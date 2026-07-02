@@ -36,7 +36,8 @@
     padding: 5px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.3); }
   #pf-zoom img { width: 280px; height: 280px; object-fit: contain; display: block; }
   .pf-table td { padding: 8px 8px; border-bottom: 1px solid #f3f3f3; vertical-align: top; overflow: hidden; }
-  .pf-table .pf-total td { border-top: 2px solid #ddd; font-weight: 700; }
+  .pf-table .pf-total td { border-top: 2px solid #ddd; font-weight: 700;
+    position: sticky; bottom: 0; background: #fff; z-index: 4; }
   .pf-rs { position: absolute; right: 0; top: 0; width: 8px; height: 100%; cursor: col-resize; user-select: none; }
   .pf-rs:hover { background: #f0c4b8; }
   #pf-colmenu { display: none; position: absolute; top: 34px; right: 0; z-index: 50; background: #fff;
@@ -1340,7 +1341,7 @@
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
-          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
+          sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
         ]);
         pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
@@ -1369,22 +1370,28 @@
     { k: 'date', l: '日付', w: 54 },
     { k: 'cc', l: '国', w: 38 },
     { k: 'img', l: '画像', w: 46 },
-    { k: 'product', l: '商品 / バリエーション', w: 280 },
+    { k: 'product', l: '商品 / バリエーション', w: 260 },
     { k: 'qty', l: '数量', w: 42 },
-    { k: 'order', l: 'Order ID / バイヤー', w: 135 },
-    { k: 'inv', l: '在庫No', w: 220 },
+    { k: 'order', l: 'Order ID', w: 128 },
+    { k: 'buyer', l: 'バイヤー', w: 105 },
+    { k: 'sku', l: 'SKU', w: 105 },
+    { k: 'inv', l: '在庫No', w: 200 },
     { k: 'sales', l: '販売額', w: 92 },
     { k: 'deposit', l: '入金額', w: 92 },
     { k: 'cost', l: '仕入額(円)', w: 106 },
-    { k: 'profit', l: '粗利 / 率', w: 86 },
-    { k: 'status', l: '配送状態', w: 112 },
+    { k: 'profit', l: '粗利', w: 78 },
+    { k: 'rate', l: '率', w: 52 },
+    { k: 'status', l: '配送状態', w: 78 },
+    { k: 'tracking', l: '追跡No', w: 128 },
+    { k: 'sls', l: '伝票', w: 46 },
   ];
   const pfColPref = Object.assign({ hidden: [], widths: {}, order: [] }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
   const savePfCols = () => localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
   const pfColOrder = () => {
     const def = PF_COLS.map(c => c.k);
     const saved = (pfColPref.order || []).filter(k => def.includes(k));
-    return saved.length === def.length ? saved : def;
+    if (!saved.length) return def;
+    return saved.concat(def.filter(k => !saved.includes(k))); // 新列は末尾に追加
   };
   const pfVisibleCols = () => pfColOrder().map(k => PF_COLS.find(c => c.k === k)).filter(c => c && !pfColPref.hidden.includes(c.k));
 
@@ -1457,7 +1464,7 @@
     let html = `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="table-layout:fixed;min-width:760px">` +
       '<colgroup>' + cols.map(c => `<col style="width:${pfColPref.widths[c.k] || c.w}px">`).join('') + '</colgroup>' +
       '<tr>' + cols.map(c => `<th>${c.l}<span class="pf-rs" data-k="${c.k}"></span></th>`).join('') + '</tr>';
-    let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0;
+    let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0;
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg) return;
@@ -1470,7 +1477,7 @@
       if (dep != null) tDep += dep * rg.rateJpy;
       if (cost != null) tCost += cost;
       const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
-      if (profit != null) { pairProfit += profit; pairN++; }
+      if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; }
       const items = (o.items && o.items.length) ? o.items : [{}];
       const rate = (profit != null && dep) ? Math.round(profit / (dep * rg.rateJpy) * 100) : null;
       const invAssign = assignInv(o, invs); // まとめ買い: 在庫を商品行に割当
@@ -1485,19 +1492,24 @@
           // ---- 注文単位（rowspanで全商品行にまたがる）----
           date: () => first ? `<td${rs}>${(o.order_date || '').slice(5)}</td>` : '',
           cc: () => first ? `<td${rs}><b style="color:${rg.color}">${o.cc}</b></td>` : '',
-          order: () => first ? `<td${rs} style="font-size:11px"><a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a><br><span class="smd-dim">${esc(o.buyer || '')}</span></td>` : '',
+          order: () => first ? `<td${rs} style="font-size:11px"><a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a></td>` : '',
+          buyer: () => first ? `<td${rs} style="font-size:11px;word-break:break-all">${esc(o.buyer || '')}</td>` : '',
+          sls: () => first ? `<td${rs}><a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="SLS伝票を印刷（Waybill Printer連携）" style="text-decoration:none;font-size:16px">🖨️</a></td>` : '',
+          rate: () => first ? `<td${rs}>${rate != null ? `<span style="color:${rate < 0 ? '#d93025' : '#1a7f37'};font-weight:700">${rate}%</span>` : ''}</td>` : '',
+          tracking: () => first ? `<td${rs} style="font-size:10px;word-break:break-all" class="smd-dim">${esc(o.tracking || '')}</td>` : '',
+          sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${esc(v.sku)}</div>` : '').join('')}</td>`,
           sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
           deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>'}</td>` : '',
-          profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>${rate != null ? `<br><span class="smd-dim" style="font-size:10px">${rate}%</span>` : ''}` : ''}</td>` : '',
-          status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}${o.tracking ? `<br><span class="smd-dim" style="font-size:9.5px" title="追跡番号">${esc(o.tracking)}</span>` : ''}</td>` : '',
+          profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
+          status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}</td>` : '',
           // ---- 商品行単位 ----
           img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
           product: () => {
             const pid = it.item_id || (pf.prodMap && pf.prodMap.get(o.cc + ':' + it.name)) || null;
             const nameHtml = esc((it.name || '').slice(0, 60));
-            return `<td><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}${pid ? '\nクリックで商品編集ページへ' : ''}">` +
+            return `<td><div style="line-height:1.35;word-break:break-word" title="${pid ? 'クリックで商品編集ページへ' : ''}">` +
               (pid ? `<a href="https://${rg.host}/portal/product/${pid}" target="_blank" style="color:#333;text-decoration:none" onmouseover="this.style.color='#ee4d2d'" onmouseout="this.style.color='#333'">${nameHtml}</a>` : nameHtml) +
-              `</div>${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}</td>`;
+              `</div>${it.variation ? `<div class="smd-dim" style="font-size:11px;word-break:break-word">${esc(it.variation)}</div>` : ''}</td>`;
           },
           qty: () => `<td>${it.qty || ''}</td>`,
           inv: () => `<td style="font-size:10.5px;color:#7a6ba7">${rowInvs.map(v =>
@@ -1520,6 +1532,7 @@
       deposit: () => fmtJpy(tDep),
       cost: () => fmtJpy(tCost),
       profit: () => `<b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件</span>`,
+      rate: () => pairDep ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairDep * 100)}%</span>` : '',
     };
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利は入金額・仕入額の両方が判明している注文のみ合算（合計は${pairN}件分）。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
