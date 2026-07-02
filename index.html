@@ -1339,15 +1339,15 @@
         const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
         const [orders, income, costs, inv, prods] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
-          sbGetAll('income', 'select=cc,sn,amount'),
-          sbGetAll('costs', 'select=cc,sn,cost,deposit'),
+          sbGetAll('income', 'select=cc,sn,amount,amount_initial'),
+          sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
         ]);
         pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
         pf.ym = ym;
         pf.orders = orders;
-        pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
+        pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i]));
         pf.costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
         pf.invMap = new Map();
         inv.forEach(it => {
@@ -1360,11 +1360,20 @@
     pfRender();
   }
 
-  const pfDep = o => {
+  // 入金額: {amt, fixed} — fixed=true は「Shopeeが更新した後の確定値」（F/G方式と同じ判定）
+  const pfDepInfo = o => {
     const key = o.cc + ':' + o.sn;
+    const inc = pf.incMap.get(key);
+    if (inc && inc.amount != null) {
+      return { amt: inc.amount, fixed: inc.amount_initial != null && inc.amount !== inc.amount_initial };
+    }
     const cm = pf.costMap.get(key);
-    return pf.incMap.has(key) ? pf.incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
+    if (cm && cm.deposit != null) {
+      return { amt: cm.deposit, fixed: cm.deposit_init != null && cm.deposit !== cm.deposit_init };
+    }
+    return null;
   };
+  const pfDep = o => { const d = pfDepInfo(o); return d ? d.amt : null; };
   // 明細の列定義（幅・表示/非表示は localStorage smdPfCols に保存）
   const PF_COLS = [
     { k: 'date', l: '日付', w: 54 },
@@ -1468,7 +1477,8 @@
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg) return;
-      const dep = pfDep(o);
+      const depInfo = pfDepInfo(o);
+      const dep = depInfo ? depInfo.amt : null;
       const cost = pfCost(o);          // 実効仕入額（手入力 > 在庫連携）
       const manual = pfManualCost(o);  // 手入力値
       const invs = pfInv(o);           // 紐付いた在庫
@@ -1499,7 +1509,11 @@
           tracking: () => first ? `<td${rs} style="font-size:10px;word-break:break-all" class="smd-dim">${esc(o.tracking || '')}</td>` : '',
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${esc(v.sku)}</div>` : '').join('')}</td>`,
           sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
-          deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>'}</td>` : '',
+          deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span><br>` +
+            (depInfo && depInfo.fixed
+              ? '<span style="font-size:9.5px;color:#1a7f37;border:1px solid #a5d6a7;border-radius:6px;padding:0 4px" title="Shopee更新後の確定値">確定</span>'
+              : '<span style="font-size:9.5px;color:#999;border:1px solid #ddd;border-radius:6px;padding:0 4px" title="初回取得の暫定値（Shopee側の更新待ち）">暫定</span>')
+            : '<span class="smd-dim">未取得</span>'}</td>` : '',
           profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
           status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}</td>` : '',
           // ---- 商品行単位 ----
@@ -1634,14 +1648,19 @@
       await sbUpsert('orders', orderRows);
       log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
 
-      // 2) 入金予定額
+      // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
       say('💵 入金予定額を取得中...');
+      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial&order=sn'))
+        .map(i => [i.cc + ':' + i.sn, i]));
       const incomeRows = [];
       for (const region of targets) {
         try {
           const map = await fetchPendingCountry(region);
-          Object.entries(map).forEach(([sn, amount]) => incomeRows.push({
-            cc: region.cc, sn, amount, category: 4, synced_at: new Date().toISOString() }));
+          Object.entries(map).forEach(([sn, amount]) => {
+            const ex = exIncome.get(region.cc + ':' + sn);
+            const initial = ex ? (ex.amount_initial != null ? ex.amount_initial : ex.amount) : amount;
+            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, category: 4, synced_at: new Date().toISOString() });
+          });
         } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
       }
       await sbUpsert('income', incomeRows);
@@ -1729,10 +1748,11 @@
               if (!sn || seen.has(String(sn))) return;
               seen.add(String(sn));
               const cost = c[37] && typeof c[37].v === 'number' ? c[37].v : null;
-              const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;
+              const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;       // G列=最新
+              const depInit = c[5] && typeof c[5].v === 'number' ? c[5].v : null;   // F列=初期(暫定)
               const stq = c[16] && c[16].v != null ? String(c[16].v).slice(0, 30) : null;
               if (cost != null || dep != null) costRows.push({
-                cc: region.cc, sn: String(sn), cost, deposit: dep, status: stq, synced_at: new Date().toISOString() });
+                cc: region.cc, sn: String(sn), cost, deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() });
             });
           } catch (e) { say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
         }
