@@ -1080,6 +1080,7 @@
 
   // ---------------- Supabase（DB蓄積） ----------------
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
+  const INV_SHEET_ID = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE'; // InventoryItem（QR在庫管理）
   async function sbUpsert(table, rows) {
     if (!rows.length) return 0;
     const key = settings.sbSecret;
@@ -1239,15 +1240,22 @@
         const start = ym + '-01';
         const [y, m] = ym.split('-').map(Number);
         const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
-        const [orders, income, costs] = await Promise.all([
+        const [orders, income, costs, inv] = await Promise.all([
           sbGet('orders', `select=cc,sn,total,items,order_date,buyer,status&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc&limit=10000`),
           sbGet('income', 'select=cc,sn,amount&limit=20000'),
           sbGet('costs', 'select=cc,sn,cost,deposit&limit=20000'),
+          sbGet('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin&shopee_sn=not.is.null&limit=20000'),
         ]);
         pf.ym = ym;
         pf.orders = orders;
         pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
         pf.costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
+        pf.invMap = new Map();
+        inv.forEach(it => {
+          if (!it.shopee_sn) return;
+          if (!pf.invMap.has(it.shopee_sn)) pf.invMap.set(it.shopee_sn, []);
+          pf.invMap.get(it.shopee_sn).push(it);
+        });
       } catch (e) { body.innerHTML = `<span class="smd-err">${esc(e.message)}</span>`; return; }
     }
     pfRender();
@@ -1258,7 +1266,15 @@
     const cm = pf.costMap.get(key);
     return pf.incMap.has(key) ? pf.incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
   };
-  const pfCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
+  // 仕入額: 手入力(costs) > 在庫連携(InventoryItemのPurchasePrice合計) の優先順
+  const pfInv = o => (pf.invMap && pf.invMap.get(o.sn)) || [];
+  const pfCost = o => {
+    const cm = pf.costMap.get(o.cc + ':' + o.sn);
+    if (cm && cm.cost != null) return cm.cost;
+    const inv = pfInv(o).filter(it => it.price != null);
+    return inv.length ? inv.reduce((s, it) => s + it.price, 0) : null;
+  };
+  const pfManualCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
 
   function pfFiltered() {
     return pf.orders.filter(o => {
@@ -1288,7 +1304,10 @@
       const rg = regionByCc(o.cc);
       if (!rg) return;
       const dep = pfDep(o);
-      const cost = pfCost(o);
+      const cost = pfCost(o);          // 実効仕入額（手入力 > 在庫連携）
+      const manual = pfManualCost(o);  // 手入力値
+      const invs = pfInv(o);           // 紐付いた在庫
+      const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
       tSales += (o.total || 0) * rg.rateJpy;
       if (dep != null) tDep += dep * rg.rateJpy;
       if (cost != null) tCost += cost;
@@ -1303,11 +1322,16 @@
           `<td>${it.image ? `<img src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover" loading="lazy">` : ''}</td>` +
           `<td style="max-width:340px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc((it.name || '').slice(0, 60))}</div>` +
           `${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}` +
-          `<div class="smd-dim" style="font-size:10px">${first ? esc(o.sn) + ' / ' + esc(o.buyer || '') : ''}</div></td>` +
+          `<div class="smd-dim" style="font-size:10px">${first ? esc(o.sn) + ' / ' + esc(o.buyer || '') : ''}</div>` +
+          `${first && invs.length ? `<div style="font-size:10px;color:#7a6ba7" title="紐付いた在庫（InventoryItem）">${invs.map(v =>
+            `🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}${v.supplier ? '·' + esc(v.supplier) : ''}${v.bin ? '·棚' + esc(v.bin) : ''}`).join(' ')}</div>` : ''}</td>` +
           `<td>${it.qty || ''}</td>` +
           `<td>${first ? `${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span>` : ''}</td>` +
           `<td>${first ? (dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>') : ''}</td>` +
-          `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${cost != null ? cost : ''}" placeholder="未入力" style="width:82px;padding:4px 6px;border:1px solid ${cost != null ? '#ddd' : '#f0b429'};border-radius:5px;font-size:12px">` : ''}</td>` +
+          `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
+            ` placeholder="${invs.length && invSum ? '在庫: ' + invSum : '未入力'}"` +
+            ` title="${invs.length && invSum ? '在庫連携の自動値 ¥' + invSum + '（入力で上書き）' : '手入力で保存'}"` +
+            ` style="width:88px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` : ''}</td>` +
           `<td>${first && profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` +
           `<td class="smd-dim" style="font-size:11px">${first ? esc(o.status || '') : ''}</td></tr>`;
       });
@@ -1489,6 +1513,37 @@
         await sbUpsert('costs', costRows);
         say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅`);
       }
+
+      // 7) InventoryItem（在庫）ミラー — どの在庫をどの注文に当てたか＋仕入価格
+      say('🏷 在庫(InventoryItem)を読み取り中...');
+      try {
+        const tbl = await gvizFetch(INV_SHEET_ID, 'InventoryItem');
+        const invRows = [];
+        (tbl.rows || []).forEach(row => {
+          const c = row.c || [];
+          const g = i => (c[i] && c[i].v != null) ? c[i].v : null;
+          const itemId = g(0);
+          if (!itemId) return;
+          invRows.push({
+            item_id: String(itemId).slice(0, 60),
+            sku: g(1) != null ? String(g(1)).slice(0, 60) : null,
+            purchase_date: g(2) != null ? String(g(2)).slice(0, 30) : null,
+            name: g(3) != null ? String(g(3)).slice(0, 200) : null,
+            supplier: g(6) != null ? String(g(6)).slice(0, 50) : null,
+            name_supplier: g(7) != null ? String(g(7)).slice(0, 200) : null,
+            supplier_order: g(8) != null ? String(g(8)).slice(0, 60) : null,
+            price: typeof g(10) === 'number' ? g(10) : null,
+            condition: g(13) != null ? String(g(13)).slice(0, 40) : null,
+            status: g(14) != null ? String(g(14)).slice(0, 40) : null,
+            bin: g(16) != null ? String(g(16)).slice(0, 40) : null,
+            shopee_sn: g(22) != null ? String(g(22)).trim().slice(0, 30) : null,
+            purchase_status: g(26) != null ? String(g(26)).slice(0, 30) : null,
+            synced_at: new Date().toISOString(),
+          });
+        });
+        await sbUpsert('inventory', invRows);
+        say(`🏷 在庫ミラー ${invRows.length}件 保存 ✅`);
+      } catch (e) { say(`　在庫: ⚠ ${String(e.message).slice(0, 40)}`); }
 
       say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`);
       localStorage.setItem('smdLastSync', String(Date.now()));
