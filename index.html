@@ -1248,6 +1248,13 @@
   const pf = { ym: null, view: 'detail', cc: '', nocost: false, search: '', depFilter: '', stFilter: '',
     sortKey: 'date', sortDir: 'desc', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
 
+  // 注文時刻 → 現地時間の "YYYY-MM-DDTHH:mm"（order_ts未取得ならnull）
+  function ordLocalTs(o) {
+    if (!o.order_ts) return null;
+    const rg = regionByCc(o.cc);
+    return new Date((o.order_ts + ((rg && rg.tz) || 8) * 3600) * 1000).toISOString().slice(0, 16);
+  }
+
   // 配送状態の分類キー
   function ordStatusKey(s) {
     const t = s || '';
@@ -1375,7 +1382,7 @@
         else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = iso(Date.now() + 2 * 86400000); }
         else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
         const [orders, income, costs, inv, prods] = await Promise.all([
-          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
+          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount,amount_initial'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
@@ -1522,7 +1529,7 @@
     const rgRate = o => { const rg = regionByCc(o.cc); return rg ? rg.rateJpy : 1; };
     const val = o => {
       switch (key) {
-        case 'date': return o.order_date || '';
+        case 'date': return ordLocalTs(o) || ((o.order_date || '') + 'T12:00'); // 時刻ありは分単位、無しは正午扱い
         case 'cc': return o.cc;
         case 'product': return ((o.items || [])[0] || {}).name || '';
         case 'qty': return (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
@@ -1592,7 +1599,7 @@
         const rs = n > 1 ? ` rowspan="${n}"` : '';
         const CELL = {
           // ---- 注文単位（rowspanで全商品行にまたがる）----
-          date: () => first ? `<td${rs}>${(o.order_date || '').slice(5)}</td>` : '',
+          date: () => { const lt = ordLocalTs(o); return first ? `<td${rs}>${lt ? `${lt.slice(5, 10)}<br><span class="smd-dim" style="font-size:10px" title="注文時刻（現地時間）">${lt.slice(11)}</span>` : (o.order_date || '').slice(5)}</td>` : ''; },
           cc: () => first ? `<td${rs}><b style="color:${rg.color}">${o.cc}</b></td>` : '',
           order: () => first ? `<td${rs} style="font-size:11px"><a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a></td>` : '',
           buyer: () => first ? `<td${rs} style="font-size:11px;word-break:break-all">${esc(o.buyer || '')}</td>` : '',
@@ -1862,6 +1869,29 @@
         } catch (e) { say(`　${region.cc} 完了: ⚠ ${String(e.message).slice(0, 40)}`); }
       }
       log[log.length - 1] = `🗂 完了注文 新規${doneNew}件 保存 ✅`; st(log.join('\n'));
+
+      // 5.5) 注文時刻の補完（get_one_orderは1件ずつしか取れないため、未取得分のみ・1回200件まで）
+      try {
+        say('🕒 注文時刻を補完中...');
+        const tsCutoff = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+        const noTs = (await sbGetAll('orders', `select=cc,order_id&order_ts=is.null&order_date=gte.${tsCutoff}&order=order_date.desc`))
+          .filter(r => r.order_id && regionByCc(r.cc) && state.enabled.has(r.cc));
+        const tsTargets = noTs.slice(0, 200);
+        const tsUpdates = [];
+        for (let i = 0; i < tsTargets.length; i += 6) {
+          await Promise.all(tsTargets.slice(i, i + 6).map(async r => {
+            const rg = regionByCc(r.cc);
+            try {
+              const j = await bridgeGetJson(`https://${rg.host}/api/v3/order/get_one_order?order_id=${r.order_id}`);
+              const ct = j && j.data && j.data.create_time;
+              if (ct) tsUpdates.push({ cc: r.cc, order_id: r.order_id, order_ts: ct });
+            } catch (_) {}
+          }));
+          if (i && i % 60 === 0) { log[log.length - 1] = `🕒 注文時刻: ${i}/${tsTargets.length}...`; st(log.join('\n')); }
+        }
+        if (tsUpdates.length) await sbUpsert('orders', tsUpdates);
+        log[log.length - 1] = `🕒 注文時刻 ${tsUpdates.length}件 補完 ✅${noTs.length > tsTargets.length ? `（残り${noTs.length - tsTargets.length}件は次回同期で）` : ''}`; st(log.join('\n'));
+      } catch (e) { say(`🕒 注文時刻: ⚠ ${String(e.message).slice(0, 40)}`); }
 
       // 6) 利益管理表ミラー（仕入額AL列・入金額G列）
       if (settings.sheetId) {
