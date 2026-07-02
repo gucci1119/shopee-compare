@@ -514,6 +514,7 @@
     const items = [];
     (((oc.item_info_group || {}).item_info_list) || []).forEach(g => (g.item_list || []).forEach(li => items.push({
       name: li.name || '', image: li.image || '', qty: li.amount || 1,
+      item_id: (li.inner_item_ext_info || {}).item_id || null,
       variation: (li.description || '').startsWith('Variation:') ? li.description.slice(10).replace(/\[[^\]]*\]\s*$/, '').trim() : '',
     })));
     return {
@@ -1256,12 +1257,14 @@
         const start = ym + '-01';
         const [y, m] = ym.split('-').map(Number);
         const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
-        const [orders, income, costs, inv] = await Promise.all([
+        const [orders, income, costs, inv, prods] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
-          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin&shopee_sn=not.is.null&order=item_id'),
+          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin,proof&shopee_sn=not.is.null&order=item_id'),
+          sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
         ]);
+        pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
         pf.ym = ym;
         pf.orders = orders;
         pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
@@ -1350,12 +1353,18 @@
           `<td>${first ? (o.order_date || '').slice(5) : ''}</td>` +
           `<td>${first ? `<b style="color:${rg.color}">${o.cc}</b>` : ''}</td>` +
           `<td>${it.image ? `<img src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover" loading="lazy">` : ''}</td>` +
-          `<td style="max-width:280px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc((it.name || '').slice(0, 60))}</div>` +
-          `${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}</td>` +
+          (() => {
+            const pid = it.item_id || (pf.prodMap && pf.prodMap.get(o.cc + ':' + it.name)) || null;
+            const nameHtml = esc((it.name || '').slice(0, 60));
+            return `<td style="max-width:280px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}${pid ? '\nクリックで商品編集ページへ' : ''}">` +
+              (pid ? `<a href="https://${rg.host}/portal/product/${pid}" target="_blank" style="color:#333;text-decoration:none" onmouseover="this.style.color='#ee4d2d'" onmouseout="this.style.color='#333'">${nameHtml}</a>` : nameHtml) +
+              `</div>${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}</td>`;
+          })() +
           `<td>${it.qty || ''}</td>` +
           `<td style="font-size:11px">${first ? `<a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a><br><span class="smd-dim">${esc(o.buyer || '')}</span>` : ''}</td>` +
-          `<td style="font-size:10.5px;color:#7a6ba7;max-width:170px">${first ? invs.map(v =>
-            `<div title="${esc(v.supplier || '')}${v.bin ? ' / 棚' + esc(v.bin) : ''}">🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}</div>`).join('') : ''}</td>` +
+          `<td style="font-size:10.5px;color:#7a6ba7;max-width:180px">${first ? invs.map(v =>
+            `<div title="${esc(v.supplier || '')}${v.bin ? ' / 棚' + esc(v.bin) : ''}">🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}` +
+            `${v.proof ? ` <a href="${esc(v.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</div>`).join('') : ''}</td>` +
           `<td>${first ? `${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span>` : ''}</td>` +
           `<td>${first ? (dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>') : ''}</td>` +
           `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
@@ -1571,6 +1580,7 @@
             bin: g(16) != null ? String(g(16)).slice(0, 40) : null,
             shopee_sn: (g(22) != null && /^\d{6}[A-Z0-9]{4,}$/.test(String(g(22)).trim())) ? String(g(22)).trim().slice(0, 30) : null,
             purchase_status: g(26) != null ? String(g(26)).slice(0, 30) : null,
+            proof: (g(28) != null && /^https?:\/\//.test(String(g(28)))) ? String(g(28)).slice(0, 300) : null,
             synced_at: new Date().toISOString(),
           });
         });
