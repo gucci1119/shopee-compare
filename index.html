@@ -28,6 +28,10 @@
   .dash-cols { display: flex; gap: 12px; padding: 12px 20px 0; flex-wrap: wrap; align-items: flex-start; }
   .dash-cols .tool-card { flex: 1; min-width: 300px; margin: 0; }
   .dash-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 6px 0; border-bottom: 1px solid #f2f2f2; }
+  .pf-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .pf-table th { text-align: left; color: #888; font-size: 11px; padding: 6px 10px; border-bottom: 1px solid #eee; }
+  .pf-table td { padding: 8px 10px; border-bottom: 1px solid #f3f3f3; vertical-align: top; }
+  .pf-table .pf-total td { border-top: 2px solid #ddd; font-weight: 700; }
   .trend-bars { display: flex; align-items: flex-end; gap: 3px; height: 160px; }
   .tb { flex: 1; background: #f8c7ba; border-radius: 2px 2px 0 0; min-height: 2px; }
   .tb.today { background: #ee4d2d; }
@@ -149,6 +153,7 @@
       <button data-p="orders">📦 注文</button>
       <button data-p="restock">🛒 要仕入れ</button>
       <button data-p="trend">📈 実績</button>
+      <button data-p="profit">💹 利益</button>
       <button data-p="tools">💰 転記</button>
     </nav>
     <div id="smd-sidefoot">
@@ -166,6 +171,16 @@
       <div class="tool-card"><h3>⏰ 発送期限が近い注文（未発送）</h3><div id="dash-due"></div></div>
       <div class="tool-card"><h3>🌏 今日の国別売上</h3><div id="dash-cc"></div></div>
     </div>
+  </div>
+
+  <!-- 利益 -->
+  <div id="page-profit" style="display:none">
+    <div class="smd-pagehead">💹 利益管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（DB蓄積分＋利益管理表ミラーから算出・判明分ベース）</span></div>
+    <div class="smd-toolbar">
+      <select id="pf-month"></select>
+      <span class="smd-dim" id="pf-note"></span>
+    </div>
+    <div id="pf-body" style="padding:12px 20px"></div>
   </div>
 
   <!-- 実績 -->
@@ -292,6 +307,8 @@
     <input type="text" id="set-sbkey" placeholder="sb_publishable_...">
     <label>Supabase secretキー（書き込み用・同期するPCのみ）</label>
     <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
+    <label>利益管理表スプレッドシートID（⚠月替わりで差し替え）</label>
+    <input type="text" id="set-sheetid" placeholder="1MCiDFf...">
     <div class="note">・ライブ取得（7か国のShopeeから直接）はTampermonkeyのブリッジuserscriptが入ったPCでのみ動きます<br>
       ・ブリッジ無しのPCは、保存済みスナップショットを表示します</div>
     <div class="row"><span class="test" id="set-test"></span>
@@ -320,7 +337,7 @@
   const IMG_CDN = 'https://down-sg.img.susercontent.com/';
 
   // ---------------- 設定（localStorage） ----------------
-  const settings = Object.assign({ gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false },
+  const settings = Object.assign({ gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '' },
     JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -486,6 +503,29 @@
 
   // ---------------- 注文API（発送期日つき・キャンセル除外） ----------------
   const ORDER_TABS = [300, 400]; // 300=未発送 400=発送中
+  function parseOrderCard(region, oc, tab) {
+    const items = [];
+    (((oc.item_info_group || {}).item_info_list) || []).forEach(g => (g.item_list || []).forEach(li => items.push({
+      name: li.name || '', image: li.image || '', qty: li.amount || 1,
+      variation: (li.description || '').startsWith('Variation:') ? li.description.slice(10).replace(/\[[^\]]*\]\s*$/, '').trim() : '',
+    })));
+    return {
+      region, tab,
+      sn: (oc.card_header || {}).order_sn || '',
+      orderId: (oc.order_ext_info || {}).order_id,
+      buyer: ((oc.card_header || {}).buyer_info || {}).username || '',
+      status: (oc.status_info || {}).status || '',
+      shipBy: (oc.order_ext_info || {}).ship_by_date || 0,
+      tracking: (((oc.fulfilment_info || {}).tracking_number_list) || [])[0] || '',
+      total: ((oc.payment_info || {}).total_price || 0) / 100000, // 現地通貨額
+      items,
+    };
+  }
+  const orderRowToDb = o => ({
+    cc: o.region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
+    tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: o.total || null,
+    items: o.items, order_date: snToDate(o.sn), synced_at: new Date().toISOString(),
+  });
   async function fetchOrdersCountry(region, onProgress) {
     const rows = [];
     for (const tab of ORDER_TABS) {
@@ -509,22 +549,7 @@
         if (j.code !== 0) continue;
         ((j.data || {}).card_list || []).forEach(c => {
           const oc = c && c.order_card;
-          if (!oc) return;
-          const items = [];
-          (((oc.item_info_group || {}).item_info_list) || []).forEach(g => (g.item_list || []).forEach(li => items.push({
-            name: li.name || '', image: li.image || '', qty: li.amount || 1,
-            variation: (li.description || '').startsWith('Variation:') ? li.description.slice(10).replace(/\[[^\]]*\]\s*$/, '').trim() : '',
-          })));
-          rows.push({
-            region, tab,
-            sn: (oc.card_header || {}).order_sn || '',
-            orderId: (oc.order_ext_info || {}).order_id,
-            buyer: ((oc.card_header || {}).buyer_info || {}).username || '',
-            status: (oc.status_info || {}).status || '',
-            shipBy: (oc.order_ext_info || {}).ship_by_date || 0,
-            tracking: (((oc.fulfilment_info || {}).tracking_number_list) || [])[0] || '',
-            items,
-          });
+          if (oc) rows.push(parseOrderCard(region, oc, tab));
         });
       }
     }
@@ -571,6 +596,7 @@
     document.querySelectorAll('#smd-nav button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
     document.getElementById('page-dash').style.display = p === 'dash' ? '' : 'none';
     document.getElementById('page-trend').style.display = p === 'trend' ? '' : 'none';
+    document.getElementById('page-profit').style.display = p === 'profit' ? '' : 'none';
     document.getElementById('page-rank').style.display = p === 'rank' ? '' : 'none';
     document.getElementById('page-orders').style.display = p === 'orders' ? '' : 'none';
     document.getElementById('page-tools').style.display = p === 'tools' ? '' : 'none';
@@ -578,6 +604,7 @@
     if (p === 'restock') document.getElementById('stub-msg').textContent = '🛒 要仕入れ — 準備中（月別実績×現在庫で仕入れリストを自動生成予定）';
     if (p === 'dash') renderDash();
     if (p === 'trend') renderTrend();
+    if (p === 'profit') renderProfit();
     if (p === 'orders' && !state.orders.started) loadOrders();
   }
   document.getElementById('smd-nav').addEventListener('click', e => {
@@ -1144,6 +1171,89 @@
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
+  // ---------------- gviz（利益管理表の読み取り・Googleログインセッション利用） ----------------
+  let gvizSeq = 0;
+  function gvizFetch(sheetId, sheetName) {
+    return new Promise((resolve, reject) => {
+      const cb = '__gvz' + (++gvizSeq);
+      const cleanup = () => { delete window[cb]; sc.remove(); };
+      const timer = setTimeout(() => { cleanup(); reject(new Error('シート読取タイムアウト')); }, 15000);
+      window[cb] = data => { clearTimeout(timer); cleanup();
+        (data && data.table) ? resolve(data.table) : reject(new Error('シート応答が不正（権限/ログイン確認）')); };
+      const sc = document.createElement('script');
+      sc.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?sheet=${encodeURIComponent(sheetName)}&tqx=responseHandler:${cb}`;
+      sc.onerror = () => { clearTimeout(timer); cleanup(); reject(new Error('シート読取エラー（Googleログイン確認）')); };
+      document.head.appendChild(sc);
+    });
+  }
+
+  // ---------------- 利益ページ ----------------
+  async function renderProfit() {
+    const sel = document.getElementById('pf-month');
+    if (!sel.options.length) {
+      const d = new Date();
+      for (let i = 0; i < 6; i++) {
+        const o = document.createElement('option');
+        o.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        o.textContent = `${d.getFullYear()}年${d.getMonth() + 1}月`;
+        sel.appendChild(o);
+        d.setMonth(d.getMonth() - 1);
+      }
+      sel.addEventListener('change', renderProfit);
+    }
+    const ym = sel.value;
+    const body = document.getElementById('pf-body');
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    try {
+      const start = ym + '-01';
+      const [y, m] = ym.split('-').map(Number);
+      const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+      const [orders, income, costs] = await Promise.all([
+        sbGet('orders', `select=cc,sn,total,items,order_date&order_date=gte.${start}&order_date=lt.${end}&limit=10000`),
+        sbGet('income', 'select=cc,sn,amount&limit=10000'),
+        sbGet('costs', 'select=cc,sn,cost,deposit&limit=10000'),
+      ]);
+      const incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
+      const costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
+      const per = {};
+      REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0 });
+      orders.forEach(o => {
+        const rg = regionByCc(o.cc);
+        if (!rg || !per[o.cc]) return;
+        const p = per[o.cc];
+        p.n++;
+        p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
+        p.sales += o.total || 0;
+        const key = o.cc + ':' + o.sn;
+        const cm = costMap.get(key);
+        const dep = incMap.has(key) ? incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
+        if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
+        if (cm && cm.cost != null) { p.costJpy += cm.cost; p.costN++; } // 仕入額は円建て
+      });
+      let rowsHtml = '';
+      let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0;
+      REGIONS.forEach(rg => {
+        const p = per[rg.cc];
+        if (!p.n) return;
+        tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
+        rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
+          `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
+          `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
+          `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span></td>` +
+          `<td><b>${fmtJpy(p.depJpy - p.costJpy)}</b></td></tr>`;
+      });
+      body.innerHTML = rowsHtml
+        ? `<div class="tool-card" style="margin:0;max-width:920px"><table class="pf-table">` +
+          `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利概算</th></tr>` + rowsHtml +
+          `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td></tr></table>` +
+          `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利概算 = 入金額(判明分・手数料控除後) − 仕入額(判明分・円建て)。未仕入れ分や入金未取得分は含まれないため控えめに出ます。DB同期を続けるほど判明率が上がります。キャンセル注文は元から含まれていません。</div></div>`
+        : '<div class="smd-dim">この月の注文がまだDBにありません（💰転記タブの「DB同期」を実行してください）</div>';
+      document.getElementById('pf-note').textContent = `${orders.length}注文をDBから集計`;
+    } catch (e) {
+      body.innerHTML = `<span class="smd-err">${esc(e.message)}</span>`;
+    }
+  }
+
   let syncRunning = false;
   async function syncAll(st) {
     if (syncRunning) return;
@@ -1161,11 +1271,7 @@
       const orderRows = [];
       targets.forEach(region => {
         const oc = state.orders.perCountry.get(region.cc);
-        if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push({
-          cc: region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
-          tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null,
-          items: o.items, order_date: snToDate(o.sn), synced_at: new Date().toISOString(),
-        }));
+        if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o)));
       });
       await sbUpsert('orders', orderRows);
       log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
@@ -1217,6 +1323,65 @@
       }
       await sbUpsert('daily_stats', dayRows);
       say(`📈 日次売上 ${dayRows.length}行 保存 ✅`);
+
+      // 5) 完了注文の差分同期（新規分だけカード取得）
+      say('🗂 完了注文(差分)を取得中...');
+      let doneNew = 0;
+      for (const region of targets) {
+        try {
+          const known = new Set((await sbGet('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.500&limit=10000`))
+            .map(o => String(o.order_id)));
+          let list = [];
+          for (let p = 1; p <= 60; p++) {
+            const j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
+              order_list_tab: 500, entity_type: 1,
+              pagination: { from_page_number: 1, page_number: p, page_size: 50 } });
+            if (j.code !== 0) throw new Error(`index code=${j.code}`);
+            const idx = (j.data && j.data.index_list) || [];
+            list = list.concat(idx);
+            const total = ((j.data || {}).pagination || {}).total || 0;
+            if (!idx.length || list.length >= total) break;
+          }
+          const fresh = list.filter(x => !known.has(String(x.order_id)));
+          const rows = [];
+          for (let i = 0; i < fresh.length; i += 5) {
+            if (i % 100 === 0 && fresh.length > 100) { log[log.length - 1] = `🗂 完了注文(差分): ${region.cc} ${i}/${fresh.length}...`; st(log.join('\n')); }
+            const j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
+              order_list_tab: 500, need_count_down_desc: false, order_param_list: fresh.slice(i, i + 5) });
+            if (j.code !== 0) continue;
+            ((j.data || {}).card_list || []).forEach(c => { const oc2 = c && c.order_card; if (oc2) rows.push(orderRowToDb(parseOrderCard(region, oc2, 500))); });
+          }
+          await sbUpsert('orders', rows);
+          doneNew += rows.length;
+        } catch (e) { say(`　${region.cc} 完了: ⚠ ${String(e.message).slice(0, 40)}`); }
+      }
+      log[log.length - 1] = `🗂 完了注文 新規${doneNew}件 保存 ✅`; st(log.join('\n'));
+
+      // 6) 利益管理表ミラー（仕入額AL列・入金額G列）
+      if (settings.sheetId) {
+        say('📄 利益管理表を読み取り中...');
+        const costRows = [];
+        for (const region of targets) {
+          try {
+            const tbl = await gvizFetch(settings.sheetId, region.cc.toLowerCase() + '_p');
+            const seen = new Set();
+            (tbl.rows || []).forEach(row => {
+              const c = row.c || [];
+              const sn = c[23] && c[23].v;
+              if (!sn || seen.has(String(sn))) return;
+              seen.add(String(sn));
+              const cost = c[37] && typeof c[37].v === 'number' ? c[37].v : null;
+              const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;
+              const stq = c[16] && c[16].v != null ? String(c[16].v).slice(0, 30) : null;
+              if (cost != null || dep != null) costRows.push({
+                cc: region.cc, sn: String(sn), cost, deposit: dep, status: stq, synced_at: new Date().toISOString() });
+            });
+          } catch (e) { say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
+        }
+        await sbUpsert('costs', costRows);
+        say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅`);
+      }
+
       say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`);
       localStorage.setItem('smdLastSync', String(Date.now()));
     } catch (e) {
@@ -1409,6 +1574,7 @@
     document.getElementById('set-deptoken').value = settings.depToken;
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
+    document.getElementById('set-sheetid').value = settings.sheetId;
     document.getElementById('set-test').textContent = '';
     modal.classList.add('open');
   });
@@ -1421,6 +1587,7 @@
     settings.depToken = document.getElementById('set-deptoken').value.trim();
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
+    settings.sheetId = document.getElementById('set-sheetid').value.trim();
     saveSettings();
     modal.classList.remove('open');
     if (state.mode !== 'live') load();
