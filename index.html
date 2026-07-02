@@ -1262,31 +1262,50 @@
       clearTimeout(t);
       t = setTimeout(() => { pf.search = e.target.value.trim().toLowerCase(); pfRender(); }, 250);
     });
-    // 列メニュー（表示/非表示）
+    // 列メニュー（表示/非表示・▲▼で並び替え）
     const menu = document.getElementById('pf-colmenu');
-    menu.innerHTML = PF_COLS.map(c =>
-      `<label><input type="checkbox" data-k="${c.k}" ${pfColPref.hidden.includes(c.k) ? '' : 'checked'}> ${c.l}</label>`).join('') +
-      `<div class="reset" id="pf-colreset">列幅と表示をリセット</div>`;
+    function buildColMenu() {
+      const order = pfColOrder();
+      menu.innerHTML = order.map((k, i) => {
+        const c = PF_COLS.find(x => x.k === k);
+        return `<label><span class="pf-mv" data-k="${k}" data-d="-1" style="cursor:pointer;color:${i === 0 ? '#ddd' : '#2673dd'}">▲</span>` +
+          `<span class="pf-mv" data-k="${k}" data-d="1" style="cursor:pointer;color:${i === order.length - 1 ? '#ddd' : '#2673dd'};margin-right:6px">▼</span>` +
+          `<input type="checkbox" data-k="${k}" ${pfColPref.hidden.includes(k) ? '' : 'checked'}> ${c.l}</label>`;
+      }).join('') + `<div class="reset" id="pf-colreset">列幅・表示・順番をリセット</div>`;
+      menu.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => {
+        const k = cb.dataset.k;
+        if (cb.checked) pfColPref.hidden = pfColPref.hidden.filter(x => x !== k);
+        else if (!pfColPref.hidden.includes(k)) pfColPref.hidden.push(k);
+        savePfCols();
+        pfRender();
+      }));
+      menu.querySelectorAll('.pf-mv').forEach(mv => mv.addEventListener('click', () => {
+        const k = mv.dataset.k, d = Number(mv.dataset.d);
+        const order2 = pfColOrder().slice();
+        const i = order2.indexOf(k), j = i + d;
+        if (j < 0 || j >= order2.length) return;
+        [order2[i], order2[j]] = [order2[j], order2[i]];
+        pfColPref.order = order2;
+        savePfCols();
+        buildColMenu();
+        pfRender();
+      }));
+      menu.querySelector('#pf-colreset').addEventListener('click', () => {
+        pfColPref.hidden = [];
+        pfColPref.widths = {};
+        pfColPref.order = [];
+        savePfCols();
+        buildColMenu();
+        pfRender();
+      });
+    }
+    buildColMenu();
     document.getElementById('pf-colbtn').addEventListener('click', e => {
       e.stopPropagation();
       menu.classList.toggle('open');
     });
     menu.addEventListener('click', e => e.stopPropagation());
     document.addEventListener('click', () => menu.classList.remove('open'));
-    menu.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => {
-      const k = cb.dataset.k;
-      if (cb.checked) pfColPref.hidden = pfColPref.hidden.filter(x => x !== k);
-      else if (!pfColPref.hidden.includes(k)) pfColPref.hidden.push(k);
-      savePfCols();
-      pfRender();
-    }));
-    document.getElementById('pf-colreset').addEventListener('click', () => {
-      pfColPref.hidden = [];
-      pfColPref.widths = {};
-      savePfCols();
-      menu.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
-      pfRender();
-    });
     // 画像ホバーで拡大プレビュー（イベント委譲・再描画に強い）
     const zoom = document.createElement('div');
     zoom.id = 'pf-zoom';
@@ -1321,7 +1340,7 @@
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
-          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin,proof&shopee_sn=not.is.null&order=item_id'),
+          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
         ]);
         pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
@@ -1360,9 +1379,38 @@
     { k: 'profit', l: '粗利 / 率', w: 86 },
     { k: 'status', l: '配送状態', w: 112 },
   ];
-  const pfColPref = Object.assign({ hidden: [], widths: {} }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
+  const pfColPref = Object.assign({ hidden: [], widths: {}, order: [] }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
   const savePfCols = () => localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
-  const pfVisibleCols = () => PF_COLS.filter(c => !pfColPref.hidden.includes(c.k));
+  const pfColOrder = () => {
+    const def = PF_COLS.map(c => c.k);
+    const saved = (pfColPref.order || []).filter(k => def.includes(k));
+    return saved.length === def.length ? saved : def;
+  };
+  const pfVisibleCols = () => pfColOrder().map(k => PF_COLS.find(c => c.k === k)).filter(c => c && !pfColPref.hidden.includes(c.k));
+
+  // まとめ買い: 在庫を各商品行へ割当（商品名/バリエーション照合 → 残りは順番）
+  function assignInv(o, invs) {
+    const items = (o.items && o.items.length) ? o.items : [{}];
+    const assigned = items.map(() => []);
+    if (items.length <= 1) { assigned[0] = invs.slice(); return assigned; }
+    const rest = [];
+    invs.forEach(v => {
+      const hay = ((v.name || '') + ' ' + (v.name_supplier || '')).toLowerCase();
+      const idx = items.findIndex(it => {
+        const vari = (it.variation || '').trim().toLowerCase();
+        return vari && vari.length >= 3 && hay.includes(vari);
+      });
+      if (idx >= 0) assigned[idx].push(v); else rest.push(v);
+    });
+    let cursor = 0;
+    rest.forEach(v => {
+      while (cursor < items.length - 1 && assigned[cursor].length) cursor++;
+      assigned[cursor].push(v);
+      cursor++;
+      if (cursor >= items.length) cursor = items.length - 1;
+    });
+    return assigned;
+  }
 
   // 配送状態の日本語チップ（Delivered=バイヤー到着済み）
   function ordStatusChip(s) {
@@ -1425,12 +1473,24 @@
       if (profit != null) { pairProfit += profit; pairN++; }
       const items = (o.items && o.items.length) ? o.items : [{}];
       const rate = (profit != null && dep) ? Math.round(profit / (dep * rg.rateJpy) * 100) : null;
+      const invAssign = assignInv(o, invs); // まとめ買い: 在庫を商品行に割当
+      const n = items.length;
       items.forEach((it, idx) => {
         shown++;
         const first = idx === 0;
+        const rowInvs = invAssign[idx] || [];
+        const rowCost = rowInvs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
+        const rs = n > 1 ? ` rowspan="${n}"` : '';
         const CELL = {
-          date: () => `<td>${first ? (o.order_date || '').slice(5) : ''}</td>`,
-          cc: () => `<td>${first ? `<b style="color:${rg.color}">${o.cc}</b>` : ''}</td>`,
+          // ---- 注文単位（rowspanで全商品行にまたがる）----
+          date: () => first ? `<td${rs}>${(o.order_date || '').slice(5)}</td>` : '',
+          cc: () => first ? `<td${rs}><b style="color:${rg.color}">${o.cc}</b></td>` : '',
+          order: () => first ? `<td${rs} style="font-size:11px"><a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a><br><span class="smd-dim">${esc(o.buyer || '')}</span></td>` : '',
+          sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
+          deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>'}</td>` : '',
+          profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>${rate != null ? `<br><span class="smd-dim" style="font-size:10px">${rate}%</span>` : ''}` : ''}</td>` : '',
+          status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}${o.tracking ? `<br><span class="smd-dim" style="font-size:9.5px" title="追跡番号">${esc(o.tracking)}</span>` : ''}</td>` : '',
+          // ---- 商品行単位 ----
           img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
           product: () => {
             const pid = it.item_id || (pf.prodMap && pf.prodMap.get(o.cc + ':' + it.name)) || null;
@@ -1440,18 +1500,16 @@
               `</div>${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}</td>`;
           },
           qty: () => `<td>${it.qty || ''}</td>`,
-          order: () => `<td style="font-size:11px">${first ? `<a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a><br><span class="smd-dim">${esc(o.buyer || '')}</span>` : ''}</td>`,
-          inv: () => `<td style="font-size:10.5px;color:#7a6ba7">${first ? invs.map(v =>
+          inv: () => `<td style="font-size:10.5px;color:#7a6ba7">${rowInvs.map(v =>
             `<div title="${esc(v.supplier || '')}${v.bin ? ' / 棚' + esc(v.bin) : ''}">🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}` +
-            `${v.proof ? ` <a href="${esc(v.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</div>`).join('') : ''}</td>`,
-          sales: () => `<td>${first ? `${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span>` : ''}</td>`,
-          deposit: () => `<td>${first ? (dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>') : ''}</td>`,
-          cost: () => `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
-            ` placeholder="${invs.length && invSum ? '在庫: ' + invSum : '未入力'}"` +
-            ` title="${invs.length && invSum ? '在庫連携の自動値 ¥' + invSum + '（入力で上書き）' : '手入力で保存'}"` +
-            ` style="width:100%;max-width:96px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` : ''}</td>`,
-          profit: () => `<td>${first && profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>${rate != null ? `<br><span class="smd-dim" style="font-size:10px">${rate}%</span>` : ''}` : ''}</td>`,
-          status: () => `<td style="font-size:11px">${first ? ordStatusChip(o.status) + (o.tracking ? `<br><span class="smd-dim" style="font-size:9.5px" title="追跡番号">${esc(o.tracking)}</span>` : '') : ''}</td>`,
+            `${v.proof ? ` <a href="${esc(v.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</div>`).join('')}</td>`,
+          cost: () => `<td>` +
+            (first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
+              ` placeholder="${invs.length && invSum ? (n > 1 ? '計 ' : '在庫: ') + invSum : '未入力'}"` +
+              ` title="注文合計の仕入額${invs.length && invSum ? '（在庫連携の自動値 ¥' + invSum + '、入力で上書き）' : '（手入力で保存）'}"` +
+              ` style="width:100%;max-width:96px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` : '') +
+            (n > 1 && rowInvs.length && rowCost ? `<div style="font-size:11px;color:#7a6ba7;margin-top:2px" title="この商品分（在庫連携）">¥${rowCost.toLocaleString()}</div>` : '') +
+            `</td>`,
         };
         html += '<tr>' + cols.map(c => CELL[c.k]()).join('') + '</tr>';
       });
