@@ -1364,25 +1364,62 @@
     body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
     body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
-    body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockQrZoom(el.dataset.id)));
+    body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     stockAddForm();
   }
-  // QR拡大（スキャン/印刷用）
-  function stockQrZoom(itemId) {
+  // 在庫ラベル（29×42mm）: ItemID / SKU / 商品名 / QR / OrderID / 価格
+  const LABEL_W = 42, LABEL_H = 29; // mm（画像は横長。向きが逆なら数値を入替）
+  function stockLabelInner(r) {
+    const qr = `https://api.qrserver.com/v1/create-qr-code/?size=120x120&margin=0&data=${encodeURIComponent(r.item_id || '')}`;
+    const field = (l, v) => v ? `<div class="lf"><span>${l}</span>${esc(v)}</div>` : '';
+    return `<div class="lbl">
+      <div class="lt"><div class="lid">${esc(r.item_id || '')}</div><img class="lqr" src="${qr}"></div>
+      ${field('SKU', r.sku)}
+      ${field('Name', r.name)}
+      ${field('OrderID', r.supplier_order)}
+      <div class="lhr"></div>
+      <div class="lp">${r.price != null ? '¥' + Number(r.price).toLocaleString() : ''}</div>
+    </div>`;
+  }
+  const LABEL_CSS = `
+    @page { size: ${LABEL_W}mm ${LABEL_H}mm; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, sans-serif; -webkit-print-color-adjust: exact; }
+    body { width: ${LABEL_W}mm; }
+    .lbl { width: ${LABEL_W}mm; height: ${LABEL_H}mm; padding: 1.4mm 1.8mm; overflow: hidden; position: relative; }
+    .lt { display: flex; justify-content: space-between; align-items: flex-start; gap: 1mm; }
+    .lid { font-weight: 700; font-size: 7.5pt; line-height: 1.1; word-break: break-all; }
+    .lqr { width: 11mm; height: 11mm; flex: none; }
+    .lf { font-size: 6pt; line-height: 1.12; margin-top: 0.3mm; overflow: hidden; max-height: 6mm; }
+    .lf span { display: block; color: #666; font-size: 4.3pt; line-height: 1; }
+    .lhr { border-top: 1px dashed #000; margin: 0.6mm 0 0.3mm; }
+    .lp { font-weight: 700; font-size: 9pt; }`;
+  function stockPrintLabels(itemIds) {
+    const rows = itemIds.map(id => (stock.rows || []).find(x => x.item_id === id) || { item_id: id });
+    const w = window.open('', '_blank', 'width=420,height=340');
+    if (!w) { alert('ポップアップがブロックされました。許可してください'); return; }
+    const pages = rows.map(r => `<div style="page-break-after:always">${stockLabelInner(r)}</div>`).join('');
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><style>${LABEL_CSS}</style></head><body>${pages}<scr` + `ipt>window.onload=function(){var n=document.images.length,d=0;function go(){if(++d>=n)setTimeout(function(){window.focus();window.print();},250);}if(!n)go();for(var i=0;i<n;i++){var im=document.images[i];if(im.complete)go();else{im.onload=go;im.onerror=go;}}};</scr` + `ipt></body></html>`);
+    w.document.close();
+  }
+  // QRクリック → ラベルプレビュー＋印刷
+  function stockLabelPreview(itemId) {
     const r = (stock.rows || []).find(x => x.item_id === itemId) || { item_id: itemId };
     let ov = document.getElementById('stk-qrov');
     if (!ov) { ov = document.createElement('div'); ov.id = 'stk-qrov'; document.body.appendChild(ov); }
     ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center';
-    ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:20px 24px;text-align:center">
-      <img src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=6&data=${encodeURIComponent(itemId)}" style="width:220px;height:220px">
-      <div style="font-size:13px;font-weight:700;margin-top:8px">🏷${esc(itemId)}</div>
-      <div class="smd-dim" style="font-size:12px;max-width:240px;margin:2px auto 0;word-break:break-word">${esc(r.name || '')}</div>
+    // プレビューは実寸の約4倍で表示
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:18px;text-align:center">
+      <div class="smd-dim" style="font-size:11px;margin-bottom:8px">在庫ラベル プレビュー（${LABEL_W}×${LABEL_H}mm）</div>
+      <div style="transform:scale(4);transform-origin:top center;width:${LABEL_W}mm;height:${LABEL_H}mm;margin:0 auto ${LABEL_H * 3.2}mm;border:1px solid #ccc">
+        <style>${LABEL_CSS.replace(/@page[^}]+}/, '')}</style>${stockLabelInner(r)}
+      </div>
       <div style="margin-top:12px;display:flex;gap:8px;justify-content:center">
-        <button class="smd-btn" onclick="window.print()">🖨️ 印刷</button>
-        <button class="smd-btn primary" id="stk-qrclose">閉じる</button>
+        <button class="smd-btn primary" id="stk-lblprint">🖨️ このラベルを印刷</button>
+        <button class="smd-btn" id="stk-lblclose">閉じる</button>
       </div>
     </div>`;
-    ov.onclick = e => { if (e.target === ov || e.target.id === 'stk-qrclose') ov.remove(); };
+    ov.onclick = e => { if (e.target === ov || e.target.id === 'stk-lblclose') ov.remove(); };
+    document.getElementById('stk-lblprint').addEventListener('click', () => stockPrintLabels([itemId]));
   }
   function stockAddForm() {
     const el = document.getElementById('stk-addform');
