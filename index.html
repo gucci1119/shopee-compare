@@ -1329,23 +1329,26 @@
     if (stock.q) rows = rows.filter(r =>
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
        (r.supplier || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
-    document.getElementById('stock-note').textContent = `${rows.length}件`;
+    const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
+    const filtPriced = rows.filter(r => r.price != null).length;
+    document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
     const shown = rows.slice(0, 400);
     body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・仕入額・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。画像はShopee出品名から自動マッチ。</span></div>` +
       `<div id="stk-addform"></div>` +
       `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px">` +
-      '<tr><th>画像</th><th>ItemID</th><th>仕入日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
+      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
         return '<tr>' +
         `<td>${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>` +
         `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}${r.source === 'portal' ? ' <span title="ポータル登録">🆕</span>' : ''}</td>` +
-        `<td style="font-size:11px;white-space:nowrap">${esc(gvizDate(r.purchase_date) || '')}</td>` +
+        `<td><img class="stk-qr" src="https://api.qrserver.com/v1/create-qr-code/?size=54x54&margin=0&data=${encodeURIComponent(r.item_id || '')}" data-id="${esc(r.item_id || '')}" title="クリックで拡大（スキャン/印刷用）" style="width:40px;height:40px;cursor:zoom-in" loading="lazy"></td>` +
+        `<td style="font-size:11px;white-space:nowrap;min-width:82px">${esc(gvizDate(r.purchase_date) || '')}</td>` +
         `<td style="word-break:break-word">${esc(r.name || '')}${r.name_supplier ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.sku || '')}</td>` +
-        `<td><input class="li stk-sup" ${di} value="${esc(r.supplier || '')}" style="padding:3px 5px;font-size:11px;width:80px"></td>` +
+        `<td style="white-space:nowrap"><input class="li stk-sup" ${di} value="${esc(r.supplier || '')}" style="padding:3px 5px;font-size:11px;width:72px">${r.supplier_url ? ` <a href="${esc(r.supplier_url)}" target="_blank" title="仕入元ページを開く" style="text-decoration:none">🔗</a>` : ''}</td>` +
         `<td><input class="li stk-price" ${di} type="number" value="${r.price != null ? r.price : ''}" style="padding:3px 5px;font-size:11px;width:80px">` +
           `${r.price != null ? `<div class="smd-dim" style="font-size:9.5px">¥${Number(r.price).toLocaleString()}</div>` : ''}</td>` +
         `<td style="font-size:11px">${esc(r.condition || '')}</td>` +
@@ -1363,7 +1366,25 @@
     body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
     body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
+    body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockQrZoom(el.dataset.id)));
     stockAddForm();
+  }
+  // QR拡大（スキャン/印刷用）
+  function stockQrZoom(itemId) {
+    const r = (stock.rows || []).find(x => x.item_id === itemId) || { item_id: itemId };
+    let ov = document.getElementById('stk-qrov');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'stk-qrov'; document.body.appendChild(ov); }
+    ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:20px 24px;text-align:center">
+      <img src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=6&data=${encodeURIComponent(itemId)}" style="width:220px;height:220px">
+      <div style="font-size:13px;font-weight:700;margin-top:8px">🏷${esc(itemId)}</div>
+      <div class="smd-dim" style="font-size:12px;max-width:240px;margin:2px auto 0;word-break:break-word">${esc(r.name || '')}</div>
+      <div style="margin-top:12px;display:flex;gap:8px;justify-content:center">
+        <button class="smd-btn" onclick="window.print()">🖨️ 印刷</button>
+        <button class="smd-btn primary" id="stk-qrclose">閉じる</button>
+      </div>
+    </div>`;
+    ov.onclick = e => { if (e.target === ov || e.target.id === 'stk-qrclose') ov.remove(); };
   }
   function stockAddForm() {
     const el = document.getElementById('stk-addform');
@@ -1381,7 +1402,8 @@
         <div><label class="lc">SKU</label><input class="li" id="sa-sku"></div>
         <div><label class="lc">棚</label><input class="li" id="sa-bin"></div>
         <div><label class="lc">仕入元商品名</label><input class="li" id="sa-nsup"></div>
-        <div><label class="lc">仕入元OrderID/URL</label><input class="li" id="sa-sorder"></div>
+        <div><label class="lc">仕入元OrderID</label><input class="li" id="sa-sorder"></div>
+        <div><label class="lc">仕入元URL</label><input class="li" id="sa-surl" placeholder="https://jp.mercari.com/..."></div>
         <div><label class="lc">画像URL/ハッシュ</label><input class="li" id="sa-img"></div>
         <div><label class="lc">Shopee注文SN</label><input class="li" id="sa-sn"></div>
       </div>
@@ -1402,7 +1424,7 @@
         item_id: itemId, name, supplier: v('sa-sup') || null, price: v('sa-price') ? Number(v('sa-price')) : null,
         condition: v('sa-cond') || null, status: document.getElementById('sa-st').value, purchase_status: document.getElementById('sa-ps').value || null,
         sku: v('sa-sku') || null, bin: v('sa-bin') || null, name_supplier: v('sa-nsup') || null, supplier_order: v('sa-sorder') || null,
-        image: v('sa-img') || null, shopee_sn: /^\d{6}[A-Z0-9]{4,}$/.test(snRaw) ? snRaw : null,
+        supplier_url: v('sa-surl') || null, image: v('sa-img') || null, shopee_sn: /^\d{6}[A-Z0-9]{4,}$/.test(snRaw) ? snRaw : null,
         purchase_date: now.toISOString().slice(0, 10), source: 'portal', edited_at: now.toISOString(), synced_at: now.toISOString(),
       };
       document.getElementById('sa-msg').textContent = '登録中...';
@@ -2334,6 +2356,7 @@
             supplier: g(6) != null ? String(g(6)).slice(0, 50) : null,
             name_supplier: g(7) != null ? String(g(7)).slice(0, 200) : null,
             supplier_order: g(8) != null ? String(g(8)).slice(0, 60) : null,
+            supplier_url: (function () { const u = g(11) || g(15); return (u != null && /^https?:\/\//.test(String(u))) ? String(u).slice(0, 400) : null; })(),
             price: typeof g(10) === 'number' ? g(10) : null,
             condition: g(13) != null ? String(g(13)).slice(0, 40) : null,
             status: g(14) != null ? String(g(14)).slice(0, 40) : null,
