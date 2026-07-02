@@ -1257,7 +1257,7 @@
         const [y, m] = ym.split('-').map(Number);
         const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
         const [orders, income, costs, inv] = await Promise.all([
-          sbGetAll('orders', `select=cc,sn,total,items,order_date,buyer,status&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
+          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
           sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin&shopee_sn=not.is.null&order=item_id'),
@@ -1282,6 +1282,17 @@
     const cm = pf.costMap.get(key);
     return pf.incMap.has(key) ? pf.incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
   };
+  // 配送状態の日本語チップ（Delivered=バイヤー到着済み）
+  function ordStatusChip(s) {
+    const t = s || '';
+    if (/to ?ship/i.test(t)) return '<span style="color:#d93025;font-weight:700">未発送</span>';
+    if (/transit|shipped|shipping/i.test(t)) return '<span style="color:#1a73e8;font-weight:700">輸送中</span>';
+    if (/deliver/i.test(t)) return '<span style="color:#1a7f37;font-weight:700">到着済</span>';
+    if (/complete/i.test(t)) return '<span style="color:#1a7f37;font-weight:700">完了</span>';
+    if (/cancel/i.test(t)) return '<span style="color:#999">キャンセル</span>';
+    return `<span class="smd-dim">${esc(t)}</span>`;
+  }
+
   // 仕入額: 手入力(costs) > 在庫連携(InventoryItemのPurchasePrice合計) の優先順
   const pfInv = o => (pf.invMap && pf.invMap.get(o.sn)) || [];
   const pfCost = o => {
@@ -1314,7 +1325,8 @@
     // 明細ビュー: 注文の商品1点ごとに1行
     let html = `<div class="tool-card" style="margin:0"><table class="pf-table"><tr>
       <th>日付</th><th>国</th><th></th><th>商品 / バリエーション</th><th>数量</th>
-      <th>販売額</th><th>入金額</th><th>仕入額(円・編集可)</th><th>粗利</th><th>状態</th></tr>`;
+      <th>Order ID / バイヤー</th><th>在庫No</th>
+      <th>販売額</th><th>入金額</th><th>仕入額(円・編集可)</th><th>粗利 / 率</th><th>配送状態</th></tr>`;
     let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0;
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
@@ -1330,6 +1342,7 @@
       const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
       if (profit != null) { pairProfit += profit; pairN++; }
       const items = (o.items && o.items.length) ? o.items : [{}];
+      const rate = (profit != null && dep) ? Math.round(profit / (dep * rg.rateJpy) * 100) : null;
       items.forEach((it, idx) => {
         shown++;
         const first = idx === 0;
@@ -1337,23 +1350,23 @@
           `<td>${first ? (o.order_date || '').slice(5) : ''}</td>` +
           `<td>${first ? `<b style="color:${rg.color}">${o.cc}</b>` : ''}</td>` +
           `<td>${it.image ? `<img src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover" loading="lazy">` : ''}</td>` +
-          `<td style="max-width:340px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc((it.name || '').slice(0, 60))}</div>` +
-          `${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}` +
-          `<div class="smd-dim" style="font-size:10px">${first ? esc(o.sn) + ' / ' + esc(o.buyer || '') : ''}</div>` +
-          `${first && invs.length ? `<div style="font-size:10px;color:#7a6ba7" title="紐付いた在庫（InventoryItem）">${invs.map(v =>
-            `🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}${v.supplier ? '·' + esc(v.supplier) : ''}${v.bin ? '·棚' + esc(v.bin) : ''}`).join(' ')}</div>` : ''}</td>` +
+          `<td style="max-width:280px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc((it.name || '').slice(0, 60))}</div>` +
+          `${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}</td>` +
           `<td>${it.qty || ''}</td>` +
+          `<td style="font-size:11px">${first ? `<a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a><br><span class="smd-dim">${esc(o.buyer || '')}</span>` : ''}</td>` +
+          `<td style="font-size:10.5px;color:#7a6ba7;max-width:170px">${first ? invs.map(v =>
+            `<div title="${esc(v.supplier || '')}${v.bin ? ' / 棚' + esc(v.bin) : ''}">🏷${esc(v.item_id)}${v.price != null ? ' ¥' + Number(v.price).toLocaleString() : ''}</div>`).join('') : ''}</td>` +
           `<td>${first ? `${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span>` : ''}</td>` +
           `<td>${first ? (dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>') : ''}</td>` +
           `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
             ` placeholder="${invs.length && invSum ? '在庫: ' + invSum : '未入力'}"` +
             ` title="${invs.length && invSum ? '在庫連携の自動値 ¥' + invSum + '（入力で上書き）' : '手入力で保存'}"` +
             ` style="width:88px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` : ''}</td>` +
-          `<td>${first && profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` +
-          `<td class="smd-dim" style="font-size:11px">${first ? esc(o.status || '') : ''}</td></tr>`;
+          `<td>${first && profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>${rate != null ? `<br><span class="smd-dim" style="font-size:10px">${rate}%</span>` : ''}` : ''}</td>` +
+          `<td style="font-size:11px">${first ? ordStatusChip(o.status) + (o.tracking ? `<br><span class="smd-dim" style="font-size:9.5px" title="追跡番号">${esc(o.tracking)}</span>` : '') : ''}</td></tr>`;
       });
     });
-    html += `<tr class="pf-total"><td colspan="5">合計（フィルタ後）</td><td>${fmtJpy(tSales)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td>` +
+    html += `<tr class="pf-total"><td colspan="7">合計（フィルタ後）</td><td>${fmtJpy(tSales)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td>` +
       `<td><b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件(両方判明)</span></td><td></td></tr></table>` +
       `<div class="smd-dim" style="font-size:11px;margin-top:8px">粗利は入金額・仕入額の両方が判明している注文のみ合算。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。ここで入力するとDBに保存されます。</div></div>`;
     body.innerHTML = html;
