@@ -109,6 +109,7 @@
     <span class="smd-seg" id="smd-view">
       <button data-k="grid" class="on">混合</button>
       <button data-k="columns">国別 縦</button>
+      <button data-k="sku">SKU展開</button>
     </span>
     <input type="text" id="smd-search" placeholder="商品名・IDで絞り込み">
     <button id="smd-gear" title="設定">⚙️</button>
@@ -235,9 +236,46 @@
     id: it.id, name: it.name, image: it.image,
     pu: it.placed_units || 0, ps: it.placed_sales || 0, po: it.placed_orders || 0,
     cu: it.confirmed_units || 0, cs: it.confirmed_sales || 0, co: it.confirmed_orders || 0,
-    md: (it.models || []).map(m => ({ n: m.name, u: m.placed_units || 0, c: m.confirmed_units || 0 }))
-      .filter(m => m.u || m.c).slice(0, 8),
+    md: (it.models || []).map(m => ({ i: m.id, n: m.name, u: m.placed_units || 0, c: m.confirmed_units || 0, s: m.placed_sales || 0, cs: m.confirmed_sales || 0 }))
+      .filter(m => m.u || m.c).slice(0, 30),
   });
+
+  // ---------------- バリエーション画像（get_product_info、ブリッジ経由・遅延取得） ----------------
+  const modelImg = new Map();      // "cc:itemId" → {modelId: imageHash}
+  const modelImgPending = new Set();
+  async function fetchModelImages(region, itemId) {
+    const key = `${region.cc}:${itemId}`;
+    if (modelImg.has(key) || modelImgPending.has(key)) return;
+    modelImgPending.add(key);
+    try {
+      const j = await bridgeGetJson(`https://${region.host}/api/v3/product/get_product_info?product_id=${itemId}&is_draft=false`);
+      const p = (j.data && (j.data.product_info || j.data.product)) || j.data || {};
+      const tier = (p.tier_variation && p.tier_variation[0]) || {};
+      const imgs = tier.images || [];
+      const map = {};
+      (p.model_list || []).forEach(m => {
+        const idx = m.tier_index && m.tier_index[0];
+        if (imgs[idx]) map[m.id] = imgs[idx];
+      });
+      modelImg.set(key, map);
+    } catch (e) {
+      modelImg.set(key, {}); // 失敗時は親画像でフォールバック
+    }
+    modelImgPending.delete(key);
+  }
+  async function ensureModelImages(entries) {
+    const targets = [];
+    const seen = new Set();
+    entries.forEach(en => {
+      const key = `${en.region.cc}:${en.it.id}`;
+      if (en.model && !modelImg.has(key) && !seen.has(key)) { seen.add(key); targets.push(en); }
+    });
+    if (!targets.length) return;
+    for (let i = 0; i < targets.length; i += 4) {
+      await Promise.all(targets.slice(i, i + 4).map(en => fetchModelImages(en.region, en.it.id)));
+    }
+    if (state.view === 'sku') renderGrid();
+  }
 
   async function fetchPage(region, pp, pageNum) {
     const qs = new URLSearchParams({
@@ -501,9 +539,80 @@
       `${shown}商品を表示中` + (loading ? '（読み込み中の国があります）' : '');
   }
 
+  // SKU展開: バリエーション商品を売れたモデル単位に分解した行を作る
+  function skuRows() {
+    const rows = [];
+    countryRows().forEach(r => {
+      const { region, it } = r;
+      if (it.md && it.md.length) {
+        it.md.forEach(m => {
+          const units = state.metric === 'confirmed' ? m.c : m.u;
+          const sales = state.metric === 'confirmed' ? (m.cs || 0) : (m.s || 0);
+          if (!units && !sales) return;
+          rows.push({ region, it, model: m, units, sales, salesJpy: sales * region.rateJpy });
+        });
+      } else {
+        rows.push({ region, it, model: null, units: r.units, sales: r.sales, salesJpy: r.salesJpy });
+      }
+    });
+    if (state.search) {
+      const q = state.search.toLowerCase();
+      return rows.filter(r => (r.it.name || '').toLowerCase().includes(q) ||
+        (r.model && (r.model.n || '').toLowerCase().includes(q)) || String(r.it.id).includes(q));
+    }
+    return rows;
+  }
+
+  function renderSku(grid) {
+    grid.className = '';
+    const rows = skuRows();
+    rows.sort((a, b) => state.sortBy === 'units'
+      ? b.units - a.units || b.salesJpy - a.salesJpy
+      : b.salesJpy - a.salesJpy || b.units - a.units);
+    const loading = [...state.perCountry.values()].some(pc => pc.status === 'loading');
+    document.getElementById('smd-gridstatus').textContent =
+      `${rows.length} SKUを表示中（バリエーション展開）` + (loading ? '（読み込み中の国があります）' : '');
+    grid.innerHTML = '';
+    if (!rows.length) {
+      grid.innerHTML = `<div id="smd-empty">${loading ? '読み込み中...' : '該当するSKUがありません'}</div>`;
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    rows.forEach((r, i) => {
+      const { region, it, model } = r;
+      const imgMap = modelImg.get(`${region.cc}:${it.id}`) || {};
+      const img = (model && imgMap[model.i]) || it.image;
+      const card = document.createElement('div');
+      card.className = 'smd-card';
+      card.innerHTML =
+        `<span class="smd-rank">${i + 1}</span>` +
+        `<span class="smd-cchip" style="background:${region.color}">${region.cc}</span>` +
+        `<div class="smd-imgwrap"><img loading="lazy" src="${IMG_CDN}${img}" onerror="this.style.opacity=.15"></div>` +
+        `<div class="smd-body">` +
+        `<div class="smd-name" style="font-weight:${model ? '600' : '400'}"></div>` +
+        `<div class="smd-nums"><span class="smd-units">${r.units.toLocaleString()}<small> 点</small></span>` +
+        `<span class="smd-sales">${fmtLocal(region, r.sales)}</span></div>` +
+        `<div class="smd-jpyrow">≈ ${fmtJpy(r.salesJpy)}</div>` +
+        `<div class="smd-models"></div>` +
+        `<div class="smd-sub"><span>ID ${it.id}</span>` +
+        `<a href="https://${region.host}/datacenter/product/performance/details?id=${it.id}" target="_blank" title="詳細分析を開く">📈 詳細</a></div>` +
+        `</div>`;
+      card.querySelector('.smd-name').textContent = model ? model.n : (it.name || '');
+      card.querySelector('.smd-models').textContent = model ? (it.name || '') : '';
+      card.title = (model ? model.n + '\n' + it.name : it.name) + '\nクリックで商品編集画面を開く';
+      card.addEventListener('click', () => window.open(`https://${region.host}/portal/product/${it.id}`, '_blank'));
+      card.querySelector('.smd-sub a').addEventListener('click', e => e.stopPropagation());
+      frag.appendChild(card);
+    });
+    grid.appendChild(frag);
+    // バリエーション画像を裏で取得して差し替え（ライブモードのみ可能）
+    if (state.mode === 'live') ensureModelImages(rows);
+  }
+
   function renderGrid() {
     const grid = document.getElementById('smd-grid');
     if (state.view === 'columns') return renderColumns(grid);
+    if (state.view === 'sku') return renderSku(grid);
     grid.className = '';
     const rows = countryRows();
     rows.sort((a, b) => state.sortBy === 'units'
