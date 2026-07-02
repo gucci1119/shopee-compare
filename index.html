@@ -197,6 +197,19 @@
         <button data-k="sum">国別サマリー</button>
       </span>
       <select id="pf-cc"><option value="">全ての国</option></select>
+      <select id="pf-dep">
+        <option value="">入金:全て</option>
+        <option value="fixed">確定のみ</option>
+        <option value="prov">暫定のみ</option>
+        <option value="none">未取得のみ</option>
+      </select>
+      <select id="pf-st">
+        <option value="">配送:全て</option>
+        <option value="toship">未発送</option>
+        <option value="transit">輸送中</option>
+        <option value="delivered">到着済</option>
+        <option value="completed">完了</option>
+      </select>
       <label style="font-size:12.5px"><input type="checkbox" id="pf-nocost"> 仕入額未入力のみ</label>
       <input type="text" id="pf-search" placeholder="商品名・バイヤー・注文番号">
       <span style="position:relative">
@@ -1232,12 +1245,28 @@
   }
 
   // ---------------- 利益ページ（明細＋国別サマリー） ----------------
-  const pf = { ym: null, view: 'detail', cc: '', nocost: false, search: '', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
+  const pf = { ym: null, view: 'detail', cc: '', nocost: false, search: '', depFilter: '', stFilter: '',
+    sortKey: 'date', sortDir: 'desc', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
+
+  // 配送状態の分類キー
+  function ordStatusKey(s) {
+    const t = s || '';
+    if (/to ?ship/i.test(t)) return 'toship';
+    if (/transit|shipped|shipping/i.test(t)) return 'transit';
+    if (/deliver/i.test(t)) return 'delivered';
+    if (/complete/i.test(t)) return 'completed';
+    return 'other';
+  }
 
   function pfBind() {
     if (pf.bound) return;
     pf.bound = true;
     const sel = document.getElementById('pf-month');
+    [['past30', '過去30日'], ['past7', '過去7日'], ['thismonth', '今月']].forEach(([v, l]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = l;
+      sel.appendChild(o);
+    });
     const d = new Date();
     for (let i = 0; i < 6; i++) {
       const o = document.createElement('option');
@@ -1246,7 +1275,10 @@
       sel.appendChild(o);
       d.setMonth(d.getMonth() - 1);
     }
+    sel.value = 'past30'; // デフォルトは過去30日
     sel.addEventListener('change', () => renderProfit(true));
+    document.getElementById('pf-dep').addEventListener('change', e => { pf.depFilter = e.target.value; pfRender(); });
+    document.getElementById('pf-st').addEventListener('change', e => { pf.stFilter = e.target.value; pfRender(); });
     const ccSel = document.getElementById('pf-cc');
     REGIONS.forEach(r => { const o = document.createElement('option'); o.value = r.cc; o.textContent = r.cc; ccSel.appendChild(o); });
     ccSel.addEventListener('change', () => { pf.cc = ccSel.value; pfRender(); });
@@ -1302,6 +1334,7 @@
       });
     }
     buildColMenu();
+    pf.rebuildMenu = buildColMenu;
     document.getElementById('pf-colbtn').addEventListener('click', e => {
       e.stopPropagation();
       menu.classList.toggle('open');
@@ -1335,9 +1368,12 @@
     if (force || pf.ym !== ym) {
       body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
       try {
-        const start = ym + '-01';
-        const [y, m] = ym.split('-').map(Number);
-        const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+        const iso = t => new Date(t).toISOString().slice(0, 10);
+        let start, end;
+        if (ym === 'past30') { start = iso(Date.now() - 30 * 86400000); end = iso(Date.now() + 2 * 86400000); }
+        else if (ym === 'past7') { start = iso(Date.now() - 7 * 86400000); end = iso(Date.now() + 2 * 86400000); }
+        else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = iso(Date.now() + 2 * 86400000); }
+        else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
         const [orders, income, costs, inv, prods] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount,amount_initial'),
@@ -1370,10 +1406,11 @@
     const sheetFixed = !!(cm && cm.deposit != null && cm.deposit_init != null && cm.deposit !== cm.deposit_init);
     if (inc && inc.amount != null) {
       const apiFixed = inc.amount_initial != null && inc.amount !== inc.amount_initial;
-      return { amt: inc.amount, fixed: apiFixed || sheetFixed };
+      const init = inc.amount_initial != null ? inc.amount_initial : (cm && cm.deposit_init != null ? cm.deposit_init : null);
+      return { amt: inc.amount, init, fixed: apiFixed || sheetFixed };
     }
     if (cm && cm.deposit != null) {
-      return { amt: cm.deposit, fixed: sheetFixed };
+      return { amt: cm.deposit, init: cm.deposit_init, fixed: sheetFixed };
     }
     return null;
   };
@@ -1398,6 +1435,7 @@
     { k: 'tracking', l: '追跡No', w: 128 },
     { k: 'sls', l: '伝票', w: 46 },
   ];
+  let pfRsActive = false; // 列幅ドラッグ中はソート/列移動を抑止
   const pfColPref = Object.assign({ hidden: [], widths: {}, order: [] }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
   const savePfCols = () => localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
   const pfColOrder = () => {
@@ -1457,11 +1495,48 @@
     return pf.orders.filter(o => {
       if (pf.cc && o.cc !== pf.cc) return false;
       if (pf.nocost && pfCost(o) != null) return false;
+      if (pf.depFilter) {
+        const d = pfDepInfo(o);
+        if (pf.depFilter === 'none' && d) return false;
+        if (pf.depFilter === 'fixed' && (!d || !d.fixed)) return false;
+        if (pf.depFilter === 'prov' && (!d || d.fixed)) return false;
+      }
+      if (pf.stFilter && ordStatusKey(o.status) !== pf.stFilter) return false;
       if (pf.search) {
         const hay = (o.sn + ' ' + (o.buyer || '') + ' ' + (o.items || []).map(it => it.name + ' ' + (it.variation || '')).join(' ')).toLowerCase();
         if (!hay.includes(pf.search)) return false;
       }
       return true;
+    });
+  }
+
+  // ソート（注文単位）
+  function pfSorted(orders) {
+    const key = pf.sortKey || 'date';
+    const dir = pf.sortDir === 'asc' ? 1 : -1;
+    const rgRate = o => { const rg = regionByCc(o.cc); return rg ? rg.rateJpy : 1; };
+    const val = o => {
+      switch (key) {
+        case 'date': return o.order_date || '';
+        case 'cc': return o.cc;
+        case 'product': return ((o.items || [])[0] || {}).name || '';
+        case 'qty': return (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
+        case 'order': return o.sn || '';
+        case 'buyer': return (o.buyer || '').toLowerCase();
+        case 'sales': return (o.total || 0) * rgRate(o);
+        case 'deposit': { const d = pfDep(o); return d == null ? -1e15 : d * rgRate(o); }
+        case 'cost': { const c = pfCost(o); return c == null ? -1e15 : c; }
+        case 'profit': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null) ? d * rgRate(o) - c : -1e15; }
+        case 'rate': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null && d) ? (d * rgRate(o) - c) / (d * rgRate(o)) : -1e15; }
+        case 'status': return ordStatusKey(o.status);
+        default: return '';
+      }
+    };
+    return orders.slice().sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (va < vb) return -dir;
+      if (va > vb) return dir;
+      return 0;
     });
   }
 
@@ -1476,9 +1551,12 @@
     const cols = pfVisibleCols();
     let html = `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="table-layout:fixed;min-width:760px">` +
       '<colgroup>' + cols.map(c => `<col style="width:${pfColPref.widths[c.k] || c.w}px">`).join('') + '</colgroup>' +
-      '<tr>' + cols.map(c => `<th>${c.l}<span class="pf-rs" data-k="${c.k}"></span></th>`).join('') + '</tr>';
+      '<tr>' + cols.map(c => {
+        const ind = pf.sortKey === c.k ? (pf.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        return `<th class="pf-th" data-k="${c.k}" draggable="true" style="cursor:pointer" title="クリックでソート / ドラッグで列移動">${c.l}${ind}<span class="pf-rs" data-k="${c.k}"></span></th>`;
+      }).join('') + '</tr>';
     let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0;
-    orders.forEach(o => {
+    pfSorted(orders).forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg) return;
       const depInfo = pfDepInfo(o);
@@ -1517,7 +1595,9 @@
           sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
           deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span><br>` +
             (depInfo && depInfo.fixed
-              ? '<span style="font-size:9.5px;color:#1a7f37;border:1px solid #a5d6a7;border-radius:6px;padding:0 4px" title="Shopee更新後の確定値">確定</span>'
+              ? '<span style="font-size:9.5px;color:#1a7f37;border:1px solid #a5d6a7;border-radius:6px;padding:0 4px" title="Shopee更新後の確定値">確定</span>' +
+                (depInfo.init != null && depInfo.init !== dep
+                  ? `<span class="smd-dim" style="font-size:9.5px;margin-left:4px;text-decoration:line-through" title="暫定値（初回取得）">${fmtLocal(rg, depInfo.init)}</span>` : '')
               : '<span style="font-size:9.5px;color:#999;border:1px solid #ddd;border-radius:6px;padding:0 4px" title="初回取得の暫定値（Shopee側の更新待ち）">暫定</span>')
             : '<span class="smd-dim">未取得</span>'}</td>` : '',
           profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
@@ -1570,6 +1650,35 @@
         setTimeout(() => pfRender(), 400);
       } catch (err) { alert('保存失敗: ' + err.message); }
     }));
+    // ヘッダー: クリックでソート / D&Dで列移動
+    body.querySelectorAll('th.pf-th').forEach(th => {
+      th.addEventListener('click', e => {
+        if (e.target.classList && e.target.classList.contains('pf-rs')) return;
+        const k = th.dataset.k;
+        if (pf.sortKey === k) pf.sortDir = pf.sortDir === 'asc' ? 'desc' : 'asc';
+        else { pf.sortKey = k; pf.sortDir = 'desc'; }
+        pfRender();
+      });
+      th.addEventListener('dragstart', e => {
+        if (pfRsActive) { e.preventDefault(); return; }
+        e.dataTransfer.setData('text/plain', th.dataset.k);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      th.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+      th.addEventListener('drop', e => {
+        e.preventDefault();
+        const from = e.dataTransfer.getData('text/plain');
+        const to = th.dataset.k;
+        if (!from || from === to) return;
+        const order = pfColOrder().slice();
+        order.splice(order.indexOf(from), 1);
+        order.splice(order.indexOf(to), 0, from); // 移動先の前に挿入
+        pfColPref.order = order;
+        savePfCols();
+        if (pf.rebuildMenu) pf.rebuildMenu();
+        pfRender();
+      });
+    });
     // 列幅ドラッグ調整（設定は保存）
     const table = body.querySelector('table');
     if (table) {
@@ -1578,6 +1687,7 @@
         rs.addEventListener('mousedown', e => {
           e.preventDefault();
           e.stopPropagation();
+          pfRsActive = true;
           const k = rs.dataset.k;
           const idx = cols.findIndex(c => c.k === k);
           const colEl = colEls[idx];
@@ -1590,6 +1700,7 @@
             document.removeEventListener('mouseup', up);
             pfColPref.widths[k] = Math.max(32, startW + ev.clientX - startX);
             savePfCols();
+            setTimeout(() => { pfRsActive = false; }, 50);
           };
           document.addEventListener('mousemove', move);
           document.addEventListener('mouseup', up);
