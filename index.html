@@ -286,13 +286,23 @@
       if (d.ok) resolve(d.body); else reject(new Error(d.error || ('HTTP ' + d.status)));
     }
   });
-  function bridgeRequest(method, url, data) {
+  function rawBridgeRequest(method, url, data) {
     return new Promise((resolve, reject) => {
       const id = ++reqSeq;
       const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, 35000);
       pendingReq.set(id, { resolve, reject, timer });
       window.postMessage({ __smd: 'req', id, method, url, data }, '*');
     });
+  }
+  // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）
+  const REQ_MAX = 3;
+  let reqActive = 0;
+  const reqWaiters = [];
+  async function bridgeRequest(method, url, data) {
+    if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
+    reqActive++;
+    try { return await rawBridgeRequest(method, url, data); }
+    finally { reqActive--; const w = reqWaiters.shift(); if (w) w(); }
   }
   const bridgeGetJson = url => bridgeRequest('GET', url).then(t => JSON.parse(t));
   const bridgePostJson = (url, obj) => bridgeRequest('POST', url, JSON.stringify(obj)).then(t => { try { return JSON.parse(t); } catch (_) { return {}; } });
@@ -969,11 +979,20 @@
   async function fetchPendingCountry(region) {
     const map = {};
     let cursor = null, dir = 0, guard = 0;
-    while (guard++ < 100) {
-      const pi = { direction: dir, limit: 100 };
+    while (guard++ < 200) {
+      const pi = { direction: dir, limit: 50 };
       if (cursor != null) pi.cursor = cursor;
-      const j = await bridgePostJson(`https://${region.host}/api/v4/accounting/pc/seller_income/income_overview/get_income_detail?SPC_CDS_VER=2`,
-        { source_type: 0, income_category: 4, pagination_info: pi });
+      let j = null;
+      for (let att = 0; att < 2; att++) { // タイムアウト時1回だけリトライ
+        try {
+          j = await bridgePostJson(`https://${region.host}/api/v4/accounting/pc/seller_income/income_overview/get_income_detail?SPC_CDS_VER=2`,
+            { source_type: 0, income_category: 4, pagination_info: pi });
+          break;
+        } catch (e) {
+          if (att === 1) throw e;
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
       if (j.code !== 0) throw new Error(`入金API code=${j.code}`);
       const list = (j.data && j.data.list) || [];
       list.forEach(it => {
