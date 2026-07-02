@@ -1178,6 +1178,15 @@
     }
     return rows.length;
   }
+  async function sbDelete(table, qs) {
+    const key = settings.sbSecret;
+    if (!key) throw new Error('書き込みキー未設定');
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
+      method: 'DELETE',
+      headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' },
+    });
+    if (!r.ok) throw new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  }
   const snToDate = sn => {
     const m = /^(\d{2})(\d{2})(\d{2})/.exec(sn || '');
     return m ? `20${m[1]}-${m[2]}-${m[3]}` : null;
@@ -1273,6 +1282,8 @@
   const stock = { rows: null, imgMap: null, st: '在庫保管中', q: '', bound: false, adding: false };
   const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
   const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
+  const SUPPLIERS = ['メルカリ', 'メルカリShops', 'ヤフオク', 'PayPayフリマ', 'Amazon', 'ヤフーショッピング', '楽天'];
+  const CONDITIONS = ['新品', '中古'];
   async function renderStock() {
     if (!stock.bound) {
       stock.bound = true;
@@ -1328,31 +1339,40 @@
     if (stock.st) rows = rows.filter(r => r.status === stock.st);
     if (stock.q) rows = rows.filter(r =>
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
-       (r.supplier || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
+       (r.supplier || '') + ' ' + (r.seller || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
     const shown = rows.slice(0, 400);
     body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
-      `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・仕入額・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。画像はShopee出品名から自動マッチ。</span></div>` +
+      `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・セラー名・仕入額・コンディション・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。ItemID横の✂でまとめ仕入れを枝番分割（仕入額を均等割り）。画像はShopee出品名から自動マッチ。</span></div>` +
       `<div id="stk-addform"></div>` +
-      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px">` +
-      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日</th><th>追加日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
+      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1180px">` +
+      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日</th><th>追加日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
         return '<tr>' +
         `<td>${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>` +
-        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}${r.source === 'portal' ? ' <span title="ポータル登録">🆕</span>' : ''}</td>` +
+        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}${r.source === 'portal' ? ' <span title="ポータル登録">🆕</span>' : ''}<button class="stk-split" ${di} title="まとめ仕入れを枝番で分割（仕入額を均等割り）" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 3px;vertical-align:middle">✂</button></td>` +
         `<td><img class="stk-qr" src="https://api.qrserver.com/v1/create-qr-code/?size=54x54&margin=0&data=${encodeURIComponent(r.item_id || '')}" data-id="${esc(r.item_id || '')}" title="クリックで拡大（スキャン/印刷用）" style="width:40px;height:40px;cursor:zoom-in" loading="lazy"></td>` +
         `<td style="font-size:11px;white-space:nowrap;min-width:82px">${esc(gvizDate(r.purchase_date) || '')}</td>` +
         `<td style="font-size:11px;white-space:nowrap;min-width:82px;color:#9a8fb5">${esc(jstDate(r.created_at))}</td>` +
         `<td style="word-break:break-word">${esc(r.name || '')}${r.name_supplier ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.sku || '')}</td>` +
-        `<td style="white-space:nowrap"><input class="li stk-sup" ${di} value="${esc(r.supplier || '')}" style="padding:3px 5px;font-size:11px;width:72px">${r.supplier_url ? ` <a href="${esc(r.supplier_url)}" target="_blank" title="仕入元ページを開く" style="text-decoration:none">🔗</a>` : ''}</td>` +
+        `<td style="white-space:nowrap"><select class="li stk-sup" ${di} style="padding:3px;font-size:11px;width:104px">` +
+          `<option value="" ${!r.supplier ? 'selected' : ''}></option>` +
+          SUPPLIERS.map(s => `<option ${s === r.supplier ? 'selected' : ''}>${s}</option>`).join('') +
+          (r.supplier && !SUPPLIERS.includes(r.supplier) ? `<option selected>${esc(r.supplier)}</option>` : '') +
+          `</select>${r.supplier_url ? ` <a href="${esc(r.supplier_url)}" target="_blank" title="仕入元ページを開く" style="text-decoration:none">🔗</a>` : ''}</td>` +
+        `<td style="white-space:nowrap"><input class="li stk-seller" ${di} value="${esc(r.seller || '')}" placeholder="—" style="padding:3px 5px;font-size:11px;width:82px"></td>` +
         `<td><input class="li stk-price" ${di} type="number" value="${r.price != null ? r.price : ''}" style="padding:3px 5px;font-size:11px;width:80px">` +
           `${r.price != null ? `<div class="smd-dim" style="font-size:9.5px">¥${Number(r.price).toLocaleString()}</div>` : ''}</td>` +
-        `<td style="font-size:11px">${esc(r.condition || '')}</td>` +
+        `<td><select class="li stk-cond" ${di} style="padding:3px;font-size:11px;width:72px">` +
+          `<option value="" ${!r.condition ? 'selected' : ''}>—</option>` +
+          CONDITIONS.map(c => `<option ${c === r.condition ? 'selected' : ''}>${c}</option>`).join('') +
+          (r.condition && !CONDITIONS.includes(r.condition) ? `<option selected>${esc(r.condition)}</option>` : '') +
+          `</select></td>` +
         `<td><select class="li stk-st" ${di} style="padding:3px;font-size:11px;width:100px">${STOCK_STATUS.map(s => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}${STOCK_STATUS.includes(r.status) ? '' : `<option selected>${esc(r.status || '')}</option>`}</select></td>` +
         `<td><select class="li stk-ps" ${di} style="padding:3px;font-size:11px;width:110px">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}" ${s === (r.purchase_status || '') ? 'selected' : ''}>${s || '—'}</option>`).join('')}${STOCK_PSTATUS.includes(r.purchase_status || '') ? '' : `<option selected>${esc(r.purchase_status)}</option>`}</select></td>` +
         `<td style="font-size:11px">${esc(r.bin || '')}</td>` +
@@ -1363,12 +1383,43 @@
       `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
     // 編集ハンドラ
     body.querySelectorAll('.stk-sup').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { supplier: e.target.value || null })));
+    body.querySelectorAll('.stk-seller').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { seller: e.target.value || null })));
+    body.querySelectorAll('.stk-cond').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { condition: e.target.value || null })));
     body.querySelectorAll('.stk-price').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { price: e.target.value === '' ? null : Number(e.target.value) })) stockRender(); }));
     body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
     body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
+    body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     stockAddForm();
+  }
+  // まとめ仕入れを N 個に分割：ItemIDに枝番(-1..-N)、仕入額を均等割り（余りは-1に寄せる）
+  async function stockSplit(id) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+    const r = stock.rows.find(x => x.item_id === id);
+    if (!r) return;
+    const total = r.price || 0;
+    const ans = prompt(`「${(r.name || id).slice(0, 30)}」を何個に分割しますか？\nItemIDに枝番(-1,-2…)を付け、仕入額 ¥${total.toLocaleString()} を均等割りします（余りは-1に寄せます）。`, '2');
+    if (ans == null) return;
+    const n = parseInt(ans, 10);
+    if (!n || n < 2 || n > 100) { alert('2〜100の数を入力してください'); return; }
+    const base = Math.floor(total / n), rem = total - base * n;
+    const now = new Date().toISOString();
+    const newRows = [];
+    for (let i = 1; i <= n; i++) {
+      newRows.push(Object.assign({}, r, {
+        item_id: id + '-' + i,
+        price: total ? (i === 1 ? base + rem : base) : null,
+        sku: null, shopee_sn: null, proof: null, bin: null,   // 個体別の項目はクリア
+        edited_at: now, synced_at: now,
+      }));
+    }
+    try {
+      await sbUpsert('inventory', newRows);              // 先に枝番行を作成
+      await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id)); // 元行を削除
+      stock.rows = stock.rows.filter(x => x.item_id !== id).concat(newRows);
+      stockRender();
+    } catch (e) { alert('分割失敗: ' + e.message); }
   }
   // 在庫ラベル（29×42mm）: ItemID / SKU / 商品名 / QR / OrderID / 価格
   const LABEL_W = 42, LABEL_H = 29; // mm（画像は横長。向きが逆なら数値を入替）
@@ -1432,9 +1483,10 @@
       <h3>＋ 在庫を登録</h3>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
         <div><label class="lc">商品名（Shopee出品）*</label><input class="li" id="sa-name"></div>
-        <div><label class="lc">仕入元</label><input class="li" id="sa-sup" placeholder="メルカリ / ヤフオク"></div>
+        <div><label class="lc">仕入元</label><select class="li" id="sa-sup"><option value=""></option>${SUPPLIERS.map(s => `<option>${s}</option>`).join('')}</select></div>
+        <div><label class="lc">セラー名</label><input class="li" id="sa-seller" placeholder="出品者/店舗名"></div>
         <div><label class="lc">仕入額(円)</label><input class="li" id="sa-price" type="number"></div>
-        <div><label class="lc">コンディション</label><input class="li" id="sa-cond" placeholder="Used"></div>
+        <div><label class="lc">コンディション</label><select class="li" id="sa-cond"><option value="">—</option>${CONDITIONS.map(c => `<option>${c}</option>`).join('')}</select></div>
         <div><label class="lc">状態</label><select class="li" id="sa-st">${STOCK_STATUS.map(s => `<option ${s === '在庫保管中' ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
         <div><label class="lc">仕入状況</label><select class="li" id="sa-ps">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}">${s || '—'}</option>`).join('')}</select></div>
         <div><label class="lc">SKU</label><input class="li" id="sa-sku"></div>
@@ -1459,7 +1511,7 @@
       const itemId = 'PITM-' + now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + now.getTime().toString(36).slice(-4);
       const snRaw = v('sa-sn');
       const row = {
-        item_id: itemId, name, supplier: v('sa-sup') || null, price: v('sa-price') ? Number(v('sa-price')) : null,
+        item_id: itemId, name, supplier: v('sa-sup') || null, seller: v('sa-seller') || null, price: v('sa-price') ? Number(v('sa-price')) : null,
         condition: v('sa-cond') || null, status: document.getElementById('sa-st').value, purchase_status: document.getElementById('sa-ps').value || null,
         sku: v('sa-sku') || null, bin: v('sa-bin') || null, name_supplier: v('sa-nsup') || null, supplier_order: v('sa-sorder') || null,
         supplier_url: v('sa-surl') || null, image: v('sa-img') || null, shopee_sn: /^\d{6}[A-Z0-9]{4,}$/.test(snRaw) ? snRaw : null,
@@ -2405,7 +2457,7 @@
             synced_at: new Date().toISOString(),
           };
           // 編集済み行: ユーザー編集フィールドをペイロードから外す（merge-duplicatesは指定列のみ更新＝既存値を保持）
-          if (editedIds.has(r.item_id)) { delete r.supplier; delete r.price; delete r.status; delete r.purchase_status; }
+          if (editedIds.has(r.item_id)) { delete r.supplier; delete r.price; delete r.status; delete r.purchase_status; delete r.condition; }
           invRows.push(r);
         });
         await sbUpsert('inventory', invRows);
