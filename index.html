@@ -659,6 +659,13 @@
   const fmtJpy = n => '¥' + Math.round(n).toLocaleString();
   const fmtLocal = (region, n) => region.cur + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // gvizの日付 "Date(2025,7,26)"（月0始まり）→ "2025-08-26"。それ以外は先頭10字。
+  const gvizDate = v => {
+    if (v == null) return null;
+    const m = String(v).match(/^Date\((\d+),(\d+),(\d+)/);
+    if (m) return `${m[1]}-${String(+m[2] + 1).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}`;
+    return String(v).slice(0, 10);
+  };
 
   function setModeBadge() {
     const el = document.getElementById('smd-mode');
@@ -1260,8 +1267,14 @@
     }
   }
 
-  // ---------------- 在庫（InventoryItemミラーの閲覧） ----------------
-  const stock = { rows: null, st: '在庫保管中', q: '', bound: false };
+  // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
+  const stock = { rows: null, imgMap: null, st: '在庫保管中', q: '', bound: false, adding: false };
+  const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
+  const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
+  // 商品名を正規化して products の画像とマッチさせるキー
+  const stockNameKey = s => String(s || '').toLowerCase()
+    .replace(/\[[^\]]*\]/g, ' ').replace(/(japan(ese)? ver\.?|used|variation)/g, ' ')
+    .replace(/[^a-z0-9぀-ヿ一-鿿]+/g, ' ').trim().slice(0, 40);
   async function renderStock() {
     if (!stock.bound) {
       stock.bound = true;
@@ -1275,26 +1288,39 @@
     const body = document.getElementById('stock-body');
     if (!stock.rows) {
       body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-      try { stock.rows = await sbGetAll('inventory', 'select=*&order=item_id.desc'); }
-      catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+      try {
+        stock.rows = await sbGetAll('inventory', 'select=*&order=item_id.desc');
+        // 画像: products（Shopee出品・CDN画像）を名前でマッチ
+        stock.imgMap = new Map();
+        const prods = await sbGetAll('products', 'select=name,image').catch(() => []);
+        prods.forEach(p => { const k = stockNameKey(p.name); if (k && p.image && !stock.imgMap.has(k)) stock.imgMap.set(k, p.image); });
+      } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     }
     stockRender();
   }
-  function stockChip(s) {
-    if (s === '在庫保管中') return '<span style="color:#1a7f37;font-weight:700">在庫保管中</span>';
-    if (s === '入庫待ち') return '<span style="color:#e8930c;font-weight:700">入庫待ち</span>';
-    if (s === '販売済み') return '<span class="smd-dim">販売済み</span>';
-    return esc(s || '');
+  function stockImg(r) {
+    if (r.image) return /^https?:/.test(r.image) ? r.image : IMG_CDN + r.image;
+    const k = stockNameKey(r.name);
+    const hit = k && stock.imgMap && stock.imgMap.get(k);
+    return hit ? IMG_CDN + hit : null;
+  }
+  async function stockSave(itemId, patch) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
+    try {
+      await sbUpsert('inventory', [Object.assign({ item_id: itemId, edited_at: new Date().toISOString() }, patch)]);
+      const row = stock.rows.find(r => r.item_id === itemId);
+      if (row) Object.assign(row, patch);
+      return true;
+    } catch (e) { alert('保存失敗: ' + e.message); return false; }
   }
   function stockRender() {
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
     const inStock = all.filter(r => r.status === '在庫保管中');
-    const waiting = all.filter(r => r.status === '入庫待ち');
     const stockVal = inStock.reduce((s, r) => s + (r.price || 0), 0);
     document.getElementById('stock-kpis').innerHTML = [
       ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal)],
-      ['入庫待ち', waiting.length + '点', '仕入元から到着待ち'],
+      ['入庫待ち', all.filter(r => r.status === '入庫待ち').length + '点', '仕入元から到着待ち'],
       ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計'],
       ['全登録', all.length + '点', 'InventoryItem'],
     ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
@@ -1304,24 +1330,89 @@
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
        (r.supplier || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
     document.getElementById('stock-note').textContent = `${rows.length}件`;
-    const shown = rows.slice(0, 500);
-    body.innerHTML = `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:980px">` +
-      '<tr><th>ItemID</th><th>仕入日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
-      shown.map(r => '<tr>' +
-        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}</td>` +
-        `<td style="font-size:11px;white-space:nowrap">${esc(String(r.purchase_date || '').slice(0, 10))}</td>` +
+    const shown = rows.slice(0, 400);
+    body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
+      `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・仕入額・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。画像はShopee出品名から自動マッチ。</span></div>` +
+      `<div id="stk-addform"></div>` +
+      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px">` +
+      '<tr><th>画像</th><th>ItemID</th><th>仕入日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
+      shown.map(r => {
+        const img = stockImg(r);
+        const di = `data-id="${esc(r.item_id)}"`;
+        return '<tr>' +
+        `<td>${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>` +
+        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}${r.source === 'portal' ? ' <span title="ポータル登録">🆕</span>' : ''}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${esc(gvizDate(r.purchase_date) || '')}</td>` +
         `<td style="word-break:break-word">${esc(r.name || '')}${r.name_supplier ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.sku || '')}</td>` +
-        `<td style="font-size:11px">${esc(r.supplier || '')}</td>` +
-        `<td style="white-space:nowrap">${r.price != null ? '¥' + Number(r.price).toLocaleString() : ''}</td>` +
+        `<td><input class="li stk-sup" ${di} value="${esc(r.supplier || '')}" style="padding:3px 5px;font-size:11px;width:80px"></td>` +
+        `<td><input class="li stk-price" ${di} type="number" value="${r.price != null ? r.price : ''}" style="padding:3px 5px;font-size:11px;width:80px">` +
+          `${r.price != null ? `<div class="smd-dim" style="font-size:9.5px">¥${Number(r.price).toLocaleString()}</div>` : ''}</td>` +
         `<td style="font-size:11px">${esc(r.condition || '')}</td>` +
-        `<td style="white-space:nowrap">${stockChip(r.status)}</td>` +
-        `<td style="font-size:11px;white-space:nowrap">${esc(r.purchase_status || '')}</td>` +
+        `<td><select class="li stk-st" ${di} style="padding:3px;font-size:11px;width:100px">${STOCK_STATUS.map(s => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}${STOCK_STATUS.includes(r.status) ? '' : `<option selected>${esc(r.status || '')}</option>`}</select></td>` +
+        `<td><select class="li stk-ps" ${di} style="padding:3px;font-size:11px;width:110px">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}" ${s === (r.purchase_status || '') ? 'selected' : ''}>${s || '—'}</option>`).join('')}${STOCK_PSTATUS.includes(r.purchase_status || '') ? '' : `<option selected>${esc(r.purchase_status)}</option>`}</select></td>` +
         `<td style="font-size:11px">${esc(r.bin || '')}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.shopee_sn || '')}</td>` +
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</td>` +
-        '</tr>').join('') +
+        '</tr>';
+      }).join('') +
       `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
+    // 編集ハンドラ
+    body.querySelectorAll('.stk-sup').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { supplier: e.target.value || null })));
+    body.querySelectorAll('.stk-price').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { price: e.target.value === '' ? null : Number(e.target.value) })) stockRender(); }));
+    body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
+    body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
+    document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
+    stockAddForm();
+  }
+  function stockAddForm() {
+    const el = document.getElementById('stk-addform');
+    if (!el) return;
+    if (!stock.adding) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="tool-card" style="max-width:none;border:1px solid #b3a4e0">
+      <h3>＋ 在庫を登録</h3>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+        <div><label class="lc">商品名（Shopee出品）*</label><input class="li" id="sa-name"></div>
+        <div><label class="lc">仕入元</label><input class="li" id="sa-sup" placeholder="メルカリ / ヤフオク"></div>
+        <div><label class="lc">仕入額(円)</label><input class="li" id="sa-price" type="number"></div>
+        <div><label class="lc">コンディション</label><input class="li" id="sa-cond" placeholder="Used"></div>
+        <div><label class="lc">状態</label><select class="li" id="sa-st">${STOCK_STATUS.map(s => `<option ${s === '在庫保管中' ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+        <div><label class="lc">仕入状況</label><select class="li" id="sa-ps">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}">${s || '—'}</option>`).join('')}</select></div>
+        <div><label class="lc">SKU</label><input class="li" id="sa-sku"></div>
+        <div><label class="lc">棚</label><input class="li" id="sa-bin"></div>
+        <div><label class="lc">仕入元商品名</label><input class="li" id="sa-nsup"></div>
+        <div><label class="lc">仕入元OrderID/URL</label><input class="li" id="sa-sorder"></div>
+        <div><label class="lc">画像URL/ハッシュ</label><input class="li" id="sa-img"></div>
+        <div><label class="lc">Shopee注文SN</label><input class="li" id="sa-sn"></div>
+      </div>
+      <div class="row" style="margin-top:10px"><span class="test" id="sa-msg"></span>
+        <button class="smd-btn" id="sa-cancel">キャンセル</button>
+        <button class="smd-btn primary" id="sa-save">登録</button></div>
+    </div>`;
+    document.getElementById('sa-cancel').addEventListener('click', () => { stock.adding = false; stockAddForm(); });
+    document.getElementById('sa-save').addEventListener('click', async () => {
+      const v = id => document.getElementById(id).value.trim();
+      const name = v('sa-name');
+      if (!name) { document.getElementById('sa-msg').textContent = '商品名は必須です'; return; }
+      if (!settings.sbSecret) { document.getElementById('sa-msg').textContent = '⚙️設定で書き込みキーが必要です'; return; }
+      const now = new Date();
+      const itemId = 'PITM-' + now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + now.getTime().toString(36).slice(-4);
+      const snRaw = v('sa-sn');
+      const row = {
+        item_id: itemId, name, supplier: v('sa-sup') || null, price: v('sa-price') ? Number(v('sa-price')) : null,
+        condition: v('sa-cond') || null, status: document.getElementById('sa-st').value, purchase_status: document.getElementById('sa-ps').value || null,
+        sku: v('sa-sku') || null, bin: v('sa-bin') || null, name_supplier: v('sa-nsup') || null, supplier_order: v('sa-sorder') || null,
+        image: v('sa-img') || null, shopee_sn: /^\d{6}[A-Z0-9]{4,}$/.test(snRaw) ? snRaw : null,
+        purchase_date: now.toISOString().slice(0, 10), source: 'portal', edited_at: now.toISOString(), synced_at: now.toISOString(),
+      };
+      document.getElementById('sa-msg').textContent = '登録中...';
+      try {
+        await sbUpsert('inventory', [row]);
+        stock.rows.unshift(row);
+        stock.adding = false;
+        stockRender();
+      } catch (e) { document.getElementById('sa-msg').textContent = '失敗: ' + e.message; }
+    });
   }
 
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
@@ -2226,16 +2317,19 @@
       say('🏷 在庫(InventoryItem)を読み取り中...');
       try {
         const tbl = await gvizFetch(INV_SHEET_ID, 'InventoryItem');
+        // ポータルで編集済みの行は、編集対象フィールドをシート値で上書きしない
+        const editedIds = new Set((await sbGetAll('inventory', 'select=item_id&edited_at=not.is.null'))
+          .map(r => r.item_id));
         const invRows = [];
         (tbl.rows || []).forEach(row => {
           const c = row.c || [];
           const g = i => (c[i] && c[i].v != null) ? c[i].v : null;
           const itemId = g(0);
           if (!itemId) return;
-          invRows.push({
+          const r = {
             item_id: String(itemId).slice(0, 60),
             sku: g(1) != null ? String(g(1)).slice(0, 60) : null,
-            purchase_date: g(2) != null ? String(g(2)).slice(0, 30) : null,
+            purchase_date: gvizDate(g(2)),
             name: g(3) != null ? String(g(3)).slice(0, 200) : null,
             supplier: g(6) != null ? String(g(6)).slice(0, 50) : null,
             name_supplier: g(7) != null ? String(g(7)).slice(0, 200) : null,
@@ -2248,10 +2342,13 @@
             purchase_status: g(26) != null ? String(g(26)).slice(0, 30) : null,
             proof: (g(28) != null && /^https?:\/\//.test(String(g(28)))) ? String(g(28)).slice(0, 300) : null,
             synced_at: new Date().toISOString(),
-          });
+          };
+          // 編集済み行: ユーザー編集フィールドをペイロードから外す（merge-duplicatesは指定列のみ更新＝既存値を保持）
+          if (editedIds.has(r.item_id)) { delete r.supplier; delete r.price; delete r.status; delete r.purchase_status; }
+          invRows.push(r);
         });
         await sbUpsert('inventory', invRows);
-        say(`🏷 在庫ミラー ${invRows.length}件 保存 ✅`);
+        say(`🏷 在庫ミラー ${invRows.length}件 保存 ✅（編集保護 ${editedIds.size}件）`);
       } catch (e) { say(`　在庫: ⚠ ${String(e.message).slice(0, 40)}`); }
 
       say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`);
