@@ -175,9 +175,16 @@
 
   <!-- 利益 -->
   <div id="page-profit" style="display:none">
-    <div class="smd-pagehead">💹 利益管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（DB蓄積分＋利益管理表ミラーから算出・判明分ベース）</span></div>
+    <div class="smd-pagehead">💹 利益管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（DB蓄積＋利益管理表ミラー・判明分ベース）</span></div>
     <div class="smd-toolbar">
       <select id="pf-month"></select>
+      <span class="smd-seg" id="pf-view">
+        <button data-k="detail" class="on">明細</button>
+        <button data-k="sum">国別サマリー</button>
+      </span>
+      <select id="pf-cc"><option value="">全ての国</option></select>
+      <label style="font-size:12.5px"><input type="checkbox" id="pf-nocost"> 仕入額未入力のみ</label>
+      <input type="text" id="pf-search" placeholder="商品名・バイヤー・注文番号">
       <span class="smd-dim" id="pf-note"></span>
     </div>
     <div id="pf-body" style="padding:12px 20px"></div>
@@ -1187,71 +1194,172 @@
     });
   }
 
-  // ---------------- 利益ページ ----------------
-  async function renderProfit() {
+  // ---------------- 利益ページ（明細＋国別サマリー） ----------------
+  const pf = { ym: null, view: 'detail', cc: '', nocost: false, search: '', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
+
+  function pfBind() {
+    if (pf.bound) return;
+    pf.bound = true;
     const sel = document.getElementById('pf-month');
-    if (!sel.options.length) {
-      const d = new Date();
-      for (let i = 0; i < 6; i++) {
-        const o = document.createElement('option');
-        o.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-        o.textContent = `${d.getFullYear()}年${d.getMonth() + 1}月`;
-        sel.appendChild(o);
-        d.setMonth(d.getMonth() - 1);
-      }
-      sel.addEventListener('change', renderProfit);
+    const d = new Date();
+    for (let i = 0; i < 6; i++) {
+      const o = document.createElement('option');
+      o.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      o.textContent = `${d.getFullYear()}年${d.getMonth() + 1}月`;
+      sel.appendChild(o);
+      d.setMonth(d.getMonth() - 1);
     }
-    const ym = sel.value;
+    sel.addEventListener('change', () => renderProfit(true));
+    const ccSel = document.getElementById('pf-cc');
+    REGIONS.forEach(r => { const o = document.createElement('option'); o.value = r.cc; o.textContent = r.cc; ccSel.appendChild(o); });
+    ccSel.addEventListener('change', () => { pf.cc = ccSel.value; pfRender(); });
+    document.getElementById('pf-view').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      document.querySelectorAll('#pf-view button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      pf.view = b.dataset.k;
+      pfRender();
+    });
+    document.getElementById('pf-nocost').addEventListener('change', e => { pf.nocost = e.target.checked; pfRender(); });
+    let t;
+    document.getElementById('pf-search').addEventListener('input', e => {
+      clearTimeout(t);
+      t = setTimeout(() => { pf.search = e.target.value.trim().toLowerCase(); pfRender(); }, 250);
+    });
+  }
+
+  async function renderProfit(force) {
+    pfBind();
+    const ym = document.getElementById('pf-month').value;
     const body = document.getElementById('pf-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    try {
-      const start = ym + '-01';
-      const [y, m] = ym.split('-').map(Number);
-      const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
-      const [orders, income, costs] = await Promise.all([
-        sbGet('orders', `select=cc,sn,total,items,order_date&order_date=gte.${start}&order_date=lt.${end}&limit=10000`),
-        sbGet('income', 'select=cc,sn,amount&limit=10000'),
-        sbGet('costs', 'select=cc,sn,cost,deposit&limit=10000'),
-      ]);
-      const incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
-      const costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
-      const per = {};
-      REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0 });
-      orders.forEach(o => {
-        const rg = regionByCc(o.cc);
-        if (!rg || !per[o.cc]) return;
-        const p = per[o.cc];
-        p.n++;
-        p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
-        p.sales += o.total || 0;
-        const key = o.cc + ':' + o.sn;
-        const cm = costMap.get(key);
-        const dep = incMap.has(key) ? incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
-        if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
-        if (cm && cm.cost != null) { p.costJpy += cm.cost; p.costN++; } // 仕入額は円建て
-      });
-      let rowsHtml = '';
-      let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0;
-      REGIONS.forEach(rg => {
-        const p = per[rg.cc];
-        if (!p.n) return;
-        tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
-        rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
-          `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
-          `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
-          `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span></td>` +
-          `<td><b>${fmtJpy(p.depJpy - p.costJpy)}</b></td></tr>`;
-      });
-      body.innerHTML = rowsHtml
-        ? `<div class="tool-card" style="margin:0;max-width:920px"><table class="pf-table">` +
-          `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利概算</th></tr>` + rowsHtml +
-          `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td></tr></table>` +
-          `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利概算 = 入金額(判明分・手数料控除後) − 仕入額(判明分・円建て)。未仕入れ分や入金未取得分は含まれないため控えめに出ます。DB同期を続けるほど判明率が上がります。キャンセル注文は元から含まれていません。</div></div>`
-        : '<div class="smd-dim">この月の注文がまだDBにありません（💰転記タブの「DB同期」を実行してください）</div>';
-      document.getElementById('pf-note').textContent = `${orders.length}注文をDBから集計`;
-    } catch (e) {
-      body.innerHTML = `<span class="smd-err">${esc(e.message)}</span>`;
+    if (force || pf.ym !== ym) {
+      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      try {
+        const start = ym + '-01';
+        const [y, m] = ym.split('-').map(Number);
+        const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+        const [orders, income, costs] = await Promise.all([
+          sbGet('orders', `select=cc,sn,total,items,order_date,buyer,status&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc&limit=10000`),
+          sbGet('income', 'select=cc,sn,amount&limit=20000'),
+          sbGet('costs', 'select=cc,sn,cost,deposit&limit=20000'),
+        ]);
+        pf.ym = ym;
+        pf.orders = orders;
+        pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i.amount]));
+        pf.costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
+      } catch (e) { body.innerHTML = `<span class="smd-err">${esc(e.message)}</span>`; return; }
     }
+    pfRender();
+  }
+
+  const pfDep = o => {
+    const key = o.cc + ':' + o.sn;
+    const cm = pf.costMap.get(key);
+    return pf.incMap.has(key) ? pf.incMap.get(key) : (cm && cm.deposit != null ? cm.deposit : null);
+  };
+  const pfCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
+
+  function pfFiltered() {
+    return pf.orders.filter(o => {
+      if (pf.cc && o.cc !== pf.cc) return false;
+      if (pf.nocost && pfCost(o) != null) return false;
+      if (pf.search) {
+        const hay = (o.sn + ' ' + (o.buyer || '') + ' ' + (o.items || []).map(it => it.name + ' ' + (it.variation || '')).join(' ')).toLowerCase();
+        if (!hay.includes(pf.search)) return false;
+      }
+      return true;
+    });
+  }
+
+  function pfRender() {
+    const body = document.getElementById('pf-body');
+    const orders = pfFiltered();
+    document.getElementById('pf-note').textContent = `${orders.length}注文`;
+    if (!orders.length) { body.innerHTML = '<div class="smd-dim">該当する注文がありません（未同期の月は💰転記タブでDB同期を実行）</div>'; return; }
+    if (pf.view === 'sum') { pfRenderSummary(body, orders); return; }
+
+    // 明細ビュー: 注文の商品1点ごとに1行
+    let html = `<div class="tool-card" style="margin:0"><table class="pf-table"><tr>
+      <th>日付</th><th>国</th><th></th><th>商品 / バリエーション</th><th>数量</th>
+      <th>販売額</th><th>入金額</th><th>仕入額(円・編集可)</th><th>粗利</th><th>状態</th></tr>`;
+    let tSales = 0, tDep = 0, tCost = 0, shown = 0;
+    orders.forEach(o => {
+      const rg = regionByCc(o.cc);
+      if (!rg) return;
+      const dep = pfDep(o);
+      const cost = pfCost(o);
+      tSales += (o.total || 0) * rg.rateJpy;
+      if (dep != null) tDep += dep * rg.rateJpy;
+      if (cost != null) tCost += cost;
+      const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
+      const items = (o.items && o.items.length) ? o.items : [{}];
+      items.forEach((it, idx) => {
+        shown++;
+        const first = idx === 0;
+        html += `<tr>` +
+          `<td>${first ? (o.order_date || '').slice(5) : ''}</td>` +
+          `<td>${first ? `<b style="color:${rg.color}">${o.cc}</b>` : ''}</td>` +
+          `<td>${it.image ? `<img src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover" loading="lazy">` : ''}</td>` +
+          `<td style="max-width:340px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc((it.name || '').slice(0, 60))}</div>` +
+          `${it.variation ? `<div class="smd-dim" style="font-size:11px">${esc(it.variation)}</div>` : ''}` +
+          `<div class="smd-dim" style="font-size:10px">${first ? esc(o.sn) + ' / ' + esc(o.buyer || '') : ''}</div></td>` +
+          `<td>${it.qty || ''}</td>` +
+          `<td>${first ? `${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span>` : ''}</td>` +
+          `<td>${first ? (dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span>` : '<span class="smd-dim">未取得</span>') : ''}</td>` +
+          `<td>${first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${cost != null ? cost : ''}" placeholder="未入力" style="width:82px;padding:4px 6px;border:1px solid ${cost != null ? '#ddd' : '#f0b429'};border-radius:5px;font-size:12px">` : ''}</td>` +
+          `<td>${first && profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` +
+          `<td class="smd-dim" style="font-size:11px">${first ? esc(o.status || '') : ''}</td></tr>`;
+      });
+    });
+    html += `<tr class="pf-total"><td colspan="5">合計（フィルタ後）</td><td>${fmtJpy(tSales)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td><td></td></tr></table>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px">仕入額はここで直接入力するとDBに保存されます（円建て・注文単位）。入金額はShopee手数料控除後・自動取得。</div></div>`;
+    body.innerHTML = html;
+    body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
+      const v = e.target.value === '' ? null : Number(e.target.value);
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      try {
+        await sbUpsert('costs', [{ cc: e.target.dataset.cc, sn: e.target.dataset.sn, cost: v, synced_at: new Date().toISOString() }]);
+        const key = e.target.dataset.cc + ':' + e.target.dataset.sn;
+        const cm = pf.costMap.get(key) || { cc: e.target.dataset.cc, sn: e.target.dataset.sn };
+        cm.cost = v;
+        pf.costMap.set(key, cm);
+        e.target.style.borderColor = '#1a7f37';
+        setTimeout(() => pfRender(), 400);
+      } catch (err) { alert('保存失敗: ' + err.message); }
+    }));
+  }
+
+  function pfRenderSummary(body, orders) {
+    const per = {};
+    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0 });
+    orders.forEach(o => {
+      const rg = regionByCc(o.cc);
+      if (!rg || !per[o.cc]) return;
+      const p = per[o.cc];
+      p.n++;
+      p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
+      p.sales += o.total || 0;
+      const dep = pfDep(o), cost = pfCost(o);
+      if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
+      if (cost != null) { p.costJpy += cost; p.costN++; }
+    });
+    let rowsHtml = '';
+    let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0;
+    REGIONS.forEach(rg => {
+      const p = per[rg.cc];
+      if (!p.n) return;
+      tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
+      rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
+        `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
+        `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
+        `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span></td>` +
+        `<td><b>${fmtJpy(p.depJpy - p.costJpy)}</b></td></tr>`;
+    });
+    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:920px"><table class="pf-table">` +
+      `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利概算</th></tr>` + rowsHtml +
+      `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td></tr></table>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利概算 = 入金額(判明分・手数料控除後) − 仕入額(判明分・円建て)。キャンセル注文は元から含まれていません。</div></div>`;
   }
 
   let syncRunning = false;
