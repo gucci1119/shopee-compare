@@ -954,7 +954,7 @@
       // ブリッジ無しPC: DBの最終同期データを表示
       state.orders.started = true;
       document.getElementById('ord-note').textContent = 'DBの最終同期時点を表示中';
-      sbGet('orders', 'select=*&order=ship_by.asc&limit=1000').then(rows => {
+      sbGetAll('orders', 'select=*&tab=lt.500&order=ship_by.asc').then(rows => {
         const byCc = {};
         rows.forEach(o => {
           if (!byCc[o.cc]) byCc[o.cc] = [];
@@ -1114,6 +1114,22 @@
     return r.json();
   }
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
+  // 1000行制限を超えて全件読む（Rangeヘッダでページング）
+  async function sbGetAll(table, qs) {
+    const key = settings.sbKey || settings.sbSecret;
+    if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
+    const out = [];
+    for (let off = 0; off < 100000; off += 1000) {
+      const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
+        headers: { apikey: key, Authorization: 'Bearer ' + key, Range: `${off}-${off + 999}` } });
+      if (!r.ok && r.status !== 416) throw new Error(`DB読取 HTTP ${r.status}`);
+      if (r.status === 416) break;
+      const rows = await r.json();
+      out.push(...rows);
+      if (rows.length < 1000) break;
+    }
+    return out;
+  }
 
   async function renderDash() {
     const kpis = document.getElementById('dash-kpis');
@@ -1121,9 +1137,9 @@
     try {
       const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
       const [days, orders, income] = await Promise.all([
-        sbGet('daily_stats', `select=*&day=gte.${since}`),
-        sbGet('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&order=ship_by.asc&limit=1000'),
-        sbGet('income', 'select=cc,amount'),
+        sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
+        sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
+        sbGetAll('income', 'select=cc,amount&order=sn'),
       ]);
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
       days.forEach(d => {
@@ -1241,10 +1257,10 @@
         const [y, m] = ym.split('-').map(Number);
         const end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
         const [orders, income, costs, inv] = await Promise.all([
-          sbGet('orders', `select=cc,sn,total,items,order_date,buyer,status&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc&limit=10000`),
-          sbGet('income', 'select=cc,sn,amount&limit=20000'),
-          sbGet('costs', 'select=cc,sn,cost,deposit&limit=20000'),
-          sbGet('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin&shopee_sn=not.is.null&limit=20000'),
+          sbGetAll('orders', `select=cc,sn,total,items,order_date,buyer,status&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
+          sbGetAll('income', 'select=cc,sn,amount'),
+          sbGetAll('costs', 'select=cc,sn,cost,deposit'),
+          sbGetAll('inventory', 'select=item_id,shopee_sn,price,supplier,status,bin&shopee_sn=not.is.null&order=item_id'),
         ]);
         pf.ym = ym;
         pf.orders = orders;
@@ -1461,7 +1477,7 @@
       let doneNew = 0;
       for (const region of targets) {
         try {
-          const known = new Set((await sbGet('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.500&limit=10000`))
+          const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.500&order=order_id`))
             .map(o => String(o.order_id)));
           let list = [];
           for (let p = 1; p <= 60; p++) {
@@ -1536,7 +1552,7 @@
             condition: g(13) != null ? String(g(13)).slice(0, 40) : null,
             status: g(14) != null ? String(g(14)).slice(0, 40) : null,
             bin: g(16) != null ? String(g(16)).slice(0, 40) : null,
-            shopee_sn: g(22) != null ? String(g(22)).trim().slice(0, 30) : null,
+            shopee_sn: (g(22) != null && /^\d{6}[A-Z0-9]{4,}$/.test(String(g(22)).trim())) ? String(g(22)).trim().slice(0, 30) : null,
             purchase_status: g(26) != null ? String(g(26)).slice(0, 30) : null,
             synced_at: new Date().toISOString(),
           });
