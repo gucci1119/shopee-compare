@@ -1271,10 +1271,6 @@
   const stock = { rows: null, imgMap: null, st: '在庫保管中', q: '', bound: false, adding: false };
   const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
   const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
-  // 商品名を正規化して products の画像とマッチさせるキー
-  const stockNameKey = s => String(s || '').toLowerCase()
-    .replace(/\[[^\]]*\]/g, ' ').replace(/(japan(ese)? ver\.?|used|variation)/g, ' ')
-    .replace(/[^a-z0-9぀-ヿ一-鿿]+/g, ' ').trim().slice(0, 40);
   async function renderStock() {
     if (!stock.bound) {
       stock.bound = true;
@@ -1290,18 +1286,20 @@
       body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
       try {
         stock.rows = await sbGetAll('inventory', 'select=*&order=item_id.desc');
-        // 画像: products（Shopee出品・CDN画像）を名前でマッチ
+        // 画像: Shopee注文SN → 注文明細の画像（在庫名は日本語で商品名照合できないため、SN一致が確実）
         stock.imgMap = new Map();
-        const prods = await sbGetAll('products', 'select=name,image').catch(() => []);
-        prods.forEach(p => { const k = stockNameKey(p.name); if (k && p.image && !stock.imgMap.has(k)) stock.imgMap.set(k, p.image); });
+        const orders = await sbGetAll('orders', 'select=sn,items').catch(() => []);
+        orders.forEach(o => {
+          const it = (o.items || [])[0];
+          if (o.sn && it && it.image && !stock.imgMap.has(o.sn)) stock.imgMap.set(o.sn, it.image);
+        });
       } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     }
     stockRender();
   }
   function stockImg(r) {
     if (r.image) return /^https?:/.test(r.image) ? r.image : IMG_CDN + r.image;
-    const k = stockNameKey(r.name);
-    const hit = k && stock.imgMap && stock.imgMap.get(k);
+    const hit = r.shopee_sn && stock.imgMap && stock.imgMap.get(r.shopee_sn);
     return hit ? IMG_CDN + hit : null;
   }
   async function stockSave(itemId, patch) {
