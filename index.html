@@ -141,6 +141,10 @@
   .tool-row select { padding: 6px 8px; font-size: 13px; border: 1px solid #ddd; border-radius: 6px; }
   .smd-btn.primary { background: #ee4d2d; border-color: #ee4d2d; color: #fff; font-weight: 700; }
   .tool-status { white-space: pre-wrap; font-size: 12px; margin-top: 10px; color: #333; line-height: 1.7; }
+  /* 出品コンポーザー */
+  .lc { display: block; font-size: 11.5px; color: #888; margin-bottom: 3px; }
+  .li { width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+  .lwarn { color: #d93025; font-size: 11px; font-weight: 700; margin-left: 6px; }
   /* 設定モーダル */
   #smd-modal { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.4); display: none;
     align-items: center; justify-content: center; }
@@ -166,6 +170,7 @@
       <button data-p="rank">📊 リサーチ</button>
       <button data-p="orders">📦 注文</button>
       <button data-p="stock">🏷 在庫</button>
+      <button data-p="list">🆕 出品</button>
       <button data-p="profit">💹 利益</button>
       <button data-p="tools">💰 転記</button>
     </nav>
@@ -240,6 +245,12 @@
       <span class="smd-dim" id="stock-note"></span>
     </div>
     <div id="stock-body" style="padding:12px 20px"></div>
+  </div>
+
+  <!-- 出品コンポーザー -->
+  <div id="page-list" style="display:none">
+    <div class="smd-pagehead">🆕 出品コンポーザー <span class="smd-dim" style="font-weight:400;font-size:12px">（内容を作成→各国のShopee出品ページへ転記。発行だけ手動）</span></div>
+    <div id="list-body" style="padding:12px 20px;max-width:1150px"></div>
   </div>
 
   <!-- 売れ行きページ -->
@@ -354,6 +365,21 @@
     <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
     <label>利益管理表スプレッドシートID（⚠月替わりで差し替え）</label>
     <input type="text" id="set-sheetid" placeholder="1MCiDFf...">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">🆕 出品: タイトルテンプレ（{name}{hardware}{jpseries}{variation}）</label>
+    <input type="text" id="set-listtitle" placeholder="[Used] {name} {hardware} Japan Ver. {jpseries}">
+    <label>バリエーション名テンプレ（{hardware}{variation}）</label>
+    <input type="text" id="set-listvar" placeholder="{hardware} {variation}">
+    <label>item specifics プリセット（1行1項目 Key=Value）</label>
+    <textarea id="set-listspecs" rows="3" placeholder="Brand=No Brand&#10;Region of Origin=Japan"></textarea>
+    <label>説明テンプレ（{title}{name} が使える）</label>
+    <textarea id="set-listdesc" rows="3" placeholder="{title}&#10;&#10;- Ships from Japan..."></textarea>
+    <label>価格式: 係数 / 手数料% / 送料(円) / 丸め</label>
+    <div class="row" style="gap:6px">
+      <input type="number" id="set-pcoef" step="0.01" style="width:80px" title="係数（仕入×係数）">
+      <input type="number" id="set-pfee" step="0.1" style="width:80px" title="Shopee手数料%">
+      <input type="number" id="set-pship" step="10" style="width:90px" title="送料(円)">
+      <input type="number" id="set-pround" step="1" style="width:80px" title="丸め単位(現地通貨)">
+    </div>
     <div class="note">・ライブ取得（7か国のShopeeから直接）はTampermonkeyのブリッジuserscriptが入ったPCでのみ動きます<br>
       ・ブリッジ無しのPCは、保存済みスナップショットを表示します</div>
     <div class="row"><span class="test" id="set-test"></span>
@@ -382,8 +408,16 @@
   const IMG_CDN = 'https://down-sg.img.susercontent.com/';
 
   // ---------------- 設定（localStorage） ----------------
-  const settings = Object.assign({ gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '' },
-    JSON.parse(localStorage.getItem('smdSettings') || '{}'));
+  const settings = Object.assign({
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '',
+    // 出品コンポーザー用
+    listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
+    listVarTpl: '{hardware} {variation}',
+    listSpecs: 'Brand=No Brand\nRegion of Origin=Japan\nCondition=Used',
+    listDescTpl: '{title}\n\n- Ships from Japan with tracking\n- Pre-owned, inspected before shipping\n- Fast & secure packaging',
+    // 価格式パラメータ（フェーズ2で使用・設定でカスタム可）
+    priceCoef: 1.8, priceFeePct: 12, priceShipJpy: 1200, priceRound: 10,
+  }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
   // ---------------- ブリッジ（Tampermonkey userscript との postMessage 通信） ----------------
@@ -646,8 +680,10 @@
     document.getElementById('page-orders').style.display = p === 'orders' ? '' : 'none';
     document.getElementById('page-tools').style.display = p === 'tools' ? '' : 'none';
     document.getElementById('page-stock').style.display = p === 'stock' ? '' : 'none';
+    document.getElementById('page-list').style.display = p === 'list' ? '' : 'none';
     if (p === 'dash') { renderDash(); renderTrend(); }
     if (p === 'stock') renderStock();
+    if (p === 'list') renderList();
     if (p === 'profit') renderProfit();
     if (p === 'orders' && !state.orders.started) loadOrders();
   }
@@ -1286,6 +1322,183 @@
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</td>` +
         '</tr>').join('') +
       `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
+  }
+
+  // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
+  const listState = {
+    built: false,
+    name: '', hardware: '', jpseries: '',
+    images: '', category: '',
+    sellJpy: 0, costJpy: 0,
+    varTier: '', variations: [], // [{opt, jpy, stock}]
+    descExtra: '',
+  };
+  const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
+  const roundLocal = (v, unit) => unit > 1 ? Math.round(v / unit) * unit : Math.round(v);
+  // 価格式: 仕入(円) → 販売(円)
+  function priceFromCost(costJpy) {
+    const fee = Math.max(0, Math.min(95, settings.priceFeePct)) / 100;
+    return Math.round((costJpy * settings.priceCoef + settings.priceShipJpy) / (1 - fee));
+  }
+  function fillTpl(tpl, map) {
+    return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (map[k] != null ? map[k] : '')).replace(/\s{2,}/g, ' ').trim();
+  }
+  function listTitle(variation) {
+    return fillTpl(settings.listTitleTpl, { name: listState.name, hardware: listState.hardware, jpseries: listState.jpseries, variation: variation || '' });
+  }
+  // TW 60文字短縮（ナレッジのパス: Game削除→Japanese Ver→Japan Ver→装飾語）
+  function shortenTW(t) {
+    let s = t;
+    if (s.length <= 60) return s;
+    s = s.replace(/\bGame\b/gi, '').replace(/\s{2,}/g, ' ').trim();
+    if (s.length <= 60) return s;
+    s = s.replace(/Japanese Ver\.?/gi, 'Japan Ver.');
+    if (s.length <= 60) return s;
+    return s.slice(0, 60).trim();
+  }
+
+  function renderList() {
+    const body = document.getElementById('list-body');
+    if (!listState.built) {
+      listState.built = true;
+      body.innerHTML = `
+        <div class="tool-card" style="max-width:none">
+          <h3>1. 商品情報</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div><label class="lc">商品名（{name}）</label><input class="li" id="li-name" placeholder="Super Mario Bros"></div>
+            <div><label class="lc">ハード（{hardware}）</label><input class="li" id="li-hw" placeholder="Nintendo Switch"></div>
+            <div><label class="lc">日本語シリーズ（{jpseries}）</label><input class="li" id="li-jp" placeholder="スーパーマリオ"></div>
+          </div>
+          <label class="lc" style="margin-top:8px">カテゴリ（Shopeeのカテゴリパス。転記時にコピー用）</label>
+          <input class="li" id="li-cat" placeholder="Hobbies & Collections > Video Games > ...">
+          <label class="lc" style="margin-top:8px">画像（1行1URL。ShopeeのCDNハッシュ or フルURL。※アップロードは手動）</label>
+          <textarea class="li" id="li-img" rows="2" placeholder="down-sg.img.susercontent.com/xxxx または hash"></textarea>
+          <div id="li-imgprev" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
+        </div>
+
+        <div class="tool-card" style="max-width:none">
+          <h3>2. 価格</h3>
+          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div><label class="lc">仕入値（円・任意）</label><input class="li" id="li-cost" type="number" style="width:120px" placeholder="1200"></div>
+            <button class="smd-btn" id="li-calc" title="設定の価格式で販売額を計算">式で計算 →</button>
+            <div><label class="lc">販売額（円）</label><input class="li" id="li-sell" type="number" style="width:120px" placeholder="3000"></div>
+            <span class="smd-dim" style="font-size:11px">式: (仕入×${settings.priceCoef} + 送料${settings.priceShipJpy}) ÷ (1−手数料${settings.priceFeePct}%)。係数等は⚙️設定</span>
+          </div>
+        </div>
+
+        <div class="tool-card" style="max-width:none">
+          <h3>3. バリエーション <span class="smd-dim" style="font-weight:400;font-size:12px">（無ければ空のままで単品出品）</span></h3>
+          <label class="lc">バリエーション種別名（例: Hardware, Type）</label>
+          <input class="li" id="li-vtier" style="max-width:260px" placeholder="Hardware">
+          <div id="li-vars" style="margin-top:8px"></div>
+          <button class="smd-btn" id="li-vadd" style="margin-top:6px">＋ バリエーション追加</button>
+        </div>
+
+        <div class="tool-card" style="max-width:none">
+          <h3>4. 説明・item specifics</h3>
+          <label class="lc">説明に追記（テンプレは⚙️設定。{title}{name}が使える）</label>
+          <textarea class="li" id="li-desc" rows="2" placeholder="この商品固有の説明を追記"></textarea>
+        </div>
+
+        <div id="list-out"></div>
+      `;
+      // 入力→state同期（テキストはフォーカス保持のため部分更新）
+      const bind = (id, key) => { const el = document.getElementById(id); el.addEventListener('input', () => { listState[key] = el.value; listRefresh(); }); };
+      bind('li-name', 'name'); bind('li-hw', 'hardware'); bind('li-jp', 'jpseries');
+      bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier');
+      document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
+      document.getElementById('li-sell').addEventListener('input', e => { listState.sellJpy = Number(e.target.value) || 0; listRefresh(); });
+      document.getElementById('li-cost').addEventListener('input', e => { listState.costJpy = Number(e.target.value) || 0; });
+      document.getElementById('li-calc').addEventListener('click', () => {
+        if (!listState.costJpy) { alert('仕入値（円）を入力してください'); return; }
+        listState.sellJpy = priceFromCost(listState.costJpy);
+        document.getElementById('li-sell').value = listState.sellJpy;
+        listRefresh();
+      });
+      document.getElementById('li-vadd').addEventListener('click', () => {
+        listState.variations.push({ opt: '', jpy: listState.sellJpy || 0, stock: 1 });
+        listVarsRender();
+      });
+      listVarsRender();
+    }
+    listImgPrev();
+    listRefresh();
+  }
+
+  function listImgPrev() {
+    const wrap = document.getElementById('li-imgprev');
+    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean)
+      .map(s => /^https?:/.test(s) ? s : IMG_CDN + s);
+    wrap.innerHTML = urls.slice(0, 9).map(u => `<img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px" loading="lazy">`).join('');
+  }
+
+  function listVarsRender() {
+    const wrap = document.getElementById('li-vars');
+    if (!listState.variations.length) { wrap.innerHTML = '<span class="smd-dim" style="font-size:12px">バリエーション未設定（単品）</span>'; listRefresh(); return; }
+    wrap.innerHTML = listState.variations.map((v, i) =>
+      `<div class="row" style="gap:8px;margin-bottom:5px;align-items:center">
+        <input class="li vopt" data-i="${i}" style="flex:1" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
+        <input class="li vjpy" data-i="${i}" type="number" style="width:110px" placeholder="販売円" value="${v.jpy || ''}">
+        <input class="li vstk" data-i="${i}" type="number" style="width:70px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
+        <button class="smd-btn vdel" data-i="${i}" title="削除">✕</button>
+      </div>`).join('');
+    wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; listRefresh(); }));
+    wrap.querySelectorAll('.vjpy').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].jpy = Number(e.target.value) || 0; listRefresh(); }));
+    wrap.querySelectorAll('.vstk').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].stock = Number(e.target.value) || 0; listRefresh(); }));
+    wrap.querySelectorAll('.vdel').forEach(el => el.addEventListener('click', e => { listState.variations.splice(+e.target.dataset.i, 1); listVarsRender(); }));
+    listRefresh();
+  }
+
+  // 出力パネル: 各国の転記内容＋制約チェック
+  function listRefresh() {
+    const out = document.getElementById('list-out');
+    if (!out) return;
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const hasVar = listState.variations.length > 0;
+    const rows = hasVar ? listState.variations : [{ opt: '', jpy: listState.sellJpy, stock: 1 }];
+    const specs = settings.listSpecs;
+    out.innerHTML = `<div class="tool-card" style="max-width:none"><h3>5. 各国へ転記</h3>` +
+      `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">各項目の「コピー」で内容をコピー→「出品ページを開く」でShopeeに貼り付け（画像アップロードと最終「発行」は手動）。⚠は各国制約違反。</div>` +
+      targets.map(rg => {
+        const baseTitle = listTitle('');
+        const title = rg.cc === 'TW' ? shortenTW(baseTitle) : baseTitle;
+        const titleWarn = (rg.cc === 'TW' && baseTitle.length > 60) ? `<span class="lwarn">TW60字→短縮(${title.length})</span>` : (title.length > 100 ? `<span class="lwarn">100字超</span>` : '');
+        // 価格（現地）
+        const priced = rows.map(v => {
+          const local = roundLocal(JPY_TO_LOCAL(v.jpy || 0, rg), settings.priceRound);
+          return { opt: v.opt, local, stock: v.stock, jpy: v.jpy };
+        });
+        const warns = [];
+        if (rg.cc === 'VN' && priced.some(p => p.local > 909090)) warns.push('VN上限909,090₫超のバリエーションあり→分割必要');
+        if (rg.cc === 'BR' && priced.length > 1) {
+          const vals = priced.map(p => p.local).filter(x => x > 0);
+          if (vals.length && Math.max(...vals) / Math.min(...vals) > 4) warns.push('BRバリエーション価格比4倍超');
+        }
+        const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
+        const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
+        const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
+        const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
+        return `<div style="border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b style="color:${rg.color}">${rg.cc}</b>
+            <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">Shopee出品ページを開く ↗</a>
+          </div>
+          <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn}<div style="word-break:break-word">${esc(title)} <span class="smd-dim">(${title.length}字)</span></div></div>
+          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別）' : ''}</b><pre style="margin:2px 0;white-space:pre-wrap;font-family:inherit">${esc(priceLines)}</pre></div>
+          ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+            ${cp('タイトル', title)}
+            ${cp('価格', priceLines)}
+            ${cp('説明', desc)}
+            ${cp('item specifics', specs)}
+            ${listState.category ? cp('カテゴリ', listState.category) : ''}
+          </div>
+        </div>`;
+      }).join('') + `</div>`;
+    out.querySelectorAll('.licopy').forEach(b => b.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(decodeURIComponent(b.dataset.t)); const o = b.textContent; b.textContent = '✅ コピー済'; setTimeout(() => b.textContent = o, 1200); }
+      catch (_) { alert('コピー失敗（ブラウザ権限）'); }
+    }));
   }
 
   async function renderTrend() {
@@ -2234,6 +2447,14 @@
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
     document.getElementById('set-sheetid').value = settings.sheetId;
+    document.getElementById('set-listtitle').value = settings.listTitleTpl;
+    document.getElementById('set-listvar').value = settings.listVarTpl;
+    document.getElementById('set-listspecs').value = settings.listSpecs;
+    document.getElementById('set-listdesc').value = settings.listDescTpl;
+    document.getElementById('set-pcoef').value = settings.priceCoef;
+    document.getElementById('set-pfee').value = settings.priceFeePct;
+    document.getElementById('set-pship').value = settings.priceShipJpy;
+    document.getElementById('set-pround').value = settings.priceRound;
     document.getElementById('set-test').textContent = '';
     modal.classList.add('open');
   });
@@ -2247,8 +2468,17 @@
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
     settings.sheetId = document.getElementById('set-sheetid').value.trim();
+    settings.listTitleTpl = document.getElementById('set-listtitle').value;
+    settings.listVarTpl = document.getElementById('set-listvar').value;
+    settings.listSpecs = document.getElementById('set-listspecs').value;
+    settings.listDescTpl = document.getElementById('set-listdesc').value;
+    settings.priceCoef = Number(document.getElementById('set-pcoef').value) || 1.8;
+    settings.priceFeePct = Number(document.getElementById('set-pfee').value) || 0;
+    settings.priceShipJpy = Number(document.getElementById('set-pship').value) || 0;
+    settings.priceRound = Number(document.getElementById('set-pround').value) || 1;
     saveSettings();
     modal.classList.remove('open');
+    if (state.page === 'list') renderList();
     if (state.mode !== 'live') load();
   });
   document.getElementById('set-testbtn').addEventListener('click', async () => {
