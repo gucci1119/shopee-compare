@@ -196,6 +196,14 @@
     <div class="smd-toolbar"><b style="color:#ee4d2d">💰 利益管理表への転記</b>
       <span class="smd-dim">対象国は📊売れ行きタブの国チェックと共通 / GASの接続情報は⚙️設定</span></div>
     <div class="tool-card">
+      <h3>☁️ DB同期（Supabase）— 注文・入金・商品実績・日次売上を蓄積</h3>
+      <div class="tool-row">
+        <button class="smd-btn primary" id="sync-run">▶ 今すぐ同期</button>
+        <label style="font-size:13px"><input type="checkbox" id="sync-auto"> 自動同期（30分ごと・タブを開いている間）</label>
+      </div>
+      <div class="tool-status" id="sync-status"></div>
+    </div>
+    <div class="tool-card">
       <h3>💵 入金予定額 → F/G列（My Income Pending）</h3>
       <div class="tool-row">
         モード
@@ -239,6 +247,10 @@
     <input type="text" id="set-depurl" placeholder="https://script.google.com/macros/s/xxxx/exec">
     <label>転記GASトークン</label>
     <input type="text" id="set-deptoken" placeholder="token">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">Supabase publishableキー（読み取り用）</label>
+    <input type="text" id="set-sbkey" placeholder="sb_publishable_...">
+    <label>Supabase secretキー（書き込み用・同期するPCのみ）</label>
+    <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
     <div class="note">・ライブ取得（7か国のShopeeから直接）はTampermonkeyのブリッジuserscriptが入ったPCでのみ動きます<br>
       ・ブリッジ無しのPCは、保存済みスナップショットを表示します</div>
     <div class="row"><span class="test" id="set-test"></span>
@@ -267,7 +279,7 @@
   const IMG_CDN = 'https://down-sg.img.susercontent.com/';
 
   // ---------------- 設定（localStorage） ----------------
-  const settings = Object.assign({ gasUrl: '', token: '', auto: true, depUrl: '', depToken: '' },
+  const settings = Object.assign({ gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false },
     JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -975,6 +987,129 @@
     ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); renderOrders(); }, 200);
   });
 
+  // ---------------- Supabase（DB蓄積） ----------------
+  const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
+  async function sbUpsert(table, rows) {
+    if (!rows.length) return 0;
+    const key = settings.sbSecret;
+    for (let i = 0; i < rows.length; i += 500) {
+      const r = await fetch(`${SB_URL}/rest/v1/${table}`, {
+        method: 'POST',
+        headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(rows.slice(i, i + 500)),
+      });
+      if (!r.ok) throw new Error(`${table}保存 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+    }
+    return rows.length;
+  }
+  const snToDate = sn => {
+    const m = /^(\d{2})(\d{2})(\d{2})/.exec(sn || '');
+    return m ? `20${m[1]}-${m[2]}-${m[3]}` : null;
+  };
+  const regionDate = (region, dayOffset) => {
+    const ms = (nowSec() + region.tz * 3600 + (dayOffset || 0) * 86400) * 1000;
+    return new Date(ms).toISOString().slice(0, 10);
+  };
+
+  let syncRunning = false;
+  async function syncAll(st) {
+    if (syncRunning) return;
+    if (state.mode !== 'live') { st('❌ ライブモード（ブリッジ入りPC）でのみ同期できます'); return; }
+    if (!settings.sbSecret) { st('❌ ⚙️設定でSupabase secretキーを入力してください'); return; }
+    syncRunning = true;
+    const log = [];
+    const say = m => { log.push(m); st(log.join('\n')); };
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    try {
+      // 1) 注文（未発送・発送中）
+      say('📦 注文データを取得中...');
+      if (!state.orders.started) loadOrders();
+      await waitOrdersLoaded({ textContent: '' });
+      const orderRows = [];
+      targets.forEach(region => {
+        const oc = state.orders.perCountry.get(region.cc);
+        if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push({
+          cc: region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
+          tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null,
+          items: o.items, order_date: snToDate(o.sn), synced_at: new Date().toISOString(),
+        }));
+      });
+      await sbUpsert('orders', orderRows);
+      log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
+
+      // 2) 入金予定額
+      say('💵 入金予定額を取得中...');
+      const incomeRows = [];
+      for (const region of targets) {
+        try {
+          const map = await fetchPendingCountry(region);
+          Object.entries(map).forEach(([sn, amount]) => incomeRows.push({
+            cc: region.cc, sn, amount, category: 4, synced_at: new Date().toISOString() }));
+        } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
+      }
+      await sbUpsert('income', incomeRows);
+      say(`💵 入金 ${incomeRows.length}件 保存 ✅`);
+
+      // 3) 商品30日実績
+      say('📊 商品実績(30日)を取得中...');
+      const prodRows = [];
+      for (const region of targets) {
+        let items = null;
+        const pc = state.perCountry.get(region.cc);
+        if (state.periodKey === 'past30days' && pc && pc.status === 'ok') items = pc.items;
+        else { try { items = (await fetchCountryLive(region, 'past30days', () => {})).items; } catch (e) { say(`　${region.cc} 実績: ⚠ ${e.message}`); } }
+        if (items) prodRows.push(...items.filter(it => it.pu || it.ps).map(it => ({
+          cc: region.cc, item_id: it.id, name: it.name, image: it.image, models: it.md,
+          units30: it.pu, sales30: it.ps, synced_at: new Date().toISOString() })));
+      }
+      await sbUpsert('products', prodRows);
+      say(`📊 商品実績 ${prodRows.length}件 保存 ✅`);
+
+      // 4) 日次売上（昨日＋今日）
+      say('📈 日次売上を取得中...');
+      const dayRows = [];
+      for (const region of targets) {
+        for (const [key, off] of [['yesterday', -1], ['real_time', 0]]) {
+          try {
+            const { items } = await fetchCountryLive(region, key, () => {});
+            dayRows.push({
+              cc: region.cc, day: regionDate(region, off),
+              units: items.reduce((s, i) => s + i.pu, 0),
+              sales: items.reduce((s, i) => s + i.ps, 0),
+              orders: items.reduce((s, i) => s + i.po, 0),
+              synced_at: new Date().toISOString(),
+            });
+          } catch (e) { say(`　${region.cc} ${key}: ⚠ ${e.message.slice(0, 30)}`); }
+        }
+      }
+      await sbUpsert('daily_stats', dayRows);
+      say(`📈 日次売上 ${dayRows.length}行 保存 ✅`);
+      say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`);
+      localStorage.setItem('smdLastSync', String(Date.now()));
+    } catch (e) {
+      say(`❌ ${e.message}`);
+    }
+    syncRunning = false;
+  }
+
+  document.getElementById('sync-run').addEventListener('click', () =>
+    syncAll(t => { document.getElementById('sync-status').textContent = t; }));
+  const syncAutoCb = document.getElementById('sync-auto');
+  syncAutoCb.checked = settings.syncAuto;
+  syncAutoCb.addEventListener('change', () => { settings.syncAuto = syncAutoCb.checked; saveSettings(); });
+  setInterval(() => {
+    if (settings.syncAuto && state.mode === 'live' && !syncRunning) {
+      syncAll(t => { const el = document.getElementById('sync-status'); if (el) el.textContent = t; });
+    }
+  }, 30 * 60 * 1000);
+  // 自動同期ONなら起動1分後に1回実行
+  setTimeout(() => {
+    if (settings.syncAuto && state.mode === 'live' && !syncRunning) {
+      syncAll(t => { const el = document.getElementById('sync-status'); if (el) el.textContent = t; });
+    }
+  }, 60 * 1000);
+
   // ---------------- 転記: 入金予定額（My Income Pending → F/G列） ----------------
   async function fetchPendingCountry(region) {
     const map = {};
@@ -1140,6 +1275,8 @@
     document.getElementById('set-auto').checked = settings.auto;
     document.getElementById('set-depurl').value = settings.depUrl;
     document.getElementById('set-deptoken').value = settings.depToken;
+    document.getElementById('set-sbkey').value = settings.sbKey;
+    document.getElementById('set-sbsecret').value = settings.sbSecret;
     document.getElementById('set-test').textContent = '';
     modal.classList.add('open');
   });
@@ -1150,6 +1287,8 @@
     settings.auto = document.getElementById('set-auto').checked;
     settings.depUrl = document.getElementById('set-depurl').value.trim().replace(/\/$/, '');
     settings.depToken = document.getElementById('set-deptoken').value.trim();
+    settings.sbKey = document.getElementById('set-sbkey').value.trim();
+    settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
     saveSettings();
     modal.classList.remove('open');
     if (state.mode !== 'live') load();
