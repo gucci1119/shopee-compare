@@ -20,7 +20,7 @@
   #smd-sidefoot { margin-top: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
   #smd-main { flex: 1; min-width: 0; padding-bottom: 40px; }
   .smd-pagehead { font-size: 16px; font-weight: 700; padding: 16px 20px 0; }
-  #dash-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; padding: 12px 20px 0; }
+  #dash-kpis, #stock-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; padding: 12px 20px 0; }
   .kpi { background: #fff; border-radius: 8px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
   .kpi .t { font-size: 12px; color: #888; }
   .kpi .v { font-size: 22px; font-weight: 800; margin-top: 2px; }
@@ -166,6 +166,7 @@
       <button data-p="rank">📊 リサーチ</button>
       <button data-p="orders">📦 注文</button>
       <button data-p="restock">🛒 要仕入れ</button>
+      <button data-p="stock">🏷 在庫</button>
       <button data-p="trend">📈 実績</button>
       <button data-p="profit">💹 利益</button>
       <button data-p="tools">💰 転記</button>
@@ -219,6 +220,23 @@
       <span class="smd-dim" id="pf-note"></span>
     </div>
     <div id="pf-body" style="padding:12px 20px"></div>
+  </div>
+
+  <!-- 在庫 -->
+  <div id="page-stock" style="display:none">
+    <div class="smd-pagehead">🏷 在庫管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（InventoryItemシートのミラー・同期で更新）</span></div>
+    <div id="stock-kpis"></div>
+    <div class="smd-toolbar">
+      <select id="stock-st">
+        <option value="在庫保管中" selected>在庫保管中</option>
+        <option value="入庫待ち">入庫待ち</option>
+        <option value="販売済み">販売済み</option>
+        <option value="">全て</option>
+      </select>
+      <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号">
+      <span class="smd-dim" id="stock-note"></span>
+    </div>
+    <div id="stock-body" style="padding:12px 20px"></div>
   </div>
 
   <!-- 実績 -->
@@ -640,8 +658,10 @@
     document.getElementById('page-orders').style.display = p === 'orders' ? '' : 'none';
     document.getElementById('page-tools').style.display = p === 'tools' ? '' : 'none';
     document.getElementById('page-stub').style.display = p === 'restock' ? '' : 'none';
+    document.getElementById('page-stock').style.display = p === 'stock' ? '' : 'none';
     if (p === 'restock') document.getElementById('stub-msg').textContent = '🛒 要仕入れ — 準備中（月別実績×現在庫で仕入れリストを自動生成予定）';
     if (p === 'dash') renderDash();
+    if (p === 'stock') renderStock();
     if (p === 'trend') renderTrend();
     if (p === 'profit') renderProfit();
     if (p === 'orders' && !state.orders.started) loadOrders();
@@ -1217,6 +1237,70 @@
     } catch (e) {
       kpis.innerHTML = `<div class="kpi"><div class="t">エラー</div><div class="s">${esc(e.message)}</div></div>`;
     }
+  }
+
+  // ---------------- 在庫（InventoryItemミラーの閲覧） ----------------
+  const stock = { rows: null, st: '在庫保管中', q: '', bound: false };
+  async function renderStock() {
+    if (!stock.bound) {
+      stock.bound = true;
+      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stockRender(); });
+      let t;
+      document.getElementById('stock-search').addEventListener('input', e => {
+        clearTimeout(t);
+        t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stockRender(); }, 250);
+      });
+    }
+    const body = document.getElementById('stock-body');
+    if (!stock.rows) {
+      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      try { stock.rows = await sbGetAll('inventory', 'select=*&order=item_id.desc'); }
+      catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    }
+    stockRender();
+  }
+  function stockChip(s) {
+    if (s === '在庫保管中') return '<span style="color:#1a7f37;font-weight:700">在庫保管中</span>';
+    if (s === '入庫待ち') return '<span style="color:#e8930c;font-weight:700">入庫待ち</span>';
+    if (s === '販売済み') return '<span class="smd-dim">販売済み</span>';
+    return esc(s || '');
+  }
+  function stockRender() {
+    const body = document.getElementById('stock-body');
+    const all = stock.rows || [];
+    const inStock = all.filter(r => r.status === '在庫保管中');
+    const waiting = all.filter(r => r.status === '入庫待ち');
+    const stockVal = inStock.reduce((s, r) => s + (r.price || 0), 0);
+    document.getElementById('stock-kpis').innerHTML = [
+      ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal)],
+      ['入庫待ち', waiting.length + '点', '仕入元から到着待ち'],
+      ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計'],
+      ['全登録', all.length + '点', 'InventoryItem'],
+    ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+    let rows = all;
+    if (stock.st) rows = rows.filter(r => r.status === stock.st);
+    if (stock.q) rows = rows.filter(r =>
+      ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
+       (r.supplier || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
+    document.getElementById('stock-note').textContent = `${rows.length}件`;
+    const shown = rows.slice(0, 500);
+    body.innerHTML = `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:980px">` +
+      '<tr><th>ItemID</th><th>仕入日</th><th>商品名（Shopee出品）</th><th>SKU</th><th>仕入元</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
+      shown.map(r => '<tr>' +
+        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${esc(String(r.purchase_date || '').slice(0, 10))}</td>` +
+        `<td style="word-break:break-word">${esc(r.name || '')}${r.name_supplier ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
+        `<td style="font-size:11px;word-break:break-all">${esc(r.sku || '')}</td>` +
+        `<td style="font-size:11px">${esc(r.supplier || '')}</td>` +
+        `<td style="white-space:nowrap">${r.price != null ? '¥' + Number(r.price).toLocaleString() : ''}</td>` +
+        `<td style="font-size:11px">${esc(r.condition || '')}</td>` +
+        `<td style="white-space:nowrap">${stockChip(r.status)}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${esc(r.purchase_status || '')}</td>` +
+        `<td style="font-size:11px">${esc(r.bin || '')}</td>` +
+        `<td style="font-size:11px;word-break:break-all">${esc(r.shopee_sn || '')}</td>` +
+        `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</td>` +
+        '</tr>').join('') +
+      `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
   }
 
   async function renderTrend() {
