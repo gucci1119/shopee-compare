@@ -1315,7 +1315,7 @@
     let html = `<div class="tool-card" style="margin:0"><table class="pf-table"><tr>
       <th>日付</th><th>国</th><th></th><th>商品 / バリエーション</th><th>数量</th>
       <th>販売額</th><th>入金額</th><th>仕入額(円・編集可)</th><th>粗利</th><th>状態</th></tr>`;
-    let tSales = 0, tDep = 0, tCost = 0, shown = 0;
+    let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0;
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg) return;
@@ -1328,6 +1328,7 @@
       if (dep != null) tDep += dep * rg.rateJpy;
       if (cost != null) tCost += cost;
       const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
+      if (profit != null) { pairProfit += profit; pairN++; }
       const items = (o.items && o.items.length) ? o.items : [{}];
       items.forEach((it, idx) => {
         shown++;
@@ -1352,8 +1353,9 @@
           `<td class="smd-dim" style="font-size:11px">${first ? esc(o.status || '') : ''}</td></tr>`;
       });
     });
-    html += `<tr class="pf-total"><td colspan="5">合計（フィルタ後）</td><td>${fmtJpy(tSales)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td><td></td></tr></table>` +
-      `<div class="smd-dim" style="font-size:11px;margin-top:8px">仕入額はここで直接入力するとDBに保存されます（円建て・注文単位）。入金額はShopee手数料控除後・自動取得。</div></div>`;
+    html += `<tr class="pf-total"><td colspan="5">合計（フィルタ後）</td><td>${fmtJpy(tSales)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td>` +
+      `<td><b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件(両方判明)</span></td><td></td></tr></table>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px">粗利は入金額・仕入額の両方が判明している注文のみ合算。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。ここで入力するとDBに保存されます。</div></div>`;
     body.innerHTML = html;
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
       const v = e.target.value === '' ? null : Number(e.target.value);
@@ -1372,7 +1374,7 @@
 
   function pfRenderSummary(body, orders) {
     const per = {};
-    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0 });
+    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0, pair: 0, pairN: 0 });
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg || !per[o.cc]) return;
@@ -1383,23 +1385,25 @@
       const dep = pfDep(o), cost = pfCost(o);
       if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
       if (cost != null) { p.costJpy += cost; p.costN++; }
+      if (dep != null && cost != null) { p.pair += dep * rg.rateJpy - cost; p.pairN++; }
     });
     let rowsHtml = '';
-    let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0;
+    let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0;
     REGIONS.forEach(rg => {
       const p = per[rg.cc];
       if (!p.n) return;
       tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
+      tPair += p.pair; tPairN += p.pairN;
       rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
         `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
         `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
         `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span></td>` +
-        `<td><b>${fmtJpy(p.depJpy - p.costJpy)}</b></td></tr>`;
+        `<td><b style="color:${p.pair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(p.pair)}</b><br><span class="smd-dim">${p.pairN}件(両方判明)</span></td></tr>`;
     });
-    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:920px"><table class="pf-table">` +
-      `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利概算</th></tr>` + rowsHtml +
-      `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td>${fmtJpy(tDep - tCost)}</td></tr></table>` +
-      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利概算 = 入金額(判明分・手数料控除後) − 仕入額(判明分・円建て)。キャンセル注文は元から含まれていません。</div></div>`;
+    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:960px"><table class="pf-table">` +
+      `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利(両方判明分)</th></tr>` + rowsHtml +
+      `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td style="color:${tPair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(tPair)}<br><span class="smd-dim" style="font-weight:400">${tPairN}件</span></td></tr></table>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル注文は元から含まれていません。</div></div>`;
   }
 
   let syncRunning = false;
