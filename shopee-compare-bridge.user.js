@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.0.2
+// @version      1.0.3
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GASへ中継する。
 // @match        https://gucci1119.github.io/shopee-compare/*
 // @match        https://*.github.io/shopee-compare/*
@@ -25,7 +25,7 @@
   'use strict';
 
   // 動作確認用マーカー（サイト側やデバッグから見える）
-  try { document.documentElement.setAttribute('data-smd-bridge', '1.0.2'); } catch (_) {}
+  try { document.documentElement.setAttribute('data-smd-bridge', '1.0.3'); } catch (_) {}
 
   // 中継を許可する宛先（サイト側が任意のURLを投げても、ここに無いホストは拒否する）
   const ALLOWED_HOSTS = [
@@ -41,7 +41,7 @@
     if (!d || !d.__smd || e.origin !== location.origin) return;
 
     if (d.__smd === 'ping') {
-      window.postMessage({ __smd: 'pong', v: '1.0.2' }, '*');
+      window.postMessage({ __smd: 'pong', v: '1.0.3' }, '*');
       return;
     }
     if (d.__smd !== 'req') return;
@@ -57,6 +57,7 @@
       url: d.url,
       data: d.data,
       headers: d.method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+      fetch: true, // XHR実装はハングした接続がプールを塞ぐことがある→fetchベースに
       timeout: 30000,
       onload: r => window.postMessage({
         __smd: 'res', id: d.id, ok: r.status >= 200 && r.status < 300,
