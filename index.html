@@ -1427,7 +1427,8 @@
     { k: 'sku', l: 'SKU', w: 105 },
     { k: 'inv', l: '在庫No', w: 200 },
     { k: 'sales', l: '販売額', w: 92 },
-    { k: 'deposit', l: '入金額', w: 92 },
+    { k: 'dep_prov', l: '入金額(暫定)', w: 92 },
+    { k: 'dep_fix', l: '入金額(確定)', w: 92 },
     { k: 'cost', l: '仕入額(円)', w: 106 },
     { k: 'profit', l: '粗利', w: 78 },
     { k: 'rate', l: '率', w: 52 },
@@ -1437,6 +1438,10 @@
   ];
   let pfRsActive = false; // 列幅ドラッグ中はソート/列移動を抑止
   const pfColPref = Object.assign({ hidden: [], widths: {}, order: [] }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
+  // 旧「入金額」1列の保存設定 → 暫定/確定の2列へ引き継ぎ
+  if (pfColPref.order.includes('deposit')) pfColPref.order.splice(pfColPref.order.indexOf('deposit'), 1, 'dep_prov', 'dep_fix');
+  if (pfColPref.hidden.includes('deposit')) pfColPref.hidden.splice(pfColPref.hidden.indexOf('deposit'), 1, 'dep_prov', 'dep_fix');
+  if (pfColPref.widths.deposit) { pfColPref.widths.dep_prov = pfColPref.widths.dep_prov || pfColPref.widths.deposit; pfColPref.widths.dep_fix = pfColPref.widths.dep_fix || pfColPref.widths.deposit; }
   const savePfCols = () => localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
   const pfColOrder = () => {
     const def = PF_COLS.map(c => c.k);
@@ -1524,7 +1529,8 @@
         case 'order': return o.sn || '';
         case 'buyer': return (o.buyer || '').toLowerCase();
         case 'sales': return (o.total || 0) * rgRate(o);
-        case 'deposit': { const d = pfDep(o); return d == null ? -1e15 : d * rgRate(o); }
+        case 'dep_prov': { const d = pfDepInfo(o); const v = d ? (d.init != null ? d.init : (!d.fixed ? d.amt : null)) : null; return v == null ? -1e15 : v * rgRate(o); }
+        case 'dep_fix': { const d = pfDepInfo(o); return (d && d.fixed) ? d.amt * rgRate(o) : -1e15; }
         case 'cost': { const c = pfCost(o); return c == null ? -1e15 : c; }
         case 'profit': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null) ? d * rgRate(o) - c : -1e15; }
         case 'rate': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null && d) ? (d * rgRate(o) - c) / (d * rgRate(o)) : -1e15; }
@@ -1555,18 +1561,22 @@
         const ind = pf.sortKey === c.k ? (pf.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
         return `<th class="pf-th" data-k="${c.k}" draggable="true" style="cursor:pointer" title="クリックでソート / ドラッグで列移動">${c.l}${ind}<span class="pf-rs" data-k="${c.k}"></span></th>`;
       }).join('') + '</tr>';
-    let tSales = 0, tDep = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0;
+    let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0;
     pfSorted(orders).forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg) return;
       const depInfo = pfDepInfo(o);
       const dep = depInfo ? depInfo.amt : null;
+      const depProv = depInfo ? (depInfo.init != null ? depInfo.init : (!depInfo.fixed ? depInfo.amt : null)) : null; // 暫定=初回取得値
+      const depFix = depInfo && depInfo.fixed ? depInfo.amt : null;                                                    // 確定=Shopee更新後
       const cost = pfCost(o);          // 実効仕入額（手入力 > 在庫連携）
       const manual = pfManualCost(o);  // 手入力値
       const invs = pfInv(o);           // 紐付いた在庫
       const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
       tSales += (o.total || 0) * rg.rateJpy;
       if (dep != null) tDep += dep * rg.rateJpy;
+      if (depProv != null) tProv += depProv * rg.rateJpy;
+      if (depFix != null) tFix += depFix * rg.rateJpy;
       if (cost != null) tCost += cost;
       const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
       if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; }
@@ -1593,13 +1603,12 @@
           tracking: () => first ? `<td${rs} style="font-size:10px;word-break:break-all" class="smd-dim">${esc(o.tracking || '')}</td>` : '',
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${esc(v.sku)}</div>` : '').join('')}</td>`,
           sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
-          deposit: () => first ? `<td${rs}>${dep != null ? `${fmtLocal(rg, dep)}<br><span class="smd-jpy">≈${fmtJpy(dep * rg.rateJpy)}</span><br>` +
-            (depInfo && depInfo.fixed
-              ? '<span style="font-size:9.5px;color:#1a7f37;border:1px solid #a5d6a7;border-radius:6px;padding:0 4px" title="Shopee更新後の確定値">確定</span>' +
-                (depInfo.init != null && depInfo.init !== dep
-                  ? `<span class="smd-dim" style="font-size:9.5px;margin-left:4px;text-decoration:line-through" title="暫定値（初回取得）">${fmtLocal(rg, depInfo.init)}</span>` : '')
-              : '<span style="font-size:9.5px;color:#999;border:1px solid #ddd;border-radius:6px;padding:0 4px" title="初回取得の暫定値（Shopee側の更新待ち）">暫定</span>')
+          dep_prov: () => first ? `<td${rs}>${depProv != null
+            ? `<span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * rg.rateJpy)}</span>`
             : '<span class="smd-dim">未取得</span>'}</td>` : '',
+          dep_fix: () => first ? `<td${rs}>${depFix != null
+            ? `<b style="color:#1a7f37">${fmtLocal(rg, depFix)}</b><br><span class="smd-jpy">≈${fmtJpy(depFix * rg.rateJpy)}</span>`
+            : '<span class="smd-dim" title="Shopee側の金額更新待ち（暫定のみ）">未確定</span>'}</td>` : '',
           profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
           status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}</td>` : '',
           // ---- 商品行単位 ----
@@ -1611,7 +1620,9 @@
               (pid ? `<a href="https://${rg.host}/portal/product/${pid}" target="_blank" style="color:#333;text-decoration:none" onmouseover="this.style.color='#ee4d2d'" onmouseout="this.style.color='#333'">${nameHtml}</a>` : nameHtml) +
               `</div>${it.variation ? `<div class="smd-dim" style="font-size:11px;word-break:break-word">${esc(it.variation)}</div>` : ''}</td>`;
           },
-          qty: () => `<td>${it.qty || ''}</td>`,
+          qty: () => `<td>${(it.qty || 0) >= 2
+            ? `<span style="display:inline-block;background:#ee4d2d;color:#fff;border-radius:8px;padding:1px 8px;font-weight:700" title="複数個購入">×${it.qty}</span>`
+            : (it.qty || '')}</td>`,
           inv: () => `<td style="font-size:10.5px;color:#7a6ba7">${rowInvs.map(v =>
             `<div title="${v.price != null ? '仕入 ¥' + Number(v.price).toLocaleString() + ' / ' : ''}${esc(v.supplier || '')}${v.bin ? ' / 棚' + esc(v.bin) : ''}">🏷${esc(v.item_id)}` +
             `${v.proof ? ` <a href="${esc(v.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</div>`).join('')}</td>`,
@@ -1629,7 +1640,8 @@
     const TOTAL = {
       date: () => '合計',
       sales: () => fmtJpy(tSales),
-      deposit: () => fmtJpy(tDep),
+      dep_prov: () => fmtJpy(tProv),
+      dep_fix: () => fmtJpy(tFix),
       cost: () => fmtJpy(tCost),
       profit: () => `<b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件</span>`,
       rate: () => pairDep ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairDep * 100)}%</span>` : '',
