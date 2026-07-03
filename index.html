@@ -215,6 +215,7 @@
       <select id="pf-st">
         <option value="">配送:全て</option>
         <option value="toship">未発送</option>
+        <option value="selftransit">倉庫へ輸送中(未スキャン・手動)</option>
         <option value="transit">輸送中</option>
         <option value="delivered">到着済</option>
         <option value="completed">完了</option>
@@ -1883,7 +1884,7 @@
         const [orders, income, costs, inv, prods] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at'),
-          sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init'),
+          sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init,cost_at,self_transit_at,wb_count,wb_first_at,wb_last_at'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
         ]);
@@ -1941,9 +1942,9 @@
     { k: 'cost', l: '仕入額(円)', w: 106 },
     { k: 'profit', l: '粗利', w: 78 },
     { k: 'rate', l: 'ROI', w: 56 },
-    { k: 'status', l: '配送状態', w: 78 },
+    { k: 'status', l: '配送状態', w: 104 },
     { k: 'tracking', l: '追跡No', w: 128 },
-    { k: 'sls', l: '伝票', w: 46 },
+    { k: 'sls', l: '伝票', w: 66 },
   ];
   let pfRsActive = false; // 列幅ドラッグ中はソート/列移動を抑止
   const pfColPref = Object.assign({ hidden: [], widths: {}, order: [] }, JSON.parse(localStorage.getItem('smdPfCols') || '{}'));
@@ -2004,6 +2005,9 @@
     return inv.length ? inv.reduce((s, it) => s + it.price, 0) : null;
   };
   const pfManualCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
+  const pfMeta = o => pf.costMap.get(o.cc + ':' + o.sn) || null; // 注文メタ（cost_at/self_transit_at/wb_*）
+  // 自宅→Shopee Japan倉庫へ手動で「発送済(未スキャン)」にした注文か（スキャンされ輸送中になったら自動で解除扱い）
+  const pfSelfTransit = o => { const m = pfMeta(o); return !!(m && m.self_transit_at) && ordStatusKey(o.status) === 'toship'; };
 
   function pfFiltered() {
     return pf.orders.filter(o => {
@@ -2016,7 +2020,10 @@
         if (pf.depFilter === 'fixed' && (!d || !d.fixed)) return false;
         if (pf.depFilter === 'prov' && (!d || d.fixed)) return false;
       }
-      if (pf.stFilter && ordStatusKey(o.status) !== pf.stFilter) return false;
+      if (pf.stFilter) {
+        if (pf.stFilter === 'selftransit') { if (!pfSelfTransit(o)) return false; }
+        else if (ordStatusKey(o.status) !== pf.stFilter) return false;
+      }
       if (pf.search) {
         const hay = (o.sn + ' ' + (o.buyer || '') + ' ' + (o.items || []).map(it => it.name + ' ' + (it.variation || '')).join(' ')).toLowerCase();
         if (!hay.includes(pf.search)) return false;
@@ -2081,6 +2088,7 @@
       const depFix = depInfo && depInfo.fixed ? depInfo.amt : null;                                                    // 確定=Shopee更新後
       const cost = pfCost(o);          // 実効仕入額（手入力/確定 ＞ 在庫連携の自動算出）＝どちらでも「入力あり」扱い
       const manual = pfManualCost(o);  // 手入力/確定値（入力欄の表示用）
+      const meta = pfMeta(o);          // 注文メタ（cost_at/self_transit_at/wb_*）
       const invs = pfInv(o);           // 紐付いた在庫
       const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
       tSales += (o.total || 0) * rg.rateJpy;
@@ -2114,9 +2122,14 @@
           cc: () => first ? `<td${rs}><b style="color:${rg.color}">${o.cc}</b></td>` : '',
           order: () => first ? `<td${rs} style="font-size:11px"><a href="https://${rg.host}/portal/sale/order/${o.order_id || ''}" target="_blank" onclick="event.stopPropagation()" style="color:#2673dd;text-decoration:none" title="注文詳細を開く">${esc(o.sn)}</a></td>` : '',
           buyer: () => first ? `<td${rs} style="font-size:11px;word-break:break-all">${esc(o.buyer || '')}</td>` : '',
-          sls: () => first ? `<td${rs}>${/to ?ship/i.test(o.status || '')
-            ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="SLS伝票を印刷（Waybill Printer連携）" style="text-decoration:none;font-size:16px">🖨️</a>`
-            : `<span class="smd-dim" title="Shopee Japan倉庫でスキャン済みのため伝票印刷不可">—</span>`}</td>` : '',
+          sls: () => {
+            if (!first) return '';
+            const wbHist = meta && meta.wb_count ? `<div class="smd-dim" style="font-size:9px;line-height:1.3;margin-top:2px" title="伝票の発行回数と最終発行日（日本時間）">発行${meta.wb_count}回${meta.wb_last_at ? `<br>${jstDT(meta.wb_last_at)}` : ''}</div>` : '';
+            const btn = /to ?ship/i.test(o.status || '')
+              ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" class="pf-wb" data-cc="${o.cc}" data-sn="${esc(o.sn)}" target="_blank" title="SLS伝票を印刷（Waybill Printer連携）・発行回数を記録" style="text-decoration:none;font-size:16px">🖨️</a>`
+              : `<span class="smd-dim" title="Shopee Japan倉庫でスキャン済みのため伝票印刷不可">—</span>`;
+            return `<td${rs}>${btn}${wbHist}</td>`;
+          },
           rate: () => first ? `<td${rs}>${rate != null ? `<span style="color:${rate < 0 ? '#d93025' : '#1a7f37'};font-weight:700">${rate}%</span>` : ''}</td>` : '',
           tracking: () => first ? `<td${rs} style="font-size:10px;word-break:break-all" class="smd-dim">${esc(o.tracking || '')}</td>` : '',
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${esc(v.sku)}</div>` : '').join('')}</td>`,
@@ -2130,7 +2143,18 @@
               ? '<span class="smd-dim" title="倉庫スキャン前（未発送）のため暫定のみ">未確定</span>'
               : '<span class="smd-dim">未取得</span>')}</td>` : '',
           profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
-          status: () => first ? `<td${rs} style="font-size:11px">${o.tab === 600 ? '<span style="color:#d93025;font-weight:700">キャンセル</span>' : o.tab === 200 ? '<span style="color:#e8830c;font-weight:700">未払い</span>' : ordStatusChip(o.status)}</td>` : '',
+          status: () => {
+            if (!first) return '';
+            if (o.tab === 600) return `<td${rs} style="font-size:11px"><span style="color:#d93025;font-weight:700">キャンセル</span></td>`;
+            if (o.tab === 200) return `<td${rs} style="font-size:11px"><span style="color:#e8830c;font-weight:700">未払い</span></td>`;
+            let extra = '';
+            if (/to ?ship/i.test(o.status || '')) { // 未発送のときだけ手動フラグ（スキャンされ輸送中になれば自動でShopee側が更新）
+              extra = (meta && meta.self_transit_at)
+                ? `<div class="pf-selftransit" data-cc="${o.cc}" data-sn="${esc(o.sn)}" data-on="1" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）。クリックで解除" style="cursor:pointer;color:#7b52c4;font-weight:700;margin-top:3px;line-height:1.3">🚚倉庫へ輸送中<br><span style="font-weight:400;font-size:9px">未スキャン ${jstDT(meta.self_transit_at)}</span></div>`
+                : `<div class="pf-selftransit" data-cc="${o.cc}" data-sn="${esc(o.sn)}" data-on="0" title="自宅→Shopee Japan倉庫へ発送済にする（未スキャン）" style="cursor:pointer;color:#7b52c4;font-size:10px;margin-top:3px;border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block">🚚倉庫へ発送</div>`;
+            }
+            return `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}${extra}</td>`;
+          },
           // ---- 商品行単位 ----
           img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
           product: () => {
@@ -2150,7 +2174,8 @@
             (first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
               ` placeholder="${invs.length && invSum ? (n > 1 ? '計 ' : '在庫: ') + invSum : '未入力'}"` +
               ` title="注文合計の仕入額${invs.length && invSum ? '（在庫連携の自動値 ¥' + invSum + '、入力で上書き）' : '（手入力で保存）'}"` +
-              ` style="width:100%;max-width:96px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` : '') +
+              ` style="width:100%;max-width:96px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : '#f0b429')};border-radius:5px;font-size:12px">` +
+              `${manual != null && meta && meta.cost_at ? `<div class="smd-dim" style="font-size:9px" title="仕入額の入力日（日本時間）">記入 ${jstDT(meta.cost_at)}</div>` : ''}` : '') +
             (n > 1 && rowInvs.length && rowCost ? `<div style="font-size:11px;color:#7a6ba7;margin-top:2px" title="この商品分（在庫連携）">¥${rowCost.toLocaleString()}</div>` : '') +
             `</td>`,
         };
@@ -2174,14 +2199,37 @@
       const v = e.target.value === '' ? null : Number(e.target.value);
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
       try {
-        await sbUpsert('costs', [{ cc: e.target.dataset.cc, sn: e.target.dataset.sn, cost: v, synced_at: new Date().toISOString() }]);
+        const nowIso = new Date().toISOString();
+        const costAt = v != null ? nowIso : null; // 仕入額の入力日を記録（クリア時はnull）
+        await sbUpsert('costs', [{ cc: e.target.dataset.cc, sn: e.target.dataset.sn, cost: v, cost_at: costAt, synced_at: nowIso }]);
         const key = e.target.dataset.cc + ':' + e.target.dataset.sn;
         const cm = pf.costMap.get(key) || { cc: e.target.dataset.cc, sn: e.target.dataset.sn };
-        cm.cost = v;
+        cm.cost = v; cm.cost_at = costAt;
         pf.costMap.set(key, cm);
         e.target.style.borderColor = '#1a7f37';
         setTimeout(() => pfRender(), 400);
       } catch (err) { alert('保存失敗: ' + err.message); }
+    }));
+    // 伝票印刷（🖨️）クリック＝発行として記録（発行回数+1・発行日）。リンクは通常どおり新タブで開く
+    body.querySelectorAll('.pf-wb').forEach(a => a.addEventListener('click', async () => {
+      if (!settings.sbSecret) return; // キー未設定なら記録せず印刷だけ
+      const cc = a.dataset.cc, sn = a.dataset.sn, key = cc + ':' + sn, nowIso = new Date().toISOString();
+      const cm = pf.costMap.get(key) || { cc, sn, wb_count: 0 };
+      cm.wb_count = (cm.wb_count || 0) + 1; cm.wb_last_at = nowIso; if (!cm.wb_first_at) cm.wb_first_at = nowIso;
+      pf.costMap.set(key, cm);
+      try { await sbUpsert('costs', [{ cc, sn, wb_count: cm.wb_count, wb_last_at: nowIso, wb_first_at: cm.wb_first_at }]); } catch (err) {}
+      setTimeout(() => pfRender(), 600);
+    }));
+    // 🚚倉庫へ発送（未スキャン）トグル: self_transit_at をON/OFF
+    body.querySelectorAll('.pf-selftransit').forEach(el => el.addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const cc = el.dataset.cc, sn = el.dataset.sn, key = cc + ':' + sn;
+      const turnOn = el.dataset.on !== '1';
+      const val = turnOn ? new Date().toISOString() : null;
+      const cm = pf.costMap.get(key) || { cc, sn };
+      cm.self_transit_at = val; pf.costMap.set(key, cm);
+      try { await sbUpsert('costs', [{ cc, sn, self_transit_at: val }]); } catch (err) { alert('保存失敗: ' + err.message); }
+      pfRender();
     }));
     // ヘッダー: クリックでソート / D&Dで列移動
     body.querySelectorAll('th.pf-th').forEach(th => {
