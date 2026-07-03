@@ -234,7 +234,7 @@
 
   <!-- 在庫 -->
   <div id="page-stock" style="display:none">
-    <div class="smd-pagehead">🏷 在庫管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（InventoryItemシートのミラー・同期で更新）</span></div>
+    <div class="smd-pagehead">🏷 在庫管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（Gmail自動登録＋手動編集。スプシとは独立）</span></div>
     <div id="stock-kpis"></div>
     <div class="smd-toolbar">
       <select id="stock-st">
@@ -242,6 +242,12 @@
         <option value="入庫待ち">入庫待ち</option>
         <option value="販売済み">販売済み</option>
         <option value="">全て</option>
+      </select>
+      <select id="stock-sup"><option value="">仕入元:全て</option></select>
+      <select id="stock-origin">
+        <option value="">由来:全て</option>
+        <option value="auto">自動(メール)</option>
+        <option value="sheet">スプシ由来</option>
       </select>
       <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号">
       <span class="smd-dim" id="stock-note"></span>
@@ -670,6 +676,7 @@
   };
   // タイムスタンプ(UTC ISO) → JST日付 YYYY-MM-DD。created_at(追加日)表示用
   const jstDate = v => { if (!v) return ''; try { return new Date(v).toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); } catch (_) { return String(v).slice(0, 10); } };
+  const jstDateTime = v => { if (!v) return ''; try { const d = new Date(v); return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }) + ' ' + d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' }); } catch (_) { return String(v).slice(0, 16); } };
   // タイムスタンプ(UTC ISO) → JST日時 MM/DD HH:mm。入金額の記載日時表示用
   const jstDT = v => { if (!v) return ''; try { return new Date(v).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
 
@@ -1192,6 +1199,16 @@
     });
     if (!r.ok) throw new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
   }
+  async function sbPatch(table, qs, patch) { // 主キー(item_id)自体の変更など、キー指定での更新
+    const key = settings.sbSecret;
+    if (!key) throw new Error('書き込みキー未設定');
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
+      method: 'PATCH',
+      headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) throw new Error(`${table}更新 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  }
   const snToDate = sn => {
     const m = /^(\d{2})(\d{2})(\d{2})/.exec(sn || '');
     return m ? `20${m[1]}-${m[2]}-${m[3]}` : null;
@@ -1284,7 +1301,8 @@
   }
 
   // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
-  const stock = { rows: null, imgMap: null, st: '在庫保管中', q: '', bound: false, adding: false };
+  const stock = { rows: null, imgMap: null, st: '在庫保管中', sup: '', origin: '', q: '', bound: false, adding: false };
+  const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
   const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
   const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
   const SUPPLIERS = ['メルカリ', 'メルカリShops', 'ヤフオク', 'PayPayフリマ', 'Amazon', 'ヤフーショッピング', '楽天'];
@@ -1293,6 +1311,8 @@
     if (!stock.bound) {
       stock.bound = true;
       document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stockRender(); });
+      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stockRender(); });
+      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stockRender(); });
       let t;
       document.getElementById('stock-search').addEventListener('input', e => {
         clearTimeout(t);
@@ -1329,6 +1349,20 @@
       return true;
     } catch (e) { alert('保存失敗: ' + e.message); return false; }
   }
+  // ItemID（主キー）そのものを変更。印刷済みQRラベルとはズレるので確認を挟む
+  async function stockRenameId(oldId, newId, inputEl) {
+    const reset = () => { if (inputEl) inputEl.value = oldId; };
+    if (!newId || newId === oldId) { reset(); return; }
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); reset(); return; }
+    if (stock.rows.some(r => r.item_id === newId)) { alert('そのItemIDは既に存在します'); reset(); return; }
+    if (!confirm(`ItemIDを変更します:\n${oldId}\n→ ${newId}\n\n※印刷済みのQRラベルがある場合は貼り替えが必要です。よろしいですか？`)) { reset(); return; }
+    try {
+      await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(oldId), { item_id: newId, edited_at: new Date().toISOString() });
+      const row = stock.rows.find(r => r.item_id === oldId);
+      if (row) row.item_id = newId;
+      stockRender();
+    } catch (e) { alert('ItemID変更失敗: ' + e.message); reset(); }
+  }
   function stockRender() {
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
@@ -1340,8 +1374,15 @@
       ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計'],
       ['全登録', all.length + '点', 'InventoryItem'],
     ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+    const supSel = document.getElementById('stock-sup'); // 仕入元フィルタの選択肢を実データから一度だけ生成
+    if (supSel && supSel.options.length <= 1) {
+      const sups = [...new Set(all.map(r => r.supplier).filter(Boolean))].sort();
+      supSel.insertAdjacentHTML('beforeend', sups.map(s => `<option>${esc(s)}</option>`).join(''));
+    }
     let rows = all;
     if (stock.st) rows = rows.filter(r => r.status === stock.st);
+    if (stock.sup) rows = rows.filter(r => (r.supplier || '') === stock.sup);
+    if (stock.origin) rows = rows.filter(r => stkOrigin(r) === stock.origin);
     if (stock.q) rows = rows.filter(r =>
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
        (r.supplier || '') + ' ' + (r.seller || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
@@ -1352,18 +1393,20 @@
     body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・セラー名・仕入額・コンディション・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。ItemID横の✂でまとめ仕入れを枝番分割（仕入額を均等割り）。画像はShopee出品名から自動マッチ。</span></div>` +
       `<div id="stk-addform"></div>` +
-      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1180px">` +
-      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日</th><th>追加日</th><th>商品名</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th></tr>' +
+      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1360px">` +
+      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>Shopee注文</th><th>確証</th><th>備考</th></tr>' +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
         return '<tr>' +
         `<td>${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>` +
-        `<td style="font-size:11px;color:#7a6ba7;white-space:nowrap">🏷${esc(r.item_id || '')}${r.source === 'portal' ? ' <span title="ポータル登録">🆕</span>' : ''}<button class="stk-split" ${di} title="まとめ仕入れを枝番で分割（仕入額を均等割り）" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 3px;vertical-align:middle">✂</button></td>` +
+        `<td style="font-size:11px;white-space:nowrap">${(() => { const o = stkOrigin(r); return o === 'auto' ? '<span title="Gmailから自動登録" style="background:#e7f5ea;color:#1a7f37;font-size:8.5px;padding:1px 3px;border-radius:3px;margin-right:3px">自動</span>' : o === 'sheet' ? '<span title="スプシ(InventoryItem)由来" style="background:#eeeeee;color:#777;font-size:8.5px;padding:1px 3px;border-radius:3px;margin-right:3px">スプシ</span>' : ''; })()}` +
+          `<input class="li stk-itemid" ${di} value="${esc(r.item_id || '')}" title="ItemID（編集可。印刷済みQRラベルがある場合は貼り替えが必要）" style="width:150px;font-size:10.5px;padding:2px 4px;color:#7a6ba7">` +
+          `<button class="stk-split" ${di} title="まとめ仕入れを枝番で分割（仕入額を均等割り）" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 3px;vertical-align:middle">✂</button></td>` +
         `<td><img class="stk-qr" src="https://api.qrserver.com/v1/create-qr-code/?size=54x54&margin=0&data=${encodeURIComponent(r.item_id || '')}" data-id="${esc(r.item_id || '')}" title="クリックで拡大（スキャン/印刷用）" style="width:40px;height:40px;cursor:zoom-in" loading="lazy"></td>` +
-        `<td style="font-size:11px;white-space:nowrap;min-width:82px">${esc(gvizDate(r.purchase_date) || '')}</td>` +
-        `<td style="font-size:11px;white-space:nowrap;min-width:82px;color:#9a8fb5">${esc(jstDate(r.created_at))}</td>` +
-        `<td style="word-break:break-word">${esc(r.name || '')}${r.name_supplier && String(r.name_supplier).trim() !== String(r.name || '').trim() ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word" title="仕入元での商品名">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
+        `<td style="font-size:11px;white-space:nowrap;min-width:96px" title="仕入日時（日本時間。メール登録分は時刻あり／シート由来は日付のみ）">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td>` +
+        `<td style="font-size:11px;white-space:nowrap;min-width:96px;color:#9a8fb5" title="ポータル追加日時（日本時間）">${esc(jstDateTime(r.created_at))}</td>` +
+        `<td style="min-width:190px"><input class="li stk-name" ${di} value="${esc(r.name || '')}" title="商品名（編集可）" style="width:100%;min-width:180px;font-size:11px;padding:2px 4px">${r.name_supplier && String(r.name_supplier).trim() !== String(r.name || '').trim() ? `<div class="smd-dim" style="font-size:10px;word-break:break-word" title="仕入元での商品名">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.sku || '')}</td>` +
         `<td style="white-space:nowrap"><select class="li stk-sup" ${di} style="padding:3px;font-size:11px;width:104px">` +
           `<option value="" ${!r.supplier ? 'selected' : ''}></option>` +
@@ -1383,6 +1426,7 @@
         `<td style="font-size:11px">${esc(r.bin || '')}</td>` +
         `<td style="font-size:11px;word-break:break-all">${esc(r.shopee_sn || '')}</td>` +
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</td>` +
+        `<td><input class="li stk-note" ${di} value="${esc(r.note || '')}" placeholder="—" title="備考（自由記入）" style="width:100%;min-width:120px;font-size:11px;padding:2px 4px"></td>` +
         '</tr>';
       }).join('') +
       `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
@@ -1393,6 +1437,9 @@
     body.querySelectorAll('.stk-price').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { price: e.target.value === '' ? null : Number(e.target.value) })) stockRender(); }));
     body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
     body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
+    body.querySelectorAll('.stk-name').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { name: e.target.value.trim() || null })));
+    body.querySelectorAll('.stk-note').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { note: e.target.value.trim() || null })));
+    body.querySelectorAll('.stk-itemid').forEach(el => el.addEventListener('change', e => stockRenameId(e.target.dataset.id, e.target.value.trim(), e.target)));
     body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
