@@ -2009,7 +2009,7 @@
     return pf.orders.filter(o => {
       if (!pf.showCancel && (o.tab === 200 || o.tab === 600)) return false; // 純オーダーのみ（既定）
       if (pf.cc && o.cc !== pf.cc) return false;
-      if (pf.nocost && pfManualCost(o) != null) return false; // 「仕入額未入力のみ」＝手入力/確定がまだ無い注文（在庫連携サジェストのみは未入力扱い）
+      if (pf.nocost && pfCost(o) != null) return false; // 「仕入額未入力のみ」＝仕入額(手入力/確定 or 在庫連携)がまだ無い注文
       if (pf.depFilter) {
         const d = pfDepInfo(o);
         if (pf.depFilter === 'none' && d) return false;
@@ -2042,8 +2042,8 @@
         case 'dep_prov': { const d = pfDepInfo(o); const v = d ? (d.init != null ? d.init : (!d.fixed ? d.amt : null)) : null; return v == null ? -1e15 : v * rgRate(o); }
         case 'dep_fix': { const d = pfDepInfo(o); return (d && d.fixed) ? d.amt * rgRate(o) : -1e15; }
         case 'cost': { const c = pfCost(o); return c == null ? -1e15 : c; }
-        case 'profit': { const d = pfDep(o), c = pfManualCost(o); return (d != null && c != null) ? d * rgRate(o) - c : -1e15; }
-        case 'rate': { const d = pfDep(o), c = pfManualCost(o); return (d != null && c != null && c) ? (d * rgRate(o) - c) / c : -1e15; }
+        case 'profit': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null) ? d * rgRate(o) - c : -1e15; }
+        case 'rate': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null && c) ? (d * rgRate(o) - c) / c : -1e15; }
         case 'status': return ordStatusKey(o.status);
         default: return '';
       }
@@ -2079,19 +2079,20 @@
       const dep = depInfo ? depInfo.amt : null;
       const depProv = depInfo ? (depInfo.init != null ? depInfo.init : (!depInfo.fixed ? depInfo.amt : null)) : null; // 暫定=初回取得値
       const depFix = depInfo && depInfo.fixed ? depInfo.amt : null;                                                    // 確定=Shopee更新後
-      const manual = pfManualCost(o);  // 手入力/確定の仕入額（粗利はこれがある注文だけ）
+      const cost = pfCost(o);          // 実効仕入額（手入力/確定 ＞ 在庫連携の自動算出）＝どちらでも「入力あり」扱い
+      const manual = pfManualCost(o);  // 手入力/確定値（入力欄の表示用）
       const invs = pfInv(o);           // 紐付いた在庫
       const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
       tSales += (o.total || 0) * rg.rateJpy;
       if (dep != null) tDep += dep * rg.rateJpy;
       if (depProv != null) tProv += depProv * rg.rateJpy;
       if (depFix != null) tFix += depFix * rg.rateJpy;
-      if (manual != null) tCost += manual; // 仕入額合計＝入力/確定済みのみ（在庫連携の自動サジェストは未確定＝含めない）
-      // 粗利・ROIは「仕入額(円)に入力がある注文だけ」で計算。未入力（在庫連携サジェストのみ含む）は利益計算未完了＝空欄。
-      const profit = (dep != null && manual != null) ? dep * rg.rateJpy - manual : null;
-      if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; pairCost += manual; }
+      if (cost != null) tCost += cost;
+      // 粗利・ROIは仕入額(手入力/確定 または 在庫連携の自動算出)が判明した注文だけ計算。全く無い注文は利益計算未完了＝空欄。
+      const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
+      if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; pairCost += cost; }
       const items = (o.items && o.items.length) ? o.items : [{}];
-      const rate = (profit != null && manual) ? Math.round(profit / manual * 100) : null; // ROI = 粗利 ÷ 仕入額(投資)
+      const rate = (profit != null && cost) ? Math.round(profit / cost * 100) : null; // ROI = 粗利 ÷ 仕入額(投資)
       const invAssign = assignInv(o, invs); // まとめ買い: 在庫を商品行に割当
       const n = items.length;
       items.forEach((it, idx) => {
@@ -2167,7 +2168,7 @@
       rate: () => pairCost ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairCost * 100)}%</span>` : '',
     };
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
-      `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利・ROIは「仕入額(円)を入力/確定済み」かつ入金額が判明した注文だけ計算・合算（合計は${pairN}件分）。在庫連携(🏷)の自動サジェスト（計◯◯のプレースホルダー）だけの注文は利益計算未完了＝空欄。仕入額を入力すると確定します。キャンセルはグレー表示。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
+      `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利・ROIは仕入額（手入力/確定 または 在庫連携🏷の自動算出）と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。仕入額が全く無い注文は利益計算未完了＝空欄。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。キャンセルはグレー表示。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
     body.innerHTML = html;
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
       const v = e.target.value === '' ? null : Number(e.target.value);
@@ -2251,7 +2252,7 @@
       p.n++;
       p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
       p.sales += o.total || 0;
-      const dep = pfDep(o), cost = pfManualCost(o); // 仕入額は入力/確定済みのみ（在庫連携サジェストは未完了扱い）
+      const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
       if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
       if (cost != null) { p.costJpy += cost; p.costN++; }
       if (dep != null && cost != null) { p.pair += dep * rg.rateJpy - cost; p.pairN++; }
@@ -2272,7 +2273,7 @@
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:960px"><table class="pf-table">` +
       `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利(両方判明分)</th></tr>` + rowsHtml +
       `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td style="color:${tPair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(tPair)}<br><span class="smd-dim" style="font-weight:400">${tPairN}件</span></td></tr></table>` +
-      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と「入力/確定済みの仕入額」の両方が判明している注文だけを合算（片方しか無い注文・在庫連携サジェストのみの注文は含めない）。入金はShopee手数料控除後・仕入額は円建て。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>`;
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額（手入力/確定 または 在庫連携🏷の自動算出）の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>`;
   }
 
   let syncRunning = false;
