@@ -220,6 +220,7 @@
         <option value="completed">完了</option>
       </select>
       <label style="font-size:12.5px"><input type="checkbox" id="pf-nocost"> 仕入額未入力のみ</label>
+      <label style="font-size:12.5px"><input type="checkbox" id="pf-showcancel"> キャンセル・未払いも表示</label>
       <input type="text" id="pf-search" placeholder="商品名・バイヤー・注文番号">
       <span style="position:relative">
         <button class="smd-btn" id="pf-colbtn">🗂 列</button>
@@ -668,6 +669,8 @@
   };
   // タイムスタンプ(UTC ISO) → JST日付 YYYY-MM-DD。created_at(追加日)表示用
   const jstDate = v => { if (!v) return ''; try { return new Date(v).toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); } catch (_) { return String(v).slice(0, 10); } };
+  // タイムスタンプ(UTC ISO) → JST日時 MM/DD HH:mm。入金額の記載日時表示用
+  const jstDT = v => { if (!v) return ''; try { return new Date(v).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
 
   function setModeBadge() {
     const el = document.getElementById('smd-mode');
@@ -1739,7 +1742,7 @@
   }
 
   // ---------------- 利益ページ（明細＋国別サマリー） ----------------
-  const pf = { ym: null, view: 'detail', cc: '', nocost: false, search: '', depFilter: '', stFilter: '',
+  const pf = { ym: null, view: 'detail', cc: '', nocost: false, showCancel: false, search: '', depFilter: '', stFilter: '',
     sortKey: 'date', sortDir: 'desc', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
 
   // 注文時刻 → 現地時間の "YYYY-MM-DDTHH:mm"（order_ts未取得ならnull）
@@ -1780,6 +1783,7 @@
     sel.addEventListener('change', () => renderProfit(true));
     document.getElementById('pf-dep').addEventListener('change', e => { pf.depFilter = e.target.value; pfRender(); });
     document.getElementById('pf-st').addEventListener('change', e => { pf.stFilter = e.target.value; pfRender(); });
+    document.getElementById('pf-showcancel').addEventListener('change', e => { pf.showCancel = e.target.checked; pfRender(); });
     const ccSel = document.getElementById('pf-cc');
     REGIONS.forEach(r => { const o = document.createElement('option'); o.value = r.cc; o.textContent = r.cc; ccSel.appendChild(o); });
     ccSel.addEventListener('change', () => { pf.cc = ccSel.value; pfRender(); });
@@ -1876,8 +1880,8 @@
         else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = iso(Date.now() + 2 * 86400000); }
         else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
         const [orders, income, costs, inv, prods] = await Promise.all([
-          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
-          sbGetAll('income', 'select=cc,sn,amount,amount_initial'),
+          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
+          sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
@@ -1911,7 +1915,7 @@
     if (inc && inc.amount != null) {
       const apiFixed = inc.amount_initial != null && inc.amount !== inc.amount_initial;
       const init = inc.amount_initial != null ? inc.amount_initial : (cm && cm.deposit_init != null ? cm.deposit_init : null);
-      return { amt: inc.amount, init, fixed: apiFixed || sheetFixed || scanned };
+      return { amt: inc.amount, init, fixed: apiFixed || sheetFixed || scanned, provAt: inc.amount_initial_at || null, fixAt: inc.amount_at || null };
     }
     if (cm && cm.deposit != null) {
       return { amt: cm.deposit, init: cm.deposit_init, fixed: sheetFixed || scanned };
@@ -2002,6 +2006,7 @@
 
   function pfFiltered() {
     return pf.orders.filter(o => {
+      if (!pf.showCancel && (o.tab === 200 || o.tab === 600)) return false; // 純オーダーのみ（既定）
       if (pf.cc && o.cc !== pf.cc) return false;
       if (pf.nocost && pfCost(o) != null) return false;
       if (pf.depFilter) {
@@ -2115,15 +2120,15 @@
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${esc(v.sku)}</div>` : '').join('')}</td>`,
           sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * rg.rateJpy)}</span></td>` : '',
           dep_prov: () => first ? `<td${rs}>${depProv != null
-            ? `<span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * rg.rateJpy)}</span>`
+            ? `<span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * rg.rateJpy)}</span>${depInfo && depInfo.provAt ? `<br><span class="smd-dim" style="font-size:9px" title="暫定額の記載日時（日本時間）">日本時間 ${jstDT(depInfo.provAt)}</span>` : ''}`
             : '<span class="smd-dim">未取得</span>'}</td>` : '',
           dep_fix: () => first ? `<td${rs}>${depFix != null
-            ? `<b style="color:#1a7f37">${fmtLocal(rg, depFix)}</b><br><span class="smd-jpy">≈${fmtJpy(depFix * rg.rateJpy)}</span>`
+            ? `<b style="color:#1a7f37">${fmtLocal(rg, depFix)}</b><br><span class="smd-jpy">≈${fmtJpy(depFix * rg.rateJpy)}</span>${depInfo && depInfo.fixAt ? `<br><span class="smd-dim" style="font-size:9px" title="確定額の記載日時（日本時間）">日本時間 ${jstDT(depInfo.fixAt)}</span>` : ''}`
             : (depInfo
               ? '<span class="smd-dim" title="倉庫スキャン前（未発送）のため暫定のみ">未確定</span>'
               : '<span class="smd-dim">未取得</span>')}</td>` : '',
           profit: () => first ? `<td${rs}>${profit != null ? `<b style="color:${profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(profit)}</b>` : ''}</td>` : '',
-          status: () => first ? `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}</td>` : '',
+          status: () => first ? `<td${rs} style="font-size:11px">${o.tab === 600 ? '<span style="color:#d93025;font-weight:700">キャンセル</span>' : o.tab === 200 ? '<span style="color:#e8830c;font-weight:700">未払い</span>' : ordStatusChip(o.status)}</td>` : '',
           // ---- 商品行単位 ----
           img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
           product: () => {
@@ -2265,7 +2270,7 @@
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:960px"><table class="pf-table">` +
       `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利(両方判明分)</th></tr>` + rowsHtml +
       `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td style="color:${tPair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(tPair)}<br><span class="smd-dim" style="font-weight:400">${tPairN}件</span></td></tr></table>` +
-      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル注文は元から含まれていません。</div></div>`;
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>`;
   }
 
   let syncRunning = false;
@@ -2292,7 +2297,7 @@
 
       // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
       say('💵 入金予定額を取得中...');
-      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial&order=sn'))
+      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at&order=sn'))
         .map(i => [i.cc + ':' + i.sn, i]));
       const incomeRows = [];
       for (const region of targets) {
@@ -2300,8 +2305,12 @@
           const map = await fetchPendingCountry(region);
           Object.entries(map).forEach(([sn, amount]) => {
             const ex = exIncome.get(region.cc + ':' + sn);
+            const now = new Date().toISOString();
             const initial = ex ? (ex.amount_initial != null ? ex.amount_initial : ex.amount) : amount;
-            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, category: 4, synced_at: new Date().toISOString() });
+            const initAt = ex && ex.amount_initial_at ? ex.amount_initial_at : now;   // 暫定=初回記録日時（以後固定）
+            let fixAt = ex ? ex.amount_at : null;                                      // 確定=暫定と値が変わった最初のsync
+            if (fixAt == null && amount !== initial) fixAt = now;
+            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now });
           });
         } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
       }
@@ -2398,6 +2407,41 @@
         if (tsUpdates.length) await sbUpsert('orders', tsUpdates);
         log[log.length - 1] = `🕒 注文時刻 ${tsUpdates.length}件 補完 ✅${noTs.length > tsTargets.length ? `（残り${noTs.length - tsTargets.length}件は次回同期で）` : ''}`; st(log.join('\n'));
       } catch (e) { say(`🕒 注文時刻: ⚠ ${String(e.message).slice(0, 40)}`); }
+
+      // 5.6) 未払い(200)・キャンセル/返品(600) も取り込む（利益ページのフィルタ表示用。セラーセンターの全注文を網羅）
+      say('🚫 未払い・キャンセル注文を取得中...');
+      let extraNew = 0;
+      for (const region of targets) {
+        for (const tab of [200, 600]) {
+          try {
+            const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.${tab}&order=order_id`))
+              .map(o => String(o.order_id)));
+            let list = [];
+            for (let p = 1; p <= 10; p++) { // 直近500件まで（過去の大量キャンセルは遡らない）
+              const j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
+                order_list_tab: tab, entity_type: 1,
+                pagination: { from_page_number: 1, page_number: p, page_size: 50 } });
+              if (j.code !== 0) throw new Error(`index code=${j.code}`);
+              const idx = (j.data && j.data.index_list) || [];
+              list = list.concat(idx);
+              const total = ((j.data || {}).pagination || {}).total || 0;
+              if (!idx.length || list.length >= total) break;
+            }
+            // 200(未払い)は状態が変わり得るので毎回全件更新、600(キャンセル)は差分のみ
+            const targetList = tab === 200 ? list : list.filter(x => !known.has(String(x.order_id)));
+            const rows = [];
+            for (let i = 0; i < targetList.length; i += 5) {
+              const j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
+                order_list_tab: tab, need_count_down_desc: false, order_param_list: targetList.slice(i, i + 5) });
+              if (j.code !== 0) continue;
+              ((j.data || {}).card_list || []).forEach(c => { const oc2 = c && c.order_card; if (oc2) rows.push(orderRowToDb(parseOrderCard(region, oc2, tab))); });
+            }
+            if (rows.length) await sbUpsert('orders', rows);
+            extraNew += rows.length;
+          } catch (e) { say(`　${region.cc} tab${tab}: ⚠ ${String(e.message).slice(0, 40)}`); }
+        }
+      }
+      say(`🚫 未払い・キャンセル ${extraNew}件 保存 ✅`);
 
       // 6) 利益管理表ミラー（仕入額AL列・入金額G列）
       if (settings.sheetId) {
