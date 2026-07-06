@@ -690,10 +690,13 @@
       item_id: (li.inner_item_ext_info || {}).item_id || null,
       variation: (li.description || '').startsWith('Variation:') ? li.description.slice(10).replace(/\[[^\]]*\]\s*$/, '').trim() : '',
     })));
-    // 予約商品(Pre-Order)判定：候補フィールドを広めに拾う（Shopeeのカード構造差異に対応）
+    // Shopeeのカードに含まれる警告/ラベルの表示文字列を直接拾う（自前計算せずShopeeの実データ）
     const oe = oc.order_ext_info || {}, ch = oc.card_header || {};
-    const labelHit = (arr) => Array.isArray(arr) && arr.some(l => /pre.?order/i.test((l && (l.label || l.text || l.name || l.type || l.tag)) + ''));
-    const preOrder = !!(oe.pre_order || ch.pre_order || oe.is_pre_order || labelHit(ch.card_label_list) || labelHit(ch.card_comment_info && ch.card_comment_info.label_list));
+    const scanText = JSON.stringify([ch, oc.status_info, oe, oc.fulfilment_info]);
+    const preOrder = /pre.?order/i.test(scanText);
+    // 「Cancelled in N day(s)」「Risk of late shipment」「Late Shipment」等をそのまま抽出
+    const warnHit = scanText.match(/Cancelled in \d+\s*days?|Risk of late shipment|Late Shipment|pending item with your shipment/i);
+    const warn = warnHit ? warnHit[0] : '';
     return {
       region, tab,
       sn: (oc.card_header || {}).order_sn || '',
@@ -703,7 +706,7 @@
       shipBy: (oc.order_ext_info || {}).ship_by_date || 0,
       tracking: (((oc.fulfilment_info || {}).tracking_number_list) || [])[0] || '',
       total: ((oc.payment_info || {}).total_price || 0) / 100000, // 現地通貨額
-      preOrder, items,
+      preOrder, warn, items,
     };
   }
   const orderRowToDb = o => ({
@@ -1267,8 +1270,8 @@
       rows = rows.filter(r => r.buyer.toLowerCase().includes(q) || r.sn.toLowerCase().includes(q) ||
         r.items.some(it => (it.name || '').toLowerCase().includes(q) || (it.variation || '').toLowerCase().includes(q)));
     }
-    // 未発送(300)を先頭に、期限が近い順。発送済み(400)は後ろ
-    rows.sort((a, b) => (a.tab - b.tab) || (a.shipBy || 9e12) - (b.shipBy || 9e12));
+    // 新しい注文順（SN先頭=YYMMDD）。同日はSNで安定ソート
+    rows.sort((a, b) => String(b.sn || '').localeCompare(String(a.sn || '')));
     list.innerHTML = '';
     const loading = [...state.orders.perCountry.values()].some(oc => oc.status === 'loading');
     if (!rows.length) {
@@ -1286,7 +1289,12 @@
       const arranged = r.tab === 300 && !!r.tracking; // 発送手配済（Processed）
       const isLate = r.tab === 300 && !r.tracking && r.shipBy && r.shipBy < nowSec();
       const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
-      const flags = (isLate ? badge('#d93025', '遅延', 'Late Shipment：未発送のまま期日超過') : '') + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
+      // Shopeeの実際の警告（あれば優先表示）＋予約
+      let warnBadge = '';
+      if (/Cancelled in/i.test(r.warn || '')) warnBadge = badge('#b00020', '⚠自動キャンセル間近', 'Shopee: ' + esc(r.warn));
+      else if (/Risk of late/i.test(r.warn || '')) warnBadge = badge('#d93025', '⚠遅延リスク', 'Shopee: Risk of late shipment');
+      else if (/Late Shipment/i.test(r.warn || '') || isLate) warnBadge = badge('#d93025', '遅延', 'Late Shipment');
+      const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
       const statusLabel = r.tab !== 300 ? '' : (arranged ? '<br><b style="color:#1a7f37">発送手配済</b>' : '<br><b style="color:#d93025">未発送</b>');
       const row = document.createElement('div');
       row.className = 'ord-row';
@@ -1346,6 +1354,23 @@
       } catch (e) { txt = `<span style="color:#d93025">❌ ${esc(e.message)}</span>（timeout/network=回線かブリッジ・log in系=再ログイン）`; }
       lines[lines.length - 1] = `<div><b style="color:${region.color}">${region.cc}</b> ${txt}</div>`; draw();
     }
+    // 注文カードの構造検査：Shopeeの警告(Late/Cancelled)・予約(Pre-Order)テキストがカードのどこにあるか特定用
+    try {
+      const bregion = targets.find(r => r.cc === 'BR') || targets[0];
+      const idxJ = JSON.parse(await bridgeRequest('POST', `https://${bregion.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
+        JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 3 } })));
+      const idxList = ((idxJ.data || {}).index_list) || [];
+      if (idxList.length) {
+        const cardJ = JSON.parse(await bridgeRequest('POST', `https://${bregion.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`,
+          JSON.stringify({ order_list_tab: 300, need_count_down_desc: false, order_param_list: idxList.slice(0, 1) })));
+        const oc = (((cardJ.data || {}).card_list || [])[0] || {}).order_card || {};
+        const scan = JSON.stringify([oc.card_header, oc.status_info, oc.order_ext_info, oc.fulfilment_info]);
+        const found = (scan.match(/Cancelled in \d+\s*days?|Risk of late shipment|Late Shipment|pre.?order/ig) || []).join(', ') || '（該当テキストなし＝i18nコードの可能性）';
+        lines.push(`<div style="margin-top:8px;font-size:11px"><b>${bregion.cc} カード検査</b>：警告/予約テキスト = <b>${esc(found)}</b>（全文はコンソール[診断カード]）</div>`);
+        lines.push(`<div style="font-size:10px;color:#555;max-height:110px;overflow:auto;background:#f7f7f7;padding:6px;border-radius:5px;margin-top:4px">status_info: ${esc(JSON.stringify(oc.status_info || {}).slice(0, 600))}</div>`);
+        console.log('[診断カード] order_card 全体:', oc);
+      }
+    } catch (e) { lines.push(`<div style="font-size:11px;color:#d93025">カード検査失敗: ${esc(e.message)}</div>`); }
     lines.push('<div class="smd-dim" style="font-size:11px;margin-top:6px">code≠0でauth/loginの語→その国のSeller Centerに再ログイン。非JSON→そのタブでSeller Centerを開き直す。timeout/network error→ブリッジ/回線。全て✅なら「更新」で通常表示に戻ります。</div>'); draw();
   }
   document.getElementById('ord-diag').addEventListener('click', diagnoseOrders);
