@@ -176,6 +176,8 @@
       <button data-p="stock">🏷 在庫管理</button>
       <button data-p="buy">🛒 仕入れ管理</button>
       <button data-p="profit">💹 利益管理</button>
+      <button data-p="expenses">💴 入出金・経費</button>
+      <button data-p="returns">↩️ 返品・キャンセル</button>
       <div class="ng">情報・マスタ</div>
       <button data-p="customers">👤 顧客管理</button>
       <button data-p="suppliers">🏪 仕入れ先</button>
@@ -372,6 +374,17 @@
   <div id="page-ship" style="display:none">
     <div class="smd-pagehead">🚚 梱包・発送 <span class="smd-dim" style="font-weight:400;font-size:12px">（発送待ちの注文＋SLS伝票印刷）</span></div>
     <div id="ship-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- 返品・キャンセル -->
+  <div id="page-returns" style="display:none">
+    <div class="smd-pagehead">↩️ 返品・キャンセル <span class="smd-dim" style="font-weight:400;font-size:12px">（キャンセル注文を自動抽出＋理由・返金額・再出品可否を記録）</span>
+      <button class="smd-btn" id="ret-refresh" style="margin-left:10px">🔄 更新</button></div>
+    <div id="ret-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- 入出金・経費 -->
+  <div id="page-expenses" style="display:none">
+    <div class="smd-pagehead">💴 入出金・経費 <span class="smd-dim" style="font-weight:400;font-size:12px">（送料・梱包資材・手数料などの経費を記録し、粗利から純利益を算出）</span></div>
+    <div id="exp-body" style="padding:12px 20px"></div>
   </div>
   <!-- アラート -->
   <div id="page-alerts" style="display:none">
@@ -766,8 +779,10 @@
     if (p === 'changelog') renderChangelog();
     if (p === 'manual') renderManual();
     if (p === 'alerts') renderAlerts();
+    if (p === 'expenses') renderExpenses();
+    if (p === 'returns') renderReturns();
   }
-  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','customers','suppliers','list','rank','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','customers','suppliers','list','rank','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p);
@@ -1714,6 +1729,164 @@
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
       : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
   }
+  // ---------------- 💴 入出金・経費（純利益） ----------------
+  const EXP_CATS = ['送料', '梱包資材', 'Shopee手数料', '広告費', '仕入送料', 'その他'];
+  const exp = { ym: null, rows: null };
+  const jstYm = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
+  const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  async function renderExpenses() {
+    const body = document.getElementById('exp-body');
+    if (!exp.ym) exp.ym = jstYm();
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    const [y, m] = exp.ym.split('-').map(Number);
+    const nextYm = m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0');
+    let rows;
+    try { rows = await sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`); }
+    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    exp.rows = rows;
+    const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
+    const byCat = {}; rows.forEach(r => { byCat[r.category] = (byCat[r.category] || 0) + (r.amount || 0); });
+    const months = []; for (let i = 0; i < 12; i++) { const d = new Date(y, m - 1 - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
+    const catList = EXP_CATS.concat(Object.keys(byCat).filter(c => !EXP_CATS.includes(c)));
+    // 純利益（利益ページで同じ月を開くと粗利が入る）
+    const grossOk = pf.grossYm === exp.ym && typeof pf.grossTotal === 'number';
+    const net = grossOk ? pf.grossTotal - total : null;
+    const netCard = `<div class="tool-card" style="margin:0 0 12px;max-width:520px;background:#f7fbf8;border:1px solid #d6ecdd">
+      <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 純利益（${exp.ym}）</div>
+      ${grossOk
+        ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件・利益ページ基準）</span><br>
+           経費合計 <b style="color:#d93025">− ${fmtJpy(total)}</b><br>
+           <span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(net)}</b></span></div>`
+        : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同じ月（${exp.ym}）を開くと自動で反映されます。<br>現在の粗利データ: ${pf.grossYm ? esc(pf.grossYm) + '（' + fmtJpy(pf.grossTotal || 0) + '）' : '未計算'}<br>経費合計 <b style="color:#d93025">${fmtJpy(total)}</b></div>`}
+    </div>`;
+    // 入力フォーム
+    const catOpts = EXP_CATS.map(c => `<option>${c}</option>`).join('');
+    const form = `<div class="tool-card" style="margin:0 0 12px;max-width:none">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-weight:700">月:</span>
+        <select id="exp-month" style="padding:5px;font-size:13px">${months.map(mm => `<option ${mm === exp.ym ? 'selected' : ''}>${mm}</option>`).join('')}</select>
+        <span style="color:#ccc">｜</span>
+        <span class="smd-dim" style="font-size:12px">経費を追加:</span>
+        <input type="date" id="exp-date" value="${jstToday()}" style="padding:5px;font-size:13px">
+        <select id="exp-cat" style="padding:5px;font-size:13px">${catOpts}</select>
+        <input type="number" id="exp-amt" placeholder="金額(円)" style="padding:5px;font-size:13px;width:110px">
+        <input type="text" id="exp-memo" placeholder="メモ（任意）" style="padding:5px;font-size:13px;width:180px">
+        <button class="smd-btn primary" id="exp-add">＋ 追加</button>
+        <span id="exp-msg" class="smd-dim" style="font-size:12px"></span>
+      </div></div>`;
+    // カテゴリ別集計
+    const catCards = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px">` +
+      catList.filter(c => byCat[c]).map(c => `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px"><div class="smd-dim" style="font-size:11px">${esc(c)}</div><div style="font-weight:700;font-size:15px">${fmtJpy(byCat[c] || 0)}</div></div>`).join('') +
+      `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px;background:#fff4f2"><div class="smd-dim" style="font-size:11px">経費合計</div><div style="font-weight:700;font-size:15px;color:#d93025">${fmtJpy(total)}</div></div></div>`;
+    // 明細
+    const table = `<div class="tool-card" style="margin:0;max-width:720px"><div class="pf-scroll" style="max-height:50vh"><table class="pf-table"><tr><th>日付</th><th>カテゴリ</th><th>金額</th><th>メモ</th><th></th></tr>` +
+      (rows.length ? rows.map(r => `<tr>
+        <td style="font-size:12px;white-space:nowrap">${esc(r.ymd)}</td>
+        <td style="font-size:12px">${esc(r.category)}</td>
+        <td><input type="number" class="exp-amt-e" data-id="${r.id}" value="${r.amount}" style="width:96px;padding:2px 4px;font-size:12px;text-align:right"></td>
+        <td><input type="text" class="exp-memo-e" data-id="${r.id}" value="${esc(r.memo || '')}" style="width:100%;min-width:140px;padding:2px 4px;font-size:12px"></td>
+        <td><button class="exp-del" data-id="${r.id}" title="削除" style="border:none;background:none;cursor:pointer;color:#d93025">🗑</button></td></tr>`).join('')
+        : `<tr><td colspan="5" class="smd-dim" style="padding:12px">この月の経費はまだありません。</td></tr>`) +
+      `</table></div></div>`;
+    body.innerHTML = netCard + form + catCards + table;
+    // ハンドラ
+    document.getElementById('exp-month').addEventListener('change', e => { exp.ym = e.target.value; renderExpenses(); });
+    document.getElementById('exp-add').addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const amt = Number(document.getElementById('exp-amt').value);
+      const ymd = document.getElementById('exp-date').value;
+      const cat = document.getElementById('exp-cat').value;
+      const memo = document.getElementById('exp-memo').value.trim();
+      if (!ymd || !amt) { document.getElementById('exp-msg').textContent = '日付と金額を入力してください'; return; }
+      try {
+        await sbUpsert('expenses', [{ ymd, category: cat, amount: Math.round(amt), memo: memo || null }]);
+        logAct('入出金・経費', '経費追加', cat, `${ymd} / ¥${Math.round(amt).toLocaleString()}${memo ? ' / ' + memo : ''}`);
+        renderExpenses();
+      } catch (e) { document.getElementById('exp-msg').textContent = '失敗: ' + e.message; }
+    });
+    body.querySelectorAll('.exp-amt-e').forEach(el => el.addEventListener('change', async e => {
+      try { await sbPatch('expenses', 'id=eq.' + e.target.dataset.id, { amount: Math.round(Number(e.target.value) || 0) }); renderExpenses(); }
+      catch (err) { alert('更新失敗: ' + err.message); }
+    }));
+    body.querySelectorAll('.exp-memo-e').forEach(el => el.addEventListener('change', async e => {
+      try { await sbPatch('expenses', 'id=eq.' + e.target.dataset.id, { memo: e.target.value.trim() || null }); }
+      catch (err) { alert('更新失敗: ' + err.message); }
+    }));
+    body.querySelectorAll('.exp-del').forEach(el => el.addEventListener('click', async () => {
+      if (!confirm('この経費を削除しますか？')) return;
+      try { await sbDelete('expenses', 'id=eq.' + el.dataset.id); logAct('入出金・経費', '経費削除', el.dataset.id, ''); renderExpenses(); }
+      catch (err) { alert('削除失敗: ' + err.message); }
+    }));
+  }
+  // ---------------- ↩️ 返品・キャンセル管理 ----------------
+  const RET_KINDS = ['キャンセル', '返品', '一部返金', 'その他'];
+  const RET_RESTOCK = ['', '再出品可', '廃棄', '未定'];
+  async function saveIssue(cc, sn, patch) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
+    try {
+      await sbUpsert('order_issues', [Object.assign({ cc, sn, updated_at: new Date().toISOString() }, patch)]);
+      logAct('返品・キャンセル', '記録', sn, cc + ' / ' + Object.entries(patch).map(([k, v]) => `${k}=${v == null ? '(空)' : v}`).join(' '));
+      return true;
+    } catch (e) { alert('保存失敗: ' + e.message); return false; }
+  }
+  async function renderReturns() {
+    const body = document.getElementById('ret-body');
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let cancelled, issues;
+    try {
+      [cancelled, issues] = await Promise.all([
+        sbGetAll('orders', 'select=cc,sn,buyer,status,items&tab=eq.600&order=sn.desc'),
+        sbGetAll('order_issues', 'select=*'),
+      ]);
+    } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
+    const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
+    const extra = issues.filter(r => !cancelKeys.has(r.cc + ':' + r.sn)).map(r => ({ cc: r.cc, sn: r.sn, buyer: '', status: '手動追加', items: [] }));
+    const rows = cancelled.concat(extra);
+    const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
+    const recorded = issues.length;
+    const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
+    const sel = (cls, cc, sn, opts, cur) => `<select class="${cls}" data-cc="${esc(cc)}" data-sn="${esc(sn)}" style="padding:2px 4px;font-size:11px">${opts.map(o => `<option ${o === (cur || '') ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`;
+    const rowHtml = rows.map(o => {
+      const it = (o.items || [])[0] || {};
+      const iss = issueMap.get(o.cc + ':' + o.sn) || {};
+      const rg = regionByCc(o.cc);
+      return `<tr>
+        <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
+        <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
+        <td style="font-size:11px">${esc(o.buyer || '')}</td>
+        <td style="font-size:11px">${esc((it.name || '').slice(0, 30))}</td>
+        <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
+        <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="理由" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
+        <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
+        <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
+        <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
+      </tr>`;
+    }).join('');
+    body.innerHTML =
+      `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル注文 ${cancelled.length}件 ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>` +
+      `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
+        <select id="ret-cc" style="padding:5px;font-size:13px">${ccOpts}</select>
+        <input type="text" id="ret-sn" placeholder="注文SN" style="padding:5px;font-size:13px;width:180px">
+        <button class="smd-btn" id="ret-add">＋ 追加</button>
+        <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1080px">` +
+      `<tr><th>国</th><th>注文SN</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
+      (rows.length ? rowHtml : `<tr><td colspan="9" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      `</table></div></div>`;
+    // ハンドラ
+    body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
+    body.querySelectorAll('.ri-restock').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { restock: e.target.value || null })));
+    body.querySelectorAll('.ri-reason').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { reason: e.target.value.trim() || null })));
+    body.querySelectorAll('.ri-memo').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { memo: e.target.value.trim() || null })));
+    body.querySelectorAll('.ri-refund').forEach(el => el.addEventListener('change', async e => { if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, { refund_jpy: e.target.value === '' ? null : Math.round(Number(e.target.value)) })) renderReturns(); }));
+    document.getElementById('ret-add').addEventListener('click', async () => {
+      const cc = document.getElementById('ret-cc').value, sn = document.getElementById('ret-sn').value.trim();
+      if (!sn) { document.getElementById('ret-msg').textContent = 'SNを入力してください'; return; }
+      if (await saveIssue(cc, sn, { kind: '返品' })) renderReturns();
+    });
+  }
   // ---------------- 🧾 操作ログ ----------------
   async function renderLog() {
     const body = document.getElementById('log-body');
@@ -1728,6 +1901,9 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '💴入出金・経費ページを新設（経費を記録→カテゴリ別集計＋粗利から純利益を自動算出。expensesテーブル）',
+      '↩️返品・キャンセル管理ページを新設（キャンセル注文を自動抽出＋種別/理由/返金額/再出品可否を記録。order_issuesテーブル）',
+      '仕入れ確証をSupabase Storage(proofsバケット)にも保存する新userscript（既存Drive版と並行。mercari-purchase-proof-supabase.user.js）',
       '在庫ラベルの一括印刷（左端☑で複数選択→まとめて印刷。ヘッダー☑で表示中を全選択）',
       '⚠️アラートページを新設（発送期日超過/24h・相手未発送・入庫待ち長期・確証未取得・滞留在庫を自動抽出。サイドバーに件数バッジ）',
       '在庫に「配送」列を追加（仕入元→自宅の配送方法/追跡番号/配達状況。メルカリ配送userscriptがSupabaseへ直書き＝スプシ非経由）',
@@ -2590,6 +2766,7 @@
       profit: () => `<b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件</span>`,
       rate: () => pairCost ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairCost * 100)}%</span>` : '',
     };
+    pf.grossTotal = pairProfit; pf.grossN = pairN; pf.grossYm = ym; // 純利益(経費ページ)用に粗利合計を退避
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利・ROIは仕入額（手入力/確定 または 在庫連携🏷の自動算出）と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。仕入額が全く無い注文は利益計算未完了＝空欄。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。キャンセルはグレー表示。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
     body.innerHTML = html;
@@ -3214,6 +3391,7 @@
     setModeBadge();
     renderSummary();
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
+    document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
