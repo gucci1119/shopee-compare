@@ -1487,15 +1487,20 @@
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
     const shown = rows.slice(0, 400);
+    if (!stock.sel) stock.sel = new Set();
+    const selCount = stock.sel.size;
     body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
-      `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・セラー名・仕入額・コンディション・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。ItemID横の✂でまとめ仕入れを枝番分割（仕入額を均等割り）。画像はShopee出品名から自動マッチ。</span></div>` +
+      `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
+      `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
+      `<span class="smd-dim" style="font-size:11px;margin-left:8px">左端☑で複数選び「一括印刷」。仕入元・仕入額・状態などはセルで直接編集（Supabaseに保存）。ItemID横の✂でまとめ分割。</span></div>` +
       `<div id="stk-addform"></div>` +
-      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1480px">` +
-      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>Shopee注文</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th title="仕入元→自宅の配送状況（メルカリはuserscript連携）">配送</th><th>棚</th><th>確証</th><th>備考</th></tr>' +
+      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1520px">` +
+      '<tr><th><input type="checkbox" id="stk-selall" title="表示中を全選択/解除"></th><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>Shopee注文</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th title="仕入元→自宅の配送状況（メルカリはuserscript連携）">配送</th><th>棚</th><th>確証</th><th>備考</th></tr>' +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
         return '<tr>' +
+        `<td><input type="checkbox" class="stk-sel" ${di}${stock.sel.has(r.item_id) ? ' checked' : ''}></td>` +
         `<td>${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>` +
         `<td style="font-size:11px;white-space:nowrap">${(() => { const o = stkOrigin(r); return o === 'auto' ? '<span title="Gmailから自動登録" style="background:#e7f5ea;color:#1a7f37;font-size:8.5px;padding:1px 3px;border-radius:3px;margin-right:3px">自動</span>' : o === 'sheet' ? '<span title="スプシ(InventoryItem)由来" style="background:#eeeeee;color:#777;font-size:8.5px;padding:1px 3px;border-radius:3px;margin-right:3px">スプシ</span>' : ''; })()}` +
           `<input class="li stk-itemid" ${di} value="${esc(r.item_id || '')}" title="ItemID（編集可。印刷済みQRラベルがある場合は貼り替えが必要）" style="width:150px;font-size:10.5px;padding:2px 4px;color:#7a6ba7">` +
@@ -1546,6 +1551,25 @@
     body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
+    // ラベル一括印刷：チェックボックス選択
+    const updateStkSelUI = () => {
+      const n = stock.sel.size;
+      const pb = document.getElementById('stk-printsel'), cb = document.getElementById('stk-selclear');
+      if (pb) { pb.disabled = !n; pb.textContent = '🖨️ 選択を一括印刷' + (n ? '（' + n + '）' : ''); }
+      if (cb) cb.style.display = n ? '' : 'none';
+    };
+    body.querySelectorAll('.stk-sel').forEach(el => el.addEventListener('change', e => {
+      const id = e.target.dataset.id;
+      if (e.target.checked) stock.sel.add(id); else stock.sel.delete(id);
+      updateStkSelUI();
+    }));
+    const selAll = document.getElementById('stk-selall');
+    if (selAll) selAll.addEventListener('change', e => {
+      body.querySelectorAll('.stk-sel').forEach(cb => { cb.checked = e.target.checked; if (e.target.checked) stock.sel.add(cb.dataset.id); else stock.sel.delete(cb.dataset.id); });
+      updateStkSelUI();
+    });
+    document.getElementById('stk-printsel').addEventListener('click', () => { if (stock.sel.size) stockPrintLabels([...stock.sel]); });
+    document.getElementById('stk-selclear').addEventListener('click', () => { stock.sel.clear(); stockRender(); });
     stockAddForm();
   }
   // ---------------- 操作ログ記録（fire-and-forget） ----------------
@@ -1704,6 +1728,7 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '在庫ラベルの一括印刷（左端☑で複数選択→まとめて印刷。ヘッダー☑で表示中を全選択）',
       '⚠️アラートページを新設（発送期日超過/24h・相手未発送・入庫待ち長期・確証未取得・滞留在庫を自動抽出。サイドバーに件数バッジ）',
       '在庫に「配送」列を追加（仕入元→自宅の配送方法/追跡番号/配達状況。メルカリ配送userscriptがSupabaseへ直書き＝スプシ非経由）',
       '操作ログの記録対象を拡大（仕入額入力・伝票発行・倉庫へ発送・ItemID変更・まとめ分割・手動登録）',
