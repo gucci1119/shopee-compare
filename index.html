@@ -464,8 +464,9 @@
     <input type="text" id="set-sbkey" placeholder="sb_publishable_...">
     <label>Supabase secretキー（書き込み用・同期するPCのみ）</label>
     <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
-    <label>利益管理表スプレッドシートID（⚠月替わりで差し替え）</label>
-    <input type="text" id="set-sheetid" placeholder="1MCiDFf...">
+    <label>利益管理表スプレッドシートID（月替わり）— 1行 = <b>YYYY-MM: ID</b>。今月の行を毎月足すだけ（過去分は残す）</label>
+    <textarea id="set-sheetids" placeholder="2026-07: 1MCiDFf...&#10;2026-06: 1rn9enG6..." style="width:100%;height:74px;font-family:monospace;font-size:11px"></textarea>
+    <div class="smd-dim" style="font-size:11px;margin-top:2px">月の行が無ければその月はシートミラーをスキップ（DB独立運用は継続）。同期は「今月」の行を使います。</div>
     <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">🆕 出品: タイトルテンプレ（{name}{hardware}{jpseries}{variation}）</label>
     <input type="text" id="set-listtitle" placeholder="[Used] {name} {hardware} Japan Ver. {jpseries}">
     <label>バリエーション名テンプレ（{hardware}{variation}）</label>
@@ -510,7 +511,7 @@
 
   // ---------------- 設定（localStorage） ----------------
   const settings = Object.assign({
-    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '',
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {},
     // 出品コンポーザー用
     listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
     listVarTpl: '{hardware} {variation}',
@@ -2242,6 +2243,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const exp = { ym: null, rows: null };
   const jstYm = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
   const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
+  const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
   async function renderExpenses() {
     const body = document.getElementById('exp-body');
     if (!exp.ym) exp.ym = jstYm();
@@ -3732,13 +3735,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       say(`🚫 未払い・キャンセル ${extraNew}件 保存 ✅`);
 
-      // 6) 利益管理表ミラー（仕入額AL列・入金額G列）
-      if (settings.sheetId) {
-        say('📄 利益管理表を読み取り中...');
+      // 6) 利益管理表ミラー（仕入額AL列・入金額G列）— 今月のシートIDを使う（月替わり対応）
+      const mirrorSheetId = sheetIdForMonth(jstYm());
+      if (mirrorSheetId) {
+        say(`📄 利益管理表を読み取り中...（${jstYm()}）`);
         const costRows = [];
         for (const region of targets) {
           try {
-            const tbl = await gvizFetch(settings.sheetId, region.cc.toLowerCase() + '_p');
+            const tbl = await gvizFetch(mirrorSheetId, region.cc.toLowerCase() + '_p');
             const seen = new Set();
             (tbl.rows || []).forEach(row => {
               const c = row.c || [];
@@ -3756,6 +3760,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         }
         await sbUpsert('costs', costRows);
         say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅`);
+      } else {
+        say(`📄 利益管理表ミラー: スキップ（${jstYm()} のシートID未設定。⚙️設定に「${jstYm()}: ID」を追加）`);
       }
 
       // 7) InventoryItem（在庫）ミラー — 既定で停止（在庫はGmail/GASでポータルへ直接反映。シートは並行運用だが再取込しない＝二重回避）
@@ -3994,7 +4000,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('set-deptoken').value = settings.depToken;
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
-    document.getElementById('set-sheetid').value = settings.sheetId;
+    {
+      const m = settings.sheetIds || {};
+      let lines = Object.keys(m).sort().reverse().map(k => `${k}: ${m[k]}`);
+      if (!lines.length && settings.sheetId) lines = [`${jstYm()}: ${settings.sheetId}`]; // 旧・単一IDを今月分として引き継ぎ
+      document.getElementById('set-sheetids').value = lines.join('\n');
+    }
     document.getElementById('set-listtitle').value = settings.listTitleTpl;
     document.getElementById('set-listvar').value = settings.listVarTpl;
     document.getElementById('set-listspecs').value = settings.listSpecs;
@@ -4015,7 +4026,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     settings.depToken = document.getElementById('set-deptoken').value.trim();
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
-    settings.sheetId = document.getElementById('set-sheetid').value.trim();
+    {
+      // 「YYYY-MM: ID」の各行を月→IDマップに。今月分は settings.sheetId にも保持（後方互換）
+      const map = {};
+      document.getElementById('set-sheetids').value.split('\n').forEach(line => {
+        const m = line.match(/(\d{4}-\d{2})\s*[:=]\s*([A-Za-z0-9_-]{20,})/);
+        if (m) map[m[1]] = m[2];
+      });
+      settings.sheetIds = map;
+      settings.sheetId = map[jstYm()] || '';
+    }
     settings.listTitleTpl = document.getElementById('set-listtitle').value;
     settings.listVarTpl = document.getElementById('set-listvar').value;
     settings.listSpecs = document.getElementById('set-listspecs').value;
