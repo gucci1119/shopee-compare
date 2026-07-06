@@ -1371,6 +1371,26 @@
         console.log('[診断カード] order_card 全体:', oc);
       }
     } catch (e) { lines.push(`<div style="font-size:11px;color:#d93025">カード検査失敗: ${esc(e.message)}</div>`); }
+    // 返品/キャンセルAPI探索（発送前/後・理由の取得用にエンドポイントを特定）
+    try {
+      const br = targets.find(r => r.cc === 'BR') || targets[0];
+      const cands = [
+        ['v3 return_list', '/api/v3/return/get_return_list?SPC_CDS_VER=2', { page_number: 1, page_size: 5, return_list_tab: 0 }],
+        ['v3 return_list(pg)', '/api/v3/return/get_return_list?SPC_CDS_VER=2', { pagination: { page_number: 1, page_size: 5 } }],
+        ['v4 returns', '/api/v4/returns/get_return_list?SPC_CDS_VER=2', { page_number: 1, page_size: 5 }],
+      ];
+      let hit = '';
+      for (const [label, path, bodyObj] of cands) {
+        try {
+          const raw = await bridgeRequest('POST', `https://${br.host}${path}`, JSON.stringify(bodyObj));
+          let j = null; try { j = JSON.parse(raw); } catch (_) {}
+          const okc = j && (j.code === 0 || (j.data && (j.data.return_list || j.data.list)));
+          hit += `<div style="font-size:10px;color:${okc ? '#1a7f37' : '#999'}">返品API [${label}]: ${okc ? '✅ 成功' : 'code=' + (j ? j.code : '非JSON')} ${esc(String((j && (j.message || j.error || '')) || raw.slice(0, 60)))}</div>`;
+          if (okc) { console.log('[診断 返品API]', label, j); break; }
+        } catch (e) { hit += `<div style="font-size:10px;color:#999">返品API [${label}]: ❌ ${esc(e.message)}</div>`; }
+      }
+      lines.push('<div style="margin-top:6px;font-size:11px"><b>返品/キャンセルAPI探索</b>（発送前/後・理由用）</div>' + hit);
+    } catch (e) { lines.push(`<div style="font-size:11px;color:#d93025">返品API探索失敗: ${esc(e.message)}</div>`); }
     lines.push('<div class="smd-dim" style="font-size:11px;margin-top:6px">code≠0でauth/loginの語→その国のSeller Centerに再ログイン。非JSON→そのタブでSeller Centerを開き直す。timeout/network error→ブリッジ/回線。全て✅なら「更新」で通常表示に戻ります。</div>'); draw();
   }
   document.getElementById('ord-diag').addEventListener('click', diagnoseOrders);
@@ -2323,7 +2343,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let cancelled, issues;
     try {
       [cancelled, issues] = await Promise.all([
-        sbGetAll('orders', 'select=cc,sn,buyer,status,items&tab=eq.600&order=sn.desc'),
+        sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
         sbGetAll('order_issues', 'select=*'),
       ]);
     } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
@@ -2339,10 +2359,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const it = (o.items || [])[0] || {};
       const iss = issueMap.get(o.cc + ':' + o.sn) || {};
       const rg = regionByCc(o.cc);
+      const dt = o.order_ts ? jstDateTime(o.order_ts) : (o.order_date || snToDate(o.sn) || '');
       return `<tr>
         <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
         <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
         <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
+        <td style="font-size:11px;white-space:nowrap">${esc(dt)}</td>
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
         <td style="font-size:11px">${esc((it.name || '').slice(0, 30))}</td>
         <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
@@ -2361,8 +2383,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1140px">` +
-      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
-      (rows.length ? rowHtml : `<tr><td colspan="9" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
+      (rows.length ? rowHtml : `<tr><td colspan="11" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
       `</table></div></div>`;
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
