@@ -178,11 +178,13 @@
       <button data-p="profit">💹 利益管理</button>
       <button data-p="expenses">💴 入出金・経費</button>
       <button data-p="returns">↩️ 返品・キャンセル</button>
+      <button data-p="summary">📈 月次サマリー</button>
       <div class="ng">情報・マスタ</div>
       <button data-p="customers">👤 顧客管理</button>
       <button data-p="suppliers">🏪 仕入れ先</button>
       <button data-p="list">🆕 出品管理</button>
       <button data-p="rank">📊 価格調整</button>
+      <button data-p="fx">💱 為替レート</button>
       <div class="ng">その他</div>
       <button data-p="log">🧾 操作ログ</button>
       <button data-p="changelog">🛠 改修履歴</button>
@@ -265,7 +267,8 @@
         <option value="auto">自動(メール)</option>
         <option value="sheet">スプシ由来</option>
       </select>
-      <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号">
+      <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号（ハンディスキャナ可）">
+      <button class="smd-btn" id="stock-scan" title="カメラで在庫QRを読み取って検索">📷 QRスキャン</button>
       <button class="smd-btn" id="stock-refresh" title="Supabaseから最新を再取得">🔄 更新</button>
       <span class="smd-dim" id="stock-note"></span>
     </div>
@@ -374,6 +377,16 @@
   <div id="page-ship" style="display:none">
     <div class="smd-pagehead">🚚 梱包・発送 <span class="smd-dim" style="font-weight:400;font-size:12px">（発送待ちの注文＋SLS伝票印刷）</span></div>
     <div id="ship-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- 月次サマリー・エクスポート -->
+  <div id="page-summary" style="display:none">
+    <div class="smd-pagehead">📈 月次サマリー <span class="smd-dim" style="font-weight:400;font-size:12px">（月次の損益と、古物台帳・経費・損益のCSV書き出し）</span></div>
+    <div id="summary-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- 為替レート -->
+  <div id="page-fx" style="display:none">
+    <div class="smd-pagehead">💱 為替レート <span class="smd-dim" style="font-weight:400;font-size:12px">（現地通貨→円の換算レート。売上・粗利・ROIの計算に使用）</span></div>
+    <div id="fx-body" style="padding:12px 20px"></div>
   </div>
   <!-- 返品・キャンセル -->
   <div id="page-returns" style="display:none">
@@ -781,8 +794,10 @@
     if (p === 'alerts') renderAlerts();
     if (p === 'expenses') renderExpenses();
     if (p === 'returns') renderReturns();
+    if (p === 'summary') renderExportSummary();
+    if (p === 'fx') renderFx();
   }
-  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','customers','suppliers','list','rank','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p);
@@ -1887,6 +1902,143 @@
       if (await saveIssue(cc, sn, { kind: '返品' })) renderReturns();
     });
   }
+  // ---------------- 💱 為替レート ----------------
+  async function applyFxRates() {
+    try {
+      const rows = await sbGetAll('fx_rates', 'select=*');
+      rows.forEach(r => { const rg = REGIONS.find(x => x.cc === r.cc); if (rg && r.rate_jpy != null) rg.rateJpy = Number(r.rate_jpy); });
+    } catch (e) { /* 未設定ならコード既定値のまま */ }
+  }
+  async function renderFx() {
+    const body = document.getElementById('fx-body');
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let rows; try { rows = await sbGetAll('fx_rates', 'select=*'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const map = new Map(rows.map(r => [r.cc, r]));
+    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:560px">
+      <div class="smd-dim" style="font-size:12px;margin-bottom:8px">1通貨あたりの円換算レート。保存すると<b>全ページの売上・粗利・ROI・純利益</b>に反映されます（Supabaseに保存＝全端末共通）。</div>
+      <table class="pf-table"><tr><th>国</th><th>通貨</th><th>1通貨 = ? 円</th><th>最終更新</th></tr>` +
+      REGIONS.map(rg => { const r = map.get(rg.cc); return `<tr>
+        <td><b style="color:${rg.color}">${rg.cc}</b></td><td>${esc(rg.cur)}</td>
+        <td><input type="number" step="any" class="fx-in" data-cc="${rg.cc}" value="${rg.rateJpy}" style="width:130px;padding:3px 5px;font-size:12px"></td>
+        <td class="smd-dim" style="font-size:11px">${r && r.updated_at ? esc(jstDateTime(r.updated_at)) : '—（コード既定値）'}</td></tr>`; }).join('') +
+      `</table>
+      <div style="margin-top:10px"><button class="smd-btn primary" id="fx-save">💾 保存して全ページに反映</button> <span id="fx-msg" class="smd-dim" style="font-size:12px"></span></div></div>`;
+    document.getElementById('fx-save').addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const ups = [...document.querySelectorAll('.fx-in')].map(i => ({ cc: i.dataset.cc, rate_jpy: Number(i.value), updated_at: new Date().toISOString() })).filter(x => !isNaN(x.rate_jpy) && x.rate_jpy > 0);
+      try {
+        await sbUpsert('fx_rates', ups);
+        ups.forEach(u => { const rg = REGIONS.find(x => x.cc === u.cc); if (rg) rg.rateJpy = u.rate_jpy; });
+        logAct('為替レート', '更新', '', ups.map(u => u.cc + '=' + u.rate_jpy).join(' '));
+        pf.ym = null; // 利益ページを次に開くとき新レートで再計算
+        document.getElementById('fx-msg').textContent = '保存しました（利益・売上などに反映）';
+      } catch (e) { document.getElementById('fx-msg').textContent = '失敗: ' + e.message; }
+    });
+  }
+  // ---------------- 📈 月次サマリー・エクスポート ----------------
+  const nextYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); };
+  function downloadCsv(name, rows) {
+    const csv = rows.map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  const invPurDate = (r) => r.purchase_ts ? String(r.purchase_ts).slice(0, 10) : (gvizDate(r.purchase_date) || '');
+  function ledgerRows(list) {
+    const head = ['受入年月日', '区分', '品目', '数量', '代価(円)', '仕入元', 'セラー', 'コンディション', 'SKU', 'ItemID', '確証URL'];
+    const body = list.map(r => [invPurDate(r), '買受', r.name || r.name_supplier || '', 1, r.price != null ? r.price : '', r.supplier || '', r.seller || '', r.condition || '', r.sku || '', r.item_id || '', r.proof || '']);
+    return [head].concat(body);
+  }
+  async function renderExportSummary() {
+    const body = document.getElementById('summary-body');
+    if (!exp.ym) exp.ym = jstYm();
+    const ym = exp.ym;
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let expenses, inv;
+    try { [expenses, inv] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${ym}-01&ymd=lt.${nextYmOf(ym)}-01&order=ymd`), ensureInv()]); }
+    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const expTotal = expenses.reduce((s, r) => s + (r.amount || 0), 0);
+    const grossOk = pf.grossYm === ym && typeof pf.grossTotal === 'number';
+    const net = grossOk ? pf.grossTotal - expTotal : null;
+    const invMonth = inv.filter(r => invPurDate(r).slice(0, 7) === ym);
+    const invAll = inv.filter(r => invPurDate(r));
+    const [yy, mm] = ym.split('-').map(Number); const months = [];
+    for (let i = 0; i < 12; i++) { const d = new Date(yy, mm - 1 - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
+    body.innerHTML =
+      `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span style="font-weight:700">対象月:</span>
+        <select id="sum-month" style="padding:5px;font-size:13px">${months.map(m => `<option ${m === ym ? 'selected' : ''}>${m}</option>`).join('')}</select>
+        <span class="smd-dim" style="font-size:12px">（経費ページと連動）</span></div></div>` +
+      `<div class="tool-card" style="margin:0 0 12px;max-width:560px;background:#f7fbf8;border:1px solid #d6ecdd">
+        <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 ${ym} 損益</div>
+        ${grossOk ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件）</span><br>経費合計 <b style="color:#d93025">− ${fmtJpy(expTotal)}</b><br><span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(net)}</b></span></div>`
+          : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同月（${ym}）を開くと反映されます（現在: ${pf.grossYm ? esc(pf.grossYm) : '未計算'}）。<br>経費合計 <b style="color:#d93025">${fmtJpy(expTotal)}</b> ・ 当月仕入 <b>${invMonth.length}</b>件</div>`}
+      </div>` +
+      `<div class="tool-card" style="margin:0;max-width:640px"><div style="font-weight:700;font-size:14px;margin-bottom:8px">📥 CSVエクスポート（Excel対応・BOM付き）</div>
+        <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
+          <button class="smd-btn" id="csv-ledger-m">📒 古物台帳（当月仕入 ${invMonth.length}件）</button>
+          <button class="smd-btn" id="csv-ledger-all">📒 古物台帳（全期間 ${invAll.length}件）</button>
+          <button class="smd-btn" id="csv-exp">💴 経費（${ym}・${expenses.length}件）</button>
+          <button class="smd-btn" id="csv-pl">🧮 月次損益サマリー（${ym}）</button>
+        </div>
+        <div class="smd-dim" style="font-size:11px;margin-top:8px">古物台帳=古物営業法の帳簿用（受入年月日・品目・代価・仕入元・確証URL）。確定申告は損益・経費CSVをそのまま集計に使えます。</div></div>`;
+    document.getElementById('sum-month').addEventListener('change', e => { exp.ym = e.target.value; renderExportSummary(); });
+    document.getElementById('csv-ledger-m').addEventListener('click', () => downloadCsv(`古物台帳_${ym}.csv`, ledgerRows(invMonth)));
+    document.getElementById('csv-ledger-all').addEventListener('click', () => downloadCsv(`古物台帳_全期間.csv`, ledgerRows(invAll)));
+    document.getElementById('csv-exp').addEventListener('click', () => downloadCsv(`経費_${ym}.csv`, [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(expenses.map(r => [r.ymd, r.category, r.amount, r.memo || '']))));
+    document.getElementById('csv-pl').addEventListener('click', () => downloadCsv(`月次損益_${ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', expTotal, expenses.length + '件'], ['純利益', net != null ? net : '', grossOk ? '' : '粗利未計算']]));
+  }
+  // ---------------- 📷 QRスキャン（在庫検索） ----------------
+  function loadJsQR() {
+    return new Promise((res, rej) => {
+      if (window.jsQR) return res();
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+      s.onload = () => res(); s.onerror = () => rej(new Error('QRライブラリの読み込みに失敗（オフライン？）'));
+      document.head.appendChild(s);
+    });
+  }
+  async function stockScanQR() {
+    const old = document.getElementById('qr-scan-ov'); if (old) old.remove();
+    const ov = document.createElement('div'); ov.id = 'qr-scan-ov';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.82);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px';
+    ov.innerHTML = `<div style="color:#fff;font-size:14px;font-weight:700">📷 在庫ラベルのQRをカメラにかざしてください</div>
+      <video id="qr-vid" playsinline muted style="width:min(90vw,440px);border-radius:12px;background:#000"></video>
+      <div id="qr-stat" style="color:#ddd;font-size:12px">カメラ起動中...</div>
+      <button class="smd-btn" id="qr-close">閉じる</button>`;
+    document.body.appendChild(ov);
+    const stat = ov.querySelector('#qr-stat'), vid = ov.querySelector('#qr-vid');
+    let stream = null, raf = null, stopped = false;
+    const cleanup = () => { stopped = true; if (raf) cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach(t => t.stop()); ov.remove(); };
+    ov.querySelector('#qr-close').addEventListener('click', cleanup);
+    ov.addEventListener('click', e => { if (e.target === ov) cleanup(); });
+    try { await loadJsQR(); } catch (e) { stat.textContent = e.message; return; }
+    const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      vid.srcObject = stream; await vid.play();
+      stat.textContent = 'スキャン中… QRを枠に映してください';
+      const tick = () => {
+        if (stopped) return;
+        if (vid.readyState === vid.HAVE_ENOUGH_DATA && vid.videoWidth) {
+          canvas.width = vid.videoWidth; canvas.height = vid.videoHeight;
+          ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+          if (code && code.data) {
+            const id = code.data.trim();
+            cleanup();
+            const inp = document.getElementById('stock-search'); if (inp) inp.value = id;
+            stock.q = id.toLowerCase();
+            if (state.page !== 'stock') showPage('stock'); else stockRender();
+            return;
+          }
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    } catch (e) { stat.textContent = 'カメラを開けません（' + e.message + '）。ハンディスキャナなら検索欄でそのまま読めます。'; }
+  }
   // ---------------- 🧾 操作ログ ----------------
   async function renderLog() {
     const body = document.getElementById('log-body');
@@ -1901,6 +2053,9 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '💱為替レートページを新設（通貨別の円換算レートを保存＝全ページの売上・粗利・ROI・純利益に反映。fx_rates）',
+      '📈月次サマリーページを新設（月次損益＋CSVエクスポート：古物台帳／経費／損益。確定申告・古物営業法帳簿用・Excel対応BOM付き）',
+      '在庫にQRスキャン（📷カメラで在庫QR→即検索・編集。ハンディスキャナは検索欄でそのまま）',
       '💴入出金・経費ページを新設（経費を記録→カテゴリ別集計＋粗利から純利益を自動算出。expensesテーブル）',
       '↩️返品・キャンセル管理ページを新設（キャンセル注文を自動抽出＋種別/理由/返金額/再出品可否を記録。order_issuesテーブル）',
       '仕入れ確証をSupabase Storage(proofsバケット)にも保存する新userscript（既存Drive版と並行。mercari-purchase-proof-supabase.user.js）',
@@ -3392,7 +3547,9 @@
     renderSummary();
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
+    document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
     if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
+    applyFxRates().then(() => { if (state.page === 'profit') renderProfit(true); }); // 保存済み為替レートをREGIONSへ適用（全計算に反映）
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
     setModeBadge();
