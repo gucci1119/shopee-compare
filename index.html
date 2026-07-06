@@ -1133,18 +1133,24 @@
   }
 
   // ---------------- 注文: 読み込み・描画 ----------------
+  // DB(orders)の最終同期分を国別に取得
+  function ordersFromDb() {
+    return sbGetAll('orders', 'select=*&tab=lt.500&order=ship_by.asc').then(rows => {
+      const byCc = {};
+      rows.forEach(o => {
+        (byCc[o.cc] = byCc[o.cc] || []).push({ sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
+          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], region: regionByCc(o.cc) });
+      });
+      return byCc;
+    });
+  }
+
   function loadOrders() {
+    state.orders.started = true;
     if (state.mode !== 'live') {
       // ブリッジ無しPC: DBの最終同期データを表示
-      state.orders.started = true;
       document.getElementById('ord-note').textContent = 'DBの最終同期時点を表示中';
-      sbGetAll('orders', 'select=*&tab=lt.500&order=ship_by.asc').then(rows => {
-        const byCc = {};
-        rows.forEach(o => {
-          if (!byCc[o.cc]) byCc[o.cc] = [];
-          byCc[o.cc].push({ sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
-            tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], region: regionByCc(o.cc) });
-        });
+      ordersFromDb().then(byCc => {
         REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
         renderOrders();
       }).catch(e => {
@@ -1152,21 +1158,35 @@
       });
       return;
     }
-    state.orders.started = true;
-    REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
-      state.orders.perCountry.set(region.cc, { status: 'loading', msg: '読み込み中...', rows: [] });
-      renderOrders();
-      fetchOrdersCountry(region, (tab, done, total) => {
-        const oc = state.orders.perCountry.get(region.cc);
-        if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
-      }).then(rows => {
-        state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows });
+    // ライブPC: まずDB同期分を即表示 → 各国ライブで上書き（失敗した国はDB分をそのまま残す）
+    document.getElementById('ord-note').textContent = 'ライブ取得中（まずDB同期分を表示）';
+    const liveFetchAll = () => {
+      REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
+        const prev = state.orders.perCountry.get(region.cc);
+        if (!prev) state.orders.perCountry.set(region.cc, { status: 'loading', msg: '読み込み中...', rows: [] });
+        else prev.status = 'loading';
         renderOrders();
-      }).catch(e => {
-        state.orders.perCountry.set(region.cc, { status: 'error', msg: e.message, rows: [] });
-        renderOrders();
+        fetchOrdersCountry(region, (tab, done, total) => {
+          const oc = state.orders.perCountry.get(region.cc);
+          if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
+        }).then(rows => {
+          state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows });
+          renderOrders();
+        }).catch(e => {
+          const oc = state.orders.perCountry.get(region.cc);
+          state.orders.perCountry.set(region.cc, { status: 'error', msg: e.message, rows: (oc && oc.rows) || [] });
+          renderOrders();
+        });
       });
-    });
+    };
+    ordersFromDb().then(byCc => {
+      REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
+        const seed = byCc[region.cc] || [];
+        state.orders.perCountry.set(region.cc, { status: 'loading', msg: seed.length ? `DB${seed.length}件→更新中` : '読み込み中...', rows: seed });
+      });
+      renderOrders();
+      liveFetchAll();
+    }).catch(liveFetchAll);
   }
 
   function shipByBadge(shipBy) {
@@ -1185,9 +1205,12 @@
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
       const oc = state.orders.perCountry.get(region.cc);
       if (!oc) return;
-      if (oc.status === 'loading') parts.push(`<span class="cc" style="color:${region.color}">${region.cc}</span><span class="smd-dim">${esc(oc.msg)}</span>`);
-      else if (oc.status === 'error') parts.push(`<span class="cc" style="color:${region.color}">${region.cc}</span><span class="smd-err" title="${esc(oc.msg)}">⚠</span>`);
-      else { parts.push(`<span class="cc" style="color:${region.color}">${region.cc}</span>${oc.rows.length}件`); total += oc.rows.length; }
+      const n = (oc.rows && oc.rows.length) || 0;
+      total += n;
+      const cc = `<span class="cc" style="color:${region.color}">${region.cc}</span>`;
+      if (oc.status === 'loading') parts.push(`${cc}<span class="smd-dim">${esc(oc.msg)}</span>`);
+      else if (oc.status === 'error') parts.push(`${cc}<span class="smd-err" title="${esc(oc.msg)}">⚠${n ? `DB${n}件` : ''}</span>`);
+      else parts.push(`${cc}${n}件`);
     });
     el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送中） ｜ ` + parts.join(' ｜ ');
   }
@@ -1198,7 +1221,7 @@
     let rows = [];
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
       const oc = state.orders.perCountry.get(region.cc);
-      if (oc && oc.status === 'ok') rows = rows.concat(oc.rows);
+      if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
     if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
     if (state.orders.search) {
