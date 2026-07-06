@@ -2046,7 +2046,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try {
       [inv, orders] = await Promise.all([
         ensureInv(),
-        sbGetAll('orders', 'select=cc,sn,buyer,status,ship_by,items&tab=lt.500&order=ship_by.asc'),
+        sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
       ]);
     } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     const nowSec = Date.now() / 1000;
@@ -2073,6 +2073,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 5) 滞留在庫：在庫保管中で登録から60日超
     const dead = inv.filter(r => r.status === '在庫保管中' && (alertDaysSince(r.created_at) || 0) > 60)
       .sort((a, b) => (alertDaysSince(b.created_at) || 0) - (alertDaysSince(a.created_at) || 0));
+    // 6) データ不整合の疑い：未払いのまま(tab<300)／発送済(tab400)なのに追跡なし＝DBが古い可能性
+    const dataIssues = orders.filter(o => (o.tab != null && o.tab < 300) || (o.tab === 400 && !o.tracking)).map(o => {
+      const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {};
+      const reason = (o.tab != null && o.tab < 300) ? `未払いのまま(tab${o.tab}・${esc(o.status || '')})` : '発送済だが追跡なし';
+      return { cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), esc((it.name || '').slice(0, 32)), esc(o.order_date || ''), reason],
+        link: rg && o.order_id ? `<a href="https://${rg.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopeeで確認">📄</a>` : '' };
+    });
 
     const invName = r => esc((r.name || r.name_supplier || r.item_id || '').slice(0, 40));
     const invImg = r => r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
@@ -2103,13 +2110,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       card('🏬', '長期在庫・滞留（60日超）', '#666', dead.length,
         ['画像', '商品名', '仕入元', '仕入額', '登録から'],
         dead.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap">${dtxt(r.created_at)}</td></tr>`).join(''),
-        '在庫保管中のまま60日以上。値下げ・再出品を検討。');
+        '在庫保管中のまま60日以上。値下げ・再出品を検討。') +
+      card('🧾', 'データ不整合の疑い', '#c2185b', dataIssues.length,
+        ['国', '注文SN', '商品', '注文日', '内容', '確認'],
+        dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
+        'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。');
 
-    const total = shipRows.length + stuckShip.length + stuckArrive.length + noProof.length;
+    const total = shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length;
     updateAlertBadge(total);
-    body.innerHTML = (shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dead.length) === 0
+    body.innerHTML = (total + dead.length) === 0
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
-      : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
+      : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length} ／ データ不整合 ${dataIssues.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
   }
   // ---------------- 💴 入出金・経費（純利益） ----------------
   const EXP_CATS = ['送料', '梱包資材', 'Shopee手数料', '広告費', '仕入送料', 'その他'];
@@ -2423,6 +2434,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      'データ品質：注文DBの古い行を監査し1件修正（Unpaid/tab200のまま実際はShipped）。アラートに「🧾データ不整合の疑い」を新設（未払いのまま／発送済なのに追跡なしを自動検知）',
+      '高速化：DB全件取得(sbGetAll)を並列ページング化（在庫4108行等・在庫を読む全ページが高速化）',
+      '仕入れ検索：最新の注文順に並べ替え＋「📷画像」でGoogle Lens逆画像検索を追加',
       '🛒仕入れ管理を刷新：「🔎仕入れ検索」タブを新設。Shopee未発送(=売れた)注文ごとに商品名を検索キーワードへ自動整形（編集可）し、メルカリ/駿河屋/ヤフオク/PayPay/楽天/Yショッピング/Amazonをワンタップで安い順検索→最速仕入れ。従来の入庫待ちは「⏳入庫待ち」タブに',
       '✅タスク管理ページを新設（Supabase tasksテーブルで複数PC同期。優先度/期日/完了・並び。初回のみSQL実行）',
       '注文管理を改善：ライブ取得が全国終わるまで真っ白だったのを、まずDB同期分を即表示→各国ライブで上書き（失敗/ハングした国はDB分を保持）',
