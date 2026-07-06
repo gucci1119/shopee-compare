@@ -170,6 +170,7 @@
     <nav id="smd-nav">
       <div class="ng">運用</div>
       <button data-p="dash" class="on">🏠 ダッシュボード</button>
+      <button data-p="alerts">⚠️ アラート <span id="alert-badge" style="display:none;background:#d93025;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:0 6px;margin-left:2px"></span></button>
       <button data-p="orders">📦 注文管理</button>
       <button data-p="ship">🚚 梱包・発送</button>
       <button data-p="stock">🏷 在庫管理</button>
@@ -371,6 +372,12 @@
   <div id="page-ship" style="display:none">
     <div class="smd-pagehead">🚚 梱包・発送 <span class="smd-dim" style="font-weight:400;font-size:12px">（発送待ちの注文＋SLS伝票印刷）</span></div>
     <div id="ship-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- アラート -->
+  <div id="page-alerts" style="display:none">
+    <div class="smd-pagehead">⚠️ アラート <span class="smd-dim" style="font-weight:400;font-size:12px">（要対応を自動抽出：発送期日・仕入状況・確証・長期在庫）</span>
+      <button class="smd-btn" id="alert-refresh" style="margin-left:10px">🔄 更新</button></div>
+    <div id="alert-body" style="padding:12px 20px"></div>
   </div>
   <!-- 仕入れ管理 -->
   <div id="page-buy" style="display:none">
@@ -758,8 +765,9 @@
     if (p === 'log') renderLog();
     if (p === 'changelog') renderChangelog();
     if (p === 'manual') renderManual();
+    if (p === 'alerts') renderAlerts();
   }
-  const PAGE_KEYS = ['dash','orders','ship','stock','buy','profit','customers','suppliers','list','rank','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','customers','suppliers','list','rank','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p);
@@ -1605,6 +1613,83 @@
       `</table></div></div>`;
     fitScroll('buy');
   }
+  // ---------------- ⚠️ アラート（要対応の自動抽出） ----------------
+  const alertDaysSince = (v) => { if (!v) return null; const t = Date.parse(v); return isNaN(t) ? null : (Date.now() - t) / 86400000; };
+  function updateAlertBadge(n) {
+    const b = document.getElementById('alert-badge');
+    if (!b) return;
+    if (n > 0) { b.textContent = n; b.style.display = ''; } else { b.style.display = 'none'; }
+  }
+  async function renderAlerts() {
+    const body = document.getElementById('alert-body');
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let inv, orders;
+    try {
+      [inv, orders] = await Promise.all([
+        ensureInv(),
+        sbGetAll('orders', 'select=cc,sn,buyer,status,ship_by,items&tab=lt.500&order=ship_by.asc'),
+      ]);
+    } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const nowSec = Date.now() / 1000;
+    // 1) 発送期日：未発送(to ship)の期日超過／24h以内
+    const toship = orders.filter(o => /to ?ship/i.test(o.status || ''));
+    const shipRows = toship.map(o => {
+      const secLeft = o.ship_by ? (o.ship_by - nowSec) : null;
+      const level = secLeft == null ? 0 : (secLeft < 0 ? 2 : (secLeft < 86400 ? 1 : 0));
+      const due = o.ship_by ? new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16) : '—';
+      const label = secLeft == null ? '' : (secLeft < 0 ? '超過' : (secLeft < 86400 ? '24h以内' : ''));
+      const it = (o.items || [])[0] || {};
+      const rg = regionByCc(o.cc);
+      return { level, cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), esc(o.buyer || ''), esc((it.name || '').slice(0, 36)), due, `<b style="color:${level === 2 ? '#d93025' : '#e8710a'}">${label}</b>`], link: rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="伝票印刷" style="text-decoration:none">🖨️</a>` : '' };
+    }).filter(r => r.level >= 1).sort((a, b) => b.level - a.level);
+    // 2) 確証未取得：自動登録(source有)で確証なし・キャンセル以外
+    const noProof = inv.filter(r => r.source && !r.proof && r.purchase_status !== 'キャンセル');
+    // 3) 発送待ち長期：仕入状況=発送待ちのまま5日超（相手が未発送）
+    const stuckShip = inv.filter(r => r.purchase_status === '発送待ち' && (alertDaysSince(r.purchase_ts) || 0) > 5)
+      .sort((a, b) => (alertDaysSince(b.purchase_ts) || 0) - (alertDaysSince(a.purchase_ts) || 0));
+    // 4) 入庫待ち長期：買ったが14日超で未入荷
+    const stuckArrive = inv.filter(r => r.status === '入庫待ち' && (alertDaysSince(r.purchase_ts || r.created_at) || 0) > 14)
+      .sort((a, b) => (alertDaysSince(b.purchase_ts || b.created_at) || 0) - (alertDaysSince(a.purchase_ts || a.created_at) || 0));
+    // 5) 滞留在庫：在庫保管中で登録から60日超
+    const dead = inv.filter(r => r.status === '在庫保管中' && (alertDaysSince(r.created_at) || 0) > 60)
+      .sort((a, b) => (alertDaysSince(b.created_at) || 0) - (alertDaysSince(a.created_at) || 0));
+
+    const invName = r => esc((r.name || r.name_supplier || r.item_id || '').slice(0, 40));
+    const dtxt = v => { const d = alertDaysSince(v); return d == null ? '—' : Math.floor(d) + '日'; };
+    const card = (icon, title, color, count, headers, rowsHtml, note) => count === 0 ? '' :
+      `<div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid ${color}">` +
+      `<div style="font-weight:700;font-size:14px;margin-bottom:2px">${icon} ${title} <span style="background:${color};color:#fff;font-size:11px;border-radius:9px;padding:0 7px;margin-left:4px">${count}</span></div>` +
+      (note ? `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">${note}</div>` : '') +
+      `<div class="pf-scroll" style="max-height:340px"><table class="pf-table"><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>${rowsHtml}</table></div></div>`;
+
+    const html =
+      card('🚚', '発送期日（未発送）', '#d93025', shipRows.length,
+        ['国', '注文SN', 'バイヤー', '商品', '発送期日', '状態', '伝票'],
+        shipRows.slice(0, 100).map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
+        'Shopee注文の発送期日が過ぎた／24時間以内のもの。🖨️で伝票印刷へ。') +
+      card('📦', '相手が未発送（発送待ち5日超）', '#e8710a', stuckShip.length,
+        ['仕入日時', '商品名', '仕入元', 'セラー', '経過'],
+        stuckShip.slice(0, 100).map(r => `<tr><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(r.purchase_ts)}</b></td></tr>`).join(''),
+        '仕入れたが相手がまだ発送していない可能性。取引メッセージやキャンセルを検討。') +
+      card('⏳', '入庫待ちが長い（14日超）', '#e8710a', stuckArrive.length,
+        ['仕入日時', '商品名', '仕入元', 'セラー', '経過'],
+        stuckArrive.slice(0, 100).map(r => `<tr><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(r.purchase_ts || r.created_at)}</b></td></tr>`).join(''),
+        '買ったのに届いていない在庫。配送状況（在庫の配送列）や到着を確認。') +
+      card('📸', '確証が未取得', '#7b52c4', noProof.length,
+        ['商品名', '仕入元', '仕入日時', '仕入状況'],
+        noProof.slice(0, 100).map(r => `<tr><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td></tr>`).join(''),
+        '古物台帳用の仕入れ確証（proof）が無い自動登録品。メール確証は通常あとから付きます。') +
+      card('🏬', '長期在庫・滞留（60日超）', '#666', dead.length,
+        ['商品名', '仕入元', '仕入額', '登録から'],
+        dead.slice(0, 100).map(r => `<tr><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap">${dtxt(r.created_at)}</td></tr>`).join(''),
+        '在庫保管中のまま60日以上。値下げ・再出品を検討。');
+
+    const total = shipRows.length + stuckShip.length + stuckArrive.length + noProof.length;
+    updateAlertBadge(total);
+    body.innerHTML = (shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dead.length) === 0
+      ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
+      : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
+  }
   // ---------------- 🧾 操作ログ ----------------
   async function renderLog() {
     const body = document.getElementById('log-body');
@@ -1619,6 +1704,7 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '⚠️アラートページを新設（発送期日超過/24h・相手未発送・入庫待ち長期・確証未取得・滞留在庫を自動抽出。サイドバーに件数バッジ）',
       '在庫に「配送」列を追加（仕入元→自宅の配送方法/追跡番号/配達状況。メルカリ配送userscriptがSupabaseへ直書き＝スプシ非経由）',
       '操作ログの記録対象を拡大（仕入額入力・伝票発行・倉庫へ発送・ItemID変更・まとめ分割・手動登録）',
       'メルカリShops（mercari-shops.com）の購入メールも自動登録に対応',
@@ -3102,6 +3188,8 @@
     showPage(start);            // 再読み込み時は前回のページを復元（無ければダッシュボード）
     setModeBadge();
     renderSummary();
+    document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
+    if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
     setModeBadge();
