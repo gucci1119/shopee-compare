@@ -1393,6 +1393,18 @@
   // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
   const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', bound: false, adding: false };
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
+  // 取引ページ（状況をすぐ見られる）URL。仕入元別に組み立て
+  function stkTxnUrl(r) {
+    const so = r.supplier_order; if (!so) return null;
+    switch (r.source) {
+      case 'mercari': return 'https://jp.mercari.com/transaction/' + so;
+      case 'mshops': return 'https://mercari-shops.com/orders/' + String(so).replace(/^order_/, '');
+      case 'yfleamarket': return 'https://paypayfleamarket.yahoo.co.jp/my/purchase';
+      case 'yahoo': return 'https://auctions.yahoo.co.jp/jp/show/mystatus?select=won';
+      case 'amazon': return 'https://www.amazon.co.jp/your-orders/order-details?orderID=' + so;
+      default: return r.supplier_url || null;
+    }
+  }
   // 仕入元→自宅の配送状況セル（メルカリ配送userscriptがSupabaseへ直書き。ship_method/tracking_no/delivery_info）
   function stkShipCell(r) {
     const parts = [];
@@ -1545,7 +1557,7 @@
           `<option value="" ${!r.supplier ? 'selected' : ''}></option>` +
           SUPPLIERS.map(s => `<option ${s === r.supplier ? 'selected' : ''}>${s}</option>`).join('') +
           (r.supplier && !SUPPLIERS.includes(r.supplier) ? `<option selected>${esc(r.supplier)}</option>` : '') +
-          `</select>${r.supplier_url ? ` <a href="${esc(r.supplier_url)}" target="_blank" title="仕入元ページを開く" style="text-decoration:none">🔗</a>` : ''}</td>` +
+          `</select>${r.supplier_url ? ` <a href="${esc(r.supplier_url)}" target="_blank" title="仕入元の商品ページを開く" style="text-decoration:none">🔗</a>` : ''}${(() => { const tu = stkTxnUrl(r); return tu ? ` <a href="${esc(tu)}" target="_blank" title="取引ページを開く（状況確認）" style="text-decoration:none">🧾</a>` : ''; })()}</td>` +
         `<td style="white-space:nowrap"><input class="li stk-seller" ${di} value="${esc(r.seller || '')}" placeholder="—" style="padding:3px 5px;font-size:11px;width:82px"></td>` +
         `<td><input class="li stk-price" ${di} type="number" value="${r.price != null ? r.price : ''}" style="padding:3px 5px;font-size:11px;width:80px">` +
           `${r.price != null ? `<div class="smd-dim" style="font-size:9.5px">¥${Number(r.price).toLocaleString()}</div>` : ''}</td>` +
@@ -1649,18 +1661,33 @@
     fitScroll('suppliers');
   }
   // ---------------- 👤 顧客管理 ----------------
+  const cust = { cc: '', repeatOnly: false };
+  const ccBadge = (cc) => { const rg = regionByCc(cc); return `<span style="background:${rg ? rg.color : '#999'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:3px">${esc(cc)}</span>`; };
   async function renderCustomers() {
     const body = document.getElementById('cust-body');
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let orders; try { orders = await sbGetAll('orders', 'select=cc,buyer,order_date&tab=lt.500&order=order_date.desc'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    if (cust.cc) orders = orders.filter(o => o.cc === cust.cc);
     const byB = {};
     orders.forEach(o => { const b = o.buyer || '(不明)'; (byB[b] = byB[b] || { n: 0, cc: new Set(), last: '' }); byB[b].n++; byB[b].cc.add(o.cc); if ((o.order_date || '') > byB[b].last) byB[b].last = o.order_date || ''; });
-    const list = Object.entries(byB).sort((a, b) => b[1].n - a[1].n);
-    const repeat = list.filter(x => x[1].n >= 2).length;
-    body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">${list.length}人（リピーター ${repeat}人） ・ 直近${orders.length}注文から集計</div>` +
-      `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>バイヤー</th><th>購入回数</th><th>国</th><th>最終購入</th></tr>` +
-      list.slice(0, 400).map(([b, v]) => `<tr><td>${esc(b)}</td><td>${v.n >= 2 ? `<b style="color:#ee4d2d">${v.n}</b>` : v.n}</td><td>${[...v.cc].join(',')}</td><td>${esc((v.last || '').slice(5))}</td></tr>`).join('') +
+    let list = Object.entries(byB).sort((a, b) => b[1].n - a[1].n);
+    if (cust.repeatOnly) list = list.filter(x => x[1].n >= 2);
+    const repeat = Object.values(byB).filter(v => v.n >= 2).length;
+    const ccOpts = REGIONS.filter(r => r.enabled !== false).map(r => `<option value="${r.cc}" ${cust.cc === r.cc ? 'selected' : ''}>${r.cc}</option>`).join('');
+    body.innerHTML =
+      `<div class="tool-card" style="margin:0 0 10px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-weight:700">国:</span>
+        <select id="cust-cc" style="padding:5px;font-size:13px"><option value="">全て</option>${ccOpts}</select>
+        <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="cust-rep" ${cust.repeatOnly ? 'checked' : ''}> リピーターのみ</label>
+        <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・直近${orders.length}注文から集計</span></div></div>` +
+      `<div class="tool-card" style="margin:0;max-width:680px"><div class="pf-scroll"><table class="pf-table"><tr><th></th><th>バイヤー</th><th>購入回数</th><th>国</th><th>最終購入</th></tr>` +
+      list.slice(0, 500).map(([b, v]) => {
+        const av = `<div style="width:26px;height:26px;border-radius:50%;background:${['#ee4d2d','#0f9d58','#1a73e8','#f9a825','#9c27b0','#00897b'][b.charCodeAt(0) % 6]};color:#fff;font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center">${esc((b[0] || '?').toUpperCase())}</div>`;
+        return `<tr><td>${av}</td><td>${esc(b)}</td><td>${v.n >= 2 ? `<b style="color:#ee4d2d">${v.n}</b>` : v.n}</td><td style="white-space:nowrap">${[...v.cc].map(ccBadge).join('')}</td><td>${esc((v.last || '').slice(5))}</td></tr>`;
+      }).join('') +
       `</table></div></div>`;
+    document.getElementById('cust-cc').addEventListener('change', e => { cust.cc = e.target.value; renderCustomers(); });
+    document.getElementById('cust-rep').addEventListener('change', e => { cust.repeatOnly = e.target.checked; renderCustomers(); });
     fitScroll('customers');
   }
   // ---------------- 🚚 梱包・発送 ----------------
@@ -1889,6 +1916,7 @@
       const rg = regionByCc(o.cc);
       return `<tr>
         <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
+        <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
         <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
         <td style="font-size:11px">${esc((it.name || '').slice(0, 30))}</td>
@@ -1907,8 +1935,8 @@
         <input type="text" id="ret-sn" placeholder="注文SN" style="padding:5px;font-size:13px;width:180px">
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1080px">` +
-      `<tr><th>国</th><th>注文SN</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1140px">` +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
       (rows.length ? rowHtml : `<tr><td colspan="9" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
       `</table></div></div>`;
     // ハンドラ
@@ -2074,6 +2102,9 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '顧客管理：国フィルター＋国カラーバッジ＋リピーターのみ絞り込み＋頭文字アイコン',
+      '返品・キャンセル：商品画像列を追加',
+      '在庫：取引ページへのリンク（🧾）を追加（状況をすぐ確認）。AmazonはGASで配送状況/販売元を反映',
       '仕入れ先ページ：仕入元名を公式サイトへのリンク＋ロゴ表示に。表記ゆれ（楽天市場→楽天／メルカリショップス→メルカリShops／Amzon→Amazon 等）を統合集計',
       '💱為替レートページを新設（通貨別の円換算レートを保存＝全ページの売上・粗利・ROI・純利益に反映。fx_rates）',
       '📈月次サマリーページを新設（月次損益＋CSVエクスポート：古物台帳／経費／損益。確定申告・古物営業法帳簿用・Excel対応BOM付き）',
