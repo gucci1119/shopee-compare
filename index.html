@@ -711,16 +711,23 @@
     tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: o.total || null,
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
   });
+  // 未発送(300)は全件、発送中(400)は大量なので直近3ページ(150件)で打ち切る＝取得が軽くなりタイムアウト回避
+  const TAB_MAX_PAGES = { 300: 10, 400: 3 };
   async function fetchOrdersCountry(region, onProgress) {
     const rows = [];
     for (const tab of ORDER_TABS) {
       let list = [];
-      for (let p = 1; p <= 10; p++) {
-        const j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
-          order_list_tab: tab, entity_type: 1,
-          pagination: { from_page_number: 1, page_number: p, page_size: 50 },
-        });
-        if (j.code !== 0) throw new Error(`注文一覧エラー code=${j.code}`);
+      const maxPage = TAB_MAX_PAGES[tab] || 4;
+      for (let p = 1; p <= maxPage; p++) {
+        let j;
+        // 途中のページで失敗しても国全体を落とさない（取得済み分は保持してそのtabを打ち切る）
+        try {
+          j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
+            order_list_tab: tab, entity_type: 1,
+            pagination: { from_page_number: 1, page_number: p, page_size: 50 },
+          });
+        } catch (e) { console.warn('[注文一覧]', region.cc, 'tab' + tab, 'p' + p, e.message); break; }
+        if (!j || j.code !== 0) { console.warn('[注文一覧] code', region.cc, 'tab' + tab, 'p' + p, j && j.code); break; }
         const idx = (j.data && j.data.index_list) || [];
         list = list.concat(idx);
         const total = ((j.data || {}).pagination || {}).total || 0;
@@ -728,10 +735,13 @@
       }
       for (let i = 0; i < list.length; i += 5) { // card_listは5件まで
         onProgress(tab, i, list.length);
-        const j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
-          order_list_tab: tab, need_count_down_desc: false, order_param_list: list.slice(i, i + 5),
-        });
-        if (j.code !== 0) continue;
+        let j;
+        try {
+          j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
+            order_list_tab: tab, need_count_down_desc: false, order_param_list: list.slice(i, i + 5),
+          });
+        } catch (e) { console.warn('[明細]', region.cc, 'tab' + tab, e.message); continue; } // 1バッチ失敗は飛ばして継続
+        if (!j || j.code !== 0) continue;
         ((j.data || {}).card_list || []).forEach(c => {
           const oc = c && c.order_card;
           if (oc) rows.push(parseOrderCard(region, oc, tab));
