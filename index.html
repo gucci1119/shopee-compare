@@ -3735,33 +3735,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       say(`🚫 未払い・キャンセル ${extraNew}件 保存 ✅`);
 
-      // 6) 利益管理表ミラー（仕入額AL列・入金額G列）— 今月のシートIDを使う（月替わり対応）
-      const mirrorSheetId = sheetIdForMonth(jstYm());
-      if (mirrorSheetId) {
-        say(`📄 利益管理表を読み取り中...（${jstYm()}）`);
+      // 6) 利益管理表ミラー（仕入額AL列・入金額G列）— 今月＋先月の両シートを読む
+      //    理由: 月末の注文(例 6/29)はShopee Japan倉庫到着が翌月初週になり、My Income(入金)の確定が月をまたぐ。
+      //    確定は「注文が載っている月のシート(=先月)」で更新されるため、今月シートだけだと取りこぼす。
+      const prevYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
+      const mirrorSheets = [...new Set([jstYm(), prevYmOf(jstYm())])].map(ym => ({ ym, id: sheetIdForMonth(ym) })).filter(x => x.id);
+      if (mirrorSheets.length) {
+        say(`📄 利益管理表を読み取り中...（${mirrorSheets.map(s => s.ym).join(' ＋ ')}）`);
         const costRows = [];
-        for (const region of targets) {
-          try {
-            const tbl = await gvizFetch(mirrorSheetId, region.cc.toLowerCase() + '_p');
-            const seen = new Set();
-            (tbl.rows || []).forEach(row => {
-              const c = row.c || [];
-              const sn = c[23] && c[23].v;
-              if (!sn || seen.has(String(sn))) return;
-              seen.add(String(sn));
-              const cost = c[37] && typeof c[37].v === 'number' ? c[37].v : null;
-              const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;       // G列=最新
-              const depInit = c[5] && typeof c[5].v === 'number' ? c[5].v : null;   // F列=初期(暫定)
-              const stq = c[16] && c[16].v != null ? String(c[16].v).slice(0, 30) : null;
-              if (cost != null || dep != null) costRows.push({
-                cc: region.cc, sn: String(sn), cost, deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() });
-            });
-          } catch (e) { say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
+        for (const { id } of mirrorSheets) {
+          for (const region of targets) {
+            try {
+              const tbl = await gvizFetch(id, region.cc.toLowerCase() + '_p');
+              const seen = new Set();
+              (tbl.rows || []).forEach(row => {
+                const c = row.c || [];
+                const sn = c[23] && c[23].v;
+                if (!sn || seen.has(String(sn))) return;
+                seen.add(String(sn));
+                const cost = c[37] && typeof c[37].v === 'number' ? c[37].v : null;
+                const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;       // G列=最新
+                const depInit = c[5] && typeof c[5].v === 'number' ? c[5].v : null;   // F列=初期(暫定)
+                const stq = c[16] && c[16].v != null ? String(c[16].v).slice(0, 30) : null;
+                if (cost != null || dep != null) costRows.push({
+                  cc: region.cc, sn: String(sn), cost, deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() });
+              });
+            } catch (e) { say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
+          }
         }
         await sbUpsert('costs', costRows);
-        say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅`);
+        say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅（今月＋先月）`);
       } else {
-        say(`📄 利益管理表ミラー: スキップ（${jstYm()} のシートID未設定。⚙️設定に「${jstYm()}: ID」を追加）`);
+        say(`📄 利益管理表ミラー: スキップ（${jstYm()} 等のシートID未設定。⚙️設定に「${jstYm()}: ID」を追加）`);
       }
 
       // 7) InventoryItem（在庫）ミラー — 既定で停止（在庫はGmail/GASでポータルへ直接反映。シートは並行運用だが再取込しない＝二重回避）
