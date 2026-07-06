@@ -317,6 +317,7 @@
   <div id="page-orders" style="display:none">
     <div class="smd-toolbar">
       <button class="smd-btn" id="ord-reload">🔄 更新</button>
+      <button class="smd-btn" id="ord-diag" title="各国のShopee注文APIの応答を調べ、なぜライブ取得が失敗するか診断">🔬 診断</button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300">未発送</button>
@@ -1281,6 +1282,38 @@
     state.orders.perCountry.clear();
     loadOrders();
   });
+  // 🔬 接続診断：各国のShopee注文APIを1回叩き、生の応答(HTTP/code/本文先頭)を表示してライブ失敗の原因を切り分ける
+  async function diagnoseOrders() {
+    const sum = document.getElementById('ord-summary');
+    if (state.mode !== 'live') { sum.innerHTML = '<div style="font-size:12px;color:#d93025">ライブモード（ブリッジ入りPC）でのみ診断できます</div>'; return; }
+    const ok = await detectBridge();
+    if (!ok) { sum.innerHTML = '<div style="font-size:12px;color:#d93025">ブリッジ未検出。Shopee Compare Bridge userscriptが有効か確認してください（data-smd-bridge=' + (document.documentElement.getAttribute('data-smd-bridge') || 'なし') + '）</div>'; return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const lines = [];
+    const draw = () => { sum.innerHTML = `<div style="font-size:12px;line-height:1.8">🔬 診断（各国の注文API 1回）<br>${lines.join('')}</div>`; };
+    for (const region of targets) {
+      lines.push(`<div><b style="color:${region.color}">${region.cc}</b> 実行中…</div>`); draw();
+      let txt;
+      try {
+        const t0 = Date.now();
+        const raw = await bridgeRequest('POST', `https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
+          JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 10 } }));
+        const ms = Date.now() - t0;
+        let j = null; try { j = JSON.parse(raw); } catch (_) {}
+        if (j && j.code === 0) {
+          const total = ((j.data || {}).pagination || {}).total;
+          txt = `<span style="color:#1a7f37">✅ OK</span> (${ms}ms・未発送total=${total})`;
+        } else if (j) {
+          txt = `<span style="color:#d93025">⚠ code=${j.code}</span> ${esc(String(j.error || j.msg || j.message || j.error_msg || '').slice(0, 140))}`;
+        } else {
+          txt = `<span style="color:#d93025">⚠ 非JSON応答（ログイン画面等の可能性）</span>: ${esc(raw.slice(0, 120))}`;
+        }
+      } catch (e) { txt = `<span style="color:#d93025">❌ ${esc(e.message)}</span>（timeout/network=回線かブリッジ・log in系=再ログイン）`; }
+      lines[lines.length - 1] = `<div><b style="color:${region.color}">${region.cc}</b> ${txt}</div>`; draw();
+    }
+    lines.push('<div class="smd-dim" style="font-size:11px;margin-top:6px">code≠0でauth/loginの語→その国のSeller Centerに再ログイン。非JSON→そのタブでSeller Centerを開き直す。timeout/network error→ブリッジ/回線。全て✅なら「更新」で通常表示に戻ります。</div>'); draw();
+  }
+  document.getElementById('ord-diag').addEventListener('click', diagnoseOrders);
   document.getElementById('ord-filter').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
