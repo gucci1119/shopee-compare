@@ -1249,7 +1249,7 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
-    if (state.orders.filter === 'late') rows = rows.filter(r => r.tab === 300 && r.shipBy && r.shipBy < nowSec());
+    if (state.orders.filter === 'late') rows = rows.filter(r => r.tab === 300 && !r.tracking && r.shipBy && r.shipBy < nowSec());
     else if (state.orders.filter === 'pre') rows = rows.filter(r => r.preOrder);
     else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
     if (state.orders.search) {
@@ -1271,17 +1271,21 @@
       const first = r.items[0] || {};
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
       const more = r.items.length > 1 ? ` ほか${r.items.length - 1}件` : '';
-      const isLate = r.tab === 300 && r.shipBy && r.shipBy < nowSec();
+      // Shopeeの「To Ship」は 未手配(To Process=追跡なし) と 手配済(Processed=追跡あり) が混在。
+      // 追跡番号があれば発送手配済み＝実質発送済扱い。遅延は「未手配のまま期日超過」だけ。
+      const arranged = r.tab === 300 && !!r.tracking; // 発送手配済（Processed）
+      const isLate = r.tab === 300 && !r.tracking && r.shipBy && r.shipBy < nowSec();
       const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
-      const flags = (isLate ? badge('#d93025', '遅延', 'Late Shipment：発送期日を超過') : '') + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
+      const flags = (isLate ? badge('#d93025', '遅延', 'Late Shipment：未発送のまま期日超過') : '') + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
+      const statusLabel = r.tab !== 300 ? '' : (arranged ? '<br><b style="color:#1a7f37">発送手配済</b>' : '<br><b style="color:#d93025">未発送</b>');
       const row = document.createElement('div');
       row.className = 'ord-row';
       row.innerHTML =
         `<span class="ord-cc" style="background:${region.color}">${region.cc}</span>` +
-        `<span class="ord-due">${r.tab === 300 ? shipByBadge(r.shipBy) : '<span class="smd-dim">発送済</span>'}</span>` +
+        `<span class="ord-due">${r.tab !== 300 ? '<span class="smd-dim">発送済</span>' : (arranged ? '<span class="smd-dim">手配済</span>' : shipByBadge(r.shipBy))}</span>` +
         `<img loading="lazy" src="${IMG_CDN}${first.image}" onerror="this.style.opacity=.15">` +
         `<div class="ord-item"><div class="ord-itemname"></div><div class="ord-itemsub"></div></div>` +
-        `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${r.tab === 300 ? '<br><b style="color:#d93025">未発送</b>' : ''}</span>` +
+        `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${statusLabel}</span>` +
         `<div class="ord-meta"><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
@@ -2104,8 +2108,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ]);
     } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     const nowSec = Date.now() / 1000;
-    // 1) 発送期日：未発送(to ship)の期日超過／24h以内
-    const toship = orders.filter(o => /to ?ship/i.test(o.status || ''));
+    // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
+    //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
+    const toship = orders.filter(o => /to ?ship/i.test(o.status || '') && !o.tracking);
     const shipRows = toship.map(o => {
       const secLeft = o.ship_by ? (o.ship_by - nowSec) : null;
       const level = secLeft == null ? 0 : (secLeft < 0 ? 2 : (secLeft < 86400 ? 1 : 0));
