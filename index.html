@@ -1350,16 +1350,32 @@
     return r.json();
   }
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
-  // 1000行制限を超えて全件読む（Rangeヘッダでページング）
+  // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
   async function sbGetAll(table, qs) {
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
-    const out = [];
-    for (let off = 0; off < 100000; off += 1000) {
-      const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
-        headers: { apikey: key, Authorization: 'Bearer ' + key, Range: `${off}-${off + 999}` } });
-      if (!r.ok && r.status !== 416) throw new Error(`DB読取 HTTP ${r.status}`);
-      if (r.status === 416) break;
+    const hdr = (extra) => ({ apikey: key, Authorization: 'Bearer ' + key, ...extra });
+    const first = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: '0-999', Prefer: 'count=exact' }) });
+    if (first.status === 416) return [];
+    if (!first.ok) throw new Error(`DB読取 HTTP ${first.status}`);
+    const out = await first.json();
+    if (out.length < 1000) return out; // 1ページで完結
+    // content-range: "0-999/12345" から総件数を得て残りページを並列取得
+    const totalStr = ((first.headers.get('content-range') || '').split('/')[1] || '').trim();
+    const total = Number(totalStr);
+    if (Number.isFinite(total) && total > 0) {
+      const offs = [];
+      for (let off = 1000; off < total; off += 1000) offs.push(off);
+      const chunks = await Promise.all(offs.map(off =>
+        fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) })
+          .then(r => (r.ok ? r.json() : []))));
+      chunks.forEach(c => out.push(...c));
+      return out;
+    }
+    // 総件数不明時は従来どおり逐次で続きを読む（安全策）
+    for (let off = 1000; off < 100000; off += 1000) {
+      const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) });
+      if (!r.ok) break;
       const rows = await r.json();
       out.push(...rows);
       if (rows.length < 1000) break;
@@ -1853,7 +1869,7 @@
   async function renderSourcing(host) {
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     let orders;
-    try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab&tab=eq.300&order=ship_by.asc'); }
+    try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,order_ts,order_date&tab=eq.300&order=order_ts.desc.nullslast,order_date.desc.nullslast,sn.desc'); }
     catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const items = [];
     orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
@@ -1861,7 +1877,7 @@
       host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
       return;
     }
-    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">未発送 ${orders.length}件 / 商品 ${items.length}点 ・ 売れた注文を各サイトで<b>最安検索</b>して最速仕入れ ・ キーワードは自動整形（<b>手直しは記憶</b>されて次回も反映・この端末）／メルカリが基本最安だが在庫は「全部」で横断確認</div>` +
+    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>） ・ キーワード検索は自動整形＆<b>手直しは記憶</b>／「<b>📷画像</b>」で同一商品を画像検索（確実）／「全部」で全サイト横断</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       items.map(({ o, it, ix }, gi) => {
         const region = regionByCc(o.cc);
@@ -1873,7 +1889,7 @@
           <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
           <td style="font-size:11px;max-width:280px">${esc((it.name || '').slice(0, 90))}${it.variation ? `<br><span class="smd-dim">${esc(it.variation)}</span>` : ''}</td>
           <td><input class="src-kw" data-i="${gi}" value="${esc(kw)}" style="width:230px;font-size:12px;padding:5px 7px;border:1px solid #ccc;border-radius:5px" title="編集するとこの商品のキーワードとして記憶されます">${saved != null ? '<span title="手直し済み" style="color:#3ecf8e;font-size:11px;margin-left:3px">✎</span>' : ''}</td>
-          <td><div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button></div></td>
+          <td><div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button>${it.image ? `<button class="src-lens" style="background:#4285f4;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="この商品画像でGoogle画像検索（同一商品を探す）">📷画像</button>` : ''}</div></td>
           <td>${region ? `<a href="https://${region.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopee注文詳細">📄</a>` : ''}</td>
         </tr>`;
       }).join('') + `</table></div></div>`;
@@ -1891,6 +1907,13 @@
     host.querySelectorAll('.src-all').forEach(btn => btn.addEventListener('click', () => {
       const kw = kwOf(btn.closest('.src-btns').dataset.i);
       if (kw) SRC_SITES.forEach(s => window.open(s.url(kw), '_blank'));
+    }));
+    // 画像でGoogle Lens逆画像検索（同一商品を確実に見つける）
+    host.querySelectorAll('.src-lens').forEach(btn => btn.addEventListener('click', () => {
+      const { it } = items[+btn.closest('.src-btns').dataset.i];
+      if (!it.image) return;
+      const imgUrl = /^https?:/.test(it.image) ? it.image : IMG_CDN + it.image;
+      window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(imgUrl), '_blank');
     }));
   }
 
