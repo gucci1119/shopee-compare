@@ -1355,6 +1355,22 @@
   // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
   const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', bound: false, adding: false };
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
+  // 仕入元→自宅の配送状況セル（メルカリ配送userscriptがSupabaseへ直書き。ship_method/tracking_no/delivery_info）
+  function stkShipCell(r) {
+    const parts = [];
+    if (r.ship_method) parts.push(`<span title="配送方法" style="color:#1565c0">${esc(r.ship_method)}</span>`);
+    if (r.ship_region) parts.push(`<span class="smd-dim" title="発送元地域" style="font-size:9.5px">発:${esc(r.ship_region)}</span>`);
+    if (r.tracking_no) parts.push(`<span title="追跡番号" style="color:#e65100">${esc(r.tracking_no)}</span>`);
+    if (r.delivery_info) {
+      const d = String(r.delivery_info);
+      let bg = '#e8f5e9', c = '#2e7d32';
+      if (d.startsWith('配達済')) { bg = '#e0e0e0'; c = '#616161'; }
+      else if (d.startsWith('配達中')) { bg = '#fff3e0'; c = '#e65100'; }
+      else if (d.startsWith('引受') || d.startsWith('到着')) { bg = '#e3f2fd'; c = '#1565c0'; }
+      parts.push(`<span style="background:${bg};color:${c};padding:1px 5px;border-radius:3px;font-weight:600">${/^(配達済|配達中|到着|引受)/.test(d) ? esc(d) : '届予定:' + esc(d)}</span>`);
+    }
+    return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
+  }
   const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
   const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
   const SUPPLIERS = ['メルカリ', 'メルカリShops', 'ヤフオク', 'PayPayフリマ', 'Amazon', 'ヤフーショッピング', '楽天'];
@@ -1420,6 +1436,7 @@
       await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(oldId), { item_id: newId, edited_at: new Date().toISOString() });
       const row = stock.rows.find(r => r.item_id === oldId);
       if (row) row.item_id = newId;
+      logAct('在庫管理', 'ItemID変更', oldId, '→ ' + newId);
       stockRender();
     } catch (e) { alert('ItemID変更失敗: ' + e.message); reset(); }
   }
@@ -1465,8 +1482,8 @@
     body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">仕入元・セラー名・仕入額・コンディション・状態・仕入状況はセルで直接編集（Supabaseに保存、同期時も保護）。ItemID横の✂でまとめ仕入れを枝番分割（仕入額を均等割り）。画像はShopee出品名から自動マッチ。</span></div>` +
       `<div id="stk-addform"></div>` +
-      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1360px">` +
-      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>Shopee注文</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th>棚</th><th>確証</th><th>備考</th></tr>' +
+      `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1480px">` +
+      '<tr><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>Shopee注文</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th title="仕入元→自宅の配送状況（メルカリはuserscript連携）">配送</th><th>棚</th><th>確証</th><th>備考</th></tr>' +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
@@ -1496,6 +1513,7 @@
           `</select></td>` +
         `<td><select class="li stk-st" ${di} style="padding:3px;font-size:11px;width:100px">${STOCK_STATUS.map(s => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}${STOCK_STATUS.includes(r.status) ? '' : `<option selected>${esc(r.status || '')}</option>`}</select></td>` +
         `<td><select class="li stk-ps" ${di} style="padding:3px;font-size:11px;width:110px">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}" ${s === (r.purchase_status || '') ? 'selected' : ''}>${s || '—'}</option>`).join('')}${STOCK_PSTATUS.includes(r.purchase_status || '') ? '' : `<option selected>${esc(r.purchase_status)}</option>`}</select></td>` +
+        `<td style="white-space:nowrap;font-size:10.5px;min-width:120px">${stkShipCell(r)}</td>` +
         `<td><input class="li stk-bin" ${di} value="${esc(r.bin || '')}" placeholder="—" title="棚（編集可）" style="width:100%;min-width:60px;font-size:11px;padding:2px 4px"></td>` +
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" title="仕入れ確証を開く" style="text-decoration:none">📸</a>` : ''}</td>` +
         `<td><input class="li stk-note" ${di} value="${esc(r.note || '')}" placeholder="—" title="備考（自由記入）" style="width:100%;min-width:120px;font-size:11px;padding:2px 4px"></td>` +
@@ -1601,6 +1619,8 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '在庫に「配送」列を追加（仕入元→自宅の配送方法/追跡番号/配達状況。メルカリ配送userscriptがSupabaseへ直書き＝スプシ非経由）',
+      '操作ログの記録対象を拡大（仕入額入力・伝票発行・倉庫へ発送・ItemID変更・まとめ分割・手動登録）',
       'メルカリShops（mercari-shops.com）の購入メールも自動登録に対応',
       '在庫・利益に「🔄 更新」ボタンを追加（Supabaseから即再取得。注文は既存）',
       'ヘッダー行と横スクロールバーの常時表示を全テーブルページに展開（利益/梱包発送/仕入れ管理/顧客/仕入れ先/操作ログ）',
@@ -1676,6 +1696,7 @@
       await sbUpsert('inventory', newRows);              // 先に枝番行を作成
       await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id)); // 元行を削除
       stock.rows = stock.rows.filter(x => x.item_id !== id).concat(newRows);
+      logAct('在庫管理', 'まとめ分割', id, newRows.length + '枝番に分割');
       stockRender();
     } catch (e) { alert('分割失敗: ' + e.message); }
   }
@@ -1782,6 +1803,7 @@
         await sbUpsert('inventory', [row]);
         stock.rows.unshift(row);
         stock.adding = false;
+        logAct('在庫管理', '手動登録', row.item_id, name);
         stockRender();
       } catch (e) { document.getElementById('sa-msg').textContent = '失敗: ' + e.message; }
     });
@@ -2473,6 +2495,7 @@
         cm.cost = v; cm.cost_at = costAt;
         pf.costMap.set(key, cm);
         e.target.style.borderColor = '#1a7f37';
+        logAct('利益管理', '仕入額入力', e.target.dataset.sn, e.target.dataset.cc + ' / ' + (v != null ? '¥' + v.toLocaleString() : '(クリア)'));
         setTimeout(() => pfRender(), 400);
       } catch (err) { alert('保存失敗: ' + err.message); }
     }));
@@ -2484,6 +2507,7 @@
       cm.wb_count = (cm.wb_count || 0) + 1; cm.wb_last_at = nowIso; if (!cm.wb_first_at) cm.wb_first_at = nowIso;
       pf.costMap.set(key, cm);
       try { await sbUpsert('costs', [{ cc, sn, wb_count: cm.wb_count, wb_last_at: nowIso, wb_first_at: cm.wb_first_at }]); } catch (err) {}
+      logAct('梱包・発送', '伝票発行', sn, cc + ' / 通算' + cm.wb_count + '回目');
       setTimeout(() => pfRender(), 600);
     }));
     // 🚚倉庫へ発送（未スキャン）トグル: self_transit_at をON/OFF
@@ -2495,6 +2519,7 @@
       const cm = pf.costMap.get(key) || { cc, sn };
       cm.self_transit_at = val; pf.costMap.set(key, cm);
       try { await sbUpsert('costs', [{ cc, sn, self_transit_at: val }]); } catch (err) { alert('保存失敗: ' + err.message); }
+      logAct('梱包・発送', turnOn ? '倉庫へ発送(未スキャン)' : '倉庫輸送を解除', sn, cc);
       pfRender();
     }));
     // ヘッダー: クリックでソート / D&Dで列移動
