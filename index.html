@@ -178,6 +178,7 @@
       <button data-p="profit">💹 利益管理</button>
       <button data-p="expenses">💴 入出金・経費</button>
       <button data-p="returns">↩️ 返品・キャンセル</button>
+      <button data-p="tasks">✅ タスク管理</button>
       <button data-p="summary">📈 月次サマリー</button>
       <div class="ng">情報・マスタ</div>
       <button data-p="customers">👤 顧客管理</button>
@@ -407,8 +408,13 @@
   </div>
   <!-- 仕入れ管理 -->
   <div id="page-buy" style="display:none">
-    <div class="smd-pagehead">🛒 仕入れ管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（仕入れたが未入荷＝入庫待ち。到着したら在庫管理で「在庫保管中」に）</span></div>
+    <div class="smd-pagehead">🛒 仕入れ管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（売れた注文を各サイトで最安検索して最速仕入れ／入庫待ちの管理）</span></div>
     <div id="buy-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- タスク管理 -->
+  <div id="page-tasks" style="display:none">
+    <div class="smd-pagehead">✅ タスク管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（Supabase同期・複数PCで共有）</span></div>
+    <div id="tasks-body" style="padding:12px 20px"></div>
   </div>
   <!-- 顧客管理 -->
   <div id="page-customers" style="display:none">
@@ -794,10 +800,11 @@
     if (p === 'alerts') renderAlerts();
     if (p === 'expenses') renderExpenses();
     if (p === 'returns') renderReturns();
+    if (p === 'tasks') renderTasks();
     if (p === 'summary') renderExportSummary();
     if (p === 'fx') renderFx();
   }
-  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','tasks','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p);
@@ -1784,20 +1791,193 @@
     setupColumns('ship', body);
     fitScroll('ship');
   }
-  // ---------------- 🛒 仕入れ管理（入庫待ち） ----------------
+  // ---------------- 🛒 仕入れ管理（仕入れ検索 ＋ 入庫待ち） ----------------
+  // 仕入先サイト（安い順で開けるものはソート指定）。keyword は encodeURIComponent 済みを渡す
+  const SRC_SITES = [
+    { k: 'mercari',   label: 'メルカリ',      bg: '#ff0211', url: kw => `https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale` },
+    { k: 'surugaya',  label: '駿河屋',        bg: '#c30d23', url: kw => `https://www.suruga-ya.jp/search?search_word=${kw}` },
+    { k: 'yahuoku',   label: 'ヤフオク',      bg: '#ff0033', url: kw => `https://auctions.yahoo.co.jp/search/search?p=${kw}&fixed=3&s1=cbids&o1=a` },
+    { k: 'paypay',    label: 'PayPay',        bg: '#ff0033', url: kw => `https://paypayfleamarket.yahoo.co.jp/search/${kw}?open=1` },
+    { k: 'rakuten',   label: '楽天',          bg: '#bf0000', url: kw => `https://search.rakuten.co.jp/search/mall/${kw}/` },
+    { k: 'yshopping', label: 'Yショッピング', bg: '#ff0033', url: kw => `https://shopping.yahoo.co.jp/search?p=${kw}` },
+    { k: 'amazon',    label: 'Amazon',        bg: '#ff9900', url: kw => `https://www.amazon.co.jp/s?k=${kw}&s=price-asc-rank` },
+  ];
+  // Shopee商品名 → 日本の仕入先で検索しやすいキーワードに自動整形（装飾・宣伝文句を除去）
+  function sourcingKeyword(name) {
+    let s = String(name || '');
+    s = s.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}️‍✅⭐️]/gu, ' '); // 絵文字・記号
+    s = s.replace(/[【〔\[].*?[】〕\]]/g, ' ');  // 【..】[..] 装飾
+    s = s.replace(/[（(].*?[）)]/g, ' ');        // （..）(..) 補足
+    const junk = /送料無料|匿名配送|即日発送|翌日発送|即決|新品未使用|未使用に近い|未使用|美品|動作確認済み?|動作品|正規品|純正品?|非売品|希少品?|激レア|限定品?|セット売り|まとめ売り|プロフ必読|値下げ交渉?|\bauthentic\b|\bgenuine\b|\boriginal\b|\bbrand ?new\b|\bfree ?shipping\b|\bjapan(ese)? ?import\b|\bimport\b|\bjapan(ese)? ?ver(sion)?\b|\bused\b|\bntsc-?j\b|\bregion ?free\b/gi;
+    s = s.replace(junk, ' ');
+    s = s.replace(/[\/|｜,、，]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = s.split(' ');
+    if (words.length > 10) s = words.slice(0, 10).join(' ');
+    return s.slice(0, 80);
+  }
+
   async function renderBuy() {
-    const body = document.getElementById('buy-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let rows; try { rows = await ensureInv(); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const wrap = document.getElementById('buy-body');
+    const tab = state.buyTab || 'search';
+    const btab = (t, label) => `<button class="buy-tab" data-t="${t}" style="padding:7px 15px;border:1px solid ${t === tab ? '#ff5722' : '#ddd'};background:${t === tab ? '#fff3ef' : '#fff'};color:${t === tab ? '#ff5722' : '#555'};font-weight:${t === tab ? 700 : 500};border-radius:7px;cursor:pointer;font-size:13px">${label}</button>`;
+    wrap.innerHTML = `<div style="display:flex;gap:8px;margin:0 0 14px">${btab('search', '🔎 仕入れ検索')}${btab('waiting', '⏳ 入庫待ち')}</div><div id="buy-inner"></div>`;
+    wrap.querySelectorAll('.buy-tab').forEach(b => b.addEventListener('click', () => { state.buyTab = b.dataset.t; renderBuy(); }));
+    const inner = wrap.querySelector('#buy-inner');
+    if (tab === 'search') renderSourcing(inner); else renderWaiting(inner);
+  }
+
+  // 🔎 仕入れ検索：Shopee未発送(=売れた)注文を各サイトで最安検索
+  async function renderSourcing(host) {
+    host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
+    let orders;
+    try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab&tab=eq.300&order=ship_by.asc'); }
+    catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const items = [];
+    orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
+    if (!items.length) {
+      host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
+      return;
+    }
+    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">未発送 ${orders.length}件 / 商品 ${items.length}点 ・ 売れた注文を各サイトで<b>最安検索</b>して最速仕入れ ・ キーワードは自動整形（編集して再検索OK）</div>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1040px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
+      items.map(({ o, it, ix }) => {
+        const region = regionByCc(o.cc);
+        const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
+        const kw = sourcingKeyword(it.name || '');
+        const rid = `${o.cc}_${o.sn}_${ix}`;
+        return `<tr>
+          <td>${img}</td>
+          <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
+          <td style="font-size:11px;max-width:280px">${esc((it.name || '').slice(0, 90))}${it.variation ? `<br><span class="smd-dim">${esc(it.variation)}</span>` : ''}</td>
+          <td><input class="src-kw" data-rid="${esc(rid)}" value="${esc(kw)}" style="width:230px;font-size:12px;padding:5px 7px;border:1px solid #ccc;border-radius:5px"></td>
+          <td><div class="src-btns" data-rid="${esc(rid)}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:340px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}</div></td>
+          <td>${region ? `<a href="https://${region.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopee注文詳細">📄</a>` : ''}</td>
+        </tr>`;
+      }).join('') + `</table></div></div>`;
+    host.querySelectorAll('.src-go').forEach(btn => btn.addEventListener('click', () => {
+      const site = SRC_SITES.find(s => s.k === btn.dataset.site);
+      const rid = btn.closest('.src-btns').dataset.rid;
+      const inp = host.querySelector(`.src-kw[data-rid="${(window.CSS && CSS.escape) ? CSS.escape(rid) : rid}"]`);
+      const kw = encodeURIComponent(((inp && inp.value.trim()) || '').replace(/\s+/g, ' '));
+      if (kw) window.open(site.url(kw), '_blank');
+    }));
+  }
+
+  // ⏳ 入庫待ち：仕入れたが未入荷
+  async function renderWaiting(host) {
+    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const waiting = rows.filter(r => r.status === '入庫待ち');
     const val = waiting.reduce((s, r) => s + (r.price || 0), 0);
-    body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">入庫待ち ${waiting.length}件 ・ 仕入額合計 ${fmtJpy(val)} ・ 到着したら🏷在庫管理で「在庫保管中」に</div>` +
+    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">入庫待ち ${waiting.length}件 ・ 仕入額合計 ${fmtJpy(val)} ・ 到着したら🏷在庫管理で「在庫保管中」に</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:880px"><tr><th>画像</th><th>仕入日時</th><th>商品名</th><th>仕入元</th><th>セラー</th><th>仕入額</th><th>仕入状況</th><th>確証</th></tr>` +
       waiting.slice(0, 400).map(r => `<tr><td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${esc((r.name || '').slice(0, 44))}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td><td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td></tr>`).join('') +
       `</table></div></div>`;
-    setupColumns('buy', body);
+    setupColumns('buy', host);
     fitScroll('buy');
   }
+  // ---------------- ✅ タスク管理（Supabase tasks / 複数PC同期） ----------------
+  const TASKS_SQL = `create table if not exists public.tasks (
+  id bigint generated always as identity primary key,
+  title text not null,
+  done boolean not null default false,
+  priority smallint not null default 1,
+  due date,
+  notes text,
+  sort double precision not null default 0,
+  created_at timestamptz not null default now(),
+  done_at timestamptz
+);
+alter table public.tasks disable row level security;
+grant all on public.tasks to anon, authenticated, service_role;`;
+  const PRIO = { 0: { t: '低', c: '#8a8f98' }, 1: { t: '中', c: '#1a73e8' }, 2: { t: '高', c: '#d93025' } };
+
+  async function renderTasks() {
+    const body = document.getElementById('tasks-body');
+    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    let tasks;
+    try {
+      tasks = await sbGet('tasks', 'select=*&order=done.asc,priority.desc,sort.asc,created_at.asc');
+    } catch (e) {
+      body.innerHTML = `<div class="tool-card" style="max-width:720px"><h3>⚠️ tasksテーブルが未作成です</h3>
+        <div class="smd-dim" style="font-size:12px;margin-bottom:8px">下のSQLを Supabase の SQL Editor に貼って一度だけ実行してください（1回だけ）。作成後にこのページを再読み込みすると使えます。</div>
+        <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ccc;border-radius:6px" onclick="this.select()">${esc(TASKS_SQL)}</textarea>
+        <div style="margin-top:8px"><a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" style="background:#3ecf8e;color:#08312a;font-weight:700;padding:7px 12px;border-radius:6px;text-decoration:none">SQL Editorを開く</a>
+        <button id="tsk-retry" style="margin-left:8px;padding:7px 12px;border:1px solid #ccc;background:#fff;border-radius:6px;cursor:pointer">再読み込み</button></div>
+        <div class="smd-dim" style="font-size:11px;margin-top:8px">詳細: ${esc(e.message)}</div></div>`;
+      const rt = document.getElementById('tsk-retry'); if (rt) rt.addEventListener('click', renderTasks);
+      return;
+    }
+    const undone = tasks.filter(t => !t.done);
+    const done = tasks.filter(t => t.done);
+    const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    const dueBadge = (d) => {
+      if (!d) return '';
+      const late = d < todayStr, today = d === todayStr;
+      const c = late ? '#d93025' : (today ? '#e8710a' : '#5f6368');
+      return `<span style="color:${c};font-size:11px;font-weight:${late || today ? 700 : 400}">📅 ${esc(d)}${late ? ' (超過)' : today ? ' (今日)' : ''}</span>`;
+    };
+    const row = (t) => `<div class="tsk-row" data-id="${t.id}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #f0f0f0${t.done ? ';opacity:.55' : ''}">
+      <input type="checkbox" class="tsk-done" ${t.done ? 'checked' : ''} style="width:17px;height:17px;cursor:pointer">
+      <span class="tsk-prio" title="優先度クリックで変更" style="cursor:pointer;flex:0 0 auto;width:20px;height:20px;line-height:20px;text-align:center;border-radius:5px;font-size:11px;font-weight:700;color:#fff;background:${PRIO[t.priority] ? PRIO[t.priority].c : '#888'}">${PRIO[t.priority] ? PRIO[t.priority].t : '中'}</span>
+      <span class="tsk-title" contenteditable="true" style="flex:1;font-size:14px;outline:none${t.done ? ';text-decoration:line-through' : ''}">${esc(t.title)}</span>
+      <input type="date" class="tsk-due" value="${t.due || ''}" style="font-size:11px;border:1px solid #e0e0e0;border-radius:5px;padding:3px 5px">
+      ${dueBadge(t.due)}
+      <button class="tsk-del" title="削除" style="border:none;background:none;color:#bbb;cursor:pointer;font-size:15px">🗑</button>
+    </div>`;
+    body.innerHTML = `
+      <div style="display:flex;gap:8px;margin:0 0 14px;max-width:760px">
+        <input id="tsk-new" placeholder="新しいタスクを入力して Enter…" style="flex:1;font-size:14px;padding:9px 12px;border:1px solid #ccc;border-radius:7px">
+        <select id="tsk-new-prio" style="font-size:13px;padding:0 8px;border:1px solid #ccc;border-radius:7px"><option value="1">中</option><option value="2">高</option><option value="0">低</option></select>
+        <input id="tsk-new-due" type="date" style="font-size:13px;padding:0 8px;border:1px solid #ccc;border-radius:7px">
+        <button id="tsk-add" style="background:#ff5722;color:#fff;border:none;border-radius:7px;padding:0 16px;font-weight:700;cursor:pointer">追加</button>
+      </div>
+      <div class="tool-card" style="margin:0;max-width:760px;padding:4px 0">
+        <div style="padding:6px 12px;font-size:12px;font-weight:700;color:#333">未完了 ${undone.length}</div>
+        ${undone.length ? undone.map(row).join('') : '<div class="smd-dim" style="padding:10px 12px;font-size:12px">未完了のタスクはありません🎉</div>'}
+      </div>
+      ${done.length ? `<div class="tool-card" style="margin:12px 0 0;max-width:760px;padding:4px 0">
+        <div style="padding:6px 12px;font-size:12px;font-weight:700;color:#888;display:flex;justify-content:space-between">完了 ${done.length}<button id="tsk-clear" style="border:none;background:none;color:#d93025;font-size:11px;cursor:pointer">完了を全削除</button></div>
+        ${done.map(row).join('')}</div>` : ''}`;
+
+    const add = async () => {
+      const inp = document.getElementById('tsk-new');
+      const title = inp.value.trim(); if (!title) return;
+      const priority = Number(document.getElementById('tsk-new-prio').value);
+      const due = document.getElementById('tsk-new-due').value || null;
+      try { await sbUpsert('tasks', [{ title, priority, due, sort: Date.now() }]); logAct('タスク管理', '追加', '', title); renderTasks(); }
+      catch (e) { alert('追加エラー: ' + e.message); }
+    };
+    document.getElementById('tsk-add').addEventListener('click', add);
+    document.getElementById('tsk-new').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+    const clr = document.getElementById('tsk-clear');
+    if (clr) clr.addEventListener('click', async () => { if (!confirm('完了タスクを全削除しますか？')) return; try { await sbDelete('tasks', 'done=eq.true'); renderTasks(); } catch (e) { alert(e.message); } });
+
+    body.querySelectorAll('.tsk-row').forEach(r => {
+      const id = r.dataset.id;
+      r.querySelector('.tsk-done').addEventListener('change', async e => {
+        try { await sbPatch('tasks', 'id=eq.' + id, { done: e.target.checked, done_at: e.target.checked ? new Date().toISOString() : null }); renderTasks(); }
+        catch (err) { alert(err.message); }
+      });
+      r.querySelector('.tsk-del').addEventListener('click', async () => {
+        try { await sbDelete('tasks', 'id=eq.' + id); r.remove(); } catch (err) { alert(err.message); }
+      });
+      r.querySelector('.tsk-prio').addEventListener('click', async e => {
+        const next = { '中': 2, '高': 0, '低': 1 }[e.target.textContent] ?? 1; // 中→高→低→中で循環
+        try { await sbPatch('tasks', 'id=eq.' + id, { priority: next }); renderTasks(); } catch (err) { alert(err.message); }
+      });
+      const titleEl = r.querySelector('.tsk-title');
+      titleEl.addEventListener('blur', async () => {
+        const v = titleEl.textContent.trim(); if (!v) { renderTasks(); return; }
+        try { await sbPatch('tasks', 'id=eq.' + id, { title: v }); } catch (err) { alert(err.message); }
+      });
+      titleEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); } });
+      r.querySelector('.tsk-due').addEventListener('change', async e => {
+        try { await sbPatch('tasks', 'id=eq.' + id, { due: e.target.value || null }); renderTasks(); } catch (err) { alert(err.message); }
+      });
+    });
+  }
+
   // ---------------- ⚠️ アラート（要対応の自動抽出） ----------------
   const alertDaysSince = (v) => { if (!v) return null; const t = Date.parse(v); return isNaN(t) ? null : (Date.now() - t) / 86400000; };
   function updateAlertBadge(n) {
@@ -2189,6 +2369,10 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '🛒仕入れ管理を刷新：「🔎仕入れ検索」タブを新設。Shopee未発送(=売れた)注文ごとに商品名を検索キーワードへ自動整形（編集可）し、メルカリ/駿河屋/ヤフオク/PayPay/楽天/Yショッピング/Amazonをワンタップで安い順検索→最速仕入れ。従来の入庫待ちは「⏳入庫待ち」タブに',
+      '✅タスク管理ページを新設（Supabase tasksテーブルで複数PC同期。優先度/期日/完了・並び。初回のみSQL実行）',
+      '注文管理を改善：ライブ取得が全国終わるまで真っ白だったのを、まずDB同期分を即表示→各国ライブで上書き（失敗/ハングした国はDB分を保持）',
+      '商品画像列を仕入れ管理/梱包発送/各アラートカードにも追加（Shopee側の商品画像）',
       '月次サマリーの純利益から返金合計（返品ページの返金¥・当月分）を差し引くように（返品の損益反映）',
       '列カスタム（🗂列ボタンで表示/非表示・並べ替え・保存）を在庫/仕入れ管理/梱包発送/顧客/仕入れ先/返品に追加',
       '顧客管理：国フィルター＋国カラーバッジ＋リピーターのみ絞り込み＋頭文字アイコン',
