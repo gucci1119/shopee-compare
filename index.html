@@ -1502,6 +1502,61 @@
     sc.style.maxHeight = Math.max(220, window.innerHeight - top - 16) + 'px';
   }
   const fitStockScroll = () => fitScroll('stock');
+  // ===== 汎用・列カスタム（表示/非表示＋並べ替え＋保存）。描画済みの.pf-tableにかぶせる（テーブル構造は非破壊） =====
+  const loadColCfg = (pid) => { try { const c = JSON.parse(localStorage.getItem('colcfg:' + pid) || '{}'); return { hidden: new Set(c.hidden || []), order: c.order || [] }; } catch { return { hidden: new Set(), order: [] }; } };
+  const saveColCfg = (pid, cfg) => localStorage.setItem('colcfg:' + pid, JSON.stringify({ hidden: [...cfg.hidden], order: cfg.order }));
+  function colKeys(table) {
+    const ths = [...table.querySelector('tr').children];
+    const keys = ths.map((th, i) => (th.textContent.trim() || ('列' + (i + 1))));
+    const seen = {}; keys.forEach((k, i) => { if (seen[k] != null) keys[i] = k + '#' + i; seen[k] = i; });
+    return keys;
+  }
+  function applyColCfg(table, keys, cfg) {
+    const order = (cfg.order && cfg.order.length) ? cfg.order.filter(k => keys.includes(k)).concat(keys.filter(k => !cfg.order.includes(k))) : keys.slice();
+    [...table.querySelectorAll('tr')].forEach(tr => {
+      const cells = {}; [...tr.children].forEach(c => { if (c.dataset.col) cells[c.dataset.col] = c; });
+      order.forEach(k => { if (cells[k]) tr.appendChild(cells[k]); });
+    });
+    keys.forEach(k => { const hide = cfg.hidden.has(k); table.querySelectorAll('[data-col="' + CSS.escape(k) + '"]').forEach(c => { c.style.display = hide ? 'none' : ''; }); });
+    return order;
+  }
+  function setupColumns(pageId, container) {
+    const table = container.querySelector('.pf-table');
+    if (!table) return;
+    const keys = colKeys(table);
+    [...table.querySelector('tr').children].forEach((th, i) => { th.dataset.col = keys[i]; });
+    [...table.querySelectorAll('tr')].slice(1).forEach(tr => { [...tr.children].forEach((td, i) => { if (i < keys.length) td.dataset.col = keys[i]; }); });
+    const cfg = loadColCfg(pageId);
+    applyColCfg(table, keys, cfg);
+    // 🗂列ボタン＋ポップオーバー
+    const btn = document.createElement('button');
+    btn.className = 'smd-btn'; btn.textContent = '🗂 列'; btn.title = '列の表示/非表示・並べ替え';
+    btn.style.cssText = 'position:relative';
+    const host = container.querySelector('.tool-card') || container;
+    host.parentNode.insertBefore(btn, host);
+    btn.style.margin = '0 0 6px';
+    const pop = document.createElement('div');
+    pop.style.cssText = 'position:absolute;z-index:150;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px;display:none;max-height:60vh;overflow:auto;width:230px;font-size:12px';
+    btn.parentNode.style.position = 'relative';
+    btn.after(pop);
+    const drawPop = () => {
+      const order = (cfg.order && cfg.order.length) ? cfg.order.filter(k => keys.includes(k)).concat(keys.filter(k => !cfg.order.includes(k))) : keys.slice();
+      pop.innerHTML = '<div style="font-weight:700;margin-bottom:6px">列の設定</div>' +
+        order.map((k, i) => `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">
+          <input type="checkbox" data-k="${esc(k)}" ${cfg.hidden.has(k) ? '' : 'checked'}>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k)}</span>
+          <button data-up="${i}" ${i === 0 ? 'disabled' : ''} style="border:none;background:#eee;border-radius:4px;cursor:pointer;padding:0 5px">↑</button>
+          <button data-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="border:none;background:#eee;border-radius:4px;cursor:pointer;padding:0 5px">↓</button></div>`).join('') +
+        '<button id="col-reset" class="smd-btn" style="margin-top:6px;width:100%">初期状態に戻す</button>';
+      pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', e => { const k = e.target.dataset.k; if (e.target.checked) cfg.hidden.delete(k); else cfg.hidden.add(k); saveColCfg(pageId, cfg); applyColCfg(table, keys, cfg); }));
+      const move = (from, to) => { const o = order.slice(); const [x] = o.splice(from, 1); o.splice(to, 0, x); cfg.order = o; saveColCfg(pageId, cfg); applyColCfg(table, keys, cfg); drawPop(); };
+      pop.querySelectorAll('[data-up]').forEach(b => b.addEventListener('click', () => move(+b.dataset.up, +b.dataset.up - 1)));
+      pop.querySelectorAll('[data-dn]').forEach(b => b.addEventListener('click', () => move(+b.dataset.dn, +b.dataset.dn + 1)));
+      pop.querySelector('#col-reset').addEventListener('click', () => { cfg.hidden = new Set(); cfg.order = []; saveColCfg(pageId, cfg); applyColCfg(table, keys, cfg); drawPop(); });
+    };
+    btn.addEventListener('click', () => { const show = pop.style.display === 'none'; pop.style.display = show ? 'block' : 'none'; if (show) drawPop(); });
+    document.addEventListener('click', e => { if (!pop.contains(e.target) && e.target !== btn) pop.style.display = 'none'; });
+  }
   function stockRender() {
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
@@ -1612,6 +1667,7 @@
     });
     document.getElementById('stk-printsel').addEventListener('click', () => { if (stock.sel.size) stockPrintLabels([...stock.sel]); });
     document.getElementById('stk-selclear').addEventListener('click', () => { stock.sel.clear(); stockRender(); });
+    setupColumns('stock', body); // 列カスタム（表示/非表示・並べ替え・保存）
     stockAddForm();
   }
   // ---------------- 操作ログ記録（fire-and-forget） ----------------
@@ -1658,6 +1714,7 @@
       `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計</th><th>セラー数</th></tr>` +
       list.map(([s, v]) => `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${v.sellers.size}</td></tr>`).join('') +
       `</table></div></div>`;
+    setupColumns('suppliers', body);
     fitScroll('suppliers');
   }
   // ---------------- 👤 顧客管理 ----------------
@@ -1688,6 +1745,7 @@
       `</table></div></div>`;
     document.getElementById('cust-cc').addEventListener('change', e => { cust.cc = e.target.value; renderCustomers(); });
     document.getElementById('cust-rep').addEventListener('change', e => { cust.repeatOnly = e.target.checked; renderCustomers(); });
+    setupColumns('customers', body);
     fitScroll('customers');
   }
   // ---------------- 🚚 梱包・発送 ----------------
@@ -1700,6 +1758,7 @@
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:780px"><tr><th>国</th><th>注文</th><th>バイヤー</th><th>商品</th><th>発送期日</th><th>伝票</th></tr>` +
       toship.slice(0, 400).map(o => { const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {}; return `<tr><td><b style="color:${rg ? rg.color : '#333'}">${o.cc}</b></td><td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${esc((it.name || '').slice(0, 40))}</td><td style="font-size:11px;white-space:nowrap">${o.ship_by ? esc(new Date(o.ship_by * 1000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })) : ''}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="SLS伝票を印刷" style="text-decoration:none;font-size:15px">🖨️</a>` : ''}</td></tr>`; }).join('') +
       `</table></div></div>`;
+    setupColumns('ship', body);
     fitScroll('ship');
   }
   // ---------------- 🛒 仕入れ管理（入庫待ち） ----------------
@@ -1713,6 +1772,7 @@
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:820px"><tr><th>仕入日時</th><th>商品名</th><th>仕入元</th><th>セラー</th><th>仕入額</th><th>仕入状況</th><th>確証</th></tr>` +
       waiting.slice(0, 400).map(r => `<tr><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${esc((r.name || '').slice(0, 44))}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td><td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td></tr>`).join('') +
       `</table></div></div>`;
+    setupColumns('buy', body);
     fitScroll('buy');
   }
   // ---------------- ⚠️ アラート（要対応の自動抽出） ----------------
@@ -1950,6 +2010,7 @@
       if (!sn) { document.getElementById('ret-msg').textContent = 'SNを入力してください'; return; }
       if (await saveIssue(cc, sn, { kind: '返品' })) renderReturns();
     });
+    setupColumns('returns', body);
   }
   // ---------------- 💱 為替レート ----------------
   async function applyFxRates() {
@@ -2102,6 +2163,7 @@
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-06', items: [
+      '列カスタム（🗂列ボタンで表示/非表示・並べ替え・保存）を在庫/仕入れ管理/梱包発送/顧客/仕入れ先/返品に追加',
       '顧客管理：国フィルター＋国カラーバッジ＋リピーターのみ絞り込み＋頭文字アイコン',
       '返品・キャンセル：商品画像列を追加',
       '在庫：取引ページへのリンク（🧾）を追加（状況をすぐ確認）。AmazonはGASで配送状況/販売元を反映',
