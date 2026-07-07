@@ -818,7 +818,7 @@
     const RENDER = {
       dash: () => { renderDash(); renderTrend(); },
       stock: renderStock, list: renderList, profit: renderProfit,
-      orders: () => { if (!state.orders.started) loadOrders(); },
+      orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       ship: renderShip, buy: renderBuy, customers: renderCustomers, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, alerts: renderAlerts,
       expenses: renderExpenses, returns: renderReturns, tasks: renderTasks, summary: renderExportSummary, fx: renderFx,
@@ -1175,42 +1175,53 @@
   function ordersFromDb() {
     return sbGetAll('orders', 'select=*&tab=lt.500&order=ship_by.asc').then(rows => {
       const byCc = {};
+      let maxSync = '';
       rows.forEach(o => {
+        if (o.synced_at && o.synced_at > maxSync) maxSync = o.synced_at;
         (byCc[o.cc] = byCc[o.cc] || []).push({ sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
           tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], preOrder: !!o.pre_order, region: regionByCc(o.cc) });
       });
+      if (maxSync) state.orders.dbSyncedAt = maxSync;
       return byCc;
     });
   }
+  const fmtOrdTs = (ts) => { if (!ts) return '不明'; try { return new Date(ts).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return '不明'; } };
+  function updateOrdNote(live) {
+    const el = document.getElementById('ord-note'); if (!el) return;
+    let t = `DB最終同期: ${fmtOrdTs(state.orders.dbSyncedAt)}`;
+    if (live) t += ' ・ 🔄ライブ更新中…';
+    else if (state.orders.liveAt) t += ` ・ ライブ更新: ${fmtOrdTs(state.orders.liveAt)}`;
+    el.textContent = t;
+  }
 
-  function loadOrders() {
+  // withLive=false: DBのみ即表示（開いた瞬間は速い）。withLive=true（更新ボタン/同期時）: ライブで上書き
+  function loadOrders(withLive) {
     state.orders.started = true;
-    if (state.mode !== 'live') {
-      // ブリッジ無しPC: DBの最終同期データを表示
-      document.getElementById('ord-note').textContent = 'DBの最終同期時点を表示中';
+    if (state.mode !== 'live' || !withLive) {
       ordersFromDb().then(byCc => {
         REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
-        renderOrders();
+        updateOrdNote(false); renderOrders();
       }).catch(e => {
         document.getElementById('ord-list').innerHTML = `<div class="smd-empty">${esc(e.message)}</div>`;
       });
       return;
     }
-    // ライブPC: まずDB同期分を即表示 → 各国ライブで上書き（失敗した国はDB分をそのまま残す）
-    document.getElementById('ord-note').textContent = 'ライブ取得中（まずDB同期分を表示）';
+    // ライブ「更新」: まずDB同期分を即表示 → 各国ライブで上書き（失敗した国はDB分をそのまま残す）
+    updateOrdNote(true);
     const liveFetchAll = () => {
       REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
         const prev = state.orders.perCountry.get(region.cc);
         if (!prev) state.orders.perCountry.set(region.cc, { status: 'loading', msg: '読み込み中...', rows: [] });
         else prev.status = 'loading';
         renderOrders();
-        // ライブ取得が固まってもDB表示を殺さないよう、国ごとに90秒でタイムアウト
-        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（DB表示のまま）')), 90000));
+        // ライブ取得が固まってもDB表示を殺さないよう、国ごとに30秒でタイムアウト（詰まっても早めに諦めてDB表示に戻す）
+        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（DB表示のまま）')), 30000));
         Promise.race([fetchOrdersCountry(region, (tab, done, total) => {
           const oc = state.orders.perCountry.get(region.cc);
           if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
         }), timeout]).then(rows => {
           state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows });
+          state.orders.liveAt = new Date().toISOString(); updateOrdNote(false);
           renderOrders();
         }).catch(e => {
           const oc = state.orders.perCountry.get(region.cc);
@@ -1284,7 +1295,12 @@
       const { region } = r;
       const first = r.items[0] || {};
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
-      const more = r.items.length > 1 ? ` ほか${r.items.length - 1}件` : '';
+      // 全商品を列挙（2点以上でも省略せず表示）
+      const itemsHtml = (r.items.length ? r.items : [first]).map(it =>
+        `<div class="ord-itemname">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''}</div>` +
+        (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '')
+      ).join('<div style="border-top:1px dashed #e8e8e8;margin:3px 0"></div>') +
+        (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#999">${r.items.length}商品・合計${qty}点</div>` : '');
       // Shopeeの「To Ship」は 未手配(To Process=追跡なし) と 手配済(Processed=追跡あり) が混在。
       // 追跡番号があれば発送手配済み＝実質発送済扱い。遅延は「未手配のまま期日超過」だけ。
       const arranged = r.tab === 300 && !!r.tracking; // 発送手配済（Processed）
@@ -1303,7 +1319,7 @@
         `<span class="ord-cc" style="background:${region.color}">${region.cc}</span>` +
         `<span class="ord-due">${r.tab !== 300 ? '<span class="smd-dim">発送済</span>' : (arranged ? '<span class="smd-dim">手配済</span>' : shipByBadge(r.shipBy))}</span>` +
         `<img loading="lazy" src="${IMG_CDN}${first.image}" onerror="this.style.opacity=.15">` +
-        `<div class="ord-item"><div class="ord-itemname"></div><div class="ord-itemsub"></div></div>` +
+        `<div class="ord-item">${itemsHtml}</div>` +
         `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${statusLabel}</span>` +
         `<div class="ord-meta"><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
         `<div class="ord-links">` +
@@ -1311,8 +1327,6 @@
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
           : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
         `</div>`;
-      row.querySelector('.ord-itemname').textContent = (first.name || '') + more;
-      row.querySelector('.ord-itemsub').textContent = (first.variation ? first.variation + ' / ' : '') + `合計${qty}点`;
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       row.addEventListener('click', () => window.open(`https://${region.host}/portal/sale/order/${r.orderId}`, '_blank'));
@@ -1324,7 +1338,7 @@
 
   document.getElementById('ord-reload').addEventListener('click', () => {
     state.orders.perCountry.clear();
-    loadOrders();
+    loadOrders(true); // 更新ボタンはライブ取得
   });
   // 🔬 接続診断：各国のShopee注文APIを1回叩き、生の応答(HTTP/code/本文先頭)を表示してライブ失敗の原因を切り分ける
   async function diagnoseOrders() {
@@ -3595,9 +3609,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const say = m => { log.push(m); st(log.join('\n')); };
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     try {
-      // 1) 注文（未発送・発送中）
+      // 1) 注文（未発送・発送中）— 同期は必ずライブで最新取得
       say('📦 注文データを取得中...');
-      if (!state.orders.started) loadOrders();
+      loadOrders(true);
       await waitOrdersLoaded({ textContent: '' });
       const orderRows = [];
       targets.forEach(region => {
@@ -3940,7 +3954,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
   // ---------------- 転記: 商品画像（注文データ → AC列） ----------------
   async function waitOrdersLoaded(st) {
-    if (!state.orders.started) loadOrders();
+    if (!state.orders.started) loadOrders(false); // 画像転記等はDBデータで足りる（同期側は先にloadOrders(true)を呼ぶ）
     for (let i = 0; i < 180; i++) {
       const targets = REGIONS.filter(r => state.enabled.has(r.cc));
       const pcs = targets.map(r => state.orders.perCountry.get(r.cc));
