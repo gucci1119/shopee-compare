@@ -274,10 +274,17 @@
     <div id="stock-body" style="padding:12px 20px"></div>
   </div>
 
-  <!-- 出品コンポーザー -->
+  <!-- 出品 -->
   <div id="page-list" style="display:none">
-    <div class="smd-pagehead">🆕 出品コンポーザー <span class="smd-dim" style="font-weight:400;font-size:12px">（内容を作成→各国のShopee出品ページへ転記。発行だけ手動）</span></div>
-    <div id="list-body" style="padding:12px 20px;max-width:1150px"></div>
+    <div class="smd-pagehead">🆕 出品 <span class="smd-dim" style="font-weight:400;font-size:12px">（出品状況の把握＋新規出品コンポーザー）</span></div>
+    <div class="smd-toolbar" style="padding:8px 20px 0">
+      <span class="smd-seg" id="list-tab">
+        <button data-k="status" class="on">📋 出品状況</button>
+        <button data-k="composer">✍️ コンポーザー</button>
+      </span>
+    </div>
+    <div id="list-status" style="padding:12px 20px"></div>
+    <div id="list-composer" style="display:none;padding:12px 20px;max-width:1150px"></div>
   </div>
 
   <!-- 売れ行きページ -->
@@ -824,7 +831,7 @@
     // 各ページの描画を1か所で実行し、例外は握って可視化（無言ハングを防ぐ）
     const RENDER = {
       dash: () => { renderDash(); renderTrend(); },
-      stock: renderStock, list: renderList, profit: renderProfit,
+      stock: renderStock, list: renderListPage, profit: renderProfit,
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, alerts: renderAlerts,
@@ -2889,6 +2896,149 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
 
+  // ---------------- 📋 出品状況（Shopee全出品カタログ＋バリエーション） ----------------
+  const LIST_PAGE_SIZE = 48; // mpsku APIのpage_size上限は48
+  const lfmt = (x) => (x == null || x === '' ? '-' : Number(x).toLocaleString());
+  function listingToRow(region, p) {
+    const pd = p.price_detail || {}, sd = p.stock_detail || {};
+    const models = (p.model_list || []).map(m => ({
+      id: m.id, n: m.name || '', sku: m.sku || '',
+      price: parseFloat((m.price_detail || {}).origin_price) || 0,
+      stock: (m.stock_detail || {}).total_available_stock != null ? (m.stock_detail || {}).total_available_stock : 0,
+      sold: (m.statistics || {}).sold_count || 0,
+    }));
+    return {
+      cc: region.cc, item_id: p.id, name: p.name || '', image: p.cover_image || '',
+      status: p.status, parent_sku: p.parent_sku || '',
+      price_min: parseFloat(pd.selling_price_min || pd.price_min) || null,
+      price_max: parseFloat(pd.selling_price_max || pd.price_max) || null,
+      stock: (sd.total_available_stock != null ? sd.total_available_stock : null),
+      model_count: models.length, models,
+      create_time: p.create_time || null, synced_at: new Date().toISOString(),
+    };
+  }
+  // 全出品をページング取得（mpsku list API・ブリッジがSPC_CDSを自動注入）
+  async function fetchListingsCountry(region, onProgress) {
+    const rows = []; let page = 1, total = 0;
+    for (;;) {
+      let j;
+      try {
+        j = await bridgePostJson(`https://${region.host}/api/v3/mpsku/list/v2/get_product_list?SPC_CDS_VER=2`,
+          { page_number: page, page_size: LIST_PAGE_SIZE, list_type: 'all', need_ext: true });
+      } catch (e) { console.warn('[出品一覧]', region.cc, 'p' + page, e.message); break; }
+      if (!j || j.code !== 0) { console.warn('[出品一覧] code', region.cc, j && j.code, j && j.message); break; }
+      const d = j.data || {}, prods = d.products || [];
+      total = (d.page_info || {}).total || total;
+      prods.forEach(p => rows.push(listingToRow(region, p)));
+      if (onProgress) onProgress(rows.length, total);
+      if (!prods.length || rows.length >= total) break;
+      if (++page > 120) break; // 安全弁(120*48=5760)
+    }
+    return rows;
+  }
+  const lst = { tab: 'status', started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: new Set(), note: '' };
+  function listingsFromDb() {
+    return sbGetAll('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
+      const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
+    });
+  }
+  async function syncListings() {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ更新できます'); return; }
+    const ok = await detectBridge();
+    if (!ok) { alert('ブリッジ未検出。Shopee Compare Bridge が有効か確認してください'); return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    lst.syncing = true; drawListingStatus();
+    for (const region of targets) {
+      lst.note = region.cc + ' 取得中...'; const nb = document.getElementById('lst-note'); if (nb) nb.textContent = '🔄 ' + lst.note;
+      try {
+        const rows = await fetchListingsCountry(region, (n, total) => { const e = document.getElementById('lst-note'); if (e) e.textContent = `🔄 ${region.cc} ${n}/${total}`; });
+        for (let i = 0; i < rows.length; i += 500) await sbUpsert('listings', rows.slice(i, i + 500));
+        lst.byCc[region.cc] = rows; drawListingStatus();
+      } catch (e) { lst.note = region.cc + ' 失敗: ' + e.message; drawListingStatus(); }
+    }
+    lst.syncing = false; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
+  }
+  function renderListPage() {
+    if (!lst.wired) {
+      lst.wired = true;
+      document.getElementById('list-tab').addEventListener('click', e => {
+        const b = e.target.closest('button'); if (!b) return;
+        document.querySelectorAll('#list-tab button').forEach(x => x.classList.remove('on'));
+        b.classList.add('on'); lst.tab = b.dataset.k; renderListPage();
+      });
+    }
+    const status = lst.tab !== 'composer';
+    document.getElementById('list-status').style.display = status ? '' : 'none';
+    document.getElementById('list-composer').style.display = status ? 'none' : '';
+    if (status) renderListingStatus(); else renderList();
+  }
+  async function renderListingStatus() {
+    const host = document.getElementById('list-status');
+    if (!lst.started) {
+      lst.started = true;
+      host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      try { lst.byCc = await listingsFromDb(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); lst.started = false; return; }
+    }
+    drawListingStatus();
+  }
+  function listingCardHtml(r) {
+    const rg = regionByCc(r.cc) || { color: '#333', host: '' };
+    const key = r.cc + ':' + r.item_id;
+    const opened = lst.open.has(key);
+    const live = r.status === 1;
+    const statusBadge = `<span style="background:${live ? '#e8f5e9' : '#eee'};color:${live ? '#1a7f37' : '#888'};font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px">${live ? '出品中' : '停止/他'}</span>`;
+    const price = r.price_min != null ? (r.price_min === r.price_max ? lfmt(r.price_min) : lfmt(r.price_min) + '〜' + lfmt(r.price_max)) : '-';
+    const oos = (r.stock || 0) <= 0;
+    const varRows = opened && r.models && r.models.length
+      ? `<div style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${lfmt(m.price)}</span><span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span><span class="smd-dim">売${m.sold}</span></div>`).join('')}</div>`
+      : '';
+    const editUrl = rg.host ? `https://${rg.host}/portal/product/edit/${r.item_id}` : '#';
+    return `<div class="tool-card" style="max-width:none;margin-bottom:6px;padding:8px 10px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="ord-cc" style="background:${rg.color}">${r.cc}</span>
+        <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</div>
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} 価格${price} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : '<span class="smd-dim">単品</span>'}</div>
+        </div>
+        <a href="${editUrl}" target="_blank" title="Shopeeで編集" style="text-decoration:none;font-size:15px">✏️</a>
+      </div>${varRows}</div>`;
+  }
+  function drawListingStatus() {
+    const host = document.getElementById('list-status'); if (!host) return;
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
+    const totalAll = all.length;
+    const q = (lst.search || '').toLowerCase();
+    let rows = all;
+    if (lst.filter === 'live') rows = rows.filter(r => r.status === 1);
+    else if (lst.filter === 'oos') rows = rows.filter(r => (r.stock || 0) <= 0);
+    else if (lst.filter === 'other') rows = rows.filter(r => r.status !== 1);
+    if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || String(r.item_id).includes(q) || (r.models || []).some(m => (m.n || '').toLowerCase().includes(q)));
+    const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
+    const shown = rows.slice(0, 500);
+    host.innerHTML =
+      `<div class="smd-toolbar" style="margin-bottom:8px">
+        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''}>🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
+        <span class="smd-seg" id="lst-filter">
+          <button data-k="all" class="${!lst.filter || lst.filter === 'all' ? 'on' : ''}">すべて</button>
+          <button data-k="live" class="${lst.filter === 'live' ? 'on' : ''}">出品中</button>
+          <button data-k="oos" class="${lst.filter === 'oos' ? 'on' : ''}">在庫切れ</button>
+          <button data-k="other" class="${lst.filter === 'other' ? 'on' : ''}">停止/その他</button>
+        </span>
+        <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
+        <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
+      </div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">出品 <b>${totalAll}</b>件（表示${rows.length}件${rows.length > 500 ? '中500件のみ' : ''}）｜ ${per || '国未選択'}</div>
+      <div id="lst-list"></div>`;
+    document.getElementById('lst-list').innerHTML = shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>';
+    document.getElementById('lst-sync').addEventListener('click', syncListings);
+    document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; drawListingStatus(); });
+    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); drawListingStatus(); }, 200); });
+    document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
+  }
+
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
   const listState = {
     built: false,
@@ -2923,7 +3073,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   function renderList() {
-    const body = document.getElementById('list-body');
+    const body = document.getElementById('list-composer');
     if (!listState.built) {
       listState.built = true;
       body.innerHTML = `
@@ -4183,7 +4333,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     settings.priceRound = Number(document.getElementById('set-pround').value) || 1;
     saveSettings();
     modal.classList.remove('open');
-    if (state.page === 'list') renderList();
+    if (state.page === 'list') renderListPage();
     if (state.mode !== 'live') load();
   });
   document.getElementById('set-testbtn').addEventListener('click', async () => {
