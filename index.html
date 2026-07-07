@@ -172,7 +172,6 @@
       <button data-p="dash" class="on" title="全体KPI・日別売上・発送期限が近い注文の要約。まずここで全体像を掴む">🏠 ダッシュボード</button>
       <button data-p="alerts" title="要対応を自動抽出（発送期日／相手が未発送／入庫待ち長期／確証未取得／滞留在庫）。各ページの問題だけを1画面に集約">⚠️ アラート <span id="alert-badge" style="display:none;background:#d93025;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:0 6px;margin-left:2px"></span></button>
       <button data-p="orders" title="全注文の一覧（未発送＋発送中）。検索・注文詳細・伝票印刷への入口">📦 注文管理</button>
-      <button data-p="ship" title="未発送だけを抽出したSLS伝票印刷の作業画面（注文管理の未発送を発送作業用に特化）">🚚 梱包・発送</button>
       <button data-p="stock" title="全在庫の台帳（在庫保管中／入庫待ち／販売済み）。登録・編集・QRラベル印刷">🏷 在庫管理</button>
       <button data-p="buy" title="🔎仕入れ検索：売れた注文を各サイトで最安検索して最速仕入れ／⏳入庫待ち：仕入れたが未入荷の管理">🛒 仕入れ管理</button>
       <button data-p="finance" title="損益をまとめて確認：💹利益明細／💴入出金・経費／📈月次サマリー（タブで切替）">💹 損益・入出金</button>
@@ -317,6 +316,7 @@
     <div class="smd-toolbar">
       <button class="smd-btn" id="ord-reload">🔄 更新</button>
       <button class="smd-btn" id="ord-diag" title="各国のShopee注文APIの応答を調べ、なぜライブ取得が失敗するか診断">🔬 診断</button>
+      <button class="smd-btn" id="ord-bulkprint" title="表示中の未発送注文のSLS伝票をまとめて印刷（国ごとに印刷タブを開く／Waybill Printer連携）">🖨️ 一括印刷</button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300">未発送</button>
@@ -377,11 +377,6 @@
     </div>
   </div>
 
-  <!-- 梱包・発送 -->
-  <div id="page-ship" style="display:none">
-    <div class="smd-pagehead">🚚 梱包・発送 <span class="smd-dim" style="font-weight:400;font-size:12px">（発送待ちの注文＋SLS伝票印刷）</span></div>
-    <div id="ship-body" style="padding:12px 20px"></div>
-  </div>
   <!-- 月次サマリー・エクスポート -->
   <div id="page-summary" style="display:none">
     <div class="smd-pagehead">📈 月次サマリー <span class="smd-dim" style="font-weight:400;font-size:12px">（月次の損益と、古物台帳・経費・損益のCSV書き出し）</span></div>
@@ -831,7 +826,7 @@
       dash: () => { renderDash(); renderTrend(); },
       stock: renderStock, list: renderList, profit: renderProfit,
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
-      ship: renderShip, buy: renderBuy, customers: renderCustomers, suppliers: renderSuppliers,
+      buy: renderBuy, customers: renderCustomers, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, alerts: renderAlerts,
       expenses: renderExpenses, returns: renderReturns, tasks: renderTasks, summary: renderExportSummary, fx: renderFx,
     };
@@ -845,7 +840,7 @@
       }
     }
   }
-  const PAGE_KEYS = ['dash','alerts','orders','ship','stock','buy','profit','expenses','returns','tasks','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','stock','buy','profit','expenses','returns','tasks','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p === 'finance' ? 'profit' : b.dataset.p); // 損益ナビは既定で利益明細を開く
@@ -1321,6 +1316,7 @@
     }
     // 新しい注文順（SN先頭=YYMMDD）。同日はSNで安定ソート
     rows.sort((a, b) => String(b.sn || '').localeCompare(String(a.sn || '')));
+    state.orders.shown = rows; // 一括印刷などで「表示中の行」を参照するため保持
     list.innerHTML = '';
     const loading = [...state.orders.perCountry.values()].some(oc => oc.status === 'loading');
     if (!rows.length) {
@@ -1397,6 +1393,23 @@
   document.getElementById('ord-reload').addEventListener('click', () => {
     state.orders.perCountry.clear();
     loadOrders(true); // 更新ボタンはライブ取得
+  });
+  // 🖨️ 一括印刷：表示中の未発送(tab300)のSLS伝票を国ごとにまとめて印刷（各注文=1タブ。Waybill Printer userscriptが自動印刷）
+  document.getElementById('ord-bulkprint').addEventListener('click', () => {
+    const targets = (state.orders.shown || []).filter(r => r.tab === 300 && r.sn);
+    if (!targets.length) { alert('表示中に未発送の注文がありません。「未発送」フィルターで絞ってから押してください。'); return; }
+    const byHost = new Map(); // host → {region, sns[]}
+    targets.forEach(r => { const rg = r.region || regionByCc(r.cc); if (!rg) return; const g = byHost.get(rg.host) || { region: rg, sns: [] }; g.sns.push(r.sn); byHost.set(rg.host, g); });
+    const groups = [...byHost.values()];
+    const total = groups.reduce((s, g) => s + g.sns.length, 0);
+    const brk = groups.map(g => `${g.region.cc} ${g.sns.length}件`).join(' / ');
+    if (!confirm(`表示中の未発送 ${total}件の伝票を印刷します。\n${brk}\n\n各注文につき1つ印刷タブが開きます（合計${total}タブ）。ポップアップ許可が必要です。続けますか？`)) return;
+    let opened = 0, delay = 0;
+    groups.forEach(g => g.sns.forEach(sn => {
+      setTimeout(() => { window.open(`https://${g.region.host}/portal/sale?sls_print=${encodeURIComponent(sn)}`, '_blank'); }, delay);
+      delay += 700; opened++; // 700ms間隔でポップアップブロック/過負荷を回避
+    }));
+    logAct('梱包・発送', '一括印刷', `${opened}件`, groups.map(g => g.region.cc).join(','));
   });
   // 🔬 接続診断：各国のShopee注文APIを1回叩き、生の応答(HTTP/code/本文先頭)を表示してライブ失敗の原因を切り分ける
   async function diagnoseOrders() {
@@ -2021,19 +2034,6 @@
     document.getElementById('cust-rep').addEventListener('change', e => { cust.repeatOnly = e.target.checked; renderCustomers(); });
     setupColumns('customers', body);
     fitScroll('customers');
-  }
-  // ---------------- 🚚 梱包・発送 ----------------
-  async function renderShip() {
-    const body = document.getElementById('ship-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let orders; try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items&tab=lt.500&order=ship_by.asc'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
-    const toship = orders.filter(o => /to ?ship/i.test(o.status || ''));
-    body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">発送待ち ${toship.length}件 ・ 🖨️で各国のSLS伝票を印刷（Waybill Printer連携）</div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:840px"><tr><th>国</th><th>画像</th><th>注文</th><th>バイヤー</th><th>商品</th><th>発送期日</th><th>伝票</th></tr>` +
-      toship.slice(0, 400).map(o => { const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {}; return `<tr><td><b style="color:${rg ? rg.color : '#333'}">${o.cc}</b></td><td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${esc((it.name || '').slice(0, 40))}</td><td style="font-size:11px;white-space:nowrap">${o.ship_by ? esc(new Date(o.ship_by * 1000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })) : ''}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="SLS伝票を印刷" style="text-decoration:none;font-size:15px">🖨️</a>` : ''}</td></tr>`; }).join('') +
-      `</table></div></div>`;
-    setupColumns('ship', body);
-    fitScroll('ship');
   }
   // ---------------- 🛒 仕入れ管理（仕入れ検索 ＋ 入庫待ち） ----------------
   // 仕入先サイト（安い順で開けるものはソート指定）。keyword は encodeURIComponent 済みを渡す
@@ -2666,6 +2666,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-07-07', items: [
+      '起動できない不具合を修正（loadOrders内のif行重複による構文エラーでアプリ全体が「起動中」で固まっていた）',
+      '注文ライブ更新の安定化：カード取得を国内並列化・国タイムアウト15→40秒・同時数3→6・raw35→14秒＋1回リトライ・全国終了で「更新中」表示を解除。BR等の大量国が毎回タイムアウト→△DBになる問題を解消',
+      '「🚚倉庫へ発送済にする」トグルが効かない不具合を修正（注文行にccが無くキー不一致）。過去に空ccで保存された3件を正しい国に復旧',
+      '注文管理：複数商品オーダーで各商品のサムネイルを表示（従来は先頭1枚のみ）',
+      '注文管理：「🚚倉庫スキャン待ち」フィルターを追加（自宅→倉庫輸送中の荷物だけ抽出）',
+      '仕入れ管理（入庫待ち）：配送・到着見込み列を追加。追跡番号を配送業者（日本郵便/ヤマト/佐川）の追跡ページへリンク',
+      '「梱包・発送」ページを廃止し注文管理に統合。上部に「🖨️一括印刷」を追加（表示中の未発送を国ごとにまとめて伝票印刷）',
+    ] },
     { date: '2026-07-06', items: [
       '注文管理：Late Shipment（🚨遅延）とPre-Order（🕒予約）をバッジ＋フィルタで表示',
       '利益管理の固まる不具合を解消（pfRenderのym未定義参照）＋全ページ描画をガード（例外時は無言ハングせずエラー表示）',
@@ -2730,8 +2739,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = document.getElementById('manual-body');
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:760px;line-height:1.9;font-size:13px">
       <h3 style="margin-top:0">Shopee OS の使い方</h3>
-      <b>📦 注文管理</b>：Shopeeセラーセンターの注文一覧（ブリッジ接続時はライブ）。<br>
-      <b>🚚 梱包・発送</b>：発送待ちの注文を一覧。🖨️でSLS伝票を印刷。<br>
+      <b>📦 注文管理</b>：Shopeeセラーセンターの注文一覧（ブリッジ接続時はライブ）。「未発送」フィルターで発送待ちだけを抽出。各行の🖨️または上部の「🖨️一括印刷」でSLS伝票を印刷（旧「梱包・発送」ページを統合）。「🚚倉庫スキャン待ち」で自宅→倉庫輸送中の荷物を抽出。<br>
       <b>🏷 在庫管理</b>：仕入れた在庫の一覧・編集。仕入元/セラー/仕入額/状態/SKU/棚/Shopee注文SN/商品名/ItemID/備考をセルで直接編集。QRクリックでラベル印刷。<br>
       <b>🛒 仕入れ管理</b>：入庫待ち（仕入れ済み・未到着）を一覧。到着したら在庫管理で「在庫保管中」に。<br>
       <b>💹 利益管理</b>：注文ごとの粗利・ROI。仕入額（手入力 or 在庫連携）と入金額が揃うと計算完了。<br>
