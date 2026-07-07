@@ -2245,6 +2245,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
+  const prevYm = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
+  // 転記/ミラー対象シートID（今月＋先月・重複と空を除く）＝入金確定の月ズレに対応
+  const activeSheetIds = () => [...new Set([sheetIdForMonth(jstYm()), sheetIdForMonth(prevYm(jstYm()))])].filter(Boolean);
   async function renderExpenses() {
     const body = document.getElementById('exp-body');
     if (!exp.ym) exp.ym = jstYm();
@@ -3893,7 +3896,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       if (!Object.keys(data).length) throw new Error('取得できた国がありません');
       lines._ = ''; st.textContent += `\nGASへ送信中... (${mode})`;
-      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data });
+      // 今月＋先月のシートIDをGASに渡す（GASが両シートに書けば、6月末注文の入金確定が7月にズレても6月シートが更新される）
+      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data, sheetIds: activeSheetIds() });
       if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
       targets.forEach(r => {
         const res = (resp.result || {})[r.cc.toLowerCase()];
@@ -3955,7 +3959,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       });
       if (!orderCount) throw new Error('対象0件（選んだ日付に注文がありません）');
       st.textContent = `画像: ${orderCount}注文 → GASへ送信中...`;
-      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data });
+      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data, sheetIds: activeSheetIds() });
       if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
       st.textContent = `✅ 画像転記 完了（${orderCount}注文）\n` + Object.keys(resp.result || {}).map(cc => {
         const r = resp.result[cc];
