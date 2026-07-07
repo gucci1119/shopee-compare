@@ -280,10 +280,12 @@
     <div class="smd-toolbar" style="padding:8px 20px 0">
       <span class="smd-seg" id="list-tab">
         <button data-k="status" class="on">📋 出品状況</button>
+        <button data-k="analysis">📊 分析・棚卸し</button>
         <button data-k="composer">✍️ コンポーザー</button>
       </span>
     </div>
     <div id="list-status" style="padding:12px 20px"></div>
+    <div id="list-analysis" style="display:none;padding:12px 20px"></div>
     <div id="list-composer" style="display:none;padding:12px 20px;max-width:1150px"></div>
   </div>
 
@@ -2957,7 +2959,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         lst.byCc[region.cc] = rows; drawListingStatus();
       } catch (e) { lst.note = region.cc + ' 失敗: ' + e.message; drawListingStatus(); }
     }
-    lst.syncing = false; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
+    lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
   }
   function renderListPage() {
     if (!lst.wired) {
@@ -2968,17 +2970,70 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         b.classList.add('on'); lst.tab = b.dataset.k; renderListPage();
       });
     }
-    const status = lst.tab !== 'composer';
-    document.getElementById('list-status').style.display = status ? '' : 'none';
-    document.getElementById('list-composer').style.display = status ? 'none' : '';
-    if (status) renderListingStatus(); else renderList();
+    const tab = lst.tab || 'status';
+    document.getElementById('list-status').style.display = tab === 'status' ? '' : 'none';
+    document.getElementById('list-analysis').style.display = tab === 'analysis' ? '' : 'none';
+    document.getElementById('list-composer').style.display = tab === 'composer' ? '' : 'none';
+    if (tab === 'status') renderListingStatus();
+    else if (tab === 'analysis') renderListingAnalysis();
+    else renderList();
+  }
+  // lst.byCc を確実にロード（出品状況/分析で共有）
+  async function ensureListings() {
+    if (lst.loaded) return;
+    lst.byCc = await listingsFromDb();
+    lst.loaded = true;
+  }
+  async function renderListingAnalysis() {
+    const host = document.getElementById('list-analysis');
+    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
+    const STLABEL = { 1: '出品中', 8: '未公開(取り下げ)', 0: '削除', 2: 'BAN', 3: 'その他' };
+    // 国別×status
+    const perCc = targets.map(r => {
+      const rows = lst.byCc[r.cc] || [];
+      const live = rows.filter(x => x.status === 1).length;
+      const unlist = rows.filter(x => x.status !== 1).length;
+      return { cc: r.cc, color: r.color, total: rows.length, live, unlist };
+    });
+    // バリエ集計（売れ筋/死にバリエ）。live出品のみ対象
+    const vars = [];
+    all.forEach(l => (l.models || []).forEach(m => vars.push({ cc: l.cc, item_id: l.item_id, pname: l.name, n: m.n, sold: m.sold || 0, stock: m.stock || 0, price: m.price, status: l.status })));
+    const liveVars = vars.filter(v => v.status === 1);
+    const totalVars = vars.length;
+    const soldVars = vars.filter(v => v.sold > 0).length;
+    const deadLive = liveVars.filter(v => v.sold === 0).length;
+    const top = [...vars].filter(v => v.sold > 0).sort((a, b) => b.sold - a.sold).slice(0, 25);
+    const ccBadge = (cc) => { const rg = regionByCc(cc) || { color: '#333' }; return `<span class="cc" style="color:${rg.color};font-weight:700">${cc}</span>`; };
+    // 棚卸し: 未公開(status!=1) 上位
+    const unlisted = all.filter(x => x.status !== 1);
+    host.innerHTML =
+      `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">📦 国別 出品ステータス</h3>
+        <div class="pf-scroll"><table class="pf-table"><tr><th>国</th><th>出品数</th><th>出品中</th><th>未公開等</th></tr>${perCc.map(p => `<tr><td>${ccBadge(p.cc)}</td><td>${p.total}</td><td style="color:#1a7f37">${p.live}</td><td style="color:#d93025">${p.unlist}</td></tr>`).join('')}<tr style="font-weight:700;border-top:2px solid #ddd"><td>計</td><td>${perCc.reduce((s, p) => s + p.total, 0)}</td><td style="color:#1a7f37">${perCc.reduce((s, p) => s + p.live, 0)}</td><td style="color:#d93025">${perCc.reduce((s, p) => s + p.unlist, 0)}</td></tr></table></div>
+      </div>
+      <div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">📊 バリエーション実績</h3>
+        <div style="font-size:13px;line-height:1.9">総バリエーション <b>${totalVars.toLocaleString()}</b> ／ 販売実績あり <b style="color:#1a7f37">${soldVars.toLocaleString()}</b> ／ <b style="color:#d93025">出品中なのに売れ0：${deadLive.toLocaleString()}</b>（値下げ・整理候補）</div>
+      </div>
+      <div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">🔥 売れ筋バリエーション TOP25</h3>
+        <div class="pf-scroll"><table class="pf-table"><tr><th>国</th><th>商品/バリエ</th><th>販売数</th><th>在庫</th></tr>${top.map(v => `<tr><td>${ccBadge(v.cc)}</td><td style="font-size:11px"><b>${esc(v.n || '（既定）')}</b> <span class="smd-dim">${esc((v.pname || '').slice(0, 34))}</span></td><td style="font-weight:700;color:#e8710a">${v.sold}</td><td>${v.stock}</td></tr>`).join('')}</table></div>
+      </div>
+      <div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">🗂 未公開の棚卸し（${unlisted.length}件・復活/削除の判断用）</h3>
+        <div class="smd-dim" style="font-size:11px;margin-bottom:6px">status≠出品中。✏️でShopee編集ページへ。全件は「出品状況」タブの「停止/その他」フィルタで。</div>
+        <div class="pf-scroll" style="max-height:360px;overflow:auto"><table class="pf-table"><tr><th>国</th><th>商品名</th><th>状態</th><th>編集</th></tr>${unlisted.slice(0, 200).map(x => { const rg = regionByCc(x.cc) || { host: '' }; return `<tr><td>${ccBadge(x.cc)}</td><td style="font-size:11px">${esc((x.name || '').slice(0, 46))}</td><td style="font-size:11px">${STLABEL[x.status] || ('status' + x.status)}</td><td>${rg.host ? `<a href="https://${rg.host}/portal/product/edit/${x.item_id}" target="_blank" style="text-decoration:none">✏️</a>` : ''}</td></tr>`; }).join('')}</table></div>
+        ${unlisted.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件表示</div>` : ''}
+      </div>`;
   }
   async function renderListingStatus() {
     const host = document.getElementById('list-status');
-    if (!lst.started) {
-      lst.started = true;
+    if (!lst.loaded) {
       host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-      try { lst.byCc = await listingsFromDb(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); lst.started = false; return; }
+      try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     }
     drawListingStatus();
   }
