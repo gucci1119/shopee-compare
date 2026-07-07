@@ -1197,9 +1197,17 @@
     el.textContent = t;
   }
 
+  // 🚚倉庫へ発送済(未スキャン)の手動フラグを costs から読み込む（利益管理と共有）
+  function loadSelfTransit() {
+    return sbGet('costs', 'select=cc,sn,self_transit_at&self_transit_at=not.is.null').then(rows => {
+      state.orders.selfTransit = new Map((rows || []).map(r => [r.cc + ':' + r.sn, r.self_transit_at]));
+    }).catch(() => {});
+  }
   // withLive=false: DBのみ即表示（開いた瞬間は速い）。withLive=true（更新ボタン/同期時）: ライブで上書き
   function loadOrders(withLive) {
     state.orders.started = true;
+    loadSelfTransit().then(() => renderOrders()); // 倉庫輸送中フラグを読み込んで反映
+    if (state.mode !== 'live' || !withLive) {
     if (state.mode !== 'live' || !withLive) {
       ordersFromDb().then(byCc => {
         REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
@@ -1316,7 +1324,16 @@
       else if (/Risk of late/i.test(r.warn || '')) warnBadge = badge('#d93025', '⚠遅延リスク', 'Shopee: Risk of late shipment');
       else if (isLate) warnBadge = badge('#d93025', '遅延', '未発送のまま発送期日を超過');
       const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
-      const statusLabel = r.tab !== 300 ? '' : (arranged ? '<br><b style="color:#1a7f37">発送手配済</b>' : '<br><b style="color:#d93025">未発送</b>');
+      // 自宅→Shopee Japan倉庫へ輸送中（スキャン待ち）＝手動フラグ(costs.self_transit_at・利益管理と共有)
+      const stKey = r.cc + ':' + r.sn;
+      const inTransit = !!(state.orders.selfTransit && state.orders.selfTransit.has(stKey));
+      let statusLabel = '', transitToggle = '';
+      if (r.tab === 300) {
+        statusLabel = inTransit
+          ? '<br><b style="color:#7b52c4">🚚倉庫へ輸送中</b><br><span class="smd-dim" style="font-size:9px">スキャン待ち</span>'
+          : (arranged ? '<br><b style="color:#1a7f37">発送手配済</b>' : '<br><b style="color:#d93025">未発送</b>');
+        transitToggle = `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${inTransit ? '↩︎ 輸送中を解除' : '🚚倉庫へ発送済にする'}</div>`;
+      }
       const row = document.createElement('div');
       row.className = 'ord-row';
       row.innerHTML =
@@ -1324,7 +1341,7 @@
         `<span class="ord-due">${r.tab !== 300 ? '<span class="smd-dim">発送済</span>' : (arranged ? '<span class="smd-dim">手配済</span>' : shipByBadge(r.shipBy))}</span>` +
         `<img loading="lazy" src="${IMG_CDN}${first.image}" onerror="this.style.opacity=.15">` +
         `<div class="ord-item">${itemsHtml}</div>` +
-        `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${statusLabel}</span>` +
+        `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${statusLabel}${transitToggle}</span>` +
         `<div class="ord-meta"><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
@@ -1338,6 +1355,20 @@
       frag.appendChild(row);
     });
     list.appendChild(frag);
+    // 🚚倉庫へ発送済（未スキャン）トグル: costs.self_transit_at をON/OFF（利益管理と共有）
+    list.querySelectorAll('.ord-selftransit').forEach(el => el.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const cc = el.dataset.cc, sn = el.dataset.sn, key = cc + ':' + sn, turnOn = el.dataset.on !== '1';
+      const val = turnOn ? new Date().toISOString() : null;
+      try {
+        await sbUpsert('costs', [{ cc, sn, self_transit_at: val }]);
+        if (!state.orders.selfTransit) state.orders.selfTransit = new Map();
+        if (turnOn) state.orders.selfTransit.set(key, val); else state.orders.selfTransit.delete(key);
+        logAct('注文管理', turnOn ? '倉庫へ発送(未スキャン)' : '倉庫輸送を解除', sn, cc);
+        renderOrders();
+      } catch (err) { alert('保存失敗: ' + err.message); }
+    }));
   }
 
   document.getElementById('ord-reload').addEventListener('click', () => {
