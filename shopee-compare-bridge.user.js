@@ -1,12 +1,21 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.1.1
+// @version      1.1.2
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GASへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。
 // @match        https://gucci1119.github.io/shopee-compare/*
 // @match        https://*.github.io/shopee-compare/*
 // @match        http://localhost:8788/*
 // @match        http://127.0.0.1:8788/*
+// GM_cookieは@match/@includeのドメインのcookieのみ読める。各国SellerのSPC_CDS注入のため下記を追加（Shopeeページ上ではbridgeは待受のみで無害）
+// @match        https://seller.shopee.ph/*
+// @match        https://seller.shopee.sg/*
+// @match        https://seller.shopee.com.my/*
+// @match        https://seller.shopee.com.br/*
+// @match        https://seller.shopee.vn/*
+// @match        https://banhang.shopee.vn/*
+// @match        https://seller.shopee.co.th/*
+// @match        https://seller.shopee.tw/*
 // @connect      seller.shopee.ph
 // @connect      seller.shopee.sg
 // @connect      seller.shopee.com.my
@@ -25,7 +34,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.1.1';
+  const VER = '1.1.2';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
