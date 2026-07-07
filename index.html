@@ -1333,15 +1333,17 @@
     const ok = await detectBridge();
     if (!ok) { sum.innerHTML = '<div style="font-size:12px;color:#d93025">ブリッジ未検出。Shopee Compare Bridge userscriptが有効か確認してください（data-smd-bridge=' + (document.documentElement.getAttribute('data-smd-bridge') || 'なし') + '）</div>'; return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
-    const lines = [];
-    const draw = () => { sum.innerHTML = `<div style="font-size:12px;line-height:1.8">🔬 診断（各国の注文API 1回）<br>${lines.join('')}</div>`; };
-    for (const region of targets) {
-      lines.push(`<div><b style="color:${region.color}">${region.cc}</b> 実行中…</div>`); draw();
+    const lines = targets.map(r => `<div><b style="color:${r.color}">${r.cc}</b> 実行中…</div>`);
+    const draw = () => { sum.innerHTML = `<div style="font-size:12px;line-height:1.8">🔬 診断（各国の注文API 1回・並列）<br>${lines.join('')}</div>`; };
+    draw();
+    const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout ' + (ms / 1000) + 's')), ms))]);
+    // 各国を並列で叩く（順番待ちで遅くならないように）。裏でライブ取得中だと枠を食うので注意書きも
+    await Promise.all(targets.map(async (region, i) => {
       let txt;
       try {
         const t0 = Date.now();
-        const raw = await bridgeRequest('POST', `https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
-          JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 10 } }));
+        const raw = await withTimeout(bridgeRequest('POST', `https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
+          JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 10 } })), 20000);
         const ms = Date.now() - t0;
         let j = null; try { j = JSON.parse(raw); } catch (_) {}
         if (j && j.code === 0) {
@@ -1353,17 +1355,17 @@
           txt = `<span style="color:#d93025">⚠ 非JSON応答（ログイン画面等の可能性）</span>: ${esc(raw.slice(0, 120))}`;
         }
       } catch (e) { txt = `<span style="color:#d93025">❌ ${esc(e.message)}</span>（timeout/network=回線かブリッジ・log in系=再ログイン）`; }
-      lines[lines.length - 1] = `<div><b style="color:${region.color}">${region.cc}</b> ${txt}</div>`; draw();
-    }
+      lines[i] = `<div><b style="color:${region.color}">${region.cc}</b> ${txt}</div>`; draw();
+    }));
     // 注文カードの構造検査：Shopeeの警告(Late/Cancelled)・予約(Pre-Order)テキストがカードのどこにあるか特定用
     try {
       const bregion = targets.find(r => r.cc === 'BR') || targets[0];
-      const idxJ = JSON.parse(await bridgeRequest('POST', `https://${bregion.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
-        JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 3 } })));
+      const idxJ = JSON.parse(await withTimeout(bridgeRequest('POST', `https://${bregion.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`,
+        JSON.stringify({ order_list_tab: 300, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 3 } })), 12000));
       const idxList = ((idxJ.data || {}).index_list) || [];
       if (idxList.length) {
-        const cardJ = JSON.parse(await bridgeRequest('POST', `https://${bregion.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`,
-          JSON.stringify({ order_list_tab: 300, need_count_down_desc: false, order_param_list: idxList.slice(0, 1) })));
+        const cardJ = JSON.parse(await withTimeout(bridgeRequest('POST', `https://${bregion.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`,
+          JSON.stringify({ order_list_tab: 300, need_count_down_desc: false, order_param_list: idxList.slice(0, 1) })), 12000));
         const oc = (((cardJ.data || {}).card_list || [])[0] || {}).order_card || {};
         const scan = JSON.stringify([oc.card_header, oc.status_info, oc.order_ext_info, oc.fulfilment_info]);
         const found = (scan.match(/Cancelled in \d+\s*days?|Risk of late shipment|Late Shipment|pre.?order/ig) || []).join(', ') || '（該当テキストなし＝i18nコードの可能性）';
@@ -1383,7 +1385,7 @@
       let hit = '';
       for (const [label, path, bodyObj] of cands) {
         try {
-          const raw = await bridgeRequest('POST', `https://${br.host}${path}`, JSON.stringify(bodyObj));
+          const raw = await withTimeout(bridgeRequest('POST', `https://${br.host}${path}`, JSON.stringify(bodyObj)), 8000);
           let j = null; try { j = JSON.parse(raw); } catch (_) {}
           const okc = j && (j.code === 0 || (j.data && (j.data.return_list || j.data.list)));
           hit += `<div style="font-size:10px;color:${okc ? '#1a7f37' : '#999'}">返品API [${label}]: ${okc ? '✅ 成功' : 'code=' + (j ? j.code : '非JSON')} ${esc(String((j && (j.message || j.error || '')) || raw.slice(0, 60)))}</div>`;
