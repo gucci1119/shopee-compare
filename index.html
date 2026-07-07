@@ -695,9 +695,12 @@
     const oe = oc.order_ext_info || {}, ch = oc.card_header || {};
     const scanText = JSON.stringify([ch, oc.status_info, oe, oc.fulfilment_info]);
     const preOrder = /pre.?order/i.test(scanText);
-    // 「Cancelled in N day(s)」「Risk of late shipment」「Late Shipment」等をそのまま抽出
-    const warnHit = scanText.match(/Cancelled in \d+\s*days?|Risk of late shipment|Late Shipment|pending item with your shipment/i);
+    // 実際の警告だけ抽出（「To avoid late shipment, please arrange drop-off」は普通のリマインダーなので拾わない）
+    const warnHit = scanText.match(/Cancelled in \d+\s*days?|Risk of late shipment/i);
     const warn = warnHit ? warnHit[0] : '';
+    // 発送手配(ドロップオフ)がまだ＝To-Process/未発送。status_descriptionに「arrange drop-off」があれば未手配。
+    const sd = ((oc.status_info || {}).status_description || {}).description_value || '';
+    const needsDropoff = /arrange\s*drop-?off|please arrange/i.test(sd);
     return {
       region, tab,
       sn: (oc.card_header || {}).order_sn || '',
@@ -707,7 +710,7 @@
       shipBy: (oc.order_ext_info || {}).ship_by_date || 0,
       tracking: (((oc.fulfilment_info || {}).tracking_number_list) || [])[0] || '',
       total: ((oc.payment_info || {}).total_price || 0) / 100000, // 現地通貨額
-      preOrder, warn, items,
+      preOrder, warn, needsDropoff, items,
     };
   }
   const orderRowToDb = o => ({
@@ -716,7 +719,7 @@
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
   });
   // 未発送(300)は全件、発送中(400)は大量なので直近3ページ(150件)で打ち切る＝取得が軽くなりタイムアウト回避
-  const TAB_MAX_PAGES = { 300: 10, 400: 3 };
+  const TAB_MAX_PAGES = { 300: 10, 400: 1 }; // 発送中(400)は直近1ページ(50)に削減＝BR等の重い国がタイムアウトしないように
   async function fetchOrdersCountry(region, onProgress) {
     const rows = [];
     for (const tab of ORDER_TABS) {
@@ -1274,7 +1277,7 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
-    if (state.orders.filter === 'late') rows = rows.filter(r => r.tab === 300 && !r.tracking && r.shipBy && r.shipBy < nowSec());
+    if (state.orders.filter === 'late') rows = rows.filter(r => r.tab === 300 && (r.needsDropoff !== undefined ? r.needsDropoff : !r.tracking) && r.shipBy && r.shipBy < nowSec());
     else if (state.orders.filter === 'pre') rows = rows.filter(r => r.preOrder);
     else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
     if (state.orders.search) {
@@ -1301,16 +1304,17 @@
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '')
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:3px 0"></div>') +
         (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#999">${r.items.length}商品・合計${qty}点</div>` : '');
-      // Shopeeの「To Ship」は 未手配(To Process=追跡なし) と 手配済(Processed=追跡あり) が混在。
-      // 追跡番号があれば発送手配済み＝実質発送済扱い。遅延は「未手配のまま期日超過」だけ。
-      const arranged = r.tab === 300 && !!r.tracking; // 発送手配済（Processed）
-      const isLate = r.tab === 300 && !r.tracking && r.shipBy && r.shipBy < nowSec();
+      // Shopeeの「To Ship」= 未手配(ドロップオフ前=要発送) と 手配済(ドロップオフ済) が混在。
+      // 越境はwaybill(追跡)が最初から付くので追跡有無では判定不可 → status_descriptionの「arrange drop-off」有無(needsDropoff)で判定。
+      // DB由来の行にはneedsDropoffが無いので、その時だけ従来の追跡有無で近似。
+      const arranged = r.tab === 300 && (r.needsDropoff !== undefined ? !r.needsDropoff : !!r.tracking);
+      const isLate = r.tab === 300 && !arranged && r.shipBy && r.shipBy < nowSec();
       const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
       // Shopeeの実際の警告（あれば優先表示）＋予約
       let warnBadge = '';
       if (/Cancelled in/i.test(r.warn || '')) warnBadge = badge('#b00020', '⚠自動キャンセル間近', 'Shopee: ' + esc(r.warn));
       else if (/Risk of late/i.test(r.warn || '')) warnBadge = badge('#d93025', '⚠遅延リスク', 'Shopee: Risk of late shipment');
-      else if (/Late Shipment/i.test(r.warn || '') || isLate) warnBadge = badge('#d93025', '遅延', 'Late Shipment');
+      else if (isLate) warnBadge = badge('#d93025', '遅延', '未発送のまま発送期日を超過');
       const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
       const statusLabel = r.tab !== 300 ? '' : (arranged ? '<br><b style="color:#1a7f37">発送手配済</b>' : '<br><b style="color:#d93025">未発送</b>');
       const row = document.createElement('div');
