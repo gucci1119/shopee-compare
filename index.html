@@ -321,7 +321,7 @@
         <button data-k="all" class="on">すべて</button>
         <button data-k="300">未発送</button>
         <button data-k="400">発送中</button>
-        <button data-k="late">🚨遅延</button>
+        <button data-k="late">🚨遅延/リスク</button>
         <button data-k="pre">🕒予約</button>
       </span>
       <input type="text" id="ord-search" placeholder="商品名・バイヤー・注文番号で絞り込み">
@@ -1263,20 +1263,34 @@
   function renderOrdersSummary() {
     const el = document.getElementById('ord-summary');
     const parts = [];
-    let total = 0;
+    let total = 0, late = 0, riskN = 0;
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
       const oc = state.orders.perCountry.get(region.cc);
       if (!oc) return;
       const n = (oc.rows && oc.rows.length) || 0;
       total += n;
+      (oc.rows || []).forEach(r => { const rk = ordRisk(r); if (rk === 2) late++; else if (rk === 1) riskN++; });
       const cc = `<span class="cc" style="color:${region.color}">${region.cc}</span>`;
       if (oc.status === 'loading') parts.push(`${cc}<span class="smd-dim">${esc(oc.msg)}</span>`);
       else if (oc.status === 'error') parts.push(`${cc}<span class="smd-err" title="${esc(oc.msg)}">⚠${n ? `DB${n}件` : ''}</span>`);
       else parts.push(`${cc}${n}件`);
     });
-    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送中） ｜ ` + parts.join(' ｜ ');
+    const riskTag = (late + riskN) ? ` ｜ <b class="ord-riskclick" style="color:#d93025;cursor:pointer" title="クリックで遅延/リスクだけ表示">🚨遅延${late} ⚠リスク${riskN}</b>` : '';
+    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送中）${riskTag} ｜ ` + parts.join(' ｜ ');
+    const rc = el.querySelector('.ord-riskclick');
+    if (rc) rc.addEventListener('click', () => { state.orders.filter = 'late'; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === 'late')); renderOrders(); });
   }
 
+  // 発送側が対応済みか（手配済＝ドロップオフ済 or 倉庫へ輸送中フラグ）。未対応の未発送だけが遅延の対象
+  const ordHandled = (r) => (r.tab === 300 && (r.needsDropoff !== undefined ? !r.needsDropoff : !!r.tracking)) || !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
+  // 0=なし 1=遅延リスク(期日24h以内 or Shopee警告) 2=遅延(期日超過)。未対応の未発送(tab300)のみ
+  const ordRisk = (r) => {
+    if (r.tab !== 300 || ordHandled(r)) return 0;
+    const s = r.shipBy ? (r.shipBy - nowSec()) : null;
+    if (s != null && s < 0) return 2;
+    if ((s != null && s < 86400) || /Risk of late/i.test(r.warn || '')) return 1;
+    return 0;
+  };
   function renderOrders() {
     renderOrdersSummary();
     const list = document.getElementById('ord-list');
@@ -1285,7 +1299,7 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
-    if (state.orders.filter === 'late') rows = rows.filter(r => r.tab === 300 && (r.needsDropoff !== undefined ? r.needsDropoff : !r.tracking) && r.shipBy && r.shipBy < nowSec());
+    if (state.orders.filter === 'late') rows = rows.filter(r => ordRisk(r) >= 1); // 遅延＋遅延リスク（未対応で期日が近い/超過）
     else if (state.orders.filter === 'pre') rows = rows.filter(r => r.preOrder);
     else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
     if (state.orders.search) {
@@ -1312,21 +1326,16 @@
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '')
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:3px 0"></div>') +
         (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#999">${r.items.length}商品・合計${qty}点</div>` : '');
-      // Shopeeの「To Ship」= 未手配(ドロップオフ前=要発送) と 手配済(ドロップオフ済) が混在。
-      // 越境はwaybill(追跡)が最初から付くので追跡有無では判定不可 → status_descriptionの「arrange drop-off」有無(needsDropoff)で判定。
-      // DB由来の行にはneedsDropoffが無いので、その時だけ従来の追跡有無で近似。
       const arranged = r.tab === 300 && (r.needsDropoff !== undefined ? !r.needsDropoff : !!r.tracking);
-      const isLate = r.tab === 300 && !arranged && r.shipBy && r.shipBy < nowSec();
-      const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
-      // Shopeeの実際の警告（あれば優先表示）＋予約
-      let warnBadge = '';
-      if (/Cancelled in/i.test(r.warn || '')) warnBadge = badge('#b00020', '⚠自動キャンセル間近', 'Shopee: ' + esc(r.warn));
-      else if (/Risk of late/i.test(r.warn || '')) warnBadge = badge('#d93025', '⚠遅延リスク', 'Shopee: Risk of late shipment');
-      else if (isLate) warnBadge = badge('#d93025', '遅延', '未発送のまま発送期日を超過');
-      const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
-      // 自宅→Shopee Japan倉庫へ輸送中（スキャン待ち）＝手動フラグ(costs.self_transit_at・利益管理と共有)
       const stKey = r.cc + ':' + r.sn;
       const inTransit = !!(state.orders.selfTransit && state.orders.selfTransit.has(stKey));
+      const risk = ordRisk(r); // 2=遅延 1=遅延リスク 0=なし
+      const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
+      let warnBadge = '';
+      if (/Cancelled in/i.test(r.warn || '')) warnBadge = badge('#b00020', '⚠自動キャンセル間近', 'Shopee: ' + esc(r.warn));
+      else if (risk === 2) warnBadge = badge('#d93025', '🚨遅延', '未対応の未発送が発送期日を超過');
+      else if (risk === 1) warnBadge = badge('#e8710a', '⚠遅延リスク', '未対応の未発送・発送期日が近い(24h以内)/Shopee警告。仕入れが間に合わなければ別の早い仕入先へ');
+      const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
       let statusLabel = '', transitToggle = '';
       if (r.tab === 300) {
         statusLabel = inTransit
