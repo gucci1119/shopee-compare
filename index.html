@@ -540,19 +540,23 @@
   function rawBridgeRequest(method, url, data) {
     return new Promise((resolve, reject) => {
       const id = ++reqSeq;
-      const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, 35000);
+      const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, 14000);
       pendingReq.set(id, { resolve, reject, timer });
       window.postMessage({ __smd: 'req', id, method, url, data }, '*');
     });
   }
-  // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）
-  const REQ_MAX = 3;
+  // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）。
+  // 6並列＋raw14秒＋timeout時1回リトライ。1本が稀に無応答になっても詰まりを14秒で解放し巻き添え全滅を防ぐ
+  const REQ_MAX = 6;
   let reqActive = 0;
   const reqWaiters = [];
   async function bridgeRequest(method, url, data) {
     if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
     reqActive++;
-    try { return await rawBridgeRequest(method, url, data); }
+    try {
+      try { return await rawBridgeRequest(method, url, data); }
+      catch (e) { if (/timeout/.test(e.message)) return await rawBridgeRequest(method, url, data); throw e; }
+    }
     finally { reqActive--; const w = reqWaiters.shift(); if (w) w(); }
   }
   const bridgeGetJson = url => bridgeRequest('GET', url).then(t => JSON.parse(t));
@@ -740,20 +744,24 @@
         const total = ((j.data || {}).pagination || {}).total || 0;
         if (!idx.length || list.length >= total) break;
       }
-      for (let i = 0; i < list.length; i += 5) { // card_listは5件まで
-        onProgress(tab, i, list.length);
+      // card_listは5件まで。バッチを並列化（逐次awaitだと1国20往復=20秒超でタイムアウトするため。同時数はbridgeRequestのREQ_MAXで律速）
+      const batches = [];
+      for (let i = 0; i < list.length; i += 5) batches.push(list.slice(i, i + 5));
+      let doneC = 0;
+      await Promise.all(batches.map(async (slice) => {
         let j;
         try {
           j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
-            order_list_tab: tab, need_count_down_desc: false, order_param_list: list.slice(i, i + 5),
+            order_list_tab: tab, need_count_down_desc: false, order_param_list: slice,
           });
-        } catch (e) { console.warn('[明細]', region.cc, 'tab' + tab, e.message); continue; } // 1バッチ失敗は飛ばして継続
-        if (!j || j.code !== 0) continue;
+        } catch (e) { console.warn('[明細]', region.cc, 'tab' + tab, e.message); doneC += slice.length; onProgress(tab, doneC, list.length); return; } // 1バッチ失敗は飛ばして継続
+        doneC += slice.length; onProgress(tab, doneC, list.length);
+        if (!j || j.code !== 0) return;
         ((j.data || {}).card_list || []).forEach(c => {
           const oc = c && c.order_card;
           if (oc) rows.push(parseOrderCard(region, oc, tab));
         });
-      }
+      }));
     }
     return rows;
   }
@@ -1219,13 +1227,16 @@
     // ライブ「更新」: まずDB同期分を即表示 → 各国ライブで上書き（失敗した国はDB分をそのまま残す）
     updateOrdNote(true);
     const liveFetchAll = () => {
-      REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
+      const enabled = REGIONS.filter(r => state.enabled.has(r.cc));
+      let settled = 0;
+      const onSettle = () => { if (++settled >= enabled.length) updateOrdNote(false); }; // 全国終了で「更新中…」表示を必ず解除（全滅時に固まらないように）
+      enabled.forEach(region => {
         const prev = state.orders.perCountry.get(region.cc);
         if (!prev) state.orders.perCountry.set(region.cc, { status: 'loading', msg: '読み込み中...', rows: [] });
         else prev.status = 'loading';
         renderOrders();
-        // ライブ取得が固まってもDB表示を殺さないよう、国ごとに15秒でタイムアウト（詰まっても早めに諦めてDB表示に戻す）
-        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（DB表示のまま）')), 15000));
+        // ライブ取得が固まってもDB表示を殺さないよう国ごとにタイムアウト。BRは未発送+発送中で往復が多く（並列化後も）時間がかかるため40秒に緩和
+        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（DB表示のまま）')), 40000));
         Promise.race([fetchOrdersCountry(region, (tab, done, total) => {
           const oc = state.orders.perCountry.get(region.cc);
           if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
@@ -1237,7 +1248,7 @@
           const oc = state.orders.perCountry.get(region.cc);
           state.orders.perCountry.set(region.cc, { status: 'error', msg: e.message, rows: (oc && oc.rows) || [] });
           renderOrders();
-        });
+        }).finally(onSettle);
       });
     };
     ordersFromDb().then(byCc => {
