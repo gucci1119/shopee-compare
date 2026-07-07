@@ -3895,16 +3895,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         } catch (e) { lines[region.cc] = `⚠ ${e.message}`; paint(); }
       }
       if (!Object.keys(data).length) throw new Error('取得できた国がありません');
-      lines._ = ''; st.textContent += `\nGASへ送信中... (${mode})`;
-      // 今月＋先月のシートIDをGASに渡す（GASが両シートに書けば、6月末注文の入金確定が7月にズレても6月シートが更新される）
-      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data, sheetIds: activeSheetIds() });
-      if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
-      targets.forEach(r => {
-        const res = (resp.result || {})[r.cc.toLowerCase()];
-        if (res) lines[r.cc] += ` → ✅ F記入=${res.F || 0} / G更新=${res.G || 0} / まとめ買い=${res.bulk || 0} / skip=${res.skip || 0} / 未マッチ=${res.nomatch || 0}`;
-      });
+      // 今月＋先月のシートに書く（6月末注文の入金確定が7月にズレても6月シートが更新される）。GASは1回=1シートなのでシートごとにPOST
+      const sids = activeSheetIds();
+      if (!sids.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
+      const agg = {};
+      for (const sid of sids) {
+        st.textContent += `\nGASへ送信中... (${mode} / シート${sids.indexOf(sid) + 1}/${sids.length})`;
+        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data, sheetId: sid });
+        if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
+        targets.forEach(r => {
+          const res = (resp.result || {})[r.cc.toLowerCase()];
+          if (res) { const a = agg[r.cc] = agg[r.cc] || { F: 0, G: 0, bulk: 0, skip: 0, nomatch: 0 }; ['F', 'G', 'bulk', 'skip', 'nomatch'].forEach(k => a[k] += (res[k] || 0)); }
+        });
+      }
+      targets.forEach(r => { const a = agg[r.cc]; if (a) lines[r.cc] += ` → ✅ F記入=${a.F} / G更新=${a.G} / まとめ買い=${a.bulk} / skip=${a.skip} / 未マッチ=${a.nomatch}`; });
       paint();
-      st.textContent += `\n✅ 完了 (${resp.mode})`;
+      st.textContent += `\n✅ 完了（${sids.length}シート・今月＋先月）`;
     } catch (e) {
       st.textContent += `\n❌ ${e.message}`;
     }
@@ -3958,13 +3964,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         });
       });
       if (!orderCount) throw new Error('対象0件（選んだ日付に注文がありません）');
-      st.textContent = `画像: ${orderCount}注文 → GASへ送信中...`;
-      const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data, sheetIds: activeSheetIds() });
-      if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
-      st.textContent = `✅ 画像転記 完了（${orderCount}注文）\n` + Object.keys(resp.result || {}).map(cc => {
-        const r = resp.result[cc];
-        return `${cc.toUpperCase()}_p AC列: 記入=${r.wrote || 0} / 未マッチ=${r.nomatch || 0}`;
-      }).join('\n');
+      const sidsImg = activeSheetIds();
+      if (!sidsImg.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
+      const aggImg = {};
+      for (const sid of sidsImg) {
+        st.textContent = `画像: ${orderCount}注文 → GASへ送信中... (シート${sidsImg.indexOf(sid) + 1}/${sidsImg.length})`;
+        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data, sheetId: sid });
+        if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
+        Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); });
+      }
+      st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sidsImg.length}シート）\n` + Object.keys(aggImg).map(cc =>
+        `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
     }
