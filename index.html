@@ -1660,12 +1660,28 @@
       default: return r.supplier_url || null;
     }
   }
+  // 追跡番号→配送業者の追跡ページURL（ship_methodで業者判定。メルカリ便はゆうゆう=日本郵便/らくらく=ヤマト）
+  function carrierTrackUrl(shipMethod, tracking) {
+    const t = String(tracking || '').replace(/[^0-9A-Za-z]/g, '');
+    if (!t) return null;
+    const m = String(shipMethod || '');
+    if (/ゆうゆう|ゆうパ|ゆうパケット|レターパック|クリックポスト|日本郵便|郵便|japan ?post/i.test(m)) return `https://trackings.post.japanpost.jp/services/srv/search/direct?reqCodeNo1=${t}&searchKind=S002`;
+    if (/らくらく|ヤマト|クロネコ|宅急便|ネコポス|yamato/i.test(m)) return `http://toi.kuronekoyamato.co.jp/cgi-bin/tneko?number01=${t}`;
+    if (/佐川|飛脚|sagawa/i.test(m)) return `https://k2k.sagawa-exp.co.jp/p/web/okurijoinput.do?okurijoNo=${t}`;
+    if (/^\d{11,13}$/.test(t)) return `https://trackings.post.japanpost.jp/services/srv/search/direct?reqCodeNo1=${t}&searchKind=S002`; // 業者不明でも12桁数字は日本郵便で引けることが多い
+    return null;
+  }
   // 仕入元→自宅の配送状況セル（メルカリ配送userscriptがSupabaseへ直書き。ship_method/tracking_no/delivery_info）
   function stkShipCell(r) {
     const parts = [];
     if (r.ship_method) parts.push(`<span title="配送方法" style="color:#1565c0">${esc(r.ship_method)}</span>`);
     if (r.ship_region) parts.push(`<span class="smd-dim" title="発送元地域" style="font-size:9.5px">発:${esc(r.ship_region)}</span>`);
-    if (r.tracking_no) parts.push(`<span title="追跡番号" style="color:#e65100">${esc(r.tracking_no)}</span>`);
+    if (r.tracking_no) {
+      const url = carrierTrackUrl(r.ship_method, r.tracking_no);
+      parts.push(url
+        ? `<a href="${url}" target="_blank" rel="noopener" title="配送業者の追跡ページを開く" style="color:#e65100;text-decoration:none;font-weight:600">📦 ${esc(r.tracking_no)} ↗</a>`
+        : `<span title="追跡番号" style="color:#e65100">${esc(r.tracking_no)}</span>`);
+    }
     if (r.delivery_info) {
       const d = String(r.delivery_info);
       let bg = '#e8f5e9', c = '#2e7d32';
@@ -2131,9 +2147,10 @@
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const waiting = rows.filter(r => r.status === '入庫待ち');
     const val = waiting.reduce((s, r) => s + (r.price || 0), 0);
-    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">入庫待ち ${waiting.length}件 ・ 仕入額合計 ${fmtJpy(val)} ・ 到着したら🏷在庫管理で「在庫保管中」に</div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:880px"><tr><th>画像</th><th>仕入日時</th><th>商品名</th><th>仕入元</th><th>セラー</th><th>仕入額</th><th>仕入状況</th><th>確証</th></tr>` +
-      waiting.slice(0, 400).map(r => `<tr><td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${esc((r.name || '').slice(0, 44))}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td><td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td></tr>`).join('') +
+    const withTrack = waiting.filter(r => r.tracking_no || r.delivery_info || r.ship_method).length;
+    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">入庫待ち ${waiting.length}件 ・ 仕入額合計 ${fmtJpy(val)} ・ うち配送追跡あり ${withTrack}件（追跡番号クリックで配送業者ページ） ・ 到着したら🏷在庫管理で「在庫保管中」に</div>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1040px"><tr><th>画像</th><th>仕入日時</th><th>商品名</th><th>仕入元</th><th>セラー</th><th>仕入額</th><th title="仕入元→自宅の配送状況・到着見込み（メルカリ便等のuserscript連携。追跡番号は配送業者の追跡ページへ）">配送・到着見込み</th><th>仕入状況</th><th>確証</th></tr>` +
+      waiting.slice(0, 400).map(r => `<tr><td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${esc((r.name || '').slice(0, 44))}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;line-height:1.5">${stkShipCell(r)}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td><td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td></tr>`).join('') +
       `</table></div></div>`;
     setupColumns('buy', host);
     fitScroll('buy');
