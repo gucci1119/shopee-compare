@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.1.0
+// @version      1.1.1
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GASへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。
 // @match        https://gucci1119.github.io/shopee-compare/*
 // @match        https://*.github.io/shopee-compare/*
@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.1.0';
+  const VER = '1.1.1';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -44,6 +44,18 @@
 
     if (d.__smd === 'ping') {
       window.postMessage({ __smd: 'pong', v: VER }, '*');
+      return;
+    }
+    // SPC_CDS 取得の診断（値そのものは返さず、取得可否と長さだけ）
+    if (d.__smd === 'cdsdiag') {
+      const host = d.host || 'seller.shopee.com.br';
+      const avail = (typeof GM_cookie !== 'undefined' && GM_cookie && !!GM_cookie.list);
+      if (!avail) { window.postMessage({ __smd: 'cdsres', avail: false, note: 'GM_cookie未定義（@grant/権限未承認の可能性）' }, '*'); return; }
+      try {
+        GM_cookie.list({ url: 'https://' + host + '/', name: 'SPC_CDS' }, (cookies, err) => {
+          window.postMessage({ __smd: 'cdsres', avail: true, err: err ? String(err) : null, found: !!(cookies && cookies.length), len: (cookies && cookies[0] && cookies[0].value || '').length, count: (cookies || []).length }, '*');
+        });
+      } catch (ex) { window.postMessage({ __smd: 'cdsres', avail: true, err: 'throw:' + ex.message }, '*'); }
       return;
     }
     if (d.__smd !== 'req') return;
