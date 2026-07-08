@@ -2981,6 +2981,132 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
   }
+
+  // ===== カタログ編集（Shopee本番書き込み）: get_product_info で読み→差分だけ update_product_info =====
+  async function productRead(host, itemId) {
+    const qp = new URLSearchParams(); qp.set('is_draft', 'false'); qp.set('product_id', String(itemId)); qp.set('SPC_CDS_VER', '2');
+    const j = await bridgeGetJson(`https://${host}/api/v3/product/get_product_info?` + qp.toString());
+    if (!j || j.code !== 0) throw new Error('読取失敗 code=' + (j && j.code) + ' ' + ((j && j.message) || ''));
+    return (j.data && (j.data.product_info || j.data)) || {};
+  }
+  async function productWrite(host, itemId, patch) {
+    const j = await bridgePostJson(`https://${host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: itemId, product_info: patch, is_draft: false });
+    return { ok: !!(j && j.code === 0), code: j && j.code, msg: (j && j.message) || '' };
+  }
+  const modelPrice = (m) => { const p = m && m.price_info; return p ? String(p.input_normal_price != null ? p.input_normal_price : (p.normal_price != null ? p.normal_price : '')) : ''; };
+  const modelName = (m, tiers) => (m.tier_index || []).map((oi, ti) => { const t = tiers[ti]; const o = t && (t.value_list || [])[oi]; return o ? o.custom_value : ''; }).join(' / ') || (m.name || '（既定）');
+  // 属性値をvalue属性用にエスケープ
+  const av = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+  function openCatalogEditor(cc, host, itemId, repName) {
+    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ編集できます'); return; }
+    const rg = regionByCc(cc) || { color: '#333', cur: '' };
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:760px;max-width:96vw;padding:0;font-size:13px;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+      <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee;position:sticky;top:0;background:#fff;border-radius:10px 10px 0 0;z-index:1">
+        <span class="ord-cc" style="background:${rg.color}">${cc}</span>
+        <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">カタログ編集</b>
+        <a href="${editUrlFor(host, itemId)}" target="_blank" style="font-size:12px;color:#1565c0;text-decoration:none" title="Shopeeの編集画面を開く">Shopeeで開く↗</a>
+        <button class="ed-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button>
+      </div>
+      <div class="ed-body" style="padding:16px 18px;max-height:calc(100vh - 150px);overflow:auto"><div class="smd-dim">読込中…（Shopeeから現在の内容を取得）</div></div>
+    </div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelector('.ed-close').addEventListener('click', close);
+    const body = ov.querySelector('.ed-body');
+
+    productRead(host, itemId).then(pi => {
+      const tiers = pi.std_tier_variation_list || [];
+      const models = pi.model_list || [];
+      const attrs = pi.attributes || [];
+      const cur = rg.cur || '';
+      // バリエ名（tierオプション）編集セクション
+      let tierHtml = '';
+      if (tiers.length) {
+        tierHtml = tiers.map((t, ti) => `<div style="margin:10px 0 4px;color:#555;font-weight:600">バリエーション: ${esc(t.custom_value || ('グループ' + (ti + 1)))}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">${(t.value_list || []).map((o, oi) => `<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="width:calc(33% - 6px);min-width:150px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集">`).join('')}</div>`).join('');
+      }
+      // 明細（model）テーブル: 価格・SKU編集
+      const modelRows = models.map(m => `<tr>
+        <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m, tiers))}</td>
+        <td style="white-space:nowrap">${esc(cur)}<input class="ed-price" data-mid="${m.id}" value="${av(modelPrice(m))}" inputmode="decimal" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></td>
+        <td style="color:#888;font-size:11px;text-align:center">${(m.stock_detail && m.stock_detail.total_available_stock != null) ? m.stock_detail.total_available_stock : '-'}</td>
+        <td><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:130px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></td>
+      </tr>`).join('');
+      // specifics（属性）: raw_value型のみ編集可、value_id型は表示のみ
+      const attrHtml = attrs.map((a, ai) => {
+        const vals = a.attribute_values || [];
+        const raw = vals.find(v => v.raw_value !== undefined);
+        if (raw) return `<div style="display:flex;gap:8px;align-items:center;margin:4px 0"><span style="color:#888;width:90px;font-size:11px">属性#${a.attribute_id}</span><input class="ed-attr" data-ai="${ai}" value="${av(raw.raw_value)}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>`;
+        return `<div style="display:flex;gap:8px;align-items:center;margin:4px 0"><span style="color:#888;width:90px;font-size:11px">属性#${a.attribute_id}</span><span style="flex:1;color:#aaa;font-size:11px">選択肢: ${vals.map(v => v.value_id).join(', ')}（v1は表示のみ）</span></div>`;
+      }).join('');
+
+      body.innerHTML = `
+        <div style="background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;font-size:11.5px;color:#8a6d3b;margin-bottom:12px">⚠️ 保存すると<b>Shopee本番カタログ</b>(item ${itemId})が更新されます。変更した項目だけ書き込みます。</div>
+        <label style="color:#555;font-weight:600">タイトル</label>
+        <textarea class="ed-name" rows="2" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical">${esc(pi.name || '')}</textarea>
+        <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:180px"><label style="color:#555;font-weight:600">親SKU</label><input class="ed-psku" value="${av(pi.parent_sku || '')}" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:monospace"></div>
+          <div style="width:150px"><label style="color:#555;font-weight:600">重量</label><div style="display:flex;align-items:center;gap:4px"><input class="ed-wval" value="${av((pi.weight || {}).value || '')}" inputmode="decimal" style="width:90px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"><span style="color:#888;font-size:11px">${(pi.weight || {}).unit === 1 ? 'kg' : ('unit' + ((pi.weight || {}).unit))}</span></div></div>
+        </div>
+        ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）</div>${tierHtml}</div>` : ''}
+        <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）</div>
+          <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU</th></tr>${modelRows}</table></div></div>
+        ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div style="margin-top:4px">${attrHtml}</div></div>` : ''}
+        <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:18px;position:sticky;bottom:0;background:#fff;padding-top:10px;border-top:1px solid #eee">
+          <span class="ed-msg" style="margin-right:auto;color:#888;font-size:11px"></span>
+          <button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:8px 14px;cursor:pointer">閉じる</button>
+          <button class="ed-save" style="border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">Shopeeに保存</button>
+        </div>`;
+      body.querySelector('.ed-close2').addEventListener('click', close);
+      body.querySelector('.ed-save').addEventListener('click', async () => {
+        const patch = {}, summary = [];
+        const nameV = body.querySelector('.ed-name').value.trim();
+        if (nameV && nameV !== (pi.name || '')) { patch.name = nameV; summary.push('タイトル'); }
+        const pskuV = body.querySelector('.ed-psku').value.trim();
+        if (pskuV !== (pi.parent_sku || '')) { patch.parent_sku = pskuV; summary.push('親SKU'); }
+        const wvalV = body.querySelector('.ed-wval').value.trim();
+        if (wvalV && wvalV !== String((pi.weight || {}).value || '')) { patch.weight = { value: wvalV, unit: (pi.weight || {}).unit != null ? (pi.weight || {}).unit : 1 }; summary.push('重量'); }
+        // tier（明細名）
+        let tierChanged = false;
+        const newTiers = JSON.parse(JSON.stringify(tiers));
+        body.querySelectorAll('.ed-tier').forEach(inp => { const ti = +inp.dataset.ti, oi = +inp.dataset.oi; const nv = inp.value; if (newTiers[ti] && newTiers[ti].value_list[oi] && newTiers[ti].value_list[oi].custom_value !== nv) { newTiers[ti].value_list[oi].custom_value = nv; tierChanged = true; } });
+        if (tierChanged) { patch.std_tier_variation_list = newTiers; summary.push('明細名'); }
+        // model 価格・SKU
+        let modelChanged = false;
+        const priceMap = {}, skuMap = {};
+        body.querySelectorAll('.ed-price').forEach(inp => priceMap[inp.dataset.mid] = inp.value.trim());
+        body.querySelectorAll('.ed-msku').forEach(inp => skuMap[inp.dataset.mid] = inp.value.trim());
+        const newModels = models.map(m => {
+          const entry = { id: m.id, tier_index: m.tier_index || [], price: (priceMap[m.id] != null ? priceMap[m.id] : modelPrice(m)) };
+          const origP = modelPrice(m), origS = m.sku || '';
+          if (priceMap[m.id] != null && priceMap[m.id] !== origP) modelChanged = true;
+          if (skuMap[m.id] != null && skuMap[m.id] !== origS) { entry.sku = skuMap[m.id]; modelChanged = true; }
+          return entry;
+        });
+        if (modelChanged) { patch.model_list = newModels; summary.push('価格/明細SKU'); }
+        // attributes（raw_valueのみ）
+        let attrChanged = false;
+        const newAttrs = JSON.parse(JSON.stringify(attrs));
+        body.querySelectorAll('.ed-attr').forEach(inp => { const ai = +inp.dataset.ai; const a = newAttrs[ai]; if (!a) return; const rv = (a.attribute_values || []).find(v => v.raw_value !== undefined); if (rv && rv.raw_value !== inp.value) { rv.raw_value = inp.value; attrChanged = true; } });
+        if (attrChanged) { patch.attributes = newAttrs; summary.push('specifics'); }
+
+        if (!summary.length) { alert('変更がありません'); return; }
+        if (!confirm(`本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${summary.join('\n・')}\n\nよろしいですか？`)) return;
+        const btn = body.querySelector('.ed-save'), msg = body.querySelector('.ed-msg');
+        btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
+        try {
+          const res = await productWrite(host, itemId, patch);
+          if (res.ok) { msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（次回🔄更新で一覧にも反映）'; btn.textContent = '保存済'; try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {} }
+          else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
+        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ エラー: ' + e.message; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
+      });
+    }).catch(e => { body.innerHTML = `<div style="color:#d93025;padding:8px">読込エラー: ${esc(e.message)}<br><span class="smd-dim">ブリッジ/ログイン状態を確認してください。</span></div><div style="text-align:right;margin-top:10px"><button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:7px 14px;cursor:pointer">閉じる</button></div>`; const b = body.querySelector('.ed-close2'); if (b) b.addEventListener('click', close); });
+  }
+
   function renderListPage() {
     if (!lst.wired) {
       lst.wired = true;
@@ -3387,9 +3513,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</div>
           <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} 価格${price} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : '<span class="smd-dim">単品</span>'}</div>
         </div>
-        <div style="display:flex;flex-direction:column;gap:2px;align-items:center;flex:none">
-          <a href="${editUrl}" target="_blank" title="Shopeeで編集" style="text-decoration:none;font-size:15px">✏️</a>
-          ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:14px">🛍️</a>` : ''}
+        <div style="display:flex;flex-direction:column;gap:3px;align-items:center;flex:none">
+          <button class="lst-edit" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="ポータル内で編集してShopeeに保存" style="border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">✎編集</button>
+          <div style="display:flex;gap:4px">
+            <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
+            ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
+          </div>
         </div>
       </div>${varRows}</div>`;
   }
@@ -3425,6 +3554,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; drawListingStatus(); });
     let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); drawListingStatus(); }, 200); });
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
+    document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
   }
 
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
