@@ -3138,8 +3138,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (classifyFranchise((l.name || '') + ' ' + names) !== fr) return;
       if ((l.model_count || 0) > 1) {
         const ck = skuKey(l.parent_sku) || productKey(l.name) || ('c' + l.item_id);
-        let c = catalogs.get(ck); if (!c) { c = { key: ck, curSku: l.parent_sku || '', bySku: !!skuKey(l.parent_sku), rep: l.name, img: l.image, cc: {}, link: {}, items: new Map(), sold: 0 }; catalogs.set(ck, c); }
-        c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
+        let c = catalogs.get(ck); if (!c) { c = { key: ck, curSku: l.parent_sku || '', bySku: !!skuKey(l.parent_sku), rep: l.name, img: l.image, cc: {}, link: {}, listings: [], items: new Map(), sold: 0 }; catalogs.set(ck, c); }
+        c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; c.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id }); if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
         (l.models || []).forEach(m => {
           const ik = skuKey(m.sku) || productKey(m.n) || m.n || ('m' + m.id);
           let it = c.items.get(ik); if (!it) { it = { key: ik, curSku: m.sku || '', bySku: !!skuKey(m.sku), rep: m.n, img: m.img || l.image, cc: {}, link: {}, sold: 0 }; c.items.set(ik, it); }
@@ -3164,10 +3164,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600'}">${n ? (o.link[r.cc] ? `<a href="${o.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`) : '✗'}</td>`; }).join('');
     const cats = [...catalogs.values()].map(withMiss).sort(cmp);
     const sgl = [...singles.values()].map(withMiss).sort(cmp);
+    if (!lst.covCatData) lst.covCatData = {};
+    cats.forEach(c => { lst.covCatData[fr + '::' + c.key] = { rep: c.rep, curSku: c.curSku, recSku: recommendSku(c.key), listings: c.listings }; });
     const catRows = cats.slice(0, 300).map(c => {
       const open = lst.covCat && lst.covCat.has(fr + '::' + c.key);
       const items = [...c.items.values()].map(withMiss).sort(cmp);
-      const header = `<tr style="background:#eaf1ff"><td>${imgTag(c.img, 26)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細)</span></td><td>${skuCell(c)}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCells(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
+      const setBtn = `<button class="cov-setsku smd-btn" data-key="${esc(fr + '::' + c.key)}" style="font-size:9px;padding:1px 5px;margin-left:4px" title="このSKUを各国のShopeeカタログに書き込む">🏷SKU設定</button>`;
+      const header = `<tr style="background:#eaf1ff"><td>${imgTag(c.img, 26)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細/${c.listings.length}出品)</span></td><td>${skuCell(c)}${setBtn}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCells(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
       const itemRows = open ? items.map(it => `<tr><td style="padding-left:18px">${imgTag(it.img, 22)}</td><td style="text-align:right;color:#bbb">↳</td><td style="font-size:11px;padding-left:8px">${esc((it.rep || '').slice(0, 38))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`).join('') : '';
       return header + itemRows;
     }).join('');
@@ -3226,6 +3229,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-sort').forEach(el => el.addEventListener('click', () => { lst.covSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-psort').forEach(el => el.addEventListener('click', () => { lst.covProdSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
+    // 🏷 SKU設定: カタログ配下の各国出品(parent_sku)をShopeeに書き込む（1件ずつ・確認あり）
+    host.querySelectorAll('.cov-setsku').forEach(el => el.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
+      const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return;
+      const ccs = [...new Set(d.listings.map(x => x.cc))].join('/');
+      const sku = prompt(`このカタログの全出品のSKUを揃えてShopeeに書き込みます。\n商品: ${d.rep}\n対象: ${d.listings.length}出品（${ccs}）\n\nSKU（推奨をそのまま使えます）:`, d.recSku || d.curSku || '');
+      if (!sku || !sku.trim()) return;
+      if (!confirm(`本番のShopeeカタログ ${d.listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
+      el.disabled = true; const orig = el.textContent; el.textContent = '書込中...';
+      let ok = 0, ng = 0;
+      for (const lg of d.listings) {
+        try { const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false }); if (j && j.code === 0) ok++; else ng++; }
+        catch (e) { ng++; }
+      }
+      el.disabled = false; el.textContent = orig;
+      alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}\n（次回の🔄更新でポータル表示にも反映されます）`);
+      try { logAct('出品', 'SKU設定', d.rep, sku.trim() + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+    }));
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
