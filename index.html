@@ -3084,32 +3084,59 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').slice(0, 40);
   // シリーズ配下の「商品(明細)×国」有無マトリクスのHTMLを返す（アコーディオンでインライン展開）。無い国=コピー出品候補
   function coverageDrillHtml(fr, targets) {
-    const products = new Map();
+    const searchUrl = (r, name) => `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent((name || '').slice(0, 40))}`;
+    // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用＝強制連結。連番/空/ゴミは無効
+    const skuKey = (sku) => { const s = String(sku || '').trim(); return (/_/.test(s) && /[a-z]/i.test(s) && s.length >= 4) ? s.toUpperCase() : null; };
+    const catalogs = new Map(), singles = new Map();
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
-      const isVar = (l.model_count || 0) > 1;
-      const units = (l.models && l.models.length) ? l.models : [{ n: l.name, img: l.image, sold: 0 }];
-      units.forEach(m => {
-        if (classifyFranchise((m.n || '') + ' ' + (l.name || '')) !== fr) return;
-        const text = (m.n && m.n.trim()) ? m.n : (l.name || '');
-        const key = productKey(text); if (!key) return;
-        let e = products.get(key); if (!e) { e = { key, rep: text, img: m.img || l.image || '', cc: {}, link: {}, sold: 0, hasVar: false, hasSingle: false }; products.set(key, e); }
-        e.cc[r.cc] = (e.cc[r.cc] || 0) + 1; e.sold += (m.sold || 0);
-        if (isVar) e.hasVar = true; else e.hasSingle = true;
-        if (!e.link[r.cc]) e.link[r.cc] = `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent(text.slice(0, 40))}`;
-      });
+      const names = (l.models || []).map(m => m.n).join(' ');
+      if (classifyFranchise((l.name || '') + ' ' + names) !== fr) return;
+      if ((l.model_count || 0) > 1) {
+        const ck = skuKey(l.parent_sku) || productKey(l.name) || ('c' + l.item_id);
+        let c = catalogs.get(ck); if (!c) { c = { key: ck, curSku: l.parent_sku || '', bySku: !!skuKey(l.parent_sku), rep: l.name, img: l.image, cc: {}, link: {}, items: new Map(), sold: 0 }; catalogs.set(ck, c); }
+        c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
+        (l.models || []).forEach(m => {
+          const ik = skuKey(m.sku) || productKey(m.n) || m.n || ('m' + m.id);
+          let it = c.items.get(ik); if (!it) { it = { key: ik, curSku: m.sku || '', bySku: !!skuKey(m.sku), rep: m.n, img: m.img || l.image, cc: {}, link: {}, sold: 0 }; c.items.set(ik, it); }
+          it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (m.sold || 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, m.n || l.name);
+          c.sold += (m.sold || 0);
+        });
+      } else {
+        const text = (l.models && l.models[0] && l.models[0].n && l.models[0].n.trim()) ? l.models[0].n : (l.name || '');
+        const msku = (l.models && l.models[0] && l.models[0].sku) || l.parent_sku;
+        const ik = skuKey(msku) || productKey(text) || text;
+        let it = singles.get(ik); if (!it) { it = { key: ik, curSku: msku || '', bySku: !!skuKey(msku), rep: text, img: (l.models && l.models[0] && l.models[0].img) || l.image, cc: {}, link: {}, sold: 0 }; singles.set(ik, it); }
+        it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (l.models || []).reduce((s, m) => s + (m.sold || 0), 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, text);
+      }
     }));
-    let rows = [...products.values()].map(p => ({ ...p, sku: recommendSku(p.key), missing: targets.filter(r => !p.cc[r.cc]).length }));
     const cmp = lst.covProdSort === 'sold' ? (a, b) => b.sold - a.sold || b.missing - a.missing
       : lst.covProdSort === 'name' ? (a, b) => (a.rep || '').localeCompare(b.rep || '', 'ja')
         : (a, b) => b.missing - a.missing || b.sold - a.sold;
-    // 🧩バリエ出品を上に固める → その中で選択ソート
-    rows.sort((a, b) => (Number(b.hasVar) - Number(a.hasVar)) || cmp(a, b));
+    const withMiss = (o) => ({ ...o, missing: targets.filter(r => !o.cc[r.cc]).length });
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
-    const shown = rows.slice(0, 500);
+    const imgTag = (u, sz) => u ? `<img src="${IMG_CDN}${esc(u)}" style="width:${sz}px;height:${sz}px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
+    const skuCell = (o) => o.bySku ? `<span style="color:#1a7f37;font-family:monospace;font-size:10px" title="現SKUで連結済み">🔗${esc(o.curSku)}</span>` : `<span style="color:#7b52c4;font-family:monospace;font-size:10px" title="現SKU: ${esc(o.curSku || '(空)')}／このSKUに揃えると連結">推奨 ${esc(recommendSku(o.key))}</span>`;
+    const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600'}">${n ? (o.link[r.cc] ? `<a href="${o.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`) : '✗'}</td>`; }).join('');
+    const cats = [...catalogs.values()].map(withMiss).sort(cmp);
+    const sgl = [...singles.values()].map(withMiss).sort(cmp);
+    const catRows = cats.slice(0, 300).map(c => {
+      const open = lst.covCat && lst.covCat.has(fr + '::' + c.key);
+      const items = [...c.items.values()].map(withMiss).sort(cmp);
+      const header = `<tr style="background:#eaf1ff"><td>${imgTag(c.img, 26)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細)</span></td><td>${skuCell(c)}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCells(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
+      const itemRows = open ? items.map(it => `<tr><td style="padding-left:18px">${imgTag(it.img, 22)}</td><td style="text-align:right;color:#bbb">↳</td><td style="font-size:11px;padding-left:8px">${esc((it.rep || '').slice(0, 38))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`).join('') : '';
+      return header + itemRows;
+    }).join('');
+    const sglRows = sgl.slice(0, 400).map(it => `<tr><td>${imgTag(it.img, 26)}</td><td title="単品出品">🔹</td><td style="font-size:11px">${esc((it.rep || '').slice(0, 40))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`).join('');
+    const colspan = 6 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-psort" data-k="${k}" style="${(lst.covProdSort || 'missing') === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
     return `<div style="padding:6px 2px">
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：商品(明細)ごとの各国明細数。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🧩=バリエ出品(上に固め) 🔹=単品／数字クリックでその国のShopee商品ページ／<b>推奨SKU</b>=統一提案（同じSKUに揃える目安）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}　${rows.length}商品</div>
-      <div class="pf-scroll" style="max-height:60vh"><table class="pf-table"><tr><th></th><th>型</th><th>商品(明細)</th><th>推奨SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>${shown.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td title="${p.hasVar ? 'バリエーション出品' : '単品出品'}">${p.hasVar ? '🧩' : '🔹'}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 42))}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(p.sku)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${p.sold || ''}</td>${targets.map(r => { const n = p.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600'}">${n ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}のShopee商品ページを開く">${n}↗</a>` : '✗'}</td>`; }).join('')}<td style="font-weight:700;color:${p.missing ? '#d93025' : '#1a7f37'}">${p.missing || '✓'}</td></tr>`).join('')}</table></div>${rows.length > 500 ? '<div class="smd-dim" style="font-size:11px">…先頭500件</div>' : ''}</div>`;
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結（少しずつSKUで括る運用）／数字クリックでその国の商品ページ／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
+      <div class="pf-scroll" style="max-height:62vh"><table class="pf-table"><tr><th></th><th>型</th><th>カタログ / 明細</th><th>SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>
+      <tr><td colspan="${colspan}" style="background:#eaf1ff;font-weight:700;font-size:11px;padding:4px 8px">📦 バリエ型カタログ ${cats.length}件</td></tr>
+      ${catRows}
+      <tr><td colspan="${colspan}" style="background:#f0f0f0;font-weight:700;font-size:11px;padding:4px 8px">🔹 単品出品 ${sgl.length}件</td></tr>
+      ${sglRows}
+      </table></div></div>`;
   }
   async function renderCoverage() {
     const host = document.getElementById('list-coverage');
@@ -3153,6 +3180,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => { const f = el.dataset.fr; if (lst.covOpen.has(f)) lst.covOpen.delete(f); else lst.covOpen.add(f); renderCoverage(); }));
     host.querySelectorAll('.cov-sort').forEach(el => el.addEventListener('click', () => { lst.covSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-psort').forEach(el => el.addEventListener('click', () => { lst.covProdSort = el.dataset.k; renderCoverage(); }));
+    host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
