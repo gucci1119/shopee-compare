@@ -3100,6 +3100,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     return [...prod.values()].map(p => ({ ...p, missing: targets.filter(r => !p.cc[r.cc]).length, present: targets.filter(r => p.cc[r.cc]).length }));
   }
+  // 「同じカタログの可能性」候補：バリエ親カタログを、ぶら下がるバリエ(ゲーム)の重なりでクラスタリング。
+  // タイトルが国ごとにズレていても中身のバリエが一致すれば同一とみなす。PH起点→他国コピペのズレを拾う想定
+  function catalogMergeCandidates(targets) {
+    const cats = [];
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      if ((l.model_count || 0) <= 1) return;
+      const vks = [...new Set((l.models || []).map(m => productKey(m.n)).filter(Boolean))];
+      if (vks.length < 2) return; // バリエ2つ未満は判定不能
+      cats.push({ cc: r.cc, host: r.host, item_id: l.item_id, name: l.name || '', img: l.image, vks, nvar: l.model_count, sku: l.parent_sku || '', sold: (l.models || []).reduce((s, m) => s + (m.sold || 0), 0) });
+    }));
+    const post = new Map(); // varKey -> [catIdx]
+    cats.forEach((c, i) => c.vks.forEach(k => { if (!post.has(k)) post.set(k, []); post.get(k).push(i); }));
+    const uf = cats.map((_, i) => i); const find = x => { while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; }; const uni = (a, b) => { a = find(a); b = find(b); if (a !== b) uf[a] = b; };
+    const shared = new Map();
+    post.forEach((list) => { if (list.length < 2 || list.length > 25) return; for (let a = 0; a < list.length; a++)for (let b = a + 1; b < list.length; b++) { const i = list[a], j = list[b]; const key = i < j ? i + ',' + j : j + ',' + i; shared.set(key, (shared.get(key) || 0) + 1); } });
+    shared.forEach((cnt, key) => { const [i, j] = key.split(',').map(Number); const mn = Math.min(cats[i].vks.length, cats[j].vks.length); if (cnt >= 3 || (cnt >= 2 && cnt >= 0.6 * mn)) uni(i, j); });
+    const clusters = new Map(); cats.forEach((c, i) => { const root = find(i); if (!clusters.has(root)) clusters.set(root, []); clusters.get(root).push(c); });
+    const cands = [...clusters.values()].filter(g => g.length >= 2);
+    cands.forEach(g => g.sort((a, b) => (a.cc === 'PH' ? -1 : b.cc === 'PH' ? 1 : b.sold - a.sold)));
+    cands.sort((a, b) => (new Set(b.map(c => c.cc)).size) - (new Set(a.map(c => c.cc)).size) || b.length - a.length || (b.reduce((s, c) => s + c.sold, 0)) - (a.reduce((s, c) => s + c.sold, 0)));
+    return cands;
+  }
   // シリーズ配下の「商品(明細)×国」有無マトリクスのHTMLを返す（アコーディオンでインライン展開）。無い国=コピー出品候補
   function coverageDrillHtml(fr, targets) {
     const searchUrl = (r, name) => `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent((name || '').slice(0, 40))}`;
@@ -3230,8 +3252,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const expand = prodIdx.filter(p => p.sold > 0 && p.missing > 0).sort((a, b) => (b.sold * b.missing) - (a.sold * a.missing) || b.sold - a.sold).slice(0, 60);
     const cchA = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const missCells = (p) => targets.map(r => { const has = p.cc[r.cc]; return `<td style="${has ? 'color:#1a7f37;font-weight:700' : 'background:#fff0f0;color:#d93025;font-weight:700'}">${has ? (p.link[r.cc] ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${has}↗</a>` : has) : '✗'}</td>`; }).join('');
+    const mergeCands = catalogMergeCandidates(targets);
     host.innerHTML =
       `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">📋 統合候補：同じカタログの可能性<span class="smd-dim" style="font-weight:400;font-size:12px">（中身のバリエが一致・タイトルのズレOK。PH起点→他国コピペのズレを検出）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がるバリエ(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
+        <div class="pf-scroll" style="max-height:52vh">${mergeCands.slice(0, 40).map(g => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px">
+          <div class="smd-dim" style="font-size:11px;margin-bottom:3px">同一候補：${new Set(g.map(c => c.cc)).size}か国 / ${g.length}カタログ</div>
+          ${g.map(c => `<div style="display:flex;gap:8px;align-items:center;font-size:11px;padding:2px 0">${c.img ? `<img src="${IMG_CDN}${esc(c.img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}<b style="color:${(regionByCc(c.cc) || {}).color || '#333'};width:24px">${c.cc}</b><a href="https://${c.host}/portal/product/list/all?keyword=${encodeURIComponent(c.name.slice(0, 40))}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name.slice(0, 54))}</a><span class="smd-dim" style="white-space:nowrap">${c.nvar}ﾊﾞﾘｴ</span><span style="color:#e8710a;white-space:nowrap">売${c.sold}</span></div>`).join('')}
+        </div>`).join('') || '<span class="smd-dim">候補なし</span>'}</div>
+      </div>
+      <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🔥 横展開すべき商品 TOP<span class="smd-dim" style="font-weight:400;font-size:12px">（売れているのに未出品の国がある＝コピー出品候補）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">優先度＝<b>販売数×未出品国数</b>。<b style="color:#d93025">✗の国に出せば伸びしろ</b>。数字クリックでその国の商品ページ。SKU統一が進むほど精度UP。</div>
         <div class="pf-scroll" style="max-height:56vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>シリーズ</th><th>推奨SKU</th><th>売</th>${cchA}<th title="未出品国数">欠</th></tr>${expand.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 40))}</td><td style="font-size:10px" class="smd-dim">${esc(p.fr)}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(recommendSku(p.key))}</td><td style="color:#e8710a;font-weight:700">${p.sold}</td>${missCells(p)}<td style="font-weight:700;color:#d93025">${p.missing}</td></tr>`).join('')}</table></div>
