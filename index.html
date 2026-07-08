@@ -3082,6 +3082,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return u.slice(0, 6).join(' ');
   }
   const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').slice(0, 40);
+  // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用。連番/空/ゴミはnull
+  const skuGroupKey = (sku) => { const s = String(sku || '').trim(); return (/_/.test(s) && /[a-z]/i.test(s) && s.length >= 4) ? s.toUpperCase() : null; };
+  // 全出品を「商品(明細)」単位で国横断グルーピング（SKU優先→タイトル正規化）。推奨ページ等で共有
+  function buildProductIndex(targets) {
+    const prod = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const isVar = (l.model_count || 0) > 1;
+      const units = (l.models && l.models.length) ? l.models : [{ n: l.name, img: l.image, sold: 0, sku: l.parent_sku }];
+      units.forEach(m => {
+        const text = (m.n && m.n.trim()) ? m.n : (l.name || '');
+        const key = skuGroupKey(m.sku) || skuGroupKey(l.parent_sku) || productKey(text) || text; if (!key) return;
+        let e = prod.get(key); if (!e) { e = { key, rep: text, img: m.img || l.image || '', fr: classifyFranchise((m.n || '') + ' ' + (l.name || '')), cc: {}, link: {}, sold: 0, isVar }; prod.set(key, e); }
+        e.cc[r.cc] = (e.cc[r.cc] || 0) + 1; e.sold += (m.sold || 0);
+        if (!e.link[r.cc]) e.link[r.cc] = `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent(text.slice(0, 40))}`;
+      });
+    }));
+    return [...prod.values()].map(p => ({ ...p, missing: targets.filter(r => !p.cc[r.cc]).length, present: targets.filter(r => p.cc[r.cc]).length }));
+  }
   // シリーズ配下の「商品(明細)×国」有無マトリクスのHTMLを返す（アコーディオンでインライン展開）。無い国=コピー出品候補
   function coverageDrillHtml(fr, targets) {
     const searchUrl = (r, name) => `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent((name || '').slice(0, 40))}`;
@@ -3207,8 +3225,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const ccBadge = (cc) => { const rg = regionByCc(cc) || { color: '#333' }; return `<span class="cc" style="color:${rg.color};font-weight:700">${cc}</span>`; };
     // 棚卸し: 未公開(status!=1) 上位
     const unlisted = all.filter(x => x.status !== 1);
+    // 🔥 横展開すべき商品：どこかで売れている(sold>0)のに未出品の国がある(missing>0)＝コピー出品候補。優先度=売×欠
+    const prodIdx = buildProductIndex(targets);
+    const expand = prodIdx.filter(p => p.sold > 0 && p.missing > 0).sort((a, b) => (b.sold * b.missing) - (a.sold * a.missing) || b.sold - a.sold).slice(0, 60);
+    const cchA = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
+    const missCells = (p) => targets.map(r => { const has = p.cc[r.cc]; return `<td style="${has ? 'color:#1a7f37;font-weight:700' : 'background:#fff0f0;color:#d93025;font-weight:700'}">${has ? (p.link[r.cc] ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${has}↗</a>` : has) : '✗'}</td>`; }).join('');
     host.innerHTML =
       `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">🔥 横展開すべき商品 TOP<span class="smd-dim" style="font-weight:400;font-size:12px">（売れているのに未出品の国がある＝コピー出品候補）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">優先度＝<b>販売数×未出品国数</b>。<b style="color:#d93025">✗の国に出せば伸びしろ</b>。数字クリックでその国の商品ページ。SKU統一が進むほど精度UP。</div>
+        <div class="pf-scroll" style="max-height:56vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>シリーズ</th><th>推奨SKU</th><th>売</th>${cchA}<th title="未出品国数">欠</th></tr>${expand.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 40))}</td><td style="font-size:10px" class="smd-dim">${esc(p.fr)}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(recommendSku(p.key))}</td><td style="color:#e8710a;font-weight:700">${p.sold}</td>${missCells(p)}<td style="font-weight:700;color:#d93025">${p.missing}</td></tr>`).join('')}</table></div>
+      </div>
+      <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📦 国別 出品ステータス</h3>
         <div class="pf-scroll"><table class="pf-table"><tr><th>国</th><th>出品数</th><th>出品中</th><th>未公開等</th></tr>${perCc.map(p => `<tr><td>${ccBadge(p.cc)}</td><td>${p.total}</td><td style="color:#1a7f37">${p.live}</td><td style="color:#d93025">${p.unlist}</td></tr>`).join('')}<tr style="font-weight:700;border-top:2px solid #ddd"><td>計</td><td>${perCc.reduce((s, p) => s + p.total, 0)}</td><td style="color:#1a7f37">${perCc.reduce((s, p) => s + p.live, 0)}</td><td style="color:#d93025">${perCc.reduce((s, p) => s + p.unlist, 0)}</td></tr></table></div>
       </div>
