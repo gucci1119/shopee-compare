@@ -3023,11 +3023,57 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return 'その他';
   }
   const franchiseKw = (name) => { const f = FRANCHISES.find(x => x[0] === name); return f ? f[2] : ''; };
+  // 商品名を国横断で突合するための正規化キー。言語差(BR=ポルトガル語)/装飾/ブランド語を吸収。数字(作品番号)は残す
+  const PRODUCT_SYNONYMS = [
+    [/resident ?evil|biohazard|バイオハザード/gi, 'residentevil'], [/pok[eé]mon|ポケモン/gi, 'pokemon'],
+    [/dragon ?ball|ドラゴンボール/gi, 'dragonball'], [/final ?fantasy|ファイナルファンタジー/gi, 'finalfantasy'],
+    [/dragon ?quest|ドラゴンクエスト/gi, 'dragonquest'], [/mega ?man|rockman|ロックマン/gi, 'megaman'],
+    [/monster ?hunter|モンスターハンター/gi, 'monsterhunter'], [/kingdom ?hearts|キングダムハーツ/gi, 'kingdomhearts'],
+    [/street ?fighter|ストリートファイター/gi, 'streetfighter'], [/metal ?gear|メタルギア/gi, 'metalgear'],
+    [/silent ?hill|サイレントヒル/gi, 'silenthill'], [/gran ?turismo|グランツーリスモ/gi, 'granturismo'],
+    [/animal ?crossing|どうぶつの森/gi, 'animalcrossing'], [/super ?mario|スーパーマリオ/gi, 'mario'],
+    [/tamagotchi|たまごっち/gi, 'tamagotchi'], [/yu-?gi-?oh|遊戯王/gi, 'yugioh'],
+  ];
+  function productKey(text) {
+    let s = String(text || '').toLowerCase();
+    s = s.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu, ' ').replace(/[【〔\[（(].*?[】〕\]）)]/g, ' ');
+    PRODUCT_SYNONYMS.forEach(([re, rep]) => { s = s.replace(re, rep); });
+    // 装飾語/状態語/言語語/ブランド語を除去（機種名や作品番号は残す）
+    s = s.replace(/\b(used|usados?|usado|novo|variation|official|oficiais|tested|working|retro|japan(ese)?|jap[aã]o|do ?jap[aã]o|ver|vers[aã]o|version|import|game|software|cartridge|only|no ?case|no ?accessories|region ?free|ntsc-?j|genuine|authentic|sony|bandai|namco|capcom|konami|sega|square ?enix|nintendo)\b/gi, ' ');
+    s = s.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const seen = new Set(), u = []; s.split(' ').filter(Boolean).forEach(w => { if (!seen.has(w)) { seen.add(w); u.push(w); } });
+    return u.slice(0, 6).join(' ');
+  }
+  const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').slice(0, 40);
+  // シリーズ配下の「商品(明細)×国」有無マトリクス。無い国=コピー出品候補。推奨SKUも生成
+  function renderCoverageDrill(fr, host, targets) {
+    const products = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const units = (l.models && l.models.length) ? l.models : [{ n: l.name, img: l.image }];
+      units.forEach(m => {
+        if (classifyFranchise((m.n || '') + ' ' + (l.name || '')) !== fr) return;
+        const text = (m.n && m.n.trim()) ? m.n : (l.name || '');
+        const key = productKey(text); if (!key) return;
+        let e = products.get(key); if (!e) { e = { key, rep: text, img: m.img || l.image || '', cc: {} }; products.set(key, e); }
+        e.cc[r.cc] = (e.cc[r.cc] || 0) + 1;
+      });
+    }));
+    const rows = [...products.values()].map(p => ({ ...p, sku: recommendSku(p.key), missing: targets.filter(r => !p.cc[r.cc]).length }))
+      .sort((a, b) => b.missing - a.missing || (a.rep || '').localeCompare(b.rep || ''));
+    const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
+    const shown = rows.slice(0, 500);
+    host.innerHTML =
+      `<div style="margin-bottom:8px"><button class="smd-btn" id="cov-back">← シリーズ一覧へ戻る</button> <b style="margin-left:8px;font-size:15px">${esc(fr)}</b> <span class="smd-dim">の商品(明細)別カバレッジ ${rows.length}件</span></div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7">商品(明細)ごとに各国の<b>明細数</b>。<b style="color:#d93025">✗＝その国に無い＝コピー出品候補</b>。<b>推奨SKU</b>＝全国統一用の提案（既存の適当SKUは無視）。タイトルのブレを正規化して束ねているため誤結合/取りこぼしあり得ます。<b>欠け国が多い順</b>。</div>
+      <div class="tool-card" style="max-width:none"><div class="pf-scroll" style="max-height:70vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>推奨SKU</th>${cch}<th title="未出品の国数">欠</th></tr>${shown.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:30px;height:30px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 46))}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(p.sku)}</td>${targets.map(r => { const n = p.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'color:#1a7f37;font-weight:600'}">${n || '✗'}</td>`; }).join('')}<td style="font-weight:700;color:${p.missing ? '#d93025' : '#1a7f37'}">${p.missing || '✓'}</td></tr>`).join('')}</table></div>${rows.length > 500 ? '<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭500件（欠け国が多い順）</div>' : ''}</div>`;
+    document.getElementById('cov-back').addEventListener('click', () => { lst.covFr = null; renderCoverage(); });
+  }
   async function renderCoverage() {
     const host = document.getElementById('list-coverage');
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (lst.covFr) { renderCoverageDrill(lst.covFr, host, targets); return; } // シリーズ選択中は商品別ドリルダウン
     // シリーズ → カタログ(=1出品)単位で集計。バリエ型(model_count>1)/単品を区別し、ぶら下がるバリエ総数も数える
     const map = new Map();
     let allCat = 0, allVarCat = 0, allVarUnits = 0, allSingle = 0;
@@ -3044,14 +3090,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .sort((a, b) => (a.fr === 'その他' ? 1 : b.fr === 'その他' ? -1 : b.catTotal - a.catTotal));
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     host.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。<b>バリエ型</b>＝1カタログに複数商品がぶら下がる（括弧内＝ぶら下がるバリエ総数）、<b>単品</b>＝1カタログ1商品。各国列＝その国のカタログ数、<b style="color:#d93025">赤=未出品＝横展開候補</b>。タイトルのブレ吸収のためシリーズで粗く分類（完全一致でない）。シリーズ名クリックで出品状況を絞り込み。</div>
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。<b>バリエ型</b>＝1カタログに複数商品がぶら下がる（括弧内＝ぶら下がるバリエ総数）、<b>単品</b>＝1カタログ1商品。各国列＝その国のカタログ数、<b style="color:#d93025">赤=未出品＝横展開候補</b>。タイトルのブレ吸収のためシリーズで粗く分類（完全一致でない）。<b>シリーズ名クリックで「商品(明細)別に各国の有無」へドリルダウン</b>。</div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
       <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計カタログ</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th>${cch}</tr>${rows.map(row => `<tr><td>${row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${esc(row.fr)}</b>`}</td><td style="font-weight:700">${row.catTotal}</td><td>${row.varCat}<span class="smd-dim" style="font-size:10px"> (${row.varUnits})</span></td><td>${row.singleCat}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`).join('')}</table></div></div>`;
-    host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => {
-      lst.search = franchiseKw(el.dataset.fr); lst.tab = 'status';
-      document.querySelectorAll('#list-tab button').forEach(x => x.classList.toggle('on', x.dataset.k === 'status'));
-      renderListPage();
-    }));
+    host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => { lst.covFr = el.dataset.fr; renderCoverage(); }));
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
