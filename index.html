@@ -3028,22 +3028,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
-    // シリーズ → {total, cc:{}} をバリエ単位で集計（親が総称でも各バリエ=ゲーム名で分類）
+    // シリーズ → カタログ(=1出品)単位で集計。バリエ型(model_count>1)/単品を区別し、ぶら下がるバリエ総数も数える
     const map = new Map();
+    let allCat = 0, allVarCat = 0, allVarUnits = 0, allSingle = 0;
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
-      const units = (l.models && l.models.length) ? l.models : [{ n: '' }];
-      units.forEach(m => {
-        const fr = classifyFranchise((m.n || '') + ' ' + (l.name || ''));
-        let e = map.get(fr); if (!e) { e = { total: 0, cc: {} }; map.set(fr, e); }
-        e.total++; e.cc[r.cc] = (e.cc[r.cc] || 0) + 1;
-      });
+      const names = (l.models || []).map(m => m.n).join(' ');
+      const fr = classifyFranchise((l.name || '') + ' ' + names);
+      const isVar = (l.model_count || 0) > 1;
+      let e = map.get(fr); if (!e) { e = { catTotal: 0, varCat: 0, varUnits: 0, singleCat: 0, cc: {} }; map.set(fr, e); }
+      e.catTotal++; e.cc[r.cc] = (e.cc[r.cc] || 0) + 1; allCat++;
+      if (isVar) { e.varCat++; e.varUnits += l.model_count; allVarCat++; allVarUnits += l.model_count; }
+      else { e.singleCat++; allSingle++; }
     }));
-    const rows = [...map.entries()].map(([fr, e]) => ({ fr, total: e.total, cc: e.cc }))
-      .sort((a, b) => (a.fr === 'その他' ? 1 : b.fr === 'その他' ? -1 : b.total - a.total));
+    const rows = [...map.entries()].map(([fr, e]) => ({ fr, ...e }))
+      .sort((a, b) => (a.fr === 'その他' ? 1 : b.fr === 'その他' ? -1 : b.catTotal - a.catTotal));
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     host.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7">シリーズ別に各国の出品数（<b>バリエ単位</b>）を集計。<b style="color:#d93025">赤=その国に未出品＝横展開候補</b>。タイトルが国ごとに微妙に違うため<b>シリーズで粗く束ねています</b>（完全一致ではありません）。シリーズ名クリックで「出品状況」タブを絞り込み。</div>
-      <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th>${cch}</tr>${rows.map(row => `<tr><td>${row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${esc(row.fr)}</b>`}</td><td style="font-weight:700">${row.total}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`).join('')}</table></div></div>`;
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。<b>バリエ型</b>＝1カタログに複数商品がぶら下がる（括弧内＝ぶら下がるバリエ総数）、<b>単品</b>＝1カタログ1商品。各国列＝その国のカタログ数、<b style="color:#d93025">赤=未出品＝横展開候補</b>。タイトルのブレ吸収のためシリーズで粗く分類（完全一致でない）。シリーズ名クリックで出品状況を絞り込み。</div>
+      <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
+      <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計カタログ</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th>${cch}</tr>${rows.map(row => `<tr><td>${row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${esc(row.fr)}</b>`}</td><td style="font-weight:700">${row.catTotal}</td><td>${row.varCat}<span class="smd-dim" style="font-size:10px"> (${row.varUnits})</span></td><td>${row.singleCat}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`).join('')}</table></div></div>`;
     host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => {
       lst.search = franchiseKw(el.dataset.fr); lst.tab = 'status';
       document.querySelectorAll('#list-tab button').forEach(x => x.classList.toggle('on', x.dataset.k === 'status'));
