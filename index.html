@@ -3195,6 +3195,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return s.slice(0, 60).trim();
   }
 
+  // ---------------- 国別の出品制約（都度ここに1行足すだけで増やせる） ----------------
+  // 制約の各種上限。国コード→値、無ければ既定。
+  const TITLE_LIMIT = { TW: 60 };            // タイトル文字数上限（既定100）
+  const SPREAD_LIMIT = { BR: 4 };            // 1リスティング内のバリエ価格差(最大/最小)上限（既定5倍）
+  const PRICE_CEIL = { VN: 909090 };         // 1バリエの価格上限（現地通貨。無ければ上限なし）
+  const BRAND_LIMIT = { SG: 1 };             // タイトルに含めてよいブランド名の数（無ければ無制限）
+  // ブランド名検出用の辞書（SGのブランド1つ制約などに使用）。増やしたければここに追加。
+  const LIST_BRANDS = ['Nintendo', 'Sony', 'Bandai', 'Namco', 'Capcom', 'Sega', 'Konami', 'Square Enix', 'Squaresoft', 'Enix', 'Atlus', 'Koei', 'Tecmo', 'SNK', 'Taito', 'Hudson', 'Microsoft', 'PlayStation', 'Sanrio', 'Level-5', 'Marvelous', 'Spike Chunsoft', 'From Software', 'Irem', 'Jaleco'];
+  function brandsInTitle(title) {
+    const t = String(title || ''); const found = new Set();
+    LIST_BRANDS.forEach(b => { if (new RegExp('(^|[^A-Za-z])' + b.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '([^A-Za-z]|$)', 'i').test(t)) found.add(b); });
+    return [...found];
+  }
+  const priceSpread = (prices) => { const v = (prices || []).filter(x => x > 0); return v.length > 1 ? Math.max(...v) / Math.min(...v) : 1; };
+  // ctx = { cc, title, prices:[現地価格...] }。国の制約に触れる警告文字列の配列を返す。
+  function countryListingWarnings(ctx) {
+    const w = [];
+    const tl = TITLE_LIMIT[ctx.cc] || 100;
+    if (ctx.title.length > tl) w.push(`タイトル${tl}字超（現在${ctx.title.length}字）`);
+    const sl = SPREAD_LIMIT[ctx.cc] || 5;
+    const sp = priceSpread(ctx.prices);
+    if ((ctx.prices || []).filter(x => x > 0).length > 1 && sp > sl) w.push(`バリエ価格差${sp.toFixed(1)}倍（上限${sl}倍）`);
+    const ceil = PRICE_CEIL[ctx.cc];
+    if (ceil && (ctx.prices || []).some(p => p > ceil)) w.push(`価格上限${ceil.toLocaleString()}超のバリエあり→分割`);
+    const bl = BRAND_LIMIT[ctx.cc];
+    if (bl != null) { const b = brandsInTitle(ctx.title); if (b.length > bl) w.push(`ブランドは${bl}つまで（検出${b.length}: ${b.join(', ')}）`); }
+    return w;
+  }
+
   function renderList() {
     const body = document.getElementById('list-composer');
     if (!listState.built) {
@@ -3300,18 +3329,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       targets.map(rg => {
         const baseTitle = listTitle('');
         const title = rg.cc === 'TW' ? shortenTW(baseTitle) : baseTitle;
-        const titleWarn = (rg.cc === 'TW' && baseTitle.length > 60) ? `<span class="lwarn">TW60字→短縮(${title.length})</span>` : (title.length > 100 ? `<span class="lwarn">100字超</span>` : '');
+        const titleWarn = (rg.cc === 'TW' && baseTitle.length > 60) ? `<span class="smd-dim" style="font-size:11px;margin-left:6px">TW60字に短縮済(${title.length}字)</span>` : '';
         // 価格（現地）
         const priced = rows.map(v => {
           const local = roundLocal(JPY_TO_LOCAL(v.jpy || 0, rg), settings.priceRound);
           return { opt: v.opt, local, stock: v.stock, jpy: v.jpy };
         });
-        const warns = [];
-        if (rg.cc === 'VN' && priced.some(p => p.local > 909090)) warns.push('VN上限909,090₫超のバリエーションあり→分割必要');
-        if (rg.cc === 'BR' && priced.length > 1) {
-          const vals = priced.map(p => p.local).filter(x => x > 0);
-          if (vals.length && Math.max(...vals) / Math.min(...vals) > 4) warns.push('BRバリエーション価格比4倍超');
-        }
+        const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local) });
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
         const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
