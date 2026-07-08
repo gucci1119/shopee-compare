@@ -3086,25 +3086,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function coverageDrillHtml(fr, targets) {
     const products = new Map();
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const isVar = (l.model_count || 0) > 1;
       const units = (l.models && l.models.length) ? l.models : [{ n: l.name, img: l.image, sold: 0 }];
       units.forEach(m => {
         if (classifyFranchise((m.n || '') + ' ' + (l.name || '')) !== fr) return;
         const text = (m.n && m.n.trim()) ? m.n : (l.name || '');
         const key = productKey(text); if (!key) return;
-        let e = products.get(key); if (!e) { e = { key, rep: text, img: m.img || l.image || '', cc: {}, sold: 0 }; products.set(key, e); }
+        let e = products.get(key); if (!e) { e = { key, rep: text, img: m.img || l.image || '', cc: {}, link: {}, sold: 0, hasVar: false, hasSingle: false }; products.set(key, e); }
         e.cc[r.cc] = (e.cc[r.cc] || 0) + 1; e.sold += (m.sold || 0);
+        if (isVar) e.hasVar = true; else e.hasSingle = true;
+        if (!e.link[r.cc]) e.link[r.cc] = `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent(text.slice(0, 40))}`;
       });
     }));
-    const rows = [...products.values()].map(p => ({ ...p, sku: recommendSku(p.key), missing: targets.filter(r => !p.cc[r.cc]).length }));
-    if (lst.covProdSort === 'sold') rows.sort((a, b) => b.sold - a.sold || b.missing - a.missing);
-    else if (lst.covProdSort === 'name') rows.sort((a, b) => (a.rep || '').localeCompare(b.rep || '', 'ja'));
-    else rows.sort((a, b) => b.missing - a.missing || b.sold - a.sold); // 既定=欠け多い順
+    let rows = [...products.values()].map(p => ({ ...p, sku: recommendSku(p.key), missing: targets.filter(r => !p.cc[r.cc]).length }));
+    const cmp = lst.covProdSort === 'sold' ? (a, b) => b.sold - a.sold || b.missing - a.missing
+      : lst.covProdSort === 'name' ? (a, b) => (a.rep || '').localeCompare(b.rep || '', 'ja')
+        : (a, b) => b.missing - a.missing || b.sold - a.sold;
+    // 🧩バリエ出品を上に固める → その中で選択ソート
+    rows.sort((a, b) => (Number(b.hasVar) - Number(a.hasVar)) || cmp(a, b));
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const shown = rows.slice(0, 500);
     const sortBtn = (k, lb) => `<button class="smd-btn cov-psort" data-k="${k}" style="${(lst.covProdSort || 'missing') === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
     return `<div style="padding:6px 2px">
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：商品(明細)ごとの各国明細数。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／<b>推奨SKU</b>=統一提案（旧SKU無視）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}　${rows.length}商品</div>
-      <div class="pf-scroll" style="max-height:60vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>推奨SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>${shown.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 44))}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(p.sku)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${p.sold || ''}</td>${targets.map(r => { const n = p.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'color:#1a7f37;font-weight:600'}">${n || '✗'}</td>`; }).join('')}<td style="font-weight:700;color:${p.missing ? '#d93025' : '#1a7f37'}">${p.missing || '✓'}</td></tr>`).join('')}</table></div>${rows.length > 500 ? '<div class="smd-dim" style="font-size:11px">…先頭500件</div>' : ''}</div>`;
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：商品(明細)ごとの各国明細数。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🧩=バリエ出品(上に固め) 🔹=単品／数字クリックでその国のShopee商品ページ／<b>推奨SKU</b>=統一提案（同じSKUに揃える目安）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}　${rows.length}商品</div>
+      <div class="pf-scroll" style="max-height:60vh"><table class="pf-table"><tr><th></th><th>型</th><th>商品(明細)</th><th>推奨SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>${shown.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td title="${p.hasVar ? 'バリエーション出品' : '単品出品'}">${p.hasVar ? '🧩' : '🔹'}</td><td style="font-size:11px">${esc((p.rep || '').slice(0, 42))}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(p.sku)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${p.sold || ''}</td>${targets.map(r => { const n = p.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600'}">${n ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}のShopee商品ページを開く">${n}↗</a>` : '✗'}</td>`; }).join('')}<td style="font-weight:700;color:${p.missing ? '#d93025' : '#1a7f37'}">${p.missing || '✓'}</td></tr>`).join('')}</table></div>${rows.length > 500 ? '<div class="smd-dim" style="font-size:11px">…先頭500件</div>' : ''}</div>`;
   }
   async function renderCoverage() {
     const host = document.getElementById('list-coverage');
