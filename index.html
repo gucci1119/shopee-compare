@@ -504,21 +504,27 @@
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
   const REGIONS = [
-    { cc: 'PH', host: 'seller.shopee.ph',     tz: 8,  cur: '₱',   rateJpy: 2.7,    color: '#ee4d2d' },
-    { cc: 'SG', host: 'seller.shopee.sg',     tz: 8,  cur: 'S$',  rateJpy: 115,    color: '#0f9d58' },
-    { cc: 'MY', host: 'seller.shopee.com.my', tz: 8,  cur: 'RM',  rateJpy: 34,     color: '#1a73e8' },
-    { cc: 'BR', host: 'seller.shopee.com.br', tz: -3, cur: 'R$',  rateJpy: 28,     color: '#f9a825' },
-    { cc: 'VN', host: 'banhang.shopee.vn',    tz: 7,  cur: '₫',   rateJpy: 0.0058, color: '#9c27b0' },
-    { cc: 'TH', host: 'seller.shopee.co.th',  tz: 7,  cur: '฿',   rateJpy: 4.4,    color: '#e91e63' },
-    { cc: 'TW', host: 'seller.shopee.tw',     tz: 8,  cur: 'NT$', rateJpy: 4.9,    color: '#00897b' },
+    { cc: 'PH', host: 'seller.shopee.ph',     buyer: 'shopee.ph',        tz: 8,  cur: '₱',   rateJpy: 2.7,    color: '#ee4d2d' },
+    { cc: 'SG', host: 'seller.shopee.sg',     buyer: 'shopee.sg',        tz: 8,  cur: 'S$',  rateJpy: 115,    color: '#0f9d58' },
+    { cc: 'MY', host: 'seller.shopee.com.my', buyer: 'shopee.com.my',    tz: 8,  cur: 'RM',  rateJpy: 34,     color: '#1a73e8' },
+    { cc: 'BR', host: 'seller.shopee.com.br', buyer: 'shopee.com.br',    tz: -3, cur: 'R$',  rateJpy: 28,     color: '#f9a825' },
+    { cc: 'VN', host: 'banhang.shopee.vn',    buyer: 'shopee.vn',        tz: 7,  cur: '₫',   rateJpy: 0.0058, color: '#9c27b0' },
+    { cc: 'TH', host: 'seller.shopee.co.th',  buyer: 'shopee.co.th',     tz: 7,  cur: '฿',   rateJpy: 4.4,    color: '#e91e63' },
+    { cc: 'TW', host: 'seller.shopee.tw',     buyer: 'shopee.tw',        tz: 8,  cur: 'NT$', rateJpy: 4.9,    color: '#00897b' },
   ];
+  // Shopeeカタログの直リンク。編集ページは item_id だけ／販売(公開)ページは shop_id が要る(同期時に自動採取→settings.shopIds)
+  const editUrlFor = (host, itemId) => `https://${host}/portal/product/${itemId}?pageEntry=product_list`;
+  const buyerUrlFor = (cc, itemId) => {
+    const r = REGIONS.find(x => x.cc === cc); const sid = (settings.shopIds || {})[cc];
+    return (r && r.buyer && sid && itemId) ? `https://${r.buyer}/product/${sid}/${itemId}` : null;
+  };
   const PAGE_SIZE = 50;
   const MAX_PAGES = 20;
   const IMG_CDN = 'https://down-sg.img.susercontent.com/';
 
   // ---------------- 設定（localStorage） ----------------
   const settings = Object.assign({
-    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {},
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {},
     // 出品コンポーザー用
     listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
     listVarTpl: '{hardware} {variation}',
@@ -2936,6 +2942,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           { page_number: page, page_size: LIST_PAGE_SIZE, list_type: 'all', need_ext: true });
       } catch (e) { console.warn('[出品一覧]', region.cc, 'p' + page, e.message); break; }
       if (!j || j.code !== 0) { console.warn('[出品一覧] code', region.cc, j && j.code, j && j.message); break; }
+      // 販売(公開)ページURL用に shop_id を1度だけ自動採取（レスポンスのどこかにある shopid を拾う）
+      if (page === 1) {
+        try {
+          const m = JSON.stringify(j).match(/"shop_?id"\s*:\s*"?(\d{4,})"?/);
+          if (m && (settings.shopIds || {})[region.cc] !== m[1]) { settings.shopIds = settings.shopIds || {}; settings.shopIds[region.cc] = m[1]; saveSettings(); }
+        } catch (_) {}
+      }
       const d = j.data || {}, prods = d.products || [];
       total = (d.page_info || {}).total || total;
       prods.forEach(p => rows.push(listingToRow(region, p)));
@@ -3142,16 +3155,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; c.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id }); if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
         (l.models || []).forEach(m => {
           const ik = skuKey(m.sku) || productKey(m.n) || m.n || ('m' + m.id);
-          let it = c.items.get(ik); if (!it) { it = { key: ik, curSku: m.sku || '', bySku: !!skuKey(m.sku), rep: m.n, img: m.img || l.image, cc: {}, link: {}, sold: 0 }; c.items.set(ik, it); }
+          let it = c.items.get(ik); if (!it) { it = { key: ik, curSku: m.sku || '', bySku: !!skuKey(m.sku), rep: m.n, img: m.img || l.image, cc: {}, link: {}, listings: [], sold: 0 }; c.items.set(ik, it); }
           it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (m.sold || 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, m.n || l.name);
+          it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id });
           c.sold += (m.sold || 0);
         });
       } else {
         const text = (l.models && l.models[0] && l.models[0].n && l.models[0].n.trim()) ? l.models[0].n : (l.name || '');
         const msku = (l.models && l.models[0] && l.models[0].sku) || l.parent_sku;
         const ik = skuKey(msku) || productKey(text) || text;
-        let it = singles.get(ik); if (!it) { it = { key: ik, curSku: msku || '', bySku: !!skuKey(msku), rep: text, img: (l.models && l.models[0] && l.models[0].img) || l.image, cc: {}, link: {}, sold: 0 }; singles.set(ik, it); }
+        let it = singles.get(ik); if (!it) { it = { key: ik, curSku: msku || '', bySku: !!skuKey(msku), rep: text, img: (l.models && l.models[0] && l.models[0].img) || l.image, cc: {}, link: {}, listings: [], sold: 0 }; singles.set(ik, it); }
         it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (l.models || []).reduce((s, m) => s + (m.sold || 0), 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, text);
+        it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id });
       }
     }));
     const cmp = lst.covProdSort === 'sold' ? (a, b) => b.sold - a.sold || b.missing - a.missing
@@ -3161,9 +3176,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const imgTag = (u, sz) => u ? `<img src="${IMG_CDN}${esc(u)}" style="width:${sz}px;height:${sz}px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
     const skuCell = (o) => o.bySku ? `<span style="color:#1a7f37;font-family:monospace;font-size:10px" title="現SKUで連結済み">🔗${esc(o.curSku)}</span>` : `<span style="color:#7b52c4;font-family:monospace;font-size:10px" title="現SKU: ${esc(o.curSku || '(空)')}／このSKUに揃えると連結">推奨 ${esc(recommendSku(o.key))}</span>`;
-    const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600'}">${n ? (o.link[r.cc] ? `<a href="${o.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`) : '✗'}</td>`; }).join('');
+    // 各国セルの数字リンク：その国の出品が1件なら✏️編集ページ直行＋🛍️販売(公開)ページ、複数ならキーワード検索(↗)
+    const linkNum = (o, r) => {
+      const n = o.cc[r.cc] || 0;
+      const ls = [...new Map((o.listings || []).filter(x => x.cc === r.cc).map(x => [x.item_id, x])).values()];
+      if (ls.length === 1) {
+        const bu = buyerUrlFor(r.cc, ls[0].item_id);
+        return `<a href="${editUrlFor(ls[0].host, ls[0].item_id)}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc} 商品編集ページを開く">${n}✏️</a>` + (bu ? `<a href="${bu}" target="_blank" style="margin-left:1px;text-decoration:none" title="${r.cc} 販売(公開)ページを開く">🛍️</a>` : '');
+      }
+      return o.link[r.cc] ? `<a href="${o.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で${ls.length || n}件開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`;
+    };
+    const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600;white-space:nowrap'}">${n ? linkNum(o, r) : '✗'}</td>`; }).join('');
     // カタログ行の各国セル：出品数リンク＋その国だけSKU設定する🏷
-    const ccCellsCat = (c) => targets.map(r => { const n = c.cc[r.cc] || 0; if (!n) return `<td style="background:#fff0f0;color:#d93025;font-weight:700">✗</td>`; return `<td style="font-weight:600;white-space:nowrap">${c.link[r.cc] ? `<a href="${c.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`}<span class="cov-setsku-cc" data-key="${esc(fr + '::' + c.key)}" data-cc="${r.cc}" style="cursor:pointer;font-size:10px;margin-left:2px" title="${r.cc}だけにSKU設定">🏷</span></td>`; }).join('');
+    const ccCellsCat = (c) => targets.map(r => { const n = c.cc[r.cc] || 0; if (!n) return `<td style="background:#fff0f0;color:#d93025;font-weight:700">✗</td>`; return `<td style="font-weight:600;white-space:nowrap">${linkNum(c, r)}<span class="cov-setsku-cc" data-key="${esc(fr + '::' + c.key)}" data-cc="${r.cc}" style="cursor:pointer;font-size:10px;margin-left:2px" title="${r.cc}だけにSKU設定">🏷</span></td>`; }).join('');
     const cats = [...catalogs.values()].map(withMiss).sort(cmp);
     const sgl = [...singles.values()].map(withMiss).sort(cmp);
     if (!lst.covCatData) lst.covCatData = {};
@@ -3180,7 +3205,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const colspan = 6 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-psort" data-k="${k}" style="${(lst.covProdSort || 'missing') === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
     return `<div style="padding:6px 2px">
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結／<b>🏷SKU設定=全国に書込・各国セルの🏷=その国だけ書込</b>／数字クリックでその国の商品ページ／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結／<b>🏷SKU設定=全国に書込・各国セルの🏷=その国だけ書込</b>／数字=1件なら<b>✏️編集ページ</b>・<b>🛍️販売(公開)ページ</b>直行(複数は↗検索。🛍️は同期後に有効)／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="pf-scroll" style="max-height:62vh"><table class="pf-table"><tr><th></th><th>型</th><th>カタログ / 明細</th><th>SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>
       <tr><td colspan="${colspan}" style="background:#eaf1ff;font-weight:700;font-size:11px;padding:4px 8px">📦 バリエ型カタログ ${cats.length}件</td></tr>
       ${catRows}
@@ -3304,7 +3329,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がるバリエ(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
         <div class="pf-scroll" style="max-height:52vh">${mergeCands.slice(0, 40).map(g => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px">
           <div class="smd-dim" style="font-size:11px;margin-bottom:3px">同一候補：${new Set(g.map(c => c.cc)).size}か国 / ${g.length}カタログ</div>
-          ${g.map(c => `<div style="display:flex;gap:8px;align-items:center;font-size:11px;padding:2px 0">${c.img ? `<img src="${IMG_CDN}${esc(c.img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}<b style="color:${(regionByCc(c.cc) || {}).color || '#333'};width:24px">${c.cc}</b><a href="https://${c.host}/portal/product/list/all?keyword=${encodeURIComponent(c.name.slice(0, 40))}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name.slice(0, 54))}</a><span class="smd-dim" style="white-space:nowrap">${c.nvar}ﾊﾞﾘｴ</span><span style="color:#e8710a;white-space:nowrap">売${c.sold}</span></div>`).join('')}
+          ${g.map(c => `<div style="display:flex;gap:8px;align-items:center;font-size:11px;padding:2px 0">${c.img ? `<img src="${IMG_CDN}${esc(c.img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}<b style="color:${(regionByCc(c.cc) || {}).color || '#333'};width:24px">${c.cc}</b><a href="${editUrlFor(c.host, c.item_id)}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="編集ページを開く">${esc(c.name.slice(0, 54))}</a>${buyerUrlFor(c.cc, c.item_id) ? `<a href="${buyerUrlFor(c.cc, c.item_id)}" target="_blank" style="text-decoration:none" title="販売(公開)ページ">🛍️</a>` : ''}<span class="smd-dim" style="white-space:nowrap">${c.nvar}ﾊﾞﾘｴ</span><span style="color:#e8710a;white-space:nowrap">売${c.sold}</span></div>`).join('')}
         </div>`).join('') || '<span class="smd-dim">候補なし</span>'}</div>
       </div>
       <div class="tool-card" style="max-width:none">
@@ -3327,7 +3352,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🗂 未公開の棚卸し（${unlisted.length}件・復活/削除の判断用）</h3>
         <div class="smd-dim" style="font-size:11px;margin-bottom:6px">status≠出品中。✏️でShopee編集ページへ。全件は「出品状況」タブの「停止/その他」フィルタで。</div>
-        <div class="pf-scroll" style="max-height:360px;overflow:auto"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品名</th><th>状態</th><th>編集</th></tr>${unlisted.slice(0, 200).map(x => { const rg = regionByCc(x.cc) || { host: '' }; return `<tr><td>${x.image ? `<img src="${IMG_CDN}${esc(x.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(x.cc)}</td><td style="font-size:11px">${esc((x.name || '').slice(0, 46))}</td><td style="font-size:11px">${STLABEL[x.status] || ('status' + x.status)}</td><td>${rg.host ? `<a href="https://${rg.host}/portal/product/list/all?keyword=${encodeURIComponent((x.name || '').slice(0, 40))}" target="_blank" style="text-decoration:none">✏️</a>` : ''}</td></tr>`; }).join('')}</table></div>
+        <div class="pf-scroll" style="max-height:360px;overflow:auto"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品名</th><th>状態</th><th>編集</th></tr>${unlisted.slice(0, 200).map(x => { const rg = regionByCc(x.cc) || { host: '' }; return `<tr><td>${x.image ? `<img src="${IMG_CDN}${esc(x.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(x.cc)}</td><td style="font-size:11px">${esc((x.name || '').slice(0, 46))}</td><td style="font-size:11px">${STLABEL[x.status] || ('status' + x.status)}</td><td style="white-space:nowrap">${rg.host ? `<a href="${editUrlFor(rg.host, x.item_id)}" target="_blank" style="text-decoration:none" title="編集ページ">✏️</a>${buyerUrlFor(x.cc, x.item_id) ? `<a href="${buyerUrlFor(x.cc, x.item_id)}" target="_blank" style="text-decoration:none;margin-left:2px" title="販売(公開)ページ">🛍️</a>` : ''}` : ''}</td></tr>`; }).join('')}</table></div>
         ${unlisted.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件表示</div>` : ''}
       </div>`;
   }
@@ -3352,7 +3377,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const varRows = opened && r.models && r.models.length
       ? `<div style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${priceLoc(m.price)}</span><span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span><span class="smd-dim">売${m.sold}</span></div>`).join('')}</div>`
       : '';
-    const editUrl = rg.host ? `https://${rg.host}/portal/product/list/all?keyword=${encodeURIComponent((r.name || '').slice(0, 40))}` : '#';
+    const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
+    const buyUrl = buyerUrlFor(r.cc, r.item_id);
     return `<div class="tool-card" style="max-width:none;margin-bottom:6px;padding:8px 10px">
       <div style="display:flex;gap:10px;align-items:center">
         <span class="ord-cc" style="background:${rg.color}">${r.cc}</span>
@@ -3361,7 +3387,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</div>
           <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} 価格${price} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : '<span class="smd-dim">単品</span>'}</div>
         </div>
-        <a href="${editUrl}" target="_blank" title="Shopeeで編集" style="text-decoration:none;font-size:15px">✏️</a>
+        <div style="display:flex;flex-direction:column;gap:2px;align-items:center;flex:none">
+          <a href="${editUrl}" target="_blank" title="Shopeeで編集" style="text-decoration:none;font-size:15px">✏️</a>
+          ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:14px">🛍️</a>` : ''}
+        </div>
       </div>${varRows}</div>`;
   }
   function drawListingStatus() {
