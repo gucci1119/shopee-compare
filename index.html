@@ -280,11 +280,13 @@
     <div class="smd-toolbar" style="padding:8px 20px 0">
       <span class="smd-seg" id="list-tab">
         <button data-k="status" class="on">📋 出品状況</button>
+        <button data-k="coverage">🌏 横断カバレッジ</button>
         <button data-k="analysis">📊 分析・棚卸し</button>
         <button data-k="composer">✍️ コンポーザー</button>
       </span>
     </div>
     <div id="list-status" style="padding:12px 20px"></div>
+    <div id="list-coverage" style="display:none;padding:12px 20px"></div>
     <div id="list-analysis" style="display:none;padding:12px 20px"></div>
     <div id="list-composer" style="display:none;padding:12px 20px;max-width:1150px"></div>
   </div>
@@ -2972,17 +2974,81 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     const tab = lst.tab || 'status';
     document.getElementById('list-status').style.display = tab === 'status' ? '' : 'none';
+    document.getElementById('list-coverage').style.display = tab === 'coverage' ? '' : 'none';
     document.getElementById('list-analysis').style.display = tab === 'analysis' ? '' : 'none';
     document.getElementById('list-composer').style.display = tab === 'composer' ? '' : 'none';
     if (tab === 'status') renderListingStatus();
+    else if (tab === 'coverage') renderCoverage();
     else if (tab === 'analysis') renderListingAnalysis();
     else renderList();
   }
-  // lst.byCc を確実にロード（出品状況/分析で共有）
+  // lst.byCc を確実にロード（出品状況/分析/横断で共有）
   async function ensureListings() {
     if (lst.loaded) return;
     lst.byCc = await listingsFromDb();
     lst.loaded = true;
+  }
+  // シリーズ(フランチャイズ)分類。タイトルが国ごとに微妙に違うため完全一致では束ねられない→シリーズで粗く束ねる。[表示名, 判定regex, 出品状況検索用kw(英語substr)]
+  const FRANCHISES = [
+    ['ポケモン', /pok[eé]?mon|ポケモン|monster ?ball ?plus|pikachu|ピカチュウ/i, 'pok'],
+    ['ドラゴンボール', /dragon ?ball|ドラゴンボール|\bdbz\b|budokai/i, 'dragon ball'],
+    ['ファイナルファンタジー', /final ?fantasy|ファイナルファンタジー|\bFF\s?(VII|VIII|IX|X|[0-9])/i, 'final fantasy'],
+    ['ドラゴンクエスト', /dragon ?quest|ドラゴンクエスト|dragon ?warrior/i, 'dragon quest'],
+    ['マリオ', /\bmario\b|マリオ/i, 'mario'],
+    ['ゼルダ', /zelda|ゼルダ/i, 'zelda'],
+    ['モンスターハンター', /monster ?hunter|モンスターハンター/i, 'monster hunter'],
+    ['カービィ', /kirby|カービィ/i, 'kirby'],
+    ['ソニック', /sonic|ソニック/i, 'sonic'],
+    ['メタルギア', /metal ?gear|メタルギア|\bMGS\b/i, 'metal gear'],
+    ['バイオハザード', /resident ?evil|biohazard|バイオハザード/i, 'resident evil'],
+    ['キングダムハーツ', /kingdom ?hearts|キングダムハーツ/i, 'kingdom hearts'],
+    ['ロックマン', /mega ?man|rockman|ロックマン/i, 'megaman'],
+    ['遊戯王', /yu-?gi-?oh|遊戯王|duel ?monsters/i, 'yu-gi'],
+    ['ストリートファイター', /street ?fighter|ストリートファイター/i, 'street fighter'],
+    ['ペルソナ', /\bpersona\b|ペルソナ/i, 'persona'],
+    ['たまごっち', /tamagotchi|たまごっち/i, 'tamagotchi'],
+    ['ガンダム', /gundam|ガンダム/i, 'gundam'],
+    ['戦国BASARA', /sengoku ?basara|戦国basara/i, 'basara'],
+    ['どうぶつの森', /animal ?crossing|どうぶつの森/i, 'animal crossing'],
+    ['スプラトゥーン', /splatoon|スプラトゥーン/i, 'splatoon'],
+    ['サイレントヒル', /silent ?hill|サイレントヒル/i, 'silent hill'],
+    ['悪魔城ドラキュラ', /castlevania|悪魔城|akumajo/i, 'castlevania'],
+    ['グランツーリスモ', /gran ?turismo|グランツーリスモ/i, 'gran turismo'],
+    ['太鼓の達人', /taiko|太鼓の達人/i, 'taiko'],
+    ['メモリーカード・周辺機器', /memory ?(stick|card)|controller|コントローラ|\bcable\b|adapter|pocketstation|memory ?card ?duo/i, 'memory'],
+  ];
+  function classifyFranchise(text) {
+    const t = String(text || '');
+    for (const [name, re] of FRANCHISES) if (re.test(t)) return name;
+    return 'その他';
+  }
+  const franchiseKw = (name) => { const f = FRANCHISES.find(x => x[0] === name); return f ? f[2] : ''; };
+  async function renderCoverage() {
+    const host = document.getElementById('list-coverage');
+    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    // シリーズ → {total, cc:{}} をバリエ単位で集計（親が総称でも各バリエ=ゲーム名で分類）
+    const map = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const units = (l.models && l.models.length) ? l.models : [{ n: '' }];
+      units.forEach(m => {
+        const fr = classifyFranchise((m.n || '') + ' ' + (l.name || ''));
+        let e = map.get(fr); if (!e) { e = { total: 0, cc: {} }; map.set(fr, e); }
+        e.total++; e.cc[r.cc] = (e.cc[r.cc] || 0) + 1;
+      });
+    }));
+    const rows = [...map.entries()].map(([fr, e]) => ({ fr, total: e.total, cc: e.cc }))
+      .sort((a, b) => (a.fr === 'その他' ? 1 : b.fr === 'その他' ? -1 : b.total - a.total));
+    const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
+    host.innerHTML =
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7">シリーズ別に各国の出品数（<b>バリエ単位</b>）を集計。<b style="color:#d93025">赤=その国に未出品＝横展開候補</b>。タイトルが国ごとに微妙に違うため<b>シリーズで粗く束ねています</b>（完全一致ではありません）。シリーズ名クリックで「出品状況」タブを絞り込み。</div>
+      <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th>${cch}</tr>${rows.map(row => `<tr><td>${row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${esc(row.fr)}</b>`}</td><td style="font-weight:700">${row.total}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`).join('')}</table></div></div>`;
+    host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => {
+      lst.search = franchiseKw(el.dataset.fr); lst.tab = 'status';
+      document.querySelectorAll('#list-tab button').forEach(x => x.classList.toggle('on', x.dataset.k === 'status'));
+      renderListPage();
+    }));
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
