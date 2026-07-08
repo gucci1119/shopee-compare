@@ -736,21 +736,26 @@
     for (const tab of ORDER_TABS) {
       let list = [];
       const maxPage = TAB_MAX_PAGES[tab] || 4;
+      // ★カーソル方式: page_number では進まず同じ50件が返る（重複＋51件目以降欠落）。前ページの next_page_sentinel を page_sentinel に渡す
+      let sentinel = null;
       for (let p = 1; p <= maxPage; p++) {
         let j;
-        // 途中のページで失敗しても国全体を落とさない（取得済み分は保持してそのtabを打ち切る）
+        const pg = { page_number: p, page_size: 50 };
+        if (sentinel) pg.page_sentinel = sentinel;
         try {
           j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
-            order_list_tab: tab, entity_type: 1,
-            pagination: { from_page_number: 1, page_number: p, page_size: 50 },
+            order_list_tab: tab, entity_type: 1, pagination: pg,
           });
         } catch (e) { console.warn('[注文一覧]', region.cc, 'tab' + tab, 'p' + p, e.message); break; }
         if (!j || j.code !== 0) { console.warn('[注文一覧] code', region.cc, 'tab' + tab, 'p' + p, j && j.code); break; }
         const idx = (j.data && j.data.index_list) || [];
         list = list.concat(idx);
         const total = ((j.data || {}).pagination || {}).total || 0;
-        if (!idx.length || list.length >= total) break;
+        sentinel = ((j.data || {}).pagination || {}).next_page_sentinel || null;
+        if (!idx.length || !sentinel || list.length >= total) break;
       }
+      // 念のため order_id で重複除去（ページング取りこぼし対策のダメ押し）
+      { const seen = new Set(); list = list.filter(x => { const id = String(x.order_id || x.package_number); if (seen.has(id)) return false; seen.add(id); return true; }); }
       // card_listは5件まで。バッチを並列化（逐次awaitだと1国20往復=20秒超でタイムアウトするため。同時数はbridgeRequestのREQ_MAXで律速）
       const batches = [];
       for (let i = 0; i < list.length; i += 5) batches.push(list.slice(i, i + 5));
@@ -4260,17 +4265,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try {
           const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.500&order=order_id`))
             .map(o => String(o.order_id)));
-          let list = [];
+          let list = [], sentinel = null;
           for (let p = 1; p <= 60; p++) {
+            const pg = { page_number: p, page_size: 50 }; if (sentinel) pg.page_sentinel = sentinel;
             const j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
-              order_list_tab: 500, entity_type: 1,
-              pagination: { from_page_number: 1, page_number: p, page_size: 50 } });
+              order_list_tab: 500, entity_type: 1, pagination: pg });
             if (j.code !== 0) throw new Error(`index code=${j.code}`);
             const idx = (j.data && j.data.index_list) || [];
             list = list.concat(idx);
             const total = ((j.data || {}).pagination || {}).total || 0;
-            if (!idx.length || list.length >= total) break;
+            sentinel = ((j.data || {}).pagination || {}).next_page_sentinel || null;
+            if (!idx.length || !sentinel || list.length >= total) break;
           }
+          { const seen = new Set(); list = list.filter(x => { const id = String(x.order_id); if (seen.has(id)) return false; seen.add(id); return true; }); }
           const fresh = list.filter(x => !known.has(String(x.order_id)));
           const rows = [];
           for (let i = 0; i < fresh.length; i += 5) {
@@ -4317,17 +4324,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           try {
             const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.${tab}&order=order_id`))
               .map(o => String(o.order_id)));
-            let list = [];
+            let list = [], sentinel = null;
             for (let p = 1; p <= 10; p++) { // 直近500件まで（過去の大量キャンセルは遡らない）
+              const pg = { page_number: p, page_size: 50 }; if (sentinel) pg.page_sentinel = sentinel;
               const j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
-                order_list_tab: tab, entity_type: 1,
-                pagination: { from_page_number: 1, page_number: p, page_size: 50 } });
+                order_list_tab: tab, entity_type: 1, pagination: pg });
               if (j.code !== 0) throw new Error(`index code=${j.code}`);
               const idx = (j.data && j.data.index_list) || [];
               list = list.concat(idx);
               const total = ((j.data || {}).pagination || {}).total || 0;
-              if (!idx.length || list.length >= total) break;
+              sentinel = ((j.data || {}).pagination || {}).next_page_sentinel || null;
+              if (!idx.length || !sentinel || list.length >= total) break;
             }
+            { const seen = new Set(); list = list.filter(x => { const id = String(x.order_id); if (seen.has(id)) return false; seen.add(id); return true; }); }
             // 200(未払い)は状態が変わり得るので毎回全件更新、600(キャンセル)は差分のみ
             const targetList = tab === 200 ? list : list.filter(x => !known.has(String(x.order_id)));
             const rows = [];
