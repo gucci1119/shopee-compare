@@ -3107,6 +3107,46 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }).catch(e => { body.innerHTML = `<div style="color:#d93025;padding:8px">読込エラー: ${esc(e.message)}<br><span class="smd-dim">ブリッジ/ログイン状態を確認してください。</span></div><div style="text-align:right;margin-top:10px"><button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:7px 14px;cursor:pointer">閉じる</button></div>`; const b = body.querySelector('.ed-close2'); if (b) b.addEventListener('click', close); });
   }
 
+  // 親SKUを複数出品にまとめて書き込む（全国/各国 共通・確認あり）
+  async function writeParentSku(listings, scopeLabel, defaultSku, repName) {
+    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
+    if (!listings || !listings.length) return;
+    const sku = prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
+    if (!sku || !sku.trim()) return;
+    if (!confirm(`本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
+    let ok = 0, ng = 0;
+    for (const lg of listings) { try { const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false }); if (j && j.code === 0) ok++; else ng++; } catch (e) { ng++; } }
+    alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}\n（次回の🔄更新でポータル表示にも反映されます）`);
+    try { logAct('出品', 'SKU設定', repName || '', scopeLabel + ' ' + sku.trim() + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
+  // 横断カバレッジの数字チップをクリックしたときの操作メニュー（大きめのタップ行）
+  function showCovCellMenu(el) {
+    document.querySelectorAll('.cov-menu').forEach(m => m.remove());
+    const cc = el.dataset.cc, host = el.dataset.host, id = el.dataset.id, name = el.dataset.name || '', buy = el.dataset.buy, search = el.dataset.search, skukey = el.dataset.skukey, count = +(el.dataset.count || 1);
+    const box = document.createElement('div'); box.className = 'cov-menu';
+    box.style.cssText = 'position:fixed;z-index:500;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:6px;min-width:212px;font-size:13px';
+    const rc = el.getBoundingClientRect();
+    box.style.left = Math.max(6, Math.min(rc.left, window.innerWidth - 226)) + 'px';
+    box.style.top = (rc.bottom + 6 + (window.innerHeight - rc.bottom < 170 ? -(rc.height + 176) : 0)) + 'px';
+    const head = document.createElement('div');
+    head.textContent = cc + '・' + (count > 1 ? count + '出品・' : '') + name;
+    head.style.cssText = 'font-size:11px;color:#999;padding:5px 10px 8px;max-width:232px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    box.appendChild(head);
+    const row = (txt, fn, color) => { const b = document.createElement('div'); b.textContent = txt; b.style.cssText = 'padding:10px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-weight:600;color:' + (color || '#333'); b.onmouseover = () => b.style.background = '#f2f2f2'; b.onmouseout = () => b.style.background = ''; b.onclick = (e) => { e.stopPropagation(); close(); fn(); }; box.appendChild(b); };
+    if (id) {
+      row('✎ ポータルで編集', () => { if (!host) { alert('ホスト不明で編集できません'); return; } openCatalogEditor(cc, host, id, name); }, '#ee4d2d');
+      row('✏️ Shopee編集画面を開く', () => window.open(editUrlFor(host, id), '_blank'));
+      if (buy) row('🛍️ 販売(公開)ページを開く', () => window.open(buy, '_blank'));
+    } else if (search) {
+      row('↗ Shopeeで検索して開く（' + count + '出品）', () => window.open(search, '_blank'));
+    }
+    if (skukey) row('🏷 この国だけSKU設定', () => { const d = lst.covCatData && lst.covCatData[skukey]; if (!d) return; const lgs = d.listings.filter(x => x.cc === cc); writeParentSku(lgs, `【${cc}】だけにSKU設定`, d.recSku || d.curSku, d.rep); }, '#7b52c4');
+    document.body.appendChild(box);
+    function close() { box.remove(); document.removeEventListener('click', onDoc, true); document.removeEventListener('keydown', onKey, true); }
+    function onDoc(e) { if (!box.contains(e.target)) close(); }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    setTimeout(() => { document.addEventListener('click', onDoc, true); document.addEventListener('keydown', onKey, true); }, 0);
+  }
   function renderListPage() {
     if (!lst.wired) {
       lst.wired = true;
@@ -3303,19 +3343,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const imgTag = (u, sz) => u ? `<img src="${IMG_CDN}${esc(u)}" style="width:${sz}px;height:${sz}px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
     const skuCell = (o) => o.bySku ? `<span style="color:#1a7f37;font-family:monospace;font-size:10px" title="現SKUで連結済み">🔗${esc(o.curSku)}</span>` : `<span style="color:#7b52c4;font-family:monospace;font-size:10px" title="現SKU: ${esc(o.curSku || '(空)')}／このSKUに揃えると連結">推奨 ${esc(recommendSku(o.key))}</span>`;
     // 各国セルの数字リンク：その国の出品が1件なら✏️編集ページ直行＋🛍️販売(公開)ページ、複数ならキーワード検索(↗)
-    const linkNum = (o, r) => {
+    // 各国セル＝クリックできる数字チップ。押すと操作メニュー(編集/Shopee/販売/SKU)が開く。skuKeyはカタログ行のみ渡す
+    const linkNum = (o, r, skuKey) => {
       const n = o.cc[r.cc] || 0;
       const ls = [...new Map((o.listings || []).filter(x => x.cc === r.cc).map(x => [x.item_id, x])).values()];
-      if (ls.length === 1) {
-        const bu = buyerUrlFor(r.cc, ls[0].item_id);
-        const ed = `<span class="cov-edit" data-cc="${r.cc}" data-host="${av(ls[0].host)}" data-id="${ls[0].item_id}" data-name="${av(o.rep || '')}" style="cursor:pointer;margin-left:2px" title="${r.cc} ポータルで編集(Shopeeに保存)">✎</span>`;
-        return `<a href="${editUrlFor(ls[0].host, ls[0].item_id)}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc} 商品編集ページを開く">${n}✏️</a>` + (bu ? `<a href="${bu}" target="_blank" style="margin-left:1px;text-decoration:none" title="${r.cc} 販売(公開)ページを開く">🛍️</a>` : '') + ed;
-      }
-      return o.link[r.cc] ? `<a href="${o.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で${ls.length || n}件開く">${n}↗</a>` : `<span style="color:#1a7f37">${n}</span>`;
+      const one = ls.length === 1 ? ls[0] : null;
+      const buy = one ? (buyerUrlFor(r.cc, one.item_id) || '') : '';
+      const data = `data-cc="${r.cc}" data-name="${av(o.rep || '')}" data-count="${ls.length}"`
+        + (one ? ` data-host="${av(one.host)}" data-id="${one.item_id}" data-buy="${av(buy)}"` : '')
+        + (o.link[r.cc] ? ` data-search="${av(o.link[r.cc])}"` : '')
+        + (skuKey ? ` data-skukey="${av(skuKey)}"` : '');
+      return `<span class="cov-cell" ${data} style="cursor:pointer;color:#0b6b2e;font-weight:700;padding:2px 8px;border-radius:6px;background:#e7f4e9;display:inline-block;min-width:22px;text-align:center;line-height:1.5" title="${r.cc}: クリックで操作">${n}${ls.length > 1 ? '⁺' : ''} ▾</span>`;
     };
-    const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'font-weight:600;white-space:nowrap'}">${n ? linkNum(o, r) : '✗'}</td>`; }).join('');
-    // カタログ行の各国セル：出品数リンク＋その国だけSKU設定する🏷
-    const ccCellsCat = (c) => targets.map(r => { const n = c.cc[r.cc] || 0; if (!n) return `<td style="background:#fff0f0;color:#d93025;font-weight:700">✗</td>`; return `<td style="font-weight:600;white-space:nowrap">${linkNum(c, r)}<span class="cov-setsku-cc" data-key="${esc(fr + '::' + c.key)}" data-cc="${r.cc}" style="cursor:pointer;font-size:10px;margin-left:2px" title="${r.cc}だけにSKU設定">🏷</span></td>`; }).join('');
+    const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'white-space:nowrap;padding:3px 4px'}">${n ? linkNum(o, r) : '✗'}</td>`; }).join('');
+    // カタログ行の各国セル：数字チップ（メニューにSKU設定も入る＝skuKeyを渡す）
+    const ccCellsCat = (c) => targets.map(r => { const n = c.cc[r.cc] || 0; if (!n) return `<td style="background:#fff0f0;color:#d93025;font-weight:700">✗</td>`; return `<td style="white-space:nowrap;padding:3px 4px">${linkNum(c, r, fr + '::' + c.key)}</td>`; }).join('');
     const cats = [...catalogs.values()].map(withMiss).sort(cmp);
     const sgl = [...singles.values()].map(withMiss).sort(cmp);
     if (!lst.covCatData) lst.covCatData = {};
@@ -3332,7 +3374,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const colspan = 6 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-psort" data-k="${k}" style="${(lst.covProdSort || 'missing') === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
     return `<div style="padding:6px 2px">
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結／<b>🏷SKU設定=全国に書込・各国セルの🏷=その国だけ書込</b>／数字=1件なら<b>✎ポータル編集(Shopee保存)</b>・<b>✏️編集ページ</b>・<b>🛍️販売ページ</b>(複数は↗検索。🛍️は同期後に有効)／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結／<b>🏷SKU設定=全国一括書込</b>／<b>各国の数字チップをクリック→操作メニュー</b>（✎ポータル編集/✏️Shopee編集画面/🛍️販売ページ/🏷この国だけSKU設定。🛍️は同期後）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="pf-scroll" style="max-height:62vh"><table class="pf-table"><tr><th></th><th>型</th><th>カタログ / 明細</th><th>SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>
       <tr><td colspan="${colspan}" style="background:#eaf1ff;font-weight:700;font-size:11px;padding:4px 8px">📦 バリエ型カタログ ${cats.length}件</td></tr>
       ${catRows}
@@ -3383,42 +3425,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-sort').forEach(el => el.addEventListener('click', () => { lst.covSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-psort').forEach(el => el.addEventListener('click', () => { lst.covProdSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
-    host.querySelectorAll('.cov-edit').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
-    // 🏷 SKU設定: カタログ配下の各国出品(parent_sku)をShopeeに書き込む（1件ずつ・確認あり）
-    host.querySelectorAll('.cov-setsku').forEach(el => el.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
-      const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return;
-      const ccs = [...new Set(d.listings.map(x => x.cc))].join('/');
-      const sku = prompt(`このカタログの全出品のSKUを揃えてShopeeに書き込みます。\n商品: ${d.rep}\n対象: ${d.listings.length}出品（${ccs}）\n\nSKU（推奨をそのまま使えます）:`, d.recSku || d.curSku || '');
-      if (!sku || !sku.trim()) return;
-      if (!confirm(`本番のShopeeカタログ ${d.listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
-      el.disabled = true; const orig = el.textContent; el.textContent = '書込中...';
-      let ok = 0, ng = 0;
-      for (const lg of d.listings) {
-        try { const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false }); if (j && j.code === 0) ok++; else ng++; }
-        catch (e) { ng++; }
-      }
-      el.disabled = false; el.textContent = orig;
-      alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}\n（次回の🔄更新でポータル表示にも反映されます）`);
-      try { logAct('出品', 'SKU設定(全国)', d.rep, sku.trim() + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
-    }));
-    // 🏷 各国だけSKU設定（カタログ行の各国セルの🏷）
-    host.querySelectorAll('.cov-setsku-cc').forEach(el => el.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
-      const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d) return;
-      const cc = el.dataset.cc; const lgs = d.listings.filter(x => x.cc === cc); if (!lgs.length) return;
-      const sku = prompt(`【${cc}】だけにSKUを設定してShopeeに書き込みます。\n商品: ${d.rep}\n対象: ${lgs.length}出品（${cc}）\n\nSKU:`, d.recSku || d.curSku || '');
-      if (!sku || !sku.trim()) return;
-      if (!confirm(`${cc} の ${lgs.length}出品に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
-      const orig = el.textContent; el.textContent = '⏳';
-      let ok = 0, ng = 0;
-      for (const lg of lgs) { try { const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false }); if (j && j.code === 0) ok++; else ng++; } catch (e) { ng++; } }
-      el.textContent = orig;
-      alert(`${cc} SKU書込 完了: 成功 ${ok} / 失敗 ${ng}`);
-      try { logAct('出品', 'SKU設定(' + cc + ')', d.rep, sku.trim() + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
-    }));
+    // 各国セルの数字チップ → 操作メニュー（編集/Shopee/販売/この国だけSKU設定）
+    host.querySelectorAll('.cov-cell').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); showCovCellMenu(el); }));
+    // 🏷SKU設定（カタログ行のSKU列＝全国一括ボタン）
+    host.querySelectorAll('.cov-setsku').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return; const ccs = [...new Set(d.listings.map(x => x.cc))].join('/'); writeParentSku(d.listings, `全国一括SKU設定（${ccs}）`, d.recSku || d.curSku, d.rep); }));
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
