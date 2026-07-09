@@ -3039,7 +3039,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-07-10', items: [
       '⇄ ワンクリック・ショップ切替：ブリッジuserscript が Shopeeセラーページに切替パネルを追加。右下の「⇄ 店名」→ 全ショップ一覧から選ぶだけで目的の店に即切替（get_sig→sig URL遷移）。パネルはドラッグで移動＋位置記憶。',
       '🌏 全タブ一括切替（ブリッジ v1.4.0）：ポータルの🔑アカウントページに「全タブを◯◯に切替」を追加。開いている各国のセラータブを、選んだ系統(gcsonlinestore/gs_japan_select等)へ一括Switch Shop（GM共有ストレージ経由で各タブが自分の国のショップに切替）。切替後、対象アカウントを選んで全国一括操作/同期。※要 userscript v1.4.0＋各国セラータブを開いておく',
-      'ヘッダに「現在: ◯◯系統」ライブ表示：今どのアカウントで各国が開いているかを一目で確認（緑=単一系統／橙⚠️=混在・ホバーで国別内訳）。再読込直後は前回値を即表示→裏で最新へ自動更新。🌏一括切替時は指示系統をすぐ反映。未ログイン国が混じっても数秒で表示（前回値を保持）。',
+      'ヘッダに「現在: ◯◯系統」表示（オンデマンド）：🔄を押した時だけ各国のアクティブ系統をライブ判定（緑=単一／橙⚠️=混在・ホバーで国別内訳）。自動判定はしない＝ブリッジが詰まっていても常時赤「取得できず」が出ない。有効な前回結果があれば起動時に表示。🌏一括切替時は指示系統をすぐ反映。',
       '対象アカウントに「系統でまとめる（全国合算）」を追加：gcsonlinestore / gs_japan_select 単位で全国分を横断表示（従来の系統×国の個別ショップは下段に）。',
       '注文カードに「🏪アカウント（系統）」表示を追加：どの国のどのアカウントの注文かが分かる（系統ごとに色分け）。',
       '「現在:系統」判定が“取得できず”になる不具合を修正：判定リクエストを注文/商品ライブ取得の6枠プールから外して直接発行（ライブ取得中でも枠待ちで詰まらない）＋打ち切りを6.5→12秒に緩和。',
@@ -6121,7 +6121,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const el = document.getElementById('acct-cursys'); if (!el) return;
     if (state.mode !== 'live') { el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: スナップショット（切替不可）</span>'; return; }
     const fresh = state.curSys && state.curSysTs && (Date.now() - state.curSysTs < CURSYS_FRESH_MS);
-    if (state.curSys) renderCurSys(state.curSys, { updating: true }); // 既知はまず即表示（更新中マーク付き）
+    if (state.curSys && state.curSys.some(x => x.fam)) renderCurSys(state.curSys, { updating: true }); // 有効な前回結果があれば即表示（更新中マーク付き）
     else el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: 確認中…</span>';
     if (!force && fresh) { renderCurSys(state.curSys); return; } // 新しければ再取得しない
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
@@ -6130,19 +6130,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (perCc.some(x => x.fam) || force || !state.curSys) { saveCurSys(perCc); renderCurSys(perCc); }
     else renderCurSys(state.curSys, { stale: true }); // 全滅（一時的な未ログイン等）→前回値を据え置き
   }
-  // ★初回自動判定：モード確定(live)が initAcctBar より後なので、boot側から呼ぶ。
-  // #acct-cursys がまだ描かれていない可能性があるので数回ポーリングして待つ。キャッシュがあっても裏で必ず1回更新。
-  function maybeAutoCurSys() {
-    if (state.mode !== 'live' || state.curSysAuto) return;
-    state.curSysAuto = true;
-    let tries = 0;
-    const tick = () => {
-      const el = document.getElementById('acct-cursys');
-      if (el) { refreshCurSys(false); return; }
-      if (++tries < 12) setTimeout(tick, 700); // 最大~8秒 span出現を待つ
-    };
-    setTimeout(tick, 600);
-  }
+  // ※「現在:系統」はオンデマンド運用（自動判定なし）。ヘッダの🔄を押した時だけ refreshCurSys(true) が走る。
   function renderCurSys(perCc, opts) {
     opts = opts || {};
     const el = document.getElementById('acct-cursys'); if (!el) return;
@@ -6219,7 +6207,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           setTimeout(() => refreshCurSys(true), 9000); // 切替完了後に「現在」を実測で更新
         });
         // 「現在: ◯◯」をライブ判定（キャッシュがあれば即表示、無ければ少し遅延して自動取得）
-        if (state.curSys) renderCurSys(state.curSys); else { const e = document.getElementById('acct-cursys'); if (e) e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); maybeAutoCurSys(); }
+        // オンデマンド：自動判定はしない。有効な前回結果(系統が取れている)があれば表示、無ければ中立ボタン（赤「取得できず」は出さない）
+        const e = document.getElementById('acct-cursys');
+        if (state.curSys && state.curSys.some(x => x.fam)) renderCurSys(state.curSys, { stale: true });
+        else if (e) { e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店をライブ判定">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); }
       } else swBox.innerHTML = '';
     }
     // 初回描画は acctReady 確定前に走るため、特定アカウント選択時はここで絞り込んで描き直す（1回だけ）
@@ -6249,7 +6240,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
     setModeBadge();
-    if (state.mode === 'live') { load(); maybeAutoCurSys(); } // リサーチ用データは裏読み＋「現在:系統」を自動判定
+    if (state.mode === 'live') load(); // リサーチ用データは裏読み（「現在:系統」は自動判定せず🔄押下時のみ＝オンデマンド）
   })();
 })();
 </script>
