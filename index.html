@@ -2100,6 +2100,33 @@
     }
     return out;
   }
+  // ★書込先アカウントの安全チェック。書込直前に各国のアクティブ店をライブ判定し、
+  // ヘッダ「対象アカウント」で指定した垢と一致するか照合。別Chromeで別垢を開いていても、そのChromeの実セッションを読むので正しく見極める。
+  async function guardWriteCountries(ccs) {
+    const uniq = [...new Set((ccs || []).filter(Boolean))];
+    if (!uniq.length) return { ok: true, summary: '' };
+    const regions = uniq.map(cc => regionByCc(cc)).filter(Boolean);
+    let live = {};
+    try { live = await detectShopIds(regions); } catch (_) {}
+    const acc = state.accounts || [];
+    const selShop = (state.acct && state.acct !== 'all' && state.acct !== 'none') ? String(state.acct) : null;
+    const selAcc = selShop ? acc.find(a => String(a.shop_id) === selShop) : null;
+    const labelOf = (sid, fallback) => { const a = acc.find(x => String(x.shop_id) === String(sid)); return (a && a.label) || fallback || sid; };
+    const lines = [], mism = [];
+    for (const cc of uniq) {
+      const info = live[cc];
+      if (!info || !info.shop_id) { mism.push(`${cc}：今のアカウントを確認できません（未ログイン/ブリッジ未検出）`); continue; }
+      const activeLabel = labelOf(info.shop_id, info.name);
+      if (selAcc && selAcc.cc === cc) {
+        if (String(info.shop_id) !== String(selAcc.shop_id)) mism.push(`${cc}：目標「${selAcc.label}」ではなく今は「${activeLabel}」になっています`);
+        else lines.push(`${cc} = ${activeLabel} ✓`);
+      } else {
+        lines.push(`${cc} = ${activeLabel}`);
+      }
+    }
+    if (mism.length) return { ok: false, msg: '⚠️ 書込先アカウントが指定と違います:\n\n・' + mism.join('\n・') + '\n\n→ ShopeeでSwitch Shopして目標の垢に切り替えてから実行してください。\n（別Chromeでその垢を開いている場合は、そのChromeのポータルで操作してください）' };
+    return { ok: true, summary: lines.join('\n') };
+  }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
   async function renderAccounts() {
     const host = document.getElementById('acct-body');
@@ -2943,6 +2970,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
       '🔍 アカウント入れ替わり検出：Shopeeがたまにセッションを第1垢に戻すバグ対策。アカウントページで「今このブラウザの垢」を各国ライブ取得（get_shop_base_info の店名(name)＋shop_id＋商品数）し、店名で今どの垢か即判別。「この端末の担当」に設定した垢と違えば⚠️警告＋未登録垢はワンクリックで登録簿へ。書込/同期の前に確認できる',
       '🔄 全ショップ一括取込：アカウントページで「Shopeeから全ショップ取込」→ メインアカウント配下の全ショップ（shop_id/店名/国/最終ログイン）をget_shop_listで取得し登録簿に自動登録（既存の名前/ブラウザ/タグ/メモは保持）。手入力不要で一覧が揃う。各国内は メイン→サブ→新規→休眠 の順で並ぶ（メインが一番上）',
+      '🛡 出品先アカウントの誤爆ガード：出品/SKU/タイトル/価格/一括などの本番書込の直前に、各国の「今アクティブな店」をライブ判定(get_shop_base_info)し、ヘッダ「対象アカウント」で指定した垢と照合。違えば⚠️で書込を中止（別Chromeで別垢を開いている場合はそのChromeの実セッションを読むので正しく見極める）。確認ダイアログに書込先アカウントを明示',
       '🎯 アカウント別データ表示：ヘッダに「対象アカウント」セレクタを追加。全データ（出品/注文/ダッシュボード/損益）を特定のショップ(shop_id)に絞り込み。同期時に「今アクティブな店」のshop_idを各行へ自動付与（listings/orders/income）。読取はsbGet/sbGetAllの1か所でshop_idフィルタを注入（全合算時は無加工）。有効化にlistings/orders/incomeへshop_id列追加(SQL 1回)＋各垢に切替えて再同期が必要（列が無い間はセレクタで警告＋絞り込み無効）',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
@@ -3496,7 +3524,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const effTitle = patch.name != null ? patch.name : (pi.name || '');
         const effPrices = newModels.map(m => parseFloat(m.price != null ? m.price : '0'));
         const cw = countryListingWarnings({ cc, title: effTitle, prices: effPrices });
-        if (!confirm(`本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${summary.join('\n・')}\n\n${cw.length ? '⚠️ ' + cc + 'の出品制約に注意:\n - ' + cw.join('\n - ') + '\n\n' : ''}よろしいですか？`)) return;
+        const gw = await guardWriteCountries([cc]);
+        if (!gw.ok) { alert(gw.msg); return; }
+        if (!confirm(`書込先アカウント: ${gw.summary}\n\n本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${summary.join('\n・')}\n\n${cw.length ? '⚠️ ' + cc + 'の出品制約に注意:\n - ' + cw.join('\n - ') + '\n\n' : ''}よろしいですか？`)) return;
         const btn = body.querySelector('.ed-save'), msg = body.querySelector('.ed-msg');
         btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
         try {
@@ -3661,7 +3691,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const i = +el.dataset.i, lg = listings[i]; const title = ov.querySelector('.uni-t[data-i="' + i + '"]').value.trim();
       if (!title) { alert('タイトルを入れてください'); return; }
       const wa = chkTitle(lg.cc, title);
-      if (!confirm(lg.cc + ' のタイトルをShopeeに書き込みます：\n\n' + title + '\n\n' + (wa.length ? '⚠️ ' + lg.cc + 'の制約に注意: ' + wa.join(' / ') + '\n\n' : '') + 'よろしいですか？')) return;
+      const gw = await guardWriteCountries([lg.cc]);
+      if (!gw.ok) { alert(gw.msg); return; }
+      if (!confirm('書込先: ' + gw.summary + '\n\n' + lg.cc + ' のタイトルをShopeeに書き込みます：\n\n' + title + '\n\n' + (wa.length ? '⚠️ ' + lg.cc + 'の制約に注意: ' + wa.join(' / ') + '\n\n' : '') + 'よろしいですか？')) return;
       el.disabled = true; el.textContent = '…';
       const ok = await writeTitle(lg, title); el.textContent = ok ? '✓' : '✗'; el.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) el.disabled = false;
       msg(ok ? lg.cc + ' タイトル書込 成功' : lg.cc + ' 失敗', ok ? '#1a7f37' : '#d93025');
@@ -3671,7 +3703,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     q('.uni-title-all').addEventListener('click', async () => {
       const title = q('.uni-title').value.trim(); if (!title) { alert('統括タイトルを入れてください'); return; }
       const warns = []; listings.forEach(lg => { const w = chkTitle(lg.cc, title); if (w.length) warns.push(lg.cc + ': ' + w.join(' / ')); });
-      if (!confirm(listings.length + '出品すべてのタイトルを次に統一してShopeeに書き込みます：\n\n' + title + '\n\n' + (warns.length ? '⚠️ 制約に触れる国があります:\n' + warns.join('\n') + '\n\n' : '') + 'よろしいですか？')) return;
+      const gwa = await guardWriteCountries(listings.map(l => l.cc));
+      if (!gwa.ok) { alert(gwa.msg); return; }
+      if (!confirm('書込先アカウント:\n' + gwa.summary + '\n\n' + listings.length + '出品すべてのタイトルを次に統一してShopeeに書き込みます：\n\n' + title + '\n\n' + (warns.length ? '⚠️ 制約に触れる国があります:\n' + warns.join('\n') + '\n\n' : '') + 'よろしいですか？')) return;
       ov.querySelectorAll('.uni-t').forEach(inp => inp.value = title);
       let ok = 0; for (const lg of listings) { if (await writeTitle(lg, title)) { ok++; const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); if (row) row.name = title; } msg('タイトル書込 ' + ok + '/' + listings.length); }
       msg('統括タイトル 完了: 成功 ' + ok + '/' + listings.length, ok === listings.length ? '#1a7f37' : '#e8710a');
@@ -3679,7 +3713,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     q('.uni-price-all').addEventListener('click', async () => {
       const f = parseFloat(q('.uni-fac').value); if (!(f > 0)) { alert('係数を入れてください'); return; }
-      if (!confirm(listings.length + '出品すべての全明細価格を ×' + f + ' にします。時間がかかります。\n（VN上限/BR価格差の制約に触れる国は自動スキップ）\n\nよろしいですか？')) return;
+      const gwp = await guardWriteCountries(listings.map(l => l.cc));
+      if (!gwp.ok) { alert(gwp.msg); return; }
+      if (!confirm('書込先アカウント:\n' + gwp.summary + '\n\n' + listings.length + '出品すべての全明細価格を ×' + f + ' にします。時間がかかります。\n（VN上限/BR価格差の制約に触れる国は自動スキップ）\n\nよろしいですか？')) return;
       let ok = 0, skip = 0; const skips = [];
       for (const lg of listings) { const r = await writePriceFactor(lg, f); if (r.ok) ok++; else if (r.skip) { skip++; skips.push(lg.cc + ': ' + r.warn); } msg('価格書込 ' + ok + '/' + listings.length + (skip ? '（スキップ' + skip + '）' : '')); }
       msg('統括価格 完了: 成功 ' + ok + '/' + listings.length + (skip ? ' / 制約でスキップ' + skip : ''), skip ? '#e8710a' : (ok === listings.length ? '#1a7f37' : '#e8710a'));
@@ -3725,7 +3761,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ov.querySelectorAll('.uvar-write').forEach(b => b.addEventListener('click', async () => {
         const li = +b.dataset.li, lg = listings[li], pi = varData.pi[li]; if (!pi) return;
         const n = (pi.model_list || []).length;
-        if (!confirm(lg.cc + ' の全明細（' + n + '件）の価格をShopeeに書き込みます。よろしいですか？')) return;
+        const gw = await guardWriteCountries([lg.cc]);
+        if (!gw.ok) { alert(gw.msg); return; }
+        if (!confirm('書込先: ' + gw.summary + '\n\n' + lg.cc + ' の全明細（' + n + '件）の価格をShopeeに書き込みます。よろしいですか？')) return;
         b.disabled = true; b.textContent = '…';
         const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
         const pmap = {}; ov.querySelectorAll('.uvar-p[data-li="' + li + '"]').forEach(inp => pmap[inp.dataset.mid] = inp.value.trim());
@@ -3749,7 +3787,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!listings || !listings.length) return;
     const sku = (presetSku != null) ? presetSku : prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
     if (!sku || !sku.trim()) return;
-    if (!confirm(`本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
+    const gw = await guardWriteCountries(listings.map(l => l.cc));
+    if (!gw.ok) { alert(gw.msg); return; }
+    if (!confirm(`書込先アカウント:\n${gw.summary}\n\n本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
     let ok = 0; const fails = [], okItems = [];
     for (const lg of listings) {
       try {
@@ -3791,6 +3831,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const bulkProg = (t) => { const e = document.getElementById('cov-bulk-prog'); if (e) e.textContent = t; };
   async function bulkApplySku(scope) {
     const items = bulkGuard(scope); if (!items) return;
+    const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const nCat = (lst.bulkSel || new Set()).size;
     if (!confirm(`${nCat}カタログ（${scope === 'all' ? '全国' : scope}・合計${items.length}出品）を、それぞれの推奨SKUに統一してShopeeに書き込みます。よろしいですか？`)) return;
     let ok = 0, ng = 0, skip = 0;
@@ -3800,6 +3841,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function bulkApplyWeight(scope) {
     const items = bulkGuard(scope); if (!items) return;
+    const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const w = prompt(`重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。`, '0.2');
     if (!w || !w.trim() || isNaN(parseFloat(w))) return;
     if (!confirm(`${items.length}出品の重量を ${w.trim()}kg に一括設定します。よろしいですか？`)) return;
@@ -3810,6 +3852,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function bulkApplyPrice(scope) {
     const items = bulkGuard(scope); if (!items) return;
+    const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const f = prompt(`価格の倍率を入力（例: 1.1で+10%、0.9で-10%）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品の全明細価格に適用。`, '1.1');
     const factor = parseFloat(f); if (!(factor > 0)) return;
     if (!confirm(`${items.length}出品の全明細価格を ×${factor} にします（現在価格を読み込んで変更）。\n（VN上限/BR価格差の制約に触れる出品は自動スキップ）\n時間がかかります。よろしいですか？`)) return;
@@ -3833,6 +3876,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function bulkApplyTitleReplace(scope) {
     const items = bulkGuard(scope); if (!items) return;
+    const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const before = prompt(`タイトルの「置換前」文字列（この文字を含む出品だけ変更）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
     if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
     const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
@@ -3859,6 +3903,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function bulkApplyModelNameReplace(scope) {
     const items = bulkGuard(scope); if (!items) return;
+    const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const before = prompt(`明細名(バリエーション名)の「置換前」文字列。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
     if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
     const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
