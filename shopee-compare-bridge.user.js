@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.3.2
+// @version      1.4.0
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -34,13 +34,16 @@
 // @connect      static.mercdn.net
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
 // @run-at       document-start
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const VER = '1.3.2';
+  const VER = '1.4.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -58,6 +61,11 @@
     const d = e.data;
     if (!d || !d.__smd || e.origin !== location.origin) return;
 
+    // ポータル→「全タブ一括切替」指令。GM共有ストレージにセット→各国セラータブのuserscriptが拾って自分の国のショップに切替
+    if (d.__smd === 'switchall') {
+      try { GM_setValue('smd_switch_all', { family: String(d.family || ''), ts: Date.now() }); window.postMessage({ __smd: 'switchall_ok' }, '*'); } catch (ex) { window.postMessage({ __smd: 'switchall_err', error: ex.message }, '*'); }
+      return;
+    }
     if (d.__smd === 'ping') {
       window.postMessage({ __smd: 'pong', v: VER }, '*');
       return;
@@ -170,7 +178,25 @@
       tog.addEventListener('click', () => { if (moved) { moved = false; return; } list.style.display = list.style.display === 'none' ? 'block' : 'none'; });
       list.querySelectorAll('.smd-sw-item').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; if (String(id) === String(current)) { list.style.display = 'none'; return; } el.textContent = '切替中…'; switchTo(id); }));
     }
-    function boot() { if (!document.body) { setTimeout(boot, 400); return; } load().then(render); }
+    // ── 全タブ一括切替の受信（GM共有ストレージ経由。ポータル/他タブが smd_switch_all をセット→各国タブが自分の国のショップに切替） ──
+    const HOST2CC = { 'seller.shopee.ph': 'PH', 'seller.shopee.sg': 'SG', 'seller.shopee.com.my': 'MY', 'seller.shopee.com.br': 'BR', 'seller.shopee.vn': 'VN', 'banhang.shopee.vn': 'VN', 'seller.shopee.co.th': 'TH', 'seller.shopee.tw': 'TW' };
+    async function handleSwitchAll(req) {
+      if (!req || !req.family || !req.ts) return;
+      let done = 0; try { done = Number(sessionStorage.getItem('smd_sw_all_done') || 0); } catch (_) {}
+      if (req.ts <= done) return;                                  // 自分のナビ後の再処理＝ループ防止
+      const cc = HOST2CC[location.host]; if (!cc) return;
+      if (!shops.length) await load();
+      const fam = String(req.family).toLowerCase();
+      const target = shops.find(s => (CC[s.country] || '') === cc && String(s.username || s.shop_name || '').toLowerCase().indexOf(fam) === 0);
+      try { sessionStorage.setItem('smd_sw_all_done', String(req.ts)); } catch (_) {}
+      if (!target || String(target.shop_id) === String(current)) return;   // この国に無い or 既にその垢
+      switchTo(target.shop_id);
+    }
+    try { GM_addValueChangeListener('smd_switch_all', (n, o, v) => { handleSwitchAll(v); }); } catch (_) {}
+    function boot() {
+      if (!document.body) { setTimeout(boot, 400); return; }
+      load().then(() => { render(); try { const p = GM_getValue('smd_switch_all', null); if (p && p.ts && (Date.now() - p.ts) < 90000) handleSwitchAll(p); } catch (_) {} });
+    }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
   })();
 })();

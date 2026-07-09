@@ -2160,6 +2160,12 @@
     const detected = settings.shopIds || {};
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     const acctByShop = {}; (rows || []).forEach(a => { if (a.shop_id) acctByShop[a.shop_id] = a; });
+    // アカウント系統（gcsonlinestore / gs_japan_select 等）＝ラベルから末尾の.国コードを外す
+    const families = [...new Set((rows || []).map(a => String(a.label || a.shop_id || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '')).filter(Boolean))];
+    const switchAllCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;background:#fff8e1;border:1px solid #ffd591">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px"><b style="font-size:13px">🌏 全タブ一括切替</b><span class="smd-dim" style="font-size:11px">開いている各国のセラータブを、選んだ系統に<b>一括でSwitch Shop</b>（各タブが自動で再読込）。切替後、ポータルで対象アカウントを選んで全国一括操作/同期。</span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${families.map(f => `<button class="acct-switchall smd-btn" data-family="${av(f)}" style="background:#8a6d3b;color:#fff;border-color:#8a6d3b">🌏 全タブを ${esc(f)} に切替</button>`).join('') || '<span class="smd-dim" style="font-size:11px">（登録簿にアカウントがありません）</span>'}</div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:5px">※各国のセラーセンター(seller.shopee.*)タブを開いておいてください。ブリッジ v1.4.0 以上が必要。</div></div>`;
     const detectCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;border:1px solid #ffd9c2">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🔍 今このブラウザのアカウント確認</b><button class="acct-detect smd-btn" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d">各国ライブ取得</button><span class="smd-dim" style="font-size:11px">Shopeeのセッション入れ替わりバグ検出用。<b>書込/同期の前にここで「今どの垢か」を確認</b>。「この端末の担当」に設定した垢と違えば⚠️。</span></div>
       <div class="acct-detect-res" style="margin-top:8px"></div></div>`;
@@ -2198,7 +2204,15 @@
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:4px 0">実装済み：ヘッダの<b>「対象アカウント」</b>で全データ（出品/注文/ダッシュボード/損益）を絞り込めます。同期時に「今アクティブなショップ」のshop_idを各行へ自動付与。<br><b>有効化に2手順</b>：①下記SQLを1回だけ実行（listings/orders/incomeにshop_id列を追加）②各アカウントに切替(Switch Shop)→🔄同期（既存行はshop_id無し＝「未判別」。再同期で振り分け）。</div>
       <textarea class="acct-alter" readonly style="width:100%;height:110px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ALTER_SQL)}</textarea>
       <div style="margin-top:5px"><button class="acct-alter-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
-    host.innerHTML = intro + importCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    host.innerHTML = intro + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    host.querySelectorAll('.acct-switchall').forEach(b => b.addEventListener('click', () => {
+      const fam = b.dataset.family;
+      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で使えます'); return; }
+      if (!confirm('開いている各国のセラータブを一括で「' + fam + '」系統に切り替えます。\n（各タブが自動でSwitch Shop＝再読込します。対象の国のセラータブを開いておいてください）\n\nよろしいですか？')) return;
+      window.postMessage({ __smd: 'switchall', family: fam }, '*');
+      try { logAct('アカウント', '全タブ切替', fam, ''); } catch (_) {}
+      alert('切替指令を送りました。開いている各国のセラータブが順に「' + fam + '」へ切り替わります（数秒）。\n完了したら、ポータルのヘッダで対象アカウントを選んで同期/全国一括操作してください。');
+    }));
     const impBtn = host.querySelector('.acct-import');
     if (impBtn) impBtn.addEventListener('click', async () => {
       if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で取込できます'); return; }
@@ -2951,7 +2965,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-10', items: [
-      '⇄ ワンクリック・ショップ切替：ブリッジuserscript v1.3.0 が Shopeeセラーページに切替パネルを追加。右下の「⇄ 店名」→ 全ショップ一覧から選ぶだけで目的の店に即切替（get_sig→sig URL遷移。Shopeeの多段Switch Shop UIを探さなくて済む）。※要 userscript 再インストール（v1.3.0）',
+      '⇄ ワンクリック・ショップ切替：ブリッジuserscript が Shopeeセラーページに切替パネルを追加。右下の「⇄ 店名」→ 全ショップ一覧から選ぶだけで目的の店に即切替（get_sig→sig URL遷移）。パネルはドラッグで移動＋位置記憶。',
+      '🌏 全タブ一括切替（ブリッジ v1.4.0）：ポータルの🔑アカウントページに「全タブを◯◯に切替」を追加。開いている各国のセラータブを、選んだ系統(gcsonlinestore/gs_japan_select等)へ一括Switch Shop（GM共有ストレージ経由で各タブが自分の国のショップに切替）。切替後、対象アカウントを選んで全国一括操作/同期。※要 userscript v1.4.0＋各国セラータブを開いておく',
     ] },
     { date: '2026-07-09', items: [
       '🆕 出品管理を大幅拡張。「出品状況」＝全出品カタログを mpsku API で全7か国取得（約6,515件）して一覧・検索・状態フィルタ・バリエ展開。各行から✎ポータル編集/✏️Shopee編集画面/🛍️販売(公開)ページへ',
