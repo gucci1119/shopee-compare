@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.2.0
-// @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。
+// @version      1.3.0
+// @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @match        https://gucci1119.github.io/shopee-compare/*
 // @match        https://*.github.io/shopee-compare/*
 // @match        http://localhost:8788/*
@@ -38,7 +38,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.2.0';
+  const VER = '1.3.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -116,4 +116,48 @@
       send(d.url);
     }
   });
+
+  // ── ⇄ ショップ切替パネル（Shopeeセラーページのみ・全ショップをワンクリック切替） ──
+  // 切替は get_sig?target_shop_id=X → 応答 {url:"…?sig=…"} へ遷移。get_sigはShopee同一オリジンからのみ通るのでここ(セラーページ)で実行する。
+  (function shopSwitcher() {
+    const SELLER = ['seller.shopee.ph', 'seller.shopee.sg', 'seller.shopee.com.my', 'seller.shopee.com.br', 'seller.shopee.vn', 'banhang.shopee.vn', 'seller.shopee.co.th', 'seller.shopee.tw'];
+    if (SELLER.indexOf(location.host) < 0) return;
+    const CC = { ph: 'PH', sg: 'SG', my: 'MY', br: 'BR', vn: 'VN', th: 'TH', tw: 'TW' };
+    const getCds = () => new Promise(res => { const m = document.cookie.match(/(?:^|;\s*)SPC_CDS=([^;]+)/); if (m) return res(m[1]); try { GM_cookie.list({ url: location.origin + '/', name: 'SPC_CDS' }, (c) => res((c && c[0] && c[0].value) || '')); } catch (_) { res(''); } });
+    let shops = [], current = null;
+    async function load() {
+      try { const r = await fetch('/api/selleraccount/subaccount/get_shop_list/', { credentials: 'include' }); const j = await r.json(); shops = (j && (j.shops || (j.data && j.data.shops))) || []; } catch (_) { shops = []; }
+      try { const r2 = await fetch('/api/v3/general/get_shop_base_info?SPC_CDS_VER=2', { credentials: 'include' }); const j2 = await r2.json(); current = (j2 && j2.data && String(j2.data.shop_id)) || null; } catch (_) {}
+    }
+    async function switchTo(shopid) {
+      const cds = await getCds();
+      try {
+        const r = await fetch('/api/selleraccount/subaccount/get_sig/?SPC_CDS_VER=2&SPC_CDS=' + encodeURIComponent(cds) + '&target_shop_id=' + shopid, { credentials: 'include' });
+        const j = await r.json();
+        if (j && j.code === 0 && j.url) { location.href = j.url; return; }
+        alert('切替失敗 code=' + (j && j.code) + ' ' + ((j && j.message) || ''));
+      } catch (e) { alert('切替エラー: ' + e.message); }
+    }
+    function render() {
+      const old = document.getElementById('smd-switcher'); if (old) old.remove();
+      const box = document.createElement('div'); box.id = 'smd-switcher';
+      box.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;font-family:sans-serif;font-size:12px';
+      const cur = shops.find(s => String(s.shop_id) === String(current));
+      const curName = cur ? (cur.shop_name || cur.username) : '店舗';
+      box.innerHTML = '<div id="smd-sw-toggle" style="background:#ee4d2d;color:#fff;padding:6px 11px;border-radius:18px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;font-weight:700">⇄ ' + curName + '</div>' +
+        '<div id="smd-sw-list" style="display:none;position:absolute;right:0;bottom:40px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-height:62vh;overflow:auto;min-width:230px;padding:6px"></div>';
+      document.body.appendChild(box);
+      const list = box.querySelector('#smd-sw-list');
+      const byCc = {}; shops.forEach(s => { const cc = CC[s.country] || (s.country || '').toUpperCase(); (byCc[cc] = byCc[cc] || []).push(s); });
+      const order = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+      list.innerHTML = '<div style="font-size:10px;color:#999;padding:2px 6px 6px">切替先を選択（Shopeeが再読込します）</div>' + order.filter(cc => byCc[cc]).map(cc =>
+        '<div style="font-weight:700;color:#888;font-size:10px;margin:5px 6px 2px">' + cc + '</div>' +
+        byCc[cc].sort((a, b) => (b.is_main_shop ? 1 : 0) - (a.is_main_shop ? 1 : 0)).map(s => { const on = String(s.shop_id) === String(current); return '<div class="smd-sw-item" data-id="' + s.shop_id + '" style="padding:6px 9px;border-radius:6px;cursor:pointer;white-space:nowrap;' + (on ? 'background:#fdf0ec;color:#ee4d2d;font-weight:700' : '') + '">' + (on ? '● ' : '') + (s.shop_name || s.username) + '</div>'; }).join('')
+      ).join('');
+      box.querySelector('#smd-sw-toggle').addEventListener('click', () => { list.style.display = list.style.display === 'none' ? 'block' : 'none'; });
+      list.querySelectorAll('.smd-sw-item').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; if (String(id) === String(current)) { list.style.display = 'none'; return; } el.textContent = '切替中…'; switchTo(id); }));
+    }
+    function boot() { if (!document.body) { setTimeout(boot, 400); return; } load().then(render); }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+  })();
 })();
