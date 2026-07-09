@@ -832,6 +832,9 @@
     acct: (function () { try { return localStorage.getItem('smdAcct') || 'all'; } catch (_) { return 'all'; } })(), // 対象アカウント: 'all' | shop_id | 'none'(未判別)
     rawRead: false,         // 同期中の内部読取はアカウント絞り込みを外す
     accounts: null,         // 登録簿キャッシュ（shop_id → {label,cc,status}）
+    // 「現在: 系統」判定キャッシュ。前回結果をlocalStorageから復元し、再読込直後に即表示（裏で最新へ更新）
+    curSys: (function () { try { const c = JSON.parse(localStorage.getItem('smdCurSys') || 'null'); return (c && Array.isArray(c.perCc)) ? c.perCc : null; } catch (_) { return null; } })(),
+    curSysTs: (function () { try { const c = JSON.parse(localStorage.getItem('smdCurSys') || 'null'); return (c && c.ts) || 0; } catch (_) { return 0; } })(),
   };
   // 同期時にアクティブなショップ(shop_id)をcc別に保持→行ビルダーが自動で shop_id を刻む
   let activeShopByCc = {};
@@ -2089,13 +2092,15 @@
     return (j && (j.shops || (j.data && j.data.shops))) || [];
   }
   // 「今このブラウザのShopeeセッションがどの垢か」を各国ライブ取得。get_shop_base_info が shop_id＋店名(name)＋商品数 を返す。
-  async function detectShopIds(targets) {
+  async function detectShopIds(targets, softMs) {
     const out = {};
     // ★並列化：各国を順番待ちすると1国のハング(最大14秒＋リトライ14秒)で全体が固まる。
     // bridgeRequest側で同時6本に絞っているので、Promise.allで投げても接続は溢れない。
+    // softMs指定時は各国をその秒数で打ち切り→null（未ログイン国が28秒粘って全体を待たせるのを防ぐ・表示用途向け）。
     await Promise.all(targets.map(async r => {
       try {
-        const j = await bridgeGetJson(`https://${r.host}/api/v3/general/get_shop_base_info?SPC_CDS_VER=2`);
+        const call = bridgeGetJson(`https://${r.host}/api/v3/general/get_shop_base_info?SPC_CDS_VER=2`);
+        const j = softMs ? await Promise.race([call, new Promise((_, rej) => setTimeout(() => rej(new Error('soft-timeout')), softMs))]) : await call;
         const d = (j && j.data) || {};
         out[r.cc] = (j && j.code === 0 && d.shop_id) ? { shop_id: String(d.shop_id), name: d.name || '', items: d.item_count, followers: d.follower_count } : null;
       } catch (e) { out[r.cc] = null; }
@@ -6038,32 +6043,42 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // 系統名（gcsonlinestore等）＝ラベルから末尾の.国コードを除去
   const familyOfShop = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? String(a.label || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '') : null; };
+  // 判定結果をlocalStorageへ保存（再読込直後に即表示できるように）
+  function saveCurSys(perCc) {
+    state.curSys = perCc; state.curSysTs = Date.now();
+    try { localStorage.setItem('smdCurSys', JSON.stringify({ perCc, ts: state.curSysTs })); } catch (_) {}
+  }
+  const CURSYS_FRESH_MS = 180000; // 3分以内のキャッシュは十分新しいとみなし再取得しない
   // ヘッダに「現在: 各国のアクティブ系統」をライブ判定して表示。混在なら⚠️＋内訳。
+  // キャッシュがあれば即表示し、裏で最新へ更新（全国未ログイン等で全滅した時は前回値を消さない）。
   async function refreshCurSys(force) {
     const el = document.getElementById('acct-cursys'); if (!el) return;
     if (state.mode !== 'live') { el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: スナップショット（切替不可）</span>'; return; }
-    if (state.curSys && !force) { renderCurSys(state.curSys); return; }
-    el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: 確認中…</span>';
+    const fresh = state.curSys && state.curSysTs && (Date.now() - state.curSysTs < CURSYS_FRESH_MS);
+    if (state.curSys) renderCurSys(state.curSys, { updating: true }); // 既知はまず即表示（更新中マーク付き）
+    else el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: 確認中…</span>';
+    if (!force && fresh) { renderCurSys(state.curSys); return; } // 新しければ再取得しない
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
-    let live = {}; try { live = await detectShopIds(targets); } catch (_) {}
+    let live = {}; try { live = await detectShopIds(targets, 6500); } catch (_) {}
     const perCc = targets.map(r => ({ cc: r.cc, fam: live[r.cc] ? familyOfShop(live[r.cc].shop_id) : null }));
-    state.curSys = perCc; renderCurSys(perCc);
+    if (perCc.some(x => x.fam) || force || !state.curSys) { saveCurSys(perCc); renderCurSys(perCc); }
+    else renderCurSys(state.curSys, { stale: true }); // 全滅（一時的な未ログイン等）→前回値を据え置き
   }
   // ★初回自動判定：モード確定(live)が initAcctBar より後なので、boot側から呼ぶ。
-  // #acct-cursys がまだ描かれていない可能性があるので数回ポーリングして待つ。
+  // #acct-cursys がまだ描かれていない可能性があるので数回ポーリングして待つ。キャッシュがあっても裏で必ず1回更新。
   function maybeAutoCurSys() {
     if (state.mode !== 'live' || state.curSysAuto) return;
     state.curSysAuto = true;
     let tries = 0;
     const tick = () => {
-      if (state.curSys) return; // 既に判定済み（手動🔄等）なら不要
       const el = document.getElementById('acct-cursys');
       if (el) { refreshCurSys(false); return; }
       if (++tries < 12) setTimeout(tick, 700); // 最大~8秒 span出現を待つ
     };
     setTimeout(tick, 600);
   }
-  function renderCurSys(perCc) {
+  function renderCurSys(perCc, opts) {
+    opts = opts || {};
     const el = document.getElementById('acct-cursys'); if (!el) return;
     const fams = [...new Set(perCc.map(x => x.fam).filter(Boolean))];
     let label, color;
@@ -6071,7 +6086,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     else if (fams.length === 1) { label = fams[0]; color = '#1a7f37'; }
     else { label = '混在'; color = '#e8710a'; }
     const detail = perCc.map(x => x.cc + '=' + (x.fam || '?')).join(' / ');
-    el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (fams.length > 1 ? ' ⚠️' : '') + '</span> <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
+    const mark = opts.updating ? ' <span class="smd-dim" style="font-size:9px">…更新中</span>' : (opts.stale ? ' <span class="smd-dim" style="font-size:9px" title="最新取得に失敗＝前回値">前回</span>' : '');
+    el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (fams.length > 1 ? ' ⚠️' : '') + '</span>' + mark + ' <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
     const b = document.getElementById('acct-cursys-btn'); if (b) b.addEventListener('click', () => refreshCurSys(true));
   }
   function updateAcctHint() {
@@ -6124,8 +6140,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!confirm('開いている各国のセラータブを一括で「' + fam + '」系統に切り替えます。\n（各国のセラータブを開いておく／各タブが自動でSwitch Shop＝再読込）\n\nよろしいですか？')) return;
           window.postMessage({ __smd: 'switchall', family: fam }, '*');
           try { logAct('アカウント', '全タブ切替', fam, ''); } catch (_) {}
+          // 楽観更新：指示した系統を即「現在」に反映（実際の切替はタブ側で数秒後→9秒後に実測で確定）
+          saveCurSys(REGIONS.filter(r => state.enabled.has(r.cc)).map(r => ({ cc: r.cc, fam })));
+          renderCurSys(state.curSys, { updating: true });
           alert('切替指令を送りました。開いている各国のセラータブが順に「' + fam + '」へ切り替わります（数秒）。');
-          setTimeout(() => refreshCurSys(true), 9000); // 切替完了後に「現在」を更新
+          setTimeout(() => refreshCurSys(true), 9000); // 切替完了後に「現在」を実測で更新
         });
         // 「現在: ◯◯」をライブ判定（キャッシュがあれば即表示、無ければ少し遅延して自動取得）
         if (state.curSys) renderCurSys(state.curSys); else { const e = document.getElementById('acct-cursys'); if (e) e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); maybeAutoCurSys(); }
