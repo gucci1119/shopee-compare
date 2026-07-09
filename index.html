@@ -532,6 +532,8 @@
     listDescTpl: '{title}\n\n- Ships from Japan with tracking\n- Pre-owned, inspected before shipping\n- Fast & secure packaging',
     // 価格式パラメータ（フェーズ2で使用・設定でカスタム可）
     priceCoef: 1.8, priceFeePct: 12, priceShipJpy: 1200, priceRound: 10,
+    // 国別の出品数上限（Shopeeの出品可能数。各自入力。未設定=空）
+    listQuota: {},
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -2742,6 +2744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       'SKU書込：失敗した国/itemと理由を表示（未ログイン等）。書込成功で即「連結(🔗)＋✓済」表示＋各国の現在SKUを🌐/メニューで可視化',
       '🌏統括編集：カバレッジの📦カタログ/単品に「🌏統括編集」を追加。統括タイトルで全国一括／国別にタイトル個別編集・書込／価格×係数を全国一括。さらに🧩バリエ比較＝各国のバリエを並べて表示（✗=その国に無いバリエ／同一国に複数カタログはSG·1/SG·2と自動連番）、価格をセルで直接編集→各国「書込」で反映。明細名変更/バリエ追加/specificsは各国行の✎詳細から',
       '国別の出品制約チェックを全書込経路に適用：VN上限を100万VND(=正)に修正（旧909,090を訂正）。TW60字/SGブランド1つ/BR価格差4倍/VN上限に触れる書込は、タイトルはconfirmで警告、価格の一括/×係数は違反出品を自動スキップ＋内訳表示（統括編集・バリエ価格・単体エディタ・一括すべて）。VN価格上限は単品(バリエなし)出品も対象（単品も1明細として全経路でチェック）',
+      '横断カバレッジ上部に「📦 国別 出品数リミット」パネルを追加：各国の使用数（同期済み出品数）／上限／残り何品／占有率％をバー表示。上限は各国の入力欄に出品可能数を入れると保存（到達=🔴/残僅か=⚠️/余裕=✅）',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
@@ -3945,6 +3948,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     try { renderCoverageInner(host); } catch (e) { host.innerHTML = '<div style="color:#d93025;padding:12px">カバレッジ描画エラー: ' + esc(e.message) + '<br><span class="smd-dim">🔄Shopeeから更新でデータを取り直すと直る場合があります。</span></div>'; console.error('renderCoverage', e); }
   }
+  // 国別 出品数リミット パネル（使用=同期済みの出品数／上限=settings.listQuota[cc]・各自入力）
+  function quotaPanelHtml(targets) {
+    const q = settings.listQuota || {};
+    const cards = targets.map(r => {
+      const used = (lst.byCc[r.cc] || []).length;
+      const lim = Number(q[r.cc]) || 0; const has = lim > 0;
+      const rem = has ? Math.max(0, lim - used) : null;
+      const pct = has ? Math.round(used / lim * 100) : null;
+      const over = has && used >= lim;
+      const near = has && !over && pct >= 90;
+      const barc = !has ? '#d0d0d0' : (over ? '#d93025' : (near ? '#e8710a' : r.color));
+      const badge = !has ? '<span class="smd-dim" style="font-size:10px">上限未設定</span>' : (over ? '<span style="font-size:10px;color:#d93025;font-weight:700">🔴到達</span>' : (near ? '<span style="font-size:10px;color:#e8710a;font-weight:700">⚠️残僅か</span>' : '<span style="font-size:10px;color:#1a7f37;font-weight:700">✅余裕</span>'));
+      const foot = !has ? '空欄=未設定' : (over ? `上限到達（${(used - lim).toLocaleString()}超）` : `あと <b style="color:${barc}">${rem.toLocaleString()}</b> 品 ・ ${Math.min(100, pct)}%`);
+      return `<div style="border:1px solid #eee;border-radius:8px;padding:7px 9px;min-width:132px;flex:1 1 132px">
+        <div style="display:flex;align-items:center;justify-content:space-between"><b style="color:${r.color};font-size:13px">${r.cc}</b> ${badge}</div>
+        <div style="font-size:15px;font-weight:700;line-height:1.3">${used.toLocaleString()}<span style="font-size:11px;color:#999;font-weight:400"> / ${has ? lim.toLocaleString() : '—'}</span></div>
+        <div style="height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden;margin:3px 0"><div style="height:100%;width:${has ? Math.min(100, pct) : 0}%;background:${barc};transition:width .2s"></div></div>
+        <div style="font-size:10.5px;color:#666;display:flex;align-items:center;gap:4px;justify-content:space-between">${foot}<input class="cov-quota" data-cc="${r.cc}" type="number" min="0" value="${has ? lim : ''}" placeholder="上限" title="${r.cc}の出品可能数を入力（Shopee側の上限）" style="width:66px;padding:2px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right"></div>
+      </div>`;
+    }).join('');
+    const totUsed = targets.reduce((s, r) => s + (lst.byCc[r.cc] || []).length, 0);
+    const totLim = targets.reduce((s, r) => s + (Number(q[r.cc]) || 0), 0);
+    return `<div class="tool-card" style="max-width:none;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:6px"><b style="font-size:13px">📦 国別 出品数リミット</b><span class="smd-dim" style="font-size:10.5px">使用=同期済みの出品数。上限はShopee側の出品可能数を各国入力（不明なら空欄）。合計 <b>${totUsed.toLocaleString()}</b>${totLim ? ' / ' + totLim.toLocaleString() : ''}</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div></div>`;
+  }
   function renderCoverageInner(host) {
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     if (!lst.covOpen) lst.covOpen = new Set();
@@ -3992,6 +4021,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.innerHTML =
       `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
+      ${quotaPanelHtml(targets)}
       <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><input id="cov-search" value="${av(lst.covSearch || '')}" placeholder="🔎 カタログ名・SKU・バリエ名で検索（2文字以上／該当シリーズを自動展開）" style="width:min(460px,100%);padding:8px 11px;border:1px solid #ddd;border-radius:8px;font-size:13px">${q ? `<span class="smd-dim" style="font-size:11px">「${esc(q)}」で絞り込み中 ${rows.length}シリーズ</span>` : ''}</div>
       ${bulkBar}
       <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th><th>売</th>${cch}</tr>${rows.map(row => {
@@ -4005,6 +4035,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-sort').forEach(el => el.addEventListener('click', () => { lst.covSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-psort').forEach(el => el.addEventListener('click', () => { lst.covProdSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
+    // 国別 出品数リミットの上限入力 → 保存して再描画（占有率バー更新）
+    host.querySelectorAll('.cov-quota').forEach(el => el.addEventListener('change', () => {
+      if (!settings.listQuota) settings.listQuota = {};
+      const v = parseInt(el.value, 10);
+      if (v > 0) settings.listQuota[el.dataset.cc] = v; else delete settings.listQuota[el.dataset.cc];
+      saveSettings(); renderCoverage();
+    }));
     // 各国セルの数字チップ → 操作メニュー（編集/Shopee/販売/この国だけSKU設定）
     host.querySelectorAll('.cov-cell').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); showCovCellMenu(el); }));
     // 検索: 入力ごとに再描画（フォーカス/カーソル位置を復元）
