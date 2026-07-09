@@ -1247,16 +1247,29 @@
     return sbGetAll('orders', 'select=*&tab=lt.500&order=ship_by.asc').then(rows => {
       const byCc = {};
       let maxSync = '';
+      const shopTally = {}; // cc → {shop_id: 件数} → 各国の主アカウントを推定（ライブ行のshop_id補完に使う）
       rows.forEach(o => {
         if (o.synced_at && o.synced_at > maxSync) maxSync = o.synced_at;
+        if (o.shop_id) { (shopTally[o.cc] = shopTally[o.cc] || {})[o.shop_id] = (shopTally[o.cc][o.shop_id] || 0) + 1; }
         (byCc[o.cc] = byCc[o.cc] || []).push({ cc: o.cc, sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
-          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], preOrder: !!o.pre_order, region: regionByCc(o.cc) });
+          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], preOrder: !!o.pre_order, shopId: o.shop_id || null, region: regionByCc(o.cc) });
       });
+      state.orders.presumedShop = {};
+      Object.keys(shopTally).forEach(cc => { state.orders.presumedShop[cc] = Object.keys(shopTally[cc]).sort((a, b) => shopTally[cc][b] - shopTally[cc][a])[0]; });
       if (maxSync) state.orders.dbSyncedAt = maxSync;
       return byCc;
     });
   }
   const fmtOrdTs = (ts) => { if (!ts) return '不明'; try { return new Date(ts).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return '不明'; } };
+  // 注文がどのアカウント(系統)のものかを示す小チップ。shop_id→登録簿ラベル→系統名。系統ごとに色分け
+  function acctChip(sid) {
+    if (!sid) return '';
+    const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid));
+    const fam = a ? famOfLabel(a.label) : ('shop ' + sid);
+    const full = a ? a.label : ('shop_id ' + sid);
+    const color = fam === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4';
+    return `<div title="${esc(full)}" style="font-size:9px;color:${color};margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏪 ${esc(fam)}</div>`;
+  }
   function updateOrdNote(live) {
     const el = document.getElementById('ord-note'); if (!el) return;
     let t = `DB最終同期: ${fmtOrdTs(state.orders.dbSyncedAt)}`;
@@ -1301,6 +1314,9 @@
           const oc = state.orders.perCountry.get(region.cc);
           if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
         }), timeout]).then(rows => {
+          // ライブ行にはshop_idが無いので、今アクティブな店 or DB推定の店で補完（アカウント表示用）
+          const presumed = activeShopByCc[region.cc] || (state.orders.presumedShop && state.orders.presumedShop[region.cc]) || null;
+          rows.forEach(x => { if (!x.shopId) x.shopId = presumed; });
           state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows });
           state.orders.liveAt = new Date().toISOString(); updateOrdNote(false);
           renderOrders();
@@ -1425,7 +1441,7 @@
         `<span class="ord-due">${r.tab !== 300 ? '<span class="smd-dim">発送済</span>' : (arranged ? '<span class="smd-dim">手配済</span>' : shipByBadge(r.shipBy))}</span>` +
         `<div class="ord-item">${itemsHtml}</div>` +
         `<span class="ord-status">${flags ? flags + '<br>' : ''}${esc(r.status)}${statusLabel}${transitToggle}</span>` +
-        `<div class="ord-meta"><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
+        `<div class="ord-meta"><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div>${acctChip(r.shopId)}</div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
@@ -1454,10 +1470,33 @@
     }));
   }
 
-  document.getElementById('ord-reload').addEventListener('click', () => {
+  // 更新ボタン＝ライブ取得＋DBへ保存（DB最終同期も進む）。ライブ不可/書込キー無しなら表示のみ
+  async function refreshOrders() {
+    const btn = document.getElementById('ord-reload');
     state.orders.perCountry.clear();
-    loadOrders(true); // 更新ボタンはライブ取得
-  });
+    if (state.mode !== 'live' || !settings.sbSecret) { loadOrders(true); return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '⏳ 更新中'; }
+    try {
+      // 先にアクティブ店を判定＝各行に正しいshop_idを刻む（既存shop_idをnullで潰さないため）
+      try { const _sh = await detectShopIds(targets, 12000); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); } catch (_) {}
+      loadOrders(true);
+      await waitOrdersLoaded({ textContent: '' });
+      const orderRows = [];
+      targets.forEach(region => { const oc = state.orders.perCountry.get(region.cc); if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o))); });
+      if (orderRows.length) {
+        // 全対象国のアクティブ店を判定できた時だけshop_idを書く。1国でも未判別なら全行からshop_id列を外す＝既存値を保持（新規注文のみnull）
+        const allDetected = targets.every(r => activeShopByCc[r.cc]);
+        const rows = allDetected ? orderRows : orderRows.map(({ shop_id, ...rest }) => rest);
+        try { await sbUpsert('orders', rows); }
+        catch (e) { if (/pre_order/i.test(e.message)) await sbUpsert('orders', rows.map(({ pre_order, ...rest }) => rest)); else throw e; }
+        state.orders.dbSyncedAt = new Date().toISOString();
+        updateOrdNote(false);
+      }
+    } catch (e) { /* ライブ表示は生きているので保存失敗は握りつぶす（DB最終同期が進まないだけ） */ }
+    finally { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } }
+  }
+  document.getElementById('ord-reload').addEventListener('click', () => { refreshOrders(); });
   // 🖨️ 一括印刷：表示中の未発送(tab300)のSLS伝票を国ごとにまとめて印刷（各注文=1タブ。Waybill Printer userscriptが自動印刷）
   document.getElementById('ord-bulkprint').addEventListener('click', () => {
     const targets = (state.orders.shown || []).filter(r => r.tab === 300 && r.sn);
@@ -2104,12 +2143,14 @@
   // 「今このブラウザのShopeeセッションがどの垢か」を各国ライブ取得。get_shop_base_info が shop_id＋店名(name)＋商品数 を返す。
   async function detectShopIds(targets, softMs) {
     const out = {};
-    // ★並列化：各国を順番待ちすると1国のハング(最大14秒＋リトライ14秒)で全体が固まる。
-    // bridgeRequest側で同時6本に絞っているので、Promise.allで投げても接続は溢れない。
-    // softMs指定時は各国をその秒数で打ち切り→null（未ログイン国が28秒粘って全体を待たせるのを防ぐ・表示用途向け）。
+    // ★並列化＋プール回避：get_shop_base_info は軽量なので、6本制限の bridgeRequest を通さず
+    // rawBridgeRequest に直接投げる（＝注文/商品のライブ取得が6枠を食い潰していても順番待ちで固まらない）。
+    // これが「ライブ取得中に取得できず(全null)」になる主因だった（判定7本が枠待ちのままsoftMsで打ち切られていた）。
+    // rawBridgeRequest自体が14秒で必ず解決。softMs指定時はそれより早く打ち切り→null。
+    const rawGetJson = url => rawBridgeRequest('GET', url).then(t => JSON.parse(t));
     await Promise.all(targets.map(async r => {
       try {
-        const call = bridgeGetJson(`https://${r.host}/api/v3/general/get_shop_base_info?SPC_CDS_VER=2`);
+        const call = rawGetJson(`https://${r.host}/api/v3/general/get_shop_base_info?SPC_CDS_VER=2`);
         const j = softMs ? await Promise.race([call, new Promise((_, rej) => setTimeout(() => rej(new Error('soft-timeout')), softMs))]) : await call;
         const d = (j && j.data) || {};
         out[r.cc] = (j && j.code === 0 && d.shop_id) ? { shop_id: String(d.shop_id), name: d.name || '', items: d.item_count, followers: d.follower_count } : null;
@@ -2991,6 +3032,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '⇄ ワンクリック・ショップ切替：ブリッジuserscript が Shopeeセラーページに切替パネルを追加。右下の「⇄ 店名」→ 全ショップ一覧から選ぶだけで目的の店に即切替（get_sig→sig URL遷移）。パネルはドラッグで移動＋位置記憶。',
       '🌏 全タブ一括切替（ブリッジ v1.4.0）：ポータルの🔑アカウントページに「全タブを◯◯に切替」を追加。開いている各国のセラータブを、選んだ系統(gcsonlinestore/gs_japan_select等)へ一括Switch Shop（GM共有ストレージ経由で各タブが自分の国のショップに切替）。切替後、対象アカウントを選んで全国一括操作/同期。※要 userscript v1.4.0＋各国セラータブを開いておく',
       'ヘッダに「現在: ◯◯系統」ライブ表示：今どのアカウントで各国が開いているかを一目で確認（緑=単一系統／橙⚠️=混在・ホバーで国別内訳）。再読込直後は前回値を即表示→裏で最新へ自動更新。🌏一括切替時は指示系統をすぐ反映。未ログイン国が混じっても数秒で表示（前回値を保持）。',
+      '対象アカウントに「系統でまとめる（全国合算）」を追加：gcsonlinestore / gs_japan_select 単位で全国分を横断表示（従来の系統×国の個別ショップは下段に）。',
+      '注文カードに「🏪アカウント（系統）」表示を追加：どの国のどのアカウントの注文かが分かる（系統ごとに色分け）。',
+      '「現在:系統」判定が“取得できず”になる不具合を修正：判定リクエストを注文/商品ライブ取得の6枠プールから外して直接発行（ライブ取得中でも枠待ちで詰まらない）＋打ち切りを6.5→12秒に緩和。',
+      '注文の「🔄更新」がDBにも保存するように：従来は画面のライブ表示だけでDB最終同期が進まなかった。更新時にアクティブ店を判定してから注文をDBへupsert（=DB最終同期も進む）。未判別の国があればshop_id列は書かず既存値を保持。',
     ] },
     { date: '2026-07-09', items: [
       '🆕 出品管理を大幅拡張。「出品状況」＝全出品カタログを mpsku API で全7か国取得（約6,515件）して一覧・検索・状態フィルタ・バリエ展開。各行から✎ポータル編集/✏️Shopee編集画面/🛍️販売(公開)ページへ',
@@ -6076,7 +6121,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     else el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: 確認中…</span>';
     if (!force && fresh) { renderCurSys(state.curSys); return; } // 新しければ再取得しない
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
-    let live = {}; try { live = await detectShopIds(targets, 6500); } catch (_) {}
+    let live = {}; try { live = await detectShopIds(targets, 12000); } catch (_) {}
     const perCc = targets.map(r => ({ cc: r.cc, fam: live[r.cc] ? familyOfShop(live[r.cc].shop_id) : null }));
     if (perCc.some(x => x.fam) || force || !state.curSys) { saveCurSys(perCc); renderCurSys(perCc); }
     else renderCurSys(state.curSys, { stale: true }); // 全滅（一時的な未ログイン等）→前回値を据え置き
