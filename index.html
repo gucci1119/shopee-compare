@@ -3172,6 +3172,44 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     bulkProg(''); alert(`価格一括 完了: 成功${ok} / 失敗${ng}\n（次回🔄更新で一覧にも反映）`);
     try { logAct('出品', '価格一括', items.length + '出品', scope + ' ×' + factor + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
   }
+  async function bulkApplyTitleReplace(scope) {
+    const items = bulkGuard(scope); if (!items) return;
+    const before = prompt(`タイトルの「置換前」文字列（この文字を含む出品だけ変更）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
+    if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
+    const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
+    if (after == null) return;
+    if (!confirm(`${items.length}出品のタイトル内「${before}」→「${after || '(削除)'}」に一括置換します。現タイトルを読み込んで変更。よろしいですか？`)) return;
+    let ok = 0, ng = 0, skip = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      try { const pi = await productRead(it.host, it.item_id); const nm = pi.name || ''; if (nm.indexOf(before) < 0) { skip++; } else { const r = await productWrite(it.host, it.item_id, { name: nm.split(before).join(after) }); r.ok ? ok++ : ng++; } }
+      catch (e) { ng++; }
+      bulkProg(`読込→書込 ${i + 1}/${items.length}`);
+    }
+    bulkProg(''); alert(`タイトル置換 完了: 成功${ok} / 失敗${ng} / 対象外${skip}(該当文字なし)\n（次回🔄更新で一覧にも反映）`);
+    try { logAct('出品', 'タイトル置換', items.length + '出品', scope + ' ' + before + '→' + after + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
+  async function bulkApplyModelNameReplace(scope) {
+    const items = bulkGuard(scope); if (!items) return;
+    const before = prompt(`明細名(バリエーション名)の「置換前」文字列。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
+    if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
+    const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
+    if (after == null) return;
+    if (!confirm(`${items.length}出品の明細名(バリエ名)内「${before}」→「${after || '(削除)'}」に一括置換します。よろしいですか？`)) return;
+    let ok = 0, ng = 0, skip = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      try {
+        const pi = await productRead(it.host, it.item_id); const tiers = pi.std_tier_variation_list || [];
+        let changed = false; const nt = JSON.parse(JSON.stringify(tiers));
+        nt.forEach(t => (t.value_list || []).forEach(o => { if (o.custom_value && o.custom_value.indexOf(before) >= 0) { o.custom_value = o.custom_value.split(before).join(after); changed = true; } }));
+        if (!changed) { skip++; } else { const r = await productWrite(it.host, it.item_id, { std_tier_variation_list: nt }); r.ok ? ok++ : ng++; }
+      } catch (e) { ng++; }
+      bulkProg(`読込→書込 ${i + 1}/${items.length}`);
+    }
+    bulkProg(''); alert(`明細名置換 完了: 成功${ok} / 失敗${ng} / 対象外${skip}(該当文字なし)\n（次回🔄更新で一覧にも反映）`);
+    try { logAct('出品', '明細名置換', items.length + '出品', scope + ' ' + before + '→' + after + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
   // 横断カバレッジの数字チップをクリックしたときの操作メニュー（大きめのタップ行）
   function showCovCellMenu(el) {
     document.querySelectorAll('.cov-menu').forEach(m => m.remove());
@@ -3474,6 +3512,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn cov-bulk-sku" title="各カタログの推奨SKUに全出品を統一">🏷 SKU→推奨に統一</button>
         <button class="smd-btn cov-bulk-wt" title="重量をkg指定で一括設定">⚖️ 重量</button>
         <button class="smd-btn cov-bulk-price" title="全明細価格に倍率を適用（現価格を読んで変更）">💰 価格 ×係数</button>
+        <button class="smd-btn cov-bulk-title" title="タイトル内の文字を検索置換">📝 タイトル置換</button>
+        <button class="smd-btn cov-bulk-mname" title="明細名(バリエ名)内の文字を検索置換">🔤 明細名置換</button>
         <button class="smd-btn cov-bulk-clear">選択解除</button>
         <span id="cov-bulk-prog" style="color:#8a6d3b;font-weight:700"></span>
         <span class="smd-dim" style="font-size:10.5px;width:100%">⚠️本番書込。対象は<b>展開済みシリーズのカタログ</b>のみ。件数が多いと時間がかかりブリッジ負荷が上がります。</span>
@@ -3503,6 +3543,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const bSku = host.querySelector('.cov-bulk-sku'); if (bSku) bSku.addEventListener('click', () => bulkApplySku(lst.bulkScope || 'all'));
     const bWt = host.querySelector('.cov-bulk-wt'); if (bWt) bWt.addEventListener('click', () => bulkApplyWeight(lst.bulkScope || 'all'));
     const bPr = host.querySelector('.cov-bulk-price'); if (bPr) bPr.addEventListener('click', () => bulkApplyPrice(lst.bulkScope || 'all'));
+    const bTi = host.querySelector('.cov-bulk-title'); if (bTi) bTi.addEventListener('click', () => bulkApplyTitleReplace(lst.bulkScope || 'all'));
+    const bMn = host.querySelector('.cov-bulk-mname'); if (bMn) bMn.addEventListener('click', () => bulkApplyModelNameReplace(lst.bulkScope || 'all'));
     const bClr = host.querySelector('.cov-bulk-clear'); if (bClr) bClr.addEventListener('click', () => { lst.bulkSel.clear(); renderCoverage(); });
   }
   async function renderListingAnalysis() {
