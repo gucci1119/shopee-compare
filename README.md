@@ -1,14 +1,17 @@
-# Shopee 全国売れ行き比較サイト
+# Shopee OS（全国オペレーションポータル）
 
-Shopee 7か国（PH/SG/MY/BR/VN/TH/TW）の売れ行きを1画面で比較する専用サイト。
+Shopee 7か国（PH/SG/MY/BR/VN/TH/TW）の運用を1画面で回す社内ポータル。売れ行き比較から始まり、注文/在庫/仕入れ/利益/顧客/出品管理まで拡張。詳しい使い方はアプリ内の **📖 マニュアル**（サイドバー）を参照。
 
 ## 構成
 
 | ファイル | 役割 |
 |---|---|
-| `index.html` | サイト本体（GitHub Pagesに置く） |
-| `shopee-compare-bridge.user.js` | Tampermonkey用ブリッジ。サイト→各国Seller Center/GASへの通信を中継 |
+| `index.html` | ポータル本体（GitHub Pagesに置く。1ファイル） |
+| `shopee-compare-bridge.user.js` | Tampermonkey用ブリッジ。ポータル→各国Seller Center/GAS/メルカリへの通信を中継（SPC_CDS自動注入） |
+| `shopee-addvar.user.js` | Tampermonkey用。メルカリ取込→バリエ追加を編集ページで実行（画像アップロード＋API確定） |
 | `shopee-compare-gas.gs` | スナップショット保存用GAS（閲覧専用PCのためのデータ置き場） |
+
+主な機能：注文管理/在庫管理/仕入れ管理/利益管理/顧客・仕入れ先/**出品管理（出品状況・横断カバレッジ・分析・コンポーザー＋ポータル内エディタ＋一括編集＋メルカリ取込バリエ追加）**/価格調整。データは Supabase を直接読み書き。
 
 ## 動作モード
 
