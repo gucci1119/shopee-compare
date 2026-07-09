@@ -196,6 +196,7 @@
     </div>
   </aside>
   <main id="smd-main">
+  <div id="smd-acctbar" style="position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #eee;padding:5px 20px;display:flex;align-items:center;gap:8px;font-size:12px"><span style="color:#888">対象アカウント</span><select id="acct-sel" style="padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;max-width:320px"></select><span id="acct-hint" class="smd-dim" style="font-size:11px"></span></div>
 
   <!-- ダッシュボード -->
   <div id="page-dash" style="display:none">
@@ -763,6 +764,7 @@
     cc: o.region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
     tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: o.total || null,
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
+    shop_id: activeShopByCc[o.region.cc] || null,
   });
   // 未発送(300)は全件、発送中(400)は大量なので直近3ページ(150件)で打ち切る＝取得が軽くなりタイムアウト回避
   const TAB_MAX_PAGES = { 300: 10, 400: 1 }; // 発送中(400)は直近1ページ(50)に削減＝BR等の重い国がタイムアウトしないように
@@ -827,7 +829,12 @@
     snapMeta: null,
     loadSeq: 0,
     orders: { started: false, perCountry: new Map(), filter: 'all', search: '' }, // cc → {status,msg,rows}
+    acct: (function () { try { return localStorage.getItem('smdAcct') || 'all'; } catch (_) { return 'all'; } })(), // 対象アカウント: 'all' | shop_id | 'none'(未判別)
+    rawRead: false,         // 同期中の内部読取はアカウント絞り込みを外す
+    accounts: null,         // 登録簿キャッシュ（shop_id → {label,cc,status}）
   };
+  // 同期時にアクティブなショップ(shop_id)をcc別に保持→行ビルダーが自動で shop_id を刻む
+  let activeShopByCc = {};
   const mv = (it, kind) => {
     if (!it) return 0;
     const k = state.metric === 'confirmed' ? { units: 'cu', sales: 'cs', orders: 'co' } : { units: 'pu', sales: 'ps', orders: 'po' };
@@ -1616,7 +1623,16 @@
   };
 
   // ---------------- DB読み取り（閲覧はブリッジ不要） ----------------
+  // アカウント絞り込みの注入：state.acctが特定shopなら account系テーブルの読取に shop_id フィルタを足す（'all'時や同期内部読取(rawRead)は無加工）
+  const ACCT_TABLES = new Set(['listings', 'orders', 'income']);
+  function acctQs(table, qs) {
+    const a = state.acct;
+    if (state.rawRead || !state.acctReady || !a || a === 'all' || !ACCT_TABLES.has(table)) return qs;
+    const filt = a === 'none' ? 'shop_id=is.null' : ('shop_id=eq.' + encodeURIComponent(a));
+    return qs ? qs + '&' + filt : filt;
+  }
   async function sbGet(table, qs) {
+    qs = acctQs(table, qs);
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキー（publishable）を入力してください');
     const hit = (k) => fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: { apikey: k, Authorization: 'Bearer ' + k } });
@@ -1629,6 +1645,7 @@
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
   // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
   async function sbGetAll(table, qs) {
+    qs = acctQs(table, qs);
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
     const hdr = (extra) => ({ apikey: key, Authorization: 'Bearer ' + key, ...extra });
@@ -2143,8 +2160,11 @@
           <button class="acct-save smd-btn" style="font-size:10px">保存</button>
           <button class="acct-del smd-btn" style="font-size:10px;color:#d93025">削除</button>
         </div>`).join('')}</div>`).join('') || '<div class="smd-dim" style="padding:8px">まだ登録がありません。上のフォームから追加してください。</div>';
-    const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 データ分離（次の一歩）</b>
-      <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin-top:4px">第2垢の出品/注文をポータルで<b>アカウント別に</b>見るには、同期データに shop_id を付けて「アカウント別フィルタ」を足す改修が必要です（今は国単位で混ざる）。第2垢の出品が増える前にやるのが安全。やる時は声かけてください。</div></div>`;
+    const ALTER_SQL = "alter table listings add column if not exists shop_id text;\nalter table orders   add column if not exists shop_id text;\nalter table income   add column if not exists shop_id text;\ncreate index if not exists listings_shop_idx on listings(shop_id);\ncreate index if not exists orders_shop_idx   on orders(shop_id);";
+    const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 アカウント別にデータを分ける（有効化手順）</b>
+      <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:4px 0">実装済み：ヘッダの<b>「対象アカウント」</b>で全データ（出品/注文/ダッシュボード/損益）を絞り込めます。同期時に「今アクティブなショップ」のshop_idを各行へ自動付与。<br><b>有効化に2手順</b>：①下記SQLを1回だけ実行（listings/orders/incomeにshop_id列を追加）②各アカウントに切替(Switch Shop)→🔄同期（既存行はshop_id無し＝「未判別」。再同期で振り分け）。</div>
+      <textarea class="acct-alter" readonly style="width:100%;height:110px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ALTER_SQL)}</textarea>
+      <div style="margin-top:5px"><button class="acct-alter-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
     host.innerHTML = intro + importCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
     const impBtn = host.querySelector('.acct-import');
     if (impBtn) impBtn.addEventListener('click', async () => {
@@ -2157,7 +2177,7 @@
         const cc = String(s.country || '').toUpperCase(); const id = cc + '_' + s.shop_id; const ex = existing[id] || {};
         return { id, cc, label: ex.label || s.shop_name || s.username || String(s.shop_id), shop_id: String(s.shop_id), browser: ex.browser || '', status: ex.status || (s.is_main_shop ? 'main' : 'sub'), tags: ex.tags || '', note: ex.note || (s.last_login ? '最終ログイン ' + new Date(s.last_login * 1000).toISOString().slice(0, 10) : ''), updated_at: new Date().toISOString() };
       });
-      try { for (let i = 0; i < upserts.length; i += 100) await sbUpsert('accounts', upserts.slice(i, i + 100)); try { logAct('アカウント', '全ショップ取込', '', upserts.length + '件'); } catch (_) {} alert(`${upserts.length}ショップを取込・更新しました`); renderAccounts(); }
+      try { for (let i = 0; i < upserts.length; i += 100) await sbUpsert('accounts', upserts.slice(i, i + 100)); try { logAct('アカウント', '全ショップ取込', '', upserts.length + '件'); } catch (_) {} state.accounts = null; try { await initAcctBar(); } catch (_) {} alert(`${upserts.length}ショップを取込・更新しました`); renderAccounts(); }
       catch (e) { alert('保存エラー: ' + e.message + '\n（accountsテーブルが未作成の可能性）'); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; }
     });
     // 🔍 現在アカウント確認
@@ -2191,12 +2211,13 @@
         host.querySelector('.acct-f-label').scrollIntoView({ block: 'center' }); host.querySelector('.acct-f-label').focus();
       }));
     });
+    const acp = host.querySelector('.acct-alter-copy'); if (acp) acp.addEventListener('click', () => { const ta = host.querySelector('.acct-alter'); ta.select(); try { document.execCommand('copy'); acp.textContent = '✓ コピーしました'; } catch (_) {} });
     host.querySelector('.acct-add').addEventListener('click', async () => {
       const g = s => ((host.querySelector(s) || {}).value || '').trim();
       const cc = (host.querySelector('.acct-f-cc') || {}).value || 'PH', label = g('.acct-f-label'), shop = g('.acct-f-shop');
       if (!label) { alert('名前を入れてください'); return; }
       const id = cc + '_' + (shop || ('x' + Date.now()));
-      try { await sbUpsert('accounts', [{ id, cc, label, shop_id: shop, browser: g('.acct-f-browser'), status: (host.querySelector('.acct-f-status') || {}).value, tags: g('.acct-f-tags'), note: g('.acct-f-note'), updated_at: new Date().toISOString() }]); try { logAct('アカウント', '追加', cc, label); } catch (_) {} renderAccounts(); }
+      try { await sbUpsert('accounts', [{ id, cc, label, shop_id: shop, browser: g('.acct-f-browser'), status: (host.querySelector('.acct-f-status') || {}).value, tags: g('.acct-f-tags'), note: g('.acct-f-note'), updated_at: new Date().toISOString() }]); try { logAct('アカウント', '追加', cc, label); } catch (_) {} state.accounts = null; try { await initAcctBar(); } catch (_) {} renderAccounts(); }
       catch (e) { alert('保存エラー: ' + e.message); }
     });
     host.querySelectorAll('.acct-usedet').forEach(b => b.addEventListener('click', () => { host.querySelector('.acct-f-cc').value = b.dataset.cc; host.querySelector('.acct-f-shop').value = b.dataset.sid; host.querySelector('.acct-f-browser').focus(); }));
@@ -2910,6 +2931,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
       '🔍 アカウント入れ替わり検出：Shopeeがたまにセッションを第1垢に戻すバグ対策。アカウントページで「今このブラウザの垢」を各国ライブ取得（get_shop_base_info の店名(name)＋shop_id＋商品数）し、店名で今どの垢か即判別。「この端末の担当」に設定した垢と違えば⚠️警告＋未登録垢はワンクリックで登録簿へ。書込/同期の前に確認できる',
       '🔄 全ショップ一括取込：アカウントページで「Shopeeから全ショップ取込」→ メインアカウント配下の全ショップ（shop_id/店名/国/最終ログイン）をget_shop_listで取得し登録簿に自動登録（既存の名前/ブラウザ/タグ/メモは保持）。手入力不要で一覧が揃う',
+      '🎯 アカウント別データ表示：ヘッダに「対象アカウント」セレクタを追加。全データ（出品/注文/ダッシュボード/損益）を特定のショップ(shop_id)に絞り込み。同期時に「今アクティブな店」のshop_idを各行へ自動付与（listings/orders/income）。読取はsbGet/sbGetAllの1か所でshop_idフィルタを注入（全合算時は無加工）。有効化にlistings/orders/incomeへshop_id列追加(SQL 1回)＋各垢に切替えて再同期が必要（列が無い間はセレクタで警告＋絞り込み無効）',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
@@ -3243,7 +3265,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     return {
       cc: region.cc, item_id: p.id, name: p.name || '', image: p.cover_image || '',
-      status: p.status, parent_sku: p.parent_sku || '',
+      status: p.status, parent_sku: p.parent_sku || '', shop_id: activeShopByCc[region.cc] || null,
       price_min: parseFloat(pd.selling_price_min || pd.price_min) || null,
       price_max: parseFloat(pd.selling_price_max || pd.price_max) || null,
       stock: (sd.total_available_stock != null ? sd.total_available_stock : null),
@@ -3290,6 +3312,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!ok) { alert('ブリッジ未検出。Shopee Compare Bridge が有効か確認してください'); return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     lst.syncing = true; drawListingStatus();
+    // アクティブなショップ(shop_id)を判定→各行に刻む
+    state.rawRead = true;
+    try { const _sh = await detectShopIds(targets); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); } catch (_) { activeShopByCc = {}; }
     for (const region of targets) {
       lst.note = region.cc + ' 取得中...'; const nb = document.getElementById('lst-note'); if (nb) nb.textContent = '🔄 ' + lst.note;
       try {
@@ -3298,6 +3323,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         lst.byCc[region.cc] = rows; drawListingStatus();
       } catch (e) { lst.note = region.cc + ' 失敗: ' + e.message; drawListingStatus(); }
     }
+    state.rawRead = false; activeShopByCc = {};
     // 新データに入れ替わったので：シリーズ分類を計算し直し＋カバレッジのキャッシュ(古い出品を指すと危険)を破棄
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }));
     lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
@@ -5367,6 +5393,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const log = [];
     const say = m => { log.push(m); st(log.join('\n')); };
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    // 同期対象＝今このブラウザでアクティブなショップ。shop_idを判定して各行に刻む（内部読取はrawReadで絞り込み解除）
+    state.rawRead = true;
+    try { const _sh = await detectShopIds(targets); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); say('🔑 対象アカウント: ' + (targets.map(r => r.cc + '=' + (_sh[r.cc] ? (_sh[r.cc].name || _sh[r.cc].shop_id) : '?')).join(' / '))); } catch (_) { activeShopByCc = {}; }
     try {
       // 1) 注文（未発送・発送中）— 同期は必ずライブで最新取得
       say('📦 注文データを取得中...');
@@ -5399,7 +5428,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const initAt = ex && ex.amount_initial_at ? ex.amount_initial_at : now;   // 暫定=初回記録日時（以後固定）
             let fixAt = ex ? ex.amount_at : null;                                      // 確定=暫定と値が変わった最初のsync
             if (fixAt == null && amount !== initial) fixAt = now;
-            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now, pending: true });
+            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now, pending: true, shop_id: activeShopByCc[region.cc] || null });
           });
         } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
       }
@@ -5623,6 +5652,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (e) {
       say(`❌ ${e.message}`);
     }
+    state.rawRead = false; activeShopByCc = {};
     syncRunning = false;
   }
 
@@ -5909,6 +5939,56 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.addEventListener('mouseout', e => { if (zoomable(e.target)) zoom.style.display = 'none'; });
   }
 
+  // 登録簿を読み込む（アカウントセレクタ用・キャッシュ）
+  async function loadAccounts(force) {
+    if (state.accounts && !force) return state.accounts;
+    let rows = [];
+    try {
+      rows = await sbGet('accounts', 'select=id,cc,label,shop_id,status&order=cc.asc');
+      if (Array.isArray(rows) && rows.length === 0 && settings.sbSecret) {
+        const r = await fetch(`${SB_URL}/rest/v1/accounts?select=id,cc,label,shop_id,status&order=cc.asc`, { headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret } });
+        if (r.ok) rows = await r.json();
+      }
+      if (!Array.isArray(rows)) rows = [];
+    } catch (_) { rows = []; }
+    state.accounts = rows; return rows;
+  }
+  function updateAcctHint() {
+    const h = document.getElementById('acct-hint'); if (!h) return;
+    if (!state.acctReady) { h.innerHTML = '<b style="color:#e8710a">⚠️ shop_id列が未作成＝アカウント別表示は無効（全合算のまま）。🔑アカウントページ下部のSQLを1回実行＋再同期で有効化</b>'; return; }
+    if (state.acct === 'all') h.textContent = '全アカウント合算';
+    else if (state.acct === 'none') h.textContent = 'shop_id未設定の行（再同期で各アカウントに振り分け）';
+    else { const a = (state.accounts || []).find(x => String(x.shop_id) === String(state.acct)); h.textContent = (a ? a.label : ('shop_id ' + state.acct)) + ' のみ表示（無ければ対象垢に切替えて再同期）'; }
+  }
+  async function initAcctBar() {
+    const sel = document.getElementById('acct-sel'); if (!sel) return;
+    // listings に shop_id 列があるか（ALTER TABLE 実施済みか）を1回だけ確認。無ければ絞り込みを無効化して警告
+    try {
+      const key = settings.sbKey || settings.sbSecret;
+      if (key) { const r = await fetch(`${SB_URL}/rest/v1/listings?select=shop_id&limit=1`, { headers: { apikey: key, Authorization: 'Bearer ' + key } }); state.acctReady = r.ok; }
+    } catch (_) { state.acctReady = false; }
+    const rows = await loadAccounts();
+    const byCc = {}; rows.forEach(a => { if (a.shop_id) (byCc[a.cc] = byCc[a.cc] || []).push(a); });
+    let html = '<option value="all">全アカウント（すべて合算）</option>';
+    REGIONS.forEach(r => { const items = byCc[r.cc] || []; if (!items.length) return; html += `<optgroup label="${r.cc}">` + items.map(a => `<option value="${esc(a.shop_id)}">${esc(a.label)}（${r.cc}）</option>`).join('') + '</optgroup>'; });
+    html += '<option value="none">未判別（shop_id無し・再同期前の既存データ）</option>';
+    sel.innerHTML = html;
+    const vals = [...sel.options].map(o => o.value);
+    if (vals.indexOf(state.acct) < 0) { state.acct = 'all'; try { localStorage.setItem('smdAcct', 'all'); } catch (_) {} }
+    sel.value = state.acct;
+    updateAcctHint();
+    if (!sel.dataset.wired) {
+      sel.dataset.wired = '1';
+      sel.addEventListener('change', () => {
+        state.acct = sel.value; try { localStorage.setItem('smdAcct', state.acct); } catch (_) {}
+        // アカウント別に読み直すためキャッシュ破棄
+        lst.loaded = false; lst.byCc = {}; lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
+        state.orders.started = false;
+        updateAcctHint();
+        showPage(state.page);
+      });
+    }
+  }
   (async function boot() {
     // 先にページ復元（await前に実行）→ 一瞬ダッシュボードが見える現象を防ぐ
     const PAGES = PAGE_KEYS;
@@ -5917,6 +5997,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     showPage(start);            // 再読み込み時は前回のページを復元（無ければダッシュボード）
     setupImageZoom();           // 画像ホバー拡大を全ページで有効化
     setModeBadge();
+    initAcctBar().catch(() => {}); // 対象アカウントのセレクタを用意
     renderSummary();
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
