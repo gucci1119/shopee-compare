@@ -178,6 +178,7 @@
       <button data-p="returns" title="キャンセル／返品の抽出と、理由・返金額・再出品可否の記録">↩️ 返品・キャンセル</button>
       <button data-p="tasks" title="やることリスト（優先度・期日・完了）。Supabaseで複数PC同期">✅ タスク管理</button>
       <div class="ng">情報・マスタ</div>
+      <button data-p="account" title="各国のShopeeアカウント(第2垢以降含む)の登録簿。shop_id・使用ブラウザ・特徴をまとめる">🔑 アカウント</button>
       <button data-p="customers" title="Shopeeバイヤー別の購入集計・リピーター把握">👤 顧客管理</button>
       <button data-p="suppliers" title="仕入元プラットフォーム・セラー別の件数と仕入額の集計">🏪 仕入れ先</button>
       <button data-p="list" title="Shopeeへの新規出品の管理（各国タイトル・文字数チェック等）">🆕 出品管理</button>
@@ -431,6 +432,11 @@
   <div id="page-customers" style="display:none">
     <div class="smd-pagehead">👤 顧客管理 <span class="smd-dim" style="font-weight:400;font-size:12px">（Shopeeバイヤー別の購入集計・リピーター把握）</span></div>
     <div id="cust-body" style="padding:12px 20px"></div>
+  </div>
+  <!-- アカウント登録簿 -->
+  <div id="page-account" style="display:none">
+    <div class="smd-pagehead">🔑 アカウント <span class="smd-dim" style="font-weight:400;font-size:12px">（各国のShopeeアカウント登録簿。第2垢以降・使用ブラウザ・特徴をまとめる）</span></div>
+    <div id="acct-body" style="padding:12px 20px"></div>
   </div>
   <!-- 仕入れ先 -->
   <div id="page-suppliers" style="display:none">
@@ -876,6 +882,7 @@
       buy: renderBuy, customers: renderCustomers, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, alerts: renderAlerts,
       expenses: renderExpenses, returns: renderReturns, tasks: renderTasks, summary: renderExportSummary, fx: renderFx,
+      account: renderAccounts,
     };
     const fn = RENDER[p];
     if (fn) {
@@ -887,7 +894,7 @@
       }
     }
   }
-  const PAGE_KEYS = ['dash','alerts','orders','stock','buy','profit','expenses','returns','tasks','summary','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','alerts','orders','stock','buy','profit','expenses','returns','tasks','summary','account','customers','suppliers','list','rank','fx','log','changelog','tools','manual'];
   document.getElementById('smd-nav').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b) showPage(b.dataset.p === 'finance' ? 'profit' : b.dataset.p); // 損益ナビは既定で利益明細を開く
@@ -2054,6 +2061,78 @@
     setupColumns('suppliers', body);
     fitScroll('suppliers');
   }
+  // ---------------- 🔑 アカウント登録簿 ----------------
+  const ACCT_STATUS = [['main', 'メイン'], ['sub', 'サブ(第2垢〜)'], ['new', '新規(準備中)'], ['dormant', '休眠']];
+  const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
+  async function renderAccounts() {
+    const host = document.getElementById('acct-body');
+    host.innerHTML = '<span class="smd-dim">読み込み中…</span>';
+    let rows = null, missing = false;
+    try { rows = await sbGet('accounts', 'select=*&order=cc.asc'); if (!Array.isArray(rows)) missing = true; } catch (e) { missing = true; }
+    const intro = `<div class="tool-card" style="max-width:none;margin-bottom:10px;background:#f7faff;border:1px solid #e0ecff"><div style="font-size:12.5px;line-height:1.8">
+        <b>アカウント＝そのChromeのShopeeログイン</b>。ポータルはブラウザのセッション(cookie)を使うので、<b>第2アカウントは別Chromeで開けばそのまま第2アカウントとして動きます</b>（出品・バリエ追加もその垢に効く）。ここは各アカウントの <b>shop_id・使用ブラウザ・特徴</b> をまとめる登録簿（Supabase保存＝どのPC/Chromeからでも同じ内容が見える）。
+        <br><span class="smd-dim">⚠️同期の注意：現状データ(出品/注文)は「国(cc)」単位でshop_id未分離のため、<b>第2垢を🔄同期すると同じ国に混ざります</b>。第2垢の出品が増える前に「shop_idでデータ分離」を入れるのが安全（下部メモ）。</span>
+      </div></div>`;
+    if (missing) {
+      host.innerHTML = intro + `<div class="tool-card" style="max-width:none;border:1px solid #ffd591;background:#fff8e1">
+        <b style="font-size:13px">⚠️ accounts テーブルがまだありません</b>
+        <div class="smd-dim" style="font-size:12px;margin:6px 0">SupabaseのSQL Editorで下記を1回だけ実行してください（既存テーブルと同じ「RLS無効＋GRANT」の流儀）。実行後この画面を再読み込み。</div>
+        <textarea class="acct-sql" readonly style="width:100%;height:158px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ACCT_SQL)}</textarea>
+        <div style="margin-top:6px"><button class="acct-sql-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
+      const cp = host.querySelector('.acct-sql-copy'); if (cp) cp.addEventListener('click', () => { const ta = host.querySelector('.acct-sql'); ta.select(); try { document.execCommand('copy'); cp.textContent = '✓ コピーしました'; } catch (_) {} });
+      return;
+    }
+    const detected = settings.shopIds || {};
+    const ccOpts = REGIONS.map(r => `<option value="${r.cc}">${r.cc}</option>`).join('');
+    const stOpts = (sel) => ACCT_STATUS.map(s => `<option value="${s[0]}"${sel === s[0] ? ' selected' : ''}>${s[1]}</option>`).join('');
+    const detHtml = REGIONS.some(r => detected[r.cc]) ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">このブラウザで検出中のshop_id（前回同期した垢）：${REGIONS.filter(r => detected[r.cc]).map(r => `<span style="margin-right:8px"><b style="color:${r.color}">${r.cc}</b> ${esc(detected[r.cc])} <button class="acct-usedet smd-btn" data-cc="${r.cc}" data-sid="${esc(detected[r.cc])}" style="font-size:9px;padding:0 4px">↑登録欄へ</button></span>`).join('')}</div>` : '';
+    const form = `<div class="tool-card" style="max-width:none;margin-bottom:10px"><b style="font-size:13px">＋ アカウント追加</b>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px">
+        <select class="acct-f-cc" style="padding:4px 6px;border:1px solid #ddd;border-radius:5px">${ccOpts}</select>
+        <input class="acct-f-label" placeholder="名前(例: PHメイン/PH仕入れ用)" style="width:190px;padding:4px 6px;border:1px solid #ddd;border-radius:5px">
+        <input class="acct-f-shop" placeholder="shop_id" style="width:110px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;font-family:monospace">
+        <input class="acct-f-browser" placeholder="使用ブラウザ(例: Chrome-仕事)" style="width:160px;padding:4px 6px;border:1px solid #ddd;border-radius:5px">
+        <select class="acct-f-status" style="padding:4px 6px;border:1px solid #ddd;border-radius:5px">${stOpts('sub')}</select>
+        <input class="acct-f-tags" placeholder="特徴タグ(例: フィギュア強い,越境OK)" style="width:190px;padding:4px 6px;border:1px solid #ddd;border-radius:5px">
+        <input class="acct-f-note" placeholder="メモ" style="flex:1;min-width:150px;padding:4px 6px;border:1px solid #ddd;border-radius:5px">
+        <button class="acct-add smd-btn" style="background:#1a7f37;color:#fff;border-color:#1a7f37">追加</button>
+      </div>${detHtml}</div>`;
+    const byCc = {}; (rows || []).forEach(a => (byCc[a.cc] = byCc[a.cc] || []).push(a));
+    const listHtml = REGIONS.filter(r => byCc[r.cc]).map(r => `<div style="margin-bottom:6px"><div style="font-weight:700;color:${r.color};font-size:13px;margin:4px 0">${r.cc} <span class="smd-dim" style="font-weight:400;font-size:11px">${byCc[r.cc].length}アカウント</span></div>
+        ${byCc[r.cc].map(a => `<div class="acct-row" data-id="${esc(a.id)}" data-cc="${esc(a.cc)}" style="border:1px solid #eee;border-radius:7px;padding:7px 9px;margin-bottom:5px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px">
+          <input class="acct-e-label" value="${av(a.label || '')}" style="width:160px;padding:3px 6px;border:1px solid #eee;border-radius:5px;font-weight:600">
+          <span class="smd-dim" style="font-size:10px">shop_id</span><input class="acct-e-shop" value="${av(a.shop_id || '')}" style="width:100px;padding:3px 6px;border:1px solid #eee;border-radius:5px;font-family:monospace">
+          <input class="acct-e-browser" value="${av(a.browser || '')}" placeholder="ブラウザ" style="width:140px;padding:3px 6px;border:1px solid #eee;border-radius:5px">
+          <select class="acct-e-status" style="padding:3px 6px;border:1px solid #eee;border-radius:5px">${stOpts(a.status)}</select>
+          <input class="acct-e-tags" value="${av(a.tags || '')}" placeholder="特徴タグ" style="width:170px;padding:3px 6px;border:1px solid #eee;border-radius:5px">
+          <input class="acct-e-note" value="${av(a.note || '')}" placeholder="メモ" style="flex:1;min-width:110px;padding:3px 6px;border:1px solid #eee;border-radius:5px">
+          <button class="acct-save smd-btn" style="font-size:10px">保存</button>
+          <button class="acct-del smd-btn" style="font-size:10px;color:#d93025">削除</button>
+        </div>`).join('')}</div>`).join('') || '<div class="smd-dim" style="padding:8px">まだ登録がありません。上のフォームから追加してください。</div>';
+    const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 データ分離（次の一歩）</b>
+      <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin-top:4px">第2垢の出品/注文をポータルで<b>アカウント別に</b>見るには、同期データに shop_id を付けて「アカウント別フィルタ」を足す改修が必要です（今は国単位で混ざる）。第2垢の出品が増える前にやるのが安全。やる時は声かけてください。</div></div>`;
+    host.innerHTML = intro + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    host.querySelector('.acct-add').addEventListener('click', async () => {
+      const g = s => ((host.querySelector(s) || {}).value || '').trim();
+      const cc = (host.querySelector('.acct-f-cc') || {}).value || 'PH', label = g('.acct-f-label'), shop = g('.acct-f-shop');
+      if (!label) { alert('名前を入れてください'); return; }
+      const id = cc + '_' + (shop || ('x' + Date.now()));
+      try { await sbUpsert('accounts', [{ id, cc, label, shop_id: shop, browser: g('.acct-f-browser'), status: (host.querySelector('.acct-f-status') || {}).value, tags: g('.acct-f-tags'), note: g('.acct-f-note'), updated_at: new Date().toISOString() }]); try { logAct('アカウント', '追加', cc, label); } catch (_) {} renderAccounts(); }
+      catch (e) { alert('保存エラー: ' + e.message); }
+    });
+    host.querySelectorAll('.acct-usedet').forEach(b => b.addEventListener('click', () => { host.querySelector('.acct-f-cc').value = b.dataset.cc; host.querySelector('.acct-f-shop').value = b.dataset.sid; host.querySelector('.acct-f-browser').focus(); }));
+    host.querySelectorAll('.acct-save').forEach(b => b.addEventListener('click', async () => {
+      const row = b.closest('.acct-row'); const id = row.dataset.id, cc = row.dataset.cc;
+      const g = s => ((row.querySelector(s) || {}).value || '').trim();
+      try { await sbUpsert('accounts', [{ id, cc, label: g('.acct-e-label'), shop_id: g('.acct-e-shop'), browser: g('.acct-e-browser'), status: (row.querySelector('.acct-e-status') || {}).value, tags: g('.acct-e-tags'), note: g('.acct-e-note'), updated_at: new Date().toISOString() }]); b.textContent = '✓'; b.style.color = '#1a7f37'; }
+      catch (e) { alert('保存エラー: ' + e.message); }
+    }));
+    host.querySelectorAll('.acct-del').forEach(b => b.addEventListener('click', async () => {
+      const id = b.closest('.acct-row').dataset.id;
+      if (!confirm('このアカウント登録を削除しますか？（Shopee側には影響しません）')) return;
+      try { await sbDelete('accounts', 'id=eq.' + encodeURIComponent(id)); renderAccounts(); } catch (e) { alert('削除エラー: ' + e.message); }
+    }));
+  }
   // ---------------- 👤 顧客管理 ----------------
   const cust = { cc: '', repeatOnly: false };
   const ccBadge = (cc) => { const rg = regionByCc(cc); return `<span style="background:${rg ? rg.color : '#999'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:3px">${esc(cc)}</span>`; };
@@ -2749,6 +2828,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '出品枠をShopeeから自動取得：横断カバレッジの枠パネルに「🔄 枠をShopeeから取得」を追加（get_product_count_limit APIのpublish_limitをブリッジ経由で各国取得。都度変わる枠に追従）',
       '横断カバレッジの並び替え強化：カタログ数/販売数/バリエ数/単品数/あいうえおに加え、列見出しクリックでその列（各国も）で並び替え＋もう一度で昇順⇄降順。表示フィルタ（すべて/欠けあり=未出品国あり/完全=全国あり）を追加。「その他（未分類）」も展開できるように',
       '編集の即時反映を強化：SKU/タイトルをShopeeに書いたら、ポータルの表示（メモリ）＋保存データ（Supabase）にも即反映するように（従来は次回同期まで古いSKUが残って見えた）。カバレッジ/分析に「🕒 出品データ最終同期」時刻を表示。未公開(取り下げ)商品はShopeeが編集を拒否する旨を明記（THに未公開が多く、統一時にTHだけ失敗しやすい＝先に公開が必要）',
+      '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
