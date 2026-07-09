@@ -2748,6 +2748,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '分析タブに「🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）」を新設：カバー画像IDが完全一致するのにSKUが違う/空のカタログをクラスタ化（各国に点在する“中身は同じだがSKU別物”を検出）。おすすめSKU欄を確認→「🏷全部このSKUに統一」でクラスタ全カタログの親SKUを揃えて連結🔗',
       '出品枠をShopeeから自動取得：横断カバレッジの枠パネルに「🔄 枠をShopeeから取得」を追加（get_product_count_limit APIのpublish_limitをブリッジ経由で各国取得。都度変わる枠に追従）',
       '横断カバレッジの並び替え強化：カタログ数/販売数/バリエ数/単品数/あいうえおに加え、列見出しクリックでその列（各国も）で並び替え＋もう一度で昇順⇄降順。表示フィルタ（すべて/欠けあり=未出品国あり/完全=全国あり）を追加。「その他（未分類）」も展開できるように',
+      '編集の即時反映を強化：SKU/タイトルをShopeeに書いたら、ポータルの表示（メモリ）＋保存データ（Supabase）にも即反映するように（従来は次回同期まで古いSKUが残って見えた）。カバレッジ/分析に「🕒 出品データ最終同期」時刻を表示。未公開(取り下げ)商品はShopeeが編集を拒否する旨を明記（THに未公開が多く、統一時にTHだけ失敗しやすい＝先に公開が必要）',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
@@ -3139,7 +3140,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 新データに入れ替わったので：シリーズ分類を計算し直し＋カバレッジのキャッシュ(古い出品を指すと危険)を破棄
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }));
     lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
+    try { localStorage.setItem('smdListSync', String(Date.now())); } catch (_) {}
     lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
+  }
+  // 出品データの最終同期時刻（ポータル表示は前回同期時点。編集はShopeeへ即時反映）
+  function listSyncStr() {
+    const t = Number(localStorage.getItem('smdListSync') || 0);
+    if (!t) return '未同期（🔄Shopeeから更新を実行）';
+    const d = new Date(t), p = n => String(n).padStart(2, '0');
+    const mins = Math.round((Date.now() - t) / 60000);
+    const ago = mins < 60 ? `${mins}分前` : mins < 1440 ? `${Math.round(mins / 60)}時間前` : `${Math.round(mins / 1440)}日前`;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}（${ago}）`;
   }
 
   // ===== カタログ編集（Shopee本番書き込み）: get_product_info で読み→差分だけ update_product_info =====
@@ -3291,7 +3302,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
         try {
           const res = await productWrite(host, itemId, patch);
-          if (res.ok) { msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（次回🔄更新で一覧にも反映）'; btn.textContent = '保存済'; try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {} }
+          if (res.ok) {
+            msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（一覧にも即反映）'; btn.textContent = '保存済';
+            // 一覧/カバレッジの表示（メモリ＋Supabase）にも反映して同期待ちで戻らないように
+            try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
+            try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
+            try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+          }
           else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
         } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ エラー: ' + e.message; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
       });
@@ -3426,7 +3443,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 国別の出品制約チェック（TW60字/SGブランド1つ/VN上限/BR価格差）。触れれば警告文字列の配列を返す
     const chkTitle = (cc, title) => countryListingWarnings({ cc, title: String(title || ''), prices: [] });
     const chkPrices = (cc, prices) => countryListingWarnings({ cc, title: '', prices: (prices || []).map(Number).filter(x => x > 0) });
-    const writeTitle = async (lg, title) => { try { const r = await productWrite(lg.host, lg.item_id, { name: title }); return r.ok; } catch (_) { return false; } };
+    const writeTitle = async (lg, title) => { try { const r = await productWrite(lg.host, lg.item_id, { name: title }); if (r.ok) { try { await sbPatch('listings', 'item_id=eq.' + lg.item_id, { name: title }); } catch (_) {} } return r.ok; } catch (_) { return false; } };
     const writePriceFactor = async (lg, factor) => {
       try {
         const pi = await productRead(lg.host, lg.item_id);
@@ -3547,10 +3564,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (ok) {
       if (!lst.covSkuWritten) lst.covSkuWritten = new Set();
       okItems.forEach(lg => { lst.covSkuWritten.add(lg.item_id); const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); if (row) row.parent_sku = sku.trim(); });
+      // Supabaseの保存データにも反映（再読込しても新SKUが残る＝ポータル表示が同期待ちで戻らない）
+      try { for (const lg of okItems) { await sbPatch('listings', 'item_id=eq.' + lg.item_id, { parent_sku: sku.trim() }); } } catch (e) { console.warn('sb sku write-through', e); }
     }
+    const hasUnpub = (listings || []).some(l => l.status != null && l.status !== 1);
     alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}`
-      + (ng ? `\n\n■ 失敗の内訳\n・${fails.join('\n・')}\n\n※ よくある原因：その国のSeller Centerに未ログイン/セッション切れ（→ログインし直す）、商品がロック/審査中、または一時的なタイムアウト。` : '')
-      + `\n\n（この画面には即反映。確定表示は次回の🔄更新）`);
+      + (ng ? `\n\n■ 失敗の内訳\n・${fails.join('\n・')}\n\n※ よくある原因：\n・<b>未公開(取り下げ)の商品はShopeeが編集を拒否</b>します（先に公開が必要）${hasUnpub ? '　←今回のクラスタに未公開あり' : ''}\n・その国のSeller Centerに未ログイン/セッション切れ（→ログインし直す）\n・商品がロック/審査中、または一時的なタイムアウト`.replace(/<\/?b>/g, '') : '')
+      + `\n\n（成功分はこの画面＋保存データに即反映。全体の確定は次回の🔄更新）`);
     try { logAct('出品', 'SKU設定', repName || '', scopeLabel + ' ' + sku.trim() + ' 成功' + ok + '/失敗' + ng + (ng ? ' [' + fails.map(f => f.split('：')[0]).join(',') + ']' : '')); } catch (_) {}
     if (ok && document.getElementById('list-coverage')) { try { renderCoverage(); } catch (_) {} }
   }
@@ -4061,7 +4081,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span class="smd-dim" style="font-size:10.5px;width:100%">⚠️本番書込。対象は<b>展開済みシリーズのカタログ</b>のみ。件数が多いと時間がかかりブリッジ負荷が上がります。</span>
       </div></div>` : '';
     host.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>（「その他」も展開可）。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('single', '単品数')} ${sortBtn('name', 'あいうえお')} ${filtSel} <span style="font-size:10.5px">※列見出しクリックでもその列で並び替え（もう一度で昇順⇄降順）</span></div>
+      `<div style="font-size:11.5px;margin-bottom:6px;padding:5px 9px;background:#f0f6ff;border:1px solid #d6e6ff;border-radius:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>🕒 <b>出品データ最終同期:</b> ${listSyncStr()}</span><span class="smd-dim" style="font-size:10.5px">この一覧は前回同期時点のデータ。SKU/タイトルの編集はShopeeへ即時反映＋この表示にも即反映（保存データも更新）。件数など全体を最新化するには「📋出品状況」タブの<b>🔄Shopeeから更新</b>。</span></div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>（「その他」も展開可）。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('single', '単品数')} ${sortBtn('name', 'あいうえお')} ${filtSel} <span style="font-size:10.5px">※列見出しクリックでもその列で並び替え（もう一度で昇順⇄降順）</span></div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
       ${quotaPanelHtml(targets)}
       <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><input id="cov-search" value="${av(lst.covSearch || '')}" placeholder="🔎 カタログ名・SKU・バリエ名で検索（2文字以上／該当シリーズを自動展開）" style="width:min(460px,100%);padding:8px 11px;border:1px solid #ddd;border-radius:8px;font-size:13px">${q ? `<span class="smd-dim" style="font-size:11px">「${esc(q)}」で絞り込み中 ${rows.length}シリーズ</span>` : ''}</div>
@@ -4222,7 +4243,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const imgClust = imageClusters(targets); lst.imgClustData = {}; imgClust.forEach(c => lst.imgClustData[c.img] = c);
     const imgClustHtml = `<div class="tool-card" style="max-width:none">
       <h3 style="margin-top:0">🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）<span class="smd-dim" style="font-weight:400;font-size:12px">（カバー画像IDが完全一致。別カタログでも中身は同じ＝統一候補）</span></h3>
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ（上位60表示）。</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ（上位60表示）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b style="color:#d93025">未公開</b>の商品はShopeeが編集拒否＝先に公開が必要（THに多い）。</div>
       <div class="pf-scroll" style="max-height:56vh">${imgClust.slice(0, 60).map(c => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
         <img src="${IMG_CDN}${esc(c.img)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px;flex:none" loading="lazy" onerror="this.style.opacity=.15">
         <div style="flex:1;min-width:0">
