@@ -1502,11 +1502,11 @@
     const btn = document.getElementById('ord-reload');
     state.orders.perCountry.clear();
     if (state.mode !== 'live' || !settings.sbSecret) { loadOrders(true); return; }
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '⏳ 更新中'; }
     try {
       // 先にアクティブ店を判定＝各行に正しいshop_idを刻む＋対象アカウントと一致確認（別垢のまま更新する事故を防ぐ）
       if (!state.accounts) await loadAccounts().catch(() => {});
+      const targets = accountTargets(); // 対象アカウントが持つ国だけ
       const { check } = await detectActiveAndCheck(targets);
       if (!check.ok) { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } alert('【注文更新を中止】\n' + check.msg); return; }
       loadOrders(true);
@@ -1696,6 +1696,20 @@
   const famOfLabel = (lbl) => String(lbl || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '');
   // ある系統(gcsonlinestore等)に属する全ショップのshop_id一覧（全国分）
   const shopIdsOfFamily = (fam) => (state.accounts || []).filter(a => a.shop_id && famOfLabel(a.label) === fam).map(a => String(a.shop_id));
+  // ある系統が「ショップを持っている国」の集合（登録簿ベース・cc大文字）。例: gs_japan_select→{PH,SG,MY,BR,TH,TW}（VN無し）
+  const famCcsSet = (fam) => new Set((state.accounts || []).filter(a => a.shop_id && famOfLabel(a.label) === fam).map(a => String(a.cc || '').toUpperCase()));
+  // ある国で選べる系統の集合（登録簿ベース）。要素が1つ＝その国は切替不可（例: VN=gcsonlinestoreのみ）
+  const ccFamilies = (cc) => new Set((state.accounts || []).filter(a => a.shop_id && String(a.cc || '').toUpperCase() === String(cc).toUpperCase()).map(a => famOfLabel(a.label)));
+  // 今の「対象アカウント」で実際に操作/取得の対象になる国（REGIONS配列）。
+  // 特定系統/垢を選んでいる時は、その垢がショップを持つ国だけ（＝gs_japan_select選択時にVNを自動除外。将来VN垢を作れば自動で含まれる）。
+  function accountTargets() {
+    const enabled = REGIONS.filter(r => state.enabled.has(r.cc));
+    const a = state.acct;
+    if (!a || a === 'all' || a === 'none') return enabled;
+    if (a.slice(0, 4) === 'fam:') { const set = famCcsSet(a.slice(4)); return set.size ? enabled.filter(r => set.has(String(r.cc).toUpperCase())) : enabled; }
+    const acc = (state.accounts || []).find(x => String(x.shop_id) === String(a));
+    return acc ? enabled.filter(r => String(r.cc).toUpperCase() === String(acc.cc || '').toUpperCase()) : enabled;
+  }
   function acctQs(table, qs) {
     const a = state.acct;
     if (state.rawRead || !state.acctReady || !a || a === 'all' || !ACCT_TABLES.has(table)) return qs;
@@ -3484,11 +3498,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ更新できます'); return; }
     const ok = await detectBridge();
     if (!ok) { alert('ブリッジ未検出。Shopee Compare Bridge が有効か確認してください'); return; }
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等の無い国を自動除外）
     lst.syncing = true; drawListingStatus();
     // アクティブなショップ(shop_id)を判定→各行に刻む＋対象アカウントと一致するか確認（別垢のまま同期する事故を防ぐ）
     state.rawRead = true;
-    if (!state.accounts) await loadAccounts().catch(() => {});
     const { check } = await detectActiveAndCheck(targets);
     if (!check.ok) { state.rawRead = false; activeShopByCc = {}; lst.syncing = false; lst.note = ''; drawListingStatus(); alert('【出品同期を中止】\n' + check.msg); return; }
     if (check.summary) { lst.note = '対象: ' + check.summary.split('\n')[0].split(' ')[0] + '…'; drawListingStatus(); }
@@ -4380,7 +4394,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // Shopeeから各国の出品枠(Listing Limit=publish_limit)を取得。ブリッジがSPC_CDSを注入するのでライブPC必須。
   async function fetchListingLimits() {
     if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で取得できます'); return; }
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を除外）
     // ★枠は「今Shopeeでアクティブな垢」の値が返る。対象アカウントを特定垢/系統にしている時は、実際に切り替わっているか確認。
     //   違う垢のまま取得すると、対象アカウントのキーに別垢の枠が保存される誤爆になるため中止。自動切替はしない（⇄/🌏で先に切替）。
     if (state.acct && state.acct !== 'all' && state.acct !== 'none') {
@@ -4430,7 +4445,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div></div>`;
   }
   function renderCoverageInner(host) {
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const targets = accountTargets(); // 対象アカウントが持つ国だけ表示（gs_japan_select選択時はVN等の列を出さない）
     if (!lst.covOpen) lst.covOpen = new Set();
     if (!lst.bulkSel) lst.bulkSel = new Set();
     if (!lst.bulkScope) lst.bulkScope = 'all';
@@ -4752,7 +4767,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function drawListingStatus() {
     const host = document.getElementById('list-status'); if (!host) return;
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を出さない）
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
     const totalAll = all.length;
     const q = (lst.search || '').toLowerCase();
@@ -5610,10 +5625,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     syncRunning = true;
     const log = [];
     const say = m => { log.push(m); st(log.join('\n')); };
-    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    // 手動同期は対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を除外）。自動同期は有効な全国（今アクティブな垢を丸ごと最新化）。
+    const targets = interactive ? accountTargets() : REGIONS.filter(r => state.enabled.has(r.cc));
     // 同期対象＝今このブラウザでアクティブなショップ。shop_idを判定して各行に刻む（内部読取はrawReadで絞り込み解除）
     state.rawRead = true;
-    if (!state.accounts) await loadAccounts().catch(() => {});
     const { live, check } = await detectActiveAndCheck(targets);
     say('🔑 対象アカウント: ' + (targets.map(r => r.cc + '=' + (live[r.cc] ? (live[r.cc].name || live[r.cc].shop_id) : '?')).join(' / ')));
     // 手動同期(interactive)で対象アカウントと実アクティブ垢がズレていたら中止（自動同期は今アクティブな垢をそのまま同期＝ガードしない）
@@ -6198,14 +6214,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function renderCurSys(perCc, opts) {
     opts = opts || {};
     const el = document.getElementById('acct-cursys'); if (!el) return;
-    const fams = [...new Set(perCc.map(x => x.fam).filter(Boolean))];
-    let label, color;
-    if (!fams.length) { label = '取得できず'; color = '#d93025'; }
-    else if (fams.length === 1) { label = fams[0]; color = '#1a7f37'; }
-    else { label = '混在'; color = '#e8710a'; }
-    const detail = perCc.map(x => x.cc + '=' + (x.fam || '?')).join(' / ');
+    const anyFams = [...new Set(perCc.map(x => x.fam).filter(Boolean))];
+    // ★「混在」は“切替可能な国”（複数系統を持つ国）だけで判定。VNのように1系統しか無い国は固定扱い＝混在に数えない
+    //   （gs_japan_select運用中もVNはgcsonlinestore専用なので警告を出さない）
+    const swFams = [...new Set(perCc.filter(x => x.fam && ccFamilies(x.cc).size > 1).map(x => x.fam))];
+    let label, color, warn = false;
+    if (!anyFams.length) { label = '取得できず'; color = '#d93025'; }
+    else if (swFams.length <= 1) { label = swFams[0] || anyFams[0]; color = '#1a7f37'; }
+    else { label = '混在'; color = '#e8710a'; warn = true; }
+    const detail = perCc.map(x => x.cc + '=' + (x.fam || '?') + (x.fam && ccFamilies(x.cc).size <= 1 ? '(専用)' : '')).join(' / ');
     const mark = opts.updating ? ' <span class="smd-dim" style="font-size:9px">…更新中</span>' : (opts.stale ? ' <span class="smd-dim" style="font-size:9px" title="最新取得に失敗＝前回値">前回</span>' : '');
-    el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (fams.length > 1 ? ' ⚠️' : '') + '</span>' + mark + ' <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
+    el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (warn ? ' ⚠️' : '') + '</span>' + mark + ' <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
     const b = document.getElementById('acct-cursys-btn'); if (b) b.addEventListener('click', () => refreshCurSys(true));
   }
   function updateAcctHint() {
