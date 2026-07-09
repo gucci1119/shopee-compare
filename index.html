@@ -4667,6 +4667,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <h3 style="margin-top:0">🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）<span class="smd-dim" style="font-weight:400;font-size:12px">（カバー画像IDが完全一致。別カタログでも中身は同じ＝統一候補）</span></h3>
       <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ（上位60表示）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b style="color:#d93025">未公開</b>の商品はShopeeが編集拒否＝先に公開が必要（THに多い）。</div>
       <div style="margin-bottom:8px"><button class="imgc-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全クラスタを、それぞれのおすすめSKUに連続で一括統一。失敗しても止まらず次へ。⏹停止で中断可。未公開はスキップ。">🏷 全クラスタを一括統一（連続・止まらない）</button> <span class="smd-dim" style="font-size:10.5px">※誤検出があるので目視してから。1クリックで全件を連続処理・失敗は自動スキップ・途中⏹停止可</span></div>
+      <div id="imgc-progress" style="margin-bottom:8px"></div>
       <div class="pf-scroll" style="max-height:56vh">${imgClust.slice(0, 60).map(c => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
         <img src="${IMG_CDN}${esc(c.img)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px;flex:none" loading="lazy" onerror="this.style.opacity=.15">
         <div style="flex:1;min-width:0">
@@ -4743,40 +4744,70 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       c.items.forEach(x => {
         if (x.status != null && x.status !== 1) { skipUnpub++; return; }
         if ((x.sku || '') === sku) { skipSame++; return; }
-        jobs.push({ host: x.host, item_id: x.item_id, cc: x.cc, sku });
+        jobs.push({ host: x.host, item_id: x.item_id, cc: x.cc, sku, name: x.name || '' });
       });
     });
     if (!jobs.length) { alert(`書込対象なし（未公開スキップ ${skipUnpub} / 既に統一済み ${skipSame}）`); return; }
     const gw = await guardWriteCountries([...new Set(jobs.map(j => j.cc))]);
     if (!gw.ok) { alert(gw.msg); return; }
-    if (!confirm(`🏪 書込先アカウント: ${gw.label}\n\n【全 ${clusters.length} クラスタ・${jobs.length}件】をおすすめSKUに一括統一します（未公開${skipUnpub}件はスキップ／既統一${skipSame}件）。\n\n・1件ずつShopeeへ連続書込。失敗しても止まらず次へ進みます。\n・件数が多いと数十分〜かかります（このタブは開いたまま／PCスリープ不可）。\n・途中は「⏹停止」でいつでも中断可。成功分は逐次保存され消えません。\n\n※誤検出の可能性もあるので、明らかに違う商品が混ざっていないか確認済みですか？\n\n開始しますか？`)) return;
+    if (!confirm(`🏪 書込先アカウント: ${gw.label}\n\n【全 ${clusters.length} クラスタ・${jobs.length}件】をおすすめSKUに一括統一します（未公開${skipUnpub}件はスキップ／既統一${skipSame}件）。\n\n・1件ずつShopeeへ連続書込。失敗しても止まらず次へ進みます。\n・件数が多いと数十分〜かかります（このタブは開いたまま／PCスリープ不可）。\n・進捗と結果は下のパネルでリアルタイムに見られます。途中「⏹停止」で中断可。成功分は逐次保存され消えません。\n\n※誤検出の可能性もあるので、明らかに違う商品が混ざっていないか確認済みですか？\n\n開始しますか？`)) return;
     lst.bulkStop = false;
     const btn = document.querySelector('.imgc-applyall'); const orig = btn ? btn.textContent : ''; if (btn) btn.disabled = true;
-    // ⏹停止ボタンを動的に追加
-    let stopBtn = document.querySelector('.imgc-stopall');
-    if (btn && !stopBtn) { stopBtn = document.createElement('button'); stopBtn.className = 'imgc-stopall smd-btn'; stopBtn.style.cssText = 'font-size:12px;margin-left:6px;background:#d93025;color:#fff;border-color:#d93025'; stopBtn.textContent = '⏹ 停止'; stopBtn.addEventListener('click', () => { lst.bulkStop = true; stopBtn.textContent = '停止中…'; stopBtn.disabled = true; }); btn.after(stopBtn); }
+    // ★ライブ進捗パネル（処理中もずっと見られる：進捗バー＋成功/失敗＋1件ずつの結果ログ）
+    const prog = document.getElementById('imgc-progress');
+    if (prog) prog.innerHTML = `<div style="border:1px solid #d9cff0;background:#faf8ff;border-radius:8px;padding:10px">
+      <div id="imgc-phead" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <b id="imgc-ptitle" style="font-size:13px;color:#7b52c4">⏳ 統一中…</b>
+        <span style="font-size:12px">進捗 <b id="imgc-pcount">0/${jobs.length}</b> <span id="imgc-ppct" class="smd-dim">(0%)</span></span>
+        <span style="font-size:12px;color:#1a7f37">✓成功 <b id="imgc-pok">0</b></span>
+        <span style="font-size:12px;color:#d93025">✗失敗 <b id="imgc-pfail">0</b></span>
+        <button class="imgc-stopall smd-btn" style="margin-left:auto;font-size:11px;background:#d93025;color:#fff;border-color:#d93025">⏹ 停止</button>
+      </div>
+      <div style="height:8px;background:#eee;border-radius:4px;overflow:hidden;margin:7px 0"><div id="imgc-pbar" style="height:100%;width:0%;background:#7b52c4;transition:width .15s"></div></div>
+      <div id="imgc-plog" style="max-height:180px;overflow:auto;font-size:10.5px;font-family:ui-monospace,monospace;line-height:1.55;border-top:1px solid #eee;padding-top:4px"></div>
+    </div>`;
+    const $p = s => prog ? prog.querySelector(s) : null;
+    const sb = $p('.imgc-stopall'); if (sb) sb.addEventListener('click', () => { lst.bulkStop = true; sb.textContent = '停止中…'; sb.disabled = true; });
+    const logEl = $p('#imgc-plog');
+    const addLog = (okThis, j, err) => {
+      if (!logEl) return;
+      const d = document.createElement('div');
+      d.innerHTML = `<span style="color:${okThis ? '#1a7f37' : '#d93025'}">${okThis ? '✓' : '✗'}</span> <b style="color:${(regionByCc(j.cc) || {}).color || '#333'}">${j.cc}</b> <span style="color:#7b52c4">${esc(j.sku)}</span> ${esc((j.name || '').slice(0, 46))}${okThis ? '' : ` <span style="color:#d93025">— ${esc(err || '')}</span>`}`;
+      logEl.appendChild(d);
+      if (logEl.children.length > 500) logEl.removeChild(logEl.firstChild); // DOM肥大防止
+      logEl.scrollTop = logEl.scrollHeight;
+    };
     if (!lst.covSkuWritten) lst.covSkuWritten = new Set();
     let ok = 0, done = 0; const fails = [];
     for (const j of jobs) {
       if (lst.bulkStop) break;
-      done++; if (btn) btn.textContent = `⏳ ${done}/${jobs.length}（成功${ok} 失敗${fails.length}）`;
+      done++;
+      const pct = Math.round(done / jobs.length * 100);
+      if ($p('#imgc-pcount')) $p('#imgc-pcount').textContent = `${done}/${jobs.length}`;
+      if ($p('#imgc-ppct')) $p('#imgc-ppct').textContent = `(${pct}%)`;
+      if ($p('#imgc-pbar')) $p('#imgc-pbar').style.width = pct + '%';
+      if (btn) btn.textContent = `⏳ ${done}/${jobs.length}`;
+      let okThis = false, err = '';
       try {
         const r = await bridgePostJson(`https://${j.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: j.item_id, product_info: { parent_sku: j.sku }, is_draft: false });
         if (r && r.code === 0) {
-          ok++; lst.covSkuWritten.add(j.item_id);
+          okThis = true; ok++; lst.covSkuWritten.add(j.item_id);
           const row = (lst.byCc[j.cc] || []).find(x => x.item_id === j.item_id); if (row) row.parent_sku = j.sku;
           try { await sbPatch('listings', 'item_id=eq.' + j.item_id, { parent_sku: j.sku }); } catch (_) {} // 逐次保存＝途中で止まっても残る
-        } else fails.push(`${j.cc} item${j.item_id}: ${(r && (r.user_message || r.message)) || ('code' + (r && r.code))}`);
-      } catch (e) { fails.push(`${j.cc} item${j.item_id}: ${e.message}`); }
+        } else { err = (r && (r.user_message || r.message)) || ('code' + (r && r.code)); fails.push(`${j.cc} item${j.item_id}: ${err}`); }
+      } catch (e) { err = e.message; fails.push(`${j.cc} item${j.item_id}: ${e.message}`); }
+      addLog(okThis, j, err);
+      if ($p('#imgc-pok')) $p('#imgc-pok').textContent = ok;
+      if ($p('#imgc-pfail')) $p('#imgc-pfail').textContent = fails.length;
     }
     const stopped = lst.bulkStop; lst.bulkStop = false;
     if (btn) { btn.disabled = false; btn.textContent = orig; }
-    if (stopBtn) stopBtn.remove();
+    if ($p('#imgc-ptitle')) $p('#imgc-ptitle').innerHTML = `${stopped ? '⏹ 中断しました' : '✅ 完了'}（成功${ok} / 失敗${fails.length} / 未公開スキップ${skipUnpub}）`;
+    // 停止ボタンを「一覧を更新」に差し替え（パネル＆結果ログは残す＝後から確認できる。押すと統一済みが一覧から消える）
+    if (sb) sb.remove();
+    const head = $p('#imgc-phead');
+    if (head) { const rb = document.createElement('button'); rb.className = 'smd-btn'; rb.style.cssText = 'margin-left:auto;font-size:11px;background:#7b52c4;color:#fff;border-color:#7b52c4'; rb.textContent = '🔄 一覧を更新（統一済みを消す）'; rb.addEventListener('click', () => renderListingAnalysis()); head.appendChild(rb); }
     try { logAct('出品', 'SKU一括統一', '', `全${clusters.length}クラスタ 成功${ok}/失敗${fails.length}/未公開skip${skipUnpub}${stopped ? ' [中断]' : ''}`); } catch (_) {}
-    alert(`🏷 一括統一 ${stopped ? '中断' : '完了'}\n成功 ${ok} / 失敗 ${fails.length} / 未公開スキップ ${skipUnpub}（対象${jobs.length}件中 ${done}件処理）`
-      + (fails.length ? `\n\n失敗例:\n・${fails.slice(0, 8).join('\n・')}${fails.length > 8 ? `\n…他${fails.length - 8}件` : ''}\n\n※未公開はShopeeが編集拒否（先に公開が必要）／セッション切れ等` : '')
-      + `\n\n統一済みはこの一覧から消えます。残りがあれば同ボタンで続行できます。`);
-    renderListingAnalysis();
   }
   async function renderListingStatus() {
     const host = document.getElementById('list-status');
