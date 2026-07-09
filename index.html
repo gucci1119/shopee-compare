@@ -504,13 +504,13 @@
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
   const REGIONS = [
-    { cc: 'PH', host: 'seller.shopee.ph',     buyer: 'shopee.ph',        tz: 8,  cur: '₱',   rateJpy: 2.7,    color: '#ee4d2d' },
-    { cc: 'SG', host: 'seller.shopee.sg',     buyer: 'shopee.sg',        tz: 8,  cur: 'S$',  rateJpy: 115,    color: '#0f9d58' },
-    { cc: 'MY', host: 'seller.shopee.com.my', buyer: 'shopee.com.my',    tz: 8,  cur: 'RM',  rateJpy: 34,     color: '#1a73e8' },
-    { cc: 'BR', host: 'seller.shopee.com.br', buyer: 'shopee.com.br',    tz: -3, cur: 'R$',  rateJpy: 28,     color: '#f9a825' },
-    { cc: 'VN', host: 'banhang.shopee.vn',    buyer: 'shopee.vn',        tz: 7,  cur: '₫',   rateJpy: 0.0058, color: '#9c27b0' },
-    { cc: 'TH', host: 'seller.shopee.co.th',  buyer: 'shopee.co.th',     tz: 7,  cur: '฿',   rateJpy: 4.4,    color: '#e91e63' },
-    { cc: 'TW', host: 'seller.shopee.tw',     buyer: 'shopee.tw',        tz: 8,  cur: 'NT$', rateJpy: 4.9,    color: '#00897b' },
+    { cc: 'PH', host: 'seller.shopee.ph',     buyer: 'shopee.ph',        tz: 8,  cur: '₱',   rateJpy: 2.7,    priceUnit: 1,    color: '#ee4d2d' },
+    { cc: 'SG', host: 'seller.shopee.sg',     buyer: 'shopee.sg',        tz: 8,  cur: 'S$',  rateJpy: 115,    priceUnit: 0.5,  color: '#0f9d58' },
+    { cc: 'MY', host: 'seller.shopee.com.my', buyer: 'shopee.com.my',    tz: 8,  cur: 'RM',  rateJpy: 34,     priceUnit: 0.5,  color: '#1a73e8' },
+    { cc: 'BR', host: 'seller.shopee.com.br', buyer: 'shopee.com.br',    tz: -3, cur: 'R$',  rateJpy: 28,     priceUnit: 1,    color: '#f9a825' },
+    { cc: 'VN', host: 'banhang.shopee.vn',    buyer: 'shopee.vn',        tz: 7,  cur: '₫',   rateJpy: 0.0058, priceUnit: 1000, color: '#9c27b0' },
+    { cc: 'TH', host: 'seller.shopee.co.th',  buyer: 'shopee.co.th',     tz: 7,  cur: '฿',   rateJpy: 4.4,    priceUnit: 1,    color: '#e91e63' },
+    { cc: 'TW', host: 'seller.shopee.tw',     buyer: 'shopee.tw',        tz: 8,  cur: 'NT$', rateJpy: 4.9,    priceUnit: 1,    color: '#00897b' },
   ];
   // Shopeeカタログの直リンク。編集ページは item_id だけ／販売(公開)ページは shop_id が要る(同期時に自動採取→settings.shopIds)
   const editUrlFor = (host, itemId) => `https://${host}/portal/product/${itemId}?pageEntry=product_list`;
@@ -1607,8 +1607,10 @@
   async function sbGet(table, qs) {
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキー（publishable）を入力してください');
-    const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
-      headers: { apikey: key, Authorization: 'Bearer ' + key } });
+    const hit = (k) => fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: { apikey: k, Authorization: 'Bearer ' + k } });
+    let r = await hit(key);
+    // publishable権限が無いテーブル（GRANT漏れ/RLS無効）で401/403の時はservice_roleで再試行
+    if (!r.ok && (r.status === 401 || r.status === 403) && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret);
     if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}`);
     return r.json();
   }
@@ -3220,7 +3222,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         q('.av-title-src').textContent = src.title || '(タイトル無し)';
         q('.av-price-src').textContent = '¥' + (src.price || 0).toLocaleString() + ' ' + (src.currency || '');
         if (!q('.av-name').value) q('.av-name').value = src.title || '';
-        ccs.forEach(cc => { const rg = regionByCc(cc); const p = ov.querySelector('.av-price[data-cc="' + cc + '"]'); if (rg && p && !p.value) p.value = roundLocal(JPY_TO_LOCAL(priceFromCost(src.price || 0), rg), 1); });
+        ccs.forEach(cc => { const rg = regionByCc(cc); const p = ov.querySelector('.av-price[data-cc="' + cc + '"]'); if (rg && p && !p.value) p.value = roundLocal(JPY_TO_LOCAL(priceFromCost(src.price || 0), rg), rg.priceUnit || 1); });
         q('.av-make').disabled = false;
         msg.style.color = '#1a7f37'; msg.textContent = '✓ 取得しました';
       } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + e.message; }
@@ -3317,7 +3319,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const it = items[i];
       try {
         const pi = await productRead(it.host, it.item_id);
-        const models = (pi.model_list || []).map(m => ({ id: m.id, tier_index: m.tier_index || [], price: (parseFloat(modelPrice(m)) * factor).toFixed(2) })).filter(m => m.price !== 'NaN');
+        const dec = (it.cc === 'VN' || it.cc === 'TW') ? 0 : 2; // ₫/NT$は整数、その他は小数2桁
+        const stk = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
+        const models = (pi.model_list || []).map(m => { const np = parseFloat(modelPrice(m)) * factor; return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: isNaN(np) ? modelPrice(m) : np.toFixed(dec), stock_setting_list: [{ sellable_stock: stk(m) }] }; });
         if (!models.length) { ng++; } else { const r = await productWrite(it.host, it.item_id, { model_list: models }); r.ok ? ok++ : ng++; }
       } catch (e) { ng++; }
       bulkProg(`読込→書込 ${i + 1}/${items.length}`);
@@ -3414,6 +3418,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function ensureListings() {
     if (lst.loaded) return;
     lst.byCc = await listingsFromDb();
+    // シリーズ分類は静的なので1商品1回だけ計算してキャッシュ（毎レンダーの再計算＝検索/展開の重さを解消）
+    Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => {
+      if (l._fr === undefined) { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }
+    }));
     lst.loaded = true;
   }
   // シリーズ(フランチャイズ)分類。タイトルが国ごとに微妙に違うため完全一致では束ねられない→シリーズで粗く束ねる。[表示名, 判定regex, 出品状況検索用kw(英語substr)]
@@ -3558,7 +3566,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const catalogs = new Map(), singles = new Map();
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
       const names = (l.models || []).map(m => m.n).join(' ');
-      if (classifyFranchise((l.name || '') + ' ' + names) !== fr) return;
+      if ((l._fr !== undefined ? l._fr : classifyFranchise((l.name || '') + ' ' + names)) !== fr) return;
       if ((l.model_count || 0) > 1) {
         const ck = skuKey(l.parent_sku) || productKey(l.name) || ('c' + l.item_id);
         let c = catalogs.get(ck); if (!c) { c = { key: ck, curSku: l.parent_sku || '', bySku: !!skuKey(l.parent_sku), rep: l.name, img: l.image, cc: {}, link: {}, listings: [], items: new Map(), sold: 0 }; catalogs.set(ck, c); }
@@ -3590,7 +3598,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const skuEdit = (fullKey, o) => `<div style="display:flex;gap:2px;align-items:center;white-space:nowrap">${o.bySku ? '<span title="現SKUで連結済み" style="color:#1a7f37">🔗</span>' : '<span title="未連結（推奨SKUをプリセット）" style="color:#7b52c4;font-size:9px;font-weight:700">推</span>'}<input class="cov-sku-in" data-key="${esc(fullKey)}" value="${av(o.bySku ? o.curSku : recommendSku(o.key))}" spellcheck="false" title="現状:${av(o.curSku || '(空)')} ／ 推奨:${av(recommendSku(o.key))}" style="width:145px;padding:2px 5px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:10px"><button class="cov-sku-apply smd-btn" data-key="${esc(fullKey)}" style="font-size:9px;padding:1px 5px" title="このSKUを全出品(全国)に書き込む">書込</button></div>`;
     // 各国セルの数字リンク：その国の出品が1件なら✏️編集ページ直行＋🛍️販売(公開)ページ、複数ならキーワード検索(↗)
     // 各国セル＝クリックできる数字チップ。押すと操作メニュー(編集/Shopee/販売/SKU)が開く。skuKeyはカタログ行のみ渡す
-    const linkNum = (o, r, skuKey) => {
+    const linkNum = (o, r, skuKeyAttr) => {
       const n = o.cc[r.cc] || 0;
       const ls = [...new Map((o.listings || []).filter(x => x.cc === r.cc).map(x => [x.item_id, x])).values()];
       const one = ls.length === 1 ? ls[0] : null;
@@ -3598,7 +3606,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const data = `data-cc="${r.cc}" data-name="${av(o.rep || '')}" data-count="${ls.length}"`
         + (one ? ` data-host="${av(one.host)}" data-id="${one.item_id}" data-buy="${av(buy)}"` : '')
         + (o.link[r.cc] ? ` data-search="${av(o.link[r.cc])}"` : '')
-        + (skuKey ? ` data-skukey="${av(skuKey)}"` : '');
+        + (skuKeyAttr ? ` data-skukey="${av(skuKeyAttr)}"` : '');
       return `<span class="cov-cell" ${data} style="cursor:pointer;color:#0b6b2e;font-weight:700;padding:2px 8px;border-radius:6px;background:#e7f4e9;display:inline-block;min-width:22px;text-align:center;line-height:1.5" title="${r.cc}: クリックで操作">${n}${ls.length > 1 ? '⁺' : ''} ▾</span>`;
     };
     const ccCells = (o) => targets.map(r => { const n = o.cc[r.cc] || 0; return `<td style="${n === 0 ? 'background:#fff0f0;color:#d93025;font-weight:700' : 'white-space:nowrap;padding:3px 4px'}">${n ? linkNum(o, r) : '✗'}</td>`; }).join('');
@@ -3639,6 +3647,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const host = document.getElementById('list-coverage');
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    try { renderCoverageInner(host); } catch (e) { host.innerHTML = '<div style="color:#d93025;padding:12px">カバレッジ描画エラー: ' + esc(e.message) + '<br><span class="smd-dim">🔄Shopeeから更新でデータを取り直すと直る場合があります。</span></div>'; console.error('renderCoverage', e); }
+  }
+  function renderCoverageInner(host) {
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     if (!lst.covOpen) lst.covOpen = new Set();
     if (!lst.bulkSel) lst.bulkSel = new Set();
@@ -3648,7 +3659,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let q = (lst.covSearch || '').trim().toLowerCase(); if (q.length < 2) q = '';
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
       const names = (l.models || []).map(m => m.n).join(' ');
-      const fr = classifyFranchise((l.name || '') + ' ' + names);
+      const fr = l._fr !== undefined ? l._fr : classifyFranchise((l.name || '') + ' ' + names);
       const isVar = (l.model_count || 0) > 1;
       const sold = (l.models || []).reduce((s, m) => s + (m.sold || 0), 0);
       let e = map.get(fr); if (!e) { e = { catTotal: 0, varCat: 0, varUnits: 0, singleCat: 0, sold: 0, cc: {} }; map.set(fr, e); }
@@ -3702,7 +3713,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-cell').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); showCovCellMenu(el); }));
     // 検索: 入力ごとに再描画（フォーカス/カーソル位置を復元）
     const sInp = host.querySelector('#cov-search');
-    if (sInp) sInp.addEventListener('input', () => { lst.covSearch = sInp.value; const pos = sInp.selectionStart; Promise.resolve(renderCoverage()).then(() => { const ni = document.getElementById('cov-search'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }); });
+    if (sInp) {
+      let composing = false, sto = null;
+      sInp.addEventListener('compositionstart', () => { composing = true; });
+      sInp.addEventListener('compositionend', () => { composing = false; sInp.dispatchEvent(new Event('input', { bubbles: true })); });
+      sInp.addEventListener('input', () => {
+        lst.covSearch = sInp.value;
+        if (composing) return; // IME変換確定前は再描画しない（日本語入力が切れるのを防止）
+        clearTimeout(sto);
+        const pos = sInp.selectionStart;
+        sto = setTimeout(() => { Promise.resolve(renderCoverage()).catch(e => console.warn('cov', e)).then(() => { const ni = document.getElementById('cov-search'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250);
+      });
+    }
     // SKU列インライン編集：入力欄クリックは行トグルに伝播させない／「書込」で全出品へ書き込み
     host.querySelectorAll('.cov-sku-in').forEach(el => el.addEventListener('click', ev => ev.stopPropagation()));
     host.querySelectorAll('.cov-sku-apply').forEach(el => el.addEventListener('click', (ev) => {
@@ -3723,6 +3745,48 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const bMn = host.querySelector('.cov-bulk-mname'); if (bMn) bMn.addEventListener('click', () => bulkApplyModelNameReplace(lst.bulkScope || 'all'));
     const bClr = host.querySelector('.cov-bulk-clear'); if (bClr) bClr.addEventListener('click', () => { lst.bulkSel.clear(); renderCoverage(); });
     host.querySelectorAll('.cov-addvar').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); openAddVariation(el.dataset.key); }));
+  }
+  // 売れ行き・カバレッジ・価格・在庫から「やるべき施策」を自動抽出（タスク化用）
+  function computeSuggestions(targets) {
+    const sug = [];
+    const prodIdx = buildProductIndex(targets);
+    // 1) 横展開（売れてるのに未出品の国）
+    prodIdx.filter(p => p.sold > 0 && p.missing > 0).sort((a, b) => (b.sold * b.missing) - (a.sold * a.missing)).slice(0, 15).forEach(p => {
+      const miss = targets.filter(r => !p.cc[r.cc]).map(r => r.cc);
+      sug.push({ icon: '🌏', cat: '横展開', score: p.sold * p.missing, priority: (p.sold * p.missing >= 20 ? 3 : 2), text: `「${esc((p.rep || '').slice(0, 38))}」を <b>${miss.join('/')}</b> へ出品（${p.present}か国で計 ${p.sold} 販売の売れ筋）`, task: `出品: 「${(p.rep || '').slice(0, 28)}」を ${miss.join('/')} へ横展開` });
+    });
+    // 2) 価格差（同一商品の各国最安を円換算して比較）
+    const pm = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const units = (l.models && l.models.length) ? l.models : [{ sku: l.parent_sku, n: l.name, price: l.price_min }];
+      units.forEach(m => {
+        const key = skuGroupKey(m.sku) || skuGroupKey(l.parent_sku) || productKey(m.n || l.name); if (!key) return;
+        const price = parseFloat(m.price) || parseFloat(l.price_min) || 0; if (!price) return;
+        const jpy = price * (r.rateJpy || 1);
+        let e = pm.get(key); if (!e) { e = { rep: m.n || l.name, cc: {}, sold: 0 }; pm.set(key, e); }
+        e.sold += (m.sold || 0);
+        if (e.cc[r.cc] == null || jpy < e.cc[r.cc]) e.cc[r.cc] = jpy;
+      });
+    }));
+    pm.forEach(e => {
+      const vals = Object.entries(e.cc).filter(([, v]) => v > 0); if (vals.length < 2) return;
+      vals.sort((a, b) => a[1] - b[1]); const lo = vals[0], hi = vals[vals.length - 1]; const ratio = hi[1] / lo[1];
+      if (ratio >= 1.7 && e.sold > 0) sug.push({ icon: '💰', cat: '価格差', score: e.sold * ratio, priority: 2, text: `「${esc((e.rep || '').slice(0, 38))}」 各国の価格差 <b>${ratio.toFixed(1)}倍</b>（${hi[0]}が高 / ${lo[0]}が安・円換算）→ 見直し`, task: `価格調整: 「${(e.rep || '').slice(0, 26)}」 ${hi[0]}↔${lo[0]} 価格差${ratio.toFixed(1)}倍を是正` });
+    });
+    // 3) 再公開（未公開だが販売実績あり）／4) 在庫補充（出品中・在庫切れ・売れてる）
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const sold = (l.models || []).reduce((s, m) => s + (m.sold || 0), 0);
+      if (l.status !== 1 && sold > 0) sug.push({ icon: '📢', cat: '再公開', score: sold, priority: 2, text: `${r.cc}「${esc((l.name || '').slice(0, 34))}」が<b>未公開</b>なのに ${sold} 販売実績 → 再公開検討`, task: `再公開検討: ${r.cc}「${(l.name || '').slice(0, 24)}」(実績${sold})` });
+      else if (l.status === 1 && sold > 0 && l.stock != null && l.stock <= 0) sug.push({ icon: '📦', cat: '在庫', score: sold, priority: 3, text: `${r.cc}「${esc((l.name || '').slice(0, 34))}」が<b>在庫切れ</b>（${sold}販売）→ 補充/仕入れ`, task: `在庫補充: ${r.cc}「${(l.name || '').slice(0, 24)}」在庫切れ(${sold}販売)` });
+    }));
+    const seen = new Set(); const out = sug.filter(s => { if (seen.has(s.task)) return false; seen.add(s.task); return true; });
+    out.sort((a, b) => b.priority - a.priority || b.score - a.score);
+    return out.slice(0, 40);
+  }
+  async function addSuggestionTask(s) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
+    try { await sbUpsert('tasks', [{ title: s.task, priority: s.priority || 2, sort: Date.now() }]); try { logAct('施策', 'タスク化', s.cat, s.task); } catch (_) {} return true; }
+    catch (e) { alert('タスク追加失敗: ' + e.message); return false; }
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
@@ -3755,7 +3819,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cchA = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const missCells = (p) => targets.map(r => { const has = p.cc[r.cc]; return `<td style="${has ? 'color:#1a7f37;font-weight:700' : 'background:#fff0f0;color:#d93025;font-weight:700'}">${has ? (p.link[r.cc] ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${has}↗</a>` : has) : '✗'}</td>`; }).join('');
     const mergeCands = catalogMergeCandidates(targets);
+    const sugs = computeSuggestions(targets); lst.sugData = sugs;
+    const sugCatColor = { '横展開': '#1565c0', '価格差': '#e8710a', '再公開': '#7b52c4', '在庫': '#d93025' };
+    const sugHtml = `<div class="tool-card" style="max-width:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><b style="font-size:14px">🎯 施策提案</b><span class="smd-dim" style="font-size:11px">売れ行き/カバレッジ/価格/在庫から自動抽出。「✅タスク化」で✅タスク管理へ送る</span>${sugs.length ? `<button class="sug-all smd-btn" style="margin-left:auto;font-size:11px">上位10件を一括タスク化</button>` : ''}</div>
+      ${sugs.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>種別</th><th>提案</th><th></th></tr>${sugs.map((s, i) => `<tr><td style="white-space:nowrap;color:${sugCatColor[s.cat] || '#333'};font-weight:700;font-size:11px">${s.icon}${s.cat}</td><td style="font-size:12px">${s.text}</td><td><button class="sug-task smd-btn" data-i="${i}" style="white-space:nowrap;font-size:10px;padding:1px 6px">✅タスク化</button></td></tr>`).join('')}</table></div>` : '<div class="smd-dim">提案なし（🔄Shopeeから更新でデータ取得後に表示）</div>'}
+    </div>`;
     host.innerHTML =
+      sugHtml +
       `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📋 統合候補：同じカタログの可能性<span class="smd-dim" style="font-weight:400;font-size:12px">（中身のバリエが一致・タイトルのズレOK。PH起点→他国コピペのズレを検出）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がるバリエ(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
@@ -3787,6 +3858,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div class="pf-scroll" style="max-height:360px;overflow:auto"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品名</th><th>状態</th><th>編集</th></tr>${unlisted.slice(0, 200).map(x => { const rg = regionByCc(x.cc) || { host: '' }; return `<tr><td>${x.image ? `<img src="${IMG_CDN}${esc(x.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(x.cc)}</td><td style="font-size:11px">${esc((x.name || '').slice(0, 46))}</td><td style="font-size:11px">${STLABEL[x.status] || ('status' + x.status)}</td><td style="white-space:nowrap">${rg.host ? `<a href="${editUrlFor(rg.host, x.item_id)}" target="_blank" style="text-decoration:none" title="編集ページ">✏️</a>${buyerUrlFor(x.cc, x.item_id) ? `<a href="${buyerUrlFor(x.cc, x.item_id)}" target="_blank" style="text-decoration:none;margin-left:2px" title="販売(公開)ページ">🛍️</a>` : ''}` : ''}</td></tr>`; }).join('')}</table></div>
         ${unlisted.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件表示</div>` : ''}
       </div>`;
+    host.querySelectorAll('.sug-task').forEach(el => el.addEventListener('click', async () => { const s = lst.sugData[+el.dataset.i]; if (!s) return; el.disabled = true; if (await addSuggestionTask(s)) { el.textContent = '✓済'; el.style.background = '#e7f4e9'; } else el.disabled = false; }));
+    const sugAll = host.querySelector('.sug-all'); if (sugAll) sugAll.addEventListener('click', async () => { if (!confirm('上位10件をタスク化しますか？')) return; sugAll.disabled = true; let ok = 0; for (const s of (lst.sugData || []).slice(0, 10)) { if (await addSuggestionTask(s)) ok++; } sugAll.textContent = `✓ ${ok}件をタスク化`; });
   }
   async function renderListingStatus() {
     const host = document.getElementById('list-status');
@@ -3873,7 +3946,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     descExtra: '',
   };
   const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
-  const roundLocal = (v, unit) => unit > 1 ? Math.round(v / unit) * unit : Math.round(v);
+  const roundLocal = (v, unit) => { unit = unit || 1; const r = Math.round(v / unit) * unit; return unit < 1 ? Math.round(r * 100) / 100 : Math.round(r); };
   // 価格式: 仕入(円) → 販売(円)
   function priceFromCost(costJpy) {
     const fee = Math.max(0, Math.min(95, settings.priceFeePct)) / 100;
