@@ -6034,6 +6034,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (_) { rows = []; }
     state.accounts = rows; return rows;
   }
+  // 系統名（gcsonlinestore等）＝ラベルから末尾の.国コードを除去
+  const familyOfShop = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? String(a.label || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '') : null; };
+  // ヘッダに「現在: 各国のアクティブ系統」をライブ判定して表示。混在なら⚠️＋内訳。
+  async function refreshCurSys(force) {
+    const el = document.getElementById('acct-cursys'); if (!el) return;
+    if (state.mode !== 'live') { el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: スナップショット（切替不可）</span>'; return; }
+    if (state.curSys && !force) { renderCurSys(state.curSys); return; }
+    el.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: 確認中…</span>';
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    let live = {}; try { live = await detectShopIds(targets); } catch (_) {}
+    const perCc = targets.map(r => ({ cc: r.cc, fam: live[r.cc] ? familyOfShop(live[r.cc].shop_id) : null }));
+    state.curSys = perCc; renderCurSys(perCc);
+  }
+  function renderCurSys(perCc) {
+    const el = document.getElementById('acct-cursys'); if (!el) return;
+    const fams = [...new Set(perCc.map(x => x.fam).filter(Boolean))];
+    let label, color;
+    if (!fams.length) { label = '取得できず'; color = '#d93025'; }
+    else if (fams.length === 1) { label = fams[0]; color = '#1a7f37'; }
+    else { label = '混在'; color = '#e8710a'; }
+    const detail = perCc.map(x => x.cc + '=' + (x.fam || '?')).join(' / ');
+    el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (fams.length > 1 ? ' ⚠️' : '') + '</span> <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
+    const b = document.getElementById('acct-cursys-btn'); if (b) b.addEventListener('click', () => refreshCurSys(true));
+  }
   function updateAcctHint() {
     const h = document.getElementById('acct-hint'); if (!h) return;
     if (!state.acctReady) { h.innerHTML = '<b style="color:#e8710a">⚠️ shop_id列が未作成＝アカウント別表示は無効（全合算のまま）。🔑アカウントページ下部のSQLを1回実行＋再同期で有効化</b>'; return; }
@@ -6076,7 +6100,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (swBox) {
       const fams = [...new Set(rows.map(a => String(a.label || a.shop_id || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '')).filter(Boolean))];
       if (fams.length) {
-        swBox.innerHTML = '<span style="color:#888;font-size:11px">🌏全タブ切替</span><select id="acct-swall" title="開いている各国のセラータブを一括Switch Shop（要ブリッジv1.4.0＋各国タブ）" style="padding:3px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px"><option value="">系統を選ぶ…</option>' + fams.map(f => `<option value="${esc(f)}">→ ${esc(f)}</option>`).join('') + '</select>';
+        swBox.innerHTML = '<span id="acct-cursys"></span><span style="color:#ccc">｜</span><span style="color:#888;font-size:11px">🌏全タブ切替</span><select id="acct-swall" title="開いている各国のセラータブを一括Switch Shop（要ブリッジv1.4.0＋各国タブ）" style="padding:3px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px"><option value="">系統を選ぶ…</option>' + fams.map(f => `<option value="${esc(f)}">→ ${esc(f)}</option>`).join('') + '</select>';
         document.getElementById('acct-swall').addEventListener('change', function () {
           const fam = this.value; this.value = '';
           if (!fam) return;
@@ -6085,7 +6109,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           window.postMessage({ __smd: 'switchall', family: fam }, '*');
           try { logAct('アカウント', '全タブ切替', fam, ''); } catch (_) {}
           alert('切替指令を送りました。開いている各国のセラータブが順に「' + fam + '」へ切り替わります（数秒）。');
+          setTimeout(() => refreshCurSys(true), 9000); // 切替完了後に「現在」を更新
         });
+        // 「現在: ◯◯」をライブ判定（キャッシュがあれば即表示、無ければ少し遅延して自動取得）
+        if (state.curSys) renderCurSys(state.curSys); else { const e = document.getElementById('acct-cursys'); if (e) e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); if (state.mode === 'live' && !state.curSysAuto) { state.curSysAuto = true; setTimeout(() => refreshCurSys(false), 2000); } }
       } else swBox.innerHTML = '';
     }
     // 初回描画は acctReady 確定前に走るため、特定アカウント選択時はここで絞り込んで描き直す（1回だけ）
