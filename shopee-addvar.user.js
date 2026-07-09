@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Add-Variation (Mercari)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.1.0
+// @version      0.2.0
 // @description  ポータルから渡されたジョブ(URLハッシュ #smdjob=)を受け取り、Shopee商品編集ページでメルカリ画像をアップロード→バリエ追加をUI自動操作する。まずは診断＋半自動（最後の保存は人が押す）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -19,7 +19,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.1.0';
+  const VER = '0.2.0';
 
   // --- ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） ---
   function readJob() {
@@ -86,7 +86,7 @@
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">${job.image ? `<img src="${job.image}" style="width:44px;height:44px;object-fit:cover;border-radius:6px">` : ''}<div style="flex:1;min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.name || ''}</div><div style="color:#888">価格 ${job.price || '-'} / 在庫 ${job.stock != null ? job.stock : '-'}</div></div></div>
         <div style="display:flex;gap:6px;margin-bottom:8px">
           <button class="av-diag" style="flex:1;padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 診断</button>
-          <button class="av-run" style="flex:1;padding:6px;border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;cursor:pointer;font-weight:600">▶ 実行(半自動)</button>
+          <button class="av-run" style="flex:1;padding:6px;border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;cursor:pointer;font-weight:600">▶ バリエ追加を実行</button>
         </div>
         <div class="av-log" style="max-height:160px;overflow:auto;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px;font-size:11px;line-height:1.5;font-family:monospace"></div>
       </div>`;
@@ -114,16 +114,56 @@
     log('★このログを開発者に伝えてください（セレクタ確定に使います）');
   }
 
-  // --- 実行（半自動・v0.1：まず画像取得と要素探索まで。最後の保存は人が押す） ---
+  // --- 実行：画像をアップロード枠でimg_id化 → update_product_infoでバリエ確定（API方式） ---
+  const modelPrice = (m) => { const p = m && m.price_info; return p ? String(p.input_normal_price != null ? p.input_normal_price : (p.normal_price != null ? p.normal_price : '0')) : '0'; };
+  const modelStock = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
   async function run(job) {
     logEl.innerHTML = '';
     try {
-      log('画像取得中… ' + (job.image || '').slice(0, 40));
-      const file = await fetchImageFile(job.image, 'mercari.jpg');
-      log('✓ 画像取得 ' + Math.round(file.size / 1024) + 'KB', '#1a7f37');
-      log('（v0.1）バリエ追加のUI自動操作はDOM確定後に実装します。');
-      log('いまは：①診断でDOMを送る→②開発者がセレクタ確定→③自動化 の順。');
-      log('lastImgId(直近アップ画像): ' + (lastImgId || 'なし'));
+      const pid = (location.pathname.match(/product\/(\d+)/) || [])[1];
+      if (!pid) { log('product_id不明', '#d93025'); return; }
+      const cds = (document.cookie.match(/SPC_CDS=([^;]+)/) || [])[1] || '';
+      const base = 'https://' + location.host + '/api/v3/product/';
+      const withCds = (path, extra) => { const p = new URLSearchParams(extra || {}); if (cds) p.set('SPC_CDS', cds); p.set('SPC_CDS_VER', '2'); return base + path + '?' + p.toString(); };
+
+      log('① メルカリ画像を取得中…');
+      const file = await fetchImageFile(job.image, 'mercari_' + pid + '.jpg');
+      log('✓ 画像 ' + Math.round(file.size / 1024) + 'KB', '#1a7f37');
+
+      // ② 画像アップロード枠にファイルを入れて img_id を得る（メイン画像枠を借用。保存はしないので商品には残らない）
+      const fin = document.querySelector('.shopee-image-manager input[type=file], .shopee-file-upload input[type=file], input.eds-upload__input');
+      if (!fin) { log('✗ アップロード枠が見つかりません（🔍診断で報告を）', '#d93025'); return; }
+      lastImgId = null;
+      log('② 画像をアップロード中…（img_id取得）');
+      setFile(fin, file);
+      let w = 0; while (!lastImgId && w < 40) { await sleep(500); w++; }
+      if (!lastImgId) { log('✗ img_id取得できず（クロップ画面が出た/枠が違う可能性。手動で1枚上げてから再実行でも可）', '#d93025'); return; }
+      const imgId = lastImgId;
+      log('✓ img_id 取得', '#1a7f37');
+
+      // ③ 現在の商品情報
+      log('③ 商品情報を取得…');
+      const jr = await fetch(withCds('get_product_info', { is_draft: 'false', product_id: pid }), { credentials: 'include' }).then(r => r.json());
+      if (!jr || jr.code !== 0) { log('✗ get_product_info失敗 code=' + (jr && jr.code), '#d93025'); return; }
+      const pi = (jr.data && (jr.data.product_info || jr.data)) || {};
+      const tiers = JSON.parse(JSON.stringify(pi.std_tier_variation_list || []));
+      if (!tiers.length || !(tiers[0].value_list || []).length) { log('✗ この商品はバリエ型ではありません（単品→バリエ化は未対応）', '#d93025'); return; }
+      const newIdx = tiers[0].value_list.length;
+
+      if (!confirm('この商品に新バリエ「' + job.name + '」（価格 ' + job.price + ' / 在庫 ' + job.stock + '）を追加してShopeeに保存します。よろしいですか？')) { log('中止しました'); return; }
+
+      tiers[0].value_list.push({ id: 0, custom_value: job.name, selling_point: '', image_id: imgId });
+      const models = (pi.model_list || []).map(m => ({ id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: modelPrice(m), stock_setting_list: [{ sellable_stock: modelStock(m) }] }));
+      models.push({ id: 0, tier_index: [newIdx], is_default: false, sku: job.sku || '', price: String(job.price || '0'), gtin_code: '', confirm_empty_gtin: false, stock_setting_list: [{ sellable_stock: parseInt(job.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0 });
+
+      log('④ バリエを保存中…');
+      const wr = await fetch(withCds('update_product_info', {}), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ product_id: Number(pid), product_info: { std_tier_variation_list: tiers, model_list: models }, is_draft: false }) }).then(r => r.json());
+      if (wr && wr.code === 0) {
+        log('✅ 追加成功！ 3秒後にリロードします', '#1a7f37');
+        setTimeout(() => location.reload(), 3000);
+      } else {
+        log('✗ 保存失敗 code=' + (wr && wr.code) + ' ' + ((wr && (wr.user_message || wr.message)) || ''), '#d93025');
+      }
     } catch (e) { log('✗ ' + e.message, '#d93025'); }
   }
 
