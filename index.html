@@ -766,6 +766,18 @@
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
     shop_id: activeShopByCc[o.region.cc] || null,
   });
+  // 注文をDBへupsert。shop_idを判定できた国だけshop_idを書き、未判別の国はshop_id列を外して既存値を保持（nullで潰さない）。
+  async function upsertOrdersPreservingShop(orderRows, targets) {
+    const detCcs = new Set((targets || []).filter(r => activeShopByCc[r.cc]).map(r => r.cc));
+    const withShop = orderRows.filter(o => detCcs.has(o.cc));
+    const noShop = orderRows.filter(o => !detCcs.has(o.cc)).map(({ shop_id, ...rest }) => rest);
+    const doUpsert = async (rows) => {
+      if (!rows.length) return;
+      try { await sbUpsert('orders', rows); }
+      catch (e) { if (/pre_order/i.test(e.message)) await sbUpsert('orders', rows.map(({ pre_order, ...rest }) => rest)); else throw e; }
+    };
+    await doUpsert(withShop); await doUpsert(noShop);
+  }
   // 未発送(300)は全件、発送中(400)は大量なので直近3ページ(150件)で打ち切る＝取得が軽くなりタイムアウト回避
   const TAB_MAX_PAGES = { 300: 10, 400: 1 }; // 発送中(400)は直近1ページ(50)に削減＝BR等の重い国がタイムアウトしないように
   async function fetchOrdersCountry(region, onProgress) {
@@ -1485,11 +1497,7 @@
       const orderRows = [];
       targets.forEach(region => { const oc = state.orders.perCountry.get(region.cc); if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o))); });
       if (orderRows.length) {
-        // 全対象国のアクティブ店を判定できた時だけshop_idを書く。1国でも未判別なら全行からshop_id列を外す＝既存値を保持（新規注文のみnull）
-        const allDetected = targets.every(r => activeShopByCc[r.cc]);
-        const rows = allDetected ? orderRows : orderRows.map(({ shop_id, ...rest }) => rest);
-        try { await sbUpsert('orders', rows); }
-        catch (e) { if (/pre_order/i.test(e.message)) await sbUpsert('orders', rows.map(({ pre_order, ...rest }) => rest)); else throw e; }
+        await upsertOrdersPreservingShop(orderRows, targets); // 判定できた国だけshop_idを刻む（他国は既存保持）
         state.orders.dbSyncedAt = new Date().toISOString();
         updateOrdNote(false);
       }
@@ -5556,11 +5564,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const oc = state.orders.perCountry.get(region.cc);
         if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o)));
       });
-      try { await sbUpsert('orders', orderRows); }
-      catch (e) { // pre_order列が未作成でも同期を止めない（列を落として再試行）
-        if (/pre_order/i.test(e.message)) await sbUpsert('orders', orderRows.map(({ pre_order, ...rest }) => rest));
-        else throw e;
-      }
+      await upsertOrdersPreservingShop(orderRows, targets); // 判定できた国だけshop_idを刻む＋pre_order列フォールバック（未判別国は既存shop_id保持）
       log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
 
       // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
