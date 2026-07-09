@@ -574,6 +574,27 @@
   }
   const bridgeGetJson = url => bridgeRequest('GET', url).then(t => JSON.parse(t));
   const bridgePostJson = (url, obj) => bridgeRequest('POST', url, JSON.stringify(obj)).then(t => { try { return JSON.parse(t); } catch (_) { return {}; } });
+  // メルカリ商品ページ(リンク)から タイトル/価格/画像/説明 を取得（ブリッジ経由でHTMLを取ってmetaを解析）
+  const htmlDecode = (s) => { try { const t = document.createElement('textarea'); t.innerHTML = String(s || ''); return t.value; } catch (_) { return String(s || ''); } };
+  function metaFromHtml(html, key) {
+    let m = html.match(new RegExp('<meta[^>]+(?:property|name)="' + key + '"[^>]+content="([^"]*)"', 'i'));
+    if (m) return htmlDecode(m[1]);
+    m = html.match(new RegExp('<meta[^>]+content="([^"]*)"[^>]+(?:property|name)="' + key + '"', 'i'));
+    return m ? htmlDecode(m[1]) : '';
+  }
+  async function fetchMercari(url) {
+    if (!/^https?:\/\/(jp\.)?mercari\.com\/item\//.test(url) && !/mercari\.com\/.*item/.test(url)) throw new Error('メルカリ商品URLではありません');
+    const html = await bridgeRequest('GET', url);
+    if (!html || html.length < 500) throw new Error('取得失敗（空/短すぎ）');
+    const title = metaFromHtml(html, 'og:title').replace(/\s*by メルカリ\s*$/, '').trim();
+    const price = parseInt(metaFromHtml(html, 'product:price:amount') || '0', 10) || 0;
+    const currency = metaFromHtml(html, 'product:price:currency') || 'JPY';
+    const image = metaFromHtml(html, 'og:image');
+    const desc = metaFromHtml(html, 'og:description');
+    if (!title && !image) throw new Error('データが読めませんでした（メルカリ側の仕様変更の可能性）');
+    return { url, title, price, currency, image, desc };
+  }
+  try { window.__fetchMercari = fetchMercari; } catch (_) {}
   async function detectBridge() {
     for (let i = 0; i < 6 && !bridgeAvailable; i++) {
       window.postMessage({ __smd: 'ping' }, '*');

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.1.2
-// @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GASへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。
+// @version      1.2.0
+// @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。
 // @match        https://gucci1119.github.io/shopee-compare/*
 // @match        https://*.github.io/shopee-compare/*
 // @match        http://localhost:8788/*
@@ -26,6 +26,10 @@
 // @connect      seller.shopee.tw
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
+// メルカリ商品データ取得用（リンク→タイトル/価格/画像）。取得のみ・書き込みはしない
+// @connect      jp.mercari.com
+// @connect      mercari.com
+// @connect      static.mercdn.net
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @run-at       document-start
@@ -34,7 +38,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.1.2';
+  const VER = '1.2.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -43,6 +47,7 @@
     'seller.shopee.ph', 'seller.shopee.sg', 'seller.shopee.com.my', 'seller.shopee.com.br',
     'seller.shopee.vn', 'banhang.shopee.vn', 'seller.shopee.co.th', 'seller.shopee.tw',
     'script.google.com', 'script.googleusercontent.com',
+    'jp.mercari.com', 'mercari.com', 'static.mercdn.net',
   ];
 
   // 注意: Tampermonkeyサンドボックスでは e.source === window が成立しないことがあるため
