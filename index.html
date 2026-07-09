@@ -1659,7 +1659,7 @@
       const [days, orders, income] = await Promise.all([
         sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
         sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
-        sbGetAll('income', 'select=cc,amount&order=sn'),
+        sbGetAll('income', 'select=cc,amount,pending&order=sn'),
       ]);
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
       days.forEach(d => {
@@ -1669,13 +1669,13 @@
       });
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
-      let pendJpy = 0;
-      income.forEach(i => { const rg = regionByCc(i.cc); if (rg) pendJpy += (i.amount || 0) * rg.rateJpy; });
+      let pendJpy = 0, pendN = 0;
+      income.forEach(i => { if (i.pending === false) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
       kpis.innerHTML = [
         ['今日の売上', fmtJpy(todayJpy), `${todayUnits}点（同期時点）`],
         ['昨日の売上', fmtJpy(yestJpy), ''],
         ['未発送', toShip.length + '件', due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり'],
-        ['入金予定(Pending)', fmtJpy(pendJpy), income.length + '件'],
+        ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）'],
       ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
       const due = document.getElementById('dash-due');
       due.innerHTML = toShip.slice(0, 8).map(o => {
@@ -2401,6 +2401,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const exp = { ym: null, rows: null };
   const jstYm = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
   const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  // 返金の当月合計（JST）。返金日(refund_date)基準。無ければcreated_atをJST換算。編集日(updated_at)は使わない＝編集で月がズレない
+  const refundForYm = (issues, ym) => (issues || []).reduce((s, r) => { if (r.refund_jpy == null) return s; const m = r.refund_date ? String(r.refund_date).slice(0, 7) : (r.created_at ? new Date(Date.parse(r.created_at) + 9 * 3600000).toISOString().slice(0, 7) : ''); return m === ym ? s + (r.refund_jpy || 0) : s; }, 0);
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
   const prevYm = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
@@ -2412,24 +2414,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     const [y, m] = exp.ym.split('-').map(Number);
     const nextYm = m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0');
-    let rows;
-    try { rows = await sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`); }
+    let rows, issues = [];
+    try { [rows, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => [])]); }
     catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     exp.rows = rows;
     const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
+    const refundTotal = refundForYm(issues, exp.ym);
     const byCat = {}; rows.forEach(r => { byCat[r.category] = (byCat[r.category] || 0) + (r.amount || 0); });
     const months = []; for (let i = 0; i < 12; i++) { const d = new Date(y, m - 1 - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
     const catList = EXP_CATS.concat(Object.keys(byCat).filter(c => !EXP_CATS.includes(c)));
-    // 純利益（利益ページで同じ月を開くと粗利が入る）
+    // 純利益（利益ページで同じ月を開くと粗利が入る）＝ 粗利 − 経費 − 返金（月次サマリーと一致）
     const grossOk = pf.grossYm === exp.ym && typeof pf.grossTotal === 'number';
-    const net = grossOk ? pf.grossTotal - total : null;
+    const net = grossOk ? pf.grossTotal - total - refundTotal : null;
     const netCard = `<div class="tool-card" style="margin:0 0 12px;max-width:520px;background:#f7fbf8;border:1px solid #d6ecdd">
       <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 純利益（${exp.ym}）</div>
       ${grossOk
-        ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件・利益ページ基準）</span><br>
+        ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件＝確定${pf.grossFixN || 0}/暫定${pf.grossProvN || 0}）</span>${pf.grossProvN ? `<br><span style="font-size:11px;color:#e8710a">⚠️ 暫定入金 ${pf.grossProvN}件を含む（Shopee確定で変動しうる。確定申告は確定後に再確認）</span>` : ''}<br>
            経費合計 <b style="color:#d93025">− ${fmtJpy(total)}</b><br>
+           返金合計 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（返品ページ・当月の返金日分）</span><br>
            <span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(net)}</b></span></div>`
-        : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同じ月（${exp.ym}）を開くと自動で反映されます。<br>現在の粗利データ: ${pf.grossYm ? esc(pf.grossYm) + '（' + fmtJpy(pf.grossTotal || 0) + '）' : '未計算'}<br>経費合計 <b style="color:#d93025">${fmtJpy(total)}</b></div>`}
+        : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同じ月（${exp.ym}）を開くと自動で反映されます。<br>現在の粗利データ: ${pf.grossYm ? esc(pf.grossYm) + '（' + fmtJpy(pf.grossTotal || 0) + '）' : '未計算'}<br>経費合計 <b style="color:#d93025">${fmtJpy(total)}</b> ／ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`}
     </div>`;
     // 入力フォーム
     const catOpts = EXP_CATS.map(c => `<option>${c}</option>`).join('');
@@ -2534,6 +2538,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
         <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="理由" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
+        <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
       </tr>`;
@@ -2547,15 +2552,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1140px">` +
-      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>再出品</th><th>メモ</th></tr>` +
-      (rows.length ? rowHtml : `<tr><td colspan="11" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>返金日</th><th>再出品</th><th>メモ</th></tr>` +
+      (rows.length ? rowHtml : `<tr><td colspan="12" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
       `</table></div></div>`;
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
     body.querySelectorAll('.ri-restock').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { restock: e.target.value || null })));
     body.querySelectorAll('.ri-reason').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { reason: e.target.value.trim() || null })));
     body.querySelectorAll('.ri-memo').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { memo: e.target.value.trim() || null })));
-    body.querySelectorAll('.ri-refund').forEach(el => el.addEventListener('change', async e => { if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, { refund_jpy: e.target.value === '' ? null : Math.round(Number(e.target.value)) })) renderReturns(); }));
+    body.querySelectorAll('.ri-refdate').forEach(el => el.addEventListener('change', async e => { if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, { refund_date: e.target.value || null })) renderReturns(); }));
+    body.querySelectorAll('.ri-refund').forEach(el => el.addEventListener('change', async e => {
+      const val = e.target.value === '' ? null : Math.round(Number(e.target.value));
+      const patch = { refund_jpy: val };
+      const rd = e.target.closest('tr').querySelector('.ri-refdate'); // 返金額を入れたのに返金日が空なら今日を自動セット（計上月がブレないよう固定）
+      if (val != null && rd && !rd.value) patch.refund_date = jstToday();
+      if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, patch)) renderReturns();
+    }));
     document.getElementById('ret-add').addEventListener('click', async () => {
       const cc = document.getElementById('ret-cc').value, sn = document.getElementById('ret-sn').value.trim();
       if (!sn) { document.getElementById('ret-msg').textContent = 'SNを入力してください'; return; }
@@ -2617,10 +2629,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const ym = exp.ym;
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let expenses, inv, issues;
-    try { [expenses, inv, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${ym}-01&ymd=lt.${nextYmOf(ym)}-01&order=ymd`), ensureInv(), sbGetAll('order_issues', 'select=refund_jpy,updated_at,created_at').catch(() => [])]); }
+    try { [expenses, inv, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${ym}-01&ymd=lt.${nextYmOf(ym)}-01&order=ymd`), ensureInv(), sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => [])]); }
     catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     const expTotal = expenses.reduce((s, r) => s + (r.amount || 0), 0);
-    const refundTotal = (issues || []).filter(r => String(r.updated_at || r.created_at || '').slice(0, 7) === ym).reduce((s, r) => s + (r.refund_jpy || 0), 0);
+    const refundTotal = refundForYm(issues, ym);
     const grossOk = pf.grossYm === ym && typeof pf.grossTotal === 'number';
     const net = grossOk ? pf.grossTotal - expTotal - refundTotal : null;
     const invMonth = inv.filter(r => invPurDate(r).slice(0, 7) === ym);
@@ -2634,7 +2646,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span class="smd-dim" style="font-size:12px">（経費ページと連動）</span></div></div>` +
       `<div class="tool-card" style="margin:0 0 12px;max-width:560px;background:#f7fbf8;border:1px solid #d6ecdd">
         <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 ${ym} 損益</div>
-        ${grossOk ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件）</span><br>経費合計 <b style="color:#d93025">− ${fmtJpy(expTotal)}</b><br>返金合計 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（返品ページの返金¥・当月記録分）</span><br><span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(net)}</b></span></div>`
+        ${grossOk ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件＝確定${pf.grossFixN || 0}/暫定${pf.grossProvN || 0}）</span>${pf.grossProvN ? `<br><span style="font-size:11px;color:#e8710a">⚠️ 暫定入金 ${pf.grossProvN}件を含む（確定で変動しうる）</span>` : ''}<br>経費合計 <b style="color:#d93025">− ${fmtJpy(expTotal)}</b><br>返金合計 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（返品ページの返金¥・当月記録分）</span><br><span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(net)}</b></span></div>`
           : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同月（${ym}）を開くと反映されます（現在: ${pf.grossYm ? esc(pf.grossYm) : '未計算'}）。<br>経費合計 <b style="color:#d93025">${fmtJpy(expTotal)}</b> ・ 当月仕入 <b>${invMonth.length}</b>件</div>`}
       </div>` +
       `<div class="tool-card" style="margin:0;max-width:640px"><div style="font-weight:700;font-size:14px;margin-bottom:8px">📥 CSVエクスポート（Excel対応・BOM付き）</div>
@@ -2727,6 +2739,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       'ブリッジ v1.2.0：メルカリ商品取得のため許可ホストを追加（取得のみ）',
       '注文一覧APIのページングをカーソル方式に修正（BR等50件超の国で注文が2重表示/51件目以降が欠落していた不具合を解消）',
       '監査＆最適化：カバレッジ検索の日本語入力(IME)が切れる不具合を修正（debounce＋変換対応）／シリーズ分類をキャッシュして検索・展開を高速化／カバレッジ描画をガード（1件の異常でタブが固まらない）／一括価格を通貨別に丸め＋明細SKU/在庫を保持（SKU消失リスク解消）／国別の価格丸め単位／DB読取の権限フォールバック',
+      'SKU書込：失敗した国/itemと理由を表示（未ログイン等）。書込成功で即「連結(🔗)＋✓済」表示＋各国の現在SKUを🌐/メニューで可視化',
+      '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
       '起動できない不具合を修正（loadOrders内のif行重複による構文エラーでアプリ全体が「起動中」で固まっていた）',
@@ -2918,9 +2932,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         edited_at: now, synced_at: now,
       }));
     }
+    const branchIds = newRows.map(x => x.item_id);
+    const inList = branchIds.map(x => encodeURIComponent('"' + x + '"')).join(',');
     try {
+      // 衝突チェック：枝番IDが既存だと merge-duplicates で黙って上書きされるので事前に止める
+      const existing = await sbGet('inventory', `select=item_id&item_id=in.(${inList})`);
+      if (existing && existing.length) { alert('枝番ID（' + existing.map(x => x.item_id).join(', ') + '）が既に存在します。分割を中止しました。'); return; }
       await sbUpsert('inventory', newRows);              // 先に枝番行を作成
-      await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id)); // 元行を削除
+      try {
+        await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id)); // 元行を削除
+      } catch (delErr) {
+        // 元行の削除に失敗＝元＋枝番で二重計上になるため、作った枝番をロールバック
+        try { await sbDelete('inventory', `item_id=in.(${inList})`); } catch (_) {}
+        throw new Error('元行の削除に失敗したため中止しました（作成した枝番は取り消し済み）: ' + delErr.message);
+      }
       stock.rows = stock.rows.filter(x => x.item_id !== id).concat(newRows);
       logAct('在庫管理', 'まとめ分割', id, newRows.length + '枝番に分割');
       stockRender();
@@ -4614,7 +4639,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const ind = pf.sortKey === c.k ? (pf.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
         return `<th class="pf-th" data-k="${c.k}" draggable="true" style="cursor:pointer" title="クリックでソート / ドラッグで列移動">${c.l}${ind}<span class="pf-rs" data-k="${c.k}"></span></th>`;
       }).join('') + '</tr>';
-    let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0, pairCost = 0;
+    let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0, pairCost = 0, pairFixN = 0, pairProvN = 0;
     pfSorted(orders).forEach(o => {
      try {
       const rg = regionByCc(o.cc);
@@ -4635,7 +4660,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (cost != null) tCost += cost;
       // 粗利・ROIは仕入額(手入力/確定 または 在庫連携の自動算出)が判明した注文だけ計算。全く無い注文は利益計算未完了＝空欄。
       const profit = (dep != null && cost != null) ? dep * rg.rateJpy - cost : null;
-      if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; pairCost += cost; }
+      if (profit != null) { pairProfit += profit; pairN++; pairDep += dep * rg.rateJpy; pairCost += cost; if (depInfo && depInfo.fixed) pairFixN++; else pairProvN++; }
       const items = (o.items && o.items.length) ? o.items : [{}];
       const rate = (profit != null && cost) ? Math.round(profit / cost * 100) : null; // ROI = 粗利 ÷ 仕入額(投資)
       const invAssign = assignInv(o, invs); // まとめ買い: 在庫を商品行に割当
@@ -4730,7 +4755,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       profit: () => `<b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件</span>`,
       rate: () => pairCost ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairCost * 100)}%</span>` : '',
     };
-    pf.grossTotal = pairProfit; pf.grossN = pairN; pf.grossYm = pf.ym; // 純利益(経費ページ)用に粗利合計を退避
+    pf.grossTotal = pairProfit; pf.grossN = pairN; pf.grossYm = pf.ym; pf.grossFixN = pairFixN; pf.grossProvN = pairProvN; // 純利益(経費ページ)用に粗利合計＋確定/暫定件数を退避
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利・ROIは仕入額（手入力/確定 または 在庫連携🏷の自動算出）と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。仕入額が全く無い注文は利益計算未完了＝空欄。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。キャンセルはグレー表示。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
     body.innerHTML = html;
@@ -4908,12 +4933,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const initAt = ex && ex.amount_initial_at ? ex.amount_initial_at : now;   // 暫定=初回記録日時（以後固定）
             let fixAt = ex ? ex.amount_at : null;                                      // 確定=暫定と値が変わった最初のsync
             if (fixAt == null && amount !== initial) fixAt = now;
-            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now });
+            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now, pending: true });
           });
         } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
       }
       await sbUpsert('income', incomeRows);
-      say(`💵 入金 ${incomeRows.length}件 保存 ✅`);
+      // 以前Pendingだったが今回のPendingに無い＝入金確定済み → pending=false に更新（利益計算用の金額は残す）。ダッシュボードのPending合計が水増しされないように
+      const curKeys = new Set(incomeRows.map(r => r.cc + ':' + r.sn));
+      const settledRows = []; exIncome.forEach((v, key) => { if (!curKeys.has(key)) { const p = key.indexOf(':'); settledRows.push({ cc: key.slice(0, p), sn: key.slice(p + 1), pending: false }); } });
+      if (settledRows.length) await sbUpsert('income', settledRows);
+      say(`💵 入金 ${incomeRows.length}件 保存 ✅${settledRows.length ? `（確定済 ${settledRows.length}件を除外）` : ''}`);
 
       // 3) 商品30日実績
       say('📊 商品実績(30日)を取得中...');
