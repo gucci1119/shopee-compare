@@ -1628,10 +1628,20 @@
   // ---------------- DB読み取り（閲覧はブリッジ不要） ----------------
   // アカウント絞り込みの注入：state.acctが特定shopなら account系テーブルの読取に shop_id フィルタを足す（'all'時や同期内部読取(rawRead)は無加工）
   const ACCT_TABLES = new Set(['listings', 'orders', 'income']);
+  // ラベルから末尾の.国コードを除いた「系統名」。gcsonlinestore.ph → gcsonlinestore
+  const famOfLabel = (lbl) => String(lbl || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '');
+  // ある系統(gcsonlinestore等)に属する全ショップのshop_id一覧（全国分）
+  const shopIdsOfFamily = (fam) => (state.accounts || []).filter(a => a.shop_id && famOfLabel(a.label) === fam).map(a => String(a.shop_id));
   function acctQs(table, qs) {
     const a = state.acct;
     if (state.rawRead || !state.acctReady || !a || a === 'all' || !ACCT_TABLES.has(table)) return qs;
-    const filt = a === 'none' ? 'shop_id=is.null' : ('shop_id=eq.' + encodeURIComponent(a));
+    let filt;
+    if (a === 'none') filt = 'shop_id=is.null';
+    else if (a.slice(0, 4) === 'fam:') { // 系統でまとめる＝その系統の全国ショップをin句で
+      const ids = shopIdsOfFamily(a.slice(4));
+      if (!ids.length) return qs; // 未取得なら絞らない（全件のまま）
+      filt = 'shop_id=in.(' + ids.map(encodeURIComponent).join(',') + ')';
+    } else filt = 'shop_id=eq.' + encodeURIComponent(a);
     return qs ? qs + '&' + filt : filt;
   }
   async function sbGet(table, qs) {
@@ -2116,7 +2126,9 @@
     let live = {};
     try { live = await detectShopIds(regions); } catch (_) {}
     const acc = state.accounts || [];
-    const selShop = (state.acct && state.acct !== 'all' && state.acct !== 'none') ? String(state.acct) : null;
+    const rawAcct = String(state.acct || '');
+    const selFam = rawAcct.slice(0, 4) === 'fam:' ? rawAcct.slice(4) : null; // 系統でまとめる＝全国その系統が目標
+    const selShop = (state.acct && state.acct !== 'all' && state.acct !== 'none' && !selFam) ? rawAcct : null;
     const selAcc = selShop ? acc.find(a => String(a.shop_id) === selShop) : null;
     const labelOf = (sid, fallback) => { const a = acc.find(x => String(x.shop_id) === String(sid)); return (a && a.label) || fallback || sid; };
     const lines = [], mism = [], unconf = [];
@@ -2124,7 +2136,11 @@
       const info = live[cc];
       if (!info || !info.shop_id) { unconf.push(cc); lines.push(`${cc} = ？（今のアカウント未確認）`); continue; }
       const activeLabel = labelOf(info.shop_id, info.name);
-      if (selAcc && selAcc.cc === cc) {
+      if (selFam) { // 系統指定：各国のアクティブ店がその系統かを照合
+        const activeFam = familyOfShop(info.shop_id) || famOfLabel(info.name);
+        if (activeFam !== selFam) mism.push(`${cc}：目標系統「${selFam}」ではなく今は「${activeLabel}」（${activeFam || '?'}系統）になっています`);
+        else lines.push(`${cc} = ${activeLabel} ✓`);
+      } else if (selAcc && selAcc.cc === cc) {
         if (String(info.shop_id) !== String(selAcc.shop_id)) mism.push(`${cc}：目標「${selAcc.label}」ではなく今は「${activeLabel}」になっています`);
         else lines.push(`${cc} = ${activeLabel} ✓`);
       } else {
@@ -6043,7 +6059,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     state.accounts = rows; return rows;
   }
   // 系統名（gcsonlinestore等）＝ラベルから末尾の.国コードを除去
-  const familyOfShop = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? String(a.label || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, '') : null; };
+  const familyOfShop = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? famOfLabel(a.label) : null; };
   // 判定結果をlocalStorageへ保存（再読込直後に即表示できるように）
   function saveCurSys(perCc) {
     state.curSys = perCc; state.curSysTs = Date.now();
@@ -6096,6 +6112,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!state.acctReady) { h.innerHTML = '<b style="color:#e8710a">⚠️ shop_id列が未作成＝アカウント別表示は無効（全合算のまま）。🔑アカウントページ下部のSQLを1回実行＋再同期で有効化</b>'; return; }
     if (state.acct === 'all') h.textContent = '全アカウント合算';
     else if (state.acct === 'none') h.textContent = 'shop_id未設定の行（再同期で各アカウントに振り分け）';
+    else if (state.acct.slice(0, 4) === 'fam:') { const f = state.acct.slice(4); const n = shopIdsOfFamily(f).length; h.textContent = f + ' 系統の全国合算' + (n ? `（${n}ショップ）` : '（未取込＝絞り込めません）'); }
     else { const a = (state.accounts || []).find(x => String(x.shop_id) === String(state.acct)); h.textContent = (a ? a.label : ('shop_id ' + state.acct)) + ' のみ表示（無ければ対象垢に切替えて再同期）'; }
   }
   async function initAcctBar() {
@@ -6110,7 +6127,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const stOrd = { main: 0, sub: 1, new: 2, dormant: 3 };
     Object.values(byCc).forEach(arr => arr.sort((a, b) => (stOrd[a.status] != null ? stOrd[a.status] : 9) - (stOrd[b.status] != null ? stOrd[b.status] : 9) || String(a.label || '').localeCompare(String(b.label || ''), 'ja')));
     let html = '<option value="all">全アカウント（すべて合算）</option>';
-    REGIONS.forEach(r => { const items = byCc[r.cc] || []; if (!items.length) return; html += `<optgroup label="${r.cc}">` + items.map(a => `<option value="${esc(a.shop_id)}">${esc(a.label)}（${r.cc}）</option>`).join('') + '</optgroup>'; });
+    // ★系統でまとめる（gcsonlinestore / gs_japan_select）＝全国分を合算。ショップ数も表示
+    const famCount = {}; rows.forEach(a => { if (a.shop_id) { const f = famOfLabel(a.label); famCount[f] = (famCount[f] || 0) + 1; } });
+    const fams = Object.keys(famCount).sort((a, b) => famCount[b] - famCount[a] || a.localeCompare(b, 'ja'));
+    if (fams.length) html += '<optgroup label="── 系統でまとめる（全国合算） ──">' + fams.map(f => `<option value="fam:${esc(f)}">${esc(f)}（全国 ${famCount[f]}ショップ）</option>`).join('') + '</optgroup>';
+    // 個別ショップ（系統×国）
+    REGIONS.forEach(r => { const items = byCc[r.cc] || []; if (!items.length) return; html += `<optgroup label="個別 ${r.cc}">` + items.map(a => `<option value="${esc(a.shop_id)}">${esc(a.label)}（${r.cc}）</option>`).join('') + '</optgroup>'; });
     html += '<option value="none">未判別（shop_id無し・再同期前の既存データ）</option>';
     sel.innerHTML = html;
     const vals = [...sel.options].map(o => o.value);
