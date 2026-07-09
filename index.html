@@ -2746,6 +2746,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '国別の出品制約チェックを全書込経路に適用：VN上限を100万VND(=正)に修正（旧909,090を訂正）。TW60字/SGブランド1つ/BR価格差4倍/VN上限に触れる書込は、タイトルはconfirmで警告、価格の一括/×係数は違反出品を自動スキップ＋内訳表示（統括編集・バリエ価格・単体エディタ・一括すべて）。VN価格上限は単品(バリエなし)出品も対象（単品も1明細として全経路でチェック）',
       '横断カバレッジ上部に「📦 国別 出品枠（Listing Limit）」パネルを追加：Shopeeの出品枠はLive(公開中)だけを数えるため、status=1(Live)を集計して「Live / 枠・残り・占有率%」をバー表示（作成数/未公開/違反は副表示）。枠はShopee商品一覧の「Listing Limit」を各国入力→保存（到達=🔴/残僅か=⚠️/余裕=✅）。例: PH Live991 / 枠1000 → あと9',
       '分析タブに「🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）」を新設：カバー画像IDが完全一致するのにSKUが違う/空のカタログをクラスタ化（各国に点在する“中身は同じだがSKU別物”を検出）。おすすめSKU欄を確認→「🏷全部このSKUに統一」でクラスタ全カタログの親SKUを揃えて連結🔗',
+      '出品枠をShopeeから自動取得：横断カバレッジの枠パネルに「🔄 枠をShopeeから取得」を追加（get_product_count_limit APIのpublish_limitをブリッジ経由で各国取得。都度変わる枠に追従）',
+      '横断カバレッジの並び替え強化：カタログ数/販売数/バリエ数/単品数/あいうえおに加え、列見出しクリックでその列（各国も）で並び替え＋もう一度で昇順⇄降順。表示フィルタ（すべて/欠けあり=未出品国あり/完全=全国あり）を追加。「その他（未分類）」も展開できるように',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
@@ -3957,6 +3959,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     rows.forEach(r => { const s = Number(r.status); if (s === 1) live++; else if (s === 8) unpub++; else other++; });
     return { total: rows.length, live, unpub, other };
   }
+  // Shopeeから各国の出品枠(Listing Limit=publish_limit)を取得。ブリッジがSPC_CDSを注入するのでライブPC必須。
+  async function fetchListingLimits() {
+    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で取得できます'); return; }
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    if (!settings.listQuota) settings.listQuota = {};
+    let ok = 0; const fail = [];
+    for (const r of targets) {
+      try {
+        const j = await bridgeGetJson(`https://${r.host}/api/v3/opt/mpsku/list/get_product_count_limit?SPC_CDS_VER=2`);
+        const d = (j && j.data) || {};
+        const lim = Number(d.publish_limit != null ? d.publish_limit : (d.limit != null ? d.limit : d.product_count_limit));
+        if (j && j.code === 0 && lim > 0) { settings.listQuota[r.cc] = lim; ok++; }
+        else fail.push(`${r.cc}(code${j && j.code})`);
+      } catch (e) { fail.push(`${r.cc}:${(e.message || '').slice(0, 30)}`); }
+    }
+    saveSettings();
+    try { renderCoverage(); } catch (_) {}
+    alert(`出品枠を取得: 成功 ${ok}/${targets.length}` + (fail.length ? `\n失敗: ${fail.join(', ')}\n（未ログイン/ブリッジ未検出の可能性）` : ''));
+  }
   function quotaPanelHtml(targets) {
     const q = settings.listQuota || {};
     const cards = targets.map(r => {
@@ -3981,7 +4002,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const totLive = targets.reduce((s, r) => s + quotaStats(r.cc).live, 0);
     const totCreated = targets.reduce((s, r) => s + (lst.byCc[r.cc] || []).length, 0);
     return `<div class="tool-card" style="max-width:none;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:6px"><b style="font-size:13px">📦 国別 出品枠（Listing Limit）</b><span class="smd-dim" style="font-size:10.5px"><b>Live(公開中)だけが枠に数えられます</b>。枠はShopee商品一覧の「Listing Limit」を各国入力。未公開/違反は枠外＝作成数は枠を超えてもOK。合計 Live <b>${totLive.toLocaleString()}</b>・作成 ${totCreated.toLocaleString()}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:6px"><b style="font-size:13px">📦 国別 出品枠（Listing Limit）</b><button class="cov-fetchlimit smd-btn" style="font-size:10.5px" title="Shopeeから各国の出品枠(Listing Limit)を取得（ライブPC）">🔄 枠をShopeeから取得</button><span class="smd-dim" style="font-size:10.5px;margin-left:auto"><b>Live(公開中)だけが枠に数えられます</b>。枠は自動取得か手入力。未公開/違反は枠外＝作成数は枠超OK。合計 Live <b>${totLive.toLocaleString()}</b>・作成 ${totCreated.toLocaleString()}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div></div>`;
   }
   function renderCoverageInner(host) {
@@ -4004,17 +4025,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (q && !e.matched) { const hay = ((l.name || '') + ' ' + (l.parent_sku || '') + ' ' + names + ' ' + (l.models || []).map(m => m.sku).join(' ')).toLowerCase(); if (hay.includes(q)) e.matched = true; }
     }));
     const sort = lst.covSort || 'catTotal';
+    const dir = (lst.covSortDir || (sort === 'name' ? 'asc' : 'desc')) === 'asc' ? 1 : -1;
+    const missOf = (row) => targets.filter(r => !(row.cc[r.cc])).length;
+    const baseCmp = sort === 'name' ? (a, b) => a.fr.localeCompare(b.fr, 'ja')
+      : sort === 'varUnits' ? (a, b) => a.varUnits - b.varUnits
+      : sort === 'single' ? (a, b) => a.singleCat - b.singleCat
+      : sort === 'sold' ? (a, b) => a.sold - b.sold
+        : sort.startsWith('cc:') ? (a, b) => ((a.cc[sort.slice(3)] || 0) - (b.cc[sort.slice(3)] || 0))
+          : (a, b) => a.catTotal - b.catTotal;
+    const filt = lst.covFilter || 'all';
     let rows = [...map.entries()].map(([fr, e]) => ({ fr, ...e }));
+    if (filt === 'gap') rows = rows.filter(x => x.fr === 'その他' || missOf(x) > 0);
+    else if (filt === 'full') rows = rows.filter(x => x.fr !== 'その他' && missOf(x) === 0);
     const others = rows.filter(x => x.fr === 'その他'); rows = rows.filter(x => x.fr !== 'その他');
-    if (sort === 'name') rows.sort((a, b) => a.fr.localeCompare(b.fr, 'ja'));
-    else if (sort === 'varUnits') rows.sort((a, b) => b.varUnits - a.varUnits);
-    else if (sort === 'sold') rows.sort((a, b) => b.sold - a.sold);
-    else rows.sort((a, b) => b.catTotal - a.catTotal);
+    rows.sort((a, b) => (dir * baseCmp(a, b)) || (b.catTotal - a.catTotal));
     rows = rows.concat(others);
     if (q) rows = rows.filter(x => x.matched);
-    const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
+    const arrow = dir > 0 ? '▲' : '▼';
+    const hs = (k) => sort === k ? ` <span style="font-size:9px">${arrow}</span>` : '';
+    const cch = targets.map(r => `<th class="cov-hsort" data-k="cc:${r.cc}" style="color:${r.color};cursor:pointer" title="${r.cc}のカタログ数で並べ替え">${r.cc}${hs('cc:' + r.cc)}</th>`).join('');
     const colspan = 5 + targets.length;
-    const sortBtn = (k, lb) => `<button class="smd-btn cov-sort" data-k="${k}" style="${sort === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
+    const sortBtn = (k, lb) => `<button class="smd-btn cov-sort" data-k="${k}" style="${sort === k ? 'background:#1565c0;color:#fff' : ''}">${lb}${sort === k ? ' ' + arrow : ''}</button>`;
+    const filtSel = `<select class="cov-filter" style="padding:3px 6px;border:1px solid #ddd;border-radius:5px;font-size:12px;margin-left:4px"><option value="all"${filt === 'all' ? ' selected' : ''}>表示: すべて</option><option value="gap"${filt === 'gap' ? ' selected' : ''}>欠けあり(未出品国あり)</option><option value="full"${filt === 'full' ? ' selected' : ''}>完全(全国あり)</option></select>`;
     const scopeOpts = ['all'].concat(REGIONS.map(r => r.cc)).map(v => `<option value="${v}"${lst.bulkScope === v ? ' selected' : ''}>${v === 'all' ? '全国' : v}</option>`).join('');
     const bulkBar = lst.bulkSel.size ? `<div class="tool-card" style="max-width:none;margin-bottom:8px;background:#fff8e1;border:1px solid #ffd591;position:sticky;top:0;z-index:6"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
         <b style="color:#8a6d3b">🛠 一括編集：${lst.bulkSel.size}カタログ選択中</b>
@@ -4029,20 +4061,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span class="smd-dim" style="font-size:10.5px;width:100%">⚠️本番書込。対象は<b>展開済みシリーズのカタログ</b>のみ。件数が多いと時間がかかりブリッジ負荷が上がります。</span>
       </div></div>` : '';
     host.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('name', 'あいうえお')}</div>
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>（「その他」も展開可）。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('single', '単品数')} ${sortBtn('name', 'あいうえお')} ${filtSel} <span style="font-size:10.5px">※列見出しクリックでもその列で並び替え（もう一度で昇順⇄降順）</span></div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
       ${quotaPanelHtml(targets)}
       <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><input id="cov-search" value="${av(lst.covSearch || '')}" placeholder="🔎 カタログ名・SKU・バリエ名で検索（2文字以上／該当シリーズを自動展開）" style="width:min(460px,100%);padding:8px 11px;border:1px solid #ddd;border-radius:8px;font-size:13px">${q ? `<span class="smd-dim" style="font-size:11px">「${esc(q)}」で絞り込み中 ${rows.length}シリーズ</span>` : ''}</div>
       ${bulkBar}
-      <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th><th>売</th>${cch}</tr>${rows.map(row => {
+      <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th class="cov-hsort" data-k="catTotal" style="cursor:pointer" title="計で並べ替え">計${hs('catTotal')}</th><th class="cov-hsort" data-k="varUnits" style="cursor:pointer" title="バリエ数で並べ替え">🧩バリエ型${hs('varUnits')}<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th class="cov-hsort" data-k="single" style="cursor:pointer" title="単品数で並べ替え">🔹単品${hs('single')}</th><th class="cov-hsort" data-k="sold" style="cursor:pointer" title="販売数で並べ替え">売${hs('sold')}</th>${cch}</tr>${rows.map(row => {
         const open = q ? true : lst.covOpen.has(row.fr);
-        const nameCell = row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'} ${esc(row.fr)}</b>`;
+        const nameCell = `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:${row.fr === 'その他' ? '#888' : '#1565c0'}">${open ? '▼' : '▶'} ${row.fr === 'その他' ? 'その他（未分類）' : esc(row.fr)}</b>`;
         const main = `<tr><td>${nameCell}</td><td style="font-weight:700">${row.catTotal}</td><td>${row.varCat}<span class="smd-dim" style="font-size:10px"> (${row.varUnits})</span></td><td>${row.singleCat}</td><td style="color:#e8710a;font-weight:600">${row.sold || ''}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`;
-        const exp = (open && row.fr !== 'その他') ? `<tr><td colspan="${colspan}" style="background:#fafafa;padding:0 8px">${coverageDrillHtml(row.fr, targets, q)}</td></tr>` : '';
+        const exp = open ? `<tr><td colspan="${colspan}" style="background:#fafafa;padding:0 8px">${coverageDrillHtml(row.fr, targets, q)}</td></tr>` : '';
         return main + exp;
       }).join('')}</table></div></div>`;
     host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => { const f = el.dataset.fr; if (lst.covOpen.has(f)) lst.covOpen.delete(f); else lst.covOpen.add(f); renderCoverage(); }));
-    host.querySelectorAll('.cov-sort').forEach(el => el.addEventListener('click', () => { lst.covSort = el.dataset.k; renderCoverage(); }));
+    const setCovSort = (k) => { if (lst.covSort === k) lst.covSortDir = ((lst.covSortDir || (k === 'name' ? 'asc' : 'desc')) === 'asc' ? 'desc' : 'asc'); else { lst.covSort = k; lst.covSortDir = (k === 'name' ? 'asc' : 'desc'); } renderCoverage(); };
+    host.querySelectorAll('.cov-sort,.cov-hsort').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); setCovSort(el.dataset.k); }));
+    const covFilterEl = host.querySelector('.cov-filter'); if (covFilterEl) covFilterEl.addEventListener('change', () => { lst.covFilter = covFilterEl.value; renderCoverage(); });
+    const fetchLimitEl = host.querySelector('.cov-fetchlimit'); if (fetchLimitEl) fetchLimitEl.addEventListener('click', async () => { fetchLimitEl.disabled = true; fetchLimitEl.textContent = '取得中…'; await fetchListingLimits(); });
     host.querySelectorAll('.cov-psort').forEach(el => el.addEventListener('click', () => { lst.covProdSort = el.dataset.k; renderCoverage(); }));
     host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
     // 国別 出品数リミットの上限入力 → 保存して再描画（占有率バー更新）
