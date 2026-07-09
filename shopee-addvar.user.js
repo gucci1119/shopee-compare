@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Add-Variation (Mercari)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.2.0
+// @version      0.3.0
 // @description  ポータルから渡されたジョブ(URLハッシュ #smdjob=)を受け取り、Shopee商品編集ページでメルカリ画像をアップロード→バリエ追加をUI自動操作する。まずは診断＋半自動（最後の保存は人が押す）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -19,7 +19,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.2.0';
+  const VER = '0.3.0';
 
   // --- ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） ---
   function readJob() {
@@ -130,14 +130,29 @@
       const file = await fetchImageFile(job.image, 'mercari_' + pid + '.jpg');
       log('✓ 画像 ' + Math.round(file.size / 1024) + 'KB', '#1a7f37');
 
-      // ② 画像アップロード枠にファイルを入れて img_id を得る（メイン画像枠を借用。保存はしないので商品には残らない）
-      const fin = document.querySelector('.shopee-image-manager input[type=file], .shopee-file-upload input[type=file], input.eds-upload__input');
+      // ② 画像アップロード枠にファイルを入れて img_id を得る。バリエ用スロット優先（メインはクロップが出るため）
+      const inputs = [...document.querySelectorAll('input.eds-upload__input, .eds-upload input[type=file]')];
+      const varSlot = inputs.find(i => !i.closest('.shopee-image-manager'));
+      const fin = varSlot || inputs[0] || document.querySelector('input[type=file]');
       if (!fin) { log('✗ アップロード枠が見つかりません（🔍診断で報告を）', '#d93025'); return; }
       lastImgId = null;
-      log('② 画像をアップロード中…（img_id取得）');
+      log('② 画像をアップロード中…' + (varSlot ? '(バリエ枠)' : '(メイン枠)'));
+      log('⚠️ クロップ/確認画面が出たら「確定/Confirm」を押してください（自動でも試みます）', '#8a6d3b');
       setFile(fin, file);
-      let w = 0; while (!lastImgId && w < 40) { await sleep(500); w++; }
-      if (!lastImgId) { log('✗ img_id取得できず（クロップ画面が出た/枠が違う可能性。手動で1枚上げてから再実行でも可）', '#d93025'); return; }
+      // クロップ/確認モーダルが出たら自動で「確定」を押す。並行して img_id を待つ（最大90秒＝手動確定の余地）
+      let w = 0;
+      while (!lastImgId && w < 180) {
+        await sleep(500); w++;
+        try {
+          const dlg = [...document.querySelectorAll('[role=dialog], .eds-modal, .eds-modal__box, [class*=modal], [class*=crop], [class*=cropper]')].find(d => d.offsetParent !== null && [...d.querySelectorAll('button')].some(b => b.offsetParent !== null));
+          if (dlg) {
+            const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|concluir|conclu|ok|done|apply|salvar|save|保存|使用|use)/i.test(norm(b.textContent)) && !/(cancel|取消|cancelar|voltar|back|reset)/i.test(norm(b.textContent)));
+            const primary = ok || dlg.querySelector('button.eds-button--primary, button[class*=primary]');
+            if (primary && !primary.__smdClicked) { primary.__smdClicked = true; log('・確認モーダルを自動クリック: 「' + norm(primary.textContent).slice(0, 14) + '」'); primary.click(); }
+          }
+        } catch (_) {}
+      }
+      if (!lastImgId) { log('✗ img_id取得できず（クロップ確認が自動化できなかった可能性。🔍診断ログを共有ください）', '#d93025'); return; }
       const imgId = lastImgId;
       log('✓ img_id 取得', '#1a7f37');
 
