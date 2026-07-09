@@ -3356,19 +3356,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const sku = (presetSku != null) ? presetSku : prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
     if (!sku || !sku.trim()) return;
     if (!confirm(`本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
-    let ok = 0; const fails = [];
+    let ok = 0; const fails = [], okItems = [];
     for (const lg of listings) {
       try {
         const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false });
-        if (j && j.code === 0) ok++;
+        if (j && j.code === 0) { ok++; okItems.push(lg); }
         else fails.push(`${lg.cc} (item ${lg.item_id})：${(j && (j.user_message || j.message)) || ('code ' + (j && j.code))}`);
       } catch (e) { fails.push(`${lg.cc} (item ${lg.item_id})：${e.message}`); }
     }
     const ng = fails.length;
+    // 成功分を即反映：メモリ上のparent_skuを更新＋書込済み(item_id)をマーク → 再描画で 推→🔗・✓済・国別SKU が即反映
+    if (ok) {
+      if (!lst.covSkuWritten) lst.covSkuWritten = new Set();
+      okItems.forEach(lg => { lst.covSkuWritten.add(lg.item_id); const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); if (row) row.parent_sku = sku.trim(); });
+    }
     alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}`
       + (ng ? `\n\n■ 失敗の内訳\n・${fails.join('\n・')}\n\n※ よくある原因：その国のSeller Centerに未ログイン/セッション切れ（→ログインし直す）、商品がロック/審査中、または一時的なタイムアウト。` : '')
-      + `\n\n（次回の🔄更新でポータル表示にも反映されます）`);
+      + `\n\n（この画面には即反映。確定表示は次回の🔄更新）`);
     try { logAct('出品', 'SKU設定', repName || '', scopeLabel + ' ' + sku.trim() + ' 成功' + ok + '/失敗' + ng + (ng ? ' [' + fails.map(f => f.split('：')[0]).join(',') + ']' : '')); } catch (_) {}
+    if (ok && document.getElementById('list-coverage')) { try { renderCoverage(); } catch (_) {} }
   }
   // 選択中カタログの対象出品を集める（scope='all' か 特定cc）。covCatDataは展開済フランチャイズ分だけ持つ
   function bulkListings(scope) {
@@ -3466,7 +3472,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 横断カバレッジの数字チップをクリックしたときの操作メニュー（大きめのタップ行）
   function showCovCellMenu(el) {
     document.querySelectorAll('.cov-menu').forEach(m => m.remove());
-    const cc = el.dataset.cc, host = el.dataset.host, id = el.dataset.id, name = el.dataset.name || '', buy = el.dataset.buy, search = el.dataset.search, skukey = el.dataset.skukey, count = +(el.dataset.count || 1);
+    const cc = el.dataset.cc, host = el.dataset.host, id = el.dataset.id, name = el.dataset.name || '', buy = el.dataset.buy, search = el.dataset.search, skukey = el.dataset.skukey, count = +(el.dataset.count || 1), curSku = el.dataset.sku;
     const box = document.createElement('div'); box.className = 'cov-menu';
     box.style.cssText = 'position:fixed;z-index:500;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:6px;min-width:212px;font-size:13px';
     const rc = el.getBoundingClientRect();
@@ -3474,8 +3480,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     box.style.top = (rc.bottom + 6 + (window.innerHeight - rc.bottom < 170 ? -(rc.height + 176) : 0)) + 'px';
     const head = document.createElement('div');
     head.textContent = cc + '・' + (count > 1 ? count + '出品・' : '') + name;
-    head.style.cssText = 'font-size:11px;color:#999;padding:5px 10px 8px;max-width:232px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    head.style.cssText = 'font-size:11px;color:#999;padding:5px 10px 4px;max-width:232px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     box.appendChild(head);
+    if (id) { const sk = document.createElement('div'); sk.innerHTML = '現在のSKU：<b style="font-family:monospace;color:' + (curSku ? '#1a7f37' : '#d93025') + '">' + esc(curSku || '(空)') + '</b>'; sk.style.cssText = 'font-size:11px;color:#666;padding:0 10px 8px;max-width:232px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; box.appendChild(sk); }
     const row = (txt, fn, color) => { const b = document.createElement('div'); b.textContent = txt; b.style.cssText = 'padding:10px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-weight:600;color:' + (color || '#333'); b.onmouseover = () => b.style.background = '#f2f2f2'; b.onmouseout = () => b.style.background = ''; b.onclick = (e) => { e.stopPropagation(); close(); fn(); }; box.appendChild(b); };
     if (id) {
       row('✎ ポータルで編集', () => { if (!host) { alert('ホスト不明で編集できません'); return; } openCatalogEditor(cc, host, id, name); }, '#ee4d2d');
@@ -3666,12 +3673,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if ((l.model_count || 0) > 1) {
         const ck = skuKey(l.parent_sku) || productKey(l.name) || ('c' + l.item_id);
         let c = catalogs.get(ck); if (!c) { c = { key: ck, curSku: l.parent_sku || '', bySku: !!skuKey(l.parent_sku), rep: l.name, img: l.image, cc: {}, link: {}, listings: [], items: new Map(), sold: 0 }; catalogs.set(ck, c); }
-        c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; c.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id }); if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
+        c.cc[r.cc] = (c.cc[r.cc] || 0) + 1; c.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id, parent_sku: l.parent_sku || '' }); if (!c.link[r.cc]) c.link[r.cc] = searchUrl(r, l.name);
         (l.models || []).forEach(m => {
           const ik = skuKey(m.sku) || productKey(m.n) || m.n || ('m' + m.id);
           let it = c.items.get(ik); if (!it) { it = { key: ik, curSku: m.sku || '', bySku: !!skuKey(m.sku), rep: m.n, img: m.img || l.image, cc: {}, link: {}, listings: [], sold: 0 }; c.items.set(ik, it); }
           it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (m.sold || 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, m.n || l.name);
-          it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id });
+          it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id, parent_sku: l.parent_sku || '' });
           c.sold += (m.sold || 0);
         });
       } else {
@@ -3680,7 +3687,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const ik = skuKey(msku) || productKey(text) || text;
         let it = singles.get(ik); if (!it) { it = { key: ik, curSku: msku || '', bySku: !!skuKey(msku), rep: text, img: (l.models && l.models[0] && l.models[0].img) || l.image, cc: {}, link: {}, listings: [], sold: 0 }; singles.set(ik, it); }
         it.cc[r.cc] = (it.cc[r.cc] || 0) + 1; it.sold += (l.models || []).reduce((s, m) => s + (m.sold || 0), 0); if (!it.link[r.cc]) it.link[r.cc] = searchUrl(r, text);
-        it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id });
+        it.listings.push({ cc: r.cc, host: r.host, item_id: l.item_id, parent_sku: l.parent_sku || '' });
       }
     }));
     const cmp = lst.covProdSort === 'sold' ? (a, b) => b.sold - a.sold || b.missing - a.missing
@@ -3691,7 +3698,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const imgTag = (u, sz) => u ? `<img src="${IMG_CDN}${esc(u)}" style="width:${sz}px;height:${sz}px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
     const skuCell = (o) => o.bySku ? `<span style="color:#1a7f37;font-family:monospace;font-size:10px" title="現SKUで連結済み">🔗${esc(o.curSku)}</span>` : `<span style="color:#7b52c4;font-family:monospace;font-size:10px" title="現SKU: ${esc(o.curSku || '(空)')}／このSKUに揃えると連結">推奨 ${esc(recommendSku(o.key))}</span>`;
     // インライン編集できるSKUセル（現状SKUで連結済なら🔗、未連結なら推奨SKUをプリセット）。編集して「書込」で全出品に書き込む
-    const skuEdit = (fullKey, o) => `<div style="display:flex;gap:2px;align-items:center;white-space:nowrap">${o.bySku ? '<span title="現SKUで連結済み" style="color:#1a7f37">🔗</span>' : '<span title="未連結（推奨SKUをプリセット）" style="color:#7b52c4;font-size:9px;font-weight:700">推</span>'}<input class="cov-sku-in" data-key="${esc(fullKey)}" value="${av(o.bySku ? o.curSku : recommendSku(o.key))}" spellcheck="false" title="現状:${av(o.curSku || '(空)')} ／ 推奨:${av(recommendSku(o.key))}" style="width:145px;padding:2px 5px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:10px"><button class="cov-sku-apply smd-btn" data-key="${esc(fullKey)}" style="font-size:9px;padding:1px 5px" title="このSKUを全出品(全国)に書き込む">書込</button></div>`;
+    const skuEdit = (fullKey, o) => {
+      const perCc = {}; (o.listings || []).forEach(x => { if (perCc[x.cc] == null) perCc[x.cc] = x.parent_sku || ''; });
+      const ccPairs = Object.entries(perCc);
+      const differ = [...new Set(ccPairs.map(([, s]) => s))].length > 1;
+      const ccTip = ccPairs.map(([cc, s]) => cc + ': ' + (s || '(空)')).join('\n');
+      const written = lst.covSkuWritten && (o.listings || []).some(x => lst.covSkuWritten.has(x.item_id));
+      const badge = written ? ' <span title="このセッションで書き込み済み（次の🔄更新で確定表示）" style="color:#1a7f37;font-size:10px;font-weight:700">✓済</span>' : '';
+      const globe = ccPairs.length ? ` <span class="smd-dim" title="各国の現在SKU:\n${av(ccTip)}" style="cursor:help;font-size:10px;color:${differ ? '#d93025' : '#8a8a8a'}">🌐${differ ? '差' : ''}</span>` : '';
+      return `<div style="display:flex;gap:3px;align-items:center;white-space:nowrap">${o.bySku ? '<span title="現SKUで連結済み" style="color:#1a7f37">🔗</span>' : '<span title="未連結（推奨SKUをプリセット）" style="color:#7b52c4;font-size:9px;font-weight:700">推</span>'}<input class="cov-sku-in" data-key="${esc(fullKey)}" value="${av(o.bySku ? o.curSku : recommendSku(o.key))}" spellcheck="false" title="現状:${av(o.curSku || '(空)')} ／ 推奨:${av(recommendSku(o.key))}" style="width:140px;padding:2px 5px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:10px"><button class="cov-sku-apply smd-btn" data-key="${esc(fullKey)}" style="font-size:9px;padding:1px 5px" title="このSKUを全出品(全国)に書き込む">書込</button>${globe}${badge}</div>`;
+    };
     // 各国セルの数字リンク：その国の出品が1件なら✏️編集ページ直行＋🛍️販売(公開)ページ、複数ならキーワード検索(↗)
     // 各国セル＝クリックできる数字チップ。押すと操作メニュー(編集/Shopee/販売/SKU)が開く。skuKeyはカタログ行のみ渡す
     const linkNum = (o, r, skuKeyAttr) => {
@@ -3700,7 +3716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const one = ls.length === 1 ? ls[0] : null;
       const buy = one ? (buyerUrlFor(r.cc, one.item_id) || '') : '';
       const data = `data-cc="${r.cc}" data-name="${av(o.rep || '')}" data-count="${ls.length}"`
-        + (one ? ` data-host="${av(one.host)}" data-id="${one.item_id}" data-buy="${av(buy)}"` : '')
+        + (one ? ` data-host="${av(one.host)}" data-id="${one.item_id}" data-buy="${av(buy)}" data-sku="${av(one.parent_sku || '')}"` : '')
         + (o.link[r.cc] ? ` data-search="${av(o.link[r.cc])}"` : '')
         + (skuKeyAttr ? ` data-skukey="${av(skuKeyAttr)}"` : '');
       return `<span class="cov-cell" ${data} style="cursor:pointer;color:#0b6b2e;font-weight:700;padding:2px 8px;border-radius:6px;background:#e7f4e9;display:inline-block;min-width:22px;text-align:center;line-height:1.5" title="${r.cc}: クリックで操作">${n}${ls.length > 1 ? '⁺' : ''} ▾</span>`;
