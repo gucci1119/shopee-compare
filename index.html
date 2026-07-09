@@ -3929,7 +3929,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // lst.byCc を確実にロード（出品状況/分析/横断で共有）
   async function ensureListings() {
     if (lst.loaded) return;
-    lst.byCc = await listingsFromDb();
+    const seq = (lst._seq = (lst._seq || 0) + 1);   // アカウント切替で読込が重なった時、古い(未フィルタ)結果が上書きしないように
+    const data = await listingsFromDb();
+    if (seq !== lst._seq) return;                    // より新しい読込に追い越された→この結果は破棄
+    lst.byCc = data;
     // シリーズ分類は静的なので1商品1回だけ計算してキャッシュ（毎レンダーの再計算＝検索/展開の重さを解消）
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => {
       if (l._fr === undefined) { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }
@@ -6001,6 +6004,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         updateAcctHint();
         showPage(state.page);
       });
+    }
+    // 初回描画は acctReady 確定前に走るため、特定アカウント選択時はここで絞り込んで描き直す（1回だけ）
+    if (!state.acctInit) {
+      state.acctInit = true;
+      if (state.acctReady && state.acct && state.acct !== 'all') {
+        lst.loaded = false; lst.byCc = {}; lst.covCatData = {}; state.orders.started = false;
+        showPage(state.page);
+      }
     }
   }
   (async function boot() {
