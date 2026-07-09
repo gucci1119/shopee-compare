@@ -3136,10 +3136,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   // 親SKUを複数出品にまとめて書き込む（全国/各国 共通・確認あり）
-  async function writeParentSku(listings, scopeLabel, defaultSku, repName) {
+  async function writeParentSku(listings, scopeLabel, defaultSku, repName, presetSku) {
     if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
     if (!listings || !listings.length) return;
-    const sku = prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
+    const sku = (presetSku != null) ? presetSku : prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
     if (!sku || !sku.trim()) return;
     if (!confirm(`本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
     let ok = 0, ng = 0;
@@ -3426,7 +3426,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return cands;
   }
   // シリーズ配下の「商品(明細)×国」有無マトリクスのHTMLを返す（アコーディオンでインライン展開）。無い国=コピー出品候補
-  function coverageDrillHtml(fr, targets) {
+  function coverageDrillHtml(fr, targets, q) {
     const searchUrl = (r, name) => `https://${r.host}/portal/product/list/all?keyword=${encodeURIComponent((name || '').slice(0, 40))}`;
     // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用＝強制連結。連番/空/ゴミは無効
     const skuKey = (sku) => { const s = String(sku || '').trim(); return (/_/.test(s) && /[a-z]/i.test(s) && s.length >= 4) ? s.toUpperCase() : null; };
@@ -3461,6 +3461,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const imgTag = (u, sz) => u ? `<img src="${IMG_CDN}${esc(u)}" style="width:${sz}px;height:${sz}px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
     const skuCell = (o) => o.bySku ? `<span style="color:#1a7f37;font-family:monospace;font-size:10px" title="現SKUで連結済み">🔗${esc(o.curSku)}</span>` : `<span style="color:#7b52c4;font-family:monospace;font-size:10px" title="現SKU: ${esc(o.curSku || '(空)')}／このSKUに揃えると連結">推奨 ${esc(recommendSku(o.key))}</span>`;
+    // インライン編集できるSKUセル（現状SKUで連結済なら🔗、未連結なら推奨SKUをプリセット）。編集して「書込」で全出品に書き込む
+    const skuEdit = (fullKey, o) => `<div style="display:flex;gap:2px;align-items:center;white-space:nowrap">${o.bySku ? '<span title="現SKUで連結済み" style="color:#1a7f37">🔗</span>' : '<span title="未連結（推奨SKUをプリセット）" style="color:#7b52c4;font-size:9px;font-weight:700">推</span>'}<input class="cov-sku-in" data-key="${esc(fullKey)}" value="${av(o.bySku ? o.curSku : recommendSku(o.key))}" spellcheck="false" title="現状:${av(o.curSku || '(空)')} ／ 推奨:${av(recommendSku(o.key))}" style="width:145px;padding:2px 5px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:10px"><button class="cov-sku-apply smd-btn" data-key="${esc(fullKey)}" style="font-size:9px;padding:1px 5px" title="このSKUを全出品(全国)に書き込む">書込</button></div>`;
     // 各国セルの数字リンク：その国の出品が1件なら✏️編集ページ直行＋🛍️販売(公開)ページ、複数ならキーワード検索(↗)
     // 各国セル＝クリックできる数字チップ。押すと操作メニュー(編集/Shopee/販売/SKU)が開く。skuKeyはカタログ行のみ渡す
     const linkNum = (o, r, skuKey) => {
@@ -3482,24 +3484,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!lst.covCatData) lst.covCatData = {};
     cats.forEach(c => { lst.covCatData[fr + '::' + c.key] = { rep: c.rep, curSku: c.curSku, recSku: recommendSku(c.key), listings: c.listings }; });
     sgl.forEach(it => { lst.covCatData[fr + '::S::' + it.key] = { rep: it.rep, curSku: it.curSku, recSku: recommendSku(it.key), listings: it.listings }; });
-    const catRows = cats.slice(0, 300).map(c => {
+    // 検索フィルタ（表示のみ絞る。covCatDataは全件のまま）
+    let dcats = cats, dsgl = sgl;
+    if (q) {
+      const mm = (o) => (((o.rep || '') + ' ' + (o.curSku || '') + ' ' + recommendSku(o.key) + ' ' + [...(o.items ? o.items.values() : [])].map(x => x.rep || '').join(' ')).toLowerCase()).includes(q);
+      dcats = cats.filter(mm); dsgl = sgl.filter(mm);
+    }
+    const catRows = dcats.slice(0, 300).map(c => {
       const open = lst.covCat && lst.covCat.has(fr + '::' + c.key);
       const items = [...c.items.values()].map(withMiss).sort(cmp);
-      const setBtn = `<button class="cov-setsku smd-btn" data-key="${esc(fr + '::' + c.key)}" style="font-size:9px;padding:1px 5px;margin-left:4px" title="このSKUを各国のShopeeカタログに書き込む">🏷SKU設定</button>`;
       const bsel = lst.bulkSel && lst.bulkSel.has(fr + '::' + c.key);
-      const header = `<tr style="background:${bsel ? '#dcedff' : '#eaf1ff'}"><td style="white-space:nowrap"><input type="checkbox" class="cov-bulk" data-key="${esc(fr + '::' + c.key)}"${bsel ? ' checked' : ''} style="vertical-align:middle;margin-right:3px;cursor:pointer" title="一括編集に選択">${imgTag(c.img, 22)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細/${c.listings.length}出品)</span></td><td>${skuCell(c)}${setBtn}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCellsCat(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
+      const header = `<tr style="background:${bsel ? '#dcedff' : '#eaf1ff'}"><td style="white-space:nowrap"><input type="checkbox" class="cov-bulk" data-key="${esc(fr + '::' + c.key)}"${bsel ? ' checked' : ''} style="vertical-align:middle;margin-right:3px;cursor:pointer" title="一括編集に選択">${imgTag(c.img, 22)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細/${c.listings.length}出品)</span></td><td>${skuEdit(fr + '::' + c.key, c)}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCellsCat(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
       const itemRows = open ? items.map(it => `<tr><td style="padding-left:18px">${imgTag(it.img, 22)}</td><td style="text-align:right;color:#bbb">↳</td><td style="font-size:11px;padding-left:8px">${esc((it.rep || '').slice(0, 38))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`).join('') : '';
       return header + itemRows;
     }).join('');
-    const sglRows = sgl.slice(0, 400).map(it => { const sbsel = lst.bulkSel && lst.bulkSel.has(fr + '::S::' + it.key); return `<tr style="${sbsel ? 'background:#dcedff' : ''}"><td style="white-space:nowrap"><input type="checkbox" class="cov-bulk" data-key="${esc(fr + '::S::' + it.key)}"${sbsel ? ' checked' : ''} style="vertical-align:middle;margin-right:3px;cursor:pointer" title="一括編集に選択">${imgTag(it.img, 20)}</td><td title="単品出品">🔹</td><td style="font-size:11px">${esc((it.rep || '').slice(0, 40))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`; }).join('');
+    const sglRows = dsgl.slice(0, 400).map(it => { const sbsel = lst.bulkSel && lst.bulkSel.has(fr + '::S::' + it.key); return `<tr style="${sbsel ? 'background:#dcedff' : ''}"><td style="white-space:nowrap"><input type="checkbox" class="cov-bulk" data-key="${esc(fr + '::S::' + it.key)}"${sbsel ? ' checked' : ''} style="vertical-align:middle;margin-right:3px;cursor:pointer" title="一括編集に選択">${imgTag(it.img, 20)}</td><td title="単品出品">🔹</td><td style="font-size:11px">${esc((it.rep || '').slice(0, 40))}</td><td>${skuEdit(fr + '::S::' + it.key, it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`; }).join('');
     const colspan = 6 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-psort" data-k="${k}" style="${(lst.covProdSort || 'missing') === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
     return `<div style="padding:6px 2px">
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／「推奨」=このSKUに揃えれば連結／<b>🏷SKU設定=全国一括書込</b>／<b>各国の数字チップをクリック→操作メニュー</b>（✎ポータル編集/✏️Shopee編集画面/🛍️販売ページ/🏷この国だけSKU設定。🛍️は同期後）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px"><b>${esc(fr)}</b>：📦カタログ(親)クリックで配下のバリエ明細を展開。<b style="color:#d93025">✗=未出品=コピー出品候補</b>／🔗=現SKUで連結済／推=未連結(推奨SKUをプリセット)／<b>SKU欄を編集→「書込」で全出品(全国)に反映</b>／<b>各国の数字チップをクリック→操作メニュー</b>（✎ポータル編集/✏️Shopee編集画面/🛍️販売ページ/🏷この国だけSKU設定。🛍️は同期後）／並び: ${sortBtn('missing', '欠け順')} ${sortBtn('sold', '販売数順')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="pf-scroll" style="max-height:62vh"><table class="pf-table"><tr><th></th><th>型</th><th>カタログ / 明細</th><th>SKU</th><th>売</th>${cch}<th title="未出品の国数">欠</th></tr>
-      <tr><td colspan="${colspan}" style="background:#eaf1ff;font-weight:700;font-size:11px;padding:4px 8px">📦 バリエ型カタログ ${cats.length}件</td></tr>
+      <tr><td colspan="${colspan}" style="background:#eaf1ff;font-weight:700;font-size:11px;padding:4px 8px">📦 バリエ型カタログ ${dcats.length}件${q ? '（検索一致）' : ''}</td></tr>
       ${catRows}
-      <tr><td colspan="${colspan}" style="background:#f0f0f0;font-weight:700;font-size:11px;padding:4px 8px">🔹 単品出品 ${sgl.length}件</td></tr>
+      <tr><td colspan="${colspan}" style="background:#f0f0f0;font-weight:700;font-size:11px;padding:4px 8px">🔹 単品出品 ${dsgl.length}件${q ? '（検索一致）' : ''}</td></tr>
       ${sglRows}
       </table></div></div>`;
   }
@@ -3513,6 +3520,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!lst.bulkScope) lst.bulkScope = 'all';
     const map = new Map();
     let allCat = 0, allVarCat = 0, allVarUnits = 0, allSingle = 0;
+    let q = (lst.covSearch || '').trim().toLowerCase(); if (q.length < 2) q = '';
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
       const names = (l.models || []).map(m => m.n).join(' ');
       const fr = classifyFranchise((l.name || '') + ' ' + names);
@@ -3522,6 +3530,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       e.catTotal++; e.cc[r.cc] = (e.cc[r.cc] || 0) + 1; e.sold += sold; allCat++;
       if (isVar) { e.varCat++; e.varUnits += l.model_count; allVarCat++; allVarUnits += l.model_count; }
       else { e.singleCat++; allSingle++; }
+      if (q && !e.matched) { const hay = ((l.name || '') + ' ' + (l.parent_sku || '') + ' ' + names + ' ' + (l.models || []).map(m => m.sku).join(' ')).toLowerCase(); if (hay.includes(q)) e.matched = true; }
     }));
     const sort = lst.covSort || 'catTotal';
     let rows = [...map.entries()].map(([fr, e]) => ({ fr, ...e }));
@@ -3531,6 +3540,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     else if (sort === 'sold') rows.sort((a, b) => b.sold - a.sold);
     else rows.sort((a, b) => b.catTotal - a.catTotal);
     rows = rows.concat(others);
+    if (q) rows = rows.filter(x => x.matched);
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const colspan = 5 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-sort" data-k="${k}" style="${sort === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
@@ -3550,12 +3560,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.innerHTML =
       `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
+      <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center"><input id="cov-search" value="${av(lst.covSearch || '')}" placeholder="🔎 カタログ名・SKU・バリエ名で検索（2文字以上／該当シリーズを自動展開）" style="width:min(460px,100%);padding:8px 11px;border:1px solid #ddd;border-radius:8px;font-size:13px">${q ? `<span class="smd-dim" style="font-size:11px">「${esc(q)}」で絞り込み中 ${rows.length}シリーズ</span>` : ''}</div>
       ${bulkBar}
       <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th><th>売</th>${cch}</tr>${rows.map(row => {
-        const open = lst.covOpen.has(row.fr);
+        const open = q ? true : lst.covOpen.has(row.fr);
         const nameCell = row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'} ${esc(row.fr)}</b>`;
         const main = `<tr><td>${nameCell}</td><td style="font-weight:700">${row.catTotal}</td><td>${row.varCat}<span class="smd-dim" style="font-size:10px"> (${row.varUnits})</span></td><td>${row.singleCat}</td><td style="color:#e8710a;font-weight:600">${row.sold || ''}</td>${targets.map(r => { const n = row.cc[r.cc] || 0; return `<td style="${n === 0 && row.fr !== 'その他' ? 'background:#fff0f0;color:#d93025;font-weight:700' : ''}">${n || (row.fr === 'その他' ? 0 : '—')}</td>`; }).join('')}</tr>`;
-        const exp = (open && row.fr !== 'その他') ? `<tr><td colspan="${colspan}" style="background:#fafafa;padding:0 8px">${coverageDrillHtml(row.fr, targets)}</td></tr>` : '';
+        const exp = (open && row.fr !== 'その他') ? `<tr><td colspan="${colspan}" style="background:#fafafa;padding:0 8px">${coverageDrillHtml(row.fr, targets, q)}</td></tr>` : '';
         return main + exp;
       }).join('')}</table></div></div>`;
     host.querySelectorAll('.cov-fr').forEach(el => el.addEventListener('click', () => { const f = el.dataset.fr; if (lst.covOpen.has(f)) lst.covOpen.delete(f); else lst.covOpen.add(f); renderCoverage(); }));
@@ -3564,8 +3575,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-cat').forEach(el => el.addEventListener('click', () => { if (!lst.covCat) lst.covCat = new Set(); const k = el.dataset.key; if (lst.covCat.has(k)) lst.covCat.delete(k); else lst.covCat.add(k); renderCoverage(); }));
     // 各国セルの数字チップ → 操作メニュー（編集/Shopee/販売/この国だけSKU設定）
     host.querySelectorAll('.cov-cell').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); showCovCellMenu(el); }));
-    // 🏷SKU設定（カタログ行のSKU列＝全国一括ボタン）
-    host.querySelectorAll('.cov-setsku').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return; const ccs = [...new Set(d.listings.map(x => x.cc))].join('/'); writeParentSku(d.listings, `全国一括SKU設定（${ccs}）`, d.recSku || d.curSku, d.rep); }));
+    // 検索: 入力ごとに再描画（フォーカス/カーソル位置を復元）
+    const sInp = host.querySelector('#cov-search');
+    if (sInp) sInp.addEventListener('input', () => { lst.covSearch = sInp.value; const pos = sInp.selectionStart; Promise.resolve(renderCoverage()).then(() => { const ni = document.getElementById('cov-search'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }); });
+    // SKU列インライン編集：入力欄クリックは行トグルに伝播させない／「書込」で全出品へ書き込み
+    host.querySelectorAll('.cov-sku-in').forEach(el => el.addEventListener('click', ev => ev.stopPropagation()));
+    host.querySelectorAll('.cov-sku-apply').forEach(el => el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return;
+      const inp = el.parentElement.querySelector('.cov-sku-in'); const val = (inp && inp.value || '').trim();
+      if (!val) { alert('SKUを入力してください'); return; }
+      const ccs = [...new Set(d.listings.map(x => x.cc))].join('/');
+      writeParentSku(d.listings, `SKU書込（${ccs}）`, val, d.rep, val);
+    }));
     // 一括編集：選択チェック・スコープ・各アクション
     host.querySelectorAll('.cov-bulk').forEach(el => el.addEventListener('change', () => { const k = el.dataset.key; if (el.checked) lst.bulkSel.add(k); else lst.bulkSel.delete(k); renderCoverage(); }));
     const scopeSel = host.querySelector('#cov-bulkscope'); if (scopeSel) scopeSel.addEventListener('change', () => { lst.bulkScope = scopeSel.value; });
