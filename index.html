@@ -4339,6 +4339,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     rows.forEach(r => { const s = Number(r.status); if (s === 1) live++; else if (s === 8) unpub++; else other++; });
     return { total: rows.length, live, unpub, other };
   }
+  // 出品枠(Listing Limit)はアカウント別に保持。特定アカウント/系統(fam:)選択時はそのキー、全体/未判別はレガシー(cc)=メイン垢ぶん。
+  // ＝gs_japan_select等の枠を入れてもgcsonlinestoreの枠を上書きしない。
+  function quotaKey(cc) { const a = state.acct; return (a && a !== 'all' && a !== 'none') ? a + '|' + cc : cc; }
+  const quotaLimit = (cc) => Number((settings.listQuota || {})[quotaKey(cc)]) || 0;
+  // 今この画面がどのアカウントぶんを表示しているか（枠パネル等の見出し用）
+  function acctScopeLabel() {
+    const a = state.acct;
+    if (!a || a === 'all') return '全アカウント';
+    if (a === 'none') return '未判別';
+    if (a.slice(0, 4) === 'fam:') return a.slice(4) + '（全国）';
+    const acc = (state.accounts || []).find(x => String(x.shop_id) === String(a));
+    return acc ? acc.label : ('shop ' + a);
+  }
   // Shopeeから各国の出品枠(Listing Limit=publish_limit)を取得。ブリッジがSPC_CDSを注入するのでライブPC必須。
   async function fetchListingLimits() {
     if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で取得できます'); return; }
@@ -4350,7 +4363,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const j = await bridgeGetJson(`https://${r.host}/api/v3/opt/mpsku/list/get_product_count_limit?SPC_CDS_VER=2`);
         const d = (j && j.data) || {};
         const lim = Number(d.publish_limit != null ? d.publish_limit : (d.limit != null ? d.limit : d.product_count_limit));
-        if (j && j.code === 0 && lim > 0) { settings.listQuota[r.cc] = lim; ok++; }
+        if (j && j.code === 0 && lim > 0) { settings.listQuota[quotaKey(r.cc)] = lim; ok++; }
         else fail.push(`${r.cc}(code${j && j.code})`);
       } catch (e) { fail.push(`${r.cc}:${(e.message || '').slice(0, 30)}`); }
     }
@@ -4362,7 +4375,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const q = settings.listQuota || {};
     const cards = targets.map(r => {
       const st = quotaStats(r.cc); const live = st.live;
-      const lim = Number(q[r.cc]) || 0; const has = lim > 0;
+      const lim = quotaLimit(r.cc); const has = lim > 0;
       const rem = has ? lim - live : null;
       const pct = has ? Math.round(live / lim * 100) : null;
       const over = has && live >= lim;
@@ -4382,7 +4395,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const totLive = targets.reduce((s, r) => s + quotaStats(r.cc).live, 0);
     const totCreated = targets.reduce((s, r) => s + (lst.byCc[r.cc] || []).length, 0);
     return `<div class="tool-card" style="max-width:none;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:6px"><b style="font-size:13px">📦 国別 出品枠（Listing Limit）</b><button class="cov-fetchlimit smd-btn" style="font-size:10.5px" title="Shopeeから各国の出品枠(Listing Limit)を取得（ライブPC）">🔄 枠をShopeeから取得</button><span class="smd-dim" style="font-size:10.5px;margin-left:auto"><b>Live(公開中)だけが枠に数えられます</b>。枠は自動取得か手入力。未公開/違反は枠外＝作成数は枠超OK。合計 Live <b>${totLive.toLocaleString()}</b>・作成 ${totCreated.toLocaleString()}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:6px"><b style="font-size:13px">📦 国別 出品枠（Listing Limit）<span style="font-weight:400;font-size:11px;color:#2b6cb0"> 対象: ${esc(acctScopeLabel())}</span></b><button class="cov-fetchlimit smd-btn" style="font-size:10.5px" title="Shopeeから各国の出品枠(Listing Limit)を取得（ライブPC）">🔄 枠をShopeeから取得</button><span class="smd-dim" style="font-size:10.5px;margin-left:auto"><b>Live(公開中)だけが枠に数えられます</b>。枠は自動取得か手入力。未公開/違反は枠外＝作成数は枠超OK。合計 Live <b>${totLive.toLocaleString()}</b>・作成 ${totCreated.toLocaleString()}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div></div>`;
   }
   function renderCoverageInner(host) {
@@ -4465,7 +4478,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-quota').forEach(el => el.addEventListener('change', () => {
       if (!settings.listQuota) settings.listQuota = {};
       const v = parseInt(el.value, 10);
-      if (v > 0) settings.listQuota[el.dataset.cc] = v; else delete settings.listQuota[el.dataset.cc];
+      const k = quotaKey(el.dataset.cc);
+      if (v > 0) settings.listQuota[k] = v; else delete settings.listQuota[k];
       saveSettings(); renderCoverage();
     }));
     // 各国セルの数字チップ → 操作メニュー（編集/Shopee/販売/この国だけSKU設定）
