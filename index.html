@@ -2064,6 +2064,13 @@
   // ---------------- 🔑 アカウント登録簿 ----------------
   const ACCT_STATUS = [['main', 'メイン'], ['sub', 'サブ(第2垢〜)'], ['new', '新規(準備中)'], ['dormant', '休眠']];
   const acctStLabel = v => (ACCT_STATUS.find(s => s[0] === v) || [, v || '-'])[1];
+  // メインアカウント配下の全ショップ一覧（get_shop_list）。1セッションで全13ショップ等をshop_id/店名/国/最終ログイン付きで取得。
+  async function fetchShopList() {
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const host = (targets[0] || REGIONS[0]).host;
+    const j = await bridgeGetJson(`https://${host}/api/selleraccount/subaccount/get_shop_list/`);
+    return (j && (j.shops || (j.data && j.data.shops))) || [];
+  }
   // 「今このブラウザのShopeeセッションがどの垢か」を各国ライブ取得。get_shop_base_info が shop_id＋店名(name)＋商品数 を返す。
   async function detectShopIds(targets) {
     const out = {};
@@ -2101,6 +2108,7 @@
     const detectCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;border:1px solid #ffd9c2">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🔍 今このブラウザのアカウント確認</b><button class="acct-detect smd-btn" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d">各国ライブ取得</button><span class="smd-dim" style="font-size:11px">Shopeeのセッション入れ替わりバグ検出用。<b>書込/同期の前にここで「今どの垢か」を確認</b>。「この端末の担当」に設定した垢と違えば⚠️。</span></div>
       <div class="acct-detect-res" style="margin-top:8px"></div></div>`;
+    const importCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;background:#eef8f0;border:1px solid #cdeccf"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🔄 Shopeeから全ショップ取込</b><button class="acct-import smd-btn" style="background:#1a7f37;color:#fff;border-color:#1a7f37">メインアカウント配下を一括取込</button><span class="smd-dim" style="font-size:11px">1ログインで見える全ショップ（shop_id・店名・国・最終ログイン）を登録簿へ。既存の名前/ブラウザ/タグ/メモは保持。状態はメイン垢=main、他=subで初期化（あとで編集可）。</span></div></div>`;
     const ccOpts = REGIONS.map(r => `<option value="${r.cc}">${r.cc}</option>`).join('');
     const stOpts = (sel) => ACCT_STATUS.map(s => `<option value="${s[0]}"${sel === s[0] ? ' selected' : ''}>${s[1]}</option>`).join('');
     const detHtml = REGIONS.some(r => detected[r.cc]) ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">このブラウザで検出中のshop_id（前回同期した垢）：${REGIONS.filter(r => detected[r.cc]).map(r => `<span style="margin-right:8px"><b style="color:${r.color}">${r.cc}</b> ${esc(detected[r.cc])} <button class="acct-usedet smd-btn" data-cc="${r.cc}" data-sid="${esc(detected[r.cc])}" style="font-size:9px;padding:0 4px">↑登録欄へ</button></span>`).join('')}</div>` : '';
@@ -2129,7 +2137,21 @@
         </div>`).join('')}</div>`).join('') || '<div class="smd-dim" style="padding:8px">まだ登録がありません。上のフォームから追加してください。</div>';
     const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 データ分離（次の一歩）</b>
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin-top:4px">第2垢の出品/注文をポータルで<b>アカウント別に</b>見るには、同期データに shop_id を付けて「アカウント別フィルタ」を足す改修が必要です（今は国単位で混ざる）。第2垢の出品が増える前にやるのが安全。やる時は声かけてください。</div></div>`;
-    host.innerHTML = intro + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    host.innerHTML = intro + importCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    const impBtn = host.querySelector('.acct-import');
+    if (impBtn) impBtn.addEventListener('click', async () => {
+      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で取込できます'); return; }
+      impBtn.disabled = true; impBtn.textContent = '取込中…';
+      let shops; try { shops = await fetchShopList(); } catch (e) { alert('取得失敗: ' + e.message); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; return; }
+      if (!shops.length) { alert('ショップが取得できませんでした（ログイン状態を確認）'); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; return; }
+      const existing = {}; (rows || []).forEach(a => existing[a.id] = a);
+      const upserts = shops.map(s => {
+        const cc = String(s.country || '').toUpperCase(); const id = cc + '_' + s.shop_id; const ex = existing[id] || {};
+        return { id, cc, label: ex.label || s.shop_name || s.username || String(s.shop_id), shop_id: String(s.shop_id), browser: ex.browser || '', status: ex.status || (s.is_main_shop ? 'main' : 'sub'), tags: ex.tags || '', note: ex.note || (s.last_login ? '最終ログイン ' + new Date(s.last_login * 1000).toISOString().slice(0, 10) : ''), updated_at: new Date().toISOString() };
+      });
+      try { for (let i = 0; i < upserts.length; i += 100) await sbUpsert('accounts', upserts.slice(i, i + 100)); try { logAct('アカウント', '全ショップ取込', '', upserts.length + '件'); } catch (_) {} alert(`${upserts.length}ショップを取込・更新しました`); renderAccounts(); }
+      catch (e) { alert('保存エラー: ' + e.message + '\n（accountsテーブルが未作成の可能性）'); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; }
+    });
     // 🔍 現在アカウント確認
     const renderDetect = (live) => {
       const my = settings.myShop || {};
@@ -2879,6 +2901,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '編集の即時反映を強化：SKU/タイトルをShopeeに書いたら、ポータルの表示（メモリ）＋保存データ（Supabase）にも即反映するように（従来は次回同期まで古いSKUが残って見えた）。カバレッジ/分析に「🕒 出品データ最終同期」時刻を表示。未公開(取り下げ)商品はShopeeが編集を拒否する旨を明記（THに未公開が多く、統一時にTHだけ失敗しやすい＝先に公開が必要）',
       '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
       '🔍 アカウント入れ替わり検出：Shopeeがたまにセッションを第1垢に戻すバグ対策。アカウントページで「今このブラウザの垢」を各国ライブ取得（get_shop_base_info の店名(name)＋shop_id＋商品数）し、店名で今どの垢か即判別。「この端末の担当」に設定した垢と違えば⚠️警告＋未登録垢はワンクリックで登録簿へ。書込/同期の前に確認できる',
+      '🔄 全ショップ一括取込：アカウントページで「Shopeeから全ショップ取込」→ メインアカウント配下の全ショップ（shop_id/店名/国/最終ログイン）をget_shop_listで取得し登録簿に自動登録（既存の名前/ブラウザ/タグ/メモは保持）。手入力不要で一覧が揃う',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
