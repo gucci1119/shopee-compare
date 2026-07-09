@@ -825,7 +825,7 @@
     const k = state.metric === 'confirmed' ? { units: 'cu', sales: 'cs', orders: 'co' } : { units: 'pu', sales: 'ps', orders: 'po' };
     return it[k[kind]] || 0;
   };
-  const fmtJpy = n => '¥' + Math.round(n).toLocaleString();
+  const fmtJpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
   const fmtLocal = (region, n) => region.cur + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   // 商品名などを「途中で切らずに」表示：全文をtitle(ホバーで全部見える)にしつつ、幅が足りない時だけ…で省略。wに'wrap'を渡すと折り返し表示
@@ -1088,7 +1088,7 @@
         const row = document.createElement('div');
         row.className = 'smd-item';
         row.innerHTML = `<span class="smd-itemrank">${i + 1}</span>` +
-          `<img loading="lazy" src="${IMG_CDN}${it.image}" onerror="this.style.opacity=.15">` +
+          `<img loading="lazy" src="${IMG_CDN}${esc(it.image)}" onerror="this.style.opacity=.15">` +
           `<div class="smd-iteminfo"><div class="smd-itemname"></div>` +
           `<div class="smd-itemstats"><b>${mv(it, 'units').toLocaleString()}点</b> ${fmtLocal(region, mv(it, 'sales'))}` +
           ` <span class="smd-jpy">≈${fmtJpy(mv(it, 'sales') * region.rateJpy)}</span></div></div>`;
@@ -1203,7 +1203,7 @@
       card.innerHTML =
         `<span class="smd-rank">${i + 1}</span>` +
         `<span class="smd-cchip" style="background:${region.color}">${region.cc}</span>` +
-        `<div class="smd-imgwrap"><img loading="lazy" src="${IMG_CDN}${it.image}" onerror="this.style.opacity=.15"></div>` +
+        `<div class="smd-imgwrap"><img loading="lazy" src="${IMG_CDN}${esc(it.image)}" onerror="this.style.opacity=.15"></div>` +
         `<div class="smd-body">` +
         `<div class="smd-name"></div>` +
         `<div class="smd-nums"><span class="smd-units">${r.units.toLocaleString()}<small> 点</small></span>` +
@@ -1566,6 +1566,7 @@
   async function sbUpsert(table, rows) {
     if (!rows.length) return 0;
     const key = settings.sbSecret;
+    if (!key) throw new Error('このPCは書き込みキー未設定です（⚙️設定でservice_roleキーを入力）');
     for (let i = 0; i < rows.length; i += 500) {
       const r = await fetch(`${SB_URL}/rest/v1/${table}`, {
         method: 'POST',
@@ -1635,14 +1636,14 @@
       for (let off = 1000; off < total; off += 1000) offs.push(off);
       const chunks = await Promise.all(offs.map(off =>
         fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) })
-          .then(r => (r.ok ? r.json() : []))));
+          .then(r => { if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}（${off}〜。件数不足のまま集計しないため中断）`); return r.json(); })));
       chunks.forEach(c => out.push(...c));
       return out;
     }
     // 総件数不明時は従来どおり逐次で続きを読む（安全策）
     for (let off = 1000; off < 100000; off += 1000) {
       const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) });
-      if (!r.ok) break;
+      if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}（${off}〜。件数不足のまま集計しないため中断）`);
       const rows = await r.json();
       out.push(...rows);
       if (rows.length < 1000) break;
@@ -1681,7 +1682,7 @@
         const rg = regionByCc(o.cc);
         const it = (o.items && o.items[0]) || {};
         const img = it.image
-          ? `<img src="${IMG_CDN}${it.image}" style="width:34px;height:34px;border-radius:5px;object-fit:cover;flex:none" loading="lazy">`
+          ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;border-radius:5px;object-fit:cover;flex:none" loading="lazy">`
           : `<span style="width:34px;height:34px;flex:none;background:#f4f4f4;border-radius:5px"></span>`;
         const link = o.order_id && rg ? `https://${rg.host}/portal/sale/order/${o.order_id}` : null;
         const body = `<b style="color:${rg ? rg.color : '#333'};flex:none">${o.cc}</b>${img}` +
@@ -2598,7 +2599,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 📈 月次サマリー・エクスポート ----------------
   const nextYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); };
   function downloadCsv(name, rows) {
-    const csv = rows.map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+    // CSVインジェクション対策：先頭が = + - @ タブ 等のセルは先頭に ' を付けてExcel/Sheetsに数式実行させない（古物台帳/確定申告CSVは特に重要）
+    const csv = rows.map(r => r.map(c => { let s = String(c == null ? '' : c); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }).join(',')).join('\r\n');
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -4691,7 +4693,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             return `<td${rs} style="font-size:11px">${ordStatusChip(o.status)}${extra}</td>`;
           },
           // ---- 商品行単位 ----
-          img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${it.image}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
+          img: () => `<td>${it.image ? `<img class="pf-thumb" src="${IMG_CDN}${esc(it.image)}" style="width:36px;height:36px;border-radius:4px;object-fit:cover;cursor:zoom-in" loading="lazy">` : ''}</td>`,
           product: () => {
             const pid = it.item_id || (pf.prodMap && pf.prodMap.get(o.cc + ':' + it.name)) || null;
             const nameHtml = nm(it.name, '100%');
