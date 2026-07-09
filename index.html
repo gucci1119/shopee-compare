@@ -2091,13 +2091,15 @@
   // 「今このブラウザのShopeeセッションがどの垢か」を各国ライブ取得。get_shop_base_info が shop_id＋店名(name)＋商品数 を返す。
   async function detectShopIds(targets) {
     const out = {};
-    for (const r of targets) {
+    // ★並列化：各国を順番待ちすると1国のハング(最大14秒＋リトライ14秒)で全体が固まる。
+    // bridgeRequest側で同時6本に絞っているので、Promise.allで投げても接続は溢れない。
+    await Promise.all(targets.map(async r => {
       try {
         const j = await bridgeGetJson(`https://${r.host}/api/v3/general/get_shop_base_info?SPC_CDS_VER=2`);
         const d = (j && j.data) || {};
         out[r.cc] = (j && j.code === 0 && d.shop_id) ? { shop_id: String(d.shop_id), name: d.name || '', items: d.item_count, followers: d.follower_count } : null;
       } catch (e) { out[r.cc] = null; }
-    }
+    }));
     return out;
   }
   // ★書込先アカウントの安全チェック。書込直前に各国のアクティブ店をライブ判定し、
@@ -6047,6 +6049,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const perCc = targets.map(r => ({ cc: r.cc, fam: live[r.cc] ? familyOfShop(live[r.cc].shop_id) : null }));
     state.curSys = perCc; renderCurSys(perCc);
   }
+  // ★初回自動判定：モード確定(live)が initAcctBar より後なので、boot側から呼ぶ。
+  // #acct-cursys がまだ描かれていない可能性があるので数回ポーリングして待つ。
+  function maybeAutoCurSys() {
+    if (state.mode !== 'live' || state.curSysAuto) return;
+    state.curSysAuto = true;
+    let tries = 0;
+    const tick = () => {
+      if (state.curSys) return; // 既に判定済み（手動🔄等）なら不要
+      const el = document.getElementById('acct-cursys');
+      if (el) { refreshCurSys(false); return; }
+      if (++tries < 12) setTimeout(tick, 700); // 最大~8秒 span出現を待つ
+    };
+    setTimeout(tick, 600);
+  }
   function renderCurSys(perCc) {
     const el = document.getElementById('acct-cursys'); if (!el) return;
     const fams = [...new Set(perCc.map(x => x.fam).filter(Boolean))];
@@ -6112,7 +6128,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           setTimeout(() => refreshCurSys(true), 9000); // 切替完了後に「現在」を更新
         });
         // 「現在: ◯◯」をライブ判定（キャッシュがあれば即表示、無ければ少し遅延して自動取得）
-        if (state.curSys) renderCurSys(state.curSys); else { const e = document.getElementById('acct-cursys'); if (e) e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); if (state.mode === 'live' && !state.curSysAuto) { state.curSysAuto = true; setTimeout(() => refreshCurSys(false), 2000); } }
+        if (state.curSys) renderCurSys(state.curSys); else { const e = document.getElementById('acct-cursys'); if (e) e.innerHTML = '<span class="smd-dim" style="font-size:11px">現在: <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px">🔄確認</button></span>'; const eb = document.getElementById('acct-cursys-btn'); if (eb) eb.addEventListener('click', () => refreshCurSys(true)); maybeAutoCurSys(); }
       } else swBox.innerHTML = '';
     }
     // 初回描画は acctReady 確定前に走るため、特定アカウント選択時はここで絞り込んで描き直す（1回だけ）
@@ -6142,7 +6158,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
     setModeBadge();
-    if (state.mode === 'live') load(); // リサーチ用データは裏で読み込んでおく
+    if (state.mode === 'live') { load(); maybeAutoCurSys(); } // リサーチ用データは裏読み＋「現在:系統」を自動判定
   })();
 })();
 </script>
