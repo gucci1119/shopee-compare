@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.3.1
+// @version      1.3.2
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -40,7 +40,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.3.1';
+  const VER = '1.3.2';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -143,11 +143,16 @@
     function render() {
       const old = document.getElementById('smd-switcher'); if (old) old.remove();
       const box = document.createElement('div'); box.id = 'smd-switcher';
-      box.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;font-family:sans-serif;font-size:12px';
+      // 位置は記憶（ドラッグで移動可）。初期は右端の中央あたり＝Shopeeの上部ヘッダ・下部チャット・左ナビと被りにくい場所
+      let pos = { left: null, top: null };
+      try { pos = JSON.parse(localStorage.getItem('smd_sw_pos') || 'null') || pos; } catch (_) {}
+      const baseTop = pos.top != null ? pos.top : Math.round(window.innerHeight * 0.45);
+      const baseLeft = pos.left != null ? pos.left : (window.innerWidth - 190);
+      box.style.cssText = 'position:fixed;left:' + baseLeft + 'px;top:' + baseTop + 'px;z-index:2147483647;font-family:sans-serif;font-size:12px';
       const cur = shops.find(s => String(s.shop_id) === String(current));
       const curName = cur ? (cur.shop_name || cur.username) : '店舗';
-      box.innerHTML = '<div id="smd-sw-toggle" style="background:#ee4d2d;color:#fff;padding:6px 11px;border-radius:18px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;font-weight:700">⇄ ' + curName + '</div>' +
-        '<div id="smd-sw-list" style="display:none;position:absolute;right:0;bottom:40px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-height:62vh;overflow:auto;min-width:230px;padding:6px"></div>';
+      box.innerHTML = '<div id="smd-sw-toggle" title="ドラッグで移動／クリックで切替一覧" style="background:#ee4d2d;color:#fff;padding:6px 11px;border-radius:18px;cursor:grab;box-shadow:0 2px 10px rgba(0,0,0,.35);white-space:nowrap;font-weight:700;user-select:none">⇄ ' + curName + '</div>' +
+        '<div id="smd-sw-list" style="display:none;position:absolute;right:0;top:38px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-height:62vh;overflow:auto;min-width:230px;padding:6px"></div>';
       document.body.appendChild(box);
       const list = box.querySelector('#smd-sw-list');
       const byCc = {}; shops.forEach(s => { const cc = CC[s.country] || (s.country || '').toUpperCase(); (byCc[cc] = byCc[cc] || []).push(s); });
@@ -156,7 +161,13 @@
         '<div style="font-weight:700;color:#888;font-size:10px;margin:5px 6px 2px">' + cc + '</div>' +
         byCc[cc].sort((a, b) => (b.is_main_shop ? 1 : 0) - (a.is_main_shop ? 1 : 0)).map(s => { const on = String(s.shop_id) === String(current); return '<div class="smd-sw-item" data-id="' + s.shop_id + '" style="padding:6px 9px;border-radius:6px;cursor:pointer;white-space:nowrap;' + (on ? 'background:#fdf0ec;color:#ee4d2d;font-weight:700' : '') + '">' + (on ? '● ' : '') + (s.shop_name || s.username) + '</div>'; }).join('')
       ).join('');
-      box.querySelector('#smd-sw-toggle').addEventListener('click', () => { list.style.display = list.style.display === 'none' ? 'block' : 'none'; });
+      // ドラッグ移動（>4px動いたらドラッグ＝クリック扱いしない）＋位置記憶
+      const tog = box.querySelector('#smd-sw-toggle');
+      let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+      tog.addEventListener('mousedown', (e) => { dragging = true; moved = false; sx = e.clientX; sy = e.clientY; const r = box.getBoundingClientRect(); ox = r.left; oy = r.top; tog.style.cursor = 'grabbing'; e.preventDefault(); });
+      window.addEventListener('mousemove', (e) => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; if (Math.abs(dx) + Math.abs(dy) > 4) moved = true; let nl = Math.max(0, Math.min(window.innerWidth - 60, ox + dx)); let nt = Math.max(0, Math.min(window.innerHeight - 30, oy + dy)); box.style.left = nl + 'px'; box.style.top = nt + 'px'; });
+      window.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; tog.style.cursor = 'grab'; if (moved) { const r = box.getBoundingClientRect(); try { localStorage.setItem('smd_sw_pos', JSON.stringify({ left: Math.round(r.left), top: Math.round(r.top) })); } catch (_) {} } });
+      tog.addEventListener('click', () => { if (moved) { moved = false; return; } list.style.display = list.style.display === 'none' ? 'block' : 'none'; });
       list.querySelectorAll('.smd-sw-item').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; if (String(id) === String(current)) { list.style.display = 'none'; return; } el.textContent = '切替中…'; switchTo(id); }));
     }
     function boot() { if (!document.body) { setTimeout(boot, 400); return; } load().then(render); }
