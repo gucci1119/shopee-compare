@@ -3119,6 +3119,59 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     alert(`SKU書込 完了: 成功 ${ok} / 失敗 ${ng}\n（次回の🔄更新でポータル表示にも反映されます）`);
     try { logAct('出品', 'SKU設定', repName || '', scopeLabel + ' ' + sku.trim() + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
   }
+  // 選択中カタログの対象出品を集める（scope='all' か 特定cc）。covCatDataは展開済フランチャイズ分だけ持つ
+  function bulkListings(scope) {
+    const out = [];
+    (lst.bulkSel || new Set()).forEach(key => {
+      const d = lst.covCatData && lst.covCatData[key]; if (!d) return;
+      d.listings.forEach(lg => { if (scope === 'all' || lg.cc === scope) out.push({ host: lg.host, item_id: lg.item_id, cc: lg.cc, recSku: d.recSku, rep: d.rep }); });
+    });
+    return out;
+  }
+  function bulkGuard(scope) {
+    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ一括編集できます'); return null; }
+    const items = bulkListings(scope);
+    if (!items.length) { alert('対象の出品がありません（選択したカタログが展開済みか、対象国を確認してください）'); return null; }
+    return items;
+  }
+  const bulkProg = (t) => { const e = document.getElementById('cov-bulk-prog'); if (e) e.textContent = t; };
+  async function bulkApplySku(scope) {
+    const items = bulkGuard(scope); if (!items) return;
+    const nCat = (lst.bulkSel || new Set()).size;
+    if (!confirm(`${nCat}カタログ（${scope === 'all' ? '全国' : scope}・合計${items.length}出品）を、それぞれの推奨SKUに統一してShopeeに書き込みます。よろしいですか？`)) return;
+    let ok = 0, ng = 0, skip = 0;
+    for (let i = 0; i < items.length; i++) { const it = items[i]; if (!it.recSku) { skip++; continue; } try { const r = await productWrite(it.host, it.item_id, { parent_sku: it.recSku }); r.ok ? ok++ : ng++; } catch (e) { ng++; } bulkProg(`書込 ${i + 1}/${items.length}`); }
+    bulkProg(''); alert(`SKU一括 完了: 成功${ok} / 失敗${ng} / スキップ${skip}(推奨SKU無し)\n（次回🔄更新で一覧にも反映）`);
+    try { logAct('出品', 'SKU一括', nCat + 'カタログ', scope + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
+  async function bulkApplyWeight(scope) {
+    const items = bulkGuard(scope); if (!items) return;
+    const w = prompt(`重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。`, '0.2');
+    if (!w || !w.trim() || isNaN(parseFloat(w))) return;
+    if (!confirm(`${items.length}出品の重量を ${w.trim()}kg に一括設定します。よろしいですか？`)) return;
+    let ok = 0, ng = 0;
+    for (let i = 0; i < items.length; i++) { try { const r = await productWrite(items[i].host, items[i].item_id, { weight: { value: w.trim(), unit: 1 } }); r.ok ? ok++ : ng++; } catch (e) { ng++; } bulkProg(`書込 ${i + 1}/${items.length}`); }
+    bulkProg(''); alert(`重量一括 完了: 成功${ok} / 失敗${ng}`);
+    try { logAct('出品', '重量一括', items.length + '出品', scope + ' ' + w.trim() + 'kg 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
+  async function bulkApplyPrice(scope) {
+    const items = bulkGuard(scope); if (!items) return;
+    const f = prompt(`価格の倍率を入力（例: 1.1で+10%、0.9で-10%）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品の全明細価格に適用。`, '1.1');
+    const factor = parseFloat(f); if (!(factor > 0)) return;
+    if (!confirm(`${items.length}出品の全明細価格を ×${factor} にします（現在価格を読み込んで変更）。時間がかかります。よろしいですか？`)) return;
+    let ok = 0, ng = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      try {
+        const pi = await productRead(it.host, it.item_id);
+        const models = (pi.model_list || []).map(m => ({ id: m.id, tier_index: m.tier_index || [], price: (parseFloat(modelPrice(m)) * factor).toFixed(2) })).filter(m => m.price !== 'NaN');
+        if (!models.length) { ng++; } else { const r = await productWrite(it.host, it.item_id, { model_list: models }); r.ok ? ok++ : ng++; }
+      } catch (e) { ng++; }
+      bulkProg(`読込→書込 ${i + 1}/${items.length}`);
+    }
+    bulkProg(''); alert(`価格一括 完了: 成功${ok} / 失敗${ng}\n（次回🔄更新で一覧にも反映）`);
+    try { logAct('出品', '価格一括', items.length + '出品', scope + ' ×' + factor + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
+  }
   // 横断カバレッジの数字チップをクリックしたときの操作メニュー（大きめのタップ行）
   function showCovCellMenu(el) {
     document.querySelectorAll('.cov-menu').forEach(m => m.remove());
@@ -3366,7 +3419,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const open = lst.covCat && lst.covCat.has(fr + '::' + c.key);
       const items = [...c.items.values()].map(withMiss).sort(cmp);
       const setBtn = `<button class="cov-setsku smd-btn" data-key="${esc(fr + '::' + c.key)}" style="font-size:9px;padding:1px 5px;margin-left:4px" title="このSKUを各国のShopeeカタログに書き込む">🏷SKU設定</button>`;
-      const header = `<tr style="background:#eaf1ff"><td>${imgTag(c.img, 26)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細/${c.listings.length}出品)</span></td><td>${skuCell(c)}${setBtn}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCellsCat(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
+      const bsel = lst.bulkSel && lst.bulkSel.has(fr + '::' + c.key);
+      const header = `<tr style="background:${bsel ? '#dcedff' : '#eaf1ff'}"><td style="white-space:nowrap"><input type="checkbox" class="cov-bulk" data-key="${esc(fr + '::' + c.key)}"${bsel ? ' checked' : ''} style="vertical-align:middle;margin-right:3px;cursor:pointer" title="一括編集に選択">${imgTag(c.img, 22)}</td><td><b class="cov-cat" data-key="${esc(fr + '::' + c.key)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'}📦</b></td><td style="font-size:11px"><b>${esc((c.rep || '').slice(0, 40))}</b> <span class="smd-dim">(${c.items.size}明細/${c.listings.length}出品)</span></td><td>${skuCell(c)}${setBtn}</td><td style="color:#e8710a;font-weight:600">${c.sold || ''}</td>${ccCellsCat(c)}<td style="font-weight:700;color:${c.missing ? '#d93025' : '#1a7f37'}">${c.missing || '✓'}</td></tr>`;
       const itemRows = open ? items.map(it => `<tr><td style="padding-left:18px">${imgTag(it.img, 22)}</td><td style="text-align:right;color:#bbb">↳</td><td style="font-size:11px;padding-left:8px">${esc((it.rep || '').slice(0, 38))}</td><td>${skuCell(it)}</td><td style="font-size:11px;color:#e8710a;font-weight:600">${it.sold || ''}</td>${ccCells(it)}<td style="font-weight:700;color:${it.missing ? '#d93025' : '#1a7f37'}">${it.missing || '✓'}</td></tr>`).join('') : '';
       return header + itemRows;
     }).join('');
@@ -3388,6 +3442,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     if (!lst.covOpen) lst.covOpen = new Set();
+    if (!lst.bulkSel) lst.bulkSel = new Set();
+    if (!lst.bulkScope) lst.bulkScope = 'all';
     const map = new Map();
     let allCat = 0, allVarCat = 0, allVarUnits = 0, allSingle = 0;
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
@@ -3411,9 +3467,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cch = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const colspan = 5 + targets.length;
     const sortBtn = (k, lb) => `<button class="smd-btn cov-sort" data-k="${k}" style="${sort === k ? 'background:#1565c0;color:#fff' : ''}">${lb}</button>`;
+    const scopeOpts = ['all'].concat(REGIONS.map(r => r.cc)).map(v => `<option value="${v}"${lst.bulkScope === v ? ' selected' : ''}>${v === 'all' ? '全国' : v}</option>`).join('');
+    const bulkBar = lst.bulkSel.size ? `<div class="tool-card" style="max-width:none;margin-bottom:8px;background:#fff8e1;border:1px solid #ffd591;position:sticky;top:0;z-index:6"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
+        <b style="color:#8a6d3b">🛠 一括編集：${lst.bulkSel.size}カタログ選択中</b>
+        <label>対象国 <select id="cov-bulkscope" style="padding:3px 6px;border:1px solid #ddd;border-radius:5px">${scopeOpts}</select></label>
+        <button class="smd-btn cov-bulk-sku" title="各カタログの推奨SKUに全出品を統一">🏷 SKU→推奨に統一</button>
+        <button class="smd-btn cov-bulk-wt" title="重量をkg指定で一括設定">⚖️ 重量</button>
+        <button class="smd-btn cov-bulk-price" title="全明細価格に倍率を適用（現価格を読んで変更）">💰 価格 ×係数</button>
+        <button class="smd-btn cov-bulk-clear">選択解除</button>
+        <span id="cov-bulk-prog" style="color:#8a6d3b;font-weight:700"></span>
+        <span class="smd-dim" style="font-size:10.5px;width:100%">⚠️本番書込。対象は<b>展開済みシリーズのカタログ</b>のみ。件数が多いと時間がかかりブリッジ負荷が上がります。</span>
+      </div></div>` : '';
     host.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('name', 'あいうえお')}</div>
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px;line-height:1.7"><b>カタログ＝Shopeeの1出品</b>。バリエ型=複数商品がぶら下がる（括弧=バリエ総数）、単品=1商品。各国=カタログ数、<b style="color:#d93025">赤=未出品</b>。<b>シリーズ名クリックで下に「商品(明細)別カバレッジ」を展開</b>。展開後<b>📦行のチェックで一括編集</b>。並び: ${sortBtn('catTotal', 'カタログ数')} ${sortBtn('sold', '販売数')} ${sortBtn('varUnits', 'バリエ数')} ${sortBtn('name', 'あいうえお')}</div>
       <div class="tool-card" style="max-width:none;margin-bottom:8px"><div style="font-size:13px;line-height:1.9">全カタログ <b>${allCat.toLocaleString()}</b> ＝ 🧩バリエ型 <b>${allVarCat.toLocaleString()}</b>（ぶら下がりバリエ計 <b>${allVarUnits.toLocaleString()}</b>） ＋ 🔹単品 <b>${allSingle.toLocaleString()}</b></div></div>
+      ${bulkBar}
       <div class="tool-card" style="max-width:none"><div class="pf-scroll"><table class="pf-table"><tr><th>シリーズ</th><th>計</th><th>🧩バリエ型<br><span style="font-weight:400;font-size:10px">(バリエ数)</span></th><th>🔹単品</th><th>売</th>${cch}</tr>${rows.map(row => {
         const open = lst.covOpen.has(row.fr);
         const nameCell = row.fr === 'その他' ? '<span class="smd-dim">その他（未分類）</span>' : `<b class="cov-fr" data-fr="${esc(row.fr)}" style="cursor:pointer;color:#1565c0">${open ? '▼' : '▶'} ${esc(row.fr)}</b>`;
@@ -3429,6 +3497,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.cov-cell').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); showCovCellMenu(el); }));
     // 🏷SKU設定（カタログ行のSKU列＝全国一括ボタン）
     host.querySelectorAll('.cov-setsku').forEach(el => el.addEventListener('click', (ev) => { ev.stopPropagation(); const d = lst.covCatData && lst.covCatData[el.dataset.key]; if (!d || !d.listings.length) return; const ccs = [...new Set(d.listings.map(x => x.cc))].join('/'); writeParentSku(d.listings, `全国一括SKU設定（${ccs}）`, d.recSku || d.curSku, d.rep); }));
+    // 一括編集：選択チェック・スコープ・各アクション
+    host.querySelectorAll('.cov-bulk').forEach(el => el.addEventListener('change', () => { const k = el.dataset.key; if (el.checked) lst.bulkSel.add(k); else lst.bulkSel.delete(k); renderCoverage(); }));
+    const scopeSel = host.querySelector('#cov-bulkscope'); if (scopeSel) scopeSel.addEventListener('change', () => { lst.bulkScope = scopeSel.value; });
+    const bSku = host.querySelector('.cov-bulk-sku'); if (bSku) bSku.addEventListener('click', () => bulkApplySku(lst.bulkScope || 'all'));
+    const bWt = host.querySelector('.cov-bulk-wt'); if (bWt) bWt.addEventListener('click', () => bulkApplyWeight(lst.bulkScope || 'all'));
+    const bPr = host.querySelector('.cov-bulk-price'); if (bPr) bPr.addEventListener('click', () => bulkApplyPrice(lst.bulkScope || 'all'));
+    const bClr = host.querySelector('.cov-bulk-clear'); if (bClr) bClr.addEventListener('click', () => { lst.bulkSel.clear(); renderCoverage(); });
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
