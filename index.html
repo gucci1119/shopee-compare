@@ -554,6 +554,8 @@
     priceCoef: 1.8, priceFeePct: 12, priceShipJpy: 1200, priceRound: 10,
     // 国別の出品数上限（Shopeeの出品可能数。各自入力。未設定=空）
     listQuota: {},
+    // よく使うカテゴリの候補（コンポーザーのプルダウン。＋登録で追加）
+    listCats: ['Hobbies & Collections > Video Games > Games', 'Hobbies & Collections > Video Games > Consoles', 'Hobbies & Collections > Toys > Action Figures & Toy Figures', 'Hobbies & Collections > Collectibles'],
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -4874,10 +4876,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div><label class="lc">ハード（{hardware}）</label><input class="li" id="li-hw" placeholder="Nintendo Switch"></div>
             <div><label class="lc">日本語シリーズ（{jpseries}）</label><input class="li" id="li-jp" placeholder="スーパーマリオ"></div>
           </div>
-          <label class="lc" style="margin-top:8px">カテゴリ（Shopeeのカテゴリパス。転記時にコピー用）</label>
-          <input class="li" id="li-cat" placeholder="Hobbies & Collections > Video Games > ...">
-          <label class="lc" style="margin-top:8px">画像（1行1URL。ShopeeのCDNハッシュ or フルURL。※アップロードは手動）</label>
-          <textarea class="li" id="li-img" rows="2" placeholder="down-sg.img.susercontent.com/xxxx または hash"></textarea>
+          <label class="lc" style="margin-top:8px">カテゴリ（プルダウンから選択 or 入力。転記時にコピー用）</label>
+          <div class="row" style="gap:6px;align-items:center">
+            <input class="li" id="li-cat" list="li-catlist" placeholder="選択 or 入力" style="flex:1" autocomplete="off">
+            <button class="smd-btn" id="li-catsave" title="今のカテゴリを候補に登録">＋登録</button>
+            <datalist id="li-catlist"></datalist>
+          </div>
+          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像。1行1URL。※Shopeeへのアップロードは手動）</label>
+          <div class="row" style="gap:6px;align-items:flex-start">
+            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or ハッシュ。または右の🔗でメルカリ等のリンクから取得" style="flex:1"></textarea>
+            <button class="smd-btn" id="li-imgfetch" title="メルカリ等の商品リンクから画像(og:image)を取得して追加">🔗 リンクから</button>
+          </div>
           <div id="li-imgprev" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
         </div>
 
@@ -4921,13 +4930,52 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         listRefresh();
       });
       document.getElementById('li-vadd').addEventListener('click', () => {
-        listState.variations.push({ opt: '', jpy: listState.sellJpy || 0, stock: 1 });
+        listState.variations.push({ opt: '', jpy: listState.sellJpy || 0, stock: 1, img: '' });
         listVarsRender();
+      });
+      // カテゴリ候補プルダウン＋登録
+      listCatDatalist();
+      document.getElementById('li-catsave').addEventListener('click', () => {
+        const v = (document.getElementById('li-cat').value || '').trim();
+        if (!v) return;
+        settings.listCats = settings.listCats || [];
+        if (!settings.listCats.includes(v)) { settings.listCats.unshift(v); saveSettings(); listCatDatalist(); }
+        const b = document.getElementById('li-catsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
+      });
+      // カタログ画像をリンクから取得
+      document.getElementById('li-imgfetch').addEventListener('click', async () => {
+        const btn = document.getElementById('li-imgfetch'); const url = prompt('メルカリ等の商品ページURL、または画像URLを貼り付け：');
+        if (!url) return;
+        btn.disabled = true; btn.textContent = '⏳取得中';
+        const img = await fetchImageFromUrl(url);
+        btn.disabled = false; btn.textContent = '🔗 リンクから';
+        if (!img) { alert('画像を取得できませんでした（ブリッジ未検出／対応外サイト／セッション切れの可能性）'); return; }
+        const ta = document.getElementById('li-img'); ta.value = (ta.value ? ta.value.trim() + '\n' : '') + img;
+        listState.images = ta.value; listImgPrev(); listRefresh();
       });
       listVarsRender();
     }
     listImgPrev();
     listRefresh();
+  }
+  function listCatDatalist() {
+    const dl = document.getElementById('li-catlist'); if (!dl) return;
+    dl.innerHTML = (settings.listCats || []).map(c => `<option value="${esc(c)}">`).join('');
+  }
+  // 商品ページURL(メルカリ等)→og:image、または直リンク画像URLをそのまま返す。ブリッジ経由でHTML取得
+  async function fetchImageFromUrl(url) {
+    url = String(url || '').trim(); if (!url) return null;
+    // 直リンク画像 or 既知の画像CDNはそのまま使う
+    if (/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(url) || /susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(url)) return url;
+    if (state.mode !== 'live') return null; // ページ取得はブリッジ必須
+    try {
+      const html = await bridgeRequest('GET', url);
+      const pick = re => { const m = html.match(re); return m ? m[1] : null; };
+      const og = pick(/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i)
+        || pick(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)
+        || pick(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+      return og ? og.replace(/&amp;/g, '&') : null;
+    } catch (e) { return null; }
   }
 
   function listImgPrev() {
@@ -4940,17 +4988,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listVarsRender() {
     const wrap = document.getElementById('li-vars');
     if (!listState.variations.length) { wrap.innerHTML = '<span class="smd-dim" style="font-size:12px">バリエーション未設定（単品）</span>'; listRefresh(); return; }
+    const thumb = (im) => im ? `<img src="${esc(/^https?:/.test(im) ? im : IMG_CDN + im)}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
     wrap.innerHTML = listState.variations.map((v, i) =>
-      `<div class="row" style="gap:8px;margin-bottom:5px;align-items:center">
-        <input class="li vopt" data-i="${i}" style="flex:1" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
-        <input class="li vjpy" data-i="${i}" type="number" style="width:110px" placeholder="販売円" value="${v.jpy || ''}">
-        <input class="li vstk" data-i="${i}" type="number" style="width:70px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
-        <button class="smd-btn vdel" data-i="${i}" title="削除">✕</button>
+      `<div style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
+        <div class="row" style="gap:8px;align-items:center">
+          <input class="li vopt" data-i="${i}" style="flex:1" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
+          <input class="li vjpy" data-i="${i}" type="number" style="width:100px" placeholder="販売円" value="${v.jpy || ''}">
+          <input class="li vstk" data-i="${i}" type="number" style="width:64px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
+          <button class="smd-btn vdel" data-i="${i}" title="このバリエを削除">✕</button>
+        </div>
+        <div class="row" style="gap:6px;align-items:center;margin-top:5px">
+          ${thumb(v.img)}
+          <input class="li vimg" data-i="${i}" style="flex:1;font-size:11px" placeholder="この明細の画像URL（1枚）。または右の🔗でリンク取得" value="${esc(v.img || '')}">
+          <button class="smd-btn vimgfetch" data-i="${i}" title="メルカリ等の商品リンクから画像を取得">🔗</button>
+        </div>
       </div>`).join('');
     wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; listRefresh(); }));
     wrap.querySelectorAll('.vjpy').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].jpy = Number(e.target.value) || 0; listRefresh(); }));
     wrap.querySelectorAll('.vstk').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].stock = Number(e.target.value) || 0; listRefresh(); }));
-    wrap.querySelectorAll('.vdel').forEach(el => el.addEventListener('click', e => { listState.variations.splice(+e.target.dataset.i, 1); listVarsRender(); }));
+    wrap.querySelectorAll('.vimg').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].img = e.target.value; listRefresh(); }));
+    wrap.querySelectorAll('.vdel').forEach(el => el.addEventListener('click', e => { listState.variations.splice(+e.currentTarget.dataset.i, 1); listVarsRender(); }));
+    wrap.querySelectorAll('.vimgfetch').forEach(el => el.addEventListener('click', async e => {
+      const i = +e.currentTarget.dataset.i; const btn = e.currentTarget;
+      const url = prompt(`バリエ「${listState.variations[i].opt || (i + 1) + '番目'}」の画像：メルカリ等の商品リンク or 画像URLを貼り付け`);
+      if (!url) return;
+      btn.disabled = true; btn.textContent = '⏳';
+      const img = await fetchImageFromUrl(url);
+      btn.disabled = false; btn.textContent = '🔗';
+      if (!img) { alert('画像を取得できませんでした（ブリッジ未検出／対応外サイト／セッション切れの可能性）'); return; }
+      listState.variations[i].img = img; listVarsRender();
+    }));
     listRefresh();
   }
 
@@ -4962,8 +5029,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const hasVar = listState.variations.length > 0;
     const rows = hasVar ? listState.variations : [{ opt: '', jpy: listState.sellJpy, stock: 1 }];
     const specs = settings.listSpecs;
+    // 画像（全国共通。手動アップロード用にまとめて表示）
+    const toU = s => /^https?:/.test(s) ? s : IMG_CDN + s;
+    const catImgs = (listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU);
+    const varImgs = hasVar ? listState.variations.filter(v => v.img).map(v => ({ opt: v.opt, url: toU(v.img) })) : [];
+    const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2"></a>`;
+    const imgBlock = (catImgs.length || varImgs.length) ? `<div style="border:1px solid #e6e0f5;background:#faf8ff;border-radius:8px;padding:10px;margin-bottom:10px">
+        <b style="font-size:12.5px">🖼️ 画像（Shopeeへは手動アップロード ／ バリエは1明細=1枚）</b>
+        ${catImgs.length ? `<div style="font-size:11px;margin-top:6px;color:#666">カタログ用トップ</div><div style="display:flex;gap:6px;flex-wrap:wrap">${catImgs.map(imgThumb).join('')}</div>` : ''}
+        ${varImgs.length ? `<div style="font-size:11px;margin-top:8px;color:#666">バリエ明細別（クリックで開いて保存）</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:2px">${varImgs.map(v => `<div style="text-align:center">${imgThumb(v.url)}<div style="font-size:9px;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.opt || '')}">${esc(v.opt || '-')}</div></div>`).join('')}</div>` : ''}
+      </div>` : '';
     out.innerHTML = `<div class="tool-card" style="max-width:none"><h3>5. 各国へ転記</h3>` +
       `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">各項目の「コピー」で内容をコピー→「出品ページを開く」でShopeeに貼り付け（画像アップロードと最終「発行」は手動）。⚠は各国制約違反。</div>` +
+      imgBlock +
       targets.map(rg => {
         const baseTitle = listTitle('');
         const title = rg.cc === 'TW' ? shortenTW(baseTitle) : baseTitle;
