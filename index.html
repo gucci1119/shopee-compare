@@ -3399,7 +3399,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">×<input class="uni-fac" value="1.1" inputmode="decimal" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-price-all smd-btn">全国の全明細価格に適用</button><span class="smd-dim" style="font-size:11px">全バリエ価格を×係数。個別価格は✎詳細で</span></div>
         </div>
         <div style="font-weight:700;font-size:12px;margin-bottom:4px">国別タイトル</div>
-        <div style="max-height:44vh;overflow:auto"><table class="pf-table" style="width:100%"><tr><th>国</th><th style="text-align:left">タイトル</th><th>現価格</th><th></th></tr>${rows}</table></div>
+        <div style="max-height:32vh;overflow:auto"><table class="pf-table" style="width:100%"><tr><th>国</th><th style="text-align:left">タイトル</th><th>現価格</th><th></th></tr>${rows}</table></div>
+        <div style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:12px">🧩 バリエーション（各国で比較・編集）</b><button class="uni-loadvar smd-btn" style="font-size:11px">各国のバリエを読み込む</button><span class="smd-dim" style="font-size:11px">各国のShopeeから取得。<b style="color:#d93025">✗</b>=その国に無いバリエ／価格はセルで直接編集→各国の「価格書込」</span></div>
+          <div class="uni-var" style="margin-top:8px"></div>
+        </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px"><span class="uni-msg" style="margin-right:auto;font-size:11px;color:#888"></span><button class="uni-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:8px 14px;cursor:pointer">閉じる</button></div>
       </div></div>`;
     document.body.appendChild(ov);
@@ -3444,6 +3448,60 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       let ok = 0; for (const lg of listings) { if (await writePriceFactor(lg, f)) ok++; msg('価格書込 ' + ok + '/' + listings.length); }
       msg('統括価格 完了: 成功 ' + ok + '/' + listings.length, ok === listings.length ? '#1a7f37' : '#e8710a');
       try { logAct('出品', '統括価格', d.rep, '×' + f + ' ' + ok + '/' + listings.length); } catch (_) {}
+    });
+    // ── バリエ比較・編集（各国のバリエを並べて表示＋価格インライン編集） ──
+    const varData = { pi: {} };
+    const stkOf = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
+    async function loadVariations() {
+      const box = q('.uni-var'); if (!box) return;
+      box.innerHTML = '<span class="smd-dim">読込中… 0/' + listings.length + '</span>';
+      const prog = () => box.querySelector('.smd-dim');
+      const varMap = new Map();
+      for (let i = 0; i < listings.length; i++) {
+        const lg = listings[i];
+        try {
+          const pi = await productRead(lg.host, lg.item_id); varData.pi[i] = pi;
+          const tiers = pi.std_tier_variation_list || [];
+          (pi.model_list || []).forEach(m => {
+            const vn = modelName(m, tiers); const key = productKey(vn) || vn || ('#' + m.id);
+            let v = varMap.get(key); if (!v) { v = { name: vn, cells: {} }; varMap.set(key, v); }
+            if (!v.name && vn) v.name = vn;
+            v.cells[i] = { price: modelPrice(m), mid: m.id };
+          });
+        } catch (e) { varData.pi[i] = null; }
+        if (prog()) prog().textContent = '読込中… ' + (i + 1) + '/' + listings.length;
+      }
+      const ccCount = {}; listings.forEach(lg => ccCount[lg.cc] = (ccCount[lg.cc] || 0) + 1);
+      const ccSeen = {}; const colLabel = listings.map(lg => { if (ccCount[lg.cc] > 1) { ccSeen[lg.cc] = (ccSeen[lg.cc] || 0) + 1; return lg.cc + '·' + ccSeen[lg.cc]; } return lg.cc; });
+      const varCount = listings.map((lg, i) => { const pi = varData.pi[i]; return pi ? String((pi.model_list || []).length) : '—'; });
+      const rowsV = [...varMap.values()].map(v => {
+        const cells = listings.map((lg, i) => {
+          const c = v.cells[i];
+          if (!c) return '<td style="background:#fff2f2;color:#d93025;text-align:center" title="この国にはこのバリエが無い">✗</td>';
+          return '<td style="white-space:nowrap"><span style="font-size:10px;color:' + rgc(lg.cc).color + '">' + rgc(lg.cc).cur + '</span><input class="uvar-p" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.price) + '" style="width:66px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right"></td>';
+        }).join('');
+        return '<tr><td style="text-align:left;position:sticky;left:0;background:#fff">' + nm(v.name || '（既定）', '220px') + '</td>' + cells + '</tr>';
+      }).join('');
+      const head = '<tr><th style="text-align:left;position:sticky;left:0;background:#fafafa">バリエ (' + varMap.size + ')</th>' + listings.map((lg, i) => '<th style="white-space:nowrap"><span style="color:' + rgc(lg.cc).color + '">' + colLabel[i] + '</span><br><span style="font-weight:400;font-size:9px;color:#999">' + varCount[i] + '種</span></th>').join('') + '</tr>';
+      const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.pi[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px" title="' + lg.cc + 'の全明細価格を書込">書込</button>' : '—') + '</td>').join('') + '</tr>';
+      box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">価格はセルで直接編集→各国「書込」で反映。<b style="color:#d93025">✗</b>の国はそのバリエ未出品（＋バリエ/✎詳細で追加）。明細名の変更・バリエ追加・specificsは各国行の<b>✎詳細</b>から。</div>';
+      ov.querySelectorAll('.uvar-write').forEach(b => b.addEventListener('click', async () => {
+        const li = +b.dataset.li, lg = listings[li], pi = varData.pi[li]; if (!pi) return;
+        const n = (pi.model_list || []).length;
+        if (!confirm(lg.cc + ' の全明細（' + n + '件）の価格をShopeeに書き込みます。よろしいですか？')) return;
+        b.disabled = true; b.textContent = '…';
+        const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
+        const pmap = {}; ov.querySelectorAll('.uvar-p[data-li="' + li + '"]').forEach(inp => pmap[inp.dataset.mid] = inp.value.trim());
+        const models = (pi.model_list || []).map(m => { let p = (pmap[m.id] != null && pmap[m.id] !== '') ? pmap[m.id] : modelPrice(m); const pn = parseFloat(p); if (!isNaN(pn)) p = pn.toFixed(dec); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: p, stock_setting_list: [{ sellable_stock: stkOf(m) }] }; });
+        let ok = false; try { const r = await productWrite(lg.host, lg.item_id, { model_list: models }); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 code=' + r.code + ' ' + r.msg, '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
+        b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) b.disabled = false;
+        if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', lg.cc, (d.rep || '') + ' ' + n + '件'); } catch (_) {} }
+      }));
+    }
+    q('.uni-loadvar').addEventListener('click', async function () {
+      const btn = this; btn.disabled = true; btn.textContent = '読込中…';
+      try { await loadVariations(); btn.textContent = '再読込'; } catch (e) { msg('読込失敗 ' + e.message, '#d93025'); btn.textContent = '各国のバリエを読み込む'; }
+      btn.disabled = false;
     });
   }
   // 親SKUを複数出品にまとめて書き込む（全国/各国 共通・確認あり）
