@@ -1505,8 +1505,10 @@
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '⏳ 更新中'; }
     try {
-      // 先にアクティブ店を判定＝各行に正しいshop_idを刻む（既存shop_idをnullで潰さないため）
-      try { const _sh = await detectShopIds(targets, 12000); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); } catch (_) {}
+      // 先にアクティブ店を判定＝各行に正しいshop_idを刻む＋対象アカウントと一致確認（別垢のまま更新する事故を防ぐ）
+      if (!state.accounts) await loadAccounts().catch(() => {});
+      const { check } = await detectActiveAndCheck(targets);
+      if (!check.ok) { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } alert('【注文更新を中止】\n' + check.msg); return; }
       loadOrders(true);
       await waitOrdersLoaded({ textContent: '' });
       const orderRows = [];
@@ -2181,14 +2183,12 @@
     }));
     return out;
   }
-  // ★書込先アカウントの安全チェック。書込直前に各国のアクティブ店をライブ判定し、
-  // ヘッダ「対象アカウント」で指定した垢と一致するか照合。別Chromeで別垢を開いていても、そのChromeの実セッションを読むので正しく見極める。
-  async function guardWriteCountries(ccs) {
+  // ★アカウント一致チェック（純関数）。live(cc→{shop_id,name}) と 対象ccs から、
+  // ヘッダ「対象アカウント」で指定した垢/系統と実際にアクティブな垢が一致するか照合。
+  // 明確な不一致→{ok:false}（中止）、未確認(セッション切れ等)→{ok:true,summary付き警告}。
+  function checkAccountMatch(live, ccs) {
     const uniq = [...new Set((ccs || []).filter(Boolean))];
     if (!uniq.length) return { ok: true, summary: '' };
-    const regions = uniq.map(cc => regionByCc(cc)).filter(Boolean);
-    let live = {};
-    try { live = await detectShopIds(regions); } catch (_) {}
     const acc = state.accounts || [];
     const rawAcct = String(state.acct || '');
     const selFam = rawAcct.slice(0, 4) === 'fam:' ? rawAcct.slice(4) : null; // 系統でまとめる＝全国その系統が目標
@@ -2211,11 +2211,32 @@
         lines.push(`${cc} = ${activeLabel}`);
       }
     }
+    // アクティブ垢のコンパクト表示（系統単位。ダイアログ見出し用）
+    const activeFams = [...new Set(uniq.map(cc => { const info = live[cc]; return info && info.shop_id ? (familyOfShop(info.shop_id) || famOfLabel(info.name) || '?') : '?'; }))];
+    const label = activeFams.join(' / ');
     // 明確な不一致＝別垢が今アクティブ → 事故防止のため必ず中止（ハードブロック）
-    if (mism.length) return { ok: false, msg: '⚠️ 書込先アカウントが指定と違います:\n\n・' + mism.join('\n・') + '\n\n→ ShopeeでSwitch Shopして目標の垢に切り替えてから実行してください。\n（別Chromeでその垢を開いている場合は、そのChromeのポータルで操作してください）' };
+    if (mism.length) return { ok: false, label, msg: '⚠️ 対象アカウントが「今Shopeeでアクティブな垢」と違います:\n\n・' + mism.join('\n・') + '\n\n→ ⇄ か 🌏全タブ切替 で目標の垢に切り替えてから実行してください。\n（別Chromeでその垢を開いている場合は、そのChromeのポータルで操作）', summary: lines.join('\n') };
     // 確認できなかっただけ（セッション切れ/一時的）→ 中止はせず、確認ダイアログに警告を出す
     const warn = unconf.length ? '\n\n⚠️ ' + unconf.join('・') + ' は今のアカウントを確認できませんでした（セッション切れの可能性）。書込先が意図どおりか各自確認のうえ実行してください。' : '';
-    return { ok: true, summary: lines.join('\n') + warn };
+    return { ok: true, label, summary: lines.join('\n') + warn };
+  }
+  // ★書込先アカウントの安全チェック（書込直前用）。各国のアクティブ店をライブ判定→対象アカウントと照合。
+  async function guardWriteCountries(ccs) {
+    const uniq = [...new Set((ccs || []).filter(Boolean))];
+    if (!uniq.length) return { ok: true, summary: '' };
+    const regions = uniq.map(cc => regionByCc(cc)).filter(Boolean);
+    let live = {};
+    try { live = await detectShopIds(regions); } catch (_) {}
+    return checkAccountMatch(live, uniq);
+  }
+  // ★同期系用：アクティブ垢を1回だけ検出→activeShopByCc(行ラベリング用)を埋める＋対象アカウント一致チェック。
+  // 戻り: { live, check }。check.ok=false なら呼び出し側で中止する。二重検出を避けるためsync/更新はこれを使う。
+  async function detectActiveAndCheck(targets) {
+    let live = {};
+    try { live = await detectShopIds(targets, 12000); } catch (_) {}
+    activeShopByCc = {};
+    Object.keys(live).forEach(cc => { if (live[cc]) activeShopByCc[cc] = live[cc].shop_id; });
+    return { live, check: checkAccountMatch(live, targets.map(r => r.cc)) };
   }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
   async function renderAccounts() {
@@ -3465,9 +3486,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!ok) { alert('ブリッジ未検出。Shopee Compare Bridge が有効か確認してください'); return; }
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     lst.syncing = true; drawListingStatus();
-    // アクティブなショップ(shop_id)を判定→各行に刻む
+    // アクティブなショップ(shop_id)を判定→各行に刻む＋対象アカウントと一致するか確認（別垢のまま同期する事故を防ぐ）
     state.rawRead = true;
-    try { const _sh = await detectShopIds(targets); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); } catch (_) { activeShopByCc = {}; }
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const { check } = await detectActiveAndCheck(targets);
+    if (!check.ok) { state.rawRead = false; activeShopByCc = {}; lst.syncing = false; lst.note = ''; drawListingStatus(); alert('【出品同期を中止】\n' + check.msg); return; }
+    if (check.summary) { lst.note = '対象: ' + check.summary.split('\n')[0].split(' ')[0] + '…'; drawListingStatus(); }
     for (const region of targets) {
       lst.note = region.cc + ' 取得中...'; const nb = document.getElementById('lst-note'); if (nb) nb.textContent = '🔄 ' + lst.note;
       try {
@@ -3946,7 +3970,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const items = bulkGuard(scope); if (!items) return;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const nCat = (lst.bulkSel || new Set()).size;
-    if (!confirm(`${nCat}カタログ（${scope === 'all' ? '全国' : scope}・合計${items.length}出品）を、それぞれの推奨SKUに統一してShopeeに書き込みます。よろしいですか？`)) return;
+    if (!confirm(`🏪 書込先アカウント: ${gwB.label}\n\n${nCat}カタログ（${scope === 'all' ? '全国' : scope}・合計${items.length}出品）を、それぞれの推奨SKUに統一してShopeeに書き込みます。よろしいですか？`)) return;
     let ok = 0, ng = 0, skip = 0;
     for (let i = 0; i < items.length; i++) { const it = items[i]; if (!it.recSku) { skip++; continue; } try { const r = await productWrite(it.host, it.item_id, { parent_sku: it.recSku }); r.ok ? ok++ : ng++; } catch (e) { ng++; } bulkProg(`書込 ${i + 1}/${items.length}`); }
     bulkProg(''); alert(`SKU一括 完了: 成功${ok} / 失敗${ng} / スキップ${skip}(推奨SKU無し)\n（次回🔄更新で一覧にも反映）`);
@@ -3955,7 +3979,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function bulkApplyWeight(scope) {
     const items = bulkGuard(scope); if (!items) return;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
-    const w = prompt(`重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。`, '0.2');
+    const w = prompt(`🏪 書込先: ${gwB.label}\n重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。`, '0.2');
     if (!w || !w.trim() || isNaN(parseFloat(w))) return;
     if (!confirm(`${items.length}出品の重量を ${w.trim()}kg に一括設定します。よろしいですか？`)) return;
     let ok = 0, ng = 0;
@@ -3966,7 +3990,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function bulkApplyPrice(scope) {
     const items = bulkGuard(scope); if (!items) return;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
-    const f = prompt(`価格の倍率を入力（例: 1.1で+10%、0.9で-10%）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品の全明細価格に適用。`, '1.1');
+    const f = prompt(`🏪 書込先: ${gwB.label}\n価格の倍率を入力（例: 1.1で+10%、0.9で-10%）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品の全明細価格に適用。`, '1.1');
     const factor = parseFloat(f); if (!(factor > 0)) return;
     if (!confirm(`${items.length}出品の全明細価格を ×${factor} にします（現在価格を読み込んで変更）。\n（VN上限/BR価格差の制約に触れる出品は自動スキップ）\n時間がかかります。よろしいですか？`)) return;
     let ok = 0, ng = 0, skip = 0; const skips = [];
@@ -3990,7 +4014,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function bulkApplyTitleReplace(scope) {
     const items = bulkGuard(scope); if (!items) return;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
-    const before = prompt(`タイトルの「置換前」文字列（この文字を含む出品だけ変更）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
+    const before = prompt(`🏪 書込先: ${gwB.label}\nタイトルの「置換前」文字列（この文字を含む出品だけ変更）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
     if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
     const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
     if (after == null) return;
@@ -4017,7 +4041,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function bulkApplyModelNameReplace(scope) {
     const items = bulkGuard(scope); if (!items) return;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
-    const before = prompt(`明細名(バリエーション名)の「置換前」文字列。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
+    const before = prompt(`🏪 書込先: ${gwB.label}\n明細名(バリエーション名)の「置換前」文字列。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品が対象。`, '');
     if (before == null) return; if (!before) { alert('置換前の文字列を入力してください'); return; }
     const after = prompt('「置換後」文字列（削除したい場合は空欄のままOK）', '');
     if (after == null) return;
@@ -5579,7 +5603,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   let syncRunning = false;
-  async function syncAll(st) {
+  async function syncAll(st, interactive) {
     if (syncRunning) return;
     if (state.mode !== 'live') { st('❌ ライブモード（ブリッジ入りPC）でのみ同期できます'); return; }
     if (!settings.sbSecret) { st('❌ ⚙️設定でSupabase secretキーを入力してください'); return; }
@@ -5589,7 +5613,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     // 同期対象＝今このブラウザでアクティブなショップ。shop_idを判定して各行に刻む（内部読取はrawReadで絞り込み解除）
     state.rawRead = true;
-    try { const _sh = await detectShopIds(targets); activeShopByCc = {}; Object.keys(_sh).forEach(cc => { if (_sh[cc]) activeShopByCc[cc] = _sh[cc].shop_id; }); say('🔑 対象アカウント: ' + (targets.map(r => r.cc + '=' + (_sh[r.cc] ? (_sh[r.cc].name || _sh[r.cc].shop_id) : '?')).join(' / '))); } catch (_) { activeShopByCc = {}; }
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const { live, check } = await detectActiveAndCheck(targets);
+    say('🔑 対象アカウント: ' + (targets.map(r => r.cc + '=' + (live[r.cc] ? (live[r.cc].name || live[r.cc].shop_id) : '?')).join(' / ')));
+    // 手動同期(interactive)で対象アカウントと実アクティブ垢がズレていたら中止（自動同期は今アクティブな垢をそのまま同期＝ガードしない）
+    if (interactive && !check.ok) { state.rawRead = false; activeShopByCc = {}; syncRunning = false; st('【同期を中止】\n' + check.msg); alert('【同期を中止】\n' + check.msg); return; }
     try {
       // 1) 注文（未発送・発送中）— 同期は必ずライブで最新取得
       say('📦 注文データを取得中...');
@@ -5847,7 +5875,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   document.getElementById('sync-run').addEventListener('click', () =>
-    syncAll(t => { document.getElementById('sync-status').textContent = t; }));
+    syncAll(t => { document.getElementById('sync-status').textContent = t; }, true));
   const syncAutoCb = document.getElementById('sync-auto');
   syncAutoCb.checked = settings.syncAuto;
   syncAutoCb.addEventListener('change', () => { settings.syncAuto = syncAutoCb.checked; saveSettings(); });
