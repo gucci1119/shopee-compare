@@ -2745,6 +2745,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🌏統括編集：カバレッジの📦カタログ/単品に「🌏統括編集」を追加。統括タイトルで全国一括／国別にタイトル個別編集・書込／価格×係数を全国一括。さらに🧩バリエ比較＝各国のバリエを並べて表示（✗=その国に無いバリエ／同一国に複数カタログはSG·1/SG·2と自動連番）、価格をセルで直接編集→各国「書込」で反映。明細名変更/バリエ追加/specificsは各国行の✎詳細から',
       '国別の出品制約チェックを全書込経路に適用：VN上限を100万VND(=正)に修正（旧909,090を訂正）。TW60字/SGブランド1つ/BR価格差4倍/VN上限に触れる書込は、タイトルはconfirmで警告、価格の一括/×係数は違反出品を自動スキップ＋内訳表示（統括編集・バリエ価格・単体エディタ・一括すべて）。VN価格上限は単品(バリエなし)出品も対象（単品も1明細として全経路でチェック）',
       '横断カバレッジ上部に「📦 国別 出品枠（Listing Limit）」パネルを追加：Shopeeの出品枠はLive(公開中)だけを数えるため、status=1(Live)を集計して「Live / 枠・残り・占有率%」をバー表示（作成数/未公開/違反は副表示）。枠はShopee商品一覧の「Listing Limit」を各国入力→保存（到達=🔴/残僅か=⚠️/余裕=✅）。例: PH Live991 / 枠1000 → あと9',
+      '分析タブに「🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）」を新設：カバー画像IDが完全一致するのにSKUが違う/空のカタログをクラスタ化（各国に点在する“中身は同じだがSKU別物”を検出）。おすすめSKU欄を確認→「🏷全部このSKUに統一」でクラスタ全カタログの親SKUを揃えて連結🔗',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
@@ -4131,6 +4132,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { await sbUpsert('tasks', [{ title: s.task, priority: s.priority || 2, sort: Date.now() }]); try { logAct('施策', 'タスク化', s.cat, s.task); } catch (_) {} return true; }
     catch (e) { alert('タスク追加失敗: ' + e.message); return false; }
   }
+  // 🖼️ カバー画像IDが完全一致するカタログを束ねる（同一商品の可能性）。SKUがバラバラ/空のものを優先
+  function imageClusters(targets) {
+    const byImg = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const img = (l.image || '').trim(); if (!img) return;
+      let g = byImg.get(img); if (!g) { g = []; byImg.set(img, g); }
+      g.push({ cc: l.cc, host: (regionByCc(l.cc) || {}).host, item_id: l.item_id, name: l.name || '', sku: (l.parent_sku || '').trim(), sold: (l.models || []).reduce((s, m) => s + (m.sold || 0), 0), nvar: l.model_count || 0, status: l.status });
+    }));
+    const clusters = [];
+    byImg.forEach((g, img) => {
+      if (g.length < 2) return;
+      const distinct = new Set(g.map(x => x.sku).filter(Boolean));
+      const hasEmpty = g.some(x => !x.sku);
+      if (distinct.size <= 1 && !hasEmpty) return;             // 既に同一SKUで連結済み＝対象外
+      const rep = g.map(x => x.name).sort((a, b) => b.length - a.length)[0] || '';
+      const sug = g.map(x => x.sku).find(s => skuGroupKey(s)) || recommendSku(productKey(rep));  // クラスタ内の有効SKU優先、無ければ推奨SKU
+      clusters.push({ img, items: g, nCc: new Set(g.map(x => x.cc)).size, nSku: distinct.size, hasEmpty, sold: g.reduce((s, x) => s + x.sold, 0), rep, sug });
+    });
+    clusters.sort((a, b) => (b.nSku - a.nSku) || (b.nCc - a.nCc) || (b.sold - a.sold) || (b.items.length - a.items.length));
+    return clusters;
+  }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
@@ -4162,6 +4184,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cchA = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const missCells = (p) => targets.map(r => { const has = p.cc[r.cc]; return `<td style="${has ? 'color:#1a7f37;font-weight:700' : 'background:#fff0f0;color:#d93025;font-weight:700'}">${has ? (p.link[r.cc] ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${has}↗</a>` : has) : '✗'}</td>`; }).join('');
     const mergeCands = catalogMergeCandidates(targets);
+    const imgClust = imageClusters(targets); lst.imgClustData = {}; imgClust.forEach(c => lst.imgClustData[c.img] = c);
+    const imgClustHtml = `<div class="tool-card" style="max-width:none">
+      <h3 style="margin-top:0">🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）<span class="smd-dim" style="font-weight:400;font-size:12px">（カバー画像IDが完全一致。別カタログでも中身は同じ＝統一候補）</span></h3>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ（上位60表示）。</div>
+      <div class="pf-scroll" style="max-height:56vh">${imgClust.slice(0, 60).map(c => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
+        <img src="${IMG_CDN}${esc(c.img)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px;flex:none" loading="lazy" onerror="this.style.opacity=.15">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:3px"><span class="smd-dim" style="font-size:11px">${c.nCc}か国 / ${c.items.length}カタログ / SKU種類${c.nSku}${c.hasEmpty ? '＋空' : ''} / 売${c.sold}</span>
+            <input class="imgc-sku" data-img="${esc(c.img)}" value="${av(c.sug)}" spellcheck="false" title="このSKUに全部揃える" style="width:190px;padding:2px 5px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:10px;margin-left:auto">
+            <button class="imgc-apply smd-btn" data-img="${esc(c.img)}" style="font-size:10px;background:#7b52c4;color:#fff;border-color:#7b52c4" title="このクラスタ全カタログの親SKUを揃えて連結">🏷 全部このSKUに統一</button></div>
+          ${c.items.map(x => `<div style="display:flex;gap:6px;align-items:center;font-size:11px;padding:1px 0"><b style="color:${(regionByCc(x.cc) || {}).color || '#333'};width:22px;flex:none">${x.cc}</b><a href="${editUrlFor(x.host, x.item_id)}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.name)}｜クリックで編集ページ">${esc(x.name)}</a>${buyerUrlFor(x.cc, x.item_id) ? `<a href="${buyerUrlFor(x.cc, x.item_id)}" target="_blank" style="text-decoration:none" title="販売(公開)ページ">🛍️</a>` : ''}<span style="font-family:monospace;font-size:10px;color:${x.sku ? '#555' : '#d93025'};white-space:nowrap" title="現在の親SKU">${x.sku ? esc(x.sku) : '(空)'}</span>${x.status !== 1 ? '<span class="smd-dim" style="font-size:9px">未公開</span>' : ''}</div>`).join('')}
+        </div>
+      </div>`).join('') || '<span class="smd-dim">候補なし（画像が一致しSKUが異なるカタログは見つかりませんでした）</span>'}</div>
+    </div>`;
     const sugs = computeSuggestions(targets); lst.sugData = sugs;
     const sugCatColor = { '横展開': '#1565c0', '価格差': '#e8710a', '再公開': '#7b52c4', '在庫': '#d93025' };
     const sugHtml = `<div class="tool-card" style="max-width:none">
@@ -4170,6 +4206,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     </div>`;
     host.innerHTML =
       sugHtml +
+      imgClustHtml +
       `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📋 統合候補：同じカタログの可能性<span class="smd-dim" style="font-weight:400;font-size:12px">（中身のバリエが一致・タイトルのズレOK。PH起点→他国コピペのズレを検出）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がるバリエ(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
@@ -4203,6 +4240,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </div>`;
     host.querySelectorAll('.sug-task').forEach(el => el.addEventListener('click', async () => { const s = lst.sugData[+el.dataset.i]; if (!s) return; el.disabled = true; if (await addSuggestionTask(s)) { el.textContent = '✓済'; el.style.background = '#e7f4e9'; } else el.disabled = false; }));
     const sugAll = host.querySelector('.sug-all'); if (sugAll) sugAll.addEventListener('click', async () => { if (!confirm('上位10件をタスク化しますか？')) return; sugAll.disabled = true; let ok = 0; for (const s of (lst.sugData || []).slice(0, 10)) { if (await addSuggestionTask(s)) ok++; } sugAll.textContent = `✓ ${ok}件をタスク化`; });
+    // 🖼️同一画像クラスタ → 全カタログの親SKUを揃えて連結
+    host.querySelectorAll('.imgc-apply').forEach(el => el.addEventListener('click', async () => {
+      const c = lst.imgClustData && lst.imgClustData[el.dataset.img]; if (!c) return;
+      const inp = host.querySelector('.imgc-sku[data-img="' + el.dataset.img + '"]');
+      const v = ((inp && inp.value) || '').trim();
+      await writeParentSku(c.items, `🖼️同一画像で統一（${c.nCc}か国/${c.items.length}件）`, c.sug, c.rep, v || undefined);
+      renderListingAnalysis();
+    }));
   }
   async function renderListingStatus() {
     const host = document.getElementById('list-status');
