@@ -2149,6 +2149,9 @@
         <button class="acct-add smd-btn" style="background:#1a7f37;color:#fff;border-color:#1a7f37">追加</button>
       </div>${detHtml}</div>`;
     const byCc = {}; (rows || []).forEach(a => (byCc[a.cc] = byCc[a.cc] || []).push(a));
+    // 各国内は メイン→サブ→新規→休眠 の順（同順は名前順）＝メインが一番上
+    const stOrder = { main: 0, sub: 1, new: 2, dormant: 3 };
+    Object.values(byCc).forEach(arr => arr.sort((a, b) => (stOrder[a.status] != null ? stOrder[a.status] : 9) - (stOrder[b.status] != null ? stOrder[b.status] : 9) || String(a.label || '').localeCompare(String(b.label || ''), 'ja')));
     const listHtml = REGIONS.filter(r => byCc[r.cc]).map(r => `<div style="margin-bottom:6px"><div style="font-weight:700;color:${r.color};font-size:13px;margin:4px 0">${r.cc} <span class="smd-dim" style="font-weight:400;font-size:11px">${byCc[r.cc].length}アカウント</span></div>
         ${byCc[r.cc].map(a => `<div class="acct-row" data-id="${esc(a.id)}" data-cc="${esc(a.cc)}" style="border:1px solid #eee;border-radius:7px;padding:7px 9px;margin-bottom:5px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px">
           <input class="acct-e-label" value="${av(a.label || '')}" style="width:160px;padding:3px 6px;border:1px solid #eee;border-radius:5px;font-weight:600">
@@ -2930,7 +2933,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '編集の即時反映を強化：SKU/タイトルをShopeeに書いたら、ポータルの表示（メモリ）＋保存データ（Supabase）にも即反映するように（従来は次回同期まで古いSKUが残って見えた）。カバレッジ/分析に「🕒 出品データ最終同期」時刻を表示。未公開(取り下げ)商品はShopeeが編集を拒否する旨を明記（THに未公開が多く、統一時にTHだけ失敗しやすい＝先に公開が必要）',
       '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
       '🔍 アカウント入れ替わり検出：Shopeeがたまにセッションを第1垢に戻すバグ対策。アカウントページで「今このブラウザの垢」を各国ライブ取得（get_shop_base_info の店名(name)＋shop_id＋商品数）し、店名で今どの垢か即判別。「この端末の担当」に設定した垢と違えば⚠️警告＋未登録垢はワンクリックで登録簿へ。書込/同期の前に確認できる',
-      '🔄 全ショップ一括取込：アカウントページで「Shopeeから全ショップ取込」→ メインアカウント配下の全ショップ（shop_id/店名/国/最終ログイン）をget_shop_listで取得し登録簿に自動登録（既存の名前/ブラウザ/タグ/メモは保持）。手入力不要で一覧が揃う',
+      '🔄 全ショップ一括取込：アカウントページで「Shopeeから全ショップ取込」→ メインアカウント配下の全ショップ（shop_id/店名/国/最終ログイン）をget_shop_listで取得し登録簿に自動登録（既存の名前/ブラウザ/タグ/メモは保持）。手入力不要で一覧が揃う。各国内は メイン→サブ→新規→休眠 の順で並ぶ（メインが一番上）',
       '🎯 アカウント別データ表示：ヘッダに「対象アカウント」セレクタを追加。全データ（出品/注文/ダッシュボード/損益）を特定のショップ(shop_id)に絞り込み。同期時に「今アクティブな店」のshop_idを各行へ自動付与（listings/orders/income）。読取はsbGet/sbGetAllの1か所でshop_idフィルタを注入（全合算時は無加工）。有効化にlistings/orders/incomeへshop_id列追加(SQL 1回)＋各垢に切替えて再同期が必要（列が無い間はセレクタで警告＋絞り込み無効）',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
@@ -5969,6 +5972,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (_) { state.acctReady = false; }
     const rows = await loadAccounts();
     const byCc = {}; rows.forEach(a => { if (a.shop_id) (byCc[a.cc] = byCc[a.cc] || []).push(a); });
+    const stOrd = { main: 0, sub: 1, new: 2, dormant: 3 };
+    Object.values(byCc).forEach(arr => arr.sort((a, b) => (stOrd[a.status] != null ? stOrd[a.status] : 9) - (stOrd[b.status] != null ? stOrd[b.status] : 9) || String(a.label || '').localeCompare(String(b.label || ''), 'ja')));
     let html = '<option value="all">全アカウント（すべて合算）</option>';
     REGIONS.forEach(r => { const items = byCc[r.cc] || []; if (!items.length) return; html += `<optgroup label="${r.cc}">` + items.map(a => `<option value="${esc(a.shop_id)}">${esc(a.label)}（${r.cc}）</option>`).join('') + '</optgroup>'; });
     html += '<option value="none">未判別（shop_id無し・再同期前の既存データ）</option>';
