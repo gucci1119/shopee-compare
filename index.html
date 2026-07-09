@@ -2063,6 +2063,19 @@
   }
   // ---------------- 🔑 アカウント登録簿 ----------------
   const ACCT_STATUS = [['main', 'メイン'], ['sub', 'サブ(第2垢〜)'], ['new', '新規(準備中)'], ['dormant', '休眠']];
+  const acctStLabel = v => (ACCT_STATUS.find(s => s[0] === v) || [, v || '-'])[1];
+  // 「今このブラウザのShopeeセッションがどの垢か」を各国ライブ取得（shop_id）。Shopeeのセッション入れ替わりバグ検出用。
+  async function detectShopIds(targets) {
+    const out = {};
+    for (const r of targets) {
+      try {
+        const j = await bridgePostJson(`https://${r.host}/api/v3/mpsku/list/v2/get_product_list?SPC_CDS_VER=2`, { page_number: 1, page_size: 1, list_type: 'all' });
+        const m = JSON.stringify(j || {}).match(/"shop_?id"\s*:\s*"?(\d{4,})"?/);
+        out[r.cc] = (j && j.code === 0 && m) ? m[1] : null;
+      } catch (e) { out[r.cc] = null; }
+    }
+    return out;
+  }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
   async function renderAccounts() {
     const host = document.getElementById('acct-body');
@@ -2083,6 +2096,11 @@
       return;
     }
     const detected = settings.shopIds || {};
+    const targets = REGIONS.filter(r => state.enabled.has(r.cc));
+    const acctByShop = {}; (rows || []).forEach(a => { if (a.shop_id) acctByShop[a.shop_id] = a; });
+    const detectCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;border:1px solid #ffd9c2">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🔍 今このブラウザのアカウント確認</b><button class="acct-detect smd-btn" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d">各国ライブ取得</button><span class="smd-dim" style="font-size:11px">Shopeeのセッション入れ替わりバグ検出用。<b>書込/同期の前にここで「今どの垢か」を確認</b>。「この端末の担当」に設定した垢と違えば⚠️。</span></div>
+      <div class="acct-detect-res" style="margin-top:8px"></div></div>`;
     const ccOpts = REGIONS.map(r => `<option value="${r.cc}">${r.cc}</option>`).join('');
     const stOpts = (sel) => ACCT_STATUS.map(s => `<option value="${s[0]}"${sel === s[0] ? ' selected' : ''}>${s[1]}</option>`).join('');
     const detHtml = REGIONS.some(r => detected[r.cc]) ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">このブラウザで検出中のshop_id（前回同期した垢）：${REGIONS.filter(r => detected[r.cc]).map(r => `<span style="margin-right:8px"><b style="color:${r.color}">${r.cc}</b> ${esc(detected[r.cc])} <button class="acct-usedet smd-btn" data-cc="${r.cc}" data-sid="${esc(detected[r.cc])}" style="font-size:9px;padding:0 4px">↑登録欄へ</button></span>`).join('')}</div>` : '';
@@ -2111,7 +2129,33 @@
         </div>`).join('')}</div>`).join('') || '<div class="smd-dim" style="padding:8px">まだ登録がありません。上のフォームから追加してください。</div>';
     const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 データ分離（次の一歩）</b>
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin-top:4px">第2垢の出品/注文をポータルで<b>アカウント別に</b>見るには、同期データに shop_id を付けて「アカウント別フィルタ」を足す改修が必要です（今は国単位で混ざる）。第2垢の出品が増える前にやるのが安全。やる時は声かけてください。</div></div>`;
-    host.innerHTML = intro + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    host.innerHTML = intro + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    // 🔍 現在アカウント確認
+    const renderDetect = (live) => {
+      const my = settings.myShop || {};
+      const box = host.querySelector('.acct-detect-res'); if (!box) return;
+      box.innerHTML = `<table class="pf-table" style="width:auto;min-width:520px"><tr><th>国</th><th style="text-align:left">今このブラウザの垢(ライブ)</th><th>この端末の担当</th><th></th></tr>` + targets.map(r => {
+        const sid = live[r.cc]; const acc = sid && acctByShop[sid]; const exp = my[r.cc];
+        const mism = exp && exp.shop_id && sid && exp.shop_id !== sid;
+        const okm = exp && exp.shop_id && sid && exp.shop_id === sid;
+        const now = sid ? `<b>${esc(sid)}</b>${acc ? ` <span style="color:#1a7f37">${esc(acc.label)}・${acctStLabel(acc.status)}</span>` : ' <span class="smd-dim">(未登録)</span>'}` : '<span style="color:#d93025">取得失敗/未ログイン</span>';
+        const expTxt = exp && exp.shop_id ? `${esc(exp.label || exp.shop_id)}` : '<span class="smd-dim">未設定</span>';
+        const flag = mism ? '<b style="color:#d93025">⚠️ 入れ替わり？担当と違う</b>' : okm ? '<span style="color:#1a7f37">✅ 一致</span>' : '';
+        return `<tr${mism ? ' style="background:#fff0f0"' : ''}><td><b style="color:${r.color}">${r.cc}</b></td><td style="text-align:left;font-size:11px">${now}</td><td style="font-size:11px">${expTxt}</td><td style="white-space:nowrap">${flag} <button class="acct-setmy smd-btn" data-cc="${r.cc}" data-sid="${esc(sid || '')}" data-label="${esc(acc ? acc.label : '')}" style="font-size:9px" title="今の垢をこの端末の担当として記録">この端末の担当に設定</button></td></tr>`;
+      }).join('') + `</table><div class="smd-dim" style="font-size:10.5px;margin-top:4px">⚠️が出たら：そのChromeで<b>Seller Centerを開き直して正しい垢にログインし直す</b>→再度「各国ライブ取得」で✅を確認してから作業。入れ替わったまま書込/同期しない。</div>`;
+    };
+    const dbtn = host.querySelector('.acct-detect');
+    if (dbtn) dbtn.addEventListener('click', async () => {
+      if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で確認できます'); return; }
+      dbtn.disabled = true; dbtn.textContent = '取得中…';
+      const live = await detectShopIds(targets); lst.liveShop = live; renderDetect(live);
+      dbtn.disabled = false; dbtn.textContent = '再取得';
+      host.querySelectorAll('.acct-setmy').forEach(b => b.addEventListener('click', () => {
+        if (!b.dataset.sid) { alert('取得できた垢がありません'); return; }
+        settings.myShop = settings.myShop || {}; settings.myShop[b.dataset.cc] = { shop_id: b.dataset.sid, label: b.dataset.label || b.dataset.sid };
+        saveSettings(); renderDetect(lst.liveShop || {});
+      }));
+    });
     host.querySelector('.acct-add').addEventListener('click', async () => {
       const g = s => ((host.querySelector(s) || {}).value || '').trim();
       const cc = (host.querySelector('.acct-f-cc') || {}).value || 'PH', label = g('.acct-f-label'), shop = g('.acct-f-shop');
@@ -2829,6 +2873,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '横断カバレッジの並び替え強化：カタログ数/販売数/バリエ数/単品数/あいうえおに加え、列見出しクリックでその列（各国も）で並び替え＋もう一度で昇順⇄降順。表示フィルタ（すべて/欠けあり=未出品国あり/完全=全国あり）を追加。「その他（未分類）」も展開できるように',
       '編集の即時反映を強化：SKU/タイトルをShopeeに書いたら、ポータルの表示（メモリ）＋保存データ（Supabase）にも即反映するように（従来は次回同期まで古いSKUが残って見えた）。カバレッジ/分析に「🕒 出品データ最終同期」時刻を表示。未公開(取り下げ)商品はShopeeが編集を拒否する旨を明記（THに未公開が多く、統一時にTHだけ失敗しやすい＝先に公開が必要）',
       '🔑 アカウント登録簿ページを新設：各国のShopeeアカウント（第2垢以降含む）を shop_id・使用ブラウザ・状態(メイン/サブ/新規/休眠)・特徴タグ・メモ で登録（Supabase accountsテーブル＝全PC/Chromeで共有）。「アカウント＝そのChromeのログイン」なので第2垢は別Chromeでそのまま操作可。※データのアカウント別分離(shop_idタグ付け)は次段の課題として明記',
+      '🔍 アカウント入れ替わり検出：Shopeeがたまにセッションを第1垢に戻すバグ対策。アカウントページで「今このブラウザの垢」を各国ライブ取得(shop_id)し、登録簿の名前に照合＋「この端末の担当」に設定した垢と違えば⚠️警告。書込/同期の前に確認できる',
       '会計の正確化：①CSVエクスポートに数式インジェクション対策（古物台帳/確定申告用）②返金の計上月を「返金日(refund_date・新設)」基準に固定（編集で月がズレない）③純利益を経費ページ/月次サマリーで統一（粗利−経費−返金）④粗利に「確定/暫定」件数＋暫定入金を含む警告表示⑤ダッシュボードPendingは未入金のみ集計（入金確定分をpendingフラグで除外）⑥在庫まとめ分割に衝突チェック＋ロールバック（二重計上防止）⑦sbGetAllの取得失敗を握りつぶさず中断',
     ] },
     { date: '2026-07-07', items: [
