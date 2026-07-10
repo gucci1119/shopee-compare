@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.6
+// @version      0.6.7
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -36,7 +36,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.6';
+  const VER = '0.6.7';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -123,6 +123,9 @@
     try { if (typeof txt !== 'string' || !txt) return; const m = txt.match(CDN_ID_RE); if (m && uploadRespIds[uploadRespIds.length - 1] !== m[1]) { uploadRespIds.push(m[1]); if (logEl) log('・アップAPI応答 id=…' + m[1].slice(-6), '#7b52c4'); } } catch (_) {}
   }
   const captures = [];   // {url, method, body, resp}
+  const uploadCaptures = [];  // 画像アップロード通信（バリエ専用アップの正体を掴む用）
+  function fdFields(body) { try { if (body && typeof body.entries === 'function') { const out = []; for (const pair of body.entries()) { const k = pair[0], v = pair[1]; out.push(k + ' = ' + ((v && v.name !== undefined && v.size !== undefined) ? ('[File name=' + v.name + ' size=' + v.size + ' type=' + (v.type || '') + ']') : String(v).slice(0, 300))); } return out.join('\n'); } } catch (_) {} return typeof body === 'string' ? body.slice(0, 500) : '(FormData読取不可)'; }
+  function captureUpload(url, method, body, respText) { try { uploadCaptures.push({ url: url || '', method: method || 'POST', query: ((url || '').split('?')[1] || ''), fields: fdFields(body), resp: (typeof respText === 'string' ? respText.slice(0, 4000) : '') }); if (uploadCaptures.length > 8) uploadCaptures.shift(); if (typeof renderCaptures === 'function') renderCaptures(); if (logEl) log('📸 画像アップ通信を記録: ' + (url || '').split('?')[0], '#7b52c4'); } catch (_) {} }
   const CREATE_RE = /(add_product|create_product|product\/add|create_item|add_item|publish)/i;
   function recordMaybe(url, method, body, resp) {
     try {
@@ -288,8 +291,8 @@
           recordMaybe(url, method, body, '');
           if (CREATE_RE.test(url)) { p.then(r => { try { r.clone().text().then(t => recordMaybe(url, method, body, t)); } catch (_) {} }); }
         }
-        // 画像アップロード応答からimage_idを拾う（bodyがFormDataでもOK＝URLで判定）
-        if (UPLOAD_URL_RE.test(url)) { p.then(r => { try { r.clone().text().then(grabUploadId); } catch (_) {} }); }
+        // 画像アップロード応答からimage_idを拾う＋通信を記録（バリエ専用アップの正体調査用）
+        if (UPLOAD_URL_RE.test(url)) { const b0 = init && init.body; p.then(r => { try { r.clone().text().then(t => { grabUploadId(t); captureUpload(url, method, b0, t); }); } catch (_) {} }); }
       } catch (_) {}
       return p;
     };
@@ -301,7 +304,7 @@
           recordMaybe(this.__smdU || '', this.__smdM || 'POST', body, '');
           if (CREATE_RE.test(this.__smdU || '')) { this.addEventListener('load', () => { try { recordMaybe(this.__smdU, this.__smdM, body, this.responseText); } catch (_) {} }); }
         }
-        if (UPLOAD_URL_RE.test(this.__smdU || '')) { this.addEventListener('load', () => { try { grabUploadId(this.responseText); } catch (_) {} }); }
+        if (UPLOAD_URL_RE.test(this.__smdU || '')) { const b0 = body; this.addEventListener('load', () => { try { grabUploadId(this.responseText); captureUpload(this.__smdU, this.__smdM, b0, this.responseText); } catch (_) {} }); }
       } catch (_) {}
       return oSend.apply(this, arguments);
     };
@@ -312,11 +315,18 @@
   function log(msg, color) { if (logEl) { const d = document.createElement('div'); d.textContent = msg; if (color) d.style.color = color; logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight; } console.log('[newlisting]', msg); }
   function renderCaptures() {
     if (!capEl) return;
-    capEl.innerHTML = captures.length ? captures.map((c, i) => `<div style="margin-bottom:4px"><b>#${i + 1}</b> ${(c.url || '').split('?')[0]} <button data-i="${i}" class="nl-copy" style="font-size:10px;padding:1px 5px;cursor:pointer">この内容をコピー</button></div>`).join('') : '<span style="color:#888">まだ作成APIは未キャプチャ。手動で1回「発行」すると、その通信をここに記録します。</span>';
+    const createHtml = captures.length ? captures.map((c, i) => `<div style="margin-bottom:4px"><b>#${i + 1}</b> ${(c.url || '').split('?')[0]} <button data-i="${i}" class="nl-copy" style="font-size:10px;padding:1px 5px;cursor:pointer">この内容をコピー</button></div>`).join('') : '<span style="color:#888">まだ作成APIは未キャプチャ。手動で1回「発行」すると、その通信をここに記録します。</span>';
+    const upHtml = uploadCaptures.length ? ('<div style="margin-top:6px;border-top:1px dashed #ddd;padding-top:4px"><b>🖼️ 画像アップ通信</b>（手動で画像を上げると記録／バリエ専用アップの調査用）' + uploadCaptures.map((c, i) => `<div style="margin:3px 0">U${i + 1} …${((c.url || '').split('?')[0]).split('/').slice(-2).join('/')} <button data-u="${i}" class="nl-ucopy" style="font-size:10px;padding:1px 5px;cursor:pointer">コピー</button></div>`).join('') + '</div>') : '';
+    capEl.innerHTML = createHtml + upHtml;
     capEl.querySelectorAll('.nl-copy').forEach(b => b.addEventListener('click', () => {
       const c = captures[+b.dataset.i];
       const txt = 'URL: ' + c.url + '\nMETHOD: ' + c.method + '\n--- REQUEST BODY ---\n' + c.body + '\n--- RESPONSE ---\n' + c.resp;
       navigator.clipboard.writeText(txt).then(() => { const o = b.textContent; b.textContent = '✅コピー済(開発者に貼付)'; setTimeout(() => b.textContent = o, 1500); });
+    }));
+    capEl.querySelectorAll('.nl-ucopy').forEach(b => b.addEventListener('click', () => {
+      const c = uploadCaptures[+b.dataset.u];
+      const txt = 'URL: ' + c.url + '\nMETHOD: ' + c.method + '\nQUERY: ' + c.query + '\n--- FORM FIELDS ---\n' + c.fields + '\n--- RESPONSE ---\n' + c.resp;
+      navigator.clipboard.writeText(txt).then(() => { const o = b.textContent; b.textContent = '✅コピー済'; setTimeout(() => b.textContent = o, 1500); });
     }));
   }
   function panel(job) {
