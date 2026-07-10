@@ -3717,7 +3717,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let src = null; // fetchMercari結果
     const ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
-    const ccRows = ccs.map(cc => { const rg = regionByCc(cc) || { cur: '', color: '#333' }; const n = d.listings.filter(x => x.cc === cc).length; return `<tr data-cc="${cc}"><td style="white-space:nowrap"><input type="checkbox" class="av-cc" data-cc="${cc}" checked> <b style="color:${rg.color}">${cc}</b> <span class="smd-dim">${n}出品</span></td><td style="white-space:nowrap">${rg.cur}<input class="av-price" data-cc="${cc}" style="width:90px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;text-align:right" placeholder="価格"></td><td><input class="av-stock" data-cc="${cc}" value="1" style="width:56px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;text-align:right" title="在庫"></td></tr>`; }).join('');
+    const ccRows = ccs.map(cc => { const rg = regionByCc(cc) || { cur: '', color: '#333' }; const n = d.listings.filter(x => x.cc === cc).length; return `<tr data-cc="${cc}"><td style="white-space:nowrap"><input type="checkbox" class="av-cc" data-cc="${cc}" checked> <b style="color:${rg.color}">${cc}</b> <span class="smd-dim">${n}出品</span></td><td style="white-space:nowrap">${rg.cur}<input class="av-price" data-cc="${cc}" style="width:90px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;text-align:right" placeholder="価格"></td><td><input class="av-stock" data-cc="${cc}" value="1" style="width:56px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;text-align:right" title="在庫"></td><td class="av-profit" data-cc="${cc}" style="font-size:11px;white-space:nowrap;text-align:right"></td></tr>`; }).join('');
     ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:640px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
       <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee">
         <b style="flex:1">🛒 メルカリ取込 → バリエ追加</b>
@@ -3732,8 +3732,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <input class="av-name" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:8px">
         <label style="color:#555;font-weight:600;font-size:12px">SKU（任意・全国共通）</label>
         <input class="av-sku" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:monospace;font-size:11px;margin-bottom:10px">
-        <div style="font-weight:700;font-size:12px;border-top:1px solid #eee;padding-top:10px">対象国と価格（¥→各国換算・編集可）</div>
-        <table class="pf-table" style="width:100%;margin-top:6px"><tr><th style="text-align:left">国</th><th>価格</th><th>在庫</th></tr>${ccRows}</table>
+        <div style="font-weight:700;font-size:12px;border-top:1px solid #eee;padding-top:10px">対象国と価格 <span class="smd-dim" style="font-weight:400">（コンポーザーと同じ重量ベースで自動算出・編集可）</span></div>
+        <div class="row" style="gap:12px;margin:8px 0;align-items:flex-end;flex-wrap:wrap">
+          <div><label class="lc" style="font-size:11px">ROI%</label><input class="li av-roi" type="number" value="${settings.roiPct}" style="width:64px"></div>
+          <div><label class="lc" style="font-size:11px">重量g</label><input class="li av-weight" type="number" value="${settings.weightG}" style="width:74px"></div>
+          <span class="smd-dim" style="font-size:11px">仕入 <b>¥<span class="av-cost">-</span></b> → 各国価格を自動算出（手数料=合計方式）。<span style="color:#d93025">利益マイナスは⚠</span></span>
+        </div>
+        <table class="pf-table" style="width:100%;margin-top:6px"><tr><th style="text-align:left">国</th><th>価格</th><th>在庫</th><th>利益(円)</th></tr>${ccRows}</table>
         <div class="av-note" style="font-size:11px;color:#8a6d3b;background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;margin-top:10px">⚠️ ③のuserscript未導入の間は、ジョブは保存されるだけで自動実行されません（各国の編集ページを開いて手動でも可）。</div>
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px">
           <span class="av-msg" style="margin-right:auto;font-size:11px;color:#888"></span>
@@ -3746,6 +3751,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
     ov.querySelectorAll('.av-close,.av-close2').forEach(b => b.addEventListener('click', close));
     const q = (s) => ov.querySelector(s);
+    // 各国の利益表示を更新（現在の価格入力値から逆算）。src.price=仕入(円)
+    const avProfit = () => {
+      if (!src) return; const weightG = Number(q('.av-weight').value) || settings.weightG;
+      ccs.forEach(cc => { const pc = ov.querySelector('.av-profit[data-cc="' + cc + '"]'); const pv = Number((ov.querySelector('.av-price[data-cc="' + cc + '"]').value || '').replace(/,/g, '')) || 0; if (!pc) return; if (!pv) { pc.textContent = ''; return; } const pf = priceProfitFor(cc, src.price || 0, pv, { weightG }); const bad = pf.profit < 0 || pf.buyerJpy <= (src.price || 0); pc.textContent = '¥' + (pf.profit >= 0 ? '+' : '') + pf.profit.toLocaleString() + (bad ? ' ⚠' : ''); pc.style.color = bad ? '#d93025' : '#1a7f37'; });
+    };
+    // ROI/重量から各国価格を再計算して埋める（コンポーザーと同じ priceLocalFor）
+    const avRecalc = () => {
+      if (!src) return; const roiPct = Number(q('.av-roi').value) || settings.roiPct; const weightG = Number(q('.av-weight').value) || settings.weightG;
+      ccs.forEach(cc => { const rg = regionByCc(cc); const p = ov.querySelector('.av-price[data-cc="' + cc + '"]'); if (rg && p) p.value = roundLocal(priceLocalFor(cc, src.price || 0, { roiPct, weightG }), rg.priceUnit || 1); });
+      avProfit();
+    };
+    q('.av-roi').addEventListener('input', avRecalc);
+    q('.av-weight').addEventListener('input', avRecalc);
+    ov.querySelectorAll('.av-price').forEach(el => el.addEventListener('input', avProfit));
     q('.av-fetch').addEventListener('click', async () => {
       const url = q('.av-url').value.trim(); const msg = q('.av-msg');
       if (!url) { msg.textContent = 'URLを入れてください'; return; }
@@ -3757,7 +3776,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         q('.av-title-src').textContent = src.title || '(タイトル無し)';
         q('.av-price-src').textContent = '¥' + (src.price || 0).toLocaleString() + ' ' + (src.currency || '');
         if (!q('.av-name').value) q('.av-name').value = src.title || '';
-        ccs.forEach(cc => { const rg = regionByCc(cc); const p = ov.querySelector('.av-price[data-cc="' + cc + '"]'); if (rg && p && !p.value) p.value = roundLocal(JPY_TO_LOCAL(priceFromCost(src.price || 0), rg), rg.priceUnit || 1); });
+        const costEl = q('.av-cost'); if (costEl) costEl.textContent = (src.price || 0).toLocaleString();
+        avRecalc(); // コンポーザーと同じ重量ベース計算で各国価格＋利益を算出
         q('.av-make').disabled = false;
         msg.style.color = '#1a7f37'; msg.textContent = '✓ 取得しました';
       } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + e.message; }
@@ -4939,7 +4959,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     opt = opt || {};
     const roi = (opt.roiPct != null ? opt.roiPct : (listState.roiPct != null ? listState.roiPct : settings.roiPct)) / 100;
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
-    const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
+    // 寸法はopt優先→無ければlistState（コンポーザー外＝カバレッジのバリエ追加等でopt指定して使えるように）
+    const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
+    const vol = (dW && dH && dD) ? (dW * dH * dD / 6000) : 0;
     const chargeG = Math.max(weightG, vol);
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
@@ -4948,11 +4970,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return kJpy / rg.rateJpy; // 現地通貨（丸め前）
   }
   // 確定した現地価格から「実際に取れる利益(円)＋ROI＋円換算」を逆算（丸め後の価格で算出＝表示用の実数）
-  function priceProfitFor(cc, costJpy, localPrice) {
+  function priceProfitFor(cc, costJpy, localPrice, opt) {
     const rg = regionByCc(cc); if (!rg) return { buyerJpy: 0, profit: 0, roi: 0 };
+    opt = opt || {};
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式）
-    const weightG = (listState.weightG != null ? listState.weightG : settings.weightG) || 0;
-    const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
+    const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
+    const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
+    const vol = (dW && dH && dD) ? (dW * dH * dD / 6000) : 0;
     const slsJpy = slsLocal(cc, Math.max(weightG, vol)) * rg.rateJpy;
     const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
     const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
