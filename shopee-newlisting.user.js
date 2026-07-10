@@ -79,7 +79,7 @@
     const tmpl = JSON.parse(JSON.stringify(lastCreateBody)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
-    if (job.weightG) pi.weight = { value: String(job.weightG / 1000), unit: 1 };
+    if (job.weightG) { const u = (pi.weight && pi.weight.unit != null) ? pi.weight.unit : 1; pi.weight = { value: String(u === 1 ? (job.weightG / 1000) : job.weightG), unit: u }; } // 雛形の単位を尊重(PH=1:kg / VN等はg)
     if (job.dims) pi.dimension = { width: String(job.dims.w || ''), height: String(job.dims.h || ''), length: String(job.dims.d || '') };
     pi.parent_sku = job.parentSku || '';
     if (uploadedImgIds.length) pi.images = uploadedImgIds.slice(0, 9);
