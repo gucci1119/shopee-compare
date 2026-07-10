@@ -4244,7 +4244,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     return u.slice(0, 6).join(' ');
   }
-  const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').slice(0, 40);
+  const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40).replace(/_$/, '');
   // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用。連番/空/ゴミはnull
   const skuGroupKey = (sku) => { const s = String(sku || '').trim(); return (/_/.test(s) && /[a-z]/i.test(s) && s.length >= 4) ? s.toUpperCase() : null; };
   // 全出品を「商品(明細)」単位で国横断グルーピング（SKU優先→タイトル正規化）。推奨ページ等で共有
@@ -4910,7 +4910,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
   const listState = {
     built: false,
-    name: '', hardware: '', jpseries: '', parentSku: '',
+    name: '', hardware: '', jpseries: '', parentSku: '', titleOverride: '',
     images: '', uploadImgs: [], category: '',
     sellJpy: 0, costJpy: 0,
     roiPct: null, weightG: null, dimW: 0, dimH: 0, dimD: 0, // 価格計算用（未設定は設定の既定値）
@@ -4962,8 +4962,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function fillTpl(tpl, map) {
     return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (map[k] != null ? map[k] : '')).replace(/\s{2,}/g, ' ').trim();
   }
-  function listTitle(variation) {
-    return fillTpl(settings.listTitleTpl, { name: listState.name, hardware: listState.hardware, jpseries: listState.jpseries, variation: variation || '' });
+  // 自動生成タイトル：テンプレから生成し、バリエ有りなら「[Used] Variation ...」を自動挿入
+  function listTitleAuto() {
+    let t = fillTpl(settings.listTitleTpl, { name: listState.name, hardware: listState.hardware, jpseries: listState.jpseries, variation: '' });
+    if (listState.variations.length && !/\bVariation\b/i.test(t)) t = t.replace(/^(\s*\[[^\]]+\]\s*)/, '$1Variation ');
+    return t;
+  }
+  // 出力用タイトル：手動修正(titleOverride)があれば優先、無ければ自動
+  function listTitle() {
+    return (listState.titleOverride && listState.titleOverride.trim()) ? listState.titleOverride.trim() : listTitleAuto();
   }
   // TW 60文字短縮（ナレッジのパス: Game削除→Japanese Ver→Japan Ver→装飾語）
   function shortenTW(t) {
@@ -5044,6 +5051,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div><label class="lc">ハード（{hardware}）</label><input class="li" id="li-hw" placeholder="Nintendo Switch"></div>
             <div><label class="lc">日本語シリーズ（{jpseries}）</label><input class="li" id="li-jp" placeholder="スーパーマリオ"></div>
           </div>
+          <label class="lc" style="margin-top:8px">出品タイトル <span class="smd-dim">（上の欄から自動生成。バリエ有りは「Variation」を自動挿入。ここで直接修正も可）</span></label>
+          <div class="row" style="gap:6px;align-items:center">
+            <input class="li" id="li-title" placeholder="商品名・ハード等から自動生成されます" style="flex:1">
+            <button class="smd-btn" id="li-titleauto" title="手動修正を捨てて自動生成タイトルに戻す">🔄 自動</button>
+          </div>
           <label class="lc" style="margin-top:8px">カテゴリ（プルダウンから選択 or 入力。転記時にコピー用）</label>
           <div class="row" style="gap:6px;align-items:center">
             <input class="li" id="li-cat" list="li-catlist" placeholder="選択 or 入力" style="flex:1" autocomplete="off">
@@ -5051,8 +5063,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <datalist id="li-catlist"></datalist>
           </div>
           <label class="lc" style="margin-top:8px">親SKU（カタログのSKU。転記時にコピー用）</label>
-          <input class="li" id="li-psku" placeholder="例: DIGIMON_DS_SWITCH" style="font-family:monospace" spellcheck="false">
-          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像。1行1URL／📁ファイル／ドラッグ&ドロップも可。※Shopeeへは手動アップ）</label>
+          <div class="row" style="gap:6px;align-items:center">
+            <input class="li" id="li-psku" placeholder="例: DIGIMON_DS_SWITCH" style="flex:1;font-family:monospace" spellcheck="false">
+            <button class="smd-btn" id="li-pskusug" title="商品名・ハードからSKUを提案（修正可）">💡 提案</button>
+          </div>
+          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像・<b>最大9枚</b>。1行1URL／📁ファイル／ドラッグ&ドロップ・途中追加も可。※Shopeeへは手動アップ）<span id="li-imgcount" class="smd-dim" style="font-weight:400"></span></label>
           <div class="row" style="gap:6px;align-items:flex-start">
             <textarea class="li" id="li-img" rows="2" placeholder="画像URL or メルカリ等のリンク（貼ると自動取得）／📁 or ここに画像をドロップ" style="flex:1"></textarea>
             <div style="display:flex;flex-direction:column;gap:4px">
@@ -5081,7 +5096,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <label class="lc">バリエーション種別名（例: Hardware, Type）</label>
           <input class="li" id="li-vtier" style="max-width:260px" placeholder="Hardware">
           <div id="li-vars" style="margin-top:8px"></div>
-          <button class="smd-btn" id="li-vadd" style="margin-top:6px">＋ バリエーション追加</button>
+          <div class="row" style="gap:6px;margin-top:6px">
+            <button class="smd-btn" id="li-vadd">＋ バリエーション追加</button>
+            <button class="smd-btn" id="li-vskusug" title="各バリエのSKUを商品名＋バリエ名から一括提案（修正可）">💡 全バリエSKU提案</button>
+          </div>
+          <div class="smd-dim" style="font-size:11px;margin-top:4px">※Shopee制限：バリエ画像は<b>1明細1枚</b>まで。カタログ直下のトップ画像は<b>最大9枚</b>。</div>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -5102,6 +5121,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const bind = (id, key) => { const el = document.getElementById(id); el.addEventListener('input', () => { listState[key] = el.value; listRefresh(); }); };
       bind('li-name', 'name'); bind('li-hw', 'hardware'); bind('li-jp', 'jpseries');
       bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier'); bind('li-psku', 'parentSku');
+      // タイトル：手動修正するとtitleOverrideに保存。名前等を変えても未修正なら自動追従
+      const titleEl = document.getElementById('li-title');
+      titleEl.addEventListener('input', () => { listState.titleOverride = titleEl.value; listRefresh(); });
+      document.getElementById('li-titleauto').addEventListener('click', () => { listState.titleOverride = ''; titleEl.value = listTitleAuto(); listRefresh(); });
+      // 名前/ハード/シリーズを変えたら（未修正のとき）自動タイトルを追従表示
+      ['li-name', 'li-hw', 'li-jp'].forEach(id => document.getElementById(id).addEventListener('input', () => { if (!(listState.titleOverride || '').trim()) titleEl.value = listTitleAuto(); }));
+      // 親SKU提案：商品名＋ハードから生成（修正可）
+      document.getElementById('li-pskusug').addEventListener('click', () => {
+        const key = [listState.name, listState.hardware, listState.jpseries].filter(Boolean).join(' ');
+        const sug = recommendSku(key); if (!sug) { alert('先に商品名を入力してください'); return; }
+        listState.parentSku = sug; document.getElementById('li-psku').value = sug; listRefresh();
+      });
       document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
       // カタログ画像：フォーカスを外した時、商品ページURL（画像直リンクでない行）は自動でog:imageに変換
       document.getElementById('li-img').addEventListener('change', async e => {
@@ -5122,6 +5153,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       document.getElementById('li-vadd').addEventListener('click', () => {
         listState.variations.push({ opt: '', cost: 0, stock: 1, img: '' });
         listVarsRender();
+      });
+      // 全バリエSKU提案：商品名＋各バリエ名から生成（空欄のみ埋める・上書きは確認）
+      document.getElementById('li-vskusug').addEventListener('click', () => {
+        if (!listState.variations.length) { alert('先にバリエーションを追加してください'); return; }
+        const filled = listState.variations.some(v => (v.sku || '').trim());
+        if (filled && !confirm('既に入力済みのSKUも含めて再提案で上書きしますか？（キャンセルで空欄のみ埋めます）')) {
+          listState.variations.forEach(v => { if (!(v.sku || '').trim()) v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
+        } else {
+          listState.variations.forEach(v => { v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
+        }
+        listVarsRender(); listRefresh();
       });
       // カテゴリ候補プルダウン＋登録
       listCatDatalist();
@@ -5274,18 +5316,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img })) };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img })) };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
     sv('li-name', listState.name); sv('li-hw', listState.hardware); sv('li-jp', listState.jpseries);
     sv('li-cat', listState.category); sv('li-psku', listState.parentSku); sv('li-img', listState.images); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
     sv('li-roi', listState.roiPct); sv('li-weight', listState.weightG); sv('li-dw', listState.dimW || ''); sv('li-dh', listState.dimH || ''); sv('li-dd', listState.dimD || ''); sv('li-cost', listState.costJpy || '');
+    sv('li-title', listTitle());
   }
   function listApplyState(st) {
     st = st || {};
     Object.assign(listState, {
-      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
+      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', titleOverride: st.titleOverride || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
       varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0,
       variations: (st.variations || []).map(v => ({ opt: v.opt || '', sku: v.sku || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
@@ -5318,7 +5361,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const wrap = document.getElementById('li-imgprev'); if (!wrap) return;
     const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean).map(s => /^https?:/.test(s) ? s : IMG_CDN + s);
     const ups = listState.uploadImgs || [];
-    wrap.innerHTML = urls.slice(0, 9).map(u => `<img src="${esc(u)}" style="width:44px;height:44px;object-fit:cover;border-radius:5px" loading="lazy" onerror="this.style.opacity=.2">`).join('')
+    const total = urls.length + ups.length; // カタログ画像の合計（Shopee上限9枚）
+    const cnt = document.getElementById('li-imgcount');
+    if (cnt) { cnt.textContent = total ? ` — ${total}/9枚${total > 9 ? ' ⚠超過（先頭9枚のみ有効）' : ''}` : ''; cnt.style.color = total > 9 ? '#d93025' : ''; }
+    wrap.innerHTML = urls.slice(0, 9).map((u, idx) => `<span style="position:relative;display:inline-block"><img src="${esc(u)}" style="width:44px;height:44px;object-fit:cover;border-radius:5px${idx > 8 ? ';opacity:.3' : ''}" loading="lazy" onerror="this.style.opacity=.2"><span style="position:absolute;bottom:-2px;left:-2px;background:#333;color:#fff;font-size:8px;padding:0 2px;border-radius:3px">${idx + 1}</span></span>`).join('')
       + ups.map((u, i) => `<span style="position:relative;display:inline-block"><img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px"><button class="li-upclear" data-i="${i}" title="このアップ画像を削除" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:10px;line-height:1;cursor:pointer">✕</button></span>`).join('');
     wrap.querySelectorAll('.li-upclear').forEach(el => el.addEventListener('click', e => { listState.uploadImgs.splice(+e.currentTarget.dataset.i, 1); listImgPrev(); listRefresh(); }));
   }
@@ -5406,16 +5452,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${catImgs.length ? `<div style="font-size:11px;margin-top:6px;color:#666">カタログ用トップ</div><div style="display:flex;gap:6px;flex-wrap:wrap">${catImgs.map(imgThumb).join('')}</div>` : ''}
         ${varImgs.length ? `<div style="font-size:11px;margin-top:8px;color:#666">バリエ明細別（クリックで開いて保存）</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:2px">${varImgs.map(v => `<div style="text-align:center">${imgThumb(v.url)}<div style="font-size:9px;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.opt || '')}">${esc(v.opt || '-')}</div></div>`).join('')}</div>` : ''}
       </div>` : '';
-    out.innerHTML = `<div class="tool-card" style="max-width:none"><h3>5. 各国へ転記</h3>` +
-      `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">各項目の「コピー」で内容をコピー→「出品ページを開く」でShopeeに貼り付け（画像アップロードと最終「発行」は手動）。⚠は各国制約違反。</div>` +
+    out.innerHTML = `<div class="tool-card" style="max-width:none"><h3>5. 各国へ転記して出品</h3>` +
+      `<div style="border:1px solid #cde5cd;background:#f2faf2;border-radius:8px;padding:9px 11px;margin-bottom:8px;font-size:12px;line-height:1.7">
+         <b>📤 出品する手順（このポータルは下書き作成まで。発行はShopee側で押します）</b><br>
+         ① 出したい国の <b>「Shopee出品ページを開く ↗」</b> を押す（新規出品ページが別タブで開く）<br>
+         ② 各「📋コピー」でタイトル・価格・説明・カテゴリ・SKUを1つずつコピー → Shopeeの各欄に貼り付け<br>
+         ③ 上の🖼️画像を1枚ずつ保存 → Shopeeにアップロード（バリエ画像は明細ごと1枚）<br>
+         ④ <b>最後にShopeeページ内の「保存して公開／発行(Publish)」ボタンを押す</b> ＝ これで出品完了。<br>
+         <span class="smd-dim">※このポータルから直接Shopeeへ自動出品はしません（誤出品防止のため手動発行）。⚠は各国の制約違反。</span>
+       </div>
+       <div class="smd-dim" style="font-size:11px;margin-bottom:8px">💱 <b>価格の見方</b>：<b>太字＝現地通貨</b>（Shopeeに入力する出品価格）／ <b>≈¥＝日本円換算</b>（参考）／ <b>利益¥＝あなたの粗利</b>。仕入値の入力は全て「円」です。</div>` +
       imgBlock +
       targets.map(rg => {
-        const baseTitle = listTitle('');
+        const baseTitle = listTitle();
         const title = rg.cc === 'TW' ? shortenTW(baseTitle) : baseTitle;
         const titleWarn = (rg.cc === 'TW' && baseTitle.length > 60) ? `<span class="smd-dim" style="font-size:11px;margin-left:6px">TW60字に短縮済(${title.length}字)</span>` : '';
         // 価格（現地）＝重量ベースで各バリエの仕入(円)から算出
         const priced = rows.map(v => {
-          const local = roundLocal(priceLocalFor(rg.cc, v.cost || 0), settings.priceRound);
+          const local = roundLocal(priceLocalFor(rg.cc, v.cost || 0), rg.priceUnit || 1); // 丸めは各国の最小単位(SG/MY=0.5, VN=1000等)。旧priceRound=10だとSGが0になるバグ
           return { opt: v.opt, sku: v.sku, local, stock: v.stock, cost: v.cost };
         });
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
@@ -5449,6 +5503,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { await navigator.clipboard.writeText(decodeURIComponent(b.dataset.t)); const o = b.textContent; b.textContent = '✅ コピー済'; setTimeout(() => b.textContent = o, 1200); }
       catch (_) { alert('コピー失敗（ブラウザ権限）'); }
     }));
+    // タイトル欄：手動修正が無ければ自動生成に追従（バリエ追加で「Variation」挿入等を反映）。編集中はカーソルを乱さない
+    const tEl = document.getElementById('li-title');
+    if (tEl && document.activeElement !== tEl && !(listState.titleOverride || '').trim()) tEl.value = listTitleAuto();
     listAutoSave(); // 入力反映のたびに作業中内容を自動保存
   }
 
