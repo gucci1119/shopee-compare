@@ -558,6 +558,8 @@
     listCats: ['Hobbies & Collections > Video Games > Games', 'Hobbies & Collections > Video Games > Consoles', 'Hobbies & Collections > Toys > Action Figures & Toy Figures', 'Hobbies & Collections > Collectibles'],
     // よく使う説明文の候補（お気に入り。＋登録で追加）
     listDescs: [],
+    // コンポーザーの下書き（ポータル内の一時保存。[{id,title,savedAt,state}]）
+    listDrafts: [],
     // ★重量ベース価格ロジック（スプシ解読・全て設定で調整可）
     priceFees: { PH: [9.46, 8.96, 2.24], SG: [15.75, 0, 3.00], MY: [19.17, 0, 3.78], BR: [13.75, 0, 2.00], VN: [13.98, 2.16, 4.91], TH: [16.85, 0, 3.21], TW: [12.75, 3.00, 2.50] }, // 販売,プログラム,決済(%)
     priceSls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] },                                              // [50gの送料, 50gごとの追加] 現地通貨・セラー実質負担
@@ -4996,6 +4998,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!listState.built) {
       listState.built = true;
       body.innerHTML = `
+        <div class="tool-card" style="max-width:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px">
+          <b style="font-size:12px">📝 下書き</b>
+          <button class="smd-btn" id="li-draftsave" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4" title="今の入力内容をポータル内に下書き保存（Shopeeには送りません）">💾 下書き保存</button>
+          <select class="li" id="li-draftload" style="font-size:12px;max-width:280px"><option value="">📂 下書きを開く…</option></select>
+          <button class="smd-btn" id="li-draftdel" style="font-size:12px" title="選択中の下書きを削除">🗑 削除</button>
+          <button class="smd-btn" id="li-draftnew" style="font-size:12px" title="入力を全部クリアして新規作成">✨ 新規</button>
+          <span class="smd-dim" style="font-size:10.5px">※ポータル内の一時保存。Shopeeへの発行は各国転記から手動</span>
+        </div>
         <div class="tool-card" style="max-width:none">
           <h3>1. 商品情報</h3>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
@@ -5072,6 +5082,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!settings.listCats.includes(v)) { settings.listCats.unshift(v); saveSettings(); listCatDatalist(); }
         const b = document.getElementById('li-catsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
       });
+      // 下書き（ポータル内保存）
+      listDraftDropdown();
+      document.getElementById('li-draftsave').addEventListener('click', () => {
+        const def = listState.name || '無題';
+        const title = prompt('下書きの名前:', def); if (title == null) return;
+        settings.listDrafts = settings.listDrafts || [];
+        settings.listDrafts.unshift({ id: 'd' + Date.now(), title: title.trim() || def, savedAt: Date.now(), state: listDraftState() });
+        if (settings.listDrafts.length > 50) settings.listDrafts.length = 50;
+        saveSettings(); listDraftDropdown();
+        const b = document.getElementById('li-draftsave'); const o = b.textContent; b.textContent = '✅保存'; setTimeout(() => b.textContent = o, 1400);
+      });
+      document.getElementById('li-draftload').addEventListener('change', e => {
+        const id = e.target.value; if (!id) return;
+        const d = (settings.listDrafts || []).find(x => x.id === id); if (!d) return;
+        if (!confirm(`下書き「${d.title}」を開きます。今の入力内容は破棄されます。よろしいですか？`)) { e.target.value = ''; return; }
+        listApplyState(d.state);
+      });
+      document.getElementById('li-draftdel').addEventListener('click', () => {
+        const sel = document.getElementById('li-draftload'); const id = sel.value;
+        if (!id) { alert('削除する下書きをプルダウンから選んでください'); return; }
+        const d = (settings.listDrafts || []).find(x => x.id === id); if (!d) return;
+        if (!confirm(`下書き「${d.title}」を削除します。よろしいですか？`)) return;
+        settings.listDrafts = (settings.listDrafts || []).filter(x => x.id !== id); saveSettings(); listDraftDropdown();
+      });
+      document.getElementById('li-draftnew').addEventListener('click', () => {
+        if (!confirm('入力を全部クリアして新規作成します。保存していない内容は消えます。よろしいですか？')) return;
+        listState.variations = []; listApplyState({}); const sel = document.getElementById('li-draftload'); if (sel) sel.value = '';
+      });
       // 説明文お気に入り（呼出＋登録）
       listDescFav();
       document.getElementById('li-descfav').addEventListener('change', e => {
@@ -5108,6 +5146,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listDescFav() {
     const sel = document.getElementById('li-descfav'); if (!sel) return;
     sel.innerHTML = '<option value="">★お気に入り呼出…</option>' + (settings.listDescs || []).map(d => `<option value="${esc(d)}">${esc(d.replace(/\n/g, ' ').slice(0, 40))}</option>`).join('');
+  }
+  // ---- コンポーザー下書き（ポータル内の一時保存） ----
+  function listDraftState() {
+    const s = listState;
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, category: s.category, images: s.images, roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, cost: v.cost, stock: v.stock, img: v.img })) };
+  }
+  function listSyncForm() {
+    const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
+    sv('li-name', listState.name); sv('li-hw', listState.hardware); sv('li-jp', listState.jpseries);
+    sv('li-cat', listState.category); sv('li-img', listState.images); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
+    sv('li-roi', listState.roiPct); sv('li-weight', listState.weightG); sv('li-dw', listState.dimW || ''); sv('li-dh', listState.dimH || ''); sv('li-dd', listState.dimD || ''); sv('li-cost', listState.costJpy || '');
+  }
+  function listApplyState(st) {
+    st = st || {};
+    Object.assign(listState, {
+      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', category: st.category || '', images: st.images || '',
+      roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
+      varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0,
+      variations: (st.variations || []).map(v => ({ opt: v.opt || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
+    });
+    listSyncForm(); listVarsRender(); listImgPrev(); listRefresh();
+  }
+  function listDraftDropdown() {
+    const sel = document.getElementById('li-draftload'); if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">📂 下書きを開く…</option>' + (settings.listDrafts || []).map(d => `<option value="${esc(d.id)}">${esc(d.title || '(無題)')} — ${(() => { try { return new Date(d.savedAt).toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } })()}</option>`).join('');
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
   }
   // 商品ページURL(メルカリ等)→og:image、または直リンク画像URLをそのまま返す。ブリッジ経由でHTML取得
   async function fetchImageFromUrl(url) {
