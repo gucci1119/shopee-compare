@@ -9,6 +9,7 @@ Shopee 7か国（PH/SG/MY/BR/VN/TH/TW）の運用を1画面で回す社内ポー
 | `index.html` | ポータル本体（GitHub Pagesに置く。1ファイル） |
 | `shopee-compare-bridge.user.js` | Tampermonkey用ブリッジ。ポータル→各国Seller Center/GAS/メルカリへの通信を中継（SPC_CDS自動注入） |
 | `shopee-addvar.user.js` | Tampermonkey用。メルカリ取込→バリエ追加を編集ページで実行（画像アップロード＋API確定） |
+| `shopee-newlisting.user.js` | Tampermonkey用。コンポーザーの出品ジョブを新規出品ページで受け取り、画像先行アップロード＋作成APIのキャプチャ（発行まで自動化の偵察版）。配信: `gucci1119.github.io/shopee-compare/shopee-newlisting.user.js` |
 | `shopee-compare-gas.gs` | スナップショット保存用GAS（閲覧専用PCのためのデータ置き場） |
 
 主な機能：注文管理/在庫管理/仕入れ管理/利益管理/顧客・仕入れ先/**出品管理（出品状況・横断カバレッジ・分析・コンポーザー＋ポータル内エディタ＋一括編集＋メルカリ取込バリエ追加）**/価格調整。データは Supabase を直接読み書き。
