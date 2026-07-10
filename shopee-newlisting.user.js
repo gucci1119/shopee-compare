@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.4
+// @version      0.6.5
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -13,6 +13,22 @@
 // @match        https://seller.shopee.tw/portal/product/*
 // @connect      static.mercdn.net
 // @connect      jp.mercari.com
+// @connect      mercari-shops-static.com
+// @connect      auctions.c.yimg.jp
+// @connect      wing-auctions.c.yimg.jp
+// @connect      auc-pctr.c.yimg.jp
+// @connect      item-shopping.c.yimg.jp
+// @connect      shopping.c.yimg.jp
+// @connect      s.yimg.jp
+// @connect      m.media-amazon.com
+// @connect      images-na.ssl-images-amazon.com
+// @connect      image.rakuten.co.jp
+// @connect      thumbnail.image.rakuten.co.jp
+// @connect      tshop.r10s.jp
+// @connect      r.r10s.jp
+// @connect      www.bookoffonline.co.jp
+// @connect      img-eshop.cdn.nintendo.net
+// @connect      store.nintendo.co.jp
 // @connect      *
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
@@ -20,7 +36,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.4';
+  const VER = '0.6.5';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -100,6 +116,12 @@
   let lastImgId = null;
   let lastCreateBody = null;      // 直近の create_product_info リクエストbody（雛形として再利用）
   const uploadedImgIds = [];      // 🖼️画像先行アップで得た image_id（複数）
+  const uploadRespIds = [];       // 画像アップロードAPIの「応答」から得た image_id（アップ順・最も確実）
+  const UPLOAD_URL_RE = /(upload_image|media_space|\/mms\/|image_upload|upload.?image)/i;
+  // アップロード応答テキストから CDN image_id を1つ拾ってキューに積む（DOMより確実）
+  function grabUploadId(txt) {
+    try { if (typeof txt !== 'string' || !txt) return; const m = txt.match(CDN_ID_RE); if (m && uploadRespIds[uploadRespIds.length - 1] !== m[1]) { uploadRespIds.push(m[1]); if (logEl) log('・アップAPI応答 id=…' + m[1].slice(-6), '#7b52c4'); } } catch (_) {}
+  }
   const captures = [];   // {url, method, body, resp}
   const CREATE_RE = /(add_product|create_product|product\/add|create_item|add_item|publish)/i;
   function recordMaybe(url, method, body, resp) {
@@ -177,15 +199,19 @@
     log(label + ' 取得中…（DL）');
     try { file = await Promise.race([fetchImageFile(url, 'img.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
     catch (e) { log('✗ ' + label + ' 取得失敗: ' + e.message, '#d93025'); return null; }
-    const before = currentProductImageIds();
+    const beforeNet = uploadRespIds.length;   // アップロードAPI応答の件数（この枚のidはこの後に積まれる）
+    const beforeDom = currentProductImageIds();
     setFile(fin, file);
     let w = 0, newId = null;
-    while (w < 50 && !newId) {
+    while (w < 60 && !newId) {
       await sleep(500); w++;
+      // クロップ確認ダイアログを自動確定（これを押して初めてアップロードAPIが飛ぶ）
       try { const dlg = [...document.querySelectorAll('[role=dialog],[class*=crop],[class*=cropper]')].find(d => d.offsetParent !== null && [...d.querySelectorAll('button')].some(b => b.offsetParent !== null)); if (dlg) { const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|ok|apply|save|保存|use|使用|done)/i.test(norm(b.textContent)) && !/(cancel|取消|back|reset)/i.test(norm(b.textContent))); if (ok && !ok.__c) { ok.__c = true; ok.click(); } } } catch (_) {}
-      const now = currentProductImageIds(); const diff = now.filter(id => !before.includes(id)); if (diff.length) newId = diff[diff.length - 1];
+      // ①アップロードAPI応答から得たid（最優先・確実）②DOMサムネ（フォールバック）
+      if (uploadRespIds.length > beforeNet) { newId = uploadRespIds[uploadRespIds.length - 1]; break; }
+      const now = currentProductImageIds(); const diff = now.filter(id => !beforeDom.includes(id)); if (diff.length) newId = diff[diff.length - 1];
     }
-    log(newId ? ('✓ ' + label + ' [' + newId.slice(-6) + ']') : ('△ ' + label + ' id未確認'), newId ? '#1a7f37' : '#8a6d3b');
+    log(newId ? ('✓ ' + label + ' [' + newId.slice(-6) + ']') : ('△ ' + label + ' id未確認（応答/サムネ未検出）'), newId ? '#1a7f37' : '#8a6d3b');
     return newId;
   }
   // ★コンポーザーのカタログ画像＋各バリエ画像を自動アップ→image_id化（バリエ別に割当）
@@ -256,6 +282,8 @@
           recordMaybe(url, method, body, '');
           if (CREATE_RE.test(url)) { p.then(r => { try { r.clone().text().then(t => recordMaybe(url, method, body, t)); } catch (_) {} }); }
         }
+        // 画像アップロード応答からimage_idを拾う（bodyがFormDataでもOK＝URLで判定）
+        if (UPLOAD_URL_RE.test(url)) { p.then(r => { try { r.clone().text().then(grabUploadId); } catch (_) {} }); }
       } catch (_) {}
       return p;
     };
@@ -267,6 +295,7 @@
           recordMaybe(this.__smdU || '', this.__smdM || 'POST', body, '');
           if (CREATE_RE.test(this.__smdU || '')) { this.addEventListener('load', () => { try { recordMaybe(this.__smdU, this.__smdM, body, this.responseText); } catch (_) {} }); }
         }
+        if (UPLOAD_URL_RE.test(this.__smdU || '')) { this.addEventListener('load', () => { try { grabUploadId(this.responseText); } catch (_) {} }); }
       } catch (_) {}
       return oSend.apply(this, arguments);
     };
