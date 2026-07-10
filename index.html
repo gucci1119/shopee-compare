@@ -5512,10 +5512,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     listRefresh();
   }
 
+  // 国別上書きの set/prune（空なら削除して「調整あり」を消す）
+  function ovSetVar(cc, i, key, val) {
+    const o = listState.overrides[cc] = listState.overrides[cc] || {}; o.vars = o.vars || {};
+    const ovar = o.vars[i] = o.vars[i] || {};
+    if (val === '' || val == null) delete ovar[key]; else ovar[key] = val;
+    if (!Object.keys(ovar).length) delete o.vars[i];
+    ovPrune(cc);
+  }
+  function ovSetTop(cc, key, val) {
+    const o = listState.overrides[cc] = listState.overrides[cc] || {};
+    if ((val || '').trim() === '') delete o[key]; else o[key] = val;
+    ovPrune(cc);
+  }
+  function ovPrune(cc) {
+    const o = listState.overrides[cc]; if (!o) return;
+    if (o.vars && !Object.keys(o.vars).length) delete o.vars;
+    if (!(o.title || '').trim() && !(o.images || '').trim() && (!o.vars || !Object.keys(o.vars).length)) delete listState.overrides[cc];
+  }
   // 出力パネル: 各国の転記内容＋制約チェック
   function listRefresh() {
     const out = document.getElementById('list-out');
     if (!out) return;
+    // 全再描画してもフォーカス位置を保つ（インライン編集用）。data-foc をキーに復元
+    const ae = document.activeElement;
+    const focSave = (ae && out.contains(ae) && ae.dataset && ae.dataset.foc) ? { k: ae.dataset.foc, s: ae.selectionStart, e: ae.selectionEnd } : null;
     const targets = accountTargets(); // 対象アカウントが持つ国だけへ転記（gs_japan_select選択時はVN等を出さない）
     const hasVar = listState.variations.length > 0;
     const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1 }];
@@ -5574,12 +5595,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? priced.map(p => p.name) : [] });
         const priceLines = priced.map(p => `${hasVar ? p.name + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         // 表示用（円換算＋取れる利益＋ROI）
+        // インライン編集：明細名・価格をカード上で直接編集（空欄=自動）。利益は右に自動表示
         const priceRich = priced.map(p => {
           const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025';
           const cost = Number(p.cost) || 0;
           const bad = cost > 0 && (pr.buyerJpy <= cost || pr.profit < 0);
-          const costTag = `<span class="smd-dim">仕入¥${cost.toLocaleString()}</span> <span style="color:#bbb">→</span> `;
-          return `<div style="padding:1px 0${bad ? ';background:#fff4f4;border-radius:4px' : ''}">${hasVar ? esc(p.name) + '：' : ''}${costTag}<b>${fmtLocal(rg, p.local)}</b>${p.manual ? ' <span style="color:#7b52c4;font-size:10px">✎手動</span>' : ''} <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${bad ? ' <span style="color:#d93025;font-weight:700">⚠要確認</span>' : ''}${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}${p.sku ? ` <span style="font-family:monospace;font-size:10px;color:#7b52c4">SKU:${esc(p.sku)}</span>` : ''}</div>`;
+          return `<div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0${bad ? ';background:#fff4f4;border-radius:4px' : ''}">
+            ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:120px;font-size:11px;padding:2px 5px" title="この国の明細名（空欄=既定）">` : ''}
+            <span class="smd-dim" style="font-size:11px;white-space:nowrap">仕入¥${cost.toLocaleString()} →</span>
+            <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="number" step="any" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:84px;padding:2px 5px;${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="空欄=自動計算(${p.auto}) / 入力=この国だけ手動価格"></span>
+            <span style="font-size:11px;white-space:nowrap"><span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc}">ROI${Math.round(pr.roi)}%</span>${bad ? ' <b style="color:#d93025">⚠</b>' : ''}${p.manual ? ' <span style="color:#7b52c4">✎</span>' : ''}</span>
+          </div>`;
         }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? priced.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
@@ -5601,13 +5627,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">
             <span><b style="color:${rg.color}">${rg.cc}</b>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px">
-              <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけタイトル・画像・明細（名前/価格/在庫/採用）を編集">✏️ この国を編集</button>
+              <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
               <a href="${autoUrl}" target="_blank" class="smd-btn" style="text-decoration:none;background:#f3eefb;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="新規出品ページを開き、userscriptが画像アップ＋作成APIを扱います（要 shopee-newlisting.user.js）">▶ 自動で出品(β)</a>
               <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">手動 ↗</a>
             </span>
           </div>
-          <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn}<div style="word-break:break-word">${esc(title)} <span class="smd-dim">(${title.length}字)</span></div></div>
-          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
+          <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
+            <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
+          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
           ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
           <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
             ${cp('タイトル', title)}
@@ -5626,6 +5653,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       catch (_) { alert('コピー失敗（ブラウザ権限）'); }
     }));
     out.querySelectorAll('.li-ovedit').forEach(b => b.addEventListener('click', () => openCountryOverride(b.dataset.cc)));
+    // インライン国別編集（タイトル・明細名・価格をカード上で直接編集）
+    out.querySelectorAll('.cov-ititle').forEach(el => el.addEventListener('input', e => { ovSetTop(e.target.dataset.cc, 'title', e.target.value); listRefresh(); }));
+    out.querySelectorAll('.cov-iname').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'name', e.target.value); listRefresh(); }));
+    out.querySelectorAll('.cov-iprice').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'price', (e.target.value || '').trim()); listRefresh(); }));
+    // フォーカス復元（全再描画してもカーソルが飛ばない）
+    if (focSave) { const fe = out.querySelector('[data-foc="' + focSave.k + '"]'); if (fe) { fe.focus(); try { fe.setSelectionRange(focSave.s, focSave.e); } catch (_) {} } }
     // ▶ 全対象国を一括で開く（対象国の新規出品タブを順に開く。ポップアップブロック時は許可を促す）
     const batchBtn = document.getElementById('li-batchopen');
     if (batchBtn) batchBtn.addEventListener('click', () => {
