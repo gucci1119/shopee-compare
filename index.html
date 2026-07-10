@@ -4939,6 +4939,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const kJpy = ((Number(costJpy) || 0) * (1 + roi) / (1 - fxM) + slsJpy) / feeProd / (1 - pb);
     return kJpy / rg.rateJpy; // 現地通貨（丸め前）
   }
+  // 確定した現地価格から「実際に取れる利益(円)＋ROI＋円換算」を逆算（丸め後の価格で算出＝表示用の実数）
+  function priceProfitFor(cc, costJpy, localPrice) {
+    const rg = regionByCc(cc); if (!rg) return { buyerJpy: 0, profit: 0, roi: 0 };
+    const fees = (settings.priceFees || {})[cc] || [0, 0, 0];
+    const feeProd = fees.reduce((p, f) => p * (1 - (Number(f) || 0) / 100), 1) || 1;
+    const weightG = (listState.weightG != null ? listState.weightG : settings.weightG) || 0;
+    const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
+    const slsJpy = slsLocal(cc, Math.max(weightG, vol)) * rg.rateJpy;
+    const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
+    const sellerJpy = buyerJpy * feeProd;                    // Shopee手数料控除後にセラーが受け取る円
+    const profit = sellerJpy - (Number(costJpy) || 0) - slsJpy;
+    return { buyerJpy: Math.round(buyerJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
+  }
   // 旧・単純式（互換のため残置）
   function priceFromCost(costJpy) {
     const fee = Math.max(0, Math.min(95, settings.priceFeePct)) / 100;
@@ -5035,7 +5048,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div><label class="lc">寸法 W×H×D（cm・任意/容積重量用）</label><span style="display:inline-flex;gap:4px"><input class="li" id="li-dw" type="number" style="width:52px" placeholder="W"><input class="li" id="li-dh" type="number" style="width:52px" placeholder="H"><input class="li" id="li-dd" type="number" style="width:52px" placeholder="D"></span></div>
             <div><label class="lc">単品の仕入値（円）<span class="smd-dim">※バリエ有りは各行に入力</span></label><input class="li" id="li-cost" type="number" style="width:110px" placeholder="4400"></div>
           </div>
-          <div class="smd-dim" style="font-size:11px;margin-top:6px">各バリエの<b>仕入(円)</b>から、<b>手数料・SLS送料(重量別)・利益</b>を織り込んで各国の出品価格を自動算出（式: 仕入×(1+ROI)÷(1−${settings.priceFxMargin}%) ＋ SLS送料 → 手数料控除 ÷ (1−${settings.priceProfitBuffer}%)）。手数料/送料レート/バッファは⚙️設定で調整可。</div>
+          <div class="smd-dim" style="font-size:11px;margin-top:6px">各バリエの<b>仕入(円)</b>から、<b>手数料・SLS送料(重量別)・利益</b>を織り込んで各国の出品価格を自動算出（式: 仕入×(1+ROI)÷(1−${settings.priceFxMargin}%) ＋ SLS送料 → 手数料控除 ÷ (1−${settings.priceProfitBuffer}%)）。</div>
+          <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#7b52c4;font-weight:700">⚙️ 手数料・SLS送料・バッファを調整</summary><div id="li-pricecfg" style="margin-top:6px"></div></details>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -5050,7 +5064,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <h3>4. 説明・item specifics</h3>
           <label class="lc">説明に追記（テンプレは⚙️設定。{title}{name}が使える）</label>
           <div class="row" style="gap:6px;align-items:flex-start">
-            <textarea class="li" id="li-desc" rows="2" placeholder="この商品固有の説明を追記。または右のお気に入りから呼び出し" style="flex:1"></textarea>
+            <textarea class="li" id="li-desc" rows="6" placeholder="この商品固有の説明を追記。または右のお気に入りから呼び出し" style="flex:1"></textarea>
             <div style="display:flex;flex-direction:column;gap:4px">
               <select class="li" id="li-descfav" style="font-size:11px;max-width:170px"><option value="">★お気に入り呼出…</option></select>
               <button class="smd-btn" id="li-descsave" style="font-size:11px" title="今の説明文をお気に入りに登録">＋登録</button>
@@ -5065,6 +5079,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       bind('li-name', 'name'); bind('li-hw', 'hardware'); bind('li-jp', 'jpseries');
       bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier');
       document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
+      // カタログ画像：フォーカスを外した時、商品ページURL（画像直リンクでない行）は自動でog:imageに変換
+      document.getElementById('li-img').addEventListener('change', async e => {
+        const lines = (e.target.value || '').split('\n');
+        let changed = false;
+        for (let i = 0; i < lines.length; i++) {
+          const s = lines[i].trim();
+          if (s && /^https?:\/\//.test(s) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(s) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(s)) {
+            const img = await fetchImageFromUrl(s); if (img) { lines[i] = img; changed = true; }
+          }
+        }
+        if (changed) { e.target.value = lines.join('\n'); listState.images = e.target.value; listImgPrev(); listRefresh(); }
+      });
       document.getElementById('li-cost').addEventListener('input', e => { listState.costJpy = Number(e.target.value) || 0; listRefresh(); });
       // 価格計算パラメータ（ROI・重量・寸法）
       const numBind = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => { listState[key] = el.value === '' ? null : (Number(el.value) || 0); listRefresh(); }); };
@@ -5110,6 +5136,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!confirm('入力を全部クリアして新規作成します。保存していない内容は消えます。よろしいですか？')) return;
         listState.variations = []; listApplyState({}); const sel = document.getElementById('li-draftload'); if (sel) sel.value = '';
       });
+      // 価格設定（手数料/SLS/バッファ）編集パネル
+      priceCfgRender();
       // 説明文お気に入り（呼出＋登録）
       listDescFav();
       document.getElementById('li-descfav').addEventListener('change', e => {
@@ -5150,6 +5178,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listDescFav() {
     const sel = document.getElementById('li-descfav'); if (!sel) return;
     sel.innerHTML = '<option value="">★お気に入り呼出…</option>' + (settings.listDescs || []).map(d => `<option value="${esc(d)}">${esc(d.replace(/\n/g, ' ').slice(0, 40))}</option>`).join('');
+  }
+  // 価格設定（手数料/SLS送料/バッファ）を編集できるパネル。変更は即保存＋価格再計算。
+  const PRICE_DEFAULTS = {
+    fees: { PH: [9.46, 8.96, 2.24], SG: [15.75, 0, 3.00], MY: [19.17, 0, 3.78], BR: [13.75, 0, 2.00], VN: [13.98, 2.16, 4.91], TH: [16.85, 0, 3.21], TW: [12.75, 3.00, 2.50] },
+    sls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] }, fx: 2, pb: 5,
+  };
+  function priceCfgRender() {
+    const host = document.getElementById('li-pricecfg'); if (!host) return;
+    const ccs = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+    const inp = (val, cls, cc, idx) => `<input class="li ${cls}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${val}" style="width:62px;padding:2px 4px;font-size:11px;text-align:right">`;
+    host.innerHTML = `<div style="font-size:10.5px;color:#666;margin-bottom:4px">手数料(%)＝販売/プログラム/決済。SLS送料(現地通貨・セラー実質負担)＝50gの額 / 50gごとの追加。変更は即反映＆保存。年1回の改定時に更新。</div>
+      <div class="pf-scroll"><table class="pf-table" style="font-size:11px"><tr><th>国</th><th>販売%</th><th>ﾌﾟﾛｸﾞﾗﾑ%</th><th>決済%</th><th>SLS 50g</th><th>SLS +50g</th></tr>
+      ${ccs.map(cc => { const f = (settings.priceFees || {})[cc] || [0, 0, 0]; const s = (settings.priceSls || {})[cc] || [0, 0]; return `<tr><td><b style="color:${(regionByCc(cc) || {}).color}">${cc}</b></td><td>${inp(f[0], 'pf-fee', cc, 0)}</td><td>${inp(f[1], 'pf-fee', cc, 1)}</td><td>${inp(f[2], 'pf-fee', cc, 2)}</td><td>${inp(s[0], 'pf-sls', cc, 0)}</td><td>${inp(s[1], 'pf-sls', cc, 1)}</td></tr>`; }).join('')}
+      </table></div>
+      <div class="row" style="gap:12px;margin-top:6px;align-items:flex-end;flex-wrap:wrap">
+        <div><label class="lc" style="font-size:11px">FX/端数マージン%</label><input class="li pf-fx" type="number" step="any" value="${settings.priceFxMargin}" style="width:70px"></div>
+        <div><label class="lc" style="font-size:11px">利益バッファ%</label><input class="li pf-pb" type="number" step="any" value="${settings.priceProfitBuffer}" style="width:70px"></div>
+        <button class="smd-btn" id="li-pricereset" style="font-size:11px">既定値に戻す</button>
+      </div>`;
+    host.querySelectorAll('.pf-fee').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceFees[cc] = settings.priceFees[cc] || [0, 0, 0]; settings.priceFees[cc][i] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
+    host.querySelectorAll('.pf-sls').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceSls[cc] = settings.priceSls[cc] || [0, 0]; settings.priceSls[cc][i] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
+    host.querySelector('.pf-fx').addEventListener('input', e => { settings.priceFxMargin = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
+    host.querySelector('.pf-pb').addEventListener('input', e => { settings.priceProfitBuffer = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
+    host.querySelector('#li-pricereset').addEventListener('click', () => {
+      if (!confirm('手数料・SLS送料・バッファをスプシ解読の既定値に戻します。よろしいですか？')) return;
+      settings.priceFees = JSON.parse(JSON.stringify(PRICE_DEFAULTS.fees)); settings.priceSls = JSON.parse(JSON.stringify(PRICE_DEFAULTS.sls));
+      settings.priceFxMargin = PRICE_DEFAULTS.fx; settings.priceProfitBuffer = PRICE_DEFAULTS.pb; saveSettings(); priceCfgRender(); listRefresh();
+    });
   }
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
@@ -5287,6 +5343,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
         const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? rows.map(v => varName(v.opt)) : [] });
         const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
+        // 表示用（円換算＋取れる利益＋ROI）。コピーは上のpriceLines（現地価格のみ）
+        const priceRich = priced.map(p => { const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025'; return `<div style="padding:1px 0">${hasVar ? esc(varName(p.opt)) + '：' : ''}<b>${fmtLocal(rg, p.local)}</b> <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}</div>`; }).join('');
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
         return `<div style="border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:8px">
@@ -5295,7 +5353,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">Shopee出品ページを開く ↗</a>
           </div>
           <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn}<div style="word-break:break-word">${esc(title)} <span class="smd-dim">(${title.length}字)</span></div></div>
-          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別）' : ''}</b><pre style="margin:2px 0;white-space:pre-wrap;font-family:inherit">${esc(priceLines)}</pre></div>
+          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
           ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
           <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
             ${cp('タイトル', title)}
