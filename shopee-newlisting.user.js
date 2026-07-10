@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.4.5
+// @version      0.4.6
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.4.5';
+  const VER = '0.4.6';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -69,7 +69,12 @@
   const CREATE_RE = /(add_product|create_product|product\/add|create_item|add_item|publish)/i;
   function recordMaybe(url, method, body, resp) {
     try {
-      if (typeof body === 'string' && /"img_id"\s*:\s*"([^"]+)"/.test(body)) { lastImgId = body.match(/"img_id"\s*:\s*"([^"]+)"/)[1]; }
+      // 画像の image_id を拾う。①MMSの img_id ②Shopeeが実際に使う "ph-..."/"sg-..." 等のCDN id（手動アップした画像も自動収集）
+      if (typeof body === 'string') {
+        const m = body.match(/"img_id"\s*:\s*"([^"]+)"/); if (m) lastImgId = m[1];
+        const ids = body.match(/"(?:image_id|img_id)"\s*:\s*"([a-z]{2,4}-[0-9a-z-]{10,})"/g) || [];
+        ids.forEach(s => { const id = s.match(/"([a-z]{2,4}-[0-9a-z-]{10,})"/)[1]; if (id && !uploadedImgIds.includes(id)) { uploadedImgIds.push(id); if (logEl) log('🖼️ 画像を検出 image_id …' + id.slice(-8) + '（計' + uploadedImgIds.length + '枚）', '#1a7f37'); if (fillBtnRefresh) fillBtnRefresh(); } });
+      }
       if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); try { localStorage.setItem('smdNlTmpl_' + location.host, body); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); log('💾 雛形を保存しました（次回以降も記憶）', '#1a7f37'); } catch (_) {} }
       if (CREATE_RE.test(url || '')) {
         captures.push({ url, method, body: (typeof body === 'string' ? body.slice(0, 200000) : ''), resp: (typeof resp === 'string' ? resp.slice(0, 20000) : '') });
@@ -206,7 +211,8 @@
     fillBtnRefresh = () => {
       renderTmplSel();
       const has = !!currentTmplBody();
-      if (tmplEl) tmplEl.innerHTML = has ? '雛形あり ✅（カテゴリ/ブランド/物流を流用して作成）' : '<span style="color:#c0392b">雛形なし：手動で1件「Save and Delist」→「💾保存」で雛形化</span>';
+      const imgline = '　🖼️検出画像: <b>' + uploadedImgIds.length + '枚</b>' + (uploadedImgIds.length ? '（この画像で作成）' : '（Product Imagesに手動追加すると自動取得）');
+      if (tmplEl) tmplEl.innerHTML = (has ? '雛形あり ✅' : '<span style="color:#c0392b">雛形なし：手動で1件「Save and Delist」→「💾保存」</span>') + imgline;
     };
     fillBtnRefresh();
     sel.addEventListener('change', () => { selTmplName = sel.value; fillBtnRefresh(); });
