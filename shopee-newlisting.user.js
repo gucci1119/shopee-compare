@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.0
+// @version      0.6.1
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.0';
+  const VER = '0.6.1';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -83,9 +83,14 @@
     const bin = atob(b64); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     return new File([arr], name || 'img.jpg', { type: mime });
   }
-  // 画像取得：GAS URLが設定済ならGAS優先（確実）、無ければGM_xhr
+  // 画像取得：①普通のfetch（mercdnはCORS *なので直接読める＝最速・GM_xhr不要）②GAS代理 ③GM_xhr
   async function fetchImageFile(url, name) {
-    if (getGasUrl()) { const d = await fetchViaGas(url); return dataUrlToFile(d, name); }
+    try {
+      const r = await fetch(url, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      if (r.ok) { const b = await r.blob(); if (b && b.size) return new File([b], name || 'img.jpg', { type: b.type || 'image/jpeg' }); }
+      if (logEl) log('・fetch HTTP ' + r.status + '→次の手段', '#8a6d3b');
+    } catch (e) { if (logEl) log('・fetch不可(' + e.message + ')→次の手段', '#8a6d3b'); }
+    if (getGasUrl()) { try { const d = await fetchViaGas(url); return dataUrlToFile(d, name); } catch (e) { if (logEl) log('・GAS失敗(' + e.message + ')→GM_xhr', '#8a6d3b'); } }
     return await fetchImageFileGM(url, name);
   }
 
