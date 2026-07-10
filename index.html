@@ -563,6 +563,7 @@
     listTitleFavs: [],
     listVarFavs: ['DS:', 'Switch:', '3DS:', 'GBA:', 'Cartridge Only', 'CIB (Complete In Box)'],
     composerZoom: 1, // コンポーザー全体の表示倍率（文字サイズ）
+    listCcOrder: [], // 各国カードの表示順（cc配列。ドラッグ並べ替えで更新）
     // コンポーザーの下書き（ポータル内の一時保存。[{id,title,savedAt,state}]）
     listDrafts: [],
     // ★重量ベース価格ロジック（スプシ解読・全て設定で調整可）
@@ -4949,6 +4950,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   };
   let listDragVar = null; // バリエカードのドラッグ並べ替え中インデックス
   let catDragIdx = null;  // カタログ画像のドラッグ並べ替え中インデックス
+  let covVarDrag = null;  // 各国カードでのバリエ並べ替え中インデックス（全国共通の並びを変える）
   // 旧 images(改行URL)+uploadImgs(dataURL) → 単一配列 catImgs へ一度だけ移行
   function catMigrate() {
     if (!listState.catImgs || !listState.catImgs.length) {
@@ -5087,17 +5089,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <details class="tool-card" style="max-width:none;padding:8px 14px">
           <summary style="cursor:pointer;font-weight:700;color:#7b52c4;font-size:13px">❓ 使い方 ＆ 価格ロジック（クリックで開く）</summary>
           <div style="font-size:12px;line-height:1.9;padding:8px 2px;color:#444">
-            <b>■ 全体の流れ</b>：1〜4を入力 → 下の<b>「5. 各国へ転記」</b>に各国のタイトル・価格・説明・SKUが自動生成 → 各項目の<b>「📋コピー」</b>でコピー → <b>「Shopee出品ページを開く」</b>で貼り付け → 画像アップロードと最終「発行」はShopee側で手動。
-            <br><b>■ 下書き・自動保存</b>：入力は<b>自動保存</b>され、リロード/タブを閉じても戻ります。名前を付けて残すなら<b>💾下書き保存</b>、全部消して作り直すなら<b>✨新規</b>。
-            <br><b>■ 画像</b>：<b>①URL貼付 ②📁ファイル選択 ③ドラッグ&ドロップ</b> の3通り。メルカリ等の商品リンクは自動で画像取得（要ブリッジ）。カタログ用トップ＝AI生成画像、各バリエ＝メルカリ等の商品画像（<b>1明細=1枚</b>）。
-            <br><b>■ SKU</b>：<b>親SKU</b>（カタログ）＋各バリエの<b>SKU</b>。転記の📋でコピーしてShopeeの各SKU欄へ。
-            <br><b>■ 制約チェック</b>：⚠️で各国ルール違反を警告（SG=ブランド1つ / TW=タイトル60字 / BR=バリエ価格差4倍 / VN=価格上限 / <b>明細名は全国共通30字</b>）。
-            <br><br><b>■ 価格ロジック（重量ベース・各バリエの仕入から自動計算）</b>
-            <br>&nbsp;① <b>課金重量</b> = max(実重量, 容積重量=W×H×D÷6000)。Shopeeは重い方で送料を取るため。
-            <br>&nbsp;② <b>SLS送料</b>（＝あなたが負担する送料）= 「SLS 50g」＋「SLS +50g」×(課金重量÷50 −1)。重いほど高い。
-            <br>&nbsp;③ <b>売価</b> = ( 仕入×(1+ROI)÷(1−FX%) ＋ SLS送料 ) ÷ (1−販売%)(1−ﾌﾟﾛｸﾞﾗﾑ%)(1−決済%) ÷ (1−利益バッファ%) ÷ 為替。
-            <br>&nbsp;&nbsp;※手数料は3種を<b>掛け算</b>。<b>FX%</b>=為替の安全マージン、<b>利益バッファ%</b>=上乗せ利益。全部「⚙️手数料・SLS送料・バッファを調整」で変更可。
-            <br>&nbsp;&nbsp;例：PH 仕入4400円・ROI40%・500g → <b>₱3,340（利益¥+2,243）</b>。ROI/重量/手数料を変えると全国が即再計算。
+            <b>■ 全体の流れ</b>：1〜4を入力 → 下の<b>「5. 各国へ転記して出品」</b>に各国のカードが自動生成 → 各項目の<b>「📋コピー」</b>で貼り付け or <b>「▶自動で出品(β)」</b>。画像アップと最終「発行」はShopee側。
+            <br><b>■ 文字サイズ</b>：右上の<b>小/標準/大/特大</b>で全体を拡大縮小（見づらい時に）。
+            <br><b>■ 下書き・自動保存</b>：入力は<b>自動保存</b>（リロード/タブ閉じでも復帰）。名前付き保存＝<b>💾下書き保存</b>、作り直し＝<b>✨新規</b>。
+            <br><b>■ タイトル</b>：自動生成＋バリエ有りで「Variation」自動挿入。直接修正も、<b>★呼出/＋登録</b>でお気に入りも可。<b>🔄自動</b>で生成に戻す。
+            <br><b>■ 画像（統一）</b>：Section1・各国カードとも <b>サムネを✕で削除／ドラッグで並べ替え／🔗📁ドロップで追加</b>。メルカリ商品URLは自動で画像化（ブリッジ不要）。カタログ＝<b>最大9枚</b>、各バリエ＝<b>1枚</b>。
+            <br><b>■ バリエーション（3.）</b>：<b>⠿の帯をドラッグで並べ替え</b>／各明細に<b>仕入¥・重量g・在庫・SKU・画像</b>／<b>💡全バリエSKU提案</b>／<b>⚙️全バリエ一括</b>（仕入・重量・在庫をまとめて適用）。重量は明細ごとに変えると送料＝価格が変わります。
+            <br><b>■ 各国カード（5.）＝その場で国別編集</b>：タイトル・明細名・価格・在庫を<b>直接入力</b>（空欄=自動）。各明細の<b>✕でその国だけ除外／↩で戻す</b>（VN価格上限・BR4倍対策）。<b>「✏️画像/在庫/除外」</b>で画像・specifics・採用可否をまとめて。<b>「✏️国別調整あり」</b>バッジが付いた国は上書き中。
+            <br><b>■ 一括系</b>：<b>▶全対象国を一括で開く</b>（新規出品タブを一斉）／<b>🌏国一括編集</b>（選択国へ タイトル・価格×係数・明細の採用・specifics をまとめて）。
+            <br><b>■ specifics</b>：全国共通が既定。各国で違う時は「✏️」→specifics欄→<b>「◯◯のテンプレに保存」</b>でその国の既定に（=各国別）。
+            <br><b>■ SKU／制約チェック</b>：親SKU＋明細SKU。⚠️で各国ルール違反を警告（SG=ブランド1/ TW=60字 / BR=価格差4倍 / VN=価格上限 / 明細名は全国共通30字）。価格行で<b>円換算が仕入以下/利益マイナス</b>は<b>⚠要確認</b>。
+            <br><br><b>■ 価格ロジック（重量ベース・各明細の仕入から自動計算）</b>
+            <br>&nbsp;① <b>課金重量</b> = max(実重量, 容積重量=W×H×D÷6000)。
+            <br>&nbsp;② <b>SLS送料</b>（自己負担）= 「SLS 50g」＋「SLS +50g」×(課金重量÷50 −1)。
+            <br>&nbsp;③ <b>売価</b> = ( 仕入×(1+ROI)÷(1−FX%) ＋ SLS送料 ) ÷ (1−<b>合計手数料%</b>) ÷ (1−利益バッファ%) ÷ 為替。
+            <br>&nbsp;&nbsp;※手数料は<b>合計（販売＋プログラム＋決済の加算＝スプシの合計列）</b>。⚙️で各国の手数料・SLS・FX・バッファを変更可（合計%も表示）。
+            <br>&nbsp;&nbsp;例：PH 仕入4400円・ROI40%・500g → <b>₱3,395（利益¥+2,249）</b>。ROI/重量/手数料を変えると全国即再計算。
           </div>
         </details>
         <div class="tool-card" style="max-width:none">
@@ -5616,7 +5623,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 全再描画してもフォーカス位置を保つ（インライン編集用）。data-foc をキーに復元
     const ae = document.activeElement;
     const focSave = (ae && out.contains(ae) && ae.dataset && ae.dataset.foc) ? { k: ae.dataset.foc, s: ae.selectionStart, e: ae.selectionEnd } : null;
-    const targets = accountTargets(); // 対象アカウントが持つ国だけへ転記（gs_japan_select選択時はVN等を出さない）
+    let targets = accountTargets(); // 対象アカウントが持つ国だけへ転記（gs_japan_select選択時はVN等を出さない）
+    // 各国カードの表示順（listCcOrderに載っている国を優先。未登録は元の順で後ろ）
+    const ccOrder = settings.listCcOrder || [];
+    targets = targets.slice().sort((a, b) => { const ia = ccOrder.indexOf(a.cc), ib = ccOrder.indexOf(b.cc); return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib); });
     const hasVar = listState.variations.length > 0;
     const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1 }];
     // この国のitem specifics（この出品の国別上書き ▶ 国別テンプレ ▶ 全国共通）
@@ -5688,8 +5698,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const vthumb = hasVar ? (vimg
             ? `<span class="cov-vthumb" data-cc="${rg.cc}" data-i="${p.i}" title="画像をドロップで差し替え／クリックで消去" style="position:relative;display:inline-block;cursor:pointer;flex:none"><img src="${esc(vimg)}" referrerpolicy="no-referrer" style="width:28px;height:28px;object-fit:cover;border-radius:4px;display:block" onerror="this.style.opacity=.2"></span>`
             : `<span class="cov-vthumb" data-cc="${rg.cc}" data-i="${p.i}" title="画像をここにドロップ／クリックでURL入力（この明細1枚）" style="width:28px;height:28px;flex:none;border:1px dashed #ccc;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:#bbb;cursor:pointer">＋</span>`) : '';
-          return `<div class="row" style="gap:5px;align-items:center;flex-wrap:wrap;padding:2px 0${p.off ? ';opacity:.45' : (bad ? ';background:#fff4f4;border-radius:4px' : '')}">
-            <span style="font-size:11px;font-weight:700;color:#7b52c4;min-width:16px;text-align:center">${p.i + 1}</span>
+          return `<div class="cov-vrow" data-i="${p.i}" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding:2px 0${p.off ? ';opacity:.45' : (bad ? ';background:#fff4f4;border-radius:4px' : '')}">
+            <span class="cov-vgrip" draggable="true" data-i="${p.i}" title="ドラッグで並べ替え（全国共通の並び）" style="font-size:11px;font-weight:700;color:#7b52c4;min-width:18px;text-align:center;cursor:grab">⠿${p.i + 1}</span>
             <button class="cov-ioff smd-btn" data-cc="${rg.cc}" data-i="${p.i}" title="${p.off ? 'この国に戻す' : 'この国では出さない（除外）'}" style="padding:0 6px;font-weight:700;${p.off ? 'color:#1a7f37;border-color:#9ccc9c' : 'color:#d93025;border-color:#e0a0a0'}">${p.off ? '↩' : '✕'}</button>
             ${vthumb}
             ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:100px;font-size:11px;padding:2px 5px${p.off ? ';text-decoration:line-through' : ''}" title="この国の明細名（空欄=既定）"${p.off ? ' disabled' : ''}>` : ''}
@@ -5726,9 +5736,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         let jobTok = ''; try { jobTok = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(job))))); } catch (_) {}
         const autoUrl = `https://${rg.host}/portal/product/new#smdjob=${jobTok}`;
         autoLinks.push({ cc: rg.cc, url: autoUrl });
-        return `<div style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:0 -10px 8px;padding:7px 10px 6px;border-bottom:1px solid #f0f0f0;background:${rg.color}0f;border-radius:0 0 6px 6px">
-            <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
+        return `<div class="cov-card" data-cc="${rg.cc}" style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
+          <div class="cov-cchead" data-cc="${rg.cc}" draggable="true" style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:0 -10px 8px;padding:7px 10px 6px;border-bottom:1px solid #f0f0f0;background:${rg.color}0f;border-radius:0 0 6px 6px;cursor:grab" title="ヘッダをドラッグで国の並べ替え">
+            <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">⠿ ${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px">
               <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
               <a href="${autoUrl}" target="_blank" class="smd-btn" style="text-decoration:none;background:#f3eefb;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="新規出品ページを開き、userscriptが画像アップ＋作成APIを扱います（要 shopee-newlisting.user.js）">▶ 自動で出品(β)</a>
@@ -5763,6 +5773,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     out.querySelectorAll('.cov-iprice').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'price', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-istock').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'stock', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-ioff').forEach(el => el.addEventListener('click', e => { ovToggleOff(e.currentTarget.dataset.cc, +e.currentTarget.dataset.i); listRefresh(); }));
+    // 各国カードでのバリエ並べ替え（番号⠿をドラッグ→別明細にドロップ＝全国共通の並びを変更）
+    out.querySelectorAll('.cov-vgrip').forEach(g => {
+      g.addEventListener('dragstart', e => { covVarDrag = +g.dataset.i; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'smdcovvar'); } catch (_) {} });
+      g.addEventListener('dragend', () => { covVarDrag = null; });
+    });
+    out.querySelectorAll('.cov-vrow').forEach(row => {
+      row.addEventListener('dragover', e => { if (covVarDrag == null) return; e.preventDefault(); row.style.boxShadow = 'inset 0 0 0 2px #7b52c4'; });
+      row.addEventListener('dragleave', () => { row.style.boxShadow = ''; });
+      row.addEventListener('drop', e => { if (covVarDrag == null) return; e.preventDefault(); e.stopPropagation(); row.style.boxShadow = ''; const to = +row.dataset.i, from = covVarDrag; covVarDrag = null; if (from !== to) { reorderVariations(from, to); listVarsRender(); listRefresh(); } });
+    });
     // バリエ明細画像（各国）：クリックで上書き解除、ドロップ/ファイルで差し替え（1明細1枚）
     out.querySelectorAll('.cov-vthumb').forEach(el => {
       const cc = el.dataset.cc, i = +el.dataset.i;
@@ -5800,6 +5820,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     const bulkBtn = document.getElementById('li-bulkcountry');
     if (bulkBtn) bulkBtn.addEventListener('click', () => openBulkCountryEdit());
+    // 各国カードの並べ替え（ヘッダをドラッグ→別カードにドロップ）。順序は settings.listCcOrder に保存
+    let covCcDrag = null;
+    out.querySelectorAll('.cov-cchead').forEach(h => {
+      h.addEventListener('dragstart', e => { covCcDrag = h.dataset.cc; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'smdcc'); } catch (_) {} });
+      h.addEventListener('dragend', () => { covCcDrag = null; });
+    });
+    out.querySelectorAll('.cov-card').forEach(card => {
+      card.addEventListener('dragover', e => { if (covCcDrag == null || card.dataset.cc === covCcDrag) return; e.preventDefault(); card.style.outline = '2px solid #7b52c4'; });
+      card.addEventListener('dragleave', () => { card.style.outline = ''; });
+      card.addEventListener('drop', e => {
+        if (covCcDrag == null) return; e.preventDefault(); e.stopPropagation(); card.style.outline = '';
+        const from = covCcDrag, to = card.dataset.cc; covCcDrag = null; if (from === to) return;
+        const order = (settings.listCcOrder && settings.listCcOrder.length) ? settings.listCcOrder.slice() : accountTargets().map(r => r.cc);
+        const fi = order.indexOf(from); if (fi >= 0) order.splice(fi, 1);
+        const ti = order.indexOf(to); order.splice(ti < 0 ? order.length : ti, 0, from);
+        settings.listCcOrder = order; saveSettings(); listRefresh();
+      });
+    });
     // タイトル欄：手動修正が無ければ自動生成に追従（バリエ追加で「Variation」挿入等を反映）。編集中はカーソルを乱さない
     const tEl = document.getElementById('li-title');
     if (tEl && document.activeElement !== tEl && !(listState.titleOverride || '').trim()) tEl.value = listTitleAuto();
