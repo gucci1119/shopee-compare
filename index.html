@@ -4121,11 +4121,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       lst.wired = true;
       document.getElementById('list-tab').addEventListener('click', e => {
         const b = e.target.closest('button'); if (!b) return;
-        document.querySelectorAll('#list-tab button').forEach(x => x.classList.remove('on'));
-        b.classList.add('on'); lst.tab = b.dataset.k; renderListPage();
+        lst.tab = b.dataset.k; try { localStorage.setItem('smdListTab', lst.tab); } catch (_) {} renderListPage();
       });
     }
-    const tab = lst.tab || 'status';
+    // サブタブを記憶（リロードしても同じタブに戻る）
+    if (!lst.tab) { try { lst.tab = localStorage.getItem('smdListTab') || 'status'; } catch (_) { lst.tab = 'status'; } }
+    const tab = lst.tab;
+    document.querySelectorAll('#list-tab button').forEach(x => x.classList.toggle('on', x.dataset.k === tab));
     document.getElementById('list-status').style.display = tab === 'status' ? '' : 'none';
     document.getElementById('list-coverage').style.display = tab === 'coverage' ? '' : 'none';
     document.getElementById('list-analysis').style.display = tab === 'analysis' ? '' : 'none';
@@ -4909,7 +4911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const listState = {
     built: false,
     name: '', hardware: '', jpseries: '',
-    images: '', category: '',
+    images: '', uploadImgs: [], category: '',
     sellJpy: 0, costJpy: 0,
     roiPct: null, weightG: null, dimW: 0, dimH: 0, dimD: 0, // 価格計算用（未設定は設定の既定値）
     varTier: '', variations: [], // [{opt, cost(仕入円), stock, img}]
@@ -5034,8 +5036,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>
           <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像。1行1URL。※Shopeeへのアップロードは手動）</label>
           <div class="row" style="gap:6px;align-items:flex-start">
-            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or ハッシュ。または右の🔗でメルカリ等のリンクから取得" style="flex:1"></textarea>
-            <button class="smd-btn" id="li-imgfetch" title="メルカリ等の商品リンクから画像(og:image)を取得して追加">🔗 リンクから</button>
+            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or メルカリ等のリンク（貼ると自動取得）／📁で手元の画像も" style="flex:1"></textarea>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <button class="smd-btn" id="li-imgfetch" title="メルカリ等の商品リンクから画像(og:image)を取得して追加">🔗 リンクから</button>
+              <button class="smd-btn" id="li-imgfile" title="手元の画像ファイルをアップロード（AI生成画像など）">📁 ファイル</button>
+              <input type="file" id="li-imgfileinput" accept="image/*" style="display:none">
+            </div>
           </div>
           <div id="li-imgprev" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
         </div>
@@ -5162,8 +5168,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const ta = document.getElementById('li-img'); ta.value = (ta.value ? ta.value.trim() + '\n' : '') + img;
         listState.images = ta.value; listImgPrev(); listRefresh();
       });
+      // カタログ画像を手元ファイルからアップ（AI生成画像など）
+      document.getElementById('li-imgfile').addEventListener('click', () => document.getElementById('li-imgfileinput').click());
+      document.getElementById('li-imgfileinput').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) readImageFile(f, url => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(url); listImgPrev(); listRefresh(); }); });
       // ★自動復元：前回の作業内容（オートセーブ）があれば復元＝リロード/タブ閉じでも消えない
-      try { const auto = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); if (auto && (auto.name || (auto.variations && auto.variations.length) || auto.category || auto.images)) { listApplyState(auto); } } catch (_) {}
+      try { const auto = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); if (auto && (auto.name || (auto.variations && auto.variations.length) || auto.category || auto.images)) { listApplyState(auto); setTimeout(() => { listFetchLinks().catch(() => {}); }, 300); } } catch (_) {}
       listVarsRender();
     }
     listImgPrev();
@@ -5174,6 +5183,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listCatDatalist() {
     const dl = document.getElementById('li-catlist'); if (!dl) return;
     dl.innerHTML = (settings.listCats || []).map(c => `<option value="${esc(c)}">`).join('');
+  }
+  // 画像URLが「商品ページ（画像直リンクでない）」か判定
+  const isPageUrl = s => s && /^https?:\/\//.test(s) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(s) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(s);
+  // ローカル画像ファイル→縮小してdataURL化（手動アップ用。Shopeeへは結局手動アップだが、コンポーザーでプレビュー＆下書き保存できる）
+  function readImageFile(file, cb) {
+    if (!file || !/^image\//.test(file.type)) { alert('画像ファイルを選んでください'); return; }
+    const rd = new FileReader();
+    rd.onload = () => { const im = new Image(); im.onload = () => { const max = 1000; let w = im.width, h = im.height; if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); } const cv = document.createElement('canvas'); cv.width = w; cv.height = h; cv.getContext('2d').drawImage(im, 0, 0, w, h); cb(cv.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => alert('画像を読めませんでした'); im.src = rd.result; };
+    rd.readAsDataURL(file);
+  }
+  // 復元/読込時：カタログ＋バリエ画像の「商品ページURL」を自動でog:imageに変換（ブリッジ稼働時）
+  async function listFetchLinks() {
+    let changed = false;
+    const lines = (listState.images || '').split('\n');
+    for (let i = 0; i < lines.length; i++) { const s = lines[i].trim(); if (isPageUrl(s)) { const img = await fetchImageFromUrl(s); if (img) { lines[i] = img; changed = true; } } }
+    if (changed) listState.images = lines.join('\n');
+    for (const v of listState.variations) { const s = (v.img || '').trim(); if (isPageUrl(s)) { const img = await fetchImageFromUrl(s); if (img) { v.img = img; changed = true; } } }
+    if (changed) { listSyncForm(); listVarsRender(); listImgPrev(); listRefresh(); }
   }
   function listDescFav() {
     const sel = document.getElementById('li-descfav'); if (!sel) return;
@@ -5210,7 +5237,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, category: s.category, images: s.images, roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, cost: v.cost, stock: v.stock, img: v.img })) };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, cost: v.cost, stock: v.stock, img: v.img })) };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
@@ -5221,7 +5248,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listApplyState(st) {
     st = st || {};
     Object.assign(listState, {
-      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', category: st.category || '', images: st.images || '',
+      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
       varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0,
       variations: (st.variations || []).map(v => ({ opt: v.opt || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
@@ -5251,10 +5278,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   function listImgPrev() {
-    const wrap = document.getElementById('li-imgprev');
-    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean)
-      .map(s => /^https?:/.test(s) ? s : IMG_CDN + s);
-    wrap.innerHTML = urls.slice(0, 9).map(u => `<img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px" loading="lazy">`).join('');
+    const wrap = document.getElementById('li-imgprev'); if (!wrap) return;
+    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean).map(s => /^https?:/.test(s) ? s : IMG_CDN + s);
+    const ups = listState.uploadImgs || [];
+    wrap.innerHTML = urls.slice(0, 9).map(u => `<img src="${esc(u)}" style="width:44px;height:44px;object-fit:cover;border-radius:5px" loading="lazy" onerror="this.style.opacity=.2">`).join('')
+      + ups.map((u, i) => `<span style="position:relative;display:inline-block"><img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px"><button class="li-upclear" data-i="${i}" title="このアップ画像を削除" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:10px;line-height:1;cursor:pointer">✕</button></span>`).join('');
+    wrap.querySelectorAll('.li-upclear').forEach(el => el.addEventListener('click', e => { listState.uploadImgs.splice(+e.currentTarget.dataset.i, 1); listImgPrev(); listRefresh(); }));
   }
 
   function listVarsRender() {
@@ -5274,8 +5303,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         </div>
         <div class="row" style="gap:6px;align-items:center;margin-top:5px">
           ${thumb(v.img)}
-          <input class="li vimg" data-i="${i}" style="flex:1;font-size:11px" placeholder="画像URL or メルカリ等の商品リンク（貼ると自動取得）／または右の🔗" value="${esc(v.img || '')}">
-          <button class="smd-btn vimgfetch" data-i="${i}" title="メルカリ等の商品リンクから画像を取得">🔗</button>
+          ${(v.img || '').slice(0, 5) === 'data:'
+      ? `<span style="flex:1;font-size:11px;color:#1a7f37">📁 アップロード画像（設定済・サムネ参照）</span><button class="smd-btn vimgclr" data-i="${i}" title="画像をクリア">✕画像</button>`
+      : `<input class="li vimg" data-i="${i}" style="flex:1;font-size:11px" placeholder="画像URL or メルカリ等の商品リンク（貼ると自動取得）／または右の🔗📁" value="${esc(v.img || '')}"><button class="smd-btn vimgfetch" data-i="${i}" title="メルカリ等の商品リンクから画像を取得">🔗</button><button class="smd-btn vimgfile" data-i="${i}" title="手元の画像ファイルをアップ">📁</button>`}
         </div>
       </div>`;
     }).join('');
@@ -5307,6 +5337,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!img) { alert('画像を取得できませんでした（ブリッジ未検出／対応外サイト／セッション切れの可能性）'); return; }
       listState.variations[i].img = img; listVarsRender();
     }));
+    wrap.querySelectorAll('.vimgfile').forEach(el => el.addEventListener('click', e => {
+      const i = +e.currentTarget.dataset.i;
+      const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+      inp.onchange = () => { const f = inp.files[0]; if (f) readImageFile(f, url => { listState.variations[i].img = url; listVarsRender(); }); };
+      inp.click();
+    }));
+    wrap.querySelectorAll('.vimgclr').forEach(el => el.addEventListener('click', e => { listState.variations[+e.currentTarget.dataset.i].img = ''; listVarsRender(); }));
     listRefresh();
   }
 
@@ -5320,7 +5357,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const specs = settings.listSpecs;
     // 画像（全国共通。手動アップロード用にまとめて表示）
     const toU = s => /^https?:/.test(s) ? s : IMG_CDN + s;
-    const catImgs = (listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU);
+    const catImgs = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU), ...(listState.uploadImgs || [])];
     const varImgs = hasVar ? listState.variations.filter(v => v.img).map(v => ({ opt: v.opt, url: toU(v.img) })) : [];
     const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2"></a>`;
     const imgBlock = (catImgs.length || varImgs.length) ? `<div style="border:1px solid #e6e0f5;background:#faf8ff;border-radius:8px;padding:10px;margin-bottom:10px">
