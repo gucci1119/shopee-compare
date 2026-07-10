@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.3
+// @version      0.6.4
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.3';
+  const VER = '0.6.4';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -106,7 +106,7 @@
     try {
       // ※画像の image_id は通信からは拾わない（おすすめ商品等の無関係idが混ざるため）。DOMの collectPageImageIds のみ使用
       if (typeof body === 'string') { const m = body.match(/"img_id"\s*:\s*"([^"]+)"/); if (m) lastImgId = m[1]; }
-      if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); try { localStorage.setItem('smdNlTmpl_' + location.host, body); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); log('💾 雛形を保存しました（次回以降も記憶）', '#1a7f37'); } catch (_) {} }
+      if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = stripTmplImages(body); try { localStorage.setItem('smdNlTmpl_' + location.host, JSON.stringify(lastCreateBody)); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); log('💾 雛形を保存しました（画像は除外・次回以降も記憶）', '#1a7f37'); } catch (_) {} }
       if (CREATE_RE.test(url || '')) {
         captures.push({ url, method, body: (typeof body === 'string' ? body.slice(0, 200000) : ''), resp: (typeof resp === 'string' ? resp.slice(0, 20000) : '') });
         if (logEl) log('📡 作成系APIをキャプチャ: ' + (url || '').split('?')[0], '#7b52c4');
@@ -120,7 +120,33 @@
   function getTmpls() { try { return JSON.parse(localStorage.getItem(TKEY) || '{}') || {}; } catch (_) { return {}; } }
   function saveTmpls(o) { try { localStorage.setItem(TKEY, JSON.stringify(o)); } catch (_) {} }
   let selTmplName = ''; // パネルで選択中の雛形名（空=直近の作成 lastCreateBody）
-  function currentTmplBody() { const o = getTmpls(); if (selTmplName && o[selTmplName]) return o[selTmplName]; return lastCreateBody; }
+  // 雛形からは画像を完全に除去（雛形に画像を持たせる意図はない＝Shopeeが最低1枚要求するので手動作成時に上げただけ）。
+  // 画像は毎回ジョブ(コンポーザー)から差し替える。過去に画像入りで保存された雛形も、ここで無害化される。
+  function stripTmplImages(body) {
+    try {
+      const b = (typeof body === 'string') ? JSON.parse(body) : JSON.parse(JSON.stringify(body));
+      const pi = b.product_info || (b.product_info = {});
+      pi.images = []; pi.long_images = []; pi.gallery_image_list = [];
+      if (Array.isArray(pi.std_tier_variation_list)) pi.std_tier_variation_list.forEach(t => (t.value_list || []).forEach(v => { v.image_id = ''; }));
+      if (Array.isArray(pi.model_list)) pi.model_list.forEach(m => { m.sku_image = ''; });
+      return b;
+    } catch (e) { return (typeof body === 'string') ? (function () { try { return JSON.parse(body); } catch (_) { return null; } })() : body; }
+  }
+  // 雛形が固定している「国・カテゴリの正解」を取り出す（パネル表示用）
+  function tmplSummary(body) {
+    try {
+      const pi = (body && body.product_info) || {};
+      return {
+        cp: (pi.category_path || []).join(' > ') || '—',
+        brand: pi.brand_id || '—',
+        cond: (pi.condition != null ? pi.condition : '—'),
+        wunit: ((pi.weight && pi.weight.unit) === 1 ? 'kg' : 'g'),
+        ch: (pi.logistics_channels || []).map(c => c.channelid).join(',') || '—',
+        attrs: (pi.attributes || []).length,
+      };
+    } catch (_) { return null; }
+  }
+  function currentTmplBody() { const o = getTmpls(); const b = (selTmplName && o[selTmplName]) ? o[selTmplName] : lastCreateBody; return b ? stripTmplImages(b) : null; }
   // 「Product Images」枠のプレビュー画像だけから Shopee CDN image_id を読む（推薦パネル等を除外）
   const CDN_ID_RE = /([a-z]{2,4}-\d{6,}-[0-9a-z]{4,}-[0-9a-z]{8,})/;
   function productImageScope() {
@@ -195,9 +221,9 @@
     if (job.weightG) { const u = (pi.weight && pi.weight.unit != null) ? pi.weight.unit : 1; pi.weight = { value: String(u === 1 ? (job.weightG / 1000) : job.weightG), unit: u }; } // 雛形の単位を尊重(PH=1:kg / VN等はg)
     if (job.dims) pi.dimension = { width: String(job.dims.w || ''), height: String(job.dims.h || ''), length: String(job.dims.d || '') };
     pi.parent_sku = job.parentSku || '';
-    // pi.images はジョブ由来のカタログidで上書き。取得できなければ雛形の焼付き画像を勝手に使わない（＝要確認）
+    // pi.images はジョブ由来のカタログidで上書き。雛形は画像を持たないので、取れなければ作成中止。
     if (_catIds.length) pi.images = _catIds.slice(0, 9);
-    else if (!confirm('カタログ画像を取得できませんでした（自動アップ失敗）。\n雛形に焼き付いた画像のまま作成すると、全バリエが雛形の画像になります。\nこのまま作成しますか？（キャンセル推奨）')) return;
+    else { alert('カタログ画像を取得できませんでした（自動アップ失敗）。\nコンポーザーに画像が入っているか確認して、再実行してください。\n※雛形は画像を持たない設計です。'); return; }
     const cover = (pi.images && pi.images[0]) || '';
     const vars = job.variations || [];
     if (vars.length > 1 || (vars.length === 1 && vars[0].name)) {
@@ -312,16 +338,30 @@
     };
     fillBtnRefresh = () => {
       renderTmplSel();
-      const has = !!currentTmplBody();
-      const imgline = '　🖼️検出画像: <b>' + uploadedImgIds.length + '枚</b>' + (uploadedImgIds.length ? '（この画像で作成）' : '（Product Imagesに手動追加すると自動取得）');
-      if (tmplEl) tmplEl.innerHTML = (has ? '雛形あり ✅' : '<span style="color:#c0392b">雛形なし：手動で1件「Save and Delist」→「💾保存」</span>') + imgline;
+      const base = currentTmplBody(); const has = !!base;
+      const imgline = '　🖼️検出画像: <b>' + uploadedImgIds.length + '枚</b>';
+      let html;
+      if (has) {
+        const s = tmplSummary(base) || {};
+        html = '雛形あり ✅（' + (selTmplName || '直近の作成') + '）' + imgline
+          + '<div style="margin-top:4px;padding:6px;background:#f6f7fb;border:1px solid #e2e2ef;border-radius:6px;line-height:1.55;color:#555">'
+          + '<b style="color:#333">この雛形が固定（＝国・カテゴリの正解）</b><br>'
+          + '・カテゴリ: ' + s.cp + '<br>'
+          + '・ブランドID: ' + s.brand + '　/ Condition: ' + s.cond + '<br>'
+          + '・属性: ' + s.attrs + '件 / 重量単位: ' + s.wunit + ' / 配送ch: ' + s.ch + '<br>'
+          + '<b style="color:#333">ジョブが差し替え</b>: タイトル / 説明 / 価格 / 在庫 / SKU / 重量値 / バリエ名 / <u>画像</u>（雛形は画像を持ちません）'
+          + '</div>';
+      } else {
+        html = '<span style="color:#c0392b">雛形なし：手動で1件「Save and Delist」→「💾保存」</span>' + imgline;
+      }
+      if (tmplEl) tmplEl.innerHTML = html;
     };
     fillBtnRefresh();
     sel.addEventListener('change', () => { selTmplName = sel.value; fillBtnRefresh(); });
     box.querySelector('.nl-tmplsave').addEventListener('click', () => {
       if (!lastCreateBody) { alert('直近の作成がありません。先に手動で1件「Save and Delist」してから💾保存してください'); return; }
       const name = prompt('この雛形の名前（例: 中古ゲーム / 新品ゲーム / コンソール）:', '中古ゲーム'); if (!name) return;
-      const o = getTmpls(); o[name.trim()] = lastCreateBody; saveTmpls(o); selTmplName = name.trim(); fillBtnRefresh();
+      const o = getTmpls(); o[name.trim()] = stripTmplImages(lastCreateBody); saveTmpls(o); selTmplName = name.trim(); fillBtnRefresh();
       log('💾 雛形「' + name.trim() + '」を保存しました', '#1a7f37');
     });
     if (job && cd) cd.addEventListener('click', () => createFromJob(job, false));
@@ -414,7 +454,7 @@
 
   function boot() {
     console.log('[newlisting] booted v' + VER + ' @', location.href);
-    try { const s = localStorage.getItem('smdNlTmpl_' + location.host); if (s && !lastCreateBody) lastCreateBody = JSON.parse(s); } catch (_) {} // 保存済み雛形を復元（この国のもの）
+    try { const s = localStorage.getItem('smdNlTmpl_' + location.host); if (s && !lastCreateBody) lastCreateBody = stripTmplImages(JSON.parse(s)); } catch (_) {} // 保存済み雛形を復元（画像除外・この国のもの）
     const job = readJob();
     // ジョブ(#smdjob=…k:nl)があれば必ず起動。無ければ新規出品ページ(/new /create)のときだけ貼付フォールバックを出す。
     // ※ 編集ページ(/portal/product/123 等)では addvar と衝突しないよう、ジョブが無ければ何もしない。
