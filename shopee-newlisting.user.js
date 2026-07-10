@@ -43,14 +43,20 @@
     Object.defineProperty(input, 'files', { value: dt.files, configurable: true });
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
-  function fetchImageFile(url, name) {
+  function fetchImageFileOnce(url, name, timeout) {
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
-        method: 'GET', url, responseType: 'blob', timeout: 30000,
-        onload: r => { try { const type = r.response.type || 'image/jpeg'; res(new File([r.response], name || 'img.jpg', { type })); } catch (e) { rej(e); } },
-        onerror: () => rej(new Error('画像取得失敗')), ontimeout: () => rej(new Error('画像取得タイムアウト')),
+        method: 'GET', url, responseType: 'blob', timeout: timeout || 15000,
+        onload: r => { try { const type = (r.response && r.response.type) || 'image/jpeg'; if (!r.response || r.response.size === 0) return rej(new Error('空レスポンス')); res(new File([r.response], name || 'img.jpg', { type })); } catch (e) { rej(e); } },
+        onerror: () => rej(new Error('画像取得失敗')), ontimeout: () => rej(new Error('タイムアウト')),
       });
     });
+  }
+  async function fetchImageFile(url, name) {
+    // GM_xhrがmercdnで稀にハング→短めタイムアウト＋2リトライ
+    let last;
+    for (let a = 0; a < 3; a++) { try { return await fetchImageFileOnce(url, name, 15000); } catch (e) { last = e; if (logEl) log('・画像取得リトライ ' + (a + 1) + '/3 (' + e.message + ')', '#8a6d3b'); } }
+    throw last || new Error('画像取得失敗');
   }
 
   // ===== ネットワーク・キャプチャ（新規作成API＋img_idを拾う） =====
@@ -193,7 +199,9 @@
     const renderTmplSel = () => {
       const o = getTmpls(); const names = Object.keys(o);
       sel.innerHTML = '<option value="">（直近の作成）</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
-      if (selTmplName && o[selTmplName]) sel.value = selTmplName; else selTmplName = '';
+      // 直近作成が無く、名前つき雛形があるなら先頭を自動選択（保存すればどのページでも「雛形あり」に）
+      if (!selTmplName && !lastCreateBody && names.length) selTmplName = names[0];
+      if (selTmplName && o[selTmplName]) sel.value = selTmplName; else { if (!o[selTmplName]) selTmplName = ''; sel.value = selTmplName; }
     };
     fillBtnRefresh = () => {
       renderTmplSel();
