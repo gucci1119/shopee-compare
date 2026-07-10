@@ -549,6 +549,7 @@
     listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
     listVarTpl: '{hardware} {variation}',
     listSpecs: 'Brand=No Brand\nRegion of Origin=Japan\nCondition=Used',
+    listSpecsByCc: {}, // 各国別 item specifics テンプレ（未設定の国は listSpecs にフォールバック）
     listDescTpl: '{title}\n\n- Ships from Japan with tracking\n- Pre-owned, inspected before shipping\n- Fast & secure packaging',
     // 価格式パラメータ（フェーズ2で使用・設定でカスタム可）
     priceCoef: 1.8, priceFeePct: 12, priceShipJpy: 1200, priceRound: 10,
@@ -5573,7 +5574,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function ovPrune(cc) {
     const o = listState.overrides[cc]; if (!o) return;
     if (o.vars && !Object.keys(o.vars).length) delete o.vars;
-    if (!(o.title || '').trim() && !(o.images || '').trim() && (!o.vars || !Object.keys(o.vars).length)) delete listState.overrides[cc];
+    if (!(o.title || '').trim() && !(o.images || '').trim() && !(o.specifics || '').trim() && (!o.vars || !Object.keys(o.vars).length)) delete listState.overrides[cc];
   }
   // 出力パネル: 各国の転記内容＋制約チェック
   function listRefresh() {
@@ -5585,7 +5586,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const targets = accountTargets(); // 対象アカウントが持つ国だけへ転記（gs_japan_select選択時はVN等を出さない）
     const hasVar = listState.variations.length > 0;
     const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1 }];
-    const specs = settings.listSpecs;
+    // この国のitem specifics（この出品の国別上書き ▶ 国別テンプレ ▶ 全国共通）
+    const specsFor = (cc) => { const o = listState.overrides[cc] || {}; if (o.specifics != null) return o.specifics; const t = (settings.listSpecsByCc || {})[cc]; return (t != null && t !== '') ? t : settings.listSpecs; };
     // 画像（全国共通。手動アップロード用にまとめて表示）
     const toU = resolveImgUrl;
     const catImgs = (listState.catImgs || []).map(toU);
@@ -5622,7 +5624,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // ★国別上書き（この国だけタイトル/画像/明細名/価格/在庫/採用可否を変える）
         const ov = listState.overrides[rg.cc] || {};
         const ovVars = ov.vars || {};
-        const hasOv = !!((ov.title || '').trim() || (ov.images || '').trim() || Object.keys(ovVars).length);
+        const hasOv = !!((ov.title || '').trim() || (ov.images || '').trim() || (ov.specifics || '').trim() || Object.keys(ovVars).length);
         const baseTitle0 = (ov.title || '').trim() ? ov.title : listTitle();
         const title = rg.cc === 'TW' ? shortenTW(baseTitle0) : baseTitle0;
         const titleWarn = (rg.cc === 'TW' && baseTitle0.length > 60) ? `<span class="smd-dim" style="font-size:11px;margin-left:6px">TW60字に短縮済(${title.length}字)</span>` : '';
@@ -5681,7 +5683,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           k: 'nl',
           title, description: desc, category: listState.category, cc: rg.cc, parentSku: listState.parentSku,
           weightG: (listState.weightG != null ? listState.weightG : settings.weightG), dims: { w: listState.dimW || 0, h: listState.dimH || 0, d: listState.dimD || 0 },
-          varTier: listState.varTier, specifics: specs, images: ccCatImgs.filter(u => /^https?:/.test(u)),
+          varTier: listState.varTier, specifics: specsFor(rg.cc), images: ccCatImgs.filter(u => /^https?:/.test(u)),
           variations: hasVar
             ? pricedLive.map(p => ({ name: p.name, sku: p.sku || '', price: String(p.local), stock: p.stock, image: p.image ? toU(p.image) : '' }))
             : [{ name: '', sku: listState.parentSku || '', price: String((pricedLive[0] || {}).local || 0), stock: (pricedLive[0] && pricedLive[0].stock != null) ? pricedLive[0].stock : 1, image: '' }],
@@ -5707,7 +5709,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             ${cp('タイトル', title)}
             ${cp('価格', priceLines)}
             ${cp('説明', desc)}
-            ${cp('item specifics', specs)}
+            ${cp('item specifics', specsFor(rg.cc))}${(listState.overrides[rg.cc] || {}).specifics != null || ((settings.listSpecsByCc || {})[rg.cc] != null && (settings.listSpecsByCc || {})[rg.cc] !== '') ? '<span style="font-size:9px;color:#7b52c4;align-self:center">国別</span>' : ''}
             ${listState.category ? cp('カテゴリ', listState.category) : ''}
             ${listState.parentSku ? cp('親SKU', listState.parentSku) : ''}
             ${(hasVar && priced.some(p => p.sku)) ? cp('SKU一覧', skuText) : ''}
@@ -5775,6 +5777,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
     const ov = JSON.parse(JSON.stringify(listState.overrides[cc] || {})); ov.vars = ov.vars || {};
     const autoTitle = listTitle();
+    const specsEff = (function () { const o = listState.overrides[cc] || {}; if (o.specifics != null) return o.specifics; const t = (settings.listSpecsByCc || {})[cc]; return (t != null && t !== '') ? t : settings.listSpecs; })();
     const catImgsGlobal = (listState.catImgs || []).slice();
     const ov2u = s => resolveImgUrl(s);
     const varRows = rows.map((v, i) => {
@@ -5808,6 +5811,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <input class="li cov-title" placeholder="${esc(autoTitle)}" value="${esc((listState.overrides[cc] || {}).title || '')}" style="width:100%">
         <label class="lc" style="margin-top:10px">カタログ画像（この国用・1行1URL。空欄=全国共通 ${catImgsGlobal.length}枚）</label>
         <textarea class="li cov-images" rows="2" placeholder="空欄なら全国共通の画像を使用" style="width:100%">${esc((listState.overrides[cc] || {}).images || '')}</textarea>
+        <label class="lc" style="margin-top:10px">item specifics（この国用・1行1項目 Key=Value）<span class="smd-dim">${(settings.listSpecsByCc || {})[cc] ? 'この国のテンプレ適用中' : '全国共通テンプレ'}</span></label>
+        <textarea class="li cov-specs" rows="3" placeholder="${esc(specsEff)}" style="width:100%;font-family:monospace;font-size:12px">${esc((listState.overrides[cc] || {}).specifics != null ? (listState.overrides[cc] || {}).specifics : ((settings.listSpecsByCc || {})[cc] || ''))}</textarea>
+        <button class="cov-specstpl smd-btn" style="font-size:11px;margin-top:4px" title="今の内容を「${cc}の国別テンプレ」として保存（次回以降この国の既定に）">💾 ${cc}のテンプレに保存</button>
         <div style="font-weight:700;font-size:12px;border-top:1px solid #eee;padding-top:10px;margin-top:12px">明細（${hasVar ? rows.length + '個' : '単品'}）— この国だけ 名前・価格・在庫・画像・採用可否を変更</div>
         <div style="margin-top:8px">${varRows}</div>
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px">
@@ -5832,10 +5838,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!confirm(cc + ' の国別上書きを全部消して、全国共通に戻します。よろしいですか？')) return;
       delete listState.overrides[cc]; close(); listRefresh();
     });
+    // この国のspecificsをテンプレとして保存（settings.listSpecsByCc[cc]）
+    box.querySelector('.cov-specstpl').addEventListener('click', () => {
+      const val = (box.querySelector('.cov-specs').value || '').trim();
+      settings.listSpecsByCc = settings.listSpecsByCc || {};
+      if (val) settings.listSpecsByCc[cc] = val; else delete settings.listSpecsByCc[cc];
+      saveSettings();
+      const b = box.querySelector('.cov-specstpl'); const o = b.textContent; b.textContent = '✅ 保存'; setTimeout(() => b.textContent = o, 1200);
+    });
     box.querySelector('.cov-apply').addEventListener('click', () => {
       const nov = { vars: {} };
       const t = (box.querySelector('.cov-title').value || '').trim(); if (t) nov.title = t;
       const im = (box.querySelector('.cov-images').value || '').trim(); if (im) nov.images = im;
+      const sp = box.querySelector('.cov-specs').value; if (sp != null && sp.trim() !== '' && sp.trim() !== (settings.listSpecs || '').trim() && sp.trim() !== ((settings.listSpecsByCc || {})[cc] || '').trim()) nov.specifics = sp.trim();
       rows.forEach((v, i) => {
         const o = {};
         const on = box.querySelector('.cov-on[data-i="' + i + '"]').checked; if (!on) o.off = true;
@@ -5845,7 +5860,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const igEl = box.querySelector('.cov-img[data-i="' + i + '"]'); if (igEl && (igEl.value || '').trim()) o.image = igEl.value.trim();
         if (Object.keys(o).length) nov.vars[i] = o;
       });
-      if (!nov.title && !nov.images && !Object.keys(nov.vars).length) delete listState.overrides[cc];
+      if (!nov.title && !nov.images && !nov.specifics && !Object.keys(nov.vars).length) delete listState.overrides[cc];
       else listState.overrides[cc] = nov;
       close(); listRefresh();
     });
