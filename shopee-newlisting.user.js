@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.7
+// @version      0.6.8
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -36,7 +36,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.7';
+  const VER = '0.6.8';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -331,7 +331,8 @@
   }
   function panel(job) {
     const box = document.createElement('div');
-    box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:999999;width:360px;background:#fff;border:2px solid #7b52c4;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:12px;font-family:sans-serif;overflow:hidden';
+    const capMode = !job && /smdcap/i.test(location.hash || '');   // 編集ページの記録モードは左に置く（addvarと重ならない）
+    box.style.cssText = 'position:fixed;' + (capMode ? 'left:16px' : 'right:16px') + ';bottom:16px;z-index:999999;width:360px;background:#fff;border:2px solid #7b52c4;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:12px;font-family:sans-serif;overflow:hidden';
     box.innerHTML = `<div style="background:#7b52c4;color:#fff;padding:8px 10px;font-weight:700;display:flex;align-items:center;gap:6px">✍️ 新規出品オート <span style="font-weight:400;font-size:10px;opacity:.85">v${VER}（β）</span><span style="margin-left:auto;cursor:pointer" class="nl-x">✕</span></div>
       <div style="padding:10px">
         ${job ? `<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px">${(job.title || '(タイトル無)').slice(0, 60)}</div>
@@ -503,7 +504,8 @@
     const job = readJob();
     // ジョブ(#smdjob=…k:nl)があれば必ず起動。無ければ新規出品ページ(/new /create)のときだけ貼付フォールバックを出す。
     // ※ 編集ページ(/portal/product/123 等)では addvar と衝突しないよう、ジョブが無ければ何もしない。
-    if (!job && !isNewPage()) return;
+    // ただし URLに #smdcap を付けた時だけ、編集ページでも「画像アップ通信の記録」用にパネルを出す（左側に配置＝addvarと非重複）。
+    if (!job && !isNewPage() && !/smdcap/i.test(location.hash || '')) return;
     let tries = 0;
     const t = setInterval(() => { tries++; if ($$('input,textarea').length > 3 || tries > 50) { clearInterval(t); panel(job); } }, 500);
   }
