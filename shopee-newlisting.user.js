@@ -64,7 +64,7 @@
   function recordMaybe(url, method, body, resp) {
     try {
       if (typeof body === 'string' && /"img_id"\s*:\s*"([^"]+)"/.test(body)) { lastImgId = body.match(/"img_id"\s*:\s*"([^"]+)"/)[1]; }
-      if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); if (fillBtnRefresh) fillBtnRefresh(); } catch (_) {} }
+      if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); try { localStorage.setItem('smdNlTmpl_' + location.host, body); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); log('💾 雛形を保存しました（次回以降も記憶）', '#1a7f37'); } catch (_) {} }
       if (CREATE_RE.test(url || '')) {
         captures.push({ url, method, body: (typeof body === 'string' ? body.slice(0, 200000) : ''), resp: (typeof resp === 'string' ? resp.slice(0, 20000) : '') });
         if (logEl) log('📡 作成系APIをキャプチャ: ' + (url || '').split('?')[0], '#7b52c4');
@@ -270,6 +270,7 @@
 
   function boot() {
     console.log('[newlisting] booted v' + VER + ' @', location.href);
+    try { const s = localStorage.getItem('smdNlTmpl_' + location.host); if (s && !lastCreateBody) lastCreateBody = JSON.parse(s); } catch (_) {} // 保存済み雛形を復元（この国のもの）
     const job = readJob();
     // ジョブ(#smdjob=…k:nl)があれば必ず起動。無ければ新規出品ページ(/new /create)のときだけ貼付フォールバックを出す。
     // ※ 編集ページ(/portal/product/123 等)では addvar と衝突しないよう、ジョブが無ければ何もしない。
