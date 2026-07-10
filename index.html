@@ -4939,7 +4939,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const listState = {
     built: false,
     name: '', hardware: '', jpseries: '', parentSku: '', titleOverride: '',
-    images: '', uploadImgs: [], category: '',
+    images: '', uploadImgs: [], catImgs: [], category: '', // catImgs=カタログ画像の統一配列(URL/dataURL順序保持)。images/uploadImgsは旧互換
     sellJpy: 0, costJpy: 0,
     roiPct: null, weightG: null, dimW: 0, dimH: 0, dimD: 0, // 価格計算用（未設定は設定の既定値）
     varTier: '', variations: [], // [{opt, cost(仕入円), stock, img}]
@@ -4947,6 +4947,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     overrides: {}, // 国別上書き { [cc]: { title, images, vars: { [i]: { name, price, stock, image, off } } } }
   };
   let listDragVar = null; // バリエカードのドラッグ並べ替え中インデックス
+  let catDragIdx = null;  // カタログ画像のドラッグ並べ替え中インデックス
+  // 旧 images(改行URL)+uploadImgs(dataURL) → 単一配列 catImgs へ一度だけ移行
+  function catMigrate() {
+    if (!listState.catImgs || !listState.catImgs.length) {
+      const seed = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+      if (seed.length) listState.catImgs = seed;
+    }
+    if (!listState.catImgs) listState.catImgs = [];
+  }
   const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
   const roundLocal = (v, unit) => { unit = unit || 1; const r = Math.round(v / unit) * unit; return unit < 1 ? Math.round(r * 100) / 100 : Math.round(r); };
   // 各国の合計手数料率(%)＝販売＋プログラム＋決済（スプシの「合計」列と同じ加算方式。Shopeeは各%を売価から差し引く）
@@ -5115,16 +5124,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <input class="li" id="li-psku" placeholder="例: DIGIMON_DS_SWITCH" style="flex:1;font-family:monospace" spellcheck="false">
             <button class="smd-btn" id="li-pskusug" title="商品名・ハードからSKUを提案（修正可）">💡 提案</button>
           </div>
-          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像・<b>最大9枚</b>。1行1URL／📁ファイル／ドラッグ&ドロップ・途中追加も可。※Shopeeへは手動アップ）<span id="li-imgcount" class="smd-dim" style="font-weight:400"></span></label>
-          <div class="row" style="gap:6px;align-items:flex-start">
-            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or メルカリ等のリンク（貼ると自動取得）／📁 or ここに画像をドロップ" style="flex:1"></textarea>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <button class="smd-btn" id="li-imgfetch" title="メルカリ等の商品リンクから画像(og:image)を取得して追加">🔗 リンクから</button>
-              <button class="smd-btn" id="li-imgfile" title="手元の画像ファイルをアップロード（AI生成画像など）">📁 ファイル</button>
-              <input type="file" id="li-imgfileinput" accept="image/*" style="display:none">
-            </div>
+          <label class="lc" style="margin-top:8px">画像（カタログ用トップ・<b>最大9枚</b>。<b>サムネを✕で削除／ドラッグで並べ替え</b>／🔗📁・ここにドロップで追加。※Shopeeへは手動アップ）<span id="li-imgcount" class="smd-dim" style="font-weight:400"></span></label>
+          <div id="li-imgprev" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;min-height:56px;border:1.5px dashed #d3c4ef;border-radius:8px;padding:8px;align-items:center"></div>
+          <div class="row" style="gap:6px;margin-top:6px">
+            <button class="smd-btn" id="li-imgfetch" title="画像URL or メルカリ等の商品リンクから追加（複数行OK）">🔗 リンク/URLから追加</button>
+            <button class="smd-btn" id="li-imgfile" title="手元の画像ファイルをアップロードして追加">📁 ファイルから追加</button>
+            <input type="file" id="li-imgfileinput" accept="image/*" multiple style="display:none">
           </div>
-          <div id="li-imgprev" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -5182,19 +5188,6 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const key = [listState.name, listState.hardware, listState.jpseries].filter(Boolean).join(' ');
         const sug = recommendSku(key); if (!sug) { alert('先に商品名を入力してください'); return; }
         listState.parentSku = sug; document.getElementById('li-psku').value = sug; listRefresh();
-      });
-      document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
-      // カタログ画像：フォーカスを外した時、商品ページURL（画像直リンクでない行）は自動でog:imageに変換
-      document.getElementById('li-img').addEventListener('change', async e => {
-        const lines = (e.target.value || '').split('\n');
-        let changed = false;
-        for (let i = 0; i < lines.length; i++) {
-          const s = lines[i].trim();
-          if (s && /^https?:\/\//.test(s) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(s) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(s)) {
-            const img = await fetchImageFromUrl(s); if (img) { lines[i] = img; changed = true; }
-          }
-        }
-        if (changed) { e.target.value = lines.join('\n'); listState.images = e.target.value; listImgPrev(); listRefresh(); }
       });
       document.getElementById('li-cost').addEventListener('input', e => { listState.costJpy = Number(e.target.value) || 0; listRefresh(); });
       // 価格計算パラメータ（ROI・重量・寸法）
@@ -5287,28 +5280,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!settings.listDescs.includes(v)) { settings.listDescs.unshift(v); saveSettings(); listDescFav(); }
         const b = document.getElementById('li-descsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
       });
-      // カタログ画像をリンクから取得
+      // カタログ画像をリンク/URLから追加（複数行OK・メルカリ商品URL可）
+      const catAdd = (u) => { listState.catImgs = listState.catImgs || []; if (listState.catImgs.length >= 9) { alert('カタログ画像は最大9枚です'); return false; } listState.catImgs.push(u); return true; };
       document.getElementById('li-imgfetch').addEventListener('click', async () => {
-        const btn = document.getElementById('li-imgfetch'); const url = prompt('メルカリ等の商品ページURL、または画像URLを貼り付け：');
-        if (!url) return;
+        const btn = document.getElementById('li-imgfetch'); const inp = prompt('画像URL or メルカリ等の商品リンク（複数は改行で）:');
+        if (!inp) return;
+        const lines = inp.split('\n').map(s => s.trim()).filter(Boolean);
         btn.disabled = true; btn.textContent = '⏳取得中';
-        const img = await fetchImageFromUrl(url);
-        btn.disabled = false; btn.textContent = '🔗 リンクから';
-        if (!img) { alert('画像を取得できませんでした（ブリッジ未検出／対応外サイト／セッション切れの可能性）'); return; }
-        const ta = document.getElementById('li-img'); ta.value = (ta.value ? ta.value.trim() + '\n' : '') + img;
-        listState.images = ta.value; listImgPrev(); listRefresh();
+        for (const s of lines) { let u = s; if (isPageUrl(u)) { const img = await fetchImageFromUrl(u); if (img) u = img; } if (!catAdd(u)) break; }
+        btn.disabled = false; btn.textContent = '🔗 リンク/URLから追加';
+        listImgPrev(); listRefresh();
       });
-      // カタログ画像を手元ファイルからアップ（AI生成画像など）
       document.getElementById('li-imgfile').addEventListener('click', () => document.getElementById('li-imgfileinput').click());
-      document.getElementById('li-imgfileinput').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) readImageFile(f, url => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(url); listImgPrev(); listRefresh(); }); });
-      // カタログ画像のドラッグ&ドロップ（ファイル→アップ、URL→追加）
-      wireDrop(document.getElementById('li-img'),
-        dataUrl => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(dataUrl); listImgPrev(); listRefresh(); },
-        async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } const ta = document.getElementById('li-img'); ta.value = (ta.value ? ta.value.trim() + '\n' : '') + url; listState.images = ta.value; listImgPrev(); listRefresh(); });
+      document.getElementById('li-imgfileinput').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; files.forEach(f => readImageFile(f, url => { if (catAdd(url)) { listImgPrev(); listRefresh(); } })); });
+      // カタログ画像のドロップで追加（ファイル→dataURL、URL→追加）※並べ替えドラッグ中は無視
       wireDrop(document.getElementById('li-imgprev'),
-        dataUrl => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(dataUrl); listImgPrev(); listRefresh(); }, null);
+        dataUrl => { if (catAdd(dataUrl)) { listImgPrev(); listRefresh(); } },
+        async url => { let u = url; if (isPageUrl(u)) { const img = await fetchImageFromUrl(u); if (img) u = img; } if (catAdd(u)) { listImgPrev(); listRefresh(); } });
       // ★自動復元：前回の作業内容（オートセーブ）があれば復元＝リロード/タブ閉じでも消えない
-      try { const auto = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); if (auto && (auto.name || (auto.variations && auto.variations.length) || auto.category || auto.images)) { listApplyState(auto); setTimeout(() => { listFetchLinks().catch(() => {}); }, 300); } } catch (_) {}
+      try { const auto = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); if (auto && (auto.name || (auto.variations && auto.variations.length) || auto.category || auto.images || (auto.catImgs && auto.catImgs.length))) { listApplyState(auto); setTimeout(() => { listFetchLinks().catch(() => {}); }, 300); } } catch (_) {}
       listVarsRender();
     }
     listImgPrev();
@@ -5336,10 +5326,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 画像のドラッグ&ドロップ。ファイル→onImage(dataURL)、URL文字列→onUrl。
   function wireDrop(el, onImage, onUrl) {
     if (!el || el._dropWired) return; el._dropWired = true;
-    el.addEventListener('dragover', e => { if (listDragVar != null) return; e.preventDefault(); el.style.outline = '2px dashed #7b52c4'; el.style.outlineOffset = '2px'; });
+    el.addEventListener('dragover', e => { if (listDragVar != null || catDragIdx != null) return; e.preventDefault(); el.style.outline = '2px dashed #7b52c4'; el.style.outlineOffset = '2px'; });
     el.addEventListener('dragleave', () => { el.style.outline = ''; });
     el.addEventListener('drop', e => {
-      if (listDragVar != null) return; // バリエ並べ替え中は画像ドロップにしない
+      if (listDragVar != null || catDragIdx != null) return; // 並べ替え中は画像ドロップにしない
       e.preventDefault(); el.style.outline = '';
       const f = e.dataTransfer.files && e.dataTransfer.files[0];
       if (f && /^image\//.test(f.type)) { readImageFile(f, onImage); return; }
@@ -5350,9 +5340,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 復元/読込時：カタログ＋バリエ画像の「商品ページURL」を自動でog:imageに変換（ブリッジ稼働時）
   async function listFetchLinks() {
     let changed = false;
-    const lines = (listState.images || '').split('\n');
-    for (let i = 0; i < lines.length; i++) { const s = lines[i].trim(); if (isPageUrl(s)) { const img = await fetchImageFromUrl(s); if (img) { lines[i] = img; changed = true; } } }
-    if (changed) listState.images = lines.join('\n');
+    const arr = listState.catImgs || [];
+    for (let i = 0; i < arr.length; i++) { const s = String(arr[i] || '').trim(); if (isPageUrl(s)) { const img = await fetchImageFromUrl(s); if (img) { arr[i] = img; changed = true; } } }
     for (const v of listState.variations) { const s = (v.img || '').trim(); if (isPageUrl(s)) { const img = await fetchImageFromUrl(s); if (img) { v.img = img; changed = true; } } }
     if (changed) { listSyncForm(); listVarsRender(); listImgPrev(); listRefresh(); }
   }
@@ -5399,23 +5388,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img })) };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, catImgs: (s.catImgs || []).slice(), roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img })) };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
     sv('li-name', listState.name); sv('li-hw', listState.hardware); sv('li-jp', listState.jpseries);
-    sv('li-cat', listState.category); sv('li-psku', listState.parentSku); sv('li-img', listState.images); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
+    sv('li-cat', listState.category); sv('li-psku', listState.parentSku); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
     sv('li-roi', listState.roiPct); sv('li-weight', listState.weightG); sv('li-dw', listState.dimW || ''); sv('li-dh', listState.dimH || ''); sv('li-dd', listState.dimD || ''); sv('li-cost', listState.costJpy || '');
     sv('li-title', listTitle());
   }
   function listApplyState(st) {
     st = st || {};
     Object.assign(listState, {
-      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', titleOverride: st.titleOverride || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
+      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', titleOverride: st.titleOverride || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [], catImgs: st.catImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
       varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0, overrides: st.overrides || {},
       variations: (st.variations || []).map(v => ({ opt: v.opt || '', sku: v.sku || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
     });
+    catMigrate(); // 旧下書き(images/uploadImgs)→catImgs
     listSyncForm(); listVarsRender(); listImgPrev(); listRefresh();
   }
   function listDraftDropdown() {
@@ -5444,14 +5434,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
   function listImgPrev() {
     const wrap = document.getElementById('li-imgprev'); if (!wrap) return;
-    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean).map(resolveImgUrl);
-    const ups = listState.uploadImgs || [];
-    const total = urls.length + ups.length; // カタログ画像の合計（Shopee上限9枚）
+    const list = listState.catImgs || (listState.catImgs = []);
+    const total = list.length;
     const cnt = document.getElementById('li-imgcount');
-    if (cnt) { cnt.textContent = total ? ` — ${total}/9枚${total > 9 ? ' ⚠超過（先頭9枚のみ有効）' : ''}` : ''; cnt.style.color = total > 9 ? '#d93025' : ''; }
-    wrap.innerHTML = urls.slice(0, 9).map((u, idx) => `<span style="position:relative;display:inline-block"><img src="${esc(u)}" referrerpolicy="no-referrer" style="width:44px;height:44px;object-fit:cover;border-radius:5px${idx > 8 ? ';opacity:.3' : ''}" loading="lazy" onerror="this.style.opacity=.2;this.title='読込失敗（CDNブロック等）'"><span style="position:absolute;bottom:-2px;left:-2px;background:#333;color:#fff;font-size:8px;padding:0 2px;border-radius:3px">${idx + 1}</span></span>`).join('')
-      + ups.map((u, i) => `<span style="position:relative;display:inline-block"><img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px"><button class="li-upclear" data-i="${i}" title="このアップ画像を削除" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:10px;line-height:1;cursor:pointer">✕</button></span>`).join('');
-    wrap.querySelectorAll('.li-upclear').forEach(el => el.addEventListener('click', e => { listState.uploadImgs.splice(+e.currentTarget.dataset.i, 1); listImgPrev(); listRefresh(); }));
+    if (cnt) { cnt.textContent = total ? ` — ${total}/9枚${total > 9 ? ' ⚠超過（先頭9枚のみ有効）' : ''}` : ' — 画像なし'; cnt.style.color = total > 9 ? '#d93025' : ''; }
+    wrap.innerHTML = total ? list.map((u, idx) => `<span class="li-cimg" data-i="${idx}" draggable="true" style="position:relative;display:inline-block;cursor:grab${idx > 8 ? ';opacity:.35' : ''}"><img src="${esc(resolveImgUrl(u))}" referrerpolicy="no-referrer" style="width:48px;height:48px;object-fit:cover;border-radius:5px;display:block" onerror="this.style.opacity=.2;this.title='読込失敗（CDNブロック等）'"><span style="position:absolute;bottom:-2px;left:-2px;background:#333;color:#fff;font-size:8px;padding:0 3px;border-radius:3px">${idx + 1}</span><button class="li-cdel" data-i="${idx}" title="削除" style="position:absolute;top:-6px;right:-6px;width:17px;height:17px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:10px;line-height:1;cursor:pointer">✕</button></span>`).join('') : '<span class="smd-dim" style="font-size:12px">画像をここにドロップ、または🔗/📁で追加（最大9枚）</span>';
+    wrap.querySelectorAll('.li-cdel').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); listState.catImgs.splice(+e.currentTarget.dataset.i, 1); listImgPrev(); listRefresh(); }));
+    wrap.querySelectorAll('.li-cimg').forEach(sp => {
+      sp.addEventListener('dragstart', e => { catDragIdx = +sp.dataset.i; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'smdcat'); } catch (_) {} });
+      sp.addEventListener('dragend', () => { catDragIdx = null; });
+      sp.addEventListener('dragover', e => { if (catDragIdx == null) return; e.preventDefault(); sp.style.outline = '2px solid #7b52c4'; });
+      sp.addEventListener('dragleave', () => { sp.style.outline = ''; });
+      sp.addEventListener('drop', e => { if (catDragIdx == null) return; e.preventDefault(); e.stopPropagation(); sp.style.outline = ''; const to = +sp.dataset.i, from = catDragIdx; catDragIdx = null; if (from !== to) { const a = listState.catImgs; const [m] = a.splice(from, 1); a.splice(to, 0, m); } listImgPrev(); listRefresh(); });
+    });
   }
 
   function listVarsRender() {
@@ -5557,7 +5552,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function ccCatalogRaw(cc) {
     const o = listState.overrides[cc] || {};
     if ((o.images || '').trim()) return o.images.split('\n').map(s => s.trim()).filter(Boolean);
-    return [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+    return (listState.catImgs || []).slice();
   }
   function ovSetCatalog(cc, rawList) {
     const o = listState.overrides[cc] = listState.overrides[cc] || {};
@@ -5593,7 +5588,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const specs = settings.listSpecs;
     // 画像（全国共通。手動アップロード用にまとめて表示）
     const toU = resolveImgUrl;
-    const catImgs = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU), ...(listState.uploadImgs || [])];
+    const catImgs = (listState.catImgs || []).map(toU);
     const varImgs = hasVar ? listState.variations.filter(v => v.img).map(v => ({ opt: v.opt, url: toU(v.img) })) : [];
     const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" referrerpolicy="no-referrer" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2;this.title='読込失敗（CDNがブロック。リンクは有効なのでShopee側では使えます）'"></a>`;
     const imgBlock = (catImgs.length || varImgs.length) ? `<div style="border:1px solid #e6e0f5;background:#faf8ff;border-radius:8px;padding:10px;margin-bottom:10px">
@@ -5670,7 +5665,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? pricedLive.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
         // カタログ画像ストリップ（この国分。上書きがあれば国別、無ければ全国共通のraw）
-        const catRawGlobal = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+        const catRawGlobal = (listState.catImgs || []).slice();
         const catRaw = (ov.images || '').trim() ? ov.images.split('\n').map(s => s.trim()).filter(Boolean) : catRawGlobal;
         const catStrip = `<div style="margin-top:7px">
           <div style="font-size:11px;color:#666">🖼️ カタログ画像 <b>${catRaw.length}/9</b>${catRaw.length > 9 ? ' <span style="color:#d93025">⚠超過</span>' : ''}${(ov.images || '').trim() ? ' <span style="color:#7b52c4">(この国用)</span>' : ''}</div>
@@ -5703,10 +5698,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">手動 ↗</a>
             </span>
           </div>
-          <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
+          ${catStrip}
+          <div style="font-size:12.5px;margin-top:8px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
             <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
           <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
-          ${catStrip}
           ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
           <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
             ${cp('タイトル', title)}
@@ -5780,7 +5775,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
     const ov = JSON.parse(JSON.stringify(listState.overrides[cc] || {})); ov.vars = ov.vars || {};
     const autoTitle = listTitle();
-    const catImgsGlobal = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+    const catImgsGlobal = (listState.catImgs || []).slice();
     const ov2u = s => resolveImgUrl(s);
     const varRows = rows.map((v, i) => {
       const o = ov.vars[i] || {};
