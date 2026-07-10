@@ -558,6 +558,9 @@
     listCats: ['Hobbies & Collections > Video Games > Games', 'Hobbies & Collections > Video Games > Consoles', 'Hobbies & Collections > Toys > Action Figures & Toy Figures', 'Hobbies & Collections > Collectibles'],
     // よく使う説明文の候補（お気に入り。＋登録で追加）
     listDescs: [],
+    // よく使うタイトルの候補・バリエ明細名テンプレ（DS:〜/Switch:〜 等）の候補
+    listTitleFavs: [],
+    listVarFavs: ['DS:', 'Switch:', '3DS:', 'GBA:', 'Cartridge Only', 'CIB (Complete In Box)'],
     // コンポーザーの下書き（ポータル内の一時保存。[{id,title,savedAt,state}]）
     listDrafts: [],
     // ★重量ベース価格ロジック（スプシ解読・全て設定で調整可）
@@ -5084,6 +5087,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="row" style="gap:6px;align-items:center">
             <input class="li" id="li-title" placeholder="商品名・ハード等から自動生成されます" style="flex:1">
             <button class="smd-btn" id="li-titleauto" title="手動修正を捨てて自動生成タイトルに戻す">🔄 自動</button>
+            <select class="li" id="li-titlefav" style="font-size:11px;max-width:150px"><option value="">★呼出…</option></select>
+            <button class="smd-btn" id="li-titlesave" title="今のタイトルをお気に入りに登録">＋登録</button>
           </div>
           <label class="lc" style="margin-top:8px">カテゴリ（プルダウンから選択 or 入力。転記時にコピー用）</label>
           <div class="row" style="gap:6px;align-items:center">
@@ -5124,6 +5129,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <h3>3. バリエーション <span class="smd-dim" style="font-weight:400;font-size:12px">（無ければ空のままで単品出品）</span></h3>
           <label class="lc">バリエーション種別名（例: Hardware, Type）</label>
           <input class="li" id="li-vtier" style="max-width:260px" placeholder="Hardware">
+          <div class="smd-dim" style="font-size:11px;margin-top:4px">明細名は各行の入力欄で <b>★候補（DS:／Switch: 等）</b>から呼出せます。新しい明細名を候補に足すには行の <b>★</b> を押す。</div>
+          <datalist id="li-varfavlist"></datalist>
           <div id="li-vars" style="margin-top:8px"></div>
           <div class="row" style="gap:6px;margin-top:6px">
             <button class="smd-btn" id="li-vadd">＋ バリエーション追加</button>
@@ -5234,6 +5241,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 価格設定（手数料/SLS/バッファ）編集パネル
       priceCfgRender();
       // 説明文お気に入り（呼出＋登録）
+      // タイトルお気に入り＋バリエ明細名テンプレ候補
+      listTitleFav(); listVarFavList();
+      document.getElementById('li-titlefav').addEventListener('change', e => {
+        const v = e.target.value; if (!v) return;
+        listState.titleOverride = v; document.getElementById('li-title').value = v; e.target.value = ''; listRefresh();
+      });
+      document.getElementById('li-titlesave').addEventListener('click', () => {
+        const v = (document.getElementById('li-title').value || '').trim();
+        if (!v) { alert('タイトルを入力してから登録してください'); return; }
+        settings.listTitleFavs = settings.listTitleFavs || [];
+        if (!settings.listTitleFavs.includes(v)) { settings.listTitleFavs.unshift(v); saveSettings(); listTitleFav(); }
+        const b = document.getElementById('li-titlesave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
+      });
       listDescFav();
       document.getElementById('li-descfav').addEventListener('change', e => {
         const v = e.target.value; if (!v) return;
@@ -5279,8 +5299,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const dl = document.getElementById('li-catlist'); if (!dl) return;
     dl.innerHTML = (settings.listCats || []).map(c => `<option value="${esc(c)}">`).join('');
   }
-  // 画像URLが「商品ページ（画像直リンクでない）」か判定
-  const isPageUrl = s => s && /^https?:\/\//.test(s) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(s) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(s);
+  // メルカリ商品ページURL → 画像直リンク(mercdn)を商品IDから組み立て。★ブリッジ不要で確実（実測200/jpeg）
+  const mercariImg = (s) => { const m = String(s || '').match(/mercari\.com\/item\/(m\d{6,})/i); return m ? 'https://static.mercdn.net/item/detail/orig/photos/' + m[1] + '_1.jpg' : null; };
+  // 画像文字列を「実際に表示できるURL」へ解決：メルカリ商品URL→画像直リンク、http(s)はそのまま、素の値はShopee CDN前置
+  const resolveImgUrl = (s) => { s = String(s || '').trim(); if (!s) return ''; return mercariImg(s) || (/^https?:/.test(s) ? s : IMG_CDN + s); };
+  // 画像URLが「商品ページ（画像直リンクでない）」か判定。メルカリ商品URLは同期変換できるのでページ扱いしない
+  const isPageUrl = s => s && /^https?:\/\//.test(s) && !mercariImg(s) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(s) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(s);
   // ローカル画像ファイル→縮小してdataURL化（手動アップ用。Shopeeへは結局手動アップだが、コンポーザーでプレビュー＆下書き保存できる）
   function readImageFile(file, cb) {
     if (!file || !/^image\//.test(file.type)) { alert('画像ファイルを選んでください'); return; }
@@ -5313,6 +5337,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listDescFav() {
     const sel = document.getElementById('li-descfav'); if (!sel) return;
     sel.innerHTML = '<option value="">★お気に入り呼出…</option>' + (settings.listDescs || []).map(d => `<option value="${esc(d)}">${esc(d.replace(/\n/g, ' ').slice(0, 40))}</option>`).join('');
+  }
+  function listTitleFav() {
+    const sel = document.getElementById('li-titlefav'); if (!sel) return;
+    sel.innerHTML = '<option value="">★呼出…</option>' + (settings.listTitleFavs || []).map(d => `<option value="${esc(d)}">${esc(d.slice(0, 46))}</option>`).join('');
+  }
+  function listVarFavList() {
+    const dl = document.getElementById('li-varfavlist'); if (!dl) return;
+    dl.innerHTML = (settings.listVarFavs || []).map(v => `<option value="${esc(v)}">`).join('');
   }
   // 価格設定（手数料/SLS送料/バッファ）を編集できるパネル。変更は即保存＋価格再計算。
   const PRICE_DEFAULTS = {
@@ -5373,9 +5405,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 商品ページURL(メルカリ等)→og:image、または直リンク画像URLをそのまま返す。ブリッジ経由でHTML取得
   async function fetchImageFromUrl(url) {
     url = String(url || '').trim(); if (!url) return null;
+    // ★メルカリ商品URLは商品IDから画像直リンクを組み立て（ブリッジ不要・最優先）
+    const mi = mercariImg(url); if (mi) return mi;
     // 直リンク画像 or 既知の画像CDNはそのまま使う
     if (/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(url) || /susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(url)) return url;
-    if (state.mode !== 'live') return null; // ページ取得はブリッジ必須
+    if (state.mode !== 'live') return null; // 他サイトのページ取得はブリッジ必須
     try {
       const html = await bridgeRequest('GET', url);
       const pick = re => { const m = html.match(re); return m ? m[1] : null; };
@@ -5388,7 +5422,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
   function listImgPrev() {
     const wrap = document.getElementById('li-imgprev'); if (!wrap) return;
-    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean).map(s => /^https?:/.test(s) ? s : IMG_CDN + s);
+    const urls = listState.images.split('\n').map(s => s.trim()).filter(Boolean).map(resolveImgUrl);
     const ups = listState.uploadImgs || [];
     const total = urls.length + ups.length; // カタログ画像の合計（Shopee上限9枚）
     const cnt = document.getElementById('li-imgcount');
@@ -5401,13 +5435,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listVarsRender() {
     const wrap = document.getElementById('li-vars');
     if (!listState.variations.length) { wrap.innerHTML = '<span class="smd-dim" style="font-size:12px">バリエーション未設定（単品）</span>'; listRefresh(); return; }
-    const thumb = (im) => im ? `<img src="${esc(/^https?:/.test(im) ? im : IMG_CDN + im)}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2;this.title='読込失敗'">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
+    const thumb = (im) => im ? `<img src="${esc(resolveImgUrl(im))}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2;this.title='読込失敗'">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
     const vlen = (opt) => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: opt }).length; // 明細名(全国共通30字上限)の実長
     wrap.innerHTML = listState.variations.map((v, i) => {
       const nlen = vlen(v.opt); const over = nlen > 30;
       return `<div class="li-vcard" data-i="${i}" style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
         <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
-          <input class="li vopt" data-i="${i}" style="flex:1;min-width:160px" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
+          <input class="li vopt" data-i="${i}" list="li-varfavlist" style="flex:1;min-width:160px" placeholder="選択肢名（例: DS:Digimon Story）" value="${esc(v.opt)}"><button class="smd-btn vfav" data-i="${i}" title="この明細名を★候補に登録">★</button>
           <span class="vlen" data-i="${i}" style="font-size:10px;white-space:nowrap;color:${over ? '#d93025' : '#999'}" title="明細名『${esc(fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v.opt }))}』の文字数（全国共通30字まで）">${nlen}/30${over ? '⚠' : ''}</span>
           <input class="li vsku" data-i="${i}" style="width:130px;font-family:monospace;font-size:11px" placeholder="SKU" value="${esc(v.sku || '')}" spellcheck="false" title="この明細のSKU">
           <input class="li vcost" data-i="${i}" type="number" style="width:90px" placeholder="仕入円" value="${v.cost || ''}" title="この明細の仕入値(円)。ここから各国価格を自動計算">
@@ -5443,6 +5477,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       });
     });
     wrap.querySelectorAll('.vdel').forEach(el => el.addEventListener('click', e => { listState.variations.splice(+e.currentTarget.dataset.i, 1); listVarsRender(); }));
+    wrap.querySelectorAll('.vfav').forEach(el => el.addEventListener('click', e => {
+      const v = (listState.variations[+e.currentTarget.dataset.i].opt || '').trim(); if (!v) { alert('先に明細名を入力してください'); return; }
+      settings.listVarFavs = settings.listVarFavs || [];
+      if (!settings.listVarFavs.includes(v)) { settings.listVarFavs.unshift(v); saveSettings(); listVarFavList(); }
+      const b = e.currentTarget; const o = b.textContent; b.textContent = '✅'; setTimeout(() => b.textContent = o, 900);
+    }));
     wrap.querySelectorAll('.vimgfetch').forEach(el => el.addEventListener('click', async e => {
       const i = +e.currentTarget.dataset.i; const btn = e.currentTarget;
       const url = prompt(`バリエ「${listState.variations[i].opt || (i + 1) + '番目'}」の画像：メルカリ等の商品リンク or 画像URLを貼り付け`);
@@ -5472,7 +5512,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1 }];
     const specs = settings.listSpecs;
     // 画像（全国共通。手動アップロード用にまとめて表示）
-    const toU = s => /^https?:/.test(s) ? s : IMG_CDN + s;
+    const toU = resolveImgUrl;
     const catImgs = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU), ...(listState.uploadImgs || [])];
     const varImgs = hasVar ? listState.variations.filter(v => v.img).map(v => ({ opt: v.opt, url: toU(v.img) })) : [];
     const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" referrerpolicy="no-referrer" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2;this.title='読込失敗（CDNがブロック。リンクは有効なのでShopee側では使えます）'"></a>`;
