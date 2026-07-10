@@ -556,6 +556,15 @@
     listQuota: {},
     // よく使うカテゴリの候補（コンポーザーのプルダウン。＋登録で追加）
     listCats: ['Hobbies & Collections > Video Games > Games', 'Hobbies & Collections > Video Games > Consoles', 'Hobbies & Collections > Toys > Action Figures & Toy Figures', 'Hobbies & Collections > Collectibles'],
+    // よく使う説明文の候補（お気に入り。＋登録で追加）
+    listDescs: [],
+    // ★重量ベース価格ロジック（スプシ解読・全て設定で調整可）
+    priceFees: { PH: [9.46, 8.96, 2.24], SG: [15.75, 0, 3.00], MY: [19.17, 0, 3.78], BR: [13.75, 0, 2.00], VN: [13.98, 2.16, 4.91], TH: [16.85, 0, 3.21], TW: [12.75, 3.00, 2.50] }, // 販売,プログラム,決済(%)
+    priceSls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] },                                              // [50gの送料, 50gごとの追加] 現地通貨・セラー実質負担
+    priceFxMargin: 2,       // FX/端数マージン(%)
+    priceProfitBuffer: 5,   // 利益バッファ(%)
+    roiPct: 40,             // 目標ROI(%)
+    weightG: 500,           // 既定の重量(g)
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -4900,12 +4909,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     name: '', hardware: '', jpseries: '',
     images: '', category: '',
     sellJpy: 0, costJpy: 0,
-    varTier: '', variations: [], // [{opt, jpy, stock}]
+    roiPct: null, weightG: null, dimW: 0, dimH: 0, dimD: 0, // 価格計算用（未設定は設定の既定値）
+    varTier: '', variations: [], // [{opt, cost(仕入円), stock, img}]
     descExtra: '',
   };
   const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
   const roundLocal = (v, unit) => { unit = unit || 1; const r = Math.round(v / unit) * unit; return unit < 1 ? Math.round(r * 100) / 100 : Math.round(r); };
-  // 価格式: 仕入(円) → 販売(円)
+  // ★重量ベース価格計算：仕入(円)＋重量＋各国手数料/SLS送料/バッファ から 現地出品価格を算出（スプシ解読の式）
+  //  K(円) = ( 仕入×(1+ROI)÷(1−FXマージン) + SLS送料円 ) ÷ (1−販売%)(1−プログラム%)(1−決済%) ÷ (1−利益バッファ)
+  //  出品価格(現地) = K ÷ 為替。SLS送料は課金重量(=max(実重量,容積重量W×H×D÷6000))を50g単位で。
+  function slsLocal(cc, chargeG) {
+    const s = (settings.priceSls || {})[cc]; if (!s) return 0;
+    const brackets = Math.max(1, Math.ceil((Number(chargeG) || 0) / 50));
+    return (Number(s[0]) || 0) + (Number(s[1]) || 0) * (brackets - 1);
+  }
+  function priceLocalFor(cc, costJpy, opt) {
+    const rg = regionByCc(cc); if (!rg) return 0;
+    opt = opt || {};
+    const roi = (opt.roiPct != null ? opt.roiPct : (listState.roiPct != null ? listState.roiPct : settings.roiPct)) / 100;
+    const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
+    const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
+    const chargeG = Math.max(weightG, vol);
+    const fees = (settings.priceFees || {})[cc] || [0, 0, 0];
+    const feeProd = fees.reduce((p, f) => p * (1 - (Number(f) || 0) / 100), 1) || 1;
+    const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
+    const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
+    const kJpy = ((Number(costJpy) || 0) * (1 + roi) / (1 - fxM) + slsJpy) / feeProd / (1 - pb);
+    return kJpy / rg.rateJpy; // 現地通貨（丸め前）
+  }
+  // 旧・単純式（互換のため残置）
   function priceFromCost(costJpy) {
     const fee = Math.max(0, Math.min(95, settings.priceFeePct)) / 100;
     return Math.round((costJpy * settings.priceCoef + settings.priceShipJpy) / (1 - fee));
@@ -4953,6 +4985,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (ceil && (ctx.prices || []).some(p => p > ceil)) { const over = (ctx.prices || []).filter(p => p > ceil).length; w.push(`価格上限${ceil.toLocaleString()}超（単品/バリエ${over}件）→上限内に`); }
     const bl = BRAND_LIMIT[ctx.cc];
     if (bl != null) { const b = brandsInTitle(ctx.title); if (b.length > bl) w.push(`ブランドは${bl}つまで（検出${b.length}: ${b.join(', ')}）`); }
+    // 明細名(バリエーション名)の文字数上限＝全国共通30字
+    const overVn = (ctx.varNames || []).filter(n => (n || '').length > 30);
+    if (overVn.length) w.push(`明細名30字超（全国共通）: ${overVn.map(n => `「${n}」${n.length}字`).join(' / ')}`);
     return w;
   }
 
@@ -4983,13 +5018,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         </div>
 
         <div class="tool-card" style="max-width:none">
-          <h3>2. 価格</h3>
-          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
-            <div><label class="lc">仕入値（円・任意）</label><input class="li" id="li-cost" type="number" style="width:120px" placeholder="1200"></div>
-            <button class="smd-btn" id="li-calc" title="設定の価格式で販売額を計算">式で計算 →</button>
-            <div><label class="lc">販売額（円）</label><input class="li" id="li-sell" type="number" style="width:120px" placeholder="3000"></div>
-            <span class="smd-dim" style="font-size:11px">式: (仕入×${settings.priceCoef} + 送料${settings.priceShipJpy}) ÷ (1−手数料${settings.priceFeePct}%)。係数等は⚙️設定</span>
+          <h3>2. 価格 <span class="smd-dim" style="font-weight:400;font-size:12px">（重量ベースで各国自動計算）</span></h3>
+          <div class="row" style="gap:12px;align-items:flex-end;flex-wrap:wrap">
+            <div><label class="lc">目標ROI（%）</label><input class="li" id="li-roi" type="number" style="width:80px" placeholder="${settings.roiPct}"></div>
+            <div><label class="lc">重量（g）</label><input class="li" id="li-weight" type="number" style="width:80px" placeholder="${settings.weightG}"></div>
+            <div><label class="lc">寸法 W×H×D（cm・任意/容積重量用）</label><span style="display:inline-flex;gap:4px"><input class="li" id="li-dw" type="number" style="width:52px" placeholder="W"><input class="li" id="li-dh" type="number" style="width:52px" placeholder="H"><input class="li" id="li-dd" type="number" style="width:52px" placeholder="D"></span></div>
+            <div><label class="lc">単品の仕入値（円）<span class="smd-dim">※バリエ有りは各行に入力</span></label><input class="li" id="li-cost" type="number" style="width:110px" placeholder="4400"></div>
           </div>
+          <div class="smd-dim" style="font-size:11px;margin-top:6px">各バリエの<b>仕入(円)</b>から、<b>手数料・SLS送料(重量別)・利益</b>を織り込んで各国の出品価格を自動算出（式: 仕入×(1+ROI)÷(1−${settings.priceFxMargin}%) ＋ SLS送料 → 手数料控除 ÷ (1−${settings.priceProfitBuffer}%)）。手数料/送料レート/バッファは⚙️設定で調整可。</div>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -5003,7 +5039,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div class="tool-card" style="max-width:none">
           <h3>4. 説明・item specifics</h3>
           <label class="lc">説明に追記（テンプレは⚙️設定。{title}{name}が使える）</label>
-          <textarea class="li" id="li-desc" rows="2" placeholder="この商品固有の説明を追記"></textarea>
+          <div class="row" style="gap:6px;align-items:flex-start">
+            <textarea class="li" id="li-desc" rows="2" placeholder="この商品固有の説明を追記。または右のお気に入りから呼び出し" style="flex:1"></textarea>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <select class="li" id="li-descfav" style="font-size:11px;max-width:170px"><option value="">★お気に入り呼出…</option></select>
+              <button class="smd-btn" id="li-descsave" style="font-size:11px" title="今の説明文をお気に入りに登録">＋登録</button>
+            </div>
+          </div>
         </div>
 
         <div id="list-out"></div>
@@ -5013,16 +5055,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       bind('li-name', 'name'); bind('li-hw', 'hardware'); bind('li-jp', 'jpseries');
       bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier');
       document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
-      document.getElementById('li-sell').addEventListener('input', e => { listState.sellJpy = Number(e.target.value) || 0; listRefresh(); });
-      document.getElementById('li-cost').addEventListener('input', e => { listState.costJpy = Number(e.target.value) || 0; });
-      document.getElementById('li-calc').addEventListener('click', () => {
-        if (!listState.costJpy) { alert('仕入値（円）を入力してください'); return; }
-        listState.sellJpy = priceFromCost(listState.costJpy);
-        document.getElementById('li-sell').value = listState.sellJpy;
-        listRefresh();
-      });
+      document.getElementById('li-cost').addEventListener('input', e => { listState.costJpy = Number(e.target.value) || 0; listRefresh(); });
+      // 価格計算パラメータ（ROI・重量・寸法）
+      const numBind = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => { listState[key] = el.value === '' ? null : (Number(el.value) || 0); listRefresh(); }); };
+      numBind('li-roi', 'roiPct'); numBind('li-weight', 'weightG'); numBind('li-dw', 'dimW'); numBind('li-dh', 'dimH'); numBind('li-dd', 'dimD');
       document.getElementById('li-vadd').addEventListener('click', () => {
-        listState.variations.push({ opt: '', jpy: listState.sellJpy || 0, stock: 1, img: '' });
+        listState.variations.push({ opt: '', cost: 0, stock: 1, img: '' });
         listVarsRender();
       });
       // カテゴリ候補プルダウン＋登録
@@ -5033,6 +5071,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         settings.listCats = settings.listCats || [];
         if (!settings.listCats.includes(v)) { settings.listCats.unshift(v); saveSettings(); listCatDatalist(); }
         const b = document.getElementById('li-catsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
+      });
+      // 説明文お気に入り（呼出＋登録）
+      listDescFav();
+      document.getElementById('li-descfav').addEventListener('change', e => {
+        const v = e.target.value; if (!v) return;
+        listState.descExtra = v; document.getElementById('li-desc').value = v; e.target.value = ''; listRefresh();
+      });
+      document.getElementById('li-descsave').addEventListener('click', () => {
+        const v = (document.getElementById('li-desc').value || '').trim();
+        if (!v) { alert('説明文を入力してから登録してください'); return; }
+        settings.listDescs = settings.listDescs || [];
+        if (!settings.listDescs.includes(v)) { settings.listDescs.unshift(v); saveSettings(); listDescFav(); }
+        const b = document.getElementById('li-descsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
       });
       // カタログ画像をリンクから取得
       document.getElementById('li-imgfetch').addEventListener('click', async () => {
@@ -5053,6 +5104,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listCatDatalist() {
     const dl = document.getElementById('li-catlist'); if (!dl) return;
     dl.innerHTML = (settings.listCats || []).map(c => `<option value="${esc(c)}">`).join('');
+  }
+  function listDescFav() {
+    const sel = document.getElementById('li-descfav'); if (!sel) return;
+    sel.innerHTML = '<option value="">★お気に入り呼出…</option>' + (settings.listDescs || []).map(d => `<option value="${esc(d)}">${esc(d.replace(/\n/g, ' ').slice(0, 40))}</option>`).join('');
   }
   // 商品ページURL(メルカリ等)→og:image、または直リンク画像URLをそのまま返す。ブリッジ経由でHTML取得
   async function fetchImageFromUrl(url) {
@@ -5081,24 +5136,41 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const wrap = document.getElementById('li-vars');
     if (!listState.variations.length) { wrap.innerHTML = '<span class="smd-dim" style="font-size:12px">バリエーション未設定（単品）</span>'; listRefresh(); return; }
     const thumb = (im) => im ? `<img src="${esc(/^https?:/.test(im) ? im : IMG_CDN + im)}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
-    wrap.innerHTML = listState.variations.map((v, i) =>
-      `<div style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
+    const vlen = (opt) => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: opt }).length; // 明細名(全国共通30字上限)の実長
+    wrap.innerHTML = listState.variations.map((v, i) => {
+      const nlen = vlen(v.opt); const over = nlen > 30;
+      return `<div style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
         <div class="row" style="gap:8px;align-items:center">
           <input class="li vopt" data-i="${i}" style="flex:1" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
-          <input class="li vjpy" data-i="${i}" type="number" style="width:100px" placeholder="販売円" value="${v.jpy || ''}">
-          <input class="li vstk" data-i="${i}" type="number" style="width:64px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
+          <span class="vlen" data-i="${i}" style="font-size:10px;white-space:nowrap;color:${over ? '#d93025' : '#999'}" title="明細名『${esc(fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v.opt }))}』の文字数（全国共通30字まで）">${nlen}/30${over ? '⚠' : ''}</span>
+          <input class="li vcost" data-i="${i}" type="number" style="width:96px" placeholder="仕入円" value="${v.cost || ''}" title="この明細の仕入値(円)。ここから各国価格を自動計算">
+          <input class="li vstk" data-i="${i}" type="number" style="width:60px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
           <button class="smd-btn vdel" data-i="${i}" title="このバリエを削除">✕</button>
         </div>
         <div class="row" style="gap:6px;align-items:center;margin-top:5px">
           ${thumb(v.img)}
-          <input class="li vimg" data-i="${i}" style="flex:1;font-size:11px" placeholder="この明細の画像URL（1枚）。または右の🔗でリンク取得" value="${esc(v.img || '')}">
+          <input class="li vimg" data-i="${i}" style="flex:1;font-size:11px" placeholder="画像URL or メルカリ等の商品リンク（貼ると自動取得）／または右の🔗" value="${esc(v.img || '')}">
           <button class="smd-btn vimgfetch" data-i="${i}" title="メルカリ等の商品リンクから画像を取得">🔗</button>
         </div>
-      </div>`).join('');
-    wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; listRefresh(); }));
-    wrap.querySelectorAll('.vjpy').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].jpy = Number(e.target.value) || 0; listRefresh(); }));
+      </div>`;
+    }).join('');
+    const upLen = (i) => { const el = wrap.querySelector('.vlen[data-i="' + i + '"]'); if (el) { const n = vlen(listState.variations[i].opt); el.textContent = n + '/30' + (n > 30 ? '⚠' : ''); el.style.color = n > 30 ? '#d93025' : '#999'; } };
+    wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; upLen(+e.target.dataset.i); listRefresh(); }));
+    wrap.querySelectorAll('.vcost').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].cost = Number(e.target.value) || 0; listRefresh(); }));
     wrap.querySelectorAll('.vstk').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].stock = Number(e.target.value) || 0; listRefresh(); }));
-    wrap.querySelectorAll('.vimg').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].img = e.target.value; listRefresh(); }));
+    // 画像欄：入力中はそのまま保持。フォーカスを外した時に商品ページURL（画像直リンクでない）なら自動でog:image取得
+    wrap.querySelectorAll('.vimg').forEach(el => {
+      el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].img = e.target.value; });
+      el.addEventListener('change', async e => {
+        const i = +e.target.dataset.i; const val = (e.target.value || '').trim();
+        listState.variations[i].img = val;
+        if (val && /^https?:\/\//.test(val) && !/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(val) && !/susercontent\.com|mercdn\.net|yimg\.jp|media-amazon|googleusercontent|rakuten\.co\.jp/i.test(val)) {
+          e.target.disabled = true; const img = await fetchImageFromUrl(val); e.target.disabled = false;
+          if (img) { listState.variations[i].img = img; listVarsRender(); return; }
+        }
+        listVarsRender();
+      });
+    });
     wrap.querySelectorAll('.vdel').forEach(el => el.addEventListener('click', e => { listState.variations.splice(+e.currentTarget.dataset.i, 1); listVarsRender(); }));
     wrap.querySelectorAll('.vimgfetch').forEach(el => el.addEventListener('click', async e => {
       const i = +e.currentTarget.dataset.i; const btn = e.currentTarget;
@@ -5119,7 +5191,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!out) return;
     const targets = accountTargets(); // 対象アカウントが持つ国だけへ転記（gs_japan_select選択時はVN等を出さない）
     const hasVar = listState.variations.length > 0;
-    const rows = hasVar ? listState.variations : [{ opt: '', jpy: listState.sellJpy, stock: 1 }];
+    const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1 }];
     const specs = settings.listSpecs;
     // 画像（全国共通。手動アップロード用にまとめて表示）
     const toU = s => /^https?:/.test(s) ? s : IMG_CDN + s;
@@ -5138,13 +5210,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const baseTitle = listTitle('');
         const title = rg.cc === 'TW' ? shortenTW(baseTitle) : baseTitle;
         const titleWarn = (rg.cc === 'TW' && baseTitle.length > 60) ? `<span class="smd-dim" style="font-size:11px;margin-left:6px">TW60字に短縮済(${title.length}字)</span>` : '';
-        // 価格（現地）
+        // 価格（現地）＝重量ベースで各バリエの仕入(円)から算出
         const priced = rows.map(v => {
-          const local = roundLocal(JPY_TO_LOCAL(v.jpy || 0, rg), settings.priceRound);
-          return { opt: v.opt, local, stock: v.stock, jpy: v.jpy };
+          const local = roundLocal(priceLocalFor(rg.cc, v.cost || 0), settings.priceRound);
+          return { opt: v.opt, local, stock: v.stock, cost: v.cost };
         });
-        const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local) });
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
+        const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? rows.map(v => varName(v.opt)) : [] });
         const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
