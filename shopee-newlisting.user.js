@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.5.1
+// @version      0.6.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.5.1';
+  const VER = '0.6.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -54,11 +54,39 @@
       });
     });
   }
-  async function fetchImageFile(url, name) {
+  async function fetchImageFileGM(url, name) {
     // GM_xhrがmercdnで稀にハング→短めタイムアウト＋2リトライ
     let last;
-    for (let a = 0; a < 3; a++) { try { return await fetchImageFileOnce(url, name, 15000); } catch (e) { last = e; if (logEl) log('・画像取得リトライ ' + (a + 1) + '/3 (' + e.message + ')', '#8a6d3b'); } }
+    for (let a = 0; a < 3; a++) { try { return await fetchImageFileOnce(url, name, 15000); } catch (e) { last = e; if (logEl) log('・GM_xhr リトライ ' + (a + 1) + '/3 (' + e.message + ')', '#8a6d3b'); } }
     throw last || new Error('画像取得失敗');
+  }
+  // ★GAS代理でメルカリ画像を取得（Google側でfetch→base64を返す。GM_xhr持病を回避）。JSONPで受ける
+  let gasSeq = 0;
+  const getGasUrl = () => { try { return localStorage.getItem('smdNlGasUrl') || ''; } catch (_) { return ''; } };
+  const setGasUrl = (u) => { try { localStorage.setItem('smdNlGasUrl', u); } catch (_) {} };
+  function fetchViaGas(url) {
+    return new Promise((res, rej) => {
+      const gas = getGasUrl(); if (!gas) return rej(new Error('GAS URL未設定'));
+      const cb = '__nlgas' + (++gasSeq);
+      const cleanup = () => { try { delete window[cb]; } catch (_) {} if (sc.parentNode) sc.remove(); };
+      const timer = setTimeout(() => { cleanup(); rej(new Error('GASタイムアウト')); }, 40000);
+      window[cb] = (data) => { clearTimeout(timer); cleanup(); (data && data.ok && data.dataUrl) ? res(data.dataUrl) : rej(new Error('GAS: ' + ((data && data.error) || '失敗'))); };
+      const sc = document.createElement('script');
+      sc.src = gas + (gas.indexOf('?') >= 0 ? '&' : '?') + 'url=' + encodeURIComponent(url) + '&callback=' + cb;
+      sc.onerror = () => { clearTimeout(timer); cleanup(); rej(new Error('GAS読込エラー')); };
+      document.head.appendChild(sc);
+    });
+  }
+  function dataUrlToFile(dataUrl, name) {
+    const c = dataUrl.indexOf(','); const head = dataUrl.slice(0, c); const b64 = dataUrl.slice(c + 1);
+    const mime = (head.match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
+    const bin = atob(b64); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new File([arr], name || 'img.jpg', { type: mime });
+  }
+  // 画像取得：GAS URLが設定済ならGAS優先（確実）、無ければGM_xhr
+  async function fetchImageFile(url, name) {
+    if (getGasUrl()) { const d = await fetchViaGas(url); return dataUrlToFile(d, name); }
+    return await fetchImageFileGM(url, name);
   }
 
   // ===== ネットワーク・キャプチャ（新規作成API＋img_idを拾う） =====
@@ -218,6 +246,7 @@
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
           <button class="nl-img" style="padding:6px;border:1px solid #1565c0;background:#eef4ff;color:#1565c0;border-radius:6px;cursor:pointer;font-weight:700" title="コンポーザーの画像(メルカリ等)を自動でShopeeにアップ→image_id化（手動アップ不要）">🖼️ 画像を自動アップ</button>
         </div>
+        <button class="nl-gas" style="width:100%;padding:4px;border:1px solid #ddd;background:#fafafa;color:#555;border-radius:6px;cursor:pointer;font-size:10px;margin-bottom:6px" title="メルカリ画像をGoogle側で取得する代理GASのURLを設定（GM_xhrが死ぬ環境用）">⚙️ 画像取得GAS URL（<span class="nl-gasstate"></span>）</button>
         <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:6px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
         <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
           <span style="font-size:10px;color:#888;white-space:nowrap">使う雛形</span>
@@ -241,6 +270,9 @@
     box.querySelector('.nl-x').addEventListener('click', () => box.remove());
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
     const imgBtn = box.querySelector('.nl-img'); if (imgBtn && job) imgBtn.addEventListener('click', () => autoUploadJobImages(job));
+    const gasState = box.querySelector('.nl-gasstate'); const refreshGas = () => { if (gasState) gasState.textContent = getGasUrl() ? '設定済✅' : '未設定'; };
+    refreshGas();
+    box.querySelector('.nl-gas').addEventListener('click', () => { const cur = getGasUrl(); const u = prompt('画像取得GASのURL（…/exec）を貼り付け。空で解除:', cur); if (u == null) return; setGasUrl(u.trim()); refreshGas(); log(u.trim() ? '⚙️ GAS URL設定：' + u.trim().slice(0, 40) + '…' : '⚙️ GAS URL解除', '#1565c0'); });
     const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
     const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl'), sel = box.querySelector('.nl-tmplsel');
     const renderTmplSel = () => {
