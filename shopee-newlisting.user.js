@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.4.6
+// @version      0.4.7
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.4.6';
+  const VER = '0.4.7';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -90,10 +90,22 @@
   function saveTmpls(o) { try { localStorage.setItem(TKEY, JSON.stringify(o)); } catch (_) {} }
   let selTmplName = ''; // パネルで選択中の雛形名（空=直近の作成 lastCreateBody）
   function currentTmplBody() { const o = getTmpls(); if (selTmplName && o[selTmplName]) return o[selTmplName]; return lastCreateBody; }
+  // ページ上のアップ済み画像サムネ(img src)から Shopee CDN image_id を読み取る（手動アップした画像を確実に拾う）
+  const CDN_ID_RE = /([a-z]{2,4}-\d{6,}-[0-9a-z]{4,}-[0-9a-z]{8,})/;
+  function collectPageImageIds() {
+    const before = uploadedImgIds.length;
+    const scope = $$('.eds-upload img, [class*="upload"] img, [class*="image-manager"] img, [class*="ImageManager"] img');
+    scope.forEach(im => { const r = im.getBoundingClientRect(); if (r.left > window.innerWidth * 0.6) return; /* 右の推薦パネル除外 */ const s = im.currentSrc || im.src || im.getAttribute('src') || ''; const m = s.match(CDN_ID_RE); if (m && !uploadedImgIds.includes(m[1])) uploadedImgIds.push(m[1]); });
+    const added = uploadedImgIds.length - before;
+    if (logEl) log('🖼️ ページから画像 image_id を取込：+' + added + '（計' + uploadedImgIds.length + '枚）', added ? '#1a7f37' : '#8a6d3b');
+    if (fillBtnRefresh) fillBtnRefresh();
+    return added;
+  }
   // ジョブ＋雛形 から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
   async function createFromJob(job, publish) {
     const base = currentTmplBody();
     if (!base) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャ→「💾保存」で雛形にしてください'); return; }
+    collectPageImageIds(); // 作成前に、ページに手動アップした画像のidを取り込む
     const tmpl = JSON.parse(JSON.stringify(base)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
@@ -174,7 +186,7 @@
            </div>`}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
-          <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:${job ? '#fff' : '#f2f2f2'};border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'}"${job ? '' : ' disabled'}>🖼️ 画像先行アップ</button>
+          <button class="nl-img" style="padding:6px;border:1px solid #1565c0;background:#eef4ff;color:#1565c0;border-radius:6px;cursor:pointer;font-weight:700" title="Product Imagesに手動で追加した画像のidをページから取り込む（GM_xhr不要・確実）">🖼️ 画像を取込</button>
         </div>
         <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:6px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
         <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
@@ -198,7 +210,7 @@
     logEl = box.querySelector('.nl-log'); capEl = box.querySelector('.nl-cap');
     box.querySelector('.nl-x').addEventListener('click', () => box.remove());
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
-    const imgBtn = box.querySelector('.nl-img'); if (job) imgBtn.addEventListener('click', () => preUpload(job));
+    const imgBtn = box.querySelector('.nl-img'); if (imgBtn) imgBtn.addEventListener('click', () => collectPageImageIds());
     const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
     const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl'), sel = box.querySelector('.nl-tmplsel');
     const renderTmplSel = () => {
