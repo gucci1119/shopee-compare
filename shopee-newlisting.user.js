@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.3.0
+// @version      0.4.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.3.0';
+  const VER = '0.4.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -57,17 +57,50 @@
   // 目的：ユーザーが手動で1回「発行」した時の add_product / create リクエストの URL・payload・response を丸ごと記録。
   //       これを開発者(私)に共有 → 次版で同じ形をジョブから組んで完全自動化する。
   let lastImgId = null;
+  let lastCreateBody = null;      // 直近の create_product_info リクエストbody（雛形として再利用）
+  const uploadedImgIds = [];      // 🖼️画像先行アップで得た image_id（複数）
   const captures = [];   // {url, method, body, resp}
   const CREATE_RE = /(add_product|create_product|product\/add|create_item|add_item|publish)/i;
   function recordMaybe(url, method, body, resp) {
     try {
       if (typeof body === 'string' && /"img_id"\s*:\s*"([^"]+)"/.test(body)) { lastImgId = body.match(/"img_id"\s*:\s*"([^"]+)"/)[1]; }
+      if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); if (fillBtnRefresh) fillBtnRefresh(); } catch (_) {} }
       if (CREATE_RE.test(url || '')) {
         captures.push({ url, method, body: (typeof body === 'string' ? body.slice(0, 200000) : ''), resp: (typeof resp === 'string' ? resp.slice(0, 20000) : '') });
         if (logEl) log('📡 作成系APIをキャプチャ: ' + (url || '').split('?')[0], '#7b52c4');
         renderCaptures();
       }
     } catch (_) {}
+  }
+  let fillBtnRefresh = null;
+  // ジョブ＋雛形(直近の作成) から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
+  async function createFromJob(job, publish) {
+    if (!lastCreateBody) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャしてください（それを雛形に使います）'); return; }
+    const tmpl = JSON.parse(JSON.stringify(lastCreateBody)); const pi = tmpl.product_info || (tmpl.product_info = {});
+    pi.name = job.title || pi.name;
+    pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
+    if (job.weightG) pi.weight = { value: String(job.weightG / 1000), unit: 1 };
+    if (job.dims) pi.dimension = { width: String(job.dims.w || ''), height: String(job.dims.h || ''), length: String(job.dims.d || '') };
+    pi.parent_sku = job.parentSku || '';
+    if (uploadedImgIds.length) pi.images = uploadedImgIds.slice(0, 9);
+    const cover = (pi.images && pi.images[0]) || '';
+    const vars = job.variations || [];
+    if (vars.length > 1 || (vars.length === 1 && vars[0].name)) {
+      pi.std_tier_variation_list = [{ id: 0, custom_value: job.varTier || 'Title', group_id: '0', value_list: vars.map(v => ({ id: 0, custom_value: v.name, selling_point: '', image_id: cover })) }];
+      pi.model_list = vars.map((v, i) => ({ id: 0, tier_index: [i], is_default: false, sku: v.sku || '', price: String(v.price), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }));
+    } else {
+      const v = vars[0] || {}; pi.std_tier_variation_list = [];
+      pi.model_list = [{ id: 0, tier_index: [], is_default: true, sku: job.parentSku || '', price: String(v.price || '0'), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }];
+    }
+    pi.unlisted = !publish; tmpl.is_draft = false;
+    if (!confirm((publish ? '【公開】' : '【非公開・下書き】') + ' で「' + (job.title || '').slice(0, 40) + '」を作成します。\n※カテゴリ/ブランド/属性/物流は雛形（直近の手動作成）を流用。画像は' + (uploadedImgIds.length ? '先行アップの' + uploadedImgIds.length + '枚' : '雛形と同じ') + '。よろしいですか？')) return;
+    log('🚀 create_product_info 実行中…');
+    try {
+      const cds = (document.cookie.match(/SPC_CDS=([^;]+)/) || [])[1] || '';
+      const r = await fetch('/api/v3/product/create_product_info?SPC_CDS=' + cds + '&SPC_CDS_VER=2', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tmpl) }).then(x => x.json());
+      if (r && r.code === 0) { log('✅ 作成成功 product_id=' + ((r.data && r.data.product_id) || '?') + (publish ? '（公開）' : '（非公開）'), '#1a7f37'); }
+      else { log('✗ 失敗 code=' + (r && r.code) + ' ' + ((r && (r.user_message || r.msg)) || ''), '#d93025'); }
+    } catch (e) { log('✗ ' + e.message, '#d93025'); }
   }
   (function hookNet() {
     const of = window.fetch;
@@ -112,7 +145,7 @@
   function panel(job) {
     const box = document.createElement('div');
     box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:999999;width:360px;background:#fff;border:2px solid #7b52c4;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:12px;font-family:sans-serif;overflow:hidden';
-    box.innerHTML = `<div style="background:#7b52c4;color:#fff;padding:8px 10px;font-weight:700;display:flex;align-items:center;gap:6px">✍️ 新規出品オート <span style="font-weight:400;font-size:10px;opacity:.85">v${VER}（偵察版）</span><span style="margin-left:auto;cursor:pointer" class="nl-x">✕</span></div>
+    box.innerHTML = `<div style="background:#7b52c4;color:#fff;padding:8px 10px;font-weight:700;display:flex;align-items:center;gap:6px">✍️ 新規出品オート <span style="font-weight:400;font-size:10px;opacity:.85">v${VER}（β）</span><span style="margin-left:auto;cursor:pointer" class="nl-x">✕</span></div>
       <div style="padding:10px">
         ${job ? `<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px">${(job.title || '(タイトル無)').slice(0, 60)}</div>
         <div style="color:#888;margin-bottom:8px">${(job.variations || []).length}バリエ / 画像${(job.images || []).length}枚 / ${job.cc || ''}</div>`
@@ -125,7 +158,12 @@
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
           <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:${job ? '#fff' : '#f2f2f2'};border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'}"${job ? '' : ' disabled'}>🖼️ 画像先行アップ</button>
         </div>
-        <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:8px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
+        <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:6px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+          <button class="nl-create-draft" style="padding:8px;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="ジョブ＋雛形(直近の作成)から create_product_info で【非公開】作成">🚀 作成（非公開）</button>
+          <button class="nl-create-pub" style="padding:8px;border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="同じく【公開】で作成（ライブに出ます）">🚀 作成＋公開</button>
+        </div>
+        <div class="nl-tmpl" style="font-size:10px;color:#888;margin-bottom:8px"></div>
         <div style="font-size:11px;background:#f3eefb;border:1px solid #e0d3f5;border-radius:6px;padding:6px 8px;margin-bottom:8px">
           <b>手順</b>：①<b>▶自動入力</b>で埋まる項目を埋める（カテゴリ/バリエ/画像は手動補完）→ ②🖼️画像アップ → ③<b>手動で1件「発行」</b>すると下の「作成API」に通信が記録される → <b>「コピー」して開発者へ</b>渡せば発行まで全自動化。※自動入力はβ＝入らない欄があれば🔍診断ログを共有ください（精度UP）。
         </div>
@@ -139,6 +177,11 @@
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
     const imgBtn = box.querySelector('.nl-img'); if (job) imgBtn.addEventListener('click', () => preUpload(job));
     const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
+    const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl');
+    fillBtnRefresh = () => { if (tmplEl) tmplEl.innerHTML = lastCreateBody ? '雛形あり（この内容のカテゴリ/ブランド/物流を流用して作成できます）✅' : '<span style="color:#c0392b">雛形なし：先に手動で1件「Save and Delist」して雛形をキャプチャしてください</span>'; };
+    fillBtnRefresh();
+    if (job && cd) cd.addEventListener('click', () => createFromJob(job, false));
+    if (job && cp) cp.addEventListener('click', () => createFromJob(job, true));
     const loadBtn = box.querySelector('.nl-load');
     if (loadBtn) loadBtn.addEventListener('click', () => {
       const tok = (box.querySelector('.nl-paste').value || '').trim(); const j = decodeJob(tok);
@@ -219,9 +262,9 @@
             if (dlg) { const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|ok|apply|salvar|save|保存|use|使用)/i.test(norm(b.textContent)) && !/(cancel|取消|cancelar|back|reset)/i.test(norm(b.textContent))); if (ok && !ok.__c) { ok.__c = true; ok.click(); log('・クロップ自動確定'); } }
           } catch (_) {}
         }
-        if (lastImgId) log('✓ img_id 取得 (' + lastImgId.slice(0, 10) + '…)', '#1a7f37'); else log('△ img_id未取得（手動でアップしても可）', '#8a6d3b');
+        if (lastImgId) { if (!uploadedImgIds.includes(lastImgId)) uploadedImgIds.push(lastImgId); log('✓ img_id 取得 (' + lastImgId.slice(0, 10) + '…)', '#1a7f37'); } else log('△ img_id未取得（手動でアップしても可）', '#8a6d3b');
       }
-      log('画像アップ完了。', '#1a7f37');
+      log('画像アップ完了。取得 image_id: ' + uploadedImgIds.length + '枚', '#1a7f37');
     } catch (e) { log('✗ ' + e.message, '#d93025'); }
   }
 
