@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.1
+// @version      0.6.2
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.1';
+  const VER = '0.6.2';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -138,37 +138,52 @@
     if (fillBtnRefresh) fillBtnRefresh();
     return added;
   }
-  // ★コンポーザーの画像(メルカリ直リンク等)を自動でShopeeにアップ→image_id化（手動アップ不要にするのが目的）
+  // 今Product Imagesにある画像idの配列
+  function currentProductImageIds() {
+    const scope = productImageScope();
+    const imgs = scope ? $$('img', scope) : $$('.eds-upload img').filter(im => im.getBoundingClientRect().left < window.innerWidth * 0.5);
+    const ids = []; imgs.forEach(im => { const s = im.currentSrc || im.src || im.getAttribute('src') || ''; const m = s.match(CDN_ID_RE); if (m && !ids.includes(m[1])) ids.push(m[1]); });
+    return ids;
+  }
+  // 1枚アップして、増えた新しい image_id を返す
+  async function uploadOneImage(url, fin, label) {
+    let file = null;
+    log(label + ' 取得中…（DL）');
+    try { file = await Promise.race([fetchImageFile(url, 'img.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
+    catch (e) { log('✗ ' + label + ' 取得失敗: ' + e.message, '#d93025'); return null; }
+    const before = currentProductImageIds();
+    setFile(fin, file);
+    let w = 0, newId = null;
+    while (w < 50 && !newId) {
+      await sleep(500); w++;
+      try { const dlg = [...document.querySelectorAll('[role=dialog],[class*=crop],[class*=cropper]')].find(d => d.offsetParent !== null && [...d.querySelectorAll('button')].some(b => b.offsetParent !== null)); if (dlg) { const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|ok|apply|save|保存|use|使用|done)/i.test(norm(b.textContent)) && !/(cancel|取消|back|reset)/i.test(norm(b.textContent))); if (ok && !ok.__c) { ok.__c = true; ok.click(); } } } catch (_) {}
+      const now = currentProductImageIds(); const diff = now.filter(id => !before.includes(id)); if (diff.length) newId = diff[diff.length - 1];
+    }
+    log(newId ? ('✓ ' + label + ' [' + newId.slice(-6) + ']') : ('△ ' + label + ' id未確認'), newId ? '#1a7f37' : '#8a6d3b');
+    return newId;
+  }
+  // ★コンポーザーのカタログ画像＋各バリエ画像を自動アップ→image_id化（バリエ別に割当）
+  let jobImgResult = { catalog: [], variations: {} };
   async function autoUploadJobImages(job) {
-    uploadedImgIds.length = 0; // 毎回リセット（前回分の混入防止）
-    const imgs = (job.images || []).filter(u => /^https?:/.test(u)).slice(0, 9);
-    if (!imgs.length) { log('ジョブに画像URLがありません（コンポーザーでカタログ画像を入れて）', '#d93025'); return; }
+    jobImgResult = { catalog: [], variations: {} }; uploadedImgIds.length = 0;
     const scope = productImageScope();
     const fin = (scope && $$('input[type=file]', scope)[0]) || document.querySelector('input.eds-upload__input, .eds-upload input[type=file], input[type=file]');
     if (!fin) { log('✗ Product Images のアップロード枠が見つからず（🔍診断を）', '#d93025'); return; }
-    for (let i = 0; i < imgs.length; i++) {
-      log('画像' + (i + 1) + '/' + imgs.length + ' 取得中…（メルカリ→ダウンロード）');
-      let file = null;
-      try { file = await Promise.race([fetchImageFile(imgs[i], 'img' + i + '.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
-      catch (e) { log('✗ 画像' + (i + 1) + ' 取得失敗: ' + e.message + '（GM_xhr不調＝この画像はスキップ）', '#d93025'); continue; }
-      const before = uploadedImgIds.length;
-      log('・Shopeeにアップロード中…（クロップが出たら自動確定）');
-      setFile(fin, file);
-      let w = 0; while (w < 50 && uploadedImgIds.length === before) {
-        await sleep(500); w++;
-        try { const dlg = [...document.querySelectorAll('[role=dialog],[class*=crop],[class*=cropper]')].find(d => d.offsetParent !== null && [...d.querySelectorAll('button')].some(b => b.offsetParent !== null)); if (dlg) { const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|ok|apply|save|保存|use|使用|done)/i.test(norm(b.textContent)) && !/(cancel|取消|back|reset)/i.test(norm(b.textContent))); if (ok && !ok.__c) { ok.__c = true; ok.click(); log('・クロップ自動確定'); } } } catch (_) {}
-        collectPageImageIds();
-      }
-      log(uploadedImgIds.length > before ? ('✓ 画像' + (i + 1) + ' アップ完了') : ('△ 画像' + (i + 1) + ' id未確認（サムネ未出現）'), uploadedImgIds.length > before ? '#1a7f37' : '#8a6d3b');
-    }
-    log('自動アップ完了：計 ' + uploadedImgIds.length + ' 枚', uploadedImgIds.length ? '#1a7f37' : '#d93025');
+    const cats = (job.images || []).filter(u => /^https?:/.test(u)).slice(0, 9);
+    for (let i = 0; i < cats.length; i++) { const id = await uploadOneImage(cats[i], fin, 'カタログ' + (i + 1)); if (id) jobImgResult.catalog.push(id); }
+    const vars = job.variations || [];
+    for (let i = 0; i < vars.length; i++) { const u = vars[i].image; if (u && /^https?:/.test(u)) { const id = await uploadOneImage(u, fin, 'バリエ' + (i + 1) + '(' + (vars[i].name || '') + ')'); if (id) jobImgResult.variations[i] = id; } }
+    uploadedImgIds.push(...jobImgResult.catalog);
+    log('自動アップ完了：カタログ ' + jobImgResult.catalog.length + ' / バリエ ' + Object.keys(jobImgResult.variations).length + ' 枚', (jobImgResult.catalog.length || Object.keys(jobImgResult.variations).length) ? '#1a7f37' : '#d93025');
     if (fillBtnRefresh) fillBtnRefresh();
   }
   // ジョブ＋雛形 から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
   async function createFromJob(job, publish) {
     const base = currentTmplBody();
     if (!base) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャ→「💾保存」で雛形にしてください'); return; }
-    uploadedImgIds.length = 0; collectPageImageIds(); // 作成前に、今Product Imagesにある画像idを取り込む（毎回フレッシュ）
+    // 画像は jobImgResult(自動アップの結果) を優先。無ければProduct Imagesをスキャン（手動アップ用フォールバック）
+    let _catIds = jobImgResult.catalog.slice(); const _varIds = Object.assign({}, jobImgResult.variations);
+    if (!_catIds.length && !Object.keys(_varIds).length) { uploadedImgIds.length = 0; collectPageImageIds(); _catIds = uploadedImgIds.slice(0, 9); }
     const tmpl = JSON.parse(JSON.stringify(base)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
