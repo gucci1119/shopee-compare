@@ -1,16 +1,16 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.1.0
+// @version      0.2.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
-// @match        https://seller.shopee.ph/portal/product/new*
-// @match        https://seller.shopee.sg/portal/product/new*
-// @match        https://seller.shopee.com.my/portal/product/new*
-// @match        https://seller.shopee.com.br/portal/product/new*
-// @match        https://seller.shopee.vn/portal/product/new*
-// @match        https://banhang.shopee.vn/portal/product/new*
-// @match        https://seller.shopee.co.th/portal/product/new*
-// @match        https://seller.shopee.tw/portal/product/new*
+// @match        https://seller.shopee.ph/portal/product/*
+// @match        https://seller.shopee.sg/portal/product/*
+// @match        https://seller.shopee.com.my/portal/product/*
+// @match        https://seller.shopee.com.br/portal/product/*
+// @match        https://seller.shopee.vn/portal/product/*
+// @match        https://banhang.shopee.vn/portal/product/*
+// @match        https://seller.shopee.co.th/portal/product/*
+// @match        https://seller.shopee.tw/portal/product/*
 // @connect      static.mercdn.net
 // @connect      jp.mercari.com
 // @connect      *
@@ -20,16 +20,20 @@
 
 (function () {
   'use strict';
-  const VER = '0.1.0';
+  const VER = '0.2.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
   //            variations:[{name, sku, price, stock, image}], specifics, cc }
+  function decodeJob(tok) {
+    if (!tok) return null;
+    try { const j = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(tok))))); return (j && j.k === 'nl') ? j : null; } catch (e) { return null; }
+  }
   function readJob() {
     const m = (location.hash || '').match(/[#&]smdjob=([^&]+)/);
-    if (!m) return null;
-    try { return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); } catch (e) { return null; }
+    return m ? decodeJob(m[1]) : null;
   }
+  const isNewPage = () => /\/portal\/product\/(new|create)/i.test(location.pathname);
 
   const $$ = (sel, root) => [...(root || document).querySelectorAll(sel)];
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -110,11 +114,16 @@
     box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:999999;width:360px;background:#fff;border:2px solid #7b52c4;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:12px;font-family:sans-serif;overflow:hidden';
     box.innerHTML = `<div style="background:#7b52c4;color:#fff;padding:8px 10px;font-weight:700;display:flex;align-items:center;gap:6px">✍️ 新規出品オート <span style="font-weight:400;font-size:10px;opacity:.85">v${VER}（偵察版）</span><span style="margin-left:auto;cursor:pointer" class="nl-x">✕</span></div>
       <div style="padding:10px">
-        <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px">${(job.title || '(タイトル無)').slice(0, 60)}</div>
-        <div style="color:#888;margin-bottom:8px">${(job.variations || []).length}バリエ / 画像${(job.images || []).length}枚 / ${job.cc || ''}</div>
+        ${job ? `<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px">${(job.title || '(タイトル無)').slice(0, 60)}</div>
+        <div style="color:#888;margin-bottom:8px">${(job.variations || []).length}バリエ / 画像${(job.images || []).length}枚 / ${job.cc || ''}</div>`
+        : `<div style="font-size:11px;background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:6px 8px;margin-bottom:8px">
+             ジョブ未受信。ポータルのコンポーザーで各国の <b>「📋 自動出品ジョブ」</b> を押してコピー → 下に貼り付けて「読込」。<br>
+             <textarea class="nl-paste" placeholder="ここに自動出品ジョブ(トークン)を貼り付け" style="width:100%;height:44px;margin-top:4px;font-size:10px;box-sizing:border-box"></textarea>
+             <button class="nl-load" style="margin-top:4px;padding:5px 10px;border:1px solid #7b52c4;background:#7b52c4;color:#fff;border-radius:6px;cursor:pointer;font-weight:600">読込</button>
+           </div>`}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
-          <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🖼️ 画像先行アップ</button>
+          <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:${job ? '#fff' : '#f2f2f2'};border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'}"${job ? '' : ' disabled'}>🖼️ 画像先行アップ</button>
         </div>
         <div style="font-size:11px;background:#f3eefb;border:1px solid #e0d3f5;border-radius:6px;padding:6px 8px;margin-bottom:8px">
           <b>手順（初版）</b>：①🔍診断 と ②🖼️画像アップ を押してログを開発者へ。③その後<b>手動でこの商品を1件「発行」</b>すると、下の「作成API」に通信が記録されます → <b>「コピー」して開発者に渡す</b>と、次版で発行まで自動化します。
@@ -127,9 +136,16 @@
     logEl = box.querySelector('.nl-log'); capEl = box.querySelector('.nl-cap');
     box.querySelector('.nl-x').addEventListener('click', () => box.remove());
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
-    box.querySelector('.nl-img').addEventListener('click', () => preUpload(job));
+    const imgBtn = box.querySelector('.nl-img'); if (job) imgBtn.addEventListener('click', () => preUpload(job));
+    const loadBtn = box.querySelector('.nl-load');
+    if (loadBtn) loadBtn.addEventListener('click', () => {
+      const tok = (box.querySelector('.nl-paste').value || '').trim(); const j = decodeJob(tok);
+      if (!j) { alert('ジョブを読み込めませんでした（トークンが不正か、newlisting用でない）'); return; }
+      box.remove(); panel(j);
+    });
     renderCaptures();
-    log('準備OK。まず🔍診断→🖼️画像アップ、その後この商品を手動で1件発行してください。');
+    log('準備OK（v' + VER + '）。URL: ' + location.pathname);
+    if (job) log('ジョブ受信: ' + (job.title || '').slice(0, 40)); else log('ジョブ未受信。📋自動出品ジョブを貼り付けてください。', '#8a6d3b');
   }
 
   // ===== 診断：新規出品ページのDOMをマップ（セレクタ確定に使う） =====
@@ -184,10 +200,13 @@
   }
 
   function boot() {
+    console.log('[newlisting] booted v' + VER + ' @', location.href);
     const job = readJob();
-    if (!job) return;
+    // ジョブ(#smdjob=…k:nl)があれば必ず起動。無ければ新規出品ページ(/new /create)のときだけ貼付フォールバックを出す。
+    // ※ 編集ページ(/portal/product/123 等)では addvar と衝突しないよう、ジョブが無ければ何もしない。
+    if (!job && !isNewPage()) return;
     let tries = 0;
-    const t = setInterval(() => { tries++; if ($$('input,textarea').length > 3 || tries > 40) { clearInterval(t); panel(job); } }, 500);
+    const t = setInterval(() => { tries++; if ($$('input,textarea').length > 3 || tries > 50) { clearInterval(t); panel(job); } }, 500);
   }
   boot();
 })();
