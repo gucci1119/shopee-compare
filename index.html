@@ -561,6 +561,7 @@
     // よく使うタイトルの候補・バリエ明細名テンプレ（DS:〜/Switch:〜 等）の候補
     listTitleFavs: [],
     listVarFavs: ['DS:', 'Switch:', '3DS:', 'GBA:', 'Cartridge Only', 'CIB (Complete In Box)'],
+    composerZoom: 1, // コンポーザー全体の表示倍率（文字サイズ）
     // コンポーザーの下書き（ポータル内の一時保存。[{id,title,savedAt,state}]）
     listDrafts: [],
     // ★重量ベース価格ロジック（スプシ解読・全て設定で調整可）
@@ -5064,8 +5065,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <select class="li" id="li-draftload" style="font-size:12px;max-width:280px"><option value="">📂 下書きを開く…</option></select>
           <button class="smd-btn" id="li-draftdel" style="font-size:12px" title="選択中の下書きを削除">🗑 削除</button>
           <button class="smd-btn" id="li-draftnew" style="font-size:12px" title="入力を全部クリアして新規作成">✨ 新規</button>
-          <span class="smd-dim" style="font-size:10.5px">※ポータル内の一時保存。Shopeeへの発行は各国転記から手動</span>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:11px" title="コンポーザー全体の文字・表示サイズ">
+            <span class="smd-dim">文字サイズ</span>
+            <button class="smd-btn li-zoom" data-z="0.85" style="font-size:11px;padding:2px 7px">小</button>
+            <button class="smd-btn li-zoom" data-z="1" style="font-size:12px;padding:2px 7px">標準</button>
+            <button class="smd-btn li-zoom" data-z="1.15" style="font-size:13px;padding:2px 7px">大</button>
+            <button class="smd-btn li-zoom" data-z="1.3" style="font-size:14px;padding:2px 7px">特大</button>
+          </span>
         </div>
+        <span class="smd-dim" style="font-size:10.5px;display:block;margin:-2px 2px 6px">※ポータル内の一時保存。Shopeeへの発行は各国転記から手動</span>
         <details class="tool-card" style="max-width:none;padding:8px 14px">
           <summary style="cursor:pointer;font-weight:700;color:#7b52c4;font-size:13px">❓ 使い方 ＆ 価格ロジック（クリックで開く）</summary>
           <div style="font-size:12px;line-height:1.9;padding:8px 2px;color:#444">
@@ -5216,6 +5224,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!settings.listCats.includes(v)) { settings.listCats.unshift(v); saveSettings(); listCatDatalist(); }
         const b = document.getElementById('li-catsave'); const o = b.textContent; b.textContent = '✅登録'; setTimeout(() => b.textContent = o, 1200);
       });
+      // 文字サイズ（コンポーザー全体をzoomで拡大縮小）
+      const applyZoom = () => {
+        const c = document.getElementById('list-composer'); if (c) c.style.zoom = settings.composerZoom || 1;
+        document.querySelectorAll('.li-zoom').forEach(b => { const on = Math.abs(Number(b.dataset.z) - (settings.composerZoom || 1)) < 0.001; b.style.background = on ? '#7b52c4' : ''; b.style.color = on ? '#fff' : ''; });
+      };
+      document.querySelectorAll('.li-zoom').forEach(b => b.addEventListener('click', () => { settings.composerZoom = Number(b.dataset.z) || 1; saveSettings(); applyZoom(); }));
+      applyZoom();
       // 下書き（ポータル内保存）
       listDraftDropdown();
       document.getElementById('li-draftsave').addEventListener('click', () => {
@@ -5538,6 +5553,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!Object.keys(ovar).length) delete o.vars[i];
     ovPrune(cc);
   }
+  // この国のカタログ画像の生リスト（上書きがあれば国別、無ければ全国共通）
+  function ccCatalogRaw(cc) {
+    const o = listState.overrides[cc] || {};
+    if ((o.images || '').trim()) return o.images.split('\n').map(s => s.trim()).filter(Boolean);
+    return [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+  }
+  function ovSetCatalog(cc, rawList) {
+    const o = listState.overrides[cc] = listState.overrides[cc] || {};
+    o.images = (rawList || []).join('\n'); ovPrune(cc);
+  }
   function ovToggleOff(cc, i) {
     const o = listState.overrides[cc] = listState.overrides[cc] || {}; o.vars = o.vars || {};
     const ovar = o.vars[i] = o.vars[i] || {};
@@ -5627,9 +5652,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025';
           const cost = Number(p.cost) || 0;
           const bad = !p.off && cost > 0 && (pr.buyerJpy <= cost || pr.profit < 0);
+          const vimg = hasVar ? resolveImgUrl(p.image) : '';
+          const vthumb = hasVar ? (vimg
+            ? `<span class="cov-vthumb" data-cc="${rg.cc}" data-i="${p.i}" title="画像をドロップで差し替え／クリックで消去" style="position:relative;display:inline-block;cursor:pointer;flex:none"><img src="${esc(vimg)}" referrerpolicy="no-referrer" style="width:28px;height:28px;object-fit:cover;border-radius:4px;display:block" onerror="this.style.opacity=.2"></span>`
+            : `<span class="cov-vthumb" data-cc="${rg.cc}" data-i="${p.i}" title="画像をここにドロップ／クリックでURL入力（この明細1枚）" style="width:28px;height:28px;flex:none;border:1px dashed #ccc;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:#bbb;cursor:pointer">＋</span>`) : '';
           return `<div class="row" style="gap:5px;align-items:center;flex-wrap:wrap;padding:2px 0${p.off ? ';opacity:.45' : (bad ? ';background:#fff4f4;border-radius:4px' : '')}">
+            <span style="font-size:11px;font-weight:700;color:#7b52c4;min-width:16px;text-align:center">${p.i + 1}</span>
             <button class="cov-ioff smd-btn" data-cc="${rg.cc}" data-i="${p.i}" title="${p.off ? 'この国に戻す' : 'この国では出さない（除外）'}" style="padding:0 6px;font-weight:700;${p.off ? 'color:#1a7f37;border-color:#9ccc9c' : 'color:#d93025;border-color:#e0a0a0'}">${p.off ? '↩' : '✕'}</button>
-            ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:110px;font-size:11px;padding:2px 5px${p.off ? ';text-decoration:line-through' : ''}" title="この国の明細名（空欄=既定）"${p.off ? ' disabled' : ''}>` : ''}
+            ${vthumb}
+            ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:100px;font-size:11px;padding:2px 5px${p.off ? ';text-decoration:line-through' : ''}" title="この国の明細名（空欄=既定）"${p.off ? ' disabled' : ''}>` : ''}
             <span class="smd-dim" style="font-size:11px;white-space:nowrap">仕入¥${cost.toLocaleString()} →</span>
             <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="number" step="any" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:76px;padding:2px 5px;${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="空欄=自動計算(${p.auto}) / 入力=この国だけ手動価格"${p.off ? ' disabled' : ''}></span>
             在庫<input class="li cov-istock" data-cc="${rg.cc}" data-i="${p.i}" data-foc="s-${rg.cc}-${p.i}" type="number" value="${p.stock != null ? p.stock : ''}" placeholder="1" style="width:42px;padding:2px 4px;font-size:11px"${p.off ? ' disabled' : ''}>
@@ -5637,6 +5668,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>`;
         }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? pricedLive.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
+        // カタログ画像ストリップ（この国分。上書きがあれば国別、無ければ全国共通のraw）
+        const catRawGlobal = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean), ...(listState.uploadImgs || [])];
+        const catRaw = (ov.images || '').trim() ? ov.images.split('\n').map(s => s.trim()).filter(Boolean) : catRawGlobal;
+        const catStrip = `<div style="margin-top:7px">
+          <div style="font-size:11px;color:#666">🖼️ カタログ画像 <b>${catRaw.length}/9</b>${catRaw.length > 9 ? ' <span style="color:#d93025">⚠超過</span>' : ''}${(ov.images || '').trim() ? ' <span style="color:#7b52c4">(この国用)</span>' : ''}</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px">
+            ${catRaw.slice(0, 9).map((u, idx) => `<span style="position:relative;display:inline-block"><img src="${esc(resolveImgUrl(u))}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:cover;border-radius:4px;display:block" onerror="this.style.opacity=.2"><button class="cov-catdel" data-cc="${rg.cc}" data-idx="${idx}" title="この国のカタログから削除" style="position:absolute;top:-5px;right:-5px;width:15px;height:15px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:9px;line-height:1;cursor:pointer">✕</button></span>`).join('')}
+            <span class="cov-catadd" data-cc="${rg.cc}" title="画像URL/メルカリリンクをドロップ or クリックで追加（最大9枚）" style="width:34px;height:34px;border:1.5px dashed #7b52c4;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;color:#7b52c4;cursor:pointer;font-size:16px">＋</span>
+          </div>
+        </div>`;
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
         // ★自動出品ジョブ（画像はhttp(s)のみ＝data:はhash非対応）
@@ -5664,6 +5705,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="font-size:12.5px;margin-top:6px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
             <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
           <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
+          ${catStrip}
           ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
           <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
             ${cp('タイトル', title)}
@@ -5688,6 +5730,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     out.querySelectorAll('.cov-iprice').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'price', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-istock').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'stock', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-ioff').forEach(el => el.addEventListener('click', e => { ovToggleOff(e.currentTarget.dataset.cc, +e.currentTarget.dataset.i); listRefresh(); }));
+    // バリエ明細画像（各国）：クリックで上書き解除、ドロップ/ファイルで差し替え（1明細1枚）
+    out.querySelectorAll('.cov-vthumb').forEach(el => {
+      const cc = el.dataset.cc, i = +el.dataset.i;
+      el.addEventListener('click', () => {
+        const url = prompt('この明細の画像URL（メルカリ商品リンク可）。空欄でこの国の上書きを解除:', '');
+        if (url == null) return;
+        if (!url.trim()) { ovSetVar(cc, i, 'image', ''); listRefresh(); return; }
+        (async () => { let u = url.trim(); if (isPageUrl(u)) { const img = await fetchImageFromUrl(u); if (img) u = img; } ovSetVar(cc, i, 'image', u); listRefresh(); })();
+      });
+      wireDrop(el, dataUrl => { ovSetVar(cc, i, 'image', dataUrl); listRefresh(); }, async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } ovSetVar(cc, i, 'image', url); listRefresh(); });
+    });
+    // カタログ画像 削除（各国）
+    out.querySelectorAll('.cov-catdel').forEach(el => el.addEventListener('click', e => {
+      const cc = e.currentTarget.dataset.cc, idx = +e.currentTarget.dataset.idx;
+      const raw = ccCatalogRaw(cc); raw.splice(idx, 1); ovSetCatalog(cc, raw); listRefresh();
+    }));
+    // カタログ画像 追加（各国）：クリックでURL入力／ドロップで追加（最大9枚）
+    out.querySelectorAll('.cov-catadd').forEach(el => {
+      const cc = el.dataset.cc;
+      const add = async (u) => { if (isPageUrl(u)) { const img = await fetchImageFromUrl(u); if (img) u = img; } const raw = ccCatalogRaw(cc); if (raw.length >= 9) { alert('カタログ画像は最大9枚です'); return; } raw.push(u); ovSetCatalog(cc, raw); listRefresh(); };
+      el.addEventListener('click', () => { const url = prompt('追加する画像URL（メルカリ商品リンク可）:'); if (url && url.trim()) add(url.trim()); });
+      wireDrop(el, dataUrl => { const raw = ccCatalogRaw(cc); if (raw.length >= 9) { alert('カタログ画像は最大9枚です'); return; } raw.push(dataUrl); ovSetCatalog(cc, raw); listRefresh(); }, url => add(url));
+    });
     // フォーカス復元（全再描画してもカーソルが飛ばない）
     if (focSave) { const fe = out.querySelector('[data-foc="' + focSave.k + '"]'); if (fe) { fe.focus(); try { fe.setSelectionRange(focSave.s, focSave.e); } catch (_) {} } }
     // ▶ 全対象国を一括で開く（対象国の新規出品タブを順に開く。ポップアップブロック時は許可を促す）
