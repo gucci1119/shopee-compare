@@ -4919,8 +4919,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   };
   const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
   const roundLocal = (v, unit) => { unit = unit || 1; const r = Math.round(v / unit) * unit; return unit < 1 ? Math.round(r * 100) / 100 : Math.round(r); };
+  // 各国の合計手数料率(%)＝販売＋プログラム＋決済（スプシの「合計」列と同じ加算方式。Shopeeは各%を売価から差し引く）
+  function feeTotalPct(cc) {
+    const fees = (settings.priceFees || {})[cc] || [0, 0, 0];
+    return fees.reduce((p, f) => p + (Number(f) || 0), 0);
+  }
+  // 手数料控除後にセラーが受け取る割合（= 1 − 合計%）。合計が高すぎる場合は下限0.05でガード
+  function feeKeep(cc) { return Math.max(0.05, 1 - feeTotalPct(cc) / 100); }
   // ★重量ベース価格計算：仕入(円)＋重量＋各国手数料/SLS送料/バッファ から 現地出品価格を算出（スプシ解読の式）
-  //  K(円) = ( 仕入×(1+ROI)÷(1−FXマージン) + SLS送料円 ) ÷ (1−販売%)(1−プログラム%)(1−決済%) ÷ (1−利益バッファ)
+  //  K(円) = ( 仕入×(1+ROI)÷(1−FXマージン) + SLS送料円 ) ÷ (1−合計手数料%) ÷ (1−利益バッファ)
   //  出品価格(現地) = K ÷ 為替。SLS送料は課金重量(=max(実重量,容積重量W×H×D÷6000))を50g単位で。
   function slsLocal(cc, chargeG) {
     const s = (settings.priceSls || {})[cc]; if (!s) return 0;
@@ -4934,23 +4941,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
     const chargeG = Math.max(weightG, vol);
-    const fees = (settings.priceFees || {})[cc] || [0, 0, 0];
-    const feeProd = fees.reduce((p, f) => p * (1 - (Number(f) || 0) / 100), 1) || 1;
+    const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
-    const kJpy = ((Number(costJpy) || 0) * (1 + roi) / (1 - fxM) + slsJpy) / feeProd / (1 - pb);
+    const kJpy = ((Number(costJpy) || 0) * (1 + roi) / (1 - fxM) + slsJpy) / feeMult / (1 - pb);
     return kJpy / rg.rateJpy; // 現地通貨（丸め前）
   }
   // 確定した現地価格から「実際に取れる利益(円)＋ROI＋円換算」を逆算（丸め後の価格で算出＝表示用の実数）
   function priceProfitFor(cc, costJpy, localPrice) {
     const rg = regionByCc(cc); if (!rg) return { buyerJpy: 0, profit: 0, roi: 0 };
-    const fees = (settings.priceFees || {})[cc] || [0, 0, 0];
-    const feeProd = fees.reduce((p, f) => p * (1 - (Number(f) || 0) / 100), 1) || 1;
+    const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式）
     const weightG = (listState.weightG != null ? listState.weightG : settings.weightG) || 0;
     const vol = (listState.dimW && listState.dimH && listState.dimD) ? (listState.dimW * listState.dimH * listState.dimD / 6000) : 0;
     const slsJpy = slsLocal(cc, Math.max(weightG, vol)) * rg.rateJpy;
     const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
-    const sellerJpy = buyerJpy * feeProd;                    // Shopee手数料控除後にセラーが受け取る円
+    const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
     const profit = sellerJpy - (Number(costJpy) || 0) - slsJpy;
     return { buyerJpy: Math.round(buyerJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
   }
@@ -5295,15 +5300,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const ccs = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
     const inp = (val, cls, cc, idx) => `<input class="li ${cls}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${val}" style="width:62px;padding:2px 4px;font-size:11px;text-align:right">`;
     host.innerHTML = `<div style="font-size:10.5px;color:#666;margin-bottom:4px">手数料(%)＝販売/プログラム/決済。SLS送料(現地通貨・セラー実質負担)＝50gの額 / 50gごとの追加。変更は即反映＆保存。年1回の改定時に更新。</div>
-      <div class="pf-scroll"><table class="pf-table" style="font-size:11px"><tr><th>国</th><th>販売%</th><th>ﾌﾟﾛｸﾞﾗﾑ%</th><th>決済%</th><th>SLS 50g</th><th>SLS +50g</th></tr>
-      ${ccs.map(cc => { const f = (settings.priceFees || {})[cc] || [0, 0, 0]; const s = (settings.priceSls || {})[cc] || [0, 0]; return `<tr><td><b style="color:${(regionByCc(cc) || {}).color}">${cc}</b></td><td>${inp(f[0], 'pf-fee', cc, 0)}</td><td>${inp(f[1], 'pf-fee', cc, 1)}</td><td>${inp(f[2], 'pf-fee', cc, 2)}</td><td>${inp(s[0], 'pf-sls', cc, 0)}</td><td>${inp(s[1], 'pf-sls', cc, 1)}</td></tr>`; }).join('')}
+      <div class="pf-scroll"><table class="pf-table" style="font-size:11px"><tr><th>国</th><th>販売%</th><th>ﾌﾟﾛｸﾞﾗﾑ%</th><th>決済%</th><th>合計%</th><th>SLS 50g</th><th>SLS +50g</th></tr>
+      ${ccs.map(cc => { const f = (settings.priceFees || {})[cc] || [0, 0, 0]; const s = (settings.priceSls || {})[cc] || [0, 0]; return `<tr><td><b style="color:${(regionByCc(cc) || {}).color}">${cc}</b></td><td>${inp(f[0], 'pf-fee', cc, 0)}</td><td>${inp(f[1], 'pf-fee', cc, 1)}</td><td>${inp(f[2], 'pf-fee', cc, 2)}</td><td class="pf-total" data-cc="${cc}" style="text-align:right;font-weight:700;color:#7b52c4">${feeTotalPct(cc).toFixed(2)}%</td><td>${inp(s[0], 'pf-sls', cc, 0)}</td><td>${inp(s[1], 'pf-sls', cc, 1)}</td></tr>`; }).join('')}
       </table></div>
       <div class="row" style="gap:12px;margin-top:6px;align-items:flex-end;flex-wrap:wrap">
         <div><label class="lc" style="font-size:11px">FX/端数マージン%</label><input class="li pf-fx" type="number" step="any" value="${settings.priceFxMargin}" style="width:70px"></div>
         <div><label class="lc" style="font-size:11px">利益バッファ%</label><input class="li pf-pb" type="number" step="any" value="${settings.priceProfitBuffer}" style="width:70px"></div>
         <button class="smd-btn" id="li-pricereset" style="font-size:11px">既定値に戻す</button>
       </div>`;
-    host.querySelectorAll('.pf-fee').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceFees[cc] = settings.priceFees[cc] || [0, 0, 0]; settings.priceFees[cc][i] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
+    host.querySelectorAll('.pf-fee').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceFees[cc] = settings.priceFees[cc] || [0, 0, 0]; settings.priceFees[cc][i] = Number(e.target.value) || 0; const tot = host.querySelector('.pf-total[data-cc="' + cc + '"]'); if (tot) tot.textContent = feeTotalPct(cc).toFixed(2) + '%'; saveSettings(); listRefresh(); }));
     host.querySelectorAll('.pf-sls').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceSls[cc] = settings.priceSls[cc] || [0, 0]; settings.priceSls[cc][i] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
     host.querySelector('.pf-fx').addEventListener('input', e => { settings.priceFxMargin = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
     host.querySelector('.pf-pb').addEventListener('input', e => { settings.priceProfitBuffer = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
@@ -5364,7 +5369,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const total = urls.length + ups.length; // カタログ画像の合計（Shopee上限9枚）
     const cnt = document.getElementById('li-imgcount');
     if (cnt) { cnt.textContent = total ? ` — ${total}/9枚${total > 9 ? ' ⚠超過（先頭9枚のみ有効）' : ''}` : ''; cnt.style.color = total > 9 ? '#d93025' : ''; }
-    wrap.innerHTML = urls.slice(0, 9).map((u, idx) => `<span style="position:relative;display:inline-block"><img src="${esc(u)}" style="width:44px;height:44px;object-fit:cover;border-radius:5px${idx > 8 ? ';opacity:.3' : ''}" loading="lazy" onerror="this.style.opacity=.2"><span style="position:absolute;bottom:-2px;left:-2px;background:#333;color:#fff;font-size:8px;padding:0 2px;border-radius:3px">${idx + 1}</span></span>`).join('')
+    wrap.innerHTML = urls.slice(0, 9).map((u, idx) => `<span style="position:relative;display:inline-block"><img src="${esc(u)}" referrerpolicy="no-referrer" style="width:44px;height:44px;object-fit:cover;border-radius:5px${idx > 8 ? ';opacity:.3' : ''}" loading="lazy" onerror="this.style.opacity=.2;this.title='読込失敗（CDNブロック等）'"><span style="position:absolute;bottom:-2px;left:-2px;background:#333;color:#fff;font-size:8px;padding:0 2px;border-radius:3px">${idx + 1}</span></span>`).join('')
       + ups.map((u, i) => `<span style="position:relative;display:inline-block"><img src="${u}" style="width:44px;height:44px;object-fit:cover;border-radius:5px"><button class="li-upclear" data-i="${i}" title="このアップ画像を削除" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;border:none;background:#d93025;color:#fff;font-size:10px;line-height:1;cursor:pointer">✕</button></span>`).join('');
     wrap.querySelectorAll('.li-upclear').forEach(el => el.addEventListener('click', e => { listState.uploadImgs.splice(+e.currentTarget.dataset.i, 1); listImgPrev(); listRefresh(); }));
   }
@@ -5372,7 +5377,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function listVarsRender() {
     const wrap = document.getElementById('li-vars');
     if (!listState.variations.length) { wrap.innerHTML = '<span class="smd-dim" style="font-size:12px">バリエーション未設定（単品）</span>'; listRefresh(); return; }
-    const thumb = (im) => im ? `<img src="${esc(/^https?:/.test(im) ? im : IMG_CDN + im)}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
+    const thumb = (im) => im ? `<img src="${esc(/^https?:/.test(im) ? im : IMG_CDN + im)}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:cover;border-radius:5px;flex:none" onerror="this.style.opacity=.2;this.title='読込失敗'">` : '<span style="width:34px;height:34px;border:1px dashed #ccc;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">なし</span>';
     const vlen = (opt) => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: opt }).length; // 明細名(全国共通30字上限)の実長
     wrap.innerHTML = listState.variations.map((v, i) => {
       const nlen = vlen(v.opt); const over = nlen > 30;
@@ -5446,7 +5451,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const toU = s => /^https?:/.test(s) ? s : IMG_CDN + s;
     const catImgs = [...(listState.images || '').split('\n').map(s => s.trim()).filter(Boolean).map(toU), ...(listState.uploadImgs || [])];
     const varImgs = hasVar ? listState.variations.filter(v => v.img).map(v => ({ opt: v.opt, url: toU(v.img) })) : [];
-    const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2"></a>`;
+    const imgThumb = (u) => `<a href="${esc(u)}" target="_blank" title="クリックで開く→右クリックで保存"><img src="${esc(u)}" referrerpolicy="no-referrer" style="width:52px;height:52px;object-fit:cover;border-radius:5px" onerror="this.style.opacity=.2;this.title='読込失敗（CDNがブロック。リンクは有効なのでShopee側では使えます）'"></a>`;
     const imgBlock = (catImgs.length || varImgs.length) ? `<div style="border:1px solid #e6e0f5;background:#faf8ff;border-radius:8px;padding:10px;margin-bottom:10px">
         <b style="font-size:12.5px">🖼️ 画像（Shopeeへは手動アップロード ／ バリエは1明細=1枚）</b>
         ${catImgs.length ? `<div style="font-size:11px;margin-top:6px;color:#666">カタログ用トップ</div><div style="display:flex;gap:6px;flex-wrap:wrap">${catImgs.map(imgThumb).join('')}</div>` : ''}
@@ -5476,7 +5481,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? rows.map(v => varName(v.opt)) : [] });
         const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         // 表示用（円換算＋取れる利益＋ROI）。コピーは上のpriceLines（現地価格のみ）
-        const priceRich = priced.map(p => { const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025'; return `<div style="padding:1px 0">${hasVar ? esc(varName(p.opt)) + '：' : ''}<b>${fmtLocal(rg, p.local)}</b> <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}${p.sku ? ` <span style="font-family:monospace;font-size:10px;color:#7b52c4">SKU:${esc(p.sku)}</span>` : ''}</div>`; }).join('');
+        const priceRich = priced.map(p => {
+          const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025';
+          const cost = Number(p.cost) || 0;
+          // 仕入と出品価格(円換算)を並べて誤り検知。出品円換算が仕入以下 or 利益マイナス＝桁/単位ミスの疑い
+          const bad = cost > 0 && (pr.buyerJpy <= cost || pr.profit < 0);
+          const costTag = `<span class="smd-dim">仕入¥${cost.toLocaleString()}</span> <span style="color:#bbb">→</span> `;
+          return `<div style="padding:1px 0${bad ? ';background:#fff4f4;border-radius:4px' : ''}">${hasVar ? esc(varName(p.opt)) + '：' : ''}${costTag}<b>${fmtLocal(rg, p.local)}</b> <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${bad ? ' <span style="color:#d93025;font-weight:700">⚠要確認</span>' : ''}${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}${p.sku ? ` <span style="font-family:monospace;font-size:10px;color:#7b52c4">SKU:${esc(p.sku)}</span>` : ''}</div>`;
+        }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? priced.map(p => `${varName(p.opt)}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
