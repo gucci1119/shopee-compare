@@ -4945,6 +4945,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     descExtra: '',
     overrides: {}, // 国別上書き { [cc]: { title, images, vars: { [i]: { name, price, stock, image, off } } } }
   };
+  let listDragVar = null; // バリエカードのドラッグ並べ替え中インデックス
   const JPY_TO_LOCAL = (jpy, rg) => jpy / rg.rateJpy; // rateJpy=現地→円 なので円→現地は割る
   const roundLocal = (v, unit) => { unit = unit || 1; const r = Math.round(v / unit) * unit; return unit < 1 ? Math.round(r * 100) / 100 : Math.round(r); };
   // 各国の合計手数料率(%)＝販売＋プログラム＋決済（スプシの「合計」列と同じ加算方式。Shopeeは各%を売価から差し引く）
@@ -5320,9 +5321,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 画像のドラッグ&ドロップ。ファイル→onImage(dataURL)、URL文字列→onUrl。
   function wireDrop(el, onImage, onUrl) {
     if (!el || el._dropWired) return; el._dropWired = true;
-    el.addEventListener('dragover', e => { e.preventDefault(); el.style.outline = '2px dashed #7b52c4'; el.style.outlineOffset = '2px'; });
+    el.addEventListener('dragover', e => { if (listDragVar != null) return; e.preventDefault(); el.style.outline = '2px dashed #7b52c4'; el.style.outlineOffset = '2px'; });
     el.addEventListener('dragleave', () => { el.style.outline = ''; });
     el.addEventListener('drop', e => {
+      if (listDragVar != null) return; // バリエ並べ替え中は画像ドロップにしない
       e.preventDefault(); el.style.outline = '';
       const f = e.dataTransfer.files && e.dataTransfer.files[0];
       if (f && /^image\//.test(f.type)) { readImageFile(f, onImage); return; }
@@ -5445,9 +5447,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     wrap.innerHTML = listState.variations.map((v, i) => {
       const nlen = vlen(v.opt); const over = nlen > 30;
       return `<div class="li-vcard" data-i="${i}" style="border:1.5px solid #d3c4ef;border-left:4px solid #7b52c4;border-radius:8px;padding:8px 10px 10px;margin-bottom:0;background:#fcfbff;box-shadow:0 1px 3px rgba(123,82,196,.08)">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-          <span style="background:#7b52c4;color:#fff;font-size:11px;font-weight:700;border-radius:5px;padding:1px 8px">バリエ ${i + 1}</span>
-          <span class="smd-dim" style="font-size:10.5px">明細名・SKU・仕入・在庫・画像</span>
+        <div class="vdrag" data-i="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:grab" title="ドラッグして並べ替え">
+          <span style="background:#7b52c4;color:#fff;font-size:11px;font-weight:700;border-radius:5px;padding:1px 8px">⠿ バリエ ${i + 1}</span>
+          <span class="smd-dim" style="font-size:10.5px">明細名・SKU・仕入・在庫・画像（左の帯をドラッグで並べ替え）</span>
         </div>
         <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
           <input class="li vopt" data-i="${i}" list="li-varfavlist" style="flex:1;min-width:160px" placeholder="選択肢名（例: DS:Digimon Story）" value="${esc(v.opt)}"><button class="smd-btn vfav" data-i="${i}" title="この明細名を★候補に登録">★</button>
@@ -5469,8 +5471,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; upLen(+e.target.dataset.i); listRefresh(); }));
     wrap.querySelectorAll('.vcost').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].cost = Number(e.target.value) || 0; listRefresh(); }));
     wrap.querySelectorAll('.vsku').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].sku = e.target.value; listRefresh(); }));
-    // 各バリエカードに画像ドラッグ&ドロップ（ファイル→設定、URL→設定＋自動取得）
+    // 各バリエカードに画像ドラッグ&ドロップ（ファイル→設定、URL→設定＋自動取得）※並べ替えドラッグ中は無視
     wrap.querySelectorAll('.li-vcard').forEach(card => { const i = +card.dataset.i; wireDrop(card, dataUrl => { listState.variations[i].img = dataUrl; listVarsRender(); }, async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } listState.variations[i].img = url; listVarsRender(); }); });
+    // バリエカードの並べ替え（左の帯をドラッグ→別カードにドロップ）
+    wrap.querySelectorAll('.vdrag').forEach(h => {
+      h.addEventListener('dragstart', e => { listDragVar = +h.dataset.i; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'smdvar'); } catch (_) {} });
+      h.addEventListener('dragend', () => { listDragVar = null; wrap.querySelectorAll('.li-vcard').forEach(c => c.style.boxShadow = '0 1px 3px rgba(123,82,196,.08)'); });
+    });
+    wrap.querySelectorAll('.li-vcard').forEach(card => {
+      card.addEventListener('dragover', e => { if (listDragVar == null) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; card.style.boxShadow = '0 0 0 2px #7b52c4'; });
+      card.addEventListener('dragleave', () => { if (listDragVar != null) card.style.boxShadow = '0 1px 3px rgba(123,82,196,.08)'; });
+      card.addEventListener('drop', e => {
+        if (listDragVar == null) return; e.preventDefault(); e.stopPropagation();
+        const to = +card.dataset.i, from = listDragVar; listDragVar = null;
+        if (from === to || from == null) { listVarsRender(); return; }
+        const arr = listState.variations; const [m] = arr.splice(from, 1); arr.splice(to, 0, m);
+        listVarsRender();
+      });
+    });
     wrap.querySelectorAll('.vstk').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].stock = Number(e.target.value) || 0; listRefresh(); }));
     // 画像欄：入力中はそのまま保持。フォーカスを外した時に商品ページURL（画像直リンクでない）なら自動でog:image取得
     wrap.querySelectorAll('.vimg').forEach(el => {
