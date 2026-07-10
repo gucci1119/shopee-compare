@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.5.0
+// @version      0.5.1
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.5.0';
+  const VER = '0.5.1';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -47,8 +47,10 @@
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
         method: 'GET', url, responseType: 'blob', timeout: timeout || 15000,
-        onload: r => { try { const type = (r.response && r.response.type) || 'image/jpeg'; if (!r.response || r.response.size === 0) return rej(new Error('空レスポンス')); res(new File([r.response], name || 'img.jpg', { type })); } catch (e) { rej(e); } },
-        onerror: () => rej(new Error('画像取得失敗')), ontimeout: () => rej(new Error('タイムアウト')),
+        anonymous: true,                 // Cookie/リファラを外す（mercdnがGM_xhrで固まる対策・過去に有効）
+        headers: { 'Referer': '', 'Origin': '' },
+        onload: r => { try { const type = (r.response && r.response.type) || 'image/jpeg'; if (!r.response || r.response.size === 0) return rej(new Error('空レスポンス status=' + r.status)); res(new File([r.response], name || 'img.jpg', { type })); } catch (e) { rej(e); } },
+        onerror: (e) => rej(new Error('取得失敗 status=' + (e && e.status))), ontimeout: () => rej(new Error('タイムアウト')),
       });
     });
   }
