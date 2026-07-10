@@ -4910,7 +4910,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
   const listState = {
     built: false,
-    name: '', hardware: '', jpseries: '',
+    name: '', hardware: '', jpseries: '', parentSku: '',
     images: '', uploadImgs: [], category: '',
     sellJpy: 0, costJpy: 0,
     roiPct: null, weightG: null, dimW: 0, dimH: 0, dimD: 0, // 価格計算用（未設定は設定の既定値）
@@ -5034,9 +5034,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <button class="smd-btn" id="li-catsave" title="今のカテゴリを候補に登録">＋登録</button>
             <datalist id="li-catlist"></datalist>
           </div>
-          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像。1行1URL。※Shopeeへのアップロードは手動）</label>
+          <label class="lc" style="margin-top:8px">親SKU（カタログのSKU。転記時にコピー用）</label>
+          <input class="li" id="li-psku" placeholder="例: DIGIMON_DS_SWITCH" style="font-family:monospace" spellcheck="false">
+          <label class="lc" style="margin-top:8px">画像（カタログ用トップ画像。1行1URL／📁ファイル／ドラッグ&ドロップも可。※Shopeeへは手動アップ）</label>
           <div class="row" style="gap:6px;align-items:flex-start">
-            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or メルカリ等のリンク（貼ると自動取得）／📁で手元の画像も" style="flex:1"></textarea>
+            <textarea class="li" id="li-img" rows="2" placeholder="画像URL or メルカリ等のリンク（貼ると自動取得）／📁 or ここに画像をドロップ" style="flex:1"></textarea>
             <div style="display:flex;flex-direction:column;gap:4px">
               <button class="smd-btn" id="li-imgfetch" title="メルカリ等の商品リンクから画像(og:image)を取得して追加">🔗 リンクから</button>
               <button class="smd-btn" id="li-imgfile" title="手元の画像ファイルをアップロード（AI生成画像など）">📁 ファイル</button>
@@ -5083,7 +5085,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 入力→state同期（テキストはフォーカス保持のため部分更新）
       const bind = (id, key) => { const el = document.getElementById(id); el.addEventListener('input', () => { listState[key] = el.value; listRefresh(); }); };
       bind('li-name', 'name'); bind('li-hw', 'hardware'); bind('li-jp', 'jpseries');
-      bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier');
+      bind('li-cat', 'category'); bind('li-desc', 'descExtra'); bind('li-vtier', 'varTier'); bind('li-psku', 'parentSku');
       document.getElementById('li-img').addEventListener('input', e => { listState.images = e.target.value; listImgPrev(); listRefresh(); });
       // カタログ画像：フォーカスを外した時、商品ページURL（画像直リンクでない行）は自動でog:imageに変換
       document.getElementById('li-img').addEventListener('change', async e => {
@@ -5171,6 +5173,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // カタログ画像を手元ファイルからアップ（AI生成画像など）
       document.getElementById('li-imgfile').addEventListener('click', () => document.getElementById('li-imgfileinput').click());
       document.getElementById('li-imgfileinput').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) readImageFile(f, url => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(url); listImgPrev(); listRefresh(); }); });
+      // カタログ画像のドラッグ&ドロップ（ファイル→アップ、URL→追加）
+      wireDrop(document.getElementById('li-img'),
+        dataUrl => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(dataUrl); listImgPrev(); listRefresh(); },
+        async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } const ta = document.getElementById('li-img'); ta.value = (ta.value ? ta.value.trim() + '\n' : '') + url; listState.images = ta.value; listImgPrev(); listRefresh(); });
+      wireDrop(document.getElementById('li-imgprev'),
+        dataUrl => { listState.uploadImgs = listState.uploadImgs || []; listState.uploadImgs.push(dataUrl); listImgPrev(); listRefresh(); }, null);
       // ★自動復元：前回の作業内容（オートセーブ）があれば復元＝リロード/タブ閉じでも消えない
       try { const auto = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); if (auto && (auto.name || (auto.variations && auto.variations.length) || auto.category || auto.images)) { listApplyState(auto); setTimeout(() => { listFetchLinks().catch(() => {}); }, 300); } } catch (_) {}
       listVarsRender();
@@ -5192,6 +5200,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rd = new FileReader();
     rd.onload = () => { const im = new Image(); im.onload = () => { const max = 1000; let w = im.width, h = im.height; if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); } const cv = document.createElement('canvas'); cv.width = w; cv.height = h; cv.getContext('2d').drawImage(im, 0, 0, w, h); cb(cv.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => alert('画像を読めませんでした'); im.src = rd.result; };
     rd.readAsDataURL(file);
+  }
+  // 画像のドラッグ&ドロップ。ファイル→onImage(dataURL)、URL文字列→onUrl。
+  function wireDrop(el, onImage, onUrl) {
+    if (!el || el._dropWired) return; el._dropWired = true;
+    el.addEventListener('dragover', e => { e.preventDefault(); el.style.outline = '2px dashed #7b52c4'; el.style.outlineOffset = '2px'; });
+    el.addEventListener('dragleave', () => { el.style.outline = ''; });
+    el.addEventListener('drop', e => {
+      e.preventDefault(); el.style.outline = '';
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f && /^image\//.test(f.type)) { readImageFile(f, onImage); return; }
+      const url = (e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain') || '').trim();
+      if (url && onUrl) onUrl(url);
+    });
   }
   // 復元/読込時：カタログ＋バリエ画像の「商品ページURL」を自動でog:imageに変換（ブリッジ稼働時）
   async function listFetchLinks() {
@@ -5237,21 +5258,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, cost: v.cost, stock: v.stock, img: v.img })) };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, category: s.category, images: s.images, uploadImgs: s.uploadImgs || [], roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img })) };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
     sv('li-name', listState.name); sv('li-hw', listState.hardware); sv('li-jp', listState.jpseries);
-    sv('li-cat', listState.category); sv('li-img', listState.images); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
+    sv('li-cat', listState.category); sv('li-psku', listState.parentSku); sv('li-img', listState.images); sv('li-desc', listState.descExtra); sv('li-vtier', listState.varTier);
     sv('li-roi', listState.roiPct); sv('li-weight', listState.weightG); sv('li-dw', listState.dimW || ''); sv('li-dh', listState.dimH || ''); sv('li-dd', listState.dimD || ''); sv('li-cost', listState.costJpy || '');
   }
   function listApplyState(st) {
     st = st || {};
     Object.assign(listState, {
-      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
+      name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
       varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0,
-      variations: (st.variations || []).map(v => ({ opt: v.opt || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
+      variations: (st.variations || []).map(v => ({ opt: v.opt || '', sku: v.sku || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '' })),
     });
     listSyncForm(); listVarsRender(); listImgPrev(); listRefresh();
   }
@@ -5293,12 +5314,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const vlen = (opt) => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: opt }).length; // 明細名(全国共通30字上限)の実長
     wrap.innerHTML = listState.variations.map((v, i) => {
       const nlen = vlen(v.opt); const over = nlen > 30;
-      return `<div style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
-        <div class="row" style="gap:8px;align-items:center">
-          <input class="li vopt" data-i="${i}" style="flex:1" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
+      return `<div class="li-vcard" data-i="${i}" style="border:1px solid #eee;border-radius:7px;padding:6px 7px;margin-bottom:6px">
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <input class="li vopt" data-i="${i}" style="flex:1;min-width:160px" placeholder="選択肢名（例: Cartridge Only）" value="${esc(v.opt)}">
           <span class="vlen" data-i="${i}" style="font-size:10px;white-space:nowrap;color:${over ? '#d93025' : '#999'}" title="明細名『${esc(fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v.opt }))}』の文字数（全国共通30字まで）">${nlen}/30${over ? '⚠' : ''}</span>
-          <input class="li vcost" data-i="${i}" type="number" style="width:96px" placeholder="仕入円" value="${v.cost || ''}" title="この明細の仕入値(円)。ここから各国価格を自動計算">
-          <input class="li vstk" data-i="${i}" type="number" style="width:60px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
+          <input class="li vsku" data-i="${i}" style="width:130px;font-family:monospace;font-size:11px" placeholder="SKU" value="${esc(v.sku || '')}" spellcheck="false" title="この明細のSKU">
+          <input class="li vcost" data-i="${i}" type="number" style="width:90px" placeholder="仕入円" value="${v.cost || ''}" title="この明細の仕入値(円)。ここから各国価格を自動計算">
+          <input class="li vstk" data-i="${i}" type="number" style="width:56px" placeholder="在庫" value="${v.stock != null ? v.stock : ''}">
           <button class="smd-btn vdel" data-i="${i}" title="このバリエを削除">✕</button>
         </div>
         <div class="row" style="gap:6px;align-items:center;margin-top:5px">
@@ -5312,6 +5334,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const upLen = (i) => { const el = wrap.querySelector('.vlen[data-i="' + i + '"]'); if (el) { const n = vlen(listState.variations[i].opt); el.textContent = n + '/30' + (n > 30 ? '⚠' : ''); el.style.color = n > 30 ? '#d93025' : '#999'; } };
     wrap.querySelectorAll('.vopt').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].opt = e.target.value; upLen(+e.target.dataset.i); listRefresh(); }));
     wrap.querySelectorAll('.vcost').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].cost = Number(e.target.value) || 0; listRefresh(); }));
+    wrap.querySelectorAll('.vsku').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].sku = e.target.value; listRefresh(); }));
+    // 各バリエカードに画像ドラッグ&ドロップ（ファイル→設定、URL→設定＋自動取得）
+    wrap.querySelectorAll('.li-vcard').forEach(card => { const i = +card.dataset.i; wireDrop(card, dataUrl => { listState.variations[i].img = dataUrl; listVarsRender(); }, async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } listState.variations[i].img = url; listVarsRender(); }); });
     wrap.querySelectorAll('.vstk').forEach(el => el.addEventListener('input', e => { listState.variations[+e.target.dataset.i].stock = Number(e.target.value) || 0; listRefresh(); }));
     // 画像欄：入力中はそのまま保持。フォーカスを外した時に商品ページURL（画像直リンクでない）なら自動でog:image取得
     wrap.querySelectorAll('.vimg').forEach(el => {
@@ -5375,13 +5400,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // 価格（現地）＝重量ベースで各バリエの仕入(円)から算出
         const priced = rows.map(v => {
           const local = roundLocal(priceLocalFor(rg.cc, v.cost || 0), settings.priceRound);
-          return { opt: v.opt, local, stock: v.stock, cost: v.cost };
+          return { opt: v.opt, sku: v.sku, local, stock: v.stock, cost: v.cost };
         });
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
         const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? rows.map(v => varName(v.opt)) : [] });
         const priceLines = priced.map(p => `${hasVar ? esc(varName(p.opt)) + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         // 表示用（円換算＋取れる利益＋ROI）。コピーは上のpriceLines（現地価格のみ）
-        const priceRich = priced.map(p => { const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025'; return `<div style="padding:1px 0">${hasVar ? esc(varName(p.opt)) + '：' : ''}<b>${fmtLocal(rg, p.local)}</b> <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}</div>`; }).join('');
+        const priceRich = priced.map(p => { const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025'; return `<div style="padding:1px 0">${hasVar ? esc(varName(p.opt)) + '：' : ''}<b>${fmtLocal(rg, p.local)}</b> <span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc};font-size:11px">ROI${Math.round(pr.roi)}%</span>${p.stock != null ? ` <span class="smd-dim">在庫${p.stock}</span>` : ''}${p.sku ? ` <span style="font-family:monospace;font-size:10px;color:#7b52c4">SKU:${esc(p.sku)}</span>` : ''}</div>`; }).join('');
+        const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? priced.map(p => `${varName(p.opt)}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
         return `<div style="border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:8px">
@@ -5398,6 +5424,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             ${cp('説明', desc)}
             ${cp('item specifics', specs)}
             ${listState.category ? cp('カテゴリ', listState.category) : ''}
+            ${listState.parentSku ? cp('親SKU', listState.parentSku) : ''}
+            ${(hasVar && priced.some(p => p.sku)) ? cp('SKU一覧', skuText) : ''}
           </div>
         </div>`;
       }).join('') + `</div>`;
