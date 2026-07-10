@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.2
+// @version      0.6.3
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.2';
+  const VER = '0.6.3';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -181,27 +181,35 @@
   async function createFromJob(job, publish) {
     const base = currentTmplBody();
     if (!base) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャ→「💾保存」で雛形にしてください'); return; }
+    // 画像未アップなら、この場でジョブ画像(カタログ＋バリエ別)を自動アップ（手動🖼️不要）
+    if (!jobImgResult.catalog.length && !Object.keys(jobImgResult.variations).length) {
+      const hasJobImgs = (job.images || []).some(u => /^https?:/.test(u)) || (job.variations || []).some(v => v.image && /^https?:/.test(v.image));
+      if (hasJobImgs) { log('画像未アップ→自動アップを実行します…', '#1565c0'); await autoUploadJobImages(job); }
+    }
     // 画像は jobImgResult(自動アップの結果) を優先。無ければProduct Imagesをスキャン（手動アップ用フォールバック）
     let _catIds = jobImgResult.catalog.slice(); const _varIds = Object.assign({}, jobImgResult.variations);
-    if (!_catIds.length && !Object.keys(_varIds).length) { uploadedImgIds.length = 0; collectPageImageIds(); _catIds = uploadedImgIds.slice(0, 9); }
+    if (!_catIds.length) { uploadedImgIds.length = 0; collectPageImageIds(); _catIds = uploadedImgIds.slice(0, 9); }
     const tmpl = JSON.parse(JSON.stringify(base)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
     if (job.weightG) { const u = (pi.weight && pi.weight.unit != null) ? pi.weight.unit : 1; pi.weight = { value: String(u === 1 ? (job.weightG / 1000) : job.weightG), unit: u }; } // 雛形の単位を尊重(PH=1:kg / VN等はg)
     if (job.dims) pi.dimension = { width: String(job.dims.w || ''), height: String(job.dims.h || ''), length: String(job.dims.d || '') };
     pi.parent_sku = job.parentSku || '';
-    if (uploadedImgIds.length) pi.images = uploadedImgIds.slice(0, 9);
+    // pi.images はジョブ由来のカタログidで上書き。取得できなければ雛形の焼付き画像を勝手に使わない（＝要確認）
+    if (_catIds.length) pi.images = _catIds.slice(0, 9);
+    else if (!confirm('カタログ画像を取得できませんでした（自動アップ失敗）。\n雛形に焼き付いた画像のまま作成すると、全バリエが雛形の画像になります。\nこのまま作成しますか？（キャンセル推奨）')) return;
     const cover = (pi.images && pi.images[0]) || '';
     const vars = job.variations || [];
     if (vars.length > 1 || (vars.length === 1 && vars[0].name)) {
-      pi.std_tier_variation_list = [{ id: 0, custom_value: job.varTier || 'Title', group_id: '0', value_list: vars.map(v => ({ id: 0, custom_value: v.name, selling_point: '', image_id: cover })) }];
+      pi.std_tier_variation_list = [{ id: 0, custom_value: job.varTier || 'Title', group_id: '0', value_list: vars.map((v, i) => ({ id: 0, custom_value: v.name, selling_point: '', image_id: _varIds[i] || cover })) }];
       pi.model_list = vars.map((v, i) => ({ id: 0, tier_index: [i], is_default: false, sku: v.sku || '', price: String(v.price), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }));
     } else {
       const v = vars[0] || {}; pi.std_tier_variation_list = [];
       pi.model_list = [{ id: 0, tier_index: [], is_default: true, sku: job.parentSku || '', price: String(v.price || '0'), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }];
     }
     pi.unlisted = !publish; tmpl.is_draft = false;
-    if (!confirm((publish ? '【公開】' : '【非公開・下書き】') + ' で「' + (job.title || '').slice(0, 40) + '」を作成します。\n※カテゴリ/ブランド/属性/物流は雛形（直近の手動作成）を流用。画像は' + (uploadedImgIds.length ? '先行アップの' + uploadedImgIds.length + '枚' : '雛形と同じ') + '。よろしいですか？')) return;
+    const _nVar = Object.keys(_varIds).length;
+    if (!confirm((publish ? '【公開】' : '【非公開・下書き】') + ' で「' + (job.title || '').slice(0, 40) + '」を作成します。\n※カテゴリ/ブランド/属性/物流は雛形（直近の手動作成）を流用。\n画像：カタログ' + _catIds.length + '枚 / バリエ別' + _nVar + '枚' + (_nVar < vars.length && vars.length > 1 ? '（残りはカタログ1枚目で代替）' : '') + '。\nよろしいですか？')) return;
     log('🚀 create_product_info 実行中…');
     try {
       const cds = (document.cookie.match(/SPC_CDS=([^;]+)/) || [])[1] || '';
