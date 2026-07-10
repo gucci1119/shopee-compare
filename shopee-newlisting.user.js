@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.4.7
+// @version      0.5.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.4.7';
+  const VER = '0.5.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -69,12 +69,8 @@
   const CREATE_RE = /(add_product|create_product|product\/add|create_item|add_item|publish)/i;
   function recordMaybe(url, method, body, resp) {
     try {
-      // 画像の image_id を拾う。①MMSの img_id ②Shopeeが実際に使う "ph-..."/"sg-..." 等のCDN id（手動アップした画像も自動収集）
-      if (typeof body === 'string') {
-        const m = body.match(/"img_id"\s*:\s*"([^"]+)"/); if (m) lastImgId = m[1];
-        const ids = body.match(/"(?:image_id|img_id)"\s*:\s*"([a-z]{2,4}-[0-9a-z-]{10,})"/g) || [];
-        ids.forEach(s => { const id = s.match(/"([a-z]{2,4}-[0-9a-z-]{10,})"/)[1]; if (id && !uploadedImgIds.includes(id)) { uploadedImgIds.push(id); if (logEl) log('🖼️ 画像を検出 image_id …' + id.slice(-8) + '（計' + uploadedImgIds.length + '枚）', '#1a7f37'); if (fillBtnRefresh) fillBtnRefresh(); } });
-      }
+      // ※画像の image_id は通信からは拾わない（おすすめ商品等の無関係idが混ざるため）。DOMの collectPageImageIds のみ使用
+      if (typeof body === 'string') { const m = body.match(/"img_id"\s*:\s*"([^"]+)"/); if (m) lastImgId = m[1]; }
       if (typeof body === 'string' && /create_product_info/.test(url || '')) { try { lastCreateBody = JSON.parse(body); try { localStorage.setItem('smdNlTmpl_' + location.host, body); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); log('💾 雛形を保存しました（次回以降も記憶）', '#1a7f37'); } catch (_) {} }
       if (CREATE_RE.test(url || '')) {
         captures.push({ url, method, body: (typeof body === 'string' ? body.slice(0, 200000) : ''), resp: (typeof resp === 'string' ? resp.slice(0, 20000) : '') });
@@ -90,22 +86,54 @@
   function saveTmpls(o) { try { localStorage.setItem(TKEY, JSON.stringify(o)); } catch (_) {} }
   let selTmplName = ''; // パネルで選択中の雛形名（空=直近の作成 lastCreateBody）
   function currentTmplBody() { const o = getTmpls(); if (selTmplName && o[selTmplName]) return o[selTmplName]; return lastCreateBody; }
-  // ページ上のアップ済み画像サムネ(img src)から Shopee CDN image_id を読み取る（手動アップした画像を確実に拾う）
+  // 「Product Images」枠のプレビュー画像だけから Shopee CDN image_id を読む（推薦パネル等を除外）
   const CDN_ID_RE = /([a-z]{2,4}-\d{6,}-[0-9a-z]{4,}-[0-9a-z]{8,})/;
+  function productImageScope() {
+    const lbl = $$('*').find(e => e.children.length === 0 && /product images/i.test(norm(e.textContent)) && norm(e.textContent).length < 20);
+    if (lbl) { let p = lbl; for (let k = 0; k < 5 && p; k++) { p = p.parentElement; if (p && $$('.eds-upload, [class*="upload"]', p).length) return p; } }
+    return null;
+  }
   function collectPageImageIds() {
     const before = uploadedImgIds.length;
-    const scope = $$('.eds-upload img, [class*="upload"] img, [class*="image-manager"] img, [class*="ImageManager"] img');
-    scope.forEach(im => { const r = im.getBoundingClientRect(); if (r.left > window.innerWidth * 0.6) return; /* 右の推薦パネル除外 */ const s = im.currentSrc || im.src || im.getAttribute('src') || ''; const m = s.match(CDN_ID_RE); if (m && !uploadedImgIds.includes(m[1])) uploadedImgIds.push(m[1]); });
+    const scope = productImageScope();
+    const imgs = scope ? $$('img', scope) : $$('.eds-upload img').filter(im => im.getBoundingClientRect().left < window.innerWidth * 0.5);
+    imgs.forEach(im => { const s = im.currentSrc || im.src || im.getAttribute('src') || ''; const m = s.match(CDN_ID_RE); if (m && !uploadedImgIds.includes(m[1])) uploadedImgIds.push(m[1]); });
     const added = uploadedImgIds.length - before;
-    if (logEl) log('🖼️ ページから画像 image_id を取込：+' + added + '（計' + uploadedImgIds.length + '枚）', added ? '#1a7f37' : '#8a6d3b');
+    if (logEl) log('🖼️ Product Imagesから id取込 +' + added + '（計' + uploadedImgIds.length + '枚）' + (uploadedImgIds.length ? ' […' + uploadedImgIds.map(x => x.slice(-6)).join(', …') + ']' : ''), added ? '#1a7f37' : '#8a6d3b');
     if (fillBtnRefresh) fillBtnRefresh();
     return added;
+  }
+  // ★コンポーザーの画像(メルカリ直リンク等)を自動でShopeeにアップ→image_id化（手動アップ不要にするのが目的）
+  async function autoUploadJobImages(job) {
+    uploadedImgIds.length = 0; // 毎回リセット（前回分の混入防止）
+    const imgs = (job.images || []).filter(u => /^https?:/.test(u)).slice(0, 9);
+    if (!imgs.length) { log('ジョブに画像URLがありません（コンポーザーでカタログ画像を入れて）', '#d93025'); return; }
+    const scope = productImageScope();
+    const fin = (scope && $$('input[type=file]', scope)[0]) || document.querySelector('input.eds-upload__input, .eds-upload input[type=file], input[type=file]');
+    if (!fin) { log('✗ Product Images のアップロード枠が見つからず（🔍診断を）', '#d93025'); return; }
+    for (let i = 0; i < imgs.length; i++) {
+      log('画像' + (i + 1) + '/' + imgs.length + ' 取得中…（メルカリ→ダウンロード）');
+      let file = null;
+      try { file = await Promise.race([fetchImageFile(imgs[i], 'img' + i + '.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
+      catch (e) { log('✗ 画像' + (i + 1) + ' 取得失敗: ' + e.message + '（GM_xhr不調＝この画像はスキップ）', '#d93025'); continue; }
+      const before = uploadedImgIds.length;
+      log('・Shopeeにアップロード中…（クロップが出たら自動確定）');
+      setFile(fin, file);
+      let w = 0; while (w < 50 && uploadedImgIds.length === before) {
+        await sleep(500); w++;
+        try { const dlg = [...document.querySelectorAll('[role=dialog],[class*=crop],[class*=cropper]')].find(d => d.offsetParent !== null && [...d.querySelectorAll('button')].some(b => b.offsetParent !== null)); if (dlg) { const ok = [...dlg.querySelectorAll('button')].find(b => b.offsetParent !== null && /(confirm|確定|完成|ok|apply|save|保存|use|使用|done)/i.test(norm(b.textContent)) && !/(cancel|取消|back|reset)/i.test(norm(b.textContent))); if (ok && !ok.__c) { ok.__c = true; ok.click(); log('・クロップ自動確定'); } } } catch (_) {}
+        collectPageImageIds();
+      }
+      log(uploadedImgIds.length > before ? ('✓ 画像' + (i + 1) + ' アップ完了') : ('△ 画像' + (i + 1) + ' id未確認（サムネ未出現）'), uploadedImgIds.length > before ? '#1a7f37' : '#8a6d3b');
+    }
+    log('自動アップ完了：計 ' + uploadedImgIds.length + ' 枚', uploadedImgIds.length ? '#1a7f37' : '#d93025');
+    if (fillBtnRefresh) fillBtnRefresh();
   }
   // ジョブ＋雛形 から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
   async function createFromJob(job, publish) {
     const base = currentTmplBody();
     if (!base) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャ→「💾保存」で雛形にしてください'); return; }
-    collectPageImageIds(); // 作成前に、ページに手動アップした画像のidを取り込む
+    uploadedImgIds.length = 0; collectPageImageIds(); // 作成前に、今Product Imagesにある画像idを取り込む（毎回フレッシュ）
     const tmpl = JSON.parse(JSON.stringify(base)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
@@ -186,7 +214,7 @@
            </div>`}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
-          <button class="nl-img" style="padding:6px;border:1px solid #1565c0;background:#eef4ff;color:#1565c0;border-radius:6px;cursor:pointer;font-weight:700" title="Product Imagesに手動で追加した画像のidをページから取り込む（GM_xhr不要・確実）">🖼️ 画像を取込</button>
+          <button class="nl-img" style="padding:6px;border:1px solid #1565c0;background:#eef4ff;color:#1565c0;border-radius:6px;cursor:pointer;font-weight:700" title="コンポーザーの画像(メルカリ等)を自動でShopeeにアップ→image_id化（手動アップ不要）">🖼️ 画像を自動アップ</button>
         </div>
         <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:6px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
         <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
@@ -210,7 +238,7 @@
     logEl = box.querySelector('.nl-log'); capEl = box.querySelector('.nl-cap');
     box.querySelector('.nl-x').addEventListener('click', () => box.remove());
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
-    const imgBtn = box.querySelector('.nl-img'); if (imgBtn) imgBtn.addEventListener('click', () => collectPageImageIds());
+    const imgBtn = box.querySelector('.nl-img'); if (imgBtn && job) imgBtn.addEventListener('click', () => autoUploadJobImages(job));
     const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
     const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl'), sel = box.querySelector('.nl-tmplsel');
     const renderTmplSel = () => {
