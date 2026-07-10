@@ -73,10 +73,17 @@
     } catch (_) {}
   }
   let fillBtnRefresh = null;
-  // ジョブ＋雛形(直近の作成) から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
+  // ===== 名前つき雛形（中古/新品/カテゴリ別に複数保存・国=host別） =====
+  const TKEY = 'smdNlTmpls_' + location.host;
+  function getTmpls() { try { return JSON.parse(localStorage.getItem(TKEY) || '{}') || {}; } catch (_) { return {}; } }
+  function saveTmpls(o) { try { localStorage.setItem(TKEY, JSON.stringify(o)); } catch (_) {} }
+  let selTmplName = ''; // パネルで選択中の雛形名（空=直近の作成 lastCreateBody）
+  function currentTmplBody() { const o = getTmpls(); if (selTmplName && o[selTmplName]) return o[selTmplName]; return lastCreateBody; }
+  // ジョブ＋雛形 から create_product_info を組み立てて作成。publish=falseで非公開(Save and Delist相当)
   async function createFromJob(job, publish) {
-    if (!lastCreateBody) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャしてください（それを雛形に使います）'); return; }
-    const tmpl = JSON.parse(JSON.stringify(lastCreateBody)); const pi = tmpl.product_info || (tmpl.product_info = {});
+    const base = currentTmplBody();
+    if (!base) { alert('先に手動で1件「Save and Delist」して作成APIをキャプチャ→「💾保存」で雛形にしてください'); return; }
+    const tmpl = JSON.parse(JSON.stringify(base)); const pi = tmpl.product_info || (tmpl.product_info = {});
     pi.name = job.title || pi.name;
     pi.description_info = { description: JSON.stringify({ field_list: [{ type: 0, value: job.description || '' }] }), description_type: 'json' };
     if (job.weightG) { const u = (pi.weight && pi.weight.unit != null) ? pi.weight.unit : 1; pi.weight = { value: String(u === 1 ? (job.weightG / 1000) : job.weightG), unit: u }; } // 雛形の単位を尊重(PH=1:kg / VN等はg)
@@ -159,8 +166,13 @@
           <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:${job ? '#fff' : '#f2f2f2'};border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'}"${job ? '' : ' disabled'}>🖼️ 画像先行アップ</button>
         </div>
         <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:6px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
-          <button class="nl-create-draft" style="padding:8px;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="ジョブ＋雛形(直近の作成)から create_product_info で【非公開】作成">🚀 作成（非公開）</button>
+        <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;color:#888;white-space:nowrap">使う雛形</span>
+          <select class="nl-tmplsel" style="flex:1;font-size:11px;padding:3px"></select>
+          <button class="nl-tmplsave" style="font-size:10px;padding:3px 6px;cursor:pointer;white-space:nowrap" title="直近に手動作成した内容を、名前をつけて雛形に保存（例：中古ゲーム／新品ゲーム）">💾保存</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
+          <button class="nl-create-draft" style="padding:8px;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="ジョブ＋選択中の雛形から create_product_info で【非公開】作成">🚀 作成（非公開）</button>
           <button class="nl-create-pub" style="padding:8px;border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="同じく【公開】で作成（ライブに出ます）">🚀 作成＋公開</button>
         </div>
         <div class="nl-tmpl" style="font-size:10px;color:#888;margin-bottom:8px"></div>
@@ -177,9 +189,25 @@
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
     const imgBtn = box.querySelector('.nl-img'); if (job) imgBtn.addEventListener('click', () => preUpload(job));
     const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
-    const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl');
-    fillBtnRefresh = () => { if (tmplEl) tmplEl.innerHTML = lastCreateBody ? '雛形あり（この内容のカテゴリ/ブランド/物流を流用して作成できます）✅' : '<span style="color:#c0392b">雛形なし：先に手動で1件「Save and Delist」して雛形をキャプチャしてください</span>'; };
+    const cd = box.querySelector('.nl-create-draft'), cp = box.querySelector('.nl-create-pub'), tmplEl = box.querySelector('.nl-tmpl'), sel = box.querySelector('.nl-tmplsel');
+    const renderTmplSel = () => {
+      const o = getTmpls(); const names = Object.keys(o);
+      sel.innerHTML = '<option value="">（直近の作成）</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
+      if (selTmplName && o[selTmplName]) sel.value = selTmplName; else selTmplName = '';
+    };
+    fillBtnRefresh = () => {
+      renderTmplSel();
+      const has = !!currentTmplBody();
+      if (tmplEl) tmplEl.innerHTML = has ? '雛形あり ✅（カテゴリ/ブランド/物流を流用して作成）' : '<span style="color:#c0392b">雛形なし：手動で1件「Save and Delist」→「💾保存」で雛形化</span>';
+    };
     fillBtnRefresh();
+    sel.addEventListener('change', () => { selTmplName = sel.value; fillBtnRefresh(); });
+    box.querySelector('.nl-tmplsave').addEventListener('click', () => {
+      if (!lastCreateBody) { alert('直近の作成がありません。先に手動で1件「Save and Delist」してから💾保存してください'); return; }
+      const name = prompt('この雛形の名前（例: 中古ゲーム / 新品ゲーム / コンソール）:', '中古ゲーム'); if (!name) return;
+      const o = getTmpls(); o[name.trim()] = lastCreateBody; saveTmpls(o); selTmplName = name.trim(); fillBtnRefresh();
+      log('💾 雛形「' + name.trim() + '」を保存しました', '#1a7f37');
+    });
     if (job && cd) cd.addEventListener('click', () => createFromJob(job, false));
     if (job && cp) cp.addEventListener('click', () => createFromJob(job, true));
     const loadBtn = box.querySelector('.nl-load');
