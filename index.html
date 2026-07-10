@@ -3587,6 +3587,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (e) { /* 取れなければ raw のみで動く */ }
     return m;
   }
+  // 【コンポーザー用】既存出品(同カテゴリ)からitem specifics(属性)を取り込み→Key=Valueテキスト化。要ライブ
+  async function importSpecificsText(cc) {
+    if (state.mode !== 'live') { alert('ライブ（ブリッジ入り）PCで実行してください'); return null; }
+    const rg = regionByCc(cc); if (!rg) return null;
+    const inp = prompt(cc + ' の既存出品（同カテゴリの近い商品）の 商品URL または product_id:'); if (!inp) return null;
+    const pid = (String(inp).match(/(\d{6,})/) || [])[1]; if (!pid) { alert('product_id が読み取れません'); return null; }
+    try {
+      const pi = await productRead(rg.host, pid);
+      const attrs = pi.attributes || [];
+      if (!attrs.length) { alert('この商品には item specifics（属性）がありません'); return null; }
+      const catId = pi.category_id || (pi.category_info && (pi.category_info.category_id || (Array.isArray(pi.category_info) && pi.category_info[pi.category_info.length - 1]))) || null;
+      const tree = await attrTree(rg.host, catId);
+      const lines = attrs.map(a => {
+        const def = tree.get(a.attribute_id) || {};
+        const name = def.name || ('attr_' + a.attribute_id);
+        const vals = (a.attribute_values || []).map(v => (v.value_id != null ? (((def.options || []).find(o => o.id === v.value_id) || {}).name || v.value_id) : (v.raw_value != null ? (v.raw_value + (v.unit ? v.unit : '')) : null))).filter(x => x != null && x !== '');
+        return vals.length ? name + '=' + vals.join(',') : null;
+      }).filter(Boolean);
+      if (!lines.length) { alert('属性値を取得できませんでした（rawのみ/権限の可能性）'); return null; }
+      return lines.join('\n');
+    } catch (e) { alert('取込失敗: ' + e.message); return null; }
+  }
   const modelPrice = (m) => { const p = m && m.price_info; return p ? String(p.input_normal_price != null ? p.input_normal_price : (p.normal_price != null ? p.normal_price : '')) : ''; };
   const modelName = (m, tiers) => (m.tier_index || []).map((oi, ti) => { const t = tiers[ti]; const o = t && (t.value_list || [])[oi]; return o ? o.custom_value : ''; }).join(' / ') || (m.name || '（既定）');
   // 属性値をvalue属性用にエスケープ
@@ -6015,7 +6037,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <textarea class="li cov-images" rows="2" placeholder="空欄なら全国共通の画像を使用" style="width:100%">${esc((listState.overrides[cc] || {}).images || '')}</textarea>
         <label class="lc" style="margin-top:10px">item specifics（この国用・1行1項目 Key=Value）<span class="smd-dim">${(settings.listSpecsByCc || {})[cc] ? 'この国のテンプレ適用中' : '全国共通テンプレ'}</span></label>
         <textarea class="li cov-specs" rows="3" placeholder="${esc(specsEff)}" style="width:100%;font-family:monospace;font-size:12px">${esc((listState.overrides[cc] || {}).specifics != null ? (listState.overrides[cc] || {}).specifics : ((settings.listSpecsByCc || {})[cc] || ''))}</textarea>
-        <button class="cov-specstpl smd-btn" style="font-size:11px;margin-top:4px" title="今の内容を「${cc}の国別テンプレ」として保存（次回以降この国の既定に）">💾 ${cc}のテンプレに保存</button>
+        <div class="row" style="gap:6px;margin-top:4px">
+          <button class="cov-specstpl smd-btn" style="font-size:11px" title="今の内容を「${cc}の国別テンプレ」として保存（次回以降この国の既定に）">💾 ${cc}のテンプレに保存</button>
+          <button class="cov-specsimport smd-btn" style="font-size:11px;background:#eef4ff;border-color:#1565c0;color:#1565c0" title="この国の既存出品(同カテゴリの近い商品)から属性を取り込む（要ライブ・β）">📥 既存出品から取込(β)</button>
+        </div>
         <label class="lc" style="margin-top:10px">説明の追記（この国用・空欄=全国共通）</label>
         <textarea class="li cov-descx" rows="2" placeholder="${esc(listState.descExtra || '（全国共通の追記）')}" style="width:100%">${esc((listState.overrides[cc] || {}).descExtra != null ? (listState.overrides[cc] || {}).descExtra : '')}</textarea>
         <div style="font-weight:700;font-size:12px;border-top:1px solid #eee;padding-top:10px;margin-top:12px">明細（${hasVar ? rows.length + '個' : '単品'}）— この国だけ 名前・価格・在庫・画像・採用可否を変更</div>
@@ -6041,6 +6066,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     box.querySelector('.cov-reset').addEventListener('click', () => {
       if (!confirm(cc + ' の国別上書きを全部消して、全国共通に戻します。よろしいですか？')) return;
       delete listState.overrides[cc]; close(); listRefresh();
+    });
+    // 既存出品から specifics を取り込む（β・要ライブ）
+    box.querySelector('.cov-specsimport').addEventListener('click', async () => {
+      const b = box.querySelector('.cov-specsimport'); const o = b.textContent; b.disabled = true; b.textContent = '⏳取込中';
+      const t = await importSpecificsText(cc); b.disabled = false; b.textContent = o;
+      if (t != null) box.querySelector('.cov-specs').value = t;
     });
     // この国のspecificsをテンプレとして保存（settings.listSpecsByCc[cc]）
     box.querySelector('.cov-specstpl').addEventListener('click', () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.2.0
+// @version      0.3.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.2.0';
+  const VER = '0.3.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -121,12 +121,13 @@
              <textarea class="nl-paste" placeholder="ここに自動出品ジョブ(トークン)を貼り付け" style="width:100%;height:44px;margin-top:4px;font-size:10px;box-sizing:border-box"></textarea>
              <button class="nl-load" style="margin-top:4px;padding:5px 10px;border:1px solid #7b52c4;background:#7b52c4;color:#fff;border-radius:6px;cursor:pointer;font-weight:600">読込</button>
            </div>`}
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
           <button class="nl-diag" style="padding:6px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔍 ページ診断</button>
           <button class="nl-img" style="padding:6px;border:1px solid #ddd;background:${job ? '#fff' : '#f2f2f2'};border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'}"${job ? '' : ' disabled'}>🖼️ 画像先行アップ</button>
         </div>
+        <button class="nl-fill" style="width:100%;padding:7px;border:1px solid #7b52c4;background:${job ? '#7b52c4' : '#ccc'};color:#fff;border-radius:6px;cursor:${job ? 'pointer' : 'not-allowed'};font-weight:700;margin-bottom:8px"${job ? '' : ' disabled'}>▶ タイトル/説明/価格を自動入力（試験）</button>
         <div style="font-size:11px;background:#f3eefb;border:1px solid #e0d3f5;border-radius:6px;padding:6px 8px;margin-bottom:8px">
-          <b>手順（初版）</b>：①🔍診断 と ②🖼️画像アップ を押してログを開発者へ。③その後<b>手動でこの商品を1件「発行」</b>すると、下の「作成API」に通信が記録されます → <b>「コピー」して開発者に渡す</b>と、次版で発行まで自動化します。
+          <b>手順</b>：①<b>▶自動入力</b>で埋まる項目を埋める（カテゴリ/バリエ/画像は手動補完）→ ②🖼️画像アップ → ③<b>手動で1件「発行」</b>すると下の「作成API」に通信が記録される → <b>「コピー」して開発者へ</b>渡せば発行まで全自動化。※自動入力はβ＝入らない欄があれば🔍診断ログを共有ください（精度UP）。
         </div>
         <div style="font-weight:600;font-size:11px;margin-bottom:2px">📡 作成API（手動発行で記録）</div>
         <div class="nl-cap" style="max-height:70px;overflow:auto;background:#faf8ff;border:1px solid #eee;border-radius:6px;padding:6px;font-size:11px;margin-bottom:6px"></div>
@@ -137,6 +138,7 @@
     box.querySelector('.nl-x').addEventListener('click', () => box.remove());
     box.querySelector('.nl-diag').addEventListener('click', () => diagnose());
     const imgBtn = box.querySelector('.nl-img'); if (job) imgBtn.addEventListener('click', () => preUpload(job));
+    const fillBtn = box.querySelector('.nl-fill'); if (job && fillBtn) fillBtn.addEventListener('click', () => tryAutofill(job));
     const loadBtn = box.querySelector('.nl-load');
     if (loadBtn) loadBtn.addEventListener('click', () => {
       const tok = (box.querySelector('.nl-paste').value || '').trim(); const j = decodeJob(tok);
@@ -171,6 +173,30 @@
       if (hit) log('見出し「' + k + '」: あり (' + norm(hit.textContent).slice(0, 20) + ')');
     });
     log('★このログ全文を開発者に伝えてください（セレクタ確定に使います）', '#7b52c4');
+  }
+
+  // ===== ▶ 自動入力（β）：タイトル/説明/価格を見出しヒューリスティックで埋める =====
+  function setReactValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set; setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const labelText = (el) => (el.getAttribute('placeholder') || el.getAttribute('aria-label') || (el.labels && el.labels[0] && norm(el.labels[0].textContent)) || '').toLowerCase();
+  const nearLabel = (el) => { let p = el; for (let k = 0; k < 4 && p; k++) { p = p.parentElement; if (!p) break; const t = norm(p.textContent || ''); if (t && t.length < 70) return t.toLowerCase(); } return ''; };
+  function tryAutofill(job) {
+    logEl.innerHTML = ''; log('▶ 自動入力（β）を試みます…');
+    const vis = $$('input,textarea').filter(e => e.offsetParent !== null && !e.disabled && e.type !== 'file' && e.type !== 'checkbox' && e.type !== 'radio' && e.type !== 'hidden');
+    const match = (el, re) => re.test(labelText(el)) || re.test(nearLabel(el));
+    const titleEl = vis.find(e => match(e, /product name|商品名|nama produk|ชื่อสินค้า|tên sản phẩm|nome do produto|t[íi]tulo|(^|[^a-z])title([^a-z]|$)|(^|[^a-z])name([^a-z]|$)/i));
+    if (titleEl && job.title) { setReactValue(titleEl, job.title); log('✓ タイトル入力: ' + job.title.slice(0, 40)); } else log('△ タイトル欄が見つからず（手動で）', '#8a6d3b');
+    const tas = $$('textarea').filter(e => e.offsetParent !== null && !e.disabled && e !== titleEl);
+    const descEl = tas.find(e => match(e, /description|説明|deskripsi|mô t[ảa]|รายละเอียด|descri/i)) || tas.sort((a, b) => (b.offsetHeight * b.offsetWidth) - (a.offsetHeight * a.offsetWidth))[0];
+    if (descEl && job.description) { setReactValue(descEl, job.description); log('✓ 説明入力'); } else log('△ 説明欄が見つからず（手動で）', '#8a6d3b');
+    if ((job.variations || []).length === 1 && job.variations[0].price) {
+      const priceEl = vis.find(e => e !== titleEl && match(e, /price|価格|harga|gi[áa]|ราคา|pre[çc]o/i));
+      if (priceEl) { setReactValue(priceEl, String(job.variations[0].price)); log('✓ 価格入力: ' + job.variations[0].price); } else log('△ 価格欄が見つからず（手動で）', '#8a6d3b');
+    } else if ((job.variations || []).length > 1) { log('・バリエ有り：価格/明細は手動 or 診断後に対応', '#888'); }
+    log('※カテゴリ・バリエ・画像・寸法/重量は手動で補完してください。入らない欄は🔍診断ログを共有ください。', '#7b52c4');
   }
 
   // ===== 画像先行アップロード：メルカリ/直リンク画像を投入してimg_idを得る（addvar流） =====
