@@ -5520,6 +5520,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!Object.keys(ovar).length) delete o.vars[i];
     ovPrune(cc);
   }
+  function ovToggleOff(cc, i) {
+    const o = listState.overrides[cc] = listState.overrides[cc] || {}; o.vars = o.vars || {};
+    const ovar = o.vars[i] = o.vars[i] || {};
+    ovar.off = !ovar.off; if (!ovar.off) delete ovar.off;
+    if (!Object.keys(ovar).length) delete o.vars[i];
+    ovPrune(cc);
+  }
   function ovSetTop(cc, key, val) {
     const o = listState.overrides[cc] = listState.overrides[cc] || {};
     if ((val || '').trim() === '') delete o[key]; else o[key] = val;
@@ -5571,7 +5578,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          </div>
        </details>` +
       imgBlock +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:10px;align-items:start">' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:16px;align-items:start">' +
       targets.map(rg => {
         const varName = v => fillTpl(settings.listVarTpl, { hardware: listState.hardware, variation: v });
         // ★国別上書き（この国だけタイトル/画像/明細名/価格/在庫/採用可否を変える）
@@ -5593,23 +5600,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const image = (o.image != null) ? o.image : (v.img || '');
           const stock = (o.stock != null && o.stock !== '') ? Number(o.stock) : v.stock;
           return { i, opt: v.opt, sku: v.sku, local, auto, manual, stock, cost: v.cost, name, image, off: !!o.off };
-        }).filter(p => !p.off); // 「この国では出さない」明細は除外
-        const warns = countryListingWarnings({ cc: rg.cc, title, prices: priced.map(p => p.local), varNames: hasVar ? priced.map(p => p.name) : [] });
-        const priceLines = priced.map(p => `${hasVar ? p.name + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
-        // 表示用（円換算＋取れる利益＋ROI）
-        // インライン編集：明細名・価格をカード上で直接編集（空欄=自動）。利益は右に自動表示
+        }); // off（この国では出さない）も表示は残す。ジョブ/コピーは pricedLive で除外
+        const pricedLive = priced.filter(p => !p.off);
+        const warns = countryListingWarnings({ cc: rg.cc, title, prices: pricedLive.map(p => p.local), varNames: hasVar ? pricedLive.map(p => p.name) : [] });
+        const priceLines = pricedLive.map(p => `${hasVar ? p.name + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
+        // 表示用（円換算＋取れる利益＋ROI）。明細名・価格・在庫をその場編集、✕でこの国だけ除外
         const priceRich = priced.map(p => {
           const pr = priceProfitFor(rg.cc, p.cost || 0, p.local); const pc = pr.profit >= 0 ? '#1a7f37' : '#d93025';
           const cost = Number(p.cost) || 0;
-          const bad = cost > 0 && (pr.buyerJpy <= cost || pr.profit < 0);
-          return `<div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0${bad ? ';background:#fff4f4;border-radius:4px' : ''}">
-            ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:120px;font-size:11px;padding:2px 5px" title="この国の明細名（空欄=既定）">` : ''}
+          const bad = !p.off && cost > 0 && (pr.buyerJpy <= cost || pr.profit < 0);
+          return `<div class="row" style="gap:5px;align-items:center;flex-wrap:wrap;padding:2px 0${p.off ? ';opacity:.45' : (bad ? ';background:#fff4f4;border-radius:4px' : '')}">
+            <button class="cov-ioff smd-btn" data-cc="${rg.cc}" data-i="${p.i}" title="${p.off ? 'この国に戻す' : 'この国では出さない（除外）'}" style="padding:0 6px;font-weight:700;${p.off ? 'color:#1a7f37;border-color:#9ccc9c' : 'color:#d93025;border-color:#e0a0a0'}">${p.off ? '↩' : '✕'}</button>
+            ${hasVar ? `<input class="li cov-iname" data-cc="${rg.cc}" data-i="${p.i}" data-foc="n-${rg.cc}-${p.i}" value="${esc(p.name)}" style="flex:1;min-width:110px;font-size:11px;padding:2px 5px${p.off ? ';text-decoration:line-through' : ''}" title="この国の明細名（空欄=既定）"${p.off ? ' disabled' : ''}>` : ''}
             <span class="smd-dim" style="font-size:11px;white-space:nowrap">仕入¥${cost.toLocaleString()} →</span>
-            <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="number" step="any" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:84px;padding:2px 5px;${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="空欄=自動計算(${p.auto}) / 入力=この国だけ手動価格"></span>
-            <span style="font-size:11px;white-space:nowrap"><span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc}">ROI${Math.round(pr.roi)}%</span>${bad ? ' <b style="color:#d93025">⚠</b>' : ''}${p.manual ? ' <span style="color:#7b52c4">✎</span>' : ''}</span>
+            <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="number" step="any" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:76px;padding:2px 5px;${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="空欄=自動計算(${p.auto}) / 入力=この国だけ手動価格"${p.off ? ' disabled' : ''}></span>
+            在庫<input class="li cov-istock" data-cc="${rg.cc}" data-i="${p.i}" data-foc="s-${rg.cc}-${p.i}" type="number" value="${p.stock != null ? p.stock : ''}" placeholder="1" style="width:42px;padding:2px 4px;font-size:11px"${p.off ? ' disabled' : ''}>
+            <span style="font-size:11px;white-space:nowrap">${p.off ? '<span style="color:#d93025;font-weight:700">除外中</span>' : `<span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc}">ROI${Math.round(pr.roi)}%</span>${bad ? ' <b style="color:#d93025">⚠</b>' : ''}${p.manual ? ' <span style="color:#7b52c4">✎</span>' : ''}`}</span>
           </div>`;
         }).join('');
-        const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? priced.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
+        const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? pricedLive.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
         const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (listState.descExtra ? '\n\n' + listState.descExtra : '');
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
         // ★自動出品ジョブ（画像はhttp(s)のみ＝data:はhash非対応）
@@ -5619,15 +5628,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           weightG: (listState.weightG != null ? listState.weightG : settings.weightG), dims: { w: listState.dimW || 0, h: listState.dimH || 0, d: listState.dimD || 0 },
           varTier: listState.varTier, specifics: specs, images: ccCatImgs.filter(u => /^https?:/.test(u)),
           variations: hasVar
-            ? priced.map(p => ({ name: p.name, sku: p.sku || '', price: String(p.local), stock: p.stock, image: p.image ? toU(p.image) : '' }))
-            : [{ name: '', sku: listState.parentSku || '', price: String((priced[0] || {}).local || 0), stock: (priced[0] && priced[0].stock != null) ? priced[0].stock : 1, image: '' }],
+            ? pricedLive.map(p => ({ name: p.name, sku: p.sku || '', price: String(p.local), stock: p.stock, image: p.image ? toU(p.image) : '' }))
+            : [{ name: '', sku: listState.parentSku || '', price: String((pricedLive[0] || {}).local || 0), stock: (pricedLive[0] && pricedLive[0].stock != null) ? pricedLive[0].stock : 1, image: '' }],
         };
         let jobTok = ''; try { jobTok = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(job))))); } catch (_) {}
         const autoUrl = `https://${rg.host}/portal/product/new#smdjob=${jobTok}`;
         autoLinks.push({ cc: rg.cc, url: autoUrl });
-        return `<div style="border:1px solid ${hasOv ? '#c9b6ec' : '#eee'};border-radius:8px;padding:10px;margin-bottom:0;background:#fff">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">
-            <span><b style="color:${rg.color};font-size:15px">${rg.cc}</b>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
+        return `<div style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:0 -10px 8px;padding:7px 10px 6px;border-bottom:1px solid #f0f0f0;background:${rg.color}0f;border-radius:0 0 6px 6px">
+            <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px">
               <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
               <a href="${autoUrl}" target="_blank" class="smd-btn" style="text-decoration:none;background:#f3eefb;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="新規出品ページを開き、userscriptが画像アップ＋作成APIを扱います（要 shopee-newlisting.user.js）">▶ 自動で出品(β)</a>
@@ -5659,6 +5668,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     out.querySelectorAll('.cov-ititle').forEach(el => el.addEventListener('input', e => { ovSetTop(e.target.dataset.cc, 'title', e.target.value); listRefresh(); }));
     out.querySelectorAll('.cov-iname').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'name', e.target.value); listRefresh(); }));
     out.querySelectorAll('.cov-iprice').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'price', (e.target.value || '').trim()); listRefresh(); }));
+    out.querySelectorAll('.cov-istock').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'stock', (e.target.value || '').trim()); listRefresh(); }));
+    out.querySelectorAll('.cov-ioff').forEach(el => el.addEventListener('click', e => { ovToggleOff(e.currentTarget.dataset.cc, +e.currentTarget.dataset.i); listRefresh(); }));
     // フォーカス復元（全再描画してもカーソルが飛ばない）
     if (focSave) { const fe = out.querySelector('[data-foc="' + focSave.k + '"]'); if (fe) { fe.focus(); try { fe.setSelectionRange(focSave.s, focSave.e); } catch (_) {} } }
     // ▶ 全対象国を一括で開く（対象国の新規出品タブを順に開く。ポップアップブロック時は許可を促す）
