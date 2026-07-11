@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.9
+// @version      0.7.0
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -36,7 +36,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.9';
+  const VER = '0.7.0';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -200,7 +200,7 @@
   async function uploadOneImage(url, fin, label) {
     let file = null;
     log(label + ' 取得中…（DL）');
-    try { file = await Promise.race([fetchImageFile(url, 'img.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
+    try { file = /^data:/.test(url) ? dataUrlToFile(url, 'img.jpg') : await Promise.race([fetchImageFile(url, 'img.jpg'), new Promise((_, rej) => setTimeout(() => rej(new Error('全体タイムアウト50s')), 50000))]); }
     catch (e) { log('✗ ' + label + ' 取得失敗: ' + e.message, '#d93025'); return null; }
     const beforeNet = uploadRespIds.length;   // アップロードAPI応答の件数（この枚のidはこの後に積まれる）
     const beforeDom = currentProductImageIds();
@@ -216,6 +216,24 @@
     }
     log(newId ? ('✓ ' + label + ' [' + newId.slice(-6) + ']') : ('△ ' + label + ' id未確認（応答/サムネ未検出）'), newId ? '#1a7f37' : '#8a6d3b');
     return newId;
+  }
+  // ===== ショップ共通画像（バナー等）：一度アップして image_id をキャッシュ→毎回カタログ末尾に自動追加 =====
+  const SHOPKEY = 'smdNlShopImgs_' + location.host;
+  function getShopImgs() { try { return JSON.parse(localStorage.getItem(SHOPKEY) || '[]') || []; } catch (_) { return []; } }
+  function setShopImgs(a) { try { localStorage.setItem(SHOPKEY, JSON.stringify(a)); } catch (_) {} if (fillBtnRefresh) fillBtnRefresh(); }
+  // ショップ画像トークン(data URL可)を受けて、Shopeeに1回だけアップ→image_idをキャッシュ
+  async function registerShopImages(images) {
+    const list = (images || []).filter(u => /^(https?:|data:)/.test(u)).slice(0, 9);
+    if (!list.length) { alert('登録するショップ画像がありません'); return; }
+    const scope = productImageScope();
+    const fin = (scope && $$('input[type=file]', scope)[0]) || document.querySelector('input.eds-upload__input, .eds-upload input[type=file], input[type=file]');
+    if (!fin) { alert('このページに Product Images のアップロード枠がありません。\n新規出品ページ（Add a New Product）を開いてから実行してください。'); return; }
+    log('★ショップ共通画像を登録中… ' + list.length + '枚', '#7b52c4');
+    const ids = [];
+    for (let i = 0; i < list.length; i++) { const id = await uploadOneImage(list[i], fin, 'ショップ画像' + (i + 1)); if (id) ids.push(id); }
+    setShopImgs(ids);
+    log('★ショップ共通画像を登録完了：' + ids.length + '枚（以後カタログ末尾に自動追加）', ids.length ? '#1a7f37' : '#d93025');
+    alert('ショップ共通画像を ' + ids.length + '枚 登録しました。\n今後の🚀作成で、カタログの後ろに自動で付きます。');
   }
   // ★コンポーザーのカタログ画像＋各バリエ画像を自動アップ→image_id化（バリエ別に割当）
   let jobImgResult = { catalog: [], variations: {} };
@@ -257,7 +275,8 @@
     // pi.images = カタログ画像のみ（＝ユーザーが用意したショップ/シリーズ画像）。バリエ画像はギャラリーに載せない。
     // ★実機検証済(2026-07-11 product_id 48763835994)：Shopeeはギャラリー(pi.images)外のバリエimage_idもちゃんと効かせる。だからギャラリーはカタログだけでOK。
     const cover = _catIds[0] || '';
-    pi.images = _catIds.slice(0, 9);
+    const shopImgs = getShopImgs();   // ショップ共通画像（バナー等）を商品画像の後ろに自動追加
+    pi.images = [..._catIds, ...shopImgs.filter(id => !_catIds.includes(id))].slice(0, 9);
     const vars = job.variations || [];
     if (vars.length > 1 || (vars.length === 1 && vars[0].name)) {
       pi.std_tier_variation_list = [{ id: 0, custom_value: job.varTier || 'Title', group_id: '0', value_list: vars.map((v, i) => ({ id: 0, custom_value: v.name, selling_point: '', image_id: _varIds[i] || cover })) }];
@@ -356,6 +375,11 @@
           <button class="nl-create-draft" style="padding:8px;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="ジョブ＋選択中の雛形から create_product_info で【非公開】作成">🚀 作成（非公開）</button>
           <button class="nl-create-pub" style="padding:8px;border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;cursor:pointer;font-weight:700;font-size:11px" title="同じく【公開】で作成（ライブに出ます）">🚀 作成＋公開</button>
         </div>
+        <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px;font-size:10px;color:#555">
+          🏬 ショップ共通画像: <b class="nl-shopn">0</b>枚
+          <button class="nl-shopset" style="font-size:10px;padding:2px 6px;cursor:pointer;margin-left:auto" title="ポータルの『📋ショップ画像をuserscriptへ』でコピーしたトークンを貼り付けて登録（このページで1回だけ・以後カタログ末尾に自動追加）">設定</button>
+          <button class="nl-shopclr" style="font-size:10px;padding:2px 6px;cursor:pointer" title="ショップ共通画像を解除">クリア</button>
+        </div>
         <div class="nl-tmpl" style="font-size:10px;color:#888;margin-bottom:8px"></div>
         <div style="font-size:11px;background:#f3eefb;border:1px solid #e0d3f5;border-radius:6px;padding:6px 8px;margin-bottom:8px">
           <b>手順</b>：①<b>▶自動入力</b>で埋まる項目を埋める（カテゴリ/バリエ/画像は手動補完）→ ②🖼️画像アップ → ③<b>手動で1件「発行」</b>すると下の「作成API」に通信が記録される → <b>「コピー」して開発者へ</b>渡せば発行まで全自動化。※自動入力はβ＝入らない欄があれば🔍診断ログを共有ください（精度UP）。
@@ -383,6 +407,7 @@
     };
     fillBtnRefresh = () => {
       renderTmplSel();
+      const shopN = box.querySelector('.nl-shopn'); if (shopN) shopN.textContent = getShopImgs().length;
       const base = currentTmplBody(); const has = !!base;
       const imgline = '　🖼️検出画像: <b>' + uploadedImgIds.length + '枚</b>';
       let html;
@@ -403,6 +428,13 @@
     };
     fillBtnRefresh();
     sel.addEventListener('change', () => { selTmplName = sel.value; fillBtnRefresh(); });
+    const shopSet = box.querySelector('.nl-shopset'); if (shopSet) shopSet.addEventListener('click', () => {
+      const tok = prompt('ポータルの「★画像テンプレ → 📋 userscriptへ登録」でコピーしたトークンを貼り付け:'); if (!tok) return;
+      let raw = null; try { raw = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(tok.trim()))))); } catch (_) {}
+      if (!raw || raw.k !== 'shopimg' || !Array.isArray(raw.images)) { alert('ショップ画像トークンではありません（k:shopimg でない）'); return; }
+      registerShopImages(raw.images);
+    });
+    const shopClr = box.querySelector('.nl-shopclr'); if (shopClr) shopClr.addEventListener('click', () => { if (confirm('ショップ共通画像の登録を解除しますか？')) { setShopImgs([]); log('ショップ共通画像を解除', '#8a6d3b'); } });
     box.querySelector('.nl-tmplsave').addEventListener('click', () => {
       if (!lastCreateBody) { alert('直近の作成がありません。先に手動で1件「Save and Delist」してから💾保存してください'); return; }
       const name = prompt('この雛形の名前（例: 中古ゲーム / 新品ゲーム / コンソール）:', '中古ゲーム'); if (!name) return;
@@ -413,8 +445,11 @@
     if (job && cp) cp.addEventListener('click', () => createFromJob(job, true));
     const loadBtn = box.querySelector('.nl-load');
     if (loadBtn) loadBtn.addEventListener('click', () => {
-      const tok = (box.querySelector('.nl-paste').value || '').trim(); const j = decodeJob(tok);
-      if (!j) { alert('ジョブを読み込めませんでした（トークンが不正か、newlisting用でない）'); return; }
+      const tok = (box.querySelector('.nl-paste').value || '').trim();
+      let raw = null; try { raw = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(tok))))); } catch (_) {}
+      if (raw && raw.k === 'shopimg' && Array.isArray(raw.images)) { registerShopImages(raw.images); return; }
+      const j = (raw && raw.k === 'nl') ? raw : null;
+      if (!j) { alert('読み込めませんでした（トークンが不正か、対応外）'); return; }
       box.remove(); panel(j);
     });
     renderCaptures();
