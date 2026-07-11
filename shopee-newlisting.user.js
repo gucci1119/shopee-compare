@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.6.8
+// @version      0.6.9
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
@@ -36,7 +36,7 @@
 
 (function () {
   'use strict';
-  const VER = '0.6.8';
+  const VER = '0.6.9';
 
   // ===== ジョブ受け取り（URLハッシュ #smdjob=base64(JSON)） =====
   // ジョブ形: { title, description, category, price, weightG, dims:{w,h,d}, images:[url...],
@@ -254,16 +254,15 @@
     if (job.dims) pi.dimension = { width: String(job.dims.w || ''), height: String(job.dims.h || ''), length: String(job.dims.d || '') };
     pi.parent_sku = job.parentSku || '';
     if (!_catIds.length) { alert('カタログ画像を取得できませんでした（自動アップ失敗）。\nコンポーザーに画像が入っているか確認して、再実行してください。\n※雛形は画像を持たない設計です。'); return; }
-    // ギャラリー(pi.images)＝カタログ＋各バリエ画像。※Shopeeはギャラリー外のimage_idをバリエに使えない可能性があるため、バリエ画像もギャラリーに含める。先頭=cover=カタログ1枚目。
+    // pi.images = カタログ画像のみ（＝ユーザーが用意したショップ/シリーズ画像）。バリエ画像はギャラリーに載せない。
+    // ★実機検証済(2026-07-11 product_id 48763835994)：Shopeeはギャラリー(pi.images)外のバリエimage_idもちゃんと効かせる。だからギャラリーはカタログだけでOK。
     const cover = _catIds[0] || '';
-    const gallery = _catIds.slice();
-    Object.keys(_varIds).map(Number).sort((a, b) => a - b).forEach(k => { const id = _varIds[k]; if (id && !gallery.includes(id)) gallery.push(id); });
-    pi.images = gallery.slice(0, 9);
+    pi.images = _catIds.slice(0, 9);
     const vars = job.variations || [];
     if (vars.length > 1 || (vars.length === 1 && vars[0].name)) {
       pi.std_tier_variation_list = [{ id: 0, custom_value: job.varTier || 'Title', group_id: '0', value_list: vars.map((v, i) => ({ id: 0, custom_value: v.name, selling_point: '', image_id: _varIds[i] || cover })) }];
       pi.model_list = vars.map((v, i) => ({ id: 0, tier_index: [i], is_default: false, sku: v.sku || '', price: String(v.price), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }));
-      log('画像割当 → cover[…' + (cover || '').slice(-6) + '] ' + vars.map((v, i) => (i + 1) + ':' + (_varIds[i] ? '…' + _varIds[i].slice(-6) : 'cover')).join(' ') + '（ギャラリー' + pi.images.length + '枚）', '#1565c0');
+      log('画像割当 → cover[…' + (cover || '').slice(-6) + '] ' + vars.map((v, i) => (i + 1) + ':' + (_varIds[i] ? '…' + _varIds[i].slice(-6) : 'cover')).join(' ') + '（カタログ' + pi.images.length + '枚・バリエ画像はギャラリー非搭載）', '#1565c0');
     } else {
       const v = vars[0] || {}; pi.std_tier_variation_list = [];
       pi.model_list = [{ id: 0, tier_index: [], is_default: true, sku: job.parentSku || '', price: String(v.price || '0'), stock_setting_list: [{ sellable_stock: parseInt(v.stock, 10) || 0 }], ssp_id: 0, cssp_id: 0, sku_image: '' }];
