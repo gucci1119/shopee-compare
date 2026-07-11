@@ -592,12 +592,13 @@
       if (d.ok) resolve(d.body); else reject(new Error(d.error || ('HTTP ' + d.status)));
     }
   });
-  function rawBridgeRequest(method, url, data) {
+  function rawBridgeRequest(method, url, data, timeoutMs) {
+    const to = timeoutMs || 14000;
     return new Promise((resolve, reject) => {
       const id = ++reqSeq;
-      const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, 14000);
+      const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, to);
       pendingReq.set(id, { resolve, reject, timer });
-      window.postMessage({ __smd: 'req', id, method, url, data }, '*');
+      window.postMessage({ __smd: 'req', id, method, url, data, timeout: to }, '*');
     });
   }
   // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）。
@@ -605,17 +606,20 @@
   const REQ_MAX = 6;
   let reqActive = 0;
   const reqWaiters = [];
-  async function bridgeRequest(method, url, data) {
+  async function bridgeRequest(method, url, data, opt) {
+    opt = opt || {};
+    const to = opt.timeout;                    // 重いGAS転記等は長めのタイムアウトを指定
+    const noRetry = !!opt.noRetry;             // 重い書き込みは二重実行を避けるためリトライ無効
     if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
     reqActive++;
     try {
-      try { return await rawBridgeRequest(method, url, data); }
-      catch (e) { if (/timeout/.test(e.message)) return await rawBridgeRequest(method, url, data); throw e; }
+      try { return await rawBridgeRequest(method, url, data, to); }
+      catch (e) { if (!noRetry && /timeout/.test(e.message)) return await rawBridgeRequest(method, url, data, to); throw e; }
     }
     finally { reqActive--; const w = reqWaiters.shift(); if (w) w(); }
   }
   const bridgeGetJson = url => bridgeRequest('GET', url).then(t => JSON.parse(t));
-  const bridgePostJson = (url, obj) => bridgeRequest('POST', url, JSON.stringify(obj)).then(t => { try { return JSON.parse(t); } catch (_) { return {}; } });
+  const bridgePostJson = (url, obj, opt) => bridgeRequest('POST', url, JSON.stringify(obj), opt).then(t => { try { return JSON.parse(t); } catch (_) { return {}; } });
   // メルカリ商品ページ(リンク)から タイトル/価格/画像/説明 を取得（ブリッジ経由でHTMLを取ってmetaを解析）
   const htmlDecode = (s) => { try { const t = document.createElement('textarea'); t.innerHTML = String(s || ''); return t.value; } catch (_) { return String(s || ''); } };
   function metaFromHtml(html, key) {
@@ -7290,7 +7294,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const agg = {};
       for (const sid of sids) {
         st.textContent += `\nGASへ送信中... (${mode} / シート${sids.indexOf(sid) + 1}/${sids.length})`;
-        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data, sheetId: sid });
+        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, mode, data, sheetId: sid }, { timeout: 150000, noRetry: true });
         if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
         targets.forEach(r => {
           const res = (resp.result || {})[r.cc.toLowerCase()];
@@ -7359,7 +7363,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const aggImg = {};
       for (const sid of sidsImg) {
         st.textContent = `画像: ${orderCount}注文 → GASへ送信中... (シート${sidsImg.indexOf(sid) + 1}/${sidsImg.length})`;
-        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data, sheetId: sid });
+        const resp = await bridgePostJson(settings.depUrl, { token: settings.depToken, action: 'images', data, sheetId: sid }, { timeout: 150000, noRetry: true });
         if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
         Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); });
       }
