@@ -206,6 +206,7 @@
   <div id="page-dash" style="display:none">
     <div class="smd-pagehead">🏠 ダッシュボード <span class="smd-dim" id="dash-sync" style="font-weight:400;font-size:12px"></span></div>
     <div id="dash-kpis"></div>
+    <div class="tool-card" style="max-width:1000px"><h3>📊 自動分析（直近の傾向）</h3><div id="dash-analysis" style="font-size:13px;line-height:1.9;color:#333"></div></div>
     <div class="dash-cols">
       <div class="tool-card"><h3>⏰ 発送期限が近い注文（未発送）</h3><div id="dash-due"></div></div>
       <div class="tool-card"><h3>🌏 今日の国別売上</h3><div id="dash-cc"></div></div>
@@ -1840,6 +1841,31 @@
         return `<div class="dash-row"><span><b style="color:${rg.color}">${rg.cc}</b></span>` +
           `<span>${d ? `${d.units}点 / ${fmtLocal(rg, d.sales)} <span class="smd-jpy">≈${fmtJpy((d.sales || 0) * rg.rateJpy)}</span>` : '<span class="smd-dim">同期なし</span>'}</span></div>`;
       }).join('');
+      // ---- 📊 自動分析（傾向を文章化。利益は仕入未入力が多いため当面除外） ----
+      const anaEl = document.getElementById('dash-analysis');
+      if (anaEl) {
+        const byDay = {};  // JST暦日 → {jpy, units, cc:{cc:jpy}}
+        days.forEach(d => { const rg = regionByCc(d.cc); if (!rg) return; const j = (d.sales || 0) * rg.rateJpy; const e = byDay[d.day] = byDay[d.day] || { jpy: 0, units: 0, cc: {} }; e.jpy += j; e.units += (d.units || 0); e.cc[d.cc] = (e.cc[d.cc] || 0) + j; });
+        const dstr = (off) => new Date(Date.now() + 9 * 3600000 + off * 86400000).toISOString().slice(0, 10);
+        const sumRange = (a, b) => { let t = 0; for (let i = a; i < b; i++) { const k = dstr(-i); t += byDay[k] ? byDay[k].jpy : 0; } return t; };
+        const last7 = sumRange(0, 7), prev7 = sumRange(7, 14);
+        const todayCc = REGIONS.map(rg => { const d = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, 0)); return { cc: rg.cc, jpy: d ? (d.sales || 0) * rg.rateJpy : 0, units: d ? d.units : 0 }; });
+        const activeToday = todayCc.filter(x => x.units > 0).sort((a, b) => b.jpy - a.jpy);
+        const zeroToday = todayCc.filter(x => x.units === 0).map(x => x.cc);
+        const silent7 = REGIONS.filter(rg => { for (let i = 0; i < 7; i++) { const k = dstr(-i); if (byDay[k] && byDay[k].cc[rg.cc]) return false; } return true; }).map(rg => rg.cc);
+        let bestK = null, bestV = 0; for (let i = 0; i < 14; i++) { const k = dstr(-i); const v = byDay[k] ? byDay[k].jpy : 0; if (v > bestV) { bestV = v; bestK = k; } }
+        const overdue = toShip.filter(o => o.ship_by && o.ship_by < nowSec());
+        const oldest = overdue.reduce((m, o) => Math.min(m, o.ship_by || Infinity), Infinity);
+        const oldestH = isFinite(oldest) ? Math.floor((nowSec() - oldest) / 3600) : 0;
+        const tr = prev7 ? Math.round((last7 / prev7 - 1) * 100) : null;
+        const L = [];
+        L.push(`<b>今日</b>：${activeToday.length ? activeToday.map(x => x.cc + ' ' + fmtJpy(x.jpy)).join('・') + (activeToday.length > 1 ? '（' + activeToday[0].cc + 'が牽引）' : '') : 'まだ売上0'}。${zeroToday.length ? `<span class="smd-dim">${zeroToday.join('/')}は本日まだ0</span>` : ''}`);
+        L.push(`<b>直近7日</b>：${fmtJpy(last7)}${tr != null ? `（前の7日 ${fmtJpy(prev7)} 比 <b style="color:${tr >= 0 ? '#1a7f37' : '#d93025'}">${tr >= 0 ? '+' : ''}${tr}%</b>${tr >= 15 ? ' 📈好調' : tr <= -15 ? ' 📉失速' : ''}）` : ''}。${bestK ? `直近2週のベストは <b>${bestK}</b>（${fmtJpy(bestV)}）` : ''}`);
+        if (silent7.length) L.push(`<b style="color:#e8710a">直近7日 売上0の国</b>：${silent7.join(' / ')} … 実際に動きが無いか、<b>日次売上の取得漏れ</b>（各国のショップにログイン＆ブリッジ正常が必要）。要確認。`);
+        L.push(`<b>未発送</b>：${toShip.length}件${overdue.length ? `、うち<b style="color:#d93025">期限超過 ${overdue.length}件</b>（最古 ${oldestH}h超過）→ 早めに発送を` : '（期限に余裕あり）'}${due24.length ? `。24h以内も ${due24.length}件` : ''}`);
+        if (pendN) L.push(`<b>入金予定</b>：${fmtJpy(pendJpy)}（未入金 ${pendN}件）`);
+        anaEl.innerHTML = L.map(l => `<div style="margin:3px 0">・${l}</div>`).join('');
+      }
       const last = Number(localStorage.getItem('smdLastSync') || 0);
       document.getElementById('dash-sync').textContent = last
         ? `最終同期 ${new Date(last).toLocaleString('ja-JP')}` : '（未同期 — 💰転記タブの「DB同期」を実行してください）';
