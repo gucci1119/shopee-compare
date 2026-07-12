@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.4.2
+// @version      1.4.3
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -32,6 +32,7 @@
 // @connect      jp.mercari.com
 // @connect      mercari.com
 // @connect      static.mercdn.net
+// @connect      *
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @grant        GM_setValue
@@ -43,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.4.2';
+  const VER = '1.4.3';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -68,6 +69,20 @@
     }
     if (d.__smd === 'ping') {
       window.postMessage({ __smd: 'pong', v: VER }, '*');
+      return;
+    }
+    // GM_xhr 動作診断（typeof＋実リクエストの結末を返す。ハング/ブロックの切り分け用）
+    if (d.__smd === 'gmdiag') {
+      const info = { __smd: 'gmdiagres', ver: VER, gmxhr: typeof GM_xmlhttpRequest };
+      if (typeof GM_xmlhttpRequest !== 'function') { window.postMessage(Object.assign({ ok: false, err: 'GM_xmlhttpRequest未定義(@grant未承認)' }, info), '*'); return; }
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: d.url || 'https://seller.shopee.ph/api/v3/general/get_shop_base_info', timeout: 8000,
+          onload: r => window.postMessage(Object.assign({ ok: true, status: r.status, len: (r.responseText || '').length }, info), '*'),
+          onerror: e => window.postMessage(Object.assign({ ok: false, err: 'onerror status=' + (e && e.status) + ' ' + ((e && e.error) || '') }, info), '*'),
+          ontimeout: () => window.postMessage(Object.assign({ ok: false, err: 'ontimeout(8s)' }, info), '*'),
+        });
+      } catch (ex) { window.postMessage(Object.assign({ ok: false, err: 'throw:' + ex.message }, info), '*'); }
       return;
     }
     // SPC_CDS 取得の診断（値そのものは返さず、取得可否と長さだけ）
