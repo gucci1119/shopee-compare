@@ -5037,8 +5037,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const priceLoc = (n) => cur + lfmt(n);
     const price = r.price_min != null ? (r.price_min === r.price_max ? priceLoc(r.price_min) : priceLoc(r.price_min) + '〜' + priceLoc(r.price_max)) : '-';
     const oos = (r.stock || 0) <= 0;
+    const canEdit = state.mode === 'live' && !!rg.host;   // ライブモードのみ在庫・予約をその場で編集
     const varRows = opened && r.models && r.models.length
-      ? `<div style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${priceLoc(m.price)}</span><span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span><span class="smd-dim">売${m.sold}</span></div>`).join('')}</div>`
+      ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${priceLoc(m.price)}</span>${canEdit ? `<label style="color:#555;white-space:nowrap">在庫<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label>` : `<span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span>`}<span class="smd-dim">売${m.sold}</span></div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px"><label style="font-size:11px;color:#555;display:inline-flex;align-items:center;gap:3px"><input type="checkbox" class="lst-po"> 予約(Pre-order)</label><label style="font-size:11px;color:#555;white-space:nowrap">発送日数<input class="lst-podts" inputmode="numeric" style="width:46px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label><span class="lst-po-state smd-dim" style="font-size:10px">（予約状態を取得中…）</span><button class="lst-save" style="margin-left:auto;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 在庫・予約を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     const buyUrl = buyerUrlFor(r.cc, r.item_id);
@@ -5092,6 +5093,59 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); drawListingStatus(); }, 200); });
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
+    // 展開したライブ行：現在の予約状態＋最新在庫を取得してその場編集を有効化
+    lst.poCache = lst.poCache || {};
+    document.querySelectorAll('#lst-list .lst-inline').forEach(async panel => {
+      const host = panel.dataset.host, id = Number(panel.dataset.id), cc = panel.dataset.cc;
+      if (state.mode !== 'live' || !host) return;
+      const poState = panel.querySelector('.lst-po-state');
+      const apply = (pi) => {
+        const po = pi.pre_order_info || {};
+        const cb = panel.querySelector('.lst-po'), dts = panel.querySelector('.lst-podts');
+        if (cb) cb.checked = !!po.pre_order;
+        if (dts && document.activeElement !== dts) dts.value = po.days_to_ship || '';
+        if (poState) poState.textContent = po.pre_order ? ('現在：予約ON・' + (po.days_to_ship || '?') + '日') : '現在：予約OFF';
+        (pi.model_list || []).forEach(m => { const inp = panel.querySelector('.lst-stk[data-mid="' + m.id + '"]'); if (inp && document.activeElement !== inp) inp.value = modelStock(m); });
+      };
+      if (lst.poCache[id]) { apply(lst.poCache[id]); return; }
+      try { const pi = await productRead(host, id); lst.poCache[id] = pi; apply(pi); }
+      catch (e) { if (poState) poState.textContent = '（予約状態の取得失敗: ' + String(e.message).slice(0, 22) + '）'; }
+    });
+    document.querySelectorAll('#lst-list .lst-save').forEach(btn => btn.addEventListener('click', async () => {
+      const panel = btn.closest('.lst-inline'); const host = panel.dataset.host, id = Number(panel.dataset.id), cc = panel.dataset.cc;
+      const msg = panel.querySelector('.lst-save-msg');
+      const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+      btn.disabled = true; btn.textContent = '読込中…'; msg.textContent = '';
+      try {
+        const pi = lst.poCache[id] || await productRead(host, id);
+        const models = pi.model_list || [];
+        const stkMap = {}; panel.querySelectorAll('.lst-stk').forEach(inp => stkMap[inp.dataset.mid] = inp.value.trim());
+        let stockCh = false;
+        const newModels = models.map(m => {
+          const e = { id: m.id, tier_index: m.tier_index || [], price: modelPrice(m) };
+          const v = stkMap[m.id];
+          if (v != null && v !== '' && String(parseInt(v, 10)) !== String(modelStock(m))) { e.stock_setting_list = [{ sellable_stock: parseInt(v, 10) || 0 }]; stockCh = true; }
+          return e;
+        });
+        const patch = {}, summary = [];
+        if (stockCh) { patch.model_list = newModels; summary.push('在庫'); }
+        const cb = panel.querySelector('.lst-po'), dts = panel.querySelector('.lst-podts');
+        const poOn = cb.checked, dtsV = parseInt(dts.value, 10) || 0;
+        const origPo = !!(pi.pre_order_info && pi.pre_order_info.pre_order), origDts = (pi.pre_order_info && pi.pre_order_info.days_to_ship) || 0;
+        if (poOn !== origPo || (dtsV && dtsV !== origDts)) { patch.pre_order_info = { pre_order: poOn, days_to_ship: dtsV || (poOn ? 7 : 3) }; summary.push('予約' + (poOn ? 'ON・' + patch.pre_order_info.days_to_ship + '日' : 'OFF')); }
+        if (!summary.length) { msg.textContent = '変更なし'; btn.disabled = false; btn.textContent = '💾 在庫・予約を保存'; return; }
+        if (!confirm(`書込先: ${gw.summary}\n${cc} item${id} に「${summary.join(' / ')}」を保存します。よろしいですか？`)) { btn.disabled = false; btn.textContent = '💾 在庫・予約を保存'; return; }
+        btn.textContent = '書込中…';
+        const res = await productWrite(host, id, patch);
+        if (res.ok) {
+          msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました'; btn.textContent = '保存済';
+          if (patch.pre_order_info) { pi.pre_order_info = patch.pre_order_info; }
+          if (patch.model_list) { patch.model_list.forEach(pm => { if (pm.stock_setting_list) { const rm = (pi.model_list || []).find(x => x.id === pm.id); if (rm) rm.stock_detail = { seller_stock_info: [{ sellable_stock: pm.stock_setting_list[0].sellable_stock }] }; } }); }
+          try { const row = (lst.byCc[cc] || []).find(x => x.item_id === id); if (row && patch.model_list) { patch.model_list.forEach(pm => { if (pm.stock_setting_list) { const rm = (row.models || []).find(x => x.id === pm.id); if (rm) rm.stock = pm.stock_setting_list[0].sellable_stock; } }); row.stock = (row.models || []).reduce((s, m) => s + (m.stock || 0), 0); } } catch (_) {}
+          try { logAct('出品', '在庫/予約編集', pi.name || '', cc + ' ' + summary.join('/')); } catch (_) {}
+        } else { msg.style.color = '#d93025'; msg.textContent = '✗ code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = '💾 在庫・予約を保存'; }
+      } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + e.message; btn.disabled = false; btn.textContent = '💾 在庫・予約を保存'; }
+    }));
   }
 
   // ---------------- 出品コンポーザー（フェーズ1: 普通の半自動出品） ----------------
