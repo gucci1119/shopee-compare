@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.4.1
+// @version      1.4.2
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -43,7 +43,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.4.1';
+  const VER = '1.4.2';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -98,7 +98,8 @@
         url: url,
         data: d.data,
         headers: d.method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
-        fetch: true, // XHR実装はハングした接続がプールを塞ぐことがある→fetchベースに
+        // ※ fetch:true は Tampermonkey 5.5系でクロスオリジン時に onload/ontimeout を返さずハングする事があるため撤去。
+        //    通常のXHR経路＋確実に効くtimeoutに戻す（ハング接続はtimeoutでabortされプールも解放される）。
         timeout: (typeof d.timeout === 'number' && d.timeout > 0) ? d.timeout + 5000 : 30000, // 重いGAS転記はポータル指定のtimeout+5秒（ポータル側が先に切れるように）
 
         onload: r => window.postMessage({
