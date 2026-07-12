@@ -206,7 +206,11 @@
   <div id="page-dash" style="display:none">
     <div class="smd-pagehead">🏠 ダッシュボード <span class="smd-dim" id="dash-sync" style="font-weight:400;font-size:12px"></span></div>
     <div id="dash-kpis"></div>
-    <div class="tool-card" style="max-width:1000px"><h3>📊 自動分析（直近の傾向）</h3><div id="dash-analysis" style="font-size:13px;line-height:1.9;color:#333"></div></div>
+    <div class="tool-card" style="max-width:1000px"><h3>📊 自動分析（直近の傾向）</h3><div id="dash-analysis" style="font-size:13px;line-height:1.9;color:#333"></div>
+      <div id="dash-bycc" style="font-size:12px;margin-top:8px"></div>
+      <div style="font-weight:700;font-size:12.5px;margin:12px 0 4px;border-top:1px solid #f0f0f0;padding-top:10px">🎯 今おすすめのアクション <span class="smd-dim" style="font-weight:400;font-size:11px">（「✅タスク化」で✅タスク管理へ）</span></div>
+      <div id="dash-actions"></div>
+    </div>
     <div class="dash-cols">
       <div class="tool-card"><h3>⏰ 発送期限が近い注文（未発送）</h3><div id="dash-due"></div></div>
       <div class="tool-card"><h3>🌏 今日の国別売上</h3><div id="dash-cc"></div></div>
@@ -1864,7 +1868,24 @@
         if (silent7.length) L.push(`<b style="color:#e8710a">直近7日 売上0の国</b>：${silent7.join(' / ')} … 実際に動きが無いか、<b>日次売上の取得漏れ</b>（各国のショップにログイン＆ブリッジ正常が必要）。要確認。`);
         L.push(`<b>未発送</b>：${toShip.length}件${overdue.length ? `、うち<b style="color:#d93025">期限超過 ${overdue.length}件</b>（最古 ${oldestH}h超過）→ 早めに発送を` : '（期限に余裕あり）'}${due24.length ? `。24h以内も ${due24.length}件` : ''}`);
         if (pendN) L.push(`<b>入金予定</b>：${fmtJpy(pendJpy)}（未入金 ${pendN}件）`);
+        L.push(`<b>1日平均（直近7日）</b>：${fmtJpy(last7 / 7)}／今日はここまで ${fmtJpy(todayCc.reduce((s, x) => s + x.jpy, 0))}`);
         anaEl.innerHTML = L.map(l => `<div style="margin:3px 0">・${l}</div>`).join('');
+        // 国別（直近7日・前週比）
+        const ccJpy7 = REGIONS.map(rg => { let t7 = 0, tp = 0; for (let i = 0; i < 7; i++) { const k = dstr(-i); if (byDay[k] && byDay[k].cc[rg.cc]) t7 += byDay[k].cc[rg.cc]; } for (let i = 7; i < 14; i++) { const k = dstr(-i); if (byDay[k] && byDay[k].cc[rg.cc]) tp += byDay[k].cc[rg.cc]; } const td = todayCc.find(x => x.cc === rg.cc) || {}; return { cc: rg.cc, color: rg.color, w7: t7, prev: tp, today: td.jpy || 0 }; }).filter(x => x.w7 > 0 || x.today > 0).sort((a, b) => b.w7 - a.w7);
+        const byccEl = document.getElementById('dash-bycc');
+        if (byccEl) byccEl.innerHTML = '<b>直近7日 国別</b>：' + (ccJpy7.length ? ccJpy7.map(x => { const d = x.prev ? Math.round((x.w7 / x.prev - 1) * 100) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b style="color:${x.color}">${x.cc}</b> ${fmtJpy(x.w7)}${d != null ? ` <span style="color:${d >= 0 ? '#1a7f37' : '#d93025'};font-size:11px">${d >= 0 ? '+' : ''}${d}%</span>` : ''}${x.today ? ` <span class="smd-dim" style="font-size:11px">(今日${fmtJpy(x.today)})</span>` : ''}</span>`; }).join('') : '<span class="smd-dim">データなし</span>');
+        // おすすめアクション（タスク化）
+        const actions = [];
+        if (overdue.length) actions.push({ cat: '発送', priority: 1, text: `期限超過 <b style="color:#d93025">${overdue.length}件</b>（最古${oldestH}h）を今日中に発送`, task: `【発送】期限超過${overdue.length}件を発送（最古${oldestH}h超過）` });
+        if (due24.length) actions.push({ cat: '発送', priority: 1, text: `24h以内締切 <b>${due24.length}件</b>を優先処理`, task: `【発送】24h以内締切 ${due24.length}件を発送` });
+        silent7.forEach(cc => actions.push({ cat: '売上', priority: 2, text: `<b>${cc}</b> は直近7日 売上0 → 日次取得の確認 or テコ入れ（値下げ/露出/在庫）`, task: `【${cc}】直近7日 売上0 — 日次取得確認＆テコ入れ検討` }));
+        ccJpy7.forEach(x => { if (x.prev && x.w7 / x.prev < 0.7) { const d = Math.round((x.w7 / x.prev - 1) * 100); actions.push({ cat: '売上', priority: 2, text: `<b style="color:${x.color}">${x.cc}</b> 直近7日が前週比 <b style="color:#d93025">${d}%</b> → 要因確認・対策`, task: `【${x.cc}】売上が前週比${d}% — 要因確認・対策` }); } });
+        if (pendN) actions.push({ cat: '入金', priority: 3, text: `入金予定 ${fmtJpy(pendJpy)}（${pendN}件）→ 着金チェック`, task: `【入金】未入金 ${pendN}件（${fmtJpy(pendJpy)}）の着金確認` });
+        const actEl = document.getElementById('dash-actions');
+        if (actEl) {
+          actEl.innerHTML = actions.length ? actions.map((a, i) => `<div class="dash-row" style="align-items:center;padding:3px 0"><span style="font-size:12.5px">・${a.text}</span><button class="dash-task smd-btn" data-i="${i}" style="white-space:nowrap;font-size:10px;padding:1px 7px;margin-left:auto">✅タスク化</button></div>`).join('') : '<div class="smd-dim" style="font-size:12px">今すぐ必要な対応はありません 🎉</div>';
+          actEl.querySelectorAll('.dash-task').forEach(el => el.addEventListener('click', async () => { const a = actions[+el.dataset.i]; if (!a) return; el.disabled = true; if (await addSuggestionTask(a)) { el.textContent = '✓ タスク化済'; el.style.background = '#e7f4e9'; } else el.disabled = false; }));
+        }
       }
       const last = Number(localStorage.getItem('smdLastSync') || 0);
       document.getElementById('dash-sync').textContent = last
@@ -6436,10 +6457,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const keys = Object.keys(byDay).sort();
       if (!keys.length) { el.innerHTML = '<span class="smd-dim">まだデータがありません。自動同期が毎日積み上げていきます</span>'; return; }
       const max = Math.max(...keys.map(k => byDay[k]), 1);
-      el.innerHTML = '<div class="trend-bars">' + keys.map(k =>
-        `<div class="tb${k === keys[keys.length - 1] ? ' today' : ''}" style="height:${Math.max(2, Math.round(byDay[k] / max * 150))}px" title="${k}: ${fmtJpy(byDay[k])}"></div>`).join('') + '</div>' +
-        `<div style="display:flex;justify-content:space-between;font-size:10px;color:#999"><span>${keys[0]}</span><span>${keys[keys.length - 1]}</span></div>`;
-      document.getElementById('trend-note').textContent = `${keys.length}日分を表示（円換算は概算レート）。同期を続けるほどグラフが伸びます`;
+      const jkShort = (n) => n >= 1000000 ? '¥' + (n / 1000000).toFixed(1) + 'M' : n >= 10000 ? '¥' + (n / 1000).toFixed(0) + 'k' : n >= 1000 ? '¥' + (n / 1000).toFixed(1) + 'k' : (n ? '¥' + Math.round(n) : '');
+      const avg = keys.reduce((s, k) => s + byDay[k], 0) / keys.length;
+      el.innerHTML = '<div style="display:flex;align-items:flex-end;gap:4px;height:180px;border-bottom:1px solid #eee">' + keys.map(k => {
+        const v = byDay[k]; const h = Math.max(2, Math.round(v / max * 140)); const isToday = k === keys[keys.length - 1];
+        return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:0" title="${k}: ${fmtJpy(v)}">` +
+          `<div style="font-size:9px;color:${isToday ? '#ee4d2d' : '#666'};white-space:nowrap;margin-bottom:2px;font-weight:${isToday ? '700' : '400'}">${jkShort(v)}</div>` +
+          `<div style="width:100%;background:${isToday ? '#ee4d2d' : '#f6b5a6'};height:${h}px;border-radius:3px 3px 0 0"></div>` +
+          `<div style="font-size:9px;color:#999;margin-top:3px;white-space:nowrap">${k.slice(5)}</div></div>`;
+      }).join('') + '</div>';
+      document.getElementById('trend-note').innerHTML = `${keys.length}日分・円換算(概算)。<b>合計 ${fmtJpy(keys.reduce((s, k) => s + byDay[k], 0))}</b>／1日平均 <b>${fmtJpy(avg)}</b>／最高 <b>${fmtJpy(max)}</b>（${keys.reduce((a, k) => byDay[k] > byDay[a] ? k : a, keys[0])}）`;
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
