@@ -677,6 +677,7 @@
   const REQ_MAX = 6;
   let reqActive = 0;
   const reqWaiters = [];
+  let bridgeTimeoutStreak = 0, bridgeStuckChecking = false;
   async function bridgeRequest(method, url, data, opt) {
     opt = opt || {};
     const to = opt.timeout;                    // 重いGAS転記等は長めのタイムアウトを指定
@@ -684,10 +685,40 @@
     if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
     reqActive++;
     try {
-      try { return await rawBridgeRequest(method, url, data, to); }
-      catch (e) { if (!noRetry && /timeout/.test(e.message)) return await rawBridgeRequest(method, url, data, to); throw e; }
+      try { const r = await rawBridgeRequest(method, url, data, to); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+      catch (e) {
+        if (!noRetry && /timeout/.test(e.message)) { const r = await rawBridgeRequest(method, url, data, to); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+        throw e;
+      }
+    } catch (e) {
+      if (/timeout/.test(e.message || '')) { bridgeTimeoutStreak++; if (bridgeTimeoutStreak >= 3) checkBridgeStuck(); }
+      throw e;
     }
     finally { reqActive--; const w = reqWaiters.shift(); if (w) w(); }
+  }
+  // ★連続timeout時「pingは通るのにreqが無応答」＝TMのGM_xhr詰まり を検知して案内バナーを出す（今日の混乱の再発防止）
+  function checkBridgeStuck() {
+    if (bridgeStuckChecking || document.getElementById('smd-bridge-stuck')) return;
+    bridgeStuckChecking = true; let got = false;
+    const h = e => { if (e.data && e.data.__smd === 'pong') got = true; };
+    window.addEventListener('message', h); window.postMessage({ __smd: 'ping' }, '*');
+    setTimeout(() => { window.removeEventListener('message', h); bridgeStuckChecking = false; if (got) showBridgeStuckBanner(); }, 2000);
+  }
+  function hideBridgeStuckBanner() { const b = document.getElementById('smd-bridge-stuck'); if (b) b.remove(); }
+  function showBridgeStuckBanner() {
+    if (document.getElementById('smd-bridge-stuck')) return;
+    const b = document.createElement('div'); b.id = 'smd-bridge-stuck';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483600;background:#b3261e;color:#fff;padding:9px 16px;font-size:13px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.35)';
+    b.innerHTML = '<b style="white-space:nowrap">⚠ ブリッジが応答していません</b><span style="opacity:.95">拡張の通信(GM_xhr)が詰まっています。<b>Tampermonkeyを OFF→ON</b>（またはChrome再起動）→ このページを<b>再読込</b>してください。</span>' +
+      '<button id="smd-bridge-recheck" style="margin-left:auto;background:#fff;color:#b3261e;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-weight:700;white-space:nowrap">再確認</button>' +
+      '<button id="smd-bridge-x" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:6px;padding:4px 8px;cursor:pointer">×</button>';
+    document.body.appendChild(b);
+    b.querySelector('#smd-bridge-x').addEventListener('click', () => b.remove());
+    b.querySelector('#smd-bridge-recheck').addEventListener('click', async () => {
+      const btn = b.querySelector('#smd-bridge-recheck'); btn.textContent = '確認中…'; btn.disabled = true;
+      try { await rawBridgeRequest('GET', 'https://seller.shopee.ph/api/v3/general/get_shop_base_info', null, 6000); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); toast('✅ ブリッジ復活しました'); }
+      catch (_) { btn.textContent = 'まだ詰まっています'; setTimeout(() => { btn.textContent = '再確認'; btn.disabled = false; }, 1600); }
+    });
   }
   const bridgeGetJson = url => bridgeRequest('GET', url).then(t => JSON.parse(t));
   const bridgePostJson = (url, obj, opt) => bridgeRequest('POST', url, JSON.stringify(obj), opt).then(t => { try { return JSON.parse(t); } catch (_) { return {}; } });
