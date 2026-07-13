@@ -584,6 +584,7 @@
     <div class="note">・ライブ取得（7か国のShopeeから直接）はTampermonkeyのブリッジuserscriptが入ったPCでのみ動きます<br>
       ・ブリッジ無しのPCは、保存済みスナップショットを表示します</div>
     <div class="row"><span class="test" id="set-test"></span>
+      <button id="set-backup" title="在庫・注文・経費・タスク・返品などSupabaseの全データをJSONファイルで書き出し（保管用バックアップ）">💾 バックアップ</button>
       <button id="set-testbtn">接続テスト</button>
       <button id="set-cancel">閉じる</button>
       <button class="primary" id="set-save">保存</button></div>
@@ -1035,23 +1036,97 @@
   { const tb = document.getElementById('smd-theme'); if (tb) tb.addEventListener('click', () => { let m; try { m = localStorage.getItem('smdTheme') || 'light'; } catch (_) { m = 'light'; } applyTheme(m === 'light' ? 'dark' : m === 'dark' ? 'auto' : 'light'); }); }
   try { if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if ((localStorage.getItem('smdTheme') || 'light') === 'auto') applyTheme('auto'); }); } catch (_) {}
   // ===== ⌘K / Ctrl+K クイックジャンプ（ページ検索） =====
+  // Cmd/Ctrl+K から、ページ検索に加えて「在庫・注文・出品のデータ」まで横断検索して直接ジャンプ
+  function jumpSearch(page, inputId, term, setState) {
+    try { if (setState) setState(); } catch (_) {}
+    showPage(page);
+    // ページ描画後に検索窓へ値を入れて既存のフィルタ処理を発火（描画が非同期でも拾えるよう少し待つ）
+    setTimeout(() => { const el = document.getElementById(inputId); if (el) { el.value = term; el.dispatchEvent(new Event('input', { bubbles: true })); } }, 80);
+  }
+  async function paletteData(q) {
+    q = q.toLowerCase(); const hits = [];
+    const push = (icon, label, sub, act) => { if (hits.length < 24) hits.push({ label: icon + ' ' + label, sub, act, data: true }); };
+    // 在庫（常時ロード＝ensureInvでキャッシュ）
+    try {
+      const inv = stock.rows || await ensureInv();
+      for (const r of inv) {
+        const hay = ((r.name || '') + ' ' + (r.name_supplier || '') + ' ' + (r.sku || '') + ' ' + (r.shopee_sn || '') + ' ' + (r.item_id || '') + ' ' + (r.supplier || '') + ' ' + (r.seller || '')).toLowerCase();
+        if (!hay.includes(q)) continue;
+        const term = String(r.sku || r.shopee_sn || r.item_id || r.name || '');
+        push('🏷', (r.name || r.name_supplier || r.sku || r.item_id || '(無題)'),
+          [r.status, r.sku && ('SKU ' + r.sku), r.shopee_sn && ('注文 ' + r.shopee_sn), r.price != null && ('¥' + Number(r.price).toLocaleString())].filter(Boolean).join(' ・ '),
+          () => jumpSearch('stock', 'stock-search', term, () => { stock.q = term; }));
+        if (hits.length >= 24) break;
+      }
+    } catch (_) {}
+    // 注文（注文管理を開いたことがあるキャッシュから）
+    try {
+      if (state.orders && state.orders.perCountry) {
+        for (const [cc, oc] of state.orders.perCountry) {
+          for (const o of (oc.rows || [])) {
+            const sn = o.sn || o.order_sn || ''; const buyer = o.buyer || o.buyer_username || '';
+            const hay = (sn + ' ' + buyer + ' ' + (o.tracking || '') + ' ' + (o.name || o.item_name || '') + ' ' + (o.sku || '')).toLowerCase();
+            if (!hay.includes(q)) continue;
+            const term = String(sn || buyer);
+            push('📦', (o.name || o.item_name || sn || '(注文)'), [cc, buyer, sn].filter(Boolean).join(' ・ '),
+              () => jumpSearch('orders', 'ord-search', term, () => { state.orders.search = term; }));
+            if (hits.length >= 24) break;
+          }
+          if (hits.length >= 24) break;
+        }
+      }
+    } catch (_) {}
+    // 出品（出品管理を開いたことがあるキャッシュから）
+    try {
+      if (typeof lst !== 'undefined' && lst.byCc) {
+        const seen = new Set();
+        for (const arr of Object.values(lst.byCc)) {
+          for (const it of (arr || [])) {
+            const nm2 = it.name || it.title || ''; if (!nm2) continue;
+            if (!(nm2 + ' ' + (it.item_id || '')).toLowerCase().includes(q)) continue;
+            if (seen.has(nm2)) continue; seen.add(nm2);
+            push('🆕', nm2, 'Shopee出品', () => { lst.tab = 'status'; jumpSearch('list', 'lst-search', nm2, () => { lst.search = nm2; }); });
+            if (hits.length >= 24) break;
+          }
+          if (hits.length >= 24) break;
+        }
+      }
+    } catch (_) {}
+    return hits;
+  }
   function openPalette() {
     if (document.getElementById('smd-palette')) return;
     const ALIAS = { dash: 'ダッシュボード ホーム 概要 トップ dashboard', alerts: 'アラート 警告 要対応', orders: '注文 発送 未発送 オーダー order', stock: '在庫 棚卸 インベントリ stock', buy: '仕入れ 仕入 検索 入庫待ち sourcing', profit: '利益 損益 入出金 純利益 粗利 経費 サマリー 確定申告 profit', finance: '利益 損益 入出金 純利益 粗利 経費 サマリー profit', customers: '顧客 バイヤー 購入者 customer', suppliers: '仕入れ先 セラー supplier', list: '出品 出品管理 カバレッジ コンポーザー 商品 listing', price: '価格 値付け price', fx: '為替 レート fx', tasks: 'タスク やること todo', returns: '返品 キャンセル 返金 return', log: '操作ログ 履歴 log', changelog: '改修履歴 更新履歴', manual: 'マニュアル 使い方 ヘルプ help', account: 'アカウント ショップ 垢 account', expenses: '経費 入出金', summary: 'サマリー 月次' };
-    const items = [...document.querySelectorAll('#smd-nav button[data-p]')].map(b => ({ label: (b.textContent || '').trim(), el: b, kw: ((b.dataset.p && ALIAS[b.dataset.p]) || '').toLowerCase() }));
+    const pages = [...document.querySelectorAll('#smd-nav button[data-p]')].map(b => ({ label: (b.textContent || '').trim(), el: b, kw: ((b.dataset.p && ALIAS[b.dataset.p]) || '').toLowerCase() }));
     const ov = document.createElement('div'); ov.id = 'smd-palette';
     ov.style.cssText = 'position:fixed;inset:0;z-index:2147482000;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;padding-top:12vh';
-    ov.innerHTML = '<div style="width:460px;max-width:92vw;background:#fff;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.4);overflow:hidden">' +
-      '<input id="smd-pal-in" placeholder="ページを検索（例: 在庫 / 利益 / 注文 / 出品…）" autocomplete="off" style="width:100%;box-sizing:border-box;padding:14px 16px;border:none;font-size:15px;outline:none;background:transparent;color:inherit">' +
-      '<div id="smd-pal-list" style="max-height:52vh;overflow:auto;border-top:1px solid rgba(128,128,128,.2)"></div></div>';
+    ov.innerHTML = '<div style="width:520px;max-width:92vw;background:#fff;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.4);overflow:hidden">' +
+      '<input id="smd-pal-in" placeholder="ページ＋在庫/注文/出品を検索（例: 在庫 / FF7 / 251234 / バイヤー名…）" autocomplete="off" style="width:100%;box-sizing:border-box;padding:14px 16px;border:none;font-size:15px;outline:none;background:transparent;color:inherit">' +
+      '<div id="smd-pal-list" style="max-height:56vh;overflow:auto;border-top:1px solid rgba(128,128,128,.2)"></div></div>';
     document.body.appendChild(ov);
     const inp = ov.querySelector('#smd-pal-in'), list = ov.querySelector('#smd-pal-list');
-    let sel = 0, filtered = items;
-    const draw = () => { list.innerHTML = filtered.length ? filtered.map((it, i) => `<div class="pal-it" data-i="${i}" style="padding:10px 16px;cursor:pointer;font-size:14px;${i === sel ? 'background:rgba(238,77,45,.16)' : ''}">${esc(it.label)}</div>`).join('') : '<div style="padding:14px 16px;color:#999">該当なし</div>'; };
+    let sel = 0, pageHits = pages, dataHits = [], dataSeq = 0;
+    const combined = () => pageHits.concat(dataHits);
+    const rowHtml = (it, i, hdr) => (hdr ? `<div style="padding:6px 16px 2px;font-size:10.5px;color:#999;font-weight:700;letter-spacing:.04em">${hdr}</div>` : '') +
+      `<div class="pal-it" data-i="${i}" style="padding:9px 16px;cursor:pointer;font-size:14px;${i === sel ? 'background:rgba(238,77,45,.16)' : ''}">${esc(it.label)}${it.sub ? `<div style="color:#8a8f98;font-size:11.5px;margin-top:1px">${esc(it.sub)}</div>` : ''}</div>`;
+    const draw = () => {
+      const arr = combined();
+      if (!arr.length) { list.innerHTML = '<div style="padding:14px 16px;color:#999">該当なし</div>'; return; }
+      let html = '', firstData = pageHits.length;
+      html += arr.map((it, i) => rowHtml(it, i, i === 0 && pageHits.length ? 'ページ' : (i === firstData && dataHits.length ? 'データ（在庫・注文・出品）' : ''))).join('');
+      list.innerHTML = html;
+    };
     const close = () => ov.remove();
-    const go = () => { const it = filtered[sel]; if (it) { it.el.click(); close(); } };
-    inp.addEventListener('input', () => { const q = inp.value.trim().toLowerCase(); filtered = q ? items.filter(it => it.label.toLowerCase().includes(q) || it.kw.includes(q)) : items; sel = 0; draw(); });
-    inp.addEventListener('keydown', e => { if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, filtered.length - 1); draw(); } else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); draw(); } else if (e.key === 'Enter') { e.preventDefault(); go(); } else if (e.key === 'Escape') { close(); } });
+    const go = () => { const it = combined()[sel]; if (it) { close(); if (it.act) it.act(); else if (it.el) it.el.click(); } };
+    const runData = async (q) => { const my = ++dataSeq; const h = await paletteData(q); if (my !== dataSeq || !document.getElementById('smd-palette')) return; dataHits = h; draw(); };
+    inp.addEventListener('input', () => {
+      const q = inp.value.trim().toLowerCase();
+      pageHits = q ? pages.filter(it => it.label.toLowerCase().includes(q) || it.kw.includes(q)) : pages;
+      sel = 0;
+      if (q.length >= 2) runData(q); else { dataHits = []; dataSeq++; }
+      draw();
+    });
+    inp.addEventListener('keydown', e => { const n = combined().length; if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, n - 1); draw(); } else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); draw(); } else if (e.key === 'Enter') { e.preventDefault(); go(); } else if (e.key === 'Escape') { close(); } });
     list.addEventListener('click', e => { const it = e.target.closest('.pal-it'); if (it) { sel = +it.dataset.i; go(); } });
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
     draw(); inp.focus();
@@ -2266,6 +2341,10 @@
     if (stock.q) rows = rows.filter(r =>
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
        (r.supplier || '') + ' ' + (r.seller || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
+    // 🏚 死に筋（滞留）：在庫保管中のまま登録から90日超。値下げ・再出品の検討対象を素早く洗い出す
+    const DEAD_DAYS = 90;
+    const deadCount = all.filter(r => r.status === '在庫保管中' && (alertDaysSince(r.created_at) || 0) > DEAD_DAYS).length;
+    if (stock.dead) { rows = rows.filter(r => r.status === '在庫保管中' && (alertDaysSince(r.created_at) || 0) > DEAD_DAYS).sort((a, b) => (alertDaysSince(b.created_at) || 0) - (alertDaysSince(a.created_at) || 0)); }
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
@@ -2276,6 +2355,7 @@
       `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
       `<button class="smd-btn" id="stk-csv" style="margin-left:6px" title="表示中（絞り込み後）の在庫をCSVで書き出し">⬇ CSV(${rows.length})</button>` +
+      `<button class="smd-btn" id="stk-dead" style="margin-left:6px;${stock.dead ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="在庫保管中のまま${DEAD_DAYS}日超の「死に筋」だけ表示（値下げ・再出品の検討対象）。滞留日数の長い順。">🏚 死に筋${deadCount ? '（' + deadCount + '）' : ''}</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">左端☑で複数選び「一括印刷」。仕入元・仕入額・状態などはセルで直接編集（Supabaseに保存）。ItemID横の✂でまとめ分割。</span></div>` +
       `<div id="stk-addform"></div>` +
       `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1520px">` +
@@ -2334,6 +2414,7 @@
     body.querySelectorAll('.stk-itemid').forEach(el => el.addEventListener('change', e => stockRenameId(e.target.dataset.id, e.target.value.trim(), e.target)));
     body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
+    { const db = document.getElementById('stk-dead'); if (db) db.addEventListener('click', () => { stock.dead = !stock.dead; stockRender(); }); }
     { const cb = document.getElementById('stk-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('在庫_' + new Date().toISOString().slice(0, 10) + '.csv', [['ItemID', '商品名', 'SKU', '仕入元', 'セラー', '仕入額(円)', 'コンディション', '状態', '棚', 'Shopee注文SN', '備考']].concat(rows.map(r => [r.item_id || '', r.name || '', r.sku || '', r.supplier || '', r.seller || '', r.price != null ? r.price : '', r.condition || '', r.status || '', r.bin || '', r.shopee_sn || '', r.note || ''])))); }
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     // ラベル一括印刷：チェックボックス選択
@@ -2398,10 +2479,11 @@
     const bySup = {};
     rows.forEach(r => { const s = normSupplier(r.supplier || '(未設定)'); (bySup[s] = bySup[s] || { n: 0, val: 0, sellers: new Set() }); bySup[s].n++; bySup[s].val += r.price || 0; if (r.seller) bySup[s].sellers.add(r.seller); });
     const list = Object.entries(bySup).sort((a, b) => b[1].n - a[1].n);
-    body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">仕入元 ${list.length}種 ・ 全${rows.length}件から集計 ・ 名称クリックで公式サイトへ（表記ゆれは統合表示）</div>` +
-      `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計</th><th>セラー数</th></tr>` +
-      list.map(([s, v]) => `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${v.sellers.size}</td></tr>`).join('') +
+    body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">仕入元 ${list.length}種 ・ 全${rows.length}件から集計 ・ 名称クリックで公式サイトへ（表記ゆれは統合表示） <button class="smd-btn" id="sup-csv" style="font-size:11px;margin-left:6px" title="仕入元集計をCSVで書き出し">⬇ CSV</button></div>` +
+      `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計(円)</th><th>平均単価(円)</th><th>セラー数</th></tr>` +
+      list.map(([s, v]) => `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${fmtJpy(v.n ? v.val / v.n : 0)}</td><td>${v.sellers.size}</td></tr>`).join('') +
       `</table></div></div>`;
+    { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入れ先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size])))); }
     setupColumns('suppliers', body);
     fitScroll('suppliers');
   }
@@ -3045,6 +3127,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <input type="number" id="exp-amt" placeholder="金額(円)" style="padding:5px;font-size:13px;width:110px">
         <input type="text" id="exp-memo" placeholder="メモ（任意）" style="padding:5px;font-size:13px;width:180px">
         <button class="smd-btn primary" id="exp-add">＋ 追加</button>
+        <button class="smd-btn" id="exp-csv" style="margin-left:4px" title="この月の経費明細をCSVで書き出し">⬇ CSV(${rows.length})</button>
         <span id="exp-msg" class="smd-dim" style="font-size:12px"></span>
       </div></div>`;
     // カテゴリ別集計
@@ -3064,6 +3147,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = netCard + form + catCards + table;
     // ハンドラ
     document.getElementById('exp-month').addEventListener('change', e => { exp.ym = e.target.value; renderExpenses(); });
+    { const cb = document.getElementById('exp-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('経費_' + exp.ym + '.csv', [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(rows.map(r => [r.ymd || '', r.category || '', r.amount != null ? r.amount : '', r.memo || ''])).concat([['', '経費合計', total, ''], ['', '返金合計', refundTotal, '']]))); }
     document.getElementById('exp-add').addEventListener('click', async () => {
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
       const amt = Number(document.getElementById('exp-amt').value);
@@ -3338,6 +3422,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔗 仕入れ自動マッチ（利益タブ）：仕入額未入力の注文に、未紐付けの在庫を商品名で照合→ワンクリックで紐付け→仕入額が利益/確定申告に反映。',
       '⚠ ブリッジ詰まり自動検知：連続タイムアウト時「pingは通るのに通信が無応答＝拡張の詰まり」を検知し、赤バナーで再起動を案内（再確認ボタンつき）。',
       '💱 為替レートの自動更新（GAS）：無料APIで各国→円レートを毎日 fx_rates に反映（shopee-fx-sync.gs・partner承認と無関係に稼働可）。',
+      '🔎 ⌘Kを全データ検索に拡張：ページだけでなく在庫・注文・出品を横断検索（商品名/SKU/注文番号/バイヤー名）→選ぶと該当ページを開いて自動で絞り込み。',
+      '💾 バックアップ：⚙️設定に「バックアップ」ボタン追加。在庫・経費・タスク・返品・日次・入金・為替などSupabase全データを1つのJSONファイルに書き出し（保管用）。',
+      '🏚 死に筋フィルタ（在庫）：在庫保管中のまま90日超の滞留在庫だけをワンクリック抽出（滞留日数の長い順）。値下げ・再出品の検討に。',
+      '⬇ CSV追加：仕入れ先（件数/仕入額/平均単価/セラー数）・経費（月次明細＋合計）をCSV書き出し。',
+      '🔔 朝のダイジェスト（GAS）：前日売上(国別・円換算)／直近7日と前週比／未完了・期限切れタスク／死に筋・確証未取得を毎朝メール通知（shopee-digest.gs・Supabaseのみ＝承認不要）。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
@@ -7844,6 +7933,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     modal.classList.add('open');
   });
   document.getElementById('set-cancel').addEventListener('click', () => modal.classList.remove('open'));
+  document.getElementById('set-backup').addEventListener('click', async () => {
+    const btn = document.getElementById('set-backup'); const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '取得中…';
+    try {
+      // 主要テーブルを一括取得。1つ失敗しても他は残す（テーブル未作成環境に配慮）
+      const TABLES = ['inventory', 'expenses', 'tasks', 'order_issues', 'daily_stats', 'income', 'fx_rates', 'accounts', 'listings'];
+      const dump = { _meta: { app: 'Shopee OS backup', exported_at: new Date().toISOString(), tables: {} } };
+      for (const t of TABLES) {
+        try { const rows = await sbGetAll(t, 'select=*'); dump[t] = rows; dump._meta.tables[t] = rows.length; }
+        catch (e) { dump[t] = { error: String(e.message || e) }; dump._meta.tables[t] = 'error'; }
+      }
+      const json = JSON.stringify(dump, null, 1);
+      const blob = new Blob([json], { type: 'application/json' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'shopee-os-backup_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      const okCnt = Object.values(dump._meta.tables).filter(v => v !== 'error').reduce((s, v) => s + (Number(v) || 0), 0);
+      toast('💾 バックアップ書出: ' + okCnt.toLocaleString() + '件（' + TABLES.length + 'テーブル）');
+    } catch (e) { toast('バックアップ失敗: ' + (e.message || e), true); }
+    finally { btn.disabled = false; btn.textContent = orig; }
+  });
   document.getElementById('set-save').addEventListener('click', () => {
     settings.gasUrl = document.getElementById('set-gas').value.trim().replace(/\/$/, '');
     settings.token = document.getElementById('set-token').value.trim();
