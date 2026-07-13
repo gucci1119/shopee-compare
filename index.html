@@ -2944,7 +2944,8 @@
       if (phase !== 'delivered' && phase !== 'eta' && pdays != null && pdays >= expDays) phase = 'likely';
       return { r, di, pd, pdays, phase, eta, expDays };
     });
-    const G = { delivered: 0, likely: 1, out: 2, eta: 3, transit: 4, none: 5 };
+    // 到着予定＝これから来る物（配達中→予定日→追跡中）を上に。到着済/見込み（=要確認の片付けの山）は下、手配待ちは最下。
+    const G = { out: 0, eta: 1, transit: 2, delivered: 3, likely: 4, none: 5 };
     list.sort((a, b) => (G[a.phase] !== G[b.phase]) ? G[a.phase] - G[b.phase] : (a.phase === 'eta' ? (a.eta || '').localeCompare(b.eta || '') : (b.pdays || 0) - (a.pdays || 0)));
     const cnt = p => list.filter(x => x.phase === p).length;
     const overdue = list.filter(x => x.phase === 'eta' && x.eta < todayStr).length;
@@ -2976,7 +2977,8 @@
       chip('✅到着済', cnt('delivered'), '#2e7d32') + chip('🟡到着済見込み', cnt('likely'), '#b26a00') + chip('🚚配達中', cnt('out'), '#e65100') + chip('📅予定あり', cnt('eta'), '#1565c0') + chip('📦追跡中', cnt('transit'), '#3949ab') + chip('❔手配待ち', cnt('none'), '#6b7280') +
       `<br><span class="smd-dim">${cnt('likely') ? `🟡 <b style="color:#b26a00">${cnt('likely')}</b>件は想定日数を超過＝届いている可能性大（「✓入荷」で在庫へ）` : '長期未着なし'}${overdue ? ` ・ 到着予定超過 <b style="color:#d93025">${overdue}</b>件` : ''} ・ 追跡番号クリックで配送業者ページ（現在地）へ</span></div>` +
       `<div style="margin:0 4px 8px"><button class="smd-btn" id="wait-alert" style="${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済・到着済見込み・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
-      `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button></div>` +
+      `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
+      ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') + `</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
       (shown.length ? shown.map(x => { const r = x.r, ph = WAIT_PHASE[x.phase];
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
@@ -3000,6 +3002,21 @@
       if (!confirm('この商品を「在庫保管中」に移します（入荷完了）。よろしいですか？')) return;
       if (await stockSave(id, { status: '在庫保管中' })) { toast('✅ 入荷: 在庫保管中に移動しました'); renderWaiting(host); }
     }));
+    { const ba = document.getElementById('wait-bulkarrive'); if (ba) ba.addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const targets = list.filter(x => x.phase === 'delivered' || x.phase === 'likely'); // 表示フィルタに関わらず全「到着済+見込み」を対象
+      if (!targets.length) return;
+      if (!confirm(`到着済＋到着済見込み ${targets.length}件をまとめて「在庫保管中」にします。\n\n※「到着済見込み」は仕入元の想定配送日数を超えた推定です。まだ届いていない物が混ざる可能性があります。\n（後で🏷在庫管理から個別に戻せます）\n\n実行しますか？`)) return;
+      ba.disabled = true; ba.textContent = '処理中…';
+      try {
+        const now = new Date().toISOString();
+        await sbUpsert('inventory', targets.map(x => ({ item_id: x.r.item_id, status: '在庫保管中', edited_at: now })));
+        targets.forEach(x => { const row = stock.rows.find(r => r.item_id === x.r.item_id); if (row) row.status = '在庫保管中'; });
+        logAct('仕入れ管理', '到着済見込みを一括入荷', `${targets.length}件`, '');
+        toast(`✅ ${targets.length}件を在庫保管中に移動しました`);
+        renderWaiting(host);
+      } catch (e) { alert('一括入荷に失敗: ' + e.message); ba.disabled = false; ba.textContent = '✓ 見込みを一括入荷'; }
+    }); }
     setupColumns('buy', host);
     fitScroll('buy');
   }
@@ -3550,7 +3567,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔔 朝のダイジェスト（GAS）：前日売上(国別・円換算)／直近7日と前週比／未完了・期限切れタスク／死に筋・確証未取得を毎朝メール通知（shopee-digest.gs・Supabaseのみ＝承認不要）。',
       '📦 注文の一括操作：注文管理に「⬇CSV（ピッキングリスト）」「📋追跡番号を一括コピー」を追加。フィルタ（未発送/遅延/国など）で絞った表示中の注文にそのまま効く。',
       '🚚 到着予定一覧：仕入れ管理の「⏳入庫待ち」を到着スケジュール化。到着済→到着済見込み→配達中→予定日→追跡中→手配待ちの順に並べ、待ち日数を表示。「✓入荷」ワンクリックで在庫保管中へ／「🔺要確認のみ」／CSV。',
-      '🟡 「配達中のまま実は到着済」問題を修正：仕入元ごとの想定配送日数（Amazon3日/フリマ6-7日等）を超えても未確定なら「到着済見込み（届いてるかも）」に格上げ（例：Amazon梱包資材が数日「配達中」表示のまま＝実際は届いている）。',
+      '🟡 「配達中のまま実は到着済」問題を修正：仕入元ごとの想定配送日数（Amazon3日/フリマ6-7日等）を超えても未確定なら「到着済見込み（届いてるかも）」に格上げ（例：Amazon梱包資材が数日「配達中」表示のまま＝実際は届いている）。並び順も「これから来る物（配達中→予定→追跡中）」を上に。到着済見込みは「✓見込みを一括入荷」でまとめて在庫化（確認ダイアログあり）。',
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページ（現在地）へ＋発送元県を表示。※荷物の「今どこ（郵便局名等）」の自動取込はメルカリ配送userscript側の拡張が必要（delivery_place列に対応済み・入れば自動表示）。',
     ] },
     { date: '2026-07-10', items: [
