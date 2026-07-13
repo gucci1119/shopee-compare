@@ -2837,7 +2837,7 @@
     const wrap = document.getElementById('buy-body');
     const tab = state.buyTab || 'search';
     const btab = (t, label) => `<button class="buy-tab" data-t="${t}" style="padding:7px 15px;border:1px solid ${t === tab ? '#ff5722' : '#ddd'};background:${t === tab ? '#fff3ef' : '#fff'};color:${t === tab ? '#ff5722' : '#555'};font-weight:${t === tab ? 700 : 500};border-radius:7px;cursor:pointer;font-size:13px">${label}</button>`;
-    wrap.innerHTML = `<div style="display:flex;gap:8px;margin:0 0 14px">${btab('search', '🔎 仕入れ検索')}${btab('waiting', '⏳ 入庫待ち')}</div><div id="buy-inner"></div>`;
+    wrap.innerHTML = `<div style="display:flex;gap:8px;margin:0 0 14px">${btab('search', '🔎 仕入れ検索')}${btab('waiting', '⏳ 入庫待ち・到着予定')}</div><div id="buy-inner"></div>`;
     wrap.querySelectorAll('.buy-tab').forEach(b => b.addEventListener('click', () => { state.buyTab = b.dataset.t; renderBuy(); }));
     const inner = wrap.querySelector('#buy-inner');
     if (tab === 'search') renderSourcing(inner); else renderWaiting(inner);
@@ -2895,17 +2895,85 @@
     }));
   }
 
-  // ⏳ 入庫待ち：仕入れたが未入荷
+  // 配送情報文字列(delivery_info)から到着予定日を推定："2026-07-15" / "7/15" / "7月15日" を拾う（年跨ぎは補正）
+  function parseEtaDate(s) {
+    if (!s) return null; s = String(s);
+    let m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return `${m[1]}-${String(+m[2]).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}`;
+    m = s.match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/);
+    if (m) {
+      const now = new Date(Date.now() + 9 * 3600000); let y = now.getFullYear(); const mo = +m[1], da = +m[2];
+      const cand = new Date(y, mo - 1, da), today0 = new Date(y, now.getMonth(), now.getDate());
+      if ((today0 - cand) > 180 * 86400000) y += 1; // 半年以上前の日付＝翌年の予定とみなす
+      return `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`;
+    }
+    return null;
+  }
+  const WAIT_PHASE = { delivered: { t: '✅ 到着済', bg: '#e8f5e9', c: '#2e7d32' }, out: { t: '🚚 配達中', bg: '#fff3e0', c: '#e65100' }, eta: { t: '📅 到着予定', bg: '#e3f2fd', c: '#1565c0' }, transit: { t: '📦 追跡中', bg: '#eef2ff', c: '#3949ab' }, none: { t: '❔ 音沙汰なし', bg: '#f3f4f6', c: '#6b7280' } };
+  // ⏳ 入庫待ち・到着予定：仕入れたが未入荷の到着スケジュール
   async function renderWaiting(host) {
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
-    const waiting = rows.filter(r => r.status === '入庫待ち');
-    const val = waiting.reduce((s, r) => s + (r.price || 0), 0);
-    const withTrack = waiting.filter(r => r.tracking_no || r.delivery_info || r.ship_method).length;
-    host.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">入庫待ち ${waiting.length}件 ・ 仕入額合計 ${fmtJpy(val)} ・ うち配送追跡あり ${withTrack}件（追跡番号クリックで配送業者ページ） ・ 到着したら🏷在庫管理で「在庫保管中」に</div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1040px"><tr><th>画像</th><th>仕入日時</th><th>商品名</th><th>仕入元</th><th>セラー</th><th>仕入額</th><th title="仕入元→自宅の配送状況・到着見込み（メルカリ便等のuserscript連携。追跡番号は配送業者の追跡ページへ）">配送・到着見込み</th><th>仕入状況</th><th>確証</th></tr>` +
-      waiting.slice(0, 400).map(r => `<tr><td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${nm(r.name, '300px')}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;line-height:1.5">${stkShipCell(r)}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td><td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td></tr>`).join('') +
+    const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    const daysTo = (from, to) => { const t = Date.parse(from); return isNaN(t) ? null : Math.round((Date.parse(to) - t) / 86400000); };
+    // 各入庫待ちの到着フェーズ・予定日・待ち日数を判定
+    const list = rows.filter(r => r.status === '入庫待ち').map(r => {
+      const di = String(r.delivery_info || '');
+      const pd = invPurDate(r); const pdays = pd ? Math.max(0, daysTo(pd, todayStr) || 0) : null;
+      let phase, eta = null;
+      if (/^(配達済|受取|お受け取り)/.test(di)) phase = 'delivered';
+      else if (/^配達中/.test(di)) phase = 'out';
+      else { eta = parseEtaDate(di); if (eta && !/^(到着|引受)/.test(di)) phase = 'eta'; else if (di || r.tracking_no || r.ship_method) phase = 'transit'; else phase = 'none'; }
+      return { r, di, pd, pdays, phase, eta };
+    });
+    const G = { delivered: 0, out: 1, eta: 2, transit: 3, none: 4 };
+    list.sort((a, b) => (G[a.phase] !== G[b.phase]) ? G[a.phase] - G[b.phase] : (a.phase === 'eta' ? (a.eta || '').localeCompare(b.eta || '') : (b.pdays || 0) - (a.pdays || 0)));
+    const cnt = p => list.filter(x => x.phase === p).length;
+    const stale = list.filter(x => (x.phase === 'none' || x.phase === 'transit') && (x.pdays || 0) >= 14).length;
+    const overdue = list.filter(x => x.phase === 'eta' && x.eta < todayStr).length;
+    const val = list.reduce((s, x) => s + (x.r.price || 0), 0);
+    const needAtt = x => x.phase === 'delivered' || ((x.phase === 'none' || x.phase === 'transit') && (x.pdays || 0) >= 14) || (x.phase === 'eta' && x.eta < todayStr);
+    const alertOnly = !!state.buyWaitAlert;
+    const shown = (alertOnly ? list.filter(needAtt) : list).slice(0, 800);
+    const chip = (label, n, col) => `<span style="display:inline-block;background:${col}22;color:${col};font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:5px">${label} ${n}</span>`;
+    const etaCol = d => !d ? '#5f6368' : (d < todayStr ? '#d93025' : (d === todayStr ? '#e8710a' : ((daysTo(todayStr, d) || 9) <= 2 ? '#e8710a' : '#1a7f37')));
+    const etaTxt = x => {
+      if (x.phase === 'delivered') return '<b style="color:#2e7d32">到着済</b>';
+      if (x.phase === 'out') return '<b style="color:#e65100">本日前後</b>';
+      if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>`; }
+      if (x.di) return `<span class="smd-dim">${esc(x.di)}</span>`;
+      return '<span class="smd-dim">—</span>';
+    };
+    const trackCell = r => { if (!r.tracking_no) return r.ship_method ? `<span class="smd-dim" style="font-size:10.5px">${esc(r.ship_method)}</span>` : '<span class="smd-dim">—</span>'; const url = carrierTrackUrl(r.ship_method, r.tracking_no); const t = `${r.ship_method ? esc(r.ship_method) + ' ' : ''}${esc(r.tracking_no)}`; return url ? `<a href="${url}" target="_blank" rel="noopener" style="color:#e65100;text-decoration:none;font-weight:600;font-size:10.5px">📦 ${t} ↗</a>` : `<span style="color:#e65100;font-size:10.5px">${t}</span>`; };
+    host.innerHTML =
+      `<div style="margin:0 4px 8px;font-size:12px">入庫待ち <b>${list.length}</b>件 ・ 仕入額 ${fmtJpy(val)}　` +
+      chip('✅到着済', cnt('delivered'), '#2e7d32') + chip('🚚配達中', cnt('out'), '#e65100') + chip('📅予定あり', cnt('eta'), '#1565c0') + chip('📦追跡中', cnt('transit'), '#3949ab') + chip('❔音沙汰なし', cnt('none'), '#6b7280') +
+      `<br><span class="smd-dim">${stale ? `⚠️ 14日以上未着 <b style="color:#d93025">${stale}</b>件` : '長期未着なし'}${overdue ? ` ・ 到着予定超過 <b style="color:#d93025">${overdue}</b>件` : ''} ・ 到着したら「✓入荷」で在庫保管中へ（🏷在庫管理と同期）</span></div>` +
+      `<div style="margin:0 4px 8px"><button class="smd-btn" id="wait-alert" style="${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済（未反映）・14日以上未着・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
+      `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button></div>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1120px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th>追跡</th><th>確証</th><th></th></tr>` +
+      (shown.length ? shown.map(x => { const r = x.r, ph = WAIT_PHASE[x.phase];
+        return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
+        `<td><span style="background:${ph.bg};color:${ph.c};font-weight:700;font-size:10.5px;padding:2px 7px;border-radius:11px;white-space:nowrap">${ph.t}</span></td>` +
+        `<td style="font-size:12px;white-space:nowrap">${etaTxt(x)}</td>` +
+        `<td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>` +
+        `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').slice(5).replace('-', '/') || '—')}<br><b style="color:${(x.pdays || 0) >= 14 ? '#d93025' : '#5f6368'}">${x.pdays == null ? '' : x.pdays + '日'}</b></td>` +
+        `<td style="font-size:11px">${nm(r.name, '260px')}</td>` +
+        `<td style="font-size:10.5px">${esc(r.supplier || '')}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
+        `<td style="line-height:1.5">${trackCell(r)}</td>` +
+        `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td>` +
+        `<td><button class="wait-arrive" data-id="${esc(r.item_id)}" title="入荷完了→在庫保管中に移す" style="border:1px solid ${x.phase === 'delivered' ? '#2e7d32' : '#ccc'};background:${x.phase === 'delivered' ? '#e8f5e9' : '#fff'};color:${x.phase === 'delivered' ? '#2e7d32' : '#555'};border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">✓入荷</button></td>` +
+        `</tr>`;
+      }).join('') : `<tr><td colspan="10" class="smd-dim" style="padding:14px">${alertOnly ? '要確認の入庫待ちはありません🎉' : '入庫待ちはありません🎉'}</td></tr>`) +
       `</table></div></div>`;
+    { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; renderWaiting(host); }); }
+    { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, x.r.name || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.item_id || '']))));  }
+    host.querySelectorAll('.wait-arrive').forEach(b => b.addEventListener('click', async e => {
+      const id = b.dataset.id;
+      if (!confirm('この商品を「在庫保管中」に移します（入荷完了）。よろしいですか？')) return;
+      if (await stockSave(id, { status: '在庫保管中' })) { toast('✅ 入荷: 在庫保管中に移動しました'); renderWaiting(host); }
+    }));
     setupColumns('buy', host);
     fitScroll('buy');
   }
@@ -3455,6 +3523,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '⬇ CSV追加：仕入れ先（件数/仕入額/平均単価/セラー数）・経費（月次明細＋合計）をCSV書き出し。',
       '🔔 朝のダイジェスト（GAS）：前日売上(国別・円換算)／直近7日と前週比／未完了・期限切れタスク／死に筋・確証未取得を毎朝メール通知（shopee-digest.gs・Supabaseのみ＝承認不要）。',
       '📦 注文の一括操作：注文管理に「⬇CSV（ピッキングリスト）」「📋追跡番号を一括コピー」を追加。フィルタ（未発送/遅延/国など）で絞った表示中の注文にそのまま効く。',
+      '🚚 到着予定一覧：仕入れ管理の「⏳入庫待ち」を到着スケジュール化。配送情報から到着予定日を推定して到着済→配達中→予定日順に並べ、待ち日数・14日以上未着/予定超過を警告。「✓入荷」ワンクリックで在庫保管中へ／「🔺要確認のみ」／CSV書き出し。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
