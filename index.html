@@ -3678,6 +3678,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
       '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
+      '💡 シリーズ明細サジェスト：コンポーザーのバリエーション欄に「シリーズの明細を提案」を追加。自分の全出品(全7か国 約6500カタログ・Supabaseのlistings)から、入力中のシリーズ名に一致する明細名を集計→今の明細に無いものを提案し、チェックで一括追加。既存カタログの抜け漏れ明細も発見できる（ブリッジ不要）。まだ出していないシリーズの全タイトル調査はAI(/shopee-listing-title)へ誘導。',
       '🐞 バグ修正（アラート滞留在庫）：長期在庫の判定が登録日(created_at＝DB一括取込で最近寄り)基準で常にほぼ0件だった → 仕入日(invPurDate)基準90日超に修正（在庫🏚死に筋と統一）。',
       '📥 アラート追加「到着済なのに入庫待ち」：配送追跡が配達完了/お届け済みなのに✓入荷し忘れの在庫を抽出（在庫・利益に未反映を防ぐ）。バッジ件数にも算入。',
       '📊 ダッシュボードに運用KPI追加：⏳入庫待ち(件数＋仕入額＋到着済未反映)・🏚死に筋(90日超・滞留金額)を一目で。',
@@ -5947,7 +5948,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="row" style="gap:6px;margin-top:6px">
             <button class="smd-btn" id="li-vadd">＋ バリエーション追加</button>
             <button class="smd-btn" id="li-vskusug" title="各バリエのSKUを商品名＋バリエ名から一括提案（修正可）">💡 全バリエSKU提案</button>
+            <button class="smd-btn" id="li-varsuggest" style="background:#eef8f0;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="自分の全出品(全7か国 約6500カタログ)から、このシリーズで使った明細名を集めて提案。既存カタログに足りない明細を一括追加できます">💡 シリーズの明細を提案（自分の全出品から）</button>
           </div>
+          <div id="li-varsuggest-panel" style="display:none;margin-top:8px"></div>
           <div class="row" style="gap:6px;margin-top:6px;align-items:center;background:#f6f2fd;border:1px solid #e0d3f5;border-radius:7px;padding:6px 8px;flex-wrap:wrap">
             <b style="font-size:11.5px;color:#7b52c4">⚙️ 全バリエ一括:</b>
             <span style="font-size:12px;color:#555">仕入 ¥<input class="li" id="li-bulk-cost" type="number" style="width:78px" placeholder="変更なし"></span>
@@ -5999,6 +6002,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         listState.variations.push({ opt: '', cost: 0, stock: 1, img: '', weightG: null });
         listVarsRender();
       });
+      { const b = document.getElementById('li-varsuggest'); if (b) b.addEventListener('click', () => openVarSuggest()); }
       // 全バリエ一括適用：入力した項目(仕入/重量/在庫)だけ全明細に反映
       document.getElementById('li-bulk-apply').addEventListener('click', () => {
         if (!listState.variations.length) { alert('先にバリエーションを追加してください'); return; }
@@ -6337,6 +6341,66 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     wrap.querySelectorAll('.li-favdel').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); settings.listImgFavs.splice(+e.currentTarget.dataset.i, 1); saveSettings(); listImgFavsRender(); }));
   }
 
+  // 自分の全出品カタログ（Supabase listings・models[].n にバリエ明細名）。ブリッジ不要
+  let _listingCatalog = null;
+  async function ensureListingsCatalog() {
+    if (_listingCatalog) return _listingCatalog;
+    _listingCatalog = await sbGetAll('listings', 'select=cc,item_id,name,models');
+    return _listingCatalog;
+  }
+  const vsNorm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // 💡 シリーズ明細サジェスト：全出品からキーワード一致カタログの明細名を集計→今の明細に無いものを提案・一括追加
+  async function openVarSuggest() {
+    const panel = document.getElementById('li-varsuggest-panel');
+    if (!panel) return;
+    panel.style.display = '';
+    panel.innerHTML = '<span class="smd-dim" style="font-size:12px">全出品カタログを読み込み中…</span>';
+    let cat; try { cat = await ensureListingsCatalog(); } catch (e) { panel.innerHTML = '<span style="color:#d93025">読み込み失敗: ' + esc(e.message) + '</span>'; return; }
+    const modelsOf = (L) => { const m = L.models; if (Array.isArray(m)) return m; try { return JSON.parse(m || '[]'); } catch (_) { return []; } };
+    const render = (kw) => {
+      kw = String(kw || '').trim();
+      const toks = kw.toLowerCase().split(/\s+/).filter(Boolean);
+      const match = (s) => { s = (s || '').toLowerCase(); return toks.every(t => s.includes(t)); };
+      const varMap = new Map(); let matchedCats = 0;
+      cat.forEach(L => {
+        const names = modelsOf(L).map(m => m && m.n || '').filter(Boolean);
+        if (!toks.length || !match((L.name || '') + ' ' + names.join(' '))) return;
+        matchedCats++;
+        names.forEach(nm => { const k = vsNorm(nm); if (!k) return; const g = varMap.get(k) || { name: nm, n: 0, ccs: new Set() }; g.n++; g.ccs.add(L.cc); varMap.set(k, g); });
+      });
+      const have = new Set(listState.variations.map(v => vsNorm(v.opt)));
+      const sugg = [...varMap.values()].sort((a, b) => b.n - a.n);
+      const missing = sugg.filter(g => !have.has(vsNorm(g.name)));
+      panel.innerHTML =
+        `<div style="border:1px solid #b9e0c2;background:#f6fbf7;border-radius:8px;padding:10px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+            <b style="font-size:12.5px;color:#1a7f37">💡 シリーズ明細サジェスト</b>
+            <input id="li-vs-kw" value="${esc(kw)}" placeholder="シリーズ名/キーワード（例: たまごっち / Mario / Final Fantasy）" style="flex:1;min-width:200px;padding:5px 8px;font-size:12px;border:1px solid #bcd">
+            <button class="smd-btn" id="li-vs-go">🔎 検索</button>
+            <button class="smd-btn" id="li-vs-close" title="閉じる">×</button>
+          </div>
+          <div class="smd-dim" style="font-size:11px;margin-bottom:7px">自分の全出品 <b>${cat.length}</b>カタログ（全7か国）から「${esc(kw) || '—'}」に一致 <b>${matchedCats}</b>件 → 過去に使った明細名 <b>${sugg.length}</b>種（うち今の明細に<b style="color:#1a7f37">無い ${missing.length}</b>種）。×N=使った回数。チェック＝追加対象。</div>` +
+        (sugg.length
+          ? `<div style="max-height:280px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:2px;border:1px solid #e0ece2;border-radius:6px;padding:5px;background:#fff">` +
+            sugg.map(g => { const has = have.has(vsNorm(g.name)); return `<label style="display:flex;gap:6px;align-items:center;font-size:11.5px;padding:2px 4px;border-radius:4px;${has ? 'opacity:.5' : ''}" title="${esc(g.name)} ・ ${[...g.ccs].join('/')}"><input type="checkbox" class="li-vs-cb" data-name="${esc(g.name)}"${has ? ' disabled' : ' checked'}><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span><span class="smd-dim" style="font-size:10px;white-space:nowrap">×${g.n}${has ? ' ✓有' : ''}</span></label>`; }).join('') + `</div>` +
+            (missing.length ? `<div style="margin-top:8px"><button class="smd-btn" id="li-vs-add" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700">✓ チェックした明細を追加（${missing.length}）</button> <span class="smd-dim" style="font-size:11px">既存の明細は保持し、不足分だけ足します</span></div>` : `<div class="smd-dim" style="font-size:11.5px;margin-top:8px;color:#1a7f37">✓ このシリーズで使った明細は全て揃っています。</div>`)
+          : `<div class="smd-dim" style="font-size:12px;padding:8px 4px">一致する明細がありません。キーワードを変えてください。<br>※まだ一度も出品していないシリーズの「全タイトル」を知りたい時は、AIに「○○（シリーズ名）＋ハード名 のShopee出品タイトルを作って」と頼めば全タイトルを調査できます（/shopee-listing-title）。</div>`) +
+        `</div>`;
+      document.getElementById('li-vs-go').addEventListener('click', () => render(document.getElementById('li-vs-kw').value));
+      document.getElementById('li-vs-kw').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); render(e.target.value); } });
+      document.getElementById('li-vs-close').addEventListener('click', () => { panel.style.display = 'none'; });
+      const addBtn = document.getElementById('li-vs-add');
+      if (addBtn) addBtn.addEventListener('click', () => {
+        const names = [...panel.querySelectorAll('.li-vs-cb:checked:not([disabled])')].map(cb => cb.dataset.name);
+        if (!names.length) { toast('追加する明細を選んでください', true); return; }
+        names.forEach(nm => listState.variations.push({ opt: nm, cost: 0, stock: 1, img: '', weightG: null }));
+        listVarsRender(); listRefresh();
+        toast('✓ ' + names.length + '明細を追加しました');
+        render(document.getElementById('li-vs-kw') ? document.getElementById('li-vs-kw').value : kw);
+      });
+    };
+    render((listState.name || '').trim());
+  }
   function listVarsRender() {
     const wrap = document.getElementById('li-vars');
     // 単品の仕入値は「バリエ無し（単品）」の時だけ表示（バリエ有りは各明細の仕入を使うため紛らわしさ回避）
