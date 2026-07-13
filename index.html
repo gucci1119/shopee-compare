@@ -2059,10 +2059,11 @@
     kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
     try {
       const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
-      const [days, orders, income] = await Promise.all([
+      const [days, orders, income, inv] = await Promise.all([
         sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
         sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
         sbGetAll('income', 'select=cc,amount,pending&order=sn'),
+        ensureInv().catch(() => []),
       ]);
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
       days.forEach(d => {
@@ -2074,11 +2075,20 @@
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
       let pendJpy = 0, pendN = 0;
       income.forEach(i => { if (i.pending === false) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
+      // ---- 運用KPI（在庫由来の要対応・横断） ----
+      const holdD = r => { const d = invPurDate(r); let t = d ? Date.parse(d) : NaN; if (isNaN(t)) t = r.created_at ? Date.parse(r.created_at) : NaN; return isNaN(t) ? 0 : (Date.now() - t) / 86400000; };
+      const waiting = inv.filter(r => r.status === '入庫待ち');
+      const waitVal = waiting.reduce((s, r) => s + (r.price || 0), 0);
+      const deadArr = inv.filter(r => r.status === '在庫保管中' && holdD(r) > 90);
+      const deadVal = deadArr.reduce((s, r) => s + (r.price || 0), 0);
+      const arrivedNotRecv = waiting.filter(r => deliveredAt(r)).length;
       kpis.innerHTML = [
         ['今日の売上', fmtJpy(todayJpy), `${todayUnits}点（同期時点）`],
         ['昨日の売上', fmtJpy(yestJpy), ''],
         ['未発送', toShip.length + '件', due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）'],
+        ['⏳入庫待ち', waiting.length + '件', '仕入 ' + fmtJpy(waitVal) + (arrivedNotRecv ? ` ・📥到着済未反映${arrivedNotRecv}` : '')],
+        ['🏚死に筋(90日超)', deadArr.length + '件', deadArr.length ? fmtJpy(deadVal) + ' 滞留' : 'なし🎉'],
       ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
       const due = document.getElementById('dash-due');
       due.innerHTML = toShip.slice(0, 8).map(o => {
@@ -2190,6 +2200,15 @@
   }
   // 受取日時の文字列(YYYY/MM/DD HH:MM or MM/DD HH:MM)から日付部分(MM/DD or YYYY-MM-DD)を返す
   const receivedDay = (t) => { if (!t) return ''; const m = String(t).match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/) || String(t).match(/^(\d{1,2})\/(\d{1,2})/); if (!m) return ''; return m.length === 4 ? `${m[1]}-${String(+m[2]).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}` : `${m[1]}/${m[2]}`; };
+  // リードタイム(仕入→受取)の日数。年なしのヤマト表記(MM/DD)は仕入年基準で補正。0〜120日の妥当範囲のみ返す
+  function leadDays(r) {
+    const pd = invPurDate(r), da = deliveredAt(r); if (!pd || !da) return null;
+    const pt = Date.parse(pd); if (isNaN(pt)) return null;
+    let dt, m = String(da).match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+    if (m) dt = Date.parse(`${m[1]}-${('0' + m[2]).slice(-2)}-${('0' + m[3]).slice(-2)}`);
+    else { m = String(da).match(/(\d{1,2})\/(\d{1,2})/); if (!m) return null; const py = new Date(pt).getFullYear(); dt = Date.parse(`${py}-${('0' + m[1]).slice(-2)}-${('0' + m[2]).slice(-2)}`); if (dt < pt) dt = Date.parse(`${py + 1}-${('0' + m[1]).slice(-2)}-${('0' + m[2]).slice(-2)}`); }
+    if (isNaN(dt)) return null; const d = (dt - pt) / 86400000; return (d >= 0 && d < 120) ? d : null;
+  }
   // 仕入元→自宅の配送状況セル（メルカリ配送userscriptがSupabaseへ直書き。ship_method/tracking_no/delivery_info）
   function stkShipCell(r) {
     const parts = [];
@@ -2518,7 +2537,8 @@
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let rows; try { rows = await ensureInv(); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
     const bySup = {};
-    rows.forEach(r => { const s = normSupplier(r.supplier || '(未設定)'); (bySup[s] = bySup[s] || { n: 0, val: 0, sellers: new Set() }); bySup[s].n++; bySup[s].val += r.price || 0; if (r.seller) bySup[s].sellers.add(r.seller); });
+    rows.forEach(r => { const s = normSupplier(r.supplier || '(未設定)'); const g = (bySup[s] = bySup[s] || { n: 0, val: 0, sellers: new Set(), leadSum: 0, leadN: 0 }); g.n++; g.val += r.price || 0; if (r.seller) g.sellers.add(r.seller); const lt = leadDays(r); if (lt != null) { g.leadSum += lt; g.leadN++; } });
+    const avgLead = v => v.leadN ? (Math.round(v.leadSum / v.leadN * 10) / 10) : null;
     const list = Object.entries(bySup).sort((a, b) => b[1].n - a[1].n);
     // ── セラー別（同一仕入元×同一セラー）集計。リピート＝直接交渉候補 ──
     const bySeller = {};
@@ -2547,8 +2567,8 @@
     const shipInfo = g => `連絡可${g.open}${g.anon ? ' / 匿名' + g.anon : ''}${g.unknown ? ' / 不明' + g.unknown : ''}`;
 
     body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">仕入元 ${list.length}種 ・ 全${rows.length}件から集計 ・ 名称クリックで公式サイトへ（表記ゆれは統合表示） <button class="smd-btn" id="sup-csv" style="font-size:11px;margin-left:6px" title="仕入元集計をCSVで書き出し">⬇ CSV</button></div>` +
-      `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計(円)</th><th>平均単価(円)</th><th>セラー数</th></tr>` +
-      list.map(([s, v]) => `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${fmtJpy(v.n ? v.val / v.n : 0)}</td><td>${v.sellers.size}</td></tr>`).join('') +
+      `<div class="tool-card" style="margin:0;max-width:720px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計(円)</th><th>平均単価(円)</th><th>セラー数</th><th title="仕入→受取の平均日数（配送追跡データがある分から算出）">平均到着</th></tr>` +
+      list.map(([s, v]) => { const al = avgLead(v); return `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${fmtJpy(v.n ? v.val / v.n : 0)}</td><td>${v.sellers.size}</td><td style="white-space:nowrap">${al != null ? `<b>${al}日</b> <span class="smd-dim" style="font-size:10px">(${v.leadN})</span>` : '<span class="smd-dim">—</span>'}</td></tr>`; }).join('') +
       `</table></div></div>` +
       `<div style="margin:18px 4px 6px;font-weight:700;font-size:14px">🔁 リピートセラー（直接取引の交渉候補）</div>` +
       `<div class="smd-dim" style="font-size:11.5px;margin:0 4px 8px">同じセラーから <b>2回以上</b>仕入れた相手。<b>匿名配送（らくらく/ゆうゆうメルカリ便など）は住所が分からない</b>ので既定で除外。定形外・クリックポスト・メルカリShops等＝伝票や取引情報から住所・電話が分かり連絡できる可能性。回数の多い順。</div>` +
@@ -2569,7 +2589,7 @@
         g.items.map(it => `<div style="font-size:10.5px;line-height:1.5">${esc(it.date || '')} ・ ${it.price != null ? fmtJpy(it.price) : ''} ・ ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${esc((it.name || '').slice(0, 34))}↗</a>` : esc((it.name || '').slice(0, 34))}${it.ship ? ` <span class="smd-dim">[${esc(it.ship)}]</span>` : ''}${it.received ? ` <span style="color:#2e7d32">📥受取${esc(it.received)}</span>` : ''}</div>`).join('') +
         `</div></td></tr>`).join('') : `<tr><td colspan="8" class="smd-dim" style="padding:12px">${sup.contactOnly ? '連絡可（匿名以外）のリピートセラーはいません。「住所が分かる相手のみ」を外すと全リピートを表示。' : 'リピートセラー（2回以上）はまだありません。'}</td></tr>`) +
       `</table></div></div>`;
-    { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入れ先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size])))); }
+    { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入れ先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数', '平均到着日数', '到着計測数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size, avgLead(v) != null ? avgLead(v) : '', v.leadN])))); }
     { const cb = document.getElementById('sup-contact'); if (cb) cb.addEventListener('click', () => { sup.contactOnly = !sup.contactOnly; renderSuppliers(); }); }
     { const cb = document.getElementById('sup-scsv'); if (cb) cb.addEventListener('click', () => downloadCsv('リピートセラー_' + new Date().toISOString().slice(0, 10) + '.csv', [['セラー', '仕入元', '回数', '合計仕入額(円)', '平均(円)', '直近仕入', '連絡可否', '連絡可発送数', '匿名発送数', '不明']].concat(shown.map(g => [g.seller, g.supplier, g.n, Math.round(g.val), Math.round(g.n ? g.val / g.n : 0), g.last, g.contact === 'open' ? '連絡可' : g.contact === 'anon' ? '匿名のみ' : '不明', g.open, g.anon, g.unknown])))); }
     body.querySelectorAll('.sup-exp').forEach(el => el.addEventListener('click', () => { const box = document.getElementById('supi-' + el.dataset.idx); if (!box) return; const show = box.style.display === 'none'; box.style.display = show ? '' : 'none'; el.textContent = el.textContent.replace(show ? '▾' : '▴', show ? '▴' : '▾'); }));
@@ -3240,9 +3260,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 4) 入庫待ち長期：買ったが14日超で未入荷
     const stuckArrive = inv.filter(r => r.status === '入庫待ち' && (alertDaysSince(r.purchase_ts || r.created_at) || 0) > 14)
       .sort((a, b) => (alertDaysSince(b.purchase_ts || b.created_at) || 0) - (alertDaysSince(a.purchase_ts || a.created_at) || 0));
-    // 5) 滞留在庫：在庫保管中で登録から60日超
-    const dead = inv.filter(r => r.status === '在庫保管中' && (alertDaysSince(r.created_at) || 0) > 60)
-      .sort((a, b) => (alertDaysSince(b.created_at) || 0) - (alertDaysSince(a.created_at) || 0));
+    // 5) 滞留在庫：在庫保管中で「仕入から」90日超。★created_atはDB一括取込で最近寄り→仕入日(invPurDate)基準で数える（在庫🏚死に筋と統一）
+    const holdDays = (r) => { const d = invPurDate(r); let t = d ? Date.parse(d) : NaN; if (isNaN(t)) t = r.created_at ? Date.parse(r.created_at) : NaN; return isNaN(t) ? 0 : (Date.now() - t) / 86400000; };
+    const dead = inv.filter(r => r.status === '在庫保管中' && holdDays(r) > 90)
+      .sort((a, b) => holdDays(b) - holdDays(a));
+    // 7) 到着済なのに入庫待ちのまま：配送追跡が「配達完了/お届け済み」なのに status=入庫待ち＝✓入荷し忘れ（在庫に反映されず利益計算にも出ない）
+    const arrivedNotRecv = inv.filter(r => r.status === '入庫待ち' && deliveredAt(r))
+      .sort((a, b) => String(deliveredAt(b) || '').localeCompare(String(deliveredAt(a) || '')));
     // 6) データ不整合の疑い：未払いのまま(tab<300)／発送済(tab400)なのに追跡なし＝DBが古い可能性
     const dataIssues = orders.filter(o => (o.tab != null && o.tab < 300) || (o.tab === 400 && !o.tracking)).map(o => {
       const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {};
@@ -3261,6 +3285,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div class="pf-scroll" style="max-height:340px"><table class="pf-table"><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>${rowsHtml}</table></div></div>`;
 
     const html =
+      card('📥', '到着済なのに入庫待ち（✓入荷し忘れ）', '#1a7f37', arrivedNotRecv.length,
+        ['画像', '商品名', '仕入元', 'セラー', '受取日時', '仕入から'],
+        arrivedNotRecv.slice(0, 100).map(r => `<tr style="background:#f6fbf7"><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#2e7d32">📥 ${esc(deliveredAt(r))}</b></td><td style="font-size:11px;white-space:nowrap">${dtxt(r.purchase_ts || r.purchase_date)}</td></tr>`).join(''),
+        '配送業者は「配達完了/お届け済み」なのに在庫が入庫待ちのまま＝在庫・利益に未反映。🛒仕入れ管理→⏳入庫待ち・到着予定 の「✓入荷」／「見込みを一括入荷」で在庫保管中へ。') +
       card('🚚', '発送期日（未発送）', '#d93025', shipRows.length,
         ['国', '画像', '注文SN', 'バイヤー', '商品', '発送期日', '状態', '伝票'],
         shipRows.slice(0, 100).map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
@@ -3286,11 +3314,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。');
 
-    const total = shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length;
+    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length;
     updateAlertBadge(total);
     body.innerHTML = (total + dead.length) === 0
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
-      : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length} ／ データ不整合 ${dataIssues.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
+      : `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">要対応 <b>${total}</b>件（到着済未反映 ${arrivedNotRecv.length} ／ 発送期日 ${shipRows.length} ／ 相手未発送 ${stuckShip.length} ／ 入庫待ち長期 ${stuckArrive.length} ／ 確証未取得 ${noProof.length} ／ データ不整合 ${dataIssues.length}）＋ 滞留在庫 ${dead.length}件</div>` + html;
   }
   // ---------------- 💴 入出金・経費（純利益） ----------------
   const EXP_CATS = ['送料', '梱包資材', 'Shopee手数料', '広告費', '仕入送料', 'その他'];
@@ -3650,6 +3678,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
       '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
+      '🐞 バグ修正（アラート滞留在庫）：長期在庫の判定が登録日(created_at＝DB一括取込で最近寄り)基準で常にほぼ0件だった → 仕入日(invPurDate)基準90日超に修正（在庫🏚死に筋と統一）。',
+      '📥 アラート追加「到着済なのに入庫待ち」：配送追跡が配達完了/お届け済みなのに✓入荷し忘れの在庫を抽出（在庫・利益に未反映を防ぐ）。バッジ件数にも算入。',
+      '📊 ダッシュボードに運用KPI追加：⏳入庫待ち(件数＋仕入額＋到着済未反映)・🏚死に筋(90日超・滞留金額)を一目で。',
+      '🚚 仕入れ先に「平均到着日数」列：仕入→受取のリードタイムを配送追跡から算出し仕入元別に表示（速い仕入先の把握・CSVにも）。',
       '🌏 自動出品の他国有効化ガイド：コンポーザーの自動出品ボックスに「他国で自動出品を有効化する」手順＋各国「雛形を作る↗」リンクを追加。自動出品は各国とも初回1回だけ雛形（手動作成のcreate_product_info）を登録すれば有効（カテゴリ/ブランド/属性/物流は雛形が固定）＝コンポーザーは既に全7か国分のジョブを生成済み。',
       '📥 受取日時：配送追跡の「配達完了/お届け済み」時刻から「いつ受け取ったか」を自動表示（到着予定一覧の到着済＝受取日時＋仕入から◯日で到着／在庫台帳の配送欄／リピートセラーの品目／各CSV）。',
       '🔁 リピートセラー（直接交渉候補）：仕入れ先ページにセラー別集計を追加。2回以上仕入れた相手を回数順に表示し、直接取引の打診候補を抽出。匿名配送（らくらく/ゆうゆうメルカリ便等＝住所不明）は既定で除外し、定形外/クリックポスト/メルカリShops等＝住所が分かる相手だけに絞れる。品目展開・CSV対応。',
