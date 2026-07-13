@@ -6362,18 +6362,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const render = (kw) => {
       kw = String(kw || '').trim();
       const kwl = kw.toLowerCase();
-      // 検索フレーズ＝入力語＋日本語シリーズ名に対応する英名（例: たまごっち→tamagotchi）
+      // 検索フレーズ＝入力語＋日本語シリーズ名に対応する英名（例: たまごっち→tamagotchi）。過度に広がらないよう「最長一致の別名」だけ足す（マリオカートは mario 単独でなく mario kart）
       const phrases = [kwl];
-      Object.keys(VS_JP_EN).forEach(j => { if (kwl.includes(j.toLowerCase())) phrases.push(VS_JP_EN[j]); });
+      let bestAlias = '';
+      Object.keys(VS_JP_EN).forEach(j => { if (kwl.includes(j.toLowerCase()) && j.length > bestAlias.length) bestAlias = j; });
+      if (bestAlias) phrases.push(VS_JP_EN[bestAlias]);
       const hasKw = kwl.length > 0;
+      // ★明細名「そのもの」がシリーズに一致するものだけ集める（カタログが複数シリーズを束ねていても混ざらない）
       const match = (s) => { s = (s || '').toLowerCase(); return phrases.some(p => { const ts = p.split(/\s+/).filter(Boolean); return ts.length && ts.every(t => s.includes(t)); }); };
-      const varMap = new Map(); let matchedCats = 0;
+      const varMap = new Map(); const matchedCatSet = new Set();
       cat.forEach(L => {
-        const names = modelsOf(L).map(m => m && m.n || '').filter(Boolean);
-        if (!hasKw || !match((L.name || '') + ' ' + names.join(' '))) return;
-        matchedCats++;
-        names.forEach(nm => { const k = vsNorm(nm); if (!k) return; const g = varMap.get(k) || { name: nm, n: 0, ccs: new Set() }; g.n++; g.ccs.add(L.cc); varMap.set(k, g); });
+        modelsOf(L).forEach(m => {
+          const nm = m && m.n || ''; if (!nm || !hasKw || !match(nm)) return;
+          matchedCatSet.add(L.cc + ':' + L.item_id);
+          const k = vsNorm(nm); const g = varMap.get(k) || { name: nm, n: 0, ccs: new Set() }; g.n++; g.ccs.add(L.cc); varMap.set(k, g);
+        });
       });
+      const matchedCats = matchedCatSet.size;
       const have = new Set(listState.variations.map(v => vsNorm(v.opt)));
       const sugg = [...varMap.values()].sort((a, b) => b.n - a.n);
       const missing = sugg.filter(g => !have.has(vsNorm(g.name)));
