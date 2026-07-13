@@ -2966,13 +2966,20 @@
       const s = x.ds || x.di; // 追跡中：配送業者の最新状態（輸送中/作業店通過 等）を表示
       return s ? `<span style="color:#3949ab;font-weight:600">${esc(s)}</span>` : '<span class="smd-dim">—</span>';
     };
-    // 配送セル：運送会社バッジ＋追跡番号リンク＋現在地（delivery_placeがあれば／無ければ発送元県）
-    const deliveryCell = r => {
+    // 配送セル：運送会社バッジ＋追跡番号リンク＋現在地＋「▾履歴」（発送/中継局/センター/到着/配達の全スキャンをタイムライン展開）
+    const deliveryCell = (r, idx) => {
       const parts = [];
       const cb = carrierBadge(r.ship_method); if (cb) parts.push(cb);
       if (r.tracking_no) { const url = carrierTrackUrl(r.ship_method, r.tracking_no); parts.push(url ? `<a href="${url}" target="_blank" rel="noopener" title="配送業者の追跡ページで現在地を確認" style="color:#e65100;text-decoration:none;font-weight:600;font-size:10.5px">📦 ${esc(r.tracking_no)} ↗</a>` : `<span style="color:#e65100;font-size:10.5px">${esc(r.tracking_no)}</span>`); }
       if (r.delivery_place) parts.push(`<span style="font-size:10.5px;color:#1565c0" title="配送追跡の最新地点">📍 ${esc(r.delivery_place)}</span>`); // shopee-tracking.gs が入れる現在地（営業所/郵便局・県）
       else if (r.ship_region && r.ship_region !== '未定') parts.push(`<span class="smd-dim" style="font-size:10px">発送元:${esc(r.ship_region)}</span>`);
+      let hist = []; try { hist = r.delivery_history ? JSON.parse(r.delivery_history) : []; } catch (_) {}
+      if (hist.length) {
+        parts.push(`<span class="wait-hist" data-idx="${idx}" style="cursor:pointer;color:#3949ab;font-size:10px;user-select:none">▾ 配送履歴 ${hist.length}件</span>` +
+          `<div class="wait-histbox" id="wh-${idx}" style="display:none;margin-top:3px;border-left:2px solid #cfd8dc;padding-left:8px">` +
+          hist.slice().reverse().map((h, i) => `<div style="font-size:10px;line-height:1.45;margin-bottom:2px;${i === 0 ? 'font-weight:700;color:#1565c0' : 'color:#78909c'}">${esc(h.t || '')} <b>${esc(h.s || '')}</b>${h.p ? `<br><span style="color:#90a4ae">@ ${esc(h.p)}</span>` : ''}</div>`).join('') +
+          `</div>`);
+      }
       return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
     };
     host.innerHTML =
@@ -2983,7 +2990,7 @@
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
       ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') + `</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
-      (shown.length ? shown.map(x => { const r = x.r, ph = WAIT_PHASE[x.phase];
+      (shown.length ? shown.map((x, idx) => { const r = x.r, ph = WAIT_PHASE[x.phase];
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
         `<td><span style="background:${ph.bg};color:${ph.c};font-weight:700;font-size:10.5px;padding:2px 7px;border-radius:11px;white-space:nowrap">${ph.t}</span></td>` +
         `<td style="font-size:12px;white-space:nowrap">${etaTxt(x)}</td>` +
@@ -2992,7 +2999,7 @@
         `<td style="font-size:11px">${nm(r.name, '260px')}</td>` +
         `<td style="font-size:10.5px">${esc(r.supplier || '')}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
         `<td style="font-size:11px;white-space:nowrap">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
-        `<td style="line-height:1.6">${deliveryCell(r)}</td>` +
+        `<td style="line-height:1.6">${deliveryCell(r, idx)}</td>` +
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td>` +
         `<td><button class="wait-arrive" data-id="${esc(r.item_id)}" title="入荷完了→在庫保管中に移す" style="border:1px solid ${(x.phase === 'delivered' || x.phase === 'likely') ? '#2e7d32' : '#ccc'};background:${(x.phase === 'delivered' || x.phase === 'likely') ? '#e8f5e9' : '#fff'};color:${(x.phase === 'delivered' || x.phase === 'likely') ? '#2e7d32' : '#555'};border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">✓入荷</button></td>` +
         `</tr>`;
@@ -3000,6 +3007,13 @@
       `</table></div></div>`;
     { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; renderWaiting(host); }); }
     { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, x.r.name || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
+    host.querySelectorAll('.wait-hist').forEach(el => el.addEventListener('click', e => {
+      e.stopPropagation();
+      const box = document.getElementById('wh-' + el.dataset.idx); if (!box) return;
+      const show = box.style.display === 'none';
+      box.style.display = show ? '' : 'none';
+      el.textContent = el.textContent.replace(show ? '▾' : '▴', show ? '▴' : '▾');
+    }));
     host.querySelectorAll('.wait-arrive').forEach(b => b.addEventListener('click', async e => {
       const id = b.dataset.id;
       if (!confirm('この商品を「在庫保管中」に移します（入荷完了）。よろしいですか？')) return;
@@ -3573,6 +3587,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🟡 「配達中のまま実は到着済」問題を修正：仕入元ごとの想定配送日数（Amazon3日/フリマ6-7日等）を超えても未確定なら「到着済見込み（届いてるかも）」に格上げ（例：Amazon梱包資材が数日「配達中」表示のまま＝実際は届いている）。並び順も「これから来る物（配達中→予定→追跡中）」を上に。到着済見込みは「✓見込みを一括入荷」でまとめて在庫化（確認ダイアログあり）。',
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
+      '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',

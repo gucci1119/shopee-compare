@@ -12,9 +12,10 @@
  *
  * ■ 事前にSupabaseへ列を追加（SQL Editorで1回だけ）
  *   alter table public.inventory
- *     add column if not exists delivery_status text,
- *     add column if not exists delivery_place  text,
- *     add column if not exists delivery_eta    text,
+ *     add column if not exists delivery_status  text,
+ *     add column if not exists delivery_place   text,
+ *     add column if not exists delivery_eta     text,
+ *     add column if not exists delivery_history text,   -- 全スキャン履歴(JSON: [{t,s,p}...] 発送/中継局/センター/到着/配達)
  *     add column if not exists delivery_synced_at timestamptz;
  *
  * ■ セットアップ
@@ -54,7 +55,7 @@ function syncTracking() {
       var info = isYamato_(r.ship_method) ? parseYamato_(html) : parseJapanPost_(html);
       if (!info || !info.status) return;
       ok++;
-      var patch = { item_id: r.item_id, delivery_status: info.status, delivery_place: info.place || null, delivery_eta: info.eta || null, delivery_synced_at: now };
+      var patch = { item_id: r.item_id, delivery_status: info.status, delivery_place: info.place || null, delivery_eta: info.eta || null, delivery_history: JSON.stringify(info.history || []), delivery_synced_at: now };
       if (autoArrive && isDelivered_(info.status)) { patch.status = '在庫保管中'; patch.edited_at = now; delivered++; }
       updates.push(patch);
     });
@@ -88,19 +89,20 @@ function strip_(s) { return String(s || '').replace(/<[^>]+>/g, ' ').replace(/&n
 function trRows_(html) { return html.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || []; }
 function tdCells_(tr) { return (tr.match(/<td[^>]*>[\s\S]*?<\/td>/g) || []).map(strip_).filter(function (c) { return c; }); }
 
-// 日本郵便：履歴テーブルの最終行（日時 / 状態 / 取扱局 / 県）
+// 日本郵便：履歴テーブル全行（日時 / 状態 / 取扱局 / 県）を古い→新しい順で。発送・中継・到着・配達を全部拾う
 function parseJapanPost_(html) {
   var hist = [];
   trRows_(html).forEach(function (tr) {
     var c = tdCells_(tr);
-    if (c.length >= 2 && /^\d{4}\/\d{1,2}\/\d{1,2}/.test(c[0]) && /(引受|中継|到着|配達|お届け|通過|輸送|持ち出|返送|保管)/.test(c.join(' '))) hist.push(c);
+    if (c.length >= 2 && /^\d{4}\/\d{1,2}\/\d{1,2}/.test(c[0]) && /(引受|中継|到着|配達|お届け|通過|輸送|持ち出|返送|保管)/.test(c.join(' ')))
+      hist.push({ t: c[0] || '', s: c[1] || '', p: (c[2] || '') + (c[3] ? ' ' + c[3] : '') });
   });
   if (!hist.length) return null;
   var L = hist[hist.length - 1];
-  return { status: L[1] || '', place: (L[2] || '') + (L[3] ? ' ' + L[3] : ''), when: L[0] || '', eta: '' };
+  return { status: L.s, place: L.p, when: L.t, eta: '', history: hist };
 }
 
-// ヤマト：履歴テーブルの最終行（状態 / 日付 / 時刻 / 営業所）＋お届け予定日時
+// ヤマト：履歴テーブル全行（状態 / 日付 / 時刻 / 営業所）＋お届け予定日時。荷物受付/発送/作業店通過/配達まで全部
 function parseYamato_(html) {
   var eta = '';
   var flat = strip_(html.replace(/swd\.writeln\('/g, ' '));
@@ -109,9 +111,10 @@ function parseYamato_(html) {
   var hist = [];
   trRows_(html).forEach(function (tr) {
     var c = tdCells_(tr);
-    if (c.length && /^(荷物受付|発送済み|作業店通過|配達完了|投函完了|輸送中|持ち出し|保管|返品|集荷|センター|宅急便センター)/.test(c[0])) hist.push(c);
+    if (c.length && /^(荷物受付|発送済み|作業店通過|配達完了|投函完了|輸送中|持ち出し|保管|返品|集荷|センター|宅急便センター)/.test(c[0]))
+      hist.push({ t: (c[1] || '') + (c[2] ? ' ' + c[2] : ''), s: c[0], p: c[3] || '' });
   });
-  if (!hist.length) return { status: '', place: '', when: '', eta: eta };
+  if (!hist.length) return { status: '', place: '', when: '', eta: eta, history: [] };
   var L = hist[hist.length - 1];
-  return { status: L[0], when: (L[1] || '') + (L[2] ? ' ' + L[2] : ''), place: L[3] || '', eta: eta };
+  return { status: L.s, when: L.t, place: L.p, eta: eta, history: hist };
 }
