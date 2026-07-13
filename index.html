@@ -2180,11 +2180,22 @@
     if (/^\d{11,13}$/.test(t)) return `https://trackings.post.japanpost.jp/services/srv/search/direct?reqCodeNo1=${t}&searchKind=S002`; // 業者不明でも12桁数字は日本郵便で引けることが多い
     return null;
   }
+  // 配送履歴(delivery_history)から「受け取った日時」を取り出す（配達完了/お届け済み/投函完了の最後のスキャン時刻）
+  function deliveredAt(r) {
+    if (!r || !r.delivery_history) return null;
+    let h; try { h = JSON.parse(r.delivery_history); } catch (_) { return null; }
+    if (!Array.isArray(h)) return null;
+    for (let i = h.length - 1; i >= 0; i--) { if (/(配達完了|お届け.*済|投函完了)/.test(h[i].s || '')) return h[i].t || null; }
+    return null;
+  }
+  // 受取日時の文字列(YYYY/MM/DD HH:MM or MM/DD HH:MM)から日付部分(MM/DD or YYYY-MM-DD)を返す
+  const receivedDay = (t) => { if (!t) return ''; const m = String(t).match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/) || String(t).match(/^(\d{1,2})\/(\d{1,2})/); if (!m) return ''; return m.length === 4 ? `${m[1]}-${String(+m[2]).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}` : `${m[1]}/${m[2]}`; };
   // 仕入元→自宅の配送状況セル（メルカリ配送userscriptがSupabaseへ直書き。ship_method/tracking_no/delivery_info）
   function stkShipCell(r) {
     const parts = [];
     if (r.ship_method) parts.push(`<span title="配送方法" style="color:#1565c0">${esc(r.ship_method)}</span>`);
     if (r.ship_region) parts.push(`<span class="smd-dim" title="発送元地域" style="font-size:9.5px">発:${esc(r.ship_region)}</span>`);
+    { const da = deliveredAt(r); if (da) parts.push(`<span title="配送追跡での受取(配達完了)日時" style="background:#e8f5e9;color:#2e7d32;padding:1px 5px;border-radius:3px;font-weight:600">📥 受取 ${esc(da)}</span>`); }
     if (r.tracking_no) {
       const url = carrierTrackUrl(r.ship_method, r.tracking_no);
       parts.push(url
@@ -2442,7 +2453,7 @@
     body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
     { const db = document.getElementById('stk-dead'); if (db) db.addEventListener('click', () => { stock.dead = !stock.dead; stockRender(); }); }
-    { const cb = document.getElementById('stk-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('在庫_' + new Date().toISOString().slice(0, 10) + '.csv', [['ItemID', '商品名', 'SKU', '仕入元', 'セラー', '仕入額(円)', 'コンディション', '状態', '棚', 'Shopee注文SN', '備考']].concat(rows.map(r => [r.item_id || '', r.name || '', r.sku || '', r.supplier || '', r.seller || '', r.price != null ? r.price : '', r.condition || '', r.status || '', r.bin || '', r.shopee_sn || '', r.note || ''])))); }
+    { const cb = document.getElementById('stk-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('在庫_' + new Date().toISOString().slice(0, 10) + '.csv', [['ItemID', '商品名', 'SKU', '仕入元', 'セラー', '仕入額(円)', 'コンディション', '状態', '棚', '受取日時', 'Shopee注文SN', '備考']].concat(rows.map(r => [r.item_id || '', r.name || '', r.sku || '', r.supplier || '', r.seller || '', r.price != null ? r.price : '', r.condition || '', r.status || '', r.bin || '', deliveredAt(r) || '', r.shopee_sn || '', r.note || ''])))); }
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     // ラベル一括印刷：チェックボックス選択
     const updateStkSelUI = () => {
@@ -2522,7 +2533,7 @@
       if (sm) { if (ANON_SHIP.test(sm)) g.anon++; else g.open++; } else g.unknown++;
       const d = invPurDate(r); if (d > g.last) g.last = d;
       if (!g.url && r.supplier_url) g.url = r.supplier_url;
-      g.items.push({ name: r.name || r.name_supplier || '', price: r.price, date: d, ship: sm, url: r.supplier_url, txn: stkTxnUrl(r) });
+      g.items.push({ name: r.name || r.name_supplier || '', price: r.price, date: d, ship: sm, url: r.supplier_url, txn: stkTxnUrl(r), received: receivedDay(deliveredAt(r)) });
     });
     // 事業者マーケット（Shops/ショッピング/楽天/店舗系）は請求書等に事業者情報が出る＝連絡可
     const BIZ_SUP = /^(メルカリShops|ヤフーショッピング|楽天|Nintendo Store|ブックオフ)/;
@@ -2555,7 +2566,7 @@
         `<td style="font-size:11px;white-space:nowrap">${cBadge(g.contact)}<br><span class="smd-dim" style="font-size:10px">${shipInfo(g)}</span></td>` +
         `<td><span class="sup-exp" data-idx="${idx}" style="cursor:pointer;color:#3949ab;font-size:11px;user-select:none">▾ ${g.items.length}品</span>` +
         `<div class="sup-itemsbox" id="supi-${idx}" style="display:none;margin-top:4px;border-left:2px solid #cfd8dc;padding-left:8px;max-width:420px">` +
-        g.items.map(it => `<div style="font-size:10.5px;line-height:1.5">${esc(it.date || '')} ・ ${it.price != null ? fmtJpy(it.price) : ''} ・ ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${esc((it.name || '').slice(0, 34))}↗</a>` : esc((it.name || '').slice(0, 34))}${it.ship ? ` <span class="smd-dim">[${esc(it.ship)}]</span>` : ''}</div>`).join('') +
+        g.items.map(it => `<div style="font-size:10.5px;line-height:1.5">${esc(it.date || '')} ・ ${it.price != null ? fmtJpy(it.price) : ''} ・ ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${esc((it.name || '').slice(0, 34))}↗</a>` : esc((it.name || '').slice(0, 34))}${it.ship ? ` <span class="smd-dim">[${esc(it.ship)}]</span>` : ''}${it.received ? ` <span style="color:#2e7d32">📥受取${esc(it.received)}</span>` : ''}</div>`).join('') +
         `</div></td></tr>`).join('') : `<tr><td colspan="8" class="smd-dim" style="padding:12px">${sup.contactOnly ? '連絡可（匿名以外）のリピートセラーはいません。「住所が分かる相手のみ」を外すと全リピートを表示。' : 'リピートセラー（2回以上）はまだありません。'}</td></tr>`) +
       `</table></div></div>`;
     { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入れ先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size])))); }
@@ -3010,7 +3021,7 @@
     const chip = (label, n, col) => `<span style="display:inline-block;background:${col}22;color:${col};font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:5px">${label} ${n}</span>`;
     const etaCol = d => !d ? '#5f6368' : (d < todayStr ? '#d93025' : (d === todayStr ? '#e8710a' : ((daysTo(todayStr, d) || 9) <= 2 ? '#e8710a' : '#1a7f37')));
     const etaTxt = x => {
-      if (x.phase === 'delivered') return `<b style="color:#2e7d32">到着済</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
+      if (x.phase === 'delivered') { const da = deliveredAt(x.r); const lt = (da && x.pd) ? daysTo(x.pd, receivedDay(da)) : null; return `<b style="color:#2e7d32">到着済</b>${da ? `<br><span style="font-size:10px;color:#2e7d32">📥 ${esc(da)}</span>${lt != null && lt >= 0 ? `<br><span class="smd-dim" style="font-size:9.5px">仕入から${lt}日で到着</span>` : ''}` : (x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : '')}`; }
       if (x.phase === 'likely') return `<b style="color:#b26a00">届いてるかも</b><br><span class="smd-dim" style="font-size:10px">${x.pdays}日経過${x.di ? '・' + esc(x.di) : ''}</span>`;
       if (x.phase === 'out') return `<b style="color:#e65100">配達中（本日）</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
@@ -3057,7 +3068,7 @@
       }).join('') : `<tr><td colspan="10" class="smd-dim" style="padding:14px">${alertOnly ? '要確認の入庫待ちはありません🎉' : '入庫待ちはありません🎉'}</td></tr>`) +
       `</table></div></div>`;
     { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; renderWaiting(host); }); }
-    { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, x.r.name || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
+    { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '受取日時', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, deliveredAt(x.r) || '', x.r.name || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
     host.querySelectorAll('.wait-hist').forEach(el => el.addEventListener('click', e => {
       e.stopPropagation();
       const box = document.getElementById('wh-' + el.dataset.idx); if (!box) return;
@@ -3639,6 +3650,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
       '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
+      '📥 受取日時：配送追跡の「配達完了/お届け済み」時刻から「いつ受け取ったか」を自動表示（到着予定一覧の到着済＝受取日時＋仕入から◯日で到着／在庫台帳の配送欄／リピートセラーの品目／各CSV）。',
       '🔁 リピートセラー（直接交渉候補）：仕入れ先ページにセラー別集計を追加。2回以上仕入れた相手を回数順に表示し、直接取引の打診候補を抽出。匿名配送（らくらく/ゆうゆうメルカリ便等＝住所不明）は既定で除外し、定形外/クリックポスト/メルカリShops等＝住所が分かる相手だけに絞れる。品目展開・CSV対応。',
     ] },
     { date: '2026-07-10', items: [
