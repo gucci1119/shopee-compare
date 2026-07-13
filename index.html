@@ -2499,6 +2499,9 @@
     return `<img src="https://www.google.com/s2/favicons?domain=${meta.dom}&sz=32" style="width:16px;height:16px;vertical-align:middle;margin-right:7px;border-radius:3px" onerror="this.style.display='none'">` +
       `<a href="${meta.url}" target="_blank" rel="noopener" title="${esc(s)}の公式サイトを開く" style="text-decoration:none;color:#1565c0;font-weight:700">${esc(s)} ↗</a>`;
   };
+  const sup = { contactOnly: true, open: new Set() };
+  // 匿名配送＝発送元の住所・氏名が伝票/取引に出ない配送。これ以外なら定形外/クリックポスト等で住所・電話が分かり、直接連絡できる可能性
+  const ANON_SHIP = /(メルカリ便|らくらく|ゆうゆう|ヤフネコ|おてがる|かんたんラクマパック|匿名|ネコポス|ゆうパケットポスト)/;
   async function renderSuppliers() {
     const body = document.getElementById('sup-body');
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
@@ -2506,11 +2509,56 @@
     const bySup = {};
     rows.forEach(r => { const s = normSupplier(r.supplier || '(未設定)'); (bySup[s] = bySup[s] || { n: 0, val: 0, sellers: new Set() }); bySup[s].n++; bySup[s].val += r.price || 0; if (r.seller) bySup[s].sellers.add(r.seller); });
     const list = Object.entries(bySup).sort((a, b) => b[1].n - a[1].n);
+    // ── セラー別（同一仕入元×同一セラー）集計。リピート＝直接交渉候補 ──
+    const bySeller = {};
+    rows.forEach(r => {
+      const seller = String(r.seller || '').trim(); if (!seller) return;
+      const sp = normSupplier(r.supplier || '(未設定)');
+      const k = sp + '' + seller;
+      const g = bySeller[k] || (bySeller[k] = { supplier: sp, seller, n: 0, val: 0, open: 0, anon: 0, unknown: 0, last: '', url: null, items: [] });
+      g.n++; g.val += r.price || 0;
+      const sm = String(r.ship_method || '').trim();
+      if (sm) { if (ANON_SHIP.test(sm)) g.anon++; else g.open++; } else g.unknown++;
+      const d = invPurDate(r); if (d > g.last) g.last = d;
+      if (!g.url && r.supplier_url) g.url = r.supplier_url;
+      g.items.push({ name: r.name || r.name_supplier || '', price: r.price, date: d, ship: sm, url: r.supplier_url, txn: stkTxnUrl(r) });
+    });
+    const contactOf = g => (g.supplier === 'メルカリShops' || g.open > 0) ? 'open' : (g.anon > 0 ? 'anon' : 'unknown');
+    let sellers = Object.values(bySeller).filter(g => g.n >= 2);
+    sellers.forEach(g => { g.contact = contactOf(g); g.items.sort((a, b) => String(b.date).localeCompare(String(a.date))); });
+    const openRepeat = sellers.filter(g => g.contact === 'open').length;
+    let shown = sup.contactOnly ? sellers.filter(g => g.contact === 'open') : sellers;
+    shown.sort((a, b) => b.n - a.n || b.val - a.val);
+    const cBadge = c => c === 'open' ? '<span style="background:#e8f5e9;color:#2e7d32;font-weight:700;font-size:10px;padding:1px 6px;border-radius:9px">連絡可</span>' : c === 'anon' ? '<span style="background:#eee;color:#888;font-size:10px;padding:1px 6px;border-radius:9px">匿名のみ</span>' : '<span style="background:#fff3e0;color:#e8710a;font-size:10px;padding:1px 6px;border-radius:9px">配送不明</span>';
+    const shipInfo = g => `連絡可${g.open}${g.anon ? ' / 匿名' + g.anon : ''}${g.unknown ? ' / 不明' + g.unknown : ''}`;
+
     body.innerHTML = `<div class="smd-dim" style="font-size:12px;margin:0 4px 8px">仕入元 ${list.length}種 ・ 全${rows.length}件から集計 ・ 名称クリックで公式サイトへ（表記ゆれは統合表示） <button class="smd-btn" id="sup-csv" style="font-size:11px;margin-left:6px" title="仕入元集計をCSVで書き出し">⬇ CSV</button></div>` +
       `<div class="tool-card" style="margin:0;max-width:640px"><div class="pf-scroll"><table class="pf-table"><tr><th>仕入元</th><th>件数</th><th>仕入額合計(円)</th><th>平均単価(円)</th><th>セラー数</th></tr>` +
       list.map(([s, v]) => `<tr><td>${supplierNameCell(s)}</td><td>${v.n}</td><td>${fmtJpy(v.val)}</td><td>${fmtJpy(v.n ? v.val / v.n : 0)}</td><td>${v.sellers.size}</td></tr>`).join('') +
+      `</table></div></div>` +
+      `<div style="margin:18px 4px 6px;font-weight:700;font-size:14px">🔁 リピートセラー（直接取引の交渉候補）</div>` +
+      `<div class="smd-dim" style="font-size:11.5px;margin:0 4px 8px">同じセラーから <b>2回以上</b>仕入れた相手。<b>匿名配送（らくらく/ゆうゆうメルカリ便など）は住所が分からない</b>ので既定で除外。定形外・クリックポスト・メルカリShops等＝伝票や取引情報から住所・電話が分かり連絡できる可能性。回数の多い順。</div>` +
+      `<div style="margin:0 4px 8px"><button class="smd-btn" id="sup-contact" style="${sup.contactOnly ? 'background:#e8f5e9;border-color:#a5d6a7;color:#2e7d32;font-weight:700' : ''}" title="匿名配送のみのセラーを除外（住所が分かる相手だけ）">✅ 住所が分かる相手のみ（${openRepeat}）</button>` +
+      `<button class="smd-btn" id="sup-scsv" style="margin-left:6px" title="このセラー一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
+      `<span class="smd-dim" style="font-size:11px;margin-left:8px">リピートセラー ${sellers.length}人（うち連絡可 ${openRepeat}人）</span></div>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:860px"><tr><th>セラー</th><th>仕入元</th><th>回数</th><th>合計</th><th>平均</th><th>直近仕入</th><th>配送（連絡可否）</th><th>品目</th></tr>` +
+      (shown.length ? shown.map((g, idx) => `<tr${g.contact === 'open' ? ' style="background:#f6fbf7"' : ''}>` +
+        `<td style="font-weight:700">${g.url ? `<a href="${esc(g.url)}" target="_blank" rel="noopener" title="このセラーの出品例を開く" style="text-decoration:none;color:#1565c0">${esc(g.seller)} ↗</a>` : esc(g.seller)}</td>` +
+        `<td style="font-size:11px">${esc(g.supplier)}</td>` +
+        `<td style="font-weight:700;color:#d93025">${g.n}回</td>` +
+        `<td style="white-space:nowrap">${fmtJpy(g.val)}</td>` +
+        `<td style="white-space:nowrap;font-size:11px">${fmtJpy(g.n ? g.val / g.n : 0)}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${esc(g.last || '')}</td>` +
+        `<td style="font-size:11px;white-space:nowrap">${cBadge(g.contact)}<br><span class="smd-dim" style="font-size:10px">${shipInfo(g)}</span></td>` +
+        `<td><span class="sup-exp" data-idx="${idx}" style="cursor:pointer;color:#3949ab;font-size:11px;user-select:none">▾ ${g.items.length}品</span>` +
+        `<div class="sup-itemsbox" id="supi-${idx}" style="display:none;margin-top:4px;border-left:2px solid #cfd8dc;padding-left:8px;max-width:420px">` +
+        g.items.map(it => `<div style="font-size:10.5px;line-height:1.5">${esc(it.date || '')} ・ ${it.price != null ? fmtJpy(it.price) : ''} ・ ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${esc((it.name || '').slice(0, 34))}↗</a>` : esc((it.name || '').slice(0, 34))}${it.ship ? ` <span class="smd-dim">[${esc(it.ship)}]</span>` : ''}</div>`).join('') +
+        `</div></td></tr>`).join('') : `<tr><td colspan="8" class="smd-dim" style="padding:12px">${sup.contactOnly ? '連絡可（匿名以外）のリピートセラーはいません。「住所が分かる相手のみ」を外すと全リピートを表示。' : 'リピートセラー（2回以上）はまだありません。'}</td></tr>`) +
       `</table></div></div>`;
     { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入れ先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size])))); }
+    { const cb = document.getElementById('sup-contact'); if (cb) cb.addEventListener('click', () => { sup.contactOnly = !sup.contactOnly; renderSuppliers(); }); }
+    { const cb = document.getElementById('sup-scsv'); if (cb) cb.addEventListener('click', () => downloadCsv('リピートセラー_' + new Date().toISOString().slice(0, 10) + '.csv', [['セラー', '仕入元', '回数', '合計仕入額(円)', '平均(円)', '直近仕入', '連絡可否', '連絡可発送数', '匿名発送数', '不明']].concat(shown.map(g => [g.seller, g.supplier, g.n, Math.round(g.val), Math.round(g.n ? g.val / g.n : 0), g.last, g.contact === 'open' ? '連絡可' : g.contact === 'anon' ? '匿名のみ' : '不明', g.open, g.anon, g.unknown])))); }
+    body.querySelectorAll('.sup-exp').forEach(el => el.addEventListener('click', () => { const box = document.getElementById('supi-' + el.dataset.idx); if (!box) return; const show = box.style.display === 'none'; box.style.display = show ? '' : 'none'; el.textContent = el.textContent.replace(show ? '▾' : '▴', show ? '▴' : '▾'); }));
     setupColumns('suppliers', body);
     fitScroll('suppliers');
   }
@@ -3588,6 +3636,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
       '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
+      '🔁 リピートセラー（直接交渉候補）：仕入れ先ページにセラー別集計を追加。2回以上仕入れた相手を回数順に表示し、直接取引の打診候補を抽出。匿名配送（らくらく/ゆうゆうメルカリ便等＝住所不明）は既定で除外し、定形外/クリックポスト/メルカリShops等＝住所が分かる相手だけに絞れる。品目展開・CSV対応。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
