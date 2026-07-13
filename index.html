@@ -320,6 +320,7 @@
         <div id="pf-colmenu"></div>
       </span>
       <button class="smd-btn" id="pf-refresh" title="最新に更新">🔄 更新</button>
+      <button class="smd-btn" id="pf-costmatch" style="background:#eef8f0;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="仕入額が未入力の注文に、未紐付けの在庫を名前で照合してワンクリック紐付け（利益・確定申告を埋める）">🔗 仕入れ自動マッチ</button>
       <span class="smd-dim" id="pf-note"></span>
     </div>
     <div id="pf-body" style="padding:12px 20px"></div>
@@ -3334,6 +3335,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '⬇ CSV書き出し：在庫ページ・顧客ページに追加（絞り込み後をそのまま出力）。',
       '🧠 フィルタ記憶：在庫（状態/検索）・利益（月/国）の絞り込みを次回に復元（毎回選び直す手間を解消）。',
       '🔔 成功/コピー通知をトースト化（右下にふわっと表示）。※エラーや確認は従来どおりダイアログで確実に止めます。',
+      '🔗 仕入れ自動マッチ（利益タブ）：仕入額未入力の注文に、未紐付けの在庫を商品名で照合→ワンクリックで紐付け→仕入額が利益/確定申告に反映。',
+      '⚠ ブリッジ詰まり自動検知：連続タイムアウト時「pingは通るのに通信が無応答＝拡張の詰まり」を検知し、赤バナーで再起動を案内（再確認ボタンつき）。',
+      '💱 為替レートの自動更新（GAS）：無料APIで各国→円レートを毎日 fx_rates に反映（shopee-fx-sync.gs・partner承認と無関係に稼働可）。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
@@ -6725,6 +6729,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     document.getElementById('pf-nocost').addEventListener('change', e => { pf.nocost = e.target.checked; pfRender(); });
     document.getElementById('pf-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderProfit(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
+    { const cm = document.getElementById('pf-costmatch'); if (cm) cm.addEventListener('click', () => openCostMatch()); }
     let t;
     document.getElementById('pf-search').addEventListener('input', e => {
       clearTimeout(t);
@@ -6928,6 +6933,76 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const pfMeta = o => pf.costMap.get(o.cc + ':' + o.sn) || null; // 注文メタ（cost_at/self_transit_at/wb_*）
   // 自宅→Shopee Japan倉庫へ手動で「発送済(未スキャン)」にした注文か（スキャンされ輸送中になったら自動で解除扱い）
   const pfSelfTransit = o => { const m = pfMeta(o); return !!(m && m.self_transit_at) && ordStatusKey(o.status) === 'toship'; };
+
+  // 🔗 仕入れ自動マッチ：仕入額未入力の注文に、未紐付け在庫を名前で照合→shopee_sn紐付けで仕入額を流し込む
+  async function openCostMatch() {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定でキーを入れてください）'); return; }
+    const need = (pf.orders || []).filter(o => o.tab !== 200 && o.tab !== 600 && pfCost(o) == null);
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:920px;max-width:97vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+      <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee;position:sticky;top:0;background:#fff;z-index:1;border-radius:10px 10px 0 0">
+        <b style="flex:1">🔗 仕入れ自動マッチ <span class="smd-dim" style="font-weight:400">（${esc(pf.ym || '')} / 仕入額未入力 ${need.length}件）</span></b>
+        <button class="cm-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button>
+      </div>
+      <div class="cm-body" style="padding:14px 18px;max-height:calc(100vh - 160px);overflow:auto"><div class="smd-dim">在庫を読み込み中…</div></div></div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelector('.cm-close').addEventListener('click', close);
+    const body = ov.querySelector('.cm-body');
+    if (!need.length) { body.innerHTML = '<div style="color:#1a7f37;font-size:13px">✅ この期間、仕入額が未入力の注文はありません。</div>'; return; }
+    let inv; try { inv = await sbGetAll('inventory', 'select=item_id,name,name_supplier,sku,supplier,seller,price,status,shopee_sn'); }
+    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    const pool = inv.filter(v => !v.shopee_sn && v.price != null); // 未紐付け＋仕入額あり
+    const STOP = /\[used\]|\[usado\]|variation|varia[cç][aã]o|japan(ese)?|ver\.?|nintendo|sony|sega|microsoft|game|series|used|tested|working|only|set|lot|中古|新品|ソフト/gi;
+    const toks = s => (s || '').toLowerCase().replace(STOP, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').split(/\s+/).filter(w => w.length >= 2);
+    const poolTok = pool.map(v => ({ v: v, t: new Set(toks((v.name || '') + ' ' + (v.name_supplier || '') + ' ' + (v.sku || ''))) }));
+    const rows = need.map((o) => {
+      const oname = (o.items && o.items.map(it => (it.name || '') + ' ' + (it.variation || '')).join(' ')) || '';
+      const ot = new Set(toks(oname));
+      const cand = poolTok.map(p => { let s = 0; ot.forEach(w => { if (p.t.has(w)) s++; }); return { v: p.v, s: s }; }).filter(c => c.s >= 1).sort((a, b) => b.s - a.s).slice(0, 5);
+      return { o: o, oname: oname, cand: cand };
+    });
+    const withCand = rows.filter(r => r.cand.length);
+    const optLabel = v => `${(v.name || v.name_supplier || v.item_id || '').slice(0, 40)}  ¥${(v.price || 0).toLocaleString()}${v.supplier ? ' / ' + v.supplier : ''}`;
+    body.innerHTML =
+      `<div style="font-size:12px;color:#8a6d3b;background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;margin-bottom:10px">未紐付けの在庫（仕入額あり）<b>${pool.length}</b>件と、商品名で照合しました。候補を確認し、正しければ選んで「紐付け保存」。保存すると在庫の <code>shopee_sn</code> にこの注文が入り、仕入額が利益に反映されます（間違いは在庫ページで解除可）。<br>候補あり <b>${withCand.length}</b>件 / 候補なし <b>${rows.length - withCand.length}</b>件。</div>` +
+      (withCand.length ? `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:820px"><tr><th style="width:34px"></th><th>注文（商品）</th><th>国/日付</th><th>候補（在庫→仕入額）</th></tr>` +
+        withCand.map((r, i) => {
+          const rg = regionByCc(r.o.cc) || { color: '#333' };
+          return `<tr>
+            <td style="text-align:center"><input type="checkbox" class="cm-ck" data-i="${i}" checked></td>
+            <td style="font-size:12px">${nm(r.oname.replace(STOP, '').trim() || r.oname, '260px')}</td>
+            <td style="white-space:nowrap;font-size:11px"><b style="color:${rg.color}">${r.o.cc}</b> ${esc((r.o.order_date || '').slice(5))}</td>
+            <td><select class="cm-sel" data-i="${i}" style="width:100%;max-width:420px;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">${r.cand.map((c, ci) => `<option value="${esc(c.v.item_id)}"${ci === 0 ? ' selected' : ''}>${esc(optLabel(c.v))}${c.s >= 2 ? ' ✓' : ''}</option>`).join('')}<option value="">（スキップ）</option></select></td>
+          </tr>`;
+        }).join('') + `</table></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px;position:sticky;bottom:0;background:#fff;padding-top:10px;border-top:1px solid #eee">
+          <span class="cm-msg" style="margin-right:auto;font-size:12px;color:#888"></span>
+          <button class="cm-save" style="border:1px solid #1a7f37;background:#1a7f37;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:700">✅ チェックした分を紐付け保存</button>
+        </div>`
+        : '<div class="smd-dim" style="font-size:13px">名前が一致する未紐付け在庫が見つかりませんでした。在庫の商品名/セラー名を整えるか、利益表のセルで直接仕入額を入力してください。</div>');
+    const saveBtn = body.querySelector('.cm-save');
+    if (saveBtn) saveBtn.addEventListener('click', async () => {
+      const jobs = [];
+      body.querySelectorAll('.cm-ck').forEach(ck => { if (!ck.checked) return; const i = +ck.dataset.i; const sel = body.querySelector('.cm-sel[data-i="' + i + '"]'); const id = sel && sel.value; if (id) jobs.push({ id: id, o: withCand[i].o }); });
+      if (!jobs.length) { body.querySelector('.cm-msg').textContent = 'チェックされた紐付けがありません'; return; }
+      if (!confirm(jobs.length + '件の在庫を、対応する注文に紐付けます（仕入額が利益に反映）。よろしいですか？')) return;
+      saveBtn.disabled = true; saveBtn.textContent = '保存中…'; const msg = body.querySelector('.cm-msg'); let ok = 0;
+      const now = new Date().toISOString();
+      for (const j of jobs) {
+        try {
+          await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(j.id), { shopee_sn: j.o.sn, status: '販売済み', edited_at: now });
+          const it = inv.find(x => x.item_id === j.id); if (it) { it.shopee_sn = j.o.sn; if (!pf.invMap.has(j.o.sn)) pf.invMap.set(j.o.sn, []); pf.invMap.get(j.o.sn).push(it); }
+          ok++; msg.textContent = ok + '/' + jobs.length + ' 紐付け…';
+        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '一部失敗: ' + e.message; }
+      }
+      try { logAct('利益', '仕入れ自動マッチ', pf.ym || '', ok + '件紐付け'); } catch (_) {}
+      toast('✅ ' + ok + '件を紐付けました');
+      close(); try { pfRender(); } catch (_) {}
+    });
+  }
 
   function pfFiltered() {
     return pf.orders.filter(o => {
