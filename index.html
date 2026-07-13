@@ -405,6 +405,8 @@
       <button class="smd-btn" id="ord-reload">🔄 更新</button>
       <button class="smd-btn" id="ord-diag" title="各国のShopee注文APIの応答を調べ、なぜライブ取得が失敗するか診断">🔬 診断</button>
       <button class="smd-btn" id="ord-bulkprint" title="表示中の未発送注文のSLS伝票をまとめて印刷（国ごとに印刷タブを開く／Waybill Printer連携）">🖨️ 一括印刷</button>
+      <button class="smd-btn" id="ord-csv" title="表示中（絞り込み後）の注文をピッキングリストとしてCSVで書き出し">⬇ CSV</button>
+      <button class="smd-btn" id="ord-copytrack" title="表示中（絞り込み後）の追跡番号をまとめてコピー（配送業者一括照会用）">📋 追跡番号</button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300">未発送</button>
@@ -1550,6 +1552,8 @@
   const fmtOrdTs = (ts) => { if (!ts) return '不明'; try { return new Date(ts).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return '不明'; } };
   // 注文がどのアカウントのものかを示す小チップ。shop_id→登録簿のショップ名(gcsonlinestore.ph等)。系統ごとに色分け。
   // 登録簿が未ロード/不明ならshop_idの羅列を出さず非表示（ロード後にrenderOrdersで再描画される）
+  // shop_id → 店ラベル（プレーン文字列。CSV等でacctChipのHTML抜き用）
+  const acctLabel = (sid) => { if (!sid) return ''; const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return (a && a.label) || ''; };
   function acctChip(sid) {
     if (!sid) return '';
     const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid));
@@ -1800,6 +1804,26 @@
       delay += 700; opened++; // 700ms間隔でポップアップブロック/過負荷を回避
     }));
     logAct('梱包・発送', '一括印刷', `${opened}件`, groups.map(g => g.region.cc).join(','));
+  });
+  // ⬇ CSV：表示中（絞り込み後）の注文をピッキングリストとして書き出し
+  document.getElementById('ord-csv').addEventListener('click', () => {
+    const rows = state.orders.shown || [];
+    if (!rows.length) { toast('表示中の注文がありません', true); return; }
+    const stName = { 300: '未発送', 400: '発送中' };
+    const body = rows.map(r => {
+      const qty = r.items.reduce((s, it) => s + it.qty, 0);
+      const names = r.items.map(it => `${it.name || ''}${it.variation ? ' [' + it.variation + ']' : ''}${it.qty > 1 ? ' ×' + it.qty : ''}`).join(' / ');
+      const due = r.tab === 300 && r.shipBy ? jstDateTime(new Date(r.shipBy * 1000).toISOString()) : '';
+      return [r.cc, acctLabel(r.shopId) || '', r.sn, r.buyer || '', names, qty, r.tracking || '', (stName[r.tab] || r.status || ''), due, r.preOrder ? '予約' : ''];
+    });
+    downloadCsv('注文_' + new Date().toISOString().slice(0, 10) + '.csv', [['国', '店', '注文SN', 'バイヤー', '商品', '点数', '追跡番号', '状態', '発送期日', '区分']].concat(body));
+    toast('⬇ 注文CSV書出: ' + rows.length + '件');
+  });
+  // 📋 追跡番号を一括コピー（表示中で追跡ありのみ・重複排除）
+  document.getElementById('ord-copytrack').addEventListener('click', () => {
+    const tks = [...new Set((state.orders.shown || []).map(r => r.tracking).filter(Boolean))];
+    if (!tks.length) { toast('表示中に追跡番号がありません', true); return; }
+    copyText(tks.join('\n'), tks.length + '件の追跡番号');
   });
   // 🔬 接続診断：各国のShopee注文APIを1回叩き、生の応答(HTTP/code/本文先頭)を表示してライブ失敗の原因を切り分ける
   async function diagnoseOrders() {
@@ -3430,6 +3454,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🏚 死に筋フィルタ（在庫）：在庫保管中のまま90日超の滞留在庫だけをワンクリック抽出（滞留日数の長い順）。値下げ・再出品の検討に。',
       '⬇ CSV追加：仕入れ先（件数/仕入額/平均単価/セラー数）・経費（月次明細＋合計）をCSV書き出し。',
       '🔔 朝のダイジェスト（GAS）：前日売上(国別・円換算)／直近7日と前週比／未完了・期限切れタスク／死に筋・確証未取得を毎朝メール通知（shopee-digest.gs・Supabaseのみ＝承認不要）。',
+      '📦 注文の一括操作：注文管理に「⬇CSV（ピッキングリスト）」「📋追跡番号を一括コピー」を追加。フィルタ（未発送/遅延/国など）で絞った表示中の注文にそのまま効く。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
