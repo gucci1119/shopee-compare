@@ -2929,20 +2929,23 @@
     const daysTo = (from, to) => { const t = Date.parse(from); return isNaN(t) ? null : Math.round((Date.parse(to) - t) / 86400000); };
     // 各入庫待ちの到着フェーズ・予定日・待ち日数を判定
     const list = rows.filter(r => r.status === '入庫待ち').map(r => {
-      const di = String(r.delivery_info || '');
+      const ds = String(r.delivery_status || '');   // 配送業者の最新状態（shopee-tracking.gsが取込）＝あれば最優先・新鮮
+      const di = String(r.delivery_info || '');      // メルカリ由来の状態/予定（無い/古いことがある）
       const pd = invPurDate(r); const pdays = pd ? Math.max(0, daysTo(pd, todayStr) || 0) : null;
       const expDays = WAIT_EXP_DAYS[normSupplier(r.supplier)] || 6;
+      const hasCarrier = !!ds;
+      // ETA：業者のdelivery_eta優先、無ければメルカリdiの日付（引受/到着/発送=過去スキャンは除外）
+      const etaCand = parseEtaDate(r.delivery_eta || '') || (!/^(引受|到着|発送)/.test(di) ? parseEtaDate(di) : null);
+      const futureEta = (etaCand && etaCand >= todayStr) ? etaCand : null;
       let phase, eta = null;
-      const diD = parseEtaDate(di);
-      const futureEta = (diD && !/^(引受|到着|発送)/.test(di) && diD >= todayStr) ? diD : null; // 未来のお届け予定日だけをETA扱い（引受/到着=過去スキャン、を除外）
-      if (/^(配達済|受取|お受け取り|お届け済)/.test(di)) phase = 'delivered';
-      else if (futureEta) { phase = 'eta'; eta = futureEta; }        // 予定日が未来＝素直に到着予定
-      else if (/^配達中/.test(di)) phase = 'out';
-      else if (di || r.tracking_no || r.ship_method) phase = 'transit';
+      if (/(配達完了|お届け.*済|投函完了|受取)/.test(ds) || /^(配達済|受取|お受け取り|お届け済)/.test(di)) phase = 'delivered';
+      else if (/(持ち出し|配達中|配達店)/.test(ds) || /^配達中/.test(di)) phase = 'out';
+      else if (futureEta) { phase = 'eta'; eta = futureEta; }       // 未来のお届け予定日＝到着予定
+      else if (ds || di || r.tracking_no || r.ship_method) phase = 'transit';
       else phase = 'none';
-      // ★想定日数を超えて未確定＝実際は届いている可能性大 → 到着済見込み（要確認）に格上げ。未来ETAは信頼して除外
-      if (phase !== 'delivered' && phase !== 'eta' && pdays != null && pdays >= expDays) phase = 'likely';
-      return { r, di, pd, pdays, phase, eta, expDays };
+      // 配送業者の新鮮なデータが無い時だけ、想定日数超で「到着済見込み」に格上げ（例：Amazon＝追跡連携なし）
+      if (!hasCarrier && phase !== 'delivered' && phase !== 'eta' && pdays != null && pdays >= expDays) phase = 'likely';
+      return { r, ds, di, pd, pdays, phase, eta, expDays };
     });
     // 到着予定＝これから来る物（配達中→予定日→追跡中）を上に。到着済/見込み（=要確認の片付けの山）は下、手配待ちは最下。
     const G = { out: 0, eta: 1, transit: 2, delivered: 3, likely: 4, none: 5 };
@@ -2956,19 +2959,19 @@
     const chip = (label, n, col) => `<span style="display:inline-block;background:${col}22;color:${col};font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:5px">${label} ${n}</span>`;
     const etaCol = d => !d ? '#5f6368' : (d < todayStr ? '#d93025' : (d === todayStr ? '#e8710a' : ((daysTo(todayStr, d) || 9) <= 2 ? '#e8710a' : '#1a7f37')));
     const etaTxt = x => {
-      if (x.phase === 'delivered') return '<b style="color:#2e7d32">到着済</b>';
+      if (x.phase === 'delivered') return `<b style="color:#2e7d32">到着済</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'likely') return `<b style="color:#b26a00">届いてるかも</b><br><span class="smd-dim" style="font-size:10px">${x.pdays}日経過${x.di ? '・' + esc(x.di) : ''}</span>`;
-      if (x.phase === 'out') return '<b style="color:#e65100">本日前後</b>';
-      if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>`; }
-      if (x.di) return `<span class="smd-dim">${esc(x.di)}</span>`;
-      return '<span class="smd-dim">—</span>';
+      if (x.phase === 'out') return `<b style="color:#e65100">配達中（本日）</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
+      if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
+      const s = x.ds || x.di; // 追跡中：配送業者の最新状態（輸送中/作業店通過 等）を表示
+      return s ? `<span style="color:#3949ab;font-weight:600">${esc(s)}</span>` : '<span class="smd-dim">—</span>';
     };
     // 配送セル：運送会社バッジ＋追跡番号リンク＋現在地（delivery_placeがあれば／無ければ発送元県）
     const deliveryCell = r => {
       const parts = [];
       const cb = carrierBadge(r.ship_method); if (cb) parts.push(cb);
       if (r.tracking_no) { const url = carrierTrackUrl(r.ship_method, r.tracking_no); parts.push(url ? `<a href="${url}" target="_blank" rel="noopener" title="配送業者の追跡ページで現在地を確認" style="color:#e65100;text-decoration:none;font-weight:600;font-size:10.5px">📦 ${esc(r.tracking_no)} ↗</a>` : `<span style="color:#e65100;font-size:10.5px">${esc(r.tracking_no)}</span>`); }
-      if (r.delivery_place) parts.push(`<span style="font-size:10.5px;color:#1565c0">📍 ${esc(r.delivery_place)}${r.delivery_status ? '・' + esc(r.delivery_status) : ''}</span>`); // userscript連携時の現在地
+      if (r.delivery_place) parts.push(`<span style="font-size:10.5px;color:#1565c0" title="配送追跡の最新地点">📍 ${esc(r.delivery_place)}</span>`); // shopee-tracking.gs が入れる現在地（営業所/郵便局・県）
       else if (r.ship_region && r.ship_region !== '未定') parts.push(`<span class="smd-dim" style="font-size:10px">発送元:${esc(r.ship_region)}</span>`);
       return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
     };
@@ -3568,7 +3571,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 注文の一括操作：注文管理に「⬇CSV（ピッキングリスト）」「📋追跡番号を一括コピー」を追加。フィルタ（未発送/遅延/国など）で絞った表示中の注文にそのまま効く。',
       '🚚 到着予定一覧：仕入れ管理の「⏳入庫待ち」を到着スケジュール化。到着済→到着済見込み→配達中→予定日→追跡中→手配待ちの順に並べ、待ち日数を表示。「✓入荷」ワンクリックで在庫保管中へ／「🔺要確認のみ」／CSV。',
       '🟡 「配達中のまま実は到着済」問題を修正：仕入元ごとの想定配送日数（Amazon3日/フリマ6-7日等）を超えても未確定なら「到着済見込み（届いてるかも）」に格上げ（例：Amazon梱包資材が数日「配達中」表示のまま＝実際は届いている）。並び順も「これから来る物（配達中→予定→追跡中）」を上に。到着済見込みは「✓見込みを一括入荷」でまとめて在庫化（確認ダイアログあり）。',
-      '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページ（現在地）へ＋発送元県を表示。※荷物の「今どこ（郵便局名等）」の自動取込はメルカリ配送userscript側の拡張が必要（delivery_place列に対応済み・入れば自動表示）。',
+      '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
+      '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
     ] },
     { date: '2026-07-10', items: [
       '✍️ コンポーザー強化：SG価格0バグ修正（丸めを各国最小単位に）／手数料を合計(加算)方式に＋合計%表示／仕入¥→各国価格→利益の比較表示（利益マイナスは⚠要確認）／タイトルの自動生成＋バリエ時「Variation」自動＋手動修正＋★お気に入り／親SKU・全バリエSKUの💡提案／バリエ明細名テンプレ候補(DS:/Switch:等)／画像はカタログ9枚・バリエ1枚の上限表示。',
