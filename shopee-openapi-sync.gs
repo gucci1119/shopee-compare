@@ -241,6 +241,62 @@ function syncAll() {
   return log;
 }
 
+// ================= 第2段①：注文明細 → orders表（注文管理をブリッジ非依存に） =================
+// Open APIの order_status → ポータルの tab（300=未発送/400=発送中）。注文管理は300/400のみ表示
+var ORD_STATUS_TAB = { UNPAID: 200, READY_TO_SHIP: 300, PROCESSED: 300, RETRY_SHIP: 300, SHIPPED: 400, TO_CONFIRM_RECEIVE: 400, COMPLETED: 500, IN_CANCEL: 600, CANCELLED: 600, TO_RETURN: 700, INVOICE_PENDING: 200 };
+var ORD_STATUS_LABEL = { READY_TO_SHIP: 'To Ship', PROCESSED: 'Processed', RETRY_SHIP: 'Retry Ship', SHIPPED: 'Shipping', TO_CONFIRM_RECEIVE: 'To Receive' };
+// 商品画像URL → CDNハッシュ（ポータルは IMG_CDN + hash で表示するのでhashだけ保存）
+function imgHash_(it) {
+  var u = (it && (it.image_url || (it.image_info && (it.image_info.image_url || (it.image_info.image_url_list || [])[0])))) || '';
+  if (!u) return '';
+  return String(u).split('?')[0].split('/').pop().replace(/\.\w+$/, '');
+}
+function syncOrdersForShop_(tok) {
+  var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
+  var tz = CC_TZ[cc] != null ? CC_TZ[cc] : 8;
+  var to = now_(), from = to - 15 * 86400; // Open APIの時間窓上限=15日
+  // 直近15日の注文SNを列挙（全ステータス）
+  var sns = [], cursor = '';
+  for (var g = 0; g < 60; g++) {
+    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 100, cursor: cursor }, 'get');
+    var r = j.response || {};
+    (r.order_list || []).forEach(function (o) { sns.push(o.order_sn); });
+    if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
+  }
+  if (!sns.length) return { cc: cc, shop_id: tok.shop_id, orders: 0 };
+  var rows = [];
+  for (var i = 0; i < sns.length; i += 50) {
+    var q = { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time' };
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', q, 'get');
+    (((jd.response || {}).order_list) || []).forEach(function (o) {
+      var st = o.order_status || '';
+      var tab = ORD_STATUS_TAB[st] || 0;
+      if (tab !== 300 && tab !== 400) return; // 注文管理＝未発送/発送中のみ
+      var items = (o.item_list || []).map(function (it) {
+        return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, variation: it.model_name || '' };
+      });
+      var day = o.create_time ? new Date((o.create_time + tz * 3600) * 1000).toISOString().slice(0, 10) : null;
+      rows.push({
+        cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st),
+        tab: tab, ship_by: o.ship_by_date || null, tracking: null, total: parseFloat(o.total_amount || 0) || null,
+        items: items, order_date: day, order_ts: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
+        shop_id: String(tok.shop_id), synced_at: new Date().toISOString()
+      });
+    });
+  }
+  if (rows.length) sbUpsert_('orders', rows, 'cc,sn');
+  return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
+}
+function syncOrdersAll() {
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) {
+    try { log.push(syncOrdersForShop_(tok)); }
+    catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
+  });
+  Logger.log(JSON.stringify(log, null, 1));
+  return log;
+}
+
 // ---------- Supabase upsert ----------
 function sbUpsert_(table, rows, onConflict) {
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : '');
