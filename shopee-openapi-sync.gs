@@ -297,6 +297,39 @@ function syncOrdersAll() {
   return log;
 }
 
+// ================= 第2段②：入金(escrow) → income表（純利益を公式データで確定） =================
+// get_escrow_detail の escrow_amount = Shopee手数料控除後のセラー入金額（現地通貨）。粗利 = escrow − 仕入額。
+function syncEscrowForShop_(tok) {
+  var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
+  var to = now_(), from = to - 15 * 86400;
+  var orders = [], cursor = '';
+  for (var g = 0; g < 60; g++) {
+    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 100, cursor: cursor, response_optional_fields: 'order_status' }, 'get');
+    var r = j.response || {};
+    (r.order_list || []).forEach(function (o) { orders.push({ sn: o.order_sn, status: o.order_status || '' }); });
+    if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
+  }
+  var rows = [], now2 = new Date().toISOString(), errs = 0, skip = 0;
+  orders.forEach(function (o) {
+    if (/^(UNPAID|CANCELLED|IN_CANCEL|INVOICE_PENDING)$/.test(o.status)) { skip++; return; } // 未払い/キャンセルは入金なし
+    var e; try { e = callShop_(tok.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: o.sn }, 'get'); } catch (ex) { errs++; return; }
+    var inc = ((e.response || {}).order_income) || {};
+    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) return;
+    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: now2, amount_initial: amt, amount_initial_at: now2, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), synced_at: now2 });
+  });
+  if (rows.length) sbUpsert_('income', rows, 'cc,sn');
+  return { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
+}
+function syncEscrowAll() {
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) {
+    try { log.push(syncEscrowForShop_(tok)); }
+    catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
+  });
+  Logger.log(JSON.stringify(log, null, 1));
+  return log;
+}
+
 // ---------- Supabase upsert ----------
 function sbUpsert_(table, rows, onConflict) {
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : '');
