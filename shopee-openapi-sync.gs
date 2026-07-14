@@ -279,7 +279,7 @@ function syncOrdersForShop_(tok) {
       rows.push({
         cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st),
         tab: tab, ship_by: o.ship_by_date || null, tracking: null, total: parseFloat(o.total_amount || 0) || null,
-        items: items, order_date: day, order_ts: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
+        items: items, order_date: day, order_ts: o.create_time || null, // order_tsはbigint(Unix秒)
         shop_id: String(tok.shop_id), synced_at: new Date().toISOString()
       });
     });
