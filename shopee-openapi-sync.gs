@@ -271,7 +271,7 @@ function syncOrdersForShop_(tok) {
     (((jd.response || {}).order_list) || []).forEach(function (o) {
       var st = o.order_status || '';
       var tab = ORD_STATUS_TAB[st] || 0;
-      if (tab !== 300 && tab !== 400) return; // 注文管理＝未発送/発送中のみ
+      if (!tab) return; // 未知ステータスのみ除外。完了(500)/キャンセル(600)も保存してtabを正しく更新＝注文管理(tab<500)から自動で外れる
       var items = (o.item_list || []).map(function (it) {
         return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, variation: it.model_name || '' };
       });
