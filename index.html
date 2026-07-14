@@ -565,6 +565,9 @@
     <input type="text" id="set-sbkey" placeholder="sb_publishable_...">
     <label>Supabase secretキー（書き込み用・同期するPCのみ）</label>
     <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">AIシリーズ調査GAS URL（任意・出品コンポーザーの「🔍AIで全タイトル調査」を自動化）</label>
+    <input type="text" id="set-airesearch" placeholder="https://script.google.com/macros/s/xxxx/exec（shopee-series-research.gs）">
+    <div class="smd-dim" style="font-size:11px;margin-top:2px">未設定なら調査依頼文のコピーになります。設定すると押すだけで未出品タイトルを自動提案（Claude API・従量課金）。</div>
     <label>利益管理表スプレッドシートID（月替わり）— 1行 = <b>YYYY-MM: ID</b>。今月の行を毎月足すだけ（過去分は残す）</label>
     <textarea id="set-sheetids" placeholder="2026-07: 1MCiDFf...&#10;2026-06: 1rn9enG6..." style="width:100%;height:74px;font-family:monospace;font-size:11px"></textarea>
     <div class="smd-dim" style="font-size:11px;margin-top:2px">月の行が無ければその月はシートミラーをスキップ（DB独立運用は継続）。同期は「今月」の行を使います。</div>
@@ -619,7 +622,7 @@
 
   // ---------------- 設定（localStorage） ----------------
   const settings = Object.assign({
-    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {},
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '',
     // 出品コンポーザー用
     listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
     listVarTpl: '{hardware} {variation}',
@@ -3678,7 +3681,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📦 配送の可視化：らくらく便(ヤマト)／ゆうゆう便(日本郵便)を色バッジ表示＋追跡番号クリックで配送業者ページへ＋発送元県を表示。',
       '📍 配送追跡の自動取込（GAS）：ヤマト・日本郵便の追跡ページを直接読み、最新状態（輸送中/作業店通過/配達完了 等）・現在地（営業所・郵便局名＋県）・到着見込み日を入庫待ち在庫に自動反映（shopee-tracking.gs・Supabaseのみ＝承認不要）。到着予定一覧が「今どこ・いつ着く」を自動表示（📍現在地・状態を各行に）。',
       '🧭 配送履歴タイムライン：各行の「▾配送履歴」で、発送→中継局→センター通過→到着→配達 の全スキャン（日時・状態・営業所/郵便局名）を展開表示。どこの局・センターを通ったかが一目で分かる。',
-      '🖼️ シリーズ明細サジェストに画像：各提案明細にサムネイル表示＋チェックで追加すると画像も一緒に設定。「🔍 AIで全タイトル調査」で未出品タイトルの調査依頼文をコピー（チャットに貼れば未出品分まで提案）。',
+      '🖼️ シリーズ明細サジェストに画像：各提案明細にサムネイル表示＋チェックで追加すると画像も一緒に設定。',
+      '🌐 AIネット調査をポータル内で自動化：⚙️設定に「AIシリーズ調査GAS URL」を入れると、「🔍AIで全タイトル調査」でGAS(Claude API/Web検索・shopee-series-research.gs)をJSONP呼び出し→そのシリーズの全タイトルをネット調査し、未出品を判定して提案・一括追加（CORS/ブリッジ不要）。未設定時は従来どおり依頼文コピー。',
       '💡 シリーズ明細サジェスト：コンポーザーのバリエーション欄に「シリーズの明細を提案」を追加。自分の全出品(全7か国 約6500カタログ・Supabaseのlistings)から、入力中のシリーズ名に一致する明細名を集計→今の明細に無いものを提案し、チェックで一括追加。既存カタログの抜け漏れ明細も発見できる（ブリッジ不要）。まだ出していないシリーズの全タイトル調査はAI(/shopee-listing-title)へ誘導。',
       '🐞 バグ修正（アラート滞留在庫）：長期在庫の判定が登録日(created_at＝DB一括取込で最近寄り)基準で常にほぼ0件だった → 仕入日(invPurDate)基準90日超に修正（在庫🏚死に筋と統一）。',
       '📥 アラート追加「到着済なのに入庫待ち」：配送追跡が配達完了/お届け済みなのに✓入荷し忘れの在庫を抽出（在庫・利益に未反映を防ぐ）。バッジ件数にも算入。',
@@ -6350,6 +6354,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return _listingCatalog;
   }
   const vsNorm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // AIシリーズ調査GAS(shopee-series-research.gs)をJSONPで呼ぶ＝CORS不要・ブリッジ不要。60秒でタイムアウト
+  function aiResearchJsonp(series, hw) {
+    return new Promise((resolve, reject) => {
+      if (!settings.aiResearchUrl) { reject(new Error('URL未設定')); return; }
+      const cb = 'smdAi' + Math.abs(Date.now() % 1e9) + Math.floor(Math.random() * 1000);
+      const s = document.createElement('script');
+      const to = setTimeout(() => { cleanup(); reject(new Error('タイムアウト（60秒）')); }, 60000);
+      function cleanup() { clearTimeout(to); try { delete window[cb]; } catch (_) {} if (s.parentNode) s.remove(); }
+      window[cb] = (data) => { cleanup(); resolve(data); };
+      s.onerror = () => { cleanup(); reject(new Error('GASに接続できません（URL/デプロイを確認）')); };
+      s.src = settings.aiResearchUrl + (settings.aiResearchUrl.indexOf('?') >= 0 ? '&' : '?') + 'series=' + encodeURIComponent(series) + '&hw=' + encodeURIComponent(hw) + '&callback=' + cb;
+      document.body.appendChild(s);
+    });
+  }
   // 出品は英語表記なので、日本語のシリーズ名で検索できるよう主要シリーズを英訳（キーワードに含めば英名も検索語に追加）
   const VS_JP_EN = { 'たまごっち': 'tamagotchi', 'マリオ': 'mario', 'マリオカート': 'mario kart', 'ポケモン': 'pokemon', 'ポケットモンスター': 'pokemon', 'ファイナルファンタジー': 'final fantasy', 'ドラゴンクエスト': 'dragon quest', 'ドラクエ': 'dragon quest', 'ゼルダ': 'zelda', 'ゼルダの伝説': 'zelda', 'デジモン': 'digimon', 'カービィ': 'kirby', '星のカービィ': 'kirby', 'どうぶつの森': 'animal crossing', 'モンスターハンター': 'monster hunter', 'モンハン': 'monster hunter', 'バイオハザード': 'resident evil', 'ソニック': 'sonic', 'メタルギア': 'metal gear', 'ストリートファイター': 'street fighter', '遊戯王': 'yu-gi-oh', 'ドラゴンボール': 'dragon ball', 'ワンピース': 'one piece', 'カ―ドキャプター': 'card captor', '妖怪ウォッチ': 'yokai watch', 'キングダムハーツ': 'kingdom hearts', '聖剣伝説': 'mana', 'メダロット': 'medabots', 'ロックマン': 'mega man', '牧場物語': 'story of seasons', 'イナズマイレブン': 'inazuma eleven', 'ぷよぷよ': 'puyo puyo', 'サガ': 'saga', '女神転生': 'megami tensei', 'ペルソナ': 'persona', 'テイルズ': 'tales of', 'カービー': 'kirby', 'どうぶつ': 'animal crossing' };
   // 💡 シリーズ明細サジェスト：全出品からキーワード一致カタログの明細名を集計→今の明細に無いものを提案・一括追加
@@ -6402,15 +6420,50 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       document.getElementById('li-vs-go').addEventListener('click', () => render(document.getElementById('li-vs-kw').value));
       document.getElementById('li-vs-kw').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); render(e.target.value); } });
       document.getElementById('li-vs-close').addEventListener('click', () => { panel.style.display = 'none'; });
-      { const ai = document.getElementById('li-vs-ai'); if (ai) ai.addEventListener('click', () => {
+      { const ai = document.getElementById('li-vs-ai'); if (ai) ai.addEventListener('click', async () => {
         const series = (document.getElementById('li-vs-kw') ? document.getElementById('li-vs-kw').value : kw).trim();
         const hw = (listState.hardware || '').trim();
-        const existing = sugg.map(g => g.name);
-        const req = `Shopee出品用に「${series}」${hw ? '（ハード: ' + hw + '）' : ''}シリーズのゲーム全タイトルをネットで調べてください（日本語版・各ハード・廉価版/ベスト版/限定版含む）。\n` +
-          `私が既に出しているタイトル(${existing.length}件): ${existing.join(' / ') || '（なし）'}\n` +
-          `↑に含まれていない未出品のタイトルを、Shopeeのバリエーション明細名の形（例: ${hw ? hw + ':タイトル' : '機種:タイトル'}）でリスト化して提案してください。`;
-        copyText(req, 'AI調査の依頼文');
-        toast('🔍 依頼文をコピー。チャットに貼り付けて送ってください');
+        if (!series) { toast('シリーズ名を入れてください', true); return; }
+        // URL未設定＝依頼文コピー(フォールバック)
+        if (!settings.aiResearchUrl) {
+          const existing = sugg.map(g => g.name);
+          const req = `Shopee出品用に「${series}」${hw ? '（ハード: ' + hw + '）' : ''}シリーズのゲーム全タイトルをネットで調べてください（日本語版・各ハード・廉価版/ベスト版/限定版含む）。\n` +
+            `私が既に出しているタイトル(${existing.length}件): ${existing.join(' / ') || '（なし）'}\n` +
+            `↑に含まれていない未出品のタイトルを、Shopeeのバリエーション明細名の形（例: ${hw ? hw + ':タイトル' : '機種:タイトル'}）でリスト化して提案してください。`;
+          copyText(req, 'AI調査の依頼文');
+          toast('🔍 依頼文をコピー。⚙️設定でAI調査GAS URLを入れると押すだけで自動化できます');
+          return;
+        }
+        // URL設定済＝GAS(Claude API/Web検索)をJSONPで呼んで自動調査
+        let box = document.getElementById('li-vs-airesult');
+        if (!box) { box = document.createElement('div'); box.id = 'li-vs-airesult'; box.style.marginTop = '8px'; panel.appendChild(box); }
+        box.innerHTML = '<span class="smd-dim" style="font-size:12px">🔍 AIがネット調査中…（10〜30秒）</span>';
+        ai.disabled = true;
+        try {
+          const data = await aiResearchJsonp(series, hw);
+          if (!data || !data.ok) throw new Error((data && data.error) || '応答なし');
+          const titles = data.titles || [];
+          const catNameSet = new Set(); cat.forEach(L => modelsOf(L).forEach(m => { if (m && m.n) catNameSet.add(vsNorm(m.n)); }));
+          const inComposer = new Set(listState.variations.map(v => vsNorm(v.opt)));
+          const rows = titles.map(t => { const label = (t.platform ? t.platform + ':' : '') + t.title; return { label, inComp: inComposer.has(vsNorm(label)) || inComposer.has(vsNorm(t.title)), inCat: catNameSet.has(vsNorm(label)) || catNameSet.has(vsNorm(t.title)) }; });
+          const missing = rows.filter(r => !r.inComp && !r.inCat).length;
+          box.innerHTML = `<div style="border:1px solid #bcd;background:#eef4ff;border-radius:8px;padding:10px">
+            <b style="font-size:12.5px;color:#1565c0">🌐 AI調査：「${esc(series)}」の全タイトル ${rows.length}件</b> <span class="smd-dim" style="font-size:11px">🏬=既に出品済／✓=今の明細にあり</span>
+            <div style="max-height:280px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:2px;margin-top:6px;border:1px solid #cdd;border-radius:6px;padding:5px;background:#fff">` +
+            rows.map(r => `<label style="display:flex;gap:6px;align-items:center;font-size:11.5px;padding:2px 4px;${r.inComp ? 'opacity:.5' : ''}"><input type="checkbox" class="li-ai-cb" data-name="${esc(r.label)}"${r.inComp ? ' disabled' : (r.inCat ? '' : ' checked')}><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.label)}</span>${r.inComp ? '<span style="font-size:10px;color:#1a7f37">✓</span>' : (r.inCat ? '<span title="他カタログ/他国で出品済み" style="font-size:10px;color:#1a7f37">🏬</span>' : '<span style="font-size:9px;color:#d93025">未</span>')}</label>`).join('') +
+            `</div>
+            <div style="margin-top:8px"><button class="smd-btn" id="li-ai-add" style="background:#1565c0;border-color:#1565c0;color:#fff;font-weight:700">✓ チェックした明細を追加</button> <span class="smd-dim" style="font-size:11px">未出品 <b style="color:#d93025">${missing}</b>件（🏬既出品は既定オフ）</span></div>
+          </div>`;
+          const addB = document.getElementById('li-ai-add');
+          if (addB) addB.addEventListener('click', () => {
+            const picked = [...box.querySelectorAll('.li-ai-cb:checked:not([disabled])')].map(cb => cb.dataset.name);
+            if (!picked.length) { toast('追加する明細を選んでください', true); return; }
+            picked.forEach(nm => listState.variations.push({ opt: nm, cost: 0, stock: 1, img: '', weightG: null }));
+            listVarsRender(); listRefresh();
+            toast('✓ ' + picked.length + '明細を追加しました');
+          });
+        } catch (e) { box.innerHTML = '<span style="color:#d93025;font-size:12px">AI調査失敗: ' + esc(e.message) + '（⚙️設定のURL／GASのANTHROPIC_API_KEYを確認）</span>'; }
+        finally { ai.disabled = false; }
       }); }
       const addBtn = document.getElementById('li-vs-add');
       if (addBtn) addBtn.addEventListener('click', () => {
@@ -8272,6 +8325,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('set-deptoken').value = settings.depToken;
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
+    document.getElementById('set-airesearch').value = settings.aiResearchUrl || '';
     {
       const m = settings.sheetIds || {};
       let lines = Object.keys(m).sort().reverse().map(k => `${k}: ${m[k]}`);
@@ -8319,6 +8373,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     settings.depToken = document.getElementById('set-deptoken').value.trim();
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
+    settings.aiResearchUrl = document.getElementById('set-airesearch').value.trim().replace(/\/$/, '');
     {
       // 「YYYY-MM: ID」の各行を月→IDマップに。今月分は settings.sheetId にも保持（後方互換）
       const map = {};
