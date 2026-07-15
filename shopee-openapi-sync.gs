@@ -104,9 +104,11 @@ function exchangeToken_(code, who) {
   var j = JSON.parse(body);
   if (j.error && j.error !== '') throw new Error('token取得失敗: ' + j.error + ' ' + (j.message || '') + ' / ' + body.slice(0, 300));
   var access = j.access_token, refresh = j.refresh_token, expire = now_() + (j.expire_in || 14400) - 300;
+  // ★メイン垢トークンのrefreshに必要なmerchant_idを捕捉（CNSC越境は merchant_id で更新する）
+  var merchantId = (j.merchant_id_list && j.merchant_id_list[0]) || j.merchant_id || null;
   // 対象ショップID群：単店はそれ自身。メイン垢は応答のshop_id_list（無ければ公開APIで列挙）
   var shopIds = who.shop_id ? [who.shop_id] : (j.shop_id_list || []);
-  var note = '';
+  var note = '応答keys: ' + Object.keys(j).join(',') + ' / merchant_id_list=' + JSON.stringify(j.merchant_id_list || j.merchant_id || null);
   if (!shopIds.length && who.main_account_id) {
     try { shopIds = getShopsByPartner_().map(function (s) { return s.shop_id; }); } catch (e) { note = 'shop列挙に失敗: ' + e; }
     if (!shopIds.length) note += ' ／ token応答: ' + body.slice(0, 300);
@@ -115,6 +117,7 @@ function exchangeToken_(code, who) {
   shopIds.forEach(function (sid) {
     var tok = { shop_id: sid, access_token: access, refresh_token: refresh, expire_at: expire };
     if (who.main_account_id) tok.main_account_id = who.main_account_id;
+    if (merchantId) tok.merchant_id = merchantId;
     saveToken_(tok);
     try { var info = shopInfo_(sid); tok.cc = REGION_TO_CC[info.region] || info.region; tok.shop_name = info.shop_name; saveToken_(tok); } catch (_) {}
     saved.push(getToken_(sid));
@@ -150,8 +153,10 @@ function ensureToken_(shopId) {
   var path = '/api/v2/auth/access_token/get';
   var ts = now_();
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var payload = { refresh_token: tok.refresh_token, partner_id: partnerId_(), shop_id: shopId };
-  if (tok.main_account_id) payload.merchant_id = tok.main_account_id; // メイン垢はmerchant指定の可能性（初回refreshで確認）
+  // メイン垢トークンは merchant_id で更新（無ければshop_id）。main_account_idはrefresh未対応
+  var payload = { refresh_token: tok.refresh_token, partner_id: partnerId_() };
+  if (tok.merchant_id) payload.merchant_id = tok.merchant_id;
+  else payload.shop_id = shopId;
   var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('refresh失敗 shop_id=' + shopId + ': ' + j.error + ' ' + (j.message || ''));
