@@ -438,10 +438,15 @@ function fetchNews_(force) {
         var link = (b.match(/<link[^>]*href=["']([^"']+)["']/) || [])[1] || (b.match(/<link[^>]*>([\s\S]*?)<\/link>/) || [])[1] || (b.match(/<guid[^>]*>([\s\S]*?)<\/guid>/) || [])[1] || '';
         var date = (b.match(/<(pubDate|published|updated|dc:date)[^>]*>([\s\S]*?)<\/(?:pubDate|published|updated|dc:date)>/) || [])[2] || '';
         var desc = (b.match(/<(description|summary|content:encoded)[^>]*>([\s\S]*?)<\/(?:description|summary|content:encoded)>/) || [])[2] || '';
+        var img = (b.match(/<media:(?:content|thumbnail)[^>]*\burl=["']([^"']+)["']/) || [])[1]
+          || (b.match(/<enclosure[^>]*\burl=["']([^"'>]+\.(?:jpe?g|png|webp|gif)[^"'>]*)["']/i) || [])[1]
+          || (b.match(/<enclosure[^>]*type=["']image[^>]*\burl=["']([^"']+)["']/i) || [])[1]
+          || (decodeXml_(desc).match(/<img[^>]+\bsrc=["']([^"']+)["']/i) || [])[1] || '';
+        img = decodeXml_(img).trim();
         title = decodeXml_(stripTags_(title)).replace(/\s+/g, ' ').trim();
         link = decodeXml_(link).trim();
         desc = decodeXml_(stripTags_(desc)).replace(/\s+/g, ' ').trim();
-        if (title && link) items.push({ title: title.slice(0, 200), link: link, source: f.s, region: f.r, cat: f.c, date: date, summary: desc.slice(0, 160) });
+        if (title && link) items.push({ title: title.slice(0, 200), link: link, image: img, source: f.s, region: f.r, cat: f.c, date: date, summary: desc.slice(0, 160) });
       });
     } catch (e) { }
   });
