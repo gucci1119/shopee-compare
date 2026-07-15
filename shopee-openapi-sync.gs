@@ -43,6 +43,13 @@ function doGet(e) {
       } catch (err) { out = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(cb + '(' + JSON.stringify(out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
+    if (p.action === 'news') {
+      var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
+      var nout;
+      try { nout = { ok: true, items: fetchNews_(p.force === '1') }; } catch (e) { nout = { ok: false, error: String((e && e.message) || e).slice(0, 160) }; }
+      return ContentService.createTextOutput(ncb + '(' + JSON.stringify(nout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'auth') return HtmlService.createHtmlOutput('<p>対象ショップにログインした状態で下のリンクから認可してください。</p><p><a href="' + buildAuthUrl() + '">▶ このショップをShopeeで認可する</a></p>');
     if (p.code && (p.shop_id || p.main_account_id)) {
       var who = p.shop_id ? { shop_id: parseInt(p.shop_id, 10) } : { main_account_id: parseInt(p.main_account_id, 10) };
@@ -397,3 +404,51 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   Logger.log('✅ トリガー設定'); return 'ok';
 }
+
+// ================= 業界ニュース（ゲーム/アニメ・日本/海外のRSS集約） =================
+// r: 地域 jp/en ／ c: ジャンル game/anime。追加/削除で簡単に増やせる。
+var NEWS_FEEDS = [
+  { u: 'https://automaton-media.com/feed/', s: 'AUTOMATON', r: 'jp', c: 'game' },
+  { u: 'https://jp.ign.com/feed.xml', s: 'IGN Japan', r: 'jp', c: 'game' },
+  { u: 'https://www.gamespark.jp/rss/index.rdf', s: 'Game*Spark', r: 'jp', c: 'game' },
+  { u: 'https://www.famitsu.com/rss/famitsu-new-arrival.rdf', s: 'ファミ通', r: 'jp', c: 'game' },
+  { u: 'https://natalie.mu/comic/feed/news', s: 'コミックナタリー', r: 'jp', c: 'anime' },
+  { u: 'https://animeanime.jp/rss/index.rdf', s: 'アニメ!アニメ!', r: 'jp', c: 'anime' },
+  { u: 'https://ascii.jp/rss.xml', s: 'ASCII', r: 'jp', c: 'anime' },
+  { u: 'https://feeds.feedburner.com/ign/all', s: 'IGN', r: 'en', c: 'game' },
+  { u: 'https://www.polygon.com/rss/index.xml', s: 'Polygon', r: 'en', c: 'game' },
+  { u: 'https://www.nintendolife.com/feeds/latest', s: 'Nintendo Life', r: 'en', c: 'game' },
+  { u: 'https://www.animenewsnetwork.com/all/rss.xml', s: 'Anime News Network', r: 'en', c: 'anime' },
+  { u: 'https://www.gematsu.com/feed', s: 'Gematsu', r: 'en', c: 'game' }
+];
+function stripTags_(s) { return String(s).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ''); }
+function decodeXml_(s) { return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&'); }
+function fetchNews_(force) {
+  var cache = CacheService.getScriptCache();
+  if (!force) { var hit = cache.get('news_v1'); if (hit) return JSON.parse(hit); }
+  var items = [];
+  NEWS_FEEDS.forEach(function (f) {
+    try {
+      var res = UrlFetchApp.fetch(f.u, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ShopeeOS/1.0)' } });
+      if (res.getResponseCode() >= 300) return;
+      var xml = res.getContentText();
+      var blocks = xml.match(/<(item|entry)[\s>][\s\S]*?<\/(item|entry)>/g) || [];
+      blocks.slice(0, 10).forEach(function (b) {
+        var title = (b.match(/<title[^>]*>([\s\S]*?)<\/title>/) || [])[1] || '';
+        var link = (b.match(/<link[^>]*href=["']([^"']+)["']/) || [])[1] || (b.match(/<link[^>]*>([\s\S]*?)<\/link>/) || [])[1] || (b.match(/<guid[^>]*>([\s\S]*?)<\/guid>/) || [])[1] || '';
+        var date = (b.match(/<(pubDate|published|updated|dc:date)[^>]*>([\s\S]*?)<\/(?:pubDate|published|updated|dc:date)>/) || [])[2] || '';
+        var desc = (b.match(/<(description|summary|content:encoded)[^>]*>([\s\S]*?)<\/(?:description|summary|content:encoded)>/) || [])[2] || '';
+        title = decodeXml_(stripTags_(title)).replace(/\s+/g, ' ').trim();
+        link = decodeXml_(link).trim();
+        desc = decodeXml_(stripTags_(desc)).replace(/\s+/g, ' ').trim();
+        if (title && link) items.push({ title: title.slice(0, 200), link: link, source: f.s, region: f.r, cat: f.c, date: date, summary: desc.slice(0, 160) });
+      });
+    } catch (e) { }
+  });
+  items.forEach(function (it) { it.ts = Date.parse(it.date) || 0; });
+  items.sort(function (a, b) { return b.ts - a.ts; });
+  var out = items.slice(0, 140);
+  try { cache.put('news_v1', JSON.stringify(out), 1800); } catch (e) { } // 30分キャッシュ
+  return out;
+}
+function testNews() { var r = fetchNews_(true); Logger.log(r.length + '件 / 例: ' + JSON.stringify(r.slice(0, 3), null, 1)); return r.length; }
