@@ -64,6 +64,87 @@ function doGet(e) {
   } catch (err) { return HtmlService.createHtmlOutput('<h3>エラー</h3><pre>' + err + '</pre>'); }
 }
 
+// ★webchat取り込み：Tampermonkeyから生チャットJSON/正規化メッセージをPOSTで受ける（WRITE_TOKENガード）
+// body: { token, action:'chat_ingest', captures:[{url,cc,body}], messages:[{...chat_messagesの行}] }
+function doPost(e) {
+  var out = { ok: false };
+  try {
+    var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var wt = P_().getProperty('WRITE_TOKEN');
+    if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+    if (body.action === 'chat_ingest') out = chatIngest_(body);
+    else throw new Error('unknown action: ' + body.action);
+  } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+function chatHash_(s) { var d = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(s)); return Utilities.base64EncodeWebSafe(d).replace(/=+$/, '').slice(0, 22); }
+function chatTryParse_(s) { try { return JSON.parse(s); } catch (e) { return { _unparsed: String(s).slice(0, 4000) }; } }
+function chatIngest_(body) {
+  var rawRows = [], msgRows = [];
+  (body.captures || []).forEach(function (c) {
+    if (!c) return;
+    var b = (typeof c.body === 'string') ? chatTryParse_(c.body) : (c.body || {});
+    var str = JSON.stringify(b);
+    if (str.length > 90000) str = str.slice(0, 90000); // jsonb肥大ガード
+    rawRows.push({ id: chatHash_((c.url || '') + str), cc: c.cc || null, url: String(c.url || '').slice(0, 500), body: chatTryParse_(str) });
+    try { chatNormalizeCapture_(b, c.cc).forEach(function (m) { msgRows.push(m); }); } catch (_) {}
+  });
+  (body.messages || []).forEach(function (m) {
+    if (!m || !m.text) return;
+    var conv = String(m.conversation_id || m.buyer || '');
+    var id = m.id ? String(m.id) : ((m.source || 'shopee') + '|' + (m.cc || '') + '|' + conv + '|' + (m.msg_time || '') + '|' + chatHash_(m.text));
+    msgRows.push({
+      id: id, source: m.source || 'shopee', cc: m.cc || null, shop_id: m.shop_id || null,
+      conversation_id: conv, buyer: m.buyer || null, direction: m.direction === 'out' ? 'out' : 'in',
+      msg_type: m.msg_type || 'text', text: String(m.text).slice(0, 4000), msg_time: m.msg_time || new Date().toISOString(),
+      synced_at: new Date().toISOString()
+    });
+  });
+  if (rawRows.length) sbUpsert_('chat_raw', rawRows, 'id');
+  if (msgRows.length) sbUpsert_('chat_messages', dedupById_(msgRows), 'id');
+  return { ok: true, raw: rawRows.length, messages: msgRows.length };
+}
+function dedupById_(rows) { var seen = {}, out = []; rows.forEach(function (r) { if (r && r.id && !seen[r.id]) { seen[r.id] = 1; out.push(r); } }); return out; }
+// 生JSONの中から会話一覧/メッセージ配列を探し、text＋時刻がある要素を chat_messages 行に変換（ベストエフォート）。
+// ★方向(in/out)は生データ(chat_raw)で確証を得てから精密化する。当面は from_shop_id 等の手掛かりがあれば out、無ければ in。
+function chatNormalizeCapture_(root, cc) {
+  var rows = [], now = new Date().toISOString();
+  function toIso_(t) {
+    if (t == null) return null; var n = Number(t); if (!n) { var d = Date.parse(t); return d ? new Date(d).toISOString() : null; }
+    if (n < 1e12) n = n * 1000;              // 秒→ms
+    if (n > 1e15) n = Math.round(n / 1000);  // マイクロ秒→ms
+    return new Date(n).toISOString();
+  }
+  function textOf_(o) {
+    if (o == null) return '';
+    if (typeof o === 'string') return o;
+    if (o.text) return String(o.text);
+    if (o.content) { if (typeof o.content === 'string') return o.content; if (o.content.text) return String(o.content.text); }
+    if (o.latest_message_content && o.latest_message_content.text) return String(o.latest_message_content.text);
+    if (o.message) return String(o.message);
+    return '';
+  }
+  function pushItem_(it) {
+    if (!it || typeof it !== 'object') return;
+    var text = textOf_(it); if (!text) return;
+    var ts = toIso_(it.created_timestamp || it.create_time || it.last_message_timestamp || it.timestamp || it.ctime || it.msg_time); if (!ts) return;
+    var conv = String(it.conversation_id || it.conv_id || it.biz_id || it.to_id || it.username || it.to_name || '');
+    var buyer = it.to_name || it.from_name || it.username || it.nickname || it.buyer || (conv || null);
+    var dir = (it.from_shop_id || it.is_from_seller || it.self || it.sender_type === 'seller') ? 'out' : 'in';
+    var mid = it.message_id || it.id || null;
+    var id = mid ? ('shopee|' + (cc || '') + '|' + mid) : ('shopee|' + (cc || '') + '|' + conv + '|' + ts + '|' + chatHash_(text));
+    rows.push({ id: id, source: 'shopee', cc: cc || null, shop_id: it.from_shop_id || it.shop_id || null, conversation_id: conv, buyer: buyer ? String(buyer) : null, direction: dir, msg_type: String(it.message_type || it.type || 'text'), text: String(text).slice(0, 4000), msg_time: ts, synced_at: now });
+  }
+  // bodyの中の「配列」を総当たりで探索（会話一覧・メッセージ一覧の名前がShopee側で変わっても拾える）
+  var seen = 0;
+  (function walk(node, depth) {
+    if (!node || depth > 6 || seen > 4000) return; seen++;
+    if (Array.isArray(node)) { node.forEach(function (x) { if (x && typeof x === 'object') { pushItem_(x); walk(x, depth + 1); } }); return; }
+    if (typeof node === 'object') { for (var k in node) { var v = node[k]; if (v && typeof v === 'object') walk(v, depth + 1); } }
+  })(root, 0);
+  return rows;
+}
+
 // メイン垢認可→shop_id_list取得→各shopに個別トークンを発行(per-shop)して保存
 function exchangeToken_(code, who) {
   var path = '/api/v2/auth/token/get', ts = now_();
