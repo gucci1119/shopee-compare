@@ -452,7 +452,9 @@ function parseFeed_(xml, f) {
     title = decodeXml_(stripTags_(title)).replace(/\s+/g, ' ').trim();
     link = decodeXml_(link).trim();
     desc = decodeXml_(stripTags_(desc)).replace(/\s+/g, ' ').trim();
-    if (title && link) out.push({ title: title.slice(0, 200), link: link, image: img, source: f.s, region: f.r, cat: f.c, type: f.t || 'med', date: date, summary: desc.slice(0, 140) });
+    var cat = f.c;
+    if (cat === 'game' && /(anime|manga|crunchyroll|isekai|sh(o|ō)nen|sh(o|ō)jo|アニメ|漫画|マンガ|声優|劇場版|OVA)/i.test(title + ' ' + desc)) cat = 'anime';
+    if (title && link) out.push({ title: title.slice(0, 200), link: link, image: img, source: f.s, region: f.r, cat: cat, type: f.t || 'med', date: date, summary: desc.slice(0, 140) });
   });
   return out;
 }
@@ -471,8 +473,31 @@ function fetchNews_(force) {
   });
   items.forEach(function (it) { it.ts = Date.parse(it.date) || 0; });
   items.sort(function (a, b) { return b.ts - a.ts; });
-  var out = items.slice(0, 160);
-  try { cache.put('news_v2', JSON.stringify(out), 1800); } catch (e) { } // 30分キャッシュ（100KB上限に注意し160件・summary140字）
+  var out = items.slice(0, 150);
+  // 海外(en)記事のタイトルを日本語化（無料gtx・並列・失敗は英語のまま）
+  try {
+    var en = out.filter(function (it) { return it.region === 'en' && it.title; });
+    var tr = translateToJa_(en.map(function (it) { return it.title; }));
+    en.forEach(function (it, i) { if (tr[i] && tr[i] !== it.title) it.title_ja = tr[i]; });
+  } catch (e) { }
+  try { cache.put('news_v2', JSON.stringify(out), 1800); } catch (e) { } // 30分キャッシュ（100KB上限に注意）
+  return out;
+}
+// 英語→日本語（Googleの無料gtxエンドポイント・fetchAllで並列）。失敗した要素は空文字。
+function translateToJa_(texts) {
+  var out = texts.map(function () { return ''; });
+  if (!texts.length) return out;
+  try {
+    var reqs = texts.map(function (t) { return { url: 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t&q=' + encodeURIComponent(String(t).slice(0, 400)), muteHttpExceptions: true }; });
+    var resps = UrlFetchApp.fetchAll(reqs);
+    resps.forEach(function (res, i) {
+      try {
+        if (res.getResponseCode() !== 200) return;
+        var j = JSON.parse(res.getContentText());
+        out[i] = (j[0] || []).map(function (seg) { return seg[0]; }).join('').trim();
+      } catch (e) { }
+    });
+  } catch (e) { }
   return out;
 }
 function testNews() { var r = fetchNews_(true); Logger.log(r.length + '件 / 例: ' + JSON.stringify(r.slice(0, 3), null, 1)); return r.length; }
