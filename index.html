@@ -6176,6 +6176,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!listState.built) {
       listState.built = true;
       body.innerHTML = `
+        <div class="li-2col" style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
+        <div style="flex:1 1 540px;min-width:0">
         <div class="tool-card" style="max-width:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px">
           <b style="font-size:12px">📝 下書き</b>
           <button class="smd-btn" id="li-draftsave" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4" title="今の入力内容をポータル内に下書き保存（Shopeeには送りません）">💾 下書き保存</button>
@@ -6332,6 +6334,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         </div>
 
         <div id="list-out"></div>
+        </div>
+        <div class="li-prevcol" style="flex:0 0 330px;min-width:280px"><div id="li-livepreview" style="position:sticky;top:44px"></div></div>
+        </div>
       `;
       // 入力→state同期（テキストはフォーカス保持のため部分更新）
       const bind = (id, key) => { const el = document.getElementById(id); el.addEventListener('input', () => { listState[key] = el.value; listRefresh(); }); };
@@ -7010,9 +7015,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!(o.title || '').trim() && !(o.images || '').trim() && !(o.specifics || '').trim() && o.descExtra == null && (!o.vars || !Object.keys(o.vars).length)) delete listState.overrides[cc];
   }
   // 出力パネル: 各国の転記内容＋制約チェック
+  // 右に追従するライブプレビュー（Shopee風・入力すると即更新）
+  function renderComposerPreview() {
+    const el = document.getElementById('li-livepreview'); if (!el) return;
+    const imgs = (listState.catImgs || []).map(resolveImgUrl).filter(Boolean);
+    const img = imgs[0] || '';
+    const title = listTitle();
+    const hasVar = listState.variations.length > 0;
+    const cost0 = hasVar ? ((listState.variations[0] || {}).cost || 0) : (listState.costJpy || 0);
+    const targets = accountTargets();
+    const priceRows = targets.slice(0, 7).map(rg => { let p = 0; try { p = priceLocalFor(rg.cc, cost0); } catch (e) { } return { cc: rg.cc, color: rg.color, str: p > 0 ? fmtLocal(rg, p) : '—' }; });
+    const varNames = hasVar ? listState.variations.map(v => (v.opt || '').trim() || '(明細名未入力)') : [];
+    const desc = (fillTpl(settings.listDescTpl, { title, name: listState.name }) || '').replace(/\s*\n\s*/g, ' ').trim().slice(0, 130);
+    const tl = title.length;
+    el.innerHTML =
+      `<div style="font-weight:800;font-size:12px;color:#7b52c4;margin-bottom:6px">👁 プレビュー <span class="smd-dim" style="font-weight:400;font-size:10px">（入力すると自動更新・目安）</span></div>` +
+      `<div style="border:1px solid #e6e0f5;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.06)">` +
+      `<div style="height:186px;background:#f1f1f1 no-repeat center/cover${img ? `;background-image:url('${esc(img)}')` : ''};display:flex;align-items:center;justify-content:center;color:#ccc;font-size:34px">${img ? '' : '🖼️'}</div>` +
+      `<div style="padding:9px 11px">` +
+      `<div style="font-size:13px;font-weight:700;line-height:1.4;color:#1a2c4e;min-height:34px">${esc(title || '（商品名を入力すると生成）')}</div>` +
+      `<div class="smd-dim" style="font-size:10px;margin-top:2px">タイトル ${tl}字${tl > 100 ? ' <span style="color:#d93025">⚠長すぎ</span>' : ''}　${hasVar ? `🎚 バリエ ${listState.variations.length}種` : '📦 単品'}</div>` +
+      (varNames.length ? `<div class="smd-dim" style="font-size:10.5px;margin-top:3px;line-height:1.5">${varNames.map(esc).join(' / ')}</div>` : '') +
+      `<div style="margin-top:8px;font-weight:700;font-size:11px;color:#334">各国の予定価格</div>` +
+      `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:3px">${priceRows.some(r => r.str !== '—') ? priceRows.map(r => `<span style="font-size:11px;white-space:nowrap"><b style="color:${r.color}">${r.cc}</b> ${r.str}</span>`).join('') : '<span class="smd-dim" style="font-size:11px">仕入値（円）を入れると自動計算</span>'}</div>` +
+      (desc ? `<div style="margin-top:8px;font-weight:700;font-size:11px;color:#334">説明（先頭）</div><div class="smd-dim" style="font-size:10.5px;line-height:1.5;margin-top:2px">${esc(desc)}…</div>` : '') +
+      `</div></div>` +
+      `<div class="smd-dim" style="font-size:10px;margin-top:6px;line-height:1.4">※目安表示です。実際の各国の価格・在庫・タイトルは下の「5. 各国へ転記」で確認・調整できます。</div>`;
+  }
   function listRefresh() {
     const out = document.getElementById('list-out');
     if (!out) return;
+    renderComposerPreview();
     // 全再描画してもフォーカス位置を保つ（インライン編集用）。data-foc をキーに復元
     const ae = document.activeElement;
     const focSave = (ae && out.contains(ae) && ae.dataset && ae.dataset.foc) ? { k: ae.dataset.foc, s: ae.selectionStart, e: ae.selectionEnd } : null;
