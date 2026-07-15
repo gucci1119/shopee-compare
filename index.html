@@ -7065,12 +7065,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!(o.title || '').trim() && !(o.images || '').trim() && !(o.specifics || '').trim() && o.descExtra == null && (!o.vars || !Object.keys(o.vars).length)) delete listState.overrides[cc];
   }
   // 出力パネル: 各国の転記内容＋制約チェック
-  // 右に追従するライブプレビュー＝Shopee公開ページのイメージ（国切替つき・入力で即更新）
+  // 右に追従するライブプレビュー＝Shopee公開ページのイメージ（国切替＋PC/スマホ切替・入力で即更新）
   function renderComposerPreview() {
     const el = document.getElementById('li-livepreview'); if (!el) return;
     const targets = accountTargets();
     if (!targets.length) { el.innerHTML = '<div class="smd-dim" style="font-size:11px">対象アカウントの国がありません</div>'; return; }
     let cc = listState._prevCc; if (!cc || !targets.some(t => t.cc === cc)) cc = targets[0].cc;
+    const device = listState._prevDevice === 'pc' ? 'pc' : 'mobile';
     const rg = regionByCc(cc) || targets[0];
     const imgs = (listState.catImgs || []).map(resolveImgUrl).filter(Boolean);
     const img = imgs[0] || '';
@@ -7078,27 +7079,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const title = ((listState.overrides[cc] || {}).title || '').trim() || listTitle();
     const roundP = (costJpy) => { try { return roundLocal(priceLocalFor(cc, costJpy || 0), rg.priceUnit || 1); } catch (e) { return 0; } };
     let priceHtml;
-    if (hasVar) { const ps = listState.variations.map(v => roundP(v.cost)).filter(p => p > 0); if (ps.length) { const mn = Math.min(...ps), mx = Math.max(...ps); priceHtml = mn === mx ? fmtLocal(rg, mn) : `${fmtLocal(rg, mn)} 〜 ${fmtLocal(rg, mx)}`; } else priceHtml = '<span style="color:#aaa;font-size:13px">仕入値を入力</span>'; }
-    else { const p = roundP(listState.costJpy); priceHtml = p > 0 ? fmtLocal(rg, p) : '<span style="color:#aaa;font-size:13px">仕入値を入力</span>'; }
-    const varChips = hasVar ? listState.variations.map(v => `<span style="display:inline-block;border:1px solid #ddd;border-radius:5px;padding:3px 9px;font-size:11px;margin:0 5px 5px 0;color:#333;background:#fafafa">${esc((v.opt || '').trim() || '(未入力)')}</span>`).join('') : '';
-    const desc = (fillTpl(settings.listDescTpl, { title, name: listState.name }) || '').trim().slice(0, 200);
+    if (hasVar) { const ps = listState.variations.map(v => roundP(v.cost)).filter(p => p > 0); if (ps.length) { const mn = Math.min(...ps), mx = Math.max(...ps); priceHtml = mn === mx ? fmtLocal(rg, mn) : `${fmtLocal(rg, mn)} 〜 ${fmtLocal(rg, mx)}`; } else priceHtml = '<span style="color:#aaa;font-size:14px">仕入値を入力</span>'; }
+    else { const p = roundP(listState.costJpy); priceHtml = p > 0 ? fmtLocal(rg, p) : '<span style="color:#aaa;font-size:14px">仕入値を入力</span>'; }
+    const varChips = hasVar ? listState.variations.map(v => `<span style="display:inline-block;border:1px solid #ee4d2d;color:#ee4d2d;border-radius:4px;padding:3px 9px;font-size:11px;margin:0 5px 5px 0;background:#fff">${esc((v.opt || '').trim() || '(未入力)')}</span>`).join('') : '';
+    const desc = (fillTpl(settings.listDescTpl, { title, name: listState.name }) || '').trim();
     const tl = title.length, tlimit = (TITLE_LIMIT[cc] || 100);
-    const ccChips = targets.map(t => `<button class="lp-cc smd-btn" data-cc="${t.cc}" style="font-size:10.5px;padding:2px 8px${t.cc === cc ? `;background:${t.color};color:#fff;border-color:${t.color};font-weight:700` : ''}">${t.cc}</button>`).join('');
+    // specifics（商品仕様）: 国別上書き ▶ 国別テンプレ ▶ 全国共通
+    const specsFor = (c) => { const o = listState.overrides[c] || {}; if (o.specifics != null) return o.specifics; const t = (settings.listSpecsByCc || {})[c]; return (t != null && t !== '') ? t : settings.listSpecs; };
+    const specRows = String(specsFor(cc) || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => { const i = l.indexOf('='); return i > 0 ? [l.slice(0, i).trim(), l.slice(i + 1).trim()] : [l, '']; });
+    const specHtml = specRows.length ? `<div style="margin-top:9px;border:1px solid #eee;border-radius:7px;overflow:hidden"><div style="background:#fafafa;padding:5px 10px;font-size:11px;font-weight:700;color:#555">商品仕様（Specification）</div>${specRows.map(([k, v]) => `<div style="display:flex;font-size:11px;padding:4px 10px;border-top:1px solid #f4f4f4"><span style="flex:none;width:104px;color:#888">${esc(k)}</span><span style="flex:1;color:#333">${esc(v)}</span></div>`).join('')}</div>` : '<div class="smd-dim" style="font-size:10.5px;margin-top:9px">商品仕様（Specification）は「4.説明」下や⚙️設定で編集。未設定です。</div>';
+    const chips = targets.map(t => `<button class="lp-cc smd-btn" data-cc="${t.cc}" style="font-size:10.5px;padding:2px 8px${t.cc === cc ? `;background:${t.color};color:#fff;border-color:${t.color};font-weight:700` : ''}">${t.cc}</button>`).join('');
+    const dev = (v, l) => `<button class="lp-dev smd-btn" data-dev="${v}" style="font-size:10.5px;padding:2px 9px${device === v ? ';background:#33415c;color:#fff;border-color:#33415c;font-weight:700' : ''}">${l}</button>`;
+    const descMax = device === 'pc' ? 500 : 240;
+    const info =
+      `<div style="color:${rg.color};font-weight:800;font-size:${device === 'pc' ? 24 : 21}px;line-height:1">${priceHtml}</div>` +
+      `<div style="font-size:13px;line-height:1.45;color:#222;margin-top:7px">${esc(title || '（商品名を入力すると生成）')}</div>` +
+      `<div style="font-size:10px;color:${tl > tlimit ? '#d93025' : '#bbb'};margin-top:3px">タイトル ${tl}/${tlimit}字${tl > tlimit ? ' ⚠超過（この国では自動短縮 or 要調整）' : ''}　${hasVar ? '🎚 バリエ' + listState.variations.length : '📦 単品'}</div>` +
+      (varChips ? `<div style="margin-top:9px"><div style="font-size:11px;color:#666;margin-bottom:4px">バリエーション（選択肢）</div>${varChips}</div>` : '') +
+      specHtml +
+      `<div style="margin-top:9px;border-top:1px solid #f0f0f0;padding-top:8px"><div style="font-size:11px;color:#666;margin-bottom:3px">商品説明</div><div class="smd-dim" style="font-size:11px;line-height:1.55;white-space:pre-wrap;max-height:${device === 'pc' ? 220 : 130}px;overflow:hidden">${esc(desc.slice(0, descMax))}${desc.length > descMax ? '…' : ''}</div></div>` +
+      `<div style="margin-top:11px;display:flex;gap:6px"><div style="flex:1;text-align:center;background:#ffefe9;color:#ee4d2d;border:1px solid #ee4d2d;border-radius:5px;padding:7px;font-size:11px;font-weight:700">🛒 カートに追加</div><div style="flex:1;text-align:center;background:#ee4d2d;color:#fff;border-radius:5px;padding:7px;font-size:11px;font-weight:700">今すぐ購入</div></div>`;
+    const imgBox = `<div style="${device === 'pc' ? 'width:250px;flex:none;max-width:250px;' : 'max-height:270px;'}aspect-ratio:1/1;background:#f4f4f4 no-repeat center/cover${img ? `;background-image:url('${esc(img)}')` : ''};display:flex;align-items:center;justify-content:center;color:#ccc;font-size:40px">${img ? '' : '🖼️'}</div>`;
+    const card = device === 'pc'
+      ? `<div style="border:1px solid #e6e0f5;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(0,0,0,.1);display:flex">${imgBox}<div style="flex:1;min-width:0;padding:12px 15px">${info}</div></div>`
+      : `<div style="border:1px solid #e6e0f5;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(0,0,0,.1)">${imgBox}<div style="padding:11px 13px">${info}</div></div>`;
     el.innerHTML =
       `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap"><span style="font-weight:800;font-size:12px;color:#7b52c4">👁 プレビュー</span><span class="smd-dim" style="font-size:10px">公開ページのイメージ</span></div>` +
-      `<div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:7px">${ccChips}</div>` +
-      `<div style="border:1px solid #e6e0f5;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(0,0,0,.1)">` +
-      `<div style="aspect-ratio:1/1;max-height:270px;background:#f4f4f4 no-repeat center/cover${img ? `;background-image:url('${esc(img)}')` : ''};display:flex;align-items:center;justify-content:center;color:#ccc;font-size:40px">${img ? '' : '🖼️'}</div>` +
-      `<div style="padding:11px 13px">` +
-      `<div style="color:${rg.color};font-weight:800;font-size:21px;line-height:1">${priceHtml}</div>` +
-      `<div style="font-size:12.5px;line-height:1.45;color:#222;margin-top:7px;max-height:54px;overflow:hidden">${esc(title || '（商品名を入力すると生成）')}</div>` +
-      `<div style="font-size:10px;color:${tl > tlimit ? '#d93025' : '#bbb'};margin-top:3px">タイトル ${tl}/${tlimit}字${tl > tlimit ? ' ⚠超過（この国では自動で短縮 or 要調整）' : ''}　${hasVar ? '🎚 バリエ' + listState.variations.length : '📦 単品'}</div>` +
-      (varChips ? `<div style="margin-top:9px"><div style="font-size:11px;color:#666;margin-bottom:4px">バリエーション</div>${varChips}</div>` : '') +
-      `<div style="margin-top:9px;border-top:1px solid #f0f0f0;padding-top:8px"><div style="font-size:11px;color:#666;margin-bottom:3px">商品説明</div><div class="smd-dim" style="font-size:11px;line-height:1.55;white-space:pre-wrap;max-height:120px;overflow:hidden">${esc(desc)}${desc.length >= 200 ? '…' : ''}</div></div>` +
-      `<div style="margin-top:11px;display:flex;gap:6px"><div style="flex:1;text-align:center;background:#ffefe9;color:#ee4d2d;border:1px solid #ee4d2d;border-radius:5px;padding:7px;font-size:11px;font-weight:700">🛒 カートに追加</div><div style="flex:1;text-align:center;background:#ee4d2d;color:#fff;border-radius:5px;padding:7px;font-size:11px;font-weight:700">今すぐ購入</div></div>` +
-      `</div></div>` +
-      `<div class="smd-dim" style="font-size:10px;margin-top:6px;line-height:1.4">※<b>${cc}</b>の目安イメージ（下のボタンは見本）。実際の各国の価格・在庫・タイトルは下の「5. 各国へ転記」で確認・調整できます。</div>`;
+      `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:7px;align-items:center"><div style="display:flex;gap:3px;flex-wrap:wrap">${chips}</div><span style="margin-left:auto;display:flex;gap:3px">${dev('mobile', '📱スマホ')}${dev('pc', '🖥PC')}</span></div>` +
+      card +
+      `<div class="smd-dim" style="font-size:10px;margin-top:6px;line-height:1.4">※<b>${cc}</b>・<b>${device === 'pc' ? 'PC' : 'スマホ'}</b>表示の目安（ボタンは見本）。実際の各国の価格・在庫・タイトル・属性は下の「5. 各国へ転記」で確認・調整できます。</div>`;
     el.querySelectorAll('.lp-cc').forEach(b => b.addEventListener('click', () => { listState._prevCc = b.dataset.cc; renderComposerPreview(); }));
+    el.querySelectorAll('.lp-dev').forEach(b => b.addEventListener('click', () => { listState._prevDevice = b.dataset.dev; renderComposerPreview(); }));
+    const col = el.closest('.li-prevcol'); if (col) { col.style.flex = device === 'pc' ? '0 0 560px' : '0 0 330px'; col.style.minWidth = device === 'pc' ? '460px' : '280px'; }
   }
   function listRefresh() {
     const out = document.getElementById('list-out');
