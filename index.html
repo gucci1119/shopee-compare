@@ -3047,36 +3047,61 @@
     }));
   }
   // ---------------- 👤 顧客管理 ----------------
-  const cust = { cc: '', repeatOnly: false };
+  const cust = { cc: '', repeatOnly: false, inclCancel: false, open: null };
   const ccBadge = (cc) => { const rg = regionByCc(cc); return `<span style="background:${rg ? rg.color : '#999'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:3px">${esc(cc)}</span>`; };
+  const custItemsStr = (o) => ((o.items || []).map(it => `${esc(it.name || it.item_name || '(商品名なし)')}${(it.qty || it.quantity || it.model_quantity_purchased || 1) > 1 ? ` ×${(it.qty || it.quantity || it.model_quantity_purchased)}` : ''}`).join('、') || '（明細なし）');
   async function renderCustomers() {
     const body = document.getElementById('cust-body');
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let orders; try { orders = await sbGetAll('orders', 'select=cc,buyer,order_date&tab=lt.500&order=order_date.desc'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
-    if (cust.cc) orders = orders.filter(o => o.cc === cust.cc);
+    let orders, notes;
+    try {
+      orders = await sbGetAll('orders', 'select=cc,buyer,order_date,tab,items&order=order_date.desc');
+      notes = await sbGetAll('customer_notes', 'select=buyer,note').catch(() => []);
+    } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+    const noteMap = {}; (notes || []).forEach(n => { noteMap[n.buyer] = n.note || ''; });
+    const scoped = cust.cc ? orders.filter(o => o.cc === cust.cc) : orders;
     const byB = {};
-    orders.forEach(o => { const b = o.buyer || '(不明)'; (byB[b] = byB[b] || { n: 0, cc: new Set(), last: '' }); byB[b].n++; byB[b].cc.add(o.cc); if ((o.order_date || '') > byB[b].last) byB[b].last = o.order_date || ''; });
-    let list = Object.entries(byB).sort((a, b) => b[1].n - a[1].n);
-    if (cust.repeatOnly) list = list.filter(x => x[1].n >= 2);
-    const repeat = Object.values(byB).filter(v => v.n >= 2).length;
+    scoped.forEach(o => { const b = o.buyer || '(不明)'; const e = byB[b] = byB[b] || { orders: [], cc: new Set(), last: '', cancel: 0 }; e.orders.push(o); if (o.tab === 600) e.cancel++; if (o.cc) e.cc.add(o.cc); if ((o.order_date || '') > e.last) e.last = o.order_date || ''; });
+    const countOf = e => cust.inclCancel ? e.orders.length : e.orders.filter(o => o.tab !== 600).length;
+    let list = Object.entries(byB).map(([b, e]) => ({ b, e, n: countOf(e) })).filter(x => x.n > 0);
+    list.sort((a, b) => b.n - a.n || (b.e.last > a.e.last ? 1 : -1));
+    if (cust.repeatOnly) list = list.filter(x => x.n >= 2);
+    const repeat = list.filter(x => x.n >= 2).length;
+    const totalOrders = scoped.filter(o => cust.inclCancel || o.tab !== 600).length;
     const ccOpts = REGIONS.filter(r => r.enabled !== false).map(r => `<option value="${r.cc}" ${cust.cc === r.cc ? 'selected' : ''}>${r.cc}</option>`).join('');
+    const detailRow = (x) => {
+      const rows = x.e.orders.slice().sort((a, b) => (b.order_date || '') > (a.order_date || '') ? 1 : -1).map(o => `<div style="display:flex;gap:8px;padding:3px 0;border-top:1px dashed #e5e5e5;font-size:11.5px;align-items:flex-start"><span style="flex:none;width:66px;color:#666">${esc((o.order_date || '').slice(0, 10) || '—')}</span><span style="flex:none">${ccBadge(o.cc)}</span><span style="flex:1;min-width:0">${custItemsStr(o)}</span>${o.tab === 600 ? '<span style="flex:none;color:#d93025;font-size:10px;font-weight:700">❌ｷｬﾝｾﾙ</span>' : ''}</div>`).join('');
+      return `<tr class="cust-detail"><td colspan="5" style="background:#fafbff;padding:9px 13px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">🧾 購入履歴（${x.e.orders.length}件${x.e.cancel ? `・うちキャンセル${x.e.cancel}` : ''}）</div>${rows}<div style="margin-top:9px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">📝 メモ（特徴・要注意など）</div><textarea class="cust-note" data-b="${esc(x.b)}" rows="2" placeholder="例：梱包厳重希望／良いリピーター／クレーム歴 など" style="width:100%;max-width:540px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">${esc(noteMap[x.b] || '')}</textarea><div class="cust-note-status smd-dim" data-b="${esc(x.b)}" style="font-size:10px;margin-top:2px"></div></div></td></tr>`;
+    };
     body.innerHTML =
-      `<div class="tool-card" style="margin:0 0 10px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      `<div class="tool-card" style="margin:0 0 10px;max-width:none"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span style="font-weight:700">国:</span>
         <select id="cust-cc" style="padding:5px;font-size:13px"><option value="">全て</option>${ccOpts}</select>
         <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="cust-rep" ${cust.repeatOnly ? 'checked' : ''}> リピーターのみ</label>
-        <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・直近${orders.length}注文から集計</span>
-        <button class="smd-btn" id="cust-csv" style="font-size:11px;margin-left:auto" title="この顧客一覧をCSVで書き出し">⬇ CSV</button></div></div>` +
-      `<div class="tool-card" style="margin:0;max-width:680px"><div class="pf-scroll"><table class="pf-table"><tr><th></th><th>バイヤー</th><th>購入回数</th><th>国</th><th>最終購入</th></tr>` +
-      list.slice(0, 500).map(([b, v]) => {
+        <label style="font-size:12px;cursor:pointer" title="キャンセルになった注文を購入回数に含めるか"><input type="checkbox" id="cust-cancel" ${cust.inclCancel ? 'checked' : ''}> キャンセルも含める</label>
+        <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・${totalOrders}注文${cust.inclCancel ? '（キャンセル込み）' : '（キャンセル除く）'}</span>
+        <button class="smd-btn" id="cust-csv" style="font-size:11px;margin-left:auto" title="この顧客一覧をCSVで書き出し">⬇ CSV</button></div>
+        <div class="smd-dim" style="font-size:11px;margin-top:5px">💡 行をクリックすると<b>購入履歴（いつ・何を・何個・どの国）</b>と<b>メモ</b>が開きます。📝＝メモあり。</div></div>` +
+      `<div class="tool-card" style="margin:0;max-width:780px"><div class="pf-scroll"><table class="pf-table"><tr><th></th><th>バイヤー</th><th>購入回数</th><th>国</th><th>最終購入</th></tr>` +
+      list.slice(0, 500).map(x => {
+        const b = x.b, v = x.e, isOpen = cust.open === b;
         const av = `<div style="width:26px;height:26px;border-radius:50%;background:${['#ee4d2d','#0f9d58','#1a73e8','#f9a825','#9c27b0','#00897b'][b.charCodeAt(0) % 6]};color:#fff;font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center">${esc((b[0] || '?').toUpperCase())}</div>`;
-        return `<tr><td>${av}</td><td>${esc(b)}</td><td>${v.n >= 2 ? `<b style="color:#ee4d2d">${v.n}</b>` : v.n}</td><td style="white-space:nowrap">${[...v.cc].map(ccBadge).join('')}</td><td>${esc((v.last || '').slice(5))}</td></tr>`;
+        const memoMark = (noteMap[b] || '').trim() ? ' 📝' : '';
+        const row = `<tr class="cust-row" data-b="${esc(b)}" style="cursor:pointer${isOpen ? ';background:#f0f6ff' : ''}"><td>${av}</td><td>${isOpen ? '▾ ' : '▸ '}${esc(b)}${memoMark}</td><td>${x.n >= 2 ? `<b style="color:#ee4d2d">${x.n}</b>` : x.n}${(v.cancel && cust.inclCancel) ? ` <span class="smd-dim" style="font-size:10px">(❌${v.cancel})</span>` : ''}</td><td style="white-space:nowrap">${[...v.cc].map(ccBadge).join('')}</td><td>${esc((v.last || '').slice(5, 10))}</td></tr>`;
+        return row + (isOpen ? detailRow(x) : '');
       }).join('') +
       `</table></div></div>`;
-    document.getElementById('cust-cc').addEventListener('change', e => { cust.cc = e.target.value; renderCustomers(); });
+    document.getElementById('cust-cc').addEventListener('change', e => { cust.cc = e.target.value; cust.open = null; renderCustomers(); });
     document.getElementById('cust-rep').addEventListener('change', e => { cust.repeatOnly = e.target.checked; renderCustomers(); });
-    { const cb = document.getElementById('cust-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('顧客_' + new Date().toISOString().slice(0, 10) + '.csv', [['バイヤー', '購入回数', '国', '最終購入']].concat(list.map(([b, v]) => [b, v.n, [...v.cc].join('/'), v.last || ''])))); }
-    setupColumns('customers', body);
+    document.getElementById('cust-cancel').addEventListener('change', e => { cust.inclCancel = e.target.checked; renderCustomers(); });
+    body.querySelectorAll('.cust-row').forEach(r => r.addEventListener('click', () => { const b = r.dataset.b; cust.open = (cust.open === b ? null : b); renderCustomers(); }));
+    body.querySelectorAll('.cust-note').forEach(t => t.addEventListener('change', async () => {
+      const b = t.dataset.b, st = body.querySelector('.cust-note-status[data-b="' + (window.CSS && CSS.escape ? CSS.escape(b) : b) + '"]');
+      if (st) { st.textContent = '保存中…'; st.style.color = '#888'; }
+      try { await sbUpsert('customer_notes', [{ buyer: b, note: t.value, updated_at: new Date().toISOString() }]); noteMap[b] = t.value; if (st) { st.textContent = '✓ 保存しました'; st.style.color = '#1a7f37'; } }
+      catch (e) { if (st) { st.textContent = '保存エラー: ' + (e.message || e); st.style.color = '#d93025'; } }
+    }));
+    { const cb = document.getElementById('cust-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('顧客_' + new Date().toISOString().slice(0, 10) + '.csv', [['バイヤー', '購入回数', 'キャンセル', '国', '最終購入', 'メモ']].concat(list.map(x => [x.b, x.n, x.e.cancel, [...x.e.cc].join('/'), x.e.last || '', noteMap[x.b] || ''])))); }
     fitScroll('customers');
   }
   // ---------------- 🛒 仕入れ管理（仕入れ検索 ＋ 入庫待ち） ----------------
