@@ -571,6 +571,25 @@
     <input type="text" id="set-sbsecret" placeholder="sb_secret_...">
     <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">AIシリーズ調査GAS URL（任意・出品コンポーザーの「🔍AIで全タイトル調査」を自動化）</label>
     <input type="text" id="set-airesearch" placeholder="https://script.google.com/macros/s/xxxx/exec（shopee-series-research.gs）">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">OpenAPI同期GAS URL（在庫/価格を公式APIで更新＝ブリッジ不要。shopee-openapi-sync の /exec）</label>
+    <input type="text" id="set-openapi" placeholder="https://script.google.com/macros/s/xxxx/exec">
+    <label>WRITE_TOKEN（GASのスクリプトプロパティと同じ値・書き込み保護用）</label>
+    <input type="text" id="set-writetoken" placeholder="例: shopee_wr_7Xq2">
+    <div style="margin-top:12px;border-top:1px solid #eee;padding-top:10px">
+      <label style="font-weight:700">📦 在庫/価格を公式APIで更新（ブリッジ不要）</label>
+      <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="oa-shop" placeholder="shop_id" style="width:110px" title="対象ショップのshop_id（GASのauthShopsで確認）">
+        <input type="text" id="oa-item" placeholder="item_id" style="width:130px">
+        <input type="text" id="oa-model" placeholder="バリエ名(無ければ空)" style="width:160px" title="バリエーション名。空＝バリエ無し(model_id 0)。名前はget_model_listで解決">
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center;margin-top:5px">
+        <input type="number" id="oa-stock" placeholder="在庫数" style="width:90px">
+        <button class="smd-btn" id="oa-updstock">📦 在庫を更新</button>
+        <input type="number" id="oa-price" placeholder="価格(現地)" step="any" style="width:110px">
+        <button class="smd-btn" id="oa-updprice">💲 価格を更新</button>
+      </div>
+      <div id="oa-result" class="smd-dim" style="font-size:11.5px;margin-top:5px;word-break:break-all"></div>
+    </div>
     <div class="smd-dim" style="font-size:11px;margin-top:2px">未設定なら調査依頼文のコピーになります。設定すると押すだけで未出品タイトルを自動提案（Claude API・従量課金）。</div>
     <label>利益管理表スプレッドシートID（月替わり）— 1行 = <b>YYYY-MM: ID</b>。今月の行を毎月足すだけ（過去分は残す）</label>
     <textarea id="set-sheetids" placeholder="2026-07: 1MCiDFf...&#10;2026-06: 1rn9enG6..." style="width:100%;height:74px;font-family:monospace;font-size:11px"></textarea>
@@ -626,7 +645,7 @@
 
   // ---------------- 設定（localStorage） ----------------
   const settings = Object.assign({
-    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '',
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '', openapiUrl: '', writeToken: '',
     // 出品コンポーザー用
     listTitleTpl: '[Used] {name} {hardware} Japan Ver. {jpseries}',
     listVarTpl: '{hardware} {variation}',
@@ -774,6 +793,18 @@
       s.onerror = () => { clearTimeout(timer); cleanup(); reject(new Error('GAS読み込みエラー')); };
       document.head.appendChild(s);
     });
+  }
+
+  // ---------------- 公式API 書き込み（在庫/価格）: GAS JSONP経由・ブリッジ不要 ----------------
+  // params: { shop_id, item_id, model_id?/model_name?, stock?(在庫) or price?(価格) }
+  async function openapiUpdate(action, params) {
+    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
+    const q = Object.assign({ action, token: settings.writeToken }, params);
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
+    return res;
   }
 
   // ---------------- 期間計算 ----------------
@@ -8366,6 +8397,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
     document.getElementById('set-airesearch').value = settings.aiResearchUrl || '';
+    { const a = document.getElementById('set-openapi'); if (a) a.value = settings.openapiUrl || ''; const b = document.getElementById('set-writetoken'); if (b) b.value = settings.writeToken || ''; }
     {
       const m = settings.sheetIds || {};
       let lines = Object.keys(m).sort().reverse().map(k => `${k}: ${m[k]}`);
@@ -8405,6 +8437,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (e) { toast('バックアップ失敗: ' + (e.message || e), true); }
     finally { btn.disabled = false; btn.textContent = orig; }
   });
+  // 📦 公式APIで在庫/価格更新（openapiUpdate経由・JSONP）
+  {
+    const oaRun = async (action, valKey, valId) => {
+      const r = document.getElementById('oa-result'); r.textContent = '更新中…'; r.style.color = '#888';
+      try {
+        const shop_id = document.getElementById('oa-shop').value.trim();
+        const item_id = document.getElementById('oa-item').value.trim();
+        const model_name = document.getElementById('oa-model').value.trim();
+        const v = document.getElementById(valId).value.trim();
+        if (!shop_id || !item_id || v === '') throw new Error('shop_id / item_id / 値 を入力してください');
+        const params = { shop_id, item_id }; if (model_name) params.model_name = model_name; else params.model_id = 0; params[valKey] = v;
+        const res = await openapiUpdate(action, params);
+        r.style.color = '#1a7f37'; r.textContent = '✅ 更新成功（model_id=' + res.model_id + '） ' + JSON.stringify(res.result || {});
+      } catch (e) { r.style.color = '#d93025'; r.textContent = '❌ ' + (e.message || e); }
+    };
+    const b1 = document.getElementById('oa-updstock'); if (b1) b1.addEventListener('click', () => oaRun('update_stock', 'stock', 'oa-stock'));
+    const b2 = document.getElementById('oa-updprice'); if (b2) b2.addEventListener('click', () => oaRun('update_price', 'price', 'oa-price'));
+  }
   document.getElementById('set-save').addEventListener('click', () => {
     settings.gasUrl = document.getElementById('set-gas').value.trim().replace(/\/$/, '');
     settings.token = document.getElementById('set-token').value.trim();
@@ -8414,6 +8464,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
     settings.aiResearchUrl = document.getElementById('set-airesearch').value.trim().replace(/\/$/, '');
+    { const a = document.getElementById('set-openapi'); if (a) settings.openapiUrl = a.value.trim().replace(/\/$/, ''); const b = document.getElementById('set-writetoken'); if (b) settings.writeToken = b.value.trim(); }
     {
       // 「YYYY-MM: ID」の各行を月→IDマップに。今月分は settings.sheetId にも保持（後方互換）
       const map = {};
