@@ -104,24 +104,37 @@ function exchangeToken_(code, who) {
   var j = JSON.parse(body);
   if (j.error && j.error !== '') throw new Error('token取得失敗: ' + j.error + ' ' + (j.message || '') + ' / ' + body.slice(0, 300));
   var access = j.access_token, refresh = j.refresh_token, expire = now_() + (j.expire_in || 14400) - 300;
-  // ★メイン垢トークンのrefreshに必要なmerchant_idを捕捉（CNSC越境は merchant_id で更新する）
-  var merchantId = (j.merchant_id_list && j.merchant_id_list[0]) || j.merchant_id || null;
+  // ★CNSCは各shopに固有のmerchant_idがあり、更新はshop毎のmerchant_idで行う（[0]を全店に流用するのは誤り）
+  var mlist = j.merchant_id_list || (j.merchant_id ? [j.merchant_id] : []);
+  // ★Unupgraded CNSC は merchant_id_list が空。supplier_id_list を merchant_id 相当として更新に使う
+  var usedSupplier = false;
+  if (!mlist.length && j.supplier_id_list && j.supplier_id_list.length) { mlist = j.supplier_id_list; usedSupplier = true; }
   // 対象ショップID群：単店はそれ自身。メイン垢は応答のshop_id_list（無ければ公開APIで列挙）
   var shopIds = who.shop_id ? [who.shop_id] : (j.shop_id_list || []);
-  var note = '応答keys: ' + Object.keys(j).join(',') + ' / merchant_id_list=' + JSON.stringify(j.merchant_id_list || j.merchant_id || null);
+  // shop_id_list と merchant_id_list が同数なら index対応（shopIds[i]のmerchant=mlist[i]）
+  var aligned = (mlist.length > 0 && mlist.length === shopIds.length);
+  P_().setProperty('authDebug', JSON.stringify({ at: new Date().toISOString(), keys: Object.keys(j), merchant_id_list: mlist, shop_id_list: (j.shop_id_list || []), aligned: aligned }));
+  var note = '応答keys: ' + Object.keys(j).join(',') + ' / ids=' + mlist.length + ' shops=' + shopIds.length + ' aligned=' + aligned + ' usedSupplier=' + usedSupplier + ' idlist=' + JSON.stringify(mlist) + ' supplier_id_list=' + JSON.stringify(j.supplier_id_list || []);
   if (!shopIds.length && who.main_account_id) {
     try { shopIds = getShopsByPartner_().map(function (s) { return s.shop_id; }); } catch (e) { note = 'shop列挙に失敗: ' + e; }
+    aligned = false; // 順序が保証されない列挙なので index対応は使わない
     if (!shopIds.length) note += ' ／ token応答: ' + body.slice(0, 300);
   }
-  var saved = [];
+  // ★per-shopトークン化：mainのrefresh_tokenから各shopの access/refresh を発行（access_token/get {refresh, shop_id}）
+  //   これで各店が固有のrefresh_tokenを持ち、以降 shop_id 更新で自動リフレッシュできる（merchant不要）
+  var saved = [], deriveErr = [];
   shopIds.forEach(function (sid) {
-    var tok = { shop_id: sid, access_token: access, refresh_token: refresh, expire_at: expire };
+    var tok = { shop_id: sid };
     if (who.main_account_id) tok.main_account_id = who.main_account_id;
-    if (merchantId) tok.merchant_id = merchantId;
+    try {
+      var r = refreshOne_(refresh, { shop_id: sid });
+      tok.access_token = r.access; tok.refresh_token = r.refresh; tok.expire_at = r.expire;
+    } catch (e) { deriveErr.push(sid + ':' + String(e).slice(0, 40)); tok.access_token = access; tok.refresh_token = refresh; tok.expire_at = expire; }
     saveToken_(tok);
     try { var info = shopInfo_(sid); tok.cc = REGION_TO_CC[info.region] || info.region; tok.shop_name = info.shop_name; saveToken_(tok); } catch (_) {}
     saved.push(getToken_(sid));
   });
+  if (deriveErr.length) note += ' ／ per-shop発行NG: ' + JSON.stringify(deriveErr);
   return { shops: saved, note: note };
 }
 
@@ -149,24 +162,40 @@ function ensureToken_(shopId) {
   var tok = getToken_(shopId);
   if (!tok) throw new Error('未認可 shop_id=' + shopId);
   if (tok.expire_at > now_()) return tok;
-  // refresh（メイン垢トークンは全店で共有＝1回更新して同じmain_account_idの全店に反映）
-  var path = '/api/v2/auth/access_token/get';
-  var ts = now_();
-  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  // メイン垢トークンは merchant_id で更新（無ければshop_id）。main_account_idはrefresh未対応
-  var payload = { refresh_token: tok.refresh_token, partner_id: partnerId_() };
-  if (tok.merchant_id) payload.merchant_id = tok.merchant_id;
-  else payload.shop_id = shopId;
-  var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) });
-  var j = JSON.parse(res.getContentText());
-  if (j.error && j.error !== '') throw new Error('refresh失敗 shop_id=' + shopId + ': ' + j.error + ' ' + (j.message || ''));
-  var access = j.access_token, refresh = j.refresh_token || tok.refresh_token, expire = now_() + (j.expire_in || 14400) - 300;
-  if (tok.main_account_id) {
-    listTokens_().forEach(function (t) { if (t.main_account_id === tok.main_account_id) { t.access_token = access; t.refresh_token = refresh; t.expire_at = expire; saveToken_(t); } });
-    return getToken_(shopId);
-  }
-  tok.access_token = access; tok.refresh_token = refresh; tok.expire_at = expire; saveToken_(tok);
+  // ★per-shopトークン：各店が自分のrefresh_tokenを持ち shop_id で更新（merchant不要）
+  var r = refreshOne_(tok.refresh_token, { shop_id: shopId });
+  tok.access_token = r.access; tok.refresh_token = r.refresh; tok.expire_at = r.expire; saveToken_(tok);
   return tok;
+}
+
+// 1回のrefresh呼び出し。who={merchant_id} or {shop_id}
+function refreshOne_(refreshToken, who) {
+  var path = '/api/v2/auth/access_token/get', ts = now_();
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+  var payload = { refresh_token: refreshToken, partner_id: partnerId_() };
+  if (who.merchant_id) payload.merchant_id = who.merchant_id; else payload.shop_id = who.shop_id;
+  var j = JSON.parse(UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) }).getContentText());
+  if (j.error && j.error !== '') throw new Error('refresh失敗 ' + JSON.stringify(who) + ': ' + j.error + ' ' + (j.message || ''));
+  return { access: j.access_token, refresh: j.refresh_token || refreshToken, expire: now_() + (j.expire_in || 14400) - 300 };
+}
+
+// ★メイン垢の全トークンを一括更新。merchant_id毎に1回refreshし（refresh_tokenは連鎖）、
+//   各merchantのaccess_tokenをそのmerchantの店だけに配る（別merchantの店に流用しない＝invalid_token回避）
+function refreshMainAccount_(mainId) {
+  var toks = listTokens_().filter(function (t) { return t.main_account_id === mainId; });
+  if (!toks.length) return;
+  var rt = toks[0].refresh_token;
+  // merchant_id毎にグループ化（merchant_id未設定の店は shop_id 単位で個別更新）
+  var groups = {};
+  toks.forEach(function (t) { var key = t.merchant_id ? ('m:' + t.merchant_id) : ('s:' + t.shop_id); (groups[key] = groups[key] || []).push(t); });
+  Object.keys(groups).forEach(function (key) {
+    var grp = groups[key];
+    var who = grp[0].merchant_id ? { merchant_id: grp[0].merchant_id } : { shop_id: grp[0].shop_id };
+    var r = refreshOne_(rt, who);
+    rt = r.refresh; // 連鎖：次のmerchant更新は新しいrefresh_tokenを使う
+    grp.forEach(function (t) { t.access_token = r.access; t.expire_at = r.expire; }); // access_tokenは同merchantの店だけに
+  });
+  toks.forEach(function (t) { t.refresh_token = rt; saveToken_(t); }); // 最終的なrefresh_tokenを全店に保存
 }
 
 // ---------- 署名付きショップAPI呼び出し ----------
@@ -304,8 +333,9 @@ function syncOrdersAll() {
 
 // ================= 第2段②：入金(escrow) → income表（純利益を公式データで確定） =================
 // get_escrow_detail の escrow_amount = Shopee手数料控除後のセラー入金額（現地通貨）。粗利 = escrow − 仕入額。
-function syncEscrowForShop_(tok) {
+function syncEscrowForShop_(tok, deadline, finalized) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
+  var fin = finalized || {}; // 確定済み(pending=false)snの集合＝再取得不要
   var to = now_(), from = to - 15 * 86400;
   var orders = [], cursor = '';
   for (var g = 0; g < 60; g++) {
@@ -314,25 +344,59 @@ function syncEscrowForShop_(tok) {
     (r.order_list || []).forEach(function (o) { orders.push({ sn: o.order_sn, status: o.order_status || '' }); });
     if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
   }
-  var rows = [], now2 = new Date().toISOString(), errs = 0, skip = 0;
-  orders.forEach(function (o) {
-    if (/^(UNPAID|CANCELLED|IN_CANCEL|INVOICE_PENDING)$/.test(o.status)) { skip++; return; } // 未払い/キャンセルは入金なし
-    var e; try { e = callShop_(tok.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: o.sn }, 'get'); } catch (ex) { errs++; return; }
+  var rows = [], now2 = new Date().toISOString(), errs = 0, skip = 0, partial = false;
+  for (var oi = 0; oi < orders.length; oi++) {
+    if (deadline && now_() > deadline) { partial = true; break; } // 6分制限の手前で安全打ち切り（残りは次回が拾う）
+    var o = orders[oi];
+    if (/^(UNPAID|CANCELLED|IN_CANCEL|INVOICE_PENDING)$/.test(o.status)) { skip++; continue; } // 未払い/キャンセルは入金なし
+    if (fin[o.sn]) { skip++; continue; } // 既に確定済み＝escrow金額は不変なのでコールしない
+    var e; try { e = callShop_(tok.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: o.sn }, 'get'); } catch (ex) { errs++; continue; }
     var inc = ((e.response || {}).order_income) || {};
-    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) return;
-    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: now2, amount_initial: amt, amount_initial_at: now2, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), synced_at: now2 });
-  });
+    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) continue;
+    // ★手数料内訳（Shopeeが差し引く分）＝実利益率の算出に使う
+    var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
+    var feeTotal = f_comm + f_serv + f_txn;
+    var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
+    var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
+      original_price: parseFloat(inc.original_price) || null, voucher_seller: parseFloat(inc.voucher_from_seller) || 0,
+      final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
+    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: now2, amount_initial: amt, amount_initial_at: now2, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2 });
+  }
   if (rows.length) sbUpsert_('income', rows, 'cc,sn');
-  return { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
+  var out = { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
+  if (partial) out.partial = true;
+  return out;
 }
 function syncEscrowAll() {
   var toks = listTokens_(), log = [];
+  var deadline = now_() + 270; // 4.5分で打ち切り（GAS6分制限の手前・残りは6h後の次回で自動継続）
+  // 確定済みsnをcc毎に1回だけ取得（各店で使い回し＝再取得スキップ用）
+  var finByCc = {};
   toks.forEach(function (tok) {
-    try { log.push(syncEscrowForShop_(tok)); }
+    var cc = tok.cc; if (!cc || finByCc[cc]) return;
+    try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; }
+  });
+  toks.forEach(function (tok) {
+    try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); }
     catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
   });
   Logger.log(JSON.stringify(log, null, 1));
   return log;
+}
+// income表から確定済み(pending=false)の注文snを取得（再取得スキップ用）
+function finalizedSns_(cc) {
+  // 確定済み(pending=false)かつ手数料内訳が既にある行だけスキップ。fees未取得の確定行は1度だけ再取得して埋める。
+  var rows = sbSelect_('income', 'select=sn&cc=eq.' + cc + '&pending=is.false&fee_total=not.is.null&limit=5000');
+  var s = {}; rows.forEach(function (r) { s[r.sn] = 1; }); return s;
+}
+
+// ---------- Supabase select（GET） ----------
+function sbSelect_(table, query) {
+  var url = cfg_('SB_URL') + '/rest/v1/' + table + '?' + query;
+  var key = cfg_('SB_SERVICE_KEY');
+  var res = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
+  if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+  return JSON.parse(res.getContentText());
 }
 
 // ---------- Supabase upsert ----------
@@ -353,3 +417,87 @@ function sbUpsert_(table, rows, onConflict) {
 // ---------- 便利：ログ確認 ----------
 function authShops() { Logger.log(JSON.stringify(listTokens_().map(function (t) { return { cc: t.cc, shop_id: t.shop_id, shop_name: t.shop_name, expire: new Date(t.expire_at * 1000).toLocaleString() }; }), null, 1)); }
 function showAuthUrl() { Logger.log(buildAuthUrl()); }
+
+// ---------- 診断：各トークンに merchant_id が入っているか（4h自動更新の可否を判定） ----------
+// merchant_id が false の店があると、4h後のrefreshが「merchant_id or shop_id required」で失敗しうる。
+// 全店 merchant_id:true なら放置で回る。false があれば「デプロイ最新版で再認可」で解消。
+function diag() {
+  var toks = listTokens_();
+  var out = toks.map(function (t) {
+    return { cc: t.cc, shop_id: t.shop_id, shop_name: t.shop_name || '',
+      has_merchant_id: !!t.merchant_id, merchant_id: t.merchant_id || null,
+      has_main_account: !!t.main_account_id,
+      expires_in_min: Math.round((t.expire_at - now_()) / 60) };
+  });
+  var ok = out.every(function (r) { return r.has_merchant_id || r.has_main_account; });
+  Logger.log(JSON.stringify({ shops: out.length, all_refreshable: ok, detail: out }, null, 1));
+  return { all_refreshable: ok, shops: out.length };
+}
+
+// 認可時に保存した token/get 応答の形（merchant_id_list / shop_id_list / aligned）を表示
+function showAuthDebug() { Logger.log(P_().getProperty('authDebug') || '（authDebug未保存＝最新版デプロイで再認可してください）'); }
+
+// ---------- 更新テスト：全店を実際にrefreshし、全店でAPIが通るかまで検証 ----------
+// 本番のensureToken_と同じ refreshMainAccount_ を使い、更新後に各店 get_shop_info を叩いて生存確認。
+function testRefresh() {
+  var toks = listTokens_(); if (!toks.length) return Logger.log('未認可');
+  var ok = 0, ng = [];
+  toks.forEach(function (t) {
+    try {
+      var r = refreshOne_(t.refresh_token, { shop_id: t.shop_id }); // per-shop更新
+      t.access_token = r.access; t.refresh_token = r.refresh; t.expire_at = r.expire; saveToken_(t);
+      shopInfo_(t.shop_id); ok++;
+    } catch (e) { ng.push(t.cc + ':' + t.shop_id + ' ' + String(e).slice(0, 40)); }
+  });
+  if (ng.length) Logger.log('⚠️ ' + ok + '店OK / NG: ' + JSON.stringify(ng));
+  else Logger.log('✅ 全' + ok + '店 per-shop更新成功＝4h後も自動更新で放置OK。setupTriggers済なら完全自動化完了');
+}
+
+// ---------- 非破壊プローブ：supplier_id(=merchant_id)での更新が全店に効くかを保存せず検証 ----------
+// 現行トークンは一切変更しない。新access_tokenを各shopのget_shop_infoで試して有効店数を数えるだけ。
+function probeRefresh() {
+  var toks = listTokens_(); if (!toks.length) return Logger.log('未認可');
+  var mid = null; toks.forEach(function (t) { if (t.merchant_id) mid = t.merchant_id; });
+  if (!mid) return Logger.log('merchant_id(supplier_id)が未保存＝最新exchangeToken_をデプロイしてコンソールで再認可してください');
+  var r; try { r = refreshOne_(toks[0].refresh_token, { merchant_id: mid }); }
+  catch (e) { return Logger.log('❌ supplier(merchant_id=' + mid + ')での更新自体が失敗: ' + e); }
+  var ok = 0, ng = [];
+  toks.forEach(function (t) {
+    try {
+      var ts = now_();
+      var url = HOST + '/api/v2/shop/get_shop_info?partner_id=' + partnerId_() + '&timestamp=' + ts + '&access_token=' + r.access + '&shop_id=' + t.shop_id + '&sign=' + signShop_('/api/v2/shop/get_shop_info', ts, r.access, t.shop_id);
+      var j = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText());
+      if (j.error) ng.push(t.cc + ':' + t.shop_id); else ok++;
+    } catch (e) { ng.push(t.cc + ':' + t.shop_id); }
+  });
+  Logger.log('supplier更新の新token: 有効 ' + ok + '店 / NG ' + ng.length + ' ' + JSON.stringify(ng) + ' ／ 現行トークンは無変更(安全)。ok=13なら4h自動更新OK');
+}
+
+// ---------- 現行トークンをper-shop化（再認可なし・今のmain refreshから各shopトークンを発行） ----------
+// これを1回実行すると、各店が固有のrefresh_tokenを持つ状態になり、以降 shop_id 更新で4h自動更新が回る。
+function derivePerShopTokens() {
+  var toks = listTokens_(); if (!toks.length) return Logger.log('未認可');
+  var mainRefresh = toks[0].refresh_token; // 現在のmainのrefresh_token（各shop発行に使い回す）
+  var res = [];
+  toks.forEach(function (t) {
+    try {
+      var r = refreshOne_(mainRefresh, { shop_id: t.shop_id });
+      t.access_token = r.access; t.refresh_token = r.refresh; t.expire_at = r.expire; delete t.merchant_id; saveToken_(t);
+      res.push(t.cc + ':' + t.shop_id + ' OK');
+    } catch (e) { res.push(t.cc + ':' + t.shop_id + ' NG ' + String(e).slice(0, 50)); }
+  });
+  var ok = 0, ng = [];
+  listTokens_().forEach(function (t) { try { shopInfo_(t.shop_id); ok++; } catch (e) { ng.push(t.cc + ':' + t.shop_id); } });
+  Logger.log(JSON.stringify({ derive: res, 実APIで生存確認_OK: ok, NG: ng }, null, 1) + '\nok=13なら完了。次に testRefresh でper-shop更新を確認');
+}
+
+// ---------- トリガー一括設定：これを1回実行するだけで全同期が自動化 ----------
+// syncAll(日次売上)=1h毎 / syncOrdersAll(注文)=1h毎 / syncEscrowAll(入金)=6h毎。既存トリガーは張り直し。
+function setupTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
+  ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
+  Logger.log('✅ トリガー設定: syncAll(1h) / syncOrdersAll(1h) / syncEscrowAll(6h)');
+  return 'ok';
+}

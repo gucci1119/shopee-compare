@@ -7297,7 +7297,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
         const [orders, income, costs, inv, prods] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
-          sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at'),
+          sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,fee_total,buyer_paid,fees'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init,cost_at,self_transit_at,wb_count,wb_first_at,wb_last_at'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
@@ -7569,6 +7569,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
 
+  // 🧾 手数料内訳・国別実手数料率（公式escrow由来：買主支払 → Shopee手数料 → 入金 の内訳）
+  function pfFeePanelHtml(orders) {
+    const agg = new Map(); let anyFee = false;
+    orders.forEach(o => {
+      const inc = pf.incMap.get(o.cc + ':' + o.sn);
+      if (!inc || inc.fee_total == null) return;
+      const rg = regionByCc(o.cc); if (!rg) return;
+      anyFee = true;
+      const a = agg.get(o.cc) || { n: 0, buyerJpy: 0, feeJpy: 0, escrowJpy: 0 };
+      a.n++; a.buyerJpy += (inc.buyer_paid || 0) * rg.rateJpy; a.feeJpy += (inc.fee_total || 0) * rg.rateJpy; a.escrowJpy += (inc.amount || 0) * rg.rateJpy;
+      agg.set(o.cc, a);
+    });
+    if (!anyFee) return `<div class="tool-card" style="margin:0 0 10px;padding:10px 14px"><b>🧾 手数料内訳・実手数料率</b> <span class="smd-dim" style="font-size:11.5px">公式escrowの手数料データを集計中。<b>syncEscrowAll</b>（GAS・6h毎）が回ると国別の実手数料率がここに出ます。</span></div>`;
+    const rows = [...agg.entries()].sort((a, b) => b[1].feeJpy - a[1].feeJpy);
+    let tB = 0, tF = 0, tE = 0, tN = 0;
+    const tr = rows.map(([cc, a]) => {
+      tB += a.buyerJpy; tF += a.feeJpy; tE += a.escrowJpy; tN += a.n;
+      const rate = a.buyerJpy ? (a.feeJpy / a.buyerJpy * 100) : 0;
+      const rg = regionByCc(cc) || { color: '#333' };
+      return `<tr><td><b style="color:${rg.color}">${cc}</b></td><td style="text-align:right">${a.n}</td><td style="text-align:right">${fmtJpy(a.buyerJpy)}</td><td style="text-align:right;color:#d93025">− ${fmtJpy(a.feeJpy)}</td><td style="text-align:right;font-weight:700;color:${rate > 15 ? '#d93025' : '#e8710a'}">${rate.toFixed(1)}%</td><td style="text-align:right;color:#1a7f37">${fmtJpy(a.escrowJpy)}</td></tr>`;
+    }).join('');
+    const totRate = tB ? (tF / tB * 100) : 0;
+    return `<div class="tool-card" style="margin:0 0 10px;padding:8px 14px 10px">` +
+      `<div style="font-weight:700;margin-bottom:4px">🧾 手数料内訳・国別実手数料率 <span class="smd-dim" style="font-weight:400;font-size:11px">（公式escrow・${tN}件／絞り込み反映）</span></div>` +
+      `<div class="pf-scroll"><table class="pf-table" style="min-width:520px"><tr><th>国</th><th style="text-align:right">件数</th><th style="text-align:right">買主支払</th><th style="text-align:right">Shopee手数料</th><th style="text-align:right">実手数料率</th><th style="text-align:right">入金(escrow)</th></tr>` +
+      tr +
+      `<tr class="pf-total"><td>合計</td><td style="text-align:right">${tN}</td><td style="text-align:right">${fmtJpy(tB)}</td><td style="text-align:right;color:#d93025">− ${fmtJpy(tF)}</td><td style="text-align:right;font-weight:700">${totRate.toFixed(1)}%</td><td style="text-align:right;color:#1a7f37">${fmtJpy(tE)}</td></tr>` +
+      `</table></div>` +
+      `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">手数料＝commission＋service＋transaction。入金(escrow)は手数料控除後にShopeeから受け取る額。粗利＝入金−仕入。</div></div>`;
+  }
+
   function pfRender() {
     const body = document.getElementById('pf-body');
     const orders = pfFiltered();
@@ -7702,6 +7733,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       profit: () => `<b style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(pairProfit)}</b><br><span class="smd-dim" style="font-weight:400">${pairN}件</span>`,
       rate: () => pairCost ? `<span style="color:${pairProfit < 0 ? '#d93025' : '#1a7f37'}">${Math.round(pairProfit / pairCost * 100)}%</span>` : '',
     };
+    // 🧾 手数料内訳パネルを明細の上に差し込む（公式escrom由来・絞り込み反映）
+    html = pfFeePanelHtml(orders) + html;
     // ※ pf.grossTotal はpfRender冒頭でpfMonthGross()から確定済み（絞り込みに依存させない）。ここの pairProfit は表の「合計」行=絞り込み後の表示用。
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">粗利・ROIは仕入額（手入力/確定 または 在庫連携🏷の自動算出）と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。仕入額が全く無い注文は利益計算未完了＝空欄。仕入額は 手入力 ＞ 在庫連携(🏷) の優先。キャンセルはグレー表示。列の幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」で変更できます。</div></div>`;
