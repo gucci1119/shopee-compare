@@ -271,6 +271,7 @@
   <div id="page-dash" style="display:none">
     <div class="smd-pagehead">🏠 ダッシュボード <span class="smd-dim" id="dash-sync" style="font-weight:400;font-size:12px"></span></div>
     <div id="dash-kpis"></div>
+    <div class="tool-card" style="max-width:1000px"><h3>💸 Payoneerリリース（確定＝実績・見込み＝未リリースescrow）</h3><div id="dash-payout" style="font-size:13px"></div></div>
     <div class="tool-card" style="max-width:1000px"><h3>📊 自動分析（直近の傾向）</h3><div id="dash-analysis" style="font-size:13px;line-height:1.9;color:#333"></div>
       <div id="dash-bycc" style="font-size:12px;margin-top:8px"></div>
       <div style="font-weight:700;font-size:12.5px;margin:12px 0 4px;border-top:1px solid #f0f0f0;padding-top:10px">🎯 今おすすめのアクション <span class="smd-dim" style="font-weight:400;font-size:11px">（「✅タスク化」で✅タスク管理へ）</span></div>
@@ -2097,11 +2098,12 @@
     kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
     try {
       const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
-      const [days, orders, income, inv] = await Promise.all([
+      const [days, orders, income, inv, payouts] = await Promise.all([
         sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
         sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
         sbGetAll('income', 'select=cc,amount,pending&order=sn'),
         ensureInv().catch(() => []),
+        sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
       ]);
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
       days.forEach(d => {
@@ -2149,6 +2151,52 @@
         return `<div class="dash-row"><span><b style="color:${rg.color}">${rg.cc}</b></span>` +
           `<span>${d ? `${d.units}点 / ${fmtLocal(rg, d.sales)} <span class="smd-jpy">≈${fmtJpy((d.sales || 0) * rg.rateJpy)}</span>` : '<span class="smd-dim">同期なし</span>'}</span></div>`;
       }).join('');
+      // ---- 💸 Payoneerリリース（確定=payouts実績・見込み=未リリースescrowをUSD換算） ----
+      const poEl = document.getElementById('dash-payout');
+      if (poEl) {
+        const usd = n => '$' + (Math.round((n || 0) * 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        // 国別の実効レート（現地→USD）＝ payoutsの payout_amount/from_amount の合計比
+        const rateAcc = {}; // cc → {usd, local}
+        (payouts || []).forEach(p => { const a = rateAcc[p.cc] = rateAcc[p.cc] || { usd: 0, local: 0 }; a.usd += (+p.payout_amount || 0); a.local += (+p.from_amount || 0); });
+        const rateOf = cc => { const a = rateAcc[cc]; return a && a.local > 0 ? a.usd / a.local : null; };
+        // 確定リリースを週バケット（月曜始まり）に集計。今週=0/先週=-1…
+        const wkStart = d => { const dt = new Date(d); const dow = (dt.getDay() + 6) % 7; dt.setHours(0, 0, 0, 0); dt.setDate(dt.getDate() - dow); return dt; };
+        const thisMon = wkStart(new Date());
+        const wkUsd = {}; // wkIndex → usd
+        (payouts || []).forEach(p => { if (!p.payout_time) return; const dt = new Date(p.payout_time * 1000); const wi = Math.round((wkStart(dt) - thisMon) / (7 * 86400000)); wkUsd[wi] = (wkUsd[wi] || 0) + (+p.payout_amount || 0); });
+        const wkKeys = Object.keys(wkUsd).map(Number).sort((a, b) => b - a).filter(k => k >= -5); // 直近6週
+        const wkLabel = k => k === 0 ? '今週' : k === -1 ? '先週' : `${-k}週前`;
+        const wkRange = k => { const s = new Date(thisMon.getTime() + k * 7 * 86400000); const e = new Date(s.getTime() + 6 * 86400000); const f = d => `${d.getMonth() + 1}/${d.getDate()}`; return `${f(s)}〜${f(e)}`; };
+        // 見込み＝pending escrow（現地）をUSD換算
+        const pendLocal = {}; // cc → local sum
+        (income || []).forEach(i => { if (i.pending === false) return; pendLocal[i.cc] = (pendLocal[i.cc] || 0) + (+i.amount || 0); });
+        let pipeUsd = 0; const pipeRows = [];
+        Object.keys(pendLocal).forEach(cc => { const r = rateOf(cc); const u = r != null ? pendLocal[cc] * r : null; if (u != null) pipeUsd += u; pipeRows.push({ cc, usd: u, hasRate: r != null }); });
+        pipeRows.sort((a, b) => (b.usd || 0) - (a.usd || 0));
+        const barMax = Math.max(1, ...wkKeys.map(k => wkUsd[k]));
+        const confHtml = wkKeys.length
+          ? wkKeys.map(k => {
+            const w = Math.round((wkUsd[k] / barMax) * 100);
+            const hot = k === 0;
+            return `<div class="dash-row" style="align-items:center;gap:8px"><span style="width:74px;flex:none;font-weight:${hot ? 700 : 400};color:${hot ? '#0f9d58' : '#333'}">${wkLabel(k)}</span>` +
+              `<span class="smd-dim" style="width:64px;flex:none;font-size:11px">${wkRange(k)}</span>` +
+              `<span style="flex:1;background:#eef6f0;border-radius:4px;height:14px;position:relative;min-width:40px"><span style="position:absolute;left:0;top:0;bottom:0;width:${w}%;background:${hot ? '#0f9d58' : '#8fc7a6'};border-radius:4px"></span></span>` +
+              `<b style="width:96px;flex:none;text-align:right">${usd(wkUsd[k])}</b></div>`;
+          }).join('')
+          : '<div class="smd-dim">確定リリース履歴なし（payouts未同期）</div>';
+        const noRate = pipeRows.filter(r => !r.hasRate).map(r => r.cc);
+        const pipeHtml = pipeRows.length
+          ? pipeRows.filter(r => r.usd != null).map(r => `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b>${r.cc}</b> ${usd(r.usd)}</span>`).join('')
+          : '<span class="smd-dim">未リリースescrowなし</span>';
+        poEl.innerHTML =
+          `<div style="display:flex;flex-wrap:wrap;gap:20px;margin-bottom:6px">` +
+          `<div><div class="smd-dim" style="font-size:11px">今週リリース確定（実績）</div><div style="font-size:20px;font-weight:800;color:#0f9d58">${usd(wkUsd[0] || 0)}</div></div>` +
+          `<div><div class="smd-dim" style="font-size:11px">未リリースescrow（今後の見込み総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)}</div></div>` +
+          `</div>` +
+          `<div style="font-weight:700;font-size:12px;margin:8px 0 2px">確定リリース（週別・Payoneer着金USD）</div>${confHtml}` +
+          `<div style="font-weight:700;font-size:12px;margin:10px 0 2px">見込み内訳（未リリースescrow → USD換算）</div><div style="line-height:1.9">${pipeHtml}</div>` +
+          `<div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6">・確定＝get_payout_detailの実績（Payoneer着金USD）。今週は着金済みの合計。<br>・見込み＝まだリリースされていないescrow（pending）を、payoutsの実効レートでUSD換算した総額。<b>Shopeeは各注文の将来リリース日を公開しないため、週別の内訳は出せません</b>（総額のみ）。${noRate.length ? `<br>・${noRate.join('/')}はレート未確定（payout実績待ち）で見込み除外。` : ''}</div>`;
+      }
       // ---- 📊 自動分析（傾向を文章化。利益は仕入未入力が多いため当面除外） ----
       const anaEl = document.getElementById('dash-analysis');
       if (anaEl) {
@@ -3696,6 +3744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-07-15', items: [
       '🚀 公式Open API移行（取得）：売上・注文・入金(escrow)を Shopee公式API→GAS(サーバー側)で24時間自動同期。ブラウザ/ブリッジを常駐しなくても全7か国13店が最新に（「今日の国別売上がPHだけ」問題やGM_xhr詰まりを根治）。トークンはper-shop方式で4h自動更新（このアカウントはmerchant無しのUnupgraded型のため、mainのrefreshから各shopトークンを発行しshop_idで更新）。',
+      '💸 Payoneerリリース見込み（ダッシュボード）：公式get_payout_detailの実績payoutをpayoutsテーブルに蓄積（6h自動同期）。①今週/先週…の確定リリース額を週別にUSD表示（Payoneer着金＝実績）、②まだリリースされていないescrow(pending)をpayoutsの実効レートでUSD換算した「今後の見込み総額」を国別に表示。※Shopeeは各注文の将来リリース日を公開しないため、見込みは週別に割らず総額のみ（捏造しない）。',
       '🧾 手数料内訳・国別実手数料率：公式get_escrow_detailの commission/service/transaction 手数料と買主支払額をincomeに保存し、💹利益ページに「買主支払→Shopee手数料→入金」の国別パネルを追加（例 VN31.7%/PH25.6%/BR12.2%）。実利益の可視化。',
       '📦 在庫/価格の公式API更新（ブリッジ卒業・書込）：GASにupdate_stock/update_price＋JSONPエンドポイント(WRITE_TOKENガード)＋バリエ名→model_id自動解決(get_model_list)。⚙️設定に「📦在庫/価格を公式APIで更新」パネルを追加＝ブラウザ/ブリッジ無しでも書き込める。',
       '🔧 表示の最適化（API運用に合わせて）：ダッシュボードの「最終同期」を旧localStorage残骸→実データ(daily_stats.synced_at)基準に修正（サーバー同期が動いても古く見えるバグを解消）／自動分析「売上0の国」の案内をGAS同期基準に／モードバッジ「🔵スナップショット」→「🔵閲覧モード(公式APIで自動同期)」／マニュアル・設定注記を「運用データは公式API自動同期でブリッジ不要・書込系だけライブ」に刷新。',

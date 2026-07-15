@@ -298,6 +298,45 @@ function finalizedSns_(cc) {
   var s = {}; rows.forEach(function (r) { s[r.sn] = 1; }); return s;
 }
 
+// ================= Payoneer入金(payout) → payouts表（いつ・いくらPayoneerに入るか） =================
+// get_payout_detail の payout_info: {payout_time(Unix), payout_amount(USD等), payout_currency, from_amount(現地), from_currency, pay_service, exchange_rate}
+function syncPayoutsForShop_(tok) {
+  var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
+  // 窓上限15日。過去15日(確定payout)＋未来15日(予約済/見込みpayout=今週来週リリース見込み)の2窓
+  var nowS = now_();
+  var windows = [
+    { from: nowS - 15 * 86400, to: nowS },       // 過去（確定）
+    { from: nowS, to: nowS + 15 * 86400 }        // 未来（見込み）
+  ];
+  var rows = [], future = 0;
+  windows.forEach(function (w) {
+    var pageNo = 0;
+    for (var g = 0; g < 30; g++) {
+      var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: w.from, payout_time_to: w.to, page_size: 40, page_no: pageNo }, 'get');
+      var resp = j.response || {};
+      (resp.payout_list || []).forEach(function (p) {
+        var info = p.payout_info || {};
+        if (info.payout_time == null) return;
+        if (info.payout_time > nowS) future++;
+        rows.push({
+          payout_id: String(tok.shop_id) + '_' + info.payout_time, cc: cc, shop_id: String(tok.shop_id),
+          payout_time: info.payout_time, payout_amount: parseFloat(info.payout_amount) || null, payout_currency: info.payout_currency || null,
+          from_amount: parseFloat(info.from_amount) || null, from_currency: info.from_currency || null,
+          pay_service: info.pay_service || null, order_count: (p.escrow_list || []).length, synced_at: new Date().toISOString()
+        });
+      });
+      if (!resp.more) break; pageNo++;
+    }
+  });
+  if (rows.length) sbUpsert_('payouts', rows, 'payout_id');
+  return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, future: future };
+}
+function syncPayoutsAll() {
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  Logger.log(JSON.stringify(log, null, 1)); return log;
+}
+
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
@@ -349,11 +388,12 @@ function testRefresh() {
   if (ng.length) Logger.log('⚠️ ' + ok + '店OK / NG: ' + JSON.stringify(ng));
   else Logger.log('✅ 全' + ok + '店 per-shop更新成功＝4h後も自動更新で放置OK');
 }
-// トリガー一括設定（syncAll1h / syncOrdersAll1h / syncEscrowAll6h）
+// トリガー一括設定（syncAll1h / syncOrdersAll1h / syncEscrowAll6h / syncPayoutsAll6h）
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
+  ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   Logger.log('✅ トリガー設定'); return 'ok';
 }
