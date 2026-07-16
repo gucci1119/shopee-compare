@@ -781,10 +781,16 @@
     roiPct: 40,             // 目標ROI(%)（仕入額帯別ROI OFF時の単一値・フォールバック）
     weightG: 500,           // 既定の重量(g)
     roiBracketOn: true,     // 仕入額帯別ROIを使う（ON=帯テーブルから自動選択／OFF=単一roiPct）
-    roiBase: ROI_CURVE_DEFAULT.slice(),  // 〜500g帯の仕入額別ROI(70段)。既定=PHカーブ
-    roiWeightBands: {},     // 重い重量帯の上書き { "1000":[70段], "1500":[...] }（未設定の帯はroiBaseにフォールバック）
+    roiBase: ROI_CURVE_DEFAULT.slice(),  // 全国共通・〜500g帯の仕入額別ROI(70段)。既定=PHカーブ。全ての最終フォールバック
+    roiOverrides: {},       // 国×重量帯の上書き { PH:{"1000":[70段]}, "*":{"1500":[70段]} }（未設定は roiBase にフォールバック。"*"=全国共通）
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
+  // 旧 roiWeightBands（全国共通の重量帯上書き）→ roiOverrides["*"] へ移行
+  if (settings.roiWeightBands && typeof settings.roiWeightBands === 'object' && Object.keys(settings.roiWeightBands).length) {
+    settings.roiOverrides = settings.roiOverrides || {};
+    settings.roiOverrides['*'] = Object.assign({}, settings.roiWeightBands, settings.roiOverrides['*'] || {});
+  }
+  if (settings.roiWeightBands) { delete settings.roiWeightBands; saveSettings(); }
 
   // ---------------- ブリッジ（Tampermonkey userscript との postMessage 通信） ----------------
   let bridgeAvailable = false;
@@ -6687,12 +6693,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const brackets = Math.max(1, Math.ceil((Number(chargeG) || 0) / 50));
     return (Number(s[0]) || 0) + (Number(s[1]) || 0) * (brackets - 1);
   }
-  // 仕入額(円)×重量帯 から目標ROI(%)を引く。¥500刻み70段。重量帯は500g刻み（未設定帯はroiBaseにフォールバック）。
+  // 仕入額(円)×重量帯×国 から目標ROI(%)を引く。¥500刻み70段。重量帯は500g刻み。
+  // フォールバック順：その国×重量帯 → その国×〜500g → 全国共通×重量帯 → roiBase(全国共通×〜500g)。
   function roiBandKey(weightG) { return Math.max(500, Math.ceil((Number(weightG) || 0) / 500) * 500); }
-  function roiForCost(costJpy, weightG) {
+  function roiForCost(costJpy, weightG, cc) {
     const idx = Math.min(69, Math.max(0, Math.ceil((Number(costJpy) || 0) / 500) - 1));
     const band = roiBandKey(weightG);
-    const arr = (band <= 500 ? null : (settings.roiWeightBands || {})[band]) || settings.roiBase || [];
+    const ov = settings.roiOverrides || {};
+    const pick = (o, b) => (o && o[b]) || null;
+    const arr = pick(ov[cc], band) || pick(ov[cc], 500) || pick(ov['*'], band) || settings.roiBase || [];
     const v = arr[idx];
     return (v != null && isFinite(v)) ? Number(v) : settings.roiPct;
   }
@@ -6707,7 +6716,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ROI優先順位：opt明示 → listState(コンポーザーのROI欄) → 仕入額帯別ROI(ON時・課金重量で帯選択) → 単一roiPct
     const roi = (opt.roiPct != null ? opt.roiPct
       : (listState.roiPct != null ? listState.roiPct
-        : (settings.roiBracketOn ? roiForCost(costJpy, chargeG) : settings.roiPct))) / 100;
+        : (settings.roiBracketOn ? roiForCost(costJpy, chargeG, cc) : settings.roiPct))) / 100;
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
@@ -6910,8 +6919,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <div id="li-cost-wrap"><label class="lc">仕入値（円）<span class="req">必須</span><span class="smd-dim">※日本での仕入れ額。これを元に各国の販売価格を自動計算</span></label><input class="li" id="li-cost" type="number" style="width:120px" placeholder="例: 4400"></div>
           </div>
           <div class="smd-dim" style="font-size:11px;margin-top:6px">各バリエの<b>仕入(円)</b>から、<b>手数料・SLS送料(重量別)・利益</b>を織り込んで各国の出品価格を自動算出（式: 仕入×(1+ROI)÷(1−${settings.priceFxMargin}%) ＋ SLS送料 → 手数料控除 ÷ (1−${settings.priceProfitBuffer}%)）。</div>
-          <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#7b52c4;font-weight:700">⚙️ 手数料・SLS送料・バッファを調整</summary><div id="li-pricecfg" style="margin-top:6px"></div></details>
-          <details style="margin-top:8px" open><summary style="cursor:pointer;font-size:12px;color:#1a7f37;font-weight:700">💹 仕入額帯別ROI（価格設定シート）</summary><div id="li-roicfg" style="margin-top:6px"></div></details>
+          <details style="margin-top:8px" open><summary style="cursor:pointer;font-size:12px;color:#1a7f37;font-weight:700">💹 価格設定シート（各国別：手数料・SLS送料・バッファ・目標ROI）</summary>
+            <div style="font-size:10.5px;color:#888;margin:4px 0 2px">手数料は国ごとに年数回変わるので、改定時はここを更新。ROIは仕入額帯×重量帯×国で設定。</div>
+            <div id="li-pricecfg" style="margin-top:6px"></div>
+            <hr style="border:none;border-top:1px dashed #ddd;margin:12px 0 8px">
+            <div id="li-roicfg" style="margin-top:2px"></div>
+          </details>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -7244,49 +7257,74 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       settings.priceFxMargin = PRICE_DEFAULTS.fx; settings.priceProfitBuffer = PRICE_DEFAULTS.pb; saveSettings(); priceCfgRender(); listRefresh();
     });
   }
-  // 仕入額帯別ROI（価格設定シート）編集パネル。¥500刻み70段 × 重量帯(500g刻み)。
-  let roiCfgBand = 500;
+  // 価格設定シートのROI部：仕入額(¥500刻み70段)×重量帯(500g刻み)×国。既定=全国共通のroiBase(PHカーブ)。
+  let roiCfgBand = 500, roiCfgCc = '*';
+  // 実効ROI配列（表示・プレースホルダ用。フォールバック：その国×帯→その国×〜500g→全国共通×帯→roiBase）
+  function roiResolveArr(cc, band) {
+    const ov = settings.roiOverrides || {}; const pick = (o, b) => (o && o[b]) || null;
+    if (cc === '*') return (band <= 500 ? null : pick(ov['*'], band)) || settings.roiBase || [];
+    return pick(ov[cc], band) || pick(ov[cc], 500) || pick(ov['*'], band) || settings.roiBase || [];
+  }
+  // 実体配列（未設定ならnull。'*'×〜500gだけは常にroiBaseが実体）
+  function roiStoredArr(cc, band) { if (cc === '*' && band <= 500) return settings.roiBase; return ((settings.roiOverrides || {})[cc] || {})[band] || null; }
+  function roiSetArr(cc, band, arr) {
+    if (cc === '*' && band <= 500) { settings.roiBase = arr; return; }
+    settings.roiOverrides = settings.roiOverrides || {}; settings.roiOverrides[cc] = settings.roiOverrides[cc] || {}; settings.roiOverrides[cc][band] = arr;
+  }
+  function roiClearArr(cc, band) {
+    if (cc === '*' && band <= 500) { settings.roiBase = ROI_CURVE_DEFAULT.slice(); return; }
+    const ov = settings.roiOverrides || {}; if (ov[cc]) { delete ov[cc][band]; if (!Object.keys(ov[cc]).length) delete ov[cc]; }
+  }
+  function roiCcHasEdit(cc) { const ov = settings.roiOverrides || {}; return cc === '*' ? !!Object.keys(ov['*'] || {}).length : !!(ov[cc] && Object.keys(ov[cc]).length); }
   function roiCfgRender() {
     const host = document.getElementById('li-roicfg'); if (!host) return;
+    const CCS = ['*', 'PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+    const ccLbl = (c) => c === '*' ? '＊全国共通' : c;
     const bands = []; for (let b = 500; b <= 10000; b += 500) bands.push(b);
     const base = settings.roiBase || [];
-    const wb = settings.roiWeightBands || {};
-    const heavy = roiCfgBand > 500;
-    const curArr = heavy ? (wb[roiCfgBand] || base) : base;
+    const stored = roiStoredArr(roiCfgCc, roiCfgBand);
+    const eff = roiResolveArr(roiCfgCc, roiCfgBand);
+    const isEdited = (roiCfgCc === '*' && roiCfgBand <= 500) ? true : !!stored;
     const bandLbl = (b) => b <= 500 ? '〜500g' : '〜' + (b / 1000) + 'kg';
     let rowsHtml = '';
     for (let i = 0; i < 70; i++) {
-      const cost = (i + 1) * 500; const v = curArr[i];
-      rowsHtml += `<tr><td style="text-align:right;color:#666;padding:1px 6px">¥${cost.toLocaleString()}</td><td style="padding:1px 4px"><input class="li rc-roi" data-i="${i}" type="number" step="any" value="${v != null ? v : ''}" placeholder="${base[i] != null ? base[i] : ''}" style="width:64px;text-align:right;padding:2px 4px;font-size:11px">%</td></tr>`;
+      const cost = (i + 1) * 500; const v = (stored ? stored[i] : eff[i]);
+      rowsHtml += `<tr><td style="text-align:right;color:#666;padding:1px 6px">¥${cost.toLocaleString()}</td><td style="padding:1px 4px"><input class="li rc-roi" data-i="${i}" type="number" step="any" value="${v != null ? v : ''}" placeholder="${eff[i] != null ? eff[i] : ''}" style="width:64px;text-align:right;padding:2px 4px;font-size:11px">%</td></tr>`;
     }
     host.innerHTML = `
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:4px;font-weight:700"><input type="checkbox" id="rc-on" ${settings.roiBracketOn ? 'checked' : ''}> 仕入額帯別ROIを使う <span style="font-weight:400;color:#888">（OFF＝単一ROI ${settings.roiPct}% を全帯に適用）</span></label>
-      <div style="font-size:10.5px;color:#666;margin-bottom:6px">仕入額（¥500刻み70段）×重量帯 で目標ROIを自動選択。<b>コンポーザーの「目標ROI」欄を空にした時だけ</b>効きます（欄に数値を入れるとその値が優先）。重量が重い帯は送料で売値が跳ねるので、競争力のためROIを下げる運用。初期値＝PHカーブ（最安¥500で最低¥1,200利益→高額帯は約24%へ収束）。全7か国共通（手数料は売値側で自動調整）。</div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:4px;font-weight:700"><input type="checkbox" id="rc-on" ${settings.roiBracketOn ? 'checked' : ''}> 仕入額帯別ROIを使う <span style="font-weight:400;color:#888">（OFF＝単一ROI ${settings.roiPct}% を適用）</span></label>
+      <div style="font-size:10.5px;color:#666;margin-bottom:6px">仕入額（¥500刻み70段）×重量帯×国 で目標ROIを自動選択。<b>コンポーザーの「目標ROI」欄を空にした時だけ</b>効きます（欄に数値を入れるとその値が優先）。既定＝全国共通のPHカーブ（最安¥500で最低¥1,200利益→高額帯は約24%収束）。<b>国・重量帯を選んで上書き</b>するとその条件だけ独立。未設定はフォールバック（その国の〜500g→全国共通）。手数料が違っても取れる利益は同じ目標ROIなら同額（差は売値側で吸収）。</div>
       <div class="row" style="gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+        <label style="font-size:11px">国</label>
+        <select id="rc-cc" style="font-size:11px;padding:2px 4px">${CCS.map(c => `<option value="${c}" ${c === roiCfgCc ? 'selected' : ''}>${ccLbl(c)}${c !== '*' && roiCcHasEdit(c) ? ' ✎' : ''}</option>`).join('')}</select>
         <label style="font-size:11px">重量帯</label>
-        <select id="rc-band" style="font-size:11px;padding:2px 4px">${bands.map(b => `<option value="${b}" ${b === roiCfgBand ? 'selected' : ''}>${bandLbl(b)}${(b > 500 && wb[b]) ? ' ✎編集済' : ''}</option>`).join('')}</select>
-        ${heavy ? `<button class="smd-btn" id="rc-copybase" style="font-size:11px">〜500g帯からコピー</button>` : ''}
-        <button class="smd-btn" id="rc-resetband" style="font-size:11px">この帯をPHカーブに戻す</button>
-        <span style="font-size:10.5px;color:#888">${heavy && !wb[roiCfgBand] ? '（この帯は未設定＝〜500g帯と同じ。編集すると独立します）' : ''}</span>
+        <select id="rc-band" style="font-size:11px;padding:2px 4px">${bands.map(b => `<option value="${b}" ${b === roiCfgBand ? 'selected' : ''}>${bandLbl(b)}${(roiStoredArr(roiCfgCc, b) && !(roiCfgCc === '*' && b <= 500)) ? ' ✎' : ''}</option>`).join('')}</select>
+        ${roiCfgCc !== '*' ? `<button class="smd-btn" id="rc-copyglobal" style="font-size:11px">全国共通からコピー</button>` : ''}
+        ${roiCfgBand > 500 ? `<button class="smd-btn" id="rc-copybase" style="font-size:11px">〜500g帯からコピー</button>` : ''}
+        <button class="smd-btn" id="rc-resetband" style="font-size:11px">${(roiCfgCc === '*' && roiCfgBand <= 500) ? 'PHカーブに戻す' : '上書き解除'}</button>
       </div>
-      <div class="pf-scroll" style="max-height:260px;overflow:auto;border:1px solid #eee;border-radius:6px"><table class="pf-table" style="font-size:11px;width:100%"><tr><th style="position:sticky;top:0;background:#faf7ff">仕入額(〜)</th><th style="position:sticky;top:0;background:#faf7ff">目標ROI</th></tr>${rowsHtml}</table></div>
-      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="smd-btn" id="rc-resetall" style="font-size:11px">全重量帯を初期化（PHカーブに戻す）</button><span style="font-size:10.5px;color:#888">変更は即保存＆価格再計算。</span></div>`;
+      <div style="font-size:10.5px;color:${isEdited ? '#1a7f37' : '#c07a00'};margin-bottom:4px">${isEdited ? '● この条件は独立設定中（編集値が保存されます）' : '○ 未設定＝フォールバック値を表示中。編集するとこの条件用に独立します'}</div>
+      <div class="pf-scroll" style="max-height:240px;overflow:auto;border:1px solid #eee;border-radius:6px"><table class="pf-table" style="font-size:11px;width:100%"><tr><th style="position:sticky;top:0;background:#faf7ff">仕入額(〜)</th><th style="position:sticky;top:0;background:#faf7ff">目標ROI（${ccLbl(roiCfgCc)}・${bandLbl(roiCfgBand)}）</th></tr>${rowsHtml}</table></div>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="smd-btn" id="rc-resetall" style="font-size:11px">全ROIを初期化（全国共通PHカーブ・国別上書き全削除）</button><span style="font-size:10.5px;color:#888">変更は即保存＆価格再計算。</span></div>`;
     host.querySelector('#rc-on').addEventListener('change', e => { settings.roiBracketOn = e.target.checked; saveSettings(); listRefresh(); });
+    host.querySelector('#rc-cc').addEventListener('change', e => { roiCfgCc = e.target.value || '*'; roiCfgRender(); });
     host.querySelector('#rc-band').addEventListener('change', e => { roiCfgBand = Number(e.target.value) || 500; roiCfgRender(); });
     host.querySelectorAll('.rc-roi').forEach(el => el.addEventListener('input', e => {
       const i = +e.target.dataset.i; const val = e.target.value === '' ? null : (Number(e.target.value) || 0);
-      if (roiCfgBand <= 500) { settings.roiBase = settings.roiBase || ROI_CURVE_DEFAULT.slice(); settings.roiBase[i] = (val == null ? ROI_CURVE_DEFAULT[i] : val); }
-      else { settings.roiWeightBands = settings.roiWeightBands || {}; if (!settings.roiWeightBands[roiCfgBand]) settings.roiWeightBands[roiCfgBand] = (settings.roiBase || ROI_CURVE_DEFAULT).slice(); settings.roiWeightBands[roiCfgBand][i] = (val == null ? (settings.roiBase || ROI_CURVE_DEFAULT)[i] : val); }
+      let arr = roiStoredArr(roiCfgCc, roiCfgBand);
+      const firstMaterialize = !arr;
+      if (!arr) { arr = roiResolveArr(roiCfgCc, roiCfgBand).slice(); roiSetArr(roiCfgCc, roiCfgBand, arr); }
+      arr[i] = (val == null ? ROI_CURVE_DEFAULT[i] : val);
       saveSettings(); listRefresh();
+      // 初回に独立化した時だけ再描画して ●独立/✎ 表示を更新（フォーカスとカーソル位置は復元）
+      if (firstMaterialize) { const caret = e.target.selectionStart; roiCfgRender(); const again = document.querySelector('.rc-roi[data-i="' + i + '"]'); if (again) { again.focus(); try { again.setSelectionRange(caret, caret); } catch (_) { } } }
     }));
-    const cb = host.querySelector('#rc-copybase'); if (cb) cb.addEventListener('click', () => { settings.roiWeightBands = settings.roiWeightBands || {}; settings.roiWeightBands[roiCfgBand] = (settings.roiBase || ROI_CURVE_DEFAULT).slice(); saveSettings(); roiCfgRender(); listRefresh(); });
-    host.querySelector('#rc-resetband').addEventListener('click', () => {
-      if (roiCfgBand <= 500) { settings.roiBase = ROI_CURVE_DEFAULT.slice(); } else if (settings.roiWeightBands) { delete settings.roiWeightBands[roiCfgBand]; }
-      saveSettings(); roiCfgRender(); listRefresh();
-    });
+    const cg = host.querySelector('#rc-copyglobal'); if (cg) cg.addEventListener('click', () => { roiSetArr(roiCfgCc, roiCfgBand, roiResolveArr('*', roiCfgBand).slice()); saveSettings(); roiCfgRender(); listRefresh(); });
+    const cb = host.querySelector('#rc-copybase'); if (cb) cb.addEventListener('click', () => { roiSetArr(roiCfgCc, roiCfgBand, roiResolveArr(roiCfgCc, 500).slice()); saveSettings(); roiCfgRender(); listRefresh(); });
+    host.querySelector('#rc-resetband').addEventListener('click', () => { roiClearArr(roiCfgCc, roiCfgBand); saveSettings(); roiCfgRender(); listRefresh(); });
     host.querySelector('#rc-resetall').addEventListener('click', () => {
-      if (!confirm('全重量帯のROIを初期のPHカーブに戻します。よろしいですか？')) return;
-      settings.roiBase = ROI_CURVE_DEFAULT.slice(); settings.roiWeightBands = {}; saveSettings(); roiCfgRender(); listRefresh();
+      if (!confirm('全ROIを初期化します（全国共通をPHカーブに戻し、国別・重量帯別の上書きを全削除）。よろしいですか？')) return;
+      settings.roiBase = ROI_CURVE_DEFAULT.slice(); settings.roiOverrides = {}; saveSettings(); roiCfgRender(); listRefresh();
     });
   }
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
