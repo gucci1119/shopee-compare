@@ -240,7 +240,14 @@ function callShop_(shopId, path, query, method, body) {
   if (query) for (var k in query) url += '&' + k + '=' + encodeURIComponent(query[k]);
   var opt = { method: method || 'get', muteHttpExceptions: true };
   if (body) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(body); }
-  var j = JSON.parse(UrlFetchApp.fetch(url, opt).getContentText());
+  // Shopeeゲートウェイは稀に "Address unavailable"/接続失敗を返す（同一ホストでも散発）→ 短い間隔で最大3回リトライ
+  var txt = null, lastErr = null;
+  for (var a = 0; a < 3; a++) {
+    try { txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
+    catch (e) { lastErr = e; Utilities.sleep(700 * (a + 1)); }
+  }
+  if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
+  var j = JSON.parse(txt);
   if (j.error) throw new Error(path + ' error=' + j.error + ' ' + (j.message || ''));
   return j;
 }
