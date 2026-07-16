@@ -244,7 +244,7 @@ function callShop_(shopId, path, query, method, body) {
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
     try { txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
-    catch (e) { lastErr = e; Utilities.sleep(700 * (a + 1)); }
+    catch (e) { lastErr = e; if (/too many times|quota|rate/i.test(String(e))) break; Utilities.sleep(700 * (a + 1)); } // クォータ枯渇は即諦める（無駄打ち防止）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
