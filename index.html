@@ -1071,7 +1071,7 @@
   }
   const orderRowToDb = o => ({
     cc: o.region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
-    tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: o.total || null,
+    tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: (o.total != null ? o.total : null),
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
     shop_id: activeShopByCc[o.region.cc] || null,
   });
@@ -2283,7 +2283,7 @@
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
       let pendJpy = 0, pendN = 0;
-      income.forEach(i => { if (i.pending === false) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
+      income.forEach(i => { if (i.pending !== true) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
       // ---- 運用KPI（在庫由来の要対応・横断） ----
       const holdD = r => { const d = invPurDate(r); let t = d ? Date.parse(d) : NaN; if (isNaN(t)) t = r.created_at ? Date.parse(r.created_at) : NaN; return isNaN(t) ? 0 : (Date.now() - t) / 86400000; };
       const waiting = inv.filter(r => r.status === '入庫待ち');
@@ -2338,7 +2338,7 @@
         const wkRange = k => { const s = new Date(thisMon.getTime() + k * 7 * 86400000); const e = new Date(s.getTime() + 6 * 86400000); const f = d => `${d.getMonth() + 1}/${d.getDate()}`; return `${f(s)}〜${f(e)}`; };
         // 見込み＝pending escrow（現地）をUSD換算
         const pendLocal = {}; // cc → local sum
-        (income || []).forEach(i => { if (i.pending === false) return; pendLocal[i.cc] = (pendLocal[i.cc] || 0) + (+i.amount || 0); });
+        (income || []).forEach(i => { if (i.pending !== true) return; pendLocal[i.cc] = (pendLocal[i.cc] || 0) + (+i.amount || 0); });
         let pipeUsd = 0; const pipeRows = [];
         Object.keys(pendLocal).forEach(cc => { const r = rateOf(cc); const u = r != null ? pendLocal[cc] * r : null; if (u != null) pipeUsd += u; pipeRows.push({ cc, usd: u, hasRate: r != null }); });
         pipeRows.sort((a, b) => (b.usd || 0) - (a.usd || 0));
@@ -6743,7 +6743,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function feeKeep(cc) { return Math.max(0.05, 1 - feeTotalPct(cc) / 100); }
   // ★重量ベース価格計算：仕入(円)＋重量＋各国手数料/SLS送料/バッファ から 現地出品価格を算出（スプシ解読の式）
   //  K(円) = ( 仕入×(1+ROI)÷(1−FXマージン) + SLS送料円 ) ÷ (1−合計手数料%) ÷ (1−利益バッファ)
-  //  出品価格(現地) = K ÷ 為替。SLS送料は課金重量(=max(実重量,容積重量W×H×D÷6000))を50g単位で。
+  //  出品価格(現地) = K ÷ 為替。SLS送料は課金重量(=max(実重量g, 容積重量g=W×H×D(cm)÷6))を50g単位で。
   function slsLocal(cc, chargeG) {
     const s = (settings.priceSls || {})[cc]; if (!s) return 0;
     const brackets = Math.max(1, Math.ceil((Number(chargeG) || 0) / 50));
@@ -6773,7 +6773,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     // 寸法はopt優先→無ければlistState（コンポーザー外＝カバレッジのバリエ追加等でopt指定して使えるように）
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
-    const vol = (dW && dH && dD) ? (dW * dH * dD / 6000) : 0;
+    const vol = (dW && dH && dD) ? (dW * dH * dD / 6) : 0; // 容積重量(g)=W×H×D(cm)÷6000×1000＝÷6。weightG(g)と同単位で比較
     const chargeG = Math.max(weightG, vol);
     // ROI優先順位：opt明示 → listState(コンポーザーのROI欄) → 仕入額帯別ROI(ON時・課金重量で帯選択) → 単一roiPct
     const roi = (opt.roiPct != null ? opt.roiPct
@@ -6792,7 +6792,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式）
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
-    const vol = (dW && dH && dD) ? (dW * dH * dD / 6000) : 0;
+    const vol = (dW && dH && dD) ? (dW * dH * dD / 6) : 0; // 容積重量(g)=W×H×D(cm)÷6000×1000＝÷6。weightG(g)と同単位で比較
     const slsJpy = slsLocal(cc, Math.max(weightG, vol)) * rg.rateJpy;
     const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
     const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
@@ -9833,6 +9833,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // アカウント別に読み直すためキャッシュ破棄
         lst.loaded = false; lst.byCc = {}; lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
         state.orders.started = false;
+        // ★口座別キャッシュも全破棄（切替後に別アカウントの金額/注文が残る不具合の修正）
+        try { pf.ym = null; pf._invAt = 0; } catch (_) {}
+        try { renderDash._cache = null; } catch (_) {}
+        try { cust._cache = null; } catch (_) {}
+        try { plan._cache = null; } catch (_) {}
+        try { msg.rows = null; } catch (_) {}
         updateAcctHint();
         showPage(state.page);
       });
