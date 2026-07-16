@@ -43,16 +43,30 @@ function doGet(e) {
       } catch (err) { out = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(cb + '(' + JSON.stringify(out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    // ★送信キュー取得：webchatのuserscriptが未送信の返信を取りに来る（JSONP・WRITE_TOKENガード）
+    // ★送信キュー取得：現在は無効化（ポーリング由来のurlfetch枠浪費を根絶するため、外部通信せず常に空を即返す）
+    //   チャット返信の送信機能を再開する時は webhook 方式で作り直す。userscript側のpollOutboxが叩いても無害（Supabaseを呼ばない）。
     if (p.action === 'outbox_pending') {
       var ocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
-      var oout;
+      return ContentService.createTextOutput(ocb + '(' + JSON.stringify({ ok: true, items: [], disabled: true }) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★公式API出品（アカウント×国を shop_id で明示・JSONPでCORS回避・WRITE_TOKENガード）
+    //   params: shop_id, name, desc, price, stock, weight(kg), images(改行\n区切りURL), category, condition, brand_id, publish(0/1)
+    //   category_id/logistic_id/画像アップロードは addItem_ がshop毎に解決。既定は非公開(UNLIST)＝安全確認後にShopeeで公開。
+    if (p.action === 'add_item') {
+      var acb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var aout;
       try {
-        var owt = P_().getProperty('WRITE_TOKEN');
-        if (!owt || p.token !== owt) throw new Error('WRITE_TOKEN不正');
-        oout = { ok: true, items: sbSelect_('chat_outbox', 'select=id,cc,buyer,conversation_id,text&status=eq.pending&order=created_at.asc&limit=10') };
-      } catch (err) { oout = { ok: false, error: String((err && err.message) || err) }; }
-      return ContentService.createTextOutput(ocb + '(' + JSON.stringify(oout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+        var awt = P_().getProperty('WRITE_TOKEN');
+        if (!awt || p.token !== awt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        aout = addItem_({
+          shop_id: p.shop_id, item_name: p.name, description: p.desc || p.name,
+          price: p.price, stock: p.stock, weight: p.weight,
+          category: p.category || 'Games', condition: p.condition || 'USED',
+          brand_id: p.brand_id, publish: p.publish === '1',
+          images: p.images ? String(p.images).split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : []
+        });
+      } catch (err) { aout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(acb + '(' + JSON.stringify(aout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {

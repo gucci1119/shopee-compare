@@ -921,6 +921,19 @@
     return res;
   }
 
+  // ---------------- 公式API 出品（アカウント×国を shop_id で明示・add_item） ----------------
+  // params: { shop_id, name, desc, price, stock, weight(kg), images(改行\n区切りURL), category, condition, publish(0/1) }
+  // 画像アップロード＋category/logistic解決をGAS内で行うためタイムアウト長め(120s)。既定は非公開(UNLIST)。
+  async function openapiAddItem(params) {
+    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
+    const q = Object.assign({ action: 'add_item', token: settings.writeToken }, params);
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 120000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API出品に失敗');
+    return res;
+  }
+
   // ---------------- 期間計算 ----------------
   const nowSec = () => Math.floor(Date.now() / 1000);
   const dayStart = tz => { const off = tz * 3600; return Math.floor((nowSec() + off) / 86400) * 86400 - off; };
@@ -6342,7 +6355,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     catch (e) { alert('タスク追加失敗: ' + e.message); return false; }
   }
   // 🖼️ カバー画像IDが完全一致するカタログを束ねる（同一商品の可能性）。SKUがバラバラ/空のものを優先
-  function imageClusters(targets) {
+  function imageClusters(targets, mode) {
     const byImg = new Map();
     targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
       const img = (l.image || '').trim(); if (!img) return;
@@ -6359,7 +6372,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const sug = g.map(x => x.sku).find(s => skuGroupKey(s)) || recommendSku(productKey(rep));  // クラスタ内の有効SKU優先、無ければ推奨SKU
       clusters.push({ img, items: g, nCc: new Set(g.map(x => x.cc)).size, nSku: distinct.size, hasEmpty, sold: g.reduce((s, x) => s + x.sold, 0), rep, sug });
     });
-    clusters.sort((a, b) => (b.nSku - a.nSku) || (b.nCc - a.nCc) || (b.sold - a.sold) || (b.items.length - a.items.length));
+    // 並び：'sold'=売れた数優先（売れ筋から揃える・既定）／'frag'=SKUバラけ優先（統一の必要度が高い順）
+    const byFrag = (a, b) => (b.nSku - a.nSku) || (b.nCc - a.nCc) || (b.sold - a.sold) || (b.items.length - a.items.length);
+    const bySold = (a, b) => (b.sold - a.sold) || (b.nSku - a.nSku) || (b.nCc - a.nCc) || (b.items.length - a.items.length);
+    clusters.sort(mode === 'frag' ? byFrag : bySold);
     return clusters;
   }
   async function renderListingAnalysis() {
@@ -6393,11 +6409,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const cchA = targets.map(r => `<th style="color:${r.color}">${r.cc}</th>`).join('');
     const missCells = (p) => targets.map(r => { const has = p.cc[r.cc]; return `<td style="${has ? 'color:#1a7f37;font-weight:700' : 'background:#fff0f0;color:#d93025;font-weight:700'}">${has ? (p.link[r.cc] ? `<a href="${p.link[r.cc]}" target="_blank" style="color:#1a7f37;text-decoration:none" title="${r.cc}で開く">${has}↗</a>` : has) : '✗'}</td>`; }).join('');
     const mergeCands = catalogMergeCandidates(targets);
-    const imgClust = imageClusters(targets); lst.imgClustData = {}; imgClust.forEach(c => lst.imgClustData[c.img] = c);
+    const imgSort = lst.imgClustSort || 'sold'; const imgClust = imageClusters(targets, imgSort); lst.imgClustData = {}; imgClust.forEach(c => lst.imgClustData[c.img] = c);
     const imgClustHtml = `<div class="tool-card" style="max-width:none">
       <h3 style="margin-top:0">🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）<span class="smd-dim" style="font-weight:400;font-size:12px">（カバー画像IDが完全一致。別カタログでも中身は同じ＝統一候補）</span></h3>
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ（上位60表示）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b style="color:#d93025">未公開</b>の商品はShopeeが編集拒否＝先に公開が必要（THに多い）。</div>
-      <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="imgc-dryrun smd-btn" style="font-size:12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="書き込まずに『何を書くか（旧SKU→新SKU＋商品名）』を全件プレビュー。誤転記チェック用。">🔍 検証（書かずに全件プレビュー）</button><button class="imgc-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全クラスタを、それぞれのおすすめSKUに連続で一括統一。失敗しても止まらず次へ。⏹停止で中断可。未公開はスキップ。">🏷 全クラスタを一括統一（連続・止まらない）</button> <span class="smd-dim" style="font-size:10.5px">※まず🔍検証で目視 → ▶本実行が安全。書込中も1件ずつ旧→新を確認でき、途中⏹停止可</span></div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ中 上位60を<b>${imgSort === 'sold' ? '🔥売れ筋順' : '🧩バラけ順'}</b>で表示（下の並びボタンで切替）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b style="color:#d93025">未公開</b>の商品はShopeeが編集拒否＝先に公開が必要（THに多い）。</div>
+      <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="font-size:11px;color:#666">並び:</span><button class="imgc-sort smd-btn" data-mode="sold" style="font-size:11px;${imgSort === 'sold' ? 'background:#e8710a;color:#fff;border-color:#e8710a;font-weight:700' : ''}" title="売れた数が多いクラスタから表示＆一括統一（＝売れ筋から揃える）">🔥 売れ筋順</button><button class="imgc-sort smd-btn" data-mode="frag" style="font-size:11px;${imgSort === 'frag' ? 'background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700' : ''}" title="SKUのバラけ数・国数が多い＝統一の必要度が高い順">🧩 バラけ順</button><span style="width:10px;flex:none"></span><button class="imgc-dryrun smd-btn" style="font-size:12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="書き込まずに『何を書くか（旧SKU→新SKU＋商品名）』を全件プレビュー。誤転記チェック用。">🔍 検証（書かずに全件プレビュー）</button><button class="imgc-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全クラスタを、それぞれのおすすめSKUに連続で一括統一。失敗しても止まらず次へ。⏹停止で中断可。未公開はスキップ。">🏷 全クラスタを一括統一（連続・止まらない）</button> <span class="smd-dim" style="font-size:10.5px">※まず🔍検証で目視 → ▶本実行が安全。書込中も1件ずつ旧→新を確認でき、途中⏹停止可</span></div>
       <div id="imgc-progress" style="margin-bottom:8px"></div>
       <div class="pf-scroll" style="max-height:56vh">${imgClust.slice(0, 60).map(c => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
         <img src="${IMG_CDN}${esc(c.img)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px;flex:none" loading="lazy" onerror="this.style.opacity=.15">
@@ -6461,13 +6477,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     const allBtn = host.querySelector('.imgc-applyall'); if (allBtn) allBtn.addEventListener('click', () => applyAllImageClusters(false));
     const dryBtn = host.querySelector('.imgc-dryrun'); if (dryBtn) dryBtn.addEventListener('click', () => applyAllImageClusters(true));
+    host.querySelectorAll('.imgc-sort').forEach(el => el.addEventListener('click', () => { lst.imgClustSort = el.dataset.mode; renderListingAnalysis(); }));
   }
   // ★全クラスタを連続で一括統一。dryRun=true なら書き込まず「何を書くか（旧SKU→新SKU＋商品名）」を全件プレビューだけ。
   //   本実行は1件ずつ処理し失敗しても止まらず次へ。⏹停止で中断可。成功は都度Supabase保存＝途中で止まっても消えない。
   async function applyAllImageClusters(dryRun) {
     if (!dryRun && state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ書き込みできます'); return; }
     if (!state.accounts) await loadAccounts().catch(() => {});
-    const clusters = imageClusters(accountTargets()).filter(c => (c.sug || '').trim());
+    const clusters = imageClusters(accountTargets(), lst.imgClustSort || 'sold').filter(c => (c.sug || '').trim());
     if (!clusters.length) { alert('一括統一できるクラスタがありません（おすすめSKUが空、または既に統一済み）'); return; }
     // 書込ジョブを構築（未公開＝Shopeeが拒否なのでスキップ／既に同一SKUもスキップ）。旧SKUも保持＝誤転記チェック用
     const jobs = []; let skipUnpub = 0, skipSame = 0;
@@ -7829,6 +7846,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${varImgs.length ? `<div style="font-size:11px;margin-top:8px;color:#666">バリエ明細別（クリックで開いて保存）</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:2px">${varImgs.map(v => `<div style="text-align:center">${imgThumb(v.url)}<div style="font-size:9px;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.opt || '')}">${esc(v.opt || '-')}</div></div>`).join('')}</div>` : ''}
       </div>` : '';
     const autoLinks = []; // 各対象国の自動出品URL（一括で開く用。map内でpush）
+    // ★公式API直接出品（アカウント×国）：登録簿(系統)を確保→各国カードにshop_idを解決してボタンを出す
+    if (!state.accounts && !listState._acctLoading) { listState._acctLoading = true; loadAccounts().then(() => { listState._acctLoading = false; listRefresh(); }).catch(() => { listState._acctLoading = false; }); }
+    const apiFamilies = [...new Set((state.accounts || []).filter(a => a.shop_id).map(a => famOfLabel(a.label)))];
+    if (apiFamilies.length && !apiFamilies.includes(listState.apiFamily)) listState.apiFamily = apiFamilies[0];
+    const apiFam = listState.apiFamily || '';
+    const apiJobs = {}; // cc → {shop_id,name,desc,price,stock,weight,images,hasVar,varCount}
     out.innerHTML = `<div class="tool-card" style="max-width:none"><h3 id="li-sec5">5. 各国へ転記して出品</h3>` +
       `<div style="border:1px solid #b6e6c9;background:#eafaef;border-radius:8px;padding:9px 11px;margin-bottom:8px;font-size:12px;line-height:1.7">
          <b>🚀 API出品（公式API・おすすめ）</b>：各国の <b>「▶ 自動で出品」</b> で新規出品ページが開き、右下の userscript(<code>shopee-newlisting</code>)パネルの <b>🚀作成（非公開）／🚀作成＋公開</b> で公式API(<code>create_product_info</code>)により<b>実際に作成できます</b>。画像は自動で先行アップロード。<b>初回だけその国の雛形登録が必要</b>（下の「🌏 他国で自動出品を有効化する」参照）。雛形が無い国／API失敗時のみ、下の<b>手動フォールバック</b>を使ってください。
@@ -7837,6 +7860,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
            <button id="li-bulkcountry" class="smd-btn" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="全国/選択国へ タイトル・価格・明細の採用・specifics をまとめて適用">🌏 国一括編集</button>
            <button id="li-record" class="smd-btn" style="background:#eef7ff;border-color:#1565c0;color:#1565c0;font-weight:700" title="この出品の 仕入・重量・各国の価格・手数料・利益 を💰出品台帳に記録（価格改定の参考用）。▶自動で出品/一括で開く の時は自動記録されます">📥 台帳に記録</button>
            <span class="smd-dim" style="font-size:11px">一括で開く=新規出品タブを一斉に開く（要ポップアップ許可）。📥記録=価格改定の参考に台帳へ保存（<b>💰出品台帳</b>タブで閲覧）。</span>
+         </div>
+         <div style="margin-top:8px;padding:8px 10px;border:1px dashed #1a7f37;border-radius:7px;background:#f4fbf6">
+           <b style="font-size:12px;color:#1a7f37">🚀 公式APIで直接出品（β・アカウント×国を指定）</b>
+           ${apiFamilies.length
+             ? `<span style="margin-left:8px;font-size:11.5px">出品先アカウント（系統）：<select id="li-apifam" style="padding:2px 6px;border:1px solid #b6e6c9;border-radius:5px;font-size:12px">${apiFamilies.map(f => `<option value="${esc(f)}"${f === apiFam ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select></span>
+                <div class="smd-dim" style="font-size:11px;margin-top:4px">各国カードの <b style="color:#1a7f37">🚀 公式APIで出品</b> を押すと、その国の <b>${esc(apiFam)}</b> ショップへ <b>非公開(UNLIST)</b> で直接作成します（ブラウザのShopeeログイン不要）。作成後Shopeeで確認して公開。※現状は<b>単一明細</b>のみ（バリエは次段）。枠回復後に実出品を検証予定。</div>`
+             : `<span class="smd-dim" style="font-size:11px;margin-left:8px">アカウント登録簿が空です。<b>🔑アカウント</b>で「Shopeeから全ショップ取込」をすると系統が選べます。</span>`}
          </div>
          <details style="margin-top:8px">
            <summary style="cursor:pointer;font-weight:700;font-size:12px;color:#7b52c4;list-style:none;user-select:none">🌏 他国で自動出品を有効化する（各国 初回だけ・要ブリッジ）</summary>
@@ -7931,15 +7961,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         let jobTok = ''; try { jobTok = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(job))))); } catch (_) {}
         const autoUrl = `https://${rg.host}/portal/product/new#smdjob=${jobTok}`;
         autoLinks.push({ cc: rg.cc, url: autoUrl });
+        // ★公式API直接出品：この国×選択系統のshop_idを解決してジョブ登録（無ければボタン非表示）
+        const apiShopRow = apiFam ? (state.accounts || []).find(a => a.shop_id && String(a.cc || '').toUpperCase() === rg.cc && famOfLabel(a.label) === apiFam) : null;
+        if (apiShopRow) {
+          const p0 = pricedLive[0] || {};
+          apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, hasVar, varCount: pricedLive.length };
+        }
         return `<div class="cov-card" data-cc="${rg.cc}" style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
           <div class="cov-cchead" data-cc="${rg.cc}" draggable="true" style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:0 -10px 8px;padding:7px 10px 6px;border-bottom:1px solid #f0f0f0;background:${rg.color}0f;border-radius:0 0 6px 6px;cursor:grab" title="ヘッダをドラッグで国の並べ替え">
             <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">⠿ ${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px">
               <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
               <a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページを開く→右下パネルの🚀作成（非公開/公開）で公式API(create_product_info)で作成。要 shopee-newlisting.user.js＋その国の雛形。※押すと💰出品台帳に自動記録">▶ 自動で出品</a>
+              ${apiShopRow ? `<button class="li-apilist smd-btn" data-cc="${rg.cc}" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="${esc(apiFam)} の ${rg.cc} ショップ(shop_id ${apiShopRow.shop_id})へ公式APIで直接作成（非公開・ブラウザのShopeeログイン不要）。${hasVar ? '※バリエ有り＝現状は先頭1明細のみ作成' : ''}">🚀 公式APIで出品</button>` : ''}
               <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">手動 ↗</a>
             </span>
           </div>
+          ${apiShopRow ? `<div class="li-apiresult" data-cc="${rg.cc}" style="font-size:11px;margin:2px 0 4px"></div>` : ''}
           ${catStrip}
           <div style="font-size:12.5px;margin-top:8px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
             <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
@@ -8021,6 +8059,28 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
     // ▶自動で出品（各国）を押した瞬間に台帳へ自動記録（リンクは通常どおり新タブで開く）
     out.querySelectorAll('.li-autolist').forEach(a => a.addEventListener('click', () => { try { recordListing(true); } catch (_) {} }));
+    // 🚀 公式APIで直接出品（アカウント×国・shop_id指定・非公開作成）
+    const apiFamSel = document.getElementById('li-apifam');
+    if (apiFamSel) apiFamSel.addEventListener('change', () => { listState.apiFamily = apiFamSel.value; listRefresh(); });
+    out.querySelectorAll('.li-apilist').forEach(btn => btn.addEventListener('click', async () => {
+      const cc = btn.dataset.cc, jb = apiJobs[cc]; if (!jb) return;
+      const resEl = out.querySelector('.li-apiresult[data-cc="' + cc + '"]');
+      if (!jb.images || !jb.images.length) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">画像がありません（カタログ画像を追加してください。http(s)のURLのみ対象）</span>'; return; }
+      if (!(jb.name || '').trim()) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">タイトルが空です</span>'; return; }
+      const warnVar = jb.hasVar ? `\n※この商品はバリエ有り(${jb.varCount}明細)ですが、現状は先頭1明細のみ作成します（バリエ対応は次段）。` : '';
+      if (!confirm(`${cc} の「${apiFam}」ショップに、公式APIで【非公開(UNLIST)】で出品します。\n\n商品: ${jb.name}\n価格(現地): ${jb.price}\n画像: ${jb.images.length}枚\nshop_id: ${jb.shop_id}${warnVar}\n\nよろしいですか？（作成後Shopeeで確認→公開してください）`)) return;
+      const orig = btn.textContent; btn.disabled = true; btn.textContent = '⏳ 出品中…';
+      if (resEl) resEl.innerHTML = '<span class="smd-dim">画像アップロード＋作成中（最大2分）…途中でタブを閉じないでください</span>';
+      try {
+        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: jb.images.join('\n'), category: 'Games', condition: 'USED', publish: 0 });
+        const host = (REGIONS.find(x => x.cc === cc) || {}).host || ('seller.shopee.' + cc.toLowerCase());
+        if (resEl) resEl.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 作成(非公開) item_id=${r.item_id}</span> <a href="https://${host}/portal/product/list" target="_blank">Shopeeで確認↗</a>`;
+        try { recordListing(true); } catch (_) {}
+        try { logAct('出品', '公式API出品', cc, jb.name + ' item_id=' + r.item_id); } catch (_) {}
+      } catch (e) {
+        if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ ' + esc(String((e && e.message) || e)) + '</span>';
+      } finally { btn.disabled = false; btn.textContent = orig; }
+    }));
     // 📥 台帳に記録（明示ボタン）
     const recBtn = document.getElementById('li-record');
     if (recBtn) recBtn.addEventListener('click', () => recordListing(false));
