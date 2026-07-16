@@ -43,6 +43,17 @@ function doGet(e) {
       } catch (err) { out = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(cb + '(' + JSON.stringify(out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★送信キュー取得：webchatのuserscriptが未送信の返信を取りに来る（JSONP・WRITE_TOKENガード）
+    if (p.action === 'outbox_pending') {
+      var ocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var oout;
+      try {
+        var owt = P_().getProperty('WRITE_TOKEN');
+        if (!owt || p.token !== owt) throw new Error('WRITE_TOKEN不正');
+        oout = { ok: true, items: sbSelect_('chat_outbox', 'select=id,cc,buyer,conversation_id,text&status=eq.pending&order=created_at.asc&limit=10') };
+      } catch (err) { oout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ocb + '(' + JSON.stringify(oout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {
       var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
@@ -73,6 +84,7 @@ function doPost(e) {
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
     if (body.action === 'chat_ingest') out = chatIngest_(body);
+    else if (body.action === 'outbox_done') out = outboxDone_(body);
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
@@ -105,6 +117,12 @@ function chatIngest_(body) {
   return { ok: true, raw: rawRows.length, messages: msgRows.length };
 }
 function dedupById_(rows) { var seen = {}, out = []; rows.forEach(function (r) { if (r && r.id && !seen[r.id]) { seen[r.id] = 1; out.push(r); } }); return out; }
+// 送信キューの完了マーク（userscriptが送信後に呼ぶ）：status=sent/error
+function outboxDone_(body) {
+  if (!body.id) throw new Error('id必須');
+  sbUpsert_('chat_outbox', [{ id: String(body.id), status: body.ok ? 'sent' : 'error', sent_at: new Date().toISOString(), error: body.ok ? null : String(body.error || '').slice(0, 200) }], 'id');
+  return { ok: true, id: body.id };
+}
 // 生JSONの中から会話一覧/メッセージ配列を探し、text＋時刻がある要素を chat_messages 行に変換（ベストエフォート）。
 // ★方向(in/out)は生データ(chat_raw)で確証を得てから精密化する。当面は from_shop_id 等の手掛かりがあれば out、無ければ in。
 function chatNormalizeCapture_(root, cc) {
