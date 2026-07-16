@@ -2433,8 +2433,12 @@
       let last = 0;
       days.forEach(d => { const t = d.synced_at ? Date.parse(d.synced_at) : 0; if (t > last) last = t; });
       if (!last) last = Number(localStorage.getItem('smdLastSync') || 0);
-      document.getElementById('dash-sync').textContent = last
-        ? `最終同期 ${new Date(last).toLocaleString('ja-JP')}` : '（未同期 — 通常はGASが自動同期。出ない場合は GAS の syncAll を確認）';
+      // 鮮度警告：GASのsyncAllは毎時走る想定。6時間超の未更新＝Gmail上限/トークン失効/トリガー停止の疑い→赤で警告（古いデータでの誤判断を防ぐ）
+      const syncEl = document.getElementById('dash-sync');
+      const ageH = last ? (Date.now() - last) / 3600000 : Infinity;
+      if (!last) syncEl.innerHTML = '<span style="color:#d93025;font-weight:700">⚠ 未同期 — GASの自動同期(syncAll)を確認</span>';
+      else if (ageH > 6) syncEl.innerHTML = `<span style="color:#d93025;font-weight:700" title="自動同期(GASのsyncAll等)が止まっている可能性。Gmail送信上限/トークン失効/トリガー停止を確認してください。古いデータのまま判断すると危険です。">⚠ 最終同期 ${new Date(last).toLocaleString('ja-JP')}（約${Math.floor(ageH)}時間前・要確認）</span>`;
+      else syncEl.textContent = `最終同期 ${new Date(last).toLocaleString('ja-JP')}`;
     } catch (e) {
       kpis.innerHTML = `<div class="kpi"><div class="t">エラー</div><div class="s">${esc(e.message)}</div></div>`;
     }
@@ -5720,13 +5724,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function recordListing(silent) {
     try {
       const snap = buildListingSnapshot();
-      if (!snap.econ || !Object.keys(snap.econ).length) { if (!silent) toast('記録する国/価格がありません（商品情報と対象国を確認）', true); return; }
-      if (!settings.sbSecret) { if (!silent) toast('⚠️ 記録には⚙️設定の Supabase 書き込みキーが必要です', true); return; }
+      if (!snap.econ || !Object.keys(snap.econ).length) { if (!silent) toast('記録する国/価格がありません（商品情報と対象国を確認）', true); return false; }
+      if (!settings.sbSecret) { if (!silent) toast('⚠️ 記録には⚙️設定の Supabase 書き込みキーが必要です', true); return false; }
       await sbUpsert('listing_catalog', [snap]); // created_at はDB default（merge時は既存を維持）
       try { logAct('出品', '台帳に記録', snap.name || snap.title, snap.parent_sku || (Object.keys(snap.econ).length + '国')); } catch (_) {}
       lst._ledgerReload = true;
       if (!silent) toast('💰 出品台帳に記録しました（💰出品台帳タブで確認）');
-    } catch (e) { if (!silent) toast('記録エラー: ' + (e.message || e), true); }
+      return true;
+    } catch (e) { if (!silent) toast('記録エラー: ' + (e.message || e), true); return false; }
   }
   async function renderLedger(useCache) {
     const host = document.getElementById('list-ledger'); if (!host) return;
@@ -5749,11 +5754,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
+    // 🈳 仕入(原価)未入力の追い込み：未入力の明細を含む商品を抽出（埋めるほど利益/ROI/損益の精度が上がる＝外注さん向け単純作業）
+    const rNeedsCost = r => { const econ = r.econ || {}; return Object.keys(econ).some(cc => (econ[cc].vars || []).some(v => v.cost == null)); };
+    const needCostTotal = (rows || []).filter(rNeedsCost).length;
+    if (lst.ledgerNeedCost) list = list.filter(rNeedsCost);
     const head = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
       <span style="font-weight:700;font-size:14px">💰 出品台帳</span>
       <span class="smd-dim" style="font-size:12px">${(rows || []).length}件 <span style="color:#888">（出品時に自動記録＋📥手動記録。価格改定の参考に）</span></span>
       <input id="ledger-q" placeholder="🔍 商品名/SKU/カテゴリ" value="${esc(lst.ledgerQ || '')}" style="padding:5px 9px;font-size:12.5px;min-width:220px">
       <button id="ledger-reload" class="smd-btn" style="font-size:11px">🔄 更新</button>
+      <button id="ledger-needcost" class="smd-btn" style="font-size:11px;${lst.ledgerNeedCost ? 'background:#e0a44a;border-color:#e0a44a;color:#fff;font-weight:700' : ''}" title="仕入(原価)が未入力の明細がある商品だけ表示。埋めるほど利益/ROI/損益の精度が上がる＝外注さんの追い込み作業に最適">🈳 仕入未入力のみ${needCostTotal ? `（${needCostTotal}）` : ''}</button>
       <button id="ledger-backfill" class="smd-btn" style="font-size:11px;background:#eef7ff;border-color:#1565c0;color:#1565c0;font-weight:700" title="現在ライブの出品を、各国の価格・手数料・SLS送料で台帳に一括作成（仕入・利益は空欄→各明細に仕入を入れると利益が出ます）。既に台帳にある商品は上書きしません">📥 現在の出品から一括作成</button></div>`;
     if (!list.length) {
       host.innerHTML = head + `<div class="tool-card" style="max-width:760px;font-size:12.5px;color:#555">${(rows || []).length ? '該当なし（検索条件を変えてください）。' : 'まだ記録がありません。<b>✍️出品を作る</b>で商品を入力し、<b>📥台帳に記録</b>または<b>▶自動で出品</b>を押すとここに貯まります。'}</div>`;
@@ -5807,6 +5817,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const qi = host.querySelector('#ledger-q');
     if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { lst.ledgerQ = qi.value; renderLedger(true).then(() => { const n = document.getElementById('ledger-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250); }); }
     const rl = host.querySelector('#ledger-reload'); if (rl) rl.addEventListener('click', () => renderLedger());
+    const nc = host.querySelector('#ledger-needcost'); if (nc) nc.addEventListener('click', () => { lst.ledgerNeedCost = !lst.ledgerNeedCost; renderLedger(true); });
     const bf = host.querySelector('#ledger-backfill'); if (bf) bf.addEventListener('click', () => ledgerBackfillLive());
     // 開閉状態を覚える（仕入入力で再描画しても開いたまま）
     lst._ledgerOpen = lst._ledgerOpen || new Set();
@@ -8079,13 +8090,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!autoLinks.length) { alert('対象国がありません（対象アカウントを確認してください）'); return; }
       if (!(listState.name || '').trim() && !listState.variations.length) { alert('先に商品情報を入力してください'); return; }
       if (!confirm(`対象 ${autoLinks.length}国（${autoLinks.map(x => x.cc).join('/')}）の新規出品ページを一括で開きます。\n※各タブでuserscriptパネルが起動します。実際の作成は各タブで🚀作成を押すまで行われません。よろしいですか？`)) return;
-      recordListing(true); // 💰出品台帳に自動記録（静かに）
+      recordListing(true).then(ok => { if (ok) toast('📥 出品台帳に自動記録しました（💰出品台帳タブで確認・不要なら削除可）'); }).catch(() => {}); // 💰出品台帳に自動記録
       let blocked = 0;
       autoLinks.forEach(l => { const w = window.open(l.url, '_blank'); if (!w) blocked++; });
       if (blocked) alert(`${blocked}/${autoLinks.length}国がポップアップブロックされました。ブラウザのポップアップを「許可」に変えて、もう一度このボタンを押してください（許可すれば全国一気に開きます）。`);
     });
     // ▶自動で出品（各国）を押した瞬間に台帳へ自動記録（リンクは通常どおり新タブで開く）
-    out.querySelectorAll('.li-autolist').forEach(a => a.addEventListener('click', () => { try { recordListing(true); } catch (_) {} }));
+    out.querySelectorAll('.li-autolist').forEach(a => a.addEventListener('click', () => { try { recordListing(true).then(ok => { if (ok) toast('📥 出品台帳に自動記録しました（💰出品台帳タブで確認・不要なら削除可）'); }).catch(() => {}); } catch (_) {} }));
     // 🚀 公式APIで直接出品（アカウント×国・shop_id指定・非公開作成）
     const apiFamSel = document.getElementById('li-apifam');
     if (apiFamSel) apiFamSel.addEventListener('change', () => { listState.apiFamily = apiFamSel.value; listRefresh(); });
