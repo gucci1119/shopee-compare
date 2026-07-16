@@ -85,6 +85,8 @@ function doPost(e) {
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
     if (body.action === 'chat_ingest') out = chatIngest_(body);
     else if (body.action === 'outbox_done') out = outboxDone_(body);
+    else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
+    else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
@@ -277,6 +279,92 @@ function testUpdateStock() {
   var STOCK = 1;     // 設定したい在庫数
   if (!SHOP_ID || !ITEM_ID) return Logger.log('SHOP_ID / ITEM_ID を入れて実行してください');
   Logger.log(JSON.stringify(updateStock_(SHOP_ID, ITEM_ID, MODEL_ID, STOCK), null, 1));
+}
+
+// ================= 公式APIで出品作成（add_item・出す先=shop_idで指定＝アカウント/国を明示） =================
+// カテゴリ解決：get_categoryからキーワード(既定'Games')に一致するleafのcategory_idを返す（shop毎キャッシュ）
+function resolveCategoryId_(shopId, keyword) {
+  keyword = String(keyword || 'Games');
+  var ck = 'catid_' + shopId + '_' + keyword.toLowerCase();
+  var c0 = P_().getProperty(ck); if (c0) return parseInt(c0, 10);
+  var j = callShop_(shopId, '/api/v2/product/get_category', { language: 'en' }, 'get');
+  var list = ((j.response || {}).category_list) || [];
+  var byId = {}; list.forEach(function (c) { byId[c.category_id] = c; });
+  var kw = keyword.toLowerCase(), best = null;
+  list.forEach(function (c) {
+    if (c.has_children) return; // leafのみ出品可
+    var nm = String(c.display_category_name || c.original_category_name || c.category_name || '').toLowerCase();
+    if (nm.indexOf(kw) < 0) return;
+    var chain = nm, p = c, d = 0;
+    while (p && p.parent_category_id && byId[p.parent_category_id] && d < 10) { p = byId[p.parent_category_id]; chain += ' < ' + String(p.display_category_name || p.category_name || '').toLowerCase(); d++; }
+    var score = (chain.indexOf('video game') >= 0 ? 10 : 0) + (nm === kw ? 4 : 0) + (nm === 'games' ? 3 : 0);
+    if (!best || score > best.score) best = { id: c.category_id, score: score };
+  });
+  if (!best) throw new Error('category "' + keyword + '" not found (shop ' + shopId + ')');
+  P_().setProperty(ck, String(best.id));
+  return best.id;
+}
+// 物流チャネル解決：有効なStandard/International優先（shop毎キャッシュ）
+function resolveLogisticId_(shopId) {
+  var ck = 'logi_' + shopId; var c0 = P_().getProperty(ck); if (c0) return parseInt(c0, 10);
+  var j = callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get');
+  var list = ((j.response || {}).logistics_channel_list) || [];
+  var enabled = list.filter(function (c) { return c.enabled; });
+  var std = enabled.filter(function (c) { return /standard|international|sls/i.test(c.logistics_channel_name || ''); });
+  var pick = std[0] || enabled[0];
+  if (!pick) throw new Error('no enabled logistic channel (shop ' + shopId + ')');
+  P_().setProperty(ck, String(pick.logistics_channel_id));
+  return pick.logistics_channel_id;
+}
+// 画像URL→image_id（media_space/upload_image・public署名・multipart）
+function uploadImageUrl_(imageUrl) {
+  var ts = now_(), path = '/api/v2/media_space/upload_image';
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+  var blob = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true }).getBlob();
+  var res = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var j = JSON.parse(res.getContentText());
+  if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
+  var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
+  return info.image_id || (info.image_id_list || [])[0];
+}
+// メタ(category/logistic/brand)を解決して返す＝コンポーザーが出品前に確認できる
+function listMeta_(body) {
+  var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
+  return { ok: true, shop_id: shopId, category_id: resolveCategoryId_(shopId, body.category || 'Games'), logistic_id: resolveLogisticId_(shopId), brand_id: 0 };
+}
+// 出品作成（単一バリエ・E2E実証形）。spec: { shop_id, item_name, description, price, stock, weight(kg), images:[url...], category|category_id, logistic_id, brand_id, publish(bool) }
+// ※バリエーション商品は add_item 後に init_tier_variation が必要＝次段で対応。まずは単品/1明細で実証。
+function addItem_(body) {
+  var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
+  var categoryId = body.category_id ? parseInt(body.category_id, 10) : resolveCategoryId_(shopId, body.category || 'Games');
+  var logisticId = body.logistic_id ? parseInt(body.logistic_id, 10) : resolveLogisticId_(shopId);
+  var imgIds = body.image_ids || [];
+  if ((!imgIds || !imgIds.length) && body.images && body.images.length) {
+    imgIds = body.images.slice(0, 9).map(function (u) { return uploadImageUrl_(u); }).filter(Boolean);
+  }
+  if (!imgIds.length) throw new Error('画像が必要（image_ids か images URL を渡す）');
+  var payload = {
+    original_price: parseFloat(body.price),
+    description: String(body.description || body.item_name || ''),
+    weight: parseFloat(body.weight || 0.5),
+    item_name: String(body.item_name || '').slice(0, 120),
+    category_id: categoryId,
+    brand: { brand_id: body.brand_id != null ? parseInt(body.brand_id, 10) : 0 },
+    condition: body.condition || 'USED',
+    item_status: body.publish ? 'NORMAL' : 'UNLIST',
+    seller_stock: [{ stock: parseInt(body.stock != null ? body.stock : 1, 10) }],
+    image: { image_id_list: imgIds },
+    logistic_info: [{ logistic_id: logisticId, enabled: true }]
+  };
+  if (body.dimension) payload.dimension = body.dimension;
+  var j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+  var resp = j.response || j;
+  return { ok: true, shop_id: shopId, item_id: (resp.item_id || (resp.item || {}).item_id || null), category_id: categoryId, logistic_id: logisticId, image_ids: imgIds };
+}
+// 安全確認用：1件だけ非公開(UNLIST)で作成テスト（値を書き換えて手動実行→編集画面で確認→削除）
+function testAddItem() {
+  var r = addItem_({ shop_id: 0 /* 例:695473017(PH) */, item_name: '【TEST】Sample Used Game', description: 'test', price: 300, stock: 1, weight: 0.5, category: 'Games', images: ['https://cf.shopee.ph/file/xxxx'], publish: false });
+  Logger.log(JSON.stringify(r, null, 1));
 }
 
 function getOrderSns_(shopId, timeFrom, timeTo) {
