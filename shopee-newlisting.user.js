@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.7.0
-// @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①DOM診断 ②画像を先行アップロード(img_id化) ③新規作成APIのキャプチャ を行う偵察版。ここで得たAPIペイロードを元に、次版で「発行まで完全自動」を実装する。現状は何も勝手に発行しない（安全）。
+// @version      0.7.1
+// @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①画像を先行アップロード(image_id化) ②雛形(その国で一度手動作成したcreate_product_info)＋ジョブから create_product_info を組み立て ③パネルの「🚀作成（非公開）／🚀作成＋公開」で公式APIにより実際に作成、まで行う。雛形が無い国はパネルが「雛形なし」表示（先に手動で1件作成→💾保存で登録）。🚀を押すまでは発行しない。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
 // @match        https://seller.shopee.com.my/portal/product/*
@@ -382,7 +382,7 @@
         </div>
         <div class="nl-tmpl" style="font-size:10px;color:#888;margin-bottom:8px"></div>
         <div style="font-size:11px;background:#f3eefb;border:1px solid #e0d3f5;border-radius:6px;padding:6px 8px;margin-bottom:8px">
-          <b>手順</b>：①<b>▶自動入力</b>で埋まる項目を埋める（カテゴリ/バリエ/画像は手動補完）→ ②🖼️画像アップ → ③<b>手動で1件「発行」</b>すると下の「作成API」に通信が記録される → <b>「コピー」して開発者へ</b>渡せば発行まで全自動化。※自動入力はβ＝入らない欄があれば🔍診断ログを共有ください（精度UP）。
+          <b>手順（API出品）</b>：①雛形を選ぶ（無ければ先に手動で1件作成→<b>💾保存</b>で登録）→ ②<b>🚀作成（非公開）</b>で下書き作成、確認後 <b>🚀作成＋公開</b>でライブに。画像は自動で先行アップロード。※<b>🚀作成＋公開</b>は実際にShopeeへ公開されます。下の「作成API」は手動発行時の通信記録（雛形づくり用）。
         </div>
         <div style="font-weight:600;font-size:11px;margin-bottom:2px">📡 作成API（手動発行で記録）</div>
         <div class="nl-cap" style="max-height:70px;overflow:auto;background:#faf8ff;border:1px solid #eee;border-radius:6px;padding:6px;font-size:11px;margin-bottom:6px"></div>
