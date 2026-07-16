@@ -5711,7 +5711,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${has ? v.roi + '%' : '<span class="smd-dim">—</span>'}</td></tr>`;
         }).join('');
       }).join('');
-      return `<details class="ledger-item" style="border:1px solid #e6e6e6;border-left:4px solid ${anyNeg ? '#d93025' : '#1a7f37'};border-radius:8px;margin-bottom:8px;background:#fff">
+      return `<details class="ledger-item" data-id="${idE}" ${(lst._ledgerOpen && lst._ledgerOpen.has(r.id)) ? 'open' : ''} style="border:1px solid #e6e6e6;border-left:4px solid ${anyNeg ? '#d93025' : (haveProfit ? '#1a7f37' : '#c9c9c9')};border-radius:8px;margin-bottom:8px;background:#fff">
         <summary style="cursor:pointer;list-style:none;padding:9px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <span style="font-weight:700;font-size:13px;flex:1;min-width:200px">${esc(r.name || r.title || '(無題)')}</span>
           <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${r.cost_total != null ? jpy(r.cost_total) : '—'} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国</span>
@@ -5727,20 +5727,100 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
       </details>`;
     }).join('');
-    host.innerHTML = head + `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">💡 手数料・SLS送料・利益は<b>記録時点</b>の計算値です（為替や手数料設定を変えても過去記録は変わりません）。価格改定の参考にどうぞ。</div>` + cards;
+    host.innerHTML = head + `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">💡 価格・手数料・SLS送料は各国の実データ。<b>黄色い「仕入」欄に仕入(円)を入れると利益・ROIが自動で出ます</b>（同じ明細名は全国に反映）。「📥現在の出品から一括作成」で今のライブ出品をまとめて台帳化（重量は仮${(listState.weightG != null ? listState.weightG : settings.weightG) || 500}gでSLS概算）。価格改定の参考にどうぞ。</div>` + cards;
     wireLedger(host);
   }
   function wireLedger(host) {
     const qi = host.querySelector('#ledger-q');
     if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { lst.ledgerQ = qi.value; renderLedger().then(() => { const n = document.getElementById('ledger-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250); }); }
     const rl = host.querySelector('#ledger-reload'); if (rl) rl.addEventListener('click', () => renderLedger());
+    const bf = host.querySelector('#ledger-backfill'); if (bf) bf.addEventListener('click', () => ledgerBackfillLive());
+    // 開閉状態を覚える（仕入入力で再描画しても開いたまま）
+    lst._ledgerOpen = lst._ledgerOpen || new Set();
+    host.querySelectorAll('details.ledger-item').forEach(d => d.addEventListener('toggle', () => { const id = d.dataset.id; if (!id) return; if (d.open) lst._ledgerOpen.add(id); else lst._ledgerOpen.delete(id); }));
     host.querySelectorAll('.ledger-del').forEach(b => b.addEventListener('click', async (e) => {
       e.preventDefault(); e.stopPropagation();
       if (!settings.sbSecret) { toast('削除には⚙️設定の書き込みキーが必要です', true); return; }
       if (!confirm('この記録を削除しますか？')) return;
-      try { await sbDelete('listing_catalog', 'id=eq.' + encodeURIComponent(b.dataset.id)); toast('削除しました'); renderLedger(); }
+      try { await sbDelete('listing_catalog', 'id=eq.' + encodeURIComponent(b.dataset.id)); if (lst._ledgerOpen) lst._ledgerOpen.delete(b.dataset.id); toast('削除しました'); renderLedger(); }
       catch (err) { toast('削除エラー: ' + (err.message || err), true); }
     }));
+    // 仕入インライン入力→利益/ROIを再計算して保存（同じ明細名は全国に反映）
+    host.querySelectorAll('.ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
+  }
+  async function saveLedgerCost(id, cc, i, val) {
+    const r = (lst._ledgerRows || []).find(x => x.id === id); if (!r || !r.econ) return;
+    const src = ((r.econ[cc] || {}).vars || [])[i]; if (!src) return;
+    const cost = (val === '' || val == null) ? null : Number(val);
+    if (cost != null && (isNaN(cost) || cost < 0)) { toast('仕入は0以上の数値で', true); return; }
+    const key = (src.name || '').trim().toLowerCase(); // 同じ明細（名前一致）を全国に反映。単品(空名)は全明細
+    Object.keys(r.econ).forEach(c => (r.econ[c].vars || []).forEach(v => {
+      if ((v.name || '').trim().toLowerCase() !== key) return;
+      v.cost = cost;
+      if (cost == null) { v.profit = null; v.roi = null; }
+      else { const seller = v.sellerJpy != null ? v.sellerJpy : ((v.buyerJpy || 0) - (v.feeJpy || 0)); v.profit = Math.round(seller - cost - (v.slsJpy || 0)); v.roi = cost > 0 ? Math.round(v.profit / cost * 100) : 0; }
+    }));
+    (r.variations || []).forEach(vv => { if ((vv.name || '').trim().toLowerCase() === key) vv.cost = cost; });
+    const cs = (r.variations || []).map(vv => vv.cost).filter(c => c != null);
+    r.cost_total = cs.length ? cs.reduce((s, c) => s + c, 0) : null;
+    r.updated_at = new Date().toISOString();
+    if (!settings.sbSecret) { toast('保存には⚙️設定の書き込みキーが必要です', true); renderLedger(); return; }
+    try { await sbUpsert('listing_catalog', [r]); } catch (e) { toast('保存エラー: ' + (e.message || e), true); }
+    renderLedger();
+  }
+  // 現在ライブの出品を台帳へ一括作成（価格・手数料・SLSのみ。仕入・利益は空欄→台帳で仕入入力）。既存idは上書きしない
+  async function ledgerBackfillLive() {
+    if (!settings.sbSecret) { toast('一括作成には⚙️設定の Supabase 書き込みキーが必要です', true); return; }
+    const host = document.getElementById('list-ledger');
+    try {
+      const [live, existing] = await Promise.all([
+        sbGetAll('listings', 'select=cc,item_id,name,parent_sku,status,models&status=eq.1'),
+        sbGetAll('listing_catalog', 'select=id'),
+      ]);
+      const have = new Set((existing || []).map(x => x.id));
+      const defW = (listState.weightG != null ? listState.weightG : settings.weightG) || 500;
+      const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      // 商品グループ化：parent_sku優先、無ければ正規化タイトル
+      const groups = {};
+      (live || []).forEach(l => {
+        const gk = (l.parent_sku || '').trim() || ('nm:' + norm(l.name));
+        (groups[gk] = groups[gk] || []).push(l);
+      });
+      const gkeys = Object.keys(groups);
+      const rowsOut = [];
+      gkeys.forEach(gk => {
+        const items = groups[gk];
+        const id = 'lst|' + (gk.indexOf('nm:') === 0 ? gk.slice(3) : gk).slice(0, 90);
+        if (have.has(id)) return; // 既存は触らない（合成/手入力の仕入を守る）
+        const econ = {};
+        items.forEach(l => {
+          const rg = regionByCc(l.cc); if (!rg) return;
+          const feeMult = feeKeep(l.cc), slsJ = Math.round(slsLocal(l.cc, defW) * rg.rateJpy);
+          const models = (l.models && l.models.length) ? l.models : [{ n: '', sku: l.parent_sku || '', price: 0 }];
+          const vars = models.map(m => {
+            const local = Number(m.price) || 0; const buyerJpy = Math.round(local * rg.rateJpy); const sellerJpy = Math.round(buyerJpy * feeMult);
+            return { name: m.n || '', sku: m.sku || '', cost: null, weightG: defW, local, buyerJpy, sellerJpy, feeJpy: buyerJpy - sellerJpy, feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: slsJ, profit: null, roi: null };
+          });
+          econ[l.cc] = { rate: rg.rateJpy, cur: rg.cur, vars };
+        });
+        if (!Object.keys(econ).length) return;
+        // 代表名＝最長のname、variationsは明細数が最多の国から
+        const repName = items.map(x => x.name || '').sort((a, b) => b.length - a.length)[0] || '';
+        const bestItem = items.slice().sort((a, b) => (b.models || []).length - (a.models || []).length)[0];
+        const variations = ((bestItem.models || [])).map(m => ({ name: m.n || '', sku: m.sku || '', cost: null, weightG: defW }));
+        rowsOut.push({ id, name: repName, title: repName, category: '', parent_sku: (gk.indexOf('nm:') === 0 ? '' : gk), weight_g: defW, cost_total: null, variations, econ, note: '既存出品から', updated_at: new Date().toISOString() });
+      });
+      if (!rowsOut.length) { toast('新規に作成する出品はありません（既に台帳にあるか、ライブ出品なし）'); return; }
+      if (!confirm(`ライブ出品から ${rowsOut.length} 商品を台帳に作成します（既存 ${have.size} 件は上書きしません）。\n重量は仮 ${defW}g でSLS送料を概算。仕入は空欄→各明細に入力すると利益が出ます。\nよろしいですか？`)) return;
+      if (host) host.innerHTML = '<div class="smd-dim" style="padding:10px">台帳を作成中… 0/' + rowsOut.length + '</div>';
+      for (let i = 0; i < rowsOut.length; i += 300) {
+        await sbUpsert('listing_catalog', rowsOut.slice(i, i + 300));
+        if (host) host.innerHTML = '<div class="smd-dim" style="padding:10px">台帳を作成中… ' + Math.min(i + 300, rowsOut.length) + '/' + rowsOut.length + '</div>';
+      }
+      try { logAct('出品', '台帳を一括作成', '', rowsOut.length + '商品（既存出品から）'); } catch (_) {}
+      toast('✅ ' + rowsOut.length + ' 商品を台帳に作成しました。各明細に仕入を入れると利益が出ます');
+      renderLedger();
+    } catch (e) { toast('一括作成エラー: ' + (e.message || e), true); if (host) renderLedger(); }
   }
   // lst.byCc を確実にロード（出品状況/分析/横断で共有）
   async function ensureListings() {
