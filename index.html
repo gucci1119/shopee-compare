@@ -744,6 +744,9 @@
   const IMG_CDN = 'https://down-sg.img.susercontent.com/';
 
   // ---------------- 設定（localStorage） ----------------
+  // 仕入額帯別ROIの初期カーブ（¥500刻み70段・PHの実ROIカーブ＝バリエーションシート基準）。
+  // 「〜500g小物」の既定。安い物ほど高ROIで最安帯¥500は最低¥1,200利益(240%相当)、以降はPH同様に自然増→約24%へ収束。
+  const ROI_CURVE_DEFAULT = [243, 124, 88, 67, 55, 46, 42, 37, 33, 31, 28, 27, 25, 24, 25, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24];
   const settings = Object.assign({
     gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '', openapiUrl: '', writeToken: '',
     // 🏖 バケーションモード（休暇/出品停止中。ON中は売上0・失速を「想定内」として警告抑制＋全ポータルに表示）
@@ -775,8 +778,11 @@
     priceSls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] },                                              // [50gの送料, 50gごとの追加] 現地通貨・セラー実質負担
     priceFxMargin: 2,       // FX/端数マージン(%)
     priceProfitBuffer: 5,   // 利益バッファ(%)
-    roiPct: 40,             // 目標ROI(%)
+    roiPct: 40,             // 目標ROI(%)（仕入額帯別ROI OFF時の単一値・フォールバック）
     weightG: 500,           // 既定の重量(g)
+    roiBracketOn: true,     // 仕入額帯別ROIを使う（ON=帯テーブルから自動選択／OFF=単一roiPct）
+    roiBase: ROI_CURVE_DEFAULT.slice(),  // 〜500g帯の仕入額別ROI(70段)。既定=PHカーブ
+    roiWeightBands: {},     // 重い重量帯の上書き { "1000":[70段], "1500":[...] }（未設定の帯はroiBaseにフォールバック）
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
 
@@ -5669,11 +5675,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
+    lst._ledgerRows = rows || []; // 仕入インライン編集で該当行/econを引くためのキャッシュ
     const head = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
       <span style="font-weight:700;font-size:14px">💰 出品台帳</span>
       <span class="smd-dim" style="font-size:12px">${(rows || []).length}件 <span style="color:#888">（出品時に自動記録＋📥手動記録。価格改定の参考に）</span></span>
       <input id="ledger-q" placeholder="🔍 商品名/SKU/カテゴリ" value="${esc(lst.ledgerQ || '')}" style="padding:5px 9px;font-size:12.5px;min-width:220px">
-      <button id="ledger-reload" class="smd-btn" style="font-size:11px">🔄 更新</button></div>`;
+      <button id="ledger-reload" class="smd-btn" style="font-size:11px">🔄 更新</button>
+      <button id="ledger-backfill" class="smd-btn" style="font-size:11px;background:#eef7ff;border-color:#1565c0;color:#1565c0;font-weight:700" title="現在ライブの出品を、各国の価格・手数料・SLS送料で台帳に一括作成（仕入・利益は空欄→各明細に仕入を入れると利益が出ます）。既に台帳にある商品は上書きしません">📥 現在の出品から一括作成</button></div>`;
     if (!list.length) {
       host.innerHTML = head + `<div class="tool-card" style="max-width:760px;font-size:12.5px;color:#555">${(rows || []).length ? '該当なし（検索条件を変えてください）。' : 'まだ記録がありません。<b>✍️出品を作る</b>で商品を入力し、<b>📥台帳に記録</b>または<b>▶自動で出品</b>を押すとここに貯まります。'}</div>`;
       wireLedger(host); return;
@@ -5681,32 +5689,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const jpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
     const cards = list.map(r => {
       const econ = r.econ || {}; const ccs = Object.keys(econ);
-      // 全国・全明細の利益レンジ
-      let pMin = Infinity, pMax = -Infinity, rMin = Infinity, rMax = -Infinity;
-      ccs.forEach(cc => (econ[cc].vars || []).forEach(v => { pMin = Math.min(pMin, v.profit); pMax = Math.max(pMax, v.profit); rMin = Math.min(rMin, v.roi); rMax = Math.max(rMax, v.roi); }));
-      const anyNeg = pMin < 0;
-      const rangeTxt = pMin === Infinity ? '—' : (pMin === pMax ? jpy(pMin) : jpy(pMin) + '〜' + jpy(pMax));
+      // 利益レンジ（仕入が入っている＝profit確定の明細だけ対象）
+      let pMin = Infinity, pMax = -Infinity, haveProfit = false, needCost = false;
+      ccs.forEach(cc => (econ[cc].vars || []).forEach(v => { if (v.profit != null) { haveProfit = true; pMin = Math.min(pMin, v.profit); pMax = Math.max(pMax, v.profit); } else needCost = true; }));
+      const anyNeg = haveProfit && pMin < 0;
+      const rangeTxt = !haveProfit ? '<span class="smd-dim">仕入未入力</span>' : (pMin === pMax ? jpy(pMin) : jpy(pMin) + '〜' + jpy(pMax));
+      const idE = esc(r.id);
       const rows2 = ccs.map(cc => {
         const e = econ[cc]; const rg = regionByCc(cc);
-        return (e.vars || []).map(v => {
-          const pc = v.profit >= 0 ? '#1a7f37' : '#d93025';
-          return `<tr style="${v.profit < 0 ? 'background:#fff4f4' : ''}">
+        return (e.vars || []).map((v, idx) => {
+          const has = v.profit != null; const pc = (v.profit || 0) >= 0 ? '#1a7f37' : '#d93025';
+          return `<tr style="${has && v.profit < 0 ? 'background:#fff4f4' : ''}">
             <td style="padding:3px 7px;white-space:nowrap"><span style="background:${(rg && rg.color) || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${cc}</span></td>
             <td style="padding:3px 7px;font-size:11.5px">${esc(v.name || '—')}${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap">${(e.cur || '')}${(Number(v.local) || 0).toLocaleString()}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#888">${jpy(v.buyerJpy)}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="Shopee手数料">${jpy(v.feeJpy)} <span style="font-size:9.5px">(${v.feePct}%)</span></td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="SLS送料">${jpy(v.slsJpy)}</td>
-            <td style="padding:3px 7px;text-align:right;white-space:nowrap">${jpy(v.cost)}</td>
-            <td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700;color:${pc}">${v.profit >= 0 ? '+' : ''}${jpy(v.profit)}</td>
-            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${v.roi}%</td></tr>`;
+            <td style="padding:2px 5px;text-align:right;white-space:nowrap">¥<input class="ledger-cost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${v.cost != null ? v.cost : ''}" placeholder="仕入" title="仕入(円)を入力すると利益が出ます" style="width:62px;padding:2px 4px;font-size:11px;${v.cost == null ? 'background:#fffbea;border-color:#e0c060' : ''}"></td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700;color:${pc}">${has ? (v.profit >= 0 ? '+' : '') + jpy(v.profit) : '<span class="smd-dim">—</span>'}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${has ? v.roi + '%' : '<span class="smd-dim">—</span>'}</td></tr>`;
         }).join('');
       }).join('');
       return `<details class="ledger-item" style="border:1px solid #e6e6e6;border-left:4px solid ${anyNeg ? '#d93025' : '#1a7f37'};border-radius:8px;margin-bottom:8px;background:#fff">
         <summary style="cursor:pointer;list-style:none;padding:9px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <span style="font-weight:700;font-size:13px;flex:1;min-width:200px">${esc(r.name || r.title || '(無題)')}</span>
-          <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${jpy(r.cost_total)} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国</span>
-          <span style="font-size:11.5px;white-space:nowrap">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}</span>
+          <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${r.cost_total != null ? jpy(r.cost_total) : '—'} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国</span>
+          <span style="font-size:11.5px;white-space:nowrap">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}${needCost ? ' <span style="color:#b3701a;font-size:10px">✎仕入入力で利益</span>' : ''}</span>
           <span class="smd-dim" style="font-size:10.5px;white-space:nowrap">${(r.updated_at || '').slice(0, 10)}</span>
           <button class="ledger-del smd-btn" data-id="${esc(r.id)}" title="この記録を削除" style="font-size:10px;padding:1px 6px;color:#d93025;border-color:#e0a0a0">🗑</button>
         </summary>
@@ -6597,15 +6606,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const brackets = Math.max(1, Math.ceil((Number(chargeG) || 0) / 50));
     return (Number(s[0]) || 0) + (Number(s[1]) || 0) * (brackets - 1);
   }
+  // 仕入額(円)×重量帯 から目標ROI(%)を引く。¥500刻み70段。重量帯は500g刻み（未設定帯はroiBaseにフォールバック）。
+  function roiBandKey(weightG) { return Math.max(500, Math.ceil((Number(weightG) || 0) / 500) * 500); }
+  function roiForCost(costJpy, weightG) {
+    const idx = Math.min(69, Math.max(0, Math.ceil((Number(costJpy) || 0) / 500) - 1));
+    const band = roiBandKey(weightG);
+    const arr = (band <= 500 ? null : (settings.roiWeightBands || {})[band]) || settings.roiBase || [];
+    const v = arr[idx];
+    return (v != null && isFinite(v)) ? Number(v) : settings.roiPct;
+  }
   function priceLocalFor(cc, costJpy, opt) {
     const rg = regionByCc(cc); if (!rg) return 0;
     opt = opt || {};
-    const roi = (opt.roiPct != null ? opt.roiPct : (listState.roiPct != null ? listState.roiPct : settings.roiPct)) / 100;
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     // 寸法はopt優先→無ければlistState（コンポーザー外＝カバレッジのバリエ追加等でopt指定して使えるように）
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
     const vol = (dW && dH && dD) ? (dW * dH * dD / 6000) : 0;
     const chargeG = Math.max(weightG, vol);
+    // ROI優先順位：opt明示 → listState(コンポーザーのROI欄) → 仕入額帯別ROI(ON時・課金重量で帯選択) → 単一roiPct
+    const roi = (opt.roiPct != null ? opt.roiPct
+      : (listState.roiPct != null ? listState.roiPct
+        : (settings.roiBracketOn ? roiForCost(costJpy, chargeG) : settings.roiPct))) / 100;
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
@@ -6809,6 +6830,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           </div>
           <div class="smd-dim" style="font-size:11px;margin-top:6px">各バリエの<b>仕入(円)</b>から、<b>手数料・SLS送料(重量別)・利益</b>を織り込んで各国の出品価格を自動算出（式: 仕入×(1+ROI)÷(1−${settings.priceFxMargin}%) ＋ SLS送料 → 手数料控除 ÷ (1−${settings.priceProfitBuffer}%)）。</div>
           <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:#7b52c4;font-weight:700">⚙️ 手数料・SLS送料・バッファを調整</summary><div id="li-pricecfg" style="margin-top:6px"></div></details>
+          <details style="margin-top:8px" open><summary style="cursor:pointer;font-size:12px;color:#1a7f37;font-weight:700">💹 仕入額帯別ROI（価格設定シート）</summary><div id="li-roicfg" style="margin-top:6px"></div></details>
         </div>
 
         <div class="tool-card" style="max-width:none">
@@ -6947,6 +6969,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       // 価格設定（手数料/SLS/バッファ）編集パネル
       priceCfgRender();
+      // 仕入額帯別ROI（価格設定シート）編集パネル
+      roiCfgRender();
       // 説明文お気に入り（呼出＋登録）
       // タイトルお気に入り＋バリエ明細名テンプレ候補
       listTitleFav(); listVarFavList();
@@ -7137,6 +7161,51 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!confirm('手数料・SLS送料・バッファをスプシ解読の既定値に戻します。よろしいですか？')) return;
       settings.priceFees = JSON.parse(JSON.stringify(PRICE_DEFAULTS.fees)); settings.priceSls = JSON.parse(JSON.stringify(PRICE_DEFAULTS.sls));
       settings.priceFxMargin = PRICE_DEFAULTS.fx; settings.priceProfitBuffer = PRICE_DEFAULTS.pb; saveSettings(); priceCfgRender(); listRefresh();
+    });
+  }
+  // 仕入額帯別ROI（価格設定シート）編集パネル。¥500刻み70段 × 重量帯(500g刻み)。
+  let roiCfgBand = 500;
+  function roiCfgRender() {
+    const host = document.getElementById('li-roicfg'); if (!host) return;
+    const bands = []; for (let b = 500; b <= 10000; b += 500) bands.push(b);
+    const base = settings.roiBase || [];
+    const wb = settings.roiWeightBands || {};
+    const heavy = roiCfgBand > 500;
+    const curArr = heavy ? (wb[roiCfgBand] || base) : base;
+    const bandLbl = (b) => b <= 500 ? '〜500g' : '〜' + (b / 1000) + 'kg';
+    let rowsHtml = '';
+    for (let i = 0; i < 70; i++) {
+      const cost = (i + 1) * 500; const v = curArr[i];
+      rowsHtml += `<tr><td style="text-align:right;color:#666;padding:1px 6px">¥${cost.toLocaleString()}</td><td style="padding:1px 4px"><input class="li rc-roi" data-i="${i}" type="number" step="any" value="${v != null ? v : ''}" placeholder="${base[i] != null ? base[i] : ''}" style="width:64px;text-align:right;padding:2px 4px;font-size:11px">%</td></tr>`;
+    }
+    host.innerHTML = `
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:4px;font-weight:700"><input type="checkbox" id="rc-on" ${settings.roiBracketOn ? 'checked' : ''}> 仕入額帯別ROIを使う <span style="font-weight:400;color:#888">（OFF＝単一ROI ${settings.roiPct}% を全帯に適用）</span></label>
+      <div style="font-size:10.5px;color:#666;margin-bottom:6px">仕入額（¥500刻み70段）×重量帯 で目標ROIを自動選択。<b>コンポーザーの「目標ROI」欄を空にした時だけ</b>効きます（欄に数値を入れるとその値が優先）。重量が重い帯は送料で売値が跳ねるので、競争力のためROIを下げる運用。初期値＝PHカーブ（最安¥500で最低¥1,200利益→高額帯は約24%へ収束）。全7か国共通（手数料は売値側で自動調整）。</div>
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+        <label style="font-size:11px">重量帯</label>
+        <select id="rc-band" style="font-size:11px;padding:2px 4px">${bands.map(b => `<option value="${b}" ${b === roiCfgBand ? 'selected' : ''}>${bandLbl(b)}${(b > 500 && wb[b]) ? ' ✎編集済' : ''}</option>`).join('')}</select>
+        ${heavy ? `<button class="smd-btn" id="rc-copybase" style="font-size:11px">〜500g帯からコピー</button>` : ''}
+        <button class="smd-btn" id="rc-resetband" style="font-size:11px">この帯をPHカーブに戻す</button>
+        <span style="font-size:10.5px;color:#888">${heavy && !wb[roiCfgBand] ? '（この帯は未設定＝〜500g帯と同じ。編集すると独立します）' : ''}</span>
+      </div>
+      <div class="pf-scroll" style="max-height:260px;overflow:auto;border:1px solid #eee;border-radius:6px"><table class="pf-table" style="font-size:11px;width:100%"><tr><th style="position:sticky;top:0;background:#faf7ff">仕入額(〜)</th><th style="position:sticky;top:0;background:#faf7ff">目標ROI</th></tr>${rowsHtml}</table></div>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="smd-btn" id="rc-resetall" style="font-size:11px">全重量帯を初期化（PHカーブに戻す）</button><span style="font-size:10.5px;color:#888">変更は即保存＆価格再計算。</span></div>`;
+    host.querySelector('#rc-on').addEventListener('change', e => { settings.roiBracketOn = e.target.checked; saveSettings(); listRefresh(); });
+    host.querySelector('#rc-band').addEventListener('change', e => { roiCfgBand = Number(e.target.value) || 500; roiCfgRender(); });
+    host.querySelectorAll('.rc-roi').forEach(el => el.addEventListener('input', e => {
+      const i = +e.target.dataset.i; const val = e.target.value === '' ? null : (Number(e.target.value) || 0);
+      if (roiCfgBand <= 500) { settings.roiBase = settings.roiBase || ROI_CURVE_DEFAULT.slice(); settings.roiBase[i] = (val == null ? ROI_CURVE_DEFAULT[i] : val); }
+      else { settings.roiWeightBands = settings.roiWeightBands || {}; if (!settings.roiWeightBands[roiCfgBand]) settings.roiWeightBands[roiCfgBand] = (settings.roiBase || ROI_CURVE_DEFAULT).slice(); settings.roiWeightBands[roiCfgBand][i] = (val == null ? (settings.roiBase || ROI_CURVE_DEFAULT)[i] : val); }
+      saveSettings(); listRefresh();
+    }));
+    const cb = host.querySelector('#rc-copybase'); if (cb) cb.addEventListener('click', () => { settings.roiWeightBands = settings.roiWeightBands || {}; settings.roiWeightBands[roiCfgBand] = (settings.roiBase || ROI_CURVE_DEFAULT).slice(); saveSettings(); roiCfgRender(); listRefresh(); });
+    host.querySelector('#rc-resetband').addEventListener('click', () => {
+      if (roiCfgBand <= 500) { settings.roiBase = ROI_CURVE_DEFAULT.slice(); } else if (settings.roiWeightBands) { delete settings.roiWeightBands[roiCfgBand]; }
+      saveSettings(); roiCfgRender(); listRefresh();
+    });
+    host.querySelector('#rc-resetall').addEventListener('click', () => {
+      if (!confirm('全重量帯のROIを初期のPHカーブに戻します。よろしいですか？')) return;
+      settings.roiBase = ROI_CURVE_DEFAULT.slice(); settings.roiWeightBands = {}; saveSettings(); roiCfgRender(); listRefresh();
     });
   }
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
