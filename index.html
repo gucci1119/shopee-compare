@@ -408,12 +408,14 @@
         <button data-k="status" class="on">📋 出品状況</button>
         <button data-k="coverage">🌏 横断カバレッジ</button>
         <button data-k="analysis">📊 分析・棚卸し</button>
+        <button data-k="ledger">💰 出品台帳</button>
         <button data-k="composer">✍️ 出品を作る</button>
       </span>
     </div>
     <div id="list-status" style="padding:12px 20px"></div>
     <div id="list-coverage" style="display:none;padding:12px 20px"></div>
     <div id="list-analysis" style="display:none;padding:12px 20px"></div>
+    <div id="list-ledger" style="display:none;padding:12px 20px"></div>
     <div id="list-composer" style="display:none;padding:12px 20px;max-width:1700px"></div>
   </div>
 
@@ -5604,11 +5606,131 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('list-status').style.display = tab === 'status' ? '' : 'none';
     document.getElementById('list-coverage').style.display = tab === 'coverage' ? '' : 'none';
     document.getElementById('list-analysis').style.display = tab === 'analysis' ? '' : 'none';
+    document.getElementById('list-ledger').style.display = tab === 'ledger' ? '' : 'none';
     document.getElementById('list-composer').style.display = tab === 'composer' ? '' : 'none';
     if (tab === 'status') renderListingStatus();
     else if (tab === 'coverage') renderCoverage();
     else if (tab === 'analysis') renderListingAnalysis();
+    else if (tab === 'ledger') renderLedger();
     else renderList();
+  }
+
+  // ---------------- 💰 出品台帳（出品時の 仕入/重量/各国価格/手数料/利益 を記録＝価格改定の参考） ----------------
+  // コンポーザーの現在状態から「出品の経済スナップショット」を作る（listRefreshと同じ価格・利益計算を独立に再現）
+  function buildListingSnapshot() {
+    const hasVar = listState.variations.length > 0;
+    const rows = hasVar ? listState.variations : [{ opt: '', cost: listState.costJpy, stock: 1, sku: listState.parentSku || '' }];
+    const title = listTitle();
+    const sku = (listState.parentSku || '').trim();
+    const id = 'lst|' + (sku || title || 'untitled').slice(0, 90);
+    const defW = (listState.weightG != null ? listState.weightG : settings.weightG) || 0;
+    const econ = {};
+    accountTargets().forEach(rg => {
+      const ov = listState.overrides[rg.cc] || {}, ovVars = ov.vars || {};
+      const vlist = rows.map((v, i) => {
+        const o = ovVars[i] || {}; if (o.off) return null;
+        const wg = v.weightG != null ? v.weightG : defW;
+        const auto = roundLocal(priceLocalFor(rg.cc, v.cost || 0, { weightG: wg }), rg.priceUnit || 1);
+        const local = (o.price != null && String(o.price) !== '') ? Number(o.price) : auto;
+        const pr = priceProfitFor(rg.cc, v.cost || 0, local, { weightG: wg });
+        return { name: hasVar ? ((o.name != null && o.name !== '') ? o.name : (v.opt || '')) : '', sku: v.sku || '', cost: Number(v.cost) || 0, weightG: wg, local: local, buyerJpy: pr.buyerJpy, feeJpy: pr.feeJpy, feePct: pr.feePct, slsJpy: pr.slsJpy, sellerJpy: pr.sellerJpy, profit: pr.profit, roi: Math.round(pr.roi) };
+      }).filter(Boolean);
+      if (vlist.length) econ[rg.cc] = { rate: rg.rateJpy, cur: rg.cur, vars: vlist };
+    });
+    const variations = rows.map(v => ({ name: v.opt || '', sku: v.sku || '', cost: Number(v.cost) || 0, weightG: v.weightG != null ? v.weightG : defW }));
+    return { id, name: (listState.name || '').trim(), title, category: listState.category || '', parent_sku: sku, weight_g: defW, cost_total: variations.reduce((s, v) => s + (v.cost || 0), 0), variations, econ, updated_at: new Date().toISOString() };
+  }
+  async function recordListing(silent) {
+    try {
+      const snap = buildListingSnapshot();
+      if (!snap.econ || !Object.keys(snap.econ).length) { if (!silent) toast('記録する国/価格がありません（商品情報と対象国を確認）', true); return; }
+      if (!settings.sbSecret) { if (!silent) toast('⚠️ 記録には⚙️設定の Supabase 書き込みキーが必要です', true); return; }
+      await sbUpsert('listing_catalog', [snap]); // created_at はDB default（merge時は既存を維持）
+      try { logAct('出品', '台帳に記録', snap.name || snap.title, snap.parent_sku || (Object.keys(snap.econ).length + '国')); } catch (_) {}
+      lst._ledgerReload = true;
+      if (!silent) toast('💰 出品台帳に記録しました（💰出品台帳タブで確認）');
+    } catch (e) { if (!silent) toast('記録エラー: ' + (e.message || e), true); }
+  }
+  async function renderLedger() {
+    const host = document.getElementById('list-ledger'); if (!host) return;
+    if (!host.dataset.wired) { host.dataset.wired = '1'; }
+    host.innerHTML = '<div class="smd-dim" style="padding:10px">読み込み中…</div>';
+    let rows;
+    try { rows = await sbGetAll('listing_catalog', 'select=*&order=updated_at.desc'); }
+    catch (e) {
+      if (/does not exist|relation|schema cache|42P01/i.test(e.message || '')) {
+        host.innerHTML = `<div class="tool-card" style="max-width:860px"><div style="font-weight:700;margin-bottom:6px">💰 出品台帳（テーブル未作成）</div><div style="font-size:12.5px;line-height:1.8;color:#444">Supabaseに <code>listing_catalog</code> テーブルを1回作成すると使えます。SQL Editorで以下を実行してください：<pre style="background:#f6f6f6;border:1px solid #eee;border-radius:6px;padding:8px;font-size:11px;overflow:auto;white-space:pre-wrap">create table if not exists listing_catalog (id text primary key, name text, title text, category text, parent_sku text, weight_g numeric, cost_total numeric, variations jsonb, econ jsonb, note text, created_at timestamptz default now(), updated_at timestamptz default now());
+alter table listing_catalog disable row level security;
+grant select,insert,update,delete on listing_catalog to anon, authenticated;</pre>作成後この画面を🔄更新。</div></div>`;
+      } else host.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>';
+      return;
+    }
+    const q = (lst.ledgerQ || '').toLowerCase().trim();
+    let list = rows || [];
+    if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
+    const head = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <span style="font-weight:700;font-size:14px">💰 出品台帳</span>
+      <span class="smd-dim" style="font-size:12px">${(rows || []).length}件 <span style="color:#888">（出品時に自動記録＋📥手動記録。価格改定の参考に）</span></span>
+      <input id="ledger-q" placeholder="🔍 商品名/SKU/カテゴリ" value="${esc(lst.ledgerQ || '')}" style="padding:5px 9px;font-size:12.5px;min-width:220px">
+      <button id="ledger-reload" class="smd-btn" style="font-size:11px">🔄 更新</button></div>`;
+    if (!list.length) {
+      host.innerHTML = head + `<div class="tool-card" style="max-width:760px;font-size:12.5px;color:#555">${(rows || []).length ? '該当なし（検索条件を変えてください）。' : 'まだ記録がありません。<b>✍️出品を作る</b>で商品を入力し、<b>📥台帳に記録</b>または<b>▶自動で出品</b>を押すとここに貯まります。'}</div>`;
+      wireLedger(host); return;
+    }
+    const jpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
+    const cards = list.map(r => {
+      const econ = r.econ || {}; const ccs = Object.keys(econ);
+      // 全国・全明細の利益レンジ
+      let pMin = Infinity, pMax = -Infinity, rMin = Infinity, rMax = -Infinity;
+      ccs.forEach(cc => (econ[cc].vars || []).forEach(v => { pMin = Math.min(pMin, v.profit); pMax = Math.max(pMax, v.profit); rMin = Math.min(rMin, v.roi); rMax = Math.max(rMax, v.roi); }));
+      const anyNeg = pMin < 0;
+      const rangeTxt = pMin === Infinity ? '—' : (pMin === pMax ? jpy(pMin) : jpy(pMin) + '〜' + jpy(pMax));
+      const rows2 = ccs.map(cc => {
+        const e = econ[cc]; const rg = regionByCc(cc);
+        return (e.vars || []).map(v => {
+          const pc = v.profit >= 0 ? '#1a7f37' : '#d93025';
+          return `<tr style="${v.profit < 0 ? 'background:#fff4f4' : ''}">
+            <td style="padding:3px 7px;white-space:nowrap"><span style="background:${(rg && rg.color) || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${cc}</span></td>
+            <td style="padding:3px 7px;font-size:11.5px">${esc(v.name || '—')}${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap">${(e.cur || '')}${(Number(v.local) || 0).toLocaleString()}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#888">${jpy(v.buyerJpy)}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="Shopee手数料">${jpy(v.feeJpy)} <span style="font-size:9.5px">(${v.feePct}%)</span></td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="SLS送料">${jpy(v.slsJpy)}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap">${jpy(v.cost)}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700;color:${pc}">${v.profit >= 0 ? '+' : ''}${jpy(v.profit)}</td>
+            <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${v.roi}%</td></tr>`;
+        }).join('');
+      }).join('');
+      return `<details class="ledger-item" style="border:1px solid #e6e6e6;border-left:4px solid ${anyNeg ? '#d93025' : '#1a7f37'};border-radius:8px;margin-bottom:8px;background:#fff">
+        <summary style="cursor:pointer;list-style:none;padding:9px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:13px;flex:1;min-width:200px">${esc(r.name || r.title || '(無題)')}</span>
+          <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${jpy(r.cost_total)} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国</span>
+          <span style="font-size:11.5px;white-space:nowrap">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}</span>
+          <span class="smd-dim" style="font-size:10.5px;white-space:nowrap">${(r.updated_at || '').slice(0, 10)}</span>
+          <button class="ledger-del smd-btn" data-id="${esc(r.id)}" title="この記録を削除" style="font-size:10px;padding:1px 6px;color:#d93025;border-color:#e0a0a0">🗑</button>
+        </summary>
+        <div style="padding:2px 12px 12px;overflow:auto">
+          <table style="border-collapse:collapse;font-size:12px;min-width:640px"><thead><tr style="color:#888;font-size:10.5px;text-align:left">
+            <th style="padding:2px 7px">国</th><th style="padding:2px 7px">明細</th><th style="padding:2px 7px;text-align:right">出品価格</th><th style="padding:2px 7px;text-align:right">買主¥</th><th style="padding:2px 7px;text-align:right">手数料</th><th style="padding:2px 7px;text-align:right">SLS送料</th><th style="padding:2px 7px;text-align:right">仕入</th><th style="padding:2px 7px;text-align:right">利益</th><th style="padding:2px 7px;text-align:right">ROI</th>
+          </tr></thead><tbody>${rows2}</tbody></table>
+          ${r.category ? `<div class="smd-dim" style="font-size:10.5px;margin-top:5px">カテゴリ: ${esc(r.category)}</div>` : ''}
+        </div>
+      </details>`;
+    }).join('');
+    host.innerHTML = head + `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">💡 手数料・SLS送料・利益は<b>記録時点</b>の計算値です（為替や手数料設定を変えても過去記録は変わりません）。価格改定の参考にどうぞ。</div>` + cards;
+    wireLedger(host);
+  }
+  function wireLedger(host) {
+    const qi = host.querySelector('#ledger-q');
+    if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { lst.ledgerQ = qi.value; renderLedger().then(() => { const n = document.getElementById('ledger-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250); }); }
+    const rl = host.querySelector('#ledger-reload'); if (rl) rl.addEventListener('click', () => renderLedger());
+    host.querySelectorAll('.ledger-del').forEach(b => b.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (!settings.sbSecret) { toast('削除には⚙️設定の書き込みキーが必要です', true); return; }
+      if (!confirm('この記録を削除しますか？')) return;
+      try { await sbDelete('listing_catalog', 'id=eq.' + encodeURIComponent(b.dataset.id)); toast('削除しました'); renderLedger(); }
+      catch (err) { toast('削除エラー: ' + (err.message || err), true); }
+    }));
   }
   // lst.byCc を確実にロード（出品状況/分析/横断で共有）
   async function ensureListings() {
@@ -6501,7 +6623,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
     const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
     const profit = sellerJpy - (Number(costJpy) || 0) - slsJpy;
-    return { buyerJpy: Math.round(buyerJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
+    return { buyerJpy: Math.round(buyerJpy), sellerJpy: Math.round(sellerJpy), feeJpy: Math.round(buyerJpy - sellerJpy), feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: Math.round(slsJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
   }
   // 旧・単純式（互換のため残置）
   function priceFromCost(costJpy) {
@@ -7487,7 +7609,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          <div style="margin-top:7px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
            <button id="li-batchopen" class="smd-btn" style="background:#7b52c4;border-color:#7b52c4;color:#fff;font-weight:700">▶ 全対象国を一括で開く（${targets.length}国）</button>
            <button id="li-bulkcountry" class="smd-btn" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="全国/選択国へ タイトル・価格・明細の採用・specifics をまとめて適用">🌏 国一括編集</button>
-           <span class="smd-dim" style="font-size:11px">一括で開く=新規出品タブを一斉に開く（要ポップアップ許可）。国一括編集=複数国へまとめて設定。</span>
+           <button id="li-record" class="smd-btn" style="background:#eef7ff;border-color:#1565c0;color:#1565c0;font-weight:700" title="この出品の 仕入・重量・各国の価格・手数料・利益 を💰出品台帳に記録（価格改定の参考用）。▶自動で出品/一括で開く の時は自動記録されます">📥 台帳に記録</button>
+           <span class="smd-dim" style="font-size:11px">一括で開く=新規出品タブを一斉に開く（要ポップアップ許可）。📥記録=価格改定の参考に台帳へ保存（<b>💰出品台帳</b>タブで閲覧）。</span>
          </div>
          <details style="margin-top:8px">
            <summary style="cursor:pointer;font-weight:700;font-size:12px;color:#7b52c4;list-style:none;user-select:none">🌏 他国で自動出品を有効化する（各国 初回だけ・要ブリッジ）</summary>
@@ -7587,7 +7710,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">⠿ ${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px">
               <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
-              <a href="${autoUrl}" target="_blank" class="smd-btn" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページを開く→右下パネルの🚀作成（非公開/公開）で公式API(create_product_info)で作成。要 shopee-newlisting.user.js＋その国の雛形">▶ 自動で出品</a>
+              <a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページを開く→右下パネルの🚀作成（非公開/公開）で公式API(create_product_info)で作成。要 shopee-newlisting.user.js＋その国の雛形。※押すと💰出品台帳に自動記録">▶ 自動で出品</a>
               <a href="https://${rg.host}/portal/product/new" target="_blank" class="smd-btn" style="text-decoration:none">手動 ↗</a>
             </span>
           </div>
@@ -7665,10 +7788,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!autoLinks.length) { alert('対象国がありません（対象アカウントを確認してください）'); return; }
       if (!(listState.name || '').trim() && !listState.variations.length) { alert('先に商品情報を入力してください'); return; }
       if (!confirm(`対象 ${autoLinks.length}国（${autoLinks.map(x => x.cc).join('/')}）の新規出品ページを一括で開きます。\n※各タブでuserscriptパネルが起動します。実際の作成は各タブで🚀作成を押すまで行われません。よろしいですか？`)) return;
+      recordListing(true); // 💰出品台帳に自動記録（静かに）
       let blocked = 0;
       autoLinks.forEach(l => { const w = window.open(l.url, '_blank'); if (!w) blocked++; });
       if (blocked) alert(`${blocked}/${autoLinks.length}国がポップアップブロックされました。ブラウザのポップアップを「許可」に変えて、もう一度このボタンを押してください（許可すれば全国一気に開きます）。`);
     });
+    // ▶自動で出品（各国）を押した瞬間に台帳へ自動記録（リンクは通常どおり新タブで開く）
+    out.querySelectorAll('.li-autolist').forEach(a => a.addEventListener('click', () => { try { recordListing(true); } catch (_) {} }));
+    // 📥 台帳に記録（明示ボタン）
+    const recBtn = document.getElementById('li-record');
+    if (recBtn) recBtn.addEventListener('click', () => recordListing(false));
     const bulkBtn = document.getElementById('li-bulkcountry');
     if (bulkBtn) bulkBtn.addEventListener('click', () => openBulkCountryEdit());
     const prevBtn = document.getElementById('li-preview');
