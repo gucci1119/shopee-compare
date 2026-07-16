@@ -4315,7 +4315,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const kpi = (t, v, s, col) => `<div style="flex:1;min-width:130px;background:#fff;border:1px solid #eee;border-radius:8px;padding:9px 12px"><div style="font-size:11px;color:#888">${t}</div><div style="font-size:19px;font-weight:800${col ? ';color:' + col : ''}">${v}</div><div style="font-size:10.5px;color:#888">${s || ''}</div></div>`;
     const rel = ts => { if (!ts) return ''; const h = (now - Date.parse(ts)) / 3600000; if (h < 1) return Math.max(1, Math.round(h * 60)) + '分前'; if (h < 24) return Math.round(h) + '時間前'; if (h < 24 * 8) return Math.round(h / 24) + '日前'; return new Date(ts).toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' }); };
     const srcBadge = s => s === 'whatsapp' ? '<span style="background:#25d366;color:#fff;font-size:9.5px;font-weight:700;border-radius:3px;padding:0 4px">WhatsApp</span>' : '<span style="background:#ee4d2d;color:#fff;font-size:9.5px;font-weight:700;border-radius:3px;padding:0 4px">Shopee</span>';
-    const thread = c => `<tr class="msg-detail"><td colspan="4" style="background:#fafbff;padding:9px 13px"><div style="display:flex;flex-direction:column;gap:5px;max-width:620px">${c.msgs.map(m => `<div style="display:flex;${m.direction === 'out' ? 'justify-content:flex-end' : ''}"><div style="max-width:78%;background:${m.direction === 'out' ? '#dcf5e5' : '#fff'};border:1px solid ${m.direction === 'out' ? '#b6e6c9' : '#e5e5e5'};border-radius:9px;padding:6px 10px;font-size:12px"><div style="white-space:pre-wrap;line-height:1.5">${esc(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div><div style="font-size:9.5px;color:#999;margin-top:2px;text-align:right">${esc((m.msg_time || '').slice(5, 16).replace('T', ' '))}</div></div></div>`).join('')}</div></td></tr>`;
+    const thread = c => `<tr class="msg-detail"><td colspan="4" style="background:#fafbff;padding:9px 13px"><div style="display:flex;flex-direction:column;gap:5px;max-width:620px">${c.msgs.map(m => `<div style="display:flex;${m.direction === 'out' ? 'justify-content:flex-end' : ''}"><div style="max-width:78%;background:${m.direction === 'out' ? '#dcf5e5' : '#fff'};border:1px solid ${m.direction === 'out' ? '#b6e6c9' : '#e5e5e5'};border-radius:9px;padding:6px 10px;font-size:12px"><div style="white-space:pre-wrap;line-height:1.5">${esc(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div><div style="font-size:9.5px;color:#999;margin-top:2px;text-align:right">${esc((m.msg_time || '').slice(5, 16).replace('T', ' '))}</div></div></div>`).join('')}</div>` +
+      (c.source === 'shopee' ? `<div style="margin-top:10px;max-width:620px;border-top:1px dashed #dbe3ef;padding-top:8px"><div style="display:flex;gap:6px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(c.key)}" rows="2" placeholder="返信を入力して送信（webchatタブを開いておくと自動送信）" style="flex:1;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(c.key)}" data-cc="${esc(c.cc || '')}" data-buyer="${esc(c.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(c.key)}" style="font-size:10.5px;margin-top:3px"></div></div>` : '') +
+      `</td></tr>`;
     body.innerHTML =
       `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:820px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信', unreplied, '相手からの最後に未返信', unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
       `<div class="tool-card" style="margin:0 0 8px;max-width:820px;padding:8px 12px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12px">絞り込み:</span>` +
@@ -4332,6 +4334,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.querySelectorAll('.msg-src').forEach(b => b.addEventListener('click', () => { msg.source = b.dataset.v; renderMessages(); }));
     { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; renderMessages(); }); }
     body.querySelectorAll('.msg-row').forEach(r => r.addEventListener('click', () => { const k = r.dataset.k; msg.open = (msg.open === k ? null : k); renderMessages(); }));
+    const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
+    body.querySelectorAll('.msg-reply-send').forEach(btn => btn.addEventListener('click', async () => {
+      const k = btn.dataset.k, cc = btn.dataset.cc, buyer = btn.dataset.buyer;
+      const ta = body.querySelector('.msg-reply-in[data-k="' + cssEsc(k) + '"]');
+      const stat = body.querySelector('.msg-reply-stat[data-k="' + cssEsc(k) + '"]');
+      const text = ((ta && ta.value) || '').trim();
+      if (!text) { if (ta) ta.focus(); return; }
+      if (!settings.sbSecret) { if (stat) { stat.textContent = '⚠️ 送信には⚙️設定の「Supabase secretキー（書き込み用）」が必要です'; stat.style.color = '#d93025'; } return; }
+      if (stat) { stat.textContent = '送信待ちに登録中…'; stat.style.color = '#888'; }
+      try {
+        const id = 'ob|' + cc + '|' + buyer + '|' + Date.now();
+        await sbUpsert('chat_outbox', [{ id, cc, buyer, conversation_id: k, text, status: 'pending', created_at: new Date().toISOString() }]);
+        if (ta) ta.value = '';
+        try { logAct('メッセージ', '返信送信', buyer, text.slice(0, 40)); } catch (_) {}
+        if (stat) { stat.textContent = '📤 送信待ちに登録しました（webchatタブが開いていれば自動で送信されます）'; stat.style.color = '#1a7f37'; }
+      } catch (e) { if (stat) { stat.textContent = '登録エラー: ' + (e.message || e); stat.style.color = '#d93025'; } }
+    }));
   }
 
   // ---------------- 📰 業界ニュース（ゲーム/アニメ・日本＋海外・GAS RSS集約） ----------------
