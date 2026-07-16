@@ -257,7 +257,7 @@
           <button data-p="stock" title="全在庫の台帳（在庫保管中／入庫待ち／販売済み）。登録・編集・QRラベル印刷">🏷 在庫管理</button>
           <button data-p="buy" title="🔎仕入れ検索：売れた注文を各サイトで最安検索して最速仕入れ／⏳入庫待ち：仕入れたが未入荷の管理">🛒 仕入れ管理</button>
           <button data-p="list" title="Shopeeへの新規出品を作る／出品状況の把握（各国タイトル・文字数チェック等）">🆕 出品管理</button>
-          <button data-p="messages" title="Shopeeチャット＋WhatsApp等のメッセージを一元表示・分析（webchat取り込み）">💬 メッセージ</button>
+          <button data-p="messages" title="Shopeeチャット＋WhatsApp等のメッセージを一元表示・分析（webchat取り込み）">💬 メッセージ <span id="msg-nav-badge" style="display:none;background:#d93025;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:0 6px;margin-left:2px"></span></button>
           <button data-p="returns" title="キャンセル／返品の抽出と、理由・返金額・再出品可否の記録">↩️ 返品・キャンセル</button>
           <button data-p="tasks" title="やることリスト（優先度・期日・完了）。Supabaseで複数PC同期">✅ タスク管理</button>
         </div>
@@ -1342,6 +1342,7 @@
       b.style.cssText = `padding:6px 13px;border:1px solid ${on ? '#1a7f37' : '#ddd'};background:${on ? '#eef8f0' : '#fff'};color:${on ? '#1a7f37' : '#555'};font-weight:${on ? 700 : 500};border-radius:7px;cursor:pointer;font-size:12.5px`;
     });
     PAGE_KEYS.forEach(k => { const el = document.getElementById('page-' + k); if (el) el.style.display = k === p ? '' : 'none'; });
+    if (p !== 'messages' && window.__msgPoll) { clearInterval(window.__msgPoll); window.__msgPoll = null; } // メッセージ画面を離れたらリアルタイム更新を止める
     // 各ページの描画を1か所で実行し、例外は握って可視化（無言ハングを防ぐ）
     const RENDER = {
       dash: () => { renderDash(); renderTrend(); },
@@ -4280,13 +4281,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `</div>`;
   }
   // ---------------- 💬 メッセージ（Shopeeチャット＋WhatsApp一元・分析） ----------------
-  const msg = { open: null, source: 'all', unrepliedOnly: false };
+  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set() };
+  // 💬ナビの未返信バッジ更新
+  function updateMsgNavBadge(n) { const b = document.getElementById('msg-nav-badge'); if (b) { if (n > 0) { b.textContent = n; b.style.display = ''; } else b.style.display = 'none'; } }
+  // 新着通知（ブラウザ通知＋タイトル点滅＋トースト）。相手からの新規メッセージ時のみ。
+  function notifyNewMsgs(list) {
+    if (!list.length) return;
+    const names = [...new Set(list.map(m => m.buyer || '相手'))].slice(0, 3).join('、');
+    try { if (window.Notification && Notification.permission === 'granted') new Notification('💬 新着メッセージ（' + list.length + '件）', { body: names + ' から', tag: 'shopee-chat' }); } catch (_) {}
+    try { toast('💬 新着メッセージ: ' + names + '（' + list.length + '件）'); } catch (_) {}
+    // タイトル点滅
+    try { const orig = document.title; let f = 0; clearInterval(window.__titleFlash); window.__titleFlash = setInterval(() => { document.title = (f++ % 2) ? '🔴 新着メッセージ' : orig; if (f > 8) { clearInterval(window.__titleFlash); document.title = orig; } }, 700); } catch (_) {}
+  }
   async function renderMessages() {
     const body = document.getElementById('msg-body'); if (!body) return;
     { const rb = document.getElementById('msg-refresh'); if (rb && !rb._wired) { rb._wired = true; rb.addEventListener('click', () => renderMessages()); } }
     body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let rows;
-    try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time&order=msg_time.desc'); }
+    try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
     catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>'; return; } }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
@@ -4305,6 +4317,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     rows.forEach(m => { const k = m.conversation_id || m.buyer || m.id; const c = conv[k] = conv[k] || { key: k, buyer: m.buyer, source: m.source || 'shopee', cc: m.cc, msgs: [] }; c.msgs.push(m); });
     let convList = Object.values(conv).map(c => { c.msgs.sort((a, b) => (a.msg_time || '') < (b.msg_time || '') ? -1 : 1); c.last = c.msgs[c.msgs.length - 1]; c.unreplied = c.last && c.last.direction === 'in'; return c; });
     const totalConv = convList.length, unreplied = convList.filter(c => c.unreplied).length;
+    msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
+    updateMsgNavBadge(unreplied);
     const now = Date.now(), recent = rows.filter(m => m.msg_time && (now - Date.parse(m.msg_time)) < 86400000).length;
     const bySource = {}; convList.forEach(c => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
     const gaps = []; convList.forEach(c => { for (let i = 0; i < c.msgs.length - 1; i++) { if (c.msgs[i].direction === 'in' && c.msgs[i + 1].direction === 'out') { const g = Date.parse(c.msgs[i + 1].msg_time) - Date.parse(c.msgs[i].msg_time); if (g > 0) gaps.push(g); break; } } });
@@ -4362,11 +4376,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try {
         const id = 'ob|' + cc + '|' + buyer + '|' + Date.now();
         await sbUpsert('chat_outbox', [{ id, cc, buyer, conversation_id: k, text, status: 'pending', created_at: new Date().toISOString() }]);
-        if (ta) ta.value = '';
+        if (ta) ta.value = ''; delete msg.draft[k];
         try { logAct('メッセージ', '返信送信', buyer, text.slice(0, 40)); } catch (_) {}
         if (stat) { stat.textContent = '📤 送信待ちに登録しました（webchatタブが開いていれば自動で送信されます）'; stat.style.color = '#1a7f37'; }
       } catch (e) { if (stat) { stat.textContent = '登録エラー: ' + (e.message || e); stat.style.color = '#d93025'; } }
     }));
+    // 返信の下書き保持（会話切替・自動更新で消えない）
+    { const rin = body.querySelector('.msg-reply-in'); if (rin) { const k = rin.dataset.k; if (msg.draft[k]) rin.value = msg.draft[k]; rin.addEventListener('input', () => { msg.draft[k] = rin.value; }); } }
+    // 通知の許可を一度だけ求める
+    try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (_) {}
+    // ★リアルタイム更新：この画面を開いている間だけ、新着(synced_at)を検知して反映＋通知（常時ポーリングはしない）
+    if (window.__msgPoll) clearInterval(window.__msgPoll);
+    window.__msgPoll = setInterval(async () => {
+      const pg = document.getElementById('page-messages');
+      if (!pg || pg.style.display === 'none') { clearInterval(window.__msgPoll); window.__msgPoll = null; return; }
+      if (!msg.lastSync) return;
+      let neu; try { neu = await sbGetAll('chat_messages', 'select=id,buyer,direction,synced_at&synced_at=gt.' + encodeURIComponent(msg.lastSync) + '&order=synced_at.desc&limit=100'); } catch (_) { return; }
+      if (!neu || !neu.length) return; // 新着が無ければ再描画しない＝画面が止まらない
+      const incoming = neu.filter(m => m.direction === 'in' && !msg.notifiedIds.has(m.id));
+      incoming.forEach(m => msg.notifiedIds.add(m.id)); if (msg.notifiedIds.size > 800) msg.notifiedIds.clear();
+      // 入力中のフォーカス・カーソルを保持したまま再描画（返信作業を邪魔しない）
+      const act = document.activeElement, wasReply = !!(act && act.classList && act.classList.contains('msg-reply-in')), rk = wasReply ? act.dataset.k : null, caret = wasReply ? act.selectionStart : null;
+      if (incoming.length) notifyNewMsgs(incoming);
+      await renderMessages();
+      if (wasReply) { const nt = document.querySelector('.msg-reply-in[data-k="' + ((window.CSS && CSS.escape) ? CSS.escape(rk) : rk) + '"]'); if (nt) { nt.focus(); try { nt.setSelectionRange(caret, caret); } catch (_) {} } }
+    }, 12000);
   }
 
   // ---------------- 📰 業界ニュース（ゲーム/アニメ・日本＋海外・GAS RSS集約） ----------------
