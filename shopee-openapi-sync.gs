@@ -413,9 +413,22 @@ function syncDailyStatsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, days: rows.length, orders: details.length };
 }
 function syncAll() {
-  var toks = listTokens_(), log = [];
-  toks.forEach(function (tok) { try { log.push(syncDailyStatsForShop_(tok)); } catch (e) { log.push({ shop_id: tok.shop_id, cc: tok.cc, error: String(e).slice(0, 80) }); } });
-  Logger.log(JSON.stringify(log, null, 1)); return log;
+  // ★日次集計はDBのorders表から計算＝Shopeeの二重取得を解消（旧: syncDailyStatsForShop_ が毎時Shopeeを再取得していた。
+  //   orders表は syncOrdersAll が公式APIで同期済みなので、そこから cc×日 で units/sales/orders を集計するだけ＝Shopee呼び出しゼロ）。
+  var since = new Date((now_() - 4 * 86400) * 1000).toISOString().slice(0, 10);
+  var orders = sbSelect_('orders', 'select=cc,total,order_date,items,tab&order_date=gte.' + since + '&limit=10000');
+  var byKey = {};
+  (orders || []).forEach(function (o) {
+    if (o.tab === 600) return; // キャンセル除外
+    var day = String(o.order_date || '').slice(0, 10), cc = o.cc; if (!day || !cc) return;
+    var units = (o.items || []).reduce(function (s, it) { return s + (Number(it.qty) || 1); }, 0);
+    var e = byKey[cc + '|' + day] = byKey[cc + '|' + day] || { cc: cc, day: day, units: 0, sales: 0, orders: 0 };
+    e.units += units; e.sales += parseFloat(o.total || 0) || 0; e.orders += 1;
+  });
+  var rows = Object.keys(byKey).map(function (k) { var e = byKey[k]; e.synced_at = new Date().toISOString(); return e; });
+  if (rows.length) sbUpsert_('daily_stats', rows, 'cc,day');
+  Logger.log('syncAll(DB集計): ' + rows.length + ' 日行 / ' + ((orders || []).length) + ' 注文');
+  return { days: rows.length, orders: (orders || []).length };
 }
 
 // 注文 → orders
