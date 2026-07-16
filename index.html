@@ -2242,18 +2242,24 @@
     return out;
   }
 
-  async function renderDash() {
+  async function renderDash(force) {
     const kpis = document.getElementById('dash-kpis');
-    kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
     try {
-      const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
-      const [days, orders, income, inv, payouts] = await Promise.all([
-        sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
-        sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
-        sbGetAll('income', 'select=cc,amount,pending&order=sn'),
-        ensureInv().catch(() => []),
-        sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
-      ]);
+      let days, orders, income, inv, payouts;
+      const dc = renderDash._cache; // 60秒キャッシュ（連続で開いても再取得しない）。daysはtrendでも再利用
+      if (!force && dc && Date.now() - dc.at < 60000) { ({ days, orders, income, inv, payouts } = dc); }
+      else {
+        kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
+        const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
+        [days, orders, income, inv, payouts] = await Promise.all([
+          sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
+          sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
+          sbGetAll('income', 'select=cc,amount,pending&order=sn'),
+          ensureInv().catch(() => []),
+          sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
+        ]);
+        renderDash._cache = { days, orders, income, inv, payouts, at: Date.now() };
+      }
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
       days.forEach(d => {
         const rg = regionByCc(d.cc); if (!rg) return;
@@ -3085,14 +3091,19 @@
   const ccBadge = (cc) => { const rg = regionByCc(cc); return `<span style="background:${rg ? rg.color : '#999'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:3px">${esc(cc)}</span>`; };
   const custItemsStr = (o) => ((o.items || []).map(it => `${esc(it.name || it.item_name || '(商品名なし)')}${(it.qty || it.quantity || it.model_quantity_purchased || 1) > 1 ? ` ×${(it.qty || it.quantity || it.model_quantity_purchased)}` : ''}`).join('、') || '（明細なし）');
   const custItemQty = (o) => (o.items || []).reduce((s, it) => s + Number(it.qty || it.quantity || it.model_quantity_purchased || 1), 0);
-  async function renderCustomers() {
+  async function renderCustomers(force) {
     const body = document.getElementById('cust-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let orders, notes;
-    try {
-      orders = await sbGetAll('orders', 'select=cc,buyer,order_date,tab,items,total&order=order_date.desc');
-      notes = await sbGetAll('customer_notes', 'select=buyer,note').catch(() => []);
-    } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+    const cch = cust._cache; // 絞り込みは再取得せずキャッシュから（TTL120秒／force・書込後は取り直し）
+    if (!force && cch && Date.now() - cch.at < 120000) { orders = cch.orders; notes = cch.notes; }
+    else {
+      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      try {
+        orders = await sbGetAll('orders', 'select=cc,buyer,order_date,tab,items,total&order=order_date.desc');
+        notes = await sbGetAll('customer_notes', 'select=buyer,note').catch(() => []);
+      } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+      cust._cache = { orders, notes, at: Date.now() };
+    }
     const noteMap = {}; (notes || []).forEach(n => { noteMap[n.buyer] = n.note || ''; });
     const scoped = cust.cc ? orders.filter(o => o.cc === cust.cc) : orders;
     const byB = {};
@@ -3128,7 +3139,7 @@
     const wireNote = (t) => t.addEventListener('change', async () => {
       const b = t.dataset.b, st = body.querySelector('.cust-note-status[data-b="' + (window.CSS && CSS.escape ? CSS.escape(b) : b) + '"]');
       if (st) { st.textContent = '保存中…'; st.style.color = '#888'; }
-      try { await sbUpsert('customer_notes', [{ buyer: b, note: t.value, updated_at: new Date().toISOString() }]); noteMap[b] = t.value; if (st) { st.textContent = '✓ 保存しました'; st.style.color = '#1a7f37'; } }
+      try { await sbUpsert('customer_notes', [{ buyer: b, note: t.value, updated_at: new Date().toISOString() }]); noteMap[b] = t.value; cust._cache = null; if (st) { st.textContent = '✓ 保存しました'; st.style.color = '#1a7f37'; } }
       catch (e) { if (st) { st.textContent = '保存エラー: ' + (e.message || e); st.style.color = '#d93025'; } }
     });
     body.innerHTML =
@@ -3174,21 +3185,26 @@
     try { await sbUpsert('app_kv', [{ k: 'plan_cfg', v: plan.cfg, updated_at: new Date().toISOString() }]); if (st) { st.textContent = '✓ 保存（全PC同期）'; st.style.color = '#1a7f37'; } }
     catch (e) { if (st) { st.textContent = '✓ この端末に保存（同期は設定の秘密キーが必要）'; st.style.color = '#888'; } }
   }
-  async function renderPlan() {
+  async function renderPlan(force) {
     const body = document.getElementById('plan-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費を集計）</span>';
     let orders, income, costs, inv, expenses, kv, tasks;
-    try {
-      [orders, income, costs, inv, expenses, kv, tasks] = await Promise.all([
-        sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
-        sbGetAll('income', 'select=cc,sn,amount'),
-        sbGetAll('costs', 'select=cc,sn,cost,deposit'),
-        sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
-        sbGetAll('expenses', 'select=ymd,amount'),
-        sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
-        sbGetAll('tasks', 'select=done').catch(() => []),
-      ]);
-    } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+    const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝7テーブル毎回取得を解消
+    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks } = pc.data); }
+    else {
+      body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費を集計）</span>';
+      try {
+        [orders, income, costs, inv, expenses, kv, tasks] = await Promise.all([
+          sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
+          sbGetAll('income', 'select=cc,sn,amount'),
+          sbGetAll('costs', 'select=cc,sn,cost,deposit'),
+          sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
+          sbGetAll('expenses', 'select=ymd,amount'),
+          sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
+          sbGetAll('tasks', 'select=done').catch(() => []),
+        ]);
+      } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks }, at: Date.now() };
+    }
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
     if (plan.cfg.opexPct == null) plan.cfg.opexPct = 6;
@@ -4311,14 +4327,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // タイトル点滅
     try { const orig = document.title; let f = 0; clearInterval(window.__titleFlash); window.__titleFlash = setInterval(() => { document.title = (f++ % 2) ? '🔴 新着メッセージ' : orig; if (f > 8) { clearInterval(window.__titleFlash); document.title = orig; } }, 700); } catch (_) {}
   }
-  async function renderMessages() {
+  async function renderMessages(useCache) {
     const body = document.getElementById('msg-body'); if (!body) return;
     { const rb = document.getElementById('msg-refresh'); if (rb && !rb._wired) { rb._wired = true; rb.addEventListener('click', () => renderMessages()); } }
     // 初回だけ「読み込み中」。既に一覧が出ている更新時は消さず、裏で取得→中身だけ差し替え（一瞬空にしない）
     if (!document.getElementById('msg-list')) body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     let rows;
-    try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
-    catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>'; return; } }
+    // 会話クリック/絞り込み/ポーリングはキャッシュ(msg.rows)から描画＝毎回全履歴を取り直さない。取得は初回・🔄更新のみ
+    if (useCache && msg.rows) { rows = msg.rows; }
+    else {
+      try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
+      catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>'; return; } }
+      msg.rows = rows;
+    }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
         <div style="font-weight:700;font-size:14px;margin-bottom:6px">まだメッセージがありません 📭</div>
@@ -4391,9 +4412,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div id="msg-list" style="width:290px;flex:none;overflow-y:auto;border-right:1px solid #eee;background:#fff">${listHtml}</div>` +
       `<div id="msg-pane" style="flex:1;min-width:0;display:flex;flex-direction:column">${paneHtml}</div>` +
       `</div></div>`;
-    body.querySelectorAll('.msg-src').forEach(b => b.addEventListener('click', () => { msg.source = b.dataset.v; renderMessages(); }));
-    { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; renderMessages(); }); }
-    body.querySelectorAll('.msg-ci').forEach(r => r.addEventListener('click', () => { msg.open = r.dataset.k; renderMessages(); }));
+    body.querySelectorAll('.msg-src').forEach(b => b.addEventListener('click', () => { msg.source = b.dataset.v; renderMessages(true); }));
+    { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; renderMessages(true); }); }
+    body.querySelectorAll('.msg-ci').forEach(r => r.addEventListener('click', () => { msg.open = r.dataset.k; renderMessages(true); }));
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
@@ -4423,14 +4444,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const pg = document.getElementById('page-messages');
       if (!pg || pg.style.display === 'none') { clearInterval(window.__msgPoll); window.__msgPoll = null; return; }
       if (!msg.lastSync) return;
-      let neu; try { neu = await sbGetAll('chat_messages', 'select=id,buyer,direction,synced_at&synced_at=gt.' + encodeURIComponent(msg.lastSync) + '&order=synced_at.desc&limit=100'); } catch (_) { return; }
+      let neu; try { neu = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&synced_at=gt.' + encodeURIComponent(msg.lastSync) + '&order=synced_at.desc&limit=200'); } catch (_) { return; }
       if (!neu || !neu.length) return; // 新着が無ければ再描画しない＝画面が止まらない
+      const have = new Set((msg.rows || []).map(r => r.id)); const fresh = neu.filter(m => !have.has(m.id));
+      if (fresh.length) msg.rows = fresh.concat(msg.rows || []); // 差分だけキャッシュにマージ＝全履歴の再取得をしない
       const incoming = neu.filter(m => m.direction === 'in' && !msg.notifiedIds.has(m.id));
       incoming.forEach(m => msg.notifiedIds.add(m.id)); if (msg.notifiedIds.size > 800) msg.notifiedIds.clear();
       // 入力中のフォーカス・カーソルを保持したまま再描画（返信作業を邪魔しない）
       const act = document.activeElement, wasReply = !!(act && act.classList && act.classList.contains('msg-reply-in')), rk = wasReply ? act.dataset.k : null, caret = wasReply ? act.selectionStart : null;
       if (incoming.length) notifyNewMsgs(incoming);
-      await renderMessages();
+      await renderMessages(true);
       if (wasReply) { const nt = document.querySelector('.msg-reply-in[data-k="' + ((window.CSS && CSS.escape) ? CSS.escape(rk) : rk) + '"]'); if (nt) { nt.focus(); try { nt.setSelectionRange(caret, caret); } catch (_) {} } }
     }, 12000);
   }
@@ -5665,11 +5688,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!silent) toast('💰 出品台帳に記録しました（💰出品台帳タブで確認）');
     } catch (e) { if (!silent) toast('記録エラー: ' + (e.message || e), true); }
   }
-  async function renderLedger() {
+  async function renderLedger(useCache) {
     const host = document.getElementById('list-ledger'); if (!host) return;
     if (!host.dataset.wired) { host.dataset.wired = '1'; }
-    host.innerHTML = '<div class="smd-dim" style="padding:10px">読み込み中…</div>';
     let rows;
+    if (useCache && lst._ledgerRows) { rows = lst._ledgerRows; } // 検索など：キャッシュから（再取得しない）
+    else {
+    host.innerHTML = '<div class="smd-dim" style="padding:10px">読み込み中…</div>';
     try { rows = await sbGetAll('listing_catalog', 'select=*&order=updated_at.desc'); }
     catch (e) {
       if (/does not exist|relation|schema cache|42P01/i.test(e.message || '')) {
@@ -5679,10 +5704,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } else host.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>';
       return;
     }
+    lst._ledgerRows = rows || []; // 仕入インライン編集/検索で使うキャッシュ（再取得時のみ更新）
+    }
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
-    lst._ledgerRows = rows || []; // 仕入インライン編集で該当行/econを引くためのキャッシュ
     const head = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
       <span style="font-weight:700;font-size:14px">💰 出品台帳</span>
       <span class="smd-dim" style="font-size:12px">${(rows || []).length}件 <span style="color:#888">（出品時に自動記録＋📥手動記録。価格改定の参考に）</span></span>
@@ -5739,7 +5765,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   function wireLedger(host) {
     const qi = host.querySelector('#ledger-q');
-    if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { lst.ledgerQ = qi.value; renderLedger().then(() => { const n = document.getElementById('ledger-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250); }); }
+    if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { lst.ledgerQ = qi.value; renderLedger(true).then(() => { const n = document.getElementById('ledger-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }); }, 250); }); }
     const rl = host.querySelector('#ledger-reload'); if (rl) rl.addEventListener('click', () => renderLedger());
     const bf = host.querySelector('#ledger-backfill'); if (bf) bf.addEventListener('click', () => ledgerBackfillLive());
     // 開閉状態を覚える（仕入入力で再描画しても開いたまま）
@@ -8277,7 +8303,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     el.textContent = '読み込み中...';
     try {
       const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-      const days = await sbGet('daily_stats', `select=*&day=gte.${since}&order=day`);
+      const dc = renderDash._cache; // ダッシュが直前に取得したdaily_stats(40日)を再利用＝daily_statsの二重取得を解消
+      const days = (dc && Date.now() - dc.at < 60000) ? (dc.days || []).filter(d => d.day >= since) : await sbGet('daily_stats', `select=*&day=gte.${since}&order=day`);
       const byDay = {};
       days.forEach(d => { const rg = regionByCc(d.cc); if (!rg) return; byDay[d.day] = (byDay[d.day] || 0) + (d.sales || 0) * rg.rateJpy; });
       const keys = Object.keys(byDay).sort();
@@ -8453,14 +8480,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         pf.orders = orders;
         pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i]));
         pf.costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
-        pfSetInvMap(inv);
+        pfSetInvMap(inv); pf._invAt = Date.now();
       } catch (e) { body.innerHTML = `<span class="smd-err">${esc(e.message)}</span>`; return; }
     } else {
-      // 期間データはキャッシュのまま、在庫連携(shopee_sn)だけ毎回更新＝在庫で注文SNを当てた分を即「利益へ転記」反映
-      try {
-        const inv = await sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id');
-        pfSetInvMap(inv);
-      } catch (e) {}
+      // 期間データはキャッシュ。在庫連携(shopee_sn)は120秒に1回だけ更新（毎タブ切替での在庫再取得を解消）
+      if (force || !pf._invAt || Date.now() - pf._invAt > 120000) {
+        try {
+          const inv = await sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id');
+          pfSetInvMap(inv); pf._invAt = Date.now();
+        } catch (e) {}
+      }
     }
     try { pfRender(); }
     catch (e) { document.getElementById('pf-body').innerHTML = `<span class="smd-err">描画エラー: ${esc(e.message)}</span><div class="smd-dim" style="font-size:11px">この月のデータに想定外の値がある可能性。コンソールに詳細。</div>`; console.error('[利益] pfRender失敗', e); }
