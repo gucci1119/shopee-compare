@@ -91,6 +91,13 @@ function doGet(e) {
       } catch (err) { gout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gcb + '(' + JSON.stringify(gout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★アカウント健全性（全店のペナルティ点・違反指標）。読み取りのみ・token不要。ポータルの🛡パネル/アラート用。
+    if (p.action === 'account_health') {
+      var hcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var hout;
+      try { hout = { ok: true, shops: accountHealthAll_() }; } catch (err) { hout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(hcb + '(' + JSON.stringify(hout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★価格/在庫を複数モデルまとめて更新（ブリッジ卒業）。params: shop_id, item_id, list=JSON([{model_id,price}] / [{model_id,stock}])
     if (p.action === 'update_price_list' || p.action === 'update_stock_list') {
       var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -520,6 +527,47 @@ function shipOrder_(shopId, orderSn, param) {
   var j = callShop_(shopId, '/api/v2/logistics/ship_order', null, 'post', body);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, order_sn: String(orderSn), error: err, response: j.response || {} };
+}
+
+// ================= アカウント健全性（account_health）＝ペナルティ/違反の監視でBAN予防 =================
+function getShopPenalty_(shopId) { var j = callShop_(shopId, '/api/v2/account_health/get_shop_penalty', null, 'get'); return (j && j.response) || j; }
+function getShopPerformance_(shopId) { var j = callShop_(shopId, '/api/v2/account_health/get_shop_performance', null, 'get'); return (j && j.response) || j; }
+// 全認可店の健全性を集約（doGet account_health 用）。penalty=総ペナルティ点/ongoing=進行中の罰/rating=総合評価/metrics=各指標(値・目標・良否)。
+function accountHealthAll_() {
+  var toks = listTokens_(), out = [];
+  for (var i = 0; i < toks.length; i++) {
+    var SID = toks[i].shop_id, row = { cc: toks[i].cc || '?', shop_id: SID, shop_name: toks[i].shop_name || '' };
+    try {
+      var p = getShopPenalty_(SID) || {}, pp = p.penalty_points || {};
+      row.penalty = (pp.overall_penalty_points != null) ? pp.overall_penalty_points : (p.overall_penalty_points != null ? p.overall_penalty_points : 0);
+      row.ongoing = (p.ongoing_punishment || []).length;
+      row.tier = (p.punishment_tier != null) ? p.punishment_tier : ((pp.punishment_tier != null) ? pp.punishment_tier : null);
+    } catch (e) { row.penaltyErr = String((e && e.message) || e).slice(0, 140); }
+    try {
+      var perf = getShopPerformance_(SID) || {}, op = perf.overall_performance || {};
+      row.rating = (op.rating != null) ? op.rating : null; // 1:Poor 2:NeedImprovement 3:Good 4:Excellent 等
+      row.fulfillment = (op.fulfillment_failed != null) ? op.fulfillment_failed : null;
+      row.listing = (op.listing_failed != null) ? op.listing_failed : null;
+      row.custom = (op.custom_service_failed != null) ? op.custom_service_failed : null;
+      var ml = perf.metric_list || [];
+      // 良否が悪い指標だけ拾う（metric_type/comparator/target と current を比較。取れるだけ拾って良否は portal で判定）
+      row.metrics = ml.map(function (m) {
+        var cur = (m.current_period && (m.current_period.value != null ? m.current_period.value : m.current_period)) ;
+        var tgt = (m.target && (m.target.value != null ? m.target.value : m.target));
+        return { id: m.metric_id, type: m.metric_type, name: m.metric_name, unit: m.unit, value: cur, target: tgt, comparator: m.comparator };
+      });
+    } catch (e2) { row.perfErr = String((e2 && e2.message) || e2).slice(0, 140); }
+    out.push(row);
+  }
+  return out;
+}
+// 検証：メイン店1つでpenalty/performanceの生JSONを出力（応答の形を確認してからportalの表示を精緻化）
+function testAccountHealth() {
+  var toks = listTokens_(); if (!toks.length) { Logger.log('認可店なし'); return; }
+  var SID = 695473017; if (!getToken_(SID)) SID = toks[0].shop_id; // PH優先・無ければ先頭
+  Logger.log('対象 shop_id: ' + SID);
+  try { Logger.log('PENALTY: ' + JSON.stringify(getShopPenalty_(SID))); } catch (e) { Logger.log('get_shop_penalty FAILED: ' + e); }
+  try { Logger.log('PERFORMANCE: ' + JSON.stringify(getShopPerformance_(SID))); } catch (e2) { Logger.log('get_shop_performance FAILED: ' + e2); }
 }
 
 // ================= 公式APIで出品作成（add_item・出す先=shop_idで指定＝アカウント/国を明示） =================
