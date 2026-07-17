@@ -749,21 +749,26 @@ function testVariationImage() {
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
 
-// 発送フロー診断（読み取りのみ・発送はしない）：発送待ち注文を1件拾い、必要パラメータ(集荷/持込/不要)を表示。
-// SID を対象店に変えて実行。何をどう送ればいいか（info_needed）を確認してから ship_order を作る。
+// 発送フロー診断（読み取りのみ・発送はしない）：全認可店を巡回し発送待ち注文を1件見つけ、必要パラメータ(集荷/持込/不要)を表示。
+// 注文が入ったら実行→ info_needed を確認してから ship_order を作る。
 function testShipDiag() {
-  var SID = 695473017; // ← 発送待ちがある店のshop_idに変更（例:PH 695473017）
-  var to = now_(), from = to - 15 * 86400;
-  var j = callShop_(SID, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 30, response_optional_fields: 'order_status' }, 'get');
-  var list = ((j.response || {}).order_list) || [];
-  var rts = list.filter(function (o) { return o.order_status === 'READY_TO_SHIP' || o.order_status === 'PROCESSED'; });
-  Logger.log('直近15日: 全' + list.length + '件 / 発送待ち(READY_TO_SHIP/PROCESSED) ' + rts.length + '件');
-  if (!rts.length) { Logger.log('この店に発送待ち注文が無い→ SID を別の店に変えて実行'); return; }
-  var sn = rts[0].order_sn;
-  Logger.log('対象 order_sn: ' + sn + ' (status=' + rts[0].order_status + ')');
-  try { Logger.log('SHIPPING_PARAMETER: ' + JSON.stringify(getShipParam_(SID, sn))); } catch (e) { Logger.log('get_shipping_parameter FAILED: ' + e); }
-  try { Logger.log('TRACKING: ' + JSON.stringify(getTracking_(SID, sn))); } catch (e2) { Logger.log('get_tracking_number: ' + e2); }
-  Logger.log('※これは読み取りのみ。実際の発送(ship_order)はまだ実行していません。');
+  var toks = listTokens_();
+  var to = now_(), from = to - 15 * 86400, found = null;
+  for (var i = 0; i < toks.length; i++) {
+    var SID = toks[i].shop_id;
+    try {
+      var j = callShop_(SID, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 30, response_optional_fields: 'order_status' }, 'get');
+      var list = ((j.response || {}).order_list) || [];
+      var rts = list.filter(function (o) { return o.order_status === 'READY_TO_SHIP' || o.order_status === 'PROCESSED'; });
+      Logger.log((toks[i].cc || '?') + ' shop ' + SID + ': 全' + list.length + ' / 発送待ち ' + rts.length);
+      if (rts.length && !found) found = { SID: SID, cc: toks[i].cc, sn: rts[0].order_sn, status: rts[0].order_status };
+    } catch (e) { Logger.log('shop ' + SID + ' err: ' + e); }
+  }
+  if (!found) { Logger.log('全店で発送待ち注文なし（バケーション中などで全発送済みなら正常）。注文が入ったら再実行。'); return; }
+  Logger.log('=== 診断対象: ' + found.cc + ' shop ' + found.SID + ' / order_sn ' + found.sn + ' (' + found.status + ') ===');
+  try { Logger.log('SHIPPING_PARAMETER: ' + JSON.stringify(getShipParam_(found.SID, found.sn))); } catch (e2) { Logger.log('get_shipping_parameter FAILED: ' + e2); }
+  try { Logger.log('TRACKING: ' + JSON.stringify(getTracking_(found.SID, found.sn))); } catch (e3) { Logger.log('get_tracking_number: ' + e3); }
+  Logger.log('※読み取りのみ。実際の発送(ship_order)はしていません。');
 }
 
 function getOrderSns_(shopId, timeFrom, timeTo) {
