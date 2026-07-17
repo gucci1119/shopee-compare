@@ -501,6 +501,27 @@ function testUpdateStock() {
   Logger.log(JSON.stringify(updateStock_(SHOP_ID, ITEM_ID, MODEL_ID, STOCK), null, 1));
 }
 
+// ================= 発送（logistics）＝ブリッジ卒業の最後 =================
+// 読み取り：発送に必要なパラメータ（集荷pickup / 持込dropoff / 不要none のどれか＋選択肢）。書き込み前の確認用。
+function getShipParam_(shopId, orderSn) {
+  var j = callShop_(shopId, '/api/v2/logistics/get_shipping_parameter', { order_sn: String(orderSn) }, 'get');
+  return (j && j.response) || j;
+}
+// 読み取り：追跡番号（発送手配後に採番される）
+function getTracking_(shopId, orderSn) {
+  var j = callShop_(shopId, '/api/v2/logistics/get_tracking_number', { order_sn: String(orderSn) }, 'get');
+  return (j && j.response) || j;
+}
+// 書き込み：発送手配（ship_order）。paramで pickup{address_id,pickup_time_id} か dropoff{branch_id} を指定（無ければ自動手配）。
+function shipOrder_(shopId, orderSn, param) {
+  var body = { order_sn: String(orderSn) };
+  if (param && param.pickup) body.pickup = param.pickup;
+  else if (param && param.dropoff) body.dropoff = param.dropoff;
+  var j = callShop_(shopId, '/api/v2/logistics/ship_order', null, 'post', body);
+  var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
+  return { ok: !err, order_sn: String(orderSn), error: err, response: j.response || {} };
+}
+
 // ================= 公式APIで出品作成（add_item・出す先=shop_idで指定＝アカウント/国を明示） =================
 // カテゴリ解決：get_categoryからキーワード(既定'Games')に一致するleafのcategory_idを返す（shop毎キャッシュ）
 function resolveCategoryId_(shopId, keyword) {
@@ -726,6 +747,23 @@ function testVariationImage() {
   } catch (e) { Logger.log('IMG FAILED: ' + e); }
   try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
+}
+
+// 発送フロー診断（読み取りのみ・発送はしない）：発送待ち注文を1件拾い、必要パラメータ(集荷/持込/不要)を表示。
+// SID を対象店に変えて実行。何をどう送ればいいか（info_needed）を確認してから ship_order を作る。
+function testShipDiag() {
+  var SID = 695473017; // ← 発送待ちがある店のshop_idに変更（例:PH 695473017）
+  var to = now_(), from = to - 15 * 86400;
+  var j = callShop_(SID, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 30, response_optional_fields: 'order_status' }, 'get');
+  var list = ((j.response || {}).order_list) || [];
+  var rts = list.filter(function (o) { return o.order_status === 'READY_TO_SHIP' || o.order_status === 'PROCESSED'; });
+  Logger.log('直近15日: 全' + list.length + '件 / 発送待ち(READY_TO_SHIP/PROCESSED) ' + rts.length + '件');
+  if (!rts.length) { Logger.log('この店に発送待ち注文が無い→ SID を別の店に変えて実行'); return; }
+  var sn = rts[0].order_sn;
+  Logger.log('対象 order_sn: ' + sn + ' (status=' + rts[0].order_status + ')');
+  try { Logger.log('SHIPPING_PARAMETER: ' + JSON.stringify(getShipParam_(SID, sn))); } catch (e) { Logger.log('get_shipping_parameter FAILED: ' + e); }
+  try { Logger.log('TRACKING: ' + JSON.stringify(getTracking_(SID, sn))); } catch (e2) { Logger.log('get_tracking_number: ' + e2); }
+  Logger.log('※これは読み取りのみ。実際の発送(ship_order)はまだ実行していません。');
 }
 
 function getOrderSns_(shopId, timeFrom, timeTo) {
