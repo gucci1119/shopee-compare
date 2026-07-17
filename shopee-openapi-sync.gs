@@ -105,6 +105,18 @@ function doGet(e) {
       } catch (err) { lout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）。params: shop_id, item_id, option, price, stock, sku
+    if (p.action === 'add_variation') {
+      var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var vout;
+      try {
+        var vwt = P_().getProperty('WRITE_TOKEN');
+        if (!vwt || p.token !== vwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var vshop = parseInt(p.shop_id, 10); if (!getToken_(vshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        vout = addVariation_(vshop, p.item_id, p.option, p.price, p.stock, p.sku);
+      } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {
       var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
@@ -361,6 +373,34 @@ function updateTierVariation_(shopId, itemId, tierVariation, model) {
 function addModel_(shopId, itemId, modelList) {
   var j = callShop_(shopId, '/api/v2/product/add_model', null, 'post', { item_id: parseInt(itemId, 10), model_list: modelList });
   return (j && j.response) || j;
+}
+// ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
+function addVariation_(shopId, itemId, optionName, price, stock, sku) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  optionName = String(optionName || '').trim();
+  if (!optionName) throw new Error('追加するバリエ名が空です');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (!tiers.length) throw new Error('バリエ無し商品にはこの方法で追加できません（先にバリエ化が必要）');
+  if (tiers.length > 1) throw new Error('2層バリエ商品は未対応（1層のみ）');
+  var tier = tiers[0];
+  var opts = (tier.option_list || []).map(function (o) { return o.option; });
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  var existIdx = opts.indexOf(optionName), newIndex;
+  if (existIdx >= 0) {
+    var has = models.some(function (m) { return (m.tier_index || [])[0] === existIdx; });
+    if (has) throw new Error('その明細は既に存在します: ' + optionName);
+    newIndex = existIdx;
+  } else {
+    var newOpts = opts.concat([optionName]);
+    updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts.map(function (o) { return { option: o }; }) }], remap);
+    newIndex = newOpts.length - 1;
+  }
+  var model = { tier_index: [newIndex], original_price: parseFloat(price), seller_stock: [{ stock: parseInt(stock, 10) || 0 }] };
+  if (sku) model.model_sku = String(sku);
+  var am = addModel_(shopId, itemId, [model]);
+  var nm = ((am && am.model) || [])[0] || {};
+  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex };
 }
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
 function resolveModelId_(shopId, itemId, modelName) {

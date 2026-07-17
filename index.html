@@ -1053,6 +1053,16 @@
   }
   const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list);
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
+  // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
+  async function openapiAddVariation(shopId, itemId, opts) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const q = Object.assign({ action: 'add_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, opts);
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 90000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式APIバリエ追加に失敗');
+    return res;
+  }
 
   // ---------------- 期間計算 ----------------
   const nowSec = () => Math.floor(Date.now() / 1000);
@@ -4383,6 +4393,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-17', items: [
+      '➕ バリエ追加も公式API化（統括編集）：バリエ比較グリッドで「その国に無いバリエ」のセルが ＋追加 ボタンに。価格・在庫を入れるだけで、Shopeeにそのバリエ（明細）を公式APIで追加（tierにオプション追記→add_model）。ライブPC/各国ログイン不要。本番E2Eで 2バリエ→3バリエ 追加まで確認。1層バリエ商品が対象（2層は未対応）。GAS web app v20。',
       '🔵 出品の“書き込み”を公式APIへ全面移行（ブリッジ卒業が大きく前進）：①タイトル/親SKU/説明の編集＝update_item、②在庫/価格の一括更新・バリエ価格編集＝読み(get_model_list)も書き(update_price/update_stock)も公式API。統括編集の「価格×係数」「各国バリエ価格」「統括タイトル/SKU」が、出品のshop_id判明時は ブラウザのShopeeログイン無し・ライブPC不要 で書けるように（無ければ従来ブリッジに自動フォールバック）。出品自身のshop_idで書くので誤ショップ書込も防止。自己完結E2E（作成→編集→読み戻し→削除）で検証済。GAS web app v18/v19。',
       '🚀 公式API出品が本番稼働（ブリッジ卒業の本命）：✍️出品を作る→出品先アカウント（系統）と条件（中古/新品）を選び、各国の「🚀公式APIで出品」または「🚀全対象国に一括出品」で、ブラウザのShopeeログイン無しに アカウント×国を指定して 非公開(UNLIST)で直接作成。単品もバリエ商品も対応（add_item→init_tier_variation）。本番E2Eで作成→自動削除まで確認（単品 item 55164190620／バリエ item 41082685573）。GAS web app v17・説明20字未満は自動補完。',
       '🩸 マージン漏れ検知（分析タブ）：出品台帳の仕入 ×「今のライブ価格」で利益/ROIを再計算し、赤字・目標ROI割れで売れ続けている出品を国別に炙り出す。価格を上げる/取り下げの判断に（各国の編集ページへリンク）。',
@@ -4577,7 +4588,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['出品作成（公式add_item・単品/バリエ）', ['none', 'none', 'none', 'none', 'api', 'api']],
       ['出品編集（タイトル/親SKU/説明）', ['none', 'none', 'none', 'bridge', 'api', 'api']],
       ['自動出品 コンポーザー（雛形・作成）', ['none', 'bridge', 'bridge', 'bridge', 'bridge', 'bridge']],
-      ['バリエ追加(add_model)・明細名・画像', ['none', 'none', 'none', 'bridge', 'bridge', 'soon']],
+      ['バリエ追加(add_model)', ['none', 'none', 'none', 'bridge', 'api', 'api']],
+      ['明細名変更・バリエ画像', ['none', 'none', 'none', 'bridge', 'bridge', 'soon']],
       ['バケーション表示', ['none', 'none', 'none', 'portal', 'portal', 'portal']],
       ['発送 API化', ['none', 'none', 'none', 'none', 'none', 'soon']],
     ];
@@ -5750,14 +5762,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const rowsV = [...varMap.values()].map(v => {
         const cells = listings.map((lg, i) => {
           const c = v.cells[i];
-          if (!c) return '<td style="background:#fff2f2;color:#d93025;text-align:center" title="この国にはこのバリエが無い">✗</td>';
+          if (!c) {
+            // 公式API＋shop_id判明＋対象がバリエ商品 なら「＋追加」導線を出す（無ければ従来✗）
+            const rd = varData.reads[i];
+            const canAdd = rd && rd.models.length && shopIdForListing(lg.cc, lg.item_id) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
+            return canAdd
+              ? '<td style="background:#fff8f0;text-align:center"><button class="uvar-add" data-li="' + i + '" data-opt="' + av(v.name || '') + '" style="font-size:9px;padding:2px 6px;border:1px dashed #e8710a;border-radius:5px;background:#fff;color:#e8710a;cursor:pointer;font-weight:700" title="' + lg.cc + ' にこのバリエを公式APIで追加">＋追加</button></td>'
+              : '<td style="background:#fff2f2;color:#d93025;text-align:center" title="この国にはこのバリエが無い">✗</td>';
+          }
           return '<td style="white-space:nowrap"><span style="font-size:10px;color:' + rgc(lg.cc).color + '">' + rgc(lg.cc).cur + '</span><input class="uvar-p" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.price) + '" style="width:66px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right"></td>';
         }).join('');
         return '<tr><td style="text-align:left;position:sticky;left:0;background:#fff">' + nm(v.name || '（既定）', '220px') + '</td>' + cells + '</tr>';
       }).join('');
       const head = '<tr><th style="text-align:left;position:sticky;left:0;background:#fafafa">バリエ (' + varMap.size + ')</th>' + listings.map((lg, i) => '<th style="white-space:nowrap"><span style="color:' + rgc(lg.cc).color + '">' + colLabel[i] + '</span><br><span style="font-weight:400;font-size:9px;color:#999">' + varCount[i] + '種</span></th>').join('') + '</tr>';
       const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.reads[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細価格をShopeeへ書込">書込</button>' : '—') + '</td>').join('') + '</tr>';
-      box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">価格はセルで直接編集→各国「書込」で反映。<b style="color:#d93025">✗</b>の国はそのバリエ未出品（＋バリエ/✎詳細で追加）。明細名の変更・バリエ追加・specificsは各国行の<b>✎詳細</b>から。</div>';
+      box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">価格はセルで直接編集→各国「書込」で反映。<b style="color:#e8710a">＋追加</b>はその国にそのバリエを公式APIで追加（価格・在庫を入れるだけ／🔄再読込で反映）。明細名の変更・バリエ画像は各国行の<b>✎詳細</b>から。</div>';
       ov.querySelectorAll('.uvar-write').forEach(b => b.addEventListener('click', async () => {
         const li = +b.dataset.li, lg = listings[li], read = varData.reads[li]; if (!read) return;
         const n = read.models.length;
@@ -5774,6 +5793,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         let ok = false; try { const r = await writeModelPricesUnified(lg, read, priceByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
         b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) b.disabled = false;
         if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', lg.cc, (d.rep || '') + ' ' + n + '件'); } catch (_) {} }
+      }));
+      // ＋追加：その国の出品に不足バリエを公式APIで足す（tierにオプション追記→add_model）
+      ov.querySelectorAll('.uvar-add').forEach(b => b.addEventListener('click', async () => {
+        const li = +b.dataset.li, lg = listings[li], opt = b.dataset.opt || '';
+        const sid = shopIdForListing(lg.cc, lg.item_id);
+        if (!sid) { alert('この出品のshop_idが不明です（各アカウントで再同期してください）'); return; }
+        const price = prompt(lg.cc + ' の出品に「' + opt + '」バリエを追加します。\n' + rgc(lg.cc).cur + ' 価格（現地通貨）を入力：', '');
+        if (price == null || !price.trim() || isNaN(parseFloat(price))) { if (price != null) alert('価格が正しくありません'); return; }
+        const stock = prompt('在庫数（既定 1）', '1'); if (stock == null) return;
+        const pv = chkPrices(lg.cc, [parseFloat(price)]);
+        if (pv.length && !confirm(lg.cc + ' の価格が出品制約に触れています:\n\n' + pv.join('\n') + '\n\nそれでも追加しますか？')) return;
+        const gw = await guardWriteCountries([lg.cc]); if (!gw.ok) { alert(gw.msg); return; }
+        if (!confirm('書込先: ' + gw.summary + '\n\n' + lg.cc + ' の出品に「' + opt + '」バリエを追加します。\n価格 ' + price.trim() + ' / 在庫 ' + (stock.trim() || '1') + '\n\nよろしいですか？')) return;
+        b.disabled = true; b.textContent = '…';
+        try {
+          const r = await openapiAddVariation(sid, lg.item_id, { option: opt, price: price.trim(), stock: stock.trim() || '1' });
+          if (r && r.ok) { b.textContent = '✓追加'; b.style.color = '#1a7f37'; b.style.borderStyle = 'solid'; msg(lg.cc + ' 「' + opt + '」追加 成功（🔄再読込で反映）', '#1a7f37'); try { logAct('出品', 'バリエ追加', lg.cc, opt + ' @' + price.trim()); } catch (_) {} }
+          else { b.disabled = false; b.textContent = '＋追加'; msg(lg.cc + ' 追加失敗 ' + ((r && r.error) || ''), '#d93025'); }
+        } catch (e) { b.disabled = false; b.textContent = '＋追加'; msg(lg.cc + ' 追加失敗 ' + e.message, '#d93025'); }
       }));
     }
     q('.uni-loadvar').addEventListener('click', async function () {
