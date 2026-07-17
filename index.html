@@ -2436,11 +2436,11 @@
         if (byccEl) byccEl.innerHTML = '<b>直近7日 国別</b>：' + (ccJpy7.length ? ccJpy7.map(x => { const d = x.prev ? Math.round((x.w7 / x.prev - 1) * 100) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b style="color:${x.color}">${x.cc}</b> ${fmtJpy(x.w7)}${d != null ? ` <span style="color:${d >= 0 ? '#1a7f37' : '#d93025'};font-size:11px">${d >= 0 ? '+' : ''}${d}%</span>` : ''}${x.today ? ` <span class="smd-dim" style="font-size:11px">(今日${fmtJpy(x.today)})</span>` : ''}</span>`; }).join('') : '<span class="smd-dim">データなし</span>');
         // おすすめアクション（タスク化）
         const actions = [];
-        if (overdue.length) actions.push({ cat: '発送', priority: 1, text: `期限超過 <b style="color:#d93025">${overdue.length}件</b>（最古${oldestH}h）を今日中に発送`, task: `【発送】期限超過${overdue.length}件を発送（最古${oldestH}h超過）` });
-        if (due24.length) actions.push({ cat: '発送', priority: 1, text: `24h以内締切 <b>${due24.length}件</b>を優先処理`, task: `【発送】24h以内締切 ${due24.length}件を発送` });
-        if (!vac) silent7.forEach(cc => actions.push({ cat: '売上', priority: 2, text: `<b>${cc}</b> は直近7日 売上0 → 日次同期の確認（GAS/トークン） or テコ入れ（値下げ/露出/在庫）`, task: `【${cc}】直近7日 売上0 — 日次同期確認＆テコ入れ検討` }));
-        if (!vac) ccJpy7.forEach(x => { if (x.prev && x.w7 / x.prev < 0.7) { const d = Math.round((x.w7 / x.prev - 1) * 100); actions.push({ cat: '売上', priority: 2, text: `<b style="color:${x.color}">${x.cc}</b> 直近7日が前週比 <b style="color:#d93025">${d}%</b> → 要因確認・対策`, task: `【${x.cc}】売上が前週比${d}% — 要因確認・対策` }); } });
-        if (pendN) actions.push({ cat: '入金', priority: 3, text: `入金予定 ${fmtJpy(pendJpy)}（${pendN}件）→ 着金チェック`, task: `【入金】未入金 ${pendN}件（${fmtJpy(pendJpy)}）の着金確認` });
+        if (overdue.length) actions.push({ key: 'ship-overdue', cat: '発送', priority: 1, text: `期限超過 <b style="color:#d93025">${overdue.length}件</b>（最古${oldestH}h）を今日中に発送`, task: `【発送】期限超過${overdue.length}件を発送（最古${oldestH}h超過）` });
+        if (due24.length) actions.push({ key: 'ship-due24', cat: '発送', priority: 1, text: `24h以内締切 <b>${due24.length}件</b>を優先処理`, task: `【発送】24h以内締切 ${due24.length}件を発送` });
+        if (!vac) silent7.forEach(cc => actions.push({ key: 'sales-zero-' + cc, cat: '売上', priority: 2, text: `<b>${cc}</b> は直近7日 売上0 → 日次同期の確認（GAS/トークン） or テコ入れ（値下げ/露出/在庫）`, task: `【${cc}】直近7日 売上0 — 日次同期確認＆テコ入れ検討` }));
+        if (!vac) ccJpy7.forEach(x => { if (x.prev && x.w7 / x.prev < 0.7) { const d = Math.round((x.w7 / x.prev - 1) * 100); actions.push({ key: 'sales-drop-' + x.cc, cat: '売上', priority: 2, text: `<b style="color:${x.color}">${x.cc}</b> 直近7日が前週比 <b style="color:#d93025">${d}%</b> → 要因確認・対策`, task: `【${x.cc}】売上が前週比${d}% — 要因確認・対策` }); } });
+        if (pendN) actions.push({ key: 'pay-pending', cat: '入金', priority: 3, text: `入金予定 ${fmtJpy(pendJpy)}（${pendN}件）→ 着金チェック`, task: `【入金】未入金 ${pendN}件（${fmtJpy(pendJpy)}）の着金確認` });
         const actEl = document.getElementById('dash-actions');
         if (actEl) {
           if (!actions.length) { actEl.innerHTML = '<div class="smd-dim" style="font-size:12px">今日やることは今のところありません 🎉</div>'; }
@@ -2448,8 +2448,11 @@
             // 本日のやること＝チェック可能・日次リセット（外注さんが上から潰す）。チェック状態はローカル日付キーで保持
             const dayKey = (new Date()).toLocaleDateString('en-CA'); // YYYY-MM-DD（端末ローカル）
             const ckKey = 'smdChecklist_' + dayKey;
+            // 古い日付のチェック状態は掃除（キーの無限増殖を防ぐ・今日分だけ残す）
+            try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.indexOf('smdChecklist_') === 0 && k !== ckKey) localStorage.removeItem(k); } } catch (_) {}
             let done = {}; try { done = JSON.parse(localStorage.getItem(ckKey) || '{}'); } catch (_) {}
-            const keyOf = a => String(a.task || a.text); // タスク文字列を一意キーに（日本語もそのまま＝衝突しない。JSON/オブジェクトキーは日本語可）
+            // 安定キー（a.key）優先＝件数や「最古◯h」等の時間変動値でチェックが外れないように。無ければタスク文字列
+            const keyOf = a => a.key || String(a.task || a.text);
             const renderChk = () => {
               const total = actions.length, nDone = actions.filter(a => done[keyOf(a)]).length, pct = total ? Math.round(nDone / total * 100) : 0, allDone = nDone === total;
               actEl.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span style="font-size:11.5px;font-weight:700;color:${allDone ? '#1a7f37' : '#333'}">本日 ${nDone}/${total} 完了</span><span style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden;max-width:200px"><span style="display:block;height:100%;width:${pct}%;background:${allDone ? '#1a7f37' : '#7b52c4'};transition:width .2s"></span></span>${allDone ? '<span style="font-size:11px;color:#1a7f37;font-weight:700">🎉 今日のやること完了！</span>' : ''}</div>` +
@@ -6484,8 +6487,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★🩸マージン漏れ検知：台帳(listing_catalog)の仕入原価 ×「今のライブ価格」で利益/ROIを再計算し、赤字/薄利で売れ続ける生き出品を炙り出す（読み取り専用・利益直結）
     let leakHtml = '';
     try {
-      let catRows = lst._ledgerRows;
-      if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); } catch (_) { catRows = []; } }
+      // 台帳が既に全列キャッシュ済(_ledgerRows)ならそれを使う。無ければ部分列で取得し専用キャッシュ(_leakCat)へ
+      //   （_ledgerRowsは select=* なので部分列で上書きしない＝台帳タブを壊さない。並び替えトグルでの毎回再取得も防ぐ）
+      let catRows = lst._ledgerRows || lst._leakCat;
+      if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); lst._leakCat = catRows; } catch (_) { catRows = []; } }
       const costBySku = {}, costByName = {};
       (catRows || []).forEach(c => {
         const cw = c.weight_g;
