@@ -561,6 +561,37 @@ function accountHealthAll_() {
   }
   return out;
 }
+// ★このアカウントで「実際に使えるAPI」を読み取りで一括プローブ（error_not_found/権限エラー＝不可、param不足エラー＝存在＝使える）。
+function testApiCapabilities() {
+  var SID = 695473017; var toks = listTokens_(); if (!getToken_(SID)) SID = (toks[0] || {}).shop_id;
+  Logger.log('== API可用性プローブ shop_id=' + SID + ' ==');
+  var to = now_(), from = to - 15 * 86400;
+  var probes = [
+    ['返品 returns/get_return_list', '/api/v2/return/get_return_list', { page_no: 0, page_size: 20, create_time_from: from, create_time_to: to }],
+    ['レビュー product/get_comment', '/api/v2/product/get_comment', { page_size: 20 }],
+    ['クーポン voucher/get_voucher_list', '/api/v2/voucher/get_voucher_list', { status: 'all', page_no: 1, page_size: 20 }],
+    ['割引 discount/get_discount_list', '/api/v2/discount/get_discount_list', { discount_status: 'all', page_no: 1, page_size: 20 }],
+    ['セット bundle_deal/get_bundle_deal_list', '/api/v2/bundle_deal/get_bundle_deal_list', { page_no: 1, page_size: 20 }],
+    ['違反履歴 account_health/get_punishment_history', '/api/v2/account_health/get_punishment_history', { punishment_status: 1, page_no: 1, page_size: 20 }],
+    ['点数履歴 account_health/get_penalty_point_history', '/api/v2/account_health/get_penalty_point_history', { page_no: 1, page_size: 20 }],
+    ['チャット sellerchat/get_conversation_list', '/api/v2/sellerchat/get_conversation_list', { direction: 'latest', type: 'all', page_size: 20 }]
+  ];
+  for (var i = 0; i < probes.length; i++) {
+    var name = probes[i][0], path = probes[i][1], q = probes[i][2];
+    try {
+      var j = callShop_(SID, path, q, 'get');
+      var e = (j && j.error) ? j.error : '';
+      Logger.log((e ? '❌ ' : '✅ ') + name + ' → ' + (e ? ('error=' + e + ' ' + (j.message || '')) : 'OK'));
+    } catch (ex) {
+      var msg = String((ex && ex.message) || ex);
+      // error_not_found / no permission = 使えない。missing/invalid param = 存在する（＝使える）
+      var usable = /param|missing|invalid|required|empty/i.test(msg) && !/not_found|permission/i.test(msg);
+      Logger.log((usable ? '🟡(存在) ' : '❌ ') + name + ' → ' + msg.slice(0, 160));
+    }
+  }
+  Logger.log('== ✅=呼べた / 🟡=存在するがparam要調整（＝使える） / ❌=not_found/権限なし(不可) ==');
+}
+
 // 検証：メイン店1つでpenalty/performanceの生JSONを出力（応答の形を確認してからportalの表示を精緻化）
 function testAccountHealth() {
   var toks = listTokens_(); if (!toks.length) { Logger.log('認可店なし'); return; }
