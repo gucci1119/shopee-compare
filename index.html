@@ -2109,7 +2109,8 @@
       return;
     }
     const frag = document.createDocumentFragment();
-    rows.forEach(r => {
+    const ordN = state.orders.showN || 50;          // 表示は初期50件（一括印刷/CSVは state.orders.shown=全件のまま）
+    rows.slice(0, ordN).forEach(r => {
       const { region } = r;
       const first = r.items[0] || {};
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
@@ -2160,6 +2161,7 @@
       frag.appendChild(row);
     });
     list.appendChild(frag);
+    if (rows.length > ordN) { const more = document.createElement('div'); more.style.cssText = 'text-align:center;margin:10px 0'; more.innerHTML = `<button class="smd-btn" id="ord-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - ordN}件）</button> <button class="smd-btn" id="ord-all" style="font-size:12px;margin-left:6px">全件表示</button>`; list.appendChild(more); const mb = document.getElementById('ord-more'); if (mb) mb.addEventListener('click', () => { state.orders.showN = ordN + 50; renderOrders(); }); const ab = document.getElementById('ord-all'); if (ab) ab.addEventListener('click', () => { state.orders.showN = rows.length; renderOrders(); }); }
     // 🚚倉庫へ発送済（未スキャン）トグル: costs.self_transit_at をON/OFF（利益管理と共有）
     list.querySelectorAll('.ord-selftransit').forEach(el => el.addEventListener('click', async e => {
       e.stopPropagation();
@@ -2335,12 +2337,13 @@
     document.querySelectorAll('#ord-filter button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     state.orders.filter = b.dataset.k;
+    state.orders.showN = 50;
     renderOrders();
   });
   let ordSearchTimer;
   document.getElementById('ord-search').addEventListener('input', e => {
     clearTimeout(ordSearchTimer);
-    ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); renderOrders(); }, 200);
+    ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); state.orders.showN = 50; renderOrders(); }, 200);
   });
 
   // ---------------- Supabase（DB蓄積） ----------------
@@ -2737,13 +2740,13 @@
       // 前回のフィルタ（状態・検索）を復元＝毎回リセットされないように
       try { const sf = JSON.parse(localStorage.getItem('smdStockFilter') || '{}'); if (sf.st != null) stock.st = sf.st; if (sf.q != null) stock.q = sf.q; const stEl = document.getElementById('stock-st'); if (stEl && stock.st) stEl.value = stock.st; const sEl = document.getElementById('stock-search'); if (sEl && stock.q) sEl.value = stock.q; } catch (_) {}
       const saveStockFilter = () => { try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: stock.st, q: stock.q })); } catch (_) {} };
-      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; saveStockFilter(); stockRender(); });
-      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stockRender(); });
-      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stockRender(); });
+      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.showN = 100; saveStockFilter(); stockRender(); });
+      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.showN = 100; stockRender(); });
+      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.showN = 100; stockRender(); });
       let t;
       document.getElementById('stock-search').addEventListener('input', e => {
         clearTimeout(t);
-        t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); saveStockFilter(); stockRender(); }, 250);
+        t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.showN = 100; saveStockFilter(); stockRender(); }, 250);
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
@@ -2917,7 +2920,8 @@
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
-    const shown = rows.slice(0, 400);
+    const stkN = stock.showN || 100;               // 初期100件（CSV/選択は rows=全件のまま）
+    const shown = rows.slice(0, stkN);
     if (!stock.sel) stock.sel = new Set();
     const selCount = stock.sel.size;
     // ★🔄 シリーズ別 回転速度：仕入日(invPurDate)＋売却日(snToDate(shopee_sn))から「仕入→売却の平均日数」を系統別に算出。速く高回転で売れる系統＝仕入れ推奨の指針（在庫データのみで完結）
@@ -2989,8 +2993,9 @@
         `<td><input class="li stk-note" ${di} value="${esc(r.note || '')}" placeholder="—" title="備考（自由記入）" style="width:100%;min-width:120px;font-size:11px;padding:2px 4px"></td>` +
         '</tr>';
       }).join('') +
-      `</table></div>${rows.length > shown.length ? `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${rows.length}件中 最初の${shown.length}件を表示（検索で絞り込めます）</div>` : ''}</div>`;
+      `</table></div>${rows.length > shown.length ? `<div style="text-align:center;margin:8px 4px"><button class="smd-btn" id="stk-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - shown.length}件）</button> <button class="smd-btn" id="stk-all" style="font-size:12px;margin-left:6px">全件表示</button> <span class="smd-dim" style="font-size:11px">（検索で絞り込むと速いです）</span></div>` : ''}</div>`;
     // テーブル領域を実際の位置から高さ計算 → ヘッダー固定＋横スクロールバーを常時画面内に（ページ自体はスクロールさせない）
+    { const mb = document.getElementById('stk-more'); if (mb) mb.addEventListener('click', () => { stock.showN = stkN + 100; stockRender(); }); const ab = document.getElementById('stk-all'); if (ab) ab.addEventListener('click', () => { stock.showN = rows.length; stockRender(); }); }
     fitStockScroll();
     // 編集ハンドラ
     body.querySelectorAll('.stk-sup').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { supplier: e.target.value || null })));
@@ -5069,7 +5074,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px">売上・注文・入金・payouts 取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">GAS24h自動。<code>order/*・payment/get_escrow_detail・get_payout_detail</code></td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">手数料内訳・実手数料率</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">get_escrow_detail の commission/service/transaction</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">商品一覧・バリエ(model)情報 取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/get_item_list・get_model_list</code></td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>在庫更新 / 価格更新（一括・バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">⚙️設定📦パネル＋<b>統括編集の価格×係数・バリエ価格編集も公式API化(2026-07)</b>＝読み(<code>get_model_list</code>)も書き(<code>update_price/update_stock</code>のprice_list/stock_list)もブリッジ非依存。shop_id判明時は公式・無ければブリッジ自動フォールバック</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>価格更新（一括・バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>統括編集の価格×係数・バリエ価格編集を公式API化(2026-07)</b>＝読み(<code>get_model_list</code>)も書き(<code>update_price</code>のprice_list)もブリッジ非依存。shop_id判明時は公式・無ければブリッジ自動フォールバック</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">在庫更新</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px"><b>単品は⚙️設定📦パネルで公式API</b>(<code>update_stock</code>)。<b>一括在庫はUI未配線</b>（GAS <code>updateStockList_</code>/doGet は実装済だが統括編集に在庫入力欄が無い）。在庫は通常ライブ在庫編集(出品一覧の展開)で運用</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">出品状態のライブ即時取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ(mpsku)。get_item_listでAPI代替可・未移行</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>新規出品（add_item・単品/バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>本番稼働(2026-07)</b>。✍️出品を作る→🚀公式APIで出品（アカウント×国指定・非公開作成）。<code>product/add_item→init_tier_variation</code>。E2E(単品/バリエ)成功</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品編集（タイトル/親SKU/説明）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/update_item</code>。統括/一括のタイトル・SKU書込がshop_id判明時は公式（ライブ/各国ログイン不要）</td></tr>
@@ -7363,11 +7369,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
     const profit = sellerJpy - (Number(costJpy) || 0) - slsJpy;
     return { buyerJpy: Math.round(buyerJpy), sellerJpy: Math.round(sellerJpy), feeJpy: Math.round(buyerJpy - sellerJpy), feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: Math.round(slsJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
-  }
-  // 旧・単純式（互換のため残置）
-  function priceFromCost(costJpy) {
-    const fee = Math.max(0, Math.min(95, settings.priceFeePct)) / 100;
-    return Math.round((costJpy * settings.priceCoef + settings.priceShipJpy) / (1 - fee));
   }
   function fillTpl(tpl, map) {
     return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (map[k] != null ? map[k] : '')).replace(/\s{2,}/g, ' ').trim();
