@@ -749,6 +749,22 @@ function testVariationImage() {
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
 
+// first_mile（越境ファーストマイル）診断＝読み取りのみ：各店にファーストマイル・チャネルがあるか＋未バインド注文があるかを確認。
+// 「関係あるか」の判定用。チャネルが空/エラーなら＝この運用ではfirst_mileは使っていない＝対象外。
+function testFirstMileDiag() {
+  var toks = listTokens_();
+  for (var i = 0; i < toks.length; i++) {
+    var SID = toks[i].shop_id, cc = toks[i].cc || '?';
+    try {
+      var ch = callShop_(SID, '/api/v2/first_mile/get_channel_list', { region: cc }, 'get');
+      var list = ((ch.response || {}).logistics_channel_list) || ((ch.response || {}).channel_list) || [];
+      Logger.log(cc + ' shop ' + SID + ' : first_mileチャネル ' + list.length + '件' + (ch.error ? ' / err=' + ch.error : ''));
+      if (list.length) Logger.log('   → ' + JSON.stringify(list).slice(0, 300));
+    } catch (e) { Logger.log(cc + ' shop ' + SID + ' : get_channel_list 例外 ' + e); }
+  }
+  Logger.log('※チャネルが全店0件/エラー＝この運用ではfirst_mileは未使用＝対象外。1件でもあれば紐付け自動化の余地あり。読み取りのみ。');
+}
+
 // 発送フロー診断（読み取りのみ・発送はしない）：全認可店を巡回し発送待ち注文を1件見つけ、必要パラメータ(集荷/持込/不要)を表示。
 // 注文が入ったら実行→ info_needed を確認してから ship_order を作る。
 function testShipDiag() {
