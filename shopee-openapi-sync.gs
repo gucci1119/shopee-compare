@@ -81,6 +81,30 @@ function doGet(e) {
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★モデル(明細)読み：get_model_list（ブリッジproductRead代替）。params: shop_id, item_id。読み取り専用なのでtoken不要。
+    if (p.action === 'get_models') {
+      var gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var gout;
+      try {
+        var gshop = parseInt(p.shop_id, 10); if (!getToken_(gshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        gout = { ok: true, data: getModels_(gshop, p.item_id) };
+      } catch (err) { gout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(gcb + '(' + JSON.stringify(gout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★価格/在庫を複数モデルまとめて更新（ブリッジ卒業）。params: shop_id, item_id, list=JSON([{model_id,price}] / [{model_id,stock}])
+    if (p.action === 'update_price_list' || p.action === 'update_stock_list') {
+      var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var lout;
+      try {
+        var lwt = P_().getProperty('WRITE_TOKEN');
+        if (!lwt || p.token !== lwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var lshop = parseInt(p.shop_id, 10); if (!getToken_(lshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var arr; try { arr = JSON.parse(p.list || '[]'); } catch (_) { throw new Error('list JSON不正'); }
+        var lr = p.action === 'update_price_list' ? updatePriceList_(lshop, p.item_id, arr) : updateStockList_(lshop, p.item_id, arr);
+        lout = { ok: true, action: p.action, item_id: p.item_id, result: lr };
+      } catch (err) { lout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {
       var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
@@ -292,6 +316,40 @@ function updatePrice_(shopId, itemId, modelId, price) {
   var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body);
   return (j && j.response) || j;
 }
+// ★モデル(明細)一覧を公式APIで読む（ブリッジのproductRead代替）：model_id/価格/在庫/SKU/バリエ名。
+//   バリエ無し商品は get_item_base_info で1件(model_id=0)にフォールバック。
+function getModels_(shopId, itemId) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var priceOf = function (o) { var pi = (o.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
+  var stockOf = function (o) { var sv = o.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; };
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  var out = models.map(function (m) {
+    var idx = m.tier_index || [];
+    var nm = idx.map(function (ti, k) { var t = tiers[k]; var opt = t && t.option_list && t.option_list[ti]; return opt ? opt.option : ''; }).join(',');
+    return { model_id: m.model_id, tier_index: idx, name: nm || m.model_name || '', sku: m.model_sku || '', price: priceOf(m), stock: stockOf(m) };
+  });
+  if (!out.length) {
+    var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId) }, 'get');
+    var it = ((b.response || {}).item_list || [])[0] || {};
+    out = [{ model_id: 0, tier_index: [], name: '', sku: it.item_sku || '', price: priceOf(it), stock: stockOf(it) }];
+  }
+  return { item_id: itemId, tier_variation: tiers, models: out };
+}
+// ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
+function updatePriceList_(shopId, itemId, list) {
+  var pl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, original_price: parseFloat(x.price) }; }).filter(function (x) { return !isNaN(x.original_price); });
+  if (!pl.length) throw new Error('価格リストが空');
+  var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', { item_id: parseInt(itemId, 10), price_list: pl });
+  return { updated: pl.length, response: (j && j.response) || j };
+}
+// ★在庫を複数モデルまとめて更新（update_stock stock_list）。list=[{model_id,stock}]
+function updateStockList_(shopId, itemId, list) {
+  var sl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, seller_stock: [{ stock: parseInt(x.stock, 10) }] }; }).filter(function (x) { return !isNaN(x.seller_stock[0].stock); });
+  if (!sl.length) throw new Error('在庫リストが空');
+  var j = callShop_(shopId, '/api/v2/product/update_stock', null, 'post', { item_id: parseInt(itemId, 10), stock_list: sl });
+  return { updated: sl.length, response: (j && j.response) || j };
+}
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
 function resolveModelId_(shopId, itemId, modelName) {
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
@@ -462,6 +520,25 @@ function testUpdateItem() {
     Logger.log('READBACK: item_name=' + it.item_name + ' / item_sku=' + it.item_sku);
   } catch (e) { Logger.log('UPDATE/READBACK FAILED: ' + e); }
   try { var d = callShop_(r.shop_id || 695473017, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
+  catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
+}
+
+// 価格/在庫のlist更新 検証：非公開で1件作成→get_models→価格×2・在庫9にupdate_price_list/update_stock_list→読み戻し→削除（自己完結）
+function testPriceStockList() {
+  var SID = 695473017;
+  var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
+  var r = addItem_({ shop_id: SID, item_name: '【TEST】price/stock list', description: 'Test update_price_list/update_stock_list. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false });
+  Logger.log('CREATED: ' + JSON.stringify(r));
+  if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
+  try {
+    var m0 = getModels_(SID, r.item_id); Logger.log('MODELS(before): ' + JSON.stringify(m0.models));
+    var pl = m0.models.map(function (m) { return { model_id: m.model_id, price: parseFloat(m.price) * 2 }; });
+    var sl = m0.models.map(function (m) { return { model_id: m.model_id, stock: 9 }; });
+    Logger.log('PRICE: ' + JSON.stringify(updatePriceList_(SID, r.item_id, pl)));
+    Logger.log('STOCK: ' + JSON.stringify(updateStockList_(SID, r.item_id, sl)));
+    var m1 = getModels_(SID, r.item_id); Logger.log('MODELS(after): ' + JSON.stringify(m1.models) + '  ← price=600・stock=9になっていればOK');
+  } catch (e) { Logger.log('PRICE/STOCK FAILED: ' + e); }
+  try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
 

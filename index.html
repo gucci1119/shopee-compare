@@ -1034,6 +1034,25 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API編集に失敗');
     return res;
   }
+  // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
+  async function openapiGetModels(shopId, itemId) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const qs = 'action=get_models&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式APIモデル取得に失敗');
+    return res.data;
+  }
+  // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
+  async function openapiUpdateModelList(action, shopId, itemId, list) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const qs = 'action=' + action + '&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&list=' + encodeURIComponent(JSON.stringify(list));
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
+    return res;
+  }
+  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list);
+  const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
 
   // ---------------- 期間計算 ----------------
   const nowSec = () => Math.floor(Date.now() / 1000);
@@ -4364,6 +4383,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-17', items: [
+      '🔵 出品の“書き込み”を公式APIへ全面移行（ブリッジ卒業が大きく前進）：①タイトル/親SKU/説明の編集＝update_item、②在庫/価格の一括更新・バリエ価格編集＝読み(get_model_list)も書き(update_price/update_stock)も公式API。統括編集の「価格×係数」「各国バリエ価格」「統括タイトル/SKU」が、出品のshop_id判明時は ブラウザのShopeeログイン無し・ライブPC不要 で書けるように（無ければ従来ブリッジに自動フォールバック）。出品自身のshop_idで書くので誤ショップ書込も防止。自己完結E2E（作成→編集→読み戻し→削除）で検証済。GAS web app v18/v19。',
       '🚀 公式API出品が本番稼働（ブリッジ卒業の本命）：✍️出品を作る→出品先アカウント（系統）と条件（中古/新品）を選び、各国の「🚀公式APIで出品」または「🚀全対象国に一括出品」で、ブラウザのShopeeログイン無しに アカウント×国を指定して 非公開(UNLIST)で直接作成。単品もバリエ商品も対応（add_item→init_tier_variation）。本番E2Eで作成→自動削除まで確認（単品 item 55164190620／バリエ item 41082685573）。GAS web app v17・説明20字未満は自動補完。',
       '🩸 マージン漏れ検知（分析タブ）：出品台帳の仕入 ×「今のライブ価格」で利益/ROIを再計算し、赤字・目標ROI割れで売れ続けている出品を国別に炙り出す。価格を上げる/取り下げの判断に（各国の編集ページへリンク）。',
       '🔄 シリーズ別 回転速度（在庫タブ）：仕入日と売却日から「仕入→売却の平均日数」をシリーズ別に集計。速く売れる系統＝厚く仕入れる指針に（🟢速い/🟠遅め・在庫0の速い系統は補充候補）。',
@@ -4975,10 +4995,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px">売上・注文・入金・payouts 取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">GAS24h自動。<code>order/*・payment/get_escrow_detail・get_payout_detail</code></td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">手数料内訳・実手数料率</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">get_escrow_detail の commission/service/transaction</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">商品一覧・バリエ(model)情報 取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/get_item_list・get_model_list</code></td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>在庫更新 / 価格更新</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">⚙️設定の📦パネルで実装済。<code>product/update_stock・update_price</code></td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>在庫更新 / 価格更新（一括・バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px">⚙️設定📦パネル＋<b>統括編集の価格×係数・バリエ価格編集も公式API化(2026-07)</b>＝読み(<code>get_model_list</code>)も書き(<code>update_price/update_stock</code>のprice_list/stock_list)もブリッジ非依存。shop_id判明時は公式・無ければブリッジ自動フォールバック</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">出品状態のライブ即時取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ(mpsku)。get_item_listでAPI代替可・未移行</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>新規出品（リスティング作成）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ(create_product_info)。<b>E2E実証済(2026-07)</b>：per-shop <code>product/add_item</code>でPHに作成→<code>delete_item</code>削除まで成功。必須=category_id/brand/condition/seller_stock/image/logistic_info。<b>ポータル統合は次段階</b></td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">出品編集・バリエ画像・SKU</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🔴</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ。<code>product/update_item・tier_variation・update_model</code>はAPIにある・未実装</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品編集（タイトル/親SKU/説明）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化済(2026-07)</b>。<code>product/update_item</code>。統括タイトル/SKU書込がshop_id判明時は公式（ライブ/各国ログイン不要）</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">明細名変更・バリエ画像・バリエ追加(add_model)・specifics・重量</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ。<code>update_model・add_model・update_tier_variation</code>はAPIにある・未移行（画像アップ絡みで実機検証が要るため次段階）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">発送・伝票印刷</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🔴</td><td style="border:1px solid #eee;padding:5px 8px">今はSLS waybill script。<code>logistics/ship_order</code>等はAPIにある・未実装</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">休暇モード（Holiday Mode）切替</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">❌</td><td style="border:1px solid #eee;padding:5px 8px">公式APIに無い→各Seller Center手動。ポータルの🏖は表示・警告制御のみ</td></tr>
         </tbody>
@@ -5627,17 +5648,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (ok) { try { await sbPatch('listings', 'item_id=eq.' + lg.item_id, { name: title }); } catch (_) {} }
       return ok;
     } catch (_) { return false; } };
+    // 出品のshop_idをlst.byCcから解決（公式APIで明細を読み書きするのに必要）
+    const shopIdForListing = (lg) => { const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); return row && row.shop_id ? row.shop_id : null; };
+    // 明細(モデル)を公式API優先で読む→ 正規化 {src, sid, pi?, models:[{model_id,price,stock,sku,tier_index,name}]}
+    const readModelsUnified = async (lg) => {
+      const sid = shopIdForListing(lg);
+      if (settings.openapiUrl && settings.writeToken && sid) {
+        try { const d = await openapiGetModels(sid, lg.item_id); if (d && d.models) return { src: 'api', sid, models: d.models.map(m => ({ model_id: m.model_id, price: m.price, stock: m.stock, sku: m.sku || '', tier_index: m.tier_index || [], name: m.name || '' })) }; } catch (_) {}
+      }
+      const pi = await productRead(lg.host, lg.item_id); const tiers = pi.std_tier_variation_list || [];
+      return { src: 'bridge', sid, pi, models: (pi.model_list || []).map(m => ({ model_id: m.id, price: modelPrice(m), stock: stkOf(m), sku: m.sku || '', tier_index: m.tier_index || [], name: modelName(m, tiers) })) };
+    };
+    // 明細価格を公式API優先で書く。priceByModelId={model_id:価格文字列}。読んだsrcに合わせて公式/ブリッジを自動選択
+    const writeModelPricesUnified = async (lg, read, priceByModelId) => {
+      if (read.src === 'api') {
+        const list = read.models.map(m => ({ model_id: m.model_id, price: priceByModelId[m.model_id] })).filter(x => x.price != null && x.price !== '');
+        if (!list.length) return { ok: false };
+        try { const r = await openapiUpdatePriceList(read.sid, lg.item_id, list); return { ok: !!(r && r.ok), msg: r && r.error }; } catch (e) { return { ok: false, msg: e.message }; }
+      }
+      const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
+      const models = (read.pi.model_list || []).map(m => { let p = priceByModelId[m.id]; if (p == null || p === '') p = modelPrice(m); const pn = parseFloat(p); if (!isNaN(pn)) p = pn.toFixed(dec); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: p, stock_setting_list: [{ sellable_stock: stkOf(m) }] }; });
+      const r = await productWrite(lg.host, lg.item_id, { model_list: models }); return { ok: r.ok, code: r.code, msg: r.msg };
+    };
     const writePriceFactor = async (lg, factor) => {
       try {
-        const pi = await productRead(lg.host, lg.item_id);
+        const read = await readModelsUnified(lg);
+        if (!read.models.length) return { ok: false };
         const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
-        const stk = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
-        const newPrices = (pi.model_list || []).map(m => parseFloat(modelPrice(m)) * factor);
+        const newPrices = read.models.map(m => parseFloat(m.price) * factor);
         const wv = chkPrices(lg.cc, newPrices);
         if (wv.length) return { skip: true, warn: wv.join(' / ') };
-        const models = (pi.model_list || []).map(m => { const np = parseFloat(modelPrice(m)) * factor; return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: isNaN(np) ? modelPrice(m) : np.toFixed(dec), stock_setting_list: [{ sellable_stock: stk(m) }] }; });
-        if (!models.length) return { ok: false };
-        const r = await productWrite(lg.host, lg.item_id, { model_list: models }); return { ok: r.ok };
+        const priceByModelId = {}; read.models.forEach(m => { const np = parseFloat(m.price) * factor; priceByModelId[m.model_id] = isNaN(np) ? m.price : np.toFixed(dec); });
+        const r = await writeModelPricesUnified(lg, read, priceByModelId); return { ok: r.ok };
       } catch (_) { return { ok: false }; }
     };
     q('.uni-title-fill').addEventListener('click', () => { const v = q('.uni-title').value; ov.querySelectorAll('.uni-t').forEach(inp => inp.value = v); });
@@ -5680,7 +5722,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { logAct('出品', '統括価格', d.rep, '×' + f + ' ' + ok + '/' + listings.length + (skip ? ' skip' + skip : '')); } catch (_) {}
     });
     // ── バリエ比較・編集（各国のバリエを並べて表示＋価格インライン編集） ──
-    const varData = { pi: {} };
+    const varData = { reads: {} };
     const stkOf = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
     async function loadVariations() {
       const box = q('.uni-var'); if (!box) return;
@@ -5690,20 +5732,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       for (let i = 0; i < listings.length; i++) {
         const lg = listings[i];
         try {
-          const pi = await productRead(lg.host, lg.item_id); varData.pi[i] = pi;
-          const tiers = pi.std_tier_variation_list || [];
-          (pi.model_list || []).forEach(m => {
-            const vn = modelName(m, tiers); const key = productKey(vn) || vn || ('#' + m.id);
+          const read = await readModelsUnified(lg); varData.reads[i] = read; // 公式API優先(get_model_list)・不可ならブリッジ
+          read.models.forEach(m => {
+            const vn = m.name; const key = productKey(vn) || vn || ('#' + m.model_id);
             let v = varMap.get(key); if (!v) { v = { name: vn, cells: {} }; varMap.set(key, v); }
             if (!v.name && vn) v.name = vn;
-            v.cells[i] = { price: modelPrice(m), mid: m.id };
+            v.cells[i] = { price: m.price, mid: m.model_id };
           });
-        } catch (e) { varData.pi[i] = null; }
+        } catch (e) { varData.reads[i] = null; }
         if (prog()) prog().textContent = '読込中… ' + (i + 1) + '/' + listings.length;
       }
       const ccCount = {}; listings.forEach(lg => ccCount[lg.cc] = (ccCount[lg.cc] || 0) + 1);
       const ccSeen = {}; const colLabel = listings.map(lg => { if (ccCount[lg.cc] > 1) { ccSeen[lg.cc] = (ccSeen[lg.cc] || 0) + 1; return lg.cc + '·' + ccSeen[lg.cc]; } return lg.cc; });
-      const varCount = listings.map((lg, i) => { const pi = varData.pi[i]; return pi ? String((pi.model_list || []).length) : '—'; });
+      const varCount = listings.map((lg, i) => { const rd = varData.reads[i]; return rd ? String(rd.models.length) : '—'; });
       const rowsV = [...varMap.values()].map(v => {
         const cells = listings.map((lg, i) => {
           const c = v.cells[i];
@@ -5713,21 +5754,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         return '<tr><td style="text-align:left;position:sticky;left:0;background:#fff">' + nm(v.name || '（既定）', '220px') + '</td>' + cells + '</tr>';
       }).join('');
       const head = '<tr><th style="text-align:left;position:sticky;left:0;background:#fafafa">バリエ (' + varMap.size + ')</th>' + listings.map((lg, i) => '<th style="white-space:nowrap"><span style="color:' + rgc(lg.cc).color + '">' + colLabel[i] + '</span><br><span style="font-weight:400;font-size:9px;color:#999">' + varCount[i] + '種</span></th>').join('') + '</tr>';
-      const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.pi[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細価格をShopeeへ書込">書込</button>' : '—') + '</td>').join('') + '</tr>';
+      const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.reads[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細価格をShopeeへ書込">書込</button>' : '—') + '</td>').join('') + '</tr>';
       box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">価格はセルで直接編集→各国「書込」で反映。<b style="color:#d93025">✗</b>の国はそのバリエ未出品（＋バリエ/✎詳細で追加）。明細名の変更・バリエ追加・specificsは各国行の<b>✎詳細</b>から。</div>';
       ov.querySelectorAll('.uvar-write').forEach(b => b.addEventListener('click', async () => {
-        const li = +b.dataset.li, lg = listings[li], pi = varData.pi[li]; if (!pi) return;
-        const n = (pi.model_list || []).length;
+        const li = +b.dataset.li, lg = listings[li], read = varData.reads[li]; if (!read) return;
+        const n = read.models.length;
         const gw = await guardWriteCountries([lg.cc]);
         if (!gw.ok) { alert(gw.msg); return; }
         if (!confirm('書込先: ' + gw.summary + '\n\n' + lg.cc + ' の全明細（' + n + '件）の価格をShopeeに書き込みます。よろしいですか？')) return;
         b.disabled = true; b.textContent = '…';
         const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
         const pmap = {}; ov.querySelectorAll('.uvar-p[data-li="' + li + '"]').forEach(inp => pmap[inp.dataset.mid] = inp.value.trim());
-        const models = (pi.model_list || []).map(m => { let p = (pmap[m.id] != null && pmap[m.id] !== '') ? pmap[m.id] : modelPrice(m); const pn = parseFloat(p); if (!isNaN(pn)) p = pn.toFixed(dec); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: p, stock_setting_list: [{ sellable_stock: stkOf(m) }] }; });
-        const wv = chkPrices(lg.cc, models.map(m => parseFloat(m.price)));
+        const priceByModelId = {}; const prices = [];
+        read.models.forEach(m => { let p = (pmap[m.model_id] != null && pmap[m.model_id] !== '') ? pmap[m.model_id] : m.price; const pn = parseFloat(p); prices.push(pn); priceByModelId[m.model_id] = isNaN(pn) ? p : pn.toFixed(dec); });
+        const wv = chkPrices(lg.cc, prices);
         if (wv.length && !confirm(lg.cc + ' の価格が出品制約に触れています:\n\n' + wv.join('\n') + '\n\n（Shopee側で拒否される可能性があります）それでも書き込みますか？')) { b.disabled = false; b.textContent = '書込'; return; }
-        let ok = false; try { const r = await productWrite(lg.host, lg.item_id, { model_list: models }); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 code=' + r.code + ' ' + r.msg, '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
+        let ok = false; try { const r = await writeModelPricesUnified(lg, read, priceByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
         b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) b.disabled = false;
         if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', lg.cc, (d.rep || '') + ' ' + n + '件'); } catch (_) {} }
       }));
