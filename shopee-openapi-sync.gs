@@ -448,6 +448,23 @@ function testAddItemVar() {
   }
 }
 
+// update_item 検証：非公開で1件作成→タイトル/親SKUをupdate_itemで変更→読み戻して確認→削除（自己完結・手動実行）
+function testUpdateItem() {
+  var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
+  var r = addItem_({ shop_id: 695473017, item_name: '【TEST】update_item before', description: 'Test update_item via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false });
+  Logger.log('CREATED: ' + JSON.stringify(r));
+  if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
+  try {
+    var u = updateItem_({ shop_id: r.shop_id || 695473017, item_id: r.item_id, item_name: '【TEST】update_item AFTER 名前変更OK', item_sku: 'TESTSKU-AFTER' });
+    Logger.log('UPDATED: ' + JSON.stringify(u));
+    var g = callShop_(r.shop_id || 695473017, '/api/v2/product/get_item_base_info', { item_id_list: String(r.item_id) }, 'get', null);
+    var it = (g && g.response && g.response.item_list && g.response.item_list[0]) || {};
+    Logger.log('READBACK: item_name=' + it.item_name + ' / item_sku=' + it.item_sku);
+  } catch (e) { Logger.log('UPDATE/READBACK FAILED: ' + e); }
+  try { var d = callShop_(r.shop_id || 695473017, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
+  catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
+}
+
 function getOrderSns_(shopId, timeFrom, timeTo) {
   var sns = [], cursor = '';
   for (var g = 0; g < 50; g++) {
