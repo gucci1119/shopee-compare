@@ -63,7 +63,9 @@ function doGet(e) {
           price: p.price, stock: p.stock, weight: p.weight,
           category: p.category || 'Games', condition: p.condition || 'USED',
           brand_id: p.brand_id, publish: p.publish === '1',
-          images: p.images ? String(p.images).split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : []
+          images: p.images ? String(p.images).split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [],
+          variations: p.variations ? (function () { try { return JSON.parse(p.variations); } catch (_) { return []; } })() : [], // [{name,price,stock,sku,image}]（バリエ商品）
+          tier_name: p.tier_name || 'バージョン'
         });
       } catch (err) { aout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(acb + '(' + JSON.stringify(aout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -380,12 +382,44 @@ function addItem_(body) {
   if (body.dimension) payload.dimension = body.dimension;
   var j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
   var resp = j.response || j;
-  return { ok: true, shop_id: shopId, item_id: (resp.item_id || (resp.item || {}).item_id || null), category_id: categoryId, logistic_id: logisticId, image_ids: imgIds };
+  var itemId = (resp.item_id || (resp.item || {}).item_id || null);
+  var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_id: logisticId, image_ids: imgIds };
+  // ★バリエーション：add_item後に init_tier_variation で機種等のバリエを設定（2明細以上のとき）
+  var vars = body.variations || [];
+  if (itemId && vars.length >= 2) {
+    var optionList = vars.map(function (v) {
+      var o = { option: String(v.name || '').slice(0, 20) }; // Shopeeのバリエ名は20字上限
+      if (v.image) { try { var iid = uploadImageUrl_(v.image); if (iid) o.image = { image_id: iid }; } catch (_) {} }
+      return o;
+    });
+    var modelList = vars.map(function (v, i) {
+      return { tier_index: [i], original_price: parseFloat(v.price != null ? v.price : body.price), model_sku: String(v.sku || ''), seller_stock: [{ stock: parseInt(v.stock != null ? v.stock : 1, 10) }] };
+    });
+    var tvBody = { item_id: itemId, tier_variation: [{ name: String(body.tier_name || 'バージョン').slice(0, 20), option_list: optionList }], model: modelList };
+    var jt = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', tvBody);
+    result.variations = vars.length;
+    result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
+  }
+  return result;
 }
 // 安全確認用：1件だけ非公開(UNLIST)で作成テスト（値を書き換えて手動実行→編集画面で確認→削除）
 function testAddItem() {
   var r = addItem_({ shop_id: 0 /* 例:695473017(PH) */, item_name: '【TEST】Sample Used Game', description: 'test', price: 300, stock: 1, weight: 0.5, category: 'Games', images: ['https://cf.shopee.ph/file/xxxx'], publish: false });
   Logger.log(JSON.stringify(r, null, 1));
+}
+// バリエ商品のE2Eテスト（2バリエ・作成→CREATEDログ→自動削除→DELETEDログ）。手動実行で確認
+function testAddItemVar() {
+  var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
+  var r = addItem_({ shop_id: 695473017, item_name: '【TEST】Variation Used Game', description: 'Test variation listing via official API. Auto-deleted right after creation.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false,
+    tier_name: 'Version', variations: [
+      { name: 'PS4', price: 300, stock: 1, sku: 'TESTVAR-PS4', image: img },
+      { name: 'PS5', price: 400, stock: 2, sku: 'TESTVAR-PS5', image: img }
+    ] });
+  Logger.log('CREATED: ' + JSON.stringify(r, null, 1));
+  if (r && r.item_id) {
+    try { var d = callShop_(r.shop_id || 695473017, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
+    catch (e) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e); }
+  }
 }
 
 function getOrderSns_(shopId, timeFrom, timeTo) {
