@@ -1077,24 +1077,7 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIバリエ追加に失敗');
     return res;
   }
-  // 公式APIでアカウント健全性（全店のペナルティ点・違反指標）を取得。読み取り・token不要
-  async function openapiAccountHealth() {
-    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
-    const qs = 'action=account_health';
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 120000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '公式API健全性取得に失敗');
-    return res.shops || [];
-  }
-  // 全店13×2コール＝重いのでキャッシュ（TTL30分）。force で再取得。アカウント/アラート/ダッシュボードで共有
-  const healthCache = { at: 0, shops: null };
-  async function loadHealth(force) {
-    if (!force && healthCache.shops && Date.now() - healthCache.at < 1800000) return healthCache.shops;
-    const shops = await openapiAccountHealth();
-    healthCache.shops = shops; healthCache.at = Date.now();
-    return shops;
-  }
-  // 危険判定：ペナルティ点>0 / 進行中の罰あり / 総合評価がPoor(1)・要改善(2)
-  const healthBad = s => (s.penalty > 0) || (s.ongoing > 0) || (s.rating != null && s.rating <= 2) || (s.fulfillment > 0) || (s.listing > 0) || (s.custom > 0);
+  // ※アカウント健全性(account_health)はこのCB越境垢では権限なし(error_not_found/shop invalid)で断念。実装は撤去済。
 
   // 公式APIでバリエ画像を設定（画像URL→upload→対象optionのimage差し替え・他は維持）
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
@@ -3240,32 +3223,6 @@
     return { live, check: checkAccountMatch(live, targets.map(r => r.cc)) };
   }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
-  // 🛡 アカウント健全性パネル（アカウントページ内。loadHealthのキャッシュ共有）
-  async function renderHealthPanel(force) {
-    const body = document.getElementById('acct-health-body'); if (!body) return;
-    body.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span> 取得中…（全店のペナルティ/違反を確認）</span>';
-    let shops;
-    try { shops = await loadHealth(force); } catch (e) { body.innerHTML = errBox(e); return; }
-    if (!shops || !shops.length) { body.innerHTML = '<span class="smd-dim">データがありません（GAS未認可、または account_health 未デプロイ）。</span>'; return; }
-    const badN = shops.filter(healthBad).length;
-    const ratingTxt = r => r == null ? '—' : (['', '🔴Poor', '🟠要改善', '🟢Good', '🟢優良'][r] || ('評価' + r));
-    const rows = shops.slice().sort((a, b) => (healthBad(b) ? 1 : 0) - (healthBad(a) ? 1 : 0) || (b.penalty || 0) - (a.penalty || 0)).map(s => {
-      const bad = healthBad(s);
-      const badMetrics = (s.metrics || []).filter(m => m.comparator && m.value != null && m.target != null && ((m.comparator === '<' || m.comparator === '<=') ? Number(m.value) > Number(m.target) : (m.comparator === '>' || m.comparator === '>=') ? Number(m.value) < Number(m.target) : false));
-      const err = s.penaltyErr || s.perfErr;
-      return `<tr style="${bad ? 'background:#fdecea' : ''}">
-        <td style="white-space:nowrap;font-weight:700;color:${(regionByCc(s.cc) || {}).color || '#333'}">${esc(s.cc)}</td>
-        <td style="white-space:nowrap;font-size:11px">${esc(s.shop_name || String(s.shop_id))}</td>
-        <td style="text-align:center;font-weight:700;color:${(s.penalty > 0) ? '#d93025' : '#1a7f37'}">${s.penalty != null ? s.penalty : '—'}</td>
-        <td style="text-align:center">${s.ongoing > 0 ? ('<b style="color:#d93025">' + s.ongoing + '</b>') : '0'}</td>
-        <td style="text-align:center;font-size:11px">${ratingTxt(s.rating)}</td>
-        <td style="font-size:11px;color:#d93025">${err ? ('⚠️' + esc(err)) : (badMetrics.length ? esc(badMetrics.map(m => (m.name || m.id) + ' ' + m.value + (m.unit || '')).join(' / ')) : '—')}</td>
-      </tr>`;
-    }).join('');
-    body.innerHTML = `<div style="font-size:12px;margin-bottom:6px">${badN ? '<b style="color:#d93025">⚠️ 要注意 ' + badN + '店</b>（ペナルティ点あり/進行中の罰/評価低）' : '<b style="color:#1a7f37">✅ 全店 健全</b>'} <span class="smd-dim">・最終チェック ${new Date(healthCache.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span></div>
-      <div class="pf-scroll"><table class="pf-table"><tr><th>国</th><th>店</th><th>ペナルティ点</th><th>進行中の罰</th><th>総合評価</th><th>気になる指標/エラー</th></tr>${rows}</table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:5px">💡 ペナルティ点が付く/進行中の罰がある/総合評価が低い店は<b style="color:#d93025">赤</b>。放置すると出品制限・アカBANに繋がるので、Seller Centerで原因（遅延発送・違反出品・未対応チャット等）を確認して対処。指標はShopeeの Account Health 準拠。</div>`;
-  }
   async function renderAccounts() {
     const host = document.getElementById('acct-body');
     host.innerHTML = '<span class="smd-dim">読み込み中…</span>';
@@ -3339,13 +3296,7 @@
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:4px 0">実装済み：ヘッダの<b>「対象アカウント」</b>で全データ（出品/注文/ダッシュボード/損益）を絞り込めます。同期時に「今アクティブなショップ」のshop_idを各行へ自動付与。<br><b>有効化に2手順</b>：①下記SQLを1回だけ実行（listings/orders/incomeにshop_id列を追加）②各アカウントに切替(Switch Shop)→🔄同期（既存行はshop_id無し＝「未判別」。再同期で振り分け）。</div>
       <textarea class="acct-alter" readonly style="width:100%;height:110px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ALTER_SQL)}</textarea>
       <div style="margin-top:5px"><button class="acct-alter-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
-    const healthCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;border:1px solid #d6e4f5;background:#f7fbff">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🛡 アカウント健全性（ペナルティ・違反）</b>
-        <button class="smd-btn" id="acct-health-check" style="background:#1a73e8;color:#fff;border-color:#1a73e8">🔄 全店チェック</button>
-        <span class="smd-dim" style="font-size:11px">公式APIでペナルティ点・遅延発送率などを取得＝<b>アカBAN/出品制限の予防</b>。読み取りのみ（全店13×2コールなので手動チェック）。</span></div>
-      <div id="acct-health-body" style="margin-top:8px"></div></div>`;
-    host.innerHTML = intro + healthCard + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
-    { const hb = document.getElementById('acct-health-check'); if (hb) hb.addEventListener('click', () => renderHealthPanel(true)); if (healthCache.shops) renderHealthPanel(false); }
+    host.innerHTML = intro + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
     host.querySelectorAll('.acct-switchall').forEach(b => b.addEventListener('click', () => {
       const fam = b.dataset.family;
       if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で使えます'); return; }
@@ -4530,7 +4481,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-07-17', items: [
       '✍️ 出品を作る（コンポーザー）の上部をスッキリ整理：ページ先頭に「この画面＝①②③」の説明→「① 出品タイプ（単品/バリエ）」を最上部に置き、まず何を押すか一目で分かる順序に。文字サイズは4ボタン→コンパクトなプルダウン、下書きバーは控えめな補助バーに、重複していた注意書きも統合。ボタンの数を減らして視線を主役（1〜4入力→5.各国へ転記）に集中させました。',
       '💴 事業計画に「毎月の固定費・経費を登録」を新設＝実利益を正確に：人件費・家賃・ツール等をその月に項目登録すると、実利益＝入金−仕入−固定費−変動費−その他経費 に即反映（登録した実額を優先、未登録の月は見込み額でフォールバック＝切替で過大にならない）。月次履歴の列を 固定費／変動費／その他経費 に分割し「実利益」を明示。必要注文数の逆算は1注文の利益＝既定1200円（梱包資材は別途差引）で計算。',
-      '🛡 アカウント健全性の監視を追加（アカBAN予防）：🔑アカウントページに「全店チェック」ボタン＝公式API(account_health)で各国のペナルティ点・進行中の罰・総合評価・遅延発送率などを取得し、危険な店を赤でハイライト。放置すると出品制限やアカBANに繋がる違反を早期に発見。読み取りのみ・キャッシュ30分。※GAS web app v24再デプロイで有効。',
+      '🔎 この越境垢で使える公式APIを実測プローブ→ロードマップを正確化：account_health（健全性/ペナルティ）・returns（返品）・comment（レビュー）・discount/voucher（割引/クーポン）・bundle_deal（セット）・sellerchat（チャット）を読み取りで検証した結果、いずれも error_not_found / shop_id invalid / server error で、このCB越境垢（merchant無し）では権限なしと判明。マトリクス/対応表を「➖垢権限なし（実測）」に訂正し、作りかけのaccount_healthパネルは撤去。結論＝中核（注文/商品/出品作成・編集・バリエ・画像/価格在庫/入金）は全てAPI化済で、残せる余地は実質「発送」のみ。',
       '🗺 改修履歴の「成長マトリクス」＆「公式API対応表」を最新化＋拡充：完了分（出品作成/編集・バリエ追加/明細名/画像）をAPI✅に更新し、まだ手を付けていない公式API機能を「🟠API可能・未着手」として明示（返品・返金/注文キャンセル対応/レビュー返信/割引・クーポン/商品ブースト/アカウント健全性・ペナルティ監視/CB国際物流first_mile/チャットsellerchat）。何を伸ばせるか一目で分かるように。',
       '🖼 バリエ画像も公式API化：統括編集のバリエ比較グリッドで、各セルの🖼で「その国のそのバリエ画像」を公式APIで差し替え（画像URL→他バリエの画像は維持）。＋追加でも任意で画像URLを指定可。本番E2Eで差替＆他画像維持を確認。あわせて明細名変更/バリエ追加が既存画像を消しうる潜在バグも保持修正（tierOpt_）。GAS web app v23。',
       '🧹 メニューの重複を整理（第2弾）：①転記ページを左メニューから撤去（⚙️設定＞上級者に「💰転記/手動同期を開く」＋⌘K検索で到達可）＝スプシ独立運用の方針に合わせスッキリ。②月次P&Lを📈事業計画に一本化（事業計画の実利益に返金差引を追加し「返金」列を新設。損益の数字が2箇所で食い違う問題を解消。経費タブの純利益カードから事業計画への導線）。③ダッシュボードの在庫KPI（死に筋/入庫待ち/未発送）をクリックで詳細（アラート/仕入れ管理/注文）へ＝二重表示を集約。④価格調整に役割バナー＝「相場を見る画面」明示＋『出品管理＞横断カバレッジ（統括編集）』への一括書き換え導線。⑤本日のやること（今日の実務）とアラート（在庫/注文/データの要対応）の役割を明記し相互リンク。',
@@ -4721,6 +4672,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       portal: { t: 'ポータル', bg: '#e3f0ff', fg: '#1565c0' },
       soon: { t: '検証済→予定', bg: '#fff4e0', fg: '#b45309' },
       possible: { t: 'API可能', bg: '#fff0e0', fg: '#c2410c' }, // 公式APIにあるが未着手
+      noperm: { t: '垢権限なし', bg: '#fdecea', fg: '#c0392b' }, // APIにはあるが、このCB越境垢では権限なし(実測)
       na: { t: 'APIに無い', bg: '#f0f0f0', fg: '#999' },
     };
     const CAP = [
@@ -4738,14 +4690,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['自動出品 コンポーザー（雛形・作成）', ['none', 'bridge', 'bridge', 'bridge', 'bridge', 'bridge']],
       ['バケーション表示', ['none', 'none', 'none', 'portal', 'portal', 'portal']],
       ['発送・伝票（ship_order/waybill）', ['none', 'none', 'none', 'none', 'none', 'soon']],
-      // ↓ 公式APIにあるが「まだ手を付けていない」機能（やろうと思えばできる＝ロードマップ候補）
-      ['返品・返金の対応（returns）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['注文キャンセルの対応（cancellation）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['レビュー/Q&A 返信（comment）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['割引・クーポン（discount/voucher）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['商品ブースト＝上位表示（boost_item）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['アカウント健全性・ペナルティ（account_health）', ['none', 'none', 'none', 'none', 'none', 'soon']],
-      ['チャット送受信（sellerchat）', ['bridge', 'bridge', 'bridge', 'bridge', 'bridge', 'possible']],
+      // ↓ 公式APIには在るが、このCB越境垢では権限なし（2026-07-18 実測プローブで確定：error_not_found / shop_id invalid）
+      ['返品・キャンセル・レビュー・割引・クーポン・セット販売（販促/管理系）', ['none', 'none', 'none', 'none', 'none', 'noperm']],
+      ['アカウント健全性・ペナルティ（account_health）', ['none', 'none', 'none', 'none', 'none', 'noperm']],
+      ['商品ブースト＝上位表示（boost_item）', ['none', 'none', 'none', 'none', 'none', 'noperm']],
+      ['チャット送受信（sellerchat）', ['bridge', 'bridge', 'bridge', 'bridge', 'bridge', 'noperm']],
       ['広告・マーケ支出', ['none', 'none', 'none', 'none', 'none', 'na']],
     ];
     const cell = k => { const s = S[k] || S.none; return `<td style="border:1px solid #eee;padding:4px 6px;text-align:center;background:${s.bg};color:${s.fg};font-size:10.5px;font-weight:600;white-space:nowrap">${s.t}</td>`; };
@@ -4753,12 +4702,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const matrix =
       `<div class="tool-card" style="margin:0 0 14px;max-width:1150px">
         <div style="font-weight:800;font-size:14px;margin-bottom:3px">📈 機能の成長マトリクス <span class="smd-dim" style="font-weight:400;font-size:11px">（時系列で「使えるようになっていった」様子）</span></div>
-        <div style="font-size:11px;margin-bottom:8px">凡例：${legend('bridge', 'ブリッジ(常駐要)')} → ${legend('api', '公式API(自動・常駐不要)')} ／ ${legend('portal', 'ポータル機能')} ／ ${legend('soon', '検証済→予定')} ／ ${legend('possible', 'API可能・未着手')} ／ ${legend('na', 'APIに無い')} ／ ${legend('none', '未実装')}</div>
+        <div style="font-size:11px;margin-bottom:8px">凡例：${legend('bridge', 'ブリッジ(常駐要)')} → ${legend('api', '公式API(自動・常駐不要)')} ／ ${legend('portal', 'ポータル機能')} ／ ${legend('soon', '検証済→予定')} ／ ${legend('possible', 'API可能・未着手')} ／ ${legend('noperm', '垢権限なし(実測)')} ／ ${legend('na', 'APIに無い')} ／ ${legend('none', '未実装')}</div>
         <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;min-width:560px;width:100%">
           <thead><tr><th style="border:1px solid #eee;padding:4px 8px;text-align:left;background:#fafafa">機能</th>${MILES.map(m => `<th style="border:1px solid #eee;padding:4px 6px;text-align:center;background:#fafafa;white-space:nowrap">${m}</th>`).join('')}</tr></thead>
           <tbody>${CAP.map(row => `<tr><td style="border:1px solid #eee;padding:4px 8px;white-space:nowrap;font-weight:600">${row[0]}</td>${row[1].map(cell).join('')}</tr>`).join('')}</tbody>
         </table></div>
-        <div style="font-size:11px;color:#666;margin-top:6px">紫→緑に変わった行＝<b>ブリッジ卒業</b>（ブラウザ/拡張の常駐なしで回るように）。右端「次▶」＝<b style="color:#b45309">検証済→予定</b>（発送）／<b style="color:#c2410c">API可能・未着手</b>＝公式APIにあるが未実装の候補（返品/キャンセル/レビュー返信/割引/ブースト/健全性/チャット）。<b>画像を含む出品書き込みは全て公式API化済</b>で、残りは発送＋この候補群。</div>
+        <div style="font-size:11px;color:#666;margin-top:6px">紫→緑に変わった行＝<b>ブリッジ卒業</b>（ブラウザ/拡張の常駐なしで回るように）。右端「次▶」＝<b style="color:#b45309">検証済→予定</b>（発送）／<b style="color:#c0392b">垢権限なし</b>＝公式APIには在るが<b>このCB越境垢では権限なし</b>（2026-07-18 実測：返品/レビュー/割引/クーポン/健全性/チャット等が error_not_found・shop_id invalid で全滅）。<b>中核（注文・商品・出品作成/編集・バリエ・価格在庫・入金）と画像まで全て公式API化済</b>で、残せる余地は実質<b>発送のみ</b>。first_mile同様この垢は販促/管理系APIが未provision。</div>
       </div>`;
     body.innerHTML = matrix +
       `<div class="tool-card" style="margin:0;max-width:1150px;font-size:13px;line-height:1.8">` +
@@ -5171,19 +5120,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>バリエ 追加/明細名/画像</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化済(2026-07)</b>。<code>add_model</code>(＋追加)/<code>update_tier_variation</code>(明細名置換・画像差替)。画像は<code>media_space/upload_image</code>→optionのimage差替（他バリエ画像は維持）。統括編集グリッドの＋追加・🖼</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">specifics（属性）・重量の一括編集</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ/✎詳細。<code>update_item</code>のweight/attribute_listで移行可・未着手</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>発送・伝票（waybill）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">読み取り診断＋<code>logistics/ship_order</code>関数は実装済。<b>実注文が入り次第</b> get_shipping_parameter で集荷/持込を確認→本発送→伝票<code>create_shipping_document</code>。今はSLS印刷script</td></tr>
-          <tr><td colspan="3" style="border:1px solid #eee;padding:4px 8px;background:#fff7ee;font-weight:700;color:#c2410c;font-size:11px">🔭 公式APIにあるが未着手（やろうと思えばできる候補）</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">返品・返金の対応</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>returns/get_return_list・get_return_detail・confirm/dispute</code>＝返品の一覧取得・承認/異議。今の返品ページを自動化できる</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">注文キャンセルの対応</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>order/handle_buyer_cancellation・cancel_order</code>＝買い手キャンセルの承認/拒否・在庫切れ時の出品側キャンセル</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">レビュー/Q&A 返信</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/get_comment・reply_comment</code>＝評価コメントに定型/AI返信（評価維持に効く）</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">割引・クーポン（販促）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>discount/add_discount・voucher/add_voucher・bundle_deal・add_on_deal・shop_flash_sale</code>＝セール/クーポン/セット販売を一括作成</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">商品ブースト（上位表示）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/boost_item</code>＝4時間ごとに指定商品を検索上位へ（1日5件まで等の枠）。売れ筋の露出増に</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">アカウント健全性・ペナルティ監視</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>account_health/get_shop_penalty・get_metric</code>＝ペナルティ点・遅延発送率・違反を取得→アラート化（アカBAN予防）</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">CB国際物流 first_mile 事前申告</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px"><b>対象外（この運用では使わない）</b>。うちは SLS伝票を貼って箱詰め→倉庫でShopeeが読むだけ＝箱に注文を紐付ける操作が無い。実機確認でも全13店 <code>no permission for first mile pre declare</code>。<code>first_mile/*</code> は該当なし</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">チャット送受信（webchat代替）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟠</td><td style="border:1px solid #eee;padding:5px 8px"><code>sellerchat/send_message・get_message・get_conversation</code>＝今のwebchat取り込みuserscriptを公式APIに置換できる（要 審査ゲート）</td></tr>
+          <tr><td colspan="3" style="border:1px solid #eee;padding:4px 8px;background:#fdecea;font-weight:700;color:#c0392b;font-size:11px">➖ 公式APIには在るが、このCB越境垢では権限なし（2026-07-18 実測プローブで確定）</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">返品・返金の対応（returns）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>error_not_found</code>。<code>returns/*</code> はこの垢で使えない</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">レビュー返信・割引・クーポン・セット販売</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>product/get_comment→shop_id invalid</code>／<code>discount→Shopid invalid</code>／<code>voucher→error_server</code>／<code>bundle_deal→error_unknown</code>。販促/レビュー系は全て権限なし</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">アカウント健全性・ペナルティ監視</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>get_shop_penalty→error_not_found</code>／<code>get_shop_performance→server error(CB feature toggle失敗)</code>。account_health はこの垢で未provision</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">商品ブースト・チャットAPI（boost/sellerchat）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">同系統の管理APIで権限なしと推定（チャットは現状webちゃっと取り込みで運用）</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">CB国際物流 first_mile 事前申告</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px"><b>対象外（この運用では使わない）</b>。うちは SLS伝票を貼って箱詰め→倉庫でShopeeが読むだけ＝箱に注文を紐付ける操作が無い。実機でも全13店 <code>no permission for first mile pre declare</code></td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">休暇モード（Holiday Mode）切替</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">❌</td><td style="border:1px solid #eee;padding:5px 8px">公式APIに無い→各Seller Center手動。ポータルの🏖は表示・警告制御のみ</td></tr>
         </tbody>
       </table></div>
-      <div style="font-size:11.5px;color:#666;line-height:1.7;margin-top:5px"><b>まとめ</b>：<b>取得</b>・<b>在庫/価格</b>・<b>出品作成/編集/バリエ(追加/名前/画像)</b>はAPI化済＝ブリッジ非常駐でOK。残るブリッジ書込は<b>発送</b>（実注文待ち）と一部の<b>specifics/重量</b>のみ。🟠は公式APIにあるが未着手の候補（返品/キャンセル/レビュー返信/販促/ブースト/健全性/チャット）＝伸ばせる余地。➖first_mileは権限なしで対象外。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。</div>
+      <div style="font-size:11.5px;color:#666;line-height:1.7;margin-top:5px"><b>まとめ</b>：<b>取得</b>・<b>在庫/価格</b>・<b>出品作成/編集/バリエ(追加/名前/画像)</b>はAPI化済＝ブリッジ非常駐でOK。残るブリッジ書込は<b>発送</b>（実注文待ち）と一部の<b>specifics/重量</b>のみ。➖の販促/管理系（返品/レビュー/割引/クーポン/健全性/ブースト/チャット/first_mile）は<b>この越境垢では権限なし</b>と実測確定＝伸ばす余地は実質無し。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。</div>
 
       <div style="margin:14px 0 4px;font-weight:700;font-size:13px;color:#7b52c4">🚀 自動出品フロー（コンポーザー → 発行）</div>
       <div style="background:#fff;border:1px solid #ececec;border-radius:9px;padding:12px">
