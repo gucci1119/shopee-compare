@@ -1077,6 +1077,25 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIバリエ追加に失敗');
     return res;
   }
+  // 公式APIでアカウント健全性（全店のペナルティ点・違反指標）を取得。読み取り・token不要
+  async function openapiAccountHealth() {
+    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    const qs = 'action=account_health';
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 120000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API健全性取得に失敗');
+    return res.shops || [];
+  }
+  // 全店13×2コール＝重いのでキャッシュ（TTL30分）。force で再取得。アカウント/アラート/ダッシュボードで共有
+  const healthCache = { at: 0, shops: null };
+  async function loadHealth(force) {
+    if (!force && healthCache.shops && Date.now() - healthCache.at < 1800000) return healthCache.shops;
+    const shops = await openapiAccountHealth();
+    healthCache.shops = shops; healthCache.at = Date.now();
+    return shops;
+  }
+  // 危険判定：ペナルティ点>0 / 進行中の罰あり / 総合評価がPoor(1)・要改善(2)
+  const healthBad = s => (s.penalty > 0) || (s.ongoing > 0) || (s.rating != null && s.rating <= 2) || (s.fulfillment > 0) || (s.listing > 0) || (s.custom > 0);
+
   // 公式APIでバリエ画像を設定（画像URL→upload→対象optionのimage差し替え・他は維持）
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -3221,6 +3240,32 @@
     return { live, check: checkAccountMatch(live, targets.map(r => r.cc)) };
   }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
+  // 🛡 アカウント健全性パネル（アカウントページ内。loadHealthのキャッシュ共有）
+  async function renderHealthPanel(force) {
+    const body = document.getElementById('acct-health-body'); if (!body) return;
+    body.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span> 取得中…（全店のペナルティ/違反を確認）</span>';
+    let shops;
+    try { shops = await loadHealth(force); } catch (e) { body.innerHTML = errBox(e); return; }
+    if (!shops || !shops.length) { body.innerHTML = '<span class="smd-dim">データがありません（GAS未認可、または account_health 未デプロイ）。</span>'; return; }
+    const badN = shops.filter(healthBad).length;
+    const ratingTxt = r => r == null ? '—' : (['', '🔴Poor', '🟠要改善', '🟢Good', '🟢優良'][r] || ('評価' + r));
+    const rows = shops.slice().sort((a, b) => (healthBad(b) ? 1 : 0) - (healthBad(a) ? 1 : 0) || (b.penalty || 0) - (a.penalty || 0)).map(s => {
+      const bad = healthBad(s);
+      const badMetrics = (s.metrics || []).filter(m => m.comparator && m.value != null && m.target != null && ((m.comparator === '<' || m.comparator === '<=') ? Number(m.value) > Number(m.target) : (m.comparator === '>' || m.comparator === '>=') ? Number(m.value) < Number(m.target) : false));
+      const err = s.penaltyErr || s.perfErr;
+      return `<tr style="${bad ? 'background:#fdecea' : ''}">
+        <td style="white-space:nowrap;font-weight:700;color:${(regionByCc(s.cc) || {}).color || '#333'}">${esc(s.cc)}</td>
+        <td style="white-space:nowrap;font-size:11px">${esc(s.shop_name || String(s.shop_id))}</td>
+        <td style="text-align:center;font-weight:700;color:${(s.penalty > 0) ? '#d93025' : '#1a7f37'}">${s.penalty != null ? s.penalty : '—'}</td>
+        <td style="text-align:center">${s.ongoing > 0 ? ('<b style="color:#d93025">' + s.ongoing + '</b>') : '0'}</td>
+        <td style="text-align:center;font-size:11px">${ratingTxt(s.rating)}</td>
+        <td style="font-size:11px;color:#d93025">${err ? ('⚠️' + esc(err)) : (badMetrics.length ? esc(badMetrics.map(m => (m.name || m.id) + ' ' + m.value + (m.unit || '')).join(' / ')) : '—')}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<div style="font-size:12px;margin-bottom:6px">${badN ? '<b style="color:#d93025">⚠️ 要注意 ' + badN + '店</b>（ペナルティ点あり/進行中の罰/評価低）' : '<b style="color:#1a7f37">✅ 全店 健全</b>'} <span class="smd-dim">・最終チェック ${new Date(healthCache.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span></div>
+      <div class="pf-scroll"><table class="pf-table"><tr><th>国</th><th>店</th><th>ペナルティ点</th><th>進行中の罰</th><th>総合評価</th><th>気になる指標/エラー</th></tr>${rows}</table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:5px">💡 ペナルティ点が付く/進行中の罰がある/総合評価が低い店は<b style="color:#d93025">赤</b>。放置すると出品制限・アカBANに繋がるので、Seller Centerで原因（遅延発送・違反出品・未対応チャット等）を確認して対処。指標はShopeeの Account Health 準拠。</div>`;
+  }
   async function renderAccounts() {
     const host = document.getElementById('acct-body');
     host.innerHTML = '<span class="smd-dim">読み込み中…</span>';
@@ -3294,7 +3339,13 @@
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:4px 0">実装済み：ヘッダの<b>「対象アカウント」</b>で全データ（出品/注文/ダッシュボード/損益）を絞り込めます。同期時に「今アクティブなショップ」のshop_idを各行へ自動付与。<br><b>有効化に2手順</b>：①下記SQLを1回だけ実行（listings/orders/incomeにshop_id列を追加）②各アカウントに切替(Switch Shop)→🔄同期（既存行はshop_id無し＝「未判別」。再同期で振り分け）。</div>
       <textarea class="acct-alter" readonly style="width:100%;height:110px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ALTER_SQL)}</textarea>
       <div style="margin-top:5px"><button class="acct-alter-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
-    host.innerHTML = intro + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    const healthCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;border:1px solid #d6e4f5;background:#f7fbff">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🛡 アカウント健全性（ペナルティ・違反）</b>
+        <button class="smd-btn" id="acct-health-check" style="background:#1a73e8;color:#fff;border-color:#1a73e8">🔄 全店チェック</button>
+        <span class="smd-dim" style="font-size:11px">公式APIでペナルティ点・遅延発送率などを取得＝<b>アカBAN/出品制限の予防</b>。読み取りのみ（全店13×2コールなので手動チェック）。</span></div>
+      <div id="acct-health-body" style="margin-top:8px"></div></div>`;
+    host.innerHTML = intro + healthCard + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    { const hb = document.getElementById('acct-health-check'); if (hb) hb.addEventListener('click', () => renderHealthPanel(true)); if (healthCache.shops) renderHealthPanel(false); }
     host.querySelectorAll('.acct-switchall').forEach(b => b.addEventListener('click', () => {
       const fam = b.dataset.family;
       if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で使えます'); return; }
@@ -4479,6 +4530,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-07-17', items: [
       '✍️ 出品を作る（コンポーザー）の上部をスッキリ整理：ページ先頭に「この画面＝①②③」の説明→「① 出品タイプ（単品/バリエ）」を最上部に置き、まず何を押すか一目で分かる順序に。文字サイズは4ボタン→コンパクトなプルダウン、下書きバーは控えめな補助バーに、重複していた注意書きも統合。ボタンの数を減らして視線を主役（1〜4入力→5.各国へ転記）に集中させました。',
       '💴 事業計画に「毎月の固定費・経費を登録」を新設＝実利益を正確に：人件費・家賃・ツール等をその月に項目登録すると、実利益＝入金−仕入−固定費−変動費−その他経費 に即反映（登録した実額を優先、未登録の月は見込み額でフォールバック＝切替で過大にならない）。月次履歴の列を 固定費／変動費／その他経費 に分割し「実利益」を明示。必要注文数の逆算は1注文の利益＝既定1200円（梱包資材は別途差引）で計算。',
+      '🛡 アカウント健全性の監視を追加（アカBAN予防）：🔑アカウントページに「全店チェック」ボタン＝公式API(account_health)で各国のペナルティ点・進行中の罰・総合評価・遅延発送率などを取得し、危険な店を赤でハイライト。放置すると出品制限やアカBANに繋がる違反を早期に発見。読み取りのみ・キャッシュ30分。※GAS web app v24再デプロイで有効。',
       '🗺 改修履歴の「成長マトリクス」＆「公式API対応表」を最新化＋拡充：完了分（出品作成/編集・バリエ追加/明細名/画像）をAPI✅に更新し、まだ手を付けていない公式API機能を「🟠API可能・未着手」として明示（返品・返金/注文キャンセル対応/レビュー返信/割引・クーポン/商品ブースト/アカウント健全性・ペナルティ監視/CB国際物流first_mile/チャットsellerchat）。何を伸ばせるか一目で分かるように。',
       '🖼 バリエ画像も公式API化：統括編集のバリエ比較グリッドで、各セルの🖼で「その国のそのバリエ画像」を公式APIで差し替え（画像URL→他バリエの画像は維持）。＋追加でも任意で画像URLを指定可。本番E2Eで差替＆他画像維持を確認。あわせて明細名変更/バリエ追加が既存画像を消しうる潜在バグも保持修正（tierOpt_）。GAS web app v23。',
       '🧹 メニューの重複を整理（第2弾）：①転記ページを左メニューから撤去（⚙️設定＞上級者に「💰転記/手動同期を開く」＋⌘K検索で到達可）＝スプシ独立運用の方針に合わせスッキリ。②月次P&Lを📈事業計画に一本化（事業計画の実利益に返金差引を追加し「返金」列を新設。損益の数字が2箇所で食い違う問題を解消。経費タブの純利益カードから事業計画への導線）。③ダッシュボードの在庫KPI（死に筋/入庫待ち/未発送）をクリックで詳細（アラート/仕入れ管理/注文）へ＝二重表示を集約。④価格調整に役割バナー＝「相場を見る画面」明示＋『出品管理＞横断カバレッジ（統括編集）』への一括書き換え導線。⑤本日のやること（今日の実務）とアラート（在庫/注文/データの要対応）の役割を明記し相互リンク。',
@@ -4692,7 +4744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['レビュー/Q&A 返信（comment）', ['none', 'none', 'none', 'none', 'none', 'possible']],
       ['割引・クーポン（discount/voucher）', ['none', 'none', 'none', 'none', 'none', 'possible']],
       ['商品ブースト＝上位表示（boost_item）', ['none', 'none', 'none', 'none', 'none', 'possible']],
-      ['アカウント健全性・ペナルティ（account_health）', ['none', 'none', 'none', 'none', 'none', 'possible']],
+      ['アカウント健全性・ペナルティ（account_health）', ['none', 'none', 'none', 'none', 'none', 'soon']],
       ['チャット送受信（sellerchat）', ['bridge', 'bridge', 'bridge', 'bridge', 'bridge', 'possible']],
       ['広告・マーケ支出', ['none', 'none', 'none', 'none', 'none', 'na']],
     ];
