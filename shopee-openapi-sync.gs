@@ -70,6 +70,17 @@ function doGet(e) {
       } catch (err) { aout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(acb + '(' + JSON.stringify(aout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★公式APIで出品編集（タイトル/親SKU/説明）：ブリッジ卒業。params: shop_id, item_id, name, sku, desc（送った項目だけ更新）
+    if (p.action === 'update_item') {
+      var ucb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var uout;
+      try {
+        var uwt = P_().getProperty('WRITE_TOKEN');
+        if (!uwt || p.token !== uwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc });
+      } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {
       var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
@@ -403,6 +414,19 @@ function addItem_(body) {
     result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
   }
   return result;
+}
+// 出品編集（公式API・ブリッジ卒業）：タイトル/親SKU/説明を product/update_item で更新。指定shop_id×item_id。
+function updateItem_(body) {
+  var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
+  var itemId = parseInt(body.item_id, 10); if (!itemId) throw new Error('item_id 必須');
+  var payload = { item_id: itemId };
+  if (body.item_name != null && String(body.item_name) !== '') payload.item_name = String(body.item_name).slice(0, 120);
+  if (body.item_sku != null) payload.item_sku = String(body.item_sku);
+  if (body.description != null && String(body.description) !== '') payload.description = String(body.description);
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc のいずれか）');
+  var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
+  var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
+  return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
 }
 // 安全確認用：1件だけ非公開(UNLIST)で作成テスト（値を書き換えて手動実行→編集画面で確認→削除）
 function testAddItem() {

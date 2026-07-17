@@ -1023,6 +1023,18 @@
     return res;
   }
 
+  // ---------------- 公式API 出品編集（タイトル/親SKU/説明を update_item・ブリッジ卒業） ----------------
+  // params: { shop_id, item_id, name?, sku?, desc? }（送った項目だけ更新）
+  async function openapiUpdateItem(params) {
+    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
+    const q = Object.assign({ action: 'update_item', token: settings.writeToken }, params);
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API編集に失敗');
+    return res;
+  }
+
   // ---------------- 期間計算 ----------------
   const nowSec = () => Math.floor(Date.now() / 1000);
   const dayStart = tz => { const off = tz * 3600; return Math.floor((nowSec() + off) / 86400) * 86400 - off; };
@@ -5607,7 +5619,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 国別の出品制約チェック（TW60字/SGブランド1つ/VN上限/BR価格差）。触れれば警告文字列の配列を返す
     const chkTitle = (cc, title) => countryListingWarnings({ cc, title: String(title || ''), prices: [] });
     const chkPrices = (cc, prices) => countryListingWarnings({ cc, title: '', prices: (prices || []).map(Number).filter(x => x > 0) });
-    const writeTitle = async (lg, title) => { try { const r = await productWrite(lg.host, lg.item_id, { name: title }); if (r.ok) { try { await sbPatch('listings', 'item_id=eq.' + lg.item_id, { name: title }); } catch (_) {} } return r.ok; } catch (_) { return false; } };
+    const writeTitle = async (lg, title) => { try {
+      const sid = ((lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id) || {}).shop_id;
+      let ok;
+      if (settings.openapiUrl && settings.writeToken && sid) { const r = await openapiUpdateItem({ shop_id: sid, item_id: lg.item_id, name: title }); ok = !!(r && r.ok); } // 公式API(ライブ/ログイン不要)
+      else { const r = await productWrite(lg.host, lg.item_id, { name: title }); ok = r.ok; } // フォールバック=ブリッジ(要ライブ)
+      if (ok) { try { await sbPatch('listings', 'item_id=eq.' + lg.item_id, { name: title }); } catch (_) {} }
+      return ok;
+    } catch (_) { return false; } };
     const writePriceFactor = async (lg, factor) => {
       try {
         const pi = await productRead(lg.host, lg.item_id);
@@ -5721,19 +5740,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // 親SKUを複数出品にまとめて書き込む（全国/各国 共通・確認あり）
   async function writeParentSku(listings, scopeLabel, defaultSku, repName, presetSku) {
-    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみSKU書き込みできます'); return; }
     if (!listings || !listings.length) return;
     const sku = (presetSku != null) ? presetSku : prompt(`${scopeLabel}\n商品: ${repName || ''}\n対象: ${listings.length}出品\n\nSKU:`, defaultSku || '');
     if (!sku || !sku.trim()) return;
+    // 各出品のshop_idをlst.byCcから解決＝公式API(update_item)で書ける（ライブ/ログイン不要・誤ショップ書込も防ぐ）。無ければブリッジ(要ライブ)にフォールバック
+    const shopIdOf = (lg) => { const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); return row && row.shop_id ? row.shop_id : null; };
+    const canApi = !!(settings.openapiUrl && settings.writeToken);
+    const apiCount = listings.filter(lg => canApi && shopIdOf(lg)).length;
+    if (!apiCount && state.mode !== 'live') { alert('SKU書込には、公式API（⚙️設定のOpenAPI URL＋WRITE_TOKEN＋出品にshop_id＝各垢で再同期）か、ライブモード（ブリッジ入りPC）が必要です'); return; }
     const gw = await guardWriteCountries(listings.map(l => l.cc));
     if (!gw.ok) { alert(gw.msg); return; }
-    if (!confirm(`書込先アカウント:\n${gw.summary}\n\n本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。よろしいですか？`)) return;
+    if (!confirm(`書込先アカウント:\n${gw.summary}\n\n本番のShopeeカタログ ${listings.length}件に SKU「${sku.trim()}」を書き込みます。\n（${apiCount}件=公式API${apiCount < listings.length ? ' / 残り=ブリッジ' : ''}）よろしいですか？`)) return;
     let ok = 0; const fails = [], okItems = [];
     for (const lg of listings) {
       try {
-        const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false });
-        if (j && j.code === 0) { ok++; okItems.push(lg); }
-        else fails.push(`${lg.cc} (item ${lg.item_id})：${(j && (j.user_message || j.message)) || ('code ' + (j && j.code))}`);
+        const sid = shopIdOf(lg);
+        if (canApi && sid) {
+          const r = await openapiUpdateItem({ shop_id: sid, item_id: lg.item_id, sku: sku.trim() });
+          if (r && r.ok) { ok++; okItems.push(lg); } else fails.push(`${lg.cc} (item ${lg.item_id})：${(r && r.error) || 'API失敗'}`);
+        } else if (state.mode === 'live') {
+          const j = await bridgePostJson(`https://${lg.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: lg.item_id, product_info: { parent_sku: sku.trim() }, is_draft: false });
+          if (j && j.code === 0) { ok++; okItems.push(lg); }
+          else fails.push(`${lg.cc} (item ${lg.item_id})：${(j && (j.user_message || j.message)) || ('code ' + (j && j.code))}`);
+        } else {
+          fails.push(`${lg.cc} (item ${lg.item_id})：shop_id未判明＋非ライブ（各垢で再同期 or ライブPCで）`);
+        }
       } catch (e) { fails.push(`${lg.cc} (item ${lg.item_id})：${e.message}`); }
     }
     const ng = fails.length;
