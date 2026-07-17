@@ -117,6 +117,18 @@ function doGet(e) {
       } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★明細名(バリエ名)を置換（tierのoption名 before→after）。params: shop_id, item_id, before, after
+    if (p.action === 'rename_models') {
+      var rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rout;
+      try {
+        var rwt = P_().getProperty('WRITE_TOKEN');
+        if (!rwt || p.token !== rwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var rshop = parseInt(p.shop_id, 10); if (!getToken_(rshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        rout = renameModels_(rshop, p.item_id, p.before, p.after);
+      } catch (err) { rout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★業界ニュース（ゲーム/アニメ・日本/海外のRSSをサーバー側で集約。CORS回避のJSONP）
     if (p.action === 'news') {
       var ncb = String(p.callback || 'cb').replace(/[^A-Za-z0-9_$.]/g, '');
@@ -402,6 +414,26 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku) {
   var nm = ((am && am.model) || [])[0] || {};
   return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex };
 }
+// ★明細名(バリエ名)を置換：tierのoption名に含まれる before→after を書き換え（既存model据え置き）。1層/2層どちらもOK。
+function renameModels_(shopId, itemId, before, after) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  before = String(before || ''); after = String(after == null ? '' : after);
+  if (!before) throw new Error('置換前が空です');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (!tiers.length) throw new Error('バリエ無し商品です');
+  var changed = 0;
+  var newTiers = tiers.map(function (t) {
+    return { name: t.name, option_list: (t.option_list || []).map(function (o) {
+      var v = o.option; if (v && v.indexOf(before) >= 0) { v = v.split(before).join(after); changed++; }
+      return { option: v };
+    }) };
+  });
+  if (!changed) return { ok: true, changed: 0 };
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  updateTierVariation_(shopId, itemId, newTiers, remap);
+  return { ok: true, changed: changed };
+}
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
 function resolveModelId_(shopId, itemId, modelName) {
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
@@ -612,6 +644,23 @@ function testAddModel() {
     Logger.log('ADD_MODEL: ' + JSON.stringify(am));
     var m2 = getModels_(SID, r.item_id); Logger.log('MODELS(after): ' + JSON.stringify(m2.models) + '  <- PS4/PS5/PS5Pro の3件になっていればOK');
   } catch (e) { Logger.log('ADD_MODEL FAILED: ' + e); }
+  try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
+  catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
+}
+
+// rename_models 検証：2バリエ(PS4/PS5)作成→PS4→'PS4 Slim'置換→確認→削除（自己完結）
+function testRenameModels() {
+  var SID = 695473017;
+  var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
+  var r = addItem_({ shop_id: SID, item_name: '【TEST】rename models variation item', description: 'Test rename_models via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version',
+    variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'REN-PS4', image: img }, { name: 'PS5', price: 400, stock: 1, sku: 'REN-PS5', image: img }] });
+  Logger.log('CREATED: ' + JSON.stringify(r));
+  if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
+  try {
+    Logger.log('BEFORE: ' + JSON.stringify(getModels_(SID, r.item_id).models.map(function (mm) { return mm.name; })));
+    Logger.log('RENAME: ' + JSON.stringify(renameModels_(SID, r.item_id, 'PS4', 'PS4 Slim')));
+    Logger.log('AFTER: ' + JSON.stringify(getModels_(SID, r.item_id).models.map(function (mm) { return mm.name; })) + '  <- PS4 Slim / PS5 ならOK');
+  } catch (e) { Logger.log('RENAME FAILED: ' + e); }
   try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
