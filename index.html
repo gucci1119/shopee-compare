@@ -1538,6 +1538,31 @@
       renderSummary(); renderGrid();
     });
   }
+  // 💰 台帳(listing_catalog)の仕入原価を name→{cost,weightG} でキャッシュ（売れ行きカードに国別の適正価格を出す用・1回だけ取得）
+  let rankCost = null;
+  function rankCostKey(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+  async function ensureRankCost() {
+    if (rankCost) return;
+    rankCost = {};
+    try {
+      const rows = lst._ledgerRows || lst._leakCat || (settings.sbKey ? await sbGetAll('listing_catalog', 'select=name,parent_sku,variations,weight_g') : []);
+      (rows || []).forEach(c => {
+        const cw = c.weight_g;
+        (c.variations || []).forEach(v => { if (v.cost == null) return; const rec = { cost: Number(v.cost), weightG: (v.weightG != null ? v.weightG : cw) }; if (v.name) rankCost[rankCostKey(v.name)] = rec; });
+        const v0 = (c.variations || [])[0];
+        if (c.name && v0 && v0.cost != null) { const k = rankCostKey(c.name); if (!rankCost[k]) rankCost[k] = { cost: Number(v0.cost), weightG: (v0.weightG != null ? v0.weightG : cw) }; }
+      });
+      if (state.page === 'rank') renderGrid(); // 取得後に適正価格を反映
+    } catch (_) { }
+  }
+  // 売れ行きカード用：この商品名に台帳の仕入があれば、その国の適正出品価格(概算)を返す
+  function rankSuggestPrice(region, name, modelName) {
+    if (!rankCost) return null;
+    const rec = rankCost[rankCostKey(modelName)] || rankCost[rankCostKey(name)];
+    if (!rec) return null;
+    const local = roundLocal(priceLocalFor(region.cc, rec.cost, { weightG: rec.weightG }), region.priceUnit || 1);
+    return { local, cost: rec.cost };
+  }
   function loadAllLive() {
     const seq = ++state.loadSeq;
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(r => loadCountryLive(r, seq));
@@ -1772,11 +1797,15 @@
       grid.innerHTML = `<div class="smd-empty">${loading ? '読み込み中...' : '該当するSKUがありません'}</div>`;
       return;
     }
+    ensureRankCost(); // 台帳原価を確保（適正価格表示用・1回だけ取得→取得後に再描画）
     const frag = document.createDocumentFragment();
     rows.forEach((r, i) => {
       const { region, it, model } = r;
       const imgMap = modelImg.get(`${region.cc}:${it.id}`) || {};
       const img = (model && imgMap[model.i]) || it.image;
+      // 💰 台帳に仕入があれば、その国の適正出品価格(概算)を出す
+      const sug = rankSuggestPrice(region, it.name || '', model ? model.n : '');
+      const sugHtml = sug ? `<div style="font-size:11px;margin-top:2px;color:#1a7f37;font-weight:600" title="台帳の仕入 ${fmtJpy(sug.cost)} から、目標ROI・手数料・SLS・為替込みで算出した適正な出品価格の概算">💰 適正 ${fmtLocal(region, sug.local)}</div>` : '';
       const card = document.createElement('div');
       card.className = 'smd-card';
       card.innerHTML =
@@ -1788,15 +1817,16 @@
         `<div class="smd-nums"><span class="smd-units">${r.units.toLocaleString()}<small> 点</small></span>` +
         `<span class="smd-sales">${fmtLocal(region, r.sales)}</span></div>` +
         `<div class="smd-jpyrow">≈ ${fmtJpy(r.salesJpy)}</div>` +
+        sugHtml +
         `<div class="smd-models"></div>` +
-        `<div class="smd-sub"><span>ID ${it.id}</span>` +
+        `<div class="smd-sub"><a href="${editUrlFor(region.host, it.id)}" target="_blank" title="この商品の編集ページ（価格を直す）">✏️ 価格編集</a>` +
         `<a href="https://${region.host}/datacenter/product/performance/details?id=${it.id}" target="_blank" title="詳細分析を開く">📈 詳細</a></div>` +
         `</div>`;
       card.querySelector('.smd-name').textContent = model ? model.n : (it.name || '');
       card.querySelector('.smd-models').textContent = model ? (it.name || '') : '';
       card.title = (model ? model.n + '\n' + it.name : it.name) + '\nクリックで商品編集画面を開く';
       card.addEventListener('click', () => window.open(`https://${region.host}/portal/product/${it.id}`, '_blank'));
-      card.querySelector('.smd-sub a').addEventListener('click', e => e.stopPropagation());
+      card.querySelectorAll('.smd-sub a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
       frag.appendChild(card);
     });
     grid.appendChild(frag);
@@ -1843,7 +1873,7 @@
       card.querySelector('.smd-name').textContent = it.name || '';
       card.title = (it.name || '') + '\nクリックで商品編集画面を開く';
       card.addEventListener('click', () => window.open(`https://${region.host}/portal/product/${it.id}`, '_blank'));
-      card.querySelector('.smd-sub a').addEventListener('click', e => e.stopPropagation());
+      card.querySelectorAll('.smd-sub a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
       frag.appendChild(card);
     });
     grid.appendChild(frag);
