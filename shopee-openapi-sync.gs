@@ -558,7 +558,7 @@ function testPriceStockList() {
 function testAddModel() {
   var SID = 695473017;
   var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
-  var r = addItem_({ shop_id: SID, item_name: '【TEST】add_model', description: 'Test add_model/update_tier_variation via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version', variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'ADDMOD-PS4', image: img }] });
+  var r = addItem_({ shop_id: SID, item_name: '【TEST】add_model variation test item', description: 'Test add_model/update_tier_variation via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version', variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'ADDMOD-PS4', image: img }] });
   Logger.log('CREATED: ' + JSON.stringify(r));
   if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
   try {
