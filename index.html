@@ -2109,6 +2109,7 @@
     const total = groups.reduce((s, g) => s + g.sns.length, 0);
     const brk = groups.map(g => `${g.region.cc} ${g.sns.length}件`).join(' / ');
     if (!confirm(`表示中の未発送 ${total}件の伝票を印刷します。\n${brk}\n\n各注文につき1つ印刷タブが開きます（合計${total}タブ）。ポップアップ許可が必要です。続けますか？`)) return;
+    if (total > 25 && !confirm(`⚠️ ${total}件＝${total}個のタブが順に開きます（ブラウザが重くなりやすい）。\n国フィルターで絞って少しずつ印刷するのがおすすめです。\nこのまま${total}件すべて開きますか？`)) return;
     let opened = 0, delay = 0;
     groups.forEach(g => g.sns.forEach(sn => {
       setTimeout(() => { window.open(`https://${g.region.host}/portal/sale?sls_print=${encodeURIComponent(sn)}`, '_blank'); }, delay);
@@ -3379,19 +3380,30 @@
     const invBySn = {}; inv.forEach(it => { if (it.shopee_sn) invBySn[it.shopee_sn] = (invBySn[it.shopee_sn] || 0) + (Number(it.price) || 0); });
     const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
     const costBySn = {}; costs.forEach(c => { costBySn[c.cc + ':' + c.sn] = c; });
-    const M = {};
+    const M = {}, M2 = {}; // M2[ym][cc] = 国×月の {n,dep,cost,gn}（純マージンヒートマップ用・同じ突合ロジック）
     orders.forEach(o => {
       if (o.tab === 600) return; // キャンセル除外
       const ym = (o.order_date || '').slice(0, 7); if (!ym) return;
       const rg = regionByCc(o.cc), rate = rg ? rg.rateJpy : 0;
       const m = M[ym] = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 };
-      m.n++; m.gmv += (Number(o.total) || 0) * rate;
+      const cc2 = (M2[ym] = M2[ym] || {})[o.cc] = (M2[ym][o.cc]) || { n: 0, dep: 0, cost: 0, gn: 0 };
+      m.n++; m.gmv += (Number(o.total) || 0) * rate; cc2.n++;
       if (o.tab === 200) return; // 未払いは粗利対象外（利益エンジンと同じ）
       const key = o.cc + ':' + o.sn, inc = incBySn[key], cm = costBySn[key];
       const dep = (inc && inc.amount != null) ? Number(inc.amount) : (cm && cm.deposit != null ? Number(cm.deposit) : null);
       const cost = (cm && cm.cost != null) ? Number(cm.cost) : (invBySn[o.sn] != null ? invBySn[o.sn] : null);
-      if (dep != null && cost != null) { m.dep += dep * rate; m.cost += cost; m.gn++; }
+      if (dep != null && cost != null) { m.dep += dep * rate; m.cost += cost; m.gn++; cc2.dep += dep * rate; cc2.cost += cost; cc2.gn++; }
     });
+    // 国×月 純マージン(粗利率=粗利/入金)ヒートマップHTML（直近6か月・データのある国のみ・信頼度低いセルは薄く）
+    const heatMonths = [...new Set(Object.keys(M2))].sort().reverse().slice(0, 6);
+    const heatCcs = REGIONS.map(r => r.cc).filter(cc => heatMonths.some(ym => (M2[ym] || {})[cc] && M2[ym][cc].gn >= 2));
+    let heatHtml = '';
+    if (heatMonths.length && heatCcs.length) {
+      const cellColor = (mg, reliable) => { if (mg == null) return 'background:#f6f6f6;color:#bbb'; const g = Math.max(0, Math.min(1, (mg + 10) / 50)); const bg = mg < 0 ? '#fdecea' : `hsl(${Math.round(120 * g)},62%,${reliable ? 88 : 94}%)`; return `background:${bg};color:${mg < 0 ? '#c0392b' : '#264d2b'}${reliable ? '' : ';opacity:.75'}`; };
+      heatHtml = `<div class="tool-card" style="max-width:none"><h3 style="margin-top:0">🗺 国別 純マージン ヒートマップ <span class="smd-dim" style="font-weight:400;font-size:12px">（粗利率＝粗利÷入金。どの国が"実質"稼いでいるか。手数料・SLS・為替後）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 仕入と入金の両方が判明した注文だけで計算（薄いセル＝件数が少なく参考値）。<b style="color:#d93025">赤＝赤字</b>。撤退/注力の判断に。</div>
+        <div class="pf-scroll" style="max-height:none"><table class="pf-table" style="width:auto;min-width:auto"><tr><th>月＼国</th>${heatCcs.map(cc => `<th style="text-align:center;color:${(regionByCc(cc) || {}).color || '#333'}">${cc}</th>`).join('')}</tr>${heatMonths.map(ym => `<tr><td style="font-weight:700;white-space:nowrap">${ym}</td>${heatCcs.map(cc => { const c = (M2[ym] || {})[cc]; if (!c || !c.gn || c.dep <= 0) return `<td style="text-align:center;color:#ccc">–</td>`; const mg = Math.round((c.dep - c.cost) / c.dep * 100); const reliable = c.gn >= Math.max(3, c.n * 0.4); return `<td title="${cc} ${ym}：粗利${Math.round((c.dep - c.cost)).toLocaleString()}円 / 入金${Math.round(c.dep).toLocaleString()}円（${c.gn}件で計算）" style="text-align:center;font-weight:700;white-space:nowrap;${cellColor(mg, reliable)}">${mg}%</td>`; }).join('')}</tr>`).join('')}</table></div></div>`;
+    }
     const E = {}; expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (ym) E[ym] = (E[ym] || 0) + (Number(x.amount) || 0); });
     const yms = [...new Set([...Object.keys(M), ...Object.keys(E)])].sort().reverse();
     const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const exp = E[ym] || 0; const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, exp, gross, net: gross - exp }; });
@@ -3444,6 +3456,7 @@
     const tot = rows.reduce((s, r) => ({ n: s.n + r.n, gmv: s.gmv + r.gmv, dep: s.dep + r.dep, cost: s.cost + r.cost, opex: s.opex + opexOf(r), exp: s.exp + r.exp, gross: s.gross + r.gross, op: s.op + (opProfitOf(r) || 0) }), { n: 0, gmv: 0, dep: 0, cost: 0, opex: 0, exp: 0, gross: 0, op: 0 });
     const money = (v, col) => `<b style="color:${col || (v < 0 ? '#d93025' : '#222')}">${fmtJpy(v)}</b>`;
     body.innerHTML =
+      heatHtml +  // 🗺 国別 純マージン ヒートマップ（データ有り時のみ）
       // ===== 目標＆逆算 =====
       `<div class="tool-card" style="margin:0 0 12px;max-width:none;background:#f7fbff;border:1px solid #d6e4f5">
         <div style="font-weight:700;font-size:15px;margin-bottom:8px">🎯 目標＆逆算</div>
