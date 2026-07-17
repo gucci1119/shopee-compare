@@ -554,21 +554,23 @@ function testPriceStockList() {
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
 
-// add_model/update_tier_variation 検証：PS4の1バリエ商品を作成→tierにPS5追加→PS5をadd_model→2件確認→削除（自己完結）
+// add_model/update_tier_variation 検証：2バリエ(PS4/PS5)で作成→tierに3つ目(PS5Pro)を追加→add_model→3件確認→削除（自己完結）
 function testAddModel() {
   var SID = 695473017;
   var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
-  var r = addItem_({ shop_id: SID, item_name: '【TEST】add_model variation test item', description: 'Test add_model/update_tier_variation via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version', variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'ADDMOD-PS4', image: img }] });
+  var r = addItem_({ shop_id: SID, item_name: '【TEST】add_model variation test item', description: 'Test add_model/update_tier_variation via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version',
+    variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'ADDMOD-PS4', image: img }, { name: 'PS5', price: 400, stock: 1, sku: 'ADDMOD-PS5', image: img }] });
   Logger.log('CREATED: ' + JSON.stringify(r));
   if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
   try {
-    var m0 = getModels_(SID, r.item_id); Logger.log('MODELS(before): ' + JSON.stringify(m0.models));
-    var m1id = m0.models[0].model_id;
-    var utv = updateTierVariation_(SID, r.item_id, [{ name: 'Version', option_list: [{ option: 'PS4' }, { option: 'PS5' }] }], [{ model_id: m1id, tier_index: [0] }]);
+    var m0 = getModels_(SID, r.item_id); Logger.log('MODELS(before): ' + JSON.stringify(m0.models) + '  <- PS4/PS5 の2件のはず');
+    // 既存2modelを index[0],[1] に再マップしつつ tier に PS5Pro を追加（level=1のまま）
+    var remap = m0.models.map(function (mm) { return { model_id: mm.model_id, tier_index: mm.tier_index }; });
+    var utv = updateTierVariation_(SID, r.item_id, [{ name: 'Version', option_list: [{ option: 'PS4' }, { option: 'PS5' }, { option: 'PS5Pro' }] }], remap);
     Logger.log('UPDATE_TIER: ' + JSON.stringify(utv));
-    var am = addModel_(SID, r.item_id, [{ tier_index: [1], original_price: 400, model_sku: 'ADDMOD-PS5', seller_stock: [{ stock: 2 }] }]);
+    var am = addModel_(SID, r.item_id, [{ tier_index: [2], original_price: 500, model_sku: 'ADDMOD-PS5PRO', seller_stock: [{ stock: 2 }] }]);
     Logger.log('ADD_MODEL: ' + JSON.stringify(am));
-    var m2 = getModels_(SID, r.item_id); Logger.log('MODELS(after): ' + JSON.stringify(m2.models) + '  <- PS4/PS5 の2件になっていればOK');
+    var m2 = getModels_(SID, r.item_id); Logger.log('MODELS(after): ' + JSON.stringify(m2.models) + '  <- PS4/PS5/PS5Pro の3件になっていればOK');
   } catch (e) { Logger.log('ADD_MODEL FAILED: ' + e); }
   try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
