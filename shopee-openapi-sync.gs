@@ -366,7 +366,7 @@ function addItem_(body) {
   if (!imgIds.length) throw new Error('画像が必要（image_ids か images URL を渡す）');
   var payload = {
     original_price: parseFloat(body.price),
-    description: String(body.description || body.item_name || ''),
+    description: (function (d) { d = String(d || ''); return d.length >= 20 ? d : (d + ' ' + String(body.item_name || '') + ' 日本の商品です。丁寧に梱包して発送します。').slice(0, 3000); })(body.description || body.item_name || ''), // Shopeeは説明20字以上必須→短ければ自動補完
     weight: parseFloat(body.weight || 0.5),
     item_name: String(body.item_name || '').slice(0, 120),
     category_id: categoryId,
