@@ -105,7 +105,7 @@ function doGet(e) {
       } catch (err) { lout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    // ★出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）。params: shop_id, item_id, option, price, stock, sku
+    // ★出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）。params: shop_id, item_id, option, price, stock, sku, image(任意URL)
     if (p.action === 'add_variation') {
       var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var vout;
@@ -113,9 +113,21 @@ function doGet(e) {
         var vwt = P_().getProperty('WRITE_TOKEN');
         if (!vwt || p.token !== vwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var vshop = parseInt(p.shop_id, 10); if (!getToken_(vshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        vout = addVariation_(vshop, p.item_id, p.option, p.price, p.stock, p.sku);
+        vout = addVariation_(vshop, p.item_id, p.option, p.price, p.stock, p.sku, p.image);
       } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★バリエ画像を設定（画像URL→upload→対象optionのimage差し替え）。params: shop_id, item_id, option, image(URL)
+    if (p.action === 'set_variation_image') {
+      var scb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var sout;
+      try {
+        var swt = P_().getProperty('WRITE_TOKEN');
+        if (!swt || p.token !== swt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var sshop = parseInt(p.shop_id, 10); if (!getToken_(sshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        sout = setVariationImage_(sshop, p.item_id, p.option, p.image);
+      } catch (err) { sout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(scb + '(' + JSON.stringify(sout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★明細名(バリエ名)を置換（tierのoption名 before→after）。params: shop_id, item_id, before, after
     if (p.action === 'rename_models') {
@@ -386,11 +398,19 @@ function addModel_(shopId, itemId, modelList) {
   var j = callShop_(shopId, '/api/v2/product/add_model', null, 'post', { item_id: parseInt(itemId, 10), model_list: modelList });
   return (j && j.response) || j;
 }
+// tier option を {option, image?} に正規化＝**既存のバリエ画像を維持**（update_tier_variationでoptionを再構築する際に画像を消さないため）。overrideId指定でそのoptionだけ画像差し替え。
+function tierOpt_(o, newName, overrideId) {
+  var out = { option: (newName != null ? newName : o.option) };
+  var id = overrideId || (o.image && (o.image.image_id || (o.image.image_id_list || [])[0]));
+  if (id) out.image = { image_id: id };
+  return out;
+}
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
-function addVariation_(shopId, itemId, optionName, price, stock, sku) {
+function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   optionName = String(optionName || '').trim();
   if (!optionName) throw new Error('追加するバリエ名が空です');
+  var newImageId = imageUrl ? uploadImageUrl_(imageUrl) : null; // 新バリエの画像（任意）
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
   if (!tiers.length) throw new Error('バリエ無し商品にはこの方法で追加できません（先にバリエ化が必要）');
@@ -404,15 +424,17 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku) {
     if (has) throw new Error('その明細は既に存在します: ' + optionName);
     newIndex = existIdx;
   } else {
-    var newOpts = opts.concat([optionName]);
-    updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts.map(function (o) { return { option: o }; }) }], remap);
-    newIndex = newOpts.length - 1;
+    var optObjs = (tier.option_list || []).map(function (o) { return tierOpt_(o); }); // 既存optionは画像を維持
+    var newOpt = { option: optionName }; if (newImageId) newOpt.image = { image_id: newImageId };
+    optObjs.push(newOpt);
+    updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
+    newIndex = optObjs.length - 1;
   }
   var model = { tier_index: [newIndex], original_price: parseFloat(price), seller_stock: [{ stock: parseInt(stock, 10) || 0 }] };
   if (sku) model.model_sku = String(sku);
   var am = addModel_(shopId, itemId, [model]);
   var nm = ((am && am.model) || [])[0] || {};
-  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex };
+  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined };
 }
 // ★明細名(バリエ名)を置換：tierのoption名に含まれる before→after を書き換え（既存model据え置き）。1層/2層どちらもOK。
 function renameModels_(shopId, itemId, before, after) {
@@ -426,13 +448,35 @@ function renameModels_(shopId, itemId, before, after) {
   var newTiers = tiers.map(function (t) {
     return { name: t.name, option_list: (t.option_list || []).map(function (o) {
       var v = o.option; if (v && v.indexOf(before) >= 0) { v = v.split(before).join(after); changed++; }
-      return { option: v };
+      return tierOpt_(o, v); // 名前を変えつつ既存画像を維持
     }) };
   });
   if (!changed) return { ok: true, changed: 0 };
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   updateTierVariation_(shopId, itemId, newTiers, remap);
   return { ok: true, changed: changed };
+}
+// ★バリエ画像を設定：画像URL→upload_image→対象optionのimageを差し替え（他optionの画像は維持）。1層バリエのみ。
+function setVariationImage_(shopId, itemId, optionName, imageUrl) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  optionName = String(optionName || '').trim();
+  if (!optionName) throw new Error('対象バリエ名が空です');
+  if (!imageUrl) throw new Error('画像URLが空です');
+  var imageId = uploadImageUrl_(imageUrl);
+  if (!imageId) throw new Error('画像アップロード失敗');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (!tiers.length) throw new Error('バリエ無し商品です');
+  if (tiers.length > 1) throw new Error('2層バリエは未対応（1層のみ）');
+  var tier = tiers[0], found = false;
+  var optObjs = (tier.option_list || []).map(function (o) {
+    if (o.option === optionName) { found = true; return tierOpt_(o, null, imageId); } // 対象だけ差し替え
+    return tierOpt_(o); // 他は既存画像を維持
+  });
+  if (!found) throw new Error('バリエが見つかりません: ' + optionName);
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
+  return { ok: true, item_id: itemId, option: optionName, image_id: imageId };
 }
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
 function resolveModelId_(shopId, itemId, modelName) {
@@ -661,6 +705,25 @@ function testRenameModels() {
     Logger.log('RENAME: ' + JSON.stringify(renameModels_(SID, r.item_id, 'PS4', 'PS4 Slim')));
     Logger.log('AFTER: ' + JSON.stringify(getModels_(SID, r.item_id).models.map(function (mm) { return mm.name; })) + '  <- PS4 Slim / PS5 ならOK');
   } catch (e) { Logger.log('RENAME FAILED: ' + e); }
+  try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
+  catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
+}
+
+// set_variation_image 検証：2バリエ(画像付)作成→tier生JSON確認→PS4画像差替→前後のtier_variationを出力→削除（自己完結）
+function testVariationImage() {
+  var SID = 695473017;
+  var img = 'https://cf.shopee.ph/file/ph-11134207-820lb-mn2xuma40buof7';
+  var r = addItem_({ shop_id: SID, item_name: '【TEST】variation image set listing item', description: 'Test set_variation_image via official API. Auto-deleted right after.', price: 300, stock: 1, weight: 0.5, category: 'Games', images: [img], publish: false, tier_name: 'Version',
+    variations: [{ name: 'PS4', price: 300, stock: 1, sku: 'IMG-PS4', image: img }, { name: 'PS5', price: 400, stock: 1, sku: 'IMG-PS5', image: img }] });
+  Logger.log('CREATED: ' + JSON.stringify(r));
+  if (!r || !r.item_id) { Logger.log('作成失敗のため中断'); return; }
+  try {
+    var tv0 = ((callShop_(SID, '/api/v2/product/get_model_list', { item_id: r.item_id }, 'get').response) || {}).tier_variation;
+    Logger.log('TIER BEFORE: ' + JSON.stringify(tv0)); // ← option_listにimageが返るか（維持できるかの鍵）
+    Logger.log('SET IMG(PS4): ' + JSON.stringify(setVariationImage_(SID, r.item_id, 'PS4', img)));
+    var tv1 = ((callShop_(SID, '/api/v2/product/get_model_list', { item_id: r.item_id }, 'get').response) || {}).tier_variation;
+    Logger.log('TIER AFTER: ' + JSON.stringify(tv1)); // ← PS4のimage差替＆PS5のimageが維持されているか
+  } catch (e) { Logger.log('IMG FAILED: ' + e); }
   try { var d = callShop_(SID, '/api/v2/product/delete_item', null, 'post', { item_id: r.item_id }); Logger.log('DELETED: item_id=' + r.item_id + ' resp=' + JSON.stringify(d)); }
   catch (e2) { Logger.log('DELETE FAILED (Seller Centerから手動削除): item_id=' + r.item_id + ' : ' + e2); }
 }
