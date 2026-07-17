@@ -2720,7 +2720,30 @@
     const shown = rows.slice(0, 400);
     if (!stock.sel) stock.sel = new Set();
     const selCount = stock.sel.size;
-    body.innerHTML = `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
+    // ★🔄 シリーズ別 回転速度：仕入日(invPurDate)＋売却日(snToDate(shopee_sn))から「仕入→売却の平均日数」を系統別に算出。速く高回転で売れる系統＝仕入れ推奨の指針（在庫データのみで完結）
+    let velHtml = '';
+    try {
+      const bySeries = {};
+      all.forEach(r => {
+        const fr = classifyFranchise(r.name || '');
+        const e = bySeries[fr] = bySeries[fr] || { fr, sold: 0, days: [], cost: [], inStock: 0 };
+        if (r.status === '在庫保管中') e.inStock++;
+        const sn = r.shopee_sn;
+        if (sn) { const pd = invPurDate(r), sd = snToDate(sn); if (pd && sd) { const d = (Date.parse(sd) - Date.parse(pd)) / 86400000; if (d >= 0 && d < 1000) { e.sold++; e.days.push(d); if (r.price != null) e.cost.push(Number(r.price)); } } }
+      });
+      const avg = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+      const series = Object.values(bySeries).filter(e => e.fr !== 'その他' && e.sold >= 2).map(e => ({ fr: e.fr, sold: e.sold, avgDays: avg(e.days), avgCost: avg(e.cost), inStock: e.inStock }));
+      const allDays = series.map(s => s.avgDays).filter(x => x != null).sort((a, b) => a - b);
+      const medDays = allDays.length ? allDays[Math.floor(allDays.length / 2)] : null;
+      series.sort((a, b) => b.sold - a.sold || (a.avgDays || 9999) - (b.avgDays || 9999));
+      if (series.length) {
+        velHtml = `<details class="tool-card" style="margin:0 4px 10px;max-width:none"${series.length <= 12 ? ' open' : ''}>
+          <summary style="cursor:pointer;font-weight:700;font-size:13px;list-style:none">🔄 シリーズ別 回転速度（速く売れる＝仕入れ推奨）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">仕入→売却の平均日数。販売2件以上のシリーズ。速い系統を厚く仕入れる指針に（🟢=中央値より速い）</span></summary>
+          <div class="pf-scroll" style="max-height:44vh;margin-top:8px"><table class="pf-table" style="width:100%"><tr><th>シリーズ</th><th style="text-align:right">販売数</th><th style="text-align:right">平均回転日数</th><th style="text-align:right">平均仕入</th><th style="text-align:right">手元在庫</th><th>目安</th></tr>${series.slice(0, 40).map(s => { const fast = medDays != null && s.avgDays != null && s.avgDays <= medDays; const hint = fast ? '<span style="color:#1a7f37;font-weight:700">🟢 速い＝仕入れ推奨</span>' : '<span style="color:#e8710a">🟠 遅め＝厚仕入れ注意</span>'; return `<tr><td style="font-size:11.5px">${nm(s.fr, '200px')}</td><td style="text-align:right;font-weight:600;color:#e8710a">${s.sold}</td><td style="text-align:right;color:${fast ? '#1a7f37' : '#e8710a'};font-weight:700">${s.avgDays != null ? Math.round(s.avgDays) + '日' : '—'}</td><td style="text-align:right;color:#888">${s.avgCost != null ? '¥' + Math.round(s.avgCost).toLocaleString() : '—'}</td><td style="text-align:right">${s.inStock || ''}</td><td style="font-size:11px">${hint}${fast && s.inStock === 0 ? ' <span class="smd-dim">(在庫0=補充候補)</span>' : ''}</td></tr>`; }).join('')}</table></div>
+        </details>`;
+      }
+    } catch (_) { velHtml = ''; }
+    body.innerHTML = velHtml + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
       `<button class="smd-btn" id="stk-csv" style="margin-left:6px" title="表示中（絞り込み後）の在庫をCSVで書き出し">⬇ CSV(${rows.length})</button>` +
