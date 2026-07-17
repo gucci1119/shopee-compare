@@ -623,13 +623,6 @@
     </div>
   </div>
 
-  <!-- 月次サマリー・エクスポート -->
-  <div id="page-summary" style="display:none">
-    <div class="smd-pagehead">📈 月次サマリー <span class="smd-dim" style="font-weight:400;font-size:12px">（月次の損益と、古物台帳・経費・損益のCSV書き出し）</span></div>
-    <div class="pagehelp" style="margin:0 20px 0"><b>この画面：月ごとの損益まとめと、CSV書き出しの画面です。</b><span style="color:#5a6b8c;font-size:11.5px">※古物台帳・経費・損益のCSVを出力（確定申告・記帳用）。上部で月を選択。</span></div>
-    <div class="fin-subnav" style="display:flex;gap:8px;padding:6px 20px 0"><button class="fin-tab" data-fp="profit">💹 利益明細</button><button class="fin-tab" data-fp="expenses">💴 入出金・経費</button></div>
-    <div id="summary-body" style="padding:12px 20px"></div>
-  </div>
   <!-- 為替レート -->
   <div id="page-fx" style="display:none">
     <div class="smd-pagehead">💱 為替レート <span class="smd-dim" style="font-weight:400;font-size:12px">（現地通貨→円の換算レート。売上・粗利・ROIの計算に使用）</span></div>
@@ -4374,46 +4367,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = list.map(r => [invPurDate(r), '買受', r.name || r.name_supplier || '', 1, r.price != null ? r.price : '', r.supplier || '', r.seller || '', r.condition || '', r.sku || '', r.item_id || '', r.proof || '']);
     return [head].concat(body);
   }
-  async function renderExportSummary() {
-    const body = document.getElementById('summary-body');
-    if (!exp.ym) exp.ym = jstYm();
-    const ym = exp.ym;
-    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
-    let expenses, inv, issues;
-    try { [expenses, inv, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${ym}-01&ymd=lt.${nextYmOf(ym)}-01&order=ymd`), ensureInv(), sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => [])]); }
-    catch (e) { body.innerHTML = errBox(e); return; }
-    const expTotal = expenses.reduce((s, r) => s + (r.amount || 0), 0);
-    const refundTotal = refundForYm(issues, ym);
-    const grossOk = pf.grossYm === ym && typeof pf.grossTotal === 'number';
-    const net = grossOk ? pf.grossTotal - expTotal - refundTotal : null;
-    const invMonth = inv.filter(r => invPurDate(r).slice(0, 7) === ym);
-    const invAll = inv.filter(r => invPurDate(r));
-    const [yy, mm] = ym.split('-').map(Number); const months = [];
-    for (let i = 0; i < 12; i++) { const d = new Date(yy, mm - 1 - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
-    body.innerHTML =
-      `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <span style="font-weight:700">対象月:</span>
-        <select id="sum-month" style="padding:5px;font-size:13px">${months.map(m => `<option ${m === ym ? 'selected' : ''}>${m}</option>`).join('')}</select>
-        <span class="smd-dim" style="font-size:12px">（経費ページと連動）</span></div></div>` +
-      `<div class="tool-card" style="margin:0 0 12px;max-width:560px;background:#f7fbf8;border:1px solid #d6ecdd">
-        <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 ${ym} 損益</div>
-        ${grossOk ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件＝確定${pf.grossFixN || 0}/暫定${pf.grossProvN || 0}）</span>${pf.grossProvN ? `<br><span style="font-size:11px;color:#e8710a">⚠️ 暫定入金 ${pf.grossProvN}件を含む（確定で変動しうる）</span>` : ''}<br>経費合計 <b style="color:#d93025">− ${fmtJpy(expTotal)}</b><br>返金合計 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（返品ページの返金¥・当月記録分）</span><br><span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${net < 0 ? '▲赤字 ' : ''}${fmtJpy(net)}</b></span></div>`
-          : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益管理</b>で同月（${ym}）を開くと反映されます（現在: ${pf.grossYm ? esc(pf.grossYm) : '未計算'}）。<br>経費合計 <b style="color:#d93025">${fmtJpy(expTotal)}</b> ・ 当月仕入 <b>${invMonth.length}</b>件</div>`}
-      </div>` +
-      `<div class="tool-card" style="margin:0;max-width:640px"><div style="font-weight:700;font-size:14px;margin-bottom:8px">📥 CSVエクスポート（Excel対応・BOM付き）</div>
-        <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
-          <button class="smd-btn" id="csv-ledger-m">📒 古物台帳（当月仕入 ${invMonth.length}件）</button>
-          <button class="smd-btn" id="csv-ledger-all">📒 古物台帳（全期間 ${invAll.length}件）</button>
-          <button class="smd-btn" id="csv-exp">💴 経費（${ym}・${expenses.length}件）</button>
-          <button class="smd-btn" id="csv-pl">🧮 月次損益サマリー（${ym}）</button>
-        </div>
-        <div class="smd-dim" style="font-size:11px;margin-top:8px">古物台帳=古物営業法の帳簿用（受入年月日・品目・代価・仕入元・確証URL）。確定申告は損益・経費CSVをそのまま集計に使えます。</div></div>`;
-    document.getElementById('sum-month').addEventListener('change', e => { exp.ym = e.target.value; renderExportSummary(); });
-    document.getElementById('csv-ledger-m').addEventListener('click', () => downloadCsv(`古物台帳_${ym}.csv`, ledgerRows(invMonth)));
-    document.getElementById('csv-ledger-all').addEventListener('click', () => downloadCsv(`古物台帳_全期間.csv`, ledgerRows(invAll)));
-    document.getElementById('csv-exp').addEventListener('click', () => downloadCsv(`経費_${ym}.csv`, [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(expenses.map(r => [r.ymd, r.category, r.amount, r.memo || '']))));
-    document.getElementById('csv-pl').addEventListener('click', () => downloadCsv(`月次損益_${ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', expTotal, expenses.length + '件'], ['純利益', net != null ? net : '', grossOk ? '' : '粗利未計算']]));
-  }
+  // （旧 renderExportSummary は「月次サマリー」タブ廃止に伴い撤去。古物台帳/損益CSVは renderExpenses に統合済み）
   // ---------------- 📷 QRスキャン（在庫検索） ----------------
   function loadJsQR() {
     return new Promise((res, rej) => {
@@ -4680,7 +4634,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['入金 escrow', ['bridge', 'bridge', 'bridge', 'api', 'api', 'api']],
       ['入金予定 payouts', ['none', 'none', 'none', 'api', 'api', 'api']],
       ['手数料内訳・実手数料率', ['none', 'none', 'none', 'api', 'api', 'api']],
-      ['在庫更新（単品→一括）', ['bridge', 'bridge', 'bridge', 'api', 'api', 'api']],
+      ['在庫更新（単品・⚙️公式パネル）', ['bridge', 'bridge', 'bridge', 'api', 'api', 'api']],
       ['価格更新（単品→一括→バリエ）', ['bridge', 'bridge', 'bridge', 'api', 'api', 'api']],
       ['出品作成（公式add_item・単品/バリエ）', ['none', 'none', 'none', 'none', 'api', 'api']],
       ['出品編集（タイトル/親SKU/説明）', ['none', 'none', 'none', 'bridge', 'api', 'api']],
@@ -5129,7 +5083,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px">休暇モード（Holiday Mode）切替</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">❌</td><td style="border:1px solid #eee;padding:5px 8px">公式APIに無い→各Seller Center手動。ポータルの🏖は表示・警告制御のみ</td></tr>
         </tbody>
       </table></div>
-      <div style="font-size:11.5px;color:#666;line-height:1.7;margin-top:5px"><b>まとめ</b>：<b>取得</b>・<b>在庫/価格</b>・<b>出品作成/編集/バリエ(追加/名前/画像)</b>はAPI化済＝ブリッジ非常駐でOK。残るブリッジ書込は<b>発送</b>（実注文待ち）と一部の<b>specifics/重量</b>のみ。➖の販促/管理系（返品/レビュー/割引/クーポン/健全性/ブースト/チャット/first_mile）は<b>この越境垢では権限なし</b>と実測確定＝伸ばす余地は実質無し。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。</div>
+      <div style="font-size:11.5px;color:#666;line-height:1.7;margin-top:5px"><b>まとめ</b>：<b>取得</b>・<b>在庫/価格</b>・<b>出品作成/編集/バリエ(追加/名前/画像)</b>はAPI化済＝ブリッジ非常駐でOK。残るブリッジ書込は<b>発送</b>（実注文待ち）と一部の<b>specifics/重量</b>のみ。➖の販促/管理系（返品/レビュー/割引/クーポン/健全性/ブースト/チャット/first_mile）は<b>この越境垢では権限なし</b>と実測確定＝伸ばす余地は実質無し。<b>休暇モード</b>はAPIに無いのでポータル側表示が最善。</div>
 
       <div style="margin:14px 0 4px;font-weight:700;font-size:13px;color:#7b52c4">🚀 自動出品フロー（コンポーザー → 発行）</div>
       <div style="background:#fff;border:1px solid #ececec;border-radius:9px;padding:12px">
@@ -5876,12 +5830,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!c) {
             // 公式API＋shop_id判明＋対象がバリエ商品 なら「＋追加」導線を出す（無ければ従来✗）
             const rd = varData.reads[i];
-            const canAdd = rd && rd.models.length && shopIdForListing(lg.cc, lg.item_id) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
+            const canAdd = rd && rd.models.length && shopIdForListing(lg) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
             return canAdd
               ? '<td style="background:#fff8f0;text-align:center"><button class="uvar-add" data-li="' + i + '" data-opt="' + av(v.name || '') + '" style="font-size:9px;padding:2px 6px;border:1px dashed #e8710a;border-radius:5px;background:#fff;color:#e8710a;cursor:pointer;font-weight:700" title="' + lg.cc + ' にこのバリエを公式APIで追加">＋追加</button></td>'
               : '<td style="background:#fff2f2;color:#d93025;text-align:center" title="この国にはこのバリエが無い">✗</td>';
           }
-          const canImg = shopIdForListing(lg.cc, lg.item_id) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
+          const canImg = shopIdForListing(lg) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
           const imgBtn = canImg ? '<button class="uvar-img" data-li="' + i + '" data-opt="' + av(v.name || '') + '" title="' + lg.cc + ' のこのバリエ画像を変更（画像URL）" style="margin-left:3px;font-size:10px;padding:1px 4px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer">🖼</button>' : '';
           return '<td style="white-space:nowrap"><span style="font-size:10px;color:' + rgc(lg.cc).color + '">' + rgc(lg.cc).cur + '</span><input class="uvar-p" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.price) + '" style="width:66px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right">' + imgBtn + '</td>';
         }).join('');
@@ -5910,7 +5864,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ＋追加：その国の出品に不足バリエを公式APIで足す（tierにオプション追記→add_model）
       ov.querySelectorAll('.uvar-add').forEach(b => b.addEventListener('click', async () => {
         const li = +b.dataset.li, lg = listings[li], opt = b.dataset.opt || '';
-        const sid = shopIdForListing(lg.cc, lg.item_id);
+        const sid = shopIdForListing(lg);
         if (!sid) { alert('この出品のshop_idが不明です（各アカウントで再同期してください）'); return; }
         const price = prompt(lg.cc + ' の出品に「' + opt + '」バリエを追加します。\n' + rgc(lg.cc).cur + ' 価格（現地通貨）を入力：', '');
         if (price == null || !price.trim() || isNaN(parseFloat(price))) { if (price != null) alert('価格が正しくありません'); return; }
@@ -5931,7 +5885,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 🖼 バリエ画像変更：画像URL→公式APIで対象バリエのimageを差し替え（他は維持）
       ov.querySelectorAll('.uvar-img').forEach(b => b.addEventListener('click', async () => {
         const li = +b.dataset.li, lg = listings[li], opt = b.dataset.opt || '';
-        const sid = shopIdForListing(lg.cc, lg.item_id);
+        const sid = shopIdForListing(lg);
         if (!sid) { alert('この出品のshop_idが不明です（各アカウントで再同期してください）'); return; }
         const url = prompt(lg.cc + '「' + opt + '」のバリエ画像を差し替えます。\n画像URL（メルカリ等の商品URLも可）を入力：', '');
         if (url == null || !url.trim()) return;
@@ -7067,6 +7021,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div class="pf-scroll" style="max-height:360px;overflow:auto"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品名</th><th>状態</th><th>編集</th></tr>${unlisted.slice(0, 200).map(x => { const rg = regionByCc(x.cc) || { host: '' }; return `<tr><td>${x.image ? `<img src="${IMG_CDN}${esc(x.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(x.cc)}</td><td style="font-size:11px">${nm(x.name, '340px')}</td><td style="font-size:11px">${STLABEL[x.status] || ('status' + x.status)}</td><td style="white-space:nowrap">${rg.host ? `<a href="${editUrlFor(rg.host, x.item_id)}" target="_blank" style="text-decoration:none" title="編集ページ">✏️</a>${buyerUrlFor(x.cc, x.item_id) ? `<a href="${buyerUrlFor(x.cc, x.item_id)}" target="_blank" style="text-decoration:none;margin-left:2px" title="販売(公開)ページ">🛍️</a>` : ''}` : ''}</td></tr>`; }).join('')}</table></div>
         ${unlisted.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件表示</div>` : ''}
       </div>`;
+    // 目次ジャンプ（カードが多く縦に長いので、各カードのh3から自動でアンカーナビを生成＝テンプレ非依存）
+    { const cards = [...host.querySelectorAll(':scope > .tool-card')];
+      if (cards.length > 3) {
+        const nav = document.createElement('div');
+        nav.style.cssText = 'position:sticky;top:0;z-index:15;background:var(--card,#fff);border:1px solid #e6e0f5;border-radius:8px;padding:6px 10px;margin-bottom:8px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;box-shadow:0 2px 6px rgba(0,0,0,.06)';
+        nav.innerHTML = '<b style="font-size:11px;color:#7b52c4">ジャンプ:</b>';
+        cards.forEach((c, i) => { c.id = 'an-' + i; const h = c.querySelector('h3'); const label = h ? h.textContent.replace(/[（(].*$/, '').trim().slice(0, 12) : ('#' + (i + 1)); const b = document.createElement('button'); b.className = 'smd-btn'; b.textContent = label; b.style.cssText = 'font-size:10.5px;padding:2px 7px'; b.addEventListener('click', () => { const t = document.getElementById('an-' + i); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); }); nav.appendChild(b); });
+        host.insertBefore(nav, host.firstChild);
+      } }
     host.querySelectorAll('.sug-task').forEach(el => el.addEventListener('click', async () => { const s = lst.sugData[+el.dataset.i]; if (!s) return; el.disabled = true; if (await addSuggestionTask(s)) { el.textContent = '✓済'; el.style.background = '#e7f4e9'; } else el.disabled = false; }));
     const sugAll = host.querySelector('.sug-all'); if (sugAll) sugAll.addEventListener('click', async () => { if (!confirm('上位10件をタスク化しますか？')) return; sugAll.disabled = true; let ok = 0; for (const s of (lst.sugData || []).slice(0, 10)) { if (await addSuggestionTask(s)) ok++; } sugAll.textContent = `✓ ${ok}件をタスク化`; });
     // 🖼️同一画像クラスタ → 全カタログの親SKUを揃えて連結
@@ -7222,7 +7185,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (lst.filter === 'other') rows = rows.filter(r => r.status !== 1);
     if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || String(r.item_id).includes(q) || (r.models || []).some(m => (m.n || '').toLowerCase().includes(q)));
     const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
-    const shown = rows.slice(0, 500);
+    const N = lst.showN || 60;                 // 初期は60件だけ描画＝6500件でも軽い（もっと見る/全件で追加）
+    const shown = rows.slice(0, N);
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''}>🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
@@ -7235,12 +7199,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
-      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">出品 <b>${totalAll}</b>件（表示${rows.length}件${rows.length > 500 ? '中500件のみ' : ''}）｜ ${per || '国未選択'}</div>
-      <div id="lst-list"></div>`;
+      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${rows.length}</b>件（全${totalAll}件）｜ 表示 ${Math.min(N, rows.length)}件 ｜ ${per || '国未選択'}</div>
+      <div id="lst-list"></div>
+      <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
     document.getElementById('lst-list').innerHTML = shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>';
+    { const more = document.getElementById('lst-more'); if (more && rows.length > N) more.innerHTML = `<button class="smd-btn" id="lst-more-btn" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - N}件）</button> <button class="smd-btn" id="lst-all-btn" style="font-size:12px;margin-left:6px">全件表示</button>`; }
+    { const mb = document.getElementById('lst-more-btn'); if (mb) mb.addEventListener('click', () => { lst.showN = N + 60; drawListingStatus(); }); }
+    { const ab = document.getElementById('lst-all-btn'); if (ab) ab.addEventListener('click', () => { if (rows.length > 1500 && !confirm(rows.length + '件を一度に表示すると重くなる場合があります。よろしいですか？（絞り込み推奨）')) return; lst.showN = rows.length; drawListingStatus(); }); }
     document.getElementById('lst-sync').addEventListener('click', syncListings);
-    document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; drawListingStatus(); });
-    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); drawListingStatus(); }, 200); });
+    document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.showN = 60; drawListingStatus(); });
+    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.showN = 60; drawListingStatus(); }, 200); });
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
     // 展開したライブ行：現在の予約状態＋最新在庫を取得してその場編集を有効化
