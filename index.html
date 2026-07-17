@@ -2938,7 +2938,7 @@
     // 明確な不一致＝別垢が今アクティブ → 事故防止のため必ず中止（ハードブロック）
     if (mism.length) return { ok: false, label, msg: '⚠️ 対象アカウントが「今Shopeeでアクティブな垢」と違います:\n\n・' + mism.join('\n・') + '\n\n→ ⇄ か 🌏全タブ切替 で目標の垢に切り替えてから実行してください。\n（別Chromeでその垢を開いている場合は、そのChromeのポータルで操作）', summary: lines.join('\n') };
     // 確認できなかっただけ（セッション切れ/一時的）→ 中止はせず、確認ダイアログに警告を出す
-    const warn = unconf.length ? '\n\n⚠️ ' + unconf.join('・') + ' は今のアカウントを確認できませんでした（セッション切れの可能性）。書込先が意図どおりか各自確認のうえ実行してください。' : '';
+    const warn = unconf.length ? '\n\n⚠️⚠️【要注意】' + unconf.join('・') + ' は「今どの垢がShopeeでアクティブか」を確認できませんでした（セッション切れ/別Chromeの可能性）。' + (uniq.length >= 2 ? '\nこれは複数国への一括書込です。' : '') + '\n別の垢に書き込む事故を防ぐため、対象の垢でSeller Centerを開き直してから実行するのを強く推奨します。' : '';
     return { ok: true, label, summary: lines.join('\n') + warn };
   }
   // ★書込先アカウントの安全チェック（書込直前用）。各国のアクティブ店をライブ判定→対象アカウントと照合。
@@ -5421,6 +5421,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     q('.uni-price-all').addEventListener('click', async () => {
       const f = parseFloat(q('.uni-fac').value); if (!(f > 0)) { alert('係数を入れてください'); return; }
+      if ((f > 3 || f < 0.3) && !confirm(`⚠️ 係数 ×${f} は極端です（例: 1.1＝+10% / 0.9＝−10%）。\n全明細価格を ×${f}（${f >= 1 ? '+' : ''}${Math.round((f - 1) * 100)}%）に本当に変更しますか？\n※「11」は「1.1」の、「0.11」は「1.1」の打ち間違いかもしれません。`)) return;
       const gwp = await guardWriteCountries(listings.map(l => l.cc));
       if (!gwp.ok) { alert(gwp.msg); return; }
       if (!confirm('書込先アカウント:\n' + gwp.summary + '\n\n' + listings.length + '出品すべての全明細価格を ×' + f + ' にします。時間がかかります。\n（VN上限/BR価格差の制約に触れる国は自動スキップ）\n\nよろしいですか？')) return;
@@ -5563,6 +5564,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
     const f = prompt(`🏪 書込先: ${gwB.label}\n価格の倍率を入力（例: 1.1で+10%、0.9で-10%）。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品の全明細価格に適用。`, '1.1');
     const factor = parseFloat(f); if (!(factor > 0)) return;
+    if ((factor > 3 || factor < 0.3) && !confirm(`⚠️ 係数 ×${factor} は極端です（例: 1.1＝+10% / 0.9＝−10%）。\n全明細価格を ×${factor}（${factor >= 1 ? '+' : ''}${Math.round((factor - 1) * 100)}%）に本当に変更しますか？\n※「11」は「1.1」の打ち間違いかもしれません。`)) return;
     if (!confirm(`${items.length}出品の全明細価格を ×${factor} にします（現在価格を読み込んで変更）。\n（VN上限/BR価格差の制約に触れる出品は自動スキップ）\n時間がかかります。よろしいですか？`)) return;
     let ok = 0, ng = 0, skip = 0; const skips = [];
     for (let i = 0; i < items.length; i++) {
@@ -6422,6 +6424,47 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（一括統一もこの範囲に一致）
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
+    // ★🩸マージン漏れ検知：台帳(listing_catalog)の仕入原価 ×「今のライブ価格」で利益/ROIを再計算し、赤字/薄利で売れ続ける生き出品を炙り出す（読み取り専用・利益直結）
+    let leakHtml = '';
+    try {
+      let catRows = lst._ledgerRows;
+      if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); } catch (_) { catRows = []; } }
+      const costBySku = {}, costByName = {};
+      (catRows || []).forEach(c => {
+        const cw = c.weight_g;
+        (c.variations || []).forEach(v => {
+          if (v.cost == null) return;
+          const rec = { cost: Number(v.cost), weightG: (v.weightG != null ? v.weightG : cw) };
+          if (v.sku) costBySku[String(v.sku).toLowerCase().trim()] = rec;
+          if (v.name) costByName[String(v.name).toLowerCase().trim()] = rec;
+          if ((!v.name || v.name === '') && c.parent_sku) costBySku[String(c.parent_sku).toLowerCase().trim()] = rec;
+        });
+      });
+      const targetRoi = Number(settings.roiPct) || 15;
+      const leaks = [];
+      all.forEach(l => {
+        if (l.status !== 1) return; // 出品中のみ
+        (l.models || []).forEach(m => {
+          const price = Number(m.price) || 0; if (!price) return;
+          const cm = (m.sku && costBySku[String(m.sku).toLowerCase().trim()]) || (m.n && costByName[String(m.n).toLowerCase().trim()]) || (l.parent_sku && costBySku[String(l.parent_sku).toLowerCase().trim()]);
+          if (!cm) return;
+          const pr = priceProfitFor(l.cc, cm.cost, price, { weightG: cm.weightG });
+          if (pr.profit < 0 || pr.roi < targetRoi) {
+            const rg = regionByCc(l.cc) || {};
+            leaks.push({ cc: l.cc, name: m.n || l.name, item_id: l.item_id, host: rg.host, cur: rg.cur || '', price, cost: cm.cost, profit: pr.profit, roi: Math.round(pr.roi), sold: m.sold || 0, loss: pr.profit < 0 });
+          }
+        });
+      });
+      leaks.sort((a, b) => a.profit - b.profit); // 赤字が大きい順
+      const lossN = leaks.filter(x => x.loss).length;
+      const jpyL = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
+      const withCost = (catRows || []).filter(c => (c.variations || []).some(v => v.cost != null)).length;
+      leakHtml = `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">🩸 マージン漏れ検知 <span class="smd-dim" style="font-weight:400;font-size:12px">（台帳の仕入 ×「今のライブ価格」で再計算。<b style="color:#d93025">赤字</b>／目標ROI(${targetRoi}%)割れで売れている生き出品）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 <b>仕入を入れた台帳商品だけ</b>が対象（${withCost}件）。<b>💰出品台帳</b>の🈳で仕入を埋めるほど精度UP。<b style="color:#d93025">${lossN}件が赤字</b>／計${leaks.length}件が要改善 → 価格を上げる or 取り下げの判断に。国チップ＝各国の編集ページ。</div>
+        ${leaks.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品/バリエ</th><th style="text-align:right">現価格</th><th style="text-align:right">仕入</th><th style="text-align:right">利益/個</th><th style="text-align:right">ROI</th><th style="text-align:right">販売</th></tr>${leaks.slice(0, 100).map(x => { const rg = regionByCc(x.cc) || {}; return `<tr style="${x.loss ? 'background:#fff4f4' : ''}"><td style="white-space:nowrap"><a href="${editUrlFor(x.host, x.item_id)}" target="_blank" title="${x.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${x.cc}</span> ✏️</a></td><td style="font-size:11px">${nm(x.name, '240px')}</td><td style="text-align:right;white-space:nowrap">${x.cur}${x.price.toLocaleString()}</td><td style="text-align:right;white-space:nowrap;color:#888">${jpyL(x.cost)}</td><td style="text-align:right;white-space:nowrap;font-weight:700;color:${x.loss ? '#d93025' : '#e8710a'}">${x.profit >= 0 ? '+' : ''}${jpyL(x.profit)}</td><td style="text-align:right;color:${x.loss ? '#d93025' : '#e8710a'}">${x.roi}%</td><td style="text-align:right;color:#e8710a;font-weight:600">${x.sold || ''}</td></tr>`; }).join('')}</table></div>${leaks.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（赤字が大きい順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">${withCost ? '赤字/薄利の出品は見つかりませんでした 🎉' : 'まだ台帳に仕入(原価)が入っていません。<b>💰出品台帳</b>タブの🈳「仕入未入力のみ」から埋めると、ここに赤字/薄利の出品が出ます。'}</div>`}
+      </div>`;
+    } catch (_) { leakHtml = ''; }
     const STLABEL = { 1: '出品中', 8: '未公開(取り下げ)', 0: '削除', 2: 'BAN', 3: 'その他' };
     // 国別×status
     const perCc = targets.map(r => {
@@ -6471,6 +6514,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     </div>`;
     host.innerHTML =
       sugHtml +
+      leakHtml +
       imgClustHtml +
       `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📋 統合候補：同じカタログの可能性<span class="smd-dim" style="font-weight:400;font-size:12px">（中身のバリエが一致・タイトルのズレOK。PH起点→他国コピペのズレを検出）</span></h3>
