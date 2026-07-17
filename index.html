@@ -311,6 +311,9 @@
   :root[data-theme="dark"] #smd-nav button:hover { background:#21262c; }
   :root[data-theme="dark"] #smd-nav button.on { background:#2b211b; }
   :root[data-theme="dark"] .pf-table tr:hover td { background:rgba(255,255,255,.03); }
+  /* ローディング・スピナー（体感速度UP） */
+  .smd-spin { display:inline-block; width:15px; height:15px; border:2px solid rgba(120,120,120,.25); border-top-color:#ee4d2d; border-radius:50%; animation:smd-spin .7s linear infinite; vertical-align:-3px; margin-right:8px; }
+  @keyframes smd-spin { to { transform:rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -1256,6 +1259,18 @@
     if (!el) { el = document.createElement('div'); el.id = 'smd-toast'; document.body.appendChild(el); }
     el.textContent = msg; el.className = 'show' + (isErr ? ' err' : '');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = ''; }, 1800);
+  }
+  try { window.__smdOpenSettings = () => { const g = document.getElementById('smd-gear'); if (g) g.click(); }; } catch (_) {}
+  // 共通エラー表示：生エラーを平易な日本語＋次の一手（再読み込み/設定）に。技術詳細は折りたたみ
+  function errBox(e) {
+    const raw = String((e && e.message) || e || '');
+    const friendly = /Supabase|publishable|secret|キー/i.test(raw) ? '⚙️設定で Supabase キーを入れると、このデータが表示されます。'
+      : /Failed to fetch|NetworkError|timeout|接続|ネットワーク|Load failed/i.test(raw) ? '通信に失敗しました。ネット接続を確認して「再読み込み」してください。'
+      : /does not exist|relation|42P01|schema cache|未作成/i.test(raw) ? '必要なテーブルが未作成の可能性があります（設定・セットアップを確認）。'
+      : 'データの取得でエラーが発生しました。再読み込みで直ることがあります。';
+    return `<div class="tool-card" style="max-width:640px"><div style="font-weight:700;margin-bottom:4px">⚠️ ${friendly}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"><button class="smd-btn" onclick="location.reload()">🔄 再読み込み</button><button class="smd-btn" style="background:#eef4ff;border-color:#1565c0;color:#1565c0;font-weight:700" onclick="window.__smdOpenSettings&&window.__smdOpenSettings()">⚙️ 設定を開く</button></div>
+      <details><summary style="cursor:pointer;font-size:11px;color:#999">詳細（技術的なエラー）</summary><div style="font-size:11px;color:#999;margin-top:4px;word-break:break-all">${esc(raw)}</div></details></div>`;
   }
   function copyText(t, label) {
     t = String(t == null ? '' : t); if (!t) return;
@@ -2636,7 +2651,7 @@
     }
     const body = document.getElementById('stock-body');
     if (!stock.rows) {
-      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
       try {
         // 追加日時の新しい順（最新に登録したものを先頭に）。item_id順だと同日でもソース名で並び最新が埋もれるため
         stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc');
@@ -2647,7 +2662,7 @@
           const it = (o.items || [])[0];
           if (o.sn && it && it.image && !stock.imgMap.has(o.sn)) stock.imgMap.set(o.sn, it.image);
         });
-      } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+      } catch (e) { body.innerHTML = errBox(e); return; }
     }
     stockRender();
   }
@@ -2934,8 +2949,8 @@
   const ANON_SHIP = /(メルカリ便|らくらく|ゆうゆう|ヤフネコ|おてがる|かんたんラクマパック|匿名|ネコポス|ゆうパケットポスト)/;
   async function renderSuppliers() {
     const body = document.getElementById('sup-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let rows; try { rows = await ensureInv(); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let rows; try { rows = await ensureInv(); } catch (e) { body.innerHTML = errBox(e); return; }
     const bySup = {};
     rows.forEach(r => { const s = normSupplier(r.supplier || '(未設定)'); const g = (bySup[s] = bySup[s] || { n: 0, val: 0, sellers: new Set(), leadSum: 0, leadN: 0 }); g.n++; g.val += r.price || 0; if (r.seller) g.sellers.add(r.seller); const lt = leadDays(r); if (lt != null) { g.leadSum += lt; g.leadN++; } });
     const avgLead = v => v.leadN ? (Math.round(v.leadSum / v.leadN * 10) / 10) : null;
@@ -3249,11 +3264,11 @@
     const cch = cust._cache; // 絞り込みは再取得せずキャッシュから（TTL120秒／force・書込後は取り直し）
     if (!force && cch && Date.now() - cch.at < 120000) { orders = cch.orders; notes = cch.notes; }
     else {
-      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
       try {
         orders = await sbGetAll('orders', 'select=cc,buyer,order_date,tab,items,total&order=order_date.desc');
         notes = await sbGetAll('customer_notes', 'select=buyer,note').catch(() => []);
-      } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+      } catch (e) { body.innerHTML = errBox(e); return; }
       cust._cache = { orders, notes, at: Date.now() };
     }
     const noteMap = {}; (notes || []).forEach(n => { noteMap[n.buyer] = n.note || ''; });
@@ -3354,7 +3369,7 @@
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
         ]);
-      } catch (e) { body.innerHTML = '<div class="tool-card">エラー: ' + esc(e.message) + '</div>'; return; }
+      } catch (e) { body.innerHTML = errBox(e); return; }
       plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks }, at: Date.now() };
     }
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
@@ -3542,7 +3557,7 @@
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     let orders;
     try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,order_ts,order_date&tab=eq.300&order=order_ts.desc.nullslast,order_date.desc.nullslast,sn.desc'); }
-    catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    catch (e) { host.innerHTML = errBox(e); return; }
     const items = [];
     orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
     if (!items.length) {
@@ -3617,8 +3632,8 @@
   };
   // ⏳ 入庫待ち・到着予定：仕入れたが未入荷の到着スケジュール
   async function renderWaiting(host) {
-    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = errBox(e); return; }
     const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
     const daysTo = (from, to) => { const t = Date.parse(from); return isNaN(t) ? null : Math.round((Date.parse(to) - t) / 86400000); };
     // 各入庫待ちの到着フェーズ・予定日・待ち日数を判定
@@ -3749,7 +3764,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
   async function renderTasks() {
     const body = document.getElementById('tasks-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let tasks;
     try {
       tasks = await sbGet('tasks', 'select=*&order=done.asc,priority.desc,sort.asc,created_at.asc');
@@ -3842,14 +3857,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderAlerts() {
     const body = document.getElementById('alert-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let inv, orders;
     try {
       [inv, orders] = await Promise.all([
         ensureInv(),
         sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
       ]);
-    } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    } catch (e) { body.innerHTML = errBox(e); return; }
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
@@ -3947,12 +3962,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderExpenses() {
     const body = document.getElementById('exp-body');
     if (!exp.ym) exp.ym = jstYm();
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     const [y, m] = exp.ym.split('-').map(Number);
     const nextYm = m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0');
     let rows, issues = [];
     try { [rows, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => [])]); }
-    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    catch (e) { body.innerHTML = errBox(e); return; }
     exp.rows = rows;
     const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
     const refundTotal = refundForYm(issues, exp.ym);
@@ -4045,14 +4060,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderReturns() {
     const body = document.getElementById('ret-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let cancelled, issues;
     try {
       [cancelled, issues] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
         sbGetAll('order_issues', 'select=*'),
       ]);
-    } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    } catch (e) { body.innerHTML = errBox(e); return; }
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
     const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
     const extra = issues.filter(r => !cancelKeys.has(r.cc + ':' + r.sn)).map(r => ({ cc: r.cc, sn: r.sn, buyer: '', status: '手動追加', items: [] }));
@@ -4122,8 +4137,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderFx() {
     const body = document.getElementById('fx-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let rows; try { rows = await sbGetAll('fx_rates', 'select=*'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let rows; try { rows = await sbGetAll('fx_rates', 'select=*'); } catch (e) { body.innerHTML = errBox(e); return; }
     const map = new Map(rows.map(r => [r.cc, r]));
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:560px">
       <div class="smd-dim" style="font-size:12px;margin-bottom:8px">1通貨あたりの円換算レート。保存すると<b>全ページの売上・粗利・ROI・純利益</b>に反映されます（Supabaseに保存＝全端末共通）。</div>
@@ -4165,10 +4180,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = document.getElementById('summary-body');
     if (!exp.ym) exp.ym = jstYm();
     const ym = exp.ym;
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let expenses, inv, issues;
     try { [expenses, inv, issues] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${ym}-01&ymd=lt.${nextYmOf(ym)}-01&order=ymd`), ensureInv(), sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => [])]); }
-    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    catch (e) { body.innerHTML = errBox(e); return; }
     const expTotal = expenses.reduce((s, r) => s + (r.amount || 0), 0);
     const refundTotal = refundForYm(issues, ym);
     const grossOk = pf.grossYm === ym && typeof pf.grossTotal === 'number';
@@ -4255,8 +4270,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🧾 操作ログ ----------------
   async function renderLog() {
     const body = document.getElementById('log-body');
-    body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    let logs; try { logs = await sbGetAll('activity_log', 'select=*&order=ts.desc&limit=500'); } catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let logs; try { logs = await sbGetAll('activity_log', 'select=*&order=ts.desc&limit=500'); } catch (e) { body.innerHTML = errBox(e); return; }
     if (!logs.length) { body.innerHTML = '<span class="smd-dim">まだ操作ログはありません。在庫などを編集すると記録されます。</span>'; return; }
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:900px"><div class="pf-scroll"><table class="pf-table"><tr><th>日時</th><th>画面</th><th>操作</th><th>対象</th><th>内容</th></tr>` +
       logs.map(l => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(l.ts))}</td><td style="font-size:11px">${esc(l.page || '')}</td><td style="font-size:11px">${esc(l.action || '')}</td><td style="font-size:11px;color:#7a6ba7;word-break:break-all">${esc(l.target || '')}</td><td style="font-size:11px">${esc(l.detail || '')}</td></tr>`).join('') +
@@ -4483,13 +4498,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = document.getElementById('msg-body'); if (!body) return;
     { const rb = document.getElementById('msg-refresh'); if (rb && !rb._wired) { rb._wired = true; rb.addEventListener('click', () => renderMessages()); } }
     // 初回だけ「読み込み中」。既に一覧が出ている更新時は消さず、裏で取得→中身だけ差し替え（一瞬空にしない）
-    if (!document.getElementById('msg-list')) body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    if (!document.getElementById('msg-list')) body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows;
     // 会話クリック/絞り込み/ポーリングはキャッシュ(msg.rows)から描画＝毎回全履歴を取り直さない。取得は初回・🔄更新のみ
     if (useCache && msg.rows) { rows = msg.rows; }
     else {
       try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
-      catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>'; return; } }
+      catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = errBox(e); return; } }
       msg.rows = rows;
     }
     if (!rows || !rows.length) {
@@ -5878,7 +5893,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         host.innerHTML = `<div class="tool-card" style="max-width:860px"><div style="font-weight:700;margin-bottom:6px">💰 出品台帳（テーブル未作成）</div><div style="font-size:12.5px;line-height:1.8;color:#444">Supabaseに <code>listing_catalog</code> テーブルを1回作成すると使えます。SQL Editorで以下を実行してください：<pre style="background:#f6f6f6;border:1px solid #eee;border-radius:6px;padding:8px;font-size:11px;overflow:auto;white-space:pre-wrap">create table if not exists listing_catalog (id text primary key, name text, title text, category text, parent_sku text, weight_g numeric, cost_total numeric, variations jsonb, econ jsonb, note text, created_at timestamptz default now(), updated_at timestamptz default now());
 alter table listing_catalog disable row level security;
 grant select,insert,update,delete on listing_catalog to anon, authenticated;</pre>作成後この画面を🔄更新。</div></div>`;
-      } else host.innerHTML = '<div class="tool-card">読み取りエラー: ' + esc(e.message) + '</div>';
+      } else host.innerHTML = errBox(e);
       return;
     }
     lst._ledgerRows = rows || []; // 仕入インライン編集/検索で使うキャッシュ（再取得時のみ更新）
@@ -6282,8 +6297,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   async function renderCoverage() {
     const host = document.getElementById('list-coverage');
-    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    try { await ensureListings(); } catch (e) { host.innerHTML = errBox(e); return; }
     try { renderCoverageInner(host); } catch (e) { host.innerHTML = '<div style="color:#d93025;padding:12px">カバレッジ描画エラー: ' + esc(e.message) + '<br><span class="smd-dim">🔄Shopeeから更新でデータを取り直すと直る場合があります。</span></div>'; console.error('renderCoverage', e); }
   }
   // 国別 出品数リミット パネル。Shopeeの出品枠は「Live(公開中)」だけを数える。
@@ -6550,8 +6565,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
-    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-    try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+    host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    try { await ensureListings(); } catch (e) { host.innerHTML = errBox(e); return; }
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（一括統一もこの範囲に一致）
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
     // ★🩸マージン漏れ検知：台帳(listing_catalog)の仕入原価 ×「今のライブ価格」で利益/ROIを再計算し、赤字/薄利で売れ続ける生き出品を炙り出す（読み取り専用・利益直結）
@@ -6784,8 +6799,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function renderListingStatus() {
     const host = document.getElementById('list-status');
     if (!lst.loaded) {
-      host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
-      try { await ensureListings(); } catch (e) { host.innerHTML = 'エラー: ' + esc(e.message); return; }
+      host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+      try { await ensureListings(); } catch (e) { host.innerHTML = errBox(e); return; }
     }
     drawListingStatus();
   }
@@ -8734,7 +8749,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const ym = document.getElementById('pf-month').value;
     const body = document.getElementById('pf-body');
     if (force || pf.ym !== ym) {
-      body.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+      body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
       try {
         const iso = t => new Date(t).toISOString().slice(0, 10);
         let start, end;
@@ -8901,7 +8916,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const body = ov.querySelector('.cm-body');
     if (!need.length) { body.innerHTML = '<div style="color:#1a7f37;font-size:13px">✅ この期間、仕入額が未入力の注文はありません。</div>'; return; }
     let inv; try { inv = await sbGetAll('inventory', 'select=item_id,name,name_supplier,sku,supplier,seller,price,status,shopee_sn'); }
-    catch (e) { body.innerHTML = 'エラー: ' + esc(e.message); return; }
+    catch (e) { body.innerHTML = errBox(e); return; }
     const pool = inv.filter(v => !v.shopee_sn && v.price != null); // 未紐付け＋仕入額あり
     const STOP = /\[used\]|\[usado\]|variation|varia[cç][aã]o|japan(ese)?|ver\.?|nintendo|sony|sega|microsoft|game|series|used|tested|working|only|set|lot|中古|新品|ソフト/gi;
     const toks = s => (s || '').toLowerCase().replace(STOP, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').split(/\s+/).filter(w => w.length >= 2);
