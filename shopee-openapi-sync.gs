@@ -361,9 +361,11 @@ function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
   var categoryId = body.category_id ? parseInt(body.category_id, 10) : resolveCategoryId_(shopId, body.category || 'Games');
   var logisticId = body.logistic_id ? parseInt(body.logistic_id, 10) : resolveLogisticId_(shopId);
+  var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
+  function _upImg(u) { u = String(u || ''); if (!u) return null; if (_imgCache[u]) return _imgCache[u]; var id = uploadImageUrl_(u); if (id) _imgCache[u] = id; return id; }
   var imgIds = body.image_ids || [];
   if ((!imgIds || !imgIds.length) && body.images && body.images.length) {
-    imgIds = body.images.slice(0, 9).map(function (u) { return uploadImageUrl_(u); }).filter(Boolean);
+    imgIds = body.images.slice(0, 9).map(function (u) { return _upImg(u); }).filter(Boolean);
   }
   if (!imgIds.length) throw new Error('画像が必要（image_ids か images URL を渡す）');
   var payload = {
@@ -389,7 +391,7 @@ function addItem_(body) {
   if (itemId && vars.length >= 2) {
     var optionList = vars.map(function (v) {
       var o = { option: String(v.name || '').slice(0, 20) }; // Shopeeのバリエ名は20字上限
-      if (v.image) { try { var iid = uploadImageUrl_(v.image); if (iid) o.image = { image_id: iid }; } catch (_) {} }
+      if (v.image) { try { var iid = _upImg(v.image); if (iid) o.image = { image_id: iid }; } catch (_) {} }
       return o;
     });
     var modelList = vars.map(function (v, i) {
