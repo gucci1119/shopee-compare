@@ -1529,7 +1529,12 @@
       renderSummary(); renderGrid(); maybeUpload(seq);
     }).catch(e => {
       if (seq !== state.loadSeq) return;
-      state.perCountry.set(region.cc, { status: 'error', msg: e.message, items: [], total: 0 });
+      const raw = String((e && e.message) || e);
+      // 403/401＝その国のSeller Centerに未ログイン/セッション切れ（Shopeeが拒否）。分かりやすい文言に
+      const friendly = /HTTP 40[13]/.test(raw) ? `${region.cc}にログインしていない可能性（その国のSeller Centerでログイン→再試行）`
+        : /timeout|ブリッジ|bridge|応答/i.test(raw) ? 'ブリッジ未応答（Tampermonkey拡張をOFF→ON→再試行）'
+        : raw;
+      state.perCountry.set(region.cc, { status: 'error', msg: friendly, items: [], total: 0 });
       renderSummary(); renderGrid();
     });
   }
@@ -2685,6 +2690,22 @@
       return true;
     } catch (e) { alert('保存失敗: ' + e.message); return false; }
   }
+  // 選択した在庫の状態を一括変更（届いた入庫待ちを「在庫保管中(受取済)」にまとめて片付ける用）
+  async function stockBulkStatus(newStatus) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+    const ids = [...(stock.sel || [])]; if (!ids.length) return;
+    if (!confirm(`選択した ${ids.length}件 の状態を「${newStatus}」に変更します。\n（届いた入庫待ちを受取済にする一括処理）\nよろしいですか？`)) return;
+    try {
+      const now = new Date().toISOString();
+      const rows = ids.map(id => ({ item_id: id, status: newStatus, edited_at: now }));
+      for (let i = 0; i < rows.length; i += 200) await sbUpsert('inventory', rows.slice(i, i + 200));
+      ids.forEach(id => { const r = stock.rows.find(x => x.item_id === id); if (r) r.status = newStatus; });
+      try { logAct('在庫管理', '一括状態変更', ids.length + '件', '→' + newStatus); } catch (_) {}
+      stock.sel.clear();
+      toast(`✅ ${ids.length}件を「${newStatus}」にしました`);
+      stockRender();
+    } catch (e) { alert('一括変更に失敗: ' + e.message); }
+  }
   // ItemID（主キー）そのものを変更。印刷済みQRラベルとはズレるので確認を挟む
   async function stockRenameId(oldId, newId, inputEl) {
     const reset = () => { if (inputEl) inputEl.value = oldId; };
@@ -2829,6 +2850,7 @@
     } catch (_) { velHtml = ''; }
     body.innerHTML = velHtml + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
+      `<button class="smd-btn" id="stk-bulkrecv" style="margin-left:4px;display:${selCount ? '' : 'none'};background:#e7f5ea;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="選択した入庫待ちを『在庫保管中(受取済)』に一括変更＝届いたのに更新してない在庫をまとめて片付け">✅ 受取済にする${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
       `<button class="smd-btn" id="stk-csv" style="margin-left:6px" title="表示中（絞り込み後）の在庫をCSVで書き出し">⬇ CSV(${rows.length})</button>` +
       `<button class="smd-btn" id="stk-dead" style="margin-left:6px;${stock.dead ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="在庫保管中のまま${DEAD_DAYS}日超の「死に筋」だけ表示（値下げ・再出品の検討対象）。滞留日数の長い順。">🏚 死に筋${deadCount ? '（' + deadCount + '）' : ''}</button>` +
@@ -2896,10 +2918,12 @@
     // ラベル一括印刷：チェックボックス選択
     const updateStkSelUI = () => {
       const n = stock.sel.size;
-      const pb = document.getElementById('stk-printsel'), cb = document.getElementById('stk-selclear');
+      const pb = document.getElementById('stk-printsel'), cb = document.getElementById('stk-selclear'), rb = document.getElementById('stk-bulkrecv');
       if (pb) { pb.disabled = !n; pb.textContent = '🖨️ 選択を一括印刷' + (n ? '（' + n + '）' : ''); }
       if (cb) cb.style.display = n ? '' : 'none';
+      if (rb) { rb.style.display = n ? '' : 'none'; rb.textContent = '✅ 受取済にする' + (n ? '（' + n + '）' : ''); }
     };
+    { const rb = document.getElementById('stk-bulkrecv'); if (rb) rb.addEventListener('click', () => stockBulkStatus('在庫保管中')); }
     body.querySelectorAll('.stk-sel').forEach(el => el.addEventListener('change', e => {
       const id = e.target.dataset.id;
       if (e.target.checked) stock.sel.add(id); else stock.sel.delete(id);
