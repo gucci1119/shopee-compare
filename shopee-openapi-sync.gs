@@ -885,11 +885,53 @@ function testEscrowDump() {
     }
     Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': 完了 ' + done.length + '件（直近90日を走査' + scanned + '件）===');
     if (!done.length) { Logger.log('  完了注文なし（バケーション明けに再実行）'); return; }
-    var sn = done[0].order_sn;
-    try { var e = callShop_(t.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: sn }, 'get'); Logger.log(cc + ' ' + sn + ' order_income: ' + JSON.stringify((e.response || {}).order_income)); }
-    catch (ex) { Logger.log('  escrow err: ' + ex); }
+    // 一時エラー(error_server)対策：成功するまで最大5件試す
+    var got = false;
+    for (var k = 0; k < done.length && k < 5 && !got; k++) {
+      var sn = done[k].order_sn;
+      try {
+        var e = callShop_(t.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: sn }, 'get');
+        var oi = (e.response || {}).order_income;
+        if (oi) { Logger.log(cc + ' ' + sn + ' order_income: ' + JSON.stringify(oi)); got = true; }
+        else { Logger.log('  ' + sn + ' order_income空 resp=' + JSON.stringify(e.response || e).slice(0, 200)); }
+      } catch (ex) { Logger.log('  ' + sn + ' escrow err: ' + String(ex).slice(0, 120)); }
+    }
+    if (!got) Logger.log('  ' + cc + ': ' + Math.min(done.length, 5) + '件試すも全てescrow取得失敗（Shopee側一時エラーの可能性・時間を置いて再実行）');
   });
   Logger.log('※order_income内に tax/duty/import(関税)・actual/estimated_shipping_fee(送料の実測差) 等があるか確認');
+}
+
+// ★キャンセル/返品の「理由」がAPIで取れるか実測：注文詳細に cancel_reason 等が入るか。
+// 返品専用API(return/*)はCB垢では権限なし＝不可。キャンセル理由は注文APIで取れる見込みを検証する。
+function testCancelReason() {
+  var toks = listTokens_();
+  var FIELDS = 'order_status,cancel_reason,cancel_by,note,buyer_cancel_reason,item_list,create_time';
+  ['PH', 'BR', 'TH', 'TW', 'MY', 'SG', 'VN'].forEach(function (cc) {
+    var t = toks.filter(function (x) { return x.cc === cc; })[0];
+    if (!t) return;
+    // 直近90日を14日ずつ遡り、キャンセル状態の注文を探す
+    var cans = [], scanned = 0;
+    for (var w = 0; w < 7 && !cans.length; w++) {
+      var to = now_() - w * 14 * 86400, from = to - 14 * 86400;
+      try {
+        var j = callShop_(t.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 50, response_optional_fields: 'order_status' }, 'get');
+        var list = ((j.response || {}).order_list) || []; scanned += list.length;
+        cans = list.filter(function (o) { return o.order_status === 'CANCELLED'; });
+      } catch (ex) { Logger.log('  ' + cc + ' 取得err: ' + String(ex).slice(0, 120)); break; }
+    }
+    Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': キャンセル ' + cans.length + '件（走査' + scanned + '件）===');
+    if (!cans.length) { Logger.log('  キャンセル注文なし'); return; }
+    var sns = cans.slice(0, 3).map(function (o) { return o.order_sn; }).join(',');
+    try {
+      var d = callShop_(t.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns, response_optional_fields: FIELDS }, 'get');
+      var ol = ((d.response || {}).order_list) || [];
+      ol.forEach(function (o) {
+        Logger.log('  ' + o.order_sn + ' status=' + o.order_status + ' cancel_reason=' + JSON.stringify(o.cancel_reason) + ' cancel_by=' + JSON.stringify(o.cancel_by) + ' buyer_cancel_reason=' + JSON.stringify(o.buyer_cancel_reason) + ' note=' + JSON.stringify(o.note));
+      });
+      Logger.log('  ↑cancel_reasonに値が入れば自動取得可。undefined/空なら注文APIでは取れない。');
+    } catch (ex) { Logger.log('  detail err: ' + String(ex).slice(0, 160)); }
+  });
+  Logger.log('※返品(配達後)の理由は return/get_return_detail が要るが本アカウントは権限なし。ここで取れるのはキャンセル理由のみ。');
 }
 
 function getOrderSns_(shopId, timeFrom, timeTo) {
