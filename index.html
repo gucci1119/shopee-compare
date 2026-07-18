@@ -4387,8 +4387,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
       </tr>`;
     }).join('');
+    // 返品・返金の分析：シリーズ別/国別/理由別のパターン把握（リージョン違い等の対策に）
+    const analysisCard = (() => {
+      if (!rows.length) return '';
+      const byFr = {}, byCc = {}, byReason = {};
+      rows.forEach(o => {
+        const iss = issueMap.get(o.cc + ':' + o.sn) || {};
+        const refund = iss.refund_jpy || 0;
+        const it = (o.items || [])[0] || {};
+        const fr = (typeof classifyFranchise === 'function' ? classifyFranchise(it.name || '') : '') || 'その他';
+        (byFr[fr] = byFr[fr] || { n: 0, refund: 0 }); byFr[fr].n++; byFr[fr].refund += refund;
+        (byCc[o.cc] = byCc[o.cc] || { n: 0, refund: 0 }); byCc[o.cc].n++; byCc[o.cc].refund += refund;
+        const rs = (iss.reason || '').trim(); if (rs) byReason[rs] = (byReason[rs] || 0) + 1;
+      });
+      const topFr = Object.entries(byFr).sort((a, b) => b[1].n - a[1].n).slice(0, 12);
+      const topReason = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      const ccArr = Object.entries(byCc).sort((a, b) => b[1].n - a[1].n);
+      const chip = (label, n, extra, col) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${col || '#e0d0d0'};border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b>${esc(label)}</b> ${n}件${extra ? ` <span style="color:#d93025">${extra}</span>` : ''}</span>`;
+      return `<details class="tool-card" open style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">📊 返品・返金の分析 <span class="smd-dim" style="font-weight:400;font-size:11px">（何が・なぜ返品されているか＝対策のヒント）</span></summary>
+        <div style="margin-top:8px;font-size:12px"><b>シリーズ別</b>（多い順・返金額）<div style="margin:4px 0 8px">${topFr.map(([fr, v]) => chip(fr, v.n, v.refund ? fmtJpy(v.refund) : '', '#e0c0cc')).join('') || '<span class="smd-dim">—</span>'}</div>
+        <b>国別</b><div style="margin:4px 0 8px">${ccArr.map(([cc, v]) => chip(cc, v.n, v.refund ? fmtJpy(v.refund) : '', (regionByCc(cc) || {}).color || '#ccc')).join('')}</div>
+        ${topReason.length ? `<b>理由別</b>（記録済みのみ）<div style="margin:4px 0 4px">${topReason.map(([r, n]) => chip(r, n, '', '#d0d0e0')).join('')}</div>` : '<div class="smd-dim" style="font-size:11px">理由を各行の「理由」欄に書くと、ここに理由別の集計が出ます（例：リージョン違い/動作不良/届かない）。</div>'}
+        <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 同じシリーズ/理由が多い＝出品文言や対象国の見直しで防げるかも（例：リージョン違いは商品名/説明に対応機種を明記）。<b>SLS+の半額保証</b>（返金でも約半額が数ヶ月後にセラーへ）は、入ったら返金額をマイナス（実質戻り）で記録すると純損失が正確になります。</div></div>
+      </details>`;
+    })();
     body.innerHTML =
       `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル注文 ${cancelled.length}件 ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>` +
+      analysisCard +
       `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
         <select id="ret-cc" style="padding:5px;font-size:13px">${ccOpts}</select>
