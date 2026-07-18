@@ -934,6 +934,44 @@ function testCancelReason() {
   Logger.log('※返品(配達後)の理由は return/get_return_detail が要るが本アカウントは権限なし。ここで取れるのはキャンセル理由のみ。');
 }
 
+// ★SLS+補償(半額保証)がMy income=入金明細(wallet_transaction)にAPIで現れるか調査。
+// 直近90日の全取引の transaction_type を集計し、補償/調整っぽい取引のサンプルをダンプする。
+function testWalletTxns() {
+  var toks = listTokens_();
+  ['PH', 'BR'].forEach(function (cc) {
+    var t = toks.filter(function (x) { return x.cc === cc; })[0];
+    if (!t) { Logger.log(cc + ': 認可店なし'); return; }
+    var types = {}, samples = [], total = 0, err = '';
+    try {
+      // page_noは1始まり＋create_time窓は狭い。7日窓×13=91日を走査（3ヶ月遅れの補償を捕捉）。
+      var WIN = 7 * 86400;
+      for (var w = 0; w < 13 && !err; w++) {
+        var wto = now_() - w * WIN, wfrom = wto - WIN;
+        for (var pg = 1; pg <= 5; pg++) {
+          var j = callShop_(t.shop_id, '/api/v2/payment/get_wallet_transaction_list', { page_no: pg, page_size: 100, create_time_from: wfrom, create_time_to: wto }, 'get');
+          if (j && j.error) { err = j.error + ' ' + (j.message || ''); break; }
+          var resp = j.response || {};
+          var list = resp.transaction_list || [];
+          total += list.length;
+          list.forEach(function (tx) {
+            var ty = tx.transaction_type || '?';
+            types[ty] = (types[ty] || 0) + 1;
+            var blob = JSON.stringify(tx).toLowerCase();
+            if (/compensat|insur|sls|adjust|claim|reimburse|protect/.test(blob) && samples.length < 8) samples.push(tx);
+          });
+          if (!resp.more || !list.length) break;
+        }
+      }
+      if (err) { Logger.log('  ' + cc + ' wallet err(resp): ' + err); return; }
+      Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': wallet取引 ' + total + '件（91日）===');
+      Logger.log('  種別内訳: ' + JSON.stringify(types));
+      if (!samples.length) Logger.log('  補償/調整っぽい取引は0件（キーワード compensat/insur/sls/adjust/claim/reimburse/protect）');
+      samples.forEach(function (s) { Logger.log('  ▼補償候補: ' + JSON.stringify(s).slice(0, 340)); });
+    } catch (ex) { Logger.log('  ' + cc + ' wallet err: ' + String(ex).slice(0, 180)); }
+  });
+  Logger.log('※transaction_typeに ADJUSTMENT/COMPENSATION 等、description/reasonにSLS+補償の手掛かりがあるか確認。1件でも取れれば自動検知の目処が立つ。');
+}
+
 function getOrderSns_(shopId, timeFrom, timeTo) {
   var sns = [], cursor = '';
   for (var g = 0; g < 50; g++) {
