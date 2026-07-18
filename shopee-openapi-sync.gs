@@ -1011,16 +1011,27 @@ function syncOrdersForShop_(tok) {
   if (!sns.length) return { cc: cc, shop_id: tok.shop_id, orders: 0 };
   var rows = [];
   for (var i = 0; i < sns.length; i += 50) {
-    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time' }, 'get');
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason' }, 'get');
     (((jd.response || {}).order_list) || []).forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
       if (!tab) return;
       var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, variation: it.model_name || '' }; });
       var day = o.create_time ? new Date((o.create_time + tz * 3600) * 1000).toISOString().slice(0, 10) : null;
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: null, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), synced_at: new Date().toISOString() });
+      // キャンセル理由：買い手の記入(buyer_cancel_reason)優先→無ければcancel_reason。誰が(system/buyer/seller)も付す
+      var creason = String(o.buyer_cancel_reason || o.cancel_reason || '').trim();
+      var cby = String(o.cancel_by || '').trim();
+      var cancelReason = creason ? (creason + (cby ? ' [' + cby + ']' : '')) : null;
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: null, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, synced_at: new Date().toISOString() });
     });
   }
-  if (rows.length) sbUpsert_('orders', rows, 'cc,sn');
+  if (rows.length) {
+    // orders表に cancel_reason 列が未追加でも同期が壊れないよう、列エラー時はその項目を外して再試行
+    try { sbUpsert_('orders', rows, 'cc,sn'); }
+    catch (e) {
+      if (/cancel_reason/.test(String(e))) { rows.forEach(function (r) { delete r.cancel_reason; }); sbUpsert_('orders', rows, 'cc,sn'); }
+      else throw e;
+    }
+  }
   return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
 }
 function syncOrdersAll() {
