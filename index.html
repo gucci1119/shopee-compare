@@ -4354,10 +4354,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let cancelled, issues;
     try {
       [cancelled, issues] = await Promise.all([
-        sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
+        sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
         sbGetAll('order_issues', 'select=*'),
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
+    // Shopee注文APIのキャンセル理由(英語)→日本語。末尾の [system]/[buyer]/[seller] は誰がの表示に。
+    const cancelReasonJa = raw => {
+      if (!raw) return '';
+      const m = String(raw).match(/^(.*?)(?:\s*\[(\w+)\])?$/);
+      const txt = (m ? m[1] : raw).trim(), by = m && m[2] ? m[2] : '';
+      const MAP = { 'Unpaid Order': '未払い(自動)', 'Failed Delivery': '配送失敗', 'Need to Modify Order': '注文変更希望', 'Out of Stock': '在庫切れ', 'Others': 'その他', 'Buyer Requested Cancellation': '買い手都合', 'Payment Issue': '決済不備', 'Change of Mind': '気が変わった', 'Item Not as Described': '説明と違う', 'Wrong Item': '商品違い', 'Shipping Fee too High': '送料が高い' };
+      const byJa = { system: '自動', buyer: '買い手', seller: '自分' }[by] || '';
+      return (MAP[txt] || txt) + (byJa ? `・${byJa}` : '');
+    };
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
     const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
     const extra = issues.filter(r => !cancelKeys.has(r.cc + ':' + r.sn)).map(r => ({ cc: r.cc, sn: r.sn, buyer: '', status: '手動追加', items: [] }));
@@ -4380,7 +4389,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
         <td style="font-size:11px">${nm(it.name, '260px')}</td>
         <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
-        <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="理由" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
+        <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
@@ -4398,7 +4407,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const fr = (typeof classifyFranchise === 'function' ? classifyFranchise(it.name || '') : '') || 'その他';
         (byFr[fr] = byFr[fr] || { n: 0, refund: 0 }); byFr[fr].n++; byFr[fr].refund += refund;
         (byCc[o.cc] = byCc[o.cc] || { n: 0, refund: 0 }); byCc[o.cc].n++; byCc[o.cc].refund += refund;
-        const rs = (iss.reason || '').trim(); if (rs) byReason[rs] = (byReason[rs] || 0) + 1;
+        const rs = (iss.reason || '').trim() || cancelReasonJa(o.cancel_reason);
+        if (rs) byReason[rs] = (byReason[rs] || 0) + 1;
       });
       const topFr = Object.entries(byFr).sort((a, b) => b[1].n - a[1].n).slice(0, 12);
       const topReason = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 10);
@@ -4407,7 +4417,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return `<details class="tool-card" open style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">📊 返品・返金の分析 <span class="smd-dim" style="font-weight:400;font-size:11px">（何が・なぜ返品されているか＝対策のヒント）</span></summary>
         <div style="margin-top:8px;font-size:12px"><b>シリーズ別</b>（多い順・返金額）<div style="margin:4px 0 8px">${topFr.map(([fr, v]) => chip(fr, v.n, v.refund ? fmtJpy(v.refund) : '', '#e0c0cc')).join('') || '<span class="smd-dim">—</span>'}</div>
         <b>国別</b><div style="margin:4px 0 8px">${ccArr.map(([cc, v]) => chip(cc, v.n, v.refund ? fmtJpy(v.refund) : '', (regionByCc(cc) || {}).color || '#ccc')).join('')}</div>
-        ${topReason.length ? `<b>理由別</b>（記録済みのみ）<div style="margin:4px 0 4px">${topReason.map(([r, n]) => chip(r, n, '', '#d0d0e0')).join('')}</div>` : '<div class="smd-dim" style="font-size:11px">理由を各行の「理由」欄に書くと、ここに理由別の集計が出ます（例：リージョン違い/動作不良/届かない）。</div>'}
+        ${topReason.length ? `<b>理由別</b>（Shopee自動取得＋手動記録）<div style="margin:4px 0 4px">${topReason.map(([r, n]) => chip(r, n, '', '#d0d0e0')).join('')}</div>` : '<div class="smd-dim" style="font-size:11px">キャンセル理由はShopeeから自動取得します（未払い/配送失敗/注文変更希望 等）。返品(配達後)の理由は各行の「理由」欄に手動記入を。</div>'}
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 同じシリーズ/理由が多い＝出品文言や対象国の見直しで防げるかも（例：リージョン違いは商品名/説明に対応機種を明記）。<b>SLS+の半額保証</b>（返金でも約半額が数ヶ月後にセラーへ）は、入ったら返金額をマイナス（実質戻り）で記録すると純損失が正確になります。</div></div>
       </details>`;
     })();
