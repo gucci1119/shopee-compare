@@ -866,6 +866,26 @@ function testShipDiag() {
   Logger.log('※読み取りのみ。実際の発送(ship_order)はしていません。');
 }
 
+// escrow詳細ダンプ（読み取りのみ）：TH/TWの完了注文のorder_incomeを丸ごと出力。関税(tax/duty/import)や
+// estimated/actual_shipping_fee など、暫定→確定で動く要因・後から引かれる項目があるかを実データで確認する。
+function testEscrowDump() {
+  var toks = listTokens_();
+  ['TH', 'TW', 'PH', 'BR'].forEach(function (cc) {
+    var t = toks.filter(function (x) { return x.cc === cc; })[0];
+    if (!t) { Logger.log(cc + ': 認可店なし'); return; }
+    var to = now_(), from = to - 30 * 86400;
+    var j = callShop_(t.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 50, response_optional_fields: 'order_status' }, 'get');
+    var list = ((j.response || {}).order_list) || [];
+    var done = list.filter(function (o) { return o.order_status === 'COMPLETED'; });
+    Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': 完了 ' + done.length + '件 / 直近' + list.length + ' ===');
+    if (!done.length) { Logger.log('  完了注文なし（バケーション明けに再実行）'); return; }
+    var sn = done[0].order_sn;
+    try { var e = callShop_(t.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: sn }, 'get'); Logger.log(cc + ' ' + sn + ' order_income: ' + JSON.stringify((e.response || {}).order_income)); }
+    catch (ex) { Logger.log('  escrow err: ' + ex); }
+  });
+  Logger.log('※order_income内に tax/duty/import(関税)・actual/estimated_shipping_fee(送料の実測差) 等があるか確認');
+}
+
 function getOrderSns_(shopId, timeFrom, timeTo) {
   var sns = [], cursor = '';
   for (var g = 0; g < 50; g++) {
@@ -972,6 +992,9 @@ function syncEscrowForShop_(tok, deadline, finalized) {
     if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
   }
   var rows = [], now2 = new Date().toISOString(), errs = 0, skip = 0, partial = false;
+  // ★初回取得値(amount_initial=暫定)を保持するため既存incomeを読む。上書きすると常に暫定=確定になる不具合の修正
+  var prev = {};
+  try { var ex = sbSelect_('income', 'select=cc,sn,amount,amount_initial,amount_initial_at&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (ex || []).forEach(function (r) { prev[r.cc + ':' + r.sn] = r; }); } catch (_) {}
   for (var oi = 0; oi < orders.length; oi++) {
     if (deadline && now_() > deadline) { partial = true; break; }
     var o = orders[oi];
@@ -986,7 +1009,12 @@ function syncEscrowForShop_(tok, deadline, finalized) {
     var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
       original_price: parseFloat(inc.original_price) || null, voucher_seller: parseFloat(inc.voucher_from_seller) || 0,
       final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
-    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: now2, amount_initial: amt, amount_initial_at: now2, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2 });
+    // 初回取得値(暫定)は保持。amount_at は「額が実際に変わった時刻」＝前回と同額なら前回のまま、変われば今
+    var pv = prev[cc + ':' + o.sn];
+    var initAmt = (pv && pv.amount_initial != null) ? pv.amount_initial : amt;
+    var initAt = (pv && pv.amount_initial_at) ? pv.amount_initial_at : now2;
+    var amtAt = (pv && pv.amount != null && parseFloat(pv.amount) === amt && pv.amount_at) ? pv.amount_at : now2;
+    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: amtAt, amount_initial: initAmt, amount_initial_at: initAt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2 });
   }
   if (rows.length) sbUpsert_('income', rows, 'cc,sn');
   var out = { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
