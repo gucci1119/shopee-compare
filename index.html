@@ -3471,7 +3471,7 @@
   }
   // ---------------- 📈 事業計画（目標逆算 ＋ 月次収支履歴） ----------------
   const plan = { cfg: null };
-  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, monthTargets: {} });
+  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, monthTargets: {}, fixBreak: [] });
   function planLoadLocal() { try { return JSON.parse(localStorage.getItem('smdPlanCfg') || 'null'); } catch (_) { return null; } }
   async function planSave() {
     const st = document.getElementById('plan-save-stat');
@@ -3506,6 +3506,7 @@
     if (plan.cfg.opexPct == null) plan.cfg.opexPct = 6;
     if (plan.cfg.taxPct == null) plan.cfg.taxPct = 0;
     if (!plan.cfg.monthTargets) plan.cfg.monthTargets = {};
+    if (!Array.isArray(plan.cfg.fixBreak)) plan.cfg.fixBreak = [];
     // 利益エンジンと同じ突合：仕入原価=costs.cost 優先→在庫(shopee_sn)の仕入値合算／入金=income.amount 優先→costs.deposit（いずれもローカル通貨）
     const invBySn = {}; inv.forEach(it => { if (it.shopee_sn) invBySn[it.shopee_sn] = (invBySn[it.shopee_sn] || 0) + (Number(it.price) || 0); });
     const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
@@ -3554,7 +3555,11 @@
     // 月別目標：その月の上書きがあればそれ、無ければ既定(targetNet)。逆算・進捗は当月の目標を使う
     const targetOf = ym => { const mt = cfg.monthTargets && cfg.monthTargets[ym]; return (mt != null && mt !== '') ? Number(mt) || 0 : (Number(cfg.targetNet) || 0); };
     const targetNet = targetOf(curYm);
-    const opexFixed = (cfg.opexFixed === '' || cfg.opexFixed == null) ? 0 : (Number(cfg.opexFixed) || 0);
+    const numFmt = n => (n === '' || n == null || isNaN(Number(n))) ? '' : Number(n).toLocaleString('en-US');   // 3桁区切り表示
+    const numParse = v => { const n = Number(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? 0 : n; }; // カンマ等を除いて数値化
+    const fixBreak = Array.isArray(cfg.fixBreak) ? cfg.fixBreak : [];                 // 固定費(見込み)の内訳［{name,amount}］
+    const fixBreakSum = fixBreak.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const opexFixed = fixBreak.length ? fixBreakSum : ((cfg.opexFixed === '' || cfg.opexFixed == null) ? 0 : (Number(cfg.opexFixed) || 0)); // 内訳があれば合計、無ければ手入力の見込み
     const opexPct = (cfg.opexPct === '' || cfg.opexPct == null) ? 0 : (Number(cfg.opexPct) || 0);
     const taxPct = (cfg.taxPct === '' || cfg.taxPct == null) ? 0 : (Number(cfg.taxPct) || 0);
     const afterTax = v => (v > 0 ? Math.round(v * (1 - taxPct / 100)) : v); // 税引後（黒字にのみ課税・赤字はそのまま）
@@ -3605,20 +3610,29 @@
       `<div class="tool-card" style="margin:0 0 12px;max-width:none;background:#f7fbff;border:1px solid #d6e4f5">
         <div style="font-weight:700;font-size:15px;margin-bottom:8px">🎯 目標＆逆算</div>
         <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end">
-          <label style="font-size:12px" title="税引前の営業利益の目標（既定）。月ごとに変えるなら下の「月別の目標」で上書き">月の目標<b>営業利益</b> <span class="smd-dim">既定・税引前</span><br><input id="plan-target" type="number" value="${Number(cfg.targetNet) || ''}" style="width:120px;padding:5px;font-size:14px;margin-top:2px"> 円</label>
+          <label style="font-size:12px" title="税引前の営業利益の目標（既定）。月ごとに変えるなら下の「月別の目標」で上書き">月の目標<b>営業利益</b> <span class="smd-dim">既定・税引前</span><br><input id="plan-target" type="text" inputmode="numeric" value="${numFmt(cfg.targetNet)}" style="width:120px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円</label>
           <label style="font-size:12px">月の<b>稼働日数</b><br><input id="plan-days" type="number" value="${workDays}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> 日</label>
-          <label style="font-size:12px" title="必要注文数の逆算に使う固定費の見込み。実利益は下で登録した実額を優先します">月の<b>固定費（見込み）</b> <span class="smd-dim">逆算用</span><br><input id="plan-opexf" type="number" value="${opexFixed}" style="width:110px;padding:5px;font-size:14px;margin-top:2px"> 円</label>
+          <label style="font-size:12px" title="必要注文数の逆算に使う固定費の見込み。実利益は下で登録した実額を優先します">月の<b>固定費（見込み）</b> <span class="smd-dim">${fixBreak.length ? '内訳から自動' : '逆算用'}</span><br><input id="plan-opexf" type="text" inputmode="numeric" value="${numFmt(opexFixed)}"${fixBreak.length ? ' readonly title="下の「固定費の内訳」から自動計算（内訳を空にすると手入力に戻ります）"' : ''} style="width:110px;padding:5px;font-size:14px;margin-top:2px;text-align:right${fixBreak.length ? ';background:#f1f1f1;color:#555' : ''}"> 円</label>
           <label style="font-size:12px" title="送料・各種手数料など、売上に比例する費用の率">月の<b>変動費率</b> <span class="smd-dim">送料・手数料</span><br><input id="plan-opexp" type="number" step="0.1" value="${opexPct}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> %</label>
           <label style="font-size:12px" title="所得税・住民税・事業税・社会保険料などの実効率。税引後(手取り)の目安に使います。正確な率は税理士に確認を">税・保険 <b>見込み率</b> <span class="smd-dim">税引後の目安</span><br><input id="plan-tax" type="number" step="0.1" value="${cfg.taxPct}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> %</label>
-          <label style="font-size:12px">1注文の<b>利益</b> <span class="smd-dim">既定1200</span><br><input id="plan-avg" type="number" value="${cfg.avgProfit}" placeholder="自動:${autoContrib || 1200}" style="width:96px;padding:5px;font-size:14px;margin-top:2px"> 円<br><span class="smd-dim" style="font-size:10px">梱包資材は別途差引</span></label>
+          <label style="font-size:12px">1注文の<b>利益</b> <span class="smd-dim">既定1,200</span><br><input id="plan-avg" type="text" inputmode="numeric" value="${cfg.avgProfit === '' || cfg.avgProfit == null ? '' : numFmt(cfg.avgProfit)}" placeholder="自動:${numFmt(autoContrib || 1200)}" style="width:96px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円<br><span class="smd-dim" style="font-size:10px">梱包資材は別途差引</span></label>
           <span id="plan-save-stat" class="smd-dim" style="font-size:11px"></span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed #d6e4f5">
           <span style="font-size:12px;font-weight:700">📅 月別の目標（季節で変える場合）</span>
           <select id="plan-mt-ym" style="padding:5px;font-size:13px;border:1px solid #ddd;border-radius:6px">${(() => { const ops = []; const [yy, mm] = curYm.split('-').map(Number); for (let i = -1; i <= 6; i++) { const d = new Date(yy, mm - 1 + i, 1); const ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); ops.push(`<option value="${ym}"${ym === curYm ? ' selected' : ''}>${ym}${ym === curYm ? '（今月）' : ''}</option>`); } return ops.join(''); })()}</select>
-          <input id="plan-mt-amt" type="number" placeholder="この月の目標(円)" style="width:150px;padding:5px;font-size:13px;border:1px solid #ddd;border-radius:6px">
+          <input id="plan-mt-amt" type="text" inputmode="numeric" placeholder="この月の目標(円)" style="width:150px;padding:5px;font-size:13px;border:1px solid #ddd;border-radius:6px;text-align:right">
           <button class="smd-btn" id="plan-mt-set" style="font-size:12px">設定</button>
           <span class="smd-dim" style="font-size:11px">${(() => { const ks = Object.keys(cfg.monthTargets || {}).filter(k => cfg.monthTargets[k] != null && cfg.monthTargets[k] !== '').sort(); return ks.length ? '上書き中: ' + ks.map(k => k + '=' + fmtJpy(Number(cfg.monthTargets[k]))).join(' / ') + '（空で設定すると既定に戻る）' : '未設定の月は上の既定額を使用'; })()}</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed #d6e4f5">
+          <span style="font-size:12px;font-weight:700">📋 固定費の内訳（見込み）</span>
+          ${fixBreak.length ? fixBreak.map((x, i) => `<span style="background:#eef2ff;border:1px solid #d6e0f5;border-radius:6px;padding:2px 4px 2px 8px;font-size:11.5px;white-space:nowrap">${esc(x.name)} ¥${numFmt(x.amount)} <button class="plan-fb-del" data-i="${i}" title="削除" style="border:none;background:none;cursor:pointer;color:#d93025;font-size:12px;padding:0 2px">✕</button></span>`).join('') + `<b style="font-size:12px">＝計 ¥${numFmt(fixBreakSum)}</b>` : '<span class="smd-dim" style="font-size:11px">未設定＝上の「固定費（見込み）」を手入力。ここに人件費・家賃・ツール等を足すと自動で合計されます。</span>'}
+          <span style="width:6px"></span>
+          <input id="plan-fb-name" placeholder="項目(例:人件費)" style="width:120px;padding:5px;font-size:12px;border:1px solid #ddd;border-radius:6px">
+          <input id="plan-fb-amt" type="text" inputmode="numeric" placeholder="金額" style="width:90px;padding:5px;font-size:12px;border:1px solid #ddd;border-radius:6px;text-align:right">
+          <button class="smd-btn" id="plan-fb-add" style="font-size:12px">＋項目追加</button>
+          ${fixBreak.length ? `<button class="smd-btn" id="plan-fb-apply" style="font-size:11px" title="この内訳を、上の登録フォームで選んだ月に実額の固定費として一括登録します">↧ 内訳を選択月に一括登録</button>` : ''}
         </div>
         <div class="smd-dim" style="font-size:11px;margin-top:6px">💡 <b>実利益 ＝ 入金 − 仕入 − 固定費 − 変動費 − その他経費</b>。<b>固定費（人件費・家賃・ツール）は下の「毎月の固定費・経費を登録」で実額を入れる</b>と、その月は見込みでなく実額で計算します（未登録の月は見込み額を使用）。必要注文数の逆算は1注文の利益（既定1200円）で計算。</div>
         <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px">
@@ -3638,7 +3652,7 @@
           <select id="plan-exp-cat" style="padding:6px;font-size:13px;border:1px solid #ddd;border-radius:6px">
             <option value="人件費">人件費</option><option value="家賃">家賃</option><option value="ツール">ツール</option><option value="通信費">通信費</option><option value="外注費">外注費</option><option value="梱包資材">梱包資材</option><option value="その他">その他</option>
           </select>
-          <input id="plan-exp-amt" type="number" placeholder="金額(円)" style="width:120px;padding:6px;font-size:13px;border:1px solid #ddd;border-radius:6px">
+          <input id="plan-exp-amt" type="text" inputmode="numeric" placeholder="金額(円)" style="width:120px;padding:6px;font-size:13px;border:1px solid #ddd;border-radius:6px;text-align:right">
           <input id="plan-exp-memo" type="text" placeholder="メモ(任意)" style="width:150px;padding:6px;font-size:13px;border:1px solid #ddd;border-radius:6px">
           <button class="smd-btn" id="plan-exp-add" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700">＋ 登録</button>
           <span id="plan-exp-stat" class="smd-dim" style="font-size:11px"></span>
@@ -3677,22 +3691,43 @@
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopee escrow を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入値を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>変動費</b>=送料・手数料（入金×率）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−変動費−その他経費−返金。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
       </div>`;
-    const wire = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { cfg[key] = id === 'plan-avg' ? (el.value === '' ? '' : Number(el.value) || 0) : (Number(el.value) || 0); plan.cfg = cfg; planSave(); renderPlan(); }); };
+    const wire = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { cfg[key] = (id === 'plan-avg' && el.value.trim() === '') ? '' : numParse(el.value); plan.cfg = cfg; planSave(); renderPlan(); }); };
     wire('plan-target', 'targetNet'); wire('plan-days', 'workDays'); wire('plan-avg', 'avgProfit'); wire('plan-opexf', 'opexFixed'); wire('plan-opexp', 'opexPct'); wire('plan-tax', 'taxPct');
     { const g = document.getElementById('plan-gotasks'); if (g) g.addEventListener('click', () => showPage('tasks')); }
     { const g = document.getElementById('plan-exp-manage'); if (g) g.addEventListener('click', () => showPage('expenses')); }
     // 月別目標の上書き設定（空で設定＝既定に戻す）
     { const mb = document.getElementById('plan-mt-set'); if (mb) mb.addEventListener('click', () => {
         const ym = (document.getElementById('plan-mt-ym') || {}).value; if (!ym) return;
-        const raw = (document.getElementById('plan-mt-amt') || {}).value;
+        const raw = ((document.getElementById('plan-mt-amt') || {}).value || '').trim();
         if (!cfg.monthTargets) cfg.monthTargets = {};
-        if (raw === '' || raw == null) delete cfg.monthTargets[ym]; else cfg.monthTargets[ym] = Math.round(Number(raw) || 0);
+        if (raw === '') delete cfg.monthTargets[ym]; else cfg.monthTargets[ym] = Math.round(numParse(raw));
         plan.cfg = cfg; planSave(); renderPlan();
+      }); }
+    // 固定費の内訳：項目追加/削除／選択月に一括登録
+    { const fb = document.getElementById('plan-fb-add'); if (fb) fb.addEventListener('click', () => {
+        const name = ((document.getElementById('plan-fb-name') || {}).value || '').trim();
+        const amt = Math.round(numParse((document.getElementById('plan-fb-amt') || {}).value));
+        if (!name || !(amt > 0)) { alert('項目名と金額を入れてください'); return; }
+        if (!Array.isArray(cfg.fixBreak)) cfg.fixBreak = [];
+        cfg.fixBreak.push({ name: name, amount: amt }); plan.cfg = cfg; planSave(); renderPlan();
+      }); }
+    document.querySelectorAll('.plan-fb-del').forEach(el => el.addEventListener('click', () => { const i = +el.dataset.i; if (Array.isArray(cfg.fixBreak)) { cfg.fixBreak.splice(i, 1); plan.cfg = cfg; planSave(); renderPlan(); } }));
+    { const fa = document.getElementById('plan-fb-apply'); if (fa) fa.addEventListener('click', async () => {
+        const ym = (document.getElementById('plan-exp-ym') || {}).value || curYm;
+        const items = Array.isArray(cfg.fixBreak) ? cfg.fixBreak : [];
+        if (!items.length) return;
+        if (!confirm(`固定費の内訳（${items.length}項目・計 ${fmtJpy(fixBreakSum)}）を「${ym}${ym > curYm ? '(予測)' : ''}」の実額として登録します。よろしいですか？`)) return;
+        fa.disabled = true;
+        try {
+          await sbUpsert('expenses', items.map(x => ({ ymd: ym + '-01', category: x.name, amount: Math.round(Number(x.amount) || 0), memo: (ym > curYm ? '予測 ' : '') + '固定費内訳' })));
+          try { logAct('事業計画', '固定費内訳を登録', ym, fixBreakSum + '円'); } catch (_) {}
+          plan._cache = null; await renderPlan(true);
+        } catch (e) { fa.disabled = false; alert('失敗: ' + e.message); }
       }); }
     { const ab = document.getElementById('plan-exp-add'); if (ab) ab.addEventListener('click', async () => {
         const ym = (document.getElementById('plan-exp-ym') || {}).value || curYm;   // 選択した月（将来月=予測入力）
         const cat = (document.getElementById('plan-exp-cat') || {}).value || 'その他';
-        const amt = Math.round(Number((document.getElementById('plan-exp-amt') || {}).value) || 0);
+        const amt = Math.round(numParse((document.getElementById('plan-exp-amt') || {}).value));
         const memo = ((document.getElementById('plan-exp-memo') || {}).value || '').trim();
         const stat = document.getElementById('plan-exp-stat');
         if (!(amt > 0)) { if (stat) { stat.textContent = '金額を入れてください'; stat.style.color = '#d93025'; } return; }
@@ -4489,6 +4524,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '💴 事業計画に「毎月の固定費・経費を登録」を新設＝実利益を正確に：人件費・家賃・ツール等をその月に項目登録すると、実利益＝入金−仕入−固定費−変動費−その他経費 に即反映（登録した実額を優先、未登録の月は見込み額でフォールバック＝切替で過大にならない）。月次履歴の列を 固定費／変動費／その他経費 に分割し「実利益」を明示。必要注文数の逆算は1注文の利益＝既定1200円（梱包資材は別途差引）で計算。',
       '⚠️ アラートに「内訳チップ」＋滞留在庫の対処導線：先頭に各カテゴリ（到着済未反映/発送期日/相手未発送/入庫待ち長期/確証未取得/データ不整合/滞留在庫）の件数チップを追加＝合計◯件の中身が一目で分かり、クリックでその項目へジャンプ。滞留在庫カードに「寝ている仕入額の合計」＋「🏚在庫の死に筋一覧で対処」ボタン（値下げ/損切り判断へ）。',
       '🧹 メニューの重複整理（第3弾）：①「仕入れ先」を左メニューから外し「仕入れ管理」のサブタブ（🔎検索／⏳入庫待ち／🏪仕入れ先）に統合＝仕入ドメインを1か所に。②「為替レート」を左メニューから外し⚙️設定の「💱為替レートを設定」ボタンへ（⌘K検索でも到達可）。③アラート/ダッシュボード「本日のやること」/タスク管理の棲み分けを各pagehelpに明記（自動検知＝アラート／今日の実務＝ダッシュボード／手動の恒久ToDo＝タスク）＋タスクの優先度チップ操作(中→高→低)も明記。左メニュー20→18項目に。',
+      '📋 事業計画：固定費の内訳を登録＋金額を3桁区切りに：①「固定費の内訳（見込み）」に人件費・家賃・ツール等を項目登録すると合計が自動で「固定費（見込み）」になる（内訳から自動）。「↧内訳を選択月に一括登録」でその月の実額固定費としてまとめて計上も可。②目標・固定費・利益・経費などの金額入力を3桁区切り（カンマ）表示に。',
       '📈 事業計画に「税金・月別目標・予測経費」を追加：①<b>税・保険 見込み率</b>を入れると<b>税引後（手取り目安）</b>を逆算カード・今月進捗・月次表に表示（ざっくり目安。正確な税額は税理士へ）。②<b>月別の目標</b>を上書き設定でき（季節変動に対応）、月次表に<b>目標/達成率</b>列を追加。③固定費・経費の登録に<b>月選択</b>を追加し<b>将来月＝予測</b>を先に入力可能（月次表に予測行として反映）。実利益＝入金−仕入−固定費−変動費−その他経費−返金は不変。',
       '🔎 この越境垢で使える公式APIを実測プローブ→ロードマップを正確化：account_health（健全性/ペナルティ）・returns（返品）・comment（レビュー）・discount/voucher（割引/クーポン）・bundle_deal（セット）・sellerchat（チャット）を読み取りで検証した結果、いずれも error_not_found / shop_id invalid / server error で、このCB越境垢（merchant無し）では権限なしと判明。マトリクス/対応表を「➖垢権限なし（実測）」に訂正し、作りかけのaccount_healthパネルは撤去。結論＝中核（注文/商品/出品作成・編集・バリエ・画像/価格在庫/入金）は全てAPI化済で、残せる余地は実質「発送」のみ。',
       '🗺 改修履歴の「成長マトリクス」＆「公式API対応表」を最新化＋拡充：完了分（出品作成/編集・バリエ追加/明細名/画像）をAPI✅に更新し、まだ手を付けていない公式API機能を「🟠API可能・未着手」として明示（返品・返金/注文キャンセル対応/レビュー返信/割引・クーポン/商品ブースト/アカウント健全性・ペナルティ監視/CB国際物流first_mile/チャットsellerchat）。何を伸ばせるか一目で分かるように。',
