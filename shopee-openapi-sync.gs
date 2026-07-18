@@ -972,6 +972,42 @@ function testWalletTxns() {
   Logger.log('※transaction_typeに ADJUSTMENT/COMPENSATION 等、description/reasonにSLS+補償の手掛かりがあるか確認。1件でも取れれば自動検知の目処が立つ。');
 }
 
+// ★SLS+補償の自動検知調査：payout詳細(get_payout_detail)の内訳に補償/調整行があるか。
+// CB口座の入金はwalletでなくpayout/escrow経由なので、まず過去15日のpayoutの全キー＋生JSONをダンプ。
+function testPayoutDump() {
+  var toks = listTokens_();
+  var nowS = now_(), from = nowS - 15 * 86400, to = nowS;
+  Logger.log('認可店: ' + toks.map(function (t) { return (t.cc || '?') + ':' + t.shop_id; }).join(' / '));
+  var adjTotal = 0, byScen = {}, examples = {};
+  toks.forEach(function (t) {
+    try {
+      // 15日窓×6=90日を走査（補償は数ヶ月遅延のため直近だけだと出ない）
+      for (var w = 0; w < 6; w++) {
+        var wto = nowS - w * 15 * 86400, wfrom = wto - 15 * 86400;
+        var j = callShop_(t.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: wfrom, payout_time_to: wto, page_size: 40, page_no: 0 }, 'get');
+        if (j && j.error) break;
+        ((((j.response || {}).payout_list) || [])).forEach(function (p) {
+          (p.offline_adjustment_list || []).forEach(function (a) {
+            adjTotal++;
+            var key = (a.module || '?') + ' ／ ' + (a.scenario || '?'); // 種類の分類軸
+            var b = byScen[key] = byScen[key] || { n: 0, sum: 0, pos: 0 };
+            b.n++; b.sum += (parseFloat(a.adjustment_amount) || 0);
+            if ((parseFloat(a.adjustment_amount) || 0) > 0) b.pos++;
+            if (!examples[key]) examples[key] = JSON.stringify(a).slice(0, 300);
+          });
+        });
+      }
+    } catch (ex) { Logger.log((t.cc || '?') + ' ' + t.shop_id + ' err: ' + String(ex).slice(0, 160)); }
+  });
+  Logger.log('=== offline調整 種類別（module ／ scenario）合計' + adjTotal + '件・90日 ===');
+  Object.keys(byScen).sort(function (a, b) { return byScen[b].n - byScen[a].n; }).forEach(function (k) {
+    var b = byScen[k];
+    Logger.log('  [' + b.n + '件・純額' + Math.round(b.sum) + '・うちプラス' + b.pos + '件] ' + k);
+    Logger.log('      例: ' + examples[k]);
+  });
+  Logger.log('※プラス金額の調整＝入金(補償/返戻)候補。scenario/moduleにSLS/compensation/shipping/insurance系があれば自動検知可。関税(Tax/Duty)はマイナス。');
+}
+
 function getOrderSns_(shopId, timeFrom, timeTo) {
   var sns = [], cursor = '';
   for (var g = 0; g < 50; g++) {
