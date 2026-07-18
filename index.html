@@ -4367,6 +4367,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const byJa = { system: '自動', buyer: '買い手', seller: '自分' }[by] || '';
       return (MAP[txt] || txt) + (byJa ? `・${byJa}` : '');
     };
+    // キャンセルの段階：SLS+半額保証の対象は「日本を出た後」のみ。発送前=損失なし/日本国内=商品戻る(保証外)。
+    const STAGES = ['', '発送前', '日本国内', '日本を出た後'];
+    const inferStage = raw => {
+      const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
+      if (/Unpaid Order/i.test(t)) return '発送前';       // 未払い自動キャンセル=発送前
+      if (/Failed Delivery/i.test(t)) return '日本を出た後'; // 配送失敗=出国後に届かず
+      return '';
+    };
+    const effStage = (o, iss) => (iss.stage || inferStage(o.cancel_reason)); // 手動設定優先、無ければ理由から推定
+    const slsEligible = (o, iss) => effStage(o, iss) === '日本を出た後';     // 半額保証の対象
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
     const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
     const extra = issues.filter(r => !cancelKeys.has(r.cc + ':' + r.sn)).map(r => ({ cc: r.cc, sn: r.sn, buyer: '', status: '手動追加', items: [] }));
@@ -4389,6 +4399,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
         <td style="font-size:11px">${nm(it.name, '260px')}</td>
         <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
+        <td title="SLS+半額保証の対象は『日本を出た後』のみ">${sel('ri-stage', o.cc, o.sn, STAGES, effStage(o, iss))}${!iss.stage && effStage(o, iss) ? '<span title="理由からの推定（確定は選択を）" style="color:#e8710a;font-size:10px">推</span>' : ''}</td>
         <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
@@ -4424,10 +4435,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // SLS+補償 待ちリスト：主眼は「補償に頼らない実質損失の把握」。補償は数ヶ月〜大幅遅延（Shopee公式）のため見込み回収は別枠・不確実扱い。
     const COMP_RATE = 0.5, COMP_OLD_DAYS = 120; // 見込み補償≈返金の50%・120日超は特に遅延
     const compCard = (() => {
-      const withRefund = rows.map(o => ({ o, iss: issueMap.get(o.cc + ':' + o.sn) || {} })).filter(x => (x.iss.refund_jpy || 0) > 0);
+      // SLS+補償の対象は「日本を出た後」の返金のみ（発送前=損失なし/日本国内=商品戻るので保証外）
+      const anyRefund = rows.map(o => ({ o, iss: issueMap.get(o.cc + ':' + o.sn) || {} })).filter(x => (x.iss.refund_jpy || 0) > 0);
+      const withRefund = anyRefund.filter(x => slsEligible(x.o, x.iss));
       const pending = withRefund.filter(x => !(x.iss.comp_amount > 0));
       const received = withRefund.filter(x => x.iss.comp_amount > 0);
-      if (!withRefund.length) return '';
+      if (!anyRefund.length) return '';
+      if (!withRefund.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025;padding:9px 14px;font-size:11.5px">🩹 返金は${anyRefund.length}件ありますが、SLS+保証の対象（「日本を出た後」の返金）はまだ分類されていません。各行の<b>「段階」</b>を「日本を出た後」にすると、ここに保証対象の損失・補償状況が集計されます。</div>`;
       const daysSince = d => d ? Math.floor((Date.now() - new Date(d + 'T00:00:00').getTime()) / 86400000) : null;
       const refundAll = withRefund.reduce((s, x) => s + (x.iss.refund_jpy || 0), 0);
       const recTotal = received.reduce((s, x) => s + (x.iss.comp_amount || 0), 0);
@@ -4451,10 +4465,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <td style="white-space:nowrap"><input class="ri-comp" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" placeholder="受取¥" style="width:80px;padding:2px 4px;font-size:11px"><input class="ri-compdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" title="受取日" style="font-size:11px;padding:2px 4px;margin-left:3px"></td>
         </tr>`;
       }).join('');
-      return `<details class="tool-card" ${pending.length ? 'open' : ''} style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🩹 返金による損失 ＆ SLS+補償の回収状況 <span class="smd-dim" style="font-weight:400;font-size:11px">（補償は数ヶ月〜大幅遅延。頼らず損失を把握）</span></summary>
+      return `<details class="tool-card" ${pending.length ? 'open' : ''} style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🩹 返金による損失 ＆ SLS+補償の回収状況 <span class="smd-dim" style="font-weight:400;font-size:11px">（対象＝「日本を出た後」の返金のみ。補償は数ヶ月〜大幅遅延、頼らず損失を把握）</span></summary>
         <div style="margin-top:8px;font-size:12px">
           <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">
-            <span>返金総額 <b style="color:#d93025">${fmtJpy(refundAll)}</b></span>
+            <span>保証対象の返金 <b style="color:#d93025">${fmtJpy(refundAll)}</b> <span class="smd-dim">(${withRefund.length}件)</span></span>
             <span>受取補償 <b style="color:#188038">${fmtJpy(recTotal)}</b> <span class="smd-dim">(${received.length}件)</span></span>
             <span style="border-left:2px solid #d93025;padding-left:10px">実質損失（現時点） <b style="color:#d93025;font-size:14px">${fmtJpy(netLoss)}</b></span>
             <span class="smd-dim">補償待ちの見込み回収 ≈${fmtJpy(expPending)}（不確実・遅延中）</span>
@@ -4474,14 +4488,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <input type="text" id="ret-sn" placeholder="注文SN" style="padding:5px;font-size:13px;width:180px">
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1140px">` +
-      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th>理由</th><th>返金¥</th><th>返金日</th><th>再出品</th><th>メモ</th></tr>` +
-      (rows.length ? rowHtml : `<tr><td colspan="12" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1220px">` +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th>再出品</th><th>メモ</th></tr>` +
+      (rows.length ? rowHtml : `<tr><td colspan="13" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
       `</table></div></div>` +
       (rows.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - retN}件）</button></div>` : '');
     { const mb = document.getElementById('ret-more'); if (mb) mb.addEventListener('click', () => { renderReturns._showN = retN + 50; renderReturns(); }); }
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
+    body.querySelectorAll('.ri-stage').forEach(el => el.addEventListener('change', async e => { if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, { stage: e.target.value || null })) renderReturns(); }));
     body.querySelectorAll('.ri-restock').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { restock: e.target.value || null })));
     body.querySelectorAll('.ri-reason').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { reason: e.target.value.trim() || null })));
     body.querySelectorAll('.ri-memo').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { memo: e.target.value.trim() || null })));
