@@ -873,11 +873,17 @@ function testEscrowDump() {
   ['TH', 'TW', 'PH', 'BR'].forEach(function (cc) {
     var t = toks.filter(function (x) { return x.cc === cc; })[0];
     if (!t) { Logger.log(cc + ': 認可店なし'); return; }
-    var to = now_(), from = to - 30 * 86400;
-    var j = callShop_(t.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 50, response_optional_fields: 'order_status' }, 'get');
-    var list = ((j.response || {}).order_list) || [];
-    var done = list.filter(function (o) { return o.order_status === 'COMPLETED'; });
-    Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': 完了 ' + done.length + '件 / 直近' + list.length + ' ===');
+    // get_order_listは15日窓まで。直近90日を14日ずつ遡って完了注文を探す
+    var done = [], scanned = 0;
+    for (var w = 0; w < 7 && !done.length; w++) {
+      var to = now_() - w * 14 * 86400, from = to - 14 * 86400;
+      try {
+        var j = callShop_(t.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 50, response_optional_fields: 'order_status' }, 'get');
+        var list = ((j.response || {}).order_list) || []; scanned += list.length;
+        done = list.filter(function (o) { return o.order_status === 'COMPLETED'; });
+      } catch (ex) { Logger.log('  ' + cc + ' 取得err: ' + ex); break; }
+    }
+    Logger.log('=== ' + cc + ' shop ' + t.shop_id + ': 完了 ' + done.length + '件（直近90日を走査' + scanned + '件）===');
     if (!done.length) { Logger.log('  完了注文なし（バケーション明けに再実行）'); return; }
     var sn = done[0].order_sn;
     try { var e = callShop_(t.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: sn }, 'get'); Logger.log(cc + ' ' + sn + ' order_income: ' + JSON.stringify((e.response || {}).order_income)); }
