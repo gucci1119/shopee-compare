@@ -3471,7 +3471,7 @@
   }
   // ---------------- 📈 事業計画（目標逆算 ＋ 月次収支履歴） ----------------
   const plan = { cfg: null };
-  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', monthTargets: {}, fixBreak: [] });
+  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', targetTakeHome: '', costPer: '', cashCycle: 1, monthTargets: {}, fixBreak: [] });
   function planLoadLocal() { try { return JSON.parse(localStorage.getItem('smdPlanCfg') || 'null'); } catch (_) { return null; } }
   async function planSave() {
     const st = document.getElementById('plan-save-stat');
@@ -3554,7 +3554,6 @@
     const workDays = Number(cfg.workDays) || 24;
     // 月別目標：その月の上書きがあればそれ、無ければ既定(targetNet)。逆算・進捗は当月の目標を使う
     const targetOf = ym => { const mt = cfg.monthTargets && cfg.monthTargets[ym]; return (mt != null && mt !== '') ? Number(mt) || 0 : (Number(cfg.targetNet) || 0); };
-    const targetNet = targetOf(curYm);
     const numFmt = n => (n === '' || n == null || isNaN(Number(n))) ? '' : Number(n).toLocaleString('en-US');   // 3桁区切り表示
     const numParse = v => { const n = Number(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? 0 : n; }; // カンマ等を除いて数値化
     const fixBreak = Array.isArray(cfg.fixBreak) ? cfg.fixBreak : [];                 // 固定費内訳［{name,amount,freq,cat,memo}］
@@ -3565,6 +3564,9 @@
     const opexPct = (cfg.opexPct === '' || cfg.opexPct == null) ? 0 : (Number(cfg.opexPct) || 0);
     const taxPct = (cfg.taxPct === '' || cfg.taxPct == null) ? 0 : (Number(cfg.taxPct) || 0);
     const afterTax = v => (v > 0 ? Math.round(v * (1 - taxPct / 100)) : v); // 税引後（黒字にのみ課税・赤字はそのまま）
+    // 手取りから逆算：稼ぎたい手取り(月)があれば税で割り戻して営業利益に。無ければ営業利益目標をそのまま。
+    const takeHomeTarget = (cfg.targetTakeHome !== '' && Number(cfg.targetTakeHome) > 0) ? Number(cfg.targetTakeHome) : null;
+    const targetNet = takeHomeTarget != null ? Math.round(takeHomeTarget / (1 - taxPct / 100)) : targetOf(curYm);
     // 入金データの被覆率（gn/n）が低い月は粗利が過少＝実利益が信用できない → 「—」扱い
     const reli = r => r.gn > 0 && r.gn >= r.n * 0.4;
     // 固定費：実額登録(人件費・家賃・ツール等)があればそれを、無ければ見込み(opexFixed)をフォールバック＝切替時に過大にならない
@@ -3589,6 +3591,12 @@
     const vatRefund = (cfg.vatRefund !== '' && cfg.vatRefund != null && !isNaN(Number(cfg.vatRefund))) ? Number(cfg.vatRefund) : vatAuto;
     const takeHome = afterTax(targetNet);           // 税・保険後（還付なし）
     const takeHomeVat = takeHome + vatRefund;        // 消費税還付込み
+    // 運転資金＆キャッシュ推移：月の仕入×回収サイクル。仕入/件は実績→手入力上書き。回収サイクルは仕入払い→入金までの月数。
+    const costPerPlan = (cfg.costPer !== '' && Number(cfg.costPer) > 0) ? Number(cfg.costPer) : Math.round(costPerOrder);
+    const cashCycle = (cfg.cashCycle !== '' && Number(cfg.cashCycle) > 0) ? Number(cfg.cashCycle) : 1;
+    const monthlyCost = Math.round(needOrders * costPerPlan);   // 目標達成に要る月の仕入
+    const workingCapital = Math.round(monthlyCost * cashCycle); // 運転資金の目安（常に回し続ける現金）
+    const monthCash = takeHome;                                 // 毎月増えるキャッシュ（手取り・還付は別枠で年数回）
     const curOp = opProfitOf(curRow) || 0;
     // 今月ペース
     const now = new Date(Date.now() + 9 * 3600000);
@@ -3619,7 +3627,8 @@
       `<div class="tool-card" style="margin:0 0 12px;max-width:none;background:#f7fbff;border:1px solid #d6e4f5">
         <div style="font-weight:700;font-size:15px;margin-bottom:8px">🎯 目標＆逆算</div>
         <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end">
-          <label style="font-size:12px" title="税引前の営業利益の目標。ここで単純に目安を立てる（月別の実績管理は利益管理ページで）">月の目標<b>営業利益</b> <span class="smd-dim">税引前</span><br><input id="plan-target" type="text" inputmode="numeric" value="${numFmt(cfg.targetNet)}" style="width:120px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円</label>
+          <label style="font-size:12px" title="税引前の営業利益の目標。右の「稼ぎたい手取り」を入れるとそちら優先で税から割り戻します">月の目標<b>営業利益</b> <span class="smd-dim">税引前</span><br><input id="plan-target" type="text" inputmode="numeric" value="${numFmt(cfg.targetNet)}" ${takeHomeTarget != null ? 'readonly title="手取り目標から自動計算中"' : ''} style="width:120px;padding:5px;font-size:14px;margin-top:2px;text-align:right${takeHomeTarget != null ? ';background:#f1f1f1;color:#555' : ''}"> 円</label>
+          <label style="font-size:12px" title="この額を手元に残したい（税引後の手取り）。入れると税で割り戻して営業利益→必要注文数を逆算します。空欄なら左の営業利益目標を使用">稼ぎたい<b>手取り</b>(月) <span class="smd-dim">税引後</span><br><input id="plan-th" type="text" inputmode="numeric" value="${cfg.targetTakeHome === '' || cfg.targetTakeHome == null ? '' : numFmt(cfg.targetTakeHome)}" placeholder="例:480,000" style="width:110px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円</label>
           <label style="font-size:12px">月の<b>稼働日数</b><br><input id="plan-days" type="number" value="${workDays}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> 日</label>
           <label style="font-size:12px" title="必要注文数の逆算に使う固定費の見込み。実利益は下で登録した実額を優先します">月の<b>固定費（見込み）</b> <span class="smd-dim">${fixBreak.length ? '内訳から自動' : '逆算用'}</span><br><input id="plan-opexf" type="text" inputmode="numeric" value="${numFmt(opexFixed)}"${fixBreak.length ? ' readonly title="下の「固定費の内訳」から自動計算（内訳を空にすると手入力に戻ります）"' : ''} style="width:110px;padding:5px;font-size:14px;margin-top:2px;text-align:right${fixBreak.length ? ';background:#f1f1f1;color:#555' : ''}"> 円</label>
           <label style="font-size:12px" title="送料・各種手数料など、売上に比例する費用の率">月の<b>変動費率</b> <span class="smd-dim">送料・手数料</span><br><input id="plan-opexp" type="number" step="0.1" value="${opexPct}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> %</label>
@@ -3676,7 +3685,20 @@
             ${taxPct > 0 ? `<div>　− 税・保険 ${taxPct}%　＝ とられる税金 <b style="color:#d93025;font-size:14px">${fmtJpy(targetNet - takeHome)}</b> <span class="smd-dim">/月（年 約${fmtJpy((targetNet - takeHome) * 12)}）</span></div>` : '<div class="smd-dim">　− 税・保険（率0%＝未設定。上の「税・保険 見込み率」を入れると税額が出ます）</div>'}
             <div>　＝ <b style="color:#7b52c4;font-size:14px">手取り ${fmtJpy(takeHome)}</b></div>
             ${vatRefund > 0 ? `<div style="color:#1a7f37">　＋ 消費税還付 ${fmtJpy(vatRefund)}${cfg.vatRefund === '' || cfg.vatRefund == null ? '<span class="smd-dim">(自動推定)</span>' : ''}　＝ <b style="color:#1a7f37;font-size:14px">手取り（還付込み） ${fmtJpy(takeHomeVat)}</b></div>` : ''}
-          </div>` : '<div class="smd-dim" style="font-size:13px">上の「月の目標<b>営業利益</b>」を入力すると、必要な注文数を逆算します。</div>'}
+          </div>
+          <div style="margin-top:10px;background:#fff;border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.85">
+            <div style="font-weight:700;color:#555;margin-bottom:3px">🏦 資金の目安（この規模で回すと）</div>
+            <div style="display:flex;flex-wrap:wrap;gap:3px 14px;align-items:center">
+              <span>月の仕入 ≈ ${numFmt(needOrders)}件 × 仕入/件 <input id="plan-costper" type="text" inputmode="numeric" value="${cfg.costPer === '' || cfg.costPer == null ? '' : numFmt(cfg.costPer)}" placeholder="実績 ${numFmt(Math.round(costPerOrder))}" style="width:78px;padding:2px 5px;text-align:right;font-size:12px"> 円 ＝ <b>${fmtJpy(monthlyCost)}</b></span>
+              <span>回収サイクル <input id="plan-cycle" type="text" inputmode="decimal" value="${cfg.cashCycle === '' || cfg.cashCycle == null ? '' : cfg.cashCycle}" placeholder="1" style="width:44px;padding:2px 5px;text-align:right;font-size:12px"> ヶ月 <span class="smd-dim">（仕入払い→入金）</span></span>
+            </div>
+            <div style="margin-top:5px">→ 必要な<b>運転資金</b> ≈ <b style="color:#d93025;font-size:16px">${fmtJpy(workingCapital)}</b> <span class="smd-dim">＝ 月の仕入 ${fmtJpy(monthlyCost)} × ${cashCycle}ヶ月。常にこれだけ現金を回し続ける必要</span></div>
+            <div style="font-weight:700;color:#555;margin:8px 0 2px">📈 キャッシュ推移（毎月この目標を達成した場合・手取りの累積）</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${[1, 3, 6, 12].map(m => `<span style="background:#f3fbf5;border:1px solid #bfe6c9;border-radius:10px;padding:2px 11px">+${m}ヶ月 <b style="color:#1a7f37">${fmtJpy(monthCash * m)}</b></span>`).join('')}
+            </div>
+            <div class="smd-dim" style="font-size:10.5px;margin-top:4px">※キャッシュ推移は手取り(税引後)の累積。消費税還付は別枠で年数回入りさらに増えます。運転資金は目安（回収サイクルとBR比率で変動。BR以外2週〜1ヶ月・BRは1.5ヶ月）。</div>
+          </div>` : '<div class="smd-dim" style="font-size:13px">上の「月の目標<b>営業利益</b>」（または「稼ぎたい手取り」）を入力すると、必要な注文数・資金を逆算します。</div>'}
         </div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">⚠️ 税・保険 見込み率は<b>ざっくりの目安</b>です（所得税/住民税/事業税/社会保険や消費税の還付は事業形態で大きく変わります）。正確な税額は<b>税理士に確認</b>してください。</div>
       </div>` +
@@ -3730,6 +3752,8 @@
       </div>`;
     const wire = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { cfg[key] = ((id === 'plan-avg' || id === 'plan-vat') && el.value.trim() === '') ? '' : numParse(el.value); plan.cfg = cfg; planSave(); renderPlan(); }); };
     wire('plan-target', 'targetNet'); wire('plan-days', 'workDays'); wire('plan-avg', 'avgProfit'); wire('plan-opexf', 'opexFixed'); wire('plan-opexp', 'opexPct'); wire('plan-tax', 'taxPct'); wire('plan-vat', 'vatRefund');
+    // 手取り目標・仕入/件・回収サイクル（空欄OK）
+    ['plan-th', 'plan-costper', 'plan-cycle'].forEach(id => { const el = document.getElementById(id); if (!el) return; const key = id === 'plan-th' ? 'targetTakeHome' : id === 'plan-costper' ? 'costPer' : 'cashCycle'; el.addEventListener('change', () => { cfg[key] = el.value.trim() === '' ? '' : numParse(el.value); plan.cfg = cfg; planSave(); renderPlan(); }); });
     { const g = document.getElementById('plan-gotasks'); if (g) g.addEventListener('click', () => showPage('tasks')); }
     { const g = document.getElementById('plan-exp-manage'); if (g) g.addEventListener('click', () => showPage('expenses')); }
     // 固定費の内訳：項目追加/削除／選択月に一括登録
