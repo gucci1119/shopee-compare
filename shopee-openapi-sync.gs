@@ -1167,15 +1167,38 @@ function finalizedSns_(cc) {
 
 // ================= Payoneer入金(payout) → payouts表（いつ・いくらPayoneerに入るか） =================
 // get_payout_detail の payout_info: {payout_time(Unix), payout_amount(USD等), payout_currency, from_amount(現地), from_currency, pay_service, exchange_rate}
+// ＋ offline_adjustment_list（補償/関税など注文別調整）→ order_adjustments表
+// 調整の分類：プラス金額=補償/返戻、マイナスで duty/customs/tax=関税、その他=other
+function adjKind_(amount, blob) {
+  if (amount > 0) return 'compensation';
+  if (/duty|customs|tax\b|import/i.test(blob)) return 'duty';
+  return 'other';
+}
+// payout_listから調整行を作る（複数payoutで共有）
+function payoutAdjRows_(list, cc, shopId, nowIso) {
+  var out = [];
+  (list || []).forEach(function (p) {
+    var pt = (p.payout_info || {}).payout_time || 0;
+    (p.offline_adjustment_list || []).forEach(function (a) {
+      var amt = parseFloat(a.adjustment_amount) || 0;
+      var sn = a.order_sn || '';
+      var scen = a.scenario || '', mod = a.module || '';
+      var kind = adjKind_(amt, mod + ' ' + scen);
+      var key = pt + '_' + sn + '_' + Math.round(amt) + '_' + scen.replace(/\W+/g, '').slice(0, 18);
+      out.push({ adj_id: key, cc: cc, shop_id: String(shopId), order_sn: sn, amount: amt, module: mod, scenario: scen, remark: a.remark || null, payout_time: pt, kind: kind, synced_at: nowIso });
+    });
+  });
+  return out;
+}
 function syncPayoutsForShop_(tok) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   // 窓上限15日。過去15日(確定payout)＋未来15日(予約済/見込みpayout=今週来週リリース見込み)の2窓
-  var nowS = now_();
+  var nowS = now_(), nowIso = new Date().toISOString();
   var windows = [
     { from: nowS - 15 * 86400, to: nowS },       // 過去（確定）
     { from: nowS, to: nowS + 15 * 86400 }        // 未来（見込み）
   ];
-  var rows = [], future = 0;
+  var rows = [], adjRows = [], future = 0;
   windows.forEach(function (w) {
     var pageNo = 0;
     for (var g = 0; g < 30; g++) {
@@ -1189,19 +1212,41 @@ function syncPayoutsForShop_(tok) {
           payout_id: String(tok.shop_id) + '_' + info.payout_time, cc: cc, shop_id: String(tok.shop_id),
           payout_time: info.payout_time, payout_amount: parseFloat(info.payout_amount) || null, payout_currency: info.payout_currency || null,
           from_amount: parseFloat(info.from_amount) || null, from_currency: info.from_currency || null,
-          pay_service: info.pay_service || null, order_count: (p.escrow_list || []).length, synced_at: new Date().toISOString()
+          pay_service: info.pay_service || null, order_count: (p.escrow_list || []).length, synced_at: nowIso
         });
       });
+      adjRows = adjRows.concat(payoutAdjRows_(resp.payout_list || [], cc, tok.shop_id, nowIso));
       if (!resp.more) break; pageNo++;
     }
   });
   if (rows.length) sbUpsert_('payouts', rows, 'payout_id');
-  return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, future: future };
+  // order_adjustments列が未作成でも壊れないよう、失敗時はスキップ
+  if (adjRows.length) { try { sbUpsert_('order_adjustments', adjRows, 'adj_id'); } catch (e) { if (!/order_adjustments|relation|does not exist/i.test(String(e))) throw e; } }
+  return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
 }
 function syncPayoutsAll() {
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   Logger.log(JSON.stringify(log, null, 1)); return log;
+}
+// ★履歴の補償/関税を一括取込（過去180日を15日窓で走査）。初回に1度手動実行。要 order_adjustments 表。
+function backfillAdjustments() {
+  var toks = listTokens_(), nowS = now_(), nowIso = new Date().toISOString(), total = 0, log = [];
+  toks.forEach(function (tok) {
+    var cc = tok.cc || '?', got = 0;
+    try {
+      for (var wk = 0; wk < 12; wk++) { // 12×15日=180日
+        var to = nowS - wk * 15 * 86400, from = to - 15 * 86400;
+        var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: from, payout_time_to: to, page_size: 40, page_no: 0 }, 'get');
+        if (j && j.error) break;
+        var adj = payoutAdjRows_((j.response || {}).payout_list || [], cc, tok.shop_id, nowIso);
+        if (adj.length) { sbUpsert_('order_adjustments', adj, 'adj_id'); got += adj.length; }
+      }
+    } catch (e) { log.push(cc + ' ' + tok.shop_id + ' err: ' + String(e).slice(0, 120)); }
+    total += got; if (got) log.push(cc + ' ' + tok.shop_id + ': ' + got + '件');
+  });
+  log.push('=== 合計 ' + total + '件 取込 ===');
+  Logger.log(log.join('\n')); return total;
 }
 
 function sbSelect_(table, query) {
