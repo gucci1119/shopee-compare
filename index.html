@@ -3471,7 +3471,7 @@
   }
   // ---------------- 📈 事業計画（目標逆算 ＋ 月次収支履歴） ----------------
   const plan = { cfg: null };
-  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', monthTargets: {}, fixBreak: [] });
+  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: '', opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', ovPrice: '', ovFeePct: '', ovCostPer: '', monthTargets: {}, fixBreak: [] });
   function planLoadLocal() { try { return JSON.parse(localStorage.getItem('smdPlanCfg') || 'null'); } catch (_) { return null; } }
   async function planSave() {
     const st = document.getElementById('plan-save-stat');
@@ -3574,9 +3574,21 @@
     const opexOf = r => reli(r) ? Math.round(effFixedOf(r) + varOf(r)) : 0; // 運営費＝固定費＋変動費
     // 実利益（営業利益）＝ 粗利 − 固定費 − 変動費 − その他経費 − 返金
     const opProfitOf = r => reli(r) ? Math.round(r.gross - effFixedOf(r) - varOf(r) - r.other - (r.refund || 0)) : null;
-    // 1注文の平均利益：設定（既定1200円）。空欄なら実績から自動（無ければ1200）
-    const autoContrib = Math.round(autoAvgGross - avgDep * opexPct / 100);
-    const contrib = (cfg.avgProfit !== '' && Number(cfg.avgProfit) > 0) ? Number(cfg.avgProfit) : (autoContrib > 0 ? autoContrib : 1200);
+    // ===== 1件あたりの採算（論理モデル）：単価→手数料→入金→仕入→粗利→変動費→貢献利益。各値は実績から自動、手入力で上書き可 =====
+    const ovNum = k => (cfg[k] !== '' && cfg[k] != null && !isNaN(Number(cfg[k]))) ? Number(cfg[k]) : null;
+    const feePctAuto = avgPrice > 0 ? Math.round((avgPrice - avgDep) / avgPrice * 1000) / 10 : 0; // Shopee実効手数料率＝(GMV−入金)/GMV
+    const pricePer = ovNum('ovPrice') != null ? ovNum('ovPrice') : avgPrice;             // 売上単価/件(GMV)
+    const feePct = ovNum('ovFeePct') != null ? ovNum('ovFeePct') : feePctAuto;           // Shopee手数料率
+    const depPer = Math.round(pricePer * (1 - feePct / 100));                             // 入金/件(手数料引き後)
+    const costPerAuto = Math.max(0, Math.round(avgDep - autoAvgGross));                   // 仕入/件(実績＝入金−粗利)
+    const costPer = ovNum('ovCostPer') != null ? ovNum('ovCostPer') : costPerAuto;        // 仕入/件
+    const grossPer = depPer - costPer;                                                    // 粗利/件
+    const varPer = Math.round(depPer * opexPct / 100);                                    // 変動費/件(国内送料・梱包＝入金×変動費率)
+    const contribCalc = grossPer - varPer;                                                // 1件の貢献利益(＝逆算の分母)
+    const autoContrib = Math.round(autoAvgGross - avgDep * opexPct / 100);                // 旧・実績ベース（フォールバック用）
+    // 1件利益：avgProfit手入力を最優先→無ければ採算モデルの貢献利益→無ければ実績→1200
+    const contrib = (cfg.avgProfit !== '' && Number(cfg.avgProfit) > 0) ? Number(cfg.avgProfit) : (contribCalc > 0 ? contribCalc : (autoContrib > 0 ? autoContrib : 1200));
+    const contribIsModel = !(cfg.avgProfit !== '' && Number(cfg.avgProfit) > 0) && contribCalc > 0; // 採算モデル由来か（手入力上書きでない）
     // 必要注文＝(目標＋今月の固定費)/1件利益。固定費は当月の実額登録があればそれ、無ければ見込み
     const planFixed = (EF[curYm] > 0 ? EF[curYm] : opexFixed);
     const needOrders = contrib > 0 ? Math.ceil((targetNet + planFixed) / contrib) : 0;
@@ -3626,7 +3638,7 @@
           <label style="font-size:12px" title="送料・各種手数料など、売上に比例する費用の率">月の<b>変動費率</b> <span class="smd-dim">送料・手数料</span><br><input id="plan-opexp" type="number" step="0.1" value="${opexPct}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> %</label>
           <label style="font-size:12px" title="所得税・住民税・事業税・社会保険料などの実効率。税引後(手取り)の目安に使います。正確な率は税理士に確認を">税・保険 <b>見込み率</b> <span class="smd-dim">税引後の目安</span><br><input id="plan-tax" type="number" step="0.1" value="${cfg.taxPct}" style="width:64px;padding:5px;font-size:14px;margin-top:2px"> %</label>
           <label style="font-size:12px" title="輸出は消費税免税。国内仕入・経費で払った消費税(税込の10/110)が還付される見込み額（月）。空欄なら仕入から自動推定。実際の還付額に合わせて上書きを">消費税<b>還付</b>(月) <span class="smd-dim">輸出免税の戻り</span><br><input id="plan-vat" type="text" inputmode="numeric" value="${cfg.vatRefund === '' || cfg.vatRefund == null ? '' : numFmt(cfg.vatRefund)}" placeholder="自動:${numFmt(vatAuto)}" style="width:100px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円</label>
-          <label style="font-size:12px">1注文の<b>利益</b> <span class="smd-dim">既定1,200</span><br><input id="plan-avg" type="text" inputmode="numeric" value="${cfg.avgProfit === '' || cfg.avgProfit == null ? '' : numFmt(cfg.avgProfit)}" placeholder="自動:${numFmt(autoContrib || 1200)}" style="width:96px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円<br><span class="smd-dim" style="font-size:10px">梱包資材は別途差引</span></label>
+          <label style="font-size:12px" title="空欄推奨。空欄だと下の「採算」から自動計算。ここに数字を入れると採算を無視してこの額で逆算します">1注文の<b>利益</b> <span class="smd-dim">空欄=採算から自動</span><br><input id="plan-avg" type="text" inputmode="numeric" value="${cfg.avgProfit === '' || cfg.avgProfit == null ? '' : numFmt(cfg.avgProfit)}" placeholder="自動:${numFmt(contribCalc > 0 ? contribCalc : (autoContrib || 1200))}" style="width:96px;padding:5px;font-size:14px;margin-top:2px;text-align:right"> 円<br><span class="smd-dim" style="font-size:10px">下の採算①で自動算出</span></label>
           <span id="plan-save-stat" class="smd-dim" style="font-size:11px"></span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed #d6e4f5">
@@ -3666,12 +3678,22 @@
             <span style="font-size:16px;font-weight:800;color:#ee4d2d">件</span>
             <span class="smd-dim" style="font-size:12px">（稼働${workDays}日）</span>
           </div>
+          <div style="margin-top:10px;background:#fff;border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.95">
+            <div style="font-weight:700;color:#555;margin-bottom:2px">🧮 ①「1件の利益」の内訳（採算）<span class="smd-dim" style="font-weight:400">— 空欄＝直近実績から自動／数字を入れると上書き（別の商材で試算可）</span></div>
+            <div>売上単価(GMV/件)　<input class="plan-ov" data-k="ovPrice" type="text" inputmode="numeric" value="${cfg.ovPrice === '' || cfg.ovPrice == null ? '' : numFmt(cfg.ovPrice)}" placeholder="実績 ${numFmt(avgPrice)}" style="width:80px;padding:2px 5px;text-align:right;font-size:12px"> 円</div>
+            <div style="color:#c47">　− Shopee手数料　<input class="plan-ov" data-k="ovFeePct" type="text" inputmode="decimal" value="${cfg.ovFeePct === '' || cfg.ovFeePct == null ? '' : cfg.ovFeePct}" placeholder="実績 ${feePctAuto}" style="width:54px;padding:2px 5px;text-align:right;font-size:12px"> %　→ −${fmtJpy(pricePer - depPer)}</div>
+            <div>　＝ 入金/件　<b>${fmtJpy(depPer)}</b> <span class="smd-dim">（Shopee手数料引き後＝escrow）</span></div>
+            <div style="color:#c47">　− 仕入/件　<input class="plan-ov" data-k="ovCostPer" type="text" inputmode="numeric" value="${cfg.ovCostPer === '' || cfg.ovCostPer == null ? '' : numFmt(cfg.ovCostPer)}" placeholder="実績 ${numFmt(costPerAuto)}" style="width:80px;padding:2px 5px;text-align:right;font-size:12px"> 円</div>
+            <div>　＝ 粗利/件　<b>${fmtJpy(grossPer)}</b></div>
+            <div style="color:#c47">　− 変動費(送料・梱包) ${opexPct}%　→ −${fmtJpy(varPer)} <span class="smd-dim">（上の「変動費率」で調整）</span></div>
+            <div style="border-top:1px dashed #e0e0e0;margin-top:3px;padding-top:3px">　＝ <b style="color:#1a73e8;font-size:15px">1件の利益 ${fmtJpy(contribCalc > 0 ? contribCalc : contrib)}</b>${contribIsModel ? ' <span class="smd-dim">(この採算から自動)</span>' : (cfg.avgProfit !== '' && Number(cfg.avgProfit) > 0 ? ` <span style="color:#e8710a">※逆算は上の「1注文の利益」手入力 ${fmtJpy(contrib)} を使用中</span>` : (contribCalc <= 0 ? ' <span style="color:#e8710a">※実績データ待ち→既定¥1,200で計算中</span>' : ''))}</div>
+          </div>
           <div style="margin-top:10px;background:#fff;border-radius:8px;padding:9px 12px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center;line-height:1.9">
-            <span class="smd-dim" style="font-weight:700">逆算式</span>
+            <span class="smd-dim" style="font-weight:700">② 逆算式</span>
             <span>目標利益 <b>${fmtJpy(targetNet)}</b></span><span style="color:#aaa">＋</span>
             <span title="当月の固定費（実額登録があればその実額、無ければ見込み）">固定費 <b>${fmtJpy(planFixed)}</b>${EF[curYm] > 0 ? '' : '<span style="color:#e8710a">*</span>'}</span><span style="color:#aaa">＝</span>
             <span>まず稼ぐ利益 <b style="color:#111">${fmtJpy(targetNet + planFixed)}</b></span>
-            <span style="color:#aaa">÷</span><span title="1注文あたりの利益（既定1,200円）">1件の利益 <b>${fmtJpy(contrib)}</b></span>
+            <span style="color:#aaa">÷</span><span title="上の採算で出した1件の利益">1件の利益 <b>${fmtJpy(contrib)}</b></span>
             <span style="color:#aaa">＝</span><b style="color:#1a73e8;font-size:15px">${numFmt(needOrders)}件</b>
             ${EF[curYm] > 0 ? '' : '<span class="smd-dim" style="font-size:10.5px;width:100%">＊固定費は見込み額。今月の実額を「毎月の固定費・経費を登録」で入れると逆算も実額基準になります。</span>'}
           </div>
@@ -3738,6 +3760,8 @@
       </div>`;
     const wire = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { cfg[key] = ((id === 'plan-avg' || id === 'plan-vat') && el.value.trim() === '') ? '' : numParse(el.value); plan.cfg = cfg; planSave(); renderPlan(); }); };
     wire('plan-target', 'targetNet'); wire('plan-days', 'workDays'); wire('plan-avg', 'avgProfit'); wire('plan-opexf', 'opexFixed'); wire('plan-opexp', 'opexPct'); wire('plan-tax', 'taxPct'); wire('plan-vat', 'vatRefund');
+    // 採算の上書き入力（売上単価・手数料率・仕入/件）。空欄なら実績から自動
+    body.querySelectorAll('.plan-ov').forEach(el => el.addEventListener('change', () => { const k = el.dataset.k; cfg[k] = el.value.trim() === '' ? '' : numParse(el.value); plan.cfg = cfg; planSave(); renderPlan(); }));
     { const g = document.getElementById('plan-gotasks'); if (g) g.addEventListener('click', () => showPage('tasks')); }
     { const g = document.getElementById('plan-exp-manage'); if (g) g.addEventListener('click', () => showPage('expenses')); }
     // 月別目標の上書き設定（空で設定＝既定に戻す）
