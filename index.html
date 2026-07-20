@@ -4411,13 +4411,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderReturns() {
     const body = document.getElementById('ret-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
-    let cancelled, issues;
+    let cancelled, issues, adjustments;
     try {
-      [cancelled, issues] = await Promise.all([
+      [cancelled, issues, adjustments] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
         sbGetAll('order_issues', 'select=*'),
+        sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').catch(() => []),
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
+    // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
+    const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 1);
+    const adjComp = new Map();   // cc:sn → 補償合計(円)
+    const adjByCc = {};          // cc → { comp, duty }（円）
+    (adjustments || []).forEach(a => {
+      const jpy = Math.round((Number(a.amount) || 0) * adjRate(a.cc));
+      if (a.kind === 'compensation' && a.order_sn) adjComp.set(a.cc + ':' + a.order_sn, (adjComp.get(a.cc + ':' + a.order_sn) || 0) + jpy);
+      const b = adjByCc[a.cc] = adjByCc[a.cc] || { comp: 0, duty: 0 };
+      if (a.kind === 'compensation') b.comp += jpy; else if (a.kind === 'duty') b.duty += jpy;
+    });
+    const compAutoTotal = Object.values(adjByCc).reduce((s, b) => s + b.comp, 0);
+    const dutyTotal = Object.values(adjByCc).reduce((s, b) => s + b.duty, 0);
     // Shopee注文APIのキャンセル理由(英語)→日本語。末尾の [system]/[buyer]/[seller] は誰がの表示に。
     const cancelReasonJa = raw => {
       if (!raw) return '';
@@ -4498,13 +4511,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // SLS+補償の対象は「日本を出た後」の返金のみ（発送前=損失なし/日本国内=商品戻るので保証外）
       const anyRefund = rows.map(o => ({ o, iss: issueMap.get(o.cc + ':' + o.sn) || {} })).filter(x => (x.iss.refund_jpy || 0) > 0);
       const withRefund = anyRefund.filter(x => slsEligible(x.o, x.iss));
-      const pending = withRefund.filter(x => !(x.iss.comp_amount > 0));
-      const received = withRefund.filter(x => x.iss.comp_amount > 0);
+      // 受取補償：手動記入(comp_amount)優先→無ければpayoutから自動検知(adjComp)
+      const effComp = (o, iss) => (iss.comp_amount > 0 ? iss.comp_amount : (adjComp.get(o.cc + ':' + o.sn) || 0));
+      const isAutoComp = (o, iss) => !(iss.comp_amount > 0) && (adjComp.get(o.cc + ':' + o.sn) || 0) > 0;
+      const pending = withRefund.filter(x => !(effComp(x.o, x.iss) > 0));
+      const received = withRefund.filter(x => effComp(x.o, x.iss) > 0);
       if (!anyRefund.length) return '';
       if (!withRefund.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025;padding:9px 14px;font-size:11.5px">🩹 返金は${anyRefund.length}件ありますが、SLS+保証の対象（「日本を出た後」の返金）はまだ分類されていません。各行の<b>「段階」</b>を「日本を出た後」にすると、ここに保証対象の損失・補償状況が集計されます。</div>`;
       const daysSince = d => d ? Math.floor((Date.now() - new Date(d + 'T00:00:00').getTime()) / 86400000) : null;
       const refundAll = withRefund.reduce((s, x) => s + (x.iss.refund_jpy || 0), 0);
-      const recTotal = received.reduce((s, x) => s + (x.iss.comp_amount || 0), 0);
+      const recTotal = received.reduce((s, x) => s + effComp(x.o, x.iss), 0);
+      const autoRecCount = received.filter(x => isAutoComp(x.o, x.iss)).length;
       const netLoss = refundAll - recTotal;              // 補償に頼らない現時点の実質損失
       const expPending = pending.reduce((s, x) => s + Math.round((x.iss.refund_jpy || 0) * COMP_RATE), 0); // 不確実な見込み回収
       const old = pending.filter(x => { const dd = daysSince(x.iss.refund_date); return dd != null && dd > COMP_OLD_DAYS; });
@@ -4529,7 +4546,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="margin-top:8px;font-size:12px">
           <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">
             <span>保証対象の返金 <b style="color:#d93025">${fmtJpy(refundAll)}</b> <span class="smd-dim">(${withRefund.length}件)</span></span>
-            <span>受取補償 <b style="color:#188038">${fmtJpy(recTotal)}</b> <span class="smd-dim">(${received.length}件)</span></span>
+            <span>受取補償 <b style="color:#188038">${fmtJpy(recTotal)}</b> <span class="smd-dim">(${received.length}件${autoRecCount ? '・うち自動検知' + autoRecCount : ''})</span></span>
             <span style="border-left:2px solid #d93025;padding-left:10px">実質損失（現時点） <b style="color:#d93025;font-size:14px">${fmtJpy(netLoss)}</b></span>
             <span class="smd-dim">補償待ちの見込み回収 ≈${fmtJpy(expPending)}（不確実・遅延中）</span>
           </div>
@@ -4538,10 +4555,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>実質損失＝返金総額−受取補償</b>（＝補償に頼らない“今の痛み”）。見込み回収(≈${COMP_RATE * 100}%)は<b>当てにしない前提</b>でキャッシュ計画を。実際に補償が入ったら「受取¥」に実額を記入→リストから外れ実質損失が減ります。</div>
         </div></details>`;
     })();
+    // 🧾 payout明細の調整（補償・関税）＝自動取得サマリー（order_adjustments）
+    const adjCard = (() => {
+      if (!(adjustments || []).length) return '';
+      const ccs = Object.keys(adjByCc).sort((a, b) => (adjByCc[b].comp + Math.abs(adjByCc[b].duty)) - (adjByCc[a].comp + Math.abs(adjByCc[a].duty)));
+      const chip = (cc, b) => `<span style="display:inline-flex;gap:6px;align-items:center;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${cc}</b>${b.comp ? `<span style="color:#188038">補償+${fmtJpy(b.comp)}</span>` : ''}${b.duty ? `<span style="color:#d93025">関税${fmtJpy(b.duty)}</span>` : ''}</span>`;
+      return `<details class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🧾 payout明細の調整（補償・関税）<span class="smd-dim" style="font-weight:400;font-size:11px">— Shopee入金明細から自動取得（注文別）</span></summary>
+        <div style="margin-top:8px;font-size:12px">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
+            <span>補償・返戻（入金） 計 <b style="color:#188038">+${fmtJpy(compAutoTotal)}</b></span>
+            <span>関税・輸入税（控除） 計 <b style="color:#d93025">${fmtJpy(dutyTotal)}</b> <span class="smd-dim">← 実コスト</span></span>
+          </div>
+          <div style="margin-bottom:4px">${ccs.map(cc => chip(cc, adjByCc[cc])).join('') || '<span class="smd-dim">—</span>'}</div>
+          <div class="smd-dim" style="font-size:10.5px;margin-top:4px">💡 補償（プラス）は上の「SLS+補償」に自動反映（受取補償に計上）。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
+        </div></details>`;
+    })();
     body.innerHTML =
       `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル注文 ${cancelled.length}件 ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>` +
       analysisCard +
       compCard +
+      adjCard +
       `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
         <select id="ret-cc" style="padding:5px;font-size:13px">${ccOpts}</select>
