@@ -387,7 +387,7 @@
 
   <!-- ダッシュボード -->
   <div id="page-dash" style="display:none">
-    <div class="smd-pagehead">🏠 ダッシュボード <span class="smd-dim" id="dash-sync" style="font-weight:400;font-size:12px"></span><button id="vac-toggle" class="smd-btn" style="float:right;font-size:11px;padding:3px 12px" title="休暇・出品停止中はONに。売上0や失速の警告を「想定内」に切り替え、ポータルにバケーション表示を出します">🏖 バケーション</button></div>
+    <div class="smd-pagehead">🏠 ダッシュボード <span class="smd-dim" id="dash-sync" style="font-weight:400;font-size:12px"></span><button id="vac-toggle" class="smd-btn" style="float:right;font-size:11px;padding:3px 12px" title="休暇・出品停止中はONに。売上0や失速の警告を「想定内」に切り替え、ポータルにバケーション表示を出します">🏖 バケーション</button><button id="dash-refreshall" class="smd-btn" style="float:right;font-size:11px;padding:3px 12px;margin-right:8px;background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700" title="全ページのデータをまとめて最新化：出品状況をShopeeから取得（ライブPCのみ）＋各ページのキャッシュを破棄して次に開いた時に最新を再取得。注文/入金/売上はGASが自動同期しているので通常は再取得だけでOK。">🔄 まとめて更新</button><span id="dash-refreshall-msg" style="float:right;font-size:11px;margin-right:8px;color:#1a7f37;align-self:center"></span></div>
     <div class="pagehelp" style="margin:8px 20px 0"><b>この画面：今日の売上・未発送・入金予定など、全体の状況をひと目で確認する画面です。</b><span style="color:#5a6b8c;font-size:11.5px">※まずここで全体像を掴む。各カードにカーソルを乗せると意味の説明が出ます。詳しくは各ページへ。</span></div>
     <div id="dash-kpis" style="max-width:1280px"></div>
     <div class="tool-card" style="max-width:1280px"><h3>💸 Payoneerリリース（確定＝実績・見込み＝未リリースescrow）</h3><div id="dash-payout" style="font-size:13px"></div></div>
@@ -1558,6 +1558,27 @@
   { const t = document.getElementById('vac-toggle'); if (t) t.addEventListener('click', () => setVacation(!settings.vacationMode)); }
   { const o = document.getElementById('vac-off'); if (o) o.addEventListener('click', () => setVacation(false)); }
   applyVacationUI();
+  // 🔄 まとめて更新：各ページのキャッシュを破棄（次に開くとSupabaseから最新）＋出品状況をShopeeから取得（ライブPCのみ）＋ダッシュ再描画
+  async function refreshEverything(btn) {
+    const msg = document.getElementById('dash-refreshall-msg');
+    const set = (t, err) => { if (msg) { msg.textContent = t; msg.style.color = err ? '#d93025' : '#1a7f37'; } };
+    if (btn) btn.disabled = true;
+    try {
+      try { renderDash._cache = null; } catch (_) {}
+      try { plan._cache = null; } catch (_) {}
+      try { cust._cache = null; } catch (_) {}
+      try { lst._ledgerRows = null; lst._leakCat = null; lst.covCatData = {}; } catch (_) {}
+      let listNote;
+      if (state.mode === 'live' && settings.sbSecret) { set('🔄 出品状況をShopeeから取得中…（30〜60秒）'); try { await syncListings(); listNote = ' ・出品状況✓'; } catch (e) { listNote = ' ・出品状況✗(' + (e.message || '') + ')'; } }
+      else { listNote = ' ・出品状況はライブPCの📋出品一覧で🔄'; }
+      await renderDash(true);
+      set('✅ 更新（他ページは開くと最新に。注文/入金/売上はGASが自動同期）' + listNote);
+      toast('🔄 まとめて更新しました');
+      setTimeout(() => set(''), 8000);
+    } catch (e) { set('更新エラー: ' + (e.message || e), true); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  { const rb = document.getElementById('dash-refreshall'); if (rb) rb.addEventListener('click', () => refreshEverything(rb)); }
 
   // ---------------- ページ切替 ----------------
   const FIN_GROUP = ['profit', 'expenses']; // 💹損益・入出金 は2ページをタブでまとめる（旧「月次サマリー」は経費タブへ統合）
@@ -4575,10 +4596,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     })();
     // 🧾 payout明細の調整（補償・関税）＝自動取得サマリー（order_adjustments）
     const adjCard = (() => {
-      if (!(adjustments || []).length) return '';
+      if (!(adjustments || []).length) return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><b style="font-size:14px">🧾 補償が入った注文</b><div class="smd-dim" style="font-size:11.5px;margin-top:6px">まだ補償データがありません。補償はShopee入金明細(payout)から自動取得します（GASのpayout同期＋過去分は <code>backfillAdjustments</code> を1回実行）。補償が入るとここに「どの注文にいくら着いたか」が出ます。<br>※order_adjustments テーブル未作成の場合は返品メモリの要SQLを実行してください。</div></div>`;
       const ccs = Object.keys(adjByCc).sort((a, b) => (adjByCc[b].comp + Math.abs(adjByCc[b].duty)) - (adjByCc[a].comp + Math.abs(adjByCc[a].duty)));
       const chip = (cc, b) => `<span style="display:inline-flex;gap:6px;align-items:center;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${cc}</b>${b.comp ? `<span style="color:#188038">補償+${fmtJpy(b.comp)}</span>` : ''}${b.duty ? `<span style="color:#d93025">関税${fmtJpy(b.duty)}</span>` : ''}</span>`;
-      return `<details class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🧾 payout明細の調整（補償・関税）<span class="smd-dim" style="font-weight:400;font-size:11px">— Shopee入金明細から自動取得（注文別）</span></summary>
+      return `<details open class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🧾 補償が入った注文（payout明細から自動取得）<span class="smd-dim" style="font-weight:400;font-size:11px">— どの注文に保証金が着いたか／関税も</span></summary>
         <div style="margin-top:8px;font-size:12px">
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
             <span>補償・返戻（入金） 計 <b style="color:#188038">+${fmtJpy(compAutoTotal)}</b></span>
@@ -4589,7 +4610,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const cl = (adjustments || []).filter(a => a.kind === 'compensation' && a.order_sn).map(a => ({ cc: a.cc, sn: a.order_sn, jpy: Math.round((Number(a.amount) || 0) * adjRate(a.cc)), scen: a.module || a.scenario || '' })).filter(x => x.jpy > 0).sort((x, y) => y.jpy - x.jpy);
         if (!cl.length) return '<div class="smd-dim" style="font-size:11px">補償が入った注文はまだありません（backfillAdjustments実行後に反映）。</div>';
         const scenJa = s => /non-receipt/i.test(s) ? '荷物未着' : /lost|damage/i.test(s) ? '紛失・破損' : /return shipping|reimbursement/i.test(s) ? '返送送料' : (s || '補償');
-        return `<details style="margin-top:6px"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#188038">✅ 補償が入った注文 ${cl.length}件（クリックで一覧）</summary>
+        return `<details open style="margin-top:6px"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#188038">✅ 補償が入った注文 ${cl.length}件（＝保証金が着いた注文。ここに無い注文はまだ未着）</summary>
           <div class="pf-scroll" style="max-height:34vh;margin-top:6px"><table class="pf-table" style="min-width:520px;font-size:11px"><tr><th>国</th><th>注文SN</th><th>補償額(円)</th><th>種類</th></tr>
           ${cl.slice(0, 200).map(x => `<tr><td><b style="color:${(regionByCc(x.cc) || {}).color || '#333'}">${esc(x.cc)}</b></td><td style="word-break:break-all">${esc(x.sn)}</td><td style="text-align:right;color:#188038;font-weight:700">+${fmtJpy(x.jpy)}</td><td>${esc(scenJa(x.scen))}</td></tr>`).join('')}</table></div>
           ${cl.length > 200 ? `<div class="smd-dim" style="font-size:10px;margin-top:3px">上位200件を表示（全${cl.length}件）</div>` : ''}</details>`;
@@ -4758,6 +4779,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🔄 <b>ダッシュボードに「まとめて更新」ボタン</b>：各ページを回って🔄を押す手間を解消。1回で<b>出品状況をShopeeから取得（ライブPC）＋各ページのキャッシュ破棄</b>（次に開くとSupabaseから最新）＋ダッシュ再描画。注文/入金/売上はGASが自動同期のため通常は再取得だけでOK。',
+      '💊 <b>返品ページ：補償が入った注文を最初から表示</b>：🧾カードが二重に折りたたまれ見つけにくかったのを、<b>「✅補償が入った注文 N件」を開いた状態</b>に。「ここに無い＝まだ未着」と明記。補償データが無い時も案内カードを表示。',
+      '🏷 <b>子SKUの命名を改善（同語の重複を解消）</b>：<code>THE_LAST_OF_US_PS4_THE_LAST_OF_US_PART</code> のようにバリエ名に商品名が二重に入るのをやめ、<code>THE_LAST_OF_US_PS4_PART_II</code> のように。子SKU整理は<b>未公開の出品も試行</b>（Shopeeが拒否する場合は失敗として表示）。',
+      '📦 <b>Amazon商品ページからの画像取込に対応</b>（前述の改良に加え本記載）。',
       '🗓️ <b>「出品予定」リストを新設</b>（出品ページのサブタブ）：これから出品する商品を<b>商品名・バリエ・仕入元・仕入URL・出品予定国・予定日（いつまでに）・メモ・状態</b>で管理。<b>予定日順に並び期限切れは赤</b>、状態（未着手/準備中/出品済）切替、<b>✍️作成へ</b>で商品名・バリエを「出品を作る」に引き継ぎ。Supabase <code>listing_plan</code> テーブル（初回1回作成）。',
       '📦 <b>Amazon商品の画像取込に対応</b>：仕入元がAmazonの商品ページURLからも主画像を取得（<code>data-old-hires</code>／<code>data-a-dynamic-image</code>／landingImage を優先抽出。og:imageだと主画像が取れないため）。※Amazonの画像URL（media-amazon）は従来どおり直接貼付でOK。ブリッジ稼働時に有効。',
       '🧷 <b>国のヌケに「子SKU整理・国横断アライン」を新設</b>（分析タブ）：カバー画像一致で同一商品をグループ化し、<b>バリエ明細SKU(子SKU)をバリエ間で一意＋同じバリエ名は全国同じSKU</b>に揃える候補を検出。推奨SKU（グループ内の有効SKUの多数決優先・無ければ生成）を提示し、<b>🔍検証（プレビュー）→グループ別/一括で書込</b>（公開中のみ・未公開はスキップ・1件ずつ結果）。親SKU統一の子SKU版。書込はブリッジ。',
