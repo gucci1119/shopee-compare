@@ -8716,7 +8716,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!listState.apiFamByCc) listState.apiFamByCc = {}; // 国別のアカウント上書き（cc→系統）
     // その国のショップが有る系統だけ / 国別上書き→無ければ全体既定→無ければ先頭
     const famsForCc = cc => apiFamilies.filter(f => (state.accounts || []).some(a => a.shop_id && String(a.cc || '').toUpperCase() === cc && famOfLabel(a.label) === f));
-    const effFamOf = cc => { const L = famsForCc(cc); if (!L.length) return ''; const pv = listState.apiFamByCc[cc]; if (pv && L.includes(pv)) return pv; if (apiFam && L.includes(apiFam)) return apiFam; return L[0]; };
+    const SKIP = '__skip__'; // この国は出品しない
+    const effFamOf = cc => { const pv = listState.apiFamByCc[cc]; if (pv === SKIP) return SKIP; const L = famsForCc(cc); if (!L.length) return ''; if (pv && L.includes(pv)) return pv; if (apiFam && L.includes(apiFam)) return apiFam; return L[0]; };
     const apiJobs = {}; // cc → {shop_id,name,desc,price,stock,weight,images,hasVar,varCount,fam}
     out.innerHTML = `<div class="tool-card" style="max-width:none"><h3 id="li-sec5">5. 各国へ転記して出品</h3>` +
       `<div style="border:1px solid #b6e6c9;background:#eafaef;border-radius:8px;padding:9px 11px;margin-bottom:8px;font-size:12px;line-height:1.7">
@@ -8733,7 +8734,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
              ? `<span style="margin-left:8px;font-size:11.5px">出品先アカウント（系統）：<select id="li-apifam" style="padding:2px 6px;border:1px solid #b6e6c9;border-radius:5px;font-size:12px">${apiFamilies.map(f => `<option value="${esc(f)}"${f === apiFam ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select></span>
                 <span style="margin-left:10px;font-size:11.5px">条件：<select id="li-apicond" style="padding:2px 6px;border:1px solid #b6e6c9;border-radius:5px;font-size:12px"><option value="USED"${(listState.apiCondition || 'USED') === 'USED' ? ' selected' : ''}>中古(USED)</option><option value="NEW"${listState.apiCondition === 'NEW' ? ' selected' : ''}>新品(NEW)</option></select></span>
                 <span style="margin-left:10px;font-size:11.5px">作成後：<select id="li-apipub" title="作成した商品を公開するか非公開(下書き)にするか" style="padding:2px 6px;border:1px solid #b6e6c9;border-radius:5px;font-size:12px"><option value="public"${(listState.apiPublish || 'public') === 'public' ? ' selected' : ''}>公開する</option><option value="unlist"${listState.apiPublish === 'unlist' ? ' selected' : ''}>非公開(下書き)</option></select></span>
-                <button id="li-apibulk" class="smd-btn" style="margin-left:10px;font-size:12px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="対象国すべてに公式APIで非公開(UNLIST)一括出品（各国を順に作成）">🚀 全対象国に一括出品</button>
+                <button id="li-apibulk" class="smd-btn" style="margin-left:10px;font-size:12px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="各国カードで選んだアカウントへ公式APIで一括出品。「🚫出品しない」にした国は除外（各国を順に作成）">🚀 選んだ国に一括出品</button>
                 <div class="smd-dim" style="font-size:11px;margin-top:4px">ここは<b>全国の既定アカウント</b>。各国カードで<b>国ごとに別アカウント（系統）へ変更</b>できます（複数系統がある国はカードにプルダウン表示）。<b style="color:#1a7f37">🚀 公式APIで出品</b>（または上の<b>一括</b>）で、その国の選んだショップへ直接作成（ログイン不要・<b>単品もバリエも対応</b>）。<b>作成後の状態は上の「作成後」で公開/非公開を選択</b>。結果は各国カードに ✅/❌ とトーストで表示。</div>`
              : `<span class="smd-dim" style="font-size:11px;margin-left:8px">アカウント登録簿が空です。<b>🔑アカウント</b>で「Shopeeから全ショップ取込」をすると系統が選べます。</span>`}
          </div>
@@ -8831,9 +8832,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const autoUrl = `https://${rg.host}/portal/product/new#smdjob=${jobTok}`;
         autoLinks.push({ cc: rg.cc, url: autoUrl });
         // ★公式API直接出品：この国×選択系統のshop_idを解決してジョブ登録（無ければボタン非表示）
-        const cardFam = effFamOf(rg.cc); // この国の出品先系統（国別上書き優先）
+        const cardFam = effFamOf(rg.cc); // この国の出品先系統（国別上書き優先。SKIP=出品しない）
+        const skip = cardFam === SKIP;
         const cardFams = famsForCc(rg.cc); // この国で選べる系統一覧
-        const apiShopRow = cardFam ? (state.accounts || []).find(a => a.shop_id && String(a.cc || '').toUpperCase() === rg.cc && famOfLabel(a.label) === cardFam) : null;
+        const apiShopRow = (cardFam && !skip) ? (state.accounts || []).find(a => a.shop_id && String(a.cc || '').toUpperCase() === rg.cc && famOfLabel(a.label) === cardFam) : null;
         if (apiShopRow) {
           const p0 = pricedLive[0] || {};
           apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, fam: cardFam, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, hasVar, varCount: pricedLive.length, variations: (job.variations || []).map(v => ({ name: v.name, price: v.price, stock: v.stock, sku: v.sku, image: /^https?:/.test(String(v.image || '')) ? v.image : '' })) };
@@ -8845,13 +8847,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">⠿ ${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
             <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
               <button class="li-ovedit smd-btn" data-cc="${rg.cc}" style="background:#fff7ec;border-color:#e0a44a;color:#b3701a;font-weight:700" title="この国だけ 画像・在庫・カタログ画像・明細の除外(この国では出さない) をまとめて編集。※タイトル/明細名/価格はカード上で直接編集できます">✏️ 画像/在庫/除外</button>
-              ${cardFams.length > 1
-        ? `<select class="li-cardfam" data-cc="${rg.cc}" title="この国の出品先アカウント（系統）を選ぶ" style="padding:3px 6px;border:1px solid #b6e6c9;border-radius:5px;font-size:11.5px;background:#f4fbf6">${cardFams.map(f => `<option value="${esc(f)}"${f === cardFam ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select>`
-        : (cardFams.length === 1 ? `<span class="smd-dim" style="font-size:10.5px" title="出品先アカウント">🏬${esc(cardFam)}</span>` : '')}
-              ${apiUsable
-        ? `<button class="li-apilist smd-btn" data-cc="${rg.cc}" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="${esc(cardFam)} の ${rg.cc} ショップ(shop_id ${apiShopRow.shop_id})へ公式APIで直接作成（ブラウザのShopeeログイン不要）。${hasVar ? '※' + pricedLive.length + 'バリエ付きで作成' : ''}">🚀 公式APIで出品</button>`
-        : `<a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページ→右下パネルの🚀作成で公式API出品（要 shopee-newlisting＋雛形）。${apiShopRow ? '※この商品はアップロード画像(data:)のため🚀直接APIが使えず、こちらを使います' : '※この系統ではAPI直接出品が使えない国'}">▶ 自動で出品</a>${apiShopRow && !apiUsable ? '<span class="smd-dim" style="font-size:10px;color:#e8710a" title="🚀直接APIはhttp(s)画像URLが必要。アップロード/スクショ(data:)画像なので使えません。▶自動で出品ならブラウザ経由でアップロードして出せます">🚀不可(要http画像)</span>' : ''}`}
-              <details class="li-more" style="display:inline-block">
+              ${cardFams.length >= 1
+        ? `<select class="li-cardfam" data-cc="${rg.cc}" title="この国の出品先アカウント（系統）／出品しない を選ぶ" style="padding:3px 6px;border:1px solid ${skip ? '#e0a44a' : '#b6e6c9'};border-radius:5px;font-size:11.5px;background:${skip ? '#fdf3e6' : '#f4fbf6'}">${cardFams.map(f => `<option value="${esc(f)}"${(!skip && f === cardFam) ? ' selected' : ''}>🏬 ${esc(f)}</option>`).join('')}<option value="${SKIP}"${skip ? ' selected' : ''}>🚫 出品しない</option></select>`
+        : `<span class="smd-dim" style="font-size:10.5px" title="この国で出品先アカウントがありません">アカウント未登録</span>`}
+              ${skip
+        ? `<span style="font-size:11px;color:#b3701a;font-weight:700" title="この国は一括出品・個別出品の対象外。上のプルダウンでアカウントを選ぶと対象に戻ります">🚫 出品しない</span>`
+        : (apiUsable
+          ? `<button class="li-apilist smd-btn" data-cc="${rg.cc}" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="${esc(cardFam)} の ${rg.cc} ショップ(shop_id ${apiShopRow.shop_id})へ公式APIで直接作成（ブラウザのShopeeログイン不要）。${hasVar ? '※' + pricedLive.length + 'バリエ付きで作成' : ''}">🚀 公式APIで出品</button>`
+          : `<a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページ→右下パネルの🚀作成で公式API出品（要 shopee-newlisting＋雛形）。${apiShopRow ? '※この商品はアップロード画像(data:)のため🚀直接APIが使えず、こちらを使います' : '※この系統ではAPI直接出品が使えない国'}">▶ 自動で出品</a>${apiShopRow && !apiUsable ? '<span class="smd-dim" style="font-size:10px;color:#e8710a" title="🚀直接APIはhttp(s)画像URLが必要。アップロード/スクショ(data:)画像なので使えません。▶自動で出品ならブラウザ経由でアップロードして出せます">🚀不可(要http画像)</span>' : ''}`)}
+              <details class="li-more" style="display:${skip ? 'none' : 'inline-block'}">
                 <summary class="smd-btn" style="cursor:pointer;list-style:none;user-select:none;font-weight:400;color:#666" title="他の出品方法（フォールバック）">▾ 他の方法</summary>
                 <div style="margin-top:6px;padding:7px 9px;border:1px solid #e3e3e3;border-radius:7px;background:#fafafa;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end">
                   ${apiUsable ? `<a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none" title="新規出品ページ→パネルの🚀作成（userscript経由・要雛形）。押すと台帳に自動記録">▶ 自動で出品（userscript）</a>` : ''}
@@ -8990,6 +8994,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // 🚀 全対象国に一括出品（各国順に作成）
     const apiBulkBtn = document.getElementById('li-apibulk');
+    if (apiBulkBtn) { const tccs = Object.keys(apiJobs); apiBulkBtn.textContent = tccs.length ? `🚀 ${tccs.length}国に一括出品（${tccs.join('/')}）` : '🚀 一括出品（対象なし）'; if (!tccs.length) { apiBulkBtn.style.opacity = '.5'; } }
     if (apiBulkBtn) apiBulkBtn.addEventListener('click', async () => {
       const ccs = Object.keys(apiJobs); if (!ccs.length) { alert('出品先が解決できる対象国がありません（系統セレクタとアカウント登録簿を確認）'); return; }
       if (!(listState.name || '').trim() && !listState.variations.length) { alert('先に商品情報を入力してください'); return; }
