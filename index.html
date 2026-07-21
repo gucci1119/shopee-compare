@@ -4491,6 +4491,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
+        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+補償の受取（payout明細から自動検知／手動記入）">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#1a7f37;font-size:9px">✅自動検知</span>`; return '<span class="smd-dim">—</span>'; })()}</td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
       </tr>`;
@@ -4582,7 +4583,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <span>関税・輸入税（控除） 計 <b style="color:#d93025">${fmtJpy(dutyTotal)}</b> <span class="smd-dim">← 実コスト</span></span>
           </div>
           <div style="margin-bottom:4px">${ccs.map(cc => chip(cc, adjByCc[cc])).join('') || '<span class="smd-dim">—</span>'}</div>
-          <div class="smd-dim" style="font-size:10.5px;margin-top:4px">💡 補償（プラス）は、その注文が「段階＝日本を出た後」かつ返金額を記録済みなら上の「SLS+補償」の受取補償に反映されます（それ以外はここの合計には出ますが上には反映されません）。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
+          ${(() => {
+        const cl = (adjustments || []).filter(a => a.kind === 'compensation' && a.order_sn).map(a => ({ cc: a.cc, sn: a.order_sn, jpy: Math.round((Number(a.amount) || 0) * adjRate(a.cc)), scen: a.module || a.scenario || '' })).filter(x => x.jpy > 0).sort((x, y) => y.jpy - x.jpy);
+        if (!cl.length) return '<div class="smd-dim" style="font-size:11px">補償が入った注文はまだありません（backfillAdjustments実行後に反映）。</div>';
+        const scenJa = s => /non-receipt/i.test(s) ? '荷物未着' : /lost|damage/i.test(s) ? '紛失・破損' : /return shipping|reimbursement/i.test(s) ? '返送送料' : (s || '補償');
+        return `<details style="margin-top:6px"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#188038">✅ 補償が入った注文 ${cl.length}件（クリックで一覧）</summary>
+          <div class="pf-scroll" style="max-height:34vh;margin-top:6px"><table class="pf-table" style="min-width:520px;font-size:11px"><tr><th>国</th><th>注文SN</th><th>補償額(円)</th><th>種類</th></tr>
+          ${cl.slice(0, 200).map(x => `<tr><td><b style="color:${(regionByCc(x.cc) || {}).color || '#333'}">${esc(x.cc)}</b></td><td style="word-break:break-all">${esc(x.sn)}</td><td style="text-align:right;color:#188038;font-weight:700">+${fmtJpy(x.jpy)}</td><td>${esc(scenJa(x.scen))}</td></tr>`).join('')}</table></div>
+          ${cl.length > 200 ? `<div class="smd-dim" style="font-size:10px;margin-top:3px">上位200件を表示（全${cl.length}件）</div>` : ''}</details>`;
+      })()}
+          <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 補償（プラス）は、その注文が「段階＝日本を出た後」かつ返金額を記録済みなら上の「SLS+補償」の受取補償に反映されます。<b>各注文の補償額は上の一覧の「補償」列にも✅で出ます</b>。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
         </div></details>`;
     })();
     body.innerHTML =
@@ -4596,9 +4606,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <input type="text" id="ret-sn" placeholder="注文SN" style="padding:5px;font-size:13px;width:180px">
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1220px">` +
-      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th>再出品</th><th>メモ</th></tr>` +
-      (rows.length ? rowHtml : `<tr><td colspan="13" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1320px">` +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="SLS+補償の受取。payout明細から自動検知(✅)＋手動記入(✍)">補償</th><th>再出品</th><th>メモ</th></tr>` +
+      (rows.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
       `</table></div></div>` +
       (rows.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - retN}件）</button></div>` : '');
     { const mb = document.getElementById('ret-more'); if (mb) mb.addEventListener('click', () => { renderReturns._showN = retN + 50; renderReturns(); }); }
