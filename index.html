@@ -4756,6 +4756,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🛡️ <b>公式API出品の二重送信を防止</b>：1回のクリックで作成が2回走り、2回目が「This product duplicates another in your shop（重複）」になる不具合を修正（進行中ロックで同一国の重複作成・確認ダイアログ二重表示を防止）。SGで「1回しか押していないのに重複エラー＋実際は作成済」の原因。',
+      '🈺 <b>バリエ種別名（Title/Hardware等）を出品に反映＋国別パネルに表示</b>：これまでAPI出品時に種別名を送っておらず全て既定「バージョン」になっていたのを修正（1.商品情報の「バリエーション種別名」を送信）。各国カードに<b>「バリエ種別名: ◯◯」</b>を表示（未設定は既定バージョンと明記）。',
+      '🗣️ <b>出品失敗メッセージの誤訳を是正</b>：「価格が上限超（max price over limit）」を誤って「出品枠上限」と表示していたのを修正＝<b>価格/配送チャネルの価格上限</b>と正しく案内（例MYのSPX Lockers）。<b>商品の重複</b>（バリエ名重複とは別）も日本語で明示（その国の店舗内の重複＝他国とは無関係）。',
       '🏷 <b>SKUを各国カードでも表示・編集・一括提案</b>：各国カードに「🏷SKU」パネルを追加＝<b>カタログ(親)SKU</b>を直接編集でき、<b>各バリエのSKU</b>も価格行の🏷欄でその場編集可。<b>「💡SKU提案（親＋全バリエ）」</b>ボタンで、商品名・ハード・シリーズ＋各バリエ名から<b>親SKUと全バリエSKUをまとめて自動生成して適用</b>（全国共通。既存があれば上書き確認）。出品直前のカードで完結。',
       '🚫 各国カードで<b>価格上限を超えたバリエが一目で分かる</b>ように：上限超（VN=100万VND等）の明細は<b>価格欄を赤枠＋行を赤背景＋「⚠上限超」バッジ</b>で個別表示（従来は「◯件超」と件数だけ）。どれを下げる/✕除外すればいいかが即分かる。',
       '🔢 出品コンポーザーの不具合修正3点：①<b>価格・在庫の入力が「後ろからしか打てない」不具合を修正</b>（type=number＝カーソル位置APIが使えず再描画で末尾に飛んでいた→type=text＋inputmodeに変更）。②各国カードのバリエ名に<b>文字数カウント（N/30）</b>を表示（30字超は赤＋⚠）。③<b>出品失敗の理由を日本語でも表示</b>（英語原文＋日本語ヒント。バリエ名重複・出品枠・画像・価格・説明20字等をマップ）。バリエ名上限を20→<b>30字</b>に是正（GAS v30・Ⅰ/Ⅱの1字違いでも通る）。',
@@ -8986,7 +8989,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${catStrip}
           <div style="font-size:12.5px;margin-top:8px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
             <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
-          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
+          <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b>${hasVar ? ` <span class="smd-dim" style="font-size:10.5px">バリエ種別名: <b style="color:#7b52c4">${esc((listState.varTier || '').trim() || 'バージョン')}</b>${(listState.varTier || '').trim() ? '' : '（未設定＝既定バージョン。1.商品情報の「バリエーション種別名」で変更）'}</span>` : ''}<div style="margin:2px 0">${priceRich}</div></div>
           <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:#faf7ff;border:1px solid #ece3fb;border-radius:6px;padding:5px 8px">
             <b style="color:#7b52c4;white-space:nowrap">🏷 SKU</b>
             <span style="white-space:nowrap;font-size:11px">${hasVar ? 'カタログ(親) ' : ''}<input class="li cov-psku" data-cc="${rg.cc}" data-foc="pk-${rg.cc}" value="${esc(listState.parentSku || '')}" placeholder="親SKU（任意）" style="width:150px;padding:2px 5px;font-size:11px;font-family:monospace" title="カタログ(親)SKU＝全国共通の管理コード"></span>
@@ -9076,30 +9079,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // Shopeeの英語エラーを日本語のヒントに変換（原文も併記する。ヒント無しは''）
     const apiErrorJa = (em) => {
       const s = String(em || '').toLowerCase(); const h = [];
-      if (/duplicat/.test(s) && /tier|option|variation/.test(s)) h.push('バリエ名が重複しています（各バリエ名を30字以内で一意に。Ⅰ/Ⅱの違いでもOK）');
+      // 重複：バリエ名 vs 商品そのものを区別
+      if (/duplicat/.test(s) && /(tier|option|variation)/.test(s)) h.push('バリエ名が重複しています（各バリエ名を30字以内で一意に。Ⅰ/Ⅱの違いでもOK）');
+      else if (/duplicat/.test(s)) h.push('その店舗に同じ商品が既にあります（重複）＝二重作成の可能性。Shopeeの商品一覧で確認を。※他国とは無関係、その国の店舗内での重複です');
       else if (/tier|init_tier|variation/.test(s)) h.push('バリエ設定でエラー（バリエ名・価格・在庫を確認）');
-      if (/limit|quota|item.?count|too many|上限|maximum/.test(s)) h.push('出品枠の上限に到達の可能性（公開中の不要品を削除して枠を空ける）');
+      // 価格が上限超（＝出品枠とは別物。配送チャネル/カテゴリの価格上限）
+      if (/max price|price\b.{0,25}(over|exceed).{0,20}limit|over max limit|over.{0,6}max.{0,6}limit/.test(s)) h.push('価格が上限を超過（配送チャネル/カテゴリの価格上限。原文の Channel detail を確認→価格を下げるか、その国の該当バリエを✕除外／別チャネル）');
+      else if (/(listing|item)\b.{0,10}limit|item.?count|too many item|quota|出品(枠|数)|listing limit/.test(s)) h.push('出品枠（Listing Limit）の上限に到達の可能性（公開中の不要品を削除して枠を空ける）');
       if (/image/.test(s)) h.push('画像エラー（枚数・形式・URLを確認。アップ画像はStorage経由）');
       if (/category/.test(s)) h.push('カテゴリが不正（カテゴリ欄の名前/パスを確認）');
       if (/brand/.test(s)) h.push('ブランド指定エラー');
       if (/weight/.test(s)) h.push('重量エラー（0や未入力を確認）');
-      if (/\bprice|original_price/.test(s)) h.push('価格エラー（各国の上限/下限・0を確認。BRは価格差4倍制限あり）');
       if (/desc|description/.test(s)) h.push('説明文エラー（20字以上必要）');
       if (/\bname\b|title|item_name/.test(s)) h.push('タイトルエラー（長さ・禁止語を確認）');
-      if (/logistic|channel|shipping/.test(s)) h.push('配送チャネルのエラー');
+      if (/logistic|channel|shipping/.test(s)) h.push('配送チャネル関連（対象チャネルの制約に抵触。価格上限がチャネル依存のこともあり）');
       if (/token|permission|auth|unauthor|access/.test(s)) h.push('認可/権限エラー（トークン切れ・再認可が必要かも）');
       if (/\bstock|seller_stock/.test(s)) h.push('在庫エラー');
       if (/timeout|timed out/i.test(s)) h.push('タイムアウト（画像やバリエが多いと2分超過することがあります。再試行を）');
       return h.join(' / ');
     };
     // 1国の公式API出品（per-country ボタン＆一括で共用。confirmは呼び出し側）
+    const apiBusy = (listState._apiBusy = listState._apiBusy || new Set()); // 出品処理の進行中ロック（二重送信＝重複作成を防止）
     const apiCreateOne = async (cc) => {
       const jb = apiJobs[cc]; if (!jb) return { cc, skip: true };
+      if (apiBusy.has(cc)) { toast(`${cc}: 出品処理が進行中です（二重送信を防止）`, true); return { cc, skip: 'busy' }; }
       const resEl = out.querySelector('.li-apiresult[data-cc="' + cc + '"]');
       const b = out.querySelector('.li-apilist[data-cc="' + cc + '"]');
       if (!(jb.name || '').trim()) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ タイトルが空</span>'; toast(`${cc}: タイトルが空です`, true); return { cc, error: 'タイトル空' }; }
       const doVar = jb.hasVar && jb.variations && jb.variations.length >= 2;
       const orig = b ? b.textContent : ''; if (b) { b.disabled = true; b.textContent = '⏳…'; }
+      apiBusy.add(cc);  // 以降 finally で必ず解除（=最初のawait前に同期でロック→二重呼び出しは即skip）
       try {
         const pubFlag = (listState.apiPublish || 'public') === 'public' ? 1 : 0;
         // 画像を全てhttp化（httpはそのまま／アップロード画像(data:)はStorageへ上げてURL化）
@@ -9112,7 +9121,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         let vars = jb.variations;
         if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im })); } vars = rv; }
         if (resEl) resEl.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span>作成中…（画像アップロード＋登録${doVar ? '＋バリエ設定' : ''}。通常30〜60秒・最大2分）</span>`;
-        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined });
+        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined, tier_name: doVar ? ((listState.varTier || '').trim() || undefined) : undefined });
         const rg2 = REGIONS.find(x => x.cc === cc) || {};
         const host = rg2.host || ('seller.shopee.' + cc.toLowerCase());
         const varFailed = r.variations && r.tier_init && r.tier_init !== 'ok';
@@ -9130,10 +9139,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ 出品失敗' + (ja ? '：<b>' + esc(ja) + '</b>' : '') + '<br><span class="smd-dim" style="font-size:10.5px">原文: ' + esc(em) + '</span></span>';
         toast(`❌ ${cc} 出品失敗: ${ja || em}`.slice(0, 160), true);
         return { cc, error: em, ja };
-      } finally { if (b) { b.disabled = false; b.textContent = orig; } }
+      } finally { apiBusy.delete(cc); if (b) { b.disabled = false; b.textContent = orig; } }
     };
     out.querySelectorAll('.li-apilist').forEach(btn => btn.addEventListener('click', async () => {
       const cc = btn.dataset.cc, jb = apiJobs[cc]; if (!jb) return;
+      if (apiBusy.has(cc)) { toast(`${cc}: 出品処理が進行中です`, true); return; } // 確認ダイアログの二重表示も防止
       const doVar = jb.hasVar && jb.variations && jb.variations.length >= 2;
       const warnVar = doVar ? `\n※バリエ${jb.varCount}明細を機種バリエ(init_tier_variation)として作成します。` : '';
       const stW = (listState.apiPublish || 'public') === 'public' ? '公開' : '非公開(下書き)';
