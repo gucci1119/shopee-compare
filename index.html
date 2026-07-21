@@ -3566,15 +3566,14 @@
     const afterTax = v => (v > 0 ? Math.round(v * (1 - taxPct / 100)) : v); // 税引後（黒字にのみ課税・赤字はそのまま）
     // 手取りから逆算：稼ぎたい手取り(月)があれば税で割り戻して営業利益に。無ければ営業利益目標をそのまま。
     const takeHomeTarget = (cfg.targetTakeHome !== '' && Number(cfg.targetTakeHome) > 0) ? Number(cfg.targetTakeHome) : null;
-    const targetNet = takeHomeTarget != null ? Math.round(takeHomeTarget / (1 - taxPct / 100)) : targetOf(curYm);
+    const targetNet = takeHomeTarget != null ? Math.round(takeHomeTarget / (1 - Math.min(taxPct, 95) / 100)) : targetOf(curYm); // 税率は95%上限で0除算防止
     // 入金データの被覆率（gn/n）が低い月は粗利が過少＝実利益が信用できない → 「—」扱い
     const reli = r => r.gn > 0 && r.gn >= r.n * 0.4;
     // 固定費：実額登録(人件費・家賃・ツール等)があればそれを、無ければ見込み(opexFixed)をフォールバック＝切替時に過大にならない
     const effFixedOf = r => (r.fixReg > 0 ? r.fixReg : opexFixed);
     const fixEstimated = r => !(r.fixReg > 0);                    // 見込み値を使っているか（実額未登録）
-    const varOf = r => Math.round(r.dep * opexPct / 100);          // 変動費＝送料・手数料（入金×率）
-    const opexOf = r => reli(r) ? Math.round(effFixedOf(r) + varOf(r)) : 0; // 運営費＝固定費＋変動費
-    // 実利益（営業利益）＝ 粗利 − 固定費 − 変動費 − その他経費 − 返金
+    const varOf = r => Math.round(r.dep * opexPct / 100);          // 変動費（opexPct=0固定なので実質0。opProfitOfでの後方互換用）
+    // 実利益（営業利益）＝ 粗利 − 固定費 − その他経費 − 返金（変動費は廃止＝0）
     const opProfitOf = r => reli(r) ? Math.round(r.gross - effFixedOf(r) - varOf(r) - r.other - (r.refund || 0)) : null;
     // 1件の利益：手入力（既定¥1,200＝Shopee手数料引き後の粗利。人件費/梱包/国内送料は固定費側）。実績加味はしない＝単純な目安。
     const contrib = (cfg.avgProfit !== '' && Number(cfg.avgProfit) > 0) ? Number(cfg.avgProfit) : 1200;
@@ -3584,8 +3583,8 @@
     const needPerDay = workDays > 0 ? needOrders / workDays : 0;
     const needGmv = needOrders * avgPrice;
     // 消費税還付（輸出免税）：国内仕入で払った消費税(税込の10/110)が戻る見込み。目標の仕入は注文数×1件仕入で推定。手入力で上書き可。
-    const costRow = rows.find(r => r.cost > 0 && r.n > 0);
-    const costPerOrder = costRow ? costRow.cost / costRow.n : 0;
+    const costRow = rows.find(r => r.cost > 0 && r.gn > 0);
+    const costPerOrder = costRow ? costRow.cost / costRow.gn : 0; // 仕入は突合済(gn)の合計→gnで割る（nで割ると過小）
     const targetCost = Math.round(needOrders * costPerOrder);
     const vatAuto = Math.round(targetCost * 10 / 110);
     const vatRefund = (cfg.vatRefund !== '' && cfg.vatRefund != null && !isNaN(Number(cfg.vatRefund))) ? Number(cfg.vatRefund) : vatAuto;
@@ -3653,7 +3652,7 @@
             ${fixBreak.length ? `<button class="smd-btn" id="plan-fb-apply" style="font-size:11px" title="この内訳を、上の登録フォームで選んだ月に固定費として一括登録（毎月/年額は月額換算・一回は全額）">↧ 内訳を選択月に登録</button>` : ''}
           </div>
         </div>
-        <div class="smd-dim" style="font-size:11px;margin-top:6px">💡 <b>実利益 ＝ 入金 − 仕入 − 固定費 − その他経費</b>（送料・梱包・手数料は固定費や入金に含む＝別途「変動費」は引きません）。<b>固定費は下の「毎月の固定費・経費を登録」で実額を入れる</b>と、その月は実額で計算（未登録の月は見込み額）。必要注文数の逆算は1注文の利益（既定¥1,200）で計算。</div>
+        <div class="smd-dim" style="font-size:11px;margin-top:6px">💡 <b>実利益 ＝ 入金 − 仕入 − 固定費 − その他経費 − 返金</b>（送料・梱包・手数料は固定費や入金に含む＝別途「変動費」は引きません）。<b>固定費は下の「毎月の固定費・経費を登録」で実額を入れる</b>と、その月は実額で計算（未登録の月は見込み額）。必要注文数の逆算は1注文の利益（既定¥1,200）で計算。</div>
         <div style="margin-top:14px;border-radius:10px;padding:16px;background:linear-gradient(135deg,#eaf3ff,#f7fbff);border:2px solid #1a73e8">
           <div style="font-size:12.5px;color:#1a73e8;font-weight:800;margin-bottom:8px">🎯 目標達成に必要な販売数 ＝ 何オーダー売ればいい？</div>
           ${needOrders > 0 ? `<div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
@@ -3745,7 +3744,7 @@
         <div style="display:flex;align-items:flex-end;gap:3px;height:96px;margin:4px 0 16px;padding:0 2px">${chartHtml || '<span class="smd-dim" style="font-size:12px">データがありません</span>'}</div>
         <div class="pf-scroll"><table class="pf-table">
           <tr><th>月</th><th>注文</th><th>売上(GMV)</th><th>入金</th><th>仕入</th><th>粗利</th><th>固定費</th><th>その他経費</th><th>返金</th><th>実利益</th><th>目標</th><th>達成</th><th>税引後</th><th>粗利/件</th></tr>
-          ${rows.map(r => { const has = reli(r), dash = '<span class="smd-dim">—</span>', op = opProfitOf(r), estm = fixEstimated(r), tgt = targetOf(r.ym), fut = r.ym > curYm; const achv = (has && op != null && tgt > 0) ? Math.round(op / tgt * 100) : null; return `<tr${fut ? ' style="background:#faf7ff"' : ''}><td style="font-weight:700;white-space:nowrap">${r.ym}${fut ? ' <span style="color:#7b52c4;font-size:9px">予測</span>' : ''}</td><td>${r.n}</td><td style="white-space:nowrap">${fmtJpy(r.gmv)}</td><td style="white-space:nowrap">${has ? fmtJpy(r.dep) : dash}</td><td style="white-space:nowrap;color:#a15">${has ? fmtJpy(r.cost) : dash}</td><td style="white-space:nowrap">${has ? money(r.gross) : dash}</td><td style="white-space:nowrap;color:#c47" title="${estm ? '見込み（実額未登録）' : '実額登録'}">${r.fixReg > 0 ? fmtJpy(r.fixReg) : (has ? fmtJpy(opexFixed) + '<span style="color:#e8710a">*</span>' : dash)}</td><td style="white-space:nowrap;color:#d93025">${fmtJpy(r.other)}</td><td style="white-space:nowrap;color:#d93025">${r.refund ? fmtJpy(r.refund) : '—'}</td><td style="white-space:nowrap">${has ? money(op, op < 0 ? '#d93025' : '#1a7f37') : dash}</td><td style="white-space:nowrap;color:#1a73e8">${tgt ? fmtJpy(tgt) : dash}</td><td style="white-space:nowrap;font-weight:700;color:${achv == null ? '#888' : (achv >= 100 ? '#1a7f37' : '#e8710a')}">${achv == null ? dash : achv + '%'}</td><td style="white-space:nowrap;color:#7b52c4">${has && taxPct > 0 ? money(afterTax(op)) : dash}</td><td style="white-space:nowrap">${has ? fmtJpy(Math.round(r.gross / r.gn)) : dash}</td></tr>`; }).join('')}
+          ${rows.map(r => { const has = reli(r), dash = '<span class="smd-dim">—</span>', op = opProfitOf(r), estm = fixEstimated(r), tgt = (r.ym === curYm ? targetNet : targetOf(r.ym)), fut = r.ym > curYm; const achv = (has && op != null && tgt > 0) ? Math.round(op / tgt * 100) : null; return `<tr${fut ? ' style="background:#faf7ff"' : ''}><td style="font-weight:700;white-space:nowrap">${r.ym}${fut ? ' <span style="color:#7b52c4;font-size:9px">予測</span>' : ''}</td><td>${r.n}</td><td style="white-space:nowrap">${fmtJpy(r.gmv)}</td><td style="white-space:nowrap">${has ? fmtJpy(r.dep) : dash}</td><td style="white-space:nowrap;color:#a15">${has ? fmtJpy(r.cost) : dash}</td><td style="white-space:nowrap">${has ? money(r.gross) : dash}</td><td style="white-space:nowrap;color:#c47" title="${estm ? '見込み（実額未登録）' : '実額登録'}">${r.fixReg > 0 ? fmtJpy(r.fixReg) : (has ? fmtJpy(opexFixed) + '<span style="color:#e8710a">*</span>' : dash)}</td><td style="white-space:nowrap;color:#d93025">${fmtJpy(r.other)}</td><td style="white-space:nowrap;color:#d93025">${r.refund ? fmtJpy(r.refund) : '—'}</td><td style="white-space:nowrap">${has ? money(op, op < 0 ? '#d93025' : '#1a7f37') : dash}</td><td style="white-space:nowrap;color:#1a73e8">${tgt ? fmtJpy(tgt) : dash}</td><td style="white-space:nowrap;font-weight:700;color:${achv == null ? '#888' : (achv >= 100 ? '#1a7f37' : '#e8710a')}">${achv == null ? dash : achv + '%'}</td><td style="white-space:nowrap;color:#7b52c4">${has && taxPct > 0 ? money(afterTax(op)) : dash}</td><td style="white-space:nowrap">${has ? fmtJpy(Math.round(r.gross / r.gn)) : dash}</td></tr>`; }).join('')}
           <tr style="border-top:2px solid #ccc;font-weight:700"><td>合計</td><td>${tot.n}</td><td>${fmtJpy(tot.gmv)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopee escrow を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入値を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
@@ -4404,11 +4403,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
     // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
-    const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 1);
+    const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ（||1だと現地通貨をそのまま円扱いし過大化）
     const adjComp = new Map();   // cc:sn → 補償合計(円)
     const adjByCc = {};          // cc → { comp, duty }（円）
     (adjustments || []).forEach(a => {
-      const jpy = Math.round((Number(a.amount) || 0) * adjRate(a.cc));
+      const rate = adjRate(a.cc); if (!rate) return; // レート不明の国は集計に入れない
+      const jpy = Math.round((Number(a.amount) || 0) * rate);
       if (a.kind === 'compensation' && a.order_sn) adjComp.set(a.cc + ':' + a.order_sn, (adjComp.get(a.cc + ':' + a.order_sn) || 0) + jpy);
       const b = adjByCc[a.cc] = adjByCc[a.cc] || { comp: 0, duty: 0 };
       if (a.kind === 'compensation') b.comp += jpy; else if (a.kind === 'duty') b.duty += jpy;
@@ -4531,7 +4531,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">
             <span>保証対象の返金 <b style="color:#d93025">${fmtJpy(refundAll)}</b> <span class="smd-dim">(${withRefund.length}件)</span></span>
             <span>受取補償 <b style="color:#188038">${fmtJpy(recTotal)}</b> <span class="smd-dim">(${received.length}件${autoRecCount ? '・うち自動検知' + autoRecCount : ''})</span></span>
-            <span style="border-left:2px solid #d93025;padding-left:10px">実質損失（現時点） <b style="color:#d93025;font-size:14px">${fmtJpy(netLoss)}</b></span>
+            <span style="border-left:2px solid #d93025;padding-left:10px">実質損失（現時点） <b style="color:${netLoss > 0 ? '#d93025' : '#1a7f37'};font-size:14px">${fmtJpy(Math.max(0, netLoss))}</b>${netLoss < 0 ? ` <span class="smd-dim">（補償が返金を ${fmtJpy(-netLoss)} 上回り実質プラス）</span>` : ''}</span>
             <span class="smd-dim">補償待ちの見込み回収 ≈${fmtJpy(expPending)}（不確実・遅延中）</span>
           </div>
           ${old.length ? `<div style="background:#fce8e6;border-radius:6px;padding:5px 9px;margin-bottom:8px;font-size:11.5px"><b style="color:#d93025">🔴 ${COMP_OLD_DAYS}日超え ${old.length}件</b> ＝ 特に遅延。Shopeeへ督促候補（2025Q4分は2026/7末・2026Q1-3分は8〜9月目処との回答）。</div>` : ''}
@@ -4551,7 +4551,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <span>関税・輸入税（控除） 計 <b style="color:#d93025">${fmtJpy(dutyTotal)}</b> <span class="smd-dim">← 実コスト</span></span>
           </div>
           <div style="margin-bottom:4px">${ccs.map(cc => chip(cc, adjByCc[cc])).join('') || '<span class="smd-dim">—</span>'}</div>
-          <div class="smd-dim" style="font-size:10.5px;margin-top:4px">💡 補償（プラス）は上の「SLS+補償」に自動反映（受取補償に計上）。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
+          <div class="smd-dim" style="font-size:10.5px;margin-top:4px">💡 補償（プラス）は、その注文が「段階＝日本を出た後」かつ返金額を記録済みなら上の「SLS+補償」の受取補償に反映されます（それ以外はここの合計には出ますが上には反映されません）。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
         </div></details>`;
     })();
     body.innerHTML =
