@@ -4756,6 +4756,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🏷 <b>SKUを各国カードでも表示・編集・一括提案</b>：各国カードに「🏷SKU」パネルを追加＝<b>カタログ(親)SKU</b>を直接編集でき、<b>各バリエのSKU</b>も価格行の🏷欄でその場編集可。<b>「💡SKU提案（親＋全バリエ）」</b>ボタンで、商品名・ハード・シリーズ＋各バリエ名から<b>親SKUと全バリエSKUをまとめて自動生成して適用</b>（全国共通。既存があれば上書き確認）。出品直前のカードで完結。',
       '🚫 各国カードで<b>価格上限を超えたバリエが一目で分かる</b>ように：上限超（VN=100万VND等）の明細は<b>価格欄を赤枠＋行を赤背景＋「⚠上限超」バッジ</b>で個別表示（従来は「◯件超」と件数だけ）。どれを下げる/✕除外すればいいかが即分かる。',
       '🔢 出品コンポーザーの不具合修正3点：①<b>価格・在庫の入力が「後ろからしか打てない」不具合を修正</b>（type=number＝カーソル位置APIが使えず再描画で末尾に飛んでいた→type=text＋inputmodeに変更）。②各国カードのバリエ名に<b>文字数カウント（N/30）</b>を表示（30字超は赤＋⚠）。③<b>出品失敗の理由を日本語でも表示</b>（英語原文＋日本語ヒント。バリエ名重複・出品枠・画像・価格・説明20字等をマップ）。バリエ名上限を20→<b>30字</b>に是正（GAS v30・Ⅰ/Ⅱの1字違いでも通る）。',
       '🧩 公式API出品でバリエが付かず単品になる不具合を修正：<code>init_tier_variation</code> が「tier option name is duplicated」で失敗していた（バリエ名を20字で切ると末尾が同じになり重複＝例「PS5:The Last of us Part II/I」→どちらも「PS5:The Last of us P」）。GASで<b>option名を必ず一意化</b>（20字超は先頭+末尾を残して中間を…で圧縮＝Part I/II等の識別を保持、なお重複したら連番）。GAS Webアプリ v29。',
@@ -6868,6 +6869,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return u.slice(0, 6).join(' ');
   }
   const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40).replace(/_$/, '');
+  // 親SKU＋全バリエSKUをまとめて提案・適用（overwrite=falseは空欄だけ埋める）。国別カード/各セクション共通。
+  function suggestSkusAll(overwrite) {
+    const pk = [listState.name, listState.hardware, listState.jpseries].filter(Boolean).join(' ');
+    const psug = recommendSku(pk);
+    if (psug && (overwrite || !(listState.parentSku || '').trim())) listState.parentSku = psug;
+    (listState.variations || []).forEach(v => { if (overwrite || !(v.sku || '').trim()) v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
+    const pel = document.getElementById('li-psku'); if (pel) pel.value = listState.parentSku || '';
+  }
   // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用。連番/空/ゴミはnull
   const skuGroupKey = (sku) => { const s = String(sku || '').trim(); return (/_/.test(s) && /[a-z]/i.test(s) && s.length >= 4) ? s.toUpperCase() : null; };
   // 全出品を「商品(明細)」単位で国横断グルーピング（SKU優先→タイトル正規化）。推奨ページ等で共有
@@ -8899,7 +8908,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="text" inputmode="decimal" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:76px;padding:2px 5px;${overCeil ? 'border:1.5px solid #d93025;background:#fff4f4;' : ''}${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="${overCeil ? '⚠ ' + rg.cc + 'の価格上限' + ceil.toLocaleString() + 'を超過。価格を下げるか✕で除外を' : '空欄=自動計算(' + p.auto + ') / 入力=この国だけ手動価格'}"${p.off ? ' disabled' : ''}></span>${overCeil ? `<span style="font-size:10px;color:#fff;background:#d93025;font-weight:700;border-radius:3px;padding:1px 5px;white-space:nowrap" title="${rg.cc}上限${ceil.toLocaleString()}${rg.cur}超">⚠上限超</span>` : ''}
             在庫<input class="li cov-istock" data-cc="${rg.cc}" data-i="${p.i}" data-foc="s-${rg.cc}-${p.i}" type="text" inputmode="numeric" value="${p.stock != null ? p.stock : ''}" placeholder="1" style="width:42px;padding:2px 4px;font-size:11px"${p.off ? ' disabled' : ''}>
             <span style="font-size:11px;white-space:nowrap">${p.off ? '<span style="color:#d93025;font-weight:700">除外中</span>' : `<span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc}">ROI${Math.round(pr.roi)}%</span>${bad ? ' <b style="color:#d93025">⚠</b>' : ''}${p.manual ? ' <span style="color:#7b52c4">✎</span>' : ''}`}</span>
-            ${p.sku ? `<span style="font-family:monospace;font-size:10px;color:#7b52c4;white-space:nowrap" title="この明細のSKU（変更はセクション3）">🏷${esc(p.sku)}</span>` : ''}
+            ${hasVar ? `<span style="white-space:nowrap;font-size:10px;color:#7b52c4">🏷<input class="li cov-isku" data-cc="${rg.cc}" data-i="${p.i}" data-foc="k-${rg.cc}-${p.i}" value="${esc(p.sku || '')}" placeholder="SKU" style="width:96px;padding:2px 4px;font-size:10px;font-family:monospace" title="このバリエのSKU（全国共通）"${p.off ? ' disabled' : ''}></span>` : ''}
           </div>`;
         }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? pricedLive.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));
@@ -8978,6 +8987,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <div style="font-size:12.5px;margin-top:8px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
             <input class="li cov-ititle" data-cc="${rg.cc}" data-foc="t-${rg.cc}" value="${esc(baseTitle0)}" placeholder="${esc(listTitle())}" style="width:100%;margin-top:2px" title="この国のタイトル（空欄で全国共通に戻る）"></div>
           <div style="font-size:12.5px;margin-top:6px"><b>価格${hasVar ? '（バリエーション別・その場で編集可）' : ''}</b><div style="margin:2px 0">${priceRich}</div></div>
+          <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:#faf7ff;border:1px solid #ece3fb;border-radius:6px;padding:5px 8px">
+            <b style="color:#7b52c4;white-space:nowrap">🏷 SKU</b>
+            <span style="white-space:nowrap;font-size:11px">${hasVar ? 'カタログ(親) ' : ''}<input class="li cov-psku" data-cc="${rg.cc}" data-foc="pk-${rg.cc}" value="${esc(listState.parentSku || '')}" placeholder="親SKU（任意）" style="width:150px;padding:2px 5px;font-size:11px;font-family:monospace" title="カタログ(親)SKU＝全国共通の管理コード"></span>
+            <button class="li-cardskusug smd-btn" data-cc="${rg.cc}" style="font-size:11px;padding:2px 8px;background:#f3eefb;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="商品名・ハード・シリーズ＋各バリエ名から、親SKUと全バリエSKUを自動生成して適用（全国共通）">💡 SKU提案（親＋全バリエ）</button>
+            ${hasVar ? '<span class="smd-dim" style="font-size:10px">各バリエSKUは上の価格行の🏷で編集</span>' : ''}
+          </div>
           ${warns.length ? `<div class="lwarn" style="display:block">⚠ ${warns.map(esc).join(' / ')}</div>` : ''}
         </div>`;
       }).join('') + `</div></div>`;
@@ -8992,6 +9007,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     out.querySelectorAll('.cov-iprice').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'price', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-istock').forEach(el => el.addEventListener('input', e => { ovSetVar(e.target.dataset.cc, +e.target.dataset.i, 'stock', (e.target.value || '').trim()); listRefresh(); }));
     out.querySelectorAll('.cov-ioff').forEach(el => el.addEventListener('click', e => { ovToggleOff(e.currentTarget.dataset.cc, +e.currentTarget.dataset.i); listRefresh(); }));
+    // SKU（全国共通）：バリエSKU・親SKUをカード上で直接編集＋💡提案（親＋全バリエ一括）
+    out.querySelectorAll('.cov-isku').forEach(el => el.addEventListener('input', e => { const i = +e.target.dataset.i; if (listState.variations[i]) { listState.variations[i].sku = e.target.value; listRefresh(); } }));
+    out.querySelectorAll('.cov-psku').forEach(el => el.addEventListener('input', e => { listState.parentSku = e.target.value; const p = document.getElementById('li-psku'); if (p) p.value = e.target.value; listRefresh(); }));
+    out.querySelectorAll('.li-cardskusug').forEach(b => b.addEventListener('click', () => {
+      if (!(listState.name || '').trim()) { alert('先に商品名（セクション1）を入力してください'); return; }
+      const anySku = (listState.parentSku || '').trim() || (listState.variations || []).some(v => (v.sku || '').trim());
+      const ow = anySku ? confirm('既存のSKUも上書きして再提案しますか？\n\nOK＝全て上書き ／ キャンセル＝空欄だけ埋める') : true;
+      suggestSkusAll(ow); listRefresh();
+      toast('🏷 SKUを提案しました（親＋全バリエ・全国共通）');
+    }));
     // 各国カードでのバリエ並べ替え（番号⠿をドラッグ→別明細にドロップ＝全国共通の並びを変更）
     out.querySelectorAll('.cov-vgrip').forEach(g => {
       g.addEventListener('dragstart', e => { covVarDrag = +g.dataset.i; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'smdcovvar'); } catch (_) {} });
