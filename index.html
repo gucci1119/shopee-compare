@@ -1043,6 +1043,27 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公開/非公開の切替に失敗');
     return res;
   }
+  // アップロード画像(data:)を Supabase Storage(公開バケット listing-imgs)に上げて公開http URLを返す（直接API出品用）
+  async function uploadImgToStorage(dataUrl, tag) {
+    if (!settings.sbSecret) throw new Error('書き込みキー(sbSecret)が未設定です（⚙️設定）');
+    const m = /^data:([^;]+);base64,(.+)$/.exec(String(dataUrl || '')); if (!m) return null;
+    const mime = m[1], bytes = Uint8Array.from(atob(m[2]), c => c.charCodeAt(0));
+    const ext = (mime.split('/')[1] || 'jpg').replace('jpeg', 'jpg').replace('+xml', '');
+    const path = 'cat/' + Date.now() + '_' + (tag || 0) + '_' + Math.random().toString(36).slice(2, 7) + '.' + ext;
+    const res = await fetch(SB_URL + '/storage/v1/object/listing-imgs/' + path, { method: 'POST', headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret, 'content-type': mime, 'x-upsert': 'true' }, body: bytes });
+    if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('画像アップロード失敗 ' + res.status + '（バケット listing-imgs が未作成/非公開かも）: ' + t.slice(0, 100)); }
+    return SB_URL + '/storage/v1/object/public/listing-imgs/' + path;
+  }
+  // 混在した画像URL配列を「全てhttp(s)」に解決（httpはそのまま／data:はStorageへ上げてURL化）
+  async function resolveImgsForApi(imgs) {
+    const out = [];
+    for (let i = 0; i < (imgs || []).length; i++) {
+      const u = String(imgs[i] || '');
+      if (/^https?:/.test(u)) out.push(u);
+      else if (/^data:/.test(u)) { const pu = await uploadImgToStorage(u, i); if (pu) out.push(pu); }
+    }
+    return out;
+  }
   // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
   async function openapiGetModels(shopId, itemId) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -8853,10 +8874,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const apiShopRow = (cardFam && !skip) ? (state.accounts || []).find(a => a.shop_id && String(a.cc || '').toUpperCase() === rg.cc && famOfLabel(a.label) === cardFam) : null;
         if (apiShopRow) {
           const p0 = pricedLive[0] || {};
-          apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, fam: cardFam, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, hasVar, varCount: pricedLive.length, variations: (job.variations || []).map(v => ({ name: v.name, price: v.price, stock: v.stock, sku: v.sku, image: /^https?:/.test(String(v.image || '')) ? v.image : '' })) };
+          apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, fam: cardFam, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, imagesRaw: ccCatImgs, hasVar, varCount: pricedLive.length, variations: (job.variations || []).map(v => ({ name: v.name, price: v.price, stock: v.stock, sku: v.sku, image: v.image || '' })) };
         }
-        // 🚀直接APIは http(s)画像が必要。アップロード画像(data:)だけの商品は使えない→▶自動で出品を主にする
-        const apiUsable = !!apiShopRow && (job.images || []).length > 0;
+        // 🚀直接APIは http(s)画像が必要。http画像があるか、または書込キーありでアップロード画像(data:)を上げられる場合に使える
+        const apiUsable = !!apiShopRow && ((job.images || []).length > 0 || (!!settings.sbSecret && (ccCatImgs || []).some(u => /^data:/.test(u))));
         return `<div class="cov-card" data-cc="${rg.cc}" style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
           <div class="cov-cchead" data-cc="${rg.cc}" draggable="true" style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:0 -10px 8px;padding:7px 10px 6px;border-bottom:1px solid #f0f0f0;background:${rg.color}0f;border-radius:0 0 6px 6px;cursor:grab" title="ヘッダをドラッグで国の並べ替え">
             <span><span style="background:${rg.color};color:#fff;font-weight:800;font-size:14px;border-radius:5px;padding:2px 9px">⠿ ${rg.cc}</span>${hasOv ? ' <span style="font-size:10px;background:#7b52c4;color:#fff;border-radius:4px;padding:1px 6px">✏️ 国別調整あり</span>' : ''}</span>
@@ -8869,7 +8890,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ? `<span style="font-size:11px;color:#b3701a;font-weight:700" title="この国は一括出品・個別出品の対象外。上のプルダウンでアカウントを選ぶと対象に戻ります">🚫 出品しない</span>`
         : (apiUsable
           ? `<button class="li-apilist smd-btn" data-cc="${rg.cc}" style="background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="${esc(cardFam)} の ${rg.cc} ショップ(shop_id ${apiShopRow.shop_id})へ公式APIで直接作成（ブラウザのShopeeログイン不要）。${hasVar ? '※' + pricedLive.length + 'バリエ付きで作成' : ''}">🚀 公式APIで出品</button>`
-          : `<a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページ→右下パネルの🚀作成で公式API出品（要 shopee-newlisting＋雛形）。${apiShopRow ? '※この商品はアップロード画像(data:)のため🚀直接APIが使えず、こちらを使います' : '※この系統ではAPI直接出品が使えない国'}">▶ 自動で出品</a>${apiShopRow && !apiUsable ? '<span class="smd-dim" style="font-size:10px;color:#e8710a" title="🚀直接APIはhttp(s)画像URLが必要。アップロード/スクショ(data:)画像なので使えません。▶自動で出品ならブラウザ経由でアップロードして出せます">🚀不可(要http画像)</span>' : ''}`)}
+          : `<a href="${autoUrl}" target="_blank" class="smd-btn li-autolist" style="text-decoration:none;background:#eafaef;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="新規出品ページ→右下パネルの🚀作成で公式API出品（要 shopee-newlisting＋雛形）。${apiShopRow ? '※🚀直接APIには書込キー(⚙️設定のsecret)が要ります。入れるとアップロード画像も自動でネットに上げて🚀で出せます' : '※この系統ではAPI直接出品が使えない国'}">▶ 自動で出品</a>${apiShopRow && !apiUsable ? '<span class="smd-dim" style="font-size:10px;color:#e8710a" title="🚀にはネット上のhttp画像が必要。⚙️設定に書込キー(secret)を入れると、アップロード画像も自動でStorageに上げて🚀で出せます">🚀は書込キー要</span>' : ''}`)}
               <details class="li-more" style="display:${skip ? 'none' : 'inline-block'}">
                 <summary class="smd-btn" style="cursor:pointer;list-style:none;user-select:none;font-weight:400;color:#666" title="他の出品方法（フォールバック）">▾ 他の方法</summary>
                 <div style="margin-top:6px;padding:7px 9px;border:1px solid #e3e3e3;border-radius:7px;background:#fafafa;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end">
@@ -8970,18 +8991,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const jb = apiJobs[cc]; if (!jb) return { cc, skip: true };
       const resEl = out.querySelector('.li-apiresult[data-cc="' + cc + '"]');
       const b = out.querySelector('.li-apilist[data-cc="' + cc + '"]');
-      if (!jb.images || !jb.images.length) {
-        const msg = 'http画像が無く出品不可（貼付/スクショのdata:画像は直接API不可）。「▶自動で出品」を使うか、http(s)の画像URLで登録を';
-        if (resEl) resEl.innerHTML = `<span style="color:#d93025">❌ ${msg}</span>`; toast(`${cc}: ${msg}`, true);
-        return { cc, error: '画像なし(http画像が無い)' };
-      }
       if (!(jb.name || '').trim()) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ タイトルが空</span>'; toast(`${cc}: タイトルが空です`, true); return { cc, error: 'タイトル空' }; }
       const doVar = jb.hasVar && jb.variations && jb.variations.length >= 2;
       const orig = b ? b.textContent : ''; if (b) { b.disabled = true; b.textContent = '⏳…'; }
-      if (resEl) resEl.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>作成中…（最大2分）</span>';
       try {
         const pubFlag = (listState.apiPublish || 'public') === 'public' ? 1 : 0;
-        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: jb.images.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(jb.variations) : undefined });
+        // 画像を全てhttp化（httpはそのまま／アップロード画像(data:)はStorageへ上げてURL化）
+        if (resEl) resEl.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>画像を準備中…</span>';
+        let imgUrls;
+        try { imgUrls = await resolveImgsForApi(jb.imagesRaw && jb.imagesRaw.length ? jb.imagesRaw : jb.images); }
+        catch (ie) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ 画像準備失敗: ' + esc(String(ie.message || ie)) + '</span>'; toast(`${cc} 画像準備失敗: ${ie.message || ie}`.slice(0, 150), true); if (b) { b.disabled = false; b.textContent = orig; } return { cc, error: '画像準備失敗' }; }
+        if (!imgUrls.length) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ 画像がありません</span>'; toast(`${cc}: 画像がありません`, true); if (b) { b.disabled = false; b.textContent = orig; } return { cc, error: '画像なし' }; }
+        // バリエ画像も同様にhttp化
+        let vars = jb.variations;
+        if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im })); } vars = rv; }
+        if (resEl) resEl.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>作成中…（最大2分）</span>';
+        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined });
         const host = (REGIONS.find(x => x.cc === cc) || {}).host || ('seller.shopee.' + cc.toLowerCase());
         const vinfo = (r.variations && r.tier_init) ? (r.tier_init === 'ok' ? ` <span style="color:#1a7f37">＋${r.variations}バリエ✓</span>` : ` <span style="color:#d93025">（バリエ設定: ${esc(String(r.tier_init))}）</span>`) : '';
         const stText = pubFlag ? '公開' : '非公開(下書き)';
