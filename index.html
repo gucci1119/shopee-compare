@@ -4756,7 +4756,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
-      '🏷 <b>子SKU（バリエ明細SKU）の一意化＋重複警告</b>：Shopeeは同一商品内でバリエ間のSKU重複が不可。「💡SKU提案」を<b>全バリエで必ず一意</b>に生成するよう修正（重複時は _2,_3… 付与）。手入力で重複した場合も<b>該当SKU欄を赤枠＋⚠＋カード警告</b>で検知。親SKU＝それらを束ねる管理コード。',
+      '🧷 <b>国のヌケに「子SKU整理・国横断アライン」を新設</b>（分析タブ）：カバー画像一致で同一商品をグループ化し、<b>バリエ明細SKU(子SKU)をバリエ間で一意＋同じバリエ名は全国同じSKU</b>に揃える候補を検出。推奨SKU（グループ内の有効SKUの多数決優先・無ければ生成）を提示し、<b>🔍検証（プレビュー）→グループ別/一括で書込</b>（公開中のみ・未公開はスキップ・1件ずつ結果）。親SKU統一の子SKU版。書込はブリッジ。',
+      '↔️ 各国カードの<b>子/親SKU入力欄を広げて全文表示</b>（flex伸長）。',
+      '🏷 <b>子SKU（バリエ明細SKU）の一意化＋重複警告</b>：',Shopeeは同一商品内でバリエ間のSKU重複が不可。「💡SKU提案」を<b>全バリエで必ず一意</b>に生成するよう修正（重複時は _2,_3… 付与）。手入力で重複した場合も<b>該当SKU欄を赤枠＋⚠＋カード警告</b>で検知。親SKU＝それらを束ねる管理コード。',
       '🚚 <b>MYなどの「価格が上限超（配送チャネル）」を根本対応</b>（GAS v31）：<b>Locker/自己集荷系チャネル（価格上限・サイズ制限が厳しい）を除外し、使える有効チャネルを全て有効化</b>（＝手動出品と同じ挙動）。単一Lockerに縛られて高額品（PS5等）が弾かれていた問題を解消。旧キャッシュも新キーで無効化。',
       '🛡️ <b>公式API出品の二重送信を防止</b>：1回のクリックで作成が2回走り、2回目が「This product duplicates another in your shop（重複）」になる不具合を修正（進行中ロックで同一国の重複作成・確認ダイアログ二重表示を防止）。SGで「1回しか押していないのに重複エラー＋実際は作成済」の原因。',
       '🈺 <b>バリエ種別名（Title/Hardware等）を出品に反映＋国別パネルに表示</b>：これまでAPI出品時に種別名を送っておらず全て既定「バージョン」になっていたのを修正（1.商品情報の「バリエーション種別名」を送信）。各国カードに<b>「バリエ種別名: ◯◯」</b>を表示（未設定は既定バージョンと明記）。',
@@ -7299,6 +7301,61 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     clusters.sort(mode === 'frag' ? byFrag : bySold);
     return clusters;
   }
+  // ★子SKU整理：同一商品(カバー画像一致)グループ内で、バリエ明細SKU(子SKU)を「バリエ間で一意」かつ「国横断で同じバリエ名=同じSKU」に揃える候補を検出。
+  function childSkuClusters(targets) {
+    const byImg = new Map();
+    targets.forEach(r => (lst.byCc[r.cc] || []).forEach(l => {
+      const models = (l.models || []).filter(m => (m.n || '').trim()); // 名前つき明細(バリエ商品)のみ
+      if (!models.length) return;
+      const img = (l.image || '').trim(); if (!img) return;
+      let g = byImg.get(img); if (!g) { g = []; byImg.set(img, g); }
+      g.push({ cc: l.cc, host: (regionByCc(l.cc) || {}).host, item_id: l.item_id, name: l.name || '', status: l.status, models });
+    }));
+    const norm = s => String(s || '').trim().toUpperCase();
+    const skuOK = s => /_/.test(String(s || '')) && /[a-z]/i.test(String(s || '')) && String(s).trim().length >= 4;
+    const clusters = [];
+    byImg.forEach((g, img) => {
+      const rep = g.map(x => x.name).sort((a, b) => b.length - a.length)[0] || '';
+      const nameOrder = [], nameDisp = {}, skuVotes = {};
+      g.forEach(l => l.models.forEach(m => {
+        const nk = norm(m.n); if (!nameDisp[nk]) { nameDisp[nk] = m.n; nameOrder.push(nk); }
+        if (m.sku) { (skuVotes[nk] = skuVotes[nk] || {})[m.sku] = (skuVotes[nk][m.sku] || 0) + 1; }
+      }));
+      const used = new Set(), target = {};
+      nameOrder.forEach(nk => {
+        const votes = skuVotes[nk] || {}, cands = Object.keys(votes);
+        // 優先度：有効SKU＆未使用 → 有効SKU → 未使用 → 最多 → 生成
+        let best = cands.filter(s => skuOK(s) && !used.has(norm(s))).sort((a, b) => votes[b] - votes[a])[0]
+                || cands.filter(skuOK).sort((a, b) => votes[b] - votes[a])[0]
+                || cands.filter(s => !used.has(norm(s))).sort((a, b) => votes[b] - votes[a])[0]
+                || cands.sort((a, b) => votes[b] - votes[a])[0]
+                || recommendSku([rep, nameDisp[nk]].filter(Boolean).join(' ')) || recommendSku(nameDisp[nk]) || 'SKU';
+        let cand = best, k = 2; while (used.has(norm(cand))) { cand = best.slice(0, 36) + '_' + k; k++; }
+        used.add(norm(cand)); target[nk] = cand;
+      });
+      let changeN = 0, dupN = 0;
+      const listings = g.map(l => {
+        const seenInL = {}; l.models.forEach(m => { if (m.sku) seenInL[norm(m.sku)] = (seenInL[norm(m.sku)] || 0) + 1; });
+        const hasDup = Object.keys(seenInL).some(k => seenInL[k] > 1) || l.models.some(m => !(m.sku || '').trim());
+        if (hasDup) dupN++;
+        const changes = l.models.map(m => { const t = target[norm(m.n)]; const chg = !!(t && norm(m.sku) !== norm(t)); if (chg) changeN++; return { model_id: m.id, name: m.n, old: m.sku || '', neu: t, chg }; }).filter(c => c.neu);
+        return { cc: l.cc, host: l.host, item_id: l.item_id, name: l.name, status: l.status, changes, changed: changes.some(c => c.chg) };
+      });
+      if (!changeN && !dupN) return; // 既に整っている
+      clusters.push({ img, rep, listings, changeN, dupN, nCc: new Set(g.map(x => x.cc)).size, sold: g.reduce((s, x) => s + x.models.reduce((a, m) => a + (m.sold || 0), 0), 0), nameOrder, nameDisp, target });
+    });
+    clusters.sort((a, b) => (b.changeN - a.changeN) || (b.dupN - a.dupN) || (b.sold - a.sold));
+    return clusters;
+  }
+  // 子SKUを1出品に書込（bridge productWrite・現model_listのtier_index/価格を保持しSKUだけ差替え）
+  async function applyChildSkuOne(l) {
+    if (!l.changed) return { ok: true, skipped: true };
+    const pi = await productRead(l.host, l.item_id);
+    const byModel = {}; l.changes.forEach(c => { if (c.chg) byModel[c.model_id] = c.neu; });
+    const newModels = (pi.model_list || []).map(m => { const e = { id: m.id, tier_index: m.tier_index || [], price: modelPrice(m) }; if (byModel[m.id] != null) e.sku = byModel[m.id]; return e; });
+    const r = await productWrite(l.host, l.item_id, { model_list: newModels });
+    return r;
+  }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -7389,6 +7446,31 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
       </div>`).join('') || '<span class="smd-dim">候補なし（画像が一致しSKUが異なるカタログは見つかりませんでした）</span>'}</div>
     </div>`;
+    // ★子SKU整理カード
+    const childClust = childSkuClusters(targets); lst.childClustData = {}; childClust.forEach((c, i) => lst.childClustData[i] = c);
+    const cskuTot = childClust.reduce((s, c) => s + c.changeN, 0);
+    const childSkuHtml = `<div class="tool-card" style="max-width:none">
+      <h3 style="margin-top:0">🏷 子SKU（バリエ明細SKU）の整理・国横断アライン <span class="smd-dim" style="font-weight:400;font-size:12px">（同一商品グループ内でバリエ間を一意に＋同じバリエ名は全国同じSKUに）</span></h3>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">Shopeeは<b>同一商品内でバリエ間のSKU重複が不可</b>。カバー画像一致でグループ化し、各バリエ名に<b>推奨SKU</b>（グループ内の有効SKUの多数決優先・無ければ生成）を割当てて揃えます。<b>${childClust.length}</b>グループ・計<b>${cskuTot}</b>明細が要整理（上位40表示）。書込は現在の在庫ページ同様<b>ブリッジ（ライブPC）</b>で実行。<b style="color:#d93025">未公開</b>はShopeeが編集拒否＝スキップ。</div>
+      <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="csku-dryrun smd-btn" style="font-size:12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="書かずに『どの明細のSKUを 旧→新 にするか』を全件プレビュー。誤りチェック用">🔍 検証（書かずにプレビュー）</button>
+        <button class="csku-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全グループの子SKUを推奨どおりに連続で整理。失敗しても止まらず次へ。未公開はスキップ">🏷 全グループを一括整理（連続）</button>
+        <span class="smd-dim" style="font-size:10.5px">※まず🔍検証で目視 → 本実行が安全。1件ずつ結果表示</span>
+      </div>
+      <div id="csku-progress" style="margin-bottom:8px"></div>
+      <div class="pf-scroll" style="max-height:56vh">${childClust.slice(0, 40).map((c, i) => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
+        <img src="${IMG_CDN}${esc(c.img)}" style="width:52px;height:52px;object-fit:cover;border-radius:5px;flex:none" loading="lazy" onerror="this.style.opacity=.15">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:3px">
+            <span style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px" title="${esc(c.rep)}">${esc(c.rep)}</span>
+            <span class="smd-dim" style="font-size:10.5px">${c.nCc}か国 / ${c.listings.length}出品 / 変更${c.changeN}明細${c.dupN ? ' / <b style="color:#d93025">重複' + c.dupN + '出品</b>' : ''} / 売${c.sold}</span>
+            <button class="csku-apply smd-btn" data-i="${i}" style="font-size:10px;background:#7b52c4;color:#fff;border-color:#7b52c4;margin-left:auto" title="このグループの子SKUを推奨どおりに揃えて書込">🏷 このグループを整理</button>
+          </div>
+          <div style="font-size:10.5px;color:#555;margin-bottom:3px;display:flex;gap:8px;flex-wrap:wrap">${c.nameOrder.map(nk => `<span style="white-space:nowrap"><span style="color:#333">${esc(c.nameDisp[nk])}</span> → <b style="font-family:monospace;color:#7b52c4">${esc(c.target[nk])}</b></span>`).join('')}</div>
+          ${c.listings.map(l => `<div style="display:flex;gap:6px;align-items:center;font-size:10.5px;padding:1px 0"><b style="color:${(regionByCc(l.cc) || {}).color || '#333'};width:22px;flex:none">${l.cc}</b><a href="${editUrlFor(l.host, l.item_id)}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.name)}">${esc(l.name)}</a>${l.status !== 1 ? '<span class="smd-dim" style="font-size:9px">未公開</span>' : ''}<span class="smd-dim" style="white-space:nowrap">${l.changes.filter(x => x.chg).length}明細変更</span></div>`).join('')}
+        </div>
+      </div>`).join('') || '<span class="smd-dim">整理が必要な子SKUは見つかりませんでした（既にバリエ間一意＆国横断で揃っています）</span>'}</div>
+    </div>`;
     const sugs = computeSuggestions(targets); lst.sugData = sugs;
     const sugCatColor = { '横展開': '#1565c0', '価格差': '#e8710a', '再公開': '#7b52c4', '在庫': '#d93025' };
     const sugHtml = `<div class="tool-card" style="max-width:none">
@@ -7399,6 +7481,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       sugHtml +
       leakHtml +
       imgClustHtml +
+      childSkuHtml +
       `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📋 統合候補：同じカタログの可能性<span class="smd-dim" style="font-weight:400;font-size:12px">（中身のバリエが一致・タイトルのズレOK。PH起点→他国コピペのズレを検出）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がるバリエ(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
@@ -7452,6 +7535,39 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const allBtn = host.querySelector('.imgc-applyall'); if (allBtn) allBtn.addEventListener('click', () => applyAllImageClusters(false));
     const dryBtn = host.querySelector('.imgc-dryrun'); if (dryBtn) dryBtn.addEventListener('click', () => applyAllImageClusters(true));
     host.querySelectorAll('.imgc-sort').forEach(el => el.addEventListener('click', () => { lst.imgClustSort = el.dataset.mode; renderListingAnalysis(); }));
+    // ★子SKU整理の書込（bridge productWrite・公開中のみ・1件ずつ結果）
+    const applyChildSkuCluster = async (c) => {
+      const prog = host.querySelector('#csku-progress');
+      const affected = c.listings.filter(l => l.changed && l.status === 1); // 未公開はShopeeが編集拒否＝スキップ
+      const skippedUnp = c.listings.filter(l => l.changed && l.status !== 1).length;
+      if (!affected.length) { if (prog) prog.innerHTML = '<span class="smd-dim">公開中で変更対象の出品がありません（未公開はスキップ）</span>'; return { ok: 0, ng: 0 }; }
+      let ok = 0, ng = 0;
+      for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> 書込 ${i + 1}/${affected.length}（${l.cc} ${esc((l.name || '').slice(0, 30))}）</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } }
+      if (prog) prog.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 子SKU整理 完了：成功${ok}${ng ? ` / <span style="color:#d93025">失敗${ng}</span>` : ''}${skippedUnp ? ` / 未公開スキップ${skippedUnp}` : ''}</span>`;
+      try { logAct('出品', '子SKU整理', (c.rep || '').slice(0, 40), '成功' + ok + '/失敗' + ng); } catch (_) {}
+      return { ok, ng };
+    };
+    host.querySelectorAll('.csku-apply').forEach(el => el.addEventListener('click', async () => {
+      const c = lst.childClustData && lst.childClustData[+el.dataset.i]; if (!c) return;
+      if (state.mode !== 'live') { alert('子SKUの書込はライブモード（ブリッジ入りPC）で行ってください'); return; }
+      const n = c.listings.filter(l => l.changed && l.status === 1).length;
+      if (!confirm(`「${c.rep}」の子SKUを推奨どおりに整えます（公開中${n}出品）。よろしいですか？`)) return;
+      await applyChildSkuCluster(c); renderListingAnalysis();
+    }));
+    { const db = host.querySelector('.csku-dryrun'); if (db) db.addEventListener('click', () => {
+      const cs = Object.values(lst.childClustData || {}); const prog = host.querySelector('#csku-progress'); if (!prog) return;
+      prog.innerHTML = `<div style="border:1px solid #d9c8f5;border-radius:6px;padding:8px;background:#faf7ff;font-size:11px;max-height:44vh;overflow:auto"><b>🔍 検証（全${cs.length}グループ）</b>${cs.slice(0, 40).map(c => `<div style="margin-top:5px;border-top:1px dotted #e2d6f7;padding-top:3px"><b>${esc((c.rep || '').slice(0, 44))}</b><br>${c.listings.filter(l => l.changed).map(l => `${l.cc}${l.status !== 1 ? '<span style="color:#d93025">(未公開)</span>' : ''}: ` + l.changes.filter(x => x.chg).map(x => `${esc(x.name)} ${x.old ? esc(x.old) : '(空)'}→<b style="color:#7b52c4">${esc(x.neu)}</b>`).join(' / ')).join('<br>')}</div>`).join('')}</div>`;
+    }); }
+    { const ab = host.querySelector('.csku-applyall'); if (ab) ab.addEventListener('click', async () => {
+      if (state.mode !== 'live') { alert('子SKUの書込はライブモード（ブリッジ入りPC）で行ってください'); return; }
+      const cs = Object.values(lst.childClustData || {}); if (!cs.length) return;
+      if (!confirm(`全${cs.length}グループの子SKUを推奨どおりに整えます（公開中の出品のみ・連続書込）。よろしいですか？`)) return;
+      const prog = host.querySelector('#csku-progress'); let ok = 0, ng = 0, gi = 0;
+      for (const c of cs) { gi++; const affected = c.listings.filter(l => l.changed && l.status === 1); for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> グループ${gi}/${cs.length} ・ ${l.cc} ${esc((l.name || '').slice(0, 26))}</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } } }
+      if (prog) prog.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 全グループ完了：成功${ok}${ng ? ` / <span style="color:#d93025">失敗${ng}</span>` : ''}</span>`;
+      try { logAct('出品', '子SKU整理(一括)', cs.length + 'グループ', '成功' + ok + '/失敗' + ng); } catch (_) {}
+      renderListingAnalysis();
+    }); }
   }
   // ★全クラスタを連続で一括統一。dryRun=true なら書き込まず「何を書くか（旧SKU→新SKU＋商品名）」を全件プレビューだけ。
   //   本実行は1件ずつ処理し失敗しても止まらず次へ。⏹停止で中断可。成功は都度Supabase保存＝途中で止まっても消えない。
