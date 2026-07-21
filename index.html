@@ -489,6 +489,7 @@
         <button data-k="coverage" title="同じ商品がどの国に有る/無いか＝未出品の国（コピー出品の候補）を把握">🌏 国のヌケ（横展開）</button>
         <button data-k="analysis" title="売れ筋・施策提案・赤字検知・SKU整理・棚卸しをまとめて">📊 分析・やること</button>
         <button data-k="ledger" title="出品ごとの仕入・各国価格・手数料・利益・ROIの台帳（価格改定の参考）">💰 利益台帳</button>
+        <button data-k="plan" title="これから出品する予定の商品リスト（予定日・バリエ・仕入元を管理）">🗓️ 出品予定</button>
         <button data-k="composer" title="新しい商品をShopeeに出品する下書きを作る">✍️ 出品を作る</button>
       </span>
     </div>
@@ -497,6 +498,7 @@
     <div id="list-coverage" style="display:none;padding:12px 20px"></div>
     <div id="list-analysis" style="display:none;padding:12px 20px"></div>
     <div id="list-ledger" style="display:none;padding:12px 20px"></div>
+    <div id="list-plan" style="display:none;padding:12px 20px"></div>
     <div id="list-composer" style="display:none;padding:12px 20px;max-width:1700px"></div>
   </div>
 
@@ -4756,6 +4758,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🗓️ <b>「出品予定」リストを新設</b>（出品ページのサブタブ）：これから出品する商品を<b>商品名・バリエ・仕入元・仕入URL・出品予定国・予定日（いつまでに）・メモ・状態</b>で管理。<b>予定日順に並び期限切れは赤</b>、状態（未着手/準備中/出品済）切替、<b>✍️作成へ</b>で商品名・バリエを「出品を作る」に引き継ぎ。Supabase <code>listing_plan</code> テーブル（初回1回作成）。',
+      '📦 <b>Amazon商品の画像取込に対応</b>：仕入元がAmazonの商品ページURLからも主画像を取得（<code>data-old-hires</code>／<code>data-a-dynamic-image</code>／landingImage を優先抽出。og:imageだと主画像が取れないため）。※Amazonの画像URL（media-amazon）は従来どおり直接貼付でOK。ブリッジ稼働時に有効。',
       '🧷 <b>国のヌケに「子SKU整理・国横断アライン」を新設</b>（分析タブ）：カバー画像一致で同一商品をグループ化し、<b>バリエ明細SKU(子SKU)をバリエ間で一意＋同じバリエ名は全国同じSKU</b>に揃える候補を検出。推奨SKU（グループ内の有効SKUの多数決優先・無ければ生成）を提示し、<b>🔍検証（プレビュー）→グループ別/一括で書込</b>（公開中のみ・未公開はスキップ・1件ずつ結果）。親SKU統一の子SKU版。書込はブリッジ。',
       '↔️ 各国カードの<b>子/親SKU入力欄を広げて全文表示</b>（flex伸長）。',
       '🏷 <b>子SKU（バリエ明細SKU）の一意化＋重複警告</b>：Shopeeは同一商品内でバリエ間のSKU重複が不可。「💡SKU提案」を<b>全バリエで必ず一意</b>に生成するよう修正（重複時は _2,_3… 付与）。手入力で重複した場合も<b>該当SKU欄を赤枠＋⚠＋カード警告</b>で検知。親SKU＝それらを束ねる管理コード。',
@@ -6536,6 +6540,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('list-coverage').style.display = tab === 'coverage' ? '' : 'none';
     document.getElementById('list-analysis').style.display = tab === 'analysis' ? '' : 'none';
     document.getElementById('list-ledger').style.display = tab === 'ledger' ? '' : 'none';
+    document.getElementById('list-plan').style.display = tab === 'plan' ? '' : 'none';
     document.getElementById('list-composer').style.display = tab === 'composer' ? '' : 'none';
     // 統一感：各サブタブに他ページと同じ.pagehelp説明バナー（コンポーザーは自前の詳細バナーがあるので非表示）
     const help = document.getElementById('list-help');
@@ -6544,7 +6549,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         status: '<b>この画面：いまShopeeに出している全商品（全7か国）の一覧です。</b><span class="step">1</span>状態や国で<b>絞り込み</b> <span class="step">2</span>各行の <b>✎/✏️/🛍️</b> から編集ページ・販売ページへ <span class="step">3</span>名前・SKUで<b>検索</b>。<span style="color:#5a6b8c;font-size:11.5px">※未公開・停止も切替で表示。件数が多いので絞り込み推奨。</span>',
         coverage: '<b>この画面：同じ商品が「どの国に有る／無い」かを一目で把握します。</b><span class="step">1</span>シリーズ名クリックで<b>明細を展開</b> <span class="step">2</span><b style="color:#d93025">✗＝未出品＝コピー出品の候補</b> <span class="step">3</span>SKUを揃えて<b>連結</b>。<span style="color:#5a6b8c;font-size:11.5px">※売れてるのに未出品の国は横展開のチャンス。</span>',
         analysis: '<b>この画面：売れ筋・施策・SKU整理・棚卸しをまとめて確認します。</b><span class="step">1</span><b>🎯施策提案</b>をタスク化 <span class="step">2</span><b>🖼️同じ画像＝同一商品</b>をSKU統一（🔥売れ筋順で揃える） <span class="step">3</span><b>🔥売れ筋バリエ</b>／未公開の棚卸し。<span style="color:#5a6b8c;font-size:11.5px">※🔄更新でデータ取得後に表示。</span>',
-        ledger: '<b>この画面：出品時の 仕入・重量・各国価格・手数料・利益・ROI を記録した台帳です（価格改定の参考用）。</b><span class="step">1</span><b>✍️出品を作る</b>で📥記録／▶自動で出品時は自動記録 <span class="step">2</span>国×明細で一覧・<b style="color:#d93025">赤字ハイライト</b> <span class="step">3</span>名前で<b>検索</b>。'
+        ledger: '<b>この画面：出品時の 仕入・重量・各国価格・手数料・利益・ROI を記録した台帳です（価格改定の参考用）。</b><span class="step">1</span><b>✍️出品を作る</b>で📥記録／▶自動で出品時は自動記録 <span class="step">2</span>国×明細で一覧・<b style="color:#d93025">赤字ハイライト</b> <span class="step">3</span>名前で<b>検索</b>。',
+        plan: '<b>この画面：これから出品する予定の商品リストです（やることの管理）。</b><span class="step">1</span><b>＋追加</b>で 商品名・予定日・バリエ・仕入元 を登録 <span class="step">2</span><b>予定日順</b>に並び<b style="color:#d93025">期限切れは赤</b> <span class="step">3</span>できたら<b>✅出品済</b>／<b>✍️作成へ</b>で出品を作る画面に引き継ぎ。'
       };
       if (tab === 'composer' || !HT[tab]) { help.style.display = 'none'; }
       else { help.style.display = ''; help.innerHTML = HT[tab]; }
@@ -6553,6 +6559,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     else if (tab === 'coverage') renderCoverage();
     else if (tab === 'analysis') renderListingAnalysis();
     else if (tab === 'ledger') renderLedger();
+    else if (tab === 'plan') renderListingPlan();
     else renderList();
   }
 
@@ -6592,6 +6599,82 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!silent) toast('💰 出品台帳に記録しました（💰出品台帳タブで確認）');
       return true;
     } catch (e) { if (!silent) toast('記録エラー: ' + (e.message || e), true); return false; }
+  }
+  // 🗓️ 出品予定リスト（これから出品する商品のバックログ管理）
+  const PLAN_SOURCES = ['Amazon', 'メルカリ', 'メルカリShops', 'ヤフオク', 'PayPayフリマ', '楽天', 'Yショッピング', 'ブックオフ', 'その他'];
+  const PLAN_STATUS = ['未着手', '準備中', '出品済'];
+  function planToComposer(r) {
+    const vars = (r.variations || '').split(/[,、\n]/).map(s => s.trim()).filter(Boolean);
+    try { listApplyState({ name: r.name || '', mode: vars.length ? 'variation' : 'single', variations: vars.map(v => ({ opt: v, cost: 0, stock: 1 })) }); }
+    catch (_) { listState.name = r.name || ''; }
+    lst.tab = 'composer'; try { localStorage.setItem('smdListTab', 'composer'); } catch (_) {}
+    renderListPage(); toast('✍️ 出品を作るに引き継ぎました（商品名・バリエ）');
+  }
+  async function renderListingPlan() {
+    const host = document.getElementById('list-plan'); if (!host) return;
+    host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let rows;
+    try { rows = await sbGetAll('listing_plan', 'select=*'); }
+    catch (e) {
+      host.innerHTML = `<div class="tool-card" style="max-width:880px"><div style="font-weight:700;margin-bottom:6px">🗓️ 出品予定（テーブル未作成）</div><div style="font-size:12.5px;line-height:1.8;color:#444">Supabaseに <code>listing_plan</code> テーブルを1回作成すると使えます。SQL Editorで以下を実行してください：<pre style="background:#f6f6f6;border:1px solid #eee;border-radius:6px;padding:8px;font-size:11px;overflow:auto;white-space:pre-wrap">create table if not exists listing_plan (id text primary key, name text, variations text, source text, source_url text, countries text, due_date date, status text, note text, created_at timestamptz default now(), updated_at timestamptz default now());
+grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この画面を開き直すと使えます。</span><br><span style="color:#d93025;font-size:11.5px">${esc(e.message)}</span></div></div>`;
+      return;
+    }
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const dd = r => r.due_date ? new Date(r.due_date + 'T00:00:00') : null;
+    const done = r => r.status === '出品済';
+    rows.sort((a, b) => {
+      if (done(a) !== done(b)) return done(a) ? 1 : -1;
+      const da = dd(a), db = dd(b);
+      if (!!da !== !!db) return da ? -1 : 1;
+      if (da && db && +da !== +db) return da - db;
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    });
+    const nOpen = rows.filter(r => !done(r)).length;
+    const nOver = rows.filter(r => !done(r) && dd(r) && dd(r) < today).length;
+    host.innerHTML = `
+      <div class="tool-card" style="max-width:none">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <b style="font-size:14px">🗓️ 出品予定リスト</b>
+          <span class="smd-dim" style="font-size:11.5px">未出品 ${nOpen}件${nOver ? ` ・ <b style="color:#d93025">期限切れ ${nOver}件</b>` : ''}</span>
+        </div>
+        <datalist id="plan-src-list">${PLAN_SOURCES.map(s => `<option value="${s}">`).join('')}</datalist>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;background:#f7f9ff;border:1px solid #e0e8ff;border-radius:8px;padding:8px 10px;margin-bottom:10px">
+          <label style="font-size:11px;color:#555">商品名<span style="color:#d93025">*</span><br><input id="plan-name" placeholder="例: The Last of us シリーズ" style="width:220px;padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">バリエ<br><input id="plan-var" placeholder="例: PS4 Part2, PS5 Part1" style="width:180px;padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">仕入元<br><input id="plan-src" list="plan-src-list" placeholder="Amazon等" style="width:110px;padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">仕入URL<br><input id="plan-url" placeholder="任意" style="width:150px;padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">出品予定国<br><input id="plan-cc" placeholder="例: PH SG MY" style="width:110px;padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">予定日（いつまでに）<br><input id="plan-due" type="date" style="padding:4px 6px"></label>
+          <label style="font-size:11px;color:#555">メモ<br><input id="plan-note" placeholder="任意" style="width:150px;padding:4px 6px"></label>
+          <button id="plan-add" class="smd-btn" style="background:#1a7f37;color:#fff;border-color:#1a7f37;font-weight:700;padding:6px 12px">＋ 追加</button>
+        </div>
+        <div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="width:100%">
+          <tr><th>状態</th><th>予定日</th><th>商品名</th><th>バリエ</th><th>仕入元</th><th>予定国</th><th>メモ</th><th>作成日</th><th></th></tr>
+          ${rows.map(r => { const over = !done(r) && dd(r) && dd(r) < today; const url = (r.source_url || '').trim(); return `<tr style="${done(r) ? 'opacity:.55;' : ''}${over ? 'background:#fff4f4' : ''}">
+            <td><select class="plan-st" data-id="${esc(r.id)}" style="font-size:11px;padding:2px 4px;border:1px solid ${done(r) ? '#9ccc9c' : '#ddd'};border-radius:4px;background:${done(r) ? '#eafaef' : '#fff'}">${PLAN_STATUS.map(s => `<option${s === (r.status || '未着手') ? ' selected' : ''}>${s}</option>`).join('')}</select></td>
+            <td style="white-space:nowrap;${over ? 'color:#d93025;font-weight:700' : ''}"><input class="plan-due-e" data-id="${esc(r.id)}" type="date" value="${r.due_date || ''}" style="font-size:11px;padding:2px 3px;border:1px solid #ddd;border-radius:4px">${over ? ' ⚠' : ''}</td>
+            <td style="font-size:12px;font-weight:600">${esc(r.name || '')}</td>
+            <td style="font-size:11px;color:#555">${esc(r.variations || '')}</td>
+            <td style="font-size:11px;white-space:nowrap">${url ? `<a href="${esc(url)}" target="_blank" style="color:#1565c0;text-decoration:none">${esc(r.source || 'リンク')}↗</a>` : esc(r.source || '')}</td>
+            <td style="font-size:11px">${esc(r.countries || '')}</td>
+            <td style="font-size:11px;color:#666;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(r.note || '')}">${esc(r.note || '')}</td>
+            <td class="smd-dim" style="font-size:10px;white-space:nowrap">${(r.created_at || '').slice(0, 10)}</td>
+            <td style="white-space:nowrap"><button class="plan-tocomp smd-btn" data-id="${esc(r.id)}" title="この予定で『出品を作る』を開く（商品名・バリエを引き継ぎ）" style="font-size:10px;padding:1px 6px;border-color:#7b52c4;color:#7b52c4">✍️作成へ</button> <button class="plan-del smd-btn" data-id="${esc(r.id)}" title="削除" style="font-size:10px;padding:1px 6px;color:#d93025">🗑</button></td>
+          </tr>`; }).join('') || '<tr><td colspan="9" class="smd-dim" style="padding:12px">まだ予定はありません。上の＋追加で登録してください。</td></tr>'}
+        </table></div>
+      </div>`;
+    document.getElementById('plan-add').addEventListener('click', async () => {
+      const g = id => document.getElementById(id).value.trim();
+      const name = g('plan-name'); if (!name) { alert('商品名を入れてください'); return; }
+      const rec = { id: 'p' + Date.now(), name, variations: g('plan-var') || null, source: g('plan-src') || null, source_url: g('plan-url') || null, countries: g('plan-cc') || null, due_date: document.getElementById('plan-due').value || null, status: '未着手', note: g('plan-note') || null };
+      try { await sbUpsert('listing_plan', [rec]); toast('🗓️ 出品予定に追加しました'); try { logAct('出品', '予定追加', name, ''); } catch (_) {} renderListingPlan(); }
+      catch (e) { alert('保存失敗: ' + e.message); }
+    });
+    host.querySelectorAll('.plan-st').forEach(el => el.addEventListener('change', async () => { try { await sbPatch('listing_plan', 'id=eq.' + encodeURIComponent(el.dataset.id), { status: el.value, updated_at: new Date().toISOString() }); renderListingPlan(); } catch (e) { alert(e.message); } }));
+    host.querySelectorAll('.plan-due-e').forEach(el => el.addEventListener('change', async () => { try { await sbPatch('listing_plan', 'id=eq.' + encodeURIComponent(el.dataset.id), { due_date: el.value || null, updated_at: new Date().toISOString() }); renderListingPlan(); } catch (e) { alert(e.message); } }));
+    host.querySelectorAll('.plan-del').forEach(el => el.addEventListener('click', async () => { if (!confirm('この予定を削除しますか？')) return; try { await sbDelete('listing_plan', 'id=eq.' + encodeURIComponent(el.dataset.id)); renderListingPlan(); } catch (e) { alert(e.message); } }));
+    host.querySelectorAll('.plan-tocomp').forEach(el => el.addEventListener('click', () => { const r = rows.find(x => x.id === el.dataset.id); if (r) planToComposer(r); }));
   }
   async function renderLedger(useCache) {
     const host = document.getElementById('list-ledger'); if (!host) return;
@@ -8536,6 +8619,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try {
       const html = await bridgeRequest('GET', url);
       const pick = re => { const m = html.match(re); return m ? m[1] : null; };
+      const isAmazon = /amazon\.(co\.jp|com)/i.test(url);
+      if (isAmazon) {
+        // Amazon商品ページは主画像を og:image でなく data-old-hires / data-a-dynamic-image / #landingImage に持つ
+        let a = pick(/id=["']landingImage["'][^>]*\bdata-old-hires=["']([^"']+)["']/i)
+          || pick(/\bdata-old-hires=["']([^"']+)["']/i);
+        if (!a) { const dyn = pick(/\bdata-a-dynamic-image=["']({[^"']+})["']/i); if (dyn) { try { a = Object.keys(JSON.parse(dyn.replace(/&quot;/g, '"')))[0]; } catch (_) {} } }
+        if (!a) a = pick(/id=["']landingImage["'][^>]*\bsrc=["'](https?:\/\/[^"']+)["']/i);
+        if (a) return a.replace(/&amp;/g, '&');
+      }
       const og = pick(/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i)
         || pick(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)
         || pick(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
