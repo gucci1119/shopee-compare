@@ -4756,6 +4756,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🏬 出品コンポーザーの出品先アカウント既定を見直し：<b>既定を gs_japan_select にしない</b>（主アカウント gcsonlinestore を優先。その国にそのアカウントが無ければ選べる方を自動選択）。さらに<b>国別に選んだアカウントが保存されない不具合を修正</b>＝下書き/自動保存にアカウント選択（全体・国別・条件）を含め、再描画・ページ再読込しても選択が維持されるように。',
       '🩹 公式API出品のカテゴリ不一致を修正：カテゴリ欄に<b>フルパス</b>（例「Hobbies &amp; Collections &gt; Video Games &gt; Games」）を入れると<code>category not found</code>で出品失敗していた不具合を解消。GAS側の<code>resolveCategoryId_</code>を<b>パス対応</b>に（<code>&gt;</code>区切りの最後をリーフ名として照合し、手前の階層は一致加点に使う）。BRで category_id 101400 に解決することを実機確認。GAS Webアプリ v28。',
       '☁️ Supabase Storage 公開バケット <code>listing-imgs</code> を作成＝メルカリ等からアップした画像（data:）も🚀公式APIで出品可能に（http URL化して渡す）。',
       '📋 出品状況が「スナップショット」だと分かるように改善：一覧上部に<b>🕒最終同期◯分前</b>＋<b>これはスナップショット</b>の注意＋目立つ<b>🔄Shopeeから更新</b>ボタンを追加（Shopeeで直接いじった分＝手動出品・在庫・公開/非公開は更新するまで反映されない、を明示）。',
@@ -8332,7 +8333,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, catImgs: (s.catImgs || []).slice(), roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, mode: s.mode || ((s.variations && s.variations.length) ? 'variation' : 'single'), overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img, weightG: v.weightG != null ? v.weightG : null })) };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, catImgs: (s.catImgs || []).slice(), roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, mode: s.mode || ((s.variations && s.variations.length) ? 'variation' : 'single'), overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img, weightG: v.weightG != null ? v.weightG : null })), apiFamily: s.apiFamily || '', apiFamByCc: Object.assign({}, s.apiFamByCc || {}), apiCondition: s.apiCondition || 'USED' };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
@@ -8349,6 +8350,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0, overrides: st.overrides || {},
       variations: (st.variations || []).map(v => ({ opt: v.opt || '', sku: v.sku || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '', weightG: v.weightG != null ? v.weightG : null })),
       mode: st.mode || ((st.variations && st.variations.length) ? 'variation' : 'single'),
+      // 出品先アカウント（全体/国別）と条件は、下書きに入っていれば復元・無ければ現状維持（リロードで選択が消えないように）
+      apiFamily: st.apiFamily != null ? st.apiFamily : (listState.apiFamily || ''),
+      apiFamByCc: st.apiFamByCc || listState.apiFamByCc || {},
+      apiCondition: st.apiCondition || listState.apiCondition || 'USED',
     });
     catMigrate(); // 旧下書き(images/uploadImgs)→catImgs
     listSyncForm(); listVarsRender(); listImgPrev(); listRefresh(); liApplyModeUI();
@@ -8797,7 +8802,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★公式API直接出品（アカウント×国）：登録簿(系統)を確保→各国カードにshop_idを解決してボタンを出す
     if (!state.accounts && !listState._acctLoading) { listState._acctLoading = true; loadAccounts().then(() => { listState._acctLoading = false; listRefresh(); }).catch(() => { listState._acctLoading = false; }); }
     const apiFamilies = [...new Set((state.accounts || []).filter(a => a.shop_id).map(a => famOfLabel(a.label)))];
-    if (apiFamilies.length && !apiFamilies.includes(listState.apiFamily)) listState.apiFamily = apiFamilies[0];
+    // 既定はgcsonlinestore（主アカウント・VNもある）を優先。gs_japan_selectを既定にしない
+    if (apiFamilies.length && !apiFamilies.includes(listState.apiFamily)) listState.apiFamily = (apiFamilies.find(f => /gcsonline/i.test(f)) || apiFamilies.find(f => !/gs_japan|japan_select/i.test(f)) || apiFamilies[0]);
     const apiFam = listState.apiFamily || '';
     if (!listState.apiFamByCc) listState.apiFamByCc = {}; // 国別のアカウント上書き（cc→系統）
     // その国のショップが有る系統だけ / 国別上書き→無ければ全体既定→無ければ先頭
