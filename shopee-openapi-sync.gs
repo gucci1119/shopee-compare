@@ -81,6 +81,17 @@ function doGet(e) {
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★公開/非公開の切替（unlist_item）。params: shop_id, item_id, unlist(1=非公開/0=公開)。「公開」ボタン＝unlist=0。
+    if (p.action === 'unlist_item') {
+      var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var lo;
+      try {
+        var lwt = P_().getProperty('WRITE_TOKEN');
+        if (!lwt || p.token !== lwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        lo = unlistItem_(p.shop_id, p.item_id, p.unlist === '1' || p.unlist === 'true');
+      } catch (err) { lo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★モデル(明細)読み：get_model_list（ブリッジproductRead代替）。params: shop_id, item_id。読み取り専用なのでtoken不要。
     if (p.action === 'get_models') {
       var gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -713,6 +724,17 @@ function updateItem_(body) {
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
+}
+// 公開/非公開の切替（unlist=false で公開=NORMAL、true で非公開=UNLIST）。未公開商品の「公開」ボタン用。
+function unlistItem_(shopId, itemId, unlist) {
+  shopId = parseInt(shopId, 10); if (!shopId) throw new Error('shop_id 必須');
+  itemId = parseInt(itemId, 10); if (!itemId) throw new Error('item_id 必須');
+  var j = callShop_(shopId, '/api/v2/product/unlist_item', null, 'post', { item_list: [{ item_id: itemId, unlist: !!unlist }] });
+  if (j.error && j.error !== '') throw new Error(j.error + ' ' + (j.message || ''));
+  var resp = j.response || {};
+  var fail = (resp.failure_list || [])[0];
+  if (fail) throw new Error('unlist_item失敗: ' + (fail.failed_reason || JSON.stringify(fail)));
+  return { ok: true, shop_id: shopId, item_id: itemId, unlist: !!unlist };
 }
 // 安全確認用：1件だけ非公開(UNLIST)で作成テスト（値を書き換えて手動実行→編集画面で確認→削除）
 function testAddItem() {
