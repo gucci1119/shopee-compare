@@ -6959,6 +6959,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return u.slice(0, 6).join(' ');
   }
   const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40).replace(/_$/, '');
+  // 子SKU＝「親SKU_<バリエ固有部>」。バリエ名に含まれる商品名は除いて同語の重複を防ぐ（例: THE_LAST_OF_US_PS4_PART_II ／ ×THE_LAST_OF_US_PS4_THE_LAST_OF_US_PART）
+  function childSku(parentSku, name, opt) {
+    const base = parentSku || recommendSku(name) || 'SKU';
+    const nameSku = recommendSku(name);
+    let tail = recommendSku(opt);
+    if (nameSku && tail) tail = tail.split(nameSku).join('_').replace(/_+/g, '_').replace(/^_|_$/g, ''); // バリエ名側の商品名を除去
+    const out = tail ? (base + '_' + tail) : base;
+    return out.replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40).replace(/_$/, '');
+  }
   // 親SKU＋全バリエSKUをまとめて提案・適用（overwrite=falseは空欄だけ埋める）。国別カード/各セクション共通。
   // ★子SKU(バリエ明細SKU)はバリエ間で必ず一意にする（Shopee制約＝同一商品内で重複不可）。親SKUはそれを束ねる管理コード。
   const skuNorm = (s) => String(s || '').trim().toUpperCase();
@@ -6971,7 +6980,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!overwrite) vars.forEach(v => { if ((v.sku || '').trim()) seen.add(skuNorm(v.sku)); }); // 据え置く既存SKUも重複判定に含める
     vars.forEach((v, idx) => {
       if (!overwrite && (v.sku || '').trim()) return; // 空欄だけ埋めるモードで既に入っていれば据え置き
-      let base = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')) || recommendSku(listState.name) || 'SKU';
+      let base = childSku(listState.parentSku, listState.name, v.opt) || recommendSku(listState.name) || 'SKU';
       let cand = base, k = 2;
       while (seen.has(skuNorm(cand))) { cand = base.slice(0, 36) + '_' + k; k++; } // 重複したら _2,_3… で一意化
       v.sku = cand; seen.add(skuNorm(cand));
@@ -7412,7 +7421,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 || cands.filter(skuOK).sort((a, b) => votes[b] - votes[a])[0]
                 || cands.filter(s => !used.has(norm(s))).sort((a, b) => votes[b] - votes[a])[0]
                 || cands.sort((a, b) => votes[b] - votes[a])[0]
-                || recommendSku([rep, nameDisp[nk]].filter(Boolean).join(' ')) || recommendSku(nameDisp[nk]) || 'SKU';
+                || childSku(recommendSku(rep), rep, nameDisp[nk]) || recommendSku(nameDisp[nk]) || 'SKU';
         let cand = best, k = 2; while (used.has(norm(cand))) { cand = best.slice(0, 36) + '_' + k; k++; }
         used.add(norm(cand)); target[nk] = cand;
       });
@@ -7534,10 +7543,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const cskuTot = childClust.reduce((s, c) => s + c.changeN, 0);
     const childSkuHtml = `<div class="tool-card" style="max-width:none">
       <h3 style="margin-top:0">🏷 子SKU（バリエ明細SKU）の整理・国横断アライン <span class="smd-dim" style="font-weight:400;font-size:12px">（同一商品グループ内でバリエ間を一意に＋同じバリエ名は全国同じSKUに）</span></h3>
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">Shopeeは<b>同一商品内でバリエ間のSKU重複が不可</b>。カバー画像一致でグループ化し、各バリエ名に<b>推奨SKU</b>（グループ内の有効SKUの多数決優先・無ければ生成）を割当てて揃えます。<b>${childClust.length}</b>グループ・計<b>${cskuTot}</b>明細が要整理（上位40表示）。書込は現在の在庫ページ同様<b>ブリッジ（ライブPC）</b>で実行。<b style="color:#d93025">未公開</b>はShopeeが編集拒否＝スキップ。</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">Shopeeは<b>同一商品内でバリエ間のSKU重複が不可</b>。カバー画像一致でグループ化し、各バリエ名に<b>推奨SKU</b>（グループ内の有効SKUの多数決優先・無ければ生成）を割当てて揃えます。<b>${childClust.length}</b>グループ・計<b>${cskuTot}</b>明細が要整理（上位40表示）。書込は現在の在庫ページ同様<b>ブリッジ（ライブPC）</b>で実行。<b>未公開も試行</b>します（Shopeeが拒否する場合は失敗として表示）。</div>
       <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="csku-dryrun smd-btn" style="font-size:12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="書かずに『どの明細のSKUを 旧→新 にするか』を全件プレビュー。誤りチェック用">🔍 検証（書かずにプレビュー）</button>
-        <button class="csku-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全グループの子SKUを推奨どおりに連続で整理。失敗しても止まらず次へ。未公開はスキップ">🏷 全グループを一括整理（連続）</button>
+        <button class="csku-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全グループの子SKUを推奨どおりに連続で整理。失敗しても止まらず次へ。未公開も試行">🏷 全グループを一括整理（連続）</button>
         <span class="smd-dim" style="font-size:10.5px">※まず🔍検証で目視 → 本実行が安全。1件ずつ結果表示</span>
       </div>
       <div id="csku-progress" style="margin-bottom:8px"></div>
@@ -7621,20 +7630,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★子SKU整理の書込（bridge productWrite・公開中のみ・1件ずつ結果）
     const applyChildSkuCluster = async (c) => {
       const prog = host.querySelector('#csku-progress');
-      const affected = c.listings.filter(l => l.changed && l.status === 1); // 未公開はShopeeが編集拒否＝スキップ
-      const skippedUnp = c.listings.filter(l => l.changed && l.status !== 1).length;
-      if (!affected.length) { if (prog) prog.innerHTML = '<span class="smd-dim">公開中で変更対象の出品がありません（未公開はスキップ）</span>'; return { ok: 0, ng: 0 }; }
+      const affected = c.listings.filter(l => l.changed); // 未公開も試行（Shopeeが拒否する場合は失敗として表示）
+      if (!affected.length) { if (prog) prog.innerHTML = '<span class="smd-dim">変更対象の出品がありません</span>'; return { ok: 0, ng: 0 }; }
       let ok = 0, ng = 0;
-      for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> 書込 ${i + 1}/${affected.length}（${l.cc} ${esc((l.name || '').slice(0, 30))}）</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } }
-      if (prog) prog.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 子SKU整理 完了：成功${ok}${ng ? ` / <span style="color:#d93025">失敗${ng}</span>` : ''}${skippedUnp ? ` / 未公開スキップ${skippedUnp}` : ''}</span>`;
+      for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> 書込 ${i + 1}/${affected.length}（${l.cc}${l.status !== 1 ? '/未公開' : ''} ${esc((l.name || '').slice(0, 30))}）</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } }
+      if (prog) prog.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 子SKU整理 完了：成功${ok}${ng ? ` / <span style="color:#d93025">失敗${ng}</span>（未公開はShopeeが拒否することあり）` : ''}</span>`;
       try { logAct('出品', '子SKU整理', (c.rep || '').slice(0, 40), '成功' + ok + '/失敗' + ng); } catch (_) {}
       return { ok, ng };
     };
     host.querySelectorAll('.csku-apply').forEach(el => el.addEventListener('click', async () => {
       const c = lst.childClustData && lst.childClustData[+el.dataset.i]; if (!c) return;
       if (state.mode !== 'live') { alert('子SKUの書込はライブモード（ブリッジ入りPC）で行ってください'); return; }
-      const n = c.listings.filter(l => l.changed && l.status === 1).length;
-      if (!confirm(`「${c.rep}」の子SKUを推奨どおりに整えます（公開中${n}出品）。よろしいですか？`)) return;
+      const n = c.listings.filter(l => l.changed).length;
+      if (!confirm(`「${c.rep}」の子SKUを推奨どおりに整えます（${n}出品・未公開含む）。よろしいですか？`)) return;
       await applyChildSkuCluster(c); renderListingAnalysis();
     }));
     { const db = host.querySelector('.csku-dryrun'); if (db) db.addEventListener('click', () => {
@@ -7646,7 +7654,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const cs = Object.values(lst.childClustData || {}); if (!cs.length) return;
       if (!confirm(`全${cs.length}グループの子SKUを推奨どおりに整えます（公開中の出品のみ・連続書込）。よろしいですか？`)) return;
       const prog = host.querySelector('#csku-progress'); let ok = 0, ng = 0, gi = 0;
-      for (const c of cs) { gi++; const affected = c.listings.filter(l => l.changed && l.status === 1); for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> グループ${gi}/${cs.length} ・ ${l.cc} ${esc((l.name || '').slice(0, 26))}</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } } }
+      for (const c of cs) { gi++; const affected = c.listings.filter(l => l.changed); for (let i = 0; i < affected.length; i++) { const l = affected[i]; if (prog) prog.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span> グループ${gi}/${cs.length} ・ ${l.cc}${l.status !== 1 ? '/未公開' : ''} ${esc((l.name || '').slice(0, 26))}</span>`; try { const r = await applyChildSkuOne(l); (r && r.ok !== false) ? ok++ : ng++; } catch (e) { ng++; } } }
       if (prog) prog.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 全グループ完了：成功${ok}${ng ? ` / <span style="color:#d93025">失敗${ng}</span>` : ''}</span>`;
       try { logAct('出品', '子SKU整理(一括)', cs.length + 'グループ', '成功' + ok + '/失敗' + ng); } catch (_) {}
       renderListingAnalysis();
