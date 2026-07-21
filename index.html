@@ -4755,6 +4755,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-07-22', items: [
+      '📋 出品状況が「スナップショット」だと分かるように改善：一覧上部に<b>🕒最終同期◯分前</b>＋<b>これはスナップショット</b>の注意＋目立つ<b>🔄Shopeeから更新</b>ボタンを追加（Shopeeで直接いじった分＝手動出品・在庫・公開/非公開は更新するまで反映されない、を明示）。',
+      '🔄 <b>1商品だけライブ更新</b>：各商品の行に🔄ボタンを追加。全件取り直さず、その商品の<b>最新の在庫・価格だけ公式API（get_model_list）で取り直して即反映</b>。※初回だけ全体同期でショップIDを取得しておく必要あり。',
+    ] },
     { date: '2026-07-21', items: [
       '↩️ 返品・キャンセル管理を大幅強化：①<b>返品・返金の分析</b>（シリーズ/国/理由別の件数・返金額チップ）でリージョン違い等のパターンを可視化。②<b>キャンセル理由を公式APIで自動取得</b>（order/get_order_detailのcancel_reason/cancel_by/buyer_cancel_reason→英日変換して表示・orders.cancel_reasonに保存）。③<b>段階</b>列（発送前/日本国内/日本を出た後）＝SLS+半額保証の対象は「日本を出た後」のみ。cancel_reasonから自動推定＋手動選択。',
       '🩹 SLS+補償の実質損失管理＆自動検知：<b>実質損失＝保証対象の返金−受取補償</b>を「補償に頼らない前提」で表示（補償はShopee審査で数ヶ月〜大幅遅延のため）。<b>get_payout_detailのoffline_adjustment_listから補償・関税を自動取込</b>（order_adjustments表）→補償(プラス)は注文別に円換算してSLS+補償の受取に自動反映、<b>関税(マイナス、例VN輸入関税)</b>は🧾調整サマリーで国別に把握。payout同期に相乗り＝追加API無。履歴はbackfillAdjustmentsで過去180日取込。',
@@ -6287,6 +6291,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ===== 一括編集の公式API優先ヘルパー（shop_id判明+writeToken→公式API、無ければブリッジに自動フォールバック） =====
   function shopIdOfListing(cc, itemId) { const row = ((lst.byCc && lst.byCc[cc]) || []).find(x => x.item_id === itemId); return row && row.shop_id ? row.shop_id : null; }
+  // 1商品だけをライブ最新化（全件取り直さず、公式API get_model_list でその商品の在庫・価格だけ取り直す）
+  async function refreshOneListing(cc, itemId) {
+    const row = ((lst.byCc && lst.byCc[cc]) || []).find(x => String(x.item_id) === String(itemId));
+    if (!row) { toast('対象の商品が見つかりません', true); return; }
+    itemId = row.item_id;   // DBの型（数値）に揃える
+    const sid = shopIdOfListing(cc, itemId);
+    if (!settings.openapiUrl) { alert('公式APIのURLが未設定です（⚙️設定）。1商品だけの更新は公式APIを使います。全体は🔄Shopeeから更新で取得できます。'); return; }
+    if (!sid) { alert('この商品のショップIDが未取得です。まず一度「🔄Shopeeから更新」で全体同期すると、以後は1商品だけ更新できます。'); return; }
+    toast('🔄 ' + cc + ' の最新の在庫・価格を取得中…');
+    try {
+      const d = await openapiGetModels(sid, itemId);
+      const raw = (d && d.models) || [];
+      const oldSold = {}; (row.models || []).forEach(m => { oldSold[m.id] = m.sold || 0; });
+      const models = raw.map(m => ({ id: m.model_id, n: m.name || '', sku: m.sku || '', img: '', price: Number(m.price) || 0, stock: Number(m.stock) || 0, sold: oldSold[m.model_id] || 0 }));
+      const prices = models.map(m => m.price).filter(p => p > 0);
+      row.models = models;
+      row.price_min = prices.length ? Math.min(...prices) : row.price_min;
+      row.price_max = prices.length ? Math.max(...prices) : row.price_max;
+      row.stock = models.reduce((s, m) => s + (m.stock || 0), 0);
+      row.model_count = models.length > 1 ? models.length : 0;   // model_id 0 の単品は 0＝「単品」表示
+      row.synced_at = new Date().toISOString();
+      try { await sbUpsert('listings', [row]); } catch (e) { console.warn('refreshOne upsert', e.message); }
+      drawListingStatus();
+      toast('✅ ' + cc + ' この商品を最新化しました（在庫' + row.stock + '）');
+    } catch (e) { toast('最新化に失敗: ' + e.message, true); }
+  }
   const stkModelBridge = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
   // 明細(モデル)を公式API優先で読む → {src, sid, pi?, models:[{model_id,price,stock,sku,tier_index,name}]}
   async function readModelsForItem(it) {
@@ -7513,7 +7543,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
         <div style="display:flex;flex-direction:column;gap:3px;align-items:center;flex:none">
           <button class="lst-edit" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="ポータル内で編集してShopeeに保存" style="border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">✎編集</button>
-          <div style="display:flex;gap:4px">
+          <div style="display:flex;gap:4px;align-items:center">
+            <button class="lst-refresh1" data-cc="${r.cc}" data-id="${r.item_id}" title="この商品だけ最新の在庫・価格に更新（公式API）" style="border:1px solid #1565c0;background:#fff;color:#1565c0;border-radius:6px;padding:2px 6px;cursor:pointer;font-size:12px;line-height:1">🔄</button>
             <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
           </div>
@@ -7546,6 +7577,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#f1f6ff;border:1px solid #cfe0ff;border-radius:8px;padding:6px 10px;margin-bottom:6px;font-size:11.5px">
+        <span>🕒 <b>最終同期 ${listSyncStr()}</b></span>
+        <span class="smd-dim">📸 これは<b>スナップショット</b>です。Shopeeで直接変えた分（手動出品・在庫・公開/非公開）は <b>🔄Shopeeから更新</b> を押すまで反映されません。</span>
+        <button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700">🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
+      </div>
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${rows.length}</b>件（全${totalAll}件）｜ 表示 ${Math.min(N, rows.length)}件 ｜ ${per || '国未選択'}</div>
       <div id="lst-list"></div>
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
@@ -7554,10 +7590,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const mb = document.getElementById('lst-more-btn'); if (mb) mb.addEventListener('click', () => { lst.showN = N + 60; drawListingStatus(); }); }
     { const ab = document.getElementById('lst-all-btn'); if (ab) ab.addEventListener('click', () => { if (rows.length > 1500 && !confirm(rows.length + '件を一度に表示すると重くなる場合があります。よろしいですか？（絞り込み推奨）')) return; lst.showN = rows.length; drawListingStatus(); }); }
     document.getElementById('lst-sync').addEventListener('click', syncListings);
+    { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.showN = 60; drawListingStatus(); });
     let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.showN = 60; drawListingStatus(); }, 200); });
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
+    document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
     // 展開したライブ行：現在の予約状態＋最新在庫を取得してその場編集を有効化
     lst.poCache = lst.poCache || {};
     document.querySelectorAll('#lst-list .lst-inline').forEach(async panel => {
