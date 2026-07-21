@@ -613,7 +613,8 @@ function testAccountHealth() {
 }
 
 // ================= 公式APIで出品作成（add_item・出す先=shop_idで指定＝アカウント/国を明示） =================
-// カテゴリ解決：get_categoryからキーワード(既定'Games')に一致するleafのcategory_idを返す（shop毎キャッシュ）
+// カテゴリ解決：get_categoryからキーワード/パスに一致するleafのcategory_idを返す（shop毎キャッシュ）
+// keyword は "Games" 単語でも "Hobbies & Collections > Video Games > Games" のパスでもよい（>区切り。最後=leaf名、手前=親ヒント）
 function resolveCategoryId_(shopId, keyword) {
   keyword = String(keyword || 'Games');
   var ck = 'catid_' + shopId + '_' + keyword.toLowerCase();
@@ -621,7 +622,11 @@ function resolveCategoryId_(shopId, keyword) {
   var j = callShop_(shopId, '/api/v2/product/get_category', { language: 'en' }, 'get');
   var list = ((j.response || {}).category_list) || [];
   var byId = {}; list.forEach(function (c) { byId[c.category_id] = c; });
-  var kw = keyword.toLowerCase(), best = null;
+  // パス対応：">"区切りの最後の要素をleaf一致キーワード、手前の要素を親チェーンのヒント(加点)に使う
+  var segs = keyword.split('>').map(function (s) { return s.trim().toLowerCase(); }).filter(function (s) { return s; });
+  var kw = segs.length ? segs[segs.length - 1] : keyword.toLowerCase();
+  var parents = segs.slice(0, -1);            // 例: ["hobbies & collections","video games"]
+  var best = null;
   list.forEach(function (c) {
     if (c.has_children) return; // leafのみ出品可
     var nm = String(c.display_category_name || c.original_category_name || c.category_name || '').toLowerCase();
@@ -629,6 +634,7 @@ function resolveCategoryId_(shopId, keyword) {
     var chain = nm, p = c, d = 0;
     while (p && p.parent_category_id && byId[p.parent_category_id] && d < 10) { p = byId[p.parent_category_id]; chain += ' < ' + String(p.display_category_name || p.category_name || '').toLowerCase(); d++; }
     var score = (chain.indexOf('video game') >= 0 ? 10 : 0) + (nm === kw ? 4 : 0) + (nm === 'games' ? 3 : 0);
+    parents.forEach(function (seg) { if (seg && chain.indexOf(seg) >= 0) score += 5; }); // 親パスが階層に含まれれば加点
     if (!best || score > best.score) best = { id: c.category_id, score: score };
   });
   if (!best) throw new Error('category "' + keyword + '" not found (shop ' + shopId + ')');
