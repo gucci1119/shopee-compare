@@ -4458,15 +4458,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (e) { body.innerHTML = errBox(e); return; }
     // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
     const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ（||1だと現地通貨をそのまま円扱いし過大化）
-    const adjComp = new Map();   // cc:sn → 補償合計(円)
-    const adjByCc = {};          // cc → { comp, duty }（円）
-    (adjustments || []).forEach(a => {
+    // ★同一調整の重複を除去（cc:sn:種別:金額:シナリオ が同じ＝二重取込。注文SN重複の原因）
+    const _adjSeen = new Set();
+    const adjustmentsU = (adjustments || []).filter(a => { const k = [a.cc, a.order_sn, a.kind, Math.round(Number(a.amount) || 0), (a.module || a.scenario || '')].join('|'); if (_adjSeen.has(k)) return false; _adjSeen.add(k); return true; });
+    const adjComp = new Map();    // cc:sn → 補償合計(円)
+    const adjCompLoc = new Map(); // cc:sn → 補償合計(現地通貨)
+    const adjByCc = {};           // cc → { comp, duty }（円）
+    adjustmentsU.forEach(a => {
       const rate = adjRate(a.cc); if (!rate) return; // レート不明の国は集計に入れない
-      const jpy = Math.round((Number(a.amount) || 0) * rate);
-      if (a.kind === 'compensation' && a.order_sn) adjComp.set(a.cc + ':' + a.order_sn, (adjComp.get(a.cc + ':' + a.order_sn) || 0) + jpy);
+      const loc = Number(a.amount) || 0, jpy = Math.round(loc * rate);
+      if (a.kind === 'compensation' && a.order_sn) { const key = a.cc + ':' + a.order_sn; adjComp.set(key, (adjComp.get(key) || 0) + jpy); adjCompLoc.set(key, (adjCompLoc.get(key) || 0) + loc); }
       const b = adjByCc[a.cc] = adjByCc[a.cc] || { comp: 0, duty: 0 };
       if (a.kind === 'compensation') b.comp += jpy; else if (a.kind === 'duty') b.duty += jpy;
     });
+    const fmtLoc2 = (cc, v) => { const rg = regionByCc(cc) || {}; return (rg.cur || '') + Math.round(v).toLocaleString(); }; // 現地通貨表示
     const compAutoTotal = Object.values(adjByCc).reduce((s, b) => s + b.comp, 0);
     const dutyTotal = Object.values(adjByCc).reduce((s, b) => s + b.duty, 0);
     // Shopee注文APIのキャンセル理由(英語)→日本語。末尾の [system]/[buyer]/[seller] は誰がの表示に。
@@ -4491,30 +4496,43 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
     const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
     const extra = issues.filter(r => !cancelKeys.has(r.cc + ':' + r.sn)).map(r => ({ cc: r.cc, sn: r.sn, buyer: '', status: '手動追加', items: [] }));
-    const rows = cancelled.concat(extra);
+    const rows = cancelled.concat(extra);   // 分析・補償カード用（キャンセル＋手動追加）
+    // 補償のみの注文（配達後の紛失/破損等＝キャンセルではない）も一覧に統合して表示
+    const rowKeys0 = new Set(rows.map(o => o.cc + ':' + o.sn));
+    const compKeys = new Set(); adjustmentsU.forEach(a => { if (a.kind === 'compensation' && a.order_sn) compKeys.add(a.cc + ':' + a.order_sn); });
+    const compExtra = [...compKeys].filter(k => !rowKeys0.has(k)).map(k => { const i = k.indexOf(':'); const cc = k.slice(0, i), sn = k.slice(i + 1); return { cc, sn, buyer: '', status: '補償', items: [], _comp: true, order_date: snToDate(sn) || '' }; });
+    const rowsAll = rows.concat(compExtra);
+    // フィルタ（全部/キャンセル/補償あり/保証待ち）
+    const hasCompRow = o => (adjComp.get(o.cc + ':' + o.sn) || 0) > 0 || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0) > 0;
+    const rf = renderReturns._filter || 'all';
+    const rowsView = rf === 'cancel' ? rowsAll.filter(o => !o._comp)
+      : rf === 'comp' ? rowsAll.filter(hasCompRow)
+      : rf === 'pending' ? rowsAll.filter(o => { const iss = issueMap.get(o.cc + ':' + o.sn) || {}; return slsEligible(o, iss) && (iss.refund_jpy || 0) > 0 && !hasCompRow(o); })
+      : rowsAll;
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
     const sel = (cls, cc, sn, opts, cur) => `<select class="${cls}" data-cc="${esc(cc)}" data-sn="${esc(sn)}" style="padding:2px 4px;font-size:11px">${opts.map(o => `<option ${o === (cur || '') ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`;
     const retN = renderReturns._showN || 50;
-    const rowHtml = rows.slice(0, retN).map(o => {
+    const rowHtml = rowsView.slice(0, retN).map(o => {
       const it = (o.items || [])[0] || {};
       const iss = issueMap.get(o.cc + ':' + o.sn) || {};
       const rg = regionByCc(o.cc);
-      const dt = o.order_ts ? jstDateTime(o.order_ts) : (o.order_date || snToDate(o.sn) || '');
-      return `<tr>
+      // order_ts は秒単位で保存されている（そのままだと new Date が ms 扱いで1970年になる）→秒なら×1000。無ければSNから日付
+      const dt = o.order_ts ? jstDateTime(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || snToDate(o.sn) || '');
+      return `<tr${o._comp ? ' style="background:#f2fbf5"' : ''}>
         <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
         <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
         <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
         <td style="font-size:11px;white-space:nowrap">${esc(dt)}</td>
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
-        <td style="font-size:11px">${nm(it.name, '260px')}</td>
-        <td>${sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
+        <td style="font-size:11px">${o._comp && !it.name ? '<span class="smd-dim">（補償のみ・配達後の紛失/破損等）</span>' : nm(it.name, '260px')}</td>
+        <td>${o._comp ? '<span style="color:#188038;font-weight:700;font-size:11px;white-space:nowrap">🎁 補償</span>' : sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
         <td title="SLS+半額保証の対象は『日本を出た後』のみ">${sel('ri-stage', o.cc, o.sn, STAGES, effStage(o, iss))}${!iss.stage && effStage(o, iss) ? '<span title="理由からの推定（確定は選択を）" style="color:#e8710a;font-size:10px">推</span>' : ''}</td>
         <td><input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
-        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+補償の受取（payout明細から自動検知／手動記入）">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#1a7f37;font-size:9px">✅自動検知</span>`; return '<span class="smd-dim">—</span>'; })()}</td>
+        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+補償の受取（payout明細から自動検知／手動記入）">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅自動検知</span>`; return '<span class="smd-dim">—</span>'; })()}</td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
       </tr>`;
@@ -4596,7 +4614,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     })();
     // 🧾 payout明細の調整（補償・関税）＝自動取得サマリー（order_adjustments）
     const adjCard = (() => {
-      if (!(adjustments || []).length) return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><b style="font-size:14px">🧾 補償が入った注文</b><div class="smd-dim" style="font-size:11.5px;margin-top:6px">まだ補償データがありません。補償はShopee入金明細(payout)から自動取得します（GASのpayout同期＋過去分は <code>backfillAdjustments</code> を1回実行）。補償が入るとここに「どの注文にいくら着いたか」が出ます。<br>※order_adjustments テーブル未作成の場合は返品メモリの要SQLを実行してください。</div></div>`;
+      if (!adjustmentsU.length) return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><b style="font-size:14px">🧾 補償が入った注文</b><div class="smd-dim" style="font-size:11.5px;margin-top:6px">まだ補償データがありません。補償はShopee入金明細(payout)から自動取得します（GASのpayout同期＋過去分は <code>backfillAdjustments</code> を1回実行）。補償が入るとここに「どの注文にいくら着いたか」が出ます。<br>※order_adjustments テーブル未作成の場合は返品メモリの要SQLを実行してください。</div></div>`;
       const ccs = Object.keys(adjByCc).sort((a, b) => (adjByCc[b].comp + Math.abs(adjByCc[b].duty)) - (adjByCc[a].comp + Math.abs(adjByCc[a].duty)));
       const chip = (cc, b) => `<span style="display:inline-flex;gap:6px;align-items:center;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${cc}</b>${b.comp ? `<span style="color:#188038">補償+${fmtJpy(b.comp)}</span>` : ''}${b.duty ? `<span style="color:#d93025">関税${fmtJpy(b.duty)}</span>` : ''}</span>`;
       return `<details open class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">🧾 補償が入った注文（payout明細から自動取得）<span class="smd-dim" style="font-weight:400;font-size:11px">— どの注文に保証金が着いたか／関税も</span></summary>
@@ -4607,19 +4625,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>
           <div style="margin-bottom:4px">${ccs.map(cc => chip(cc, adjByCc[cc])).join('') || '<span class="smd-dim">—</span>'}</div>
           ${(() => {
-        const cl = (adjustments || []).filter(a => a.kind === 'compensation' && a.order_sn).map(a => ({ cc: a.cc, sn: a.order_sn, jpy: Math.round((Number(a.amount) || 0) * adjRate(a.cc)), scen: a.module || a.scenario || '' })).filter(x => x.jpy > 0).sort((x, y) => y.jpy - x.jpy);
+        const cl = adjustmentsU.filter(a => a.kind === 'compensation' && a.order_sn).map(a => ({ cc: a.cc, sn: a.order_sn, loc: Number(a.amount) || 0, jpy: Math.round((Number(a.amount) || 0) * adjRate(a.cc)), scen: a.module || a.scenario || '' })).filter(x => x.jpy > 0).sort((x, y) => y.jpy - x.jpy);
         if (!cl.length) return '<div class="smd-dim" style="font-size:11px">補償が入った注文はまだありません（backfillAdjustments実行後に反映）。</div>';
-        const scenJa = s => /non-receipt/i.test(s) ? '荷物未着' : /lost|damage/i.test(s) ? '紛失・破損' : /return shipping|reimbursement/i.test(s) ? '返送送料' : (s || '補償');
-        return `<details open style="margin-top:6px"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#188038">✅ 補償が入った注文 ${cl.length}件（＝保証金が着いた注文。ここに無い注文はまだ未着）</summary>
-          <div class="pf-scroll" style="max-height:34vh;margin-top:6px"><table class="pf-table" style="min-width:520px;font-size:11px"><tr><th>国</th><th>注文SN</th><th>補償額(円)</th><th>種類</th></tr>
-          ${cl.slice(0, 200).map(x => `<tr><td><b style="color:${(regionByCc(x.cc) || {}).color || '#333'}">${esc(x.cc)}</b></td><td style="word-break:break-all">${esc(x.sn)}</td><td style="text-align:right;color:#188038;font-weight:700">+${fmtJpy(x.jpy)}</td><td>${esc(scenJa(x.scen))}</td></tr>`).join('')}</table></div>
+        const scenJa = s => /non-receipt/i.test(s) ? '荷物未着' : /lost|damage/i.test(s) ? '紛失・破損' : /return shipping|reimbursement/i.test(s) ? '返送送料' : /subsidy/i.test(s) ? '補助' : /refund/i.test(s) ? '返戻' : /compensation/i.test(s) ? '補償' : (s || '補償');
+        return `<details open style="margin-top:6px"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#188038">✅ 補償が入った注文 ${cl.length}件（＝保証金が着いた注文。下の一覧にも「🎁補償」行＋補償列で出ます）</summary>
+          <div class="pf-scroll" style="max-height:34vh;margin-top:6px"><table class="pf-table" style="min-width:560px;font-size:11px"><tr><th>国</th><th>注文SN</th><th>補償額(現地)</th><th>補償額(円)</th><th>種類</th></tr>
+          ${cl.slice(0, 200).map(x => `<tr><td><b style="color:${(regionByCc(x.cc) || {}).color || '#333'}">${esc(x.cc)}</b></td><td style="word-break:break-all">${esc(x.sn)}</td><td style="text-align:right;color:#188038">${esc(fmtLoc2(x.cc, x.loc))}</td><td style="text-align:right;color:#188038;font-weight:700">+${fmtJpy(x.jpy)}</td><td>${esc(scenJa(x.scen))}</td></tr>`).join('')}</table></div>
           ${cl.length > 200 ? `<div class="smd-dim" style="font-size:10px;margin-top:3px">上位200件を表示（全${cl.length}件）</div>` : ''}</details>`;
       })()}
           <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 補償（プラス）は、その注文が「段階＝日本を出た後」かつ返金額を記録済みなら上の「SLS+補償」の受取補償に反映されます。<b>各注文の補償額は上の一覧の「補償」列にも✅で出ます</b>。関税・輸入税（マイナス、例：VN輸入関税）は実コスト。金額は各国通貨→円換算（概算）。明細はGASの backfillAdjustments で過去分も取込。</div>
         </div></details>`;
     })();
     body.innerHTML =
-      `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル注文 ${cancelled.length}件 ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>` +
+      `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 4px 10px"><span class="smd-dim" style="font-size:12px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></span><span style="margin-left:auto;font-size:11px;color:#666">表示:</span><select id="ret-filter" style="padding:3px 6px;font-size:12px;border:1px solid #ccc;border-radius:5px"><option value="all"${rf === 'all' ? ' selected' : ''}>全部（${rowsAll.length}）</option><option value="cancel"${rf === 'cancel' ? ' selected' : ''}>キャンセルのみ（${rowsAll.filter(o => !o._comp).length}）</option><option value="comp"${rf === 'comp' ? ' selected' : ''}>補償が入った（${rowsAll.filter(hasCompRow).length}）</option><option value="pending"${rf === 'pending' ? ' selected' : ''}>保証待ち（日本を出た後・未補償）</option></select></div>` +
       analysisCard +
       compCard +
       adjCard +
@@ -4631,9 +4649,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1320px">` +
       `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="SLS+補償の受取。payout明細から自動検知(✅)＋手動記入(✍)">補償</th><th>再出品</th><th>メモ</th></tr>` +
-      (rows.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">キャンセル注文・記録はありません。</td></tr>`) +
+      (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">該当する注文はありません（フィルタを変更してください）。</td></tr>`) +
       `</table></div></div>` +
-      (rows.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - retN}件）</button></div>` : '');
+      (rowsView.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rowsView.length - retN}件）</button></div>` : '');
+    { const fs = document.getElementById('ret-filter'); if (fs) fs.addEventListener('change', () => { renderReturns._filter = fs.value; renderReturns._showN = 50; renderReturns(); }); }
     { const mb = document.getElementById('ret-more'); if (mb) mb.addEventListener('click', () => { renderReturns._showN = retN + 50; renderReturns(); }); }
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
@@ -4779,6 +4798,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '↩️ <b>返品ページを大幅改善（統一・フィルタ・重複除去・日時修正）</b>：①<b>補償が入った注文を下の一覧に統合</b>（🎁補償行＋補償列）。②<b>フィルタ追加</b>（全部／キャンセルのみ／補償が入った／保証待ち）。③補償額を<b>現地通貨＋円の両方</b>で表示。④<b>注文SNの重複を除去</b>（同一調整の二重取込を排除＝件数・合計も正しく）。⑤<b>日時が1970年になるバグを修正</b>（order_tsが秒なのにミリ秒扱いだった）。',
       '🔗 <b>バリエ明細に「仕入元URL」欄を追加</b>（出品を作る→3.バリエ明細）：メルカリ/Amazon等の商品ページURLを<b>貼るだけで、画像を自動取得＋リンクを保存</b>（画像が空の明細のみ自動取得／後から再仕入れ・確認に↗で開ける）。下書きにも保存。Shopee手動出品より徹底時短。',
       '🔄 <b>ダッシュボードに「まとめて更新」ボタン</b>：各ページを回って🔄を押す手間を解消。1回で<b>出品状況をShopeeから取得（ライブPC）＋各ページのキャッシュ破棄</b>（次に開くとSupabaseから最新）＋ダッシュ再描画。注文/入金/売上はGASが自動同期のため通常は再取得だけでOK。',
       '💊 <b>返品ページ：補償が入った注文を最初から表示</b>：🧾カードが二重に折りたたまれ見つけにくかったのを、<b>「✅補償が入った注文 N件」を開いた状態</b>に。「ここに無い＝まだ未着」と明記。補償データが無い時も案内カードを表示。',
