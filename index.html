@@ -4756,6 +4756,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🏷 <b>子SKU（バリエ明細SKU）の一意化＋重複警告</b>：Shopeeは同一商品内でバリエ間のSKU重複が不可。「💡SKU提案」を<b>全バリエで必ず一意</b>に生成するよう修正（重複時は _2,_3… 付与）。手入力で重複した場合も<b>該当SKU欄を赤枠＋⚠＋カード警告</b>で検知。親SKU＝それらを束ねる管理コード。',
+      '🚚 <b>MYなどの「価格が上限超（配送チャネル）」を根本対応</b>（GAS v31）：<b>Locker/自己集荷系チャネル（価格上限・サイズ制限が厳しい）を除外し、使える有効チャネルを全て有効化</b>（＝手動出品と同じ挙動）。単一Lockerに縛られて高額品（PS5等）が弾かれていた問題を解消。旧キャッシュも新キーで無効化。',
       '🛡️ <b>公式API出品の二重送信を防止</b>：1回のクリックで作成が2回走り、2回目が「This product duplicates another in your shop（重複）」になる不具合を修正（進行中ロックで同一国の重複作成・確認ダイアログ二重表示を防止）。SGで「1回しか押していないのに重複エラー＋実際は作成済」の原因。',
       '🈺 <b>バリエ種別名（Title/Hardware等）を出品に反映＋国別パネルに表示</b>：これまでAPI出品時に種別名を送っておらず全て既定「バージョン」になっていたのを修正（1.商品情報の「バリエーション種別名」を送信）。各国カードに<b>「バリエ種別名: ◯◯」</b>を表示（未設定は既定バージョンと明記）。',
       '🗣️ <b>出品失敗メッセージの誤訳を是正</b>：「価格が上限超（max price over limit）」を誤って「出品枠上限」と表示していたのを修正＝<b>価格/配送チャネルの価格上限</b>と正しく案内（例MYのSPX Lockers）。<b>商品の重複</b>（バリエ名重複とは別）も日本語で明示（その国の店舗内の重複＝他国とは無関係）。',
@@ -6873,11 +6875,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   const recommendSku = (key) => String(key || '').toUpperCase().replace(/ /g, '_').replace(/[^A-Z0-9_]/g, '').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40).replace(/_$/, '');
   // 親SKU＋全バリエSKUをまとめて提案・適用（overwrite=falseは空欄だけ埋める）。国別カード/各セクション共通。
+  // ★子SKU(バリエ明細SKU)はバリエ間で必ず一意にする（Shopee制約＝同一商品内で重複不可）。親SKUはそれを束ねる管理コード。
+  const skuNorm = (s) => String(s || '').trim().toUpperCase();
   function suggestSkusAll(overwrite) {
     const pk = [listState.name, listState.hardware, listState.jpseries].filter(Boolean).join(' ');
     const psug = recommendSku(pk);
     if (psug && (overwrite || !(listState.parentSku || '').trim())) listState.parentSku = psug;
-    (listState.variations || []).forEach(v => { if (overwrite || !(v.sku || '').trim()) v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
+    const vars = listState.variations || [];
+    const seen = new Set();
+    if (!overwrite) vars.forEach(v => { if ((v.sku || '').trim()) seen.add(skuNorm(v.sku)); }); // 据え置く既存SKUも重複判定に含める
+    vars.forEach((v, idx) => {
+      if (!overwrite && (v.sku || '').trim()) return; // 空欄だけ埋めるモードで既に入っていれば据え置き
+      let base = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')) || recommendSku(listState.name) || 'SKU';
+      let cand = base, k = 2;
+      while (seen.has(skuNorm(cand))) { cand = base.slice(0, 36) + '_' + k; k++; } // 重複したら _2,_3… で一意化
+      v.sku = cand; seen.add(skuNorm(cand));
+    });
     const pel = document.getElementById('li-psku'); if (pel) pel.value = listState.parentSku || '';
   }
   // ちゃんとしたSKU（英字＋アンダースコア・4文字以上）はグループキーとして採用。連番/空/ゴミはnull
@@ -8024,11 +8037,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       document.getElementById('li-vskusug').addEventListener('click', () => {
         if (!listState.variations.length) { alert('先にバリエーションを追加してください'); return; }
         const filled = listState.variations.some(v => (v.sku || '').trim());
-        if (filled && !confirm('既に入力済みのSKUも含めて再提案で上書きしますか？（キャンセルで空欄のみ埋めます）')) {
-          listState.variations.forEach(v => { if (!(v.sku || '').trim()) v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
-        } else {
-          listState.variations.forEach(v => { v.sku = recommendSku([listState.name, v.opt].filter(Boolean).join(' ')); });
-        }
+        // 子SKUは必ずバリエ間で一意（suggestSkusAllが親も含めて一意化して埋める）
+        const ow = filled ? confirm('既に入力済みのSKUも含めて再提案で上書きしますか？（キャンセルで空欄のみ埋めます）') : true;
+        suggestSkusAll(ow);
         listVarsRender(); listRefresh();
       });
       // カテゴリ候補プルダウン＋登録
@@ -8889,7 +8900,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           return { i, opt: v.opt, sku: v.sku, local, auto, manual, stock, cost: v.cost, name, image, weightG: wg, off: !!o.off };
         }); // off（この国では出さない）も表示は残す。ジョブ/コピーは pricedLive で除外
         const pricedLive = priced.filter(p => !p.off);
+        // 子SKU（バリエ明細SKU）の重複検出＝Shopeeはバリエ間でSKU重複不可
+        const skuCount = {}; if (hasVar) pricedLive.forEach(p => { const k = (p.sku || '').trim().toUpperCase(); if (k) skuCount[k] = (skuCount[k] || 0) + 1; });
+        const dupSkuSet = new Set(Object.keys(skuCount).filter(k => skuCount[k] > 1));
         const warns = countryListingWarnings({ cc: rg.cc, title, prices: pricedLive.map(p => p.local), varNames: hasVar ? pricedLive.map(p => p.name) : [] });
+        if (dupSkuSet.size) warns.push(`子SKUが重複（${dupSkuSet.size}種）＝バリエ間で一意にする必要。「💡SKU提案」で自動整理できます`);
         const priceLines = pricedLive.map(p => `${hasVar ? p.name + ': ' : ''}${fmtLocal(rg, p.local)}${p.stock != null ? ` (在庫${p.stock})` : ''}`).join('\n');
         // 表示用（円換算＋取れる利益＋ROI）。明細名・価格・在庫をその場編集、✕でこの国だけ除外
         const priceRich = priced.map(p => {
@@ -8911,7 +8926,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <span style="white-space:nowrap;font-size:11px">${rg.cur}<input class="li cov-iprice" data-cc="${rg.cc}" data-i="${p.i}" data-foc="p-${rg.cc}-${p.i}" type="text" inputmode="decimal" value="${p.manual ? p.local : ''}" placeholder="${p.auto}" style="width:76px;padding:2px 5px;${overCeil ? 'border:1.5px solid #d93025;background:#fff4f4;' : ''}${p.manual ? 'color:#7b52c4;font-weight:700' : ''}" title="${overCeil ? '⚠ ' + rg.cc + 'の価格上限' + ceil.toLocaleString() + 'を超過。価格を下げるか✕で除外を' : '空欄=自動計算(' + p.auto + ') / 入力=この国だけ手動価格'}"${p.off ? ' disabled' : ''}></span>${overCeil ? `<span style="font-size:10px;color:#fff;background:#d93025;font-weight:700;border-radius:3px;padding:1px 5px;white-space:nowrap" title="${rg.cc}上限${ceil.toLocaleString()}${rg.cur}超">⚠上限超</span>` : ''}
             在庫<input class="li cov-istock" data-cc="${rg.cc}" data-i="${p.i}" data-foc="s-${rg.cc}-${p.i}" type="text" inputmode="numeric" value="${p.stock != null ? p.stock : ''}" placeholder="1" style="width:42px;padding:2px 4px;font-size:11px"${p.off ? ' disabled' : ''}>
             <span style="font-size:11px;white-space:nowrap">${p.off ? '<span style="color:#d93025;font-weight:700">除外中</span>' : `<span class="smd-dim">≈¥${pr.buyerJpy.toLocaleString()}</span> <span style="color:${pc};font-weight:600">利益¥${pr.profit >= 0 ? '+' : ''}${pr.profit.toLocaleString()}</span> <span style="color:${pc}">ROI${Math.round(pr.roi)}%</span>${bad ? ' <b style="color:#d93025">⚠</b>' : ''}${p.manual ? ' <span style="color:#7b52c4">✎</span>' : ''}`}</span>
-            ${hasVar ? `<span style="white-space:nowrap;font-size:10px;color:#7b52c4">🏷<input class="li cov-isku" data-cc="${rg.cc}" data-i="${p.i}" data-foc="k-${rg.cc}-${p.i}" value="${esc(p.sku || '')}" placeholder="SKU" style="width:96px;padding:2px 4px;font-size:10px;font-family:monospace" title="このバリエのSKU（全国共通）"${p.off ? ' disabled' : ''}></span>` : ''}
+            ${hasVar ? (() => { const dupSku = !p.off && p.sku && dupSkuSet.has((p.sku || '').trim().toUpperCase()); return `<span style="white-space:nowrap;font-size:10px;color:#7b52c4">🏷<input class="li cov-isku" data-cc="${rg.cc}" data-i="${p.i}" data-foc="k-${rg.cc}-${p.i}" value="${esc(p.sku || '')}" placeholder="SKU" style="width:96px;padding:2px 4px;font-size:10px;font-family:monospace${dupSku ? ';border:1.5px solid #d93025;background:#fff4f4' : ''}" title="${dupSku ? '⚠ 子SKU重複＝バリエ間で一意にする必要（💡SKU提案で自動整理）' : 'このバリエのSKU（全国共通・他バリエと重複不可）'}"${p.off ? ' disabled' : ''}>${dupSku ? '<span style="color:#d93025;font-weight:700" title="子SKU重複">⚠</span>' : ''}</span>`; })() : ''}
           </div>`;
         }).join('');
         const skuText = (listState.parentSku ? '親SKU: ' + listState.parentSku + '\n' : '') + (hasVar ? pricedLive.map(p => `${p.name}: ${p.sku || ''}`).join('\n') : (listState.parentSku ? '' : ''));

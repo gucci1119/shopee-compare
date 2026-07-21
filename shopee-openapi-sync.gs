@@ -641,18 +641,27 @@ function resolveCategoryId_(shopId, keyword) {
   P_().setProperty(ck, String(best.id));
   return best.id;
 }
-// 物流チャネル解決：有効なStandard/International優先（shop毎キャッシュ）
-function resolveLogisticId_(shopId) {
-  var ck = 'logi_' + shopId; var c0 = P_().getProperty(ck); if (c0) return parseInt(c0, 10);
+// 物流チャネル解決：Locker/自己集荷系（価格上限・サイズ制限が厳しく高額品が「max price over limit」で弾かれる）を除外し、
+// 使える有効チャネルを「全て」有効化する（＝手動出品と同じ挙動。単一Lockerに縛られて高額品が出せない問題を防ぐ）。返り値は logistic_info 配列。
+function resolveLogisticInfo_(shopId) {
+  var ck = 'logi2_' + shopId; // ★旧 logi_ の単一idキャッシュ(Locker混入の恐れ)は使わず新キーに
+  var c0 = P_().getProperty(ck);
+  if (c0) { try { var cached = JSON.parse(c0); if (cached && cached.length) return cached; } catch (e) {} }
   var j = callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get');
   var list = ((j.response || {}).logistics_channel_list) || [];
   var enabled = list.filter(function (c) { return c.enabled; });
-  var std = enabled.filter(function (c) { return /standard|international|sls/i.test(c.logistics_channel_name || ''); });
-  var pick = std[0] || enabled[0];
-  if (!pick) throw new Error('no enabled logistic channel (shop ' + shopId + ')');
-  P_().setProperty(ck, String(pick.logistics_channel_id));
-  return pick.logistics_channel_id;
+  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point/i.test(c.logistics_channel_name || ''); };
+  var usable = enabled.filter(function (c) { return !isLocker(c); });
+  var pref = function (c) { var n = (c.logistics_channel_name || '').toLowerCase(); return (/standard/.test(n) ? 3 : 0) + (/international|cross.?border/.test(n) ? 2 : 0) + (/sls|shopee/.test(n) ? 1 : 0); };
+  usable.sort(function (a, b) { return pref(b) - pref(a); });
+  var pickList = usable.length ? usable : enabled; // 全部Lockerしか無ければ已む無く全enabled
+  if (!pickList.length) throw new Error('no enabled logistic channel (shop ' + shopId + ')');
+  var info = pickList.map(function (c) { return { logistic_id: c.logistics_channel_id, enabled: true }; });
+  P_().setProperty(ck, JSON.stringify(info));
+  return info;
 }
+// 単一id版（listMeta_等の後方互換）＝先頭チャネルのid
+function resolveLogisticId_(shopId) { return resolveLogisticInfo_(shopId)[0].logistic_id; }
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
 function uploadImageUrl_(imageUrl) {
   var ts = now_(), path = '/api/v2/media_space/upload_image';
@@ -674,7 +683,8 @@ function listMeta_(body) {
 function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
   var categoryId = body.category_id ? parseInt(body.category_id, 10) : resolveCategoryId_(shopId, body.category || 'Games');
-  var logisticId = body.logistic_id ? parseInt(body.logistic_id, 10) : resolveLogisticId_(shopId);
+  // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
+  var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
   function _upImg(u) { u = String(u || ''); if (!u) return null; if (_imgCache[u]) return _imgCache[u]; var id = uploadImageUrl_(u); if (id) _imgCache[u] = id; return id; }
   var imgIds = body.image_ids || [];
@@ -693,13 +703,13 @@ function addItem_(body) {
     item_status: body.publish ? 'NORMAL' : 'UNLIST',
     seller_stock: [{ stock: parseInt(body.stock != null ? body.stock : 1, 10) }],
     image: { image_id_list: imgIds },
-    logistic_info: [{ logistic_id: logisticId, enabled: true }]
+    logistic_info: logisticInfo
   };
   if (body.dimension) payload.dimension = body.dimension;
   var j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
   var resp = j.response || j;
   var itemId = (resp.item_id || (resp.item || {}).item_id || null);
-  var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_id: logisticId, image_ids: imgIds };
+  var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_ids: logisticInfo.map(function (x) { return x.logistic_id; }), image_ids: imgIds };
   // ★バリエーション：add_item後に init_tier_variation で機種等のバリエを設定（2明細以上のとき）
   var vars = body.variations || [];
   if (itemId && vars.length >= 2) {
