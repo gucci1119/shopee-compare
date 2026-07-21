@@ -4756,6 +4756,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🧩 公式API出品でバリエが付かず単品になる不具合を修正：<code>init_tier_variation</code> が「tier option name is duplicated」で失敗していた（バリエ名を20字で切ると末尾が同じになり重複＝例「PS5:The Last of us Part II/I」→どちらも「PS5:The Last of us P」）。GASで<b>option名を必ず一意化</b>（20字超は先頭+末尾を残して中間を…で圧縮＝Part I/II等の識別を保持、なお重複したら連番）。GAS Webアプリ v29。',
+      '🔗 公式API出品の成功時に<b>実際の販売ページ＋Shopee編集リンク</b>を表示（<code>https://{買い手ドメイン}/product/{shop_id}/{item_id}</code>）。バリエ設定に失敗した場合は「単品で作成＝名前を短く一意にして作り直し」の案内も表示。作成中の目安表記も「通常30〜60秒・最大2分」に。',
       '🏬 出品コンポーザーの出品先アカウント既定を見直し：<b>既定を gs_japan_select にしない</b>（主アカウント gcsonlinestore を優先。その国にそのアカウントが無ければ選べる方を自動選択）。さらに<b>国別に選んだアカウントが保存されない不具合を修正</b>＝下書き/自動保存にアカウント選択（全体・国別・条件）を含め、再描画・ページ再読込しても選択が維持されるように。',
       '🩹 公式API出品のカテゴリ不一致を修正：カテゴリ欄に<b>フルパス</b>（例「Hobbies &amp; Collections &gt; Video Games &gt; Games」）を入れると<code>category not found</code>で出品失敗していた不具合を解消。GAS側の<code>resolveCategoryId_</code>を<b>パス対応</b>に（<code>&gt;</code>区切りの最後をリーフ名として照合し、手前の階層は一致加点に使う）。BRで category_id 101400 に解決することを実機確認。GAS Webアプリ v28。',
       '☁️ Supabase Storage 公開バケット <code>listing-imgs</code> を作成＝メルカリ等からアップした画像（data:）も🚀公式APIで出品可能に（http URL化して渡す）。',
@@ -9061,12 +9063,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // バリエ画像も同様にhttp化
         let vars = jb.variations;
         if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im })); } vars = rv; }
-        if (resEl) resEl.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>作成中…（最大2分）</span>';
+        if (resEl) resEl.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span>作成中…（画像アップロード＋登録${doVar ? '＋バリエ設定' : ''}。通常30〜60秒・最大2分）</span>`;
         const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined });
-        const host = (REGIONS.find(x => x.cc === cc) || {}).host || ('seller.shopee.' + cc.toLowerCase());
-        const vinfo = (r.variations && r.tier_init) ? (r.tier_init === 'ok' ? ` <span style="color:#1a7f37">＋${r.variations}バリエ✓</span>` : ` <span style="color:#d93025">（バリエ設定: ${esc(String(r.tier_init))}）</span>`) : '';
+        const rg2 = REGIONS.find(x => x.cc === cc) || {};
+        const host = rg2.host || ('seller.shopee.' + cc.toLowerCase());
+        const varFailed = r.variations && r.tier_init && r.tier_init !== 'ok';
+        const vinfo = (r.variations && r.tier_init) ? (r.tier_init === 'ok' ? ` <span style="color:#1a7f37">＋${r.variations}バリエ✓</span>` : ` <span style="color:#d93025">⚠️バリエ設定失敗＝単品で作成（${esc(String(r.tier_init))}）</span>`) : '';
         const stText = pubFlag ? '公開' : '非公開(下書き)';
-        if (resEl) resEl.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 作成(${stText}) item_id=${r.item_id}</span>${vinfo} <a href="https://${host}/portal/product/list" target="_blank">Shopeeで確認↗</a>`;
+        const buyUrl = (rg2.buyer && jb.shop_id && r.item_id) ? `https://${rg2.buyer}/product/${jb.shop_id}/${r.item_id}` : null;
+        const editUrl = r.item_id ? `https://${host}/portal/product/${r.item_id}?pageEntry=product_list` : `https://${host}/portal/product/list`;
+        if (resEl) resEl.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 作成(${stText}) item_id=${r.item_id}</span>${vinfo}<br>${buyUrl ? `<a href="${buyUrl}" target="_blank" style="font-weight:600">🛍️ 販売ページを開く↗</a> ・ ` : ''}<a href="${editUrl}" target="_blank">✏️ Shopeeで編集↗</a>${varFailed ? '<br><span class="smd-dim" style="font-size:10.5px">※バリエ名が重複/長すぎた可能性。名前を短く一意にして作り直すか、Shopeeの編集画面でバリエを追加してください。</span>' : ''}`;
         toast(`✅ ${cc} 出品成功（${stText}）item_id=${r.item_id}`);
         try { logAct('出品', '公式API出品', cc, jb.name + ' item_id=' + r.item_id + ' ' + stText); } catch (_) {}
         return { cc, ok: true, item_id: r.item_id };

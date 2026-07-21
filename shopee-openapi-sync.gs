@@ -703,8 +703,21 @@ function addItem_(body) {
   // ★バリエーション：add_item後に init_tier_variation で機種等のバリエを設定（2明細以上のとき）
   var vars = body.variations || [];
   if (itemId && vars.length >= 2) {
-    var optionList = vars.map(function (v) {
-      var o = { option: String(v.name || '').slice(0, 20) }; // Shopeeのバリエ名は20字上限
+    // ★tier option名は「一意・20字以内」が必須。重複すると init_tier_variation が product.error_busi
+    //   「tier option name is duplicated」で失敗し、バリエが付かず単品のまま作られてしまう。
+    //   長い名前は先頭+末尾を残して中間を…で圧縮（末尾のPart I/II・Best等の識別を保持）→なお重複したら連番で一意化。
+    var _optName = function (raw, i) {
+      raw = String(raw != null ? raw : '').trim();
+      if (!raw) return '#' + (i + 1);
+      if (raw.length <= 20) return raw;
+      return raw.slice(0, 11) + '…' + raw.slice(-8); // 11+1+8=20字
+    };
+    var _used = {};
+    var optionList = vars.map(function (v, i) {
+      var nm = _optName(v.name, i);
+      if (_used[nm]) { var k = 2, c; do { var suf = '(' + k + ')'; c = nm.slice(0, 20 - suf.length) + suf; k++; } while (_used[c] && k < 100); nm = c; }
+      _used[nm] = true;
+      var o = { option: nm };
       if (v.image) { try { var iid = _upImg(v.image); if (iid) o.image = { image_id: iid }; } catch (_) {} }
       return o;
     });
@@ -714,6 +727,7 @@ function addItem_(body) {
     var tvBody = { item_id: itemId, tier_variation: [{ name: String(body.tier_name || 'バージョン').slice(0, 20), option_list: optionList }], model: modelList };
     var jt = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', tvBody);
     result.variations = vars.length;
+    result.tier_options = optionList.map(function (o) { return o.option; }); // 生成した一意オプション名（確認用）
     result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
   }
   return result;
