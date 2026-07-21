@@ -4798,6 +4798,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-22', items: [
+      '🛒 <b>Amazon仕入れ強化</b>：①各バリエの「仕入元🔗」に<b>ASINでも</b>入れられる（自動でdp URLに変換）。②Amazon商品ページから<b>画像＋重量(g)＋寸法(cm)を自動取込</b>（重量はSLS計算に反映）。③<b>1ページ内の色/サイズ違いを一括でバリエ追加</b>（「🛒 Amazonの色/サイズ違いを取込(β)」ボタン→各明細に仕入元URLが入り画像も自動取得）。※取込はライブPC(ブリッジ)必要。gs_japan_select運用向け。',
       '↩️ <b>返品ページを大幅改善（統一・フィルタ・重複除去・日時修正）</b>：①<b>補償が入った注文を下の一覧に統合</b>（🎁補償行＋補償列）。②<b>フィルタ追加</b>（全部／キャンセルのみ／補償が入った／保証待ち）。③補償額を<b>現地通貨＋円の両方</b>で表示。④<b>注文SNの重複を除去</b>（同一調整の二重取込を排除＝件数・合計も正しく）。⑤<b>日時が1970年になるバグを修正</b>（order_tsが秒なのにミリ秒扱いだった）。',
       '🔗 <b>バリエ明細に「仕入元URL」欄を追加</b>（出品を作る→3.バリエ明細）：メルカリ/Amazon等の商品ページURLを<b>貼るだけで、画像を自動取得＋リンクを保存</b>（画像が空の明細のみ自動取得／後から再仕入れ・確認に↗で開ける）。下書きにも保存。Shopee手動出品より徹底時短。',
       '🔄 <b>ダッシュボードに「まとめて更新」ボタン</b>：各ページを回って🔄を押す手間を解消。1回で<b>出品状況をShopeeから取得（ライブPC）＋各ページのキャッシュ破棄</b>（次に開くとSupabaseから最新）＋ダッシュ再描画。注文/入金/売上はGASが自動同期のため通常は再取得だけでOK。',
@@ -8218,6 +8219,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <button class="smd-btn" id="li-vadd">＋ バリエーション追加</button>
             <button class="smd-btn" id="li-vskusug" title="各バリエのSKUを商品名＋バリエ名から一括提案（修正可）">💡 全バリエSKU提案</button>
             <button class="smd-btn" id="li-varsuggest" style="background:#eef8f0;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="自分の全出品(全7か国 約6500カタログ)から、このシリーズで使った明細名を集めて提案。既存カタログに足りない明細を一括追加できます">💡 シリーズの明細を提案（自分の全出品から）</button>
+            <button class="smd-btn" id="li-amazonvar" style="background:#fff4e6;border-color:#ff9900;color:#b36b00;font-weight:700" title="Amazonの1商品ページ（色/サイズ違いが1ページにまとまっているもの）のURL/ASINを入れると、各バリエを一括で明細に追加します。各明細に仕入元URLが入るので画像も自動取得（ライブPC必要）。β">🛒 Amazonの色/サイズ違いを取込(β)</button>
           </div>
           <div id="li-varsuggest-panel" style="display:none;margin-top:8px"></div>
           <div class="row" style="gap:6px;margin-top:6px;align-items:center;background:#f6f2fd;border:1px solid #e0d3f5;border-radius:7px;padding:6px 8px;flex-wrap:wrap">
@@ -8276,6 +8278,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       document.querySelectorAll('.li-mode').forEach(b => b.addEventListener('click', () => liSetMode(b.dataset.m)));
       { const b = document.getElementById('li-varsuggest'); if (b) b.addEventListener('click', () => openVarSuggest()); }
+      // 🛒 Amazon 1ページの色/サイズ違いを一括でバリエに追加（各明細にdp URL→画像は自動取得）
+      { const b = document.getElementById('li-amazonvar'); if (b) b.addEventListener('click', async () => {
+        if (state.mode !== 'live') { alert('Amazon取込はライブモード（ブリッジ入りPC）で行ってください。※各URLを個別に貼る方法は非ライブでも一部可'); return; }
+        const inp = prompt('Amazonの商品URL または ASIN を入れてください\n（色/サイズ違いが1ページにまとまっている商品）'); if (!inp) return;
+        const az = amazonAsin(inp); const url = az ? amazonDpUrl(az) : inp.trim();
+        if (!/amazon\.(co\.jp|com)/i.test(url)) { alert('AmazonのURL/ASINを入れてください'); return; }
+        const ob = b.textContent; b.disabled = true; b.textContent = '取込中…';
+        try {
+          const vars = await fetchAmazonVariations(url);
+          if (!vars.length) { alert('このページから色/サイズ違いを検出できませんでした。\n・1ページに複数バリエがある商品か確認してください\n・別ページのバリエは各明細の「仕入元🔗」に個別に貼る方法があります'); return; }
+          if (!confirm(vars.length + '個のバリエを追加します：\n' + vars.slice(0, 30).map(v => '・' + v.label).join('\n') + (vars.length > 30 ? '\n…他' : '') + '\n\n（各明細に仕入元URLが入り、画像は自動取得。仕入額・在庫は後で入力）')) return;
+          listState.mode = 'variation';
+          const start = listState.variations.length;
+          vars.forEach(v => listState.variations.push({ opt: v.label, cost: 0, stock: 1, img: '', weightG: null, srcUrl: amazonDpUrl(v.asin) }));
+          liApplyModeUI(); listVarsRender(); listAutoSave();
+          toast('🛒 Amazonから ' + vars.length + '個のバリエを追加。画像を取得中…');
+          for (let i = start; i < listState.variations.length; i++) { const v = listState.variations[i]; if (v.srcUrl && !(v.img || '').trim()) { try { const meta = await fetchAmazonMeta(v.srcUrl); if (meta.img) { v.img = meta.img; listVarsRender(); } } catch (_) {} } }
+          listAutoSave(); toast('🛒 画像取得まで完了');
+        } catch (e) { alert('取込エラー: ' + e.message); }
+        finally { b.disabled = false; b.textContent = ob; }
+      }); }
       // 全バリエ一括適用：入力した項目(仕入/重量/在庫)だけ全明細に反映
       document.getElementById('li-bulk-apply').addEventListener('click', () => {
         if (!listState.variations.length) { alert('先にバリエーションを追加してください'); return; }
@@ -8665,6 +8688,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 商品ページURL(メルカリ等)→og:image、または直リンク画像URLをそのまま返す。ブリッジ経由でHTML取得
   async function fetchImageFromUrl(url) {
     url = String(url || '').trim(); if (!url) return null;
+    { const az = amazonAsin(url); if (az) url = amazonDpUrl(az); } // Amazon URL/ASIN→クリーンなdp（長い追跡URLでも確実に）
     // ★メルカリ商品URLは商品IDから画像直リンクを組み立て（ブリッジ不要・最優先）
     const mi = mercariImg(url); if (mi) return mi;
     // 直リンク画像 or 既知の画像CDNはそのまま使う
@@ -8687,6 +8711,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         || pick(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
       return og ? og.replace(/&amp;/g, '&') : null;
     } catch (e) { return null; }
+  }
+  // Amazon: URL または ASIN(10桁) → クリーンな dp URL / 非Amazonは null
+  const amazonAsin = s => { s = String(s || '').trim(); const m = s.match(/\/(?:dp|gp\/product|gp\/aw\/d|product)\/([A-Z0-9]{10})(?:[/?]|$)/i) || s.match(/[/?&](?:asin|ASIN)=([A-Z0-9]{10})/); if (m) return m[1].toUpperCase(); if (/^[A-Z0-9]{10}$/.test(s) && /[A-Z]/.test(s)) return s.toUpperCase(); return null; };
+  const amazonDpUrl = asin => 'https://www.amazon.co.jp/dp/' + asin;
+  // Amazon商品ページから 画像・重量(g)・寸法(cm) を取得（best-effort・ブリッジ必須）
+  async function fetchAmazonMeta(url) {
+    const out = {};
+    if (state.mode !== 'live') return out;
+    let html; try { html = await bridgeRequest('GET', url); } catch (_) { return out; }
+    const pick = re => { const m = html.match(re); return m ? m[1] : null; };
+    let a = pick(/id=["']landingImage["'][^>]*\bdata-old-hires=["']([^"']+)["']/i) || pick(/\bdata-old-hires=["']([^"']+)["']/i);
+    if (!a) { const dyn = pick(/\bdata-a-dynamic-image=["']({[^"']+})["']/i); if (dyn) { try { a = Object.keys(JSON.parse(dyn.replace(/&quot;/g, '"')))[0]; } catch (_) {} } }
+    if (a) out.img = a.replace(/&amp;/g, '&');
+    const flat = html.replace(/&nbsp;/g, ' ');
+    const wm = flat.match(/(?:商品の重量|梱包重量|本体重量|重量)\D{0,25}?([\d,.]+)\s*(kg|g|グラム|キログラム)/i);
+    if (wm) { let v = parseFloat(wm[1].replace(/,/g, '')); if (/kg|キロ/i.test(wm[2])) v *= 1000; if (v > 0 && v < 200000) out.weightG = Math.round(v); }
+    const dm = flat.match(/(?:品目の寸法|商品の寸法|梱包サイズ)\D{0,25}?([\d.]+)\D{1,6}([\d.]+)(?:\D{1,6}([\d.]+))?\s*cm/i);
+    if (dm) { const nums = [dm[1], dm[2], dm[3]].filter(Boolean).map(parseFloat).filter(n => n > 0 && n < 500); if (nums.length >= 2) { out.dimW = nums[0]; out.dimH = nums[1]; if (nums[2]) out.dimD = nums[2]; } }
+    return out;
+  }
+  // Amazon 1ページ内の色/サイズ違い（twister）→ [{asin, label}]（best-effort・ブリッジ必須）
+  async function fetchAmazonVariations(url) {
+    if (state.mode !== 'live') return [];
+    let html; try { html = await bridgeRequest('GET', url); } catch (_) { return []; }
+    // dimensionValuesDisplayData:{"ASIN":["ラベル",...],...}（値は配列なので入れ子{}なし＝1階層で拾える）
+    const m = html.match(/dimensionValuesDisplayData["']?\s*[:=]\s*(\{[^{}]+\})/);
+    let map = null; if (m) { try { map = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/'/g, '"')); } catch (_) {} }
+    const out = [], seen = {};
+    if (map) for (const asin in map) { if (/^[A-Z0-9]{10}$/i.test(asin) && !seen[asin]) { seen[asin] = 1; const lbl = (Array.isArray(map[asin]) ? map[asin].join(' ') : String(map[asin])).replace(/\s+/g, ' ').trim(); out.push({ asin: asin.toUpperCase(), label: lbl || asin }); } }
+    return out;
   }
 
   function listImgPrev() {
@@ -8900,15 +8954,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     wrap.querySelectorAll('.vweight').forEach(el => el.addEventListener('input', e => { const val = e.target.value; listState.variations[+e.target.dataset.i].weightG = val === '' ? null : (Number(val) || 0); listRefresh(); }));
     // 仕入元URL：貼るだけで リンク保存＋（画像が空なら）画像を自動取得
     wrap.querySelectorAll('.vsrc').forEach(el => el.addEventListener('change', async e => {
-      const i = +e.target.dataset.i; const url = (e.target.value || '').trim();
+      const i = +e.target.dataset.i; let url = (e.target.value || '').trim();
+      const asin = amazonAsin(url); if (asin) { url = amazonDpUrl(asin); e.target.value = url; } // ASIN/AmazonURL→クリーンなdp URL
       listState.variations[i].srcUrl = url || null;
-      const msg = wrap.querySelector('.vsrc-msg[data-i="' + i + '"]');
-      if (url && isPageUrl(url) && !(listState.variations[i].img || '').trim()) {
+      const msg = wrap.querySelector('.vsrc-msg[data-i="' + i + '"]'); const v = listState.variations[i];
+      if (url && /amazon\.(co\.jp|com)/i.test(url)) {
+        if (msg) msg.textContent = 'Amazon取込中…';
+        const meta = await fetchAmazonMeta(url); const got = [];
+        if (meta.img && !(v.img || '').trim()) { v.img = meta.img; got.push('画像'); }
+        if (meta.weightG && v.weightG == null) { v.weightG = meta.weightG; got.push('重量' + meta.weightG + 'g'); }
+        if (meta.dimW && !listState.dimW) { listState.dimW = meta.dimW; listState.dimH = meta.dimH || 0; if (meta.dimD) listState.dimD = meta.dimD; got.push('寸法'); }
+        if (msg) msg.textContent = got.length ? '✓ ' + got.join('・') + '取込' : '取れず（ライブPC/ブリッジ要）';
+        if (got.length) toast('🛒 Amazonから ' + got.join('・') + ' を取込');
+      } else if (url && isPageUrl(url) && !(v.img || '').trim()) {
         if (msg) msg.textContent = '画像取得中…';
-        try { const img = await fetchImageFromUrl(url); if (img) { listState.variations[i].img = img; toast('🔗 仕入元から画像を取得しました'); } else if (msg) { msg.textContent = '画像取れず（ライブPC/ブリッジ要）'; } }
+        try { const img = await fetchImageFromUrl(url); if (img) { v.img = img; toast('🔗 仕入元から画像を取得しました'); } else if (msg) { msg.textContent = '画像取れず（ライブPC/ブリッジ要）'; } }
         catch (_) { if (msg) msg.textContent = '画像取れず'; }
       }
-      listVarsRender(); listAutoSave();
+      listVarsRender(); listSyncForm(); listAutoSave();
     }));
     // 各バリエカードに画像ドラッグ&ドロップ（ファイル→設定、URL→設定＋自動取得）※並べ替えドラッグ中は無視
     wrap.querySelectorAll('.li-vcard').forEach(card => { const i = +card.dataset.i; wireDrop(card, dataUrl => { listState.variations[i].img = dataUrl; listVarsRender(); }, async url => { if (isPageUrl(url)) { const img = await fetchImageFromUrl(url); if (img) url = img; } listState.variations[i].img = url; listVarsRender(); }); });
