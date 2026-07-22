@@ -10151,9 +10151,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const isCancel = o.tab === 600;
         if (isCancel && !inclCancel) return;
         const key = trendBucket(ds, period); if (!key) return;
-        const b = buk[key] = buk[key] || { count: 0, sales: 0, cancel: 0 };
-        b.count++; if (isCancel) b.cancel++;
-        if (!isCancel) { const rg = regionByCc(o.cc); if (rg) b.sales += (Number(o.total) || 0) * rg.rateJpy; } // キャンセルは売上に入れない
+        const b = buk[key] = buk[key] || { count: 0, sales: 0, cancel: 0, byCc: {} };
+        const cc = o.cc || '?';
+        const bc = b.byCc[cc] = b.byCc[cc] || { count: 0, sales: 0 };
+        b.count++; bc.count++; if (isCancel) b.cancel++;
+        if (!isCancel) { const rg = regionByCc(cc); if (rg) { const s = (Number(o.total) || 0) * rg.rateJpy; b.sales += s; bc.sales += s; } } // キャンセルは売上に入れない
       });
       const keys = Object.keys(buk).sort().slice(-TREND_SHOWN[period]);
       const noteEl = document.getElementById('trend-note');
@@ -10165,15 +10167,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const max = Math.max(...keys.map(val), 1);
       const avg = keys.reduce((s, k) => s + val(k), 0) / keys.length;
       const avgBottom = 18 + Math.round(avg / max * 140);
-      const barColor = metric === 'count' ? '#6ea8fe' : '#f6b5a6', barLast = metric === 'count' ? '#1565c0' : '#ee4d2d';
-      el.innerHTML = '<div style="overflow-x:auto;padding-bottom:2px"><div style="position:relative;display:flex;align-items:flex-end;gap:5px;height:180px;border-bottom:1px solid #eee;min-width:' + (keys.length * 46) + 'px">' +
+      // 国別：表示中バケットの国別合計を集計→凡例（色順）。積み上げも同じ色順で。
+      const ccVal = bc => metric === 'count' ? bc.count : bc.sales;
+      const ccTotal = {};
+      keys.forEach(k => Object.entries(buk[k].byCc).forEach(([cc, bc]) => { ccTotal[cc] = (ccTotal[cc] || 0) + ccVal(bc); }));
+      const ccOrder = REGIONS.map(r => r.cc).filter(cc => (ccTotal[cc] || 0) > 0); // 色定義順で安定
+      const ccColor = cc => (regionByCc(cc) || {}).color || '#bbb';
+      const legend = ccOrder.map(cc => `<span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin-right:10px"><span style="width:10px;height:10px;border-radius:2px;background:${ccColor(cc)};display:inline-block"></span><b style="color:${ccColor(cc)}">${cc}</b> ${fmtFull(Math.round(ccTotal[cc]))}</span>`).join('');
+      el.innerHTML = `<div style="margin-bottom:8px">${legend}</div>` +
+        '<div style="overflow-x:auto;padding-bottom:2px"><div style="position:relative;display:flex;align-items:flex-end;gap:5px;height:180px;border-bottom:1px solid #eee;min-width:' + (keys.length * 46) + 'px">' +
         `<div style="position:absolute;left:0;right:0;bottom:${avgBottom}px;border-top:1px dashed #b0b6bd;pointer-events:none"><span style="position:absolute;left:0;top:-13px;font-size:9px;color:#8a9099;background:#fff;padding:0 4px;border-radius:3px">平均 ${fmtV(Math.round(avg)) || '0件'}</span></div>` +
         keys.map(k => {
           const v = val(k); const h = Math.max(2, Math.round(v / max * 140)); const last = k === keys[keys.length - 1];
-          const tip = `${k}: ${fmtFull(v)}${buk[k].cancel ? '（うちｷｬﾝｾﾙ' + buk[k].cancel + '）' : ''}`;
+          // 国別の積み上げセグメント（下から色順）
+          const segs = ccOrder.map(cc => { const bc = buk[k].byCc[cc]; const cv = bc ? ccVal(bc) : 0; if (cv <= 0) return ''; const sh = Math.max(1, Math.round(cv / v * h)); return `<div style="height:${sh}px;background:${ccColor(cc)}" title="${k} ${cc}: ${fmtFull(Math.round(cv))}"></div>`; }).join('');
+          const tipCc = ccOrder.filter(cc => buk[k].byCc[cc]).map(cc => `${cc} ${fmtFull(Math.round(ccVal(buk[k].byCc[cc])))}`).join(' / ');
+          const tip = `${k}: ${fmtFull(v)}${buk[k].cancel ? '（うちｷｬﾝｾﾙ' + buk[k].cancel + '）' : ''}\n${tipCc}`;
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:36px" title="${tip}">` +
-            `<div style="font-size:9px;color:${last ? barLast : '#666'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${fmtV(v)}</div>` +
-            `<div style="width:100%;background:${last ? barLast : barColor};height:${h}px;border-radius:3px 3px 0 0"></div>` +
+            `<div style="font-size:9px;color:${last ? '#111' : '#666'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${fmtV(v)}</div>` +
+            `<div style="width:100%;height:${h}px;border-radius:3px 3px 0 0;overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
             `<div style="font-size:9px;color:#999;margin-top:3px;white-space:nowrap">${trendLabel(k, period)}</div></div>`;
         }).join('') + '</div></div>';
       const total = keys.reduce((s, k) => s + val(k), 0);
