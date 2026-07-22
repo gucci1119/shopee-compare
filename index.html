@@ -3038,6 +3038,50 @@
     const shown = rows.slice((stkPage - 1) * stkPer, stkPage * stkPer);
     if (!stock.sel) stock.sel = new Set();
     const selCount = stock.sel.size;
+    // ★📦 定番・補充リスト：商品ごとに直近90日の販売から「予想月販売数」を算出。月2個以上＝有在庫推奨。今の在庫数・過不足・補充リンクを、予想月販の多い順で。売却日は snToDate(shopee_sn)、商品の束ねは仕入れ名を正規化(sourcingKeyword)して概算。
+    let restockHtml = '';
+    try {
+      const nowMs = Date.now(), DAY = 86400000;
+      const byProd = {};
+      // 束ねキー：仕入れ名を正規化(sourcingKeyword)＋機種トークンも外す（「封印の剣 GBA」と「封印の剣」を同一商品に）
+      const groupKey = (nm0) => { const s = sourcingKeyword(nm0 || '', '') || String(nm0 || ''); const core = s.split(/\s+/).filter(t => t && !PLATFORM_TOK.test(t)).join(' ').trim(); return (core || String(nm0 || '').trim()).toLowerCase(); };
+      all.forEach(r => {
+        const key = groupKey(r.name);
+        if (!key) return;
+        const g = byProd[key] = byProd[key] || { key, name: r.name || '', inStock: 0, waiting: 0, sold90: 0, soldTotal: 0, costs: [] , img: null };
+        if (!g.img) { const im = stockImg(r); if (im) g.img = im; }
+        if (r.status === '在庫保管中') g.inStock++;
+        else if (r.status === '入庫待ち') g.waiting++;
+        else if (r.status === '販売済み') { g.soldTotal++; const sd = snToDate(r.shopee_sn); if (sd) { const t = Date.parse(sd + 'T00:00:00'); if (nowMs - t <= 90 * DAY) g.sold90++; } }
+        if (r.price != null) g.costs.push(Number(r.price));
+      });
+      const avg = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+      const list = Object.values(byProd).map(g => ({ ...g, perMonth: g.sold90 / 3, avgCost: avg(g.costs) }))
+        .filter(g => g.perMonth >= 2).sort((a, b) => b.perMonth - a.perMonth);
+      if (list.length) {
+        const rowsH = list.slice(0, 80).map(g => {
+          const supply = g.inStock + g.waiting, need = Math.ceil(g.perMonth), gap = need - supply;
+          const enc = encodeURIComponent((sourcingKeyword(g.name, '') || g.name).replace(/\s+/g, ' ').trim());
+          const badge = gap > 0 ? `<span style="color:#d93025;font-weight:700">🔴 補充 ${gap}個</span>` : (supply <= need ? '<span style="color:#e8710a">🟡 残少</span>' : '<span style="color:#1a7f37">🟢 十分</span>');
+          const links = `<a href="https://jp.mercari.com/search?keyword=${enc}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://paypayfleamarket.yahoo.co.jp/search/${enc}" target="_blank" rel="noopener" style="color:#ff0033;font-weight:700;text-decoration:none">フリマ</a> <a href="https://www.suruga-ya.jp/search?search_word=${enc}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a>`;
+          return `<tr${gap > 0 ? ' style="background:#fff5f5"' : ''}>
+            <td>${g.img ? `<img src="${esc(g.img)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>
+            <td style="font-size:11.5px">${nm(g.name, '240px')}</td>
+            <td style="text-align:right;font-weight:700;color:#7b52c4">${g.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
+            <td style="text-align:right;font-weight:700">${g.inStock}</td>
+            <td style="text-align:right;color:#888">${g.waiting || ''}</td>
+            <td style="font-size:11px;white-space:nowrap">${badge}</td>
+            <td style="text-align:right;color:#888;font-size:11px">${g.avgCost != null ? '¥' + Math.round(g.avgCost).toLocaleString() : '—'}</td>
+            <td style="font-size:10.5px;white-space:nowrap">${links}</td></tr>`;
+        }).join('');
+        const needCount = list.filter(g => (g.inStock + g.waiting) < Math.ceil(g.perMonth)).length;
+        restockHtml = `<details class="tool-card" open style="margin:0 4px 10px;max-width:none;border-left:4px solid #7b52c4">
+          <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">📦 定番・補充リスト（月2個以上売れる＝有在庫推奨）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">直近90日の販売→予想月販売数の多い順。${needCount ? `<b style="color:#d93025">🔴 補充が要る ${needCount}品</b>` : '在庫は足りています🎉'}</span></summary>
+          <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:720px"><tr><th>画像</th><th>商品名</th><th style="text-align:right" title="直近90日の販売数÷3">予想月販</th><th style="text-align:right">現在庫</th><th style="text-align:right">入庫待</th><th>状況</th><th style="text-align:right">平均仕入</th><th>補充を探す</th></tr>${rowsH}</table></div>
+          <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝直近90日の販売数÷3</b>。<b>現在庫＋入庫待ち＜1ヶ月分</b>で🔴補充。商品の束ねは仕入れ名を正規化した概算です（別表記は分かれることあり）。「補充を探す」で各サイトの安い順検索へ。</div>
+        </details>`;
+      }
+    } catch (_) { restockHtml = ''; }
     // ★🔄 シリーズ別 回転速度：仕入日(invPurDate)＋売却日(snToDate(shopee_sn))から「仕入→売却の平均日数」を系統別に算出。速く高回転で売れる系統＝仕入れ推奨の指針（在庫データのみで完結）
     let velHtml = '';
     try {
@@ -3061,7 +3105,7 @@
         </details>`;
       }
     } catch (_) { velHtml = ''; }
-    body.innerHTML = velHtml + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
+    body.innerHTML = restockHtml + velHtml + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-bulkrecv" style="margin-left:4px;display:${selCount ? '' : 'none'};background:#e7f5ea;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="選択した入庫待ちを『在庫保管中(受取済)』に一括変更＝届いたのに更新してない在庫をまとめて片付け">✅ 受取済にする${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
