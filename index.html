@@ -1515,6 +1515,23 @@
   document.addEventListener('error', e => { const t = e.target; if (t && t.tagName === 'IMG' && !t.dataset.failMark) { t.dataset.failMark = '1'; t.style.backgroundImage = 'repeating-linear-gradient(45deg,rgba(0,0,0,.05),rgba(0,0,0,.05) 6px,rgba(0,0,0,.09) 6px,rgba(0,0,0,.09) 12px)'; if (!t.title) t.title = '画像の読込に失敗（CDNブロック等。Shopee側ではリンクが有効な場合あり）'; } }, true);
   // 商品名などを「途中で切らずに」表示：全文をtitle(ホバーで全部見える)にしつつ、幅が足りない時だけ…で省略。wに'wrap'を渡すと折り返し表示
   const nm = (s, w) => { const t = esc(s || ''); return w === 'wrap' ? `<span title="${t}" style="word-break:break-word">${t}</span>` : `<span title="${t}" style="display:inline-block;max-width:${w || '280px'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom">${t}</span>`; };
+  // 数字ページネーション。total件をper件ずつ、cur(1始まり)を中心に番号＋前後‹›を描画。ボタンは class="pgbtn" data-pg="N"。呼び出し側で .pgbtn に onGo(N) を配線。
+  function pageNav(total, per, cur) {
+    const pages = Math.ceil(total / per);
+    if (pages <= 1) return '';
+    cur = Math.min(Math.max(1, cur || 1), pages);
+    const btn = (p, label, active, disabled) => `<button class="pgbtn" data-pg="${p}" ${disabled ? 'disabled' : ''} style="min-width:32px;padding:5px 9px;margin:0 2px;border:1px solid ${active ? '#7b52c4' : '#ddd'};border-radius:6px;background:${active ? '#7b52c4' : '#fff'};color:${active ? '#fff' : '#555'};font-weight:${active ? 700 : 500};cursor:${disabled ? 'default' : 'pointer'};font-size:12px;${disabled ? 'opacity:.4' : ''}">${label || p}</button>`;
+    const out = [btn(cur - 1, '‹', false, cur <= 1)];
+    const win = [], add = p => { if (p >= 1 && p <= pages && !win.includes(p)) win.push(p); };
+    add(1); add(2); for (let p = cur - 2; p <= cur + 2; p++) add(p); add(pages - 1); add(pages);
+    win.sort((a, b) => a - b);
+    let prev = 0;
+    win.forEach(p => { if (p - prev > 1) out.push('<span style="padding:0 3px;color:#aaa">…</span>'); out.push(btn(p, null, p === cur)); prev = p; });
+    out.push(btn(cur + 1, '›', false, cur >= pages));
+    return `<div class="pgnav" style="text-align:center;margin:12px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:1px">${out.join('')}<span class="smd-dim" style="font-size:11px;margin-left:8px">${total.toLocaleString()}件 / ${pages}ページ</span></div>`;
+  }
+  // .pgbtn を配線：クリックで onGo(page) を呼ぶ（rootはコンテナ要素 or document）
+  function wirePageNav(root, onGo) { (root || document).querySelectorAll('.pgbtn').forEach(b => b.addEventListener('click', () => { if (!b.disabled) onGo(+b.dataset.pg); })); }
   // gvizの日付 "Date(2025,7,26)"（月0始まり）→ "2025-08-26"。それ以外は先頭10字。
   const gvizDate = v => {
     if (v == null) return null;
@@ -2204,8 +2221,8 @@
       return;
     }
     const frag = document.createDocumentFragment();
-    const ordN = state.orders.showN || 50;          // 表示は初期50件（一括印刷/CSVは state.orders.shown=全件のまま）
-    rows.slice(0, ordN).forEach(r => {
+    const ordPer = 50, ordPages = Math.max(1, Math.ceil(rows.length / ordPer)), ordPage = Math.min(Math.max(1, state.orders.page || 1), ordPages); // 1ページ50件（一括印刷/CSVは rows=全件のまま）
+    rows.slice((ordPage - 1) * ordPer, ordPage * ordPer).forEach(r => {
       const { region } = r;
       const first = r.items[0] || {};
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
@@ -2256,7 +2273,7 @@
       frag.appendChild(row);
     });
     list.appendChild(frag);
-    if (rows.length > ordN) { const more = document.createElement('div'); more.style.cssText = 'text-align:center;margin:10px 0'; more.innerHTML = `<button class="smd-btn" id="ord-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - ordN}件）</button> <button class="smd-btn" id="ord-all" style="font-size:12px;margin-left:6px">全件表示</button>`; list.appendChild(more); const mb = document.getElementById('ord-more'); if (mb) mb.addEventListener('click', () => { state.orders.showN = ordN + 50; renderOrders(); }); const ab = document.getElementById('ord-all'); if (ab) ab.addEventListener('click', () => { state.orders.showN = rows.length; renderOrders(); }); }
+    if (rows.length > ordPer) { const more = document.createElement('div'); more.innerHTML = pageNav(rows.length, ordPer, ordPage); list.appendChild(more.firstElementChild); wirePageNav(list, p => { state.orders.page = p; renderOrders(); list.scrollIntoView({ block: 'start', behavior: 'smooth' }); }); }
     // 🚚倉庫へ発送済（未スキャン）トグル: costs.self_transit_at をON/OFF（利益管理と共有）
     list.querySelectorAll('.ord-selftransit').forEach(el => el.addEventListener('click', async e => {
       e.stopPropagation();
@@ -2432,13 +2449,13 @@
     document.querySelectorAll('#ord-filter button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     state.orders.filter = b.dataset.k;
-    state.orders.showN = 50;
+    state.orders.page = 1;
     renderOrders();
   });
   let ordSearchTimer;
   document.getElementById('ord-search').addEventListener('input', e => {
     clearTimeout(ordSearchTimer);
-    ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); state.orders.showN = 50; renderOrders(); }, 200);
+    ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); state.orders.page = 1; renderOrders(); }, 200);
   });
 
   // ---------------- Supabase（DB蓄積） ----------------
@@ -2835,13 +2852,13 @@
       // 前回のフィルタ（状態・検索）を復元＝毎回リセットされないように
       try { const sf = JSON.parse(localStorage.getItem('smdStockFilter') || '{}'); if (sf.st != null) stock.st = sf.st; if (sf.q != null) stock.q = sf.q; const stEl = document.getElementById('stock-st'); if (stEl && stock.st) stEl.value = stock.st; const sEl = document.getElementById('stock-search'); if (sEl && stock.q) sEl.value = stock.q; } catch (_) {}
       const saveStockFilter = () => { try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: stock.st, q: stock.q })); } catch (_) {} };
-      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.showN = 100; saveStockFilter(); stockRender(); });
-      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.showN = 100; stockRender(); });
-      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.showN = 100; stockRender(); });
+      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); });
+      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.page = 1; stockRender(); });
+      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.page = 1; stockRender(); });
       let t;
       document.getElementById('stock-search').addEventListener('input', e => {
         clearTimeout(t);
-        t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.showN = 100; saveStockFilter(); stockRender(); }, 250);
+        t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.page = 1; saveStockFilter(); stockRender(); }, 250);
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
@@ -3015,8 +3032,10 @@
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
-    const stkN = stock.showN || 100;               // 初期100件（CSV/選択は rows=全件のまま）
-    const shown = rows.slice(0, stkN);
+    const stkPer = 100;                            // 1ページ100件（CSV/選択は rows=全件のまま）
+    const stkPages = Math.max(1, Math.ceil(rows.length / stkPer));
+    const stkPage = Math.min(Math.max(1, stock.page || 1), stkPages);
+    const shown = rows.slice((stkPage - 1) * stkPer, stkPage * stkPer);
     if (!stock.sel) stock.sel = new Set();
     const selCount = stock.sel.size;
     // ★🔄 シリーズ別 回転速度：仕入日(invPurDate)＋売却日(snToDate(shopee_sn))から「仕入→売却の平均日数」を系統別に算出。速く高回転で売れる系統＝仕入れ推奨の指針（在庫データのみで完結）
@@ -3088,9 +3107,9 @@
         `<td><input class="li stk-note" ${di} value="${esc(r.note || '')}" placeholder="—" title="備考（自由記入）" style="width:100%;min-width:120px;font-size:11px;padding:2px 4px"></td>` +
         '</tr>';
       }).join('') +
-      `</table></div>${rows.length > shown.length ? `<div style="text-align:center;margin:8px 4px"><button class="smd-btn" id="stk-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - shown.length}件）</button> <button class="smd-btn" id="stk-all" style="font-size:12px;margin-left:6px">全件表示</button> <span class="smd-dim" style="font-size:11px">（検索で絞り込むと速いです）</span></div>` : ''}</div>`;
+      `</table></div>${pageNav(rows.length, stkPer, stkPage)}</div>`;
     // テーブル領域を実際の位置から高さ計算 → ヘッダー固定＋横スクロールバーを常時画面内に（ページ自体はスクロールさせない）
-    { const mb = document.getElementById('stk-more'); if (mb) mb.addEventListener('click', () => { stock.showN = stkN + 100; stockRender(); }); const ab = document.getElementById('stk-all'); if (ab) ab.addEventListener('click', () => { stock.showN = rows.length; stockRender(); }); }
+    wirePageNav(body, p => { stock.page = p; stockRender(); const el = document.getElementById('stock-body'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
     fitStockScroll();
     // 編集ハンドラ
     body.querySelectorAll('.stk-sup').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { supplier: e.target.value || null })));
@@ -4082,14 +4101,15 @@
       host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
       return;
     }
-    const buyN = renderSourcing._showN || 30;   // 表示は初期30点（新しい注文順に上から仕入れ）
+    const buyPer = 30, buyPages = Math.max(1, Math.ceil(items.length / buyPer)), buyPage = Math.min(Math.max(1, renderSourcing._page || 1), buyPages); // 1ページ30点（新しい注文順に上から仕入れ）
     host.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 4px 10px">
-        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>・表示${Math.min(buyN, items.length)}点）</span>
+        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>・${buyPage}/${buyPages}ページ）</span>
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="表示中の全行について、対応サイトから今すぐ買える出品を安い順に取得（購入はしません／上から順に取得するため少し時間がかかります）">🔍 表示中を一括で最安取得</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
       <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
-      items.slice(0, buyN).map(({ o, it, ix }, gi) => {
+      items.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
+        const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
         const region = regionByCc(o.cc);
         const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
         const saved = localStorage.getItem(kwStoreKey(it.name, it.variation));
@@ -4104,9 +4124,8 @@
             <div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button>${it.image ? `<button class="src-lens" style="background:#4285f4;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="この商品画像でGoogle画像検索（同一商品を探す）">📷画像</button>` : ''}</div></td>
           <td>${region ? `<a href="https://${region.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopee注文詳細">📄</a>` : ''}</td>
         </tr>`;
-      }).join('') + `</table></div></div>` +
-      (items.length > buyN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="src-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${items.length - buyN}点）</button></div>` : '');
-    { const mb = document.getElementById('src-more'); if (mb) mb.addEventListener('click', () => { renderSourcing._showN = buyN + 30; renderSourcing(host); }); }
+      }).join('') + `</table></div></div>` + pageNav(items.length, buyPer, buyPage);
+    wirePageNav(host, p => { renderSourcing._page = p; renderSourcing(host); host.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
     const kwOf = (i) => encodeURIComponent(((host.querySelector(`.src-kw[data-i="${i}"]`) || {}).value || '').trim().replace(/\s+/g, ' '));
     // 手直しを記憶（編集したらその商品のキーワードとして保存）
     host.querySelectorAll('.src-kw').forEach(inp => inp.addEventListener('change', () => {
@@ -4722,8 +4741,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
     const sel = (cls, cc, sn, opts, cur) => `<select class="${cls}" data-cc="${esc(cc)}" data-sn="${esc(sn)}" style="padding:2px 4px;font-size:11px">${opts.map(o => `<option ${o === (cur || '') ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`;
-    const retN = renderReturns._showN || 50;
-    const rowHtml = rowsView.slice(0, retN).map(o => {
+    const retPer = 50, retPages = Math.max(1, Math.ceil(rowsView.length / retPer)), retPage = Math.min(Math.max(1, renderReturns._page || 1), retPages);
+    const rowHtml = rowsView.slice((retPage - 1) * retPer, retPage * retPer).map(o => {
       const it = (o.items || [])[0] || {};
       const iss = issueMap.get(o.cc + ':' + o.sn) || {};
       const rg = regionByCc(o.cc);
@@ -4851,13 +4870,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="SLS+補償の受取。payout明細から自動検知(✅)＋手動記入(✍)">補償</th><th>再出品</th><th>メモ</th></tr>` +
       (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">${rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。'}</td></tr>`) +
       `</table></div></div>` +
-      (rowsView.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rowsView.length - retN}件）</button></div>` : '');
+      pageNav(rowsView.length, retPer, retPage);
     body.innerHTML = tabBar + summary +
       (rtab === 'refund'
         ? (analysisCard + compCard + adjCard + addTool + tableBlock)
         : (addTool + tableBlock));
-    body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._showN = 50; renderReturns(); }));
-    { const mb = document.getElementById('ret-more'); if (mb) mb.addEventListener('click', () => { renderReturns._showN = retN + 50; renderReturns(); }); }
+    body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
+    wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
     body.querySelectorAll('.ri-stage').forEach(el => el.addEventListener('change', async e => { if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, { stage: e.target.value || null })) renderReturns(); }));
@@ -8052,8 +8071,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (lst.filter === 'other') rows = rows.filter(r => r.status !== 1);
     if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || String(r.item_id).includes(q) || (r.models || []).some(m => (m.n || '').toLowerCase().includes(q)));
     const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
-    const N = lst.showN || 60;                 // 初期は60件だけ描画＝6500件でも軽い（もっと見る/全件で追加）
-    const shown = rows.slice(0, N);
+    const lstPer = 60, lstPages = Math.max(1, Math.ceil(rows.length / lstPer)), lstPage = Math.min(Math.max(1, lst.page || 1), lstPages); // 1ページ60件＝6500件でも軽い
+    const shown = rows.slice((lstPage - 1) * lstPer, lstPage * lstPer);
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''}>🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
@@ -8071,17 +8090,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span class="smd-dim">📸 これは<b>スナップショット</b>です。Shopeeで直接変えた分（手動出品・在庫・公開/非公開）は <b>🔄Shopeeから更新</b> を押すまで反映されません。</span>
         <button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700">🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
       </div>
-      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${rows.length}</b>件（全${totalAll}件）｜ 表示 ${Math.min(N, rows.length)}件 ｜ ${per || '国未選択'}</div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${rows.length}</b>件（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
       <div id="lst-list"></div>
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
     document.getElementById('lst-list').innerHTML = shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>';
-    { const more = document.getElementById('lst-more'); if (more && rows.length > N) more.innerHTML = `<button class="smd-btn" id="lst-more-btn" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rows.length - N}件）</button> <button class="smd-btn" id="lst-all-btn" style="font-size:12px;margin-left:6px">全件表示</button>`; }
-    { const mb = document.getElementById('lst-more-btn'); if (mb) mb.addEventListener('click', () => { lst.showN = N + 60; drawListingStatus(); }); }
-    { const ab = document.getElementById('lst-all-btn'); if (ab) ab.addEventListener('click', () => { if (rows.length > 1500 && !confirm(rows.length + '件を一度に表示すると重くなる場合があります。よろしいですか？（絞り込み推奨）')) return; lst.showN = rows.length; drawListingStatus(); }); }
+    { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(rows.length, lstPer, lstPage); }
+    wirePageNav(document.getElementById('lst-more'), p => { lst.page = p; drawListingStatus(); const el = document.getElementById('lst-list'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
     document.getElementById('lst-sync').addEventListener('click', syncListings);
     { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
-    document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.showN = 60; drawListingStatus(); });
-    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.showN = 60; drawListingStatus(); }, 200); });
+    document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.page = 1; drawListingStatus(); });
+    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.page = 1; drawListingStatus(); }, 200); });
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
