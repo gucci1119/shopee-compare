@@ -4557,11 +4557,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ★補償が入った注文を先頭に（＝埋もれず一目で分かる）。残りは日付の新しい順。
     const dateKeyOf = o => { if (o.order_ts) { const t = Number(o.order_ts); return t < 1e11 ? t * 1000 : t; } const d = o.order_date || snToDate(o.sn); return d ? Date.parse(d + 'T00:00:00') : 0; };
     const rowsAll = rows.concat(compExtra).sort((a, b) => { const ca = hasCompRow(a), cb = hasCompRow(b); if (ca !== cb) return ca ? -1 : 1; if (ca && cb) return (adjComp.get(b.cc + ':' + b.sn) || 0) - (adjComp.get(a.cc + ':' + a.sn) || 0); return dateKeyOf(b) - dateKeyOf(a); });
-    const rf = renderReturns._filter || 'all';
-    const rowsView = rf === 'cancel' ? rowsAll.filter(o => !o._comp)
-      : rf === 'comp' ? rowsAll.filter(hasCompRow)
-      : rf === 'pending' ? rowsAll.filter(o => { const iss = issueMap.get(o.cc + ':' + o.sn) || {}; return slsEligible(o, iss) && (iss.refund_jpy || 0) > 0 && !hasCompRow(o); })
-      : rowsAll;
+    // タブで「返金・補償（お金が動いた分）」と「キャンセル（損失なし）」に分ける
+    const isRefundRow = o => o._comp || hasCompRow(o) || ((issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0) > 0;
+    const cancelRows = rowsAll.filter(o => !isRefundRow(o));
+    const refundRows = rowsAll.filter(isRefundRow);
+    const rtab = renderReturns._tab || 'refund';
+    const rowsView = rtab === 'cancel' ? cancelRows : refundRows;
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
@@ -4681,23 +4682,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>各注文の補償額・種類は下の一覧に「🎁補償」行＋補償列</b>で出ます（右上フィルタ「補償が入った」で絞込可・金額は現地通貨＋円）。補償は「段階＝日本を出た後」＋返金額記録済みなら「SLS+補償」の受取に反映。関税（マイナス）は実コスト。</div>
         </div></div>`;
     })();
-    body.innerHTML =
-      `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 4px 10px"><span class="smd-dim" style="font-size:12px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></span><span style="margin-left:auto;font-size:11px;color:#666">表示:</span><select id="ret-filter" style="padding:3px 6px;font-size:12px;border:1px solid #ccc;border-radius:5px"><option value="all"${rf === 'all' ? ' selected' : ''}>全部（${rowsAll.length}）</option><option value="cancel"${rf === 'cancel' ? ' selected' : ''}>キャンセルのみ（${rowsAll.filter(o => !o._comp).length}）</option><option value="comp"${rf === 'comp' ? ' selected' : ''}>補償が入った（${rowsAll.filter(hasCompRow).length}）</option><option value="pending"${rf === 'pending' ? ' selected' : ''}>保証待ち（日本を出た後・未補償）</option></select></div>` +
-      analysisCard +
-      compCard +
-      adjCard +
-      `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    const tabBtn = (id, label, n, active) => `<button class="ret-tab" data-tab="${id}" style="padding:8px 18px;font-size:13.5px;font-weight:700;border:none;border-bottom:3px solid ${active ? '#c2185b' : 'transparent'};background:none;cursor:pointer;color:${active ? '#c2185b' : '#999'}">${esc(label)} <span style="font-weight:400;font-size:11.5px">${n}</span></button>`;
+    const tabBar = `<div style="display:flex;gap:2px;align-items:center;border-bottom:1px solid #eee;margin:0 0 12px;flex-wrap:wrap">${tabBtn('refund', '💸 返金・補償', refundRows.length, rtab === 'refund')}${tabBtn('cancel', '↩️ キャンセル', cancelRows.length, rtab === 'cancel')}<span class="smd-dim" style="margin-left:auto;align-self:center;font-size:11px;padding-right:6px">${rtab === 'refund' ? '返金を出した／Shopee補償が入った注文 ＝ 損失と回収を管理' : '発送前・未払い等で流れた注文 ＝ 基本は再出品するだけ'}</span></div>`;
+    const summary = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`;
+    const addTool = `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
         <select id="ret-cc" style="padding:5px;font-size:13px">${ccOpts}</select>
         <input type="text" id="ret-sn" placeholder="注文SN" style="padding:5px;font-size:13px;width:180px">
         <button class="smd-btn" id="ret-add">＋ 追加</button>
-        <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>` +
+        <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>`;
+    const tableBlock =
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1320px">` +
       `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="SLS+補償の受取。payout明細から自動検知(✅)＋手動記入(✍)">補償</th><th>再出品</th><th>メモ</th></tr>` +
-      (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">該当する注文はありません（フィルタを変更してください）。</td></tr>`) +
+      (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">${rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。'}</td></tr>`) +
       `</table></div></div>` +
       (rowsView.length > retN ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="ret-more" style="background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700">▼ もっと見る（残り ${rowsView.length - retN}件）</button></div>` : '');
-    { const fs = document.getElementById('ret-filter'); if (fs) fs.addEventListener('change', () => { renderReturns._filter = fs.value; renderReturns._showN = 50; renderReturns(); }); }
+    body.innerHTML = tabBar + summary +
+      (rtab === 'refund'
+        ? (analysisCard + compCard + adjCard + addTool + tableBlock)
+        : (addTool + tableBlock));
+    body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._showN = 50; renderReturns(); }));
     { const mb = document.getElementById('ret-more'); if (mb) mb.addEventListener('click', () => { renderReturns._showN = retN + 50; renderReturns(); }); }
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
