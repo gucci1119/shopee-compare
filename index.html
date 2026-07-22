@@ -4544,7 +4544,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 補償のみの注文（配達後の紛失/破損等＝キャンセルではない）も一覧に統合して表示
     const rowKeys0 = new Set(rows.map(o => o.cc + ':' + o.sn));
     const compKeys = new Set(); adjustmentsU.forEach(a => { if (a.kind === 'compensation' && a.order_sn) compKeys.add(a.cc + ':' + a.order_sn); });
-    const compExtra = [...compKeys].filter(k => !rowKeys0.has(k)).map(k => { const i = k.indexOf(':'); const cc = k.slice(0, i), sn = k.slice(i + 1); return { cc, sn, buyer: '', status: '補償', items: [], _comp: true, order_date: snToDate(sn) || '' }; });
+    // 補償のみの注文は cancelled(tab=600) に無いので、全注文(orders)から画像・商品名・バイヤー・日時を補完
+    const compOnlyKeys = [...compKeys].filter(k => !rowKeys0.has(k));
+    let compOrdMap = new Map();
+    if (compOnlyKeys.length) {
+      const sns = [...new Set(compOnlyKeys.map(k => k.slice(k.indexOf(':') + 1)))];
+      try { const co = await sbGetAll('orders', 'select=cc,sn,buyer,items,order_date,order_ts&sn=in.(' + sns.map(s => '"' + s + '"').join(',') + ')'); (co || []).forEach(o => compOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {}
+    }
+    const compExtra = compOnlyKeys.map(k => { const i = k.indexOf(':'); const cc = k.slice(0, i), sn = k.slice(i + 1); const od = compOrdMap.get(k) || {}; return { cc, sn, buyer: od.buyer || '', status: '補償', items: od.items || [], _comp: true, order_date: od.order_date || snToDate(sn) || '', order_ts: od.order_ts }; });
     // フィルタ（全部/キャンセル/補償あり/保証待ち）
     const hasCompRow = o => (adjComp.get(o.cc + ':' + o.sn) || 0) > 0 || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0) > 0;
     // ★補償が入った注文を先頭に（＝埋もれず一目で分かる）。残りは日付の新しい順。
