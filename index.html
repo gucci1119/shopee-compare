@@ -3939,13 +3939,34 @@
       parse: doc => { const out = [], seen = new Set(); doc.querySelectorAll('.itemCard').forEach(c => { const a = c.querySelector('a[href*="/goods/detail/"]') || (c.closest && c.closest('a[href*="/goods/detail/"]')); if (!a) return; const url = a.href.split('?')[0]; if (seen.has(url)) return; const w = c.textContent || ''; if (/売切|SOLD/i.test(w)) return; const price = dealYen((c.querySelector('.itemCard_price') || {}).textContent || w); if (!price) return; const brand = ((c.querySelector('.itemCard_brand') || {}).textContent || '').trim(); const nm = ((c.querySelector('.itemCard_name') || {}).textContent || '').trim(); const name = ((brand ? brand + ' ' : '') + nm).trim() || dealName(a); if (!name) return; seen.add(url); out.push({ name, price, url, cond: (w.match(/中古[A-D]|新品・?未使用品?/) || [''])[0] }); }); return out; } },
   ];
   // kwEnc（encodeURIComponent済み）で全サイトを取得・パースし、ジャンク除外→安い順で返す。onSite(k,n) で進捗通知。
+  // 機種トークン（英語サブタイトルは落とすが機種名は残す）
+  const PLATFORM_TOK = /^(gba|gbc|gb|sfc|snes|nes|fc|switch|ns|ps[1-5]|psp|vita|ds|3ds|dsi|2ds|wii|wiiu|gc|gamecube|n64|64|saturn|ss|dreamcast|dc|md|pce|neogeo|xbox|nintendo|playstation|sony|sega)$/i;
+  // 検索が0件になりがちな英語サブタイトル等を落とし「日本語作品名＋機種＋数字」に広げる。英→和(JP_DICT)も適用。日本語作品名が無ければ広げない('')。
+  function broadenKeyword(kwRaw) {
+    let s = String(kwRaw || '');
+    JP_DICT.forEach(([re, jp]) => { s = s.replace(re, jp); });
+    const toks = s.split(/\s+/).filter(Boolean);
+    const isJa = t => /[ぁ-んァ-ヶー一-龠]/.test(t);
+    if (!toks.some(isJa)) return '';
+    const kept = toks.filter(t => isJa(t) || PLATFORM_TOK.test(t) || /^[0-9]{1,4}$/.test(t));
+    const j = kept.join(' ').trim();
+    return (j && j.replace(/\s+/g, '') !== String(kwRaw).replace(/\s+/g, '')) ? j : '';
+  }
   async function srcFetchDeals(kwEnc, onSite) {
+    let kwRaw = kwEnc; try { kwRaw = decodeURIComponent(kwEnc); } catch (_) {}
+    const kwBroad = broadenKeyword(kwRaw);
+    const kwBroadEnc = kwBroad ? encodeURIComponent(kwBroad) : '';
+    const usedBroad = [];
     const results = [];
     await Promise.all(DEAL_SITES.map(async site => {
-      try {
-        const html = await bridgeRequest('GET', site.url(kwEnc));
+      const grab = async (enc) => {
+        const html = await bridgeRequest('GET', site.url(enc));
         const doc = new DOMParser().parseFromString(html, 'text/html');
-        const items = site.parse(doc).filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
+        return site.parse(doc).filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
+      };
+      try {
+        let items = await grab(kwEnc);
+        if (!items.length && kwBroadEnc) { items = await grab(kwBroadEnc); if (items.length) usedBroad.push(site.k); } // 0件なら作品名＋機種に広げて再検索
         items.forEach(x => { x.site = site.label; x.bg = site.bg; });
         items.sort((a, b) => a.price - b.price);
         results.push(...items);
@@ -3953,11 +3974,11 @@
       } catch (e) { if (onSite) onSite(site.k, -1); }
     }));
     results.sort((a, b) => a.price - b.price);
-    return results;
+    return { deals: results, broadKw: usedBroad.length ? kwBroad : '' };
   }
   // 取得した出品を「サイト横断・安い順の比較一覧」で描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
-  function renderDeals(container, deals, showN) {
-    if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした（キーワードを手直しするか、各サイトの検索ボタンで手動確認を）。</span>'; return; }
+  function renderDeals(container, deals, showN, broadKw) {
+    if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした。<b>英語のサブタイトルは日本のサイトに無い</b>ことが多いです（例：Sacred Stones→聖魔の光石）。キーワードを<b>日本語の作品名＋機種</b>に手直しするか、各サイトの検索ボタンで確認を。</span>'; return; }
     // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
     const bySite = {};
     deals.forEach(d => { if (!bySite[d.site] || d.price < bySite[d.site].price) bySite[d.site] = d; });
@@ -3974,6 +3995,7 @@
     const more = deals.length > n ? `<div style="text-align:center;margin-top:6px"><button class="src-deal-more" style="background:none;border:1px solid #ccc;border-radius:5px;color:#7b52c4;font-size:11px;cursor:pointer;padding:3px 10px">▼ もっと見る（残り ${deals.length - n}件）</button></div>` : '';
     container.innerHTML =
       `<div style="font-size:12px;font-weight:700;margin-bottom:5px">💰 サイト横断・安い順で比較（${deals.length}件）<span class="smd-dim" style="font-weight:400;font-size:10.5px">　※開く＝実際の商品ページ。決済ボタンはご自身で（購入は自動化しません）</span></div>` +
+      (broadKw ? `<div style="font-size:11px;color:#b26a00;background:#fff8e6;border-radius:5px;padding:4px 8px;margin-bottom:6px">🔎 ヒット0のサイトは「<b>${esc(broadKw)}</b>」に広げて再検索しました（英語サブタイトル等を外し作品名＋機種で。別バリエも混じるので現物を確認してください）。</div>` : '') +
       `<div style="margin-bottom:7px">各サイト最安↓ ${chips}</div>` +
       `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">#</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th><th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
     const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20));
@@ -4101,7 +4123,7 @@
       if (!kw) { cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px">キーワードが空です</span>'; return; }
       if (btn) { btn.disabled = true; btn.textContent = '🔍 取得中…'; }
       cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px"><span class="smd-spin"></span> 各サイトから取得して比較中…</span>';
-      try { const deals = await srcFetchDeals(kw); renderDeals(cont, deals); }
+      try { const { deals, broadKw } = await srcFetchDeals(kw); renderDeals(cont, deals, undefined, broadKw); }
       catch (e) { cont.innerHTML = `<span style="color:#d93025;font-size:11.5px">取得失敗：${esc(e.message || e)}（ブリッジ稼働を確認）</span>`; }
       finally { if (btn) { btn.disabled = false; btn.textContent = '🔍 比較を再取得'; } }
     }
