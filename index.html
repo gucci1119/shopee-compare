@@ -907,13 +907,13 @@
       if (d.ok) resolve(d.body); else reject(new Error(d.error || ('HTTP ' + d.status)));
     }
   });
-  function rawBridgeRequest(method, url, data, timeoutMs) {
+  function rawBridgeRequest(method, url, data, timeoutMs, headers) {
     const to = timeoutMs || 14000;
     return new Promise((resolve, reject) => {
       const id = ++reqSeq;
       const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, to);
       pendingReq.set(id, { resolve, reject, timer });
-      window.postMessage({ __smd: 'req', id, method, url, data, timeout: to }, '*');
+      window.postMessage({ __smd: 'req', id, method, url, data, timeout: to, headers: headers || undefined }, '*');
     });
   }
   // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）。
@@ -929,9 +929,9 @@
     if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
     reqActive++;
     try {
-      try { const r = await rawBridgeRequest(method, url, data, to); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+      try { const r = await rawBridgeRequest(method, url, data, to, opt.headers); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
       catch (e) {
-        if (!noRetry && /timeout/.test(e.message)) { const r = await rawBridgeRequest(method, url, data, to); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+        if (!noRetry && /timeout/.test(e.message)) { const r = await rawBridgeRequest(method, url, data, to, opt.headers); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
         throw e;
       }
     } catch (e) {
@@ -3913,12 +3913,33 @@
   const dealYen = (t) => { const s = String(t || '').replace(/,/g, ''); const m = s.match(/([0-9]{2,7})\s*円/) || s.match(/[¥￥]\s*([0-9]{2,7})/); return m ? parseInt(m[1], 10) : 0; };
   const dealNear = (a, re) => { let n = a; for (let i = 0; i < 7 && n; i++) { n = n.parentElement; if (!n) break; if (re.test(n.textContent || '')) return n; } return null; };
   const dealName = (a) => { if (!a) return ''; let t = (a.textContent || '').trim(); if (t.length > 3) return t; const img = a.querySelector && a.querySelector('img'); if (img && img.alt && img.alt.length > 3) return img.alt.trim(); return (a.getAttribute && (a.getAttribute('title') || a.getAttribute('aria-label')) || '').trim(); };
-  // 各サイト：url(kwEnc) で検索URL、parse(doc) で「今すぐ買える出品」配列を返す。メルカリは検索がSPA＋署名APIのため一覧取得不可＝ここには入れない（従来の検索ボタンのまま）。
+  // メルカリ検索：SPAでHTMLに一覧が無いため、公式検索API(api.mercari.jp)をDPoP署名(ES256/WebCrypto)で叩く。ブリッジ(GM_xhr)経由でCORS回避＋ヘッダ転送。取得のみ・購入はしない。
+  async function mercariDpop(htu, htm) {
+    const b64u = (buf) => btoa(String.fromCharCode.apply(null, new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const b64s = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const jwk = await crypto.subtle.exportKey('jwk', kp.publicKey);
+    const header = { typ: 'dpop+jwt', alg: 'ES256', jwk: { crv: 'P-256', kty: 'EC', x: jwk.x, y: jwk.y } };
+    const payload = { iat: Math.floor(Date.now() / 1000), jti: crypto.randomUUID(), htu, htm, uuid: crypto.randomUUID() };
+    const si = b64s(JSON.stringify(header)) + '.' + b64s(JSON.stringify(payload));
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(si));
+    return si + '.' + b64u(sig);
+  }
+  async function mercariSearch(keyword) {
+    const url = 'https://api.mercari.jp/v2/entities:search';
+    const dpop = await mercariDpop(url, 'POST');
+    const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: [], shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
+    const txt = await bridgeRequest('POST', url, JSON.stringify(body), { headers: { 'DPoP': dpop, 'X-Platform': 'web' } });
+    let j = {}; try { j = JSON.parse(txt); } catch (_) {}
+    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: 'https://jp.mercari.com/item/' + x.id, cond: '' }));
+  }
+  // 各サイト：url(kwEnc)+parse(doc) でHTML取得→パース。custom(kwRaw) があればそれで直接取得（メルカリのAPI等）。
   const DEAL_SITES = [
+    { k: 'mercari', label: 'メルカリ', bg: '#ff0211', custom: kwRaw => mercariSearch(kwRaw) },
     { k: 'surugaya', label: '駿河屋', bg: '#c30d23',
       url: kw => `https://www.suruga-ya.jp/search?search_word=${kw}`,
       parse: doc => { const out = []; doc.querySelectorAll('div.item').forEach(it => { const a = it.querySelector('a[href*="/product/detail/"]'); if (!a) return; const w = it.textContent || ''; if (/品切れ|在庫なし|売切|完売/.test(w)) return; out.push({ name: ((it.querySelector('.product-name') || {}).textContent || '').trim(), price: dealYen((it.querySelector('.item_price,.price_teika') || {}).textContent || w), url: a.href, cond: /中古/.test(w) ? '中古' : /新品/.test(w) ? '新品' : '' }); }); return out; } },
-    { k: 'paypay', label: 'PayPayフリマ', bg: '#ff0033',
+    { k: 'paypay', label: 'Yahoo!フリマ', bg: '#ff0033',
       url: kw => `https://paypayfleamarket.yahoo.co.jp/search/${kw}`,
       parse: doc => { const nx = doc.querySelector('#__NEXT_DATA__'); if (!nx) return []; const out = [], seen = new Set(); try { const j = JSON.parse(nx.textContent); const walk = o => { if (!o || typeof o !== 'object') return; const id = o.id; if (id && /^[a-z0-9]{8,}$/i.test(String(id)) && o.price != null && (o.name || o.title) && !seen.has(id)) { seen.add(id); out.push({ name: String(o.name || o.title), price: +o.price, url: 'https://paypayfleamarket.yahoo.co.jp/item/' + id, cond: '' }); } Object.values(o).forEach(walk); }; walk(j); } catch (e) {} return out; } },
     { k: 'yahuoku', label: 'ヤフオク', bg: '#ff0033',
@@ -3959,14 +3980,13 @@
     const usedBroad = [];
     const results = [];
     await Promise.all(DEAL_SITES.map(async site => {
-      const grab = async (enc) => {
-        const html = await bridgeRequest('GET', site.url(enc));
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        return site.parse(doc).filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
+      const grab = async (enc, raw) => {
+        const items = site.custom ? await site.custom(raw) : site.parse(new DOMParser().parseFromString(await bridgeRequest('GET', site.url(enc)), 'text/html'));
+        return items.filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
       };
       try {
-        let items = await grab(kwEnc);
-        if (!items.length && kwBroadEnc) { items = await grab(kwBroadEnc); if (items.length) usedBroad.push(site.k); } // 0件なら作品名＋機種に広げて再検索
+        let items = await grab(kwEnc, kwRaw);
+        if (!items.length && kwBroadEnc) { items = await grab(kwBroadEnc, kwBroad); if (items.length) usedBroad.push(site.k); } // 0件なら作品名＋機種に広げて再検索
         items.forEach(x => { x.site = site.label; x.bg = site.bg; });
         items.sort((a, b) => a.price - b.price);
         results.push(...items);
@@ -4065,7 +4085,7 @@
         <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>・表示${Math.min(buyN, items.length)}点）</span>
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="表示中の全行について、対応サイトから今すぐ買える出品を安い順に取得（購入はしません／上から順に取得するため少し時間がかかります）">🔍 表示中を一括で最安取得</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
-      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝駿河屋/PayPayフリマ/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。メルカリは検索方式が特殊なため「メルカリ」ボタンで手動検索。キーワードは<b>手直しすると記憶</b>。</div>` +
+      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       items.slice(0, buyN).map(({ o, it, ix }, gi) => {
         const region = regionByCc(o.cc);

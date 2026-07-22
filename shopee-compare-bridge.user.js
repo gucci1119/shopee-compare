@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.4.3
+// @version      1.5.0
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.4.3';
+  const VER = '1.5.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -53,7 +53,11 @@
     'seller.shopee.ph', 'seller.shopee.sg', 'seller.shopee.com.my', 'seller.shopee.com.br',
     'seller.shopee.vn', 'banhang.shopee.vn', 'seller.shopee.co.th', 'seller.shopee.tw',
     'script.google.com', 'script.googleusercontent.com',
-    'jp.mercari.com', 'mercari.com', 'static.mercdn.net',
+    'jp.mercari.com', 'mercari.com', 'static.mercdn.net', 'api.mercari.jp',
+    // 仕入れ比較（各サイトの検索取得）用
+    'www.suruga-ya.jp', 'suruga-ya.jp',
+    'auctions.yahoo.co.jp', 'paypayfleamarket.yahoo.co.jp', 'shopping.yahoo.co.jp',
+    'search.rakuten.co.jp', 'www.amazon.co.jp', 'www.2ndstreet.jp',
   ];
 
   // 注意: Tampermonkeyサンドボックスでは e.source === window が成立しないことがあるため
@@ -112,7 +116,8 @@
         method: d.method || 'GET',
         url: url,
         data: d.data,
-        headers: d.method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+        // POSTは既定でJSON。ポータルから渡された任意ヘッダ（メルカリ検索のDPoP/X-Platform等）を合成
+        headers: Object.assign(d.method === 'POST' ? { 'Content-Type': 'application/json' } : {}, d.headers || {}),
         // ※ fetch:true は Tampermonkey 5.5系でクロスオリジン時に onload/ontimeout を返さずハングする事があるため撤去。
         //    通常のXHR経路＋確実に効くtimeoutに戻す（ハング接続はtimeoutでabortされプールも解放される）。
         timeout: (typeof d.timeout === 'number' && d.timeout > 0) ? d.timeout + 5000 : 30000, // 重いGAS転記はポータル指定のtimeout+5秒（ポータル側が先に切れるように）
