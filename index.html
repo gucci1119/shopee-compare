@@ -3904,6 +3904,7 @@
     { k: 'rakuten',   label: '楽天',          bg: '#bf0000', url: kw => `https://search.rakuten.co.jp/search/mall/${kw}/` },
     { k: 'yshopping', label: 'Yショッピング', bg: '#ff0033', url: kw => `https://shopping.yahoo.co.jp/search?p=${kw}` },
     { k: 'amazon',    label: 'Amazon',        bg: '#ff9900', url: kw => `https://www.amazon.co.jp/s?k=${kw}&s=price-asc-rank` },
+    { k: 'secondstreet', label: 'セカスト',   bg: '#e60012', url: kw => `https://www.2ndstreet.jp/search?keyword=${kw}` },
   ];
   // ▼ 実出品の最安取得：各サイトのHTMLをブリッジで取得→パースし「今すぐ買える出品」を安い順に並べる。
   //   ※購入・決済は一切しない（直リンクを出すだけ。クリック→実際の商品ページ→決済はユーザーが押す）。
@@ -3931,6 +3932,10 @@
     { k: 'amazon', label: 'Amazon', bg: '#ff9900',
       url: kw => `https://www.amazon.co.jp/s?k=${kw}&s=price-asc-rank`,
       parse: doc => { const out = [], seen = new Set(); doc.querySelectorAll('div[data-asin]').forEach(d => { const asin = d.getAttribute('data-asin'); if (!asin || seen.has(asin)) return; const a = d.querySelector('a[href*="/dp/"]'); if (!a) return; const price = dealYen((d.querySelector('.a-price .a-offscreen') || {}).textContent || ''); if (!price) return; const nm = dealName(d.querySelector('h2 a, h2') || a); if (!nm) return; seen.add(asin); out.push({ name: nm, price, url: 'https://www.amazon.co.jp/dp/' + asin, cond: '' }); }); return out; } },
+    // セカスト(2nd STREET オンライン)：.itemCard→.itemCard_brand/.itemCard_name/.itemCard_price(¥)＋/goods/detail/リンク＋中古状態。※WAF/JS描画でブリッジ取得が空になりうる（その時は検索ボタンで手動）。
+    { k: 'secondstreet', label: 'セカスト', bg: '#e60012',
+      url: kw => `https://www.2ndstreet.jp/search?keyword=${kw}`,
+      parse: doc => { const out = [], seen = new Set(); doc.querySelectorAll('.itemCard').forEach(c => { const a = c.querySelector('a[href*="/goods/detail/"]') || (c.closest && c.closest('a[href*="/goods/detail/"]')); if (!a) return; const url = a.href.split('?')[0]; if (seen.has(url)) return; const w = c.textContent || ''; if (/売切|SOLD/i.test(w)) return; const price = dealYen((c.querySelector('.itemCard_price') || {}).textContent || w); if (!price) return; const brand = ((c.querySelector('.itemCard_brand') || {}).textContent || '').trim(); const nm = ((c.querySelector('.itemCard_name') || {}).textContent || '').trim(); const name = ((brand ? brand + ' ' : '') + nm).trim() || dealName(a); if (!name) return; seen.add(url); out.push({ name, price, url, cond: (w.match(/中古[A-D]|新品・?未使用品?/) || [''])[0] }); }); return out; } },
   ];
   // kwEnc（encodeURIComponent済み）で全サイトを取得・パースし、ジャンク除外→安い順で返す。onSite(k,n) で進捗通知。
   async function srcFetchDeals(kwEnc, onSite) {
@@ -3949,19 +3954,28 @@
     results.sort((a, b) => a.price - b.price);
     return results;
   }
-  // 取得した最安リストをコンテナに描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
+  // 取得した出品を「サイト横断・安い順の比較一覧」で描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
   function renderDeals(container, deals, showN) {
-    if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11px">今すぐ買える出品が見つからず（キーワードを調整するか各サイトの検索ボタンで手動確認を）</span>'; return; }
-    const n = showN || 3;
-    const rowHtml = deals.slice(0, n).map((d, i) => `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:flex;align-items:center;gap:6px;text-decoration:none;padding:3px 5px;border-radius:5px;${i === 0 ? 'background:#eafaf0;' : ''}border:1px solid #eee;margin-bottom:3px">
-      <span style="background:${d.bg};color:#fff;font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;white-space:nowrap">${esc(d.site)}</span>
-      <b style="color:#c0392b;font-size:12.5px;white-space:nowrap">¥${d.price.toLocaleString()}</b>
-      ${d.cond ? `<span style="font-size:9px;color:#666;white-space:nowrap">${esc(d.cond)}</span>` : ''}
-      <span style="font-size:10.5px;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc(d.name.slice(0, 42))}</span>
-      <span style="font-size:11px;color:#1a7f37;white-space:nowrap">開く→</span></a>`).join('');
-    const more = deals.length > n ? `<button class="src-deal-more" style="background:none;border:none;color:#7b52c4;font-size:10.5px;cursor:pointer;padding:2px">▼ もっと見る（${deals.length - n}件）</button>` : '';
-    container.innerHTML = rowHtml + more;
-    const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 5));
+    if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした（キーワードを手直しするか、各サイトの検索ボタンで手動確認を）。</span>'; return; }
+    // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
+    const bySite = {};
+    deals.forEach(d => { if (!bySite[d.site] || d.price < bySite[d.site].price) bySite[d.site] = d; });
+    const chips = Object.values(bySite).sort((a, b) => a.price - b.price).map((d, i) =>
+      `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:#fff;border:1px solid ${i === 0 ? '#1a7f37' : '#e0e0e0'};border-radius:14px;padding:2px 9px;margin:0 5px 5px 0;font-size:11.5px">${i === 0 ? '🏆' : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span> <b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.cond ? `<span style="color:#888;font-size:9.5px">${esc(d.cond)}</span>` : ''}</a>`).join('');
+    const n = showN || 15;
+    const rows = deals.slice(0, n).map((d, i) => `<tr style="${i === 0 ? 'background:#eafaf0' : ''}">
+      <td style="text-align:center;color:#999;font-size:11px">${i + 1}</td>
+      <td><span style="background:${d.bg};color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 6px;white-space:nowrap">${esc(d.site)}</span></td>
+      <td style="text-align:right;white-space:nowrap"><b style="color:#c0392b;font-size:13px">¥${d.price.toLocaleString()}</b></td>
+      <td style="font-size:10.5px;color:#666;white-space:nowrap">${esc(d.cond || '')}</td>
+      <td style="font-size:11.5px">${esc(d.name.slice(0, 70))}</td>
+      <td style="white-space:nowrap"><a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#1a7f37;font-weight:700;font-size:11.5px;text-decoration:none">開く→</a></td></tr>`).join('');
+    const more = deals.length > n ? `<div style="text-align:center;margin-top:6px"><button class="src-deal-more" style="background:none;border:1px solid #ccc;border-radius:5px;color:#7b52c4;font-size:11px;cursor:pointer;padding:3px 10px">▼ もっと見る（残り ${deals.length - n}件）</button></div>` : '';
+    container.innerHTML =
+      `<div style="font-size:12px;font-weight:700;margin-bottom:5px">💰 サイト横断・安い順で比較（${deals.length}件）<span class="smd-dim" style="font-weight:400;font-size:10.5px">　※開く＝実際の商品ページ。決済ボタンはご自身で（購入は自動化しません）</span></div>` +
+      `<div style="margin-bottom:7px">各サイト最安↓ ${chips}</div>` +
+      `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">#</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th><th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
+    const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20));
   }
   // よく出る英語タイトル → 日本語での検索語（日本の仕入先はJPの方がヒットしやすい）。全一致でなく含めば置換
   const JP_DICT = [
@@ -4023,21 +4037,20 @@
         <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>・表示${Math.min(buyN, items.length)}点）</span>
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="表示中の全行について、対応サイトから今すぐ買える出品を安い順に取得（購入はしません／上から順に取得するため少し時間がかかります）">🔍 表示中を一括で最安取得</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
-      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍最安を出す</b>＝駿河屋/PayPayフリマ/楽天/Yショッピング/ヤフオク(即決)/Amazonから<b>今すぐ買える出品を安い順に直リンク表示</b>。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。メルカリは検索方式が特殊なため「メルカリ」ボタンで手動検索。キーワードは<b>手直しすると記憶</b>。</div>` +
+      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝駿河屋/PayPayフリマ/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。メルカリは検索方式が特殊なため「メルカリ」ボタンで手動検索。キーワードは<b>手直しすると記憶</b>。</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1080px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       items.slice(0, buyN).map(({ o, it, ix }, gi) => {
         const region = regionByCc(o.cc);
         const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
         const saved = localStorage.getItem(kwStoreKey(it.name, it.variation));
         const kw = saved != null ? saved : sourcingKeyword(it.name, it.variation);
-        return `<tr>
+        return `<tr data-row="${gi}">
           <td>${img}</td>
           <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
           <td style="font-size:11px;max-width:280px">${nm(it.name, '280px')}${it.variation ? `<br><span class="smd-dim">${esc(it.variation)}</span>` : ''}</td>
           <td><input class="src-kw" data-i="${gi}" value="${esc(kw)}" style="width:230px;font-size:12px;padding:5px 7px;border:1px solid #ccc;border-radius:5px" title="編集するとこの商品のキーワードとして記憶されます">${saved != null ? '<span title="手直し済み" style="color:#3ecf8e;font-size:11px;margin-left:3px">✎</span>' : ''}</td>
           <td style="min-width:300px">
-            <button class="src-deals-go" data-i="${gi}" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:5px 11px;font-size:11.5px;font-weight:700;cursor:pointer;margin-bottom:5px" title="対応サイトから『今すぐ買える出品』を安い順に取得して直リンクを出します（購入はしません）">🔍 最安を出す</button>
-            <div class="src-deals" data-i="${gi}" style="margin-bottom:6px"></div>
+            <button class="src-deals-go" data-i="${gi}" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:5px 11px;font-size:11.5px;font-weight:700;cursor:pointer;margin-bottom:5px" title="対応サイトから『今すぐ買える出品』を取得し、サイト横断で安い順に比較一覧を表示します（購入はしません）">🔍 比較一覧</button>
             <div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button>${it.image ? `<button class="src-lens" style="background:#4285f4;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="この商品画像でGoogle画像検索（同一商品を探す）">📷画像</button>` : ''}</div></td>
           <td>${region ? `<a href="https://${region.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopee注文詳細">📄</a>` : ''}</td>
         </tr>`;
@@ -4066,18 +4079,25 @@
       const imgUrl = /^https?:/.test(it.image) ? it.image : IMG_CDN + it.image;
       window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(imgUrl), '_blank');
     }));
-    // 🔍 最安を出す：対応サイトから今すぐ買える出品を安い順に取得して直リンク表示（購入は一切しない）
+    // 🔍 比較一覧：対応サイトから今すぐ買える出品を取得し、商品行の直下に全幅で比較一覧を表示（購入は一切しない）
     async function runDeals(i) {
-      const cont = host.querySelector(`.src-deals[data-i="${i}"]`);
+      const itemTr = host.querySelector(`tr[data-row="${i}"]`);
       const btn = host.querySelector(`.src-deals-go[data-i="${i}"]`);
-      if (!cont) return;
+      if (!itemTr) return;
+      let detailTr = host.querySelector(`tr.deal-detail[data-row="${i}"]`);
+      if (!detailTr) {
+        detailTr = document.createElement('tr'); detailTr.className = 'deal-detail'; detailTr.dataset.row = i;
+        detailTr.innerHTML = '<td colspan="6" style="background:#f7f9fc;padding:9px 13px;border-top:2px solid #1a7f37"><div class="deal-cont"></div></td>';
+        itemTr.after(detailTr);
+      }
+      const cont = detailTr.querySelector('.deal-cont');
       const kw = kwOf(i);
-      if (!kw) { cont.innerHTML = '<span class="smd-dim" style="font-size:11px">キーワードが空です</span>'; return; }
+      if (!kw) { cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px">キーワードが空です</span>'; return; }
       if (btn) { btn.disabled = true; btn.textContent = '🔍 取得中…'; }
-      cont.innerHTML = '<span class="smd-dim" style="font-size:11px"><span class="smd-spin"></span> 各サイトから取得中…</span>';
+      cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px"><span class="smd-spin"></span> 各サイトから取得して比較中…</span>';
       try { const deals = await srcFetchDeals(kw); renderDeals(cont, deals); }
-      catch (e) { cont.innerHTML = `<span style="color:#d93025;font-size:11px">取得失敗：${esc(e.message || e)}（ブリッジ稼働を確認）</span>`; }
-      finally { if (btn) { btn.disabled = false; btn.textContent = '🔍 最安を再取得'; } }
+      catch (e) { cont.innerHTML = `<span style="color:#d93025;font-size:11.5px">取得失敗：${esc(e.message || e)}（ブリッジ稼働を確認）</span>`; }
+      finally { if (btn) { btn.disabled = false; btn.textContent = '🔍 比較を再取得'; } }
     }
     host.querySelectorAll('.src-deals-go').forEach(btn => btn.addEventListener('click', () => runDeals(+btn.dataset.i)));
     { const ab = document.getElementById('src-deals-all'); if (ab) ab.addEventListener('click', async () => {
