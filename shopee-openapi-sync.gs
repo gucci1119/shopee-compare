@@ -1284,25 +1284,48 @@ function syncPayoutsAll() {
   toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
-// ★履歴の補償/関税を一括取込（過去180日を15日窓で走査）。初回に1度手動実行。要 order_adjustments 表。
-function backfillAdjustments() {
-  var toks = listTokens_(), nowS = now_(), nowIso = new Date().toISOString(), total = 0, log = [];
+// ★履歴の補償/関税を一括取込（15日窓で走査。ページ送り対応）。手動実行。要 order_adjustments 表。
+// backfillAdjustments()            … 既定2年・打ち切り12窓(180日連続入金なし)
+// backfillAdjustments(1095, 40)    … 3年・打ち切り40窓(600日)緩め ＝ 深い再走査
+// backfillAdjustmentsDeep()        … 上記のショートカット
+function backfillAdjustments(days, maxEmpty, ccList) {
+  var DAYS = days || 730;                 // 既定2年
+  var MAXEMPTY = maxEmpty || 12;          // payoutゼロが連続この窓数で打ち切り（既定180日）
+  var WINDOWS = Math.ceil(DAYS / 15);
+  var toks = listTokens_(); if (ccList && ccList.length) toks = toks.filter(function (t) { return ccList.indexOf(t.cc) >= 0; }); // 特定国だけに絞れる
+  var nowS = now_(), nowIso = new Date().toISOString(), total = 0, log = [];
   toks.forEach(function (tok) {
-    var cc = tok.cc || '?', got = 0;
+    var cc = tok.cc || '?', got = 0, emptyStreak = 0, oldest = 0, stop = '全期間走査';
     try {
-      for (var wk = 0; wk < 12; wk++) { // 12×15日=180日
+      for (var wk = 0; wk < WINDOWS; wk++) {
         var to = nowS - wk * 15 * 86400, from = to - 15 * 86400;
-        var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: from, payout_time_to: to, page_size: 40, page_no: 0 }, 'get');
-        if (j && j.error) break;
-        var adj = payoutAdjRows_((j.response || {}).payout_list || [], cc, tok.shop_id, nowIso);
-        if (adj.length) { sbUpsert_('order_adjustments', adj, 'adj_id'); got += adj.length; }
+        var payoutsInWin = 0, pageNo = 0, apiErr = false;
+        for (var g = 0; g < 30; g++) { // 1窓内をページ送りで完走
+          var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: from, payout_time_to: to, page_size: 40, page_no: pageNo }, 'get');
+          if (j && j.error) { apiErr = true; break; } // この窓でAPIエラー（遡り上限など）
+          var resp = j.response || {};
+          var pl = resp.payout_list || [];
+          payoutsInWin += pl.length;
+          if (pl.length) oldest = from;
+          var adj = payoutAdjRows_(pl, cc, tok.shop_id, nowIso);
+          if (adj.length) { sbUpsert_('order_adjustments', adj, 'adj_id'); got += adj.length; }
+          if (!resp.more) break; pageNo++;
+        }
+        if (apiErr) { stop = 'APIが' + new Date(from * 1000).toISOString().slice(0, 10) + '以前を拒否'; break; } // APIが古い期間を返さない＝これ以上遡れない
+        // payoutが全く無い窓が連続MAXEMPTY回続いたら営業開始前とみなし打ち切り
+        if (payoutsInWin === 0) { if (++emptyStreak >= MAXEMPTY) { stop = 'payout空白' + (MAXEMPTY * 15) + '日で打切'; break; } } else emptyStreak = 0;
       }
     } catch (e) { log.push(cc + ' ' + tok.shop_id + ' err: ' + String(e).slice(0, 120)); }
-    total += got; if (got) log.push(cc + ' ' + tok.shop_id + ': ' + got + '件');
+    total += got;
+    log.push(cc + ' ' + tok.shop_id + ': ' + got + '件' + (oldest ? ('（最古payout ' + new Date(oldest * 1000).toISOString().slice(0, 10) + '頃まで／' + stop + '）') : '（payoutなし）'));
   });
-  log.push('=== 合計 ' + total + '件 取込 ===');
+  log.push('=== 合計 ' + total + '件 取込（走査 ' + DAYS + '日分・打切' + MAXEMPTY + '窓）===');
   Logger.log(log.join('\n')); return total;
 }
+// 深い再走査：3年分・打ち切りを大幅に緩めてTH/VN等の古い分も取り切る（※全ショップだとGAS6分上限に達しやすい）
+function backfillAdjustmentsDeep() { return backfillAdjustments(1095, 40); }
+// 浅かったTH/VNだけを3年分・緩め打ち切りで深掘り（2ショップなので6分内に完走。stopで理由が分かる）
+function backfillAdjustmentsTHVN() { return backfillAdjustments(1095, 40, ['TH', 'VN']); }
 
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
