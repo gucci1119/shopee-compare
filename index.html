@@ -4785,6 +4785,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ♾️ 無在庫・在庫監視：設定＋監視カタログ（実在庫データ接続）。監視の自動巡回/取り下げはブリッジ・公式APIでこれから（ロードマップ参照）。
   let dropshipRows = null;   // 在庫の実データ（初回のみ取得しキャッシュ。🔄で再取得）
   let dropshipKvLoaded = false; // app_kvからの監視リスト取り込みは初回のみ
+  let dropshipAuto = {};     // GAS監視(monitorDropshipStock)の結果 app_kv.dropship_status = {updatedAt, items:{item_id:{st,sig,at}}}
   async function renderDropship() {
     const body = document.getElementById('dropship-body');
     const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true, watch: [], watchStatus: {} };
@@ -4824,12 +4825,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
        <div style="font-weight:700;font-size:13.5px">🚧 実装ロードマップ</div>
        <ol style="font-size:12px;margin:8px 0 0;padding-left:20px;line-height:1.8">
          <li><b>✅ カタログ登録</b>：在庫から監視商品を選んで登録（下の「＋監視に追加」）。実画像・実仕入先・仕入値・自社の在庫状態を表示。</li>
-         <li><b>在庫監視（次）</b>：${cfg.freq}で監視先ページを確認。静的サイトはCORSで直接取得不可 → <b>ブリッジ(Tampermonkey GM_xhr)</b>か<b>GAS</b>で巡回し、売切れ（og:availability / 「売り切れ」表記 / 404）を検知して在庫状態を更新。</li>
-         <li><b>売切れ時の動作</b>：<b>${cfg.outOfStock === '取り下げ' ? '自動取り下げ' : '在庫0'}</b>。取り下げはShopeeへの外向き操作なので、まず<b>要確認リスト</b>に出し、ワンクリックで公式API(update_stock/unlist)実行。</li>
+         <li><b>✅ 在庫監視</b>：GAS(<b>monitorDropshipStock</b>／Google IP＝Yahoo・PayPay制限を受けない)が監視先ページを巡回→ 404/「売り切れ」/在庫ありを判定し🤖で自動表示。売切れは<b>取り下げ候補</b>に集約。${cfg.freq}トリガーで定期実行（手動上書きも可）。</li>
+         <li><b>売切れ時の動作</b>：<b>${cfg.outOfStock === '取り下げ' ? '自動取り下げ' : '在庫0'}</b>。取り下げはShopeeへの外向き操作なので、まず<b>取り下げ候補</b>に出し（実装済）、ワンクリックで公式API(update_stock/unlist)実行（次）。</li>
          <li><b>多国同時出品</b>：選んだ国(${cfg.countries.join('/') || '—'})へ▶自動出品を各国分。1枚目画像＝サムネ枠。</li>
          <li><b>売れたら他国取り下げ</b>：${cfg.crossDelist ? '有効' : '無効'}。ある国で売れたら同一商品を他国から取り下げ（二重販売防止）。</li>
        </ol>
-       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1」まで実データで動きます。「2」以降（自動巡回・取り下げ・多国出品）を次に組みます。</div></div>`;
+       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1〜2（監視）」まで実データで動きます。残り（公式API取り下げ・多国出品）を次に組みます。</div></div>`;
 
     body.innerHTML = settingsCard + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
 
@@ -4844,6 +4845,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!dropshipRows) {
       try { dropshipRows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,supplier,supplier_url,price,image,shopee_sn,status'); }
       catch (e) { const c = document.getElementById('ds-catalog'); if (c) c.innerHTML = card('📦 監視カタログ', '', `<div style="color:#c0392b;font-size:12px">在庫の読取に失敗しました：${esc(e.message)}</div>`); return; }
+      try { const sk = await sbGetAll('app_kv', 'select=v&k=eq.dropship_status'); dropshipAuto = (sk && sk[0] && sk[0].v) || {}; } catch (_) { dropshipAuto = {}; }
     }
     renderDsCatalog();
 
@@ -4858,27 +4860,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const c = document.getElementById('ds-catalog'); if (!c) return;
       const byId = new Map(dropshipRows.map(r => [r.item_id, r]));
       const watched = cfg.watch.map(id => byId.get(id)).filter(Boolean);
-      const stOf = id => cfg.watchStatus[id] || 'check';
-      const ST = { stock: { t: '在庫あり', c: '#1a7f37' }, oos: { t: '売切れ', c: '#d93025' }, check: { t: '要確認', c: '#b26a00' } };
-      const statusSel = r => `<select class="ds-status" data-id="${esc(r.item_id)}" style="font-size:11px;padding:3px 5px;border:1.5px solid ${ST[stOf(r.item_id)].c};border-radius:6px;color:${ST[stOf(r.item_id)].c};font-weight:700">${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${stOf(r.item_id) === k ? 'selected' : ''}>${v.t}</option>`).join('')}</select>`;
-      // 売切れ→取り下げ候補：仕入先が売切れた監視商品（＝これ以上仕入れられない→Shopeeで売れると欠品になる）
+      const autoItems = (dropshipAuto && dropshipAuto.items) || {};
+      const autoOf = id => autoItems[id] ? autoItems[id].st : null;                       // GAS監視の判定(stock/oos/unknown)
+      const stOf = id => { const m = cfg.watchStatus[id]; return (m && m !== 'auto') ? m : (autoOf(id) || 'check'); }; // 手動上書き優先→自動→要確認
+      const LBL = { stock: '在庫あり', oos: '売切れ', check: '要確認', unknown: '不明' };
+      const COL = { stock: '#1a7f37', oos: '#d93025', check: '#b26a00', unknown: '#888' };
+      const SEL = [['auto', '自動判定に従う'], ['stock', '在庫あり'], ['oos', '売切れ'], ['check', '要確認']];
+      const statusSel = r => { const cur = cfg.watchStatus[r.item_id] || 'auto'; const col = COL[stOf(r.item_id)] || '#888'; return `<select class="ds-status" data-id="${esc(r.item_id)}" title="自動判定を上書きしたいとき手動で選択" style="font-size:11px;padding:3px 5px;border:1.5px solid ${col};border-radius:6px;color:${col};font-weight:700">${SEL.map(([k, v]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`; };
+      const autoBadge = r => { const a = autoItems[r.item_id]; if (!a) return '<div class="smd-dim" style="font-size:10px;margin-top:2px">🤖 未巡回</div>'; const col = COL[a.st] || '#888'; return `<div style="font-size:10px;color:${col};margin-top:2px" title="自動巡回の判定（${esc(a.sig || '')} / ${a.at ? new Date(a.at).toLocaleString('ja-JP') : ''}）">🤖 ${LBL[a.st] || a.st}</div>`; };
+      // 売切れ→取り下げ候補（実効ステータス＝手動上書き or 自動判定）
       const oos = watched.filter(r => stOf(r.item_id) === 'oos');
+      const lastChk = dropshipAuto.updatedAt
+        ? `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🤖 最終自動チェック：${new Date(dropshipAuto.updatedAt).toLocaleString('ja-JP')}（GASが仕入先ページを巡回し在庫を自動判定）</div>`
+        : `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🤖 自動巡回はまだ実行されていません（GASの <b>monitorDropshipStock</b> トリガーで定期更新。手動でも実行可）</div>`;
       const delistBanner = oos.length
         ? `<div style="background:#fdecea;border:1.5px solid #f3b7b0;border-left:4px solid #d93025;border-radius:8px;padding:10px 13px;margin-bottom:12px">
              <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝これ以上仕入れられない。Shopeeに出しているなら早めに取り下げ推奨）</span></div>
              <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${oos.map(r => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid #f0c4bf;border-radius:14px;padding:2px 10px;font-size:11px">🚫 ${nm(r.name || r.name_supplier, '170px')}</span>`).join('')}</div>
-             <div class="smd-dim" style="font-size:10.5px;margin-top:6px">自動での売切れ検知＆公式APIでの一括取り下げはロードマップ「2〜3」。今は手動で状態を更新。</div>
+             <div class="smd-dim" style="font-size:10.5px;margin-top:6px">公式APIでの一括取り下げはロードマップ「3」。今は🔗在庫確認↗で確認し、必要なら手動で取り下げ。</div>
            </div>`
         : '';
       const watchedTable = watched.length
-        ? delistBanner + `<div class="pf-scroll"><table class="pf-table" style="min-width:740px">
-             <tr><th>画像</th><th>商品名</th><th>監視先（仕入先）</th><th>仕入値</th><th>仕入先在庫</th><th>自社状態</th><th></th></tr>
+        ? lastChk + delistBanner + `<div class="pf-scroll"><table class="pf-table" style="min-width:760px">
+             <tr><th>画像</th><th>商品名</th><th>監視先（仕入先）</th><th>仕入値</th><th>仕入先在庫（🤖自動/手動）</th><th>自社状態</th><th></th></tr>
              ${watched.map(r => `<tr>
                <td>${imgCell(r)}</td>
                <td style="font-size:12px">${nm(r.name || r.name_supplier, '240px')}</td>
                <td style="font-size:11px">${supplierNameCell(normSupplier(r.supplier))}${watchLink(r)}</td>
                <td style="font-size:12px">${yen(r.price)}</td>
-               <td>${statusSel(r)}</td>
+               <td>${statusSel(r)}${autoBadge(r)}</td>
                <td style="font-size:11px">${esc(r.status || '—')}</td>
                <td><button class="ds-unwatch" data-id="${esc(r.item_id)}" style="border:1px solid #e0b4c4;background:#fff;color:#c2185b;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">👁 解除</button></td>
              </tr>`).join('')}
