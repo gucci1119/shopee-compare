@@ -4852,7 +4852,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     renderDsCatalog();
     // Shopee出品(listings 約6500件)は🔗紐付け検索用。カタログ描画をブロックしないよう初回のみ裏で取得→完了後に再描画
-    if (dropshipListings === null) { dropshipListings = []; sbGetAll('listings', 'select=cc,item_id,name&status=eq.1').then(rows => { dropshipListings = rows || []; renderDsCatalog(); }).catch(() => { dropshipListings = []; }); }
+    if (dropshipListings === null) { dropshipListings = []; sbGetAll('listings', 'select=cc,item_id,name,models&status=eq.1').then(rows => { dropshipListings = rows || []; renderDsCatalog(); }).catch(() => { dropshipListings = []; }); }
 
     const yen = v => (v || v === 0) ? '¥' + Number(v).toLocaleString() : '—';
     // URLから仕入元を判定（SUPPLIER_METAのドメイン一致）
@@ -4869,17 +4869,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const stOf = id => { const m = cfg.watchStatus[id]; return (m && m !== 'auto') ? m : (autoOf(id) || 'check'); };
       const imgOf = it => { const a = metaOf(it.id); return (a && a.image) || mercdnFromUrl(it.url) || null; };
       const titleOf = it => { const a = metaOf(it.id); return it.title || (a && a.title) || ''; };
-      const LBL = { stock: '在庫あり', oos: '売切れ', check: '要確認', unknown: '不明', delisted: '取り下げ済み' };
+      const LBL = { stock: '在庫あり', oos: '売切れ', check: '要確認', unknown: '不明', delisted: '対応済み' };
       const COL = { stock: '#1a7f37', oos: '#d93025', check: '#b26a00', unknown: '#888', delisted: '#5f6368' };
-      const SEL = [['auto', '自動判定に従う'], ['stock', '在庫あり'], ['oos', '売切れ'], ['check', '要確認'], ['delisted', '✓取り下げ済み']];
+      const SEL = [['auto', '自動判定に従う'], ['stock', '在庫あり'], ['oos', '売切れ'], ['check', '要確認'], ['delisted', '✓対応済み(取下/在庫0)']];
       const statusSel = it => { const cur = cfg.watchStatus[it.id] || 'auto'; const col = COL[stOf(it.id)] || '#888'; return `<select class="ds-status" data-id="${esc(it.id)}" title="自動判定を上書きしたいとき手動で選択" style="font-size:11px;padding:3px 5px;border:1.5px solid ${col};border-radius:6px;color:${col};font-weight:700">${SEL.map(([k, v]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`; };
       const autoBadge = it => { const a = metaOf(it.id); if (!a) return '<div class="smd-dim" style="font-size:10px;margin-top:2px">🤖 未巡回</div>'; const col = COL[a.st] || '#888'; return `<div style="font-size:10px;color:${col};margin-top:2px" title="自動巡回の判定（${esc(a.sig || '')} / ${a.at ? new Date(a.at).toLocaleString('ja-JP') : ''}）">🤖 ${LBL[a.st] || a.st}</div>`; };
       // 登録商品 ⇔ 各国Shopee出品(listings) の紐付け
       const linksOf = id => (cfg.watchLinks[id] || []);
       const shopIdOf = cc => (settings.shopIds || {})[cc];
+      const actIcon = a => a === 'stock0' ? '0️⃣' : '🚫';
+      const actWord = a => a === 'stock0' ? '在庫0' : '取り下げ';
+      // 紐付け1件の売切れ時アクションを実行：unlist=取り下げ / stock0=在庫0（model指定なければ全model or 単品）
+      const dsExecLink = async (link) => {
+        const sid = shopIdOf(link.cc);
+        if (!sid) throw new Error(link.cc + ' のshop_idが未取得（出品管理で一度同期してください）');
+        if (link.action === 'stock0') {
+          let mids = [];
+          if (link.model_id != null && link.model_id !== '') mids = [Number(link.model_id)];
+          else { const md = await openapiGetModels(sid, +link.li); mids = (md || []).map(m => m.model_id); if (!mids.length) mids = [0]; }
+          await openapiUpdateStockList(sid, +link.li, mids.map(mid => ({ model_id: mid, stock: 0 })));
+        } else {
+          await openapiUnlistItem(sid, +link.li, true);
+        }
+      };
       const linkChips = it => {
         const ls = linksOf(it.id); const linkedCcs = new Set(ls.map(l => l.cc));
-        const chips = ls.length ? ls.map(l => `<span style="display:inline-flex;align-items:center;background:#eef3ff;border:1px solid #cdd9f5;color:#2952a3;border-radius:10px;padding:1px 4px 1px 7px;font-size:10px;margin:1px 3px 1px 0">${esc(l.cc)}<button class="ds-unlink" data-id="${esc(it.id)}" data-cc="${esc(l.cc)}" title="紐付けを外す" style="border:none;background:none;color:#a33;cursor:pointer;font-size:11px;padding:0 0 0 4px;line-height:1">×</button></span>`).join('') : '<span class="smd-dim" style="font-size:10px">未紐付け</span>';
+        const chips = ls.length ? ls.map((l, idx) => `<span style="display:inline-flex;align-items:center;background:${l.action === 'stock0' ? '#fff4e5' : '#eef3ff'};border:1px solid ${l.action === 'stock0' ? '#f0d3a8' : '#cdd9f5'};color:${l.action === 'stock0' ? '#a8650a' : '#2952a3'};border-radius:10px;padding:1px 4px 1px 6px;font-size:10px;margin:1px 3px 1px 0" title="売切れたら【${actWord(l.action)}】${l.model_name ? ' / 明細: ' + esc(l.model_name) : '（商品全体）'}">${actIcon(l.action)}${esc(l.cc)}${l.model_name ? '·' + esc(String(l.model_name).slice(0, 6)) : ''}<button class="ds-unlink" data-id="${esc(it.id)}" data-idx="${idx}" title="紐付けを外す" style="border:none;background:none;color:#a33;cursor:pointer;font-size:11px;padding:0 0 0 4px;line-height:1">×</button></span>`).join('') : '<span class="smd-dim" style="font-size:10px">未紐付け</span>';
         const gaps = (cfg.countries || []).filter(cc => !linkedCcs.has(cc));
         const cov = ls.length ? (gaps.length ? ` <span class="smd-dim" style="font-size:9.5px" title="対象国のうちまだShopee出品を紐付けていない国">未:${esc(gaps.join(','))}</span>` : ' <span style="font-size:9.5px;color:#1a7f37" title="対象国すべてに紐付け済み">全対象国✓</span>') : '';
         return chips + cov + `<br><button class="ds-link" data-id="${esc(it.id)}" style="border:1px dashed #99a;background:${dropshipLinkTarget === it.id ? '#fff6db' : '#fff'};color:#556;border-radius:8px;padding:1px 7px;font-size:10px;cursor:pointer;margin-top:3px">🔗 紐付け</button> <button class="ds-compose" data-id="${esc(it.id)}" title="このURLの商品でShopee出品を作る（仕入元URL＝画像自動取得。各国に出品）" style="border:1px solid #7b52c4;background:#f3eefc;color:#7b52c4;border-radius:8px;padding:1px 7px;font-size:10px;cursor:pointer;margin-top:3px">✍️ 出品作成</button>`;
@@ -4891,9 +4906,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         : `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🤖 自動巡回はまだ実行されていません（GASの <b>monitorDropshipStock</b> が登録URLを巡回して在庫/画像を取得。1日2回・手動実行も可）</div>`;
       const delistBanner = oos.length
         ? `<div style="background:#fdecea;border:1.5px solid #f3b7b0;border-left:4px solid #d93025;border-radius:8px;padding:10px 13px;margin-bottom:12px">
-             <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝再仕入不可。紐付けたShopee出品を公式APIで取り下げ）</span></div>
-             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(it => { const ls = linksOf(it.id); const btns = ls.length ? ls.map(l => `<button class="ds-unlist" data-id="${esc(it.id)}" data-cc="${esc(l.cc)}" data-li="${esc(l.li)}" title="Shopee公式API(unlist_item)で${esc(l.cc)}の出品を非公開(取り下げ)にする" style="border:1px solid #d93025;background:#fff;color:#d93025;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🚫 ${esc(l.cc)}取り下げ</button>`).join(' ') + (ls.length >= 2 ? ` <button class="ds-unlist-all" data-id="${esc(it.id)}" title="紐付けた全${ls.length}国の出品を一括で取り下げ（売れたら他国も取り下げ＝二重販売防止）" style="border:1px solid #b71c1c;background:#b71c1c;color:#fff;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🌐 全${ls.length}国取り下げ</button>` : '') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ可</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(titleOf(it) || detectSource(it.url) || 'この商品', '180px')} <a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a><span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(it.id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
-             <div class="smd-dim" style="font-size:10.5px;margin-top:7px">🚫{国}取り下げ＝公式API(unlist_item)で即・非公開（実行前に確認あり）。⚙️設定にOpenAPI URL/WRITE_TOKEN が必要。紐付け無しの分は「✓済」で手動記録。</div>
+             <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝再仕入不可。紐付けごとに🚫取り下げ or 0️⃣在庫0を実行）</span></div>
+             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(it => { const ls = linksOf(it.id); const btns = ls.length ? ls.map((l, idx) => `<button class="ds-exec" data-id="${esc(it.id)}" data-idx="${idx}" title="Shopee公式APIで${esc(l.cc)}${l.model_name ? '(' + esc(l.model_name) + ')' : ''}を【${actWord(l.action)}】" style="border:1px solid ${l.action === 'stock0' ? '#a8650a' : '#d93025'};background:#fff;color:${l.action === 'stock0' ? '#a8650a' : '#d93025'};border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">${actIcon(l.action)} ${esc(l.cc)}${l.model_name ? '·' + esc(String(l.model_name).slice(0, 6)) : ''} ${actWord(l.action)}</button>`).join(' ') + (ls.length >= 2 ? ` <button class="ds-exec-all" data-id="${esc(it.id)}" title="紐付けた全${ls.length}件をそれぞれの設定(取り下げ/在庫0)で一括実行（売れたら他国も＝二重販売防止）" style="border:1px solid #b71c1c;background:#b71c1c;color:#fff;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🌐 全${ls.length}件実行</button>` : '') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ/在庫0できます</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(titleOf(it) || detectSource(it.url) || 'この商品', '180px')} <a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a><span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(it.id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
+             <div class="smd-dim" style="font-size:10.5px;margin-top:7px">🚫取り下げ=unlist_item（新規の純無在庫向け）／0️⃣在庫0=update_stock（<b>既に売れている商品はこちら＝取り下げ/削除されない</b>。単品/特定明細に対応）。実行前に確認あり・⚙️設定にOpenAPI URL/WRITE_TOKENが必要。紐付け無しは「✓済」で手動記録。</div>
            </div>`
         : '';
       const rows = items.length
@@ -4945,25 +4960,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         showPage('list'); renderListPage();
         if (typeof toast === 'function') toast('✍️ 出品を作るに引き継ぎました（仕入元URL＝画像自動取得）。各国へ出品してください');
       }));
-      c.querySelectorAll('.ds-unlink').forEach(b => b.addEventListener('click', () => { const id = b.dataset.id; cfg.watchLinks[id] = (cfg.watchLinks[id] || []).filter(l => l.cc !== b.dataset.cc); if (!cfg.watchLinks[id].length) delete cfg.watchLinks[id]; save(); renderDsCatalog(); }));
-      c.querySelectorAll('.ds-unlist').forEach(b => b.addEventListener('click', async () => {
-        const cc = b.dataset.cc, li = b.dataset.li, sid = shopIdOf(cc);
-        if (!sid) { alert(cc + ' のshop_idが未取得です。出品管理ページで一度同期してください（settings.shopIds）'); return; }
-        if (!confirm(`${cc} のShopee出品（item ${li}）を公式APIで【取り下げ（非公開）】にします。よろしいですか？`)) return;
-        b.disabled = true; b.textContent = '取り下げ中…';
-        try { await openapiUnlistItem(sid, +li, true); if (typeof toast === 'function') toast(`🚫 ${cc} を取り下げました（Shopeeで確認）`); cfg.watchStatus[b.dataset.id] = 'delisted'; save(); renderDsCatalog(); }
-        catch (e) { alert('取り下げに失敗: ' + (e.message || e)); b.disabled = false; b.textContent = '🚫 ' + cc + '取り下げ'; }
+      c.querySelectorAll('.ds-unlink').forEach(b => b.addEventListener('click', () => { const id = b.dataset.id, idx = +b.dataset.idx; if (!cfg.watchLinks[id]) return; cfg.watchLinks[id].splice(idx, 1); if (!cfg.watchLinks[id].length) delete cfg.watchLinks[id]; save(); renderDsCatalog(); }));
+      c.querySelectorAll('.ds-exec').forEach(b => b.addEventListener('click', async () => {
+        const id = b.dataset.id, idx = +b.dataset.idx; const link = (cfg.watchLinks[id] || [])[idx]; if (!link) return;
+        const label = actWord(link.action);
+        if (!confirm(`${link.cc}${link.model_name ? '（明細: ' + link.model_name + '）' : ''} のShopee出品を公式APIで【${label}】にします。よろしいですか？`)) return;
+        const orig = b.textContent; b.disabled = true; b.textContent = label + '中…';
+        try { await dsExecLink(link); if (typeof toast === 'function') toast(`${actIcon(link.action)} ${link.cc} を${label}しました（Shopeeで確認）`); cfg.watchStatus[id] = 'delisted'; save(); renderDsCatalog(); }
+        catch (e) { alert(label + 'に失敗: ' + (e.message || e)); b.disabled = false; b.textContent = orig; }
       }));
-      c.querySelectorAll('.ds-unlist-all').forEach(b => b.addEventListener('click', async () => {
+      c.querySelectorAll('.ds-exec-all').forEach(b => b.addEventListener('click', async () => {
         const id = b.dataset.id, ls = (cfg.watchLinks[id] || []);
         if (!ls.length) return;
         const missing = ls.filter(l => !shopIdOf(l.cc));
         if (missing.length) { alert('shop_id未取得の国があります：' + missing.map(l => l.cc).join(',') + '（出品管理で同期してください）'); return; }
-        if (!confirm(`この商品の紐付け ${ls.length}国（${ls.map(l => l.cc).join('/')}）のShopee出品を公式APIで【一括取り下げ（非公開）】にします。よろしいですか？`)) return;
-        b.disabled = true; b.textContent = '取り下げ中…';
+        if (!confirm(`この商品の紐付け ${ls.length}件（${ls.map(l => l.cc + ':' + actWord(l.action)).join(' / ')}）を公式APIで一括実行します。よろしいですか？`)) return;
+        b.disabled = true; b.textContent = '実行中…';
         let ok = 0; const fail = [];
-        for (const l of ls) { try { await openapiUnlistItem(shopIdOf(l.cc), +l.li, true); ok++; } catch (e) { fail.push(l.cc); } }
-        if (typeof toast === 'function') toast(`🌐 ${ok}/${ls.length}国を取り下げました` + (fail.length ? `（失敗:${fail.join(',')}）` : ''), fail.length > 0);
+        for (const l of ls) { try { await dsExecLink(l); ok++; } catch (e) { fail.push(l.cc); } }
+        if (typeof toast === 'function') toast(`🌐 ${ok}/${ls.length}件を実行しました` + (fail.length ? `（失敗:${fail.join(',')}）` : ''), fail.length > 0);
         if (!fail.length) cfg.watchStatus[id] = 'delisted';
         save(); renderDsCatalog();
       }));
@@ -4976,14 +4991,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const q = (lsi.value || '').trim().toLowerCase();
           const rd = document.getElementById('ds-link-results'); if (!rd) return;
           if (!q) { rd.innerHTML = '<span class="smd-dim" style="font-size:11px">Shopee出品タイトルを入力…</span>'; return; }
-          const already = new Set((cfg.watchLinks[dropshipLinkTarget] || []).map(l => l.cc + '|' + l.li));
-          const hits = (dropshipListings || []).filter(l => (l.name || '').toLowerCase().includes(q)).slice(0, 25);
-          rd.innerHTML = hits.length ? `<div class="pf-scroll"><table class="pf-table" style="min-width:520px">${hits.map(l => `<tr>
-              <td style="width:38px;font-weight:700;font-size:11px;color:#2952a3">${esc(l.cc)}</td>
-              <td style="font-size:11.5px">${nm(l.name, '320px')}<br><span class="smd-dim" style="font-size:10px">item ${esc(String(l.item_id))}</span></td>
-              <td style="width:74px">${already.has(l.cc + '|' + l.item_id) ? '<span class="smd-dim" style="font-size:10.5px">紐付済</span>' : `<button class="ds-linkadd" data-cc="${esc(l.cc)}" data-li="${esc(String(l.item_id))}" data-nm="${esc((l.name || '').slice(0, 60))}" style="border:1px solid #2952a3;background:#eef3ff;color:#2952a3;border-radius:6px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">＋紐付け</button>`}</td>
-            </tr>`).join('')}</table></div>` : '<span class="smd-dim" style="font-size:11px">該当なし</span>';
-          rd.querySelectorAll('.ds-linkadd').forEach(b => b.addEventListener('click', () => { const id = dropshipLinkTarget; cfg.watchLinks[id] = cfg.watchLinks[id] || []; if (!cfg.watchLinks[id].some(l => l.cc === b.dataset.cc && l.li === b.dataset.li)) cfg.watchLinks[id].push({ cc: b.dataset.cc, li: b.dataset.li, name: b.dataset.nm }); save(); renderDsCatalog(); }));
+          const hits = (dropshipListings || []).filter(l => (l.name || '').toLowerCase().includes(q)).slice(0, 20);
+          const defAct = cfg.outOfStock === '取り下げ' ? 'unlist' : 'stock0';
+          rd.innerHTML = hits.length ? `<div class="pf-scroll"><table class="pf-table" style="min-width:640px">${hits.map(l => {
+              const models = Array.isArray(l.models) ? l.models : [];
+              const modelOpts = `<option value="">商品全体（${models.length ? models.length + '明細まとめて' : '単品'}）</option>` + models.map(m => { const sold = (m.confirmed_sales || m.placed_sales || m.sold || 0); return `<option value="${esc(String(m.id))}" data-mn="${esc(m.name || '')}">${esc(m.name || ('#' + m.id))}${sold ? ' ★売実績' + sold : ''}</option>`; }).join('');
+              return `<tr>
+                <td style="width:34px;font-weight:700;font-size:11px;color:#2952a3;vertical-align:top">${esc(l.cc)}</td>
+                <td style="font-size:11.5px">${nm(l.name, '300px')}<br><span class="smd-dim" style="font-size:10px">item ${esc(String(l.item_id))}${models.length ? ' ・ ' + models.length + '明細' : ''}</span>
+                  <div style="margin-top:4px;display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+                    <select class="dl-act" title="この出品を売切れ時にどうするか" style="font-size:10.5px;padding:2px 4px;border:1px solid #cdd7ea;border-radius:5px"><option value="unlist" ${defAct === 'unlist' ? 'selected' : ''}>売切れ時:取り下げ</option><option value="stock0" ${defAct === 'stock0' ? 'selected' : ''}>売切れ時:在庫0(推奨:実績あり)</option></select>
+                    <select class="dl-model" title="単品なら商品全体。バリエは特定明細だけ無在庫にもできる" style="font-size:10.5px;padding:2px 4px;border:1px solid #cdd7ea;border-radius:5px;max-width:200px">${modelOpts}</select>
+                  </div>
+                </td>
+                <td style="width:70px;vertical-align:top"><button class="ds-linkadd" data-cc="${esc(l.cc)}" data-li="${esc(String(l.item_id))}" data-nm="${esc((l.name || '').slice(0, 60))}" style="border:1px solid #2952a3;background:#eef3ff;color:#2952a3;border-radius:6px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">＋紐付け</button></td>
+              </tr>`;
+            }).join('')}</table></div>` : '<span class="smd-dim" style="font-size:11px">該当なし</span>';
+          rd.querySelectorAll('.ds-linkadd').forEach(b => b.addEventListener('click', () => {
+            const id = dropshipLinkTarget; if (!id) return;
+            const tr = b.closest('tr'); const actSel = tr.querySelector('.dl-act'), modSel = tr.querySelector('.dl-model');
+            const action = actSel ? actSel.value : 'unlist';
+            const model_id = (modSel && modSel.value) ? modSel.value : null;
+            const model_name = (model_id && modSel.selectedOptions[0]) ? (modSel.selectedOptions[0].getAttribute('data-mn') || '') : '';
+            cfg.watchLinks[id] = cfg.watchLinks[id] || [];
+            if (!cfg.watchLinks[id].some(l => l.cc === b.dataset.cc && l.li === b.dataset.li && (l.model_id || null) === model_id)) cfg.watchLinks[id].push({ cc: b.dataset.cc, li: b.dataset.li, name: b.dataset.nm, action: action, model_id: model_id, model_name: model_name });
+            save(); renderDsCatalog();
+          }));
         };
         lsi.addEventListener('input', doLink);
       }
