@@ -4953,7 +4953,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // 作成中の下書きがあれば置き換え確認（下書き消失防止）
         let hasDraft = false; try { const d = JSON.parse(localStorage.getItem('smdComposerAuto') || 'null'); hasDraft = !!(d && (d.name || (Array.isArray(d.variations) && d.variations.some(v => v.opt || v.cost)) || (d.catImgs && d.catImgs.length))); } catch (_) {}
         if (hasDraft && !confirm('「出品を作る」に作成中の下書きがあります。この無在庫商品で作り直しますか？\n（今の下書きは置き換わります。残したい場合は先に「下書きを保存」してください）')) return;
-        const seed = { name: name, mode: 'single', apiCondition: 'USED', costJpy: price, catImgs: img ? [img] : [], variations: [{ opt: '', cost: price, stock: 1, img: img, srcUrl: it.url }] };
+        const seed = { name: name, mode: 'single', apiCondition: 'USED', costJpy: price, catImgs: img ? [img] : [], watchSrcUrl: it.url, variations: [{ opt: '', cost: price, stock: 1, img: img, srcUrl: it.url }] };
         try { localStorage.setItem('smdComposerAuto', JSON.stringify(seed)); } catch (_) {}  // 復元が古い下書きを載せないよう先に上書き
         try { listApplyState(seed); } catch (_) { try { listState.name = name; } catch (e) {} }
         lst.tab = 'composer'; try { localStorage.setItem('smdListTab', 'composer'); } catch (_) {}
@@ -8480,6 +8480,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (e.srcSt === 'stock') src = ' <span style="background:#e8f5e9;color:#1a7f37;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px" title="仕入元に在庫あり">仕入元:在庫あり</span>';
     return `<span style="background:#fff4e5;color:#a8650a;border:1px solid #f0d3a8;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px" title="仕入元URLと連携して在庫監視中（出品管理→♾️無在庫）">👁 ${label}</span>${src}`;
   }
+  // 無在庫cfgの読み書き（renderDropshipの外＝出品作成の自動リンクからも使う）
+  function dropCfgLoad() { try { return JSON.parse(localStorage.getItem('smdDropCfg') || '{}'); } catch (_) { return {}; } }
+  function dropCfgSave(cfg) { try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {} try { if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'dropship_cfg', v: cfg, updated_at: new Date().toISOString() }]).catch(() => {}); } catch (_) {} }
+  // 出品作成時：監視ソースURLを無在庫リストに登録＋作成した出品(cc,item_id)を自動紐付け（商品全体）
+  function dropAutoLink(url, cc, itemId, name) {
+    if (!url || !/^https?:\/\//.test(url) || !cc || !itemId) return false;
+    const cfg = dropCfgLoad();
+    cfg.items = Array.isArray(cfg.items) ? cfg.items : [];
+    cfg.watchLinks = (cfg.watchLinks && typeof cfg.watchLinks === 'object') ? cfg.watchLinks : {};
+    let it = cfg.items.find(x => x.url === url);
+    if (!it) { it = { id: 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), url: url, source: '', title: name || '', addedAt: new Date().toISOString() }; cfg.items.push(it); }
+    cfg.watchLinks[it.id] = cfg.watchLinks[it.id] || [];
+    const action = cfg.outOfStock === '在庫0' ? 'stock0' : 'unlist';
+    if (!cfg.watchLinks[it.id].some(l => l.cc === cc && String(l.li) === String(itemId) && !l.model_id)) {
+      cfg.watchLinks[it.id].push({ cc: cc, li: String(itemId), name: name || '', action: action, model_id: null, model_name: '' });
+    }
+    dropCfgSave(cfg);
+    return true;
+  }
   function listingCardHtml(r) {
     const rg = regionByCc(r.cc) || { color: '#333', host: '' };
     const key = r.cc + ':' + r.item_id;
@@ -8634,6 +8653,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     varTier: '', variations: [], // [{opt, cost(仕入円), stock, img}]
     mode: 'single', // 'single'(単品) | 'variation'(バリエーション)。variations配列と連動
     descExtra: '',
+    watchSrcUrl: '', // ♾️無在庫: 在庫監視する仕入元URL（任意）。入れて出品すると作成後に自動で在庫監視へ紐付け
     overrides: {}, // 国別上書き { [cc]: { title, images, vars: { [i]: { name, price, stock, image, off } } } }
   };
   let listDragVar = null; // バリエカードのドラッグ並べ替え中インデックス
@@ -9323,7 +9343,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ---- コンポーザー下書き（ポータル内の一時保存） ----
   function listDraftState() {
     const s = listState;
-    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, catImgs: (s.catImgs || []).slice(), roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, costJpy: s.costJpy, mode: s.mode || ((s.variations && s.variations.length) ? 'variation' : 'single'), overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img, weightG: v.weightG != null ? v.weightG : null, srcUrl: v.srcUrl || null })), apiFamily: s.apiFamily || '', apiFamByCc: Object.assign({}, s.apiFamByCc || {}), apiCondition: s.apiCondition || 'USED' };
+    return { name: s.name, hardware: s.hardware, jpseries: s.jpseries, parentSku: s.parentSku, titleOverride: s.titleOverride || '', category: s.category, catImgs: (s.catImgs || []).slice(), roiPct: s.roiPct, weightG: s.weightG, dimW: s.dimW, dimH: s.dimH, dimD: s.dimD, varTier: s.varTier, descExtra: s.descExtra, watchSrcUrl: s.watchSrcUrl || '', costJpy: s.costJpy, mode: s.mode || ((s.variations && s.variations.length) ? 'variation' : 'single'), overrides: JSON.parse(JSON.stringify(s.overrides || {})), variations: (s.variations || []).map(v => ({ opt: v.opt, sku: v.sku, cost: v.cost, stock: v.stock, img: v.img, weightG: v.weightG != null ? v.weightG : null, srcUrl: v.srcUrl || null })), apiFamily: s.apiFamily || '', apiFamByCc: Object.assign({}, s.apiFamByCc || {}), apiCondition: s.apiCondition || 'USED' };
   }
   function listSyncForm() {
     const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val == null ? '' : val); };
@@ -9337,7 +9357,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     Object.assign(listState, {
       name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', titleOverride: st.titleOverride || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [], catImgs: st.catImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
-      varTier: st.varTier || '', descExtra: st.descExtra || '', costJpy: st.costJpy || 0, overrides: st.overrides || {},
+      varTier: st.varTier || '', descExtra: st.descExtra || '', watchSrcUrl: st.watchSrcUrl || '', costJpy: st.costJpy || 0, overrides: st.overrides || {},
       variations: (st.variations || []).map(v => ({ opt: v.opt || '', sku: v.sku || '', cost: v.cost || 0, stock: v.stock != null ? v.stock : 1, img: v.img || '', weightG: v.weightG != null ? v.weightG : null, srcUrl: v.srcUrl || null })),
       mode: st.mode || ((st.variations && st.variations.length) ? 'variation' : 'single'),
       // 出品先アカウント（全体/国別）と条件は、下書きに入っていれば復元・無ければ現状維持（リロードで選択が消えないように）
@@ -9886,6 +9906,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 <button id="li-apibulk" class="smd-btn" style="margin-left:10px;font-size:12px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="各国カードで選んだアカウントへ公式APIで一括出品。「🚫出品しない」にした国は除外（各国を順に作成）">🚀 選んだ国に一括出品</button>
                 <div class="smd-dim" style="font-size:11px;margin-top:4px">ここは<b>全国の既定アカウント</b>。各国カードで<b>国ごとに別アカウント（系統）へ変更</b>できます（複数系統がある国はカードにプルダウン表示）。<b style="color:#1a7f37">🚀 公式APIで出品</b>（または上の<b>一括</b>）で、その国の選んだショップへ直接作成（ログイン不要・<b>単品もバリエも対応</b>）。<b>作成後の状態は上の「作成後」で公開/非公開を選択</b>。結果は各国カードに ✅/❌ とトーストで表示。</div>`
              : `<span class="smd-dim" style="font-size:11px;margin-left:8px">アカウント登録簿が空です。<b>🔑アカウント</b>で「Shopeeから全ショップ取込」をすると系統が選べます。</span>`}
+           <div style="margin-top:8px;padding-top:7px;border-top:1px dashed #cce8d6;font-size:11.5px">
+             <label style="font-weight:700;color:#a8650a">♾️ 在庫監視ソースURL <span style="font-weight:400;color:#888">（無在庫の場合・任意）</span></label>
+             <input id="li-watchsrc" type="text" placeholder="例: https://jp.mercari.com/item/mXXXX ・ https://paypayfleamarket.yahoo.co.jp/item/zXXXX" value="${esc(listState.watchSrcUrl || '')}" style="display:block;width:100%;max-width:560px;padding:4px 8px;border:1px solid #f0d3a8;border-radius:6px;font-size:12px;margin-top:3px;box-sizing:border-box">
+             <div class="smd-dim" style="font-size:10.5px;margin-top:3px">仕入元URLを入れて出品すると、<b>作成後にこの出品を自動で「在庫監視」に紐付け</b>（手動🔗紐付け不要）。仕入元が売切れたら出品一覧に🚨表示・♾️無在庫で取り下げ/在庫0。</div>
+           </div>
          </div>
          <details style="margin-top:8px">
            <summary style="cursor:pointer;font-weight:700;font-size:12px;color:#7b52c4;list-style:none;user-select:none">🌏 他国で自動出品を有効化する（各国 初回だけ・要ブリッジ）</summary>
@@ -10121,6 +10146,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 条件(USED/NEW)セレクタ
     { const cs = document.getElementById('li-apicond'); if (cs) cs.addEventListener('change', () => { listState.apiCondition = cs.value; }); }
     { const ps = document.getElementById('li-apipub'); if (ps) ps.addEventListener('change', () => { listState.apiPublish = ps.value; }); }
+    { const ws = document.getElementById('li-watchsrc'); if (ws) ws.addEventListener('input', () => { listState.watchSrcUrl = ws.value.trim(); try { listAutoSave(); } catch (_) {} }); }
     // Shopeeの英語エラーを日本語のヒントに変換（原文も併記する。ヒント無しは''）
     const apiErrorJa = (em) => {
       const s = String(em || '').toLowerCase(); const h = [];
@@ -10177,6 +10203,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (resEl) resEl.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 作成(${stText}) item_id=${r.item_id}</span>${vinfo}<br>${buyUrl ? `<a href="${buyUrl}" target="_blank" style="font-weight:600">🛍️ 販売ページを開く↗</a> ・ ` : ''}<a href="${editUrl}" target="_blank">✏️ Shopeeで編集↗</a>${varFailed ? '<br><span class="smd-dim" style="font-size:10.5px">※バリエ名が重複/長すぎた可能性。名前を短く一意にして作り直すか、Shopeeの編集画面でバリエを追加してください。</span>' : ''}`;
         toast(`✅ ${cc} 出品成功（${stText}）item_id=${r.item_id}`);
         try { logAct('出品', '公式API出品', cc, jb.name + ' item_id=' + r.item_id + ' ' + stText); } catch (_) {}
+        // ♾️ 無在庫：監視ソースURLが入っていれば、この出品を自動で在庫監視に紐付け
+        try { if ((listState.watchSrcUrl || '').trim() && r.item_id) { if (dropAutoLink(listState.watchSrcUrl.trim(), cc, r.item_id, jb.name)) toast(`♾️ ${cc} を在庫監視に自動紐付けしました`); } } catch (_) {}
         return { cc, ok: true, item_id: r.item_id };
       } catch (e) {
         const em = String((e && e.message) || e);
