@@ -4760,14 +4760,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderReturns() {
     const body = document.getElementById('ret-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
-    let cancelled, issues, adjustments;
+    let cancelled, issues, adjustments, formalReturns;
     try {
-      [cancelled, issues, adjustments] = await Promise.all([
+      [cancelled, issues, adjustments, formalReturns] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
         sbGetAll('order_issues', 'select=*'),
         sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').catch(() => []),
+        sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => []),  // Shopee公式 返品/返金リクエスト
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
+    formalReturns = formalReturns || [];
     // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
     const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ（||1だと現地通貨をそのまま円扱いし過大化）
     // ★同一調整の重複を除去（cc:sn:種別:金額:シナリオ が同じ＝二重取込。注文SN重複の原因）
@@ -4831,14 +4833,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const isRefundRow = o => o._comp || hasCompRow(o) || ((issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0) > 0;
     const cancelRows = rowsAll.filter(o => !isRefundRow(o));
     const refundRows = rowsAll.filter(isRefundRow);
+    // ↩️ 返品リクエスト（Shopee公式 returns API＝買い手が正式に申請した返品/返金。キャンセルや補償とは別の実データ）
+    const retStatusJa = s => ({ REQUESTED: '申請中', PROCESSING: '処理中', JUDGING: '審査中', ACCEPTED: '承認', SELLER_DISPUTE: '異議申立', BUYER_DISPUTE: '買手異議', CLOSED: '完了', CANCELLED: '取消', REFUND_PAID: '返金済', SETTLED: '解決済', RETURN: '返送中' }[s] || s || '');
+    const retStatusColor = s => /CLOSED|REFUND_PAID|SETTLED|ACCEPTED/.test(s) ? '#1a7f37' : /CANCELLED/.test(s) ? '#999' : /DISPUTE/.test(s) ? '#d93025' : '#e8710a';
+    const retReasonJa = s => ({ NON_RECEIPT: '荷物未着', WRONG_ITEM: '商品違い', ITEM_WRONG: '商品違い', ITEM_DAMAGED: '破損', PHYSICAL_DMG: '破損', ITEM_MISSING: '欠品', ITEM_MISS: '欠品', ITEM_NOT_RECEIVED: '未着', ITEM_FAKE: '偽物疑い', FUNCTIONAL_ISSUE: '動作不良', NOT_FUNCTIONING: '動作不良', NOT_MATCH: '説明と相違', CHANGE_MIND: '気が変わった', DIFF_PRODUCT: '別商品', OTHER: 'その他', OTHERS: 'その他' }[s] || (s || '').replace(/_/g, ' ').toLowerCase() || '');
+    // 返品リクエストの注文SNで商品名・画像・バイヤーを補完
+    let retOrdMap = new Map();
+    if (formalReturns.length) {
+      const rsns = [...new Set(formalReturns.map(r => r.order_sn).filter(Boolean))];
+      if (rsns.length) { try { const ro = await sbGetAll('orders', 'select=cc,sn,buyer,items&sn=in.(' + rsns.map(s => '"' + s + '"').join(',') + ')'); (ro || []).forEach(o => retOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {} }
+    }
+    const retRefundJpy = r => { const rate = adjRate(r.cc); return rate ? Math.round((Number(r.refund_amount) || 0) * rate) : 0; };
     const rtab = renderReturns._tab || 'refund';
-    const rowsView = rtab === 'cancel' ? cancelRows : refundRows;
+    const rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows;
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
     const sel = (cls, cc, sn, opts, cur) => `<select class="${cls}" data-cc="${esc(cc)}" data-sn="${esc(sn)}" style="padding:2px 4px;font-size:11px">${opts.map(o => `<option ${o === (cur || '') ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`;
     const retPer = 50, retPages = Math.max(1, Math.ceil(rowsView.length / retPer)), retPage = Math.min(Math.max(1, renderReturns._page || 1), retPages);
-    const rowHtml = rowsView.slice((retPage - 1) * retPer, retPage * retPer).map(o => {
+    const rowHtml = rtab === 'formal' ? '' : rowsView.slice((retPage - 1) * retPer, retPage * retPer).map(o => {
       const it = (o.items || [])[0] || {};
       const iss = issueMap.get(o.cc + ':' + o.sn) || {};
       const rg = regionByCc(o.cc);
@@ -4952,8 +4965,44 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>各注文の補償額・種類は下の一覧に「🎁補償」行＋補償列</b>で出ます（右上フィルタ「補償が入った」で絞込可・金額は現地通貨＋円）。補償は「段階＝日本を出た後」＋返金額記録済みなら「SLS+補償」の受取に反映。関税（マイナス）は実コスト。</div>
         </div></div>`;
     })();
+    // ↩️ 返品リクエスト一覧（国別サマリー＋テーブル）
+    const formalBlock = (() => {
+      if (!formalReturns.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px;font-size:11.5px">Shopeeの正式な返品/返金リクエストはまだ取り込まれていません。6時間ごとに自動同期（<code>syncReturnsAll</code>）します。過去分が必要なら <code>backfillReturns</code> を1回実行してください。</div>`;
+      const byCc = {}; formalReturns.forEach(r => { const b = byCc[r.cc] = byCc[r.cc] || { n: 0, jpy: 0 }; b.n++; b.jpy += retRefundJpy(r); });
+      const ccChips = Object.entries(byCc).sort((a, b) => b[1].n - a[1].n).map(([cc, b]) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${(regionByCc(cc) || {}).color || '#e0d0d0'};border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${esc(cc)}</b> ${b.n}件${b.jpy ? ` <span style="color:#d93025">${fmtJpy(b.jpy)}</span>` : ''}</span>`).join('');
+      const totJpy = Object.values(byCc).reduce((s, b) => s + b.jpy, 0);
+      const frows = formalReturns.slice((retPage - 1) * retPer, retPage * retPer).map(r => {
+        const od = retOrdMap.get(r.cc + ':' + r.order_sn) || {};
+        const it = (od.items || [])[0] || {};
+        const rg = regionByCc(r.cc);
+        const dt = r.create_time ? jstDateTime(Number(r.create_time) * 1000).slice(0, 10) : '';
+        const cur = r.currency || (rg || {}).cur || '';
+        return `<tr>
+          <td><b style="color:${rg ? rg.color : '#333'}">${esc(r.cc)}</b></td>
+          <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
+          <td style="font-size:11px;word-break:break-all">${esc(r.order_sn || '')}</td>
+          <td style="font-size:11px;white-space:nowrap">${esc(dt)}</td>
+          <td style="font-size:11px">${esc(od.buyer || '')}</td>
+          <td style="font-size:11px">${it.name ? nm(it.name, '260px') : '<span class="smd-dim">—</span>'}</td>
+          <td style="white-space:nowrap"><span style="color:${retStatusColor(r.status)};font-weight:700;font-size:11px">${esc(retStatusJa(r.status))}</span></td>
+          <td style="font-size:11px">${esc(retReasonJa(r.reason))}</td>
+          <td style="text-align:right;font-size:11px;white-space:nowrap">${Number(r.refund_amount) > 0 ? `${esc(cur)} ${Math.round(r.refund_amount).toLocaleString()}${retRefundJpy(r) ? `<br><span class="smd-dim" style="font-size:9.5px">≈${fmtJpy(retRefundJpy(r))}</span>` : ''}` : '<span class="smd-dim">—</span>'}</td>
+          <td style="font-size:10.5px;word-break:break-all" class="smd-dim">${esc(r.return_sn || '')}</td>
+        </tr>`;
+      }).join('');
+      return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px">
+          <div style="font-weight:700;font-size:14px">↩️ 返品リクエスト <span class="smd-dim" style="font-weight:400;font-size:11px">— Shopee公式APIで買い手が申請した正式な返品/返金（6時間ごと自動同期）。計 ${formalReturns.length}件${totJpy ? ` ・返金相当 <b style="color:#d93025">${fmtJpy(totJpy)}</b>` : ''}</span></div>
+          <div style="margin:8px 0 2px">${ccChips}</div>
+          <div class="smd-dim" style="font-size:10.5px">💡 これは「キャンセル」や「payout補償」とは別で、<b>買い手がアプリから正式に申請した返品/返金</b>の実データです。左の「💸返金・補償」は自分の記録＋補償入金、こちらは<b>Shopee側の返品リクエスト原本</b>。</div>
+        </div>
+        <div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1080px">
+          <tr><th>国</th><th>画像</th><th>注文SN</th><th>申請日</th><th>バイヤー</th><th>商品</th><th>状態</th><th>理由</th><th>返金額</th><th>返品SN</th></tr>
+          ${frows}
+        </table></div></div>` + pageNav(formalReturns.length, retPer, retPage);
+    })();
     const tabBtn = (id, label, n, active) => `<button class="ret-tab" data-tab="${id}" style="padding:8px 18px;font-size:13.5px;font-weight:700;border:none;border-bottom:3px solid ${active ? '#c2185b' : 'transparent'};background:none;cursor:pointer;color:${active ? '#c2185b' : '#999'}">${esc(label)} <span style="font-weight:400;font-size:11.5px">${n}</span></button>`;
-    const tabBar = `<div style="display:flex;gap:2px;align-items:center;border-bottom:1px solid #eee;margin:0 0 12px;flex-wrap:wrap">${tabBtn('refund', '💸 返金・補償', refundRows.length, rtab === 'refund')}${tabBtn('cancel', '↩️ キャンセル', cancelRows.length, rtab === 'cancel')}<span class="smd-dim" style="margin-left:auto;align-self:center;font-size:11px;padding-right:6px">${rtab === 'refund' ? '返金を出した／Shopee補償が入った注文 ＝ 損失と回収を管理' : '発送前・未払い等で流れた注文 ＝ 基本は再出品するだけ'}</span></div>`;
+    const tabHint = rtab === 'formal' ? 'Shopeeで買い手が正式に申請した返品/返金リクエストの実データ（原本）' : rtab === 'refund' ? '返金を出した／Shopee補償が入った注文 ＝ 損失と回収を管理' : '発送前・未払い等で流れた注文 ＝ 基本は再出品するだけ';
+    const tabBar = `<div style="display:flex;gap:2px;align-items:center;border-bottom:1px solid #eee;margin:0 0 12px;flex-wrap:wrap">${tabBtn('formal', '↩️ 返品リクエスト', formalReturns.length, rtab === 'formal')}${tabBtn('refund', '💸 返金・補償', refundRows.length, rtab === 'refund')}${tabBtn('cancel', '🚫 キャンセル', cancelRows.length, rtab === 'cancel')}<span class="smd-dim" style="margin-left:auto;align-self:center;font-size:11px;padding-right:6px">${tabHint}</span></div>`;
     const summary = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`;
     const addTool = `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
@@ -4968,9 +5017,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `</table></div></div>` +
       pageNav(rowsView.length, retPer, retPage);
     body.innerHTML = tabBar + summary +
-      (rtab === 'refund'
-        ? (analysisCard + compCard + adjCard + addTool + tableBlock)
-        : (addTool + tableBlock));
+      (rtab === 'formal'
+        ? formalBlock
+        : rtab === 'refund'
+          ? (analysisCard + compCard + adjCard + addTool + tableBlock)
+          : (addTool + tableBlock));
     body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
     wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
     // ハンドラ

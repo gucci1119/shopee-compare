@@ -1327,6 +1327,71 @@ function backfillAdjustmentsDeep() { return backfillAdjustments(1095, 40); }
 // 浅かったTH/VNだけを3年分・緩め打ち切りで深掘り（2ショップなので6分内に完走。stopで理由が分かる）
 function backfillAdjustmentsTHVN() { return backfillAdjustments(1095, 40, ['TH', 'VN']); }
 
+// ========== 返品・返金リクエストの同期（Shopee公式 returns/get_return_list） → Supabase 'returns' 表 ==========
+// ★まず構造確認：1〜2ショップで叩き、返るフィールド名とサンプルをログ出力。テーブル設計の確認用。
+// 一時トリガー用の入口：次の発火で「自分(probeReturns)の毎分トリガーを削除」し、
+// 「syncReturnsAll の6時間毎トリガー」を1本だけ作成する（自己クリーンアップ）。
+// backfill は既に済（returns_backfilled フラグ）。ScriptApp のトリガー操作はUIより確実。
+function probeReturns() {
+  var hasSync = false;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    var fn = t.getHandlerFunction();
+    if (fn === 'probeReturns') ScriptApp.deleteTrigger(t);   // 自分の毎分トリガーを削除
+    if (fn === 'syncReturnsAll') hasSync = true;
+  });
+  if (!hasSync) ScriptApp.newTrigger('syncReturnsAll').timeBased().everyHours(6).create();
+}
+// 返品APIのレスポンス行 → returns表の行（フィールド名は複数候補に対応して防御的に）
+function returnRows_(list, cc, shopId, nowIso) {
+  return (list || []).map(function (r) {
+    var reason = r.reason || (r.negotiation && r.negotiation.reason) || '';
+    return {
+      return_sn: String(r.return_sn || r.returnid || r.return_id || ''),
+      cc: cc, shop_id: String(shopId),
+      order_sn: r.order_sn || '',
+      status: String(r.status || ''),
+      reason: String(reason || ''),
+      refund_amount: parseFloat(r.refund_amount != null ? r.refund_amount : (r.amount != null ? r.amount : 0)) || 0,
+      currency: r.currency || null,
+      create_time: r.create_time || 0,
+      update_time: r.update_time || 0,
+      synced_at: nowIso
+    };
+  }).filter(function (x) { return x.return_sn; });
+}
+// 15日窓で走査してreturns表にupsert（返品APIは窓に上限があることがあるため窓分割・ページ送り）
+function syncReturnsRange_(days, ccList) {
+  var DAYS = days || 730, WINDOWS = Math.ceil(DAYS / 14);
+  var toks = listTokens_(); if (ccList && ccList.length) toks = toks.filter(function (t) { return ccList.indexOf(t.cc) >= 0; });
+  var nowS = now_(), nowIso = new Date().toISOString(), total = 0, log = [];
+  toks.forEach(function (tok) {
+    var cc = tok.cc || '?', got = 0, emptyStreak = 0, oldest = 0, stop = '全期間';
+    try {
+      for (var wk = 0; wk < WINDOWS; wk++) {
+        var to = nowS - wk * 14 * 86400, from = to - 14 * 86400, any = 0, pageNo = 0, apiErr = false;
+        for (var g = 0; g < 30; g++) {
+          var j;
+          try { j = callShop_(tok.shop_id, '/api/v2/returns/get_return_list', { page_no: pageNo, page_size: 40, create_time_from: from, create_time_to: to }, 'get'); }
+          catch (e) { apiErr = true; break; }
+          var resp = j.response || {};
+          var list = resp.return || resp.return_list || [];
+          any += list.length;
+          var rows = returnRows_(list, cc, tok.shop_id, nowIso);
+          if (rows.length) { try { sbUpsert_('returns', rows, 'return_sn'); } catch (e2) { if (/relation|does not exist/i.test(String(e2))) { Logger.log('returns表が未作成です'); return; } throw e2; } got += rows.length; oldest = from; }
+          if (!resp.more) break; pageNo++;
+        }
+        if (apiErr) { stop = 'APIが' + new Date(from * 1000).toISOString().slice(0, 10) + '以前を拒否'; break; }
+        if (any === 0) { if (++emptyStreak >= 12) { stop = '空白180日で打切'; break; } } else emptyStreak = 0;
+      }
+    } catch (e) { log.push(cc + ' ' + tok.shop_id + ' err: ' + String(e).slice(0, 120)); }
+    total += got; log.push(cc + ' ' + tok.shop_id + ': ' + got + '件' + (oldest ? ('（最古 ' + new Date(oldest * 1000).toISOString().slice(0, 10) + '／' + stop + '）') : ''));
+  });
+  log.push('=== 合計 ' + total + '件 取込（走査' + DAYS + '日）===');
+  Logger.log(log.join('\n')); return total;
+}
+function syncReturnsAll() { return syncReturnsRange_(45); }      // 定例（直近45日）
+function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
+
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
