@@ -4784,20 +4784,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ♾️ 無在庫・在庫監視：設定＋監視カタログ（実在庫データ接続）。監視の自動巡回/取り下げはブリッジ・公式APIでこれから（ロードマップ参照）。
   let dropshipRows = null;   // 在庫の実データ（初回のみ取得しキャッシュ。🔄で再取得）
+  let dropshipKvLoaded = false; // app_kvからの監視リスト取り込みは初回のみ
   async function renderDropship() {
     const body = document.getElementById('dropship-body');
     const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true, watch: [], watchStatus: {} };
     let cfg; try { cfg = Object.assign({}, DEF, JSON.parse(localStorage.getItem('smdDropCfg') || '{}')); } catch (_) { cfg = Object.assign({}, DEF); }
     if (!Array.isArray(cfg.watch)) cfg.watch = [];
     if (!cfg.watchStatus || typeof cfg.watchStatus !== 'object') cfg.watchStatus = {};
-    const save = () => localStorage.setItem('smdDropCfg', JSON.stringify(cfg));
+    // クロスデバイス同期(app_kv)：初回のみ他PCの監視リスト/状態を取り込む（settingsはグローバルのキー保持オブジェクト）
+    if (!dropshipKvLoaded && (settings.sbKey || settings.sbSecret)) {
+      dropshipKvLoaded = true;
+      try {
+        const kv = await sbGetAll('app_kv', 'select=v&k=eq.dropship_cfg');
+        if (kv && kv[0] && kv[0].v) { cfg = Object.assign({}, DEF, cfg, kv[0].v); localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); }
+      } catch (_) {}
+      if (!Array.isArray(cfg.watch)) cfg.watch = [];
+      if (!cfg.watchStatus || typeof cfg.watchStatus !== 'object') cfg.watchStatus = {};
+    }
+    const save = () => { try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {} if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'dropship_cfg', v: cfg, updated_at: new Date().toISOString() }]).catch(() => {}); };
     const SUPS = (typeof SUPPLIERS !== 'undefined' && SUPPLIERS.length ? SUPPLIERS : ['メルカリ', 'Yahoo!フリマ', 'ヤフオク', '駿河屋', '楽天', 'セカスト', 'Amazon']);
     const CCS = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
     const toggleChip = (label, on) => `<span class="ds-chip" data-v="${esc(label)}" style="display:inline-flex;align-items:center;gap:3px;border:1.5px solid ${on ? '#c2185b' : '#d8dee6'};background:${on ? '#fdeef4' : '#fff'};color:${on ? '#c2185b' : '#667'};border-radius:16px;padding:3px 12px;font-size:12px;cursor:pointer;margin:0 6px 6px 0;font-weight:${on ? '700' : '400'};user-select:none">${on ? '✓ ' : ''}${esc(label)}</span>`;
     const sel = (id, opts, cur) => `<select id="${id}" style="padding:5px 8px;font-size:13px;border:1.5px solid #cdd7ea;border-radius:6px">${opts.map(o => `<option ${o === cur ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
     const card = (title, sub, inner) => `<div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">${title}${sub ? ` <span class="smd-dim" style="font-weight:400;font-size:11.5px">${sub}</span>` : ''}</div><div style="margin-top:9px">${inner}</div></div>`;
 
-    const settings = card('⚙️ 監視・出品の設定', '（まずはここを決める。あとで自由に変更OK）',
+    const settingsCard = card('⚙️ 監視・出品の設定', '（まずはここを決める。あとで自由に変更OK）',
       `<div style="font-size:12.5px;margin-bottom:4px"><b>👁 監視先（＝仕入先）</b> <span class="smd-dim">この仕入元の在庫を見張る</span></div>
        <div id="ds-sups" style="margin-bottom:10px">${SUPS.map(s => toggleChip(s, cfg.suppliers.includes(s))).join('')}</div>
        <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
@@ -4820,7 +4831,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
        </ol>
        <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1」まで実データで動きます。「2」以降（自動巡回・取り下げ・多国出品）を次に組みます。</div></div>`;
 
-    body.innerHTML = settings + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
+    body.innerHTML = settingsCard + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
 
     // 設定のインタラクション（即保存）
     body.querySelectorAll('#ds-sups .ds-chip').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; const i = cfg.suppliers.indexOf(v); if (i >= 0) cfg.suppliers.splice(i, 1); else cfg.suppliers.push(v); save(); renderDropship(); }));
