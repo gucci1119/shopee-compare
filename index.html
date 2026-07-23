@@ -4782,11 +4782,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return true;
     } catch (e) { alert('保存失敗: ' + e.message); return false; }
   }
-  // ♾️ 無在庫・在庫監視（ラフ版）：設定はlocalStorage 'smdDropCfg' に保存。監視/取り下げの実処理はこれから（設計のたたき台）。
-  function renderDropship() {
+  // ♾️ 無在庫・在庫監視：設定＋監視カタログ（実在庫データ接続）。監視の自動巡回/取り下げはブリッジ・公式APIでこれから（ロードマップ参照）。
+  let dropshipRows = null;   // 在庫の実データ（初回のみ取得しキャッシュ。🔄で再取得）
+  async function renderDropship() {
     const body = document.getElementById('dropship-body');
-    const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true };
+    const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true, watch: [] };
     let cfg; try { cfg = Object.assign({}, DEF, JSON.parse(localStorage.getItem('smdDropCfg') || '{}')); } catch (_) { cfg = Object.assign({}, DEF); }
+    if (!Array.isArray(cfg.watch)) cfg.watch = [];
     const save = () => localStorage.setItem('smdDropCfg', JSON.stringify(cfg));
     const SUPS = (typeof SUPPLIERS !== 'undefined' && SUPPLIERS.length ? SUPPLIERS : ['メルカリ', 'Yahoo!フリマ', 'ヤフオク', '駿河屋', '楽天', 'セカスト', 'Amazon']);
     const CCS = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
@@ -4806,39 +4808,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
        <div id="ds-ccs">${CCS.map(c => toggleChip(c, cfg.countries.includes(c))).join('')}</div>
        <div class="smd-dim" style="font-size:11px;margin-top:6px">💡 設定は自動保存されます（この端末）。「1時間ごと」等の高頻度は不要との想定で最短1日1回にしています。</div>`);
 
-    const catalog = card('📦 監視カタログ <span class="smd-dim" style="font-weight:400;font-size:11px">（ラフ：レイアウト見本）</span>', '',
-      `<div class="smd-dim" style="font-size:12px;margin-bottom:8px">無在庫で出す商品の一覧イメージです。<b>1枚目画像に枠</b>を付け、各国の出品状態と仕入先の在庫を並べます（実データ連携はこれから）。</div>
-       <div class="pf-scroll"><table class="pf-table" style="min-width:760px">
-         <tr><th>画像</th><th>商品名</th><th>仕入先/在庫</th><th>仕入値</th>${CCS.map(c => `<th>${c}</th>`).join('')}<th>操作</th></tr>
-         <tr>
-           <td><div style="width:46px;height:46px;border:3px solid #c2185b;border-radius:6px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;background:#fafafa;font-size:9px;color:#c2185b">1枚目<br>枠</div></td>
-           <td style="font-size:12px">（例）たまごっち 森で発見 ツタ柄</td>
-           <td style="font-size:11px"><b>メルカリ</b> <span style="color:#1a7f37">在庫あり</span></td>
-           <td style="font-size:12px">¥3,800</td>
-           ${CCS.map((c, i) => `<td style="font-size:11px">${i < 3 ? '<span style="color:#1a7f37">出品中</span>' : '<span class="smd-dim">—</span>'}</td>`).join('')}
-           <td><span class="smd-dim" style="font-size:11px">見本</span></td>
-         </tr>
-         <tr>
-           <td><div style="width:46px;height:46px;border:3px solid #c2185b;border-radius:6px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;background:#fafafa;font-size:9px;color:#c2185b">1枚目<br>枠</div></td>
-           <td style="font-size:12px">（例）ポケモン エメラルド アドバンス</td>
-           <td style="font-size:11px"><b>セカスト</b> <span style="color:#d93025">売切れ→取り下げ</span></td>
-           <td style="font-size:12px">¥5,500</td>
-           ${CCS.map(() => `<td style="font-size:11px"><span class="smd-dim">取下</span></td>`).join('')}
-           <td><span class="smd-dim" style="font-size:11px">見本</span></td>
-         </tr>
-       </table></div>`);
-
     const roadmap = `<div class="tool-card" style="margin:0;max-width:none;border-left:4px solid #6a5acd;padding:12px 15px;background:#faf9ff">
-       <div style="font-weight:700;font-size:13.5px">🚧 実装ロードマップ <span class="smd-dim" style="font-weight:400;font-size:11px">（このラフから詰める順番）</span></div>
+       <div style="font-weight:700;font-size:13.5px">🚧 実装ロードマップ</div>
        <ol style="font-size:12px;margin:8px 0 0;padding-left:20px;line-height:1.8">
-         <li><b>カタログ登録</b>：どの商品を無在庫で出すか（既存の出品/在庫から選ぶ or 仕入先URLで追加）。仕入先URL＝在庫監視先。</li>
-         <li><b>多国同時出品</b>：選んだ国へ一括出品（公式APIの▶自動出品を各国分。1枚目画像＝サムネに枠）。</li>
-         <li><b>在庫監視</b>：${cfg.freq}で仕入先ページ/APIを確認（ブリッジ経由）。売切れ検知で<b>${cfg.outOfStock === '取り下げ' ? '自動取り下げ' : '在庫0'}</b>。</li>
+         <li><b>✅ カタログ登録</b>：在庫から監視商品を選んで登録（下の「＋監視に追加」）。実画像・実仕入先・仕入値・Shopee出品状態を表示。</li>
+         <li><b>在庫監視（次）</b>：${cfg.freq}で監視先ページを確認。静的サイトはCORSで直接取得不可 → <b>ブリッジ(Tampermonkey GM_xhr)</b>か<b>GAS</b>で巡回し、売切れ（og:availability / 「売り切れ」表記 / 404）を検知して在庫状態を更新。</li>
+         <li><b>売切れ時の動作</b>：<b>${cfg.outOfStock === '取り下げ' ? '自動取り下げ' : '在庫0'}</b>。取り下げはShopeeへの外向き操作なので、まず<b>要確認リスト</b>に出し、ワンクリックで公式API(update_stock/unlist)実行。</li>
+         <li><b>多国同時出品</b>：選んだ国(${cfg.countries.join('/') || '—'})へ▶自動出品を各国分。1枚目画像＝サムネ枠。</li>
          <li><b>売れたら他国取り下げ</b>：${cfg.crossDelist ? '有効' : '無効'}。ある国で売れたら同一商品を他国から取り下げ（二重販売防止）。</li>
        </ol>
-       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 まずこのラフの<b>設定・レイアウト</b>に「ここ違う／これ足して」を言ってもらえれば、そこから実データ連携・自動化を組みます。</div></div>`;
+       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1」まで実データで動きます。「2」以降（自動巡回・取り下げ・多国出品）を次に組みます。</div></div>`;
 
-    body.innerHTML = settings + catalog + roadmap;
+    body.innerHTML = settings + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
 
     // 設定のインタラクション（即保存）
     body.querySelectorAll('#ds-sups .ds-chip').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; const i = cfg.suppliers.indexOf(v); if (i >= 0) cfg.suppliers.splice(i, 1); else cfg.suppliers.push(v); save(); renderDropship(); }));
@@ -4846,6 +4827,72 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const fq = document.getElementById('ds-freq'); if (fq) fq.addEventListener('change', () => { cfg.freq = fq.value; save(); renderDropship(); });
     const oo = document.getElementById('ds-oos'); if (oo) oo.addEventListener('change', () => { cfg.outOfStock = /取り下げ/.test(oo.value) ? '取り下げ' : '在庫0'; save(); renderDropship(); });
     const cr = document.getElementById('ds-cross'); if (cr) cr.addEventListener('change', () => { cfg.crossDelist = cr.checked; save(); renderDropship(); });
+
+    // ── 監視カタログ（実データ）──
+    if (!dropshipRows) {
+      try { dropshipRows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,supplier,supplier_url,price,image,shopee_sn,status'); }
+      catch (e) { const c = document.getElementById('ds-catalog'); if (c) c.innerHTML = card('📦 監視カタログ', '', `<div style="color:#c0392b;font-size:12px">在庫の読取に失敗しました：${esc(e.message)}</div>`); return; }
+    }
+    renderDsCatalog();
+
+    function imgCell(r) {
+      const src = stockImg(r);
+      return `<div style="width:46px;height:46px;border:3px solid #c2185b;border-radius:6px;box-sizing:border-box;overflow:hidden;background:#fafafa;flex:0 0 auto">${src ? `<img src="${esc(src)}" loading="lazy" style="width:100%;height:100%;object-fit:cover" onerror="this.style.visibility='hidden'">` : '<div style="font-size:9px;color:#c2185b;display:flex;align-items:center;justify-content:center;height:100%">no img</div>'}</div>`;
+    }
+    const yen = v => (v || v === 0) ? '¥' + Number(v).toLocaleString() : '—';
+    const listBadge = r => r.shopee_sn ? '<span style="color:#1a7f37;font-weight:700">出品中</span>' : '<span class="smd-dim">未出品</span>';
+    const watchLink = r => r.supplier_url && /^https?:/.test(r.supplier_url) ? ` <a href="${esc(r.supplier_url)}" target="_blank" rel="noopener" style="font-size:11px;color:#1565c0" title="監視先の在庫ページを開いて確認">在庫確認↗</a>` : '';
+
+    function renderDsCatalog() {
+      const c = document.getElementById('ds-catalog'); if (!c) return;
+      const byId = new Map(dropshipRows.map(r => [r.item_id, r]));
+      const watched = cfg.watch.map(id => byId.get(id)).filter(Boolean);
+      const watchedTable = watched.length
+        ? `<div class="pf-scroll"><table class="pf-table" style="min-width:720px">
+             <tr><th>画像</th><th>商品名</th><th>監視先（仕入先）</th><th>仕入値</th><th>在庫状態</th><th>Shopee</th><th></th></tr>
+             ${watched.map(r => `<tr>
+               <td>${imgCell(r)}</td>
+               <td style="font-size:12px">${nm(r.name || r.name_supplier, '240px')}</td>
+               <td style="font-size:11px">${supplierNameCell(normSupplier(r.supplier))}${watchLink(r)}</td>
+               <td style="font-size:12px">${yen(r.price)}</td>
+               <td style="font-size:11px">${esc(r.status || '—')}</td>
+               <td style="font-size:11px">${listBadge(r)}</td>
+               <td><button class="ds-unwatch" data-id="${esc(r.item_id)}" style="border:1px solid #e0b4c4;background:#fff;color:#c2185b;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">👁 解除</button></td>
+             </tr>`).join('')}
+           </table></div>`
+        : `<div class="smd-dim" style="font-size:12px;padding:8px 0">まだ監視商品がありません。下の検索で在庫から追加してください（無在庫で出す＝仕入先の在庫を見張りたい商品）。</div>`;
+
+      const monitorableTotal = dropshipRows.filter(r => r.supplier_url && /^https?:/.test(r.supplier_url)).length;
+      const searchUI = `<div style="margin-top:14px;border-top:1px dashed #e3d3db;padding-top:12px">
+          <div style="font-size:12.5px;font-weight:700;margin-bottom:6px">＋ 監視に追加 <span class="smd-dim" style="font-weight:400;font-size:11px">（在庫${dropshipRows.length}件から検索。監視先URL有り＝${monitorableTotal}件が巡回対象になれます）</span></div>
+          <input id="ds-search" type="text" placeholder="商品名・仕入先で検索（例：たまごっち / メルカリ）" style="width:100%;max-width:420px;padding:7px 10px;font-size:13px;border:1.5px solid #cdd7ea;border-radius:7px;box-sizing:border-box">
+          <div id="ds-results" style="margin-top:8px"></div>
+        </div>`;
+
+      c.innerHTML = card('📦 監視カタログ', `（監視中 ${watched.length} 件） <button id="ds-refresh" style="border:1px solid #cdd7ea;background:#fff;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer">🔄 在庫再取得</button>`, watchedTable + searchUI);
+
+      c.querySelectorAll('.ds-unwatch').forEach(b => b.addEventListener('click', () => { cfg.watch = cfg.watch.filter(id => id !== b.dataset.id); save(); renderDsCatalog(); }));
+      const rf = document.getElementById('ds-refresh'); if (rf) rf.addEventListener('click', async () => { dropshipRows = null; await renderDropship(); });
+      const si = document.getElementById('ds-search');
+      if (si) {
+        const doSearch = () => {
+          const q = (si.value || '').trim().toLowerCase();
+          const rd = document.getElementById('ds-results'); if (!rd) return;
+          if (!q) { rd.innerHTML = '<span class="smd-dim" style="font-size:11px">キーワードを入力…</span>'; return; }
+          const watchSet = new Set(cfg.watch);
+          const hits = dropshipRows.filter(r => !watchSet.has(r.item_id) && ((r.name || '') + (r.name_supplier || '') + (r.supplier || '')).toLowerCase().includes(q)).slice(0, 25);
+          rd.innerHTML = hits.length ? `<div class="pf-scroll"><table class="pf-table" style="min-width:560px">
+              ${hits.map(r => `<tr>
+                <td style="width:44px">${imgCell(r)}</td>
+                <td style="font-size:12px">${nm(r.name || r.name_supplier, '260px')}<br><span class="smd-dim" style="font-size:10.5px">${esc(normSupplier(r.supplier) || '—')} ・ ${yen(r.price)} ・ ${esc(r.status || '—')}</span></td>
+                <td style="width:70px"><button class="ds-watch" data-id="${esc(r.item_id)}" style="border:1px solid #c2185b;background:#fdeef4;color:#c2185b;border-radius:6px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">＋監視</button></td>
+              </tr>`).join('')}
+            </table></div>` : '<span class="smd-dim" style="font-size:11px">該当なし</span>';
+          rd.querySelectorAll('.ds-watch').forEach(b => b.addEventListener('click', () => { if (!cfg.watch.includes(b.dataset.id)) cfg.watch.push(b.dataset.id); save(); renderDsCatalog(); }));
+        };
+        si.addEventListener('input', doSearch);
+      }
+    }
   }
 
   async function renderReturns() {
