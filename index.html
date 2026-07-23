@@ -4830,10 +4830,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          <li><b>✅ カタログ登録</b>：在庫から監視商品を選んで登録（下の「＋監視に追加」）。実画像・実仕入先・仕入値・自社の在庫状態を表示。</li>
          <li><b>✅ 在庫監視</b>：GAS(<b>monitorDropshipStock</b>／Google IP＝Yahoo・PayPay制限を受けない)が監視先ページを巡回→ 404/「売り切れ」/在庫ありを判定し🤖で自動表示。売切れは<b>取り下げ候補</b>に集約。${cfg.freq}トリガーで定期実行（手動上書きも可）。</li>
          <li><b>✅ 取り下げ</b>：監視商品に各国Shopee出品を🔗紐付け→ 売切れ時に<b>取り下げ候補</b>から「🚫{国}取り下げ」ワンクリックで公式API(unlist_item)実行（実行前に確認）。外向き操作のため自動実行はせず手動確定。</li>
-         <li><b>多国同時出品</b>：選んだ国(${cfg.countries.join('/') || '—'})へ▶自動出品を各国分。1枚目画像＝サムネ枠。（紐付けデータで未出品国の把握が可能に）</li>
-         <li><b>売れたら他国取り下げ</b>：${cfg.crossDelist ? '有効' : '無効'}。ある国で売れたら紐付け済みの同一商品を他国からも取り下げ（二重販売防止）。</li>
+         <li><b>🟡 多国同時出品</b>：紐付け表示で<b>未出品の対象国</b>(未:XX)を把握。実際の各国出品は既存の<b>🆕出品管理＞▶自動出品</b>(create_product_info・画像/カテゴリ/重量ベース価格)で。将来ここから直接ハンドオフ予定。</li>
+         <li><b>✅ 売れたら他国取り下げ</b>：${cfg.crossDelist ? '有効' : '無効'}。一点物が売れたら取り下げ候補の「🌐 全N国取り下げ」で紐付け済み全国を一括unlist（確認式・二重販売防止）。</li>
        </ol>
-       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1〜3（登録・監視・取り下げ）」まで実データで動きます。残り（多国同時出品・売れたら他国取り下げ）を次に。</div></div>`;
+       <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 「1〜3・5」まで実データで動作。残りは④の各国一括出品ハンドオフ（現状は出品管理へ誘導）。</div></div>`;
 
     body.innerHTML = settingsCard + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
 
@@ -4875,7 +4875,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 監視商品 ⇔ 各国Shopee出品(listings) の紐付け
       const linksOf = id => (cfg.watchLinks[id] || []);
       const shopIdOf = cc => (settings.shopIds || {})[cc];
-      const linkChips = r => { const ls = linksOf(r.item_id); const chips = ls.length ? ls.map(l => `<span style="display:inline-flex;align-items:center;background:#eef3ff;border:1px solid #cdd9f5;color:#2952a3;border-radius:10px;padding:1px 4px 1px 7px;font-size:10px;margin:1px 3px 1px 0">${esc(l.cc)}<button class="ds-unlink" data-id="${esc(r.item_id)}" data-cc="${esc(l.cc)}" title="紐付けを外す" style="border:none;background:none;color:#a33;cursor:pointer;font-size:11px;padding:0 0 0 4px;line-height:1">×</button></span>`).join('') : '<span class="smd-dim" style="font-size:10px">未紐付け</span>'; return chips + `<br><button class="ds-link" data-id="${esc(r.item_id)}" style="border:1px dashed #99a;background:${dropshipLinkTarget === r.item_id ? '#fff6db' : '#fff'};color:#556;border-radius:8px;padding:1px 7px;font-size:10px;cursor:pointer;margin-top:3px">🔗 出品を紐付け</button>`; };
+      const linkChips = r => {
+        const ls = linksOf(r.item_id); const linkedCcs = new Set(ls.map(l => l.cc));
+        const chips = ls.length ? ls.map(l => `<span style="display:inline-flex;align-items:center;background:#eef3ff;border:1px solid #cdd9f5;color:#2952a3;border-radius:10px;padding:1px 4px 1px 7px;font-size:10px;margin:1px 3px 1px 0">${esc(l.cc)}<button class="ds-unlink" data-id="${esc(r.item_id)}" data-cc="${esc(l.cc)}" title="紐付けを外す" style="border:none;background:none;color:#a33;cursor:pointer;font-size:11px;padding:0 0 0 4px;line-height:1">×</button></span>`).join('') : '<span class="smd-dim" style="font-size:10px">未紐付け</span>';
+        const gaps = (cfg.countries || []).filter(cc => !linkedCcs.has(cc));  // ④ 対象国のうち未出品
+        const cov = ls.length ? (gaps.length ? ` <span class="smd-dim" style="font-size:9.5px" title="対象国のうちまだShopee出品を紐付けていない国。出品管理から追加出品を">未:${esc(gaps.join(','))}</span>` : ' <span style="font-size:9.5px;color:#1a7f37" title="対象国すべてに紐付け済み">全対象国✓</span>') : '';
+        return chips + cov + `<br><button class="ds-link" data-id="${esc(r.item_id)}" style="border:1px dashed #99a;background:${dropshipLinkTarget === r.item_id ? '#fff6db' : '#fff'};color:#556;border-radius:8px;padding:1px 7px;font-size:10px;cursor:pointer;margin-top:3px">🔗 出品を紐付け</button>`;
+      };
       // 売切れ→取り下げ候補（実効ステータス＝手動上書き or 自動判定）
       const oos = watched.filter(r => stOf(r.item_id) === 'oos');
       const lastChk = dropshipAuto.updatedAt
@@ -4884,7 +4890,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const delistBanner = oos.length
         ? `<div style="background:#fdecea;border:1.5px solid #f3b7b0;border-left:4px solid #d93025;border-radius:8px;padding:10px 13px;margin-bottom:12px">
              <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝再仕入不可。紐付けたShopee出品を公式APIで取り下げ）</span></div>
-             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(r => { const ls = linksOf(r.item_id); const btns = ls.length ? ls.map(l => `<button class="ds-unlist" data-id="${esc(r.item_id)}" data-cc="${esc(l.cc)}" data-li="${esc(l.li)}" title="Shopee公式API(unlist_item)で${esc(l.cc)}の出品を非公開(取り下げ)にする" style="border:1px solid #d93025;background:#fff;color:#d93025;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🚫 ${esc(l.cc)}取り下げ</button>`).join(' ') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ可</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(r.name || r.name_supplier, '190px')}${r.supplier_url && /^https?:/.test(r.supplier_url) ? ` <a href="${esc(r.supplier_url)}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a>` : ''}<span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(r.item_id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
+             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(r => { const ls = linksOf(r.item_id); const btns = ls.length ? ls.map(l => `<button class="ds-unlist" data-id="${esc(r.item_id)}" data-cc="${esc(l.cc)}" data-li="${esc(l.li)}" title="Shopee公式API(unlist_item)で${esc(l.cc)}の出品を非公開(取り下げ)にする" style="border:1px solid #d93025;background:#fff;color:#d93025;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🚫 ${esc(l.cc)}取り下げ</button>`).join(' ') + (ls.length >= 2 ? ` <button class="ds-unlist-all" data-id="${esc(r.item_id)}" title="紐付けた全${ls.length}国の出品を一括で取り下げ（売れたら他国も取り下げ＝二重販売防止）" style="border:1px solid #b71c1c;background:#b71c1c;color:#fff;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🌐 全${ls.length}国取り下げ</button>` : '') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ可</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(r.name || r.name_supplier, '190px')}${r.supplier_url && /^https?:/.test(r.supplier_url) ? ` <a href="${esc(r.supplier_url)}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a>` : ''}<span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(r.item_id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
              <div class="smd-dim" style="font-size:10.5px;margin-top:7px">🚫{国}取り下げ＝公式API(unlist_item)で即・非公開（実行前に確認あり）。⚙️設定にOpenAPI URL/WRITE_TOKEN が必要。紐付け無しの分は「✓済」で手動記録。</div>
            </div>`
         : '';
@@ -4932,6 +4938,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         b.disabled = true; b.textContent = '取り下げ中…';
         try { await openapiUnlistItem(sid, +li, true); if (typeof toast === 'function') toast(`🚫 ${cc} を取り下げました（Shopeeで確認）`); cfg.watchStatus[b.dataset.id] = 'delisted'; save(); renderDsCatalog(); }
         catch (e) { alert('取り下げに失敗: ' + (e.message || e)); b.disabled = false; b.textContent = '🚫 ' + cc + '取り下げ'; }
+      }));
+      c.querySelectorAll('.ds-unlist-all').forEach(b => b.addEventListener('click', async () => {
+        const id = b.dataset.id, ls = (cfg.watchLinks[id] || []);
+        if (!ls.length) return;
+        const missing = ls.filter(l => !shopIdOf(l.cc));
+        if (missing.length) { alert('shop_id未取得の国があります：' + missing.map(l => l.cc).join(',') + '（出品管理で同期してください）'); return; }
+        if (!confirm(`この商品の紐付け ${ls.length}国（${ls.map(l => l.cc).join('/')}）のShopee出品を公式APIで【一括取り下げ（非公開）】にします。よろしいですか？`)) return;
+        b.disabled = true; b.textContent = '取り下げ中…';
+        let ok = 0; const fail = [];
+        for (const l of ls) { try { await openapiUnlistItem(shopIdOf(l.cc), +l.li, true); ok++; } catch (e) { fail.push(l.cc); } }
+        if (typeof toast === 'function') toast(`🌐 ${ok}/${ls.length}国を取り下げました` + (fail.length ? `（失敗:${fail.join(',')}）` : ''), fail.length > 0);
+        if (!fail.length) cfg.watchStatus[id] = 'delisted';
+        save(); renderDsCatalog();
       }));
       const rf = document.getElementById('ds-refresh'); if (rf) rf.addEventListener('click', async () => { dropshipRows = null; dropshipListings = null; await renderDropship(); });
       const lc = document.getElementById('ds-link-close'); if (lc) lc.addEventListener('click', () => { dropshipLinkTarget = null; renderDsCatalog(); });
