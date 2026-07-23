@@ -4786,9 +4786,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   let dropshipRows = null;   // 在庫の実データ（初回のみ取得しキャッシュ。🔄で再取得）
   async function renderDropship() {
     const body = document.getElementById('dropship-body');
-    const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true, watch: [] };
+    const DEF = { suppliers: ['メルカリ', 'Yahoo!フリマ', 'セカストオンライン'], freq: '1日2回', outOfStock: '取り下げ', countries: ['PH', 'SG', 'MY'], crossDelist: true, watch: [], watchStatus: {} };
     let cfg; try { cfg = Object.assign({}, DEF, JSON.parse(localStorage.getItem('smdDropCfg') || '{}')); } catch (_) { cfg = Object.assign({}, DEF); }
     if (!Array.isArray(cfg.watch)) cfg.watch = [];
+    if (!cfg.watchStatus || typeof cfg.watchStatus !== 'object') cfg.watchStatus = {};
     const save = () => localStorage.setItem('smdDropCfg', JSON.stringify(cfg));
     const SUPS = (typeof SUPPLIERS !== 'undefined' && SUPPLIERS.length ? SUPPLIERS : ['メルカリ', 'Yahoo!フリマ', 'ヤフオク', '駿河屋', '楽天', 'セカスト', 'Amazon']);
     const CCS = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
@@ -4847,15 +4848,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const c = document.getElementById('ds-catalog'); if (!c) return;
       const byId = new Map(dropshipRows.map(r => [r.item_id, r]));
       const watched = cfg.watch.map(id => byId.get(id)).filter(Boolean);
+      const stOf = id => cfg.watchStatus[id] || 'check';
+      const ST = { stock: { t: '在庫あり', c: '#1a7f37' }, oos: { t: '売切れ', c: '#d93025' }, check: { t: '要確認', c: '#b26a00' } };
+      const statusSel = r => `<select class="ds-status" data-id="${esc(r.item_id)}" style="font-size:11px;padding:3px 5px;border:1.5px solid ${ST[stOf(r.item_id)].c};border-radius:6px;color:${ST[stOf(r.item_id)].c};font-weight:700">${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${stOf(r.item_id) === k ? 'selected' : ''}>${v.t}</option>`).join('')}</select>`;
+      // 売切れ→取り下げ候補（Shopee出品中のものは特に要対応）
+      const oos = watched.filter(r => stOf(r.item_id) === 'oos');
+      const oosListed = oos.filter(r => r.shopee_sn);
+      const delistBanner = oos.length
+        ? `<div style="background:#fdecea;border:1.5px solid #f3b7b0;border-left:4px solid #d93025;border-radius:8px;padding:10px 13px;margin-bottom:12px">
+             <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝これ以上仕入れられない。Shopee出品中の${oosListed.length}件は早めに取り下げ推奨）</span></div>
+             <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${oos.map(r => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid #f0c4bf;border-radius:14px;padding:2px 10px;font-size:11px">${r.shopee_sn ? '🔴' : '⚪'} ${nm(r.name || r.name_supplier, '160px')}</span>`).join('')}</div>
+             <div class="smd-dim" style="font-size:10.5px;margin-top:6px">🔴=Shopee出品中（取り下げ対象） ／ ⚪=未出品。自動巡回＆公式APIでの一括取り下げはロードマップ「2〜3」。</div>
+           </div>`
+        : '';
       const watchedTable = watched.length
-        ? `<div class="pf-scroll"><table class="pf-table" style="min-width:720px">
-             <tr><th>画像</th><th>商品名</th><th>監視先（仕入先）</th><th>仕入値</th><th>在庫状態</th><th>Shopee</th><th></th></tr>
+        ? delistBanner + `<div class="pf-scroll"><table class="pf-table" style="min-width:740px">
+             <tr><th>画像</th><th>商品名</th><th>監視先（仕入先）</th><th>仕入値</th><th>仕入先在庫</th><th>Shopee</th><th></th></tr>
              ${watched.map(r => `<tr>
                <td>${imgCell(r)}</td>
                <td style="font-size:12px">${nm(r.name || r.name_supplier, '240px')}</td>
                <td style="font-size:11px">${supplierNameCell(normSupplier(r.supplier))}${watchLink(r)}</td>
                <td style="font-size:12px">${yen(r.price)}</td>
-               <td style="font-size:11px">${esc(r.status || '—')}</td>
+               <td>${statusSel(r)}</td>
                <td style="font-size:11px">${listBadge(r)}</td>
                <td><button class="ds-unwatch" data-id="${esc(r.item_id)}" style="border:1px solid #e0b4c4;background:#fff;color:#c2185b;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">👁 解除</button></td>
              </tr>`).join('')}
@@ -4871,7 +4885,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
       c.innerHTML = card('📦 監視カタログ', `（監視中 ${watched.length} 件） <button id="ds-refresh" style="border:1px solid #cdd7ea;background:#fff;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer">🔄 在庫再取得</button>`, watchedTable + searchUI);
 
-      c.querySelectorAll('.ds-unwatch').forEach(b => b.addEventListener('click', () => { cfg.watch = cfg.watch.filter(id => id !== b.dataset.id); save(); renderDsCatalog(); }));
+      c.querySelectorAll('.ds-unwatch').forEach(b => b.addEventListener('click', () => { cfg.watch = cfg.watch.filter(id => id !== b.dataset.id); delete cfg.watchStatus[b.dataset.id]; save(); renderDsCatalog(); }));
+      c.querySelectorAll('.ds-status').forEach(s => s.addEventListener('change', () => { cfg.watchStatus[s.dataset.id] = s.value; save(); renderDsCatalog(); }));
       const rf = document.getElementById('ds-refresh'); if (rf) rf.addEventListener('click', async () => { dropshipRows = null; await renderDropship(); });
       const si = document.getElementById('ds-search');
       if (si) {
