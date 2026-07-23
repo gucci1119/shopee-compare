@@ -8453,6 +8453,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     drawListingStatus();
   }
+  // 無在庫(在庫監視)の紐付けを cc|item_id で逆引き。{whole:全体監視, models:Set(監視中のmodel_id)}
+  function dropWatchIndex() {
+    let cfg; try { cfg = JSON.parse(localStorage.getItem('smdDropCfg') || '{}'); } catch (_) { cfg = {}; }
+    const links = cfg.watchLinks || {};
+    const idx = new Map();
+    Object.keys(links).forEach(dsId => (links[dsId] || []).forEach(l => {
+      const k = l.cc + '|' + l.li;
+      let e = idx.get(k); if (!e) { e = { whole: false, models: new Set() }; idx.set(k, e); }
+      if (l.model_id != null && l.model_id !== '') e.models.add(String(l.model_id)); else e.whole = true;
+    }));
+    return idx;
+  }
+  // 出品カードの「在庫監視対象」バッジ
+  function watchBadgeHtml(r) {
+    const idx = lst._watchIdx; if (!idx) return '';
+    const e = idx.get(r.cc + '|' + r.item_id); if (!e) return '';
+    const total = r.model_count || (r.models ? r.models.length : 0);
+    const label = e.whole ? '在庫監視(全体)' : ('在庫監視(' + e.models.size + (total ? '/' + total : '') + '明細)');
+    return `<span style="background:#fff4e5;color:#a8650a;border:1px solid #f0d3a8;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px" title="仕入元URLと連携して在庫監視中（出品管理→♾️無在庫）">👁 ${label}</span>`;
+  }
   function listingCardHtml(r) {
     const rg = regionByCc(r.cc) || { color: '#333', host: '' };
     const key = r.cc + ':' + r.item_id;
@@ -8475,7 +8495,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15">
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</div>
-          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} 価格${price} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : '<span class="smd-dim">単品</span>'}</div>
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} 価格${price} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : '<span class="smd-dim">単品</span>'}</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:3px;align-items:center;flex:none">
           <button class="lst-edit" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="ポータル内で編集してShopeeに保存" style="border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">✎編集</button>
@@ -8491,12 +8511,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const host = document.getElementById('list-status'); if (!host) return;
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を出さない）
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
+    lst._watchIdx = dropWatchIndex(); // 在庫監視の逆引き（cc|item_id → 全体/明細）
     const totalAll = all.length;
+    const watchedCount = all.filter(r => lst._watchIdx.has(r.cc + '|' + r.item_id)).length;
     const q = (lst.search || '').toLowerCase();
     let rows = all;
     if (lst.filter === 'live') rows = rows.filter(r => r.status === 1);
     else if (lst.filter === 'oos') rows = rows.filter(r => (r.stock || 0) <= 0);
     else if (lst.filter === 'other') rows = rows.filter(r => r.status !== 1);
+    else if (lst.filter === 'watched') rows = rows.filter(r => lst._watchIdx.has(r.cc + '|' + r.item_id));
+    else if (lst.filter === 'unwatched') rows = rows.filter(r => !lst._watchIdx.has(r.cc + '|' + r.item_id));
     if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || String(r.item_id).includes(q) || (r.models || []).some(m => (m.n || '').toLowerCase().includes(q)));
     const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
     const lstPer = 60, lstPages = Math.max(1, Math.ceil(rows.length / lstPer)), lstPage = Math.min(Math.max(1, lst.page || 1), lstPages); // 1ページ60件＝6500件でも軽い
@@ -8509,6 +8533,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <button data-k="live" class="${lst.filter === 'live' ? 'on' : ''}">出品中</button>
           <button data-k="oos" class="${lst.filter === 'oos' ? 'on' : ''}">在庫切れ</button>
           <button data-k="other" class="${lst.filter === 'other' ? 'on' : ''}">停止/その他</button>
+          <button data-k="watched" class="${lst.filter === 'watched' ? 'on' : ''}" title="仕入元URLと連携して在庫監視中の出品（出品管理→♾️無在庫で紐付け）">👁 在庫監視${watchedCount ? '(' + watchedCount + ')' : ''}</button>
+          <button data-k="unwatched" class="${lst.filter === 'unwatched' ? 'on' : ''}" title="仕入元連携なしの出品">監視対象外</button>
         </span>
         <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
