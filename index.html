@@ -10992,10 +10992,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     el.textContent = '読み込み中...';
     try {
       if (!renderTrend._orders || Date.now() - (renderTrend._ordAt || 0) > 120000) {
-        renderTrend._orders = await sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn');
+        // 売上額は完了を待たず income(escrow)の buyer_paid にある＝速報で出せる。orders.total(完了時のみ)より即時
+        [renderTrend._orders, renderTrend._income] = await Promise.all([
+          sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn'),
+          sbGetAll('income', 'select=cc,sn,buyer_paid').catch(() => []),
+        ]);
         renderTrend._ordAt = Date.now();
       }
       const orders = renderTrend._orders || [];
+      const snAmt = new Map();   // cc|sn → 買い手支払額（速報売上）
+      (renderTrend._income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snAmt.set(i.cc + '|' + i.sn, v); });
       const { period, metric, inclCancel, range } = trendState;
       const rr = range ? trendRange(range) : null;
       const effPeriod = rr ? 'day' : period;   // 範囲プリセット選択時は日足で表示
@@ -11025,7 +11031,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const cc = o.cc || '?';
         const bc = b.byCc[cc] = b.byCc[cc] || { count: 0, sales: 0 };
         b.count++; bc.count++; if (isCancel) b.cancel++;
-        if (!isCancel) { const rg = regionByCc(cc); if (rg) { const s = (Number(o.total) || 0) * rg.rateJpy; b.sales += s; bc.sales += s; } }
+        // 売上額＝income.buyer_paid(escrow・完了を待たず入る)優先→無ければorders.total(完了時)
+        if (!isCancel) { const rg = regionByCc(cc); if (rg) { const amt = snAmt.has(cc + '|' + o.sn) ? snAmt.get(cc + '|' + o.sn) : (Number(o.total) || 0); const s = amt * rg.rateJpy; b.sales += s; bc.sales += s; } }
       });
       // バケットのキー列を生成（0件の日/週/月も出す）。クイック範囲なら その範囲の日足を、無ければ今日(JST)から遡ってN個
       let keys;
@@ -11078,8 +11085,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const pName = (TREND_PERIODS.find(p => p[0] === effPeriod) || ['', ''])[1];
       const rangePrefix = rr ? `<b>${rr.label}</b>（${rr.s}〜${rr.e}）・` : '';
       const topK = keys.reduce((a, k) => val(k) > val(a) ? k : a, keys[0]);
-      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(注文額×レート)' : ''}${metric === 'count' && inclCancel ? '・キャンセル含む' : (metric === 'count' ? '・キャンセル除く' : '')}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）` +
-        (metric === 'sales' ? `<br><span style="color:#b45309">※直近の売上が低いのはバグではなく<b>計上ラグ</b>：Shopeeは注文が「完了」した時に売上を記録するため、未発送/発送中の注文はまだ¥0。完了すると遡って埋まります（件数は日本時間で即時反映）。</span>` : '');
+      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric === 'count' && inclCancel ? '・キャンセル含む' : (metric === 'count' ? '・キャンセル除く' : '')}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）`;
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
