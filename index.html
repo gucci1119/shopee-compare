@@ -2643,18 +2643,29 @@
         ]);
         renderDash._cache = { days, orders, income, inv, payouts, recentOrders, at: Date.now() };
       }
-      // 今日/昨日は日本時間基準で raw orders から集計（daily_statsは各国ローカル日付のためJSTで揃わない）。order_ts→JST、無ければorder_dateにフォールバック
+      // 今日/昨日の「件数」は日本時間基準で raw orders から（order_ts→JST）。ただし未発送(tab=300)は total=null＝
+      // 売上額がordersに無く、金額の実データは daily_stats(各国ローカル日付)にしか無い。よって金額はdaily_stats、件数はJST。
       const jstToday = jstDate(Date.now()), jstYest = jstDate(Date.now() - 86400000);
       const odDate = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '');
-      const tCc = {}, yCc = {};  // cc → {units, local}
+      const tCcU = {}, yCcU = {};  // cc → 件数（日本時間）
       (recentOrders || []).forEach(o => {
         if (o.tab === 600) return;  // キャンセル除外
-        const d = odDate(o), cc = o.cc, units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0), local = Number(o.total) || 0;
-        if (d === jstToday) { const e = tCc[cc] = tCc[cc] || { units: 0, local: 0 }; e.units += units; e.local += local; }
-        else if (d === jstYest) { const e = yCc[cc] = yCc[cc] || { units: 0, local: 0 }; e.units += units; e.local += local; }
+        const d = odDate(o), units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
+        if (d === jstToday) tCcU[o.cc] = (tCcU[o.cc] || 0) + units;
+        else if (d === jstYest) yCcU[o.cc] = (yCcU[o.cc] || 0) + units;
       });
+      // 金額は daily_stats（各国ローカル日付。金額の入る唯一の実データ）。件数はJSTのtCcUを使う
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
-      REGIONS.forEach(rg => { const t = tCc[rg.cc]; if (t) { todayJpy += t.local * rg.rateJpy; todayUnits += t.units; } const y = yCc[rg.cc]; if (y) yestJpy += y.local * rg.rateJpy; });
+      const tCc = {};  // cc → {units(JST件数), local(daily_stats現地売上)}
+      REGIONS.forEach(rg => {
+        const dToday = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, 0));
+        const local = dToday ? (dToday.sales || 0) : 0;
+        const u = tCcU[rg.cc] || 0;
+        if (local > 0 || u > 0) tCc[rg.cc] = { units: u, local: local };
+        todayJpy += local * rg.rateJpy; todayUnits += u;
+        const dYest = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, -1));
+        if (dYest) yestJpy += (dYest.sales || 0) * rg.rateJpy;
+      });
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
       let pendJpy = 0, pendN = 0;
