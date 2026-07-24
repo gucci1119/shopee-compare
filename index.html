@@ -11003,21 +11003,32 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const snAmt = new Map();   // cc|sn → 買い手支払額（速報売上）
       (renderTrend._income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snAmt.set(i.cc + '|' + i.sn, v); });
       const { period, metric, inclCancel, range } = trendState;
-      const rr = range ? trendRange(range) : null;
-      const effPeriod = rr ? 'day' : period;   // 範囲プリセット選択時は日足で表示
+      // 期間指定（開始〜終了を自由に）。クイックより優先
+      const cust = (trendState.custStart && trendState.custEnd && trendState.custStart <= trendState.custEnd)
+        ? { s: trendState.custStart, e: trendState.custEnd, label: '指定' } : null;
+      const rr = cust || (range ? trendRange(range) : null);
+      // 範囲指定時は幅に応じて日/週/月を自動選択（長期間で細かすぎるのを防ぐ）
+      const rrSpan = rr ? (Date.parse(rr.e) - Date.parse(rr.s)) / 86400000 + 1 : 0;
+      const effPeriod = rr ? (rrSpan <= 45 ? 'day' : rrSpan <= 180 ? 'week' : 'month') : period;
       // 日本時間基準で日付バケット化：order_ts(注文時刻)があればJSTに変換して使う。無ければSN由来の日付(各国ローカル)にフォールバック。
       // ※以前は order_date(SN=各国ローカル日付)優先＋ts使用時もUTCだったため、BR等の注文が前日にズレて当日が過少に見えていた。
       const ordDate = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || snToDate(o.sn));
       // コントロール
       const seg = (cls, k, cur, label) => `<button class="${cls}" data-k="${k}" style="padding:3px 10px;border:1px solid ${k === cur ? '#ee4d2d' : '#ddd'};background:${k === cur ? '#ffece6' : '#fff'};color:${k === cur ? '#ee4d2d' : '#555'};font-weight:${k === cur ? 700 : 500};border-radius:6px;cursor:pointer;font-size:12px">${label}</button>`;
-      ctrl.innerHTML = '<span class="smd-dim">期間</span>' + TREND_PERIODS.map(([k, l]) => seg('tr-p', k, range ? '' : period, l)).join('') +
-        '<span class="smd-dim" style="margin-left:8px">クイック</span>' + TREND_RANGES.map(([k, l]) => seg('tr-r', k, range || '', l)).join('') +
+      const di = 'padding:2px 6px;border:1px solid #ddd;border-radius:6px;font-size:12px';
+      ctrl.innerHTML = '<span class="smd-dim">期間</span>' + TREND_PERIODS.map(([k, l]) => seg('tr-p', k, rr ? '' : period, l)).join('') +
+        '<span class="smd-dim" style="margin-left:8px">クイック</span>' + TREND_RANGES.map(([k, l]) => seg('tr-r', k, cust ? '' : (range || ''), l)).join('') +
+        `<span class="smd-dim" style="margin-left:8px">指定</span><input type="date" id="tr-cs" value="${trendState.custStart || ''}" style="${di}"><span style="color:#999">〜</span><input type="date" id="tr-ce" value="${trendState.custEnd || ''}" style="${di}">${cust ? `<button id="tr-cclr" class="smd-btn" style="font-size:11px;padding:2px 8px;margin-left:2px">✕</button>` : ''}` +
         '<span class="smd-dim" style="margin-left:8px">指標</span>' + [['sales', '売上¥'], ['count', 'オーダー数']].map(([k, l]) => seg('tr-m', k, metric, l)).join('') +
         `<label style="margin-left:10px;cursor:pointer;font-size:12px"><input type="checkbox" id="tr-cancel" ${inclCancel ? 'checked' : ''}> キャンセルも含む</label>`;
-      ctrl.querySelectorAll('.tr-p').forEach(b => b.onclick = () => { trendState.period = b.dataset.k; trendState.range = null; renderTrend(); });   // 期間クリックでクイック解除
-      ctrl.querySelectorAll('.tr-r').forEach(b => b.onclick = () => { trendState.range = (trendState.range === b.dataset.k ? null : b.dataset.k); renderTrend(); });   // 同じボタン再押しで解除
+      ctrl.querySelectorAll('.tr-p').forEach(b => b.onclick = () => { trendState.period = b.dataset.k; trendState.range = null; trendState.custStart = trendState.custEnd = null; renderTrend(); });   // 期間クリックで範囲解除
+      ctrl.querySelectorAll('.tr-r').forEach(b => b.onclick = () => { trendState.range = (trendState.range === b.dataset.k ? null : b.dataset.k); trendState.custStart = trendState.custEnd = null; renderTrend(); });
       ctrl.querySelectorAll('.tr-m').forEach(b => b.onclick = () => { trendState.metric = b.dataset.k; renderTrend(); });
       { const cb = document.getElementById('tr-cancel'); if (cb) cb.onchange = () => { trendState.inclCancel = cb.checked; renderTrend(); }; }
+      { const cs = document.getElementById('tr-cs'), ce = document.getElementById('tr-ce'), cl = document.getElementById('tr-cclr');
+        const apply = () => { trendState.custStart = cs.value || null; trendState.custEnd = ce.value || null; if (cs.value || ce.value) trendState.range = null; renderTrend(); };
+        if (cs) cs.onchange = apply; if (ce) ce.onchange = apply;
+        if (cl) cl.onclick = () => { trendState.custStart = trendState.custEnd = null; renderTrend(); }; }
       // 集計（件数も売上も orders を order_ts→JST で。売上=orders.total は注文完了(tab500)時に記録されるため
       // 直近~2週の未発送/発送中(tab300/400=total null)は売上0＝計上ラグ。完了すると遡って埋まる）
       const buk = {};
@@ -11037,8 +11048,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // バケットのキー列を生成（0件の日/週/月も出す）。クイック範囲なら その範囲の日足を、無ければ今日(JST)から遡ってN個
       let keys;
       if (rr) {
-        keys = []; let cur = new Date(rr.s + 'T00:00:00Z'); const end = new Date(rr.e + 'T00:00:00Z');
-        while (cur <= end) { keys.push(cur.toISOString().slice(0, 10)); cur.setUTCDate(cur.getUTCDate() + 1); }
+        keys = []; const seen = new Set(); let cur = new Date(rr.s + 'T00:00:00Z'); const end = new Date(rr.e + 'T00:00:00Z');
+        while (cur <= end) { const k = trendBucket(cur.toISOString().slice(0, 10), effPeriod); if (k && !seen.has(k)) { seen.add(k); keys.push(k); } cur.setUTCDate(cur.getUTCDate() + 1); }
       } else {
         const seenK = new Set(), seqK = [];
         let cur = new Date(jstDate(Date.now()) + 'T00:00:00Z'), guard = 0;
