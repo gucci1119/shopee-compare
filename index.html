@@ -3133,7 +3133,8 @@
     return repeatCache;
   }
   // ※ 下の描画から参照するので、必ず repeatSellersHtml より前で定義する（関数内に置くとTDZで落ちる）
-  let repeatView = 'catalog';   // catalog=カタログ(親出品)別 / item=商品別(親×バリエ) / series=シリーズ別
+  let repeatView = 'catalog';   // catalog=カタログ(親出品)別 / item=明細別(親×バリエ) / series=シリーズ別
+  const repeatOpen = new Set();  // 明細（バリエーション）を展開中のカタログ
   // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
   const stockBadge = (r) => {
     if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
@@ -3160,10 +3161,10 @@
         if (!key || key === 'その他') return;
         label = key;
       }
-      const e = g[key] = g[key] || { key: key, label: label, perMonth: 0, win: 0, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '' };
+      const e = g[key] = g[key] || { key: key, label: label, perMonth: 0, win: 0, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '', children: [] };
       // カタログ名は国で言語が違うので、短い＝装飾の少ない表記を代表にする
       if (mode === 'catalog' && label.length < e.label.length) e.label = label;
-      e.perMonth += r.perMonth; e.win += r.win; e.qty += r.qty; e.items++;
+      e.perMonth += r.perMonth; e.win += r.win; e.qty += r.qty; e.items++; e.children.push(r);
       r.ccs.forEach(c => e.ccs.add(c));
       if ((r.last || '') > e.last) e.last = r.last || '';
       if (r.stock != null) e.stock = (e.stock || 0) + r.stock;
@@ -3185,15 +3186,19 @@
     const list = rows.filter(r => r.perMonth >= repeatMin);
     const n2 = rows.filter(r => r.perMonth >= 2).length, n1 = rows.filter(r => r.perMonth >= 1).length;
     const viewBtn = (v, label, tip) => `<button class="rep-view smd-btn" data-v="${v}" title="${tip}" style="font-size:11px;padding:3px 10px;${mode === v ? 'background:#1a7f37;color:#fff;border-color:#1a7f37' : ''}">${label}</button>`;
-    const viewBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${viewBtn('catalog', 'カタログ別', '親出品ごと＝実際に運用している単位。バリエーションをまとめて見る')}${viewBtn('item', '商品別', '親商品×バリエーション単位')}${viewBtn('series', 'シリーズ別', 'ロックマン等、作品群でまとめて見る')}</span>`;
+    const viewBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${viewBtn('catalog', 'カタログ別', '親出品ごと＝実際に運用している単位。バリエーションをまとめて見る')}${viewBtn('item', '明細別', 'バリエーション明細を全カタログ横断でフラットに並べる')}${viewBtn('series', 'シリーズ別', 'ロックマン等、作品群でまとめて見る')}</span>`;
     if (agg) {
       const unit = mode === 'catalog' ? 'バリエ' : '商品';
       const title = mode === 'catalog' ? 'カタログ（親出品）単位で集約' : 'シリーズ単位で集約';
       const rowsH = list.slice(0, 150).map(r => {
         const kw = encodeURIComponent(mode === 'series' ? (franchiseKw(r.label) || r.label) : (sourcingKeyword(r.label, '') || r.label));
-        return `<tr>
+        const kids = (r.children || []).filter(c => c.variation);   // バリエーション出品のときだけ明細を持つ
+        const open = repeatOpen.has(r.key);
+        const caret = kids.length > 1 ? (open ? '▼ ' : '▶ ') : '';
+        // 親（カタログ／シリーズ）行
+        const head = `<tr${open ? ' style="background:#f6f3fc"' : ''}>
           <td>${r.img ? `<img src="${IMG_CDN}${esc(r.img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>
-          <td style="font-size:12px;font-weight:700">${esc(r.label.slice(0, 62))}<span class="smd-dim" style="font-weight:400;font-size:10px"> ／ ${r.items}${unit}</span></td>
+          <td style="font-size:12px;font-weight:700"><span class="rep-exp" data-k="${esc(r.key)}" style="${kids.length > 1 ? 'cursor:pointer' : ''}" title="${kids.length > 1 ? '明細（バリエーション）を開く' : ''}">${caret}${esc(r.label.slice(0, 62))}</span><span class="smd-dim" style="font-weight:400;font-size:10px"> ／ ${r.items}${unit}</span></td>
           <td style="text-align:right;font-weight:700;color:#7b52c4">${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
           <td style="text-align:right;color:#888;font-size:11px">${r.win}<span class="smd-dim" style="font-size:9px">/半年</span></td>
           <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
@@ -3203,13 +3208,31 @@
           <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
           <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${esc(r.last)}</td>
           <td style="font-size:10.5px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${kw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
+        if (!open || kids.length <= 1) return head;
+        // 明細（バリエーション）行。どのバリエが売れているか＝何を買い足すかが分かる
+        const kidH = kids.slice().sort((a, b) => b.perMonth - a.perMonth).map(c => {
+          const ckw = encodeURIComponent(sourcingKeyword(c.parent, c.variation) || c.variation);
+          return `<tr style="background:#fbfaff">
+            <td></td>
+            <td style="font-size:11px;padding-left:24px;color:#444">└ <b style="color:#7b52c4">${esc(c.variation)}</b></td>
+            <td style="text-align:right;font-size:11px;font-weight:700;color:#7b52c4">${c.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
+            <td style="text-align:right;color:#888;font-size:11px">${c.win}</td>
+            <td style="text-align:right;color:#888;font-size:11px">${c.qty}</td>
+            <td style="text-align:right;font-weight:700;font-size:11px">${c.stock != null ? c.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
+            <td style="font-size:10px;white-space:nowrap">${stockBadge(c)}</td>
+            <td style="font-size:10px;white-space:nowrap">${c.ccs.map(x => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(x)}</span>`).join('')}</td>
+            <td style="text-align:right;color:#888;font-size:11px">${c.cost != null ? '¥' + Math.round(c.cost).toLocaleString() : '—'}</td>
+            <td class="smd-dim" style="font-size:10px;white-space:nowrap">${esc(c.last)}</td>
+            <td style="font-size:10px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${ckw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${ckw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
+        }).join('');
+        return head + kidH;
       }).join('');
       const need = list.filter(r => r.months != null && r.months < 1).length;
       return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
         <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">${title}。${list.length}件${need ? `　<b style="color:#d93025">🔴 補充が要る ${need}</b>` : ''}</span></summary>
         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}
           ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}
-          <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは作品別だと各1〜2個でも1カタログでは月13個）を拾います。</span></div>
+          <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは明細別だと各1〜2個でも1カタログでは月13個）を拾います。<b>▶ を押すと明細（どのバリエが売れているか）が開きます。</b></span></div>
         <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>${mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ'}</th><th style="text-align:right">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 ${mode === 'catalog' ? '同じカタログが国ごとに別名で出ている分は、装飾・言語を除いた名前で束ねています。' : 'シリーズ判定できない商品（「その他」）は誤集計を避けるため<b>束ねていません</b>。'}個別に見るときは「商品別」へ。</div>
       </details>`;
@@ -3257,6 +3280,8 @@
     h.innerHTML = repeatSellersHtml(repeatCache.rows);
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { repeatMin = Number(el.dataset.v); renderRepeatSellers(); }));
     h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
+    h.querySelectorAll('.rep-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k;
+      if (repeatOpen.has(k)) repeatOpen.delete(k); else repeatOpen.add(k); renderRepeatSellers(); }));
   }
 
   // 在庫ページのサブタブ（📒在庫台帳 / 🎯有在庫化候補）。台帳側のKPI・絞り込み・表はまとめて隠す
