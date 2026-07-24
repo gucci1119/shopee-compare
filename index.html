@@ -10992,10 +10992,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     el.textContent = '読み込み中...';
     try {
       if (!renderTrend._orders || Date.now() - (renderTrend._ordAt || 0) > 120000) {
-        renderTrend._orders = await sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn');
+        // 件数=ordersをJSTで集計。売上=daily_stats(各国ローカル日付。未発送はorders.total=nullで金額が無いため)
+        [renderTrend._orders, renderTrend._daily] = await Promise.all([
+          sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn'),
+          sbGetAll('daily_stats', 'select=cc,day,sales,units').catch(() => []),
+        ]);
         renderTrend._ordAt = Date.now();
       }
       const orders = renderTrend._orders || [];
+      const dstats = renderTrend._daily || [];
       const { period, metric, inclCancel, range } = trendState;
       const rr = range ? trendRange(range) : null;
       const effPeriod = rr ? 'day' : period;   // 範囲プリセット選択時は日足で表示
@@ -11012,19 +11017,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ctrl.querySelectorAll('.tr-r').forEach(b => b.onclick = () => { trendState.range = (trendState.range === b.dataset.k ? null : b.dataset.k); renderTrend(); });   // 同じボタン再押しで解除
       ctrl.querySelectorAll('.tr-m').forEach(b => b.onclick = () => { trendState.metric = b.dataset.k; renderTrend(); });
       { const cb = document.getElementById('tr-cancel'); if (cb) cb.onchange = () => { trendState.inclCancel = cb.checked; renderTrend(); }; }
-      // 集計
+      // 集計。件数=orders(order_ts→JST)。売上=daily_stats(各国ローカル日付。金額の入る唯一の実データ)。
       const buk = {};
-      orders.forEach(o => {
+      const bget = key => (buk[key] = buk[key] || { count: 0, sales: 0, cancel: 0, byCc: {} });
+      const bcget = (b, cc) => (b.byCc[cc] = b.byCc[cc] || { count: 0, sales: 0 });
+      orders.forEach(o => {   // 件数（JST）
         const ds = ordDate(o); if (!ds) return;
         const isCancel = o.tab === 600;
         if (isCancel && !inclCancel) return;
-        if (rr && (ds < rr.s || ds > rr.e)) return;   // クイック範囲外は除外
+        if (rr && (ds < rr.s || ds > rr.e)) return;
         const key = trendBucket(ds, effPeriod); if (!key) return;
-        const b = buk[key] = buk[key] || { count: 0, sales: 0, cancel: 0, byCc: {} };
-        const cc = o.cc || '?';
-        const bc = b.byCc[cc] = b.byCc[cc] || { count: 0, sales: 0 };
+        const b = bget(key), cc = o.cc || '?', bc = bcget(b, cc);
         b.count++; bc.count++; if (isCancel) b.cancel++;
-        if (!isCancel) { const rg = regionByCc(cc); if (rg) { const s = (Number(o.total) || 0) * rg.rateJpy; b.sales += s; bc.sales += s; } } // キャンセルは売上に入れない
+      });
+      dstats.forEach(d => {   // 売上（daily_stats・各国ローカル日付）
+        const ds = d.day; if (!ds) return;
+        if (rr && (ds < rr.s || ds > rr.e)) return;
+        const key = trendBucket(ds, effPeriod); if (!key) return;
+        const rg = regionByCc(d.cc); if (!rg) return;
+        const s = (Number(d.sales) || 0) * rg.rateJpy;
+        const b = bget(key), bc = bcget(b, d.cc);
+        b.sales += s; bc.sales += s;
       });
       // バケットのキー列を生成（0件の日/週/月も出す）。クイック範囲なら その範囲の日足を、無ければ今日(JST)から遡ってN個
       let keys;
@@ -11077,7 +11090,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const pName = (TREND_PERIODS.find(p => p[0] === effPeriod) || ['', ''])[1];
       const rangePrefix = rr ? `<b>${rr.label}</b>（${rr.s}〜${rr.e}）・` : '';
       const topK = keys.reduce((a, k) => val(k) > val(a) ? k : a, keys[0]);
-      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分${metric === 'sales' ? '・円換算(概算＝注文額×レート)' : ''}${inclCancel ? '・キャンセル含む' : '・キャンセル除く'}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）`;
+      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分${metric === 'sales' ? '・売上=daily_stats(円換算・各国ローカル日付)' : '・件数=日本時間'}${metric === 'count' && inclCancel ? '・キャンセル含む' : (metric === 'count' ? '・キャンセル除く' : '')}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）`;
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
