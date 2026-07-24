@@ -11018,6 +11018,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         renderTrend._ordAt = Date.now();
       }
       const orders = renderTrend._orders || [];
+      const isMobile = (window.innerWidth || 1920) < 640;   // スマホは本数を絞り、棒を画面幅に収める
       const snAmt = new Map();   // cc|sn → 買い手支払額（速報売上）
       (renderTrend._income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snAmt.set(i.cc + '|' + i.sn, v); });
       const { period, metric, inclCancel, range } = trendState;
@@ -11069,9 +11070,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         keys = []; const seen = new Set(); let cur = new Date(rr.s + 'T00:00:00Z'); const end = new Date(rr.e + 'T00:00:00Z');
         while (cur <= end) { const k = trendBucket(cur.toISOString().slice(0, 10), effPeriod); if (k && !seen.has(k)) { seen.add(k); keys.push(k); } cur.setUTCDate(cur.getUTCDate() + 1); }
       } else {
+        // スマホは横幅が狭いので日足は本数を絞る（30→14）。週/月は元々少なくそのまま
+        const shownN = (isMobile && effPeriod === 'day') ? 14 : TREND_SHOWN[effPeriod];
         const seenK = new Set(), seqK = [];
         let cur = new Date(jstDate(Date.now()) + 'T00:00:00Z'), guard = 0;
-        while (seqK.length < TREND_SHOWN[effPeriod] && guard < 4000) {
+        while (seqK.length < shownN && guard < 4000) {
           const k = trendBucket(cur.toISOString().slice(0, 10), effPeriod);
           if (k && !seenK.has(k)) { seenK.add(k); seqK.push(k); }
           cur.setUTCDate(cur.getUTCDate() - 1); guard++;
@@ -11089,7 +11092,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const fmtFull = v => metric === 'count' ? v + '件' : fmtJpy(v);
       const max = Math.max(...keys.map(val), 1);
       const avg = keys.reduce((s, k) => s + val(k), 0) / keys.length;
-      const avgBottom = 18 + Math.round(avg / max * 140);
+      const barMax = isMobile ? 108 : 140;   // 棒の最大高さ（スマホは低め）
+      const avgBottom = 18 + Math.round(avg / max * barMax);
       // 国別：表示中バケットの国別合計を集計→凡例（色順）。積み上げも同じ色順で。
       const ccVal = bc => metric === 'count' ? bc.count : bc.sales;
       const ccTotal = {};
@@ -11098,18 +11102,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const ccColor = cc => (regionByCc(cc) || {}).color || '#bbb';
       const legend = ccOrder.map(cc => `<span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin-right:10px"><span style="width:10px;height:10px;border-radius:2px;background:${ccColor(cc)};display:inline-block"></span><b style="color:${ccColor(cc)}">${cc}</b> ${fmtFull(Math.round(ccTotal[cc]))}</span>`).join('');
       el.innerHTML = `<div style="margin-bottom:8px">${legend}</div>` +
-        '<div style="overflow-x:auto;padding-bottom:2px"><div style="position:relative;display:flex;align-items:flex-end;gap:5px;height:180px;border-bottom:1px solid #eee;min-width:' + (keys.length * 46) + 'px">' +
+        '<div style="overflow-x:auto;padding-bottom:' + (isMobile ? 22 : 2) + 'px"><div style="position:relative;display:flex;align-items:flex-end;gap:' + (isMobile ? 2 : 5) + 'px;height:' + (isMobile ? 150 : 180) + 'px;border-bottom:1px solid #eee;' + (isMobile ? 'width:100%' : 'min-width:' + (keys.length * 46) + 'px') + '">' +
         `<div style="position:absolute;left:0;right:0;bottom:${avgBottom}px;border-top:1px dashed #b0b6bd;pointer-events:none"><span style="position:absolute;left:0;top:-13px;font-size:9px;color:#8a9099;background:#fff;padding:0 4px;border-radius:3px">平均 ${fmtV(Math.round(avg)) || '0件'}</span></div>` +
         keys.map(k => {
-          const v = val(k); const h = v > 0 ? Math.max(2, Math.round(v / max * 140)) : 0; const last = k === keys[keys.length - 1];
+          const v = val(k); const h = v > 0 ? Math.max(2, Math.round(v / max * barMax)) : 0; const last = k === keys[keys.length - 1];
           // 国別の積み上げセグメント（下から色順）
           const segs = v > 0 ? ccOrder.map(cc => { const bc = bk(k).byCc[cc]; const cv = bc ? ccVal(bc) : 0; if (cv <= 0) return ''; const sh = Math.max(1, Math.round(cv / v * h)); return `<div style="height:${sh}px;background:${ccColor(cc)}" title="${k} ${cc}: ${fmtFull(Math.round(cv))}"></div>`; }).join('') : '';
           const tipCc = ccOrder.filter(cc => bk(k).byCc[cc]).map(cc => `${cc} ${fmtFull(Math.round(ccVal(bk(k).byCc[cc])))}`).join(' / ');
           const tip = `${k}: ${fmtFull(v)}${bk(k).cancel ? '（うちｷｬﾝｾﾙ' + bk(k).cancel + '）' : ''}${tipCc ? '\n' + tipCc : ''}`;
-          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:36px" title="${tip}">` +
-            `<div style="font-size:9px;color:${v > 0 ? (last ? '#111' : '#666') : '#c4c8ce'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${v > 0 ? fmtV(v) : '0'}</div>` +
+          const denseX = isMobile && effPeriod === 'day';   // 日足×スマホは日付が密→回転＋値ラベルは非表示(タップでtip)
+          const vLabel = denseX ? (last ? fmtV(v) : '') : (v > 0 ? fmtV(v) : (isMobile ? '' : '0'));
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:${isMobile ? 10 : 36}px" title="${tip}">` +
+            `<div style="font-size:${isMobile ? 8 : 9}px;color:${v > 0 ? (last ? '#111' : '#666') : '#c4c8ce'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${vLabel}</div>` +
             `<div style="width:100%;height:${h}px;border-radius:3px 3px 0 0;overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
-            `<div style="font-size:9px;color:#999;margin-top:3px;white-space:nowrap">${trendLabel(k, effPeriod)}</div></div>`;
+            `<div style="font-size:${isMobile ? 7.5 : 9}px;color:#999;margin-top:${denseX ? 8 : 3}px;white-space:nowrap;height:${denseX ? 0 : 'auto'};transform:${denseX ? 'rotate(-50deg)' : 'none'};transform-origin:center top">${trendLabel(k, effPeriod)}</div></div>`;
         }).join('') + '</div></div>';
       const total = keys.reduce((s, k) => s + val(k), 0);
       const pName = (TREND_PERIODS.find(p => p[0] === effPeriod) || ['', ''])[1];
