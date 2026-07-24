@@ -3114,27 +3114,40 @@
       const pk = nameToProd[invKey(r.name_supplier || r.name)]; if (!pk) return;
       heldBy[pk] = (heldBy[pk] || 0) + 1;
     });
+    // 売れた日付をそのまま持たせ、集計期間(60/90/180日)は描画時に切り替える。
+    // 180日平均だと最近伸びている商品が薄まって埋もれるため（実測：月2個以上が180日=27件・90日=46件・60日=62件）。
     const rows = Object.entries(g).map(([pk, e]) => {
       const d = e.dates.slice().sort();
-      const win = e.dates.filter(x => now - Date.parse(x + 'T00:00:00') <= REPEAT_WIN * DAY).length;
       const costs = e.costs.slice().sort((a, b) => a - b);
-      const perMonth = win / (REPEAT_WIN / 30);
-      const stock = Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null;
       return {
         parent: e.parent, variation: e.variation, img: e.img,
         jpName: Object.keys(e.jp).sort((a, b) => e.jp[b] - e.jp[a])[0] || '',
-        qty: e.qty, win: win, perMonth: perMonth,
-        ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
+        qty: e.qty, dates: d, ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
         cost: costs.length ? costs[Math.floor(costs.length / 2)] : null,
-        stock: stock, months: (stock != null && perMonth > 0) ? stock / perMonth : null
+        stock: Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null
       };
-    }).filter(r => r.win > 0).sort((a, b) => b.perMonth - a.perMonth || b.qty - a.qty);
+    });
     repeatCache = { rows: rows };
     return repeatCache;
+  }
+  // 選択中の集計期間で 販売数・月販・在庫の持ち・勢い を計算する
+  function repeatRate(r) {
+    const now = Date.now(), DAY = 86400000;
+    const inDays = n => r.dates.filter(x => now - Date.parse(x + 'T00:00:00') <= n * DAY).length;
+    const win = inDays(repeatWin);
+    const perMonth = win / (repeatWin / 30);
+    const r60 = inDays(60) / 2, r180 = inDays(180) / 6;
+    return Object.assign({}, r, {
+      win: win, perMonth: perMonth,
+      months: (r.stock != null && perMonth > 0) ? r.stock / perMonth : null,
+      // 直近60日が半年平均の1.5倍以上なら「伸びている」
+      rising: (r180 > 0 && r60 >= r180 * 1.5 && r60 >= 1)
+    });
   }
   // ※ 下の描画から参照するので、必ず repeatSellersHtml より前で定義する（関数内に置くとTDZで落ちる）
   let repeatView = 'catalog';   // catalog=カタログ(親出品)別 / item=明細別(親×バリエ) / series=シリーズ別
   const repeatOpen = new Set();  // 明細（バリエーション）を展開中のカタログ
+  let repeatWin = 90;            // 集計期間（日）。180=半年平均 / 90 / 60=最近の勢い
   // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
   const stockBadge = (r) => {
     if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
@@ -3161,10 +3174,11 @@
         if (!key || key === 'その他') return;
         label = key;
       }
-      const e = g[key] = g[key] || { key: key, label: label, perMonth: 0, win: 0, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '', children: [] };
+      const e = g[key] = g[key] || { key: key, label: label, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '', children: [], dates: [] };
       // カタログ名は国で言語が違うので、短い＝装飾の少ない表記を代表にする
       if (mode === 'catalog' && label.length < e.label.length) e.label = label;
-      e.perMonth += r.perMonth; e.win += r.win; e.qty += r.qty; e.items++; e.children.push(r);
+      e.qty += r.qty; e.items++; e.children.push(r);
+      e.dates = e.dates.concat(r.dates || []);
       r.ccs.forEach(c => e.ccs.add(c));
       if ((r.last || '') > e.last) e.last = r.last || '';
       if (r.stock != null) e.stock = (e.stock || 0) + r.stock;
@@ -3173,33 +3187,33 @@
     });
     return Object.values(g).map(e => {
       const c = e.costs.slice().sort((a, b) => a - b);
-      return Object.assign({}, e, {
-        ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null,
-        months: (e.stock != null && e.perMonth > 0) ? e.stock / e.perMonth : null
-      });
-    }).sort((a, b) => b.perMonth - a.perMonth);
+      return repeatRate(Object.assign({}, e, { ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null }));
+    }).filter(e => e.win > 0).sort((a, b) => b.perMonth - a.perMonth);
   }
   function repeatSellersHtml(rowsIn) {
     const mode = repeatView;
     const agg = (mode === 'catalog' || mode === 'series');
-    const rows = agg ? repeatAggRows(rowsIn, mode) : rowsIn;
+    const rated = rowsIn.map(repeatRate).filter(r => r.win > 0).sort((a, b) => b.perMonth - a.perMonth || b.qty - a.qty);
+    const rows = agg ? repeatAggRows(rowsIn, mode) : rated;
     const list = rows.filter(r => r.perMonth >= repeatMin);
     const n2 = rows.filter(r => r.perMonth >= 2).length, n1 = rows.filter(r => r.perMonth >= 1).length;
     const viewBtn = (v, label, tip) => `<button class="rep-view smd-btn" data-v="${v}" title="${tip}" style="font-size:11px;padding:3px 10px;${mode === v ? 'background:#1a7f37;color:#fff;border-color:#1a7f37' : ''}">${label}</button>`;
     const viewBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${viewBtn('catalog', 'カタログ別', '親出品ごと＝実際に運用している単位。バリエーションをまとめて見る')}${viewBtn('item', '明細別', 'バリエーション明細を全カタログ横断でフラットに並べる')}${viewBtn('series', 'シリーズ別', 'ロックマン等、作品群でまとめて見る')}</span>`;
+    const winBtn = (d, label, tip) => `<button class="rep-win smd-btn" data-d="${d}" title="${tip}" style="font-size:11px;padding:3px 10px;${repeatWin === d ? 'background:#0b5cab;color:#fff;border-color:#0b5cab' : ''}">${label}</button>`;
+    const winBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${winBtn(60, '直近60日', '最近の勢い。伸びている商品を逃さない')}${winBtn(90, '直近90日', 'ふだんはこれ')}${winBtn(180, '半年', '長期の定番。最近の伸びは薄まる')}</span>`;
     if (agg) {
       const unit = mode === 'catalog' ? 'バリエ' : '商品';
       const title = mode === 'catalog' ? 'カタログ（親出品）単位で集約' : 'シリーズ単位で集約';
       const rowsH = list.slice(0, 150).map(r => {
         const kw = encodeURIComponent(mode === 'series' ? (franchiseKw(r.label) || r.label) : (sourcingKeyword(r.label, '') || r.label));
-        const kids = (r.children || []).filter(c => c.variation);   // バリエーション出品のときだけ明細を持つ
+        const kids = (r.children || []).filter(c => c.variation).map(repeatRate).filter(c => c.win > 0);   // バリエーション出品のときだけ明細を持つ（期間を適用）
         const open = repeatOpen.has(r.key);
         const caret = kids.length > 1 ? (open ? '▼ ' : '▶ ') : '';
         // 親（カタログ／シリーズ）行
         const head = `<tr${open ? ' style="background:#f6f3fc"' : ''}>
           <td>${r.img ? `<img src="${IMG_CDN}${esc(r.img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>
           <td style="font-size:12px;font-weight:700"><span class="rep-exp" data-k="${esc(r.key)}" style="${kids.length > 1 ? 'cursor:pointer' : ''}" title="${kids.length > 1 ? '明細（バリエーション）を開く' : ''}">${caret}${esc(r.label.slice(0, 62))}</span><span class="smd-dim" style="font-weight:400;font-size:10px"> ／ ${r.items}${unit}</span></td>
-          <td style="text-align:right;font-weight:700;color:#7b52c4">${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
+          <td style="text-align:right;font-weight:700;color:#7b52c4">${r.rising ? '<span title="直近60日が半年平均の1.5倍以上＝伸びている" style="font-size:10px">📈</span> ' : ''}${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
           <td style="text-align:right;color:#888;font-size:11px">${r.win}<span class="smd-dim" style="font-size:9px">/半年</span></td>
           <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
           <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
@@ -3230,7 +3244,7 @@
       const need = list.filter(r => r.months != null && r.months < 1).length;
       return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
         <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">${title}。${list.length}件${need ? `　<b style="color:#d93025">🔴 補充が要る ${need}</b>` : ''}</span></summary>
-        <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}
+        <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}${winBar}
           ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}
           <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは明細別だと各1〜2個でも1カタログでは月13個）を拾います。<b>▶ を押すと明細（どのバリエが売れているか）が開きます。</b></span></div>
         <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>${mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ'}</th><th style="text-align:right">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
@@ -3249,7 +3263,7 @@
       return `<tr>
         <td>${r.img ? `<img src="${IMG_CDN}${esc(r.img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}</td>
         <td style="font-size:11.5px">${nameCell}</td>
-        <td style="text-align:right;font-weight:700;color:#7b52c4">${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
+        <td style="text-align:right;font-weight:700;color:#7b52c4">${r.rising ? '<span title="直近60日が半年平均の1.5倍以上＝伸びている" style="font-size:10px">📈</span> ' : ''}${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
         <td style="text-align:right;color:#888;font-size:11px">${r.win}<span class="smd-dim" style="font-size:9px">/半年</span></td>
         <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
         <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
@@ -3261,7 +3275,7 @@
     }).join('');
     return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
       <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。予想月販の多い順に${list.length}品${(() => { const need = list.filter(r => r.months != null && r.months < 1).length; const over = list.filter(r => r.months != null && r.months > 6).length; return (need ? `　<b style="color:#d93025">🔴 補充が要る ${need}品</b>` : '') + (over ? `　<span style="color:#7b52c4">🔵 持ちすぎ ${over}品</span>` : ''); })()}</span></summary>
-      <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}
+      <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}${winBar}
         ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}
         <span class="smd-dim" style="font-size:10.5px"><b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。作品ごとに割れて埋もれる定番は「シリーズ別」で。</span>
       </div>
@@ -3280,6 +3294,7 @@
     h.innerHTML = repeatSellersHtml(repeatCache.rows);
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { repeatMin = Number(el.dataset.v); renderRepeatSellers(); }));
     h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
+    h.querySelectorAll('.rep-win').forEach(el => el.addEventListener('click', () => { repeatWin = Number(el.dataset.d); renderRepeatSellers(); }));
     h.querySelectorAll('.rep-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k;
       if (repeatOpen.has(k)) repeatOpen.delete(k); else repeatOpen.add(k); renderRepeatSellers(); }));
   }
