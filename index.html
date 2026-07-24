@@ -2627,25 +2627,34 @@
     try {
       let days, orders, income, inv, payouts;
       const dc = renderDash._cache; // 60秒キャッシュ（連続で開いても再取得しない）。daysはtrendでも再利用
-      if (!force && dc && Date.now() - dc.at < 60000) { ({ days, orders, income, inv, payouts } = dc); }
+      let recentOrders;
+      if (!force && dc && Date.now() - dc.at < 60000) { ({ days, orders, income, inv, payouts, recentOrders } = dc); }
       else {
         kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
         const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
-        [days, orders, income, inv, payouts] = await Promise.all([
+        const since5 = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);  // 今日/昨日(JST)算出用に直近5日の注文
+        [days, orders, income, inv, payouts, recentOrders] = await Promise.all([
           sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
           sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
           sbGetAll('income', 'select=cc,amount,pending&order=sn'),
           ensureInv().catch(() => []),
           sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
+          sbGetAll('orders', `select=cc,order_ts,order_date,total,tab,items&order_date=gte.${since5}`).catch(() => []),
         ]);
-        renderDash._cache = { days, orders, income, inv, payouts, at: Date.now() };
+        renderDash._cache = { days, orders, income, inv, payouts, recentOrders, at: Date.now() };
       }
-      let todayJpy = 0, yestJpy = 0, todayUnits = 0;
-      days.forEach(d => {
-        const rg = regionByCc(d.cc); if (!rg) return;
-        if (d.day === regionDate(rg, 0)) { todayJpy += (d.sales || 0) * rg.rateJpy; todayUnits += d.units || 0; }
-        if (d.day === regionDate(rg, -1)) yestJpy += (d.sales || 0) * rg.rateJpy;
+      // 今日/昨日は日本時間基準で raw orders から集計（daily_statsは各国ローカル日付のためJSTで揃わない）。order_ts→JST、無ければorder_dateにフォールバック
+      const jstToday = jstDate(Date.now()), jstYest = jstDate(Date.now() - 86400000);
+      const odDate = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '');
+      const tCc = {}, yCc = {};  // cc → {units, local}
+      (recentOrders || []).forEach(o => {
+        if (o.tab === 600) return;  // キャンセル除外
+        const d = odDate(o), cc = o.cc, units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0), local = Number(o.total) || 0;
+        if (d === jstToday) { const e = tCc[cc] = tCc[cc] || { units: 0, local: 0 }; e.units += units; e.local += local; }
+        else if (d === jstYest) { const e = yCc[cc] = yCc[cc] || { units: 0, local: 0 }; e.units += units; e.local += local; }
       });
+      let todayJpy = 0, yestJpy = 0, todayUnits = 0;
+      REGIONS.forEach(rg => { const t = tCc[rg.cc]; if (t) { todayJpy += t.local * rg.rateJpy; todayUnits += t.units; } const y = yCc[rg.cc]; if (y) yestJpy += y.local * rg.rateJpy; });
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
       let pendJpy = 0, pendN = 0;
@@ -2658,8 +2667,8 @@
       const deadVal = deadArr.reduce((s, r) => s + (r.price || 0), 0);
       const arrivedNotRecv = waiting.filter(r => deliveredAt(r)).length;
       kpis.innerHTML = [
-        ['今日の売上', fmtJpy(todayJpy), `${todayUnits}点（同期時点）`, '今日の全7か国の売上を円換算で合計。最後の同期時点の値（リアルタイムではない）。'],
-        ['昨日の売上', fmtJpy(yestJpy), '前日の確定売上', '昨日1日分の売上（円換算・ほぼ確定値）。今日との比較の基準に。'],
+        ['今日の売上', fmtJpy(todayJpy), `${todayUnits}点（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。注文時刻を日本時間で集計。'],
+        ['昨日の売上', fmtJpy(yestJpy), '前日の確定売上（日本時間）', '昨日1日分（日本時間）の売上（円換算・ほぼ確定値）。今日との比較の基準に。'],
         ['未発送', toShip.length + '件', due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり', '発送待ちの注文数。期限24時間以内はShopeeのペナルティ対象になりやすいので優先。', 'orders'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeで確定前（escrow保留中）の入金見込み額。リリース後はここから外れて実入金になる。'],
         ['⏳入庫待ち', waiting.length + '件', '仕入れ ' + fmtJpy(waitVal) + (arrivedNotRecv ? ` ・📥到着済未反映${arrivedNotRecv}` : ''), '仕入元（メルカリ等）から到着待ちの在庫。📥到着済未反映は受取処理が必要（詳細はクリック→仕入れ管理/アラート）。', 'buy'],
@@ -2683,9 +2692,9 @@
       }).join('') || '<div class="smd-dim">未発送はありません🎉</div>';
       const ccEl = document.getElementById('dash-cc');
       ccEl.innerHTML = REGIONS.map(rg => {
-        const d = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, 0));
+        const t = tCc[rg.cc];   // 今日(日本時間)の国別。0点の国も出す
         return `<div class="dash-row"><span><b style="color:${rg.color}">${rg.cc}</b></span>` +
-          `<span>${d ? `${d.units}点 / ${fmtLocal(rg, d.sales)} <span class="smd-jpy">≈${fmtJpy((d.sales || 0) * rg.rateJpy)}</span>` : '<span class="smd-dim">同期なし</span>'}</span></div>`;
+          `<span>${t ? `${t.units}点 / ${fmtLocal(rg, t.local)} <span class="smd-jpy">≈${fmtJpy(t.local * rg.rateJpy)}</span>` : '<span class="smd-dim">0点</span>'}</span></div>`;
       }).join('');
       // ---- 💸 Payoneerリリース（確定=payouts実績・見込み=未リリースescrowをUSD換算） ----
       const poEl = document.getElementById('dash-payout');
@@ -10989,11 +10998,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         b.count++; bc.count++; if (isCancel) b.cancel++;
         if (!isCancel) { const rg = regionByCc(cc); if (rg) { const s = (Number(o.total) || 0) * rg.rateJpy; b.sales += s; bc.sales += s; } } // キャンセルは売上に入れない
       });
-      const keys = Object.keys(buk).sort().slice(-TREND_SHOWN[period]);
+      // 今日(JST)から遡ってバケットを連続生成＝0件の日/週/月もチャートに出す（データのある日だけ詰めない）
+      const seenK = new Set(), seqK = [];
+      { let cur = new Date(jstDate(Date.now()) + 'T00:00:00Z'), guard = 0;
+        while (seqK.length < TREND_SHOWN[period] && guard < 4000) {
+          const k = trendBucket(cur.toISOString().slice(0, 10), period);
+          if (k && !seenK.has(k)) { seenK.add(k); seqK.push(k); }
+          cur.setUTCDate(cur.getUTCDate() - 1); guard++;
+        } }
+      const keys = seqK.reverse();  // 古い→新しい
       const noteEl = document.getElementById('trend-note');
-      if (!keys.length) { el.innerHTML = '<span class="smd-dim">データがありません（注文を同期すると表示されます）</span>'; noteEl.textContent = ''; return; }
+      if (!Object.keys(buk).length) { el.innerHTML = '<span class="smd-dim">データがありません（注文を同期すると表示されます）</span>'; noteEl.textContent = ''; return; }
+      const EMPTY = { count: 0, sales: 0, cancel: 0, byCc: {} };
+      const bk = k => buk[k] || EMPTY;   // 0件バケットの安全アクセス
       const jkShort = n => n >= 1000000 ? '¥' + (n / 1000000).toFixed(1) + 'M' : n >= 10000 ? '¥' + (n / 1000).toFixed(0) + 'k' : n >= 1000 ? '¥' + (n / 1000).toFixed(1) + 'k' : (n ? '¥' + Math.round(n) : '');
-      const val = k => metric === 'count' ? buk[k].count : buk[k].sales;
+      const val = k => metric === 'count' ? bk(k).count : bk(k).sales;
       const fmtV = v => metric === 'count' ? (v ? v + '件' : '') : jkShort(v);
       const fmtFull = v => metric === 'count' ? v + '件' : fmtJpy(v);
       const max = Math.max(...keys.map(val), 1);
@@ -11002,7 +11021,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // 国別：表示中バケットの国別合計を集計→凡例（色順）。積み上げも同じ色順で。
       const ccVal = bc => metric === 'count' ? bc.count : bc.sales;
       const ccTotal = {};
-      keys.forEach(k => Object.entries(buk[k].byCc).forEach(([cc, bc]) => { ccTotal[cc] = (ccTotal[cc] || 0) + ccVal(bc); }));
+      keys.forEach(k => Object.entries(bk(k).byCc).forEach(([cc, bc]) => { ccTotal[cc] = (ccTotal[cc] || 0) + ccVal(bc); }));
       const ccOrder = REGIONS.map(r => r.cc).filter(cc => (ccTotal[cc] || 0) > 0); // 色定義順で安定
       const ccColor = cc => (regionByCc(cc) || {}).color || '#bbb';
       const legend = ccOrder.map(cc => `<span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin-right:10px"><span style="width:10px;height:10px;border-radius:2px;background:${ccColor(cc)};display:inline-block"></span><b style="color:${ccColor(cc)}">${cc}</b> ${fmtFull(Math.round(ccTotal[cc]))}</span>`).join('');
@@ -11010,13 +11029,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         '<div style="overflow-x:auto;padding-bottom:2px"><div style="position:relative;display:flex;align-items:flex-end;gap:5px;height:180px;border-bottom:1px solid #eee;min-width:' + (keys.length * 46) + 'px">' +
         `<div style="position:absolute;left:0;right:0;bottom:${avgBottom}px;border-top:1px dashed #b0b6bd;pointer-events:none"><span style="position:absolute;left:0;top:-13px;font-size:9px;color:#8a9099;background:#fff;padding:0 4px;border-radius:3px">平均 ${fmtV(Math.round(avg)) || '0件'}</span></div>` +
         keys.map(k => {
-          const v = val(k); const h = Math.max(2, Math.round(v / max * 140)); const last = k === keys[keys.length - 1];
+          const v = val(k); const h = v > 0 ? Math.max(2, Math.round(v / max * 140)) : 0; const last = k === keys[keys.length - 1];
           // 国別の積み上げセグメント（下から色順）
-          const segs = ccOrder.map(cc => { const bc = buk[k].byCc[cc]; const cv = bc ? ccVal(bc) : 0; if (cv <= 0) return ''; const sh = Math.max(1, Math.round(cv / v * h)); return `<div style="height:${sh}px;background:${ccColor(cc)}" title="${k} ${cc}: ${fmtFull(Math.round(cv))}"></div>`; }).join('');
-          const tipCc = ccOrder.filter(cc => buk[k].byCc[cc]).map(cc => `${cc} ${fmtFull(Math.round(ccVal(buk[k].byCc[cc])))}`).join(' / ');
-          const tip = `${k}: ${fmtFull(v)}${buk[k].cancel ? '（うちｷｬﾝｾﾙ' + buk[k].cancel + '）' : ''}\n${tipCc}`;
+          const segs = v > 0 ? ccOrder.map(cc => { const bc = bk(k).byCc[cc]; const cv = bc ? ccVal(bc) : 0; if (cv <= 0) return ''; const sh = Math.max(1, Math.round(cv / v * h)); return `<div style="height:${sh}px;background:${ccColor(cc)}" title="${k} ${cc}: ${fmtFull(Math.round(cv))}"></div>`; }).join('') : '';
+          const tipCc = ccOrder.filter(cc => bk(k).byCc[cc]).map(cc => `${cc} ${fmtFull(Math.round(ccVal(bk(k).byCc[cc])))}`).join(' / ');
+          const tip = `${k}: ${fmtFull(v)}${bk(k).cancel ? '（うちｷｬﾝｾﾙ' + bk(k).cancel + '）' : ''}${tipCc ? '\n' + tipCc : ''}`;
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:36px" title="${tip}">` +
-            `<div style="font-size:9px;color:${last ? '#111' : '#666'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${fmtV(v)}</div>` +
+            `<div style="font-size:9px;color:${v > 0 ? (last ? '#111' : '#666') : '#c4c8ce'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${v > 0 ? fmtV(v) : '0'}</div>` +
             `<div style="width:100%;height:${h}px;border-radius:3px 3px 0 0;overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
             `<div style="font-size:9px;color:#999;margin-top:3px;white-space:nowrap">${trendLabel(k, period)}</div></div>`;
         }).join('') + '</div></div>';
