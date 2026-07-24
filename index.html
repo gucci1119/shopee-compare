@@ -2636,35 +2636,35 @@
         [days, orders, income, inv, payouts, recentOrders] = await Promise.all([
           sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
           sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('income', 'select=cc,amount,pending&order=sn'),
+          sbGetAll('income', 'select=cc,sn,amount,buyer_paid,pending&order=sn'),
           ensureInv().catch(() => []),
           sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
-          sbGetAll('orders', `select=cc,order_ts,order_date,total,tab,items&order_date=gte.${since5}`).catch(() => []),
+          sbGetAll('orders', `select=cc,sn,order_ts,order_date,total,tab,items&order_date=gte.${since5}`).catch(() => []),
         ]);
         renderDash._cache = { days, orders, income, inv, payouts, recentOrders, at: Date.now() };
       }
-      // 今日/昨日の「件数」は日本時間基準で raw orders から（order_ts→JST）。ただし未発送(tab=300)は total=null＝
-      // 売上額がordersに無く、金額の実データは daily_stats(各国ローカル日付)にしか無い。よって金額はdaily_stats、件数はJST。
+      // 今日/昨日を日本時間基準(order_ts→JST)で。件数=orders、金額=income.buyer_paid(escrow・注文完了を待たず入る＝速報)。
+      // orders.totalは完了時のみで直近が¥0になるため使わない。買い手支払額は注文SNでincomeと突合。
       const jstToday = jstDate(Date.now()), jstYest = jstDate(Date.now() - 86400000);
       const odDate = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '');
-      const tCcU = {}, yCcU = {};  // cc → 件数（日本時間）
+      const snPaid = new Map();  // cc|sn → 買い手支払額
+      (income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snPaid.set(i.cc + '|' + i.sn, v); });
+      const tCcU = {}, tCcL = {}, yCcL = {};  // cc → 件数(今日) / 現地売上(今日) / 現地売上(昨日)
       (recentOrders || []).forEach(o => {
         if (o.tab === 600) return;  // キャンセル除外
         const d = odDate(o), units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
-        if (d === jstToday) tCcU[o.cc] = (tCcU[o.cc] || 0) + units;
-        else if (d === jstYest) yCcU[o.cc] = (yCcU[o.cc] || 0) + units;
+        const paid = snPaid.has(o.cc + '|' + o.sn) ? snPaid.get(o.cc + '|' + o.sn) : (Number(o.total) || 0);
+        if (d === jstToday) { tCcU[o.cc] = (tCcU[o.cc] || 0) + units; tCcL[o.cc] = (tCcL[o.cc] || 0) + paid; }
+        else if (d === jstYest) yCcL[o.cc] = (yCcL[o.cc] || 0) + paid;
       });
-      // 金額は daily_stats（各国ローカル日付。金額の入る唯一の実データ）。件数はJSTのtCcUを使う
       let todayJpy = 0, yestJpy = 0, todayUnits = 0;
-      const tCc = {};  // cc → {units(JST件数), local(daily_stats現地売上)}
+      const tCc = {};  // cc → {units(JST件数), local(income現地売上)}
       REGIONS.forEach(rg => {
-        const dToday = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, 0));
-        const local = dToday ? (dToday.sales || 0) : 0;
+        const local = tCcL[rg.cc] || 0;
         const u = tCcU[rg.cc] || 0;
+        yestJpy += (yCcL[rg.cc] || 0) * rg.rateJpy;
         if (local > 0 || u > 0) tCc[rg.cc] = { units: u, local: local };
         todayJpy += local * rg.rateJpy; todayUnits += u;
-        const dYest = days.find(x => x.cc === rg.cc && x.day === regionDate(rg, -1));
-        if (dYest) yestJpy += (dYest.sales || 0) * rg.rateJpy;
       });
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
