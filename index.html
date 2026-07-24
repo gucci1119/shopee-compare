@@ -3052,15 +3052,20 @@
   async function buildRepeatSellers() {
     const [orders, inv] = await Promise.all([
       sbGetAll('orders', 'select=cc,sn,status,items,order_date&order=order_date.desc'),
-      sbGetAll('inventory', 'select=shopee_sn,name,name_supplier,price&shopee_sn=not.is.null').catch(() => [])
+      sbGetAll('inventory', 'select=shopee_sn,name,name_supplier,price,status').catch(() => [])
     ]);
     const bySn = new Map();
     (inv || []).forEach(r => { const k = String(r.shopee_sn || '').trim(); if (k && !bySn.has(k)) bySn.set(k, r); });
     const skip = /CANCEL|UNPAID|INVALID/i, now = Date.now(), DAY = 86400000;
+    const snProd = new Map();   // 単品注文のSN → 商品キー（現在庫を数えるための正解データ）
     const g = {};
     (orders || []).forEach(o => {
       if (skip.test(o.status || '')) return;
       const items = o.items || [];
+      if (items.length === 1) {
+        const v0 = String(items[0].variation || '').trim(), p0 = repeatCanon(items[0].name);
+        if (p0 || v0) snProd.set(String(o.sn || '').trim(), p0 + ' ‖ ' + v0.toLowerCase());
+      }
       items.forEach(it => {
         const v = String(it.variation || '').trim(), p = repeatCanon(it.name);
         if (!p && !v) return;
@@ -3080,16 +3085,40 @@
         }
       });
     });
-    const rows = Object.values(g).map(e => {
+    // 現在庫の突合：SKUが未統一でも数えられるよう「売れた在庫」を正解データにして仕入れ名→商品の辞書を学習し、
+    // それを未販売の在庫保管中に当てる。特定できない分は 0 ではなく null（不明）として扱う＝嘘の在庫数を出さない。
+    const invKey = s => String(s || '').toLowerCase()
+      .replace(/[【〔\[].*?[】〕\]]/g, ' ').replace(/[（(].*?[）)]/g, ' ')
+      .replace(/送料無料|匿名配送|即決|新品未使用|未使用に近い|美品|動作確認済み?|中古|新品|セット|まとめ/g, ' ')
+      .replace(/[^\wぁ-んァ-ヶ一-龥ａ-ｚA-Za-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+    const votes = {};
+    (inv || []).forEach(r => {
+      const sn = String(r.shopee_sn || '').trim(); if (!sn) return;
+      const pk = snProd.get(sn); if (!pk) return;
+      const k = invKey(r.name_supplier || r.name); if (!k) return;
+      (votes[k] = votes[k] || {})[pk] = (votes[k][pk] || 0) + 1;
+    });
+    const nameToProd = {};
+    Object.keys(votes).forEach(k => { nameToProd[k] = Object.entries(votes[k]).sort((a, b) => b[1] - a[1])[0][0]; });
+    const heldBy = {};
+    (inv || []).forEach(r => {
+      if (r.status !== '在庫保管中') return;
+      const pk = nameToProd[invKey(r.name_supplier || r.name)]; if (!pk) return;
+      heldBy[pk] = (heldBy[pk] || 0) + 1;
+    });
+    const rows = Object.entries(g).map(([pk, e]) => {
       const d = e.dates.slice().sort();
       const win = e.dates.filter(x => now - Date.parse(x + 'T00:00:00') <= REPEAT_WIN * DAY).length;
       const costs = e.costs.slice().sort((a, b) => a - b);
+      const perMonth = win / (REPEAT_WIN / 30);
+      const stock = Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null;
       return {
         parent: e.parent, variation: e.variation, img: e.img,
         jpName: Object.keys(e.jp).sort((a, b) => e.jp[b] - e.jp[a])[0] || '',
-        qty: e.qty, win: win, perMonth: win / (REPEAT_WIN / 30),
+        qty: e.qty, win: win, perMonth: perMonth,
         ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
-        cost: costs.length ? costs[Math.floor(costs.length / 2)] : null
+        cost: costs.length ? costs[Math.floor(costs.length / 2)] : null,
+        stock: stock, months: (stock != null && perMonth > 0) ? stock / perMonth : null
       };
     }).filter(r => r.win > 0).sort((a, b) => b.perMonth - a.perMonth || b.qty - a.qty);
     repeatCache = { rows: rows };
@@ -3101,6 +3130,16 @@
     const tabBtn = (v, label, cnt) => `<button class="rep-min smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px;${repeatMin === v ? 'background:#7b52c4;color:#fff;border-color:#7b52c4' : ''}">${label}（${cnt}）</button>`;
     // まとめ買い・リクエスト出品の名前は商品名でないので仕入れ検索に使えない（例「◯◯様 リクエスト 7点 まとめ商品」）
     const bundleish = s => /リクエスト|まとめ(商品|売り)?|専用|様|\d+\s*点/.test(String(s || ''));
+    // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
+    const stockBadge = (r) => {
+      if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
+      const m = r.months;
+      if (m == null) return '';
+      if (m < 1) return `<span style="color:#d93025;font-weight:700">🔴 補充 (${m.toFixed(1)}ヶ月分)</span>`;
+      if (m < 2) return `<span style="color:#e8710a;font-weight:700">🟡 残少 (${m.toFixed(1)}ヶ月分)</span>`;
+      if (m > 6) return `<span style="color:#7b52c4">🔵 持ちすぎ (${m.toFixed(1)}ヶ月分)</span>`;
+      return `<span style="color:#1a7f37">🟢 十分 (${m.toFixed(1)}ヶ月分)</span>`;
+    };
     const rowsH = list.slice(0, 120).map(r => {
       const jp = (r.jpName && !bundleish(r.jpName)) ? r.jpName : '';
       const kw = (jp || sourcingKeyword(r.parent, r.variation) || r.parent).replace(/\s+/g, ' ').trim();
@@ -3114,19 +3153,21 @@
         <td style="text-align:right;font-weight:700;color:#7b52c4">${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
         <td style="text-align:right;color:#888;font-size:11px">${r.win}<span class="smd-dim" style="font-size:9px">/半年</span></td>
         <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
+        <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
+        <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${r.ccs.map(c => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(c)}</span>`).join('')}</td>
         <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
         <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${esc(r.last)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${links}</td></tr>`;
     }).join('');
     return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
-      <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。予想月販の多い順に${list.length}品</span></summary>
+      <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。予想月販の多い順に${list.length}品${(() => { const need = list.filter(r => r.months != null && r.months < 1).length; const over = list.filter(r => r.months != null && r.months > 6).length; return (need ? `　<b style="color:#d93025">🔴 補充が要る ${need}品</b>` : '') + (over ? `　<span style="color:#7b52c4">🔵 持ちすぎ ${over}品</span>` : ''); })()}</span></summary>
       <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">
         ${tabBtn(2, '🎯 月2個以上', n2)}${tabBtn(1, '月1個以上', n1)}
         <span class="smd-dim" style="font-size:10.5px">在庫数とは突合していません（SKU未統一のため）。<b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。</span>
       </div>
-      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>商品（親 ／ バリエーション）</th><th style="text-align:right" title="直近180日の販売数÷6">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="9" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝直近半年の販売数÷6</b>（キャンセル・未払いは除外）。<b>バリエーションが実商品</b>なので親商品とは分けて集計。原価目安は注文SNで在庫台帳と突合できた分の中央値（SKUには依存しません）。</div>
+      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>商品（親 ／ バリエーション）</th><th style="text-align:right" title="直近180日の販売数÷6">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝直近半年の販売数÷6</b>（キャンセル・未払いは除外）。<b>バリエーションが実商品</b>なので親商品とは分けて集計。原価目安は注文SNで在庫台帳と突合できた分の中央値。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
     </details>`;
   }
   async function renderRepeatSellers() {
