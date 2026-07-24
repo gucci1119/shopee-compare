@@ -464,6 +464,12 @@
       <span class="step">1</span>メルカリ等の仕入れは<b>メールから自動登録</b>（手動追加も可）　<span class="step">2</span>届いたら状態を「<b>在庫保管中</b>」に　<span class="step">3</span>QRを押すと<b>棚ラベルを印刷</b>。<br>
       <span style="color:#5a6b8c;font-size:11.5px">※状態＝<b>入庫待ち</b>(まだ届いてない)／<b>在庫保管中</b>(手元にある)／<b>販売済み</b>。仕入元・仕入額・SKU等はセルを直接クリックで編集。</span>
     </div>
+    <div class="smd-toolbar" style="padding:0 20px 4px">
+      <span class="smd-seg" id="stock-tab">
+        <button data-k="ledger" class="on" title="仕入れた在庫の台帳（登録・状態変更・棚ラベル）">📒 在庫台帳</button>
+        <button data-k="repeat" title="販売履歴から「繰り返し売れている＝先に仕入れておくべき」商品を洗い出す">🎯 有在庫化候補</button>
+      </span>
+    </div>
     <div id="stock-kpis"></div>
     <div class="smd-toolbar">
       <select id="stock-st">
@@ -3071,8 +3077,10 @@
         if (!p && !v) return;
         const key = p + ' ‖ ' + v.toLowerCase();
         const e = g[key] = g[key] || { parent: it.name || '', variation: v, qty: 0, ccs: new Set(), dates: [], jp: {}, costs: [], img: it.image || '' };
-        e.qty += (it.qty || 1); e.ccs.add(o.cc);
-        if (o.order_date) e.dates.push(o.order_date);
+        const q = it.qty || 1;
+        e.qty += q; e.ccs.add(o.cc);
+        // 個数ぶん積む（注文行数でなく実売個数で月販を出す。1注文2個も2個として数える）
+        if (o.order_date) for (let i = 0; i < q; i++) e.dates.push(o.order_date);
         if (!e.img && it.image) e.img = it.image;
         // 単品注文のときだけSNが商品を一意に指す → そこから日本語の仕入れ名と原価を拾う
         if (items.length === 1) {
@@ -3124,22 +3132,75 @@
     repeatCache = { rows: rows };
     return repeatCache;
   }
-  function repeatSellersHtml(rows) {
+  // ※ 下の描画から参照するので、必ず repeatSellersHtml より前で定義する（関数内に置くとTDZで落ちる）
+  let repeatView = 'item';   // item=商品別 / series=シリーズ別
+  // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
+  const stockBadge = (r) => {
+    if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
+    const m = r.months;
+    if (m == null) return '';
+    if (m < 1) return `<span style="color:#d93025;font-weight:700">🔴 補充 (${m.toFixed(1)}ヶ月分)</span>`;
+    if (m < 2) return `<span style="color:#e8710a;font-weight:700">🟡 残少 (${m.toFixed(1)}ヶ月分)</span>`;
+    if (m > 6) return `<span style="color:#7b52c4">🔵 持ちすぎ (${m.toFixed(1)}ヶ月分)</span>`;
+    return `<span style="color:#1a7f37">🟢 十分 (${m.toFixed(1)}ヶ月分)</span>`;
+  };
+  const tabBtnHtml = (v, label, cnt) => `<button class="rep-min smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px;${repeatMin === v ? 'background:#7b52c4;color:#fff;border-color:#7b52c4' : ''}">${label}（${cnt}）</button>`;
+  // シリーズ集約：作品ごと(ロックマン4/5/3…)に割れて各行が閾値未満になり定番を見落とすのを防ぐ。
+  // 「ロックマンは月◯個売れる＝シリーズで仕入れる」という判断に使う。分類できないものは束ねない（誤集計を避ける）。
+  function repeatSeriesRows(rows) {
+    const g = {};
+    rows.forEach(r => {
+      const fr = classifyFranchise((r.parent || '') + ' ' + (r.variation || ''));
+      if (!fr || fr === 'その他') return;
+      const e = g[fr] = g[fr] || { fr: fr, perMonth: 0, win: 0, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [] };
+      e.perMonth += r.perMonth; e.win += r.win; e.qty += r.qty; e.items++;
+      r.ccs.forEach(c => e.ccs.add(c));
+      if ((r.last || '') > e.last) e.last = r.last || '';
+      if (r.stock != null) e.stock = (e.stock || 0) + r.stock;
+      if (r.cost != null) e.costs.push(r.cost);
+    });
+    return Object.values(g).map(e => {
+      const c = e.costs.slice().sort((a, b) => a - b);
+      return Object.assign({}, e, {
+        ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null,
+        months: (e.stock != null && e.perMonth > 0) ? e.stock / e.perMonth : null
+      });
+    }).sort((a, b) => b.perMonth - a.perMonth);
+  }
+  function repeatSellersHtml(rowsIn) {
+    const series = repeatView === 'series';
+    const rows = series ? repeatSeriesRows(rowsIn) : rowsIn;
     const list = rows.filter(r => r.perMonth >= repeatMin);
     const n2 = rows.filter(r => r.perMonth >= 2).length, n1 = rows.filter(r => r.perMonth >= 1).length;
-    const tabBtn = (v, label, cnt) => `<button class="rep-min smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px;${repeatMin === v ? 'background:#7b52c4;color:#fff;border-color:#7b52c4' : ''}">${label}（${cnt}）</button>`;
+    const viewBtn = (v, label, tip) => `<button class="rep-view smd-btn" data-v="${v}" title="${tip}" style="font-size:11px;padding:3px 10px;${repeatView === v ? 'background:#1a7f37;color:#fff;border-color:#1a7f37' : ''}">${label}</button>`;
+    const viewBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${viewBtn('item', '商品別', '親商品×バリエーション単位')}${viewBtn('series', 'シリーズ別', 'ロックマン等、作品ごとに割れて埋もれる定番をまとめて見る')}</span>`;
+    if (series) {
+      const rowsH = list.slice(0, 120).map(r => {
+        const kw = encodeURIComponent(franchiseKw(r.fr) || r.fr);
+        return `<tr>
+          <td style="font-size:12px;font-weight:700">${esc(r.fr)}<span class="smd-dim" style="font-weight:400;font-size:10px"> ／ ${r.items}商品</span></td>
+          <td style="text-align:right;font-weight:700;color:#7b52c4">${r.perMonth.toFixed(1)}<span class="smd-dim" style="font-size:9px">/月</span></td>
+          <td style="text-align:right;color:#888;font-size:11px">${r.win}<span class="smd-dim" style="font-size:9px">/半年</span></td>
+          <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
+          <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
+          <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
+          <td style="font-size:10.5px;white-space:nowrap">${r.ccs.map(c => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(c)}</span>`).join('')}</td>
+          <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
+          <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${esc(r.last)}</td>
+          <td style="font-size:10.5px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${kw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
+      }).join('');
+      const need = list.filter(r => r.months != null && r.months < 1).length;
+      return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
+        <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">シリーズ単位で集約。${list.length}シリーズ${need ? `　<b style="color:#d93025">🔴 補充が要る ${need}</b>` : ''}</span></summary>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}
+          ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}
+          <span class="smd-dim" style="font-size:10.5px">作品ごとに割れて埋もれる定番（例：ロックマンは作品別だと各1〜2個でも合計は月◯個）を拾います。</span></div>
+        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:760px"><tr><th>シリーズ</th><th style="text-align:right">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="10" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+        <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 シリーズ判定できない商品（「その他」）は誤集計を避けるため<b>束ねていません</b>。個別に見るときは「商品別」へ。</div>
+      </details>`;
+    }
     // まとめ買い・リクエスト出品の名前は商品名でないので仕入れ検索に使えない（例「◯◯様 リクエスト 7点 まとめ商品」）
     const bundleish = s => /リクエスト|まとめ(商品|売り)?|専用|様|\d+\s*点/.test(String(s || ''));
-    // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
-    const stockBadge = (r) => {
-      if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
-      const m = r.months;
-      if (m == null) return '';
-      if (m < 1) return `<span style="color:#d93025;font-weight:700">🔴 補充 (${m.toFixed(1)}ヶ月分)</span>`;
-      if (m < 2) return `<span style="color:#e8710a;font-weight:700">🟡 残少 (${m.toFixed(1)}ヶ月分)</span>`;
-      if (m > 6) return `<span style="color:#7b52c4">🔵 持ちすぎ (${m.toFixed(1)}ヶ月分)</span>`;
-      return `<span style="color:#1a7f37">🟢 十分 (${m.toFixed(1)}ヶ月分)</span>`;
-    };
     const rowsH = list.slice(0, 120).map(r => {
       const jp = (r.jpName && !bundleish(r.jpName)) ? r.jpName : '';
       const kw = (jp || sourcingKeyword(r.parent, r.variation) || r.parent).replace(/\s+/g, ' ').trim();
@@ -3162,9 +3223,9 @@
     }).join('');
     return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
       <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。予想月販の多い順に${list.length}品${(() => { const need = list.filter(r => r.months != null && r.months < 1).length; const over = list.filter(r => r.months != null && r.months > 6).length; return (need ? `　<b style="color:#d93025">🔴 補充が要る ${need}品</b>` : '') + (over ? `　<span style="color:#7b52c4">🔵 持ちすぎ ${over}品</span>` : ''); })()}</span></summary>
-      <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">
-        ${tabBtn(2, '🎯 月2個以上', n2)}${tabBtn(1, '月1個以上', n1)}
-        <span class="smd-dim" style="font-size:10.5px">在庫数とは突合していません（SKU未統一のため）。<b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。</span>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${viewBar}
+        ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}
+        <span class="smd-dim" style="font-size:10.5px"><b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。作品ごとに割れて埋もれる定番は「シリーズ別」で。</span>
       </div>
       <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>商品（親 ／ バリエーション）</th><th style="text-align:right" title="直近180日の販売数÷6">予想月販</th><th style="text-align:right">半年</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>直近</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝直近半年の販売数÷6</b>（キャンセル・未払いは除外）。<b>バリエーションが実商品</b>なので親商品とは分けて集計。原価目安は注文SNで在庫台帳と突合できた分の中央値。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
@@ -3180,8 +3241,22 @@
     const h = document.getElementById('stk-repeat'); if (!h) return;   // 集計中に他ページへ移った場合
     h.innerHTML = repeatSellersHtml(repeatCache.rows);
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { repeatMin = Number(el.dataset.v); renderRepeatSellers(); }));
+    h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
   }
 
+  // 在庫ページのサブタブ（📒在庫台帳 / 🎯有在庫化候補）。台帳側のKPI・絞り込み・表はまとめて隠す
+  let stockTab = (() => { try { return localStorage.getItem('smdStockTab') || 'ledger'; } catch (_) { return 'ledger'; } })();
+  function applyStockTab() {
+    const isBuy = stockTab === 'repeat';
+    document.querySelectorAll('#stock-tab button').forEach(b => b.classList.toggle('on', b.dataset.k === stockTab));
+    const show = (el, on) => { if (el) el.style.display = on ? '' : 'none'; };
+    show(document.getElementById('stk-buytab'), isBuy);
+    show(document.getElementById('stk-ledger'), !isBuy);
+    show(document.getElementById('stock-kpis'), !isBuy);
+    const pg = document.getElementById('page-stock');
+    if (pg) { const tb = pg.querySelectorAll('.smd-toolbar'); tb.forEach((t, i) => { if (i > 0) show(t, !isBuy); }); }  // 先頭はタブバー自身なので残す
+    if (isBuy) { try { renderRepeatSellers(); } catch (_) {} }
+  }
   function stockRender() {
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
@@ -3247,7 +3322,8 @@
         </details>`;
       }
     } catch (_) { velHtml = ''; }
-    body.innerHTML = restockHtml + velHtml + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
+    // サブタブ：🎯有在庫化候補（＋シリーズ別回転速度＝どちらも「何を仕入れるか」の判断）と 📒在庫台帳 を切り替える
+    body.innerHTML = `<div id="stk-buytab">${restockHtml}${velHtml}</div><div id="stk-ledger">` + `<div style="margin:0 4px 8px"><button class="smd-btn" id="stk-addbtn">＋ 在庫を登録</button>` +
       `<button class="smd-btn" id="stk-printsel" style="margin-left:6px"${selCount ? '' : ' disabled'}>🖨️ 選択を一括印刷${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-bulkrecv" style="margin-left:4px;display:${selCount ? '' : 'none'};background:#e7f5ea;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="選択した入庫待ちを『在庫保管中(受取済)』に一括変更＝届いたのに更新してない在庫をまとめて片付け">✅ 受取済にする${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
@@ -3293,10 +3369,11 @@
         `<td><input class="li stk-note" ${di} value="${esc(r.note || '')}" placeholder="—" title="備考（自由記入）" style="width:100%;min-width:120px;font-size:11px;padding:2px 4px"></td>` +
         '</tr>';
       }).join('') +
-      `</table></div>${pageNav(rows.length, stkPer, stkPage)}</div>`;
+      `</table></div>${pageNav(rows.length, stkPer, stkPage)}</div></div>`;
+    applyStockTab();
     // テーブル領域を実際の位置から高さ計算 → ヘッダー固定＋横スクロールバーを常時画面内に（ページ自体はスクロールさせない）
     wirePageNav(body, p => { stock.page = p; stockRender(); const el = document.getElementById('stock-body'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
-    fitStockScroll();
+    if (stockTab !== 'repeat') fitStockScroll();   // 台帳が非表示のときは高さ計算しない（0高さで潰れるため）
     // 編集ハンドラ
     body.querySelectorAll('.stk-sup').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { supplier: e.target.value || null })));
     body.querySelectorAll('.stk-seller').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { seller: e.target.value || null })));
@@ -3313,7 +3390,10 @@
     body.querySelectorAll('.stk-split').forEach(el => el.addEventListener('click', () => stockSplit(el.dataset.id)));
     document.getElementById('stk-addbtn').addEventListener('click', () => { stock.adding = !stock.adding; stockAddForm(); });
     { const db = document.getElementById('stk-dead'); if (db) db.addEventListener('click', () => { stock.dead = !stock.dead; stockRender(); }); }
-    try { renderRepeatSellers(); } catch (_) {}   // 🎯有在庫化候補は注文データを別途取るので非同期で後から埋める
+    { const tb = document.getElementById('stock-tab');
+      if (tb && !tb.dataset.wired) { tb.dataset.wired = '1';
+        tb.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; stockTab = b.dataset.k;
+          try { localStorage.setItem('smdStockTab', stockTab); } catch (_) {} applyStockTab(); }); } }
     { const cb = document.getElementById('stk-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('在庫_' + new Date().toISOString().slice(0, 10) + '.csv', [['ItemID', '商品名', 'SKU', '仕入元', 'セラー', '仕入額(円)', 'コンディション', '状態', '棚', '受取日時', 'Shopee注文SN', '備考']].concat(rows.map(r => [r.item_id || '', r.name || '', r.sku || '', r.supplier || '', r.seller || '', r.price != null ? r.price : '', r.condition || '', r.status || '', r.bin || '', deliveredAt(r) || '', r.shopee_sn || '', r.note || ''])))); }
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     // ラベル一括印刷：チェックボックス選択
