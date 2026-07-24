@@ -3048,6 +3048,26 @@
   let repeatCache = null;   // {rows} 一度作ったらページ再描画では作り直さない
   let repeatMin = 2;        // 表示しきい値（予想月販）
   const REPEAT_WIN = 180;   // 直近半年
+  // 商品同定キー。同じ商品が「単品ページ」と「バリエ明細」の両方で出ていることがあるので束ねる。
+  // コツ＝バリエ側の数字は残し、親カタログ側の裸の数字は捨てる（親題名に「2 3 4 5 6」と全作品番号が並ぶため、
+  // 親の数字を使うと全バリエが同じキーになってしまう）。実測6件が統合され誤爆なし。
+  function repeatToks(str, keepBareDigits) {
+    let t = String(str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .replace(/[\[\]()（）【】★☆|]/g, ' ')
+      .replace(/r?\$\s*[\d.,]+/g, ' ')
+      .replace(/cart(oes|ao)\s+de\s+memoria|memory\s+cards?/g, ' memorycard ')
+      .replace(/\bmemoria\b/g, ' memory ');
+    PRODUCT_SYNONYMS.forEach(([re, rep]) => { t = t.replace(re, ' ' + rep + ' '); });
+    return t.split(/[^a-z0-9]+/).filter(Boolean).filter(w => {
+      if (/^\d+$/.test(w)) return keepBareDigits;
+      return /\d/.test(w) || RP_PLAT.has(w) || (w.length >= 3 && !RP_STOP.has(w));
+    });
+  }
+  function repeatProdKey(name, vari) {
+    const a = vari ? repeatToks(vari, true) : repeatToks(name, true);
+    const b = vari ? repeatToks(name, false) : [];
+    return [...new Set(a.concat(b))].sort().join(' ');
+  }
   // カタログ同定キー。重複出品・国別の言語差(BR=ポルトガル語)・語順・タイトル末尾の切れを吸収しつつ、
   // ブランド等の識別語(hori/fujiwork等)は残して別商品が混ざらないようにする。
   const RP_STOP = new Set(('used usado usados usada usadas new novo nova variation variacao official oficial oficiais tested testado working funcionando retro japan japanese japao japones japonesa japonese do da de dos das para com sem the of for and ou ver versao version edicao edition melhor preco price pacote especial special selecao selection revival import cartridge cartucho software game jogo jogos only somente apenas accessories region free ntscj genuine authentic autentico sony bandai namco capcom konami sega square enix nintendo lot set bundle complete completo produto item raro rare series').split(' '));
@@ -3080,14 +3100,18 @@
       if (skip.test(o.status || '')) return;
       const items = o.items || [];
       if (items.length === 1) {
-        const v0 = String(items[0].variation || '').trim(), p0 = repeatCanon(items[0].name);
-        if (p0 || v0) snProd.set(String(o.sn || '').trim(), p0 + ' ‖ ' + v0.toLowerCase());
+        const k0 = repeatProdKey(items[0].name, String(items[0].variation || '').trim());
+        if (k0) snProd.set(String(o.sn || '').trim(), k0);
       }
       items.forEach(it => {
-        const v = String(it.variation || '').trim(), p = repeatCanon(it.name);
-        if (!p && !v) return;
-        const key = p + ' ‖ ' + v.toLowerCase();
-        const e = g[key] = g[key] || { parent: it.name || '', variation: v, qty: 0, ccs: new Set(), dates: [], jp: {}, costs: [], img: it.image || '' };
+        const v = String(it.variation || '').trim();
+        const key = repeatProdKey(it.name, v);
+        if (!key) return;
+        const e = g[key] = g[key] || { parent: it.name || '', variation: v, qty: 0, ccs: new Set(), dates: [], jp: {}, costs: [], img: it.image || '', lst: new Map() };
+        // どの出品（国×item_id）から売れたか＝商品ページへのリンク元。重複出品もここに並ぶ
+        if (it.item_id) e.lst.set(o.cc + '|' + it.item_id, { cc: o.cc, id: it.item_id, vari: !!v });
+        // 表示名はバリエ名があればそちらを主役にする（単品題名は長く冗長なため）
+        if (!e.variation && v) { e.variation = v; e.parent = it.name || e.parent; }
         const q = it.qty || 1;
         e.qty += q; e.ccs.add(o.cc);
         // 個数ぶん積む（注文行数でなく実売個数で月販を出す。1注文2個も2個として数える）
@@ -3134,6 +3158,7 @@
         parent: e.parent, variation: e.variation, img: e.img,
         jpName: Object.keys(e.jp).sort((a, b) => e.jp[b] - e.jp[a])[0] || '',
         qty: e.qty, dates: d, ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
+        lst: [...(e.lst ? e.lst.values() : [])],
         cost: costs.length ? costs[Math.floor(costs.length / 2)] : null,
         stock: Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null
       };
@@ -3169,6 +3194,29 @@
     if (m > 6) return `<span style="color:#7b52c4">🔵 持ちすぎ (${m.toFixed(1)}ヶ月分)</span>`;
     return `<span style="color:#1a7f37">🟢 十分 (${m.toFixed(1)}ヶ月分)</span>`;
   };
+  // 国チップを「その国の実際の商品ページ」へのリンクにする。
+  // 1国に複数出品があれば重複出品なので枝番(¹²)＋⚠を付ける＝一目で分かる
+  function repeatCcChips(r) {
+    const byCc = {};
+    (r.lst || []).forEach(x => { (byCc[x.cc] = byCc[x.cc] || []).push(x); });
+    let anyDup = false;
+    const html = (r.ccs || []).map(cc => {
+      const links = byCc[cc] || [];
+      const dup = links.length > 1;
+      if (dup) anyDup = true;
+      const base = 'display:inline-block;border-radius:3px;padding:0 4px;margin-right:2px;text-decoration:none;color:#333;background:';
+      if (!links.length) return `<span style="${base}#f1f3f7">${esc(cc)}</span>`;
+      return links.map((x, i) => {
+        const url = buyerUrlFor(cc, x.id) || editUrlForCc(cc, x.id);
+        const label = esc(cc) + (dup ? `<sup>${i + 1}</sup>` : '');
+        const tip = dup ? `${cc}の商品ページを開く（この国に${links.length}件の重複出品）` : `${cc}の商品ページを開く`;
+        return url ? `<a href="${url}" target="_blank" rel="noopener" title="${esc(tip)}" style="${base}${dup ? '#fde8e8' : '#f1f3f7'}">${label}</a>`
+                   : `<span style="${base}${dup ? '#fde8e8' : '#f1f3f7'}">${label}</span>`;
+      }).join('');
+    }).join('');
+    return html + (anyDup ? ' <span title="同じ国に複数の出品＝重複出品" style="color:#d93025;font-size:10px">⚠重複</span>' : '');
+  }
+  const editUrlForCc = (cc, itemId) => { const rg = REGIONS.find(x => x.cc === cc); return rg && rg.host ? editUrlFor(rg.host, itemId) : null; };
   const tabBtnHtml = (v, label, cnt) => `<button class="rep-min smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px;${repeatMin === v ? 'background:#7b52c4;color:#fff;border-color:#7b52c4' : ''}">${label}（${cnt}）</button>`;
   // 集約ビュー。商品別(親×バリエ)だけだと作品ごとに割れて定番を見落とすため、
   //  ・カタログ別＝親出品ごと（実際に運用している単位。例「Variation Megaman Rockman Series」＝ロックマン1カタログ）
@@ -3190,6 +3238,7 @@
       if (mode === 'catalog' && label.length < e.label.length) e.label = label;
       e.qty += r.qty; e.items++; e.children.push(r);
       e.dates = e.dates.concat(r.dates || []);
+      (r.lst || []).forEach(x => { e.lstMap = e.lstMap || new Map(); e.lstMap.set(x.cc + '|' + x.id, x); });
       r.ccs.forEach(c => e.ccs.add(c));
       if ((r.last || '') > e.last) e.last = r.last || '';
       if (r.stock != null) e.stock = (e.stock || 0) + r.stock;
@@ -3198,7 +3247,7 @@
     });
     return Object.values(g).map(e => {
       const c = e.costs.slice().sort((a, b) => a - b);
-      return repeatRate(Object.assign({}, e, { ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null }));
+      return repeatRate(Object.assign({}, e, { ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null, lst: [...(e.lstMap ? e.lstMap.values() : [])] }));
     }).filter(e => e.win > 0).sort((a, b) => b.perMonth - a.perMonth);
   }
   function repeatSellersHtml(rowsIn) {
@@ -3229,7 +3278,7 @@
           <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
           <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
           <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
-          <td style="font-size:10.5px;white-space:nowrap">${r.ccs.map(c => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(c)}</span>`).join('')}</td>
+          <td style="font-size:10.5px;white-space:nowrap">${repeatCcChips(r)}</td>
           <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
           <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${esc(r.last)}</td>
           <td style="font-size:10.5px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${kw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
@@ -3245,7 +3294,7 @@
             <td style="text-align:right;color:#888;font-size:11px">${c.qty}</td>
             <td style="text-align:right;font-weight:700;font-size:11px">${c.stock != null ? c.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
             <td style="font-size:10px;white-space:nowrap">${stockBadge(c)}</td>
-            <td style="font-size:10px;white-space:nowrap">${c.ccs.map(x => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(x)}</span>`).join('')}</td>
+            <td style="font-size:10px;white-space:nowrap">${repeatCcChips(c)}</td>
             <td style="text-align:right;color:#888;font-size:11px">${c.cost != null ? '¥' + Math.round(c.cost).toLocaleString() : '—'}</td>
             <td class="smd-dim" style="font-size:10px;white-space:nowrap">${esc(c.last)}</td>
             <td style="font-size:10px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${ckw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${ckw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
@@ -3283,7 +3332,7 @@
         <td style="text-align:right;color:#888;font-size:11px">${r.qty}</td>
         <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
         <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
-        <td style="font-size:10.5px;white-space:nowrap">${r.ccs.map(c => `<span style="display:inline-block;background:#f1f3f7;border-radius:3px;padding:0 4px;margin-right:2px">${esc(c)}</span>`).join('')}</td>
+        <td style="font-size:10.5px;white-space:nowrap">${repeatCcChips(r)}</td>
         <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
         <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${esc(r.last)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${links}</td></tr>`;
