@@ -3072,7 +3072,9 @@
   // ブランド等の識別語(hori/fujiwork等)は残して別商品が混ざらないようにする。
   const RP_STOP = new Set(('used usado usados usada usadas new novo nova variation variacao official oficial oficiais tested testado working funcionando retro japan japanese japao japones japonesa japonese do da de dos das para com sem the of for and ou ver versao version edicao edition melhor preco price pacote especial special selecao selection revival import cartridge cartucho software game jogo jogos only somente apenas accessories region free ntscj genuine authentic autentico sony bandai namco capcom konami sega square enix nintendo lot set bundle complete completo produto item raro rare series ' +
     // 「PlayStation」の語＆末尾切れの断片。実プラットフォームは ps/ps2/psp トークンで拾うのでこの語は冗長ノイズ＝分断の元
-    'play plays playstation playstation2 playstation3 playstation4 playstation5 station pla').split(' '));
+    'play plays playstation playstation2 playstation3 playstation4 playstation5 station pla ' +
+    // 差1語分析で同一商品を割っていた安全なノイズ語（飾り語・PT語・誤字）。番号(4/2/3)・機種(nes/nds)・味(cola/orange)は残す
+    'from lote lotes conjunto conjuntos importado importada importados genuino genuina genuinos shipping frete package embalagem usade uma mensagem').split(' '));
   const RP_PLAT = new Set('wii wiiu 3ds ds gba gbc gb snes nes n64 gc gamecube ps ps1 ps2 ps3 ps4 ps5 psp psvita vita switch nsw saturn dreamcast dc xbox pc fc famicom'.split(' '));
   function repeatCanon(s) {
     let t = String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()   // アクセント除去(memória→memoria)
@@ -3109,9 +3111,11 @@
         const v = String(it.variation || '').trim();
         const key = repeatProdKey(it.name, v);
         if (!key) return;
-        const e = g[key] = g[key] || { parent: it.name || '', variation: v, qty: 0, ccs: new Set(), dates: [], jp: {}, costs: [], img: it.image || '', lst: new Map() };
+        const e = g[key] = g[key] || { parent: it.name || '', variation: v, qty: 0, ccs: new Set(), dates: [], jp: {}, costs: [], img: it.image || '', lst: new Map(), sales: [] };
         // どの出品（国×item_id）から売れたか＝商品ページへのリンク元。重複出品もここに並ぶ
         if (it.item_id) e.lst.set(o.cc + '|' + it.item_id, { cc: o.cc, id: it.item_id, vari: !!v, shop: o.shop_id || null });
+        // 実際の注文レコード（国・注文SN・日付）＝オーダーページで正誤性を検証できるように保持
+        e.sales.push({ cc: o.cc, sn: o.sn || '', date: o.order_date || '', id: it.item_id, shop: o.shop_id || null, q: it.qty || 1 });
         // 表示名はバリエ名があればそちらを主役にする（単品題名は長く冗長なため）
         if (!e.variation && v) { e.variation = v; e.parent = it.name || e.parent; }
         const q = it.qty || 1;
@@ -3157,9 +3161,9 @@
       const d = e.dates.slice().sort();
       const costs = e.costs.slice().sort((a, b) => a - b);
       return {
-        parent: e.parent, variation: e.variation, img: e.img,
+        key: pk, parent: e.parent, variation: e.variation, img: e.img,
         jpName: Object.keys(e.jp).sort((a, b) => e.jp[b] - e.jp[a])[0] || '',
-        qty: e.qty, dates: d, ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
+        qty: e.qty, dates: d, sales: e.sales || [], ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
         lst: [...(e.lst ? e.lst.values() : [])],
         cost: costs.length ? costs[Math.floor(costs.length / 2)] : null,
         stock: Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null
@@ -3196,7 +3200,27 @@
   const repeatOpen = new Set();  // 明細（バリエーション）を展開中のカタログ
   let repeatWin = 90;            // 集計期間（日）。180=半年平均 / 90 / 60=最近の勢い
   let repeatQ = '';             // 検索キーワード（商品名・バリエ・仕入れ名で絞り込み）
+  let repeatRowByKey = new Map();  // 描画中の行を key で引く（📋注文明細の表示用）
   const repeatMatch = (r, q) => !q || ((r.label || '') + ' ' + (r.parent || '') + ' ' + (r.variation || '') + ' ' + (r.jpName || '')).toLowerCase().includes(q);
+  // 📋 商品の注文明細（国・注文SN・日付）をオーバーレイで一覧。各注文からその国の商品ページを開けて正誤性を検証できる
+  function showRepeatOrders(row) {
+    const sales = (row.sales || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const title = esc((row.label || row.parent || '') + (row.variation && !row.label ? ' ／ ' + row.variation : ''));
+    const rowsH = sales.map(s => {
+      const url = productPageUrl(s.cc, s.id, s.shop);
+      return `<tr><td style="padding:3px 8px">${esc(s.date || '')}</td><td style="padding:3px 8px;font-weight:700">${esc(s.cc)}</td><td style="padding:3px 8px;font-family:monospace;font-size:11px">${esc(s.sn || '')}</td><td style="padding:3px 8px;text-align:right">${s.q || 1}</td><td style="padding:3px 8px">${url ? `<a href="${url}" target="_blank" rel="noopener" style="color:#0b5cab">商品ページ↗</a>` : ''}</td></tr>`;
+    }).join('');
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:640px;width:92%;max-height:82vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="position:sticky;top:0;background:#fff;padding:12px 16px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px">
+        <b style="font-size:13px;flex:1">📋 注文明細（${sales.length}件）— ${title}</b>
+        <button class="ro-close" style="border:none;background:#f1f3f7;border-radius:6px;padding:4px 10px;cursor:pointer">✕ 閉じる</button></div>
+      <div style="padding:6px 10px 14px"><div class="smd-dim" style="font-size:11px;padding:4px 8px">Shopeeの注文管理でこのSNを検索すれば実データと照合できます。国名からその国の商品ページも開けます。</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="text-align:left;color:#888"><th style="padding:3px 8px">日付</th><th style="padding:3px 8px">国</th><th style="padding:3px 8px">注文SN</th><th style="padding:3px 8px;text-align:right">数</th><th style="padding:3px 8px">確認</th></tr>${rowsH}</table></div></div>`;
+    ov.addEventListener('click', e => { if (e.target === ov || e.target.closest('.ro-close')) ov.remove(); });
+    document.body.appendChild(ov);
+  }
   // 在庫の持ち月数で補充要否。特定できない商品は憶測を出さず「—」にする
   const stockBadge = (r) => {
     if (r.stock == null) return '<span class="smd-dim" style="font-size:10px">—</span>';
@@ -3209,15 +3233,17 @@
   };
   // 一発物マーク：1ヶ月に集中して売れた＝定番でない（アクティブ月レートで月販が高く出るので注意喚起）
   const spikeMark = (r) => r.oneShot ? '<span title="1ヶ月に集中して売れた＝一発物の可能性（定番でない）" style="font-size:10px">⚡</span> ' : '';
-  // 売れた日：直近5日を MM/DD で表示、全日付はホバーで。空欄より「いつ売れたか」が有在庫判断に効く
+  // 売れた日：直近5日を MM/DD で表示。📋を押すと実際の注文レコード（国・注文SN・日付）を一覧＝オーダーで正誤性を検証できる。
   const soldDatesCell = (r, small) => {
-    const ds = (r.soldDates || []).slice();
+    const sales = (r.sales || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const ds = sales.length ? sales.map(s => s.date).filter(Boolean) : (r.soldDates || []).slice().reverse();
     if (!ds.length) return `<span class="smd-dim">${esc(r.last || '')}</span>`;
-    const recent = ds.slice(-5).reverse().map(d => d.slice(5).replace('-', '/'));
+    const recent = ds.slice(0, 5).map(d => d.slice(5).replace('-', '/'));
     const more = ds.length - recent.length;
-    const full = ds.slice().reverse().join('  ');
     const sz = small ? '9.5px' : '10.5px';
-    return `<span title="売れた日（全${ds.length}件）&#10;${esc(full)}" style="font-size:${sz};cursor:help">${recent.join(' ')}${more > 0 ? ` <span class="smd-dim">+${more}</span>` : ''}</span>`;
+    const key = esc(r.key || r.label || '');
+    const orderBtn = sales.length ? ` <a href="#" class="rep-orders" data-key="${key}" title="この商品の注文明細（国・SN・日付）を一覧＝販売実績の検証用" style="font-size:${sz};text-decoration:none">📋${sales.length}</a>` : '';
+    return `<span style="font-size:${sz}">${recent.join(' ')}${more > 0 ? ` <span class="smd-dim">+${more}</span>` : ''}</span>${orderBtn}`;
   };
   // 国チップを「その国の実際の商品ページ」へのリンクにする。
   // 1国に複数出品があれば重複出品なので枝番(¹²)＋⚠を付ける＝一目で分かる
@@ -3263,11 +3289,12 @@
         if (!key || key === 'その他') return;
         label = key;
       }
-      const e = g[key] = g[key] || { key: key, label: label, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '', children: [], dates: [] };
+      const e = g[key] = g[key] || { key: key, label: label, qty: 0, items: 0, ccs: new Set(), last: '', stock: null, costs: [], img: '', children: [], dates: [], sales: [] };
       // カタログ名は国で言語が違うので、短い＝装飾の少ない表記を代表にする
       if (mode === 'catalog' && label.length < e.label.length) e.label = label;
       e.qty += r.qty; e.items++; e.children.push(r);
       e.dates = e.dates.concat(r.dates || []);
+      e.sales = e.sales.concat(r.sales || []);
       (r.lst || []).forEach(x => { e.lstMap = e.lstMap || new Map(); e.lstMap.set(x.cc + '|' + x.id, x); });
       r.ccs.forEach(c => e.ccs.add(c));
       if ((r.last || '') > e.last) e.last = r.last || '';
@@ -3293,6 +3320,9 @@
     const rated = rowsIn.map(r => repeatRate(r)).filter(r => r.win > 0).sort((a, b) => b.perMonth - a.perMonth || b.qty - a.qty);
     const rows = agg ? repeatAggRows(rowsIn, mode) : rated;
     const q = repeatQ;
+    repeatRowByKey = new Map();   // 📋注文明細の引き当て用（明細=base行＋集約行の両方をキーで引けるように）
+    rowsIn.forEach(r => repeatRowByKey.set(r.key, r));
+    rows.forEach(r => repeatRowByKey.set(r.key, r));
     const passMin = r => (repeatMin === 'steady' ? (r.soldMonths >= 3) : (r.perMonth >= repeatMin)) && repeatMatch(r, q);
     const list = rows.filter(passMin);
     const n2 = rows.filter(r => r.perMonth >= 2 && repeatMatch(r, q)).length, n1 = rows.filter(r => r.perMonth >= 1 && repeatMatch(r, q)).length;
@@ -3408,6 +3438,8 @@
       const qc = document.getElementById('rep-qclr'); if (qc) qc.addEventListener('click', () => { repeatQ = ''; renderRepeatSellers(); }); }
     h.querySelectorAll('.rep-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k;
       if (repeatOpen.has(k)) repeatOpen.delete(k); else repeatOpen.add(k); renderRepeatSellers(); }));
+    h.querySelectorAll('.rep-orders').forEach(el => el.addEventListener('click', (ev) => { ev.preventDefault();
+      const row = repeatRowByKey.get(el.dataset.key); if (row) showRepeatOrders(row); }));
   }
 
   // 在庫ページのサブタブ（📒在庫台帳 / 🎯有在庫化候補）。台帳側のKPI・絞り込み・表はまとめて隠す
