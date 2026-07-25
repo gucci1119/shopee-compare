@@ -7274,6 +7274,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const models = (read.pi.model_list || []).map(m => { let p = priceByModelId[m.id]; if (p == null || p === '') p = modelPrice(m); const pn = parseFloat(p); if (!isNaN(pn)) p = pn.toFixed(dec); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: p, stock_setting_list: [{ sellable_stock: stkOf(m) }] }; });
       const r = await productWrite(lg.host, lg.item_id, { model_list: models }); return { ok: r.ok, code: r.code, msg: r.msg };
     };
+    // 明細在庫を公式API優先で書く。stockByModelId={model_id:在庫数}。価格版と同じくsrcに合わせ公式/ブリッジ自動選択
+    const writeModelStockUnified = async (lg, read, stockByModelId) => {
+      if (read.src === 'api') {
+        const list = read.models.map(m => ({ model_id: m.model_id, stock: parseInt(stockByModelId[m.model_id], 10) }))
+          .filter(x => Number.isFinite(x.stock) && x.stock >= 0);
+        if (!list.length) return { ok: false };
+        try { const r = await openapiUpdateStockList(read.sid, lg.item_id, list); return { ok: !!(r && r.ok), msg: r && r.error }; } catch (e) { return { ok: false, msg: e.message }; }
+      }
+      // ブリッジ：価格は現状維持しつつ在庫だけ更新（model_listで価格＋在庫を送る）
+      const dec = (lg.cc === 'VN' || lg.cc === 'TW') ? 0 : 2;
+      const models = (read.pi.model_list || []).map(m => { let st = stockByModelId[m.id]; const sn = parseInt(st, 10); const stock = Number.isFinite(sn) && sn >= 0 ? sn : stkOf(m); const pn = parseFloat(modelPrice(m)); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: isNaN(pn) ? modelPrice(m) : pn.toFixed(dec), stock_setting_list: [{ sellable_stock: stock }] }; });
+      const r = await productWrite(lg.host, lg.item_id, { model_list: models }); return { ok: r.ok, code: r.code, msg: r.msg };
+    };
     const writePriceFactor = async (lg, factor) => {
       try {
         const read = await readModelsUnified(lg);
@@ -7341,7 +7354,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const vn = m.name; const key = productKey(vn) || vn || ('#' + m.model_id);
             let v = varMap.get(key); if (!v) { v = { name: vn, cells: {} }; varMap.set(key, v); }
             if (!v.name && vn) v.name = vn;
-            v.cells[i] = { price: m.price, mid: m.model_id };
+            v.cells[i] = { price: m.price, mid: m.model_id, stock: m.stock };
           });
         } catch (e) { varData.reads[i] = null; }
         if (prog()) prog().textContent = '読込中… ' + (i + 1) + '/' + listings.length;
@@ -7362,13 +7375,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           }
           const canImg = shopIdForListing(lg) && settings.openapiUrl && settings.writeToken && (v.name || '').trim();
           const imgBtn = canImg ? '<button class="uvar-img" data-li="' + i + '" data-opt="' + av(v.name || '') + '" title="' + lg.cc + ' のこのバリエ画像を変更（画像URL）" style="margin-left:3px;font-size:10px;padding:1px 4px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer">🖼</button>' : '';
-          return '<td style="white-space:nowrap"><span style="font-size:10px;color:' + rgc(lg.cc).color + '">' + rgc(lg.cc).cur + '</span><input class="uvar-p" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.price) + '" style="width:66px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right">' + imgBtn + '</td>';
+          return '<td style="white-space:nowrap"><div style="display:flex;align-items:center;gap:2px"><span style="font-size:10px;color:' + rgc(lg.cc).color + '">' + rgc(lg.cc).cur + '</span><input class="uvar-p" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.price) + '" style="width:64px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:11px;text-align:right">' + imgBtn + '</div><div style="display:flex;align-items:center;gap:2px;margin-top:2px"><span style="font-size:9px;color:#8a93a3">在</span><input class="uvar-s" data-li="' + i + '" data-mid="' + av(c.mid) + '" value="' + av(c.stock != null ? c.stock : '') + '" inputmode="numeric" style="width:64px;padding:2px 4px;border:1px solid #e5e7eb;border-radius:4px;font-size:10.5px;text-align:right;color:#555" title="' + lg.cc + ' の在庫数"></div></td>';
         }).join('');
         return '<tr><td style="text-align:left;position:sticky;left:0;background:#fff">' + nm(v.name || '（既定）', '220px') + '</td>' + cells + '</tr>';
       }).join('');
       const head = '<tr><th style="text-align:left;position:sticky;left:0;background:#fafafa">バリエ (' + varMap.size + ')</th>' + listings.map((lg, i) => '<th style="white-space:nowrap"><span style="color:' + rgc(lg.cc).color + '">' + colLabel[i] + '</span><br><span style="font-weight:400;font-size:9px;color:#999">' + varCount[i] + '種</span></th>').join('') + '</tr>';
-      const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.reads[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細価格をShopeeへ書込">書込</button>' : '—') + '</td>').join('') + '</tr>';
-      box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">価格はセルで直接編集→各国「書込」で反映。<b style="color:#e8710a">＋追加</b>はその国にそのバリエを公式APIで追加（価格・在庫＋任意で画像URL）。各セルの<b>🖼</b>でそのバリエ画像を差し替え（他バリエの画像は維持）。いずれも🔄再読込で反映。</div>';
+      const foot = '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">価格を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.reads[i] ? '<button class="uvar-write smd-btn" data-li="' + i + '" style="font-size:9px;background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細価格をShopeeへ書込">価格書込</button>' : '—') + '</td>').join('') + '</tr>'
+        + '<tr><td style="text-align:left;position:sticky;left:0;background:#fafafa;font-size:10px;color:#888">在庫を書込→</td>' + listings.map((lg, i) => '<td style="text-align:center">' + (varData.reads[i] ? '<button class="uvar-swrite smd-btn" data-li="' + i + '" style="font-size:9px;background:#0b5cab;border-color:#0b5cab;color:#fff;font-weight:700" title="' + lg.cc + 'の全明細在庫をShopeeへ書込">在庫書込</button>' : '—') + '</td>').join('') + '</tr>';
+      box.innerHTML = '<div style="overflow:auto;max-height:40vh"><table class="pf-table" style="min-width:100%;font-size:11px">' + head + rowsV + foot + '</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:5px">各セルで<b>価格</b>と<b>在（在庫）</b>を直接編集→各国の<b style="color:#1a7f37">価格書込</b>／<b style="color:#0b5cab">在庫書込</b>で反映（各国まとめて）。<b style="color:#e8710a">＋追加</b>はその国にそのバリエを公式APIで追加。各セルの<b>🖼</b>で画像差し替え。いずれも🔄再読込で反映。</div>';
       ov.querySelectorAll('.uvar-write').forEach(b => b.addEventListener('click', async () => {
         const li = +b.dataset.li, lg = listings[li], read = varData.reads[li]; if (!read) return;
         const n = read.models.length;
@@ -7385,6 +7399,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         let ok = false; try { const r = await writeModelPricesUnified(lg, read, priceByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
         b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) b.disabled = false;
         if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', lg.cc, (d.rep || '') + ' ' + n + '件'); } catch (_) {} }
+      }));
+      // 在庫書込：その国の全明細の在庫をまとめてShopeeへ（公式API優先・ブリッジ自動フォールバック）
+      ov.querySelectorAll('.uvar-swrite').forEach(b => b.addEventListener('click', async () => {
+        const li = +b.dataset.li, lg = listings[li], read = varData.reads[li]; if (!read) return;
+        const n = read.models.length;
+        const gw = await guardWriteCountries([lg.cc]);
+        if (!gw.ok) { alert(gw.msg); return; }
+        // 入力された在庫を集める（空欄は現状維持）。要約を確認に出す
+        const smap = {}; ov.querySelectorAll('.uvar-s[data-li="' + li + '"]').forEach(inp => smap[inp.dataset.mid] = inp.value.trim());
+        const stockByModelId = {}; const changes = [];
+        read.models.forEach(m => { const raw = smap[m.model_id]; const cur = (m.stock != null ? m.stock : 0); let val = cur; if (raw != null && raw !== '') { const sn = parseInt(raw, 10); if (Number.isFinite(sn) && sn >= 0) val = sn; } stockByModelId[m.model_id] = val; if (val !== cur) changes.push((m.name || '明細') + ': ' + cur + '→' + val); });
+        if (!changes.length) { alert('在庫の変更がありません（各セルの「在」欄を編集してください）'); return; }
+        if (!confirm('書込先: ' + gw.summary + '\n\n' + lg.cc + ' の在庫を' + changes.length + '件 変更します:\n' + changes.slice(0, 12).join('\n') + (changes.length > 12 ? '\n…他' + (changes.length - 12) + '件' : '') + '\n\nShopeeに書き込みます。よろしいですか？')) return;
+        b.disabled = true; b.textContent = '…';
+        let ok = false; try { const r = await writeModelStockUnified(lg, read, stockByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 在庫 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 在庫 失敗 ' + e.message, '#d93025'); }
+        b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#fff' : '#ffd7d7'; if (!ok) b.disabled = false;
+        if (ok) { msg(lg.cc + ' 在庫書込 成功（' + changes.length + '件）', '#1a7f37'); try { logAct('出品', 'バリエ在庫', lg.cc, (d.rep || '') + ' ' + changes.length + '件'); } catch (_) {} }
       }));
       // ＋追加：その国の出品に不足バリエを公式APIで足す（tierにオプション追記→add_model）
       ov.querySelectorAll('.uvar-add').forEach(b => b.addEventListener('click', async () => {
