@@ -2693,23 +2693,22 @@
       const odDate = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '');
       const snPaid = new Map();  // cc|sn → 買い手支払額
       (income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snPaid.set(i.cc + '|' + i.sn, v); });
-      // 件数は「注文数」で数える（チャートのオーダー数と一致させる。以前は販売個数=点で数えていてズレていた）
-      const tCcU = {}, tCcL = {}, yCcL = {};  // cc → 注文数(今日) / 現地売上(今日) / 現地売上(昨日)
+      // 注文数(件)と商品数(点=item qtyの合計)を両方数える。1注文で複数商品のことがあるので両方見せる
+      const tCcO = {}, tCcU = {}, tCcL = {}, yCcL = {};  // cc → 注文数 / 商品数 / 現地売上(今日) / 現地売上(昨日)
       (recentOrders || []).forEach(o => {
         if (o.tab === 600) return;  // キャンセル除外
-        const d = odDate(o);
+        const d = odDate(o), units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
         const paid = snPaid.has(o.cc + '|' + o.sn) ? snPaid.get(o.cc + '|' + o.sn) : (Number(o.total) || 0);
-        if (d === jstToday) { tCcU[o.cc] = (tCcU[o.cc] || 0) + 1; tCcL[o.cc] = (tCcL[o.cc] || 0) + paid; }
+        if (d === jstToday) { tCcO[o.cc] = (tCcO[o.cc] || 0) + 1; tCcU[o.cc] = (tCcU[o.cc] || 0) + units; tCcL[o.cc] = (tCcL[o.cc] || 0) + paid; }
         else if (d === jstYest) yCcL[o.cc] = (yCcL[o.cc] || 0) + paid;
       });
-      let todayJpy = 0, yestJpy = 0, todayUnits = 0;
-      const tCc = {};  // cc → {units(JST件数), local(income現地売上)}
+      let todayJpy = 0, yestJpy = 0, todayOrders = 0, todayUnits = 0;
+      const tCc = {};  // cc → {orders, units, local}
       REGIONS.forEach(rg => {
-        const local = tCcL[rg.cc] || 0;
-        const u = tCcU[rg.cc] || 0;
+        const local = tCcL[rg.cc] || 0, ord = tCcO[rg.cc] || 0, u = tCcU[rg.cc] || 0;
         yestJpy += (yCcL[rg.cc] || 0) * rg.rateJpy;
-        if (local > 0 || u > 0) tCc[rg.cc] = { units: u, local: local };
-        todayJpy += local * rg.rateJpy; todayUnits += u;
+        if (local > 0 || ord > 0) tCc[rg.cc] = { orders: ord, units: u, local: local };
+        todayJpy += local * rg.rateJpy; todayOrders += ord; todayUnits += u;
       });
       const toShip = orders.filter(o => o.tab === 300);
       const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
@@ -2723,7 +2722,7 @@
       const deadVal = deadArr.reduce((s, r) => s + (r.price || 0), 0);
       const arrivedNotRecv = waiting.filter(r => deliveredAt(r)).length;
       kpis.innerHTML = [
-        ['今日の売上', fmtJpy(todayJpy), `${todayUnits}件（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。件数＝注文数（チャートのオーダー数と一致）。'],
+        ['今日の売上', fmtJpy(todayJpy), `${todayOrders}件 / ${todayUnits}点（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。件＝注文数（チャートのオーダー数と一致）／点＝商品数（1注文に複数商品のことあり）。'],
         ['昨日の売上', fmtJpy(yestJpy), '前日の確定売上（日本時間）', '昨日1日分（日本時間）の売上（円換算・ほぼ確定値）。今日との比較の基準に。'],
         ['未発送', toShip.length + '件', due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり', '発送待ちの注文数。期限24時間以内はShopeeのペナルティ対象になりやすいので優先。', 'orders'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeで確定前（escrow保留中）の入金見込み額。リリース後はここから外れて実入金になる。'],
@@ -2750,7 +2749,7 @@
       ccEl.innerHTML = REGIONS.map(rg => {
         const t = tCc[rg.cc];   // 今日(日本時間)の国別。0点の国も出す
         return `<div class="dash-row"><span><b style="color:${rg.color}">${rg.cc}</b></span>` +
-          `<span>${t ? `${t.units}件 / ${fmtLocal(rg, t.local)} <span class="smd-jpy">≈${fmtJpy(t.local * rg.rateJpy)}</span>` : '<span class="smd-dim">0件</span>'}</span></div>`;
+          `<span>${t ? `${t.orders}件 / ${t.units}点 / ${fmtLocal(rg, t.local)} <span class="smd-jpy">≈${fmtJpy(t.local * rg.rateJpy)}</span>` : '<span class="smd-dim">0件</span>'}</span></div>`;
       }).join('');
       // ---- 💸 Payoneerリリース（確定=payouts実績・見込み=未リリースescrowをUSD換算） ----
       const poEl = document.getElementById('dash-payout');
@@ -11039,7 +11038,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!renderTrend._orders || Date.now() - (renderTrend._ordAt || 0) > 120000) {
         // 売上額は完了を待たず income(escrow)の buyer_paid にある＝速報で出せる。orders.total(完了時のみ)より即時
         [renderTrend._orders, renderTrend._income] = await Promise.all([
-          sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn'),
+          sbGetAll('orders', 'select=cc,order_date,order_ts,tab,total,sn,items'),
           sbGetAll('income', 'select=cc,sn,buyer_paid').catch(() => []),
         ]);
         renderTrend._ordAt = Date.now();
@@ -11065,7 +11064,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ctrl.innerHTML = '<span class="smd-dim">期間</span>' + TREND_PERIODS.map(([k, l]) => seg('tr-p', k, rr ? '' : period, l)).join('') +
         '<span class="smd-dim" style="margin-left:8px">クイック</span>' + TREND_RANGES.map(([k, l]) => seg('tr-r', k, cust ? '' : (range || ''), l)).join('') +
         `<span class="smd-dim" style="margin-left:8px">指定</span><input type="date" id="tr-cs" value="${trendState.custStart || ''}" style="${di}"><span style="color:#999">〜</span><input type="date" id="tr-ce" value="${trendState.custEnd || ''}" style="${di}">${cust ? `<button id="tr-cclr" class="smd-btn" style="font-size:11px;padding:2px 8px;margin-left:2px">✕</button>` : ''}` +
-        '<span class="smd-dim" style="margin-left:8px">指標</span>' + [['sales', '売上¥'], ['count', 'オーダー数']].map(([k, l]) => seg('tr-m', k, metric, l)).join('') +
+        '<span class="smd-dim" style="margin-left:8px">指標</span>' + [['sales', '売上¥'], ['count', 'オーダー数'], ['units', '商品数']].map(([k, l]) => seg('tr-m', k, metric, l)).join('') +
         `<label style="margin-left:10px;cursor:pointer;font-size:12px"><input type="checkbox" id="tr-cancel" ${inclCancel ? 'checked' : ''}> キャンセルも含む</label>`;
       ctrl.querySelectorAll('.tr-p').forEach(b => b.onclick = () => { trendState.period = b.dataset.k; trendState.range = null; trendState.custStart = trendState.custEnd = null; renderTrend(); });   // 期間クリックで範囲解除
       ctrl.querySelectorAll('.tr-r').forEach(b => b.onclick = () => { trendState.range = (trendState.range === b.dataset.k ? null : b.dataset.k); trendState.custStart = trendState.custEnd = null; renderTrend(); });
@@ -11084,10 +11083,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (isCancel && !inclCancel) return;
         if (rr && (ds < rr.s || ds > rr.e)) return;
         const key = trendBucket(ds, effPeriod); if (!key) return;
-        const b = buk[key] = buk[key] || { count: 0, sales: 0, cancel: 0, byCc: {} };
+        const b = buk[key] = buk[key] || { count: 0, units: 0, sales: 0, cancel: 0, byCc: {} };
         const cc = o.cc || '?';
-        const bc = b.byCc[cc] = b.byCc[cc] || { count: 0, sales: 0 };
-        b.count++; bc.count++; if (isCancel) b.cancel++;
+        const bc = b.byCc[cc] = b.byCc[cc] || { count: 0, units: 0, sales: 0 };
+        const uq = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);   // 商品数(点)
+        b.count++; bc.count++; b.units += uq; bc.units += uq; if (isCancel) b.cancel++;
         // 売上額＝income.buyer_paid(escrow・完了を待たず入る)優先→無ければorders.total(完了時)
         if (!isCancel) { const rg = regionByCc(cc); if (rg) { const amt = snAmt.has(cc + '|' + o.sn) ? snAmt.get(cc + '|' + o.sn) : (Number(o.total) || 0); const s = amt * rg.rateJpy; b.sales += s; bc.sales += s; } }
       });
@@ -11110,19 +11110,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       const noteEl = document.getElementById('trend-note');
       if (!Object.keys(buk).length) { el.innerHTML = '<span class="smd-dim">データがありません（注文を同期すると表示されます）</span>'; noteEl.textContent = ''; return; }
-      const EMPTY = { count: 0, sales: 0, cancel: 0, byCc: {} };
+      const EMPTY = { count: 0, units: 0, sales: 0, cancel: 0, byCc: {} };
       const bk = k => buk[k] || EMPTY;   // 0件バケットの安全アクセス
       // 万・億表記（日本人に読みやすい）。1億以上=◯億 / 1万以上=◯万(100万以上は小数無し) / それ未満=そのまま
       const jkShort = n => !n ? '' : n >= 1e8 ? '¥' + (n / 1e8).toFixed(n >= 1e9 ? 0 : 1) + '億' : n >= 1e4 ? '¥' + (n / 1e4).toFixed(n >= 1e6 ? 0 : 1) + '万' : '¥' + Math.round(n).toLocaleString();
-      const val = k => metric === 'count' ? bk(k).count : bk(k).sales;
-      const fmtV = v => metric === 'count' ? (v ? v + '件' : '') : jkShort(v);
-      const fmtFull = v => metric === 'count' ? v + '件' : fmtJpy(v);
+      const unit = metric === 'units' ? '点' : '件';   // count=件(注文数) / units=点(商品数)
+      const val = k => metric === 'sales' ? bk(k).sales : metric === 'units' ? bk(k).units : bk(k).count;
+      const fmtV = v => metric === 'sales' ? jkShort(v) : (v ? v + unit : '');
+      const fmtFull = v => metric === 'sales' ? fmtJpy(v) : v + unit;
       const max = Math.max(...keys.map(val), 1);
       const avg = keys.reduce((s, k) => s + val(k), 0) / keys.length;
       const barMax = isMobile ? 108 : 140;   // 棒の最大高さ（スマホは低め）
       const avgBottom = 18 + Math.round(avg / max * barMax);
       // 国別：表示中バケットの国別合計を集計→凡例（色順）。積み上げも同じ色順で。
-      const ccVal = bc => metric === 'count' ? bc.count : bc.sales;
+      const ccVal = bc => metric === 'sales' ? bc.sales : metric === 'units' ? bc.units : bc.count;
       const ccTotal = {};
       keys.forEach(k => Object.entries(bk(k).byCc).forEach(([cc, bc]) => { ccTotal[cc] = (ccTotal[cc] || 0) + ccVal(bc); }));
       const ccOrder = REGIONS.map(r => r.cc).filter(cc => (ccTotal[cc] || 0) > 0); // 色定義順で安定
@@ -11148,7 +11149,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const pName = (TREND_PERIODS.find(p => p[0] === effPeriod) || ['', ''])[1];
       const rangePrefix = rr ? `<b>${rr.label}</b>（${rr.s}〜${rr.e}）・` : '';
       const topK = keys.reduce((a, k) => val(k) > val(a) ? k : a, keys[0]);
-      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric === 'count' && inclCancel ? '・キャンセル含む' : (metric === 'count' ? '・キャンセル除く' : '')}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）`;
+      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric !== 'sales' ? (inclCancel ? '・キャンセル含む' : '・キャンセル除く') : ''}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(max)}</b>（${topK}）`;
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
