@@ -1426,7 +1426,7 @@ function backfillReturns() { return syncReturnsRange_(730); }    // 初回バッ
 //     price_min, price_max, stock, model_count, models:[{id,n,sku,img,price,stock,sold}],
 //     create_time, synced_at }
 var LIST_ITEM_STATUS = ['NORMAL', 'UNLIST'];   // 取得対象。必要なら 'BANNED','REVIEWING' 追加
-var LIST_RR_BATCH = 3;                          // ラウンドロビンで1回に処理する店舗数（6分制限内に収める）
+var LIST_RR_BATCH = 1;                          // ラウンドロビンで1回に処理する店舗数（バリエ多い店は6分制限に当たるため1店ずつ）
 
 // 全出品の item_id + 公開状態を、状態別ページングで取得
 function listItemIds_(shopId) {
@@ -1501,12 +1501,12 @@ function syncListingsRoundRobin() {
   toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
   var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
   if (start >= toks.length) start = 0;
+  P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length)); // 先に進める=1店がタイムアウトしても次回は次店へ(詰まり防止)
   var log = [];
   for (var i = 0; i < LIST_RR_BATCH && i < toks.length; i++) {
     var tok = toks[(start + i) % toks.length];
     try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
   }
-  P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length));
   Logger.log('listings同期(RR): ' + JSON.stringify(log)); return log;
 }
 
@@ -1579,6 +1579,16 @@ function testRefresh() {
   else Logger.log('✅ 全' + ok + '店 per-shop更新成功＝4h後も自動更新で放置OK');
 }
 // トリガー一括設定（syncAll1h / syncOrdersAll1h / syncEscrowAll6h / syncPayoutsAll6h）
+// 既存トリガーを壊さず、出品同期(syncListingsRoundRobin)の30分トリガーだけを追加（重複作成しない）
+// ※setupTriggersは全削除→再作成でsyncReturnsAll等を消すため、既存運用に足すだけの時はこちらを使う
+function addListingsTrigger() {
+  var exists = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'syncListingsRoundRobin'; });
+  if (exists) { Logger.log('既に存在: syncListingsRoundRobin トリガー'); return 'exists'; }
+  ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create();
+  Logger.log('✅ 追加: syncListingsRoundRobin を30分毎に');
+  return 'added';
+}
+
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
