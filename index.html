@@ -8866,7 +8866,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const imgSort = lst.imgClustSort || 'sold'; const imgClust = imageClusters(targets, imgSort); lst.imgClustData = {}; imgClust.forEach(c => lst.imgClustData[c.img] = c);
     const imgClustHtml = `<div class="tool-card" style="max-width:none">
       <h3 style="margin-top:0">🖼️ 同じ画像＝同一商品の可能性（SKUを束ねる）<span class="smd-dim" style="font-weight:400;font-size:12px">（カバー画像IDが完全一致。別カタログでも中身は同じ＝統一候補）</span></h3>
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ中 上位60を<b>${imgSort === 'sold' ? '🔥売れ筋順' : '🧩バラけ順'}</b>で表示（下の並びボタンで切替）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b style="color:#d93025">未公開</b>の商品はShopeeが編集拒否＝先に公開が必要（THに多い）。</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">同じ写真なのに<b>SKUが違う/空</b>のカタログを検出（各国に点在しがち）。おすすめSKU欄を確認して<b>「🏷全部このSKUに統一」で連結🔗</b>。画像流用の誤検出もあるので名前で目視を。<b>${imgClust.length}</b>クラスタ中 上位60を<b>${imgSort === 'sold' ? '🔥売れ筋順' : '🧩バラけ順'}</b>で表示（下の並びボタンで切替）。<br>🕒 最終同期 ${listSyncStr()}。統一するとこの表示＆保存データに即反映。<b>未公開(delist)の商品も公式APIで統一を試行します</b>（リミットで一時delistされた商品もOK。Shopeeが拒否した場合のみ失敗表示）。</div>
       <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="font-size:11px;color:#666">並び:</span><button class="imgc-sort smd-btn" data-mode="sold" style="font-size:11px;${imgSort === 'sold' ? 'background:#e8710a;color:#fff;border-color:#e8710a;font-weight:700' : ''}" title="売れた数が多いクラスタから表示＆一括統一（＝売れ筋から揃える）">🔥 売れ筋順</button><button class="imgc-sort smd-btn" data-mode="frag" style="font-size:11px;${imgSort === 'frag' ? 'background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700' : ''}" title="SKUのバラけ数・国数が多い＝統一の必要度が高い順">🧩 バラけ順</button><span style="width:10px;flex:none"></span><button class="imgc-dryrun smd-btn" style="font-size:12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="書き込まずに『何を書くか（旧SKU→新SKU＋商品名）』を全件プレビュー。誤転記チェック用。">🔍 検証（書かずに全件プレビュー）</button><button class="imgc-applyall smd-btn" style="font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700" title="全クラスタを、それぞれのおすすめSKUに連続で一括統一。失敗しても止まらず次へ。⏹停止で中断可。未公開はスキップ。">🏷 全クラスタを一括統一（連続・止まらない）</button> <span class="smd-dim" style="font-size:10.5px">※まず🔍検証で目視 → ▶本実行が安全。書込中も1件ずつ旧→新を確認でき、途中⏹停止可</span></div>
       <div id="imgc-progress" style="margin-bottom:8px"></div>
       <div class="pf-scroll" style="max-height:56vh">${imgClust.slice(0, 60).map(c => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px;display:flex;gap:8px">
@@ -9009,21 +9009,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!state.accounts) await loadAccounts().catch(() => {});
     const clusters = imageClusters(accountTargets(), lst.imgClustSort || 'sold').filter(c => (c.sug || '').trim());
     if (!clusters.length) { alert('一括統一できるクラスタがありません（おすすめSKUが空、または既に統一済み）'); return; }
-    // 書込ジョブを構築（未公開＝Shopeeが拒否なのでスキップ／既に同一SKUもスキップ）。旧SKUも保持＝誤転記チェック用
-    const jobs = []; let skipUnpub = 0, skipSame = 0;
+    // 書込ジョブを構築。未公開(delist)も試行＝公式update_itemはUNLIST商品もSKU編集可（リミットで一時delistされた商品こそ統一したい）。既に同一SKUのみスキップ。旧SKUも保持＝誤転記チェック用
+    const jobs = []; let unpubN = 0, skipSame = 0;
     clusters.forEach(c => {
       const sku = c.sug.trim();
       c.items.forEach(x => {
-        if (x.status != null && x.status !== 1) { skipUnpub++; return; }
         if ((x.sku || '') === sku) { skipSame++; return; }
-        jobs.push({ host: x.host, item_id: x.item_id, cc: x.cc, sku, oldSku: x.sku || '', name: x.name || '' });
+        const unpub = (x.status != null && x.status !== 1); if (unpub) unpubN++;
+        jobs.push({ host: x.host, item_id: x.item_id, cc: x.cc, sku, oldSku: x.sku || '', name: x.name || '', unpub });
       });
     });
-    if (!jobs.length) { alert(`対象なし（未公開スキップ ${skipUnpub} / 既に統一済み ${skipSame}）`); return; }
+    if (!jobs.length) { alert(`対象なし（既に統一済み ${skipSame}）`); return; }
     if (!dryRun) {
       const gw = await guardWriteCountries([...new Set(jobs.map(j => j.cc))]);
       if (!gw.ok) { alert(gw.msg); return; }
-      if (!confirm(`🏪 書込先アカウント: ${gw.label}\n\n【全 ${clusters.length} クラスタ・${jobs.length}件】をおすすめSKUに一括統一します（未公開${skipUnpub}件はスキップ／既統一${skipSame}件）。\n\n・1件ずつShopeeへ連続書込。失敗しても止まらず次へ。\n・下のパネルで「旧SKU→新SKU＋商品名」を1件ずつ確認できます。誤転記に気づいたら「⏹停止」。\n・件数が多いと数十分〜（タブ開いたまま／PCスリープ不可）。成功分は逐次保存され消えません。\n\n先に「🔍検証」で全件プレビューしましたか？\n\n開始しますか？`)) return;
+      if (!confirm(`🏪 書込先アカウント: ${gw.label}\n\n【全 ${clusters.length} クラスタ・${jobs.length}件】をおすすめSKUに一括統一します（うち未公開${unpubN}件も試行／既統一${skipSame}件はスキップ）。\n\n・1件ずつShopeeへ連続書込。失敗しても止まらず次へ。未公開(delist)商品も公式APIで試行します（Shopeeが拒否した場合のみ失敗表示）。\n・下のパネルで「旧SKU→新SKU＋商品名」を1件ずつ確認できます。誤転記に気づいたら「⏹停止」。\n・件数が多いと数十分〜（タブ開いたまま／PCスリープ不可）。成功分は逐次保存され消えません。\n\n先に「🔍検証」で全件プレビューしましたか？\n\n開始しますか？`)) return;
     }
     lst.bulkStop = false;
     const btn = document.querySelector('.imgc-applyall'); const dbtn = document.querySelector('.imgc-dryrun');
@@ -9089,12 +9089,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (sb) sb.remove();
     const head = $p('#imgc-phead');
     if (dryRun) {
-      if ($p('#imgc-ptitle')) $p('#imgc-ptitle').innerHTML = `🔍 検証完了：この ${done} 件を書きます（未公開スキップ${skipUnpub}／既統一${skipSame}）。内容を確認して▶`;
+      if ($p('#imgc-ptitle')) $p('#imgc-ptitle').innerHTML = `🔍 検証完了：この ${done} 件を書きます（うち未公開${unpubN}も試行／既統一${skipSame}はスキップ）。内容を確認して▶`;
       if (head) { const rb = document.createElement('button'); rb.className = 'smd-btn'; rb.style.cssText = 'margin-left:auto;font-size:12px;background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700'; rb.textContent = '▶ この内容で本実行'; rb.addEventListener('click', () => applyAllImageClusters(false)); head.appendChild(rb); }
     } else {
-      if ($p('#imgc-ptitle')) $p('#imgc-ptitle').innerHTML = `${stopped ? '⏹ 中断しました' : '✅ 完了'}（成功${ok} / 失敗${fails.length} / 未公開スキップ${skipUnpub}）`;
+      if ($p('#imgc-ptitle')) $p('#imgc-ptitle').innerHTML = `${stopped ? '⏹ 中断しました' : '✅ 完了'}（成功${ok} / 失敗${fails.length} / うち未公開試行${unpubN}）`;
       if (head) { const rb = document.createElement('button'); rb.className = 'smd-btn'; rb.style.cssText = 'margin-left:auto;font-size:11px;background:#7b52c4;color:#fff;border-color:#7b52c4'; rb.textContent = '🔄 一覧を更新（統一済みを消す）'; rb.addEventListener('click', () => renderListingAnalysis()); head.appendChild(rb); }
-      try { logAct('出品', 'SKU一括統一', '', `全${clusters.length}クラスタ 成功${ok}/失敗${fails.length}/未公開skip${skipUnpub}${stopped ? ' [中断]' : ''}`); } catch (_) {}
+      try { logAct('出品', 'SKU一括統一', '', `全${clusters.length}クラスタ 成功${ok}/失敗${fails.length}/未公開試${unpubN}${stopped ? ' [中断]' : ''}`); } catch (_) {}
     }
   }
   async function renderListingStatus() {
