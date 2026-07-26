@@ -1703,7 +1703,7 @@
       try { renderDash._cache = null; } catch (_) {}
       try { plan._cache = null; } catch (_) {}
       try { cust._cache = null; } catch (_) {}
-      try { lst._ledgerRows = null; lst._leakCat = null; lst.covCatData = {}; } catch (_) {}
+      try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
       try { renderTrend._orders = null; } catch (_) {}                // 売上・オーダー数の推移
@@ -8115,6 +8115,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     host.querySelectorAll('.ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
   }
   async function saveLedgerCost(id, cc, i, val) {
+    lst._leakHtmlCache = null; // 原価を変えたらマージン漏れ検知のメモを無効化＝分析タブで再計算される
     const r = (lst._ledgerRows || []).find(x => x.id === id); if (!r || !r.econ) return;
     const src = ((r.econ[cc] || {}).vars || [])[i]; if (!src) return;
     const cost = (val === '' || val == null) ? null : Number(val);
@@ -8797,11 +8798,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
     // ★🩸マージン漏れ検知：台帳(listing_catalog)の仕入原価 ×「今のライブ価格」で利益/ROIを再計算し、赤字/薄利で売れ続ける生き出品を炙り出す（読み取り専用・利益直結）
     let leakHtml = '';
+    // 台帳(原価)を取得（_ledgerRows/_leakCatにキャッシュ）。この先の重い計算(全出品×明細)は「データ版数」でメモ化＝並び替えトグルや再表示で再計算しない（🔄同期で自動更新）
+    let catRows = lst._ledgerRows || lst._leakCat;
+    if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); lst._leakCat = catRows; } catch (_) { catRows = []; } }
+    const _leakVer = String(lst._seq || 0) + '|' + (settings.roiPct || '') + '|' + ((catRows && catRows.length) || 0) + '|' + all.length + '|' + targets.map(r => r.cc).join('');
+    if (lst._leakHtmlCache != null && lst._leakVer === _leakVer) { leakHtml = lst._leakHtmlCache; }
+    else {
     try {
-      // 台帳が既に全列キャッシュ済(_ledgerRows)ならそれを使う。無ければ部分列で取得し専用キャッシュ(_leakCat)へ
-      //   （_ledgerRowsは select=* なので部分列で上書きしない＝台帳タブを壊さない。並び替えトグルでの毎回再取得も防ぐ）
-      let catRows = lst._ledgerRows || lst._leakCat;
-      if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); lst._leakCat = catRows; } catch (_) { catRows = []; } }
       const costBySku = {}, costByName = {};
       (catRows || []).forEach(c => {
         const cw = c.weight_g;
@@ -8838,6 +8841,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${leaks.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品/バリエ</th><th style="text-align:right">現価格</th><th style="text-align:right">仕入</th><th style="text-align:right">利益/個</th><th style="text-align:right">ROI</th><th style="text-align:right">販売</th></tr>${leaks.slice(0, 100).map(x => { const rg = regionByCc(x.cc) || {}; return `<tr style="${x.loss ? 'background:#fff4f4' : ''}"><td style="white-space:nowrap"><a href="${editUrlFor(x.host, x.item_id)}" target="_blank" title="${x.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${x.cc}</span> ✏️</a></td><td style="font-size:11px">${nm(x.name, '240px')}</td><td style="text-align:right;white-space:nowrap">${x.cur}${x.price.toLocaleString()}</td><td style="text-align:right;white-space:nowrap;color:#888">${jpyL(x.cost)}</td><td style="text-align:right;white-space:nowrap;font-weight:700;color:${x.loss ? '#d93025' : '#e8710a'}">${x.profit >= 0 ? '+' : ''}${jpyL(x.profit)}</td><td style="text-align:right;color:${x.loss ? '#d93025' : '#e8710a'}">${x.roi}%</td><td style="text-align:right;color:#e8710a;font-weight:600">${x.sold || ''}</td></tr>`; }).join('')}</table></div>${leaks.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（赤字が大きい順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">${withCost ? '赤字/薄利の出品は見つかりませんでした 🎉' : 'まだ台帳に仕入(原価)が入っていません。<b>💰出品台帳</b>タブの🈳「仕入未入力のみ」から埋めると、ここに赤字/薄利の出品が出ます。'}</div>`}
       </div>`;
     } catch (_) { leakHtml = ''; }
+    lst._leakHtmlCache = leakHtml; lst._leakVer = _leakVer;
+    }
     const STLABEL = { 1: '出品中', 8: '未公開(取り下げ)', 0: '削除', 2: 'BAN', 3: 'その他' };
     // 国別×status
     const perCc = targets.map(r => {
