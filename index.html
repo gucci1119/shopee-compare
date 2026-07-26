@@ -2820,6 +2820,7 @@
       const poEl = document.getElementById('dash-payout');
       if (poEl) {
         const usd = n => '$' + (Math.round((n || 0) * 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const yen = n => '¥' + Math.round(n || 0).toLocaleString('ja-JP'); // 現地→円（rg.rateJpy）で加算した値を表示
         // 国別の実効レート（現地→USD）＝ payoutsの payout_amount/from_amount の合計比
         const rateAcc = {}; // cc → {usd, local}
         (payouts || []).forEach(p => { const a = rateAcc[p.cc] = rateAcc[p.cc] || { usd: 0, local: 0 }; a.usd += (+p.payout_amount || 0); a.local += (+p.from_amount || 0); });
@@ -2827,16 +2828,16 @@
         // 確定リリースを週バケット（月曜始まり）に集計。今週=0/先週=-1…
         const wkStart = d => { const dt = new Date(d); const dow = (dt.getDay() + 6) % 7; dt.setHours(0, 0, 0, 0); dt.setDate(dt.getDate() - dow); return dt; };
         const thisMon = wkStart(new Date());
-        const wkUsd = {}; // wkIndex → usd
-        (payouts || []).forEach(p => { if (!p.payout_time) return; const dt = new Date(p.payout_time * 1000); const wi = Math.round((wkStart(dt) - thisMon) / (7 * 86400000)); wkUsd[wi] = (wkUsd[wi] || 0) + (+p.payout_amount || 0); });
+        const wkUsd = {}, wkJpy = {}; // wkIndex → usd / jpy
+        (payouts || []).forEach(p => { if (!p.payout_time) return; const dt = new Date(p.payout_time * 1000); const wi = Math.round((wkStart(dt) - thisMon) / (7 * 86400000)); wkUsd[wi] = (wkUsd[wi] || 0) + (+p.payout_amount || 0); const rgp = regionByCc(p.cc); if (rgp && rgp.rateJpy) wkJpy[wi] = (wkJpy[wi] || 0) + (+p.from_amount || 0) * rgp.rateJpy; });
         const wkKeys = Object.keys(wkUsd).map(Number).sort((a, b) => b - a).filter(k => k >= -5); // 直近6週
         const wkLabel = k => k === 0 ? '今週' : k === -1 ? '先週' : `${-k}週前`;
         const wkRange = k => { const s = new Date(thisMon.getTime() + k * 7 * 86400000); const e = new Date(s.getTime() + 6 * 86400000); const f = d => `${d.getMonth() + 1}/${d.getDate()}`; return `${f(s)}〜${f(e)}`; };
         // 見込み＝pending escrow（現地）をUSD換算
         const pendLocal = {}, pendOld = {}; // cc → local sum, cc → 最古pendingのISO（滞留日数用）
         (income || []).forEach(i => { if (i.pending !== true) return; pendLocal[i.cc] = (pendLocal[i.cc] || 0) + (+i.amount || 0); const t = i.amount_initial_at || i.amount_at || i.synced_at; if (t && (!pendOld[i.cc] || t < pendOld[i.cc])) pendOld[i.cc] = t; });
-        let pipeUsd = 0; const pipeRows = [];
-        Object.keys(pendLocal).forEach(cc => { const r = rateOf(cc); const u = r != null ? pendLocal[cc] * r : null; if (u != null) pipeUsd += u; pipeRows.push({ cc, usd: u, hasRate: r != null }); });
+        let pipeUsd = 0, pipeJpy = 0; const pipeRows = [];
+        Object.keys(pendLocal).forEach(cc => { const r = rateOf(cc); const u = r != null ? pendLocal[cc] * r : null; if (u != null) pipeUsd += u; const rgc = regionByCc(cc); const j = (rgc && rgc.rateJpy) ? pendLocal[cc] * rgc.rateJpy : null; if (j != null) pipeJpy += j; pipeRows.push({ cc, usd: u, jpy: j, hasRate: r != null }); });
         pipeRows.sort((a, b) => (b.usd || 0) - (a.usd || 0));
         const barMax = Math.max(1, ...wkKeys.map(k => wkUsd[k]));
         const confHtml = wkKeys.length
@@ -2846,17 +2847,17 @@
             return `<div class="dash-row" style="align-items:center;gap:8px"><span style="width:74px;flex:none;font-weight:${hot ? 700 : 400};color:${hot ? '#0f9d58' : '#333'}">${wkLabel(k)}</span>` +
               `<span class="smd-dim" style="width:64px;flex:none;font-size:11px">${wkRange(k)}</span>` +
               `<span style="flex:1;background:#eef6f0;border-radius:4px;height:14px;position:relative;min-width:40px"><span style="position:absolute;left:0;top:0;bottom:0;width:${w}%;background:${hot ? '#0f9d58' : '#8fc7a6'};border-radius:4px"></span></span>` +
-              `<b style="width:96px;flex:none;text-align:right">${usd(wkUsd[k])}</b></div>`;
+              `<b style="width:120px;flex:none;text-align:right">${usd(wkUsd[k])}<span class="smd-dim" style="font-weight:400;font-size:10px;display:block">${yen(wkJpy[k] || 0)}</span></b></div>`;
           }).join('')
           : '<div class="smd-dim">確定リリース履歴なし（payouts未同期）</div>';
         const noRate = pipeRows.filter(r => !r.hasRate).map(r => r.cc);
         const pipeHtml = pipeRows.length
-          ? pipeRows.filter(r => r.usd != null).map(r => { const t = pendOld[r.cc]; const age = t ? Math.floor((Date.now() - Date.parse(t)) / 86400000) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b>${r.cc}</b> ${usd(r.usd)}${age != null ? ` <span class="smd-dim" style="font-size:11px" title="最も古い未リリースが${age}日前＝古いほど近く入りやすい目安">最古${age}日</span>` : ''}</span>`; }).join('')
+          ? pipeRows.filter(r => r.usd != null).map(r => { const t = pendOld[r.cc]; const age = t ? Math.floor((Date.now() - Date.parse(t)) / 86400000) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b>${r.cc}</b> ${usd(r.usd)}${r.jpy != null ? ` <span class="smd-dim" style="font-size:11px">${yen(r.jpy)}</span>` : ''}${age != null ? ` <span class="smd-dim" style="font-size:11px" title="最も古い未リリースが${age}日前＝古いほど近く入りやすい目安">最古${age}日</span>` : ''}</span>`; }).join('')
           : '<span class="smd-dim">リリース前の預かり金なし</span>';
         poEl.innerHTML =
           `<div style="display:flex;flex-wrap:wrap;gap:20px;margin-bottom:6px">` +
-          `<div><div class="smd-dim" style="font-size:11px">今週リリース確定（実績）</div><div style="font-size:20px;font-weight:800;color:#0f9d58">${usd(wkUsd[0] || 0)}</div></div>` +
-          `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します">リリース前の預かり金（今後の入金見込み総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)}</div></div>` +
+          `<div><div class="smd-dim" style="font-size:11px">今週リリース確定（実績）</div><div style="font-size:20px;font-weight:800;color:#0f9d58">${usd(wkUsd[0] || 0)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(wkJpy[0] || 0)}</span></div></div>` +
+          `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します。これが「今後の入金予定」の総額です">💰入金予定（リリース前の預かり金・総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(pipeJpy)}</span></div></div>` +
           `</div>` +
           `<div style="font-weight:700;font-size:12px;margin:8px 0 2px">確定リリース（週別・Payoneer着金USD）</div>${confHtml}` +
           `<div style="font-weight:700;font-size:12px;margin:10px 0 2px">見込み内訳（リリース前の預かり金 → USD換算）</div><div style="line-height:1.9">${pipeHtml}</div>` +
