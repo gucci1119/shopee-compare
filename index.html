@@ -7226,6 +7226,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;gap:6px;flex-wrap:wrap"><input class="uni-title" value="${av(common)}" style="flex:1;min-width:260px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"><button class="uni-title-fill smd-btn">↓各国欄に反映（書込まない）</button><button class="uni-title-all smd-btn" style="border-color:#ee4d2d;background:#ee4d2d;color:#fff">全国に書込</button></div>
           <div style="font-weight:700;font-size:12px;margin:10px 0 5px">💰 価格を一括で（各国の現価格に対して）</div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">×<input class="uni-fac" value="1.1" inputmode="decimal" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-price-all smd-btn">全国の全明細価格に適用</button><span class="smd-dim" style="font-size:11px">全バリエ価格を×係数。個別価格は✎詳細で</span></div>
+          <div style="font-weight:700;font-size:12px;margin:10px 0 5px">🔢 在庫を全国一括で（公式API・国ごとは下のグリッドで）</div>
+          <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">在庫<input class="uni-stock" value="" inputmode="numeric" placeholder="例: 5" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-stock-all smd-btn" style="border-color:#0b5cab;background:#0b5cab;color:#fff">全国の全明細在庫に設定</button><span class="smd-dim" style="font-size:11px">全バリエ在庫をこの数に。まず「各国のバリエを読み込む」を実行</span></div>
         </div>
         <div style="font-weight:700;font-size:12px;margin-bottom:4px">国別タイトル</div>
         <div style="max-height:32vh;overflow:auto"><table class="pf-table" style="width:100%"><tr><th>国</th><th style="text-align:left">タイトル</th><th>現価格</th><th></th></tr>${rows}</table></div>
@@ -7337,6 +7339,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       msg('統括価格 完了: 成功 ' + ok + '/' + listings.length + (skip ? ' / 制約でスキップ' + skip : ''), skip ? '#e8710a' : (ok === listings.length ? '#1a7f37' : '#e8710a'));
       if (skips.length) alert('次の国は出品制約に触れるためスキップしました（価格未変更）:\n\n' + skips.join('\n'));
       try { logAct('出品', '統括価格', d.rep, '×' + f + ' ' + ok + '/' + listings.length + (skip ? ' skip' + skip : '')); } catch (_) {}
+    });
+    // 🔢 在庫を全国一括：全出品の全明細をこの在庫数に（公式API update_stock_list 優先・ブリッジ自動フォールバック）
+    q('.uni-stock-all').addEventListener('click', async () => {
+      const raw = q('.uni-stock').value.trim(); const sVal = parseInt(raw, 10);
+      if (raw === '' || !Number.isFinite(sVal) || sVal < 0) { alert('在庫数（0以上の整数）を入れてください'); return; }
+      const gw = await guardWriteCountries(listings.map(l => l.cc));
+      if (!gw.ok) { alert(gw.msg); return; }
+      if (!confirm('書込先アカウント:\n' + gw.summary + '\n\n' + listings.length + '出品すべての全明細の在庫を「' + sVal + '」にします。\n※全バリエが同じ在庫数になります。時間がかかります。\n\nよろしいですか？')) return;
+      let ok = 0, fail = 0; const fails = [];
+      for (const lg of listings) {
+        try {
+          const read = await readModelsUnified(lg);
+          if (!read.models.length) { fail++; fails.push(lg.cc + ': 明細なし'); continue; }
+          const stockByModelId = {}; read.models.forEach(m => stockByModelId[m.model_id] = sVal);
+          const r = await writeModelStockUnified(lg, read, stockByModelId);
+          if (r.ok) ok++; else { fail++; fails.push(lg.cc + ': ' + (r.msg || '失敗')); }
+        } catch (e) { fail++; fails.push(lg.cc + ': ' + e.message); }
+        msg('在庫書込 ' + ok + '/' + listings.length + (fail ? '（失敗' + fail + '）' : ''));
+      }
+      msg('統括在庫 完了: 成功 ' + ok + '/' + listings.length, ok === listings.length ? '#1a7f37' : '#e8710a');
+      if (fails.length) alert('次の国は失敗しました（在庫未変更）:\n\n' + fails.join('\n'));
+      try { logAct('出品', '統括在庫', d.rep, '=' + sVal + ' ' + ok + '/' + listings.length); } catch (_) {}
     });
     // ── バリエ比較・編集（各国のバリエを並べて表示＋価格インライン編集） ──
     const varData = { reads: {} };
