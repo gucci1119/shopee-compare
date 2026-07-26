@@ -8996,7 +8996,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★全クラスタを連続で一括統一。dryRun=true なら書き込まず「何を書くか（旧SKU→新SKU＋商品名）」を全件プレビューだけ。
   //   本実行は1件ずつ処理し失敗しても止まらず次へ。⏹停止で中断可。成功は都度Supabase保存＝途中で止まっても消えない。
   async function applyAllImageClusters(dryRun) {
-    if (!dryRun && state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ書き込みできます'); return; }
+    const canApiSku = !!(settings.openapiUrl && settings.writeToken);
+    if (!dryRun && !canApiSku && state.mode !== 'live') { alert('SKU書込には、公式API（⚙️OpenAPI URL＋WRITE_TOKEN）か、🟢ライブPC（ブリッジ）が必要です'); return; }
     if (!state.accounts) await loadAccounts().catch(() => {});
     const clusters = imageClusters(accountTargets(), lst.imgClustSort || 'sold').filter(c => (c.sug || '').trim());
     if (!clusters.length) { alert('一括統一できるクラスタがありません（おすすめSKUが空、または既に統一済み）'); return; }
@@ -9057,12 +9058,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (dryRun) { addLog('plan', j); if ($p('#imgc-pok')) $p('#imgc-pok').textContent = done; continue; }
       let err = '', okThis = false;
       try {
-        const r = await bridgePostJson(`https://${j.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: j.item_id, product_info: { parent_sku: j.sku }, is_draft: false });
-        if (r && r.code === 0) {
-          okThis = true; ok++; lst.covSkuWritten.add(j.item_id);
+        const sid = ((lst.byCc[j.cc] || []).find(x => x.item_id === j.item_id) || {}).shop_id;
+        if (settings.openapiUrl && settings.writeToken && sid) { // 公式API(update_item・ライブ/各国ログイン不要)優先
+          const r = await openapiUpdateItem({ shop_id: sid, item_id: j.item_id, sku: j.sku });
+          if (r && r.ok) okThis = true; else err = (r && r.error) || 'API失敗';
+        } else if (state.mode === 'live') { // フォールバック=ブリッジ(要ライブPC)
+          const r = await bridgePostJson(`https://${j.host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: j.item_id, product_info: { parent_sku: j.sku }, is_draft: false });
+          if (r && r.code === 0) okThis = true; else err = (r && (r.user_message || r.message)) || ('code' + (r && r.code));
+        } else { err = 'shop_id未判明＋非ライブ（各垢で再同期 or ライブPCで）'; }
+        if (okThis) {
+          ok++; lst.covSkuWritten.add(j.item_id);
           const row = (lst.byCc[j.cc] || []).find(x => x.item_id === j.item_id); if (row) row.parent_sku = j.sku;
           try { await sbPatch('listings', 'item_id=eq.' + j.item_id, { parent_sku: j.sku }); } catch (_) {}
-        } else { err = (r && (r.user_message || r.message)) || ('code' + (r && r.code)); fails.push(`${j.cc} item${j.item_id}: ${err}`); }
+        } else { fails.push(`${j.cc} item${j.item_id}: ${err}`); }
       } catch (e) { err = e.message; fails.push(`${j.cc} item${j.item_id}: ${e.message}`); }
       addLog(okThis ? 'ok' : 'fail', j, err);
       if ($p('#imgc-pok')) $p('#imgc-pok').textContent = ok;
