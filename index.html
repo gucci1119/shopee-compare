@@ -9132,6 +9132,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     drawListingStatus();
   }
   let lstDropStatus = null; // app_kv.dropship_status.items（無在庫の仕入元ソース状態）。出品一覧で表示用に初回のみ取得
+  // 📝出品ごとのメモ＋⚠️在庫0固定フラグ。app_kv の k='listing_meta' に { items:{ <item_id>:{note,keep0,at} } } で保存（新テーブル不要・注記した出品だけ持つ疎マップ）
+  let lstMeta = null;       // { <item_id>: {note, keep0, at} }
+  let _metaSaveT = null;
+  function saveListingMeta() {
+    if (_metaSaveT) clearTimeout(_metaSaveT);
+    _metaSaveT = setTimeout(() => {
+      // 空メモ＆フラグ無しのエントリは間引いて肥大化を防ぐ
+      const items = {}; Object.keys(lstMeta || {}).forEach(k => { const m = lstMeta[k]; if (m && ((m.note && m.note.trim()) || m.keep0)) items[k] = { note: (m.note || '').slice(0, 2000), keep0: !!m.keep0, at: m.at || Date.now() }; });
+      lstMeta = items;
+      if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'listing_meta', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] listing_meta保存失敗', e));
+    }, 500);
+  }
+  const metaOf = (id) => (lstMeta && lstMeta[id]) || {};
   // 無在庫(在庫監視)の紐付けを cc|item_id で逆引き。{whole:全体監視, models:Set(監視中のmodel_id), srcSt:仕入元状態}
   function dropWatchIndex() {
     let cfg; try { cfg = JSON.parse(localStorage.getItem('smdDropCfg') || '{}'); } catch (_) { cfg = {}; }
@@ -9187,6 +9200,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const priceLoc = (n) => cur + lfmt(n);
     const price = r.price_min != null ? (r.price_min === r.price_max ? priceLoc(r.price_min) : priceLoc(r.price_min) + '〜' + priceLoc(r.price_max)) : '-';
     const oos = (r.stock || 0) <= 0;
+    const meta = metaOf(r.item_id);  // 📝メモ＋⚠️在庫0固定フラグ
     const canOfficialEdit = !!(settings.openapiUrl && settings.writeToken && r.shop_id); // 公式APIで在庫をその場編集（ライブPC不要）
     const canEdit = (state.mode === 'live' && !!rg.host) || canOfficialEdit;  // 在庫のその場編集：ライブ or 公式API
     const canPreorder = state.mode === 'live' && !!rg.host;   // 予約(Pre-order)はブリッジのみ＝ライブ時だけ
@@ -9198,7 +9212,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     const buyUrl = buyerUrlFor(r.cc, r.item_id);
-    return `<div class="tool-card" style="max-width:none;margin-bottom:6px;padding:8px 10px">
+    return `<div class="tool-card" style="max-width:none;margin-bottom:6px;padding:8px 10px${meta.keep0 ? ';border-left:3px solid #b71c1c' : ''}">
       <div style="display:flex;gap:10px;align-items:center">
         <span class="ord-cc" style="background:${rg.color}">${r.cc}</span>
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15">
@@ -9215,7 +9229,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
           </div>
         </div>
-      </div>${varRows}</div>`;
+      </div>${varRows}<div style="display:flex;gap:6px;align-items:center;margin-top:5px;font-size:11px">
+        <span title="この出品のメモ（自由記入・自動保存）">📝</span>
+        <input class="lst-memo" data-id="${r.item_id}" value="${av(meta.note || '')}" placeholder="メモ（自由記入）" style="flex:1;min-width:0;padding:2px 6px;border:1px solid #eee;border-radius:5px;font-size:11px">
+        <label title="仕入元が過少で在庫0のまま運用する出品。ONにすると在庫を増やす保存時に警告します" style="white-space:nowrap;cursor:pointer;color:${meta.keep0 ? '#b71c1c' : '#999'};font-weight:${meta.keep0 ? '700' : '400'}"><input type="checkbox" class="lst-keep0" data-id="${r.item_id}" ${meta.keep0 ? 'checked' : ''}> ⚠️在庫0固定</label>
+      </div></div>`;
   }
   function drawListingStatus() {
     const host = document.getElementById('list-status'); if (!host) return;
@@ -9223,10 +9241,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstDropStatus = {}; }); }
+    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
     lst._watchIdx = dropWatchIndex(); // 在庫監視の逆引き（cc|item_id → 全体/明細/仕入元状態）
     const totalAll = all.length;
     const watchedCount = all.filter(r => lst._watchIdx.has(r.cc + '|' + r.item_id)).length;
     const srcOosCount = all.filter(r => { const e = lst._watchIdx.get(r.cc + '|' + r.item_id); return e && e.srcSt === 'oos'; }).length;
+    const keep0Count = all.filter(r => metaOf(r.item_id).keep0).length;
     const q = (lst.search || '').toLowerCase();
     let rows = all;
     if (lst.filter === 'live') rows = rows.filter(r => r.status === 1);
@@ -9235,6 +9255,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (lst.filter === 'watched') rows = rows.filter(r => lst._watchIdx.has(r.cc + '|' + r.item_id));
     else if (lst.filter === 'unwatched') rows = rows.filter(r => !lst._watchIdx.has(r.cc + '|' + r.item_id));
     else if (lst.filter === 'srcoos') rows = rows.filter(r => { const e = lst._watchIdx.get(r.cc + '|' + r.item_id); return e && e.srcSt === 'oos'; });
+    else if (lst.filter === 'keep0') rows = rows.filter(r => metaOf(r.item_id).keep0);
     if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || String(r.item_id).includes(q) || (r.models || []).some(m => (m.n || '').toLowerCase().includes(q)));
     // 公開/非公開（status 1=公開・それ以外=非公開）
     if (lst.pub === 'pub') rows = rows.filter(r => r.status === 1);
@@ -9270,6 +9291,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <button data-k="watched" class="${lst.filter === 'watched' ? 'on' : ''}" title="仕入元URLと連携して在庫監視中の出品（出品管理→♾️無在庫で紐付け）">👁 在庫監視${watchedCount ? '(' + watchedCount + ')' : ''}</button>
           <button data-k="unwatched" class="${lst.filter === 'unwatched' ? 'on' : ''}" title="仕入元連携なしの出品">監視対象外</button>
           ${srcOosCount ? `<button data-k="srcoos" class="${lst.filter === 'srcoos' ? 'on' : ''}" style="color:#c0392b;font-weight:700" title="仕入元が売切れ＝再仕入不可。取り下げ/在庫0を検討">🚨 仕入元売切れ(${srcOosCount})</button>` : ''}
+          ${keep0Count ? `<button data-k="keep0" class="${lst.filter === 'keep0' ? 'on' : ''}" style="color:#b71c1c;font-weight:700" title="在庫0固定フラグを付けた出品（仕入元が過少で在庫0運用）">⚠️在庫0固定(${keep0Count})</button>` : ''}
         </span>
         <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
@@ -9331,6 +9353,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました（タイトルが各国で異なるため直接まとめられませんでした。該当カタログの🌍各国まとめ編集から操作してください）');
     }));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
+    // 📝メモ（入力＝再描画せず保存＝フォーカス維持）／⚠️在庫0固定（トグル＝保存して再描画で赤帯反映）
+    document.querySelectorAll('#lst-list .lst-memo').forEach(inp => inp.addEventListener('input', () => { const id = inp.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.note = inp.value; m.at = Date.now(); saveListingMeta(); }));
+    document.querySelectorAll('#lst-list .lst-keep0').forEach(cb => cb.addEventListener('change', () => { const id = cb.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.keep0 = cb.checked; m.at = Date.now(); saveListingMeta(); drawListingStatus(); }));
     // 展開したライブ行：現在の予約状態＋最新在庫を取得してその場編集を有効化
     lst.poCache = lst.poCache || {};
     document.querySelectorAll('#lst-list .lst-inline').forEach(async panel => {
@@ -9371,6 +9396,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const chg = [priceList.length ? '価格' + priceList.length : '', stockList.length ? '在庫' + stockList.length : ''].filter(Boolean).join('・');
         const warn = priceList.length ? countryListingWarnings({ cc, title: '', prices: priceList.map(x => x.price) }) : [];
         if (warn.length && !confirm(`⚠️ ${cc}の価格制約に注意:\n - ${warn.join('\n - ')}\n\nこのまま書き込みますか？`)) return;
+        // ⚠️在庫0固定フラグ：仕入元が過少で在庫0運用の出品。在庫を増やそうとしたら警告（誤って増やす事故防止）
+        if (metaOf(id).keep0 && stockList.some(s => (s.stock || 0) > 0) && !confirm(`⚠️ この出品は「在庫0固定」に設定されています（仕入元が過少で在庫0のまま運用）。\n\n在庫を増やそうとしています。本当に在庫を増やしますか？`)) return;
         if (!confirm(`書込先: ${gw.summary}\n${cc} item${id} の【${chg}】を公式APIで保存します。よろしいですか？`)) return;
         btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
         try {
