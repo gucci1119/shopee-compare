@@ -7295,6 +7295,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
   // カタログ単位の「🌏統括編集」：統括タイトル→全国／国別タイトル編集・書込／価格×係数一括。細かい価格・バリエは各行の✎詳細(openCatalogEditor)
+  // 出品一覧の行から「各国まとめ編集」を直接開く：同じタイトルの各国出品を束ねて covCatData を即席で作る（SKU未統一でもタイトルで横断）
+  function openUnifyFromListing(repName) {
+    const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const target = norm(repName);
+    if (!target) { alert('この商品はタイトルが空のため、各国をまとめられません。'); return false; }
+    const listings = []; const seen = new Set();
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(l => {
+      if (norm(l.name) !== target) return;
+      const k = cc + ':' + l.item_id; if (seen.has(k)) return; seen.add(k);
+      const rg = regionByCc(cc) || {};
+      listings.push({ cc, host: rg.host || '', item_id: l.item_id, parent_sku: l.parent_sku || '', name: l.name || '', price: l.price_min });
+    }));
+    if (!listings.length) return false;
+    const key = '__row__::' + target.slice(0, 60);
+    lst.covCatData = lst.covCatData || {};
+    lst.covCatData[key] = { rep: repName, curSku: (listings[0] || {}).parent_sku || '', recSku: '', listings };
+    openUnifyEditor(key);
+    return true;
+  }
   function openUnifyEditor(fullKey) {
     // 各国まとめ編集の書込(タイトル/価格/在庫)は公式API優先＝shop_id直書きでライブPC不要。公式未設定時のみライブ(ブリッジ)を要求。
     const canOfficialUnify = !!(settings.openapiUrl && settings.writeToken);
@@ -7318,7 +7337,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="font-weight:700;font-size:12px;margin:10px 0 5px">💰 価格を一括で（今の価格に倍率をかける）</div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">今の価格×<input class="uni-fac" value="1.1" inputmode="decimal" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right">倍<button class="uni-price-all smd-btn">全国の全明細価格に適用</button><span class="smd-dim" style="font-size:11px">例: 1.1＝+10%値上げ／0.9＝10%値下げ。1件ずつは✎詳細で</span></div>
           <div style="font-weight:700;font-size:12px;margin:10px 0 5px">🔢 在庫を全国一括で（公式API・国ごとは下のグリッドで）</div>
-          <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">在庫<input class="uni-stock" value="" inputmode="numeric" placeholder="例: 5" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-stock-all smd-btn" style="border-color:#0b5cab;background:#0b5cab;color:#fff">全国の全明細在庫に設定</button><span class="smd-dim" style="font-size:11px">全バリエ在庫をこの数に。まず「各国のバリエを読み込む」を実行</span></div>
+          <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">在庫<input class="uni-stock" value="" inputmode="numeric" placeholder="例: 5" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-stock-all smd-btn" style="border-color:#0b5cab;background:#0b5cab;color:#fff">全国の全明細在庫に設定</button><button class="uni-stock-zero smd-btn" style="border-color:#b71c1c;background:#b71c1c;color:#fff;font-weight:700" title="仕入元が売切れた時：全国・全バリエの在庫を0にして二重販売を防ぐ">🚫 全国在庫0（仕入切れ）</button><span class="smd-dim" style="font-size:11px">全バリエ在庫をこの数に。まず「各国のバリエを読み込む」を実行</span></div>
         </div>
         <div style="font-weight:700;font-size:12px;margin-bottom:4px">国別タイトル</div>
         <div style="max-height:32vh;overflow:auto"><table class="pf-table" style="width:100%"><tr><th>国</th><th style="text-align:left">タイトル</th><th>現価格</th><th></th></tr>${rows}</table></div>
@@ -7453,6 +7472,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (fails.length) alert('次の国は失敗しました（在庫未変更）:\n\n' + fails.join('\n'));
       try { logAct('出品', '統括在庫', d.rep, '=' + sVal + ' ' + ok + '/' + listings.length); } catch (_) {}
     });
+    // 🚫 仕入切れ＝全国在庫0（uni-stock-all を 0 で再利用。二重販売防止の強い確認は下の在庫設定側で行う）
+    { const z = q('.uni-stock-zero'); if (z) z.addEventListener('click', () => { q('.uni-stock').value = '0'; q('.uni-stock-all').click(); }); }
     // ── バリエ比較・編集（各国のバリエを並べて表示＋価格インライン編集） ──
     const varData = { reads: {} };
     const stkOf = (m) => { const sd = m.stock_detail || {}; const si = (sd.seller_stock_info || [])[0]; return (si && si.sellable_stock != null) ? si.sellable_stock : (sd.total_available_stock != null ? sd.total_available_stock : 0); };
@@ -9187,7 +9208,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
         <div style="display:flex;flex-direction:column;gap:3px;align-items:center;flex:none">
           <button class="lst-edit" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="ポータル内で編集してShopeeに保存" style="border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">✎編集</button>
-          <button class="lst-unify" data-name="${av(r.name || '')}" title="この商品の各国（PH・BRなど）をまとめて編集する画面へ。※この一覧から直接まとめ編集する機能は準備中" style="border:1px solid #1a7f37;background:#fff;color:#1a7f37;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:10.5px;font-weight:600;white-space:nowrap">🌍 各国まとめ編集</button>
+          <button class="lst-unify" data-name="${av(r.name || '')}" title="この商品の各国（PH・BRなど）のタイトル・価格・在庫を1画面でまとめて編集（仕入切れ時は🚫全国在庫0も）。同じタイトルの各国を束ねて直接開きます" style="border:1px solid #1a7f37;background:#fff;color:#1a7f37;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:10.5px;font-weight:600;white-space:nowrap">🌍 各国まとめ編集</button>
           <div style="display:flex;gap:4px;align-items:center">
             <button class="lst-refresh1" data-cc="${r.cc}" data-id="${r.item_id}" title="この商品だけ最新の在庫・価格に更新（公式API）" style="border:1px solid #1565c0;background:#fff;color:#1565c0;border-radius:6px;padding:2px 6px;cursor:pointer;font-size:12px;line-height:1">🔄</button>
             <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
@@ -9301,11 +9322,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 🌍 各国まとめ編集：この一覧から直接まとめ編集は準備中。当面は「各国そろえる」画面へ商品名で飛ばして、そこの🌍各国まとめ編集を使ってもらう
     document.querySelectorAll('#lst-list .lst-unify').forEach(el => el.addEventListener('click', () => {
       const nm = (el.dataset.name || '').trim();
+      // まず出品一覧のデータで同名の各国を束ねて「各国まとめ編集」を直接開く。見つからなければ従来どおり「各国そろえる」へ
+      if (openUnifyFromListing(nm)) return;
       lst.covSearch = nm.length > 24 ? nm.slice(0, 24) : nm;
       lst.tab = 'analysis'; lst.anaSub = 'coverage';
       try { localStorage.setItem('smdListTab', 'analysis'); } catch (_) {}
       renderListPage();
-      if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました。該当カタログの〔🌍各国まとめ編集〕から各国の価格・在庫をまとめて変更できます（この一覧から直接まとめ編集は準備中）');
+      if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました（タイトルが各国で異なるため直接まとめられませんでした。該当カタログの🌍各国まとめ編集から操作してください）');
     }));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
     // 展開したライブ行：現在の予約状態＋最新在庫を取得してその場編集を有効化
