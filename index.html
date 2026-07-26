@@ -1143,6 +1143,55 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIモデル取得に失敗');
     return res.data;
   }
+  // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
+  async function openapiShipParam(shopId, sn) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const qs = 'action=ship_param&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '発送情報の取得に失敗');
+    return res.data;
+  }
+  // 発送(書込・決裁操作)：ship_order。必ずユーザー確認の後にのみ呼ぶ
+  async function openapiShipOrder(params) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const q = Object.assign({ action: 'ship_order', token: settings.writeToken }, params);
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res) throw new Error('応答なし');
+    return res;
+  }
+  // 公式APIでの発送フロー（β）：必要情報を読んで内容を提示→ユーザーが確認したときだけ発送手配。自動実行はしない
+  async function apiShipFlow(cc, sn, shopId, host) {
+    if (!settings.openapiUrl || !settings.writeToken) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); return; }
+    let param;
+    try { param = await openapiShipParam(shopId, sn); }
+    catch (e) { alert('発送情報の取得に失敗: ' + (e.message || e) + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); return; }
+    const info = (param && param.info_needed) || {};
+    const needPickup = Array.isArray(info.pickup) && info.pickup.length;
+    const needDropoff = Array.isArray(info.dropoff) && info.dropoff.length;
+    let choice = {}, msg = `注文 ${sn}（${cc}）を公式APIで発送手配します。\n\n`;
+    if (needPickup) {
+      const addr = ((param.pickup || {}).address_list || [])[0];
+      if (!addr) { alert('集荷先住所が取得できませんでした。Seller Centerから発送してください。'); return; }
+      const timeId = ((addr.time_slot_list || [])[0] || {}).pickup_time_id;
+      choice = { pickup_address_id: addr.address_id, pickup_time_id: timeId };
+      msg += `方式: 集荷(pickup)\n住所ID: ${addr.address_id}${timeId ? ' / 時間枠ID: ' + timeId : ''}\n`;
+    } else if (needDropoff) {
+      const br = ((param.dropoff || {}).branch_list || [])[0];
+      if (br && br.branch_id != null) { choice = { dropoff_branch_id: br.branch_id }; msg += `方式: 持込(dropoff)\n支店ID: ${br.branch_id}\n`; }
+      else { msg += `方式: 持込(dropoff・自動)\n`; }
+    } else {
+      msg += `方式: 自動手配（追加情報は不要）\n`;
+    }
+    msg += `\n⚠️ これは実際にShopeeへ発送手配を送る操作です（お金・物流が動きます）。実行しますか？\n※β機能：最初の1件で結果をShopeeでご確認ください。`;
+    if (!confirm(msg)) return;
+    try {
+      const r = await openapiShipOrder(Object.assign({ shop_id: shopId, order_sn: sn }, choice));
+      if (r && r.ok) { alert('✅ 発送手配を送信しました。Shopeeの注文で状態と追跡番号をご確認ください。'); try { logAct('注文', 'API発送(β)', sn, cc); } catch (_) {} renderOrders(); }
+      else { alert('発送に失敗しました: ' + ((r && r.error) || '不明') + '\n（Seller Center／SLS伝票印刷は従来どおり使えます）'); }
+    } catch (e) { alert('発送に失敗しました: ' + (e.message || e)); }
+  }
   // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
   async function openapiUpdateModelList(action, shopId, itemId, list) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -2348,11 +2397,13 @@
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
           : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
+        ((r.tab === 300 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<button class="ord-shipapi" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="公式APIで発送手配（β・内容を確認してから実行）" style="border:1px solid #1a7f37;background:#fff;color:#1a7f37;border-radius:6px;padding:0 5px;cursor:pointer;font-size:12px;line-height:1.6">🚚</button>` : '') +
         `</div>`;
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       row.addEventListener('click', () => window.open(`https://${region.host}/portal/sale/order/${r.orderId}`, '_blank'));
       row.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+      row.querySelectorAll('.ord-shipapi').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); apiShipFlow(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host); }));
       frag.appendChild(row);
     });
     list.appendChild(frag);
@@ -5916,6 +5967,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-26', items: [
+      '🔌 <b>「APIでできるのに未実施」を全部つぶす（3件）</b>：①<b>出品データをGASが公式APIで自動同期</b>（<code>get_item_list</code>系）＝<b>ブリッジPC不要</b>で出品一覧/各国そろえるが最新に（30分ごと数店ずつ）。②<b>重量の各国一括を公式API化</b>（<code>update_item</code>のweight・SLS送料計算に直結）。③<b>発送手配(ship_order)を配線</b>＝注文管理の未発送行に🚚（<code>get_shipping_parameter</code>で方式判定→<b>確認後だけ</b>手配。決裁操作ゆえ自動実行なし・実注文で要検証）。※①③はGAS側の貼付・実行が必要。属性(specifics)の各国一括は「国×カテゴリで属性が違い危険」なため意図的に非対応。',
       '🔤 <b>用語の平易化（第3弾）</b>：ダッシュボード・損益に出る <b>「escrow」→「（リリース前の）Shopeeの預かり金」</b>と補足（＝Shopeeがまだ支払っていない売上金）。各国まとめ編集で書込PCでない時の案内を<b>「🟢ライブのPCでだけ書き込めます／今は閲覧モード」</b>と平易化。<b>「SLS伝票」→「Shopee指定配送の送り状」</b>、<b>「利益バッファ」→「利益の余裕」</b>の補足も追加。',
       '🔤 <b>初見でも分かる言葉に改名</b>：わかりにくかった専門用語を平易化。<b>「国のヌケ／横断カバレッジ」→「🌍 各国そろえる（未出品を探す）」</b>、<b>「統括編集」→「🌍 各国まとめ編集」</b>。各国そろえるの先頭に<b>「何をする画面か」の説明バナー</b>も追加（赤ぬり＝未出品＝伸びしろ）。ほかに <b>「係数」→「倍率」</b>（例1.1＝+10%と明記）、<b>「統括タイトル」→「各国共通タイトル」</b>、<b>「無在庫」→「無在庫（取り寄せ）」</b>と補足。※過去の改修履歴の文言はそのまま。',
       '🌍 <b>出品一覧の各行に「各国まとめ編集」ボタンを設置</b>：その商品の各国（PH/BR等）をまとめて編集する画面（各国そろえる）へ商品名で直行。<span style="color:#888">※この一覧から直接まとめ編集する機能は準備中（当面は各国そろえる側の🌍各国まとめ編集で操作）。</span>',
@@ -6612,8 +6664,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>新規出品（add_item・単品/バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>本番稼働(2026-07)</b>。✍️出品を作る→🚀公式APIで出品（アカウント×国指定・非公開作成）。<code>product/add_item→init_tier_variation</code>。E2E(単品/バリエ)成功</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品編集（タイトル/親SKU/説明）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/update_item</code>。統括/一括のタイトル・SKU書込がshop_id判明時は公式（ライブ/各国ログイン不要）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>バリエ 追加/明細名/画像</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化済(2026-07)</b>。<code>add_model</code>(＋追加)/<code>update_tier_variation</code>(明細名置換・画像差替)。画像は<code>media_space/upload_image</code>→optionのimage差替（他バリエ画像は維持）。各国まとめ編集グリッドの＋追加・🖼</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">specifics（属性）・重量の一括編集</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ/✎詳細。<code>update_item</code>のweight/attribute_listで移行可・未着手</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>発送・伝票（waybill）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">読み取り診断＋<code>logistics/ship_order</code>関数は実装済。<b>実注文が入り次第</b> get_shipping_parameter で集荷/持込を確認→本発送→伝票<code>create_shipping_document</code>。今はSLS印刷script</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>重量の一括編集</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化(2026-07)</b>＝各国そろえるの一括バー <b>⚖️重量</b> が <code>update_item</code>のweightで各国一括（shop_id判明時は公式・無ければブリッジ）。SLS送料計算に直結</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">specifics（属性）の編集</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">✎詳細で1件ずつ（ブリッジ）。<b>各国一括は非対応が正解</b>＝属性ID・選択肢は<b>国×カテゴリで異なり</b>、他国にコピーすると存在しない属性を書いて壊れるため。単品の公式API化は<code>get_item_attribute</code>要で低頻度のため保留</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>発送手配（ship_order）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅β</td><td style="border:1px solid #eee;padding:5px 8px"><b>配線済(2026-07・要実注文で検証)</b>＝📦注文管理の未発送行に <b>🚚（公式APIで発送手配）</b>。<code>get_shipping_parameter</code>で集荷/持込/自動を判定→<b>内容を提示しユーザーが確認したときだけ</b><code>ship_order</code>。決裁操作なので自動実行はしない。伝票は従来のSLS印刷が確実（<code>create_shipping_document</code>は未実装）</td></tr>
           <tr><td colspan="3" style="border:1px solid #eee;padding:4px 8px;background:#fdecea;font-weight:700;color:#c0392b;font-size:11px">➖ 公式APIには在るが、このCB越境垢では権限なし（2026-07-18 実測プローブで確定）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">返品・返金の対応（returns）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>error_not_found</code>。<code>returns/*</code> はこの垢で使えない</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">レビュー返信・割引・クーポン・セット販売</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>product/get_comment→shop_id invalid</code>／<code>discount→Shopid invalid</code>／<code>voucher→error_server</code>／<code>bundle_deal→error_unknown</code>。販促/レビュー系は全て権限なし</td></tr>
@@ -7644,17 +7697,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     bulkProg(''); alert(`SKU一括 完了: 成功${ok} / 失敗${ng} / スキップ${skip}(推奨SKU無し)\n（次回🔄更新で一覧にも反映）`);
     try { logAct('出品', 'SKU一括', nCat + 'カタログ', scope + ' 成功' + ok + '/失敗' + ng); } catch (_) {}
   }
+  // 重量を公式API(update_item weight)優先で書く。shop_id判明＋openapi設定時は公式（ライブ/各国ログイン不要）、無ければブリッジ
+  async function writeItemWeightForItem(it, kg) {
+    const sid = ((lst.byCc[it.cc] || []).find(x => x.item_id === it.item_id) || {}).shop_id;
+    if (settings.openapiUrl && settings.writeToken && sid) { const r = await openapiUpdateItem({ shop_id: sid, item_id: it.item_id, weight: kg }); return { ok: !!(r && r.ok) }; }
+    const r = await productWrite(it.host, it.item_id, { weight: { value: kg, unit: 1 } }); return { ok: !!(r && r.ok) }; // フォールバック=ブリッジ(要ライブ)
+  }
   async function bulkApplyWeight(scope) {
     const items = bulkGuard(scope); if (!items) return;
-    if (state.mode !== 'live') { alert('重量の一括変更は、まだ公式API未対応のためライブモード（ブリッジ入りPC）が必要です。\n（タイトル/SKU/価格の一括は公式APIで可）'); return; }
+    const canOfficial = !!(settings.openapiUrl && settings.writeToken);
+    if (!canOfficial && state.mode !== 'live') { alert('重量の一括変更には、公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）か、🟢ライブPC（ブリッジ）が必要です。'); return; }
     const gwB = await guardWriteCountries(items.map(it => it.cc)); if (!gwB.ok) { alert(gwB.msg); return; }
-    const w = prompt(`🏪 書込先: ${gwB.label}\n重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。`, '0.2');
+    const w = prompt(`🏪 書込先: ${gwB.label}\n重量(kg)を入力。選択カタログの${scope === 'all' ? '全国' : scope} 合計${items.length}出品に一括設定します。\n（公式APIで各国まとめて＝ライブPC不要）`, '0.2');
     if (!w || !w.trim() || isNaN(parseFloat(w))) return;
-    if (!confirm(`${items.length}出品の重量を ${w.trim()}kg に一括設定します。よろしいですか？`)) return;
+    const kg = String(parseFloat(w));
+    if (!confirm(`${items.length}出品の重量を ${kg}kg に一括設定します（SLS送料計算に反映）。よろしいですか？`)) return;
     let ok = 0, ng = 0;
-    for (let i = 0; i < items.length; i++) { try { const r = await productWrite(items[i].host, items[i].item_id, { weight: { value: w.trim(), unit: 1 } }); r.ok ? ok++ : ng++; } catch (e) { ng++; } bulkProg(`書込 ${i + 1}/${items.length}`); }
-    bulkProg(''); alert(`重量一括 完了: 成功${ok} / 失敗${ng}`);
-    try { logAct('出品', '重量一括', items.length + '出品', scope + ' ' + w.trim() + 'kg 成功' + ok + '/失敗' + ng); } catch (_) {}
+    for (let i = 0; i < items.length; i++) { try { const r = await writeItemWeightForItem(items[i], kg); r && r.ok ? ok++ : ng++; } catch (e) { ng++; } bulkProg(`書込 ${i + 1}/${items.length}`); }
+    bulkProg(''); alert(`重量一括 完了: 成功${ok} / 失敗${ng}\n（次回🔄更新で一覧にも反映）`);
+    try { logAct('出品', '重量一括', items.length + '出品', scope + ' ' + kg + 'kg 成功' + ok + '/失敗' + ng); } catch (_) {}
   }
   async function bulkApplyPrice(scope) {
     const items = bulkGuard(scope); if (!items) return;

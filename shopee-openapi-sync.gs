@@ -77,7 +77,7 @@ function doGet(e) {
       try {
         var uwt = P_().getProperty('WRITE_TOKEN');
         if (!uwt || p.token !== uwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -103,6 +103,31 @@ function doGet(e) {
       return ContentService.createTextOutput(gcb + '(' + JSON.stringify(gout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★アカウント健全性（全店のペナルティ点・違反指標）。読み取りのみ・token不要。ポータルの🛡パネル/アラート用。
+    // ★発送(読取)：get_shipping_parameter＝この注文が「集荷(pickup)/持込(dropoff)/自動」のどれで、必要なID一覧を返す。UIの発送前確認用
+    if (p.action === 'ship_param') {
+      var spcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var spout;
+      try {
+        var spshop = parseInt(p.shop_id, 10); if (!getToken_(spshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        spout = { ok: true, data: getShipParam_(spshop, p.order_sn) };
+      } catch (err) { spout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(spcb + '(' + JSON.stringify(spout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★発送(書込・決裁操作)：ship_order。WRITE_TOKEN必須。pickup{address_id,pickup_time_id}/dropoff{branch_id}を指定、無指定は自動手配
+    if (p.action === 'ship_order') {
+      var socb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var soout;
+      try {
+        var sowt = P_().getProperty('WRITE_TOKEN');
+        if (!sowt || p.token !== sowt) throw new Error('WRITE_TOKEN不正（発送拒否）');
+        var soshop = parseInt(p.shop_id, 10); if (!getToken_(soshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var soParam = null;
+        if (p.pickup_address_id) soParam = { pickup: { address_id: parseInt(p.pickup_address_id, 10) || 0, pickup_time_id: p.pickup_time_id ? String(p.pickup_time_id) : undefined } };
+        else if (p.dropoff_branch_id) soParam = { dropoff: { branch_id: parseInt(p.dropoff_branch_id, 10) || 0 } };
+        soout = shipOrder_(soshop, p.order_sn, soParam);
+      } catch (err) { soout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(socb + '(' + JSON.stringify(soout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'account_health') {
       var hcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var hout;
@@ -750,7 +775,8 @@ function updateItem_(body) {
   if (body.item_name != null && String(body.item_name) !== '') payload.item_name = String(body.item_name).slice(0, 120);
   if (body.item_sku != null) payload.item_sku = String(body.item_sku);
   if (body.description != null && String(body.description) !== '') payload.description = String(body.description);
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc のいずれか）');
+  if (body.weight != null && String(body.weight) !== '' && !isNaN(parseFloat(body.weight))) payload.weight = parseFloat(body.weight); // kg（SLS送料計算に効く）
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
