@@ -1079,6 +1079,12 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
     return res;
   }
+  // まとめて更新用：注文/売上/入金をShopeeから即取得（run_orders/run_daily/run_income）。公式API未設定なら何もしない
+  async function openapiRunFetch(action) {
+    if (!settings.openapiUrl || !settings.writeToken) return null;
+    const qs = 'action=' + action + '&token=' + encodeURIComponent(settings.writeToken);
+    return jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 180000);
+  }
 
   // ---------------- 公式API 出品（アカウント×国を shop_id で明示・add_item） ----------------
   // params: { shop_id, name, desc, price, stock, weight(kg), images(改行\n区切りURL), category, condition, publish(0/1) }
@@ -1708,11 +1714,19 @@
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
       try { renderTrend._orders = null; } catch (_) {}                // 売上・オーダー数の推移
       try { lstDropStatus = null; } catch (_) {}                      // 出品一覧の仕入元ソース状態
+      // ★注文・売上をShopeeから即取得（公式API設定時）＝5分前の注文もその場で反映。未設定なら従来どおりGAS自動同期(約1h)に任せる
+      let dataNote = '';
+      if (settings.openapiUrl && settings.writeToken) {
+        set('🔄 Shopeeから注文・売上を取得中…（30秒〜2分）');
+        const [ro, rd] = await Promise.allSettled([openapiRunFetch('run_orders'), openapiRunFetch('run_daily')]); // 並列＝待ちを短縮
+        dataNote += (ro.status === 'fulfilled' && ro.value && ro.value.ok) ? ' ・注文✓' : ' ・注文△';
+        dataNote += (rd.status === 'fulfilled' && rd.value && rd.value.ok) ? ' ・売上✓' : ' ・売上△';
+      }
       let listNote;
       if (state.mode === 'live' && settings.sbSecret) { set('🔄 出品状況をShopeeから取得中…（30〜60秒）'); try { await syncListings(); listNote = ' ・出品状況✓'; } catch (e) { listNote = ' ・出品状況✗(' + (e.message || '') + ')'; } }
       else { listNote = ' ・出品状況はライブPCの📋出品一覧で🔄'; }
       try { showPage(state.page); } catch (_) {} // いま開いているページを最新化
-      set('✅ 更新（他ページは開くと最新に。注文/入金/売上はGASが自動同期）' + listNote);
+      set('✅ 更新完了' + dataNote + listNote + '（他ページは開くと最新に）');
       toast('🔄 まとめて更新しました');
       setTimeout(() => set(''), 8000);
     } catch (e) { set('更新エラー: ' + (e.message || e), true); }
@@ -7608,6 +7622,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { await loadVariations(); btn.textContent = '再読込'; } catch (e) { msg('読込失敗 ' + e.message, '#d93025'); btn.textContent = '各国のバリエを読み込む'; }
       btn.disabled = false;
     });
+    // ★開いたら自動でバリエを読み込む（毎回ボタンを押す手間・ラグを解消）
+    setTimeout(() => { const lb = q('.uni-loadvar'); if (lb && !lb.disabled) lb.click(); }, 50);
   }
   // 親SKUを複数出品にまとめて書き込む（全国/各国 共通・確認あり）
   async function writeParentSku(listings, scopeLabel, defaultSku, repName, presetSku) {
@@ -9239,7 +9255,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15">
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(r.name || '')}">${esc(r.name)}<span class="smd-dim" style="font-size:9px;margin-left:6px;font-weight:400">${(r.name || '').length}字</span></div>
-          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span title="出品アカウント: ${esc(a.label)}" style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : ''); })()} ${watchBadgeHtml(r)} 価格${price}${jpyStr ? `<span class="smd-dim" title="現地通貨を今のレートで円換算">(${jpyStr})</span>` : ''} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : `<span class="smd-dim">単品${canEdit ? '（下で価格・在庫を編集）' : ''}</span>`}</div>${(sp.cond || sp.brand || (sp.cat && sp.cat !== 0)) ? `<div style="font-size:10.5px;color:#667;margin-top:1px">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:3px;padding:0 4px">${condLabel(sp.cond)}</span>` : ''}${sp.brand ? ` 🏷${esc(sp.brand)}` : ''}${sp.catName ? ` 📁${esc(sp.catName)}` : (sp.cat && sp.cat !== 0 ? ` 📁#${esc(String(sp.cat))}` : '')}</div>` : ''}
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span title="出品アカウント: ${esc(a.label)}" style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : ''); })()} ${watchBadgeHtml(r)} 価格${price}${jpyStr ? `<span class="smd-dim" title="現地通貨を今のレートで円換算">(${jpyStr})</span>` : ''} ・ 在庫${r.stock != null ? r.stock : '-'}${oos ? '<b style="color:#d93025">（切れ）</b>' : ''} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : `<span class="smd-dim">単品${canEdit ? '（下で価格・在庫を編集）' : ''}</span>`}</div><div style="font-size:10.5px;color:#667;margin-top:1px">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:3px;padding:0 4px">${condLabel(sp.cond)}</span> ` : ''}${sp.brand ? `🏷${esc(sp.brand)} ` : ''}${sp.catName ? `📁${esc(sp.catName)} ` : (sp.cat && sp.cat !== 0 ? `📁#${esc(String(sp.cat))} ` : '')}${r.parent_sku ? `<span title="親SKU（管理コード）" style="color:#7b52c4">🔖${esc(r.parent_sku)}</span> ` : ''}<span class="smd-dim" title="ShopeeのItem ID（各国ごと）">ID:${r.item_id}</span></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:3px;align-items:center;flex:none">
           <button class="lst-edit" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="ポータル内で編集してShopeeに保存" style="border:1px solid #ee4d2d;background:#fff;color:#ee4d2d;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">✎編集</button>
@@ -9269,9 +9285,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const rg = regionByCc(cc) || {};
         const jp = rg.rateJpy && l.price_min != null ? '¥' + Math.round(l.price_min * rg.rateJpy).toLocaleString('ja-JP') : '';
         const oos = (l.stock || 0) <= 0, pub = l.status === 1;
-        return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}</td>`;
+        return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}<div class="smd-dim" style="font-size:8px;color:#bbb" title="ShopeeのItem ID">#${l.item_id}</div></td>`;
       }).join('');
-      return `<tr style="border-bottom:1px solid #eee"><td style="padding:5px 8px;position:sticky;left:0;background:#fff;z-index:1;min-width:230px;max-width:300px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(g.img || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0"><div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(g.rep)}">${esc(g.rep)}</div><div class="smd-dim" style="font-size:10px">${ccN}か国に出品</div></div></div></td>${cells}<td style="padding:4px 6px;white-space:nowrap"><button class="grid-unify smd-btn" data-name="${av(g.rep)}" style="font-size:10px;padding:2px 6px;border-color:#1a7f37;color:#1a7f37" title="この商品の各国をまとめて編集（価格・在庫・🚫全国在庫0）">🌍まとめ編集</button></td></tr>`;
+      return `<tr style="border-bottom:1px solid #eee"><td style="padding:5px 8px;position:sticky;left:0;background:#fff;z-index:1;min-width:230px;max-width:300px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(g.img || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0"><div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(g.rep)}">${esc(g.rep)}</div><div class="smd-dim" style="font-size:10px">${ccN}か国に出品${(function () { const sk = GRID_CCS.map(cc => g.byCc[cc]).filter(Boolean).map(l => l.parent_sku).filter(Boolean)[0] || ''; return sk ? ' · <span title="親SKU（管理コード）" style="color:#7b52c4">🔖' + esc(sk) + '</span>' : ''; })()}</div></div></div></td>${cells}<td style="padding:4px 6px;white-space:nowrap"><button class="grid-unify smd-btn" data-name="${av(g.rep)}" style="font-size:10px;padding:2px 6px;border-color:#1a7f37;color:#1a7f37" title="この商品の各国をまとめて編集（価格・在庫・🚫全国在庫0）">🌍まとめ編集</button></td></tr>`;
     }).join('');
     return `<div style="overflow-x:auto;border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11px">${head}${body}</table></div>`;
   }
