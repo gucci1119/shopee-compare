@@ -552,7 +552,7 @@
         <span style="margin-left:6px"><b>各国の相場を横並び（現地＋円）</b>→</span><button class="smd-btn rank-go" data-go="listgrid" style="font-size:10.5px;padding:1px 8px">🌏 国横断で横並び</button>
         <span style="margin-left:6px"><b>価格をまとめて書き換え</b>→</span><button class="smd-btn" id="rank-goedit" style="font-size:10.5px;padding:1px 8px">🆕 各国まとめ編集</button><span>（公式APIで各国一括）</span>
       </div>
-      <div style="margin-top:4px;font-size:10.5px;color:#8a97a3">※下のランキングは🟢ライブPC（ブリッジ）でのみ表示されます。DBだけで売れ行きを見たい場合はこのページのDB化改修も可能です（ご希望あれば）。</div>
+      <div style="margin-top:4px;font-size:10.5px;color:#8a97a3">※下のランキングは、🟢ライブPC(ブリッジ)がある時はShopee内部の性能ランキング、無い時は<b>DBの売れ筋（直近30日・注文ベース／ブラウザ不要）</b>を表示します。</div>
     </div>
     <div class="smd-toolbar">
       <span class="smd-seg" id="smd-period">
@@ -1717,6 +1717,7 @@
       try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
+      try { _dbRankCache = null; } catch (_) {}                       // 📊価格調整DBランキング
       try { renderTrend._orders = null; } catch (_) {}                // 売上・オーダー数の推移
       try { lstDropStatus = null; } catch (_) {}                      // 出品一覧の仕入元ソース状態
       // ★注文・売上をShopeeから即取得（公式API設定時）＝5分前の注文もその場で反映。未設定なら従来どおりGAS自動同期(約1h)に任せる
@@ -2166,6 +2167,31 @@
     if (state.mode === 'live') ensureModelImages(rows);
   }
 
+  // 📊 価格調整のDB版：ブリッジ無しでも直近30日の売れ筋を注文(DB)×listings(価格)で表示（ブラウザ不要）
+  let _dbRankCache = null;
+  async function renderDbRank(grid) {
+    grid.className = ''; grid.innerHTML = '<div class="smd-empty">DBから売れ筋を集計中…</div>';
+    try {
+      if (!_dbRankCache) {
+        const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+        const [orders, listings] = await Promise.all([
+          sbGetAll('orders', `select=cc,items,order_date,status&order_date=gte.${since}`),
+          sbGetAll('listings', 'select=cc,item_id,name,image,price_min,stock,status')
+        ]);
+        const lmap = new Map(); (listings || []).forEach(l => lmap.set(l.cc + '|' + l.item_id, l));
+        const skip = /CANCEL|UNPAID|INVALID|RETURN/i, agg = new Map();
+        (orders || []).forEach(o => { if (skip.test(o.status || '')) return; (o.items || []).forEach(it => { if (!it.item_id) return; const k = o.cc + '|' + it.item_id; const e = agg.get(k) || { cc: o.cc, item_id: it.item_id, name: it.name || '', img: it.image || '', units: 0 }; e.units += (it.qty || 1); if (!e.name && it.name) e.name = it.name; agg.set(k, e); }); });
+        _dbRankCache = [...agg.values()].map(e => Object.assign(e, { l: lmap.get(e.cc + '|' + e.item_id) })).sort((a, b) => b.units - a.units).slice(0, 150);
+      }
+      const rows = _dbRankCache;
+      if (!rows.length) { grid.innerHTML = '<div class="smd-empty">直近30日の販売データがありません（注文が同期されるまで）</div>'; return; }
+      grid.innerHTML = `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">📊 <b>直近30日の売れ筋（DB・注文ベース／ブラウザ不要）</b>。価格の隣は円換算。🌍まとめ編集で各国の価格を一括調整。</div>` + rows.map((e, i) => {
+        const l = e.l || {}, rg = regionByCc(e.cc) || {}, jp = (rg.rateJpy && l.price_min != null) ? '¥' + Math.round(l.price_min * rg.rateJpy).toLocaleString('ja-JP') : '';
+        return `<div class="tool-card" style="max-width:none;margin-bottom:5px;padding:6px 10px;display:flex;gap:10px;align-items:center"><b style="width:26px;color:#888;flex:none;text-align:right">${i + 1}</b><span class="ord-cc" style="background:${rg.color || '#333'};flex:none">${e.cc}</span><img src="${IMG_CDN}${esc(e.img || (l && l.image) || '')}" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="flex:1;min-width:0"><div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(e.name)}">${esc(e.name)}</div><div style="font-size:11px;color:#777">🔥<b>${e.units}</b>点売れた ・ ${l.price_min != null ? (rg.cur || '') + lfmt(l.price_min) + (jp ? ` <span class="smd-dim">${jp}</span>` : '') : '<span class="smd-dim">価格未取得</span>'} ・ 在庫${l.stock != null ? l.stock : '-'} <span class="smd-dim">ID:${e.item_id}</span></div></div><button class="rankdb-unify smd-btn" data-name="${av(e.name)}" style="font-size:10px;padding:2px 8px;border-color:#1a7f37;color:#1a7f37;flex:none">🌍まとめ編集</button></div>`;
+      }).join('');
+      grid.querySelectorAll('.rankdb-unify').forEach(b => b.addEventListener('click', () => { try { if (typeof openUnifyFromListing === 'function') { if (!openUnifyFromListing((b.dataset.name || '').trim())) alert('各国の同名カタログが見つかりませんでした（出品一覧を一度開くと束ねやすくなります）'); } } catch (_) {} }));
+    } catch (e) { grid.innerHTML = '<div class="smd-empty" style="color:#d93025">DB集計エラー: ' + esc(e.message || e) + '</div>'; }
+  }
   function renderGrid() {
     const grid = document.getElementById('smd-grid');
     if (state.view === 'columns') return renderColumns(grid);
@@ -2180,9 +2206,8 @@
       `${rows.length}商品を表示中` + (loading ? '（読み込み中の国があります）' : '');
     grid.innerHTML = '';
     if (!rows.length) {
-      grid.innerHTML = `<div class="smd-empty">${loading ? '読み込み中...' :
-        (state.mode === 'boot' ? 'ブリッジ未検出＆GAS未設定です。⚙️設定からGAS URLを入れるか、ブリッジuserscript入りのPCで開いてください' : '該当する商品がありません')}</div>`;
-      return;
+      if (loading) { grid.innerHTML = '<div class="smd-empty">読み込み中...</div>'; return; }
+      renderDbRank(grid); return; // ブリッジのライブ取得が無い＝DBの売れ筋ランキングを表示（公式API運用の既定）
     }
     const frag = document.createDocumentFragment();
     rows.forEach((r, i) => {
