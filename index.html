@@ -9250,6 +9250,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <label title="仕入元が過少で在庫0のまま運用する出品。ONにすると在庫を増やす保存時に警告します" style="white-space:nowrap;cursor:pointer;color:${meta.keep0 ? '#b71c1c' : '#999'};font-weight:${meta.keep0 ? '700' : '400'}"><input type="checkbox" class="lst-keep0" data-id="${r.item_id}" ${meta.keep0 ? 'checked' : ''}> ⚠️在庫0固定</label>
       </div></div>`;
   }
+  // 🌏 国横断・横並び：同じタイトルで束ねた各国版を1行に並べる表。groups=[{rep,img,byCc:{cc:listing}}]
+  const GRID_CCS = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+  function listingGridHtml(groups) {
+    if (!groups.length) return '<div class="smd-empty">該当する商品はありません</div>';
+    const head = `<tr style="background:#eef3fb"><th style="text-align:left;padding:5px 8px;position:sticky;left:0;background:#eef3fb;z-index:1">商品</th>${GRID_CCS.map(cc => { const rg = regionByCc(cc) || {}; return `<th style="padding:5px 6px;color:${rg.color || '#333'};white-space:nowrap">${cc}</th>`; }).join('')}<th style="padding:5px 6px">操作</th></tr>`;
+    const body = groups.map(g => {
+      const ccN = GRID_CCS.filter(cc => g.byCc[cc]).length;
+      const cells = GRID_CCS.map(cc => {
+        const l = g.byCc[cc];
+        if (!l) return `<td style="text-align:center;color:#ccc;border-left:1px solid #f0f0f0">—</td>`;
+        const rg = regionByCc(cc) || {};
+        const jp = rg.rateJpy && l.price_min != null ? '¥' + Math.round(l.price_min * rg.rateJpy).toLocaleString('ja-JP') : '';
+        const oos = (l.stock || 0) <= 0, pub = l.status === 1;
+        return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}</td>`;
+      }).join('');
+      return `<tr style="border-bottom:1px solid #eee"><td style="padding:5px 8px;position:sticky;left:0;background:#fff;z-index:1;min-width:230px;max-width:300px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(g.img || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0"><div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(g.rep)}">${esc(g.rep)}</div><div class="smd-dim" style="font-size:10px">${ccN}か国に出品</div></div></div></td>${cells}<td style="padding:4px 6px;white-space:nowrap"><button class="grid-unify smd-btn" data-name="${av(g.rep)}" style="font-size:10px;padding:2px 6px;border-color:#1a7f37;color:#1a7f37" title="この商品の各国をまとめて編集（価格・在庫・🚫全国在庫0）">🌍まとめ編集</button></td></tr>`;
+    }).join('');
+    return `<div style="overflow-x:auto;border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11px">${head}${body}</table></div>`;
+  }
   function drawListingStatus() {
     const host = document.getElementById('list-status'); if (!host) return;
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を出さない）
@@ -9299,8 +9318,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
     }
     const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
-    const lstPer = 60, lstPages = Math.max(1, Math.ceil(rows.length / lstPer)), lstPage = Math.min(Math.max(1, lst.page || 1), lstPages); // 1ページ60件＝6500件でも軽い
-    const shown = rows.slice((lstPage - 1) * lstPer, lstPage * lstPer);
+    // 🌏横並び（国横断）：同じタイトルで各国を束ねる
+    let gridGroups = null;
+    if (lst.grid) {
+      const gnorm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const gm = new Map();
+      rows.forEach(r => { const k = gnorm(r.name); if (!k) return; let g = gm.get(k); if (!g) { g = { rep: r.name, img: r.image, byCc: {} }; gm.set(k, g); } if (!g.byCc[r.cc]) g.byCc[r.cc] = r; });
+      gridGroups = [...gm.values()];
+    }
+    const lstPer = lst.grid ? 40 : 60;
+    const listLen = lst.grid ? gridGroups.length : rows.length;
+    const lstPages = Math.max(1, Math.ceil(listLen / lstPer)), lstPage = Math.min(Math.max(1, lst.page || 1), lstPages);
+    const shown = (lst.grid ? gridGroups : rows).slice((lstPage - 1) * lstPer, lstPage * lstPer);
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '出品データはGASが自動同期しています（約30分ごと・数店ずつ）。ここは最新のDBを取り直します'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
@@ -9334,6 +9363,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           </select>
         </label>
         <button class="smd-btn" id="lst-sortdir" title="昇順/降順を切替">${lst.sortDir === 'asc' ? '⬆ 昇順' : '⬇ 降順'}</button>
+        <button class="smd-btn" id="lst-gridtoggle" style="${lst.grid ? 'background:#1a7f37;color:#fff;border-color:#1a7f37;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目。仕入切れ時の🚫全国在庫0もここから">🌏 ${lst.grid ? '横並び中（カード表示に戻す）' : '国横断で横並び表示'}</button>
         <label style="color:#555">価格帯 <input id="lst-pmin" type="number" placeholder="最小" value="${lst.priceMin != null ? esc(String(lst.priceMin)) : ''}" style="width:64px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-pmax" type="number" placeholder="最大" value="${lst.priceMax != null ? esc(String(lst.priceMax)) : ''}" style="width:64px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
         <span class="smd-dim" style="font-size:10px">※価格帯は各国の現地通貨。国を1つに絞ると正確</span>
         ${specsReady ? `<span class="smd-seg" id="lst-cond">
@@ -9347,11 +9377,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span class="smd-dim">🤖 出品データは<b>公式APIで自動同期</b>（約30分ごと・数店ずつ）＝ブラウザを開かなくても最新。Shopeeで直接変えた分（在庫・公開/非公開など）も<b>最大30分ほどで自動反映</b>されます。すぐ取り直したい時は上の「🔄最新に更新」を。</span>
         ${state.mode === 'live' && settings.sbSecret ? `<button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700" title="この端末（🟢ライブ）からShopeeへ直接取りに行って即時最新化。通常は公式APIの自動同期で足りるため不要です">🔄 ${lst.syncing ? '取得中...' : '🟢この端末から即時取得'}</button>` : ''}
       </div>
-      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${rows.length}</b>件（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
       <div id="lst-list"></div>
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
-    document.getElementById('lst-list').innerHTML = shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>';
-    { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(rows.length, lstPer, lstPage); }
+    document.getElementById('lst-list').innerHTML = lst.grid ? listingGridHtml(shown) : (shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>');
+    { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(lst.grid ? gridGroups.length : rows.length, lstPer, lstPage); }
     wirePageNav(document.getElementById('lst-more'), p => { lst.page = p; drawListingStatus(); const el = document.getElementById('lst-list'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
     document.getElementById('lst-sync').addEventListener('click', () => {
       // 🟢ライブPCならShopeeへ直接。そうでなければGASが自動同期したDBを取り直す（ブリッジ不要）
@@ -9364,6 +9394,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const seg = document.getElementById('lst-pub'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.pub = b.dataset.p; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-sort'); if (s) s.addEventListener('change', () => { lst.sort = s.value; if (lst.sort && !lst.sortDir) lst.sortDir = (lst.sort === 'name') ? 'asc' : 'desc'; lst.page = 1; drawListingStatus(); }); }
     { const d = document.getElementById('lst-sortdir'); if (d) d.addEventListener('click', () => { lst.sortDir = lst.sortDir === 'asc' ? 'desc' : 'asc'; drawListingStatus(); }); }
+    { const g = document.getElementById('lst-gridtoggle'); if (g) g.addEventListener('click', () => { lst.grid = !lst.grid; lst.page = 1; drawListingStatus(); }); }
+    document.querySelectorAll('#lst-list .grid-unify').forEach(el => el.addEventListener('click', () => { if (!openUnifyFromListing((el.dataset.name || '').trim()) && typeof toast === 'function') toast('各国の同名カタログが見つかりませんでした'); }));
     { let pt; const pmin = document.getElementById('lst-pmin'), pmax = document.getElementById('lst-pmax'); const upd = () => { clearTimeout(pt); pt = setTimeout(() => { lst.priceMin = (pmin.value === '') ? null : Number(pmin.value); lst.priceMax = (pmax.value === '') ? null : Number(pmax.value); lst.page = 1; drawListingStatus(); }, 300); }; if (pmin) pmin.addEventListener('input', upd); if (pmax) pmax.addEventListener('input', upd); }
     { const seg = document.getElementById('lst-cond'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.cond = b.dataset.c; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-brand'); if (s) s.addEventListener('change', () => { lst.brand = s.value; lst.page = 1; drawListingStatus(); }); }
