@@ -9153,9 +9153,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const priceLoc = (n) => cur + lfmt(n);
     const price = r.price_min != null ? (r.price_min === r.price_max ? priceLoc(r.price_min) : priceLoc(r.price_min) + '〜' + priceLoc(r.price_max)) : '-';
     const oos = (r.stock || 0) <= 0;
-    const canEdit = state.mode === 'live' && !!rg.host;   // ライブモードのみ在庫・予約をその場で編集
+    const canOfficialEdit = !!(settings.openapiUrl && settings.writeToken && r.shop_id); // 公式APIで在庫をその場編集（ライブPC不要）
+    const canEdit = (state.mode === 'live' && !!rg.host) || canOfficialEdit;  // 在庫のその場編集：ライブ or 公式API
+    const canPreorder = state.mode === 'live' && !!rg.host;   // 予約(Pre-order)はブリッジのみ＝ライブ時だけ
     const varRows = opened && r.models && r.models.length
-      ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${priceLoc(m.price)}</span>${canEdit ? `<label style="color:#555;white-space:nowrap">在庫<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label>` : `<span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span>`}<span class="smd-dim">売${m.sold}</span></div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px"><label style="font-size:11px;color:#555;display:inline-flex;align-items:center;gap:3px"><input type="checkbox" class="lst-po"> 予約(Pre-order)</label><label style="font-size:11px;color:#555;white-space:nowrap">発送日数<input class="lst-podts" inputmode="numeric" style="width:46px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label><span class="lst-po-state smd-dim" style="font-size:10px">（予約状態を取得中…）</span><button class="lst-save" style="margin-left:auto;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 在庫・予約を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
+      ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${r.models.map(m => `<div style="display:flex;gap:10px;font-size:11px;padding:2px 0;align-items:center"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.n || '（既定）')}</span><span style="color:#1565c0">${priceLoc(m.price)}</span>${canEdit ? `<label style="color:#555;white-space:nowrap">在庫<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label>` : `<span style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#555'}">在庫${m.stock}</span>`}<span class="smd-dim">売${m.sold}</span></div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px">${canPreorder ? `<label style="font-size:11px;color:#555;display:inline-flex;align-items:center;gap:3px"><input type="checkbox" class="lst-po"> 予約(Pre-order)</label><label style="font-size:11px;color:#555;white-space:nowrap">発送日数<input class="lst-podts" inputmode="numeric" style="width:46px;margin-left:3px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:11px"></label><span class="lst-po-state smd-dim" style="font-size:10px">（予約状態を取得中…）</span>` : `<span class="smd-dim" style="font-size:10px">公式APIで在庫を保存（予約はライブPCで）</span>`}<button class="lst-save" style="margin-left:auto;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 ${canPreorder ? '在庫・予約' : '在庫'}を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     const buyUrl = buyerUrlFor(r.cc, r.item_id);
@@ -9268,6 +9270,28 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const panel = btn.closest('.lst-inline'); const host = panel.dataset.host, id = Number(panel.dataset.id), cc = panel.dataset.cc;
       const msg = panel.querySelector('.lst-save-msg');
       const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+      const sidS = shopIdOfListing(cc, id);
+      const hasPreUI = !!panel.querySelector('.lst-po'); // 予約UIがある＝ライブ
+      // 予約UIが無い（＝公式のみモード）＋公式API使える → 公式 update_stock で在庫だけ保存（ライブPC不要・productRead不要）
+      if (!hasPreUI && settings.openapiUrl && settings.writeToken && sidS) {
+        const row = (lst.byCc[cc] || []).find(x => x.item_id === id) || {};
+        const stkMap = {}; panel.querySelectorAll('.lst-stk').forEach(inp => stkMap[inp.dataset.mid] = inp.value.trim());
+        const stockList = [];
+        (row.models || []).forEach(m => { const v = stkMap[m.id]; if (v != null && v !== '' && String(parseInt(v, 10)) !== String(m.stock)) stockList.push({ model_id: m.id, stock: parseInt(v, 10) || 0 }); });
+        if (!stockList.length) { msg.textContent = '変更なし'; return; }
+        if (!confirm(`書込先: ${gw.summary}\n${cc} item${id} の在庫を公式APIで保存します。よろしいですか？`)) return;
+        btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
+        try {
+          const r = await openapiUpdateStockList(sidS, id, stockList);
+          if (r && r.ok) {
+            msg.style.color = '#1a7f37'; msg.textContent = '✓ 在庫を保存しました'; btn.textContent = '保存済';
+            stockList.forEach(sl => { const rm = (row.models || []).find(x => x.id === sl.model_id); if (rm) rm.stock = sl.stock; });
+            row.stock = (row.models || []).reduce((s, m) => s + (m.stock || 0), 0);
+            try { logAct('出品', '在庫編集(公式)', row.name || '', cc + ' 在庫'); } catch (_) {}
+          } else { msg.style.color = '#d93025'; msg.textContent = '✗ ' + ((r && r.error) || 'API失敗'); btn.disabled = false; btn.textContent = '💾 在庫を保存'; }
+        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + e.message; btn.disabled = false; btn.textContent = '💾 在庫を保存'; }
+        return;
+      }
       btn.disabled = true; btn.textContent = '読込中…'; msg.textContent = '';
       try {
         const pi = lst.poCache[id] || await productRead(host, id);
