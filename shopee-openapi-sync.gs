@@ -1392,6 +1392,115 @@ function syncReturnsRange_(days, ccList) {
 function syncReturnsAll() { return syncReturnsRange_(45); }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
+// ================= 出品(listings)同期：公式 get_item_list でブリッジ卒業 =================
+// ポータルの listings テーブル（＝出品一覧／各国そろえる／横断の土台）を公式APIだけで埋める。
+// 従来はブリッジPC(mpsku)でしか取れなかった出品データを、注文と同じくGASがサーバー側で自動同期。
+// listings 1行の形はポータルの listingToRow と一致させる:
+//   { cc, item_id, name, image(=画像ハッシュ), status(1=公開/0=その他), parent_sku, shop_id,
+//     price_min, price_max, stock, model_count, models:[{id,n,sku,img,price,stock,sold}],
+//     create_time, synced_at }
+var LIST_ITEM_STATUS = ['NORMAL', 'UNLIST'];   // 取得対象。必要なら 'BANNED','REVIEWING' 追加
+var LIST_RR_BATCH = 3;                          // ラウンドロビンで1回に処理する店舗数（6分制限内に収める）
+
+// 全出品の item_id + 公開状態を、状態別ページングで取得
+function listItemIds_(shopId) {
+  var out = [];
+  LIST_ITEM_STATUS.forEach(function (st) {
+    var offset = 0;
+    for (var g = 0; g < 500; g++) { // 500*100=5万件まで安全弁
+      var j = callShop_(shopId, '/api/v2/product/get_item_list', { offset: offset, page_size: 100, item_status: st }, 'get');
+      var r = j.response || {};
+      (r.item || []).forEach(function (it) { out.push({ item_id: it.item_id, status: (st === 'NORMAL' ? 1 : 0) }); });
+      if (!r.has_next_page) break;
+      offset = (r.next_offset != null) ? r.next_offset : (offset + 100);
+    }
+  });
+  return out;
+}
+function priceOfInfo_(pi0) { if (!pi0) return 0; return pi0.original_price != null ? pi0.original_price : (pi0.current_price != null ? pi0.current_price : 0); }
+function stockOfV2_(sv) { sv = sv || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; }
+
+// 1店舗ぶんを取得して listings に upsert（本体）
+function syncListingsForShop_(tok) {
+  var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
+  var shopId = tok.shop_id;
+  var ids = listItemIds_(shopId);
+  if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0 };
+  var statusById = {}; ids.forEach(function (x) { statusById[x.item_id] = x.status; });
+  var rows = [];
+  for (var i = 0; i < ids.length; i += 50) {
+    var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
+    var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: batch.join(',') }, 'get');
+    ((b.response || {}).item_list || []).forEach(function (it) {
+      var img = ((it.image || {}).image_id_list || [])[0] || '';
+      var models = [], price_min = null, price_max = null, stock = null, model_count = 0;
+      if (it.has_model) {
+        try {
+          var g = getModels_(shopId, it.item_id);
+          models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0 }; });
+          model_count = models.length;
+          var prices = models.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
+          if (prices.length) { price_min = Math.min.apply(null, prices); price_max = Math.max.apply(null, prices); }
+          stock = models.reduce(function (s, m) { return s + (Number(m.stock) || 0); }, 0);
+        } catch (e) { /* モデル取得失敗時は単品扱いで継続 */ }
+      }
+      if (!it.has_model || !models.length) {
+        var p = priceOfInfo_((it.price_info || [])[0]);
+        price_min = p || null; price_max = p || null; stock = stockOfV2_(it.stock_info_v2); models = []; model_count = 0;
+      }
+      rows.push({
+        cc: cc, item_id: it.item_id, name: it.item_name || '', image: img,
+        status: (statusById[it.item_id] != null ? statusById[it.item_id] : (it.item_status === 'NORMAL' ? 1 : 0)),
+        parent_sku: it.item_sku || '', shop_id: String(shopId),
+        price_min: price_min, price_max: price_max, stock: stock,
+        model_count: model_count, models: models,
+        create_time: it.create_time || null, synced_at: new Date().toISOString()
+      });
+    });
+  }
+  if (rows.length) sbUpsert_('listings', rows);   // on_conflict はポータルと同じくPK(item_id)に委ねる
+  return { cc: cc, shop_id: shopId, listings: rows.length };
+}
+
+// 全店舗を一気に（初回の全件ロード用。13店ぶんで6分制限に当たる場合は数回実行 or 下のRRトリガーに任せる）
+function syncListingsAll() {
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) { try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  Logger.log('listings同期(all): ' + JSON.stringify(log)); return log;
+}
+
+// ★定例トリガー用：カーソルで数店ずつ回す（6分制限を超えないための本命）。30分ごと×3店 → 全店 約2時間で一巡
+function syncListingsRoundRobin() {
+  var toks = listTokens_(); if (!toks.length) return [];
+  toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
+  var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
+  if (start >= toks.length) start = 0;
+  var log = [];
+  for (var i = 0; i < LIST_RR_BATCH && i < toks.length; i++) {
+    var tok = toks[(start + i) % toks.length];
+    try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
+  }
+  P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length));
+  Logger.log('listings同期(RR): ' + JSON.stringify(log)); return log;
+}
+
+// ★まず1店だけで中身確認（本番listingsに書く前の検証。Supabaseには書かない）
+function testSyncListingsOneShop() {
+  var toks = listTokens_(); if (!toks.length) { Logger.log('認可店なし'); return; }
+  var tok = toks[0], cc = tok.cc || '?';
+  Logger.log('テスト対象: ' + cc + ' shop_id=' + tok.shop_id);
+  var ids = listItemIds_(tok.shop_id);
+  Logger.log('item_id総数=' + ids.length + ' 先頭=' + JSON.stringify(ids.slice(0, 3)));
+  if (!ids.length) return;
+  var b = callShop_(tok.shop_id, '/api/v2/product/get_item_base_info', { item_id_list: ids.slice(0, 3).map(function (x) { return x.item_id; }).join(',') }, 'get');
+  var sample = ((b.response || {}).item_list || []).map(function (it) {
+    var mc = 0; if (it.has_model) { try { mc = (getModels_(tok.shop_id, it.item_id).models || []).length; } catch (e) {} }
+    return { item_id: it.item_id, name: (it.item_name || '').slice(0, 40), status: it.item_status, sku: it.item_sku, image: ((it.image || {}).image_id_list || [])[0] || '', has_model: it.has_model, model_count: mc, price0: priceOfInfo_((it.price_info || [])[0]), stock: stockOfV2_(it.stock_info_v2), create_time: it.create_time };
+  });
+  Logger.log('サンプル行: ' + JSON.stringify(sample, null, 1));
+  Logger.log('★OKなら syncListingsAll()（or 数回）で全件ロード → setupTriggers() でRR自動化');
+}
+
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
@@ -1450,6 +1559,7 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
+  ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
   Logger.log('✅ トリガー設定'); return 'ok';
 }
 

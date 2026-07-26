@@ -6608,7 +6608,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px">商品一覧・バリエ(model)情報 取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/get_item_list・get_model_list</code></td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>価格更新（一括・バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>各国まとめ編集（旧・統括編集）の価格×係数・バリエ価格編集を公式API化(2026-07)</b>＝読み(<code>get_model_list</code>)も書き(<code>update_price</code>のprice_list)もブリッジ非依存。shop_id判明時は公式・無ければブリッジ自動フォールバック</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>在庫更新（一括・バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>各国まとめ編集（旧・統括編集）のバリエ比較グリッドで各国一括在庫を公式API化(2026-07)</b>＝各セルの「在」欄→各国「在庫書込」で<code>update_stock_list</code>(公式)。shop_id判明時は公式・無ければブリッジ自動フォールバック。単品は⚙️設定📦パネルからも可</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">出品状態のライブ即時取得</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">今はブリッジ(mpsku)。get_item_listでAPI代替可・未移行</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品データの取得・同期</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化(2026-07)</b>＝GASが <code>product/get_item_list</code>＋<code>get_item_base_info</code>＋<code>get_model_list</code> で listings を自動同期（30分ごと・数店ずつラウンドロビン）。<b>ブリッジPC不要</b>で出品一覧/各国そろえるが最新に。ブリッジの🔄は🟢ライブPCでの即時取得用に残置。<span style="color:#e8710a">※GAS側の関数を貼付→testSyncListingsOneShopで検証→syncListingsAll/ setupTriggersで有効化</span></td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>新規出品（add_item・単品/バリエ）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>本番稼働(2026-07)</b>。✍️出品を作る→🚀公式APIで出品（アカウント×国指定・非公開作成）。<code>product/add_item→init_tier_variation</code>。E2E(単品/バリエ)成功</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品編集（タイトル/親SKU/説明）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/update_item</code>。統括/一括のタイトル・SKU書込がshop_id判明時は公式（ライブ/各国ログイン不要）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>バリエ 追加/明細名/画像</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化済(2026-07)</b>。<code>add_model</code>(＋追加)/<code>update_tier_variation</code>(明細名置換・画像差替)。画像は<code>media_space/upload_image</code>→optionのimage差替（他バリエ画像は維持）。各国まとめ編集グリッドの＋追加・🖼</td></tr>
@@ -6870,6 +6870,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return sbGetAll('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
     });
+  }
+  // ブリッジ不要でDBを取り直す（出品データはGASが公式get_item_listで自動同期している）
+  async function reloadListingsFromDb() {
+    lst.syncing = true; drawListingStatus();
+    try {
+      lst.loaded = false; await ensureListings();
+      if (typeof toast === 'function') toast('🔄 最新の出品データを取得しました（GASが自動同期）');
+    } catch (e) { alert('取得に失敗しました: ' + (e.message || e)); }
+    finally {
+      lst.syncing = false; drawListingStatus();
+      if (lst.tab === 'analysis' && lst.anaSub === 'coverage') { try { renderCoverage(); } catch (_) {} }
+    }
   }
   async function syncListings() {
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
@@ -9118,7 +9130,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const shown = rows.slice((lstPage - 1) * lstPer, lstPage * lstPer);
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
-        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''}>🔄 ${lst.syncing ? '取得中...' : 'Shopeeから更新'}</button>
+        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '出品データはGASが自動同期しています（約30分ごと・数店ずつ）。ここは最新のDBを取り直します'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
         <span class="smd-seg" id="lst-filter">
           <button data-k="all" class="${!lst.filter || lst.filter === 'all' ? 'on' : ''}">すべて</button>
           <button data-k="live" class="${lst.filter === 'live' ? 'on' : ''}">出品中</button>
@@ -9142,7 +9154,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('lst-list').innerHTML = shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>';
     { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(rows.length, lstPer, lstPage); }
     wirePageNav(document.getElementById('lst-more'), p => { lst.page = p; drawListingStatus(); const el = document.getElementById('lst-list'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
-    document.getElementById('lst-sync').addEventListener('click', syncListings);
+    document.getElementById('lst-sync').addEventListener('click', () => {
+      // 🟢ライブPCならShopeeへ直接。そうでなければGASが自動同期したDBを取り直す（ブリッジ不要）
+      if (state.mode === 'live' && settings.sbSecret) syncListings();
+      else reloadListingsFromDb();
+    });
     { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.page = 1; drawListingStatus(); });
     let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.page = 1; drawListingStatus(); }, 200); });
