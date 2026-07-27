@@ -489,7 +489,8 @@
         <button class="smd-btn" id="pf-colbtn">🗂 列</button>
         <div id="pf-colmenu"></div>
       </span>
-      <button class="smd-btn" id="pf-refresh" title="最新に更新">🔄 更新</button>
+      <button class="smd-btn" id="pf-refresh" title="表示を最新に更新（DBを再読み込み）">🔄 更新</button>
+      <button class="smd-btn" id="pf-sheetsync" style="background:#eef4ff;border-color:#1565c0;color:#1565c0;font-weight:700" title="利益計算表(スプシ)を今すぐ取り込む（仕入値/仕入元/在庫No/PayPal差分）。さっき書いた分を即反映。自動でも1時間毎に取込。">📗 スプシ即時取込</button>
       <button class="smd-btn" id="pf-costmatch" style="background:#eef8f0;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="仕入額が未入力の注文に、未紐付けの在庫を名前で照合してワンクリック紐付け（利益・確定申告を埋める）">🔗 仕入れ自動マッチ</button>
       <span class="smd-dim" id="pf-note"></span>
     </div>
@@ -11880,6 +11881,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('pf-nocost').addEventListener('change', e => { pf.nocost = e.target.checked; pfRender(); });
     document.getElementById('pf-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderProfit(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     { const cm = document.getElementById('pf-costmatch'); if (cm) cm.addEventListener('click', () => openCostMatch()); }
+    // 📗 スプシ即時取込：GAS(mercari同期プロジェクト)のdoGetをJSONPで叩き、利益計算表→app_kv.profit_sheetを今すぐ更新→再描画
+    { const sb = document.getElementById('pf-sheetsync'); if (sb) sb.addEventListener('click', () => {
+      const url = 'https://script.google.com/macros/s/AKfycbyOv0ijK4DB8ZJwurLMpCZgmMrjZ5ZW2nIQgvwlSWDp3CIYDtWds5z-hRYLrnsJ6wYC/exec';
+      const orig = sb.textContent; sb.disabled = true; sb.textContent = '⏳ 取込中…';
+      const cb = 'psjsonp' + Date.now();
+      let done = false;
+      const finish = (msg, ok) => { if (done) return; done = true; try { delete window[cb]; } catch (_) {} const s = document.getElementById(cb + '_s'); if (s) s.remove(); sb.disabled = false; sb.textContent = orig; if (ok) { toast('📗 利益計算表を取込みました' + (msg ? '（' + msg + '）' : '')); renderProfit(true); } else { toast('取込失敗: ' + msg, true); } };
+      const to = setTimeout(() => finish('タイムアウト（シートが大きいと数十秒かかります）', false), 90000);
+      window[cb] = (res) => { clearTimeout(to); if (res && res.ok) finish((res.thisRun != null ? res.thisRun + '注文' : ''), true); else finish((res && res.error) || '不明なエラー', false); };
+      const s = document.createElement('script'); s.id = cb + '_s'; s.onerror = () => { clearTimeout(to); finish('通信エラー（要ログイン/権限）', false); };
+      s.src = url + '?action=run_profitsheet&token=' + encodeURIComponent(settings.writeToken || 'shopee_wr_7Xq2') + '&callback=' + cb;
+      document.body.appendChild(s);
+    }); }
     let t;
     document.getElementById('pf-search').addEventListener('input', e => {
       clearTimeout(t);
