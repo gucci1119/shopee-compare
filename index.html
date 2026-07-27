@@ -350,6 +350,11 @@
     .kpi .v { font-size: 17px !important; }
     #smd-acctbar #acct-sel { max-width: 150px; }
   }
+  /* 🎭 デモ表示モード：商品画像をぼかして識別不能に（テキスト系はデータ層で匿名化） */
+  html.smd-demo img { filter: blur(11px) saturate(.6) contrast(.95) !important; }
+  html.smd-demo #demo-banner { display: flex !important; }
+  #demo-banner { position: sticky; top: 31px; z-index: 19; background: linear-gradient(90deg,#f3e8ff,#e7d4ff); border-bottom: 1px solid #b98cff; color: #5b21a6; padding: 7px 20px; font-size: 13px; font-weight: 700; align-items: center; gap: 10px; }
+  #smd-demo-toggle.on { background: #f3e8ff; border-color: #7b52c4; color: #5b21a6; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -400,6 +405,7 @@
     <div id="smd-sidefoot">
       <span id="vac-chip" style="display:none;font-size:12px;padding:4px 10px;border-radius:12px;background:#ffe0b2;color:#b45309;font-weight:700;margin-bottom:6px">🏖 バケーション中</span>
       <span id="smd-mode">起動中...</span>
+      <button id="smd-demo-toggle" class="smd-btn" title="デモ表示モードのON/OFF。ONにすると商品名・SKU・仕入元・顧客名を匿名化し、商品画像をぼかして表示します（人に画面を見せる時用・実データは変更しません）" style="width:100%;font-size:12px">🎭 デモ表示: OFF</button>
       <div style="display:flex;gap:8px;align-items:center">
         <button id="smd-gear" class="smd-btn" title="設定" style="flex:1">⚙️ 設定</button>
         <button id="smd-theme" title="ライト/ダーク/自動 切替" aria-label="テーマ切替（ライト/ダーク/自動）">🌙</button>
@@ -416,6 +422,11 @@
   <div id="setup-banner" style="display:none;position:sticky;top:31px;z-index:19;background:linear-gradient(90deg,#e8f1ff,#d9e6ff);border-bottom:1px solid #9dc0ff;color:#1a3d7c;padding:8px 20px;font-size:13px;font-weight:600;align-items:center;gap:10px;flex-wrap:wrap">
     <span style="font-size:15px">👋</span><span>はじめに：<b>⚙️設定でSupabaseキー</b>を入れると、売上・注文・在庫・利益などのデータが表示されます。（右のボタンから）</span>
     <button id="setup-open" class="smd-btn primary" style="margin-left:auto;font-size:12px;background:#1565c0;border-color:#1565c0;color:#fff;font-weight:700">⚙️ 設定を開く</button>
+  </div>
+  <!-- 🎭 デモ表示バナー：デモモードON時のみ表示（html.smd-demo で display:flex） -->
+  <div id="demo-banner" style="display:none">
+    <span style="font-size:15px">🎭</span><span>デモ表示モード（ダミーデータ）— <b>商品名・SKU・仕入元・顧客名は匿名化、商品画像はぼかし表示</b>です。実データは表示していません。</span>
+    <button id="demo-off" class="smd-btn" style="margin-left:auto;font-size:11px;padding:2px 10px;background:#fff;border-color:#7b52c4;color:#5b21a6;font-weight:700">▶ 通常表示に戻す</button>
   </div>
 
   <!-- ダッシュボード -->
@@ -1526,6 +1537,22 @@
   applyTheme();
   { const tb = document.getElementById('smd-theme'); if (tb) tb.addEventListener('click', () => { let m; try { m = localStorage.getItem('smdTheme') || 'light'; } catch (_) { m = 'light'; } applyTheme(m === 'light' ? 'dark' : m === 'dark' ? 'auto' : 'light'); }); }
   try { if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if ((localStorage.getItem('smdTheme') || 'light') === 'auto') applyTheme('auto'); }); } catch (_) {}
+  // ===== 🎭 デモ表示モードのトグル =====
+  const demoOn = () => { try { return localStorage.getItem('smdDemo') === '1'; } catch (_) { return false; } };
+  function applyDemoUI() {
+    const on = demoOn();
+    document.documentElement.classList.toggle('smd-demo', on);
+    const b = document.getElementById('smd-demo-toggle');
+    if (b) { b.textContent = '🎭 デモ表示: ' + (on ? 'ON' : 'OFF'); b.classList.toggle('on', on); }
+  }
+  function setDemo(on) {
+    try { localStorage.setItem('smdDemo', on ? '1' : '0'); } catch (_) {}
+    // 全ページのキャッシュを確実に破棄して匿名化/実データを取り直すためリロード
+    location.reload();
+  }
+  applyDemoUI();
+  { const d = document.getElementById('smd-demo-toggle'); if (d) d.addEventListener('click', () => setDemo(!demoOn())); }
+  { const o = document.getElementById('demo-off'); if (o) o.addEventListener('click', () => setDemo(false)); }
   // ===== ⌘K / Ctrl+K クイックジャンプ（ページ検索） =====
   // Cmd/Ctrl+K から、ページ検索に加えて「在庫・注文・出品のデータ」まで横断検索して直接ジャンプ
   function jumpSearch(page, inputId, term, setState) {
@@ -2717,6 +2744,60 @@
     } else filt = 'shop_id=eq.' + encodeURIComponent(a);
     return qs ? qs + '&' + filt : filt;
   }
+  // ===== 🎭 デモ表示モード（ダミーデータ）: 商品名/SKU/仕入元/顧客名などを決定的に匿名化 =====
+  // 目的：Shopeeコミュニティ等でポータル全体を見せる時に「利益商品・仕入元」がバレないようにする。
+  // DB読取の単一チョークポイント(sbGet/sbGetAll)でmaskするので下流の描画は自動でダミーになる（idや価格・在庫は保持＝編集や集計は壊さない）。
+  // ※ demoOn はブート時(applyDemoUI)に先に呼ぶため、TDZ回避で上方に定義済み。
+  const _dh = s => { s = String(s == null ? '' : s); let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h; };
+  const _L = h => String.fromCharCode(65 + h % 26);
+  const dmProd = s => (s == null || s === '') ? s : ('サンプル商品 ' + _L(_dh(s)) + '-' + (100 + _dh(s) % 900));
+  const dmSku = s => (s == null || s === '') ? s : ('SKU-' + (_dh('k' + s) % 1000000).toString(36).toUpperCase());
+  const dmSupplier = s => (s == null || s === '') ? s : ('仕入先' + _L(_dh('sp' + s)));
+  const dmBrand = s => (s == null || s === '') ? s : ('ブランド' + _L(_dh('br' + s)));
+  const dmBuyer = s => (s == null || s === '') ? s : ('購入者' + (100 + _dh('by' + s) % 900));
+  const dmName = s => (s == null || s === '') ? s : ('ユーザー' + (100 + _dh('nm' + s) % 900));
+  const dmUrl = u => (u && /^https?:/i.test(String(u))) ? '#demo' : u;
+  const dmText = s => (s == null || s === '') ? s : '（デモ非表示）';
+  // ショップ名は国コード接尾辞(.ph等)を残す＝国別の色分け/フィルタ(famOfLabel/cc判定)を壊さない
+  const dmShop = s => { s = String(s || ''); const m = s.match(/\.(ph|sg|my|br|vn|th|tw)$/i); const suf = m ? m[0] : ''; const base = suf ? s.slice(0, -suf.length) : s; return base ? ('shop' + _L(_dh('sh' + base)) + suf) : s; };
+  const _dfn = { prod: dmProd, sku: dmSku, supplier: dmSupplier, brand: dmBrand, buyer: dmBuyer, name: dmName, text: dmText, url: dmUrl };
+  // テーブル別の匿名化対象フィールド（idや価格・在庫・数量・日時は保持）
+  const DEMO_FIELDS = {
+    listings:        { prod: ['name'], sku: ['parent_sku', 'sku'], url: ['url'], models: { prod: ['n'], sku: ['sku'] } },
+    products:        { prod: ['name', 'title'], sku: ['sku'] },
+    orders:          { buyer: ['buyer'], items: { prod: ['name', 'variation', 'title', 'title_ja'], sku: ['sku'], url: ['url', 'link'] } },
+    inventory:       { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier', 'supplier_name'], url: ['url', 'source_url', 'product_url', 'link', 'photo_url', 'image_url', 'PhotoURL', 'supplier_url'] },
+    listing_catalog: { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier'], url: ['url', 'source_url', 'supplier_url'] },
+    costs:           { prod: ['name', 'title'], sku: ['sku'] },
+    returns:         { buyer: ['buyer'], prod: ['name', 'title', 'variation'], sku: ['sku'] },
+    order_issues:    { buyer: ['buyer'] },
+    customer_notes:  { buyer: ['buyer', 'name'], text: ['note'] },
+    chat_messages:   { buyer: ['buyer', 'sender', 'name', 'to_name', 'user_name'], text: ['text', 'content', 'message', 'last_message', 'body'] },
+  };
+  function _maskObj(o, spec) {
+    if (!o || typeof o !== 'object') return o;
+    const c = { ...o };
+    Object.keys(spec).forEach(kind => {
+      if (kind === 'models' || kind === 'items') return;
+      (spec[kind] || []).forEach(f => { if (c[f] != null) c[f] = _dfn[kind](c[f]); });
+    });
+    ['models', 'items'].forEach(arrKey => { if (spec[arrKey] && Array.isArray(c[arrKey])) c[arrKey] = c[arrKey].map(x => _maskObj(x, spec[arrKey])); });
+    return c;
+  }
+  function maskDemo(table, rows) {
+    if (!demoOn() || !Array.isArray(rows)) return rows;
+    if (table === 'app_kv') return rows.map(r => {
+      if (!r || !r.v || typeof r.v !== 'object') return r;
+      const k = r.k || '', v = r.v; try {
+        if (/^listing_meta/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.note) m.note = dmText(m.note); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+        if (/^listing_specs/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.brand) m.brand = dmBrand(m.brand); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+        if (/^dropship/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.title) m.title = dmProd(m.title); if (m.url) m.url = dmUrl(m.url); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+      } catch (_) {}
+      return r;
+    });
+    const spec = DEMO_FIELDS[table]; if (!spec) return rows;
+    return rows.map(r => _maskObj(r, spec));
+  }
   async function sbGet(table, qs) {
     qs = acctQs(table, qs);
     const key = settings.sbKey || settings.sbSecret;
@@ -2726,7 +2807,7 @@
     // publishable権限が無いテーブル（GRANT漏れ/RLS無効）で401/403の時はservice_roleで再試行
     if (!r.ok && (r.status === 401 || r.status === 403) && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret);
     if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}`);
-    return r.json();
+    return maskDemo(table, await r.json());
   }
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
   // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
@@ -2739,7 +2820,7 @@
     if (first.status === 416) return [];
     if (!first.ok) throw new Error(`DB読取 HTTP ${first.status}`);
     const out = await first.json();
-    if (out.length < 1000) return out; // 1ページで完結
+    if (out.length < 1000) return maskDemo(table, out); // 1ページで完結
     // content-range: "0-999/12345" から総件数を得て残りページを並列取得
     const totalStr = ((first.headers.get('content-range') || '').split('/')[1] || '').trim();
     const total = Number(totalStr);
@@ -2750,7 +2831,7 @@
         fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) })
           .then(r => { if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}（${off}〜。件数不足のまま集計しないため中断）`); return r.json(); })));
       chunks.forEach(c => out.push(...c));
-      return out;
+      return maskDemo(table, out);
     }
     // 総件数不明時は従来どおり逐次で続きを読む（安全策）
     for (let off = 1000; off < 100000; off += 1000) {
@@ -2760,7 +2841,7 @@
       out.push(...rows);
       if (rows.length < 1000) break;
     }
-    return out;
+    return maskDemo(table, out);
   }
 
   async function renderDash(force) {
@@ -5466,7 +5547,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const autoOf = id => autoItems[id] ? autoItems[id].st : null;
       const stOf = id => { const m = cfg.watchStatus[id]; return (m && m !== 'auto') ? m : (autoOf(id) || 'check'); };
       const imgOf = it => { const a = metaOf(it.id); return (a && a.image) || mercdnFromUrl(it.url) || null; };
-      const titleOf = it => { const a = metaOf(it.id); return it.title || (a && a.title) || ''; };
+      const titleOf = it => { const a = metaOf(it.id); const t = it.title || (a && a.title) || ''; return demoOn() ? dmProd(t || it.id) : t; };
+      // 🎭デモ：仕入先URL/サイト名は表示専用でマスク（cfg本体・保存には触れない）
+      const dUrlOf = it => demoOn() ? '#' : it.url;
+      const dUrlDisp = u => demoOn() ? '（デモ非表示・仕入先URL）' : String(u).replace(/^https?:\/\//, '').slice(0, 44);
+      const dSrcOf = u => demoOn() ? '仕入先サイト' : detectSource(u);
       const priceOf = it => { const a = metaOf(it.id); return (a && a.price != null) ? a.price : null; };
       const LBL = { stock: '在庫あり', oos: '売切れ', check: '要確認', unknown: '不明', delisted: '対応済み' };
       const COL = { stock: '#1a7f37', oos: '#d93025', check: '#b26a00', unknown: '#888', delisted: '#5f6368' };
@@ -5506,16 +5591,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const delistBanner = oos.length
         ? `<div style="background:#fdecea;border:1.5px solid #f3b7b0;border-left:4px solid #d93025;border-radius:8px;padding:10px 13px;margin-bottom:12px">
              <div style="font-weight:700;font-size:13px;color:#b71c1c">🚫 取り下げ候補 ${oos.length}件 <span style="font-weight:400;font-size:11px;color:#8a3b34">（仕入先が売切れ＝再仕入不可。紐付けごとに🚫取り下げ or 0️⃣在庫0を実行）</span></div>
-             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(it => { const ls = linksOf(it.id); const btns = ls.length ? ls.map((l, idx) => `<button class="ds-exec" data-id="${esc(it.id)}" data-idx="${idx}" title="Shopee公式APIで${esc(l.cc)}${l.model_name ? '(' + esc(l.model_name) + ')' : ''}を【${actWord(l.action)}】" style="border:1px solid ${l.action === 'stock0' ? '#a8650a' : '#d93025'};background:#fff;color:${l.action === 'stock0' ? '#a8650a' : '#d93025'};border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">${actIcon(l.action)} ${esc(l.cc)}${l.model_name ? '·' + esc(String(l.model_name).slice(0, 6)) : ''} ${actWord(l.action)}</button>`).join(' ') + (ls.length >= 2 ? ` <button class="ds-exec-all" data-id="${esc(it.id)}" title="紐付けた全${ls.length}件をそれぞれの設定(取り下げ/在庫0)で一括実行（売れたら他国も＝二重販売防止）" style="border:1px solid #b71c1c;background:#b71c1c;color:#fff;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🌐 全${ls.length}件実行</button>` : '') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ/在庫0できます</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(titleOf(it) || detectSource(it.url) || 'この商品', '180px')} <a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a><span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(it.id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
+             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${oos.map(it => { const ls = linksOf(it.id); const btns = ls.length ? ls.map((l, idx) => `<button class="ds-exec" data-id="${esc(it.id)}" data-idx="${idx}" title="Shopee公式APIで${esc(l.cc)}${l.model_name ? '(' + esc(l.model_name) + ')' : ''}を【${actWord(l.action)}】" style="border:1px solid ${l.action === 'stock0' ? '#a8650a' : '#d93025'};background:#fff;color:${l.action === 'stock0' ? '#a8650a' : '#d93025'};border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">${actIcon(l.action)} ${esc(l.cc)}${l.model_name ? '·' + esc(String(l.model_name).slice(0, 6)) : ''} ${actWord(l.action)}</button>`).join(' ') + (ls.length >= 2 ? ` <button class="ds-exec-all" data-id="${esc(it.id)}" title="紐付けた全${ls.length}件をそれぞれの設定(取り下げ/在庫0)で一括実行（売れたら他国も＝二重販売防止）" style="border:1px solid #b71c1c;background:#b71c1c;color:#fff;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">🌐 全${ls.length}件実行</button>` : '') : `<span class="smd-dim" style="font-size:10px">🔗紐付けすると公式APIで取り下げ/在庫0できます</span>`; return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #f0c4bf;border-radius:8px;padding:5px 9px;font-size:11px">🚫 ${nm(titleOf(it) || dSrcOf(it.url) || 'この商品', '180px')} <a href="${esc(dUrlOf(it))}" target="_blank" rel="noopener" style="color:#1565c0;font-size:10px">仕入先↗</a><span style="margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center">${btns} <button class="ds-delisted" data-id="${esc(it.id)}" title="取り下げ済みとして候補から外す" style="border:1px solid #1a7f37;background:#eafaf0;color:#1a7f37;border-radius:12px;padding:2px 9px;font-size:10.5px;cursor:pointer;font-weight:700">✓済</button></span></div>`; }).join('')}</div>
              <div class="smd-dim" style="font-size:10.5px;margin-top:7px">🚫取り下げ=unlist_item（新規の純無在庫向け）／0️⃣在庫0=update_stock（<b>既に売れている商品はこちら＝取り下げ/削除されない</b>。単品/特定明細に対応）。実行前に確認あり・⚙️設定にOpenAPI URL/WRITE_TOKENが必要。紐付け無しは「✓済」で手動記録。</div>
            </div>`
         : '';
       const rows = items.length
         ? lastChk + delistBanner + `<div class="pf-scroll"><table class="pf-table" style="min-width:880px">
              <tr><th>画像</th><th>商品（URL）</th><th>仕入元</th><th>仕入値</th><th>仕入先在庫（🤖自動/手動）</th><th>Shopee出品(紐付)</th><th></th></tr>
-             ${items.map(it => { const src = detectSource(it.url); return `<tr>
+             ${items.map(it => { const src = dSrcOf(it.url); return `<tr>
                <td>${imgBox(imgOf(it))}</td>
-               <td style="font-size:12px">${titleOf(it) ? nm(titleOf(it), '210px') : '<span class="smd-dim">（出品作成時にタイトル取得）</span>'}<br><a href="${esc(it.url)}" target="_blank" rel="noopener" style="font-size:10px;color:#1565c0" title="仕入先ページを開く">${esc(String(it.url).replace(/^https?:\/\//, '').slice(0, 44))}↗</a></td>
+               <td style="font-size:12px">${titleOf(it) ? nm(titleOf(it), '210px') : '<span class="smd-dim">（出品作成時にタイトル取得）</span>'}<br><a href="${esc(dUrlOf(it))}" target="_blank" rel="noopener" style="font-size:10px;color:#1565c0" title="仕入先ページを開く">${esc(dUrlDisp(it.url))}↗</a></td>
                <td style="font-size:11px">${src ? supplierNameCell(src) : '<span class="smd-dim">—</span>'}</td>
                <td style="font-size:12px">${priceOf(it) != null ? '¥' + Number(priceOf(it)).toLocaleString() : '<span class="smd-dim">—</span>'}</td>
                <td>${statusSel(it)}${autoBadge(it)}</td>
@@ -13005,6 +13090,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!Array.isArray(rows)) rows = [];
     } catch (_) { rows = []; }
+    if (demoOn()) rows = rows.map(a => ({ ...a, label: dmShop(a.label) }));  // 🎭デモ：ショップ名を匿名化（国コードは保持）
     state.accounts = rows; return rows;
   }
   // 系統名（gcsonlinestore等）＝ラベルから末尾の.国コードを除去
