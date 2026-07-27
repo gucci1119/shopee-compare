@@ -483,7 +483,7 @@
         <option value="completed">完了</option>
       </select>
       <label style="font-size:12.5px"><input type="checkbox" id="pf-nocost"> 仕入額未入力のみ</label>
-      <label style="font-size:12.5px" title="🔒ON＝スプシ実額(①手入力/②📗計算表)がある注文だけで粗利を計算。③在庫連携の推定原価は除外＝到着待ち等の仕入未確定を混ぜない＝スプシの粗利に一致しやすい。OFF＝③も含む従来集計。"><input type="checkbox" id="pf-strictcost"> 🔒確定仕入のみ</label>
+      <label style="font-size:12.5px" title="🔒ON＝在庫No（Stock No.）が付いた注文だけで粗利を計算＝仕入れた実物が到着し在庫台帳に載った「確定分」のみ。到着待ち（在庫No未）は除外＝スプシの粗利に近づく。OFF＝在庫No無しも含む従来集計。"><input type="checkbox" id="pf-strictcost"> 🔒到着済(在庫No)のみ</label>
       <label style="font-size:12.5px"><input type="checkbox" id="pf-showcancel"> キャンセル・未払いも表示</label>
       <input type="text" id="pf-search" placeholder="商品名・バイヤー・注文番号">
       <span style="position:relative">
@@ -12109,15 +12109,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const pfInv = o => (pf.invMap && pf.invMap.get(o.sn)) || [];
   const pfSheet = o => (pf.sheetMap && pf.sheetMap[o.cc + ':' + o.sn]) || null;  // 📗利益計算表の取り込み値（Order ID突合）
   const pfPaypal = o => { const s = pfSheet(o); return (s && Number(s.paypal_yen)) || 0; };  // PayPal差分(円)＝追加入金。大半0
-  const pfCost = (o, strict) => {
+  const pfCost = o => {
     const cm = pf.costMap.get(o.cc + ':' + o.sn);
     if (cm && cm.cost != null) return cm.cost;         // ①ポータル手入力/確定が最優先
     const sh = pfSheet(o); if (sh && Number(sh.cost) > 0) return Number(sh.cost);  // ②利益計算表(スプシ)の仕入値(税込)
-    // 🔒確定仕入モード：①手入力/②スプシ実額が無ければ「未確定」＝③在庫連携の推定原価は使わない（到着待ち等を粗利に混ぜない＝スプシの粗利に一致しやすい）
-    if (strict == null ? pf.strictCost : strict) return null;
     const inv = pfInv(o).filter(it => it.price != null);
     return inv.length ? inv.reduce((s, it) => s + it.price, 0) : null;  // ③在庫連携
   };
+  // 在庫No（Stock No.）が付いているか＝仕入れた実物が到着し在庫台帳に載った注文（到着待ちはstock_no空）。📗スプシ取込のstock_no配列 or 紐付いた在庫で判定。
+  const pfStock = o => { const sh = pfSheet(o); return !!((sh && Array.isArray(sh.stock_no) && sh.stock_no.length) || pfInv(o).length); };
   const pfManualCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
   const pfMeta = o => pf.costMap.get(o.cc + ':' + o.sn) || null; // 注文メタ（cost_at/self_transit_at/wb_*）
   // 自宅→Shopee Japan倉庫へ手動で「発送済(未スキャン)」にした注文か（スキャンされ輸送中になったら自動で解除扱い）
@@ -12126,7 +12126,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🔗 仕入れ自動マッチ：仕入額未入力の注文に、未紐付け在庫を名前で照合→shopee_sn紐付けで仕入額を流し込む
   async function openCostMatch() {
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定でキーを入れてください）'); return; }
-    const need = (pf.orders || []).filter(o => o.tab !== 200 && o.tab !== 600 && pfCost(o, false) == null);
+    const need = (pf.orders || []).filter(o => o.tab !== 200 && o.tab !== 600 && pfCost(o) == null);
     const ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
     ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:920px;max-width:97vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
@@ -12197,7 +12197,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return pf.orders.filter(o => {
       if (!pf.showCancel && (o.tab === 200 || o.tab === 600)) return false; // 純オーダーのみ（既定）
       if (pf.cc && o.cc !== pf.cc) return false;
-      if (pf.nocost && pfCost(o, false) != null) return false; // 「仕入額未入力のみ」＝仕入額(手入力/確定 or 在庫連携)がまだ無い注文（確定モードに依存しない）
+      if (pf.nocost && pfCost(o) != null) return false; // 「仕入額未入力のみ」＝仕入額(手入力/確定 or 在庫連携)がまだ無い注文
       if (pf.depFilter) {
         const d = pfDepInfo(o);
         if (pf.depFilter === 'none' && d) return false;
@@ -12224,7 +12224,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (o.tab === 200 || o.tab === 600) return; // 未払い/キャンセルは粗利に含めない（絞り込みトグルに関係なく）
       const rg = regionByCc(o.cc); if (!rg) return;
       const di = pfDepInfo(o), dep = di ? di.amt : null, cost = pfCost(o);
-      if (dep != null && cost != null) { g += dep * rg.rateJpy - cost; n++; if (di.fixed) fixN++; else provN++; }
+      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { g += dep * rg.rateJpy - cost; n++; if (di.fixed) fixN++; else provN++; }
     });
     return { total: g, n: n, fixN: fixN, provN: provN };
   }
@@ -12336,10 +12336,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (cost != null) tCost += cost;
       if (ppl > 0) tPpl += ppl;
       // 粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算。全く無い注文は利益計算未完了＝空欄。
-      const profit = (dep != null && cost != null) ? (depJpy + ppl - cost) : null;
+      // 🔒到着済のみモード＝在庫Noが無い注文（＝仕入れた実物が到着待ち）は粗利計算から除外
+      const stockOk = !pf.strictCost || pfStock(o);
+      const profit = (dep != null && cost != null && stockOk) ? (depJpy + ppl - cost) : null;
       if (profit != null) { pairProfit += profit; pairN++; pairDep += depJpy + ppl; pairCost += cost; if (depInfo && depInfo.fixed) pairFixN++; else pairProvN++; }
-      // 🔒確定モードで「入金あり＆③在庫連携なら原価が付くのに、確定原価が無いため除外した」注文数（＝スプシに未入力＝到着待ち等）
-      else if (pf.strictCost && dep != null && cost == null && pfCost(o, false) != null) strictSkipN++;
+      // 🔒到着済のみモードで「入金も原価も判明しているのに、在庫No無し(到着待ち)のため除外した」注文数
+      else if (pf.strictCost && dep != null && cost != null && !pfStock(o)) strictSkipN++;
       const items = (o.items && o.items.length) ? o.items : [{}];
       const rate = (profit != null && cost) ? Math.round(profit / cost * 100) : null; // ROI = 粗利 ÷ 仕入額(投資)
       const invAssign = assignInv(o, invs); // まとめ買い: 在庫を商品行に割当
@@ -12449,7 +12451,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     html = pfFeePanelHtml(orders) + html;
     // ※ pf.grossTotal はpfRender冒頭でpfMonthGross()から確定済み（絞り込みに依存させない）。ここの pairProfit は表の「合計」行=絞り込み後の表示用。
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
-      `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${pf.strictCost ? `<b style="color:#1565c0">🔒確定仕入のみ表示中</b>（③在庫連携の推定原価は除外＝スプシの粗利に一致しやすい）。${strictSkipN ? `<b style="color:#c5760a">仕入未確定 ${strictSkipN}件を粗利から除外中</b>（到着待ち等）。` : ''}` : ''}粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。<b>仕入額の優先＝①手入力 ＞ ②📗利益計算表(スプシ)の取込${pf.strictCost ? '' : ' ＞ ③在庫連携🏷'}</b>。<b>粗利＝(Shopee入金＋PayPal差分)−仕入</b>（PayPal差分は主にBR・大半0）。仕入額が全く無い注文は空欄。キャンセルはグレー表示。列幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」。</div></div>`;
+      `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${pf.strictCost ? `<b style="color:#1565c0">🔒到着済(在庫No)のみ表示中</b>（在庫Noが付いた＝到着し在庫台帳に載った注文だけで粗利計算）。${strictSkipN ? `<b style="color:#c5760a">到着待ち ${strictSkipN}件を粗利から除外中</b>（在庫No未＝実物未着）。` : ''}` : ''}粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。<b>仕入額の優先＝①手入力 ＞ ②📗利益計算表(スプシ)の取込 ＞ ③在庫連携🏷</b>。<b>粗利＝(Shopee入金＋PayPal差分)−仕入</b>（PayPal差分は主にBR・大半0）。仕入額が全く無い注文は空欄。キャンセルはグレー表示。列幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」。</div></div>`;
     body.innerHTML = html;
     fitScroll('profit');
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
@@ -12563,7 +12565,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
       if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
       if (cost != null) { p.costJpy += cost; p.costN++; }
-      if (dep != null && cost != null) { p.pair += dep * rg.rateJpy - cost; p.pairN++; }
+      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * rg.rateJpy - cost; p.pairN++; }
     });
     let rowsHtml = '';
     let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0;
