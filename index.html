@@ -7224,20 +7224,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const { check } = await detectActiveAndCheck(targets);
     if (!check.ok) { state.rawRead = false; activeShopByCc = {}; lst.syncing = false; lst.note = ''; drawListingStatus(); alert('【出品同期を中止】\n' + check.msg); return; }
     if (check.summary) { lst.note = '対象: ' + check.summary.split('\n')[0].split(' ')[0] + '…'; drawListingStatus(); }
+    const skippedEmpty = [];
     for (const region of targets) {
       lst.note = region.cc + ' 取得中...'; const nb = document.getElementById('lst-note'); if (nb) nb.textContent = '🔄 ' + lst.note;
       try {
         const rows = await fetchListingsCountry(region, (n, total) => { const e = document.getElementById('lst-note'); if (e) e.textContent = `🔄 ${region.cc} ${n}/${total}`; });
+        // ★空取得ガード：ライブが0件を返しても、既存(DB由来)の在庫を持っている国は上書き消去しない。
+        //   （ブリッジ不調/Shopeeログイン切れ等で全国0になり「出品が消えた！」と誤認する事故を防ぐ。DBは6千件あるのに画面だけ空になる）
+        if ((!rows || rows.length === 0) && ((lst.byCc[region.cc] || []).length > 0)) {
+          skippedEmpty.push(region.cc);
+          lst.note = region.cc + ' 取得0件→既存データを保持（スキップ）'; drawListingStatus();
+          continue;
+        }
         for (let i = 0; i < rows.length; i += 500) await sbUpsert('listings', rows.slice(i, i + 500));
         lst.byCc[region.cc] = rows; drawListingStatus();
       } catch (e) { lst.note = region.cc + ' 失敗: ' + e.message; drawListingStatus(); }
+    }
+    // 全国が0件スキップ＝ライブ取得がまるごと失敗（ブリッジ/ログイン）。既存表示は保持したまま原因を知らせる。
+    if (skippedEmpty.length && skippedEmpty.length === targets.length) {
+      alert('⚠️ ライブ取得が全国で0件でした（ブリッジ未接続 or Shopeeログイン切れの可能性）。\n既存の出品表示はそのまま保持しています（消えていません）。\nブリッジ/ログインを確認して再度「🔄最新に更新」を実行してください。');
     }
     state.rawRead = false; activeShopByCc = {};
     // 新データに入れ替わったので：シリーズ分類を計算し直し＋カバレッジのキャッシュ(古い出品を指すと危険)を破棄
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }));
     lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
     try { localStorage.setItem('smdListSync', String(Date.now())); } catch (_) {}
-    lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP'); drawListingStatus();
+    lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP') + (skippedEmpty.length ? `（${skippedEmpty.join('/')}は0件のため既存保持）` : ''); drawListingStatus();
   }
   // 出品データの最終同期時刻（ポータル表示は前回同期時点。編集はShopeeへ即時反映）
   function listSyncStr() {
