@@ -4991,7 +4991,17 @@
     }
     return null;
   }
-  const WAIT_PHASE = { delivered: { t: '✅ 到着済', bg: '#e8f5e9', c: '#2e7d32' }, likely: { t: '🟡 到着済見込み', bg: '#fff8e1', c: '#b26a00' }, out: { t: '🚚 配達中', bg: '#fff3e0', c: '#e65100' }, eta: { t: '📅 到着予定', bg: '#e3f2fd', c: '#1565c0' }, transit: { t: '📦 追跡中', bg: '#eef2ff', c: '#3949ab' }, none: { t: '❔ 手配待ち', bg: '#f3f4f6', c: '#6b7280' } };
+  const WAIT_PHASE = { delivered: { t: '✅ 到着済', bg: '#e8f5e9', c: '#2e7d32' }, likely: { t: '🟡 到着済見込み', bg: '#fff8e1', c: '#b26a00' }, out: { t: '🚚 配達中(お近く)', bg: '#fff3e0', c: '#e65100' }, arrived: { t: '🏣 配達店到着', bg: '#e0f2f1', c: '#00695c' }, eta: { t: '📅 到着予定', bg: '#e3f2fd', c: '#1565c0' }, linehaul: { t: '🚛 輸送中', bg: '#ede7f6', c: '#4527a0' }, shipped: { t: '📮 発送済', bg: '#e8eaf6', c: '#283593' }, transit: { t: '📦 追跡中', bg: '#eef2ff', c: '#3949ab' }, none: { t: '❔ 手配待ち', bg: '#f3f4f6', c: '#6b7280' } };
+  // 配送業者の最新ステータス文言(ds)＋メルカリ由来(di)→配送段階に分類。発送直後/輸送中/配達店到着/配達中を区別（追跡中を細かく）
+  const stageOf = (ds, di) => {
+    const s = String(ds || ''), d = String(di || '');
+    if (/(配達完了|お届け.*済|投函完了|受取)/.test(s) || /^(配達済|受取|お受け取り|お届け済)/.test(d)) return 'delivered';
+    if (/(持ち出し|配達中|配達のため|お届けにあが)/.test(s) || /^配達中/.test(d)) return 'out';
+    if (/(到着|お届け先|最寄|配達担当|配達店)/.test(s)) return 'arrived';
+    if (/(輸送中|作業店通過|中継|通過|センター|発送)/.test(s) || /輸送中|中継/.test(d)) return 'linehaul';
+    if (/(荷物受付|受付|引受|集荷|発送済)/.test(s) || /^(引受|発送)/.test(d)) return 'shipped';
+    return '';
+  };
   // 仕入元別「これ以上経ったら到着済とみなす」日数。Amazon等の即配は短く、フリマ/オークションは長め。想定超過＝配達中/追跡中/音沙汰なしでも「到着済見込み」に格上げ（例: Amazon梱包資材が数日「配達中」のまま＝実際は届いている）
   const WAIT_EXP_DAYS = { 'Amazon': 3, '楽天': 4, 'Yahoo!ショッピング': 4, 'セカストオンライン': 4, 'オフモール': 4, 'Nintendo Store': 5, 'メルカリ': 6, 'メルカリShops': 6, 'ヤフオク': 7, 'Yahoo!フリマ': 7 };
   // 配送方法(ship_method)→運送会社バッジ。らくらく=ヤマト(緑)/ゆうゆう=日本郵便(青)/郵便(灰)
@@ -5020,9 +5030,13 @@
       const etaCand = parseEtaDate(r.delivery_eta || '') || (!/^(引受|到着|発送)/.test(di) ? parseEtaDate(di) : null);
       const futureEta = (etaCand && etaCand >= todayStr) ? etaCand : null;
       let phase, eta = null;
-      if (/(配達完了|お届け.*済|投函完了|受取)/.test(ds) || /^(配達済|受取|お受け取り|お届け済)/.test(di)) phase = 'delivered';
-      else if (/(持ち出し|配達中|配達店)/.test(ds) || /^配達中/.test(di)) phase = 'out';
-      else if (futureEta) { phase = 'eta'; eta = futureEta; }       // 未来のお届け予定日＝到着予定
+      const st = stageOf(ds, di);
+      if (st === 'delivered') phase = 'delivered';
+      else if (st === 'out') phase = 'out';                          // 持ち出し中＝お近くで配達中
+      else if (st === 'arrived') phase = 'arrived';                  // 配達店/最寄局に到着＝まもなく配達
+      else if (futureEta) { phase = 'eta'; eta = futureEta; }        // 未来のお届け予定日＝到着予定
+      else if (st === 'linehaul') phase = 'linehaul';               // 輸送中（作業店通過/中継）
+      else if (st === 'shipped') phase = 'shipped';                 // 発送済・受付直後
       else if (ds || di || r.tracking_no || r.ship_method) phase = 'transit';
       else phase = 'none';
       // 配送業者の新鮮なデータが無い時だけ、想定日数超で「到着済見込み」に格上げ（例：Amazon＝追跡連携なし）
@@ -5030,7 +5044,7 @@
       return { r, ds, di, pd, pdays, phase, eta, expDays };
     });
     // 到着予定＝これから来る物（配達中→予定日→追跡中）を上に。到着済/見込み（=要確認の片付けの山）は下、手配待ちは最下。
-    const G = { out: 0, eta: 1, transit: 2, delivered: 3, likely: 4, none: 5 };
+    const G = { out: 0, arrived: 1, eta: 2, linehaul: 3, shipped: 4, transit: 5, delivered: 6, likely: 7, none: 8 };
     list.sort((a, b) => (G[a.phase] !== G[b.phase]) ? G[a.phase] - G[b.phase] : (a.phase === 'eta' ? (a.eta || '').localeCompare(b.eta || '') : (b.pdays || 0) - (a.pdays || 0)));
     const cnt = p => list.filter(x => x.phase === p).length;
     const overdue = list.filter(x => x.phase === 'eta' && x.eta < todayStr).length;
@@ -5043,10 +5057,15 @@
     const etaTxt = x => {
       if (x.phase === 'delivered') { const da = deliveredAt(x.r); const lt = (da && x.pd) ? daysTo(x.pd, receivedDay(da)) : null; return `<b style="color:#2e7d32">到着済</b>${da ? `<br><span style="font-size:10px;color:#2e7d32">📥 ${esc(da)}</span>${lt != null && lt >= 0 ? `<br><span class="smd-dim" style="font-size:9.5px">仕入から${lt}日で到着</span>` : ''}` : (x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : '')}`; }
       if (x.phase === 'likely') return `<b style="color:#b26a00">届いてるかも</b><br><span class="smd-dim" style="font-size:10px">${x.pdays}日経過${x.di ? '・' + esc(x.di) : ''}</span>`;
-      if (x.phase === 'out') return `<b style="color:#e65100">配達中（本日）</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
+      if (x.phase === 'out') return `<b style="color:#e65100">配達中（本日中・お近く）</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
+      if (x.phase === 'arrived') return `<b style="color:#00695c">まもなく配達</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
-      const s = x.ds || x.di; // 追跡中：配送業者の最新状態（輸送中/作業店通過 等）を表示
-      return s ? `<span style="color:#3949ab;font-weight:600">${esc(s)}</span>` : '<span class="smd-dim">—</span>';
+      if (x.phase === 'linehaul') return `<b style="color:#4527a0">輸送中</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
+      if (x.phase === 'shipped') return `<b style="color:#283593">発送済</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : (x.di ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.di)}</span>` : '')}`;
+      const s = x.ds || x.di; // 追跡中：配送業者の最新状態が無い＝番号未取得/未反映
+      if (s) return `<span style="color:#3949ab;font-weight:600">${esc(s)}</span>`;
+      if (x.r.tracking_no) return '<span class="smd-dim" style="font-size:10.5px" title="追跡番号はあるが配送業者の最新状態を未取得（次回の追跡同期で反映）">追跡取得待ち</span>';
+      return '<span class="smd-dim" style="font-size:10.5px" title="追跡番号が未取得（メルカリ等の発送後にサイト側で番号が付く／定形外は追跡なし）">追跡番号なし</span>';
     };
     // 配送セル：運送会社バッジ＋追跡番号リンク＋現在地＋「▾履歴」（発送/中継局/センター/到着/配達の全スキャンをタイムライン展開）
     const deliveryCell = (r, idx) => {
@@ -5066,7 +5085,7 @@
     };
     host.innerHTML =
       `<div style="margin:0 4px 8px;font-size:12px">入庫待ち <b>${list.length}</b>件 ・ 仕入額 ${fmtJpy(val)}　` +
-      chip('✅到着済', cnt('delivered'), '#2e7d32') + chip('🟡到着済見込み', cnt('likely'), '#b26a00') + chip('🚚配達中', cnt('out'), '#e65100') + chip('📅予定あり', cnt('eta'), '#1565c0') + chip('📦追跡中', cnt('transit'), '#3949ab') + chip('❔手配待ち', cnt('none'), '#6b7280') +
+      chip('✅到着済', cnt('delivered'), '#2e7d32') + chip('🟡到着済見込み', cnt('likely'), '#b26a00') + chip('🚚配達中', cnt('out'), '#e65100') + chip('🏣配達店到着', cnt('arrived'), '#00695c') + chip('📅予定あり', cnt('eta'), '#1565c0') + chip('🚛輸送中', cnt('linehaul'), '#4527a0') + chip('📮発送済', cnt('shipped'), '#283593') + chip('📦追跡中', cnt('transit'), '#3949ab') + chip('❔手配待ち', cnt('none'), '#6b7280') +
       `<br><span class="smd-dim">${cnt('likely') ? `🟡 <b style="color:#b26a00">${cnt('likely')}</b>件は想定日数を超過＝届いている可能性大（「✓入荷」で在庫へ）` : '長期未着なし'}${overdue ? ` ・ 到着予定超過 <b style="color:#d93025">${overdue}</b>件` : ''} ・ 追跡番号クリックで配送業者ページ（現在地）へ</span></div>` +
       `<div style="margin:0 4px 8px"><button class="smd-btn" id="wait-alert" style="${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済・到着済見込み・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
@@ -5077,7 +5096,7 @@
         `<td><span style="background:${ph.bg};color:${ph.c};font-weight:700;font-size:10.5px;padding:2px 7px;border-radius:11px;white-space:nowrap">${ph.t}</span></td>` +
         `<td style="font-size:12px;white-space:nowrap">${etaTxt(x)}</td>` +
         `<td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>` +
-        `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').slice(5).replace('-', '/') || '—')}<br><b style="color:${(x.pdays || 0) >= (x.expDays || 6) ? '#d93025' : '#5f6368'}">${x.pdays == null ? '' : x.pdays + '日'}</b></td>` +
+        `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').replace(/-/g, '/') || '—')}<br><b style="color:${(x.pdays || 0) >= (x.expDays || 6) ? '#d93025' : '#5f6368'}">${x.pdays == null ? '' : x.pdays + '日'}</b></td>` +
         `<td style="font-size:11px">${nm(r.name, '260px')}</td>` +
         `<td style="font-size:10.5px">${esc(r.supplier || '')}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
         `<td style="font-size:11px;white-space:nowrap">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
@@ -5746,15 +5765,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const adjComp = new Map();    // cc:sn → 補償合計(円)
     const adjCompLoc = new Map(); // cc:sn → 補償合計(現地通貨)
     const adjCompScen = new Map();// cc:sn → 種類（荷物未着 等）
+    const adjCompPay = new Map(); // cc:sn → 補償の入金日(payout_time・最新)
     const adjByCc = {};           // cc → { comp, duty }（円）
     adjustmentsU.forEach(a => {
       const rate = adjRate(a.cc); if (!rate) return; // レート不明の国は集計に入れない
       const loc = Number(a.amount) || 0, jpy = Math.round(loc * rate);
-      if (a.kind === 'compensation' && a.order_sn) { const key = a.cc + ':' + a.order_sn; adjComp.set(key, (adjComp.get(key) || 0) + jpy); adjCompLoc.set(key, (adjCompLoc.get(key) || 0) + loc); if (!adjCompScen.has(key)) adjCompScen.set(key, scenJa(a.module || a.scenario || '')); }
+      if (a.kind === 'compensation' && a.order_sn) { const key = a.cc + ':' + a.order_sn; adjComp.set(key, (adjComp.get(key) || 0) + jpy); adjCompLoc.set(key, (adjCompLoc.get(key) || 0) + loc); if (!adjCompScen.has(key)) adjCompScen.set(key, scenJa(a.module || a.scenario || '')); if (a.payout_time) { const cur = adjCompPay.get(key) || 0; if (Number(a.payout_time) > cur) adjCompPay.set(key, Number(a.payout_time)); } }
       const b = adjByCc[a.cc] = adjByCc[a.cc] || { comp: 0, duty: 0 };
       if (a.kind === 'compensation') b.comp += jpy; else if (a.kind === 'duty') b.duty += jpy;
     });
     const fmtLoc2 = (cc, v) => { const rg = regionByCc(cc) || {}; return (rg.cur || '') + Math.round(v).toLocaleString(); }; // 現地通貨表示
+    // epoch(秒/ms両対応)→日付。返品リクエストの申請/承認日・補償の入金日の一覧表示用
+    const fmtEpMD = t => { t = Number(t || 0); if (!t) return ''; const d = new Date(t < 1e11 ? t * 1000 : t); return (d.getMonth() + 1) + '/' + d.getDate(); };
     const compAutoTotal = Object.values(adjByCc).reduce((s, b) => s + b.comp, 0);
     const dutyTotal = Object.values(adjByCc).reduce((s, b) => s + b.duty, 0);
     // Shopee注文APIのキャンセル理由(英語)→日本語。末尾の [system]/[buyer]/[seller] は誰がの表示に。
@@ -5811,6 +5833,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (rsns.length) { try { const ro = await sbGetAll('orders', 'select=cc,sn,buyer,items&sn=in.(' + rsns.map(s => '"' + s + '"').join(',') + ')'); (ro || []).forEach(o => retOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {} }
     }
     const retRefundJpy = r => { const rate = adjRate(r.cc); return rate ? Math.round((Number(r.refund_amount) || 0) * rate) : 0; };
+    // 返品リクエスト(returns)を注文SNで逆引き→返金・補償タブに「申請日/承認(更新)日/状態」を出す。cc:sn 一致（複数あれば最新update_time）
+    const retByOrderSn = new Map();
+    formalReturns.forEach(r => { if (!r.order_sn) return; const key = (r.cc || '') + ':' + r.order_sn; const ut = Number(r.update_time || r.create_time || 0); const prev = retByOrderSn.get(key); if (!prev || ut > (prev._ut || 0)) retByOrderSn.set(key, { status: r.status, create_time: r.create_time, update_time: r.update_time, _ut: ut }); });
     const rtab = renderReturns._tab || 'refund';
     const rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows;
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
@@ -5836,7 +5861,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td>${o._comp ? `<span style="font-size:11px;color:#188038;white-space:nowrap">🎁 ${esc(adjCompScen.get(o.cc + ':' + o.sn) || '補償')}</span>` : `<input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px">`}</td>
         <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
-        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+補償の受取（payout明細から自動検知／手動記入）">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅自動検知</span>`; return '<span class="smd-dim">—</span>'; })()}</td>
+        <td style="font-size:10.5px;white-space:nowrap;text-align:center" title="買い手がアプリから正式申請した返品/返金リクエスト（Shopee returns）。申請日→承認/更新日と状態">${(() => { const r = retByOrderSn.get(o.cc + ':' + o.sn); if (!r) return '<span class="smd-dim">—</span>'; const ap = fmtEpMD(r.update_time), rq = fmtEpMD(r.create_time); return `<span style="color:${retStatusColor(r.status)};font-weight:700">${esc(retStatusJa(r.status))}</span>${ap ? `<br><span title="承認/更新日">承認 ${ap}</span>` : ''}${rq ? `<br><span class="smd-dim" style="font-size:9px">申請 ${rq}</span>` : ''}`; })()}</td>
+        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+半額保証の受取（payout明細から自動検知／手動記入）＋入金日">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; const pay = adjCompPay.get(o.cc + ':' + o.sn); const payTxt = pay ? `<br><span style="color:#1a7f37;font-size:9px" title="補償の入金日(payout)">💰${fmtEpMD(pay)} 入金</span>` : ''; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動${iss.comp_date ? ' ' + esc(String(iss.comp_date).slice(5)) : ''}</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅保証済</span>${payTxt}`; return '<span class="smd-dim">—</span>'; })()}</td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"></td>
       </tr>`;
@@ -5978,8 +6004,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn" id="ret-add">＋ 追加</button>
         <span id="ret-msg" class="smd-dim" style="font-size:12px"></span></div></div>`;
     const tableBlock =
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1320px">` +
-      `<tr><th>国</th><th>画像</th><th>注文SN</th><th>日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="SLS+補償の受取。payout明細から自動検知(✅)＋手動記入(✍)">補償</th><th>再出品</th><th>メモ</th></tr>` +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1440px">` +
+      `<tr><th>国</th><th>画像</th><th>注文SN</th><th title="注文日">日時</th><th>バイヤー</th><th>商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="買い手が正式申請した返品/返金リクエストの申請日→承認/更新日と状態">返金<br>リクエスト</th><th title="SLS+半額保証の受取。payout明細から自動検知(✅保証済)＋入金日／手動記入(✍)">補償<br>(入金日)</th><th>再出品</th><th>メモ</th></tr>` +
       (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">${rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。'}</td></tr>`) +
       `</table></div></div>` +
       pageNav(rowsView.length, retPer, retPage);
