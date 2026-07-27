@@ -118,3 +118,16 @@ function parseYamato_(html) {
   var L = hist[hist.length - 1];
   return { status: L.s, when: L.t, place: L.p, eta: eta, history: hist };
 }
+
+// ===== 追跡同期トリガーを「1時間ごと」に張り直す（頻度アップ）=====
+// 使い方：この関数を Apps Script で1回 Run するだけ。既存の syncTracking トリガーを全削除→1時間ごとで作り直す。
+// ※ ScriptApp のトリガー操作は UI より確実（実行中ロックや関数ピッカーの不具合を回避）。
+function setupTrackingTrigger() {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'syncTracking') { ScriptApp.deleteTrigger(t); removed++; }
+  });
+  ScriptApp.newTrigger('syncTracking').timeBased().everyHours(1).create();
+  Logger.log('旧トリガー ' + removed + '件を削除し、syncTracking を1時間ごとに設定しました。');
+  return '旧' + removed + '件削除→1時間ごとに設定';
+}
