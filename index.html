@@ -425,7 +425,7 @@
   </div>
   <!-- 🎭 デモ表示バナー：デモモードON時のみ表示（html.smd-demo で display:flex） -->
   <div id="demo-banner" style="display:none">
-    <span style="font-size:15px">🎭</span><span>デモ表示モード（ダミーデータ）— <b>商品名・SKU・仕入元・顧客名は匿名化、商品画像はぼかし表示</b>です。実データは表示していません。</span>
+    <span style="font-size:15px">🎭</span><span>デモ表示モード（ダミーデータ）— <b>商品名・SKU・仕入元・顧客名は匿名化、売上・入金・利益などの金額はイメージ値、商品画像はぼかし</b>。実データは表示していません。</span>
     <button id="demo-off" class="smd-btn" style="margin-left:auto;font-size:11px;padding:2px 10px;background:#fff;border-color:#7b52c4;color:#5b21a6;font-weight:700">▶ 通常表示に戻す</button>
   </div>
 
@@ -2760,17 +2760,23 @@
   const dmText = s => (s == null || s === '') ? s : '（デモ非表示）';
   // ショップ名は国コード接尾辞(.ph等)を残す＝国別の色分け/フィルタ(famOfLabel/cc判定)を壊さない
   const dmShop = s => { s = String(s || ''); const m = s.match(/\.(ph|sg|my|br|vn|th|tw)$/i); const suf = m ? m[0] : ''; const base = suf ? s.slice(0, -suf.length) : s; return base ? ('shop' + _L(_dh('sh' + base)) + suf) : s; };
-  const _dfn = { prod: dmProd, sku: dmSku, supplier: dmSupplier, brand: dmBrand, buyer: dmBuyer, name: dmName, text: dmText, url: dmUrl };
+  // 金額もイメージ化：全金額を決定的係数でスケール（比率・整合は保ったまま実額を隠す＝売上/入金/利益がリアルな見た目のダミーに）
+  const DEMO_MONEY_K = 0.73;
+  const dmMoney = n => { const v = Number(n); if (isNaN(v) || v === 0) return n; return Math.round(v * DEMO_MONEY_K * 100) / 100; };
+  const _dfn = { prod: dmProd, sku: dmSku, supplier: dmSupplier, brand: dmBrand, buyer: dmBuyer, name: dmName, text: dmText, url: dmUrl, money: dmMoney };
   // テーブル別の匿名化対象フィールド（idや価格・在庫・数量・日時は保持）
   const DEMO_FIELDS = {
-    listings:        { prod: ['name'], sku: ['parent_sku', 'sku'], url: ['url'], models: { prod: ['n'], sku: ['sku'] } },
+    listings:        { prod: ['name'], sku: ['parent_sku', 'sku'], url: ['url'], money: ['price_min', 'price_max'], models: { prod: ['n'], sku: ['sku'], money: ['price'] } },
     products:        { prod: ['name', 'title'], sku: ['sku'] },
-    orders:          { buyer: ['buyer'], items: { prod: ['name', 'variation', 'title', 'title_ja'], sku: ['sku'], url: ['url', 'link'] } },
-    inventory:       { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier', 'supplier_name'], url: ['url', 'source_url', 'product_url', 'link', 'photo_url', 'image_url', 'PhotoURL', 'supplier_url'] },
-    listing_catalog: { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier'], url: ['url', 'source_url', 'supplier_url'] },
-    costs:           { prod: ['name', 'title'], sku: ['sku'] },
-    returns:         { buyer: ['buyer'], prod: ['name', 'title', 'variation'], sku: ['sku'] },
-    order_issues:    { buyer: ['buyer'] },
+    orders:          { buyer: ['buyer'], money: ['total'], items: { prod: ['name', 'variation', 'title', 'title_ja'], sku: ['sku'], url: ['url', 'link'], money: ['price'] } },
+    income:          { money: ['amount', 'amount_initial', 'buyer_paid', 'fee_total'], moneyObj: ['fees'] },
+    payouts:         { money: ['payout_amount', 'from_amount'] },
+    order_adjustments: { money: ['amount'] },
+    inventory:       { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier', 'supplier_name'], url: ['url', 'source_url', 'product_url', 'link', 'photo_url', 'image_url', 'PhotoURL', 'supplier_url'], money: ['price', 'cost'] },
+    listing_catalog: { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier'], url: ['url', 'source_url', 'supplier_url'], money: ['cost', 'price', 'profit', 'buyer_paid', 'fee', 'sls', 'receive'] },
+    costs:           { prod: ['name', 'title'], sku: ['sku'], money: ['cost', 'deposit', 'deposit_init'] },
+    returns:         { buyer: ['buyer'], prod: ['name', 'title', 'variation'], sku: ['sku'], money: ['refund_amount'] },
+    order_issues:    { buyer: ['buyer'], money: ['refund_jpy', 'comp_amount'] },
     customer_notes:  { buyer: ['buyer', 'name'], text: ['note'] },
     chat_messages:   { buyer: ['buyer', 'sender', 'name', 'to_name', 'user_name'], text: ['text', 'content', 'message', 'last_message', 'body'] },
   };
@@ -2778,9 +2784,11 @@
     if (!o || typeof o !== 'object') return o;
     const c = { ...o };
     Object.keys(spec).forEach(kind => {
-      if (kind === 'models' || kind === 'items') return;
+      if (kind === 'models' || kind === 'items' || kind === 'moneyObj') return;
       (spec[kind] || []).forEach(f => { if (c[f] != null) c[f] = _dfn[kind](c[f]); });
     });
+    // 入れ子の金額オブジェクト（例 income.fees の各手数料）を丸ごとスケール
+    (spec.moneyObj || []).forEach(f => { if (c[f] && typeof c[f] === 'object' && !Array.isArray(c[f])) { const o2 = { ...c[f] }; Object.keys(o2).forEach(k => { if (typeof o2[k] === 'number') o2[k] = dmMoney(o2[k]); }); c[f] = o2; } });
     ['models', 'items'].forEach(arrKey => { if (spec[arrKey] && Array.isArray(c[arrKey])) c[arrKey] = c[arrKey].map(x => _maskObj(x, spec[arrKey])); });
     return c;
   }
@@ -2792,6 +2800,7 @@
         if (/^listing_meta/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.note) m.note = dmText(m.note); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^listing_specs/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.brand) m.brand = dmBrand(m.brand); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^dropship/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.title) m.title = dmProd(m.title); if (m.url) m.url = dmUrl(m.url); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+        if (/^profit_sheet/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.cost) m.cost = dmMoney(m.cost); if (m.paypal_yen) m.paypal_yen = dmMoney(m.paypal_yen); if (m.paypal_local) m.paypal_local = dmMoney(m.paypal_local); if (m.supplier) m.supplier = dmSupplier(m.supplier); if (m.supplier_url) m.supplier_url = dmUrl(m.supplier_url); if (Array.isArray(m.stock_no)) m.stock_no = m.stock_no.map(dmSku); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
       } catch (_) {}
       return r;
     });
@@ -6944,7 +6953,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${card('#d93025', '🆘', '困ったとき', `・反映されない → ブラウザを強制リロード（Cmd+Shift+R）。<br>・国が network error → その国のSeller Centerにログインし直す。<br>・書き込みできない → 🟢ライブか、ブリッジが有効か確認。<br>・userscriptを更新した → Tampermonkeyで<b>再インポート</b>。`)}
     </div>`;
     // ===== 図解クイックガイド（スライド式）＝文字を減らし、絵と流れで直感的に =====
-    const loopFlow = `<div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-bottom:8px">${['🛒 仕入れ', '🏷 入庫', '🆕 出品', '📦 受注・発送', '💰 入金', '💹 利益'].map((x, k) => `<span style="background:#fff;border:1.5px solid #cdd7ea;border-radius:20px;padding:4px 11px;font-weight:700;font-size:12px;color:#3b4fb0;white-space:nowrap">${x}</span>${k < 5 ? '<span style="color:#9db0bd;font-weight:700">→</span>' : '<span style="color:#e8710a;font-weight:700">↺ くり返し</span>'}`).join('')}</div><div style="font-size:13px;color:#555;line-height:1.7">この<b>一周を1画面で回す</b>のがこのポータルです。左メニューが各工程に対応（右下の…で説明）。まずは①〜⑤を順に。</div>`;
+    const loopFlow = `<div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:12px">${['🛒 仕入れ', '🏷 入庫', '🆕 出品', '📦 受注・発送', '💰 入金', '💹 利益'].map((x, k) => `<span style="background:#fff;border:2px solid #cdd7ea;border-radius:22px;padding:6px 14px;font-weight:700;font-size:15px;color:#3b4fb0;white-space:nowrap">${x}</span>${k < 5 ? '<span style="color:#9db0bd;font-weight:700;font-size:16px">→</span>' : '<span style="color:#e8710a;font-weight:700;font-size:15px">↺ くり返し</span>'}`).join('')}</div><div style="font-size:16px;color:#555;line-height:1.85">この<b>一周を1画面で回す</b>のがこのポータルです。左メニューが各工程に対応。まずは①〜⑤を順に見てください。</div>`;
     const SL = [
       { c: '#3b4fb0', ic: '🗺', t: 'このポータルでできること', body: loopFlow },
       { c: '#f9a825', ic: '🛒', t: '① 仕入れる', body: `売れた商品を各サイト（メルカリ／駿河屋／ヤフオク等）へ<b>ワンタップで最安検索</b>して仕入れ。届くまでは<b>⏳入庫待ち</b>で追跡（発送済／輸送中／配達中…）。`, btn: '🛒 仕入れ管理' },
@@ -6954,18 +6963,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       { c: '#0f9d58', ic: '💰', t: '⑤ 入金・利益を見る', body: `💸<b>Payoneer入金予定</b>（銀行着金見込みまで）と、注文ごとの<b>粗利・ROI</b>。仕入値は利益計算表(スプシ)から自動取込＝仕入額が自動で埋まる。`, btn: '💹 損益・入出金' },
       { c: '#1565c0', ic: '🚦', t: '2つのモード & 困った時', body: `<b style="color:#1565c0">🔵通常</b>＝売上・注文・在庫・利益の<b>閲覧はいつでも</b>（公式APIが24h自動同期）。<b style="color:#1a7f37">🟢ライブ</b>＝Shopeeへ<b>書き込む</b>時だけ必要（Tampermonkey＋各国ログイン済PC）。<br>🆘 反映されない→<b>Cmd+Shift+R</b>／書けない→各国ログイン＆🟢確認。` },
     ];
-    const slideHtml = (s, i) => `<div class="mn-slide" style="display:${i === 0 ? 'flex' : 'none'};gap:16px;align-items:center;min-height:190px;padding:24px 30px 34px;background:linear-gradient(135deg,${s.c}12,${s.c}03)">
-      <div style="flex:none;width:88px;height:88px;border-radius:22px;background:${s.c};color:#fff;display:flex;align-items:center;justify-content:center;font-size:44px;box-shadow:0 8px 20px ${s.c}55">${s.ic}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:800;font-size:18px;color:${s.c};margin-bottom:7px">${s.t}</div>
-        <div style="font-size:13.5px;line-height:1.85;color:#333">${s.body}</div>
-        ${s.btn ? `<div style="margin-top:9px;font-size:12px;color:#555">左メニューの ${chip(s.btn)} を開く</div>` : ''}
+    const slideHtml = (s, i) => `<div class="mn-slide" style="display:${i === 0 ? 'flex' : 'none'};flex-wrap:wrap;gap:22px;align-items:center;min-height:280px;padding:34px 40px 48px;background:linear-gradient(135deg,${s.c}12,${s.c}03)">
+      <div style="flex:none;width:120px;height:120px;border-radius:28px;background:${s.c};color:#fff;display:flex;align-items:center;justify-content:center;font-size:64px;box-shadow:0 10px 26px ${s.c}55">${s.ic}</div>
+      <div style="flex:1;min-width:240px">
+        <div style="font-weight:800;font-size:26px;color:${s.c};margin-bottom:12px">${s.t}</div>
+        <div style="font-size:17px;line-height:1.95;color:#333">${s.body}</div>
+        ${s.btn ? `<div style="margin-top:14px;font-size:14.5px;color:#555">左メニューの ${chip(s.btn)} を開く</div>` : ''}
       </div></div>`;
-    const arrowBtn = (id, ch, side) => `<button id="${id}" aria-label="${ch}" style="position:absolute;${side}:8px;top:50%;transform:translateY(-50%);width:36px;height:36px;border-radius:50%;border:1px solid #dfe4ea;background:#fff;cursor:pointer;font-size:20px;line-height:1;color:#3b4fb0;box-shadow:0 2px 8px rgba(0,0,0,.12);z-index:2">${ch}</button>`;
-    body.innerHTML = `<div style="max-width:900px;margin:0 auto">
-      <div style="font-weight:800;font-size:16px;margin:2px 2px 4px">📖 使い方ガイド</div>
-      <div style="font-size:12px;color:#5a6b8c;margin:0 2px 12px">👇 まずスライドで<b>全体の流れ</b>を（‹ ›で送る）。細かい機能は下の「全機能リファレンス」に。</div>
-      <div id="mn-slides" style="position:relative;border:1px solid #e5e5e5;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 14px rgba(0,0,0,.06)">
+    const arrowBtn = (id, ch, side) => `<button id="${id}" aria-label="${ch}" style="position:absolute;${side}:10px;top:50%;transform:translateY(-50%);width:48px;height:48px;border-radius:50%;border:1px solid #dfe4ea;background:#fff;cursor:pointer;font-size:26px;line-height:1;color:#3b4fb0;box-shadow:0 2px 10px rgba(0,0,0,.14);z-index:2">${ch}</button>`;
+    body.innerHTML = `<div style="max-width:1040px;margin:0 auto">
+      <div style="font-weight:800;font-size:22px;margin:2px 2px 4px">📖 使い方ガイド</div>
+      <div style="font-size:14px;color:#5a6b8c;margin:0 2px 14px">👇 まずスライドで<b>全体の流れ</b>を（‹ ›で送る）。細かい機能は下の「全機能リファレンス」に。</div>
+      <div id="mn-slides" style="position:relative;border:1px solid #e5e5e5;border-radius:18px;overflow:hidden;background:#fff;box-shadow:0 4px 18px rgba(0,0,0,.07)">
         ${SL.map(slideHtml).join('')}
         ${arrowBtn('mn-prev', '‹', 'left')}${arrowBtn('mn-next', '›', 'right')}
         <div id="mn-dots" style="position:absolute;bottom:10px;left:0;right:0;display:flex;gap:7px;justify-content:center">${SL.map((_, k) => `<span class="mn-dot" data-k="${k}" style="width:9px;height:9px;border-radius:50%;background:#3b4fb0;cursor:pointer;opacity:${k === 0 ? '1' : '.3'};transition:opacity .2s"></span>`).join('')}</div>
