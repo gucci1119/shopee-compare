@@ -5836,8 +5836,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 返品リクエスト(returns)を注文SNで逆引き→返金・補償タブに「申請日/承認(更新)日/状態」を出す。cc:sn 一致（複数あれば最新update_time）
     const retByOrderSn = new Map();
     formalReturns.forEach(r => { if (!r.order_sn) return; const key = (r.cc || '') + ':' + r.order_sn; const ut = Number(r.update_time || r.create_time || 0); const prev = retByOrderSn.get(key); if (!prev || ut > (prev._ut || 0)) retByOrderSn.set(key, { status: r.status, create_time: r.create_time, update_time: r.update_time, _ut: ut }); });
+    // ★返品リクエスト(146件)の返金額を「損失」として💸返金・補償タブに合流（補償=戻ったお金だけでなく、返品で出た損失も一望）
+    // 既にrefundRows(補償/手動返金)に居るcc:snは重複させない。返金額>0の正式返品だけ損失行として追加。
+    const refundKeys0 = new Set(refundRows.map(o => o.cc + ':' + o.sn));
+    const returnExtra = formalReturns.filter(r => r.order_sn && (Number(r.refund_amount) || 0) > 0 && !refundKeys0.has((r.cc || '') + ':' + r.order_sn))
+      .map(r => { const cc = r.cc || '', sn = r.order_sn; const od = retOrdMap.get(cc + ':' + sn) || {}; const t = Number(r.create_time || r.update_time || 0); return { cc, sn, buyer: od.buyer || '', items: od.items || [], _return: true, ret_status: r.status, ret_reason: r.reason, refund_jpy: retRefundJpy(r), refund_local: Number(r.refund_amount) || 0, currency: r.currency, order_ts: null, order_date: t ? new Date(t < 1e11 ? t * 1000 : t).toISOString().slice(0, 10) : (snToDate(sn) || '') }; });
     const rtab = renderReturns._tab || 'refund';
-    const rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows;
+    const rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows.concat(returnExtra).sort((a, b) => dateKeyOf(b) - dateKeyOf(a));
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
@@ -5849,17 +5854,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const rg = regionByCc(o.cc);
       // order_ts は秒単位で保存されている（そのままだと new Date が ms 扱いで1970年になる）→秒なら×1000。無ければSNから日付
       const dt = o.order_ts ? jstDateTime(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || snToDate(o.sn) || '');
-      return `<tr${o._comp ? ' style="background:#f2fbf5"' : ''}>
+      return `<tr${o._comp ? ' style="background:#f2fbf5"' : (o._return ? ' style="background:#fdf3f2"' : '')}>
         <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
         <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
         <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
         <td style="font-size:11px;white-space:nowrap">${esc(dt)}</td>
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
-        <td style="font-size:11px">${o._comp && !it.name ? '<span class="smd-dim">（補償のみ・配達後の紛失/破損等）</span>' : nm(it.name, '260px')}</td>
-        <td>${o._comp ? '<span style="color:#188038;font-weight:700;font-size:11px;white-space:nowrap">🎁 補償</span>' : sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
+        <td style="font-size:11px">${(o._comp || o._return) && !it.name ? `<span class="smd-dim">（${o._comp ? '補償のみ・配達後の紛失/破損等' : '返品リクエスト'}）</span>` : nm(it.name, '260px')}</td>
+        <td>${o._comp ? '<span style="color:#188038;font-weight:700;font-size:11px;white-space:nowrap">🎁 補償</span>' : o._return ? '<span style="color:#d93025;font-weight:700;font-size:11px;white-space:nowrap">↩️ 返品</span>' : sel('ri-kind', o.cc, o.sn, RET_KINDS, iss.kind || (o.status === '手動追加' ? '返品' : 'キャンセル'))}</td>
         <td title="SLS+半額保証の対象は『日本を出た後』のみ">${sel('ri-stage', o.cc, o.sn, STAGES, effStage(o, iss))}${!iss.stage && effStage(o, iss) ? '<span title="理由からの推定（確定は選択を）" style="color:#e8710a;font-size:10px">推</span>' : ''}</td>
-        <td>${o._comp ? `<span style="font-size:11px;color:#188038;white-space:nowrap">🎁 ${esc(adjCompScen.get(o.cc + ':' + o.sn) || '補償')}</span>` : `<input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px">`}</td>
-        <td><input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px"></td>
+        <td>${o._comp ? `<span style="font-size:11px;color:#188038;white-space:nowrap">🎁 ${esc(adjCompScen.get(o.cc + ':' + o.sn) || '補償')}</span>` : o._return ? `<span style="font-size:11px;color:#c0392b">${esc(retReasonJa(o.ret_reason) || '返品')}</span>` : `<input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px">`}</td>
+        <td>${o._return ? `<b style="color:#d93025;font-size:11px" title="返品リクエストの返金額＝損失（現地→円）">-${fmtJpy(o.refund_jpy)}</b><br><span class="smd-dim" style="font-size:9px">${esc(fmtLoc2(o.cc, o.refund_local))}</span>` : `<input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px">`}</td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
         <td style="font-size:10.5px;white-space:nowrap;text-align:center" title="買い手がアプリから正式申請した返品/返金リクエスト（Shopee returns）。申請日→承認/更新日と状態">${(() => { const r = retByOrderSn.get(o.cc + ':' + o.sn); if (!r) return '<span class="smd-dim">—</span>'; const ap = fmtEpMD(r.update_time), rq = fmtEpMD(r.create_time); return `<span style="color:${retStatusColor(r.status)};font-weight:700">${esc(retStatusJa(r.status))}</span>${ap ? `<br><span title="承認/更新日">承認 ${ap}</span>` : ''}${rq ? `<br><span class="smd-dim" style="font-size:9px">申請 ${rq}</span>` : ''}`; })()}</td>
         <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+半額保証の受取（payout明細から自動検知／手動記入）＋入金日">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; const pay = adjCompPay.get(o.cc + ':' + o.sn); const payTxt = pay ? `<br><span style="color:#1a7f37;font-size:9px" title="補償の入金日(payout)">💰${fmtEpMD(pay)} 入金</span>` : ''; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動${iss.comp_date ? ' ' + esc(String(iss.comp_date).slice(5)) : ''}</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅保証済</span>${payTxt}`; return '<span class="smd-dim">—</span>'; })()}</td>
