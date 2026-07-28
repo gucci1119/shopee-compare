@@ -406,7 +406,10 @@ function getModels_(shopId, itemId) {
   var out = models.map(function (m) {
     var idx = m.tier_index || [];
     var nm = idx.map(function (ti, k) { var t = tiers[k]; var opt = t && t.option_list && t.option_list[ti]; return opt ? opt.option : ''; }).join(',');
-    return { model_id: m.model_id, tier_index: idx, name: nm || m.model_name || '', sku: m.model_sku || '', price: priceOf(m), stock: stockOf(m) };
+    // 明細画像：第1階層オプションの画像（Shopeeは第1 tier のみ画像を持つ）。image_id優先・無ければimage_url
+    var im = ''; var t0 = tiers[0], oi = idx[0];
+    if (t0 && t0.option_list && oi != null) { var op = t0.option_list[oi]; if (op && op.image) im = op.image.image_id || op.image.image_url || ''; }
+    return { model_id: m.model_id, tier_index: idx, name: nm || m.model_name || '', sku: m.model_sku || '', price: priceOf(m), stock: stockOf(m), img: im };
   });
   if (!out.length) {
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId) }, 'get');
@@ -1144,7 +1147,8 @@ function syncAll() {
 }
 
 // 注文 → orders
-var ORD_STATUS_TAB = { UNPAID: 200, READY_TO_SHIP: 300, PROCESSED: 300, RETRY_SHIP: 300, SHIPPED: 400, TO_CONFIRM_RECEIVE: 400, COMPLETED: 500, IN_CANCEL: 600, CANCELLED: 600, TO_RETURN: 700, INVOICE_PENDING: 200 };
+// INVOICE_PENDING=BRの「支払済・請求書(nota fiscal)待ち」＝発送前(未入金でない)→300。TO_RETURN=配達後に返品申請＝売上/入金は成立済なので完了扱い500に残し、返金損失はreturns表で別計上（ポータルは700を知らず全集計から消えていた）
+var ORD_STATUS_TAB = { UNPAID: 200, READY_TO_SHIP: 300, PROCESSED: 300, RETRY_SHIP: 300, SHIPPED: 400, TO_CONFIRM_RECEIVE: 400, COMPLETED: 500, IN_CANCEL: 600, CANCELLED: 600, TO_RETURN: 500, INVOICE_PENDING: 300 };
 var ORD_STATUS_LABEL = { READY_TO_SHIP: 'To Ship', PROCESSED: 'Processed', RETRY_SHIP: 'Retry Ship', SHIPPED: 'Shipping', TO_CONFIRM_RECEIVE: 'To Receive' };
 function imgHash_(it) {
   var u = (it && (it.image_url || (it.image_info && (it.image_info.image_url || (it.image_info.image_url_list || [])[0])))) || '';
@@ -1155,7 +1159,8 @@ function syncOrdersForShop_(tok) {
   var tz = CC_TZ[cc] != null ? CC_TZ[cc] : 8;
   var to = now_(), from = to - 15 * 86400, sns = [], cursor = '';
   for (var g = 0; g < 60; g++) {
-    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 100, cursor: cursor }, 'get');
+    // ★update_timeで取得＝作成15日超でも状態が変わった注文(発送/完了/キャンセル)を拾い続ける。create_timeだとBR等の遅い越境注文がtab300や暫定入金のまま固まる。update_time≧create_timeなので新規注文も必ず含む(厳密に上位互換)。order_dateはcreate_time基準のままで集計は不変
+    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'update_time', time_from: from, time_to: to, page_size: 100, cursor: cursor }, 'get');
     var r = j.response || {};
     (r.order_list || []).forEach(function (o) { sns.push(o.order_sn); });
     if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
@@ -1197,7 +1202,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var fin = finalized || {}, to = now_(), from = to - 15 * 86400, orders = [], cursor = '';
   for (var g = 0; g < 60; g++) {
-    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: from, time_to: to, page_size: 100, cursor: cursor, response_optional_fields: 'order_status' }, 'get');
+    var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'update_time', time_from: from, time_to: to, page_size: 100, cursor: cursor, response_optional_fields: 'order_status' }, 'get'); // ★update_time＝完了/入金確定が15日超で起きた越境注文の最終escrowを拾い続ける（create_timeだと暫定入金のまま固まる）
     var r = j.response || {};
     (r.order_list || []).forEach(function (o) { orders.push({ sn: o.order_sn, status: o.order_status || '' }); });
     if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
@@ -1209,7 +1214,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   for (var oi = 0; oi < orders.length; oi++) {
     if (deadline && now_() > deadline) { partial = true; break; }
     var o = orders[oi];
-    if (/^(UNPAID|CANCELLED|IN_CANCEL|INVOICE_PENDING)$/.test(o.status)) { skip++; continue; }
+    if (/^(UNPAID|CANCELLED|IN_CANCEL)$/.test(o.status)) { skip++; continue; } // INVOICE_PENDING(BR・支払済で請求書待ち)は入金が来るのでスキップしない
     if (fin[o.sn]) { skip++; continue; }
     var e; try { e = callShop_(tok.shop_id, '/api/v2/payment/get_escrow_detail', { order_sn: o.sn }, 'get'); } catch (ex) { errs++; continue; }
     var inc = ((e.response || {}).order_income) || {};
@@ -1463,7 +1468,7 @@ function syncListingsForShop_(tok) {
       if (it.has_model) {
         try {
           var g = getModels_(shopId, it.item_id);
-          models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0 }; });
+          models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0 }; });
           model_count = models.length;
           var prices = models.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
           if (prices.length) { price_min = Math.min.apply(null, prices); price_max = Math.max.apply(null, prices); }
