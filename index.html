@@ -8417,20 +8417,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       catch (_) { lst._ledgerImg = {}; }
     }
     const _ledgerImgOf = r => { const im = (lst._ledgerImg || {})[((r.name || r.title || '')).toLowerCase().trim()]; return im ? IMG_CDN + im : ''; };
-    // 📗 仕入(原価)の自動補完：利益管理表(profit_sheet=cc:sn別の仕入値)を注文(sn→items名)で橋渡しし、商品名→直近仕入(円)を作る。台帳の未入力欄に「提案」として出す（1回だけ取得しキャッシュ）
+    // 📗 仕入の自動補完＋実売利益統計：利益管理表(profit_sheet=cc:sn別仕入)＋入金(income)を注文(sn→items名)で橋渡しし、商品名→{直近仕入} と {実売利益の配列} を作る（1回だけ取得しキャッシュ）
     if (lst._ledgerCostMap === undefined) {
       try {
-        const [pk, ords] = await Promise.all([
+        const [pk, ords, inc] = await Promise.all([
           settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []) : [],
           settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => []) : [],
+          settings.sbKey ? sbGetAll('income', 'select=cc,sn,amount').catch(() => []) : [],
         ]);
         const sheet = (pk && pk[0] && pk[0].v && pk[0].v.items) || {};
-        const cm = {}; // name(小文字) -> {cost, ts}（同名は直近の注文の仕入を優先）
-        (ords || []).forEach(o => { const sc = sheet[o.cc + ':' + o.sn]; if (!sc || sc.cost == null) return; const ts = Number(o.order_ts) || 0; (o.items || []).forEach(it => { const k = (it.name || '').toLowerCase().trim(); if (!k) return; const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: Math.round(Number(sc.cost)), ts }; }); });
-        lst._ledgerCostMap = cm;
-      } catch (_) { lst._ledgerCostMap = {}; }
+        const incMap = {}; (inc || []).forEach(x => { incMap[x.cc + ':' + x.sn] = Number(x.amount) || 0; });
+        const cm = {}, pm = {}; // cm: name->{cost,ts}（直近仕入） / pm: name->[{profit,ts}]（実売利益＝入金円−仕入円）
+        (ords || []).forEach(o => {
+          const key = o.cc + ':' + o.sn; const sc = sheet[key]; const ts = Number(o.order_ts) || 0;
+          const rg = regionByCc(o.cc); const rate = (rg && rg.rateJpy) || 0;
+          const costY = (sc && sc.cost != null) ? Math.round(Number(sc.cost)) : null;
+          const amtY = (incMap[key] != null && rate) ? Math.round(incMap[key] * rate) : null;
+          const profitY = (costY != null && amtY != null) ? amtY - costY : null;
+          (o.items || []).forEach(it => { const k = (it.name || '').toLowerCase().trim(); if (!k) return;
+            if (costY != null) { const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: costY, ts }; }
+            if (profitY != null) { (pm[k] = pm[k] || []).push({ profit: profitY, ts }); }
+          });
+        });
+        lst._ledgerCostMap = cm; lst._ledgerProfitMap = pm;
+      } catch (_) { lst._ledgerCostMap = {}; lst._ledgerProfitMap = {}; }
     }
     const _ledgerSugCost = r => { const c = (lst._ledgerCostMap || {})[((r.name || r.title || '')).toLowerCase().trim()]; return c ? c.cost : null; };
+    const _ledgerProfitStats = r => { const arr = (lst._ledgerProfitMap || {})[((r.name || r.title || '')).toLowerCase().trim()]; if (!arr || !arr.length) return null; const s = arr.map(x => x.profit).sort((a, b) => a - b); const n = s.length; const median = n % 2 ? s[(n - 1) / 2] : Math.round((s[n / 2 - 1] + s[n / 2]) / 2); const recent = arr.slice().sort((a, b) => b.ts - a.ts)[0].profit; return { min: s[0], max: s[n - 1], median, recent, n }; };
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
@@ -8454,6 +8467,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const cards = list.map(r => {
       const econ = r.econ || {}; const ccs = Object.keys(econ);
       const sugCost = _ledgerSugCost(r); // 📗利益管理表の直近仕入(提案)
+      const pstat = _ledgerProfitStats(r); // 💰実売利益（入金−仕入）の 最大/最小/中央/直近
       const varN = new Set(ccs.flatMap(cc => (econ[cc].vars || []).map(v => (v.name || '').trim()).filter(Boolean))).size; // 明細(バリエ)数（名前の異なる明細）
       // 利益レンジ（仕入が入っている＝profit確定の明細だけ対象）
       let pMin = Infinity, pMax = -Infinity, haveProfit = false, needCost = false;
@@ -8482,7 +8496,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${_ledgerImgOf(r) ? `<img src="${_ledgerImgOf(r)}" style="width:36px;height:36px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.display='none'">` : '<span style="width:36px;height:36px;border-radius:5px;background:#f0f0f0;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:#ccc">📦</span>'}
           <span style="font-weight:700;font-size:13px;flex:1;min-width:200px">${esc(r.name || r.title || '(無題)')}</span>
           <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${r.cost_total != null ? jpy(r.cost_total) : '—'} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国 ・ ${varN > 0 ? varN + 'バリエ' : '単一'}</span>
-          <span style="font-size:11.5px;white-space:nowrap">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}${needCost ? ' <span style="color:#b3701a;font-size:10px">✎仕入入力で利益</span>' : ''}</span>
+          <span style="font-size:11.5px;white-space:nowrap" title="台帳記録時の想定利益（各国バリエの範囲）">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}${needCost ? ' <span style="color:#b3701a;font-size:10px">✎仕入入力で利益</span>' : ''}</span>
+          ${pstat ? `<span style="font-size:11px;white-space:nowrap" title="実際に売れた注文の利益(入金円−仕入円)。価格を都度改定しているので直近が一番リアル"><span class="smd-dim">実売</span> 直近<b style="color:${pstat.recent < 0 ? '#d93025' : '#1a7f37'}">${jpy(pstat.recent)}</b> <span class="smd-dim">中央${jpy(pstat.median)}・最${jpy(pstat.max)}〜${jpy(pstat.min)}・${pstat.n}件</span></span>` : ''}
           <span class="smd-dim" style="font-size:10.5px;white-space:nowrap">${(r.updated_at || '').slice(0, 10)}</span>
           <button class="ledger-del smd-btn" data-id="${esc(r.id)}" title="この記録を削除" style="font-size:10px;padding:1px 6px;color:#d93025;border-color:#e0a0a0">🗑</button>
         </summary>
