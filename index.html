@@ -1768,6 +1768,7 @@
       try { renderDash._cache = null; } catch (_) {}
       try { plan._cache = null; } catch (_) {}
       try { cust._cache = null; } catch (_) {}
+      try { renderReturns._cache = null; } catch (_) {}
       try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
@@ -3788,9 +3789,8 @@
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; repeatMin = /^\d/.test(v) ? Number(v) : v; renderRepeatSellers(); }));
     h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
     h.querySelectorAll('.rep-win').forEach(el => el.addEventListener('click', () => { repeatWin = Number(el.dataset.d); renderRepeatSellers(); }));
-    { const qi = document.getElementById('rep-q');
-      if (qi) { qi.addEventListener('input', () => { const pos = qi.selectionStart; repeatQ = qi.value.trim().toLowerCase(); renderRepeatSellers();
-        const ni = document.getElementById('rep-q'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }); }
+    { const qi = document.getElementById('rep-q'); let _rt;
+      if (qi) { qi.addEventListener('input', () => { clearTimeout(_rt); _rt = setTimeout(() => { const el = document.getElementById('rep-q'); if (!el) return; const pos = el.selectionStart; repeatQ = el.value.trim().toLowerCase(); renderRepeatSellers(); const ni = document.getElementById('rep-q'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }, 200); }); } // ★200msデバウンス：1文字ごとの全集計8周を解消
       const qc = document.getElementById('rep-qclr'); if (qc) qc.addEventListener('click', () => { repeatQ = ''; renderRepeatSellers(); }); }
     h.querySelectorAll('.rep-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k;
       if (repeatOpen.has(k)) repeatOpen.delete(k); else repeatOpen.add(k); renderRepeatSellers(); }));
@@ -5556,6 +5556,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
     try {
       await sbUpsert('order_issues', [Object.assign({ cc, sn, updated_at: new Date().toISOString() }, patch)]);
+      try { renderReturns._cache = null; } catch (_) {} // 書込後は返品ページのキャッシュを破棄→次のrenderReturnsで取り直し
       logAct('返品・キャンセル', '記録', sn, cc + ' / ' + Object.entries(patch).map(([k, v]) => `${k}=${v == null ? '(空)' : v}`).join(' '));
       return true;
     } catch (e) { alert('保存失敗: ' + e.message); return false; }
@@ -5826,18 +5827,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
   }
 
-  async function renderReturns() {
+  async function renderReturns(force) {
     const body = document.getElementById('ret-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let cancelled, issues, adjustments, formalReturns;
-    try {
-      [cancelled, issues, adjustments, formalReturns] = await Promise.all([
-        sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
-        sbGetAll('order_issues', 'select=*'),
-        sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').catch(() => []),
-        sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => []),  // Shopee公式 返品/返金リクエスト
-      ]);
-    } catch (e) { body.innerHTML = errBox(e); return; }
+    const rch = renderReturns._cache; // ★タブ/ページ切替の度の全件再取得を解消（TTL120秒／saveIssue・まとめて更新で破棄）
+    if (!force && rch && Date.now() - rch.at < 120000) {
+      ({ cancelled, issues, adjustments, formalReturns } = rch);
+    } else {
+      try {
+        [cancelled, issues, adjustments, formalReturns] = await Promise.all([
+          sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
+          sbGetAll('order_issues', 'select=*'),
+          sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').catch(() => []),
+          sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => []),  // Shopee公式 返品/返金リクエスト
+        ]);
+        renderReturns._cache = { cancelled, issues, adjustments, formalReturns, at: Date.now() };
+      } catch (e) { body.innerHTML = errBox(e); return; }
+    }
     formalReturns = formalReturns || [];
     // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
     const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ（||1だと現地通貨をそのまま円扱いし過大化）
