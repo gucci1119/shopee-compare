@@ -5287,7 +5287,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
-    const toship = orders.filter(o => /to ?ship/i.test(o.status || '') && !o.tracking);
+    const toship = orders.filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
     const shipRows = toship.map(o => {
       const secLeft = o.ship_by ? (o.ship_by - nowSec) : null;
       const level = secLeft == null ? 0 : (secLeft < 0 ? 2 : (secLeft < 86400 ? 1 : 0));
@@ -12244,7 +12244,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (o.tab === 200 || o.tab === 600) return; // 未払い/キャンセルは粗利に含めない（絞り込みトグルに関係なく）
       const rg = regionByCc(o.cc); if (!rg) return;
       const di = pfDepInfo(o), dep = di ? di.amt : null, cost = pfCost(o);
-      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { g += dep * rg.rateJpy - cost; n++; if (di.fixed) fixN++; else provN++; }
+      // ★会計値(純利益/確定申告CSVの元)は PayPal差分を含め、"表示専用"の🔒到着済トグル(strictCost)では絞らない（税額を静かに変えない）
+      if (dep != null && cost != null) { g += dep * rg.rateJpy + pfPaypal(o) - cost; n++; if (di.fixed) fixN++; else provN++; }
     });
     return { total: g, n: n, fixN: fixN, provN: provN };
   }
@@ -12587,7 +12588,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
       if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
       if (cost != null) { p.costJpy += cost; p.costN++; }
-      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * rg.rateJpy - cost; p.pairN++; }
+      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * rg.rateJpy + pfPaypal(o) - cost; p.pairN++; }
     });
     let rowsHtml = '';
     let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0;
