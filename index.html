@@ -1769,6 +1769,7 @@
       try { plan._cache = null; } catch (_) {}
       try { cust._cache = null; } catch (_) {}
       try { renderReturns._cache = null; } catch (_) {}
+      try { renderAlerts._cache = null; } catch (_) {}
       try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; lst._ledgerImg = undefined; lst._ledgerCostMap = undefined; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
@@ -5318,16 +5319,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!b) return;
     if (n > 0) { b.textContent = n; b.style.display = ''; } else { b.style.display = 'none'; }
   }
-  async function renderAlerts() {
+  async function renderAlerts(force) {
     const body = document.getElementById('alert-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let inv, orders;
-    try {
-      [inv, orders] = await Promise.all([
-        ensureInv(),
-        sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-      ]);
-    } catch (e) { body.innerHTML = errBox(e); return; }
+    const ach = renderAlerts._cache; // ★タブ切替の度の全件再取得を解消（TTL120秒／更新ボタン・まとめて更新でforce）。invはensureInvが元々キャッシュ済
+    if (!force && ach && Date.now() - ach.at < 120000) { orders = ach.orders; inv = await ensureInv(); }
+    else {
+      try {
+        [inv, orders] = await Promise.all([
+          ensureInv(),
+          sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
+        ]);
+        renderAlerts._cache = { orders, at: Date.now() };
+      } catch (e) { body.innerHTML = errBox(e); return; }
+    }
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
@@ -13525,7 +13531,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     setModeBadge();
     initAcctBar().catch(() => {}); // 対象アカウントのセレクタを用意
     renderSummary();
-    document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
+    document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
     if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
