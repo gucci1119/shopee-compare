@@ -8515,6 +8515,24 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
     ov.querySelectorAll('.oh-close').forEach(b => b.addEventListener('click', close));
   }
+  // 📜 カタログ(商品)ごとの編集履歴：activity_log(logActが商品名targetで記録)を商品名で引いて表示
+  async function showEditHistory(name) {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:600px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)"><div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📜 編集履歴：${esc((name || '').slice(0, 46))}</b><button class="eh-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div><div class="eh-body" style="padding:14px 18px;max-height:calc(100vh - 160px);overflow:auto"><div class="smd-dim">読み込み中…</div></div></div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelectorAll('.eh-close').forEach(b => b.addEventListener('click', close));
+    const body = ov.querySelector('.eh-body');
+    try {
+      // 商品名(target)完全一致で取得。取れなければ部分一致(ilike)も試す
+      let rows = await sbGetAll('activity_log', 'select=page,action,target,detail,created_at&target=eq.' + encodeURIComponent(name) + '&order=created_at.desc&limit=200').catch(() => null);
+      if ((!rows || !rows.length) && name) { rows = await sbGetAll('activity_log', 'select=page,action,target,detail,created_at&target=ilike.' + encodeURIComponent('%' + name.slice(0, 40) + '%') + '&order=created_at.desc&limit=200').catch(() => []); }
+      if (!rows || !rows.length) { body.innerHTML = '<div class="smd-dim" style="font-size:12.5px">この商品の編集履歴はまだありません。<br>価格・在庫・タイトル・各国まとめ編集などを行うと、日時・操作・内容が自動で記録されます。</div>'; return; }
+      body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 7px">日時</th><th style="padding:3px 7px">操作</th><th style="padding:3px 7px">内容</th></tr></thead><tbody>' + rows.map(r => { const d = r.created_at ? new Date(r.created_at) : null; const w = d ? ['日', '月', '火', '水', '木', '金', '土'][d.getDay()] : ''; const ds = d ? `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w}) ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : '—'; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 7px;white-space:nowrap;color:#888;font-size:11px">${ds}</td><td style="padding:4px 7px;font-weight:600;white-space:nowrap">${esc(r.action || '')}</td><td style="padding:4px 7px;color:#555">${esc(r.detail || '')}</td></tr>`; }).join('') + '</tbody></table><div class="smd-dim" style="font-size:10.5px;margin-top:8px">※価格・在庫・タイトル・まとめ編集・自動出品などの操作を記録（操作ログと共有）。</div>';
+    } catch (e) { body.innerHTML = '<div style="color:#d93025">履歴の取得に失敗: ' + esc(e.message || '') + '</div>'; }
+  }
   async function renderLedger(useCache) {
     const host = document.getElementById('list-ledger'); if (!host) return;
     if (!host.dataset.wired) { host.dataset.wired = '1'; }
@@ -9852,6 +9870,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <button class="lst-refresh1" data-cc="${r.cc}" data-id="${r.item_id}" title="この商品だけ最新の在庫・価格に更新（公式API）" style="border:none;background:none;cursor:pointer;font-size:13px;line-height:1;padding:1px 2px">🔄</button>
             <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
+            <span class="lst-edithist" data-name="${av(r.name || '')}" title="この商品の編集履歴（価格・在庫・タイトル等の変更ログ）" style="cursor:pointer;font-size:13px;line-height:1">📜</span>
             ${isSingle && canEdit ? `<button class="lst-save" title="価格・在庫を公式APIで保存" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;font-weight:700">💾保存</button>` : ''}
           </div>
           ${isSingle && canEdit ? `<span class="lst-save-msg" style="font-size:10px;color:#888;text-align:center"></span>` : ''}
@@ -10124,6 +10143,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.querySelectorAll('#lst-list .lst-ccflags').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; lst.covOpen = lst.covOpen || new Set(); if (lst.covOpen.has(id)) lst.covOpen.delete(id); else lst.covOpen.add(id); drawListingStatus(); }));
     // 💰実売クリック → 過去オーダー明細＋利益変遷＋原価統計モーダル
     document.querySelectorAll('#lst-list .lst-realized').forEach(el => el.addEventListener('click', () => showOrderHistory(el.dataset.name || '')));
+    document.querySelectorAll('#lst-list .lst-edithist').forEach(el => el.addEventListener('click', () => showEditHistory(el.dataset.name || '')));
     document.querySelectorAll('#lst-list .ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
     document.querySelectorAll('#lst-list .ledger-sugcost').forEach(el => el.addEventListener('click', () => saveLedgerCost(el.dataset.id, el.dataset.cc, +el.dataset.i, el.dataset.cost)));
     document.querySelectorAll('#lst-list .lst-tocatalog').forEach(el => el.addEventListener('click', () => { const nm = (el.dataset.name || '').trim(); lst.ledgerQ = nm.length > 28 ? nm.slice(0, 28) : nm; lst.tab = 'ledger'; try { localStorage.setItem('smdListTab', 'ledger'); } catch (_) {} renderListPage(); }));
