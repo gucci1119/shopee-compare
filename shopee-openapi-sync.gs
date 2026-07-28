@@ -1532,6 +1532,54 @@ function testSyncListingsOneShop() {
   Logger.log('★OKなら syncListingsAll()（or 数回）で全件ロード → setupTriggers() でRR自動化');
 }
 
+// ===== 👁閲覧/❤️いいね/🛒販売数（get_item_extra_info）=====
+// 出品同期(listings)とは別枠で app_kv listing_stats_<shop_id> に非破壊で書く。ゆっくり動く指標なので1日1回。
+// ★まず field 名を実レスポンスで確認する用（ドライラン・Supabaseに書かない）
+function testStatsOneShop() {
+  var toks = listTokens_(); if (!toks.length) { Logger.log('認可店なし'); return; }
+  var tok = toks[0];
+  var ids = listItemIds_(tok.shop_id);
+  Logger.log('対象 ' + tok.cc + ' shop=' + tok.shop_id + ' item数=' + ids.length);
+  if (!ids.length) return;
+  var b = callShop_(tok.shop_id, '/api/v2/product/get_item_extra_info', { item_id_list: ids.slice(0, 5).map(function (x) { return x.item_id; }).join(',') }, 'get');
+  Logger.log('get_item_extra_info 生レスポンス: ' + JSON.stringify(b, null, 1).slice(0, 2500));
+}
+function syncListingStatsForShop_(tok) {
+  var shopId = tok.shop_id, cc = tok.cc || '?';
+  var ids = listItemIds_(shopId);
+  if (!ids.length) return { cc: cc, shop_id: shopId, stats: 0 };
+  var stats = {};
+  for (var i = 0; i < ids.length; i += 50) {
+    var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
+    var b = callShop_(shopId, '/api/v2/product/get_item_extra_info', { item_id_list: batch.join(',') }, 'get');
+    ((b.response || {}).item_list || []).forEach(function (it) {
+      var ex = it.item_extra || it; // v2は item_extra にネストする版もあるので両対応
+      var sale = (it.sale != null ? it.sale : ex.sale);
+      var views = (ex.views != null ? ex.views : it.views);
+      var likes = (ex.likes != null ? ex.likes : (ex.liked_count != null ? ex.liked_count : it.likes));
+      var cmt = (ex.cmt_count != null ? ex.cmt_count : (ex.comment_count != null ? ex.comment_count : it.comment_count));
+      stats[it.item_id] = { sale: (sale != null ? sale : null), views: (views != null ? views : null), likes: (likes != null ? likes : null), cmt: (cmt != null ? cmt : null) };
+    });
+  }
+  var n = Object.keys(stats).length;
+  if (n) sbUpsert_('app_kv', [{ k: 'listing_stats_' + shopId, v: { items: stats } }], 'k'); // 非破壊：この店の分だけ丸ごと置換
+  return { cc: cc, shop_id: shopId, stats: n };
+}
+function syncListingStats() {
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) {
+    try { log.push(syncListingStatsForShop_(tok)); }
+    catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
+  });
+  Logger.log('listing_stats同期: ' + JSON.stringify(log)); return log;
+}
+// 1日1回トリガー（既存トリガーは消さず、syncListingStats の重複だけ掃除して1本にする）
+function setupStatsTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'syncListingStats') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('syncListingStats').timeBased().everyDays(1).atHour(4).create();
+  Logger.log('syncListingStats を毎日4時に設定');
+}
+
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
