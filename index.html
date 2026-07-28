@@ -7288,7 +7288,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     return rows;
   }
-  const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: new Set(), note: '' };
+  const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: new Set(), costOpen: new Set(), note: '' };
   function listingsFromDb() {
     return sbGetAll('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
@@ -8582,9 +8582,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const cs = (r.variations || []).map(vv => vv.cost).filter(c => c != null);
     r.cost_total = cs.length ? cs.reduce((s, c) => s + c, 0) : null;
     r.updated_at = new Date().toISOString();
-    if (!settings.sbSecret) { toast('保存には⚙️設定の書き込みキーが必要です', true); renderLedger(); return; }
+    if (!settings.sbSecret) { toast('保存には⚙️設定の書き込みキーが必要です', true); reRenderAfterCost(); return; }
     try { await sbUpsert('listing_catalog', [r]); } catch (e) { toast('保存エラー: ' + (e.message || e), true); }
-    renderLedger();
+    reRenderAfterCost();
+  }
+  // 原価保存後の再描画：利益台帳を見ているならそちら、出品一覧を見ているならそちらを更新（原価は両画面で共用）
+  function reRenderAfterCost() {
+    if (lst.tab === 'status' && document.getElementById('list-status')) { drawListingStatus(); }
+    else { renderLedger(); }
   }
   // 現在ライブの出品を台帳へ一括作成（価格・手数料・SLSのみ。仕入・利益は空欄→台帳で仕入入力）。既存idは上書きしない
   async function ledgerBackfillLive() {
@@ -9676,6 +9681,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 18列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️いいね/💰実売/📗原価/ROI/🌏国/ブランド/SKU/JAN/操作。横に増えても親を横スクロールで見せる（min-width固定）
   const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(150px,1fr) 46px 104px 118px 48px 58px 58px 54px 92px 74px 50px 44px 92px 118px 128px 128px;column-gap:12px;row-gap:2px;align-items:start';
   const LMINW = 1650; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
+  // 📗 出品一覧のカードから開く原価エディタ（利益台帳と同じ per明細 の仕入入力→利益/ROI。saveLedgerCostで保存・全国反映）
+  function costEditorHtml(r) {
+    const cat = (lst._catalogByName || {})[(r.name || '').toLowerCase().trim()];
+    if (!cat) return `<div style="margin-top:6px;padding:8px 10px;background:#fbf7ee;border:1px dashed #e0c690;border-radius:6px;font-size:11.5px;color:#7a5c1e">📗 この商品はまだ<b>利益台帳</b>に無いので原価を計算できません。<button class="lst-tocatalog smd-btn" data-name="${av(r.name || '')}" style="font-size:10.5px;margin:0 4px">利益台帳を開く</button>→「📥現在の出品から一括作成」で登録すると、ここで各国・各明細の<b>原価/利益/ROI</b>を編集できます。</div>`;
+    const econ = cat.econ || {}, ccs = Object.keys(econ), idE = esc(cat.id);
+    const jpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
+    const sug = ledgerSugCostByName(r.name);
+    const rows2 = ccs.map(cc => { const e = econ[cc], rg2 = regionByCc(cc); return (e.vars || []).map((v, idx) => { const has = v.profit != null, pc = (v.profit || 0) >= 0 ? '#1a7f37' : '#d93025'; return `<tr style="${has && v.profit < 0 ? 'background:#fff4f4' : ''}"><td style="padding:3px 7px;white-space:nowrap"><span style="background:${(rg2 && rg2.color) || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${cc}</span></td><td style="padding:3px 7px;font-size:11.5px">${v.name ? esc(v.name) : '<span class="smd-dim">（単一）</span>'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${(e.cur || '')}${(Number(v.local) || 0).toLocaleString()}</td><td style="padding:2px 5px;text-align:right;white-space:nowrap">¥<input class="ledger-cost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${v.cost != null ? v.cost : ''}" placeholder="仕入" style="width:64px;padding:2px 4px;font-size:11px;${v.cost == null ? 'background:#fffbea;border-color:#e0c060' : ''}">${v.cost == null && sug != null ? `<div class="ledger-sugcost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" data-cost="${sug}" title="📗利益管理表の直近仕入。クリックで適用" style="font-size:9.5px;color:#1565c0;cursor:pointer;text-decoration:underline;margin-top:1px">📗¥${sug.toLocaleString()} 適用</div>` : ''}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700;color:${pc}">${has ? (v.profit >= 0 ? '+' : '') + jpy(v.profit) : '<span class="smd-dim">—</span>'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${has ? v.roi + '%' : '<span class="smd-dim">—</span>'}</td></tr>`; }).join(''); }).join('');
+    return `<div style="margin-top:6px;padding:8px 10px;background:#fbfaf6;border:1px solid #ece3cf;border-radius:6px;overflow:auto"><div style="font-size:11px;color:#8a6d3b;margin-bottom:4px">📗 <b>原価をその場で編集</b>（黄色い欄に仕入(円)を入れると利益・ROIが自動計算。同じ明細名は全国に反映）<button class="lst-tocatalog smd-btn" data-name="${av(r.name || '')}" style="font-size:10px;margin-left:6px">利益台帳で詳しく</button></div><table style="border-collapse:collapse;font-size:12px;min-width:520px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:2px 7px">国</th><th style="padding:2px 7px">明細</th><th style="padding:2px 7px;text-align:right">出品価格</th><th style="padding:2px 7px;text-align:right">仕入</th><th style="padding:2px 7px;text-align:right">利益</th><th style="padding:2px 7px;text-align:right">ROI</th></tr></thead><tbody>${rows2}</tbody></table></div>`;
+  }
   function listingCardHtml(r) {
     const rg = regionByCc(r.cc) || { color: '#333', host: '' };
     const key = r.cc + ':' + r.item_id;
@@ -9708,6 +9723,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const _cov = (lst._nameCcCount || {})[(r.name || '').toLowerCase().trim()] || 1;
     const _st = statOf(r.item_id); // 🛒販売(sale)/👁閲覧(views)/❤️いいね(likes)＝GASのlisting_stats（この国のこの出品）
     const _nf = n => (n == null ? null : Number(n).toLocaleString());
+    const _cat = (lst._catalogByName || {})[(r.name || '').toLowerCase().trim()]; // 台帳の該当商品（原価インライン編集用）
+    const _catCost = _cat && _cat.cost_total != null ? _cat.cost_total : null;
+    const _costOpen = lst.costOpen && lst.costOpen.has(String(r.item_id));
     // カード表示は横スクロールコンテナ(min-width:LMINWのwrapper)内。ヘッダーと整列するよう水平marginは0・padding左右はヘッダーと同じ14に揃える（幅はwrapperのmin-widthで固定）
     return `<div class="tool-card${isSingle && canEdit ? ' lst-inline' : ''}"${isSingle && canEdit ? ` data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}"` : ''} style="max-width:none;margin:6px 0;padding:8px 14px${meta.keep0 ? ';border-left:3px solid #b71c1c' : ''}">
       <div style="${LGRID}">
@@ -9725,7 +9743,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div style="text-align:right;min-width:0;font-size:11px;color:#555" title="閲覧数（views）">${_st.views != null ? _nf(_st.views) : '<span class="smd-dim">—</span>'}</div>
         <div style="text-align:right;min-width:0;font-size:11px;color:#e8710a" title="いいね数（likes）">${_st.likes != null ? '♥' + _nf(_st.likes) : '<span class="smd-dim">—</span>'}</div>
         <div style="text-align:right;min-width:0;font-size:11px" title="${_ps ? '実際に売れた注文の直近利益（入金円−仕入円・全7か国合算）。中央' + jpyShort(_ps.median) + '・最' + jpyShort(_ps.max) + '〜' + jpyShort(_ps.min) + '・' + _ps.n + '件' : '実売データなし（売れて入金＋仕入が揃うと表示）'}">${_ps ? `<div style="font-weight:700;color:${_ps.recent < 0 ? '#d93025' : '#1a7f37'}">${jpyShort(_ps.recent)}</div><div class="smd-dim" style="font-size:8px">${_ps.n}件</div>` : '<span class="smd-dim">—</span>'}</div>
-        <div style="text-align:right;min-width:0;font-size:11px;color:#8a6d3b" title="利益管理表の直近仕入(円・同名注文)">${_sug != null ? '¥' + _sug.toLocaleString() : '<span class="smd-dim">—</span>'}</div>
+        <div class="lst-costcell" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="クリックで原価をその場編集（各国・各明細の原価/利益/ROI・台帳ページ不要）${_catCost == null && _sug != null ? '｜表示は利益管理表の直近仕入(参考)' : ''}" style="text-align:right;min-width:0;font-size:11px;color:${_costOpen ? '#1a7f37' : '#8a6d3b'};cursor:pointer;font-weight:${_costOpen ? 700 : 400}">${_catCost != null ? '¥' + _catCost.toLocaleString() : (_sug != null ? `<span style="color:#b0a080">¥${_sug.toLocaleString()}</span>` : '')}<span style="font-size:9px;color:#c9a86a"> ${_costOpen ? '▲' : '✎'}</span></div>
         <div style="text-align:right;min-width:0;font-size:11px" title="実売直近利益÷原価">${_roi != null ? `<span style="font-weight:700;color:${_roi < 0 ? '#d93025' : '#1a7f37'}">${_roi}%</span>` : '<span class="smd-dim">—</span>'}</div>
         <div style="text-align:center;min-width:0;font-size:11px" title="7か国中この数に出品中（同一タイトルで集計）"><span style="font-weight:700;color:${_cov >= 5 ? '#1a7f37' : (_cov >= 3 ? '#a8650a' : '#d93025')}">${_cov}/7</span></div>
         <div style="font-size:11px;word-break:break-word;min-width:0;line-height:1.25" title="${av(sp.brand || '')}">${sp.brand ? '🏷' + esc(sp.brand) : '<span class="smd-dim">—</span>'}</div>
@@ -9745,7 +9763,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span title="この出品のメモ（自由記入・自動保存）">📝</span>
         <input class="lst-memo" data-id="${r.item_id}" value="${av(meta.note || '')}" placeholder="メモ（自由記入）" style="flex:1;min-width:0;padding:2px 6px;border:1px solid #eee;border-radius:5px;font-size:11px">
         <label title="仕入元が過少で在庫0のまま運用する出品。ONにすると全バリエーション明細に自動適用され、在庫を増やす保存時に警告します" style="white-space:nowrap;cursor:pointer;color:${meta.keep0 ? '#b71c1c' : '#999'};font-weight:${meta.keep0 ? '700' : '400'}"><input type="checkbox" class="lst-keep0" data-id="${r.item_id}" ${meta.keep0 ? 'checked' : ''}> ⚠️在庫0固定${meta.keep0 ? '（全明細）' : ''}</label>
-      </div></div>`;
+      </div>${_costOpen ? costEditorHtml(r) : ''}</div>`;
   }
   // 🌏 国横断・横並び：同じタイトルで束ねた各国版を1行に並べる表。groups=[{rep,img,byCc:{cc:listing}}]
   const GRID_CCS = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
@@ -9792,6 +9810,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; drawListingStatus(); }).catch(() => { lstSpecs = {}; }); }
     if (lstStats === null) { lstStats = {}; sbGetAll('app_kv', 'select=v&k=like.listing_stats_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstStats = m; drawListingStatus(); }).catch(() => { lstStats = {}; }); } // 👁閲覧/❤️いいね/🛒販売（GASのlisting_stats）
+    // 📗 利益台帳(listing_catalog)を出品一覧でも使えるよう遅延ロード＋商品名索引（原価インライン編集用・利益台帳とキャッシュ共用）
+    if (lst._ledgerRows === undefined) { lst._ledgerRows = null; sbGetAll('listing_catalog', 'select=*').then(rows => { lst._ledgerRows = rows || []; drawListingStatus(); }).catch(() => { lst._ledgerRows = []; }); }
+    if (Array.isArray(lst._ledgerRows)) { const cm = {}; lst._ledgerRows.forEach(r => { const k = ((r.name || r.title || '')).toLowerCase().trim(); if (k && !cm[k]) cm[k] = r; }); lst._catalogByName = cm; }
     // 💰 実売利益マップ（台帳と共用）を1回だけ裏で取得→完了後に再描画。読み込み前は💰チップ非表示（ledgerProfitStatsByNameがnullを返す）
     if (lst._ledgerCostMap === undefined && !lst._ledgerMapsLoading) { lst._ledgerMapsLoading = true; ensureLedgerMaps().then(() => { lst._ledgerMapsLoading = false; drawListingStatus(); }).catch(() => { lst._ledgerMapsLoading = false; }); }
     // 🌏 各商品が何か国に出ているか（商品名で束ねる）＝カード/グリッドの◯/7国列に使う。軽いので毎描画で構築
@@ -9987,6 +10008,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.querySelectorAll('#lst-list .lst-memo').forEach(inp => inp.addEventListener('input', () => { const id = inp.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.note = inp.value; m.at = Date.now(); saveListingMeta(); }));
     document.querySelectorAll('#lst-list .lst-pid').forEach(el => el.addEventListener('click', () => { const key = el.dataset.key; const cur = pidOf(key); const jan = prompt('JANコード（バーコード13桁など。空で削除）', cur.jan || ''); if (jan === null) return; const mpn = prompt('型番・モデル番号（任意。空で削除）', cur.mpn || ''); if (mpn === null) return; productIds = productIds || {}; productIds[key] = { jan: (jan || '').trim(), mpn: (mpn || '').trim(), at: Date.now() }; saveProductIds(); drawListingStatus(); })); // 🔖JAN/型番設定（parent_sku単位・各国そろえると共有）
     document.querySelectorAll('#lst-list .lst-keep0').forEach(cb => cb.addEventListener('change', () => { const id = cb.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.keep0 = cb.checked; m.at = Date.now(); saveListingMeta(); drawListingStatus(); }));
+    // 📗原価セル：クリックでその場の原価エディタを開閉／中の仕入入力は利益台帳と同じsaveLedgerCost（保存後reRenderAfterCostで一覧を再描画・costOpenは保持されるので開いたまま）
+    document.querySelectorAll('#lst-list .lst-costcell').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; lst.costOpen = lst.costOpen || new Set(); if (lst.costOpen.has(id)) lst.costOpen.delete(id); else lst.costOpen.add(id); drawListingStatus(); }));
+    document.querySelectorAll('#lst-list .ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
+    document.querySelectorAll('#lst-list .ledger-sugcost').forEach(el => el.addEventListener('click', () => saveLedgerCost(el.dataset.id, el.dataset.cc, +el.dataset.i, el.dataset.cost)));
+    document.querySelectorAll('#lst-list .lst-tocatalog').forEach(el => el.addEventListener('click', () => { const nm = (el.dataset.name || '').trim(); lst.ledgerQ = nm.length > 28 ? nm.slice(0, 28) : nm; lst.tab = 'ledger'; try { localStorage.setItem('smdListTab', 'ledger'); } catch (_) {} renderListPage(); }));
     // 明細(model)単位の在庫0固定：チェックで keep0m[model_id] を更新（全再描画せず色だけ更新＝開いたパネルを閉じない）
     document.querySelectorAll('#lst-list .lst-keep0m').forEach(cb => cb.addEventListener('change', () => { const id = cb.dataset.id, mid = cb.dataset.mid; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.keep0m = m.keep0m || {}; if (cb.checked) m.keep0m[mid] = true; else delete m.keep0m[mid]; m.at = Date.now(); saveListingMeta(); const lbl = cb.closest('label'); if (lbl) lbl.style.color = cb.checked ? '#b71c1c' : '#c9c9c9'; }));
     // 💴 明細の価格入力に応じて円換算をライブ更新
