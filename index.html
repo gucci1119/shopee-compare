@@ -1769,7 +1769,7 @@
       try { plan._cache = null; } catch (_) {}
       try { cust._cache = null; } catch (_) {}
       try { renderReturns._cache = null; } catch (_) {}
-      try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; lst._ledgerImg = undefined; } catch (_) {}
+      try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; lst._ledgerImg = undefined; lst._ledgerCostMap = undefined; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
       try { _dbRankCache = null; } catch (_) {}                       // 📊価格調整DBランキング
@@ -8417,6 +8417,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       catch (_) { lst._ledgerImg = {}; }
     }
     const _ledgerImgOf = r => { const im = (lst._ledgerImg || {})[((r.name || r.title || '')).toLowerCase().trim()]; return im ? IMG_CDN + im : ''; };
+    // 📗 仕入(原価)の自動補完：利益管理表(profit_sheet=cc:sn別の仕入値)を注文(sn→items名)で橋渡しし、商品名→直近仕入(円)を作る。台帳の未入力欄に「提案」として出す（1回だけ取得しキャッシュ）
+    if (lst._ledgerCostMap === undefined) {
+      try {
+        const [pk, ords] = await Promise.all([
+          settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []) : [],
+          settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => []) : [],
+        ]);
+        const sheet = (pk && pk[0] && pk[0].v && pk[0].v.items) || {};
+        const cm = {}; // name(小文字) -> {cost, ts}（同名は直近の注文の仕入を優先）
+        (ords || []).forEach(o => { const sc = sheet[o.cc + ':' + o.sn]; if (!sc || sc.cost == null) return; const ts = Number(o.order_ts) || 0; (o.items || []).forEach(it => { const k = (it.name || '').toLowerCase().trim(); if (!k) return; const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: Math.round(Number(sc.cost)), ts }; }); });
+        lst._ledgerCostMap = cm;
+      } catch (_) { lst._ledgerCostMap = {}; }
+    }
+    const _ledgerSugCost = r => { const c = (lst._ledgerCostMap || {})[((r.name || r.title || '')).toLowerCase().trim()]; return c ? c.cost : null; };
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
@@ -8439,6 +8453,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const jpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
     const cards = list.map(r => {
       const econ = r.econ || {}; const ccs = Object.keys(econ);
+      const sugCost = _ledgerSugCost(r); // 📗利益管理表の直近仕入(提案)
+      const varN = new Set(ccs.flatMap(cc => (econ[cc].vars || []).map(v => (v.name || '').trim()).filter(Boolean))).size; // 明細(バリエ)数（名前の異なる明細）
       // 利益レンジ（仕入が入っている＝profit確定の明細だけ対象）
       let pMin = Infinity, pMax = -Infinity, haveProfit = false, needCost = false;
       ccs.forEach(cc => (econ[cc].vars || []).forEach(v => { if (v.profit != null) { haveProfit = true; pMin = Math.min(pMin, v.profit); pMax = Math.max(pMax, v.profit); } else needCost = true; }));
@@ -8451,12 +8467,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const has = v.profit != null; const pc = (v.profit || 0) >= 0 ? '#1a7f37' : '#d93025';
           return `<tr style="${has && v.profit < 0 ? 'background:#fff4f4' : ''}">
             <td style="padding:3px 7px;white-space:nowrap"><span style="background:${(rg && rg.color) || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${cc}</span></td>
-            <td style="padding:3px 7px;font-size:11.5px">${esc(v.name || '—')}${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
+            <td style="padding:3px 7px;font-size:11.5px">${v.name ? esc(v.name) : '<span class="smd-dim" title="バリエーション無し（単一商品）">（単一）</span>'}${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap">${(e.cur || '')}${(Number(v.local) || 0).toLocaleString()}</td>
             ${lst.ledgerSimple ? '' : `<td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#888">${jpy(v.buyerJpy)}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="Shopee手数料">${jpy(v.feeJpy)} <span style="font-size:9.5px">(${v.feePct}%)</span></td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="SLS送料">${jpy(v.slsJpy)}</td>`}
-            <td style="padding:2px 5px;text-align:right;white-space:nowrap">¥<input class="ledger-cost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${v.cost != null ? v.cost : ''}" placeholder="仕入" title="仕入(円)を入力すると利益が出ます" style="width:62px;padding:2px 4px;font-size:11px;${v.cost == null ? 'background:#fffbea;border-color:#e0c060' : ''}"></td>
+            <td style="padding:2px 5px;text-align:right;white-space:nowrap">¥<input class="ledger-cost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" type="number" step="any" value="${v.cost != null ? v.cost : ''}" placeholder="仕入" title="仕入(円)を入力すると利益が出ます" style="width:62px;padding:2px 4px;font-size:11px;${v.cost == null ? 'background:#fffbea;border-color:#e0c060' : ''}">${v.cost == null && sugCost != null ? `<div class="ledger-sugcost" data-id="${idE}" data-cc="${cc}" data-i="${idx}" data-cost="${sugCost}" title="📗利益管理表の直近仕入 ¥${sugCost.toLocaleString()}。クリックで適用（同名注文の直近値・要確認）" style="font-size:9.5px;color:#1565c0;cursor:pointer;margin-top:1px;text-decoration:underline">📗¥${sugCost.toLocaleString()} 適用</div>` : ''}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700;color:${pc}">${has ? (v.profit >= 0 ? '+' : '') + jpy(v.profit) : '<span class="smd-dim">—</span>'}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:${pc}">${has ? v.roi + '%' : '<span class="smd-dim">—</span>'}</td></tr>`;
         }).join('');
@@ -8465,7 +8481,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <summary style="cursor:pointer;list-style:none;padding:9px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           ${_ledgerImgOf(r) ? `<img src="${_ledgerImgOf(r)}" style="width:36px;height:36px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.display='none'">` : '<span style="width:36px;height:36px;border-radius:5px;background:#f0f0f0;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:#ccc">📦</span>'}
           <span style="font-weight:700;font-size:13px;flex:1;min-width:200px">${esc(r.name || r.title || '(無題)')}</span>
-          <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${r.cost_total != null ? jpy(r.cost_total) : '—'} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国</span>
+          <span class="smd-dim" style="font-size:11.5px;white-space:nowrap">仕入 ${r.cost_total != null ? jpy(r.cost_total) : '—'} ・ ${Number(r.weight_g) || 0}g ・ ${ccs.length}国 ・ ${varN > 0 ? varN + 'バリエ' : '単一'}</span>
           <span style="font-size:11.5px;white-space:nowrap">利益 <b style="color:${anyNeg ? '#d93025' : '#1a7f37'}">${rangeTxt}</b>${anyNeg ? ' <b style="color:#d93025">⚠赤字あり</b>' : ''}${needCost ? ' <span style="color:#b3701a;font-size:10px">✎仕入入力で利益</span>' : ''}</span>
           <span class="smd-dim" style="font-size:10.5px;white-space:nowrap">${(r.updated_at || '').slice(0, 10)}</span>
           <button class="ledger-del smd-btn" data-id="${esc(r.id)}" title="この記録を削除" style="font-size:10px;padding:1px 6px;color:#d93025;border-color:#e0a0a0">🗑</button>
@@ -8500,6 +8516,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // 仕入インライン入力→利益/ROIを再計算して保存（同じ明細名は全国に反映）
     host.querySelectorAll('.ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
+    host.querySelectorAll('.ledger-sugcost').forEach(el => el.addEventListener('click', () => saveLedgerCost(el.dataset.id, el.dataset.cc, +el.dataset.i, el.dataset.cost))); // 📗利益管理表の直近仕入をクリックで適用
   }
   async function saveLedgerCost(id, cc, i, val) {
     lst._leakHtmlCache = null; // 原価を変えたらマージン漏れ検知のメモを無効化＝分析タブで再計算される
