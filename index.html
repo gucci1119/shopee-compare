@@ -7242,6 +7242,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 📋 出品状況（Shopee全出品カタログ＋バリエーション） ----------------
   const LIST_PAGE_SIZE = 48; // mpsku APIのpage_size上限は48
   const lfmt = (x) => (x == null || x === '' ? '-' : Number(x).toLocaleString());
+  // 符号付きコンパクト円（+¥1,200 / -¥980 / +¥1.5万）。台帳の実売利益など省スペース表示用。
+  const jpyShort = (n) => { const v = Math.round(Number(n) || 0); const sign = v > 0 ? '+' : (v < 0 ? '-' : ''); const a = Math.abs(v); const body = a >= 100000 ? (a / 10000).toFixed(a >= 1000000 ? 0 : 1) + '万' : a.toLocaleString(); return sign + '¥' + body; };
   function listingToRow(region, p) {
     const pd = p.price_detail || {}, sd = p.stock_detail || {};
     const models = (p.model_list || []).map(m => ({
@@ -8407,6 +8409,43 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     host.querySelectorAll('.plan-del').forEach(el => el.addEventListener('click', async () => { if (!confirm('この予定を削除しますか？')) return; try { await sbDelete('listing_plan', 'id=eq.' + encodeURIComponent(el.dataset.id)); renderListingPlan(); } catch (e) { alert(e.message); } }));
     host.querySelectorAll('.plan-tocomp').forEach(el => el.addEventListener('click', () => { const r = rows.find(x => x.id === el.dataset.id); if (r) planToComposer(r); }));
   }
+  // 📗 利益台帳の「原価(直近仕入)」「実売利益」マップを1回だけ構築（出品一覧グリッド／カードと利益台帳で共用）。
+  // key=商品名(lowercase trim)。cost=直近の仕入(円)、profit=[{入金円−仕入円, ts}] の配列。
+  async function ensureLedgerMaps() {
+    if (lst._ledgerCostMap !== undefined) return;
+    try {
+      const [pk, ords, inc] = await Promise.all([
+        settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []) : [],
+        settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => []) : [],
+        settings.sbKey ? sbGetAll('income', 'select=cc,sn,amount').catch(() => []) : [],
+      ]);
+      const sheet = (pk && pk[0] && pk[0].v && pk[0].v.items) || {};
+      const incMap = {}; (inc || []).forEach(x => { incMap[x.cc + ':' + x.sn] = Number(x.amount) || 0; });
+      const cm = {}, pm = {};
+      (ords || []).forEach(o => {
+        const key = o.cc + ':' + o.sn; const sc = sheet[key]; const ts = Number(o.order_ts) || 0;
+        const rg = regionByCc(o.cc); const rate = (rg && rg.rateJpy) || 0;
+        const costY = (sc && sc.cost != null) ? Math.round(Number(sc.cost)) : null;
+        const amtY = (incMap[key] != null && rate) ? Math.round(incMap[key] * rate) : null;
+        const profitY = (costY != null && amtY != null) ? amtY - costY : null;
+        (o.items || []).forEach(it => { const k = (it.name || '').toLowerCase().trim(); if (!k) return;
+          if (costY != null) { const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: costY, ts }; }
+          if (profitY != null) { (pm[k] = pm[k] || []).push({ profit: profitY, ts }); }
+        });
+      });
+      lst._ledgerCostMap = cm; lst._ledgerProfitMap = pm;
+    } catch (_) { lst._ledgerCostMap = {}; lst._ledgerProfitMap = {}; }
+  }
+  // 実売利益の統計（最大/最小/中央/直近/件数）。直近＝価格を都度改定しているので一番リアル。
+  function ledgerProfitStatsByName(name) {
+    const arr = (lst._ledgerProfitMap || {})[(name || '').toLowerCase().trim()];
+    if (!arr || !arr.length) return null;
+    const s = arr.map(x => x.profit).sort((a, b) => a - b); const n = s.length;
+    const median = n % 2 ? s[(n - 1) / 2] : Math.round((s[n / 2 - 1] + s[n / 2]) / 2);
+    const recent = arr.slice().sort((a, b) => b.ts - a.ts)[0].profit;
+    return { min: s[0], max: s[n - 1], median, recent, n };
+  }
+  function ledgerSugCostByName(name) { const c = (lst._ledgerCostMap || {})[(name || '').toLowerCase().trim()]; return c ? c.cost : null; }
   async function renderLedger(useCache) {
     const host = document.getElementById('list-ledger'); if (!host) return;
     if (!host.dataset.wired) { host.dataset.wired = '1'; }
@@ -8431,33 +8470,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       catch (_) { lst._ledgerImg = {}; }
     }
     const _ledgerImgOf = r => { const im = (lst._ledgerImg || {})[((r.name || r.title || '')).toLowerCase().trim()]; return im ? IMG_CDN + im : ''; };
-    // 📗 仕入の自動補完＋実売利益統計：利益管理表(profit_sheet=cc:sn別仕入)＋入金(income)を注文(sn→items名)で橋渡しし、商品名→{直近仕入} と {実売利益の配列} を作る（1回だけ取得しキャッシュ）
-    if (lst._ledgerCostMap === undefined) {
-      try {
-        const [pk, ords, inc] = await Promise.all([
-          settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []) : [],
-          settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => []) : [],
-          settings.sbKey ? sbGetAll('income', 'select=cc,sn,amount').catch(() => []) : [],
-        ]);
-        const sheet = (pk && pk[0] && pk[0].v && pk[0].v.items) || {};
-        const incMap = {}; (inc || []).forEach(x => { incMap[x.cc + ':' + x.sn] = Number(x.amount) || 0; });
-        const cm = {}, pm = {}; // cm: name->{cost,ts}（直近仕入） / pm: name->[{profit,ts}]（実売利益＝入金円−仕入円）
-        (ords || []).forEach(o => {
-          const key = o.cc + ':' + o.sn; const sc = sheet[key]; const ts = Number(o.order_ts) || 0;
-          const rg = regionByCc(o.cc); const rate = (rg && rg.rateJpy) || 0;
-          const costY = (sc && sc.cost != null) ? Math.round(Number(sc.cost)) : null;
-          const amtY = (incMap[key] != null && rate) ? Math.round(incMap[key] * rate) : null;
-          const profitY = (costY != null && amtY != null) ? amtY - costY : null;
-          (o.items || []).forEach(it => { const k = (it.name || '').toLowerCase().trim(); if (!k) return;
-            if (costY != null) { const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: costY, ts }; }
-            if (profitY != null) { (pm[k] = pm[k] || []).push({ profit: profitY, ts }); }
-          });
-        });
-        lst._ledgerCostMap = cm; lst._ledgerProfitMap = pm;
-      } catch (_) { lst._ledgerCostMap = {}; lst._ledgerProfitMap = {}; }
-    }
-    const _ledgerSugCost = r => { const c = (lst._ledgerCostMap || {})[((r.name || r.title || '')).toLowerCase().trim()]; return c ? c.cost : null; };
-    const _ledgerProfitStats = r => { const arr = (lst._ledgerProfitMap || {})[((r.name || r.title || '')).toLowerCase().trim()]; if (!arr || !arr.length) return null; const s = arr.map(x => x.profit).sort((a, b) => a - b); const n = s.length; const median = n % 2 ? s[(n - 1) / 2] : Math.round((s[n / 2 - 1] + s[n / 2]) / 2); const recent = arr.slice().sort((a, b) => b.ts - a.ts)[0].profit; return { min: s[0], max: s[n - 1], median, recent, n }; };
+    // 📗 仕入の自動補完＋実売利益統計マップ（共有ヘルパーで1回だけ構築）
+    await ensureLedgerMaps();
+    const _ledgerSugCost = r => ledgerSugCostByName(r.name || r.title || '');
+    const _ledgerProfitStats = r => ledgerProfitStatsByName(r.name || r.title || '');
     const q = (lst.ledgerQ || '').toLowerCase().trim();
     let list = rows || [];
     if (q) list = list.filter(r => ((r.name || '') + ' ' + (r.title || '') + ' ' + (r.parent_sku || '') + ' ' + (r.category || '')).toLowerCase().includes(q));
@@ -9685,7 +9701,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee" loading="lazy" onerror="this.style.opacity=.15">
         <div style="min-width:0">
           <div style="font-size:12px;word-break:break-word;line-height:1.3" title="${av(r.name || '')}">${esc(r.name)}<span class="smd-dim" style="font-size:9px;margin-left:6px;font-weight:400">${(r.name || '').length}字</span></div>
-          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : `<span class="smd-dim">単品${canEdit ? '（下で価格・在庫を編集）' : ''}</span>`}</div><div style="font-size:10.5px;color:#667;margin-top:1px">${sp.catName ? `📁${esc(sp.catName)} ` : (sp.cat && sp.cat !== 0 ? `📁#${esc(String(sp.cat))} ` : '')}<span class="smd-dim" title="ShopeeのItem ID（各国ごと）">ID:${r.item_id}</span></div>
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : `<span class="smd-dim">単品${canEdit ? '（下で価格・在庫を編集）' : ''}</span>`}${(() => { const ps = ledgerProfitStatsByName(r.name); return ps ? ` <span title="実際に売れた注文の利益（入金円−仕入円・全7か国合算）。価格を都度改定しているので直近が一番リアル。中央${jpyShort(ps.median)}・最${jpyShort(ps.max)}〜${jpyShort(ps.min)}・${ps.n}件" style="background:${ps.recent < 0 ? '#fdeaea' : '#eafaef'};color:${ps.recent < 0 ? '#d93025' : '#1a7f37'};font-weight:700;border-radius:3px;padding:1px 5px;font-size:10px;white-space:nowrap">💰実売 ${jpyShort(ps.recent)}</span>` : ''; })()}</div><div style="font-size:10.5px;color:#667;margin-top:1px">${sp.catName ? `📁${esc(sp.catName)} ` : (sp.cat && sp.cat !== 0 ? `📁#${esc(String(sp.cat))} ` : '')}<span class="smd-dim" title="ShopeeのItem ID（各国ごと）">ID:${r.item_id}</span></div>
         </div>
         <div style="font-size:10px;min-width:0" title="コンディション">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:3px;padding:1px 4px;white-space:nowrap">${condLabel(sp.cond)}</span>` : '<span class="smd-dim">—</span>'}</div>
         <div style="font-size:10px;word-break:break-all;min-width:0;line-height:1.25" title="出品アカウント">${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600" title="${esc(a.label)}">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : '<span class="smd-dim">—</span>'); })()}</div>
@@ -9725,7 +9741,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const oos = (l.stock || 0) <= 0, pub = l.status === 1;
         return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}<div class="smd-dim" style="font-size:8px;color:#6b7280" title="ShopeeのItem ID">#${l.item_id}</div></td>`;
       }).join('');
-      return `<tr style="border-bottom:1px solid #eee"><td style="padding:5px 8px;position:sticky;left:0;background:#fff;z-index:1;min-width:230px;max-width:300px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(g.img || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0"><div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(g.rep)}">${esc(g.rep)}</div><div class="smd-dim" style="font-size:10px">${ccN}か国に出品${(function () { const sk = GRID_CCS.map(cc => g.byCc[cc]).filter(Boolean).map(l => l.parent_sku).filter(Boolean)[0] || ''; return sk ? ' · <span title="親SKU（管理コード）" style="color:#7b52c4">🔖' + esc(sk) + '</span>' : ''; })()}</div></div></div></td>${cells}<td style="padding:4px 6px;white-space:nowrap"><button class="grid-unify smd-btn" data-name="${av(g.rep)}" style="font-size:10px;padding:2px 6px;border-color:#1a7f37;color:#1a7f37" title="この商品の各国をまとめて編集（価格・在庫・🚫全国在庫0）">🌍まとめ編集</button></td></tr>`;
+      const gps = ledgerProfitStatsByName(g.rep); // 💰実売利益（入金−仕入）／商品名で台帳と突合
+      const profLine = gps ? `<div style="font-size:9.5px;white-space:nowrap" title="実際に売れた注文の利益（入金円−仕入円）。価格を都度改定しているので直近が一番リアル。中央${jpyShort(gps.median)}・${gps.n}件"><span class="smd-dim">💰実売</span> <b style="color:${gps.recent < 0 ? '#d93025' : '#1a7f37'}">${jpyShort(gps.recent)}</b> <span class="smd-dim">中央${jpyShort(gps.median)}・${gps.n}件</span></div>` : '';
+      return `<tr style="border-bottom:1px solid #eee"><td style="padding:5px 8px;position:sticky;left:0;background:#fff;z-index:1;min-width:230px;max-width:300px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(g.img || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0"><div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(g.rep)}">${esc(g.rep)}</div><div class="smd-dim" style="font-size:10px"><span title="7か国中${ccN}か国に出品中。残りは各国セルの—から出せます" style="color:${ccN >= 5 ? '#1a7f37' : (ccN >= 3 ? '#a8650a' : '#d93025')};font-weight:600">${ccN}/7国</span>${(function () { const sk = GRID_CCS.map(cc => g.byCc[cc]).filter(Boolean).map(l => l.parent_sku).filter(Boolean)[0] || ''; return sk ? ' · <span title="親SKU（管理コード）" style="color:#7b52c4">🔖' + esc(sk) + '</span>' : ''; })()}</div>${profLine}</div></div></td>${cells}<td style="padding:4px 6px;white-space:nowrap"><button class="grid-unify smd-btn" data-name="${av(g.rep)}" style="font-size:10px;padding:2px 6px;border-color:#1a7f37;color:#1a7f37" title="この商品の各国をまとめて編集（価格・在庫・🚫全国在庫0）">🌍まとめ編集</button></td></tr>`;
     }).join('');
     return `<div style="overflow-x:auto;border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11px">${head}${body}</table></div>`;
   }
@@ -9738,6 +9756,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
     if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; drawListingStatus(); }).catch(() => { lstSpecs = {}; }); }
+    // 💰 実売利益マップ（台帳と共用）を1回だけ裏で取得→完了後に再描画。読み込み前は💰チップ非表示（ledgerProfitStatsByNameがnullを返す）
+    if (lst._ledgerCostMap === undefined && !lst._ledgerMapsLoading) { lst._ledgerMapsLoading = true; ensureLedgerMaps().then(() => { lst._ledgerMapsLoading = false; drawListingStatus(); }).catch(() => { lst._ledgerMapsLoading = false; }); }
     lst._watchIdx = dropWatchIndex(); // 在庫監視の逆引き（cc|item_id → 全体/明細/仕入元状態）
     const totalAll = all.length;
     const watchedCount = all.filter(r => lst._watchIdx.has(r.cc + '|' + r.item_id)).length;
