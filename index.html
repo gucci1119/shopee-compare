@@ -2861,22 +2861,30 @@
     try {
       let days, orders, income, inv, payouts;
       const dc = renderDash._cache; // 60秒キャッシュ（連続で開いても再取得しない）。daysはtrendでも再利用
-      let recentOrders;
-      if (!force && dc && Date.now() - dc.at < 60000) { ({ days, orders, income, inv, payouts, recentOrders } = dc); }
+      let recentOrders, dashWarn;
+      if (!force && dc && Date.now() - dc.at < 60000) { ({ days, orders, income, inv, payouts, recentOrders, dashWarn } = dc); }
       else {
         kpis.innerHTML = '<div class="kpi"><div class="t">読み込み中...</div><div class="v">…</div></div>';
         const since = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10);
         const since5 = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);  // 今日/昨日(JST)算出用に直近5日の注文
+        // ★2026-07-28 読込失敗を「静かに¥0」にせず握った失敗を記録→上部に警告（income/orders/daily_statsは元々catchせず=失敗で全体が例外表示）
+        dashWarn = [];
+        const soft = (label, p) => p.catch(e => { dashWarn.push(label); try { console.error('dash load失敗:', label, e); } catch (_) {} return []; });
         [days, orders, income, inv, payouts, recentOrders] = await Promise.all([
           sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
           sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items&tab=lt.500&order=ship_by.asc'),
           sbGetAll('income', 'select=cc,sn,amount,buyer_paid,pending&order=sn'),
-          ensureInv().catch(() => []),
-          sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time').catch(() => []),
-          sbGetAll('orders', `select=cc,sn,order_ts,order_date,total,tab,items&order_date=gte.${since5}`).catch(() => []),
+          soft('在庫', ensureInv()),
+          soft('入金', sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time')),
+          soft('直近注文', sbGetAll('orders', `select=cc,sn,order_ts,order_date,total,tab,items&order_date=gte.${since5}`)),
         ]);
-        renderDash._cache = { days, orders, income, inv, payouts, recentOrders, at: Date.now() };
+        renderDash._cache = { days, orders, income, inv, payouts, recentOrders, dashWarn, at: Date.now() };
       }
+      // 読込に一部失敗した時＝KPIの上に警告（不完全な数値を"正しい"と誤認させない）。計算は不変・バナーのみ。
+      { const wid = 'dash-loadwarn'; let wb = document.getElementById(wid);
+        if (dashWarn && dashWarn.length) { if (!wb) { wb = document.createElement('div'); wb.id = wid; if (kpis && kpis.parentNode) kpis.parentNode.insertBefore(wb, kpis); }
+          wb.innerHTML = `<div style="background:#fff3f0;border:1px solid #ffc4b3;color:#b5341a;border-radius:8px;padding:8px 12px;margin:0 0 10px;font-size:12.5px">⚠️ <b>${dashWarn.join('・')}</b>の読み込みに失敗しました。表示中の数値はその分だけ不完全です（右上「🔄更新」で再取得してください）。</div>`; }
+        else if (wb) { wb.innerHTML = ''; } }
       // 今日/昨日を日本時間基準(order_ts→JST)で。件数=orders、金額=income.buyer_paid(escrow・注文完了を待たず入る＝速報)。
       // orders.totalは完了時のみで直近が¥0になるため使わない。買い手支払額は注文SNでincomeと突合。
       const jstToday = jstDate(Date.now()), jstYest = jstDate(Date.now() - 86400000);
