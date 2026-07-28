@@ -9739,7 +9739,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const rg = regionByCc(cc) || {};
         const jp = rg.rateJpy && l.price_min != null ? '¥' + Math.round(l.price_min * rg.rateJpy).toLocaleString('ja-JP') : '';
         const oos = (l.stock || 0) <= 0, pub = l.status === 1;
-        return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}<div class="smd-dim" style="font-size:8px;color:#6b7280" title="ShopeeのItem ID">#${l.item_id}</div></td>`;
+        const single = !(l.models && l.models.length);                                  // 単品＝model_id 0 で直接編集
+        const canEd = !!(settings.openapiUrl && settings.writeToken && l.shop_id);       // 公式APIで書込可
+        if (canEd && single) {
+          // ✎ 単品セルはその場で価格・在庫を編集→💾で公式API保存（1商品・全国を1画面で操作）
+          return `<td style="padding:3px 5px;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}">
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:1px"><span style="color:#1565c0;font-size:9px">${rg.cur || ''}</span><input class="grid-prc" data-cc="${cc}" data-id="${l.item_id}" value="${l.price_min != null ? l.price_min : ''}" inputmode="decimal" title="出品価格（現地通貨）" style="width:54px;padding:1px 2px;border:1px solid #ddd;border-radius:4px;text-align:right;font-size:10.5px;color:#1565c0"></div>
+            <div class="smd-dim" style="font-size:9px">${jp}</div>
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:2px;margin-top:1px"><span style="font-size:9px;color:#888">在</span><input class="grid-stk" data-cc="${cc}" data-id="${l.item_id}" value="${l.stock != null ? l.stock : ''}" inputmode="numeric" title="在庫" style="width:32px;padding:1px 2px;border:1px solid #ddd;border-radius:4px;text-align:right;font-size:10.5px;color:${oos ? '#d93025' : '#333'}"><button class="grid-save" data-cc="${cc}" data-id="${l.item_id}" title="この国の価格・在庫を公式APIで保存" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:4px;padding:0 3px;cursor:pointer;font-size:10px;line-height:1.5">💾</button></div>
+            ${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}
+            <div class="smd-dim" style="font-size:8px;color:#6b7280" title="ShopeeのItem ID">#${l.item_id}</div></td>`;
+        }
+        return `<td style="padding:4px 6px;white-space:nowrap;border-left:1px solid #f0f0f0;text-align:right;font-size:11px;background:${pub ? '#fff' : '#f7f7f7'}"><div style="color:#1565c0;font-weight:600">${rg.cur || ''}${lfmt(l.price_min)}</div><div class="smd-dim" style="font-size:9.5px">${jp}</div><div style="color:${oos ? '#d93025' : '#555'}">在${l.stock != null ? l.stock : '-'}</div>${!single ? `<div class="grid-unify smd-dim" data-name="${av(g.rep)}" title="バリエーション有り＝各国まとめ編集で価格・在庫を編集" style="font-size:8.5px;color:#7b52c4;cursor:pointer;text-decoration:underline">✎${(l.models || []).length}変種</div>` : ''}${pub ? '' : '<div class="smd-dim" style="font-size:9px">非公開</div>'}<div class="smd-dim" style="font-size:8px;color:#6b7280" title="ShopeeのItem ID">#${l.item_id}</div></td>`;
       }).join('');
       const gps = ledgerProfitStatsByName(g.rep); // 💰実売利益（入金−仕入）／商品名で台帳と突合
       const profLine = gps ? `<div style="font-size:9.5px;white-space:nowrap" title="実際に売れた注文の利益（入金円−仕入円）。価格を都度改定しているので直近が一番リアル。中央${jpyShort(gps.median)}・${gps.n}件"><span class="smd-dim">💰実売</span> <b style="color:${gps.recent < 0 ? '#d93025' : '#1a7f37'}">${jpyShort(gps.recent)}</b> <span class="smd-dim">中央${jpyShort(gps.median)}・${gps.n}件</span></div>` : '';
@@ -9883,6 +9894,34 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const d = document.getElementById('lst-sortdir'); if (d) d.addEventListener('click', () => { lst.sortDir = lst.sortDir === 'asc' ? 'desc' : 'asc'; drawListingStatus(); }); }
     { const g = document.getElementById('lst-gridtoggle'); if (g) g.addEventListener('click', () => { lst.grid = !lst.grid; lst.page = 1; drawListingStatus(); }); }
     document.querySelectorAll('#lst-list .grid-unify').forEach(el => el.addEventListener('click', () => { if (!openUnifyFromListing((el.dataset.name || '').trim()) && typeof toast === 'function') toast('各国の同名カタログが見つかりませんでした'); }));
+    // 🌏 国横断グリッドの単品セル：その場で価格・在庫を公式API保存（カードの単品保存と同じ経路。model_id 0）
+    document.querySelectorAll('#lst-list .grid-save').forEach(btn => btn.addEventListener('click', async () => {
+      const cc = btn.dataset.cc, id = Number(btn.dataset.id), cell = btn.closest('td');
+      const prcInp = cell.querySelector('.grid-prc'), stkInp = cell.querySelector('.grid-stk');
+      const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+      const sidS = shopIdOfListing(cc, id);
+      if (!(settings.openapiUrl && settings.writeToken && sidS)) { alert('公式APIの書込設定（openapiUrl/writeToken）が必要です'); return; }
+      const row = (lst.byCc[cc] || []).find(x => x.item_id === id) || {};
+      const priceList = [], stockList = [];
+      const pv = prcInp ? prcInp.value.trim() : ''; if (pv !== '' && parseFloat(pv) > 0 && String(parseFloat(pv)) !== String(row.price_min)) priceList.push({ model_id: 0, price: parseFloat(pv) });
+      const sv = stkInp ? stkInp.value.trim() : ''; if (sv !== '' && String(parseInt(sv, 10)) !== String(row.stock)) stockList.push({ model_id: 0, stock: parseInt(sv, 10) || 0 });
+      if (!priceList.length && !stockList.length) { if (typeof toast === 'function') toast('変更なし'); return; }
+      const chg = [priceList.length ? '価格' : '', stockList.length ? '在庫' : ''].filter(Boolean).join('・');
+      const warn = priceList.length ? countryListingWarnings({ cc, title: '', prices: priceList.map(x => x.price) }) : [];
+      if (warn.length && !confirm(`⚠️ ${cc}の価格制約に注意:\n - ${warn.join('\n - ')}\n\nこのまま書き込みますか？`)) return;
+      const k0Increase = stockList.filter(s => (s.stock || 0) > 0 && keep0OfModel(id, 0));
+      if (k0Increase.length && !confirm(`⚠️「在庫0固定」の在庫を増やそうとしています（仕入元が過少で在庫0運用）。本当に増やしますか？`)) return;
+      if (!confirm(`書込先: ${gw.summary}\n${cc} item${id} の【${chg}】を公式APIで保存します。よろしいですか？`)) return;
+      btn.disabled = true; const oldTxt = btn.textContent; btn.textContent = '…';
+      try {
+        if (priceList.length) { const rp = await openapiUpdatePriceList(sidS, id, priceList); if (!(rp && rp.ok)) throw new Error((rp && rp.error) || '価格API失敗'); }
+        if (stockList.length) { const rs = await openapiUpdateStockList(sidS, id, stockList); if (!(rs && rs.ok)) throw new Error((rs && rs.error) || '在庫API失敗'); }
+        priceList.forEach(pl => { row.price_min = pl.price; row.price_max = pl.price; });
+        stockList.forEach(sl => { row.stock = sl.stock; });
+        btn.textContent = '✓'; btn.style.background = '#1a7f37'; btn.style.color = '#fff';
+        try { logAct('出品', '価格在庫編集(グリッド)', row.name || '', cc + ' ' + chg); } catch (_) {}
+      } catch (e) { alert('✗ ' + (e.message || e)); btn.disabled = false; btn.textContent = oldTxt; }
+    }));
     { let pt; const pmin = document.getElementById('lst-pmin'), pmax = document.getElementById('lst-pmax'); const upd = () => { clearTimeout(pt); pt = setTimeout(() => { lst.priceMin = (pmin.value === '') ? null : Number(pmin.value); lst.priceMax = (pmax.value === '') ? null : Number(pmax.value); lst.page = 1; drawListingStatus(); }, 300); }; if (pmin) pmin.addEventListener('input', upd); if (pmax) pmax.addEventListener('input', upd); }
     { const seg = document.getElementById('lst-cond'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.cond = b.dataset.c; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-brand'); if (s) s.addEventListener('change', () => { lst.brand = s.value; lst.page = 1; drawListingStatus(); }); }
