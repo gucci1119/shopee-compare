@@ -7348,7 +7348,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // 出品データの最終同期時刻（ポータル表示は前回同期時点。編集はShopeeへ即時反映）
   function listSyncStr() {
-    const t = Number(localStorage.getItem('smdListSync') || 0);
+    // 実データの新しさ＝各出品のsynced_at最大（GASが約30分ごとに自動更新）を優先。無ければこの端末の最終ライブ取得時刻
+    const t = lst._dataFreshMs || Number(localStorage.getItem('smdListSync') || 0);
     if (!t) return '未同期（🔄Shopeeから更新を実行）';
     const d = new Date(t), p = n => String(n).padStart(2, '0');
     const mins = Math.round((Date.now() - t) / 60000);
@@ -9679,8 +9680,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 出品一覧の表グリッド：見出し・折りたたみ行・展開バリエ行・単品編集行が全てこの同じ列定義を共有＝ピクセル調整不要で必ず揃う。列を足す時はここに1トラック足す
   // 18列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️いいね/💰実売/📗原価/ROI/🌏国/ブランド/SKU/JAN/操作。横に増えても親を横スクロールで見せる（min-width固定）
-  const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(150px,1fr) 46px 104px 118px 48px 58px 58px 54px 92px 74px 50px 44px 92px 118px 128px 128px;column-gap:12px;row-gap:2px;align-items:start';
-  const LMINW = 1650; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
+  const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(150px,1fr) 46px 104px 118px 48px 58px 58px 54px 92px 110px 70px 44px 92px 118px 128px 128px;column-gap:12px;row-gap:2px;align-items:start';
+  const LMINW = 1706; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
   // 📗 出品一覧のカードから開く原価エディタ（利益台帳と同じ per明細 の仕入入力→利益/ROI。saveLedgerCostで保存・全国反映）
   function costEditorHtml(r) {
     const cat = ((r.parent_sku || '').trim() && (lst._catalogBySku || {})[(r.parent_sku || '').trim()]) || (lst._catalogByName || {})[(r.name || '').toLowerCase().trim()];
@@ -9804,6 +9805,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const host = document.getElementById('list-status'); if (!host) return;
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を出さない）
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
+    { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstDropStatus = {}; }); }
     if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
@@ -9857,6 +9859,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         else if (lst.sort === 'sale') { va = Number(statOf(a.item_id).sale) || 0; vb = Number(statOf(b.item_id).sale) || 0; }
         else if (lst.sort === 'views') { va = Number(statOf(a.item_id).views) || 0; vb = Number(statOf(b.item_id).views) || 0; }
         else if (lst.sort === 'likes') { va = Number(statOf(a.item_id).likes) || 0; vb = Number(statOf(b.item_id).likes) || 0; }
+        else if (lst.sort === 'profit') { const pa = ledgerProfitStatsByName(a.name), pb = ledgerProfitStatsByName(b.name); va = pa ? pa.recent : -1e12; vb = pb ? pb.recent : -1e12; }
+        else if (lst.sort === 'cost') { va = ledgerSugCostByName(a.name) || 0; vb = ledgerSugCostByName(b.name) || 0; }
+        else if (lst.sort === 'roi') { const ca = ledgerSugCostByName(a.name), pa = ledgerProfitStatsByName(a.name); va = (ca && pa) ? pa.recent / ca : -1e12; const cb = ledgerSugCostByName(b.name), pb = ledgerProfitStatsByName(b.name); vb = (cb && pb) ? pb.recent / cb : -1e12; }
+        else if (lst.sort === 'cov') { va = (lst._nameCcCount || {})[(a.name || '').toLowerCase().trim()] || 0; vb = (lst._nameCcCount || {})[(b.name || '').toLowerCase().trim()] || 0; }
         return (va - vb) * dir;
       });
     }
@@ -9920,25 +9926,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
       ${lst.grid ? '<div id="lst-list"></div>' : `<div style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:#f6f6f8">
         <div style="min-width:${LMINW}px">
-        <div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:#fff;z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
+        ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:#fff;z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
           <span class="ord-cc" style="visibility:hidden">--</span><span></span>
-          <span style="min-width:0">商品名 / タイトル</span>
+          <span class="lst-sorth" data-s="name" style="min-width:0;cursor:pointer;user-select:none;color:${col('name')}" title="クリックで並び替え（再クリックで昇順⇄降順）">商品名 / タイトル${ar('name')}</span>
           <span>状態</span>
           <span>アカウント</span>
-          <span style="text-align:right">価格</span>
-          <span style="text-align:right">在庫</span>
-          <span style="text-align:right" title="累計販売数（公式APIのsale・今までの購入）">🛒販売</span>
-          <span style="text-align:right" title="閲覧数（views）">👁閲覧</span>
-          <span style="text-align:right" title="いいね数（likes）">❤️</span>
-          <span style="text-align:right" title="実際に売れた注文の直近利益（入金円−仕入円）">💰実売</span>
-          <span style="text-align:right" title="利益管理表の直近仕入(円)">📗原価</span>
-          <span style="text-align:right" title="実売直近利益÷原価">ROI</span>
-          <span style="text-align:center" title="7か国中いくつに出品しているか">🌏国</span>
+          <span class="lst-sorth" data-s="price" style="text-align:right;cursor:pointer;user-select:none;color:${col('price')}" title="クリックで並び替え">価格${ar('price')}</span>
+          <span class="lst-sorth" data-s="stock" style="text-align:right;cursor:pointer;user-select:none;color:${col('stock')}" title="クリックで並び替え">在庫${ar('stock')}</span>
+          <span class="lst-sorth" data-s="sale" style="text-align:right;cursor:pointer;user-select:none;color:${col('sale')}" title="累計販売数（今までの購入・全期間累計）。クリックで並び替え">🛒販売${ar('sale')}</span>
+          <span class="lst-sorth" data-s="views" style="text-align:right;cursor:pointer;user-select:none;color:${col('views')}" title="閲覧数（全期間累計）。クリックで並び替え">👁閲覧${ar('views')}</span>
+          <span class="lst-sorth" data-s="likes" style="text-align:right;cursor:pointer;user-select:none;color:${col('likes')}" title="いいね数（全期間累計）。クリックで並び替え">❤️${ar('likes')}</span>
+          <span class="lst-sorth" data-s="profit" style="text-align:right;cursor:pointer;user-select:none;color:${col('profit')}" title="実際に売れた注文の直近利益。クリックで並び替え">💰実売${ar('profit')}</span>
+          <span class="lst-sorth" data-s="cost" style="text-align:right;cursor:pointer;user-select:none;color:${col('cost')}" title="原価。クリックで並び替え">📗原価${ar('cost')}</span>
+          <span class="lst-sorth" data-s="roi" style="text-align:right;cursor:pointer;user-select:none;color:${col('roi')}" title="ROI。クリックで並び替え">ROI${ar('roi')}</span>
+          <span class="lst-sorth" data-s="cov" style="text-align:center;cursor:pointer;user-select:none;color:${col('cov')}" title="7か国中いくつに出品か。クリックで並び替え">🌏国${ar('cov')}</span>
           <span>ブランド</span>
           <span>SKU</span>
           <span>📇 JAN/型番</span>
           <span style="text-align:center">操作</span>
-        </div>
+        </div>`; })()}
         <div id="lst-list"></div>
         </div>
       </div>`}
@@ -9956,6 +9962,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { lst.search = v.trim(); lst.page = 1; drawListingStatus(); }, 200); });
     { const seg = document.getElementById('lst-pub'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.pub = b.dataset.p; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-sort'); if (s) s.addEventListener('change', () => { lst.sort = s.value; if (lst.sort && !lst.sortDir) lst.sortDir = (lst.sort === 'name') ? 'asc' : 'desc'; lst.page = 1; drawListingStatus(); }); }
+    // ヘッダー列クリックで並び替え（同じ列を再クリックで昇順⇄降順・数値列は既定降順/名前は昇順）
+    document.querySelectorAll('.lst-sorth').forEach(el => el.addEventListener('click', () => { const k = el.dataset.s; if (lst.sort === k) { lst.sortDir = lst.sortDir === 'asc' ? 'desc' : 'asc'; } else { lst.sort = k; lst.sortDir = (k === 'name') ? 'asc' : 'desc'; } lst.page = 1; drawListingStatus(); }));
     { const d = document.getElementById('lst-sortdir'); if (d) d.addEventListener('click', () => { lst.sortDir = lst.sortDir === 'asc' ? 'desc' : 'asc'; drawListingStatus(); }); }
     { const g = document.getElementById('lst-gridtoggle'); if (g) g.addEventListener('click', () => { lst.grid = !lst.grid; lst.page = 1; try { localStorage.setItem('smdListGrid', lst.grid ? '1' : '0'); } catch (_) {} drawListingStatus(); }); }
     document.querySelectorAll('#lst-list .grid-unify').forEach(el => el.addEventListener('click', () => { if (!openUnifyFromListing((el.dataset.name || '').trim()) && typeof toast === 'function') toast('各国の同名カタログが見つかりませんでした'); }));
