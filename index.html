@@ -12399,7 +12399,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         return `<th class="pf-th" data-k="${c.k}" draggable="true" style="cursor:pointer" title="クリックでソート / ドラッグで列移動">${c.l}${ind}<span class="pf-rs" data-k="${c.k}"></span></th>`;
       }).join('') + '</tr>';
     let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, tPpl = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0, pairCost = 0, pairFixN = 0, pairProvN = 0, strictSkipN = 0;
-    pfSorted(orders).forEach(o => {
+    // ★ページ送り：合計は全件で累積し、DOMに出す行だけ現在ページ(100注文)に絞る（旧: 全注文を一括innerHTML＝描画が重い）。絞り込み/並替が変わったらsig不一致で1ページ目へ
+    const PER_PF = 100;
+    const _pfSig = orders.length + '|' + (orders[0] ? orders[0].sn : '') + '|' + pf.sortKey + '|' + pf.sortDir + '|' + pf.ym;
+    if (_pfSig !== pf._pageSig) { pf.page = 1; pf._pageSig = _pfSig; }
+    const _pfPages = Math.max(1, Math.ceil(orders.length / PER_PF));
+    pf.page = Math.min(Math.max(1, pf.page || 1), _pfPages);
+    const _pfStart = (pf.page - 1) * PER_PF, _pfEnd = _pfStart + PER_PF;
+    pfSorted(orders).forEach((o, _oi) => {
      try {
       const rg = regionByCc(o.cc);
       if (!rg) return;
@@ -12521,7 +12528,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             `</td>`; },
         };
         const trStyle = o.tab === 600 ? ' style="opacity:.4;background:#f4f4f4"' : ''; // キャンセルはグレーアウト
-        html += '<tr' + trStyle + '>' + cols.map(c => CELL[c.k]()).join('') + '</tr>';
+        if (_oi >= _pfStart && _oi < _pfEnd) html += '<tr' + trStyle + '>' + cols.map(c => CELL[c.k]()).join('') + '</tr>'; // ★現在ページの注文だけDOMに出す（合計は上で全件累積済み）
       });
      } catch (err) { console.warn('[利益] 行をスキップ', o && o.sn, err && err.message); }
     });
@@ -12539,9 +12546,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     html = pfFeePanelHtml(orders) + html;
     // ※ pf.grossTotal はpfRender冒頭でpfMonthGross()から確定済み（絞り込みに依存させない）。ここの pairProfit は表の「合計」行=絞り込み後の表示用。
     html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
+      '<div style="text-align:center;margin:10px 0 2px">' + pageNav(orders.length, PER_PF, pf.page) + '</div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${pf.strictCost ? `<b style="color:#1565c0">🔒到着済(在庫No)のみ表示中</b>（在庫Noが付いた＝到着し在庫台帳に載った注文だけで粗利計算）。${strictSkipN ? `<b style="color:#c5760a">到着待ち ${strictSkipN}件を粗利から除外中</b>（在庫No未＝実物未着）。` : ''}` : ''}粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。<b>仕入額の優先＝①手入力 ＞ ②📗利益計算表(スプシ)の取込 ＞ ③在庫連携🏷</b>。<b>粗利＝(Shopee入金＋PayPal差分)−仕入</b>（PayPal差分は主にBR・大半0）。仕入額が全く無い注文は空欄。キャンセルはグレー表示。列幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」。</div></div>`;
     body.innerHTML = html;
     fitScroll('profit');
+    wirePageNav(body, p => { pf.page = p; const sc = body.querySelector('.pf-scroll'); if (sc) sc.scrollTop = 0; pfRender(); }); // ★ページ送り（同じ絞り込みなのでsig一致＝1ページ目に戻らずそのページを描画）
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
       const v = e.target.value === '' ? null : Number(e.target.value);
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
