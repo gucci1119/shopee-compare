@@ -1254,26 +1254,35 @@
     const info = (param && param.info_needed) || {};
     const needPickup = Array.isArray(info.pickup) && info.pickup.length;
     const needDropoff = Array.isArray(info.dropoff) && info.dropoff.length;
-    let choice = {}, msg = `注文 ${sn}（${cc}）を公式APIで発送手配します。\n\n`;
+    const needNonInteg = Array.isArray(info.non_integrated) && info.non_integrated.length; // 非統合チャネル＝自前で追跡番号が要る
+    // 非統合(non_integrated)チャネルは tracking_number 等を自分で入れる必要があり、pickup/dropoffの自動手配では送れない→Seller Centerへ誘導（誤った空リクエストで only_support_one_type 等を出さない）
+    if (needNonInteg && !needPickup && !needDropoff) { alert(`この注文（${sn}）は非統合(non_integrated)の配送チャネルです。追跡番号を自分で登録する必要があるため、Seller Center（またはSLS伝票印刷）から発送してください。\n\n必要項目: ${info.non_integrated.join(', ')}`); return; }
+    let choice = {}, method = '', msg = `注文 ${sn}（${cc}）を公式APIで発送手配します。\n\n`;
+    // pickup/dropoff は排他。両方要求される稀なケースは pickup を優先（Shopeeの info_needed は通常どちらか一方のみ）
     if (needPickup) {
       const addr = ((param.pickup || {}).address_list || [])[0];
       if (!addr) { alert('集荷先住所が取得できませんでした。Seller Centerから発送してください。'); return; }
       const timeId = ((addr.time_slot_list || [])[0] || {}).pickup_time_id;
       choice = { pickup_address_id: addr.address_id, pickup_time_id: timeId };
-      msg += `方式: 集荷(pickup)\n住所ID: ${addr.address_id}${timeId ? ' / 時間枠ID: ' + timeId : ''}\n`;
+      method = 'pickup'; msg += `方式: 集荷(pickup)\n住所ID: ${addr.address_id}${timeId ? ' / 時間枠ID: ' + timeId : ''}\n`;
     } else if (needDropoff) {
       const br = ((param.dropoff || {}).branch_list || [])[0];
-      if (br && br.branch_id != null) { choice = { dropoff_branch_id: br.branch_id }; msg += `方式: 持込(dropoff)\n支店ID: ${br.branch_id}\n`; }
-      else { msg += `方式: 持込(dropoff・自動)\n`; }
+      if (br && br.branch_id != null) { choice = { dropoff_branch_id: br.branch_id }; method = 'dropoff'; msg += `方式: 持込(dropoff)\n支店ID: ${br.branch_id}\n`; }
+      else { method = 'dropoff(auto)'; msg += `方式: 持込(dropoff・自動)\n`; }
     } else {
-      msg += `方式: 自動手配（追加情報は不要）\n`;
+      method = 'auto'; msg += `方式: 自動手配（追加情報は不要）\n`;
     }
     msg += `\n⚠️ これは実際にShopeeへ発送手配を送る操作です（お金・物流が動きます）。実行しますか？\n※β機能：最初の1件で結果をShopeeでご確認ください。`;
     if (!confirm(msg)) return;
     try {
       const r = await openapiShipOrder(Object.assign({ shop_id: shopId, order_sn: sn }, choice));
       if (r && r.ok) { alert('✅ 発送手配を送信しました。Shopeeの注文で状態と追跡番号をご確認ください。'); try { logAct('注文', 'API発送(β)', sn, cc); } catch (_) {} renderOrders(); }
-      else { alert('発送に失敗しました: ' + ((r && r.error) || '不明') + '\n（Seller Center／SLS伝票印刷は従来どおり使えます）'); }
+      else {
+        // 失敗時：次の1件で原因を特定できるよう、チャネルが要求した方式・実際に送った方式・生エラーを全部出す＋記録
+        const diag = `方式判定: ${['pickup', 'dropoff', 'non_integrated'].filter(k => (info[k] || []).length).join('/') || '(なし=auto)'}\n送信方式: ${method}\n送信内容: ${JSON.stringify(choice)}\nエラー: ${(r && r.error) || '不明'}`;
+        try { logAct('注文', 'API発送失敗(診断)', sn, diag.replace(/\n/g, ' / ')); } catch (_) {}
+        alert(`発送に失敗しました。\n\n${diag}\n\n（この内容をそのまま共有してもらえれば原因を特定できます。Seller Center／SLS伝票印刷は従来どおり使えます）`);
+      }
     } catch (e) { alert('発送に失敗しました: ' + (e.message || e)); }
     } finally { apiShipFlow._busy.delete(_shipKey); }
   }
