@@ -9530,6 +9530,54 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const r = await productWrite(l.host, l.item_id, { model_list: newModels });
     return r;
   }
+  // 🎯 目利きプレイブック：機種(プラットフォーム)判定。作品名から PS5/Switch/GBA 等を推定（新しい/具体的な方を優先）
+  const PLAYBOOK_PLATFORMS = [
+    [/ps\s?5|playstation\s?5/i, 'PS5'], [/ps\s?4|playstation\s?4/i, 'PS4'], [/ps\s?3|playstation\s?3/i, 'PS3'], [/ps\s?2|playstation\s?2/i, 'PS2'], [/ps\s?1|psx|ps\s?one|playstation\s?1/i, 'PS1'],
+    [/psp|playstation\s?portable/i, 'PSP'], [/ps\s?vita|psvita|\bvita\b/i, 'Vita'],
+    [/wii\s?u/i, 'WiiU'], [/\bwii\b/i, 'Wii'], [/game\s?cube|ゲームキューブ|\bgc\b/i, 'GC'], [/nintendo\s?64|\bn64\b|ニンテンドウ?64/i, 'N64'],
+    [/switch|スイッチ|\bns\b/i, 'Switch'], [/\b3ds\b/i, '3DS'], [/\bdsi?\b|nintendo\s?ds/i, 'DS'],
+    [/\bgba\b|game\s?boy\s?advance/i, 'GBA'], [/\bgbc\b|game\s?boy\s?color/i, 'GBC'], [/game\s?boy|ゲームボーイ|\bgb\b/i, 'GB'],
+    [/super\s?famicom|\bsfc\b|snes|スーパーファミコン/i, 'SFC'], [/famicom|ファミコン|\bfc\b|\bnes\b/i, 'FC'],
+    [/mega\s?drive|メガドライブ|genesis|\bmd\b/i, 'MD'], [/saturn|セガサターン/i, 'Saturn'], [/pc\s?engine|pcエンジン|\bpce\b/i, 'PCE'], [/dreamcast|ドリームキャスト/i, 'DC']
+  ];
+  const detectPlatform = (name) => { const t = String(name || ''); for (const [re, label] of PLAYBOOK_PLATFORMS) if (re.test(t)) return label; return 'その他'; };
+  // 売れた実績を フランチャイズ×機種 で集計＝「次に何を仕入れるか」の型を提示（目利きの属人性を解消）
+  async function renderPlaybook(container) {
+    if (!container) return;
+    container.innerHTML = '<div class="tool-card" style="max-width:none"><h3 style="margin-top:0">🎯 目利きプレイブック <span class="smd-dim" style="font-weight:400;font-size:12px">（売れた実績を フランチャイズ×機種 で集計＝次に仕入れるべき型）</span></h3><div class="smd-dim" style="padding:6px"><span class="smd-spin"></span> 売れた実績を集計中…</div></div>';
+    let orders;
+    try { orders = await sbGetAll('orders', 'select=cc,items,total,status'); }
+    catch (e) { container.innerHTML = ''; return; }
+    const fr = {}, pf = {}, mat = {}; let totalUnits = 0;
+    orders.forEach(o => {
+      if (/cancel/i.test(o.status || '')) return;
+      const rg = regionByCc(o.cc); const rate = rg ? (rg.rateJpy || 0) : 0;
+      const its = o.items || []; const totQty = its.reduce((s, x) => s + (x.qty || 1), 0) || 1;
+      const revPerJpy = (Number(o.total) || 0) * rate / totQty; // 注文総額を数量按分→1点あたり売上(円)
+      its.forEach(it => {
+        const qty = it.qty || 1; const F = classifyFranchise(it.name || '') || 'その他'; const P = detectPlatform(it.name || '');
+        totalUnits += qty;
+        (fr[F] = fr[F] || { units: 0, rev: 0 }).units += qty; fr[F].rev += revPerJpy * qty;
+        (pf[P] = pf[P] || { units: 0 }).units += qty;
+        (mat[F] = mat[F] || {})[P] = (mat[F][P] || 0) + qty;
+      });
+    });
+    if (!totalUnits) { container.innerHTML = '<div class="tool-card" style="max-width:none"><h3 style="margin-top:0">🎯 目利きプレイブック</h3><div class="smd-dim" style="font-size:12px">まだ集計できる注文がありません（注文管理で同期すると出ます）。</div></div>'; return; }
+    const frArr = Object.keys(fr).map(k => ({ name: k, units: fr[k].units, rev: fr[k].rev, avg: fr[k].rev / fr[k].units, topPf: Object.keys(mat[k] || {}).sort((a, b) => mat[k][b] - mat[k][a])[0] || '—' })).sort((a, b) => b.units - a.units);
+    const pfArr = Object.keys(pf).map(k => ({ name: k, units: pf[k].units })).sort((a, b) => b.units - a.units);
+    const jy = n => '¥' + Math.round(n || 0).toLocaleString();
+    const maxFrU = frArr[0] ? frArr[0].units : 1, maxPfU = pfArr[0] ? pfArr[0].units : 1;
+    const frRows = frArr.slice(0, 20).filter(x => x.name !== 'その他').map(x => `<tr><td style="font-size:12px;font-weight:600">${esc(x.name)}</td><td style="text-align:right;font-weight:700;color:#1a7f37">${x.units}</td><td style="min-width:120px"><div style="background:#e8f4ea;border-radius:3px;height:14px;width:${Math.max(4, Math.round(x.units / maxFrU * 100))}%"></div></td><td style="text-align:right;font-size:11px;color:#666">${jy(x.avg)}</td><td style="text-align:right;font-size:11px;color:#888">${jy(x.rev)}</td><td style="text-align:center"><span style="background:#eef;border-radius:4px;padding:1px 6px;font-size:11px;color:#3b5bdb">${esc(x.topPf)}</span></td></tr>`).join('');
+    const pfRows = pfArr.filter(x => x.name !== 'その他').slice(0, 12).map(x => `<span style="display:inline-flex;align-items:center;gap:5px;margin:0 10px 6px 0"><b style="color:#3b5bdb;font-size:12px">${esc(x.name)}</b><span style="background:#eef;border-radius:8px;height:12px;width:${Math.max(14, Math.round(x.units / maxPfU * 120))}px;display:inline-block"></span><span style="font-size:11px;color:#1a7f37;font-weight:700">${x.units}</span></span>`).join('');
+    container.innerHTML = `<div class="tool-card" style="max-width:none">
+      <h3 style="margin-top:0">🎯 目利きプレイブック <span class="smd-dim" style="font-weight:400;font-size:12px">（過去の全注文 ${totalUnits}点を フランチャイズ×機種 で集計＝<b>次に仕入れるべき型</b>）</span></h3>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">💡 <b>よく売れているシリーズ・機種</b>が上に来ます。<b>新しく仕入れる時の狙い目</b>（＝この型を各サイトで探す）。売価はその国の通貨→円換算の平均。</div>
+      <div style="font-weight:700;font-size:12px;margin:4px 0 6px;color:#333">🕹 機種別 販売数</div>
+      <div style="margin-bottom:12px;line-height:1.9">${pfRows || '<span class="smd-dim">—</span>'}</div>
+      <div style="font-weight:700;font-size:12px;margin:4px 0 6px;color:#333">🏆 フランチャイズ別 売れ筋（上位20）</div>
+      <div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>フランチャイズ</th><th style="text-align:right">販売数</th><th></th><th style="text-align:right">平均売価</th><th style="text-align:right">売上(円)</th><th style="text-align:center">主力機種</th></tr>${frRows}</table></div>
+    </div>`;
+  }
   // 🎯 マージン漏れ→目標ROIに一括修正（値上げのみ・公式API）。lst._leaks（renderListingAnalysisが算出）を使う。
   async function runLeakFixAll() {
     const leaks = (lst._leaks || []).filter(x => x.shop_id && x.newPrice > 0 && x.newPrice > x.price);
@@ -9698,6 +9746,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ${sugs.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>種別</th><th>提案</th><th></th></tr>${sugs.map((s, i) => `<tr><td style="white-space:nowrap;color:${sugCatColor[s.cat] || '#333'};font-weight:700;font-size:11px">${s.icon}${s.cat}</td><td style="font-size:12px">${s.text}</td><td><button class="sug-task smd-btn" data-i="${i}" style="white-space:nowrap;font-size:10px;padding:1px 6px">✅タスク化</button></td></tr>`).join('')}</table></div>` : '<div class="smd-dim">提案なし（🔄Shopeeから更新でデータ取得後に表示）</div>'}
     </div>`;
     host.innerHTML =
+      '<div id="an-playbook"></div>' +
       sugHtml +
       leakHtml +
       imgClustHtml +
@@ -9753,6 +9802,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       renderListingAnalysis();
     }));
     { const fb = host.querySelector('.leak-fixall'); if (fb) fb.addEventListener('click', () => runLeakFixAll()); }
+    try { renderPlaybook(document.getElementById('an-playbook')); } catch (_) {}
     const allBtn = host.querySelector('.imgc-applyall'); if (allBtn) allBtn.addEventListener('click', () => applyAllImageClusters(false));
     const dryBtn = host.querySelector('.imgc-dryrun'); if (dryBtn) dryBtn.addEventListener('click', () => applyAllImageClusters(true));
     host.querySelectorAll('.imgc-sort').forEach(el => el.addEventListener('click', () => { lst.imgClustSort = el.dataset.mode; renderListingAnalysis(); }));
