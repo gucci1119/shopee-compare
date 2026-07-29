@@ -7472,7 +7472,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const av = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
   function openCatalogEditor(cc, host, itemId, repName) {
-    if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ編集できます'); return; }
+    // 読取り・書込とも公式API化済（update_item/price/stock）。公式API設定があればライブ(ブリッジ)不要で開ける。バリエ名・明細SKUだけはブリッジ or Shopee編集ページが必要。
+    if (state.mode !== 'live' && !(settings.openapiUrl && settings.writeToken)) { alert('カタログ編集には公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）か🟢ライブPCが必要です'); return; }
     const rg = regionByCc(cc) || { color: '#333', cur: '' };
     const ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
@@ -7620,17 +7621,56 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!confirm(`書込先アカウント: ${gw.summary}\n\n本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${summary.join('\n・')}\n\n${cw.length ? '⚠️ ' + cc + 'の出品制約に注意:\n - ' + cw.join('\n - ') + '\n\n' : ''}よろしいですか？`)) return;
         const btn = body.querySelector('.ed-save'), msg = body.querySelector('.ed-msg');
         btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
+        // 内部v3 attributes → 公式v2 attribute_list へ変換（選択肢=value_id / 自由記述=original_value_name+value_unit）
+        const mapAttrsOfficial = (arr) => (arr || []).map(a => ({ attribute_id: a.attribute_id, attribute_value_list: (a.attribute_values || []).map(v => (v.value_id != null ? { value_id: v.value_id } : { original_value_name: (v.raw_value != null ? String(v.raw_value) : ''), value_unit: v.unit || '' })) }));
+        const useOfficial = !!(settings.openapiUrl && settings.writeToken && sidCat); // 公式API優先（ブリッジ卒業）。sidCat=行から解決した shop_id
         try {
-          const res = await productWrite(host, itemId, patch);
-          if (res.ok) {
-            msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（一覧にも即反映）'; btn.textContent = '保存済 ✓';
-            setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900); // 連続編集用に再度押せる状態へ
-            // 一覧/カバレッジの表示（メモリ＋Supabase）にも反映して同期待ちで戻らないように
+          if (useOfficial) {
+            const done = [];
+            // 1) 商品情報（タイトル/親SKU/重量/予約/属性）を update_item で一括
+            const itemP = { shop_id: sidCat, item_id: itemId };
+            if (patch.name != null) itemP.name = patch.name;
+            if (patch.parent_sku != null) itemP.sku = patch.parent_sku;
+            if (patch.weight != null && patch.weight.value != null && patch.weight.value !== '') itemP.weight = patch.weight.value;
+            if (patch.pre_order_info != null) itemP.preorder = JSON.stringify({ is_pre_order: !!patch.pre_order_info.pre_order, days_to_ship: patch.pre_order_info.days_to_ship });
+            if (patch.attributes != null) itemP.attributes = JSON.stringify(mapAttrsOfficial(patch.attributes));
+            if (Object.keys(itemP).length > 2) { const r = await openapiUpdateItem(itemP); if (!(r && r.ok)) throw new Error('商品情報(update_item): ' + ((r && r.error) || '失敗')); done.push('商品情報'); }
+            // 2) 価格・在庫（変更分のみ・既存の公式ヘルパー）
+            const priceList = [], stockList = [];
+            (patch.model_list || []).forEach(m => {
+              const om = (pi.model_list || []).find(x => x.id === m.id);
+              if (m.price != null && String(m.price) !== String(om ? modelPrice(om) : '')) { const pv = parseFloat(m.price); if (!isNaN(pv) && pv > 0) priceList.push({ model_id: m.id, price: pv }); }
+              if (m.stock_setting_list && m.stock_setting_list[0]) stockList.push({ model_id: m.id, stock: parseInt(m.stock_setting_list[0].sellable_stock, 10) || 0 });
+            });
+            if (priceList.length) { const r = await openapiUpdatePriceList(sidCat, itemId, priceList); if (!(r && r.ok)) throw new Error('価格: ' + ((r && r.error) || '失敗')); done.push('価格' + priceList.length); }
+            if (stockList.length) { const r = await openapiUpdateStockList(sidCat, itemId, stockList); if (!(r && r.ok)) throw new Error('在庫: ' + ((r && r.error) || '失敗')); done.push('在庫' + stockList.length); }
+            // 3) バリエ名の変更・明細SKUは公式の単純APIで安全に書けない（tier再マップが必要）→ブリッジがあれば委譲・無ければ未保存と明示
+            const leftover = {};
+            if (patch.std_tier_variation_list != null) leftover.std_tier_variation_list = patch.std_tier_variation_list;
+            const skuModels = (patch.model_list || []).filter(m => m.sku != null).map(m => ({ id: m.id, tier_index: m.tier_index || [], price: m.price, sku: m.sku }));
+            if (skuModels.length) leftover.model_list = skuModels;
+            let leftoverNote = '';
+            if (Object.keys(leftover).length) {
+              if (state.mode === 'live') { const rb = await productWrite(host, itemId, leftover); if (!rb.ok) throw new Error('バリエ名/明細SKU: code=' + rb.code + ' ' + rb.msg); done.push('バリエ名/SKU'); }
+              else { leftoverNote = '｜⚠️バリエ名・明細SKUはTampermonkey ONのPCかShopee編集ページで保存してください'; }
+            }
+            msg.style.color = leftoverNote ? '#a8650a' : '#1a7f37';
+            msg.textContent = (done.length ? '✓ 公式APIで保存（' + done.join('・') + '）' : '✓ 保存') + leftoverNote; btn.textContent = '保存済 ✓';
+            setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
             try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
             try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
-            try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+            try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+          } else {
+            const res = await productWrite(host, itemId, patch); // 公式未設定時のみブリッジ全書込
+            if (res.ok) {
+              msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（一覧にも即反映）'; btn.textContent = '保存済 ✓';
+              setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
+              try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
+              try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
+              try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+            }
+            else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
           }
-          else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
         } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ エラー: ' + e.message; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
       });
     }).catch(e => { body.innerHTML = `<div style="color:#d93025;padding:8px">読込エラー: ${esc(e.message)}<br><span class="smd-dim">Shopeeから現在の内容を取得できませんでした。ブリッジ（Tampermonkey）が応答していない可能性があります＝画面上部の赤帯の指示（Tampermonkey OFF→ON／再読込）をお試しください。<br>急ぐ場合は上の「<b>Shopeeで開く↗</b>」からShopeeの編集ページで直接編集できます。</span></div><div style="text-align:right;margin-top:10px"><button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:7px 14px;cursor:pointer">閉じる</button></div>`; const b = body.querySelector('.ed-close2'); if (b) b.addEventListener('click', close); });

@@ -77,7 +77,10 @@ function doGet(e) {
       try {
         var uwt = P_().getProperty('WRITE_TOKEN');
         if (!uwt || p.token !== uwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight });
+        var uPre = null, uAttrs = null;
+        try { if (p.preorder) uPre = JSON.parse(p.preorder); } catch (e0) {}
+        try { if (p.attributes) uAttrs = JSON.parse(p.attributes); } catch (e1) {}
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight, pre_order: uPre, attribute_list: uAttrs });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -798,7 +801,14 @@ function updateItem_(body) {
   if (body.item_sku != null) payload.item_sku = String(body.item_sku);
   if (body.description != null && String(body.description) !== '') payload.description = String(body.description);
   if (body.weight != null && String(body.weight) !== '' && !isNaN(parseFloat(body.weight))) payload.weight = parseFloat(body.weight); // kg（SLS送料計算に効く）
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight のいずれか）');
+  // 予約(pre_order)：{is_pre_order, days_to_ship}
+  if (body.pre_order && typeof body.pre_order === 'object') {
+    var po = body.pre_order, isPo = !!po.is_pre_order, dts = parseInt(po.days_to_ship, 10);
+    payload.pre_order = { is_pre_order: isPo, days_to_ship: (dts > 0 ? dts : (isPo ? 7 : 3)) };
+  }
+  // 属性(specifics)：attribute_list=[{attribute_id, attribute_value_list:[{value_id, original_value_name, value_unit}]}]
+  if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
