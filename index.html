@@ -9822,10 +9822,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><b style="font-size:14px">🎯 施策提案</b><span class="smd-dim" style="font-size:11px">売れ行き/カバレッジ/価格/在庫から自動抽出。「✅タスク化」で✅タスク管理へ送る</span>${sugs.length ? `<button class="sug-all smd-btn" style="margin-left:auto;font-size:11px">上位10件を一括タスク化</button>` : ''}</div>
       ${sugs.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>種別</th><th>提案</th><th></th></tr>${sugs.map((s, i) => `<tr><td style="white-space:nowrap;color:${sugCatColor[s.cat] || '#333'};font-weight:700;font-size:11px">${s.icon}${s.cat}</td><td style="font-size:12px">${s.text}</td><td><button class="sug-task smd-btn" data-i="${i}" style="white-space:nowrap;font-size:10px;padding:1px 6px">✅タスク化</button></td></tr>`).join('')}</table></div>` : '<div class="smd-dim">提案なし（🔄Shopeeから更新でデータ取得後に表示）</div>'}
     </div>`;
+    // ★👀見られてるのに売れない → 値下げ/見直し（閲覧が多いのに販売0の生き出品。原価が分かる分は「ROI維持の下限価格」＝安全に下げられる床も提示）。マージン漏れ(値上げ)の対になる"値下げ"の打ち手＝売上/ノルマ直結
+    let dealHtml = '';
+    try {
+      let statMap = {};
+      try { const srows = await sbGetAll('app_kv', 'select=v&k=like.listing_stats_*'); (srows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { statMap[String(id)] = it[id]; }); }); } catch (_) {}
+      const cBySku = {}, cByName = {};
+      (catRows || []).forEach(c => { const cw = c.weight_g; (c.variations || []).forEach(v => { if (v.cost == null) return; const rec = { cost: Number(v.cost), weightG: (v.weightG != null ? v.weightG : cw) }; if (v.sku) cBySku[String(v.sku).toLowerCase().trim()] = rec; if (v.name) cByName[String(v.name).toLowerCase().trim()] = rec; if ((!v.name || v.name === '') && c.parent_sku) cBySku[String(c.parent_sku).toLowerCase().trim()] = rec; }); });
+      const VIEW_MIN = 20, roiT = Number(settings.roiPct) || 15;
+      const cand = all.filter(l => l.status === 1 && (l.stock == null || l.stock > 0)).map(l => { const s = statMap[String(l.item_id)] || {}; return { l, views: Number(s.views) || 0, sale: Number(s.sale) || 0, likes: Number(s.likes) || 0 }; })
+        .filter(x => x.views >= VIEW_MIN && x.sale === 0)
+        .sort((a, b) => (b.likes - a.likes) || (b.views - a.views)); // いいね多い(欲しいのに買わない=価格抵抗が濃い)→次に閲覧が多い順
+      const totalWastedViews = cand.reduce((s, x) => s + x.views, 0);
+      dealHtml = `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">👀 見られてるのに売れない → 値下げ/見直し <span class="smd-dim" style="font-weight:400;font-size:12px">（閲覧${VIEW_MIN}以上あるのに販売0の出品中＝注目は集めているのに買われていない。価格・タイトル・画像の見直しで売上に化ける候補）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 <b>いいねが多い順</b>（欲しいのに買っていない＝価格抵抗が濃い）→ 次に閲覧が多い順。<b>原価が台帳にある分</b>は「ROI${roiT}%を保てる下限価格」を提示＝<b>そこまでは安全に下げられます</b>。該当 <b>${cand.length}</b>件・累計閲覧 <b>${totalWastedViews.toLocaleString()}</b>回が未転換。国チップ＝編集ページ。</div>
+        ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${cand.slice(0, 100).map(x => { const l = x.l, rg = regionByCc(l.cc) || {}; const cm = (l.parent_sku && cBySku[String(l.parent_sku).toLowerCase().trim()]) || (l.name && cByName[String(l.name).toLowerCase().trim()]); let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (cm) { const floor = roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG }), rg.priceUnit || 1); floorTd = (floor && floor < (Number(l.price_min) || 0)) ? `<b style="color:#1a7f37">${rg.cur || ''}${floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${nm(l.name, '260px')}</td><td style="text-align:right;font-weight:700;color:#555">${x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${(Number(l.price_min) || 0).toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
+      </div>`;
+    } catch (e) { dealHtml = ''; }
     host.innerHTML =
       '<div id="an-playbook"></div>' +
       sugHtml +
       leakHtml +
+      dealHtml +
       imgClustHtml +
       childSkuHtml +
       `<div class="tool-card" style="max-width:none">
