@@ -54,7 +54,11 @@
   .pf-scroll { max-height: calc(100vh - 165px); overflow: auto; }
   #pf-zoom { position: fixed; z-index: 300; display: none; pointer-events: none; background: #fff;
     padding: 5px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.3); }
-  #pf-zoom img { width: 280px; height: 280px; object-fit: contain; display: block; }
+  #pf-zoom img { width: min(42vw, 420px); height: min(42vw, 420px); object-fit: contain; display: block; }
+  img.zoomable-thumb, .ord-row img, #ord-list img { cursor: zoom-in; }
+  #img-lightbox { position: fixed; inset: 0; z-index: 500; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.82); cursor: zoom-out; }
+  #img-lightbox img { max-width: 94vw; max-height: 94vh; object-fit: contain; border-radius: 8px; box-shadow: 0 10px 50px rgba(0,0,0,.5); }
+  #img-lightbox .ilb-close { position: fixed; top: 16px; right: 22px; color: #fff; font-size: 30px; cursor: pointer; line-height: 1; }
   .pf-table td { padding: 8px 8px; border-bottom: 1px solid #f3f3f3; vertical-align: top; overflow: hidden; }
   .pf-table .pf-total td { border-top: 2px solid #ddd; font-weight: 700;
     position: sticky; bottom: 0; background: #fff; z-index: 4; }
@@ -155,6 +159,7 @@
   .ord-meta { flex: none; text-align: right; font-size: 11px; color: #777; width: 150px; }
   .ord-meta .buyer { color: #333; }
   .ord-status { flex: none; font-size: 11px; color: #1565c0; width: 90px; text-align: center; }
+  .ord-warehouse { flex: none; font-size: 10px; width: 100px; text-align: center; line-height: 1.35; }
   .ord-links { flex: none; font-size: 12px; display: flex; gap: 8px; }
   .ord-links a { color: #2673dd; text-decoration: none; }
   /* 転記タブ */
@@ -628,6 +633,7 @@
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300">未発送</button>
+        <button data-k="unarranged" title="Shopeeで arrange shipment（発送手配）をまだ押していない注文だけ。ここから📦発送手配でSLS伝票を発行できます">📦未手配</button>
         <button data-k="400">発送中</button>
         <button data-k="transit">🚚倉庫スキャン待ち</button>
         <button data-k="late">🚨遅延/リスク</button>
@@ -642,7 +648,8 @@
       <span style="width:104px">店（アカウント）</span>
       <span style="width:84px;text-align:center">期日</span>
       <span style="flex:1">商品</span>
-      <span style="width:90px;text-align:center">状態</span>
+      <span style="width:90px;text-align:center" title="Shopee上の発送状態。未発送＝arrange shipment未実施。📦発送手配を押すとSLS伝票が発行され発送手配済に">Shopee上</span>
+      <span style="width:100px;text-align:center" title="あなたの手元→Shopee Japan倉庫への物理発送。伝票を貼って倉庫へ送ったら「🚚倉庫へ発送済にする」で記録">自宅→倉庫</span>
       <span style="width:150px;text-align:right">バイヤー／追跡</span>
       <span style="width:44px"></span>
     </div>
@@ -1252,25 +1259,26 @@
     try { param = await openapiShipParam(shopId, sn); }
     catch (e) { alert('発送情報の取得に失敗: ' + (e.message || e) + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); return; }
     const info = (param && param.info_needed) || {};
-    const needPickup = Array.isArray(info.pickup) && info.pickup.length;
-    const needDropoff = Array.isArray(info.dropoff) && info.dropoff.length;
-    const needNonInteg = Array.isArray(info.non_integrated) && info.non_integrated.length; // 非統合チャネル＝自前で追跡番号が要る
-    // 非統合(non_integrated)チャネルは tracking_number 等を自分で入れる必要があり、pickup/dropoffの自動手配では送れない→Seller Centerへ誘導（誤った空リクエストで only_support_one_type 等を出さない）
-    if (needNonInteg && !needPickup && !needDropoff) { alert(`この注文（${sn}）は非統合(non_integrated)の配送チャネルです。追跡番号を自分で登録する必要があるため、Seller Center（またはSLS伝票印刷）から発送してください。\n\n必要項目: ${info.non_integrated.join(', ')}`); return; }
-    let choice = {}, method = '', msg = `注文 ${sn}（${cc}）を公式APIで発送手配します。\n\n`;
-    // pickup/dropoff は排他。両方要求される稀なケースは pickup を優先（Shopeeの info_needed は通常どちらか一方のみ）
-    if (needPickup) {
+    // ★方式は info_needed の「キーの有無」で判定する。値が空配列[]でも、そのキーがあれば『その方式を明示せよ』の意味（例 dropoff:[] ＝ dropoff方式・支店指定なし）。length で判定すると空配列を『方式なし』と誤り、空{}送信で only_support_one_type になる。
+    const has = k => info && Object.prototype.hasOwnProperty.call(info, k);
+    const hasPickup = has('pickup'), hasDropoff = has('dropoff'), hasNonInteg = has('non_integrated');
+    // 非統合(non_integrated)＝自前で追跡番号が要る→ここでは自動手配できないのでSeller Center誘導
+    if (hasNonInteg && !hasPickup && !hasDropoff) { alert(`この注文（${sn}）は非統合(non_integrated)の配送チャネルです。追跡番号を自分で登録する必要があるため、Seller Center（またはSLS伝票印刷）から発送してください。`); return; }
+    let choice = {}, method = '', msg = `注文 ${sn}（${cc}）を公式APIで発送手配（arrange shipment）します。\n\n`;
+    if (hasPickup) {
       const addr = ((param.pickup || {}).address_list || [])[0];
-      if (!addr) { alert('集荷先住所が取得できませんでした。Seller Centerから発送してください。'); return; }
-      const timeId = ((addr.time_slot_list || [])[0] || {}).pickup_time_id;
-      choice = { pickup_address_id: addr.address_id, pickup_time_id: timeId };
-      method = 'pickup'; msg += `方式: 集荷(pickup)\n住所ID: ${addr.address_id}${timeId ? ' / 時間枠ID: ' + timeId : ''}\n`;
-    } else if (needDropoff) {
+      const timeId = addr && ((addr.time_slot_list || [])[0] || {}).pickup_time_id;
+      if (addr) { choice = { pickup_address_id: addr.address_id, pickup_time_id: timeId }; msg += `方式: 集荷(pickup)\n住所ID: ${addr.address_id}${timeId ? ' / 時間枠ID: ' + timeId : ''}\n`; }
+      else { choice = { method: 'pickup' }; msg += `方式: 集荷(pickup・住所指定なし)\n`; }
+      method = 'pickup';
+    } else if (hasDropoff) {
       const br = ((param.dropoff || {}).branch_list || [])[0];
-      if (br && br.branch_id != null) { choice = { dropoff_branch_id: br.branch_id }; method = 'dropoff'; msg += `方式: 持込(dropoff)\n支店ID: ${br.branch_id}\n`; }
-      else { method = 'dropoff(auto)'; msg += `方式: 持込(dropoff・自動)\n`; }
+      if (br && br.branch_id != null) { choice = { dropoff_branch_id: br.branch_id }; msg += `方式: 持込(dropoff)\n支店ID: ${br.branch_id}\n`; }
+      else { choice = { method: 'dropoff' }; msg += `方式: 持込(dropoff・支店指定なし)\n`; } // ← 空dropoffを明示（GASが {dropoff:{}} を送る）
+      method = 'dropoff';
     } else {
-      method = 'auto'; msg += `方式: 自動手配（追加情報は不要）\n`;
+      // info_needed が空＝方式不明。越境SLSは持込(dropoff)が基本なので dropoff で試行する
+      choice = { method: 'dropoff' }; method = 'dropoff(既定)'; msg += `方式: 自動判定できず→持込(dropoff)で試行\n`;
     }
     msg += `\n⚠️ これは実際にShopeeへ発送手配を送る操作です（お金・物流が動きます）。実行しますか？\n※β機能：最初の1件で結果をShopeeでご確認ください。`;
     if (!confirm(msg)) return;
@@ -1279,7 +1287,7 @@
       if (r && r.ok) { alert('✅ 発送手配を送信しました。Shopeeの注文で状態と追跡番号をご確認ください。'); try { logAct('注文', 'API発送(β)', sn, cc); } catch (_) {} renderOrders(); }
       else {
         // 失敗時：次の1件で原因を特定できるよう、チャネルが要求した方式・実際に送った方式・生エラーを全部出す＋記録
-        const diag = `方式判定: ${['pickup', 'dropoff', 'non_integrated'].filter(k => (info[k] || []).length).join('/') || '(なし=auto)'}\n送信方式: ${method}\n送信内容: ${JSON.stringify(choice)}\nエラー: ${(r && r.error) || '不明'}`;
+        const diag = `方式判定(info_needed key): ${['pickup', 'dropoff', 'non_integrated'].filter(k => has(k)).join('/') || '(キーなし)'}\n送信方式: ${method}\n送信内容: ${JSON.stringify(choice)}\nエラー: ${(r && r.error) || '不明'}`;
         try { logAct('注文', 'API発送失敗(診断)', sn, diag.replace(/\n/g, ' / ')); } catch (_) {}
         alert(`発送に失敗しました。\n\n${diag}\n\n（この内容をそのまま共有してもらえれば原因を特定できます。Seller Center／SLS伝票印刷は従来どおり使えます）`);
       }
@@ -2511,6 +2519,7 @@
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
     if (state.orders.filter === 'late') rows = rows.filter(r => ordRisk(r) >= 1); // 遅延＋遅延リスク（未対応で期日が近い/超過）
+    else if (state.orders.filter === 'unarranged') rows = rows.filter(r => r.tab === 300 && !r.tracking && !/^(processed|shipping|shipped|retry_?ship|to[_ ]?receive|to[_ ]?confirm_?receive|completed)$/i.test(String(r.status || '').replace(/\s+/g, '_'))); // arrange shipment未実施＝Shopee上まだ未発送(READY_TO_SHIP)。ここから📦発送手配
     else if (state.orders.filter === 'transit') rows = rows.filter(r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn))); // 🚚倉庫へ発送済(未スキャン)にした注文だけ
     else if (state.orders.filter === 'pre') rows = rows.filter(r => r.preOrder);
     else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
@@ -2555,14 +2564,16 @@
       else if (risk === 2) warnBadge = badge('#d93025', '🚨遅延', '未対応の未発送が発送期日を超過');
       else if (risk === 1) warnBadge = badge('#e8710a', '⚠遅延リスク', '未対応の未発送・発送期日が近い(24h以内)/Shopee警告。仕入れが間に合わなければ別の早い仕入先へ');
       const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
-      let statusLabel = '', transitToggle = '';
-      if (r.tab === 300) {
-        // 自宅→倉庫は「物理的に倉庫へ送ったか」だけで判定＝手動フラグ(inTransit)のみ。Shopeeで arrange shipment（SLS伝票発行）を押しても荷物はまだ家にあるので、それだけでは「発送済」にしない。
-        statusLabel = inTransit
-          ? '<br><span style="font-size:9px;color:#7b52c4;white-space:nowrap" title="あなたの手元→Shopee Japan倉庫へ発送済み（倉庫スキャン待ち）。Shopeeの発送手配とは別の物理発送です">自宅→倉庫 <b>🚚倉庫へ発送済</b></span>'
-          : '<br><span style="font-size:9px;color:#d93025;white-space:nowrap" title="あなたの手元→Shopee Japan倉庫へまだ物理的に発送していない（Shopeeで発送手配済でも、伝票を貼って倉庫へ送るまではここは未発送）">自宅→倉庫 <b>未発送</b></span>';
-        transitToggle = `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${inTransit ? '↩︎ 輸送中を解除' : '🚚倉庫へ発送済にする'}</div>`;
-      }
+      // ★状態を2列に分離：①Shopee上（Shopeeの発送状態＋arrange shipmentボタン）②自宅→倉庫（物理発送・手動フラグ）
+      // 自宅→倉庫は inTransit(手動)のみで判定。Shopeeで arrange shipment を押しても荷物は家にある＝物理は未発送。
+      const warehouseLabel = inTransit
+        ? '<span style="color:#7b52c4;white-space:nowrap" title="手元→Shopee Japan倉庫へ発送済み（倉庫スキャン待ち）">🚚倉庫へ発送済</span>'
+        : '<span style="color:#d93025;white-space:nowrap" title="手元→倉庫へまだ物理発送していない。Shopeeで発送手配済でも、伝票を貼って倉庫へ送るまでは未発送">未発送</span>';
+      const transitToggle = (r.tab === 300) ? `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${inTransit ? '↩︎ 解除' : '🚚倉庫へ発送済にする'}</div>` : '';
+      // Shopeeへ発送手配(arrange shipment)＝ship_order。まだ手配していない(未発送/arranged=false)注文だけに出す。押すとSLS伝票が発行される。
+      const arrangeBtn = (r.tab === 300 && !arranged && r.shopId && settings.openapiUrl && settings.writeToken)
+        ? `<button class="ord-shipapi" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="Shopeeへ発送手配(arrange shipment)を実行＝SLS伝票を発行。押すと確認ダイアログ→OKで手配。手配後は🖨️で伝票印刷して荷物に貼り、倉庫へ物理発送→「🚚倉庫へ発送済にする」を記録" style="display:block;margin:4px auto 0;border:1px solid #ee4d2d;background:#fff3ef;color:#ee4d2d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:10.5px;font-weight:700;white-space:nowrap">📦発送手配</button>`
+        : '';
       const row = document.createElement('div');
       row.className = 'ord-row';
       row.innerHTML =
@@ -2574,14 +2585,14 @@
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
             : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝出荷期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
         `<div class="ord-item">${itemsHtml}</div>` +
-        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${r.tab === 300 ? '<span style="font-size:8.5px;color:#8a8f98">Shopee上 </span>' : ''}${ordStatusJa(r.status)}</span>${statusLabel}${transitToggle}</span>` +
+        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}</span>` +
+        `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
         `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00') : 0); if (!t) return '📅—'; const d = new Date(t); const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]; return `📅${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w})`; })()}</div><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
           : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
         `</div>`;
-      // 発送手配(arrange shipment)はShopee側で押してSLS伝票を発行→荷物に貼る運用。ポータルからship_orderは叩かない（📮公式発送ボタンは廃止）。伝票印刷は🖨️、倉庫へ物理発送したら「🚚倉庫へ発送済にする」を記録。
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       row.addEventListener('click', () => window.open(`https://${region.host}/portal/sale/order/${r.orderId}`, '_blank'));
@@ -13896,14 +13907,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
     document.addEventListener('mousemove', e => {
       if (zoom.style.display !== 'block') return;
-      zoom.style.left = Math.min(e.clientX + 24, innerWidth - 310) + 'px';
-      zoom.style.top = Math.max(8, Math.min(e.clientY - 140, innerHeight - 310)) + 'px';
+      const zw = zoom.getBoundingClientRect().width || 430;
+      zoom.style.left = Math.max(8, Math.min(e.clientX + 24, innerWidth - zw - 16)) + 'px';
+      zoom.style.top = Math.max(8, Math.min(e.clientY - zw / 2, innerHeight - zw - 16)) + 'px';
     });
     document.addEventListener('mouseout', e => {
       if (!zoomable(e.target)) return;
       zoom.style.display = 'none';
       const stash = e.target.__titleStash; if (stash) { stash.forEach(([n, t]) => n.setAttribute('title', t)); e.target.__titleStash = null; }
     });
+    // 🔍クリックで最大表示（ライトボックス）。もっと大きく見たいとき用。カーソルは zoom-in（虫眼鏡）。
+    let lb = document.getElementById('img-lightbox');
+    if (!lb) { lb = document.createElement('div'); lb.id = 'img-lightbox'; lb.innerHTML = '<span class="ilb-close" title="閉じる">×</span><img>'; document.body.appendChild(lb); lb.addEventListener('click', () => { lb.style.display = 'none'; }); }
+    document.addEventListener('click', e => {
+      if (!zoomable(e.target)) return;
+      e.preventDefault(); e.stopPropagation();
+      lb.querySelector('img').src = e.target.currentSrc || e.target.src;
+      zoom.style.display = 'none'; lb.style.display = 'flex';
+    }, true); // capture段階＝行クリック等の他ハンドラより先に拾い、画像クリックはライトボックスだけにする
   }
 
   // 登録簿を読み込む（アカウントセレクタ用・キャッシュ）

@@ -137,6 +137,8 @@ function doGet(e) {
         var soParam = null;
         if (p.pickup_address_id) soParam = { pickup: { address_id: parseInt(p.pickup_address_id, 10) || 0, pickup_time_id: p.pickup_time_id ? String(p.pickup_time_id) : undefined } };
         else if (p.dropoff_branch_id) soParam = { dropoff: { branch_id: parseInt(p.dropoff_branch_id, 10) || 0 } };
+        else if (p.method === 'dropoff') soParam = { dropoff: {} }; // 持込方式・支店指定不要（info_needed.dropoff=[] のケース）＝空dropoffで「方式=dropoff」を明示（これが無いと {} 送信で only_support_one_type）
+        else if (p.method === 'pickup') soParam = { pickup: {} };
         soout = shipOrder_(soshop, p.order_sn, soParam);
       } catch (err) { soout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(socb + '(' + JSON.stringify(soout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
