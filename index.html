@@ -1183,6 +1183,45 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIモデル取得に失敗');
     return res.data;
   }
+  // ★商品まるごと公式読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」を公式API化（ブリッジ未応答でも詰まらない）。読み取り専用。
+  async function openapiGetItemInfo(shopId, itemId) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const qs = 'action=get_item_full&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '公式API商品取得に失敗');
+    return apiPiFromFull(res.data);
+  }
+  // 公式v2レスポンス({base:get_item_base_info, model:get_model_list})→ エディタが使う内部v3形(pi)へ変換。
+  // 対応: name/parent_sku/weight/pre_order_info/std_tier_variation_list/model_list(価格・在庫・SKU)/attributes/category_path
+  function apiPiFromFull(full) {
+    const base = (full && full.base) || {};
+    const ml = (full && full.model) || {};
+    const tiers = ml.tier_variation || [];
+    const std = tiers.map(t => ({ custom_value: t.name || '', value_list: (t.option_list || []).map(o => ({ custom_value: o.option || '' })) }));
+    const models = (ml.models || []).map(m => ({
+      id: m.model_id, tier_index: m.tier_index || [], sku: m.sku || '',
+      price_info: { input_normal_price: m.price, normal_price: m.price },
+      stock_detail: { seller_stock_info: [{ sellable_stock: m.stock }] },
+      name: m.name || ''
+    }));
+    // 属性: value_id有り=選択肢型 / 無し(0)=自由記述(raw_value)。unitは保持。
+    const attrs = (base.attribute_list || []).map(a => ({
+      attribute_id: a.attribute_id,
+      attribute_values: (a.attribute_value_list || []).map(v => (v.value_id ? { value_id: v.value_id, unit: v.value_unit } : { raw_value: v.original_value_name, unit: v.value_unit }))
+    }));
+    const po = base.pre_order || {};
+    return {
+      _src: 'api',
+      name: base.item_name || '',
+      parent_sku: base.item_sku || '',
+      weight: { value: (base.weight != null ? base.weight : ''), unit: 1 }, // 公式は常にkg
+      pre_order_info: { pre_order: !!po.is_pre_order, days_to_ship: po.days_to_ship || 0 },
+      std_tier_variation_list: std,
+      model_list: models,
+      attributes: attrs,
+      category_path: base.category_id ? [base.category_id] : []
+    };
+  }
   // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
   async function openapiShipParam(shopId, sn) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -7439,8 +7478,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ov.querySelector('.ed-close').addEventListener('click', close);
     const body = ov.querySelector('.ed-body');
 
-    // ブリッジ(GM_xhr)未応答だと productRead が無限hangするので18秒でタイムアウト→catchでエラー表示
-    Promise.race([productRead(host, itemId), new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（ブリッジ未応答）')), 18000))]).then(async pi => {
+    // ★開くのを公式API化：まず公式(get_item_base_info＋get_model_list)で読む→失敗時のみブリッジへfallback。
+    // これでTampermonkey未応答でもエディタが詰まらず開ける（書込・属性選択肢は当面ブリッジ）。
+    const sidCat = (typeof shopIdOfListing === 'function') ? shopIdOfListing(cc, itemId) : null;
+    const readPi = (async () => {
+      if (settings.openapiUrl && sidCat) {
+        try { return await openapiGetItemInfo(sidCat, itemId); }
+        catch (e) { /* 公式API失敗（未デプロイ/権限等）→ブリッジへfallback */ }
+      }
+      // ブリッジ(GM_xhr)未応答だと productRead が無限hangするので18秒でタイムアウト→catchでエラー表示
+      return await Promise.race([productRead(host, itemId), new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（ブリッジ未応答）')), 18000))]);
+    })();
+    readPi.then(async pi => {
       const tiers = pi.std_tier_variation_list || [];
       const models = pi.model_list || [];
       const attrs = pi.attributes || [];
@@ -7481,7 +7530,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }).join('');
 
       body.innerHTML = `
-        <div style="background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;font-size:11.5px;color:#8a6d3b;margin-bottom:12px">⚠️ 保存すると<b>Shopee本番カタログ</b>(item ${itemId})が更新されます。変更した項目だけ書き込みます。</div>
+        <div style="background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;font-size:11.5px;color:#8a6d3b;margin-bottom:12px">⚠️ 保存すると<b>Shopee本番カタログ</b>(item ${itemId})が更新されます。変更した項目だけ書き込みます。<span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:700;${pi._src === 'api' ? 'background:#e6f4ea;color:#137333' : 'background:#eef;color:#3b5bdb'}">読込: ${pi._src === 'api' ? '公式API' : 'ブリッジ'}</span></div>
         <label style="color:#555;font-weight:600">タイトル</label>
         <textarea class="ed-name" rows="2" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical">${esc(pi.name || '')}</textarea>
         <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">

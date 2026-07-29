@@ -102,6 +102,16 @@ function doGet(e) {
       } catch (err) { gout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gcb + '(' + JSON.stringify(gout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★商品まるごと読み：get_item_full＝get_item_base_info＋get_model_list（ブリッジproductRead代替・エディタの開く用）。読み取り専用・token不要。
+    if (p.action === 'get_item_full') {
+      var gfcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var gfout;
+      try {
+        var gfshop = parseInt(p.shop_id, 10); if (!getToken_(gfshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        gfout = { ok: true, data: getItemFull_(gfshop, p.item_id) };
+      } catch (err) { gfout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(gfcb + '(' + JSON.stringify(gfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★アカウント健全性（全店のペナルティ点・違反指標）。読み取りのみ・token不要。ポータルの🛡パネル/アラート用。
     // ★発送(読取)：get_shipping_parameter＝この注文が「集荷(pickup)/持込(dropoff)/自動」のどれで、必要なID一覧を返す。UIの発送前確認用
     if (p.action === 'ship_param') {
@@ -417,6 +427,15 @@ function getModels_(shopId, itemId) {
     out = [{ model_id: 0, tier_index: [], name: '', sku: it.item_sku || '', price: priceOf(it), stock: stockOf(it) }];
   }
   return { item_id: itemId, tier_variation: tiers, models: out };
+}
+// ★商品まるごと読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」用。読み取り専用・token不要。
+// 返す: { base: get_item_base_info の item, model: getModels_ の {tier_variation,models} }。ポータル側 apiPiFromFull が内部v3形へ変換。
+function getItemFull_(shopId, itemId) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId), need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
+  var base = (((b.response || {}).item_list) || [])[0] || {};
+  var ml = getModels_(shopId, itemId); // {item_id, tier_variation, models:[{model_id,tier_index,name,sku,price,stock,img}]}
+  return { base: base, model: ml };
 }
 // ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
 function updatePriceList_(shopId, itemId, list) {
