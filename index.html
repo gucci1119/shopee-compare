@@ -389,7 +389,7 @@
         <div class="ngitems">
           <button data-p="dash" class="on" title="全体KPI・日別売上・発送期限が近い注文の要約。まずここで全体像を掴む">🏠 ダッシュボード</button>
           <button data-p="todo" title="やること1か所：📅今日の実務／⚠️自動検知の要対応／✅手動ToDo／🗓️出品予定">🎯 やること <span id="alert-badge" style="display:none;background:#d93025;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:0 6px;margin-left:2px"></span></button>
-          <button data-p="orders" title="全注文の一覧（未発送＋発送中）。検索・注文詳細・伝票印刷への入口">📦 注文管理</button>
+          <button data-p="orders" title="全注文の一覧（未発送＋発送済）。検索・注文詳細・伝票印刷への入口">📦 注文管理</button>
           <button data-p="stock" title="全在庫の台帳（在庫保管中／入庫待ち／販売済み）。登録・編集・QRラベル印刷">🏷 在庫管理</button>
           <button data-p="buy" title="🔎仕入れ検索：売れた注文を各サイトで最安検索／⏳入庫待ち：未入荷の管理／🏪仕入れ先：仕入元・セラー別の集計">🛒 仕入れ管理</button>
           <button data-p="list" title="Shopeeへの新規出品を作る／出品状況の把握／🌍各国そろえる（未出品を探す）・各国まとめ編集／♾️無在庫（取り寄せ）・在庫監視">🆕 出品管理</button>
@@ -701,7 +701,7 @@
         </select>
         <button class="smd-btn primary" id="img-run">▶ 実行</button>
       </div>
-      <div class="smd-dim" style="font-size:11px;margin-top:4px">※ポータルが取得済みの未発送・発送中の注文から日付（注文番号先頭6桁）で選びます</div>
+      <div class="smd-dim" style="font-size:11px;margin-top:4px">※ポータルが取得済みの未発送・発送済の注文から日付（注文番号先頭6桁）で選びます</div>
       <div class="tool-status" id="img-status"></div>
     </div>
   </div>
@@ -1613,6 +1613,7 @@
     if (!a) return;
     e.preventDefault(); e.stopPropagation();
     const id = a.dataset.id, m = a.dataset.m || '';
+    const inWaiting = !!a.closest('#buy-body');   // 入庫待ちビューか（保存後に状況/到着見込み列を再描画するため）
     const num = (prompt('追跡番号を入力（郵便局／ヤマト等）\n※取引ページや荷物ラベルの番号をそのまま貼り付けてください。\n保存すると次回以降このアプリで配送状況を追えます。', '') || '').replace(/[\s-]/g, '').trim();
     if (!num) return;
     const prev = a.outerHTML;
@@ -1625,6 +1626,8 @@
         ? `<a href="${url}" target="_blank" rel="noopener" title="配送業者の追跡ページを開く" style="color:#e65100;text-decoration:none;font-weight:600">📦 ${esc(num)} ↗</a>`
         : `<span title="追跡番号（保存済）" style="color:#e65100">📦 ${esc(num)}</span>`;
       if (url) window.open(url, '_blank', 'noopener');
+      // 番号だけ書き換えても「状況」「到着見込み」列は追跡番号なしのまま古い→入庫待ちビューを再描画（stock.rowsは更新済みで軽い）
+      if (inWaiting && typeof renderWaiting === 'function' && renderWaiting._host && document.body.contains(renderWaiting._host)) { try { renderWaiting(renderWaiting._host); } catch (_) {} }
     } catch (err) { a.outerHTML = prev; alert('保存に失敗しました: ' + (err && err.message || err)); }
   });
   // Escで最前面のモーダル/オーバーレイを閉じる（閉じるボタンを押す→無ければ要素を除去）
@@ -2097,7 +2100,6 @@
           token: settings.token, fn: 'put', period: state.periodKey,
           snapshot: { fetchedAt: Date.now(), period: state.periodKey, countries },
         });
-        console.log('[SMD] スナップショット保存完了:', state.periodKey);
       } catch (e) { console.warn('[SMD] スナップショット保存失敗:', e); }
     }, 800);
   }
@@ -2524,7 +2526,7 @@
       else parts.push(`${cc}${n}件`);
     });
     const riskTag = (late + riskN) ? ` ｜ <b class="ord-riskclick" style="color:#d93025;cursor:pointer" title="クリックで遅延/リスクだけ表示">🚨遅延${late} ⚠リスク${riskN}</b>` : '';
-    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送中）${riskTag} ｜ ` + parts.join(' ｜ ');
+    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送済）${riskTag} ｜ ` + parts.join(' ｜ ');
     const rc = el.querySelector('.ord-riskclick');
     if (rc) rc.addEventListener('click', () => { state.orders.filter = 'late'; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === 'late')); renderOrders(); });
   }
@@ -2619,7 +2621,7 @@
         `<div class="ord-item">${itemsHtml}</div>` +
         `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}</span>` +
         `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
-        `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00') : 0); if (!t) return '📅—'; const d = new Date(t); const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]; return `📅${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w})`; })()}</div><div class="buyer"></div><div style="white-space:nowrap">${esc(r.sn)} <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span></div><div>${r.tracking ? `${esc(r.tracking)} <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '追跡なし'}</div></div>` +
+        `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00+09:00') : 0); if (!t) return '📅—'; try { return '📅' + new Date(t).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }); } catch (_) { return '📅' + jstDate(t); } })()}</div><div class="buyer"></div><div style="white-space:nowrap">${esc(r.sn)} <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span></div><div>${r.tracking ? `${esc(r.tracking)} <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '追跡なし'}</div></div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order" target="_blank" title="Shopeeの注文一覧を開く（注文番号は左の📋でコピー→検索窓に貼付）※Shopeeの注文詳細は内部IDが必要で直リンク不可のため一覧を開きます">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
@@ -2697,14 +2699,14 @@
   document.getElementById('ord-csv').addEventListener('click', () => {
     const rows = state.orders.shown || [];
     if (!rows.length) { toast('表示中の注文がありません', true); return; }
-    const stName = { 300: '未発送', 400: '発送中' };
     const body = rows.map(r => {
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
       const names = r.items.map(it => `${it.name || ''}${it.variation ? ' [' + it.variation + ']' : ''}${it.qty > 1 ? ' ×' + it.qty : ''}`).join(' / ');
       const due = r.tab === 300 && r.shipBy ? jstDateTime(new Date(r.shipBy * 1000).toISOString()) : '';
-      return [r.cc, acctLabel(r.shopId) || '', r.sn, r.buyer || '', names, qty, r.tracking || '', (stName[r.tab] || r.status || ''), due, r.preOrder ? '予約' : ''];
+      // 状態はtab決め打ちでなく実ステータス（発送手配済を「未発送」と誤記しない）。手配列でShopee上の手配有無を明示
+      return [r.cc, acctLabel(r.shopId) || '', r.sn, r.buyer || '', names, qty, r.tracking || '', ordStatusJa(r.status), ordArranged(r) ? '手配済' : (r.tab === 300 ? '未手配' : ''), due, r.preOrder ? '予約' : ''];
     });
-    downloadCsv('注文_' + new Date().toISOString().slice(0, 10) + '.csv', [['国', '店', '注文SN', 'バイヤー', '商品', '点数', '追跡番号', '状態', '発送期日', '区分']].concat(body));
+    downloadCsv('注文_' + new Date().toISOString().slice(0, 10) + '.csv', [['国', '店', '注文SN', 'バイヤー', '商品', '点数', '追跡番号', '状態', '手配', '発送期日', '区分']].concat(body));
     toast('⬇ 注文CSV書出: ' + rows.length + '件');
   });
   // 📋 追跡番号を一括コピー（表示中で追跡ありのみ・重複排除）
@@ -3069,10 +3071,10 @@
         if (local > 0 || ord > 0) tCc[rg.cc] = { orders: ord, units: u, local: local };
         todayJpy += local * rg.rateJpy; todayOrders += ord; todayUnits += u;
       });
-      // 「未発送」は"未対応の未発送"だけ＝発送手配済(tracking有)や🚚倉庫へ輸送中(selfTransit)は除外し、注文一覧の未発送表示と件数を一致させる
-      const toShip = orders.filter(o => o.tab === 300 && !o.tracking && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
-      // 期限の緊急度は「まだarrange shipmentしていない注文」だけ。手配済(PROCESSED等)は発送期限を満たしているのでペナルティ対象外。
-      const unarr = toShip.filter(o => !ordArranged(o));
+      // 「未発送」は"未対応の未発送"だけ＝発送手配済(ordArranged=PROCESSED/tracking有)や🚚倉庫へ輸送中(selfTransit)は除外。tracking単体でなくordArrangedで判定し、注文一覧の📦未手配と件数を一致させる
+      const toShip = orders.filter(o => o.tab === 300 && !ordArranged(o) && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
+      // 期限の緊急度も同じ母集団（toShipは既に未手配のみ）
+      const unarr = toShip;
       const overdueShip = unarr.filter(o => o.ship_by && (o.ship_by - nowSec()) < 0);           // 未手配で既に期限切れ（最優先）
       const due24 = unarr.filter(o => o.ship_by && (o.ship_by - nowSec()) >= 0 && (o.ship_by - nowSec()) < 86400); // 未手配でこれから24h以内
       let pendJpy = 0, pendN = 0;
@@ -4579,7 +4581,8 @@
     const M = {}, M2 = {}; // M2[ym][cc] = 国×月の {n,dep,cost,gn}（純マージンヒートマップ用・同じ突合ロジック）
     orders.forEach(o => {
       if (o.tab === 600) return; // キャンセル除外
-      const ym = (o.order_date || '').slice(0, 7); if (!ym) return;
+      // 月次バケットはJST(order_ts優先→無ければローカルorder_date)。トレンド/ダッシュボード/損益と月境界で一致させる
+      const ym = (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 7); if (!ym) return;
       const rg = regionByCc(o.cc), rate = rg ? rg.rateJpy : 0;
       const m = M[ym] = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 };
       const cc2 = (M2[ym] = M2[ym] || {})[o.cc] = (M2[ym][o.cc]) || { n: 0, dep: 0, cost: 0, gn: 0 };
@@ -5248,6 +5251,7 @@
   };;
   // ⏳ 入庫待ち・到着予定：仕入れたが未入荷の到着スケジュール
   async function renderWaiting(host) {
+    renderWaiting._host = host;   // 📮番号を貼る等の保存後に再描画できるよう最新hostを保持
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = errBox(e); return; }
     const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
@@ -5539,7 +5543,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .sort((a, b) => String(deliveredAt(b) || '').localeCompare(String(deliveredAt(a) || '')));
     // 6) データ不整合の疑い：発送済(tab400)なのに追跡番号が無い＝DBが古い/同期漏れの可能性。
     //    ※未入金(tab<300)は「買い手がまだ払っていない」通常状態なので不整合ではない（Shopeeが期限切れで自動キャンセル）→ここでは除外し偽アラートを出さない。
-    const dataIssues = orders.filter(o => (o.tab === 400 && !o.tracking)).map(o => {
+    //    ※tab400にはキャンセル/返品/完了も含まれ、それらは追跡が無くて当然＝偽アラートになるので実ステータスで除外する。
+    const dataIssues = orders.filter(o => (o.tab === 400 && !o.tracking && !/(cancel|return|refund|complete|キャンセル|返品|返金|完了)/i.test(String(o.status || '')))).map(o => {
       const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {};
       const reason = '発送済だが追跡なし';
       return { cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), nm(it.name, '260px'), esc(o.order_date || ''), reason],
@@ -5553,7 +5558,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<details class="tool-card" open id="${anchorId || ''}" style="margin:0 0 12px;max-width:none;border-left:4px solid ${color};padding:11px 14px;scroll-margin-top:8px">` +
       `<summary style="cursor:pointer;font-weight:700;font-size:14px">${icon} ${title} <span style="background:${color};color:#fff;font-size:11px;border-radius:9px;padding:0 7px;margin-left:4px">${count}</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">（クリックで畳む）</span></summary>` +
       (note ? `<div class="smd-dim" style="font-size:11px;margin:6px 0 8px">${note}</div>` : '') +
-      `<div class="pf-scroll" style="max-height:340px"><table class="pf-table"><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>${rowsHtml}</table></div></details>`;
+      `<div class="pf-scroll" style="max-height:340px"><table class="pf-table"><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>${rowsHtml}</table></div>` +
+      // 表示は最大100件。超過分は無言で消えると「件数だけ多い」誤解になるので残数を明示
+      (count > 100 ? `<div style="font-size:11px;color:#c0392b;margin-top:6px;font-weight:600">⚠ 上位100件のみ表示（残り ${count - 100} 件は非表示）。古い順から片付けるか、各ページで絞り込んでください。</div>` : '') +
+      `</details>`;
 
     const deadVal = dead.reduce((s, r) => s + (r.price || 0), 0); // 滞留在庫に寝ている仕入額
     const html =
@@ -6723,7 +6731,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['明細名変更(update_tier_variation)', ['none', 'none', 'none', 'bridge', 'bridge', 'api']],
       ['バリエ画像(set_variation_image)', ['none', 'none', 'none', 'bridge', 'bridge', 'api']],
       ['価格・在庫のインライン編集（出品一覧から直接／展開バリエ含む）', ['none', 'none', 'none', 'none', 'none', 'bridge', 'api']],
-      ['予約(Pre-order)設定', ['none', 'none', 'none', 'bridge', 'bridge', 'bridge', 'possible']],
+      ['予約(Pre-order)設定（✎カタログ編集＝公式API update_item）', ['none', 'none', 'none', 'bridge', 'bridge', 'bridge', 'api']],
       ['販売数・閲覧・いいね 取得（get_item_extra_info）', ['none', 'none', 'none', 'none', 'none', 'none', 'api']],
       ['✎カタログ編集の読取り（タイトル/価格/在庫/バリエ名/重量/予約・get_item_base_info＋get_model_list）', ['none', 'none', 'none', 'bridge', 'bridge', 'bridge', 'api']],
       ['✎カタログ編集の書込：タイトル/親SKU/重量/予約/属性/価格/在庫（update_item・update_price・update_stock）', ['none', 'none', 'none', 'bridge', 'bridge', 'bridge', 'api']],
@@ -7021,7 +7029,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
       ${h('📁 各ページ早見表')}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">
-        ${card('#ee4d2d', '📦', '注文管理', '全注文（未発送＋発送中）。検索・詳細・伝票印刷の入口。')}
+        ${card('#ee4d2d', '📦', '注文管理', '全注文（未発送＋発送済）。検索・詳細・伝票印刷の入口。')}
         ${card('#1a73e8', '🏷', '在庫管理', '📒在庫台帳（登録/編集/QRラベル/まとめ分割）＋<b>🎯有在庫化候補</b>（販売履歴から繰り返し売れている商品＝先に仕入れるべき定番を抽出）。')}
         ${card('#f9a825', '🛒', '仕入れ管理', '🔎仕入れ検索 と ⏳入庫待ち の2タブ。')}
         ${card('#0f9d58', '💹', '損益・入出金', '利益明細（注文別）／入出金・経費（月次純利益＋経費入力＋CSV/古物台帳）。月次の推移・目標は📈事業計画へ。')}
@@ -7166,8 +7174,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>出品編集（タイトル/親SKU/説明）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><code>product/update_item</code>。統括/一括のタイトル・SKU書込がshop_id判明時は公式（ライブ/各国ログイン不要）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>バリエ 追加/明細名/画像</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化済(2026-07)</b>。<code>add_model</code>(＋追加)/<code>update_tier_variation</code>(明細名置換・画像差替)。画像は<code>media_space/upload_image</code>→optionのimage差替（他バリエ画像は維持）。各国まとめ編集グリッドの＋追加・🖼</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><b>重量の一括編集</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>公式API化(2026-07)</b>＝各国そろえるの一括バー <b>⚖️重量</b> が <code>update_item</code>のweightで各国一括（shop_id判明時は公式・無ければブリッジ）。SLS送料計算に直結</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px">specifics（属性）の編集</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">🟡</td><td style="border:1px solid #eee;padding:5px 8px">✎詳細で1件ずつ（ブリッジ）。<b>各国一括は非対応が正解</b>＝属性ID・選択肢は<b>国×カテゴリで異なり</b>、他国にコピーすると存在しない属性を書いて壊れるため。単品の公式API化は<code>get_item_attribute</code>要で低頻度のため保留</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>発送手配（ship_order）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅β</td><td style="border:1px solid #eee;padding:5px 8px"><b>配線済(2026-07・要実注文で検証)</b>＝📦注文管理の未発送行に <b>🚚（公式APIで発送手配）</b>。<code>get_shipping_parameter</code>で集荷/持込/自動を判定→<b>内容を提示しユーザーが確認したときだけ</b><code>ship_order</code>。決裁操作なので自動実行はしない。伝票は従来のSLS印刷が確実（<code>create_shipping_document</code>は未実装）</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px">specifics（属性）の編集</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅</td><td style="border:1px solid #eee;padding:5px 8px"><b>書込は公式API</b>（✎詳細＝<code>update_item</code>のattribute_list）。<b>選択肢リストの読取りのみブリッジ</b>（<code>get_attribute_tree</code>・未応答時は6秒でrawテキスト降格）。<b>各国一括は非対応が正解</b>＝属性ID・選択肢は<b>国×カテゴリで異なり</b>、他国にコピーすると存在しない属性を書いて壊れるため</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><b>発送手配（ship_order）</b></td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">✅β</td><td style="border:1px solid #eee;padding:5px 8px"><b>ポータルに集約（各国Seller Centerに行かず手配）</b>＝📦注文管理の未発送行の <b>📦発送手配</b> ボタンで公式APIの<code>ship_order</code>を実行。<code>get_shipping_parameter</code>で集荷/持込/自動を判定→<b>内容を提示しユーザーが確認したときだけ</b>送信（決裁操作なので自動実行はしない）。<b>※CB越境SLSは<code>ship_order_only_support_one_type</code>で弾かれる場合があり、その時は失敗表示に戻るのでShopee側で手配</b>。伝票は🖨️のSLS印刷（<code>create_shipping_document</code>は未実装）</td></tr>
           <tr><td colspan="3" style="border:1px solid #eee;padding:4px 8px;background:#fdecea;font-weight:700;color:#c0392b;font-size:11px">➖ 公式APIには在るが、このCB越境垢では権限なし（2026-07-18 実測プローブで確定）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">返品・返金の対応（returns）</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>error_not_found</code>。<code>returns/*</code> はこの垢で使えない</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px">レビュー返信・割引・クーポン・セット販売</td><td style="border:1px solid #eee;padding:5px 8px;text-align:center">➖</td><td style="border:1px solid #eee;padding:5px 8px">実測 <code>product/get_comment→shop_id invalid</code>／<code>discount→Shopid invalid</code>／<code>voucher→error_server</code>／<code>bundle_deal→error_unknown</code>。販促/レビュー系は全て権限なし</td></tr>
@@ -8139,7 +8147,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (wv.length && !confirm(lg.cc + ' の価格が出品制約に触れています:\n\n' + wv.join('\n') + '\n\n（Shopee側で拒否される可能性があります）それでも書き込みますか？')) { b.disabled = false; b.textContent = '書込'; return; }
         let ok = false; try { const r = await writeModelPricesUnified(lg, read, priceByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 失敗 ' + e.message, '#d93025'); }
         b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#1a7f37' : '#d93025'; if (!ok) b.disabled = false;
-        if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', lg.cc, (d.rep || '') + ' ' + n + '件'); } catch (_) {} }
+        if (ok) { msg(lg.cc + ' 価格書込 成功（' + n + '件）', '#1a7f37'); try { logAct('出品', 'バリエ価格', d.rep || lg.cc, lg.cc + ' ' + n + '件'); } catch (_) {} }
       }));
       // 在庫書込：その国の全明細の在庫をまとめてShopeeへ（公式API優先・ブリッジ自動フォールバック）
       ov.querySelectorAll('.uvar-swrite').forEach(b => b.addEventListener('click', async () => {
@@ -8156,7 +8164,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         b.disabled = true; b.textContent = '…';
         let ok = false; try { const r = await writeModelStockUnified(lg, read, stockByModelId); ok = r.ok; if (!ok) msg(lg.cc + ' 在庫 失敗 ' + (r.msg || ''), '#d93025'); } catch (e) { msg(lg.cc + ' 在庫 失敗 ' + e.message, '#d93025'); }
         b.textContent = ok ? '✓' : '✗'; b.style.color = ok ? '#fff' : '#ffd7d7'; if (!ok) b.disabled = false;
-        if (ok) { msg(lg.cc + ' 在庫書込 成功（' + changes.length + '件）', '#1a7f37'); try { logAct('出品', 'バリエ在庫', lg.cc, (d.rep || '') + ' ' + changes.length + '件'); } catch (_) {} }
+        if (ok) { msg(lg.cc + ' 在庫書込 成功（' + changes.length + '件）', '#1a7f37'); try { logAct('出品', 'バリエ在庫', d.rep || lg.cc, lg.cc + ' ' + changes.length + '件'); } catch (_) {} }
       }));
       // ＋追加：その国の出品に不足バリエを公式APIで足す（tierにオプション追記→add_model）
       ov.querySelectorAll('.uvar-add').forEach(b => b.addEventListener('click', async () => {
@@ -8175,7 +8183,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try {
           const params = { option: opt, price: price.trim(), stock: stock.trim() || '1' }; if (image && image.trim()) params.image = image.trim();
           const r = await openapiAddVariation(sid, lg.item_id, params);
-          if (r && r.ok) { b.textContent = '✓追加'; b.style.color = '#1a7f37'; b.style.borderStyle = 'solid'; msg(lg.cc + ' 「' + opt + '」追加 成功（🔄再読込で反映）', '#1a7f37'); try { logAct('出品', 'バリエ追加', lg.cc, opt + ' @' + price.trim()); } catch (_) {} }
+          if (r && r.ok) { b.textContent = '✓追加'; b.style.color = '#1a7f37'; b.style.borderStyle = 'solid'; msg(lg.cc + ' 「' + opt + '」追加 成功（🔄再読込で反映）', '#1a7f37'); try { logAct('出品', 'バリエ追加', d.rep || lg.cc, lg.cc + ' ' + opt + ' @' + price.trim()); } catch (_) {} }
           else { b.disabled = false; b.textContent = '＋追加'; msg(lg.cc + ' 追加失敗 ' + ((r && r.error) || ''), '#d93025'); }
         } catch (e) { b.disabled = false; b.textContent = '＋追加'; msg(lg.cc + ' 追加失敗 ' + e.message, '#d93025'); }
       }));
@@ -8191,7 +8199,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const prev = b.textContent; b.disabled = true; b.textContent = '…';
         try {
           const r = await openapiSetVariationImage(sid, lg.item_id, opt, url.trim());
-          if (r && r.ok) { b.textContent = '✓'; b.style.color = '#1a7f37'; msg(lg.cc + ' 「' + opt + '」画像 差替成功', '#1a7f37'); try { logAct('出品', 'バリエ画像', lg.cc, opt); } catch (_) {} }
+          if (r && r.ok) { b.textContent = '✓'; b.style.color = '#1a7f37'; msg(lg.cc + ' 「' + opt + '」画像 差替成功', '#1a7f37'); try { logAct('出品', 'バリエ画像', d.rep || lg.cc, lg.cc + ' ' + opt); } catch (_) {} }
           else { b.disabled = false; b.textContent = prev; msg(lg.cc + ' 画像失敗 ' + ((r && r.error) || ''), '#d93025'); }
         } catch (e) { b.disabled = false; b.textContent = prev; msg(lg.cc + ' 画像失敗 ' + e.message, '#d93025'); }
       }));
@@ -8744,10 +8752,10 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     const body = ov.querySelector('.eh-body');
     try {
       // 商品名(target)完全一致で取得。取れなければ部分一致(ilike)も試す
-      let rows = await sbGetAll('activity_log', 'select=page,action,target,detail,created_at&target=eq.' + encodeURIComponent(name) + '&order=created_at.desc&limit=200').catch(() => null);
-      if ((!rows || !rows.length) && name) { rows = await sbGetAll('activity_log', 'select=page,action,target,detail,created_at&target=ilike.' + encodeURIComponent('%' + name.slice(0, 40) + '%') + '&order=created_at.desc&limit=200').catch(() => []); }
+      let rows = await sbGetAll('activity_log', 'select=page,action,target,detail,ts&target=eq.' + encodeURIComponent(name) + '&order=ts.desc&limit=200').catch(() => null);
+      if ((!rows || !rows.length) && name) { rows = await sbGetAll('activity_log', 'select=page,action,target,detail,ts&target=ilike.' + encodeURIComponent('%' + name.slice(0, 40) + '%') + '&order=ts.desc&limit=200').catch(() => []); }
       if (!rows || !rows.length) { body.innerHTML = '<div class="smd-dim" style="font-size:12.5px">この商品の編集履歴はまだありません。<br>価格・在庫・タイトル・各国まとめ編集などを行うと、日時・操作・内容が自動で記録されます。</div>'; return; }
-      body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 7px">日時</th><th style="padding:3px 7px">操作</th><th style="padding:3px 7px">内容</th></tr></thead><tbody>' + rows.map(r => { const d = r.created_at ? new Date(r.created_at) : null; const w = d ? ['日', '月', '火', '水', '木', '金', '土'][d.getDay()] : ''; const ds = d ? `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w}) ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : '—'; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 7px;white-space:nowrap;color:#888;font-size:11px">${ds}</td><td style="padding:4px 7px;font-weight:600;white-space:nowrap">${esc(r.action || '')}</td><td style="padding:4px 7px;color:#555">${esc(r.detail || '')}</td></tr>`; }).join('') + '</tbody></table><div class="smd-dim" style="font-size:10.5px;margin-top:8px">※価格・在庫・タイトル・まとめ編集・自動出品などの操作を記録（操作ログと共有）。</div>';
+      body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 7px">日時</th><th style="padding:3px 7px">操作</th><th style="padding:3px 7px">内容</th></tr></thead><tbody>' + rows.map(r => { const ds = r.ts ? jstDateTime(r.ts) : '—'; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 7px;white-space:nowrap;color:#888;font-size:11px">${ds}</td><td style="padding:4px 7px;font-weight:600;white-space:nowrap">${esc(r.action || '')}</td><td style="padding:4px 7px;color:#555">${esc(r.detail || '')}</td></tr>`; }).join('') + '</tbody></table><div class="smd-dim" style="font-size:10.5px;margin-top:8px">※価格・在庫・タイトル・まとめ編集・自動出品などの操作を記録（操作ログと共有）。</div>';
     } catch (e) { body.innerHTML = '<div style="color:#d93025">履歴の取得に失敗: ' + esc(e.message || '') + '</div>'; }
   }
   async function renderLedger(useCache) {
@@ -12772,8 +12780,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         else if (ym === 'past7') { start = iso(Date.now() - 7 * 86400000); end = iso(Date.now() + 2 * 86400000); }
         else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = new Date(Date.UTC(n.getFullYear(), n.getMonth() + 1, 1)).toISOString().slice(0, 10); } // 翌月1日(排他)＝月末に翌月注文が混入して当月利益が過大になるのを防ぐ
         else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
-        const [orders, income, costs, inv, prods, sheetKv, returns] = await Promise.all([
-          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
+        // order_dateは各国ローカル日付＝JST月境界とズレる。取得は±2日広めにし、下でorder_ts→JST日付で当月に厳密に絞る（トレンド/ダッシュボードの月次と一致させる）
+        const dShift = (s, days) => new Date(Date.parse(s + 'T00:00:00Z') + days * 86400000).toISOString().slice(0, 10);
+        const startW = dShift(start, -2), endW = dShift(end, 2);
+        let [orders, income, costs, inv, prods, sheetKv, returns] = await Promise.all([
+          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${startW}&order_date=lt.${endW}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,fee_total,buyer_paid,fees'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init,cost_at,self_transit_at,wb_count,wb_first_at,wb_last_at'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,supplier_url,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
@@ -12782,6 +12793,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           sbGetAll('returns', 'select=cc,order_sn,status,refund_amount').catch(() => []),  // 返品/返金リクエスト：Shopeeが「完了」のまま返金された注文を可視化（粗利計算は変えない＝返品ページで別途損失計上）
         ]);
         if (_pfSeq !== pf._loadSeq) return; // より新しい月切替の読込に追い越された→この結果は捨てる（別月データを別月ラベルで描画しない）
+        // JST日付で当月に厳密に絞る（order_ts優先→無ければローカルorder_date）。広めに取得した±2日分の他月混入を除去
+        { const ordDateJ = o => o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || snToDate(o.sn) || '');
+          orders = orders.filter(o => { const d = ordDateJ(o); return d && d >= start && d < end; }); }
         // 返金あり(返金額>0・リクエスト取消でない)の注文セット。状態が「完了」でも返金バッジを出して矛盾表示を防ぐ
         pf.refundSet = new Set((returns || []).filter(r => Number(r.refund_amount) > 0 && !/cancel/i.test(r.status || '')).map(r => r.cc + ':' + r.order_sn));
         pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
