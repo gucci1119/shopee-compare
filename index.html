@@ -1607,6 +1607,26 @@
   // 値を .smd-copy にして data-copy を持たせるとクリックでコピー（テキスト選択の邪魔をしないよう委譲）
   const cpy = (text, disp, extraStyle) => `<span class="smd-copy" data-copy="${esc(text)}" title="クリックでコピー" style="${extraStyle || ''}">${disp == null ? esc(text) : disp}</span>`;
   document.addEventListener('click', e => { const c = e.target.closest && e.target.closest('.smd-copy'); if (c && c.dataset.copy != null) { e.stopPropagation(); copyText(c.dataset.copy); } });
+  // 入庫待ちの「📮番号を貼る」＝追跡番号が取り込めていない在庫に手入力→inventory.tracking_noへ保存し、配送業者の追跡ページを開く
+  document.addEventListener('click', async e => {
+    const a = e.target.closest && e.target.closest('.stk-addtrack');
+    if (!a) return;
+    e.preventDefault(); e.stopPropagation();
+    const id = a.dataset.id, m = a.dataset.m || '';
+    const num = (prompt('追跡番号を入力（郵便局／ヤマト等）\n※取引ページや荷物ラベルの番号をそのまま貼り付けてください。\n保存すると次回以降このアプリで配送状況を追えます。', '') || '').replace(/[\s-]/g, '').trim();
+    if (!num) return;
+    const prev = a.outerHTML;
+    a.textContent = '💾 保存中…';
+    try {
+      await sbUpsert('inventory', [{ item_id: id, tracking_no: num, edited_at: new Date().toISOString() }]);
+      if (stock.rows) { const row = stock.rows.find(x => String(x.item_id) === String(id)); if (row) row.tracking_no = num; }
+      const url = carrierTrackUrl(m, num);
+      a.outerHTML = url
+        ? `<a href="${url}" target="_blank" rel="noopener" title="配送業者の追跡ページを開く" style="color:#e65100;text-decoration:none;font-weight:600">📦 ${esc(num)} ↗</a>`
+        : `<span title="追跡番号（保存済）" style="color:#e65100">📦 ${esc(num)}</span>`;
+      if (url) window.open(url, '_blank', 'noopener');
+    } catch (err) { a.outerHTML = prev; alert('保存に失敗しました: ' + (err && err.message || err)); }
+  });
   // Escで最前面のモーダル/オーバーレイを閉じる（閉じるボタンを押す→無ければ要素を除去）
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
@@ -3319,6 +3339,12 @@
       else if (d.startsWith('配達中')) { bg = '#fff3e0'; c = '#e65100'; }
       else if (d.startsWith('引受') || d.startsWith('到着')) { bg = '#e3f2fd'; c = '#1565c0'; }
       parts.push(`<span style="background:${bg};color:${c};padding:1px 5px;border-radius:3px;font-weight:600">${/^(配達済|配達中|到着|引受)/.test(d) ? esc(d) : '届予定:' + esc(d)}</span>`);
+    }
+    // 追跡番号が取り込めていない在庫（入庫待ちの9割）＝取り込み漏れ。取引ページ(ライブ配送状況)への導線＋番号手貼りを出す
+    if (!r.tracking_no) {
+      const txn = stkTxnUrl(r) || r.supplier_url;
+      if (txn) parts.push(`<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の取引ページを開く（配送状況をライブで確認できます）" style="color:#00695c;text-decoration:none;font-weight:600">🔎 取引ページで追跡 ↗</a>`);
+      parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
     }
     return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
   }
@@ -5290,6 +5316,12 @@
           `<div class="wait-histbox" id="wh-${idx}" style="display:none;margin-top:3px;border-left:2px solid #cfd8dc;padding-left:8px">` +
           hist.slice().reverse().map((h, i) => `<div style="font-size:10px;line-height:1.45;margin-bottom:2px;${i === 0 ? 'font-weight:700;color:#1565c0' : 'color:#78909c'}">${esc(h.t || '')} <b>${esc(h.s || '')}</b>${h.p ? `<br><span style="color:#90a4ae">@ ${esc(h.p)}</span>` : ''}</div>`).join('') +
           `</div>`);
+      }
+      // 追跡番号が取り込めていない（入庫待ちの9割）＝取り込み漏れ。取引ページ(ライブ配送状況)への導線＋番号手貼りを出す
+      if (!r.tracking_no) {
+        const txn = stkTxnUrl(r) || r.supplier_url;
+        if (txn) parts.push(`<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の取引ページを開く（配送状況をライブで確認できます）" style="color:#00695c;text-decoration:none;font-weight:600;font-size:10.5px">🔎 取引ページで追跡 ↗</a>`);
+        parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡・現在地表示）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
       }
       return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
     };
