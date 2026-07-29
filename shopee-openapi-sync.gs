@@ -1582,6 +1582,15 @@ function syncListingStatsForShop_(tok) {
   }
   var n = Object.keys(stats).length;
   if (n) sbUpsert_('app_kv', [{ k: 'listing_stats_' + shopId, v: { items: stats } }], 'k'); // 非破壊：この店の分だけ丸ごと置換
+  // 📈日次スナップショット：listing_stats_history に (item_id, snap_date) で1日1行を積む→ポータルで期間フィルタ(過去N日の伸び)に使う。
+  // テーブル未作成でも current 同期は壊さないよう try/catch。JST日付。
+  if (n) {
+    try {
+      var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+      var hist = Object.keys(stats).map(function (iid) { var s = stats[iid]; return { item_id: parseInt(iid, 10), shop_id: shopId, cc: cc, snap_date: today, sale: s.sale, views: s.views, likes: s.likes, cmt: s.cmt }; });
+      sbUpsert_('listing_stats_history', hist, 'item_id,snap_date');
+    } catch (e) { Logger.log('listing_stats_history 追記スキップ（テーブル未作成の可能性）: ' + String((e && e.message) || e).slice(0, 140)); }
+  }
   return { cc: cc, shop_id: shopId, stats: n };
 }
 function syncListingStats() {

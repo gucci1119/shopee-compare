@@ -2917,6 +2917,16 @@
     if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}`);
     return maskDemo(table, await r.json());
   }
+  // Supabase RPC（Postgres関数）呼び出し。読取り集計をサーバー側で行い、巨大データをブラウザに落とさないため。listing_stats_delta 等で使用。
+  async function sbRpc(fn, args) {
+    const key = settings.sbKey || settings.sbSecret;
+    if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
+    const hit = (k) => fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method: 'POST', headers: { apikey: k, Authorization: 'Bearer ' + k, 'Content-Type': 'application/json' }, body: JSON.stringify(args || {}) });
+    let r = await hit(key);
+    if (!r.ok && (r.status === 401 || r.status === 403) && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret);
+    if (!r.ok) throw new Error(`RPC ${fn} HTTP ${r.status}`);
+    return r.json();
+  }
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
   // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
   async function sbGetAll(table, qs) {
@@ -9769,8 +9779,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🏷コンディション/カテゴリ/ブランド：GASが app_kv の listing_specs_<shop_id> に {items:{<item_id>:{cond,cat,brand}}} で保存。全店マージして表示・フィルタ
   let lstSpecs = null; // { <item_id>: {cond, cat, brand} }
   const specOf = (id) => (lstSpecs && lstSpecs[id]) || {};
-  let lstStats = null; // { <item_id>: {sale, views, likes, cmt} } ＝GASが get_item_extra_info で書く app_kv listing_stats_*
+  let lstStats = null; // { <item_id>: {sale, views, likes, cmt} } ＝GASが get_item_extra_info で書く app_kv listing_stats_*（累計値）
   const statOf = (id) => (lstStats && lstStats[id]) || {};
+  // 📈期間フィルタ：lst.statsPeriod(0=全期間/7/30/90日) の間の伸び。listing_stats_history のスナップショット差分をSupabase RPC(listing_stats_delta)で取得。
+  let lstStatsDelta = null; // { <item_id>: {sale, views, likes} } ＝現在−N日前（historyが足りない出品はキー無し＝蓄積中）
+  // 表示・並替に使う「期間反映済み」スタッツ。全期間なら累計、期間指定なら差分（差分未取得/蓄積不足は period フラグで印）。
+  const statOfP = (id) => {
+    const p = (lst && lst.statsPeriod) || 0;
+    if (!p) return statOf(id);
+    const d = lstStatsDelta && lstStatsDelta[id];
+    if (d) return { sale: d.sale, views: d.views, likes: d.likes, cmt: null, _delta: true };
+    return { sale: null, views: null, likes: null, cmt: null, _delta: true, _pending: true }; // 蓄積中（この期間の起点スナップショットがまだ無い）
+  };
+  function loadStatsDelta() { // 期間指定時に差分を取得（RPC）。全期間なら不要。
+    const p = (lst && lst.statsPeriod) || 0;
+    if (!p) { lstStatsDelta = null; drawListingStatus(); return; }
+    lstStatsDelta = lstStatsDelta || {};
+    sbRpc('listing_stats_delta', { days: p }).then(rows => {
+      const m = {}; (rows || []).forEach(r => { if (r.d_sale != null || r.d_views != null || r.d_likes != null) m[r.item_id] = { sale: r.d_sale, views: r.d_views, likes: r.d_likes }; });
+      lstStatsDelta = m; drawListingStatus();
+    }).catch(e => { lstStatsDelta = {}; drawListingStatus(); /* テーブル/RPC未作成なら空＝全件蓄積中表示 */ });
+  }
   const condLabel = (c) => c === 'NEW' ? '🆕新品' : (c === 'USED' ? '♻️中古' : (c || ''));
   // 無在庫(在庫監視)の紐付けを cc|item_id で逆引き。{whole:全体監視, models:Set(監視中のmodel_id), srcSt:仕入元状態}
   function dropWatchIndex() {
@@ -9887,7 +9916,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const _roi = (_ps && _sug != null && _sug > 0) ? Math.round(_ps.recent / _sug * 100) : null;
     const _cov = (lst._nameCcCount || {})[(r.name || '').toLowerCase().trim()] || 1;
     const _ccset = (lst._nameCcSet || {})[(r.name || '').toLowerCase().trim()]; // この商品が出品中の国セット（国旗表示・展開用）
-    const _st = statOf(r.item_id); // 🛒販売(sale)/👁閲覧(views)/❤️いいね(likes)＝GASのlisting_stats（この国のこの出品）
+    const _st = statOfP(r.item_id); // 🛒販売(sale)/👁閲覧(views)/❤️いいね(likes)。全期間=累計／期間指定=その間の伸び(差分)
+    const _stPend = _st._pending; const _stDelta = _st._delta; // 蓄積中フラグ・差分表示フラグ
+    const _sv = (v, pre) => v == null ? (_stPend ? '<span class="smd-dim" style="font-weight:400;font-size:9px" title="この期間の起点スナップショットがまだ無い（日次で蓄積されます）">蓄積中</span>' : '<span class="smd-dim" style="font-weight:400">—</span>') : ((_stDelta && v >= 0 ? '+' : '') + (pre || '') + _nf(v));
     const _nf = n => (n == null ? null : Number(n).toLocaleString());
     const _cat = ((r.parent_sku || '').trim() && (lst._catalogBySku || {})[(r.parent_sku || '').trim()]) || (lst._catalogByName || {})[(r.name || '').toLowerCase().trim()]; // 台帳の該当商品（親SKU優先→商品名）＝原価インライン編集用
     const _catCost = _cat && _cat.cost_total != null ? _cat.cost_total : null;
@@ -9905,9 +9936,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div style="font-size:10px;word-break:break-all;min-width:0;line-height:1.25" title="出品アカウント">${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600" title="${esc(a.label)}">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : '<span class="smd-dim">—</span>'); })()}</div>
         <div style="text-align:right;line-height:1.15;min-width:0;overflow:hidden" title="現地価格（円換算）">${isSingle && canEdit ? `<span style="white-space:nowrap;color:#1565c0">${cur}<input class="lst-prc" data-mid="0" value="${r.price_min != null ? r.price_min : ''}" inputmode="decimal" style="width:62px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="0" style="font-size:9px">${rg.rateJpy && r.price_min ? jyen(r.price_min) : ''}</div>` : `<div style="font-size:12px;color:#1565c0;font-weight:600">${price}</div>${jpyStr ? `<div class="smd-dim" style="font-size:9px">${jpyStr}</div>` : ''}`}</div>
         <div style="text-align:right;min-width:0">${isSingle && canEdit ? `<input class="lst-stk" data-mid="0" value="${r.stock != null ? r.stock : ''}" inputmode="numeric" style="width:40px;padding:2px 3px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:12px">` : `<span style="font-size:14px;font-weight:700;color:${oos ? '#d93025' : '#333'}">${r.stock != null ? r.stock : '-'}</span>${oos ? '<div style="font-size:8.5px;color:#d93025;font-weight:700">切れ</div>' : ''}`}</div>
-        <div style="text-align:right;min-width:0;font-size:12px;font-weight:700;color:#c2185b" title="累計販売数（今までの購入・公式APIのsale）">${_st.sale != null ? _nf(_st.sale) : '<span class="smd-dim" style="font-weight:400">—</span>'}</div>
-        <div style="text-align:right;min-width:0;font-size:11px;color:#555" title="閲覧数（views）">${_st.views != null ? _nf(_st.views) : '<span class="smd-dim">—</span>'}</div>
-        <div style="text-align:right;min-width:0;font-size:11px;color:#e8710a" title="いいね数（likes）">${_st.likes != null ? '♥' + _nf(_st.likes) : '<span class="smd-dim">—</span>'}</div>
+        <div style="text-align:right;min-width:0;font-size:12px;font-weight:700;color:#c2185b" title="${_stDelta ? 'この期間の販売の伸び（差分）' : '累計販売数（今までの購入・公式APIのsale）'}">${_sv(_st.sale)}</div>
+        <div style="text-align:right;min-width:0;font-size:11px;color:#555" title="${_stDelta ? 'この期間の閲覧の伸び' : '閲覧数（views）'}">${_sv(_st.views)}</div>
+        <div style="text-align:right;min-width:0;font-size:11px;color:#e8710a" title="${_stDelta ? 'この期間のいいねの伸び' : 'いいね数（likes）'}">${_sv(_st.likes, '♥')}</div>
         <div class="lst-realized" data-name="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:11px;cursor:pointer" title="${_ps ? '実際に売れた注文の直近利益（入金円−仕入円）。中央' + jpyShort(_ps.median) + '・最' + jpyShort(_ps.max) + '〜' + jpyShort(_ps.min) + '・単品注文' + _ps.n + '件｜クリックで過去オーダー明細・利益の変遷' : 'クリックで過去オーダー履歴（売れて入金＋仕入が揃うと利益が出ます）'}">${_ps ? `<div style="font-weight:700;color:${_ps.recent < 0 ? '#d93025' : '#1a7f37'};text-decoration:underline;text-decoration-style:dotted">${jpyShort(_ps.recent)}</div><div class="smd-dim" style="font-size:8px">${_ps.n}件 📈</div>` : '<span class="smd-dim" style="text-decoration:underline;text-decoration-style:dotted">— 📈</span>'}</div>
         <div class="lst-costcell" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="クリックで原価をその場編集（各国・各明細の原価/利益/ROI・台帳ページ不要）${_catCost == null && _sug != null ? '｜表示は利益管理表の直近仕入(参考)' : ''}" style="text-align:right;min-width:0;font-size:11px;color:${_costOpen ? '#1a7f37' : '#8a6d3b'};cursor:pointer;font-weight:${_costOpen ? 700 : 400}">${_catCost != null ? '¥' + _catCost.toLocaleString() : (_sug != null ? `<span style="color:#b0a080">¥${_sug.toLocaleString()}</span>` : '')}<span style="font-size:9px;color:#c9a86a"> ${_costOpen ? '▲' : '✎'}</span></div>
         <div style="text-align:right;min-width:0;font-size:11px" title="実売直近利益÷原価">${_roi != null ? `<span style="font-weight:700;color:${_roi < 0 ? '#d93025' : '#1a7f37'}">${_roi}%</span>` : '<span class="smd-dim">—</span>'}</div>
@@ -10029,9 +10060,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         else if (lst.sort === 'stock') { va = a.stock || 0; vb = b.stock || 0; }
         else if (lst.sort === 'models') { va = a.model_count || 0; vb = b.model_count || 0; }
         else if (lst.sort === 'created') { va = a.create_time || 0; vb = b.create_time || 0; }
-        else if (lst.sort === 'sale') { va = Number(statOf(a.item_id).sale) || 0; vb = Number(statOf(b.item_id).sale) || 0; }
-        else if (lst.sort === 'views') { va = Number(statOf(a.item_id).views) || 0; vb = Number(statOf(b.item_id).views) || 0; }
-        else if (lst.sort === 'likes') { va = Number(statOf(a.item_id).likes) || 0; vb = Number(statOf(b.item_id).likes) || 0; }
+        else if (lst.sort === 'sale') { va = Number(statOfP(a.item_id).sale) || 0; vb = Number(statOfP(b.item_id).sale) || 0; }
+        else if (lst.sort === 'views') { va = Number(statOfP(a.item_id).views) || 0; vb = Number(statOfP(b.item_id).views) || 0; }
+        else if (lst.sort === 'likes') { va = Number(statOfP(a.item_id).likes) || 0; vb = Number(statOfP(b.item_id).likes) || 0; }
         else if (lst.sort === 'profit') { const pa = ledgerProfitStatsByName(a.name), pb = ledgerProfitStatsByName(b.name); va = pa ? pa.recent : -1e12; vb = pb ? pb.recent : -1e12; }
         else if (lst.sort === 'cost') { va = ledgerSugCostByName(a.name) || 0; vb = ledgerSugCostByName(b.name) || 0; }
         else if (lst.sort === 'roi') { const ca = ledgerSugCostByName(a.name), pa = ledgerProfitStatsByName(a.name); va = (ca && pa) ? pa.recent / ca : -1e12; const cb = ledgerSugCostByName(b.name), pb = ledgerProfitStatsByName(b.name); vb = (cb && pb) ? pb.recent / cb : -1e12; }
@@ -10091,6 +10122,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <button data-c="USED" class="${lst.cond === 'USED' ? 'on' : ''}">♻️中古</button>
         </span>${brands.length ? `<label style="color:#555">ブランド<select id="lst-brand" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"><option value="">すべて</option>${brands.map(b => `<option value="${av(b)}" ${lst.brand === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select></label>` : ''}` : ''}
         <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">バリエ・単品すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">🧩バリエ有り</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
+        <span class="smd-seg" id="lst-statsperiod" title="🛒販売・👁閲覧・❤️いいねを『全期間の累計』か『直近N日の伸び』で表示（日次スナップショットの差分）"><button data-sp="0" class="${!(lst.statsPeriod) ? 'on' : ''}">📊全期間</button><button data-sp="7" class="${lst.statsPeriod === 7 ? 'on' : ''}">📈7日</button><button data-sp="30" class="${lst.statsPeriod === 30 ? 'on' : ''}">📈30日</button><button data-sp="90" class="${lst.statsPeriod === 90 ? 'on' : ''}">📈90日</button></span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;font-size:11px;color:#8a8f98">
         <span>🕒 最終同期 <b style="color:#555">${listSyncStr()}</b></span>
@@ -10174,6 +10206,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { let pt; const pmin = document.getElementById('lst-pmin'), pmax = document.getElementById('lst-pmax'); const upd = () => { clearTimeout(pt); pt = setTimeout(() => { lst.priceMin = (pmin.value === '') ? null : Number(pmin.value); lst.priceMax = (pmax.value === '') ? null : Number(pmax.value); lst.page = 1; drawListingStatus(); }, 300); }; if (pmin) pmin.addEventListener('input', upd); if (pmax) pmax.addEventListener('input', upd); }
     { const seg = document.getElementById('lst-cond'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.cond = b.dataset.c; lst.page = 1; drawListingStatus(); }); }
     { const seg = document.getElementById('lst-vartype'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.varType = b.dataset.v; lst.page = 1; drawListingStatus(); }); }
+    { const seg = document.getElementById('lst-statsperiod'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; const np = Number(b.dataset.sp) || 0; if (np === (lst.statsPeriod || 0)) return; lst.statsPeriod = np; lst.page = 1; loadStatsDelta(); }); } // 期間切替→差分をRPCで取得後に再描画（loadStatsDelta内でdrawListingStatus）
     { const s = document.getElementById('lst-brand'); if (s) s.addEventListener('change', () => { lst.brand = s.value; lst.page = 1; drawListingStatus(); }); }
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
