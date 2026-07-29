@@ -115,6 +115,16 @@ function doGet(e) {
       } catch (err) { gfout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gfcb + '(' + JSON.stringify(gfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★属性(specifics)の選択肢を公式APIで読む：get_attribute_tree（ブリッジの内部v3代替＝カタログ編集の属性ドロップダウン用）。読み取り専用。
+    if (p.action === 'get_attributes') {
+      var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var gaout;
+      try {
+        var gashop = parseInt(p.shop_id, 10); if (!getToken_(gashop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        gaout = { ok: true, data: getAttributeTree_(gashop, p.category_id, p.language) };
+      } catch (err) { gaout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(gacb + '(' + JSON.stringify(gaout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★アカウント健全性（全店のペナルティ点・違反指標）。読み取りのみ・token不要。ポータルの🛡パネル/アラート用。
     // ★発送(読取)：get_shipping_parameter＝この注文が「集荷(pickup)/持込(dropoff)/自動」のどれで、必要なID一覧を返す。UIの発送前確認用
     if (p.action === 'ship_param') {
@@ -441,6 +451,31 @@ function getItemFull_(shopId, itemId) {
   var base = (((b.response || {}).item_list) || [])[0] || {};
   var ml = getModels_(shopId, itemId); // {item_id, tier_variation, models:[{model_id,tier_index,name,sku,price,stock,img}]}
   return { base: base, model: ml };
+}
+// ★属性(specifics)の選択肢を公式APIで読む（ブリッジの内部v3 get_attribute_tree 代替）。カタログ編集の属性ドロップダウン用。
+// 返す: [{attribute_id, name, mandatory, multi, options:[{id,name}]}]（ポータル attrTree と同形）。フィールド名は版差があるため防御的に読む。
+function getAttributeTree_(shopId, catId, lang) {
+  shopId = parseInt(shopId, 10); catId = parseInt(catId, 10);
+  var j = callShop_(shopId, '/api/v2/product/get_attribute_tree', { category_id_list: String(catId), language: lang || 'en' }, 'get');
+  var resp = j.response || {};
+  var list = resp.list || [];
+  var tree = (list[0] && (list[0].attribute_tree || list[0].attribute_list)) || resp.attribute_list || (Array.isArray(list) && list[0] && list[0].attribute_id ? list : []);
+  return (tree || []).map(function (a) {
+    var info = a.attribute_info || {};
+    var maxv = info.max_input_value_number || info.max_value_count || a.max_input_value_number || 1;
+    var rawOpts = a.attribute_value_tree || a.attribute_value_list || a.children || [];
+    var opts = rawOpts.map(function (c) {
+      var vid = (c.value_id != null ? c.value_id : c.id);
+      return { id: vid, name: c.display_value_name || c.original_value_name || c.display_name || c.value_name || c.name || String(vid) };
+    });
+    return {
+      attribute_id: a.attribute_id,
+      name: a.display_attribute_name || a.original_attribute_name || a.display_name || a.attribute_name || ('#' + a.attribute_id),
+      mandatory: !!(info.is_mandatory || a.is_mandatory || a.mandatory),
+      multi: (maxv || 1) > 1,
+      options: opts
+    };
+  });
 }
 // ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
 function updatePriceList_(shopId, itemId, list) {

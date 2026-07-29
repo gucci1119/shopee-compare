@@ -7551,10 +7551,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const j = await bridgePostJson(`https://${host}/api/v3/product/update_product_info?SPC_CDS_VER=2`, { product_id: itemId, product_info: patch, is_draft: false });
     return { ok: !!(j && j.code === 0), code: j && j.code, msg: (j && j.message) || '' };
   }
+  // 属性(specifics)の選択肢を公式APIで読む（get_attribute_tree・ブリッジ卒業）。GASが {attribute_id,name,mandatory,multi,options} 配列を返す
+  async function openapiGetAttributes(shopId, catId, lang) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const q = { action: 'get_attributes', shop_id: shopId, category_id: catId, language: lang || 'en' };
+    const qs = Object.keys(q).map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 30000);
+    if (!res || !res.ok) throw new Error((res && res.error) || 'get_attributes失敗');
+    return res.data || [];
+  }
   // カテゴリの属性定義（選択肢一覧）。attribute_id → {name, mandatory, multi, options:[{id,name}]}
-  async function attrTree(host, catId) {
+  // shopId があり公式API設定済みなら公式(get_attribute_tree)優先＝ブリッジ非常駐でも属性ドロップダウンが出る。失敗/空のみブリッジへ。
+  async function attrTree(host, catId, shopId) {
     const m = new Map();
     if (!catId) return m;
+    const lang = 'en'; // 属性はattribute_idで突合＝言語は表示名のみ影響。enを既定
+    if (settings.openapiUrl && settings.writeToken && shopId) {
+      try {
+        const list = await openapiGetAttributes(shopId, catId, lang);
+        if (list && list.length) { list.forEach(a => m.set(a.attribute_id, { name: a.name || ('#' + a.attribute_id), mandatory: !!a.mandatory, multi: !!a.multi, options: (a.options || []).map(o => ({ id: o.id, name: o.name || String(o.id) })) })); return m; }
+      } catch (e) { /* 公式失敗（未デプロイ/権限/版差）→ブリッジへfallback */ }
+    }
     try {
       const qp = new URLSearchParams(); qp.set('category_ids', String(catId)); qp.set('SPC_CDS_VER', '2');
       const j = await bridgeGetJson(`https://${host}/api/v3/category/get_attribute_tree?` + qp.toString());
@@ -7630,8 +7647,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const attrs = pi.attributes || [];
       const cur = rg.cur || '';
       const catId = (pi.category_path && pi.category_path.length) ? pi.category_path[pi.category_path.length - 1] : null;
-      // attrTreeはブリッジ(GM_xhr)経由。Tampermonkey未応答だと公式読込が成功してもここでrenderが固まるので6秒でタイムアウト→空Mapで続行（属性はrawテキスト表示に降格）
-      const atree = await Promise.race([attrTree(host, catId), new Promise(res => setTimeout(() => res(new Map()), 6000))]);
+      // 属性選択肢：公式API(get_attributes)優先＝ブリッジ非常駐でもドロップダウンが出る（sidCat＝shop_id）。公式失敗/未設定時のみブリッジ。どちらも詰まらないよう8秒でタイムアウト→空Map（rawテキスト降格）
+      const atree = await Promise.race([attrTree(host, catId, sidCat), new Promise(res => setTimeout(() => res(new Map()), 8000))]);
       // バリエ名（tierオプション）編集セクション
       let tierHtml = '';
       if (tiers.length) {
