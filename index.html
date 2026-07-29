@@ -632,12 +632,12 @@
       <button class="smd-btn" id="ord-copytrack" title="表示中（絞り込み後）の追跡番号をまとめてコピー（配送業者一括照会用）">📋 追跡番号</button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
-        <button data-k="300">未発送</button>
+        <button data-k="300" title="Shopeeがまだ発送していない注文（未手配＋発送手配済の両方）＝手元で対応が要る注文">未発送</button>
         <button data-k="unarranged" title="Shopeeで arrange shipment（発送手配）をまだ押していない注文だけ。ここから📦発送手配でSLS伝票を発行できます">📦未手配</button>
-        <button data-k="400">発送中</button>
-        <button data-k="transit">🚚倉庫スキャン待ち</button>
-        <button data-k="late">🚨遅延/リスク</button>
-        <button data-k="pre">🕒予約</button>
+        <button data-k="400" title="Shopeeが発送済み（倉庫から出荷後）＝配送中〜完了。手元での作業は不要">✈️発送済</button>
+        <button data-k="transit" title="あなたが「🚚倉庫へ発送済にする」を押したが、まだShopee倉庫でスキャンされていない注文">🚚倉庫スキャン待ち</button>
+        <button data-k="late" title="発送期限が近い/超過している未対応の注文">🚨遅延/リスク</button>
+        <button data-k="pre" title="予約商品（Pre-order）の注文">🕒予約</button>
       </span>
       <input type="text" id="ord-search" placeholder="商品名・バイヤー・注文番号で絞り込み">
       <span class="smd-dim" id="ord-note">発送期日が近い順</span>
@@ -1248,22 +1248,23 @@
     return res;
   }
   // 公式APIでの発送フロー（β）：必要情報を読んで内容を提示→ユーザーが確認したときだけ発送手配。自動実行はしない
-  async function apiShipFlow(cc, sn, shopId, host) {
-    if (!settings.openapiUrl || !settings.writeToken) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); return; }
+  async function apiShipFlow(cc, sn, shopId, host, btn) {
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '📦発送手配'; } };
+    if (!settings.openapiUrl || !settings.writeToken) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); restoreBtn(); return; }
     const _shipKey = cc + ':' + sn; // 二重送信ロック：連打・処理中の再クリックで二回発送手配しない
     apiShipFlow._busy = apiShipFlow._busy || new Set();
-    if (apiShipFlow._busy.has(_shipKey)) { alert('この注文は発送手配を処理中です。完了までお待ちください。'); return; }
+    if (apiShipFlow._busy.has(_shipKey)) { alert('この注文は発送手配を処理中です。完了までお待ちください。'); restoreBtn(); return; }
     apiShipFlow._busy.add(_shipKey);
     try {
     let param;
     try { param = await openapiShipParam(shopId, sn); }
-    catch (e) { alert('発送情報の取得に失敗: ' + (e.message || e) + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); return; }
+    catch (e) { alert('発送情報の取得に失敗: ' + (e.message || e) + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); restoreBtn(); return; }
     const info = (param && param.info_needed) || {};
     // ★方式は info_needed の「キーの有無」で判定する。値が空配列[]でも、そのキーがあれば『その方式を明示せよ』の意味（例 dropoff:[] ＝ dropoff方式・支店指定なし）。length で判定すると空配列を『方式なし』と誤り、空{}送信で only_support_one_type になる。
     const has = k => info && Object.prototype.hasOwnProperty.call(info, k);
     const hasPickup = has('pickup'), hasDropoff = has('dropoff'), hasNonInteg = has('non_integrated');
     // 非統合(non_integrated)＝自前で追跡番号が要る→ここでは自動手配できないのでSeller Center誘導
-    if (hasNonInteg && !hasPickup && !hasDropoff) { alert(`この注文（${sn}）は非統合(non_integrated)の配送チャネルです。追跡番号を自分で登録する必要があるため、Seller Center（またはSLS伝票印刷）から発送してください。`); return; }
+    if (hasNonInteg && !hasPickup && !hasDropoff) { alert(`この注文（${sn}）は非統合(non_integrated)の配送チャネルです。追跡番号を自分で登録する必要があるため、Seller Center（またはSLS伝票印刷）から発送してください。`); restoreBtn(); return; }
     let choice = {}, method = '', msg = `注文 ${sn}（${cc}）を公式APIで発送手配（arrange shipment）します。\n\n`;
     if (hasPickup) {
       const addr = ((param.pickup || {}).address_list || [])[0];
@@ -1280,18 +1281,26 @@
       // info_needed が空＝方式不明。越境SLSは持込(dropoff)が基本なので dropoff で試行する
       choice = { method: 'dropoff' }; method = 'dropoff(既定)'; msg += `方式: 自動判定できず→持込(dropoff)で試行\n`;
     }
-    msg += `\n⚠️ これは実際にShopeeへ発送手配を送る操作です（お金・物流が動きます）。実行しますか？\n※β機能：最初の1件で結果をShopeeでご確認ください。`;
-    if (!confirm(msg)) return;
+    msg += `\n⚠️ これは実際にShopeeへ発送手配（arrange shipment）を送る操作です（SLS伝票が発行されます）。実行しますか？`;
+    if (!confirm(msg)) { restoreBtn(); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '📮 送信中…'; }
     try {
       const r = await openapiShipOrder(Object.assign({ shop_id: shopId, order_sn: sn }, choice));
-      if (r && r.ok) { alert('✅ 発送手配を送信しました。Shopeeの注文で状態と追跡番号をご確認ください。'); try { logAct('注文', 'API発送(β)', sn, cc); } catch (_) {} renderOrders(); }
+      if (r && r.ok) {
+        // 成功：ローカルの注文状態を発送手配済(Processed)に更新→再描画でボタンが消えShopee上=発送手配済に即反映（次の同期を待たない）
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        try { logAct('注文', 'API発送手配', sn, cc); } catch (_) {}
+        renderOrders();
+        alert('✅ 発送手配を送信しました（SLS伝票が発行されました）。🖨️で伝票を印刷して荷物に貼り、倉庫へ発送してください。');
+      }
       else {
         // 失敗時：次の1件で原因を特定できるよう、チャネルが要求した方式・実際に送った方式・生エラーを全部出す＋記録
         const diag = `方式判定(info_needed key): ${['pickup', 'dropoff', 'non_integrated'].filter(k => has(k)).join('/') || '(キーなし)'}\n送信方式: ${method}\n送信内容: ${JSON.stringify(choice)}\nエラー: ${(r && r.error) || '不明'}`;
         try { logAct('注文', 'API発送失敗(診断)', sn, diag.replace(/\n/g, ' / ')); } catch (_) {}
         alert(`発送に失敗しました。\n\n${diag}\n\n（この内容をそのまま共有してもらえれば原因を特定できます。Seller Center／SLS伝票印刷は従来どおり使えます）`);
+        restoreBtn();
       }
-    } catch (e) { alert('発送に失敗しました: ' + (e.message || e)); }
+    } catch (e) { alert('発送に失敗しました: ' + (e.message || e)); restoreBtn(); }
     } finally { apiShipFlow._busy.delete(_shipKey); }
   }
   // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
@@ -2587,7 +2596,7 @@
         `<div class="ord-item">${itemsHtml}</div>` +
         `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}</span>` +
         `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
-        `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00') : 0); if (!t) return '📅—'; const d = new Date(t); const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]; return `📅${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w})`; })()}</div><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
+        `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00') : 0); if (!t) return '📅—'; const d = new Date(t); const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]; return `📅${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w})`; })()}</div><div class="buyer"></div><div style="white-space:nowrap">${esc(r.sn)} <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span></div><div>${r.tracking ? `${esc(r.tracking)} <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '追跡なし'}</div></div>` +
         `<div class="ord-links">` +
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
@@ -2597,7 +2606,7 @@
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       row.addEventListener('click', () => window.open(`https://${region.host}/portal/sale/order/${r.orderId}`, '_blank'));
       row.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
-      row.querySelectorAll('.ord-shipapi').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); apiShipFlow(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host); }));
+      row.querySelectorAll('.ord-shipapi').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); b.disabled = true; b.textContent = '⏳確認中…'; apiShipFlow(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host, b); }));
       frag.appendChild(row);
     });
     list.appendChild(frag);
