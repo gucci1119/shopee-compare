@@ -9537,7 +9537,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 🎯 目利きプレイブック：機種(プラットフォーム)判定。作品名から PS5/Switch/GBA 等を推定（新しい/具体的な方を優先）
   const PLAYBOOK_PLATFORMS = [
-    [/ps\s?5|playstation\s?5/i, 'PS5'], [/ps\s?4|playstation\s?4/i, 'PS4'], [/ps\s?3|playstation\s?3/i, 'PS3'], [/ps\s?2|playstation\s?2/i, 'PS2'], [/ps\s?1|psx|ps\s?one|playstation\s?1/i, 'PS1'],
+    [/\bps\s?5\b|playstation\s?5/i, 'PS5'], [/\bps\s?4\b|playstation\s?4/i, 'PS4'], [/\bps\s?3\b|playstation\s?3/i, 'PS3'], [/\bps\s?2\b|playstation\s?2/i, 'PS2'], [/\bps\s?1\b|\bpsx\b|ps\s?one|playstation\s?1/i, 'PS1'],
     [/psp|playstation\s?portable/i, 'PSP'], [/ps\s?vita|psvita|\bvita\b/i, 'Vita'],
     [/wii\s?u/i, 'WiiU'], [/\bwii\b/i, 'Wii'], [/game\s?cube|ゲームキューブ|\bgc\b/i, 'GC'], [/nintendo\s?64|\bn64\b|ニンテンドウ?64/i, 'N64'],
     [/switch|スイッチ|\bns\b/i, 'Switch'], [/\b3ds\b/i, '3DS'], [/\bdsi?\b|nintendo\s?ds/i, 'DS'],
@@ -9555,7 +9555,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     catch (e) { container.innerHTML = ''; return; }
     const fr = {}, pf = {}, mat = {}; let totalUnits = 0;
     orders.forEach(o => {
-      if (/cancel/i.test(o.status || '')) return;
+      if (/cancel|unpaid|invoice.?pending/i.test(o.status || '')) return; // 実際に売れた実績のみ＝キャンセル/未払い/請求書待ちは除外（未確定の需要で仕入れ判断を誤らせない）
       const rg = regionByCc(o.cc); const rate = rg ? (rg.rateJpy || 0) : 0;
       const its = o.items || []; const totQty = its.reduce((s, x) => s + (x.qty || 1), 0) || 1;
       const revPerJpy = (Number(o.total) || 0) * rate / totQty; // 注文総額を数量按分→1点あたり売上(円)
@@ -9627,7 +9627,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 台帳(原価)を取得（_ledgerRows/_leakCatにキャッシュ）。この先の重い計算(全出品×明細)は「データ版数」でメモ化＝並び替えトグルや再表示で再計算しない（🔄同期で自動更新）
     let catRows = lst._ledgerRows || lst._leakCat;
     if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); lst._leakCat = catRows; lst._leakCatErr = ''; } catch (e) { catRows = []; lst._leakCatErr = (e && e.message) || '読込エラー'; } }
-    const _leakVer = String(lst._seq || 0) + '|' + (settings.roiPct || '') + '|' + ((catRows && catRows.length) || 0) + '|' + all.length + '|' + targets.map(r => r.cc).join('') + '|' + (lst._priceWriteSeq || 0);
+    // 価格の合計シグネチャをキーに含める＝どの経路(公式API/ブリッジ/一括)で価格が変わってもキャッシュが必ず無効化される（値上げして直したのに赤字表示が残るのを確実に防ぐ）
+    const _priceSig = all.reduce((s, l) => s + (Number(l.price_min) || 0) + (l.models || []).reduce((t, m) => t + (Number(m.price) || 0), 0), 0);
+    const _leakVer = String(lst._seq || 0) + '|' + (settings.roiPct || '') + '|' + ((catRows && catRows.length) || 0) + '|' + all.length + '|' + targets.map(r => r.cc).join('') + '|' + Math.round(_priceSig);
     if (lst._leakHtmlCache != null && lst._leakVer === _leakVer) { leakHtml = lst._leakHtmlCache; }
     else {
     try {
