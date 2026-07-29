@@ -5070,22 +5070,39 @@
       host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
       return;
     }
-    const buyPer = 30, buyPages = Math.max(1, Math.ceil(items.length / buyPer)), buyPage = Math.min(Math.max(1, renderSourcing._page || 1), buyPages); // 1ページ30点（新しい注文順に上から仕入れ）
+    // 🛒仕入れワークリスト：各行に「✓仕入れ済」トグル（localStorage・二重買い防止）＋発送期限順ソート＋仕入れ済を隠すフィルタ
+    const doneKey = (x) => 'srcDone:' + x.o.cc + ':' + x.o.sn + ':' + x.ix;
+    const isDone = (x) => { try { return localStorage.getItem(doneKey(x)) === '1'; } catch (_) { return false; } };
+    const doneN = items.filter(isDone).length;
+    const tsOf = o => o.order_ts ? (Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date ? Date.parse(o.order_date + 'T00:00:00') : 0);
+    const sortMode = renderSourcing._sort || 'new';   // new=新しい順 / deadline=発送期限が近い順
+    let disp = items.slice();
+    if (sortMode === 'deadline') disp.sort((a, b) => (a.o.ship_by || 9e15) - (b.o.ship_by || 9e15) || tsOf(b.o) - tsOf(a.o));
+    else disp.sort((a, b) => tsOf(b.o) - tsOf(a.o));
+    if (renderSourcing._hideDone) disp = disp.filter(x => !isDone(x));
+    const buyPer = 30, buyPages = Math.max(1, Math.ceil(disp.length / buyPer)), buyPage = Math.min(Math.max(1, renderSourcing._page || 1), buyPages); // 1ページ30点
     host.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 4px 10px">
-        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b>新しい注文順</b>・${buyPage}/${buyPages}ページ）</span>
+        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b style="color:#c0392b">未手配 ${items.length - doneN}</b>・<b style="color:#1a7f37">仕入れ済 ${doneN}</b>）</span>
+        <span class="smd-seg" id="src-sort" style="font-size:11px"><button data-s="new" class="${sortMode === 'new' ? 'on' : ''}" title="注文が新しい順">🆕新しい順</button><button data-s="deadline" class="${sortMode === 'deadline' ? 'on' : ''}" title="発送期限が近い順＝期限直前を先に仕入れる">⏰期限が近い順</button></span>
+        <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="✓仕入れ済にした商品を一覧から隠す（残タスクだけ表示）"><input type="checkbox" id="src-hidedone" ${renderSourcing._hideDone ? 'checked' : ''}>仕入れ済を隠す</label>
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="表示中の全行について、対応サイトから今すぐ買える出品を安い順に取得（購入はしません／上から順に取得するため少し時間がかかります）">🔍 表示中を一括で最安取得</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
       <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1240px"><tr><th>画像</th><th>国</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
-      items.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1330px"><tr><th>仕入れ</th><th>画像</th><th>国</th><th>期限</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
+      disp.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
         const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
         const region = regionByCc(o.cc);
         const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
         const saved = localStorage.getItem(kwStoreKey(it.name, it.variation));
         const kw = saved != null ? saved : sourcingKeyword(it.name, it.variation);
-        return `<tr data-row="${gi}">
+        const done = isDone({ o, ix });
+        const dueH = o.ship_by ? Math.floor((o.ship_by - (Date.now() / 1000)) / 3600) : null; // 発送期限まで残り時間
+        const dueCell = dueH == null ? '<span class="smd-dim">—</span>' : (dueH < 0 ? `<b style="color:#d93025">超過${-dueH}h</b>` : `<span style="color:${dueH < 24 ? '#e8710a' : '#666'};font-weight:${dueH < 24 ? 700 : 400}">残${dueH}h</span>`);
+        return `<tr data-row="${gi}"${done ? ' style="opacity:.5;background:#f4faf5"' : ''}>
+          <td style="text-align:center"><button class="src-done" data-i="${gi}" title="${done ? '仕入れ済を解除' : 'この商品を仕入れ済にする（二重買い防止・一覧から隠せる）'}" style="border:1px solid ${done ? '#1a7f37' : '#cdd3db'};background:${done ? '#1a7f37' : '#fff'};color:${done ? '#fff' : '#888'};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap">${done ? '✓済' : '仕入れ済'}</button></td>
           <td>${img}</td>
           <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
+          <td style="white-space:nowrap;font-size:11px">${dueCell}</td>
           <td style="font-size:11.5px;max-width:320px;white-space:normal;word-break:break-word;line-height:1.4">${esc(it.name)}${it.variation ? `<br><span class="smd-dim">${esc(it.variation)}</span>` : ''}</td>
           <td><input class="src-kw" data-i="${gi}" value="${esc(kw)}" style="width:340px;max-width:44vw;font-size:12.5px;padding:6px 9px;border:1px solid #ccc;border-radius:5px" title="編集するとこの商品のキーワードとして記憶されます">${saved != null ? '<span title="手直し済み" style="color:#3ecf8e;font-size:11px;margin-left:3px">✎</span>' : ''}</td>
           <td style="min-width:300px">
@@ -5093,12 +5110,21 @@
             <div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button>${it.image ? `<button class="src-lens" style="background:#4285f4;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="この商品画像でGoogle画像検索（同一商品を探す）">📷画像</button>` : ''}</div></td>
           <td>${region ? `<a href="https://${region.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopee注文詳細">📄</a>` : ''}</td>
         </tr>`;
-      }).join('') + `</table></div></div>` + pageNav(items.length, buyPer, buyPage);
+      }).join('') + `</table></div></div>` + pageNav(disp.length, buyPer, buyPage);
     wirePageNav(host, p => { renderSourcing._page = p; renderSourcing(host); host.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+    // 🛒仕入れワークリスト操作：✓仕入れ済トグル（二重買い防止）／並び替え／仕入れ済を隠す
+    host.querySelectorAll('.src-done').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation(); const x = disp[+btn.dataset.i]; if (!x) return;
+      const k = doneKey(x);
+      try { if (localStorage.getItem(k) === '1') localStorage.removeItem(k); else localStorage.setItem(k, '1'); } catch (_) {}
+      renderSourcing(host);
+    }));
+    { const seg = host.querySelector('#src-sort'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; renderSourcing._sort = b.dataset.s; renderSourcing._page = 1; renderSourcing(host); }); }
+    { const hd = host.querySelector('#src-hidedone'); if (hd) hd.addEventListener('change', () => { renderSourcing._hideDone = hd.checked; renderSourcing._page = 1; renderSourcing(host); }); }
     const kwOf = (i) => encodeURIComponent(((host.querySelector(`.src-kw[data-i="${i}"]`) || {}).value || '').trim().replace(/\s+/g, ' '));
     // 手直しを記憶（編集したらその商品のキーワードとして保存）
     host.querySelectorAll('.src-kw').forEach(inp => inp.addEventListener('change', () => {
-      const { it } = items[+inp.dataset.i];
+      const { it } = disp[+inp.dataset.i];
       try { localStorage.setItem(kwStoreKey(it.name, it.variation), inp.value); } catch (e) {}
     }));
     host.querySelectorAll('.src-go').forEach(btn => btn.addEventListener('click', () => {
@@ -5112,7 +5138,7 @@
     }));
     // 画像でGoogle Lens逆画像検索（同一商品を確実に見つける）
     host.querySelectorAll('.src-lens').forEach(btn => btn.addEventListener('click', () => {
-      const { it } = items[+btn.closest('.src-btns').dataset.i];
+      const { it } = disp[+btn.closest('.src-btns').dataset.i];
       if (!it.image) return;
       const imgUrl = /^https?:/.test(it.image) ? it.image : IMG_CDN + it.image;
       window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(imgUrl), '_blank');
@@ -5125,7 +5151,7 @@
       let detailTr = host.querySelector(`tr.deal-detail[data-row="${i}"]`);
       if (!detailTr) {
         detailTr = document.createElement('tr'); detailTr.className = 'deal-detail'; detailTr.dataset.row = i;
-        detailTr.innerHTML = '<td colspan="6" style="background:#f7f9fc;padding:9px 13px;border-top:2px solid #1a7f37"><div class="deal-cont"></div></td>';
+        detailTr.innerHTML = '<td colspan="8" style="background:#f7f9fc;padding:9px 13px;border-top:2px solid #1a7f37"><div class="deal-cont"></div></td>';
         itemTr.after(detailTr);
       }
       const cont = detailTr.querySelector('.deal-cont');
