@@ -894,7 +894,7 @@
       <input type="number" id="set-pround" step="1" style="width:80px" title="丸め単位(現地通貨)">
     </div>
     <div class="note">・売上/注文/入金などの<b>運用データは公式API（GASサーバー側）がSupabaseへ24h自動同期</b>＝ブラウザ/ブリッジ無しのPCでも閲覧OK<br>
-      ・出品のライブ取得・SKU/バリエ編集・Switch Shop など<b>"書き込み系"だけ</b>Tampermonkeyのブリッジ入りPCが必要（🟢ライブ）</div>
+      ・タイトル/価格/在庫/重量/予約/属性の編集・カタログ編集・発送は<b>公式API</b>で書けます（⚙️OpenAPI設定があれば普通のPCでOK）。<b>🟢ライブ（Tampermonkeyのブリッジ入りPC）が要るのは</b>バリエ名変更・明細SKU・Switch Shop・他サイト取得・出品枠のライブ取得<b>だけ</b></div>
     <div class="row"><span class="test" id="set-test"></span>
       <button id="set-backup" title="在庫・注文・経費・タスク・返品などSupabaseの全データをJSONファイルで書き出し（保管用バックアップ）">💾 バックアップ</button>
       <button id="set-testbtn">接続テスト</button>
@@ -1295,7 +1295,7 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
     return res;
   }
-  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list);
+  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
@@ -1778,7 +1778,7 @@
     else if (state.mode === 'snap') {
       el.className = 'snap';
       el.textContent = '🔵 閲覧モード（DBは公式APIで自動同期・書込は不可）';
-      el.title = '売上/注文/入金/在庫の閲覧は最新（GASサーバー側が24h自動同期）。Shopeeへの書き込みだけ🟢ライブ（ブリッジ入りPC）が必要です。';
+      el.title = '売上/注文/入金/在庫の閲覧は最新（GASサーバー側が24h自動同期）。タイトル/価格/在庫/重量/予約/属性の編集・カタログ編集・発送も公式APIで書けます（⚙️OpenAPI設定があれば普通のPCでOK）。🟢ライブ（ブリッジ入りPC）が要るのはバリエ名変更・明細SKU・他サイト取得・出品枠のライブ取得くらいです。';
     } else { el.className = ''; el.textContent = '⚪ 未接続'; }
   }
 
@@ -2569,7 +2569,7 @@
             ? (arranged ? '<span class="smd-dim">手配済</span>' : shipByBadge(r.shipBy))
             : /unpaid/i.test(r.status || '') ? '<span style="color:#d93025;font-weight:700">未入金</span>'
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
-            : '<span class="smd-dim">発送済</span>'}</span>` +
+            : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝出荷期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
         `<div class="ord-item">${itemsHtml}</div>` +
         `<span class="ord-status">${flags ? flags + '<br>' : ''}${r.tab === 300 ? '<span style="font-size:8.5px;color:#8a8f98">Shopee上 </span>' : ''}${ordStatusJa(r.status)}${statusLabel}${transitToggle}</span>` +
         `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00') : 0); if (!t) return '📅—'; const d = new Date(t); const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]; return `📅${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}(${w})`; })()}</div><div class="buyer"></div><div>${esc(r.sn)}</div><div>${esc(r.tracking || '追跡なし')}</div></div>` +
@@ -2577,7 +2577,7 @@
         `<a href="https://${region.host}/portal/sale/order/${r.orderId}" target="_blank" title="注文詳細">📄</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
           : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
-        ((r.tab === 300 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<button class="ord-shipapi" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="公式APIで発送手配（β・内容を確認してから実行）" style="border:1px solid #1a7f37;background:#fff;color:#1a7f37;border-radius:6px;padding:0 5px;cursor:pointer;font-size:12px;line-height:1.6">🚚</button>` : '') +
+        ((r.tab === 300 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<button class="ord-shipapi" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="📮 公式APIでShopeeへ発送手配する（β・実際に物流が動く決定操作。押すと内容確認ダイアログが出ます）※左の紫『🚚倉庫へ発送済にする』は自宅→倉庫の記録用でShopeeには送りません" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:0 5px;cursor:pointer;font-size:11px;line-height:1.6;font-weight:700">📮公式発送</button>` : '') +
         `</div>`;
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
@@ -3025,7 +3025,8 @@
       });
       // 「未発送」は"未対応の未発送"だけ＝発送手配済(tracking有)や🚚倉庫へ輸送中(selfTransit)は除外し、注文一覧の未発送表示と件数を一致させる
       const toShip = orders.filter(o => o.tab === 300 && !o.tracking && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
-      const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 86400);
+      const overdueShip = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) < 0);           // 既に期限切れ（最優先）
+      const due24 = toShip.filter(o => o.ship_by && (o.ship_by - nowSec()) >= 0 && (o.ship_by - nowSec()) < 86400); // これから24h以内（期限切れは含めない）
       let pendJpy = 0, pendN = 0;
       income.forEach(i => { if (i.pending !== true) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
       // ---- 運用KPI（在庫由来の要対応・横断） ----
@@ -3038,7 +3039,7 @@
       kpis.innerHTML = [
         ['今日の売上', fmtJpy(todayJpy), `${todayOrders}件 / ${todayUnits}点（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。件＝注文数（チャートのオーダー数と一致）／点＝商品数（1注文に複数商品のことあり）。'],
         ['昨日の売上', fmtJpy(yestJpy), '前日の売上（日本時間・速報）', '昨日1日分（日本時間）の売上（円換算）。買い手支払額(escrow)ベースの速報値でキャンセルは除外済み。入金確定で微増減することあり。今日との比較の基準に。'],
-        ['未発送', toShip.length + '件', due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり', '発送待ちの注文数。期限24時間以内はShopeeのペナルティ対象になりやすいので優先。', 'orders'],
+        ['未発送', toShip.length + '件', overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件${due24.length ? ` ・24h以内 ${due24.length}件` : ''}` : (due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり'), '発送待ちの注文数。🔴期限切れは即発送（ペナルティ対象）。次いで24h以内を優先。', 'orders'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeがまだ支払っていない（リリース前に預かり中＝escrow）の入金見込み額。リリース後はここから外れて実入金になる。'],
         ['⏳入庫待ち', waiting.length + '件', '仕入れ ' + fmtJpy(waitVal) + (arrivedNotRecv ? ` ・📥到着済未反映${arrivedNotRecv}` : ''), '仕入元（メルカリ等）から到着待ちの在庫。📥到着済未反映は受取処理が必要（詳細はクリック→仕入れ管理/アラート）。', 'buy'],
         ['🏚死に筋(90日超)', deadArr.length + '件', deadArr.length ? fmtJpy(deadVal) + ' 滞留' : 'なし🎉', '仕入から90日超で在庫保管中＝資金が寝ている状態。値下げ／損切りの検討対象。明細はクリック→アラートに一本化。', deadArr.length ? 'alerts' : ''],
@@ -3157,7 +3158,8 @@
         const todayCc = REGIONS.map(rg => { const t = tCc[rg.cc]; return { cc: rg.cc, jpy: t ? t.local * rg.rateJpy : 0, units: t ? t.units : 0 }; });
         const activeToday = todayCc.filter(x => x.units > 0).sort((a, b) => b.jpy - a.jpy);
         const zeroToday = todayCc.filter(x => x.units === 0).map(x => x.cc);
-        const silent7 = REGIONS.filter(rg => !last7Keys.some(k => byDay[k] && byDay[k].cc[rg.cc])).map(rg => rg.cc);
+        // 直近7日どの日にもその国のdaily_statsが1行も無い＝データ欠落。※値0でもキーが在れば「同期済で売上0」なので silent 扱いしない（偽「同期漏れ」を防ぐ）
+        const silent7 = REGIONS.filter(rg => !last7Keys.some(k => byDay[k] && byDay[k].cc && (rg.cc in byDay[k].cc))).map(rg => rg.cc);
         let bestK = null, bestV = 0; dayKeys.slice(-14).forEach(k => { if (byDay[k].jpy > bestV) { bestV = byDay[k].jpy; bestK = k; } });
         const overdue = toShip.filter(o => o.ship_by && o.ship_by < nowSec());
         const oldest = overdue.reduce((m, o) => Math.min(m, o.ship_by || Infinity), Infinity);
@@ -5436,10 +5438,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 7) 到着済なのに入庫待ちのまま：配送追跡が「配達完了/お届け済み」なのに status=入庫待ち＝✓入荷し忘れ（在庫に反映されず利益計算にも出ない）
     const arrivedNotRecv = inv.filter(r => r.status === '入庫待ち' && deliveredAt(r))
       .sort((a, b) => String(deliveredAt(b) || '').localeCompare(String(deliveredAt(a) || '')));
-    // 6) データ不整合の疑い：未払いのまま(tab<300)／発送済(tab400)なのに追跡なし＝DBが古い可能性
-    const dataIssues = orders.filter(o => (o.tab != null && o.tab < 300) || (o.tab === 400 && !o.tracking)).map(o => {
+    // 6) データ不整合の疑い：発送済(tab400)なのに追跡番号が無い＝DBが古い/同期漏れの可能性。
+    //    ※未入金(tab<300)は「買い手がまだ払っていない」通常状態なので不整合ではない（Shopeeが期限切れで自動キャンセル）→ここでは除外し偽アラートを出さない。
+    const dataIssues = orders.filter(o => (o.tab === 400 && !o.tracking)).map(o => {
       const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {};
-      const reason = (o.tab != null && o.tab < 300) ? `未払いのまま(tab${o.tab}・${esc(o.status || '')})` : '発送済だが追跡なし';
+      const reason = '発送済だが追跡なし';
       return { cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), nm(it.name, '260px'), esc(o.order_date || ''), reason],
         link: rg && o.order_id ? `<a href="https://${rg.host}/portal/sale/order/${esc(o.order_id)}" target="_blank" title="Shopeeで確認">📄</a>` : '' };
     });
@@ -9489,7 +9492,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 台帳(原価)を取得（_ledgerRows/_leakCatにキャッシュ）。この先の重い計算(全出品×明細)は「データ版数」でメモ化＝並び替えトグルや再表示で再計算しない（🔄同期で自動更新）
     let catRows = lst._ledgerRows || lst._leakCat;
     if (!catRows) { try { catRows = await sbGetAll('listing_catalog', 'select=parent_sku,name,variations,weight_g'); lst._leakCat = catRows; lst._leakCatErr = ''; } catch (e) { catRows = []; lst._leakCatErr = (e && e.message) || '読込エラー'; } }
-    const _leakVer = String(lst._seq || 0) + '|' + (settings.roiPct || '') + '|' + ((catRows && catRows.length) || 0) + '|' + all.length + '|' + targets.map(r => r.cc).join('');
+    const _leakVer = String(lst._seq || 0) + '|' + (settings.roiPct || '') + '|' + ((catRows && catRows.length) || 0) + '|' + all.length + '|' + targets.map(r => r.cc).join('') + '|' + (lst._priceWriteSeq || 0);
     if (lst._leakHtmlCache != null && lst._leakVer === _leakVer) { leakHtml = lst._leakHtmlCache; }
     else {
     try {
@@ -9508,7 +9511,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const leaks = [];
       all.forEach(l => {
         if (l.status !== 1) return; // 出品中のみ
-        (l.models || []).forEach(m => {
+        // バリエ無しの単品は models が空＝価格は price_min・SKUは parent_sku にある。1明細扱いで必ず検査対象にする（従来は単品が丸ごと漏れていた）
+        const mds = (l.models && l.models.length) ? l.models : [{ n: '', sku: l.parent_sku, price: l.price_min, sold: l.sold }];
+        mds.forEach(m => {
           const price = Number(m.price) || 0; if (!price) return;
           const cm = (m.sku && costBySku[String(m.sku).toLowerCase().trim()]) || (m.n && costByName[String(m.n).toLowerCase().trim()]) || (l.parent_sku && costBySku[String(l.parent_sku).toLowerCase().trim()]);
           if (!cm) return;
@@ -12572,7 +12577,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         let start, end;
         if (ym === 'past30') { start = iso(Date.now() - 30 * 86400000); end = iso(Date.now() + 2 * 86400000); }
         else if (ym === 'past7') { start = iso(Date.now() - 7 * 86400000); end = iso(Date.now() + 2 * 86400000); }
-        else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = iso(Date.now() + 2 * 86400000); }
+        else if (ym === 'thismonth') { const n = new Date(); start = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`; end = new Date(Date.UTC(n.getFullYear(), n.getMonth() + 1, 1)).toISOString().slice(0, 10); } // 翌月1日(排他)＝月末に翌月注文が混入して当月利益が過大になるのを防ぐ
         else { start = ym + '-01'; const [y, m] = ym.split('-').map(Number); end = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10); }
         const [orders, income, costs, inv, prods, sheetKv, returns] = await Promise.all([
           sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${start}&order_date=lt.${end}&order=order_date.desc`),
