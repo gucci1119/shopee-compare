@@ -49,6 +49,36 @@ function doGet(e) {
       var ocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       return ContentService.createTextOutput(ocb + '(' + JSON.stringify({ ok: true, items: [], disabled: true }) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★ポータル新規登録の完了メール：登録者本人＋オーナーへ通知（URL付き）。WRITE_TOKEN必須。
+    //   ポータルから ?action=notify_signup&token=&email=&url=&callback=
+    if (p.action === 'notify_signup') {
+      var ncb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var nout;
+      try {
+        var nwt = P_().getProperty('WRITE_TOKEN');
+        if (!nwt || p.token !== nwt) throw new Error('WRITE_TOKEN不正');
+        var regEmail = String(p.email || '').trim();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(regEmail)) throw new Error('email形式不正');
+        var portalUrl = String(p.url || '').trim();
+        if (!/^https?:\/\//.test(portalUrl)) portalUrl = 'https://gucci1119.github.io/shopee-compare/';
+        var OWNER = 'ryoya.kawaguchi1119@gmail.com';
+        var nowJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+        var subj = '【Shopee OS】ポータル登録完了：' + regEmail;
+        var body = 'Shopee OS ポータルの新規登録が完了しました。\n\n'
+          + '登録メール: ' + regEmail + '\n'
+          + '登録日時: ' + nowJst + ' (JST)\n\n'
+          + '▼ ポータルはこちら（このメール＋設定したパスワードでログイン）\n'
+          + portalUrl + '\n\n'
+          + '※心当たりがない登録の場合は、Supabase の app_kv(portal_auth) から該当アカウントを削除してください。';
+        // 登録者本人へ（オーナーにも控えをBCC）。同一なら重複回避。
+        var opt = { name: 'Shopee OS ポータル' };
+        if (regEmail.toLowerCase() !== OWNER.toLowerCase()) opt.bcc = OWNER;
+        MailApp.sendEmail(regEmail, subj, body, opt);
+        if (regEmail.toLowerCase() === OWNER.toLowerCase()) { /* 本人=オーナーなら1通で足りる */ }
+        nout = { ok: true, sent: regEmail };
+      } catch (nerr) { nout = { ok: false, error: String((nerr && nerr.message) || nerr) }; }
+      return ContentService.createTextOutput(ncb + '(' + JSON.stringify(nout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★公式API出品（アカウント×国を shop_id で明示・JSONPでCORS回避・WRITE_TOKENガード）
     //   params: shop_id, name, desc, price, stock, weight(kg), images(改行\n区切りURL), category, condition, brand_id, publish(0/1)
     //   category_id/logistic_id/画像アップロードは addItem_ がshop毎に解決。既定は非公開(UNLIST)＝安全確認後にShopeeで公開。
