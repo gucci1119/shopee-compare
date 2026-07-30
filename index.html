@@ -6206,7 +6206,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const returnExtra = formalReturns.filter(r => r.order_sn && (Number(r.refund_amount) || 0) > 0 && !refundKeys0.has((r.cc || '') + ':' + r.order_sn))
       .map(r => { const cc = r.cc || '', sn = r.order_sn; const od = retOrdMap.get(cc + ':' + sn) || {}; const t = Number(r.create_time || r.update_time || 0); return { cc, sn, buyer: od.buyer || '', items: od.items || [], _return: true, ret_status: r.status, ret_reason: r.reason, refund_jpy: retRefundJpy(r), refund_local: Number(r.refund_amount) || 0, currency: r.currency, order_ts: null, order_date: t ? new Date(t < 1e11 ? t * 1000 : t).toISOString().slice(0, 10) : (snToDate(sn) || '') }; });
     const rtab = renderReturns._tab || 'refund';
-    const rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows.concat(returnExtra).sort((a, b) => dateKeyOf(b) - dateKeyOf(a));
+    let rowsView = rtab === 'formal' ? formalReturns : rtab === 'cancel' ? cancelRows : refundRows.concat(returnExtra).sort((a, b) => dateKeyOf(b) - dateKeyOf(a));
+    // 返金リクエストが「取消(CANCELLED)」＝買い手が申請を取り消した＝存在しないリクエスト。既定で隠す（下のトグルで表示可）
+    const retStatusOf = (o) => o._return ? o.ret_status : ((retByOrderSn.get(o.cc + ':' + o.sn) || {}).status);
+    let cxlHidden = 0;
+    if (rtab === 'refund' && renderReturns._showCxl !== true) { rowsView = rowsView.filter(o => { const c = retStatusOf(o) === 'CANCELLED'; if (c) cxlHidden++; return !c; }); }
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
@@ -6221,7 +6225,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return `<tr${o._comp ? ' style="background:#f2fbf5"' : (o._return ? ' style="background:#fdf3f2"' : '')}>
         <td><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td>
         <td>${it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>
-        <td style="font-size:11px;word-break:break-all">${esc(o.sn)}</td>
+        <td style="font-size:11px;word-break:break-all">${rg ? `<a href="https://${rg.host}/portal/sale/order#smdsn=${encodeURIComponent(o.sn)}" target="_blank" style="color:#2673dd;text-decoration:none" title="Shopeeでこの注文を開く（userscript導入で詳細へ直行／未導入は一覧＋番号で検索）">${esc(o.sn)}</a> <span class="smd-copy" data-copy="${esc(o.sn)}" title="注文番号をコピー" style="color:#b0b0b0">📋</span>` : esc(o.sn)}</td>
         <td style="font-size:11px;white-space:nowrap">${esc(dt)}</td>
         <td style="font-size:11px">${esc(o.buyer || '')}</td>
         <td style="font-size:11px">${(o._comp || o._return) && !it.name ? `<span class="smd-dim">（${o._comp ? '補償のみ・配達後の紛失/破損等' : '返品リクエスト'}）</span>` : nm(it.name, '260px')}</td>
@@ -6378,13 +6382,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">${rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。'}</td></tr>`) +
       `</table></div></div>` +
       pageNav(rowsView.length, retPer, retPage);
+    const cxlToggle = (rtab === 'refund') ? `<div style="margin:0 4px 8px"><label style="font-size:12px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:5px" title="返金リクエストが取消(CANCELLED)された行＝買い手が申請を取り消した＝存在しないリクエスト。既定では隠しています"><input type="checkbox" id="ret-showcxl" ${renderReturns._showCxl === true ? 'checked' : ''}>🚫取消された返金リクエストも表示${cxlHidden ? `<span class="smd-dim">（${cxlHidden}件を非表示中）</span>` : ''}</label></div>` : '';
     body.innerHTML = tabBar + summary +
       (rtab === 'formal'
         ? formalBlock
         : rtab === 'refund'
-          ? (analysisCard + compCard + adjCard + addTool + tableBlock)
+          ? (analysisCard + compCard + adjCard + addTool + cxlToggle + tableBlock)
           : (addTool + tableBlock));
     body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
+    { const cx = body.querySelector('#ret-showcxl'); if (cx) cx.addEventListener('change', () => { renderReturns._showCxl = cx.checked; renderReturns._page = 1; renderReturns(); }); }
     wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
