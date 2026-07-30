@@ -630,6 +630,8 @@
       <button class="smd-btn" id="ord-bulkprint" title="表示中の未発送注文のSLS伝票（Shopee指定配送の送り状）をまとめて印刷（国ごとに印刷タブを開く／Waybill Printer連携）">🖨️ 一括印刷</button>
       <button class="smd-btn" id="ord-csv" title="表示中（絞り込み後）の注文をピッキングリストとしてCSVで書き出し">⬇ CSV</button>
       <button class="smd-btn" id="ord-copytrack" title="表示中（絞り込み後）の追跡番号をまとめてコピー（配送業者一括照会用）">📋 追跡番号</button>
+      <button class="smd-btn" id="ord-selall" title="表示中の未手配注文（📦発送手配ボタンがある行）をすべて選択／解除">☑ 未手配を全選択</button>
+      <button class="smd-btn" id="ord-bulkship" title="下でチェックした未手配の注文をまとめてShopeeへ発送手配（公式API・1回の確認あり）。各国Seller Centerに行かず一括手配" style="border-color:#ee4d2d;color:#ee4d2d;font-weight:700">🎯 選択を一括発送手配<span id="ord-selcount"></span></button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300" title="Shopeeがまだ発送していない注文（未手配＋発送手配済の両方）＝手元で対応が要る注文">未発送</button>
@@ -1302,6 +1304,58 @@
       }
     } catch (e) { alert('発送に失敗しました: ' + (e.message || e)); restoreBtn(); }
     } finally { apiShipFlow._busy.delete(_shipKey); }
+  }
+  // 一括発送手配用：確認/alertを出さず1件手配（成功/スキップ/失敗を返す）。方式判定はapiShipFlowと同じ(info_neededキー有無)
+  async function apiShipOneSilent(cc, sn, shopId) {
+    let param;
+    try { param = await openapiShipParam(shopId, sn); }
+    catch (e) { return { ok: false, error: '発送情報取得失敗: ' + (e.message || e) }; }
+    const info = (param && param.info_needed) || {};
+    const has = k => info && Object.prototype.hasOwnProperty.call(info, k);
+    const hasPickup = has('pickup'), hasDropoff = has('dropoff'), hasNonInteg = has('non_integrated');
+    if (hasNonInteg && !hasPickup && !hasDropoff) return { ok: false, skipped: true, reason: '非統合(追跡番号を自分で登録要)→Seller Centerで手配' };
+    let choice = {}, method = '';
+    if (hasPickup) {
+      const addr = ((param.pickup || {}).address_list || [])[0];
+      const timeId = addr && ((addr.time_slot_list || [])[0] || {}).pickup_time_id;
+      choice = addr ? { pickup_address_id: addr.address_id, pickup_time_id: timeId } : { method: 'pickup' }; method = 'pickup';
+    } else if (hasDropoff) {
+      const br = ((param.dropoff || {}).branch_list || [])[0];
+      choice = (br && br.branch_id != null) ? { dropoff_branch_id: br.branch_id } : { method: 'dropoff' }; method = 'dropoff';
+    } else { choice = { method: 'dropoff' }; method = 'dropoff(既定)'; }
+    try {
+      const r = await openapiShipOrder(Object.assign({ shop_id: shopId, order_sn: sn }, choice));
+      if (r && r.ok) {
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        try { logAct('注文', 'API発送手配(一括)', sn, cc); } catch (_) {}
+        return { ok: true, method };
+      }
+      return { ok: false, error: (r && r.error) || '失敗', method };
+    } catch (e) { return { ok: false, error: (e.message || e), method }; }
+  }
+  // 🎯 選択した注文をまとめてShopeeへ発送手配（各国Seller Centerに行かず一括。1回の確認→順次実行→結果サマリ）
+  async function bulkArrangeShip() {
+    const chks = [...document.querySelectorAll('.ord-selchk:checked')];
+    if (!chks.length) { alert('発送手配する注文を選択してください（各注文の「☑選択」／上の「☑未手配を全選択」）。'); return; }
+    if (!(settings.openapiUrl && settings.writeToken)) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); return; }
+    const items = chks.map(c => ({ cc: c.dataset.cc, sn: c.dataset.sn, shop: c.dataset.shop }));
+    const gw = await guardWriteCountries([...new Set(items.map(x => x.cc))]);
+    if (!gw.ok) { alert(gw.msg); return; }
+    const byCcN = {}; items.forEach(x => byCcN[x.cc] = (byCcN[x.cc] || 0) + 1);
+    const ccSummary = Object.keys(byCcN).map(cc => cc + ' ' + byCcN[cc] + '件').join('・');
+    if (!confirm(`🎯 選択した ${items.length}件（${ccSummary}）をShopeeへ一括発送手配（arrange shipment）します。\n\n書込先: ${gw.summary}\n\n⚠️ 実際にSLS伝票が発行される操作です。越境SLSで方式が合わない/非統合の注文は自動でスキップ・失敗表示します。実行しますか？`)) return;
+    const btn = document.getElementById('ord-bulkship'); const orig = btn ? btn.innerHTML : ''; if (btn) btn.disabled = true;
+    let ok = 0, skip = 0, fail = 0; const errs = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]; if (btn) btn.textContent = `📮 手配中… ${i + 1}/${items.length}`;
+      const r = await apiShipOneSilent(it.cc, it.sn, it.shop);
+      if (r.ok) ok++; else if (r.skipped) { skip++; errs.push('⏭ ' + it.cc + ' ' + it.sn + ': ' + r.reason); } else { fail++; errs.push('❌ ' + it.cc + ' ' + it.sn + ': ' + (r.error || '失敗')); }
+      await new Promise(res => setTimeout(res, 200));
+    }
+    try { logAct('注文', 'API一括発送手配', '', `成功${ok}/スキップ${skip}/失敗${fail}（計${items.length}）`); } catch (_) {}
+    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    alert(`🎯 一括発送手配 完了\n\n✅ 成功: ${ok}件\n⏭ スキップ: ${skip}件\n❌ 失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 12).join('\n') + (errs.length > 12 ? `\n…ほか${errs.length - 12}件` : '') : ''}\n\n成功分は🖨️で伝票を印刷→荷物に貼って倉庫へ発送してください。`);
+    renderOrders();
   }
   // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
   async function openapiUpdateModelList(action, shopId, itemId, list) {
@@ -2605,8 +2659,13 @@
         : '<span style="color:#d93025;white-space:nowrap" title="手元→倉庫へまだ物理発送していない。Shopeeで発送手配済でも、伝票を貼って倉庫へ送るまでは未発送">未発送</span>';
       const transitToggle = (r.tab === 300) ? `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${inTransit ? '↩︎ 解除' : '🚚倉庫へ発送済にする'}</div>` : '';
       // Shopeeへ発送手配(arrange shipment)＝ship_order。まだ手配していない(未発送/arranged=false)注文だけに出す。押すとSLS伝票が発行される。
-      const arrangeBtn = (r.tab === 300 && !arranged && r.shopId && settings.openapiUrl && settings.writeToken)
+      const canArrange = (r.tab === 300 && !arranged && r.shopId && settings.openapiUrl && settings.writeToken);
+      const arrangeBtn = canArrange
         ? `<button class="ord-shipapi" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="Shopeeへ発送手配(arrange shipment)を実行＝SLS伝票を発行。押すと確認ダイアログ→OKで手配。手配後は🖨️で伝票印刷して荷物に貼り、倉庫へ物理発送→「🚚倉庫へ発送済にする」を記録" style="display:block;margin:4px auto 0;border:1px solid #ee4d2d;background:#fff3ef;color:#ee4d2d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:10.5px;font-weight:700;white-space:nowrap">📦発送手配</button>`
+        : '';
+      // 一括発送手配用チェックボックス（未手配のみ）
+      const selChk = canArrange
+        ? `<label style="display:block;margin-top:3px;font-size:9px;color:#ee4d2d;cursor:pointer;white-space:nowrap" title="一括発送手配に選択"><input type="checkbox" class="ord-selchk" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" style="vertical-align:middle;margin:0 3px 0 0">選択</label>`
         : '';
       const row = document.createElement('div');
       row.className = 'ord-row';
@@ -2619,7 +2678,7 @@
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
             : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝出荷期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
         `<div class="ord-item">${itemsHtml}</div>` +
-        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}</span>` +
+        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}${selChk}</span>` +
         `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
         `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00+09:00') : 0); if (!t) return '📅—'; try { return '📅' + new Date(t).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }); } catch (_) { return '📅' + jstDate(t); } })()}</div><div class="buyer"></div><div style="white-space:nowrap">${esc(r.sn)} <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span></div><div>${r.tracking ? `${esc(r.tracking)} <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '追跡なし'}</div></div>` +
         `<div class="ord-links">` +
@@ -2677,6 +2736,11 @@
     finally { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } }
   }
   document.getElementById('ord-reload').addEventListener('click', () => { refreshOrders(); });
+  // 🎯 選択を一括発送手配 ／ ☑未手配を全選択 ／ 選択件数の表示（.ord-selchk は行再描画で作られるため委譲で件数更新）
+  { const bs = document.getElementById('ord-bulkship'); if (bs) bs.addEventListener('click', () => bulkArrangeShip()); }
+  const updSelCount = () => { const n = document.querySelectorAll('.ord-selchk:checked').length; const el = document.getElementById('ord-selcount'); if (el) el.textContent = n ? '（' + n + '）' : ''; };
+  { const sa = document.getElementById('ord-selall'); if (sa) sa.addEventListener('click', () => { const boxes = [...document.querySelectorAll('.ord-selchk')]; if (!boxes.length) { alert('未手配の注文がありません（📦発送手配ボタンのある行が対象）。「📦未手配」フィルタで絞ると選びやすいです。'); return; } const allOn = boxes.every(b => b.checked); boxes.forEach(b => b.checked = !allOn); updSelCount(); }); }
+  document.getElementById('ord-list').addEventListener('change', e => { if (e.target && e.target.classList && e.target.classList.contains('ord-selchk')) updSelCount(); });
   // 🖨️ 一括印刷：表示中の未発送(tab300)のSLS伝票を国ごとにまとめて印刷（各注文=1タブ。Waybill Printer userscriptが自動印刷）
   document.getElementById('ord-bulkprint').addEventListener('click', () => {
     const targets = (state.orders.shown || []).filter(r => r.tab === 300 && r.sn);
