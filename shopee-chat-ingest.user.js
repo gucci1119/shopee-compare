@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.8.5
-// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。
+// @version      1.9.0
+// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。返信キューの巡回はSupabase直読み(キー設定時)でGAS枠を消費しない。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
 // @match        https://seller.shopee.com.my/*
@@ -12,6 +12,8 @@
 // @match        https://seller.shopee.tw/*
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
+// @connect      khjjjouhryigqunxygyg.supabase.co
+// @connect      supabase.co
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -55,6 +57,21 @@
     return false;
   };
   GM_registerMenuCommand('★ WRITE_TOKENを設定（これだけでOK）', askToken);
+  // ---- 返信キュー用：Supabase 直読み設定（キーはソースに埋めずTampermonkeyに保存＝公開リポジトリに漏れない） ----
+  // 設定すると chat_outbox を Supabase から直接読んで返信送信する＝GAS の urlfetch 日次枠を一切使わない（リアルタイム性維持）。
+  // 空のままなら従来どおり GAS 経由（※現在GAS側の outbox_pending は枠節約で無効化＝返信は送られない）。
+  const DEFAULT_SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co'; // プロジェクトURL（秘密ではない・全RESTに現れる）
+  const K_SBURL = 'chat_sb_url', K_SBKEY = 'chat_sb_key';
+  const getSbUrl = () => (GM_getValue(K_SBURL, '') || DEFAULT_SB_URL).replace(/\/$/, '');
+  const getSbKey = () => GM_getValue(K_SBKEY, '');
+  GM_registerMenuCommand('★ 返信を有効化：Supabaseキーを設定（GAS枠を使わず直読み）', () => {
+    const v = prompt('ポータル ⚙️設定の「Supabase secretキー（書き込み用）」を貼り付けてください。\n設定すると返信キュー(chat_outbox)をSupabaseから直接読んで送信します＝GASの日次枠を一切消費しません。\n（空にすると従来のGAS経由に戻ります）', getSbKey());
+    if (v != null) { GM_setValue(K_SBKEY, v.trim()); toast(v.trim() ? '✓ 返信をSupabase直読みで有効化（GAS節約）' : 'GAS経由に戻しました'); updateChip(); }
+  });
+  GM_registerMenuCommand('Supabase URLを変更（通常不要）', () => {
+    const v = prompt('Supabase プロジェクトURL（通常は既定のままでOK）', getSbUrl());
+    if (v != null) { GM_setValue(K_SBURL, v.trim().replace(/\/$/, '')); toast('Supabase URLを保存しました'); }
+  });
   GM_registerMenuCommand('GAS URLを変更（通常不要）', () => {
     const v = prompt('GAS の /exec URL（通常は既定のままでOK）', getUrl());
     if (v != null) { GM_setValue(K_URL, v.trim().replace(/\/$/, '')); toast('GAS URLを保存しました'); }
@@ -391,9 +408,46 @@
     if (ta.value && ta.value.trim()) { setNativeValue(ta, ''); ta.dispatchEvent(new Event('input', { bubbles: true })); throw new Error('送信が確定しませんでした（Enter無効）'); }
   }
   function outboxDone(id, ok, err) { return new Promise(res => { GM_xmlhttpRequest({ method: 'POST', url: getUrl(), headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ action: 'outbox_done', token: getTok(), id: id, ok: ok, error: err || '' }), onload: () => res(), onerror: () => res(), ontimeout: () => res() }); }); }
+
+  // ---- Supabase 直読み（GAS枠を使わない返信キュー・キー設定時のみ） ----
+  function sbReq(method, path, body) {
+    return new Promise((res, rej) => {
+      const key = getSbKey(); if (!key) { rej(new Error('no key')); return; }
+      const headers = { 'apikey': key, 'Authorization': 'Bearer ' + key };
+      if (body != null) headers['Content-Type'] = 'application/json';
+      if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
+      GM_xmlhttpRequest({
+        method, url: getSbUrl() + '/rest/v1/' + path, headers, timeout: 15000,
+        data: body != null ? JSON.stringify(body) : undefined,
+        onload: r => { let j = null; try { j = r.responseText ? JSON.parse(r.responseText) : null; } catch (_) {} res({ status: r.status, json: j }); },
+        onerror: () => rej(new Error('net')), ontimeout: () => rej(new Error('timeout'))
+      });
+    });
+  }
+  function outboxDoneSb(id, ok, err) {
+    return sbReq('PATCH', 'chat_outbox?id=eq.' + encodeURIComponent(id),
+      { status: ok ? 'sent' : 'error', sent_at: new Date().toISOString(), error: ok ? null : String(err || '').slice(0, 200) }).catch(() => {});
+  }
+  async function pollOutboxSb() {
+    let items = [];
+    try {
+      const r = await sbReq('GET', 'chat_outbox?status=eq.pending&select=id,cc,buyer,conversation_id,text&order=created_at.asc&limit=20');
+      if (r && r.status >= 200 && r.status < 300 && Array.isArray(r.json)) items = r.json;
+      else { outboxBusy = false; return; }
+    } catch (_) { outboxBusy = false; return; }
+    for (const it of items) {
+      if (it.buyer === '__CYCLE__' || it.text === '__CYCLE__') { await outboxDoneSb(it.id, true, ''); continue; }
+      let ok = false, err = ''; try { await sendReply(it); ok = true; sentReplies++; } catch (e) { err = String((e && e.message) || e); lastErr = '返信:' + err; }
+      await outboxDoneSb(it.id, ok, err); updateChip(); await sleep(900);
+    }
+    outboxBusy = false;
+  }
+
   let outboxBusy = false;
   function pollOutbox() {
     if (outboxBusy || !OUTBOX_ON()) return;
+    // Supabaseキーがあれば直読み（GAS枠ゼロ＝リアルタイム維持）。無ければ従来のGAS経由（※現GASは outbox_pending を無効化中＝送信されない）。
+    if (getSbKey()) { outboxBusy = true; pollOutboxSb(); return; }
     const url = getUrl(), tok = getTok(); if (!url || !tok) return;
     outboxBusy = true;
     GM_xmlhttpRequest({
