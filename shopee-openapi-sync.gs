@@ -63,6 +63,29 @@ function doGet(e) {
       } catch (rerr) { rout = { ok: false, error: String((rerr && rerr.message) || rerr) }; }
       return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★売上(日次)の即時取得：run_daily → syncAll()（WRITE_TOKEN必須）。まとめて更新の「売上」が実は効いていなかった対策。
+    if (p.action === 'run_daily') {
+      var dcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var dout;
+      try {
+        var dwt = P_().getProperty('WRITE_TOKEN');
+        if (!dwt || p.token !== dwt) throw new Error('WRITE_TOKEN不正');
+        dout = { ok: true, action: 'run_daily', result: syncAll() };
+      } catch (derr) { dout = { ok: false, error: String((derr && derr.message) || derr) }; }
+      return ContentService.createTextOutput(dcb + '(' + JSON.stringify(dout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★入金(escrow)の即時取得：run_income → syncEscrowAll()（WRITE_TOKEN必須）。自己制限270秒＝重い時はポータル側は待たず背景実行。
+    if (p.action === 'run_income') {
+      var icb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var iout;
+      try {
+        var iwt = P_().getProperty('WRITE_TOKEN');
+        if (!iwt || p.token !== iwt) throw new Error('WRITE_TOKEN不正');
+        var ilog = syncEscrowAll();
+        iout = { ok: true, action: 'run_income', shops: (ilog || []).length };
+      } catch (ierr) { iout = { ok: false, error: String((ierr && ierr.message) || ierr) }; }
+      return ContentService.createTextOutput(icb + '(' + JSON.stringify(iout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★ポータル新規登録の完了メール：登録者本人＋オーナーへ通知（URL付き）。WRITE_TOKEN必須。
     //   ポータルから ?action=notify_signup&token=&email=&url=&callback=
     if (p.action === 'notify_signup') {
