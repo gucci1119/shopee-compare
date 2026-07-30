@@ -57,7 +57,7 @@ function doGet(e) {
       try {
         var rwt = P_().getProperty('WRITE_TOKEN');
         if (!rwt || p.token !== rwt) throw new Error('WRITE_TOKEN不正');
-        var rlog = syncOrdersAll();
+        var rlog = syncOrdersAll(p.days > 0 ? parseInt(p.days, 10) : 4); // ★on-demandは既定4日窓で高速化（新注文はcreate/update直近＝4日で十分）。全期間が要る時は&days=15
         var nOk = 0, nErr = 0; (rlog || []).forEach(function (x) { if (x && x.error) nErr++; else nOk++; });
         rout = { ok: true, action: 'run_orders', shops_ok: nOk, shops_err: nErr };
       } catch (rerr) { rout = { ok: false, error: String((rerr && rerr.message) || rerr) }; }
@@ -1340,10 +1340,10 @@ function imgHash_(it) {
   var u = (it && (it.image_url || (it.image_info && (it.image_info.image_url || (it.image_info.image_url_list || [])[0])))) || '';
   if (!u) return ''; return String(u).split('?')[0].split('/').pop().replace(/\.\w+$/, '');
 }
-function syncOrdersForShop_(tok) {
+function syncOrdersForShop_(tok, daysWindow) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var tz = CC_TZ[cc] != null ? CC_TZ[cc] : 8;
-  var to = now_(), from = to - 15 * 86400, sns = [], cursor = '';
+  var to = now_(), from = to - (daysWindow > 0 ? daysWindow : 15) * 86400, sns = [], cursor = ''; // on-demand(⚡今すぐ取得/まとめて更新)は短窓で高速化。毎時トリガーは15日で状態変化も拾う
   for (var g = 0; g < 60; g++) {
     // ★update_timeで取得＝作成15日超でも状態が変わった注文(発送/完了/キャンセル)を拾い続ける。create_timeだとBR等の遅い越境注文がtab300や暫定入金のまま固まる。update_time≧create_timeなので新規注文も必ず含む(厳密に上位互換)。order_dateはcreate_time基準のままで集計は不変
     var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'update_time', time_from: from, time_to: to, page_size: 100, cursor: cursor }, 'get');
@@ -1397,9 +1397,9 @@ function syncOrdersForShop_(tok) {
   }
   return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
 }
-function syncOrdersAll() {
+function syncOrdersAll(daysWindow) {
   var toks = listTokens_(), log = [];
-  toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok, daysWindow)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 
