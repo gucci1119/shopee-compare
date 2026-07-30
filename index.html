@@ -634,10 +634,11 @@
       <button class="smd-btn" id="ord-bulkship" title="下でチェックした未手配の注文をまとめてShopeeへ発送手配（公式API・1回の確認あり）。各国Seller Centerに行かず一括手配" style="border-color:#ee4d2d;color:#ee4d2d;font-weight:700">🎯 選択を一括発送手配<span id="ord-selcount"></span></button>
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
-        <button data-k="300" title="Shopeeがまだ発送していない注文（未手配＋発送手配済の両方）＝手元で対応が要る注文">未発送</button>
-        <button data-k="unarranged" title="Shopeeで arrange shipment（発送手配）をまだ押していない注文だけ。ここから📦発送手配でSLS伝票を発行できます">📦未手配</button>
-        <button data-k="400" title="Shopeeが発送済み（倉庫から出荷後）＝配送中〜完了。手元での作業は不要">✈️発送済</button>
-        <button data-k="transit" title="あなたが「🚚倉庫へ発送済にする」を押したが、まだShopee倉庫でスキャンされていない注文">🚚倉庫スキャン待ち</button>
+        <button data-k="300" title="手元で対応が要る全部＝①未手配＋②伝票発行済（③倉庫スキャン待ちは物理発送済なので含みません）">📥要対応</button>
+        <button data-k="unarranged" title="① 未手配：Arrange Shipment（発送手配）をまだ押していない＝SLS伝票が未発行。ここから📦発送手配で伝票を発行します">①📦未手配</button>
+        <button data-k="arranged" title="② 伝票発行済：Arrange Shipment押済でSLS伝票は発行済だが、まだ倉庫へ物理発送していない。伝票を印刷・梱包して倉庫へ送ります">②📄伝票発行済</button>
+        <button data-k="transit" title="③ 倉庫スキャン待ち：自社倉庫→Shopee Japan倉庫へ物理発送済で、まだ倉庫でスキャンされていない＝輸送中">③🚚倉庫スキャン待ち</button>
+        <button data-k="400" title="④ 発送済：Shopee倉庫でスキャン済＝Shopeeの物流に乗って配送中〜完了。手元での作業は不要">④✈️発送済</button>
         <button data-k="late" title="発送期限が近い/超過している未対応の注文">🚨遅延/リスク</button>
         <button data-k="pre" title="予約商品（Pre-order）の注文">🕒予約</button>
       </span>
@@ -2591,21 +2592,38 @@
     const el = document.getElementById('ord-summary');
     const parts = [];
     let total = 0, late = 0, riskN = 0;
+    // 発送フロー4段階の件数（①未手配 ②伝票発行済 ③倉庫スキャン待ち ④発送済）
+    let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+    const isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
       const oc = state.orders.perCountry.get(region.cc);
       if (!oc) return;
       const n = (oc.rows && oc.rows.length) || 0;
       total += n;
-      (oc.rows || []).forEach(r => { const rk = ordRisk(r); if (rk === 2) late++; else if (rk === 1) riskN++; });
+      (oc.rows || []).forEach(r => {
+        const rk = ordRisk(r); if (rk === 2) late++; else if (rk === 1) riskN++;
+        if (r.tab === 400) s4++;
+        else if (r.tab === 300) { if (isSelfT(r)) s3++; else if (ordArranged(r)) s2++; else s1++; }
+      });
       const cc = `<span class="cc" style="color:${region.color}">${region.cc}</span>`;
       if (oc.status === 'loading') parts.push(`${cc}<span class="smd-dim">${esc(oc.msg)}</span>`);
       else if (oc.status === 'error') parts.push(`${cc}<span class="smd-err" title="${esc(oc.msg)}">⚠${n ? `DB${n}件` : ''}</span>`);
       else parts.push(`${cc}${n}件`);
     });
     const riskTag = (late + riskN) ? ` ｜ <b class="ord-riskclick" style="color:#d93025;cursor:pointer" title="クリックで遅延/リスクだけ表示">🚨遅延${late} ⚠リスク${riskN}</b>` : '';
-    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送済）${riskTag} ｜ ` + parts.join(' ｜ ');
+    // 4段階チップ（クリックで各フィルタへ）
+    const stageChip = (k, label, nn, col) => `<span class="ord-stagechip" data-k="${k}" title="クリックでこの段階だけ表示" style="cursor:pointer;display:inline-block;background:${col}18;color:${col};font-weight:700;font-size:11px;padding:2px 9px;border-radius:11px;margin-right:6px">${label} ${nn}</span>`;
+    const stageLine = `<div style="margin-top:5px">発送フロー：` +
+      stageChip('unarranged', '①📦未手配', s1, '#d93025') +
+      stageChip('arranged', '②📄伝票発行済', s2, '#1565c0') +
+      stageChip('transit', '③🚚倉庫スキャン待ち', s3, '#7b52c4') +
+      stageChip('400', '④✈️発送済', s4, '#1a7f37') +
+      `<span class="smd-dim" style="font-size:10.5px">①未手配＝Arrange Shipment未 → ②押済で伝票発行 → ③倉庫へ送って輸送中 → ④倉庫スキャンで発送済</span></div>`;
+    el.innerHTML = `未処理注文 <b>${total}</b>件（未発送＋発送済）${riskTag} ｜ ` + parts.join(' ｜ ') + stageLine;
+    const setFilter = (k) => { state.orders.filter = k; state.orders.page = 1; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === k)); renderOrders(); };
     const rc = el.querySelector('.ord-riskclick');
-    if (rc) rc.addEventListener('click', () => { state.orders.filter = 'late'; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === 'late')); renderOrders(); });
+    if (rc) rc.addEventListener('click', () => setFilter('late'));
+    el.querySelectorAll('.ord-stagechip').forEach(c => c.addEventListener('click', () => setFilter(c.dataset.k)));
   }
 
   // ★Shopeeが発送手配済み(arrange shipment実施済)か＝単一の判定に統一（表示・遅延・KPI・フィルタで食い違わないように）。
@@ -2630,11 +2648,15 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
+    // 発送フロー4段階：①未手配(Arrange Shipment未)→②伝票発行済(手配済・倉庫へ未発送)→③倉庫スキャン待ち(自社→Shopee倉庫 輸送中)→④発送済(倉庫スキャン済=tab400)
+    const _isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
     if (state.orders.filter === 'late') rows = rows.filter(r => ordRisk(r) >= 1); // 遅延＋遅延リスク（未対応で期日が近い/超過）
-    else if (state.orders.filter === 'unarranged') rows = rows.filter(r => r.tab === 300 && !ordArranged(r)); // arrange shipment未実施＝Shopee上まだ未発送。renderのarrangedと同一判定（食い違い防止）。ここから📦発送手配
-    else if (state.orders.filter === 'transit') rows = rows.filter(r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn))); // 🚚倉庫へ発送済(未スキャン)にした注文だけ
+    else if (state.orders.filter === 'unarranged') rows = rows.filter(r => r.tab === 300 && !ordArranged(r) && !_isSelfT(r)); // ①未手配：Arrange Shipment未押下（renderのarrangedと同一判定＝食い違い防止）。ここから📦発送手配
+    else if (state.orders.filter === 'arranged') rows = rows.filter(r => r.tab === 300 && ordArranged(r) && !_isSelfT(r)); // ②伝票発行済：SLS伝票発行済だが倉庫へ物理未発送
+    else if (state.orders.filter === 'transit') rows = rows.filter(r => r.tab === 300 && _isSelfT(r)); // ③倉庫スキャン待ち：自社→Shopee倉庫へ物理発送済・未スキャン（スキャンされ tab=400 になったら④発送済へ自動で移る）
+    else if (state.orders.filter === '300') rows = rows.filter(r => r.tab === 300 && !_isSelfT(r)); // 📥要対応：手元にある未発送（①未手配＋②伝票発行済。倉庫へ発送済=③は含めない）
     else if (state.orders.filter === 'pre') rows = rows.filter(r => r.preOrder);
-    else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter);
+    else if (state.orders.filter !== 'all') rows = rows.filter(r => String(r.tab) === state.orders.filter); // ④発送済(tab400)等
     if (state.orders.search) {
       const q = state.orders.search.toLowerCase();
       rows = rows.filter(r => r.buyer.toLowerCase().includes(q) || r.sn.toLowerCase().includes(q) ||
