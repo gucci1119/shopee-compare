@@ -9686,6 +9686,35 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     alert(`🎯 一括修正 完了\n\n成功: ${okItems}出品 / ${okModels}明細\n失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 8).join('\n') : ''}`);
     lst._leakHtmlCache = null; renderListingAnalysis();
   }
+  // 「👀見られてるのに売れない」→ ROI維持の下限まで一括値下げ（マージン漏れ一括値上げの対。単品・原価判明・下げ余地ありのみ。公式API・プレビュー＆確認あり）
+  async function runDealCutAll() {
+    const cuts = (lst._dealCuts || []).filter(x => x.shop_id && x.newPrice > 0 && x.newPrice < x.price);
+    if (!cuts.length) { alert('一括値下げできる出品がありません（単品＋原価判明＋下げ余地＋shop_id判明が対象）。'); return; }
+    if (!(settings.openapiUrl && settings.writeToken)) { alert('⚙️設定の公式API（OpenAPI URL＋WRITE_TOKEN）が必要です。'); return; }
+    const roiT = Number(settings.roiPct) || 15;
+    const byCcN = {}; cuts.forEach(x => byCcN[x.cc] = (byCcN[x.cc] || 0) + 1);
+    const ccSummary = Object.keys(byCcN).map(cc => cc + ' ' + byCcN[cc] + '件').join('・');
+    const examples = cuts.slice(0, 8).map(x => `・${x.cc} ${String(x.name).slice(0, 26)}：${x.cur}${x.price.toLocaleString()} → ${x.cur}${x.newPrice.toLocaleString()}`).join('\n');
+    const gw = await guardWriteCountries([...new Set(cuts.map(x => x.cc))]);
+    if (!gw.ok) { alert(gw.msg); return; }
+    if (!confirm(`🎯 ROI維持の下限まで一括値下げします（目標ROI${roiT}%は確保）。\n\n書込先: ${gw.summary}\n対象: ${cuts.length}件（${ccSummary}）\n\n例:\n${examples}${cuts.length > 8 ? `\n…ほか${cuts.length - 8}件` : ''}\n\n本番のShopee価格を公式APIで下げます。実行しますか？`)) return;
+    const groups = {};
+    cuts.forEach(x => { const k = x.shop_id + ':' + x.item_id; (groups[k] = groups[k] || { shop_id: x.shop_id, item_id: x.item_id, cc: x.cc, list: [] }); groups[k].list.push({ model_id: x.model_id, price: x.newPrice }); });
+    const gArr = Object.keys(groups).map(k => groups[k]);
+    let okItems = 0, fail = 0; const errs = [];
+    const btn = document.querySelector('.deal-cutall'); if (btn) btn.disabled = true;
+    for (let i = 0; i < gArr.length; i++) {
+      const g = gArr[i]; if (btn) btn.textContent = `値下げ中… ${i + 1}/${gArr.length}`;
+      try {
+        const r = await openapiUpdatePriceList(g.shop_id, g.item_id, g.list);
+        if (r && r.ok) { okItems++; try { const row = (lst.byCc[g.cc] || []).find(y => y.item_id === g.item_id); if (row) { g.list.forEach(pl => { row.price_min = pl.price; row.price_max = pl.price; }); } } catch (_) {} }
+        else { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + ((r && r.error) || '失敗')); }
+      } catch (e) { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + (e.message || e)); }
+    }
+    try { logAct('価格調整', '見られて売れない一括値下げ(公式)', '', `${okItems}出品 成功・${fail}失敗（ROI維持下限・目標${roiT}%）`); } catch (_) {}
+    alert(`🎯 一括値下げ 完了\n\n成功: ${okItems}出品\n失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 8).join('\n') : ''}`);
+    lst._leakHtmlCache = null; renderListingAnalysis();
+  }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -9834,10 +9863,30 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         .filter(x => x.views >= VIEW_MIN && x.sale === 0)
         .sort((a, b) => (b.likes - a.likes) || (b.views - a.views)); // いいね多い(欲しいのに買わない=価格抵抗が濃い)→次に閲覧が多い順
       const totalWastedViews = cand.reduce((s, x) => s + x.views, 0);
+      // 各候補の床価格(ROI維持の下限)を1度だけ算出＝表と一括値下げで共用
+      const rows = cand.map(x => {
+        const l = x.l, rg = regionByCc(l.cc) || {};
+        const cm = (l.parent_sku && cBySku[String(l.parent_sku).toLowerCase().trim()]) || (l.name && cByName[String(l.name).toLowerCase().trim()]);
+        const cur = Number(l.price_min) || 0;
+        const isSingle = !(l.models && l.models.length > 1);
+        const floor = cm ? roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG }), rg.priceUnit || 1) : null;
+        return { x, l, rg, cm, cur, isSingle, floor };
+      });
+      // 一括値下げ対象＝単品・原価判明・床<現価格・shop_id判明（バリエ品は明細ごと事情が違うため対象外）
+      const cuts = [];
+      rows.forEach(r => {
+        if (!r.isSingle || !r.cm || !(r.floor > 0 && r.floor < r.cur)) return;
+        const shopId = r.l.shop_id || (typeof shopIdOfListing === 'function' ? shopIdOfListing(r.l.cc, r.l.item_id) : null);
+        if (!shopId) return;
+        cuts.push({ cc: r.l.cc, name: r.l.name, item_id: r.l.item_id, model_id: 0, shop_id: shopId, cur: (r.rg.cur || ''), host: r.rg.host, price: r.cur, newPrice: r.floor, roi: roiT });
+      });
+      lst._dealCuts = cuts;
+      const canApiCut = !!(settings.openapiUrl && settings.writeToken);
       dealHtml = `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">👀 見られてるのに売れない → 値下げ/見直し <span class="smd-dim" style="font-weight:400;font-size:12px">（閲覧${VIEW_MIN}以上あるのに販売0の出品中＝注目は集めているのに買われていない。価格・タイトル・画像の見直しで売上に化ける候補）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 <b>いいねが多い順</b>（欲しいのに買っていない＝価格抵抗が濃い）→ 次に閲覧が多い順。<b>原価が台帳にある分</b>は「ROI${roiT}%を保てる下限価格」を提示＝<b>そこまでは安全に下げられます</b>。該当 <b>${cand.length}</b>件・累計閲覧 <b>${totalWastedViews.toLocaleString()}</b>回が未転換。国チップ＝編集ページ。</div>
-        ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${cand.slice(0, 100).map(x => { const l = x.l, rg = regionByCc(l.cc) || {}; const cm = (l.parent_sku && cBySku[String(l.parent_sku).toLowerCase().trim()]) || (l.name && cByName[String(l.name).toLowerCase().trim()]); let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (cm) { const floor = roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG }), rg.priceUnit || 1); floorTd = (floor && floor < (Number(l.price_min) || 0)) ? `<b style="color:#1a7f37">${rg.cur || ''}${floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${nm(l.name, '260px')}</td><td style="text-align:right;font-weight:700;color:#555">${x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${(Number(l.price_min) || 0).toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
+        ${canApiCut && cuts.length ? `<div style="margin-bottom:8px"><button class="deal-cutall" style="border:1px solid #c2185b;background:#fdf0f5;color:#c2185b;border-radius:7px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:700">🎯 ROI維持の下限まで一括値下げ（${cuts.length}件・単品のみ）</button> <span class="smd-dim" style="font-size:11px">原価判明の単品を、目標ROI${roiT}%を保てる下限価格へ公式APIで一括値下げ（プレビュー＆確認あり）。バリエ品・原価不明は対象外＝個別に。</span></div>` : (cuts.length && !canApiCut ? `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🎯 一括値下げは⚙️設定の公式API（OpenAPI URL＋WRITE_TOKEN）を入れると使えます</div>` : '')}
+        ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${rows.slice(0, 100).map(r => { const l = r.l, rg = r.rg; let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (r.cm) { floorTd = (r.floor && r.floor < r.cur) ? `<b style="color:#1a7f37">${rg.cur || ''}${r.floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${nm(l.name, '260px')}${r.isSingle ? '' : ' <span class="smd-dim" style="font-size:9px" title="バリエ品＝一括値下げ対象外（個別に）">ﾊﾞﾘｴ</span>'}</td><td style="text-align:right;font-weight:700;color:#555">${r.x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${r.x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${r.cur.toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
       </div>`;
     } catch (e) { dealHtml = ''; }
     host.innerHTML =
@@ -9898,6 +9947,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       renderListingAnalysis();
     }));
     { const fb = host.querySelector('.leak-fixall'); if (fb) fb.addEventListener('click', () => runLeakFixAll()); }
+    { const dc = host.querySelector('.deal-cutall'); if (dc) dc.addEventListener('click', () => runDealCutAll()); }
     try { renderPlaybook(document.getElementById('an-playbook')); } catch (_) {}
     const allBtn = host.querySelector('.imgc-applyall'); if (allBtn) allBtn.addEventListener('click', () => applyAllImageClusters(false));
     const dryBtn = host.querySelector('.imgc-dryrun'); if (dryBtn) dryBtn.addEventListener('click', () => applyAllImageClusters(true));
