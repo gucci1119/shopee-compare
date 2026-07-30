@@ -1640,12 +1640,14 @@ var LIST_ITEM_STATUS = ['NORMAL', 'UNLIST'];   // 取得対象。必要なら 'B
 var LIST_RR_BATCH = 1;                          // ラウンドロビンで1回に処理する店舗数（バリエ多い店は6分制限に当たるため1店ずつ）
 
 // 全出品の item_id + 公開状態を、状態別ページングで取得
-function listItemIds_(shopId) {
+function listItemIds_(shopId, sinceSec) {
   var out = [];
   LIST_ITEM_STATUS.forEach(function (st) {
     var offset = 0;
     for (var g = 0; g < 500; g++) { // 500*100=5万件まで安全弁
-      var j = callShop_(shopId, '/api/v2/product/get_item_list', { offset: offset, page_size: 100, item_status: st }, 'get');
+      var q = { offset: offset, page_size: 100, item_status: st };
+      if (sinceSec) { q.update_time_from = sinceSec; q.update_time_to = now_(); } // ★増分：変更のあった出品だけ（頻繁な画像/タイトル/在庫/価格変更を高速反映）
+      var j = callShop_(shopId, '/api/v2/product/get_item_list', q, 'get');
       var r = j.response || {};
       (r.item || []).forEach(function (it) { out.push({ item_id: it.item_id, status: (st === 'NORMAL' ? 1 : 0) }); });
       if (!r.has_next_page) break;
@@ -1658,11 +1660,11 @@ function priceOfInfo_(pi0) { if (!pi0) return 0; return pi0.original_price != nu
 function stockOfV2_(sv) { sv = sv || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; }
 
 // 1店舗ぶんを取得して listings に upsert（本体）
-function syncListingsForShop_(tok) {
+function syncListingsForShop_(tok, sinceSec) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var shopId = tok.shop_id;
-  var ids = listItemIds_(shopId);
-  if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0 };
+  var ids = listItemIds_(shopId, sinceSec);
+  if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0, mode: sinceSec ? 'changed' : 'full' };
   var statusById = {}; ids.forEach(function (x) { statusById[x.item_id] = x.status; });
   var rows = [];
   for (var i = 0; i < ids.length; i += 50) {
@@ -1700,17 +1702,19 @@ function syncListingsForShop_(tok) {
   //   idsはNORMAL+UNLISTの完全取得成功時のみここに到達（ページ失敗はthrowして手前で中断）＝取得失敗での誤削除は起きない。
   //   現在のitem_id集合に無い「この店」の行だけを削除（BAN/審査中は稀・再公開時に次回同期で復活）。
   var removed = 0;
-  try {
-    var live = {}; ids.forEach(function (x) { live[String(x.item_id)] = 1; });
-    var ex = sbSelect_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&limit=50000');
-    var stale = (ex || []).map(function (r) { return String(r.item_id); }).filter(function (id) { return id && !live[id]; });
-    for (var s = 0; s < stale.length; s += 100) {
-      sbDelete_('listings', 'shop_id=eq.' + encodeURIComponent(String(shopId)) + '&item_id=in.(' + stale.slice(s, s + 100).join(',') + ')');
-    }
-    removed = stale.length;
-    if (removed) Logger.log('listings reconcile ' + cc + ': removed ' + removed + ' stale');
-  } catch (eRec) { Logger.log('listings reconcile skip ' + cc + ': ' + eRec); }
-  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed };
+  if (!sinceSec) { // 照合削除は「全件取得(full)」の時だけ。増分(changed)は一部しか取らないので削除照合してはいけない
+    try {
+      var live = {}; ids.forEach(function (x) { live[String(x.item_id)] = 1; });
+      var ex = sbSelect_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&limit=50000');
+      var stale = (ex || []).map(function (r) { return String(r.item_id); }).filter(function (id) { return id && !live[id]; });
+      for (var s = 0; s < stale.length; s += 100) {
+        sbDelete_('listings', 'shop_id=eq.' + encodeURIComponent(String(shopId)) + '&item_id=in.(' + stale.slice(s, s + 100).join(',') + ')');
+      }
+      removed = stale.length;
+      if (removed) Logger.log('listings reconcile ' + cc + ': removed ' + removed + ' stale');
+    } catch (eRec) { Logger.log('listings reconcile skip ' + cc + ': ' + eRec); }
+  }
+  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed, mode: sinceSec ? 'changed' : 'full' };
 }
 
 // 全店舗を一気に（初回の全件ロード用。13店ぶんで6分制限に当たる場合は数回実行 or 下のRRトリガーに任せる）
@@ -1732,7 +1736,17 @@ function syncListingsRoundRobin() {
     var tok = toks[(start + i) % toks.length];
     try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
   }
+  // ★毎回：全店の「変更のあった出品だけ」を増分同期（画像/タイトル/在庫/価格/バリエの変更を全店30分以内に反映）。
+  //   変更は少数＝軽い。full照合削除はRR巡回側(上)で順に。RR全店巡回を待たず頻繁な変更が反映される。
+  try { log.push({ changed: syncListingsChangedAll(2) }); } catch (eC) { log.push({ changedError: String(eC).slice(0, 140) }); }
   Logger.log('listings同期(RR): ' + JSON.stringify(log)); return log;
+}
+// ★増分同期：全店の「直近hours時間で変更のあった出品」だけを取り込む（頻繁な画像/タイトル/在庫変更の高速反映）。削除照合はしない。
+function syncListingsChangedAll(hours) {
+  var since = now_() - (hours || 2) * 3600;
+  var toks = listTokens_(), log = [];
+  toks.forEach(function (tok) { try { log.push(syncListingsForShop_(tok, since)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  Logger.log('listings増分同期(changed ' + (hours || 2) + 'h): ' + JSON.stringify(log)); return log;
 }
 
 // ★まず1店だけで中身確認（本番listingsに書く前の検証。Supabaseには書かない）
