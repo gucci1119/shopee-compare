@@ -160,8 +160,12 @@
   .ord-meta .buyer { color: #333; }
   .ord-status { flex: none; font-size: 11px; color: #1565c0; width: 90px; text-align: center; }
   .ord-warehouse { flex: none; font-size: 10px; width: 100px; text-align: center; line-height: 1.35; }
-  .ord-links { flex: none; width: 132px; font-size: 12px; display: flex; gap: 6px; justify-content: flex-end; align-items: center; white-space: nowrap; }
+  .ord-links { flex: none; width: 132px; font-size: 12px; display: flex; gap: 0; align-items: center; white-space: nowrap; }
   .ord-links a { color: #2673dd; text-decoration: none; }
+  .ol-slot { flex: none; }
+  .ol-detail { width: 58px; text-align: right; }
+  .ol-print { width: 26px; text-align: center; }
+  .ol-split { width: 48px; text-align: left; padding-left: 4px; }
   /* 転記タブ */
   .tool-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.07);
     margin: 12px 20px; padding: 14px 18px; max-width: 680px; }
@@ -1349,7 +1353,18 @@
     try {
     let param;
     try { param = await openapiShipParam(shopId, sn); }
-    catch (e) { alert('発送情報の取得に失敗: ' + (e.message || e) + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); restoreBtn(); return; }
+    catch (e) {
+      const em = String(e.message || e);
+      // 「not eligible for rescheduling」＝もうShopee上で発送手配済み（パッケージ発行済）。ポータルが未発送と誤表示していただけ→手配済みに直して静かに片付ける
+      if (/not eligible for rescheduling|already|processed|has been (arranged|shipped)/i.test(em)) {
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        try { logAct('注文', '発送手配済を検知(表示是正)', sn, cc); } catch (_) {}
+        renderOrders();
+        alert(`この注文（${sn}）は既にShopee上で発送手配済みでした（追跡番号が未取込のため未発送に見えていました）。\n\n「発送手配済」に表示を直しました。🖨️で伝票を印刷して倉庫へ発送してください。`);
+        return;
+      }
+      alert('発送情報の取得に失敗: ' + em + '\n（Seller Centerからの発送・SLS伝票印刷は従来どおり使えます）'); restoreBtn(); return;
+    }
     const info = (param && param.info_needed) || {};
     // ★方式は info_needed の「キーの有無」で判定する。値が空配列[]でも、そのキーがあれば『その方式を明示せよ』の意味（例 dropoff:[] ＝ dropoff方式・支店指定なし）。length で判定すると空配列を『方式なし』と誤り、空{}送信で only_support_one_type になる。
     const has = k => info && Object.prototype.hasOwnProperty.call(info, k);
@@ -2827,10 +2842,9 @@
         `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
         `<div class="ord-meta"><div style="font-size:10px;color:#8a8f98;font-weight:600" title="注文日">${(() => { const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (r.orderDate ? Date.parse(r.orderDate + 'T00:00:00+09:00') : 0); if (!t) return '📅—'; try { return '📅' + new Date(t).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }); } catch (_) { return '📅' + jstDate(t); } })()}</div><div class="buyer"></div><div style="white-space:nowrap"><a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="この注文の明細を開く" style="color:#2673dd;text-decoration:none">${esc(r.sn)}</a> <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span></div><div>${r.tracking ? `${esc(r.tracking)} <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '追跡なし'}</div></div>` +
         `<div class="ord-links">` +
-        `<a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="Shopeeでこの注文の明細を開く。userscript『Shopee注文をSNで直接開く』を入れると自動検索→その注文の詳細へ直行。未導入でも一覧が開き注文番号は自動コピー→「Input order ID」に貼付でOK" style="text-decoration:none;font-size:11px;font-weight:700;color:#2673dd;white-space:nowrap">📄明細↗</a>` +
-        (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
-          : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
-        ((r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : '') +
+        `<span class="ol-slot ol-detail"><a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="Shopeeでこの注文の明細を開く。userscript『Shopee注文をSNで直接開く』を入れると自動検索→その注文の詳細へ直行。未導入でも一覧が開き注文番号は自動コピー→「Input order ID」に貼付でOK" style="text-decoration:none;font-size:11px;font-weight:700;color:#2673dd;white-space:nowrap">📄明細↗</a></span>` +
+        `<span class="ol-slot ol-print">${r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>` : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`}</span>` +
+        `<span class="ol-slot ol-split">${(r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : ''}</span>` +
         `</div>`;
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
