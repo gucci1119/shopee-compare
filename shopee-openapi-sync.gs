@@ -1315,6 +1315,9 @@ function syncOrdersForShop_(tok) {
   }
   if (!sns.length) return { cc: cc, shop_id: tok.shop_id, orders: 0 };
   var rows = [];
+  // ★既存の追跡番号を読む＝既に番号がある注文は get_tracking_number を再度叩かない（API節約＝全同期＆⚡今すぐ取得を高速化）。番号未取得(発送手配直後)の分だけ引く。
+  var haveTrk = {};
+  try { var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (extr || []).forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; }); } catch (_) {}
   for (var i = 0; i < sns.length; i += 50) {
     var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason' }, 'get');
     (((jd.response || {}).order_list) || []).forEach(function (o) {
@@ -1327,8 +1330,8 @@ function syncOrdersForShop_(tok) {
       var cby = String(o.cancel_by || '').trim();
       var cancelReason = creason ? (creason + (cby ? ' [' + cby + ']' : '')) : null;
       // ★追跡番号を取得（get_order_detailは番号を返さないため get_tracking_number を引く）。発送手配済(arrange shipment済)以降だけ引く＝READY_TO_SHIP/CANCELLED/COMPLETEDはスキップしてAPIコール削減。番号が入れば「手配済」判定になり"発送手配済なのに未発送表示"も解消
-      var trk = null;
-      if (TRACK_STATUSES[st]) { try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
+      var trk = haveTrk[o.order_sn] || null; // 既にDBに番号があれば再取得しない
+      if (!trk && TRACK_STATUSES[st]) { try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
       rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, synced_at: new Date().toISOString() });
     });
   }
