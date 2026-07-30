@@ -5415,6 +5415,91 @@
       if (!r.tracking_no) parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡・現在地表示）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
       return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
     };
+    // 🧹 長期滞留の点検：入庫待ちのうち「想定日数を超えて残っている＝もう配達済のはず」の候補（配達中/まもなく配達は除く＝これから届く物）
+    const UNRELIABLE_TRACK = /楽天|Yahoo|ヤフオク/i;   // 追跡連携が弱い＝取引ページで要確認（本人指定：楽天/Yahooはきちんと調べる）
+    const clCand = list.filter(x => x.pdays != null && x.pdays >= (x.expDays || 6) && x.phase !== 'out' && x.phase !== 'arrived' && x.phase !== 'eta');
+    const cleanupN = clCand.length;
+    if (state.buyWaitCleanup) {
+      const tierDef = [
+        { k: 't30', t: '🔴 30日超（配達済のはず）', c: '#c62828', bg: '#ffebee', hint: 'この期間で未着はほぼ無い＝安心して一括受取できます' },
+        { k: 't14', t: '🟠 14〜29日（ほぼ配達済）', c: '#e65100', bg: '#fff3e0', hint: 'ほぼ届いています。楽天/Yahooは取引ページで一応確認を' },
+        { k: 't7',  t: '🟡 想定日数超〜13日（届いてるかも）', c: '#b26a00', bg: '#fff8e1', hint: '仕入元の想定日数を超過。念のため取引ページで確認推奨' },
+      ];
+      const tierOf = x => { const d = x.pdays; if (d >= 30) return 't30'; if (d >= 14) return 't14'; return 't7'; };
+      const groups = { t30: [], t14: [], t7: [] };
+      clCand.slice().sort((a, b) => (b.pdays || 0) - (a.pdays || 0)).forEach(x => groups[tierOf(x)].push(x));
+      const rowHtml = (x) => {
+        const r = x.r; const unrel = UNRELIABLE_TRACK.test(String(r.supplier || ''));
+        const txn = stkTxnUrl(r) || r.supplier_url;
+        return `<tr>` +
+          `<td style="text-align:center"><input type="checkbox" class="wcl-chk" data-id="${esc(r.item_id)}" style="width:16px;height:16px;cursor:pointer"></td>` +
+          `<td>${r.image ? `<img src="${/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>` +
+          `<td style="font-size:11px">${nm(r.name, '240px')}</td>` +
+          `<td style="font-size:10.5px;white-space:nowrap">${esc(r.supplier || '')}${unrel ? ` <span title="追跡連携が弱い仕入元＝取引ページで配達状況を確認してください" style="background:#fff3e0;color:#e65100;font-weight:700;font-size:9.5px;padding:1px 5px;border-radius:8px">要確認</span>` : ''}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
+          `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').replace(/-/g, '/') || '—')}<br><b style="color:#d93025">${x.pdays}日経過</b></td>` +
+          `<td style="font-size:11px;white-space:nowrap">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
+          `<td style="white-space:nowrap">${txn ? `<a href="${esc(txn)}" target="_blank" rel="noopener" title="取引画面で配達状況を確認（発送済/輸送中/配達中/配達済のライブ状況）" style="color:#00695c;text-decoration:none;font-weight:600;font-size:10.5px">🔎 取引ページ ↗</a>` : '<span class="smd-dim">—</span>'}</td>` +
+          `<td><button class="wait-arrive" data-id="${esc(r.item_id)}" title="この1件を入荷（在庫保管中へ）" style="border:1px solid #2e7d32;background:#e8f5e9;color:#2e7d32;border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">✓入荷</button></td>` +
+          `</tr>`;
+      };
+      const tierBlocks = tierDef.map(td => {
+        const g = groups[td.k]; if (!g.length) return '';
+        return `<tr style="background:${td.bg}"><td></td><td colspan="7" style="padding:7px 8px">` +
+          `<b style="color:${td.c};font-size:12px">${td.t}　${g.length}件</b>　<span class="smd-dim" style="font-size:10.5px">${td.hint}</span>　` +
+          `<button class="smd-btn wcl-selg" data-tier="${td.k}" style="font-size:10px;padding:1px 8px;margin-left:4px">☑ この層を全選択</button>` +
+          `</td></tr>` + g.map(rowHtml).join('');
+      }).join('');
+      host.innerHTML =
+        `<div class="pagehelp" style="margin:0 4px 8px;background:#f0f7ff;border:1px solid #cfe0ff;border-radius:9px;padding:9px 12px;font-size:11.5px;line-height:1.6">` +
+        `🧹 <b>長期滞留の点検</b>：仕入れたのに「入庫待ち」のまま残っている <b>${cleanupN}</b>件を、滞留日数の長い順に並べました。<b>古いものはもう配達済のはず</b>なので、チェックして「✅ 選択を一括受取」で在庫保管中へまとめて片付けられます。<br>` +
+        `⚠️ <b style="color:#e65100">楽天・Yahoo</b>や<b>最近仕入れた分</b>は、まだ輸送中の可能性があるので <b>🔎取引ページ</b>で配達状況を確認してから受取にしてください（<span style="background:#fff3e0;color:#e65100;font-weight:700;font-size:9.5px;padding:1px 5px;border-radius:8px">要確認</span>印）。` +
+        `</div>` +
+        `<div style="margin:0 4px 8px">` +
+        `<button class="smd-btn" id="wcl-back">← 通常表示に戻る</button>` +
+        `<button class="smd-btn" id="wcl-sel30" style="margin-left:6px;border-color:#c62828;color:#c62828;font-weight:700">☑ 30日超を全選択（${groups.t30.length}）</button>` +
+        `<button class="smd-btn" id="wcl-sel14" style="margin-left:6px;border-color:#e65100;color:#e65100;font-weight:700">☑ 14日超を全選択（${groups.t30.length + groups.t14.length}）</button>` +
+        `<button class="smd-btn" id="wcl-clear" style="margin-left:6px">☐ 全解除</button>` +
+        `<button class="smd-btn" id="wcl-recv" style="margin-left:6px;background:#e7f5ea;border-color:#1a7f37;color:#1a7f37;font-weight:700;display:none">✅ 選択を一括受取（<span id="wcl-n">0</span>）</button>` +
+        `</div>` +
+        `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:900px">` +
+        `<tr><th style="width:34px"></th><th>画像</th><th>商品名</th><th>仕入元/セラー</th><th>仕入日<br>経過</th><th>仕入額</th><th>確認</th><th></th></tr>` +
+        (tierBlocks || `<tr><td colspan="8" class="smd-dim" style="padding:14px">長期滞留の入庫待ちはありません🎉</td></tr>`) +
+        `</table></div></div>`;
+      const updN = () => { const n = host.querySelectorAll('.wcl-chk:checked').length; const el = document.getElementById('wcl-n'); if (el) el.textContent = n; const rb = document.getElementById('wcl-recv'); if (rb) rb.style.display = n ? '' : 'none'; };
+      { const b = document.getElementById('wcl-back'); if (b) b.addEventListener('click', () => { state.buyWaitCleanup = false; renderWaiting(host); }); }
+      host.querySelectorAll('.wcl-chk').forEach(c => c.addEventListener('change', updN));
+      host.querySelectorAll('.wcl-selg').forEach(b => b.addEventListener('click', () => { const ids = new Set(groups[b.dataset.tier].map(x => String(x.r.item_id))); host.querySelectorAll('.wcl-chk').forEach(c => { if (ids.has(String(c.dataset.id))) c.checked = true; }); updN(); }));
+      const selByTiers = (keys) => { const ids = new Set(keys.flatMap(k => groups[k].map(x => String(x.r.item_id)))); host.querySelectorAll('.wcl-chk').forEach(c => { if (ids.has(String(c.dataset.id))) c.checked = true; }); updN(); };
+      { const b = document.getElementById('wcl-sel30'); if (b) b.addEventListener('click', () => selByTiers(['t30'])); }
+      { const b = document.getElementById('wcl-sel14'); if (b) b.addEventListener('click', () => selByTiers(['t30', 't14'])); }
+      { const b = document.getElementById('wcl-clear'); if (b) b.addEventListener('click', () => { host.querySelectorAll('.wcl-chk:checked').forEach(c => c.checked = false); updN(); }); }
+      host.querySelectorAll('.wait-arrive').forEach(b => b.addEventListener('click', async () => {
+        const id = b.dataset.id; if (!confirm('この商品を「在庫保管中」に移します（入荷完了）。よろしいですか？')) return;
+        if (await stockSave(id, { status: '在庫保管中' })) { toast('✅ 入荷: 在庫保管中に移動しました'); renderWaiting(host); }
+      }));
+      { const rb = document.getElementById('wcl-recv'); if (rb) rb.addEventListener('click', async () => {
+        if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+        const ids = [...host.querySelectorAll('.wcl-chk:checked')].map(c => c.dataset.id);
+        if (!ids.length) return;
+        if (!confirm(`選択した ${ids.length}件を「在庫保管中」に一括受取します。\n\n※要確認印（楽天/Yahoo）や最近仕入れた分は、取引ページで配達済みを確認しましたか？まだ届いていない物が混ざっていないかご確認ください。\n（後で🏷在庫管理から個別に戻せます）\n\n実行しますか？`)) return;
+        const mp = makeProgressMeter('📥 一括受取（在庫保管中へ）…', ids.length, '#1a7f37');
+        let done = 0;
+        try {
+          const now = new Date().toISOString();
+          const CHUNK = 50;
+          for (let i = 0; i < ids.length; i += CHUNK) {
+            const part = ids.slice(i, i + CHUNK);
+            await sbUpsert('inventory', part.map(id => ({ item_id: id, status: '在庫保管中', edited_at: now })));
+            part.forEach(id => { const row = stock.rows.find(r => String(r.item_id) === String(id)); if (row) row.status = '在庫保管中'; });
+            done += part.length; mp.set(done, done + '件処理', '');
+          }
+          logAct('仕入れ管理', '長期滞留を一括受取', `${ids.length}件`, '');
+          mp.remove(); toast(`✅ ${ids.length}件を在庫保管中に移動しました`);
+          renderWaiting(host);
+        } catch (e) { mp.remove(); alert('一括受取に失敗: ' + e.message); }
+      }); }
+      return;
+    }
     host.innerHTML =
       `<div style="margin:0 4px 8px;font-size:12px">入庫待ち <b>${list.length}</b>件 ・ 仕入額 ${fmtJpy(val)}　` +
       (todayN ? `<span style="display:inline-block;background:#e65100;color:#fff;font-weight:800;font-size:12px;padding:3px 11px;border-radius:12px;margin-right:8px" title="配達中/まもなく配達/本日到着予定＝今日中に届く見込みの荷物。梱包を締めるか、待って当日便で発送するかの判断に">🏃 本日届く見込み ${todayN}件</span>` : '') +
@@ -5423,7 +5508,8 @@
       `<div style="margin:0 4px 8px"><button class="smd-btn" id="wait-today" style="${todayOnly ? 'background:#e65100;border-color:#e65100;color:#fff;font-weight:700' : 'border-color:#e65100;color:#e65100;font-weight:700'}" title="本日届く見込み（配達中/まもなく配達/本日到着予定）だけ表示＝当日発送の判断に">🏃 本日届く見込みのみ${todayN ? '（' + todayN + '）' : ''}</button>` +
       `<button class="smd-btn" id="wait-alert" style="margin-left:6px;${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済・到着済見込み・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
-      ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') + `</div>` +
+      ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
+      (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') + `</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
       (shown.length ? shown.map((x, idx) => { const r = x.r, ph = WAIT_PHASE[x.phase];
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
@@ -5442,6 +5528,7 @@
       `</table></div></div>`;
     { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; if (state.buyWaitAlert) state.buyWaitToday = false; renderWaiting(host); }); }
     { const b = document.getElementById('wait-today'); if (b) b.addEventListener('click', () => { state.buyWaitToday = !state.buyWaitToday; if (state.buyWaitToday) state.buyWaitAlert = false; renderWaiting(host); }); }
+    { const b = document.getElementById('wait-cleanup'); if (b) b.addEventListener('click', () => { state.buyWaitCleanup = true; renderWaiting(host); }); }
     { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '受取日時', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, deliveredAt(x.r) || '', x.r.name || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
     host.querySelectorAll('.wait-hist').forEach(el => el.addEventListener('click', e => {
       e.stopPropagation();
