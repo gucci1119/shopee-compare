@@ -49,6 +49,20 @@ function doGet(e) {
       var ocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       return ContentService.createTextOutput(ocb + '(' + JSON.stringify({ ok: true, items: [], disabled: true }) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★注文の即時取得：ポータルの「⚡今すぐ取得」から。公式APIで最新注文をその場で取り込む（ブリッジ不要）。WRITE_TOKEN必須。
+    //   ポータルから ?action=run_orders&token=&callback=
+    if (p.action === 'run_orders') {
+      var rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rout;
+      try {
+        var rwt = P_().getProperty('WRITE_TOKEN');
+        if (!rwt || p.token !== rwt) throw new Error('WRITE_TOKEN不正');
+        var rlog = syncOrdersAll();
+        var nOk = 0, nErr = 0; (rlog || []).forEach(function (x) { if (x && x.error) nErr++; else nOk++; });
+        rout = { ok: true, action: 'run_orders', shops_ok: nOk, shops_err: nErr };
+      } catch (rerr) { rout = { ok: false, error: String((rerr && rerr.message) || rerr) }; }
+      return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★ポータル新規登録の完了メール：登録者本人＋オーナーへ通知（URL付き）。WRITE_TOKEN必須。
     //   ポータルから ?action=notify_signup&token=&email=&url=&callback=
     if (p.action === 'notify_signup') {

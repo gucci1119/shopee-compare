@@ -158,6 +158,11 @@
   .ord-itemsub { font-size: 11px; color: #7a6ba7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ord-meta { flex: none; text-align: right; font-size: 11px; color: #777; width: 128px; }
   .ord-meta .buyer { color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ord-date { flex: none; width: 96px; text-align: center; font-size: 10.5px; color: #555; align-self: center; line-height: 1.25; }
+  .ord-time { flex: none; width: 46px; text-align: center; font-size: 10.5px; color: #8a8f98; align-self: center; }
+  .ord-no { flex: none; width: 120px; font-size: 11px; align-self: center; white-space: nowrap; }
+  .ord-buyer { flex: none; width: 100px; font-size: 11px; color: #333; align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ord-buyer .buyer { color: #333; }
   .ord-track { flex: none; width: 140px; font-size: 11px; color: #555; word-break: break-all; line-height: 1.3; align-self: center; }
   .ord-status { flex: none; font-size: 11px; color: #1565c0; width: 90px; text-align: center; }
   .ord-warehouse { flex: none; font-size: 10px; width: 100px; text-align: center; line-height: 1.35; }
@@ -672,6 +677,7 @@
     </div>
     <div class="smd-toolbar">
       <button class="smd-btn" id="ord-reload">🔄 更新</button>
+      <button class="smd-btn" id="ord-syncnow" title="今出した注文をすぐ発送したい時に。Shopee公式APIで最新注文をその場で取り込む（ブリッジ不要）。通常は毎時の自動同期で入りますが、これで即時に取得できます。" style="border-color:#1a7f37;color:#1a7f37;font-weight:700">⚡ 今すぐ取得</button>
       <button class="smd-btn" id="ord-diag" title="各国のShopee注文APIの応答を調べ、なぜライブ取得が失敗するか診断">🔬 診断</button>
       <button class="smd-btn" id="ord-bulkprint" title="表示中の未発送注文のSLS伝票（Shopee指定配送の送り状）をまとめて印刷（国ごとに印刷タブを開く／Waybill Printer連携）">🖨️ 一括印刷</button>
       <button class="smd-btn" id="ord-csv" title="表示中（絞り込み後）の注文をピッキングリストとしてCSVで書き出し">⬇ CSV</button>
@@ -2988,6 +2994,21 @@
     finally { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } }
   }
   document.getElementById('ord-reload').addEventListener('click', () => { refreshOrders(); });
+  // ⚡今すぐ取得＝公式API(GAS)で最新注文をその場で取り込む（ブリッジ不要）。今出した注文をすぐ発送したい時用。
+  { const sb = document.getElementById('ord-syncnow'); if (sb) sb.addEventListener('click', async () => {
+    if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定に「OpenAPI同期GAS URL」と「WRITE_TOKEN」を入れてください（公式APIでの即時取得に必要）。'); return; }
+    const orig = sb.innerHTML; sb.disabled = true; sb.innerHTML = '⏳ 取得中…（最大1分）';
+    try {
+      const res = await openapiRunFetch('run_orders');
+      if (!res || res.ok === false) throw new Error((res && res.error) || 'GASでの取得に失敗（run_ordersのデプロイ済みか確認）');
+      state.orders.perCountry.clear();
+      loadOrders(false);                 // GASがDBへ取り込んだ最新注文を再読込
+      await waitOrdersLoaded({ textContent: '' });
+      updateOrdNote(false);
+      sb.innerHTML = '✓ 取得完了';
+      setTimeout(() => { sb.innerHTML = orig; sb.disabled = false; }, 2500);
+    } catch (e) { alert('今すぐ取得に失敗: ' + (e.message || e)); sb.innerHTML = orig; sb.disabled = false; }
+  }); }
   // 🎯 選択を一括発送手配 ／ ☑未手配を全選択 ／ 選択件数の表示（.ord-selchk は行再描画で作られるため委譲で件数更新）
   { const bs = document.getElementById('ord-bulkship'); if (bs) bs.addEventListener('click', () => bulkArrangeShip()); }
   const updSelCount = () => { const n = document.querySelectorAll('.ord-selchk:checked').length; const el = document.getElementById('ord-selcount'); if (el) el.textContent = n ? '（' + n + '）' : ''; };
@@ -6871,6 +6892,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-07-30', items: [
+      '⚡ <b>注文管理に「今すぐ取得」ボタン</b>：今出した注文をすぐ伝票発行→発送したい時に、<b>Shopee公式API（GAS）で最新注文をその場で取り込む</b>（ブリッジ不要）。通常は毎時の自動同期(syncOrdersAll)で入るが、間に合わない時はこれで即時取得。<b>※GAS(shopee-openapi-sync)に run_orders アクションを追加＝更新デプロイが必要</b>。併せて注文行の<b>バイヤー名はみ出し（列被り）を修正</b>し、バイヤー/追跡列幅を調整。',
       '🔒 <b>ログインを追加（メール＋パスワード）</b>：URLを知られても中身が見えないよう<b>メールアドレス＋パスワード</b>のログイン画面を新設（2人だけの固定アカウント・登録画面なし）。パスワードは保存せず<b>SHA-256ハッシュのみ</b>で照合（既定アカウントを内蔵＝Supabaseキーが無い端末でもログイン可）。<b>「この端末で30日保持」</b>でリロード後も再入力不要／<b>「入力中の文字を表示」</b>で打ち間違い防止／左上ブランド横の<b>🔒でログアウト</b>。アカウントの追加・変更は必要時に対応（app_kv <code>portal_auth.users</code> でも許可可能）。',
       '🚚 <b>フリマの配送情報がポータルに入らない主因を修正</b>：メルカリ在庫の約9割が<code>source=null</code>（メール取込）で、配送userscriptのPATCHが<code>source=mercari</code>縛りだったため<b>1件も当たらず配送情報が永久に空</b>だった。<b>supplier＝メルカリ＋注文IDで突合</b>に変更（メルカリ配送v2.2）。<b>Yahoo!フリマは追跡番号をポータル(Supabase)へ直書き→既存の配送追跡が配達中を自動表示</b>（v3.9）。※「通信失敗」の真因＝貼付キーに改行混入→ヘッダ不正→v3.9で空白除去して自己修復＋🔑連携ステータス表示。',
       '🧹 <b>入庫待ちに「長期滞留の点検」ビューを新設</b>：仕入れたのに入庫待ちのまま溜まった分を<b>滞留日数で層別（🔴30日超/🟠14-29日/🟡想定超）</b>し、チェックで<b>一括受取（在庫保管中へ・進捗メーター付）</b>。楽天/Yahoo・最近仕入れは🟧要確認。長期滞留は「もう配達済のはず」を一括で片付けられる。',
