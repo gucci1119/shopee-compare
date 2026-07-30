@@ -61,7 +61,7 @@ function doGet(e) {
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(regEmail)) throw new Error('email形式不正');
         var portalUrl = String(p.url || '').trim();
         if (!/^https?:\/\//.test(portalUrl)) portalUrl = 'https://gucci1119.github.io/shopee-compare/';
-        var OWNER = 'ryoya.kawaguchi1119@gmail.com';
+        var OWNERS = ['ryoya.kawaguchi1119@gmail.com', 'gcsonlinestore631@gmail.com'];
         var nowJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
         var subj = '【Shopee OS】ポータル登録完了：' + regEmail;
         var body = 'Shopee OS ポータルの新規登録が完了しました。\n\n'
@@ -70,12 +70,12 @@ function doGet(e) {
           + '▼ ポータルはこちら（このメール＋設定したパスワードでログイン）\n'
           + portalUrl + '\n\n'
           + '※心当たりがない登録の場合は、Supabase の app_kv(portal_auth) から該当アカウントを削除してください。';
-        // 登録者本人へ（オーナーにも控えをBCC）。同一なら重複回避。
+        // 登録者本人へ（オーナー各アドレスにも控えをBCC）。登録者自身と重複するアドレスは除外。
+        var bccList = OWNERS.filter(function (o) { return o.toLowerCase() !== regEmail.toLowerCase(); });
         var opt = { name: 'Shopee OS ポータル' };
-        if (regEmail.toLowerCase() !== OWNER.toLowerCase()) opt.bcc = OWNER;
+        if (bccList.length) opt.bcc = bccList.join(',');
         MailApp.sendEmail(regEmail, subj, body, opt);
-        if (regEmail.toLowerCase() === OWNER.toLowerCase()) { /* 本人=オーナーなら1通で足りる */ }
-        nout = { ok: true, sent: regEmail };
+        nout = { ok: true, sent: regEmail, bcc: bccList.join(',') };
       } catch (nerr) { nout = { ok: false, error: String((nerr && nerr.message) || nerr) }; }
       return ContentService.createTextOutput(ncb + '(' + JSON.stringify(nout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
