@@ -1255,6 +1255,89 @@
     if (!res) throw new Error('応答なし');
     return res;
   }
+  // 注文明細（分割UI用：item_id/model_id/order_item_id/promotion_group_id/model_quantity ＋既存package_list）
+  async function openapiGetOrderDetail(shopId, sn) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const qs = 'action=get_order_detail&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '注文明細の取得に失敗');
+    const list = ((res.response || {}).order_list) || [];
+    return list[0] || null;
+  }
+  // 注文分割（決裁操作）：packageList=[{item_list:[{item_id,model_id,order_item_id,promotion_group_id,model_quantity}]}]
+  async function openapiSplitOrder(shopId, sn, packageList) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const qs = 'action=split_order&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn) + '&package_list=' + encodeURIComponent(JSON.stringify(packageList));
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res) throw new Error('応答なし');
+    return res;
+  }
+  async function openapiUnsplitOrder(shopId, sn) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const qs = 'action=unsplit_order&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    if (!res) throw new Error('応答なし');
+    return res;
+  }
+  // ✂️ 注文分割エディタ：多明細の注文を複数梱包に分ける（VNで別便にする時）。get_order_detailでID群を取得→各明細に梱包番号を割当→split_order
+  async function openSplitEditor(cc, sn, shopId, host) {
+    if (!(settings.openapiUrl && settings.writeToken)) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); return; }
+    if (!shopId) { alert('この注文のshop_idが不明です'); return; }
+    const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+    let od; try { od = await openapiGetOrderDetail(shopId, sn); } catch (e) { alert('注文明細の取得に失敗: ' + (e.message || e)); return; }
+    if (!od) { alert('注文明細が取得できませんでした'); return; }
+    const its = (od.item_list || []).filter(it => it.item_id);
+    if (its.length < 2) { alert('この注文は明細が1つだけ＝分割できません（分割は複数明細の注文のみ）。'); return; }
+    const already = (od.package_list || []).length;
+    // モーダル：各明細に梱包番号(1..N)を割当。既定は全部1（＝分割せず）。2以上を付けた分が別梱包に。
+    const ov = document.createElement('div'); ov.className = 'smd-modal-ov';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px';
+    const rowsHtml = its.map((it, i) => `<tr>
+      <td style="padding:5px 6px">${it.image_info && it.image_info.image_url ? `<img src="${esc(it.image_info.image_url)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td>
+      <td style="padding:5px 6px;font-size:11.5px">${esc(it.item_name || '')}${it.model_name ? `<br><span class="smd-dim" style="font-size:10px">${esc(it.model_name)}</span>` : ''}<br><span class="smd-dim" style="font-size:10px">×${it.model_quantity_purchased || it.model_quantity || 1}</span></td>
+      <td style="padding:5px 6px;text-align:center"><input type="number" class="spl-pkg" data-i="${i}" min="1" max="${its.length}" value="1" style="width:52px;padding:4px;text-align:center;font-size:13px;border:1.5px solid #cfd8dc;border-radius:6px"></td>
+    </tr>`).join('');
+    ov.innerHTML = `<div class="tool-card" style="max-width:560px;width:100%;max-height:88vh;overflow:auto;margin:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><b style="font-size:15px">✂️ 注文を分割（${esc(sn)}）</b><span class="spl-close" style="cursor:pointer;font-size:22px;color:#888">×</span></div>
+      <div class="smd-dim" style="font-size:11.5px;line-height:1.6;margin-bottom:8px">各明細に<b>梱包番号</b>を付けます（同じ番号＝同じ箱）。番号の種類の数＝梱包数。分割後は<b>梱包ごとに発送手配＋SLS伝票印刷</b>してください。${already ? `<br><b style="color:#e65100">※この注文は既に${already}梱包に分割済みです。</b>` : ''}</div>
+      <div class="pf-scroll"><table class="pf-table" style="min-width:auto;width:100%"><tr><th>画像</th><th>商品</th><th>梱包番号</th></tr>${rowsHtml}</table></div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="smd-btn spl-run" style="background:#ee4d2d;border-color:#ee4d2d;color:#fff;font-weight:700">✂️ この内容で分割する</button>
+        ${already ? `<button class="smd-btn spl-unsplit" style="border-color:#b3261e;color:#b3261e">↩︎ 分割を解除（未発送時のみ）</button>` : ''}
+        <button class="smd-btn spl-cancel">キャンセル</button>
+        <span class="spl-msg" style="align-self:center;font-size:11.5px"></span>
+      </div></div>`;
+    document.body.appendChild(ov);
+    const close = () => { try { ov.remove(); } catch (_) {} };
+    ov.querySelector('.spl-close').addEventListener('click', close);
+    ov.querySelector('.spl-cancel').addEventListener('click', close);
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelector('.spl-run').addEventListener('click', async () => {
+      // 梱包番号→明細をまとめる。梱包1件(全部同じ番号)なら分割不要
+      const groups = {};
+      ov.querySelectorAll('.spl-pkg').forEach(inp => { const it = its[+inp.dataset.i]; const g = String(parseInt(inp.value, 10) || 1); (groups[g] = groups[g] || []).push(it); });
+      const keys = Object.keys(groups);
+      const msgEl = ov.querySelector('.spl-msg');
+      if (keys.length < 2) { msgEl.textContent = '⚠ 2種類以上の梱包番号を付けてください（今は全部同じ＝分割になりません）'; msgEl.style.color = '#d93025'; return; }
+      // package_list を作る。Shopee仕様＝package_listに"分ける梱包"を並べる（残りは既定梱包）。ここでは全梱包を明示的に列挙
+      const packageList = keys.map(k => ({ item_list: groups[k].map(it => ({ item_id: it.item_id, model_id: it.model_id || 0, order_item_id: it.order_item_id || it.item_id, promotion_group_id: it.promotion_group_id || 0, model_quantity: it.model_quantity_purchased || it.model_quantity || 1 })) }));
+      if (!confirm(`注文 ${sn} を ${keys.length}梱包に分割します。\n\n※分割後は各梱包ごとに発送手配＋伝票印刷が必要です。よろしいですか？`)) return;
+      const btn = ov.querySelector('.spl-run'); btn.disabled = true; btn.textContent = '⏳分割中…';
+      try {
+        const res = await openapiSplitOrder(shopId, sn, packageList);
+        if (res && res.ok) { msgEl.textContent = '✅ 分割しました。梱包ごとに発送手配してください'; msgEl.style.color = '#1a7f37'; toast('✂️ 注文を' + keys.length + '梱包に分割しました'); logAct('注文管理', '注文分割', sn, keys.length + '梱包'); setTimeout(() => { close(); if (typeof renderOrders === 'function') renderOrders(); }, 1400); }
+        else { msgEl.textContent = '❌ ' + ((res && res.error) || '分割に失敗'); msgEl.style.color = '#d93025'; btn.disabled = false; btn.textContent = '✂️ この内容で分割する'; }
+      } catch (e) { msgEl.textContent = '❌ ' + (e.message || e); msgEl.style.color = '#d93025'; btn.disabled = false; btn.textContent = '✂️ この内容で分割する'; }
+    });
+    { const ub = ov.querySelector('.spl-unsplit'); if (ub) ub.addEventListener('click', async () => {
+      if (!confirm('この注文の分割を解除します（未発送のうちのみ可）。よろしいですか？')) return;
+      ub.disabled = true; ub.textContent = '⏳…';
+      try { const res = await openapiUnsplitOrder(shopId, sn); if (res && res.ok) { toast('↩︎ 分割を解除しました'); logAct('注文管理', '分割解除', sn, ''); close(); if (typeof renderOrders === 'function') renderOrders(); } else { alert('解除に失敗: ' + ((res && res.error) || '')); ub.disabled = false; ub.textContent = '↩︎ 分割を解除（未発送時のみ）'; } }
+      catch (e) { alert('解除に失敗: ' + (e.message || e)); ub.disabled = false; ub.textContent = '↩︎ 分割を解除（未発送時のみ）'; }
+    }); }
+  }
   // 公式APIでの発送フロー（β）：必要情報を読んで内容を提示→ユーザーが確認したときだけ発送手配。自動実行はしない
   async function apiShipFlow(cc, sn, shopId, host, btn) {
     const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '📦発送手配'; } };
@@ -2735,6 +2818,7 @@
         `<a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="Shopeeでこの注文の明細を開く。userscript『Shopee注文をSNで直接開く』を入れると自動検索→その注文の詳細へ直行。未導入でも一覧が開き注文番号は自動コピー→「Input order ID」に貼付でOK" style="text-decoration:none;font-size:11px;font-weight:700;color:#2673dd;white-space:nowrap">📄明細↗</a>` +
         (r.tab === 300 ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>`
           : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`) +
+        ((r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : '') +
         `</div>`;
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
@@ -2743,6 +2827,7 @@
       // 📄注文一覧を開くと同時に注文番号を自動コピー（一覧の「Input order ID」欄に貼るだけで検索できる＝詳細直リンク不可の代替）
       row.querySelectorAll('.ord-godetail').forEach(a => a.addEventListener('click', () => { try { copyText(a.dataset.sn); toast('📋 注文番号をコピー→一覧の検索欄に貼付してください'); } catch (_) {} }));
       row.querySelectorAll('.ord-shipapi').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); b.disabled = true; b.textContent = '⏳確認中…'; apiShipFlow(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host, b); }));
+      row.querySelectorAll('.ord-split').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); openSplitEditor(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host); }));
       frag.appendChild(row);
     });
     list.appendChild(frag);

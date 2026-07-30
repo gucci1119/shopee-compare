@@ -153,6 +153,42 @@ function doGet(e) {
       } catch (err) { soout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(socb + '(' + JSON.stringify(soout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★注文分割：split_order。1注文を複数梱包に分割（各梱包に伝票発行）。package_list は JSON文字列で受ける＝[{item_list:[{item_id,model_id,order_item_id,promotion_group_id,model_quantity}]}]。WRITE_TOKEN必須（決裁操作）
+    if (p.action === 'split_order') {
+      var spcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var spout;
+      try {
+        var spwt = P_().getProperty('WRITE_TOKEN'); if (!spwt || p.token !== spwt) throw new Error('WRITE_TOKEN不正（分割拒否）');
+        var spshop = parseInt(p.shop_id, 10); if (!getToken_(spshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var pkgList = JSON.parse(p.package_list || '[]'); if (!pkgList.length) throw new Error('package_list が空');
+        var spj = callShop_(spshop, '/api/v2/order/split_order', null, 'post', { order_sn: p.order_sn, package_list: pkgList });
+        spout = { ok: true, response: spj.response || spj };
+      } catch (err) { spout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(spcb + '(' + JSON.stringify(spout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★分割解除：unsplit_order（未発送のうちのみ）。WRITE_TOKEN必須
+    if (p.action === 'unsplit_order') {
+      var uscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var usout;
+      try {
+        var uswt = P_().getProperty('WRITE_TOKEN'); if (!uswt || p.token !== uswt) throw new Error('WRITE_TOKEN不正');
+        var usshop = parseInt(p.shop_id, 10); if (!getToken_(usshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var usj = callShop_(usshop, '/api/v2/order/unsplit_order', null, 'post', { order_sn: p.order_sn });
+        usout = { ok: true, response: usj.response || usj };
+      } catch (err) { usout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(uscb + '(' + JSON.stringify(usout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★注文明細取得：get_order_detail（分割UI用に item_id/model_id/order_item_id/promotion_group_id/model_quantity と既存 package_list を取る）
+    if (p.action === 'get_order_detail') {
+      var odcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var odout;
+      try {
+        var odshop = parseInt(p.shop_id, 10); if (!getToken_(odshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var odj = callShop_(odshop, '/api/v2/order/get_order_detail', { order_sn_list: p.order_sn, response_optional_fields: 'item_list,package_list' }, 'get', null);
+        odout = { ok: true, response: odj.response || odj };
+      } catch (err) { odout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(odcb + '(' + JSON.stringify(odout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'account_health') {
       var hcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var hout;
