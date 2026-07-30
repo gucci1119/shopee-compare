@@ -407,8 +407,7 @@
   #smd-login #lg-submit:disabled{opacity:.6;cursor:default;}
   #smd-login .lgerr{color:#dc2626;font-size:12.5px;min-height:16px;margin-top:10px;font-weight:600;}
   #smd-login .lgfoot{font-size:10.5px;color:#94a3b8;margin-top:14px;line-height:1.5;}
-  #smd-logout{border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:#fff;border-radius:8px;padding:4px 9px;font-size:12px;cursor:pointer;margin-left:8px;white-space:nowrap;}
-  #smd-logout:hover{background:rgba(255,255,255,.2);}
+  #smd-logout{white-space:nowrap;}
 </style>
 </head>
 <body>
@@ -687,6 +686,7 @@
       <span class="smd-seg" id="ord-filter">
         <button data-k="all" class="on">すべて</button>
         <button data-k="300" title="手元で対応が要る全部＝①未手配＋②伝票発行済（③倉庫スキャン待ちは物理発送済なので含みません）">📥要対応</button>
+        <button data-k="200" title="未支払い：買い手がまだ支払っていない注文（Shopee: Unpaid）。支払いが済むと①未手配へ進みます。BRのPix/請求書待ち等">💳未支払い</button>
         <button data-k="unarranged" title="① 未手配：Arrange Shipment（発送手配）をまだ押していない＝SLS伝票が未発行。ここから📦発送手配で伝票を発行します">①📦未手配</button>
         <button data-k="arranged" title="② 伝票発行済：Arrange Shipment押済でSLS伝票は発行済だが、まだ倉庫へ物理発送していない。伝票を印刷・梱包して倉庫へ送ります">②📄伝票発行済</button>
         <button data-k="transit" title="③ 倉庫スキャン待ち：自社倉庫→Shopee Japan倉庫へ物理発送済で、まだ倉庫でスキャンされていない＝輸送中">③🚚倉庫スキャン待ち</button>
@@ -1454,7 +1454,7 @@
       if (r && r.ok) {
         mp1.set(1, sn + ' 手配完了', '<span style="color:#1a7f37">✅ SLS伝票を発行しました</span>');
         // 成功：ローカルの注文状態を発送手配済(Processed)に更新→再描画でボタンが消えShopee上=発送手配済に即反映（次の同期を待たない）
-        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } (state.orders.arrangedLocal || (state.orders.arrangedLocal = new Set())).add(cc + ':' + sn); } catch (_) {}
         try { logAct('注文', 'API発送手配', sn, cc); } catch (_) {}
         renderOrders();
         setTimeout(() => mp1.remove(), 900);
@@ -1492,7 +1492,7 @@
     try {
       const r = await openapiShipOrder(Object.assign({ shop_id: shopId, order_sn: sn }, choice));
       if (r && r.ok) {
-        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } (state.orders.arrangedLocal || (state.orders.arrangedLocal = new Set())).add(cc + ':' + sn); } catch (_) {}
         try { logAct('注文', 'API発送手配(一括)', sn, cc); } catch (_) {}
         return { ok: true, method };
       }
@@ -1561,15 +1561,17 @@
     let ok = 0, skip = 0, fail = 0; const errs = [];
     const mp = makeProgressMeter('📮 一括発送手配中…', items.length, '#ee4d2d');
     const stat = () => '<span style="color:#1a7f37">✅' + ok + '</span> <span style="color:#a8650a">⏭' + skip + '</span> <span style="color:#d93025">❌' + fail + '</span>';
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      mp.set(i, it.cc + ' ' + it.sn + ' を手配中…', stat());
-      if (btn) btn.textContent = `📮 手配中… ${i + 1}/${items.length}`;
+    // ★並列プール（同時3件・レート制限に配慮した安全上限）。各注文は get_shipping_parameter→ship_order の2API＝1件約10秒なので、並列で全体を大幅短縮
+    const CONC = 3; let done = 0, idx = 0;
+    const runOne = async (it) => {
       const r = await apiShipOneSilent(it.cc, it.sn, it.shop);
       if (r.ok) ok++; else if (r.skipped) { skip++; errs.push('⏭ ' + it.cc + ' ' + it.sn + ': ' + r.reason); } else { fail++; errs.push('❌ ' + it.cc + ' ' + it.sn + ': ' + (r.error || '失敗')); }
-      mp.set(i + 1, null, stat());
-      await new Promise(res => setTimeout(res, 200));
-    }
+      done++; mp.set(done, it.cc + ' ' + it.sn, stat());
+      if (btn) btn.textContent = `📮 手配中… ${done}/${items.length}`;
+    };
+    await Promise.all(Array.from({ length: Math.min(CONC, items.length) }, async () => {
+      while (idx < items.length) { const my = idx++; await runOne(items[my]); }
+    }));
     mp.set(items.length, '✅ 完了', stat());
     try { logAct('注文', 'API一括発送手配', '', `成功${ok}/スキップ${skip}/失敗${fail}（計${items.length}）`); } catch (_) {}
     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
@@ -2846,7 +2848,7 @@
   // ★Shopeeが発送手配済み(arrange shipment実施済)か＝単一の判定に統一（表示・遅延・KPI・フィルタで食い違わないように）。
   //   PROCESSED/SHIPPING/SHIPPED/TO_RECEIVE/COMPLETED か追跡番号あり か needsDropoff=false。RETRY_SHIP(再手配要)は「未手配」扱い＝再手配できるよう含めない。
   const ARRANGED_RE = /^(processed|shipping|shipped|to[_ ]?receive|to[_ ]?confirm_?receive|completed)$/i;
-  const ordArranged = (r) => r.tab === 300 && (!!r.tracking || ARRANGED_RE.test(String(r.status || '').replace(/\s+/g, '_')) || (r.needsDropoff !== undefined ? !r.needsDropoff : false));
+  const ordArranged = (r) => r.tab === 300 && (!!r.tracking || ARRANGED_RE.test(String(r.status || '').replace(/\s+/g, '_')) || (r.needsDropoff !== undefined ? !r.needsDropoff : false) || !!(state.orders.arrangedLocal && state.orders.arrangedLocal.has(r.cc + ':' + r.sn))); // 手配直後はローカル手配済Setで②に留める（再同期の上書きに負けない・リロードでDB真値へ）
   // 発送側が対応済みか（Shopee手配済 or 倉庫へ輸送中フラグ）。未対応の未発送だけが遅延の対象
   const ordHandled = (r) => ordArranged(r) || !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
   // 0=なし 1=遅延リスク(期日24h以内 or Shopee警告) 2=遅延(期日超過)。未対応の未発送(tab300)のみ
@@ -14883,14 +14885,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   function injectLogout() {
     if (document.getElementById('smd-logout')) return;
-    const brand = document.getElementById('smd-brand');
-    if (!brand) return;
-    const b = document.createElement('button');
-    b.id = 'smd-logout'; b.textContent = '🔒';
+    const foot = document.getElementById('smd-sidefoot');
+    if (!foot) return;
     let em = ''; try { em = localStorage.getItem('smdAuthEmail') || ''; } catch (_) {}
-    b.title = (em ? em + ' / ' : '') + 'ログアウト';
-    b.onclick = () => { if (confirm('ログアウトしますか？')) smdLogout(); };
-    brand.appendChild(b);
+    const b = document.createElement('button');
+    b.id = 'smd-logout'; b.className = 'smd-btn'; b.style.cssText = 'width:100%;font-size:12px';
+    b.textContent = '🔒 ログアウト';
+    b.title = (em ? 'ログイン中: ' + em + '\n' : '') + 'クリックでログアウト';
+    b.onclick = () => { if (confirm((em ? em + ' を' : '') + 'ログアウトしますか？')) smdLogout(); };
+    foot.appendChild(b); // サイドバー下部（デモ表示/文字サイズ/設定の並び）
   }
 
   (async function boot() {
