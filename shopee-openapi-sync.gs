@@ -693,8 +693,10 @@ function getShipParam_(shopId, orderSn) {
   return (j && j.response) || j;
 }
 // 読み取り：追跡番号（発送手配後に採番される）
-function getTracking_(shopId, orderSn) {
-  var j = callShop_(shopId, '/api/v2/logistics/get_tracking_number', { order_sn: String(orderSn) }, 'get');
+function getTracking_(shopId, orderSn, packageNumber) {
+  var q = { order_sn: String(orderSn) };
+  if (packageNumber) q.package_number = String(packageNumber); // 分割注文＝梱包ごとに追跡番号が違うのでpackage_numberで指定
+  var j = callShop_(shopId, '/api/v2/logistics/get_tracking_number', q, 'get');
   return (j && j.response) || j;
 }
 // 書き込み：発送手配（ship_order）。paramで pickup{address_id,pickup_time_id} か dropoff{branch_id} を指定（無ければ自動手配）。
@@ -1319,7 +1321,7 @@ function syncOrdersForShop_(tok) {
   var haveTrk = {};
   try { var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (extr || []).forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; }); } catch (_) {}
   for (var i = 0; i < sns.length; i += 50) {
-    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason' }, 'get');
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list' }, 'get');
     (((jd.response || {}).order_list) || []).forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
       if (!tab) return;
@@ -1332,15 +1334,29 @@ function syncOrdersForShop_(tok) {
       // ★追跡番号を取得（get_order_detailは番号を返さないため get_tracking_number を引く）。発送手配済(arrange shipment済)以降だけ引く＝READY_TO_SHIP/CANCELLED/COMPLETEDはスキップしてAPIコール削減。番号が入れば「手配済」判定になり"発送手配済なのに未発送表示"も解消
       var trk = haveTrk[o.order_sn] || null; // 既にDBに番号があれば再取得しない
       if (!trk && TRACK_STATUSES[st]) { try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, synced_at: new Date().toISOString() });
+      // ★分割注文（package_listが2梱包以上）＝梱包ごとに別行/別伝票にするため、梱包内訳を packages に保存。単一梱包はnull（従来どおり1行）。
+      var pkgs = null, plist = o.package_list || [];
+      if (plist.length > 1) {
+        pkgs = plist.map(function (p) {
+          var pit = (p.item_list || []).map(function (it) { return { item_id: it.item_id || null, model_id: it.model_id || null }; });
+          var pt = null;
+          if (TRACK_STATUSES[st]) { try { var ptj = getTracking_(tok.shop_id, o.order_sn, p.package_number); pt = (ptj && (ptj.tracking_number || ptj.first_mile_tracking_number || ptj.last_mile_tracking_number)) || null; } catch (ep) {} }
+          return { pkg: p.package_number || '', status: p.logistics_status || '', carrier: p.shipping_carrier || '', items: pit, tracking: pt };
+        });
+      }
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
     });
   }
   if (rows.length) {
-    // orders表に cancel_reason 列が未追加でも同期が壊れないよう、列エラー時はその項目を外して再試行
+    // orders表に cancel_reason / packages 列が未追加でも同期が壊れないよう、列エラー時はその項目を外して再試行（列を足していない環境でも安全）
     try { sbUpsert_('orders', rows, 'cc,sn'); }
     catch (e) {
-      if (/cancel_reason/.test(String(e))) { rows.forEach(function (r) { delete r.cancel_reason; }); sbUpsert_('orders', rows, 'cc,sn'); }
-      else throw e;
+      var es = String(e), stripped = false;
+      ['packages', 'cancel_reason'].forEach(function (col) { if (es.indexOf(col) >= 0) { rows.forEach(function (r) { delete r[col]; }); stripped = true; } });
+      if (stripped) {
+        try { sbUpsert_('orders', rows, 'cc,sn'); }
+        catch (e2) { ['packages', 'cancel_reason'].forEach(function (col) { rows.forEach(function (r) { delete r[col]; }); }); sbUpsert_('orders', rows, 'cc,sn'); }
+      } else throw e;
     }
   }
   return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
