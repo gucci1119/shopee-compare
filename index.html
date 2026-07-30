@@ -1442,6 +1442,37 @@
     } catch (e) { return { ok: false, error: (e.message || e), method }; }
   }
   // 共通：一括処理の進捗メーター（画面下中央のプログレスバー＋現在処理中＋任意のカウント表示）。set(done,nowText,statHtml)/remove()
+  // 📜 縦に長い一覧でも常に届く「画面下端固定の横スクロールバー」。対象コンテナ(overflow-x)とscrollLeftを双方向同期。横あふれが無い時は隠す
+  function setStickyHScroll(containerId) {
+    const c = document.getElementById(containerId);
+    let bar = document.getElementById('sticky-hscroll');
+    if (!c || !document.body.contains(c)) { if (bar) bar.style.display = 'none'; return; }
+    if (!bar) {
+      bar = document.createElement('div'); bar.id = 'sticky-hscroll';
+      bar.style.cssText = 'position:fixed;bottom:0;z-index:40;overflow-x:scroll;overflow-y:hidden;height:15px;background:var(--lst-scrollbg,#f0f0f4);border-top:1px solid #ccc;box-shadow:0 -2px 6px rgba(0,0,0,.08)';
+      bar.appendChild(Object.assign(document.createElement('div'), { className: 'shs-spacer' })).style.height = '1px';
+      document.body.appendChild(bar);
+      let syncing = false;
+      bar.addEventListener('scroll', () => { if (syncing) return; syncing = true; const t = document.getElementById(bar.dataset.for); if (t) t.scrollLeft = bar.scrollLeft; syncing = false; });
+      setStickyHScroll._sync = (t) => { if (bar._syncing) return; bar._syncing = true; bar.scrollLeft = t.scrollLeft; bar._syncing = false; };
+    }
+    bar.dataset.for = containerId;
+    // 対象のscrollに合わせてバーを更新
+    const sync = () => setStickyHScroll._sync && setStickyHScroll._sync(c);
+    if (!c._shsBound) { c._shsBound = true; c.addEventListener('scroll', sync); }
+    const refresh = () => {
+      if (!document.body.contains(c) || c.offsetParent === null || c.clientWidth === 0) { bar.style.display = 'none'; return; } // ページ非表示/コンテナ消失時は隠す
+      const need = c.scrollWidth > c.clientWidth + 4;
+      if (!need) { bar.style.display = 'none'; return; }
+      const r = c.getBoundingClientRect();
+      bar.style.display = ''; bar.style.left = r.left + 'px'; bar.style.width = r.width + 'px';
+      bar.querySelector('.shs-spacer').style.width = c.scrollWidth + 'px';
+      bar.scrollLeft = c.scrollLeft;
+    };
+    refresh();
+    setStickyHScroll._refresh = refresh;
+    if (!setStickyHScroll._winBound) { setStickyHScroll._winBound = true; window.addEventListener('resize', () => setStickyHScroll._refresh && setStickyHScroll._refresh()); }
+  }
   function makeProgressMeter(title, total, accent) {
     const c = accent || '#7b52c4';
     const prog = document.createElement('div');
@@ -2128,6 +2159,7 @@
     if (p === 'alerts') { todoState.tab = 'alerts'; p = 'todo'; }
     else if (p === 'tasks') { todoState.tab = 'tasks'; p = 'todo'; }
     state.page = p;
+    try { if (setStickyHScroll._refresh) setStickyHScroll._refresh(); } catch (_) {} // ページ切替で下端の横スクロールバーを隠す/更新
     try { localStorage.setItem('smdPage', p); } catch (e) {} // 再読み込みで同じページに戻すため保存
     // 損益グループのページでは「損益・入出金」ナビをハイライト
     document.querySelectorAll('#smd-nav button').forEach(b => b.classList.toggle('on', b.dataset.p === p || (b.dataset.p === 'finance' && FIN_GROUP.includes(p))));
@@ -10825,7 +10857,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${state.mode === 'live' && settings.sbSecret ? `<button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;font-size:10.5px;padding:1px 8px" title="この端末（🟢ライブ）からShopeeへ直接取りに行って即時最新化。通常は公式APIの自動同期で足りるため不要です">🟢即時取得</button>` : ''}
       </div>
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
-      ${lst.grid ? '<div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)"><div id="lst-list"></div></div>' : `<div style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)">
+      ${lst.grid ? '<div id="lst-scroll" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)"><div id="lst-list"></div></div>' : `<div id="lst-scroll" style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)">
         <div style="min-width:${LMINW}px">
         ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:var(--lst-hdrbg);z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
           <span style="${LSTKLH[0]}"></span><span style="${LSTKLH[1]}"></span>
@@ -10854,6 +10886,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
     document.getElementById('lst-list').innerHTML = lst.grid ? listingGridHtml(shown) : (shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>');
     { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(lst.grid ? gridGroups.length : rows.length, lstPer, lstPage); }
+    // 📜 画面下部に常に届く横スクロールバー（一覧が縦に長くても、メモの下あたり＝ビューポート下端で横スクロールできる）
+    setStickyHScroll('lst-scroll');
     wirePageNav(document.getElementById('lst-more'), p => { lst.page = p; drawListingStatus(); const el = document.getElementById('lst-list'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
     document.getElementById('lst-sync').addEventListener('click', () => {
       // 🟢ライブPCならShopeeへ直接。そうでなければGASが自動同期したDBを取り直す（ブリッジ不要）
