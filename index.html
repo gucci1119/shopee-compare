@@ -5370,8 +5370,21 @@
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = errBox(e); return; }
     const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
     const daysTo = (from, to) => { const t = Date.parse(from); return isNaN(t) ? null : Math.round((Date.parse(to) - t) / 86400000); };
+    // 🚚 自社倉庫→Shopee Japan倉庫へ発送済（③倉庫スキャン待ち=selfTransit 以降／④発送済=tab400）の注文に紐づく仕入れは「本日発送すべき物量」ではない＝既定で非表示。
+    //   在庫の shopee_sn ↔ 注文SN で突合。注文が未ロードなら selfTransit マップだけで判定（安全に少なめ）。
+    const forwardedSns = new Set();
+    try {
+      (state.orders.perCountry || new Map()).forEach(oc => (oc.rows || []).forEach(o => { if (o && o.sn && (o.tab === 400 || (state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)))) forwardedSns.add(String(o.sn)); }));
+      if (state.orders.selfTransit) state.orders.selfTransit.forEach((v, k) => forwardedSns.add(String(k).split(':').pop()));
+    } catch (_) {}
+    const hideForwarded = state.buyWaitShowForwarded !== true;
+    let fwdHidden = 0;
     // 各入庫待ちの到着フェーズ・予定日・待ち日数を判定
-    const list = rows.filter(r => r.status === '入庫待ち').map(r => {
+    const list = rows.filter(r => {
+      if (r.status !== '入庫待ち') return false;
+      if (hideForwarded && r.shopee_sn && forwardedSns.has(String(r.shopee_sn))) { fwdHidden++; return false; } // 倉庫へ発送済＝本日発送対象でない
+      return true;
+    }).map(r => {
       const ds = String(r.delivery_status || '');   // 配送業者の最新状態（shopee-tracking.gsが取込）＝あれば最優先・新鮮
       const di = String(r.delivery_info || '');      // メルカリ由来の状態/予定（無い/古いことがある）
       const pd = invPurDate(r); const pdays = pd ? Math.max(0, daysTo(pd, todayStr) || 0) : null;
@@ -5536,7 +5549,8 @@
       `<button class="smd-btn" id="wait-alert" style="margin-left:6px;${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済・到着済見込み・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
       ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
-      (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') + `</div>` +
+      (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') +
+      ((fwdHidden || state.buyWaitShowForwarded) ? `<button class="smd-btn" id="wait-showfwd" style="margin-left:6px;${state.buyWaitShowForwarded ? 'background:#eef2ff;border-color:#3949ab;color:#3949ab;font-weight:700' : ''}" title="紐づくShopee注文が『倉庫スキャン待ち(自社倉庫→Shopee倉庫へ発送済)』以降の仕入れは、本日発送すべき物量ではないため既定で非表示。ここで表示/非表示を切替。">${state.buyWaitShowForwarded ? '🚚 倉庫発送済も表示中（クリックで隠す）' : ('🚚 倉庫発送済を表示（' + fwdHidden + '件を非表示中）')}</button>` : '') + `</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
       (shown.length ? shown.map((x, idx) => { const r = x.r, ph = WAIT_PHASE[x.phase];
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
@@ -5556,6 +5570,7 @@
     { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; if (state.buyWaitAlert) state.buyWaitToday = false; renderWaiting(host); }); }
     { const b = document.getElementById('wait-today'); if (b) b.addEventListener('click', () => { state.buyWaitToday = !state.buyWaitToday; if (state.buyWaitToday) state.buyWaitAlert = false; renderWaiting(host); }); }
     { const b = document.getElementById('wait-cleanup'); if (b) b.addEventListener('click', () => { state.buyWaitCleanup = true; renderWaiting(host); }); }
+    { const b = document.getElementById('wait-showfwd'); if (b) b.addEventListener('click', () => { state.buyWaitShowForwarded = !state.buyWaitShowForwarded; renderWaiting(host); }); }
     { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '受取日時', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, deliveredAt(x.r) || '', x.r.name || x.r.name_supplier || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
     host.querySelectorAll('.wait-hist').forEach(el => el.addEventListener('click', e => {
       e.stopPropagation();
