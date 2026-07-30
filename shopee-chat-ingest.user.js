@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.9.0
-// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。返信キューの巡回はSupabase直読み(キー設定時)でGAS枠を消費しない。
+// @version      1.14.0
+// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。返信キューの巡回はSupabase直読み(キー設定時)でGAS枠を消費せずリアルタイム。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
 // @match        https://seller.shopee.com.my/*
@@ -34,6 +34,10 @@
     - ページが読むチャット系のJSON応答(fetch/XHR)を横取りして GAS(doPost, action=chat_ingest) へPOST。
     - GASは生データを chat_raw に必ず退避。既知の形は chat_messages にも正規化して取り込む。
     - つまり“取りこぼしゼロ”。マッピングの微調整はGAS側だけで直せる（このスクリプトの再インストール不要）。
+  ■ 返信を有効化（任意・GAS枠を使わずリアルタイム送信）
+    - メニュー「★返信を有効化：Supabaseキーを設定」に、ポータル ⚙️設定の「Supabase secretキー（書き込み用）」を1回貼る。
+    - 設定すると chat_outbox を Supabase から直接読み書き＝GASの日次枠(urlfetch)を一切使わず、8秒巡回でリアルタイム送信。
+    - キーはソースに埋めずTampermonkey内(GM_setValue)に保存＝公開リポジトリに漏れない。空にすると従来のGAS経由に戻る。
 */
 
 (function () {
@@ -57,8 +61,13 @@
     return false;
   };
   GM_registerMenuCommand('★ WRITE_TOKENを設定（これだけでOK）', askToken);
+  GM_registerMenuCommand('GAS URLを変更（通常不要）', () => {
+    const v = prompt('GAS の /exec URL（通常は既定のままでOK）', getUrl());
+    if (v != null) { GM_setValue(K_URL, v.trim().replace(/\/$/, '')); toast('GAS URLを保存しました'); }
+  });
+
   // ---- 返信キュー用：Supabase 直読み設定（キーはソースに埋めずTampermonkeyに保存＝公開リポジトリに漏れない） ----
-  // 設定すると chat_outbox を Supabase から直接読んで返信送信する＝GAS の urlfetch 日次枠を一切使わない（リアルタイム性維持）。
+  // 設定すると chat_outbox を Supabase から直接読んで返信送信する＝GAS の urlfetch 日次枠を一切使わない（リアルタイム維持）。
   // 空のままなら従来どおり GAS 経由（※現在GAS側の outbox_pending は枠節約で無効化＝返信は送られない）。
   const DEFAULT_SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co'; // プロジェクトURL（秘密ではない・全RESTに現れる）
   const K_SBURL = 'chat_sb_url', K_SBKEY = 'chat_sb_key';
@@ -72,10 +81,7 @@
     const v = prompt('Supabase プロジェクトURL（通常は既定のままでOK）', getSbUrl());
     if (v != null) { GM_setValue(K_SBURL, v.trim().replace(/\/$/, '')); toast('Supabase URLを保存しました'); }
   });
-  GM_registerMenuCommand('GAS URLを変更（通常不要）', () => {
-    const v = prompt('GAS の /exec URL（通常は既定のままでOK）', getUrl());
-    if (v != null) { GM_setValue(K_URL, v.trim().replace(/\/$/, '')); toast('GAS URLを保存しました'); }
-  });
+
   GM_registerMenuCommand('今すぐ送信（バッファをフラッシュ）', () => flush(true));
   GM_registerMenuCommand('接続テスト', () => testPost());
 
@@ -183,24 +189,58 @@
         && !/orders?|R\$|★|Serving|Product|Order|Voucher|Shortcut|Agent|Customer|All |History|FAQ|Conversar|Vendedor|Collapse|inquiring|Sending|Sticker|Auto-?Reply|Off-?Work|^You$|Completed|Cancelled|Shipped|Unpaid|Pending|To Ship|Return|^\[|^\(/i.test(t)
         && r.top < best) { best = r.top; buyer = t; }
     });
+    buyer = buyer.replace(/[^\w.].*$/, '').trim(); // 末尾のゴミ（": ??"等）を除去＝ユーザー名は[\w.]のみ。別会話に割れるのを防ぐ
     return { thread, tr, buyer, cc };
+  }
+  let captureAs = null; // 巡回で「ヘッダ先頭＝狙い名」を確認済みの時だけ {buyer,cc} を入れる＝その時のみ行由来のクリーン名で確定
+  // ---- 日付コンテキスト：Shopeeは各メッセージに日付を出さないが、スレッドに日付区切り（"19 Jun"/"Yesterday"/"Monday"/"DD/MM"）が出る。
+  //   これを追って各メッセージの本当の日付を決める（従来は全部「今日」＝一覧の最終時刻が全部“今日”になっていた） ----
+  const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const WD = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function adjYear(d) { const now = new Date(); if (d.getTime() > now.getTime() + 86400000) d.setFullYear(d.getFullYear() - 1); return d; }
+  // 文字列の先頭が日付トークンなら {day:Date(0時), rest:残り} を返す。違えば null
+  function parseDayTok(s) {
+    s = (s || '').trim(); const low = s.toLowerCase(); let m;
+    const mk = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+    if ((m = low.match(/^today\b/))) return { day: mk(), rest: s.slice(m[0].length).trim() };
+    if ((m = low.match(/^yesterday\b/))) { const d = mk(); d.setDate(d.getDate() - 1); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = low.match(/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/))) { const d = mk(); let diff = (d.getDay() - WD[m[1]] + 7) % 7; if (diff === 0) diff = 7; d.setDate(d.getDate() - diff); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = low.match(/^(\d{1,2})\s+([a-z]{3,9})\.?(?:\s+(\d{4}))?\b/)) && MON[m[2].slice(0, 3)] !== undefined) { const d = mk(); d.setDate(1); d.setMonth(MON[m[2].slice(0, 3)]); if (m[3]) d.setFullYear(+m[3]); d.setDate(+m[1]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = low.match(/^([a-z]{3,9})\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/)) && MON[m[1].slice(0, 3)] !== undefined) { const d = mk(); d.setDate(1); d.setMonth(MON[m[1].slice(0, 3)]); if (m[3]) d.setFullYear(+m[3]); d.setDate(+m[2]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = low.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) { const d = mk(); d.setDate(1); d.setMonth(+m[2] - 1); if (m[3]) d.setFullYear(+m[3] < 100 ? 2000 + +m[3] : +m[3]); d.setDate(+m[1]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    return null;
   }
   function domExtract() {
     const h = domHeaderInfo(); if (!h) return [];
-    // 巡回中は一覧行の名前/国を信頼（ヘッダ再検出の失敗・誤名[Sticker]/Auto-Reply等を回避）
-    if (cycleTarget && cycleTarget.buyer) { h.buyer = cycleTarget.buyer; h.cc = cycleTarget.cc || h.cc; }
+    // ★巡回時のみ：reactOpenで会話を開き、ヘッダ先頭が狙い名と一致することを確認済みの時だけ captureAs をセット。
+    //   その時は一覧行由来のクリーンな名前/国で確定する（ヘッダは住所連結で抽出が不安定なため）。検証を通った時
+    //   だけなので混線しない（表示中スレッド＝その会話）。手動閲覧時は captureAs=null＝ヘッダ検出（domHeaderInfo）。
+    if (captureAs && captureAs.buyer) { h.buyer = captureAs.buyer; if (captureAs.cc) h.cc = captureAs.cc; }
     if (!h.buyer) return [];
     const tc = h.tr.left + h.tr.width / 2;
     const trans = c => !c || c === 'transparent' || /rgba\(0,\s*0,\s*0,\s*0\)/.test(c);
     const conv = h.cc + ':' + h.buyer;
-    const nowIso = new Date().toISOString(), ymd = nowIso.slice(0, 10);
+    const nowIso = new Date().toISOString();
     const rows = [];
+    let curDay = null; // スレッドを上（古い）→下（新しい）に見る間に日付区切りで更新
     [].slice.call(h.thread.children).forEach(row => {
       const img = row.querySelector('img[src*="http"]');
       const imgUrl = img ? img.src : '';
       const raw = (row.innerText || '').trim(); if (!raw && !imgUrl) return;
       const tm = (raw.match(/(\d{1,2}:\d{2})\s*$/) || [])[1] || '';
       let body = raw.replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+      // 日付区切り検出：①行全体が日付だけ（rest空）＝区切り行→curDay更新してスキップ。②先頭に日付＋本文＝Shopeeが区切りと
+      //   1件目を1行にまとめた場合。ただし「Monday …」「Today …」等の“単語始まりの普通の文”を誤って剥がさないよう、
+      //   先頭剥がしは【数字を含む日付（"9 Jun"/"18/06"）】に限定する。
+      if (body) {
+        const pdt = parseDayTok(body);
+        if (pdt) {
+          if (!pdt.rest) { curDay = pdt.day; return; }
+          const tok = body.slice(0, body.length - pdt.rest.length);
+          if (/\d/.test(tok)) { curDay = pdt.day; body = pdt.rest; }
+        }
+      }
       // システム通知・UI要素・FAQ・ボタン等は本文でないので除外
       if (/automatically closed|has joined|has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
       let bub = null, maxA = 0;
@@ -213,8 +253,13 @@
       let msgType = 'text';
       if (!body && imgUrl) { body = imgUrl; msgType = 'image'; }
       if (!body) return;
-      let mt = nowIso;
-      if (tm) { const p = tm.split(':'), d = new Date(); d.setHours(+p[0], +p[1], 0, 0); mt = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString(); }
+      // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
+      let base;
+      if (curDay) { base = new Date(curDay); if (tm) { const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); } else base.setHours(12, 0, 0, 0); }
+      else if (tm) { base = new Date(); const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); }
+      else base = new Date();
+      const mt = new Date(base.getTime() - base.getTimezoneOffset() * 60000).toISOString();
+      const ymd = mt.slice(0, 10); // 本当の日付でid＝再取込でも同一id＝重複しない
       const id = 'dom|' + h.cc + '|' + h.buyer + '|' + ymd + '|' + tm + '|' + dir + '|' + hash(body);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
@@ -258,6 +303,7 @@
   setInterval(() => {
     try {
       if (GM_getValue('autoHistory', true) === false) return;
+      if (cycling) return; // 巡回中はスレッド履歴の自動スクロールを止める（会話が同じところをグルグルするのを防ぐ）
       const h = domHeaderInfo(); if (!h || !h.buyer) return;
       const key = h.cc + ':' + h.buyer;
       if (key !== histFor && !histBusy) { histFor = key; setTimeout(loadHistory, 800); }
@@ -281,63 +327,99 @@
   // ★React Virtualizedは scroll イベントで再描画する。scrollTopをセットしただけでは行が更新されない→必ずscrollを発火
   function rvScroll(el, top) { if (!el) return; try { el.scrollTop = top; el.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {} }
   // 高速キャプチャ：開いた会話の直近＋数画面ぶんの履歴だけサッと取る（全履歴スクロールより速い）
-  async function quickCapture() {
+  async function quickCapture(deep) {
     // スレッドが描画されるまで待つ（最大~2s）＝開いた直後の取りこぼし防止
     for (let w = 0; w < 8; w++) { if (domHeaderInfo()) break; await sleep(250); }
     domSweep();
     const el = threadScroller(); if (!el) return;
-    for (let k = 0; k < 4; k++) { rvScroll(el, Math.max(0, el.scrollTop - 800)); await sleep(230); domSweep(); }
+    // 浅い（deep=false）＝現在画面＋1段だけサッと。全巡回はこれで速く全バイヤーを登録（履歴は常時sweep/新着sweepで後から貯まる）
+    const passes = deep ? 4 : 1;
+    for (let k = 0; k < passes; k++) { rvScroll(el, Math.max(0, el.scrollTop - 800)); await sleep(deep ? 230 : 150); domSweep(); }
     rvScroll(el, el.scrollHeight);
   }
-  async function autoCaptureAll(manual) {
+  // ---- ★安全な自動巡回（v1.10.0）----
+  //   合成クリックではShopeeのスレッドは切替わらない（本物クリックのみ）が、実証の結果
+  //   「行内要素のReact onClickプロップを直接呼ぶ」と確実に切替わる。開いた後ヘッダ名が狙いと
+  //   一致した時だけ取り込む＝もし切替に失敗しても混線しない（二重安全）。v1.9.0で名前上書きは撤廃済み。
+  function reactProps(el) { const k = Object.keys(el).find(k => k.indexOf('__reactProps$') === 0); return k ? el[k] : null; }
+  function reactOpen(row) {
+    const els = [row].concat([].slice.call(row.querySelectorAll('*')));
+    for (const el of els) { const p = reactProps(el); if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); return true; } catch (_) {} } }
+    return false;
+  }
+  const norm = s => (s || '').trim().toLowerCase();
+  // ヘッダ帯の名前テキスト（住所/評価が連結されることがある）＝「先頭が狙い名で始まるか」でナビ確認に使う
+  function headerBuyerRaw() {
+    let best = 1e9, txt = '';
+    [].slice.call(document.querySelectorAll('div,span')).forEach(el => {
+      if (el.children.length > 1) return; const r = el.getBoundingClientRect();
+      if (r.top >= 82 && r.top <= 122 && r.left >= 330 && r.left <= 540 && r.top < best) { const t = (el.textContent || '').trim(); if (t && /^[a-z0-9._]/i.test(t)) { best = r.top; txt = t; } }
+    });
+    return txt;
+  }
+  // 直近のユーザー操作（本物のclick/keydown/wheel）。reactOpenはonClickを直接呼ぶだけ＝DOMイベントを出さないので自分では発火しない
+  let lastUserAct = 0;
+  ['click', 'keydown', 'wheel'].forEach(t => document.addEventListener(t, () => { lastUserAct = Date.now(); }, true));
+  const userBusy = () => (Date.now() - lastUserAct) < 12000;
+  async function waitIdle() { while (userBusy()) { cycleInfo = '待機(操作中)'; updateChip(); await sleep(2000); } }
+  // 1会話を開く→ヘッダ先頭が狙い名で始まるのを確認（＝この会話が表示されたと確定）→その時だけ captureAs をセットして
+  //   一覧行由来のクリーン名で取り込む。確認できなければ取り込まない（＝混線しない・切替失敗を弾く）。
+  async function openAndCapture(row, name, cc, deep) {
+    reactOpen(row);
+    let matched = false;
+    for (let w = 0; w < 14; w++) { if (norm(headerBuyerRaw()).indexOf(norm(name)) === 0) { matched = true; break; } await sleep(200); }
+    if (!matched) return false;
+    captureAs = { buyer: name, cc: cc };
+    try { await quickCapture(deep); } finally { captureAs = null; }
+    return true;
+  }
+  const crawlDone = new Set(); // このセッションでフル取込済みの会話名（無限ループ防止）
+  // mode 'full'=未取込を全部 / 'new'=署名が変わった(新着)会話だけ。ゆっくり・操作中は待機・終わりに元の会話へ戻す
+  async function slowCrawl(mode, manual) {
     if (cycling) { if (manual) toast('巡回中です…'); return; }
-    cycling = true; const done = new Set(); let count = 0, stagnant = 0;
+    if (!manual && GM_getValue('autoCrawl', true) === false) return;
+    cycling = true; let count = 0, stagnant = 0;
+    const startConv = (domHeaderInfo() || {}).buyer || '';
     try {
       const sc0 = sideScroller(); if (sc0) { rvScroll(sc0, 0); await sleep(500); }
-      if (manual) toast('全会話の巡回取り込みを開始…');
-      while (stagnant < 4 && count < 800) {
+      if (manual) toast('ゆっくり巡回を開始…（作業中は自動で待機します）');
+      while (stagnant < 5 && count < 800) {
+        await waitIdle();
         const side = sideList(); if (!side) break;
-        let next = null, nextName = '';
-        for (const row of [].slice.call(side.children)) { const n = (row.innerText || '').trim().split('\n')[0].trim(); if (n && !done.has(n)) { next = row; nextName = n; break; } }
-        if (next) {
-          done.add(nextName); lastSig[nextName] = rowSig(next); count++; cycleInfo = '巡回 ' + count; updateChip();
-          cycleTarget = rowInfo(next); next.click(); await sleep(750);
-          try { await quickCapture(); } catch (_) {}
-          cycleTarget = null; stagnant = 0;
+        let target = null, tname = '';
+        for (const row of [].slice.call(side.children)) {
+          const nm = (row.innerText || '').trim().split('\n')[0].trim();
+          if (!nm || !/^[\w.]+$/.test(nm)) continue;
+          if (mode === 'new') { if (lastSig[nm] === rowSig(row)) continue; }
+          else { if (crawlDone.has(nm)) continue; }
+          target = row; tname = nm; break;
+        }
+        if (target) {
+          cycleInfo = (mode === 'new' ? '🐢新着 ' : '🐢巡回 ') + (count + 1); updateChip();
+          const cc = (rowInfo(target).cc) || CC;
+          const ok = await openAndCapture(target, tname, cc, true);
+          crawlDone.add(tname); lastSig[tname] = rowSig(target); // 開けても失敗しても記録＝同じ行で止まらない
+          if (ok) count++;
+          stagnant = 0;
+          await sleep(2200); // ★ゆっくり（作業を邪魔しない間隔）
         } else {
           const sc = sideScroller(); const before = sc ? sc.scrollTop : 0;
-          if (sc) rvScroll(sc, before + 500);
-          await sleep(900);
+          if (sc) rvScroll(sc, before + 500); await sleep(1000);
           if (!sc || sc.scrollTop <= before + 5) stagnant++; else stagnant = 0;
         }
       }
-      cycleInfo = ''; GM_setValue('didFullCycle', true); if (manual) toast('✅ 巡回取り込み完了（' + count + '会話）');
+      if (mode === 'full') GM_setValue('didFullCycle', true);
+      if (manual) toast('✅ 巡回完了（' + count + '会話を取込）');
+      // 元の会話へ戻す（その後ユーザーが触っていなければ）
+      if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm((row.innerText || '').split('\n')[0]) === norm(startConv)) { reactOpen(row); break; } } } }
     } catch (_) {} finally { cycling = false; cycleInfo = ''; updateChip(); }
   }
-  // 新着チェック：一覧の上位で「プレビューが変わった会話（＝新着があった）」だけ開く。変化なしは開かない＝過去の読み直しを省く
-  async function lightSweep() {
-    if (cycling) return; cycling = true;
-    try {
-      const scr = sideScroller(); if (scr) { rvScroll(scr, 0); await sleep(400); }
-      let opened = 0;
-      for (let i = 0; i < 25; i++) {
-        const side = sideList(); if (!side) break; const row = side.children[i]; if (!row) break;
-        const name = (row.innerText || '').trim().split('\n')[0].trim(); if (!name) continue;
-        const sig = rowSig(row);
-        if (lastSig[name] === sig) continue; // 変化なし＝新着なし→開かない
-        lastSig[name] = sig; opened++; cycleInfo = '新着取込 ' + opened; updateChip();
-        cycleTarget = rowInfo(row); row.click(); await sleep(950); try { await quickCapture(); } catch (_) {} cycleTarget = null; await sleep(150);
-        if (opened >= 20) break; // 一度に開きすぎない
-      }
-      cycleInfo = '';
-    } catch (_) {} finally { cycling = false; cycleInfo = ''; updateChip(); }
-  }
-  GM_registerMenuCommand('🔄 全会話をフル巡回（全履歴・最初の1回用）', () => autoCaptureAll(true));
-  GM_registerMenuCommand('起動時の自動取り込み: ON/OFF 切替', () => { const v = GM_getValue('autoCycleOnLoad', true) !== false; GM_setValue('autoCycleOnLoad', !v); toast('起動時の自動取り込みを ' + (v ? 'OFF' : 'ON') + ' にしました'); });
-  // 自動取り込み（既定ON・webchatを開いておくだけ）：起動時は毎回フル巡回で全会話を確実に一巡→以後は90秒ごとに新着だけ差分チェック。
-  if (GM_getValue('autoCycleOnLoad', true) !== false) {
-    setTimeout(() => autoCaptureAll(false), 9000); // scroll修正済＝全会話に到達。didFullCycleに関係なく毎回フル
-    setInterval(() => { if (GM_getValue('autoCycleOnLoad', true) !== false && GM_getValue('didFullCycle', false) && !cycling) lightSweep(); }, 90000);
+  GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => slowCrawl('full', true));
+  GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
+  // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
+  if (GM_getValue('autoCrawl', true) !== false) {
+    setTimeout(() => slowCrawl('full', false), 12000);
+    setInterval(() => { if (GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
   }
 
   // ---- フラッシュ（GASへPOST） ----
@@ -366,7 +448,7 @@
       ontimeout: () => { flushing = false; lastErr = 'タイムアウト'; buffer.unshift.apply(buffer, batch); msgBuffer.unshift.apply(msgBuffer, mbatch); updateChip(); }
     });
   }
-  setInterval(() => flush(false), 4000);
+  setInterval(() => flush(false), 15000); // 4秒→15秒（GAS urlfetch日次枠の節約。取り込みは多少まとめて送る）
 
   function testPost() {
     const url = getUrl(), tok = getTok();
@@ -417,7 +499,7 @@
       if (body != null) headers['Content-Type'] = 'application/json';
       if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
       GM_xmlhttpRequest({
-        method, url: getSbUrl() + '/rest/v1/' + path, headers, timeout: 15000,
+        method: method, url: getSbUrl() + '/rest/v1/' + path, headers: headers, timeout: 15000,
         data: body != null ? JSON.stringify(body) : undefined,
         onload: r => { let j = null; try { j = r.responseText ? JSON.parse(r.responseText) : null; } catch (_) {} res({ status: r.status, json: j }); },
         onerror: () => rej(new Error('net')), ontimeout: () => rej(new Error('timeout'))
@@ -446,7 +528,7 @@
   let outboxBusy = false;
   function pollOutbox() {
     if (outboxBusy || !OUTBOX_ON()) return;
-    // Supabaseキーがあれば直読み（GAS枠ゼロ＝リアルタイム維持）。無ければ従来のGAS経由（※現GASは outbox_pending を無効化中＝送信されない）。
+    // Supabaseキーがあれば直読み（GAS枠ゼロ＝8秒巡回でリアルタイム）。無ければ従来のGAS経由（※現GASは outbox_pending を無効化中＝送信されない）。
     if (getSbKey()) { outboxBusy = true; pollOutboxSb(); return; }
     const url = getUrl(), tok = getTok(); if (!url || !tok) return;
     outboxBusy = true;
@@ -465,7 +547,9 @@
       onerror: () => { outboxBusy = false; }, ontimeout: () => { outboxBusy = false; }
     });
   }
-  setInterval(pollOutbox, 5000);
+  // 返信キューの巡回：Supabaseキーがあれば8秒（GAS枠を使わずリアルタイム）／無ければ従来のGAS経由を60秒（枠節約）。いずれも非表示タブは停止。
+  setInterval(function () { if (!document.hidden && !getSbKey()) pollOutbox(); }, 60000);
+  setInterval(function () { if (!document.hidden && getSbKey()) pollOutbox(); }, 8000);
   GM_registerMenuCommand('ポータル返信の自動送信: ON/OFF 切替', () => { const v = OUTBOX_ON(); GM_setValue('outboxSend', !v); toast('ポータル返信の自動送信を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
 
   // ---- 左下チップ + トースト ----
@@ -478,7 +562,7 @@
     chip.title = 'クリックで状態表示／未設定ならトークン入力';
     chip.addEventListener('click', () => {
       if (!getTok()) { askToken(); return; }
-      alert('Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済(raw): ' + sent + ' 件\n未送信: ' + buffer.length + ' 件\nTOKEN: 設定済' + (lastErr ? ('\n直近エラー: ' + lastErr) : ''));
+      alert('Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済(raw): ' + sent + ' 件\n未送信: ' + buffer.length + ' 件\nTOKEN: 設定済\n返信送信: ' + (getSbKey() ? 'Supabase直読み(GAS枠ゼロ・8秒)' : 'GAS経由(60秒・キー未設定)') + (lastErr ? ('\n直近エラー: ' + lastErr) : ''));
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
