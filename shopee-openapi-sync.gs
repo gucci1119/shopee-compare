@@ -1696,7 +1696,21 @@ function syncListingsForShop_(tok) {
     });
   }
   if (rows.length) sbUpsert_('listings', rows);   // on_conflict はポータルと同じくPK(item_id)に委ねる
-  return { cc: cc, shop_id: shopId, listings: rows.length };
+  // ★照合削除：Shopeeで削除/BANされた出品がDBに残って幽霊重複（旧タイトル残り・件数水増し）になる問題の解消。
+  //   idsはNORMAL+UNLISTの完全取得成功時のみここに到達（ページ失敗はthrowして手前で中断）＝取得失敗での誤削除は起きない。
+  //   現在のitem_id集合に無い「この店」の行だけを削除（BAN/審査中は稀・再公開時に次回同期で復活）。
+  var removed = 0;
+  try {
+    var live = {}; ids.forEach(function (x) { live[String(x.item_id)] = 1; });
+    var ex = sbSelect_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&limit=50000');
+    var stale = (ex || []).map(function (r) { return String(r.item_id); }).filter(function (id) { return id && !live[id]; });
+    for (var s = 0; s < stale.length; s += 100) {
+      sbDelete_('listings', 'shop_id=eq.' + encodeURIComponent(String(shopId)) + '&item_id=in.(' + stale.slice(s, s + 100).join(',') + ')');
+    }
+    removed = stale.length;
+    if (removed) Logger.log('listings reconcile ' + cc + ': removed ' + removed + ' stale');
+  } catch (eRec) { Logger.log('listings reconcile skip ' + cc + ': ' + eRec); }
+  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed };
 }
 
 // 全店舗を一気に（初回の全件ロード用。13店ぶんで6分制限に当たる場合は数回実行 or 下のRRトリガーに任せる）
@@ -1807,6 +1821,11 @@ function sbUpsert_(table, rows, onConflict) {
     var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: JSON.stringify(rows.slice(i, i + 200)) });
     if (res.getResponseCode() >= 300) throw new Error('Supabase upsert ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
+}
+function sbDelete_(table, query) {
+  var key = cfg_('SB_SERVICE_KEY');
+  var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'delete', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' } });
+  if (res.getResponseCode() >= 300) throw new Error('Supabase delete ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
 }
 
 // ---------- 便利・診断・運用 ----------
