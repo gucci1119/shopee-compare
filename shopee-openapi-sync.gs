@@ -13,6 +13,19 @@ function P_() { return PropertiesService.getScriptProperties(); }
 function cfg_(k) { var v = P_().getProperty(k); if (!v) throw new Error('Script Property 未設定: ' + k); return v; }
 function partnerId_() { return parseInt(cfg_('PARTNER_ID'), 10); }
 function now_() { return Math.floor(Date.now() / 1000); }
+
+// ===== urlfetch 日次枠の自衛（無料枠 20,000回/日を全機能で共有・PT日付境界でリセット）=====
+// 背景の定期同期は UF_STOP で止め、残り(2万−UF_STOP)を「発送手配・⚡今すぐ取得」など手動操作に予約する＝
+// 背景ループがどれだけ走っても手動操作が枠切れ(get_shipping_parameter失敗)しない。教訓[[shopee_portal_perf_quota]]。
+var UF_STOP = 15000;   // 背景同期の停止ライン（残り約5,000回を手動操作に確保）
+var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop_/sb* が加算）
+function ufBump_() { _ufRun++; }
+function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
+function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
+function ufTotal_() { return ufState_().n + _ufRun; }     // 今日これまで＋この実行分
+function ufPersist_() { if (!_ufRun) return; var o = ufState_(); o.n += _ufRun; _ufRun = 0; try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {} }
+function bgAllowed_() { return ufTotal_() < UF_STOP; }     // 背景同期を続けてよいか（手動用の予約枠を侵さない）
+function ufStatus() { var o = ufState_(); Logger.log('urlfetch 今日(' + o.d + ' PT基準): ' + o.n + '回 / 背景停止ライン ' + UF_STOP + '（手動予約 ' + (20000 - UF_STOP) + '／無料枠20000）'); return o; } // エディタから実行して当日消費を確認
 function toHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
 function hmac_(base) { return toHex_(Utilities.computeHmacSha256Signature(base, cfg_('PARTNER_KEY'))); }
 function signPublic_(path, ts) { return hmac_('' + partnerId_() + path + ts); }
@@ -57,7 +70,7 @@ function doGet(e) {
       try {
         var rwt = P_().getProperty('WRITE_TOKEN');
         if (!rwt || p.token !== rwt) throw new Error('WRITE_TOKEN不正');
-        var rlog = syncOrdersAll(p.days > 0 ? parseInt(p.days, 10) : 4); // ★on-demandは既定4日窓で高速化（新注文はcreate/update直近＝4日で十分）。全期間が要る時は&days=15
+        var rlog = syncOrdersAll(p.days > 0 ? parseInt(p.days, 10) : 4, 'force'); // ★on-demandは既定4日窓で高速化＋force＝背景予約枠に関係なく実行し追跡も取得（手動なので）
         var nOk = 0, nErr = 0; (rlog || []).forEach(function (x) { if (x && x.error) nErr++; else nOk++; });
         rout = { ok: true, action: 'run_orders', shops_ok: nOk, shops_err: nErr };
       } catch (rerr) { rout = { ok: false, error: String((rerr && rerr.message) || rerr) }; }
@@ -511,6 +524,7 @@ function callShop_(shopId, path, query, method, body) {
   if (query) for (var k in query) url += '&' + k + '=' + encodeURIComponent(query[k]);
   var opt = { method: method || 'get', muteHttpExceptions: true };
   if (body) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(body); }
+  ufBump_(); // urlfetch 日次枠のカウント（1論理コール＝1）
   // Shopeeゲートウェイは稀に "Address unavailable"/接続失敗を返す（同一ホストでも散発）→ 短い間隔で最大3回リトライ
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
@@ -1326,6 +1340,7 @@ function syncAll() {
   });
   var rows = Object.keys(byKey).map(function (k) { var e = byKey[k]; e.synced_at = new Date().toISOString(); return e; });
   if (rows.length) sbUpsert_('daily_stats', rows, 'cc,day');
+  ufPersist_();
   Logger.log('syncAll(DB集計): ' + rows.length + ' 日行 / ' + ((orders || []).length) + ' 注文');
   return { days: rows.length, orders: (orders || []).length };
 }
@@ -1340,7 +1355,11 @@ function imgHash_(it) {
   var u = (it && (it.image_url || (it.image_info && (it.image_info.image_url || (it.image_info.image_url_list || [])[0])))) || '';
   if (!u) return ''; return String(u).split('?')[0].split('/').pop().replace(/\.\w+$/, '');
 }
-function syncOrdersForShop_(tok, daysWindow) {
+function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
+  // 追跡番号の取得は「毎時ぶん回す」と空振りで枠を食う（発送済でも越境SLSはAPIに番号が来ないことが多い）。
+  // → doTrk（syncOrdersAllが6時間ゲートで決定 / ⚡今すぐ取得はforce）＝取得する回だけ、かつ 6日以内の新しい注文に限り、店ごと上限で。
+  var TRK_CAP = force ? 200 : 40, trkGot = 0;
+  var trkFresh_ = function (o) { return !!o.create_time && (now_() - o.create_time) <= 6 * 86400; };
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var tz = CC_TZ[cc] != null ? CC_TZ[cc] : 8;
   var to = now_(), from = to - (daysWindow > 0 ? daysWindow : 15) * 86400, sns = [], cursor = ''; // on-demand(⚡今すぐ取得/まとめて更新)は短窓で高速化。毎時トリガーは15日で状態変化も拾う
@@ -1369,14 +1388,14 @@ function syncOrdersForShop_(tok, daysWindow) {
       var cancelReason = creason ? (creason + (cby ? ' [' + cby + ']' : '')) : null;
       // ★追跡番号を取得（get_order_detailは番号を返さないため get_tracking_number を引く）。発送手配済(arrange shipment済)以降だけ引く＝READY_TO_SHIP/CANCELLED/COMPLETEDはスキップしてAPIコール削減。番号が入れば「手配済」判定になり"発送手配済なのに未発送表示"も解消
       var trk = haveTrk[o.order_sn] || null; // 既にDBに番号があれば再取得しない
-      if (!trk && TRACK_STATUSES[st]) { try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
+      if (!trk && doTrk && TRACK_STATUSES[st] && trkFresh_(o) && trkGot < TRK_CAP) { trkGot++; try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
       // ★分割注文（package_listが2梱包以上）＝梱包ごとに別行/別伝票にするため、梱包内訳を packages に保存。単一梱包はnull（従来どおり1行）。
       var pkgs = null, plist = o.package_list || [];
       if (plist.length > 1) {
         pkgs = plist.map(function (p) {
           var pit = (p.item_list || []).map(function (it) { return { item_id: it.item_id || null, model_id: it.model_id || null }; });
           var pt = null;
-          if (TRACK_STATUSES[st]) { try { var ptj = getTracking_(tok.shop_id, o.order_sn, p.package_number); pt = (ptj && (ptj.tracking_number || ptj.first_mile_tracking_number || ptj.last_mile_tracking_number)) || null; } catch (ep) {} }
+          if (doTrk && TRACK_STATUSES[st] && trkFresh_(o) && trkGot < TRK_CAP) { trkGot++; try { var ptj = getTracking_(tok.shop_id, o.order_sn, p.package_number); pt = (ptj && (ptj.tracking_number || ptj.first_mile_tracking_number || ptj.last_mile_tracking_number)) || null; } catch (ep) {} }
           return { pkg: p.package_number || '', status: p.logistics_status || '', carrier: p.shipping_carrier || '', items: pit, tracking: pt };
         });
       }
@@ -1397,9 +1416,15 @@ function syncOrdersForShop_(tok, daysWindow) {
   }
   return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
 }
-function syncOrdersAll(daysWindow) {
+function syncOrdersAll(daysWindow, trkMode) {
+  var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
+  if (!force && !bgAllowed_()) { Logger.log('syncOrdersAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  // 追跡番号の取得は毎時ではなく最短6時間おき（force=手動は毎回）。空振りの毎時リトライで枠を溶かさない。
+  var doTrk = force;
+  if (!force) { var tl = parseInt(P_().getProperty('trkLast') || '0', 10) || 0; if (now_() - tl >= 6 * 3600) { doTrk = true; P_().setProperty('trkLast', String(now_())); } }
   var toks = listTokens_(), log = [];
-  toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok, daysWindow)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok, daysWindow, doTrk, force)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 
@@ -1443,9 +1468,11 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   if (partial) out.partial = true; return out;
 }
 function syncEscrowAll() {
+  if (!bgAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
   toks.forEach(function (tok) { try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 function finalizedSns_(cc) {
@@ -1517,8 +1544,10 @@ function syncPayoutsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
 }
 function syncPayoutsAll() {
+  if (!bgAllowed_()) { Logger.log('syncPayoutsAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 // ★履歴の補償/関税を一括取込（15日窓で走査。ページ送り対応）。手動実行。要 order_adjustments 表。
@@ -1626,7 +1655,7 @@ function syncReturnsRange_(days, ccList) {
   log.push('=== 合計 ' + total + '件 取込（走査' + DAYS + '日）===');
   Logger.log(log.join('\n')); return total;
 }
-function syncReturnsAll() { return syncReturnsRange_(45); }      // 定例（直近45日）
+function syncReturnsAll() { if (!bgAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; } var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
 // ================= 出品(listings)同期：公式 get_item_list でブリッジ卒業 =================
@@ -1719,13 +1748,16 @@ function syncListingsForShop_(tok, sinceSec) {
 
 // 全店舗を一気に（初回の全件ロード用。13店ぶんで6分制限に当たる場合は数回実行 or 下のRRトリガーに任せる）
 function syncListingsAll() {
+  if (!bgAllowed_()) { Logger.log('syncListingsAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  ufPersist_();
   Logger.log('listings同期(all): ' + JSON.stringify(log)); return log;
 }
 
 // ★定例トリガー用：カーソルで数店ずつ回す（6分制限を超えないための本命）。30分ごと×3店 → 全店 約2時間で一巡
 function syncListingsRoundRobin() {
+  if (!bgAllowed_()) { Logger.log('syncListingsRoundRobin skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(); if (!toks.length) return [];
   toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
   var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
@@ -1736,9 +1768,14 @@ function syncListingsRoundRobin() {
     var tok = toks[(start + i) % toks.length];
     try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
   }
-  // ★毎回：全店の「変更のあった出品だけ」を増分同期（画像/タイトル/在庫/価格/バリエの変更を全店30分以内に反映）。
-  //   変更は少数＝軽い。full照合削除はRR巡回側(上)で順に。RR全店巡回を待たず頻繁な変更が反映される。
-  try { log.push({ changed: syncListingsChangedAll(2) }); } catch (eC) { log.push({ changedError: String(eC).slice(0, 140) }); }
+  // 「変更のあった出品だけ」の全店増分同期は毎回(30分毎)ではなく最短2時間おき＝urlfetch枠の節約（教訓：食うポーリングを毎回走らせない）。
+  // 2h窓ぶんを一度に拾うので取りこぼしなし（画像/タイトル/在庫/価格/バリエ変更は最長2時間で反映）。
+  try {
+    var lc = parseInt(P_().getProperty('listChangedLast') || '0', 10) || 0;
+    if (now_() - lc >= 2 * 3600) { P_().setProperty('listChangedLast', String(now_())); log.push({ changed: syncListingsChangedAll(3) }); }
+    else log.push({ changedSkipped: true });
+  } catch (eC) { log.push({ changedError: String(eC).slice(0, 140) }); }
+  ufPersist_();
   Logger.log('listings同期(RR): ' + JSON.stringify(log)); return log;
 }
 // ★増分同期：全店の「直近hours時間で変更のあった出品」だけを取り込む（頻繁な画像/タイトル/在庫変更の高速反映）。削除照合はしない。
@@ -1809,11 +1846,13 @@ function syncListingStatsForShop_(tok) {
   return { cc: cc, shop_id: shopId, stats: n };
 }
 function syncListingStats() {
+  if (!bgAllowed_()) { Logger.log('syncListingStats skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) {
     try { log.push(syncListingStatsForShop_(tok)); }
     catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
   });
+  ufPersist_();
   Logger.log('listing_stats同期: ' + JSON.stringify(log)); return log;
 }
 // 1日1回トリガー（既存トリガーは消さず、syncListingStats の重複だけ掃除して1本にする）
@@ -1825,6 +1864,7 @@ function setupStatsTrigger() {
 
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
+  ufBump_();
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   return JSON.parse(res.getContentText());
@@ -1832,12 +1872,14 @@ function sbSelect_(table, query) {
 function sbUpsert_(table, rows, onConflict) {
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : ''), key = cfg_('SB_SERVICE_KEY');
   for (var i = 0; i < rows.length; i += 200) {
+    ufBump_();
     var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: JSON.stringify(rows.slice(i, i + 200)) });
     if (res.getResponseCode() >= 300) throw new Error('Supabase upsert ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
 }
 function sbDelete_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
+  ufBump_();
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'delete', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' } });
   if (res.getResponseCode() >= 300) throw new Error('Supabase delete ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
 }
