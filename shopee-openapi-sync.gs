@@ -86,6 +86,19 @@ function doGet(e) {
       } catch (ierr) { iout = { ok: false, error: String((ierr && ierr.message) || ierr) }; }
       return ContentService.createTextOutput(icb + '(' + JSON.stringify(iout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★出品カタログの公式API同期：run_listings → syncListingsAll()（WRITE_TOKEN必須）。ブリッジ無しでも出品状況をShopeeから取得できる口。
+    //   ※get_item_list系は全店だとGAS6分制限を超えうる＝ポータル側は待たず背景起動。定例はRR(30分)が本命。
+    if (p.action === 'run_listings') {
+      var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var lout;
+      try {
+        var lwt = P_().getProperty('WRITE_TOKEN');
+        if (!lwt || p.token !== lwt) throw new Error('WRITE_TOKEN不正');
+        var llog = syncListingsAll();
+        lout = { ok: true, action: 'run_listings', shops: (llog || []).length };
+      } catch (lerr) { lout = { ok: false, error: String((lerr && lerr.message) || lerr) }; }
+      return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★ポータル新規登録の完了メール：登録者本人＋オーナーへ通知（URL付き）。WRITE_TOKEN必須。
     //   ポータルから ?action=notify_signup&token=&email=&url=&callback=
     if (p.action === 'notify_signup') {
