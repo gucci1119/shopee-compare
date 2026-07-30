@@ -1252,6 +1252,8 @@ function syncAll() {
 // INVOICE_PENDING=BRの「支払済・請求書(nota fiscal)待ち」＝発送前(未入金でない)→300。TO_RETURN=配達後に返品申請＝売上/入金は成立済なので完了扱い500に残し、返金損失はreturns表で別計上（ポータルは700を知らず全集計から消えていた）
 var ORD_STATUS_TAB = { UNPAID: 200, READY_TO_SHIP: 300, PROCESSED: 300, RETRY_SHIP: 300, SHIPPED: 400, TO_CONFIRM_RECEIVE: 400, COMPLETED: 500, IN_CANCEL: 600, CANCELLED: 600, TO_RETURN: 500, INVOICE_PENDING: 300 };
 var ORD_STATUS_LABEL = { READY_TO_SHIP: 'To Ship', PROCESSED: 'Processed', RETRY_SHIP: 'Retry Ship', SHIPPED: 'Shipping', TO_CONFIRM_RECEIVE: 'To Receive' };
+// ★追跡番号を引く対象＝発送手配済(arrange shipment済)以降。READY_TO_SHIP(未手配)/CANCELLED/COMPLETED(古い)/UNPAIDはスキップしてAPIコールを節約
+var TRACK_STATUSES = { PROCESSED: 1, SHIPPED: 1, TO_CONFIRM_RECEIVE: 1 };
 function imgHash_(it) {
   var u = (it && (it.image_url || (it.image_info && (it.image_info.image_url || (it.image_info.image_url_list || [])[0])))) || '';
   if (!u) return ''; return String(u).split('?')[0].split('/').pop().replace(/\.\w+$/, '');
@@ -1280,7 +1282,10 @@ function syncOrdersForShop_(tok) {
       var creason = String(o.buyer_cancel_reason || o.cancel_reason || '').trim();
       var cby = String(o.cancel_by || '').trim();
       var cancelReason = creason ? (creason + (cby ? ' [' + cby + ']' : '')) : null;
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: null, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, synced_at: new Date().toISOString() });
+      // ★追跡番号を取得（get_order_detailは番号を返さないため get_tracking_number を引く）。発送手配済(arrange shipment済)以降だけ引く＝READY_TO_SHIP/CANCELLED/COMPLETEDはスキップしてAPIコール削減。番号が入れば「手配済」判定になり"発送手配済なのに未発送表示"も解消
+      var trk = null;
+      if (TRACK_STATUSES[st]) { try { var tj = getTracking_(tok.shop_id, o.order_sn); trk = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null; } catch (eTk) {} }
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, synced_at: new Date().toISOString() });
     });
   }
   if (rows.length) {
