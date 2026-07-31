@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.37.0
+// @version      1.38.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -924,6 +924,46 @@
   document.addEventListener('click', () => startKeepAlive(), true);
   GM_registerMenuCommand('ポータル返信の自動送信: ON/OFF 切替', () => { const v = OUTBOX_ON(); GM_setValue('outboxSend', !v); toast('ポータル返信の自動送信を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
 
+  // ---- 🔍 スタンプパネルの調査（実装の前に"実物の構造"を報告させる。推測でコードを書かないため） ----
+  // Shopeeは合成クリックを受け付けない＝Reactの onClick を直接呼ぶのが唯一の突破法（実証済み・[[shopee_portal_messages_chat]]）。
+  // ここでは「入力欄まわりのボタン群」と「開いたパネル内の画像」を調べて、そのまま貼れる形で表示する。
+  function reactOnClickOf(el) { const p = reactProps(el); return p && typeof p.onClick === 'function'; }
+  async function probeStickers() {
+    const out = [];
+    const ta = document.querySelector('textarea[placeholder="Type a message here"]');
+    if (!ta) { alert('入力欄が見つかりません。webchatで会話を開いてから実行してください。'); return; }
+    // 1) 入力欄の上下にあるツールバーの要素を洗い出す（絵文字/画像/動画などのアイコン）
+    const tr = ta.getBoundingClientRect();
+    const cands = [].slice.call(document.querySelectorAll('div,span,button,svg,img,i'))
+      .map(e => ({ e, r: e.getBoundingClientRect() }))
+      .filter(o => o.r.width > 10 && o.r.width < 60 && o.r.height > 10 && o.r.height < 60
+        && o.r.top > tr.top - 90 && o.r.top < tr.bottom + 30 && o.r.left < tr.left + 400)
+      .filter(o => o.e.children.length <= 2);
+    out.push('【入力欄まわりのボタン候補】' + cands.length + '個');
+    cands.slice(0, 14).forEach((o, i) => {
+      out.push(' ' + i + ': <' + o.e.tagName.toLowerCase() + '> x=' + Math.round(o.r.left) + ' y=' + Math.round(o.r.top)
+        + ' ' + Math.round(o.r.width) + 'x' + Math.round(o.r.height)
+        + (reactOnClickOf(o.e) ? ' [onClick有]' : '') + ' cls=' + String(o.e.className || '').slice(0, 40));
+    });
+    // 2) 左端＝たいてい絵文字/スタンプ。onClickを持つ最も左のものを開いてみる
+    const target = cands.filter(o => reactOnClickOf(o.e)).sort((a, b) => a.r.left - b.r.left)[0];
+    if (target) {
+      out.push('【開こうとした要素】x=' + Math.round(target.r.left) + ' ' + target.e.tagName.toLowerCase());
+      try { reactProps(target.e).onClick({ bubbles: true, cancelable: true, currentTarget: target.e, target: target.e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (e) { out.push('  onClick呼び出しでエラー: ' + e.message); }
+      await sleep(1200);
+    } else out.push('【注意】onClickを持つ要素が見つかりませんでした');
+    // 3) 開いたパネル内の画像（＝スタンプ）を数える
+    const imgs = [].slice.call(document.querySelectorAll('img')).map(im => ({ im, r: im.getBoundingClientRect() }))
+      .filter(o => o.r.width >= 40 && o.r.width <= 140 && o.r.top > tr.top - 420 && o.r.top < tr.top + 40);
+    out.push('【パネル内の画像候補】' + imgs.length + '個');
+    imgs.slice(0, 4).forEach((o, i) => out.push(' img' + i + ': ' + Math.round(o.r.width) + 'x' + Math.round(o.r.height)
+      + (reactOnClickOf(o.im) ? ' [onClick有]' : (reactOnClickOf(o.im.parentElement) ? ' [親にonClick有]' : ' [onClick無]'))
+      + ' src=' + String(o.im.src || '').slice(0, 70)));
+    const txt = out.join('\n');
+    try { GM_setValue('lastStickerProbe', txt); } catch (_) {}
+    prompt('🔍 スタンプパネル調査の結果（この内容をコピーして開発者に貼ってください）', txt);
+  }
+
   // ---- 左下チップ + トースト ----
   let chip = null, sentReplies = 0;
   function ensureChip() {
@@ -943,7 +983,7 @@
         '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
         '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
       if (a === '5') {
         const now = tabRole() === 'worker' ? 'manual' : 'worker';
@@ -964,6 +1004,7 @@
         if (!isWorker()) toast('このタブは🙋手動用です。5で🤖巡回役にするか、巡回役タブで実行してください');
         else { toast('📋 一覧スキャンを開始…'); scanAllConversations(true); }
       }
+      else if (a === '7') probeStickers();
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
