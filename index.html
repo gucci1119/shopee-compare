@@ -7321,6 +7321,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (age < 180) el.innerHTML = '<span style="color:#1a7f37;font-weight:700">🟢 すぐ送信できます</span> <span class="smd-dim">' + (age < 60 ? '' : '（' + Math.round(age / 60) + '分前に確認）') + '</span>';
     else el.innerHTML = '<span style="color:#e8710a;font-weight:700">🟡 いまは予約になります</span> <span class="smd-dim">送信すると<b>キューに保存</b>され、送信役が復帰した時に自動で送られます（Shopeeチャットのタブを開いたままにしてください）。</span>';
   }
+  // ---------- 📌ピン / 🏷タグ / 📝メモ（Smart Reply からの移植・第2弾） ----------
+  // 会話ごとの付箋情報。保存先は app_kv.chat_conv_meta（新テーブル不要）＝ {会話キー:{pin,note,tags[]}}
+  const TAG_PRESET = ['VIP', 'リピーター', '価格交渉中', 'クレーム', '返品・トラブル', '再入荷待ち', 'プレゼント客', '要フォロー'];
+  function cmeta(k) { return (msg._meta && msg._meta[k]) || null; }
+  async function saveMeta() { try { await sbUpsert('app_kv', [{ k: 'chat_conv_meta', v: msg._meta || {}, updated_at: new Date().toISOString() }]); } catch (_) {} }
+  function setMeta(k, patch) {
+    msg._meta = msg._meta || {};
+    const m = msg._meta[k] = Object.assign({ pin: false, note: '', tags: [] }, msg._meta[k] || {}, patch);
+    if (!m.pin && !m.note && !(m.tags || []).length) delete msg._meta[k]; // 空になったら消す
+    saveMeta(); renderMessages(true);
+  }
+  function tagChips(tags) {
+    return (tags || []).map(t => `<span style="background:#eef2ff;color:#3b4fb0;border:1px solid #d6e0ff;border-radius:3px;padding:0 4px;font-size:9.5px;font-weight:700">${esc(t)}</span>`).join(' ');
+  }
   // ---------- 📋 定型文（Smart Reply userscript からポータルへ移植・第1弾） ----------
   // webchat側スクリプトに溜めていたテンプレ（54件）をポータルでも使えるようにする。※元のスクリプトはそのまま並行稼働。
   // 保存先は app_kv.chat_templates（新テーブル不要）。形は {id,name,text,category,noteJa,usageCount,...} の配列。
@@ -7468,6 +7482,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_state'); msg._convState = ((kv || [])[0] || {}).v || null; } catch (_) {}
       // 📋定型文（Smart Reply userscript からの移植・第1弾）。webchat側のテンプレをポータルでも使えるようにする
       try { const kt = await sbGetAll('app_kv', 'select=v&k=eq.chat_templates'); const tv = ((kt || [])[0] || {}).v; msg.tpls = Array.isArray(tv) ? tv : (tv && Array.isArray(tv.items) ? tv.items : []); } catch (_) { msg.tpls = msg.tpls || []; }
+      // 📌ピン/🏷タグ/📝メモ（Smart Replyからの移植・第2弾）。会話ごとの付箋情報を app_kv にまとめて保存
+      try { const km = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_meta'); msg._meta = ((km || [])[0] || {}).v || {}; } catch (_) { msg._meta = msg._meta || {}; }
     }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
@@ -7522,7 +7538,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const gaps = []; convList.forEach(c => { for (let i = 0; i < c.msgs.length - 1; i++) { if (c.msgs[i].direction === 'in' && c.msgs[i + 1].direction === 'out') { const g = Date.parse(msgTime(c.msgs[i + 1])) - Date.parse(msgTime(c.msgs[i])); if (g > 0 && g < 30 * 86400000) gaps.push(g); break; } } });
     const avgReplyH = gaps.length ? (gaps.reduce((s, g) => s + g, 0) / gaps.length / 3600000) : null;
     const convAt = c => c.sortAt || msgTime(c.last) || '';
-    convList.sort((a, b) => (convAt(b) || '') > (convAt(a) || '') ? 1 : -1);
+    // 📌ピン留めした会話は常に先頭（Smart Replyのピン機能の移植）。それ以外は新しい順
+    convList.sort((a, b) => {
+      const pa = cmeta(a.key) && cmeta(a.key).pin ? 1 : 0, pb = cmeta(b.key) && cmeta(b.key).pin ? 1 : 0;
+      if (pa !== pb) return pb - pa;
+      return (convAt(b) || '') > (convAt(a) || '') ? 1 : -1;
+    });
     if (msg.source !== 'all') convList = convList.filter(c => c.source === msg.source);
     if (msg.unrepliedOnly) convList = convList.filter(c => c.unreplied);
     // 🔎 過去の全チャット履歴からキーワード検索（本人の主用途の1つ＝「この件どこで話したっけ？」）。
@@ -7578,12 +7599,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 検索中はヒットした発言をプレビューに出す（どこで話したか一目で分かる）
       const pv = (msg.q && c._hit) ? c._hit : c.last;
       const preview = (pv.msg_type === 'image' || IMG_PH.test(pv.text || '') ? '🖼️ 画像' : (pv.text || '')).slice(0, 40);
-      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(convAt(c))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''}</div></div></div>`;
+      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(cmeta(c.key) && cmeta(c.key).pin) ? '<span title="ピン留め">📌</span>' : ''}${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(convAt(c))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''} ${tagChips(cmeta(c.key) && cmeta(c.key).tags)}</div></div></div>`;
     }).join('') || '<div class="smd-dim" style="padding:16px;font-size:12px">会話がありません（webchatの取り込みが接続されると表示されます）</div>';
     const listMoreHtml = listShown < listTotal
       ? `<div style="padding:9px 11px;text-align:center;border-top:1px solid #f2f2f2"><button id="msg-more" class="smd-btn" style="font-size:11.5px;padding:4px 12px">もっと見る（残り ${listTotal - listShown}）</button></div>` : '';
     const paneHtml = sel ? (
-      `<div style="padding:10px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:9px;background:#fff">${avatar(sel.buyer)}<div><div style="font-weight:700;font-size:14px">${sel.unreplied ? '<span style="color:#d93025">● </span>' : ''}${esc(sel.buyer || '(不明)')}</div><div style="font-size:11px;color:#888">${srcBadge(sel.source)} ${sel.cc ? ccBadge(sel.cc) : ''} ・ ${sel.msgs.length}件</div></div></div>` +
+      `<div style="padding:10px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:9px;background:#fff">${avatar(sel.buyer)}<div><div style="font-weight:700;font-size:14px">${sel.unreplied ? '<span style="color:#d93025">● </span>' : ''}${esc(sel.buyer || '(不明)')}</div><div style="font-size:11px;color:#888">${srcBadge(sel.source)} ${sel.cc ? ccBadge(sel.cc) : ''} ・ ${sel.msgs.length}件 ${tagChips(cmeta(sel.key) && cmeta(sel.key).tags)}</div></div>` +
+      `<div style="margin-left:auto;display:flex;gap:5px">
+         <button id="cm-pin" class="smd-btn" style="font-size:11px;padding:2px 8px" title="この会話を一覧の先頭に固定">${(cmeta(sel.key) && cmeta(sel.key).pin) ? '📌 固定中' : '📌 ピン'}</button>
+         <button id="cm-tag" class="smd-btn" style="font-size:11px;padding:2px 8px" title="顧客タグ（VIP・リピーター・価格交渉中など）">🏷 タグ</button>
+         <button id="cm-note" class="smd-btn" style="font-size:11px;padding:2px 8px" title="この顧客のメモ（自分用）">📝 メモ${(cmeta(sel.key) && cmeta(sel.key).note) ? '●' : ''}</button>
+       </div></div>` +
+      ((cmeta(sel.key) && cmeta(sel.key).note) ? `<div style="background:#fffbea;border-bottom:1px solid #f4e7b8;padding:6px 14px;font-size:11.5px;white-space:pre-wrap">📝 ${esc(cmeta(sel.key).note)}</div>` : '') +
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.length ? sel.msgs.map(bubbleHtml).join('')
         : `<div class="smd-dim" style="margin:auto;text-align:center;font-size:12.5px;line-height:1.8">この会話の<b>本文はまだ取り込まれていません</b>（一覧の情報だけ表示中）<br>最後のやり取り：<b>${esc((sel.state && sel.state.prev) || '—')}</b>${sel.state && sel.state.when ? '（' + esc(sel.state.when) + '）' : ''}<br><span style="font-size:11px">本文は裏の🤖巡回役タブが順に取り込みます。急ぐ場合はShopeeチャットでこの会話を開くと即取り込まれます。</span></div>`}</div>` +
       (sel.source === 'shopee'
@@ -7623,6 +7650,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const qc = document.getElementById('msg-qclr'); if (qc) qc.addEventListener('click', () => { msg.q = ''; msg.showN = 80; renderMessages(true); });
     }
     refreshSenderStatus(); refreshCrawlBar(); wireTemplates();
+    // 📌ピン / 🏷タグ / 📝メモ
+    if (sel) {
+      const K = sel.key, cur = cmeta(K) || { pin: false, note: '', tags: [] };
+      { const b = document.getElementById('cm-pin'); if (b) b.addEventListener('click', () => setMeta(K, { pin: !cur.pin })); }
+      { const b = document.getElementById('cm-note'); if (b) b.addEventListener('click', () => { const v = prompt('この顧客のメモ（自分用・ポータルだけに保存されます）', cur.note || ''); if (v != null) setMeta(K, { note: v.trim() }); }); }
+      { const b = document.getElementById('cm-tag'); if (b) b.addEventListener('click', () => {
+          const now = (cur.tags || []).join(', ');
+          const v = prompt('顧客タグをカンマ区切りで入力\n候補: ' + TAG_PRESET.join(' / '), now);
+          if (v != null) setMeta(K, { tags: v.split(',').map(s => s.trim()).filter(Boolean).slice(0, 6) });
+        }); }
+    }
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
