@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.14.0
-// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。返信キューの巡回はSupabase直読み(キー設定時)でGAS枠を消費せずリアルタイム。
+// @version      1.15.0
+// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
 // @match        https://seller.shopee.com.my/*
@@ -424,8 +424,25 @@
 
   // ---- フラッシュ（GASへPOST） ----
   let flushing = false;
+  // ★Supabaseキー設定時：取り込みもGASを介さずSupabaseへ直接upsert（chat_messages）＝メッセージ機能を丸ごとGASゼロに。
+  //   表示に使う正規化メッセージ(msgBuffer・DOM抽出＝実績のある主経路)だけ直書きし、生JSONの退避(chat_raw・安全網＝
+  //   ほぼサポートbotのノイズ)はキー設定時は送らない（DOMが主経路なので受信箱の中身は不変・業務に支障なし）。
+  async function flushSb(manual) {
+    if (flushing) return;
+    if (!msgBuffer.length) { if (buffer.length) buffer.length = 0; if (manual) toast('送信するデータがありません'); return; }
+    flushing = true;
+    const mbatch = msgBuffer.splice(0, 100);
+    buffer.length = 0; // 生キャプチャは送らない＝溜めずに破棄（GASゼロ）
+    try {
+      const r = await sbReq('POST', 'chat_messages?on_conflict=id', mbatch, 'resolution=merge-duplicates,return=minimal');
+      if (r && r.status >= 200 && r.status < 300) { sent += mbatch.length; lastErr = ''; }
+      else { lastErr = 'SB ' + ((r && r.status) || '?'); msgBuffer.unshift.apply(msgBuffer, mbatch); }
+    } catch (e) { lastErr = 'SB通信'; msgBuffer.unshift.apply(msgBuffer, mbatch); }
+    flushing = false; updateChip();
+  }
   function flush(manual) {
     if (flushing) return;
+    if (getSbKey()) { flushSb(manual); return; } // キー設定時＝Supabase直書き（GASを叩かない）
     const url = getUrl(), tok = getTok();
     if (!buffer.length && !msgBuffer.length) { if (manual) toast('送信するデータがありません'); return; }
     if (!url || !tok) { if (manual) toast('左下チップをクリックしてWRITE_TOKENを設定してください'); return; }
@@ -448,7 +465,9 @@
       ontimeout: () => { flushing = false; lastErr = 'タイムアウト'; buffer.unshift.apply(buffer, batch); msgBuffer.unshift.apply(msgBuffer, mbatch); updateChip(); }
     });
   }
-  setInterval(() => flush(false), 15000); // 4秒→15秒（GAS urlfetch日次枠の節約。取り込みは多少まとめて送る）
+  // 取り込みの送信：GAS経由(キー未設定)は15秒でまとめ送り（枠節約）。Supabase直(キー設定)は無料なので5秒＝受信もほぼリアルタイム。いずれも中身が無ければ送らない。
+  setInterval(() => { if (!getSbKey()) flush(false); }, 15000);
+  setInterval(() => { if (getSbKey()) flush(false); }, 5000);
 
   function testPost() {
     const url = getUrl(), tok = getTok();
@@ -492,12 +511,13 @@
   function outboxDone(id, ok, err) { return new Promise(res => { GM_xmlhttpRequest({ method: 'POST', url: getUrl(), headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ action: 'outbox_done', token: getTok(), id: id, ok: ok, error: err || '' }), onload: () => res(), onerror: () => res(), ontimeout: () => res() }); }); }
 
   // ---- Supabase 直読み（GAS枠を使わない返信キュー・キー設定時のみ） ----
-  function sbReq(method, path, body) {
+  function sbReq(method, path, body, prefer) {
     return new Promise((res, rej) => {
       const key = getSbKey(); if (!key) { rej(new Error('no key')); return; }
       const headers = { 'apikey': key, 'Authorization': 'Bearer ' + key };
       if (body != null) headers['Content-Type'] = 'application/json';
-      if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
+      if (prefer) headers['Prefer'] = prefer;
+      else if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
       GM_xmlhttpRequest({
         method: method, url: getSbUrl() + '/rest/v1/' + path, headers: headers, timeout: 15000,
         data: body != null ? JSON.stringify(body) : undefined,
@@ -562,7 +582,7 @@
     chip.title = 'クリックで状態表示／未設定ならトークン入力';
     chip.addEventListener('click', () => {
       if (!getTok()) { askToken(); return; }
-      alert('Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済(raw): ' + sent + ' 件\n未送信: ' + buffer.length + ' 件\nTOKEN: 設定済\n返信送信: ' + (getSbKey() ? 'Supabase直読み(GAS枠ゼロ・8秒)' : 'GAS経由(60秒・キー未設定)') + (lastErr ? ('\n直近エラー: ' + lastErr) : ''));
+      alert('Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済: ' + sent + ' 件\n未送信: ' + msgBuffer.length + ' 件\nTOKEN: 設定済\n経路: ' + (getSbKey() ? '✅ Supabase直（取り込み5秒／返信8秒・GAS枠ゼロ）' : 'GAS経由（取り込み15秒／返信60秒・キー未設定）') + (lastErr ? ('\n直近エラー: ' + lastErr) : ''));
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
