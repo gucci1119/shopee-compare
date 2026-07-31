@@ -6948,6 +6948,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔍 <b>全機能の厳し目レビュー→是正</b>：<b>①改修履歴がHTMLタグのまま表示</b>されていたのを修正（正しく描画）。<b>②月ドロップダウン／先月ボタンが月末(29〜31日)に誤る</b>不具合（1日基準に是正・本日など月末に効く）。<b>③返品タブのバッジ件数が返品リクエストを数えず過少</b>だったのを加算。<b>④顧客の合計注文数の集計漏れ</b>を是正。<b>⑤注文一覧が全国エラーでも「注文はありません🎉」と誤表示</b>→エラー/再試行の表示に。<b>⑥各所の古い『未発送』表現を4段階フロー</b>（未手配→伝票発行済→倉庫スキャン待ち→発送済）に統一。',
       '⚡ <b>表示速度の改善</b>：<b>⌘K全データ検索を130msデバウンス化</b>（1打鍵ごとに在庫/注文/出品を全走査していたのを、打鍵が落ち着いてから1回に）。<b>出品一覧の利益/ROIソートを名前単位でメモ化</b>（並べ替えの比較関数内で台帳統計を毎回計算し直していた重さを解消）。',
       '📖 <b>マニュアル／改修履歴／メッセージの整備</b>：<b>早見表に💬メッセージ(受信箱)を追加</b>・毎日の基本フローを<b>新4段階＋⚡今すぐ取得／✂分割／💳未支払い</b>に更新。<b>ログイン/ログアウトの説明を追加</b>。<b>注文分割(split_order)を『実装予定』→『実装済』に是正</b>し、✅稼働なのに『権限なし』見出しの下にあった配置を正しい位置へ。<b>userscript一覧にshopee-chat-ingest</b>を追加。',
+      '💬 <b>メッセージを「ポータルで返信を集約」に前進</b>：①<b>送信結果をポータルで見届けられるように</b>＝返信を押したら <b>送信中…→✅送信しました／❌理由</b> を表示（webchatを見に行って確認する必要なし）。90秒たっても送信されない時は「webchatタブと取り込みツールの稼働を確認」と案内（予約は残るので開けば送られます）。②<b>一覧が重いのを解消</b>＝会話600件超を12秒ごとに全再構築していたのを<b>初期80件＋「もっと見る」</b>に。③<b>「2999/6/4」等の異常な日付で会話が先頭に固定される不具合を修正</b>＝取り込み側に日付のサニティチェック（未来1日超/5年超過去は今日に落とす・v1.17.0）＋ポータル側も未来日を信用せず取込時刻で並べる。',
       '💬 <b>メッセージ機能をGAS枠ゼロ化＋返信を復活</b>：この画面からの返信送信が、GAS側の枠節約で <code>outbox_pending</code> が無効化されて以来<b>実は送られていなかった</b>のを復活。取り込みスクリプト(shopee-chat-ingest <b>v1.15.0</b>)で、<b>Supabaseキー設定時は取り込み(chat_messages)・返信(chat_outbox)ともSupabaseへ直接読み書き</b>＝<b>GASの日次枠を一切消費せず</b>、取り込み5秒/返信8秒でリアルタイム（＝発送手配などの枠と食い合わない）。<b>キーはソースに埋めずTampermonkeyに1回だけ設定</b>（公開リポジトリに漏らさない）＝メニュー「★返信を有効化：Supabaseキーを設定」。直書き時は生JSONの退避(chat_raw)を省略＝受信箱の中身はDOM抽出の主経路で不変。※要 userscript 再インストール＋キー設定。',
     ] },
     { date: '2026-07-30', items: [
@@ -7299,7 +7300,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `</div>`;
   }
   // ---------------- 💬 メッセージ（Shopeeチャット＋WhatsApp一元・分析） ----------------
-  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set() };
+  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set(), showN: 80 };
+  // 取り込み側の日付解析ミスで「2999/6/4」等の異常日付が入ることがある（→その会話が一覧の先頭に固定され続ける）。
+  // 表示・並び替えでは未来(1日超)を信用しない＝synced_at（取込時刻）に読み替える。DBの値自体は触らない。
+  function msgTime(m) {
+    const t = m && m.msg_time; if (!t) return m && m.synced_at || '';
+    const ms = Date.parse(t);
+    if (isNaN(ms) || ms > Date.now() + 86400000) return (m.synced_at || '');
+    return t;
+  }
+  // 返信の送信結果をポータル側で見届ける（webchatを開いて確認しに行かなくて済む＝集約）。
+  // chat_outbox の該当行を数秒おきに見て sent/error を表示。90秒たっても pending なら「送信役が動いていない」と案内。
+  function watchOutbox(id, statEl) {
+    let tries = 0;
+    const tick = async () => {
+      tries++;
+      let row = null;
+      try { const r = await sbGetAll('chat_outbox', 'select=id,status,error&id=eq.' + encodeURIComponent(id)); row = (r || [])[0]; } catch (_) {}
+      const st = row && row.status;
+      if (st === 'sent') { if (statEl) { statEl.textContent = '✅ 送信しました'; statEl.style.color = '#1a7f37'; } return; }
+      if (st === 'error') { if (statEl) { statEl.textContent = '❌ 送信できませんでした: ' + ((row && row.error) || '理由不明') + '（webchatタブで会話が開けるか確認）'; statEl.style.color = '#d93025'; } return; }
+      if (tries >= 30) { // 約90秒
+        if (statEl) { statEl.textContent = '⏳ まだ送信されていません。webchatのタブが開いていて、取り込みツール(shopee-chat-ingest)が動いているか確認してください（送信予約は残っているので、開けば送られます）'; statEl.style.color = '#e8710a'; }
+        return;
+      }
+      setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 2500);
+  }
   // 💬ナビの未返信バッジ更新
   function updateMsgNavBadge(n) { const b = document.getElementById('msg-nav-badge'); if (b) { if (n > 0) { b.textContent = n; b.style.display = ''; } else b.style.display = 'none'; } }
   // 新着通知（ブラウザ通知＋タイトル点滅＋トースト）。相手からの新規メッセージ時のみ。
@@ -7336,15 +7364,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     const conv = {};
     rows.forEach(m => { const k = m.conversation_id || m.buyer || m.id; const c = conv[k] = conv[k] || { key: k, buyer: m.buyer, source: m.source || 'shopee', cc: m.cc, msgs: [] }; c.msgs.push(m); });
-    let convList = Object.values(conv).map(c => { c.msgs.sort((a, b) => (a.msg_time || '') < (b.msg_time || '') ? -1 : 1); c.last = c.msgs[c.msgs.length - 1]; c.unreplied = c.last && c.last.direction === 'in'; return c; });
+    let convList = Object.values(conv).map(c => { c.msgs.sort((a, b) => (msgTime(a) || '') < (msgTime(b) || '') ? -1 : 1); c.last = c.msgs[c.msgs.length - 1]; c.unreplied = c.last && c.last.direction === 'in'; return c; });
     const totalConv = convList.length, unreplied = convList.filter(c => c.unreplied).length;
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
-    const now = Date.now(), recent = rows.filter(m => m.msg_time && (now - Date.parse(m.msg_time)) < 86400000).length;
+    const now = Date.now(), recent = rows.filter(m => { const t = msgTime(m); return t && (now - Date.parse(t)) < 86400000; }).length;
     const bySource = {}; convList.forEach(c => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
-    const gaps = []; convList.forEach(c => { for (let i = 0; i < c.msgs.length - 1; i++) { if (c.msgs[i].direction === 'in' && c.msgs[i + 1].direction === 'out') { const g = Date.parse(c.msgs[i + 1].msg_time) - Date.parse(c.msgs[i].msg_time); if (g > 0) gaps.push(g); break; } } });
+    const gaps = []; convList.forEach(c => { for (let i = 0; i < c.msgs.length - 1; i++) { if (c.msgs[i].direction === 'in' && c.msgs[i + 1].direction === 'out') { const g = Date.parse(msgTime(c.msgs[i + 1])) - Date.parse(msgTime(c.msgs[i])); if (g > 0 && g < 30 * 86400000) gaps.push(g); break; } } });
     const avgReplyH = gaps.length ? (gaps.reduce((s, g) => s + g, 0) / gaps.length / 3600000) : null;
-    convList.sort((a, b) => (b.last.msg_time || '') > (a.last.msg_time || '') ? 1 : -1);
+    convList.sort((a, b) => (msgTime(b.last) || '') > (msgTime(a.last) || '') ? 1 : -1);
     if (msg.source !== 'all') convList = convList.filter(c => c.source === msg.source);
     if (msg.unrepliedOnly) convList = convList.filter(c => c.unreplied);
     const kpi = (t, v, s, col) => `<div style="flex:1;min-width:130px;background:#fff;border:1px solid #eee;border-radius:8px;padding:9px 12px"><div style="font-size:11px;color:#888">${t}</div><div style="font-size:19px;font-weight:800${col ? ';color:' + col : ''}">${v}</div><div style="font-size:10.5px;color:#888">${s || ''}</div></div>`;
@@ -7366,16 +7394,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const isImg = m.msg_type === 'image' && /^https?:/.test(m.text || '');
       const inner = isImg ? `<img src="${esc(m.text)}" referrerpolicy="no-referrer" style="max-width:200px;max-height:200px;border-radius:6px;display:block" onerror="this.replaceWith(document.createTextNode('🖼️ 画像'))">` : `<div style="white-space:pre-wrap;line-height:1.5">${esc(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div>`;
       const out = m.direction === 'out';
-      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((m.msg_time || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
+      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
     };
     // 選択中の会話（無ければ先頭）
     const sel = convList.find(c => c.key === msg.open) || convList[0] || null;
     if (sel) msg.open = sel.key;
-    const listHtml = convList.slice(0, 400).map(c => {
+    // 一覧は初期80件だけ描画（会話が600件超あると12秒ポーリングのたび全件HTML再構築＝重い）。続きは「もっと見る」で。
+    const listTotal = convList.length, listShown = Math.min(msg.showN || 80, listTotal);
+    const listHtml = convList.slice(0, listShown).map(c => {
       const on = sel && c.key === sel.key;
       const preview = (c.last.msg_type === 'image' ? '🖼️ 画像' : (c.last.text || '')).slice(0, 40);
-      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(c.last.msg_time)}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${c.last.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''}</div></div></div>`;
+      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(msgTime(c.last))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${c.last.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''}</div></div></div>`;
     }).join('') || '<div class="smd-dim" style="padding:16px;font-size:12px">会話がありません（webchatの取り込みが接続されると表示されます）</div>';
+    const listMoreHtml = listShown < listTotal
+      ? `<div style="padding:9px 11px;text-align:center;border-top:1px solid #f2f2f2"><button id="msg-more" class="smd-btn" style="font-size:11.5px;padding:4px 12px">もっと見る（残り ${listTotal - listShown}）</button></div>` : '';
     const paneHtml = sel ? (
       `<div style="padding:10px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:9px;background:#fff">${avatar(sel.buyer)}<div><div style="font-weight:700;font-size:14px">${sel.unreplied ? '<span style="color:#d93025">● </span>' : ''}${esc(sel.buyer || '(不明)')}</div><div style="font-size:11px;color:#888">${srcBadge(sel.source)} ${sel.cc ? ccBadge(sel.cc) : ''} ・ ${sel.msgs.length}件</div></div></div>` +
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.map(bubbleHtml).join('')}</div>` +
@@ -7390,12 +7422,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['all|全て', 'shopee|Shopee', 'whatsapp|WhatsApp'].map(s => { const [v, l] = s.split('|'); return `<button class="msg-src smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px${msg.source === v ? ';background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${l}</button>`; }).join('') +
       `<label style="font-size:12px;cursor:pointer;margin-left:6px"><input type="checkbox" id="msg-unrep" ${msg.unrepliedOnly ? 'checked' : ''}> 未返信のみ</label><span class="smd-dim" style="font-size:11px;margin-left:auto"><span style="color:#d93025">●</span>＝未返信</span></div></div>` +
       `<div class="tool-card" style="margin:0;max-width:1000px;padding:0;overflow:hidden"><div style="display:flex;height:min(64vh,600px);min-height:380px">` +
-      `<div id="msg-list" style="width:290px;flex:none;overflow-y:auto;border-right:1px solid #eee;background:#fff">${listHtml}</div>` +
+      `<div id="msg-list" style="width:290px;flex:none;overflow-y:auto;border-right:1px solid #eee;background:#fff">${listHtml}${listMoreHtml}</div>` +
       `<div id="msg-pane" style="flex:1;min-width:0;display:flex;flex-direction:column">${paneHtml}</div>` +
       `</div></div>`;
-    body.querySelectorAll('.msg-src').forEach(b => b.addEventListener('click', () => { msg.source = b.dataset.v; renderMessages(true); }));
-    { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; renderMessages(true); }); }
+    body.querySelectorAll('.msg-src').forEach(b => b.addEventListener('click', () => { msg.source = b.dataset.v; msg.showN = 80; renderMessages(true); }));
+    { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; msg.showN = 80; renderMessages(true); }); }
     body.querySelectorAll('.msg-ci').forEach(r => r.addEventListener('click', () => { msg.open = r.dataset.k; renderMessages(true); }));
+    { const mb = document.getElementById('msg-more'); if (mb) mb.addEventListener('click', () => { msg.showN = (msg.showN || 80) + 120; renderMessages(true); }); }
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
@@ -7412,7 +7445,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         await sbUpsert('chat_outbox', [{ id, cc, buyer, conversation_id: k, text, status: 'pending', created_at: new Date().toISOString() }]);
         if (ta) ta.value = ''; delete msg.draft[k];
         try { logAct('メッセージ', '返信送信', buyer, text.slice(0, 40)); } catch (_) {}
-        if (stat) { stat.textContent = '📤 送信待ちに登録しました（webchatタブが開いていれば自動で送信されます）'; stat.style.color = '#1a7f37'; }
+        if (stat) { stat.textContent = '📤 送信中…（webchatタブの取り込みツールが送信します）'; stat.style.color = '#888'; }
+        // ★送信結果をポータルで見届ける（webchatを見に行かなくても成否が分かる＝集約）。最大90秒だけ監視。
+        watchOutbox(id, stat);
       } catch (e) { if (stat) { stat.textContent = '登録エラー: ' + (e.message || e); stat.style.color = '#d93025'; } }
     }));
     // 返信の下書き保持（会話切替・自動更新で消えない）

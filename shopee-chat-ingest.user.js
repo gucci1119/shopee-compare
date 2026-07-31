@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.16.0
+// @version      1.17.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -260,6 +260,15 @@
       if (curDay) { base = new Date(curDay); if (tm) { const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); } else base.setHours(12, 0, 0, 0); }
       else if (tm) { base = new Date(); const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); }
       else base = new Date();
+      // ★日付サニティチェック：解析ミスで「2999/6/4」等の異常日付になると、その会話が一覧の先頭に固定され続ける
+      //   （実際に発生）。未来(1日超)・極端な過去(5年超)は信用せず「今日」に落とす。
+      {
+        const nowMs = Date.now();
+        if (!(base instanceof Date) || isNaN(base.getTime()) || base.getTime() > nowMs + 86400000 || base.getTime() < nowMs - 5 * 365 * 86400000) {
+          const f = new Date(); if (tm) { const p = tm.split(':'); f.setHours(+p[0], +p[1], 0, 0); }
+          base = f; curDay = null; // 誤検出した日付コンテキストも捨てる（以降の行に伝播させない）
+        }
+      }
       const mt = new Date(base.getTime() - base.getTimezoneOffset() * 60000).toISOString();
       const ymd = mt.slice(0, 10); // 本当の日付でid＝再取込でも同一id＝重複しない
       const id = 'dom|' + h.cc + '|' + h.buyer + '|' + ymd + '|' + tm + '|' + dir + '|' + hash(body);
