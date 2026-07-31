@@ -7321,6 +7321,69 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (age < 180) el.innerHTML = '<span style="color:#1a7f37;font-weight:700">🟢 すぐ送信できます</span> <span class="smd-dim">' + (age < 60 ? '' : '（' + Math.round(age / 60) + '分前に確認）') + '</span>';
     else el.innerHTML = '<span style="color:#e8710a;font-weight:700">🟡 いまは予約になります</span> <span class="smd-dim">送信すると<b>キューに保存</b>され、送信役が復帰した時に自動で送られます（Shopeeチャットのタブを開いたままにしてください）。</span>';
   }
+  // ---------- 📋 定型文（Smart Reply userscript からポータルへ移植・第1弾） ----------
+  // webchat側スクリプトに溜めていたテンプレ（54件）をポータルでも使えるようにする。※元のスクリプトはそのまま並行稼働。
+  // 保存先は app_kv.chat_templates（新テーブル不要）。形は {id,name,text,category,noteJa,usageCount,...} の配列。
+  async function saveTemplates() {
+    try { await sbUpsert('app_kv', [{ k: 'chat_templates', v: msg.tpls || [], updated_at: new Date().toISOString() }]); } catch (_) {}
+  }
+  function tplInsert(t) {
+    const ta = document.querySelector('.msg-reply-in'); if (!ta) return;
+    const cur = ta.value, at = ta.selectionStart != null ? ta.selectionStart : cur.length;
+    ta.value = cur.slice(0, at) + t.text + cur.slice(at);
+    ta.focus(); const p = at + t.text.length; try { ta.setSelectionRange(p, p); } catch (_) {}
+    const k = ta.dataset.k; if (k) msg.draft[k] = ta.value;
+    t.usageCount = (t.usageCount || 0) + 1; t.lastUsedAt = new Date().toISOString(); saveTemplates();
+    const bx = document.getElementById('msg-tplbox'); if (bx) bx.style.display = 'none';
+  }
+  function drawTplBox() {
+    const bx = document.getElementById('msg-tplbox'); if (!bx) return;
+    const list = msg.tpls || [];
+    if (!list.length) {
+      bx.innerHTML = `<div style="border:1px solid #e3ddef;background:#faf9fd;border-radius:8px;padding:9px 11px;font-size:12px;line-height:1.7">
+        <b>定型文がまだありません。</b>webchat側のテンプレをここに取り込めます（元のスクリプトはそのままで大丈夫）。<br>
+        <span class="smd-dim">書き出したJSON（例: <code>~/work/tampermonkey/import_user_templates.json</code>）の中身を貼り付けて「取り込む」。</span>
+        <textarea id="tpl-imp" rows="3" placeholder='[{"name":"...","text":"...","category":"..."}, ...]' style="width:100%;box-sizing:border-box;margin-top:5px;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:11px"></textarea>
+        <div style="margin-top:5px;display:flex;gap:6px"><button id="tpl-impgo" class="smd-btn" style="font-size:11px;padding:3px 10px;background:#1565c0;color:#fff;border-color:#1565c0">取り込む</button><span id="tpl-impmsg" class="smd-dim" style="font-size:11px"></span></div></div>`;
+      const g = document.getElementById('tpl-impgo');
+      if (g) g.addEventListener('click', async () => {
+        const el = document.getElementById('tpl-imp'), m = document.getElementById('tpl-impmsg');
+        let arr = null; try { arr = JSON.parse((el && el.value) || ''); } catch (_) {}
+        if (!Array.isArray(arr) || !arr.length) { if (m) { m.textContent = 'JSONの配列を貼り付けてください'; m.style.color = '#d93025'; } return; }
+        msg.tpls = arr.filter(x => x && x.text).map((x, i) => ({ id: x.id || ('t' + i), name: x.name || ('定型文' + (i + 1)), text: String(x.text), category: x.category || 'その他', noteJa: x.noteJa || '', usageCount: x.usageCount || 0 }));
+        await saveTemplates();
+        if (m) { m.textContent = '✅ ' + msg.tpls.length + '件を取り込みました'; m.style.color = '#1a7f37'; }
+        setTimeout(() => renderMessages(true), 700);
+      });
+      return;
+    }
+    const q = (msg.tplQ || '').toLowerCase();
+    const cats = [...new Set(list.map(t => t.category || 'その他'))];
+    let view = list.filter(t => !q || (t.name || '').toLowerCase().includes(q) || (t.text || '').toLowerCase().includes(q) || (t.noteJa || '').toLowerCase().includes(q));
+    if (msg.tplCat) view = view.filter(t => (t.category || 'その他') === msg.tplCat);
+    view = view.slice().sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0)); // よく使う順
+    bx.innerHTML = `<div style="border:1px solid #e3ddef;background:#faf9fd;border-radius:8px;padding:7px 9px">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px">
+        <input id="tpl-q" placeholder="定型文を検索" value="${esc(msg.tplQ || '')}" style="flex:1;min-width:140px;padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
+        <select id="tpl-cat" style="padding:3px 6px;border:1px solid #ddd;border-radius:6px;font-size:11.5px"><option value="">全カテゴリ</option>${cats.map(c => `<option value="${esc(c)}" ${msg.tplCat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+        <span class="smd-dim" style="font-size:11px">${view.length}件</span>
+        <button id="tpl-close" class="smd-btn" style="font-size:11px;padding:2px 8px">✕</button>
+      </div>
+      <div style="max-height:190px;overflow:auto">${view.map((t, i) => `<div class="tpl-it" data-i="${list.indexOf(t)}" style="padding:5px 7px;border-bottom:1px solid #efeaf7;cursor:pointer" title="クリックで返信欄に挿入">
+        <div style="font-size:11.5px;font-weight:700">${esc(t.name || '')} <span class="smd-dim" style="font-weight:400">${esc(t.category || '')}${t.usageCount ? ' ・' + t.usageCount + '回' : ''}</span></div>
+        <div class="smd-dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((t.noteJa || t.text || '').replace(/\s+/g, ' ').slice(0, 70))}</div></div>`).join('') || '<div class="smd-dim" style="padding:8px;font-size:11.5px">該当なし</div>'}</div></div>`;
+    bx.querySelectorAll('.tpl-it').forEach(el => el.addEventListener('click', () => { const t = (msg.tpls || [])[+el.dataset.i]; if (t) tplInsert(t); }));
+    { const qi = document.getElementById('tpl-q'); if (qi) qi.addEventListener('input', () => { msg.tplQ = qi.value; drawTplBox(); const n = document.getElementById('tpl-q'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }
+    { const cs = document.getElementById('tpl-cat'); if (cs) cs.addEventListener('change', () => { msg.tplCat = cs.value; drawTplBox(); }); }
+    { const cl = document.getElementById('tpl-close'); if (cl) cl.addEventListener('click', () => { bx.style.display = 'none'; }); }
+  }
+  function wireTemplates() {
+    const b = document.getElementById('msg-tplbtn'); if (!b) return;
+    b.addEventListener('click', () => {
+      const bx = document.getElementById('msg-tplbox'); if (!bx) return;
+      if (bx.style.display === 'none') { bx.style.display = ''; drawTplBox(); } else bx.style.display = 'none';
+    });
+  }
   // 📥 取り込み（巡回）の進捗バー＋完了見込み。webchatタブを覗くと巡回が一時停止してしまうので、
   //    進捗はこのポータルで見られるようにする（userscriptが app_kv.chat_crawl_progress に書く）。
   async function refreshCrawlBar() {
@@ -7403,6 +7466,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       msg.rows = rows;
       // 📋一覧スキャンの結果（会話を開かずに取った全会話の最新状態）も取得。本文の取り込みが追いつく前でも一覧に抜けが出ない
       try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_state'); msg._convState = ((kv || [])[0] || {}).v || null; } catch (_) {}
+      // 📋定型文（Smart Reply userscript からの移植・第1弾）。webchat側のテンプレをポータルでも使えるようにする
+      try { const kt = await sbGetAll('app_kv', 'select=v&k=eq.chat_templates'); const tv = ((kt || [])[0] || {}).v; msg.tpls = Array.isArray(tv) ? tv : (tv && Array.isArray(tv.items) ? tv.items : []); } catch (_) { msg.tpls = msg.tpls || []; }
     }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
@@ -7522,7 +7587,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.length ? sel.msgs.map(bubbleHtml).join('')
         : `<div class="smd-dim" style="margin:auto;text-align:center;font-size:12.5px;line-height:1.8">この会話の<b>本文はまだ取り込まれていません</b>（一覧の情報だけ表示中）<br>最後のやり取り：<b>${esc((sel.state && sel.state.prev) || '—')}</b>${sel.state && sel.state.when ? '（' + esc(sel.state.when) + '）' : ''}<br><span style="font-size:11px">本文は裏の🤖巡回役タブが順に取り込みます。急ぐ場合はShopeeチャットでこの会話を開くと即取り込まれます。</span></div>`}</div>` +
       (sel.source === 'shopee'
-        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div id="msg-sender" style="font-size:10.5px;margin-bottom:4px;color:#888">送信状態を確認中…</div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
+        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><div id="msg-sender" style="font-size:10.5px;color:#888;flex:1">送信状態を確認中…</div><button id="msg-tplbtn" class="smd-btn" style="font-size:11px;padding:2px 9px;white-space:nowrap" title="登録した定型文から選んで挿入">📋 定型文${(msg.tpls && msg.tpls.length) ? '（' + msg.tpls.length + '）' : ''}</button></div><div id="msg-tplbox" style="display:none;margin-bottom:6px"></div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
         : `<div class="smd-dim" style="padding:10px 14px;font-size:11px;border-top:1px solid #eee">※このソースからの返信は未対応です</div>`)
     ) : '<div class="smd-dim" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:13px">左の会話を選んでください</div>';
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
@@ -7557,7 +7622,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       const qc = document.getElementById('msg-qclr'); if (qc) qc.addEventListener('click', () => { msg.q = ''; msg.showN = 80; renderMessages(true); });
     }
-    refreshSenderStatus(); refreshCrawlBar();
+    refreshSenderStatus(); refreshCrawlBar(); wireTemplates();
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
