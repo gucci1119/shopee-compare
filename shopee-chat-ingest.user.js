@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.15.0
-// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。
+// @version      1.16.0
+// @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
 // @match        https://seller.shopee.com.my/*
@@ -73,10 +73,12 @@
   const K_SBURL = 'chat_sb_url', K_SBKEY = 'chat_sb_key';
   const getSbUrl = () => (GM_getValue(K_SBURL, '') || DEFAULT_SB_URL).replace(/\/$/, '');
   const getSbKey = () => GM_getValue(K_SBKEY, '');
-  GM_registerMenuCommand('★ 返信を有効化：Supabaseキーを設定（GAS枠を使わず直読み）', () => {
-    const v = prompt('ポータル ⚙️設定の「Supabase secretキー（書き込み用）」を貼り付けてください。\n設定すると返信キュー(chat_outbox)をSupabaseから直接読んで送信します＝GASの日次枠を一切消費しません。\n（空にすると従来のGAS経由に戻ります）', getSbKey());
-    if (v != null) { GM_setValue(K_SBKEY, v.trim()); toast(v.trim() ? '✓ 返信をSupabase直読みで有効化（GAS節約）' : 'GAS経由に戻しました'); updateChip(); }
-  });
+  const askSbKey = () => {
+    const v = prompt('ポータル ⚙️設定の「Supabase secretキー（書き込み用）」を貼り付けてください。\n設定すると取り込み・返信をSupabaseへ直接読み書き＝GASの日次枠を一切消費しません。\n（空にすると従来のGAS経由に戻ります）', getSbKey());
+    if (v != null) { GM_setValue(K_SBKEY, v.trim()); toast(v.trim() ? '✓ Supabase直で有効化（GAS枠ゼロ）' : 'GAS経由に戻しました'); updateChip(); return true; }
+    return false;
+  };
+  GM_registerMenuCommand('★ 返信を有効化：Supabaseキーを設定（GAS枠を使わず直読み）', askSbKey);
   GM_registerMenuCommand('Supabase URLを変更（通常不要）', () => {
     const v = prompt('Supabase プロジェクトURL（通常は既定のままでOK）', getSbUrl());
     if (v != null) { GM_setValue(K_SBURL, v.trim().replace(/\/$/, '')); toast('Supabase URLを保存しました'); }
@@ -582,7 +584,13 @@
     chip.title = 'クリックで状態表示／未設定ならトークン入力';
     chip.addEventListener('click', () => {
       if (!getTok()) { askToken(); return; }
-      alert('Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済: ' + sent + ' 件\n未送信: ' + msgBuffer.length + ' 件\nTOKEN: 設定済\n経路: ' + (getSbKey() ? '✅ Supabase直（取り込み5秒／返信8秒・GAS枠ゼロ）' : 'GAS経由（取り込み15秒／返信60秒・キー未設定）') + (lastErr ? ('\n直近エラー: ' + lastErr) : ''));
+      const line = 'Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済: ' + sent + ' 件\n未送信: ' + msgBuffer.length + ' 件\n経路: ' + (getSbKey() ? '✅ Supabase直（取り込み5秒／返信8秒・GAS枠ゼロ）' : 'GAS経由（取り込み15秒／返信60秒・キー未設定）') + (lastErr ? ('\n直近エラー: ' + lastErr) : '');
+      if (!getSbKey()) {
+        // キー未設定＝チップから直接設定できる（Tampermonkeyメニューを探さなくてよい）
+        if (confirm(line + '\n\n──────────\n返信・取り込みを「GAS枠ゼロ・リアルタイム」にするには Supabaseキーが要ります。\n今すぐ設定しますか？\n（OK → ポータル ⚙️設定 の「Supabase secretキー（書き込み用）」を貼り付け）')) askSbKey();
+      } else {
+        if (confirm(line + '\n\n──────────\nSupabaseキーを再設定/解除しますか？（OK＝入力）')) askSbKey();
+      }
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
