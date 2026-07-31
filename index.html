@@ -7309,6 +7309,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (isNaN(ms) || ms > Date.now() + 86400000) return (m.synced_at || '');
     return t;
   }
+  // 送信役（裏で開いたShopeeチャットのタブ＝実際に送信を実行する配管）の生存表示。
+  // 公式Chat APIがこの垢では取れないため送信はこの経路が唯一。ただし本人はポータルだけ見ていればよいように、
+  // 「今送れるか／送れないなら予約になる」をこの画面に出す。
+  async function refreshSenderStatus() {
+    const el = document.getElementById('msg-sender'); if (!el) return;
+    let hb = null;
+    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_sender_hb'); hb = (r || [])[0] && ((r[0] || {}).v || null); } catch (_) {}
+    const at = hb && hb.at ? Date.parse(hb.at) : 0;
+    const age = at ? (Date.now() - at) / 1000 : Infinity;
+    if (age < 180) el.innerHTML = '<span style="color:#1a7f37;font-weight:700">🟢 すぐ送信できます</span> <span class="smd-dim">' + (age < 60 ? '' : '（' + Math.round(age / 60) + '分前に確認）') + '</span>';
+    else el.innerHTML = '<span style="color:#e8710a;font-weight:700">🟡 いまは予約になります</span> <span class="smd-dim">送信すると<b>キューに保存</b>され、送信役が復帰した時に自動で送られます（Shopeeチャットのタブを開いたままにしてください）。</span>';
+  }
   // 返信の送信結果をポータル側で見届ける（webchatを開いて確認しに行かなくて済む＝集約）。
   // chat_outbox の該当行を数秒おきに見て sent/error を表示。90秒たっても pending なら「送信役が動いていない」と案内。
   function watchOutbox(id, statEl) {
@@ -7412,7 +7424,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div style="padding:10px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:9px;background:#fff">${avatar(sel.buyer)}<div><div style="font-weight:700;font-size:14px">${sel.unreplied ? '<span style="color:#d93025">● </span>' : ''}${esc(sel.buyer || '(不明)')}</div><div style="font-size:11px;color:#888">${srcBadge(sel.source)} ${sel.cc ? ccBadge(sel.cc) : ''} ・ ${sel.msgs.length}件</div></div></div>` +
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.map(bubbleHtml).join('')}</div>` +
       (sel.source === 'shopee'
-        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="返信を入力（webchatタブを開いておくと自動送信）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
+        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div id="msg-sender" style="font-size:10.5px;margin-bottom:4px;color:#888">送信状態を確認中…</div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
         : `<div class="smd-dim" style="padding:10px 14px;font-size:11px;border-top:1px solid #eee">※このソースからの返信は未対応です</div>`)
     ) : '<div class="smd-dim" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:13px">左の会話を選んでください</div>';
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
@@ -7429,6 +7441,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const u = document.getElementById('msg-unrep'); if (u) u.addEventListener('change', e => { msg.unrepliedOnly = e.target.checked; msg.showN = 80; renderMessages(true); }); }
     body.querySelectorAll('.msg-ci').forEach(r => r.addEventListener('click', () => { msg.open = r.dataset.k; renderMessages(true); }));
     { const mb = document.getElementById('msg-more'); if (mb) mb.addEventListener('click', () => { msg.showN = (msg.showN || 80) + 120; renderMessages(true); }); }
+    refreshSenderStatus();
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');

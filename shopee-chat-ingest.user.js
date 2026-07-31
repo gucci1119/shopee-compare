@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.17.0
+// @version      1.18.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -578,9 +578,25 @@
       onerror: () => { outboxBusy = false; }, ontimeout: () => { outboxBusy = false; }
     });
   }
-  // 返信キューの巡回：Supabaseキーがあれば8秒（GAS枠を使わずリアルタイム）／無ければ従来のGAS経由を60秒（枠節約）。いずれも非表示タブは停止。
+  // 返信キューの巡回：
+  //  ・Supabase直(キー設定時)＝GAS枠を使わないので **裏タブ(document.hidden)でも巡回する**。
+  //    ★このタブは「ポータルから送った返信を実際に送信するエンジン」＝ピン留めして裏に置く使い方が本命なので、
+  //      非表示で止めると返信が永久に送られない（旧実装のバグ）。※ブラウザの節電で裏タブのタイマーは最長1分間隔に間引かれる＝送信は最大1分遅れ。
+  //  ・GAS経由(キー未設定)＝日次枠を食うので従来どおり表示中タブのみ60秒。
   setInterval(function () { if (!document.hidden && !getSbKey()) pollOutbox(); }, 60000);
-  setInterval(function () { if (!document.hidden && getSbKey()) pollOutbox(); }, 8000);
+  setInterval(function () { if (getSbKey()) pollOutbox(); }, 8000);
+
+  // ---- 送信エンジンの生存通知（ハートビート） ----
+  // ポータル側が「今このwebchatタブが動いている＝返信を送れる」と分かるように、30秒ごとに app_kv へ最終稼働時刻を書く。
+  // Supabase直書きなのでGAS枠は使わない。キー未設定時は書かない（＝ポータルには「送信できない」と出るのが正しい）。
+  function heartbeat() {
+    if (!getSbKey()) return;
+    sbReq('POST', 'app_kv?on_conflict=k',
+      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname }, updated_at: new Date().toISOString() }],
+      'resolution=merge-duplicates,return=minimal').catch(() => {});
+  }
+  setTimeout(heartbeat, 5000);
+  setInterval(heartbeat, 30000);
   GM_registerMenuCommand('ポータル返信の自動送信: ON/OFF 切替', () => { const v = OUTBOX_ON(); GM_setValue('outboxSend', !v); toast('ポータル返信の自動送信を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
 
   // ---- 左下チップ + トースト ----
