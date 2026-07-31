@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.32.0
+// @version      1.33.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -607,6 +607,8 @@
   let scanning = false;
   async function scanAllConversations(manual) {
     if (scanning || !isWorker()) return null;
+    // 巡回中は一覧を上下にスクロールし合って衝突するので実行しない（進捗バーの分母はポータル側が代用する）
+    if (cycling) { if (manual) toast('いま取り込み巡回中です。終わってから実行してください'); return null; }
     scanning = true;
     const acc = {};
     try {

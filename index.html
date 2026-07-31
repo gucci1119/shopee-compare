@@ -7329,7 +7329,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_crawl_progress'); p = ((r || [])[0] || {}).v || null; } catch (_) {}
     const fresh = p && p.at && (Date.now() - Date.parse(p.at)) < 180000; // 3分以上更新が無ければ止まったとみなす
     if (!p || !p.running || !fresh) { el.style.display = 'none'; return; }
-    const total = Number(p.total) || 0, done = Number(p.done) || 0;
+    // 分母：一覧スキャン済みならその会話数。未スキャンでも止めないよう、ポータルが把握している会話数で代用する
+    //   （巡回中は一覧スキャンを走らせられないため。代用時は「約」と明示）
+    const scanned = Number(p.total) || 0, known = Number(msg._totalConv) || 0;
+    const total = scanned || known, approx = !scanned && !!known;
+    const done = Number(p.done) || 0;
     const pct = total ? Math.max(1, Math.min(100, Math.round(done * 100 / total))) : 0;
     // 完了見込み＝この実行で処理した件数と経過時間から速度を出して残りを割る
     let eta = '';
@@ -7348,7 +7352,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     el.innerHTML =
       `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11.5px">
          <b style="color:#1565c0">📥 過去メッセージを取り込み中</b>
-         <span>${done}${total ? ' / ' + total : ''} 会話${total ? '（' + pct + '%）' : ''}</span>
+         <span>${done}${total ? ' / ' + (approx ? '約' : '') + total : ''} 会話${total ? '（' + pct + '%）' : ''}</span>
          <span class="smd-dim">${eta ? esc(eta) : '見込みを計算中…'}</span>
          ${p.cur ? `<span class="smd-dim">いま: ${esc(p.cur)}</span>` : ''}
          <span class="smd-dim" style="margin-left:auto">※Shopeeチャットのタブは触らないでください（触ると一時停止します）</span>
@@ -7445,6 +7449,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return c;
     });
     const totalConv = convList.length, unreplied = convList.filter(c => c.unreplied).length;
+    msg._totalConv = totalConv; // 進捗バーの分母の代用（一覧スキャン未実行時）
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
     const now = Date.now(), recent = rows.filter(m => { const t = msgTime(m); return t && (now - Date.parse(t)) < 86400000; }).length;
