@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.26.0
+// @version      1.27.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -72,9 +72,31 @@
   //   手動用タブでも「今開いている会話」の取り込みは続く＝自分で返信した内容もリアルタイムでポータルに入る。
   //   返信送信・自動巡回・履歴の自動遡りは巡回役タブだけが行う（作業を邪魔しない・二重送信もしない）。
   const TAB_ROLE_KEY = 'smdChatTabRole';
-  function tabRole() { try { return sessionStorage.getItem(TAB_ROLE_KEY) || 'worker'; } catch (_) { return 'worker'; } }
+  function tabRole() { try { return sessionStorage.getItem(TAB_ROLE_KEY) || 'auto'; } catch (_) { return 'auto'; } }
   function setTabRole(r) { try { sessionStorage.setItem(TAB_ROLE_KEY, r); } catch (_) {} }
-  const isWorker = () => isWebchat() && tabRole() === 'worker';
+  // ★巡回役は「全webchatタブのうち1枚だけ」。既定を"全部巡回役"にすると2枚開いた瞬間に両方動いてしまうため、
+  //   共有ストレージのリース（持ち回り権）で自動的に1枚に絞る。持っているタブが閉じられたら45秒後に他タブが自動で引き継ぐ。
+  //   明示的に🙋手動用にしたタブは、そもそも立候補しない。
+  const TAB_ID_KEY = 'smdChatTabId';
+  function tabId() {
+    let v = null; try { v = sessionStorage.getItem(TAB_ID_KEY); } catch (_) {}
+    if (!v) { v = 't' + Math.random().toString(36).slice(2) + Date.now().toString(36); try { sessionStorage.setItem(TAB_ID_KEY, v); } catch (_) {} }
+    return v;
+  }
+  const LEASE_KEY = 'chatWorkerLease';
+  function leaseGet() { try { return GM_getValue(LEASE_KEY, null); } catch (_) { return null; } }
+  function leaseHeld() { const l = leaseGet(); return !!(l && l.id === tabId() && (Date.now() - (l.at || 0)) < 60000); }
+  function leaseTick() {
+    if (!isWebchat() || tabRole() === 'manual') { // 手動用タブは権利を手放す（他タブが引き継げるように）
+      const l0 = leaseGet(); if (l0 && l0.id === tabId()) { try { GM_setValue(LEASE_KEY, null); } catch (_) {} }
+      return;
+    }
+    const l = leaseGet(), now = Date.now();
+    if (!l || !l.at || (now - l.at) > 45000 || l.id === tabId()) { try { GM_setValue(LEASE_KEY, { id: tabId(), at: now }); } catch (_) {} }
+  }
+  setTimeout(() => { leaseTick(); updateChip(); }, 1500 + Math.floor(Math.random() * 2000)); // 同時起動の取り合いを少しずらす
+  setInterval(() => { leaseTick(); updateChip(); }, 10000);
+  const isWorker = () => isWebchat() && tabRole() !== 'manual' && leaseHeld();
 
   // ---- 設定（GAS URL / WRITE_TOKEN） ----
   // GAS URL は既定を埋め込み済み（＝①の設定は不要）。必要ならメニューから上書き可。
@@ -222,6 +244,7 @@
     return { thread, tr, buyer, cc };
   }
   let captureAs = null; // 巡回で「ヘッダ先頭＝狙い名」を確認済みの時だけ {buyer,cc} を入れる＝その時のみ行由来のクリーン名で確定
+  let _lastHdr = { key: '', at: 0 }; // 直前に表示されていた相手（混線ガード用＝切替直後は取り込まない）
   // ---- 日付コンテキスト：Shopeeは各メッセージに日付を出さないが、スレッドに日付区切り（"19 Jun"/"Yesterday"/"Monday"/"DD/MM"）が出る。
   //   これを追って各メッセージの本当の日付を決める（従来は全部「今日」＝一覧の最終時刻が全部“今日”になっていた） ----
   // 画像が読み込まれる前にShopeeが出す仮テキスト（各国語）。これを本文として保存しないための判定。
@@ -249,6 +272,14 @@
     //   だけなので混線しない（表示中スレッド＝その会話）。手動閲覧時は captureAs=null＝ヘッダ検出（domHeaderInfo）。
     if (captureAs && captureAs.buyer) { h.buyer = captureAs.buyer; if (captureAs.cc) h.cc = captureAs.cc; }
     if (!h.buyer) return [];
+    // ★混線ガード：会話を切り替えた直後は「本文は新しい相手・ヘッダはまだ前の相手」という数百msのズレが起きる。
+    //   captureAs（巡回で検証済み）でない時は、**同じ相手が続けて表示されている**ことを確認してから取り込む。
+    //   これで手動クリックで会話を切り替えた時の取り違えも防ぐ（取り込みは切替から約1.2秒遅れるだけ）。
+    if (!captureAs) {
+      const hk = h.cc + ':' + h.buyer, nowMs = Date.now();
+      if (_lastHdr.key !== hk) { _lastHdr = { key: hk, at: nowMs }; return []; }
+      if (nowMs - _lastHdr.at < 1200) return [];
+    }
     const tc = h.tr.left + h.tr.width / 2;
     const trans = c => !c || c === 'transparent' || /rgba\(0,\s*0,\s*0,\s*0\)/.test(c);
     const conv = h.cc + ':' + h.buyer;
@@ -319,7 +350,11 @@
       if (added) { captured += added; updateChip(); }
     } catch (_) {}
   }
-  setInterval(() => { if (isWebchat()) domSweep(); }, 2500); // 取り込みはwebchat画面のみ（他のSeller Centerページの小窓チャットを誤読しない）
+  // ★定期取り込みは「巡回していない時」だけ。巡回中(cycling)は quickCapture 側が
+  //   「ヘッダ＝狙いの相手」と確認できた時にだけ取り込む（captureAs）ので、そちらに任せる。
+  //   ここを常時動かすと、会話を切り替えた瞬間（本文は新しい相手・ヘッダはまだ前の相手、という数百msの隙間）に
+  //   割り込んでしまい、**別人のメッセージを前の相手の名前で保存する＝混線**が起きる（実際に発生）。
+  setInterval(() => { if (isWebchat() && !cycling) domSweep(); }, 2500);
 
   // ---- 過去履歴の自動取得（会話を開いたら上まで遡ってsweep→最新に戻す） ----
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -804,9 +839,11 @@
       chip.style.background = '#555'; chip.title = 'Shopeeチャット(webchat)の画面でだけ動きます'; return;
     }
     const warn = (!getUrl() || !getTok());
-    const role = tabRole() === 'worker' ? '🤖' : '🙋';
+    const role = (tabRole() === 'manual') ? '🙋' : (leaseHeld() ? '🤖' : '⏸');
     chip.textContent = role + ' 💬→OS: ' + sent + (msgBuffer.length ? ' (+' + msgBuffer.length + ')' : '') + (cycleInfo ? ' 🔄' + cycleInfo : '') + (warn ? ' ⚙️未設定' : '') + (lastErr ? ' ⚠️' : '');
-    chip.title = (tabRole() === 'worker' ? '巡回役タブ（自動で会話を開いて取り込み＋返信送信）' : '手動用タブ（巡回しない＝作業の邪魔をしない）') + ' — クリックで設定';
+    chip.title = (tabRole() === 'manual' ? '🙋手動用タブ（巡回しない＝作業の邪魔をしない）'
+      : leaseHeld() ? '🤖巡回役タブ（自動で会話を開いて取り込み＋返信送信）'
+        : '⏸待機タブ（他のタブが巡回役。そのタブを閉じると自動で引き継ぎます）') + ' — クリックで設定';
     chip.style.background = cycleInfo ? '#1a5' : (warn ? '#8a6d00' : (lastErr ? '#7a1f1f' : '#111'));
   }
   function toast(msg) {
