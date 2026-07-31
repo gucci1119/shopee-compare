@@ -7647,6 +7647,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const out = m.direction === 'out';
       return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
     };
+    msg._convList = convList; // 表示順（絞り込み・並び替え後）を保持＝送信後に「次の未返信」へ進むため
     // 選択中の会話（無ければ先頭）
     const sel = convList.find(c => c.key === msg.open) || convList[0] || null;
     if (sel) msg.open = sel.key;
@@ -7737,12 +7738,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (ta) ta.value = ''; delete msg.draft[k];
         try { logAct('メッセージ', '返信送信', buyer, text.slice(0, 40)); } catch (_) {}
         if (stat) { stat.textContent = '📤 送信中…（webchatタブの取り込みツールが送信します）'; stat.style.color = '#888'; }
+        // ★送ったら自動で次の未返信へ進む（返信を"待ち行列"として上から片付けられる＝即レス運用）。
+        //   古い未返信(7日超)は飛ばす。次が無ければその場に留まる。
+        try {
+          const cur = msg._convList || [];
+          const i = cur.findIndex(c => c.key === k);
+          const next = cur.slice(i + 1).find(c => c.unreplied && !c.stale) || cur.find(c => c.unreplied && !c.stale && c.key !== k);
+          if (next) { msg.open = next.key; setTimeout(() => renderMessages(true), 350); }
+        } catch (_) {}
         // ★送信結果をポータルで見届ける（webchatを見に行かなくても成否が分かる＝集約）。最大90秒だけ監視。
         watchOutbox(id, stat);
       } catch (e) { if (stat) { stat.textContent = '登録エラー: ' + (e.message || e); stat.style.color = '#d93025'; } }
     }));
     // 返信の下書き保持（会話切替・自動更新で消えない）
-    { const rin = body.querySelector('.msg-reply-in'); if (rin) { const k = rin.dataset.k; if (msg.draft[k]) rin.value = msg.draft[k]; rin.addEventListener('input', () => { msg.draft[k] = rin.value; }); } }
+    { const rin = body.querySelector('.msg-reply-in'); if (rin) { const k = rin.dataset.k; if (msg.draft[k]) rin.value = msg.draft[k]; rin.addEventListener('input', () => { msg.draft[k] = rin.value; });
+      // ⌘Enter（WinはCtrl+Enter）で送信＝手をキーボードから離さず次々返せる
+      rin.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); const b = body.querySelector('.msg-reply-send'); if (b) b.click(); } });
+    } }
     // 通知の許可を一度だけ求める
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (_) {}
     // ★リアルタイム更新：この画面を開いている間だけ、新着(synced_at)を検知して反映＋通知（常時ポーリングはしない）
