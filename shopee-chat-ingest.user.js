@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.18.0
+// @version      1.19.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -541,6 +541,26 @@
     return sbReq('PATCH', 'chat_outbox?id=eq.' + encodeURIComponent(id),
       { status: ok ? 'sent' : 'error', sent_at: new Date().toISOString(), error: ok ? null : String(err || '').slice(0, 200) }).catch(() => {});
   }
+  // ★二重送信ガード：Seller Centerのタブを複数開いていると、各タブが同じ pending を拾って
+  //   **お客さんに同じ返信を2通送ってしまう**。送信前に「pendingのものだけを sending に変える」条件付き更新で
+  //   奪い合い（compare-and-set）を行い、取れたタブだけが送る。0件＝他タブが取った＝この タブは送らない。
+  let claimSupported = true;
+  async function claimOutbox(id) {
+    if (!claimSupported) return true; // 条件付き更新が使えない環境では従来動作（単一タブ前提）
+    try {
+      const r = await sbReq('PATCH', 'chat_outbox?id=eq.' + encodeURIComponent(id) + '&status=eq.pending',
+        { status: 'sending', sent_at: new Date().toISOString() }, 'return=representation');
+      if (r && r.status >= 200 && r.status < 300) return Array.isArray(r.json) && r.json.length > 0;
+      claimSupported = false; lastErr = 'claim不可(' + ((r && r.status) || '?') + ')'; return true; // 列/制約の都合で使えない時は素通し
+    } catch (_) { return true; }
+  }
+  // 送信中にタブが閉じられた等で 'sending' のまま取り残された行を、5分後に pending へ戻す（再送可能に）
+  async function reclaimStale() {
+    if (!claimSupported) return;
+    const cutoff = new Date(Date.now() - 5 * 60000).toISOString();
+    try { await sbReq('PATCH', 'chat_outbox?status=eq.sending&sent_at=lt.' + encodeURIComponent(cutoff), { status: 'pending' }); } catch (_) {}
+  }
+  const skipUntil = new Map(); // id→再挑戦時刻。この タブに無い会話（別アカウント側の注文等）は少し置いてから再挑戦
   async function pollOutboxSb() {
     let items = [];
     try {
@@ -548,9 +568,19 @@
       if (r && r.status >= 200 && r.status < 300 && Array.isArray(r.json)) items = r.json;
       else { outboxBusy = false; return; }
     } catch (_) { outboxBusy = false; return; }
+    if (!items.length) { reclaimStale(); outboxBusy = false; return; }
+    const now = Date.now();
     for (const it of items) {
+      if (skipUntil.get(it.id) > now) continue; // この タブでは見つからなかった会話＝別タブに任せて後で再挑戦
       if (it.buyer === '__CYCLE__' || it.text === '__CYCLE__') { await outboxDoneSb(it.id, true, ''); continue; }
+      if (!(await claimOutbox(it.id))) continue; // 他タブが送信中
       let ok = false, err = ''; try { await sendReply(it); ok = true; sentReplies++; } catch (e) { err = String((e && e.message) || e); lastErr = '返信:' + err; }
+      if (!ok && /会話が見つかりません/.test(err)) {
+        // このタブ（＝今アクティブなアカウント）に無い会話。エラー確定にせず pending へ戻して他タブ/切替後に任せる。
+        skipUntil.set(it.id, now + 10 * 60000);
+        try { await sbReq('PATCH', 'chat_outbox?id=eq.' + encodeURIComponent(it.id), { status: 'pending' }); } catch (_) {}
+        updateChip(); await sleep(400); continue;
+      }
       await outboxDoneSb(it.id, ok, err); updateChip(); await sleep(900);
     }
     outboxBusy = false;
