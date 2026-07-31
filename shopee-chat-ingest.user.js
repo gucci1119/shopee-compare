@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.22.0
+// @version      1.23.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -722,13 +722,26 @@
     chip.title = 'クリックで状態表示／未設定ならトークン入力';
     chip.addEventListener('click', () => {
       if (!getTok()) { askToken(); return; }
-      const line = 'Shopee OS チャット取り込み\n国: ' + (CC || '不明') + '\nキャプチャ: ' + captured + ' 件\n送信済: ' + sent + ' 件\n未送信: ' + msgBuffer.length + ' 件\n経路: ' + (getSbKey() ? '✅ Supabase直（取り込み5秒／返信8秒・GAS枠ゼロ）' : 'GAS経由（取り込み15秒／返信60秒・キー未設定）') + (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      if (!getSbKey()) {
-        // キー未設定＝チップから直接設定できる（Tampermonkeyメニューを探さなくてよい）
-        if (confirm(line + '\n\n──────────\n返信・取り込みを「GAS枠ゼロ・リアルタイム」にするには Supabaseキーが要ります。\n今すぐ設定しますか？\n（OK → ポータル ⚙️設定 の「Supabase secretキー（書き込み用）」を貼り付け）')) askSbKey();
-      } else {
-        if (confirm(line + '\n\n──────────\nSupabaseキーを再設定/解除しますか？（OK＝入力）')) askSbKey();
-      }
+      // ★ここがこのスクリプトの操作パネル。Tampermonkeyのメニューは「動いているページで拡張アイコンを押す」必要があり
+      //   場所が分かりにくいので、必要な操作は全部このチップに集約する（本人が毎回探さずに済むように）。
+      const status =
+        'Shopee OS チャット取り込み\n' +
+        '国: ' + (CC || '不明') + '／取り込み: ' + captured + '件（未送信 ' + msgBuffer.length + '）\n' +
+        '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
+        '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
+        (lastErr ? ('\n直近エラー: ' + lastErr) : '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n（空のままOK＝閉じる）', '');
+      const a = (ans || '').trim();
+      if (a === '1') askSbKey();
+      else if (a === '2') {
+        const v = keepAliveOn(); GM_setValue('keepAlive', !v);
+        if (v) { stopKeepAlive(); toast('即レスモードOFF'); } else { startKeepAlive(); toast('⚡即レスモードON（タブに音声アイコンが出ますが無音です）'); }
+        updateChip();
+      } else if (a === '3') {
+        crawlDone.clear(); Object.keys(lastSig).forEach(k => delete lastSig[k]);
+        GM_setValue('crawlDoneList', []); GM_setValue('lastSigMap', {}); GM_setValue('didFullCycle', false);
+        toast('巡回の記録をリセットしました');
+      } else if (a === '4') flush(true);
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
