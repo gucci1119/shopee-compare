@@ -7376,6 +7376,60 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function tagChips(tags) {
     return (tags || []).map(t => `<span style="background:#eef2ff;color:#3b4fb0;border:1px solid #d6e0ff;border-radius:3px;padding:0 4px;font-size:9.5px;font-weight:700">${esc(t)}</span>`).join(' ');
   }
+  // ---------- 🧭 対応ガイド（Yes/No分岐）＝Smart Reply からの移植・第3弾 ----------
+  // 「この問い合わせにどう答えるか」を分岐でたどり、最後に返信文を返信欄へ挿入する。定型文が"文の引き出し"なら、
+  // こちらは"判断の手順書"。保存は app_kv.chat_guides（新テーブル不要）。
+  // データ形：[{ id, name, category, nodes:[ {id, ask:"質問", opts:[{label,to}]}, {id, say:"返信文"} ] }]
+  //   ・nodes[0] が開始地点。opts の to が次のノードid。say を持つノードが終点（返信文）。
+  async function saveGuides() { try { await sbUpsert('app_kv', [{ k: 'chat_guides', v: msg.guides || [], updated_at: new Date().toISOString() }]); } catch (_) {} }
+  function guideNode(g, id) { return (g.nodes || []).find(n => n.id === id) || (g.nodes || [])[0]; }
+  function drawGuideBox() {
+    const bx = document.getElementById('msg-guidebox'); if (!bx) return;
+    const list = msg.guides || [];
+    const wrap = (inner) => `<div style="border:1px solid #cfe3d4;background:#f4faf5;border-radius:8px;padding:8px 10px">${inner}</div>`;
+    if (!list.length) {
+      bx.innerHTML = wrap(`<div style="font-size:12px;line-height:1.7"><b>対応ガイドがまだありません。</b>「この問い合わせにどう答えるか」を分岐でたどれる手順書です。<br>
+        <span class="smd-dim">JSONを貼って取り込めます。形：<code>[{"name":"未着の問い合わせ","nodes":[{"id":"n1","ask":"発送済み？","opts":[{"label":"はい","to":"n2"},{"label":"いいえ","to":"n3"}]},{"id":"n2","say":"発送済みです。..."},{"id":"n3","say":"確認して折り返します。"}]}]</code></span>
+        <textarea id="gd-imp" rows="3" style="width:100%;box-sizing:border-box;margin-top:5px;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:11px"></textarea>
+        <div style="margin-top:5px;display:flex;gap:6px"><button id="gd-impgo" class="smd-btn" style="font-size:11px;padding:3px 10px;background:#1a7f37;color:#fff;border-color:#1a7f37">取り込む</button><span id="gd-impmsg" class="smd-dim" style="font-size:11px"></span></div></div>`);
+      const g = document.getElementById('gd-impgo');
+      if (g) g.addEventListener('click', async () => {
+        const el = document.getElementById('gd-imp'), m = document.getElementById('gd-impmsg');
+        let arr = null; try { arr = JSON.parse((el && el.value) || ''); } catch (_) {}
+        if (!Array.isArray(arr) || !arr.length) { if (m) { m.textContent = 'JSONの配列を貼り付けてください'; m.style.color = '#d93025'; } return; }
+        msg.guides = arr.filter(x => x && Array.isArray(x.nodes) && x.nodes.length).map((x, i) => ({ id: x.id || ('g' + i), name: x.name || ('ガイド' + (i + 1)), category: x.category || '', nodes: x.nodes }));
+        await saveGuides(); if (m) { m.textContent = '✅ ' + msg.guides.length + '件を取り込みました'; m.style.color = '#1a7f37'; }
+        setTimeout(() => renderMessages(true), 700);
+      });
+      return;
+    }
+    // ガイド選択 → 分岐をたどる
+    const g = list.find(x => x.id === msg.gdId) || null;
+    if (!g) {
+      bx.innerHTML = wrap(`<div style="font-size:11.5px;font-weight:700;margin-bottom:5px">🧭 どの状況ですか？</div>` +
+        list.map(x => `<button class="gd-pick smd-btn" data-id="${esc(x.id)}" style="font-size:11.5px;padding:3px 10px;margin:0 5px 5px 0">${esc(x.name)}</button>`).join('') +
+        `<button id="gd-close" class="smd-btn" style="font-size:11px;padding:2px 8px;float:right">✕</button>`);
+      bx.querySelectorAll('.gd-pick').forEach(b => b.addEventListener('click', () => { msg.gdId = b.dataset.id; msg.gdNode = null; drawGuideBox(); }));
+      const c = document.getElementById('gd-close'); if (c) c.addEventListener('click', () => { bx.style.display = 'none'; });
+      return;
+    }
+    const n = guideNode(g, msg.gdNode);
+    if (n && n.say) {
+      bx.innerHTML = wrap(`<div style="font-size:11.5px;font-weight:700;margin-bottom:4px">🧭 ${esc(g.name)} → この返信でどうぞ</div>
+        <div style="background:#fff;border:1px solid #e5e5e5;border-radius:6px;padding:7px 9px;font-size:12px;white-space:pre-wrap;max-height:130px;overflow:auto">${esc(n.say)}</div>
+        <div style="margin-top:6px;display:flex;gap:6px"><button id="gd-use" class="smd-btn" style="font-size:11.5px;padding:3px 12px;background:#1a7f37;color:#fff;border-color:#1a7f37;font-weight:700">この文を入れる</button><button id="gd-back" class="smd-btn" style="font-size:11px;padding:3px 10px">最初から</button></div>`);
+      const u = document.getElementById('gd-use');
+      if (u) u.addEventListener('click', () => { tplInsert({ text: n.say, usageCount: 0 }); bx.style.display = 'none'; msg.gdId = null; msg.gdNode = null; });
+      const b2 = document.getElementById('gd-back'); if (b2) b2.addEventListener('click', () => { msg.gdId = null; msg.gdNode = null; drawGuideBox(); });
+      return;
+    }
+    bx.innerHTML = wrap(`<div style="font-size:11.5px;font-weight:700;margin-bottom:5px">🧭 ${esc(g.name)}</div>
+      <div style="font-size:12.5px;margin-bottom:6px">${esc((n && n.ask) || '')}</div>` +
+      ((n && n.opts) || []).map((o, i) => `<button class="gd-opt smd-btn" data-to="${esc(o.to || '')}" style="font-size:11.5px;padding:3px 12px;margin:0 5px 5px 0">${esc(o.label || ('選択' + (i + 1)))}</button>`).join('') +
+      `<button id="gd-back" class="smd-btn" style="font-size:11px;padding:2px 8px;float:right">最初から</button>`);
+    bx.querySelectorAll('.gd-opt').forEach(b => b.addEventListener('click', () => { msg.gdNode = b.dataset.to; drawGuideBox(); }));
+    const b3 = document.getElementById('gd-back'); if (b3) b3.addEventListener('click', () => { msg.gdId = null; msg.gdNode = null; drawGuideBox(); });
+  }
   // ---------- 📋 定型文（Smart Reply userscript からポータルへ移植・第1弾） ----------
   // webchat側スクリプトに溜めていたテンプレ（54件）をポータルでも使えるようにする。※元のスクリプトはそのまま並行稼働。
   // 保存先は app_kv.chat_templates（新テーブル不要）。形は {id,name,text,category,noteJa,usageCount,...} の配列。
@@ -7433,6 +7487,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const cl = document.getElementById('tpl-close'); if (cl) cl.addEventListener('click', () => { bx.style.display = 'none'; }); }
   }
   function wireTemplates() {
+    { const gb = document.getElementById('msg-gdbtn');
+      if (gb) gb.addEventListener('click', () => {
+        const bx = document.getElementById('msg-guidebox'); if (!bx) return;
+        if (bx.style.display === 'none') { bx.style.display = ''; msg.gdId = null; msg.gdNode = null; drawGuideBox(); } else bx.style.display = 'none';
+      }); }
     const b = document.getElementById('msg-tplbtn'); if (!b) return;
     b.addEventListener('click', () => {
       const bx = document.getElementById('msg-tplbox'); if (!bx) return;
@@ -7525,6 +7584,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { const kt = await sbGetAll('app_kv', 'select=v&k=eq.chat_templates'); const tv = ((kt || [])[0] || {}).v; msg.tpls = Array.isArray(tv) ? tv : (tv && Array.isArray(tv.items) ? tv.items : []); } catch (_) { msg.tpls = msg.tpls || []; }
       // 📌ピン/🏷タグ/📝メモ（Smart Replyからの移植・第2弾）。会話ごとの付箋情報を app_kv にまとめて保存
       try { const km = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_meta'); msg._meta = ((km || [])[0] || {}).v || {}; } catch (_) { msg._meta = msg._meta || {}; }
+      // 🧭対応ガイド（Yes/No分岐の手順書）
+      try { const kg = await sbGetAll('app_kv', 'select=v&k=eq.chat_guides'); const gv = ((kg || [])[0] || {}).v; msg.guides = Array.isArray(gv) ? gv : []; } catch (_) { msg.guides = msg.guides || []; }
     }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
@@ -7673,7 +7734,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.length ? sel.msgs.map(bubbleHtml).join('')
         : `<div class="smd-dim" style="margin:auto;text-align:center;font-size:12.5px;line-height:1.8">この会話の<b>本文はまだ取り込まれていません</b>（一覧の情報だけ表示中）<br>最後のやり取り：<b>${esc((sel.state && sel.state.prev) || '—')}</b>${sel.state && sel.state.when ? '（' + esc(sel.state.when) + '）' : ''}<br><span style="font-size:11px">本文は裏の🤖巡回役タブが順に取り込みます。急ぐ場合はShopeeチャットでこの会話を開くと即取り込まれます。</span></div>`}</div>` +
       (sel.source === 'shopee'
-        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><div id="msg-sender" style="font-size:10.5px;color:#888;flex:1">送信状態を確認中…</div><button id="msg-tplbtn" class="smd-btn" style="font-size:11px;padding:2px 9px;white-space:nowrap" title="登録した定型文から選んで挿入">📋 定型文${(msg.tpls && msg.tpls.length) ? '（' + msg.tpls.length + '）' : ''}</button></div><div id="msg-tplbox" style="display:none;margin-bottom:6px"></div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
+        ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><div id="msg-sender" style="font-size:10.5px;color:#888;flex:1">送信状態を確認中…</div><button id="msg-gdbtn" class="smd-btn" style="font-size:11px;padding:2px 9px;white-space:nowrap" title="どう答えるかを分岐でたどって返信文を作る">🧭 ガイド${(msg.guides && msg.guides.length) ? '（' + msg.guides.length + '）' : ''}</button><button id="msg-tplbtn" class="smd-btn" style="font-size:11px;padding:2px 9px;white-space:nowrap" title="登録した定型文から選んで挿入">📋 定型文${(msg.tpls && msg.tpls.length) ? '（' + msg.tpls.length + '）' : ''}</button></div><div id="msg-guidebox" style="display:none;margin-bottom:6px"></div><div id="msg-tplbox" style="display:none;margin-bottom:6px"></div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
         : `<div class="smd-dim" style="padding:10px 14px;font-size:11px;border-top:1px solid #eee">※このソースからの返信は未対応です</div>`)
     ) : '<div class="smd-dim" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:13px">左の会話を選んでください</div>';
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
