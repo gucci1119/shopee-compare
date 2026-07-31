@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.24.0
+// @version      1.25.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -214,6 +214,8 @@
   let captureAs = null; // 巡回で「ヘッダ先頭＝狙い名」を確認済みの時だけ {buyer,cc} を入れる＝その時のみ行由来のクリーン名で確定
   // ---- 日付コンテキスト：Shopeeは各メッセージに日付を出さないが、スレッドに日付区切り（"19 Jun"/"Yesterday"/"Monday"/"DD/MM"）が出る。
   //   これを追って各メッセージの本当の日付を決める（従来は全部「今日」＝一覧の最終時刻が全部“今日”になっていた） ----
+  // 画像が読み込まれる前にShopeeが出す仮テキスト（各国語）。これを本文として保存しないための判定。
+  const IMG_PLACEHOLDER = /^\s*[\[［]?\s*(image|photo|picture|画像|圖片|图片|imagem|foto|hình\s*ảnh|รูปภาพ|larawan|gambar)\s*[\]］]?\s*(\.{1,3}|…)?\s*$/i;
   const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
   const WD = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
   function pad2(n) { return String(n).padStart(2, '0'); }
@@ -268,9 +270,14 @@
       if (!ref) return;
       const rc = ref.left + ref.width / 2, dir = rc < tc - 60 ? 'in' : (rc > tc + 60 ? 'out' : '');
       if (!dir) return;
-      // 画像のみ＝URLを本文に保存（ポータルで<img>表示）。テキストがあればテキスト優先
+      // ★画像メッセージの扱い（本人報告「画像が出なくなった」の対策）
+      //   Shopeeは画像が読み込まれるまで「Image …」等の仮テキストを出す。取り込みが速くなった結果この仮テキストを
+      //   本文として保存してしまい、画像が表示されなくなっていた。
+      //   → ①画像URLが取れていれば必ずURLを優先（仮テキストは無視）②URLがまだ無く仮テキストだけなら**保存しない**
+      //     （ゴミ本文で確定させず、次のsweepで実URLを拾う）。
       let msgType = 'text';
-      if (!body && imgUrl) { body = imgUrl; msgType = 'image'; }
+      if (imgUrl && (!body || IMG_PLACEHOLDER.test(body))) { body = imgUrl; msgType = 'image'; }
+      else if (!imgUrl && body && IMG_PLACEHOLDER.test(body)) return; // 画像が未ロード＝今は取り込まない
       if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
       let base;
