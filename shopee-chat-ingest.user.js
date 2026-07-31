@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.21.0
+// @version      1.22.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -469,6 +469,22 @@
   if (GM_getValue('autoCrawl', true) !== false) {
     setTimeout(() => { if (isWebchat()) slowCrawl('full', false); }, 12000);
     setInterval(() => { if (isWebchat() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
+    // ★新着をできるだけ早く取り込む（本人要望＝リアルタイム性重視。メッセージは毎日15分おきに大量に来る）。
+    //   会話一覧はWebSocketで即座に更新されるので、5秒ごとに一覧の署名だけ見て、変化があればその場で
+    //   「新着のあった会話だけ」の巡回を起動する。従来は150秒固定待ち＝最大2.5分遅れていた。
+    //   ※開いている会話は元々2.5秒ごとに取り込み済み。操作中(userBusy)は起動しない＝作業を邪魔しない。
+    setInterval(() => {
+      if (!isWebchat() || cycling || userBusy()) return;
+      if (GM_getValue('autoCrawl', true) === false) return;
+      const side = sideList(); if (!side) return;
+      let changed = false;
+      for (const row of [].slice.call(side.children)) {
+        const nm = (row.innerText || '').trim().split('\n')[0].trim();
+        if (!nm || !/^[\w.]+$/.test(nm)) continue;
+        if (lastSig[nm] !== rowSig(row)) { changed = true; break; }
+      }
+      if (changed) slowCrawl('new', false);
+    }, 5000);
   }
 
   // ---- フラッシュ（GASへPOST） ----
@@ -665,6 +681,35 @@
   }
   setTimeout(heartbeat, 5000);
   setInterval(heartbeat, 30000);
+
+  // ---- ⚡即レス用：裏タブのタイマー間引きを解除（無音オーディオのキープアライブ） ----
+  // Chromeは「5分以上ずっと裏にあるタブ」のsetIntervalを最長1分に1回まで間引く（省電力）。
+  // ＝ピン留めした送信役タブだと、ポータルから送った返信が最大1分遅れる（即レスに不向き）。
+  // 無音の音声を鳴らし続けるとこの間引きが免除されるので、8秒巡回のまま＝ほぼ即時送信になる。
+  // ※タブに音声アイコンが出る／わずかにCPUを使うため既定OFF。メニューでON。
+  let _kaCtx = null;
+  function keepAliveOn() { return GM_getValue('keepAlive', false) === true; }
+  function startKeepAlive() {
+    if (_kaCtx || !keepAliveOn() || !isWebchat()) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+      _kaCtx = new Ctx();
+      const osc = _kaCtx.createOscillator(), g = _kaCtx.createGain();
+      g.gain.value = 0.0001; // 実質無音（完全な0だと「再生中」と見なされないことがある）
+      osc.connect(g); g.connect(_kaCtx.destination); osc.start();
+      if (_kaCtx.state === 'suspended') _kaCtx.resume().catch(() => {});
+    } catch (_) { _kaCtx = null; }
+  }
+  function stopKeepAlive() { try { if (_kaCtx) { _kaCtx.close(); } } catch (_) {} _kaCtx = null; }
+  GM_registerMenuCommand('⚡ 即レスモード（裏タブでも遅れず送信）: ON/OFF', () => {
+    const v = keepAliveOn(); GM_setValue('keepAlive', !v);
+    if (v) { stopKeepAlive(); toast('即レスモードOFF（裏タブでは送信が最大1分遅れます）'); }
+    else { startKeepAlive(); toast('⚡即レスモードON（裏タブでもすぐ送信。タブに音声アイコンが出ます）'); }
+    updateChip();
+  });
+  // 自動再生の制限で最初は鳴らせないことがあるので、最初のクリック時にも起動を試す
+  setTimeout(startKeepAlive, 6000);
+  document.addEventListener('click', () => startKeepAlive(), true);
   GM_registerMenuCommand('ポータル返信の自動送信: ON/OFF 切替', () => { const v = OUTBOX_ON(); GM_setValue('outboxSend', !v); toast('ポータル返信の自動送信を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
 
   // ---- 左下チップ + トースト ----
