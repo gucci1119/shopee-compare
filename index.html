@@ -7342,6 +7342,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!m.pin && !m.note && !(m.tags || []).length) delete msg._meta[k]; // 空になったら消す
     saveMeta(); renderMessages(true);
   }
+  // ⏱ 待たせている時間のバッジ。Shopeeは9時間超で「返信をお待たせしています」警告＝そこを赤にする
+  function waitBadge(c) {
+    if (c.waitH == null) return '';
+    const h = c.waitH;
+    const lab = h < 1 ? Math.max(1, Math.round(h * 60)) + '分' : h < 48 ? Math.round(h) + '時間' : Math.round(h / 24) + '日';
+    const col = h >= 9 ? '#d93025' : h >= 3 ? '#e8710a' : '#8a97a3';
+    return ` <span title="この相手を待たせている時間（未返信）。Shopeeは9時間超で警告＝返信率(CRR)に影響" style="font-size:9.5px;font-weight:700;color:${col}">${lab}待ち</span>`;
+  }
   function tagChips(tags) {
     return (tags || []).map(t => `<span style="background:#eef2ff;color:#3b4fb0;border:1px solid #d6e0ff;border-radius:3px;padding:0 4px;font-size:9.5px;font-weight:700">${esc(t)}</span>`).join(' ');
   }
@@ -7535,11 +7543,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // まだ本文を取り込んでいない会話は、一覧スキャンの情報で「最後の1件」を仮に作って表示する（抜けを作らない）
       if (!c.last && c.state) c.last = { text: c.state.prev || '', msg_type: 'text', direction: c.state.overdue ? 'in' : 'in', msg_time: stateTime(c.state.when), synced_at: '', _stateOnly: true };
       c.unreplied = c.last && c.last.direction === 'in';
+      // ⏱ 何時間待たせているか（未返信の最後の受信からの経過）。ShopeeはCRR(返信率)を見ており9時間超で警告が出る＝即レスの指標
+      c.waitH = null;
+      if (c.unreplied) { const t = Date.parse(msgTime(c.last) || ''); if (!isNaN(t)) c.waitH = Math.max(0, (Date.now() - t) / 3600000); }
       // 一覧スキャンの方が新しければ、並び順はそちらを使う（本文の取り込みが追いついていなくても正しい順になる）
       if (c.state) { const st = stateTime(c.state.when); if (st && (!c.last || st > (msgTime(c.last) || ''))) c.sortAt = st; }
       return c;
     });
     const totalConv = convList.length, unreplied = convList.filter(c => c.unreplied).length;
+    const over9 = convList.filter(c => (c.waitH || 0) >= 9).length; // Shopeeが警告を出す9時間超＝返信率(CRR)に効く
     msg._totalConv = totalConv; // 進捗バーの分母の代用（一覧スキャン未実行時）
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
@@ -7552,6 +7564,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     convList.sort((a, b) => {
       const pa = cmeta(a.key) && cmeta(a.key).pin ? 1 : 0, pb = cmeta(b.key) && cmeta(b.key).pin ? 1 : 0;
       if (pa !== pb) return pb - pa;
+      // 「未返信のみ」表示中は“待たせている順”＝対応すべき順に並べる（即レス運用のため）
+      if (msg.unrepliedOnly) return (b.waitH || 0) - (a.waitH || 0);
       return (convAt(b) || '') > (convAt(a) || '') ? 1 : -1;
     });
     if (msg.source !== 'all') convList = convList.filter(c => c.source === msg.source);
@@ -7609,7 +7623,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 検索中はヒットした発言をプレビューに出す（どこで話したか一目で分かる）
       const pv = (msg.q && c._hit) ? c._hit : c.last;
       const preview = (pv.msg_type === 'image' || IMG_PH.test(pv.text || '') ? '🖼️ 画像' : (pv.text || '')).slice(0, 40);
-      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(cmeta(c.key) && cmeta(c.key).pin) ? '<span title="ピン留め">📌</span>' : ''}${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(convAt(c))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''} ${tagChips(cmeta(c.key) && cmeta(c.key).tags)}</div></div></div>`;
+      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(cmeta(c.key) && cmeta(c.key).pin) ? '<span title="ピン留め">📌</span>' : ''}${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}${waitBadge(c)}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(convAt(c))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''} ${tagChips(cmeta(c.key) && cmeta(c.key).tags)}</div></div></div>`;
     }).join('') || '<div class="smd-dim" style="padding:16px;font-size:12px">会話がありません（webchatの取り込みが接続されると表示されます）</div>';
     const listMoreHtml = listShown < listTotal
       ? `<div style="padding:9px 11px;text-align:center;border-top:1px solid #f2f2f2"><button id="msg-more" class="smd-btn" style="font-size:11.5px;padding:4px 12px">もっと見る（残り ${listTotal - listShown}）</button></div>` : '';
@@ -7630,7 +7644,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
     body.innerHTML =
       `<div id="msg-crawl" class="tool-card" style="display:none;margin:0 0 8px;max-width:1000px;padding:8px 12px;background:#f2f7ff;border-color:#d6e4ff"></div>` +
-      `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:1000px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信', unreplied, '相手からの最後に未返信', unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
+      `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:1000px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信', unreplied, over9 ? ('⚠️ 9時間超が ' + over9 + '件') : '相手からの最後に未返信', unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
       `<div class="tool-card" style="margin:0 0 8px;max-width:1000px;padding:8px 12px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12px">絞り込み:</span>` +
       ['all|全て', 'shopee|Shopee', 'whatsapp|WhatsApp'].map(s => { const [v, l] = s.split('|'); return `<button class="msg-src smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px${msg.source === v ? ';background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${l}</button>`; }).join('') +
       `<label style="font-size:12px;cursor:pointer;margin-left:6px"><input type="checkbox" id="msg-unrep" ${msg.unrepliedOnly ? 'checked' : ''}> 未返信のみ</label>` +
