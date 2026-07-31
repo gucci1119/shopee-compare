@@ -7323,11 +7323,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 公式Chat APIがこの垢では取れないため送信はこの経路が唯一。ただし本人はポータルだけ見ていればよいように、
   // 「今送れるか／送れないなら予約になる」をこの画面に出す。
   async function refreshSenderStatus() {
-    const el = document.getElementById('msg-sender'); if (!el) return;
+    const el = document.getElementById('msg-sender');
     let hb = null;
     try { const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_sender_hb'); hb = (r || [])[0] && ((r[0] || {}).v || null); } catch (_) {}
     const at = hb && hb.at ? Date.parse(hb.at) : 0;
     const age = at ? (Date.now() - at) / 1000 : Infinity;
+    // ★★「壊れたら気づける表示」（2026-05の設計記録からの宿題／2026-08-01に取り込みが2時間止まって誰も気づけなかった）
+    //   取り込みツールが動いていない＝新着が入らない＝この画面の内容が古いまま、という最も危険な状態を一番上で警告する。
+    {
+      const al = document.getElementById('msg-alert');
+      if (al) {
+        // 取り込みの新しさ＝読み込んだメッセージの最終取込時刻（synced_at）
+        let lastSync = 0;
+        try { (msg.rows || []).forEach(m => { const t = m.synced_at ? Date.parse(m.synced_at) : 0; if (t > lastSync) lastSync = t; }); } catch (_) {}
+        const ingestMin = lastSync ? Math.round((Date.now() - lastSync) / 60000) : null;
+        if (age > 300) { // 5分以上ハートビートが無い＝送信役タブが動いていない
+          al.style.display = '';
+          al.innerHTML = `<b style="color:#c0392b">⚠️ 取り込みツールが動いていません</b>　この画面の内容は<b>更新されていません</b>（新着が入らず、返信も送れません）。<br>
+            <span class="smd-dim">直し方：<b>Shopeeチャット(webchat)のタブを開いてリロード</b>してください。${ingestMin != null ? '最後に取り込めたのは<b>' + ingestMin + '分前</b>です。' : ''}</span>`;
+        } else if (ingestMin != null && ingestMin > 90) { // 動いてはいるが長時間まったく入っていない
+          al.style.display = '';
+          al.style.background = '#fff8e1'; al.style.borderColor = '#f4e7b8';
+          al.innerHTML = `<b style="color:#b26a00">⚠️ ${ingestMin}分間、新しいメッセージが取り込まれていません</b>
+            <span class="smd-dim">送信役は動いていますが、取り込みが進んでいない可能性があります（新着が無いだけなら正常）。長く続くならwebchatタブをリロードしてください。</span>`;
+        } else al.style.display = 'none';
+      }
+    }
+    if (!el) return;
     if (age < 180) el.innerHTML = '<span style="color:#1a7f37;font-weight:700">🟢 すぐ送信できます</span> <span class="smd-dim">' + (age < 60 ? '' : '（' + Math.round(age / 60) + '分前に確認）') + '</span>';
     else el.innerHTML = '<span style="color:#e8710a;font-weight:700">🟡 いまは予約になります</span> <span class="smd-dim">送信すると<b>キューに保存</b>され、送信役が復帰した時に自動で送られます（Shopeeチャットのタブを開いたままにしてください）。</span>';
   }
@@ -7655,6 +7677,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ) : '<div class="smd-dim" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:13px">左の会話を選んでください</div>';
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
     body.innerHTML =
+      `<div id="msg-alert" style="display:none;margin:0 0 8px;max-width:1000px;padding:9px 13px;border-radius:9px;background:#fdecea;border:1px solid #f5c6c1;font-size:12.5px;line-height:1.7"></div>` +
       `<div id="msg-crawl" class="tool-card" style="display:none;margin:0 0 8px;max-width:1000px;padding:8px 12px;background:#f2f7ff;border-color:#d6e4ff"></div>` +
       `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:1000px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信（7日以内）', unreplied, (over9 ? '⚠️ 9時間超が ' + over9 + '件' : '相手からの最後に未返信') + (staleN ? '　※7日超の古い未返信 ' + staleN + '件は除外' : ''), unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
       `<div class="tool-card" style="margin:0 0 8px;max-width:1000px;padding:8px 12px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12px">絞り込み:</span>` +
