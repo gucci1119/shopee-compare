@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.30.0
+// @version      1.31.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -560,6 +560,66 @@
     }, 5000);
   }
 
+  // ================= 会話一覧スキャン（★リアルタイム系：会話を開かずに全会話の状態を取る） =================
+  // 目的：全会話を1つずつ開く総当たり巡回は 645会話×約6秒＝1時間かかり、しかも会話を切り替えるので
+  //       混線・日付推測・業務の中断を招く。一方、左の一覧には「相手/国/最終メッセージ/時刻」が
+  //       **開かなくても**出ている。ここだけ舐めれば全会話の最新状態が**十数秒**で分かる。
+  // 役割分担：この一覧スキャン＝最新状態（ポータルの並び順・最終メッセージ）／従来の巡回＝本文の履歴（検索用）。
+  const SKIP_CHIP = /^(Closed|Overdue|Pinned|Unread|Auto-?Reply)$/i;
+  function scanSidebarVisible(acc) {
+    const side = sideList(); if (!side) return 0;
+    let n = 0;
+    [].slice.call(side.children).forEach(row => {
+      const raw = (row.innerText || '').replace(/\r/g, '');
+      const t = raw.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!t.length) return;
+      const buyer = t[0];
+      if (!buyer || !/^[\w.]{2,}$/.test(buyer)) return; // 名前らしくない行（見出し等）は無視
+      const cc = (raw.match(/\(([A-Z]{2})\)/) || [])[1] || CC;
+      const when = t.find(s => /^\d{1,2}:\d{2}$/.test(s) || /^\d{1,2}\/\d{1,2}$/.test(s) || /^(Yesterday|Today)$/i.test(s)) || '';
+      const prev = t.slice(1).find(s => s !== when && !SKIP_CHIP.test(s) && !/^\([A-Z]{2}\)/.test(s) && !/gcsonlinestore|gs_japan/i.test(s)) || '';
+      const key = cc + ':' + buyer;
+      if (!acc[key]) n++;
+      acc[key] = { buyer: buyer, cc: cc, when: when, prev: prev.slice(0, 140), overdue: /Overdue/i.test(raw) };
+    });
+    return n;
+  }
+  let scanning = false;
+  async function scanAllConversations(manual) {
+    if (scanning || !isWorker()) return null;
+    scanning = true;
+    const acc = {};
+    try {
+      const sc = sideScroller();
+      const back = sc ? sc.scrollTop : 0;
+      if (sc) { rvScroll(sc, 0); await sleep(400); }
+      let stagnant = 0;
+      for (let i = 0; i < 200 && stagnant < 3; i++) {
+        scanSidebarVisible(acc);
+        if (!sc) break;
+        const before = sc.scrollTop;
+        rvScroll(sc, before + Math.max(300, sc.clientHeight - 60));
+        await sleep(320);
+        if (sc.scrollTop <= before + 5) stagnant++; else stagnant = 0;
+        cycleInfo = '📋一覧 ' + Object.keys(acc).length; updateChip();
+      }
+      scanSidebarVisible(acc);
+      if (sc) rvScroll(sc, back); // 元のスクロール位置へ戻す
+      const list = Object.keys(acc).map(k => acc[k]);
+      if (list.length && getSbKey()) {
+        await sbReq('POST', 'app_kv?on_conflict=k',
+          [{ k: 'chat_conv_state', v: { at: new Date().toISOString(), n: list.length, items: acc }, updated_at: new Date().toISOString() }],
+          'resolution=merge-duplicates,return=minimal').catch(() => {});
+      }
+      if (manual) toast('📋 一覧スキャン完了：' + list.length + '会話');
+      return list.length;
+    } catch (_) { return null; }
+    finally { scanning = false; cycleInfo = ''; updateChip(); }
+  }
+  // 巡回役タブで：起動30秒後に1回 → 以後5分ごと（会話を開かないので軽い・作業中は避ける）
+  setTimeout(() => { if (isWorker() && !userBusy()) scanAllConversations(false); }, 30000);
+  setInterval(() => { if (isWorker() && !cycling && !scanning && !userBusy()) scanAllConversations(false); }, 300000);
+
   // ---- フラッシュ（GASへPOST） ----
   let flushing = false;
   // ★Supabaseキー設定時：取り込みもGASを介さずSupabaseへ直接upsert（chat_messages）＝メッセージ機能を丸ごとGASゼロに。
@@ -831,7 +891,7 @@
         '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
         '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
       if (a === '5') {
         const now = tabRole() === 'worker' ? 'manual' : 'worker';
@@ -848,6 +908,10 @@
         GM_setValue('crawlDoneList', []); GM_setValue('lastSigMap', {}); GM_setValue('didFullCycle', false);
         toast('巡回の記録をリセットしました');
       } else if (a === '4') flush(true);
+      else if (a === '6') {
+        if (!isWorker()) toast('このタブは🙋手動用です。5で🤖巡回役にするか、巡回役タブで実行してください');
+        else { toast('📋 一覧スキャンを開始…'); scanAllConversations(true); }
+      }
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）

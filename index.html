@@ -7363,6 +7363,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
       catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = errBox(e); return; } }
       msg.rows = rows;
+      // 📋一覧スキャンの結果（会話を開かずに取った全会話の最新状態）も取得。本文の取り込みが追いつく前でも一覧に抜けが出ない
+      try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_state'); msg._convState = ((kv || [])[0] || {}).v || null; } catch (_) {}
     }
     if (!rows || !rows.length) {
       body.innerHTML = `<div class="tool-card" style="max-width:840px">
@@ -7376,7 +7378,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     const conv = {};
     rows.forEach(m => { const k = m.conversation_id || m.buyer || m.id; const c = conv[k] = conv[k] || { key: k, buyer: m.buyer, source: m.source || 'shopee', cc: m.cc, msgs: [] }; c.msgs.push(m); });
-    let convList = Object.values(conv).map(c => { c.msgs.sort((a, b) => (msgTime(a) || '') < (msgTime(b) || '') ? -1 : 1); c.last = c.msgs[c.msgs.length - 1]; c.unreplied = c.last && c.last.direction === 'in'; return c; });
+    // 📋 一覧スキャン（会話を開かずに取った全会話の最新状態）を合流。
+    //    本文の取り込み(履歴)は時間がかかるので、まだ中身が無い会話も**一覧には出す**＝抜けが無い状態にする。
+    //    値は「相手/国/最終メッセージのプレビュー/時刻表示/Overdue」。本文が入っている会話は本文側を優先。
+    try {
+      const cs = (msg._convState && msg._convState.items) || null;
+      if (cs) Object.keys(cs).forEach(k => {
+        const s = cs[k];
+        if (!conv[k]) conv[k] = { key: k, buyer: s.buyer, source: 'shopee', cc: s.cc, msgs: [], stateOnly: true };
+        conv[k].state = s;
+      });
+    } catch (_) {}
+    // 一覧スキャンの時刻表示（"23:55" / "18/06" / "Yesterday"）を並び替え用の概算時刻に変換
+    const stateTime = (w) => {
+      if (!w) return '';
+      const d = new Date(); let m;
+      if ((m = String(w).match(/^(\d{1,2}):(\d{2})$/))) { d.setHours(+m[1], +m[2], 0, 0); }
+      else if (/^yesterday$/i.test(w)) { d.setDate(d.getDate() - 1); d.setHours(12, 0, 0, 0); }
+      else if (/^today$/i.test(w)) { d.setHours(12, 0, 0, 0); }
+      else if ((m = String(w).match(/^(\d{1,2})\/(\d{1,2})$/))) { d.setMonth(+m[2] - 1, +m[1]); d.setHours(12, 0, 0, 0); if (d.getTime() > Date.now() + 86400000) d.setFullYear(d.getFullYear() - 1); }
+      else return '';
+      return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+    };
+    let convList = Object.values(conv).map(c => {
+      c.msgs.sort((a, b) => (msgTime(a) || '') < (msgTime(b) || '') ? -1 : 1);
+      c.last = c.msgs[c.msgs.length - 1];
+      // まだ本文を取り込んでいない会話は、一覧スキャンの情報で「最後の1件」を仮に作って表示する（抜けを作らない）
+      if (!c.last && c.state) c.last = { text: c.state.prev || '', msg_type: 'text', direction: c.state.overdue ? 'in' : 'in', msg_time: stateTime(c.state.when), synced_at: '', _stateOnly: true };
+      c.unreplied = c.last && c.last.direction === 'in';
+      // 一覧スキャンの方が新しければ、並び順はそちらを使う（本文の取り込みが追いついていなくても正しい順になる）
+      if (c.state) { const st = stateTime(c.state.when); if (st && (!c.last || st > (msgTime(c.last) || ''))) c.sortAt = st; }
+      return c;
+    });
     const totalConv = convList.length, unreplied = convList.filter(c => c.unreplied).length;
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
@@ -7384,7 +7417,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const bySource = {}; convList.forEach(c => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
     const gaps = []; convList.forEach(c => { for (let i = 0; i < c.msgs.length - 1; i++) { if (c.msgs[i].direction === 'in' && c.msgs[i + 1].direction === 'out') { const g = Date.parse(msgTime(c.msgs[i + 1])) - Date.parse(msgTime(c.msgs[i])); if (g > 0 && g < 30 * 86400000) gaps.push(g); break; } } });
     const avgReplyH = gaps.length ? (gaps.reduce((s, g) => s + g, 0) / gaps.length / 3600000) : null;
-    convList.sort((a, b) => (msgTime(b.last) || '') > (msgTime(a.last) || '') ? 1 : -1);
+    const convAt = c => c.sortAt || msgTime(c.last) || '';
+    convList.sort((a, b) => (convAt(b) || '') > (convAt(a) || '') ? 1 : -1);
     if (msg.source !== 'all') convList = convList.filter(c => c.source === msg.source);
     if (msg.unrepliedOnly) convList = convList.filter(c => c.unreplied);
     // 🔎 過去の全チャット履歴からキーワード検索（本人の主用途の1つ＝「この件どこで話したっけ？」）。
@@ -7440,13 +7474,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 検索中はヒットした発言をプレビューに出す（どこで話したか一目で分かる）
       const pv = (msg.q && c._hit) ? c._hit : c.last;
       const preview = (pv.msg_type === 'image' || IMG_PH.test(pv.text || '') ? '🖼️ 画像' : (pv.text || '')).slice(0, 40);
-      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(msgTime(c.last))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''}</div></div></div>`;
+      return `<div class="msg-ci" data-k="${esc(c.key)}" style="display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid #f2f2f2;cursor:pointer;${on ? 'background:#fff3f0' : ''}">${avatar(c.buyer)}<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;gap:6px"><span style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.unreplied ? '<span title="未返信" style="color:#d93025">● </span>' : ''}${esc(c.buyer || '(不明)')}</span><span style="font-size:10px;color:#6b7280;flex:none">${rel(convAt(c))}</span></div><div style="font-size:11.5px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${pv.direction === 'out' ? '自分: ' : ''}${esc(preview)}</div><div style="margin-top:2px">${srcBadge(c.source)} ${c.cc ? ccBadge(c.cc) : ''}</div></div></div>`;
     }).join('') || '<div class="smd-dim" style="padding:16px;font-size:12px">会話がありません（webchatの取り込みが接続されると表示されます）</div>';
     const listMoreHtml = listShown < listTotal
       ? `<div style="padding:9px 11px;text-align:center;border-top:1px solid #f2f2f2"><button id="msg-more" class="smd-btn" style="font-size:11.5px;padding:4px 12px">もっと見る（残り ${listTotal - listShown}）</button></div>` : '';
     const paneHtml = sel ? (
       `<div style="padding:10px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:9px;background:#fff">${avatar(sel.buyer)}<div><div style="font-weight:700;font-size:14px">${sel.unreplied ? '<span style="color:#d93025">● </span>' : ''}${esc(sel.buyer || '(不明)')}</div><div style="font-size:11px;color:#888">${srcBadge(sel.source)} ${sel.cc ? ccBadge(sel.cc) : ''} ・ ${sel.msgs.length}件</div></div></div>` +
-      `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.map(bubbleHtml).join('')}</div>` +
+      `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.length ? sel.msgs.map(bubbleHtml).join('')
+        : `<div class="smd-dim" style="margin:auto;text-align:center;font-size:12.5px;line-height:1.8">この会話の<b>本文はまだ取り込まれていません</b>（一覧の情報だけ表示中）<br>最後のやり取り：<b>${esc((sel.state && sel.state.prev) || '—')}</b>${sel.state && sel.state.when ? '（' + esc(sel.state.when) + '）' : ''}<br><span style="font-size:11px">本文は裏の🤖巡回役タブが順に取り込みます。急ぐ場合はShopeeチャットでこの会話を開くと即取り込まれます。</span></div>`}</div>` +
       (sel.source === 'shopee'
         ? `<div style="border-top:1px solid #eee;padding:9px 12px;background:#fff"><div id="msg-sender" style="font-size:10.5px;margin-bottom:4px;color:#888">送信状態を確認中…</div><div style="display:flex;gap:8px;align-items:flex-end"><textarea class="msg-reply-in" data-k="${esc(sel.key)}" rows="2" placeholder="ここに返信を入力して送信（このページだけで完結します）" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:8px;font-size:12.5px;resize:none"></textarea><button class="msg-reply-send smd-btn" data-k="${esc(sel.key)}" data-cc="${esc(sel.cc || '')}" data-buyer="${esc(sel.buyer || '')}" style="background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700;padding:8px 16px">送信</button></div><div class="msg-reply-stat smd-dim" data-k="${esc(sel.key)}" style="font-size:10.5px;margin-top:3px"></div></div>`
         : `<div class="smd-dim" style="padding:10px 14px;font-size:11px;border-top:1px solid #eee">※このソースからの返信は未対応です</div>`)
