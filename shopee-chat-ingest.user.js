@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.25.0
+// @version      1.26.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -65,6 +65,16 @@
         .some(l => { const r = l.getBoundingClientRect(); return r.width > 600 && r.left > 200; });
     } catch (_) { return false; }
   };
+
+  // ★タブの役割（このタブだけの設定＝sessionStorage。他のタブ/次回起動には影響しない）
+  //   本人の困りごと：巡回が会話を次々切り替えるので、その間チャット業務ができない。
+  //   → webchatを2枚開き、片方を「🤖巡回役（裏に置く）」、作業する方を「🙋手動用（巡回しない）」にする。
+  //   手動用タブでも「今開いている会話」の取り込みは続く＝自分で返信した内容もリアルタイムでポータルに入る。
+  //   返信送信・自動巡回・履歴の自動遡りは巡回役タブだけが行う（作業を邪魔しない・二重送信もしない）。
+  const TAB_ROLE_KEY = 'smdChatTabRole';
+  function tabRole() { try { return sessionStorage.getItem(TAB_ROLE_KEY) || 'worker'; } catch (_) { return 'worker'; } }
+  function setTabRole(r) { try { sessionStorage.setItem(TAB_ROLE_KEY, r); } catch (_) {} }
+  const isWorker = () => isWebchat() && tabRole() === 'worker';
 
   // ---- 設定（GAS URL / WRITE_TOKEN） ----
   // GAS URL は既定を埋め込み済み（＝①の設定は不要）。必要ならメニューから上書き可。
@@ -337,7 +347,7 @@
   // 会話が切り替わったら一度だけ履歴を遡る
   setInterval(() => {
     try {
-      if (!isWebchat()) return; // webchat画面以外では何もしない
+      if (!isWorker()) return; // 巡回役タブだけ（手動用タブでスレッドが勝手にスクロールすると作業の邪魔）
       if (GM_getValue('autoHistory', true) === false) return;
       if (cycling) return; // 巡回中はスレッド履歴の自動スクロールを止める（会話が同じところをグルグルするのを防ぐ）
       const h = domHeaderInfo(); if (!h || !h.buyer) return;
@@ -474,14 +484,14 @@
   GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
   if (GM_getValue('autoCrawl', true) !== false) {
-    setTimeout(() => { if (isWebchat()) slowCrawl('full', false); }, 12000);
-    setInterval(() => { if (isWebchat() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
+    setTimeout(() => { if (isWorker()) slowCrawl('full', false); }, 12000);
+    setInterval(() => { if (isWorker() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
     // ★新着をできるだけ早く取り込む（本人要望＝リアルタイム性重視。メッセージは毎日15分おきに大量に来る）。
     //   会話一覧はWebSocketで即座に更新されるので、5秒ごとに一覧の署名だけ見て、変化があればその場で
     //   「新着のあった会話だけ」の巡回を起動する。従来は150秒固定待ち＝最大2.5分遅れていた。
     //   ※開いている会話は元々2.5秒ごとに取り込み済み。操作中(userBusy)は起動しない＝作業を邪魔しない。
     setInterval(() => {
-      if (!isWebchat() || cycling || userBusy()) return;
+      if (!isWorker() || cycling || userBusy()) return;
       if (GM_getValue('autoCrawl', true) === false) return;
       const side = sideList(); if (!side) return;
       let changed = false;
@@ -701,14 +711,14 @@
   //    ★このタブは「ポータルから送った返信を実際に送信するエンジン」＝ピン留めして裏に置く使い方が本命なので、
   //      非表示で止めると返信が永久に送られない（旧実装のバグ）。※ブラウザの節電で裏タブのタイマーは最長1分間隔に間引かれる＝送信は最大1分遅れ。
   //  ・GAS経由(キー未設定)＝日次枠を食うので従来どおり表示中タブのみ60秒。
-  setInterval(function () { if (isWebchat() && !document.hidden && !getSbKey()) pollOutbox(); }, 60000);
-  setInterval(function () { if (isWebchat() && getSbKey()) pollOutbox(); }, 8000);
+  setInterval(function () { if (isWorker() && !document.hidden && !getSbKey()) pollOutbox(); }, 60000);
+  setInterval(function () { if (isWorker() && getSbKey()) pollOutbox(); }, 8000);
 
   // ---- 送信エンジンの生存通知（ハートビート） ----
   // ポータル側が「今このwebchatタブが動いている＝返信を送れる」と分かるように、30秒ごとに app_kv へ最終稼働時刻を書く。
   // Supabase直書きなのでGAS枠は使わない。キー未設定時は書かない（＝ポータルには「送信できない」と出るのが正しい）。
   function heartbeat() {
-    if (!isWebchat() || !getSbKey()) return; // 送信できるのはwebchat画面のタブだけ＝そこだけが生存を名乗る
+    if (!isWorker() || !getSbKey()) return; // 送信を実行できる巡回役タブだけが「送れる」と名乗る
     sbReq('POST', 'app_kv?on_conflict=k',
       [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname }, updated_at: new Date().toISOString() }],
       'resolution=merge-duplicates,return=minimal').catch(() => {});
@@ -760,13 +770,19 @@
       //   場所が分かりにくいので、必要な操作は全部このチップに集約する（本人が毎回探さずに済むように）。
       const status =
         'Shopee OS チャット取り込み\n' +
+        'このタブの役割: ' + (tabRole() === 'worker' ? '🤖 巡回役（自動で会話を開いて取り込む＋返信を送信）' : '🙋 手動用（巡回しない＝作業を邪魔しない）') + '\n' +
         '国: ' + (CC || '不明') + '／取り込み: ' + captured + '件（未送信 ' + msgBuffer.length + '）\n' +
         '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
         '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
-      if (a === '1') askSbKey();
+      if (a === '5') {
+        const now = tabRole() === 'worker' ? 'manual' : 'worker';
+        setTabRole(now); updateChip();
+        toast(now === 'worker' ? '🤖 このタブを巡回役にしました（自動で会話を開きます）' : '🙋 このタブを手動用にしました（巡回しません。作業用にどうぞ）');
+      }
+      else if (a === '1') askSbKey();
       else if (a === '2') {
         const v = keepAliveOn(); GM_setValue('keepAlive', !v);
         if (v) { stopKeepAlive(); toast('即レスモードOFF'); } else { startKeepAlive(); toast('⚡即レスモードON（タブに音声アイコンが出ますが無音です）'); }
@@ -788,7 +804,9 @@
       chip.style.background = '#555'; chip.title = 'Shopeeチャット(webchat)の画面でだけ動きます'; return;
     }
     const warn = (!getUrl() || !getTok());
-    chip.textContent = '💬→OS: ' + sent + (buffer.length ? ' (+' + buffer.length + ')' : '') + (cycleInfo ? ' 🔄' + cycleInfo : '') + (warn ? ' ⚙️未設定' : '') + (lastErr ? ' ⚠️' : '');
+    const role = tabRole() === 'worker' ? '🤖' : '🙋';
+    chip.textContent = role + ' 💬→OS: ' + sent + (msgBuffer.length ? ' (+' + msgBuffer.length + ')' : '') + (cycleInfo ? ' 🔄' + cycleInfo : '') + (warn ? ' ⚙️未設定' : '') + (lastErr ? ' ⚠️' : '');
+    chip.title = (tabRole() === 'worker' ? '巡回役タブ（自動で会話を開いて取り込み＋返信送信）' : '手動用タブ（巡回しない＝作業の邪魔をしない）') + ' — クリックで設定';
     chip.style.background = cycleInfo ? '#1a5' : (warn ? '#8a6d00' : (lastErr ? '#7a1f1f' : '#111'));
   }
   function toast(msg) {
