@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.19.0
+// @version      1.20.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -48,6 +48,23 @@
     'seller.shopee.com.br': 'BR', 'banhang.shopee.vn': 'VN', 'seller.shopee.co.th': 'TH', 'seller.shopee.tw': 'TW'
   };
   const CC = HOST_CC[location.hostname] || '';
+
+  // ★このスクリプトの @match は seller.shopee.*/* ＝Seller Centerの全ページで動く。しかし
+  //   「会話の取り込み」「ポータルからの返信送信」が成立するのは**本物のwebchat画面だけ**。
+  //   注文一覧などのページにも右側に小窓チャットがあるため、そこを会話一覧と誤認して
+  //   別の場所に返信を打ち込む/各タブが同じ返信を送る、といった事故になりうる。
+  //   → 取り込み・巡回・送信・生存通知は webchat のときだけ動かす（他ページでは完全に眠る＝軽い）。
+  //   ※本人の運用＝毎日「国ごとにSeller Centerのタブを固定で開く」（業務上避けられない）。その全タブで
+  //     送信役が動くと二重送信・誤爆になるので、ここで確実に切り分ける。
+  const isWebchat = () => {
+    if (/\/webchat/i.test(location.pathname)) return true;
+    // 国によりURLが違う場合の保険＝画面中央に「幅600px超の会話スレッド」があるのはチャット画面だけ
+    // （注文一覧などの右側の小窓チャットは幅300px前後なので該当しない）。
+    try {
+      return [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid__innerScrollContainer'))
+        .some(l => { const r = l.getBoundingClientRect(); return r.width > 600 && r.left > 200; });
+    } catch (_) { return false; }
+  };
 
   // ---- 設定（GAS URL / WRITE_TOKEN） ----
   // GAS URL は既定を埋め込み済み（＝①の設定は不要）。必要ならメニューから上書き可。
@@ -285,7 +302,7 @@
       if (added) { captured += added; updateChip(); }
     } catch (_) {}
   }
-  setInterval(domSweep, 2500);
+  setInterval(() => { if (isWebchat()) domSweep(); }, 2500); // 取り込みはwebchat画面のみ（他のSeller Centerページの小窓チャットを誤読しない）
 
   // ---- 過去履歴の自動取得（会話を開いたら上まで遡ってsweep→最新に戻す） ----
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -313,6 +330,7 @@
   // 会話が切り替わったら一度だけ履歴を遡る
   setInterval(() => {
     try {
+      if (!isWebchat()) return; // webchat画面以外では何もしない
       if (GM_getValue('autoHistory', true) === false) return;
       if (cycling) return; // 巡回中はスレッド履歴の自動スクロールを止める（会話が同じところをグルグルするのを防ぐ）
       const h = domHeaderInfo(); if (!h || !h.buyer) return;
@@ -429,8 +447,8 @@
   GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
   if (GM_getValue('autoCrawl', true) !== false) {
-    setTimeout(() => slowCrawl('full', false), 12000);
-    setInterval(() => { if (GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
+    setTimeout(() => { if (isWebchat()) slowCrawl('full', false); }, 12000);
+    setInterval(() => { if (isWebchat() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
   }
 
   // ---- フラッシュ（GASへPOST） ----
@@ -477,8 +495,8 @@
     });
   }
   // 取り込みの送信：GAS経由(キー未設定)は15秒でまとめ送り（枠節約）。Supabase直(キー設定)は無料なので5秒＝受信もほぼリアルタイム。いずれも中身が無ければ送らない。
-  setInterval(() => { if (!getSbKey()) flush(false); }, 15000);
-  setInterval(() => { if (getSbKey()) flush(false); }, 5000);
+  setInterval(() => { if (isWebchat() && !getSbKey()) flush(false); }, 15000);
+  setInterval(() => { if (isWebchat() && getSbKey()) flush(false); }, 5000);
 
   function testPost() {
     const url = getUrl(), tok = getTok();
@@ -613,14 +631,14 @@
   //    ★このタブは「ポータルから送った返信を実際に送信するエンジン」＝ピン留めして裏に置く使い方が本命なので、
   //      非表示で止めると返信が永久に送られない（旧実装のバグ）。※ブラウザの節電で裏タブのタイマーは最長1分間隔に間引かれる＝送信は最大1分遅れ。
   //  ・GAS経由(キー未設定)＝日次枠を食うので従来どおり表示中タブのみ60秒。
-  setInterval(function () { if (!document.hidden && !getSbKey()) pollOutbox(); }, 60000);
-  setInterval(function () { if (getSbKey()) pollOutbox(); }, 8000);
+  setInterval(function () { if (isWebchat() && !document.hidden && !getSbKey()) pollOutbox(); }, 60000);
+  setInterval(function () { if (isWebchat() && getSbKey()) pollOutbox(); }, 8000);
 
   // ---- 送信エンジンの生存通知（ハートビート） ----
   // ポータル側が「今このwebchatタブが動いている＝返信を送れる」と分かるように、30秒ごとに app_kv へ最終稼働時刻を書く。
   // Supabase直書きなのでGAS枠は使わない。キー未設定時は書かない（＝ポータルには「送信できない」と出るのが正しい）。
   function heartbeat() {
-    if (!getSbKey()) return;
+    if (!isWebchat() || !getSbKey()) return; // 送信できるのはwebchat画面のタブだけ＝そこだけが生存を名乗る
     sbReq('POST', 'app_kv?on_conflict=k',
       [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname }, updated_at: new Date().toISOString() }],
       'resolution=merge-duplicates,return=minimal').catch(() => {});
@@ -653,6 +671,10 @@
   }
   function updateChip() {
     if (!chip) return;
+    if (!isWebchat()) { // 注文一覧などのページでは何もしない＝誤解を招かないよう「待機中」と出すだけ
+      chip.textContent = '💤 チャット取り込み（この画面では待機中）';
+      chip.style.background = '#555'; chip.title = 'Shopeeチャット(webchat)の画面でだけ動きます'; return;
+    }
     const warn = (!getUrl() || !getTok());
     chip.textContent = '💬→OS: ' + sent + (buffer.length ? ' (+' + buffer.length + ')' : '') + (cycleInfo ? ' 🔄' + cycleInfo : '') + (warn ? ' ⚙️未設定' : '') + (lastErr ? ' ⚠️' : '');
     chip.style.background = cycleInfo ? '#1a5' : (warn ? '#8a6d00' : (lastErr ? '#7a1f1f' : '#111'));
