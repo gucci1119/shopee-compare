@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.20.0
+// @version      1.21.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -402,7 +402,27 @@
     try { await quickCapture(deep); } finally { captureAs = null; }
     return true;
   }
-  const crawlDone = new Set(); // このセッションでフル取込済みの会話名（無限ループ防止）
+  // ★巡回の進捗は保存する（スクリプト更新やタブ再読込のたびに全会話600件超を開き直すと20分近く重くなるため）。
+  //   取り込み済みメッセージはSupabase側にID固定で入っているので、開き直しても増えないが「作業が無駄」なので記録を残す。
+  const crawlDone = new Set(GM_getValue('crawlDoneList', []) || []); // フル取込済みの会話名
+  let _persistT = null;
+  function persistCrawl() { // 連続書き込みを避けて2秒まとめ
+    if (_persistT) return;
+    _persistT = setTimeout(() => {
+      _persistT = null;
+      try {
+        GM_setValue('crawlDoneList', [...crawlDone].slice(-2000));
+        const keys = Object.keys(lastSig).slice(-2000), o = {}; keys.forEach(k => o[k] = lastSig[k]);
+        GM_setValue('lastSigMap', o);
+      } catch (_) {}
+    }, 2000);
+  }
+  try { const _ls = GM_getValue('lastSigMap', null); if (_ls && typeof _ls === 'object') Object.assign(lastSig, _ls); } catch (_) {}
+  GM_registerMenuCommand('巡回の記録をリセット（全会話を取り込み直す）', () => {
+    crawlDone.clear(); Object.keys(lastSig).forEach(k => delete lastSig[k]);
+    GM_setValue('crawlDoneList', []); GM_setValue('lastSigMap', {}); GM_setValue('didFullCycle', false);
+    toast('巡回の記録をリセットしました（次の巡回で全会話を開き直します）');
+  });
   // mode 'full'=未取込を全部 / 'new'=署名が変わった(新着)会話だけ。ゆっくり・操作中は待機・終わりに元の会話へ戻す
   async function slowCrawl(mode, manual) {
     if (cycling) { if (manual) toast('巡回中です…'); return; }
@@ -427,7 +447,7 @@
           cycleInfo = (mode === 'new' ? '🐢新着 ' : '🐢巡回 ') + (count + 1); updateChip();
           const cc = (rowInfo(target).cc) || CC;
           const ok = await openAndCapture(target, tname, cc, true);
-          crawlDone.add(tname); lastSig[tname] = rowSig(target); // 開けても失敗しても記録＝同じ行で止まらない
+          crawlDone.add(tname); lastSig[tname] = rowSig(target); persistCrawl(); // 開けても失敗しても記録＝同じ行で止まらない／記録は保存して再読込で無駄に開き直さない
           if (ok) count++;
           stagnant = 0;
           await sleep(2200); // ★ゆっくり（作業を邪魔しない間隔）
