@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.31.0
+// @version      1.32.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -475,6 +475,24 @@
   // ★巡回の進捗は保存する（スクリプト更新やタブ再読込のたびに全会話600件超を開き直すと20分近く重くなるため）。
   //   取り込み済みメッセージはSupabase側にID固定で入っているので、開き直しても増えないが「作業が無駄」なので記録を残す。
   const crawlDone = new Set(GM_getValue('crawlDoneList', []) || []); // フル取込済みの会話名
+  // ★取り込みの進捗をポータルへ送る（本人「どのくらい進行中かのバーも欲しい」）。
+  //   webchatタブを覗くと巡回が一時停止してしまうので、**ポータル側で進捗が見られる**ようにする。
+  //   分母は直近の一覧スキャンで数えた会話数（未スキャンなら件数だけ表示）。書きすぎないよう4秒に1回まで。
+  let _crawlRepAt = 0, _runStart = 0, _runStartDone = 0;
+  function reportCrawl(mode, running, cur) {
+    if (!getSbKey()) return;
+    const now = Date.now();
+    if (running && now - _crawlRepAt < 4000) return;
+    _crawlRepAt = now;
+    const total = parseInt(GM_getValue('lastScanTotal', 0), 10) || 0;
+    sbReq('POST', 'app_kv?on_conflict=k', [{
+      k: 'chat_crawl_progress',
+      // startAt/startDone も送る＝ポータル側で「この実行の処理速度」から完了見込み(ETA)を計算できる
+      v: { running: !!running, mode: mode || '', done: crawlDone.size, total: total, cur: cur || '',
+           startAt: _runStart ? new Date(_runStart).toISOString() : '', startDone: _runStartDone, at: new Date().toISOString() },
+      updated_at: new Date().toISOString()
+    }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+  }
   let _persistT = null;
   function persistCrawl() { // 連続書き込みを避けて2秒まとめ
     if (_persistT) return;
@@ -498,6 +516,7 @@
     if (cycling) { if (manual) toast('巡回中です…'); return; }
     if (!manual && GM_getValue('autoCrawl', true) === false) return;
     cycling = true; let count = 0, stagnant = 0;
+    _runStart = Date.now(); _runStartDone = crawlDone.size; reportCrawl(mode, true, ''); // 進捗の起点（ETA計算用）
     const startConv = (domHeaderInfo() || {}).buyer || '';
     try {
       const sc0 = sideScroller(); if (sc0) { rvScroll(sc0, 0); await sleep(500); }
@@ -521,6 +540,7 @@
           const cc = (rowInfo(target).cc) || CC;
           const ok = await openAndCapture(target, tname, cc, true);
           crawlDone.add(tname); lastSig[tname] = rowSig(target); persistCrawl(); // 開けても失敗しても記録＝同じ行で止まらない／記録は保存して再読込で無駄に開き直さない
+          reportCrawl(mode, true, tname); // 進捗をポータルへ（webchatを覗かなくても見られる）
           if (ok) count++;
           stagnant = 0;
           await sleep(2200); // ★ゆっくり（作業を邪魔しない間隔）
@@ -534,7 +554,7 @@
       if (manual) toast('✅ 巡回完了（' + count + '会話を取込）');
       // 元の会話へ戻す（その後ユーザーが触っていなければ）
       if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm((row.innerText || '').split('\n')[0]) === norm(startConv)) { reactOpen(row); break; } } } }
-    } catch (_) {} finally { cycling = false; cycleInfo = ''; updateChip(); }
+    } catch (_) {} finally { cycling = false; cycleInfo = ''; _crawlRepAt = 0; reportCrawl(mode, false, ''); updateChip(); }
   }
   GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => slowCrawl('full', true));
   GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
@@ -606,6 +626,7 @@
       scanSidebarVisible(acc);
       if (sc) rvScroll(sc, back); // 元のスクロール位置へ戻す
       const list = Object.keys(acc).map(k => acc[k]);
+      try { GM_setValue('lastScanTotal', list.length); } catch (_) {} // 進捗バーの分母（全会話数）
       if (list.length && getSbKey()) {
         await sbReq('POST', 'app_kv?on_conflict=k',
           [{ k: 'chat_conv_state', v: { at: new Date().toISOString(), n: list.length, items: acc }, updated_at: new Date().toISOString() }],

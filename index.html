@@ -7321,6 +7321,40 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (age < 180) el.innerHTML = '<span style="color:#1a7f37;font-weight:700">🟢 すぐ送信できます</span> <span class="smd-dim">' + (age < 60 ? '' : '（' + Math.round(age / 60) + '分前に確認）') + '</span>';
     else el.innerHTML = '<span style="color:#e8710a;font-weight:700">🟡 いまは予約になります</span> <span class="smd-dim">送信すると<b>キューに保存</b>され、送信役が復帰した時に自動で送られます（Shopeeチャットのタブを開いたままにしてください）。</span>';
   }
+  // 📥 取り込み（巡回）の進捗バー＋完了見込み。webchatタブを覗くと巡回が一時停止してしまうので、
+  //    進捗はこのポータルで見られるようにする（userscriptが app_kv.chat_crawl_progress に書く）。
+  async function refreshCrawlBar() {
+    const el = document.getElementById('msg-crawl'); if (!el) return;
+    let p = null;
+    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_crawl_progress'); p = ((r || [])[0] || {}).v || null; } catch (_) {}
+    const fresh = p && p.at && (Date.now() - Date.parse(p.at)) < 180000; // 3分以上更新が無ければ止まったとみなす
+    if (!p || !p.running || !fresh) { el.style.display = 'none'; return; }
+    const total = Number(p.total) || 0, done = Number(p.done) || 0;
+    const pct = total ? Math.max(1, Math.min(100, Math.round(done * 100 / total))) : 0;
+    // 完了見込み＝この実行で処理した件数と経過時間から速度を出して残りを割る
+    let eta = '';
+    const st = p.startAt ? Date.parse(p.startAt) : 0, sd = Number(p.startDone) || 0;
+    if (st && total && done > sd) {
+      const sec = (Date.parse(p.at) - st) / 1000, rate = (done - sd) / Math.max(1, sec); // 件/秒
+      const remain = Math.max(0, total - done);
+      if (rate > 0) {
+        const s = Math.round(remain / rate);
+        eta = s > 5400 ? ('残り約' + (s / 3600).toFixed(1) + '時間') : s > 90 ? ('残り約' + Math.round(s / 60) + '分') : ('残り約' + s + '秒');
+        const fin = new Date(Date.now() + s * 1000);
+        eta += '（' + fin.getHours() + ':' + String(fin.getMinutes()).padStart(2, '0') + ' 頃 完了見込み）';
+      }
+    }
+    el.style.display = '';
+    el.innerHTML =
+      `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11.5px">
+         <b style="color:#1565c0">📥 過去メッセージを取り込み中</b>
+         <span>${done}${total ? ' / ' + total : ''} 会話${total ? '（' + pct + '%）' : ''}</span>
+         <span class="smd-dim">${eta ? esc(eta) : '見込みを計算中…'}</span>
+         ${p.cur ? `<span class="smd-dim">いま: ${esc(p.cur)}</span>` : ''}
+         <span class="smd-dim" style="margin-left:auto">※Shopeeチャットのタブは触らないでください（触ると一時停止します）</span>
+       </div>
+       <div style="height:7px;background:#e9eef5;border-radius:5px;margin-top:5px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#1565c0,#4dabf7);transition:width .6s"></div></div>`;
+  }
   // 返信の送信結果をポータル側で見届ける（webchatを開いて確認しに行かなくて済む＝集約）。
   // chat_outbox の該当行を数秒おきに見て sent/error を表示。90秒たっても pending なら「送信役が動いていない」と案内。
   function watchOutbox(id, statEl) {
@@ -7488,6 +7522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ) : '<div class="smd-dim" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:13px">左の会話を選んでください</div>';
     const prevListScroll = (document.getElementById('msg-list') || {}).scrollTop || 0; // 更新時に一覧が先頭へ飛ばない
     body.innerHTML =
+      `<div id="msg-crawl" class="tool-card" style="display:none;margin:0 0 8px;max-width:1000px;padding:8px 12px;background:#f2f7ff;border-color:#d6e4ff"></div>` +
       `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:1000px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信', unreplied, '相手からの最後に未返信', unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
       `<div class="tool-card" style="margin:0 0 8px;max-width:1000px;padding:8px 12px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12px">絞り込み:</span>` +
       ['all|全て', 'shopee|Shopee', 'whatsapp|WhatsApp'].map(s => { const [v, l] = s.split('|'); return `<button class="msg-src smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px${msg.source === v ? ';background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${l}</button>`; }).join('') +
@@ -7517,7 +7552,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       const qc = document.getElementById('msg-qclr'); if (qc) qc.addEventListener('click', () => { msg.q = ''; msg.showN = 80; renderMessages(true); });
     }
-    refreshSenderStatus();
+    refreshSenderStatus(); refreshCrawlBar();
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
@@ -7547,10 +7582,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 送信役の生存表示は「新着が来た時」だけでなく独立して更新する（新着が無いと🟡のまま固まるのを防ぐ）
     if (window.__msgHb) clearInterval(window.__msgHb);
     window.__msgHb = setInterval(() => {
+      // 会話を選んでいない時でも進捗バーは動かしたいので、ページが開いているかだけで判定する
       const pg = document.getElementById('page-messages');
-      if (!pg || pg.style.display === 'none' || !document.getElementById('msg-sender')) { clearInterval(window.__msgHb); window.__msgHb = null; return; }
-      refreshSenderStatus();
-    }, 20000);
+      if (!pg || pg.style.display === 'none' || !document.getElementById('msg-body')) { clearInterval(window.__msgHb); window.__msgHb = null; return; }
+      refreshSenderStatus(); refreshCrawlBar();
+    }, 10000);
     if (window.__msgPoll) clearInterval(window.__msgPoll);
     window.__msgPoll = setInterval(async () => {
       const pg = document.getElementById('page-messages');
