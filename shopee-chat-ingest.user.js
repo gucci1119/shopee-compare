@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.27.0
+// @version      1.28.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -10,6 +10,8 @@
 // @match        https://banhang.shopee.vn/*
 // @match        https://seller.shopee.co.th/*
 // @match        https://seller.shopee.tw/*
+// @updateURL    https://gucci1119.github.io/shopee-compare/shopee-chat-ingest.user.js
+// @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-chat-ingest.user.js
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @connect      khjjjouhryigqunxygyg.supabase.co
@@ -22,6 +24,13 @@
 // ==/UserScript==
 
 /*
+  ■ 自動更新（★開発中で頻繁に直すため）
+    @updateURL/@downloadURL に配信URL（gucci1119.github.io/shopee-compare/shopee-chat-ingest.user.js）を設定済み。
+    **一度この配信URLからインストールすれば、以後はTampermonkeyが自動で最新版に更新する**＝手で入れ直さない。
+    手で入れ直さない限り GM storage は保持される＝**Supabaseキー・巡回の記録を毎回入力し直す必要がない**。
+    すぐ反映したい時は Tampermonkeyダッシュボード →「スクリプトの更新を確認」。
+    ※逆に「消して作り直す」と設定も消える。更新は必ず"上書き更新"で。
+
   ■ 使い方（初回だけ・ほぼ自動）
     GAS URLは埋め込み済みなので設定不要。インストール後にShopee Seller Centerを開くと、
     左下に案内が出て「WRITE_TOKEN を貼ってください」と1回だけ聞かれます。
