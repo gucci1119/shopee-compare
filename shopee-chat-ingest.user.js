@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.23.0
+// @version      1.24.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -501,9 +501,9 @@
     try {
       const r = await sbReq('POST', 'chat_messages?on_conflict=id', mbatch, 'resolution=merge-duplicates,return=minimal');
       if (r && r.status >= 200 && r.status < 300) { sent += mbatch.length; lastErr = ''; }
-      else { lastErr = 'SB ' + ((r && r.status) || '?'); msgBuffer.unshift.apply(msgBuffer, mbatch); }
-    } catch (e) { lastErr = 'SB通信'; msgBuffer.unshift.apply(msgBuffer, mbatch); }
-    flushing = false; updateChip();
+      else { lastErr = 'SB ' + ((r && r.status) || '?') + ((r && r.json && r.json.message) ? (' ' + String(r.json.message).slice(0, 60)) : ''); msgBuffer.unshift.apply(msgBuffer, mbatch); }
+    } catch (e) { lastErr = 'SB通信: ' + String((e && e.message) || e).slice(0, 40); msgBuffer.unshift.apply(msgBuffer, mbatch); }
+    finally { flushing = false; updateChip(); } // ★何があっても必ず解除（ここが立ちっぱなしだと以降の書き込みが全部止まる）
   }
   function flush(manual) {
     if (flushing) return;
@@ -576,20 +576,44 @@
   function outboxDone(id, ok, err) { return new Promise(res => { GM_xmlhttpRequest({ method: 'POST', url: getUrl(), headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ action: 'outbox_done', token: getTok(), id: id, ok: ok, error: err || '' }), onload: () => res(), onerror: () => res(), ontimeout: () => res() }); }); }
 
   // ---- Supabase 直読み（GAS枠を使わない返信キュー・キー設定時のみ） ----
+  // ★通信は「必ず決着する」こと（成功/失敗どちらでも返る）を最優先にする。
+  //   GM_xmlhttpRequest はこの環境で**無反応のままハングする既知の落とし穴**があり（過去にメルカリ/Yahooでも発生）、
+  //   ハングすると flushing/outboxBusy が立ちっぱなしになり、**以降の書き込みが全部止まる**（実際に
+  //   「キャプチャ321・送信済0・未送信315・エラー表示なし」で発生）。
+  //   → ①SupabaseはCORS許可なので通常の fetch を主経路にする ②それが塞がれた時だけ GM_xhr
+  //     ③どちらも自前のタイムアウトで必ず抜ける。
   function sbReq(method, path, body, prefer) {
-    return new Promise((res, rej) => {
-      const key = getSbKey(); if (!key) { rej(new Error('no key')); return; }
-      const headers = { 'apikey': key, 'Authorization': 'Bearer ' + key };
-      if (body != null) headers['Content-Type'] = 'application/json';
-      if (prefer) headers['Prefer'] = prefer;
-      else if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
-      GM_xmlhttpRequest({
-        method: method, url: getSbUrl() + '/rest/v1/' + path, headers: headers, timeout: 15000,
-        data: body != null ? JSON.stringify(body) : undefined,
-        onload: r => { let j = null; try { j = r.responseText ? JSON.parse(r.responseText) : null; } catch (_) {} res({ status: r.status, json: j }); },
-        onerror: () => rej(new Error('net')), ontimeout: () => rej(new Error('timeout'))
-      });
+    const key = getSbKey();
+    if (!key) return Promise.reject(new Error('no key'));
+    const url = getSbUrl() + '/rest/v1/' + path;
+    const headers = { 'apikey': key, 'Authorization': 'Bearer ' + key };
+    if (body != null) headers['Content-Type'] = 'application/json';
+    if (prefer) headers['Prefer'] = prefer;
+    else if (method === 'PATCH') headers['Prefer'] = 'return=minimal';
+    const data = body != null ? JSON.stringify(body) : undefined;
+    const viaFetch = () => {
+      const ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const t = setTimeout(() => { try { if (ac) ac.abort(); } catch (_) {} }, 15000);
+      // ★window.fetchは自分でフック済み。かつSupabaseのURLには chat_messages / conversation_id 等が含まれ
+      //   チャット系URL判定に引っかかる＝自分の通信を自分で取り込む無限ループになる。必ず元のfetchを使う。
+      const f = (typeof origFetch === 'function') ? origFetch : window.fetch;
+      return f.call(window, url, { method: method, headers: headers, body: data, mode: 'cors', credentials: 'omit', signal: ac ? ac.signal : undefined })
+        .then(r => r.text().catch(() => '').then(tx => { clearTimeout(t); let j = null; try { j = tx ? JSON.parse(tx) : null; } catch (_) {} return { status: r.status, json: j }; }))
+        .catch(e => { clearTimeout(t); throw e; });
+    };
+    const viaGM = () => new Promise((res, rej) => {
+      let done = false; const fin = (fn, v) => { if (!done) { done = true; fn(v); } };
+      const to = setTimeout(() => fin(rej, new Error('timeout')), 16000); // GM_xhrが無反応でも必ず抜ける保険
+      try {
+        GM_xmlhttpRequest({
+          method: method, url: url, headers: headers, timeout: 15000, data: data,
+          onload: r => { clearTimeout(to); let j = null; try { j = r.responseText ? JSON.parse(r.responseText) : null; } catch (_) {} fin(res, { status: r.status, json: j }); },
+          onerror: () => { clearTimeout(to); fin(rej, new Error('net')); },
+          ontimeout: () => { clearTimeout(to); fin(rej, new Error('timeout')); }
+        });
+      } catch (e) { clearTimeout(to); fin(rej, e); }
     });
+    return viaFetch().catch(() => viaGM());
   }
   function outboxDoneSb(id, ok, err) {
     return sbReq('PATCH', 'chat_outbox?id=eq.' + encodeURIComponent(id),
@@ -616,13 +640,17 @@
   }
   const skipUntil = new Map(); // id→再挑戦時刻。この タブに無い会話（別アカウント側の注文等）は少し置いてから再挑戦
   async function pollOutboxSb() {
+    try { await pollOutboxSbInner(); }
+    finally { outboxBusy = false; } // ★何があっても必ず解除（立ちっぱなしだと返信が二度と送られない）
+  }
+  async function pollOutboxSbInner() {
     let items = [];
     try {
       const r = await sbReq('GET', 'chat_outbox?status=eq.pending&select=id,cc,buyer,conversation_id,text&order=created_at.asc&limit=20');
       if (r && r.status >= 200 && r.status < 300 && Array.isArray(r.json)) items = r.json;
-      else { outboxBusy = false; return; }
-    } catch (_) { outboxBusy = false; return; }
-    if (!items.length) { reclaimStale(); outboxBusy = false; return; }
+      else return;
+    } catch (_) { return; }
+    if (!items.length) { reclaimStale(); return; }
     const now = Date.now();
     for (const it of items) {
       if (skipUntil.get(it.id) > now) continue; // この タブでは見つからなかった会話＝別タブに任せて後で再挑戦
@@ -637,7 +665,6 @@
       }
       await outboxDoneSb(it.id, ok, err); updateChip(); await sleep(900);
     }
-    outboxBusy = false;
   }
 
   let outboxBusy = false;
