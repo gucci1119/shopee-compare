@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.33.0
+// @version      1.35.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -303,7 +303,20 @@
     //     それ以外（履歴を遡っている途中など）は取り込まない＝次に区切りが見えた時に正しい日付で取り込む。
     let atBottom = true;
     try { const _sc = threadScroller(); if (_sc && _sc.scrollHeight > 0) atBottom = (_sc.scrollTop + _sc.clientHeight) >= (_sc.scrollHeight - 80); } catch (_) {}
-    [].slice.call(h.thread.children).forEach(row => {
+    // ★★最重要：日付区切り（Today/Yesterday/19 Jun…）より**上**にあるメッセージは、その区切りより**古い**。
+    //   ここを「今日」と決め打ちすると、昨日の23:59が今日の最新扱いになり、本当の今日の返信が下に埋もれる（実際に発生）。
+    //   → 先に「最初の区切りが何番目か」を調べ、それより上の行は**日付が確定できないので取り込まない**（後で上にスクロールされた時に正しい日付で入る）。
+    const kids = [].slice.call(h.thread.children);
+    let firstSepIdx = -1;
+    for (let i = 0; i < kids.length; i++) {
+      const rawT = (kids[i].innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+      if (!rawT) continue;
+      const pd = parseDayTok(rawT);
+      if (pd && !pd.rest) { firstSepIdx = i; break; } // 行まるごとが日付＝区切り行
+    }
+    kids.forEach((row, _idx) => {
+      // 区切りより上＝その区切りの日付より古い。日付が確定できないので取り込まない（誤って「今日」にしない）
+      if (firstSepIdx >= 0 && _idx < firstSepIdx) return;
       const img = row.querySelector('img[src*="http"]');
       const imgUrl = img ? img.src : '';
       const raw = (row.innerText || '').trim(); if (!raw && !imgUrl) return;
@@ -525,6 +538,9 @@
         // ★途中で「🙋手動用」に切り替えられたら即やめる（役割変更が効かず巡回が続いてしまう不具合の修正）。
         //   巡回役の権利を他タブに奪われた場合も同様にここで降りる。
         if (!isWorker()) { cycleInfo = ''; break; }
+        // ★返信が入ったら巡回はここで足を止める（会話の取り合いを防ぐ）。送信が終われば自動で再開。
+        while (sendingNow) { crawlPaused = true; cycleInfo = '⏸返信を優先中'; updateChip(); await sleep(800); }
+        crawlPaused = false;
         await waitIdle();
         const side = sideList(); if (!side) break;
         let target = null, tname = '';
@@ -795,9 +811,17 @@
     try { await sbReq('PATCH', 'chat_outbox?status=eq.sending&sent_at=lt.' + encodeURIComponent(cutoff), { status: 'pending' }); } catch (_) {}
   }
   const skipUntil = new Map(); // id→再挑戦時刻。この タブに無い会話（別アカウント側の注文等）は少し置いてから再挑戦
+  // ★返信は巡回より優先（本人「ポータル側でポンポン返信をかけるが衝突しないか」）。
+  //   巡回も返信も「会話を開く」操作なので、同時に走ると取り合いになり送信が失敗し得る。
+  //   → 送るものがある間は sendingNow を立てて巡回を待たせ、巡回が安全な区切り(crawlPaused)に来てから送る。
+  let sendingNow = false, crawlPaused = false;
+  async function waitCrawlPause(maxMs) {
+    const t0 = Date.now();
+    while (cycling && !crawlPaused && Date.now() - t0 < (maxMs || 8000)) await sleep(300);
+  }
   async function pollOutboxSb() {
     try { await pollOutboxSbInner(); }
-    finally { outboxBusy = false; } // ★何があっても必ず解除（立ちっぱなしだと返信が二度と送られない）
+    finally { outboxBusy = false; sendingNow = false; } // ★何があっても必ず解除（立ちっぱなしだと返信が二度と送られない／巡回も再開させる）
   }
   async function pollOutboxSbInner() {
     let items = [];
@@ -807,6 +831,9 @@
       else return;
     } catch (_) { return; }
     if (!items.length) { reclaimStale(); return; }
+    // 送るものがある＝ここから返信優先。巡回が会話を切り替えている最中なら、区切りまで待ってから送る。
+    sendingNow = true; cycleInfo = '📨返信を送信中'; updateChip();
+    await waitCrawlPause(8000);
     const now = Date.now();
     for (const it of items) {
       if (skipUntil.get(it.id) > now) continue; // この タブでは見つからなかった会話＝別タブに任せて後で再挑戦
