@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.69.0
+// @version      1.70.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.69.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.70.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -585,7 +585,16 @@
   // 一覧の行からバイヤー名と国を取る（ヘッダ再検出より信頼できる）
   function rowInfo(row) { const t = (row.innerText || '').replace(/\r/g, ''); const buyer = (t.split('\n')[0] || '').trim(); const cc = (t.match(/\(([A-Z]{2})\)/) || [])[1] || CC; return { buyer, cc }; }
   // 一覧の行から時刻/日付/ステータスを除いた本文署名を作る
-  function rowSig(row) { return (row.innerText || '').replace(/\s+/g, ' ').trim().replace(/\d+\s*分前|\d+\s*時間前|\d+\s*日前|\d{1,2}\/\d{1,2}|Yesterday|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Closed|\d{1,2}:\d{2}/gi, '').replace(/\s+/g, ' ').trim(); }
+  // ★署名から「未読バッジの数字」も外す。
+  //   本人は webchat で手動で未読に戻して"未対応の目印"にしている。ところがバッジが付くと
+  //   行の見た目が変わる＝署名が変わる＝新着とみなして巡回が会話を開き、**既読に戻して目印を消していた**
+  //   （本人が「巡回が動いて消えた」と発見）。未読/既読は取り込むべき中身ではないので署名から除く。
+  function rowSig(row) {
+    let t = (row.innerText || '').replace(/\s+/g, ' ').trim();
+    t = t.replace(/\d+\s*分前|\d+\s*時間前|\d+\s*日前|\d{1,2}\/\d{1,2}|Yesterday|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Closed|\d{1,2}:\d{2}/gi, '');
+    t = t.replace(/(^|\s)\d{1,3}(\s|$)/g, ' ');   // 単独の数字＝未読件数バッジ
+    return t.replace(/\s+/g, ' ').trim();
+  }
   // ★React Virtualizedは scroll イベントで再描画する。scrollTopをセットしただけでは行が更新されない→必ずscrollを発火
   function rvScroll(el, top) { if (!el) return; try { el.scrollTop = top; el.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {} }
   // 高速キャプチャ：開いた会話の直近＋数画面ぶんの履歴だけサッと取る（全履歴スクロールより速い）
@@ -1397,7 +1406,10 @@
   let _unreadBusy = false;
   async function autoMarkUnread() {
     if (_unreadBusy || !getSbKey() || !isWorker() || cycling || userBusy()) return;
-    if (GM_getValue('autoUnread', true) === false) return;
+    // ★既定OFF。実測で「⌄はDOMに無い（本物のホバーでしか描画されない）」「押してもHTTP/WSが飛ばない」
+    //   ことが確認でき、画面操作でも通信でも自動化できないと結論した。動かない処理で会話を開くと
+    //   本人が手で付けた未読の目印を消してしまうため、走らせないのが正しい。
+    if (GM_getValue('autoUnread', false) !== true) return;
     _unreadBusy = true;
     try {
       const r = await sbReq('GET', 'chat_messages?select=buyer,direction,msg_time&order=msg_time.desc&limit=3000');
