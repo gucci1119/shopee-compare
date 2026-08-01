@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.64.0
+// @version      1.65.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.64.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.65.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -952,7 +952,16 @@
     // 直近7日以内の会話しか対象にしないので、深くまで探さない（画面が延々と上下するのを防ぐ）
     for (let pass = 0; pass < 10; pass++) {
       const side = sideList(); if (!side) return null;
-      const row = [].slice.call(side.children).find(r => norm((r.innerText || '').split('\n')[0]) === norm(buyer));
+      // ★一覧の名前は幅で切られて「…」が付くことがある（例 andreluisdossantos…）。
+      //   完全一致だけで探すと、名前が長い相手に永久に辿り着けない。切られている場合は前方一致で照合する。
+      const target = norm(buyer);
+      const row = [].slice.call(side.children).find(r => {
+        const nm = norm((r.innerText || '').split('\n')[0]);
+        if (!nm) return false;
+        if (nm === target) return true;
+        const cut = nm.replace(/[…\.]+$/, '');
+        return cut.length >= 6 && target.indexOf(cut) === 0;
+      });
       if (row) return row;
       const sc = sideScroller(); if (!sc) return null;
       const before = sc.scrollTop; rvScroll(sc, before + 600); await sleep(500);
@@ -1354,12 +1363,17 @@
         .slice(0, 8);
       if (!targets.length) return;
       let ok = 0, ng = 0, lastErrText = '';
+      // ★巡回と一覧のスクロールを奪い合うと、探している最中に一覧が動かされて見失う。
+      //   返信送信と同じ仕組みで巡回を止めてから作業する。
+      sendingNow = true;
+      await waitCrawlPause(8000).catch(() => {});
       for (const b of targets) {
         if (!isWorker() || userBusy()) break;
         try { await markUnread(b); done[b] = lastAt[b]; ok++; }
         catch (e) { done[b] = lastAt[b]; ng++; lastErrText = e.message; } // 失敗も記録＝同じ会話で毎回詰まらない（版が上がればやり直す）
         await sleep(900);
       }
+      sendingNow = false;
       GM_setValue('unreadDone', done);
       // ★結果をポータルから見えるところに残す。「動いているのか分からない」を無くす。
       try {
