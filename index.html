@@ -7958,7 +7958,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const bubbleHtml = m => {
       // ❓FAQ履歴は Shopee と同じ「左寄せの白いカード」で描く（1本の長い灰色バーだと読めない）
       if (m.direction === 'sys' && /^❓FAQ履歴/.test(String(m.text || ''))) {
-        const ls = String(m.text).split('\n').slice(1).filter(x => x.trim());
+        const ls = String(m.text).split('\n').slice(1).filter(x => x.trim() && !/^FAQ History/i.test(x.trim()) && !/^[.\u2026\s]+$/.test(x));
+        // 中身が入っていないカード（取り込み途中の残骸）は出さない
+        if (!ls.length || ls.join('').replace(/[.\s\u2026]/g, '').length < 8) return '';
         return `<div style="display:flex;justify-content:flex-start;margin:4px 0">
           <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px 10px;max-width:88%;box-shadow:0 1px 2px rgba(0,0,0,.05)">
             <div style="font-size:11.5px;font-weight:700;margin-bottom:5px">FAQ History</div>
@@ -8010,7 +8012,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(qs.join(' '))}">${esc(qs.join(' ')) || esc(qLine)}</div>
         </div>`;
       })() : '';
-      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${quoteHtml}${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
+      // 「訳」＝この吹き出しだけ日本語にする（全体トグルを使わなくても1件ずつ訳せる）
+      const trBtn = isImg ? '' : `<button class="mb-tr" title="この文だけ日本語にする（このパソコン内で翻訳・外部送信なし）" style="border:0;background:none;color:#2673dd;font-size:10px;padding:0;margin-right:8px;cursor:pointer">訳</button>`;
+      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${quoteHtml}${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${trBtn}${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
     };
     msg._convList = convList; // 表示順（絞り込み・並び替え後）を保持＝送信後に「次の未返信」へ進むため
     // 選択中の会話（無ければ先頭）
@@ -8142,6 +8146,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try { localStorage.setItem('smdMsgTr', msg.tr ? '1' : '0'); } catch (_) {}
         renderMessages(true);
       }); }
+    body.querySelectorAll('.mb-tr').forEach(b => b.addEventListener('click', async () => {
+      const bubble = b.closest('div[style*="border-radius:10px"]') || b.parentElement.parentElement;
+      const el = bubble && bubble.querySelector('.mb-t');
+      if (!el) return;
+      if (el.nextElementSibling && el.nextElementSibling.classList.contains('mb-j')) { el.nextElementSibling.remove(); b.textContent = '訳'; return; }
+      if (typeof Translator === 'undefined') { alert('このブラウザは翻訳機能に対応していません（Chromeの新しい版が必要です）'); return; }
+      b.textContent = '…';
+      const j = await trOne((el.textContent || '').trim());
+      b.textContent = '訳';
+      if (!j) { b.textContent = '訳せず'; return; }
+      const d = document.createElement('div');
+      d.className = 'mb-j';
+      d.style.cssText = 'margin-top:5px;padding-top:5px;border-top:1px dashed rgba(0,0,0,.13);color:#5b6470;font-size:11.5px;line-height:1.5;white-space:pre-wrap';
+      d.textContent = j;
+      el.after(d);
+    }));
     if (msg.tr) runTranslate();
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
