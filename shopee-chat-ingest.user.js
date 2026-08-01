@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.54.0
+// @version      1.55.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.54.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.55.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
 
   // ---- キャプチャ・バッファ ----
@@ -631,7 +631,7 @@
     if (cycling) { if (manual) toast('巡回中です…'); return; }
     if (!manual && GM_getValue('autoCrawl', true) === false) return;
     if (mode === 'full' && !manual && backfillOff()) return; // 履歴の遡りは打ち切り済み（新着はこの下の new 巡回が拾う）
-    cycling = true; let count = 0, stagnant = 0;
+    cycling = true; let count = 0, stagnant = 0, upToDate = 0;
     _runStart = Date.now(); _runStartDone = crawlDone.size; reportCrawl(mode, true, ''); // 進捗の起点（ETA計算用）
     const startConv = (domHeaderInfo() || {}).buyer || '';
     try {
@@ -670,10 +670,16 @@
         for (const row of [].slice.call(side.children)) {
           const nm = (row.innerText || '').trim().split('\n')[0].trim();
           if (!nm || !/^[\w.]+$/.test(nm)) continue;
-          if (mode === 'new') { if (lastSig[nm] === rowSig(row)) continue; }
+          if (mode === 'new') {
+            // ★一覧は新しい順に並んでいる。取り込み済みの会話が続いたら、それより下は
+            //   もっと古い＝新着は無い。過去を読み直しても内容は変わらないので、そこで打ち切る。
+            if (lastSig[nm] === rowSig(row)) { upToDate++; continue; }
+            upToDate = 0;
+          }
           else { if (crawlDone.has(nm)) continue; }
           target = row; tname = nm; break;
         }
+        if (mode === 'new' && !target && upToDate >= 25) { cycleInfo = ''; break; } // 上から25件連続で最新＝もう新着は無い
         if (target) {
           cycleInfo = (mode === 'new' ? '🐢新着 ' : '🐢巡回 ') + (count + 1); updateChip();
           const cc = (rowInfo(target).cc) || CC;
