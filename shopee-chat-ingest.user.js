@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.35.0
+// @version      2.36.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.35.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.36.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2089,7 +2089,7 @@
       const cfg = c && c.json && c.json[0] && c.json[0].v;
       if (!cfg || !cfg.on || !cfg.text) return;
       const text = String(cfg.text).trim();
-      const delayMs = Math.max(1, Number(cfg.delayMin || 10)) * 60000;
+      const delayMs = Math.max(1, Number(cfg.delayMin || 1)) * 60000;
       const gapMs = Math.max(1, Number(cfg.gapH || 6)) * 3600000;
       // msg_time は「現地の壁時計をそのままISOにしたもの」なので、今の時刻も同じ形に揃えて比べる
       const nowLocal = Date.now() - new Date().getTimezoneOffset() * 60000;
@@ -2102,6 +2102,10 @@
         const k = (m.cc || '') + ':' + (m.buyer || '');
         (conv[k] = conv[k] || []).push(m);
       });
+      // ★「この人には自動返信しない」（ポータルの会話ヘッダで個別に指定）を尊重する
+      let meta = {};
+      try { const mk = await sbReq('GET', 'app_kv?select=v&k=eq.chat_conv_meta'); meta = (mk && mk.json && mk.json[0] && mk.json[0].v) || {}; } catch (_) {}
+      const noAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].noAuto));
       // 送信待ちが残っている相手には積まない（二重送信の防止）
       const ob = await sbReq('GET', 'chat_outbox?select=buyer,status&status=eq.pending&limit=200');
       const pending = new Set(((ob && ob.json) || []).map(x => String(x.buyer || '')));
@@ -2114,6 +2118,7 @@
         if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
         if (age > 7 * 86400000) return;                               // 古すぎる会話には送らない
         if (pending.has(String(last.buyer || ''))) return;
+        if (noAuto.has(k) || noAuto.has(String(last.buyer || ''))) return;   // 個別に「送らない」指定
         // 直近 gapH の間に同じ自動返信を送っていたら送らない（連投しない）
         const dup = ms.some(m => m.direction === 'out' && String(m.text || '').trim() === text && (nowLocal - Date.parse(m.msg_time || '')) < gapMs);
         if (dup) return;
