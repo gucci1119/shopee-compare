@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.78.0
+// @version      1.79.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.78.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.79.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -492,6 +492,15 @@
       // ★「Translated by Shopee」はShopeeの翻訳機能のラベルであって本文ではない（本人指摘）。
       //   吹き出しの下に出るため本文と連結されてしまう。各国語ぶん末尾から除去する。
       body = body.replace(TRANS_LABEL, '').trim();
+      // ★返信の「引用（返信元）」を本文から外す。Shopeeは引用カード＋本文の2段で表示するが、
+      //   文字だけ拾うと「相手名 [Image] 本文」と1本につながってしまう（本人がwebchatと見比べて発見）。
+      //   引用は「相手の名前(または自分)＋[Image]/[Sticker]等」で始まるので、その前置きだけ落とす。
+      if (h.buyer) {
+        const esc = h.buyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const qre = new RegExp('^\\s*(?:' + esc + '|you|自分)\\s*(?:\\[[^\\]]{1,24}\\]\\s*)?', 'i');
+        const cut = body.replace(qre, '').trim();
+        if (cut && cut !== body) body = cut;
+      }
       if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
       let base;
