@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.89.0
+// @version      1.90.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.89.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.90.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -831,20 +831,7 @@
   GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
   if (GM_getValue('autoCrawl', true) !== false) {
-    setTimeout(() => { if (isWorker()) slowCrawl('full', false); }, 12000);
-    // ★総当たりで会話を開く巡回は**1時間に1回**に落とす（本人指摘）。理由：
-    //   ・一覧スキャン（会話を開かない）で「誰から・いつ・最後の一言」は取れている
-    //   ・本文は**ポータルで会話を開いた瞬間**に fetch_conv で取りに行く
-    //   ・開くたびに既読になり、手で付けた未読の目印も消え、タブも重くなる（実際にメモリ不足で落ちた）
-    //   残す目的は「過去チャットのキーワード検索」用に本文を少しずつ溜めること。急ぐ必要はない。
-    setInterval(() => { if (isWorker() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 3600000);
-    // ★新着をできるだけ早く取り込む（本人要望＝リアルタイム性重視。メッセージは毎日15分おきに大量に来る）。
-    //   会話一覧はWebSocketで即座に更新されるので、5秒ごとに一覧の署名だけ見て、変化があればその場で
-    //   「新着のあった会話だけ」の巡回を起動する。従来は150秒固定待ち＝最大2.5分遅れていた。
-    //   ※開いている会話は元々2.5秒ごとに取り込み済み。操作中(userBusy)は起動しない＝作業を邪魔しない。
-    // ★リアルタイムに追いかけるのは「本人がポータルのメッセージ画面を開いている間だけ」（本人指定）。
-    //   見ていない時まで会話を開き続けると、既読になる・タブが重い・意味が薄い。
-    //   ポータルが app_kv.chat_viewer に生存を書くので、それが新しい時だけ5秒監視を働かせる。
+    // （定義は下だが関数宣言ではないため、上の1時間巡回から使えるようここで宣言する）
     let _viewerAt = 0, _viewerChk = 0;
     const viewerActive = () => {
       const now = Date.now();
@@ -857,6 +844,25 @@
       }
       return (Date.now() - _viewerAt) < 90000;
     };
+
+    setTimeout(() => { if (isWorker()) slowCrawl('full', false); }, 12000);
+    // ★総当たりで会話を開く巡回は**1時間に1回**に落とす（本人指摘）。理由：
+    //   ・一覧スキャン（会話を開かない）で「誰から・いつ・最後の一言」は取れている
+    //   ・本文は**ポータルで会話を開いた瞬間**に fetch_conv で取りに行く
+    //   ・開くたびに既読になり、手で付けた未読の目印も消え、タブも重くなる（実際にメモリ不足で落ちた）
+    //   残す目的は「過去チャットのキーワード検索」用に本文を少しずつ溜めること。急ぐ必要はない。
+    setInterval(() => {
+      if (!isWorker() || GM_getValue('autoCrawl', true) === false || cycling || userBusy()) return;
+      if (viewerActive()) return;   // ★見ている最中は総当たり巡回をしない（画面がガチャガチャ動く／送信と競合する）
+      slowCrawl('new', false);
+    }, 3600000);
+    // ★新着をできるだけ早く取り込む（本人要望＝リアルタイム性重視。メッセージは毎日15分おきに大量に来る）。
+    //   会話一覧はWebSocketで即座に更新されるので、5秒ごとに一覧の署名だけ見て、変化があればその場で
+    //   「新着のあった会話だけ」の巡回を起動する。従来は150秒固定待ち＝最大2.5分遅れていた。
+    //   ※開いている会話は元々2.5秒ごとに取り込み済み。操作中(userBusy)は起動しない＝作業を邪魔しない。
+    // ★リアルタイムに追いかけるのは「本人がポータルのメッセージ画面を開いている間だけ」（本人指定）。
+    //   見ていない時まで会話を開き続けると、既読になる・タブが重い・意味が薄い。
+    //   ポータルが app_kv.chat_viewer に生存を書くので、それが新しい時だけ5秒監視を働かせる。
     setInterval(() => {
       if (!isWorker() || cycling || userBusy()) return;
       if (GM_getValue('autoCrawl', true) === false) return;
@@ -1224,6 +1230,10 @@
     //   一致しなければ**絶対に送らない**でエラーにする（宛先間違いは取り返しがつかない）。
     {
       let okName = false;
+      // 相手が判別できない＝会話が開けていないだけのことがある。**開き直してから**再確認する
+      //   （ここで諦めると、安全ではあるが送れずに止まってしまう）。
+      for (let attempt = 0; attempt < 2 && !okName; attempt++) {
+      if (attempt > 0) { try { await openConversation(item.buyer); } catch (_) {} await sleep(900); }
       for (let i = 0; i < 10; i++) {           // 表示が追いつくまで最大約3秒待つ
         const h = domHeaderInfo();
         const raw = headerBuyerRaw ? (headerBuyerRaw() || '') : '';
@@ -1231,6 +1241,7 @@
         const want = norm(item.buyer);
         if (cand.some(c => c === want || c.indexOf(want) === 0 || want.indexOf(c.replace(/[…\.]+$/, '')) === 0 && c.length >= 6)) { okName = true; break; }
         await sleep(300);
+      }
       }
       if (!okName) {
         const now = (domHeaderInfo() || {}).buyer || '(不明)';
