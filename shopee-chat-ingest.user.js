@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.01.0
+// @version      3.10.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.01.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.10.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -566,7 +566,12 @@
         sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_thread_probe', v: { at: new Date().toISOString(), buyer: h.buyer, rows: kids.length, sample: sample }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
       }
     } catch (_) {}
+    // この取り込みで「正しい」と認める会話ID（巡回で開いた会話 or いま表示中の会話）
+    const _wantCid = (captureAs && captureAs.convId) || _cid0 || '';
     kids.forEach((row, _idx) => {
+      // ★★行ごとの素性を最優先で見る。会話IDが違う行は**その行だけ捨てる**（＝混線が起きない）。
+      const _meta = msgMeta(row);
+      if (_meta && _meta.convId && _wantCid && _meta.convId !== _wantCid) return;
       // 区切りより上＝その区切りの日付より古い。日付が確定できないので取り込まない（誤って「今日」にしない）。
       // ★ただし ctx で日付を引き継いでいる時（上から下へ通しで読んでいる最中）は、
       //   この画面より上は**前の画面で読み終えた続き**なので、引き継いだ日付で確定できる。
@@ -689,6 +694,8 @@
       // ★中央に出る灰色の通知（自動クローズ／担当者が参加した等）は左右どちらでもないので
       //   従来は捨てていた。会話の流れを追うのに必要なので dir='sys' として取り込む（本人要望）。
       //   未返信の判定は direction==='in' なので、これらは未返信に数えられない。
+      // ★送信者IDが取れているなら、それが最も確か（座標やCSSの推測より強い）
+      if (_meta && _meta.fromId && _meta.buyerId && dir !== 'sys') dir = (_meta.fromId === _meta.buyerId) ? 'in' : 'out';
       if (!dir) { if (SYS_NOTICE.test((body || '').trim())) dir = 'sys'; else return; }
       // ★画像メッセージの扱い（本人報告「画像が出なくなった」の対策）
       //   Shopeeは画像が読み込まれるまで「Image …」等の仮テキストを出す。取り込みが速くなった結果この仮テキストを
@@ -751,7 +758,10 @@
       keptDated++;
       if (quote) body = '[[q]]' + quote.replace(/\n/g, ' ') + '\n' + body;
       if (useTm) { lastTm = useTm; lastSec = useSec; }
-      const id = 'dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body);
+      // ★★IDはShopeeのメッセージIDを最優先で使う。本文の整形を変えても・日付を直しても**行が増えない**。
+      //   （今まで重複が増え続けた最大の原因が、本文のハッシュをIDに使っていたこと）
+      const id = (_meta && _meta.mid) ? ('sp|' + _meta.mid)
+               : ('dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body));
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
     // ★読み終わりに会話IDが変わっていた＝読んでいる途中で切り替わった。混ざるくらいなら捨てる。
@@ -948,6 +958,31 @@
       }
     } catch (_) {}
     return '';
+  }
+  // ★★★メッセージ1行ごとの素性（v3.10.0）。Shopeeは各行のReact propsに
+  //   message.{id, conversation_id, from_id, to_id} と conversationBuyerId を持っている（実測）。
+  //   これを使うと**タイミングに一切依存せず**に「この行はどの会話の、誰の発言か」が確定できる。
+  //   → 混線（別人の行が混ざる）が原理的に起きない／同じ発言は同じIDなので重複も増えない。
+  function msgMeta(row) {
+    try {
+      let f = reactFiber(row), d = 0;
+      while (f && d < 10) {
+        const mp = f.memoizedProps;
+        if (mp && typeof mp === 'object') {
+          const m = mp.message;
+          if (m && (m.id != null || m.conversation_id != null)) {
+            return {
+              mid: m.id != null ? String(m.id) : '',
+              convId: m.conversation_id != null ? String(m.conversation_id) : (mp.conversationId != null ? String(mp.conversationId) : ''),
+              fromId: m.from_id != null ? String(m.from_id) : '',
+              buyerId: mp.conversationBuyerId != null ? String(mp.conversationBuyerId) : ''
+            };
+          }
+        }
+        f = f.return; d++;
+      }
+    } catch (_) {}
+    return null;
   }
   function rowConv(row) {
     try {
