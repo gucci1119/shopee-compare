@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.75.0
+// @version      1.76.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.75.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.76.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -744,6 +744,10 @@
             continue; // 新着を取り込んだら次のループへ（遡りはその後で続く）
           }
         }
+        // ★1回の走査ごとに数え直す。以前は while ループをまたいで累積していたため、
+        //   毎回同じ既読の行を数え直して**すぐ25に達し、巡回がほぼ即終了**していた
+        //   （実測：一覧で今日やり取りのあった32会話のうち31会話がDBに入っていなかった）。
+        upToDate = 0;
         for (const row of [].slice.call(side.children)) {
           const nm = (row.innerText || '').trim().split('\n')[0].trim();
           if (!nm || !/^[\w.]+$/.test(nm)) continue;
@@ -756,7 +760,10 @@
           else { if (crawlDone.has(nm)) continue; }
           target = row; tname = nm; break;
         }
-        if (mode === 'new' && !target && upToDate >= 25) { cycleInfo = ''; break; } // 上から25件連続で最新＝もう新着は無い
+        // この走査で1件も新着が無く、かつ既読が25件以上続いた＝この画面ぶんは全て最新。
+        // それでも一覧の下にはまだ見ていない行があるので、スクロールを進めてから判断する
+        // （下までスクロールし切ったかどうかは stagnant が見ている）。
+        if (mode === 'new' && !target && upToDate >= 25 && stagnant >= 2) { cycleInfo = ''; break; }
         if (target) {
           cycleInfo = (mode === 'new' ? '🐢新着 ' : '🐢巡回 ') + (count + 1); updateChip();
           const cc = (rowInfo(target).cc) || CC;
