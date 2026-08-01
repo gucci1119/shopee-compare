@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.45.0
+// @version      1.46.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -1052,17 +1052,24 @@
     if (!getSbKey()) { alert('Supabaseキーが未設定です（チップの1で設定）'); return; }
     // msg_time は「日本時間の壁時計をUTC表記で」入れているので、今の壁時計と直接比較してよい
     const nowWall = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString();
-    let rows = [];
+    let rows = [], listed = [];
     try {
       const r = await sbReq('GET', 'chat_messages?select=buyer&msg_time=gt.' + nowWall + '&limit=2000');
       if (!r || r.status >= 300) { alert('取得に失敗しました（HTTP ' + (r && r.status) + '）'); return; }
       rows = Array.isArray(r.json) ? r.json : [];
+      // ★「日付が怪しい会話」を明示指定できる置き場。日付を推測で補正した会話などをここに積んでおくと、
+      //   実画面の日付区切りを読み直して正しい値で上書きできる（推測のまま残さないため）。
+      const kv = await sbReq('GET', 'app_kv?select=v&k=eq.chat_refix_buyers');
+      const v = kv && kv.json && kv.json[0] && kv.json[0].v;
+      if (v && Array.isArray(v.buyers)) listed = v.buyers.filter(Boolean);
     } catch (e) { alert('取得に失敗しました: ' + e.message); return; }
-    const buyers = [...new Set(rows.map(r => r.buyer).filter(Boolean))];
-    if (!buyers.length) { alert('✅ 未来日付の行はありません（直すものがありません）'); return; }
-    if (!confirm('未来の日付になっている会話が ' + buyers.length + '件（' + rows.length + '行）あります。\nこの会話を開き直して日付を直しますか？\n\n※消しません。同じ行を正しい日付で上書きします。')) return;
+    const buyers = [...new Set(rows.map(r => r.buyer).filter(Boolean).concat(listed))];
+    if (!buyers.length) { alert('✅ 日付を直す対象はありません'); return; }
+    if (!confirm('日付が正しくない可能性のある会話が ' + buyers.length + '件あります。\n（未来日付の行 ' + rows.length + '行／指定リスト ' + listed.length + '件）\n\nこの会話を開き直して、画面の日付区切りから正しい日付を読み直しますか？\n※消しません。同じ行を上書きします。')) return;
     buyers.forEach(b => { crawlDone.delete(b); delete lastSig[b]; });
     persistCrawl();
+    // 直し終わったら指定リストは消す（同じ会話を何度も開き直さない）
+    try { await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_refix_buyers', v: { buyers: [], at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal'); } catch (_) {}
     toast('🩹 ' + buyers.length + '件の会話を取り込み直します…');
     if (isWorker()) slowCrawl('new', true);
     else alert('このタブは🙋手動用です。巡回役タブ（🤖）で実行するか、5で巡回役に切り替えてください。\n※印は付けたので、巡回役タブの次の巡回でも直ります。');
