@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.52.0
+// @version      1.53.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,6 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
+  const VER = '1.53.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [] };
 
   // ---- キャプチャ・バッファ ----
@@ -876,9 +877,21 @@
   // 移行期の保険：ポータルで開いて既読にしてしまった会話を、webchat側で未読へ戻す。
   // webchatに「Mark as unread」があることは本人確認済み。出し方(右クリック等)は実機依存なので
   // 手順を順に試し、★できなかったら黙って成功扱いにせず必ずエラーにする（推測で成功と言わない）。
+  // 一覧をスクロールしてでも目的の会話行を見つける（閉じた会話は下の方にあることが多い）
+  async function findRow(buyer) {
+    for (let pass = 0; pass < 14; pass++) {
+      const side = sideList(); if (!side) return null;
+      const row = [].slice.call(side.children).find(r => norm((r.innerText || '').split('\n')[0]) === norm(buyer));
+      if (row) return row;
+      const sc = sideScroller(); if (!sc) return null;
+      const before = sc.scrollTop; rvScroll(sc, before + 600); await sleep(500);
+      if (sc.scrollTop <= before + 5) return null; // これ以上スクロールできない
+    }
+    return null;
+  }
   async function markUnread(buyer) {
-    const side = sideList(); if (!side) throw new Error('会話一覧が見つかりません');
-    const row = [].slice.call(side.children).find(r => norm((r.innerText || '').split('\n')[0]) === norm(buyer));
+    const side0 = sideList(); if (!side0) throw new Error('会話一覧が見つかりません');
+    const row = await findRow(buyer);
     if (!row) throw new Error('会話が一覧に見つかりません: ' + buyer);
     const findItem = () => [].slice.call(document.querySelectorAll('div,span,li,button'))
       .filter(e => e.children.length <= 1 && /mark as unread|未読/i.test((e.textContent || '').trim()))
@@ -1074,7 +1087,9 @@
   function heartbeat() {
     if (!isWorker() || !getSbKey()) return; // 送信を実行できる巡回役タブだけが「送れる」と名乗る
     sbReq('POST', 'app_kv?on_conflict=k',
-      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname }, updated_at: new Date().toISOString() }],
+      // ver＝実際に動いているスクリプトの版。これが無いと「入れ替えたのに古いまま動いている」に気づけない
+      //   （Tampermonkeyは差し替えても、開いたままのタブは古いコードで動き続ける）。
+      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER }, updated_at: new Date().toISOString() }],
       'resolution=merge-duplicates,return=minimal').catch(() => {});
   }
   setTimeout(heartbeat, 5000);
@@ -1184,6 +1199,18 @@
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
         else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
         else if (v.cmd === 'rescan_list') { out = '一覧スキャンを開始しました'; scanAllConversations(true); }
+        else if (v.cmd === 'mark_unread') {
+          // 相手のメッセージで終わっている会話（＝未返信）をまとめて未読に戻す。
+          // 閉じた会話も対象。1件ずつ結果を数え、★できなかった件数を必ず出す（成功したことにしない）。
+          const list = Array.isArray(v.buyers) ? v.buyers.slice(0, 300) : [];
+          let ok = 0; const ng = [];
+          for (const b of list) {
+            try { await markUnread(b); ok++; } catch (e) { ng.push(b + '：' + e.message); }
+            await sleep(700);
+          }
+          out = '未読に戻しました ' + ok + '/' + list.length + '件'
+            + (ng.length ? '／失敗 ' + ng.length + '件（例: ' + ng.slice(0, 3).join(' / ') + '）' : '');
+        }
         else if (v.cmd === 'probe_stickers') { out = await probeStickers(true); }
         else if (v.cmd === 'probe_unread') { out = await probeUnread(true); }
         else out = '不明な命令: ' + v.cmd;

@@ -7820,6 +7820,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
            <button class="msg-cmd smd-btn" data-cmd="backfill_off" style="font-size:11px;padding:2px 9px" title="過去メッセージの遡りを止めます。新着の取り込みと返信はそのまま続きます。">⏹ 過去の取り込みを止める</button>
            <button class="msg-cmd smd-btn" data-cmd="backfill_on" style="font-size:11px;padding:2px 9px" title="過去メッセージの遡りを再開します。">🐢 過去の取り込みを再開</button>
            <button class="msg-cmd smd-btn" data-cmd="rescan_list" style="font-size:11px;padding:2px 9px" title="会話を開かずに、一覧の最新状態だけを取り直します。">📋 一覧を今すぐ取り直す</button>
+           <button id="msg-unread-all" class="smd-btn" style="font-size:11px;padding:2px 9px;background:#1565c0;border-color:#1565c0;color:#fff;font-weight:700" title="相手のメッセージで終わっている会話（未返信）を、Shopeeチャット側でまとめて未読に戻します。閉じた会話も対象です。">🔵 未返信をまとめて未読に戻す</button>
            <span id="msg-cmd-stat" class="smd-dim" style="margin-left:auto"></span>
          </div>
        </div>` +
@@ -7944,6 +7945,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             await sbUpsert('chat_outbox', [{ id, cc, buyer, conversation_id: k, text: '[[unread]]', status: 'pending', created_at: new Date().toISOString() }]);
             watchOutbox(id, stat);
           } catch (e) { if (stat) { stat.textContent = '❌ ' + e.message; stat.style.color = '#d93025'; } }
+        });
+      }
+    }
+    // 🔵 未返信をまとめて未読に戻す（相手のメッセージで終わっている会話。閉じた会話も対象）
+    {
+      const ua = document.getElementById('msg-unread-all');
+      if (ua && !ua._wired) {
+        ua._wired = true;
+        ua.addEventListener('click', async () => {
+          const st = document.getElementById('msg-cmd-stat');
+          if (!settings.sbSecret) { if (st) { st.textContent = '⚠️ ⚙️設定の書き込みキーが必要です'; st.style.color = '#d93025'; } return; }
+          // 古すぎる未返信(7日超)は対象外＝今日の対応に関係ないものまで未読にしない
+          const list = (msg._convList || []).filter(c => c.unreplied && !c.stale).map(c => c.buyer).filter(Boolean);
+          if (!list.length) { if (st) { st.textContent = '未返信の会話がありません'; st.style.color = '#888'; } return; }
+          if (!confirm(list.length + '件の未返信の会話を、Shopeeチャット側で未読に戻します。よろしいですか？')) return;
+          const id = 'cmd|' + Date.now();
+          if (st) { st.textContent = '📤 ' + list.length + '件を未読に戻すよう指示中…（1件あたり数秒かかります）'; st.style.color = '#888'; }
+          try {
+            await sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id, cmd: 'mark_unread', buyers: list, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+            let n = 0;
+            const t = setInterval(async () => {
+              n++;
+              try {
+                const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+                const v = ((r || [])[0] || {}).v;
+                if (v && v.id === id) { clearInterval(t); if (st) { st.textContent = '✅ ' + v.text; st.style.color = '#1a7f37'; } return; }
+              } catch (_) {}
+              if (n > 200) { clearInterval(t); if (st) { st.textContent = '⚠️ 返事がありません（Shopeeチャットのタブを確認してください）'; st.style.color = '#b45309'; } }
+            }, 3000);
+          } catch (e) { if (st) { st.textContent = '❌ ' + e.message; st.style.color = '#d93025'; } }
         });
       }
     }
