@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.98.0
+// @version      2.00.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.98.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.00.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -412,6 +412,8 @@
     if ((m = low.match(/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/))) { const d = mk(); let diff = (d.getDay() - WD[m[1]] + 7) % 7; if (diff === 0) diff = 7; d.setDate(d.getDate() - diff); return { day: d, rest: s.slice(m[0].length).trim() }; }
     if ((m = low.match(/^(\d{1,2})\s+([a-z]{3,9})\.?(?:\s+(\d{4}))?\b/)) && MON[m[2].slice(0, 3)] !== undefined) { const d = mk(); d.setDate(1); d.setMonth(MON[m[2].slice(0, 3)]); if (m[3]) d.setFullYear(+m[3]); d.setDate(+m[1]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
     if ((m = low.match(/^([a-z]{3,9})\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/)) && MON[m[1].slice(0, 3)] !== undefined) { const d = mk(); d.setDate(1); d.setMonth(MON[m[1].slice(0, 3)]); if (m[3]) d.setFullYear(+m[3]); d.setDate(+m[2]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = low.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\b/))) { const d = mk(); d.setFullYear(+m[1], +m[2] - 1, +m[3]); return { day: d, rest: s.slice(m[0].length).trim() }; }
+    if ((m = s.match(/^(\d{1,2})\s*月\s*(\d{1,2})\s*日/))) { const d = mk(); d.setMonth(+m[1] - 1, +m[2]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
     if ((m = low.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) { const d = mk(); d.setDate(1); d.setMonth(+m[2] - 1); if (m[3]) d.setFullYear(+m[3] < 100 ? 2000 + +m[3] : +m[3]); d.setDate(+m[1]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
     return null;
   }
@@ -457,11 +459,28 @@
       .map(o => o.el);
     let firstSepIdx = -1;
     for (let i = 0; i < kids.length; i++) {
-      const rawT = (kids[i].innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
-      if (!rawT) continue;
-      const pd = parseDayTok(rawT);
-      if (pd && !pd.rest) { firstSepIdx = i; break; } // 行まるごとが日付＝区切り行
+      // ★仮想スクロールでは、1つの行に「日付区切り＋本文」が同居することがある。
+      //   行まるごとが日付の時しか見ていなかったため、区切りを1件も認識できていなかった（実測：確定0件）。
+      //   → 行を改行で分けて、**どれか1行が日付だけ**なら区切りとみなす。
+      const parts = String(kids[i].innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+      let hit = false;
+      for (const ln of parts) {
+        const t2 = ln.replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+        if (!t2 || t2.length > 26) continue;
+        const pd2 = parseDayTok(t2);
+        if (pd2 && !pd2.rest) { hit = true; break; }
+      }
+      if (hit) { firstSepIdx = i; break; }
     }
+    // ★区切りが1件も見つからない時は、行の実物を自動で記録する（毎回の往復をなくすため）。
+    //   2分に1回だけ・先頭12行・各70文字まで。原因が分からないまま推測で直すのを防ぐ。
+    try {
+      if (firstSepIdx < 0 && kids.length > 0 && getSbKey() && Date.now() - (window.__sepDiagAt || 0) > 120000) {
+        window.__sepDiagAt = Date.now();
+        const sample = kids.slice(0, 12).map((el, i) => i + ': ' + String(el.innerText || '').replace(/\n/g, ' / ').trim().slice(0, 70));
+        sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_thread_probe', v: { at: new Date().toISOString(), buyer: h.buyer, rows: kids.length, sample: sample }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+      }
+    } catch (_) {}
     kids.forEach((row, _idx) => {
       // 区切りより上＝その区切りの日付より古い。日付が確定できないので取り込まない（誤って「今日」にしない）
       if (firstSepIdx >= 0 && _idx < firstSepIdx) return;
@@ -474,6 +493,20 @@
       //   1件目を1行にまとめた場合。ただし「Monday …」「Today …」等の“単語始まりの普通の文”を誤って剥がさないよう、
       //   先頭剥がしは【数字を含む日付（"9 Jun"/"18/06"）】に限定する。
       if (body) {
+        // ★まず「行の中の各行」を見る。仮想スクロールでは区切りと本文が同じ行に同居し、
+        //   行まるごとが日付の時しか拾えていなかった（実測：区切り認識0件＝日付が全部推測になっていた）。
+        const lines = String(body).split('\n').map(x => x.trim()).filter(Boolean);
+        if (lines.length > 1) {
+          const keep = [];
+          for (const ln of lines) {
+            const t2 = ln.replace(/\s*\d{1,2}:\d{2}\s*$/, '').trim();
+            const pl = t2 && t2.length <= 26 ? parseDayTok(t2) : null;
+            if (pl && !pl.rest) { curDay = pl.day; continue; }   // この行は日付区切り＝本文から外す
+            keep.push(ln);
+          }
+          body = keep.join('\n').trim();
+          if (!body) return;
+        }
         const pdt = parseDayTok(body);
         if (pdt) {
           if (!pdt.rest) { curDay = pdt.day; return; }
@@ -1739,6 +1772,16 @@
         if (!items.some(o => o.title === title)) items.push({ tag: (lb.textContent || '').trim(), title: title.slice(0, 110), price: price.slice(0, 40), avail: avail.slice(0, 24), sold: sold.slice(0, 24), img: img.slice(0, 300) });
         if (items.length >= 12) break;
       }
+      // どのタブ(Product/Order/…)・どの絞り込み(All/Buyer Interest/Recommended)を見ていたかも一緒に返す。
+      //   タブを切り替えた結果が反映されないと誤解されるため、取得時の状態を明示する。
+      try {
+        const tabs = [].slice.call(document.querySelectorAll('div,span'))
+          .filter(e => e.children.length === 0 && /^(Product|Order|Voucher|Shortcut|All|Buyer Interest|Recommended)$/i.test((e.textContent || '').trim()))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left > window.innerWidth * 0.55; });
+        const active = tabs.filter(e => { const c = getComputedStyle(e); return /rgb\(238,\s*77,\s*45\)|#ee4d2d/i.test(c.color) || +c.fontWeight >= 600; })
+          .map(e => (e.textContent || '').trim());
+        if (active.length) items._tab = active.join(' / ');
+      } catch (_) {}
       return items.length ? items : null;
     } catch (_) { return null; }
   }
@@ -1765,7 +1808,7 @@
     try {
       const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_interest');
       const cur = (r && r.json && r.json[0] && r.json[0].v && r.json[0].v.byBuyer) || {};
-      cur[buyer] = { at: new Date().toISOString(), items: items || [], inquiry: inq || null };
+      cur[buyer] = { at: new Date().toISOString(), items: items || [], inquiry: inq || null, tab: (items && items._tab) || '' };
       // 直近60人ぶんだけ保持（際限なく増やさない）
       const keys = Object.keys(cur);
       if (keys.length > 60) keys.sort((a, b) => (cur[a].at < cur[b].at ? -1 : 1)).slice(0, keys.length - 60).forEach(k => delete cur[k]);
