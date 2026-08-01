@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.65.0
+// @version      1.66.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.65.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.66.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -1001,18 +1001,21 @@
     // 2) 行の右端に出た小さなボタン（⌄）を押す。Shopeeは合成クリックを無視するのでReactのonClickを直接呼ぶ。
     let it = findItem();
     if (!it) {
+      // ★「⌄」はCSSの :hover で出している可能性が高い。CSSのhoverはJSからは発火できず、
+      //   Shopeeは合成イベントも無視するため、**見た目には出せない**。
+      //   だが React の onClick は要素が見えていなくても呼べるので、可視判定を外して探す。
+      //   （実測：可視のものだけを対象にしていた版では、メニューが一度も開かなかった）
       const cands = [].slice.call(row.querySelectorAll('*'))
-        .map(e => ({ e, b: e.getBoundingClientRect() }))
-        .filter(o => visible(o.e) && o.b.width <= 44 && o.b.height <= 44 && o.b.width >= 8 && o.b.height >= 8)
-        .filter(o => o.b.left >= r.right - 70)          // 右端側だけ（アバターや本文を押さない）
-        .sort((a, b) => b.b.left - a.b.left);            // より右にあるものから
+        .map(e => ({ e, b: e.getBoundingClientRect(), p: reactProps(e) }))
+        .filter(o => o.p && typeof o.p.onClick === 'function')
+        .reverse()                                       // 「⌄」は行の末尾側にあることが多い
+        .slice(0, 10);
       for (const o of cands) {
-        let opened = false;
-        for (let el = o.e, d = 0; el && d < 3 && !opened; el = el.parentElement, d++) {
-          if (fire(el, 'onClick', at(o.b.left + o.b.width / 2, o.b.top + o.b.height / 2))) { await sleep(600); opened = menuOpen() || !!findItem(); }
-        }
-        if (opened) { it = findItem(); break; }
-        if (menuOpen()) { it = findItem(); break; }
+        const cx = o.b.width ? o.b.left + o.b.width / 2 : r.right - 20;
+        const cy = o.b.height ? o.b.top + o.b.height / 2 : r.top + r.height / 2;
+        if (!fire(o.e, 'onClick', at(cx, cy))) continue;
+        await sleep(650);
+        if (menuOpen() || findItem()) { it = findItem(); break; }
       }
     }
     // 3) メニューは開いたが Unread が無い＝閉じた会話(Closed)。
@@ -1047,6 +1050,8 @@
     }
     if (!it) {
       // ★何が出ていたのかを実測で残す。これが無いと「出ない」としか分からず推測で直すことになる。
+      // 行の中に onClick を持つ要素がいくつあったか＝「⌄」の候補が本当に無いのかを判別する材料
+      const clickable = [].slice.call(row.querySelectorAll('*')).filter(e => { const p = reactProps(e); return p && typeof p.onClick === 'function'; }).length;
       const menuish = [].slice.call(document.querySelectorAll('div,span,li,button'))
         .map(e => ({ e, r: e.getBoundingClientRect(), t: (e.textContent || '').trim() }))
         .filter(o => o.t && o.t.length <= 30 && o.e.children.length <= 1 && o.r.width > 20 && o.r.width < 340 && o.r.height > 12 && o.r.height < 60)
@@ -1063,7 +1068,7 @@
         const ks = Object.keys(p).filter(k => /^on/.test(k));
         if (ks.length) handlers.push(i + ':' + ks.join(','));
       }
-      UNREAD_DIAG.push({ buyer: buyer, at: new Date().toISOString(), near: [...new Set(menuish)], anyUnread: anyUnread, handlers: handlers });
+      UNREAD_DIAG.push({ buyer: buyer, at: new Date().toISOString(), clickable: clickable, near: [...new Set(menuish)], anyUnread: anyUnread, handlers: handlers });
       if (UNREAD_DIAG.length > 6) UNREAD_DIAG.shift();
       try { if (getSbKey()) sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_unread_diag', v: { at: new Date().toISOString(), rows: UNREAD_DIAG }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {}); } catch (_) {}
       throw new Error('「Mark as unread」が出せませんでした（右クリック/メニューとも不発）');
