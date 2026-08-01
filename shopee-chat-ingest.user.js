@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.48.0
+// @version      1.49.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -520,7 +520,9 @@
     _persistT = setTimeout(() => {
       _persistT = null;
       try {
-        GM_setValue('crawlDoneList', [...crawlDone].slice(-2000));
+        // ★上限2000だと会話が2548件ある今、リロードのたびに約500件が"未取込"に戻り
+        //   毎回84分のフル巡回が走っていた（実測 2049/2540 から判明）。会話数に余裕を持たせる。
+        GM_setValue('crawlDoneList', [...crawlDone].slice(-6000));
         const keys = Object.keys(lastSig).slice(-2000), o = {}; keys.forEach(k => o[k] = lastSig[k]);
         GM_setValue('lastSigMap', o);
       } catch (_) {}
