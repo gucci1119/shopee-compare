@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.20.0
+// @version      2.21.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.20.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.21.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -513,6 +513,7 @@
     const conv = h.cc + ':' + h.buyer;
     const nowIso = new Date().toISOString();
     const rows = [];
+    let lastTm = '';   // 直前の発言の時刻。時刻を持たない行（システム通知）を正しい位置に並べるための目印
     let curDay = (ctx && ctx.day) || null; // スレッドを上（古い）→下（新しい）に見る間に日付区切りで更新（ctxで画面をまたいで引き継ぐ）
     // ★日付を推測で書かないためのガード（本人指摘「読み込む前に書き込みしてない？ローディングが長い時がある」）
     //   Shopeeは各メッセージに日付を持たず、スレッド途中の「Today/Tuesday/19 Jun」等の区切りで日付が決まる。
@@ -587,15 +588,20 @@
           if (/\d/.test(tok)) { curDay = pdt.day; body = pdt.rest; }
         }
       }
-      // システム通知・UI要素・FAQ・ボタン等は本文でないので除外
-      if (/automatically closed|has joined|has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
+      // UI要素・FAQ・ボタン等は本文でないので除外。
+      // ★ただし「会話が自動終了した／担当者が参加した」等のシステム通知は**会話の流れを追うのに要る**（本人要望）。
+      //   ここで一律に捨てていたため、下の dir='sys' に一度も到達せず、webchatには出ているのにポータルに出ていなかった。
+      if (!SYS_NOTICE.test(body) && /has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
       let bub = null, maxA = 0;
       row.querySelectorAll('*').forEach(e => { const cs = getComputedStyle(e); if (trans(cs.backgroundColor)) return; const b = e.getBoundingClientRect(); const a = b.width * b.height; if (b.width > 20 && b.height > 12 && a > maxA) { maxA = a; bub = b; } });
       // ★左右（相手＝in／自分＝out）の判定。従来は**吹き出しの座標**で見ていたため、
       //   裏タブ（座標が全て0）では判定できず、全部捨てられていた。
       //   → まず**CSSの寄せ方**で判定する（裏タブでも取れる）。座標が使える時は座標で確認する。
       let dir = '';
+      // 中央に出る灰色の通知は左右どちらでもない＝先に確定させる（親のCSS寄せに引きずられて in/out に化けるのを防ぐ）
+      if (SYS_NOTICE.test(body)) dir = 'sys';
       try {
+        if (dir) throw 0;
         for (let e = row, d = 0; e && d < 3 && !dir; e = e.firstElementChild, d++) {
           const cs = getComputedStyle(e);
           const j = (cs.justifyContent || '') + ' ' + (cs.textAlign || '') + ' ' + (cs.alignItems || '');
@@ -648,8 +654,11 @@
       }
       if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
+      // ★システム通知（自動終了・参加）は時刻を持たない。正午に置くと会話の途中に割り込んで並びが崩れるので、
+      //   **直前の発言と同じ時刻の30秒後**に置く（webchatの見た目どおりの順番になる）。
+      const useTm = tm || lastTm;
       let base;
-      if (curDay) { base = new Date(curDay); if (tm) { const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); } else base.setHours(12, 0, 0, 0); }
+      if (curDay) { base = new Date(curDay); if (useTm) { const p = useTm.split(':'); base.setHours(+p[0], +p[1], tm ? 0 : 30, 0); } else base.setHours(12, 0, 0, 0); }
       // ★★日付区切りが見つからない行は**書かない**。以前は「最新部分を見ているなら今日」と
       //   推測していたが、仮想スクロールでは区切りが描画されていないことが普通にあり、
       //   その結果 29 Jul や Today の発言が 07-31 になる等のズレを繰り返した（本人がwebchatと
@@ -679,7 +688,8 @@
       // 引用は列を増やさず本文の先頭に印として持たせる（DBのスキーマを変えない）。表示側で2段に分けて描く。
       keptDated++;
       if (quote) body = '[[q]]' + quote.replace(/\n/g, ' ') + '\n' + body;
-      const id = 'dom|' + h.cc + '|' + h.buyer + '|' + tm + '|' + dir + '|' + hash(body);
+      if (tm) lastTm = tm;
+      const id = 'dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
     return rows;
