@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.17.0
+// @version      3.18.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.17.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.18.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2506,21 +2506,34 @@
     } catch (_) { return null; }
   }
   // 「Customer is inquiring about this product」＝いま問い合わせ対象の商品（会話の主題）
+  // ★「この商品/注文について問い合わせ中」カード。どの商品の話かを把握するのが目的（本人指定）。
+  //   実測：ラベルの要素は子を持つ（"Customer is inquiring about this orderCollapse"）ため、
+  //   子なし要素だけを探していた従来の条件では**永久に見つからなかった**。
   function grabInquiry() {
     try {
-      const lb = [].slice.call(document.querySelectorAll('div,span'))
-        .filter(e => e.children.length === 0 && /inquiring about (this|the) product|問い合わせ/i.test((e.textContent || '').trim()))[0];
-      if (!lb) return null;
-      let box = lb.parentElement;
-      for (let i = 0; i < 3 && box; i++) { if ((box.innerText || '').length > 40) break; box = box.parentElement; }
+      const hits = [].slice.call(document.querySelectorAll('*'))
+        .filter(e => /inquiring about (this|the) (product|order)|chatting about this order/i.test(String(e.textContent || '')))
+        .sort((a, b) => String(a.textContent || '').length - String(b.textContent || '').length);
+      // 中身まで含む一番小さい箱を選ぶ（ラベルだけの要素は中身が無いので飛ばす）
+      const box = hits.find(e => String(e.textContent || '').length > 60 && String(e.textContent || '').length < 900);
       if (!box) return null;
-      const lines = (box.innerText || '').split('\n').map(x => x.trim()).filter(Boolean)
-        .filter(x => !/inquiring about|Collapse|Invite Order|問い合わせ/i.test(x));
-      const title = lines.find(x => x.length > 12) || '';
-      const price = lines.find(x => /[₱RM$฿₫R\$NT]\s?[\d.,]{3,}/.test(x)) || '';
-      // ★商品画像も取る（webchatは商品カードに小さい画像を出す）
+      const raw = String(box.innerText || '');
+      const kind = /about (this|the) order|chatting about this order/i.test(raw) ? 'order' : 'product';
+      const lines = raw.split('\n').map(x => x.trim()).filter(Boolean)
+        .filter(x => !/^(Collapse|Expand|Invite Order|View Details|inquiring about|chatting about)/i.test(x) && !/inquiring about|chatting about this order/i.test(x));
       const im = box.querySelector('img[src*="http"]');
-      return title ? { title: title.slice(0, 110), price: price.slice(0, 40), img: im ? im.src : '' } : null;
+      const price = lines.find(x => /[₱RM$฿₫R\$NT]\s?[\d.,]{3,}/.test(x)) || '';
+      if (kind === 'order') {
+        return {
+          kind: 'order',
+          status: lines.find(x => /^(To Ship|Shipping|Completed|Cancell|Unpaid|Return)/i.test(x)) || '',
+          shipBy: lines.find(x => /Ship out by/i.test(x)) || '',
+          title: lines.find(x => /item|Order Total/i.test(x)) || '',
+          price: price, img: im ? im.src : ''
+        };
+      }
+      const title = lines.find(x => x.length > 12 && !/[₱RM$฿₫R\$NT]\s?[\d.,]{3,}$/.test(x)) || '';
+      return title ? { kind: 'product', title: title.slice(0, 130), price: price.slice(0, 40), img: im ? im.src : '' } : null;
     } catch (_) { return null; }
   }
   // ★バイヤー情報バー（地域・評価・注文数・ショップ）。webchatのヘッダに出ているものをそのまま持ってくる。
