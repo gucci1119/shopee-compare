@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.84.0
+// @version      1.85.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.84.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.85.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -825,14 +825,35 @@
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
   if (GM_getValue('autoCrawl', true) !== false) {
     setTimeout(() => { if (isWorker()) slowCrawl('full', false); }, 12000);
-    setInterval(() => { if (isWorker() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 150000);
+    // ★総当たりで会話を開く巡回は**1時間に1回**に落とす（本人指摘）。理由：
+    //   ・一覧スキャン（会話を開かない）で「誰から・いつ・最後の一言」は取れている
+    //   ・本文は**ポータルで会話を開いた瞬間**に fetch_conv で取りに行く
+    //   ・開くたびに既読になり、手で付けた未読の目印も消え、タブも重くなる（実際にメモリ不足で落ちた）
+    //   残す目的は「過去チャットのキーワード検索」用に本文を少しずつ溜めること。急ぐ必要はない。
+    setInterval(() => { if (isWorker() && GM_getValue('autoCrawl', true) !== false && !cycling && !userBusy()) slowCrawl('new', false); }, 3600000);
     // ★新着をできるだけ早く取り込む（本人要望＝リアルタイム性重視。メッセージは毎日15分おきに大量に来る）。
     //   会話一覧はWebSocketで即座に更新されるので、5秒ごとに一覧の署名だけ見て、変化があればその場で
     //   「新着のあった会話だけ」の巡回を起動する。従来は150秒固定待ち＝最大2.5分遅れていた。
     //   ※開いている会話は元々2.5秒ごとに取り込み済み。操作中(userBusy)は起動しない＝作業を邪魔しない。
+    // ★リアルタイムに追いかけるのは「本人がポータルのメッセージ画面を開いている間だけ」（本人指定）。
+    //   見ていない時まで会話を開き続けると、既読になる・タブが重い・意味が薄い。
+    //   ポータルが app_kv.chat_viewer に生存を書くので、それが新しい時だけ5秒監視を働かせる。
+    let _viewerAt = 0, _viewerChk = 0;
+    const viewerActive = () => {
+      const now = Date.now();
+      if (now - _viewerChk > 30000 && getSbKey()) {
+        _viewerChk = now;
+        sbReq('GET', 'app_kv?select=v&k=eq.chat_viewer').then(r => {
+          const v = r && r.json && r.json[0] && r.json[0].v;
+          _viewerAt = (v && v.at) ? Date.parse(v.at) : 0;
+        }).catch(() => {});
+      }
+      return (Date.now() - _viewerAt) < 90000;
+    };
     setInterval(() => {
       if (!isWorker() || cycling || userBusy()) return;
       if (GM_getValue('autoCrawl', true) === false) return;
+      if (!viewerActive()) return;   // 見ていない間はリアルタイム追尾しない
       const side = sideList(); if (!side) return;
       let changed = false;
       for (const row of [].slice.call(side.children)) {
@@ -1517,6 +1538,7 @@
       try {
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
         else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
+        else if (v.cmd === 'crawl_now') { out = '未取込の会話を今すぐ取り込みます'; if (!cycling) slowCrawl('new', true); }
         else if (v.cmd === 'rescan_list') { out = '一覧スキャンを開始しました'; scanAllConversations(true); }
         else if (v.cmd === 'mark_unread') {
           // 相手のメッセージで終わっている会話（＝未返信）をまとめて未読に戻す。
