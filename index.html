@@ -7735,7 +7735,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // 既にあるなら、整形済み（＝短い方＝ノイズが少ない）を採用する
         if (String(m.text || '').length < String(uniq[prev].text || '').length) uniq[prev] = m;
       }
-      if (uniq.length !== rows.length) rows = uniq;
+      if (uniq.length !== rows.length) {
+        rows = uniq;
+        // ★DB側も自動で掃除する（表示で隠すだけだと重複が溜まり続ける）。
+        //   直近ぶんだけ・1分に1回まで。整形済み（短い方）を残して他を消す。
+        try {
+          if (settings.sbSecret && Date.now() - (msg._dedupAt || 0) > 60000) {
+            msg._dedupAt = Date.now();
+            const dropIds = [];
+            const keepId = new Set(uniq.map(m => m.id));
+            for (const m of msg.rows || []) if (!keepId.has(m.id)) {
+              const k = (m.buyer || '') + '|' + (m.msg_time || '') + '|' + (m.direction || '') + '|' + norm(m);
+              if (seen.has(k)) dropIds.push(m.id);
+            }
+            dropIds.slice(0, 200).forEach(id => {
+              fetch(`${SB_URL}/rest/v1/chat_messages?id=eq.` + encodeURIComponent(id),
+                { method: 'DELETE', headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret, Prefer: 'return=minimal' } }).catch(() => {});
+            });
+            if (dropIds.length) console.log('[msg] 重複を自動削除:', Math.min(dropIds.length, 200));
+          }
+        } catch (_) {}
+      }
     }
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
