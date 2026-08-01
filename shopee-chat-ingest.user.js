@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.53.0
+// @version      1.54.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,8 +155,8 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.53.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
-  const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [] };
+  const VER = '1.54.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
 
   // ---- キャプチャ・バッファ ----
   const MAX_BODY = 200000;      // 1応答の上限（肥大ガード）
@@ -241,11 +241,49 @@
     if (!getSbKey()) return;
     WIRE.sent = true;
     try {
-      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, stat: WIRE.stat, urls: WIRE.urls, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, stat: WIRE.stat, urls: WIRE.urls, workers: WIRE.workers, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
     } catch (_) {}
   }
   setTimeout(wireFlush, 90000);
   setTimeout(wireFlush, 300000); // 5分後にもう一度（会話を開いた後の通信も拾えるように）
+
+  // ---- 🔬 Worker フック ----
+  // 実測（v1.52の標本）：document-startでfetch/XHR/WebSocketを全部フックしても、
+  // チャットの通信がページ側に一切現れなかった（WS 0件／HTTPは計測用のみ）。
+  // ＝ソケットが Web Worker 側にある可能性が高い。ただしその場合でも、復号後の
+  //   メッセージは postMessage でページへ戻るはずなので、そこを捕まえれば本文が取れる。
+  try {
+    const hookPort = (obj, label) => {
+      try {
+        obj.addEventListener('message', ev => {
+          try {
+            const d = ev.data;
+            if (typeof d === 'string') return wireSample('WK-text ' + label, d);
+            if (d instanceof ArrayBuffer) return wireSample('WK-bin ' + label, new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(d)));
+            if (d && typeof d === 'object') return wireSample('WK-obj ' + label, JSON.stringify(d).slice(0, 4000));
+          } catch (_) {}
+        });
+      } catch (_) {}
+    };
+    const OrigWorker = window.Worker;
+    if (OrigWorker) {
+      const W = function (url, opts) {
+        const w = new OrigWorker(url, opts);
+        try { WIRE.workers.push(String(url).slice(0, 160)); hookPort(w, String(url).split('/').pop().slice(0, 40)); } catch (_) {}
+        return w;
+      };
+      W.prototype = OrigWorker.prototype; window.Worker = W;
+    }
+    const OrigShared = window.SharedWorker;
+    if (OrigShared) {
+      const S = function (url, opts) {
+        const w = new OrigShared(url, opts);
+        try { WIRE.workers.push('shared:' + String(url).slice(0, 160)); if (w.port) { hookPort(w.port, 'shared'); w.port.start && w.port.start(); } } catch (_) {}
+        return w;
+      };
+      S.prototype = OrigShared.prototype; window.SharedWorker = S;
+    }
+  } catch (_) {}
 
   // ---- WebSocket フック（webchatのリアルタイム本文はWS配信のため必須） ----
   try {
@@ -569,7 +607,10 @@
         // ★上限2000だと会話が2548件ある今、リロードのたびに約500件が"未取込"に戻り
         //   毎回84分のフル巡回が走っていた（実測 2049/2540 から判明）。会話数に余裕を持たせる。
         GM_setValue('crawlDoneList', [...crawlDone].slice(-6000));
-        const keys = Object.keys(lastSig).slice(-2000), o = {}; keys.forEach(k => o[k] = lastSig[k]);
+        // ★ここも2000で切っていた。会話2548件に対して足りず、リロードのたびに約550件が
+        //   「署名不明＝新着あり」と誤判定され、新着巡回が古い会話を延々と舐める＝
+        //   その間ずっと本物の新着が画面に出てこない、という状態を作っていた。
+        const keys = Object.keys(lastSig).slice(-6000), o = {}; keys.forEach(k => o[k] = lastSig[k]);
         GM_setValue('lastSigMap', o);
       } catch (_) {}
     }, 2000);
@@ -610,7 +651,7 @@
         let target = null, tname = '';
         // ★新着を最優先。履歴の遡り(full)が1時間走る間ずっと新着が入らない＝即レスできない、を作らない。
         //   遡り中は一覧を下へスクロールしていくので、数件ごとに先頭へ戻して「新しいメッセージが来た会話」を先に処理する。
-        if (mode === 'full' && (count % 8) === 0) {
+        if ((count % 8) === 0) {   // full/new どちらの巡回中でも、新着は必ず先に取り込む
           const sc = sideScroller(); if (sc) { rvScroll(sc, 0); await sleep(600); side = sideList() || side; }
           for (const row of [].slice.call(side.children)) {
             const nm = (row.innerText || '').trim().split('\n')[0].trim();
