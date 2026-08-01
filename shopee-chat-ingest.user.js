@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.83.0
+// @version      1.84.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.83.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.84.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -446,7 +446,14 @@
     // ★★最重要：日付区切り（Today/Yesterday/19 Jun…）より**上**にあるメッセージは、その区切りより**古い**。
     //   ここを「今日」と決め打ちすると、昨日の23:59が今日の最新扱いになり、本当の今日の返信が下に埋もれる（実際に発生）。
     //   → 先に「最初の区切りが何番目か」を調べ、それより上の行は**日付が確定できないので取り込まない**（後で上にスクロールされた時に正しい日付で入る）。
-    const kids = [].slice.call(h.thread.children);
+    // ★★仮想スクロール(ReactVirtualized)は行を**絶対配置**するため、DOMの並び順が
+    //   **画面の見た目の順とは限らない**。日付区切りは「その下の行に効く」ので、DOM順のまま
+    //   解釈すると区切りと本文の対応がずれ、日付が正しくならない（本人が webchat と見比べて発見。
+    //   Todayの発言が07-31になっていた）。→ **画面上の位置(top)で並べ直してから**解釈する。
+    const kids = [].slice.call(h.thread.children)
+      .map(el => ({ el, top: el.getBoundingClientRect().top }))
+      .sort((a, b) => a.top - b.top)
+      .map(o => o.el);
     let firstSepIdx = -1;
     for (let i = 0; i < kids.length; i++) {
       const rawT = (kids[i].innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
