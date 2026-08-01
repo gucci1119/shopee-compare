@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.57.0
+// @version      1.58.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.57.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.58.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -1268,7 +1268,11 @@
       rows.forEach(m => { if (!(m.buyer in lastDir)) { lastDir[m.buyer] = m.direction; lastAt[m.buyer] = m.msg_time; } });
       const done = GM_getValue('unreadDone', {}) || {};
       // 相手で終わっている＋まだ未読にしていない（＝記録が無い／記録より新しいメッセージが来た）
-      const targets = Object.keys(lastDir).filter(b => lastDir[b] === 'in' && done[b] !== lastAt[b]).slice(0, 8);
+      // ★直近7日以内だけを対象にする（それより古い未返信まで未読にすると、今日やることが埋もれる）
+      const limit = new Date(Date.now() - 7 * 86400000 - new Date().getTimezoneOffset() * 60000).toISOString();
+      const targets = Object.keys(lastDir)
+        .filter(b => lastDir[b] === 'in' && lastAt[b] >= limit && done[b] !== lastAt[b])
+        .slice(0, 8);
       if (!targets.length) return;
       for (const b of targets) {
         if (!isWorker() || userBusy()) break;
