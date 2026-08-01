@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.10.0
+// @version      3.11.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.10.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.11.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1435,14 +1435,30 @@
   // 入力欄を必ず出す。webchatの会話は放っておくと一定時間で必ず Closed になり、入力欄が
   // 「Restart Conversation」に置き換わる＝閉じていれば再開してから入力欄を返す。
   // ★送信・調査など「入力欄を使う処理」は全部ここを通す（同じ対策を各所で書き直さないため）。
+  // ★閉じた会話は「Restart Conversation」を押さないと入力欄が出ない。
+  //   1回クリックして2秒待つだけだと間に合わず「入力欄が出ません」で失敗していた（自動返信5件中4件が失敗）。
+  //   → 合成クリックが効かない場合に備えてReactのonClickも直接呼び、出るまで待って最大3回試す。
   async function ensureComposer() {
-    let ta = document.querySelector('textarea[placeholder="Type a message here"]');
-    if (ta) return ta;
-    const restart = [].slice.call(document.querySelectorAll('button,div,span'))
-      .find(e => /Restart Conversation/i.test((e.textContent || '')) && e.children.length < 2 && e.getBoundingClientRect().width > 0);
-    if (!restart) return null;
-    restart.click(); await sleep(2000);
-    return document.querySelector('textarea[placeholder="Type a message here"]');
+    const findTa = () => document.querySelector('textarea[placeholder="Type a message here"]');
+    let ta = findTa(); if (ta) return ta;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // ボタンが描画されるのを少し待つ
+      let restart = null;
+      for (let w = 0; w < 10 && !restart; w++) {
+        restart = [].slice.call(document.querySelectorAll('button,div,span'))
+          .find(e => /Restart Conversation/i.test((e.textContent || '')) && e.children.length < 2 && e.getBoundingClientRect().width > 0);
+        if (!restart) { ta = findTa(); if (ta) return ta; await sleep(300); }
+      }
+      if (!restart) { ta = findTa(); if (ta) return ta; await sleep(500); continue; }
+      let clicked = false;
+      for (let e = restart, d = 0; e && d < 4 && !clicked; e = e.parentElement, d++) {
+        const p = reactProps(e);
+        if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: e, target: e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); clicked = true; } catch (_) {} }
+      }
+      if (!clicked) { try { restart.click(); } catch (_) {} }
+      for (let w = 0; w < 20; w++) { ta = findTa(); if (ta) return ta; await sleep(300); }   // 最大6秒待つ
+    }
+    return findTa();
   }
   // ---- 🖼 画像送信 ----
   // ポータルは本文の先頭に「[[img]]https://…」の行を積んでくる（chat_outbox に列を足さないため）。
@@ -2304,7 +2320,7 @@
       });
       if (!targets.length) return;
       const now = new Date().toISOString();
-      const put = targets.slice(0, 5).map(m => ({
+      const put = targets.slice(0, 2).map(m => ({
         id: 'auto|' + (m.cc || '') + '|' + (m.buyer || '') + '|' + Date.now(),
         cc: m.cc, buyer: m.buyer, conversation_id: (m.cc || '') + ':' + (m.buyer || ''),
         text: text, status: 'pending', created_at: now
