@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.26.0
+// @version      2.27.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.26.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.27.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2066,10 +2066,19 @@
       if (!ok) return '会話を開けませんでした: ' + buyer;
       if (!(await ensureThread(15000))) return 'Shopee側で本文がまだ作られていません（チャットの窓が他の窓に完全に隠れていると描画が止まります）: ' + buyer;
       // 「See All FAQ History」のリンクを押す（合成クリックが効かないのでReactのonClickを直接呼ぶ）。
-      // 末端要素とは限らないので、テキストが一致する中で**一番小さい要素**を選ぶ。
-      const link = [].slice.call(document.querySelectorAll('div,span,a,button,p'))
-        .filter(e => /^\s*See All FAQ History\s*$/i.test(String(e.textContent || '')))
-        .sort((a, b) => (a.querySelectorAll('*').length) - (b.querySelectorAll('*').length))[0];
+      // ★完全一致で探すと見つからない：要素のテキストは "See All FAQ History21:02" のように
+      //   **時刻がくっついて**いる（実測）。前方一致で拾い、その中の一番深い要素をリンクとみなす。
+      let link = [].slice.call(document.querySelectorAll('div,span,a,button,p'))
+        .filter(e => /^\s*See All FAQ History/i.test(String(e.textContent || '')))
+        .sort((a, b) => String(a.textContent || '').length - String(b.textContent || '').length)[0];
+      if (link) {
+        let deeper = link;
+        for (let g = 0; g < 6; g++) {
+          const c = [].slice.call(deeper.children).filter(e => /^\s*See All FAQ History/i.test(String(e.textContent || '')));
+          if (!c.length) break; deeper = c[0];
+        }
+        link = deeper;
+      }
       if (!link) return 'この会話に FAQ History はありません: ' + buyer;
       let hit = false;
       for (let e = link, d = 0; e && d < 5 && !hit; e = e.parentElement, d++) {
