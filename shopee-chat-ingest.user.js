@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.79.0
+// @version      1.81.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.79.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.81.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -394,6 +394,8 @@
   // ★画面上の区切りラベルはメッセージではない。スレッドの「ここから未読」の帯を本文として
   //   取り込んでしまい、会話に「Unread Messages」という吹き出しが並んでいた（本人発見）。
   const TRANS_LABEL = /\s*(translated\s+by\s+shopee|traduzido\s+pel[ao]\s+shopee|traducido\s+por\s+shopee|shopeeによる翻訳|由\s*shopee\s*翻[譯译]|แปลโดย\s*shopee|isinalin\s+ng\s+shopee|diterjemahkan\s+oleh\s+shopee|do\s*shopee\s*d[ịi]ch)\s*$/i;
+  // Shopeeが中央に出す通知（＝メッセージではないが、会話の流れを追うのに要る）
+  const SYS_NOTICE = /(conversation has been (automatically )?closed|has joined the conversation|has left the conversation|conversation (has been )?restarted|会話が(自動的に)?終了|参加しました|退出しました)/i;
   const UI_NOISE = /^\s*(unread\s*messages?|new\s*messages?|未読(の)?メッセージ|新着メッセージ|today|yesterday|今日|昨日)\s*$/i;
   const IMG_PLACEHOLDER =/^\s*[\[［]?\s*(image|photo|picture|sticker|画像|スタンプ|圖片|图片|贴图|貼圖|imagem|figurinha|foto|adesivo|hình\s*ảnh|nhãn\s*dán|รูปภาพ|สติกเกอร์|larawan|sticker|gambar|stiker)\s*[\]］]?\s*(\.{1,3}|…)?\s*$/i;
   const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
@@ -477,8 +479,12 @@
       row.querySelectorAll('*').forEach(e => { const cs = getComputedStyle(e); if (trans(cs.backgroundColor)) return; const b = e.getBoundingClientRect(); const a = b.width * b.height; if (b.width > 20 && b.height > 12 && a > maxA) { maxA = a; bub = b; } });
       const ref = bub || (img && img.getBoundingClientRect());
       if (!ref) return;
-      const rc = ref.left + ref.width / 2, dir = rc < tc - 60 ? 'in' : (rc > tc + 60 ? 'out' : '');
-      if (!dir) return;
+      const rc = ref.left + ref.width / 2;
+      let dir = rc < tc - 60 ? 'in' : (rc > tc + 60 ? 'out' : '');
+      // ★中央に出る灰色の通知（自動クローズ／担当者が参加した等）は左右どちらでもないので
+      //   従来は捨てていた。会話の流れを追うのに必要なので dir='sys' として取り込む（本人要望）。
+      //   未返信の判定は direction==='in' なので、これらは未返信に数えられない。
+      if (!dir) { if (SYS_NOTICE.test((body || '').trim())) dir = 'sys'; else return; }
       // ★画像メッセージの扱い（本人報告「画像が出なくなった」の対策）
       //   Shopeeは画像が読み込まれるまで「Image …」等の仮テキストを出す。取り込みが速くなった結果この仮テキストを
       //   本文として保存してしまい、画像が表示されなくなっていた。
@@ -889,7 +895,7 @@
   }
   // 巡回役タブで：起動30秒後に1回 → 以後5分ごと（会話を開かないので軽い・作業中は避ける）
   setTimeout(() => { if (isWorker() && !userBusy()) scanAllConversations(false); }, 30000);
-  setInterval(() => { if (isWorker() && !cycling && !scanning && !userBusy()) scanAllConversations(false); }, 300000);
+  setInterval(() => { if (isWorker() && !cycling && !scanning && !userBusy()) scanAllConversations(false); }, 120000);
 
   // ---- フラッシュ（GASへPOST） ----
   let flushing = false;
