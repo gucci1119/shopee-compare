@@ -7827,6 +7827,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const avatar = (name) => { const b = name || '?'; return `<div style="width:34px;height:34px;flex:none;border-radius:50%;background:${['#ee4d2d','#0f9d58','#1a73e8','#f9a825','#9c27b0','#00897b'][(b.charCodeAt(0) || 0) % 6]};color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center">${esc((b[0] || '?').toUpperCase())}</div>`; };
     // 取り込み時に画像がまだ読み込まれておらず「Image …」等の仮テキストで入ってしまった行を、本文でなく画像として見せる
     const IMG_PH = /^\s*[\[［]?\s*(image|photo|picture|画像|圖片|图片|imagem|foto|hình\s*ảnh|รูปภาพ|larawan|gambar)\s*[\]］]?\s*(\.{1,3}|…)?\s*$/i;
+    // 送信待ち（まだShopee側に反映されていない自分の発言）を、実物と同じ見た目で末尾に出す
+    const pendingOf = (key) => {
+      const list = (msg.pending && msg.pending[key]) || [];
+      if (!list.length) return [];
+      const norm2 = t => String(t || '').replace(/^\[\[q\]\][^\n]*\n/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const have = new Set((msg.rows || []).filter(r => r.direction === 'out').map(r => norm2(r.text)));
+      // 実際に取り込まれたものは送信待ちから外す
+      const left = list.filter(p => !have.has(norm2(p.text)));
+      if (left.length !== list.length) msg.pending[key] = left;
+      return left;
+    };
     const bubbleHtml = m => {
       // Shopeeが中央に出す通知（自動クローズ／担当者の参加など）は、同じく中央のグレー表示にする
       if (m.direction === 'sys') return `<div style="display:flex;justify-content:center;margin:2px 0"><div style="background:#f1f2f4;color:#6b7280;border-radius:10px;padding:3px 12px;font-size:11px;max-width:80%;text-align:center">${esc(m.text || '')}</div></div>`;
@@ -7977,6 +7988,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try {
         const id = 'ob|' + cc + '|' + buyer + '|' + Date.now();
         await sbUpsert('chat_outbox', [{ id, cc, buyer, conversation_id: k, text, status: 'pending', created_at: new Date().toISOString() }]);
+        // ★送った文面をその場で画面に残す（届くまで「送信中」）。
+        //   これが無いと、取り込まれるまで送った文が消えたように見える（本人発見）。
+        msg.pending = msg.pending || {};
+        (msg.pending[k] = msg.pending[k] || []).push({ id: id, text: text, at: new Date().toISOString() });
         if (ta) ta.value = ''; delete msg.draft[k];
         if (msg.pendImg) delete msg.pendImg[k];
         try { logAct('メッセージ', '返信送信', buyer, text.slice(0, 40)); } catch (_) {}
