@@ -7756,7 +7756,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_state'); msg._convState = ((kv || [])[0] || {}).v || null; } catch (_) {}
       // 📋定型文（Smart Reply userscript からの移植・第1弾）。webchat側のテンプレをポータルでも使えるようにする
       // 🤖 自動返信の設定（本文が一致する送信は「担当者の返信」とみなさない＝未対応のまま残す）
-      try { const ka = await sbGetAll('app_kv', 'select=v&k=eq.chat_autoreply'); msg.auto = ((ka || [])[0] || {}).v || { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly. As we are a seller based in Japan, our reply may be delayed due to the time difference. Thank you for your understanding.', delayMin: 1, gapH: 6 }; msg.autoText = (msg.auto && msg.auto.on && msg.auto.text) ? String(msg.auto.text).trim() : ''; } catch (_) {}
+      try { const ka = await sbGetAll('app_kv', 'select=v&k=eq.chat_autoreply'); msg.auto = ((ka || [])[0] || {}).v || { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly. As we are a seller based in Japan, our reply may be delayed due to the time difference. Thank you for your understanding.', delayMin: 1, gapH: 6 }; msg.autoText = (msg.auto && msg.auto.text) ? String(msg.auto.text).trim() : '';
+        msg.autoTexts = [].concat((msg.auto && msg.auto.past) || [], msg.autoText ? [msg.autoText] : []).map(x => String(x).trim()).filter(Boolean); } catch (_) {}
       try { const kt = await sbGetAll('app_kv', 'select=v&k=eq.chat_templates'); const tv = ((kt || [])[0] || {}).v; msg.tpls = Array.isArray(tv) ? tv : (tv && Array.isArray(tv.items) ? tv.items : []); } catch (_) { msg.tpls = msg.tpls || []; }
       // 📌ピン/🏷タグ/📝メモ（Smart Replyからの移植・第2弾）。会話ごとの付箋情報を app_kv にまとめて保存
       try { const km = await sbGetAll('app_kv', 'select=v&k=eq.chat_conv_meta'); msg._meta = ((km || [])[0] || {}).v || {}; } catch (_) { msg._meta = msg._meta || {}; }
@@ -7814,7 +7815,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 取り込み済みの最後の実メッセージの向きで決める（返信済みなのに赤くなるのを防ぐ）。
       // ★自動返信は「担当者が見た」ことにはならない。自動返信で終わっている会話は**未対応のまま**に残す
       //   （Shopee側を未読に戻すことはできないので、未対応の目印はポータルが持つ）。
-      const isAuto = m => m && m.direction === 'out' && msg.autoText && String(m.text || '').trim() === msg.autoText;
+      // 文面を変えても、**過去に使った文面**も自動返信として認識する（変えた瞬間に赤が消えるのを防ぐ）
+      const isAuto = m => m && m.direction === 'out' && (msg.autoTexts || []).indexOf(String(m.text || '').trim()) >= 0;
       const real = c.msgs.filter(m => !isAuto(m));
       const lastReal = real.length ? real[real.length - 1] : null;
       const lastAny = c.msgs.length ? c.msgs[c.msgs.length - 1] : null;
@@ -7824,7 +7826,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         : (lastReal ? lastReal.direction === 'in' : false));
       // ⏱ 何時間待たせているか（未返信の最後の受信からの経過）。ShopeeはCRR(返信率)を見ており9時間超で警告が出る＝即レスの指標
       c.waitH = null;
-      if (c.unreplied) { const t = Date.parse(msgTime(c.last) || ''); if (!isNaN(t)) c.waitH = Math.max(0, (Date.now() - t) / 3600000); }
+      if (c.unreplied) {
+        // 自動返信で終わっている会話は、待ち時間を**お客さんの最後の発言**から数える（自動返信でリセットしない）
+        const base = c.autoOnly && lastReal ? lastReal : c.last;
+        const t = Date.parse(msgTime(base) || ''); if (!isNaN(t)) c.waitH = Math.max(0, (Date.now() - t) / 3600000);
+      }
       // ★古い未返信（7日超）は「もう返す場面ではない」＝実質終わった会話。数にも並びにも混ぜない。
       //   全部混ぜると「未返信1833件・9時間超1667件」のような、行動に繋がらない数字になる（実測）。
       c.stale = c.unreplied && (c.waitH || 0) > 24 * 7;
@@ -8559,6 +8565,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             text: ov.querySelector('#ar-text').value.trim(),
             gapH: Math.max(1, Number(ov.querySelector('#ar-gap').value) || 6),
             delayMin: Math.max(1, Number(ov.querySelector('#ar-delay').value) || 1),
+            past: [].concat((cur.past || []), (cur.text ? [String(cur.text).trim()] : []))
+                    .filter((x, i, a) => x && a.indexOf(x) === i).slice(-10),
             at: new Date().toISOString() };
           if (v.on && !v.text) { alert('送る文面を入れてください'); return; }
           try { await sbUpsert('app_kv', [{ k: 'chat_autoreply', v, updated_at: new Date().toISOString() }]); ov.remove(); renderMessages(); }
