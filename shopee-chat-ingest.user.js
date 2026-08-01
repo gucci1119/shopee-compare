@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.72.0
+// @version      1.73.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.72.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.73.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1503,10 +1503,15 @@
   // ＝そのonClickを直接呼べば送信できる（Shopeeは合成クリックを無視するのでこれが唯一の経路）。
   function panelStickers(ta) {
     const tr = ta.getBoundingClientRect();
+    // ★調査コマンドでは28個見えたのに、送信用の絞り込みでは3個しか取れなかった。
+    //   条件を厳しくしすぎると取りこぼし、意図しないものを送る危険がある。調査と同じ条件に揃え、
+    //   さらに「onClickを持つ」ことを必須にする（スレッド内の受信画像を誤って掴まないため）。
     return [].slice.call(document.querySelectorAll('img'))
       .map(im => ({ im, r: im.getBoundingClientRect() }))
-      .filter(o => o.r.width >= 40 && o.r.width <= 140 && o.r.top > tr.top - 460 && o.r.top < tr.top + 40)
-      .filter(o => /\/file\//.test(String(o.im.src || '')));
+      .filter(o => o.r.width >= 36 && o.r.width <= 140 && o.r.height >= 36 && o.r.height <= 140)
+      .filter(o => o.r.top > tr.top - 520 && o.r.top < tr.top + 60)   // 入力欄の上に開くパネル内
+      .filter(o => /\/file\//.test(String(o.im.src || '')))
+      .filter(o => { const p = reactProps(o.im) || reactProps(o.im.parentElement); return p && typeof p.onClick === 'function'; });
   }
   async function openStickerPanel(ta) {
     if (panelStickers(ta).length) return true;              // 既に開いている
