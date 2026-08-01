@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.49.0
+// @version      1.50.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -560,8 +560,26 @@
         while (sendingNow) { crawlPaused = true; cycleInfo = '⏸返信を優先中'; updateChip(); await sleep(800); }
         crawlPaused = false;
         await waitIdle();
-        const side = sideList(); if (!side) break;
+        let side = sideList(); if (!side) break;
         let target = null, tname = '';
+        // ★新着を最優先。履歴の遡り(full)が1時間走る間ずっと新着が入らない＝即レスできない、を作らない。
+        //   遡り中は一覧を下へスクロールしていくので、数件ごとに先頭へ戻して「新しいメッセージが来た会話」を先に処理する。
+        if (mode === 'full' && (count % 8) === 0) {
+          const sc = sideScroller(); if (sc) { rvScroll(sc, 0); await sleep(600); side = sideList() || side; }
+          for (const row of [].slice.call(side.children)) {
+            const nm = (row.innerText || '').trim().split('\n')[0].trim();
+            if (!nm || !/^[\w.]+$/.test(nm)) continue;
+            if (lastSig[nm] !== undefined && lastSig[nm] !== rowSig(row)) { target = row; tname = nm; break; } // 既知の会話の表示が変わった＝新着
+          }
+          if (target) {
+            cycleInfo = '⚡新着を優先'; updateChip();
+            const cc0 = (rowInfo(target).cc) || CC;
+            await openAndCapture(target, tname, cc0, true);
+            lastSig[tname] = rowSig(target); persistCrawl();
+            await sleep(1200);
+            continue; // 新着を取り込んだら次のループへ（遡りはその後で続く）
+          }
+        }
         for (const row of [].slice.call(side.children)) {
           const nm = (row.innerText || '').trim().split('\n')[0].trim();
           if (!nm || !/^[\w.]+$/.test(nm)) continue;
@@ -1102,15 +1120,45 @@
   setTimeout(autoRefix, 20000);
   setInterval(autoRefix, 60000);
 
+  // ---- 📡 ポータルからの命令を受ける ----
+  // ★本人はwebchatを触りたくない（ポータルに集約するのがゴール）。
+  //   チップを押させる運用は「webchatでの操作」そのものなので、操作は全部ここ経由でポータルから行う。
+  //   app_kv.chat_cmd に命令が置かれたら実行し、結果を app_kv.chat_cmd_result に返す。
+  let _cmdBusy = false;
+  async function pollCmd() {
+    if (_cmdBusy || !getSbKey() || !isWorker()) return;
+    _cmdBusy = true;
+    try {
+      const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_cmd');
+      const v = r && r.json && r.json[0] && r.json[0].v;
+      if (!v || !v.id || !v.cmd) return;
+      if (GM_getValue('lastCmdId', '') === v.id) return;   // 実行済み
+      GM_setValue('lastCmdId', v.id);
+      let out = '';
+      try {
+        if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
+        else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
+        else if (v.cmd === 'rescan_list') { out = '一覧スキャンを開始しました'; scanAllConversations(true); }
+        else if (v.cmd === 'probe_stickers') { out = await probeStickers(true); }
+        else if (v.cmd === 'probe_unread') { out = await probeUnread(true); }
+        else out = '不明な命令: ' + v.cmd;
+      } catch (e) { out = '❌ ' + e.message; }
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_cmd_result', v: { id: v.id, cmd: v.cmd, text: String(out || ''), at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+      toast('📡 ポータルからの操作を実行しました: ' + v.cmd);
+    } catch (_) {} finally { _cmdBusy = false; }
+  }
+  setTimeout(pollCmd, 15000);
+  setInterval(pollCmd, 10000);
+
   // ---- 🔍 スタンプパネルの調査（実装の前に"実物の構造"を報告させる。推測でコードを書かないため） ----
   // Shopeeは合成クリックを受け付けない＝Reactの onClick を直接呼ぶのが唯一の突破法（実証済み・[[shopee_portal_messages_chat]]）。
   // ここでは「入力欄まわりのボタン群」と「開いたパネル内の画像」を調べて、そのまま貼れる形で表示する。
   function reactOnClickOf(el) { const p = reactProps(el); return p && typeof p.onClick === 'function'; }
-  async function probeStickers() {
+  async function probeStickers(quiet) {
     const out = [];
     // 会話は一定時間で必ず Closed になる＝入力欄が無いのが普通にあり得る。送信と同じ ensureComposer で再開させる。
     const ta = await ensureComposer();
-    if (!ta) { alert('会話が開いていません。webchatで会話を1つ開いてから実行してください。'); return; }
+    if (!ta) { const m = '会話が開いていません（巡回役タブが会話を開いた状態で再実行してください）'; if (quiet) return m; alert(m); return m; }
     // 1) 入力欄の上下にあるツールバーの要素を洗い出す（絵文字/画像/動画などのアイコン）
     const tr = ta.getBoundingClientRect();
     const cands = [].slice.call(document.querySelectorAll('div,span,button,svg,img,i'))
