@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.33.0
+// @version      2.34.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.33.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.34.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -568,9 +568,20 @@
       //   本文が「're chatting…」に化けていた（実データで確認）。DOMで確実に切り分ける。
       let qEl = null;
       try {
+        const rowLen = String(row.innerText || '').trim().length;
         qEl = [].slice.call(row.querySelectorAll('div')).filter(e => {
           const cs = getComputedStyle(e);
-          return parseFloat(cs.borderLeftWidth || '0') >= 2 && String(e.innerText || '').trim();
+          if (parseFloat(cs.borderLeftWidth || '0') < 2) return false;
+          const t = String(e.innerText || '').trim();
+          if (!t) return false;
+          // ★引用カードは「本文の一部」でしかない。行全体とほぼ同じ長さなら**それは引用ではない**
+          //   （定型文の中に線付きの装飾ブロックがあると、本文まるごとを引用と誤認する。実際に発生）
+          if (t.length >= rowLen - 12) return false;
+          // 引用カードは薄いグレーの重ね色（rgba の α が小さい）。不透明な色は本文側の装飾
+          const bg = String(cs.backgroundColor || '');
+          const m = bg.match(/rgba?\(([^)]+)\)/);
+          const a = m ? parseFloat((m[1].split(',')[3] || '1')) : 1;
+          return a > 0 && a < 0.35;
         }).sort((a, b) => String(a.innerText || '').length - String(b.innerText || '').length)[0] || null;
       } catch (_) {}
       // 引用カードの中のサムネイルを本文の画像と取り違えない
