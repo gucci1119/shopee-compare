@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.34.0
+// @version      2.35.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.34.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.35.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2074,6 +2074,63 @@
       captured++; updateChip();
     } catch (_) {}
   }
+
+  // ---- 🤖 自動返信（v2.35.0）----
+  // お客さんから来て**一定時間こちらが返せていない**会話に、一次返答を自動で送る。
+  // ★送信そのものは既存の送信キュー(chat_outbox)に積むだけ＝実績のある安全な経路を通す
+  //   （宛先照合つき。過去に別のお客さんへ届いた事故があるため、独自の送信経路は作らない）。
+  let _arAt = 0;
+  async function autoReplyTick() {
+    if (!getSbKey() || !isWorker() || cycling || sendingNow) return;
+    if (Date.now() - _arAt < 110000) return;
+    _arAt = Date.now();
+    try {
+      const c = await sbReq('GET', 'app_kv?select=v&k=eq.chat_autoreply');
+      const cfg = c && c.json && c.json[0] && c.json[0].v;
+      if (!cfg || !cfg.on || !cfg.text) return;
+      const text = String(cfg.text).trim();
+      const delayMs = Math.max(1, Number(cfg.delayMin || 10)) * 60000;
+      const gapMs = Math.max(1, Number(cfg.gapH || 6)) * 3600000;
+      // msg_time は「現地の壁時計をそのままISOにしたもの」なので、今の時刻も同じ形に揃えて比べる
+      const nowLocal = Date.now() - new Date().getTimezoneOffset() * 60000;
+      const since = new Date(nowLocal - 3 * 86400000).toISOString();
+      const q = await sbReq('GET', 'chat_messages?select=buyer,cc,direction,text,msg_time&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc&limit=4000');
+      const rows = (q && q.json) || [];
+      const conv = {};
+      rows.forEach(m => {
+        if (m.direction !== 'in' && m.direction !== 'out') return;   // 通知(sys)は無視
+        const k = (m.cc || '') + ':' + (m.buyer || '');
+        (conv[k] = conv[k] || []).push(m);
+      });
+      // 送信待ちが残っている相手には積まない（二重送信の防止）
+      const ob = await sbReq('GET', 'chat_outbox?select=buyer,status&status=eq.pending&limit=200');
+      const pending = new Set(((ob && ob.json) || []).map(x => String(x.buyer || '')));
+      const targets = [];
+      Object.keys(conv).forEach(k => {
+        const ms = conv[k];
+        const last = ms[ms.length - 1];
+        if (!last || last.direction !== 'in') return;                 // 相手の発言で終わっていない＝返信済み
+        const age = nowLocal - Date.parse(last.msg_time || '');
+        if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
+        if (age > 7 * 86400000) return;                               // 古すぎる会話には送らない
+        if (pending.has(String(last.buyer || ''))) return;
+        // 直近 gapH の間に同じ自動返信を送っていたら送らない（連投しない）
+        const dup = ms.some(m => m.direction === 'out' && String(m.text || '').trim() === text && (nowLocal - Date.parse(m.msg_time || '')) < gapMs);
+        if (dup) return;
+        targets.push(last);
+      });
+      if (!targets.length) return;
+      const now = new Date().toISOString();
+      const put = targets.slice(0, 5).map(m => ({
+        id: 'auto|' + (m.cc || '') + '|' + (m.buyer || '') + '|' + Date.now(),
+        cc: m.cc, buyer: m.buyer, conversation_id: (m.cc || '') + ':' + (m.buyer || ''),
+        text: text, status: 'pending', created_at: now
+      }));
+      await sbReq('POST', 'chat_outbox', put, 'return=minimal');
+      toast('🤖 自動返信を' + put.length + '件キューに入れました');
+    } catch (_) {}
+  }
+  setInterval(autoReplyTick, 60000);
 
   // ---- ❓ See All FAQ History（全文）を取り込む（v2.23.0）----
   // カードには3行しか出ないが、「See All FAQ History」を押すと全部見られる。
