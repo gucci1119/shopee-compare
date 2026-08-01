@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.51.0
+// @version      1.52.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -153,7 +153,9 @@
   const isChatUrl = (u) => { try { u = String(u || ''); return CHAT_INCLUDE.test(u) && !CHAT_EXCLUDE.test(u); } catch (_) { return false; } };
   // ★通信フックより前に宣言する。使用箇所より後ろに const を置くとTDZで初期化ごと落ちる
   //   （2026-05に同じ形で大障害を出している）。
-  const WIRE = { on: true, rows: [], sent: false };
+  // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
+  // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
+  const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [] };
 
   // ---- キャプチャ・バッファ ----
   const MAX_BODY = 200000;      // 1応答の上限（肥大ガード）
@@ -219,19 +221,30 @@
   // 当たれば1時間の巡回もDOM由来の日付バグも全部不要になる＝最大のリターン。
   // 実物を見ないと判断できないので、最初の数十件だけ標本を残す（以後は何もしない＝常時負荷にしない）。
   function wireSample(tag, text) {
-    if (!WIRE.on || !text) return;
-    const t = String(text);
-    // 読める文字の連なりだけ抜く（protobufでも本文は生のUTF-8で入っていることが多い）
-    const runs = (t.match(/[ -~ -￿]{6,}/g) || []).filter(s => !/^[\x00-\x1F]*$/.test(s)).slice(0, 12);
-    if (!runs.length) return;
-    WIRE.rows.push({ tag: tag.slice(0, 160), len: t.length, runs: runs.map(s => s.slice(0, 160)) });
-    if (WIRE.rows.length >= 40) WIRE.on = false;
+    try {
+      const k = /^HTTP/.test(tag) ? 'http' : /WS-text/.test(tag) ? 'wsText' : /WS-blob/.test(tag) ? 'wsBlob' : 'wsBin';
+      WIRE.stat[k]++;
+      if (WIRE.urls.length < 40) { const u = tag.replace(/^\S+\s*/, '').split('?')[0].slice(0, 140); if (WIRE.urls.indexOf(u) < 0) WIRE.urls.push(u); }
+      if (!WIRE.on || !text) return;
+      const t = String(text);
+      // 読める文字の連なりだけ抜く（protobufでも本文は生のUTF-8で入っていることが多い）
+      const runs = (t.match(/[\x20-\x7E\u00A0-\uFFFD]{6,}/g) || []).slice(0, 12);
+      if (!runs.length) { WIRE.stat.noRun++; return; }
+      WIRE.stat.kept++;
+      WIRE.rows.push({ tag: tag.slice(0, 160), len: t.length, runs: runs.map(s => s.slice(0, 160)) });
+      if (WIRE.rows.length >= 40) WIRE.on = false;
+    } catch (_) {}
   }
-  setTimeout(async () => {
-    if (WIRE.sent || !getSbKey() || !WIRE.rows.length) return;
-    WIRE.sent = true; WIRE.on = false;
-    try { await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal'); } catch (_) {}
-  }, 90000);
+  // ★0件でも必ず書く。書かないと「フックに来ていない」のか「可読部分が無い」のかが永久に分からない。
+  async function wireFlush() {
+    if (!getSbKey()) return;
+    WIRE.sent = true;
+    try {
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, stat: WIRE.stat, urls: WIRE.urls, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
+    } catch (_) {}
+  }
+  setTimeout(wireFlush, 90000);
+  setTimeout(wireFlush, 300000); // 5分後にもう一度（会話を開いた後の通信も拾えるように）
 
   // ---- WebSocket フック（webchatのリアルタイム本文はWS配信のため必須） ----
   try {
