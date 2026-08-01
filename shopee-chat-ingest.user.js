@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.28.0
+// @version      2.29.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.28.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.29.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2056,6 +2056,14 @@
   // ---- ❓ See All FAQ History（全文）を取り込む（v2.23.0）----
   // カードには3行しか出ないが、「See All FAQ History」を押すと全部見られる。
   // 本人がwebchatを開かずに読めるよう、ポータルから押したらここが代わりに開いて中身を持ち帰る。
+  function isFaqPanelOpen() {
+    try {
+      return [].slice.call(document.querySelectorAll('div')).some(e => {
+        const r = e.getBoundingClientRect();
+        return r.width > 300 && r.height > 200 && getComputedStyle(e).position === 'fixed' && /FAQ History/i.test(e.innerText || '');
+      });
+    } catch (_) { return false; }
+  }
   async function grabFaqAll(buyer) {
     if (!buyer) return '相手が指定されていません';
     sendingNow = true;
@@ -2103,11 +2111,31 @@
       }
       if (!lines.length) return 'FAQ History を開けませんでした: ' + buyer;
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_faq_all', v: { buyer: buyer, cc: cc0, at: new Date().toISOString(), lines: lines.slice(0, 200) }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
-      // 開いたパネルは閉じておく（次の巡回の邪魔をしない）
+      // ★開いたパネルは必ず閉じる。開きっぱなしだとwebchatがそこで止まり、巡回も返信もできなくなる（実際に発生）。
       try {
-        const cl = [].slice.call(document.querySelectorAll('[class*=close],[aria-label=Close],[aria-label=close]'))[0];
-        if (cl) { const p = reactProps(cl); if (p && typeof p.onClick === 'function') p.onClick({ bubbles: true, cancelable: true, currentTarget: cl, target: cl, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); else cl.click(); }
-        else document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const clickIt = (el) => {
+          for (let e = el, d = 0; e && d < 4; e = e.parentElement, d++) {
+            const p = reactProps(e);
+            if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: e, target: e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); return true; } catch (_) {} }
+          }
+          try { el.click(); return true; } catch (_) {}
+          return false;
+        };
+        for (let k = 0; k < 5; k++) {
+          if (!/See All FAQ History|FAQ History/i.test(document.body.innerText || '')) break;
+          // ①class/aria に close を含むもの ②「×」1文字の要素 ③Escape の順に試す
+          const cands = [].slice.call(document.querySelectorAll('*')).filter(e => {
+            const c = String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : (e.className || ''));
+            const a = String(e.getAttribute && (e.getAttribute('aria-label') || '') || '');
+            const tx = String(e.textContent || '').trim();
+            return /close/i.test(c) || /close/i.test(a) || tx === '×' || tx === '✕';
+          });
+          if (cands.length) clickIt(cands[cands.length - 1]);
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+          await sleep(400);
+          if (!(await isFaqPanelOpen())) break;
+        }
       } catch (_) {}
       return 'FAQ履歴を取り込みました（' + lines.length + '行）: ' + buyer;
     } catch (e) { return '❌ ' + e.message; } finally { sendingNow = false; }
