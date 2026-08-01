@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.90.0
+// @version      1.91.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.90.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.91.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1221,8 +1221,18 @@
     if (!item || item.buyer === '__CYCLE__' || item.text === '__CYCLE__' || !item.buyer) return; // 合図/不正は送信しない（検索窓を汚さない）
     // 特殊指示：本文が [[unread]] だけなら「未読に戻す」＝送信ではない
     if (/^\s*\[\[unread\]\]\s*$/.test(String(item.text || ''))) { await markUnread(item.buyer); return; }
+    // ★開き方は「取り込みと同じ方法」に揃える。検索窓を使う独自経路(openConversation)は
+    //   開けないことがあり、その結果ヘッダが取れず送信が止まっていた（実測）。
+    //   一覧から行を見つけて React の onClick で開く経路は、巡回で毎日動いている実績がある。
     const h0 = domHeaderInfo();
-    if (!h0 || h0.buyer !== item.buyer) { const ok = await openConversation(item.buyer); if (!ok) throw new Error('会話が見つかりません: ' + item.buyer); }
+    if (!h0 || norm(h0.buyer) !== norm(item.buyer)) {
+      let opened = false;
+      try {
+        const row = await findRow(item.buyer);
+        if (row) { reactOpen(row); await sleep(1400); opened = true; }
+      } catch (_) {}
+      if (!opened) { const ok = await openConversation(item.buyer); if (!ok) throw new Error('会話が見つかりません: ' + item.buyer); }
+    }
     await sleep(500);
     // ★★【最重要】送る直前に「いま画面に出ているのが本当にその相手か」を必ず確認する。
     //   これが無かったため、会話の切り替えに失敗した状態で送信してしまい、**別のお客さんに
@@ -1233,7 +1243,10 @@
       // 相手が判別できない＝会話が開けていないだけのことがある。**開き直してから**再確認する
       //   （ここで諦めると、安全ではあるが送れずに止まってしまう）。
       for (let attempt = 0; attempt < 2 && !okName; attempt++) {
-      if (attempt > 0) { try { await openConversation(item.buyer); } catch (_) {} await sleep(900); }
+      if (attempt > 0) {
+        try { const r2 = await findRow(item.buyer); if (r2) { reactOpen(r2); } else { await openConversation(item.buyer); } } catch (_) {}
+        await sleep(1400);
+      }
       for (let i = 0; i < 10; i++) {           // 表示が追いつくまで最大約3秒待つ
         const h = domHeaderInfo();
         const raw = headerBuyerRaw ? (headerBuyerRaw() || '') : '';
