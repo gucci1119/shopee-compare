@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.58.0
+// @version      1.59.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.58.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.59.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -773,8 +773,12 @@
       const sc = sideScroller();
       const back = sc ? sc.scrollTop : 0;
       if (sc) { rvScroll(sc, 0); await sleep(400); }
+      // ★普段は「上の方（新しい方）」だけ見る。一覧は新しい順なので、下は古い会話しかない。
+      //   全2548件をスクロールすると画面が延々と上下し、時間もかかる（本人から指摘）。
+      //   全件を数えたい時（手動実行）だけ最後まで見る。
+      const maxPass = manual ? 200 : 12;
       let stagnant = 0;
-      for (let i = 0; i < 200 && stagnant < 3; i++) {
+      for (let i = 0; i < maxPass && stagnant < 3; i++) {
         scanSidebarVisible(acc);
         if (!sc) break;
         const before = sc.scrollTop;
@@ -786,7 +790,8 @@
       scanSidebarVisible(acc);
       if (sc) rvScroll(sc, back); // 元のスクロール位置へ戻す
       const list = Object.keys(acc).map(k => acc[k]);
-      try { GM_setValue('lastScanTotal', list.length); } catch (_) {} // 進捗バーの分母（全会話数）
+      // 途中までしか見ていない時は全会話数として保存しない（分母が小さくなって進捗が壊れる）
+      try { if (manual) GM_setValue('lastScanTotal', list.length); } catch (_) {}
       if (list.length && getSbKey()) {
         await sbReq('POST', 'app_kv?on_conflict=k',
           [{ k: 'chat_conv_state', v: { at: new Date().toISOString(), n: list.length, items: acc }, updated_at: new Date().toISOString() }],
@@ -939,7 +944,8 @@
   // 手順を順に試し、★できなかったら黙って成功扱いにせず必ずエラーにする（推測で成功と言わない）。
   // 一覧をスクロールしてでも目的の会話行を見つける（閉じた会話は下の方にあることが多い）
   async function findRow(buyer) {
-    for (let pass = 0; pass < 14; pass++) {
+    // 直近7日以内の会話しか対象にしないので、深くまで探さない（画面が延々と上下するのを防ぐ）
+    for (let pass = 0; pass < 6; pass++) {
       const side = sideList(); if (!side) return null;
       const row = [].slice.call(side.children).find(r => norm((r.innerText || '').split('\n')[0]) === norm(buyer));
       if (row) return row;
@@ -956,12 +962,27 @@
     const findItem = () => [].slice.call(document.querySelectorAll('div,span,li,button'))
       .filter(e => e.children.length <= 1 && /mark as unread|未読/i.test((e.textContent || '').trim()))
       .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })[0];
-    // 1) 右クリック（コンテキストメニュー）
     const r = row.getBoundingClientRect();
     const opts = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
-    row.dispatchEvent(new MouseEvent('contextmenu', opts));
-    await sleep(900);
-    let it = findItem();
+    // 0) ★Reactのハンドラを直接呼ぶ。Shopeeは合成イベントを無視するため、dispatchEventでは
+    //    メニューが出ないことを実測で確認済み（記録された周辺テキストにメニュー項目がゼロだった）。
+    const fire = (el, prop) => {
+      const p = el && reactProps(el);
+      if (!p || typeof p[prop] !== 'function') return false;
+      try { p[prop](Object.assign({ currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: prop.slice(2).toLowerCase() }, opts)); return true; } catch (_) { return false; }
+    };
+    let it = null;
+    for (let el = row, depth = 0; el && depth < 4 && !it; el = el.parentElement, depth++) {
+      if (fire(el, 'onContextMenu')) { await sleep(800); it = findItem(); }
+    }
+    // 1) それでも駄目なら合成の右クリックも試す（環境によっては効くため）
+    if (!it) { row.dispatchEvent(new MouseEvent('contextmenu', opts)); await sleep(900); it = findItem(); }
+    // 2) ホバーで出る「…」等を狙う（マウス移動を先に通知しないと出ない実装が多い）
+    if (!it) {
+      ['pointerover', 'mouseover', 'mouseenter', 'mousemove'].forEach(t => { try { row.dispatchEvent(new MouseEvent(t, opts)); } catch (_) {} });
+      fire(row, 'onMouseEnter'); fire(row, 'onMouseOver');
+      await sleep(700); it = findItem();
+    }
     // 2) 出なければ行の「…」等をReactのonClickで開く（Shopeeは合成クリックを受け付けないため直接呼ぶ）
     if (!it) {
       const more = [].slice.call(row.querySelectorAll('div,span,svg,i'))
