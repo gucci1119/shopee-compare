@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.67.0
+// @version      1.68.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,23 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.67.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.68.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
+  // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
+  // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
+  // → 本人が1回だけ手で Unread を押し、その時に飛ぶAPIを捕まえて、以後は直接呼ぶ。
+  const ACT = { rows: [], on: true };
+  function actSample(method, url, body) {
+    try {
+      if (!ACT.on) return;
+      const u = String(url || '');
+      if (!/shopee/i.test(u)) return;
+      if (/report_metric|\/log\b|track|beacon/i.test(u)) return;
+      if (String(method).toUpperCase() === 'GET') return;      // 押した操作＝POST/PUT系だけ
+      ACT.rows.push({ at: new Date().toISOString(), m: String(method), u: u.slice(0, 220), b: String(body || '').slice(0, 400) });
+      if (ACT.rows.length > 25) ACT.rows.shift();
+    } catch (_) {}
+  }
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -191,6 +207,7 @@
       const args = arguments;
       let url = '';
       try { url = (args[0] && args[0].url) ? args[0].url : String(args[0] || ''); } catch (_) {}
+      try { const init = args[1] || (args[0] && args[0].method ? args[0] : null); if (init && init.method) actSample(init.method, url, init.body); } catch (_) {}
       const p = origFetch.apply(this, args);
       try {
         if (isChatUrl(url)) p.then(res => { try { res.clone().text().then(txt => capture(url, txt)).catch(() => {}); } catch (_) {} }).catch(() => {});
@@ -201,8 +218,9 @@
 
   // ---- XHR フック ----
   const OpenX = XMLHttpRequest.prototype.open, SendX = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (m, u) { try { this.__cu = u; } catch (_) {} return OpenX.apply(this, arguments); };
-  XMLHttpRequest.prototype.send = function () {
+  XMLHttpRequest.prototype.open = function (m, u) { try { this.__cu = u; this.__cm = m; } catch (_) {} return OpenX.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function (body) {
+    try { actSample(this.__cm || 'POST', this.__cu || '', body); } catch (_) {}
     try {
       const self = this;
       this.addEventListener('load', function () {
@@ -246,6 +264,14 @@
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, stat: WIRE.stat, urls: WIRE.urls, workers: WIRE.workers, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
     } catch (_) {}
   }
+  // 押した操作のリクエスト記録を30秒ごとに送る（本人が手でUnreadを押したら、その直後に拾える）
+  setInterval(async () => {
+    try {
+      if (!getSbKey() || !ACT.rows.length) return;
+      const rows = ACT.rows.slice(-25);
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_api_probe', v: { at: new Date().toISOString(), cc: CC, rows: rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
+    } catch (_) {}
+  }, 30000);
   setTimeout(wireFlush, 90000);
   setTimeout(wireFlush, 300000); // 5分後にもう一度（会話を開いた後の通信も拾えるように）
 
