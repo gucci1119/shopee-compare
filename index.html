@@ -7376,6 +7376,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function tagChips(tags) {
     return (tags || []).map(t => `<span style="background:#eef2ff;color:#3b4fb0;border:1px solid #d6e0ff;border-radius:3px;padding:0 4px;font-size:9.5px;font-weight:700">${esc(t)}</span>`).join(' ');
   }
+  // ---------- 🧾 この相手の注文（返信の判断材料。webchatの注文カード相当をポータルで） ----------
+  // 「何を買った人か・発送済みか・追跡番号は」を見ながら返信できないと webchat を卒業できない。
+  // 注文データは既にポータルにあるので、選択中の相手のぶんだけ引いて会話の上に出す。
+  async function refreshBuyerOrders(buyer) {
+    const el = document.getElementById('msg-orders'); if (!el || !buyer) return;
+    msg._ord = msg._ord || {};
+    if (!(buyer in msg._ord)) {
+      msg._ord[buyer] = null; // 取得中
+      try {
+        const r = await sbGetAll('orders', 'select=sn,cc,status,tab,total,order_date,items,tracking&buyer=eq.' + encodeURIComponent(buyer) + '&order=order_date.desc&limit=8');
+        msg._ord[buyer] = r || [];
+      } catch (_) { msg._ord[buyer] = []; }
+    }
+    const list = msg._ord[buyer];
+    if (!list) { el.style.display = ''; el.innerHTML = '<span class="smd-dim" style="font-size:11px">注文を確認中…</span>'; return; }
+    if (!list.length) { el.style.display = 'none'; return; }
+    const stName = { 200: '未払い', 300: '発送待ち', 400: '発送済み', 500: '完了', 600: 'キャンセル' };
+    const stColor = { 200: '#e8710a', 300: '#d93025', 400: '#1565c0', 500: '#1a7f37', 600: '#999' };
+    el.style.display = '';
+    el.innerHTML = `<div style="font-size:10.5px;font-weight:700;color:#555;margin-bottom:3px">🧾 この人の注文（${list.length}件）</div>` +
+      list.map(o => {
+        const it = (o.items || [])[0] || {};
+        const more = (o.items || []).length > 1 ? ` <span class="smd-dim">他${(o.items || []).length - 1}点</span>` : '';
+        return `<div style="display:flex;gap:7px;align-items:center;font-size:11px;padding:2px 0;border-top:1px dotted #eee">
+          <span style="font-weight:700;color:${stColor[o.tab] || '#666'};flex:none;width:56px">${stName[o.tab] || (o.status || '')}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc(it.name || '(商品名なし)')}${more}</span>
+          <span class="smd-dim" style="flex:none">${esc((o.order_date || '').slice(5))}</span>
+          ${o.tracking ? `<span class="smd-dim" style="flex:none;font-family:monospace" title="追跡番号">${esc(o.tracking)}</span>` : ''}
+          <span class="smd-dim" style="flex:none">${esc(o.sn || '')}</span></div>`;
+      }).join('');
+  }
   // ---------- 🧭 対応ガイド（Yes/No分岐）＝Smart Reply からの移植・第3弾 ----------
   // 「この問い合わせにどう答えるか」を分岐でたどり、最後に返信文を返信欄へ挿入する。定型文が"文の引き出し"なら、
   // こちらは"判断の手順書"。保存は app_kv.chat_guides（新テーブル不要）。
@@ -7731,6 +7762,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          <button id="cm-note" class="smd-btn" style="font-size:11px;padding:2px 8px" title="この顧客のメモ（自分用）">📝 メモ${(cmeta(sel.key) && cmeta(sel.key).note) ? '●' : ''}</button>
        </div></div>` +
       ((cmeta(sel.key) && cmeta(sel.key).note) ? `<div style="background:#fffbea;border-bottom:1px solid #f4e7b8;padding:6px 14px;font-size:11.5px;white-space:pre-wrap">📝 ${esc(cmeta(sel.key).note)}</div>` : '') +
+      `<div id="msg-orders" style="display:none;background:#f7f9fc;border-bottom:1px solid #e6ecf5;padding:5px 14px"></div>` +
       `<div id="msg-thread" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:#f6f7f9">${sel.msgs.length ? sel.msgs.map(bubbleHtml).join('')
         : `<div class="smd-dim" style="margin:auto;text-align:center;font-size:12.5px;line-height:1.8">この会話の<b>本文はまだ取り込まれていません</b>（一覧の情報だけ表示中）<br>最後のやり取り：<b>${esc((sel.state && sel.state.prev) || '—')}</b>${sel.state && sel.state.when ? '（' + esc(sel.state.when) + '）' : ''}<br><span style="font-size:11px">本文は裏の🤖巡回役タブが順に取り込みます。急ぐ場合はShopeeチャットでこの会話を開くと即取り込まれます。</span></div>`}</div>` +
       (sel.source === 'shopee'
@@ -7771,6 +7803,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const qc = document.getElementById('msg-qclr'); if (qc) qc.addEventListener('click', () => { msg.q = ''; msg.showN = 80; renderMessages(true); });
     }
     refreshSenderStatus(); refreshCrawlBar(); wireTemplates();
+    if (sel && sel.buyer) refreshBuyerOrders(sel.buyer); // 🧾この相手の注文を会話の上に
     // 📌ピン / 🏷タグ / 📝メモ
     if (sel) {
       const K = sel.key, cur = cmeta(K) || { pin: false, note: '', tags: [] };
