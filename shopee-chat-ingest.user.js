@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.43.0
+// @version      3.00.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '2.43.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.00.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -499,6 +499,10 @@
   //   実測：スレッド全高24931pxに対し描画9行。だから「最新が入らない／古い日付で止まる」が起きていた。
   function domExtract(ctx) {
     const h = domHeaderInfo(); if (!h) return [];
+    // ★読み始めの会話IDを覚えておき、読み終わりに変わっていたら**このバッチを丸ごと捨てる**。
+    //   途中で会話が切り替わると、前の相手の行を新しい相手として保存してしまうため。
+    const _cid0 = threadConvId();
+    if (captureAs && captureAs.convId && _cid0 && _cid0 !== captureAs.convId) return [];
     // ★巡回時のみ：reactOpenで会話を開き、ヘッダ先頭が狙い名と一致することを確認済みの時だけ captureAs をセット。
     //   その時は一覧行由来のクリーンな名前/国で確定する（ヘッダは住所連結で抽出が不安定なため）。検証を通った時
     //   だけなので混線しない（表示中スレッド＝その会話）。手動閲覧時は captureAs=null＝ヘッダ検出（domHeaderInfo）。
@@ -750,6 +754,8 @@
       const id = 'dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
+    // ★読み終わりに会話IDが変わっていた＝読んでいる途中で切り替わった。混ざるくらいなら捨てる。
+    if (_cid0 && threadConvId() !== _cid0) return [];
     return rows;
   }
   let lastNoDate = 0;   // 直近のsweepで「日付が確定できず捨てた行」の数（0でなければ通し読みが要る合図）
@@ -922,12 +928,46 @@
   //   「行内要素のReact onClickプロップを直接呼ぶ」と確実に切替わる。開いた後ヘッダ名が狙いと
   //   一致した時だけ取り込む＝もし切替に失敗しても混線しない（二重安全）。v1.9.0で名前上書きは撤廃済み。
   function reactProps(el) { const k = Object.keys(el).find(k => k.indexOf('__reactProps$') === 0); return k ? el[k] : null; }
+  function reactFiber(el) { try { const k = Object.keys(el).find(k => k.indexOf('__reactFiber$') === 0); return k ? el[k] : null; } catch (_) { return null; } }
+  // ★★★会話の同一性は「名前」でなく「ShopeeがReactに持っている会話ID」で見る（v3.0.0）。
+  //   名前で照合していたため、会話を切り替えた直後の**前の相手の中身**を新しい相手の名前で保存する事故が
+  //   繰り返し起きた（別人のFAQが混ざる／別人に返信が届く）。IDなら原理的にずれない。
+  //   実測：スレッド側は memoizedProps.conversationId、一覧の行側は memoizedProps.conversation.id / to_id / to_name。
+  function threadConvId() {
+    try {
+      const el = threadScroller() || (domHeaderInfo() || {}).thread;
+      if (!el) return '';
+      let f = reactFiber(el), d = 0;
+      while (f && d < 45) {
+        const mp = f.memoizedProps;
+        if (mp && typeof mp === 'object') {
+          if (mp.conversationId != null) return String(mp.conversationId);
+          if (mp.currentConversation && mp.currentConversation.id != null) return String(mp.currentConversation.id);
+        }
+        f = f.return; d++;
+      }
+    } catch (_) {}
+    return '';
+  }
+  function rowConv(row) {
+    try {
+      let f = reactFiber(row), d = 0;
+      while (f && d < 14) {
+        const mp = f.memoizedProps;
+        const c = mp && mp.conversation;
+        if (c && c.id != null) return { id: String(c.id), toId: String(c.to_id || ''), toName: String(c.to_name || '') };
+        f = f.return; d++;
+      }
+    } catch (_) {}
+    return null;
+  }
   function reactOpen(row) {
     const els = [row].concat([].slice.call(row.querySelectorAll('*')));
     for (const el of els) { const p = reactProps(el); if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); return true; } catch (_) {} } }
     return false;
   }
   const norm = s => (s || '').trim().toLowerCase();
+  let _sendConvId = '';   // 送信対象の会話ID（送る直前の最終確認に使う）
   // ヘッダ帯の名前テキスト（住所/評価が連結されることがある）＝「先頭が狙い名で始まるか」でナビ確認に使う
   function headerBuyerRaw() {
     // ★宛先照合に使う名前。位置で拾っていたため裏タブでは常に空になり、
@@ -989,7 +1029,15 @@
       await sleep(200);
     }
     if (!matched) return false;
-    captureAs = { buyer: name, cc: cc };
+    // ★IDで最終確認。一覧行の会話IDと、いま表示されているスレッドの会話IDが一致しなければ取り込まない。
+    //   名前一致より強い（同名・切り詰め・切替直後の残像すべてに強い）。IDが取れない環境では従来どおり続行する。
+    const want = rowConv(row);
+    if (want && want.id) {
+      let okId = false;
+      for (let w = 0; w < 12; w++) { if (threadConvId() === want.id) { okId = true; break; } await sleep(200); }
+      if (!okId) return false;
+    }
+    captureAs = { buyer: name, cc: cc, convId: (want && want.id) || threadConvId() };
     try { if (!noCapture) await quickCapture(deep); } finally { captureAs = null; }
     try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
     // FAQ History は domExtract が**正しい日付つき**で取り込むようになった（v2.23.0）。
@@ -1593,9 +1641,28 @@
         const now = (domHeaderInfo() || {}).buyer || '(不明)';
         throw new Error('宛先が一致しないため送信を中止しました（送ろうとした相手: ' + item.buyer + ' / 画面に出ている相手: ' + now + '）');
       }
+      // ★★IDでも照合する（v3.0.0）。名前は切り詰め・同名・表示の遅れでずれ得るが、
+      //   ShopeeがReactに持っている会話IDは原理的にずれない。一覧行のIDと表示中スレッドのIDを突き合わせる。
+      try {
+        const r3 = await findRow(item.buyer);
+        const want3 = r3 ? rowConv(r3) : null;
+        if (want3 && want3.id) {
+          if (want3.toName && norm(want3.toName) !== norm(item.buyer)) {
+            throw new Error('宛先IDの持ち主が違います（一覧: ' + want3.toName + ' / 送ろうとした相手: ' + item.buyer + '）');
+          }
+          let idOk = false;
+          for (let i = 0; i < 10; i++) { if (threadConvId() === want3.id) { idOk = true; break; } await sleep(300); }
+          if (!idOk) throw new Error('会話IDが一致しないため送信を中止しました（相手: ' + item.buyer + ' / 表示中ID: ' + (threadConvId() || 'なし') + '）');
+          _sendConvId = want3.id;
+        } else { _sendConvId = ''; }
+      } catch (e) { if (/宛先ID|会話ID/.test(String(e.message))) throw e; _sendConvId = ''; }
     }
     const ta = await ensureComposer();
     if (!ta) throw new Error('入力欄が出ません（会話が閉じている/再開できない）');
+    // 入力欄を出す過程で会話が変わっていないか、ここでも見る（送る直前の最終確認）
+    if (_sendConvId && threadConvId() && threadConvId() !== _sendConvId) {
+      throw new Error('送信直前に会話が切り替わったため中止しました（相手: ' + item.buyer + '）');
+    }
     // スタンプ指定（[[sticker]]<srcの一部> または [[sticker]]* で先頭）
     const stk = /^\s*\[\[sticker\]\]\s*(\S+)\s*$/.exec(String(item.text || ''));
     if (stk) { await sendSticker(ta, stk[1]); return; }
