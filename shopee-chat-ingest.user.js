@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.50.0
+// @version      1.51.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -151,6 +151,9 @@
   const CHAT_INCLUDE = /(webchat|coreapi|conversation|message|\/im\/|\/sic\/)/i;
   const CHAT_EXCLUDE = /(chatbot\.|report\.|experiment|\/log\b|get_config|is_chat_enabled|\/feature\/|query_avatars|classification|emergency\/template)/i;
   const isChatUrl = (u) => { try { u = String(u || ''); return CHAT_INCLUDE.test(u) && !CHAT_EXCLUDE.test(u); } catch (_) { return false; } };
+  // ★通信フックより前に宣言する。使用箇所より後ろに const を置くとTDZで初期化ごと落ちる
+  //   （2026-05に同じ形で大障害を出している）。
+  const WIRE = { on: true, rows: [], sent: false };
 
   // ---- キャプチャ・バッファ ----
   const MAX_BODY = 200000;      // 1応答の上限（肥大ガード）
@@ -164,6 +167,9 @@
   function capture(url, text) {
     if (!text) return;
     const t = String(text).trim();
+    // ★標本取りは「捨てる前」に行う。JSONでない/大きいという理由で捨てていた応答の中に
+    //   本文が入っている可能性を、一度も確認しないまま結論を出していたため。
+    if (!/^WS /.test(String(url))) wireSample('HTTP ' + url, t.slice(0, 4000));
     if (t.length > MAX_BODY) return;               // 大きすぎる応答は無視（画像/一覧の巨大JSON等）
     if (t[0] !== '{' && t[0] !== '[') return;      // JSONっぽくないものは無視
     const key = hash(url + '|' + t);
@@ -208,6 +214,25 @@
     return SendX.apply(this, arguments);
   };
 
+  // ---- 🔬 通信の標本取り（本文がHTTP/WSから直接取れないかの再検証用・一度きり） ----
+  // 「本文はWS(protobuf)で読めない」は2026-07-16の1回の調査で結論づけたきり再検証していない。
+  // 当たれば1時間の巡回もDOM由来の日付バグも全部不要になる＝最大のリターン。
+  // 実物を見ないと判断できないので、最初の数十件だけ標本を残す（以後は何もしない＝常時負荷にしない）。
+  function wireSample(tag, text) {
+    if (!WIRE.on || !text) return;
+    const t = String(text);
+    // 読める文字の連なりだけ抜く（protobufでも本文は生のUTF-8で入っていることが多い）
+    const runs = (t.match(/[ -~ -￿]{6,}/g) || []).filter(s => !/^[\x00-\x1F]*$/.test(s)).slice(0, 12);
+    if (!runs.length) return;
+    WIRE.rows.push({ tag: tag.slice(0, 160), len: t.length, runs: runs.map(s => s.slice(0, 160)) });
+    if (WIRE.rows.length >= 40) WIRE.on = false;
+  }
+  setTimeout(async () => {
+    if (WIRE.sent || !getSbKey() || !WIRE.rows.length) return;
+    WIRE.sent = true; WIRE.on = false;
+    try { await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal'); } catch (_) {}
+  }, 90000);
+
   // ---- WebSocket フック（webchatのリアルタイム本文はWS配信のため必須） ----
   try {
     const OrigWS = window.WebSocket;
@@ -217,7 +242,14 @@
         try {
           if (/shopee/i.test(String(url))) {
             ws.addEventListener('message', function (ev) {
-              try { const d = ev.data; if (typeof d === 'string') capture('WS ' + url, d); } catch (_) {}
+              try {
+                const d = ev.data;
+                if (typeof d === 'string') { capture('WS ' + url, d); wireSample('WS-text ' + url, d); return; }
+                // ★バイナリ(protobuf)フレーム。従来はここで捨てていたため「WSからは読めない」という
+                //   結論を出したまま一度も中身を見ていなかった。UTF-8として読める部分だけ抜いて標本を残す。
+                if (d instanceof Blob) { d.text().then(t => wireSample('WS-blob ' + url, t)).catch(() => {}); return; }
+                if (d instanceof ArrayBuffer) { wireSample('WS-bin ' + url, new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(d))); return; }
+              } catch (_) {}
             });
           }
         } catch (_) {}
