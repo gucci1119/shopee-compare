@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.08.0
+// @version      2.09.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -183,7 +183,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.08.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.09.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -811,12 +811,15 @@
   }
   // 1会話を開く→ヘッダ先頭が狙い名で始まるのを確認（＝この会話が表示されたと確定）→その時だけ captureAs をセットして
   //   一覧行由来のクリーン名で取り込む。確認できなければ取り込まない（＝混線しない・切替失敗を弾く）。
-  async function openAndCapture(row, name, cc, deep) {
+  async function openAndCapture(row, name, cc, deep, force) {
     // ★★送信中は**会話を切り替えない**。切り替えの最中に返信が走ると、
     //   送信処理が「開いた」と思っている会話と、実際に画面に出ている会話がズレて、
     //   **別のお客さんに返信が届く**（2026-08-01に実際に発生）。
     //   巡回のループ先頭でしか送信を待っていなかったため、ここでも必ず見る。
-    if (sendingNow) return false;
+    // ★ただし force=true（ポータルから「この会話を取り込む」と明示指示された時）は例外。
+    //   その処理自身が巡回を止めるために sendingNow を立てるので、ここで弾くと**必ず失敗**する
+    //   （実際に「開けませんでした」で止まり続けた）。指示された会話を開くのが目的なので競合しない。
+    if (sendingNow && !force) return false;
     reactOpen(row);
     // ★開けたかの確認。従来は「ヘッダの名前」を**画面の絶対座標**(top 82〜122等)で拾っていたため、
     //   ブラウザのツールバーが無い別ウィンドウでは座標がずれて名前が取れず、常に失敗していた。
@@ -1873,7 +1876,7 @@
               let row = await findRow(b);
               if (!row) { await sleep(800); row = await findRow(b); }   // 一覧の描画待ちで1回だけ再試行
               if (!row) out = '会話が一覧に見つかりません: ' + b;
-              else { const cc0 = (rowInfo(row).cc) || CC; const ok = await openAndCapture(row, b, cc0, true); crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {}); out = ok ? ('取り込みました: ' + b) : ('開けませんでした: ' + b); }
+              else { const cc0 = (rowInfo(row).cc) || CC; const ok = await openAndCapture(row, b, cc0, true, true); crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {}); out = ok ? ('取り込みました: ' + b) : ('開けませんでした: ' + b); }
             } catch (e) { out = '❌ ' + e.message; } finally { sendingNow = false; }
           }
         }
