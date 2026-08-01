@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.24.0
+// @version      3.25.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -256,8 +256,9 @@
             if (/chat|message|conversation|webchat/i.test(u)) {
               const key = String(u).split('?')[0].slice(0, 120);
               _wsProbe.api[key] = (_wsProbe.api[key] || 0) + 1;
-              if (_wsProbe.apiBody.length < 4) {
-                p.then(r => { try { r.clone().text().then(tx => { try { if (_wsProbe.apiBody.length < 4) _wsProbe.apiBody.push(key + ' → ' + String(tx).slice(0, 900)); } catch (_) {} }); } catch (_) {} }).catch(() => {});
+              const want = /\/conversations\/\d+\/messages|serving_mode\/conversations|chat_preview\/detail/.test(u);
+              if (want && _wsProbe.apiBody.length < 3) {
+                p.then(r => { try { r.clone().text().then(tx => { try { if (_wsProbe.apiBody.length < 3) _wsProbe.apiBody.push(key + ' → ' + String(tx).slice(0, 2600)); } catch (_) {} }); } catch (_) {} }).catch(() => {});
               }
             }
           } catch (_) {}
@@ -271,9 +272,11 @@
             if (/chat|message|conversation|webchat/i.test(String(u || ''))) {
               const key = 'XHR ' + String(u).split('?')[0].slice(0, 110);
               _wsProbe.api[key] = (_wsProbe.api[key] || 0) + 1;
-              this.addEventListener('load', function () {
-                try { if (_wsProbe.apiBody.length < 4) _wsProbe.apiBody.push(key + ' → ' + String(this.responseText || '').slice(0, 900)); } catch (_) {}
-              });
+              if (/\/conversations\/\d+\/messages|serving_mode\/conversations|chat_preview\/detail/.test(String(u || ''))) {
+                this.addEventListener('load', function () {
+                  try { if (_wsProbe.apiBody.length < 3) _wsProbe.apiBody.push(key + ' → ' + String(this.responseText || '').slice(0, 2600)); } catch (_) {}
+                });
+              }
             }
           } catch (_) {}
           return _open.apply(this, arguments);
@@ -344,7 +347,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.24.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.25.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
