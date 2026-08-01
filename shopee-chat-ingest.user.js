@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.10.0
+// @version      2.11.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -178,12 +178,38 @@
   // ※本文APIが /coreapi/v1.2/mini/... 配下の可能性があるため /mini/ 等は除外しない（取りこぼし防止＝多めに拾う方針）。
   const CHAT_INCLUDE = /(webchat|coreapi|conversation|message|\/im\/|\/sic\/)/i;
   const CHAT_EXCLUDE = /(chatbot\.|report\.|experiment|\/log\b|get_config|is_chat_enabled|\/feature\/|query_avatars|classification|emergency\/template)/i;
+  // ---- 👁 ページには常に「表示中」と伝える（裏ウィンドウでも動かすため） ----
+  // 実測：取り込み役のウィンドウが他のウィンドウに覆われると Chrome は hidden と判定し、
+  //   Shopee は**会話本文を作らなくなる／新しい会話を開けなくなる**。本人の環境では
+  //   ウィンドウが裏に回るのは避けられないため、ページ側の判定を上書きして動かし続ける。
+  //   ※本当の表示状態は _realVis() で別に保持し、心拍にはそちらを載せる（計測を歪めない）。
+  var _realVis = function () { return 'visible'; };
+  try {
+    var _d = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
+          || Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    var _h = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')
+          || Object.getOwnPropertyDescriptor(document, 'hidden');
+    if (_d && _d.get) { var _g = _d.get; _realVis = function () { try { return _g.call(document); } catch (_) { return '?'; } }; }
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } });
+    if (_h) { /* 元の値は _realVis 経由で参照 */ }
+    // Shopee側の「裏になったから止める」処理を走らせない
+    var _swallow = function (e) { try { e.stopImmediatePropagation(); } catch (_) {} };
+    window.addEventListener('visibilitychange', _swallow, true);
+    document.addEventListener('visibilitychange', _swallow, true);
+    window.addEventListener('blur', _swallow, true);
+    // 定期的に「表示された」と通知して再描画を促す
+    setInterval(function () {
+      try { document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('focus')); } catch (_) {}
+    }, 20000);
+  } catch (_) {}
+
   const isChatUrl = (u) => { try { u = String(u || ''); return CHAT_INCLUDE.test(u) && !CHAT_EXCLUDE.test(u); } catch (_) { return false; } };
   // ★通信フックより前に宣言する。使用箇所より後ろに const を置くとTDZで初期化ごと落ちる
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.10.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.11.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1609,7 +1635,7 @@
       // ver＝実際に動いているスクリプトの版。これが無いと「入れ替えたのに古いまま動いている」に気づけない
       //   （Tampermonkeyは差し替えても、開いたままのタブは古いコードで動き続ける）。
       [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated,
-             vis: document.visibilityState, hid: document.hidden,
+             vis: _realVis(), spoof: true, hid: document.hidden,
              side: (function(){ try { const l = sideList(); return l ? l.children.length : -1; } catch (_) { return -2; } })(),
              thr: (function(){ try { const h = domHeaderInfo(); return h ? h.thread.children.length : -1; } catch (_) { return -2; } })(),
              // ★スレッド判定は「幅>600 かつ 左>200」という**位置情報**に依存している。
