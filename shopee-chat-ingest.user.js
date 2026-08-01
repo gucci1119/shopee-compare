@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.09.0
+// @version      2.10.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -183,7 +183,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.09.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.10.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1875,8 +1875,24 @@
               await waitCrawlPause(6000).catch(() => {});
               let row = await findRow(b);
               if (!row) { await sleep(800); row = await findRow(b); }   // 一覧の描画待ちで1回だけ再試行
-              if (!row) out = '会話が一覧に見つかりません: ' + b;
-              else { const cc0 = (rowInfo(row).cc) || CC; const ok = await openAndCapture(row, b, cc0, true, true); crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {}); out = ok ? ('取り込みました: ' + b) : ('開けませんでした: ' + b); }
+              if (!row) out = '会話が一覧に見つかりません: ' + b + '（一覧の行数=' + (function(){ try { const l = sideList(); return l ? l.children.length : 'なし'; } catch (_) { return '?'; } })() + '）';
+              else {
+                const cc0 = (rowInfo(row).cc) || CC;
+                const before = (function(){ try { const h = domHeaderInfo(); return h ? h.thread.children.length : -1; } catch (_) { return -1; } })();
+                const ok = await openAndCapture(row, b, cc0, true, true);
+                crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {});
+                if (ok) out = '取り込みました: ' + b;
+                else {
+                  // ★どこで止まったかを必ず返す（「開けませんでした」だけでは直しようがない）
+                  const h = domHeaderInfo();
+                  out = '開けませんでした: ' + b
+                    + ' / 一覧行=' + (function(){ try { const l = sideList(); return l ? l.children.length : 'なし'; } catch (_) { return '?'; } })()
+                    + ' / スレッド行=' + (h ? h.thread.children.length : 'スレッド無し')
+                    + '(開く前' + before + ')'
+                    + ' / ヘッダ名=「' + String(headerBuyerRaw() || '') + '」'
+                    + ' / 表示=' + document.visibilityState;
+                }
+              }
             } catch (e) { out = '❌ ' + e.message; } finally { sendingNow = false; }
           }
         }
@@ -1944,8 +1960,22 @@
         const avail = (lines.find(x => /available|在庫/i.test(x)) || '').trim();
         const sold = (lines.find(x => /sold|販売/i.test(x)) || '').trim();
         // Shopeeのパネルと同じ見た目にするため、カード内のサムネイル画像も取る
-        const im = card.querySelector('img');
-        const img = im && /^https?:/.test(im.src || '') ? String(im.src) : '';
+        // ★サムネが空だった（本人指摘）。<img>が無い作りのこともあるので、
+        //   遅延読み込み属性(data-src)と背景画像(background-image)も見る。
+        let img = '';
+        const ims = [].slice.call(card.querySelectorAll('img'));
+        for (const e of ims) {
+          const u = e.currentSrc || e.src || e.getAttribute('data-src') || e.getAttribute('data-original') || '';
+          if (/^https?:/.test(u)) { img = u; break; }
+        }
+        if (!img) {
+          const all = [card].concat([].slice.call(card.querySelectorAll('*')));
+          for (const e of all) {
+            let bg = ''; try { bg = getComputedStyle(e).backgroundImage || ''; } catch (_) {}
+            const m = bg.match(/url\((['"]?)(https?:[^'")]+)\1\)/);
+            if (m) { img = m[2]; break; }
+          }
+        }
         if (!items.some(o => o.title === title)) items.push({ tag: (lb.textContent || '').trim(), title: title.slice(0, 110), price: price.slice(0, 40), avail: avail.slice(0, 24), sold: sold.slice(0, 24), img: img.slice(0, 300) });
         if (items.length >= 12) break;
       }
