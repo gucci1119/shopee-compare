@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.41.0
+// @version      1.42.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -745,15 +745,24 @@
     if (s) { setNativeValue(s, buyer); s.dispatchEvent(new Event('input', { bubbles: true })); await sleep(1600); const side2 = sideList(); const r0 = side2 && side2.children[0]; if (r0) { r0.click(); await sleep(1300); return true; } }
     return false;
   }
+  // 入力欄を必ず出す。webchatの会話は放っておくと一定時間で必ず Closed になり、入力欄が
+  // 「Restart Conversation」に置き換わる＝閉じていれば再開してから入力欄を返す。
+  // ★送信・調査など「入力欄を使う処理」は全部ここを通す（同じ対策を各所で書き直さないため）。
+  async function ensureComposer() {
+    let ta = document.querySelector('textarea[placeholder="Type a message here"]');
+    if (ta) return ta;
+    const restart = [].slice.call(document.querySelectorAll('button,div,span'))
+      .find(e => /Restart Conversation/i.test((e.textContent || '')) && e.children.length < 2 && e.getBoundingClientRect().width > 0);
+    if (!restart) return null;
+    restart.click(); await sleep(2000);
+    return document.querySelector('textarea[placeholder="Type a message here"]');
+  }
   async function sendReply(item) {
     if (!item || item.buyer === '__CYCLE__' || item.text === '__CYCLE__' || !item.buyer) return; // 合図/不正は送信しない（検索窓を汚さない）
     const h0 = domHeaderInfo();
     if (!h0 || h0.buyer !== item.buyer) { const ok = await openConversation(item.buyer); if (!ok) throw new Error('会話が見つかりません: ' + item.buyer); }
     await sleep(500);
-    // 閉じていれば再開
-    const restart = [].slice.call(document.querySelectorAll('button,div,span')).find(e => /Restart Conversation/i.test((e.textContent || '')) && e.children.length < 2 && e.getBoundingClientRect().width > 0);
-    if (restart) { restart.click(); await sleep(2000); }
-    const ta = document.querySelector('textarea[placeholder="Type a message here"]');
+    const ta = await ensureComposer();
     if (!ta) throw new Error('入力欄が出ません（会話が閉じている/再開できない）');
     setNativeValue(ta, item.text); ta.dispatchEvent(new Event('input', { bubbles: true }));
     await sleep(450);
@@ -944,8 +953,9 @@
   function reactOnClickOf(el) { const p = reactProps(el); return p && typeof p.onClick === 'function'; }
   async function probeStickers() {
     const out = [];
-    const ta = document.querySelector('textarea[placeholder="Type a message here"]');
-    if (!ta) { alert('入力欄が見つかりません。webchatで会話を開いてから実行してください。'); return; }
+    // 会話は一定時間で必ず Closed になる＝入力欄が無いのが普通にあり得る。送信と同じ ensureComposer で再開させる。
+    const ta = await ensureComposer();
+    if (!ta) { alert('会話が開いていません。webchatで会話を1つ開いてから実行してください。'); return; }
     // 1) 入力欄の上下にあるツールバーの要素を洗い出す（絵文字/画像/動画などのアイコン）
     const tr = ta.getBoundingClientRect();
     const cands = [].slice.call(document.querySelectorAll('div,span,button,svg,img,i'))
@@ -973,9 +983,38 @@
     imgs.slice(0, 4).forEach((o, i) => out.push(' img' + i + ': ' + Math.round(o.r.width) + 'x' + Math.round(o.r.height)
       + (reactOnClickOf(o.im) ? ' [onClick有]' : (reactOnClickOf(o.im.parentElement) ? ' [親にonClick有]' : ' [onClick無]'))
       + ' src=' + String(o.im.src || '').slice(0, 70)));
+    // 4) ★画像送信の下調べ（webchat卒業の最後の関門）。
+    //    実装の前に「何で受け付けているか」を確定させる：<input type=file> があるのか、
+    //    貼り付け(paste)/ドロップ(drop)を拾っているのか、それらしいボタンがあるのか。
+    out.push('──── 画像送信 ────');
+    const files = [].slice.call(document.querySelectorAll('input[type=file]'));
+    out.push('【input[type=file]】' + files.length + '個');
+    files.slice(0, 5).forEach((f, i) => {
+      const r = f.getBoundingClientRect();
+      out.push(' f' + i + ': accept="' + (f.accept || '') + '" multiple=' + !!f.multiple
+        + ' 表示=' + (r.width > 0 && r.height > 0 ? 'あり' : '非表示(隠しinput)')
+        + ' name=' + (f.name || '-') + ' cls=' + String(f.className || '').slice(0, 30));
+    });
+    // それらしいボタン（title/aria-label/alt に image/photo/picture/file/upload を含むもの）
+    const rx = /image|photo|picture|file|upload|attach|画像|写真/i;
+    const btns = [].slice.call(document.querySelectorAll('[title],[aria-label],img[alt],svg'))
+      .map(e => ({ e, r: e.getBoundingClientRect(), lbl: (e.getAttribute('title') || e.getAttribute('aria-label') || e.getAttribute('alt') || '') }))
+      .filter(o => o.lbl && rx.test(o.lbl) && o.r.width > 8 && o.r.width < 80);
+    out.push('【画像系ラベルのボタン】' + btns.length + '個');
+    btns.slice(0, 6).forEach((o, i) => out.push(' b' + i + ': "' + o.lbl.slice(0, 40) + '" x=' + Math.round(o.r.left) + ' y=' + Math.round(o.r.top)
+      + (reactOnClickOf(o.e) ? ' [onClick有]' : (reactOnClickOf(o.e.parentElement) ? ' [親にonClick有]' : ' [onClick無]'))));
+    // 入力欄が paste / drop を自前で拾っているか（Reactのpropsを見る＝実際に貼り付けで送れるかの判断材料）
+    if (ta) {
+      const p = reactProps(ta) || {};
+      out.push('【入力欄のReact props】' + Object.keys(p).filter(k => /^on/.test(k)).join(',') || '（onXxxなし）');
+      const wrap = ta.closest('div');
+      const wp = wrap ? (reactProps(wrap) || {}) : {};
+      out.push('【入力欄の親のReact props】' + (Object.keys(wp).filter(k => /^on/.test(k)).join(',') || '（onXxxなし）'));
+    } else out.push('【入力欄のReact props】入力欄が無いため未取得');
+
     const txt = out.join('\n');
     try { GM_setValue('lastStickerProbe', txt); } catch (_) {}
-    prompt('🔍 スタンプパネル調査の結果（この内容をコピーして開発者に貼ってください）', txt);
+    prompt('🔍 スタンプ／画像送信の調査結果（この内容をコピーして開発者に貼ってください）', txt);
   }
 
   // ---- 🔍 未読バッジ / Mark as unread の調査（巡回で既読にしてしまう問題を解くため） ----
