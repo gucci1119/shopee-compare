@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.41.0
+// @version      2.43.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '2.41.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.43.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -621,6 +621,21 @@
         // ★描画途中の「FAQ History ...」だけを掴むと、中身が空のカードがもう1枚できる（実際に発生）。
         //   実の中身が入っていない時は保存しない（次のsweepで正しく入る）。
         if (!fl.length || fl.join('').replace(/[.\s\u2026]/g, '').length < 8) return;
+        // ★★別の相手のFAQを取り込まない。会話を切り替えた直後は前の相手のカードがまだ残っていることがあり、
+        //   実際に「phael91777601 の会話に fabianartjorge のFAQ」が入った。
+        //   FAQの各行は「聞いた人の名前:」で始まるので、**自分の店以外の別人名**が出てきたら捨てる。
+        {
+          const me = String(h.buyer || '');
+          const bad = fl.some(x => {
+            const mm = String(x).match(/^([A-Za-z0-9_.\-]{3,30}):/);
+            if (!mm) return false;
+            const nm = mm[1];
+            if (nm === me) return false;
+            if (/^gcsonlinestore/i.test(nm)) return false;   // 自分の店（AIアシスタント側）
+            return true;
+          });
+          if (bad) return;
+        }
         body = '❓FAQ履歴\n' + fl.join('\n');
         isFaq = true;
       }
@@ -2106,9 +2121,10 @@
   //   （宛先照合つき。過去に別のお客さんへ届いた事故があるため、独自の送信経路は作らない）。
   let _arAt = 0;
   async function autoReplyTick() {
-    if (!getSbKey() || !isWorker() || cycling || sendingNow) return;
+    if (!getSbKey() || !isWorker()) return;
     if (Date.now() - _arAt < 110000) return;
     _arAt = Date.now();
+    const busy = cycling || sendingNow;   // 設定の初期作成だけは巡回中でも行う（作られないと永久に動かない）
     try {
       const c = await sbReq('GET', 'app_kv?select=v&k=eq.chat_autoreply');
       let cfg = c && c.json && c.json[0] && c.json[0].v;
@@ -2120,7 +2136,7 @@
         await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_autoreply', v: cfg, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
         return;   // 次の回から適用（この瞬間より後に来た発言だけが対象）
       }
-      if (!cfg.text) return;
+      if (!cfg.text || busy) return;
       const text = String(cfg.text).trim();
       const delayMs = Math.max(1, Number(cfg.delayMin || 1)) * 60000;
       const gapMs = Math.max(1, Number(cfg.gapH || 6)) * 3600000;
@@ -2129,11 +2145,29 @@
       const since = new Date(nowLocal - 3 * 86400000).toISOString();
       const q = await sbReq('GET', 'chat_messages?select=buyer,cc,direction,text,msg_time&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc&limit=4000');
       const rows = (q && q.json) || [];
+      // ★お客さん側の「問い合わせ」は、文章だけとは限らない。
+      //   商品ページのFAQから聞いてくる人は**本文を1件も送らない**（FAQ履歴だけ残る）。実際に取りこぼした。
+      //   また、Shopeeが自動で返す定型文（末尾が Auto-Reply）は**担当者が返した事にはならない**。
+      const past = [].concat(cfg.past || [], [String(cfg.text).trim()]);
+      const kindOf = (m) => {
+        const tx = String(m.text || '').trim();
+        if (m.direction === 'in') return 'buyer';
+        if (m.direction === 'sys') {
+          if (/^❓FAQ履歴/.test(tx)) {
+            const ln = tx.split('\n')[1] || '';
+            if (ln.indexOf(String(m.buyer || '') + ':') === 0) return 'buyer';   // 本人がFAQで質問した
+          }
+          return 'skip';
+        }
+        if (/Auto-?Reply\s*$/i.test(tx)) return 'auto';       // Shopeeの自動返信
+        if (past.indexOf(tx) >= 0) return 'auto';              // 自分たちの自動返信
+        return 'human';
+      };
       const conv = {};
       rows.forEach(m => {
-        if (m.direction !== 'in' && m.direction !== 'out') return;   // 通知(sys)は無視
+        const kd = kindOf(m); if (kd === 'skip') return;
         const k = (m.cc || '') + ':' + (m.buyer || '');
-        (conv[k] = conv[k] || []).push(m);
+        (conv[k] = conv[k] || []).push(Object.assign({ _k: kd }, m));
       });
       // ★「この人には自動返信しない」（ポータルの会話ヘッダで個別に指定）を尊重する
       let meta = {};
@@ -2147,8 +2181,11 @@
       const targets = [];
       Object.keys(conv).forEach(k => {
         const ms = conv[k];
-        const last = ms[ms.length - 1];
-        if (!last || last.direction !== 'in') return;                 // 相手の発言で終わっていない＝返信済み
+        // 最後の「お客さんからの問い合わせ」以降に、担当者の返信があるかを見る
+        let bi = -1; for (let i = ms.length - 1; i >= 0; i--) { if (ms[i]._k === 'buyer') { bi = i; break; } }
+        if (bi < 0) return;
+        if (ms.slice(bi + 1).some(x => x._k === 'human')) return;      // 担当者が返している＝送らない
+        const last = ms[bi];
         const age = nowLocal - Date.parse(last.msg_time || '');
         if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
         if (age > 7 * 86400000) return;                               // 古すぎる会話には送らない
