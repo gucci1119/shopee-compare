@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.36.0
+// @version      2.38.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.36.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.38.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2086,8 +2086,16 @@
     _arAt = Date.now();
     try {
       const c = await sbReq('GET', 'app_kv?select=v&k=eq.chat_autoreply');
-      const cfg = c && c.json && c.json[0] && c.json[0].v;
-      if (!cfg || !cfg.on || !cfg.text) return;
+      let cfg = c && c.json && c.json[0] && c.json[0].v;
+      // ★未設定なら「全体ON」で作る（本人方針：基本は全体ON）。ただし**作った時刻より後に来た発言だけ**を対象にする。
+      //   そうしないと、有効化した瞬間に過去の未返信ぜんぶへ一斉送信してしまう。
+      if (!cfg) {
+        cfg = { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly.',
+                delayMin: 1, gapH: 6, at: new Date().toISOString() };
+        await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_autoreply', v: cfg, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+        return;   // 次の回から適用（この瞬間より後に来た発言だけが対象）
+      }
+      if (!cfg.text) return;
       const text = String(cfg.text).trim();
       const delayMs = Math.max(1, Number(cfg.delayMin || 1)) * 60000;
       const gapMs = Math.max(1, Number(cfg.gapH || 6)) * 3600000;
@@ -2106,6 +2114,8 @@
       let meta = {};
       try { const mk = await sbReq('GET', 'app_kv?select=v&k=eq.chat_conv_meta'); meta = (mk && mk.json && mk.json[0] && mk.json[0].v) || {}; } catch (_) {}
       const noAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].noAuto));
+      const forceAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].forceAuto));
+      if (!cfg.on && !forceAuto.size) return;   // 全体OFF＋個別指定なし＝何もしない
       // 送信待ちが残っている相手には積まない（二重送信の防止）
       const ob = await sbReq('GET', 'chat_outbox?select=buyer,status&status=eq.pending&limit=200');
       const pending = new Set(((ob && ob.json) || []).map(x => String(x.buyer || '')));
@@ -2117,8 +2127,12 @@
         const age = nowLocal - Date.parse(last.msg_time || '');
         if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
         if (age > 7 * 86400000) return;                               // 古すぎる会話には送らない
+        // ★設定を入れる前から溜まっていた未返信には送らない（有効化した瞬間の一斉送信を防ぐ）
+        if (cfg.at) { const from = Date.parse(cfg.at) - new Date().getTimezoneOffset() * 60000; if (Date.parse(last.msg_time || '') < from) return; }
         if (pending.has(String(last.buyer || ''))) return;
-        if (noAuto.has(k) || noAuto.has(String(last.buyer || ''))) return;   // 個別に「送らない」指定
+        const bkey = String(last.buyer || '');
+        if (noAuto.has(k) || noAuto.has(bkey)) return;                        // この人は送らない
+        if (!cfg.on && !(forceAuto.has(k) || forceAuto.has(bkey))) return;    // 全体OFFなら「必ず送る」指定の人だけ
         // 直近 gapH の間に同じ自動返信を送っていたら送らない（連投しない）
         const dup = ms.some(m => m.direction === 'out' && String(m.text || '').trim() === text && (nowLocal - Date.parse(m.msg_time || '')) < gapMs);
         if (dup) return;
