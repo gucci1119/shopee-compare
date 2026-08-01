@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.26.0
+// @version      3.27.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -353,6 +353,18 @@
       if (Date.now() - _wsProbe.at < 55000) return;
       _wsProbe.at = Date.now();
       sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, kinds: _wsProbe.kinds, api: _wsProbe.api, apiBody: _wsProbe.apiBody, hdrKeys: _wsProbe.hdrKeys || null, apiTest: _wsProbe.apiTest || null, hooked: _wsProbe.hooked.slice(0, 10), texts: _wsProbe.texts, others: _wsProbe.others, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
+      // ★★本文らしきものが取れた時だけ、**別のキーに追記して保存**する。
+      //   タブは90分ごとに自動リロードして調査の記録が初期化されるため、上のキーだけだと
+      //   せっかく捕まえた1件が次回の上書きで消える（夜通しの観測では致命的）。
+      if ((_wsProbe.texts || []).length || (_wsProbe.others || []).length) {
+        sbReq('GET', 'app_kv?select=v&k=eq.chat_ws_text').then(function (r) {
+          var cur = (r && r.json && r.json[0] && r.json[0].v) || { items: [] };
+          var items = (cur.items || []).concat(_wsProbe.texts || [], _wsProbe.others || []);
+          var uniq = []; var seen = {};
+          items.forEach(function (x) { var k = String(x).slice(0, 120); if (!seen[k]) { seen[k] = 1; uniq.push(x); } });
+          return sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_text', v: { at: new Date().toISOString(), items: uniq.slice(-20) }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
+        }).catch(function () {});
+      }
     } catch (_) {}
   }, 20000);
 
@@ -373,7 +385,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.26.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.27.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
