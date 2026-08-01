@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.20.0
+// @version      3.21.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,11 +209,67 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
+  // ★★★【調査】チャット通信は SharedWorker の中にある（2026-08-02に判明）。
+  //   ページ側で fetch/XHR/WebSocket をいくらフックしても何も取れなかったのはこのため。
+  //   SharedWorker が作られる**その瞬間**にポートを押さえれば、会話を開かずに中身が読める可能性がある。
+  //   ＝巡回そのものを無くせるかもしれない唯一の道。ここでは**聞くだけ**（何も送らない・何も変えない）。
+  const _wsProbe = { n: 0, samples: [], at: 0 };
+  try {
+    const _SW = window.SharedWorker;
+    if (_SW) {
+      window.SharedWorker = function (...a) {
+        const w = new _SW(...a);
+        try {
+          w.port.addEventListener('message', function (ev) {
+            try {
+              _wsProbe.n++;
+              if (_wsProbe.samples.length < 8) {
+                const d = ev && ev.data;
+                _wsProbe.samples.push(typeof d === 'object' ? JSON.stringify(d).slice(0, 700) : String(d).slice(0, 700));
+              }
+            } catch (_) {}
+          });
+          w.port.start();
+        } catch (_) {}
+        return w;
+      };
+      window.SharedWorker.prototype = _SW.prototype;
+    }
+    const _W = window.Worker;
+    if (_W) {
+      window.Worker = function (...a) {
+        const w = new _W(...a);
+        try {
+          w.addEventListener('message', function (ev) {
+            try {
+              _wsProbe.n++;
+              if (_wsProbe.samples.length < 8) {
+                const d = ev && ev.data;
+                _wsProbe.samples.push('[worker]' + (typeof d === 'object' ? JSON.stringify(d).slice(0, 700) : String(d).slice(0, 700)));
+              }
+            } catch (_) {}
+          });
+        } catch (_) {}
+        return w;
+      };
+      window.Worker.prototype = _W.prototype;
+    }
+  } catch (_) {}
+  // 60秒ごとに、拾えた件数とサンプルをポータルから見えるところへ置く（調査用・数分で判断できる）
+  setInterval(function () {
+    try {
+      if (!getSbKey() || !isWebchat()) return;
+      if (Date.now() - _wsProbe.at < 55000) return;
+      _wsProbe.at = Date.now();
+      sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
+    } catch (_) {}
+  }, 20000);
+
   const _bootAt = Date.now();   // このタブが読み込まれた時刻（定期リロードの基準）
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.20.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.21.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
