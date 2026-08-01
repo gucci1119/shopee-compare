@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.05.0
+// @version      2.06.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -101,7 +101,17 @@
       return;
     }
     const l = leaseGet(), now = Date.now();
-    if (!l || !l.at || (now - l.at) > 45000 || l.id === tabId()) { try { GM_setValue(LEASE_KEY, { id: tabId(), at: now }); } catch (_) {} }
+    // ★★Shopeeは「表示されているタブ」でしか会話本文(スレッド)を作らない（実測で確定：
+    //   裏タブでは一覧の容器しか存在せず、スレッドの容器がDOMに無い）。
+    //   したがって**表示中のタブが巡回役になる**べき。裏タブが権利を持っていると、
+    //   一覧は見えるのに本文が永久に取り込めない状態になる（今日ずっとこれだった）。
+    const visible = (document.visibilityState === 'visible');
+    if (l && l.at && (now - l.at) <= 45000 && l.id !== tabId()) {
+      // 他タブが権利を持っている。相手が裏で自分が表なら奪う（表のタブを優先）
+      if (visible && l.hid === true) { try { GM_setValue(LEASE_KEY, { id: tabId(), at: now, hid: false }); } catch (_) {} }
+      return;
+    }
+    if (!l || !l.at || (now - l.at) > 45000 || l.id === tabId()) { try { GM_setValue(LEASE_KEY, { id: tabId(), at: now, hid: !visible }); } catch (_) {} }
   }
   setTimeout(() => { leaseTick(); updateChip(); }, 1500 + Math.floor(Math.random() * 2000)); // 同時起動の取り合いを少しずらす
   setInterval(() => { leaseTick(); updateChip(); }, 10000);
@@ -155,7 +165,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.05.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.06.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
