@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.23.0
+// @version      3.24.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -214,7 +214,7 @@
   //   ページ側で fetch/XHR/WebSocket をいくらフックしても何も取れなかったのはこのため。
   //   SharedWorker が作られる**その瞬間**にポートを押さえれば、会話を開かずに中身が読める可能性がある。
   //   ＝巡回そのものを無くせるかもしれない唯一の道。ここでは**聞くだけ**（何も送らない・何も変えない）。
-  const _wsProbe = { n: 0, samples: [], texts: [], others: [], kinds: {}, at: 0, hooked: [] };
+  const _wsProbe = { n: 0, samples: [], texts: [], others: [], kinds: {}, api: {}, apiBody: [], at: 0, hooked: [] };
   // ★★Tampermonkeyは**隔離されたwindow**でスクリプトを動かす。ここを書き換えても
   //   ページ本体には効かない。過去に「通信の横取りは不可能」と結論づけた実験も、
   //   そもそもフックが刺さっていなかった疑いが強い。必ず unsafeWindow（ページ本体）に仕掛ける。
@@ -243,6 +243,43 @@
       PW.WebSocket.prototype = _WS.prototype;
       ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach((k, i) => { try { PW.WebSocket[k] = i; } catch (_) {} });
     }
+    // ★履歴はHTTPで取っている（会話を開いてもWorkerには流れなかった＝実測）。
+    //   fetch/XHRもページ本体側に仕掛けて、**チャット関連のAPIのURLと応答の形**を掴む。
+    //   これが分かれば、会話を開かずにHTTPで直接取れる＝巡回を完全に廃止できる。
+    try {
+      const _f = PW.fetch;
+      if (_f) {
+        PW.fetch = function (input, init) {
+          let u = ''; try { u = typeof input === 'string' ? input : (input && input.url) || ''; } catch (_) {}
+          const p = _f.apply(this, arguments);
+          try {
+            if (/chat|message|conversation|webchat/i.test(u)) {
+              const key = String(u).split('?')[0].slice(0, 120);
+              _wsProbe.api[key] = (_wsProbe.api[key] || 0) + 1;
+              if (_wsProbe.apiBody.length < 4) {
+                p.then(r => { try { r.clone().text().then(tx => { try { if (_wsProbe.apiBody.length < 4) _wsProbe.apiBody.push(key + ' → ' + String(tx).slice(0, 900)); } catch (_) {} }); } catch (_) {} }).catch(() => {});
+              }
+            }
+          } catch (_) {}
+          return p;
+        };
+      }
+      const _open = PW.XMLHttpRequest && PW.XMLHttpRequest.prototype && PW.XMLHttpRequest.prototype.open;
+      if (_open) {
+        PW.XMLHttpRequest.prototype.open = function (m, u) {
+          try {
+            if (/chat|message|conversation|webchat/i.test(String(u || ''))) {
+              const key = 'XHR ' + String(u).split('?')[0].slice(0, 110);
+              _wsProbe.api[key] = (_wsProbe.api[key] || 0) + 1;
+              this.addEventListener('load', function () {
+                try { if (_wsProbe.apiBody.length < 4) _wsProbe.apiBody.push(key + ' → ' + String(this.responseText || '').slice(0, 900)); } catch (_) {}
+              });
+            }
+          } catch (_) {}
+          return _open.apply(this, arguments);
+        };
+      }
+    } catch (_) {}
     const _SW = PW.SharedWorker;
     if (_SW) {
       PW.SharedWorker = function (...a) {
@@ -299,7 +336,7 @@
       if (!getSbKey() || !isWebchat()) return;
       if (Date.now() - _wsProbe.at < 55000) return;
       _wsProbe.at = Date.now();
-      sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, kinds: _wsProbe.kinds, hooked: _wsProbe.hooked.slice(0, 10), texts: _wsProbe.texts, others: _wsProbe.others, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
+      sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, kinds: _wsProbe.kinds, api: _wsProbe.api, apiBody: _wsProbe.apiBody, hooked: _wsProbe.hooked.slice(0, 10), texts: _wsProbe.texts, others: _wsProbe.others, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
     } catch (_) {}
   }, 20000);
 
@@ -307,7 +344,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.23.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.24.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
