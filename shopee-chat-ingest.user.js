@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.56.0
+// @version      1.57.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,9 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.56.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.57.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
+  const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
 
   // ---- キャプチャ・バッファ ----
@@ -477,7 +479,11 @@
   //   「ヘッダ＝狙いの相手」と確認できた時にだけ取り込む（captureAs）ので、そちらに任せる。
   //   ここを常時動かすと、会話を切り替えた瞬間（本文は新しい相手・ヘッダはまだ前の相手、という数百msの隙間）に
   //   割り込んでしまい、**別人のメッセージを前の相手の名前で保存する＝混線**が起きる（実際に発生）。
-  setInterval(() => { if (isWebchat() && !cycling) domSweep(); }, 2500);
+  //   ★ただし「巡回が操作中で待機している間(idleParked)」は例外として取り込む。
+  //     本人はときどきwebchatで直接返信する。その最中は巡回が止まっており、
+  //     ここも止めていると**手で返した分がどこにも取り込まれない**空白ができていた。
+  //     待機中は会話を切り替えないので、切替時の混線は起きない。
+  setInterval(() => { if (isWebchat() && (!cycling || idleParked)) domSweep(); }, 2500);
 
   // ---- 過去履歴の自動取得（会話を開いたら上まで遡ってsweep→最新に戻す） ----
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -565,7 +571,12 @@
   let lastUserAct = 0;
   ['click', 'keydown', 'wheel'].forEach(t => document.addEventListener(t, () => { lastUserAct = Date.now(); }, true));
   const userBusy = () => (Date.now() - lastUserAct) < 12000;
-  async function waitIdle() { while (userBusy()) { cycleInfo = '待機(操作中)'; updateChip(); await sleep(2000); } }
+  // idleParked＝巡回が「操作中なので待機」で止まっている状態。この間は会話を切り替えないので
+  // 画面は動かず、開いている会話をそのまま取り込んでも混線しない（＝手で返信した分を拾える）。
+  async function waitIdle() {
+    while (userBusy()) { idleParked = true; cycleInfo = '待機(操作中)'; updateChip(); await sleep(2000); }
+    idleParked = false;
+  }
   // 1会話を開く→ヘッダ先頭が狙い名で始まるのを確認（＝この会話が表示されたと確定）→その時だけ captureAs をセットして
   //   一覧行由来のクリーン名で取り込む。確認できなければ取り込まない（＝混線しない・切替失敗を弾く）。
   async function openAndCapture(row, name, cc, deep) {
@@ -961,7 +972,18 @@
         await sleep(800); it = findItem(); if (it) break;
       }
     }
-    if (!it) throw new Error('「Mark as unread」が出せませんでした（右クリック/メニューとも不発）');
+    if (!it) {
+      // ★何が出ていたのかを実測で残す。これが無いと「出ない」としか分からず推測で直すことになる。
+      const menuish = [].slice.call(document.querySelectorAll('div,span,li,button'))
+        .map(e => ({ e, r: e.getBoundingClientRect(), t: (e.textContent || '').trim() }))
+        .filter(o => o.t && o.t.length <= 30 && o.e.children.length <= 1 && o.r.width > 20 && o.r.width < 340 && o.r.height > 12 && o.r.height < 60)
+        .filter(o => o.r.top > r.top - 260 && o.r.top < r.top + 260 && o.r.left > r.left - 60 && o.r.left < r.left + 480)
+        .slice(0, 18).map(o => o.t);
+      UNREAD_DIAG.push({ buyer: buyer, at: new Date().toISOString(), near: [...new Set(menuish)] });
+      if (UNREAD_DIAG.length > 6) UNREAD_DIAG.shift();
+      try { if (getSbKey()) sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_unread_diag', v: { at: new Date().toISOString(), rows: UNREAD_DIAG }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {}); } catch (_) {}
+      throw new Error('「Mark as unread」が出せませんでした（右クリック/メニューとも不発）');
+    }
     const p = reactProps(it) || reactProps(it.parentElement) || {};
     if (typeof p.onClick === 'function') {
       try { p.onClick({ bubbles: true, cancelable: true, currentTarget: it, target: it, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (e) { throw new Error('未読に戻せませんでした: ' + e.message); }
