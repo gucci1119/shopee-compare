@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.77.0
+// @version      1.78.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.77.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.78.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -393,6 +393,7 @@
   //   これを本文として保存すると「Sticker …」という文字と実物のスタンプ画像が二重に並ぶ（本人発見）。
   // ★画面上の区切りラベルはメッセージではない。スレッドの「ここから未読」の帯を本文として
   //   取り込んでしまい、会話に「Unread Messages」という吹き出しが並んでいた（本人発見）。
+  const TRANS_LABEL = /\s*(translated\s+by\s+shopee|traduzido\s+pel[ao]\s+shopee|traducido\s+por\s+shopee|shopeeによる翻訳|由\s*shopee\s*翻[譯译]|แปลโดย\s*shopee|isinalin\s+ng\s+shopee|diterjemahkan\s+oleh\s+shopee|do\s*shopee\s*d[ịi]ch)\s*$/i;
   const UI_NOISE = /^\s*(unread\s*messages?|new\s*messages?|未読(の)?メッセージ|新着メッセージ|today|yesterday|今日|昨日)\s*$/i;
   const IMG_PLACEHOLDER =/^\s*[\[［]?\s*(image|photo|picture|sticker|画像|スタンプ|圖片|图片|贴图|貼圖|imagem|figurinha|foto|adesivo|hình\s*ảnh|nhãn\s*dán|รูปภาพ|สติกเกอร์|larawan|sticker|gambar|stiker)\s*[\]］]?\s*(\.{1,3}|…)?\s*$/i;
   const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
@@ -488,6 +489,10 @@
       else if (!imgUrl && body && IMG_PLACEHOLDER.test(body)) return; // 画像が未ロード＝今は取り込まない
       if (!body) return;
       if (UI_NOISE.test(body)) return; // 画面の区切りラベル（「Unread Messages」等）はメッセージではない
+      // ★「Translated by Shopee」はShopeeの翻訳機能のラベルであって本文ではない（本人指摘）。
+      //   吹き出しの下に出るため本文と連結されてしまう。各国語ぶん末尾から除去する。
+      body = body.replace(TRANS_LABEL, '').trim();
+      if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
       let base;
       if (curDay) { base = new Date(curDay); if (tm) { const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); } else base.setHours(12, 0, 0, 0); }
