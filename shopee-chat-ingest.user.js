@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.93.0
+// @version      1.94.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.93.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.94.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -643,9 +643,29 @@
     domSweep();
     const el = threadScroller(); if (!el) return;
     // 浅い（deep=false）＝現在画面＋1段だけサッと。全巡回はこれで速く全バイヤーを登録（履歴は常時sweep/新着sweepで後から貯まる）
-    const passes = deep ? 4 : 1;
-    for (let k = 0; k < passes; k++) { rvScroll(el, Math.max(0, el.scrollTop - 800)); await sleep(deep ? 230 : 150); domSweep(); }
+    // ★日付区切りが見えるまで上へ遡る。v1.92で「区切りが無い行は書かない」ようにしたため、
+    //   区切りを跨がずに終わると**何も取り込めない**。逆に、区切りが1つでも見えていれば
+    //   そこから下は日付が確定できる。だから「区切りが見えるまで少しずつ上へ」進む。
+    const seeSep = () => {
+      const th = (domHeaderInfo() || {}).thread; if (!th) return false;
+      return [].slice.call(th.children).some(k => {
+        const t = (k.innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+        if (!t || t.length > 24) return false;
+        const pd = parseDayTok(t); return !!(pd && !pd.rest);
+      });
+    };
+    const passes = deep ? 8 : 4;
+    for (let k = 0; k < passes; k++) {
+      domSweep();
+      if (seeSep() && k >= (deep ? 3 : 1)) break;   // 区切りが見えていて、ある程度遡ったら終わり
+      const before = el.scrollTop;
+      rvScroll(el, Math.max(0, before - 700));
+      await sleep(deep ? 260 : 200);
+      if (el.scrollTop >= before - 5) break;        // これ以上さかのぼれない
+    }
+    domSweep();
     rvScroll(el, el.scrollHeight);
+    await sleep(150); domSweep();                    // 最下部（最新）も必ず読む
   }
   // ---- ★安全な自動巡回（v1.10.0）----
   //   合成クリックではShopeeのスレッドは切替わらない（本物クリックのみ）が、実証の結果
