@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.71.0
+// @version      1.72.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.71.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.72.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1147,6 +1147,9 @@
     await sleep(500);
     const ta = await ensureComposer();
     if (!ta) throw new Error('入力欄が出ません（会話が閉じている/再開できない）');
+    // スタンプ指定（[[sticker]]<srcの一部> または [[sticker]]* で先頭）
+    const stk = /^\s*\[\[sticker\]\]\s*(\S+)\s*$/.exec(String(item.text || ''));
+    if (stk) { await sendSticker(ta, stk[1]); return; }
     // 画像が指定されていれば先に送る（画像→本文の順。本文が空なら画像だけ送る）
     const parts = splitImgs(item.text);
     for (const u of parts.urls) {
@@ -1483,6 +1486,7 @@
             + (ng.length ? '／失敗 ' + ng.length + '件（例: ' + ng.slice(0, 3).join(' / ') + '）' : '');
         }
         else if (v.cmd === 'probe_stickers') { out = await probeStickers(true); }
+        else if (v.cmd === 'list_stickers') { out = await listStickers(); }
         else if (v.cmd === 'probe_unread') { out = await probeUnread(true); }
         else out = '不明な命令: ' + v.cmd;
       } catch (e) { out = '❌ ' + e.message; }
@@ -1492,6 +1496,56 @@
   }
   setTimeout(pollCmd, 15000);
   setInterval(pollCmd, 10000);
+
+  // ---- 😀 スタンプ送信 ----
+  // 実測（調査コマンドの結果）で確定：入力欄の左側の要素をReactのonClickで叩くとスタンプパネルが開き、
+  // パネル内に **48x48 の <img>（cf.shopee.*/file/...）が並び、いずれも onClick を持つ**。
+  // ＝そのonClickを直接呼べば送信できる（Shopeeは合成クリックを無視するのでこれが唯一の経路）。
+  function panelStickers(ta) {
+    const tr = ta.getBoundingClientRect();
+    return [].slice.call(document.querySelectorAll('img'))
+      .map(im => ({ im, r: im.getBoundingClientRect() }))
+      .filter(o => o.r.width >= 40 && o.r.width <= 140 && o.r.top > tr.top - 460 && o.r.top < tr.top + 40)
+      .filter(o => /\/file\//.test(String(o.im.src || '')));
+  }
+  async function openStickerPanel(ta) {
+    if (panelStickers(ta).length) return true;              // 既に開いている
+    const tr = ta.getBoundingClientRect();
+    const cands = [].slice.call(document.querySelectorAll('div,span,button,svg,img,i'))
+      .map(e => ({ e, r: e.getBoundingClientRect() }))
+      .filter(o => o.r.width > 10 && o.r.width < 60 && o.r.height > 10 && o.r.height < 60
+        && o.r.top > tr.top - 90 && o.r.top < tr.bottom + 30 && o.r.left < tr.left + 400)
+      .filter(o => { const p = reactProps(o.e); return p && typeof p.onClick === 'function'; })
+      .sort((a, b) => a.r.left - b.r.left);                  // 左端＝絵文字/スタンプであることが多い
+    for (const o of cands.slice(0, 6)) {
+      try { reactProps(o.e).onClick({ bubbles: true, cancelable: true, currentTarget: o.e, target: o.e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (_) {}
+      await sleep(900);
+      if (panelStickers(ta).length) return true;
+    }
+    return false;
+  }
+  // パネルを開いてスタンプ一覧をポータルへ送る（ポータル側で選ばせるため）
+  async function listStickers() {
+    const ta = await ensureComposer(); if (!ta) return 'スタンプ一覧: 会話が開いていません';
+    if (!await openStickerPanel(ta)) return 'スタンプ一覧: パネルを開けませんでした';
+    const urls = [...new Set(panelStickers(ta).map(o => String(o.im.src || '')))].slice(0, 80);
+    if (getSbKey() && urls.length) {
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_stickers', v: { at: new Date().toISOString(), cc: CC, urls: urls }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+    }
+    return 'スタンプ ' + urls.length + '個を取得しました';
+  }
+  // 指定のスタンプを送る（srcの一部一致で特定）
+  async function sendSticker(ta, key) {
+    if (!await openStickerPanel(ta)) throw new Error('スタンプパネルを開けませんでした');
+    const list = panelStickers(ta);
+    if (!list.length) throw new Error('スタンプが見つかりません');
+    const hit = list.find(o => String(o.im.src || '').indexOf(key) >= 0) || (key === '*' ? list[0] : null);
+    if (!hit) throw new Error('指定のスタンプが一覧にありません');
+    const el = hit.im, p = reactProps(el) || reactProps(el.parentElement) || {};
+    if (typeof p.onClick !== 'function') throw new Error('スタンプにクリック処理がありません');
+    p.onClick({ bubbles: true, cancelable: true, currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' });
+    await sleep(1500);
+  }
 
   // ---- 🔍 スタンプパネルの調査（実装の前に"実物の構造"を報告させる。推測でコードを書かないため） ----
   // Shopeeは合成クリックを受け付けない＝Reactの onClick を直接呼ぶのが唯一の突破法（実証済み・[[shopee_portal_messages_chat]]）。
