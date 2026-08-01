@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.01.0
+// @version      2.02.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.01.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.02.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1665,11 +1665,39 @@
       let out = '';
       // 調査(probe_*)と「この会話を取り込む」(fetch_conv)は、どのwebchatタブでも実行してよい。
       // それ以外（巡回の開始/停止など）は巡回役タブだけ。
-      const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv';
+      const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv' || String(v.cmd) === 'panel_tab';
       if (!anyTabOk && !isWorker()) { GM_setValue('lastCmdId', ''); return; }
       try {
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
         else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
+        else if (v.cmd === 'panel_tab') {
+          // ★右パネルのタブ(Product/Order/Voucher/Shortcut・All/Buyer Interest/Recommended)を切り替えて取り直す。
+          //   webchat側は「押す」だけ。何を出すかの判断はポータル側が持つ。
+          const want = String(v.tab || '').trim();
+          if (!want) { out = 'タブが指定されていません'; }
+          else {
+            const cands = [].slice.call(document.querySelectorAll('div,span,li,button'))
+              .filter(e => e.children.length <= 1 && norm(e.textContent || '') === norm(want))
+              .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left > window.innerWidth * 0.55; });
+            let done = false;
+            for (const el of cands) {
+              for (let d = 0, n = el; d < 3 && !done; d++, n = n.parentElement) {
+                const p = n && reactProps(n);
+                if (p && typeof p.onClick === 'function') {
+                  try { p.onClick({ bubbles: true, cancelable: true, currentTarget: n, target: n, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); done = true; } catch (_) {}
+                }
+              }
+              if (done) break;
+            }
+            if (!done) out = 'タブが見つかりません: ' + want;
+            else {
+              await sleep(1200);
+              const h = domHeaderInfo();
+              if (h && h.buyer) { await saveInterest(h.buyer); out = '「' + want + '」に切り替えて取り直しました'; }
+              else out = '「' + want + '」に切り替えました（会話が開いていないため取り直しは省略）';
+            }
+          }
+        }
         else if (v.cmd === 'probe_thread') {
           // ★スレッドの行が実際にどう見えているかを、そのまま報告する（日付区切りが認識できない原因の特定用）
           const h = domHeaderInfo();
