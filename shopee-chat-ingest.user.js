@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.61.0
+// @version      1.62.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.61.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.62.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -1002,7 +1002,18 @@
         .filter(o => o.t && o.t.length <= 30 && o.e.children.length <= 1 && o.r.width > 20 && o.r.width < 340 && o.r.height > 12 && o.r.height < 60)
         .filter(o => o.r.top > r.top - 260 && o.r.top < r.top + 260 && o.r.left > r.left - 60 && o.r.left < r.left + 480)
         .slice(0, 18).map(o => o.t);
-      UNREAD_DIAG.push({ buyer: buyer, at: new Date().toISOString(), near: [...new Set(menuish)] });
+      // ★決定打を取る：画面のどこかに "unread/未読" の文字があるか（サイドバーの右クリックとは限らない）
+      const anyUnread = [].slice.call(document.querySelectorAll('*'))
+        .filter(e => e.children.length === 0 && /unread|未読/i.test(e.textContent || ''))
+        .slice(0, 8).map(e => { const b = e.getBoundingClientRect(); return { t: (e.textContent || '').trim().slice(0, 40), x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width), vis: b.width > 0 && b.height > 0 }; });
+      // 行と祖先が持っているReactのハンドラ名（どうやって開く実装なのかを確定させる）
+      const handlers = [];
+      for (let el = row, i = 0; el && i < 4; el = el.parentElement, i++) {
+        const p = reactProps(el) || {};
+        const ks = Object.keys(p).filter(k => /^on/.test(k));
+        if (ks.length) handlers.push(i + ':' + ks.join(','));
+      }
+      UNREAD_DIAG.push({ buyer: buyer, at: new Date().toISOString(), near: [...new Set(menuish)], anyUnread: anyUnread, handlers: handlers });
       if (UNREAD_DIAG.length > 6) UNREAD_DIAG.shift();
       try { if (getSbKey()) sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_unread_diag', v: { at: new Date().toISOString(), rows: UNREAD_DIAG }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {}); } catch (_) {}
       throw new Error('「Mark as unread」が出せませんでした（右クリック/メニューとも不発）');
