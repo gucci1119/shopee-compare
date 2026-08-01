@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.06.0
+// @version      2.07.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -81,7 +81,25 @@
   //   手動用タブでも「今開いている会話」の取り込みは続く＝自分で返信した内容もリアルタイムでポータルに入る。
   //   返信送信・自動巡回・履歴の自動遡りは巡回役タブだけが行う（作業を邪魔しない・二重送信もしない）。
   const TAB_ROLE_KEY = 'smdChatTabRole';
-  function tabRole() { try { return sessionStorage.getItem(TAB_ROLE_KEY) || 'auto'; } catch (_) { return 'auto'; } }
+  // ★ポータルの「🪟 別窓で開く」で開いたウィンドウには #os-worker が付く。
+  //   その窓を**必ず巡回役**に固定し、元の作業用タブは自動で手動用にする。
+  //   （Shopeeは表示中のタブでしか本文を作らないため、巡回役は「独立ウィンドウ側」で固定したい。
+  //     どちらが巡回役かが毎回入れ替わると、作業用タブが裏に回った瞬間に取り込みが止まる）
+  const OSW_KEY = 'osWorkerTab';
+  const isMarkedWorker = () => { try { return /os-worker/.test(location.hash || '') || sessionStorage.getItem('osWorkerMark') === '1'; } catch (_) { return false; } };
+  try { if (/os-worker/.test(location.hash || '')) sessionStorage.setItem('osWorkerMark', '1'); } catch (_) {}
+  function oswFresh() { try { const v = GM_getValue(OSW_KEY, null); return (v && v.at && (Date.now() - v.at) < 60000) ? v : null; } catch (_) { return null; } }
+  setInterval(() => { try { if (isWebchat() && isMarkedWorker()) GM_setValue(OSW_KEY, { id: tabId(), at: Date.now() }); } catch (_) {} }, 10000);
+  try { if (isWebchat() && isMarkedWorker()) GM_setValue(OSW_KEY, { id: tabId(), at: Date.now() }); } catch (_) {}
+  function tabRole() {
+    try {
+      const v = sessionStorage.getItem(TAB_ROLE_KEY);
+      if (v) return v;                                  // 手で指定した役割が最優先
+      const w = oswFresh();
+      if (w) return w.id === tabId() ? 'worker' : 'manual';   // 別窓が生きている間は、そちらが巡回役
+      return 'auto';
+    } catch (_) { return 'auto'; }
+  }
   function setTabRole(r) { try { sessionStorage.setItem(TAB_ROLE_KEY, r); } catch (_) {} }
   // ★巡回役は「全webchatタブのうち1枚だけ」。既定を"全部巡回役"にすると2枚開いた瞬間に両方動いてしまうため、
   //   共有ストレージのリース（持ち回り権）で自動的に1枚に絞る。持っているタブが閉じられたら45秒後に他タブが自動で引き継ぐ。
@@ -165,7 +183,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.06.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.07.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
