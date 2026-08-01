@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.85.0
+// @version      1.86.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.85.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.86.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -685,6 +685,7 @@
     if (!matched) return false;
     captureAs = { buyer: name, cc: cc };
     try { await quickCapture(deep); } finally { captureAs = null; }
+    try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
     return true;
   }
   // ★巡回の進捗は保存する（スクリプト更新やタブ再読込のたびに全会話600件超を開き直すと20分近く重くなるため）。
@@ -1578,6 +1579,52 @@
   }
   setTimeout(pollCmd, 15000);
   setInterval(pollCmd, 10000);
+
+  // ---- 👀 この人が見ている商品（Buyer Interest）を取り込む ----
+  // Shopeeのチャット右パネルには「Viewed / Liked / Add to Cart」の商品が価格・在庫・販売数つきで出る。
+  // 売上に直結する情報なので、会話を開いたときに読み取ってポータルへ渡す（本人要望）。
+  function grabInterest(buyer) {
+    try {
+      if (!buyer) return null;
+      const LBL = /^(add to cart|viewed|liked|recommended|カートに追加|閲覧|お気に入り)$/i;
+      // ラベル要素を起点に、その近くの行（商品カード）をまとめる
+      const labels = [].slice.call(document.querySelectorAll('div,span'))
+        .filter(e => e.children.length === 0 && LBL.test((e.textContent || '').trim()))
+        .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left > window.innerWidth * 0.55; });
+      const items = [];
+      for (const lb of labels) {
+        let card = lb.parentElement;
+        for (let i = 0; i < 4 && card; i++) {
+          const t = (card.innerText || '').trim();
+          if (t.length > 40 && /\n/.test(t)) break;
+          card = card.parentElement;
+        }
+        if (!card) continue;
+        const lines = (card.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+        const title = lines.find(x => x.length > 12 && !LBL.test(x) && !/available|sold|details|invite order|send/i.test(x));
+        if (!title) continue;
+        const price = lines.find(x => /[₱RM$฿₫R\$NT]\s?[\d.,]{3,}/.test(x)) || '';
+        const avail = (lines.find(x => /available|在庫/i.test(x)) || '').trim();
+        const sold = (lines.find(x => /sold|販売/i.test(x)) || '').trim();
+        if (!items.some(o => o.title === title)) items.push({ tag: (lb.textContent || '').trim(), title: title.slice(0, 90), price: price.slice(0, 40), avail: avail.slice(0, 24), sold: sold.slice(0, 24) });
+        if (items.length >= 12) break;
+      }
+      return items.length ? items : null;
+    } catch (_) { return null; }
+  }
+  async function saveInterest(buyer) {
+    const items = grabInterest(buyer);
+    if (!items || !getSbKey()) return;
+    try {
+      const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_interest');
+      const cur = (r && r.json && r.json[0] && r.json[0].v && r.json[0].v.byBuyer) || {};
+      cur[buyer] = { at: new Date().toISOString(), items: items };
+      // 直近60人ぶんだけ保持（際限なく増やさない）
+      const keys = Object.keys(cur);
+      if (keys.length > 60) keys.sort((a, b) => (cur[a].at < cur[b].at ? -1 : 1)).slice(0, keys.length - 60).forEach(k => delete cur[k]);
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_interest', v: { byBuyer: cur }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
+    } catch (_) {}
+  }
 
   // ---- 😀 スタンプ送信 ----
   // 実測（調査コマンドの結果）で確定：入力欄の左側の要素をReactのonClickで叩くとスタンプパネルが開き、
