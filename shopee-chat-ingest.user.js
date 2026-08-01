@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.16.0
+// @version      3.17.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.16.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.17.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -767,8 +767,10 @@
                : ('dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body));
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
-    // ★読み終わりに会話IDが変わっていた＝読んでいる途中で切り替わった。混ざるくらいなら捨てる。
-    if (_cid0 && threadConvId() !== _cid0) return [];
+    // ※以前はここで「読み終わりにIDが変わっていたらバッチごと捨てる」ようにしていたが、
+    //   行ごとに message.conversation_id で判定するようになった今は**捨てすぎ**になる
+    //   （巡回中は頻繁に切り替わるので、正しく読めた行まで毎回消えて取り込みが進まなかった）。
+    //   行単位の判定の方が精密なので、バッチごとの破棄はやめる。
     return rows;
   }
   let lastNoDate = 0;   // 直近のsweepで「日付が確定できず捨てた行」の数（0でなければ通し読みが要る合図）
