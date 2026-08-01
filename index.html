@@ -7316,7 +7316,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `</div>`;
   }
   // ---------------- 💬 メッセージ（Shopeeチャット＋WhatsApp一元・分析） ----------------
-  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set(), showN: 80, q: '', ptabMain: 'Product' };
+  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set(), showN: 80, q: '', ptabMain: 'Product',
+    tr: (function () { try { return localStorage.getItem('smdMsgTr') === '1'; } catch (_) { return false; } })() };
   // 取り込み側の日付解析ミスで「2999/6/4」等の異常日付が入ることがある（→その会話が一覧の先頭に固定され続ける）。
   // 表示・並び替えでは未来(1日超)を信用しない＝synced_at（取込時刻）に読み替える。DBの値自体は触らない。
   function msgTime(m) {
@@ -7674,6 +7675,58 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // タイトル点滅
     try { const orig = document.title; let f = 0; clearInterval(window.__titleFlash); window.__titleFlash = setInterval(() => { document.title = (f++ % 2) ? '🔴 新着メッセージ' : orig; if (f > 8) { clearInterval(window.__titleFlash); document.title = orig; } }, 700); } catch (_) {}
   }
+  // ---- 🇯🇵 日本語訳（Chrome内蔵のオンデバイス翻訳）----
+  // ★外部の翻訳サービスにお客さんの文面を送らない。パソコンの中だけで翻訳する（無料・件数制限なし）。
+  //   一度訳した文はこのパソコンに保存して使い回す＝2回目以降は一瞬で出る。
+  const trCache = (() => { try { return JSON.parse(localStorage.getItem('smdTrCache') || '{}'); } catch (_) { return {}; } })();
+  let trSaveT = null;
+  const trSave = () => { clearTimeout(trSaveT); trSaveT = setTimeout(() => { try { localStorage.setItem('smdTrCache', JSON.stringify(trCache)); } catch (_) {} }, 800); };
+  const trHash = s => { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return 'h' + h; };
+  let _detector = null; const _translators = {};
+  async function trOne(text) {
+    const key = trHash(text);
+    if (trCache[key] !== undefined) return trCache[key];
+    if (typeof Translator === 'undefined') return '';
+    let src = '';
+    try {
+      if (typeof LanguageDetector !== 'undefined') {
+        if (!_detector) _detector = await LanguageDetector.create();
+        const d = (await _detector.detect(text))[0];
+        if (d && d.confidence > 0.25) src = d.detectedLanguage;
+      }
+    } catch (_) {}
+    if (!src) src = 'en';
+    if (src === 'ja') { trCache[key] = ''; trSave(); return ''; }
+    try {
+      if (!_translators[src]) {
+        const av = await Translator.availability({ sourceLanguage: src, targetLanguage: 'ja' });
+        if (av === 'unavailable') { trCache[key] = ''; trSave(); return ''; }
+        _translators[src] = await Translator.create({ sourceLanguage: src, targetLanguage: 'ja' });
+      }
+      const out = await _translators[src].translate(text);
+      trCache[key] = (out || '').trim(); trSave();
+      return trCache[key];
+    } catch (_) { return ''; }
+  }
+  let _trRunning = false;
+  async function runTranslate() {
+    if (_trRunning) return; _trRunning = true;
+    try {
+      const els = [].slice.call(document.querySelectorAll('#msg-thread .mb-t'));
+      for (const el of els) {
+        if (el.nextElementSibling && el.nextElementSibling.classList.contains('mb-j')) continue;
+        const t = (el.textContent || '').trim();
+        if (!t || t.length < 2 || /^https?:/.test(t)) continue;
+        const j = await trOne(t);
+        if (!j || j === t) continue;
+        const d = document.createElement('div');
+        d.className = 'mb-j';
+        d.style.cssText = 'margin-top:5px;padding-top:5px;border-top:1px dashed rgba(0,0,0,.13);color:#5b6470;font-size:11.5px;line-height:1.5;white-space:pre-wrap';
+        d.textContent = j;
+        el.after(d);
+      }
+    } catch (_) {} finally { _trRunning = false; }
+  }
   async function renderMessages(useCache) {
     const body = document.getElementById('msg-body'); if (!body) return;
     { const rb = document.getElementById('msg-refresh'); if (rb && !rb._wired) { rb._wired = true; rb.addEventListener('click', () => renderMessages()); } }
@@ -7943,9 +7996,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         return i < 0 ? e : e.slice(0, i) + '<mark style="background:#ffe066;padding:0 1px;border-radius:2px">' + e.slice(i, i + qe.length) + '</mark>' + e.slice(i + qe.length);
       };
       const imgTag = u => `<img src="${esc(u)}" referrerpolicy="no-referrer" style="max-width:200px;max-height:200px;border-radius:6px;display:block" onerror="this.replaceWith(document.createTextNode('🖼️ 画像'))">`;
-      const inner = imgTop ? (imgTag(imgTop) + `<div style="white-space:pre-wrap;line-height:1.5;margin-top:5px">${hlText(capText)}</div>`)
+      const inner = imgTop ? (imgTag(imgTop) + `<div class="mb-t" style="white-space:pre-wrap;line-height:1.5;margin-top:5px">${hlText(capText)}</div>`)
         : isImg ? imgTag(t0)
-        : `<div style="white-space:pre-wrap;line-height:1.5">${hlText(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div>`;
+        : `<div class="mb-t" style="white-space:pre-wrap;line-height:1.5">${hlText(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div>`;
       const out = m.direction === 'out';
       // 引用は「相手名 / 引用された本文」の形で入っている（userscriptが引用カードのDOMごと切り出す）。
       // Shopeeと同じく1行目を名前、2行目以降を引用本文として2段で描く。
@@ -7980,6 +8033,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          <button id="cm-pin" class="smd-btn" style="font-size:11px;padding:2px 8px" title="この会話を一覧の先頭に固定">${(cmeta(sel.key) && cmeta(sel.key).pin) ? '📌 固定中' : '📌 ピン'}</button>
          <button id="cm-tag" class="smd-btn" style="font-size:11px;padding:2px 8px" title="顧客タグ（VIP・リピーター・価格交渉中など）">🏷 タグ</button>
          <button id="cm-note" class="smd-btn" style="font-size:11px;padding:2px 8px" title="この顧客のメモ（自分用）">📝 メモ${(cmeta(sel.key) && cmeta(sel.key).note) ? '●' : ''}</button>
+         <button id="cm-tr" class="smd-btn" style="font-size:11px;padding:2px 8px${msg.tr ? ';background:#ee4d2d;border-color:#ee4d2d;color:#fff;font-weight:700' : ''}" title="各メッセージの下に日本語訳を出します。翻訳はこのパソコンの中で行われ（Chrome内蔵）、外部には送られません。自分が送った文にも付きます">🇯🇵 日本語訳${msg.tr ? ' ON' : ''}</button>
        </div></div>` +
       ((cmeta(sel.key) && cmeta(sel.key).note) ? `<div style="background:#fffbea;border-bottom:1px solid #f4e7b8;padding:6px 14px;font-size:11.5px;white-space:pre-wrap">📝 ${esc(cmeta(sel.key).note)}</div>` : '') +
       `<div id="msg-orders" style="display:none;background:#f7f9fc;border-bottom:1px solid #e6ecf5;padding:5px 14px"></div>` +
@@ -8080,6 +8134,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (v != null) setMeta(K, { tags: v.split(',').map(s => s.trim()).filter(Boolean).slice(0, 6) });
         }); }
     }
+    // 🇯🇵 日本語訳のON/OFF（このパソコン内で翻訳＝無料・外部送信なし）
+    { const b = document.getElementById('cm-tr');
+      if (b) b.addEventListener('click', async () => {
+        if (!msg.tr && typeof Translator === 'undefined') { alert('このブラウザは翻訳機能に対応していません（Chromeの新しい版が必要です）'); return; }
+        msg.tr = !msg.tr;
+        try { localStorage.setItem('smdMsgTr', msg.tr ? '1' : '0'); } catch (_) {}
+        renderMessages(true);
+      }); }
+    if (msg.tr) runTranslate();
     { const th = document.getElementById('msg-thread'); if (th) th.scrollTop = th.scrollHeight; }
     { const nl = document.getElementById('msg-list'); if (nl && prevListScroll) nl.scrollTop = prevListScroll; }
     const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
