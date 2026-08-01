@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.86.0
+// @version      1.87.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.86.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.87.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -686,6 +686,7 @@
     captureAs = { buyer: name, cc: cc };
     try { await quickCapture(deep); } finally { captureAs = null; }
     try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
+    try { grabFaq(); } catch (_) {}                  // FAQ History（AIアシスタントへの質問）も取り込む
     return true;
   }
   // ★巡回の進捗は保存する（スクリプト更新やタブ再読込のたびに全会話600件超を開き直すと20分近く重くなるため）。
@@ -1580,6 +1581,33 @@
   setTimeout(pollCmd, 15000);
   setInterval(pollCmd, 10000);
 
+  // ---- ❓ FAQ History を取り込む ----
+  // スレッド内の「FAQ History」カードには、お客さんがAIアシスタントに聞いた内容が入っている。
+  // 吹き出しとして拾えず抜けていた（本人指摘）。カードを直接探して1件のメッセージとして取り込む。
+  function grabFaq() {
+    try {
+      const h = domHeaderInfo(); if (!h || !h.buyer) return;
+      const card = [].slice.call(document.querySelectorAll('div'))
+        .filter(e => { const t = (e.innerText || '').trim(); return /^FAQ History/i.test(t) && t.length > 20 && t.length < 1200; })
+        .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+      if (!card) return;
+      const lines = (card.innerText || '').split('\n').map(x => x.trim())
+        .filter(x => x && !/^FAQ History$/i.test(x) && !/^See All FAQ History$/i.test(x) && !/^\d{1,2}:\d{2}$/.test(x));
+      if (!lines.length) return;
+      const tmm = (card.innerText || '').match(/(\d{1,2}:\d{2})\s*$/);
+      const tm = tmm ? tmm[1] : '';
+      const body = '❓FAQ履歴\n' + lines.join('\n');
+      const base = new Date();
+      if (tm) { const p = tm.split(':'); base.setHours(+p[0], +p[1], 0, 0); }
+      const iso = new Date(base.getTime() - base.getTimezoneOffset() * 60000).toISOString();
+      const id = 'dom|' + h.cc + '|' + h.buyer + '|' + (tm || '00:00') + '|sys|' + hash(body);
+      if (seenMsg.has(id)) return; seenMsg.add(id);
+      msgBuffer.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: h.cc + ':' + h.buyer,
+        direction: 'sys', msg_type: 'text', text: body, msg_time: iso, synced_at: new Date().toISOString() });
+      captured++; updateChip();
+    } catch (_) {}
+  }
+
   // ---- 👀 この人が見ている商品（Buyer Interest）を取り込む ----
   // Shopeeのチャット右パネルには「Viewed / Liked / Add to Cart」の商品が価格・在庫・販売数つきで出る。
   // 売上に直結する情報なので、会話を開いたときに読み取ってポータルへ渡す（本人要望）。
@@ -1612,13 +1640,30 @@
       return items.length ? items : null;
     } catch (_) { return null; }
   }
+  // 「Customer is inquiring about this product」＝いま問い合わせ対象の商品（会話の主題）
+  function grabInquiry() {
+    try {
+      const lb = [].slice.call(document.querySelectorAll('div,span'))
+        .filter(e => e.children.length === 0 && /inquiring about (this|the) product|問い合わせ/i.test((e.textContent || '').trim()))[0];
+      if (!lb) return null;
+      let box = lb.parentElement;
+      for (let i = 0; i < 3 && box; i++) { if ((box.innerText || '').length > 40) break; box = box.parentElement; }
+      if (!box) return null;
+      const lines = (box.innerText || '').split('\n').map(x => x.trim()).filter(Boolean)
+        .filter(x => !/inquiring about|Collapse|Invite Order|問い合わせ/i.test(x));
+      const title = lines.find(x => x.length > 12) || '';
+      const price = lines.find(x => /[₱RM$฿₫R\$NT]\s?[\d.,]{3,}/.test(x)) || '';
+      return title ? { title: title.slice(0, 110), price: price.slice(0, 40) } : null;
+    } catch (_) { return null; }
+  }
   async function saveInterest(buyer) {
     const items = grabInterest(buyer);
-    if (!items || !getSbKey()) return;
+    const inq = grabInquiry();
+    if ((!items && !inq) || !getSbKey()) return;
     try {
       const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_interest');
       const cur = (r && r.json && r.json[0] && r.json[0].v && r.json[0].v.byBuyer) || {};
-      cur[buyer] = { at: new Date().toISOString(), items: items };
+      cur[buyer] = { at: new Date().toISOString(), items: items || [], inquiry: inq || null };
       // 直近60人ぶんだけ保持（際限なく増やさない）
       const keys = Object.keys(cur);
       if (keys.length > 60) keys.sort((a, b) => (cur[a].at < cur[b].at ? -1 : 1)).slice(0, keys.length - 60).forEach(k => delete cur[k]);
