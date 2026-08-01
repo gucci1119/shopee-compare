@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.62.0
+// @version      1.63.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.62.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.63.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
@@ -961,38 +961,76 @@
     const side0 = sideList(); if (!side0) throw new Error('会話一覧が見つかりません');
     const row = await findRow(buyer);
     if (!row) throw new Error('会話が一覧に見つかりません: ' + buyer);
+    // ★実測（本人のスクショ）で確定した仕様：
+    //   会話行に**マウスを乗せると右端に「⌄」が出る**。それを押すとメニューが開く。右クリックではない。
+    //   メニューの中身は会話の状態で2パターン：
+    //     開いている会話 … Unread / Pin Chat / Mute / Forward / Close / Delete Chat
+    //     閉じた会話(Closed) … Restart / Unpin Chat / Mute / Delete Chat  ←**Unreadが無い**
+    //   項目名は「Unread」であって「Mark as unread」ではない（旧実装はこれで探しており永久に見つからなかった）。
+    const ITEM_RX = /^\s*(unread|mark as unread|未読(にする)?)\s*$/i;
+    const MENU_RX = /^\s*(restart|pin chat|unpin chat|mute|unmute|forward|close|delete chat)\s*$/i;
+    const visible = e => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
     const findItem = () => [].slice.call(document.querySelectorAll('div,span,li,button'))
-      .filter(e => e.children.length <= 1 && /mark as unread|未読/i.test((e.textContent || '').trim()))
-      .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })[0];
+      .filter(e => e.children.length <= 1 && ITEM_RX.test((e.textContent || '').trim()) && visible(e))[0];
+    const menuOpen = () => [].slice.call(document.querySelectorAll('div,span,li,button'))
+      .some(e => e.children.length <= 1 && MENU_RX.test((e.textContent || '').trim()) && visible(e));
     const r = row.getBoundingClientRect();
-    const opts = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
-    // 0) ★Reactのハンドラを直接呼ぶ。Shopeeは合成イベントを無視するため、dispatchEventでは
-    //    メニューが出ないことを実測で確認済み（記録された周辺テキストにメニュー項目がゼロだった）。
-    const fire = (el, prop) => {
+    const at = (x, y) => ({ bubbles: true, cancelable: true, clientX: Math.round(x), clientY: Math.round(y) });
+    const opts = at(r.left + r.width / 2, r.top + r.height / 2);
+    const fire = (el, prop, ev) => {
       const p = el && reactProps(el);
       if (!p || typeof p[prop] !== 'function') return false;
-      try { p[prop](Object.assign({ currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: prop.slice(2).toLowerCase() }, opts)); return true; } catch (_) { return false; }
+      try { p[prop](Object.assign({ currentTarget: el, target: el, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: prop.slice(2).toLowerCase() }, ev || opts)); return true; } catch (_) { return false; }
     };
-    let it = null;
-    for (let el = row, depth = 0; el && depth < 4 && !it; el = el.parentElement, depth++) {
-      if (fire(el, 'onContextMenu')) { await sleep(800); it = findItem(); }
-    }
-    // 1) それでも駄目なら合成の右クリックも試す（環境によっては効くため）
-    if (!it) { row.dispatchEvent(new MouseEvent('contextmenu', opts)); await sleep(900); it = findItem(); }
-    // 2) ホバーで出る「…」等を狙う（マウス移動を先に通知しないと出ない実装が多い）
+    // 1) 行にマウスを乗せる（乗せないと「⌄」が描画されない）
+    ['pointerover', 'mouseover', 'mouseenter', 'mousemove'].forEach(t => { try { row.dispatchEvent(new MouseEvent(t, opts)); } catch (_) {} });
+    fire(row, 'onMouseEnter'); fire(row, 'onMouseOver');
+    await sleep(500);
+    // 2) 行の右端に出た小さなボタン（⌄）を押す。Shopeeは合成クリックを無視するのでReactのonClickを直接呼ぶ。
+    let it = findItem();
     if (!it) {
-      ['pointerover', 'mouseover', 'mouseenter', 'mousemove'].forEach(t => { try { row.dispatchEvent(new MouseEvent(t, opts)); } catch (_) {} });
-      fire(row, 'onMouseEnter'); fire(row, 'onMouseOver');
-      await sleep(700); it = findItem();
+      const cands = [].slice.call(row.querySelectorAll('*'))
+        .map(e => ({ e, b: e.getBoundingClientRect() }))
+        .filter(o => visible(o.e) && o.b.width <= 44 && o.b.height <= 44 && o.b.width >= 8 && o.b.height >= 8)
+        .filter(o => o.b.left >= r.right - 70)          // 右端側だけ（アバターや本文を押さない）
+        .sort((a, b) => b.b.left - a.b.left);            // より右にあるものから
+      for (const o of cands) {
+        let opened = false;
+        for (let el = o.e, d = 0; el && d < 3 && !opened; el = el.parentElement, d++) {
+          if (fire(el, 'onClick', at(o.b.left + o.b.width / 2, o.b.top + o.b.height / 2))) { await sleep(600); opened = menuOpen() || !!findItem(); }
+        }
+        if (opened) { it = findItem(); break; }
+        if (menuOpen()) { it = findItem(); break; }
+      }
     }
-    // 2) 出なければ行の「…」等をReactのonClickで開く（Shopeeは合成クリックを受け付けないため直接呼ぶ）
-    if (!it) {
-      const more = [].slice.call(row.querySelectorAll('div,span,svg,i'))
-        .filter(e => { const b = e.getBoundingClientRect(); return b.width > 8 && b.width < 40 && b.height > 8 && b.height < 40; })
-        .filter(e => { const p = reactProps(e); return p && typeof p.onClick === 'function'; });
-      for (const m of more) {
-        try { reactProps(m).onClick({ bubbles: true, cancelable: true, currentTarget: m, target: m, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (_) {}
-        await sleep(800); it = findItem(); if (it) break;
+    // 3) メニューは開いたが Unread が無い＝閉じた会話(Closed)。
+    //    その場合は **先に Restart を押して会話を開いてから**、もう一度メニューを開いて Unread を押す（本人指定）。
+    if (!it && menuOpen()) {
+      const restart = [].slice.call(document.querySelectorAll('div,span,li,button'))
+        .filter(e => e.children.length <= 1 && /^\s*restart( conversation)?\s*$/i.test((e.textContent || '').trim()) && visible(e))[0];
+      if (restart) {
+        let done = false;
+        for (let el = restart, d = 0; el && d < 3 && !done; el = el.parentElement, d++) done = fire(el, 'onClick');
+        if (!done) restart.click();
+        await sleep(2200);
+        // 会話が開いた状態でメニューを開き直す
+        const row2 = await findRow(buyer) || row;
+        const r2 = row2.getBoundingClientRect();
+        ['pointerover', 'mouseover', 'mouseenter', 'mousemove'].forEach(t => { try { row2.dispatchEvent(new MouseEvent(t, at(r2.left + r2.width / 2, r2.top + r2.height / 2))); } catch (_) {} });
+        fire(row2, 'onMouseEnter'); fire(row2, 'onMouseOver');
+        await sleep(600);
+        const cands2 = [].slice.call(row2.querySelectorAll('*'))
+          .map(e => ({ e, b: e.getBoundingClientRect() }))
+          .filter(o => visible(o.e) && o.b.width <= 44 && o.b.height <= 44 && o.b.width >= 8 && o.b.height >= 8)
+          .filter(o => o.b.left >= r2.right - 70)
+          .sort((a, b) => b.b.left - a.b.left);
+        for (const o of cands2) {
+          let opened = false;
+          for (let el = o.e, d = 0; el && d < 3 && !opened; el = el.parentElement, d++) {
+            if (fire(el, 'onClick', at(o.b.left + o.b.width / 2, o.b.top + o.b.height / 2))) { await sleep(600); opened = menuOpen() || !!findItem(); }
+          }
+          if (opened) { it = findItem(); break; }
+        }
       }
     }
     if (!it) {
