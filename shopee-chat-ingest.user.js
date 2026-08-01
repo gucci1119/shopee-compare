@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.42.0
+// @version      1.43.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -947,6 +947,29 @@
   document.addEventListener('click', () => startKeepAlive(), true);
   GM_registerMenuCommand('ポータル返信の自動送信: ON/OFF 切替', () => { const v = OUTBOX_ON(); GM_setValue('outboxSend', !v); toast('ポータル返信の自動送信を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
 
+  // ---- 🩹 未来日付になってしまった会話だけを取り込み直す ----
+  // メッセージIDに日付を含めていない（dom|cc|buyer|HH:MM|dir|hash）ので、同じ会話を開き直せば
+  // ★同じ行が正しい日付で上書きされる＝消さずに直せる。日付を推測で1日ずらすより確実。
+  async function refixFutureDates() {
+    if (!getSbKey()) { alert('Supabaseキーが未設定です（チップの1で設定）'); return; }
+    // msg_time は「日本時間の壁時計をUTC表記で」入れているので、今の壁時計と直接比較してよい
+    const nowWall = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString();
+    let rows = [];
+    try {
+      const r = await sbReq('GET', 'chat_messages?select=buyer&msg_time=gt.' + nowWall + '&limit=2000');
+      if (!r || r.status >= 300) { alert('取得に失敗しました（HTTP ' + (r && r.status) + '）'); return; }
+      rows = Array.isArray(r.json) ? r.json : [];
+    } catch (e) { alert('取得に失敗しました: ' + e.message); return; }
+    const buyers = [...new Set(rows.map(r => r.buyer).filter(Boolean))];
+    if (!buyers.length) { alert('✅ 未来日付の行はありません（直すものがありません）'); return; }
+    if (!confirm('未来の日付になっている会話が ' + buyers.length + '件（' + rows.length + '行）あります。\nこの会話を開き直して日付を直しますか？\n\n※消しません。同じ行を正しい日付で上書きします。')) return;
+    buyers.forEach(b => { crawlDone.delete(b); delete lastSig[b]; });
+    persistCrawl();
+    toast('🩹 ' + buyers.length + '件の会話を取り込み直します…');
+    if (isWorker()) slowCrawl('new', true);
+    else alert('このタブは🙋手動用です。巡回役タブ（🤖）で実行するか、5で巡回役に切り替えてください。\n※印は付けたので、巡回役タブの次の巡回でも直ります。');
+  }
+
   // ---- 🔍 スタンプパネルの調査（実装の前に"実物の構造"を報告させる。推測でコードを書かないため） ----
   // Shopeeは合成クリックを受け付けない＝Reactの onClick を直接呼ぶのが唯一の突破法（実証済み・[[shopee_portal_messages_chat]]）。
   // ここでは「入力欄まわりのボタン群」と「開いたパネル内の画像」を調べて、そのまま貼れる形で表示する。
@@ -1075,7 +1098,7 @@
         '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') + '\n' +
         '過去メッセージの取り込み: ' + (backfillOff() ? '⏹終了済み（新着のみ取り込み中）' : '🐢継続中') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n  8 = 🔍未読バッジ/Mark as unread を調査\n  9 = ' + (backfillOff() ? '🐢過去メッセージの取り込みを再開する' : '⏹過去メッセージの取り込みを終了する（新着と返信は続きます）') + '\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n  8 = 🔍未読バッジ/Mark as unread を調査\n  9 = ' + (backfillOff() ? '🐢過去メッセージの取り込みを再開する' : '⏹過去メッセージの取り込みを終了する（新着と返信は続きます）') + '\n  0 = 🩹未来の日付になっている会話を取り込み直す（消さずに上書き修正）\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
       if (a === '5') {
         const now = tabRole() === 'worker' ? 'manual' : 'worker';
@@ -1098,6 +1121,7 @@
       }
       else if (a === '7') probeStickers();
       else if (a === '8') probeUnread();
+      else if (a === '0') refixFutureDates();
       else if (a === '9') {
         const off = backfillOff(); GM_setValue('backfillOff', !off);
         if (!off) {
