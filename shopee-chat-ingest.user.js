@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.68.0
+// @version      1.69.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.68.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.69.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -167,7 +167,8 @@
       const u = String(url || '');
       if (!/shopee/i.test(u)) return;
       if (/report_metric|\/log\b|track|beacon/i.test(u)) return;
-      if (String(method).toUpperCase() === 'GET') return;      // 押した操作＝POST/PUT系だけ
+      // GETも記録する（操作がGETで実装されている可能性を潰していなかった）。ただしチャット系URLのみ。
+      if (String(method).toUpperCase() === 'GET' && !/conversation|message|chat|unread|session|janus/i.test(u)) return;
       ACT.rows.push({ at: new Date().toISOString(), m: String(method), u: u.slice(0, 220), b: String(body || '').slice(0, 400) });
       if (ACT.rows.length > 25) ACT.rows.shift();
     } catch (_) {}
@@ -335,6 +336,25 @@
         } catch (_) {}
         return ws;
       };
+      // ★送信側(こちら→Shopee)もフックする。受信しか見ておらず、こちらが出す操作(Unread等)を
+      //   一度も観測できていなかった＝「APIが無い」と誤って結論しかけた。
+      try {
+        const origSend = OrigWS.prototype.send;
+        OrigWS.prototype.send = function (data) {
+          try {
+            let txt = '';
+            if (typeof data === 'string') txt = data;
+            else if (data instanceof ArrayBuffer) txt = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(data));
+            else if (data && data.buffer) txt = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(data.buffer));
+            if (txt) {
+              const runs = (txt.match(/[\x20-\x7E]{4,}/g) || []).slice(0, 10).join(' | ').slice(0, 300);
+              ACT.rows.push({ at: new Date().toISOString(), m: 'WS-send', u: String(this.url || '').slice(0, 120), b: runs });
+              if (ACT.rows.length > 40) ACT.rows.shift();
+            }
+          } catch (_) {}
+          return origSend.apply(this, arguments);
+        };
+      } catch (_) {}
       WrapWS.prototype = OrigWS.prototype;
       WrapWS.CONNECTING = OrigWS.CONNECTING; WrapWS.OPEN = OrigWS.OPEN; WrapWS.CLOSING = OrigWS.CLOSING; WrapWS.CLOSED = OrigWS.CLOSED;
       window.WebSocket = WrapWS;
