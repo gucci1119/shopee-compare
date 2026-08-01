@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.43.0
+// @version      1.44.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -757,6 +757,56 @@
     restart.click(); await sleep(2000);
     return document.querySelector('textarea[placeholder="Type a message here"]');
   }
+  // ---- 🖼 画像送信 ----
+  // ポータルは本文の先頭に「[[img]]https://…」の行を積んでくる（chat_outbox に列を足さないため）。
+  // ★base64は持ち回らない：過去にGM storageの64MB上限を超えてTampermonkeyが詰まる大障害を出している。
+  //   URLだけ受け取り、送る直前にここで取得する。
+  function splitImgs(text) {
+    const urls = [], rest = [];
+    String(text || '').split('\n').forEach(line => {
+      const m = /^\s*\[\[img\]\]\s*(\S+)\s*$/.exec(line);
+      if (m) urls.push(m[1]); else rest.push(line);
+    });
+    return { urls, text: rest.join('\n').trim() };
+  }
+  function fetchImageFile(url) {
+    return new Promise((res, rej) => {
+      GM_xmlhttpRequest({
+        method: 'GET', url: url, responseType: 'blob', timeout: 20000, anonymous: true,
+        onload: r => {
+          const b = r.response;
+          if (!b || !b.size) return rej(new Error('画像が空です status=' + r.status));
+          const type = b.type || 'image/jpeg';
+          const ext = (type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+          res(new File([b], 'img.' + ext, { type: type }));
+        },
+        onerror: () => rej(new Error('画像の取得に失敗')), ontimeout: () => rej(new Error('画像の取得がタイムアウト'))
+      });
+    });
+  }
+  // webchatへ画像を差し込む。2経路を順に試し、どちらが効いたかを返す（実物での確証が無いので両方持つ）。
+  //  A) 隠し <input type=file> に DataTransfer で流し込む（Shopee出品側で実績のある方式）
+  //  B) 入力欄に ClipboardEvent('paste') で貼り付ける（旧Smart Replyで実績があったと記録あり）
+  async function injectImage(ta, file) {
+    const inputs = [].slice.call(document.querySelectorAll('input[type=file]'))
+      .filter(f => !f.accept || /image|\*/i.test(f.accept));
+    for (const inp of inputs) {
+      try {
+        const dt = new DataTransfer(); dt.items.add(file);
+        Object.defineProperty(inp, 'files', { value: dt.files, configurable: true });
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(2500);
+        return 'file-input';
+      } catch (_) {}
+    }
+    try {
+      const dt = new DataTransfer(); dt.items.add(file);
+      ta.focus();
+      ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      await sleep(2500);
+      return 'paste';
+    } catch (e) { throw new Error('画像を差し込めませんでした: ' + e.message); }
+  }
   async function sendReply(item) {
     if (!item || item.buyer === '__CYCLE__' || item.text === '__CYCLE__' || !item.buyer) return; // 合図/不正は送信しない（検索窓を汚さない）
     const h0 = domHeaderInfo();
@@ -764,7 +814,19 @@
     await sleep(500);
     const ta = await ensureComposer();
     if (!ta) throw new Error('入力欄が出ません（会話が閉じている/再開できない）');
-    setNativeValue(ta, item.text); ta.dispatchEvent(new Event('input', { bubbles: true }));
+    // 画像が指定されていれば先に送る（画像→本文の順。本文が空なら画像だけ送る）
+    const parts = splitImgs(item.text);
+    for (const u of parts.urls) {
+      const file = await fetchImageFile(u);
+      const how = await injectImage(ta, file);
+      lastErr = ''; // 経路が分かるよう記録（どちらで通ったかを後から確認できる）
+      try { GM_setValue('lastImgRoute', how); } catch (_) {}
+      // 差し込み後は送信操作が要る場合がある：Enterを送って確定を試みる
+      ['keydown', 'keypress', 'keyup'].forEach(t => ta.dispatchEvent(new KeyboardEvent(t, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })));
+      await sleep(2200);
+    }
+    if (!parts.text) return; // 画像だけの送信
+    setNativeValue(ta, parts.text); ta.dispatchEvent(new Event('input', { bubbles: true }));
     await sleep(450);
     ['keydown', 'keypress', 'keyup'].forEach(t => ta.dispatchEvent(new KeyboardEvent(t, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })));
     await sleep(1300);
