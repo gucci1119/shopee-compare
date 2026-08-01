@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.76.0
+// @version      1.77.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.76.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.77.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1497,6 +1497,21 @@
         }
         else if (v.cmd === 'probe_stickers') { out = await probeStickers(true); }
         else if (v.cmd === 'list_stickers') { out = await listStickers(); }
+        else if (v.cmd === 'fetch_conv') {
+          // ★ポータルで開いた会話を「今すぐ」取り込む。巡回の順番を待たずに済むので、
+          //   一覧にしか無い会話（本文未取込）を開いた瞬間に中身が出るようになる。
+          const b = String(v.buyer || '');
+          if (!b) { out = '相手が指定されていません'; }
+          else {
+            sendingNow = true;
+            try {
+              await waitCrawlPause(6000).catch(() => {});
+              const row = await findRow(b);
+              if (!row) out = '会話が一覧に見つかりません: ' + b;
+              else { const cc0 = (rowInfo(row).cc) || CC; const ok = await openAndCapture(row, b, cc0, true); crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {}); out = ok ? ('取り込みました: ' + b) : ('開けませんでした: ' + b); }
+            } catch (e) { out = '❌ ' + e.message; } finally { sendingNow = false; }
+          }
+        }
         else if (v.cmd === 'probe_unread') { out = await probeUnread(true); }
         else out = '不明な命令: ' + v.cmd;
       } catch (e) { out = '❌ ' + e.message; }
