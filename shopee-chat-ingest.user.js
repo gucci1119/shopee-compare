@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.21.0
+// @version      2.22.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.21.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.22.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -513,7 +513,7 @@
     const conv = h.cc + ':' + h.buyer;
     const nowIso = new Date().toISOString();
     const rows = [];
-    let lastTm = '';   // 直前の発言の時刻。時刻を持たない行（システム通知）を正しい位置に並べるための目印
+    let lastTm = '', lastSec = 0;   // 直前の発言の時刻と秒。同じ分に複数あっても**画面と同じ順**に並べるための目印
     let curDay = (ctx && ctx.day) || null; // スレッドを上（古い）→下（新しい）に見る間に日付区切りで更新（ctxで画面をまたいで引き継ぐ）
     // ★日付を推測で書かないためのガード（本人指摘「読み込む前に書き込みしてない？ローディングが長い時がある」）
     //   Shopeeは各メッセージに日付を持たず、スレッド途中の「Today/Tuesday/19 Jun」等の区切りで日付が決まる。
@@ -654,11 +654,14 @@
       }
       if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
-      // ★システム通知（自動終了・参加）は時刻を持たない。正午に置くと会話の途中に割り込んで並びが崩れるので、
-      //   **直前の発言と同じ時刻の30秒後**に置く（webchatの見た目どおりの順番になる）。
+      // ★Shopeeは分までしか表示しないので、同じ分に3件あると保存時刻が全部同着になり、
+      //   ポータルでの並びが webchat と入れ替わる（実際に発生：momigerの16:04が逆順）。
+      //   → **画面上の並び順**で秒を1つずつ増やす。さらにシステム通知は時刻を持たないので、
+      //     直前の発言と同じ分・その次の秒に置く（正午に飛ばさない）。
       const useTm = tm || lastTm;
+      const useSec = (useTm && useTm === lastTm) ? Math.min(58, lastSec + 1) : (tm ? 0 : Math.min(58, lastSec + 1));
       let base;
-      if (curDay) { base = new Date(curDay); if (useTm) { const p = useTm.split(':'); base.setHours(+p[0], +p[1], tm ? 0 : 30, 0); } else base.setHours(12, 0, 0, 0); }
+      if (curDay) { base = new Date(curDay); if (useTm) { const p = useTm.split(':'); base.setHours(+p[0], +p[1], useSec, 0); } else base.setHours(12, 0, 0, 0); }
       // ★★日付区切りが見つからない行は**書かない**。以前は「最新部分を見ているなら今日」と
       //   推測していたが、仮想スクロールでは区切りが描画されていないことが普通にあり、
       //   その結果 29 Jul や Today の発言が 07-31 になる等のズレを繰り返した（本人がwebchatと
@@ -688,7 +691,7 @@
       // 引用は列を増やさず本文の先頭に印として持たせる（DBのスキーマを変えない）。表示側で2段に分けて描く。
       keptDated++;
       if (quote) body = '[[q]]' + quote.replace(/\n/g, ' ') + '\n' + body;
-      if (tm) lastTm = tm;
+      if (useTm) { lastTm = useTm; lastSec = useSec; }
       const id = 'dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
