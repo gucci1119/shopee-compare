@@ -7717,10 +7717,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   2行が同じ発言を指すため、そのままだと会話に同じ吹き出しが2つ並ぶ（本人発見）。
     //   相手・時刻・向き・本文が同じなら同一とみなす。
     {
-      const seen = new Set(), uniq = [];
+      // ★比較時に表記ゆれを吸収する。IDに本文のハッシュが入っているため、取り込み側で本文の
+      //   整形を変える（翻訳ラベル除去・引用除去など）たびに別IDの行が増える＝重複が生まれる。
+      //   「同じ相手・同じ時刻・同じ向き」で、ノイズを取り除いた本文が一致すれば同一とみなす。
+      const norm = m => {
+        let t = String(m.text || '');
+        t = t.replace(/\s*translated\s+by\s+shopee\s*/ig, ' ');
+        const b = String(m.buyer || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (b) t = t.replace(new RegExp('^\\s*(?:' + b + '|you|自分)\\s*(?:\\[[^\\]]{1,24}\\]\\s*)?', 'i'), '');
+        return t.replace(/\s+/g, ' ').trim().toLowerCase();
+      };
+      const seen = new Map(), uniq = [];
       for (const m of rows) {
-        const k = (m.buyer || '') + '|' + (m.msg_time || '') + '|' + (m.direction || '') + '|' + (m.text || '');
-        if (seen.has(k)) continue; seen.add(k); uniq.push(m);
+        const k = (m.buyer || '') + '|' + (m.msg_time || '') + '|' + (m.direction || '') + '|' + norm(m);
+        const prev = seen.get(k);
+        if (prev === undefined) { seen.set(k, uniq.length); uniq.push(m); continue; }
+        // 既にあるなら、整形済み（＝短い方＝ノイズが少ない）を採用する
+        if (String(m.text || '').length < String(uniq[prev].text || '').length) uniq[prev] = m;
       }
       if (uniq.length !== rows.length) rows = uniq;
     }
