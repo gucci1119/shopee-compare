@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.44.0
+// @version      1.45.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -807,8 +807,44 @@
       return 'paste';
     } catch (e) { throw new Error('画像を差し込めませんでした: ' + e.message); }
   }
+  // ---- 🔵 未読に戻す ----
+  // 移行期の保険：ポータルで開いて既読にしてしまった会話を、webchat側で未読へ戻す。
+  // webchatに「Mark as unread」があることは本人確認済み。出し方(右クリック等)は実機依存なので
+  // 手順を順に試し、★できなかったら黙って成功扱いにせず必ずエラーにする（推測で成功と言わない）。
+  async function markUnread(buyer) {
+    const side = sideList(); if (!side) throw new Error('会話一覧が見つかりません');
+    const row = [].slice.call(side.children).find(r => norm((r.innerText || '').split('\n')[0]) === norm(buyer));
+    if (!row) throw new Error('会話が一覧に見つかりません: ' + buyer);
+    const findItem = () => [].slice.call(document.querySelectorAll('div,span,li,button'))
+      .filter(e => e.children.length <= 1 && /mark as unread|未読/i.test((e.textContent || '').trim()))
+      .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })[0];
+    // 1) 右クリック（コンテキストメニュー）
+    const r = row.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
+    row.dispatchEvent(new MouseEvent('contextmenu', opts));
+    await sleep(900);
+    let it = findItem();
+    // 2) 出なければ行の「…」等をReactのonClickで開く（Shopeeは合成クリックを受け付けないため直接呼ぶ）
+    if (!it) {
+      const more = [].slice.call(row.querySelectorAll('div,span,svg,i'))
+        .filter(e => { const b = e.getBoundingClientRect(); return b.width > 8 && b.width < 40 && b.height > 8 && b.height < 40; })
+        .filter(e => { const p = reactProps(e); return p && typeof p.onClick === 'function'; });
+      for (const m of more) {
+        try { reactProps(m).onClick({ bubbles: true, cancelable: true, currentTarget: m, target: m, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (_) {}
+        await sleep(800); it = findItem(); if (it) break;
+      }
+    }
+    if (!it) throw new Error('「Mark as unread」が出せませんでした（右クリック/メニューとも不発）');
+    const p = reactProps(it) || reactProps(it.parentElement) || {};
+    if (typeof p.onClick === 'function') {
+      try { p.onClick({ bubbles: true, cancelable: true, currentTarget: it, target: it, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); } catch (e) { throw new Error('未読に戻せませんでした: ' + e.message); }
+    } else it.click();
+    await sleep(1200);
+  }
   async function sendReply(item) {
     if (!item || item.buyer === '__CYCLE__' || item.text === '__CYCLE__' || !item.buyer) return; // 合図/不正は送信しない（検索窓を汚さない）
+    // 特殊指示：本文が [[unread]] だけなら「未読に戻す」＝送信ではない
+    if (/^\s*\[\[unread\]\]\s*$/.test(String(item.text || ''))) { await markUnread(item.buyer); return; }
     const h0 = domHeaderInfo();
     if (!h0 || h0.buyer !== item.buyer) { const ok = await openConversation(item.buyer); if (!ok) throw new Error('会話が見つかりません: ' + item.buyer); }
     await sleep(500);
