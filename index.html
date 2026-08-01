@@ -8475,43 +8475,64 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       window.__msgViewer = setInterval(beat, 45000);
     }
     // 🔀 右パネルのタブ切り替え（Shopee側を押して取り直す）
-    // ❓ See All FAQ History：Shopee側のリンクを代わりに開いて、全文をここに持ってきて表示する
+    // ❓ See All FAQ History：Shopee側のリンクを代わりに開いて、全文をここに持ってきて表示する。
+    //   ★相手ごとのキャッシュ(chat_faq|<相手>)を先に読む＝2回目以降は待たずに出る。
+    //     共有キー(chat_faq_all)は**直前に別の相手を取った時の中身**が出てしまうので読まない（実際に誤表示が発生）。
+    const faqModal = (buyer, lines, stale) => {
+      const ov = document.createElement('div');
+      ov.className = 'faq-ov';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+      ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:18px 20px;width:620px;max-width:92vw;max-height:86vh;overflow:auto">
+        <h3 style="margin:0 0 10px;color:#ee4d2d;font-size:15px">❓ FAQ History（${esc(buyer)}）</h3>
+        <div class="faq-body" style="font-size:12px;line-height:1.7">${(lines || []).length
+          ? (lines).map(x => `<div style="padding:5px 0;border-bottom:1px solid #f0f0f0">${esc(x)}</div>`).join('')
+          : '<div class="smd-dim"><span class="smd-spin"></span>Shopeeから取っています…</div>'}</div>
+        <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center">
+          <span class="faq-stat smd-dim" style="font-size:11px">${stale ? '保存してあった内容です（最新を確認中…）' : ''}</span>
+          <button class="smd-btn" data-x="1">閉じる</button></div></div>`;
+      ov.addEventListener('click', ev => { if (ev.target === ov || ev.target.dataset.x) ov.remove(); });
+      document.body.appendChild(ov);
+      return ov;
+    };
     body.querySelectorAll('.msg-faqall').forEach(b => b.addEventListener('click', async () => {
       const buyer = b.dataset.b || '';
       if (!settings.sbSecret) { alert('⚙️設定の書き込みキーが必要です'); return; }
-      const old = b.textContent; b.disabled = true; b.textContent = '読み込み中…';
+      const key = 'chat_faq|' + buyer;
+      let ov = null;
+      // ① 保存済みがあれば即出す
+      try {
+        const c = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
+        const cv = ((c || [])[0] || {}).v;
+        if (cv && (cv.lines || []).length) ov = faqModal(buyer, cv.lines, true);
+      } catch (_) {}
+      if (!ov) ov = faqModal(buyer, null, false);
+      // ② 裏で最新を取りにいく（開いたままなら差し替える）
+      const t0 = Date.now();
       const id = 'faq' + Date.now();
       try {
         await sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id, cmd: 'faq_all', buyer, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
-        // Shopee側で会話を開く→リンクを押す→パネルの描画待ち、で30秒を超えることがある。
-        // 返事を待つのとは別に「その相手のFAQ全文が新しく保存されたか」も見て、取れ次第すぐ出す。
-        const t0 = Date.now();
         for (let i = 0; i < 45; i++) {
-          await new Promise(r => setTimeout(r, 1500));
-          const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
-          const v = ((r || [])[0] || {}).v;
-          const f0 = await sbGetAll('app_kv', 'select=v&k=eq.chat_faq_all');
-          const fv0 = ((f0 || [])[0] || {}).v || {};
-          const fresh = fv0.buyer === buyer && fv0.at && Date.parse(fv0.at) > t0;
-          if ((v && v.id === id) || fresh) {
-            if (!fresh && /❌|できません|ありません|見つかり/.test(String((v || {}).text))) { alert(String(v.text)); break; }
-            const f = await sbGetAll('app_kv', 'select=v&k=eq.chat_faq_all');
-            const fv = ((f || [])[0] || {}).v || {};
-            const ls = (fv.lines || []);
-            const ov = document.createElement('div');
-            ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
-            ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:18px 20px;width:620px;max-width:92vw;max-height:86vh;overflow:auto">
-              <h3 style="margin:0 0 10px;color:#ee4d2d;font-size:15px">❓ FAQ History（${esc(buyer)}）</h3>
-              ${ls.length ? `<div style="font-size:12px;line-height:1.7">${ls.map(x => `<div style="padding:5px 0;border-bottom:1px solid #f0f0f0">${esc(x)}</div>`).join('')}</div>`
-                          : '<div class="smd-dim">中身が取れませんでした</div>'}
-              <div style="margin-top:14px;text-align:right"><button class="smd-btn" data-x="1">閉じる</button></div></div>`;
-            ov.addEventListener('click', ev => { if (ev.target === ov || ev.target.dataset.x) ov.remove(); });
-            document.body.appendChild(ov);
-            break;
+          await new Promise(r => setTimeout(r, 1200));
+          if (!document.body.contains(ov)) return;             // 閉じられたらやめる
+          const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
+          const fv = ((r || [])[0] || {}).v;
+          if (fv && fv.at && Date.parse(fv.at) > t0 && (fv.lines || []).length) {
+            const bd = ov.querySelector('.faq-body'), st = ov.querySelector('.faq-stat');
+            if (bd) bd.innerHTML = fv.lines.map(x => `<div style="padding:5px 0;border-bottom:1px solid #f0f0f0">${esc(x)}</div>`).join('');
+            if (st) st.textContent = '最新に更新しました';
+            return;
+          }
+          const cr = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+          const cv2 = ((cr || [])[0] || {}).v;
+          if (cv2 && cv2.id === id && /❌|できません|ありません|見つかり/.test(String(cv2.text))) {
+            const st = ov.querySelector('.faq-stat'); const bd = ov.querySelector('.faq-body');
+            if (st) { st.textContent = String(cv2.text); st.style.color = '#b45309'; }
+            if (bd && !bd.querySelector('div[style*="border-bottom"]')) bd.innerHTML = '<div class="smd-dim">取れませんでした</div>';
+            return;
           }
         }
-      } catch (e) { alert('❌ ' + e.message); }
-      b.disabled = false; b.textContent = old;
+        const st = ov.querySelector('.faq-stat'); if (st) st.textContent = '⚠️ 返事がありません（Shopeeチャットのタブを確認）';
+      } catch (e) { const st = ov.querySelector('.faq-stat'); if (st) st.textContent = '❌ ' + e.message; }
     }));
     body.querySelectorAll('.msg-ptab').forEach(b => b.addEventListener('click', async () => {
       const el = document.getElementById('msg-side-interest'); if (!el) return;
