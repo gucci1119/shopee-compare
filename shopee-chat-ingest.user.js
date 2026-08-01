@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.39.0
+// @version      1.40.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -970,6 +970,44 @@
     prompt('🔍 スタンプパネル調査の結果（この内容をコピーして開発者に貼ってください）', txt);
   }
 
+  // ---- 🔍 未読バッジ / Mark as unread の調査（巡回で既読にしてしまう問題を解くため） ----
+  // 目的：①一覧のどの行が「未読」かをDOMで見分けられるか ②「未読に戻す」をどう呼び出すか（右クリック？…メニュー？）
+  //   ここでも推測でコードを書かず、実物の構造を報告させる。
+  async function probeUnread() {
+    const out = [];
+    const side = sideList();
+    if (!side) { alert('会話一覧が見つかりません。webchatを開いてから実行してください。'); return; }
+    const rows = [].slice.call(side.children).slice(0, 6);
+    out.push('【会話一覧の行】先頭' + rows.length + '件の中身');
+    rows.forEach((r, i) => {
+      const t = (r.innerText || '').replace(/\n/g, ' / ').slice(0, 70);
+      // 未読バッジらしきもの＝小さくて丸い/数字だけの要素、または赤系の背景
+      const badges = [].slice.call(r.querySelectorAll('*')).filter(e => {
+        const b = e.getBoundingClientRect(); if (b.width < 6 || b.width > 26 || b.height < 6 || b.height > 26) return false;
+        const cs = getComputedStyle(e); const bg = cs.backgroundColor || '';
+        const isRound = parseFloat(cs.borderRadius) >= 5;
+        const red = /rgb\((2[0-9]{2}|1[89][0-9]),\s*([0-9]{1,2}),\s*([0-9]{1,2})\)/.test(bg);
+        return (isRound && bg && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(bg)) || red;
+      });
+      out.push(' 行' + i + ': ' + t + ' ／ バッジ候補' + badges.length + '個'
+        + (badges[0] ? ' [' + Math.round(badges[0].getBoundingClientRect().width) + 'px bg=' + getComputedStyle(badges[0]).backgroundColor + ' txt=' + (badges[0].textContent || '').trim().slice(0, 4) + ']' : ''));
+    });
+    // 右クリックで何か出るか
+    const r0 = rows[0];
+    if (r0) {
+      const before = document.querySelectorAll('body *').length;
+      try { r0.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r0.getBoundingClientRect().left + 60, clientY: r0.getBoundingClientRect().top + 20 })); } catch (_) {}
+      await sleep(900);
+      const after = document.querySelectorAll('body *').length;
+      out.push('【右クリック】要素数 ' + before + ' → ' + after + (after > before ? '（何か出た可能性あり）' : '（変化なし＝合成イベントでは出ない）'));
+      const hits = [].slice.call(document.querySelectorAll('div,span,li,button')).filter(e => e.children.length === 0 && /unread|未読/i.test(e.textContent || ''));
+      out.push('【"unread/未読"を含む要素】' + hits.length + '個' + (hits[0] ? ' 例: "' + (hits[0].textContent || '').trim().slice(0, 30) + '"' : ''));
+    }
+    const txt = out.join('\n');
+    try { GM_setValue('lastUnreadProbe', txt); } catch (_) {}
+    prompt('🔍 未読バッジ / Mark as unread 調査（コピーして開発者に貼ってください）', txt);
+  }
+
   // ---- 左下チップ + トースト ----
   let chip = null, sentReplies = 0;
   function ensureChip() {
@@ -989,7 +1027,7 @@
         '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
         '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n  8 = 🔍未読バッジ/Mark as unread を調査\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
       if (a === '5') {
         const now = tabRole() === 'worker' ? 'manual' : 'worker';
@@ -1011,6 +1049,7 @@
         else { toast('📋 一覧スキャンを開始…'); scanAllConversations(true); }
       }
       else if (a === '7') probeStickers();
+      else if (a === '8') probeUnread();
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
