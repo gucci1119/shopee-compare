@@ -7645,7 +7645,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 会話クリック/絞り込み/ポーリングはキャッシュ(msg.rows)から描画＝毎回全履歴を取り直さない。取得は初回・🔄更新のみ
     if (useCache && msg.rows) { rows = msg.rows; }
     else {
-      try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc'); }
+      // ★全件(7000行超)を毎回読むと通信量が大きい。Supabaseの帯域上限を超過したため直近だけに絞る。
+      //   古い履歴は「🔎検索」時に必要な分だけ取りに行く（下の msg.q の処理）。
+      const since = new Date(Date.now() - 60 * 86400000 - new Date().getTimezoneOffset() * 60000).toISOString();
+      try { rows = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.desc'); }
       catch (e) { rows = []; if (!/does not exist|relation|schema cache/i.test(e.message || '')) { body.innerHTML = errBox(e); return; } }
       msg.rows = rows;
       // 📋一覧スキャンの結果（会話を開かずに取った全会話の最新状態）も取得。本文の取り込みが追いつく前でも一覧に抜けが出ない
@@ -7788,6 +7791,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (msg.unrepliedOnly) convList = convList.filter(c => c.unreplied);
     // 🔎 過去の全チャット履歴からキーワード検索（本人の主用途の1つ＝「この件どこで話したっけ？」）。
     //   相手の名前でも本文でもヒット。ヒットした会話だけを残し、プレビューは"最後の発言"でなく"ヒットした発言"を出す。
+    // 🔎 検索は全期間を対象にしたいので、検索時だけ古い分を追加で取りに行く（1回だけ・以後は使い回す）
+    if (msg.q && !msg._allLoaded && settings.sbKey) {
+      try {
+        const olds = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&order=msg_time.desc');
+        if (Array.isArray(olds) && olds.length) { msg.rows = olds; msg._allLoaded = true; return renderMessages(true); }
+      } catch (_) {}
+    }
     let hitTotal = 0;
     if (msg.q) {
       const q = msg.q.toLowerCase();
@@ -7821,7 +7831,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (m.direction === 'sys') return `<div style="display:flex;justify-content:center;margin:2px 0"><div style="background:#f1f2f4;color:#6b7280;border-radius:10px;padding:3px 12px;font-size:11px;max-width:80%;text-align:center">${esc(m.text || '')}</div></div>`;
       // ★本文が画像URLだけの行も画像として出す（Shopeeの見た目に寄せる）。
       //   発送時の状態写真は本文がURLのまま保存されており、文字列で並んで読みづらかった。
-      const t0 = String(m.text || '').trim();
+      // 引用（返信元）は本文の先頭に [[q]]… の1行で入っている。Shopeeと同じく引用カード＋本文の2段で描く。
+      let qLine = '';
+      let raw = String(m.text || '');
+      { const mq = raw.match(/^\[\[q\]\](.*)\n([\s\S]*)$/); if (mq) { qLine = mq[1].trim(); raw = mq[2]; m = Object.assign({}, m, { text: raw }); } }
+      const t0 = raw.trim();
       const isImg = (m.msg_type === 'image' && /^https?:/.test(t0))
         || (/^https?:\/\/\S+$/.test(t0) && /(cf\.shopee|shopeemobile|deo\.shopee|\.(jpe?g|png|webp|gif))/i.test(t0));
       if (!isImg && IMG_PH.test(m.text || '')) return `<div style="display:flex;${m.direction === 'out' ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${m.direction === 'out' ? '#dcf5e5' : '#fff'};border:1px solid ${m.direction === 'out' ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px"><span class="smd-dim">🖼️ 画像（取り込み時に未読込）</span><div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}${tick}</div></div></div>`;
@@ -7833,8 +7847,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       };
       const inner = isImg ? `<img src="${esc(t0)}" referrerpolicy="no-referrer" style="max-width:200px;max-height:200px;border-radius:6px;display:block" onerror="this.replaceWith(document.createTextNode('🖼️ 画像'))">` : `<div style="white-space:pre-wrap;line-height:1.5">${hlText(m.text || (m.msg_type === 'image' ? '🖼️ 画像' : ''))}</div>`;
       const out = m.direction === 'out';
+      const quoteHtml = qLine ? `<div style="border-left:3px solid #9ad3b0;background:rgba(0,0,0,.035);border-radius:5px;padding:3px 7px;margin-bottom:4px;font-size:11px;color:#54606e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(qLine)}</div>` : '';
       const tick = out ? '<span title="送信済み" style="color:#3aa76d;font-size:11px;margin-left:4px">✓✓</span>' : '';
-      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
+      return `<div style="display:flex;${out ? 'justify-content:flex-end' : ''}"><div style="max-width:74%;background:${out ? '#dcf5e5' : '#fff'};border:1px solid ${out ? '#b6e6c9' : '#e5e5e5'};border-radius:10px;padding:7px 11px;font-size:12.5px;box-shadow:0 1px 1px rgba(0,0,0,.04)">${quoteHtml}${inner}<div style="font-size:9.5px;color:#6b7280;margin-top:3px;text-align:right">${esc((msgTime(m) || '').slice(5, 16).replace('T', ' '))}</div></div></div>`;
     };
     msg._convList = convList; // 表示順（絞り込み・並び替え後）を保持＝送信後に「次の未返信」へ進むため
     // 選択中の会話（無ければ先頭）

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.82.0
+// @version      1.83.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.82.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.83.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -501,11 +501,17 @@
       // ★返信の「引用（返信元）」を本文から外す。Shopeeは引用カード＋本文の2段で表示するが、
       //   文字だけ拾うと「相手名 [Image] 本文」と1本につながってしまう（本人がwebchatと見比べて発見）。
       //   引用は「相手の名前(または自分)＋[Image]/[Sticker]等」で始まるので、その前置きだけ落とす。
+      let quote = '';
       if (h.buyer) {
         const esc = h.buyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const qre = new RegExp('^\\s*(?:' + esc + '|you|自分)\\s*(?:\\[[^\\]]{1,24}\\]\\s*)?', 'i');
+        const qre = new RegExp('^\\s*(' + esc + '|you|自分)\\s*(\\[[^\\]]{1,24}\\]\\s*)?', 'i');
+        const mq = body.match(qre);
         const cut = body.replace(qre, '').trim();
-        if (cut && cut !== body) body = cut;
+        if (mq && cut && cut !== body) {
+          // 引用（誰の何に対する返信か）は捨てずに残す。Shopeeは引用カード＋本文の2段で表示する。
+          quote = (mq[1] || '') + (mq[2] ? ' ' + mq[2].trim() : '');
+          body = cut;
+        }
       }
       if (!body) return;
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
@@ -536,6 +542,8 @@
       // ★IDに日付を入れない。入れると「日付を直して取り込み直す」たびに**上書きではなく新しい行が増え**、
       //   同じ発言が別々の日付で二重に並ぶ（実際に2025年と2026年の重複が発生していた）。
       //   日付を除けば、同じ発言は同じIDになり、正しい日付で上書きされる＝直せるようになる。
+      // 引用は列を増やさず本文の先頭に印として持たせる（DBのスキーマを変えない）。表示側で2段に分けて描く。
+      if (quote) body = '[[q]]' + quote.replace(/\n/g, ' ') + '\n' + body;
       const id = 'dom|' + h.cc + '|' + h.buyer + '|' + tm + '|' + dir + '|' + hash(body);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
