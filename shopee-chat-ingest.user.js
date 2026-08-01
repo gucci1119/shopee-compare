@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.04.0
+// @version      2.05.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.04.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.05.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -367,10 +367,28 @@
   function domHeaderInfo() {
     // ★スレッド容器＝中央パネル(幅>600・左>200)。会話未表示ならサイドバー(幅~390)しか無い→取り込まない
     const lists = [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid__innerScrollContainer'));
-    let thread = null, maxW = 600; lists.forEach(l => { const r = l.getBoundingClientRect(); if (r.width > maxW && r.left > 200) { maxW = r.width; thread = l; } });
+    if (!lists.length) return null;
+    // ★スレッド＝「会話一覧ではない方」。位置(幅>600)で判定していたため裏タブで必ず失敗していた。
+    const side = sideList();
+    const others = lists.filter(l => l !== side);
+    let thread = others.sort((a, b) => b.children.length - a.children.length)[0] || null;
     if (!thread) return null;
     const tr = thread.getBoundingClientRect();
+    // ★バイヤー名は「一覧で選択中の行の名前」を第一候補にする（本人案）。
+    //   一覧の行は必ず1行目が相手の名前なので、**完全一致**で照合でき、絶対にずれない。
+    //   選択中の行＝背景色が他と違う行（位置ではなく見た目の指定で判定＝裏タブでも取れる）。
     let buyer = '', cc = CC, best = 1e9;
+    try {
+      if (side) {
+        const rows = [].slice.call(side.children);
+        const bg = rows.map(r => { try { return getComputedStyle(r).backgroundColor || ''; } catch (_) { return ''; } });
+        const cnt = {}; bg.forEach(c => { cnt[c] = (cnt[c] || 0) + 1; });
+        const common = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0];
+        const selIdx = bg.findIndex((c, i) => c && c !== common && rows[i] && (rows[i].innerText || '').trim());
+        if (selIdx >= 0) { const ri = rowInfo(rows[selIdx]); if (ri.buyer) { buyer = ri.buyer; cc = ri.cc || cc; } }
+      }
+    } catch (_) {}
+    if (buyer) return { thread, tr, buyer, cc };
     [].slice.call(document.querySelectorAll('div,span,a')).forEach(el => {
       const t = (el.textContent || '').trim(); if (!t || t.length > 44 || el.children.length > 1) return;
       const r = el.getBoundingClientRect();
@@ -518,10 +536,29 @@
       if (/automatically closed|has joined|has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
       let bub = null, maxA = 0;
       row.querySelectorAll('*').forEach(e => { const cs = getComputedStyle(e); if (trans(cs.backgroundColor)) return; const b = e.getBoundingClientRect(); const a = b.width * b.height; if (b.width > 20 && b.height > 12 && a > maxA) { maxA = a; bub = b; } });
+      // ★左右（相手＝in／自分＝out）の判定。従来は**吹き出しの座標**で見ていたため、
+      //   裏タブ（座標が全て0）では判定できず、全部捨てられていた。
+      //   → まず**CSSの寄せ方**で判定する（裏タブでも取れる）。座標が使える時は座標で確認する。
+      let dir = '';
+      try {
+        for (let e = row, d = 0; e && d < 3 && !dir; e = e.firstElementChild, d++) {
+          const cs = getComputedStyle(e);
+          const j = (cs.justifyContent || '') + ' ' + (cs.textAlign || '') + ' ' + (cs.alignItems || '');
+          if (/flex-end|right/.test(j)) dir = 'out';
+          else if (/flex-start|left/.test(j)) dir = 'in';
+        }
+        if (!dir && bub) {
+          const bcs = getComputedStyle(bub.el || bub);
+          if (/auto/.test(bcs.marginLeft || '') && !/auto/.test(bcs.marginRight || '')) dir = 'out';
+          else if (/auto/.test(bcs.marginRight || '') && !/auto/.test(bcs.marginLeft || '')) dir = 'in';
+        }
+      } catch (_) {}
       const ref = bub || (img && img.getBoundingClientRect());
-      if (!ref) return;
-      const rc = ref.left + ref.width / 2;
-      let dir = rc < tc - 60 ? 'in' : (rc > tc + 60 ? 'out' : '');
+      if (!dir) {
+        if (!ref) return;
+        const rc = ref.left + ref.width / 2;
+        if (ref.width > 0 || tc > 0) dir = rc < tc - 60 ? 'in' : (rc > tc + 60 ? 'out' : '');
+      }
       // ★中央に出る灰色の通知（自動クローズ／担当者が参加した等）は左右どちらでもないので
       //   従来は捨てていた。会話の流れを追うのに必要なので dir='sys' として取り込む（本人要望）。
       //   未返信の判定は direction==='in' なので、これらは未返信に数えられない。
@@ -653,7 +690,15 @@
 
   // ---- 全会話 自動巡回（一覧を上から順に開いて全部取り込む＝全ショップ/全国対応） ----
   // sideList() は下（送信キュー節）で定義済み＝会話一覧のスクロール内容。sideScroller はその外側のスクロール容器。
-  function sideScroller() { const gs = [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid')); let el = null, min = 1e9; gs.forEach(g => { const r = g.getBoundingClientRect(); if (r.left < min && r.width < 500) { min = r.left; el = g; } }); return el; }
+  function sideScroller() {
+    // 会話一覧の中身から親のスクロール容器をたどる（位置に頼らない）
+    const inner = sideList();
+    if (inner) { const g = inner.closest('.ReactVirtualized__Grid'); if (g) return g; }
+    const gs = [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid'));
+    let el = null, min = 1e9;
+    gs.forEach(g => { const r = g.getBoundingClientRect(); if (r.left < min && r.width < 500) { min = r.left; el = g; } });
+    return el;
+  }
   let cycling = false, cycleInfo = '', cycleTarget = null; // cycleTarget＝巡回中に開いている会話の{buyer,cc}（一覧の行から取る＝信頼できる）
   const lastSig = {}; // 会話ごとの「最終プレビュー署名」。変化＝新着があった会話だけ開く（過去の読み直しを省く）
   // 一覧の行からバイヤー名と国を取る（ヘッダ再検出より信頼できる）
@@ -715,6 +760,10 @@
   const norm = s => (s || '').trim().toLowerCase();
   // ヘッダ帯の名前テキスト（住所/評価が連結されることがある）＝「先頭が狙い名で始まるか」でナビ確認に使う
   function headerBuyerRaw() {
+    // ★宛先照合に使う名前。位置で拾っていたため裏タブでは常に空になり、
+    //   「画面に出ている相手: (不明)」で送信が止まっていた。
+    //   一覧の**選択中の行の名前**を優先する（完全一致で照合でき、絶対にずれない）。
+    try { const h = domHeaderInfo(); if (h && h.buyer) return h.buyer; } catch (_) {}
     let best = 1e9, txt = '';
     [].slice.call(document.querySelectorAll('div,span')).forEach(el => {
       if (el.children.length > 1) return; const r = el.getBoundingClientRect();
@@ -1064,7 +1113,27 @@
   // 送信は textarea[placeholder="Type a message here"] に値をセット→Enter。閉じた会話はRestartを押してから。
   const OUTBOX_ON = () => GM_getValue('outboxSend', true) !== false;
   function setNativeValue(el, val) { const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement; const d = Object.getOwnPropertyDescriptor(proto.prototype, 'value'); d.set.call(el, val); }
-  function sideList() { const ls = [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid__innerScrollContainer')); let el = null, min = 1e9; ls.forEach(l => { const r = l.getBoundingClientRect(); if (r.left < min) { min = r.left; el = l; } }); return el; }
+  // ★★裏タブでは要素の位置(getBoundingClientRect)が全て0になるため、位置で判定すると必ず失敗する。
+  //   （実測：裏タブで一覧49行は取れるのにスレッドは"無い"扱い＝会話は開いているのに読めない）
+  //   → 位置ではなく**中身の特徴**で見分ける。手前でも裏でも同じように動く。
+  //   会話一覧の行には必ず「(PH) gcsonlinestore.ph」のような**店舗表示**が入る＝これが決め手。
+  const SHOP_MARK = /\([A-Z]{2}\)\s*\S+/;
+  function looksLikeSideList(el) {
+    const kids = [].slice.call(el.children).slice(0, 8);
+    if (!kids.length) return false;
+    const hit = kids.filter(k => SHOP_MARK.test(k.innerText || '')).length;
+    return hit >= Math.min(2, kids.length);      // 先頭数行に店舗表示があれば会話一覧
+  }
+  function sideList() {
+    const ls = [].slice.call(document.querySelectorAll('.ReactVirtualized__Grid__innerScrollContainer'));
+    if (!ls.length) return null;
+    const byContent = ls.filter(looksLikeSideList);
+    if (byContent.length) return byContent.sort((a, b) => b.children.length - a.children.length)[0];
+    // 中身で決まらない時だけ従来どおり位置で（手前タブでの保険）
+    let el = null, min = 1e9;
+    ls.forEach(l => { const r = l.getBoundingClientRect(); if (r.left < min) { min = r.left; el = l; } });
+    return el;
+  }
   async function openConversation(buyer) {
     const side = sideList(); if (side) { const rows = [].slice.call(side.children); for (const row of rows) { const nm = (row.innerText || '').trim().split('\n')[0].trim(); if (nm === buyer) { row.click(); await sleep(1300); return true; } } }
     // 検索フォールバック
