@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.38.0
+// @version      1.39.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -358,6 +358,12 @@
       // ★★日付も時刻も分からない行（画像だけの行など）に「取り込んだ瞬間の時刻」を入れてはいけない。
       //   実際に「Tuesday 11:03の画像」が「今日12:52」になり、会話の並びが崩れた（本人発見）。確証が無いなら書かない。
       else return;
+      // ★「未来の時刻はあり得ない」＝日付が1日ずれている。webchatは日本時間表示なので、
+      //   今より先の時刻になったら1日前とみなす（例：今11:30なのに23:33→昨夜の23:33）。
+      //   ※その会話に今日の発言が無いと「Today」の区切りが出ず、昨日の分を今日と誤判定するのを救う。
+      if (base instanceof Date && !isNaN(base.getTime()) && base.getTime() > Date.now() + 5 * 60000) {
+        base = new Date(base.getTime() - 86400000);
+      }
       // ★日付サニティチェック：解析ミスで「2999/6/4」等の異常日付になると、その会話が一覧の先頭に固定され続ける
       //   （実際に発生）。未来(1日超)・極端な過去(5年超)は信用せず「今日」に落とす。
       {
