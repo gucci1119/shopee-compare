@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.88.0
+// @version      1.89.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.88.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.89.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -679,6 +679,11 @@
   // 1会話を開く→ヘッダ先頭が狙い名で始まるのを確認（＝この会話が表示されたと確定）→その時だけ captureAs をセットして
   //   一覧行由来のクリーン名で取り込む。確認できなければ取り込まない（＝混線しない・切替失敗を弾く）。
   async function openAndCapture(row, name, cc, deep) {
+    // ★★送信中は**会話を切り替えない**。切り替えの最中に返信が走ると、
+    //   送信処理が「開いた」と思っている会話と、実際に画面に出ている会話がズレて、
+    //   **別のお客さんに返信が届く**（2026-08-01に実際に発生）。
+    //   巡回のループ先頭でしか送信を待っていなかったため、ここでも必ず見る。
+    if (sendingNow) return false;
     reactOpen(row);
     let matched = false;
     for (let w = 0; w < 14; w++) { if (norm(headerBuyerRaw()).indexOf(norm(name)) === 0) { matched = true; break; } await sleep(200); }
@@ -1327,7 +1332,9 @@
   let sendingNow = false, crawlPaused = false;
   async function waitCrawlPause(maxMs) {
     const t0 = Date.now();
-    while (cycling && !crawlPaused && Date.now() - t0 < (maxMs || 8000)) await sleep(300);
+    // 巡回が「安全な区切り」に来るまで待つ。会話を開いている最中は数秒かかるので長めに待つ。
+    // ここで待ち切れなくても、送信直前のヘッダ照合(sendReply)が最後の砦になる。
+    while (cycling && !crawlPaused && Date.now() - t0 < (maxMs || 15000)) await sleep(300);
   }
   async function pollOutboxSb() {
     try { await pollOutboxSbInner(); }
@@ -1343,7 +1350,7 @@
     if (!items.length) { reclaimStale(); return; }
     // 送るものがある＝ここから返信優先。巡回が会話を切り替えている最中なら、区切りまで待ってから送る。
     sendingNow = true; cycleInfo = '📨返信を送信中'; updateChip();
-    await waitCrawlPause(8000);
+    await waitCrawlPause(15000);
     const now = Date.now();
     for (const it of items) {
       if (skipUntil.get(it.id) > now) continue; // この タブでは見つからなかった会話＝別タブに任せて後で再挑戦
