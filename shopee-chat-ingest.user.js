@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.22.0
+// @version      2.23.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.22.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.23.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -577,6 +577,15 @@
         _keep.push(ln);
       });
       let body = _keep.join(' ').replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+      // ★FAQ History カード（お客さんがAIアシスタントに聞いた内容）。webchatには出ているので取り込む。
+      //   1行に潰さず改行のまま持たせ、ポータル側でShopeeと同じカードとして描く。
+      let isFaq = false;
+      if (/^FAQ History/i.test(body)) {
+        const fl = _keep.map(x => x.trim()).filter(x => x && !/^FAQ History$/i.test(x) && !/^See All FAQ History$/i.test(x) && !/^\d{1,2}:\d{2}$/.test(x));
+        if (!fl.length) return;
+        body = '❓FAQ履歴\n' + fl.join('\n');
+        isFaq = true;
+      }
       // 日付区切り検出：①行全体が日付だけ（rest空）＝区切り行→curDay更新してスキップ。②先頭に日付＋本文＝Shopeeが区切りと
       //   1件目を1行にまとめた場合。ただし「Monday …」「Today …」等の“単語始まりの普通の文”を誤って剥がさないよう、
       //   先頭剥がしは【数字を含む日付（"9 Jun"/"18/06"）】に限定する。
@@ -591,7 +600,7 @@
       // UI要素・FAQ・ボタン等は本文でないので除外。
       // ★ただし「会話が自動終了した／担当者が参加した」等のシステム通知は**会話の流れを追うのに要る**（本人要望）。
       //   ここで一律に捨てていたため、下の dir='sys' に一度も到達せず、webchatには出ているのにポータルに出ていなかった。
-      if (!SYS_NOTICE.test(body) && /has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
+      if (!isFaq && !SYS_NOTICE.test(body) && /has ended|requested to chat|Conversar com Vendedor|FAQ History|See All FAQ|Chat with Seller|Talk to Seller|inquiring about|Sending failed|wait for the buyer|Collapse|Product$/i.test(body)) return;
       let bub = null, maxA = 0;
       row.querySelectorAll('*').forEach(e => { const cs = getComputedStyle(e); if (trans(cs.backgroundColor)) return; const b = e.getBoundingClientRect(); const a = b.width * b.height; if (b.width > 20 && b.height > 12 && a > maxA) { maxA = a; bub = b; } });
       // ★左右（相手＝in／自分＝out）の判定。従来は**吹き出しの座標**で見ていたため、
@@ -599,7 +608,7 @@
       //   → まず**CSSの寄せ方**で判定する（裏タブでも取れる）。座標が使える時は座標で確認する。
       let dir = '';
       // 中央に出る灰色の通知は左右どちらでもない＝先に確定させる（親のCSS寄せに引きずられて in/out に化けるのを防ぐ）
-      if (SYS_NOTICE.test(body)) dir = 'sys';
+      if (isFaq || SYS_NOTICE.test(body)) dir = 'sys';
       try {
         if (dir) throw 0;
         for (let e = row, d = 0; e && d < 3 && !dir; e = e.firstElementChild, d++) {
@@ -636,12 +645,12 @@
       if (UI_NOISE.test(body)) return; // 画面の区切りラベル（「Unread Messages」等）はメッセージではない
       // ★「Translated by Shopee」はShopeeの翻訳機能のラベルであって本文ではない（本人指摘）。
       //   吹き出しの下に出るため本文と連結されてしまう。各国語ぶん末尾から除去する。
-      body = body.replace(TRANS_LABEL, '').trim();
+      if (!isFaq) body = body.replace(TRANS_LABEL, '').trim();
       // ★返信の「引用（返信元）」を本文から外す。Shopeeは引用カード＋本文の2段で表示するが、
       //   文字だけ拾うと「相手名 [Image] 本文」と1本につながってしまう（本人がwebchatと見比べて発見）。
       //   引用は「相手の名前(または自分)＋[Image]/[Sticker]等」で始まるので、その前置きだけ落とす。
       let quote = '';
-      if (h.buyer) {
+      if (h.buyer && !isFaq) {
         const esc = h.buyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const qre = new RegExp('^\\s*(' + esc + '|you|自分)\\s*(\\[[^\\]]{1,24}\\]\\s*)?', 'i');
         const mq = body.match(qre);
@@ -914,7 +923,8 @@
     captureAs = { buyer: name, cc: cc };
     try { await quickCapture(deep); } finally { captureAs = null; }
     try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
-    try { grabFaq(); } catch (_) {}                  // FAQ History（AIアシスタントへの質問）も取り込む
+    // FAQ History は domExtract が**正しい日付つき**で取り込むようになった（v2.23.0）。
+    // grabFaq は日付を常に「今日」にしてしまい、古い会話が最新扱いで先頭に来るため停止。
     return true;
   }
   // ★巡回の進捗は保存する（スクリプト更新やタブ再読込のたびに全会話600件超を開き直すと20分近く重くなるため）。
@@ -1877,7 +1887,7 @@
       let out = '';
       // 調査(probe_*)と「この会話を取り込む」(fetch_conv)は、どのwebchatタブでも実行してよい。
       // それ以外（巡回の開始/停止など）は巡回役タブだけ。
-      const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv' || String(v.cmd) === 'panel_tab';
+      const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv' || String(v.cmd) === 'panel_tab' || String(v.cmd) === 'faq_all';
       if (!anyTabOk && !isWorker()) { markDone(false); return; }
       try {
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
@@ -1982,6 +1992,7 @@
           }
         }
         else if (v.cmd === 'probe_unread') { out = await probeUnread(true); }
+        else if (v.cmd === 'faq_all') { out = await grabFaqAll(String(v.buyer || '')); }
         else out = '不明な命令: ' + v.cmd;
       } catch (e) { out = '❌ ' + e.message; }
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_cmd_result', v: { id: v.id, cmd: v.cmd, text: String(out || ''), at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
@@ -2016,6 +2027,54 @@
         direction: 'sys', msg_type: 'text', text: body, msg_time: iso, synced_at: new Date().toISOString() });
       captured++; updateChip();
     } catch (_) {}
+  }
+
+  // ---- ❓ See All FAQ History（全文）を取り込む（v2.23.0）----
+  // カードには3行しか出ないが、「See All FAQ History」を押すと全部見られる。
+  // 本人がwebchatを開かずに読めるよう、ポータルから押したらここが代わりに開いて中身を持ち帰る。
+  async function grabFaqAll(buyer) {
+    if (!buyer) return '相手が指定されていません';
+    sendingNow = true;
+    try {
+      await waitCrawlPause(6000).catch(() => {});
+      let row = await findRow(buyer);
+      if (!row) { await sleep(800); row = await findRow(buyer); }
+      if (!row) return '会話が一覧に見つかりません: ' + buyer;
+      const cc0 = (rowInfo(row).cc) || CC;
+      const ok = await openAndCapture(row, buyer, cc0, false, true);
+      if (!ok) return '会話を開けませんでした: ' + buyer;
+      // 「See All FAQ History」のリンクを押す（合成クリックが効かないのでReactのonClickを直接呼ぶ）
+      const link = [].slice.call(document.querySelectorAll('div,span,a,button'))
+        .filter(e => e.children.length === 0 && /^\s*See All FAQ History\s*$/i.test(e.innerText || ''))[0];
+      if (!link) return 'この会話に FAQ History はありません: ' + buyer;
+      let hit = false;
+      for (let e = link, d = 0; e && d < 5 && !hit; e = e.parentElement, d++) {
+        const p = reactProps(e);
+        if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: e, target: e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); hit = true; } catch (_) {} }
+      }
+      if (!hit) { try { link.click(); } catch (_) {} }
+      // 開いたパネル（モーダル/ドロワー）の中身を読む
+      let lines = [];
+      for (let w = 0; w < 12 && !lines.length; w++) {
+        await sleep(400);
+        const box = [].slice.call(document.querySelectorAll('div'))
+          .filter(e => { const t = (e.innerText || '').trim(); return /FAQ History/i.test(t) && t.length > 60 && t.length < 8000 && e.getBoundingClientRect().width > 260; })
+          .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+        if (!box) continue;
+        const cand = String(box.innerText || '').split('\n').map(x => x.trim())
+          .filter(x => x && !/^FAQ History$/i.test(x) && !/^See All FAQ History$/i.test(x) && !/^\d{1,2}:\d{2}$/.test(x) && !/^(close|閉じる|×)$/i.test(x));
+        if (cand.length > 3) lines = cand;      // カード(3行)より多く取れた＝全文が開いた
+      }
+      if (!lines.length) return 'FAQ History を開けませんでした: ' + buyer;
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_faq_all', v: { buyer: buyer, cc: cc0, at: new Date().toISOString(), lines: lines.slice(0, 200) }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+      // 開いたパネルは閉じておく（次の巡回の邪魔をしない）
+      try {
+        const cl = [].slice.call(document.querySelectorAll('[class*=close],[aria-label=Close],[aria-label=close]'))[0];
+        if (cl) { const p = reactProps(cl); if (p && typeof p.onClick === 'function') p.onClick({ bubbles: true, cancelable: true, currentTarget: cl, target: cl, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); else cl.click(); }
+        else document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      } catch (_) {}
+      return 'FAQ履歴を取り込みました（' + lines.length + '行）: ' + buyer;
+    } catch (e) { return '❌ ' + e.message; } finally { sendingNow = false; }
   }
 
   // ---- 👀 この人が見ている商品（Buyer Interest）を取り込む ----

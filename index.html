@@ -7879,6 +7879,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return left;
     };
     const bubbleHtml = m => {
+      // ❓FAQ履歴は Shopee と同じ「左寄せの白いカード」で描く（1本の長い灰色バーだと読めない）
+      if (m.direction === 'sys' && /^❓FAQ履歴/.test(String(m.text || ''))) {
+        const ls = String(m.text).split('\n').slice(1).filter(x => x.trim());
+        return `<div style="display:flex;justify-content:flex-start;margin:4px 0">
+          <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px 10px;max-width:88%;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+            <div style="font-size:11.5px;font-weight:700;margin-bottom:5px">FAQ History</div>
+            <div style="background:#f5f6f7;border-radius:6px;padding:6px 8px;font-size:11.5px;line-height:1.55;color:#333">
+              ${ls.map(x => `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x)}">${esc(x)}</div>`).join('')}
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <button class="msg-faqall smd-btn" data-b="${esc(m.buyer || '')}" style="font-size:10.5px;padding:2px 8px" title="Shopeeの「See All FAQ History」を開いて、中身を全部ここに取り込みます">See All FAQ History</button>
+              <span class="smd-dim" style="font-size:10px">${esc(String(m.msg_time || '').slice(11, 16))}</span>
+            </div>
+          </div></div>`;
+      }
       // Shopeeが中央に出す通知（自動クローズ／担当者の参加など）は、同じく中央のグレー表示にする
       if (m.direction === 'sys') return `<div style="display:flex;justify-content:center;margin:2px 0"><div style="background:#f1f2f4;color:#6b7280;border-radius:10px;padding:3px 12px;font-size:11px;max-width:80%;text-align:center">${esc(m.text || '')}</div></div>`;
       // ★本文が画像URLだけの行も画像として出す（Shopeeの見た目に寄せる）。
@@ -8336,6 +8351,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       window.__msgViewer = setInterval(beat, 45000);
     }
     // 🔀 右パネルのタブ切り替え（Shopee側を押して取り直す）
+    // ❓ See All FAQ History：Shopee側のリンクを代わりに開いて、全文をここに持ってきて表示する
+    body.querySelectorAll('.msg-faqall').forEach(b => b.addEventListener('click', async () => {
+      const buyer = b.dataset.b || '';
+      if (!settings.sbSecret) { alert('⚙️設定の書き込みキーが必要です'); return; }
+      const old = b.textContent; b.disabled = true; b.textContent = '読み込み中…';
+      const id = 'faq' + Date.now();
+      try {
+        await sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id, cmd: 'faq_all', buyer, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+          const v = ((r || [])[0] || {}).v;
+          if (v && v.id === id) {
+            if (/❌|できません|ありません|見つかり/.test(String(v.text))) { alert(String(v.text)); break; }
+            const f = await sbGetAll('app_kv', 'select=v&k=eq.chat_faq_all');
+            const fv = ((f || [])[0] || {}).v || {};
+            const ls = (fv.lines || []);
+            const ov = document.createElement('div');
+            ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+            ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:18px 20px;width:620px;max-width:92vw;max-height:86vh;overflow:auto">
+              <h3 style="margin:0 0 10px;color:#ee4d2d;font-size:15px">❓ FAQ History（${esc(buyer)}）</h3>
+              ${ls.length ? `<div style="font-size:12px;line-height:1.7">${ls.map(x => `<div style="padding:5px 0;border-bottom:1px solid #f0f0f0">${esc(x)}</div>`).join('')}</div>`
+                          : '<div class="smd-dim">中身が取れませんでした</div>'}
+              <div style="margin-top:14px;text-align:right"><button class="smd-btn" data-x="1">閉じる</button></div></div>`;
+            ov.addEventListener('click', ev => { if (ev.target === ov || ev.target.dataset.x) ov.remove(); });
+            document.body.appendChild(ov);
+            break;
+          }
+        }
+      } catch (e) { alert('❌ ' + e.message); }
+      b.disabled = false; b.textContent = old;
+    }));
     body.querySelectorAll('.msg-ptab').forEach(b => b.addEventListener('click', async () => {
       const el = document.getElementById('msg-side-interest'); if (!el) return;
       if (!settings.sbSecret) { el.textContent = '⚠️ ⚙️設定の書き込みキーが必要です'; return; }
