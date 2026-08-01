@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.47.0
+// @version      1.48.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -1079,7 +1079,10 @@
   // チップから手で押させると、押し忘れ＝おかしい日付が残り続ける。リストが置かれたら勝手に直す。
   let _refixBusy = false;
   async function autoRefix() {
-    if (_refixBusy || !getSbKey() || !isWorker() || cycling || userBusy()) return;
+    // ★巡回中でも「対象から外す」処理だけは必ず行う。
+    //   起動直後はフル巡回が長く走るので、cyclingで弾くと永久に直らない。
+    //   crawlDoneから外しておけば、走っている巡回がそのまま拾って取り込み直す。
+    if (_refixBusy || !getSbKey() || !isWorker()) return;
     _refixBusy = true;
     try {
       const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_refix_buyers');
@@ -1091,7 +1094,7 @@
       // 適用済みの印としてリストを空にする（同じ会話を何度も開き直さない）
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_refix_buyers', v: { buyers: [], at: new Date().toISOString(), applied: buyers.length }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
       toast('🩹 日付を直すため ' + buyers.length + '件の会話を取り込み直します');
-      slowCrawl('new', false);
+      if (!cycling && !userBusy()) slowCrawl('new', false); // 巡回中なら、その巡回がそのまま拾う
     } catch (_) {} finally { _refixBusy = false; }
   }
   setTimeout(autoRefix, 20000);
