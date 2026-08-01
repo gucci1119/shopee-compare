@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.55.0
+// @version      1.56.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.55.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.56.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
 
   // ---- キャプチャ・バッファ ----
@@ -656,7 +656,9 @@
           for (const row of [].slice.call(side.children)) {
             const nm = (row.innerText || '').trim().split('\n')[0].trim();
             if (!nm || !/^[\w.]+$/.test(nm)) continue;
-            if (lastSig[nm] !== undefined && lastSig[nm] !== rowSig(row)) { target = row; tname = nm; break; } // 既知の会話の表示が変わった＝新着
+            // 表示が変わった＝新着。★未知の会話(lastSig無し)も対象にする。
+            //   「既知のみ」に絞っていたため、新しく上がってきた会話が優先されず取りこぼしていた。
+            if (lastSig[nm] !== rowSig(row)) { target = row; tname = nm; break; }
           }
           if (target) {
             cycleInfo = '⚡新着を優先'; updateChip();
@@ -1226,6 +1228,36 @@
   }
   setTimeout(autoRefix, 20000);
   setInterval(autoRefix, 60000);
+
+  // ---- 🔵 未返信は自動で未読に戻す ----
+  // 本人の運用：相手のメッセージで終わっている会話は、Shopeeチャット側でも未読にしておきたい
+  // （どこで見ても「未対応」が分かる状態にする）。ボタンを押させず勝手にやる。
+  // 済んだ会話は記録して二度やらない。相手から新しいメッセージが来たら記録から外れて再度対象になる。
+  let _unreadBusy = false;
+  async function autoMarkUnread() {
+    if (_unreadBusy || !getSbKey() || !isWorker() || cycling || userBusy()) return;
+    if (GM_getValue('autoUnread', true) === false) return;
+    _unreadBusy = true;
+    try {
+      const r = await sbReq('GET', 'chat_messages?select=buyer,direction,msg_time&order=msg_time.desc&limit=3000');
+      const rows = (r && Array.isArray(r.json)) ? r.json : [];
+      if (!rows.length) return;
+      const lastDir = {}, lastAt = {};
+      rows.forEach(m => { if (!(m.buyer in lastDir)) { lastDir[m.buyer] = m.direction; lastAt[m.buyer] = m.msg_time; } });
+      const done = GM_getValue('unreadDone', {}) || {};
+      // 相手で終わっている＋まだ未読にしていない（＝記録が無い／記録より新しいメッセージが来た）
+      const targets = Object.keys(lastDir).filter(b => lastDir[b] === 'in' && done[b] !== lastAt[b]).slice(0, 8);
+      if (!targets.length) return;
+      for (const b of targets) {
+        if (!isWorker() || userBusy()) break;
+        try { await markUnread(b); done[b] = lastAt[b]; } catch (_) { done[b] = lastAt[b]; } // 失敗も記録＝同じ会話で毎回詰まらない
+        await sleep(900);
+      }
+      GM_setValue('unreadDone', done);
+    } catch (_) {} finally { _unreadBusy = false; }
+  }
+  setTimeout(autoMarkUnread, 120000);
+  setInterval(autoMarkUnread, 600000);   // 10分ごと
 
   // ---- 📡 ポータルからの命令を受ける ----
   // ★本人はwebchatを触りたくない（ポータルに集約するのがゴール）。
