@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.00.0
+// @version      2.01.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.00.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.01.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1649,10 +1649,24 @@
       //   「スレッドが見つかりません」しか返らなかった（実際に発生）。
       //   答えられないタブは**消費せずに見送る**（もう一方のタブが答える）。
       if (String(v.cmd) === 'probe_thread' && !domHeaderInfo()) return;
+      // ★「この会話を取り込む」は、巡回役かどうかに関係なく**実際に開けるタブ**が引き受ける。
+      //   巡回役タブが裏で描画されていない等で開けないと、ポータルから何度押しても失敗していた。
+      //   一覧にその相手がいないタブは**消費せず見送る**（別のタブが拾う）。
+      if (String(v.cmd) === 'fetch_conv') {
+        if (!sideList()) return;
+        const want = norm(String(v.buyer || ''));
+        const here = [].slice.call(sideList().children).some(r => {
+          const nm = norm((r.innerText || '').split('\n')[0]);
+          return nm && (nm === want || want.indexOf(nm.replace(/[…\.]+$/, '')) === 0);
+        });
+        if (!here) { /* 画面に出ていなくてもスクロールで探せるので、開ける見込みがあるなら続行 */ }
+      }
       GM_setValue('lastCmdId', v.id);
       let out = '';
-      const probeOnly = /^probe_/.test(String(v.cmd || ''));
-      if (!probeOnly && !isWorker()) { GM_setValue('lastCmdId', ''); return; }  // 操作系は巡回役だけ（実行済み印も戻す）
+      // 調査(probe_*)と「この会話を取り込む」(fetch_conv)は、どのwebchatタブでも実行してよい。
+      // それ以外（巡回の開始/停止など）は巡回役タブだけ。
+      const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv';
+      if (!anyTabOk && !isWorker()) { GM_setValue('lastCmdId', ''); return; }
       try {
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
         else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
@@ -1697,7 +1711,8 @@
             sendingNow = true;
             try {
               await waitCrawlPause(6000).catch(() => {});
-              const row = await findRow(b);
+              let row = await findRow(b);
+              if (!row) { await sleep(800); row = await findRow(b); }   // 一覧の描画待ちで1回だけ再試行
               if (!row) out = '会話が一覧に見つかりません: ' + b;
               else { const cc0 = (rowInfo(row).cc) || CC; const ok = await openAndCapture(row, b, cc0, true); crawlDone.add(b); lastSig[b] = rowSig(row); persistCrawl(); await flushSb(true).catch(() => {}); out = ok ? ('取り込みました: ' + b) : ('開けませんでした: ' + b); }
             } catch (e) { out = '❌ ' + e.message; } finally { sendingNow = false; }
