@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.46.0
+// @version      1.47.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -1074,6 +1074,28 @@
     if (isWorker()) slowCrawl('new', true);
     else alert('このタブは🙋手動用です。巡回役タブ（🤖）で実行するか、5で巡回役に切り替えてください。\n※印は付けたので、巡回役タブの次の巡回でも直ります。');
   }
+
+  // 日付が怪しい会話の再取得を「自動で」行う。
+  // チップから手で押させると、押し忘れ＝おかしい日付が残り続ける。リストが置かれたら勝手に直す。
+  let _refixBusy = false;
+  async function autoRefix() {
+    if (_refixBusy || !getSbKey() || !isWorker() || cycling || userBusy()) return;
+    _refixBusy = true;
+    try {
+      const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_refix_buyers');
+      const v = r && r.json && r.json[0] && r.json[0].v;
+      const buyers = (v && Array.isArray(v.buyers)) ? v.buyers.filter(Boolean) : [];
+      if (!buyers.length) return;
+      buyers.forEach(b => { crawlDone.delete(b); delete lastSig[b]; });
+      persistCrawl();
+      // 適用済みの印としてリストを空にする（同じ会話を何度も開き直さない）
+      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_refix_buyers', v: { buyers: [], at: new Date().toISOString(), applied: buyers.length }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+      toast('🩹 日付を直すため ' + buyers.length + '件の会話を取り込み直します');
+      slowCrawl('new', false);
+    } catch (_) {} finally { _refixBusy = false; }
+  }
+  setTimeout(autoRefix, 20000);
+  setInterval(autoRefix, 60000);
 
   // ---- 🔍 スタンプパネルの調査（実装の前に"実物の構造"を報告させる。推測でコードを書かないため） ----
   // Shopeeは合成クリックを受け付けない＝Reactの onClick を直接呼ぶのが唯一の突破法（実証済み・[[shopee_portal_messages_chat]]）。
