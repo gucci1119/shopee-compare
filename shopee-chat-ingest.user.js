@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.70.0
+// @version      1.71.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,7 +155,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.70.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.71.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1560,13 +1560,15 @@
 
     const txt = out.join('\n');
     try { GM_setValue('lastStickerProbe', txt); } catch (_) {}
+    if (quiet) return txt;   // ★ポータルから呼ばれた時は結果を返す（返さないと空で戻り、調査が無駄になる）
     prompt('🔍 スタンプ／画像送信の調査結果（この内容をコピーして開発者に貼ってください）', txt);
+    return txt;
   }
 
   // ---- 🔍 未読バッジ / Mark as unread の調査（巡回で既読にしてしまう問題を解くため） ----
   // 目的：①一覧のどの行が「未読」かをDOMで見分けられるか ②「未読に戻す」をどう呼び出すか（右クリック？…メニュー？）
   //   ここでも推測でコードを書かず、実物の構造を報告させる。
-  async function probeUnread() {
+  async function probeUnread(quiet) {
     const out = [];
     const side = sideList();
     if (!side) { alert('会話一覧が見つかりません。webchatを開いてから実行してください。'); return; }
@@ -1598,7 +1600,9 @@
     }
     const txt = out.join('\n');
     try { GM_setValue('lastUnreadProbe', txt); } catch (_) {}
+    if (quiet) return txt;
     prompt('🔍 未読バッジ / Mark as unread 調査（コピーして開発者に貼ってください）', txt);
+    return txt;
   }
 
   // ---- 左下チップ + トースト ----
