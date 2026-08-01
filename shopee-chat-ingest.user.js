@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.13.0
+// @version      3.14.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.13.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.14.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2511,7 +2511,30 @@
         .filter(x => !/inquiring about|Collapse|Invite Order|問い合わせ/i.test(x));
       const title = lines.find(x => x.length > 12) || '';
       const price = lines.find(x => /[₱RM$฿₫R\$NT]\s?[\d.,]{3,}/.test(x)) || '';
-      return title ? { title: title.slice(0, 110), price: price.slice(0, 40) } : null;
+      // ★商品画像も取る（webchatは商品カードに小さい画像を出す）
+      const im = box.querySelector('img[src*="http"]');
+      return title ? { title: title.slice(0, 110), price: price.slice(0, 40), img: im ? im.src : '' } : null;
+    } catch (_) { return null; }
+  }
+  // ★バイヤー情報バー（地域・評価・注文数・ショップ）。webchatのヘッダに出ているものをそのまま持ってくる。
+  function grabProfile() {
+    try {
+      const box = [].slice.call(document.querySelectorAll('div'))
+        .filter(e => {
+          const t = String(e.innerText || '');
+          return /\([A-Z]{2}\)\s*\S+/.test(t) && t.length < 260 && e.getBoundingClientRect().top < 200 && e.getBoundingClientRect().width > 300;
+        })
+        .sort((a, b) => String(a.innerText || '').length - String(b.innerText || '').length)[0];
+      if (!box) return null;
+      const parts = String(box.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+      const out = { place: '', rate: '', orders: [], shop: '' };
+      parts.forEach(x => {
+        if (/^\([A-Z]{2}\)/.test(x)) out.shop = x;
+        else if (/^\d(\.\d)?$/.test(x) || /★/.test(x)) out.rate = x;
+        else if (/\(\s*\d+\s*orders?\s*\)/i.test(x)) out.orders.push(x);
+        else if (!out.place && x.length <= 40 && !/^[\w.]+$/.test(x)) out.place = x;
+      });
+      return (out.shop || out.place || out.orders.length) ? out : null;
     } catch (_) { return null; }
   }
   async function saveInterest(buyer) {
@@ -2521,7 +2544,7 @@
     try {
       const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_interest');
       const cur = (r && r.json && r.json[0] && r.json[0].v && r.json[0].v.byBuyer) || {};
-      cur[buyer] = { at: new Date().toISOString(), items: items || [], inquiry: inq || null, tab: (items && items._tab) || '' };
+      cur[buyer] = { at: new Date().toISOString(), items: items || [], inquiry: inq || null, profile: grabProfile() || null, tab: (items && items._tab) || '' };
       // 直近60人ぶんだけ保持（際限なく増やさない）
       const keys = Object.keys(cur);
       if (keys.length > 60) keys.sort((a, b) => (cur[a].at < cur[b].at ? -1 : 1)).slice(0, keys.length - 60).forEach(k => delete cur[k]);
