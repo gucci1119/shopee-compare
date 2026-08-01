@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.40.0
+// @version      1.41.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -532,10 +532,16 @@
     GM_setValue('crawlDoneList', []); GM_setValue('lastSigMap', {}); GM_setValue('didFullCycle', false);
     toast('巡回の記録をリセットしました（次の巡回で全会話を開き直します）');
   });
+  // ★履歴の遡り(=full巡回)だけを止めるスイッチ。
+  //   古い会話ほど後回しに舐めるので、残りわずかになると「もう要らない古い会話」だけが残る。
+  //   ここで止めても【新着の取り込み(new巡回・一覧スキャン)】と【ポータルからの返信送信】は動き続ける。
+  //   ※「5=手動用タブに切替」で止めると返信送信(pollOutbox)まで止まるので、それとは別物として用意している。
+  const backfillOff = () => GM_getValue('backfillOff', false) === true;
   // mode 'full'=未取込を全部 / 'new'=署名が変わった(新着)会話だけ。ゆっくり・操作中は待機・終わりに元の会話へ戻す
   async function slowCrawl(mode, manual) {
     if (cycling) { if (manual) toast('巡回中です…'); return; }
     if (!manual && GM_getValue('autoCrawl', true) === false) return;
+    if (mode === 'full' && !manual && backfillOff()) return; // 履歴の遡りは打ち切り済み（新着はこの下の new 巡回が拾う）
     cycling = true; let count = 0, stagnant = 0;
     _runStart = Date.now(); _runStartDone = crawlDone.size; reportCrawl(mode, true, ''); // 進捗の起点（ETA計算用）
     const startConv = (domHeaderInfo() || {}).buyer || '';
@@ -546,6 +552,8 @@
         // ★途中で「🙋手動用」に切り替えられたら即やめる（役割変更が効かず巡回が続いてしまう不具合の修正）。
         //   巡回役の権利を他タブに奪われた場合も同様にここで降りる。
         if (!isWorker()) { cycleInfo = ''; break; }
+        // ★走っている最中に「履歴の取り込みを終了」されたら、その場で止める（次の起動を待たせない）
+        if (mode === 'full' && !manual && backfillOff()) { cycleInfo = ''; break; }
         // ★返信が入ったら巡回はここで足を止める（会話の取り合いを防ぐ）。送信が終われば自動で再開。
         while (sendingNow) { crawlPaused = true; cycleInfo = '⏸返信を優先中'; updateChip(); await sleep(800); }
         crawlPaused = false;
@@ -1025,9 +1033,10 @@
         'このタブの役割: ' + (tabRole() === 'worker' ? '🤖 巡回役（自動で会話を開いて取り込む＋返信を送信）' : '🙋 手動用（巡回しない＝作業を邪魔しない）') + '\n' +
         '国: ' + (CC || '不明') + '／取り込み: ' + captured + '件（未送信 ' + msgBuffer.length + '）\n' +
         '経路: ' + (getSbKey() ? '✅ Supabase直（受信5秒・送信8秒／GAS不使用）' : '⚠️ GAS経由（受信15秒・送信60秒／キー未設定）') + '\n' +
-        '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') +
+        '即レスモード: ' + (keepAliveOn() ? '⚡ON（裏タブでもすぐ送信）' : 'OFF（裏タブだと送信が最大1分遅れ）') + '\n' +
+        '過去メッセージの取り込み: ' + (backfillOff() ? '⏹終了済み（新着のみ取り込み中）' : '🐢継続中') +
         (lastErr ? ('\n直近エラー: ' + lastErr) : '');
-      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n  8 = 🔍未読バッジ/Mark as unread を調査\n（空のままOK＝閉じる）', '');
+      const ans = prompt(status + '\n──────────────\n番号を入れてEnter：\n  1 = Supabaseキーを設定/変更（返信を有効化）\n  2 = ⚡即レスモード ON/OFF\n  3 = 巡回の記録をリセット（全会話を取り込み直す）\n  4 = 今すぐ送信（溜まった分を送る）\n  5 = このタブの役割を切替（🤖巡回役 ⇄ 🙋手動用）\n      ※webchatを2枚開き、裏を🤖巡回役・作業する方を🙋手動用にすると\n        巡回中でもチャット業務が止まりません（この設定はこのタブだけ）\n  6 = 📋一覧を今すぐスキャン（会話を開かずに全会話の最新状態を取得）\n  7 = 🔍スタンプパネルを調査（結果をコピーして開発者に渡す）\n  8 = 🔍未読バッジ/Mark as unread を調査\n  9 = ' + (backfillOff() ? '🐢過去メッセージの取り込みを再開する' : '⏹過去メッセージの取り込みを終了する（新着と返信は続きます）') + '\n（空のままOK＝閉じる）', '');
       const a = (ans || '').trim();
       if (a === '5') {
         const now = tabRole() === 'worker' ? 'manual' : 'worker';
@@ -1050,6 +1059,18 @@
       }
       else if (a === '7') probeStickers();
       else if (a === '8') probeUnread();
+      else if (a === '9') {
+        const off = backfillOff(); GM_setValue('backfillOff', !off);
+        if (!off) {
+          GM_setValue('didFullCycle', true);              // 遡りは打ち切り＝完了扱い（起動のたびに再開しない）
+          try { reportCrawl('full', false, ''); } catch (_) {}  // ポータルの進捗バーを消す
+          toast('⏹ 過去メッセージの取り込みを終了しました（新着の取り込みと返信の送信は続きます）');
+        } else {
+          toast('🐢 過去メッセージの取り込みを再開します');
+          if (isWorker() && !cycling) slowCrawl('full', false);
+        }
+        updateChip();
+      }
     });
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
