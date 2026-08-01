@@ -7316,7 +7316,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `</div>`;
   }
   // ---------------- 💬 メッセージ（Shopeeチャット＋WhatsApp一元・分析） ----------------
-  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set(), showN: 80, q: '' };
+  const msg = { open: null, source: 'all', unrepliedOnly: false, draft: {}, lastSync: '', notifiedIds: new Set(), showN: 80, q: '', ptabMain: 'Product' };
   // 取り込み側の日付解析ミスで「2999/6/4」等の異常日付が入ることがある（→その会話が一覧の先頭に固定され続ける）。
   // 表示・並び替えでは未来(1日超)を信用しない＝synced_at（取込時刻）に読み替える。DBの値自体は触らない。
   function msgTime(m) {
@@ -7659,6 +7659,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderMessages(useCache) {
     const body = document.getElementById('msg-body'); if (!body) return;
     { const rb = document.getElementById('msg-refresh'); if (rb && !rb._wired) { rb._wired = true; rb.addEventListener('click', () => renderMessages()); } }
+    // ★メッセージ画面を開いたら、まず会話一覧を取り直すよう依頼する（本人要望）。
+    //   一覧は会話を開かずに読めるので軽い。これで「新しい会話が出てこない」が無くなる。2分に1回まで。
+    try {
+      if (settings.sbSecret && Date.now() - (msg._listAt || 0) > 120000) {
+        msg._listAt = Date.now();
+        sbUpsert('app_kv', [{ k: 'chat_cmd2', v: { id: 'lst' + Date.now(), cmd: 'rescan_list', at: new Date().toISOString() }, updated_at: new Date().toISOString() }]).catch(() => {});
+      }
+    } catch (_) {}
     // 初回だけ「読み込み中」。既に一覧が出ている更新時は消さず、裏で取得→中身だけ差し替え（一瞬空にしない）
     if (!document.getElementById('msg-list')) body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows;
@@ -7965,9 +7973,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          <div style="margin-bottom:12px"><button id="msg-refetch" class="smd-btn" style="font-size:11px;padding:3px 9px" title="この会話をもう一度Shopeeから読み直します（本文が欠けている・取り込みに失敗した時に使います）">🔁 この会話を取り込み直す</button>
            <span id="msg-refetch-stat" class="smd-dim" style="font-size:10.5px;margin-left:6px"></span></div>
          <div style="font-size:11.5px;font-weight:700;margin:10px 0 5px">👀 この人が見ている商品</div>
-         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:5px">
-           ${['Product', 'Order', 'Voucher', 'Shortcut', 'All', 'Buyer Interest', 'Recommended'].map(t => `<button class="msg-ptab smd-btn" data-t="${esc(t)}" style="font-size:10px;padding:2px 7px" title="Shopee側でこのタブに切り替えて取り直します">${esc(t)}</button>`).join('')}
+         <!-- ★Shopeeの右パネルは2段構造：上段(Product/Order/Voucher/Shortcut)を選ぶと、下段の絞り込みが入れ替わる。
+              横1列に並べると別物どうしが同列に見える（本人指摘）。上段の選択で下段を出し分ける。 -->
+         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">
+           ${['Product', 'Order', 'Voucher', 'Shortcut'].map(t => `<button class="msg-ptab smd-btn${msg.ptabMain === t ? ' smd-btn-on' : ''}" data-t="${esc(t)}" data-main="1" style="font-size:10px;padding:2px 7px${msg.ptabMain === t ? ';background:#ee4d2d;color:#fff;border-color:#ee4d2d' : ''}" title="Shopee側でこのタブに切り替えて取り直します">${esc(t)}</button>`).join('')}
          </div>
+         ${(function () {
+           const SUB = { Product: ['All', 'Buyer Interest', 'Recommended'], Order: ['All', 'Unpaid', 'To Ship', 'Shipping', 'Completed', 'Cancellation', 'Return Refund'], Voucher: ['Ongoing', 'Upcoming'], Shortcut: [] };
+           const subs = SUB[msg.ptabMain] || SUB.Product;
+           if (!subs.length) return '';
+           return `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:5px;padding-left:9px;border-left:2px solid #eee">
+             <span class="smd-dim" style="font-size:9.5px;align-self:center">${esc(msg.ptabMain || 'Product')}の中</span>
+             ${subs.map(t => `<button class="msg-ptab smd-btn" data-t="${esc(t)}" style="font-size:10px;padding:2px 7px" title="Shopeeの ${esc(msg.ptabMain || 'Product')} タブの中の絞り込みです">${esc(t)}</button>`).join('')}
+           </div>`;
+         })()}
          <div id="msg-side-interest" class="smd-dim" style="font-size:11px;margin-bottom:12px">—</div>
          <div style="font-size:11.5px;font-weight:700;margin-bottom:5px">🧭 対応ガイド</div>
          <div id="msg-side-guide" class="smd-dim" style="font-size:11px">分岐をたどって返信文を作れます</div>
@@ -8215,17 +8234,41 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const sg = document.getElementById('msg-side-guide'), gb = document.getElementById('msg-guidebox');
       if (sg && gb) { gb.style.display = ''; gb.style.margin = '0'; sg.replaceWith(gb); try { drawGuideBox(); } catch (_) {} }
     } catch (_) {}
-    // ★本文が無い会話を開いたら、その場で取り込みを依頼する（巡回の順番を待たない）。
-    //   一覧にしか無い会話を開いて「まだ取り込まれていません」で終わらせない。
+    // ★会話を開いたら、その相手の最新をその場で読み直す（本人要望「チャット開いた時に自動でそのバイヤーの最新から読み込めば？」）。
+    //   巡回の順番を待たないので「送ったばかりのやり取りが出ない」が無くなる。
+    //   同じ相手を続けて開いた時に何度も走らせないよう、1人あたり3分に1回まで。
     try {
-      const needFetch = sel && sel.buyer && !(msg.rows || []).some(r => r.buyer === sel.buyer);
-      if (needFetch && settings.sbSecret) {
-        msg._fetching = msg._fetching || {};
-        if (!msg._fetching[sel.buyer]) {
-          msg._fetching[sel.buyer] = 1;
-          const ph = body.querySelector('#msg-pane .smd-dim');
-          if (ph) ph.innerHTML = '📥 <b>この会話の本文を取り込んでいます…</b><br><span style="font-size:11.5px">数十秒かかることがあります。取り込めたら自動で表示されます。</span>';
-          sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id: 'cmd|' + Date.now(), cmd: 'fetch_conv', buyer: sel.buyer, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]).catch(() => {});
+      const b = sel && sel.buyer;
+      if (b && settings.sbSecret) {
+        msg._fetchAt = msg._fetchAt || {};
+        const none = !(msg.rows || []).some(r => r.buyer === b);
+        if (Date.now() - (msg._fetchAt[b] || 0) > 180000) {
+          msg._fetchAt[b] = Date.now();
+          if (none) {
+            const ph = body.querySelector('#msg-pane .smd-dim');
+            if (ph) ph.innerHTML = '📥 <b>この会話の本文を取り込んでいます…</b><br><span style="font-size:11.5px">数十秒かかることがあります。取り込めたら自動で表示されます。</span>';
+          } else {
+            const st0 = document.getElementById('msg-refetch-stat');
+            if (st0) { st0.textContent = '📥 最新を読み込み中…'; st0.style.color = '#888'; }
+          }
+          const cid = 'cmd|' + Date.now();
+          sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id: cid, cmd: 'fetch_conv', buyer: b, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]).catch(() => {});
+          // 取り込めたら黙って画面を更新する（押さなくても最新になる）
+          let n0 = 0;
+          const t0 = setInterval(async () => {
+            n0++;
+            try {
+              const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+              const v = ((r || [])[0] || {}).v;
+              if (v && v.id === cid) {
+                clearInterval(t0);
+                const st1 = document.getElementById('msg-refetch-stat');
+                if (st1) { st1.textContent = String(v.text || ''); st1.style.color = /失敗|見つかり|❌/.test(String(v.text)) ? '#d93025' : '#1a7f37'; }
+                renderMessages(true);
+              }
+            } catch (_) {}
+            if (n0 > 30) clearInterval(t0);
+          }, 3000);
         }
       }
     } catch (_) {}
@@ -8297,6 +8340,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const el = document.getElementById('msg-side-interest'); if (!el) return;
       if (!settings.sbSecret) { el.textContent = '⚠️ ⚙️設定の書き込みキーが必要です'; return; }
       const t = b.dataset.t;
+      if (b.dataset.main) { msg.ptabMain = t; }   // 上段を選ぶと下段の絞り込みが入れ替わる（Shopeeと同じ）
       el.textContent = '🔀「' + t + '」に切り替えています…';
       const id = 'cmd|' + Date.now();
       try {

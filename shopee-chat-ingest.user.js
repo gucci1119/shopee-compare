@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.12.0
+// @version      2.20.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.12.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.20.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -489,7 +489,11 @@
     if ((m = low.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) { const d = mk(); d.setDate(1); d.setMonth(+m[2] - 1); if (m[3]) d.setFullYear(+m[3] < 100 ? 2000 + +m[3] : +m[3]); d.setDate(+m[1]); adjYear(d); return { day: d, rest: s.slice(m[0].length).trim() }; }
     return null;
   }
-  function domExtract() {
+  // ctx＝「上から下へ通しで読む」時に日付を引き継ぐ入れ物 {day:Date|null}。
+  // ★これが無いと、区切り(Today/23 Jul…)が画面外へ出た瞬間に**その下の行が全部捨てられる**。
+  //   仮想スクロールは画面ぶんしか描画しないので、最下部（＝最新の発言）では区切りはまず見えない。
+  //   実測：スレッド全高24931pxに対し描画9行。だから「最新が入らない／古い日付で止まる」が起きていた。
+  function domExtract(ctx) {
     const h = domHeaderInfo(); if (!h) return [];
     // ★巡回時のみ：reactOpenで会話を開き、ヘッダ先頭が狙い名と一致することを確認済みの時だけ captureAs をセット。
     //   その時は一覧行由来のクリーンな名前/国で確定する（ヘッダは住所連結で抽出が不安定なため）。検証を通った時
@@ -509,7 +513,7 @@
     const conv = h.cc + ':' + h.buyer;
     const nowIso = new Date().toISOString();
     const rows = [];
-    let curDay = null; // スレッドを上（古い）→下（新しい）に見る間に日付区切りで更新
+    let curDay = (ctx && ctx.day) || null; // スレッドを上（古い）→下（新しい）に見る間に日付区切りで更新（ctxで画面をまたいで引き継ぐ）
     // ★日付を推測で書かないためのガード（本人指摘「読み込む前に書き込みしてない？ローディングが長い時がある」）
     //   Shopeeは各メッセージに日付を持たず、スレッド途中の「Today/Tuesday/19 Jun」等の区切りで日付が決まる。
     //   読み込みが遅くて区切りがまだ描画されていないと、**古いメッセージを「今日」として保存**してしまい、
@@ -554,31 +558,28 @@
       }
     } catch (_) {}
     kids.forEach((row, _idx) => {
-      // 区切りより上＝その区切りの日付より古い。日付が確定できないので取り込まない（誤って「今日」にしない）
-      if (firstSepIdx >= 0 && _idx < firstSepIdx) return;
+      // 区切りより上＝その区切りの日付より古い。日付が確定できないので取り込まない（誤って「今日」にしない）。
+      // ★ただし ctx で日付を引き継いでいる時（上から下へ通しで読んでいる最中）は、
+      //   この画面より上は**前の画面で読み終えた続き**なので、引き継いだ日付で確定できる。
+      if (firstSepIdx >= 0 && _idx < firstSepIdx && !(ctx && ctx.day)) return;
       const img = row.querySelector('img[src*="http"]');
       const imgUrl = img ? img.src : '';
       const raw = (row.innerText || '').trim(); if (!raw && !imgUrl) return;
       const tm = (raw.match(/(\d{1,2}:\d{2})\s*$/) || [])[1] || '';
-      let body = raw.replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+      // ★1つの行に「日付区切り＋本文」が同居することがある（仮想スクロール）。
+      //   以前はここで先に \s+→空白 に潰していたため改行が消え、下の行別処理が**一度も動いていなかった**。
+      const _keep = [];
+      raw.split('\n').map(x => x.trim()).filter(Boolean).forEach(ln => {
+        const t2 = ln.replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+        const pl = t2 && t2.length <= 26 ? parseDayTok(t2) : null;
+        if (pl && !pl.rest) { curDay = pl.day; return; }   // この行は日付区切り＝本文から外す
+        _keep.push(ln);
+      });
+      let body = _keep.join(' ').replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
       // 日付区切り検出：①行全体が日付だけ（rest空）＝区切り行→curDay更新してスキップ。②先頭に日付＋本文＝Shopeeが区切りと
       //   1件目を1行にまとめた場合。ただし「Monday …」「Today …」等の“単語始まりの普通の文”を誤って剥がさないよう、
       //   先頭剥がしは【数字を含む日付（"9 Jun"/"18/06"）】に限定する。
       if (body) {
-        // ★まず「行の中の各行」を見る。仮想スクロールでは区切りと本文が同じ行に同居し、
-        //   行まるごとが日付の時しか拾えていなかった（実測：区切り認識0件＝日付が全部推測になっていた）。
-        const lines = String(body).split('\n').map(x => x.trim()).filter(Boolean);
-        if (lines.length > 1) {
-          const keep = [];
-          for (const ln of lines) {
-            const t2 = ln.replace(/\s*\d{1,2}:\d{2}\s*$/, '').trim();
-            const pl = t2 && t2.length <= 26 ? parseDayTok(t2) : null;
-            if (pl && !pl.rest) { curDay = pl.day; continue; }   // この行は日付区切り＝本文から外す
-            keep.push(ln);
-          }
-          body = keep.join('\n').trim();
-          if (!body) return;
-        }
         const pdt = parseDayTok(body);
         if (pdt) {
           if (!pdt.rest) { curDay = pdt.day; return; }
@@ -683,9 +684,12 @@
     });
     return rows;
   }
-  function domSweep() {
+  let lastNoDate = 0;   // 直近のsweepで「日付が確定できず捨てた行」の数（0でなければ通し読みが要る合図）
+  function domSweep(ctx) {
     try {
-      const rows = domExtract();
+      const before = skipNoDate;
+      const rows = domExtract(ctx);
+      lastNoDate = skipNoDate - before;
       let added = 0;
       rows.forEach(m => { if (!seenMsg.has(m.id)) { seenMsg.add(m.id); msgBuffer.push(m); added++; } });
       if (seenMsg.size > 3000) seenMsg.clear();
@@ -700,7 +704,18 @@
   //     本人はときどきwebchatで直接返信する。その最中は巡回が止まっており、
   //     ここも止めていると**手で返した分がどこにも取り込まれない**空白ができていた。
   //     待機中は会話を切り替えないので、切替時の混線は起きない。
-  setInterval(() => { if (isWebchat() && (!cycling || idleParked)) domSweep(); }, 2500);
+  //   ★さらに v2.20.0：この定期sweepで「日付が確定できず捨てた行」が出たら、
+  //     それは**区切りが画面外にある**というだけなので、通し読み(sweepThread)を1回走らせて必ず拾う。
+  //     （最新の発言がいつまでも入らない原因がこれだった。放置＝取りこぼし）
+  let autoSweepAt = 0;
+  setInterval(() => {
+    if (!isWebchat() || (cycling && !idleParked)) return;
+    domSweep();
+    if (lastNoDate > 0 && isWorker() && !histBusy && Date.now() - autoSweepAt > 20000) {
+      autoSweepAt = Date.now();
+      sweepThread(false).catch(() => {});
+    }
+  }, 2500);
 
   // ---- 過去履歴の自動取得（会話を開いたら上まで遡ってsweep→最新に戻す） ----
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -709,21 +724,55 @@
     let el = null, maxW = 600; grids.forEach(g => { const r = g.getBoundingClientRect(); if (r.width > maxW && r.left > 200) { maxW = r.width; el = g; } });
     return el;
   }
+  // 画面内に日付区切り（Today/23 Jul…）が描画されているか
+  function seeSep() {
+    const th = (domHeaderInfo() || {}).thread; if (!th) return false;
+    return [].slice.call(th.children).some(k => String(k.innerText || '').split('\n').some(ln => {
+      const t = ln.trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 26) return false;
+      const pd = parseDayTok(t); return !!(pd && !pd.rest);
+    }));
+  }
+  // ★★スレッドの「通し読み」（v2.20.0）
+  //   仮想スクロールは画面ぶんしか描画しない。日付区切りが画面外へ出た瞬間、その下の行は
+  //   日付が確定できず**全部捨てられていた**（＝最新の発言がいつまでも入らない／古い日付で止まる）。
+  //   → ①区切りが見えるところまで上へ戻る ②そこから**下へ順に**読み、日付を ctx で引き継ぐ
+  //   これで「区切り→最下部（最新）」まで一度も日付を見失わない。
+  async function sweepThread(deep) {
+    const el = threadScroller(); if (!el) return;
+    const ctx = { day: null };
+    // ① 上へ：deep＝先頭まで／通常＝区切りが見えるまで（最大12画面ぶん）
+    let guard = 0, prevH = -1, stable = 0;
+    while (guard++ < (deep ? 80 : 14)) {
+      domSweep();
+      if (!deep && seeSep()) break;
+      if (el.scrollTop <= 3) {
+        if (el.scrollHeight === prevH) { if (++stable >= 2) break; } else stable = 0;
+        prevH = el.scrollHeight;
+      }
+      const before = el.scrollTop;
+      rvScroll(el, Math.max(0, before - Math.max(400, Math.round(el.clientHeight * 0.7))));
+      await sleep(deep ? 450 : 220);
+      if (!deep && el.scrollTop >= before - 5) break;   // これ以上さかのぼれない
+    }
+    // ② 下へ：日付を引き継ぎながら最下部まで
+    guard = 0;
+    while (guard++ < 200) {
+      domSweep(ctx);
+      const before = el.scrollTop;
+      if (before + el.clientHeight >= el.scrollHeight - 5) break;
+      rvScroll(el, before + Math.max(300, Math.round(el.clientHeight * 0.6)));
+      await sleep(deep ? 260 : 200);
+      if (el.scrollTop <= before + 5) break;
+    }
+    rvScroll(el, el.scrollHeight);
+    await sleep(220);
+    domSweep(ctx);          // 最下部（＝最新）を、引き継いだ日付で確実に取り込む
+  }
   let histBusy = false, histFor = '';
   async function loadHistory() {
     if (histBusy) return; histBusy = true;
-    try {
-      const el = threadScroller(); if (!el) return;
-      let guard = 0, prevH = -1, stable = 0;
-      while (guard++ < 60) {
-        domSweep();
-        if (el.scrollTop <= 3) { if (el.scrollHeight === prevH) { if (++stable >= 2) break; } else stable = 0; prevH = el.scrollHeight; }
-        rvScroll(el, Math.max(0, el.scrollTop - 500));
-        await sleep(600);
-      }
-      domSweep();
-      rvScroll(el, el.scrollHeight); // 最新へ戻す（閲覧を邪魔しない）
-    } catch (_) {} finally { histBusy = false; }
+    try { await sweepThread(true); } catch (_) {} finally { histBusy = false; }
   }
   // 会話が切り替わったら一度だけ履歴を遡る
   setInterval(() => {
@@ -775,31 +824,7 @@
     // スレッドが描画されるまで待つ（最大~2s）＝開いた直後の取りこぼし防止
     for (let w = 0; w < 8; w++) { if (domHeaderInfo()) break; await sleep(250); }
     domSweep();
-    const el = threadScroller(); if (!el) return;
-    // 浅い（deep=false）＝現在画面＋1段だけサッと。全巡回はこれで速く全バイヤーを登録（履歴は常時sweep/新着sweepで後から貯まる）
-    // ★日付区切りが見えるまで上へ遡る。v1.92で「区切りが無い行は書かない」ようにしたため、
-    //   区切りを跨がずに終わると**何も取り込めない**。逆に、区切りが1つでも見えていれば
-    //   そこから下は日付が確定できる。だから「区切りが見えるまで少しずつ上へ」進む。
-    const seeSep = () => {
-      const th = (domHeaderInfo() || {}).thread; if (!th) return false;
-      return [].slice.call(th.children).some(k => {
-        const t = (k.innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
-        if (!t || t.length > 24) return false;
-        const pd = parseDayTok(t); return !!(pd && !pd.rest);
-      });
-    };
-    const passes = deep ? 8 : 4;
-    for (let k = 0; k < passes; k++) {
-      domSweep();
-      if (seeSep() && k >= (deep ? 3 : 1)) break;   // 区切りが見えていて、ある程度遡ったら終わり
-      const before = el.scrollTop;
-      rvScroll(el, Math.max(0, before - 700));
-      await sleep(deep ? 260 : 200);
-      if (el.scrollTop >= before - 5) break;        // これ以上さかのぼれない
-    }
-    domSweep();
-    rvScroll(el, el.scrollHeight);
-    await sleep(150); domSweep();                    // 最下部（最新）も必ず読む
+    await sweepThread(deep);   // ★区切り→最下部の通し読み（v2.20.0）
   }
   // ---- ★安全な自動巡回（v1.10.0）----
   //   合成クリックではShopeeのスレッドは切替わらない（本物クリックのみ）が、実証の結果
@@ -1800,10 +1825,16 @@
     if (_cmdBusy || !getSbKey() || !isWebchat()) return;
     _cmdBusy = true;
     try {
-      const r = await sbReq('GET', 'app_kv?select=v&k=eq.chat_cmd');
-      const v = r && r.json && r.json[0] && r.json[0].v;
-      if (!v || !v.id || !v.cmd) return;
-      if (GM_getValue('lastCmdId', '') === v.id) return;   // 実行済み
+      // ★命令の置き場は2つ。chat_cmd＝会話を開く等の重い操作／chat_cmd2＝一覧の読み直し等の軽い操作。
+      //   1つしか無かった頃は「会話を開いた瞬間の取り込み」と「一覧の取り直し」が同時に来ると
+      //   後から書いた方が前のを消してしまい、片方が実行されなかった。
+      const r = await sbReq('GET', 'app_kv?select=k,v&k=in.(chat_cmd,chat_cmd2)');
+      const list = (r && r.json) || [];
+      let done = []; try { done = JSON.parse(GM_getValue('lastCmdIds', '[]')) || []; } catch (_) { done = []; }
+      if (GM_getValue('lastCmdId', '')) done.push(String(GM_getValue('lastCmdId', '')));  // 旧版の記録も尊重
+      let v = null;
+      for (const row of list) { const x = row && row.v; if (x && x.id && x.cmd && done.indexOf(String(x.id)) < 0) { v = x; if (row.k === 'chat_cmd') break; } }
+      if (!v) return;
       // ★スレッドを見る調査は「会話を開いているタブ」しか答えられない。
       //   webchatタブが2枚あると、開いていない方が先に命令を消費して
       //   「スレッドが見つかりません」しか返らなかった（実際に発生）。
@@ -1821,12 +1852,20 @@
         });
         if (!here) { /* 画面に出ていなくてもスクロールで探せるので、開ける見込みがあるなら続行 */ }
       }
-      GM_setValue('lastCmdId', v.id);
+      // 実行済みID記録（直近30件ぶんを保持＝2つの置き場を混ぜても取り違えない）
+      const markDone = (add) => {
+        let d = []; try { d = JSON.parse(GM_getValue('lastCmdIds', '[]')) || []; } catch (_) { d = []; }
+        d = d.filter(x => String(x) !== String(v.id));
+        if (add) d.push(String(v.id));
+        else if (String(GM_getValue('lastCmdId', '')) === String(v.id)) GM_setValue('lastCmdId', '');
+        GM_setValue('lastCmdIds', JSON.stringify(d.slice(-40)));
+      };
+      markDone(true);
       let out = '';
       // 調査(probe_*)と「この会話を取り込む」(fetch_conv)は、どのwebchatタブでも実行してよい。
       // それ以外（巡回の開始/停止など）は巡回役タブだけ。
       const anyTabOk = /^probe_/.test(String(v.cmd || '')) || String(v.cmd) === 'fetch_conv' || String(v.cmd) === 'panel_tab';
-      if (!anyTabOk && !isWorker()) { GM_setValue('lastCmdId', ''); return; }
+      if (!anyTabOk && !isWorker()) { markDone(false); return; }
       try {
         if (v.cmd === 'backfill_off') { GM_setValue('backfillOff', true); GM_setValue('didFullCycle', true); reportCrawl('full', false, ''); out = '過去メッセージの取り込みを終了しました（新着と返信は継続）'; }
         else if (v.cmd === 'backfill_on') { GM_setValue('backfillOff', false); out = '過去メッセージの取り込みを再開します'; if (!cycling) slowCrawl('full', false); }
