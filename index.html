@@ -7812,6 +7812,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML =
       `<div id="msg-alert" style="display:none;margin:0 0 8px;max-width:1000px;padding:9px 13px;border-radius:9px;background:#fdecea;border:1px solid #f5c6c1;font-size:12.5px;line-height:1.7"></div>` +
       `<div id="msg-crawl" class="tool-card" style="display:none;margin:0 0 8px;max-width:1000px;padding:8px 12px;background:#f2f7ff;border-color:#d6e4ff"></div>` +
+      // 取り込みツールの操作をここに集約する（webchatのタブを触らなくて済むように）
+      `<div class="tool-card" style="margin:0 0 8px;max-width:1000px;padding:8px 12px">
+         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px">
+           <b style="font-size:12px">🔧 取り込みツールの操作</b>
+           <span class="smd-dim">（Shopeeチャットのタブを触らずに、ここから指示できます）</span>
+           <button class="msg-cmd smd-btn" data-cmd="backfill_off" style="font-size:11px;padding:2px 9px" title="過去メッセージの遡りを止めます。新着の取り込みと返信はそのまま続きます。">⏹ 過去の取り込みを止める</button>
+           <button class="msg-cmd smd-btn" data-cmd="backfill_on" style="font-size:11px;padding:2px 9px" title="過去メッセージの遡りを再開します。">🐢 過去の取り込みを再開</button>
+           <button class="msg-cmd smd-btn" data-cmd="rescan_list" style="font-size:11px;padding:2px 9px" title="会話を開かずに、一覧の最新状態だけを取り直します。">📋 一覧を今すぐ取り直す</button>
+           <span id="msg-cmd-stat" class="smd-dim" style="margin-left:auto"></span>
+         </div>
+       </div>` +
       `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;max-width:1000px">${kpi('会話', totalConv, '直近の全会話')}${kpi('未返信（7日以内）', unreplied, (over9 ? '⚠️ 9時間超が ' + over9 + '件' : '相手からの最後に未返信') + (staleN ? '　※7日超の古い未返信 ' + staleN + '件は除外' : ''), unreplied ? '#d93025' : '#1a7f37')}${kpi('直近24h', recent + '件', 'メッセージ数')}${kpi('平均初回返信', avgReplyH != null ? avgReplyH.toFixed(1) + 'h' : '—', gaps.length + '会話から')}${kpi('ソース', Object.entries(bySource).map(([k, v]) => `${k === 'whatsapp' ? 'WA' : 'Shopee'}${v}`).join(' / ') || '—', '会話の内訳')}</div>` +
       `<div class="tool-card" style="margin:0 0 8px;max-width:1000px;padding:8px 12px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12px">絞り込み:</span>` +
       ['all|全て', 'shopee|Shopee', 'whatsapp|WhatsApp'].map(s => { const [v, l] = s.split('|'); return `<button class="msg-src smd-btn" data-v="${v}" style="font-size:11px;padding:3px 10px${msg.source === v ? ';background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${l}</button>`; }).join('') +
@@ -7936,6 +7947,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         });
       }
     }
+    // 🔧 取り込みツールへの指示：app_kv.chat_cmd に置くと、webchat側のツールが拾って実行し結果を返す
+    body.querySelectorAll('.msg-cmd').forEach(b => b.addEventListener('click', async () => {
+      const cmd = b.dataset.cmd, st = document.getElementById('msg-cmd-stat');
+      if (!settings.sbSecret) { if (st) { st.textContent = '⚠️ ⚙️設定の書き込みキーが必要です'; st.style.color = '#d93025'; } return; }
+      const id = 'cmd|' + Date.now();
+      if (st) { st.textContent = '📤 指示中…'; st.style.color = '#888'; }
+      try {
+        await sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id, cmd, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+        // 結果が返るまで待つ（最大60秒）。返らない＝ツールが動いていない、を隠さず出す。
+        let n = 0;
+        const t = setInterval(async () => {
+          n++;
+          try {
+            const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+            const v = ((r || [])[0] || {}).v;
+            if (v && v.id === id) { clearInterval(t); if (st) { st.textContent = '✅ ' + (v.text || '実行しました'); st.style.color = '#1a7f37'; } return; }
+          } catch (_) {}
+          if (n > 20) { clearInterval(t); if (st) { st.textContent = '⚠️ 返事がありません（Shopeeチャットのタブが開いているか確認してください）'; st.style.color = '#b45309'; } }
+        }, 3000);
+      } catch (e) { if (st) { st.textContent = '❌ ' + e.message; st.style.color = '#d93025'; } }
+    }));
     // 通知の許可を一度だけ求める
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (_) {}
     // ★リアルタイム更新：この画面を開いている間だけ、新着(synced_at)を検知して反映＋通知（常時ポーリングはしない）
