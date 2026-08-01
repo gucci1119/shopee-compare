@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      1.81.0
+// @version      1.82.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -155,12 +155,12 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '1.81.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '1.82.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
   // → 本人が1回だけ手で Unread を押し、その時に飛ぶAPIを捕まえて、以後は直接呼ぶ。
-  const ACT = { rows: [], on: true };
+  const ACT = { rows: [], on: GM_getValue('actProbe', false) === true };
   function actSample(method, url, body) {
     try {
       if (!ACT.on) return;
@@ -175,7 +175,7 @@
   }
   let idleParked = false; // 巡回が「操作中で待機」して止まっている（＝画面が動かない）状態。使用箇所より前に置く（TDZ回避）
   const UNREAD_DIAG = []; // 未読に戻せなかった時の実測メモ（推測で直さないため）
-  const WIRE = { on: true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
+  const WIRE = { on: GM_getValue('wireProbe', false) === true, rows: [], sent: false, stat: { http: 0, wsText: 0, wsBlob: 0, wsBin: 0, kept: 0, noRun: 0 }, urls: [], workers: [] };
 
   // ---- キャプチャ・バッファ ----
   const MAX_BODY = 200000;      // 1応答の上限（肥大ガード）
@@ -259,7 +259,7 @@
   }
   // ★0件でも必ず書く。書かないと「フックに来ていない」のか「可読部分が無い」のかが永久に分からない。
   async function wireFlush() {
-    if (!getSbKey()) return;
+    if (!WIRE.on || !getSbKey()) return;
     WIRE.sent = true;
     try {
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_wire_probe', v: { at: new Date().toISOString(), cc: CC, count: WIRE.rows.length, stat: WIRE.stat, urls: WIRE.urls, workers: WIRE.workers, rows: WIRE.rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
@@ -268,7 +268,7 @@
   // 押した操作のリクエスト記録を30秒ごとに送る（本人が手でUnreadを押したら、その直後に拾える）
   setInterval(async () => {
     try {
-      if (!getSbKey() || !ACT.rows.length) return;
+      if (!ACT.on || !getSbKey() || !ACT.rows.length) return;
       const rows = ACT.rows.slice(-25);
       await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_api_probe', v: { at: new Date().toISOString(), cc: CC, rows: rows }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal');
     } catch (_) {}
