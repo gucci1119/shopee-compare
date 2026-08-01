@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.11.0
+// @version      2.12.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.11.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.12.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1899,6 +1899,13 @@
             sendingNow = true;
             try {
               await waitCrawlPause(6000).catch(() => {});
+              // ★「取り込み直す」を本当に効かせる：同じメッセージは一度送ったら二度送らない仕組み(seenMsg)が
+              //   あるため、DB側を消しても**再送されず0件**になっていた（実際に発生）。
+              //   指示された会話のぶんだけ記録を消してから読み直す。
+              try {
+                const pre = 'dom|';
+                [...seenMsg].forEach(k => { if (String(k).indexOf(pre) === 0 && String(k).indexOf('|' + b + '|') > 0) seenMsg.delete(k); });
+              } catch (_) {}
               let row = await findRow(b);
               if (!row) { await sleep(800); row = await findRow(b); }   // 一覧の描画待ちで1回だけ再試行
               if (!row) out = '会話が一覧に見つかりません: ' + b + '（一覧の行数=' + (function(){ try { const l = sideList(); return l ? l.children.length : 'なし'; } catch (_) { return '?'; } })() + '）';
