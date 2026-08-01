@@ -7333,15 +7333,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     {
       const al = document.getElementById('msg-alert');
       if (al) {
-        // 取り込みの新しさ＝読み込んだメッセージの最終取込時刻（synced_at）
+        // 取り込みの新しさ＝**DBの最新の取込時刻を直接引く**。
+        //   ※画面が持っている行の synced_at では駄目：既存メッセージの上書き（取り直し）は
+        //     「新しい行」として画面に入ってこないため、取り込みが動いていても古いままに見えて誤報になる（実際に発生）。
         let lastSync = 0;
-        try { (msg.rows || []).forEach(m => { const t = m.synced_at ? Date.parse(m.synced_at) : 0; if (t > lastSync) lastSync = t; }); } catch (_) {}
+        try { const r = await sbGetAll('chat_messages', 'select=synced_at&order=synced_at.desc&limit=1'); const s = ((r || [])[0] || {}).synced_at; if (s) lastSync = Date.parse(s); } catch (_) {}
         const ingestMin = lastSync ? Math.round((Date.now() - lastSync) / 60000) : null;
+        // 巡回中は「取り込みが進んでいない」警告を出さない（進行中は当然どんどん入っている）
+        let crawling = false;
+        try { const cp = await sbGetAll('app_kv', 'select=v&k=eq.chat_crawl_progress'); const v = ((cp || [])[0] || {}).v; crawling = !!(v && v.running && v.at && (Date.now() - Date.parse(v.at)) < 180000); } catch (_) {}
         if (age > 300) { // 5分以上ハートビートが無い＝送信役タブが動いていない
           al.style.display = '';
           al.innerHTML = `<b style="color:#c0392b">⚠️ 取り込みツールが動いていません</b>　この画面の内容は<b>更新されていません</b>（新着が入らず、返信も送れません）。<br>
             <span class="smd-dim">直し方：<b>Shopeeチャット(webchat)のタブを開いてリロード</b>してください。${ingestMin != null ? '最後に取り込めたのは<b>' + ingestMin + '分前</b>です。' : ''}</span>`;
-        } else if (ingestMin != null && ingestMin > 90) { // 動いてはいるが長時間まったく入っていない
+        } else if (!crawling && ingestMin != null && ingestMin > 90) { // 動いてはいるが長時間まったく入っていない（巡回中は除外＝誤報防止）
           al.style.display = '';
           al.style.background = '#fff8e1'; al.style.borderColor = '#f4e7b8';
           al.innerHTML = `<b style="color:#b26a00">⚠️ ${ingestMin}分間、新しいメッセージが取り込まれていません</b>
