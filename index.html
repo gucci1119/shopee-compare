@@ -876,7 +876,8 @@
   <!-- メッセージ -->
   <div id="page-messages" style="display:none">
     <div class="smd-pagehead">💬 メッセージ <span class="smd-dim" style="font-weight:400;font-size:12px">（Shopeeチャット＋WhatsApp等を一元表示・分析）</span>
-      <button class="smd-btn" id="msg-refresh" title="最新のメッセージに更新" style="margin-left:10px;font-size:11px">🔄 更新</button></div>
+      <button class="smd-btn" id="msg-refresh" title="最新のメッセージに更新" style="margin-left:10px;font-size:11px">🔄 更新</button>
+      <span id="msg-fresh" class="smd-dim" style="font-weight:400;font-size:11px;margin-left:8px"></span></div>
     <div class="pagehelp" style="margin:0 20px 0"><b>この画面：お客さんとのメッセージ（Shopeeチャット・WhatsApp）をまとめて見る＆分析する画面です。</b><br>
       <span style="color:#5a6b8c;font-size:11.5px">※メッセージは webchat の取り込みツール（Tampermonkey）から Supabase に貯まります。未対応（相手からの最後のメッセージに未返信）を一目で。取り込みが動いていない場合は一覧が空になります（userscriptの稼働を確認）。</span></div>
     <div id="msg-body" style="padding:12px 20px"></div>
@@ -7541,6 +7542,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // 📥 取り込み（巡回）の進捗バー＋完了見込み。webchatタブを覗くと巡回が一時停止してしまうので、
   //    進捗はこのポータルで見られるようにする（userscriptが app_kv.chat_crawl_progress に書く）。
+  // 自動更新が生きていることを画面に出す。「更新ボタンを押さないと最新にならない」という
+  // 誤解を防ぐため＝黙って動いている機能は、動いていないのと同じに見える。
+  function drawMsgFresh() {
+    const el = document.getElementById('msg-fresh'); if (!el) return;
+    if (!msg.polledAt) { el.textContent = ''; return; }
+    const d = new Date(msg.polledAt);
+    const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+    el.textContent = '🔄 自動更新中（12秒ごと）・最終確認 ' + hm;
+  }
   async function refreshCrawlBar() {
     const el = document.getElementById('msg-crawl'); if (!el) return;
     let p = null;
@@ -7874,21 +7884,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!pg || pg.style.display === 'none' || !document.getElementById('msg-body')) { clearInterval(window.__msgHb); window.__msgHb = null; return; }
       refreshSenderStatus(); refreshCrawlBar();
     }, 10000);
+    msg.polledAt = msg.polledAt || Date.now(); drawMsgFresh();
     if (window.__msgPoll) clearInterval(window.__msgPoll);
     window.__msgPoll = setInterval(async () => {
       const pg = document.getElementById('page-messages');
       if (!pg || pg.style.display === 'none') { clearInterval(window.__msgPoll); window.__msgPoll = null; return; }
       if (!msg.lastSync) return;
       let neu; try { neu = await sbGetAll('chat_messages', 'select=id,source,cc,buyer,conversation_id,direction,msg_type,text,msg_time,synced_at&synced_at=gt.' + encodeURIComponent(msg.lastSync) + '&order=synced_at.desc&limit=200'); } catch (_) { return; }
-      if (!neu || !neu.length) return; // 新着が無ければ再描画しない＝画面が止まらない
-      const have = new Set((msg.rows || []).map(r => r.id)); const fresh = neu.filter(m => !have.has(m.id));
+      if (!neu || !neu.length) { msg.polledAt = Date.now(); drawMsgFresh(); return; } // 新着が無ければ再描画しない＝画面が止まらない
+      // ★同じIDの行が「書き直された」場合も反映する。
+      //   取り込み側はIDに日付を含めない設計＝日付の修正は同じIDの上書きで届く。
+      //   新規だけ拾っていた頃は、直したはずの日付が画面に出ないままだった。
+      const idx = new Map((msg.rows || []).map((r, i) => [r.id, i]));
+      const fresh = [];
+      neu.forEach(m => { const i = idx.get(m.id); if (i == null) fresh.push(m); else msg.rows[i] = m; });
       if (fresh.length) msg.rows = fresh.concat(msg.rows || []); // 差分だけキャッシュにマージ＝全履歴の再取得をしない
+      msg.polledAt = Date.now();
       const incoming = neu.filter(m => m.direction === 'in' && !msg.notifiedIds.has(m.id));
       incoming.forEach(m => msg.notifiedIds.add(m.id)); if (msg.notifiedIds.size > 800) msg.notifiedIds.clear();
       // 入力中のフォーカス・カーソルを保持したまま再描画（返信作業を邪魔しない）
       const act = document.activeElement, wasReply = !!(act && act.classList && act.classList.contains('msg-reply-in')), rk = wasReply ? act.dataset.k : null, caret = wasReply ? act.selectionStart : null;
       if (incoming.length) notifyNewMsgs(incoming);
       await renderMessages(true);
+      drawMsgFresh();
       if (wasReply) { const nt = document.querySelector('.msg-reply-in[data-k="' + ((window.CSS && CSS.escape) ? CSS.escape(rk) : rk) + '"]'); if (nt) { nt.focus(); try { nt.setSelectionRange(caret, caret); } catch (_) {} } }
     }, 12000);
   }
