@@ -2090,7 +2090,7 @@
       // ★未設定なら「全体ON」で作る（本人方針：基本は全体ON）。ただし**作った時刻より後に来た発言だけ**を対象にする。
       //   そうしないと、有効化した瞬間に過去の未返信ぜんぶへ一斉送信してしまう。
       if (!cfg) {
-        cfg = { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly.',
+        cfg = { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly. As we are a seller based in Japan, our reply may be delayed due to the time difference. Thank you for your understanding.',
                 delayMin: 1, gapH: 6, at: new Date().toISOString() };
         await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_autoreply', v: cfg, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
         return;   // 次の回から適用（この瞬間より後に来た発言だけが対象）
