@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.11.0
+// @version      3.12.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.11.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.12.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1443,10 +1443,15 @@
     let ta = findTa(); if (ta) return ta;
     for (let attempt = 0; attempt < 3; attempt++) {
       // ボタンが描画されるのを少し待つ
+      // ★「Restart Conversation」は画面に**5個**ヒットする（非表示の残骸を含む）。
+      //   従来は最初の1つを押していたため、実際には何も起きず「入力欄が出ません」で失敗していた（実測）。
+      //   → 文字が完全一致し、**実際に見えている**ものの**最後**が本物（実測：幅185pxの要素・自身にonClick）。
       let restart = null;
       for (let w = 0; w < 10 && !restart; w++) {
-        restart = [].slice.call(document.querySelectorAll('button,div,span'))
-          .find(e => /Restart Conversation/i.test((e.textContent || '')) && e.children.length < 2 && e.getBoundingClientRect().width > 0);
+        const cands = [].slice.call(document.querySelectorAll('*'))
+          .filter(e => /^\s*Restart Conversation\s*$/i.test(String(e.textContent || '').trim()))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 60 && r.height > 10; });
+        restart = cands.length ? cands[cands.length - 1] : null;
         if (!restart) { ta = findTa(); if (ta) return ta; await sleep(300); }
       }
       if (!restart) { ta = findTa(); if (ta) return ta; await sleep(500); continue; }
@@ -1455,8 +1460,15 @@
         const p = reactProps(e);
         if (p && typeof p.onClick === 'function') { try { p.onClick({ bubbles: true, cancelable: true, currentTarget: e, target: e, preventDefault() {}, stopPropagation() {}, nativeEvent: {}, type: 'click' }); clicked = true; } catch (_) {} }
       }
-      if (!clicked) { try { restart.click(); } catch (_) {} }
-      for (let w = 0; w < 20; w++) { ta = findTa(); if (ta) return ta; await sleep(300); }   // 最大6秒待つ
+      if (!clicked) {
+        // Reactのハンドラが見つからない時は、本物に近いマウスイベント列を投げる（実測でこれでも開く）
+        const rc = restart.getBoundingClientRect();
+        const opt = { bubbles: true, cancelable: true, composed: true, clientX: rc.left + rc.width / 2, clientY: rc.top + rc.height / 2, button: 0, buttons: 1, view: window, detail: 1 };
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(ty => {
+          try { restart.dispatchEvent(ty.indexOf('pointer') === 0 ? new PointerEvent(ty, opt) : new MouseEvent(ty, opt)); } catch (_) {}
+        });
+      }
+      for (let w = 0; w < 27; w++) { ta = findTa(); if (ta) return ta; await sleep(300); }   // 最大8秒待つ
     }
     return findTa();
   }
