@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.29.0
+// @version      2.30.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.29.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.30.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1890,6 +1890,10 @@
       // ★「この会話を取り込む」は、巡回役かどうかに関係なく**実際に開けるタブ**が引き受ける。
       //   巡回役タブが裏で描画されていない等で開けないと、ポータルから何度押しても失敗していた。
       //   一覧にその相手がいないタブは**消費せず見送る**（別のタブが拾う）。
+      // ★相手を指定する命令（会話を開く系）は、**巡回役タブに任せる**。
+      //   webchatタブが2枚あると、手動用タブが先に拾って「一覧に見つかりません」で失敗していた
+      //   （手動用タブは一覧の位置も表示中の会話も別物）。巡回役が生きている間は消費せず見送る。
+      if ((String(v.cmd) === 'fetch_conv' || String(v.cmd) === 'faq_all') && !isWorker() && tabRole() === 'manual') return;
       if (String(v.cmd) === 'fetch_conv') {
         if (!sideList()) return;
         const want = norm(String(v.buyer || ''));
