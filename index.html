@@ -7713,6 +7713,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const staleN = convList.filter(c => c.stale).length;
     const over9 = convList.filter(c => c.unreplied && !c.stale && (c.waitH || 0) >= 9).length; // Shopeeが警告を出す9時間超＝返信率(CRR)に効く
     msg._totalConv = totalConv; // 進捗バーの分母の代用（一覧スキャン未実行時）
+    // ★同じ発言の重複を表示前に落とす。IDの形式を変えた過渡期は、旧形式と新形式の
+    //   2行が同じ発言を指すため、そのままだと会話に同じ吹き出しが2つ並ぶ（本人発見）。
+    //   相手・時刻・向き・本文が同じなら同一とみなす。
+    {
+      const seen = new Set(), uniq = [];
+      for (const m of rows) {
+        const k = (m.buyer || '') + '|' + (m.msg_time || '') + '|' + (m.direction || '') + '|' + (m.text || '');
+        if (seen.has(k)) continue; seen.add(k); uniq.push(m);
+      }
+      if (uniq.length !== rows.length) rows = uniq;
+    }
     msg.lastSync = rows.reduce((mx, m) => (m.synced_at && m.synced_at > mx) ? m.synced_at : mx, msg.lastSync || '');
     updateMsgNavBadge(unreplied);
     const now = Date.now(), recent = rows.filter(m => { const t = msgTime(m); return t && (now - Date.parse(t)) < 86400000; }).length;
@@ -7837,13 +7848,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (msg.q ? `<span style="font-size:11.5px;color:#ee4d2d;font-weight:700;white-space:nowrap">${convList.length}会話 / ${hitTotal}件ヒット</span><button id="msg-qclr" class="smd-btn" style="font-size:11px;padding:2px 8px">✕</button>` : `<span class="smd-dim" style="font-size:11px;white-space:nowrap"><span style="color:#d93025">●</span>＝未返信</span>`) +
       `</div></div>` +
       `<div class="tool-card" style="margin:0;max-width:none;padding:0;overflow:hidden"><div style="display:flex;height:min(64vh,600px);min-height:380px">` +
-      `<div id="msg-list" style="width:290px;flex:none;overflow-y:auto;border-right:1px solid #eee;background:#fff">${listHtml}${listMoreHtml}</div>` +
+      `<div id="msg-list" style="width:${msg.wList || 290}px;flex:none;overflow-y:auto;border-right:1px solid #eee;background:#fff">${listHtml}${listMoreHtml}</div>` +
+      `<div id="msg-drag-l" title="左右にドラッグして一覧の幅を変えられます" style="width:6px;flex:none;cursor:col-resize;background:#f0f0f0"></div>` +
       `<div id="msg-pane" style="flex:1;min-width:0;display:flex;flex-direction:column">${paneHtml}</div>` +
       // ★右の空きスペースを使う（本人指定）。注文履歴とガイドをここに常時出しておく＝
       //   会話を見ながら「何を買った人か」「どう答えるか」を同時に確認できる。
-      `<div id="msg-side" style="width:340px;flex:none;border-left:1px solid #eee;overflow:auto;background:#fbfcfd;padding:8px 10px">
-         <div style="font-size:11.5px;font-weight:700;margin-bottom:5px">🧾 この人の注文</div>
-         <div id="msg-side-orders" class="smd-dim" style="font-size:11px;margin-bottom:12px">会話を選ぶと表示されます</div>
+      `<div id="msg-drag-r" title="左右にドラッグして右側の幅を変えられます" style="width:6px;flex:none;cursor:col-resize;background:#f0f0f0"></div>` +
+      `<div id="msg-side" style="width:${msg.wSide || 340}px;flex:none;border-left:1px solid #eee;overflow:auto;background:#fbfcfd;padding:8px 10px">
+         <div id="msg-side-orders" class="smd-dim" style="font-size:11px;margin-bottom:6px">会話を選ぶと表示されます</div>
+         <div style="margin-bottom:12px"><button id="msg-refetch" class="smd-btn" style="font-size:11px;padding:3px 9px" title="この会話をもう一度Shopeeから読み直します（本文が欠けている・取り込みに失敗した時に使います）">🔁 この会話を取り込み直す</button>
+           <span id="msg-refetch-stat" class="smd-dim" style="font-size:10.5px;margin-left:6px"></span></div>
          <div style="font-size:11.5px;font-weight:700;margin-bottom:5px">🧭 対応ガイド</div>
          <div id="msg-side-guide" class="smd-dim" style="font-size:11px">分岐をたどって返信文を作れます</div>
        </div>` +
@@ -8078,6 +8092,57 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         }
       }
     } catch (_) {}
+    // 🔁 この会話を取り込み直す（読み取りに失敗した／本文が欠けている時に、ここから実行できるように）
+    {
+      const rb = document.getElementById('msg-refetch');
+      if (rb && !rb._wired) {
+        rb._wired = true;
+        rb.addEventListener('click', async () => {
+          const st = document.getElementById('msg-refetch-stat');
+          const sel2 = msg._convList && msg._convList.find(c => c.key === msg.open);
+          if (!sel2 || !settings.sbSecret) { if (st) { st.textContent = '⚠️ 会話未選択／書き込みキー未設定'; st.style.color = '#d93025'; } return; }
+          const id = 'cmd|' + Date.now();
+          if (st) { st.textContent = '📥 読み直しています…'; st.style.color = '#888'; }
+          try {
+            await sbUpsert('app_kv', [{ k: 'chat_cmd', v: { id, cmd: 'fetch_conv', buyer: sel2.buyer, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+            let n = 0;
+            const t = setInterval(async () => {
+              n++;
+              try {
+                const r = await sbGetAll('app_kv', 'select=v&k=eq.chat_cmd_result');
+                const v = ((r || [])[0] || {}).v;
+                if (v && v.id === id) { clearInterval(t); if (st) { st.textContent = String(v.text || '完了'); st.style.color = /失敗|見つかり|❌/.test(String(v.text)) ? '#d93025' : '#1a7f37'; } renderMessages(true); return; }
+              } catch (_) {}
+              if (n > 30) { clearInterval(t); if (st) { st.textContent = '⚠️ 返事がありません（Shopeeチャットのタブを確認）'; st.style.color = '#b45309'; } }
+            }, 3000);
+          } catch (e) { if (st) { st.textContent = '❌ ' + e.message; st.style.color = '#d93025'; } }
+        });
+      }
+    }
+    // ↔ 幅の手動調整（境目をドラッグ）。値は端末に保存して次回も同じ幅で開く。
+    {
+      const wire = (id, target, key, min, max, invert) => {
+        const h = document.getElementById(id), el = document.getElementById(target);
+        if (!h || !el || h._wired) return;
+        h._wired = true;
+        h.addEventListener('mousedown', e => {
+          e.preventDefault();
+          const x0 = e.clientX, w0 = el.getBoundingClientRect().width;
+          const move = ev => {
+            let w = w0 + (invert ? (x0 - ev.clientX) : (ev.clientX - x0));
+            w = Math.max(min, Math.min(max, w));
+            el.style.width = w + 'px'; msg[key] = Math.round(w);
+          };
+          const up = () => {
+            document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+            try { localStorage.setItem('smdMsgW', JSON.stringify({ wList: msg.wList, wSide: msg.wSide })); } catch (_) {}
+          };
+          document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+        });
+      };
+      wire('msg-drag-l', 'msg-list', 'wList', 180, 700, false);
+      wire('msg-drag-r', 'msg-side', 'wSide', 200, 800, true);
+    }
     // 通知の許可を一度だけ求める
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (_) {}
     // ★リアルタイム更新：この画面を開いている間だけ、新着(synced_at)を検知して反映＋通知（常時ポーリングはしない）
