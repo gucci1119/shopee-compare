@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.00.0
+// @version      3.01.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -213,7 +213,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 90 * 60000;   // 1時間30分
-  const VER = '3.00.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.01.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2255,9 +2255,9 @@
         const last = ms[bi];
         const age = nowLocal - Date.parse(last.msg_time || '');
         if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
-        if (age > 7 * 86400000) return;                               // 古すぎる会話には送らない
-        // ★設定を入れる前から溜まっていた未返信には送らない（有効化した瞬間の一斉送信を防ぐ）
-        if (cfg.at) { const from = Date.parse(cfg.at) - new Date().getTimezoneOffset() * 60000; if (Date.parse(last.msg_time || '') < from) return; }
+        // ★「いつまで遡って送るか」。既定24時間。設定を入れる前に来ていた問い合わせにも送る（本人要望）。
+        //   一度に大量に出さないよう1回の巡回で最大5件までにしてあるので、少しずつ送られる。
+        if (age > Math.max(1, Number(cfg.lookbackH || 24)) * 3600000) return;
         if (pending.has(String(last.buyer || ''))) return;
         const bkey = String(last.buyer || '');
         if (noAuto.has(k) || noAuto.has(bkey)) return;                        // この人は送らない
