@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.23.0
+// @version      2.24.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.23.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.24.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -563,7 +563,18 @@
       // ★ただし ctx で日付を引き継いでいる時（上から下へ通しで読んでいる最中）は、
       //   この画面より上は**前の画面で読み終えた続き**なので、引き継いだ日付で確定できる。
       if (firstSepIdx >= 0 && _idx < firstSepIdx && !(ctx && ctx.day)) return;
-      const img = row.querySelector('img[src*="http"]');
+      // ★引用（返信元）カード＝「左に線が入った薄いブロック」。文字だけで剥がしていた頃は
+      //   "You're chatting with customer about this order…" の先頭 "You" を引用と誤検出し、
+      //   本文が「're chatting…」に化けていた（実データで確認）。DOMで確実に切り分ける。
+      let qEl = null;
+      try {
+        qEl = [].slice.call(row.querySelectorAll('div')).filter(e => {
+          const cs = getComputedStyle(e);
+          return parseFloat(cs.borderLeftWidth || '0') >= 2 && String(e.innerText || '').trim();
+        }).sort((a, b) => String(a.innerText || '').length - String(b.innerText || '').length)[0] || null;
+      } catch (_) {}
+      // 引用カードの中のサムネイルを本文の画像と取り違えない
+      const img = [].slice.call(row.querySelectorAll('img[src*="http"]')).filter(e => !(qEl && qEl.contains(e)))[0] || null;
       const imgUrl = img ? img.src : '';
       const raw = (row.innerText || '').trim(); if (!raw && !imgUrl) return;
       const tm = (raw.match(/(\d{1,2}:\d{2})\s*$/) || [])[1] || '';
@@ -576,6 +587,13 @@
         if (pl && !pl.rest) { curDay = pl.day; return; }   // この行は日付区切り＝本文から外す
         _keep.push(ln);
       });
+      // 引用カードの中身は本文から外し、引用として別に持つ（Shopeeと同じ2段表示にする）
+      let quote = '';
+      if (qEl) {
+        const qls = String(qEl.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+        qls.forEach(q => { const i = _keep.indexOf(q); if (i >= 0) _keep.splice(i, 1); });
+        quote = qls.join(' / ');
+      }
       let body = _keep.join(' ').replace(/\s*\d{1,2}:\d{2}\s*$/, '').replace(/\s+/g, ' ').trim();
       // ★FAQ History カード（お客さんがAIアシスタントに聞いた内容）。webchatには出ているので取り込む。
       //   1行に潰さず改行のまま持たせ、ポータル側でShopeeと同じカードとして描く。
@@ -649,19 +667,9 @@
       // ★返信の「引用（返信元）」を本文から外す。Shopeeは引用カード＋本文の2段で表示するが、
       //   文字だけ拾うと「相手名 [Image] 本文」と1本につながってしまう（本人がwebchatと見比べて発見）。
       //   引用は「相手の名前(または自分)＋[Image]/[Sticker]等」で始まるので、その前置きだけ落とす。
-      let quote = '';
-      if (h.buyer && !isFaq) {
-        const esc = h.buyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const qre = new RegExp('^\\s*(' + esc + '|you|自分)\\s*(\\[[^\\]]{1,24}\\]\\s*)?', 'i');
-        const mq = body.match(qre);
-        const cut = body.replace(qre, '').trim();
-        if (mq && cut && cut !== body) {
-          // 引用（誰の何に対する返信か）は捨てずに残す。Shopeeは引用カード＋本文の2段で表示する。
-          quote = (mq[1] || '') + (mq[2] ? ' ' + mq[2].trim() : '');
-          body = cut;
-        }
-      }
-      if (!body) return;
+      // ※文字ベースの引用剥がし（先頭が相手名/You なら引用とみなす）は撤去した。
+      //   "You can give discount…" のような**普通の文**まで切って本文を壊していたため（実データで確認）。
+      if (!body) { if (quote) { body = quote; quote = ''; } else return; }
       // 日付＝curDay（判明していれば）／無ければ今日。時刻＝HH:MM（無ければ正午）。ローカル時計をそのままISO表記で保存（表示は生スライス）
       // ★Shopeeは分までしか表示しないので、同じ分に3件あると保存時刻が全部同着になり、
       //   ポータルでの並びが webchat と入れ替わる（実際に発生：momigerの16:04が逆順）。
