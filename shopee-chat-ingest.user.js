@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      2.30.0
+// @version      2.32.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -209,7 +209,7 @@
   //   （2026-05に同じ形で大障害を出している）。
   // stat＝フックに来た回数。標本0件のときに「来ていない」のか「来たが可読部分が無い」のかを区別するため
   // （前版はこれが無く、書き込みも0件なら省いていたので原因が切り分けられなかった）。
-  const VER = '2.30.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '2.32.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -599,8 +599,10 @@
       //   1行に潰さず改行のまま持たせ、ポータル側でShopeeと同じカードとして描く。
       let isFaq = false;
       if (/^FAQ History/i.test(body)) {
-        const fl = _keep.map(x => x.trim()).filter(x => x && !/^FAQ History$/i.test(x) && !/^See All FAQ History$/i.test(x) && !/^\d{1,2}:\d{2}$/.test(x));
-        if (!fl.length) return;
+        const fl = _keep.map(x => x.trim()).filter(x => x && !/^FAQ History/i.test(x) && !/^See All FAQ History/i.test(x) && !/^\d{1,2}:\d{2}$/.test(x) && !/^[.\u2026]+$/.test(x));
+        // ★描画途中の「FAQ History ...」だけを掴むと、中身が空のカードがもう1枚できる（実際に発生）。
+        //   実の中身が入っていない時は保存しない（次のsweepで正しく入る）。
+        if (!fl.length || fl.join('').replace(/[.\s\u2026]/g, '').length < 8) return;
         body = '❓FAQ履歴\n' + fl.join('\n');
         isFaq = true;
       }
@@ -908,7 +910,7 @@
   }
   // 1会話を開く→ヘッダ先頭が狙い名で始まるのを確認（＝この会話が表示されたと確定）→その時だけ captureAs をセットして
   //   一覧行由来のクリーン名で取り込む。確認できなければ取り込まない（＝混線しない・切替失敗を弾く）。
-  async function openAndCapture(row, name, cc, deep, force) {
+  async function openAndCapture(row, name, cc, deep, force, noCapture) {
     // ★★送信中は**会話を切り替えない**。切り替えの最中に返信が走ると、
     //   送信処理が「開いた」と思っている会話と、実際に画面に出ている会話がズレて、
     //   **別のお客さんに返信が届く**（2026-08-01に実際に発生）。
@@ -945,7 +947,7 @@
     }
     if (!matched) return false;
     captureAs = { buyer: name, cc: cc };
-    try { await quickCapture(deep); } finally { captureAs = null; }
+    try { if (!noCapture) await quickCapture(deep); } finally { captureAs = null; }
     try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
     // FAQ History は domExtract が**正しい日付つき**で取り込むようになった（v2.23.0）。
     // grabFaq は日付を常に「今日」にしてしまい、古い会話が最新扱いで先頭に来るため停止。
@@ -2027,8 +2029,10 @@
       toast('📡 ポータルからの操作を実行しました: ' + v.cmd);
     } catch (_) {} finally { _cmdBusy = false; }
   }
-  setTimeout(pollCmd, 15000);
-  setInterval(pollCmd, 10000);
+  // ★ポータルのボタンを押してから動き出すまでの待ちは、ほぼこの間隔ぶん。
+  //   10秒だと「読み込み中…」が長く感じる（本人指摘）。Supabaseへの軽い1リクエストなので3秒に詰める。
+  setTimeout(pollCmd, 4000);
+  setInterval(pollCmd, 3000);
 
   // ---- ❓ FAQ History を取り込む ----
   // スレッド内の「FAQ History」カードには、お客さんがAIアシスタントに聞いた内容が入っている。
@@ -2077,7 +2081,7 @@
       if (!row) { await sleep(800); row = await findRow(buyer); }
       if (!row) return '会話が一覧に見つかりません: ' + buyer;
       const cc0 = (rowInfo(row).cc) || CC;
-      const ok = await openAndCapture(row, buyer, cc0, false, true);
+      const ok = await openAndCapture(row, buyer, cc0, false, true, true);   // 6番目=本文の取り込みはしない（開くだけ＝速い）
       if (!ok) return '会話を開けませんでした: ' + buyer;
       if (!(await ensureThread(15000))) return 'Shopee側で本文がまだ作られていません（チャットの窓が他の窓に完全に隠れていると描画が止まります）: ' + buyer;
       // 「See All FAQ History」のリンクを押す（合成クリックが効かないのでReactのonClickを直接呼ぶ）。
@@ -2114,7 +2118,12 @@
         if (cand.length > 3) lines = cand;      // カード(3行)より多く取れた＝全文が開いた
       }
       if (!lines.length) return 'FAQ History を開けませんでした: ' + buyer;
-      await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_faq_all', v: { buyer: buyer, cc: cc0, at: new Date().toISOString(), lines: lines.slice(0, 200) }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
+      const payload = { buyer: buyer, cc: cc0, at: new Date().toISOString(), lines: lines.slice(0, 200) };
+      // 相手ごとにも保存する＝2回目以降はポータルが**待たずに即表示**できる（毎回読み込ませない）
+      await sbReq('POST', 'app_kv?on_conflict=k', [
+        { k: 'chat_faq_all', v: payload, updated_at: new Date().toISOString() },
+        { k: 'chat_faq|' + buyer, v: payload, updated_at: new Date().toISOString() }
+      ], 'resolution=merge-duplicates,return=minimal').catch(() => {});
       // ★開いたパネルは必ず閉じる。開きっぱなしだとwebchatがそこで止まり、巡回も返信もできなくなる（実際に発生）。
       try {
         const clickIt = (el) => {
