@@ -4006,7 +4006,9 @@
         jpName: Object.keys(e.jp).sort((a, b) => e.jp[b] - e.jp[a])[0] || '',
         qty: e.qty, dates: d, sales: e.sales || [], ccs: [...e.ccs].sort(), last: d[d.length - 1] || '',
         lst: [...(e.lst ? e.lst.values() : [])],
+        // 原価は中央値だけでなく実測の幅も持つ（「いくらまで出して良いか」は幅で見るため）
         cost: costs.length ? costs[Math.floor(costs.length / 2)] : null,
+        costMin: costs.length ? costs[0] : null, costMax: costs.length ? costs[costs.length - 1] : null, costN: costs.length,
         stock: Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null
       };
     });
@@ -4122,6 +4124,16 @@
     if (m > 6) return `<span style="color:#7b52c4">🔵 持ちすぎ (${m.toFixed(1)}ヶ月分)</span>`;
     return `<span style="color:#1a7f37">🟢 十分 (${m.toFixed(1)}ヶ月分)</span>`;
   };
+  // 原価目安：中央値ひとつだと「いくらまで出して良いか」が分からないので【最安〜最高の幅】で出す。
+  // 幅が広い＝仕入れ値がブレる商品＝安く拾えた時だけ買う、が判断できる。中央値と件数は下に小さく添える。
+  const costCell = (r, small) => {
+    if (r.cost == null) return '<span class="smd-dim">—</span>';
+    const y = v => '¥' + Math.round(v).toLocaleString();
+    const lo = r.costMin != null ? r.costMin : r.cost, hi = r.costMax != null ? r.costMax : r.cost;
+    const n = r.costN || 1;
+    if (Math.round(lo) === Math.round(hi)) return `<span title="${esc('仕入れ実績' + n + '件。すべて ' + y(r.cost))}">${y(r.cost)}</span>`;
+    return `<span title="${esc('仕入れ実績' + n + '件の幅：最安 ' + y(lo) + ' 〜 最高 ' + y(hi) + '（中央値 ' + y(r.cost) + '）')}" style="white-space:nowrap">${y(lo)}<span class="smd-dim">〜</span>${y(hi)}</span><div class="smd-dim" style="font-size:${small ? '9px' : '9.5px'}">中央${y(r.cost)}・${n}件</div>`;
+  };
   // 一発物マーク：1ヶ月に集中して売れた＝定番でない（アクティブ月レートで月販が高く出るので注意喚起）
   const spikeMark = (r) => r.oneShot ? '<span title="1ヶ月に集中して売れた＝一発物の可能性（定番でない）" style="font-size:10px">⚡</span> ' : '';
   // 選択中の集計期間で注文レコードを絞る（直近30日なら30日以内の注文だけ＝「期間内」表示と一致させる）
@@ -4197,12 +4209,20 @@
       r.ccs.forEach(c => e.ccs.add(c));
       if ((r.last || '') > e.last) e.last = r.last || '';
       if (r.stock != null) e.stock = (e.stock || 0) + r.stock;
-      if (r.cost != null) e.costs.push(r.cost);
+      if (r.cost != null) {
+        e.costs.push(r.cost);
+        // 幅は子の実測レンジをそのまま束ねる（中央値の最小/最大では本当の幅にならない）
+        if (r.costMin != null) e.cMin = (e.cMin == null || r.costMin < e.cMin) ? r.costMin : e.cMin;
+        if (r.costMax != null) e.cMax = (e.cMax == null || r.costMax > e.cMax) ? r.costMax : e.cMax;
+        e.cN = (e.cN || 0) + (r.costN || 1);
+      }
       if (!e.img && r.img) e.img = r.img;
     });
     return Object.values(g).map(e => {
       const c = e.costs.slice().sort((a, b) => a - b);
-      return repeatRate(Object.assign({}, e, { ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null, lst: [...(e.lstMap ? e.lstMap.values() : [])] }), win);
+      return repeatRate(Object.assign({}, e, { ccs: [...e.ccs].sort(), cost: c.length ? c[Math.floor(c.length / 2)] : null,
+        costMin: e.cMin != null ? e.cMin : (c.length ? c[0] : null), costMax: e.cMax != null ? e.cMax : (c.length ? c[c.length - 1] : null), costN: e.cN || c.length,
+        lst: [...(e.lstMap ? e.lstMap.values() : [])] }), win);
     }).filter(e => e.win > 0).sort((a, b) => b.perMonth - a.perMonth);
   }
   // ある ビュー×期間 で、現在のしきい値＆検索を満たす候補件数（ボタンに出す）
@@ -4250,7 +4270,7 @@
           <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
           <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
           <td style="font-size:10.5px;white-space:nowrap">${repeatCcChips(r)}</td>
-          <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
+          <td style="text-align:right;color:#888;font-size:11px">${costCell(r)}</td>
           <td style="font-size:10.5px;white-space:nowrap">${soldDatesCell(r)}</td>
           <td style="font-size:10.5px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${kw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
         if (!open || kids.length <= 1) return head;
@@ -4266,7 +4286,7 @@
             <td style="text-align:right;font-weight:700;font-size:11px">${c.stock != null ? c.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
             <td style="font-size:10px;white-space:nowrap">${stockBadge(c)}</td>
             <td style="font-size:10px;white-space:nowrap">${repeatCcChips(c)}</td>
-            <td style="text-align:right;color:#888;font-size:11px">${c.cost != null ? '¥' + Math.round(c.cost).toLocaleString() : '—'}</td>
+            <td style="text-align:right;color:#888;font-size:11px">${costCell(c, true)}</td>
             <td style="font-size:10px;white-space:nowrap">${soldDatesCell(c, true)}</td>
             <td style="font-size:10px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${ckw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${ckw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
         }).join('');
@@ -4278,7 +4298,7 @@
         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${searchBar}${viewBar}${winBar}
           ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
           <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは明細別だと各1〜2個でも1カタログでは月13個）を拾います。<b>▶ を押すと明細（どのバリエが売れているか）が開きます。</b></span></div>
-        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ')}${repTh('perMonth', '予想月販', 1)}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ')}${repTh('perMonth', '予想月販', 1)}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1, '仕入れ実績の最安〜最高。並び替えは中央値で行います')}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 ${mode === 'catalog' ? '同じカタログが国ごとに別名で出ている分は、装飾・言語を除いた名前で束ねています。' : 'シリーズ判定できない商品（「その他」）は誤集計を避けるため<b>束ねていません</b>。'}明細だけを横断で並べたいときは「明細別」へ。</div>
       </details>`;
     }
@@ -4304,7 +4324,7 @@
         <td style="text-align:right;font-weight:700">${r.stock != null ? r.stock : '<span class="smd-dim" style="font-weight:400;font-size:10px">不明</span>'}</td>
         <td style="font-size:10.5px;white-space:nowrap">${stockBadge(r)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${repeatCcChips(r)}</td>
-        <td style="text-align:right;color:#888;font-size:11px">${r.cost != null ? '¥' + Math.round(r.cost).toLocaleString() : '—'}</td>
+        <td style="text-align:right;color:#888;font-size:11px">${costCell(r)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${soldDatesCell(r)}</td>
         <td style="font-size:10.5px;white-space:nowrap">${links}</td></tr>`;
     }).join('');
@@ -4314,8 +4334,8 @@
         ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
         <span class="smd-dim" style="font-size:10.5px"><b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。作品ごとに割れて埋もれる定番は「シリーズ別」で。</span>
       </div>
-      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', '明細（バリエーション）／ カタログ')}${repTh('perMonth', '予想月販', 1, '売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）')}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝「売れた月あたり」の平均販売数</b>（在庫切れ・休眠の月は分母に入れない＝在庫があれば月何個売れるか）。キャンセル・未払い・返品は除外。<b>バリエーションが実商品</b>なので親商品とは分けて集計。<b>⚡=1ヶ月集中の一発物</b>（定番は🔁の月数が多いもの）。原価目安は注文SNで在庫台帳と突合できた分の中央値。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
+      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', '明細（バリエーション）／ カタログ')}${repTh('perMonth', '予想月販', 1, '売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）')}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1, '仕入れ実績の最安〜最高。並び替えは中央値で行います')}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝「売れた月あたり」の平均販売数</b>（在庫切れ・休眠の月は分母に入れない＝在庫があれば月何個売れるか）。キャンセル・未払い・返品は除外。<b>バリエーションが実商品</b>なので親商品とは分けて集計。<b>⚡=1ヶ月集中の一発物</b>（定番は🔁の月数が多いもの）。原価目安は注文SNで在庫台帳と突合できた分の<b>最安〜最高（幅）</b>＝いくらまで出して良いかの目安。幅が広い商品は安く拾えた時だけ買う判断ができます（下段の「中央◯・◯件」が中央値と実績件数）。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
     </details>`;
   }
   async function renderRepeatSellers() {
@@ -9479,7 +9499,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     return rows;
   }
-  const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: new Set(), costOpen: new Set(), covOpen: new Set(), note: '' };
+  const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: new Set(), costOpen: new Set(), covOpen: new Set(), note: '', ccs: (function () { try { const a = JSON.parse(localStorage.getItem('smdLstCcs') || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })() };
   function listingsFromDb() {
     return sbGetAll('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
@@ -12439,7 +12459,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         return (va - vb) * dir;
       });
     }
-    const per = targets.map(r => `<span class="cc" style="color:${r.color}">${r.cc}</span>${(lst.byCc[r.cc] || []).length}`).join(' ｜ ');
+    // 🌏 国フィルタ。件数は「他の条件を適用したあと」の数＝押した結果と一致させる（全件数はツールチップに出す）
+    // 対象アカウントが持たない国が残っていると「0件なのに理由が出ない」ので、選択は必ず表示中の国に丸める
+    const ccSel = (Array.isArray(lst.ccs) ? lst.ccs : []).filter(cc => targets.some(t => t.cc === cc));
+    const ccCount = {}; rows.forEach(r => { ccCount[r.cc] = (ccCount[r.cc] || 0) + 1; });
+    const per = targets.map(r => {
+      const on = ccSel.indexOf(r.cc) >= 0, n = ccCount[r.cc] || 0;
+      return `<button class="lst-cc" data-cc="${r.cc}" title="${r.cc}だけに絞る（クリックで追加／もう一度で解除・複数選べます）｜この国の全出品 ${(lst.byCc[r.cc] || []).length}件" style="font:inherit;font-weight:700;cursor:pointer;border:1px solid ${on ? r.color : '#ddd'};background:${on ? r.color : '#fff'};color:${on ? '#fff' : r.color};border-radius:11px;padding:1px 9px">${r.cc}<span style="font-weight:400;opacity:.85;margin-left:2px">${n}</span></button>`;
+    }).join(' ') + (ccSel.length ? ` <button class="lst-cc" data-cc="" title="国の絞り込みを解除" style="font:inherit;cursor:pointer;border:1px solid #bbb;background:#fff;color:#666;border-radius:11px;padding:1px 9px">✕ 国すべて</button>` : '');
+    if (ccSel.length) rows = rows.filter(r => ccSel.indexOf(r.cc) >= 0);
     // 🌏横並び（国横断）：同じタイトルで各国を束ねる
     let gridGroups = null;
     if (lst.grid) {
@@ -12498,7 +12526,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span title="出品データは公式APIで自動同期（約30分ごと・数店ずつ）＝ブラウザを開かなくても最新。Shopeeで直接変えた在庫・公開状態も最大30分ほどで自動反映されます。すぐ取り直したい時は🔄最新に更新を。" style="cursor:help;text-decoration:underline dotted">🤖自動同期ⓘ</span>
         ${state.mode === 'live' && settings.sbSecret ? `<button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;font-size:10.5px;padding:1px 8px" title="この端末（🟢ライブ）からShopeeへ直接取りに行って即時最新化。通常は公式APIの自動同期で足りるため不要です">🟢即時取得</button>` : ''}
       </div>
-      <div class="smd-dim" style="font-size:12px;margin-bottom:6px">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ ${per || '国未選択'}</div>
+      <div class="smd-dim" style="font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ <span style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center">${per || '国未選択'}</span>${ccSel.length ? `<span style="color:#ee4d2d;font-weight:700">🌏 ${ccSel.join('・')}のみ</span>` : ''}</div>
       ${lst.grid ? '<div id="lst-scroll" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)"><div id="lst-list"></div></div>' : `<div id="lst-scroll" style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:10px;background:var(--lst-scrollbg)">
         <div style="min-width:${LMINW}px">
         ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:var(--lst-hdrbg);z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
@@ -12577,6 +12605,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const seg = document.getElementById('lst-vartype'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.varType = b.dataset.v; lst.page = 1; drawListingStatus(); }); }
     { const seg = document.getElementById('lst-statsperiod'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; const np = Number(b.dataset.sp) || 0; if (np === (lst.statsPeriod || 0)) return; lst.statsPeriod = np; lst.page = 1; loadStatsDelta(); }); } // 期間切替→差分をRPCで取得後に再描画（loadStatsDelta内でdrawListingStatus）
     { const s = document.getElementById('lst-brand'); if (s) s.addEventListener('change', () => { lst.brand = s.value; lst.page = 1; drawListingStatus(); }); }
+    // 🌏 国チップで絞り込み（複数選択可・data-cc空＝解除）。localStorageに残して次回も同じ国で開ける
+    host.querySelectorAll('.lst-cc').forEach(el => el.addEventListener('click', () => {
+      const cc = el.dataset.cc;
+      if (!cc) lst.ccs = [];
+      else { const a = Array.isArray(lst.ccs) ? lst.ccs.slice() : []; const i = a.indexOf(cc); if (i >= 0) a.splice(i, 1); else a.push(cc); lst.ccs = a; }
+      try { localStorage.setItem('smdLstCcs', JSON.stringify(lst.ccs)); } catch (_) {}
+      lst.page = 1; drawListingStatus();
+    }));
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
     // 🌍 各国まとめ編集：この一覧から直接まとめ編集は準備中。当面は「各国そろえる」画面へ商品名で飛ばして、そこの🌍各国まとめ編集を使ってもらう
