@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.33.0
+// @version      3.34.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -431,7 +431,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.33.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.34.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2531,8 +2531,8 @@
           }
           return 'skip';
         }
-        if (/Auto-?Reply\s*$/i.test(tx)) return 'auto';       // Shopeeの自動返信
-        if (past.indexOf(tx) >= 0) return 'auto';              // 自分たちの自動返信
+        if (past.indexOf(tx) >= 0) return 'oauto';             // ★こちらの自動返信（1問い合わせに1回だけ）
+        if (/Auto-?Reply\s*$/i.test(tx)) return 'sauto';       // Shopeeの自動返信（毎回出るので数えない）
         return 'human';
       };
       const conv = {};
@@ -2564,7 +2564,11 @@
         // 最後の「お客さんからの問い合わせ」以降に、担当者の返信があるかを見る
         let bi = -1; for (let i = ms.length - 1; i >= 0; i--) { if (ms[i]._k === 'buyer') { bi = i; break; } }
         if (bi < 0) return;
-        if (ms.slice(bi + 1).some(x => x._k === 'human')) return;      // 担当者が返している＝送らない
+        // ★★1つの問い合わせに対して一次返答は**1回だけ**。
+        //   従来は「同じ相手への間隔(6時間)」を過ぎると再送していたため、未返信が続くお客さんに
+        //   2通・3通と届いていた（実測：luanflorenzano 3通 / darkcore2019・rafaelretrogames・shutterramma 各2通）。
+        //   お客さんが**新しく発言した後**でなければ、二度と送らない。
+        if (ms.slice(bi + 1).some(x => x._k === 'human' || x._k === 'oauto')) return;
         const last = ms[bi];
         const age = nowLocal - Date.parse(last.msg_time || '');
         if (!(age >= delayMs)) return;                                // まだ猶予の中（担当者が返すかもしれない）
