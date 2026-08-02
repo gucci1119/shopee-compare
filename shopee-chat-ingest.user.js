@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.41.0
+// @version      3.42.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -442,7 +442,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.41.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.42.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1029,7 +1029,11 @@
   setInterval(() => {
     if (!isWebchat() || (cycling && !idleParked)) return;
     domSweep();
-    if (lastNoDate > 0 && isWorker() && !histBusy && !cycling && !userBusy() && Date.now() - autoSweepAt > 90000) {
+    // ★自動の通し読みは廃止（v3.42.0）。日付が確定できない行があるたびに90秒ごとにスレッドを
+    //   上下スクロールしており、「開いている会話が勝手に動く」原因になっていた（本人指摘）。
+    //   新着は通信から直接入るので、DOMを遡って読む必要がない。
+    //   過去の取りこぼしは 🔁「この人だけ取り込み直す」で明示的に実行する。
+    if (false && lastNoDate > 0 && isWorker() && !histBusy && !cycling && !userBusy() && Date.now() - autoSweepAt > 90000) {
       autoSweepAt = Date.now();
       sweepThread(false).catch(() => {});
     }
