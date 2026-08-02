@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.35.0
+// @version      3.36.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -431,7 +431,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.35.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.36.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1650,11 +1650,30 @@
     ls.forEach(l => { const r = l.getBoundingClientRect(); if (r.left < min) { min = r.left; el = l; } });
     return el;
   }
+  // ★★検索窓は使ったら必ず空に戻す。文字が残ると一覧が絞られたままになり、
+  //   以降の送信・巡回が「相手が見つからない」で全部失敗する（自分で罠を仕掛けていた）。
+  function searchBox() { return document.querySelector('.shopee-react-input__input, input[placeholder*="Search" i]'); }
+  async function clearSearch() {
+    try {
+      const s = searchBox();
+      if (s && String(s.value || '').trim()) {
+        setNativeValue(s, '');
+        s.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(900);
+      }
+    } catch (_) {}
+  }
   async function openConversation(buyer) {
+    await clearSearch();   // 前回の検索が残っていると一覧が絞られていて見つからない
     const side = sideList(); if (side) { const rows = [].slice.call(side.children); for (const row of rows) { const nm = (row.innerText || '').trim().split('\n')[0].trim(); if (nm === buyer) { row.click(); await sleep(1300); return true; } } }
-    // 検索フォールバック
-    const s = document.querySelector('.shopee-react-input__input, input[placeholder*="Search" i]');
-    if (s) { setNativeValue(s, buyer); s.dispatchEvent(new Event('input', { bubbles: true })); await sleep(1600); const side2 = sideList(); const r0 = side2 && side2.children[0]; if (r0) { r0.click(); await sleep(1300); return true; } }
+    // 検索フォールバック（使ったら必ず空に戻す）
+    const s = searchBox();
+    if (s) {
+      setNativeValue(s, buyer); s.dispatchEvent(new Event('input', { bubbles: true })); await sleep(1600);
+      const side2 = sideList(); const r0 = side2 && side2.children[0];
+      if (r0) { r0.click(); await sleep(1300); await clearSearch(); return true; }
+      await clearSearch();
+    }
     return false;
   }
   // 入力欄を必ず出す。webchatの会話は放っておくと一定時間で必ず Closed になり、入力欄が
@@ -1753,6 +1772,7 @@
   // 手順を順に試し、★できなかったら黙って成功扱いにせず必ずエラーにする（推測で成功と言わない）。
   // 一覧をスクロールしてでも目的の会話行を見つける（閉じた会話は下の方にあることが多い）
   async function findRow(buyer) {
+    await clearSearch();   // 検索が残っていると一覧が絞られていて見つからない
     // ★必ず一覧の先頭から探す。今いる位置から下へ探すだけだと、既に下までスクロールしている時に
     //   上にいる会話へ永久に辿り着けない（実測：8件すべて「会話が一覧に見つかりません」で失敗）。
     { const sc0 = sideScroller(); if (sc0 && sc0.scrollTop > 0) { rvScroll(sc0, 0); await sleep(500); } }
