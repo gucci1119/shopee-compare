@@ -4039,7 +4039,9 @@
   // ※ 下の描画から参照するので、必ず repeatSellersHtml より前で定義する（関数内に置くとTDZで落ちる）
   let repeatView = 'item';   // item=明細別(既定。バリエ明細そのものが仕入れ単位) / catalog=カタログ別 / series=シリーズ別
   const repeatOpen = new Set();  // 明細（バリエーション）を展開中のカタログ
-  let repeatWin = 90;            // 集計期間（日）。180=半年平均 / 90 / 60=最近の勢い
+  let repeatWin = 90;            // 集計期間（日）。180=半年平均 / 90 / 60=最近の勢い / REP_ALL=全期間
+  const REP_ALL = 9999;          // 「全期間」の番人。日数として扱えば分岐を増やさずに済む（取り込み開始より前まで遡る値）
+  const winName = d => d >= REP_ALL ? '全期間' : (d >= 180 ? '半年' : '直近' + d + '日');
   let repeatQ = '';             // 検索キーワード（商品名・バリエ・仕入れ名で絞り込み）
   let repeatRowByKey = new Map();  // 描画中の行を key で引く（📋注文明細の表示用）
   const repeatMatch = (r, q) => !q || ((r.label || '') + ' ' + (r.parent || '') + ' ' + (r.variation || '') + ' ' + (r.jpName || '')).toLowerCase().includes(q);
@@ -4086,18 +4088,24 @@
   // 📋 商品の注文明細（国・注文SN・日付）をオーバーレイで一覧。各注文からその国の商品ページを開けて正誤性を検証できる
   function showRepeatOrders(row) {
     const now = Date.now(), DAY = 86400000;
-    const sales = (row.sales || []).filter(s => !s.date || (now - Date.parse(s.date + 'T00:00:00') <= repeatWin * DAY)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    const winLabel = repeatWin >= 180 ? '半年' : ('直近' + repeatWin + '日');
+    // ★全期間を出す。期間で切ると表の「累計」（全期間の個数）を1件も突合できないため。
+    //   選択中の期間に入る注文だけ色を付けて区別する＝「期間内」の数字もここで検算できる。
+    const inWin = s => !s.date || (now - Date.parse(s.date + 'T00:00:00') <= repeatWin * DAY);
+    const sales = (row.sales || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const nWin = sales.filter(inWin).length;
+    const qAll = sales.reduce((a, s) => a + (s.q || 1), 0), qWin = sales.filter(inWin).reduce((a, s) => a + (s.q || 1), 0);
+    const winLabel = winName(repeatWin);
     const title = esc((row.label || row.parent || '') + (row.variation && !row.label ? ' ／ ' + row.variation : ''));
     const rowsH = sales.map(s => {
       const url = productPageUrl(s.cc, s.id, s.shop);
-      return `<tr><td style="padding:3px 8px">${esc(s.date || '')}</td><td style="padding:3px 8px;font-weight:700">${esc(s.cc)}</td><td style="padding:3px 8px;font-family:monospace;font-size:11px">${esc(s.sn || '')}</td><td style="padding:3px 8px;text-align:right">${s.q || 1}</td><td style="padding:3px 8px">${url ? `<a href="${url}" target="_blank" rel="noopener" style="color:#0b5cab">商品ページ↗</a>` : ''}</td></tr>`;
+      const on = inWin(s);
+      return `<tr style="${on ? 'background:#f6f3fc' : 'color:#999'}"><td style="padding:3px 8px">${esc(s.date || '')}${on && repeatWin < REP_ALL ? '<span style="color:#7b52c4;font-size:10px" title="選択中の期間内">●</span>' : ''}</td><td style="padding:3px 8px;font-weight:700">${esc(s.cc)}</td><td style="padding:3px 8px;font-family:monospace;font-size:11px">${esc(s.sn || '')}</td><td style="padding:3px 8px;text-align:right">${s.q || 1}</td><td style="padding:3px 8px">${url ? `<a href="${url}" target="_blank" rel="noopener" style="color:#0b5cab">商品ページ↗</a>` : ''}</td></tr>`;
     }).join('');
     const ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
     ov.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:640px;width:92%;max-height:82vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.3)">
       <div style="position:sticky;top:0;background:#fff;padding:12px 16px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px">
-        <b style="font-size:13px;flex:1">📋 注文明細（${winLabel}・${sales.length}件）— ${title}</b>
+        <b style="font-size:13px;flex:1">📋 注文明細（全期間 ${sales.length}件・${qAll}個）— ${title}<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">${repeatWin < REP_ALL ? `うち<span style="color:#7b52c4">●${winLabel}</span> ${nWin}件・${qWin}個＝表の「期間内」` : '＝表の「累計」と同じ母数'}</span></b>
         <button class="ro-close" style="border:none;background:#f1f3f7;border-radius:6px;padding:4px 10px;cursor:pointer">✕ 閉じる</button></div>
       <div style="padding:6px 10px 14px"><div class="smd-dim" style="font-size:11px;padding:4px 8px">Shopeeの注文管理でこのSNを検索すれば実データと照合できます。国名からその国の商品ページも開けます。</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="text-align:left;color:#888"><th style="padding:3px 8px">日付</th><th style="padding:3px 8px">国</th><th style="padding:3px 8px">注文SN</th><th style="padding:3px 8px;text-align:right">数</th><th style="padding:3px 8px">確認</th></tr>${rowsH}</table></div></div>`;
@@ -4121,7 +4129,8 @@
     const now = Date.now(), DAY = 86400000;
     return (r.sales || []).filter(s => !s.date || (now - Date.parse(s.date + 'T00:00:00') <= repeatWin * DAY));
   };
-  // 売れた日：選択期間内の直近5日を MM/DD で表示。📋を押すと（同じ期間内の）注文レコードを一覧＝オーダーで正誤性を検証できる。
+  // 売れた日：選択期間内の直近5日を MM/DD で表示。📋を押すと注文レコードを【全期間】で一覧＝オーダーで正誤性を検証できる。
+  // バッジは「期間内/全期間」の2つ出す（📋10 だけだと累計61の中身が見られないと思われるため）。
   const soldDatesCell = (r, small) => {
     const sales = salesInWin(r).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const ds = sales.map(s => s.date).filter(Boolean);
@@ -4130,7 +4139,8 @@
     const more = ds.length - recent.length;
     const sz = small ? '9.5px' : '10.5px';
     const key = esc(r.key || r.label || '');
-    const orderBtn = ` <a href="#" class="rep-orders" data-key="${key}" title="この期間内の注文明細（国・SN・日付）を一覧＝販売実績の検証用" style="font-size:${sz};text-decoration:none">📋${sales.length}</a>`;
+    const nAll = (r.sales || []).length;
+    const orderBtn = ` <a href="#" class="rep-orders" data-key="${key}" title="注文明細（国・注文SN・日付）を全期間で一覧＝販売実績の検証用。選択中の期間の分には●が付きます${nAll > sales.length ? `／期間内${sales.length}件・全期間${nAll}件` : ''}" style="font-size:${sz};text-decoration:none">📋${sales.length}${nAll > sales.length ? `<span class="smd-dim">/${nAll}</span>` : ''}</a>`;
     return `<span style="font-size:${sz}">${recent.join(' ')}${more > 0 ? ` <span class="smd-dim">+${more}</span>` : ''}</span>${orderBtn}`;
   };
   // 国チップを「その国の実際の商品ページ」へのリンクにする。
@@ -4220,7 +4230,7 @@
     const viewBtn = (v, label, tip) => `<button class="rep-view smd-btn" data-v="${v}" title="${tip}" style="font-size:11px;padding:3px 10px;${mode === v ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${label}（${cView(v)}）</button>`;
     const viewBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${viewBtn('catalog', 'カタログ別', '親出品ごと＝実際に運用している単位。バリエーションをまとめて見る')}${viewBtn('item', '明細別', '仕入れ単位そのもの。バリエ明細を横断で並べる（重複出品は統合済み）')}${viewBtn('series', 'シリーズ別', 'ロックマン等、作品群でまとめて見る')}</span>`;
     const winBtn = (d, label, tip) => `<button class="rep-win smd-btn" data-d="${d}" title="${tip}" style="font-size:11px;padding:3px 10px;${repeatWin === d ? 'background:#0b5cab;color:#fff;border-color:#0b5cab' : ''}">${label}（${cWin(d)}）</button>`;
-    const winBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${winBtn(30, '直近30日', '今まさに売れているもの。ただし件数が少なくブレやすい')}${winBtn(60, '直近60日', '最近の勢い。伸びている商品を逃さない')}${winBtn(90, '直近90日', 'ふだんはこれ')}${winBtn(180, '半年', '長期の定番。最近の伸びは薄まる')}</span>${repeatWin <= 30 ? '<span class="smd-dim" style="font-size:10.5px;margin-right:8px">⚠ 30日は販売1〜2件でも「月販2」に見えるためブレ大。定番判定は🔁コンスタントと併せて。</span>' : ''}`;
+    const winBar = `<span style="display:inline-flex;gap:6px;margin-right:10px">${winBtn(30, '直近30日', '今まさに売れているもの。ただし件数が少なくブレやすい')}${winBtn(60, '直近60日', '最近の勢い。伸びている商品を逃さない')}${winBtn(90, '直近90日', 'ふだんはこれ')}${winBtn(180, '半年', '長期の定番。最近の伸びは薄まる')}${winBtn(REP_ALL, '全期間', '取り込んである全注文。「累計」と同じ母数で見る＝📋で1件ずつ突合できる')}</span>${repeatWin <= 30 ? '<span class="smd-dim" style="font-size:10.5px;margin-right:8px">⚠ 30日は販売1〜2件でも「月販2」に見えるためブレ大。定番判定は🔁コンスタントと併せて。</span>' : ''}`;
     const searchBar = `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input id="rep-q" placeholder="🔎 商品名・シリーズで検索（例: メタルギア / zelda）" value="${esc(repeatQ)}" style="font-size:11px;padding:3px 8px;border:1px solid #ccc;border-radius:6px;width:280px">${repeatQ ? `<button id="rep-qclr" class="smd-btn" style="font-size:11px;padding:3px 8px">✕</button>` : ''}</span>`;
     if (agg) {
       const unit = mode === 'catalog' ? 'バリエ' : '商品';
@@ -4268,7 +4278,7 @@
         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${searchBar}${viewBar}${winBar}
           ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
           <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは明細別だと各1〜2個でも1カタログでは月13個）を拾います。<b>▶ を押すと明細（どのバリエが売れているか）が開きます。</b></span></div>
-        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ')}${repTh('perMonth', '予想月販', 1)}${repTh('win', '期間内', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ')}${repTh('perMonth', '予想月販', 1)}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 ${mode === 'catalog' ? '同じカタログが国ごとに別名で出ている分は、装飾・言語を除いた名前で束ねています。' : 'シリーズ判定できない商品（「その他」）は誤集計を避けるため<b>束ねていません</b>。'}明細だけを横断で並べたいときは「明細別」へ。</div>
       </details>`;
     }
@@ -4304,7 +4314,7 @@
         ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
         <span class="smd-dim" style="font-size:10.5px"><b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。作品ごとに割れて埋もれる定番は「シリーズ別」で。</span>
       </div>
-      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', '明細（バリエーション）／ カタログ')}${repTh('perMonth', '予想月販', 1, '売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）')}${repTh('win', '期間内', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', '明細（バリエーション）／ カタログ')}${repTh('perMonth', '予想月販', 1, '売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）')}${repTh('win', '期間内<span class="smd-dim" style="font-size:9px;font-weight:400"><br>' + winName(repeatWin) + '</span>', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝「売れた月あたり」の平均販売数</b>（在庫切れ・休眠の月は分母に入れない＝在庫があれば月何個売れるか）。キャンセル・未払い・返品は除外。<b>バリエーションが実商品</b>なので親商品とは分けて集計。<b>⚡=1ヶ月集中の一発物</b>（定番は🔁の月数が多いもの）。原価目安は注文SNで在庫台帳と突合できた分の中央値。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
     </details>`;
   }
