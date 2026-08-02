@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.30.0
+// @version      3.31.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -431,7 +431,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.30.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.31.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1018,7 +1018,7 @@
   setInterval(() => {
     if (!isWebchat() || (cycling && !idleParked)) return;
     domSweep();
-    if (lastNoDate > 0 && isWorker() && !histBusy && !cycling && Date.now() - autoSweepAt > 90000) {
+    if (lastNoDate > 0 && isWorker() && !histBusy && !cycling && !userBusy() && Date.now() - autoSweepAt > 90000) {
       autoSweepAt = Date.now();
       sweepThread(false).catch(() => {});
     }
@@ -1098,15 +1098,17 @@
   setInterval(() => {
     try {
       if (!isWorker()) return; // 巡回役タブだけ（手動用タブでスレッドが勝手にスクロールすると作業の邪魔）
-      if (GM_getValue('autoHistory', true) === false) return;
+      // ★既定OFF（v3.31.0）。新着は通信から直接取り込めるようになったので、
+      //   会話を開くたびにスレッドを上まで遡る必要がない。画面が上下し続ける原因だった（本人指摘）。
+      if (GM_getValue('autoHistory', false) !== true) return;
       if (cycling) return; // 巡回中はスレッド履歴の自動スクロールを止める（会話が同じところをグルグルするのを防ぐ）
       const h = domHeaderInfo(); if (!h || !h.buyer) return;
       const key = h.cc + ':' + h.buyer;
       if (key !== histFor && !histBusy) { histFor = key; setTimeout(loadHistory, 800); }
     } catch (_) {}
   }, 1500);
-  GM_registerMenuCommand('過去履歴の自動取得: ON/OFF 切替', () => {
-    const v = !(GM_getValue('autoHistory', true) === false); GM_setValue('autoHistory', !v);
+  GM_registerMenuCommand('過去履歴の自動取得: ON/OFF 切替（既定OFF）', () => {
+    const v = (GM_getValue('autoHistory', false) === true); GM_setValue('autoHistory', !v);
     toast('過去履歴の自動取得を ' + (v ? 'OFF' : 'ON') + ' にしました');
   });
   GM_registerMenuCommand('この会話の全履歴を今すぐ取り込む', () => { histFor = ''; loadHistory(); toast('履歴を遡って取り込み中…'); });
