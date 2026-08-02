@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.37.0
+// @version      3.38.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -214,7 +214,7 @@
   //   ページ側で fetch/XHR/WebSocket をいくらフックしても何も取れなかったのはこのため。
   //   SharedWorker が作られる**その瞬間**にポートを押さえれば、会話を開かずに中身が読める可能性がある。
   //   ＝巡回そのものを無くせるかもしれない唯一の道。ここでは**聞くだけ**（何も送らない・何も変えない）。
-  const _wsProbe = { n: 0, samples: [], texts: [], others: [], kinds: {}, types: {}, api: {}, apiBody: [], at: 0, hooked: [] };
+  const _wsProbe = { n: 0, samples: [], texts: [], others: [], kinds: {}, types: {}, skip: {}, api: {}, apiBody: [], at: 0, hooked: [] };
   // ★★Tampermonkeyは**隔離されたwindow**でスクリプトを動かす。ここを書き換えても
   //   ページ本体には効かない。過去に「通信の横取りは不可能」と結論づけた実験も、
   //   そもそもフックが刺さっていなかった疑いが強い。必ず unsafeWindow（ページ本体）に仕掛ける。
@@ -358,7 +358,7 @@
       if (!getSbKey() || !isWebchat()) return;
       if (Date.now() - _wsProbe.at < 55000) return;
       _wsProbe.at = Date.now();
-      sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, kinds: _wsProbe.kinds, types: _wsProbe.types, api: _wsProbe.api, apiBody: _wsProbe.apiBody, hdrKeys: _wsProbe.hdrKeys || null, apiTest: _wsProbe.apiTest || null, hooked: _wsProbe.hooked.slice(0, 10), texts: _wsProbe.texts, others: _wsProbe.others, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
+      sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_ws_probe', v: { at: new Date().toISOString(), count: _wsProbe.n, kinds: _wsProbe.kinds, types: _wsProbe.types, skip: _wsProbe.skip, api: _wsProbe.api, apiBody: _wsProbe.apiBody, hdrKeys: _wsProbe.hdrKeys || null, apiTest: _wsProbe.apiTest || null, hooked: _wsProbe.hooked.slice(0, 10), texts: _wsProbe.texts, others: _wsProbe.others, samples: _wsProbe.samples }, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(function () {});
       // ★★本文らしきものが取れた時だけ、**別のキーに追記して保存**する。
       //   タブは90分ごとに自動リロードして調査の記録が初期化されるため、上のキーだけだと
       //   せっかく捕まえた1件が次回の上書きで消える（夜通しの観測では致命的）。
@@ -394,23 +394,24 @@
   const WS_SHOP2CC = { br: 'BR', ph: 'PH', vn: 'VN', my: 'MY', sg: 'SG', th: 'TH', tw: 'TW' };
   let wsGot = 0;
   function wsIngest(str) {
-    let o; try { o = JSON.parse(str); } catch (_) { return; }
+    const why = k => { _wsProbe.skip[k] = (_wsProbe.skip[k] || 0) + 1; };   // 取り込まなかった理由を数える
+    let o; try { o = JSON.parse(str); } catch (_) { why('JSONでない'); return; }
     const pay = o.payload || o;
-    if (String(pay.message_type || '') !== 'message') return;
-    let mc; try { mc = JSON.parse(pay.message_content); } catch (_) { return; }
-    if (!mc || !mc.id) return;
+    if (String(pay.message_type || '') !== 'message') { why('message以外'); return; }
+    let mc; try { mc = JSON.parse(pay.message_content); } catch (_) { why('中身が壊れている'); return; }
+    if (!mc || !mc.id) { why('IDなし'); return; }
     const fromMe = /^gcsonlinestore/i.test(String(mc.from_user_name || ''));
     const shopName = String(fromMe ? mc.from_user_name : mc.to_user_name || '');
     const buyer = String((fromMe ? mc.to_user_name : mc.from_user_name) || '').trim();
-    if (!buyer || /^gcsonlinestore/i.test(buyer)) return;
+    if (!buyer || /^gcsonlinestore/i.test(buyer)) { why('相手が特定できない'); return; }
     const cc = WS_SHOP2CC[(shopName.split('.').pop() || '').toLowerCase()] || CC;
     const ty = String(mc.type || '');
     let text = '', msgType = 'text';
     const c = mc.content || {};
     if (ty === 'text') text = String(c.text || '');
     else if (ty === 'image' || ty === 'sticker') { text = String(c.url || c.image_url || c.file_url || ''); msgType = 'image'; }
-    else return;                                   // 未知の型は取り込まない（後で足す）
-    if (!text) return;
+    else { why('未対応の型:' + ty); return; }        // 未知の型は取り込まない（後で足す）
+    if (!text) { why('本文が空'); return; }
     // 時刻：メッセージ自身が持つものを優先し、無ければ受信時刻
     let ms = Number(mc.created_time || mc.create_time || mc.timestamp || pay.receiveTime || o.receiveTime || Date.now());
     if (!isFinite(ms) || ms <= 0) ms = Date.now();
@@ -418,7 +419,7 @@
     const d = new Date(ms);
     const mt = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
     const id = 'sp|' + String(mc.id);
-    if (seenMsg.has(id)) return;
+    if (seenMsg.has(id)) { why('取り込み済み'); return; }
     seenMsg.add(id);
     msgBuffer.push({ id: id, source: 'shopee', cc: cc, buyer: buyer, conversation_id: cc + ':' + buyer,
       direction: fromMe ? 'out' : 'in', msg_type: msgType, text: text, msg_time: mt });
@@ -431,7 +432,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.37.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.38.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
