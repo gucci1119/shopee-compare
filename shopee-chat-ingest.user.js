@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.36.0
+// @version      3.37.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -431,7 +431,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.36.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.37.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1356,7 +1356,7 @@
   // mode 'full'=未取込を全部 / 'new'=署名が変わった(新着)会話だけ。ゆっくり・操作中は待機・終わりに元の会話へ戻す
   async function slowCrawl(mode, manual) {
     if (cycling) { if (manual) toast('巡回中です…'); return; }
-    if (!manual && GM_getValue('autoCrawl', true) === false) return;
+    if (!manual && GM_getValue('autoCrawl', false) !== true) return;   // 自動起動の巡回は既定OFF（手動指示のみ）
     if (mode === 'full' && !manual && backfillOff()) return; // 履歴の遡りは打ち切り済み（新着はこの下の new 巡回が拾う）
     cycling = true; let count = 0, stagnant = 0, upToDate = 0;
     _runStart = Date.now(); _runStartDone = crawlDone.size; reportCrawl(mode, true, ''); // 進捗の起点（ETA計算用）
@@ -1438,9 +1438,9 @@
     } catch (_) {} finally { cycling = false; cycleInfo = ''; _crawlRepAt = 0; reportCrawl(mode, false, ''); updateChip(); }
   }
   GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => slowCrawl('full', true));
-  GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替', () => { const v = GM_getValue('autoCrawl', true) !== false; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
+  GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替（既定OFF）', () => { const v = GM_getValue('autoCrawl', false) === true; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
-  if (GM_getValue('autoCrawl', true) !== false) {
+  {
     // （定義は下だが関数宣言ではないため、上の1時間巡回から使えるようここで宣言する）
     let _viewerAt = 0, _viewerChk = 0;
     const viewerActive = () => {
@@ -1455,7 +1455,9 @@
       return (Date.now() - _viewerAt) < 90000;
     };
 
-    setTimeout(() => { if (isWorker()) slowCrawl('full', false); }, 12000);
+    // ★起動時の総当たり巡回は廃止（v3.37.0）。新着は通信から直接入るので不要。
+    //   必要な時は ⚡「全会話の本文を取り込む」から明示的に実行する。
+    setTimeout(() => { if (isWorker() && GM_getValue('autoCrawl', false) === true) slowCrawl('full', false); }, 12000);
     // ★総当たりで会話を開く巡回は**1時間に1回**に落とす（本人指摘）。理由：
     //   ・一覧スキャン（会話を開かない）で「誰から・いつ・最後の一言」は取れている
     //   ・本文は**ポータルで会話を開いた瞬間**に fetch_conv で取りに行く
@@ -1464,7 +1466,7 @@
     // ★見ていない間も**5分に1回**だけ動かす。ただしモードは 'new'＝「一覧の行が変わった会話だけ」開く。
     //   動きが無ければ1件も開かない＝負荷はほぼゼロ。これが無いと自動返信も新着通知も止まる（本人指摘）。
     setInterval(() => {
-      if (!isWorker() || GM_getValue('autoCrawl', true) === false || cycling || userBusy()) return;
+      if (!isWorker() || GM_getValue('autoCrawl', false) !== true || cycling || userBusy()) return;
       if (viewerActive()) return;   // 見ている間は下の5秒監視が担当する
       slowCrawl('new', false);
     }, 300000);
@@ -1486,7 +1488,7 @@
     //   ポータルが app_kv.chat_viewer に生存を書くので、それが新しい時だけ5秒監視を働かせる。
     setInterval(() => {
       if (!isWorker() || cycling || userBusy()) return;
-      if (GM_getValue('autoCrawl', true) === false) return;
+      if (GM_getValue('autoCrawl', false) !== true) return;
       if (!viewerActive()) return;   // 見ていない間はリアルタイム追尾しない
       const side = sideList(); if (!side) return;
       let changed = false;
