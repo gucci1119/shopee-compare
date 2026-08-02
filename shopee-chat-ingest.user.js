@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.34.0
+// @version      3.35.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -431,7 +431,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.34.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.35.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2556,8 +2556,17 @@
       // ★★「送信済み」だけでなく**失敗した分も**除外する。失敗を除外していなかったため、
       //   送れないたびに同じ相手へ積み増し、未送信が31件まで膨らんだ（実際に発生）。
       //   一度「送ると決めた」相手は、gap時間が過ぎるまで二度と積まない。
-      const sentRecently = new Set(obRows.filter(x => String(x.id || '').indexOf('auto|') === 0
-        && (Date.now() - Date.parse(x.created_at || 0)) < gapMs).map(x => String(x.buyer || '')));
+      // ★★「もう送ると決めたか」は**時間の窓ではなく、お客さんの最後の発言との前後関係**で見る。
+      //   送った自動返信が chat_messages に取り込まれないことがあり（実際に発生）、
+      //   窓(6時間)を過ぎると「まだ送っていない」と誤判定して二度送っていた。
+      //   送信ログは消えないので、これが最も確実。
+      const lastAutoAt = {};
+      obRows.forEach(x => {
+        if (String(x.id || '').indexOf('auto|') !== 0) return;
+        const b = String(x.buyer || ''), ts = Date.parse(x.created_at || 0);
+        if (!b || !isFinite(ts)) return;
+        if (!lastAutoAt[b] || ts > lastAutoAt[b]) lastAutoAt[b] = ts;
+      });
       const targets = [];
       Object.keys(conv).forEach(k => {
         const ms = conv[k];
@@ -2580,7 +2589,14 @@
         if (noAuto.has(k) || noAuto.has(bkey)) return;                        // この人は送らない
         if (!cfg.on && !(forceAuto.has(k) || forceAuto.has(bkey))) return;    // 全体OFFなら「必ず送る」指定の人だけ
         // 直近 gapH の間に同じ自動返信を送っていたら送らない（連投しない）
-        if (sentRecently.has(bkey)) return;   // 送信ログにある＝すでに送った（最優先の判定）
+        // お客さんの最後の発言より**後**に自動返信を積んでいたら、もう送っている＝二度と送らない
+        {
+          const la = lastAutoAt[bkey];
+          if (la) {
+            const lastMsgUtc = Date.parse(last.msg_time || '') + new Date().getTimezoneOffset() * 60000;
+            if (la >= lastMsgUtc) return;
+          }
+        }
         const dup = ms.some(m => m.direction === 'out' && String(m.text || '').trim() === text && (nowLocal - Date.parse(m.msg_time || '')) < gapMs);
         if (dup) return;
         targets.push(last);
