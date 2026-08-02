@@ -4043,6 +4043,46 @@
   let repeatQ = '';             // 検索キーワード（商品名・バリエ・仕入れ名で絞り込み）
   let repeatRowByKey = new Map();  // 描画中の行を key で引く（📋注文明細の表示用）
   const repeatMatch = (r, q) => !q || ((r.label || '') + ' ' + (r.parent || '') + ' ' + (r.variation || '') + ' ' + (r.jpName || '')).toLowerCase().includes(q);
+  // 表の並び替え（列ヘッダのクリックで昇順⇄降順）。既定は予想月販の多い順＝これまでの並びと同じ
+  let repeatSort = { k: 'perMonth', d: 'desc' };
+  // 列ごとの並び替え値。「売れた日」は表示と同じ期間内の最新日で並べる
+  const REP_SORTV = {
+    name: r => String(r.label || ((r.parent || '') + ' ' + (r.variation || ''))).trim().toLowerCase(),
+    perMonth: r => r.perMonth,
+    win: r => r.win,
+    qty: r => r.qty,
+    stock: r => r.stock,
+    months: r => r.months,
+    ccs: r => (r.ccs || []).length,
+    cost: r => r.cost,
+    sold: r => { const ds = salesInWin(r).map(s => s.date).filter(Boolean).sort(); return ds.length ? ds[ds.length - 1] : null; }
+  };
+  // 不明（null）は昇順でも降順でも必ず最後に置く。「不明」が先頭に並ぶと表として使えないため
+  function repeatSortRows(list) {
+    const g = REP_SORTV[repeatSort.k]; if (!g) return list;
+    const sgn = repeatSort.d === 'asc' ? 1 : -1;
+    const isNull = v => v == null || v === '' || (typeof v === 'number' && !isFinite(v));
+    return list.slice().sort((a, b) => {
+      const x = g(a), y = g(b), nx = isNull(x), ny = isNull(y);
+      if (nx || ny) return (nx && ny) ? 0 : (nx ? 1 : -1);
+      const c = (typeof x === 'number' && typeof y === 'number') ? (x - y) : String(x).localeCompare(String(y), 'ja');
+      return (c * sgn) || (b.perMonth - a.perMonth);   // 同値は予想月販の多い順
+    });
+  }
+  // 見出しに出す「今どの順で並んでいるか」。並び替えたのに説明文が「予想月販の多い順」のままだと嘘になるため
+  const REP_SORTNAME = {   // [昇順のときの言い方, 降順のときの言い方]
+    name: ['名前順（A→Z）', '名前の逆順（Z→A）'],
+    perMonth: ['予想月販の少ない順', '予想月販の多い順'],
+    win: ['期間内の少ない順', '期間内の多い順'],
+    qty: ['累計の少ない順', '累計の多い順'],
+    stock: ['現在庫の少ない順', '現在庫の多い順'],
+    months: ['在庫の持ちが短い順', '在庫の持ちが長い順'],
+    ccs: ['売れている国が少ない順', '売れている国が多い順'],
+    cost: ['原価の安い順', '原価の高い順'],
+    sold: ['売れた日が古い順', '売れた日が新しい順']
+  };
+  const repSortLabel = () => (REP_SORTNAME[repeatSort.k] || ['', ''])[repeatSort.d === 'asc' ? 0 : 1];
+  const repTh = (k, label, right, tip) => `<th class="rep-sort" data-k="${k}" title="${esc((tip ? tip + '／' : '') + '押すと並び替え（もう一度押すと逆順）')}" style="cursor:pointer;user-select:none;white-space:nowrap${right ? ';text-align:right' : ''}">${label}${repeatSort.k === k ? `<span style="color:#7b52c4"> ${repeatSort.d === 'asc' ? '▲' : '▼'}</span>` : '<span class="smd-dim" style="font-size:9px;font-weight:400"> ⇅</span>'}</th>`;
   // 📋 商品の注文明細（国・注文SN・日付）をオーバーレイで一覧。各注文からその国の商品ページを開けて正誤性を検証できる
   function showRepeatOrders(row) {
     const now = Date.now(), DAY = 86400000;
@@ -4172,7 +4212,7 @@
     rowsIn.forEach(r => repeatRowByKey.set(r.key, r));
     rows.forEach(r => repeatRowByKey.set(r.key, r));
     const passMin = r => (repeatMin === 'steady' ? (r.soldMonths >= 3) : (r.perMonth >= repeatMin)) && repeatMatch(r, q);
-    const list = rows.filter(passMin);
+    const list = repeatSortRows(rows.filter(passMin));
     const n2 = rows.filter(r => r.perMonth >= 2 && repeatMatch(r, q)).length, n1 = rows.filter(r => r.perMonth >= 1 && repeatMatch(r, q)).length;
     const nSteady = rows.filter(r => r.soldMonths >= 3 && repeatMatch(r, q)).length;
     const cView = m => repeatCountFor(rowsIn, m, repeatWin);
@@ -4205,7 +4245,7 @@
           <td style="font-size:10.5px;white-space:nowrap"><a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a> <a href="https://www.suruga-ya.jp/search?search_word=${kw}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋</a></td></tr>`;
         if (!open || kids.length <= 1) return head;
         // 明細（バリエーション）行。どのバリエが売れているか＝何を買い足すかが分かる
-        const kidH = kids.slice().sort((a, b) => b.perMonth - a.perMonth).map(c => {
+        const kidH = repeatSortRows(kids).map(c => {   // 明細も親と同じ並び順にそろえる
           const ckw = encodeURIComponent(sourcingKeyword(c.parent, c.variation) || c.variation);
           return `<tr style="background:#fbfaff">
             <td></td>
@@ -4224,11 +4264,11 @@
       }).join('');
       const need = list.filter(r => r.months != null && r.months < 1).length;
       return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
-        <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">${title}。${list.length}件${need ? `　<b style="color:#d93025">🔴 補充が要る ${need}</b>` : ''}</span></summary>
+        <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">${title}。${list.length}件（${repSortLabel()}）${need ? `　<b style="color:#d93025">🔴 補充が要る ${need}</b>` : ''}</span></summary>
         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${searchBar}${viewBar}${winBar}
           ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
           <span class="smd-dim" style="font-size:10.5px">バリエーションごとに割れて埋もれる定番（例：ロックマンは明細別だと各1〜2個でも1カタログでは月13個）を拾います。<b>▶ を押すと明細（どのバリエが売れているか）が開きます。</b></span></div>
-        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>${mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ'}</th><th style="text-align:right">予想月販</th><th style="text-align:right" title="選択中の期間内に売れた個数">期間内</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>売れた日</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+        <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', mode === 'catalog' ? 'カタログ（親出品）' : 'シリーズ')}${repTh('perMonth', '予想月販', 1)}${repTh('win', '期間内', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 ${mode === 'catalog' ? '同じカタログが国ごとに別名で出ている分は、装飾・言語を除いた名前で束ねています。' : 'シリーズ判定できない商品（「その他」）は誤集計を避けるため<b>束ねていません</b>。'}明細だけを横断で並べたいときは「明細別」へ。</div>
       </details>`;
     }
@@ -4259,12 +4299,12 @@
         <td style="font-size:10.5px;white-space:nowrap">${links}</td></tr>`;
     }).join('');
     return `<details class="tool-card" open style="max-width:none;border-left:4px solid #7b52c4">
-      <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。予想月販の多い順に${list.length}品${(() => { const need = list.filter(r => r.months != null && r.months < 1).length; const over = list.filter(r => r.months != null && r.months > 6).length; return (need ? `　<b style="color:#d93025">🔴 補充が要る ${need}品</b>` : '') + (over ? `　<span style="color:#7b52c4">🔵 持ちすぎ ${over}品</span>` : ''); })()}</span></summary>
+      <summary style="cursor:pointer;font-weight:700;font-size:13.5px;list-style:none">🎯 有在庫化候補（繰り返し売れている商品）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">実際の販売履歴から算出。${list.length}品（${repSortLabel()}）${(() => { const need = list.filter(r => r.months != null && r.months < 1).length; const over = list.filter(r => r.months != null && r.months > 6).length; return (need ? `　<b style="color:#d93025">🔴 補充が要る ${need}品</b>` : '') + (over ? `　<span style="color:#7b52c4">🔵 持ちすぎ ${over}品</span>` : ''); })()}</span></summary>
       <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">${searchBar}${viewBar}${winBar}
         ${tabBtnHtml(2, '🎯 月2個以上', n2)}${tabBtnHtml(1, '月1個以上', n1)}${tabBtnHtml('steady', '🔁 コンスタント', nSteady)}
         <span class="smd-dim" style="font-size:10.5px"><b>売れ続けている＝先に仕入れておく価値がある</b>の判断材料です。作品ごとに割れて埋もれる定番は「シリーズ別」で。</span>
       </div>
-      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th><th>明細（バリエーション）／ カタログ</th><th style="text-align:right" title="売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）">予想月販</th><th style="text-align:right" title="選択中の期間内に売れた個数">期間内</th><th style="text-align:right">累計</th><th style="text-align:right">現在庫</th><th>在庫の持ち</th><th>売れている国</th><th style="text-align:right">原価目安</th><th>売れた日</th><th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
+      <div class="pf-scroll" style="max-height:52vh;margin-top:8px"><table class="pf-table" style="width:100%;min-width:820px"><tr><th>画像</th>${repTh('name', '明細（バリエーション）／ カタログ')}${repTh('perMonth', '予想月販', 1, '売れた月あたりの平均販売数（在庫切れ・休眠の月は分母から除外）')}${repTh('win', '期間内', 1, '選択中の期間内に売れた個数')}${repTh('qty', '累計', 1)}${repTh('stock', '現在庫', 1)}${repTh('months', '在庫の持ち')}${repTh('ccs', '売れている国', 0, '売れている国の数で並びます')}${repTh('cost', '原価目安', 1)}${repTh('sold', '売れた日', 0, '期間内に最後に売れた日で並びます')}<th>仕入れを探す</th></tr>${rowsH || '<tr><td colspan="11" class="smd-dim" style="padding:12px">該当なし</td></tr>'}</table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝「売れた月あたり」の平均販売数</b>（在庫切れ・休眠の月は分母に入れない＝在庫があれば月何個売れるか）。キャンセル・未払い・返品は除外。<b>バリエーションが実商品</b>なので親商品とは分けて集計。<b>⚡=1ヶ月集中の一発物</b>（定番は🔁の月数が多いもの）。原価目安は注文SNで在庫台帳と突合できた分の中央値。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
     </details>`;
   }
@@ -4279,6 +4319,11 @@
     h.innerHTML = repeatSellersHtml(repeatCache.rows);
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; repeatMin = /^\d/.test(v) ? Number(v) : v; renderRepeatSellers(); }));
     h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
+    // 列ヘッダで並び替え。同じ列をもう一度押すと逆順／別の列は「まず知りたい向き」から（数字＝多い順、名前＝A→Z）
+    h.querySelectorAll('.rep-sort').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k;
+      if (repeatSort.k === k) repeatSort = { k, d: repeatSort.d === 'asc' ? 'desc' : 'asc' };
+      else repeatSort = { k, d: k === 'name' ? 'asc' : 'desc' };
+      renderRepeatSellers(); }));
     h.querySelectorAll('.rep-win').forEach(el => el.addEventListener('click', () => { repeatWin = Number(el.dataset.d); renderRepeatSellers(); }));
     { const qi = document.getElementById('rep-q'); let _rt;
       if (qi) { qi.addEventListener('input', () => { clearTimeout(_rt); _rt = setTimeout(() => { const el = document.getElementById('rep-q'); if (!el) return; const pos = el.selectionStart; repeatQ = el.value.trim().toLowerCase(); renderRepeatSellers(); const ni = document.getElementById('rep-q'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} } }, 200); }); } // ★200msデバウンス：1文字ごとの全集計8周を解消
