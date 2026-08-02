@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.29.0
+// @version      3.30.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -319,6 +319,7 @@
               if (mt) _wsProbe.types[mt] = (_wsProbe.types[mt] || 0) + 1;
               _wsProbe.kinds[kind] = (_wsProbe.kinds[kind] || 0) + 1;
               // 本文らしきものは優先して残す（typingは1件だけ）
+              if (kind === 'text') { try { wsIngest(str); } catch (_) {} }   // ★受け取ったメッセージをその場で取り込む
               if (kind === 'text' && _wsProbe.texts.length < 8) _wsProbe.texts.push(str.slice(0, 1600));
               else if (kind === 'other' && _wsProbe.others.length < 4) _wsProbe.others.push(str.slice(0, 900));
               else if (_wsProbe.samples.length < 2) _wsProbe.samples.push(str.slice(0, 500));
@@ -386,11 +387,51 @@
     } catch (e) { _wsProbe.apiTest = { err: String(e.message).slice(0, 120) }; }
   }, 45000);
 
+  // ★★★通信から直接取り込む（v3.30.0）＝会話を開かずに新着が入る。巡回の置き換え。
+  //   実測した形：{payload:{message_type:'message', message_content:'{...}'}}
+  //     message_content: { id, from_user_name, to_user_name, type, content:{text|url}, ... }
+  //   会話を開かないので **混線しない・既読にならない・画面が動かない**。
+  const WS_SHOP2CC = { br: 'BR', ph: 'PH', vn: 'VN', my: 'MY', sg: 'SG', th: 'TH', tw: 'TW' };
+  let wsGot = 0;
+  function wsIngest(str) {
+    let o; try { o = JSON.parse(str); } catch (_) { return; }
+    const pay = o.payload || o;
+    if (String(pay.message_type || '') !== 'message') return;
+    let mc; try { mc = JSON.parse(pay.message_content); } catch (_) { return; }
+    if (!mc || !mc.id) return;
+    const fromMe = /^gcsonlinestore/i.test(String(mc.from_user_name || ''));
+    const shopName = String(fromMe ? mc.from_user_name : mc.to_user_name || '');
+    const buyer = String((fromMe ? mc.to_user_name : mc.from_user_name) || '').trim();
+    if (!buyer || /^gcsonlinestore/i.test(buyer)) return;
+    const cc = WS_SHOP2CC[(shopName.split('.').pop() || '').toLowerCase()] || CC;
+    const ty = String(mc.type || '');
+    let text = '', msgType = 'text';
+    const c = mc.content || {};
+    if (ty === 'text') text = String(c.text || '');
+    else if (ty === 'image' || ty === 'sticker') { text = String(c.url || c.image_url || c.file_url || ''); msgType = 'image'; }
+    else return;                                   // 未知の型は取り込まない（後で足す）
+    if (!text) return;
+    // 時刻：メッセージ自身が持つものを優先し、無ければ受信時刻
+    let ms = Number(mc.created_time || mc.create_time || mc.timestamp || pay.receiveTime || o.receiveTime || Date.now());
+    if (!isFinite(ms) || ms <= 0) ms = Date.now();
+    if (ms < 1e12) ms *= 1000;                     // 秒単位なら補正
+    const d = new Date(ms);
+    const mt = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+    const id = 'sp|' + String(mc.id);
+    if (seenMsg.has(id)) return;
+    seenMsg.add(id);
+    msgBuffer.push({ id: id, source: 'shopee', cc: cc, buyer: buyer, conversation_id: cc + ':' + buyer,
+      direction: fromMe ? 'out' : 'in', msg_type: msgType, text: text, msg_time: mt });
+    wsGot++;
+    try { toast('📡 通信から取り込み: ' + buyer); } catch (_) {}
+    try { flushSb(true); } catch (_) {}
+  }
+
   const _bootAt = Date.now();   // このタブが読み込まれた時刻（定期リロードの基準）
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.29.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.30.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2079,7 +2120,7 @@
     sbReq('POST', 'app_kv?on_conflict=k',
       // ver＝実際に動いているスクリプトの版。これが無いと「入れ替えたのに古いまま動いている」に気づけない
       //   （Tampermonkeyは差し替えても、開いたままのタブは古いコードで動き続ける）。
-      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated,
+      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated, ws: wsGot,
              vis: _realVis(), spoof: true, hid: document.hidden,
              side: (function(){ try { const l = sideList(); return l ? l.children.length : -1; } catch (_) { return -2; } })(),
              thr: (function(){ try { const h = domHeaderInfo(); return h ? h.thread.children.length : -1; } catch (_) { return -2; } })(),
