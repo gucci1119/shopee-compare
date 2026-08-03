@@ -14660,20 +14660,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (period === 'week') { const dt = new Date(y, m - 1, +p[2]); const wd = (dt.getDay() + 6) % 7; dt.setDate(dt.getDate() - wd); return dt.toISOString().slice(0, 10); } // 週=月曜始まり
     return ds;
   }
-  // 進行中バケット（今日を含む期間）の経過日数と総日数。着地見込みの算出に使う。
-  // 日足は「1日の途中」を按分しても実用的でないため対象外。範囲指定時も出さない（過去区間なので）。
+  // 進行中バケット（今日を含む期間）の経過量と総量。着地見込みの算出に使う。
+  // 日/週/月/四半期/半年/年すべて対応。日足だけは「日」でなく「時」で按分する。
+  // 範囲指定時は呼ばない（過去区間なので見込みの概念がない）。
   function trendProgress(k, period) {
-    if (period === 'day') return null;
     const today = jstDate(Date.now());
+    if (period === 'day') {
+      if (k !== today) return null;
+      const j = new Date(Date.now() + 9 * 3600 * 1000);   // JSTの経過時刻
+      const done = j.getUTCHours() + j.getUTCMinutes() / 60;
+      return { done: Math.max(0.5, Math.round(done * 10) / 10), total: 24, unit: '時' };
+    }
     if (trendBucket(today, period) !== k) return null;   // 進行中のバケットでなければ見込みなし
     const y = +today.slice(0, 4), m = +today.slice(5, 7), d = +today.slice(8, 10);
     const days = (s, e) => Math.round((e - s) / 86400000);
     const now = Date.UTC(y, m - 1, d);
-    if (period === 'month') return { done: d, total: new Date(Date.UTC(y, m, 0)).getUTCDate() };
-    if (period === 'week') { const wd = (new Date(y, m - 1, d).getDay() + 6) % 7; return { done: wd + 1, total: 7 }; }   // 月曜始まり。★曜日はtrendBucketと同じローカル時刻で出す（UTCだと1日ずれる）
-    if (period === 'quarter') { const q = Math.floor((m - 1) / 3); const s0 = Date.UTC(y, q * 3, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y, q * 3 + 3, 1)) }; }
-    if (period === 'half') { const h = m <= 6 ? 0 : 1; const s0 = Date.UTC(y, h * 6, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y, h * 6 + 6, 1)) }; }
-    if (period === 'year') { const s0 = Date.UTC(y, 0, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y + 1, 0, 1)) }; }
+    if (period === 'month') return { done: d, total: new Date(Date.UTC(y, m, 0)).getUTCDate(), unit: '日' };
+    if (period === 'week') { const wd = (new Date(y, m - 1, d).getDay() + 6) % 7; return { done: wd + 1, total: 7, unit: '日' }; }   // 月曜始まり。★曜日はtrendBucketと同じローカル時刻で出す（UTCだと1日ずれる）
+    if (period === 'quarter') { const q = Math.floor((m - 1) / 3); const s0 = Date.UTC(y, q * 3, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y, q * 3 + 3, 1)), unit: '日' }; }
+    if (period === 'half') { const h = m <= 6 ? 0 : 1; const s0 = Date.UTC(y, h * 6, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y, h * 6 + 6, 1)), unit: '日' }; }
+    if (period === 'year') { const s0 = Date.UTC(y, 0, 1); return { done: days(s0, now) + 1, total: days(s0, Date.UTC(y + 1, 0, 1)), unit: '日' }; }
     return null;
   }
   function trendLabel(k, period) {
@@ -14797,7 +14803,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (last && projected) vLabel += `<span style="color:#ee4d2d;font-weight:700"> →見込 ${fmtV(Math.round(projected))}</span>`;
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:${isMobile ? 10 : 36}px" title="${tip}">` +
             `<div style="font-size:${isMobile ? 8 : 9}px;color:${v > 0 ? (last ? '#111' : '#666') : '#c4c8ce'};white-space:nowrap;margin-bottom:2px;font-weight:${last ? 700 : 400}">${vLabel}</div>` +
-            (last && projected ? `<div title="このペースで進んだ場合の着地見込み ${fmtFull(Math.round(projected))}（${prog.done}/${prog.total}日経過）" style="width:100%;height:${Math.max(0, Math.round(projected / max * barMax) - h)}px;border:1px dashed #ee4d2d;border-bottom:none;border-radius:3px 3px 0 0;box-sizing:border-box;background:repeating-linear-gradient(45deg,rgba(238,77,45,.06),rgba(238,77,45,.06) 4px,transparent 4px,transparent 8px)"></div>` : '') +
+            (last && projected ? `<div title="このペースで進んだ場合の着地見込み ${fmtFull(Math.round(projected))}（${prog.done}/${prog.total}${prog.unit || '日'}経過）" style="width:100%;height:${Math.max(0, Math.round(projected / max * barMax) - h)}px;border:1px dashed #ee4d2d;border-bottom:none;border-radius:3px 3px 0 0;box-sizing:border-box;background:repeating-linear-gradient(45deg,rgba(238,77,45,.06),rgba(238,77,45,.06) 4px,transparent 4px,transparent 8px)"></div>` : '') +
             `<div style="width:100%;height:${h}px;border-radius:${last && projected ? '0' : '3px 3px 0 0'};overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
             `<div style="font-size:${isMobile ? 7.5 : 9}px;color:#6b7280;margin-top:${denseX ? 8 : 3}px;white-space:nowrap;height:${denseX ? 0 : 'auto'};transform:${denseX ? 'rotate(-50deg)' : 'none'};transform-origin:center top">${trendLabel(k, effPeriod)}</div></div>`;
         }).join('') + '</div></div>';
@@ -14807,8 +14813,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const topK = keys.reduce((a, k) => val(k) > val(a) ? k : a, keys[0]);
       const maxActual = Math.max(...keys.map(val), 0);   // 「最高」は実績のみ（maxは見込みを含むため別に持つ）
       noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric !== 'sales' ? (inclCancel ? '・キャンセル含む' : '・キャンセル除く') : ''}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(maxActual)}</b>（${topK}）` +
-        (projected ? `<br><b style="color:#ee4d2d">📈 ${pName === '月' ? '今月' : 'この' + pName}の着地見込み ${fmtFull(Math.round(projected))}</b>` +
-          `<span class="smd-dim">（${prog.done}/${prog.total}日経過・現在 ${fmtFull(val(lastKey))}・1日あたり ${fmtFull(Math.round(val(lastKey) / prog.done * 10) / 10)}ペース）。<b>このままのペースが続いた場合</b>の単純按分です。</span>` : '');
+        (projected ? (() => {
+          const u = prog.unit || '日';
+          const nowName = { '日': '今日', '週': '今週', '月': '今月', '四半期': 'この四半期', '半年': 'この半期', '年': '今年' }[pName] || ('この' + pName);
+          const ratio = prog.done / prog.total;
+          const warn = ratio < 0.2 ? `<span style="color:#e8710a;font-weight:700"> ⚠ まだ${Math.round(ratio * 100)}%しか経過していないためブレます</span>` : '';
+          return `<br><b style="color:#ee4d2d">📈 ${nowName}の着地見込み ${fmtFull(Math.round(projected))}</b>` +
+            `<span class="smd-dim">（${prog.done}/${prog.total}${u}経過・現在 ${fmtFull(val(lastKey))}・1${u}あたり ${fmtFull(Math.round(val(lastKey) / prog.done * 10) / 10)}ペース）。<b>このままのペースが続いた場合</b>の単純按分です。</span>${warn}`;
+        })() : '');
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
 
