@@ -1281,16 +1281,31 @@
       name: m.name || ''
     }));
     // 属性: value_id有り=選択肢型 / 無し(0)=自由記述(raw_value)。unitは保持。
+    // ★名前(original_attribute_name / original_value_name)もレスポンスに入っているので必ず持ち回る。
+    //   これがあれば get_attributes を待たずに「Condition / Region」等の日本語圏でも読める名前が出せる。
     const attrs = (base.attribute_list || []).map(a => ({
       attribute_id: a.attribute_id,
-      attribute_values: (a.attribute_value_list || []).map(v => (v.value_id ? { value_id: v.value_id, unit: v.value_unit } : { raw_value: v.original_value_name, unit: v.value_unit }))
+      name: a.original_attribute_name || '',
+      mandatory: !!a.is_mandatory,
+      attribute_values: (a.attribute_value_list || []).map(v => (v.value_id ? { value_id: v.value_id, unit: v.value_unit, name: v.original_value_name || '' } : { raw_value: v.original_value_name, unit: v.value_unit }))
     }));
+    // ★説明文：normal は base.description、extended は description_info.extended_description.field_list に入る。
+    //   extended でテキスト以外(画像等)を含む場合は、編集で消してしまうので読み取り専用にする。
+    const dinfo = (base.description_info && base.description_info.extended_description) || {};
+    const dfields = dinfo.field_list || [];
+    const descType = base.description_type || 'normal';
+    const descText = descType === 'extended'
+      ? dfields.filter(f => f.field_type === 'text').map(f => f.text || '').join('\n')
+      : (base.description || '');
+    const descEditable = descType !== 'extended' || dfields.every(f => f.field_type === 'text');
     const po = base.pre_order || {};
     const img = base.image || {};
     return {
       _src: 'api',
       name: base.item_name || '',
-      description: base.description || '',                       // ★説明文（公式は description をそのまま返す）
+      description: descText,                                     // ★説明文（normal/extended 両対応）
+      description_type: descType,
+      description_editable: descEditable,
       images: (img.image_url_list || []).slice(),                // ★画像URL（表示・並べ替え用）
       image_ids: (img.image_id_list || []).slice(),              // ★画像ID（変更なしの判定用）
       parent_sku: base.item_sku || '',
@@ -9701,7 +9716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const attrHtml = attrs.map((a, ai) => {
         const vals = a.attribute_values || [];
         const def = atree.get(a.attribute_id);
-        const nm = (def && def.name) || ('属性#' + a.attribute_id);
+        const nm = (def && def.name) || a.name || ('属性#' + a.attribute_id);   // ★ツリー未取得でもレスポンスの名前を使う
         const star = def && def.mandatory ? '<span style="color:#d93025">*</span>' : '';
         if (def && def.options.length) {
           if (def.multi) {
@@ -9735,8 +9750,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="margin-top:12px">
           <label style="color:#555;font-weight:600">商品説明</label>
           <span class="smd-dim" style="font-size:10.5px">（Shopeeの説明文。改行そのまま反映）</span>
-          <textarea class="ed-desc" rows="7"${pi._src === 'api' ? '' : ' readonly'} style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical;line-height:1.5;${pi._src === 'api' ? '' : 'background:#f4f5f7;color:#888'}">${esc(pi.description || '')}</textarea>
-          ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a">⚠️ ブリッジ読込のため説明文は編集できません（⚙️OpenAPI設定を入れると編集可）。この状態で保存しても説明文は書き換わりません。</div>'}
+          <textarea class="ed-desc" rows="7"${(pi._src === 'api' && pi.description_editable !== false) ? '' : ' readonly'} style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical;line-height:1.5;${(pi._src === 'api' && pi.description_editable !== false) ? '' : 'background:#f4f5f7;color:#888'}">${esc(pi.description || '')}</textarea>
+          ${pi._src !== 'api' ? '<div class="smd-dim" style="font-size:10.5px;color:#a8650a">⚠️ ブリッジ読込のため説明文は編集できません（⚙️OpenAPI設定を入れると編集可）。この状態で保存しても説明文は書き換わりません。</div>'
+            : (pi.description_editable === false ? '<div class="smd-dim" style="font-size:10.5px;color:#a8650a">⚠️ この商品の説明文は画像等を含む拡張形式のため、ここでは編集できません（テキストだけにすると消えてしまうため）。Shopeeの編集画面をお使いください。</div>' : '')}
         </div>
         <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">
           <div style="flex:1;min-width:180px"><label style="color:#555;font-weight:600">親SKU</label><input class="ed-psku" value="${av(pi.parent_sku || '')}" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:monospace"></div>
@@ -9766,7 +9782,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!imgWrap) return;
         imgWrap.innerHTML = edImgs.length ? edImgs.map((u, i) => `
           <div style="position:relative;width:64px;height:64px;border:1px solid ${i === 0 ? '#ee4d2d' : '#ddd'};border-radius:6px;overflow:hidden;background:#f7f7f7">
-            <img src="${esc(u)}" style="width:100%;height:100%;object-fit:cover" loading="lazy" onerror="this.style.opacity=.15" title="${esc(u)}">
+            <img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(u) : u)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover" loading="lazy" onerror="this.style.opacity=.15" title="${esc(u)}">
             ${i === 0 ? '<span style="position:absolute;left:0;bottom:0;background:#ee4d2d;color:#fff;font-size:8px;padding:0 3px">表紙</span>' : ''}
             ${canEditImg ? `<button class="ed-imgdel" data-i="${i}" title="削除" style="position:absolute;right:0;top:0;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:10px;line-height:1;padding:2px 4px;cursor:pointer">✕</button>
             <span style="position:absolute;right:0;bottom:0;display:flex">
@@ -9807,7 +9823,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // 説明文
         const descV = body.querySelector('.ed-desc').value;
         // ★ブリッジ読込では説明文が取れないため比較できない＝誤って空で上書きしないよう公式読込時のみ対象
-        if (pi._src === 'api' && descV !== (pi.description || '')) { patch.description = descV; summary.push('商品説明'); }
+        if (pi._src === 'api' && pi.description_editable !== false && descV !== (pi.description || '')) { patch.description = descV; summary.push('商品説明'); }
         // 画像（並び順も含めて完全一致でなければ差し替え）
         const origImgs = (pi.images || []).slice();
         if (pi._src === 'api' && (edImgs.length !== origImgs.length || edImgs.some((u, i) => u !== origImgs[i]))) {
@@ -9876,7 +9892,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (patch.weight != null && patch.weight.value != null && patch.weight.value !== '') itemP.weight = patch.weight.value;
             if (patch.pre_order_info != null) itemP.preorder = JSON.stringify({ is_pre_order: !!patch.pre_order_info.pre_order, days_to_ship: patch.pre_order_info.days_to_ship });
             if (patch.attributes != null) itemP.attributes = JSON.stringify(mapAttrsOfficial(patch.attributes));
-            if (patch.description != null) itemP.desc = patch.description;
+            if (patch.description != null) { itemP.desc = patch.description; itemP.desc_type = pi.description_type || 'normal'; }
             if (patch.images != null) itemP.images = patch.images.join(',');   // GAS側でmedia_spaceへアップ→image_id_listに変換
             if (Object.keys(itemP).length > 2) { const r = await openapiUpdateItem(itemP); if (!(r && r.ok)) throw new Error('商品情報(update_item): ' + ((r && r.error) || '失敗')); done.push('商品情報'); }
             // 2) 価格・在庫（変更分のみ・既存の公式ヘルパー）

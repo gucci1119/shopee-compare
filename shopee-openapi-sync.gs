@@ -176,7 +176,7 @@ function doGet(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -971,7 +971,18 @@ function updateItem_(body) {
   var payload = { item_id: itemId };
   if (body.item_name != null && String(body.item_name) !== '') payload.item_name = String(body.item_name).slice(0, 120);
   if (body.item_sku != null) payload.item_sku = String(body.item_sku);
-  if (body.description != null && String(body.description) !== '') payload.description = String(body.description);
+  // 説明文。Shopeeは商品ごとに normal / extended の2形式があり、書き方が違う。
+  //   normal   … description に生テキスト
+  //   extended … description_info.extended_description.field_list に {field_type:'text', text:...} を並べる
+  //   ★形式を取り違えると error_param になるので、読み取り時の description_type をそのまま返してもらって合わせる。
+  if (body.description != null && String(body.description) !== '') {
+    if (String(body.desc_type || '') === 'extended') {
+      payload.description_type = 'extended';
+      payload.description_info = { extended_description: { field_list: [{ field_type: 'text', text: String(body.description) }] } };
+    } else {
+      payload.description = String(body.description);
+    }
+  }
   if (body.weight != null && String(body.weight) !== '' && !isNaN(parseFloat(body.weight))) payload.weight = parseFloat(body.weight); // kg（SLS送料計算に効く）
   // 予約(pre_order)：{is_pre_order, days_to_ship}
   if (body.pre_order && typeof body.pre_order === 'object') {
