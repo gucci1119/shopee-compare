@@ -173,7 +173,10 @@ function doGet(e) {
         var uPre = null, uAttrs = null;
         try { if (p.preorder) uPre = JSON.parse(p.preorder); } catch (e0) {}
         try { if (p.attributes) uAttrs = JSON.parse(p.attributes); } catch (e1) {}
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight, pre_order: uPre, attribute_list: uAttrs });
+        // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
+        var uImgs = null;
+        if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -977,7 +980,20 @@ function updateItem_(body) {
   }
   // 属性(specifics)：attribute_list=[{attribute_id, attribute_value_list:[{value_id, original_value_name, value_unit}]}]
   if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list のいずれか）');
+  // ★画像：URL配列 → media_space/upload_image で image_id に変換 → image.image_id_list を丸ごと差し替え。
+  //   Shopeeは部分更新ではなく「渡した並びがそのまま新しい画像一覧」になるので、順番＝表示順。最大9枚。
+  //   既にShopee上にある画像は URL からの再アップになるが、image_id が変わるだけで見た目は同じ。
+  if (body.images && body.images.length) {
+    var _ids = [], _seen = {};
+    for (var ii = 0; ii < body.images.length && _ids.length < 9; ii++) {
+      var _u = String(body.images[ii] || '').trim(); if (!_u) continue;
+      var _id = /^[A-Za-z0-9_-]{20,}$/.test(_u) ? _u : uploadImageUrl_(_u);   // 既にimage_idならそのまま使う
+      if (_id && !_seen[_id]) { _seen[_id] = 1; _ids.push(_id); }
+    }
+    if (!_ids.length) throw new Error('画像のアップロードに失敗しました（URLを確認してください）');
+    payload.image = { image_id_list: _ids };
+  }
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };

@@ -1286,9 +1286,13 @@
       attribute_values: (a.attribute_value_list || []).map(v => (v.value_id ? { value_id: v.value_id, unit: v.value_unit } : { raw_value: v.original_value_name, unit: v.value_unit }))
     }));
     const po = base.pre_order || {};
+    const img = base.image || {};
     return {
       _src: 'api',
       name: base.item_name || '',
+      description: base.description || '',                       // ★説明文（公式は description をそのまま返す）
+      images: (img.image_url_list || []).slice(),                // ★画像URL（表示・並べ替え用）
+      image_ids: (img.image_id_list || []).slice(),              // ★画像ID（変更なしの判定用）
       parent_sku: base.item_sku || '',
       weight: { value: (base.weight != null ? base.weight : ''), unit: 1 }, // 公式は常にkg
       pre_order_info: { pre_order: !!po.is_pre_order, days_to_ship: po.days_to_ship || 0 },
@@ -9717,6 +9721,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;font-size:11.5px;color:#8a6d3b;margin-bottom:12px">⚠️ 保存すると<b>Shopee本番カタログ</b>(item ${itemId})が更新されます。変更した項目だけ書き込みます。<span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:700;${pi._src === 'api' ? 'background:#e6f4ea;color:#137333' : 'background:#eef;color:#3b5bdb'}">読込: ${pi._src === 'api' ? '公式API' : 'ブリッジ'}</span></div>
         <label style="color:#555;font-weight:600">タイトル</label>
         <textarea class="ed-name" rows="2" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical">${esc(pi.name || '')}</textarea>
+        <div style="margin-top:12px">
+          <label style="color:#555;font-weight:600">商品画像</label>
+          <span class="smd-dim" style="font-size:10.5px">（最大9枚・<b>左が1枚目＝サムネイル</b>。◀▶で並べ替え／✕で削除）</span>
+          <div class="ed-imgwrap" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;min-height:36px"></div>
+          <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap">
+            <input class="ed-imgurl" placeholder="画像URLを貼って追加（メルカリ等の商品URLも可）" style="flex:1;min-width:220px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
+            <button class="ed-imgadd smd-btn" style="font-size:11.5px;padding:4px 12px">+ 追加</button>
+            <button class="ed-imgreset smd-btn" style="font-size:11.5px;padding:4px 10px">元に戻す</button>
+          </div>
+          ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a;margin-top:3px">⚠️ ブリッジ読込のため画像は編集できません（⚙️OpenAPI設定を入れると編集可）</div>'}
+        </div>
+        <div style="margin-top:12px">
+          <label style="color:#555;font-weight:600">商品説明</label>
+          <span class="smd-dim" style="font-size:10.5px">（Shopeeの説明文。改行そのまま反映）</span>
+          <textarea class="ed-desc" rows="7"${pi._src === 'api' ? '' : ' readonly'} style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical;line-height:1.5;${pi._src === 'api' ? '' : 'background:#f4f5f7;color:#888'}">${esc(pi.description || '')}</textarea>
+          ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a">⚠️ ブリッジ読込のため説明文は編集できません（⚙️OpenAPI設定を入れると編集可）。この状態で保存しても説明文は書き換わりません。</div>'}
+        </div>
         <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">
           <div style="flex:1;min-width:180px"><label style="color:#555;font-weight:600">親SKU</label><input class="ed-psku" value="${av(pi.parent_sku || '')}" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:monospace"></div>
           <div style="width:150px"><label style="color:#555;font-weight:600">重量</label><div style="display:flex;align-items:center;gap:4px"><input class="ed-wval" value="${av((pi.weight || {}).value || '')}" inputmode="decimal" style="width:90px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"><span style="color:#888;font-size:11px">${(pi.weight || {}).unit === 1 ? 'kg' : ('unit' + ((pi.weight || {}).unit))}</span></div></div>
@@ -9736,10 +9757,63 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <button class="ed-save" style="border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">Shopeeに保存</button>
         </div>`;
       body.querySelector('.ed-close2').addEventListener('click', close);
+      // ---- 画像エディタ：追加／削除／並べ替え（1枚目＝サムネイル） ----
+      // Shopeeは「渡した並びがそのまま新しい画像一覧」になるため、順番＝表示順。保存時にGASがmedia_spaceへ上げてIDに変換する。
+      const edImgs = (pi.images || []).slice();
+      const imgWrap = body.querySelector('.ed-imgwrap');
+      const canEditImg = pi._src === 'api';
+      function drawImgs() {
+        if (!imgWrap) return;
+        imgWrap.innerHTML = edImgs.length ? edImgs.map((u, i) => `
+          <div style="position:relative;width:64px;height:64px;border:1px solid ${i === 0 ? '#ee4d2d' : '#ddd'};border-radius:6px;overflow:hidden;background:#f7f7f7">
+            <img src="${esc(u)}" style="width:100%;height:100%;object-fit:cover" loading="lazy" onerror="this.style.opacity=.15" title="${esc(u)}">
+            ${i === 0 ? '<span style="position:absolute;left:0;bottom:0;background:#ee4d2d;color:#fff;font-size:8px;padding:0 3px">表紙</span>' : ''}
+            ${canEditImg ? `<button class="ed-imgdel" data-i="${i}" title="削除" style="position:absolute;right:0;top:0;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:10px;line-height:1;padding:2px 4px;cursor:pointer">✕</button>
+            <span style="position:absolute;right:0;bottom:0;display:flex">
+              <button class="ed-imgmv" data-i="${i}" data-d="-1" title="左へ" style="border:none;background:rgba(0,0,0,.45);color:#fff;font-size:9px;padding:1px 3px;cursor:pointer"${i === 0 ? ' disabled' : ''}>◀</button>
+              <button class="ed-imgmv" data-i="${i}" data-d="1" title="右へ" style="border:none;background:rgba(0,0,0,.45);color:#fff;font-size:9px;padding:1px 3px;cursor:pointer"${i === edImgs.length - 1 ? ' disabled' : ''}>▶</button>
+            </span>` : ''}
+          </div>`).join('') : '<span class="smd-dim" style="font-size:11px">（画像なし）</span>';
+        imgWrap.querySelectorAll('.ed-imgdel').forEach(b2 => b2.addEventListener('click', () => { edImgs.splice(+b2.dataset.i, 1); drawImgs(); }));
+        imgWrap.querySelectorAll('.ed-imgmv').forEach(b2 => b2.addEventListener('click', () => {
+          const i = +b2.dataset.i, j = i + (+b2.dataset.d);
+          if (j < 0 || j >= edImgs.length) return;
+          const t = edImgs[i]; edImgs[i] = edImgs[j]; edImgs[j] = t; drawImgs();
+        }));
+      }
+      drawImgs();
+      { const ib = body.querySelector('.ed-imgadd'), iu = body.querySelector('.ed-imgurl'), ir = body.querySelector('.ed-imgreset');
+        const addImg = async () => {
+          if (!canEditImg) { alert('画像の編集には⚙️OpenAPI設定が必要です'); return; }
+          let u = (iu.value || '').trim(); if (!u) return;
+          if (edImgs.length >= 9) { alert('画像は最大9枚です'); return; }
+          // メルカリ商品URLは画像直リンクへ変換（出品コンポーザーと同じ・ブリッジ不要）
+          const mi = (typeof mercariImg === 'function') ? mercariImg(u) : null;
+          if (mi) u = mi;
+          if (typeof isPageUrl === 'function' && isPageUrl(u)) {
+            alert('これは商品ページのURLのようです。\n画像を右クリック→「画像アドレスをコピー」で直リンクを貼ってください。\n（メルカリの商品URLはそのまま貼れます）');
+            return;
+          }
+          if (edImgs.includes(u)) { alert('同じ画像が既にあります'); return; }
+          edImgs.push(u); iu.value = ''; drawImgs();
+        };
+        if (ib) ib.addEventListener('click', addImg);
+        if (iu) iu.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addImg(); } });
+        if (ir) ir.addEventListener('click', () => { edImgs.length = 0; (pi.images || []).forEach(u => edImgs.push(u)); drawImgs(); }); }
       body.querySelector('.ed-save').addEventListener('click', async () => {
         const patch = {}, summary = [];
         const nameV = body.querySelector('.ed-name').value.trim();
         if (nameV && nameV !== (pi.name || '')) { patch.name = nameV; summary.push('タイトル'); }
+        // 説明文
+        const descV = body.querySelector('.ed-desc').value;
+        // ★ブリッジ読込では説明文が取れないため比較できない＝誤って空で上書きしないよう公式読込時のみ対象
+        if (pi._src === 'api' && descV !== (pi.description || '')) { patch.description = descV; summary.push('商品説明'); }
+        // 画像（並び順も含めて完全一致でなければ差し替え）
+        const origImgs = (pi.images || []).slice();
+        if (pi._src === 'api' && (edImgs.length !== origImgs.length || edImgs.some((u, i) => u !== origImgs[i]))) {
+          if (!edImgs.length) { alert('画像は1枚以上必要です'); return; }
+          patch.images = edImgs.slice(); summary.push('画像' + edImgs.length + '枚');
+        }
         const pskuV = body.querySelector('.ed-psku').value.trim();
         if (pskuV !== (pi.parent_sku || '')) { patch.parent_sku = pskuV; summary.push('親SKU'); }
         const wvalV = body.querySelector('.ed-wval').value.trim();
@@ -9802,6 +9876,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (patch.weight != null && patch.weight.value != null && patch.weight.value !== '') itemP.weight = patch.weight.value;
             if (patch.pre_order_info != null) itemP.preorder = JSON.stringify({ is_pre_order: !!patch.pre_order_info.pre_order, days_to_ship: patch.pre_order_info.days_to_ship });
             if (patch.attributes != null) itemP.attributes = JSON.stringify(mapAttrsOfficial(patch.attributes));
+            if (patch.description != null) itemP.desc = patch.description;
+            if (patch.images != null) itemP.images = patch.images.join(',');   // GAS側でmedia_spaceへアップ→image_id_listに変換
             if (Object.keys(itemP).length > 2) { const r = await openapiUpdateItem(itemP); if (!(r && r.ok)) throw new Error('商品情報(update_item): ' + ((r && r.error) || '失敗')); done.push('商品情報'); }
             // 2) 価格・在庫（変更分のみ・既存の公式ヘルパー）
             const priceList = [], stockList = [];
