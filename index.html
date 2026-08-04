@@ -1275,7 +1275,7 @@
     const tiers = ml.tier_variation || [];
     const std = tiers.map(t => ({ custom_value: t.name || '', value_list: (t.option_list || []).map(o => ({ custom_value: o.option || '' })) }));
     const models = (ml.models || []).map(m => ({
-      id: m.model_id, tier_index: m.tier_index || [], sku: m.sku || '',
+      id: m.model_id, tier_index: m.tier_index || [], sku: m.sku || '', img: m.img || '',   // ★明細画像（第1階層オプションの画像）
       price_info: { input_normal_price: m.price, normal_price: m.price },
       stock_detail: { seller_stock_info: [{ sellable_stock: m.stock }] },
       name: m.name || ''
@@ -9683,10 +9683,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // これでTampermonkey未応答でもエディタが詰まらず開ける（書込・属性選択肢は当面ブリッジ）。
     // itemIdはdataset由来で文字列のことがある。行のitem_idは数値なので Number/String 両方で解決（=== 不一致でsidCat=null→公式APIをスキップしてしまう不具合の回避）
     const sidCat = (typeof shopIdOfListing === 'function') ? (shopIdOfListing(cc, itemId) || shopIdOfListing(cc, Number(itemId)) || shopIdOfListing(cc, String(itemId))) : null;
+    // ★セッション内キャッシュ：同じ商品を開き直すときは即表示（保存や明細追加のたびに開き直すため効く）
+    openCatalogEditor._cache = openCatalogEditor._cache || new Map();
+    const ck = cc + '|' + itemId;
     const readPi = (async () => {
+      const hit = openCatalogEditor._cache.get(ck);
+      if (hit && Date.now() - hit.at < 180000) return hit.pi;   // 3分以内は再取得しない
       if (settings.openapiUrl && sidCat) {
-        try { return await openapiGetItemInfo(sidCat, itemId); }
-        catch (e) { /* 公式API失敗（未デプロイ/権限等）→ブリッジへfallback */ }
+        // ★GASは稀に404(デプロイ伝播中)や一時エラーを返す。1回だけ即リトライする＝これをしないと
+        //   ブリッジに落ちて「読込:ブリッジ」になり、説明文・画像・属性名が出なくなる。
+        for (let att = 0; att < 2; att++) {
+          try { const r = await openapiGetItemInfo(sidCat, itemId); openCatalogEditor._cache.set(ck, { pi: r, at: Date.now() }); return r; }
+          catch (e) { if (att === 0) await new Promise(r2 => setTimeout(r2, 700)); else console.warn('[カタログ編集] 公式API読込に失敗→ブリッジへ', String(e && e.message || e)); }
+        }
       }
       // ブリッジ(GM_xhr)未応答だと productRead が無限hangするので18秒でタイムアウト→catchでエラー表示
       return await Promise.race([productRead(host, itemId), new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト（ブリッジ未応答）')), 18000))]);
@@ -9706,7 +9715,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;flex-wrap:wrap;gap:6px">${(t.value_list || []).map((o, oi) => `<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="width:calc(33% - 6px);min-width:150px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集">`).join('')}</div>`).join('');
       }
       // 明細（model）テーブル: 価格・SKU編集
+      const optOf = (m) => { const t0 = tiers[0]; const oi = (m.tier_index || [])[0]; return (t0 && t0.value_list && t0.value_list[oi]) ? (t0.value_list[oi].custom_value || '') : ''; };
       const modelRows = models.map(m => `<tr>
+        <td style="width:46px">${m.img ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2" loading="lazy" onerror="this.style.opacity=.15">` : '<span class="smd-dim" style="font-size:10px">なし</span>'}<br><button class="ed-mimg" data-opt="${av(optOf(m))}" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer;margin-top:2px">画像</button></td>
         <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m, tiers))}</td>
         <td style="white-space:nowrap">${esc(cur)}<input class="ed-price" data-mid="${m.id}" value="${av(modelPrice(m))}" inputmode="decimal" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></td>
         <td style="text-align:center"><input class="ed-stock" data-mid="${m.id}" value="${modelStock(m)}" inputmode="numeric" style="width:60px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right" title="在庫（sellable stock）"></td>
@@ -9765,7 +9776,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         </div>
         ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）</div>${tierHtml}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）</div>
-          <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU</th></tr>${modelRows}</table></div></div>
+          <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th>画像</th><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU</th></tr>${modelRows}</table></div>
+          ${tiers.length === 1 ? `<div style="margin-top:10px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
+            <div style="font-weight:700;color:#3b5bdb;font-size:12px;margin-bottom:5px">＋ 明細（バリエーション）を追加</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <input class="ed-addname" placeholder="明細名（例: PS5:Part I）" style="flex:1;min-width:170px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">
+              <input class="ed-addprice" placeholder="価格" inputmode="decimal" style="width:88px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
+              <input class="ed-addstock" placeholder="在庫" inputmode="numeric" value="1" style="width:60px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
+              <input class="ed-addsku" placeholder="SKU(任意)" style="width:110px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace">
+              <input class="ed-addimg" placeholder="画像URL(任意)" style="flex:1;min-width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px">
+              <button class="ed-addvar smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">追加</button>
+            </div>
+            <div class="smd-dim" style="font-size:10.5px;margin-top:4px">※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
+          </div>` : (tiers.length > 1 ? '<div class="smd-dim" style="font-size:10.5px;margin-top:8px">※2層バリエ商品への明細追加は未対応です（Shopeeの編集画面をお使いください）</div>' : '')}
+        </div>
         ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div style="margin-top:4px">${attrHtml}</div></div>` : ''}
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:18px;position:sticky;bottom:0;background:#fff;padding-top:10px;border-top:1px solid #eee">
           <span class="ed-msg" style="margin-right:auto;color:#888;font-size:11px"></span>
@@ -9773,6 +9797,43 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <button class="ed-save" style="border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">Shopeeに保存</button>
         </div>`;
       body.querySelector('.ed-close2').addEventListener('click', close);
+      // ---- 明細（バリエーション）の追加・画像差し替え：どちらも即時Shopee反映（下の「保存」は不要） ----
+      const reopen = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 150); };
+      const needOfficial = () => { if (!(settings.openapiUrl && settings.writeToken && sidCat)) { alert('この操作には⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です'); return false; } return true; };
+      { const ab = body.querySelector('.ed-addvar');
+        if (ab) ab.addEventListener('click', async () => {
+          if (!needOfficial()) return;
+          const nm2 = (body.querySelector('.ed-addname').value || '').trim();
+          const pr = (body.querySelector('.ed-addprice').value || '').trim();
+          const stk = (body.querySelector('.ed-addstock').value || '').trim();
+          const sk = (body.querySelector('.ed-addsku').value || '').trim();
+          let im = (body.querySelector('.ed-addimg').value || '').trim();
+          if (typeof mercariImg === 'function' && mercariImg(im)) im = mercariImg(im);
+          if (!nm2) { alert('明細名を入れてください'); return; }
+          if (!(parseFloat(pr) > 0)) { alert('価格を入れてください'); return; }
+          const gw2 = await guardWriteCountries([cc]); if (!gw2.ok) { alert(gw2.msg); return; }
+          if (!confirm('書込先: ' + gw2.summary + '\n\n' + cc + ' の item ' + itemId + ' に明細を追加します:\n\n・' + nm2 + ' / ' + (rg.cur || '') + pr + ' / 在庫' + (stk || 0) + (sk ? ' / SKU ' + sk : '') + (im ? ' / 画像あり' : '') + '\n\nよろしいですか？')) return;
+          ab.disabled = true; ab.textContent = '追加中…';
+          try {
+            await openapiAddVariation(sidCat, itemId, { option: nm2, price: pr, stock: stk || '0', sku: sk, image: im });
+            try { logAct('出品', '明細追加', repName || '', cc + ' ' + nm2); } catch (_) {}
+            toast('✓ 明細を追加しました: ' + nm2); reopen();
+          } catch (e) { alert('明細の追加に失敗: ' + e.message); ab.disabled = false; ab.textContent = '追加'; }
+        }); }
+      body.querySelectorAll('.ed-mimg').forEach(b2 => b2.addEventListener('click', async () => {
+        if (!needOfficial()) return;
+        const opt = b2.dataset.opt || '';
+        if (!opt) { alert('この明細のオプション名が取れませんでした'); return; }
+        let u = prompt('「' + opt + '」の明細画像URLを入れてください（メルカリ商品URLも可）', '');
+        if (u == null) return; u = u.trim(); if (!u) return;
+        if (typeof mercariImg === 'function' && mercariImg(u)) u = mercariImg(u);
+        b2.disabled = true; b2.textContent = '…';
+        try {
+          await openapiSetVariationImage(sidCat, itemId, opt, u);
+          try { logAct('出品', '明細画像', repName || '', cc + ' ' + opt); } catch (_) {}
+          toast('✓ 明細画像を変更しました: ' + opt); reopen();
+        } catch (e) { alert('明細画像の変更に失敗: ' + e.message); b2.disabled = false; b2.textContent = '変更'; }
+      }));
       // ---- 画像エディタ：追加／削除／並べ替え（1枚目＝サムネイル） ----
       // Shopeeは「渡した並びがそのまま新しい画像一覧」になるため、順番＝表示順。保存時にGASがmedia_spaceへ上げてIDに変換する。
       const edImgs = (pi.images || []).slice();
@@ -9919,6 +9980,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
             try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
             try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
+            try { openCatalogEditor._cache.delete(ck); } catch (_) {}   // 保存後は再取得（古い内容を出さない）
             try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
           } else {
             const res = await productWrite(host, itemId, patch); // 公式未設定時のみブリッジ全書込
