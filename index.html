@@ -1041,6 +1041,10 @@
     priceSls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] },                                              // [50gの送料, 50gごとの追加] 現地通貨・セラー実質負担
     priceFxMargin: 2,       // FX/端数マージン(%)
     priceProfitBuffer: 5,   // 利益バッファ(%)
+    // ★以下は「価格の計算」には使わず、「実際に取れる利益」の表示だけに効く（スプシのAF列＝実際(検算)利益に一致させるため）
+    priceDiscountPct: 5,    // 想定値引き%（Discount/Voucher。スプシV列。買い手支払い＝出品価格×(1−これ)）
+    pricePayoutFxPct: 2,    // 入金時の為替手数料%（Payoneer。スプシAD列）
+    priceFixedFee: { PH: 100, SG: 0, MY: 0, BR: 0, VN: 0, TH: 0, TW: 0 },  // 国別の固定控除（現地通貨・SLS送料とは別に毎回引かれる分）
     roiPct: 40,             // 目標ROI(%)（仕入額帯別ROI OFF時の単一値・フォールバック）
     weightG: 500,           // 既定の重量(g)
     roiBracketOn: true,     // 仕入額帯別ROIを使う（ON=帯テーブルから自動選択／OFF=単一roiPct）
@@ -10224,6 +10228,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 + ' ／ FX <b>' + fxM + '%</b>・利益バッファ <b>' + pb + '%</b>'
                 + '<br>計算：仕入×(1+ROI)÷(1−FX) ＋ SLS送料 → ÷(1−手数料) ÷(1−バッファ) ＝ ' + (rg.cur || '') + shown
                 + '　<span style="color:#8a8f98">※重量を直すと即再計算されます</span>'
+                + '<br>利益の引き算：' + (rg.cur || '') + shown
+                  + ' →値引' + (Number(settings.priceDiscountPct) || 0) + '%（−¥' + (pf.discJpy || 0).toLocaleString() + '）'
+                  + ' →手数料' + feeP + '%（−¥' + (pf.feeJpy || 0).toLocaleString() + '）'
+                  + ' →SLS送料（−¥' + (pf.slsJpy || 0).toLocaleString() + '）'
+                  + ((pf.fixedJpy) ? ' →固定控除（−¥' + pf.fixedJpy.toLocaleString() + '）' : '')
+                  + ' →入金為替' + (Number(settings.pricePayoutFxPct) || 0) + '%（−¥' + (pf.payFxJpy || 0).toLocaleString() + '）'
+                  + ' ＝ 入金 <b>¥' + (pf.payoutJpy || 0).toLocaleString() + '</b> −仕入¥' + Math.round(cost).toLocaleString()
+                  + ' ＝ <b>' + (pf.profit >= 0 ? '+' : '') + Math.round(pf.profit).toLocaleString() + '円</b>'
                 + '<div style="margin-top:4px">'
                 + (roiIn > 0 ? '<button class="ed-roisave" data-roi="' + roiIn + '" data-cost="' + cost + '" data-wg="' + usedW + '" style="border:1px solid #3b5bdb;background:#fff;color:#3b5bdb;border-radius:5px;font-size:10.5px;padding:2px 9px;cursor:pointer;font-weight:700">この帯（仕入' + (Math.ceil(cost / 500) * 500 - 499).toLocaleString() + '〜' + (Math.ceil(cost / 500) * 500).toLocaleString() + '円 × ' + roiBandKey(usedW) + 'g × ' + cc + '）のROIを ' + roiIn + '% で保存</button> ' : '')
                 + '<a href="#" class="ed-pricecfg" style="font-size:10.5px;color:#1565c0;text-decoration:none">価格設定シートを開く（手数料・SLS送料・ROIカーブ）↗</a>'
@@ -14023,11 +14035,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
     const vol = (dW && dH && dD) ? (dW * dH * dD / 6) : 0; // 容積重量(g)=W×H×D(cm)÷6000×1000＝÷6。weightG(g)と同単位で比較
-    const slsJpy = slsLocal(cc, Math.max(weightG, vol)) * rg.rateJpy;
-    const buyerJpy = localPrice * rg.rateJpy;               // バイヤー支払い額の円換算
-    const sellerJpy = buyerJpy * feeMult;                    // Shopee手数料控除後にセラーが受け取る円
-    const profit = sellerJpy - (Number(costJpy) || 0) - slsJpy;
-    return { buyerJpy: Math.round(buyerJpy), sellerJpy: Math.round(sellerJpy), feeJpy: Math.round(buyerJpy - sellerJpy), feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: Math.round(slsJpy), profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
+    // ★スプシの「実際(検算)利益」(AF列)と同じ順序で引く：
+    //   買い手支払 = 出品価格×(1−想定値引き) → ×(1−手数料) → −SLS送料 → −固定控除 → ×(1−入金為替手数料) → −仕入
+    //   ※価格そのものの計算式(priceLocalFor)はスプシと一致しているので触らない。ここは「見せる利益」だけ。
+    const slsL = slsLocal(cc, Math.max(weightG, vol));       // 現地通貨
+    const slsJpy = slsL * rg.rateJpy;
+    const disc = (opt.discountPct != null ? Number(opt.discountPct) : (Number(settings.priceDiscountPct) || 0)) / 100;
+    const payFx = (Number(settings.pricePayoutFxPct) || 0) / 100;
+    const fixedL = Number((settings.priceFixedFee || {})[cc]) || 0;   // 現地通貨の固定控除
+    const buyerLocal = localPrice * (1 - disc);
+    const netLocal = buyerLocal * feeMult - slsL - fixedL;
+    const payoutJpy = netLocal * (1 - payFx) * rg.rateJpy;    // 実際に入金される円
+    const buyerJpy = buyerLocal * rg.rateJpy;
+    const sellerJpy = buyerJpy * feeMult;
+    const profit = payoutJpy - (Number(costJpy) || 0);
+    return { buyerJpy: Math.round(buyerJpy), sellerJpy: Math.round(sellerJpy), feeJpy: Math.round(buyerJpy - sellerJpy), feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: Math.round(slsJpy),
+      discJpy: Math.round(localPrice * disc * rg.rateJpy), fixedJpy: Math.round(fixedL * rg.rateJpy), payFxJpy: Math.round(netLocal * payFx * rg.rateJpy), payoutJpy: Math.round(payoutJpy),
+      profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
   }
   function fillTpl(tpl, map) {
     return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (map[k] != null ? map[k] : '')).replace(/\s{2,}/g, ' ').trim();
@@ -14547,6 +14571,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const PRICE_DEFAULTS = {
     fees: { PH: [9.46, 8.96, 2.24], SG: [15.75, 0, 3.00], MY: [19.17, 0, 3.78], BR: [13.75, 0, 2.00], VN: [13.98, 2.16, 4.91], TH: [16.85, 0, 3.21], TW: [12.75, 3.00, 2.50] },
     sls: { PH: [6, 25], SG: [2.115, 0.115], MY: [0.85, 0.85], BR: [6, 5.5], VN: [5500, 11500], TH: [40, 12], TW: [30.2, 6.5] }, fx: 2, pb: 5,
+    disc: 5, payfx: 2, fixed: { PH: 100, SG: 0, MY: 0, BR: 0, VN: 0, TH: 0, TW: 0 },
   };
   function priceCfgRender() {
     const host = document.getElementById('li-pricecfg'); if (!host) return;
@@ -14560,15 +14585,31 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div><label class="lc" style="font-size:11px">FX/端数マージン%</label><input class="li pf-fx" type="number" step="any" value="${settings.priceFxMargin}" style="width:70px"></div>
         <div><label class="lc" style="font-size:11px" title="利益バッファ＝計算した売価にさらに上乗せする「利益の余裕（安全マージン）」。5＝+5%多めに価格設定">利益バッファ%<span class="smd-dim" style="font-weight:400"> (余裕)</span></label><input class="li pf-pb" type="number" step="any" value="${settings.priceProfitBuffer}" style="width:70px"></div>
         <button class="smd-btn" id="li-pricereset" style="font-size:11px">既定値に戻す</button>
+      </div>
+      <div style="margin-top:9px;border-top:1px dashed #ddd;padding-top:7px">
+        <div style="font-size:11px;font-weight:700;color:#7b52c4">実際に取れる利益の計算（価格には影響しません）</div>
+        <div style="font-size:10.5px;color:#666;margin:2px 0 5px">スプシの「実際(検算)利益」と同じ引き方にするための項目。出品価格の計算式はここでは変わりません。</div>
+        <div class="row" style="gap:12px;align-items:flex-end;flex-wrap:wrap">
+          <div><label class="lc" style="font-size:11px" title="Discount/Voucherの想定値引き。買い手支払い＝出品価格×(1−これ)">想定値引き%</label><input class="li pf-disc" type="number" step="any" value="${settings.priceDiscountPct}" style="width:70px"></div>
+          <div><label class="lc" style="font-size:11px" title="Payoneer等で入金時に引かれる為替手数料">入金為替手数料%</label><input class="li pf-payfx" type="number" step="any" value="${settings.pricePayoutFxPct}" style="width:70px"></div>
+        </div>
+        <div style="font-size:10.5px;color:#666;margin:6px 0 3px">国別の固定控除（現地通貨・SLS送料とは別に毎回引かれる分）</div>
+        <div class="pf-scroll"><table class="pf-table" style="font-size:11px"><tr>${ccs.map(cc => `<th>${cc}</th>`).join('')}</tr><tr>${ccs.map(cc => `<td>${inp(((settings.priceFixedFee || {})[cc]) || 0, 'pf-fixed', cc, 0)}</td>`).join('')}</tr></table></div>
       </div>`;
     host.querySelectorAll('.pf-fee').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceFees[cc] = settings.priceFees[cc] || [0, 0, 0]; settings.priceFees[cc][i] = Number(e.target.value) || 0; const tot = host.querySelector('.pf-total[data-cc="' + cc + '"]'); if (tot) tot.textContent = feeTotalPct(cc).toFixed(2) + '%'; saveSettings(); listRefresh(); }));
     host.querySelectorAll('.pf-sls').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc, i = +e.target.dataset.i; settings.priceSls[cc] = settings.priceSls[cc] || [0, 0]; settings.priceSls[cc][i] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
     host.querySelector('.pf-fx').addEventListener('input', e => { settings.priceFxMargin = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
     host.querySelector('.pf-pb').addEventListener('input', e => { settings.priceProfitBuffer = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
+    host.querySelector('.pf-disc').addEventListener('input', e => { settings.priceDiscountPct = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
+    host.querySelector('.pf-payfx').addEventListener('input', e => { settings.pricePayoutFxPct = Number(e.target.value) || 0; saveSettings(); listRefresh(); });
+    host.querySelectorAll('.pf-fixed').forEach(el => el.addEventListener('input', e => { const cc = e.target.dataset.cc; settings.priceFixedFee = settings.priceFixedFee || {}; settings.priceFixedFee[cc] = Number(e.target.value) || 0; saveSettings(); listRefresh(); }));
     host.querySelector('#li-pricereset').addEventListener('click', () => {
       if (!confirm('手数料・SLS送料・バッファをスプシ解読の既定値に戻します。よろしいですか？')) return;
       settings.priceFees = JSON.parse(JSON.stringify(PRICE_DEFAULTS.fees)); settings.priceSls = JSON.parse(JSON.stringify(PRICE_DEFAULTS.sls));
-      settings.priceFxMargin = PRICE_DEFAULTS.fx; settings.priceProfitBuffer = PRICE_DEFAULTS.pb; saveSettings(); priceCfgRender(); listRefresh();
+      settings.priceFxMargin = PRICE_DEFAULTS.fx; settings.priceProfitBuffer = PRICE_DEFAULTS.pb;
+      settings.priceDiscountPct = PRICE_DEFAULTS.disc; settings.pricePayoutFxPct = PRICE_DEFAULTS.payfx;
+      settings.priceFixedFee = JSON.parse(JSON.stringify(PRICE_DEFAULTS.fixed));
+      saveSettings(); priceCfgRender(); listRefresh();
     });
   }
   // 価格設定シートのROI部：仕入額(¥500刻み70段)×重量帯(500g刻み)×国。既定=全国共通のroiBase(PHカーブ)。
