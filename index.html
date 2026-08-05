@@ -9840,27 +9840,40 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:130px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></td>
       </tr>`).join('');
       // specifics（属性）: 選択肢型は各国のattribute_treeからドロップダウン/チェックボックス、自由記述はテキスト
-      const buildAttrHtml = (atree) => attrs.map((a, ai) => {
-        const vals = a.attribute_values || [];
-        const def = atree.get(a.attribute_id);
-        // ★名前は「商品レスポンスの実名」を最優先。属性ツリーは名前が取れないと '#100135' という
-        //   プレースホルダを返すので、それを実名より優先すると数字表示に戻ってしまう。
-        const treeNm = (def && def.name && !/^#\d+$/.test(def.name)) ? def.name : '';
-        const nm = a.name || treeNm || ('属性#' + a.attribute_id);
-        const star = def && def.mandatory ? '<span style="color:#d93025">*</span>' : '';
-        if (def && def.options.length) {
-          if (def.multi) {
-            const sel = new Set(vals.map(v => v.value_id).filter(x => x != null));
-            const cbs = def.options.map(o => `<label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin:2px 8px 2px 0;white-space:nowrap"><input type="checkbox" class="ed-attr-cb" data-ai="${ai}" data-vid="${o.id}"${sel.has(o.id) ? ' checked' : ''}>${esc(o.name)}</label>`).join('');
-            return `<div style="display:flex;gap:8px;margin:5px 0"><span style="color:#666;width:120px;font-size:11px;flex:none">${esc(nm)}${star} <span class="smd-dim">(複数)</span></span><div class="ed-attr-multi" data-ai="${ai}" style="flex:1;display:flex;flex-wrap:wrap;max-height:80px;overflow:auto;border:1px solid #f0f0f0;border-radius:6px;padding:2px 6px">${cbs}</div></div>`;
+      // ★カテゴリの属性ツリー全体を出す。以前は「その商品に既に設定済みの属性」だけを出していたため、
+      //   Brandなど未設定の項目が画面に現れず入力できなかった。ツリー順＋商品側だけにある属性を後ろに足す。
+      //   data-ai(配列index)ではなく data-aid(attribute_id)で紐づける＝行数が変わっても壊れない。
+      const buildAttrHtml = (atree) => {
+        const byId = new Map(attrs.map(a => [a.attribute_id, a]));
+        const list = [];
+        atree.forEach((def, id) => list.push({ id, def, cur: byId.get(id) }));
+        attrs.forEach(a => { if (!atree.has(a.attribute_id)) list.push({ id: a.attribute_id, def: null, cur: a }); });
+        if (!list.length) return '<div class="smd-dim" style="font-size:11px">（属性はありません）</div>';
+        return list.map(({ id, def, cur }) => {
+          const vals = (cur && cur.attribute_values) || [];
+          const treeNm = (def && def.name && !/^#\d+$/.test(def.name)) ? def.name : '';
+          const nm = (cur && cur.name) || treeNm || ('属性#' + id);
+          const star = (def && def.mandatory) ? '<span style="color:#d93025">*</span>' : '';
+          const unset = !vals.length ? ' <span style="color:#b58900;font-size:9.5px">未設定</span>' : '';
+          const lab = `<span style="color:#666;width:132px;font-size:11px;flex:none">${esc(nm)}${star}${unset}</span>`;
+          if (def && def.options && def.options.length) {
+            if (def.multi) {
+              const sel = new Set(vals.map(v => v.value_id).filter(x => x != null));
+              const cbs = def.options.map(o => `<label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;margin:2px 8px 2px 0;white-space:nowrap"><input type="checkbox" class="ed-attr-cb" data-vid="${o.id}"${sel.has(o.id) ? ' checked' : ''}>${esc(o.name)}</label>`).join('');
+              return `<div style="display:flex;gap:8px;margin:5px 0">${lab}<div class="ed-attr-multi" data-aid="${id}" style="flex:1;display:flex;flex-wrap:wrap;max-height:80px;overflow:auto;border:1px solid #f0f0f0;border-radius:6px;padding:2px 6px">${cbs}</div></div>`;
+            }
+            const cur1 = vals[0] && vals[0].value_id;
+            // 選択肢にある値は必ずプルダウンで（value_idが0でも名前一致で拾う＝Conditionが自由入力になっていた原因）
+            const curName = (vals[0] && (vals[0].name || vals[0].raw_value)) || '';
+            const hit = def.options.find(o => o.id === cur1) || def.options.find(o => String(o.name).toLowerCase() === String(curName).toLowerCase());
+            const opts = `<option value="">(未設定)</option>` + def.options.map(o => `<option value="${o.id}"${hit && o.id === hit.id ? ' selected' : ''}>${esc(o.name)}</option>`).join('');
+            return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0">${lab}<select class="ed-attr-sel" data-aid="${id}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">${opts}</select></div>`;
           }
-          const cur1 = vals[0] && vals[0].value_id;
-          const opts = `<option value="">(未設定)</option>` + def.options.map(o => `<option value="${o.id}"${o.id === cur1 ? ' selected' : ''}>${esc(o.name)}</option>`).join('');
-          return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0"><span style="color:#666;width:120px;font-size:11px;flex:none">${esc(nm)}${star}</span><select class="ed-attr-sel" data-ai="${ai}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">${opts}</select></div>`;
-        }
-        const raw = vals.find(v => v.raw_value !== undefined);
-        return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0"><span style="color:#666;width:120px;font-size:11px;flex:none">${esc(nm)}${star}</span><input class="ed-attr-raw" data-ai="${ai}" value="${av(raw ? raw.raw_value : '')}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>`;
-      }).join('');
+          const raw = vals.find(v => v.raw_value !== undefined);
+          const shown = raw ? raw.raw_value : ((vals[0] && vals[0].name) || '');
+          return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0">${lab}<input class="ed-attr-raw" data-aid="${id}" value="${av(shown)}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>`;
+        }).join('');
+      };
 
       body.innerHTML = `
         <div style="background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;font-size:11.5px;color:#8a6d3b;margin-bottom:12px">⚠️ 保存すると<b>Shopee本番カタログ</b>(item ${itemId})が更新されます。変更した項目だけ書き込みます。<span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:700;${pi._src === 'api' ? 'background:#e6f4ea;color:#137333' : 'background:#fdecea;color:#b3261e'}">読込: ${pi._src === 'api' ? '公式API' : 'ブリッジ'}</span></div>${pi._src === 'api' ? '' : `<div style="background:#fdecea;border:1px solid #f5c6c2;border-radius:6px;padding:7px 10px;font-size:11px;color:#b3261e;margin-bottom:12px">公式APIで読めなかったため<b>ブリッジで表示しています</b>。この状態では<b>説明文・画像・属性名が出ず、編集もできません</b>。<br>理由：<b>${esc(openCatalogEditor._lastErr || '不明')}</b>　<button class="ed-retry" style="border:1px solid #b3261e;background:#fff;color:#b3261e;border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;margin-left:4px">公式APIで読み直す</button></div>`}
@@ -10466,13 +10479,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const origPo = !!(pi.pre_order_info && pi.pre_order_info.pre_order);
         const origDts = (pi.pre_order_info && pi.pre_order_info.days_to_ship) || 0;
         if (poOn !== origPo || (dtsV && dtsV !== origDts)) { patch.pre_order_info = { pre_order: poOn, days_to_ship: dtsV || (poOn ? 7 : 3) }; summary.push('予約' + (poOn ? '(ON・' + patch.pre_order_info.days_to_ship + '日)' : '(OFF)')); }
-        // attributes（raw_valueのみ）
-        let attrChanged = false;
-        const newAttrs = JSON.parse(JSON.stringify(attrs));
-        body.querySelectorAll('.ed-attr-raw').forEach(inp => { const ai = +inp.dataset.ai; const a = newAttrs[ai]; if (!a) return; const oldRv = (a.attribute_values || []).find(v => v.raw_value !== undefined); const oldVal = oldRv ? oldRv.raw_value : ''; if (inp.value !== oldVal) { a.attribute_values = inp.value ? [{ raw_value: inp.value, unit: (oldRv && oldRv.unit) || '' }] : []; attrChanged = true; } });
-        body.querySelectorAll('.ed-attr-sel').forEach(sel => { const ai = +sel.dataset.ai; const a = newAttrs[ai]; if (!a) return; const oldId = (a.attribute_values && a.attribute_values[0] && a.attribute_values[0].value_id) || ''; const nv = sel.value ? Number(sel.value) : ''; if (String(nv) !== String(oldId)) { a.attribute_values = nv ? [{ value_id: nv }] : []; attrChanged = true; } });
-        body.querySelectorAll('.ed-attr-multi').forEach(div => { const ai = +div.dataset.ai; const a = newAttrs[ai]; if (!a) return; const checked = [...div.querySelectorAll('.ed-attr-cb:checked')].map(cb => Number(cb.dataset.vid)); const oldIds = (a.attribute_values || []).map(v => v.value_id).filter(x => x != null); const same = checked.length === oldIds.length && checked.every(x => oldIds.includes(x)); if (!same) { a.attribute_values = checked.map(id => ({ value_id: id })); attrChanged = true; } });
-        if (attrChanged) { patch.attributes = newAttrs; summary.push('specifics'); }
+        // ★attributes：行indexでなく attribute_id で拾う（ツリー全体を出すので行数が元配列と違う）
+        {
+          const origById = new Map(attrs.map(a => [a.attribute_id, a]));
+          const built = new Map();
+          body.querySelectorAll('.ed-attr-raw[data-aid]').forEach(inp => {
+            const id = +inp.dataset.aid, v = (inp.value || '').trim();
+            const o = origById.get(id);
+            const unit = (o && (o.attribute_values || []).find(x => x.raw_value !== undefined) || {}).unit || '';
+            built.set(id, v ? [{ raw_value: v, unit }] : []);
+          });
+          body.querySelectorAll('.ed-attr-sel[data-aid]').forEach(sel2 => {
+            const id = +sel2.dataset.aid, v = sel2.value ? Number(sel2.value) : null;
+            built.set(id, v ? [{ value_id: v }] : []);
+          });
+          body.querySelectorAll('.ed-attr-multi[data-aid]').forEach(div => {
+            const id = +div.dataset.aid;
+            built.set(id, [...div.querySelectorAll('.ed-attr-cb:checked')].map(cb => ({ value_id: Number(cb.dataset.vid) })));
+          });
+          const sig = (arr) => JSON.stringify((arr || []).map(v => (v.value_id != null ? 'i' + v.value_id : 'r' + String(v.raw_value == null ? '' : v.raw_value))).sort());
+          let changed2 = false;
+          const newAttrs2 = [];
+          built.forEach((vals2, id) => {
+            const o = origById.get(id);
+            const before = o ? (o.attribute_values || []) : [];
+            if (sig(before) !== sig(vals2)) changed2 = true;
+            if (vals2.length) newAttrs2.push({ attribute_id: id, attribute_values: vals2 });
+          });
+          // 画面に出ていない属性（ツリーにも商品にも無い＝理論上無いが保険）は現状維持で残す
+          attrs.forEach(a => { if (!built.has(a.attribute_id) && (a.attribute_values || []).length) newAttrs2.push({ attribute_id: a.attribute_id, attribute_values: a.attribute_values }); });
+          if (changed2) { patch.attributes = newAttrs2; summary.push('specifics'); }
+        }
 
         // ★変更が無くてもボタンは押せる。モーダルで止めず、その場に一言出して終わる。
         if (!summary.length) {
