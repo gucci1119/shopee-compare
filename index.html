@@ -1649,16 +1649,13 @@
     if (!res || !res.ok) throw new Error((res && res.error) || 'URLの読み取りに失敗');
     return res;
   }
+  // ★PCのファイル → 公開URL。GAS Web AppへのPOSTは【302→405で構造的に通らない】と実測で確認したため
+  //   （ブラウザからは Failed to fetch になる）、既存の Supabase Storage(listing-imgs) に上げて
+  //   公開URLにし、そのURLをGASへ渡す（GASはURLからのアップロードに対応済み）。
   async function openapiUploadImage(dataUrl) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
-    const res = await fetch(settings.openapiUrl, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'upload_image', token: settings.writeToken, data: dataUrl })
-    });
-    const j = await res.json().catch(() => null);
-    if (!j || !j.ok || !j.image_id) throw new Error((j && j.error) || '画像アップロードに失敗');
-    return j.image_id;
+    const url = await uploadImgToStorage(dataUrl, 'edit');
+    if (!url) throw new Error('画像の変換に失敗しました');
+    return url;
   }
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -9758,7 +9755,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       let tierHtml = '';
       if (tiers.length) {
         tierHtml = tiers.map((t, ti) => `<div style="margin:10px 0 4px;color:#555;font-weight:600">バリエーション: ${esc(t.custom_value || ('グループ' + (ti + 1)))}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${(t.value_list || []).map((o, oi) => `<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="width:calc(33% - 6px);min-width:150px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集">`).join('')}</div>`).join('');
+          <div style="display:flex;flex-wrap:wrap;gap:6px">${(t.value_list || []).map((o, oi) => {
+            // 第1階層のオプションにだけ画像が紐づく。名前の横にサムネを出してどれがどれか分かるように。
+            const im = (ti === 0) ? ((models.find(m => (m.tier_index || [])[0] === oi) || {}).img || '') : '';
+            const th = (ti !== 0) ? '' : (im
+              ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(im) : im)}" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px;background:#f2f2f2;flex:none" loading="lazy" onerror="this.style.opacity=.15">`
+              : '<span style="width:30px;height:30px;border:1px dashed #ddd;border-radius:4px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#aaa">なし</span>');
+            return `<span style="display:inline-flex;align-items:center;gap:5px;width:calc(33% - 6px);min-width:175px">${th}<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集"></span>`;
+          }).join('')}</div>`).join('');
       }
       // 明細（model）テーブル: 価格・SKU編集
       const optOf = (m) => { const t0 = tiers[0]; const oi = (m.tier_index || [])[0]; return (t0 && t0.value_list && t0.value_list[oi]) ? (t0.value_list[oi].custom_value || '') : ''; };
