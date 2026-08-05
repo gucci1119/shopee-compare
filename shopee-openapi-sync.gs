@@ -367,6 +367,18 @@ function doGet(e) {
       } catch (err) { rout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★中身のない明細（モデル無しのオプション）を掃除。add_model失敗の後始末用。
+    if (p.action === 'clean_variation') {
+      var cvcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var cvout;
+      try {
+        var cvwt = P_().getProperty('WRITE_TOKEN');
+        if (!cvwt || p.token !== cvwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var cvshop = parseInt(p.shop_id, 10); if (!getToken_(cvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        cvout = cleanVariation_(cvshop, p.item_id);
+      } catch (err) { cvout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(cvcb + '(' + JSON.stringify(cvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★明細（バリエーション）の削除。names=削除する明細名を \u0001 区切り。削除後は番号が飛ばないよう詰め直す。
     if (p.action === 'delete_variation') {
       var dvcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -775,6 +787,26 @@ function reorderVariation_(shopId, itemId, orderNames) {
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, order: orderNames };
 }
+// ★中身のない明細（モデルが1つも紐づいていないオプション）を取り除く。
+//   add_model の失敗でオプションだけ残ったときの後始末。番号は詰め直す。
+function cleanVariation_(shopId, itemId) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+  var tier = tiers[0], optList = tier.option_list || [];
+  var used = {};
+  models.forEach(function (m) { used[(m.tier_index || [])[0]] = 1; });
+  var keep = [], removed = [];
+  for (var i = 0; i < optList.length; i++) { if (used[i]) keep.push(i); else removed.push(optList[i].option); }
+  if (!removed.length) return { ok: true, removed: 0, remain: optList.length };
+  if (!keep.length) throw new Error('全ての明細に中身がありません（この商品はここでは直せません）');
+  var map = {}, newOpts = [];
+  keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
+  return { ok: true, removed: removed.length, names: removed.slice(0, 20), remain: newOpts.length };
+}
 // ★明細(バリエ)を削除。delete_model でモデルを消し、tierのオプションも取り除いて番号を詰め直す。
 //   ・残り0件にはできない（Shopeeがバリエ商品として成立しなくなる）
 //   ・売れた実績のあるモデルもShopee側の判断で削除不可のことがある（その場合はエラーを返す）
@@ -836,7 +868,17 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   }
   var model = { tier_index: [newIndex], original_price: parseFloat(price), seller_stock: [{ stock: parseInt(stock, 10) || 0 }] };
   if (sku) model.model_sku = String(sku);
-  var am = addModel_(shopId, itemId, [model]);
+  // ★add_model が失敗すると、直前に足した「中身のないオプション」だけが商品に残ってしまう。
+  //   （価格が Shopee の許容範囲外＝価格差上限に触れる等でよく起きる）。失敗したら必ず巻き戻す。
+  var am;
+  try {
+    am = addModel_(shopId, itemId, [model]);
+  } catch (eAdd) {
+    if (existIdx < 0) {
+      try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, optObjs.length - 1) }], remap); } catch (eRb) {}
+    }
+    throw eAdd;
+  }
   var nm = ((am && am.model) || [])[0] || {};
   return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined };
 }

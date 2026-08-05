@@ -1665,6 +1665,11 @@
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
   // 明細（バリエーション）の並び替え。order=新しい順の明細名。区切りは \u0001（名前にカンマが入り得るため）
   // ★明細(バリエ)を削除。Shopee側でモデル削除＋オプションの詰め直し（番号が飛ばない）まで行う。
+  // ★中身のない明細（add_model失敗でオプションだけ残ったもの）を掃除
+  async function openapiCleanVariation(shopId, itemId) {
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    return gasCall({ action: 'clean_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, 90000);
+  }
   async function openapiDeleteVariation(shopId, itemId, names) {
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
     return gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, names: names.join('\u0001') }, 90000);
@@ -9988,6 +9993,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;align-items:center;gap:5px"><label style="color:#555;font-size:12px">発送日数(days_to_ship)</label><input class="ed-dts" value="${av((pi.pre_order_info && pi.pre_order_info.days_to_ship) || '')}" inputmode="numeric" style="width:64px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
           <span class="smd-dim" style="font-size:11px">通常品=2〜3日 / 予約品=7日〜（国別に上限あり）</span>
         </div>
+        ${(() => {
+          // ★option_list にあるのに model が無い＝「中身のない明細」。add_model が失敗したときに残る。
+          const used = new Set(models.map(m => (m.tier_index || [])[0]));
+          const ghosts = (tiers.length === 1 ? ((tiers[0].value_list || []).map((o, i) => ({ i, n: o.custom_value })).filter(o => !used.has(o.i))) : []);
+          if (!ghosts.length) return '';
+          return `<div style="margin-top:12px;border:1px solid #f0c4bd;background:#fdecea;border-radius:8px;padding:9px 11px">
+            <div style="font-weight:700;color:#c0392b;font-size:12px">⚠ 中身のない明細が ${ghosts.length} 件あります</div>
+            <div style="font-size:11px;color:#8a5a53;margin:3px 0 6px">明細の追加が途中で失敗すると、名前だけが残ることがあります（価格がShopeeの許容範囲外だったときなど）。掃除しても既存の商品や在庫には影響しません。</div>
+            <div style="font-size:10.5px;color:#8a5a53;margin-bottom:6px">${ghosts.slice(0, 12).map(g => esc(g.n)).join(' / ')}${ghosts.length > 12 ? ' …ほか' + (ghosts.length - 12) + '件' : ''}</div>
+            <button class="ed-cleanghost smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#d93025;color:#d93025;font-weight:700">🧹 中身のない明細を掃除する（${ghosts.length}件）</button>
+          </div>`;
+        })()}
         ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）<span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">名前は「保存」で反映／並び順は ◀▶ で入れ替えて「並び順を保存」（Shopeeの表示順になります）</span></div>${tierHtml}
           ${tiers.length === 1 ? `<div style="margin-top:6px"><button class="ed-ordersave smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" disabled>↕ 並び順を保存</button> <span class="ed-ordermsg smd-dim" style="font-size:10.5px"></span></div>` : ''}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）<span class="ed-spread" style="font-weight:400;font-size:11px;margin-left:8px"></span></div>
@@ -10145,6 +10162,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (qEl) qEl.addEventListener('input', drawRes);
         openCatalogEditor._pickedCat = () => pickedCat;
       }
+      // ---- 中身のない明細の掃除 ----
+      { const cg = body.querySelector('.ed-cleanghost');
+        if (cg) cg.addEventListener('click', async () => {
+          if (!needOfficial()) return;
+          const gw2 = await guardWriteCountries([cc]); if (!gw2.ok) { alert(gw2.msg); return; }
+          if (!confirm('書込先: ' + gw2.summary + '\n\n' + cc + ' の item ' + itemId + ' から「中身のない明細（名前だけ残っているもの）」を取り除きます。\n実際に売っている明細・在庫には影響しません。\n\nよろしいですか？')) return;
+          cg.disabled = true; cg.textContent = '掃除中…';
+          try {
+            const r = await openapiCleanVariation(sidCat, itemId);
+            markStale();
+            toast('🧹 ' + (r.removed || 0) + '件を取り除きました。開き直します');
+            try { openCatalogEditor._cache.delete(ck); openCatalogEditor._infl.delete(ck); } catch (_) {}
+            close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 200);
+          } catch (e) { cg.disabled = false; cg.textContent = '🧹 中身のない明細を掃除する'; alert('掃除に失敗: ' + e.message); }
+        }); }
       // ---- 明細（バリエ）の削除：Shopeeでモデル削除＋番号の詰め直しまで実行 ----
       body.querySelectorAll('.ed-mdel').forEach(btn => btn.addEventListener('click', async () => {
         if (!needOfficial()) return;
