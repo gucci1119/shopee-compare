@@ -10215,6 +10215,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 + (neg ? ' <b>⚠赤字です</b>' : '')
                 + '<div class="smd-dim" style="font-size:10.5px;line-height:1.55;margin-top:3px">'
                 + '根拠：仕入 <b>¥' + Math.round(cost).toLocaleString() + '</b>'
+                + ((roiIn > 0 || !settings.roiBracketOn || settings.priceBandCeilOff || bandCostJpy(cost) === cost) ? ''
+                  : ' → 値付けは帯の上限 <b>¥' + bandCostJpy(cost).toLocaleString() + '</b> で計算（¥' + (bandCostJpy(cost) - 499).toLocaleString() + '〜¥' + bandCostJpy(cost).toLocaleString() + 'は同じ価格）')
                 + ' ／ 重量 <b>' + usedW + 'g</b>' + (wg > 0 ? '' : '（既定値）')
                 + ' ／ 目標ROI <b>' + roiP + '%</b>' + (roiIn > 0 ? '（この1件だけ手動指定）' : (settings.roiBracketOn ? '（仕入額帯×重量帯の自動選択）' : '（単一設定）'))
                 + ' ／ ' + cc + ' 手数料 <b>' + feeP + '%</b>'
@@ -13939,6 +13941,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const fx = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     return Math.round((Number(costJpy) || 0) * ((1 + (Number(roiPct) || 0) / 100) / ((1 - fx) * (1 - pb)) - 1));
   }
+  // ★スプシの値付けは「仕入 ¥500まで／¥1,000まで…」の帯ごとに1つの価格を出す方式。
+  //   帯の中では価格が動かない（¥300でも¥500でも同じ価格）。ROIだけ帯から取って価格は実仕入で
+  //   計算していたため、安く仕入れた分だけ出品価格が下がってスプシと合わなかった。
+  //   → 帯を使うときは「その帯の上限仕入」で価格を出す。上限¥35,000超は実仕入で計算。
+  function bandCostJpy(costJpy) {
+    const c = Number(costJpy) || 0;
+    if (c <= 0) return c;
+    if (c > 35000) return c;
+    return Math.ceil(c / 500) * 500;
+  }
   function priceLocalFor(cc, costJpy, opt) {
     const rg = regionByCc(cc); if (!rg) return 0;
     opt = opt || {};
@@ -13954,7 +13966,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
-    const kJpy = ((Number(costJpy) || 0) * (1 + roi) / (1 - fxM) + slsJpy) / feeMult / (1 - pb);
+    // 帯ROIを使う（＝ROIを手で指定していない）ときだけ、帯の上限仕入で計算する＝スプシと同じ挙動。
+    const useBand = (opt.roiPct == null && listState.roiPct == null && settings.roiBracketOn && !settings.priceBandCeilOff);
+    const baseCost = useBand ? bandCostJpy(costJpy) : (Number(costJpy) || 0);
+    const kJpy = (baseCost * (1 + roi) / (1 - fxM) + slsJpy) / feeMult / (1 - pb);
     return kJpy / rg.rateJpy; // 現地通貨（丸め前）
   }
   // 確定した現地価格から「実際に取れる利益(円)＋ROI＋円換算」を逆算（丸め後の価格で算出＝表示用の実数）
