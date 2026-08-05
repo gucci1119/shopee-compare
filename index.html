@@ -10387,6 +10387,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <span style="width:34px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
           <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1;min-width:120px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:74px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
+          <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:58px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
           <input class="eb-stock" value="1" inputmode="numeric" title="在庫" style="width:52px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <span class="eb-prof" style="width:118px;flex:none;font-size:10.5px;text-align:right;white-space:nowrap" title="この価格で取れる利益とROI"></span>
@@ -10397,17 +10398,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const draw = () => {
           if (!bx) return;
           bx.innerHTML = rows.length
-            ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px 39px"><span style="flex:1;min-width:120px">明細名</span><span style="width:74px;text-align:right">仕入¥</span><span style="width:88px;text-align:right">出品価格</span><span style="width:52px;text-align:right">在庫</span><span style="width:118px;text-align:right">取れる利益</span><span style="width:74px"></span><span style="width:24px"></span></div>`
+            ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px 39px"><span style="flex:1;min-width:120px">明細名</span><span style="width:74px;text-align:right">仕入¥</span><span style="width:58px;text-align:right">重量g</span><span style="width:88px;text-align:right">出品価格</span><span style="width:52px;text-align:right">在庫</span><span style="width:118px;text-align:right">取れる利益</span><span style="width:74px"></span><span style="width:24px"></span></div>`
               + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', () => { rows.splice(+b4.closest('.ed-brow').dataset.i, 1); draw(); }));
           // ★行ごとに「取れる利益 / ROI」を出す。赤字はすぐ分かるように赤で。
+          const wgOf = (row) => { const v = parseFloat(((row.querySelector('.eb-wg') || {}).value || '').replace(/[^\d.]/g, '')); return v > 0 ? v : wDefB(); };
           const profOf = (row) => {
             const c = parseFloat((row.querySelector('.eb-cost').value || '').replace(/[^\d.]/g, ''));
             const pv = parseFloat((row.querySelector('.eb-price').value || '').replace(/[^\d.]/g, ''));
             const el3 = row.querySelector('.eb-prof'); if (!el3) return;
             if (!(c > 0) || !(pv > 0)) { el3.textContent = ''; return; }
-            const pf3 = priceProfitFor(cc, c, pv, Object.assign({ weightG: wDefB() }, roiB()));
+            const pf3 = priceProfitFor(cc, c, pv, Object.assign({ weightG: wgOf(row) }, roiB()));
             const neg3 = pf3.profit < 0;
             el3.style.color = neg3 ? '#d93025' : '#1a7f37';
             el3.innerHTML = (neg3 ? '⚠' : '') + '<b>' + (pf3.profit >= 0 ? '+' : '') + Math.round(pf3.profit).toLocaleString() + '円</b> <span style="color:#8a8f98">ROI' + Math.round(pf3.roi) + '%</span>';
@@ -10427,6 +10429,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           };
           bx.querySelectorAll('.eb-name').forEach(i7 => i7.addEventListener('input', markDup));
           markDup();
+          // ★Shopeeは1商品内のバリエ価格差に上限がある（PHは5倍）。既存明細＋追加分をまとめて見て、
+          //   はみ出す行を先に赤くする。これを無視すると add_model が失敗する。
+          const spLim = (typeof SPREAD_LIMIT !== 'undefined' && SPREAD_LIMIT[cc] != null) ? SPREAD_LIMIT[cc] : 5;
+          const markSpread = () => {
+            const exist = [...body.querySelectorAll('.ed-price')].map(i => parseFloat((i.value || '').replace(/[^\d.]/g, ''))).filter(v => v > 0);
+            const news = [...bx.querySelectorAll('.eb-price')].map(i => parseFloat((i.value || '').replace(/[^\d.]/g, ''))).filter(v => v > 0);
+            const all = exist.concat(news); if (all.length < 2) return;
+            const hi = Math.max(...all), lo = Math.min(...all);
+            const floor = hi / spLim, ceil = lo * spLim;
+            bx.querySelectorAll('.eb-price').forEach(i8 => {
+              const v = parseFloat((i8.value || '').replace(/[^\d.]/g, ''));
+              const ngv = v > 0 && (v < floor - 0.001 || v > ceil + 0.001);
+              i8.style.borderColor = ngv ? '#d93025' : '#ddd';
+              i8.title = ngv ? (cc + 'の価格差上限' + spLim + '倍を超えます（この商品で使える範囲は ' + (rg.cur || '') + Math.ceil(floor) + '〜' + (rg.cur || '') + Math.floor(ceil) + '）。このままだとShopeeに拒否されます') : '';
+            });
+          };
+          bx.querySelectorAll('.eb-price').forEach(i8 => i8.addEventListener('input', markSpread));
+          setTimeout(markSpread, 0);
           const syncRow = (row) => { profOf(row); };
           bx.querySelectorAll('.ed-brow').forEach(row => {
             syncRow(row);
@@ -10448,11 +10468,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               }
               rb.disabled = false; draw();
             }); }
-          bx.querySelectorAll('.eb-cost').forEach(inp => inp.addEventListener('input', () => {
-            const row = inp.closest('.ed-brow'); const c = parseFloat((inp.value || '').replace(/[^\d.]/g, ''));
-            const pe = row.querySelector('.eb-price'); if (c > 0 && pe) pe.value = calc(c, wDefB(), roiB());
-            syncRow(row);
-          }));
+          const recalcRow = (row) => {
+            const c = parseFloat((row.querySelector('.eb-cost').value || '').replace(/[^\d.]/g, ''));
+            const pe = row.querySelector('.eb-price'); if (c > 0 && pe) pe.value = calc(c, wgOf(row), roiB());
+            syncRow(row); try { markSpread(); } catch (_) {}
+          };
+          bx.querySelectorAll('.eb-cost').forEach(inp => inp.addEventListener('input', () => recalcRow(inp.closest('.ed-brow'))));
+          bx.querySelectorAll('.eb-wg').forEach(inp => inp.addEventListener('input', () => recalcRow(inp.closest('.ed-brow'))));
           bx.querySelectorAll('.eb-price').forEach(inp => inp.addEventListener('input', () => syncRow(inp.closest('.ed-brow'))));
           const ba = bx.querySelector('.ed-bulkadd');
           if (ba) ba.addEventListener('click', async () => {
@@ -10479,12 +10501,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             for (const x of list) {
               if (bAbort) break;
               const st = x.el.querySelector('.eb-st');
+              if (st && /✓/.test(st.textContent)) { ok2++; continue; }   // 既に登録済みの行は二重登録しない
               if (st) { st.style.color = '#8a8f98'; st.textContent = '登録中…'; }
               try {
                 await openapiAddVariation(sidCat, itemId, { option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' });
                 ok2++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ 追加'; }
                 x.el.style.background = '#f2fbf4';
-              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(e.message).slice(0, 40); st.title = String(e.message); st.style.width = 'auto'; } }
+              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(e.message); st.title = String(e.message); st.style.width = 'auto'; st.style.whiteSpace = 'normal'; st.style.flex = '1 1 240px'; } }
               ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
             }
             markStale();
@@ -10589,7 +10612,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             urls = urls.slice(0, slotN);
           }
           bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
-          rows = dedupeRows(await runPool(urls));
+          rows = dedupeRows(await runPool(urls)).map(r => Object.assign(r, { wg: wDefB() }));
           const ng = rows.filter(r => r.err).length;
           if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '') + '。名前・価格を確認して「②まとめて追加」';
           bl.disabled = false; if (bstop) bstop.style.display = 'none';
