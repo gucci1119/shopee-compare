@@ -13192,12 +13192,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 🌏 各商品が何か国に出ているか（商品名で束ねる）＝カード/グリッドの◯/7国列に使う。軽いので毎描画で構築
     { const m = {}; Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(x => { const k = (x.name || '').toLowerCase().trim(); if (!k) return; (m[k] = m[k] || new Set()).add(cc); })); const cnt = {}; Object.keys(m).forEach(k => cnt[k] = m[k].size); lst._nameCcCount = cnt; lst._nameCcSet = m; }
     // 📁カテゴリ名：国ごとに1回だけ取得（#101087 のままだと何のカテゴリか分からないため）
-    if (settings.openapiUrl && !lst._catLoading) {
+    // ★1回だけ試す。shop_idが取れない国でも必ず「試した印」を残すこと。
+    //   これが無いと needが永久に空にならず 読込→再描画→読込… の無限ループになり画面が固まる（実際に発生）。
+    if (settings.openapiUrl && !lst._catLoading && !lst._catDone) {
       const need = targets.filter(t => !catNameCache[t.cc]);
-      if (need.length) {
-        lst._catLoading = true;
-        Promise.all(need.map(t => { const row = (lst.byCc[t.cc] || []).find(x => x.shop_id); return row ? loadCatNames(t.cc, row.shop_id) : null; }))
-          .then(() => { lst._catLoading = false; drawListingStatus(); }).catch(() => { lst._catLoading = false; });
+      if (!need.length) { lst._catDone = true; }
+      else {
+        lst._catLoading = true; lst._catDone = true;   // 再入しない（成否によらずこの描画サイクルで打ち止め）
+        Promise.all(need.map(t => {
+          const row = (lst.byCc[t.cc] || []).find(x => x.shop_id);
+          if (!row) { catNameCache[t.cc] = {}; return null; }   // shop_id不明でも印を付ける
+          return loadCatNames(t.cc, row.shop_id);
+        })).then(() => {
+          lst._catLoading = false;
+          const got = targets.some(t => catNameCache[t.cc] && Object.keys(catNameCache[t.cc]).length);
+          if (got) drawListingStatus();               // 名前が取れた時だけ1回だけ再描画
+        }).catch(() => { lst._catLoading = false; });
       }
     }
     lst._watchIdx = dropWatchIndex(); // 在庫監視の逆引き（cc|item_id → 全体/明細/仕入元状態）
