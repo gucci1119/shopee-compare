@@ -1637,6 +1637,14 @@
   // 公式APIでバリエ画像を設定（画像URL→upload→対象optionのimage差し替え・他は維持）
   // ★PCのファイルをShopeeへアップして image_id を得る（JSONPのGETには載らないのでPOST）。
   //   text/plain にすることでプリフライト(OPTIONS)を避ける＝GASはOPTIONSに応答できないため。
+  // 仕入元URL→{title, price, image}。GAS側で取得するのでブリッジ不要。
+  async function openapiFetchMeta(url) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    const qs = 'action=fetch_meta&url=' + encodeURIComponent(url);
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 30000);
+    if (!res || !res.ok) throw new Error((res && res.error) || 'URLの読み取りに失敗');
+    return res;
+  }
   async function openapiUploadImage(dataUrl) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
@@ -9751,7 +9759,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 明細（model）テーブル: 価格・SKU編集
       const optOf = (m) => { const t0 = tiers[0]; const oi = (m.tier_index || [])[0]; return (t0 && t0.value_list && t0.value_list[oi]) ? (t0.value_list[oi].custom_value || '') : ''; };
       const modelRows = models.map(m => `<tr>
-        <td style="width:46px">${m.img ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2" loading="lazy" onerror="this.style.opacity=.15">` : '<span class="smd-dim" style="font-size:10px">なし</span>'}<br><button class="ed-mimg" data-opt="${av(optOf(m))}" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer;margin-top:2px">画像</button></td>
+        <td style="width:46px">${m.img ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2" loading="lazy" onerror="this.style.opacity=.15">` : '<span class="smd-dim" style="font-size:10px">なし</span>'}${tiers.length === 1 ? `<br><span style="display:inline-flex;gap:2px;margin-top:2px"><button class="ed-mimgf" data-opt="${av(optOf(m))}" title="PCの画像ファイルを選ぶ（このマスにドラッグ&ドロップも可）" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">📁</button><button class="ed-mimg" data-opt="${av(optOf(m))}" title="画像URLを入れる" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">🔗</button></span>` : ''}</td>
         <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m, tiers))}</td>
         <td style="white-space:nowrap">${esc(cur)}<input class="ed-price" data-mid="${m.id}" value="${av(modelPrice(m))}" inputmode="decimal" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></td>
         <td style="text-align:center"><input class="ed-stock" data-mid="${m.id}" value="${modelStock(m)}" inputmode="numeric" style="width:60px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right" title="在庫（sellable stock）"></td>
@@ -9816,6 +9824,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ${tiers.length === 1 ? `<div style="margin-top:10px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
             <div style="font-weight:700;color:#3b5bdb;font-size:12px;margin-bottom:5px">＋ 明細（バリエーション）を追加</div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <input class="ed-addurl" placeholder="仕入元URL（貼ると仕入・画像・名前を自動取得）" style="flex:1 1 100%;min-width:220px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
               <input class="ed-addname" placeholder="明細名（例: PS5:Part I）" style="flex:1;min-width:170px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">
               <input class="ed-addcost" placeholder="仕入¥" inputmode="numeric" title="仕入(円)を入れて⚡を押すと、重量・手数料・SLS送料・目標ROIから この国の価格を自動計算します" style="width:78px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addwg" placeholder="重量g" inputmode="numeric" value="${av(String((pi.weight && pi.weight.value) ? Math.round(parseFloat(pi.weight.value) * 1000) : ((listState && listState.weightG) || settings.weightG || 500)))}" title="課金重量(g)。既定はこの商品の登録重量" style="width:70px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
@@ -9873,6 +9882,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             }
           } catch (e) { if (msg2) { msg2.style.color = '#d93025'; msg2.textContent = '価格計算に失敗: ' + e.message; } }
         };
+        // ★仕入元URLを貼ったら：仕入(円)・画像・明細名を自動で埋める → 価格も自動計算
+        { const uIn = body.querySelector('.ed-addurl');
+          if (uIn) {
+            const pull = async () => {
+              const u = (uIn.value || '').trim(); if (!/^https?:\/\//i.test(u)) return;
+              if (uIn._last === u) return; uIn._last = u;
+              // メルカリは商品IDから画像を組めるので、通信前に画像だけ先に入れる（体感が速い）
+              const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
+              const iEl = body.querySelector('.ed-addimg');
+              if (quick && iEl && !iEl.value.trim()) iEl.value = quick;
+              if (msg2) { msg2.style.color = '#6b7280'; msg2.textContent = '仕入元を読み取り中…'; }
+              try {
+                const meta = await openapiFetchMeta(u);
+                if (meta.price > 0 && cIn && !cIn.value.trim()) cIn.value = meta.price;
+                if (meta.image && iEl && !iEl.value.trim()) iEl.value = meta.image;
+                const nEl = body.querySelector('.ed-addname');
+                if (meta.title && nEl && !nEl.value.trim()) nEl.value = String(meta.title).replace(/\s*[-|｜]\s*メルカリ.*$/, '').trim().slice(0, 40);
+                recalc();
+                if (msg2 && !(meta.price > 0)) { msg2.style.color = '#a8650a'; msg2.textContent = '価格が読み取れませんでした（仕入¥を手で入れてください）'; }
+              } catch (e) { if (msg2) { msg2.style.color = '#a8650a'; msg2.textContent = 'URLの読み取りに失敗: ' + e.message + '（仕入¥を手で入れてください）'; } }
+            };
+            uIn.addEventListener('change', pull);
+            uIn.addEventListener('paste', () => setTimeout(pull, 60));
+          } }
         if (cIn) cIn.addEventListener('input', recalc);
         if (wIn) wIn.addEventListener('input', recalc);
         if (pIn) pIn.addEventListener('input', () => { priceTouched = (pIn.value || '').trim() !== ''; recalc(); });
@@ -9897,6 +9930,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             toast('✓ 明細を追加しました: ' + nm2); reopen();
           } catch (e) { alert('明細の追加に失敗: ' + e.message); ab.disabled = false; ab.textContent = '追加'; }
         }); }
+      // 明細画像：PCのファイルから設定（📁ボタン／そのマスへのドロップ）
+      const setVarImg = async (opt, val, btn, lbl) => {
+        if (!needOfficial()) return;
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        try {
+          await openapiSetVariationImage(sidCat, itemId, opt, val);
+          try { logAct('出品', '明細画像', repName || '', cc + ' ' + opt); } catch (_) {}
+          toast('✓ 明細画像を変更しました: ' + opt); reopen();
+        } catch (e) { alert('明細画像の変更に失敗: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = lbl || '📁'; } }
+      };
+      const setVarImgFromFile = (opt, file, btn) => {
+        if (!needOfficial()) return;
+        if (!(/^image\//.test(file.type) || /\.(jpe?g|png|webp)$/i.test(file.name || ''))) { alert('jpg / png の画像を選んでください'); return; }
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        readImageFile(file, async (dataUrl) => {
+          try { const id = await openapiUploadImage(dataUrl); await setVarImg(opt, id, btn, '📁'); }
+          catch (e) { alert('画像のアップロードに失敗: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = '📁'; } }
+        });
+      };
+      body.querySelectorAll('.ed-mimgf').forEach(b2 => {
+        b2.addEventListener('click', () => {
+          const fi = document.createElement('input'); fi.type = 'file';
+          fi.accept = 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp';
+          fi.addEventListener('change', () => { if (fi.files && fi.files[0]) setVarImgFromFile(b2.dataset.opt || '', fi.files[0], b2); });
+          fi.click();
+        });
+        const cell = b2.closest('td');
+        if (cell) {
+          ['dragenter', 'dragover'].forEach(ev => cell.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); cell.style.outline = '2px dashed #7b52c4'; }));
+          cell.addEventListener('dragleave', () => { cell.style.outline = ''; });
+          cell.addEventListener('drop', e => {
+            e.preventDefault(); e.stopPropagation(); cell.style.outline = '';
+            const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (f) { setVarImgFromFile(b2.dataset.opt || '', f, b2); return; }
+            const t = ((e.dataTransfer && (e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain'))) || '').trim();
+            if (t) setVarImg(b2.dataset.opt || '', (typeof mercariImg === 'function' && mercariImg(t)) || t, b2, '📁');
+          });
+        }
+      });
       body.querySelectorAll('.ed-mimg').forEach(b2 => b2.addEventListener('click', async () => {
         if (!needOfficial()) return;
         const opt = b2.dataset.opt || '';

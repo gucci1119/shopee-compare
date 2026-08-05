@@ -212,6 +212,32 @@ function doGet(e) {
       return ContentService.createTextOutput(gfcb + '(' + JSON.stringify(gfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★属性(specifics)の選択肢を公式APIで読む：get_attribute_tree（ブリッジの内部v3代替＝カタログ編集の属性ドロップダウン用）。読み取り専用。
+    // ★仕入元URL→メタ情報（タイトル/価格/画像）。ブリッジ(Tampermonkey)無しでも取れるようGAS側で取得する。
+    //   メルカリ/ヤフオク/駿河屋など og:～ を持つページ全般。読み取り専用・token不要。
+    if (p.action === 'fetch_meta') {
+      var fcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var fout;
+      try {
+        var furl = String(p.url || '').trim();
+        if (!/^https?:\/\//i.test(furl)) throw new Error('URLが不正です');
+        var fr = UrlFetchApp.fetch(furl, { muteHttpExceptions: true, followRedirects: true,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36' } });
+        var html = fr.getContentText();
+        var meta = function (k) {
+          var m1 = html.match(new RegExp('<meta[^>]+(?:property|name)="' + k + '"[^>]+content="([^"]*)"', 'i'));
+          if (m1) return m1[1];
+          var m2 = html.match(new RegExp('<meta[^>]+content="([^"]*)"[^>]+(?:property|name)="' + k + '"', 'i'));
+          return m2 ? m2[1] : '';
+        };
+        var price = parseInt(String(meta('product:price:amount') || '').replace(/[^0-9]/g, ''), 10) || 0;
+        if (!price) {  // og:descriptionやJSON-LDに価格が入るサイト向けの保険
+          var mp = html.match(/"price"\s*:\s*"?(\d{2,9})"?/);
+          if (mp) price = parseInt(mp[1], 10) || 0;
+        }
+        fout = { ok: true, title: meta('og:title'), price: price, currency: meta('product:price:currency') || 'JPY', image: meta('og:image'), status: fr.getResponseCode() };
+      } catch (err) { fout = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
+      return ContentService.createTextOutput(fcb + '(' + JSON.stringify(fout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
@@ -701,7 +727,8 @@ function setVariationImage_(shopId, itemId, optionName, imageUrl) {
   optionName = String(optionName || '').trim();
   if (!optionName) throw new Error('対象バリエ名が空です');
   if (!imageUrl) throw new Error('画像URLが空です');
-  var imageId = uploadImageUrl_(imageUrl);
+  // ★URLでなく image_id（PCのファイルを先に upload_image したもの）が来たらそのまま使う
+  var imageId = /^https?:\/\//i.test(String(imageUrl)) ? uploadImageUrl_(imageUrl) : String(imageUrl).trim();
   if (!imageId) throw new Error('画像アップロード失敗');
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
