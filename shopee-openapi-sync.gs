@@ -659,11 +659,15 @@ function getAttributeTree_(shopId, catId, lang) {
     var rawOpts = a.attribute_value_tree || a.attribute_value_list || a.children || [];
     var opts = rawOpts.map(function (c) {
       var vid = (c.value_id != null ? c.value_id : c.id);
-      return { id: vid, name: c.display_value_name || c.original_value_name || c.display_name || c.value_name || c.name || String(vid) };
+      var vi = c.value_info || {};
+      return { id: vid, name: c.display_value_name || c.original_value_name || vi.display_value_name || vi.original_value_name || c.display_name || c.value_name || c.name || String(vid) };
     });
     return {
       attribute_id: a.attribute_id,
-      name: a.display_attribute_name || a.original_attribute_name || a.display_name || a.attribute_name || ('#' + a.attribute_id),
+      // ★属性名は attribute_info の中にある（v2 get_attribute_tree）。直下だけ見ていたため
+      //   全部 '#100130' のようなプレースホルダになっていた。info→直下の順で拾う。
+      name: info.display_attribute_name || info.original_attribute_name || info.attribute_name || info.display_name
+        || a.display_attribute_name || a.original_attribute_name || a.display_name || a.attribute_name || ('#' + a.attribute_id),
       mandatory: !!(info.is_mandatory || a.is_mandatory || a.mandatory),
       multi: (maxv || 1) > 1,
       options: opts
