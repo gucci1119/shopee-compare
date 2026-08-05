@@ -10392,6 +10392,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             el3.style.color = neg3 ? '#d93025' : '#1a7f37';
             el3.innerHTML = (neg3 ? '⚠' : '') + '<b>' + (pf3.profit >= 0 ? '+' : '') + Math.round(pf3.profit).toLocaleString() + '円</b> <span style="color:#8a8f98">ROI' + Math.round(pf3.roi) + '%</span>';
           };
+          // 同名（既存の明細とも）を赤枠で警告
+          const markDup = () => {
+            const seenN = new Map();
+            const inputs = [...bx.querySelectorAll('.eb-name')];
+            inputs.forEach(i7 => {
+              const k7 = (i7.value || '').trim().toLowerCase();
+              i7.style.borderColor = '#ddd'; i7.title = '';
+              if (!k7) return;
+              if (existNames.has(k7)) { i7.style.borderColor = '#d93025'; i7.title = 'この名前の明細はすでにこの商品にあります'; }
+              if (seenN.has(k7)) { i7.style.borderColor = '#d93025'; i7.title = '同じ名前の行が他にもあります'; const f7 = seenN.get(k7); f7.style.borderColor = '#d93025'; f7.title = i7.title; }
+              else seenN.set(k7, i7);
+            });
+          };
+          bx.querySelectorAll('.eb-name').forEach(i7 => i7.addEventListener('input', markDup));
+          markDup();
           const syncRow = (row) => { profOf(row); };
           bx.querySelectorAll('.ed-brow').forEach(row => {
             syncRow(row);
@@ -10430,6 +10445,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             }));
             const bad2 = list.filter(x => !x.name || !(parseFloat(x.price) > 0));
             if (bad2.length) { alert('明細名と価格が入っていない行があります（' + bad2.length + '件）'); return; }
+            // 手で直した結果また同名になっていることがあるので、送る直前に必ず一意化する
+            { const taken = new Set(existNames); let fixed = 0;
+              list.forEach(x => { const u = uniqName(x.name, taken); if (u !== x.name) { x.name = u; x.el.querySelector('.eb-name').value = u; fixed++; } });
+              if (fixed) toast('明細名が重複していた ' + fixed + '件に連番を付けました'); }
             const gwB = await guardWriteCountries([cc]); if (!gwB.ok) { alert(gwB.msg); return; }
             if (!confirm('書込先: ' + gwB.summary + '\n\n' + cc + ' の item ' + itemId + ' に ' + list.length + ' 件の明細を追加します:\n\n'
               + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
@@ -10445,7 +10464,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 await openapiAddVariation(sidCat, itemId, { option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' });
                 ok2++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ 追加'; }
                 x.el.style.background = '#f2fbf4';
-              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(e.message).slice(0, 18); } }
+              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(e.message).slice(0, 40); st.title = String(e.message); st.style.width = 'auto'; } }
               ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
             }
             markStale();
@@ -10454,6 +10473,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             try { logAct('出品', '明細一括追加', repName || '', cc + ' ' + ok2 + '件'); } catch (_) {}
             toast('✓ ' + ok2 + '件の明細を追加しました（画面を開き直すと反映されます）');
           });
+        };
+        // ★Shopeeは同じ明細名を2つ持てない（「その明細は既に存在します」で弾かれる）。
+        //   翻訳するとどれも "Tamagotchi Miniature Charm" のように同名になりやすいので、
+        //   既存の明細名＋この画面の他の行と突き合わせて、末尾に連番を足して必ず一意にする。
+        const existNames = new Set(((tiers[0] && tiers[0].value_list) || []).map(o => String(o.custom_value || '').trim().toLowerCase()).filter(Boolean));
+        const uniqName = (base, taken, limit) => {
+          limit = limit || 30;
+          let n = String(base || '').trim().slice(0, limit).trim() || 'Variation';
+          if (!taken.has(n.toLowerCase())) { taken.add(n.toLowerCase()); return n; }
+          for (let i = 2; i <= 99; i++) {
+            const suf = ' ' + i;
+            const cand = (n.slice(0, limit - suf.length).trim() + suf);
+            if (!taken.has(cand.toLowerCase())) { taken.add(cand.toLowerCase()); return cand; }
+          }
+          return n;
+        };
+        // 行の名前をまとめて一意化（既存の明細名＋上から順に確定させる）
+        const dedupeRows = (list) => {
+          const taken = new Set(existNames);
+          list.forEach(r => { r.name = uniqName(r.name, taken); });
+          return list;
         };
         // ★1カタログの明細は100件が上限。既存＋追加が超えないよう、貼った時点で残り枠を出す。
         const MODEL_MAX = 100;
@@ -10529,7 +10569,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             urls = urls.slice(0, slotN);
           }
           bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
-          rows = await runPool(urls);
+          rows = dedupeRows(await runPool(urls));
           const ng = rows.filter(r => r.err).length;
           if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '') + '。名前・価格を確認して「②まとめて追加」';
           bl.disabled = false; if (bstop) bstop.style.display = 'none';
@@ -10548,6 +10588,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (typeof mercariImg === 'function' && mercariImg(im)) im = mercariImg(im);
           if (!nm2) { alert('明細名を入れてください'); return; }
           if (nm2.length > 30) { alert('明細名は30字までです（現在 ' + nm2.length + '字）'); return; }
+          if (((tiers[0] && tiers[0].value_list) || []).some(o => String(o.custom_value || '').trim().toLowerCase() === nm2.toLowerCase())) {
+            alert('「' + nm2 + '」はすでにこの商品の明細にあります。別の名前にしてください（Shopeeは同名の明細を作れません）'); return;
+          }
           if (!(parseFloat(pr) > 0)) { alert('価格を入れてください'); return; }
           const gw2 = await guardWriteCountries([cc]); if (!gw2.ok) { alert(gw2.msg); return; }
           if (!confirm('書込先: ' + gw2.summary + '\n\n' + cc + ' の item ' + itemId + ' に明細を追加します:\n\n・' + nm2 + ' / ' + (rg.cur || '') + pr + ' / 在庫' + (stk || 0) + (sk ? ' / SKU ' + sk : '') + (im ? ' / 画像あり' : '') + '\n\nよろしいですか？')) return;
