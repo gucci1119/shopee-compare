@@ -374,6 +374,7 @@ function doPost(e) {
     else if (body.action === 'outbox_done') out = outboxDone_(body);
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
+    else if (body.action === 'upload_image') out = uploadImageData_(body);  // ★PCのファイルをShopeeへアップ→image_idを返す（D&D/ファイル選択用）
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
@@ -884,6 +885,26 @@ function resolveLogisticInfo_(shopId) {
 }
 // 単一id版（listMeta_等の後方互換）＝先頭チャネルのid
 function resolveLogisticId_(shopId) { return resolveLogisticInfo_(shopId)[0].logistic_id; }
+// ★画像データ(base64)→image_id。GETのJSONPには載せられないサイズなのでPOST(doPost)で受ける。
+//   body: { action:'upload_image', token, data:'<base64 or dataURL>', mime:'image/jpeg' }
+function uploadImageData_(body) {
+  var raw = String(body.data || '');
+  var m = /^data:([^;]+);base64,(.*)$/.exec(raw);
+  var mime = m ? m[1] : (body.mime || 'image/jpeg');
+  var b64 = m ? m[2] : raw;
+  if (!b64) throw new Error('画像データが空です');
+  var bytes = Utilities.base64Decode(b64);
+  var blob = Utilities.newBlob(bytes, mime, 'upload.' + (mime.indexOf('png') >= 0 ? 'png' : 'jpg'));
+  var ts = now_(), path = '/api/v2/media_space/upload_image';
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+  var res = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var j = JSON.parse(res.getContentText());
+  if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
+  var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
+  var id = info.image_id || (info.image_id_list || [])[0];
+  if (!id) throw new Error('image_idが取れませんでした');
+  return { ok: true, image_id: id };
+}
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
 function uploadImageUrl_(imageUrl) {
   var ts = now_(), path = '/api/v2/media_space/upload_image';

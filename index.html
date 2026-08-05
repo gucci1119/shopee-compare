@@ -1635,6 +1635,19 @@
   // ※アカウント健全性(account_health)はこのCB越境垢では権限なし(error_not_found/shop invalid)で断念。実装は撤去済。
 
   // 公式APIでバリエ画像を設定（画像URL→upload→対象optionのimage差し替え・他は維持）
+  // ★PCのファイルをShopeeへアップして image_id を得る（JSONPのGETには載らないのでPOST）。
+  //   text/plain にすることでプリフライト(OPTIONS)を避ける＝GASはOPTIONSに応答できないため。
+  async function openapiUploadImage(dataUrl) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const res = await fetch(settings.openapiUrl, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'upload_image', token: settings.writeToken, data: dataUrl })
+    });
+    const j = await res.json().catch(() => null);
+    if (!j || !j.ok || !j.image_id) throw new Error((j && j.error) || '画像アップロードに失敗');
+    return j.image_id;
+  }
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
@@ -9768,10 +9781,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="margin-top:12px">
           <label style="color:#555;font-weight:600">商品画像</label>
           <span class="smd-dim" style="font-size:10.5px">（最大9枚・<b>左が1枚目＝サムネイル</b>。◀▶で並べ替え／✕で削除）</span>
-          <div class="ed-imgwrap" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;min-height:36px"></div>
+          <div class="ed-imgwrap" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;min-height:56px;border:1px dashed #dfe3e8;border-radius:8px;padding:6px" title="ここに画像ファイルやURLをドラッグ&ドロップできます"></div>
           <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap">
-            <input class="ed-imgurl" placeholder="画像URLを貼って追加（メルカリ等の商品URLも可）" style="flex:1;min-width:220px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
+            <input class="ed-imgurl" placeholder="画像URLを貼って追加（メルカリ等の商品URLも可）" style="flex:1;min-width:200px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
             <button class="ed-imgadd smd-btn" style="font-size:11.5px;padding:4px 12px">+ 追加</button>
+            <button class="ed-imgfile smd-btn" style="font-size:11.5px;padding:4px 12px">📁 ファイル</button>
+            <input type="file" class="ed-imgfileinput" accept="image/*" multiple style="display:none">
             <button class="ed-imgreset smd-btn" style="font-size:11.5px;padding:4px 10px">元に戻す</button>
           </div>
           ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a;margin-top:3px">⚠️ ブリッジ読込のため画像は編集できません（⚙️OpenAPI設定を入れると編集可）</div>'}
@@ -9927,7 +9942,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         };
         if (ib) ib.addEventListener('click', addImg);
         if (iu) iu.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addImg(); } });
-        if (ir) ir.addEventListener('click', () => { edImgs.length = 0; (pi.images || []).forEach(u => edImgs.push(u)); drawImgs(); }); }
+        if (ir) ir.addEventListener('click', () => { edImgs.length = 0; (pi.images || []).forEach(u => edImgs.push(u)); drawImgs(); });
+        // ---- ファイル追加：ドラッグ&ドロップ ＋ 📁ファイル選択。Shopeeへアップして image_id を持つ ----
+        const busy = (on, t) => { if (ib) { ib.disabled = on; ib.textContent = on ? (t || 'アップ中…') : '+ 追加'; } };
+        const addFile = async (file) => {
+          if (!canEditImg) { alert('画像の編集には⚙️OpenAPI設定が必要です'); return; }
+          if (edImgs.length >= 9) { alert('画像は最大9枚です'); return; }
+          if (!/^image\//.test(file.type)) { alert('画像ファイルを選んでください'); return; }
+          await new Promise(res => readImageFile(file, async (dataUrl) => {
+            busy(true);
+            try { const id = await openapiUploadImage(dataUrl); if (!edImgs.includes(id)) { edImgs.push(id); drawImgs(); } }
+            catch (e) { alert('画像のアップロードに失敗: ' + e.message); }
+            busy(false); res();
+          }));
+        };
+        const addFiles = async (files) => { for (const f of [...files]) { if (edImgs.length >= 9) break; await addFile(f); } };
+        { const fb = body.querySelector('.ed-imgfile'), fi = body.querySelector('.ed-imgfileinput');
+          if (fb && fi) { fb.addEventListener('click', () => fi.click()); fi.addEventListener('change', () => { addFiles(fi.files); fi.value = ''; }); } }
+        // 枠へのドロップ：ファイルはアップ、URL文字列はそのまま追加
+        if (imgWrap) {
+          imgWrap.addEventListener('dragover', e => { e.preventDefault(); imgWrap.style.borderColor = '#7b52c4'; imgWrap.style.background = '#faf8ff'; });
+          imgWrap.addEventListener('dragleave', () => { imgWrap.style.borderColor = '#dfe3e8'; imgWrap.style.background = ''; });
+          imgWrap.addEventListener('drop', async e => {
+            e.preventDefault(); imgWrap.style.borderColor = '#dfe3e8'; imgWrap.style.background = '';
+            const dt = e.dataTransfer; if (!dt) return;
+            if (dt.files && dt.files.length) { await addFiles(dt.files); return; }
+            const txt = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
+            if (txt) { if (iu) iu.value = txt.trim(); await addImg(); }
+          });
+        } }
       body.querySelector('.ed-save').addEventListener('click', async () => {
         const patch = {}, summary = [];
         const nameV = body.querySelector('.ed-name').value.trim();
