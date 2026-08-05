@@ -9869,6 +9869,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 <div style="flex:1;min-width:170px">${L('明細名', '必須')}<input class="ed-addname" placeholder="例: PS5:Part I" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>
                 <div style="width:84px">${L('仕入', '円')}<input class="ed-addcost" inputmode="numeric" placeholder="4800" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 <div style="width:74px">${L('重量', 'g')}<input class="ed-addwg" inputmode="numeric" value="${av(wDef)}" title="課金重量(g)。既定はこの商品の登録重量" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
+                <div style="width:78px">${L('目標ROI', '%・空=自動')}<input class="ed-addroi" inputmode="decimal" placeholder="自動" title="空欄なら仕入額帯×重量帯から自動選択。ここに入れるとこの1件だけその値で計算します" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 <div style="width:104px">${L('出品価格', esc(rg.cur || '') + '・自動')}<input class="ed-addprice" inputmode="decimal" placeholder="自動" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right;background:#fffdf5"></div>
                 <div style="width:64px">${L('在庫')}<input class="ed-addstock" inputmode="numeric" value="1" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 <div style="width:120px">${L('SKU', '任意')}<input class="ed-addsku" placeholder="—" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></div>
@@ -9906,18 +9907,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!cIn || !pIn) return;
           const cost = parseFloat((cIn.value || '').replace(/[^\d.]/g, ''));
           const wg = parseFloat((wIn && wIn.value || '').replace(/[^\d.]/g, ''));
+          const rIn = body.querySelector('.ed-addroi');
+          const roiIn = parseFloat(((rIn && rIn.value) || '').replace(/[^\d.]/g, ''));   // ★空なら自動（帯から選択）
+          const roiOpt = (roiIn > 0) ? { roiPct: roiIn } : {};
           if (!(cost > 0)) { if (msg2) msg2.textContent = ''; return; }
           try {
             // 出品コンポーザーと同じ計算（手数料・SLS送料・FXマージン・利益バッファ・目標ROI）
-            const v = roundLocal(priceLocalFor(cc, cost, { weightG: wg > 0 ? wg : undefined }), rg.priceUnit || 1);
+            const v = roundLocal(priceLocalFor(cc, cost, Object.assign({ weightG: wg > 0 ? wg : undefined }, roiOpt)), rg.priceUnit || 1);
             if (!priceTouched) pIn.value = v;
             const shown = parseFloat((pIn.value || '').replace(/[^\d.]/g, '')) || v;
-            const pf = priceProfitFor(cc, cost, shown, { weightG: wg > 0 ? wg : undefined });
+            const pf = priceProfitFor(cc, cost, shown, Object.assign({ weightG: wg > 0 ? wg : undefined }, roiOpt));
             const neg = pf.profit < 0;
             if (msg2) {
               // ★なぜその価格になったかを必ず出す。数字が変なときに気づけるように内訳を全部見せる。
               const usedW = wg > 0 ? wg : ((listState && listState.weightG) || settings.weightG || 0);
-              const roiP = (settings.roiBracketOn ? roiForCost(cost, usedW, cc) : settings.roiPct);
+              const roiP = (roiIn > 0) ? roiIn : (settings.roiBracketOn ? roiForCost(cost, usedW, cc) : settings.roiPct);
               const feeP = Math.round((1 - feeKeep(cc)) * 1000) / 10;          // 手数料合計%
               const slsL = slsLocal(cc, usedW);                                 // SLS送料(現地通貨)
               const slsJ = Math.round(slsL * rg.rateJpy);                       // 同(円)
@@ -9930,7 +9934,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 + '<div class="smd-dim" style="font-size:10.5px;line-height:1.55;margin-top:3px">'
                 + '根拠：仕入 <b>¥' + Math.round(cost).toLocaleString() + '</b>'
                 + ' ／ 重量 <b>' + usedW + 'g</b>' + (wg > 0 ? '' : '（既定値）')
-                + ' ／ 目標ROI <b>' + roiP + '%</b>' + (settings.roiBracketOn ? '（仕入額帯×重量帯）' : '（単一設定）')
+                + ' ／ 目標ROI <b>' + roiP + '%</b>' + (roiIn > 0 ? '（この1件だけ手動指定）' : (settings.roiBracketOn ? '（仕入額帯×重量帯の自動選択）' : '（単一設定）'))
                 + ' ／ ' + cc + ' 手数料 <b>' + feeP + '%</b>'
                 + ' ／ SLS送料 <b>' + (rg.cur || '') + (Math.round(slsL * 100) / 100) + '（≈¥' + slsJ.toLocaleString() + '）</b>'
                 + ' ／ FX <b>' + fxM + '%</b>・利益バッファ <b>' + pb + '%</b>'
@@ -9966,6 +9970,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           } }
         if (cIn) cIn.addEventListener('input', recalc);
         if (wIn) wIn.addEventListener('input', recalc);
+        { const rI = body.querySelector('.ed-addroi'); if (rI) rI.addEventListener('input', () => { priceTouched = false; recalc(); }); }
         if (pIn) pIn.addEventListener('input', () => { priceTouched = (pIn.value || '').trim() !== ''; recalc(); });
         recalc(); }
       let pushOrder = null;
