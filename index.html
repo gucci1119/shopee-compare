@@ -1260,10 +1260,22 @@
     return res.data;
   }
   // ★商品まるごと公式読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」を公式API化（ブリッジ未応答でも詰まらない）。読み取り専用。
-  async function openapiGetItemInfo(shopId, itemId) {
+  // ★JSONPではなく fetch で読む。JSONPはGASがHTML(エラーページ)を返すとコールバックが呼ばれず
+  //   onerrorも起きないため、タイムアウトまで丸ごと待つ（実測で開くのに20秒かかる主因）。
+  //   fetchならHTTPステータスと本文で即判定でき、失敗をすぐ次の手へ回せる。CORSはGETで通ることを実測済み。
+  async function openapiGetItemInfo(shopId, itemId, timeoutMs) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    const qs = 'action=get_item_full&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    const qs = 'action=get_item_full&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&callback=cb';
+    const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
+    const ac = new AbortController();
+    const tm = setTimeout(() => ac.abort(), timeoutMs || 9000);
+    let txt;
+    try { const r = await fetch(url, { signal: ac.signal, credentials: 'omit' }); txt = await r.text(); }
+    catch (e) { throw new Error('GAS応答なし（' + String(e && e.name || e) + '）'); }
+    finally { clearTimeout(tm); }
+    const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(txt || '');
+    if (!m) throw new Error('GASがJSONを返しませんでした（再デプロイ直後/伝播中の可能性）');
+    let res; try { res = JSON.parse(m[1]); } catch (_) { throw new Error('GASの応答を解釈できませんでした'); }
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API商品取得に失敗');
     return apiPiFromFull(res.data);
   }
@@ -9745,7 +9757,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         //   ブリッジに落ちて「読込:ブリッジ」になり、説明文・画像・属性名が出なくなる。
         for (let att = 0; att < 2; att++) {
           try { const r = await openapiGetItemInfo(sidCat, itemId); openCatalogEditor._cache.set(ck, { pi: r, at: Date.now() }); return r; }
-          catch (e) { if (att === 0) await new Promise(r2 => setTimeout(r2, 700)); else console.warn('[カタログ編集] 公式API読込に失敗→ブリッジへ', String(e && e.message || e)); }
+          catch (e) { if (att === 0) await new Promise(r2 => setTimeout(r2, 250)); else console.warn('[カタログ編集] 公式API読込に失敗→ブリッジへ', String(e && e.message || e)); }
         }
       }
       // ブリッジ(GM_xhr)未応答だと productRead が無限hangするので18秒でタイムアウト→catchでエラー表示
