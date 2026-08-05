@@ -332,6 +332,18 @@ function doGet(e) {
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）。params: shop_id, item_id, option, price, stock, sku, image(任意URL)
+    // ★明細（バリエーション）の並び替え。order=新しい順の明細名をカンマ区切り。1層バリエのみ。
+    if (p.action === 'reorder_variation') {
+      var rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rout;
+      try {
+        var rwt = P_().getProperty('WRITE_TOKEN');
+        if (!rwt || p.token !== rwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var rshop = parseInt(p.shop_id, 10); if (!getToken_(rshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        rout = reorderVariation_(rshop, p.item_id, String(p.order || '').split('\u0001').filter(String));
+      } catch (err) { rout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'add_variation') {
       var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var vout;
@@ -669,6 +681,33 @@ function tierOpt_(o, newName, overrideId) {
   var id = overrideId || (o.image && (o.image.image_id || (o.image.image_id_list || [])[0]));
   if (id) out.image = { image_id: id };
   return out;
+}
+// ★明細の並び替え：option_listを指定順に並べ替え、各modelのtier_indexを新しい位置へ付け替える。
+//   画像は tierOpt_ で維持。並び順＝Shopeeの商品ページでの表示順。
+function reorderVariation_(shopId, itemId, orderNames) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!orderNames || !orderNames.length) throw new Error('並び順が空です');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+  var tier = tiers[0], optList = tier.option_list || [];
+  var cur = optList.map(function (o) { return o.option; });
+  if (orderNames.length !== cur.length) throw new Error('件数が一致しません（' + orderNames.length + ' / ' + cur.length + '）');
+  var newOpts = [], map = {};
+  for (var i = 0; i < orderNames.length; i++) {
+    var oi = cur.indexOf(orderNames[i]);
+    if (oi < 0) throw new Error('不明な明細名: ' + orderNames[i]);
+    if (map[oi] != null) throw new Error('明細名が重複しています: ' + orderNames[i]);
+    map[oi] = i;
+    newOpts.push(tierOpt_(optList[oi]));   // 画像を維持したまま順序だけ入れ替える
+  }
+  var remap = models.map(function (m) {
+    var old = (m.tier_index || [])[0];
+    if (map[old] == null) throw new Error('対応の取れない明細があります');
+    return { model_id: m.model_id, tier_index: [map[old]] };
+  });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
+  return { ok: true, order: orderNames };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {

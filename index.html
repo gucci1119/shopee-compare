@@ -1623,6 +1623,17 @@
     return res;
   }
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
+  // 明細（バリエーション）の並び替え。order=新しい順の明細名。区切りは \u0001（名前にカンマが入り得るため）
+  async function openapiReorderVariation(shopId, itemId, orderNames) {
+    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    const qs = 'action=reorder_variation&token=' + encodeURIComponent(settings.writeToken)
+      + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId)
+      + '&order=' + encodeURIComponent(orderNames.join('\u0001'));
+    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 90000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '並び替えに失敗');
+    return res;
+  }
   async function openapiAddVariation(shopId, itemId, opts) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
@@ -9761,7 +9772,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const th = (ti !== 0) ? '' : (im
               ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(im) : im)}" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px;background:#f2f2f2;flex:none" loading="lazy" onerror="this.style.opacity=.15">`
               : '<span style="width:30px;height:30px;border:1px dashed #ddd;border-radius:4px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#aaa">なし</span>');
-            return `<span style="display:inline-flex;align-items:center;gap:5px;width:calc(33% - 6px);min-width:175px">${th}<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集"></span>`;
+            const mv = (ti === 0 && (t.value_list || []).length > 1)
+              ? `<span style="display:inline-flex;flex:none"><button class="ed-tmv" data-oi="${oi}" data-d="-1" title="前へ" style="border:1px solid #ddd;background:#fff;border-radius:4px 0 0 4px;font-size:10px;padding:3px 4px;cursor:pointer">◀</button><button class="ed-tmv" data-oi="${oi}" data-d="1" title="後へ" style="border:1px solid #ddd;border-left:none;background:#fff;border-radius:0 4px 4px 0;font-size:10px;padding:3px 4px;cursor:pointer">▶</button></span>` : '';
+            return `<span class="ed-tierrow" data-oi="${oi}" style="display:inline-flex;align-items:center;gap:4px;width:calc(33% - 6px);min-width:200px">${th}<input class="ed-tier" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集">${mv}</span>`;
           }).join('')}</div>`).join('');
       }
       // 明細（model）テーブル: 価格・SKU編集
@@ -9777,7 +9790,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const buildAttrHtml = (atree) => attrs.map((a, ai) => {
         const vals = a.attribute_values || [];
         const def = atree.get(a.attribute_id);
-        const nm = (def && def.name) || a.name || ('属性#' + a.attribute_id);   // ★ツリー未取得でもレスポンスの名前を使う
+        // ★名前は「商品レスポンスの実名」を最優先。属性ツリーは名前が取れないと '#100135' という
+        //   プレースホルダを返すので、それを実名より優先すると数字表示に戻ってしまう。
+        const treeNm = (def && def.name && !/^#\d+$/.test(def.name)) ? def.name : '';
+        const nm = a.name || treeNm || ('属性#' + a.attribute_id);
         const star = def && def.mandatory ? '<span style="color:#d93025">*</span>' : '';
         if (def && def.options.length) {
           if (def.multi) {
@@ -9826,7 +9842,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="display:flex;align-items:center;gap:5px"><label style="color:#555;font-size:12px">発送日数(days_to_ship)</label><input class="ed-dts" value="${av((pi.pre_order_info && pi.pre_order_info.days_to_ship) || '')}" inputmode="numeric" style="width:64px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
           <span class="smd-dim" style="font-size:11px">通常品=2〜3日 / 予約品=7日〜（国別に上限あり）</span>
         </div>
-        ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）</div>${tierHtml}</div>` : ''}
+        ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）<span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">名前は「保存」で反映／並び順は ◀▶ で入れ替えて「並び順を保存」（Shopeeの表示順になります）</span></div>${tierHtml}
+          ${tiers.length === 1 ? `<div style="margin-top:6px"><button class="ed-ordersave smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" disabled>↕ 並び順を保存</button> <span class="ed-ordermsg smd-dim" style="font-size:10.5px"></span></div>` : ''}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）</div>
           <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th>画像</th><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU</th></tr>${modelRows}</table></div>
           ${tiers.length === 1 ? `<div style="margin-top:10px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
@@ -9934,6 +9951,40 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (wIn) wIn.addEventListener('input', recalc);
         if (pIn) pIn.addEventListener('input', () => { priceTouched = (pIn.value || '').trim() !== ''; recalc(); });
         recalc(); }
+      // ---- 明細の並び替え：◀▶でDOMを入れ替え、「並び順を保存」でShopeeへ反映（tier_indexも再マップ） ----
+      { const osBtn = body.querySelector('.ed-ordersave'), osMsg = body.querySelector('.ed-ordermsg');
+        const origOrder = (tiers[0] && (tiers[0].value_list || []).map(o => o.custom_value)) || [];
+        const curOrder = () => [...body.querySelectorAll('.ed-tierrow .ed-tier')].map(i => i.value);
+        const dirty = () => { const c = curOrder(); return c.length === origOrder.length && c.some((v, i) => v !== origOrder[i]); };
+        const sync = () => { if (!osBtn) return; const d = dirty(); osBtn.disabled = !d; if (osMsg) osMsg.textContent = d ? '並び順が変更されています → 保存してください' : ''; };
+        body.querySelectorAll('.ed-tmv').forEach(b3 => b3.addEventListener('click', () => {
+          const row = b3.closest('.ed-tierrow'); if (!row) return;
+          const d = +b3.dataset.d;
+          const sib = d < 0 ? row.previousElementSibling : row.nextElementSibling;
+          if (!sib || !sib.classList.contains('ed-tierrow')) return;
+          if (d < 0) row.parentNode.insertBefore(row, sib); else row.parentNode.insertBefore(sib, row);
+          sync();
+        }));
+        if (osBtn) osBtn.addEventListener('click', async () => {
+          if (!needOfficial()) return;
+          const order = curOrder();
+          if (new Set(order).size !== order.length) { alert('明細名が重複しています。先に名前を直してください'); return; }
+          const gw3 = await guardWriteCountries([cc]); if (!gw3.ok) { alert(gw3.msg); return; }
+          if (!confirm('書込先: ' + gw3.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細を次の順に並べ替えます:\n\n' + order.map((n, i) => (i + 1) + '. ' + n).join('\n') + '\n\nよろしいですか？')) return;
+          osBtn.disabled = true; osBtn.textContent = '保存中…';
+          try {
+            await openapiReorderVariation(sidCat, itemId, order);
+            try { logAct('出品', '明細並び替え', repName || '', cc + ' ' + order.join(' / ')); } catch (_) {}
+            markStale();
+            origOrder.length = 0; order.forEach(n => origOrder.push(n));
+            if (osMsg) { osMsg.style.color = '#1a7f37'; osMsg.textContent = '✓ 並び順を保存しました'; }
+            toast('✓ 明細の並び順を保存しました');
+          } catch (e) { alert('並び替えに失敗: ' + e.message); }
+          osBtn.textContent = '↕ 並び順を保存'; sync();
+        });
+        // 名前を直した場合も比較対象がずれるので同期
+        body.querySelectorAll('.ed-tier').forEach(i => i.addEventListener('input', sync));
+        sync(); }
       let addedN = 0;
       { const ab = body.querySelector('.ed-addvar');
         if (ab) ab.addEventListener('click', async () => {
