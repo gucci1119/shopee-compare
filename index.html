@@ -1658,6 +1658,20 @@
   }
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
   // 明細（バリエーション）の並び替え。order=新しい順の明細名。区切りは \u0001（名前にカンマが入り得るため）
+  // ★明細(バリエ)を削除。Shopee側でモデル削除＋オプションの詰め直し（番号が飛ばない）まで行う。
+  async function openapiDeleteVariation(shopId, itemId, names) {
+    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    return gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, names: names.join('\u0001') }, 90000);
+  }
+  // ★カテゴリ一覧（id→{n:名前, p:フルパス, hc:子ありフラグ}）。カテゴリ変更UIの検索元。国ごとにキャッシュ。
+  const catFullCache = {};
+  async function loadCatFull(cc, shopId) {
+    if (catFullCache[cc]) return catFullCache[cc];
+    if (!shopId || !settings.openapiUrl) return null;
+    const r = await gasCall({ action: 'get_categories', shop_id: shopId }, 45000);
+    catFullCache[cc] = r.map || {};
+    return catFullCache[cc];
+  }
   async function openapiReorderVariation(shopId, itemId, orderNames) {
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
     return gasCall({ action: 'reorder_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, order: orderNames.join('\u0001') }, 90000);
@@ -9874,17 +9888,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="width:46px">${m.img ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" class="zimg" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">` : '<span class="smd-dim" style="font-size:10px">なし</span>'}${tiers.length === 1 ? `<br><span style="display:inline-flex;gap:2px;margin-top:2px"><button class="ed-mimgf" data-opt="${av(optOf(m))}" title="PCの画像ファイルを選ぶ（このマスにドラッグ&ドロップも可）" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">📁</button><button class="ed-mimg" data-opt="${av(optOf(m))}" title="画像URLを入れる" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">🔗</button></span>` : ''}</td>
         <td style="white-space:nowrap">${esc(cur)}<input class="ed-price" data-mid="${m.id}" value="${av(modelPrice(m))}" inputmode="decimal" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></td>
         <td style="text-align:center"><input class="ed-stock" data-mid="${m.id}" value="${modelStock(m)}" inputmode="numeric" style="width:60px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right" title="在庫（sellable stock）"></td>
-        <td><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:130px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></td>
+        <td><span style="display:inline-flex;align-items:center;gap:3px"><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:118px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace">${tiers.length === 1 ? `<button class="ed-skusug1" data-mid="${m.id}" title="この明細のSKUだけ自動生成" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9.5px;padding:2px 5px;cursor:pointer">💡</button>` : ''}</span></td>
+        ${tiers.length === 1 ? `<td style="text-align:center"><button class="ed-mdel" data-opt="${av(optOf(m))}" title="この明細をShopeeから削除します（番号は自動で詰め直します）" style="border:1px solid #f0c4bd;background:#fff;color:#d93025;border-radius:5px;font-size:10.5px;padding:3px 7px;cursor:pointer">🗑</button></td>` : ''}
       </tr>`).join('');
       // specifics（属性）: 選択肢型は各国のattribute_treeからドロップダウン/チェックボックス、自由記述はテキスト
       // ★カテゴリの属性ツリー全体を出す。以前は「その商品に既に設定済みの属性」だけを出していたため、
       //   Brandなど未設定の項目が画面に現れず入力できなかった。ツリー順＋商品側だけにある属性を後ろに足す。
       //   data-ai(配列index)ではなく data-aid(attribute_id)で紐づける＝行数が変わっても壊れない。
-      const buildAttrHtml = (atree) => {
-        const byId = new Map(attrs.map(a => [a.attribute_id, a]));
+      const buildAttrHtml = (atree, attrsOv) => {
+        const attrsSrc = attrsOv || attrs;
+        const byId = new Map(attrsSrc.map(a => [a.attribute_id, a]));
         const list = [];
         atree.forEach((def, id) => list.push({ id, def, cur: byId.get(id) }));
-        attrs.forEach(a => { if (!atree.has(a.attribute_id)) list.push({ id: a.attribute_id, def: null, cur: a }); });
+        attrsSrc.forEach(a => { if (!atree.has(a.attribute_id)) list.push({ id: a.attribute_id, def: null, cur: a }); });
         if (!list.length) return '<div class="smd-dim" style="font-size:11px">（属性はありません）</div>';
         return list.map(({ id, def, cur }) => {
           const vals = (cur && cur.attribute_values) || [];
@@ -9908,7 +9924,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           }
           const raw = vals.find(v => v.raw_value !== undefined);
           const shown = raw ? raw.raw_value : ((vals[0] && vals[0].name) || '');
-          return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0">${lab}<input class="ed-attr-raw" data-aid="${id}" value="${av(shown)}" style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>`;
+          // 選択肢型(value_id持ち)なのに選択肢が取れていない＝自由入力にすると保存が弾かれる。触らせない。
+          const lockOpt = !raw && vals.some(v => v.value_id != null);
+          const tt = lockOpt ? ' title="この項目は選択肢式です。選択肢が取得できていないため、ここでは変更できません（カテゴリを選び直すと取得し直します）" readonly style="flex:1;padding:5px 8px;border:1px solid #eee;border-radius:6px;font-size:12px;background:#f7f7f7;color:#777"' : ' style="flex:1;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"';
+          return `<div style="display:flex;gap:8px;align-items:center;margin:5px 0">${lab}<input class="ed-attr-raw" data-aid="${id}" value="${av(shown)}"${tt}>${lockOpt ? '<span class="smd-dim" style="font-size:9.5px;flex:none">🔒選択肢式</span>' : ''}</div>`;
         }).join('');
       };
 
@@ -9940,6 +9959,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div style="flex:1;min-width:180px"><label style="color:#555;font-weight:600">親SKU <button class="ed-pskusug" title="タイトルから管理コードを自動生成" style="border:1px solid #ddd;background:#fff;border-radius:5px;font-size:10px;padding:1px 7px;cursor:pointer;font-weight:400">💡提案</button></label><input class="ed-psku" value="${av(pi.parent_sku || '')}" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:monospace"></div>
           <div style="width:150px"><label style="color:#555;font-weight:600">重量</label><div style="display:flex;align-items:center;gap:4px"><input class="ed-wval" value="${av((pi.weight || {}).value || '')}" inputmode="decimal" style="width:90px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"><span style="color:#888;font-size:11px">${(pi.weight || {}).unit === 1 ? 'kg' : ('unit' + ((pi.weight || {}).unit))}</span></div></div>
         </div>
+        <div style="margin-top:10px">
+          <label style="color:#555;font-weight:600">カテゴリ</label>
+          <span class="smd-dim" style="font-size:10.5px">（変えると下の specifics（属性）も新しいカテゴリのものに入れ替わります）</span>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:3px;flex-wrap:wrap">
+            <span class="ed-catnow" style="flex:1;min-width:220px;padding:6px 9px;border:1px solid #eee;border-radius:6px;background:#fafafa;font-size:12px;color:#444">読込中…</span>
+            <button class="ed-catedit smd-btn" style="font-size:11.5px;padding:5px 12px">変更</button>
+          </div>
+          <div class="ed-catpick" style="display:none;margin-top:6px;border:1px solid #cdd7ea;border-radius:8px;padding:8px 10px;background:#fafbff">
+            <input class="ed-catq" placeholder="カテゴリ名で検索（例: Toys, Charm, Game）" style="width:100%;padding:6px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px">
+            <div class="ed-catres" style="margin-top:6px;max-height:210px;overflow:auto;font-size:11.5px"></div>
+          </div>
+        </div>
         <div style="display:flex;gap:16px;margin-top:12px;align-items:center;flex-wrap:wrap;border-top:1px solid #eee;padding-top:12px">
           <label style="color:#555;font-weight:600;display:inline-flex;align-items:center;gap:5px"><input type="checkbox" class="ed-preorder"${(pi.pre_order_info && pi.pre_order_info.pre_order) ? ' checked' : ''}> 予約商品（Pre-order）</label>
           <div style="display:flex;align-items:center;gap:5px"><label style="color:#555;font-size:12px">発送日数(days_to_ship)</label><input class="ed-dts" value="${av((pi.pre_order_info && pi.pre_order_info.days_to_ship) || '')}" inputmode="numeric" style="width:64px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
@@ -9948,7 +9979,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）<span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">名前は「保存」で反映／並び順は ◀▶ で入れ替えて「並び順を保存」（Shopeeの表示順になります）</span></div>${tierHtml}
           ${tiers.length === 1 ? `<div style="margin-top:6px"><button class="ed-ordersave smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" disabled>↕ 並び順を保存</button> <span class="ed-ordermsg smd-dim" style="font-size:10.5px"></span></div>` : ''}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）<span class="ed-spread" style="font-weight:400;font-size:11px;margin-left:8px"></span></div>
-          <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th>画像</th><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU <button class="ed-skusug" title="親SKU＋明細名から全明細のSKUを自動生成（空欄のみ。もう一度押すと全上書き）" style="border:1px solid #ddd;background:#fff;border-radius:5px;font-size:9.5px;padding:1px 6px;cursor:pointer;font-weight:400">💡提案</button></th></tr>${modelRows}</table></div>
+          <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th>画像</th><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU <button class="ed-skusug" title="親SKU＋明細名から全明細のSKUを自動生成（空欄のみ。もう一度押すと全上書き）" style="border:1px solid #ddd;background:#fff;border-radius:5px;font-size:9.5px;padding:1px 6px;cursor:pointer;font-weight:400">💡一括</button></th>${tiers.length === 1 ? '<th style="width:44px">削除</th>' : ''}</tr>${modelRows}</table></div>
           ${tiers.length === 1 ? `<div style="margin-top:10px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
             <div style="font-weight:700;color:#3b5bdb;font-size:12px;margin-bottom:5px">＋ 明細（バリエーション）を追加</div>
             ${(() => {
@@ -9973,8 +10004,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               </div>`;
             })()}
             <div class="ed-addcalcmsg" style="font-size:11px;margin-top:5px;min-height:15px;color:#1a7f37"></div>
-            <details class="ed-bulkbox" style="margin-top:8px;border-top:1px dashed #cdd7ea;padding-top:7px">
-              <summary style="cursor:pointer;font-size:11.5px;font-weight:700;color:#3b5bdb;list-style:none">📋 まとめて追加（仕入元URLを1行1件で貼る）</summary>
+            <details class="ed-bulkbox" open style="margin-top:8px;border-top:1px dashed #cdd7ea;padding-top:7px">
+              <summary style="cursor:pointer;font-size:12px;font-weight:700;color:#fff;background:#3b5bdb;border-radius:6px;padding:5px 10px;list-style:none;display:inline-block">📋 まとめて追加（仕入元URLをここに1行1件で貼る・最大100件）</summary>
               <div style="margin-top:6px">
                 <textarea class="ed-bulkurls" rows="10" placeholder="https://jp.mercari.com/item/m...&#10;https://jp.mercari.com/item/m...&#10;（1行に1つ。100件まとめて貼ってOK）" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;font-family:monospace;white-space:pre;overflow-x:auto"></textarea>
                 <div class="ed-bulkcount smd-dim" style="font-size:10.5px;margin-top:3px"></div>
@@ -9989,7 +10020,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div class="smd-dim" style="font-size:10.5px;margin-top:2px">※<b>仕入¥と重量gを入れると価格は自動で入ります</b>（手数料・SLS送料・目標ROIから算出）。手で直せば直した値が優先されます。<br>※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
           </div>` : (tiers.length > 1 ? '<div class="smd-dim" style="font-size:10.5px;margin-top:8px">※2層バリエ商品への明細追加は未対応です（Shopeeの編集画面をお使いください）</div>' : '')}
         </div>
-        ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div class="ed-attrbox" style="margin-top:4px">${buildAttrHtml(atree)}</div></div>` : ''}
+        <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）<span class="ed-attrnote smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">カテゴリごとに項目が変わります</span></div><div class="ed-attrbox" style="margin-top:4px">${buildAttrHtml(atree)}</div></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:18px;position:sticky;bottom:0;background:#fff;padding-top:10px;border-top:1px solid #eee">
           <span class="ed-msg" style="margin-right:auto;color:#888;font-size:11px"></span>
           <button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:8px 14px;cursor:pointer">閉じる</button>
@@ -10040,11 +10071,103 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           });
           toast('💡 明細SKUを' + n5 + '件生成しました（' + (blanks.length ? '空欄のみ' : '全上書き') + '）。保存で反映されます');
         }); }
+      // ---- カテゴリ表示・変更（変えたら specifics も新カテゴリのものへ差し替え） ----
+      openCatalogEditor._pickedCat = () => null;   // 前に開いたカタログの選択を持ち越さない
+      let pickedCat = null;           // 変更後のカテゴリid（未変更ならnull）
+      let pickedTree = null;          // 変更後カテゴリの属性ツリー
+      { const nowEl = body.querySelector('.ed-catnow'), edBtn = body.querySelector('.ed-catedit'),
+              pick = body.querySelector('.ed-catpick'), qEl = body.querySelector('.ed-catq'), resEl = body.querySelector('.ed-catres');
+        const showNow = (id, map) => {
+          if (!nowEl) return;
+          const e = map && map[String(id)];
+          nowEl.innerHTML = id ? (e ? esc(e.p || e.n) + ' <span class="smd-dim" style="font-size:10px">#' + id + '</span>' : '#' + id) : '（カテゴリ不明）';
+        };
+        let catMap = null;
+        showNow(catId, null);
+        loadCatFull(cc, sidCat).then(m => { catMap = m; showNow(pickedCat || catId, m); }).catch(() => { if (nowEl && !catId) nowEl.textContent = '（取得できませんでした）'; });
+        if (edBtn) edBtn.addEventListener('click', async () => {
+          if (!pick) return;
+          const open = pick.style.display === 'none';
+          pick.style.display = open ? '' : 'none';
+          edBtn.textContent = open ? '閉じる' : '変更';
+          if (!open) return;
+          if (!catMap) { resEl.textContent = 'カテゴリ一覧を取得中…'; try { catMap = await loadCatFull(cc, sidCat); } catch (e) { resEl.textContent = '取得に失敗: ' + e.message; return; } }
+          qEl.focus(); drawRes();
+        });
+        const drawRes = () => {
+          if (!resEl) return;
+          const q = (qEl.value || '').trim().toLowerCase();
+          if (!catMap) { resEl.textContent = 'カテゴリ一覧がありません'; return; }
+          // ★出品できるのは末端カテゴリ(hc=0)だけ。中間カテゴリは出さない。
+          const ids = Object.keys(catMap).filter(id => !catMap[id].hc);
+          const hit = (q ? ids.filter(id => String(catMap[id].p || catMap[id].n).toLowerCase().includes(q)) : ids).slice(0, 60);
+          resEl.innerHTML = hit.length
+            ? hit.map(id => `<div class="ed-catopt" data-id="${id}" style="padding:4px 6px;border-radius:5px;cursor:pointer;border-bottom:1px solid #f2f2f2">${esc(catMap[id].p || catMap[id].n)} <span class="smd-dim" style="font-size:10px">#${id}</span></div>`).join('')
+              + (ids.length > hit.length ? `<div class="smd-dim" style="font-size:10px;padding:4px 6px">…ほか ${ids.length - hit.length}件。キーワードで絞ってください</div>` : '')
+            : '<div class="smd-dim" style="font-size:11px;padding:4px 6px">一致するカテゴリがありません</div>';
+          resEl.querySelectorAll('.ed-catopt').forEach(d => {
+            d.addEventListener('mouseenter', () => d.style.background = '#eef2ff');
+            d.addEventListener('mouseleave', () => d.style.background = '');
+            d.addEventListener('click', async () => {
+              const nid = Number(d.dataset.id);
+              if (nid === catId) { pickedCat = null; pickedTree = null; }
+              else pickedCat = nid;
+              showNow(pickedCat || catId, catMap);
+              if (nowEl) nowEl.style.background = pickedCat ? '#fff8e1' : '#fafafa';
+              pick.style.display = 'none'; edBtn.textContent = '変更';
+              // specifics を新カテゴリのものに差し替え（値はカテゴリが変わるとリセットされるため空で描く）
+              const box = body.querySelector('.ed-attrbox'); if (!box) return;
+              box.innerHTML = '<div class="smd-dim" style="font-size:11px">新しいカテゴリの項目を読み込み中…</div>';
+              try {
+                const t2 = pickedCat ? await attrTree(host, pickedCat, sidCat) : atree;
+                pickedTree = pickedCat ? t2 : null;
+                box.innerHTML = buildAttrHtml(t2, pickedCat ? [] : null);
+                const nt = body.querySelector('.ed-attrnote');
+                if (nt) nt.innerHTML = pickedCat ? '<span style="color:#b58900">カテゴリを変更したため、必須(*)の項目を入れ直してください</span>' : 'カテゴリごとに項目が変わります';
+              } catch (e) { box.innerHTML = '<div style="color:#d93025;font-size:11px">属性の取得に失敗: ' + esc(e.message) + '</div>'; }
+            });
+          });
+        };
+        if (qEl) qEl.addEventListener('input', drawRes);
+        openCatalogEditor._pickedCat = () => pickedCat;
+      }
+      // ---- 明細（バリエ）の削除：Shopeeでモデル削除＋番号の詰め直しまで実行 ----
+      body.querySelectorAll('.ed-mdel').forEach(btn => btn.addEventListener('click', async () => {
+        if (!needOfficial()) return;
+        const opt = btn.dataset.opt || '';
+        if (models.length <= 1) { alert('明細が1件しかないため削除できません（バリエ商品として成立しなくなります）'); return; }
+        const gwD = await guardWriteCountries([cc]); if (!gwD.ok) { alert(gwD.msg); return; }
+        if (!confirm('書込先: ' + gwD.summary + '\n\n' + cc + ' の item ' + itemId + ' から明細「' + opt + '」を削除します。\n※Shopeeから消えます（元に戻せません）。残りの番号は自動で詰め直します。\n\nよろしいですか？')) return;
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          await openapiDeleteVariation(sidCat, itemId, [opt]);
+          markStale();
+          try { logAct('出品', '明細削除', repName || '', cc + ' ' + opt); } catch (_) {}
+          toast('✓ 明細「' + opt + '」を削除しました。開き直します');
+          try { openCatalogEditor._cache.delete(ck); openCatalogEditor._infl.delete(ck); } catch (_) {}
+          close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 200);
+        } catch (e) { btn.disabled = false; btn.textContent = '🗑'; alert('削除に失敗: ' + e.message); }
+      }));
+      // ---- 💡SKU（1件ずつ） ----
+      body.querySelectorAll('.ed-skusug1').forEach(btn => btn.addEventListener('click', () => {
+        const row = btn.closest('tr'); if (!row) return;
+        const pEl = body.querySelector('.ed-psku');
+        const parent = (pEl && pEl.value.trim()) || recommendSku((body.querySelector('.ed-name').value || pi.name || '')) || 'SKU';
+        const nameEl = row.querySelector('.ed-tier2') || row.querySelector('td:nth-child(2)');
+        const optName = nameEl ? (nameEl.value != null ? nameEl.value : nameEl.textContent.replace(/^\s*\d+\s*/, '')).trim() : '';
+        const inp = row.querySelector('.ed-msku'); if (!inp) return;
+        const others = new Set([...body.querySelectorAll('.ed-msku')].filter(i => i !== inp && (i.value || '').trim()).map(i => i.value.trim().toUpperCase()));
+        let base = childSku(parent, (body.querySelector('.ed-name').value || pi.name || ''), optName) || parent;
+        let cand = base, k6 = 2;
+        while (others.has(cand.toUpperCase())) { cand = base.slice(0, 36) + '_' + k6; k6++; }
+        inp.value = cand; toast('💡 ' + cand);
+      }));
       { const rt = body.querySelector('.ed-retry');
         if (rt) rt.addEventListener('click', () => { try { openCatalogEditor._cache.delete(ck); openCatalogEditor._infl.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 120); }); }
       // ★属性の選択肢が届いたら、その部分だけドロップダウンに差し替える（描画は待たせない）
-      if (attrs.length) Promise.resolve(atreeP).then(m => {
+      Promise.resolve(atreeP).then(m => {
         if (!m || !m.size) return;
+        if (pickedCat) return;   // ユーザーがカテゴリを変えた後なら、旧カテゴリのツリーで上書きしない
         const box = body.querySelector('.ed-attrbox'); if (!box) return;
         // ★退避・復元は必ず attribute_id で行う。行番号で復元すると、ツリー到着で行の並びが
         //   変わったときに別の属性へ値が入り込む（Conditionに年齢が入る等・実際に発生）。
@@ -10662,6 +10785,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const origPo = !!(pi.pre_order_info && pi.pre_order_info.pre_order);
         const origDts = (pi.pre_order_info && pi.pre_order_info.days_to_ship) || 0;
         if (poOn !== origPo || (dtsV && dtsV !== origDts)) { patch.pre_order_info = { pre_order: poOn, days_to_ship: dtsV || (poOn ? 7 : 3) }; summary.push('予約' + (poOn ? '(ON・' + patch.pre_order_info.days_to_ship + '日)' : '(OFF)')); }
+        // カテゴリ変更（変えた時は属性もまとめて送る＝カテゴリ依存のため）
+        const newCat = (typeof openCatalogEditor._pickedCat === 'function') ? openCatalogEditor._pickedCat() : null;
+        if (newCat && newCat !== catId) { patch.category_id = newCat; summary.push('カテゴリ変更(#' + newCat + ')'); }
         // ★attributes：行indexでなく attribute_id で拾う（ツリー全体を出すので行数が元配列と違う）
         {
           const origById = new Map(attrs.map(a => [a.attribute_id, a]));
@@ -10669,7 +10795,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           body.querySelectorAll('.ed-attr-raw[data-aid]').forEach(inp => {
             const id = +inp.dataset.aid, v = (inp.value || '').trim();
             const o = origById.get(id);
-            const unit = (o && (o.attribute_values || []).find(x => x.raw_value !== undefined) || {}).unit || '';
+            const ovals = (o && o.attribute_values) || [];
+            const unit = (ovals.find(x => x.raw_value !== undefined) || {}).unit || '';
+            // ★元が「選択肢型」(value_id持ち)なのに選択肢リストが取れずテキスト欄で出ている場合がある。
+            //   そのまま文字だけ送ると Shopee に ValueId is required で丸ごと弾かれるので、
+            //   文字を変えていないときは元の値(value_id)をそのまま返す。
+            const idVal = ovals.find(x => x.value_id != null);
+            if (idVal && v && String(idVal.name || '').trim() === v) { built.set(id, ovals); return; }
             built.set(id, v ? [{ raw_value: v, unit }] : []);
           });
           body.querySelectorAll('.ed-attr-sel[data-aid]').forEach(sel2 => {
@@ -10690,8 +10822,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (vals2.length) newAttrs2.push({ attribute_id: id, attribute_values: vals2 });
           });
           // 画面に出ていない属性（ツリーにも商品にも無い＝理論上無いが保険）は現状維持で残す
-          attrs.forEach(a => { if (!built.has(a.attribute_id) && (a.attribute_values || []).length) newAttrs2.push({ attribute_id: a.attribute_id, attribute_values: a.attribute_values }); });
-          if (changed2) { patch.attributes = newAttrs2; summary.push('specifics'); }
+          if (!patch.category_id) attrs.forEach(a => { if (!built.has(a.attribute_id) && (a.attribute_values || []).length) newAttrs2.push({ attribute_id: a.attribute_id, attribute_values: a.attribute_values }); });
+          if (changed2 || patch.category_id) { patch.attributes = newAttrs2; if (changed2) summary.push('specifics'); }
         }
 
         // ★変更が無くてもボタンは押せる。モーダルで止めず、その場に一言出して終わる。
@@ -10723,6 +10855,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (patch.attributes != null) itemP.attributes = JSON.stringify(mapAttrsOfficial(patch.attributes));
             if (patch.description != null) { itemP.desc = patch.description; itemP.desc_type = pi.description_type || 'normal'; }
             if (patch.images != null) itemP.images = patch.images.join(',');   // GAS側でmedia_spaceへアップ→image_id_listに変換
+            if (patch.category_id != null) itemP.category_id = patch.category_id;
             if (Object.keys(itemP).length > 2) { const r = await openapiUpdateItem(itemP); if (!(r && r.ok)) throw new Error('商品情報(update_item): ' + ((r && r.error) || '失敗')); done.push('商品情報'); }
             // 2) 価格・在庫（変更分のみ・既存の公式ヘルパー）
             const priceList = [], stockList = [];

@@ -176,7 +176,7 @@ function doGet(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -253,7 +253,9 @@ function doGet(e) {
         clist.forEach(function (c) {
           var path = nameOf(c), pp = c, d = 0;
           while (pp && pp.parent_category_id && cby[pp.parent_category_id] && d < 10) { pp = cby[pp.parent_category_id]; path = nameOf(pp) + ' > ' + path; d++; }
-          map[c.category_id] = { n: nameOf(c), p: path };
+          // hc=1 は子カテゴリを持つ中間カテゴリ。Shopeeは末端(hc=0)にしか出品できないので、
+          // ポータルのカテゴリ選択で「選べる／選べない」を出し分けるために返す。
+          map[c.category_id] = { n: nameOf(c), p: path, hc: c.has_children ? 1 : 0 };
         });
         cout = { ok: true, shop_id: cshop, count: clist.length, map: map };
       } catch (err) { cout = { ok: false, error: String((err && err.message) || err) }; }
@@ -364,6 +366,18 @@ function doGet(e) {
         rout = reorderVariation_(rshop, p.item_id, String(p.order || '').split('\u0001').filter(String));
       } catch (err) { rout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rcb + '(' + JSON.stringify(rout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    // ★明細（バリエーション）の削除。names=削除する明細名を \u0001 区切り。削除後は番号が飛ばないよう詰め直す。
+    if (p.action === 'delete_variation') {
+      var dvcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var dvout;
+      try {
+        var dvwt = P_().getProperty('WRITE_TOKEN');
+        if (!dvwt || p.token !== dvwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var dvshop = parseInt(p.shop_id, 10); if (!getToken_(dvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String));
+      } catch (err) { dvout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dvcb + '(' + JSON.stringify(dvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'add_variation') {
       var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -649,11 +663,29 @@ function getItemFull_(shopId, itemId) {
 // 返す: [{attribute_id, name, mandatory, multi, options:[{id,name}]}]（ポータル attrTree と同形）。フィールド名は版差があるため防御的に読む。
 function getAttributeTree_(shopId, catId, lang) {
   shopId = parseInt(shopId, 10); catId = parseInt(catId, 10);
+  // ★まず get_attributes（カテゴリ単位の旧API）を使う。こちらは original_attribute_name / display_attribute_name が
+  //   必ず入っており、属性名が '#100130' のような数字表示になる問題が起きない。
+  //   get_attribute_tree は選択肢は返すが名前が空のことがあるため、足りない分の補完にだけ使う。
+  var byId = {}, order = [];
+  try {
+    var ja = callShop_(shopId, '/api/v2/product/get_attributes', { category_id: catId, language: lang || 'en' }, 'get');
+    var alist = ((ja.response || {}).attribute_list) || [];
+    alist.forEach(function (a) {
+      var nm = a.display_attribute_name || a.original_attribute_name || '';
+      var maxn = a.max_input_value_number || a.input_validation_type === 'MULTIPLE_SELECT' ? (a.max_input_value_number || 2) : 1;
+      var multi = /MULTIPLE/i.test(String(a.input_type || a.input_validation_type || '')) || (a.max_input_value_number || 1) > 1;
+      var opts = (a.attribute_value_list || []).map(function (v) {
+        return { id: (v.value_id != null ? v.value_id : v.id), name: v.display_value_name || v.original_value_name || String(v.value_id) };
+      });
+      byId[a.attribute_id] = { attribute_id: a.attribute_id, name: nm || ('#' + a.attribute_id), mandatory: !!a.is_mandatory, multi: !!multi, options: opts };
+      order.push(a.attribute_id);
+    });
+  } catch (e0) { /* 版差で無い場合は tree だけで動く */ }
   var j = callShop_(shopId, '/api/v2/product/get_attribute_tree', { category_id_list: String(catId), language: lang || 'en' }, 'get');
   var resp = j.response || {};
   var list = resp.list || [];
   var tree = (list[0] && (list[0].attribute_tree || list[0].attribute_list)) || resp.attribute_list || (Array.isArray(list) && list[0] && list[0].attribute_id ? list : []);
-  return (tree || []).map(function (a) {
+  var fromTree = (tree || []).map(function (a) {
     var info = a.attribute_info || {};
     var maxv = info.max_input_value_number || info.max_value_count || a.max_input_value_number || 1;
     var rawOpts = a.attribute_value_tree || a.attribute_value_list || a.children || [];
@@ -673,6 +705,15 @@ function getAttributeTree_(shopId, catId, lang) {
       options: opts
     };
   });
+  // 統合：名前は get_attributes 優先、選択肢は多い方を採用（treeにしか無い属性はそのまま足す）
+  fromTree.forEach(function (t) {
+    var e = byId[t.attribute_id];
+    if (!e) { byId[t.attribute_id] = t; order.push(t.attribute_id); return; }
+    if (/^#\d+$/.test(e.name) && t.name && !/^#\d+$/.test(t.name)) e.name = t.name;
+    if ((t.options || []).length > (e.options || []).length) e.options = t.options;
+    if (t.multi) e.multi = true;
+  });
+  return order.map(function (id) { return byId[id]; });
 }
 // ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
 function updatePriceList_(shopId, itemId, list) {
@@ -733,6 +774,40 @@ function reorderVariation_(shopId, itemId, orderNames) {
   });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, order: orderNames };
+}
+// ★明細(バリエ)を削除。delete_model でモデルを消し、tierのオプションも取り除いて番号を詰め直す。
+//   ・残り0件にはできない（Shopeeがバリエ商品として成立しなくなる）
+//   ・売れた実績のあるモデルもShopee側の判断で削除不可のことがある（その場合はエラーを返す）
+function removeVariation_(shopId, itemId, names) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!names || !names.length) throw new Error('削除する明細名が空です');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+  var tier = tiers[0], optList = tier.option_list || [];
+  var cur = optList.map(function (o) { return o.option; });
+  var delIdx = {};
+  names.forEach(function (n) {
+    var oi = cur.indexOf(n);
+    if (oi < 0) throw new Error('不明な明細名: ' + n);
+    delIdx[oi] = 1;
+  });
+  var keep = [];
+  for (var i = 0; i < cur.length; i++) if (!delIdx[i]) keep.push(i);
+  if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
+  // 1) 対象modelを削除
+  var delModels = models.filter(function (m) { return delIdx[(m.tier_index || [])[0]]; });
+  delModels.forEach(function (m) {
+    var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: m.model_id });
+    if (dj && dj.error && dj.error !== '') throw new Error('明細の削除に失敗: ' + dj.error + ' ' + (dj.message || ''));
+  });
+  // 2) tierのオプションを詰め直し、残ったmodelのtier_indexを 0,1,2... に振り直す（番号の穴を作らない）
+  var map = {}, newOpts = [];
+  keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
+  var remap = models.filter(function (m) { return !delIdx[(m.tier_index || [])[0]]; })
+    .map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
+  return { ok: true, deleted: names.length, remain: newOpts.length };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {
@@ -1103,6 +1178,9 @@ function updateItem_(body) {
   }
   // 属性(specifics)：attribute_list=[{attribute_id, attribute_value_list:[{value_id, original_value_name, value_unit}]}]
   if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
+  // カテゴリ変更：category_id を渡すと Shopee 側でカテゴリが移る。属性はカテゴリ依存なので
+  // 変更時は新カテゴリの attribute_list を同時に渡すこと（渡さないと必須属性欠落で弾かれる）。
+  if (body.category_id != null && String(body.category_id) !== '' && !isNaN(parseInt(body.category_id, 10))) payload.category_id = parseInt(body.category_id, 10);
   // ★画像：URL配列 → media_space/upload_image で image_id に変換 → image.image_id_list を丸ごと差し替え。
   //   Shopeeは部分更新ではなく「渡した並びがそのまま新しい画像一覧」になるので、順番＝表示順。最大9枚。
   //   既にShopee上にある画像は URL からの再アップになるが、image_id が変わるだけで見た目は同じ。
@@ -1116,7 +1194,7 @@ function updateItem_(body) {
     if (!_ids.length) throw new Error('画像のアップロードに失敗しました（URLを確認してください）');
     payload.image = { image_id_list: _ids };
   }
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image のいずれか）');
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image/category_id のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
