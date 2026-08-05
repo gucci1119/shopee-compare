@@ -238,6 +238,27 @@ function doGet(e) {
       } catch (err) { fout = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
       return ContentService.createTextOutput(fcb + '(' + JSON.stringify(fout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★カテゴリ一覧（id→名前・フルパス）。出品一覧の「カテゴリ」列が #101087 のままで読めないため。
+    //   読み取り専用・token不要。1shopぶん取れば同じ国の全商品に使える。
+    if (p.action === 'get_categories') {
+      var ccb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var cout;
+      try {
+        var cshop = parseInt(p.shop_id, 10); if (!getToken_(cshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var cj = callShop_(cshop, '/api/v2/product/get_category', { language: p.lang || 'en' }, 'get');
+        var clist = ((cj.response || {}).category_list) || [];
+        var cby = {}; clist.forEach(function (c) { cby[c.category_id] = c; });
+        var nameOf = function (c) { return String(c.display_category_name || c.original_category_name || c.category_name || ''); };
+        var map = {};
+        clist.forEach(function (c) {
+          var path = nameOf(c), pp = c, d = 0;
+          while (pp && pp.parent_category_id && cby[pp.parent_category_id] && d < 10) { pp = cby[pp.parent_category_id]; path = nameOf(pp) + ' > ' + path; d++; }
+          map[c.category_id] = { n: nameOf(c), p: path };
+        });
+        cout = { ok: true, shop_id: cshop, count: clist.length, map: map };
+      } catch (err) { cout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ccb + '(' + JSON.stringify(cout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
