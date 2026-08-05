@@ -10295,7 +10295,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (stockList.length) { const r = await openapiUpdateStockList(sidCat, itemId, stockList); if (!(r && r.ok)) throw new Error('在庫: ' + ((r && r.error) || '失敗')); done.push('在庫' + stockList.length); }
             // 3) バリエ名の変更・明細SKUは公式の単純APIで安全に書けない（tier再マップが必要）→ブリッジがあれば委譲・無ければ未保存と明示
             const leftover = {};
-            if (patch.std_tier_variation_list != null) leftover.std_tier_variation_list = patch.std_tier_variation_list;
+            // ★バリエ名は公式APIの rename_models(before→after) で1件ずつ書く。
+            //   std_tier_variation_list をブリッジに丸投げすると code=1000100018 で弾かれるため（実測）。
+            //   2層バリエだけは対応外なのでブリッジ側へ回す。
+            if (patch.std_tier_variation_list != null) {
+              if (tiers.length === 1) {
+                const beforeN = (tiers[0].value_list || []).map(o => o.custom_value);
+                const afterN = ((patch.std_tier_variation_list[0] || {}).value_list || []).map(o => o.custom_value);
+                let renamed = 0;
+                for (let i = 0; i < beforeN.length; i++) {
+                  const bn = beforeN[i], an = afterN[i];
+                  if (!an || an === bn) continue;
+                  const r = await openapiRenameModels(sidCat, itemId, bn, an);
+                  if (!(r && r.ok)) throw new Error('明細名「' + bn + '」→「' + an + '」: ' + ((r && r.error) || '失敗'));
+                  renamed++;
+                }
+                if (renamed) done.push('明細名' + renamed);
+              } else leftover.std_tier_variation_list = patch.std_tier_variation_list;
+            }
             const skuModels = (patch.model_list || []).filter(m => m.sku != null).map(m => ({ id: m.id, tier_index: m.tier_index || [], price: m.price, sku: m.sku }));
             if (skuModels.length) leftover.model_list = skuModels;
             let leftoverNote = '';
