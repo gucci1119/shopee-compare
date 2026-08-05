@@ -9801,14 +9801,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               <input class="ed-addname" placeholder="明細名（例: PS5:Part I）" style="flex:1;min-width:170px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">
               <input class="ed-addcost" placeholder="仕入¥" inputmode="numeric" title="仕入(円)を入れて⚡を押すと、重量・手数料・SLS送料・目標ROIから この国の価格を自動計算します" style="width:78px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addwg" placeholder="重量g" inputmode="numeric" value="${av(String((pi.weight && pi.weight.value) ? Math.round(parseFloat(pi.weight.value) * 1000) : ((listState && listState.weightG) || settings.weightG || 500)))}" title="課金重量(g)。既定はこの商品の登録重量" style="width:70px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
-              <button class="ed-addcalc smd-btn" title="仕入・重量から価格を自動計算" style="font-size:12px;padding:5px 9px">⚡</button>
-              <input class="ed-addprice" placeholder="価格" inputmode="decimal" style="width:88px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
+              <input class="ed-addprice" placeholder="価格(自動)" inputmode="decimal" style="width:96px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addstock" placeholder="在庫" inputmode="numeric" value="1" style="width:60px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addsku" placeholder="SKU(任意)" style="width:110px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace">
               <input class="ed-addimg" placeholder="画像URL(任意)" style="flex:1;min-width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px">
               <button class="ed-addvar smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">追加</button>
             </div>
-            <div class="smd-dim" style="font-size:10.5px;margin-top:4px">※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
+            <div class="ed-addcalcmsg" style="font-size:11px;margin-top:5px;min-height:15px;color:#1a7f37"></div>
+            <div class="smd-dim" style="font-size:10.5px;margin-top:2px">※<b>仕入¥と重量gを入れると価格は自動で入ります</b>（手数料・SLS送料・目標ROIから算出）。手で直せば直した値が優先されます。<br>※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
           </div>` : (tiers.length > 1 ? '<div class="smd-dim" style="font-size:10.5px;margin-top:8px">※2層バリエ商品への明細追加は未対応です（Shopeeの編集画面をお使いください）</div>' : '')}
         </div>
         ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div style="margin-top:4px">${attrHtml}</div></div>` : ''}
@@ -9821,19 +9821,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ---- 明細（バリエーション）の追加・画像差し替え：どちらも即時Shopee反映（下の「保存」は不要） ----
       const reopen = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 150); };
       const needOfficial = () => { if (!(settings.openapiUrl && settings.writeToken && sidCat)) { alert('この操作には⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です'); return false; } return true; };
-      { const cb2 = body.querySelector('.ed-addcalc');
-        if (cb2) cb2.addEventListener('click', () => {
-          const cost = parseFloat((body.querySelector('.ed-addcost').value || '').replace(/[^\d.]/g, ''));
-          const wg = parseFloat((body.querySelector('.ed-addwg').value || '').replace(/[^\d.]/g, ''));
-          if (!(cost > 0)) { alert('仕入(円)を入れてください'); return; }
+      // ★仕入¥・重量g を入れたらその場で価格を自動計算（ボタンを押させない）。手で価格を直したらそちらを尊重。
+      { const cIn = body.querySelector('.ed-addcost'), wIn = body.querySelector('.ed-addwg'),
+              pIn = body.querySelector('.ed-addprice'), msg2 = body.querySelector('.ed-addcalcmsg');
+        let priceTouched = false;
+        const recalc = () => {
+          if (!cIn || !pIn) return;
+          const cost = parseFloat((cIn.value || '').replace(/[^\d.]/g, ''));
+          const wg = parseFloat((wIn && wIn.value || '').replace(/[^\d.]/g, ''));
+          if (!(cost > 0)) { if (msg2) msg2.textContent = ''; return; }
           try {
             // 出品コンポーザーと同じ計算（手数料・SLS送料・FXマージン・利益バッファ・目標ROI）
             const v = roundLocal(priceLocalFor(cc, cost, { weightG: wg > 0 ? wg : undefined }), rg.priceUnit || 1);
-            body.querySelector('.ed-addprice').value = v;
-            const pf = priceProfitFor(cc, cost, v, { weightG: wg > 0 ? wg : undefined });
-            toast('⚡ ' + cc + ' ' + (rg.cur || '') + v + '（想定利益 ' + Math.round(pf.profit) + '円 / ROI ' + Math.round(pf.roi * 100) + '%）');
-          } catch (e) { alert('価格の自動計算に失敗: ' + e.message); }
-        }); }
+            if (!priceTouched) pIn.value = v;
+            const shown = parseFloat((pIn.value || '').replace(/[^\d.]/g, '')) || v;
+            const pf = priceProfitFor(cc, cost, shown, { weightG: wg > 0 ? wg : undefined });
+            const neg = pf.profit < 0;
+            if (msg2) {
+              msg2.style.color = neg ? '#d93025' : '#1a7f37';
+              msg2.innerHTML = (priceTouched ? '手入力の価格で ' : '自動計算 ') + '<b>' + (rg.cur || '') + shown + '</b>'
+                + ' ／ 想定利益 <b>' + Math.round(pf.profit).toLocaleString() + '円</b>'
+                + ' ／ ROI <b>' + Math.round(pf.roi * 100) + '%</b>'
+                + (wg > 0 ? ' <span class="smd-dim">(重量' + wg + 'g)</span>' : '')
+                + (neg ? ' <b>⚠赤字です</b>' : '');
+            }
+          } catch (e) { if (msg2) { msg2.style.color = '#d93025'; msg2.textContent = '価格計算に失敗: ' + e.message; } }
+        };
+        if (cIn) cIn.addEventListener('input', recalc);
+        if (wIn) wIn.addEventListener('input', recalc);
+        if (pIn) pIn.addEventListener('input', () => { priceTouched = (pIn.value || '').trim() !== ''; recalc(); });
+        recalc(); }
       { const ab = body.querySelector('.ed-addvar');
         if (ab) ab.addEventListener('click', async () => {
           if (!needOfficial()) return;
