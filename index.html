@@ -9737,8 +9737,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const attrs = pi.attributes || [];
       const cur = rg.cur || '';
       const catId = (pi.category_path && pi.category_path.length) ? pi.category_path[pi.category_path.length - 1] : null;
-      // 属性選択肢：公式API(get_attributes)優先＝ブリッジ非常駐でもドロップダウンが出る（sidCat＝shop_id）。公式失敗/未設定時のみブリッジ。どちらも詰まらないよう8秒でタイムアウト→空Map（rawテキスト降格）
-      const atree = await Promise.race([attrTree(host, catId, sidCat), new Promise(res => setTimeout(() => res(new Map()), 8000))]);
+      // ★属性の選択肢(get_attributes)は【待たない】。以前はここで最大8秒ブロックしており、開くのが遅い主因だった。
+      //   属性名は商品レスポンスの original_attribute_name から出せるので、まず空Mapで描画→届いたら選択肢に差し替える。
+      const atree = new Map();
+      const atreeP = (openCatalogEditor._atree = openCatalogEditor._atree || new Map()).get(cc + '|' + catId)
+        || attrTree(host, catId, sidCat).then(m => { openCatalogEditor._atree.set(cc + '|' + catId, Promise.resolve(m)); return m; }).catch(() => new Map());
       // バリエ名（tierオプション）編集セクション
       let tierHtml = '';
       if (tiers.length) {
@@ -9755,7 +9758,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:130px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></td>
       </tr>`).join('');
       // specifics（属性）: 選択肢型は各国のattribute_treeからドロップダウン/チェックボックス、自由記述はテキスト
-      const attrHtml = attrs.map((a, ai) => {
+      const buildAttrHtml = (atree) => attrs.map((a, ai) => {
         const vals = a.attribute_values || [];
         const def = atree.get(a.attribute_id);
         const nm = (def && def.name) || a.name || ('属性#' + a.attribute_id);   // ★ツリー未取得でもレスポンスの名前を使う
@@ -9780,13 +9783,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <textarea class="ed-name" rows="2" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical">${esc(pi.name || '')}</textarea>
         <div style="margin-top:12px">
           <label style="color:#555;font-weight:600">商品画像</label>
-          <span class="smd-dim" style="font-size:10.5px">（最大9枚・<b>左が1枚目＝サムネイル</b>。◀▶で並べ替え／✕で削除）</span>
+          <span class="smd-dim" style="font-size:10.5px">（最大9枚・<b>左が1枚目＝サムネイル</b>。◀▶で並べ替え／✕で削除／<b>jpg・pngをこの画面にドラッグ&ドロップで追加</b>）</span>
           <div class="ed-imgwrap" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px;min-height:56px;border:1px dashed #dfe3e8;border-radius:8px;padding:6px" title="ここに画像ファイルやURLをドラッグ&ドロップできます"></div>
           <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap">
             <input class="ed-imgurl" placeholder="画像URLを貼って追加（メルカリ等の商品URLも可）" style="flex:1;min-width:200px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
             <button class="ed-imgadd smd-btn" style="font-size:11.5px;padding:4px 12px">+ 追加</button>
             <button class="ed-imgfile smd-btn" style="font-size:11.5px;padding:4px 12px">📁 ファイル</button>
-            <input type="file" class="ed-imgfileinput" accept="image/*" multiple style="display:none">
+            <input type="file" class="ed-imgfileinput" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple style="display:none">
             <button class="ed-imgreset smd-btn" style="font-size:11.5px;padding:4px 10px">元に戻す</button>
           </div>
           ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a;margin-top:3px">⚠️ ブリッジ読込のため画像は編集できません（⚙️OpenAPI設定を入れると編集可）</div>'}
@@ -9826,13 +9829,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div class="smd-dim" style="font-size:10.5px;margin-top:2px">※<b>仕入¥と重量gを入れると価格は自動で入ります</b>（手数料・SLS送料・目標ROIから算出）。手で直せば直した値が優先されます。<br>※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
           </div>` : (tiers.length > 1 ? '<div class="smd-dim" style="font-size:10.5px;margin-top:8px">※2層バリエ商品への明細追加は未対応です（Shopeeの編集画面をお使いください）</div>' : '')}
         </div>
-        ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div style="margin-top:4px">${attrHtml}</div></div>` : ''}
+        ${attrs.length ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">specifics（属性）</div><div class="ed-attrbox" style="margin-top:4px">${buildAttrHtml(atree)}</div></div>` : ''}
         <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:18px;position:sticky;bottom:0;background:#fff;padding-top:10px;border-top:1px solid #eee">
           <span class="ed-msg" style="margin-right:auto;color:#888;font-size:11px"></span>
           <button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:8px 14px;cursor:pointer">閉じる</button>
           <button class="ed-save" style="border:1px solid #ee4d2d;background:#ee4d2d;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">Shopeeに保存</button>
         </div>`;
       body.querySelector('.ed-close2').addEventListener('click', close);
+      // ★属性の選択肢が届いたら、その部分だけドロップダウンに差し替える（描画は待たせない）
+      if (attrs.length) Promise.resolve(atreeP).then(m => {
+        if (!m || !m.size) return;
+        const box = body.querySelector('.ed-attrbox'); if (!box) return;
+        const keep = [...box.querySelectorAll('.ed-attr-raw')].map(i => i.value);   // 入力中の自由記述は退避
+        box.innerHTML = buildAttrHtml(m);
+        [...box.querySelectorAll('.ed-attr-raw')].forEach((i, k) => { if (keep[k] != null && keep[k] !== '') i.value = keep[k]; });
+      }).catch(() => {});
       // ---- 明細（バリエーション）の追加・画像差し替え：どちらも即時Shopee反映（下の「保存」は不要） ----
       const reopen = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 150); };
       const needOfficial = () => { if (!(settings.openapiUrl && settings.writeToken && sidCat)) { alert('この操作には⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です'); return false; } return true; };
@@ -9959,14 +9970,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const addFiles = async (files) => { for (const f of [...files]) { if (edImgs.length >= 9) break; await addFile(f); } };
         { const fb = body.querySelector('.ed-imgfile'), fi = body.querySelector('.ed-imgfileinput');
           if (fb && fi) { fb.addEventListener('click', () => fi.click()); fi.addEventListener('change', () => { addFiles(fi.files); fi.value = ''; }); } }
-        // 枠へのドロップ：ファイルはアップ、URL文字列はそのまま追加
-        if (imgWrap) {
-          imgWrap.addEventListener('dragover', e => { e.preventDefault(); imgWrap.style.borderColor = '#7b52c4'; imgWrap.style.background = '#faf8ff'; });
-          imgWrap.addEventListener('dragleave', () => { imgWrap.style.borderColor = '#dfe3e8'; imgWrap.style.background = ''; });
-          imgWrap.addEventListener('drop', async e => {
-            e.preventDefault(); imgWrap.style.borderColor = '#dfe3e8'; imgWrap.style.background = '';
+        // ★ドロップの受け口は【編集画面ぜんぶ】。画像枠だけだと狙いが小さすぎて落とせなかった。
+        //   dragenter/dragover 両方で preventDefault しないとブラウザがファイルを開いてしまう。
+        const hi = (on) => { if (imgWrap) { imgWrap.style.borderColor = on ? '#7b52c4' : '#dfe3e8'; imgWrap.style.background = on ? '#faf8ff' : ''; } };
+        const dropZone = body;
+        if (dropZone) {
+          const stop = e => { e.preventDefault(); e.stopPropagation(); };
+          ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => { stop(e); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; hi(true); }));
+          dropZone.addEventListener('dragleave', e => { if (!dropZone.contains(e.relatedTarget)) hi(false); });
+          dropZone.addEventListener('drop', async e => {
+            stop(e); hi(false);
             const dt = e.dataTransfer; if (!dt) return;
-            if (dt.files && dt.files.length) { await addFiles(dt.files); return; }
+            const files = [...(dt.files || [])].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif)$/i.test(f.name || ''));
+            if (files.length) { await addFiles(files); return; }
             const txt = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
             if (txt) { if (iu) iu.value = txt.trim(); await addImg(); }
           });
@@ -13250,7 +13266,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <div class="row" style="gap:6px;margin-top:6px">
             <button class="smd-btn" id="li-imgfetch" title="画像URL or メルカリ等の商品リンクから追加（複数行OK）">🔗 リンク/URLから追加</button>
             <button class="smd-btn" id="li-imgfile" title="手元の画像ファイルをアップロードして追加">📁 ファイルから追加</button>
-            <input type="file" id="li-imgfileinput" accept="image/*" multiple style="display:none">
+            <input type="file" id="li-imgfileinput" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple style="display:none">
           </div>
           <details style="margin-top:8px">
             <summary style="cursor:pointer;font-size:12px;color:#7b52c4;font-weight:700">★ 画像テンプレ（ショップ共通画像・バナー等を登録→ワンクリックで追加）</summary>
@@ -13260,7 +13276,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 <button class="smd-btn" id="li-imgfav-add" title="今カタログにある画像をすべてテンプレに登録">＋ 今の画像を登録</button>
                 <button class="smd-btn" id="li-imgfav-url" title="URL/メルカリリンクからテンプレに直接登録">🔗 URLで登録</button>
                 <button class="smd-btn" id="li-imgfav-file" title="手元の画像ファイルを直接テンプレに登録">📁 ファイルで登録</button>
-                <input type="file" id="li-imgfav-fileinput" accept="image/*" multiple style="display:none">
+                <input type="file" id="li-imgfav-fileinput" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple style="display:none">
                 <button class="smd-btn" id="li-imgfav-tous" style="background:#f3eefb;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="このテンプレ画像を『自動出品(β)』のショップ共通画像として登録するトークンをコピー。新規出品ページのuserscriptパネル『🏬ショップ共通画像→設定』に貼り付けて1回登録すれば、以後カタログ末尾に自動で付きます">📋 userscriptへ登録</button>
                 <span class="smd-dim" style="font-size:11px">サムネ＝クリックで追加／✕でテンプレ削除／ここにドロップでも登録</span>
               </div>
