@@ -9658,6 +9658,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 属性値をvalue属性用にエスケープ
   const av = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
+  // ✎にマウスを乗せた時点で公式APIを先に叩いておく＝クリック時にはもう手元にあり「瞬間で開く」。
+  // キャッシュは openCatalogEditor._cache と共用（3分有効）。失敗しても黙って捨てる（本番の読込でリトライされる）。
+  function prefetchCatalog(cc, itemId) {
+    if (!(settings.openapiUrl && settings.writeToken)) return;
+    const sid = (typeof shopIdOfListing === 'function') ? (shopIdOfListing(cc, itemId) || shopIdOfListing(cc, Number(itemId)) || shopIdOfListing(cc, String(itemId))) : null;
+    if (!sid) return;
+    openCatalogEditor._cache = openCatalogEditor._cache || new Map();
+    const ck = cc + '|' + itemId;
+    const hit = openCatalogEditor._cache.get(ck);
+    if (hit && Date.now() - hit.at < 180000) return;         // 取得済み
+    if (openCatalogEditor._inflight && openCatalogEditor._inflight.has(ck)) return;  // 二重取得しない
+    openCatalogEditor._inflight = openCatalogEditor._inflight || new Set();
+    openCatalogEditor._inflight.add(ck);
+    openapiGetItemInfo(sid, itemId)
+      .then(r => { openCatalogEditor._cache.set(ck, { pi: r, at: Date.now() }); })
+      .catch(() => {})
+      .then(() => { openCatalogEditor._inflight.delete(ck); });
+  }
   function openCatalogEditor(cc, host, itemId, repName) {
     // 読取り・書込とも公式API化済（update_item/price/stock）。公式API設定があればライブ(ブリッジ)不要で開ける。バリエ名・明細SKUだけはブリッジ or Shopee編集ページが必要。
     if (state.mode !== 'live' && !(settings.openapiUrl && settings.writeToken)) { alert('カタログ編集には公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）か🟢ライブPCが必要です'); return; }
@@ -9671,7 +9689,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <a href="${editUrlFor(host, itemId)}" target="_blank" style="font-size:12px;color:#1565c0;text-decoration:none" title="Shopeeの編集画面を開く">Shopeeで開く↗</a>
         <button class="ed-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button>
       </div>
-      <div class="ed-body" style="padding:16px 18px;max-height:calc(100vh - 150px);overflow:auto"><div class="smd-dim">読込中…（Shopeeから現在の内容を取得）</div></div>
+      <div class="ed-body" style="padding:16px 18px;max-height:calc(100vh - 150px);overflow:auto"><div class="smd-dim"><span class="smd-spin"></span> Shopeeから現在の内容を取得中…<div style="font-size:11px;margin-top:4px">${esc(repName || '')}</div><div class="ed-wait" style="font-size:10.5px;margin-top:6px;color:#a8650a"></div></div></div>
     </div>`;
     document.body.appendChild(ov);
     const close = () => ov.remove();
@@ -9781,6 +9799,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div style="font-weight:700;color:#3b5bdb;font-size:12px;margin-bottom:5px">＋ 明細（バリエーション）を追加</div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
               <input class="ed-addname" placeholder="明細名（例: PS5:Part I）" style="flex:1;min-width:170px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">
+              <input class="ed-addcost" placeholder="仕入¥" inputmode="numeric" title="仕入(円)を入れて⚡を押すと、重量・手数料・SLS送料・目標ROIから この国の価格を自動計算します" style="width:78px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
+              <input class="ed-addwg" placeholder="重量g" inputmode="numeric" value="${av(String((pi.weight && pi.weight.value) ? Math.round(parseFloat(pi.weight.value) * 1000) : ((listState && listState.weightG) || settings.weightG || 500)))}" title="課金重量(g)。既定はこの商品の登録重量" style="width:70px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
+              <button class="ed-addcalc smd-btn" title="仕入・重量から価格を自動計算" style="font-size:12px;padding:5px 9px">⚡</button>
               <input class="ed-addprice" placeholder="価格" inputmode="decimal" style="width:88px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addstock" placeholder="在庫" inputmode="numeric" value="1" style="width:60px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right">
               <input class="ed-addsku" placeholder="SKU(任意)" style="width:110px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace">
@@ -9800,6 +9821,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ---- 明細（バリエーション）の追加・画像差し替え：どちらも即時Shopee反映（下の「保存」は不要） ----
       const reopen = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 150); };
       const needOfficial = () => { if (!(settings.openapiUrl && settings.writeToken && sidCat)) { alert('この操作には⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です'); return false; } return true; };
+      { const cb2 = body.querySelector('.ed-addcalc');
+        if (cb2) cb2.addEventListener('click', () => {
+          const cost = parseFloat((body.querySelector('.ed-addcost').value || '').replace(/[^\d.]/g, ''));
+          const wg = parseFloat((body.querySelector('.ed-addwg').value || '').replace(/[^\d.]/g, ''));
+          if (!(cost > 0)) { alert('仕入(円)を入れてください'); return; }
+          try {
+            // 出品コンポーザーと同じ計算（手数料・SLS送料・FXマージン・利益バッファ・目標ROI）
+            const v = roundLocal(priceLocalFor(cc, cost, { weightG: wg > 0 ? wg : undefined }), rg.priceUnit || 1);
+            body.querySelector('.ed-addprice').value = v;
+            const pf = priceProfitFor(cc, cost, v, { weightG: wg > 0 ? wg : undefined });
+            toast('⚡ ' + cc + ' ' + (rg.cur || '') + v + '（想定利益 ' + Math.round(pf.profit) + '円 / ROI ' + Math.round(pf.roi * 100) + '%）');
+          } catch (e) { alert('価格の自動計算に失敗: ' + e.message); }
+        }); }
       { const ab = body.querySelector('.ed-addvar');
         if (ab) ab.addEventListener('click', async () => {
           if (!needOfficial()) return;
@@ -12771,7 +12805,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       lst.page = 1; drawListingStatus();
     }));
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => { const k = el.dataset.k; if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k); drawListingStatus(); }));
-    document.querySelectorAll('#lst-list .lst-edit').forEach(el => el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); }));
+    document.querySelectorAll('#lst-list .lst-edit').forEach(el => {
+      el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); });
+      // ★ホバーで先読み（マウスが乗ってからクリックまでの時間で取得を終わらせる）
+      el.addEventListener('mouseenter', () => prefetchCatalog(el.dataset.cc, el.dataset.id), { passive: true });
+    });
     // 🌍 各国まとめ編集：この一覧から直接まとめ編集は準備中。当面は「各国そろえる」画面へ商品名で飛ばして、そこの🌍各国まとめ編集を使ってもらう
     document.querySelectorAll('#lst-list .lst-unify').forEach(el => el.addEventListener('click', () => {
       const nm = (el.dataset.name || '').trim();
