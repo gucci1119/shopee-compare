@@ -1182,6 +1182,33 @@
     });
   }
 
+  // ★GAS呼び出しは fetch で行う。JSONPはGASが404/HTMLを返すと onerror だけで理由が分からず
+  //   「GAS読み込みエラー」としか出ない（再デプロイ直後の伝播中に頻発）。fetchならHTTPで判定でき、
+  //   一時エラーは1回リトライして拾える。CORSはGETで通ることを実測済み。
+  async function gasCall(params, timeoutMs) {
+    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    const q = Object.assign({}, params, { callback: 'cb' });
+    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
+    const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
+    let lastErr = '';
+    for (let att = 0; att < 2; att++) {
+      const ac = new AbortController();
+      const tm = setTimeout(() => ac.abort(), timeoutMs || 60000);
+      try {
+        const r = await fetch(url, { signal: ac.signal, credentials: 'omit' });
+        const t = await r.text();
+        const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
+        if (!m) { lastErr = 'GASがJSONを返しませんでした（HTTP ' + r.status + '・再デプロイ直後の伝播中かも）'; }
+        else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗'; if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
+      } catch (e) {
+        if (e && e.message && lastErr !== e.message && !/aborted|Failed to fetch/i.test(e.message)) throw e;
+        lastErr = lastErr || (e && e.message) || 'GAS応答なし';
+      } finally { clearTimeout(tm); }
+      if (att === 0) await new Promise(r2 => setTimeout(r2, 400));
+    }
+    throw new Error(lastErr || 'GAS呼び出しに失敗');
+  }
+
   // ---------------- 公式API 書き込み（在庫/価格）: GAS JSONP経由・ブリッジ不要 ----------------
   // params: { shop_id, item_id, model_id?/model_name?, stock?(在庫) or price?(価格) }
   async function openapiUpdate(action, params) {
@@ -1216,13 +1243,8 @@
   // ---------------- 公式API 出品編集（タイトル/親SKU/説明を update_item・ブリッジ卒業） ----------------
   // params: { shop_id, item_id, name?, sku?, desc? }（送った項目だけ更新）
   async function openapiUpdateItem(params) {
-    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
-    const q = Object.assign({ action: 'update_item', token: settings.writeToken }, params);
-    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '公式API編集に失敗');
-    return res;
+    return gasCall(Object.assign({ action: 'update_item', token: settings.writeToken }, params), 60000);
   }
   // 公式APIで公開/非公開を切替（unlist_item）。unlist=false=公開(NORMAL) / true=非公開(UNLIST)
   async function openapiUnlistItem(shopId, itemId, unlist) {
@@ -1631,33 +1653,18 @@
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
-    const qs = 'action=rename_models&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&before=' + encodeURIComponent(before) + '&after=' + encodeURIComponent(after == null ? '' : after);
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '公式API明細名変更に失敗');
-    return res;
+    return gasCall({ action: 'rename_models', token: settings.writeToken, shop_id: shopId, item_id: itemId, before: before, after: (after == null ? '' : after) }, 60000);
   }
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
   // 明細（バリエーション）の並び替え。order=新しい順の明細名。区切りは \u0001（名前にカンマが入り得るため）
   async function openapiReorderVariation(shopId, itemId, orderNames) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
-    const qs = 'action=reorder_variation&token=' + encodeURIComponent(settings.writeToken)
-      + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId)
-      + '&order=' + encodeURIComponent(orderNames.join('\u0001'));
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 90000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '並び替えに失敗');
-    return res;
+    return gasCall({ action: 'reorder_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, order: orderNames.join('\u0001') }, 90000);
   }
   async function openapiAddVariation(shopId, itemId, opts) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
-    const q = Object.assign({ action: 'add_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, opts);
-    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 90000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '公式APIバリエ追加に失敗');
-    return res;
+    return gasCall(Object.assign({ action: 'add_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, opts), 90000);
   }
   // ※アカウント健全性(account_health)はこのCB越境垢では権限なし(error_not_found/shop invalid)で断念。実装は撤去済。
 
@@ -1665,6 +1672,41 @@
   // ★PCのファイルをShopeeへアップして image_id を得る（JSONPのGETには載らないのでPOST）。
   //   text/plain にすることでプリフライト(OPTIONS)を避ける＝GASはOPTIONSに応答できないため。
   // 仕入元URL→{title, price, image}。GAS側で取得するのでブリッジ不要。
+  // 仕入元タイトル（日本語）→ Shopee向けの英語バリエ名（30字以内）。
+  // ノイズ（【】/(),「by ○○」/中古・美品・送料無料 等）を削ってから Chrome内蔵の翻訳で英訳し、整えて詰める。
+  const VAR_NOISE = /(送料無料|送料込み?|匿名配送|即決|新品未使用|未使用に近い|美品|極美品|動作確認済み?|動作品|完動品|中古品?|新品|未開封|レア|希少|限定|非売品|まとめ売り|まとめ|セット|ジャンク|訳あり|値下げ|お得|人気|正規品|本物|即日発送|匿名|ネコポス|ゆうパケット)/g;
+  function cleanSourceTitle(t) {
+    return String(t || '')
+      .replace(/\s*[-|｜]\s*(メルカリ|mercari|ヤフオク.*|Yahoo.*)\s*$/i, '')
+      .replace(/\s+by\s+\S.*$/i, '')                 // 「… by ♪yumi♪」等の出品者名
+      .replace(/[【\[（(][^】\]）)]*[】\]）)]/g, ' ')   // 括弧の中身はだいたい宣伝文句
+      .replace(VAR_NOISE, ' ')
+      .replace(/[★☆♪◆■●◎※]/g, ' ')
+      .replace(/\s{2,}/g, ' ').trim();
+  }
+  function tidyEnglish(t, limit) {
+    let out = String(t || '').replace(/[""'']/g, '').replace(/[,\.]+$/g, '')
+      .replace(/\b(the|a|an|of|for|with|and)\b/gi, m => m.toLowerCase())
+      .replace(/\s{2,}/g, ' ').trim();
+    out = out.replace(/\b[a-z]/g, c => c.toUpperCase());   // 単語頭を大文字に
+    const lim = limit || 30;
+    if (out.length <= lim) return out;
+    const cut = out.slice(0, lim);
+    const sp = cut.lastIndexOf(' ');
+    return (sp >= 12 ? cut.slice(0, sp) : cut).trim();      // 単語の途中で切らない
+  }
+  let _varTr = null;
+  async function suggestVarName(srcTitle, limit) {
+    const ja = cleanSourceTitle(srcTitle);
+    if (!ja) return '';
+    if (!/[ぁ-んァ-ヶ一-龥]/.test(ja)) return tidyEnglish(ja, limit);   // 既に英語ならそのまま整えるだけ
+    try {
+      if (typeof Translator === 'undefined') return tidyEnglish(ja, limit);
+      if (!_varTr) _varTr = await Translator.create({ sourceLanguage: 'ja', targetLanguage: 'en' });
+      const en = await _varTr.translate(ja);
+      return tidyEnglish(en || ja, limit);
+    } catch (_) { return tidyEnglish(ja, limit); }
+  }
   async function openapiFetchMeta(url) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     const qs = 'action=fetch_meta&url=' + encodeURIComponent(url);
@@ -1685,13 +1727,8 @@
     return url;
   }
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
-    const q = { action: 'set_variation_image', token: settings.writeToken, shop_id: shopId, item_id: itemId, option, image: imageUrl };
-    const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 90000);
-    if (!res || !res.ok) throw new Error((res && res.error) || '公式APIバリエ画像設定に失敗');
-    return res;
+    return gasCall({ action: 'set_variation_image', token: settings.writeToken, shop_id: shopId, item_id: itemId, option: option, image: imageUrl }, 90000);
   }
 
   // ---------------- 期間計算 ----------------
@@ -9923,7 +9960,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const wItem = (pi.weight && pi.weight.value) ? Math.round(parseFloat(pi.weight.value) * 1000) : null;
               return `<div style="margin-bottom:6px">${L('仕入元URL', '貼ると仕入・画像・名前を自動取得')}<input class="ed-addurl" placeholder="https://jp.mercari.com/item/m..." style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11.5px"></div>
               <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
-                <div style="flex:1;min-width:170px">${L('明細名', '必須・<span class="ed-addnamecnt">0</span>/30字')}<input class="ed-addname" maxlength="30" placeholder="例: PS5:Part I" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>
+                <div style="flex:1;min-width:170px">${L('明細名', '必須・<span class="ed-addnamecnt">0</span>/30字 <button class="ed-namesug" title="仕入元のタイトルから英語30字以内で作り直す" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9.5px;padding:0 6px;cursor:pointer;font-weight:400">💡英語で作る</button>')}<input class="ed-addname" maxlength="30" placeholder="例: PS5:Part I" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"></div>
                 <div style="width:84px">${L('仕入', '円')}<input class="ed-addcost" inputmode="numeric" placeholder="4800" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 <div style="width:74px">${L('重量', 'g・既定' + wDef)}<input class="ed-addwg" inputmode="numeric" value="${av(wDef)}" title="課金重量(g)。既定は${wDef}g（⚙️設定の既定重量）${wItem ? '／この商品の登録重量は' + wItem + 'g' : ''}" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 ${wItem && String(wItem) !== wDef ? `<button class="ed-usewitem" data-w="${wItem}" title="この商品に登録されている重量を使う" style="align-self:flex-end;border:1px solid #ddd;background:#fff;border-radius:6px;font-size:10px;padding:6px 7px;cursor:pointer;color:#5a6b8c">登録${wItem}g</button>` : ''}
@@ -9931,7 +9968,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 <div style="width:104px">${L('出品価格', esc(rg.cur || '') + '・自動')}<input class="ed-addprice" inputmode="decimal" placeholder="自動" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right;background:#fffdf5"></div>
                 <div style="width:64px">${L('在庫')}<input class="ed-addstock" inputmode="numeric" value="1" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
                 <div style="width:120px">${L('SKU', '任意')}<input class="ed-addsku" placeholder="—" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace"></div>
-                <div style="flex:1;min-width:150px">${L('画像URL', '任意')}<input class="ed-addimg" placeholder="—" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px"></div>
+                <div style="flex:1;min-width:150px">${L('画像URL', '任意')}<span style="display:flex;gap:5px;align-items:center"><span class="ed-addimgprev" style="width:34px;height:34px;flex:none;border:1px dashed #ddd;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#bbb;overflow:hidden">なし</span><input class="ed-addimg" placeholder="—" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px"></span></div>
                 <button class="ed-addvar smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">追加</button>
               </div>`;
             })()}
@@ -9939,9 +9976,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <details class="ed-bulkbox" style="margin-top:8px;border-top:1px dashed #cdd7ea;padding-top:7px">
               <summary style="cursor:pointer;font-size:11.5px;font-weight:700;color:#3b5bdb;list-style:none">📋 まとめて追加（仕入元URLを1行1件で貼る）</summary>
               <div style="margin-top:6px">
-                <textarea class="ed-bulkurls" rows="5" placeholder="https://jp.mercari.com/item/m...&#10;https://jp.mercari.com/item/m...&#10;（1行に1つ・5件でも10件でもOK）" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;font-family:monospace"></textarea>
+                <textarea class="ed-bulkurls" rows="10" placeholder="https://jp.mercari.com/item/m...&#10;https://jp.mercari.com/item/m...&#10;（1行に1つ。100件まとめて貼ってOK）" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;font-family:monospace;white-space:pre;overflow-x:auto"></textarea>
+                <div class="ed-bulkcount smd-dim" style="font-size:10.5px;margin-top:3px"></div>
                 <div style="display:flex;gap:6px;align-items:center;margin-top:5px;flex-wrap:wrap">
                   <button class="ed-bulkload smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">① 取り込む</button>
+                  <button class="ed-bulkstop smd-btn" style="font-size:11px;padding:5px 10px;display:none">■ 中断</button>
                   <span class="ed-bulkmsg smd-dim" style="font-size:11px"></span>
                 </div>
                 <div class="ed-bulklist" style="margin-top:7px"></div>
@@ -10095,14 +10134,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               // メルカリは商品IDから画像を組めるので、通信前に画像だけ先に入れる（体感が速い）
               const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
               const iEl = body.querySelector('.ed-addimg');
-              if (quick && iEl && !iEl.value.trim()) iEl.value = quick;
+              if (quick && iEl && !iEl.value.trim()) { iEl.value = quick; if (openCatalogEditor._drawAddPrev) openCatalogEditor._drawAddPrev(); }
               if (msg2) { msg2.style.color = '#6b7280'; msg2.textContent = '仕入元を読み取り中…'; }
               try {
                 const meta = await openapiFetchMeta(u);
                 if (meta.price > 0 && cIn && !cIn.value.trim()) cIn.value = meta.price;
                 if (meta.image && iEl && !iEl.value.trim()) iEl.value = meta.image;
                 const nEl = body.querySelector('.ed-addname');
-                if (meta.title && nEl && !nEl.value.trim()) nEl.value = String(meta.title).replace(/\s*[-|｜]\s*メルカリ.*$/, '').trim().slice(0, 40);
+                uIn._srcTitle = meta.title || '';
+                if (meta.title && nEl && !nEl.value.trim()) {
+                  nEl.value = await suggestVarName(meta.title, 30) || cleanSourceTitle(meta.title).slice(0, 30);
+                  nEl.dispatchEvent(new Event('input'));
+                }
+                if (openCatalogEditor._drawAddPrev) openCatalogEditor._drawAddPrev();
                 recalc();
                 if (msg2 && !(meta.price > 0)) { msg2.style.color = '#a8650a'; msg2.textContent = '価格が読み取れませんでした（仕入¥を手で入れてください）'; }
               } catch (e) { if (msg2) { msg2.style.color = '#a8650a'; msg2.textContent = '⚠ ' + e.message + ' ／ 画像は入っています。仕入¥だけ手で入れれば価格は自動で出ます'; } }
@@ -10110,6 +10154,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             uIn.addEventListener('change', pull);
             uIn.addEventListener('paste', () => setTimeout(pull, 60));
           } }
+        // 画像URL欄のサムネ（貼った/自動取得した画像がその場で見える）
+        { const iEl2 = body.querySelector('.ed-addimg'), pv = body.querySelector('.ed-addimgprev');
+          const drawPrev = () => {
+            if (!pv) return;
+            const u2 = (iEl2.value || '').trim();
+            const shown = u2 ? ((typeof resolveImgUrl === 'function') ? resolveImgUrl(u2) : u2) : '';
+            pv.innerHTML = shown ? '<img class="zimg" src="' + esc(shown) + '" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" onerror="this.parentNode.textContent=\'✗\'">' : 'なし';
+          };
+          if (iEl2) iEl2.addEventListener('input', drawPrev);
+          openCatalogEditor._drawAddPrev = drawPrev; drawPrev(); }
+        // 💡英語で作る：仕入元タイトルから英語30字以内のバリエ名を生成
+        { const sg = body.querySelector('.ed-namesug');
+          if (sg) sg.addEventListener('click', async () => {
+            const src2 = (body.querySelector('.ed-addurl')._srcTitle || body.querySelector('.ed-addname').value || '').trim();
+            if (!src2) { toast('先に仕入元URLを貼るか、明細名を入れてください', true); return; }
+            sg.disabled = true; sg.textContent = '作成中…';
+            const v2 = await suggestVarName(src2, 30);
+            sg.disabled = false; sg.textContent = '💡英語で作る';
+            if (!v2) { toast('生成できませんでした', true); return; }
+            const nEl2 = body.querySelector('.ed-addname'); nEl2.value = v2; nEl2.dispatchEvent(new Event('input'));
+          }); }
         { const nI = body.querySelector('.ed-addname'), nC = body.querySelector('.ed-addnamecnt');
           const cnt = () => { if (!nI || !nC) return; const n = (nI.value || '').length; nC.textContent = n; nC.style.color = n > 30 ? '#d93025' : (n >= 26 ? '#e8710a' : ''); nC.style.fontWeight = n >= 26 ? '700' : ''; };
           if (nI) nI.addEventListener('input', cnt); cnt(); }
@@ -10186,7 +10251,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!bx) return;
           bx.innerHTML = rows.length
             ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px 39px"><span style="flex:1;min-width:120px">明細名</span><span style="width:74px;text-align:right">仕入¥</span><span style="width:88px;text-align:right">出品価格</span><span style="width:52px;text-align:right">在庫</span><span style="width:118px;text-align:right">取れる利益</span><span style="width:74px"></span><span style="width:24px"></span></div>`
-              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
+              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', () => { rows.splice(+b4.closest('.ed-brow').dataset.i, 1); draw(); }));
           // ★行ごとに「取れる利益 / ROI」を出す。赤字はすぐ分かるように赤で。
@@ -10201,7 +10266,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             el3.innerHTML = (neg3 ? '⚠' : '') + '<b>' + (pf3.profit >= 0 ? '+' : '') + Math.round(pf3.profit).toLocaleString() + '円</b> <span style="color:#8a8f98">ROI' + Math.round(pf3.roi) + '%</span>';
           };
           const syncRow = (row) => { profOf(row); };
-          bx.querySelectorAll('.ed-brow').forEach(syncRow);
+          bx.querySelectorAll('.ed-brow').forEach(row => {
+            syncRow(row);
+            const r5 = rows[+row.dataset.i], st5 = row.querySelector('.eb-st');
+            if (r5 && r5.err && st5) { st5.style.color = '#d93025'; st5.textContent = '✗ 読取失敗'; row.title = r5.url + '\n' + r5.err; }
+          });
+          { const rb = bx.querySelector('.ed-bulkretry');
+            if (rb) rb.addEventListener('click', async () => {
+              const idx = rows.map((r6, i6) => r6.err ? i6 : -1).filter(i6 => i6 >= 0);
+              if (!idx.length) return;
+              rb.disabled = true; bAbort = false;
+              const wg6 = wDefB(), ro6 = roiB();
+              for (const i6 of idx) {
+                if (bAbort) break;
+                rb.textContent = '↻ 取り直し中… ' + (idx.indexOf(i6) + 1) + '/' + idx.length;
+                const r7 = await loadOne(rows[i6].url);
+                if (r7.cost > 0) r7.price = calc(r7.cost, wg6, ro6);
+                rows[i6] = r7;
+              }
+              rb.disabled = false; draw();
+            }); }
           bx.querySelectorAll('.eb-cost').forEach(inp => inp.addEventListener('input', () => {
             const row = inp.closest('.ed-brow'); const c = parseFloat((inp.value || '').replace(/[^\d.]/g, ''));
             const pe = row.querySelector('.eb-price'); if (c > 0 && pe) pe.value = calc(c, wDefB(), roiB());
@@ -10222,9 +10306,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const gwB = await guardWriteCountries([cc]); if (!gwB.ok) { alert(gwB.msg); return; }
             if (!confirm('書込先: ' + gwB.summary + '\n\n' + cc + ' の item ' + itemId + ' に ' + list.length + ' 件の明細を追加します:\n\n'
               + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
-            ba.disabled = true;
+            ba.disabled = true; bAbort = false;
+            const sb2 = bx.querySelector('.ed-bulkstop2');
+            if (sb2) { sb2.style.display = ''; sb2.textContent = '■ 中断'; sb2.onclick = () => { bAbort = true; sb2.textContent = '中断中…'; }; }
             let ok2 = 0;
             for (const x of list) {
+              if (bAbort) break;
               const st = x.el.querySelector('.eb-st');
               if (st) { st.style.color = '#8a8f98'; st.textContent = '登録中…'; }
               try {
@@ -10235,31 +10322,80 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
             }
             markStale();
-            ba.disabled = false; ba.textContent = '② 完了：' + ok2 + '/' + list.length + '件';
+            if (sb2) sb2.style.display = 'none';
+            ba.disabled = false; ba.textContent = (bAbort ? '② 中断：' : '② 完了：') + ok2 + '/' + list.length + '件';
             try { logAct('出品', '明細一括追加', repName || '', cc + ' ' + ok2 + '件'); } catch (_) {}
             toast('✓ ' + ok2 + '件の明細を追加しました（画面を開き直すと反映されます）');
           });
         };
-        if (bl) bl.addEventListener('click', async () => {
-          const urls = (bt.value || '').split(/\r?\n/).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x));
-          if (!urls.length) { alert('仕入元URLを1行に1つずつ貼ってください'); return; }
-          bl.disabled = true; rows = [];
+        // ★1カタログの明細は100件が上限。既存＋追加が超えないよう、貼った時点で残り枠を出す。
+        const MODEL_MAX = 100;
+        const nowN = models.length, slotN = Math.max(0, MODEL_MAX - nowN);
+        const bcEl = body.querySelector('.ed-bulkcount'), bstop = body.querySelector('.ed-bulkstop');
+        const parseUrls = () => {
+          const seen = new Set(), out = [];
+          (bt.value || '').split(/[\r\n\s]+/).forEach(x => {
+            const u = x.trim(); if (!/^https?:\/\//i.test(u)) return;
+            const k = u.replace(/[?#].*$/, '');
+            if (seen.has(k)) return; seen.add(k); out.push(u);
+          });
+          return out;
+        };
+        const drawCount = () => {
+          if (!bcEl) return;
+          const n = parseUrls().length;
+          const over = n > slotN;
+          bcEl.innerHTML = n
+            ? '貼り付け <b>' + n + '</b>件（重複URLは自動で除外）／現在の明細 ' + nowN + '件・追加できる残り <b>' + slotN + '</b>件'
+              + (over ? ' <span style="color:#d93025;font-weight:700">⚠ ' + (n - slotN) + '件はみ出しています</span>' : '')
+            : '残り枠 ' + slotN + '件（明細は1カタログ' + MODEL_MAX + '件まで。現在 ' + nowN + '件）';
+        };
+        if (bt) { bt.addEventListener('input', drawCount); bt.addEventListener('paste', () => setTimeout(drawCount, 0)); }
+        drawCount();
+        let bAbort = false;
+        if (bstop) bstop.addEventListener('click', () => { bAbort = true; bstop.textContent = '中断中…'; });
+        // 1件ぶんの取り込み（名前は英語30字に整える）
+        const loadOne = async (u) => {
+          const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
+          const r = { url: u, name: '', cost: 0, image: quick || '', price: '', err: '' };
+          try {
+            const meta = await openapiFetchMeta(u);
+            r.cost = meta.price || 0;
+            if (meta.image && !r.image) r.image = meta.image;
+            r.name = meta.title ? (await suggestVarName(meta.title, 30) || cleanSourceTitle(meta.title).slice(0, 30)) : '';
+          } catch (e) { r.err = String(e && e.message || e).slice(0, 40); }
+          return r;
+        };
+        // ★100件を1件ずつ直列に読むと5分以上かかる。同時4本で流す（GASが詰まらない実測上限）。
+        const runPool = async (urls, onDone) => {
           const wg = wDefB(), ro = roiB();
-          for (let i2 = 0; i2 < urls.length; i2++) {
-            const u = urls[i2];
-            if (bm) bm.textContent = '取り込み中… ' + (i2 + 1) + '/' + urls.length;
-            const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
-            let name = '', cost = 0, image = quick || '';
-            try {
-              const meta = await openapiFetchMeta(u);
-              cost = meta.price || 0;
-              if (meta.image && !image) image = meta.image;
-              name = String(meta.title || '').replace(/\s*[-|｜]\s*メルカリ.*$/, '').trim().slice(0, 30);
-            } catch (e) { if (bm) bm.textContent = 'URL読み取りに失敗した行があります: ' + e.message; }
-            rows.push({ url: u, name, cost, image, price: cost > 0 ? calc(cost, wg, ro) : '' });
+          const out = new Array(urls.length); let next = 0, fin = 0;
+          const worker = async () => {
+            while (next < urls.length && !bAbort) {
+              const i3 = next++;
+              const r = await loadOne(urls[i3]);
+              if (r.cost > 0) r.price = calc(r.cost, wg, ro);
+              out[i3] = r; fin++;
+              if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
+              if (onDone) onDone(r, i3, fin);
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(4, urls.length) }, worker));
+          return out.filter(Boolean);
+        };
+        if (bl) bl.addEventListener('click', async () => {
+          let urls = parseUrls();
+          if (!urls.length) { alert('仕入元URLを1行に1つずつ貼ってください'); return; }
+          if (urls.length > slotN) {
+            if (!confirm('この商品に追加できる明細は残り ' + slotN + '件です（Shopeeの上限' + MODEL_MAX + '件）。\n貼られた ' + urls.length + '件のうち先頭 ' + slotN + '件だけ取り込みます。よろしいですか？')) return;
+            urls = urls.slice(0, slotN);
           }
-          if (bm) bm.textContent = urls.length + '件を取り込みました。名前・価格を確認して「②まとめて追加」';
-          bl.disabled = false; draw();
+          bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
+          rows = await runPool(urls);
+          const ng = rows.filter(r => r.err).length;
+          if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '') + '。名前・価格を確認して「②まとめて追加」';
+          bl.disabled = false; if (bstop) bstop.style.display = 'none';
+          draw();
         });
       }
       let addedN = 0;
