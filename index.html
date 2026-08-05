@@ -9899,6 +9899,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               </div>`;
             })()}
             <div class="ed-addcalcmsg" style="font-size:11px;margin-top:5px;min-height:15px;color:#1a7f37"></div>
+            <details class="ed-bulkbox" style="margin-top:8px;border-top:1px dashed #cdd7ea;padding-top:7px">
+              <summary style="cursor:pointer;font-size:11.5px;font-weight:700;color:#3b5bdb;list-style:none">📋 まとめて追加（仕入元URLを1行1件で貼る）</summary>
+              <div style="margin-top:6px">
+                <textarea class="ed-bulkurls" rows="5" placeholder="https://jp.mercari.com/item/m...&#10;https://jp.mercari.com/item/m...&#10;（1行に1つ・5件でも10件でもOK）" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;font-family:monospace"></textarea>
+                <div style="display:flex;gap:6px;align-items:center;margin-top:5px;flex-wrap:wrap">
+                  <button class="ed-bulkload smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">① 取り込む</button>
+                  <span class="ed-bulkmsg smd-dim" style="font-size:11px"></span>
+                </div>
+                <div class="ed-bulklist" style="margin-top:7px"></div>
+              </div>
+            </details>
             <div class="smd-dim" style="font-size:10.5px;margin-top:2px">※<b>仕入¥と重量gを入れると価格は自動で入ります</b>（手数料・SLS送料・目標ROIから算出）。手で直せば直した値が優先されます。<br>※追加と明細画像の変更は<b>その場でShopeeに反映</b>されます（下の「保存」は不要）。1層バリエ商品のみ。</div>
           </div>` : (tiers.length > 1 ? '<div class="smd-dim" style="font-size:10.5px;margin-top:8px">※2層バリエ商品への明細追加は未対応です（Shopeeの編集画面をお使いください）</div>' : '')}
         </div>
@@ -10036,6 +10047,86 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         body.querySelectorAll('.ed-tier').forEach(i => i.addEventListener('input', sync));
         pushOrder = (n) => { origOrder.push(n); sync(); };   // 明細追加時に基準へ足す（並び替えが使えなくなるのを防ぐ）
         sync(); }
+      // ---- 📋 まとめて追加：URLを1行1件で貼る → 取り込み（仕入・画像・名前を自動取得＋価格計算）→ まとめて追加 ----
+      { const bl = body.querySelector('.ed-bulkload'), bt = body.querySelector('.ed-bulkurls'),
+              bm = body.querySelector('.ed-bulkmsg'), bx = body.querySelector('.ed-bulklist');
+        const wDefB = () => parseFloat((body.querySelector('.ed-addwg').value || '').replace(/[^\d.]/g, '')) || 500;
+        const roiB = () => { const v = parseFloat((body.querySelector('.ed-addroi').value || '').replace(/[^\d.]/g, '')); return v > 0 ? { roiPct: v } : {}; };
+        const calc = (cost, wg, ro) => roundLocal(priceLocalFor(cc, cost, Object.assign({ weightG: wg }, ro)), rg.priceUnit || 1);
+        const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0">
+          <span style="width:34px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
+          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1;min-width:120px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
+          <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:74px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
+          <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
+          <input class="eb-stock" value="1" inputmode="numeric" title="在庫" style="width:52px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
+          <span class="eb-st" style="width:80px;flex:none;font-size:10.5px;color:#8a8f98"></span>
+          <button class="eb-del" title="この行を外す" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:10px;padding:2px 6px;cursor:pointer">✕</button>
+        </div>`;
+        let rows = [];
+        const draw = () => {
+          if (!bx) return;
+          bx.innerHTML = rows.length
+            ? rows.map(rowHtml).join('') + `<div style="margin-top:7px"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button> <span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
+            : '';
+          bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', () => { rows.splice(+b4.closest('.ed-brow').dataset.i, 1); draw(); }));
+          bx.querySelectorAll('.eb-cost').forEach(inp => inp.addEventListener('input', () => {
+            const row = inp.closest('.ed-brow'); const c = parseFloat((inp.value || '').replace(/[^\d.]/g, ''));
+            const pe = row.querySelector('.eb-price'); if (c > 0 && pe) pe.value = calc(c, wDefB(), roiB());
+          }));
+          const ba = bx.querySelector('.ed-bulkadd');
+          if (ba) ba.addEventListener('click', async () => {
+            if (!needOfficial()) return;
+            const list = [...bx.querySelectorAll('.ed-brow')].map(rw => ({
+              name: (rw.querySelector('.eb-name').value || '').trim(),
+              price: (rw.querySelector('.eb-price').value || '').trim(),
+              stock: (rw.querySelector('.eb-stock').value || '').trim() || '1',
+              image: rows[+rw.dataset.i] ? rows[+rw.dataset.i].image : '', el: rw
+            }));
+            const bad2 = list.filter(x => !x.name || !(parseFloat(x.price) > 0));
+            if (bad2.length) { alert('明細名と価格が入っていない行があります（' + bad2.length + '件）'); return; }
+            const gwB = await guardWriteCountries([cc]); if (!gwB.ok) { alert(gwB.msg); return; }
+            if (!confirm('書込先: ' + gwB.summary + '\n\n' + cc + ' の item ' + itemId + ' に ' + list.length + ' 件の明細を追加します:\n\n'
+              + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
+            ba.disabled = true;
+            let ok2 = 0;
+            for (const x of list) {
+              const st = x.el.querySelector('.eb-st');
+              if (st) { st.style.color = '#8a8f98'; st.textContent = '登録中…'; }
+              try {
+                await openapiAddVariation(sidCat, itemId, { option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' });
+                ok2++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ 追加'; }
+                x.el.style.background = '#f2fbf4';
+              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(e.message).slice(0, 18); } }
+              ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
+            }
+            markStale();
+            ba.disabled = false; ba.textContent = '② 完了：' + ok2 + '/' + list.length + '件';
+            try { logAct('出品', '明細一括追加', repName || '', cc + ' ' + ok2 + '件'); } catch (_) {}
+            toast('✓ ' + ok2 + '件の明細を追加しました（画面を開き直すと反映されます）');
+          });
+        };
+        if (bl) bl.addEventListener('click', async () => {
+          const urls = (bt.value || '').split(/\r?\n/).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x));
+          if (!urls.length) { alert('仕入元URLを1行に1つずつ貼ってください'); return; }
+          bl.disabled = true; rows = [];
+          const wg = wDefB(), ro = roiB();
+          for (let i2 = 0; i2 < urls.length; i2++) {
+            const u = urls[i2];
+            if (bm) bm.textContent = '取り込み中… ' + (i2 + 1) + '/' + urls.length;
+            const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
+            let name = '', cost = 0, image = quick || '';
+            try {
+              const meta = await openapiFetchMeta(u);
+              cost = meta.price || 0;
+              if (meta.image && !image) image = meta.image;
+              name = String(meta.title || '').replace(/\s*[-|｜]\s*メルカリ.*$/, '').trim().slice(0, 30);
+            } catch (e) { if (bm) bm.textContent = 'URL読み取りに失敗した行があります: ' + e.message; }
+            rows.push({ url: u, name, cost, image, price: cost > 0 ? calc(cost, wg, ro) : '' });
+          }
+          if (bm) bm.textContent = urls.length + '件を取り込みました。名前・価格を確認して「②まとめて追加」';
+          bl.disabled = false; draw();
+        });
+      }
       let addedN = 0;
       { const ab = body.querySelector('.ed-addvar');
         if (ab) ab.addEventListener('click', async () => {
