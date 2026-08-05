@@ -11760,7 +11760,7 @@ create index if not exists listing_log_ymd_idx on listing_log (ymd);
 alter table listing_log enable row level security;
 drop policy if exists "listing_log all" on listing_log;
 create policy "listing_log all" on listing_log for all using (true) with check (true);`;
-  const logState = { rows: null, day: null, days: 90, goal: null, loading: false, missing: false };
+  const logState = { rows: null, day: null, days: 90, goal: null, loading: false, missing: false, liveOnly: false };
   async function syncListingLog() {
     if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定のservice_roleキー）');
     const [live, known] = await Promise.all([
@@ -11823,8 +11823,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       host.querySelector('#llog-retry').addEventListener('click', () => { logState.rows = null; renderListingLog(); });
       return;
     }
-    const rows = logState.rows || [];
     const today = jstDate(Date.now());
+    // ★「その日に記録された」行＝記録日と出品日が一致（＝運用開始後にリアルタイムで拾った分）。
+    //   初回取り込みで過去に振り分けた分は日付が推定なので、切り替えで外せるようにする。
+    const allRows = logState.rows || [];
+    const isLive = (r) => jstDate(r.created_at) === String(r.ymd || '').slice(0, 10);
+    const backfillN = allRows.filter(r => !isLive(r)).length;
+    const rows = logState.liveOnly ? allRows.filter(isLive) : allRows;
     const byDay = new Map();
     rows.forEach(r => { const d = String(r.ymd || '').slice(0, 10); if (!d) return; if (!byDay.has(d)) byDay.set(d, []); byDay.get(d).push(r); });
     const cnt = (d) => (byDay.get(d) || []).length;
@@ -11841,17 +11846,21 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const monthPrefix = today.slice(0, 7);
     const monthN = rows.filter(r => String(r.ymd || '').startsWith(monthPrefix)).length;
     const best = days.reduce((mx, d) => Math.max(mx, cnt(d)), 0);
-    const maxBar = Math.max(best, goal, 1);
+    // ★初回取り込みの日は数千件になり、そのまま最大値にすると他の日が全部つぶれて見えない。
+    //   0件を除いた90パーセンタイルを目盛りにし、超えた日は頭打ち＋▲で示す。
+    const nz = days.map(cnt).filter(n => n > 0).sort((a, b) => a - b);
+    const p90 = nz.length ? nz[Math.min(nz.length - 1, Math.floor(nz.length * 0.9))] : 0;
+    const maxBar = Math.max(p90, goal, 1);
     const pct = Math.min(100, Math.round(todayN / Math.max(1, goal) * 100));
     const sel = logState.day || today;
     const selRows = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
     const ccColor = (cc) => (regionByCc(cc) || {}).color || '#888';
     const bars = days.map(d => {
-      const n = cnt(d), h = Math.round(n / maxBar * 74);
+      const n = cnt(d), over = n > maxBar, h = Math.round(Math.min(n, maxBar) / maxBar * 74);
       const isToday = d === today, isSel = d === sel;
       const col = n === 0 ? '#eee' : (n >= goal ? '#1a7f37' : '#f0a35e');
-      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
-        ${n ? `<span style="font-size:8px;color:#8a8f98;line-height:1">${n}</span>` : ''}
+      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
+        ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}</span>` : ''}
         <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${col};border-radius:2px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span></div>`;
     }).join('');
     const kpi = (label, val, sub, color) => `<div style="flex:1;min-width:118px;border:1px solid #ececec;border-radius:9px;padding:9px 11px;background:#fff">
@@ -11877,11 +11886,12 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <button class="smd-btn" id="llog-sync" style="border-color:#3b5bdb;color:#3b5bdb;font-weight:700">🔄 いま反映（新しく出した分を取り込む）</button>
         <span class="smd-seg">${[30, 90, 180, 365].map(d => `<button class="llog-range${logState.days === d ? ' on' : ''}" data-d="${d}" style="${logState.days === d ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${d}日</button>`).join('')}</span>
         <button class="smd-btn" id="llog-csv" style="font-size:11.5px">⬇️ CSV</button>
+        ${backfillN ? `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#5a6b8c" title="初回取り込みでShopeeの出品日から振り分けた分（明細ごとの正確な日付ではありません）を集計から外します"><input type="checkbox" id="llog-live"${logState.liveOnly ? ' checked' : ''}> 初回取り込み分（${backfillN.toLocaleString()}件・≈推定日）を除く</label>` : ''}
         <span class="smd-dim" id="llog-msg" style="font-size:11px"></span>
       </div>
       <div style="border:1px solid #ececec;border-radius:9px;padding:9px 10px 5px;background:#fff">
         <div style="display:flex;gap:1px;align-items:flex-end">${bars}</div>
-        <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件　クリックでその日の商品</span><span>${days[days.length - 1]}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
       </div>
       <div style="margin-top:12px">
         <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>
@@ -11898,6 +11908,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       </div>`;
     host.querySelectorAll('.llog-bar').forEach(b => b.addEventListener('click', () => { logState.day = b.dataset.d; renderListingLog(); }));
     host.querySelectorAll('.llog-range').forEach(b => b.addEventListener('click', () => { logState.days = +b.dataset.d; renderListingLog(); }));
+    { const lv = host.querySelector('#llog-live'); if (lv) lv.addEventListener('change', () => { logState.liveOnly = lv.checked; renderListingLog(); }); }
     { const g = host.querySelector('#llog-goal');
       if (g) g.addEventListener('change', async () => {
         const v = Math.max(1, parseInt(g.value, 10) || 1); logState.goal = v;
