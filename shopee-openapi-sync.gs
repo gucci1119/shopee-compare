@@ -261,6 +261,26 @@ function doGet(e) {
       } catch (err) { cout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ccb + '(' + JSON.stringify(cout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★👁閲覧/❤️いいね/🛒販売数を今すぐ取り直す（ポータルの「統計を更新」ボタン用）。WRITE_TOKEN必須。
+    if (p.action === 'run_stats') {
+      var rscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rsout;
+      try {
+        var rswt = P_().getProperty('WRITE_TOKEN');
+        if (!rswt || p.token !== rswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var rslog;
+        if (p.shop_id) {
+          var rstk = listTokens_().filter(function (t) { return String(t.shop_id) === String(p.shop_id); })[0];
+          if (!rstk) throw new Error('未認可 shop_id=' + p.shop_id);
+          rslog = [syncListingStatsForShop_(rstk)];
+          ufPersist_();
+        } else {
+          rslog = syncListingStats();
+        }
+        rsout = { ok: true, action: 'run_stats', log: rslog };
+      } catch (err) { rsout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(rscb + '(' + JSON.stringify(rsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
@@ -2198,6 +2218,9 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
+  // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
+  //   👁閲覧/❤️いいね/🛒販売数(listing_stats)の同期だけ復活せず、ずっと0のままになる（実際に発生）。
+  ScriptApp.newTrigger('syncListingStats').timeBased().everyHours(6).create();
   Logger.log('✅ トリガー設定'); return 'ok';
 }
 
