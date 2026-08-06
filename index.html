@@ -1174,8 +1174,12 @@
     return bridgeAvailable;
   }
 
-  // ---------------- JSONP（GASスナップショット読み取り: ブリッジ不要） ----------------
-  function jsonp(url, timeoutMs) {
+  // ---------------- GAS読み取り（旧JSONP。中身は fetch 優先） ----------------
+  // ★<script>タグ方式(JSONP)は、GASが404やHTMLを返したときに onerror しか発火せず、
+  //   画面には「GAS読み込みエラー」としか出ない（再デプロイ直後の伝播中に頻発）。
+  //   fetch なら HTTP ステータスと本文で理由が分かり、一時的な失敗は1回リトライで拾える。
+  //   CORS が通らない相手だけ、従来のスクリプト注入にフォールバックする。
+  function jsonpScript(url, timeoutMs) {
     return new Promise((resolve, reject) => {
       const cb = '__smdJsonp' + (++reqSeq);
       const cleanup = () => { delete window[cb]; s.remove(); };
@@ -1186,6 +1190,34 @@
       s.onerror = () => { clearTimeout(timer); cleanup(); reject(new Error('GAS読み込みエラー')); };
       document.head.appendChild(s);
     });
+  }
+  async function jsonp(url, timeoutMs) {
+    const tmo = timeoutMs || 15000;
+    const full = url + (url.includes('?') ? '&' : '?') + 'callback=cb';
+    let lastErr = null, corsFail = false;
+    for (let att = 0; att < 2; att++) {
+      const ac = new AbortController();
+      const tm = setTimeout(() => ac.abort(), tmo);
+      try {
+        const r = await fetch(full, { signal: ac.signal, credentials: 'omit' });
+        const t = await r.text();
+        const body = t.trim().replace(/^\/\*\*\//, '');
+        // cb({...}) / 任意のコールバック名 / 生JSON のどれでも読めるように
+        const m = /^[\w$.]+\(([\s\S]*)\)\s*;?$/.exec(body);
+        if (m) { try { return JSON.parse(m[1]); } catch (_) {} }
+        try { return JSON.parse(body); } catch (_) {}
+        lastErr = new Error('GASがJSONを返しませんでした（HTTP ' + r.status + '・再デプロイ直後の伝播中かも）');
+      } catch (e) {
+        if (/Failed to fetch|NetworkError|CORS/i.test(String(e && e.message))) { corsFail = true; break; }
+        lastErr = (e && e.name === 'AbortError') ? new Error('GAS接続タイムアウト') : e;
+      } finally { clearTimeout(tm); }
+      if (att === 0) await new Promise(r2 => setTimeout(r2, 400));
+    }
+    // CORS不可・本文が読めない相手は従来のスクリプト注入で（想定外の応答形式でも動くように）
+    if (corsFail || (lastErr && /JSONを返しませんでした/.test(lastErr.message))) {
+      try { return await jsonpScript(url, tmo); } catch (e2) { throw lastErr || e2; }
+    }
+    throw lastErr || new Error('GAS呼び出しに失敗');
   }
 
   // ★GAS呼び出しは fetch で行う。JSONPはGASが404/HTMLを返すと onerror だけで理由が分からず
