@@ -13962,15 +13962,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★この関数は host.innerHTML を丸ごと書き換える＝検索欄も作り直される。
     //   そのままだと入力途中でフォーカスが飛び、続きが打てない（2〜3文字で止まって見える）。
     //   書き換え前にフォーカス位置を覚えて、描画が終わってから戻す。
+    //   ※裏で走っている読み込み（台帳・stats等）も完了時に再描画するので、activeElement を見るだけでは
+    //     「1回目で外れた後の2回目以降」に戻せない。入力中は lst._focusBack に覚えておいて毎回戻す。
     const _fa = document.activeElement;
-    const _faId = (_fa && _fa.id && host.contains(_fa)) ? _fa.id : null;
-    const _faS = _faId ? _fa.selectionStart : null, _faE = _faId ? _fa.selectionEnd : null;
-    if (_faId) setTimeout(() => {
-      const el = document.getElementById(_faId);
-      if (!el || el === document.activeElement) return;
-      el.focus();
-      try { if (_faS != null) el.setSelectionRange(_faS, _faE); } catch (_) {}
-    }, 0);
+    if (_fa && _fa.id && host.contains(_fa) && /^(INPUT|TEXTAREA)$/.test(_fa.tagName)) {
+      lst._focusBack = { id: _fa.id, s: _fa.selectionStart, e: _fa.selectionEnd, ts: Date.now() };
+    }
+    { const fb = lst._focusBack;
+      if (fb && Date.now() - fb.ts < 8000) setTimeout(() => {
+        const el = document.getElementById(fb.id);
+        if (!el || el === document.activeElement) return;
+        el.focus();
+        try { if (fb.s != null) el.setSelectionRange(fb.s, fb.e); } catch (_) {}
+      }, 0);
+    }
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '出品データはGASが自動同期しています（約30分ごと・数店ずつ）。ここは最新のDBを取り直します'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
@@ -14075,7 +14080,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.page = 1; drawListingStatus(); });
     // 入力値はそのまま持つ（trimすると value 差し替えでカーソルが動く）。絞り込み側で trim する。
-    let t; document.getElementById('lst-search').addEventListener('input', e => { const v = e.target.value; clearTimeout(t); t = setTimeout(() => { if (lst.search === v) return; lst.search = v; lst.page = 1; drawListingStatus(); }, 250); });
+    { const se = document.getElementById('lst-search');
+      let t;
+      se.addEventListener('input', e => {
+        const v = e.target.value;
+        lst._focusBack = { id: 'lst-search', s: e.target.selectionStart, e: e.target.selectionEnd, ts: Date.now() };
+        clearTimeout(t);
+        t = setTimeout(() => { if (lst.search === v) return; lst.search = v; lst.page = 1; drawListingStatus(); }, 250);
+      });
+      // 検索欄から自分で離れたら復元をやめる（他を触っているのに勝手に戻らないように）
+      se.addEventListener('blur', () => { setTimeout(() => { const a = document.activeElement; if (a && a.id !== 'lst-search' && a.tagName !== 'BODY') lst._focusBack = null; }, 0); });
+    }
     { const seg = document.getElementById('lst-pub'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.pub = b.dataset.p; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-sort'); if (s) s.addEventListener('change', () => { lst.sort = s.value; if (lst.sort && !lst.sortDir) lst.sortDir = (lst.sort === 'name') ? 'asc' : 'desc'; lst.page = 1; drawListingStatus(); }); }
     // ヘッダー列クリックで並び替え（同じ列を再クリックで昇順⇄降順・数値列は既定降順/名前は昇順）
