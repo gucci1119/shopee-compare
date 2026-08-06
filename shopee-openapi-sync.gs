@@ -286,6 +286,14 @@ function doGet(e) {
       var gaout;
       try {
         var gashop = parseInt(p.shop_id, 10); if (!getToken_(gashop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        if (p.raw === '1') {
+          // ★属性名が '#100130' のままになる原因を実データで確かめるための生ダンプ。
+          //   get_attributes / get_attribute_tree の両方をそのまま返す（推測で直さないため）。
+          var rawA = null, rawT = null;
+          try { rawA = callShop_(gashop, '/api/v2/product/get_attributes', { category_id: parseInt(p.category_id, 10), language: p.language || 'en' }, 'get'); } catch (e1) { rawA = { _error: String(e1 && e1.message || e1) }; }
+          try { rawT = callShop_(gashop, '/api/v2/product/get_attribute_tree', { category_id_list: String(p.category_id), language: p.language || 'en' }, 'get'); } catch (e2) { rawT = { _error: String(e2 && e2.message || e2) }; }
+          gaout = { ok: true, raw: { get_attributes: rawA, get_attribute_tree: rawT } };
+        } else
         gaout = { ok: true, data: getAttributeTree_(gashop, p.category_id, p.language) };
       } catch (err) { gaout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gacb + '(' + JSON.stringify(gaout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
