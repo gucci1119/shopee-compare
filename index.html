@@ -2131,11 +2131,12 @@
     const items = [];
     (lst.byCc[cc] || []).forEach(r => {
       const ms = Array.isArray(r.models) ? r.models : (() => { try { return JSON.parse(r.models || '[]'); } catch (_) { return []; } })();
-      if (ms.length) ms.forEach(m => { if (m.n) items.push({ t: m.n, item_id: r.item_id, name: r.name }); });
-      else if (r.name) items.push({ t: r.name, item_id: r.item_id, name: r.name });
+      if (ms.length) ms.forEach(m => { if (m.n) items.push({ t: m.n, item_id: r.item_id, name: r.name, img: m.img || r.image || '' }); });
+      else if (r.name) items.push({ t: r.name, item_id: r.item_id, name: r.name, img: r.image || '' });
     });
     const inv = new Map(), df = new Map(), tinv = new Map();
     items.forEach((x, i) => {
+      x.cg = simGrams(x.name); x.ck = simTokens(x.name);   // カタログ名の指紋（商品の種類が同じかの判定に使う）
       x.g = simGrams(x.t);
       x.g.forEach(gr => { let a = inv.get(gr); if (!a) inv.set(gr, a = []); if (a.length < 400) a.push(i); });
       x.k = simTokens(x.t);
@@ -2144,8 +2145,12 @@
     return (simIdx[cc] = { items, inv, df, tinv, N: items.length });
   }
   // クエリに似た既存出品を1件返す（しきい値以上のうち最良）
-  function simFind(cc, text, min) {
+  // ★カタログ＝商品の種類（例「たまごっちのゲーム」「たまごっちのチャーム」）、明細＝キャラ、という構造。
+  //   別カタログの同名キャラは"別物"なので、カタログ名も似ている時だけ重複候補にする。
+  //   selfItemId を渡すと、同じカタログ内は明細名だけで判定（種類は当然同じなので）。
+  function simFind(cc, text, min, catTitle, selfItemId) {
     const ix = simIndexFor(cc); if (!ix.items.length) return null;
+    const cg = catTitle ? simGrams(catTitle) : null, ckq = catTitle ? simTokens(catTitle) : null;
     const g = simGrams(text), k = simTokens(text);
     if (g.size < 3 && k.size < 1) return null;
     // 候補を絞る：文字並びが近いもの＋同じ単語を含むもの、の両方から
@@ -2156,11 +2161,19 @@
     let best = null;
     cand.forEach(([i]) => {
       const it = ix.items[i];
+      const isSelf = selfItemId != null && String(it.item_id) === String(selfItemId);
+      // 別カタログなら「そもそも同じ種類の商品か」を先に見る。ゲームとチャームは別物。
+      let catSim = 1;
+      if (!isSelf && cg) {
+        let tk = 0; if (ckq && ckq.size && it.ck && it.ck.size) { let hit = 0; ckq.forEach(w => { if (it.ck.has(w)) hit++; }); tk = hit / Math.min(ckq.size, it.ck.size); }
+        catSim = Math.max(simDice(cg, it.cg), tk);
+        if (catSim < 0.55) return;                       // 種類が違う＝重複ではない
+      }
       const d = simDice(g, it.g);
       // 「言い当てている単語」がどれだけ重なるか。タイトルの書き方が違っても効く
       const c = Math.min(simCover(k, it.k, ix.df, ix.N), simCover(it.k, k, ix.df, ix.N));
       const sc = Math.max(d, c * 0.97);
-      if (!best || sc > best.score) best = { score: sc, how: (c * 0.97 > d ? 'word' : 'text'), ...it };
+      if (!best || sc > best.score) best = { score: sc, how: (c * 0.97 > d ? 'word' : 'text'), catSim: Math.round(catSim * 100), self: isSelf, img: it.img, ...it };
     });
     return (best && best.score >= (min || 0.72)) ? best : null;
   }
@@ -2171,6 +2184,43 @@
     let c = 0;
     if (ka.size && kb.size) { let hit = 0; ka.forEach(w => { if (kb.has(w)) hit++; }); c = hit / Math.min(ka.size, kb.size); }
     return Math.max(d, c * 0.95);
+  }
+  // 画像の指紋（dHash 8x8＝64bit）。縮小して隣り合う明るさの大小だけを見るので、
+  // 圧縮・多少のリサイズ・色味の違いには強い。ただし別の人が撮った別カットは一致しない。
+  async function imgHash(dataUrl) {
+    return new Promise((res) => {
+      const im = new Image();
+      im.onload = () => {
+        try {
+          const c = document.createElement('canvas'); c.width = 9; c.height = 8;
+          const x = c.getContext('2d', { willReadFrequently: true });
+          x.drawImage(im, 0, 0, 9, 8);
+          const d = x.getImageData(0, 0, 9, 8).data;
+          const g = []; for (let i = 0; i < 72; i++) { const p = i * 4; g.push(0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]); }
+          let bits = '';
+          for (let y = 0; y < 8; y++) for (let xx = 0; xx < 8; xx++) bits += (g[y * 9 + xx] > g[y * 9 + xx + 1]) ? '1' : '0';
+          res(bits);
+        } catch (_) { res(null); }
+      };
+      im.onerror = () => res(null);
+      im.src = dataUrl;
+    });
+  }
+  const hashSim = (a, b) => { if (!a || !b || a.length !== b.length) return 0; let same = 0; for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++; return same / a.length; };
+  // URL群 → 指紋。ShopeeのCDNはブラウザ直取りを弾くのでGAS経由でまとめて取る
+  async function hashesFor(urls) {
+    const out = new Array(urls.length).fill(null);
+    for (let i = 0; i < urls.length; i += 8) {
+      const chunk = urls.slice(i, i + 8);
+      let got = [];
+      try { got = await fetchImgsViaGas(chunk); } catch (_) { got = []; }
+      for (let k = 0; k < chunk.length; k++) {
+        const r = got[k]; if (!r) continue;
+        let bin = ''; const b = r.bytes; for (let j = 0; j < b.length; j += 1024) bin += String.fromCharCode.apply(null, b.subarray(j, j + 1024));
+        out[i + k] = await imgHash('data:' + (r.mime || 'image/jpeg') + ';base64,' + btoa(bin));
+      }
+    }
+    return out;
   }
   // ---------------- 🔁 重複出品の見張り（仕入元URL台帳） ----------------
   // ★同じ商品を2回出すのを防ぐ最も確実な手がかりは「仕入元URL」。画像の見た目より確実で軽い。
@@ -10447,7 +10497,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>
           <div style="margin:6px 0 2px;border:1px dashed #f0c4bd;border-radius:8px;padding:8px 10px;background:#fffaf9">
             <div style="font-size:11.5px;font-weight:700;color:#c0392b">🔁 重複チェック（もう出している分）</div>
-            <div class="smd-dim" style="font-size:10.5px;margin:2px 0 6px">このカタログの明細どうし、および<b>${cc}の別カタログ</b>と見比べて、同じ商品が二重に出ていないか探します。名前の似具合で判定するので<b>候補</b>です。</div>
+            <div class="smd-dim" style="font-size:10.5px;margin:2px 0 6px">このカタログの明細どうし、および<b>${cc}の別カタログ</b>と見比べて、同じ商品が二重に出ていないか探します。<b>別カタログはカタログ名も似ている時だけ</b>候補にします（「〜のゲーム」と「〜のチャーム」で同じキャラ名があっても別物なので）。名前の似具合で判定するので<b>候補</b>です。</div>
             <button class="ed-dupscan smd-btn" style="font-size:11.5px;padding:5px 12px;border-color:#d93025;color:#d93025;font-weight:700">🔁 重複を探す</button>
             <span class="ed-dupmsg smd-dim" style="font-size:11px;margin-left:6px"></span>
             <div class="ed-dupres" style="margin-top:7px"></div>
@@ -10690,8 +10740,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             }
             // (2) 同じ国の別カタログ
             mine.forEach(x => {
-              const f = simFind(cc, x.t, 0.78);
-              if (f && String(f.item_id) !== String(itemId)) hits.push({ kind: 'other', a: x, name: f.t, item_id: f.item_id, cat: f.name, score: Math.round(f.score * 100) });
+              const f = simFind(cc, x.t, 0.78, pi.name || repName || '', itemId);
+              if (f && !f.self) hits.push({ kind: 'other', a: x, name: f.t, item_id: f.item_id, cat: f.name, score: Math.round(f.score * 100), catSim: f.catSim });
             });
             hits.sort((p1, p2) => p2.score - p1.score);
             dsB.disabled = false;
@@ -10699,7 +10749,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (dsM) { dsM.style.color = '#d93025'; dsM.textContent = hits.length + '件の候補'; }
             dsR.innerHTML = '<div style="max-height:220px;overflow:auto;font-size:11px">' + hits.slice(0, 60).map(h => h.kind === 'self'
               ? `<div style="border-top:1px solid #f2e3e1;padding:3px 0"><b style="color:#c0392b">${h.score}%</b>　このカタログ内： <b>${h.a.no}.</b> ${esc(h.a.t)} ／ <b>${h.b.no}.</b> ${esc(h.b.t)}</div>`
-              : `<div style="border-top:1px solid #f2e3e1;padding:3px 0"><b style="color:#e8710a">${h.score}%</b>　<b>${h.a.no}.</b> ${esc(h.a.t)} → 別カタログ「${esc(h.name)}」<span class="smd-dim">（${esc(String(h.cat || '').slice(0, 30))} / item ${h.item_id}）</span></div>`).join('')
+              : `<div style="border-top:1px solid #f2e3e1;padding:3px 0"><b style="color:#e8710a">${h.score}%</b>　<b>${h.a.no}.</b> ${esc(h.a.t)} → 別カタログ<b>「${esc(String(h.cat || '').slice(0, 34))}」</b>の「${esc(h.name)}」<span class="smd-dim">（カタログの近さ ${h.catSim}% / item ${h.item_id}）</span></div>`).join('')
               + (hits.length > 60 ? '<div class="smd-dim" style="padding:4px 0">…ほか' + (hits.length - 60) + '件</div>' : '') + '</div>';
           }, 30);
         }); }
@@ -11133,8 +11183,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
           <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:5px;font-size:11.5px">
           ${r.dup ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この仕入元URLは ${esc(r.dup.cc)} の item ${esc(String(r.dup.i))}／明細「${esc(r.dup.o || '')}」で既に出しています">⚠既出</span>` : ''}
+          ${r.imgSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
           ${r.same ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この中の ${r.same.i}行目「${esc(r.same.name)}」と ${r.same.score}% 一致。同じ商品を2回出そうとしている可能性">⚠${r.same.i}行目と重複</span>`
-            : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ(item ' + esc(String(r.near.item_id)) + ')'}「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : '')}
+            : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ「' + esc(String(r.near.cat || '').slice(0, 34)) + '」(item ' + esc(String(r.near.item_id)) + ')'}の「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : '')}
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:${BW.cost}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:${BW.wg}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:${BW.price}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
@@ -11148,7 +11199,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!bx) return;
           bx.innerHTML = rows.length
             ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px ${BW.img + 5}px"><span style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px">明細名</span><span style="width:${BW.cost}px;flex:none;text-align:right">仕入¥</span><span style="width:${BW.wg}px;flex:none;text-align:right">重量g</span><span style="width:${BW.price}px;flex:none;text-align:right">出品価格</span><span style="width:${BW.stock}px;flex:none;text-align:right">在庫</span><span style="width:${BW.prof}px;flex:none;text-align:right">取れる利益</span><span style="width:${BW.st}px;flex:none">状態</span><span style="width:${BW.del}px;flex:none"></span></div>`
-              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
+              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkimgchk smd-btn" style="font-size:11px;padding:6px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700;${rows.some(r => r.near || r.same) ? '' : 'display:none'}">🔍 画像でも確かめる（候補だけ）</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', () => { rows.splice(+b4.closest('.ed-brow').dataset.i, 1); draw(); }));
           // ★行ごとに「取れる利益 / ROI」を出す。赤字はすぐ分かるように赤で。
@@ -11202,6 +11253,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const r5 = rows[+row.dataset.i], st5 = row.querySelector('.eb-st');
             if (r5 && r5.err && st5) { st5.style.color = '#d93025'; st5.textContent = '✗ 読取失敗'; row.title = r5.url + '\n' + r5.err; }
           });
+          { const ic = bx.querySelector('.ed-bulkimgchk');
+            if (ic) ic.addEventListener('click', async () => {
+              // ★画像で全件を探すのは無理（既存の明細画像が数万枚あり、指紋化に何時間もかかる）。
+              //   タイトルで絞り込んだ候補についてだけ、画像を突き合わせて確度を上げる。
+              const tg = rows.map((r, i) => ({ r, i })).filter(x => x.r.near || x.r.same);
+              if (!tg.length) return;
+              ic.disabled = true;
+              const urls = [];
+              tg.forEach(x => { urls.push(x.r.image || ''); urls.push(x.r.near ? (x.r.near.img || '') : (rows[x.r.same.i - 1] || {}).image || ''); });
+              const idx = urls.map((u, i) => u ? i : -1).filter(i => i >= 0);
+              ic.textContent = '🔍 画像を照合中… 0/' + idx.length;
+              const got = {};
+              for (let i = 0; i < idx.length; i += 8) {
+                const part = idx.slice(i, i + 8);
+                const hs = await hashesFor(part.map(j => urls[j]));
+                part.forEach((j, k) => { got[j] = hs[k]; });
+                ic.textContent = '🔍 画像を照合中… ' + Math.min(i + 8, idx.length) + '/' + idx.length;
+              }
+              tg.forEach((x, n) => {
+                const h1 = got[n * 2], h2 = got[n * 2 + 1];
+                x.r.imgSim = (h1 && h2) ? Math.round(hashSim(h1, h2) * 100) : null;
+              });
+              ic.disabled = false; ic.textContent = '🔍 画像でも確かめる（候補だけ）';
+              draw();
+            }); }
           { const rb = bx.querySelector('.ed-bulkretry');
             if (rb) rb.addEventListener('click', async () => {
               const idx = rows.map((r6, i6) => r6.err ? i6 : -1).filter(i6 => i6 >= 0);
@@ -11387,7 +11463,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             }
             // ★索引はShopeeの明細名（英語）。日本語の元タイトルで引いても当たらないので、
             //   既存出品との照合は「生成した英語名どうし」で行う。行どうしの比較は日本語(src)のままでよい。
-            if (!r.same && r.name) { const f = simFind(cc, r.name, 0.72); if (f) r.near = { name: f.t, item_id: f.item_id, score: Math.round(f.score * 100), self: String(f.item_id) === String(itemId) }; }
+            if (!r.same && r.name) { const f = simFind(cc, r.name, 0.72, pi.name || repName || '', itemId); if (f) r.near = { name: f.t, item_id: f.item_id, cat: f.name, score: Math.round(f.score * 100), self: !!f.self }; }
           });
           const ng = rows.filter(r => r.err).length;
           const dupN = rows.filter(r => r.dup).length;
