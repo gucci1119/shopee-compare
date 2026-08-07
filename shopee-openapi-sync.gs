@@ -545,6 +545,28 @@ function doGet(e) {
       } catch (err) { dvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dvcb + '(' + JSON.stringify(dvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★明細をまとめて追加。1件ずつだと 4往復×件数 かかるので、tier更新1回＋add_model1回にまとめる。
+    //   対象は app_kv 経由（kv=キー名）。job= で進捗を書き戻す。
+    if (p.action === 'add_variations_bulk') {
+      var abcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var about;
+      try {
+        var abwt = P_().getProperty('WRITE_TOKEN');
+        if (!abwt || p.token !== abwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var abshop = parseInt(p.shop_id, 10); if (!getToken_(abshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var abrows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(String(p.kv || '')));
+        var abitems = (abrows && abrows[0] && abrows[0].v && abrows[0].v.items) || [];
+        if (!abitems.length) throw new Error('対象リストが見つかりません');
+        if (p.job) jobSet_(p.job, { status: 'run', pct: 5, step: '準備中' });
+        about = addVariationsBulk_(abshop, p.item_id, abitems, p.job);
+        try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
+        if (p.job) jobSet_(p.job, { status: 'done', result: about, msg: about.added + '件を追加' + (about.skipped ? '（同名で除外' + about.skipped + '）' : '') });
+      } catch (err) {
+        about = { ok: false, error: String((err && err.message) || err) };
+        if (p.job) jobSet_(p.job, /中止/.test(about.error) ? { status: 'cancel', msg: '止めました' } : { status: 'error', error: about.error });
+      }
+      return ContentService.createTextOutput(abcb + '(' + JSON.stringify(about) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'add_variation') {
       var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var vout;
@@ -1162,6 +1184,66 @@ function removeVariation_(shopId, itemId, names) {
     .map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, deleted: names.length, remain: newOpts.length };
+}
+// ★明細をまとめて追加。画像を並列アップロード→tier更新1回→add_model1回。
+//   1件ずつ（画像DL＋upload_image＋get_model_list＋update_tier_variation＋add_model）の4〜5往復×件数を大幅に削減。
+function addVariationsBulk_(shopId, itemId, items, jobKey) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!items || !items.length) throw new Error('対象が空です');
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+  var tier = tiers[0], opts = (tier.option_list || []).map(function (o) { return o.option; });
+  if (opts.length + items.length > 100) throw new Error('明細は1商品100件までです（現在' + opts.length + '件・追加' + items.length + '件）');
+  // ① 画像を並列で取得→media_spaceへ並列アップロード
+  var imgIds = [];
+  for (var i = 0; i < items.length; i += 12) {
+    if (jobCancelled_(jobKey)) throw new Error('中止しました');
+    var part = items.slice(i, i + 12), reqs = [], idx = [];
+    part.forEach(function (x, k) { if (x.image) { reqs.push({ url: x.image, muteHttpExceptions: true, followRedirects: true }); idx.push(i + k); } });
+    if (reqs.length) {
+      var rs = UrlFetchApp.fetchAll(reqs), ureqs = [], uidx = [];
+      rs.forEach(function (r, k2) {
+        if (r.getResponseCode() >= 400) return;
+        var ts = now_(), path = '/api/v2/media_space/upload_image';
+        ureqs.push({ url: HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts),
+                     method: 'post', muteHttpExceptions: true, payload: { image: r.getBlob() } });
+        uidx.push(idx[k2]);
+      });
+      if (ureqs.length) {
+        var urs = UrlFetchApp.fetchAll(ureqs);
+        urs.forEach(function (r3, k3) {
+          try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; } catch (e) {}
+        });
+      }
+    }
+    if (jobKey) jobSet_(jobKey, { pct: 10 + Math.round((i + part.length) / items.length * 40), step: '画像を準備中 ' + Math.min(i + 12, items.length) + '/' + items.length });
+  }
+  // ② tierに全部まとめて追記
+  if (jobKey) jobSet_(jobKey, { pct: 55, step: '明細を追加中' });
+  var optObjs = (tier.option_list || []).map(function (o) { return tierOpt_(o); });
+  var baseLen = optObjs.length, newModels = [], skipped = [];
+  items.forEach(function (x, i2) {
+    var nm = String(x.option || '').trim(); if (!nm) return;
+    if (opts.indexOf(nm) >= 0) { skipped.push(nm); return; }
+    var oo = { option: nm }; if (imgIds[i2]) oo.image = { image_id: imgIds[i2] };
+    optObjs.push(oo); opts.push(nm);
+    var m = { tier_index: [optObjs.length - 1], original_price: parseFloat(x.price), seller_stock: [{ stock: parseInt(x.stock, 10) || 0 }] };
+    if (x.sku) m.model_sku = String(x.sku);
+    newModels.push(m);
+  });
+  if (!newModels.length) throw new Error('追加できる明細がありません（同名が既にある等）');
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
+  // ③ 価格・在庫をまとめて登録。失敗したら足したオプションを巻き戻す（空の明細を残さない）
+  if (jobKey) jobSet_(jobKey, { pct: 80, step: '価格・在庫を登録中 ' + newModels.length + '件' });
+  try {
+    addModel_(shopId, itemId, newModels);
+  } catch (eAdd) {
+    try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
+    throw eAdd;
+  }
+  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10) };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {

@@ -11361,35 +11361,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const gwB = await guardWriteCountries([cc]); if (!gwB.ok) { alert(gwB.msg); return; }
             if (!confirm('書込先: ' + gwB.summary + '\n\n' + cc + ' の item ' + itemId + ' に ' + list.length + ' 件の明細を追加します:\n\n'
               + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
-            ba.disabled = true; bAbort = false;
-            const sb2 = bx.querySelector('.ed-bulkstop2');
-            if (sb2) { sb2.style.display = ''; sb2.textContent = '■ 中断'; sb2.onclick = () => { bAbort = true; sb2.textContent = '中断中…'; }; }
-            let ok2 = 0;
-            for (const x of list) {
-              if (bAbort) break;
-              const st = x.el.querySelector('.eb-st');
-              if (st && /✓/.test(st.textContent)) { ok2++; continue; }   // 既に登録済みの行は二重登録しない
-              if (st) { st.style.color = '#8a8f98'; st.textContent = '登録中…'; }
-              try {
-                await openapiAddVariation(sidCat, itemId, { option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' });
-                ok2++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ 追加'; }
-                x.el.style.background = '#f2fbf4';
-              } catch (e) {
-                if (st) { st.style.color = '#d93025'; st.textContent = '✗ 失敗'; st.title = String(e.message); }
-                // 失敗の理由は列を崩さないよう、その行の下に全文で出す
-                let er = x.el.querySelector('.eb-err');
-                if (!er) { er = document.createElement('div'); er.className = 'eb-err'; er.style.cssText = 'flex:1 1 100%;margin-left:' + (BW.img + 5) + 'px;font-size:10.5px;color:#d93025;line-height:1.5;white-space:normal'; x.el.appendChild(er); }
-                er.textContent = String(e.message);
-              }
-              ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
-            }
-            // 出したものは仕入元URL台帳に記録＝次に同じURLを貼ったら警告できる
-            try { await srcMapAdd(list.map((x, i9) => ({ url: (rows[+x.el.dataset.i] || {}).url, cc, item_id: itemId, opt: x.name })).filter(e => e.url)); } catch (_) {}
-            markStale();
-            if (sb2) sb2.style.display = 'none';
-            ba.disabled = false; ba.textContent = (bAbort ? '② 中断：' : '② 完了：') + ok2 + '/' + list.length + '件';
-            try { logAct('出品', '明細一括追加', repName || (pi.name || ''), cc + ' ' + ok2 + '/' + list.length + '件追加 → ' + list.filter(x => /✓/.test((x.el.querySelector('.eb-st') || {}).textContent || '')).map(x => x.name + '(' + (rg.cur || '') + x.price + '・在庫' + x.stock + ')').join(' / ')); } catch (_) {}
-            toast('✓ ' + ok2 + '件の明細を追加しました（画面を開き直すと反映されます）');
+            ba.disabled = true;
+            // ★しごと化＋GAS側で一括処理。1件ずつだと 4〜5往復×件数 かかっていた（62件で数分）。
+            const items2 = list.map(x => ({ option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' }));
+            const kv2 = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
+            try {
+              await sbUpsert('app_kv', [{ k: kv2, v: { items: items2 }, updated_at: new Date().toISOString() }]);
+              const key2 = await jobRemoteCreate('addvar', '明細をまとめて追加', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items2.length + '件）');
+              JOB_T0[key2] = Date.now();
+              JOB_MIRROR[key2] = (v) => {
+                if (!ba || !ba.isConnected) return;
+                if (v.status === 'done') { ba.disabled = false; ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100); markStale(); delete JOB_MIRROR[key2]; return; }
+                if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + (v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
+                ba.innerHTML = '② 追加中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key2, v.pct || 0), '#3b5bdb');
+              };
+              jobPollStart();
+              gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv2, job: key2 }, 600000))
+                .catch(e => jobRemoteFail(key2, e && e.message));
+              ba.innerHTML = '② 追加中 ' + jobBar(0, 'しごとに積みました（この画面は閉じてOK）', '#3b5bdb');
+              try { await srcMapAdd(list.map(x => ({ url: (rows[+x.el.dataset.i] || {}).url, cc, item_id: itemId, opt: x.name })).filter(e => e.url)); } catch (_) {}
+              try { logAct('出品', '明細一括追加', repName || (pi.name || ''), cc + ' ' + items2.length + '件 → ' + items2.map(x => x.option + '(' + (rg.cur || '') + x.price + ')').join(' / ')); } catch (_) {}
+              markStale();
+            } catch (e) { ba.disabled = false; alert('追加の登録に失敗: ' + e.message); }
           });
         };
         // ★Shopeeは同じ明細名を2つ持てない（「その明細は既に存在します」で弾かれる）。
