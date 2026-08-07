@@ -1368,6 +1368,15 @@
     if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('画像アップロード失敗 ' + res.status + '（バケット listing-imgs が未作成/非公開かも）: ' + t.slice(0, 100)); }
     return SB_URL + '/storage/v1/object/public/listing-imgs/' + path;
   }
+  // 任意のファイル（動画など）を Supabase Storage(listing-imgs) に上げて公開URLを返す
+  async function uploadFileToStorage(file, tag) {
+    if (!settings.sbSecret) throw new Error('書き込みキー(sbSecret)が未設定です（⚙️設定）');
+    const ext = ((file.name || '').split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+    const path = 'vid/' + Date.now() + '_' + (tag || 0) + '_' + Math.random().toString(36).slice(2, 7) + '.' + ext;
+    const res = await fetch(SB_URL + '/storage/v1/object/listing-imgs/' + path, { method: 'POST', headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret, 'content-type': file.type || 'application/octet-stream', 'x-upsert': 'true' }, body: file });
+    if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('アップロード失敗 ' + res.status + ': ' + t.slice(0, 100)); }
+    return SB_URL + '/storage/v1/object/public/listing-imgs/' + path;
+  }
   // 混在した画像URL配列を「全てhttp(s)」に解決（httpはそのまま／data:はStorageへ上げてURL化）
   async function resolveImgsForApi(imgs) {
     const out = [];
@@ -1437,6 +1446,8 @@
       ? dfields.filter(f => f.field_type === 'text').map(f => f.text || '').join('\n')
       : (base.description || '');
     const descEditable = descType !== 'extended' || dfields.every(f => f.field_type === 'text');
+    // 商品動画（Shopeeは1本まで）。url/thumbnailは表示用
+    const vi = (base.video_info || [])[0] || null;
     const po = base.pre_order || {};
     const img = base.image || {};
     return {
@@ -1445,6 +1456,7 @@
       description: descText,                                     // ★説明文（normal/extended 両対応）
       description_type: descType,
       description_editable: descEditable,
+      video: vi ? { url: vi.video_url || '', thumb: (vi.thumbnail_url || (vi.thumbnail || {}).url || ''), duration: vi.duration || 0 } : null,
       images: (img.image_url_list || []).slice(),                // ★画像URL（表示・並べ替え用）
       image_ids: (img.image_id_list || []).slice(),              // ★画像ID（変更なしの判定用）
       parent_sku: base.item_sku || '',
@@ -10268,6 +10280,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>
           ${pi._src === 'api' ? '' : '<div class="smd-dim" style="font-size:10.5px;color:#a8650a;margin-top:3px">⚠️ ブリッジ読込のため画像は編集できません（⚙️OpenAPI設定を入れると編集可）</div>'}
         </div>
+        <div style="margin-top:12px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
+          <div style="font-weight:700;color:#3b5bdb;font-size:12px">🎬 商品動画（Shopeeは1本まで）</div>
+          <div class="smd-dim" style="font-size:10.5px;margin:2px 0 6px">mp4・<b>最大30MB</b>・<b>10〜60秒</b>。差し替えると前の動画は置き換わります。<b>Shopee側の変換に30秒〜2分</b>かかるので、しごとセンターで進みます。</div>
+          <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+            <span class="ed-vidnow" style="font-size:11.5px;color:#444">${pi.video && pi.video.url ? `<a href="${esc(pi.video.url)}" target="_blank" rel="noopener" style="color:#1565c0">▶ 今の動画を見る</a>${pi.video.duration ? ' <span class="smd-dim">' + pi.video.duration + '秒</span>' : ''}` : '<span class="smd-dim">動画なし</span>'}</span>
+            <button class="ed-vidup smd-btn" style="font-size:11.5px;padding:5px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">${pi.video && pi.video.url ? '🎬 動画を差し替える' : '🎬 動画をアップロード'}</button>
+            <input type="file" class="ed-vidfile" accept="video/mp4,.mp4" style="display:none">
+            ${pi.video && pi.video.url ? '<button class="ed-viddel smd-btn" style="font-size:11.5px;padding:5px 12px;border-color:#d93025;color:#d93025">🗑 動画を外す</button>' : ''}
+            <span class="ed-vidmsg smd-dim" style="font-size:11px"></span>
+          </div>
+        </div>
         <div style="margin-top:12px">
           <label style="color:#555;font-weight:600">商品説明</label>
           <span class="smd-dim" style="font-size:10.5px">（Shopeeの説明文。改行そのまま反映）</span>
@@ -10483,6 +10506,52 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           dtsEl.value = dtsFor(cc, poEl.checked);
           dtsEl.style.background = '#fffdf5';
           setTimeout(() => { dtsEl.style.background = ''; }, 900);
+        }); }
+      // ---- 🎬 商品動画のアップロード／差し替え／削除 ----
+      { const vb = body.querySelector('.ed-vidup'), vf = body.querySelector('.ed-vidfile'),
+              vd = body.querySelector('.ed-viddel'), vm = body.querySelector('.ed-vidmsg');
+        if (vb && vf) vb.addEventListener('click', () => { if (!needOfficial()) return; vf.click(); });
+        if (vf) vf.addEventListener('change', async () => {
+          const f = (vf.files || [])[0]; vf.value = '';
+          if (!f) return;
+          if (f.size > 30 * 1024 * 1024) { alert('動画は30MBまでです（このファイルは ' + Math.round(f.size / 1048576) + 'MB）'); return; }
+          const gwV = await guardWriteCountries([cc]); if (!gwV.ok) { alert(gwV.msg); return; }
+          if (!confirm('書込先: ' + gwV.summary + '\n\n' + cc + ' の item ' + itemId + ' に動画を設定します。\n' + f.name + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）\n\n※既に動画がある場合は置き換わります。よろしいですか？')) return;
+          if (vb) { vb.disabled = true; vb.textContent = '準備中…'; }
+          try {
+            if (vm) { vm.style.color = '#3b5bdb'; vm.textContent = '動画をアップロードしています…'; }
+            const url = await uploadFileToStorage(f, itemId);
+            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24));
+            JOB_T0[key] = Date.now();
+            JOB_MIRROR[key] = (v) => {
+              if (!vm || !vm.isConnected) return;
+              if (v.status === 'done') { vm.style.color = '#1a7f37'; vm.innerHTML = '✓ 動画を設定しました ' + jobBar(100) + '（開き直すと反映されます）'; if (vb) { vb.disabled = false; vb.textContent = '🎬 動画を差し替える'; } delete JOB_MIRROR[key]; return; }
+              if (v.status === 'error' || v.status === 'cancel') { vm.style.color = '#d93025'; vm.textContent = v.status === 'cancel' ? '止めました' : ('失敗: ' + (v.error || '')); if (vb) { vb.disabled = false; vb.textContent = '🎬 もう一度'; } delete JOB_MIRROR[key]; return; }
+              vm.innerHTML = jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');
+            };
+            jobPollStart();
+            gasSerial(() => gasCall({ action: 'set_item_video', token: settings.writeToken, shop_id: sidCat, item_id: itemId, url, job: key }, 600000))
+              .catch(e => jobRemoteFail(key, e && e.message));
+            markStale();
+            try { logAct('出品', '商品動画', repName || (pi.name || ''), cc + ' 設定（' + f.name + '・' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）'); } catch (_) {}
+          } catch (e) {
+            if (vb) { vb.disabled = false; vb.textContent = '🎬 もう一度'; }
+            if (vm) { vm.style.color = '#d93025'; vm.textContent = '失敗: ' + e.message; }
+          }
+        });
+        if (vd) vd.addEventListener('click', async () => {
+          if (!needOfficial()) return;
+          const gwV2 = await guardWriteCountries([cc]); if (!gwV2.ok) { alert(gwV2.msg); return; }
+          if (!confirm('書込先: ' + gwV2.summary + '\n\n' + cc + ' の item ' + itemId + ' から動画を外します。よろしいですか？')) return;
+          vd.disabled = true; vd.textContent = '…';
+          try {
+            const r = await gasSerial(() => gasCall({ action: 'remove_item_video', token: settings.writeToken, shop_id: sidCat, item_id: itemId }, 90000));
+            if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
+            markStale();
+            try { logAct('出品', '商品動画', repName || (pi.name || ''), cc + ' 削除'); } catch (_) {}
+            if (vm) { vm.style.color = '#1a7f37'; vm.textContent = '✓ 動画を外しました（開き直すと反映されます）'; }
+            vd.remove();
+          } catch (e) { vd.disabled = false; vd.textContent = '🗑 動画を外す'; alert('失敗: ' + e.message); }
         }); }
       // ---- タイトルの文字数（推奨100字・TWだけ60字が上限） ----
       { const nEl3 = body.querySelector('.ed-name'), nC3 = body.querySelector('.ed-namecnt');
