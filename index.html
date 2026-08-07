@@ -1165,6 +1165,19 @@
     if (!title && !image) throw new Error('データが読めませんでした（メルカリ側の仕様変更の可能性）');
     return { url, title, price, currency, image, desc };
   }
+  // ★仕入元サイトの og: を「この端末のブラウザ」から読む（Tampermonkey経由）。
+  //   GAS(=Googleのサーバ)からだと相手サイトにブロックされて読めないことがあるため、その受け皿。
+  //   メルカリ以外（ヤフオク/駿河屋/フリマ等）も og: があれば同じ形で読める。
+  async function metaViaBridge(url) {
+    const html = await bridgeRequest('GET', url, null, { timeout: 20000 });
+    if (!html || html.length < 500) throw new Error('空/短すぎ');
+    const title = metaFromHtml(html, 'og:title').replace(/\s*by メルカリ\s*$/, '').trim();
+    let price = parseInt(String(metaFromHtml(html, 'product:price:amount') || '').replace(/[^0-9]/g, ''), 10) || 0;
+    if (!price) { const mp = html.match(/"price"\s*:\s*"?(\d{2,9})"?/); if (mp) price = parseInt(mp[1], 10) || 0; }
+    const image = metaFromHtml(html, 'og:image');
+    if (!title && !image) throw new Error('og情報なし');
+    return { title, price, image };
+  }
   try { window.__fetchMercari = fetchMercari; } catch (_) {}
   async function detectBridge() {
     for (let i = 0; i < 6 && !bridgeAvailable; i++) {
@@ -11381,7 +11394,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           bx.querySelectorAll('.ed-brow').forEach(row => {
             syncRow(row);
             const r5 = rows[+row.dataset.i], st5 = row.querySelector('.eb-st');
-            if (r5 && r5.err && st5) { st5.style.color = '#d93025'; st5.textContent = '✗ 読取失敗'; row.title = r5.url + '\n' + r5.err; }
+            // ★「✗ 読取失敗」だけだと原因が分からず毎回こちらで調べる羽目になる。理由をその場に出す。
+            if (r5 && r5.err && st5) { st5.style.color = '#d93025'; st5.textContent = '✗ ' + String(r5.err).slice(0, 28); row.title = r5.url + '\n' + r5.err; }
           });
           { const ic = bx.querySelector('.ed-bulkimgchk');
             if (ic) ic.addEventListener('click', async () => {
@@ -11414,13 +11428,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               if (!idx.length) return;
               rb.disabled = true; bAbort = false;
               const wg6 = wDefB(), ro6 = roiB();
-              for (const i6 of idx) {
-                if (bAbort) break;
-                rb.textContent = '↻ 取り直し中… ' + (idx.indexOf(i6) + 1) + '/' + idx.length;
-                const r7 = (await runPool([rows[i6].url]))[0] || { url: rows[i6].url, err: '取得できませんでした' };
+              // ★1件ずつ直列だと19件で数分かかっていた。まとめて（GAS一括→落ちた分は端末ブラウザ）取り直す。
+              rb.textContent = '↻ 取り直し中… ' + idx.length + '件';
+              const got7 = await runPool(idx.map(i6 => rows[i6].url));
+              idx.forEach((i6, k7) => {
+                const r7 = got7[k7]; if (!r7) return;
                 if (r7.cost > 0) r7.price = calc(r7.cost, wg6, ro6);
-                rows[i6] = r7;
-              }
+                r7.wg = rows[i6].wg; rows[i6] = r7;
+              });
               rb.disabled = false; draw();
             }); }
           { const rm = (pred, label) => {
@@ -11511,7 +11526,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const existNames = new Set(((tiers[0] && tiers[0].value_list) || []).map(o => String(o.custom_value || '').trim().toLowerCase()).filter(Boolean));
         const uniqName = (base, taken, limit) => {
           limit = limit || 30;
-          let n = String(base || '').trim().slice(0, limit).trim() || 'Variation';
+          // ★名前が取れていない行に "Variation 8" のような意味のない名前を付けない（そのままShopeeに出てしまう）。
+          //   空のまま返して赤で「名前が空」と出し、②追加の前に必ず手で入れてもらう。
+          let n = String(base || '').trim().slice(0, limit).trim();
+          if (!n) return '';
           if (!taken.has(n.toLowerCase())) { taken.add(n.toLowerCase()); return n; }
           for (let i = 2; i <= 99; i++) {
             const suf = ' ' + i;
@@ -11523,7 +11541,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // 行の名前をまとめて一意化（既存の明細名＋上から順に確定させる）
         const dedupeRows = (list) => {
           const taken = new Set(existNames);
-          list.forEach(r => { r.name = uniqName(r.name, taken); });
+          list.forEach(r => { if (String(r.name || '').trim()) r.name = uniqName(r.name, taken); else r.name = ''; });
           return list;
         };
         // ★1カタログの明細は100件が上限。既存＋追加が超えないよう、貼った時点で残り枠を出す。
@@ -11610,6 +11628,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             fin += chunk.length;
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
           }
+          // ★GAS(=Googleのサーバ)から仕入元サイトを見に行くと相手側にブロックされて読めないことがある
+          //   （2026-08-08 メルカリでほぼ全滅）。落ちた分だけ **この端末のブラウザ経由** で取り直す。
+          //   自分のIP・自分のブラウザなので普通に読める（他サイト取得はブリッジ据え置きの領域）。
+          const ngIdx = out.map((r, i4) => (r && r.err) ? i4 : -1).filter(i4 => i4 >= 0);
+          if (ngIdx.length && !bAbort && await detectBridge()) {
+            let done2 = 0;
+            const tick = () => { if (bm) bm.textContent = 'この端末のブラウザで取り直し中… ' + done2 + '/' + ngIdx.length; };
+            tick();
+            await Promise.all(ngIdx.map(async i4 => {
+              if (bAbort) return;
+              const r = out[i4];
+              try {
+                const m2 = await metaViaBridge(r.url);
+                r.cost = m2.price || 0; r.src = m2.title || ''; if (m2.image && !r.image) r.image = m2.image; r.err = '';
+              } catch (e4) { r.err = r.err + '／端末でも失敗:' + String((e4 && e4.message) || e4).slice(0, 24); }
+              done2++; tick();
+            }));
+          }
           // 名前（英語30字）は端末側でまとめて作る（GASを待たせない）
           for (const r of out) { if (r && r.src && !r.name) r.name = (await suggestVarName(r.src, 30)) || cleanSourceTitle(r.src).slice(0, 30); }
           out.forEach(r => { if (r && r.cost > 0) r.price = calc(r.cost, wg, ro); });
@@ -11629,8 +11665,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           //   ①貼った中どうし（検索結果をそのまま貼ると同じ商品が何個も混ざる）②この国の既存出品
           rows.forEach((r, i) => {
             const ti = r.src || r.name;
+            if (!String(ti || '').trim()) return;   // 読めていない行を「1番と重複」と誤警告しない
             for (let k = 0; k < i; k++) {
-              const sc = simPair(ti, rows[k].src || rows[k].name);
+              const tk = rows[k].src || rows[k].name;
+              if (!String(tk || '').trim()) continue;
+              const sc = simPair(ti, tk);
               if (sc >= 0.75) { r.same = { i: k + 1, rid: ridOf(rows[k]), name: rows[k].name, score: Math.round(sc * 100) }; break; }
             }
             // ★索引はShopeeの明細名（英語）。日本語の元タイトルで引いても当たらないので、
