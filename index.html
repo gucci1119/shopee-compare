@@ -1206,7 +1206,7 @@
         const m = /^[\w$.]+\(([\s\S]*)\)\s*;?$/.exec(body);
         if (m) { try { return JSON.parse(m[1]); } catch (_) {} }
         try { return JSON.parse(body); } catch (_) {}
-        lastErr = new Error('GASがJSONを返しませんでした（HTTP ' + r.status + '・再デプロイ直後の伝播中かも）');
+        lastErr = new Error('GAS応答エラー HTTP ' + r.status + '（他の重い処理が走っていると詰まります。少し待って再実行してください）');
       } catch (e) {
         if (/Failed to fetch|NetworkError|CORS/i.test(String(e && e.message))) { corsFail = true; break; }
         lastErr = (e && e.name === 'AbortError') ? new Error('GAS接続タイムアウト') : e;
@@ -1228,7 +1228,8 @@
     const q = Object.assign({}, params, { callback: 'cb' });
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
-    // ★GASを再デプロイした直後は数秒〜十数秒404を返すことがある（伝播待ち）。
+    // ★Apps Scriptは同一ユーザーのリクエストを直列に処理する。統計更新や注文取得のような
+    //   長い処理が走っていると、その裏で投げた呼び出しが404/タイムアウトで落ちる。
     //   1回だけの再試行だと取りこぼすので3回・間隔を伸ばして粘る。
     let lastErr = '';
     for (let att = 0; att < 3; att++) {
@@ -1238,7 +1239,7 @@
         const r = await fetch(url, { signal: ac.signal, credentials: 'omit' });
         const t = await r.text();
         const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
-        if (!m) { lastErr = 'GASがJSONを返しませんでした（HTTP ' + r.status + '・再デプロイ直後の伝播中かも）'; }
+        if (!m) { lastErr = 'GAS応答エラー HTTP ' + r.status + '（GASは同時に1件しか処理できません。他の重い処理＝統計更新/注文取得などが走っていると詰まります。少し待って再実行してください）'; }
         else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗'; if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
       } catch (e) {
         if (e && e.message && lastErr !== e.message && !/aborted|Failed to fetch/i.test(e.message)) throw e;
