@@ -11333,6 +11333,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // Shopeeは「渡した並びがそのまま新しい画像一覧」になるため、順番＝表示順。保存時にGASがmedia_spaceへ上げてIDに変換する。
       const edImgs = (pi.images || []).slice();
       const imgWrap = body.querySelector('.ed-imgwrap');
+      // ★並べ替え中かどうか。編集画面ぜんぶがファイルのドロップ受け口なので、
+      //   そちらが dropEffect='copy' を上書きすると move のドロップが成立しない（実際に落とせなかった）。
+      let imgDragFrom = null;
       const canEditImg = pi._src === 'api';
       function drawImgs() {
         if (!imgWrap) return;
@@ -11349,13 +11352,39 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // ★つかんで好きな位置まで動かせるように（◀▶は残す。1枚ずつ押すのが面倒なので）
         if (canEditImg) {
           let dragFrom = null;
+          // 並べ替え：セルの隙間に落としても、いちばん近いセルの位置に入れる
+          const dropAt = (clientX) => {
+            const cells = [...imgWrap.querySelectorAll('.ed-imgcell')];
+            if (!cells.length) return 0;
+            for (let k = 0; k < cells.length; k++) {
+              const r = cells[k].getBoundingClientRect();
+              if (clientX < r.left + r.width / 2) return k;
+            }
+            return cells.length;
+          };
+          const doMove = (from, toRaw) => {
+            let to = toRaw;
+            if (to > from) to--;
+            if (!(from >= 0) || to === from || to < 0 || to > edImgs.length - 1) { drawImgs(); return; }
+            const moved = edImgs.splice(from, 1)[0];
+            edImgs.splice(to, 0, moved);
+            drawImgs();
+          };
+          imgWrap.addEventListener('dragover', e => { if (imgDragFrom == null) return; e.preventDefault(); e.stopPropagation(); try { e.dataTransfer.dropEffect = 'move'; } catch (_) {} });
+          imgWrap.addEventListener('drop', e => {
+            if (imgDragFrom == null) return;
+            e.preventDefault(); e.stopPropagation();
+            const from = imgDragFrom; imgDragFrom = null;
+            doMove(from, dropAt(e.clientX));
+          });
           imgWrap.querySelectorAll('.ed-imgcell').forEach(cell => {
             cell.addEventListener('dragstart', e => {
-              dragFrom = +cell.dataset.i;
+              dragFrom = imgDragFrom = +cell.dataset.i;
               cell.style.opacity = '.4';
-              try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(dragFrom)); } catch (_) {}
+              // ★text/plain に数字を入れると、外側の「URLを落として追加」に拾われてしまうので専用の型にする
+              try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('application/x-smd-img', String(dragFrom)); } catch (_) {}
             });
-            cell.addEventListener('dragend', () => { cell.style.opacity = ''; imgWrap.querySelectorAll('.ed-imgcell').forEach(c => { c.style.borderColor = ''; c.style.boxShadow = ''; }); dragFrom = null; });
+            cell.addEventListener('dragend', () => { cell.style.opacity = ''; imgWrap.querySelectorAll('.ed-imgcell').forEach(c => { c.style.borderColor = ''; c.style.boxShadow = ''; }); dragFrom = null; imgDragFrom = null; });
             cell.addEventListener('dragover', e => {
               e.preventDefault();
               try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
@@ -11366,17 +11395,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             });
             cell.addEventListener('dragleave', () => { cell.style.boxShadow = ''; });
             cell.addEventListener('drop', e => {
+              if (imgDragFrom == null && dragFrom == null) return;
               e.preventDefault(); e.stopPropagation();
-              const from = dragFrom != null ? dragFrom : parseInt((() => { try { return e.dataTransfer.getData('text/plain'); } catch (_) { return ''; } })(), 10);
-              if (!(from >= 0)) return;
+              const from = dragFrom != null ? dragFrom : imgDragFrom;
+              imgDragFrom = null;
               let to = +cell.dataset.i;
               const r = cell.getBoundingClientRect();
               if (e.clientX >= r.left + r.width / 2) to++;      // 右半分に落としたら1つ後ろへ
-              if (to > from) to--;                              // 抜いた分の詰まりを補正
-              if (to === from || to < 0 || to > edImgs.length - 1) { drawImgs(); return; }
-              const moved = edImgs.splice(from, 1)[0];
-              edImgs.splice(to, 0, moved);
-              drawImgs();
+              doMove(from, to);
             });
           });
         }
@@ -11428,9 +11454,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const dropZone = body;
         if (dropZone) {
           const stop = e => { e.preventDefault(); e.stopPropagation(); };
-          ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => { stop(e); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; hi(true); }));
+          ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+            // 画像の並べ替え中は copy に上書きしない（copyにするとmoveのドロップが成立しない＝落とせなかった原因）
+            if (imgDragFrom != null) { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; return; }
+            stop(e); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; hi(true);
+          }));
           dropZone.addEventListener('dragleave', e => { if (!dropZone.contains(e.relatedTarget)) hi(false); });
           dropZone.addEventListener('drop', async e => {
+            if (imgDragFrom != null) { imgDragFrom = null; hi(false); return; }   // 並べ替えのドロップはここで処理しない
             stop(e); hi(false);
             const dt = e.dataTransfer; if (!dt) return;
             const files = [...(dt.files || [])].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif)$/i.test(f.name || ''));
