@@ -2186,7 +2186,20 @@
   async function jobRemoteCancel(key) {
     try { const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = (rows && rows[0] && rows[0].v) || {}; v.status = 'cancel'; await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
   }
+  // 呼び出し自体が落ちた時（通信断など）に台帳を実行中のまま放置しない
+  async function jobRemoteFail(key, msg) {
+    try {
+      const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
+      const v = (rows && rows[0] && rows[0].v) || {};
+      if (v.status === 'done') return;                    // GAS側は成功していた（応答だけ届かなかった）
+      v.status = v.status === 'cancel' ? 'cancel' : 'error'; v.error = String(msg || '呼び出しに失敗');
+      await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]);
+    } catch (_) {}
+  }
   async function jobRemoteDelete(key) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(key)); } catch (_) {} }
+  // 自動ダウンロード済みの印（端末ごと・最新50件だけ覚える）
+  const jobOpened = (k) => { try { return (JSON.parse(localStorage.getItem('smdJobOpened') || '[]')).includes(k); } catch (_) { return false; } };
+  const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-50))); } catch (_) {} };
   let jobPollTimer = null;
   async function jobPoll() {
     if (!settings.sbKey && !settings.sbSecret) return;
@@ -2202,7 +2215,18 @@
       j.title = v.title || j.title; j.sub = v.sub || j.sub; j.pct = v.pct || j.pct;
       j.msg = v.status === 'done' ? (v.msg || '完了') : (v.status === 'error' ? (v.error || '失敗') : (v.step || ''));
       j.state = v.status === 'done' ? 'done' : (v.status === 'error' ? 'err' : (v.status === 'cancel' ? 'stop' : 'run'));
-      if (v.status === 'done' && v.result && v.result.url && !j._opened) { j._opened = true; try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {} }
+      // ★完了したZIPの自動ダウンロードは「この端末で1回だけ」。
+      //   メモリだけで持つとリロードのたびに再ダウンロードされるので、開いた印はlocalStorageに残す。
+      if (v.status === 'done' && v.result && v.result.url && !jobOpened(r.k)) {
+        jobOpenedMark(r.k);
+        try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {}
+      }
+      // ★GASが6分制限で強制終了すると台帳は run のまま残る＝永遠に「実行中」に見える。
+      //   一定時間更新が無ければ「応答なし」に倒して、消せる状態にする。
+      if (v.status === 'run') {
+        const last = Date.parse(v.updated_at || v.created_at || 0) || 0;
+        if (last && Date.now() - last > 12 * 60000) { j.state = 'err'; j.msg = '応答なし（GASの実行時間切れかも）。✕で消せます'; }
+      }
     }
     // DBから消えたものはパネルからも消す
     const alive = new Set(rows.map(r => r.k));
@@ -10437,7 +10461,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             // ★状態はDBに置く＝ページをリロードしても走り続け、進み具合も戻ってくる
             const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚）');
             jobPollStart();
-            gasSerial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId, job: key }, 300000)).catch(() => {});
+            gasSerial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId, job: key }, 300000))
+              .catch(e => jobRemoteFail(key, e && e.message));
           })();
         });
         if (upB && upF) upB.addEventListener('click', () => { if (!needOfficial()) return; upF.click(); });
@@ -10508,13 +10533,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const items = files.map((f, i5) => ({ option: f.opt, url: urls[i5] })).filter(x => x.option && x.url);
               if (!items.length) throw new Error('画像を1枚も準備できませんでした');
               // ② 対象リストはURLが長いのでDB経由でGASへ渡す
-              const kv = 'varimg_' + cc + '_' + itemId;
+              // ★同じカタログで2件仕掛けると上書き＆先に消される。しごとごとに別キーにする。
+              const kv = 'varimg_' + cc + '_' + itemId + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
               await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
               // ③ ここから先はDB管理のしごとに引き継ぐ＝リロードしても続く
               ctx.progress(100, '準備完了');
               const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）');
               jobPollStart();
-              gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: key }, 300000)).catch(() => {});
+              gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: key }, 300000))
+                .catch(e => jobRemoteFail(key, e && e.message));
               try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + items.length + '件 → ' + label); } catch (_) {}
               markStale();
               if (go && go.isConnected) { go.disabled = false; go.textContent = '🗂 反映をしごとに積みました（この画面は閉じてOK）'; }

@@ -333,7 +333,7 @@ function doGet(e) {
         if (p.job) jobSet_(p.job, { status: 'done', result: zvout, msg: zvout.n + '枚' });
       } catch (err) {
         zvout = { ok: false, error: String((err && err.message) || err) };
-        if (p.job) jobSet_(p.job, { status: 'error', error: zvout.error });
+        if (p.job) jobSet_(p.job, /中止/.test(zvout.error) ? { status: 'cancel', msg: '止めました' } : { status: 'error', error: zvout.error });
       }
       return ContentService.createTextOutput(zvcb + '(' + JSON.stringify(zvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -356,7 +356,7 @@ function doGet(e) {
         if (p.job) jobSet_(p.job, { status: 'done', result: svout, msg: svout.applied + '/' + svout.total + '件' });
       } catch (err) {
         svout = { ok: false, error: String((err && err.message) || err) };
-        if (p.job) jobSet_(p.job, { status: 'error', error: svout.error });
+        if (p.job) jobSet_(p.job, /中止/.test(svout.error) ? { status: 'cancel', msg: '止めました' } : { status: 'error', error: svout.error });
       }
       return ContentService.createTextOutput(svcb + '(' + JSON.stringify(svout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
