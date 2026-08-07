@@ -14931,6 +14931,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const pmn = (lst.priceMin != null && lst.priceMin !== '') ? Number(lst.priceMin) : null, pmx = (lst.priceMax != null && lst.priceMax !== '') ? Number(lst.priceMax) : null;
       if (pmn != null && !isNaN(pmn)) rows = rows.filter(r => (r.price_max != null ? r.price_max : r.price_min) != null && (r.price_max != null ? r.price_max : r.price_min) >= pmn);
       if (pmx != null && !isNaN(pmx)) rows = rows.filter(r => (r.price_min != null ? r.price_min : r.price_max) != null && (r.price_min != null ? r.price_min : r.price_max) <= pmx); }
+    // 🈳 枠の状態で絞る（単品は対象外）
+    if (lst.slot) {
+      rows = rows.filter(r => varCount(r) > 0);
+      if (lst.slot === 'full') rows = rows.filter(r => MODEL_CAP - varCount(r) <= 0);                       // 満杯
+      else if (lst.slot === 'free') rows = rows.filter(r => MODEL_CAP - varCount(r) > 0);                    // まだ出せる
+      else if (lst.slot === 'sibfree') rows = rows.filter(r => {                                            // 満杯だが同シリーズに空きがある
+        if (MODEL_CAP - varCount(r) > 0) return false;
+        const arr = (_sibIdx && _sibIdx.get(r.cc + '|' + seriesKey(r.name))) || [];
+        return arr.some(x => String(x.item_id) !== String(r.item_id) && MODEL_CAP - x.cnt > 0);
+      });
+    }
     // 明細（バリエ）数で絞る。★単品は対象外（名前つき明細が0件のもの＝単品）
     { const vmn = (lst.mdlMin != null && lst.mdlMin !== '') ? Number(lst.mdlMin) : null, vmx = (lst.mdlMax != null && lst.mdlMax !== '') ? Number(lst.mdlMax) : null;
       if (vmn != null || vmx != null) {
@@ -15040,6 +15051,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <button class="smd-btn" id="lst-updated" style="${(lst.sort === 'updated' && lst.sortDir !== 'asc') ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="Shopee側で直近に変わった順（価格・在庫・画像・タイトルの変更を含む）">🔃 更新順</button>
         <button class="smd-btn" id="lst-gridtoggle" style="${lst.grid ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目。仕入切れ時の🚫全国在庫0もここから">🌏 ${lst.grid ? '横並び中（カード表示に戻す）' : '国横断で横並び表示'}</button>
         <label style="color:#555" title="バリエ商品の明細数で絞り込み（単品は自動で除きます）。例: 最大1＝明細が1つしかないバリエ商品">明細数<span class="smd-dim" style="font-size:9.5px">(単品除く)</span> <input id="lst-mmin" type="number" min="0" placeholder="最小" value="${lst.mdlMin != null ? esc(String(lst.mdlMin)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-mmax" type="number" min="0" placeholder="最大" value="${lst.mdlMax != null ? esc(String(lst.mdlMax)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
+        <span class="smd-seg" id="lst-slot" title="明細の空き枠で絞り込み（バリエ商品のみ）"><button data-s="" class="${!lst.slot ? 'on' : ''}">枠すべて</button><button data-s="free" class="${lst.slot === 'free' ? 'on' : ''}" title="まだ明細を足せるカタログ">🈳空きあり</button><button data-s="full" class="${lst.slot === 'full' ? 'on' : ''}" title="明細100件で満杯のカタログ">満杯</button><button data-s="sibfree" class="${lst.slot === 'sibfree' ? 'on' : ''}" title="このカタログは満杯だが、同シリーズ（①②③）の別カタログにまだ空きがある＝そちらに出せる">満杯→同シリーズに空き</button></span>
         <button class="smd-btn" id="lst-bymodels" style="${lst.sort === 'models' ? 'background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700' : 'border-color:#7b52c4;color:#7b52c4;font-weight:700'}" title="押すたびに 明細が少ない順 → 多い順 → 解除 と切り替わります">🧩 ${lst.sort === 'models' ? (lst.sortDir === 'asc' ? '明細 少ない順' : '明細 多い順') : '明細数で並べる'}</button>
         <label style="color:#555" title="各国の現地通貨。国を1つに絞ると正確">価格帯 <input id="lst-pmin" type="number" placeholder="最小" value="${lst.priceMin != null ? esc(String(lst.priceMin)) : ''}" style="width:60px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-pmax" type="number" placeholder="最大" value="${lst.priceMax != null ? esc(String(lst.priceMax)) : ''}" style="width:60px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
         ${specsReady ? `<span class="smd-seg" id="lst-cond">
@@ -15186,6 +15198,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         try { logAct('出品', '価格在庫編集(グリッド)', row.name || '', cc + ' ' + chg); } catch (_) {}
       } catch (e) { alert('✗ ' + (e.message || e)); btn.disabled = false; btn.textContent = oldTxt; }
     }));
+    { const sg2 = document.getElementById('lst-slot'); if (sg2) sg2.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.slot = b.dataset.s; lst.page = 1; drawListingStatus(); }); }
     { const bm2 = document.getElementById('lst-bymodels');
       if (bm2) bm2.addEventListener('click', () => {
         // 少ない順 → 多い順 → 解除 の3段トグル。単品が混ざると意味がないのでバリエ商品に絞る
