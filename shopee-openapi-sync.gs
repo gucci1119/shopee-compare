@@ -329,7 +329,7 @@ function doGet(e) {
       try {
         var zvshop = parseInt(p.shop_id, 10); if (!getToken_(zvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
         if (p.job) jobSet_(p.job, { status: 'run', step: '画像を取得中' });
-        zvout = zipVariationImages_(zvshop, p.item_id, p.cc, p.job);
+        zvout = zipVariationImages_(zvshop, p.item_id, p.cc, p.job, p.nos);
         if (p.job) jobSet_(p.job, { status: 'done', result: zvout, msg: zvout.n + '枚' });
       } catch (err) {
         zvout = { ok: false, error: String((err && err.message) || err) };
@@ -947,7 +947,7 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
 }
 // ★明細画像をまとめてZIP化→Driveに置いて公開URLを返す（ポータルの「⬇️一括ダウンロード」用）
 //   ファイル名は 001__明細名.jpg（番号＝Shopeeの明細表示順）。戻すときにこの番号で紐付ける。
-function zipVariationImages_(shopId, itemId, cc, jobKey) {
+function zipVariationImages_(shopId, itemId, cc, jobKey, nos) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [];
@@ -955,8 +955,15 @@ function zipVariationImages_(shopId, itemId, cc, jobKey) {
   var opts = tiers[0].option_list || [];
   var safe = function (t) { return String(t || '').replace(/[\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 40) || 'variation'; };
   var pad = function (n) { return ('00' + n).slice(-3); };
+  // nos=「1,5,12」のように明細番号(1始まり)を指定すると、その明細だけをZIPにする
+  var pick = null;
+  if (nos && String(nos).trim()) {
+    pick = {};
+    String(nos).split(',').forEach(function (x) { var n = parseInt(x, 10); if (n > 0) pick[n] = 1; });
+  }
   var todo = [];
   opts.forEach(function (o, i) {
+    if (pick && !pick[i + 1]) return;
     var im = o.image || {};
     var u = im.image_url || im.image_url_list && im.image_url_list[0] || '';
     if (!u && im.image_id) u = 'https://down-cvs-sg.img.susercontent.com/' + im.image_id;
