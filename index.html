@@ -2097,6 +2097,30 @@
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   // ===== 軽い通知トースト＋クリックでコピー＋Escでモーダルを閉じる（全ページ共通） =====
   let toastTimer = null;
+  // ---------------- 🔁 重複出品の見張り（仕入元URL台帳） ----------------
+  // ★同じ商品を2回出すのを防ぐ最も確実な手がかりは「仕入元URL」。画像の見た目より確実で軽い。
+  //   明細を追加するたびに url → {cc,item,opt,ts} を app_kv に貯め、次に同じURLを貼ったら警告する。
+  const srcKeyOf = (u) => String(u || '').trim().toLowerCase()
+    .replace(/[?#].*$/, '').replace(/\/$/, '')
+    .replace(/^https?:\/\/(www\.)?/, '');
+  let _srcMap = null;
+  async function srcMapLoad(force) {
+    if (_srcMap && !force) return _srcMap;
+    try {
+      const rows = await sbGetAll('app_kv', 'select=v&k=eq.listing_src');
+      _srcMap = (rows && rows[0] && rows[0].v && rows[0].v.items) || {};
+    } catch (_) { _srcMap = {}; }
+    return _srcMap;
+  }
+  async function srcMapAdd(entries) {   // entries=[{url, cc, item_id, opt}]
+    if (!settings.sbSecret || !entries || !entries.length) return;
+    try {
+      const m = await srcMapLoad(true);
+      entries.forEach(e => { const k = srcKeyOf(e.url); if (k) m[k] = { cc: e.cc, i: e.item_id, o: String(e.opt || '').slice(0, 40), t: Date.now() }; });
+      await sbUpsert('app_kv', [{ k: 'listing_src', v: { items: m }, updated_at: new Date().toISOString() }]);
+    } catch (_) {}
+  }
+  const srcDupOf = (u) => { const m = _srcMap || {}; return m[srcKeyOf(u)] || null; };
   // ---------------- 🗂 しごとセンター（バックグラウンドで走らせる・積む・止める） ----------------
   // ★重い処理（画像ZIP・一括反映など）を画面から切り離す。走らせたら閉じてよく、別の作業を続けられる。
   //   GASを叩く処理は Apps Script が同一ユーザーで直列処理するため、ここで順番待ちに並べる（同時に殴らない）。
@@ -10997,7 +11021,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const BW = { img: 32, cost: 66, wg: 50, price: 80, stock: 44, prof: 104, st: 76, del: 24, nameMin: 86 };
         const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
-          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
+          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:5px;font-size:11.5px">
+          ${r.dup ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この仕入元URLは ${esc(r.dup.cc)} の item ${esc(String(r.dup.i))}／明細「${esc(r.dup.o || '')}」で既に出しています">⚠既出 ${esc(r.dup.cc)}</span>` : ''}
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:${BW.cost}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:${BW.wg}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:${BW.price}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
@@ -11128,6 +11153,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               }
               ba.textContent = '② 追加中… ' + ok2 + '/' + list.length;
             }
+            // 出したものは仕入元URL台帳に記録＝次に同じURLを貼ったら警告できる
+            try { await srcMapAdd(list.map((x, i9) => ({ url: (rows[+x.el.dataset.i] || {}).url, cc, item_id: itemId, opt: x.name })).filter(e => e.url)); } catch (_) {}
             markStale();
             if (sb2) sb2.style.display = 'none';
             ba.disabled = false; ba.textContent = (bAbort ? '② 中断：' : '② 完了：') + ok2 + '/' + list.length + '件';
@@ -11230,9 +11257,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             urls = urls.slice(0, slotN);
           }
           bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
-          rows = dedupeRows(await runPool(urls)).map(r => Object.assign(r, { wg: wDefB() }));
+          await srcMapLoad();                                   // 既に出したURLの台帳
+          rows = dedupeRows(await runPool(urls)).map(r => Object.assign(r, { wg: wDefB(), dup: srcDupOf(r.url) }));
           const ng = rows.filter(r => r.err).length;
-          if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '') + '。名前・価格を確認して「②まとめて追加」';
+          const dupN = rows.filter(r => r.dup).length;
+          if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '')
+            + (dupN ? '　<b style="color:#d93025">⚠ ' + dupN + '件は過去に出したことのある仕入元URLです（重複の可能性）</b>' : '')
+            + '。名前・価格を確認して「②まとめて追加」';
           bl.disabled = false; if (bstop) bstop.style.display = 'none';
           draw();
         });
@@ -11252,13 +11283,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (((tiers[0] && tiers[0].value_list) || []).some(o => String(o.custom_value || '').trim().toLowerCase() === nm2.toLowerCase())) {
             alert('「' + nm2 + '」はすでにこの商品の明細にあります。別の名前にしてください（Shopeeは同名の明細を作れません）'); return;
           }
+          { const su = (body.querySelector('.ed-addurl').value || '').trim();
+            if (su) { await srcMapLoad(); const d = srcDupOf(su);
+              if (d && !confirm('⚠ この仕入元URLは過去に出しています\n\n' + d.cc + ' / item ' + d.i + ' / 明細「' + (d.o || '') + '」\n\n重複出品になる可能性があります。それでも追加しますか？')) return; } }
           if (!(parseFloat(pr) > 0)) { alert('価格を入れてください'); return; }
           const gw2 = await guardWriteCountries([cc]); if (!gw2.ok) { alert(gw2.msg); return; }
           if (!confirm('書込先: ' + gw2.summary + '\n\n' + cc + ' の item ' + itemId + ' に明細を追加します:\n\n・' + nm2 + ' / ' + (rg.cur || '') + pr + ' / 在庫' + (stk || 0) + (sk ? ' / SKU ' + sk : '') + (im ? ' / 画像あり' : '') + '\n\nよろしいですか？')) return;
           ab.disabled = true; ab.textContent = '追加中…';
           try {
             await openapiAddVariation(sidCat, itemId, { option: nm2, price: pr, stock: stk || '0', sku: sk, image: im });
-            try { logAct('出品', '明細追加', repName || (pi.name || ''), cc + ' ' + nm2 + '（価格 ' + (rg.cur || '') + pr + '・在庫 ' + (stk || '1') + (sk ? '・SKU ' + sk : '') + (im ? '・画像あり' : '') + '）'); } catch (_) {}
+            try { const su2 = (body.querySelector('.ed-addurl').value || '').trim(); if (su2) srcMapAdd([{ url: su2, cc, item_id: itemId, opt: nm2 }]); } catch (_) {}
+          try { logAct('出品', '明細追加', repName || (pi.name || ''), cc + ' ' + nm2 + '（価格 ' + (rg.cur || '') + pr + '・在庫 ' + (stk || '1') + (sk ? '・SKU ' + sk : '') + (im ? '・画像あり' : '') + '）'); } catch (_) {}
             markStale();
             // ★開き直さずに行を足す。続けて次を入力できるようにフォームを空にしてフォーカスを戻す。
             try {
