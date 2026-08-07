@@ -2085,6 +2085,96 @@
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   // ===== 軽い通知トースト＋クリックでコピー＋Escでモーダルを閉じる（全ページ共通） =====
   let toastTimer = null;
+  // ---------------- 🗂 しごとセンター（バックグラウンドで走らせる・積む・止める） ----------------
+  // ★重い処理（画像ZIP・一括反映など）を画面から切り離す。走らせたら閉じてよく、別の作業を続けられる。
+  //   GASを叩く処理は Apps Script が同一ユーザーで直列処理するため、ここで順番待ちに並べる（同時に殴らない）。
+  const JOBS = { list: [], seq: 0, open: false };
+  const jobRunning = () => JOBS.list.filter(j => j.state === 'run' || j.state === 'wait').length;
+  function jobPanel() {
+    let el = document.getElementById('smd-jobs');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'smd-jobs';
+      el.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:600;width:320px;max-width:92vw;font-size:12px;display:none';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function jobRender() {
+    const el = jobPanel();
+    const act = JOBS.list.filter(j => j.state === 'run' || j.state === 'wait');
+    const recent = JOBS.list.filter(j => j.state !== 'run' && j.state !== 'wait').slice(-4);
+    if (!act.length && !recent.length) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    const ico = { run: '⏳', wait: '⏸', done: '✅', err: '⚠️', stop: '⏹' };
+    const col = { run: '#3b5bdb', wait: '#8a8f98', done: '#1a7f37', err: '#d93025', stop: '#8a8f98' };
+    const row = (j) => `<div style="border-top:1px solid #f0f0f0;padding:6px 9px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="flex:none">${ico[j.state]}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600" title="${esc(j.title + (j.sub ? ' / ' + j.sub : ''))}">${esc(j.title)}</span>
+          ${(j.state === 'run' || j.state === 'wait') ? `<button class="job-stop" data-id="${j.id}" title="この作業を止める" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:10px;padding:1px 6px;cursor:pointer;flex:none">止める</button>` : `<button class="job-del" data-id="${j.id}" title="消す" style="border:none;background:none;color:#bbb;cursor:pointer;flex:none">✕</button>`}
+        </div>
+        <div style="font-size:10.5px;color:#8a8f98;margin-left:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.msg || '')}">${esc(j.sub || '')}${j.msg ? '　' + esc(j.msg) : ''}</div>
+        ${(j.state === 'run' || j.state === 'wait') ? `<div style="height:6px;background:#eee;border-radius:4px;margin:4px 0 0 20px;overflow:hidden"><div style="height:100%;width:${j.pct || 0}%;background:${col[j.state]};transition:width .3s"></div></div>` : ''}
+      </div>`;
+    el.innerHTML = `<div style="background:#fff;border:1px solid #dfe3ea;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.16);overflow:hidden">
+        <div class="job-head" style="display:flex;align-items:center;gap:6px;padding:7px 10px;background:#f6f8ff;cursor:pointer">
+          <b style="flex:1;font-size:12px;color:#3b4fb0">🗂 しごと${act.length ? '（実行中 ' + act.length + '）' : ''}</b>
+          <span style="color:#8a8f98;font-size:11px">${JOBS.open ? '▼' : '▲'}</span>
+        </div>
+        <div style="${JOBS.open ? '' : 'display:none'};max-height:320px;overflow:auto">${act.map(row).join('')}${recent.map(row).join('')}</div>
+      </div>`;
+    el.querySelector('.job-head').addEventListener('click', () => { JOBS.open = !JOBS.open; jobRender(); });
+    el.querySelectorAll('.job-stop').forEach(b2 => b2.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const j = JOBS.list.find(x => x.id === +b2.dataset.id); if (!j) return;
+      j.cancel = true; j.msg = '止めています…';
+      if (j.state === 'wait') { j.state = 'stop'; j.msg = '開始前に中止しました'; }
+      jobRender();
+    }));
+    el.querySelectorAll('.job-del').forEach(b2 => b2.addEventListener('click', (e) => {
+      e.stopPropagation();
+      JOBS.list = JOBS.list.filter(x => x.id !== +b2.dataset.id); jobRender();
+    }));
+  }
+  // GASを叩く処理の順番待ち（Apps Scriptは同一ユーザーで直列。並列に殴ると404/タイムアウトになる）
+  const gasQ = { chain: Promise.resolve(), n: 0 };
+  function gasSerial(fn) {
+    gasQ.n++;
+    const p = gasQ.chain.then(fn, fn).finally(() => { gasQ.n--; });
+    gasQ.chain = p.catch(() => {});
+    return p;
+  }
+  // 作業を開始。fn(ctx) の ctx = { progress(pct,msg), cancelled(), serial(fn) }
+  function startJob(title, sub, fn) {
+    const j = { id: ++JOBS.seq, title, sub, state: 'wait', pct: 0, msg: '順番待ち', cancel: false };
+    JOBS.list.push(j); JOBS.open = true; jobRender();
+    const ctx = {
+      progress: (pct, msg) => { j.pct = Math.max(0, Math.min(100, Math.round(pct))); if (msg != null) j.msg = msg; jobRender(); },
+      cancelled: () => j.cancel,
+      serial: gasSerial,
+    };
+    const run = async () => {
+      if (j.cancel) { j.state = 'stop'; jobRender(); return; }
+      j.state = 'run'; j.msg = ''; jobRender();
+      try {
+        const r = await fn(ctx);
+        if (j.cancel) { j.state = 'stop'; j.msg = '止めました'; }
+        else { j.state = 'done'; j.pct = 100; j.msg = (r && r.msg) || '完了'; }
+      } catch (e) {
+        j.state = j.cancel ? 'stop' : 'err';
+        j.msg = j.cancel ? '止めました' : String((e && e.message) || e).slice(0, 120);
+      }
+      jobRender();
+      setTimeout(() => { if (j.state === 'done') { JOBS.list = JOBS.list.filter(x => x.id !== j.id); jobRender(); } }, 60000);
+    };
+    // 実行そのものは即開始（中でGASを叩く部分だけ ctx.serial() で順番待ちに並べる）
+    run();
+    return j;
+  }
+  // ページを閉じようとした時に走っている作業があれば止める
+  window.addEventListener('beforeunload', (e) => { if (jobRunning()) { e.preventDefault(); e.returnValue = ''; } });
+
   function toast(msg, isErr) {
     let el = document.getElementById('smd-toast');
     if (!el) { el = document.createElement('div'); el.id = 'smd-toast'; document.body.appendChild(el); }
@@ -10297,80 +10387,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         });
         const safeName = (t) => String(t || '').replace(/[\\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'variation';
         const pad = (n) => String(n).padStart(3, '0');
-        if (dlB) dlB.addEventListener('click', async () => {
+        if (dlB) dlB.addEventListener('click', () => {
           const targets = slots.filter(s2 => s2.img);
           if (!targets.length) { alert('画像が設定されている明細がありません'); return; }
-          dlB.disabled = true;
-          // ★本命：GAS側で画像取得→ZIP化→Driveに置く→そのURLをブラウザが普通にダウンロード。
-          //   画像をbase64でJSONに詰めて返すと1.33倍に膨らみ、実測で8枚1分かかっていた。
-          const t0 = Date.now();
-          // ★サーバ側の一括処理なので途中経過は取れない（Apps Scriptは直列実行のため進捗を問い合わせても
-          //   その処理が終わるまで返らない）。前回の実測から1枚あたりの秒数を学習して残り時間を出す。
-          let rate = parseFloat(localStorage.getItem('smdZipSecPerImg') || '') || 0.5;   // 秒/枚
+          // ★しごとセンターに積む＝この画面を閉じても走り続ける。複数カタログを同時に積める。
+          const rate = parseFloat(localStorage.getItem('smdZipSecPerImg') || '') || 0.5;
           const est = Math.max(6, Math.round(targets.length * rate));
-          const bar = (pct) => '<span style="display:inline-block;vertical-align:middle;width:130px;height:8px;background:#eee;border-radius:5px;overflow:hidden;margin:0 6px"><span style="display:block;height:100%;width:' + pct + '%;background:#3b5bdb;transition:width .4s"></span></span>';
-          const draw = () => {
-            if (!msgI) return;
-            const el = (Date.now() - t0) / 1000;
-            const pct = Math.min(95, Math.round(el / est * 100));
-            const left = Math.max(1, Math.round(est - el));
-            msgI.innerHTML = 'ZIPを作成中' + bar(pct) + '<b>' + pct + '%</b>　残り約 <b>' + (el > est ? 'まもなく' : left + '秒') + '</b><span class="smd-dim">（' + targets.length + '枚）</span>';
-          };
-          const tick = setInterval(draw, 400);
-          if (msgI) msgI.style.color = '';
-          draw();
-          try {
-            const r = await gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId }, 300000);
-            clearInterval(tick);
-            if (!r || !r.url) throw new Error((r && r.error) || 'ZIPを作れませんでした');
-            const a2 = document.createElement('a'); a2.href = r.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click();
-            dlB.disabled = false;
-            const secs = (Date.now() - t0) / 1000;
-            try { if (r.n > 0) localStorage.setItem('smdZipSecPerImg', String(Math.max(0.05, secs / r.n))); } catch (_) {}   // 次回の見積りを実測で更新
-            if (msgI) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成しました' + bar(100) + '<b>100%</b>（' + Math.round(secs) + '秒）' + (r.ng ? ' ／ 取得できず ' + r.ng + '件' : '') + ' <a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0">ダウンロードが始まらない場合はここ</a>'; }
-            return;
-          } catch (e) {
-            clearInterval(tick);
-            // ★Driveの権限が未承認だとここに来る。黙って遅い経路に落ちると原因が分からないので手順を出す。
-            if (/権限がありません|not have permission|authoriz/i.test(String(e.message))) {
-              dlB.disabled = false;
-              if (msgI) { msgI.style.color = '#d93025'; msgI.innerHTML = '⚠ GASに<b>Google Driveの権限</b>がありません（ZIPの置き場所に使います）。<br>'
-                + '<span style="color:#5a6b8c">Apps Scriptのエディタで関数 <b>setupTriggers</b> を1回 ▶実行 → 「承認が必要です」→ 詳細 → 移動 → <b>許可</b>。そのあともう一度このボタンを押してください（デプロイのやり直しは不要）。</span>'; }
-              return;
+          if (msgI) { msgI.style.color = '#3b5bdb'; msgI.innerHTML = '🗂 <b>しごと</b>に積みました（右下で進み具合が見られます）。この画面は閉じて大丈夫です'; }
+          startJob('明細画像ZIP', cc + ' / ' + (repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚）', async (ctx) => {
+            const t0 = Date.now();
+            const tk = setInterval(() => {
+              const el2 = (Date.now() - t0) / 1000;
+              ctx.progress(Math.min(95, el2 / est * 100), '残り約 ' + (el2 > est ? 'まもなく' : Math.max(1, Math.round(est - el2)) + '秒'));
+            }, 500);
+            try {
+              const r = await ctx.serial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId }, 300000));
+              clearInterval(tk);
+              if (ctx.cancelled()) return { msg: '中止' };
+              if (!r || !r.url) throw new Error((r && r.error) || 'ZIPを作れませんでした');
+              const secs = (Date.now() - t0) / 1000;
+              try { if (r.n > 0) localStorage.setItem('smdZipSecPerImg', String(Math.max(0.05, secs / r.n))); } catch (_) {}
+              const a2 = document.createElement('a'); a2.href = r.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click();
+              if (msgI && msgI.isConnected) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成（' + Math.round(secs) + '秒）<a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0;margin-left:6px">始まらない場合はここ</a>'; }
+              return { msg: r.n + '枚・' + Math.round(secs) + '秒' + (r.ng ? '（取得できず' + r.ng + '件）' : '') };
+            } catch (e) {
+              clearInterval(tk);
+              if (/権限がありません|not have permission|authoriz/i.test(String(e.message))) throw new Error('GASにDrive/Storageの権限がありません（GASを最新にしてください）');
+              throw e;
             }
-            if (msgI) { msgI.style.color = '#e8710a'; msgI.textContent = 'サーバ側でのZIP作成に失敗（' + e.message + '）。ブラウザ側で取り直します…'; }
-          }
-          // フォールバック：従来方式（遅い）
-          const files = [], ng = [], viaGas = [];
-          let done = 0;
-          const setMsg = () => { if (msgI) msgI.textContent = 'ダウンロード中… ' + done + '/' + targets.length; };
-          const push = (t, r2) => { const ext = /png/i.test(r2.mime) ? 'png' : (/webp/i.test(r2.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r2.bytes }); };
-          { let next = 0;
-            const worker = async () => {
-              while (next < targets.length) {
-                const t = targets[next++];
-                try { push(t, await fetchImgDirect(t.img)); done++; setMsg(); } catch (_) { viaGas.push(t); }
-              }
-            };
-            await Promise.all(Array.from({ length: Math.min(12, targets.length) }, worker));
-          }
-          if (viaGas.length && msgI) msgI.textContent = 'ブラウザからは取得できないため、サーバ経由で ' + viaGas.length + '枚を取得します（GASを最新にすると一括ZIPで速くなります）';
-          for (let i2 = 0; i2 < viaGas.length; i2 += 8) {
-            const chunk = viaGas.slice(i2, i2 + 8);
-            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + (i2 + 1) + '〜' + (i2 + chunk.length) + '枚目）';
-            try { const got = await fetchImgsViaGas(chunk.map(t => t.img)); chunk.forEach((t, k) => { if (got[k]) push(t, got[k]); else ng.push(t.no); }); }
-            catch (_) { for (const t of chunk) { try { push(t, await fetchImgViaGas(t.img)); } catch (__) { ng.push(t.no); } } }
-            done = files.length; setMsg();
-          }
-          files.sort((a3, b3) => a3.no - b3.no);
-          dlB.disabled = false;
-          if (!files.length) { if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした'; } return; }
-          const zip = makeZip(files);
-          const a4 = document.createElement('a');
-          a4.href = URL.createObjectURL(zip);
-          a4.download = cc + '_' + itemId + '_明細画像_' + files.length + '枚.zip';
-          a4.click(); setTimeout(() => URL.revokeObjectURL(a4.href), 4000);
-          if (msgI) { msgI.style.color = ng.length ? '#e8710a' : '#1a7f37'; msgI.textContent = '✓ ' + files.length + '枚をZIPにしました' + (ng.length ? '（取得できず: ' + ng.length + '件）' : ''); }
+          });
         });
         if (upB && upF) upB.addEventListener('click', () => { if (!needOfficial()) return; upF.click(); });
         if (upF) upF.addEventListener('change', async () => {
@@ -10416,49 +10461,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (dup.length && !confirm('同じ明細に複数の画像が割り当てられています（後の方で上書きされます）。このまま進めますか？')) return;
             const gwU = await guardWriteCountries([cc]); if (!gwU.ok) { alert(gwU.msg); return; }
             if (!confirm('書込先: ' + gwU.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細画像を ' + pick.length + '件 差し替えます。\n\nよろしいですか？')) return;
-            go.disabled = true;
-            const t1 = Date.now();
-            const barU = (pct) => '<span style="display:inline-block;vertical-align:middle;width:120px;height:8px;background:#eee;border-radius:5px;overflow:hidden;margin:0 6px"><span style="display:block;height:100%;width:' + pct + '%;background:#1a7f37;transition:width .3s"></span></span>';
-            const setGo = (pct, label) => { go.innerHTML = label + barU(pct) + '<b>' + pct + '%</b>'; };
-            try {
-              // ① 画像をSupabase Storageへ（ブラウザから並列＝速い）
-              const urls = new Array(rows2.length);
+            const files = rows2.map((r, i5) => ({ file: r.file, opt: (slots.find(s2 => s2.no === pick[i5]) || {}).opt, no: pick[i5] }));
+            go.disabled = true; go.textContent = '🗂 しごとに積みました（この画面は閉じてOK）';
+            const label = rows2.map((r, i5) => pick[i5] + '.' + files[i5].opt).join(' / ');
+            startJob('明細画像の一括反映', cc + ' / ' + (repName || pi.name || itemId).slice(0, 24) + '（' + files.length + '枚）', async (ctx) => {
+              const t1 = Date.now();
+              // ① 画像をSupabase Storageへ（GASを使わないので並列＝速い）
+              const urls = new Array(files.length);
               let up = 0, next = 0;
               const worker = async () => {
-                while (next < rows2.length) {
+                while (next < files.length) {
+                  if (ctx.cancelled()) return;
                   const i5 = next++;
-                  const st = mapEl.querySelector('.ed-uprow[data-i="' + i5 + '"] .up-st');
                   try {
-                    const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(rows2[i5].file); });
-                    urls[i5] = await uploadImgToStorage(dataUrl, 'var' + pick[i5]);
-                    if (st) { st.style.color = '#8a8f98'; st.textContent = '準備OK'; }
-                  } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ 準備失敗'; st.title = String(e.message); } }
-                  up++; setGo(Math.round(up / rows2.length * 45), '① 画像を準備中');
+                    const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(files[i5].file); });
+                    urls[i5] = await uploadImgToStorage(dataUrl, 'var' + files[i5].no);
+                  } catch (e) { urls[i5] = null; }
+                  up++; ctx.progress(up / files.length * 45, '① 画像を準備中 ' + up + '/' + files.length);
                 }
               };
-              await Promise.all(Array.from({ length: Math.min(6, rows2.length) }, worker));
-              const items = rows2.map((r, i5) => ({ option: (slots.find(s2 => s2.no === pick[i5]) || {}).opt, url: urls[i5] })).filter(x => x.option && x.url);
+              await Promise.all(Array.from({ length: Math.min(6, files.length) }, worker));
+              if (ctx.cancelled()) return { msg: '止めました（Shopeeへの書き込みはしていません）' };
+              const items = files.map((f, i5) => ({ option: f.opt, url: urls[i5] })).filter(x => x.option && x.url);
               if (!items.length) throw new Error('画像を1枚も準備できませんでした');
-              // ② 対象リストはURLが長いのでDB経由でGASに渡す
+              // ② 対象リストはURLが長いのでDB経由でGASへ渡す
               const kv = 'varimg_' + cc + '_' + itemId;
               await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
-              // ③ GASでまとめて差し替え（Shopeeへの書き込みは1回だけ）
+              // ③ Shopeeへの書き込みは1回だけ（順番待ちに並べる）
               let pctU = 45;
-              const tk = setInterval(() => { pctU = Math.min(95, pctU + 1); setGo(pctU, '② Shopeeへ反映中'); }, 700);
+              const tk = setInterval(() => { pctU = Math.min(95, pctU + 1); ctx.progress(pctU, '② Shopeeへ反映中'); }, 700);
               let res;
-              try { res = await gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv }, 300000); }
+              try { res = await ctx.serial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv }, 300000)); }
               finally { clearInterval(tk); }
               markStale();
               const secs = Math.round((Date.now() - t1) / 1000);
-              mapEl.querySelectorAll('.up-st').forEach(st => { if (!/✗/.test(st.textContent)) { st.style.color = '#1a7f37'; st.textContent = '✓'; } });
-              try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + res.applied + '/' + rows2.length + '件 → ' + rows2.map((r, i5) => pick[i5] + '.' + (slots.find(s2 => s2.no === pick[i5]) || {}).opt).join(' / ')); } catch (_) {}
-              setGo(100, '✓ 完了 ' + res.applied + '/' + rows2.length + '件（' + secs + '秒）');
-              go.disabled = false;
-              toast('🖼 ' + res.applied + '件の明細画像を差し替えました（' + secs + '秒・開き直すと反映されます）');
-            } catch (e) {
-              go.disabled = false; go.textContent = '▶ 再実行';
-              alert('一括反映に失敗: ' + e.message);
-            }
+              try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + res.applied + '/' + files.length + '件 → ' + label); } catch (_) {}
+              if (mapEl && mapEl.isConnected) mapEl.querySelectorAll('.up-st').forEach(st => { st.style.color = '#1a7f37'; st.textContent = '✓'; });
+              if (go && go.isConnected) { go.disabled = false; go.textContent = '✓ 完了 ' + res.applied + '/' + files.length + '件（' + secs + '秒）'; }
+              return { msg: res.applied + '/' + files.length + '件・' + secs + '秒' + (res.failed ? '（失敗' + res.failed + '）' : '') };
+            });
           });
         });
       }
