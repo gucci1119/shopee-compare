@@ -572,7 +572,7 @@ function doGet(e) {
         var dvwt = P_().getProperty('WRITE_TOKEN');
         if (!dvwt || p.token !== dvwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var dvshop = parseInt(p.shop_id, 10); if (!getToken_(dvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String));
+        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String), String(p.idx || ''));
       } catch (err) { dvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dvcb + '(' + JSON.stringify(dvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1196,7 +1196,7 @@ function cleanVariation_(shopId, itemId) {
 // ★明細(バリエ)を削除。delete_model でモデルを消し、tierのオプションも取り除いて番号を詰め直す。
 //   ・残り0件にはできない（Shopeeがバリエ商品として成立しなくなる）
 //   ・売れた実績のあるモデルもShopee側の判断で削除不可のことがある（その場合はエラーを返す）
-function removeVariation_(shopId, itemId, names) {
+function removeVariation_(shopId, itemId, names, idxCsv) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!names || !names.length) throw new Error('削除する明細名が空です');
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
@@ -1204,12 +1204,19 @@ function removeVariation_(shopId, itemId, names) {
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], optList = tier.option_list || [];
   var cur = optList.map(function (o) { return o.option; });
-  var delIdx = {};
-  names.forEach(function (n) {
+  // ★名前は画面で書き換えられている場合があるため、見つからなければ「番号(0始まり)」で消す。
+  //   idxCsv は names と同じ並びの位置。どちらかで特定できればOK。
+  var idxArr = String(idxCsv || '').split(',').map(function (x) { return parseInt(x, 10); });
+  var delIdx = {}, unknown = [];
+  names.forEach(function (n, k) {
     var oi = cur.indexOf(n);
-    if (oi < 0) throw new Error('不明な明細名: ' + n);
+    if (oi < 0) {
+      var fb = idxArr[k];
+      if (fb >= 0 && fb < cur.length) oi = fb; else { unknown.push(n); return; }
+    }
     delIdx[oi] = 1;
   });
+  if (!Object.keys(delIdx).length) throw new Error('削除する明細を特定できませんでした（画面を開き直してから試してください）: ' + unknown.join(', '));
   var keep = [];
   for (var i = 0; i < cur.length; i++) if (!delIdx[i]) keep.push(i);
   if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
