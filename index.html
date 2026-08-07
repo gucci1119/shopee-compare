@@ -1329,15 +1329,22 @@
     end.setUint32(12, cLen, true); end.setUint32(16, cStart, true);
     return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
   }
-  // 画像URL→バイト列。まず直接fetch、CORSで弾かれたらGASのproxy(fetch_image)経由で取る
-  async function fetchImgBytes(url) {
-    try {
-      const r = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
-      if (r.ok) { const b = new Uint8Array(await r.arrayBuffer()); if (b.length > 100) return { bytes: b, mime: r.headers.get('content-type') || 'image/jpeg' }; }
-    } catch (_) { /* CORS → プロキシへ */ }
+  // 画像URL→バイト列。直接fetch（CORSが通れば速い・並列可）
+  async function fetchImgDirect(url) {
+    const r = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const b = new Uint8Array(await r.arrayBuffer());
+    if (b.length <= 100) throw new Error('空の応答');
+    return { bytes: b, mime: r.headers.get('content-type') || 'image/jpeg' };
+  }
+  // CORSで弾かれた分だけGASのproxy経由（Apps Scriptは直列処理なので最後にまとめて・少数想定）
+  async function fetchImgViaGas(url) {
     const res = await gasCall({ action: 'fetch_image', url: url }, 60000);
     if (!res || !res.b64) throw new Error('画像を取得できませんでした');
     return { bytes: Uint8Array.from(atob(res.b64), c => c.charCodeAt(0)), mime: res.mime || 'image/jpeg' };
+  }
+  async function fetchImgBytes(url) {
+    try { return await fetchImgDirect(url); } catch (_) { return fetchImgViaGas(url); }
   }
   // アップロード画像(data:)を Supabase Storage(公開バケット listing-imgs)に上げて公開http URLを返す（直接API出品用）
   async function uploadImgToStorage(dataUrl, tag) {
@@ -10283,16 +10290,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const targets = slots.filter(s2 => s2.img);
           if (!targets.length) { alert('画像が設定されている明細がありません'); return; }
           dlB.disabled = true;
-          const files = [], ng = [];
-          for (let i = 0; i < targets.length; i++) {
-            const t = targets[i];
-            if (msgI) msgI.textContent = 'ダウンロード中… ' + (i + 1) + '/' + targets.length;
-            try {
-              const r = await fetchImgBytes(t.img);
-              const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg');
-              files.push({ name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes });
-            } catch (e) { ng.push(t.no + ' ' + t.opt); }
+          // ★1枚ずつ直列だと100枚で数分かかる。CDNから直接取れる分は同時12本で流し、
+          //   CORSで弾かれた分だけ後からGAS経由（Apps Scriptは直列なので少数向け）。
+          const files = [], ng = [], viaGas = [];
+          let done = 0;
+          const setMsg = (extra) => { if (msgI) msgI.textContent = 'ダウンロード中… ' + done + '/' + targets.length + (extra || ''); };
+          const push = (t, r) => { const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes }); };
+          setMsg();
+          { let next = 0;
+            const worker = async () => {
+              while (next < targets.length) {
+                const t = targets[next++];
+                try { push(t, await fetchImgDirect(t.img)); }
+                catch (_) { viaGas.push(t); }
+                done++; setMsg();
+              }
+            };
+            await Promise.all(Array.from({ length: Math.min(12, targets.length) }, worker));
           }
+          for (let i = 0; i < viaGas.length; i++) {
+            const t = viaGas[i];
+            if (msgI) msgI.textContent = '取得し直し中… ' + (i + 1) + '/' + viaGas.length + '（CDNから直接取れなかった分）';
+            try { push(t, await fetchImgViaGas(t.img)); } catch (e) { ng.push(t.no + ' ' + t.opt); }
+          }
+          files.sort((a, b) => a.no - b.no);
           if (!files.length) { dlB.disabled = false; if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした（GASのfetch_imageが必要かも）'; } return; }
           const zip = makeZip(files);
           const a2 = document.createElement('a');
