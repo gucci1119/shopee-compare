@@ -12682,7 +12682,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const sid2 = shopIdOfListing(cc, +id);
             const r = await openapiDeleteItem(sid2, id);
             if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
-            try { logAct('出品', 'カタログ削除', nm, cc + ' item ' + id); } catch (_) {}
+            // ★消した商品の記録を残す：操作ログ＋専用の台帳（app_kv deleted_listings・最新500件）
+            const snap = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(id)) || {};
+            try { logAct('出品', 'カタログ削除', nm, cc + ' item ' + id + '／明細' + ((snap.model_count != null) ? snap.model_count : '?') + '件／' + (snap.status === 1 ? '出品中' : '停止・その他') + '／価格 ' + (snap.price_min != null ? snap.price_min + '〜' + (snap.price_max != null ? snap.price_max : snap.price_min) : '-')); } catch (_) {}
+            try {
+              if (settings.sbSecret) {
+                const rows0 = await sbGetAll('app_kv', 'select=v&k=eq.deleted_listings').catch(() => []);
+                const arr = ((rows0 && rows0[0] && rows0[0].v && rows0[0].v.items) || []);
+                arr.push({ cc, item_id: id, name: nm, image: snap.image || '', model_count: snap.model_count, status: snap.status,
+                  price_min: snap.price_min, price_max: snap.price_max, models: snap.models, deleted_at: new Date().toISOString() });
+                await sbUpsert('app_kv', [{ k: 'deleted_listings', v: { items: arr.slice(-500) }, updated_at: new Date().toISOString() }]);
+              }
+            } catch (_) {}
             // 画面とDBから消す
             if (lst.byCc[cc]) lst.byCc[cc] = lst.byCc[cc].filter(x => String(x.item_id) !== String(id));
             try { if (settings.sbSecret) await sbDelete('listings', 'item_id=eq.' + encodeURIComponent(id)); } catch (_) {}
@@ -12930,6 +12941,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         ${kpi('累計', rows.length + '件', 'これまでに出した明細数')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
+        <button class="smd-btn" id="llog-deleted" style="font-size:11.5px;border-color:#d93025;color:#d93025">🗑 削除した商品の記録</button>
         <button class="smd-btn" id="llog-sync" style="border-color:#3b5bdb;color:#3b5bdb;font-weight:700">🔄 いま反映（新しく出した分を取り込む）</button>
         <span class="smd-seg">${[30, 90, 180, 365].map(d => `<button class="llog-range${logState.days === d ? ' on' : ''}" data-d="${d}" style="${logState.days === d ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${d}日</button>`).join('')}</span>
         <button class="smd-btn" id="llog-csv" style="font-size:11.5px">⬇️ CSV</button>
@@ -12975,6 +12987,24 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           b.disabled = false; b.textContent = '🔄 いま反映（新しく出した分を取り込む）';
           m.style.color = '#d93025'; m.textContent = '失敗: ' + e.message;
         }
+      }); }
+    { const db2 = host.querySelector('#llog-deleted');
+      if (db2) db2.addEventListener('click', async () => {
+        db2.disabled = true;
+        let arr = [];
+        try { const rows0 = await sbGetAll('app_kv', 'select=v&k=eq.deleted_listings'); arr = (rows0 && rows0[0] && rows0[0].v && rows0[0].v.items) || []; } catch (_) {}
+        db2.disabled = false;
+        const ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;inset:0;z-index:700;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+        ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:820px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+          <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1">🗑 削除した商品の記録（${arr.length}件）</b><button class="dl-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div>
+          <div style="padding:14px 18px;max-height:calc(100vh - 170px);overflow:auto">${arr.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 6px">削除日時</th><th style="padding:3px 6px">国</th><th style="padding:3px 6px">商品名</th><th style="padding:3px 6px">明細</th><th style="padding:3px 6px">状態</th><th style="padding:3px 6px">item ID</th></tr></thead><tbody>`
+            + arr.slice().reverse().map(x => `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 6px;white-space:nowrap;color:#888;font-size:11px">${esc(jstDateTime(x.deleted_at))}</td><td style="padding:4px 6px;font-weight:700;color:${(regionByCc(x.cc) || {}).color || '#333'}">${esc(x.cc || '')}</td><td style="padding:4px 6px">${esc(String(x.name || '').slice(0, 60))}</td><td style="padding:4px 6px;text-align:right">${x.model_count != null ? x.model_count : '-'}</td><td style="padding:4px 6px">${x.status === 1 ? '出品中' : '停止・他'}</td><td style="padding:4px 6px"><span class="smd-copy" data-copy="${esc(String(x.item_id))}" style="cursor:pointer;font-family:monospace;font-size:11px">${esc(String(x.item_id))}</span></td></tr>`).join('')
+            + '</tbody></table>' : '<div class="smd-dim" style="font-size:12.5px">まだ削除の記録はありません。出品一覧の⋯から削除すると、ここに残ります。</div>'}</div></div>`;
+        document.body.appendChild(ov);
+        const cl = () => ov.remove();
+        ov.addEventListener('click', e => { if (e.target === ov) cl(); });
+        ov.querySelectorAll('.dl-close').forEach(b => b.addEventListener('click', cl));
       }); }
     { const c = host.querySelector('#llog-csv');
       if (c) c.addEventListener('click', () => {
