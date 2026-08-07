@@ -214,6 +214,37 @@ function doGet(e) {
     // ★属性(specifics)の選択肢を公式APIで読む：get_attribute_tree（ブリッジの内部v3代替＝カタログ編集の属性ドロップダウン用）。読み取り専用。
     // ★仕入元URL→メタ情報（タイトル/価格/画像）。ブリッジ(Tampermonkey)無しでも取れるようGAS側で取得する。
     //   メルカリ/ヤフオク/駿河屋など og:～ を持つページ全般。読み取り専用・token不要。
+    // ★仕入元URLをまとめて読む。ブラウザから並列に投げてもGASは1件ずつしか処理しないため
+    //   待たされた分がタイムアウトして「読取失敗」が多発していた。GAS側でfetchAll＝本当に並列。
+    //   urls は \u0001 区切り（最大20件）。
+    if (p.action === 'fetch_metas') {
+      var fmcb2 = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var fmout2;
+      try {
+        var us2 = String(p.urls || '').split('\u0001').filter(String);
+        if (!us2.length) throw new Error('URLが空です');
+        if (us2.length > 20) throw new Error('一度に20件までです');
+        var UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+        var rs2 = UrlFetchApp.fetchAll(us2.map(function (u) { return { url: u, muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': UA } }; }));
+        var arr2 = rs2.map(function (r) {
+          try {
+            if (r.getResponseCode() >= 400) return { ok: false, error: 'HTTP ' + r.getResponseCode() };
+            var html2 = r.getContentText();
+            var mt = function (k) {
+              var m1 = html2.match(new RegExp('<meta[^>]+(?:property|name)="' + k + '"[^>]+content="([^"]*)"', 'i'));
+              if (m1) return m1[1];
+              var m2 = html2.match(new RegExp('<meta[^>]+content="([^"]*)"[^>]+(?:property|name)="' + k + '"', 'i'));
+              return m2 ? m2[1] : '';
+            };
+            var pr = parseInt(String(mt('product:price:amount') || '').replace(/[^0-9]/g, ''), 10) || 0;
+            if (!pr) { var mp2 = html2.match(/"price"\s*:\s*"?(\d{2,9})"?/); if (mp2) pr = parseInt(mp2[1], 10) || 0; }
+            return { ok: true, title: mt('og:title'), price: pr, currency: mt('product:price:currency') || 'JPY', image: mt('og:image') };
+          } catch (e2) { return { ok: false, error: String(e2 && e2.message || e2).slice(0, 120) }; }
+        });
+        fmout2 = { ok: true, metas: arr2 };
+      } catch (err) { fmout2 = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(fmcb2 + '(' + JSON.stringify(fmout2) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'fetch_meta') {
       var fcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var fout;

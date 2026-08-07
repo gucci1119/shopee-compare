@@ -11395,7 +11395,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               for (const i6 of idx) {
                 if (bAbort) break;
                 rb.textContent = '↻ 取り直し中… ' + (idx.indexOf(i6) + 1) + '/' + idx.length;
-                const r7 = await loadOne(rows[i6].url);
+                const r7 = (await runPool([rows[i6].url]))[0] || { url: rows[i6].url, err: '取得できませんでした' };
                 if (r7.cost > 0) r7.price = calc(r7.cost, wg6, ro6);
                 rows[i6] = r7;
               }
@@ -11559,21 +11559,38 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           } catch (e) { r.err = String(e && e.message || e).slice(0, 40); }
           return r;
         };
-        // ★100件を1件ずつ直列に読むと5分以上かかる。同時4本で流す（GASが詰まらない実測上限）。
-        const runPool = async (urls, onDone) => {
+        // ★ブラウザから並列に投げてもGASは1件ずつしか処理しない＝待たされた分がタイムアウトして
+        //   「読取失敗」が多発していた。GAS側の fetchAll でまとめて取る（12件ずつ・本当に並列）。
+        const runPool = async (urls) => {
           const wg = wDefB(), ro = roiB();
-          const out = new Array(urls.length); let next = 0, fin = 0;
-          const worker = async () => {
-            while (next < urls.length && !bAbort) {
-              const i3 = next++;
-              const r = await loadOne(urls[i3]);
-              if (r.cost > 0) r.price = calc(r.cost, wg, ro);
-              out[i3] = r; fin++;
-              if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
-              if (onDone) onDone(r, i3, fin);
-            }
-          };
-          await Promise.all(Array.from({ length: Math.min(4, urls.length) }, worker));
+          const out = new Array(urls.length);
+          let fin = 0;
+          for (let i3 = 0; i3 < urls.length; i3 += 12) {
+            if (bAbort) break;
+            const chunk = urls.slice(i3, i3 + 12);
+            if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + '（まとめて取得中）';
+            let metas = [];
+            try {
+              const res = await gasSerial(() => gasCall({ action: 'fetch_metas', urls: chunk.join('\u0001') }, 120000));
+              metas = (res && res.metas) || [];
+            } catch (e) { metas = []; }
+            chunk.forEach((u, k) => {
+              const m = metas[k] || {};
+              const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
+              const r = { url: u, name: '', cost: 0, image: quick || '', price: '', err: '', src: '' };
+              if (m.ok) {
+                r.cost = m.price || 0;
+                if (m.image && !r.image) r.image = m.image;
+                r.src = m.title || '';
+              } else r.err = String(m.error || '取得できませんでした').slice(0, 40);
+              out[i3 + k] = r;
+            });
+            fin += chunk.length;
+            if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
+          }
+          // 名前（英語30字）は端末側でまとめて作る（GASを待たせない）
+          for (const r of out) { if (r && r.src && !r.name) r.name = (await suggestVarName(r.src, 30)) || cleanSourceTitle(r.src).slice(0, 30); }
+          out.forEach(r => { if (r && r.cost > 0) r.price = calc(r.cost, wg, ro); });
           return out.filter(Boolean);
         };
         if (bl) bl.addEventListener('click', async () => {
