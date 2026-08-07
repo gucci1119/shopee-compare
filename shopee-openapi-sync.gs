@@ -855,7 +855,9 @@ function getAttributeTree_(shopId, catId, lang) {
   //   必ず入っており、属性名が '#100130' のような数字表示になる問題が起きない。
   //   get_attribute_tree は選択肢は返すが名前が空のことがあるため、足りない分の補完にだけ使う。
   var byId = {}, order = [];
-  try {
+  // ★get_attributes は api_suspended（提供終了）。呼ぶだけ無駄なので既定では叩かない。
+  //   名前は get_attribute_tree の a.name にちゃんと入っている。
+  if (false) try {
     var ja = callShop_(shopId, '/api/v2/product/get_attributes', { category_id: catId, language: lang || 'en' }, 'get');
     var alist = ((ja.response || {}).attribute_list) || [];
     alist.forEach(function (a) {
@@ -886,7 +888,10 @@ function getAttributeTree_(shopId, catId, lang) {
       attribute_id: a.attribute_id,
       // ★属性名は attribute_info の中にある（v2 get_attribute_tree）。直下だけ見ていたため
       //   全部 '#100130' のようなプレースホルダになっていた。info→直下の順で拾う。
-      name: info.display_attribute_name || info.original_attribute_name || info.attribute_name || info.display_name
+      // ★実データ確認（2026-08-08）：get_attribute_tree は属性名を **トップレベルの a.name** に入れて返す。
+      //   （get_attributes は api_suspended で使えない）。a.name を最優先で読む。
+      name: a.name || (a.multi_lang && a.multi_lang[0] && a.multi_lang[0].value)
+        || info.display_attribute_name || info.original_attribute_name || info.attribute_name || info.display_name
         || a.display_attribute_name || a.original_attribute_name || a.display_name || a.attribute_name || ('#' + a.attribute_id),
       mandatory: !!(info.is_mandatory || a.is_mandatory || a.mandatory),
       multi: (maxv || 1) > 1,
