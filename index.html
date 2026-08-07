@@ -12030,6 +12030,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         {
           const origById = new Map(attrs.map(a => [a.attribute_id, a]));
           const built = new Map();
+          const treeQ = (typeof pickedTree !== 'undefined' && pickedTree) ? pickedTree : atree;
+          const attrSkipped = [];
           body.querySelectorAll('.ed-attr-raw[data-aid]').forEach(inp => {
             const id = +inp.dataset.aid, v = (inp.value || '').trim();
             const o = origById.get(id);
@@ -12038,8 +12040,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             // ★元が「選択肢型」(value_id持ち)なのに選択肢リストが取れずテキスト欄で出ている場合がある。
             //   そのまま文字だけ送ると Shopee に ValueId is required で丸ごと弾かれるので、
             //   文字を変えていないときは元の値(value_id)をそのまま返す。
-            const idVal = ovals.find(x => x.value_id != null);
-            if (idVal && v && String(idVal.name || '').trim() === v) { built.set(id, ovals); return; }
+            // ★選択式の属性に文字列を送るとShopeeに丸ごと弾かれる（ValueId is required）。
+            //   入力が選択肢名と一致すればそのIDに変換、一致しなければ送らず元の選択を維持する。
+            const defQ = treeQ && treeQ.get ? treeQ.get(id) : null;
+            const isChoice = !!(defQ && defQ.options && defQ.options.length) || ovals.some(x => x.value_id != null);
+            if (isChoice) {
+              const hit = ((defQ && defQ.options) || []).find(op => String(op.name).trim().toLowerCase() === v.toLowerCase());
+              if (hit) { built.set(id, [{ value_id: hit.id }]); return; }
+              if (!v) { built.set(id, []); return; }
+              const keep = ovals.filter(x => x.value_id != null);
+              if (keep.length) { built.set(id, keep); return; }
+              attrSkipped.push((o && o.name) || (defQ && defQ.name) || ('#' + id));
+              built.set(id, []);
+              return;
+            }
             built.set(id, v ? [{ raw_value: v, unit }] : []);
           });
           body.querySelectorAll('.ed-attr-sel[data-aid]').forEach(sel2 => {
