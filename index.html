@@ -12740,6 +12740,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!lst.tab) { try { lst.tab = localStorage.getItem('smdListTab') || 'status'; } catch (_) { lst.tab = 'status'; } }
     if (lst.nameW == null) { try { lst.nameW = Number(localStorage.getItem('smdListNameW')) || 150; } catch (_) { lst.nameW = 150; } document.documentElement.style.setProperty('--lst-namew', (lst.nameW || 150) + 'px'); }
     if (lst.colW == null) { try { lst.colW = JSON.parse(localStorage.getItem('smdListColW') || '{}'); } catch (_) { lst.colW = {}; } }
+    if (lst.autoFit == null) { try { lst.autoFit = localStorage.getItem('smdListAutoFit') !== '0'; } catch (_) { lst.autoFit = true; } }
     if (lst.colHide == null) {
       try { const raw = localStorage.getItem('smdListColHide'); lst.colHide = raw ? JSON.parse(raw) : null; } catch (_) { lst.colHide = null; }
       if (!lst.colHide) { lst.colHide = {}; LCOL_HIDE_DEFAULT.forEach(i => { lst.colHide[i] = 1; }); }   // 既定でJAN/IDは隠す
@@ -15003,6 +15004,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px';
         };
         const up = () => {
+          try { autoFitCols(); const wrap2 = document.querySelector('#lst-scroll > div'); if (wrap2) wrap2.style.minWidth = LMINW_GET() + 'px'; } catch (_) {}
           document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
           document.body.style.cursor = ''; document.body.style.userSelect = '';
           try { localStorage.setItem('smdListColW', JSON.stringify(lst.colW || {})); localStorage.setItem('smdListNameW', String(lst.nameW || 150)); } catch (_) {}
@@ -15028,6 +15030,34 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function lstLoadState() {
     if (lst._restored) return; lst._restored = true;
     try { const o = JSON.parse(localStorage.getItem('smdLstState') || '{}'); LST_SAVE_KEYS.forEach(k => { if (o[k] !== undefined) lst[k] = o[k]; }); } catch (_) {}
+  }
+  // ★既定で画面に収める。はみ出す分だけ、右側の「無くても困らない列」から自動で隠す。
+  //   自動で隠した分は colAuto に覚えておき、幅が変わったら毎回やり直す（戻る）。
+  const LCOL_FIT_ORDER = [17, 18, 16, 15, 12, 11, 10, 14, 13, 8, 9, 7];
+  function autoFitCols() {
+    const sc = document.getElementById('lst-scroll'); if (!sc) return 0;
+    lst.colHide = Object.assign({}, lst.colHide || {});
+    Object.keys(lst.colAuto || {}).forEach(i => { delete lst.colHide[i]; });   // 前回の自動分を戻す
+    lst.colAuto = {};
+    if (lst.autoFit === false) { applyColW(); return 0; }
+    const avail = sc.clientWidth - 4;
+    for (const i of LCOL_FIT_ORDER) {
+      if (LMINW_GET() <= avail) break;
+      if (lst.colHide[i]) continue;
+      lst.colHide[i] = 1; lst.colAuto[i] = 1;
+    }
+    applyColW();
+    const n = Object.keys(lst.colAuto).length;
+    // チップの見た目も合わせる
+    document.querySelectorAll('#lst-colpick .lst-colt').forEach(b => {
+      const i = +b.dataset.i, off = !!lst.colHide[i];
+      b.style.opacity = off ? '.45' : ''; b.style.textDecoration = off ? 'line-through' : '';
+      b.style.borderColor = off ? '' : '#7b52c4'; b.style.color = off ? '' : '#7b52c4'; b.style.fontWeight = off ? '' : '700';
+      b.title = lst.colAuto[i] ? '画面に収めるため自動で隠しています（クリックで戻す）' : '';
+    });
+    const note = document.getElementById('lst-fitnote');
+    if (note) note.innerHTML = n ? `📐 画面に収めるため <b>${n}列</b>を隠しています（「表示する列」で戻せます）` : '';
+    return n;
   }
   let _sibIdx = null;   // シリーズキー → [{cc,item_id,name,cnt,host}]
   function sibHtml(r) {
@@ -15281,8 +15311,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span style="width:1px;height:18px;background:#e3e6ec"></span>
         <span style="font-size:10px;color:#7b52c4;font-weight:700">表示する列</span>
         <span id="lst-colpick" style="display:inline-flex;flex-wrap:wrap;gap:3px">${LCOLNAME.map((n, i) => LCOL_FIXED.has(i) ? '' : `<button class="lst-colt smd-btn" data-i="${i}" style="font-size:10px;padding:1px 6px;${(lst.colHide || {})[i] ? 'opacity:.45;text-decoration:line-through' : 'border-color:#7b52c4;color:#7b52c4;font-weight:700'}">${n}</button>`).join('')}</span>
-        <button class="smd-btn" id="lst-fitw" style="font-size:11px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="はみ出している列を右から自動で隠して、横スクロールなしで収まるようにします">📐 画面に収める</button>
+        <button class="smd-btn" id="lst-fitw" style="font-size:11px;${lst.autoFit === false ? '' : 'background:#1a7f37;color:#fff;border-color:#1a7f37;font-weight:700'}" title="はみ出す列を自動で隠して横スクロールなしにします（既定ON）。OFFにすると全列表示＋横スクロール">📐 画面に収める${lst.autoFit === false ? '：OFF' : '：ON'}</button>
         <button class="smd-btn" id="lst-colreset" style="font-size:11px" title="列の表示と幅を既定に戻す">↺ 列を既定に</button>
+        <span id="lst-fitnote" style="font-size:10px;color:#1a7f37;flex-basis:100%"></span>
         <span class="smd-dim" style="font-size:10px;flex-basis:100%">※列の幅は<b>ヘッダーの境目をドラッグ</b>で変えられます（ダブルクリックで既定に戻す）</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;font-size:11px;color:#8a8f98">
@@ -15440,12 +15471,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }); }
     { const fb = document.getElementById('lst-fitw');
       if (fb) fb.addEventListener('click', () => {
-        // 右側の「無くても困らない」列から順に隠して、画面幅に収める
-        const order = [17, 18, 16, 15, 12, 11, 10, 14, 13, 8, 9, 7];
-        const avail = (document.getElementById('lst-scroll') || document.body).clientWidth - 4;
-        lst.colHide = Object.assign({}, lst.colHide);
-        for (const i of order) { if (LMINW_GET() <= avail) break; lst.colHide[i] = 1; }
-        try { localStorage.setItem('smdListColHide', JSON.stringify(lst.colHide)); } catch (_) {}
+        lst.autoFit = (lst.autoFit === false);
+        try { localStorage.setItem('smdListAutoFit', lst.autoFit ? '1' : '0'); } catch (_) {}
         drawListingStatus();
       }); }
     { const cr = document.getElementById('lst-colreset');
@@ -15549,6 +15576,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }
       }); }
     applyColW(); wireColResize(document.getElementById('lst-hdrrow'));
+    autoFitCols();
+    { const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px'; }
     // ★横スクロールが要らない幅なら固定列(sticky)をやめる。
     //   固定したままだと、商品名の列が右隣（状態・アカウント）に重なって隠してしまう。
     { const sc = document.getElementById('lst-scroll');
