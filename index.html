@@ -13133,6 +13133,39 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
     ov.querySelectorAll('.oh-close').forEach(b => b.addEventListener('click', close));
   }
+  // 📈 1商品の 販売/閲覧/いいね の日ごとの推移（listing_stats_history のスナップショット）
+  async function showStatHistory(cc, itemId, name) {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:720px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)"><div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📈 日ごとの推移：${esc((name || '').slice(0, 50))}</b><button class="sh-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div><div class="sh-body" style="padding:14px 18px;max-height:calc(100vh - 160px);overflow:auto"><div class="smd-dim">読み込み中…</div></div></div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelectorAll('.sh-close').forEach(b => b.addEventListener('click', close));
+    const body = ov.querySelector('.sh-body');
+    try {
+      const rows = await sbGetAll('listing_stats_history', 'select=snap_date,sale,views,likes,cmt&item_id=eq.' + encodeURIComponent(itemId) + '&order=snap_date.asc');
+      if (!rows || !rows.length) { body.innerHTML = '<div class="smd-dim" style="font-size:12.5px">まだ記録がありません。<br>統計は6時間ごとに自動で取り込み、<b>1日1行</b>ずつ貯まります（出品一覧の「📊統計を更新」でもすぐ取れます）。</div>'; return; }
+      const max = Math.max(1, ...rows.map(r => Math.max(r.views || 0, r.likes || 0, r.sale || 0)));
+      const bar = (v, col) => `<span style="display:inline-block;width:${Math.round((v || 0) / max * 100)}%;min-width:${v ? 2 : 0}px;height:7px;background:${col};border-radius:3px;vertical-align:middle"></span>`;
+      const dl = (i, k) => (i === 0 ? null : (rows[i][k] || 0) - (rows[i - 1][k] || 0));
+      const dch = (d) => d == null ? '' : (d > 0 ? `<b style="color:#1a7f37">+${d}</b>` : (d < 0 ? `<b style="color:#d93025">${d}</b>` : '<span style="color:#ccc">±0</span>'));
+      body.innerHTML = `<div class="smd-dim" style="font-size:11px;margin-bottom:6px">${cc}／item ${itemId}　記録 ${rows.length}日分（${rows[0].snap_date} 〜 ${rows[rows.length - 1].snap_date}）。<b>増減</b>はその日に増えた数です＝<b>いつ付いたか</b>が分かります。</div>
+        <table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:right"><th style="text-align:left;padding:3px 7px">日付</th><th style="padding:3px 7px">🛒販売</th><th style="padding:3px 7px">増減</th><th style="padding:3px 7px">👁閲覧</th><th style="padding:3px 7px">増減</th><th style="padding:3px 7px">❤️いいね</th><th style="padding:3px 7px">増減</th><th style="width:34%;padding:3px 7px"></th></tr></thead><tbody>`
+        + rows.slice().reverse().map((r, ri) => { const i = rows.length - 1 - ri; return `<tr style="border-top:1px solid #f1f1f1;text-align:right">
+            <td style="text-align:left;padding:4px 7px;white-space:nowrap;color:#666">${esc(String(r.snap_date).slice(5))}</td>
+            <td style="padding:4px 7px;font-weight:700;color:#c2185b">${r.sale || 0}</td><td style="padding:4px 7px">${dch(dl(i, 'sale'))}</td>
+            <td style="padding:4px 7px">${r.views || 0}</td><td style="padding:4px 7px">${dch(dl(i, 'views'))}</td>
+            <td style="padding:4px 7px;color:#e8710a;font-weight:700">${r.likes || 0}</td><td style="padding:4px 7px">${dch(dl(i, 'likes'))}</td>
+            <td style="padding:4px 7px;text-align:left">${bar(r.views, '#c7d2e8')} ${bar(r.likes, '#f0a35e')}</td></tr>`; }).join('')
+        + `</tbody></table>
+        <div class="smd-dim" style="font-size:10.5px;margin-top:8px">※スナップショットは1日1行。取得前に付いて消えた分（いいねを外された等）は追えません。バーは<span style="color:#7f93bd">■閲覧</span>／<span style="color:#e8710a">■いいね</span>。</div>`;
+    } catch (e) {
+      body.innerHTML = /does not exist|relation|42P01|404/i.test(e.message || '')
+        ? '<div class="smd-dim" style="font-size:12.5px">履歴テーブル（listing_stats_history）がまだありません。GASの統計同期が動くと自動で作られます。</div>'
+        : '<div style="color:#d93025">取得に失敗: ' + esc(e.message || '') + '</div>';
+    }
+  }
   // 📜 カタログ(商品)ごとの編集履歴：activity_log(logActが商品名targetで記録)を商品名で引いて表示
   async function showEditHistory(name) {
     const ov = document.createElement('div');
@@ -14701,15 +14734,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;${LSTKL[1]}" loading="lazy" onerror="this.style.opacity=.15">
         <div style="min-width:0;${LSTKL[2]}">
           <div style="font-size:12px;line-height:1.3">${editUrl !== '#' ? `<a href="${editUrl}" target="_blank" class="lst-nm" title="${av(r.name || '')}｜クリックでShopee編集ページを開く">${esc(r.name)}</a>` : `<span class="lst-nm" style="color:#333;cursor:default" title="${av(r.name || '')}">${esc(r.name)}</span>`}<span class="smd-dim" style="font-size:9px;margin-left:5px;font-weight:400">${(r.name || '').length}字</span></div>
-          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${r.model_count}バリエーション</span>` : ''}${buyUrl ? ` <a href="${buyUrl}" target="_blank" title="Shopeeの販売(公開)ページを開く" style="text-decoration:none;color:#ee4d2d;font-weight:600;font-size:10.5px">🛍️販売ページ</a>` : ''}</div>
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${varCount(r) ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600">${opened ? '▼' : '▶'} ${varCount(r)}バリエーション</span>`
+            : (r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#8a8f98;font-weight:600" title="バリエーションなし（明細に名前が付いていない＝単品）">${opened ? '▼' : '▶'} 単品</span>` : '')}${buyUrl ? ` <a href="${buyUrl}" target="_blank" title="Shopeeの販売(公開)ページを開く" style="text-decoration:none;color:#ee4d2d;font-weight:600;font-size:10.5px">🛍️販売ページ</a>` : ''}</div>
         </div>
         <div style="font-size:10px;min-width:0" title="コンディション">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:3px;padding:1px 4px;white-space:nowrap">${condLabel(sp.cond)}</span>` : '<span class="smd-dim">—</span>'}</div>
         <div style="font-size:10px;word-break:break-all;min-width:0;line-height:1.25" title="出品アカウント">${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600" title="${esc(a.label)}">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : '<span class="smd-dim">—</span>'); })()}</div>
         <div style="text-align:right;line-height:1.15;min-width:0;overflow:hidden" title="現地価格（円換算）">${isSingle && canEdit ? `<span style="white-space:nowrap;color:#1565c0">${cur}<input class="lst-prc" data-mid="0" value="${r.price_min != null ? r.price_min : ''}" inputmode="decimal" style="width:62px;padding:2px 4px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="0" style="font-size:9px">${rg.rateJpy && r.price_min ? jyen(r.price_min) : ''}</div>` : `<div style="font-size:12px;color:#1565c0;font-weight:600">${price}</div>${jpyStr ? `<div class="smd-dim" style="font-size:9px">${jpyStr}</div>` : ''}`}</div>
         <div style="text-align:right;min-width:0">${isSingle && canEdit ? `<input class="lst-stk" data-mid="0" value="${r.stock != null ? r.stock : ''}" inputmode="numeric" style="width:40px;padding:2px 3px;border:1px solid #ddd;border-radius:5px;text-align:right;font-size:12px">` : `<span style="font-size:14px;font-weight:700;color:${oos ? '#d93025' : '#333'}">${r.stock != null ? r.stock : '-'}</span>${oos ? '<div style="font-size:8.5px;color:#d93025;font-weight:700">切れ</div>' : ''}`}</div>
-        <div style="text-align:right;min-width:0;font-size:12px;font-weight:700;color:#c2185b" title="${_stDelta ? 'この期間の販売の伸び（差分）' : '累計販売数（今までの購入・公式APIのsale）'}">${_sv(_st.sale)}</div>
-        <div style="text-align:right;min-width:0;font-size:11px;color:#555" title="${_stDelta ? 'この期間の閲覧の伸び' : '閲覧数（views）'}">${_sv(_st.views)}</div>
-        <div style="text-align:right;min-width:0;font-size:11px;color:#e8710a" title="${_stDelta ? 'この期間のいいねの伸び' : 'いいね数（likes）'}">${_sv(_st.likes, '♥')}</div>
+        <div class="lst-stath" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-nm="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:12px;font-weight:700;color:#c2185b;cursor:pointer" title="${_stDelta ? 'この期間の販売の伸び（差分）' : '累計販売数（今までの購入・公式APIのsale）'}｜クリックで日ごとの推移">${_sv(_st.sale)}</div>
+        <div class="lst-stath" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-nm="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:11px;color:#555;cursor:pointer" title="${_stDelta ? 'この期間の閲覧の伸び' : '閲覧数（views）'}｜クリックで日ごとの推移">${_sv(_st.views)}</div>
+        <div class="lst-stath" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-nm="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:11px;color:#e8710a;cursor:pointer" title="${_stDelta ? 'この期間のいいねの伸び' : 'いいね数（likes）'}｜クリックで日ごとの推移（いつ付いたかが分かります）">${_sv(_st.likes, '♥')}</div>
         <div class="lst-realized" data-name="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:11px;cursor:pointer" title="${_ps ? '実際に売れた注文の直近利益（入金円−仕入円）。中央' + jpyShort(_ps.median) + '・最' + jpyShort(_ps.max) + '〜' + jpyShort(_ps.min) + '・単品注文' + _ps.n + '件｜クリックで過去オーダー明細・利益の変遷' : 'クリックで過去オーダー履歴（売れて入金＋仕入が揃うと利益が出ます）'}">${_ps ? `<div style="font-weight:700;color:${_ps.recent < 0 ? '#d93025' : '#1a7f37'};text-decoration:underline;text-decoration-style:dotted">${jpyShort(_ps.recent)}</div><div class="smd-dim" style="font-size:8px">${_ps.n}件 📈</div>` : '<span class="smd-dim" style="text-decoration:underline;text-decoration-style:dotted">— 📈</span>'}</div>
         <div class="lst-costcell" data-id="${r.item_id}" data-name="${av(r.name || '')}" title="クリックで原価をその場編集（各国・各明細の原価/利益/ROI・台帳ページ不要）${_catCost == null && _sug != null ? '｜表示は利益管理表の直近仕入(参考)' : ''}" style="text-align:right;min-width:0;font-size:11px;color:${_costOpen ? '#1a7f37' : '#8a6d3b'};cursor:pointer;font-weight:${_costOpen ? 700 : 400}">${_catCost != null ? '¥' + _catCost.toLocaleString() : (_sug != null ? `<span style="color:#b0a080">¥${_sug.toLocaleString()}</span>` : '')}<span style="font-size:9px;color:#c9a86a"> ${_costOpen ? '▲' : '✎'}</span></div>
         <div style="text-align:right;min-width:0;font-size:11px" title="実売直近利益÷原価">${_roi != null ? `<span style="font-weight:700;color:${_roi < 0 ? '#d93025' : '#1a7f37'}">${_roi}%</span>` : '<span class="smd-dim">—</span>'}</div>
@@ -14774,6 +14808,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }).join('');
     return `<div style="overflow:auto;max-height:calc(100vh - 180px);border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11px">${head}<tbody>${body}</tbody></table></div>`;
   }
+  // ★本当のバリエ明細数＝「名前が付いている明細」の数。Shopeeは単品でも名前なしモデルを1件返すため、
+  //   model_count をそのまま使うと単品が「1バリエーション」に見えてしまう。
+  const _varCntCache = new WeakMap();
+  function varCount(r) {
+    if (!r || typeof r !== 'object') return 0;
+    if (_varCntCache.has(r)) return _varCntCache.get(r);
+    let ms = r.models;
+    if (!Array.isArray(ms)) { try { ms = JSON.parse(ms || '[]'); } catch (_) { ms = []; } }
+    const n = ms.filter(m => m && String(m.n || '').trim()).length;
+    _varCntCache.set(r, n);
+    return n;
+  }
   function drawListingStatus() {
     const host = document.getElementById('list-status'); if (!host) return;
     const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を出さない）
@@ -14834,19 +14880,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // コンディション（新品/中古）・ブランド
     if (lst.cond) rows = rows.filter(r => specOf(r.item_id).cond === lst.cond);
     if (lst.brand) rows = rows.filter(r => (specOf(r.item_id).brand || '') === lst.brand);
-    if (lst.varType === 'multi') rows = rows.filter(r => (r.model_count || 0) > 0); // バリエ有り
-    else if (lst.varType === 'single') rows = rows.filter(r => !(r.model_count || 0)); // 単品
+    // ★Shopeeは単品でも「名前なしのモデル」を1件返すので model_count は1になる。
+    //   本当のバリエ数＝名前が付いている明細の数。単品はこれが0。
+    if (lst.varType === 'multi') rows = rows.filter(r => varCount(r) > 0); // バリエ有り
+    else if (lst.varType === 'single') rows = rows.filter(r => varCount(r) === 0); // 単品
     // 価格帯（現地通貨。国を混在させると通貨が異なる点に注意）
     { const pmn = (lst.priceMin != null && lst.priceMin !== '') ? Number(lst.priceMin) : null, pmx = (lst.priceMax != null && lst.priceMax !== '') ? Number(lst.priceMax) : null;
       if (pmn != null && !isNaN(pmn)) rows = rows.filter(r => (r.price_max != null ? r.price_max : r.price_min) != null && (r.price_max != null ? r.price_max : r.price_min) >= pmn);
       if (pmx != null && !isNaN(pmx)) rows = rows.filter(r => (r.price_min != null ? r.price_min : r.price_max) != null && (r.price_min != null ? r.price_min : r.price_max) <= pmx); }
-    // 明細（バリエ）数で絞る。★単品は明細1になるのが当たり前なので最初から除く＝バリエ商品の中だけで見る
+    // 明細（バリエ）数で絞る。★単品は対象外（名前つき明細が0件のもの＝単品）
     { const vmn = (lst.mdlMin != null && lst.mdlMin !== '') ? Number(lst.mdlMin) : null, vmx = (lst.mdlMax != null && lst.mdlMax !== '') ? Number(lst.mdlMax) : null;
       if (vmn != null || vmx != null) {
-        rows = rows.filter(r => (r.model_count || 0) > 0);          // 単品は対象外
-        const mc = r => r.model_count || 0;
-        if (vmn != null && !isNaN(vmn)) rows = rows.filter(r => mc(r) >= vmn);
-        if (vmx != null && !isNaN(vmx)) rows = rows.filter(r => mc(r) <= vmx);
+        rows = rows.filter(r => varCount(r) > 0);
+        if (vmn != null && !isNaN(vmn)) rows = rows.filter(r => varCount(r) >= vmn);
+        if (vmx != null && !isNaN(vmx)) rows = rows.filter(r => varCount(r) <= vmx);
       } }
     // 並び替え
     if (lst.sort) {
@@ -14861,7 +14908,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         let va = 0, vb = 0;
         if (lst.sort === 'price') { va = a.price_min || 0; vb = b.price_min || 0; }
         else if (lst.sort === 'stock') { va = a.stock || 0; vb = b.stock || 0; }
-        else if (lst.sort === 'models') { va = a.model_count || 0; vb = b.model_count || 0; }
+        else if (lst.sort === 'models') { va = varCount(a); vb = varCount(b); }
         else if (lst.sort === 'created') { va = a.create_time || 0; vb = b.create_time || 0; }
         // ★更新順。Shopeeのupdate_timeが無い行（列を足す前に同期した分）は取り込み時刻で代用
         else if (lst.sort === 'updated') { const t = r => Number(r.update_time || 0) || (Date.parse(r.synced_at || 0) / 1000) || 0; va = t(a); vb = t(b); }
@@ -15149,6 +15196,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.querySelectorAll('#lst-list .lst-ccflags').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; lst.covOpen = lst.covOpen || new Set(); if (lst.covOpen.has(id)) lst.covOpen.delete(id); else lst.covOpen.add(id); drawListingStatus(); }));
     // 💰実売クリック → 過去オーダー明細＋利益変遷＋原価統計モーダル
     document.querySelectorAll('#lst-list .lst-realized').forEach(el => el.addEventListener('click', () => showOrderHistory(el.dataset.name || '')));
+    document.querySelectorAll('#lst-list .lst-stath').forEach(el => el.addEventListener('click', () => showStatHistory(el.dataset.cc, el.dataset.item, el.dataset.nm || '')));
     document.querySelectorAll('#lst-list .lst-edithist').forEach(el => el.addEventListener('click', () => showEditHistory(el.dataset.name || '')));
     document.querySelectorAll('#lst-list .ledger-cost').forEach(inp => inp.addEventListener('change', () => saveLedgerCost(inp.dataset.id, inp.dataset.cc, +inp.dataset.i, inp.value)));
     document.querySelectorAll('#lst-list .ledger-sugcost').forEach(el => el.addEventListener('click', () => saveLedgerCost(el.dataset.id, el.dataset.cc, +el.dataset.i, el.dataset.cost)));
