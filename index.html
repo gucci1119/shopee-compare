@@ -10298,11 +10298,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const push = (t, r) => { const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes }); };
           setMsg();
           { let next = 0;
+            // ★同時に投げるとCDNが瞬間的に弾くことがある。落ちた分はまず直接もう2回試す
+            //   （そのほうがGAS経由より圧倒的に速い）。それでもダメな分だけGASへ回す。
             const worker = async () => {
               while (next < targets.length) {
                 const t = targets[next++];
-                try { push(t, await fetchImgDirect(t.img)); }
-                catch (_) { viaGas.push(t); }
+                let got = null;
+                for (let a3 = 0; a3 < 3 && !got; a3++) {
+                  if (a3) await new Promise(r3 => setTimeout(r3, 250 * a3));
+                  try { got = await fetchImgDirect(t.img); } catch (_) {}
+                }
+                if (got) push(t, got); else viaGas.push(t);
                 done++; setMsg();
               }
             };
@@ -10310,7 +10316,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           }
           for (let i = 0; i < viaGas.length; i++) {
             const t = viaGas[i];
-            if (msgI) msgI.textContent = '取得し直し中… ' + (i + 1) + '/' + viaGas.length + '（CDNから直接取れなかった分）';
+            if (msgI) msgI.textContent = '残り ' + (viaGas.length - i) + '枚を別経路で取得中…（' + done + '/' + targets.length + 'は取得済み）';
             try { push(t, await fetchImgViaGas(t.img)); } catch (e) { ng.push(t.no + ' ' + t.opt); }
           }
           files.sort((a, b) => a.no - b.no);
