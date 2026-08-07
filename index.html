@@ -12688,6 +12688,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     // サブタブを記憶（リロードしても同じタブに戻る）
     if (!lst.tab) { try { lst.tab = localStorage.getItem('smdListTab') || 'status'; } catch (_) { lst.tab = 'status'; } }
+    if (lst.nameW == null) { try { lst.nameW = Number(localStorage.getItem('smdListNameW')) || 150; } catch (_) { lst.nameW = 150; } document.documentElement.style.setProperty('--lst-namew', (lst.nameW || 150) + 'px'); }
+    if (lst.moreFil == null) { try { lst.moreFil = localStorage.getItem('smdListMoreFil') === '1'; } catch (_) { lst.moreFil = false; } }
     // 旧「国のヌケ」独立タブ→「分析・やること」内サブ切替へ移行
     if (lst.tab === 'coverage') { lst.tab = 'analysis'; lst.anaSub = 'coverage'; try { localStorage.setItem('smdListTab', 'analysis'); } catch (_) {} }
     const tab = lst.tab;
@@ -14661,7 +14663,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 出品一覧の表グリッド：見出し・折りたたみ行・展開バリエ行・単品編集行が全てこの同じ列定義を共有＝ピクセル調整不要で必ず揃う。列を足す時はここに1トラック足す
   // 18列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️いいね/💰実売/📗原価/ROI/🌏国/ブランド/SKU/JAN/操作。横に増えても親を横スクロールで見せる（min-width固定）
   // 20列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️/💰実売/📗原価/ROI/🌏国/ブランド/📁カテゴリ/SKU/JAN/🆔ID/操作
-  const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(150px,1fr) 46px 104px 118px 48px 58px 58px 54px 92px 110px 70px 84px 92px 110px 118px 128px 108px 128px;column-gap:12px;row-gap:2px;align-items:start';
+  // 商品名の幅は可変（--lst-namew）。長いタイトルを読みたい時に広げられるように。
+  const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(var(--lst-namew,150px),1fr) 46px 104px 118px 48px 58px 58px 54px 92px 110px 70px 84px 92px 110px 118px 128px 108px 128px;column-gap:12px;row-gap:2px;align-items:start';
+  const LMINW_BASE = 1964, LMINW_GET = () => LMINW_BASE + Math.max(0, (lst.nameW || 150) - 150);
   const LMINW = 1964; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
   // 横スクロールしても常に見えるよう、左端(cc/img/商品名)を左固定・操作を右固定。left値=14(padding)+各トラック累積
   // box-shadow:12px 0 0 #fff で右側のgap(12px)を白で塗り、スクロール内容の透けを防ぐ。左端はleft:0基点
@@ -14737,7 +14741,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const _catCost = _cat && _cat.cost_total != null ? _cat.cost_total : null;
     const _costOpen = lst.costOpen && lst.costOpen.has(String(r.item_id));
     // カード表示は横スクロールコンテナ(min-width:LMINWのwrapper)内。ヘッダーと整列するよう水平marginは0・padding左右はヘッダーと同じ14に揃える（幅はwrapperのmin-widthで固定）
-    return `<div class="tool-card${isSingle && canEdit ? ' lst-inline' : ''}"${isSingle && canEdit ? ` data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}"` : ''} style="max-width:none;margin:6px 0;padding:8px 14px${meta.keep0 ? ';border-left:3px solid #b71c1c' : ''}">
+    // シリーズ順のときは、同じシリーズを同じ色の帯でまとめて見分けやすくする
+    const _ser = (lst.sort === 'series' && _serColor) ? _serColor(r) : null;
+    return `<div class="tool-card${isSingle && canEdit ? ' lst-inline' : ''}"${isSingle && canEdit ? ` data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}"` : ''} style="max-width:none;margin:${_ser ? '2px 0' : '6px 0'};padding:8px 14px${meta.keep0 ? ';border-left:3px solid #b71c1c' : (_ser ? ';border-left:5px solid ' + _ser.line + ';background:' + _ser.bg : '')}">
       <div style="${LGRID}">
         <span class="ord-cc" style="background:${rg.color};position:sticky;left:0;z-index:6;box-shadow:12px 0 0 0 var(--lst-stick)">${r.cc}</span>
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;${LSTKL[1]}" loading="lazy" onerror="this.style.opacity=.15">
@@ -14856,6 +14862,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const n = ms.filter(m => m && String(m.n || '').trim()).length;
     _varCntCache.set(r, n);
     return n;
+  }
+  // シリーズごとの色（見分け用。10色を巡回）
+  const SER_COLORS = [['#3b5bdb', '#f5f7ff'], ['#1a7f37', '#f3fbf5'], ['#e8710a', '#fff8f1'], ['#7b52c4', '#faf7ff'], ['#0f9d58', '#f2fbf7'],
+                      ['#c2185b', '#fff5f8'], ['#00838f', '#f2fbfc'], ['#8d6e63', '#faf7f5'], ['#5c6bc0', '#f6f7fd'], ['#d93025', '#fff6f5']];
+  let _serMap = null;
+  function _serColor(r) {
+    if (!_serMap) return null;
+    const k = r.cc + '|' + seriesKey(r.name);
+    const i = _serMap.get(k);
+    if (i == null) return null;
+    const c = SER_COLORS[i % SER_COLORS.length];
+    return { line: c[0], bg: c[1] };
   }
   let _sibIdx = null;   // シリーズキー → [{cc,item_id,name,cnt,host}]
   function sibHtml(r) {
@@ -15046,38 +15064,47 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <input type="text" id="lst-search" placeholder="商品名・バリエーション・item_id" value="${esc(lst.search || '')}">
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
-      <div class="smd-toolbar" style="margin-bottom:6px;font-size:11.5px;flex-wrap:wrap">
-        <label style="color:#555">並び替え
-          <select id="lst-sort" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">
-            <option value="" ${!lst.sort ? 'selected' : ''}>既定（国・登録順）</option>
-            <option value="name" ${lst.sort === 'name' ? 'selected' : ''}>名前</option>
-            <option value="price" ${lst.sort === 'price' ? 'selected' : ''}>価格(最小)</option>
-            <option value="stock" ${lst.sort === 'stock' ? 'selected' : ''}>在庫</option>
-            <option value="models" ${lst.sort === 'models' ? 'selected' : ''}>明細（バリエ）数</option>
-            <option value="created" ${lst.sort === 'created' ? 'selected' : ''}>出品日（新しい/古い）</option>
-            <option value="updated" ${lst.sort === 'updated' ? 'selected' : ''}>更新日（Shopee側で直近に変わった順）</option>
-            <option value="series" ${lst.sort === 'series' ? 'selected' : ''}>シリーズ順（①②③をまとめる）</option>
-            <option value="sale" ${lst.sort === 'sale' ? 'selected' : ''}>🛒販売数(売れ筋)</option>
-            <option value="views" ${lst.sort === 'views' ? 'selected' : ''}>👁閲覧数</option>
-            <option value="likes" ${lst.sort === 'likes' ? 'selected' : ''}>❤️いいね数</option>
-          </select>
-        </label>
+      <div class="smd-toolbar" style="margin-bottom:5px;font-size:11.5px;flex-wrap:wrap;align-items:center;gap:6px">
+        <span style="font-size:10px;color:#8a8f98;font-weight:700;letter-spacing:.04em">並び替え</span>
+        <select id="lst-sort" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">
+          <option value="" ${!lst.sort ? 'selected' : ''}>既定（国・登録順）</option>
+          <option value="name" ${lst.sort === 'name' ? 'selected' : ''}>名前</option>
+          <option value="price" ${lst.sort === 'price' ? 'selected' : ''}>価格(最小)</option>
+          <option value="stock" ${lst.sort === 'stock' ? 'selected' : ''}>在庫</option>
+          <option value="models" ${lst.sort === 'models' ? 'selected' : ''}>明細（バリエ）数</option>
+          <option value="created" ${lst.sort === 'created' ? 'selected' : ''}>出品日（新しい/古い）</option>
+          <option value="updated" ${lst.sort === 'updated' ? 'selected' : ''}>更新日（Shopee側で直近に変わった順）</option>
+          <option value="series" ${lst.sort === 'series' ? 'selected' : ''}>シリーズ順（①②③をまとめる）</option>
+          <option value="sale" ${lst.sort === 'sale' ? 'selected' : ''}>🛒販売数(売れ筋)</option>
+          <option value="views" ${lst.sort === 'views' ? 'selected' : ''}>👁閲覧数</option>
+          <option value="likes" ${lst.sort === 'likes' ? 'selected' : ''}>❤️いいね数</option>
+        </select>
         <button class="smd-btn" id="lst-sortdir" title="昇順/降順を切替">${lst.sortDir === 'asc' ? '⬆ 昇順' : '⬇ 降順'}</button>
-        <button class="smd-btn" id="lst-newest" style="${(lst.sort === 'created' && lst.sortDir !== 'asc') ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="出品日が新しい順に並べ替えます（＝直近に出した商品が上）">🆕 新規出品順</button>
+        <span style="width:1px;height:18px;background:#e3e6ec"></span>
+        <span style="font-size:10px;color:#8a8f98;font-weight:700;letter-spacing:.04em">よく使う</span>
+        <button class="smd-btn" id="lst-newest" style="${(lst.sort === 'created' && lst.sortDir !== 'asc') ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="出品日が新しい順（＝直近に出した商品が上）">🆕 新規出品順</button>
         <button class="smd-btn" id="lst-updated" style="${(lst.sort === 'updated' && lst.sortDir !== 'asc') ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="Shopee側で直近に変わった順（価格・在庫・画像・タイトルの変更を含む）">🔃 更新順</button>
-        <button class="smd-btn" id="lst-gridtoggle" style="${lst.grid ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目。仕入切れ時の🚫全国在庫0もここから">🌏 ${lst.grid ? '横並び中（カード表示に戻す）' : '国横断で横並び表示'}</button>
-        <label style="color:#555" title="バリエ商品の明細数で絞り込み（単品は自動で除きます）。例: 最大1＝明細が1つしかないバリエ商品">明細数<span class="smd-dim" style="font-size:9.5px">(単品除く)</span> <input id="lst-mmin" type="number" min="0" placeholder="最小" value="${lst.mdlMin != null ? esc(String(lst.mdlMin)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-mmax" type="number" min="0" placeholder="最大" value="${lst.mdlMax != null ? esc(String(lst.mdlMax)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
-        <button class="smd-btn" id="lst-series" style="${lst.sort === 'series' ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="「〜①」「〜②」のように連番で分けたカタログを上下に並べます。もう一度押すと『複数あるシリーズだけ』に絞り、3回目で解除">📚 ${lst.sort === 'series' ? (lst.seriesOnly ? 'シリーズのみ表示中' : 'シリーズ順') : 'シリーズで並べる'}</button>
-        <span class="smd-seg" id="lst-slot" title="明細の空き枠で絞り込み（バリエ商品のみ）"><button data-s="" class="${!lst.slot ? 'on' : ''}">枠すべて</button><button data-s="free" class="${lst.slot === 'free' ? 'on' : ''}" title="まだ明細を足せるカタログ">🈳空きあり</button><button data-s="full" class="${lst.slot === 'full' ? 'on' : ''}" title="明細100件で満杯のカタログ">満杯</button><button data-s="sibfree" class="${lst.slot === 'sibfree' ? 'on' : ''}" title="このカタログは満杯だが、同シリーズ（①②③）の別カタログにまだ空きがある＝そちらに出せる">満杯→同シリーズに空き</button></span>
-        <button class="smd-btn" id="lst-bymodels" style="${lst.sort === 'models' ? 'background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700' : 'border-color:#7b52c4;color:#7b52c4;font-weight:700'}" title="押すたびに 明細が少ない順 → 多い順 → 解除 と切り替わります">🧩 ${lst.sort === 'models' ? (lst.sortDir === 'asc' ? '明細 少ない順' : '明細 多い順') : '明細数で並べる'}</button>
+        <button class="smd-btn" id="lst-series" style="${lst.sort === 'series' ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="「〜①」「〜②」のように連番で分けたカタログを上下に並べます。もう一度押すと『複数あるシリーズだけ』に絞り、3回目で解除">📚 ${lst.sort === 'series' ? (lst.seriesOnly ? 'シリーズのみ' : 'シリーズ順') : 'シリーズで並べる'}</button>
+        <button class="smd-btn" id="lst-gridtoggle" style="${lst.grid ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目">🌏 ${lst.grid ? '横並び中' : '国横断で横並び'}</button>
+        <span style="width:1px;height:18px;background:#e3e6ec"></span>
+        <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">バリエ・単品すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">🧩バリエ有り</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
+        <span class="smd-seg" id="lst-statsperiod" title="🛒販売・👁閲覧・❤️いいねを『全期間の累計』か『直近N日の伸び』かで表示">${[['', '📊全期間'], ['7', '📈7日'], ['30', '📈30日'], ['90', '📈90日']].map(([v, l]) => `<button data-p="${v}" class="${String(lst.statsPeriod || '') === v ? 'on' : ''}">${l}</button>`).join('')}</span>
+        <button class="smd-btn" id="lst-morefil" style="${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand) ? 'border-color:#7b52c4;color:#7b52c4;font-weight:700' : ''}" title="明細の空き枠・明細数・価格帯・状態・ブランドの絞り込み">⚙ 詳しい絞り込み${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand) ? ' ●' : ''}</button>
+        ${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand || lst.varType || lst.seriesOnly) ? '<button class="smd-btn" id="lst-clearfil" style="border-color:#d93025;color:#d93025" title="絞り込みをすべて解除">✕ 条件クリア</button>' : ''}
+      </div>
+      <div id="lst-morebox" style="${lst.moreFil ? '' : 'display:none;'}margin:0 0 6px;padding:7px 10px;border:1px solid #e6e2f2;border-radius:8px;background:#faf8ff;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11.5px">
+        <span style="font-size:10px;color:#7b52c4;font-weight:700">明細の空き枠</span>
+        <span class="smd-seg" id="lst-slot"><button data-s="" class="${!lst.slot ? 'on' : ''}">すべて</button><button data-s="free" class="${lst.slot === 'free' ? 'on' : ''}" title="まだ明細を足せるカタログ">🈳空きあり</button><button data-s="full" class="${lst.slot === 'full' ? 'on' : ''}">満杯</button><button data-s="sibfree" class="${lst.slot === 'sibfree' ? 'on' : ''}" title="満杯だが同シリーズの別カタログに空きがある">満杯→同シリーズに空き</button></span>
+        <label style="color:#555" title="バリエ商品の明細数で絞り込み（単品は自動で除きます）">明細数<span class="smd-dim" style="font-size:9.5px">(単品除く)</span> <input id="lst-mmin" type="number" min="0" placeholder="最小" value="${lst.mdlMin != null ? esc(String(lst.mdlMin)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-mmax" type="number" min="0" placeholder="最大" value="${lst.mdlMax != null ? esc(String(lst.mdlMax)) : ''}" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
+        <button class="smd-btn" id="lst-bymodels" style="${lst.sort === 'models' ? 'background:#7b52c4;color:#fff;border-color:#7b52c4;font-weight:700' : 'border-color:#7b52c4;color:#7b52c4;font-weight:700'}" title="押すたびに 明細が少ない順 → 多い順 → 解除">🧩 ${lst.sort === 'models' ? (lst.sortDir === 'asc' ? '明細 少ない順' : '明細 多い順') : '明細数で並べる'}</button>
         <label style="color:#555" title="各国の現地通貨。国を1つに絞ると正確">価格帯 <input id="lst-pmin" type="number" placeholder="最小" value="${lst.priceMin != null ? esc(String(lst.priceMin)) : ''}" style="width:60px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px">〜<input id="lst-pmax" type="number" placeholder="最大" value="${lst.priceMax != null ? esc(String(lst.priceMax)) : ''}" style="width:60px;font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"></label>
         ${specsReady ? `<span class="smd-seg" id="lst-cond">
           <button data-c="" class="${!lst.cond ? 'on' : ''}">状態すべて</button>
           <button data-c="NEW" class="${lst.cond === 'NEW' ? 'on' : ''}">🆕新品</button>
           <button data-c="USED" class="${lst.cond === 'USED' ? 'on' : ''}">♻️中古</button>
         </span>${brands.length ? `<label style="color:#555">ブランド<select id="lst-brand" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:5px"><option value="">すべて</option>${brands.map(b => `<option value="${av(b)}" ${lst.brand === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select></label>` : ''}` : ''}
-        <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">バリエ・単品すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">🧩バリエ有り</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
-        <span class="smd-seg" id="lst-statsperiod" title="🛒販売・👁閲覧・❤️いいねを『全期間の累計』か『直近N日の伸び』で表示（日次スナップショットの差分）"><button data-sp="0" class="${!(lst.statsPeriod) ? 'on' : ''}">📊全期間</button><button data-sp="7" class="${lst.statsPeriod === 7 ? 'on' : ''}">📈7日</button><button data-sp="30" class="${lst.statsPeriod === 30 ? 'on' : ''}">📈30日</button><button data-sp="90" class="${lst.statsPeriod === 90 ? 'on' : ''}">📈90日</button></span>
+        <span style="width:1px;height:18px;background:#e3e6ec"></span>
+        <label style="color:#555" title="商品名の列の幅。長いタイトルを見たい時に広げてください">タイトル幅 <input id="lst-namew" type="range" min="150" max="640" step="10" value="${lst.nameW || 150}" style="width:120px;vertical-align:middle"> <b id="lst-namewv" style="color:#7b52c4">${lst.nameW || 150}px</b></label>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;font-size:11px;color:#8a8f98">
         <span>🕒 最終同期 <b style="color:#555">${listSyncStr()}</b></span>
@@ -15087,7 +15114,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ <span style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center">${per || '国未選択'}</span>${ccSel.length ? `<span style="color:#ee4d2d;font-weight:700">🌏 ${ccSel.join('・')}のみ</span>` : ''}</div>
       <div id="lst-hbar" style="overflow-x:auto;overflow-y:hidden;height:12px;border:1px solid #e8e8e8;border-bottom:none;border-radius:10px 10px 0 0;background:#fafbfc" title="横スクロール（下の表と連動）"><div id="lst-hbar-in" style="height:1px"></div></div>
       ${lst.grid ? '<div id="lst-scroll" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:0 0 10px 10px;background:var(--lst-scrollbg)"><div id="lst-list"></div></div>' : `<div id="lst-scroll" style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:0 0 10px 10px;background:var(--lst-scrollbg)">
-        <div style="min-width:${LMINW}px">
+        <div style="min-width:${LMINW_GET()}px">
         ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:var(--lst-hdrbg);z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
           <span style="${LSTKLH[0]}"></span><span style="${LSTKLH[1]}"></span>
           <span class="lst-sorth" data-s="name" style="min-width:0;cursor:pointer;user-select:none;color:${col('name')};${LSTKLH[2]}" title="クリックで並び替え（再クリックで昇順⇄降順）">商品名 / タイトル${ar('name')}</span>
@@ -15113,6 +15140,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
       </div>`}
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
+    // シリーズ順のとき、表示中のシリーズに順番に色を割り当てる（2件以上あるものだけ色を付ける）
+    if (lst.sort === 'series') {
+      _serMap = new Map(); const cnt = new Map();
+      shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); cnt.set(k, (cnt.get(k) || 0) + 1); });
+      let ci = 0;
+      shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); if ((cnt.get(k) || 0) >= 2 && !_serMap.has(k)) _serMap.set(k, ci++); });
+    } else _serMap = null;
     document.getElementById('lst-list').innerHTML = lst.grid ? listingGridHtml(shown) : (shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>');
     // ★上部の横スクロールバーを本体と連動させる。一番下のバーまで行かないと横に動かせず、
     //   上の行を見ながらの横スクロールができなかったため。
@@ -15215,6 +15249,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         try { logAct('出品', '価格在庫編集(グリッド)', row.name || '', cc + ' ' + chg); } catch (_) {}
       } catch (e) { alert('✗ ' + (e.message || e)); btn.disabled = false; btn.textContent = oldTxt; }
     }));
+    // 詳しい絞り込みの開閉／条件クリア／タイトル幅
+    { const mf = document.getElementById('lst-morefil');
+      if (mf) mf.addEventListener('click', () => { lst.moreFil = !lst.moreFil; try { localStorage.setItem('smdListMoreFil', lst.moreFil ? '1' : '0'); } catch (_) {} const b = document.getElementById('lst-morebox'); if (b) b.style.display = lst.moreFil ? 'flex' : 'none'; }); }
+    { const cf = document.getElementById('lst-clearfil');
+      if (cf) cf.addEventListener('click', () => {
+        lst.slot = ''; lst.mdlMin = null; lst.mdlMax = null; lst.priceMin = null; lst.priceMax = null;
+        lst.cond = ''; lst.brand = ''; lst.varType = ''; lst.seriesOnly = false; lst.page = 1; drawListingStatus();
+      }); }
+    { const nw = document.getElementById('lst-namew'), nv = document.getElementById('lst-namewv');
+      if (nw) {
+        const apply = (v) => { lst.nameW = v; document.documentElement.style.setProperty('--lst-namew', v + 'px'); if (nv) nv.textContent = v + 'px'; };
+        apply(lst.nameW || 150);
+        nw.addEventListener('input', () => apply(Number(nw.value) || 150));
+        nw.addEventListener('change', () => { try { localStorage.setItem('smdListNameW', String(lst.nameW)); } catch (_) {} drawListingStatus(); });
+      } }
     { const sb3 = document.getElementById('lst-series');
       if (sb3) sb3.addEventListener('click', () => {
         // シリーズ順 → シリーズ順＋複数だけ → 解除
