@@ -2097,6 +2097,39 @@
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   // ===== 軽い通知トースト＋クリックでコピー＋Escでモーダルを閉じる（全ページ共通） =====
   let toastTimer = null;
+  // ---------------- 🔁 似ている出品の検知（重複出品を防ぐ） ----------------
+  // ★同じ商品でも出品者が違えばURLは毎回別物なので、URL突合では防げない。
+  //   タイトルの「文字2つ組の重なり具合」(Dice係数)で見る。日本語・英語どちらもそのまま扱えて速い。
+  const simNorm = (t) => String(t || '').toLowerCase()
+    .replace(/[\s\u3000_\-–—、。,.!！？?()（）\[\]【】"'`:：;；\/\\|+*&#@~^%$]/g, '')
+    .replace(/(送料無料|送料込み?|匿名配送|新品未使用|未使用に近い|即決|美品|中古|used|new)/g, '');
+  const simGrams = (t) => { const n = simNorm(t); const g = new Set(); if (n.length < 2) { if (n) g.add(n); return g; } for (let i = 0; i < n.length - 1; i++) g.add(n.slice(i, i + 2)); return g; };
+  const simDice = (a, b) => { if (!a.size || !b.size) return 0; let k = 0; a.forEach(x => { if (b.has(x)) k++; }); return 2 * k / (a.size + b.size); };
+  // 既存出品の索引（同じ国のぶんだけ。全件だと重いうえ、重複が問題になるのは同一国内）
+  const simIdx = {};
+  function simIndexFor(cc) {
+    if (simIdx[cc]) return simIdx[cc];
+    const items = [];
+    (lst.byCc[cc] || []).forEach(r => {
+      const ms = Array.isArray(r.models) ? r.models : (() => { try { return JSON.parse(r.models || '[]'); } catch (_) { return []; } })();
+      if (ms.length) ms.forEach(m => { if (m.n) items.push({ t: m.n, item_id: r.item_id, name: r.name }); });
+      else if (r.name) items.push({ t: r.name, item_id: r.item_id, name: r.name });
+    });
+    const inv = new Map();
+    items.forEach((x, i) => { x.g = simGrams(x.t); x.g.forEach(gr => { let a = inv.get(gr); if (!a) inv.set(gr, a = []); if (a.length < 400) a.push(i); }); });
+    return (simIdx[cc] = { items, inv });
+  }
+  // クエリに似た既存出品を1件返す（しきい値以上のうち最良）
+  function simFind(cc, text, min) {
+    const ix = simIndexFor(cc); if (!ix.items.length) return null;
+    const g = simGrams(text); if (g.size < 3) return null;
+    const cnt = new Map();
+    g.forEach(gr => { const a = ix.inv.get(gr); if (a) a.forEach(i => cnt.set(i, (cnt.get(i) || 0) + 1)); });
+    const cand = [...cnt.entries()].sort((x, y) => y[1] - x[1]).slice(0, 30);
+    let best = null;
+    cand.forEach(([i]) => { const sc = simDice(g, ix.items[i].g); if (!best || sc > best.score) best = { score: sc, ...ix.items[i] }; });
+    return (best && best.score >= (min || 0.72)) ? best : null;
+  }
   // ---------------- 🔁 重複出品の見張り（仕入元URL台帳） ----------------
   // ★同じ商品を2回出すのを防ぐ最も確実な手がかりは「仕入元URL」。画像の見た目より確実で軽い。
   //   明細を追加するたびに url → {cc,item,opt,ts} を app_kv に貯め、次に同じURLを貼ったら警告する。
@@ -11022,7 +11055,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
           <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:5px;font-size:11.5px">
-          ${r.dup ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この仕入元URLは ${esc(r.dup.cc)} の item ${esc(String(r.dup.i))}／明細「${esc(r.dup.o || '')}」で既に出しています">⚠既出 ${esc(r.dup.cc)}</span>` : ''}
+          ${r.dup ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この仕入元URLは ${esc(r.dup.cc)} の item ${esc(String(r.dup.i))}／明細「${esc(r.dup.o || '')}」で既に出しています">⚠既出</span>` : ''}
+          ${r.same ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この中の ${r.same.i}行目「${esc(r.same.name)}」と ${r.same.score}% 一致。同じ商品を2回出そうとしている可能性">⚠${r.same.i}行目と重複</span>`
+            : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="既に出している「${esc(r.near.name)}」(item ${esc(String(r.near.item_id))}) と ${r.near.score}% 一致">⚠似た出品あり</span>` : '')}
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:${BW.cost}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:${BW.wg}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:${BW.price}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
@@ -11124,6 +11159,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             }));
             const bad2 = list.filter(x => !x.name || !(parseFloat(x.price) > 0));
             if (bad2.length) { alert('明細名と価格が入っていない行があります（' + bad2.length + '件）'); return; }
+            { const risky = [...bx.querySelectorAll('.ed-brow')].map(rw => rows[+rw.dataset.i]).filter(r => r && (r.same || r.near));
+              if (risky.length && !confirm('⚠ 重複の可能性がある行が ' + risky.length + '件あります\n\n'
+                + risky.slice(0, 8).map(r => '・' + r.name + (r.same ? '（この中の' + r.same.i + '行目と' + r.same.score + '%一致）' : '（既存出品と' + r.near.score + '%一致）')).join('\n')
+                + (risky.length > 8 ? '\n…ほか' + (risky.length - 8) + '件' : '')
+                + '\n\n不要な行は✕で外せます。このまま進めますか？')) return; }
             // 手で直した結果また同名になっていることがあるので、送る直前に必ず一意化する
             { const taken = new Set(existNames); let fixed = 0;
               list.forEach(x => { const u = uniqName(x.name, taken); if (u !== x.name) { x.name = u; x.el.querySelector('.eb-name').value = u; fixed++; } });
@@ -11228,6 +11268,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const meta = await openapiFetchMeta(u);
             r.cost = meta.price || 0;
             if (meta.image && !r.image) r.image = meta.image;
+            r.src = meta.title || '';                       // 元タイトル（日本語）は類似判定に使う＝英語化より判別力が高い
             r.name = meta.title ? (await suggestVarName(meta.title, 30) || cleanSourceTitle(meta.title).slice(0, 30)) : '';
           } catch (e) { r.err = String(e && e.message || e).slice(0, 40); }
           return r;
@@ -11259,10 +11300,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
           await srcMapLoad();                                   // 既に出したURLの台帳
           rows = dedupeRows(await runPool(urls)).map(r => Object.assign(r, { wg: wDefB(), dup: srcDupOf(r.url) }));
+          // ★同じ商品を別の出品者から拾うとURLは別物になる＝URLでは防げない。タイトルの似具合で見る。
+          //   ①貼った中どうし（検索結果をそのまま貼ると同じ商品が何個も混ざる）②この国の既存出品
+          rows.forEach((r, i) => {
+            const gi = simGrams(r.src || r.name);
+            for (let k = 0; k < i; k++) {
+              const gk = simGrams(rows[k].src || rows[k].name);
+              const sc = simDice(gi, gk);
+              if (sc >= 0.78) { r.same = { i: k + 1, name: rows[k].name, score: Math.round(sc * 100) }; break; }
+            }
+            if (!r.same) { const f = simFind(cc, r.src || r.name, 0.72); if (f) r.near = { name: f.t, item_id: f.item_id, score: Math.round(f.score * 100) }; }
+          });
           const ng = rows.filter(r => r.err).length;
           const dupN = rows.filter(r => r.dup).length;
+          const sameN = rows.filter(r => r.same).length, nearN = rows.filter(r => r.near).length;
           if (bm) bm.innerHTML = rows.length + '件を取り込みました' + (ng ? '（<span style="color:#d93025">読み取り失敗 ' + ng + '件</span>）' : '')
-            + (dupN ? '　<b style="color:#d93025">⚠ ' + dupN + '件は過去に出したことのある仕入元URLです（重複の可能性）</b>' : '')
+            + (dupN ? '　<b style="color:#d93025">⚠ ' + dupN + '件は過去に出した仕入元URLです</b>' : '')
+            + (sameN ? '　<b style="color:#d93025">⚠ この中で重複 ' + sameN + '件</b>' : '')
+            + (nearN ? '　<b style="color:#e8710a">⚠ 既に出している商品に似ている ' + nearN + '件</b>' : '')
             + '。名前・価格を確認して「②まとめて追加」';
           bl.disabled = false; if (bstop) bstop.style.display = 'none';
           draw();
