@@ -1298,6 +1298,47 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公開/非公開の切替に失敗');
     return res;
   }
+  // ---------------- 最小ZIP（store方式・外部ライブラリなし） ----------------
+  // 画像は既に圧縮済みなので無圧縮で十分。CRC32だけ自前で持つ。
+  const CRC_TBL = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+  const crc32 = (u8) => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC_TBL[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  function makeZip(files) {   // files=[{name, data:Uint8Array}]
+    const enc = new TextEncoder(), parts = [], central = [];
+    let off = 0;
+    files.forEach(f => {
+      const nm = enc.encode(f.name), crc = crc32(f.data), sz = f.data.length;
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true); lh.setUint16(10, 0, true); lh.setUint16(12, 0, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, sz, true); lh.setUint32(22, sz, true);
+      lh.setUint16(26, nm.length, true); lh.setUint16(28, 0, true);
+      parts.push(new Uint8Array(lh.buffer), nm, f.data);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+      ch.setUint16(10, 0, true); ch.setUint16(12, 0, true); ch.setUint16(14, 0, true);
+      ch.setUint32(16, crc, true); ch.setUint32(20, sz, true); ch.setUint32(24, sz, true);
+      ch.setUint16(28, nm.length, true); ch.setUint16(30, 0, true); ch.setUint16(32, 0, true);
+      ch.setUint16(34, 0, true); ch.setUint16(36, 0, true); ch.setUint32(38, 0, true); ch.setUint32(42, off, true);
+      central.push(new Uint8Array(ch.buffer), nm);
+      off += 30 + nm.length + sz;
+    });
+    const cStart = off;
+    let cLen = 0; central.forEach(x => cLen += x.length);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, cLen, true); end.setUint32(16, cStart, true);
+    return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+  }
+  // 画像URL→バイト列。まず直接fetch、CORSで弾かれたらGASのproxy(fetch_image)経由で取る
+  async function fetchImgBytes(url) {
+    try {
+      const r = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+      if (r.ok) { const b = new Uint8Array(await r.arrayBuffer()); if (b.length > 100) return { bytes: b, mime: r.headers.get('content-type') || 'image/jpeg' }; }
+    } catch (_) { /* CORS → プロキシへ */ }
+    const res = await gasCall({ action: 'fetch_image', url: url }, 60000);
+    if (!res || !res.b64) throw new Error('画像を取得できませんでした');
+    return { bytes: Uint8Array.from(atob(res.b64), c => c.charCodeAt(0)), mime: res.mime || 'image/jpeg' };
+  }
   // アップロード画像(data:)を Supabase Storage(公開バケット listing-imgs)に上げて公開http URLを返す（直接API出品用）
   async function uploadImgToStorage(dataUrl, tag) {
     if (!settings.sbSecret) throw new Error('書き込みキー(sbSecret)が未設定です（⚙️設定）');
@@ -10044,6 +10085,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）<span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">名前は「保存」で反映／並び順は ◀▶ で入れ替えて「並び順を保存」（Shopeeの表示順になります）</span></div>${tierHtml}
           ${tiers.length === 1 ? `<div style="margin-top:6px"><button class="ed-ordersave smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" disabled>↕ 並び順を保存</button> <span class="ed-ordermsg smd-dim" style="font-size:10.5px"></span></div>` : ''}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）<span class="ed-spread" style="font-weight:400;font-size:11px;margin-left:8px"></span></div>
+          ${tiers.length === 1 ? `<div style="margin:6px 0 2px;border:1px dashed #cdd7ea;border-radius:8px;padding:8px 10px;background:#fafbff">
+            <div style="font-size:11.5px;font-weight:700;color:#3b5bdb">🖼 明細画像の入れ替え（PhotoRoom等で白抜きにして戻す）</div>
+            <div class="smd-dim" style="font-size:10.5px;margin:2px 0 6px">① ZIPで落とす（ファイル名の先頭に番号が入ります）→ ② 加工ツールにまとめて通す（<b>ファイル名の先頭の番号を消さない</b>）→ ③ まとめて戻す。番号で紐付けるので明細がずれません。</div>
+            <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
+              <button class="ed-imgdl smd-btn" style="font-size:11.5px;padding:5px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">⬇️ 明細画像を一括ダウンロード（ZIP）</button>
+              <button class="ed-imgup smd-btn" style="font-size:11.5px;padding:5px 12px;border-color:#1a7f37;color:#1a7f37;font-weight:700">⬆️ 加工した画像をまとめて戻す</button>
+              <input type="file" class="ed-imgupfile" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple style="display:none">
+              <span class="ed-imgmsg smd-dim" style="font-size:11px"></span>
+            </div>
+            <div class="ed-imgmap" style="margin-top:7px"></div>
+          </div>` : ''}
           <div style="max-height:320px;overflow:auto;margin-top:6px"><table class="pf-table" style="width:100%"><tr><th>画像</th><th style="text-align:left">明細</th><th>価格</th><th>在庫</th><th>SKU <button class="ed-skusug" title="親SKU＋明細名から全明細のSKUを自動生成（空欄のみ。もう一度押すと全上書き）" style="border:1px solid #ddd;background:#fff;border-radius:5px;font-size:9.5px;padding:1px 6px;cursor:pointer;font-weight:400">💡一括</button></th>${tiers.length === 1 ? '<th style="width:44px">削除</th>' : ''}</tr>${modelRows}</table></div>
           ${tiers.length === 1 ? `<div style="margin-top:10px;border:1px dashed #cdd7ea;border-radius:8px;padding:9px 11px;background:#fafbff">
             <div style="font-weight:700;color:#3b5bdb;font-size:12px;margin-bottom:5px">＋ 明細（バリエーション）を追加</div>
@@ -10205,6 +10257,98 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           dtsEl.style.background = '#fffdf5';
           setTimeout(() => { dtsEl.style.background = ''; }, 900);
         }); }
+      // ---- 🖼 明細画像の一括DL / 一括アップ（番号で紐付けるのでズレない） ----
+      { const dlB = body.querySelector('.ed-imgdl'), upB = body.querySelector('.ed-imgup'),
+              upF = body.querySelector('.ed-imgupfile'), msgI = body.querySelector('.ed-imgmsg'), mapEl = body.querySelector('.ed-imgmap');
+        // 明細の並び順（Shopeeの表示順＝tier_indexの順）。この順番の1始まり番号をファイル名に付ける。
+        const optList = (tiers[0] && tiers[0].value_list) || [];
+        const slots = optList.map((o, i) => {
+          const m = models.find(x => (x.tier_index || [])[0] === i);
+          return { no: i + 1, opt: o.custom_value || '', img: (m && m.img) || '', hasModel: !!m };
+        });
+        const safeName = (t) => String(t || '').replace(/[\\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'variation';
+        const pad = (n) => String(n).padStart(3, '0');
+        if (dlB) dlB.addEventListener('click', async () => {
+          const targets = slots.filter(s2 => s2.img);
+          if (!targets.length) { alert('画像が設定されている明細がありません'); return; }
+          dlB.disabled = true;
+          const files = [], ng = [];
+          for (let i = 0; i < targets.length; i++) {
+            const t = targets[i];
+            if (msgI) msgI.textContent = 'ダウンロード中… ' + (i + 1) + '/' + targets.length;
+            try {
+              const r = await fetchImgBytes(t.img);
+              const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg');
+              files.push({ name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes });
+            } catch (e) { ng.push(t.no + ' ' + t.opt); }
+          }
+          if (!files.length) { dlB.disabled = false; if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした（GASのfetch_imageが必要かも）'; } return; }
+          const zip = makeZip(files);
+          const a2 = document.createElement('a');
+          a2.href = URL.createObjectURL(zip);
+          a2.download = cc + '_' + itemId + '_明細画像_' + files.length + '枚.zip';
+          a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 4000);
+          dlB.disabled = false;
+          if (msgI) { msgI.style.color = ng.length ? '#e8710a' : '#1a7f37'; msgI.textContent = '✓ ' + files.length + '枚をZIPにしました' + (ng.length ? '（取得できず: ' + ng.length + '件）' : '') + '。加工後は先頭の番号を消さずに「⬆️まとめて戻す」へ'; }
+        });
+        if (upB && upF) upB.addEventListener('click', () => { if (!needOfficial()) return; upF.click(); });
+        if (upF) upF.addEventListener('change', async () => {
+          const fs = [...(upF.files || [])]; upF.value = '';
+          if (!fs.length) return;
+          // ファイル名の先頭の数字＝明細番号。無ければ明細名で照合。それでもダメなら手で選ばせる。
+          const byName = new Map(slots.map(s2 => [safeName(s2.opt).toLowerCase(), s2.no]));
+          const rows2 = fs.map(f => {
+            const base = f.name.replace(/\.[^.]+$/, '');
+            const mNo = /^\s*(\d{1,3})\b/.exec(base);
+            let no = mNo ? parseInt(mNo[1], 10) : 0;
+            if (!(no >= 1 && no <= slots.length)) {
+              no = 0;
+              const low = base.toLowerCase();
+              for (const [k, v] of byName) { if (k && low.includes(k)) { no = v; break; } }
+            }
+            return { file: f, no };
+          });
+          const optHtml = (sel) => '<option value="0">（選んでください）</option>' + slots.map(s2 => `<option value="${s2.no}" ${sel === s2.no ? 'selected' : ''}>${s2.no}. ${esc(s2.opt)}</option>`).join('');
+          mapEl.innerHTML = `<div style="font-size:11px;font-weight:700;color:#5a6b8c;margin-bottom:3px">戻す先の確認（${rows2.length}件）</div>`
+            + rows2.map((r, i) => `<div class="ed-uprow" data-i="${i}" style="display:flex;gap:6px;align-items:center;padding:3px 0;border-top:1px solid #f0f0f0">
+                <span style="width:36px;flex:none"><img class="up-th" data-i="${i}" style="width:34px;height:34px;object-fit:contain;background:#f2f2f2;border-radius:4px"></span>
+                <span style="flex:1;min-width:0;font-size:10.5px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.file.name)}">${esc(r.file.name)}</span>
+                <span style="font-size:11px;color:#8a8f98">→</span>
+                <select class="up-sel" data-i="${i}" style="flex:1;min-width:120px;padding:3px 6px;border:1px solid ${r.no ? '#ddd' : '#d93025'};border-radius:5px;font-size:11px">${optHtml(r.no)}</select>
+                <span class="up-st" style="width:74px;flex:none;font-size:10.5px;color:#8a8f98"></span>
+              </div>`).join('')
+            + `<div style="margin-top:7px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="ed-upgo smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#1a7f37;color:#1a7f37;font-weight:700">▶ ${rows2.length}件をShopeeに反映</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番に差し替えます（既存の明細・在庫・価格は変わりません）</span></div>`;
+          rows2.forEach((r, i) => { const rd = new FileReader(); rd.onload = () => { const im = mapEl.querySelector('.up-th[data-i="' + i + '"]'); if (im) im.src = rd.result; }; rd.readAsDataURL(r.file); });
+          const go = mapEl.querySelector('.ed-upgo');
+          go.addEventListener('click', async () => {
+            const sels = [...mapEl.querySelectorAll('.up-sel')];
+            const pick = sels.map(s2 => +s2.value);
+            if (pick.some(v => !v)) { alert('戻す先が決まっていない行があります'); return; }
+            const dup = pick.filter((v, i) => pick.indexOf(v) !== i);
+            if (dup.length && !confirm('同じ明細に複数の画像が割り当てられています（後の方で上書きされます）。このまま進めますか？')) return;
+            const gwU = await guardWriteCountries([cc]); if (!gwU.ok) { alert(gwU.msg); return; }
+            if (!confirm('書込先: ' + gwU.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細画像を ' + pick.length + '件 差し替えます。\n\nよろしいですか？')) return;
+            go.disabled = true;
+            let ok3 = 0;
+            for (let i = 0; i < rows2.length; i++) {
+              const st = mapEl.querySelector('.ed-uprow[data-i="' + i + '"] .up-st');
+              const slot = slots.find(s2 => s2.no === pick[i]);
+              if (st) { st.style.color = '#8a8f98'; st.textContent = 'アップ中…'; }
+              try {
+                const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(rows2[i].file); });
+                const url = await uploadImgToStorage(dataUrl, 'var' + slot.no);
+                await openapiSetVariationImage(sidCat, itemId, slot.opt, url);
+                ok3++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ ' + slot.no; }
+              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗'; st.title = String(e.message); } }
+              go.textContent = '▶ 反映中… ' + ok3 + '/' + rows2.length;
+            }
+            markStale();
+            try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + ok3 + '/' + rows2.length + '件 → ' + rows2.map((r, i) => pick[i] + '.' + (slots.find(s2 => s2.no === pick[i]) || {}).opt).join(' / ')); } catch (_) {}
+            go.disabled = false; go.textContent = '✓ 完了：' + ok3 + '/' + rows2.length + '件';
+            toast('🖼 ' + ok3 + '件の明細画像を差し替えました（開き直すと反映されます）');
+          });
+        });
+      }
       // ---- 中身のない明細の掃除 ----
       { const cg = body.querySelector('.ed-cleanghost');
         if (cg) cg.addEventListener('click', async () => {

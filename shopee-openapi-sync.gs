@@ -281,6 +281,21 @@ function doGet(e) {
       } catch (err) { rsout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rscb + '(' + JSON.stringify(rsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★画像の取り出しプロキシ。ShopeeのCDNはブラウザから直接fetchするとCORSで弾かれることがあるため、
+    //   GAS経由でbase64にして返す（明細画像の一括ダウンロード用・読み取りのみ）。
+    if (p.action === 'fetch_image') {
+      var ficb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var fiout;
+      try {
+        var fiu = String(p.url || '');
+        if (!/^https?:\/\//.test(fiu)) throw new Error('URLが不正です');
+        var fr = UrlFetchApp.fetch(fiu, { muteHttpExceptions: true, followRedirects: true });
+        if (fr.getResponseCode() >= 400) throw new Error('HTTP ' + fr.getResponseCode());
+        var fb = fr.getBlob();
+        fiout = { ok: true, mime: fb.getContentType() || 'image/jpeg', b64: Utilities.base64Encode(fb.getBytes()) };
+      } catch (err) { fiout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ficb + '(' + JSON.stringify(fiout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
