@@ -10555,9 +10555,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ---- 明細の並び替え：◀▶でDOMを入れ替え、「並び順を保存」でShopeeへ反映（tier_indexも再マップ） ----
       { const osBtn = body.querySelector('.ed-ordersave'), osMsg = body.querySelector('.ed-ordermsg');
         const origOrder = (tiers[0] && (tiers[0].value_list || []).map(o => o.custom_value)) || [];
-        const curOrder = () => [...body.querySelectorAll('.ed-tierrow .ed-tier')].map(i => i.value);
-        const dirty = () => { const c = curOrder(); return c.length === origOrder.length && c.some((v, i) => v !== origOrder[i]); };
-        const sync = () => { if (!osBtn) return; const d = dirty(); osBtn.disabled = !d; if (osMsg) osMsg.textContent = d ? '並び順が変更されています → 保存してください' : ''; };
+        // ★並べ替えは「画面に出ている名前」ではなく「Shopeeに今ある名前」で送る。
+        //   名前を編集した明細（まだ保存していない）を送ると "不明な明細名" で弾かれるため、
+        //   各行が元の何番だったか(data-oi)を辿って元の名前に戻して送る。
+        const curOi = () => [...body.querySelectorAll('.ed-tierrow')].map(r => {
+          const inp = r.querySelector('.ed-tier'); return inp ? +inp.dataset.oi : -1;
+        }).filter(x => x >= 0);
+        const curOrder = () => curOi().map(oi => origOrder[oi]);
+        // 並び順が変わったかは「元の番号の並び」で判定する（名前を直しただけで並び替え扱いにしない）
+        const dirty = () => { const o = curOi(); return o.length === origOrder.length && o.some((oi, i) => oi !== i); };
+        const sync = () => { if (!osBtn) return; const d = dirty(); osBtn.disabled = !d; if (osMsg) { osMsg.style.color = ''; osMsg.textContent = d ? '並び順が変更されています → 保存してください' : ''; } };
         body.querySelectorAll('.ed-tmv').forEach(b3 => b3.addEventListener('click', () => {
           const row = b3.closest('.ed-tierrow'); if (!row) return;
           const d = +b3.dataset.d;
@@ -10570,9 +10577,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (osBtn) osBtn.addEventListener('click', async () => {
           if (!needOfficial()) return;
           const order = curOrder();
-          if (new Set(order).size !== order.length) { alert('明細名が重複しています。先に名前を直してください'); return; }
+          if (order.some(n => n == null)) { alert('並び順を読み取れませんでした。画面を開き直してください'); return; }
+          if (new Set(order).size !== order.length) { alert('Shopee側の明細名が重複しています。先に名前を直して保存してください'); return; }
+          // 名前を編集済みの場合、この操作では名前は反映されない（下の「Shopeeに保存」が担当）
+          const renamed = [...body.querySelectorAll('.ed-tierrow .ed-tier')].filter(i => i.value !== origOrder[+i.dataset.oi]).length;
           const gw3 = await guardWriteCountries([cc]); if (!gw3.ok) { alert(gw3.msg); return; }
-          if (!confirm('書込先: ' + gw3.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細を次の順に並べ替えます:\n\n' + order.map((n, i) => (i + 1) + '. ' + n).join('\n') + '\n\nよろしいですか？')) return;
+          if (!confirm('書込先: ' + gw3.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細を次の順に並べ替えます:\n\n' + order.map((n, i) => (i + 1) + '. ' + n).join('\n')
+            + (renamed ? '\n\n※名前を書き換えた明細が ' + renamed + '件あります。ここでは並び順だけ保存されます（名前は下の「Shopeeに保存」で反映してください）。' : '')
+            + '\n\nよろしいですか？')) return;
           osBtn.disabled = true; osBtn.textContent = '保存中…';
           try {
             await openapiReorderVariation(sidCat, itemId, order);
