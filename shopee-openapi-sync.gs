@@ -572,7 +572,7 @@ function doGet(e) {
         var dvwt = P_().getProperty('WRITE_TOKEN');
         if (!dvwt || p.token !== dvwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var dvshop = parseInt(p.shop_id, 10); if (!getToken_(dvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String), String(p.idx || ''));
+        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String), String(p.idx || ''), String(p.mids || ''));
       } catch (err) { dvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dvcb + '(' + JSON.stringify(dvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1196,27 +1196,43 @@ function cleanVariation_(shopId, itemId) {
 // ★明細(バリエ)を削除。delete_model でモデルを消し、tierのオプションも取り除いて番号を詰め直す。
 //   ・残り0件にはできない（Shopeeがバリエ商品として成立しなくなる）
 //   ・売れた実績のあるモデルもShopee側の判断で削除不可のことがある（その場合はエラーを返す）
-function removeVariation_(shopId, itemId, names, idxCsv) {
+function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
-  if (!names || !names.length) throw new Error('削除する明細名が空です');
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], optList = tier.option_list || [];
   var cur = optList.map(function (o) { return o.option; });
-  // ★名前は画面で書き換えられている場合があるため、見つからなければ「番号(0始まり)」で消す。
-  //   idxCsv は names と同じ並びの位置。どちらかで特定できればOK。
-  var idxArr = String(idxCsv || '').split(',').map(function (x) { return parseInt(x, 10); });
-  var delIdx = {}, unknown = [];
-  names.forEach(function (n, k) {
-    var oi = cur.indexOf(n);
-    if (oi < 0) {
-      var fb = idxArr[k];
-      if (fb >= 0 && fb < cur.length) oi = fb; else { unknown.push(n); return; }
-    }
-    delIdx[oi] = 1;
-  });
-  if (!Object.keys(delIdx).length) throw new Error('削除する明細を特定できませんでした（画面を開き直してから試してください）: ' + unknown.join(', '));
+  var delIdx = {}, unknown = [], resolved = [], want = 0;
+  var mids = String(midCsv || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+  if (mids.length) {
+    // ★model_id（その明細そのもののID）で特定する＝名前や番号のズレで別の明細を巻き込む事故が起きない。
+    var byMid = {};
+    models.forEach(function (m) { byMid[String(m.model_id)] = m; });
+    want = mids.length;
+    mids.forEach(function (mid) {
+      var m = byMid[String(mid)];
+      var oi = m ? (m.tier_index || [])[0] : null;
+      if (m == null || oi == null) { unknown.push('ID ' + mid); return; }
+      if (!delIdx[oi]) { delIdx[oi] = 1; resolved.push(cur[oi]); }
+    });
+  } else {
+    if (!names || !names.length) throw new Error('削除する明細名が空です');
+    // 旧経路（名前→見つからなければ番号）。model_idが送られてこない古い画面向けの保険。
+    var idxArr = String(idxCsv || '').split(',').map(function (x) { return parseInt(x, 10); });
+    want = names.length;
+    names.forEach(function (n, k) {
+      var oi = cur.indexOf(n);
+      if (oi < 0) {
+        var fb = idxArr[k];
+        if (fb >= 0 && fb < cur.length) oi = fb; else { unknown.push(n); return; }
+      }
+      if (!delIdx[oi]) { delIdx[oi] = 1; resolved.push(cur[oi]); }
+    });
+  }
+  if (unknown.length) throw new Error('この明細が今のShopee側に見つかりません（画面を開き直してください）: ' + unknown.join(', '));
+  // ★数が合わないまま進めると別の明細まで消える。安全側に倒して必ず止める。
+  if (Object.keys(delIdx).length !== want) throw new Error('消す対象の数が合いません（' + Object.keys(delIdx).length + '/' + want + '）。安全のため中止しました');
   var keep = [];
   for (var i = 0; i < cur.length; i++) if (!delIdx[i]) keep.push(i);
   if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
@@ -1232,7 +1248,14 @@ function removeVariation_(shopId, itemId, names, idxCsv) {
   var remap = models.filter(function (m) { return !delIdx[(m.tier_index || [])[0]]; })
     .map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
-  return { ok: true, deleted: names.length, remain: newOpts.length };
+  // ★消したつもりが消えていない／余分に消えた を画面で確認できるよう、実際の残り件数を読み直して返す
+  var after = {};
+  try {
+    var j2 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+    var t2 = ((j2.response || {}).tier_variation || [])[0] || {};
+    after = { remain: (t2.option_list || []).length, names: (t2.option_list || []).map(function (o) { return o.option; }) };
+  } catch (e) { after = { remain: newOpts.length }; }
+  return { ok: true, deleted: resolved.length, deleted_names: resolved, remain: after.remain, remain_names: after.names || [] };
 }
 // ★明細をまとめて追加。画像を並列アップロード→tier更新1回→add_model1回。
 //   1件ずつ（画像DL＋upload_image＋get_model_list＋update_tier_variation＋add_model）の4〜5往復×件数を大幅に削減。
