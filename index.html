@@ -10332,14 +10332,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           // ②GASに8枚ずつまとめて依頼（サーバ側で並列取得）。1枚ずつ呼ぶより桁違いに速い。
           for (let i = 0; i < viaGas.length; i += 8) {
             const chunk = viaGas.slice(i, i + 8);
-            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（まとめて取得中）';
+            // ★1回のまとめ取得は数秒〜十数秒かかる。その間カウンタが止まると「固まった」ように見えるので、
+            //   いま何枚目をやっていて何秒経ったかを1秒ごとに出す。
+            const from = i + 1, to = i + chunk.length, t0 = Date.now();
+            const tick = setInterval(() => { if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + from + '〜' + to + '枚目を取得中… ' + Math.round((Date.now() - t0) / 1000) + '秒）'; }, 1000);
+            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + from + '〜' + to + '枚目を取得中…）';
             try {
               const got = await fetchImgsViaGas(chunk.map(t => t.img));
               chunk.forEach((t, k) => { if (got[k]) push(t, got[k]); else ng.push(t.no + ' ' + t.opt); });
             } catch (e) {
               // まとめ取得が失敗したら1枚ずつで拾い直す
-              for (const t of chunk) { try { push(t, await fetchImgViaGas(t.img)); } catch (_) { ng.push(t.no + ' ' + t.opt); } }
+              for (const t of chunk) {
+                try { push(t, await fetchImgViaGas(t.img)); } catch (_) { ng.push(t.no + ' ' + t.opt); }
+                done++; if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（1枚ずつに切替中）';
+              }
+              clearInterval(tick); setMsg(); continue;
             }
+            clearInterval(tick);
             done += chunk.length; setMsg();
           }
           files.sort((a, b) => a.no - b.no);
