@@ -2202,6 +2202,22 @@
   const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-50))); } catch (_) {} };
   // ★しごとが終わった時に画面を追従させるためのコールバック（同じ画面を開いたままの場合のみ）
   const JOB_DONE_CB = {};
+  // ★しごとの進み具合を、開いている画面のその場にも映す（右下パネルを見に行かなくて済むように）
+  const JOB_MIRROR = {};
+  const JOB_T0 = {};
+  function jobBar(pct, label, color) {
+    pct = Math.max(0, Math.min(100, Math.round(pct || 0)));
+    return '<span style="display:inline-flex;align-items:center;gap:6px;vertical-align:middle">'
+      + '<span style="display:inline-block;width:130px;height:8px;background:#eee;border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:' + pct + '%;background:' + (color || '#1a7f37') + ';transition:width .3s"></span></span>'
+      + '<b>' + pct + '%</b>' + (label ? '<span style="color:#8a8f98">' + label + '</span>' : '') + '</span>';
+  }
+  function jobEta(key, pct) {
+    const t0 = JOB_T0[key] || (JOB_T0[key] = Date.now());
+    if (!pct || pct < 3) return '';
+    const el = (Date.now() - t0) / 1000;
+    const left = Math.max(1, Math.round(el / pct * (100 - pct)));
+    return '　残り約 ' + (left > 90 ? Math.round(left / 60) + '分' : left + '秒');
+  }
   // 明細画像を差し替えた後、開いているエディタのサムネもその場で更新する（古い画像が残ると紛らわしい）
   function applyVarThumbs(pairs) {
     (pairs || []).forEach(({ option, url }) => {
@@ -2227,6 +2243,7 @@
       if (!j) { j = { id: ++JOBS.seq, remote: r.k, title: v.title || '作業', sub: v.sub || '', state: 'run', pct: 0, msg: '' }; JOBS.list.push(j); }
       j.title = v.title || j.title; j.sub = v.sub || j.sub; j.pct = v.pct || j.pct;
       j.msg = v.status === 'done' ? (v.msg || '完了') : (v.status === 'error' ? (v.error || '失敗') : (v.step || ''));
+      try { if (JOB_MIRROR[r.k]) JOB_MIRROR[r.k](v); } catch (_) {}
       const wasRun = j.state === 'run' || j.state === 'wait';
       j.state = v.status === 'done' ? 'done' : (v.status === 'error' ? 'err' : (v.status === 'cancel' ? 'stop' : 'run'));
       if (wasRun && j.state === 'done' && JOB_DONE_CB[r.k]) { try { JOB_DONE_CB[r.k](v); } catch (_) {} delete JOB_DONE_CB[r.k]; }
@@ -10475,6 +10492,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           (async () => {
             // ★状態はDBに置く＝ページをリロードしても走り続け、進み具合も戻ってくる
             const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚）');
+            JOB_T0[key] = Date.now();
+            JOB_MIRROR[key] = (v) => {
+              if (!msgI || !msgI.isConnected) return;
+              if (v.status === 'done') { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ZIP完成 ' + jobBar(100) + (v.result && v.result.url ? ' <a href="' + v.result.url + '" target="_blank" rel="noopener" style="color:#1565c0">始まらない場合はここ</a>' : ''); delete JOB_MIRROR[key]; return; }
+              if (v.status === 'error' || v.status === 'cancel') { msgI.style.color = '#d93025'; msgI.textContent = v.status === 'cancel' ? '止めました' : ('失敗: ' + (v.error || '')); delete JOB_MIRROR[key]; return; }
+              msgI.style.color = '#3b5bdb';
+              msgI.innerHTML = 'ZIPを作成中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');
+            };
             jobPollStart();
             gasSerial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId, job: key }, 300000))
               .catch(e => jobRemoteFail(key, e && e.message));
@@ -10540,7 +10565,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                     const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(files[i5].file); });
                     urls[i5] = await uploadImgToStorage(dataUrl, 'var' + files[i5].no);
                   } catch (e) { urls[i5] = null; }
-                  up++; ctx.progress(up / files.length * 45, '① 画像を準備中 ' + up + '/' + files.length);
+                  up++;
+                  const pct0 = up / files.length * 45;
+                  ctx.progress(pct0, '① 画像を準備中 ' + up + '/' + files.length);
+                  if (go && go.isConnected) go.innerHTML = '① 画像を準備中 ' + jobBar(pct0, up + '/' + files.length, '#3b5bdb');
                 }
               };
               await Promise.all(Array.from({ length: Math.min(6, files.length) }, worker));
@@ -10554,6 +10582,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               // ③ ここから先はDB管理のしごとに引き継ぐ＝リロードしても続く
               ctx.progress(100, '準備完了');
               const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）');
+              JOB_T0[key] = Date.now();
+              JOB_MIRROR[key] = (v) => {
+                if (!go || !go.isConnected) return;
+                if (v.status === 'done') { go.disabled = false; go.innerHTML = '✓ 完了 ' + ((v.result && v.result.applied) || items.length) + '/' + items.length + '件 ' + jobBar(100); delete JOB_MIRROR[key]; return; }
+                if (v.status === 'error' || v.status === 'cancel') { go.disabled = false; go.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ 失敗: ' + (v.error || '')); delete JOB_MIRROR[key]; return; }
+                go.innerHTML = '② Shopeeへ反映中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0));
+              };
               jobPollStart();
               // 反映が終わったら、開いたままのエディタのサムネも新しい画像に差し替える
               JOB_DONE_CB[key] = () => { applyVarThumbs(items); toast('🖼 画面のサムネも新しい画像に更新しました'); };
@@ -10561,7 +10596,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 .catch(e => jobRemoteFail(key, e && e.message));
               try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + items.length + '件 → ' + label); } catch (_) {}
               markStale();
-              if (go && go.isConnected) { go.disabled = false; go.textContent = '🗂 反映をしごとに積みました（この画面は閉じてOK）'; }
+              if (go && go.isConnected) go.innerHTML = '② Shopeeへ反映中 ' + jobBar(0, '開始しています');
               return { msg: '準備 ' + items.length + '件（' + Math.round((Date.now() - t1) / 1000) + '秒）→ 反映へ' };
             });
           });
