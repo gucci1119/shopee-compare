@@ -1852,11 +1852,15 @@
       .replace(/[★☆♪◆■●◎※]/g, ' ')
       .replace(/\s{2,}/g, ' ').trim();
   }
+  // 略語はそのまま残す（OST/GBA/RPG…）。それ以外の全角大文字は Title Case に直す
+  const KEEP_CAPS = new Set(['OST', 'BGM', 'CD', 'DVD', 'TV', 'RPG', 'DX', 'HD', 'HQ', 'USJ', 'GBA', 'GB', 'DS', '3DS', 'SFC', 'FC', 'PSP', 'PS1', 'PS2', 'PS3', 'PS4', 'PS5', 'N64', 'LP', 'EP', 'VS', 'OVA', 'PVC', 'SP', 'JP', 'US', 'EU', 'NTSC', 'PAL', 'BOX', 'II', 'III', 'IV', 'VI', 'VII', 'VIII', 'IX', 'XI', 'XII']);
   function tidyEnglish(t, limit) {
     let out = String(t || '').replace(/[""'']/g, '').replace(/[,\.]+$/g, '')
-      .replace(/\b(the|a|an|of|for|with|and)\b/gi, m => m.toLowerCase())
       .replace(/\s{2,}/g, ' ').trim();
     out = out.replace(/\b[a-z]/g, c => c.toUpperCase());   // 単語頭を大文字に
+    // 「KIRBY ULTRA SUPER DELUXE」のような全部大文字は読みにくいので整える（略語は除く）
+    out = out.split(' ').map(w => (/^[A-Z]{2,}$/.test(w) && !KEEP_CAPS.has(w)) ? (w[0] + w.slice(1).toLowerCase()) : w).join(' ');
+    out = out.split(' ').map((w, i2) => (i2 > 0 && /^(The|A|An|Of|For|With|And|In|On|To|By|From)$/.test(w)) ? w.toLowerCase() : w).join(' ');
     const lim = limit || 30;
     if (out.length <= lim) return out;
     const cut = out.slice(0, lim);
@@ -1864,16 +1868,133 @@
     return (sp >= 12 ? cut.slice(0, sp) : cut).trim();      // 単語の途中で切らない
   }
   let _varTr = null;
+  // ★仕入元の日本語タイトルをそのまま機械翻訳して30字で切ると
+  //   「CD With Obi, Theatrical」のように何の作品かも、ゲームなのかアニメなのかも分からない名前になる。
+  //   作品名／文脈／機種／種別は先に辞書で英語に確定させ、残りだけ翻訳して
+  //   「作品名 → 副題 → 文脈 → 機種 → 種別」の順で組み、はみ出す分は情報量の低い方から捨てる。
+  //   [正規表現, 英語, 優先度]  1=作品・キャラ / 3=文脈(劇場版・アニメ) / 4=機種 / 5=種別(OST・フィギュア等)
+  const VAR_TERMS = [
+    [/ポケットモンスター|ポケモン/g, 'Pokemon', 1], [/星のカービィ|カービィ/g, 'Kirby', 1],
+    [/マリオカート/g, 'Mario Kart', 1], [/マリオパーティ/g, 'Mario Party', 1],
+    [/スーパーマリオ|マリオ/g, 'Mario', 1], [/ヨッシー/g, 'Yoshi', 1], [/ルイージ/g, 'Luigi', 1],
+    [/ワリオ/g, 'Wario', 1], [/ドンキーコング/g, 'Donkey Kong', 1], [/ピクミン/g, 'Pikmin', 1],
+    [/ゼルダの伝説|ゼルダ/g, 'Zelda', 1], [/スプラトゥーン/g, 'Splatoon', 1],
+    [/どうぶつの森/g, 'Animal Crossing', 1], [/大乱闘スマッシュブラザーズ|スマッシュブラザーズ|スマブラ/g, 'Smash Bros', 1],
+    [/メトロイド/g, 'Metroid', 1], [/ファイアーエムブレム/g, 'Fire Emblem', 1],
+    [/ゼノブレイド/g, 'Xenoblade', 1], [/スターフォックス/g, 'Star Fox', 1], [/エフゼロ|F-?ZERO/gi, 'F-Zero', 1],
+    [/ドラゴンクエスト|ドラクエ/g, 'Dragon Quest', 1], [/ファイナルファンタジー/g, 'Final Fantasy', 1],
+    [/キングダムハーツ/g, 'Kingdom Hearts', 1], [/モンスターハンター|モンハン/g, 'Monster Hunter', 1],
+    [/クロノトリガー/g, 'Chrono Trigger', 1], [/ロマンシングサガ|サガ/g, 'SaGa', 1],
+    [/テイルズ/g, 'Tales of', 1], [/ペルソナ/g, 'Persona', 1], [/女神転生/g, 'Megami Tensei', 1],
+    [/逆転裁判/g, 'Ace Attorney', 1], [/レイトン教授/g, 'Layton', 1], [/リズム天国/g, 'Rhythm Heaven', 1],
+    [/マザー|MOTHER/g, 'Mother', 1], [/ロックマン/g, 'Mega Man', 1], [/悪魔城/g, 'Castlevania', 1],
+    [/バイオハザード/g, 'Resident Evil', 1], [/ストリートファイター|スト2|スト。?II/g, 'Street Fighter', 1],
+    [/鉄拳/g, 'Tekken', 1], [/ソニック/g, 'Sonic', 1], [/たまごっち/g, 'Tamagotchi', 1],
+    [/妖怪ウォッチ/g, 'Yokai Watch', 1], [/デジモン/g, 'Digimon', 1], [/遊戯王/g, 'Yu-Gi-Oh', 1],
+    [/ベイブレード/g, 'Beyblade', 1], [/ドラゴンボール/g, 'Dragon Ball', 1], [/ワンピース|ONE PIECE/gi, 'One Piece', 1],
+    [/ナルト|NARUTO/gi, 'Naruto', 1], [/ブリーチ|BLEACH/g, 'Bleach', 1], [/ハンターハンター|HUNTER×HUNTER/gi, 'Hunter x Hunter', 1],
+    [/鬼滅の刃/g, 'Demon Slayer', 1], [/呪術廻戦/g, 'Jujutsu Kaisen', 1], [/進撃の巨人/g, 'Attack on Titan', 1],
+    [/僕のヒーローアカデミア|ヒロアカ/g, 'My Hero Academia', 1], [/チェンソーマン/g, 'Chainsaw Man', 1],
+    [/スパイファミリー|SPY×FAMILY/gi, 'Spy x Family', 1], [/ハイキュー/g, 'Haikyu', 1],
+    [/スラムダンク/g, 'Slam Dunk', 1], [/名探偵コナン/g, 'Detective Conan', 1], [/犬夜叉/g, 'Inuyasha', 1],
+    [/ジョジョの奇妙な冒険|ジョジョ/g, 'JoJo', 1], [/ガンダム/g, 'Gundam', 1],
+    [/エヴァンゲリオン|エヴァ/g, 'Evangelion', 1], [/セーラームーン/g, 'Sailor Moon', 1],
+    [/プリキュア/g, 'Precure', 1], [/仮面ライダー/g, 'Kamen Rider', 1], [/ウルトラマン/g, 'Ultraman', 1],
+    [/戦隊/g, 'Sentai', 1], [/アンパンマン/g, 'Anpanman', 1], [/ドラえもん/g, 'Doraemon', 1],
+    [/クレヨンしんちゃん/g, 'Crayon Shin-chan', 1], [/となりのトトロ|トトロ/g, 'Totoro', 1],
+    [/ジブリ/g, 'Ghibli', 1], [/初音ミク|ボーカロイド|ボカロ/g, 'Hatsune Miku', 1],
+    [/ラブライブ/g, 'Love Live', 1], [/アイドルマスター|アイマス/g, 'Idolmaster', 1],
+    [/東方project|東方/g, 'Touhou', 1], [/ダンガンロンパ/g, 'Danganronpa', 1],
+    [/シュタインズゲート|シュタゲ/g, 'Steins Gate', 1], [/フェイト|Fate/g, 'Fate', 1],
+    [/ハローキティ|キティ/g, 'Hello Kitty', 1], [/サンリオ/g, 'Sanrio', 1],
+    [/シナモロール/g, 'Cinnamoroll', 1], [/マイメロディ|マイメロ/g, 'My Melody', 1],
+    [/クロミ/g, 'Kuromi', 1], [/ポムポムプリン/g, 'Pompompurin', 1], [/ぐでたま/g, 'Gudetama', 1],
+    [/リラックマ/g, 'Rilakkuma', 1], [/すみっコぐらし|すみっこぐらし/g, 'Sumikko Gurashi', 1],
+    [/ちいかわ/g, 'Chiikawa', 1], [/スヌーピー/g, 'Snoopy', 1], [/ディズニー/g, 'Disney', 1],
+    [/ミッキー/g, 'Mickey', 1], [/ダッフィー/g, 'Duffy', 1], [/くまのプーさん|プーさん/g, 'Winnie the Pooh', 1],
+    [/トイストーリー/g, 'Toy Story', 1], [/ユニバーサルスタジオジャパン|ユニバ|USJ/g, 'USJ', 1],
+    // 文脈（ゲームなのか映画なのかアニメなのか＝ここが分からないと買い手が判断できない）
+    [/劇場版|映画版/g, 'Movie', 3], [/アニメ版|アニメ/g, 'Anime', 3], [/ドラマCD/g, 'Drama CD', 3],
+    [/TV版|テレビ版/g, 'TV', 3], [/実写/g, 'Live Action', 3],
+    // 機種
+    [/ニンテンドースイッチ|Nintendo Switch|スイッチ/gi, 'Switch', 4], [/Wii ?U/gi, 'Wii U', 4], [/Wii/gi, 'Wii', 4],
+    [/ニンテンドー64|Nintendo ?64|N64/gi, 'N64', 4], [/ゲームキューブ|GameCube/gi, 'GameCube', 4],
+    [/ゲームボーイアドバンス|GBA/gi, 'GBA', 4], [/ゲームボーイ|Game ?Boy/gi, 'Game Boy', 4],
+    [/ニンテンドー3DS|3DS/gi, '3DS', 4], [/ニンテンドーDS|DSソフト|NDS/gi, 'DS', 4],
+    [/スーパーファミコン|スーファミ|SFC/g, 'Super Famicom', 4], [/ファミコン|FC/g, 'Famicom', 4],
+    [/プレイステーション ?5|PS5/gi, 'PS5', 4], [/プレイステーション ?4|PS4/gi, 'PS4', 4],
+    [/プレイステーション ?3|PS3/gi, 'PS3', 4], [/プレイステーション ?2|PS2/gi, 'PS2', 4],
+    [/プレイステーション|PS1|PSX/gi, 'PS1', 4], [/PSP/gi, 'PSP', 4], [/PS ?Vita|ヴィータ/gi, 'PS Vita', 4],
+    [/セガサターン/g, 'Sega Saturn', 4], [/メガドライブ/g, 'Mega Drive', 4], [/ドリームキャスト/g, 'Dreamcast', 4],
+    // 種別
+    [/オリジナルサウンドトラック|サウンドトラック|サントラ|オリジナルミュージック|ミュージック|OST/gi, 'OST', 5],
+    [/TV主題歌|主題歌|テーマソング/g, 'Theme Songs', 5], [/挿入歌/g, 'Insert Songs', 5],
+    [/BGM|劇伴/gi, 'BGM', 5], [/ベストセレクション|ベスト盤|ベストアルバム/g, 'Best', 5],
+    [/一番くじ/g, 'Ichiban Kuji', 5], [/フィギュア/g, 'Figure', 5], [/ぬいぐるみ/g, 'Plush', 5],
+    [/キーホルダー|キーチェーン/g, 'Keychain', 5], [/アクリルスタンド|アクスタ/g, 'Acrylic Stand', 5],
+    [/缶バッジ/g, 'Can Badge', 5], [/ポスター/g, 'Poster', 5], [/クリアファイル/g, 'Clear File', 5],
+    [/攻略本/g, 'Guide Book', 5], [/設定資料集|画集|イラスト集/g, 'Art Book', 5],
+    [/ソフト(のみ)?/g, '', 5],
+  ];
+  // 出品者向けの言い回し（買い手には意味がない）を落とす
+  const VAR_NOISE2 = /(帯付きCD|帯付き|帯あり|帯有り|再生確認済み?|動作確認済み?|一点限り|即購入(OK)?|プロフ必読|値下げ不可|最終値下げ|早い者勝ち|ケースなし|説明書なし|傷あり|汚れあり|管理[0-9A-Za-z]*|お値下げ|中古|\d?CD|DVD|Blu-?ray|ブルーレイ|ディスク|盤)/gi;
+  const VAR_SELLER = /^\S{0,14}様\s*/;                     // 「星*ノ様 …」のような取り置き相手の名前
+  const STOPW = /^(the|a|an|of|for|with|and|in|on|to|by|from|&)$/i;
+  // head=作品名 / mid=副題の単語配列 / tail=[{en,pr}] 文脈(3)・機種(4)・種別(5)
+  // はみ出す分は「機種 → 長い副題の後ろ → 種別 → 副題 → 文脈」の順に捨てる。
+  // 作品名と文脈（劇場版/アニメ）は最後まで残す＝買い手が何なのか分かる情報を優先する。
+  function packVarName(head, mid, tail, lim) {
+    const trim = (ws) => { const a = ws.slice(); while (a.length && STOPW.test(a[a.length - 1])) a.pop(); while (a.length && STOPW.test(a[0])) a.shift(); return a; };
+    let m = mid.slice(), t = tail.slice();
+    const join = () => tidyEnglish([head].concat(trim(m)).concat(t.map(x => x.en)).join(' '), 999);
+    const drop = (pr) => { const k = t.findIndex(x => x.pr === pr); if (k >= 0) t.splice(k, 1); };
+    if (join().length > lim) drop(4);
+    while (m.length > 3 && join().length > lim) m.pop();
+    if (join().length > lim) drop(5);
+    while (m.length > 1 && join().length > lim) m.pop();
+    if (join().length > lim) drop(3);
+    const s2 = join();
+    return s2.length <= lim ? s2 : tidyEnglish(s2, lim);
+  }
   async function suggestVarName(srcTitle, limit) {
-    const ja = cleanSourceTitle(srcTitle);
+    const lim = limit || 30;
+    let ja = String(srcTitle || '');
+    try { ja = ja.normalize('NFKC'); } catch (_) { }      // ＆→& ／３Ｄ→3D ／全角スペース→半角
+    ja = cleanSourceTitle(ja.replace(VAR_SELLER, '')).replace(VAR_NOISE2, ' ').replace(/[*＊♪★☆]/g, ' ').replace(/\s{2,}/g, ' ').trim();
     if (!ja) return '';
-    if (!/[ぁ-んァ-ヶ一-龥]/.test(ja)) return tidyEnglish(ja, limit);   // 既に英語ならそのまま整えるだけ
-    try {
-      if (typeof Translator === 'undefined') return tidyEnglish(ja, limit);
-      if (!_varTr) _varTr = await Translator.create({ sourceLanguage: 'ja', targetLanguage: 'en' });
-      const en = await _varTr.translate(ja);
-      return tidyEnglish(en || ja, limit);
-    } catch (_) { return tidyEnglish(ja, limit); }
+    // ① 作品名・機種・種別を辞書で英語に確定させ、元の文字列からは取り除く
+    const hit = [];
+    VAR_TERMS.forEach(([re, en, pr]) => {
+      const before = ja; ja = ja.replace(re, ' ');
+      if (ja !== before && en && !hit.some(h => h.en === en)) hit.push({ en, pr });
+    });
+    ja = ja.replace(/[、。,\/／・\-–—~〜:：;；!！?？'"「」『』]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    // ② 残り（副題）だけ翻訳する。英数字はそのまま活きる（"52 HIT TRACKS" 等）
+    let mid = '';
+    if (/[ぁ-んァ-ヶ一-龥]/.test(ja)) {
+      try {
+        if (typeof Translator !== 'undefined') {
+          if (!_varTr) _varTr = await Translator.create({ sourceLanguage: 'ja', targetLanguage: 'en' });
+          mid = (await _varTr.translate(ja)) || '';
+        }
+      } catch (_) { }
+      if (!mid) mid = ja;
+    } else mid = ja;
+    mid = mid.replace(/[ぁ-んァ-ヶーｦ-ﾟ一-龥々〆]+/g, ' ').replace(/\s{2,}/g, ' ').trim();  // 訳せ残った日本語は捨てる
+    // ③ 組み立て（作品名 → 副題 → 文脈 → 機種 → 種別）。同じ語の重複は落とす
+    const head = hit.filter(h => h.pr === 1).map(h => h.en).join(' ');
+    const tail = hit.filter(h => h.pr >= 3).sort((a, b) => a.pr - b.pr);
+    const seen = new Set(head.toLowerCase().split(/\s+/).filter(Boolean));
+    const midWords = tidyEnglish(mid, 999).split(/\s+/).filter(w => {
+      const k = w.toLowerCase().replace(/[^a-z0-9&]/g, '');
+      if (!w || !k) return false;
+      if (seen.has(k)) return false;      // 「Mario Kart 8 … 8」のような重複を必ず落とす
+      seen.add(k);
+      return true;
+    });
+    const tailWords = tail.filter(x => !x.en.toLowerCase().split(/\s+/).every(w => seen.has(w)));
+    const out = packVarName(head, midWords, tailWords, lim);
+    return out || tidyEnglish(mid, lim);
   }
   async function openapiFetchMeta(url) {
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
@@ -11278,7 +11399,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" data-rid="${ridOf(r)}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.no}px;flex:none;text-align:right;font-size:10px;color:#98a2b3;font-weight:700">${i + 1}</span>
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
-          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:5px;font-size:11.5px">
+          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" title="${av(r.src || '')}" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:5px;font-size:11.5px">
           ${r.dup ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="この仕入元URLは ${esc(r.dup.cc)} の item ${esc(String(r.dup.i))}／明細「${esc(r.dup.o || '')}」で既に出しています">⚠既出</span>` : ''}
           ${r.imgSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
           ${r.same ? `<span class="eb-jump" data-rid="${esc(r.same.rid || '')}" style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap;cursor:pointer;text-decoration:underline dotted" title="${r.same.i}番「${esc(r.same.name)}」と ${r.same.score}% 一致。クリックでその行へ移動します">⚠${r.same.i}番と重複</span>`
