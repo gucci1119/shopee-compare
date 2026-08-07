@@ -2129,11 +2129,14 @@
       e.stopPropagation();
       const j = JOBS.list.find(x => x.id === +b2.dataset.id); if (!j) return;
       j.cancel = true; j.msg = '止めています…';
+      if (j.remote) jobRemoteCancel(j.remote);
       if (j.state === 'wait') { j.state = 'stop'; j.msg = '開始前に中止しました'; }
       jobRender();
     }));
     el.querySelectorAll('.job-del').forEach(b2 => b2.addEventListener('click', (e) => {
       e.stopPropagation();
+      const j2 = JOBS.list.find(x => x.id === +b2.dataset.id);
+      if (j2 && j2.remote) jobRemoteDelete(j2.remote);
       JOBS.list = JOBS.list.filter(x => x.id !== +b2.dataset.id); jobRender();
     }));
   }
@@ -2172,8 +2175,44 @@
     run();
     return j;
   }
-  // ページを閉じようとした時に走っている作業があれば止める
-  window.addEventListener('beforeunload', (e) => { if (jobRunning()) { e.preventDefault(); e.returnValue = ''; } });
+  // ★リロードしても消えない作業：状態を app_kv（key = job_*）に置き、GAS側が完了/失敗を書き戻す。
+  //   ポータルは起動時と5秒おきにそれを読むだけ。開発でページを更新しても走り続ける。
+  async function jobRemoteCreate(kind, title, sub) {
+    const key = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const v = { kind, title, sub, status: 'run', pct: 0, step: '開始しています', created_at: new Date().toISOString() };
+    try { await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
+    return key;
+  }
+  async function jobRemoteCancel(key) {
+    try { const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = (rows && rows[0] && rows[0].v) || {}; v.status = 'cancel'; await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
+  }
+  async function jobRemoteDelete(key) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(key)); } catch (_) {} }
+  let jobPollTimer = null;
+  async function jobPoll() {
+    if (!settings.sbKey && !settings.sbSecret) return;
+    let rows = [];
+    try { rows = await sbGetAll('app_kv', 'select=k,v&k=like.job_*'); } catch (_) { return; }
+    const cut = Date.now() - 6 * 3600 * 1000;
+    for (const r of rows) {
+      const v = r.v || {};
+      // 古い完了ぶんは片付ける
+      if ((v.status === 'done' || v.status === 'error' || v.status === 'cancel') && Date.parse(v.updated_at || v.created_at || 0) < cut) { jobRemoteDelete(r.k); continue; }
+      let j = JOBS.list.find(x => x.remote === r.k);
+      if (!j) { j = { id: ++JOBS.seq, remote: r.k, title: v.title || '作業', sub: v.sub || '', state: 'run', pct: 0, msg: '' }; JOBS.list.push(j); }
+      j.title = v.title || j.title; j.sub = v.sub || j.sub; j.pct = v.pct || j.pct;
+      j.msg = v.status === 'done' ? (v.msg || '完了') : (v.status === 'error' ? (v.error || '失敗') : (v.step || ''));
+      j.state = v.status === 'done' ? 'done' : (v.status === 'error' ? 'err' : (v.status === 'cancel' ? 'stop' : 'run'));
+      if (v.status === 'done' && v.result && v.result.url && !j._opened) { j._opened = true; try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {} }
+    }
+    // DBから消えたものはパネルからも消す
+    const alive = new Set(rows.map(r => r.k));
+    JOBS.list = JOBS.list.filter(x => !x.remote || alive.has(x.remote));
+    if (JOBS.list.some(x => x.remote)) JOBS.open = JOBS.open || JOBS.list.some(x => x.remote && x.state === 'run');
+    jobRender();
+  }
+  function jobPollStart() { if (jobPollTimer) return; jobPoll(); jobPollTimer = setInterval(jobPoll, 5000); }
+  // ページを閉じようとした時に「ブラウザ側でしか走っていない作業」があれば止める（DB管理の作業は閉じてOK）
+  window.addEventListener('beforeunload', (e) => { if (JOBS.list.some(j => !j.remote && (j.state === 'run' || j.state === 'wait'))) { e.preventDefault(); e.returnValue = ''; } });
 
   function toast(msg, isErr) {
     let el = document.getElementById('smd-toast');
@@ -10394,28 +10433,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const rate = parseFloat(localStorage.getItem('smdZipSecPerImg') || '') || 0.5;
           const est = Math.max(6, Math.round(targets.length * rate));
           if (msgI) { msgI.style.color = '#3b5bdb'; msgI.innerHTML = '🗂 <b>しごと</b>に積みました（右下で進み具合が見られます）。この画面は閉じて大丈夫です'; }
-          startJob('明細画像ZIP', cc + ' / ' + (repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚）', async (ctx) => {
-            const t0 = Date.now();
-            const tk = setInterval(() => {
-              const el2 = (Date.now() - t0) / 1000;
-              ctx.progress(Math.min(95, el2 / est * 100), '残り約 ' + (el2 > est ? 'まもなく' : Math.max(1, Math.round(est - el2)) + '秒'));
-            }, 500);
-            try {
-              const r = await ctx.serial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId }, 300000));
-              clearInterval(tk);
-              if (ctx.cancelled()) return { msg: '中止' };
-              if (!r || !r.url) throw new Error((r && r.error) || 'ZIPを作れませんでした');
-              const secs = (Date.now() - t0) / 1000;
-              try { if (r.n > 0) localStorage.setItem('smdZipSecPerImg', String(Math.max(0.05, secs / r.n))); } catch (_) {}
-              const a2 = document.createElement('a'); a2.href = r.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click();
-              if (msgI && msgI.isConnected) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成（' + Math.round(secs) + '秒）<a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0;margin-left:6px">始まらない場合はここ</a>'; }
-              return { msg: r.n + '枚・' + Math.round(secs) + '秒' + (r.ng ? '（取得できず' + r.ng + '件）' : '') };
-            } catch (e) {
-              clearInterval(tk);
-              if (/権限がありません|not have permission|authoriz/i.test(String(e.message))) throw new Error('GASにDrive/Storageの権限がありません（GASを最新にしてください）');
-              throw e;
-            }
-          });
+          (async () => {
+            // ★状態はDBに置く＝ページをリロードしても走り続け、進み具合も戻ってくる
+            const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚）');
+            jobPollStart();
+            gasSerial(() => gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId, job: key }, 300000)).catch(() => {});
+          })();
         });
         if (upB && upF) upB.addEventListener('click', () => { if (!needOfficial()) return; upF.click(); });
         if (upF) upF.addEventListener('change', async () => {
@@ -10464,7 +10487,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const files = rows2.map((r, i5) => ({ file: r.file, opt: (slots.find(s2 => s2.no === pick[i5]) || {}).opt, no: pick[i5] }));
             go.disabled = true; go.textContent = '🗂 しごとに積みました（この画面は閉じてOK）';
             const label = rows2.map((r, i5) => pick[i5] + '.' + files[i5].opt).join(' / ');
-            startJob('明細画像の一括反映', cc + ' / ' + (repName || pi.name || itemId).slice(0, 24) + '（' + files.length + '枚）', async (ctx) => {
+            startJob('明細画像の一括反映（準備）', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + files.length + '枚）', async (ctx) => {
               const t1 = Date.now();
               // ① 画像をSupabase Storageへ（GASを使わないので並列＝速い）
               const urls = new Array(files.length);
@@ -10487,18 +10510,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               // ② 対象リストはURLが長いのでDB経由でGASへ渡す
               const kv = 'varimg_' + cc + '_' + itemId;
               await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
-              // ③ Shopeeへの書き込みは1回だけ（順番待ちに並べる）
-              let pctU = 45;
-              const tk = setInterval(() => { pctU = Math.min(95, pctU + 1); ctx.progress(pctU, '② Shopeeへ反映中'); }, 700);
-              let res;
-              try { res = await ctx.serial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv }, 300000)); }
-              finally { clearInterval(tk); }
+              // ③ ここから先はDB管理のしごとに引き継ぐ＝リロードしても続く
+              ctx.progress(100, '準備完了');
+              const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）');
+              jobPollStart();
+              gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: key }, 300000)).catch(() => {});
+              try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + items.length + '件 → ' + label); } catch (_) {}
               markStale();
-              const secs = Math.round((Date.now() - t1) / 1000);
-              try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + res.applied + '/' + files.length + '件 → ' + label); } catch (_) {}
-              if (mapEl && mapEl.isConnected) mapEl.querySelectorAll('.up-st').forEach(st => { st.style.color = '#1a7f37'; st.textContent = '✓'; });
-              if (go && go.isConnected) { go.disabled = false; go.textContent = '✓ 完了 ' + res.applied + '/' + files.length + '件（' + secs + '秒）'; }
-              return { msg: res.applied + '/' + files.length + '件・' + secs + '秒' + (res.failed ? '（失敗' + res.failed + '）' : '') };
+              if (go && go.isConnected) { go.disabled = false; go.textContent = '🗂 反映をしごとに積みました（この画面は閉じてOK）'; }
+              return { msg: '準備 ' + items.length + '件（' + Math.round((Date.now() - t1) / 1000) + '秒）→ 反映へ' };
             });
           });
         });
@@ -18551,6 +18571,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     setModeBadge();
     initAcctBar().catch(() => {}); // 対象アカウントのセレクタを用意
     renderSummary();
+    jobPollStart();             // ★走っている作業（DB管理）を拾って右下に出す。リロードしても続きが見える
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());

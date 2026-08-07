@@ -328,8 +328,13 @@ function doGet(e) {
       var zvout;
       try {
         var zvshop = parseInt(p.shop_id, 10); if (!getToken_(zvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        zvout = zipVariationImages_(zvshop, p.item_id, p.cc);
-      } catch (err) { zvout = { ok: false, error: String((err && err.message) || err) }; }
+        if (p.job) jobSet_(p.job, { status: 'run', step: '画像を取得中' });
+        zvout = zipVariationImages_(zvshop, p.item_id, p.cc, p.job);
+        if (p.job) jobSet_(p.job, { status: 'done', result: zvout, msg: zvout.n + '枚' });
+      } catch (err) {
+        zvout = { ok: false, error: String((err && err.message) || err) };
+        if (p.job) jobSet_(p.job, { status: 'error', error: zvout.error });
+      }
       return ContentService.createTextOutput(zvcb + '(' + JSON.stringify(zvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★明細画像を「まとめて」差し替える。1枚ずつだと 画像DL→upload_image→get_model_list→update_tier_variation の
@@ -345,9 +350,14 @@ function doGet(e) {
         var rows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(String(p.kv || '')));
         var items = (rows && rows[0] && rows[0].v && rows[0].v.items) || [];
         if (!items.length) throw new Error('対象リストが見つかりません（先に画像をアップロードしてください）');
-        svout = setVariationImagesBulk_(svshop, p.item_id, items);
+        if (p.job) jobSet_(p.job, { status: 'run', step: 'Shopeeへ反映中' });
+        svout = setVariationImagesBulk_(svshop, p.item_id, items, p.job);
         try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
-      } catch (err) { svout = { ok: false, error: String((err && err.message) || err) }; }
+        if (p.job) jobSet_(p.job, { status: 'done', result: svout, msg: svout.applied + '/' + svout.total + '件' });
+      } catch (err) {
+        svout = { ok: false, error: String((err && err.message) || err) };
+        if (p.job) jobSet_(p.job, { status: 'error', error: svout.error });
+      }
       return ContentService.createTextOutput(svcb + '(' + JSON.stringify(svout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'get_attributes') {
@@ -886,7 +896,7 @@ function reorderVariation_(shopId, itemId, orderNames) {
 }
 // ★明細画像をまとめて差し替える。items=[{option, url}]
 //   ①画像を並列DL ②media_spaceへ並列アップロード ③update_tier_variation は1回だけ
-function setVariationImagesBulk_(shopId, itemId, items) {
+function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!items || !items.length) throw new Error('対象が空です');
   // ① 画像を並列でダウンロード
@@ -899,6 +909,8 @@ function setVariationImagesBulk_(shopId, itemId, items) {
   // ② Shopeeのmedia_spaceへ並列アップロード（署名はリクエストごとに作る）
   var ids = [], path = '/api/v2/media_space/upload_image';
   for (var i2 = 0; i2 < items.length; i2 += 12) {
+    if (jobCancelled_(jobKey)) throw new Error('中止しました');
+    if (jobKey) jobSet_(jobKey, { pct: 50 + Math.round(i2 / items.length * 40), step: 'Shopeeへアップロード中 ' + i2 + '/' + items.length });
     var reqs = [], idx = [];
     for (var k = i2; k < Math.min(i2 + 12, items.length); k++) {
       if (!blobs[k]) { ids[k] = null; continue; }
@@ -935,7 +947,7 @@ function setVariationImagesBulk_(shopId, itemId, items) {
 }
 // ★明細画像をまとめてZIP化→Driveに置いて公開URLを返す（ポータルの「⬇️一括ダウンロード」用）
 //   ファイル名は 001__明細名.jpg（番号＝Shopeeの明細表示順）。戻すときにこの番号で紐付ける。
-function zipVariationImages_(shopId, itemId) {
+function zipVariationImages_(shopId, itemId, cc, jobKey) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [];
@@ -954,6 +966,8 @@ function zipVariationImages_(shopId, itemId) {
   // fetchAllは一度に投げすぎると不安定なので30件ずつ。GAS側で並列に取りに行く。
   var blobs = [], ng = [];
   for (var b0 = 0; b0 < todo.length; b0 += 30) {
+    if (jobCancelled_(jobKey)) throw new Error('中止しました');
+    if (jobKey) jobSet_(jobKey, { pct: Math.round(b0 / todo.length * 80), step: '画像を取得中 ' + b0 + '/' + todo.length });
     var part = todo.slice(b0, b0 + 30);
     var rs = UrlFetchApp.fetchAll(part.map(function (t) { return { url: t.url, muteHttpExceptions: true, followRedirects: true }; }));
     rs.forEach(function (r, k) {
@@ -968,6 +982,7 @@ function zipVariationImages_(shopId, itemId) {
     });
   }
   if (!blobs.length) throw new Error('画像を1枚も取得できませんでした');
+  if (jobKey) jobSet_(jobKey, { pct: 85, step: 'ZIPにまとめています' });
   var zip = Utilities.zip(blobs, itemId + '_meisai_' + blobs.length + '.zip');
   // ★置き場所は Supabase Storage（公開バケット listing-imgs）。
   //   Driveを使うと「新しい権限の承認」が必要になり、承認画面が出ないケースがあって詰まる。
@@ -2315,6 +2330,21 @@ function setupStatsTrigger() {
   Logger.log('syncListingStats を毎日4時に設定');
 }
 
+// ★しごと台帳：ブラウザを閉じても・リロードしても進み具合が分かるように、
+//   状態を app_kv に持つ。GAS側が完了/失敗を書き戻し、ポータルはそれを読むだけ。
+function jobGet_(key) {
+  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); return (r && r[0] && r[0].v) || null; } catch (e) { return null; }
+}
+function jobSet_(key, patch) {
+  if (!key) return;
+  try {
+    var cur = jobGet_(key) || {};
+    Object.keys(patch).forEach(function (k) { cur[k] = patch[k]; });
+    cur.updated_at = new Date().toISOString();
+    sbUpsert_('app_kv', [{ k: key, v: cur }], 'k');
+  } catch (e) {}
+}
+function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); return !!(v && v.status === 'cancel'); }
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_();
