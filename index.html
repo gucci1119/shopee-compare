@@ -11311,6 +11311,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           } catch (_) {}
         };
         const draftClear = () => { try { localStorage.removeItem(draftKey); } catch (_) {} };
+        // ★取得できた行から順に、その1行だけ書き換える（全体を作り直すと重いし入力中の値が飛ぶ）。
+        const paintRow = (i) => {
+          if (!bx) return;
+          const r = rows[i]; if (!r) return;
+          const row = bx.querySelector('.ed-brow[data-i="' + i + '"]'); if (!row) return;
+          const q = (c) => row.querySelector(c);
+          const im = q('img.zimg');
+          if (r.image && im) { if (im.src !== r.image) { im.src = r.image; im.style.opacity = 1; } }
+          else if (r.image) { const sp = row.children[1]; if (sp) sp.innerHTML = '<img class="zimg" src="' + esc(r.image) + '" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">'; }
+          const nm = q('.eb-name'); if (nm && !nm.value && r.name) nm.value = r.name;
+          const co = q('.eb-cost'); if (co && !co.value && r.cost) co.value = r.cost;
+          const pr = q('.eb-price'); if (pr && !pr.value && r.price) pr.value = r.price;
+          const st = q('.eb-st');
+          if (st) {
+            if (r.pending) { st.style.color = '#8a8f98'; st.textContent = '取得中…'; }
+            else if (r.err) { st.style.color = '#d93025'; st.textContent = '✗ ' + String(r.err).slice(0, 28); row.title = r.url + '\n' + r.err; }
+            else { st.style.color = '#188038'; st.textContent = '✓ 取得'; row.title = r.url; }
+          }
+          try { profOf(row); } catch (_) {}
+        };
         const draw = () => {
           if (!bx) return;
           bx.innerHTML = rows.length
@@ -11430,12 +11450,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const wg6 = wDefB(), ro6 = roiB();
               // ★1件ずつ直列だと19件で数分かかっていた。まとめて（GAS一括→落ちた分は端末ブラウザ）取り直す。
               rb.textContent = '↻ 取り直し中… ' + idx.length + '件';
-              const got7 = await runPool(idx.map(i6 => rows[i6].url));
-              idx.forEach((i6, k7) => {
-                const r7 = got7[k7]; if (!r7) return;
+              idx.forEach(i6 => { rows[i6].pending = true; paintRow(i6); });
+              const apply7 = (k7, r7) => {
+                const i6 = idx[k7]; if (!r7 || i6 == null || !rows[i6]) return;
                 if (r7.cost > 0) r7.price = calc(r7.cost, wg6, ro6);
-                r7.wg = rows[i6].wg; rows[i6] = r7;
-              });
+                Object.assign(rows[i6], r7, { pending: false, wg: rows[i6].wg });
+                paintRow(i6);
+              };
+              const got7 = await runPool(idx.map(i6 => rows[i6].url), apply7);
+              got7.forEach((r7, k7) => apply7(k7, r7));
               rb.disabled = false; draw();
             }); }
           { const rm = (pred, label) => {
@@ -11601,19 +11624,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         };
         // ★ブラウザから並列に投げてもGASは1件ずつしか処理しない＝待たされた分がタイムアウトして
         //   「読取失敗」が多発していた。GAS側の fetchAll でまとめて取る（12件ずつ・本当に並列）。
-        const runPool = async (urls) => {
+        const runPool = async (urls, onEach) => {
           const wg = wDefB(), ro = roiB();
           const out = new Array(urls.length);
           let fin = 0;
+          // 1件ぶんの仕上げ（名前の英語化・価格計算）→ 呼び出し側へ即通知して画面に出す
+          const finish = async (k, r) => {
+            if (r && r.src && !r.name) r.name = (await suggestVarName(r.src, 30)) || cleanSourceTitle(r.src).slice(0, 30);
+            if (r && r.cost > 0) r.price = calc(r.cost, wg, ro);
+            if (onEach) { try { onEach(k, r); } catch (_) {} }
+          };
+          // ★GAS(=Googleのサーバ)から仕入元サイトを見に行くと相手側にブロックされることがある
+          //   （2026-08-08 メルカリでほぼ全滅）。この端末のブラウザ(Tampermonkey)なら自分のIPで普通に読める。
+          //   まずGASの一括(fetchAll)で試し、落ちた分はその場でブラウザ経由に回す。1チャンクでほぼ全滅したら
+          //   以降はGASを試さずブラウザ直行に切り替える（無駄な待ちを作らない）。
+          const bridgeOk = await detectBridge();
+          let gasBad = false;
+          const viaBridge = async (i4) => {
+            const r = out[i4];
+            try {
+              const m2 = await metaViaBridge(r.url);
+              r.cost = m2.price || 0; r.src = m2.title || ''; if (m2.image && !r.image) r.image = m2.image; r.err = '';
+            } catch (e4) {
+              const add = String((e4 && e4.message) || e4).slice(0, 24);
+              r.err = r.err ? (r.err + '／端末でも失敗:' + add) : ('端末で失敗:' + add);
+            }
+            await finish(i4, r);
+          };
           for (let i3 = 0; i3 < urls.length; i3 += 12) {
             if (bAbort) break;
             const chunk = urls.slice(i3, i3 + 12);
-            if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + '（まとめて取得中）';
+            const useGas = !(gasBad && bridgeOk);
+            if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (useGas ? '（まとめて取得中）' : '（この端末のブラウザで取得中）');
             let metas = [];
-            try {
-              const res = await gasSerial(() => gasCall({ action: 'fetch_metas', urls: chunk.join('\u0001') }, 120000));
-              metas = (res && res.metas) || [];
-            } catch (e) { metas = []; }
+            if (useGas) {
+              try {
+                const res = await gasSerial(() => gasCall({ action: 'fetch_metas', urls: chunk.join('\u0001') }, 120000));
+                metas = (res && res.metas) || [];
+              } catch (e) { metas = []; }
+            }
             chunk.forEach((u, k) => {
               const m = metas[k] || {};
               const quick = (typeof mercariImg === 'function') ? mercariImg(u) : null;
@@ -11622,33 +11671,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 r.cost = m.price || 0;
                 if (m.image && !r.image) r.image = m.image;
                 r.src = m.title || '';
-              } else r.err = String(m.error || '取得できませんでした').slice(0, 40);
+              } else r.err = String(m.error || (useGas ? '取得できませんでした' : '')).slice(0, 40);
               out[i3 + k] = r;
             });
+            const ng = chunk.map((u, k) => (out[i3 + k] && out[i3 + k].err) ? (i3 + k) : -1).filter(x => x >= 0);
+            if (useGas && ng.length >= Math.max(2, Math.ceil(chunk.length * 0.7))) gasBad = true;   // GASからは読めない相手と判断
+            // 読めた行は即反映、落ちた行はブラウザ経由（同時6本まで）で取り直してから反映
+            await Promise.all(chunk.map((u, k) => {
+              const i4 = i3 + k;
+              if (out[i4] && out[i4].err) return bridgeOk ? viaBridge(i4) : finish(i4, out[i4]);
+              return finish(i4, out[i4]);
+            }));
             fin += chunk.length;
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
           }
-          // ★GAS(=Googleのサーバ)から仕入元サイトを見に行くと相手側にブロックされて読めないことがある
-          //   （2026-08-08 メルカリでほぼ全滅）。落ちた分だけ **この端末のブラウザ経由** で取り直す。
-          //   自分のIP・自分のブラウザなので普通に読める（他サイト取得はブリッジ据え置きの領域）。
-          const ngIdx = out.map((r, i4) => (r && r.err) ? i4 : -1).filter(i4 => i4 >= 0);
-          if (ngIdx.length && !bAbort && await detectBridge()) {
-            let done2 = 0;
-            const tick = () => { if (bm) bm.textContent = 'この端末のブラウザで取り直し中… ' + done2 + '/' + ngIdx.length; };
-            tick();
-            await Promise.all(ngIdx.map(async i4 => {
-              if (bAbort) return;
-              const r = out[i4];
-              try {
-                const m2 = await metaViaBridge(r.url);
-                r.cost = m2.price || 0; r.src = m2.title || ''; if (m2.image && !r.image) r.image = m2.image; r.err = '';
-              } catch (e4) { r.err = r.err + '／端末でも失敗:' + String((e4 && e4.message) || e4).slice(0, 24); }
-              done2++; tick();
-            }));
-          }
-          // 名前（英語30字）は端末側でまとめて作る（GASを待たせない）
-          for (const r of out) { if (r && r.src && !r.name) r.name = (await suggestVarName(r.src, 30)) || cleanSourceTitle(r.src).slice(0, 30); }
-          out.forEach(r => { if (r && r.cost > 0) r.price = calc(r.cost, wg, ro); });
           return out.filter(Boolean);
         };
         if (bl) bl.addEventListener('click', async () => {
@@ -11659,8 +11695,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             urls = urls.slice(0, slotN);
           }
           bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
+          // ★全部揃うまで真っ白で待たせない。枠と画像はURLだけで先に出せるので、先に表を出して
+          //   取れた行から順に埋めていく（体感が段違いに速い）。
+          rows = urls.map(u => ({ url: u, name: '', cost: 0, image: (typeof mercariImg === 'function' ? (mercariImg(u) || '') : ''), price: '', err: '', src: '', wg: wDefB(), pending: true }));
+          draw();
           await srcMapLoad();                                   // 既に出したURLの台帳
-          rows = dedupeRows(await runPool(urls)).map(r => Object.assign(r, { wg: wDefB(), dup: srcDupOf(r.url) }));
+          const got0 = await runPool(urls, (k, r) => { if (rows[k]) { Object.assign(rows[k], r, { pending: false, wg: rows[k].wg }); paintRow(k); } });
+          got0.forEach((r, k) => { if (rows[k]) Object.assign(rows[k], r, { pending: false, wg: rows[k].wg }); });
+          rows.forEach(r => { r.dup = srcDupOf(r.url); });
+          dedupeRows(rows);
           // ★同じ商品を別の出品者から拾うとURLは別物になる＝URLでは防げない。タイトルの似具合で見る。
           //   ①貼った中どうし（検索結果をそのまま貼ると同じ商品が何個も混ざる）②この国の既存出品
           rows.forEach((r, i) => {
