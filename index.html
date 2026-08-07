@@ -2279,6 +2279,19 @@
     }
     return el;
   }
+  // 「いつ始めて・いつ終わったか・何分かかったか」を出す（作業ログとして使えるように）
+  const jobTimeStr = (j) => {
+    const t0 = j.startedAt ? Date.parse(j.startedAt) : 0, t1 = j.endedAt ? Date.parse(j.endedAt) : 0;
+    if (!t0) return '';
+    const hm = (t) => { try { return new Date(t).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
+    const md = (t) => { try { return new Date(t).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit' }); } catch (_) { return ''; } };
+    const today = (t) => { try { return jstDate(t) === jstDate(Date.now()); } catch (_) { return true; } };
+    const head = (today(t0) ? '' : md(t0) + ' ') + hm(t0) + ' 開始';
+    if (!t1) return head;
+    const sec = Math.max(0, Math.round((t1 - t0) / 1000));
+    const dur = sec >= 60 ? Math.floor(sec / 60) + '分' + (sec % 60) + '秒' : sec + '秒';
+    return head + ' → ' + hm(t1) + ' 終了（' + dur + '）';
+  };
   const jobHidden = () => { try { return localStorage.getItem('smdJobsHide') === '1'; } catch (_) { return false; } };
   const jobHideSet = (v) => { try { localStorage.setItem('smdJobsHide', v ? '1' : '0'); } catch (_) {} jobRender(); };
   function jobRender() {
@@ -2302,7 +2315,8 @@
           <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600" title="${esc(j.title + (j.sub ? ' / ' + j.sub : ''))}">${esc(j.title)}</span>
           ${(j.state === 'run' || j.state === 'wait') ? `<button class="job-stop" data-id="${j.id}" title="この作業を止める" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:10px;padding:1px 6px;cursor:pointer;flex:none">止める</button>` : `<button class="job-del" data-id="${j.id}" title="消す" style="border:none;background:none;color:#bbb;cursor:pointer;flex:none">✕</button>`}
         </div>
-        <div style="font-size:10.5px;color:#8a8f98;margin-left:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.msg || '')}">${esc(j.sub || '')}${j.msg ? '　' + esc(j.msg) : ''}</div>
+        <div style="font-size:10.5px;color:#8a8f98;margin-left:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.sub || '')}　${esc(j.msg || '')}">${esc(j.sub || '')}${j.msg ? '　' + esc(j.msg) : ''}</div>
+        <div style="font-size:9.5px;color:#b0b6c0;margin-left:20px">${jobTimeStr(j)}</div>
         ${(j.state === 'run' || j.state === 'wait') ? `<div style="height:6px;background:#eee;border-radius:4px;margin:4px 0 0 20px;overflow:hidden"><div style="height:100%;width:${j.pct || 0}%;background:${col[j.state]};transition:width .3s"></div></div>` : ''}
       </div>`;
     el.innerHTML = `<div style="background:#fff;border:1px solid #dfe3ea;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.16);overflow:hidden">
@@ -2424,7 +2438,7 @@
     if (!settings.sbKey && !settings.sbSecret) return;
     let rows = [];
     try { rows = await sbGetAll('app_kv', 'select=k,v&k=like.job_*'); } catch (_) { return; }
-    const cut = Date.now() - 6 * 3600 * 1000;
+    const cut = Date.now() - 7 * 86400 * 1000;   // 作業ログとして見返せるよう1週間は残す
     for (const r of rows) {
       const v = r.v || {};
       // 古い完了ぶんは片付ける
@@ -2432,6 +2446,8 @@
       let j = JOBS.list.find(x => x.remote === r.k);
       if (!j) { j = { id: ++JOBS.seq, remote: r.k, title: v.title || '作業', sub: v.sub || '', state: 'run', pct: 0, msg: '' }; JOBS.list.push(j); }
       j.title = v.title || j.title; j.sub = v.sub || j.sub; j.pct = v.pct || j.pct;
+      j.startedAt = v.created_at || j.startedAt;
+      if ((v.status === 'done' || v.status === 'error' || v.status === 'cancel') && !j.endedAt) j.endedAt = v.updated_at || new Date().toISOString();
       j.msg = v.status === 'done' ? (v.msg || '完了') : (v.status === 'error' ? (v.error || '失敗') : (v.step || ''));
       try { if (JOB_MIRROR[r.k]) JOB_MIRROR[r.k](v); } catch (_) {}
       const wasRun = j.state === 'run' || j.state === 'wait';
@@ -13088,6 +13104,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         ${kpi('累計', rows.length + '件', 'これまでに出した明細数')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
+        <button class="smd-btn" id="llog-jobs" style="font-size:11.5px;border-color:#3b5bdb;color:#3b5bdb">🗂 しごとの履歴</button>
         <button class="smd-btn" id="llog-deleted" style="font-size:11.5px;border-color:#d93025;color:#d93025">🗑 削除した商品の記録</button>
         <button class="smd-btn" id="llog-sync" style="border-color:#3b5bdb;color:#3b5bdb;font-weight:700">🔄 いま反映（新しく出した分を取り込む）</button>
         <span class="smd-seg">${[30, 90, 180, 365].map(d => `<button class="llog-range${logState.days === d ? ' on' : ''}" data-d="${d}" style="${logState.days === d ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${d}日</button>`).join('')}</span>
@@ -13134,6 +13151,27 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           b.disabled = false; b.textContent = '🔄 いま反映（新しく出した分を取り込む）';
           m.style.color = '#d93025'; m.textContent = '失敗: ' + e.message;
         }
+      }); }
+    { const jb = host.querySelector('#llog-jobs');
+      if (jb) jb.addEventListener('click', async () => {
+        jb.disabled = true;
+        let rows2 = [];
+        try { rows2 = await sbGetAll('app_kv', 'select=k,v&k=like.job_*'); } catch (_) {}
+        jb.disabled = false;
+        const arr = rows2.map(r => r.v || {}).filter(v => v.created_at).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+        const ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;inset:0;z-index:700;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+        const dur = (v) => { const t0 = Date.parse(v.created_at || 0), t1 = Date.parse(v.updated_at || 0); if (!t0 || !t1 || t1 < t0) return ''; const sec = Math.round((t1 - t0) / 1000); return sec >= 60 ? Math.floor(sec / 60) + '分' + (sec % 60) + '秒' : sec + '秒'; };
+        const stJa = { done: '<span style="color:#1a7f37">完了</span>', error: '<span style="color:#d93025">失敗</span>', cancel: '<span style="color:#8a8f98">中止</span>', run: '<span style="color:#3b5bdb">実行中</span>' };
+        ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:900px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+          <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1">🗂 しごとの履歴（${arr.length}件・直近1週間）</b><button class="jb-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div>
+          <div style="padding:14px 18px;max-height:calc(100vh - 170px);overflow:auto">${arr.length ? `<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 6px">開始</th><th style="padding:3px 6px">終了</th><th style="padding:3px 6px">所要</th><th style="padding:3px 6px">作業</th><th style="padding:3px 6px">対象</th><th style="padding:3px 6px">結果</th></tr></thead><tbody>`
+            + arr.map(v => `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 6px;white-space:nowrap;color:#666">${esc(jstDateTime(v.created_at))}</td><td style="padding:4px 6px;white-space:nowrap;color:#666">${esc(v.updated_at && v.status !== 'run' ? jstDateTime(v.updated_at) : '')}</td><td style="padding:4px 6px;white-space:nowrap">${esc(dur(v))}</td><td style="padding:4px 6px;font-weight:600">${esc(v.title || '')}</td><td style="padding:4px 6px;color:#555">${esc(String(v.sub || '').slice(0, 40))}</td><td style="padding:4px 6px">${stJa[v.status] || esc(v.status || '')} <span class="smd-dim">${esc(String(v.msg || v.error || '').slice(0, 40))}</span></td></tr>`).join('')
+            + '</tbody></table>' : '<div class="smd-dim" style="font-size:12.5px">まだ記録がありません。</div>'}</div></div>`;
+        document.body.appendChild(ov);
+        const cl = () => ov.remove();
+        ov.addEventListener('click', e => { if (e.target === ov) cl(); });
+        ov.querySelectorAll('.jb-close').forEach(b => b.addEventListener('click', cl));
       }); }
     { const db2 = host.querySelector('#llog-deleted');
       if (db2) db2.addEventListener('click', async () => {
