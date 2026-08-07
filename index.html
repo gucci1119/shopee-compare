@@ -10304,15 +10304,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           // ★本命：GAS側で画像取得→ZIP化→Driveに置く→そのURLをブラウザが普通にダウンロード。
           //   画像をbase64でJSONに詰めて返すと1.33倍に膨らみ、実測で8枚1分かかっていた。
           const t0 = Date.now();
-          const tick = setInterval(() => { if (msgI) msgI.textContent = 'ZIPを作成中… ' + Math.round((Date.now() - t0) / 1000) + '秒（' + targets.length + '枚ぶん・サーバ側でまとめて処理しています）'; }, 1000);
-          if (msgI) { msgI.style.color = ''; msgI.textContent = 'ZIPを作成中…（' + targets.length + '枚ぶん）'; }
+          // ★サーバ側の一括処理なので途中経過は取れない（Apps Scriptは直列実行のため進捗を問い合わせても
+          //   その処理が終わるまで返らない）。前回の実測から1枚あたりの秒数を学習して残り時間を出す。
+          let rate = parseFloat(localStorage.getItem('smdZipSecPerImg') || '') || 0.5;   // 秒/枚
+          const est = Math.max(6, Math.round(targets.length * rate));
+          const bar = (pct) => '<span style="display:inline-block;vertical-align:middle;width:130px;height:8px;background:#eee;border-radius:5px;overflow:hidden;margin:0 6px"><span style="display:block;height:100%;width:' + pct + '%;background:#3b5bdb;transition:width .4s"></span></span>';
+          const draw = () => {
+            if (!msgI) return;
+            const el = (Date.now() - t0) / 1000;
+            const pct = Math.min(95, Math.round(el / est * 100));
+            const left = Math.max(1, Math.round(est - el));
+            msgI.innerHTML = 'ZIPを作成中' + bar(pct) + '<b>' + pct + '%</b>　残り約 <b>' + (el > est ? 'まもなく' : left + '秒') + '</b><span class="smd-dim">（' + targets.length + '枚）</span>';
+          };
+          const tick = setInterval(draw, 400);
+          if (msgI) msgI.style.color = '';
+          draw();
           try {
             const r = await gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId }, 300000);
             clearInterval(tick);
             if (!r || !r.url) throw new Error((r && r.error) || 'ZIPを作れませんでした');
             const a2 = document.createElement('a'); a2.href = r.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click();
             dlB.disabled = false;
-            if (msgI) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成しました（' + Math.round((Date.now() - t0) / 1000) + '秒）' + (r.ng ? ' ／ 取得できず ' + r.ng + '件' : '') + ' <a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0">ダウンロードが始まらない場合はここ</a>'; }
+            const secs = (Date.now() - t0) / 1000;
+            try { if (r.n > 0) localStorage.setItem('smdZipSecPerImg', String(Math.max(0.05, secs / r.n))); } catch (_) {}   // 次回の見積りを実測で更新
+            if (msgI) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成しました' + bar(100) + '<b>100%</b>（' + Math.round(secs) + '秒）' + (r.ng ? ' ／ 取得できず ' + r.ng + '件' : '') + ' <a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0">ダウンロードが始まらない場合はここ</a>'; }
             return;
           } catch (e) {
             clearInterval(tick);
