@@ -1289,6 +1289,11 @@
     return gasCall(Object.assign({ action: 'update_item', token: settings.writeToken }, params), 60000);
   }
   // 公式APIで公開/非公開を切替（unlist_item）。unlist=false=公開(NORMAL) / true=非公開(UNLIST)
+  // ★カタログの削除（元に戻せない）。ポータル側で二重確認してから呼ぶこと。
+  async function openapiDeleteItem(shopId, itemId) {
+    if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
+    return gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: shopId, item_id: itemId }, 90000);
+  }
   async function openapiUnlistItem(shopId, itemId, unlist) {
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
@@ -12667,6 +12672,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 公開/非公開の切替（公式API・ログイン不要）。要 GAS再デプロイ＋shop_id判明
       { const sid = shopIdOfListing(cc, +id); if (sid && settings.openapiUrl && settings.writeToken) {
         row('📢 公開する（未公開→公開）', async () => { if (!confirm(`${cc} の商品(item ${id})を【公開】にします。よろしいですか？`)) return; try { await openapiUnlistItem(sid, +id, false); toast('📢 公開しました（Shopeeで確認）'); } catch (e) { alert('公開に失敗: ' + (e.message || e)); } }, '#1a7f37');
+        row('🗑 このカタログを削除（元に戻せません）', async () => {
+          const nm = String(name || '');
+          if (!confirm('⚠ ' + cc + ' の商品(item ' + id + ')をShopeeから【削除】します。\n\n' + nm + '\n\n削除すると元に戻せません。売上・注文履歴は残りますが、この出品ページは消えます。\n\n本当に削除しますか？')) return;
+          const t = prompt('確認のため item ID を入力してください（コピペ可）\n\n' + id, '');
+          if (String(t || '').trim() !== String(id)) { if (t != null) alert('item IDが一致しないので中止しました'); return; }
+          try {
+            const sid2 = shopIdOfListing(cc, +id);
+            const r = await openapiDeleteItem(sid2, id);
+            if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
+            try { logAct('出品', 'カタログ削除', nm, cc + ' item ' + id); } catch (_) {}
+            // 画面とDBから消す
+            if (lst.byCc[cc]) lst.byCc[cc] = lst.byCc[cc].filter(x => String(x.item_id) !== String(id));
+            try { if (settings.sbSecret) await sbDelete('listings', 'item_id=eq.' + encodeURIComponent(id)); } catch (_) {}
+            toast('🗑 削除しました（item ' + id + '）');
+            drawListingStatus();
+          } catch (e) { alert('削除に失敗: ' + e.message); }
+        }, '#d93025');
         row('🔒 非公開(下書き)にする', async () => { if (!confirm(`${cc} の商品(item ${id})を【非公開(下書き)】にします。よろしいですか？`)) return; try { await openapiUnlistItem(sid, +id, true); toast('🔒 非公開にしました'); } catch (e) { alert('失敗: ' + (e.message || e)); } }, '#b3701a');
       } }
     } else if (search) {
@@ -12690,6 +12712,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // サブタブを記憶（リロードしても同じタブに戻る）
     if (!lst.tab) { try { lst.tab = localStorage.getItem('smdListTab') || 'status'; } catch (_) { lst.tab = 'status'; } }
     if (lst.nameW == null) { try { lst.nameW = Number(localStorage.getItem('smdListNameW')) || 150; } catch (_) { lst.nameW = 150; } document.documentElement.style.setProperty('--lst-namew', (lst.nameW || 150) + 'px'); }
+    if (lst.colW == null) { try { lst.colW = JSON.parse(localStorage.getItem('smdListColW') || '{}'); } catch (_) { lst.colW = {}; } applyColW(); }
     if (lst.moreFil == null) { try { lst.moreFil = localStorage.getItem('smdListMoreFil') === '1'; } catch (_) { lst.moreFil = false; } }
     // 旧「国のヌケ」独立タブ→「分析・やること」内サブ切替へ移行
     if (lst.tab === 'coverage') { lst.tab = 'analysis'; lst.anaSub = 'coverage'; try { localStorage.setItem('smdListTab', 'analysis'); } catch (_) {} }
@@ -14665,8 +14688,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 18列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️いいね/💰実売/📗原価/ROI/🌏国/ブランド/SKU/JAN/操作。横に増えても親を横スクロールで見せる（min-width固定）
   // 20列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️/💰実売/📗原価/ROI/🌏国/ブランド/📁カテゴリ/SKU/JAN/🆔ID/操作
   // 商品名の幅は可変（--lst-namew）。長いタイトルを読みたい時に広げられるように。
-  const LGRID = 'display:grid;grid-template-columns:28px 42px minmax(var(--lst-namew,150px),1fr) 46px 132px 118px 48px 58px 58px 54px 92px 110px 70px 84px 92px 110px 118px 128px 108px 128px;column-gap:12px;row-gap:2px;align-items:start';
-  const LMINW_BASE = 1992, LMINW_GET = () => LMINW_BASE + Math.max(0, (lst.nameW || 150) - 150);
+  // ★列幅は全部CSS変数で持つ＝ヘッダーの境目をドラッグしたら再描画なしで即反映できる。
+  const LCOLW = [28, 42, 0, 46, 132, 118, 48, 58, 58, 54, 92, 110, 70, 84, 92, 110, 118, 128, 108, 128]; // [2]=商品名は可変(1fr)
+  const LGRID = 'display:grid;grid-template-columns:' + LCOLW.map((w, i) => i === 2 ? 'minmax(var(--lst-namew,150px),1fr)' : ('var(--lst-c' + i + ',' + w + 'px)')).join(' ') + ';column-gap:12px;row-gap:2px;align-items:start';
+  const LMINW_GET = () => {
+    const cw = lst.colW || {};
+    let total = 12 * (LCOLW.length - 1) + 28;                    // gap＋左右padding
+    LCOLW.forEach((w, i) => { total += (i === 2 ? (lst.nameW || 150) : (cw[i] != null ? cw[i] : w)); });
+    return Math.round(total);
+  };
   const LMINW = 1964; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
   // 横スクロールしても常に見えるよう、左端(cc/img/商品名)を左固定・操作を右固定。left値=14(padding)+各トラック累積
   // box-shadow:12px 0 0 #fff で右側のgap(12px)を白で塗り、スクロール内容の透けを防ぐ。左端はleft:0基点
@@ -14789,6 +14819,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
             <span class="lst-edithist" data-name="${av(r.name || '')}" title="この商品の編集履歴（価格・在庫・タイトル等の変更ログ）" style="cursor:pointer;font-size:13px;line-height:1">📜</span>
+            <span class="lst-more1" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" data-buy="${esc(buyUrl || '')}" title="公開/非公開の切替・削除など" style="cursor:pointer;font-size:14px;line-height:1;color:#8a8f98;font-weight:700">⋯</span>
             ${isSingle && canEdit ? `<button class="lst-save" title="価格・在庫を公式APIで保存" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;font-weight:700">💾保存</button>` : ''}
           </div>
           ${isSingle && canEdit ? `<span class="lst-save-msg" style="font-size:10px;color:#888;text-align:center"></span>` : ''}
@@ -14876,13 +14907,58 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const c = SER_COLORS[i % SER_COLORS.length];
     return { line: c[0], bg: c[1] };
   }
+  // 列幅をCSS変数に流し込む（再描画不要）
+  function applyColW() {
+    const cw = lst.colW || {};
+    LCOLW.forEach((w, i) => { if (i === 2) return; document.documentElement.style.setProperty('--lst-c' + i + ', '.trim(), ((cw[i] != null ? cw[i] : w)) + 'px'); });
+  }
+  // ヘッダーの境目をドラッグして列幅を変える
+  function wireColResize(hdr) {
+    if (!hdr) return;
+    const cells = [...hdr.children];
+    cells.forEach((c, i) => {
+      if (i === 0 || i === 1 || i >= LCOLW.length) return;         // 国・画像は固定
+      c.style.position = 'relative';
+      const h = document.createElement('span');
+      h.className = 'lst-rz';
+      h.title = 'ドラッグで列幅を変更（ダブルクリックで既定に戻す）';
+      h.style.cssText = 'position:absolute;right:-7px;top:0;width:12px;height:100%;cursor:col-resize;z-index:30';
+      h.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const x0 = e.clientX;
+        const w0 = i === 2 ? (lst.nameW || 150) : ((lst.colW || {})[i] != null ? lst.colW[i] : LCOLW[i]);
+        document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+        const mv = (ev) => {
+          const w = Math.max(28, Math.round(w0 + (ev.clientX - x0)));
+          if (i === 2) { lst.nameW = w; document.documentElement.style.setProperty('--lst-namew', w + 'px'); const nv = document.getElementById('lst-namewv'); if (nv) nv.textContent = w + 'px'; const nw = document.getElementById('lst-namew'); if (nw) nw.value = Math.min(640, w); }
+          else { lst.colW = lst.colW || {}; lst.colW[i] = w; document.documentElement.style.setProperty('--lst-c' + i, w + 'px'); }
+          const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px';
+        };
+        const up = () => {
+          document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+          document.body.style.cursor = ''; document.body.style.userSelect = '';
+          try { localStorage.setItem('smdListColW', JSON.stringify(lst.colW || {})); localStorage.setItem('smdListNameW', String(lst.nameW || 150)); } catch (_) {}
+        };
+        document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+      });
+      h.addEventListener('dblclick', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (i === 2) { lst.nameW = 150; document.documentElement.style.setProperty('--lst-namew', '150px'); }
+        else { lst.colW = lst.colW || {}; delete lst.colW[i]; document.documentElement.style.setProperty('--lst-c' + i, LCOLW[i] + 'px'); }
+        try { localStorage.setItem('smdListColW', JSON.stringify(lst.colW || {})); localStorage.setItem('smdListNameW', String(lst.nameW || 150)); } catch (_) {}
+        const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px';
+      });
+      c.appendChild(h);
+    });
+  }
   let _sibIdx = null;   // シリーズキー → [{cc,item_id,name,cnt,host}]
   function sibHtml(r) {
     if (!_sibIdx) return '';
     const arr = _sibIdx.get(r.cc + '|' + seriesKey(r.name)) || [];
     if (arr.length < 2) return '';
-    const others = arr.filter(x => String(x.item_id) !== String(r.item_id) && (MODEL_CAP - x.cnt) > 0)
-      .sort((a, b) => (MODEL_CAP - b.cnt) - (MODEL_CAP - a.cnt)).slice(0, 3);
+    const all2 = arr.filter(x => String(x.item_id) !== String(r.item_id) && (MODEL_CAP - x.cnt) > 0)
+      .sort((a, b) => (MODEL_CAP - b.cnt) - (MODEL_CAP - a.cnt));
+    const others = all2.slice(0, 2);
     if (!others.length) return '';
     return ' <span style="font-size:10px;color:#8a8f98">同シリーズ</span> ' + others.map(x =>
       (() => {
@@ -14890,8 +14966,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         //   切り出していて「[Used]」のような無意味な表示になっていた）
         const no = seriesNo(x.name);
         const tag = no ? (no <= CIRC.length ? CIRC[no - 1] : String(no)) : ('…' + String(x.item_id).slice(-4));
-        return `<span class="lst-sib" data-cc="${esc(x.cc)}" data-host="${esc(x.host || '')}" data-id="${x.item_id}" data-name="${av(x.name || '')}" title="${esc(x.name || '')}（明細${x.cnt}件・あと${MODEL_CAP - x.cnt}件・item ${x.item_id}）｜クリックで編集を開く" style="cursor:pointer;border:1px solid #a5d6a7;background:#f1f8f2;color:#1a7f37;border-radius:9px;padding:0 6px;font-size:10px;font-weight:700;margin-right:3px">🈳${MODEL_CAP - x.cnt} ${esc(tag)}</span>`;
-      })()).join('');
+        return `<span class="lst-sib" data-cc="${esc(x.cc)}" data-host="${esc(x.host || '')}" data-id="${x.item_id}" data-name="${av(x.name || '')}" title="${esc(x.name || '')}（明細${x.cnt}件・あと${MODEL_CAP - x.cnt}件・item ${x.item_id}）｜クリックで編集を開く" style="cursor:pointer;border:1px solid #a5d6a7;background:#f1f8f2;color:#1a7f37;border-radius:9px;padding:0 6px;font-size:10px;font-weight:700;margin-right:3px;display:inline-block;white-space:nowrap;vertical-align:middle">🈳${MODEL_CAP - x.cnt} ${esc(tag)}</span>`;
+      })()).join('') + (all2.length > others.length ? `<span style="font-size:10px;color:#8a8f98;white-space:nowrap">他${all2.length - others.length}</span>` : '');
   }
   function drawListingStatus() {
     const host = document.getElementById('list-status'); if (!host) return;
@@ -15134,7 +15210,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div id="lst-hbar" style="overflow-x:auto;overflow-y:hidden;height:12px;border:1px solid #e8e8e8;border-bottom:none;border-radius:10px 10px 0 0;background:#fafbfc" title="横スクロール（下の表と連動）"><div id="lst-hbar-in" style="height:1px"></div></div>
       ${lst.grid ? '<div id="lst-scroll" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:0 0 10px 10px;background:var(--lst-scrollbg)"><div id="lst-list"></div></div>' : `<div id="lst-scroll" style="overflow:auto;max-height:calc(100vh - 198px);border:1px solid #e8e8e8;border-radius:0 0 10px 10px;background:var(--lst-scrollbg)">
         <div style="min-width:${LMINW_GET()}px">
-        ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:var(--lst-hdrbg);z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
+        ${(() => { const ar = k => lst.sort === k ? (lst.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; const col = k => lst.sort === k ? '#ee4d2d' : 'inherit'; return `<div id="lst-hdrrow" style="${LGRID};padding:6px 14px;font-size:10px;color:#8a8f98;font-weight:700;border-bottom:2px solid #e8e8e8;position:sticky;top:0;background:var(--lst-hdrbg);z-index:8;box-shadow:0 2px 4px rgba(0,0,0,.04)">
           <span style="${LSTKLH[0]}"></span><span style="${LSTKLH[1]}"></span>
           <span class="lst-sorth" data-s="name" style="min-width:0;cursor:pointer;user-select:none;color:${col('name')};${LSTKLH[2]}" title="クリックで並び替え（再クリックで昇順⇄降順）">商品名 / タイトル${ar('name')}</span>
           <span>状態</span>
@@ -15348,6 +15424,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 💰実売クリック → 過去オーダー明細＋利益変遷＋原価統計モーダル
     document.querySelectorAll('#lst-list .lst-realized').forEach(el => el.addEventListener('click', () => showOrderHistory(el.dataset.name || '')));
     document.querySelectorAll('#lst-list .lst-stath').forEach(el => el.addEventListener('click', () => showStatHistory(el.dataset.cc, el.dataset.item, el.dataset.nm || '')));
+    applyColW(); wireColResize(document.getElementById('lst-hdrrow'));
+    document.querySelectorAll('#lst-list .lst-more1').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); showCovCellMenu(el); }));
     document.querySelectorAll('#lst-list .lst-sib').forEach(el => {
       el.addEventListener('click', (e) => { e.stopPropagation(); if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); });
       el.addEventListener('mouseenter', () => prefetchCatalog(el.dataset.cc, el.dataset.id), { passive: true });

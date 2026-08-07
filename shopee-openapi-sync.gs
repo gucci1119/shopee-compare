@@ -391,6 +391,22 @@ function doGet(e) {
       } catch (err) { rvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rvcb + '(' + JSON.stringify(rvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★カタログの削除（delete_item）。元に戻せないのでWRITE_TOKEN必須＋ポータル側で二重確認する。
+    if (p.action === 'delete_item') {
+      var dicb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var diout;
+      try {
+        var diwt = P_().getProperty('WRITE_TOKEN');
+        if (!diwt || p.token !== diwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var dishop = parseInt(p.shop_id, 10); if (!getToken_(dishop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var dj = callShop_(dishop, '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(p.item_id, 10) });
+        var derr = (dj.error && dj.error !== '') ? (dj.error + ' ' + (dj.message || '')) : '';
+        if (derr) throw new Error(derr);
+        try { sbDelete_('listings', 'item_id=eq.' + parseInt(p.item_id, 10)); } catch (eD) {}   // DBからも消す
+        diout = { ok: true, item_id: parseInt(p.item_id, 10) };
+      } catch (err) { diout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dicb + '(' + JSON.stringify(diout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
