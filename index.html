@@ -1228,8 +1228,10 @@
     const q = Object.assign({}, params, { callback: 'cb' });
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
+    // ★GASを再デプロイした直後は数秒〜十数秒404を返すことがある（伝播待ち）。
+    //   1回だけの再試行だと取りこぼすので3回・間隔を伸ばして粘る。
     let lastErr = '';
-    for (let att = 0; att < 2; att++) {
+    for (let att = 0; att < 3; att++) {
       const ac = new AbortController();
       const tm = setTimeout(() => ac.abort(), timeoutMs || 60000);
       try {
@@ -1242,7 +1244,7 @@
         if (e && e.message && lastErr !== e.message && !/aborted|Failed to fetch/i.test(e.message)) throw e;
         lastErr = lastErr || (e && e.message) || 'GAS応答なし';
       } finally { clearTimeout(tm); }
-      if (att === 0) await new Promise(r2 => setTimeout(r2, 400));
+      if (att < 2) await new Promise(r2 => setTimeout(r2, att === 0 ? 700 : 2500));
     }
     throw new Error(lastErr || 'GAS呼び出しに失敗');
   }
@@ -10456,10 +10458,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const roiB = () => { const v = parseFloat((body.querySelector('.ed-addroi').value || '').replace(/[^\d.]/g, '')); return v > 0 ? { roiPct: v } : {}; };
         const calc = (cost, wg, ro) => roundLocal(priceLocalFor(cc, cost, Object.assign({ weightG: wg }, ro)), rg.priceUnit || 1);
         // ★列幅は1か所で持つ。ヘッダーと行で同じ数字を使い、固定列は flex:none（縮むと見出しと中身がずれる）。
-        const BW = { img: 34, cost: 74, wg: 58, price: 88, stock: 52, prof: 118, st: 96, del: 26 };
+        // 合計幅がパネルを超えると✕だけ次の行に落ちて見た目が崩れる。gap込みで収まる値にする。
+        const BW = { img: 32, cost: 66, wg: 50, price: 80, stock: 44, prof: 104, st: 76, del: 24, nameMin: 86 };
         const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
-          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 120px;min-width:120px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
+          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:${BW.cost}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:${BW.wg}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:${BW.price}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right;background:#fffdf5">
@@ -10472,7 +10475,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const draw = () => {
           if (!bx) return;
           bx.innerHTML = rows.length
-            ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px ${BW.img + 5}px"><span style="flex:1 1 120px;min-width:120px">明細名</span><span style="width:${BW.cost}px;flex:none;text-align:right">仕入¥</span><span style="width:${BW.wg}px;flex:none;text-align:right">重量g</span><span style="width:${BW.price}px;flex:none;text-align:right">出品価格</span><span style="width:${BW.stock}px;flex:none;text-align:right">在庫</span><span style="width:${BW.prof}px;flex:none;text-align:right">取れる利益</span><span style="width:${BW.st}px;flex:none">状態</span><span style="width:${BW.del}px;flex:none"></span></div>`
+            ? `<div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px ${BW.img + 5}px"><span style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px">明細名</span><span style="width:${BW.cost}px;flex:none;text-align:right">仕入¥</span><span style="width:${BW.wg}px;flex:none;text-align:right">重量g</span><span style="width:${BW.price}px;flex:none;text-align:right">出品価格</span><span style="width:${BW.stock}px;flex:none;text-align:right">在庫</span><span style="width:${BW.prof}px;flex:none;text-align:right">取れる利益</span><span style="width:${BW.st}px;flex:none">状態</span><span style="width:${BW.del}px;flex:none"></span></div>`
               + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', () => { rows.splice(+b4.closest('.ed-brow').dataset.i, 1); draw(); }));
