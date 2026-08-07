@@ -10417,23 +10417,48 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const gwU = await guardWriteCountries([cc]); if (!gwU.ok) { alert(gwU.msg); return; }
             if (!confirm('書込先: ' + gwU.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細画像を ' + pick.length + '件 差し替えます。\n\nよろしいですか？')) return;
             go.disabled = true;
-            let ok3 = 0;
-            for (let i = 0; i < rows2.length; i++) {
-              const st = mapEl.querySelector('.ed-uprow[data-i="' + i + '"] .up-st');
-              const slot = slots.find(s2 => s2.no === pick[i]);
-              if (st) { st.style.color = '#8a8f98'; st.textContent = 'アップ中…'; }
-              try {
-                const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(rows2[i].file); });
-                const url = await uploadImgToStorage(dataUrl, 'var' + slot.no);
-                await openapiSetVariationImage(sidCat, itemId, slot.opt, url);
-                ok3++; if (st) { st.style.color = '#1a7f37'; st.textContent = '✓ ' + slot.no; }
-              } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗'; st.title = String(e.message); } }
-              go.textContent = '▶ 反映中… ' + ok3 + '/' + rows2.length;
+            const t1 = Date.now();
+            const barU = (pct) => '<span style="display:inline-block;vertical-align:middle;width:120px;height:8px;background:#eee;border-radius:5px;overflow:hidden;margin:0 6px"><span style="display:block;height:100%;width:' + pct + '%;background:#1a7f37;transition:width .3s"></span></span>';
+            const setGo = (pct, label) => { go.innerHTML = label + barU(pct) + '<b>' + pct + '%</b>'; };
+            try {
+              // ① 画像をSupabase Storageへ（ブラウザから並列＝速い）
+              const urls = new Array(rows2.length);
+              let up = 0, next = 0;
+              const worker = async () => {
+                while (next < rows2.length) {
+                  const i5 = next++;
+                  const st = mapEl.querySelector('.ed-uprow[data-i="' + i5 + '"] .up-st');
+                  try {
+                    const dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(rows2[i5].file); });
+                    urls[i5] = await uploadImgToStorage(dataUrl, 'var' + pick[i5]);
+                    if (st) { st.style.color = '#8a8f98'; st.textContent = '準備OK'; }
+                  } catch (e) { if (st) { st.style.color = '#d93025'; st.textContent = '✗ 準備失敗'; st.title = String(e.message); } }
+                  up++; setGo(Math.round(up / rows2.length * 45), '① 画像を準備中');
+                }
+              };
+              await Promise.all(Array.from({ length: Math.min(6, rows2.length) }, worker));
+              const items = rows2.map((r, i5) => ({ option: (slots.find(s2 => s2.no === pick[i5]) || {}).opt, url: urls[i5] })).filter(x => x.option && x.url);
+              if (!items.length) throw new Error('画像を1枚も準備できませんでした');
+              // ② 対象リストはURLが長いのでDB経由でGASに渡す
+              const kv = 'varimg_' + cc + '_' + itemId;
+              await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
+              // ③ GASでまとめて差し替え（Shopeeへの書き込みは1回だけ）
+              let pctU = 45;
+              const tk = setInterval(() => { pctU = Math.min(95, pctU + 1); setGo(pctU, '② Shopeeへ反映中'); }, 700);
+              let res;
+              try { res = await gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv }, 300000); }
+              finally { clearInterval(tk); }
+              markStale();
+              const secs = Math.round((Date.now() - t1) / 1000);
+              mapEl.querySelectorAll('.up-st').forEach(st => { if (!/✗/.test(st.textContent)) { st.style.color = '#1a7f37'; st.textContent = '✓'; } });
+              try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + res.applied + '/' + rows2.length + '件 → ' + rows2.map((r, i5) => pick[i5] + '.' + (slots.find(s2 => s2.no === pick[i5]) || {}).opt).join(' / ')); } catch (_) {}
+              setGo(100, '✓ 完了 ' + res.applied + '/' + rows2.length + '件（' + secs + '秒）');
+              go.disabled = false;
+              toast('🖼 ' + res.applied + '件の明細画像を差し替えました（' + secs + '秒・開き直すと反映されます）');
+            } catch (e) {
+              go.disabled = false; go.textContent = '▶ 再実行';
+              alert('一括反映に失敗: ' + e.message);
             }
-            markStale();
-            try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + ok3 + '/' + rows2.length + '件 → ' + rows2.map((r, i) => pick[i] + '.' + (slots.find(s2 => s2.no === pick[i]) || {}).opt).join(' / ')); } catch (_) {}
-            go.disabled = false; go.textContent = '✓ 完了：' + ok3 + '/' + rows2.length + '件';
-            toast('🖼 ' + ok3 + '件の明細画像を差し替えました（開き直すと反映されます）');
           });
         });
       }

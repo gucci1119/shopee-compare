@@ -332,6 +332,24 @@ function doGet(e) {
       } catch (err) { zvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(zvcb + '(' + JSON.stringify(zvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★明細画像を「まとめて」差し替える。1枚ずつだと 画像DL→upload_image→get_model_list→update_tier_variation の
+    //   4往復×枚数になり、97枚で8分以上かかる。まとめれば DL/uploadを並列化＋update_tier_variationは1回で済む。
+    //   対象リストはURLが長くなるので app_kv 経由で受け渡す（kv=キー名）。
+    if (p.action === 'set_variation_images_bulk') {
+      var svcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var svout;
+      try {
+        var svwt = P_().getProperty('WRITE_TOKEN');
+        if (!svwt || p.token !== svwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var svshop = parseInt(p.shop_id, 10); if (!getToken_(svshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var rows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(String(p.kv || '')));
+        var items = (rows && rows[0] && rows[0].v && rows[0].v.items) || [];
+        if (!items.length) throw new Error('対象リストが見つかりません（先に画像をアップロードしてください）');
+        svout = setVariationImagesBulk_(svshop, p.item_id, items);
+        try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
+      } catch (err) { svout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(svcb + '(' + JSON.stringify(svout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
@@ -865,6 +883,55 @@ function reorderVariation_(shopId, itemId, orderNames) {
   });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, order: orderNames };
+}
+// ★明細画像をまとめて差し替える。items=[{option, url}]
+//   ①画像を並列DL ②media_spaceへ並列アップロード ③update_tier_variation は1回だけ
+function setVariationImagesBulk_(shopId, itemId, items) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!items || !items.length) throw new Error('対象が空です');
+  // ① 画像を並列でダウンロード
+  var blobs = [];
+  for (var i = 0; i < items.length; i += 25) {
+    var part = items.slice(i, i + 25);
+    var rs = UrlFetchApp.fetchAll(part.map(function (x) { return { url: x.url, muteHttpExceptions: true, followRedirects: true }; }));
+    rs.forEach(function (r) { blobs.push(r.getResponseCode() < 400 ? r.getBlob() : null); });
+  }
+  // ② Shopeeのmedia_spaceへ並列アップロード（署名はリクエストごとに作る）
+  var ids = [], path = '/api/v2/media_space/upload_image';
+  for (var i2 = 0; i2 < items.length; i2 += 12) {
+    var reqs = [], idx = [];
+    for (var k = i2; k < Math.min(i2 + 12, items.length); k++) {
+      if (!blobs[k]) { ids[k] = null; continue; }
+      var ts = now_();
+      reqs.push({ url: HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts),
+                  method: 'post', muteHttpExceptions: true, payload: { image: blobs[k] } });
+      idx.push(k);
+    }
+    if (!reqs.length) continue;
+    var rs2 = UrlFetchApp.fetchAll(reqs);
+    rs2.forEach(function (r2, k2) {
+      try {
+        var j2 = JSON.parse(r2.getContentText());
+        var info = (j2.response || {}).image_info || (((j2.response || {}).image_info_list || [])[0]) || {};
+        ids[idx[k2]] = info.image_id || null;
+      } catch (e) { ids[idx[k2]] = null; }
+    });
+  }
+  // ③ tierを1回だけ書き換える（対象以外の画像はそのまま維持）
+  var j3 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j3.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+  var tier = tiers[0], map = {}, miss = [];
+  items.forEach(function (x, i3) { if (ids[i3]) map[x.option] = ids[i3]; else miss.push(x.option); });
+  var okN = 0;
+  var optObjs = (tier.option_list || []).map(function (o) {
+    if (map[o.option]) { okN++; return tierOpt_(o, null, map[o.option]); }
+    return tierOpt_(o);
+  });
+  if (!okN) throw new Error('差し替えられる画像がありませんでした（明細名が一致しないか、画像の取得に失敗）');
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
+  return { ok: true, applied: okN, total: items.length, failed: items.length - okN, miss: miss.slice(0, 10) };
 }
 // ★明細画像をまとめてZIP化→Driveに置いて公開URLを返す（ポータルの「⬇️一括ダウンロード」用）
 //   ファイル名は 001__明細名.jpg（番号＝Shopeeの明細表示順）。戻すときにこの番号で紐付ける。
