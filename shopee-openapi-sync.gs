@@ -955,7 +955,7 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
   var blob = res0.getBlob(), bytes = blob.getBytes(), size = bytes.length;
   if (size > 30 * 1024 * 1024) throw new Error('動画が大きすぎます（' + Math.round(size / 1048576) + 'MB／上限30MB）');
   var t0 = new Date().getTime();
-  if (jobKey) jobSet_(jobKey, { pct: 10, step: '準備しています（' + Math.round(size / 1048576 * 10) / 10 + 'MB）' });
+  if (jobKey) jobSet_(jobKey, { pct: 10, step: 'GASが受け取りました（' + Math.round(size / 1048576 * 10) / 10 + 'MB・' + Math.round((new Date().getTime() - t0) / 1000) + '秒）' });
   // ① init
   var ij = callShop_(shopId, '/api/v2/media_space/init_video_upload', null, 'post', { file_md5: md5Hex_(bytes), file_size: size });
   var vid = ((ij.response || {}).video_upload_id) || '';
@@ -981,13 +981,13 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
     { video_upload_id: vid, part_seq_list: seqs, report_data: { upload_cost: cost } });
   if (cj.error && cj.error !== '') throw new Error('complete_video_upload ' + cj.error + ' ' + (cj.message || ''));
   // ④ トランスコード待ち（Shopee側の変換。数十秒かかる）
-  var st = '', tries = 0;
-  while (tries < 40) {
+  var st = '', tries = 0, tTrans = new Date().getTime();
+  while (tries < 90) {
     if (jobCancelled_(jobKey)) throw new Error('中止しました');
-    Utilities.sleep(4000); tries++;
+    Utilities.sleep(tries < 6 ? 1500 : 3000); tries++;   // 最初は短い間隔で見る（早く終わる動画を待たせない）
     var gj = callShop_(shopId, '/api/v2/media_space/get_video_upload_result', { video_upload_id: vid }, 'get');
     st = ((gj.response || {}).status) || '';
-    if (jobKey) jobSet_(jobKey, { pct: Math.min(92, 65 + tries), step: 'Shopeeが変換中… ' + st });
+    if (jobKey) jobSet_(jobKey, { pct: Math.min(92, 65 + tries), step: 'Shopeeが変換中… ' + st + '（' + Math.round((new Date().getTime() - tTrans) / 1000) + '秒）' });
     if (st === 'SUCCEEDED') break;
     if (st === 'FAILED') throw new Error('動画の変換に失敗しました（形式や長さを確認してください）');
   }
@@ -997,7 +997,8 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
   var uj = callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: itemId, video_upload_id: [vid] });
   var uerr = (uj.error && uj.error !== '') ? (uj.error + ' ' + (uj.message || '')) : '';
   if (uerr) throw new Error('update_item(video) ' + uerr);
-  return { ok: true, video_upload_id: vid, size: size, parts: n };
+  return { ok: true, video_upload_id: vid, size: size, parts: n,
+    ms: { total: new Date().getTime() - t0, transcode: new Date().getTime() - tTrans } };
 }
 // ★明細画像をまとめて差し替える。items=[{option, url}]
 //   ①画像を並列DL ②media_spaceへ並列アップロード ③update_tier_variation は1回だけ
