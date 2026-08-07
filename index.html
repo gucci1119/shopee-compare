@@ -13014,6 +13014,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     ]);
     const kset = new Set(known.map(k => k.cc + '|' + k.item_id + '|' + (k.model_id || 0)));
     const knownItems = new Set(known.map(k => k.cc + '|' + k.item_id));
+    // ★誤検知対策：models がまだ取れていないカタログは model_id=0 の仮行で記録される。
+    //   あとから models が同期されると「明細が増えた」と誤判定され、出品していない日に大量計上される
+    //   （2026-08-08 に台湾72件が今日出品扱いになった原因）。仮行がある単品(=名前なしmodel)は
+    //   新規ではなく“仮行の実体化”とみなし、日付を仮行の日に引き継いで仮行そのものを消す。
+    const zeroYmd = new Map();
+    known.forEach(k => { if (!k.model_id) zeroYmd.set(k.cc + '|' + k.item_id, k.ymd); });
+    const zeroDone = [];
     const today = jstDate(Date.now());
     const mOf = (L) => { const m = L.models; if (Array.isArray(m)) return m; try { return JSON.parse(m || '[]'); } catch (_) { return []; } };
     const add = [];
@@ -13024,17 +13031,28 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const isNewItem = !knownItems.has(r.cc + '|' + r.item_id);
       const ct = Number(r.create_time) || 0;
       const itemYmd = (isNewItem && ct) ? jstDate(ct < 1e11 ? ct * 1000 : ct) : today;
+      const ik = r.cc + '|' + r.item_id;
       list.forEach(m => {
         const key = r.cc + '|' + r.item_id + '|' + (m.id || 0);
         if (kset.has(key)) return;
         kset.add(key);
-        add.push({ cc: r.cc, item_id: r.item_id, model_id: m.id || 0, ymd: itemYmd,
+        let ymd = itemYmd;
+        if (m.id && !String(m.n || '').trim() && zeroYmd.has(ik)) { ymd = zeroYmd.get(ik); zeroDone.push(r.cc + '\u0000' + r.item_id); }
+        add.push({ cc: r.cc, item_id: r.item_id, model_id: m.id || 0, ymd,
           name: String(r.name || '').slice(0, 200), model_name: String(m.n || '').slice(0, 120),
           image: m.img || r.image || '', price: (m.price != null && m.price !== '' ? Number(m.price) : null),
           seeded: isNewItem && !!ct });
       });
     });
     if (add.length) await sbUpsert('listing_log', add);
+    // 実体化できた仮行(model_id=0)は二重計上になるので消す
+    const zdone = Array.from(new Set(zeroDone));
+    for (let i = 0; i < zdone.length; i += 50) {
+      const part = zdone.slice(i, i + 50);
+      const ids = part.map(x => x.split('\u0000')[1]);
+      const ccs = Array.from(new Set(part.map(x => x.split('\u0000')[0])));
+      try { await sbDelete('listing_log', 'model_id=eq.0&cc=in.(' + ccs.join(',') + ')&item_id=in.(' + ids.join(',') + ')'); } catch (_) {}
+    }
     return { added: add.length, total: kset.size };
   }
   async function loadListingLog() {
