@@ -4712,7 +4712,7 @@
   // ---------------- 操作ログ記録（fire-and-forget） ----------------
   async function logAct(page, action, target, detail) {
     if (!settings.sbSecret) return;
-    try { await sbUpsert('activity_log', [{ page, action, target: String(target || '').slice(0, 120), detail: String(detail || '').slice(0, 300) }]); } catch (e) {}
+    try { await sbUpsert('activity_log', [{ page, action, target: String(target || '').slice(0, 120), detail: String(detail || '').slice(0, 1200) }]); } catch (e) {}
   }
   // 在庫データを一度だけ読み込む（複数ページで共有）
   async function ensureInv() {
@@ -10432,7 +10432,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           osBtn.disabled = true; osBtn.textContent = '保存中…';
           try {
             await openapiReorderVariation(sidCat, itemId, order);
-            try { logAct('出品', '明細並び替え', repName || '', cc + ' ' + order.join(' / ')); } catch (_) {}
+            try { logAct('出品', '明細並び替え', repName || (pi.name || ''), cc + ' 旧: ' + ((tiers[0] && (tiers[0].value_list || []).map(o => o.custom_value)) || []).join(' / ') + '  →  新: ' + order.join(' / ')); } catch (_) {}
             markStale();
             origOrder.length = 0; order.forEach(n => origOrder.push(n));
             if (osMsg) { osMsg.style.color = '#1a7f37'; osMsg.textContent = '✓ 並び順を保存しました'; }
@@ -10598,7 +10598,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             markStale();
             if (sb2) sb2.style.display = 'none';
             ba.disabled = false; ba.textContent = (bAbort ? '② 中断：' : '② 完了：') + ok2 + '/' + list.length + '件';
-            try { logAct('出品', '明細一括追加', repName || '', cc + ' ' + ok2 + '件'); } catch (_) {}
+            try { logAct('出品', '明細一括追加', repName || (pi.name || ''), cc + ' ' + ok2 + '/' + list.length + '件追加 → ' + list.filter(x => /✓/.test((x.el.querySelector('.eb-st') || {}).textContent || '')).map(x => x.name + '(' + (rg.cur || '') + x.price + '・在庫' + x.stock + ')').join(' / ')); } catch (_) {}
             toast('✓ ' + ok2 + '件の明細を追加しました（画面を開き直すと反映されます）');
           });
         };
@@ -10725,7 +10725,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ab.disabled = true; ab.textContent = '追加中…';
           try {
             await openapiAddVariation(sidCat, itemId, { option: nm2, price: pr, stock: stk || '0', sku: sk, image: im });
-            try { logAct('出品', '明細追加', repName || '', cc + ' ' + nm2); } catch (_) {}
+            try { logAct('出品', '明細追加', repName || (pi.name || ''), cc + ' ' + nm2 + '（価格 ' + (rg.cur || '') + pr + '・在庫 ' + (stk || '1') + (sk ? '・SKU ' + sk : '') + (im ? '・画像あり' : '') + '）'); } catch (_) {}
             markStale();
             // ★開き直さずに行を足す。続けて次を入力できるようにフォームを空にしてフォーカスを戻す。
             try {
@@ -10773,12 +10773,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ★開き直さない。連続作業（10件追加など）で毎回フル再読込していたら話にならないので、
       //   成功したらその場のDOMだけ更新し、キャッシュを捨てて「次に開いた時」に正となるようにする。
       const markStale = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} };
+      // その明細に今ついている画像（履歴に「なし→設定」「差替」を残すため）
+      const curImgOf = (opt) => { const oi = (tiers[0] && (tiers[0].value_list || []).findIndex(o => (o.custom_value || '') === opt)); const m = models.find(m2 => (m2.tier_index || [])[0] === oi); return (m && m.img) || ''; };
       const setVarImg = async (opt, val, btn, lbl) => {
         if (!needOfficial()) return;
+        const before = curImgOf(opt);
         if (btn) { btn.disabled = true; btn.textContent = '…'; }
         try {
           await openapiSetVariationImage(sidCat, itemId, opt, val);
-          try { logAct('出品', '明細画像', repName || '', cc + ' ' + opt); } catch (_) {}
+          try { logAct('出品', '明細画像', repName || (pi.name || ''), cc + ' [' + opt + '] ' + (before ? '差替' : '新規設定') + '（' + (before ? '旧: ' + String(before).slice(0, 60) + ' → ' : '') + '新: ' + String(lbl || val || '').slice(0, 80) + '）'); } catch (_) {}
           markStale();
           // 同じオプションのサムネを画面上で差し替える（①明細テーブル ②上の「明細名（バリエーション）」の両方）
           const shownUrl = (typeof resolveImgUrl === 'function') ? resolveImgUrl(val) : val;
@@ -10844,8 +10847,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (typeof mercariImg === 'function' && mercariImg(u)) u = mercariImg(u);
         b2.disabled = true; b2.textContent = '…';
         try {
+          const before2 = curImgOf(opt);
           await openapiSetVariationImage(sidCat, itemId, opt, u);
-          try { logAct('出品', '明細画像', repName || '', cc + ' ' + opt); } catch (_) {}
+          try { logAct('出品', '明細画像', repName || (pi.name || ''), cc + ' [' + opt + '] ' + (before2 ? '差替' : '新規設定') + '（' + (before2 ? '旧: ' + String(before2).slice(0, 60) + ' → ' : '') + '新: ' + u.slice(0, 80) + '）'); } catch (_) {}
           toast('✓ 明細画像を変更しました: ' + opt); reopen();
         } catch (e) { alert('明細画像の変更に失敗: ' + e.message); b2.disabled = false; b2.textContent = '変更'; }
       }));
@@ -10927,26 +10931,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         } }
       body.querySelector('.ed-save').addEventListener('click', async () => {
         const patch = {}, summary = [];
+        // ★「何を変えたか」だけでなく「いくつからいくつに変えたか」を残す（履歴＝📜編集履歴／🧾操作ログ）
+        const diffs = [];
+        const sh = (v, n) => { const x = String(v == null ? '' : v); return x.length > (n || 28) ? x.slice(0, n || 28) + '…' : (x || '(空)'); };
+        const d1 = (label, before, after) => diffs.push(label + ': ' + sh(before) + ' → ' + sh(after));
         const nameV = body.querySelector('.ed-name').value.trim();
-        if (nameV && nameV !== (pi.name || '')) { patch.name = nameV; summary.push('タイトル'); }
+        if (nameV && nameV !== (pi.name || '')) { patch.name = nameV; summary.push('タイトル'); d1('タイトル', pi.name || '', nameV); }
         // 説明文
         const descV = body.querySelector('.ed-desc').value;
         // ★ブリッジ読込では説明文が取れないため比較できない＝誤って空で上書きしないよう公式読込時のみ対象
-        if (pi._src === 'api' && pi.description_editable !== false && descV !== (pi.description || '')) { patch.description = descV; summary.push('商品説明'); }
+        if (pi._src === 'api' && pi.description_editable !== false && descV !== (pi.description || '')) { patch.description = descV; summary.push('商品説明'); diffs.push('商品説明: ' + (pi.description || '').length + '字 → ' + descV.length + '字'); }
         // 画像（並び順も含めて完全一致でなければ差し替え）
         const origImgs = (pi.images || []).slice();
         if (pi._src === 'api' && (edImgs.length !== origImgs.length || edImgs.some((u, i) => u !== origImgs[i]))) {
           if (!edImgs.length) { alert('画像は1枚以上必要です'); return; }
           patch.images = edImgs.slice(); summary.push('画像' + edImgs.length + '枚');
+          // 画像は URL が長いので「枚数＋入替の有無」で残す（何枚目が変わったかまで出す）
+          { const chg = [];
+            for (let i9 = 0; i9 < Math.max(edImgs.length, origImgs.length); i9++) {
+              if (edImgs[i9] !== origImgs[i9]) chg.push((i9 + 1) + '枚目' + (origImgs[i9] == null ? '追加' : (edImgs[i9] == null ? '削除' : '差替')));
+            }
+            diffs.push('画像: ' + origImgs.length + '枚 → ' + edImgs.length + '枚' + (chg.length ? '（' + chg.slice(0, 6).join('・') + (chg.length > 6 ? ' ほか' + (chg.length - 6) : '') + '）' : ''));
+          }
         }
         const pskuV = body.querySelector('.ed-psku').value.trim();
-        if (pskuV !== (pi.parent_sku || '')) { patch.parent_sku = pskuV; summary.push('親SKU'); }
+        if (pskuV !== (pi.parent_sku || '')) { patch.parent_sku = pskuV; summary.push('親SKU'); d1('親SKU', pi.parent_sku || '', pskuV); }
         const wvalV = body.querySelector('.ed-wval').value.trim();
-        if (wvalV && wvalV !== String((pi.weight || {}).value || '')) { patch.weight = { value: wvalV, unit: (pi.weight || {}).unit != null ? (pi.weight || {}).unit : 1 }; summary.push('重量'); }
+        if (wvalV && wvalV !== String((pi.weight || {}).value || '')) { patch.weight = { value: wvalV, unit: (pi.weight || {}).unit != null ? (pi.weight || {}).unit : 1 }; summary.push('重量'); d1('重量(kg)', (pi.weight || {}).value || '', wvalV); }
         // tier（明細名）
         let tierChanged = false;
         const newTiers = JSON.parse(JSON.stringify(tiers));
-        body.querySelectorAll('.ed-tier').forEach(inp => { const ti = +inp.dataset.ti, oi = +inp.dataset.oi; const nv = inp.value; if (newTiers[ti] && newTiers[ti].value_list[oi] && newTiers[ti].value_list[oi].custom_value !== nv) { newTiers[ti].value_list[oi].custom_value = nv; tierChanged = true; } });
+        body.querySelectorAll('.ed-tier').forEach(inp => { const ti = +inp.dataset.ti, oi = +inp.dataset.oi; const nv = inp.value; if (newTiers[ti] && newTiers[ti].value_list[oi] && newTiers[ti].value_list[oi].custom_value !== nv) { d1('明細名' + (oi + 1), newTiers[ti].value_list[oi].custom_value, nv); newTiers[ti].value_list[oi].custom_value = nv; tierChanged = true; } });
         if (tierChanged) { patch.std_tier_variation_list = newTiers; summary.push('明細名'); }
         // model 価格・在庫・SKU
         let priceCh = false, skuCh = false, stockCh = false;
@@ -10957,9 +10972,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const newModels = models.map(m => {
           const entry = { id: m.id, tier_index: m.tier_index || [], price: (priceMap[m.id] != null ? priceMap[m.id] : modelPrice(m)) };
           const origP = modelPrice(m), origS = m.sku || '', origSt = modelStock(m);
-          if (priceMap[m.id] != null && priceMap[m.id] !== origP) priceCh = true;
-          if (skuMap[m.id] != null && skuMap[m.id] !== origS) { entry.sku = skuMap[m.id]; skuCh = true; }
-          if (stockMap[m.id] != null && stockMap[m.id] !== '' && String(parseInt(stockMap[m.id], 10)) !== String(origSt)) { entry.stock_setting_list = [{ sellable_stock: parseInt(stockMap[m.id], 10) || 0 }]; stockCh = true; }
+          const mn = optOf(m) || ('明細' + (((m.tier_index || [])[0] || 0) + 1));
+          if (priceMap[m.id] != null && priceMap[m.id] !== origP) { priceCh = true; d1('価格[' + sh(mn, 16) + ']', (rg.cur || '') + origP, (rg.cur || '') + priceMap[m.id]); }
+          if (skuMap[m.id] != null && skuMap[m.id] !== origS) { entry.sku = skuMap[m.id]; skuCh = true; d1('SKU[' + sh(mn, 16) + ']', origS, skuMap[m.id]); }
+          if (stockMap[m.id] != null && stockMap[m.id] !== '' && String(parseInt(stockMap[m.id], 10)) !== String(origSt)) { entry.stock_setting_list = [{ sellable_stock: parseInt(stockMap[m.id], 10) || 0 }]; stockCh = true; d1('在庫[' + sh(mn, 16) + ']', origSt, parseInt(stockMap[m.id], 10) || 0); }
           return entry;
         });
         const modelChanged = priceCh || skuCh || stockCh;
@@ -10970,10 +10986,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const dtsV = dtsRaw ? parseInt(dtsRaw, 10) : 0;
         const origPo = !!(pi.pre_order_info && pi.pre_order_info.pre_order);
         const origDts = (pi.pre_order_info && pi.pre_order_info.days_to_ship) || 0;
-        if (poOn !== origPo || (dtsV && dtsV !== origDts)) { patch.pre_order_info = { pre_order: poOn, days_to_ship: dtsV || dtsFor(cc, poOn) }; summary.push('予約' + (poOn ? '(ON・' + patch.pre_order_info.days_to_ship + '日)' : '(OFF・' + patch.pre_order_info.days_to_ship + '日)')); }
+        if (poOn !== origPo || (dtsV && dtsV !== origDts)) { patch.pre_order_info = { pre_order: poOn, days_to_ship: dtsV || dtsFor(cc, poOn) }; summary.push('予約' + (poOn ? '(ON・' + patch.pre_order_info.days_to_ship + '日)' : '(OFF・' + patch.pre_order_info.days_to_ship + '日)')); d1('予約/発送日数', (origPo ? 'ON' : 'OFF') + '・' + (origDts || '-') + '日', (poOn ? 'ON' : 'OFF') + '・' + patch.pre_order_info.days_to_ship + '日'); }
         // カテゴリ変更（変えた時は属性もまとめて送る＝カテゴリ依存のため）
         const newCat = (typeof openCatalogEditor._pickedCat === 'function') ? openCatalogEditor._pickedCat() : null;
-        if (newCat && newCat !== catId) { patch.category_id = newCat; summary.push('カテゴリ変更(#' + newCat + ')'); }
+        if (newCat && newCat !== catId) { patch.category_id = newCat; summary.push('カテゴリ変更(#' + newCat + ')'); d1('カテゴリ', catNameOf(cc, catId) || ('#' + catId), catNameOf(cc, newCat) || ('#' + newCat)); }
         // ★attributes：行indexでなく attribute_id で拾う（ツリー全体を出すので行数が元配列と違う）
         {
           const origById = new Map(attrs.map(a => [a.attribute_id, a]));
@@ -11001,10 +11017,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const sig = (arr) => JSON.stringify((arr || []).map(v => (v.value_id != null ? 'i' + v.value_id : 'r' + String(v.raw_value == null ? '' : v.raw_value))).sort());
           let changed2 = false;
           const newAttrs2 = [];
+          // 属性名と選択肢名の逆引き（履歴に「Brand: NoBrand → Nintendo」と残すため）
+          const treeNow = (typeof pickedTree !== 'undefined' && pickedTree) ? pickedTree : atree;
+          const aName = (id) => { const d = treeNow && treeNow.get && treeNow.get(id); const o = origById.get(id); return (o && o.name) || (d && d.name) || ('#' + id); };
+          const vName = (id, v) => {
+            if (v == null) return '';
+            if (v.raw_value !== undefined) return String(v.raw_value);
+            const d = treeNow && treeNow.get && treeNow.get(id);
+            const hit = d && (d.options || []).find(o2 => o2.id === v.value_id);
+            return (hit && hit.name) || (v.name || ('#' + v.value_id));
+          };
+          const vList = (id, arr) => ((arr || []).map(v => vName(id, v)).filter(Boolean).join('・') || '(未設定)');
           built.forEach((vals2, id) => {
             const o = origById.get(id);
             const before = o ? (o.attribute_values || []) : [];
-            if (sig(before) !== sig(vals2)) changed2 = true;
+            if (sig(before) !== sig(vals2)) { changed2 = true; d1('属性[' + sh(aName(id), 18) + ']', vList(id, before), vList(id, vals2)); }
             if (vals2.length) newAttrs2.push({ attribute_id: id, attribute_values: vals2 });
           });
           // 画面に出ていない属性（ツリーにも商品にも無い＝理論上無いが保険）は現状維持で残す
@@ -11023,7 +11050,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const cw = countryListingWarnings({ cc, title: effTitle, prices: effPrices });
         const gw = await guardWriteCountries([cc]);
         if (!gw.ok) { alert(gw.msg); return; }
-        if (!confirm(`書込先アカウント: ${gw.summary}\n\n本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${summary.join('\n・')}\n\n${cw.length ? '⚠️ ' + cc + 'の出品制約に注意:\n - ' + cw.join('\n - ') + '\n\n' : ''}よろしいですか？`)) return;
+        if (!confirm(`書込先アカウント: ${gw.summary}\n\n本番のShopeeカタログ（${cc} / item ${itemId}）に次を書き込みます:\n\n・${(diffs.length ? diffs : summary).join('\n・')}\n\n${cw.length ? '⚠️ ' + cc + 'の出品制約に注意:\n - ' + cw.join('\n - ') + '\n\n' : ''}よろしいですか？`)) return;
         const btn = body.querySelector('.ed-save'), msg = body.querySelector('.ed-msg');
         btn.disabled = true; btn.textContent = '書込中…'; msg.textContent = '';
         // 内部v3 attributes → 公式v2 attribute_list へ変換（選択肢=value_id / 自由記述=original_value_name+value_unit）
@@ -11085,7 +11112,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
             try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
             try { openCatalogEditor._cache.delete(ck); } catch (_) {}   // 保存後は再取得（古い内容を出さない）
-            try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+            try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
           } else {
             const res = await productWrite(host, itemId, patch); // 公式未設定時のみブリッジ全書込
             if (res.ok) {
@@ -11093,7 +11120,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
               try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
               try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
-              try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + summary.join('/')); } catch (_) {}
+              try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
             }
             else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
           }
@@ -12265,7 +12292,46 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
       let rows = await sbGetAll('activity_log', 'select=page,action,target,detail,ts&target=eq.' + encodeURIComponent(name) + '&order=ts.desc&limit=200').catch(() => null);
       if ((!rows || !rows.length) && name) { rows = await sbGetAll('activity_log', 'select=page,action,target,detail,ts&target=ilike.' + encodeURIComponent('%' + name.slice(0, 40) + '%') + '&order=ts.desc&limit=200').catch(() => []); }
       if (!rows || !rows.length) { body.innerHTML = '<div class="smd-dim" style="font-size:12.5px">この商品の編集履歴はまだありません。<br>価格・在庫・タイトル・各国まとめ編集などを行うと、日時・操作・内容が自動で記録されます。</div>'; return; }
-      body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 7px">日時</th><th style="padding:3px 7px">操作</th><th style="padding:3px 7px">内容</th></tr></thead><tbody>' + rows.map(r => { const ds = r.ts ? jstDateTime(r.ts) : '—'; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 7px;white-space:nowrap;color:#888;font-size:11px">${ds}</td><td style="padding:4px 7px;font-weight:600;white-space:nowrap">${esc(r.action || '')}</td><td style="padding:4px 7px;color:#555">${esc(r.detail || '')}</td></tr>`; }).join('') + '</tbody></table><div class="smd-dim" style="font-size:10.5px;margin-top:8px">※価格・在庫・タイトル・まとめ編集・自動出品などの操作を記録（操作ログと共有）。</div>';
+      const draw = (impact) => {
+        body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:3px 7px">日時</th><th style="padding:3px 7px">操作</th><th style="padding:3px 7px">内容</th><th style="padding:3px 7px;white-space:nowrap" title="この編集の前14日と後14日で、この商品が何個売れたかを比べます">売れ行き 前→後</th></tr></thead><tbody>'
+          + rows.map((r, i) => { const ds = r.ts ? jstDateTime(r.ts) : '—'; const im = impact ? impact[i] : null;
+            return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:4px 7px;white-space:nowrap;color:#888;font-size:11px">${ds}</td><td style="padding:4px 7px;font-weight:600;white-space:nowrap">${esc(r.action || '')}</td><td style="padding:4px 7px;color:#555">${esc(r.detail || '')}</td><td style="padding:4px 7px;white-space:nowrap;font-size:11px">${im ? im.html : '<span class="smd-dim">…</span>'}</td></tr>`;
+          }).join('') + '</tbody></table><div class="smd-dim" style="font-size:10.5px;margin-top:8px">※「売れ行き 前→後」＝その編集の<b>前14日</b>と<b>後14日</b>に売れた個数（キャンセル/未払いを除く・全国合算）。編集から14日たっていない分は「計測中」。効果は他の要因でも動くので<b>目安</b>です。</div>';
+      };
+      draw(null);
+      // 売れ行きへの影響：注文明細をこの商品名で拾って、各編集の前後14日を比べる
+      (async () => {
+        try {
+          const since = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+          const ords = await sbGetAll('orders', 'select=cc,order_ts,order_date,status,items&order_date=gte.' + since).catch(() => []);
+          const skip = /(UNPAID|CANCEL|INVOICE_PENDING)/i;
+          const key = String(name || '').trim().toLowerCase().slice(0, 40);
+          const sold = [];   // [{t(ms), qty}]
+          (ords || []).forEach(o => {
+            if (skip.test(o.status || '')) return;
+            const t = o.order_ts ? (Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date ? Date.parse(o.order_date + 'T00:00:00+09:00') : 0);
+            if (!t) return;
+            (o.items || []).forEach(it => {
+              const n2 = String(it.name || '').trim().toLowerCase();
+              if (!key || !n2 || !(n2.includes(key) || key.includes(n2.slice(0, 40)))) return;
+              sold.push({ t, qty: it.qty || 1 });
+            });
+          });
+          const W = 14 * 86400000, now = Date.now();
+          const impact = rows.map(r => {
+            const t0 = r.ts ? Date.parse(r.ts) : 0;
+            if (!t0) return { html: '<span class="smd-dim">—</span>' };
+            const before = sold.filter(x => x.t >= t0 - W && x.t < t0).reduce((a, x) => a + x.qty, 0);
+            const after = sold.filter(x => x.t >= t0 && x.t < t0 + W).reduce((a, x) => a + x.qty, 0);
+            const days = Math.floor((now - t0) / 86400000);
+            if (days < 14) return { html: '<span class="smd-dim">計測中（あと' + (14 - days) + '日）</span>' };
+            const d = after - before;
+            const col = d > 0 ? '#1a7f37' : (d < 0 ? '#d93025' : '#8a8f98');
+            return { html: '<b>' + before + '</b> → <b>' + after + '</b> <span style="color:' + col + ';font-weight:700">' + (d > 0 ? '+' : '') + d + '</span>' };
+          });
+          if (ov.isConnected) draw(impact);
+        } catch (_) { /* 影響の集計だけ失敗しても履歴は見せる */ }
+      })();
     } catch (e) { body.innerHTML = '<div style="color:#d93025">履歴の取得に失敗: ' + esc(e.message || '') + '</div>'; }
   }
   async function renderLedger(useCache) {
