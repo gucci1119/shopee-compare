@@ -1346,6 +1346,17 @@
   async function fetchImgBytes(url) {
     try { return await fetchImgDirect(url); } catch (_) { return fetchImgViaGas(url); }
   }
+  // ★まとめて取る。GAS側の UrlFetchApp.fetchAll が並列に取りに行くので1枚ずつより桁違いに速い。
+  //   （Apps Scriptは同一ユーザーのリクエストを直列処理するので、ブラウザ側で並列に呼んでも無意味）
+  async function fetchImgsViaGas(urls) {
+    const res = await gasCall({ action: 'fetch_images', urls: urls.join('\u0001') }, 180000);
+    const arr = (res && res.images) || [];
+    return urls.map((u, i) => {
+      const x = arr[i];
+      if (!x || !x.ok || !x.b64) return null;
+      return { bytes: Uint8Array.from(atob(x.b64), c => c.charCodeAt(0)), mime: x.mime || 'image/jpeg' };
+    });
+  }
   // アップロード画像(data:)を Supabase Storage(公開バケット listing-imgs)に上げて公開http URLを返す（直接API出品用）
   async function uploadImgToStorage(dataUrl, tag) {
     if (!settings.sbSecret) throw new Error('書き込みキー(sbSecret)が未設定です（⚙️設定）');
@@ -10297,27 +10308,39 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const setMsg = (extra) => { if (msgI) msgI.textContent = 'ダウンロード中… ' + done + '/' + targets.length + (extra || ''); };
           const push = (t, r) => { const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes }); };
           setMsg();
-          { let next = 0;
-            // ★同時に投げるとCDNが瞬間的に弾くことがある。落ちた分はまず直接もう2回試す
-            //   （そのほうがGAS経由より圧倒的に速い）。それでもダメな分だけGASへ回す。
-            const worker = async () => {
-              while (next < targets.length) {
-                const t = targets[next++];
-                let got = null;
-                for (let a3 = 0; a3 < 3 && !got; a3++) {
-                  if (a3) await new Promise(r3 => setTimeout(r3, 250 * a3));
-                  try { got = await fetchImgDirect(t.img); } catch (_) {}
+          // ①まず数枚だけブラウザから直接取ってみる。Shopeeの画像CDNは基本ブラウザ直取りを許さないので、
+          //   全滅ならすぐ見切って②へ（全枚数ぶん無駄に試さない）。
+          { const probe = targets.slice(0, 3);
+            let okDirect = 0;
+            await Promise.all(probe.map(async t => { try { push(t, await fetchImgDirect(t.img)); okDirect++; done++; setMsg(); } catch (_) { viaGas.push(t); } }));
+            if (okDirect) {
+              // 直接取れる環境なら残りも同時12本で
+              let next = 0;
+              const rest = targets.slice(3);
+              const worker = async () => {
+                while (next < rest.length) {
+                  const t = rest[next++];
+                  try { push(t, await fetchImgDirect(t.img)); } catch (_) { viaGas.push(t); }
+                  done++; setMsg();
                 }
-                if (got) push(t, got); else viaGas.push(t);
-                done++; setMsg();
-              }
-            };
-            await Promise.all(Array.from({ length: Math.min(12, targets.length) }, worker));
+              };
+              await Promise.all(Array.from({ length: Math.min(12, rest.length) }, worker));
+            } else {
+              targets.slice(3).forEach(t => viaGas.push(t));
+            }
           }
-          for (let i = 0; i < viaGas.length; i++) {
-            const t = viaGas[i];
-            if (msgI) msgI.textContent = '残り ' + (viaGas.length - i) + '枚を別経路で取得中…（' + done + '/' + targets.length + 'は取得済み）';
-            try { push(t, await fetchImgViaGas(t.img)); } catch (e) { ng.push(t.no + ' ' + t.opt); }
+          // ②GASに8枚ずつまとめて依頼（サーバ側で並列取得）。1枚ずつ呼ぶより桁違いに速い。
+          for (let i = 0; i < viaGas.length; i += 8) {
+            const chunk = viaGas.slice(i, i + 8);
+            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（まとめて取得中）';
+            try {
+              const got = await fetchImgsViaGas(chunk.map(t => t.img));
+              chunk.forEach((t, k) => { if (got[k]) push(t, got[k]); else ng.push(t.no + ' ' + t.opt); });
+            } catch (e) {
+              // まとめ取得が失敗したら1枚ずつで拾い直す
+              for (const t of chunk) { try { push(t, await fetchImgViaGas(t.img)); } catch (_) { ng.push(t.no + ' ' + t.opt); } }
+            }
+            done += chunk.length; setMsg();
           }
           files.sort((a, b) => a.no - b.no);
           if (!files.length) { dlB.disabled = false; if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした（GASのfetch_imageが必要かも）'; } return; }

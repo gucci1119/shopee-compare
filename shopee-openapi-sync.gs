@@ -296,6 +296,30 @@ function doGet(e) {
       } catch (err) { fiout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ficb + '(' + JSON.stringify(fiout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★画像を「まとめて」取り出す。UrlFetchApp.fetchAll はGAS側で並列に取りに行くので、
+    //   1枚ずつ呼ぶより桁違いに速い（Apps Scriptは同一ユーザーのリクエストを直列処理するため、
+    //   ブラウザ側で並列に呼んでも意味がない＝サーバ側で並列にするのが正解）。
+    //   urls は \u0001 区切り。戻りは同じ並びの配列。
+    if (p.action === 'fetch_images') {
+      var fmcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var fmout;
+      try {
+        var us = String(p.urls || '').split('\u0001').filter(String);
+        if (!us.length) throw new Error('URLが空です');
+        if (us.length > 20) throw new Error('一度に20枚までです');
+        var reqs = us.map(function (u) { return { url: u, muteHttpExceptions: true, followRedirects: true }; });
+        var rs = UrlFetchApp.fetchAll(reqs);
+        var arr = rs.map(function (r) {
+          try {
+            if (r.getResponseCode() >= 400) return { ok: false, error: 'HTTP ' + r.getResponseCode() };
+            var b = r.getBlob();
+            return { ok: true, mime: b.getContentType() || 'image/jpeg', b64: Utilities.base64Encode(b.getBytes()) };
+          } catch (e2) { return { ok: false, error: String(e2 && e2.message || e2) }; }
+        });
+        fmout = { ok: true, images: arr };
+      } catch (err) { fmout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(fmcb + '(' + JSON.stringify(fmout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
