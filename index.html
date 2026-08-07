@@ -1413,12 +1413,20 @@
     if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
     const qs = 'action=get_item_full&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&callback=cb';
     const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
-    const ac = new AbortController();
-    const tm = setTimeout(() => ac.abort(), timeoutMs || 9000);
-    let txt;
-    try { const r = await fetch(url, { signal: ac.signal, credentials: 'omit' }); txt = await r.text(); }
-    catch (e) { throw new Error('GAS応答なし（' + String(e && e.name || e) + '）'); }
-    finally { clearTimeout(tm); }
+    // ★Apps Scriptは同じユーザーのリクエストを1件ずつしか処理しない。まとめて追加や画像処理が
+    //   走っていると読み取りが順番待ちになるため、短い時間で諦めるとブリッジ表示に落ちてしまう。
+    //   長めに待ち、落ちても2回まで待ち直す。
+    const busy = (typeof JOBS !== 'undefined') && JOBS.list.some(j => j.state === 'run' || j.state === 'wait');
+    const base = timeoutMs || (busy ? 90000 : 45000);
+    let txt = null, lastE = null;
+    for (let att = 0; att < 3 && txt == null; att++) {
+      const ac = new AbortController();
+      const tm = setTimeout(() => ac.abort(), base);
+      try { const r = await fetch(url, { signal: ac.signal, credentials: 'omit' }); txt = await r.text(); }
+      catch (e) { lastE = e; if (att < 2) await new Promise(r2 => setTimeout(r2, 1200 * (att + 1))); }
+      finally { clearTimeout(tm); }
+    }
+    if (txt == null) throw new Error('GAS応答なし（' + String(lastE && lastE.name || lastE) + (busy ? '・他の作業が実行中で順番待ちでした' : '') + '）');
     const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(txt || '');
     if (!m) throw new Error('GASがJSONを返しませんでした（再デプロイ直後/伝播中の可能性）');
     let res; try { res = JSON.parse(m[1]); } catch (_) { throw new Error('GASの応答を解釈できませんでした'); }
@@ -10432,7 +10440,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               <span style="color:#5a6b8c">明細の<b>追加</b>（単品／📋まとめて追加）・明細の<b>削除 🗑</b>・<b>明細画像</b>の変更（📁 / 🔗 / 🖼一括差し替え）・<b>🧹空明細の掃除</b>。これらは確認ダイアログのあと即Shopeeに書き込まれます。</span></div>
             <div style="margin-top:5px;color:#5a6b8c">覚え方：<b>入力欄をいじったら「Shopeeに保存」／ボタンを押す操作はその場で反映済み</b>。並び順だけがその例外。</div>
           </div>
-        </details>${pi._src === 'api' ? '' : `<div style="background:#fdecea;border:1px solid #f5c6c2;border-radius:6px;padding:7px 10px;font-size:11px;color:#b3261e;margin-bottom:12px">公式APIで読めなかったため<b>ブリッジで表示しています</b>。この状態では<b>説明文・画像・属性名が出ず、編集もできません</b>。<br>理由：<b>${esc(openCatalogEditor._lastErr || '不明')}</b>　<button class="ed-retry" style="border:1px solid #b3261e;background:#fff;color:#b3261e;border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;margin-left:4px">公式APIで読み直す</button></div>`}
+        </details>${pi._src === 'api' ? '' : `<div style="background:#fdecea;border:1px solid #f5c6c2;border-radius:6px;padding:7px 10px;font-size:11px;color:#b3261e;margin-bottom:12px">公式APIで読めなかったため<b>ブリッジで表示しています</b>。この状態では<b>説明文・画像・属性名が出ず、編集もできません</b>。<br>理由：<b>${esc(openCatalogEditor._lastErr || '不明')}</b>${/応答なし|Abort/i.test(String(openCatalogEditor._lastErr || '')) ? '<br><span style="font-weight:400">※GASは同時に1件しか処理できません。<b>しごとセンターで作業が走っていると順番待ち</b>になります。終わってから「公式APIで読み直す」を押すと直ります。</span>' : ''}　<button class="ed-retry" style="border:1px solid #b3261e;background:#fff;color:#b3261e;border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;margin-left:4px">公式APIで読み直す</button></div>`}
         <label style="color:#555;font-weight:600">タイトル</label>
         <textarea class="ed-name" rows="2" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;resize:vertical">${esc(pi.name || '')}</textarea>
         <div class="ed-namecnt smd-dim" style="font-size:10.5px;margin-top:2px"></div>
