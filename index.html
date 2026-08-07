@@ -2200,6 +2200,19 @@
   // 自動ダウンロード済みの印（端末ごと・最新50件だけ覚える）
   const jobOpened = (k) => { try { return (JSON.parse(localStorage.getItem('smdJobOpened') || '[]')).includes(k); } catch (_) { return false; } };
   const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-50))); } catch (_) {} };
+  // ★しごとが終わった時に画面を追従させるためのコールバック（同じ画面を開いたままの場合のみ）
+  const JOB_DONE_CB = {};
+  // 明細画像を差し替えた後、開いているエディタのサムネもその場で更新する（古い画像が残ると紛らわしい）
+  function applyVarThumbs(pairs) {
+    (pairs || []).forEach(({ option, url }) => {
+      if (!option || !url) return;
+      const sel = (cls) => document.querySelectorAll(cls + '[data-opt="' + (window.CSS && CSS.escape ? CSS.escape(option) : option.replace(/"/g, '\\"')) + '"]');
+      sel('.ed-vth').forEach(im => { im.src = url; im.style.opacity = ''; });
+      sel('.ed-mth').forEach(im => { im.src = url; im.style.opacity = ''; });
+      sel('.ed-vth-empty').forEach(sp => { sp.outerHTML = '<img class="zimg ed-vth" data-opt="' + option.replace(/"/g, '&quot;') + '" src="' + url + '" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px;background:#f2f2f2;flex:none;cursor:zoom-in">'; });
+      sel('.ed-mth-empty').forEach(sp => { sp.outerHTML = '<img class="zimg ed-mth" data-opt="' + option.replace(/"/g, '&quot;') + '" src="' + url + '" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2;cursor:zoom-in">'; });
+    });
+  }
   let jobPollTimer = null;
   async function jobPoll() {
     if (!settings.sbKey && !settings.sbSecret) return;
@@ -2214,7 +2227,9 @@
       if (!j) { j = { id: ++JOBS.seq, remote: r.k, title: v.title || '作業', sub: v.sub || '', state: 'run', pct: 0, msg: '' }; JOBS.list.push(j); }
       j.title = v.title || j.title; j.sub = v.sub || j.sub; j.pct = v.pct || j.pct;
       j.msg = v.status === 'done' ? (v.msg || '完了') : (v.status === 'error' ? (v.error || '失敗') : (v.step || ''));
+      const wasRun = j.state === 'run' || j.state === 'wait';
       j.state = v.status === 'done' ? 'done' : (v.status === 'error' ? 'err' : (v.status === 'cancel' ? 'stop' : 'run'));
+      if (wasRun && j.state === 'done' && JOB_DONE_CB[r.k]) { try { JOB_DONE_CB[r.k](v); } catch (_) {} delete JOB_DONE_CB[r.k]; }
       // ★完了したZIPの自動ダウンロードは「この端末で1回だけ」。
       //   メモリだけで持つとリロードのたびに再ダウンロードされるので、開いた印はlocalStorageに残す。
       if (v.status === 'done' && v.result && v.result.url && !jobOpened(r.k)) {
@@ -10131,8 +10146,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             // 第1階層のオプションにだけ画像が紐づく。名前の横にサムネを出してどれがどれか分かるように。
             const im = (ti === 0) ? ((models.find(m => (m.tier_index || [])[0] === oi) || {}).img || '') : '';
             const th = (ti !== 0) ? '' : (im
-              ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(im) : im)}" referrerpolicy="no-referrer" class="zimg" style="width:30px;height:30px;object-fit:cover;border-radius:4px;background:#f2f2f2;flex:none;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">`
-              : '<span style="width:30px;height:30px;border:1px dashed #ddd;border-radius:4px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#aaa">なし</span>');
+              ? `<img class="zimg ed-vth" data-opt="${av(o.custom_value)}" src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(im) : im)}" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px;background:#f2f2f2;flex:none;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">`
+              : `<span class="ed-vth-empty" data-opt="${av(o.custom_value)}" style="width:30px;height:30px;border:1px dashed #ddd;border-radius:4px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#aaa">なし</span>`);
             const mv = (ti === 0 && (t.value_list || []).length > 1)
               ? `<span style="display:inline-flex;flex:none"><button class="ed-tmv" data-oi="${oi}" data-d="-1" title="前へ" style="border:1px solid #ddd;background:#fff;border-radius:4px 0 0 4px;font-size:10px;padding:3px 4px;cursor:pointer">◀</button><button class="ed-tmv" data-oi="${oi}" data-d="1" title="後へ" style="border:1px solid #ddd;border-left:none;background:#fff;border-radius:0 4px 4px 0;font-size:10px;padding:3px 4px;cursor:pointer">▶</button></span>` : '';
             return `<span class="ed-tierrow" data-oi="${oi}" style="display:inline-flex;align-items:center;gap:4px;width:calc(33% - 6px);min-width:214px"><span class="ed-tno" style="width:17px;flex:none;text-align:right;font-size:10.5px;color:#8a8f98;font-weight:700">${oi + 1}</span>${th}<input class="ed-tier" maxlength="30" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集（30字まで）">${mv}</span>`;
@@ -10150,7 +10165,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="font-size:11px;min-width:200px"><span style="color:#8a8f98;font-weight:700;margin-right:5px">${((m.tier_index || [])[0] || 0) + 1}</span>${tiers.length === 1
           ? `<input class="ed-tier2" maxlength="30" data-oi="${(m.tier_index || [])[0] || 0}" value="${av(optOf(m))}" title="明細名を編集（上のバリエ欄と連動・30字まで／「Shopeeに保存」で反映）" style="width:calc(100% - 22px);padding:4px 7px;border:1px solid #ddd;border-radius:5px;font-size:11px">`
           : esc(modelName(m, tiers))}</td>
-        <td style="width:46px">${m.img ? `<img src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" class="zimg" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">` : '<span class="smd-dim" style="font-size:10px">なし</span>'}${tiers.length === 1 ? `<br><span style="display:inline-flex;gap:2px;margin-top:2px"><button class="ed-mimgf" data-opt="${av(optOf(m))}" title="PCの画像ファイルを選ぶ（このマスにドラッグ&ドロップも可）" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">📁</button><button class="ed-mimg" data-opt="${av(optOf(m))}" title="画像URLを入れる" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">🔗</button></span>` : ''}</td>
+        <td style="width:46px">${m.img ? `<img class="zimg ed-mth" data-opt="${av(optOf(m))}" src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(m.img) : m.img)}" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:5px;background:#f2f2f2;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">` : `<span class="ed-mth-empty smd-dim" data-opt="${av(optOf(m))}" style="font-size:10px">なし</span>`}${tiers.length === 1 ? `<br><span style="display:inline-flex;gap:2px;margin-top:2px"><button class="ed-mimgf" data-opt="${av(optOf(m))}" title="PCの画像ファイルを選ぶ（このマスにドラッグ&ドロップも可）" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">📁</button><button class="ed-mimg" data-opt="${av(optOf(m))}" title="画像URLを入れる" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9px;padding:1px 4px;cursor:pointer">🔗</button></span>` : ''}</td>
         <td style="white-space:nowrap">${esc(cur)}<input class="ed-price" data-mid="${m.id}" value="${av(modelPrice(m))}" inputmode="decimal" style="width:88px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></td>
         <td style="text-align:center"><input class="ed-stock" data-mid="${m.id}" value="${modelStock(m)}" inputmode="numeric" style="width:60px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right" title="在庫（sellable stock）"></td>
         <td><span style="display:inline-flex;align-items:center;gap:3px"><input class="ed-msku" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="(SKU)" style="width:118px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;font-family:monospace">${tiers.length === 1 ? `<button class="ed-skusug1" data-mid="${m.id}" title="この明細のSKUだけ自動生成" style="border:1px solid #ddd;background:#fff;border-radius:4px;font-size:9.5px;padding:2px 5px;cursor:pointer">💡</button>` : ''}</span></td>
@@ -10540,6 +10555,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               ctx.progress(100, '準備完了');
               const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）');
               jobPollStart();
+              // 反映が終わったら、開いたままのエディタのサムネも新しい画像に差し替える
+              JOB_DONE_CB[key] = () => { applyVarThumbs(items); toast('🖼 画面のサムネも新しい画像に更新しました'); };
               gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: key }, 300000))
                 .catch(e => jobRemoteFail(key, e && e.message));
               try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + items.length + '件 → ' + label); } catch (_) {}
@@ -11156,6 +11173,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (btn) { btn.disabled = true; btn.textContent = '…'; }
         try {
           await openapiSetVariationImage(sidCat, itemId, opt, val);
+          applyVarThumbs([{ option: opt, url: /^https?:\/\//i.test(String(val)) ? val : (lbl || '') }]);
           try { logAct('出品', '明細画像', repName || (pi.name || ''), cc + ' [' + opt + '] ' + (before ? '差替' : '新規設定') + '（' + (before ? '旧: ' + String(before).slice(0, 60) + ' → ' : '') + '新: ' + String(lbl || val || '').slice(0, 80) + '）'); } catch (_) {}
           markStale();
           // 同じオプションのサムネを画面上で差し替える（①明細テーブル ②上の「明細名（バリエーション）」の両方）
@@ -11224,6 +11242,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try {
           const before2 = curImgOf(opt);
           await openapiSetVariationImage(sidCat, itemId, opt, u);
+          applyVarThumbs([{ option: opt, url: u }]);
           try { logAct('出品', '明細画像', repName || (pi.name || ''), cc + ' [' + opt + '] ' + (before2 ? '差替' : '新規設定') + '（' + (before2 ? '旧: ' + String(before2).slice(0, 60) + ' → ' : '') + '新: ' + u.slice(0, 80) + '）'); } catch (_) {}
           toast('✓ 明細画像を変更しました: ' + opt); reopen();
         } catch (e) { alert('明細画像の変更に失敗: ' + e.message); b2.disabled = false; b2.textContent = '変更'; }
