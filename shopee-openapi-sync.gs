@@ -1238,6 +1238,23 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     newModels.push(m);
   });
   if (!newModels.length) throw new Error('追加できる明細がありません（同名が既にある等）');
+  // ★Shopeeの仕様：1階層目のオプションは「全部に画像あり」か「全部なし」のどちらかでなければ
+  //   update_tier_variation が product.error_busi で弾かれる（実際に発生）。
+  //   混在したら、画像が取れなかった分に代わりの画像（既にある画像の1枚目）を当てて揃える。
+  //   1枚も無ければ全部から画像を外して「全部なし」に揃える。
+  var withImg = 0, firstImg = null;
+  optObjs.forEach(function (o) { if (o.image && o.image.image_id) { withImg++; if (!firstImg) firstImg = o.image.image_id; } });
+  var imgAdjust = '';
+  if (withImg > 0 && withImg < optObjs.length) {
+    if (firstImg) {
+      var filled = 0;
+      optObjs.forEach(function (o) { if (!(o.image && o.image.image_id)) { o.image = { image_id: firstImg }; filled++; } });
+      imgAdjust = '画像が無い' + filled + '件に代わりの画像を当てました';
+    } else {
+      optObjs.forEach(function (o) { delete o.image; });
+      imgAdjust = '画像を全て外しました';
+    }
+  }
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
   // ③ 価格・在庫をまとめて登録。失敗したら足したオプションを巻き戻す（空の明細を残さない）
@@ -1248,7 +1265,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
     throw eAdd;
   }
-  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10) };
+  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {
