@@ -10301,65 +10301,54 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const targets = slots.filter(s2 => s2.img);
           if (!targets.length) { alert('画像が設定されている明細がありません'); return; }
           dlB.disabled = true;
-          // ★1枚ずつ直列だと100枚で数分かかる。CDNから直接取れる分は同時12本で流し、
-          //   CORSで弾かれた分だけ後からGAS経由（Apps Scriptは直列なので少数向け）。
+          // ★本命：GAS側で画像取得→ZIP化→Driveに置く→そのURLをブラウザが普通にダウンロード。
+          //   画像をbase64でJSONに詰めて返すと1.33倍に膨らみ、実測で8枚1分かかっていた。
+          const t0 = Date.now();
+          const tick = setInterval(() => { if (msgI) msgI.textContent = 'ZIPを作成中… ' + Math.round((Date.now() - t0) / 1000) + '秒（' + targets.length + '枚ぶん・サーバ側でまとめて処理しています）'; }, 1000);
+          if (msgI) { msgI.style.color = ''; msgI.textContent = 'ZIPを作成中…（' + targets.length + '枚ぶん）'; }
+          try {
+            const r = await gasCall({ action: 'zip_variation_images', shop_id: sidCat, item_id: itemId }, 300000);
+            clearInterval(tick);
+            if (!r || !r.url) throw new Error((r && r.error) || 'ZIPを作れませんでした');
+            const a2 = document.createElement('a'); a2.href = r.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click();
+            dlB.disabled = false;
+            if (msgI) { msgI.style.color = '#1a7f37'; msgI.innerHTML = '✓ ' + r.n + '枚のZIPを作成しました（' + Math.round((Date.now() - t0) / 1000) + '秒）' + (r.ng ? ' ／ 取得できず ' + r.ng + '件' : '') + ' <a href="' + r.url + '" target="_blank" rel="noopener" style="color:#1565c0">ダウンロードが始まらない場合はここ</a>'; }
+            return;
+          } catch (e) {
+            clearInterval(tick);
+            if (msgI) { msgI.style.color = '#e8710a'; msgI.textContent = 'サーバ側でのZIP作成に失敗（' + e.message + '）。ブラウザ側で取り直します…'; }
+          }
+          // フォールバック：従来方式（遅い）
           const files = [], ng = [], viaGas = [];
           let done = 0;
-          const setMsg = (extra) => { if (msgI) msgI.textContent = 'ダウンロード中… ' + done + '/' + targets.length + (extra || ''); };
-          const push = (t, r) => { const ext = /png/i.test(r.mime) ? 'png' : (/webp/i.test(r.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r.bytes }); };
-          setMsg();
-          // ①まず数枚だけブラウザから直接取ってみる。Shopeeの画像CDNは基本ブラウザ直取りを許さないので、
-          //   全滅ならすぐ見切って②へ（全枚数ぶん無駄に試さない）。
-          { const probe = targets.slice(0, 3);
-            let okDirect = 0;
-            await Promise.all(probe.map(async t => { try { push(t, await fetchImgDirect(t.img)); okDirect++; done++; setMsg(); } catch (_) { viaGas.push(t); } }));
-            if (okDirect) {
-              // 直接取れる環境なら残りも同時12本で
-              let next = 0;
-              const rest = targets.slice(3);
-              const worker = async () => {
-                while (next < rest.length) {
-                  const t = rest[next++];
-                  try { push(t, await fetchImgDirect(t.img)); } catch (_) { viaGas.push(t); }
-                  done++; setMsg();
-                }
-              };
-              await Promise.all(Array.from({ length: Math.min(12, rest.length) }, worker));
-            } else {
-              targets.slice(3).forEach(t => viaGas.push(t));
-            }
-          }
-          // ②GASに8枚ずつまとめて依頼（サーバ側で並列取得）。1枚ずつ呼ぶより桁違いに速い。
-          for (let i = 0; i < viaGas.length; i += 8) {
-            const chunk = viaGas.slice(i, i + 8);
-            // ★1回のまとめ取得は数秒〜十数秒かかる。その間カウンタが止まると「固まった」ように見えるので、
-            //   いま何枚目をやっていて何秒経ったかを1秒ごとに出す。
-            const from = i + 1, to = i + chunk.length, t0 = Date.now();
-            const tick = setInterval(() => { if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + from + '〜' + to + '枚目を取得中… ' + Math.round((Date.now() - t0) / 1000) + '秒）'; }, 1000);
-            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + from + '〜' + to + '枚目を取得中…）';
-            try {
-              const got = await fetchImgsViaGas(chunk.map(t => t.img));
-              chunk.forEach((t, k) => { if (got[k]) push(t, got[k]); else ng.push(t.no + ' ' + t.opt); });
-            } catch (e) {
-              // まとめ取得が失敗したら1枚ずつで拾い直す
-              for (const t of chunk) {
-                try { push(t, await fetchImgViaGas(t.img)); } catch (_) { ng.push(t.no + ' ' + t.opt); }
-                done++; if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（1枚ずつに切替中）';
+          const setMsg = () => { if (msgI) msgI.textContent = 'ダウンロード中… ' + done + '/' + targets.length; };
+          const push = (t, r2) => { const ext = /png/i.test(r2.mime) ? 'png' : (/webp/i.test(r2.mime) ? 'webp' : 'jpg'); files.push({ no: t.no, name: pad(t.no) + '__' + safeName(t.opt) + '.' + ext, data: r2.bytes }); };
+          { let next = 0;
+            const worker = async () => {
+              while (next < targets.length) {
+                const t = targets[next++];
+                try { push(t, await fetchImgDirect(t.img)); } catch (_) { viaGas.push(t); }
+                done++; setMsg();
               }
-              clearInterval(tick); setMsg(); continue;
-            }
-            clearInterval(tick);
+            };
+            await Promise.all(Array.from({ length: Math.min(12, targets.length) }, worker));
+          }
+          for (let i2 = 0; i2 < viaGas.length; i2 += 8) {
+            const chunk = viaGas.slice(i2, i2 + 8);
+            if (msgI) msgI.textContent = '取得中… ' + done + '/' + targets.length + '（' + (i2 + 1) + '〜' + (i2 + chunk.length) + '枚目）';
+            try { const got = await fetchImgsViaGas(chunk.map(t => t.img)); chunk.forEach((t, k) => { if (got[k]) push(t, got[k]); else ng.push(t.no); }); }
+            catch (_) { for (const t of chunk) { try { push(t, await fetchImgViaGas(t.img)); } catch (__) { ng.push(t.no); } } }
             done += chunk.length; setMsg();
           }
-          files.sort((a, b) => a.no - b.no);
-          if (!files.length) { dlB.disabled = false; if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした（GASのfetch_imageが必要かも）'; } return; }
-          const zip = makeZip(files);
-          const a2 = document.createElement('a');
-          a2.href = URL.createObjectURL(zip);
-          a2.download = cc + '_' + itemId + '_明細画像_' + files.length + '枚.zip';
-          a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 4000);
+          files.sort((a3, b3) => a3.no - b3.no);
           dlB.disabled = false;
-          if (msgI) { msgI.style.color = ng.length ? '#e8710a' : '#1a7f37'; msgI.textContent = '✓ ' + files.length + '枚をZIPにしました' + (ng.length ? '（取得できず: ' + ng.length + '件）' : '') + '。加工後は先頭の番号を消さずに「⬆️まとめて戻す」へ'; }
+          if (!files.length) { if (msgI) { msgI.style.color = '#d93025'; msgI.textContent = '1枚も取得できませんでした'; } return; }
+          const zip = makeZip(files);
+          const a4 = document.createElement('a');
+          a4.href = URL.createObjectURL(zip);
+          a4.download = cc + '_' + itemId + '_明細画像_' + files.length + '枚.zip';
+          a4.click(); setTimeout(() => URL.revokeObjectURL(a4.href), 4000);
+          if (msgI) { msgI.style.color = ng.length ? '#e8710a' : '#1a7f37'; msgI.textContent = '✓ ' + files.length + '枚をZIPにしました' + (ng.length ? '（取得できず: ' + ng.length + '件）' : ''); }
         });
         if (upB && upF) upB.addEventListener('click', () => { if (!needOfficial()) return; upF.click(); });
         if (upF) upF.addEventListener('change', async () => {

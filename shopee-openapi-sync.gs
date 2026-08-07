@@ -320,6 +320,18 @@ function doGet(e) {
       } catch (err) { fmout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(fmcb + '(' + JSON.stringify(fmout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★明細画像をGAS側でZIPまで作ってDriveに置き、ダウンロードURLだけ返す。
+    //   base64でJSONに詰めて返すと画像1枚あたり1.33倍に膨らみ、8枚で1分かかっていた。
+    //   ZIPをDriveから直接落とせば、水増しもURL長制限も無い。
+    if (p.action === 'zip_variation_images') {
+      var zvcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var zvout;
+      try {
+        var zvshop = parseInt(p.shop_id, 10); if (!getToken_(zvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        zvout = zipVariationImages_(zvshop, p.item_id, p.cc);
+      } catch (err) { zvout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(zvcb + '(' + JSON.stringify(zvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_attributes') {
       var gacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gaout;
@@ -853,6 +865,53 @@ function reorderVariation_(shopId, itemId, orderNames) {
   });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, order: orderNames };
+}
+// ★明細画像をまとめてZIP化→Driveに置いて公開URLを返す（ポータルの「⬇️一括ダウンロード」用）
+//   ファイル名は 001__明細名.jpg（番号＝Shopeeの明細表示順）。戻すときにこの番号で紐付ける。
+function zipVariationImages_(shopId, itemId) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [];
+  if (!tiers.length) throw new Error('バリエ無し商品です');
+  var opts = tiers[0].option_list || [];
+  var safe = function (t) { return String(t || '').replace(/[\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 40) || 'variation'; };
+  var pad = function (n) { return ('00' + n).slice(-3); };
+  var todo = [];
+  opts.forEach(function (o, i) {
+    var im = o.image || {};
+    var u = im.image_url || im.image_url_list && im.image_url_list[0] || '';
+    if (!u && im.image_id) u = 'https://down-cvs-sg.img.susercontent.com/' + im.image_id;
+    if (u) todo.push({ no: i + 1, opt: o.option || '', url: u });
+  });
+  if (!todo.length) throw new Error('画像が設定されている明細がありません');
+  // fetchAllは一度に投げすぎると不安定なので30件ずつ。GAS側で並列に取りに行く。
+  var blobs = [], ng = [];
+  for (var b0 = 0; b0 < todo.length; b0 += 30) {
+    var part = todo.slice(b0, b0 + 30);
+    var rs = UrlFetchApp.fetchAll(part.map(function (t) { return { url: t.url, muteHttpExceptions: true, followRedirects: true }; }));
+    rs.forEach(function (r, k) {
+      var t = part[k];
+      try {
+        if (r.getResponseCode() >= 400) { ng.push(t.no); return; }
+        var bl = r.getBlob();
+        var ct = bl.getContentType() || 'image/jpeg';
+        var ext = /png/i.test(ct) ? 'png' : (/webp/i.test(ct) ? 'webp' : 'jpg');
+        blobs.push(bl.setName(pad(t.no) + '__' + safe(t.opt) + '.' + ext));
+      } catch (e) { ng.push(t.no); }
+    });
+  }
+  if (!blobs.length) throw new Error('画像を1枚も取得できませんでした');
+  var zip = Utilities.zip(blobs, itemId + '_meisai_' + blobs.length + '.zip');
+  // 置き場所は専用フォルダ。1日より古いZIPは自動で片付ける（Driveを汚さない）
+  var folders = DriveApp.getFoldersByName('ShopeeOS_明細画像ZIP');
+  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder('ShopeeOS_明細画像ZIP');
+  try {
+    var old = folder.getFiles(), cutoff = new Date(new Date().getTime() - 24 * 3600 * 1000);
+    while (old.hasNext()) { var f0 = old.next(); if (f0.getDateCreated() < cutoff) f0.setTrashed(true); }
+  } catch (eC) {}
+  var file = folder.createFile(zip);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return { ok: true, n: blobs.length, ng: ng.length, url: 'https://drive.google.com/uc?export=download&id=' + file.getId() };
 }
 // ★中身のない明細（モデルが1つも紐づいていないオプション）を取り除く。
 //   add_model の失敗でオプションだけ残ったときの後始末。番号は詰め直す。
