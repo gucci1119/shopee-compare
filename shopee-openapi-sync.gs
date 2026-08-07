@@ -902,16 +902,17 @@ function zipVariationImages_(shopId, itemId) {
   }
   if (!blobs.length) throw new Error('画像を1枚も取得できませんでした');
   var zip = Utilities.zip(blobs, itemId + '_meisai_' + blobs.length + '.zip');
-  // 置き場所は専用フォルダ。1日より古いZIPは自動で片付ける（Driveを汚さない）
-  var folders = DriveApp.getFoldersByName('ShopeeOS_明細画像ZIP');
-  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder('ShopeeOS_明細画像ZIP');
-  try {
-    var old = folder.getFiles(), cutoff = new Date(new Date().getTime() - 24 * 3600 * 1000);
-    while (old.hasNext()) { var f0 = old.next(); if (f0.getDateCreated() < cutoff) f0.setTrashed(true); }
-  } catch (eC) {}
-  var file = folder.createFile(zip);
-  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-  return { ok: true, n: blobs.length, ng: ng.length, url: 'https://drive.google.com/uc?export=download&id=' + file.getId() };
+  // ★置き場所は Supabase Storage（公開バケット listing-imgs）。
+  //   Driveを使うと「新しい権限の承認」が必要になり、承認画面が出ないケースがあって詰まる。
+  //   GASは元々Supabaseへ書き込んでいる＝UrlFetchAppの権限だけで完結するのでこちらが確実。
+  var sbUrl = cfg_('SB_URL'), sbKey = cfg_('SB_SERVICE_KEY');
+  var path = 'zips/' + itemId + '_' + Date.now() + '_' + blobs.length + '.zip';
+  var up = UrlFetchApp.fetch(sbUrl + '/storage/v1/object/listing-imgs/' + path, {
+    method: 'post', contentType: 'application/zip', payload: zip.getBytes(), muteHttpExceptions: true,
+    headers: { apikey: sbKey, Authorization: 'Bearer ' + sbKey, 'x-upsert': 'true' }
+  });
+  if (up.getResponseCode() >= 300) throw new Error('ZIPの保存に失敗 ' + up.getResponseCode() + ': ' + up.getContentText().slice(0, 160));
+  return { ok: true, n: blobs.length, ng: ng.length, url: sbUrl + '/storage/v1/object/public/listing-imgs/' + path };
 }
 // ★中身のない明細（モデルが1つも紐づいていないオプション）を取り除く。
 //   add_model の失敗でオプションだけ残ったときの後始末。番号は詰め直す。
