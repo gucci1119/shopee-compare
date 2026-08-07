@@ -15386,6 +15386,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">バリエ・単品すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">🧩バリエ有り</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
         <span class="smd-seg" id="lst-statsperiod" title="🛒販売・👁閲覧・❤️いいねを『全期間の累計』か『直近N日の伸び』かで表示">${[['', '📊全期間'], ['7', '📈7日'], ['30', '📈30日'], ['90', '📈90日']].map(([v, l]) => `<button data-p="${v}" class="${String(lst.statsPeriod || '') === v ? 'on' : ''}">${l}</button>`).join('')}</span>
         <button class="smd-btn" id="lst-dup" style="${lst.dupOnly ? 'background:#d93025;color:#fff;border-color:#d93025;font-weight:700' : 'border-color:#d93025;color:#d93025;font-weight:700'}" title="同じ国の中で、まったく同じタイトルのカタログが2つ以上あるものだけを表示＝重複出品の候補。国をまたいだ同名（PHとBRに同じ商品）は正常なので対象外です。押すと自動で名前順に並び、隣同士になります">⚠ 同名が複数<span style="font-weight:400;font-size:9.5px">(同一国内)</span></button>
+        <button class="smd-btn" id="lst-simdup" style="border-color:#c0392b;color:#c0392b;font-weight:700" title="いま表示している出品の中から、タイトルが似ているカタログ（＝同じ商品を二重に出している候補）を探します。国をまたいだ同名は対象外です">🔁 似た出品を探す</button>
         <button class="smd-btn" id="lst-morefil" style="${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand) ? 'border-color:#7b52c4;color:#7b52c4;font-weight:700' : ''}" title="明細の空き枠・明細数・価格帯・状態・ブランドの絞り込み">⚙ 詳しい絞り込み${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand) ? ' ●' : ''}</button>
         ${(lst.slot || lst.mdlMin != null || lst.mdlMax != null || lst.priceMin != null || lst.priceMax != null || lst.cond || lst.brand || lst.varType || lst.seriesOnly || lst.dupOnly) ? '<button class="smd-btn" id="lst-clearfil" style="border-color:#d93025;color:#d93025" title="絞り込みをすべて解除">✕ 条件クリア</button>' : ''}
       </div>
@@ -15440,6 +15441,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </div>
       </div>`}
       <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
+    lst._lastRows = rows;   // 🔁似た出品を探す の対象＝いま絞り込んだ結果
     // シリーズ順のとき、表示中のシリーズに順番に色を割り当てる（2件以上あるものだけ色を付ける）
     if (lst.sort === 'series') {
       _serMap = new Map(); const cnt = new Map();
@@ -15571,6 +15573,57 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         document.documentElement.style.setProperty('--lst-namew', '150px');
         try { localStorage.setItem('smdListColHide', JSON.stringify(lst.colHide)); localStorage.setItem('smdListColW', '{}'); localStorage.setItem('smdListNameW', '150'); } catch (_) {}
         drawListingStatus();
+      }); }
+    // 🔁 似た出品を探す（表示中の出品が対象・同じ国の中だけ）
+    { const sd = document.getElementById('lst-simdup');
+      if (sd) sd.addEventListener('click', () => {
+        sd.disabled = true; sd.textContent = '🔁 調べています…';
+        setTimeout(() => {
+          const src = (lst._lastRows || []).filter(r => r.name);
+          // 国ごとに転置索引を作って候補を絞る（全組合せは重いので）
+          const byCc = new Map();
+          src.forEach(r => { let a = byCc.get(r.cc); if (!a) byCc.set(r.cc, a = []); a.push(r); });
+          const pairs = [];
+          byCc.forEach((arr, cc2) => {
+            const items = arr.map(r => ({ r, g: simGrams(r.name), k: simTokens(r.name) }));
+            const inv = new Map();
+            items.forEach((x, i) => x.g.forEach(gr => { let a2 = inv.get(gr); if (!a2) inv.set(gr, a2 = []); if (a2.length < 300) a2.push(i); }));
+            const seen = new Set();
+            items.forEach((x, i) => {
+              const cnt = new Map();
+              x.g.forEach(gr => { const a3 = inv.get(gr); if (a3) a3.forEach(j => { if (j !== i) cnt.set(j, (cnt.get(j) || 0) + 1); }); });
+              [...cnt.entries()].sort((p, q) => q[1] - p[1]).slice(0, 12).forEach(([j]) => {
+                const key2 = i < j ? i + '_' + j : j + '_' + i;
+                if (seen.has(key2)) return; seen.add(key2);
+                const y = items[j];
+                const d = simDice(x.g, y.g);
+                let c = 0; if (x.k.size && y.k.size) { let hit = 0; x.k.forEach(w => { if (y.k.has(w)) hit++; }); c = hit / Math.min(x.k.size, y.k.size); }
+                const sc = Math.max(d, c * 0.95);
+                if (sc >= 0.85) pairs.push({ cc: cc2, a: x.r, b: y.r, score: Math.round(sc * 100) });
+              });
+            });
+          });
+          pairs.sort((p, q) => q.score - p.score);
+          sd.disabled = false; sd.textContent = '🔁 似た出品を探す';
+          const ov = document.createElement('div');
+          ov.style.cssText = 'position:fixed;inset:0;z-index:700;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px';
+          const row2 = (p) => {
+            const st = (r) => r.status === 1 ? '<span style="color:#1a7f37">出品中</span>' : '<span style="color:#888">停止/他</span>';
+            const one = (r) => `<div style="min-width:0"><b style="color:${(regionByCc(r.cc) || {}).color}">${esc(r.cc)}</b> ${esc(String(r.name || '').slice(0, 52))}<br><span class="smd-dim" style="font-size:10px">🆔${r.item_id}・明細${varCount(r)}件・${st(r)}</span> <button class="sd-open smd-btn" data-cc="${esc(r.cc)}" data-host="${esc((regionByCc(r.cc) || {}).host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" style="font-size:10px;padding:1px 7px">✎編集</button></div>`;
+            return `<div style="border-top:1px solid #f1f1f1;padding:7px 0;display:flex;gap:10px;align-items:flex-start;font-size:12px"><b style="width:44px;flex:none;color:#c0392b">${p.score}%</b>${one(p.a)}<span style="flex:none;color:#c9cfda">↔</span>${one(p.b)}</div>`;
+          };
+          ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:1000px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+            <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1">🔁 似た出品（${pairs.length}組）</b><button class="sd-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div>
+            <div style="padding:14px 18px;max-height:calc(100vh - 170px);overflow:auto">
+              <div class="smd-dim" style="font-size:11px;margin-bottom:6px">いま表示している <b>${src.length}件</b> の中から、<b>同じ国で</b>タイトルが85%以上似ているカタログを挙げています。国をまたいだ同名は対象外です。似ているだけで別商品のこともあるので<b>候補</b>として見てください。</div>
+              ${pairs.length ? pairs.slice(0, 300).map(row2).join('') + (pairs.length > 300 ? '<div class="smd-dim" style="padding:6px 0">…ほか' + (pairs.length - 300) + '組</div>' : '') : '<div class="smd-dim" style="font-size:12.5px">似た出品は見つかりませんでした。</div>'}
+            </div></div>`;
+          document.body.appendChild(ov);
+          const cl = () => ov.remove();
+          ov.addEventListener('click', e => { if (e.target === ov) cl(); });
+          ov.querySelectorAll('.sd-close').forEach(b => b.addEventListener('click', cl));
+          ov.querySelectorAll('.sd-open').forEach(b => b.addEventListener('click', () => { if (!b.dataset.host) { alert('ホスト不明'); return; } openCatalogEditor(b.dataset.cc, b.dataset.host, b.dataset.id, b.dataset.name); }));
+        }, 30);
       }); }
     { const db = document.getElementById('lst-dup');
       if (db) db.addEventListener('click', () => { lst.dupOnly = !lst.dupOnly; if (lst.dupOnly && !lst.sort) { lst.sort = 'name'; lst.sortDir = 'asc'; } lst.page = 1; drawListingStatus(); }); }
