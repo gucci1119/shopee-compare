@@ -886,6 +886,12 @@ function getAttributeTree_(shopId, catId, lang) {
     });
     return {
       attribute_id: a.attribute_id,
+      // 入力の種類を判断するための生値も返す（必須/任意・選択式/自由入力・複数選択・単位）
+      input_type: (info.input_type != null ? info.input_type : a.input_type),
+      validation: (info.input_validation_type != null ? info.input_validation_type : a.input_validation_type),
+      format_type: (info.format_type != null ? info.format_type : a.format_type),
+      max_values: maxv,
+      units: (a.attribute_unit_list || info.attribute_unit_list || []),
       // ★属性名は attribute_info の中にある（v2 get_attribute_tree）。直下だけ見ていたため
       //   全部 '#100130' のようなプレースホルダになっていた。info→直下の順で拾う。
       // ★実データ確認（2026-08-08）：get_attribute_tree は属性名を **トップレベルの a.name** に入れて返す。
