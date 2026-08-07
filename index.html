@@ -10690,17 +10690,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!confirm('書込先: ' + gwV.summary + '\n\n' + cc + ' の item ' + itemId + ' に動画を設定します。\n' + f.name + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）\n\n※既に動画がある場合は置き換わります。よろしいですか？')) return;
           if (vb) { vb.disabled = true; vb.textContent = '準備中…'; }
           try {
-            if (vm) { vm.style.color = '#3b5bdb'; vm.textContent = '動画をアップロードしています…'; }
-            const url = await uploadFileToStorage(f, itemId);
-            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24));
+            // ★先に「しごと」を登録してから上げる。逆だと、アップロード中（30MBなら数十秒）は
+            //   しごとセンターに何も出ず「動いていない」ように見える。
+            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）');
             JOB_T0[key] = Date.now();
+            jobPollStart();
+            try { await sbUpsert('app_kv', [{ k: key, v: { kind: 'video', title: '商品動画の設定', sub: cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24), status: 'run', pct: 5, step: 'この端末から動画を送っています', created_at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); } catch (_) {}
+            if (vm) { vm.style.color = '#3b5bdb'; vm.innerHTML = jobBar(5, '動画を送っています…', '#3b5bdb'); }
+            const url = await uploadFileToStorage(f, itemId);
             JOB_MIRROR[key] = (v) => {
               if (!vm || !vm.isConnected) return;
               if (v.status === 'done') { vm.style.color = '#1a7f37'; vm.innerHTML = '✓ 動画を設定しました ' + jobBar(100) + '（開き直すと反映されます）'; if (vb) { vb.disabled = false; vb.textContent = '🎬 動画を差し替える'; } delete JOB_MIRROR[key]; return; }
               if (v.status === 'error' || v.status === 'cancel') { vm.style.color = '#d93025'; vm.textContent = v.status === 'cancel' ? '止めました' : ('失敗: ' + (v.error || '')); if (vb) { vb.disabled = false; vb.textContent = '🎬 もう一度'; } delete JOB_MIRROR[key]; return; }
               vm.innerHTML = jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');
             };
-            jobPollStart();
             gasSerial(() => gasCall({ action: 'set_item_video', token: settings.writeToken, shop_id: sidCat, item_id: itemId, url, job: key }, 600000))
               .catch(e => jobRemoteFail(key, e && e.message));
             markStale();
