@@ -11236,7 +11236,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 明細画像：PCのファイルから設定（📁ボタン／そのマスへのドロップ）
       // ★開き直さない。連続作業（10件追加など）で毎回フル再読込していたら話にならないので、
       //   成功したらその場のDOMだけ更新し、キャッシュを捨てて「次に開いた時」に正となるようにする。
-      const markStale = () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} };
+      // ★Shopeeに書き込んだら「更新順」がすぐ反応するよう、この場でDBのupdate_timeを立てる。
+      //   （GASの出品同期を待つと最大30分ずれて、直前に自分で直した商品が上に来ない）
+      const markStale = () => {
+        try { openCatalogEditor._cache.delete(ck); } catch (_) {}
+        try {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const row = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(itemId));
+          if (row) row.update_time = nowSec;                       // 画面上の並びにも即反映
+          if (settings.sbSecret) sbUpsert('listings', [{ cc, item_id: itemId, update_time: nowSec }]).catch(() => {});
+        } catch (_) {}
+      };
       // その明細に今ついている画像（履歴に「なし→設定」「差替」を残すため）
       const curImgOf = (opt) => { const oi = (tiers[0] && (tiers[0].value_list || []).findIndex(o => (o.custom_value || '') === opt)); const m = models.find(m2 => (m2.tier_index || [])[0] === oi); return (m && m.img) || ''; };
       const setVarImg = async (opt, val, btn, lbl) => {
@@ -11613,6 +11623,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
             try { openCatalogEditor._cache.delete(ck); } catch (_) {}   // 保存後は再取得（古い内容を出さない）
             try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
+            markStale();   // 更新順に即反映
           } else {
             const res = await productWrite(host, itemId, patch); // 公式未設定時のみブリッジ全書込
             if (res.ok) {
@@ -11621,6 +11632,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
               try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
               try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
+              markStale();   // 更新順に即反映
             }
             else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
           }
