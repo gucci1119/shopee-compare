@@ -2526,7 +2526,8 @@ function syncListingsForShop_(tok, sinceSec) {
     var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: batch.join(',') }, 'get');
     ((b.response || {}).item_list || []).forEach(function (it) {
-      var img = ((it.image || {}).image_id_list || [])[0] || '';
+      var imgList = ((it.image || {}).image_id_list || []);
+      var img = imgList[0] || '';
       var models = [], price_min = null, price_max = null, stock = null, model_count = 0;
       if (it.has_model) {
         try {
@@ -2552,6 +2553,10 @@ function syncListingsForShop_(tok, sinceSec) {
         //   「重い順に直す」「動画が無いものから入れる」が一覧でそのままできる。
         weight: (parseFloat(it.weight) || null),
         has_video: !!((it.video_info || []).length),
+        // ★メイン画像は最大9枚あるのに1枚目しか持っていなかった＝画像の一覧・差し替えができなかった。
+        //   全部のimage_idと動画URLを保存する（🖼メディアセンター用）。
+        images: imgList,
+        video_url: (((it.video_info || [])[0] || {}).video_url || null),
         cc: cc, item_id: it.item_id, name: it.item_name || '', image: img,
         status: (statusById[it.item_id] != null ? statusById[it.item_id] : (it.item_status === 'NORMAL' ? 1 : 0)),
         parent_sku: it.item_sku || '', shop_id: String(shopId),

@@ -1191,18 +1191,18 @@
 
   // ---------------- GAS読み取り（旧JSONP。中身は fetch 優先） ----------------
   // ★<script>タグ方式(JSONP)は、GASが404やHTMLを返したときに onerror しか発火せず、
-  //   画面には「GAS読み込みエラー」としか出ない（再デプロイ直後の伝播中に頻発）。
+  //   画面には「サーバーに接続できませんでした」としか出ない（再デプロイ直後の伝播中に頻発）。
   //   fetch なら HTTP ステータスと本文で理由が分かり、一時的な失敗は1回リトライで拾える。
   //   CORS が通らない相手だけ、従来のスクリプト注入にフォールバックする。
   function jsonpScript(url, timeoutMs) {
     return new Promise((resolve, reject) => {
       const cb = '__smdJsonp' + (++reqSeq);
       const cleanup = () => { delete window[cb]; s.remove(); };
-      const timer = setTimeout(() => { cleanup(); reject(new Error('GAS接続タイムアウト')); }, timeoutMs || 15000);
+      const timer = setTimeout(() => { cleanup(); reject(new Error('サーバーの応答がありませんでした（時間切れ）')); }, timeoutMs || 15000);
       window[cb] = data => { clearTimeout(timer); cleanup(); resolve(data); };
       const s = document.createElement('script');
       s.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
-      s.onerror = () => { clearTimeout(timer); cleanup(); reject(new Error('GAS読み込みエラー')); };
+      s.onerror = () => { clearTimeout(timer); cleanup(); reject(new Error('サーバーに接続できませんでした')); };
       document.head.appendChild(s);
     });
   }
@@ -1224,7 +1224,7 @@
         lastErr = new Error('GAS応答エラー HTTP ' + r.status + '（他の重い処理が走っていると詰まります。少し待って再実行してください）');
       } catch (e) {
         if (/Failed to fetch|NetworkError|CORS/i.test(String(e && e.message))) { corsFail = true; break; }
-        lastErr = (e && e.name === 'AbortError') ? new Error('GAS接続タイムアウト') : e;
+        lastErr = (e && e.name === 'AbortError') ? new Error('サーバーの応答がありませんでした（時間切れ）') : e;
       } finally { clearTimeout(tm); }
       if (att === 0) await new Promise(r2 => setTimeout(r2, 400));
     }
@@ -1236,7 +1236,7 @@
   }
 
   // ★GAS呼び出しは fetch で行う。JSONPはGASが404/HTMLを返すと onerror だけで理由が分からず
-  //   「GAS読み込みエラー」としか出ない（再デプロイ直後の伝播中に頻発）。fetchならHTTPで判定でき、
+  //   「サーバーに接続できませんでした」としか出ない（再デプロイ直後の伝播中に頻発）。fetchならHTTPで判定でき、
   //   一時エラーは1回リトライして拾える。CORSはGETで通ることを実測済み。
   async function gasCall(params, timeoutMs) {
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
@@ -1266,7 +1266,7 @@
         //   Failed to fetch になる。この時は <script> 経由（CORSの影響を受けない）で取り直す。
         if (/Failed to fetch|NetworkError|CORS/i.test(msg)) {
           if (isWrite) { lastErr = '結果を確認できませんでした（通信が切れました）。<b>実行された可能性があります</b>ので、画面を開き直して確認してください'; }
-          else { try { return await jsonpScript(url.replace(/&callback=cb$/, ''), timeoutMs || 60000); } catch (e2) { lastErr = 'GASに繋がりません（' + msg + '）'; } }
+          else { try { return await jsonpScript(url.replace(/&callback=cb$/, ''), timeoutMs || 60000); } catch (e2) { lastErr = 'サーバーに繋がりません（' + msg + '）'; } }
         } else if (msg && lastErr !== msg && !/aborted/i.test(msg)) throw e;
         lastErr = lastErr || msg || 'GAS応答なし';
       } finally { clearTimeout(tm); }
@@ -1419,7 +1419,7 @@
   }
   // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
   async function openapiGetModels(shopId, itemId) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_models&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIモデル取得に失敗');
@@ -1430,7 +1430,7 @@
   //   onerrorも起きないため、タイムアウトまで丸ごと待つ（実測で開くのに20秒かかる主因）。
   //   fetchならHTTPステータスと本文で即判定でき、失敗をすぐ次の手へ回せる。CORSはGETで通ることを実測済み。
   async function openapiGetItemInfo(shopId, itemId, timeoutMs) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_item_full&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&callback=cb';
     const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
     // ★Apps Scriptは同じユーザーのリクエストを1件ずつしか処理しない。まとめて追加や画像処理が
@@ -1508,7 +1508,7 @@
   }
   // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
   async function openapiShipParam(shopId, sn) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=ship_param&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '発送情報の取得に失敗');
@@ -1516,8 +1516,8 @@
   }
   // 発送(書込・決裁操作)：ship_order。必ずユーザー確認の後にのみ呼ぶ
   async function openapiShipOrder(params) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const q = Object.assign({ action: 'ship_order', token: settings.writeToken }, params);
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
@@ -1526,7 +1526,7 @@
   }
   // 注文明細（分割UI用：item_id/model_id/order_item_id/promotion_group_id/model_quantity ＋既存package_list）
   async function openapiGetOrderDetail(shopId, sn) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_order_detail&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '注文明細の取得に失敗');
@@ -1535,16 +1535,16 @@
   }
   // 注文分割（決裁操作）：packageList=[{item_list:[{item_id,model_id,order_item_id,promotion_group_id,model_quantity}]}]
   async function openapiSplitOrder(shopId, sn, packageList) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const qs = 'action=split_order&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn) + '&package_list=' + encodeURIComponent(JSON.stringify(packageList));
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res) throw new Error('応答なし');
     return res;
   }
   async function openapiUnsplitOrder(shopId, sn) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const qs = 'action=unsplit_order&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res) throw new Error('応答なし');
@@ -1793,8 +1793,8 @@
   }
   // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
   async function openapiUpdateModelList(action, shopId, itemId, list) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const qs = 'action=' + action + '&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&list=' + encodeURIComponent(JSON.stringify(list));
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
@@ -1804,7 +1804,7 @@
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'rename_models', token: settings.writeToken, shop_id: shopId, item_id: itemId, before: before, after: (after == null ? '' : after) }, 60000);
   }
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
@@ -1812,11 +1812,11 @@
   // ★明細(バリエ)を削除。Shopee側でモデル削除＋オプションの詰め直し（番号が飛ばない）まで行う。
   // ★中身のない明細（add_model失敗でオプションだけ残ったもの）を掃除
   async function openapiCleanVariation(shopId, itemId) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'clean_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, 90000);
   }
   async function openapiDeleteVariation(shopId, itemId, names, idx, mids) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, names: names.join('\u0001'), idx: (idx || []).join(','), mids: (mids || []).filter(Boolean).join(',') }, 90000);
   }
   // ★カテゴリ一覧（id→{n:名前, p:フルパス, hc:子ありフラグ}）。カテゴリ変更UIの検索元。国ごとにキャッシュ。
@@ -1829,11 +1829,11 @@
     return catFullCache[cc];
   }
   async function openapiReorderVariation(shopId, itemId, orderNames) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'reorder_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, order: orderNames.join('\u0001') }, 90000);
   }
   async function openapiAddVariation(shopId, itemId, opts) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall(Object.assign({ action: 'add_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, opts), 90000);
   }
   // ※アカウント健全性(account_health)はこのCB越境垢では権限なし(error_not_found/shop invalid)で断念。実装は撤去済。
@@ -1999,13 +1999,13 @@
     return out || tidyEnglish(mid, lim);
   }
   async function openapiFetchMeta(url) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=fetch_meta&url=' + encodeURIComponent(url);
     // ★GASに fetch_meta が無い版がデプロイされていると、HTMLが返ってコールバックが呼ばれず
     //   ただのタイムアウトに見える。原因が分かる文言にする（12秒で見切る）。
     let res;
     try { res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 12000); }
-    catch (e) { throw new Error('GASが応答しません。shopee-openapi-sync.gs を貼り替えて【再デプロイ】してください（fetch_meta が未反映の可能性）'); }
+    catch (e) { throw new Error('サーバー側の処理が応答しません。管理者に連絡してください（更新の反映待ちの可能性があります）'); }
     if (!res || !res.ok) throw new Error((res && res.error) || 'URLの読み取りに失敗');
     return res;
   }
@@ -2018,7 +2018,7 @@
     return url;
   }
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
-    if (!settings.writeToken) throw new Error('WRITE_TOKEN未設定');
+    if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'set_variation_image', token: settings.writeToken, shop_id: shopId, item_id: itemId, option: option, image: imageUrl }, 90000);
   }
 
@@ -10433,7 +10433,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 大>中>小のフルパス。無ければ末端名にフォールバック
   const catPathOf = (cc, id) => { const e = _catEnt(cc, id); return e ? (typeof e === 'string' ? e : (e.p || e.n || '')) : ''; };
   async function openapiGetAttributes(shopId, catId, lang) {
-    if (!settings.openapiUrl) throw new Error('OpenAPI URL未設定');
+    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const q = { action: 'get_attributes', shop_id: shopId, category_id: catId, language: lang || 'en' };
     const qs = Object.keys(q).map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 30000);
@@ -13638,7 +13638,7 @@ drop policy if exists "listing_log all" on listing_log;
 create policy "listing_log all" on listing_log for all using (true) with check (true);`;
   const logState = { rows: null, day: null, days: 90, goal: null, loading: false, missing: false, liveOnly: false };
   async function syncListingLog() {
-    if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定のservice_roleキー）');
+    if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定で登録してください）');
     const [live, known] = await Promise.all([
       sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models'),
       sbGetAll('listing_log', 'select=cc,item_id,model_id'),
