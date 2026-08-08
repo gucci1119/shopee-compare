@@ -1285,9 +1285,10 @@ function bulkEdit_(kv, jobKey) {
     if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100), step: (i + 1) + '/' + items.length + ' ' + (it.cc || '') + ' ' + (it.item_id || '') });
     try {
       // タイトルと属性(specifics)は同じ update_item なので1回にまとめる
-      if (it.title || (it.attrs && it.attrs.length) || it.weight || it.category_id) {
+      if (it.title || (it.attrs && it.attrs.length) || it.weight || it.category_id || (it.main_images && it.main_images.length)) {
         updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title || null,
-          attribute_list: it.attrs || null, weight: it.weight || null, category_id: it.category_id || null });
+          attribute_list: it.attrs || null, weight: it.weight || null, category_id: it.category_id || null,
+          images: (it.main_images && it.main_images.length) ? it.main_images : null });   // 🖼メイン画像の差し替え（最大9枚）
       }
       var opts = it.options || [], imgs = it.images || [];
       if (opts.length || imgs.length) bulkEditTier_(it.shop_id, it.item_id, opts, imgs);
