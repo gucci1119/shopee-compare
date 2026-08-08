@@ -1284,7 +1284,10 @@ function bulkEdit_(kv, jobKey) {
     var it = items[i] || {};
     if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100), step: (i + 1) + '/' + items.length + ' ' + (it.cc || '') + ' ' + (it.item_id || '') });
     try {
-      if (it.title) updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title });
+      // タイトルと属性(specifics)は同じ update_item なので1回にまとめる
+      if (it.title || (it.attrs && it.attrs.length)) {
+        updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title || null, attribute_list: it.attrs || null });
+      }
       var opts = it.options || [], imgs = it.images || [];
       if (opts.length || imgs.length) bulkEditTier_(it.shop_id, it.item_id, opts, imgs);
       if (it.video) setItemVideo_(it.shop_id, it.item_id, it.video, jobKey);
@@ -2505,6 +2508,11 @@ function syncListingsForShop_(tok, sinceSec) {
   if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0, mode: sinceSec ? 'changed' : 'full' };
   var statusById = {}; ids.forEach(function (x) { statusById[x.item_id] = x.status; });
   var rows = [];
+  // ★コンディション/カテゴリ/ブランドは get_item_base_info に入っているのに保存していなかったため、
+  //   app_kv の listing_specs_<shop_id> が古いまま凍結し、新しく出した商品が一覧で「—」になっていた
+  //   （2026-08-08 実測：listingsは6,481件なのにspecsは6,495件＝新規35件が欠け・消えた14件が残留）。
+  //   毎回の同期でここから作り直す＝放っておいても自己修復する。
+  var specs = {};
   for (var i = 0; i < ids.length; i += 50) {
     var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: batch.join(',') }, 'get');
@@ -2525,6 +2533,11 @@ function syncListingsForShop_(tok, sinceSec) {
         var p = priceOfInfo_((it.price_info || [])[0]);
         price_min = p || null; price_max = p || null; stock = stockOfV2_(it.stock_info_v2); models = []; model_count = 0;
       }
+      specs[String(it.item_id)] = {
+        cond: it.condition || '',
+        cat: it.category_id || 0,
+        brand: ((it.brand || {}).original_brand_name || (it.brand || {}).brand_name || '')
+      };
       rows.push({
         cc: cc, item_id: it.item_id, name: it.item_name || '', image: img,
         status: (statusById[it.item_id] != null ? statusById[it.item_id] : (it.item_status === 'NORMAL' ? 1 : 0)),
@@ -2536,6 +2549,19 @@ function syncListingsForShop_(tok, sinceSec) {
     });
   }
   if (rows.length) sbUpsert_('listings', rows);   // on_conflict はポータルと同じくPK(item_id)に委ねる
+  // コンディション等を app_kv へ。増分同期(changed)のときは既存に上書きマージ、全件(full)のときは作り直す
+  if (rows.length) {
+    try {
+      var sk = 'listing_specs_' + shopId, merged = specs;
+      if (sinceSec) {
+        var cur = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(sk));
+        var old = (cur && cur[0] && cur[0].v && cur[0].v.items) || {};
+        Object.keys(specs).forEach(function (k2) { old[k2] = specs[k2]; });
+        merged = old;
+      }
+      sbUpsert_('app_kv', [{ k: sk, v: { items: merged }, updated_at: new Date().toISOString() }]);
+    } catch (eSp) { Logger.log('listing_specs skip ' + cc + ': ' + eSp); }
+  }
   // ★照合削除：Shopeeで削除/BANされた出品がDBに残って幽霊重複（旧タイトル残り・件数水増し）になる問題の解消。
   //   idsはNORMAL+UNLISTの完全取得成功時のみここに到達（ページ失敗はthrowして手前で中断）＝取得失敗での誤削除は起きない。
   //   現在のitem_id集合に無い「この店」の行だけを削除（BAN/審査中は稀・再公開時に次回同期で復活）。
