@@ -5244,6 +5244,10 @@
       if (q && String(tanaName(v)).toLowerCase().indexOf(q) < 0 && String(v.item_id).indexOf(q) < 0) return false;
       return true;
     });
+    if (tana.oldOnly) {
+      var lim = Date.now() - 180 * 86400000;
+      list = list.filter(function (v) { var d = Date.parse(String(v.purchase_date || '')); return d && d < lim; });
+    }
     if (tana.sort === 'new') list = list.slice().reverse();
     return list;
   }
@@ -5310,6 +5314,8 @@
       + '<input id="tn-q" value="' + av(tana.q) + '" placeholder="商品名・在庫Noで探す" style="width:230px;padding:5px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px">'
       + '<button id="tn-sort" class="smd-btn" style="font-size:11px;padding:3px 10px">' + (tana.sort === 'old' ? '古い順' : '新しい順') + '</button>'
       + '<span class="smd-dim" style="font-size:11.5px">' + list.length + '件中 ' + (tana.page * TANA_PER + 1) + '〜' + Math.min(list.length, (tana.page + 1) * TANA_PER) + '件</span>'
+      + '<label style="font-size:11px;white-space:nowrap"><input type="checkbox" id="tn-old" ' + (tana.oldOnly ? 'checked' : '') + '> 仕入から180日超だけ</label>'
+      + '<button id="tn-bulk" class="smd-btn" style="font-size:11.5px;padding:3px 12px;border-color:#8a8f98;color:#555;font-weight:700" title="いま絞り込まれている分をまとめて販売済みにします。実物を数えて残っていたものは、あとからItemIDで検索して「在庫あり」に戻せます">まとめて販売済みにする</button>'
       + '<button id="tn-reload" class="smd-btn" style="font-size:11px;padding:3px 10px;margin-left:auto">🔄 読み直す</button></div>'
       + '<div style="border:1px solid #eee;border-radius:9px;overflow:hidden">' + (page.map(rowHtml).join('') || '<div class="smd-empty">該当なし</div>') + '</div>'
       + (pages > 1 ? '<div style="margin-top:9px;display:flex;gap:6px;align-items:center"><button id="tn-prev" class="smd-btn" style="font-size:11px;padding:2px 10px">◀ 前</button>'
@@ -5327,6 +5333,28 @@
     { var q = host.querySelector('#tn-q');
       if (q) { var t; q.addEventListener('input', function () { clearTimeout(t); t = setTimeout(function () { tana.q = q.value; tana.page = 0; drawTana(); var q2 = document.getElementById('tn-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); }); } }
     { var sb = host.querySelector('#tn-sort'); if (sb) sb.addEventListener('click', function () { tana.sort = tana.sort === 'old' ? 'new' : 'old'; drawTana(); }); }
+    { var ob = host.querySelector('#tn-old'); if (ob) ob.addEventListener('change', function () { tana.oldOnly = ob.checked; tana.page = 0; drawTana(); }); }
+    { var bb = host.querySelector('#tn-bulk');
+      if (bb) bb.addEventListener('click', async function () {
+        var target = tanaFiltered().filter(function (v) { return String(v.status || '') !== '販売済み'; });
+        if (!target.length) { alert('対象がありません'); return; }
+        if (!confirm('いま絞り込まれている ' + target.length + '件 を、まとめて「販売済み」にします。\n\n'
+          + '※実物を数えて残っていたものは、あとからItemIDで検索して「在庫あり」に戻せます。\n\nよろしいですか？')) return;
+        if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return; }
+        bb.disabled = true; var done = 0;
+        try {
+          for (var i = 0; i < target.length; i += 200) {
+            var part = target.slice(i, i + 200);
+            bb.textContent = '反映中… ' + i + '/' + target.length;
+            await sbUpsert('inventory', part.map(function (v) { return { item_id: v.item_id, status: '販売済み' }; }));
+            part.forEach(function (v) { v.status = '販売済み'; });
+            done += part.length;
+          }
+          try { logAct('在庫', '棚卸し一括', '', done + '件を販売済みに'); } catch (e) { }
+          toast('✓ ' + done + '件を販売済みにしました');
+        } catch (e) { alert('反映に失敗: ' + ((e && e.message) || e)); }
+        bb.disabled = false; bb.textContent = 'まとめて販売済みにする'; drawTana();
+      }); }
     { var rb = host.querySelector('#tn-reload'); if (rb) rb.addEventListener('click', async function () { await tanaLoad(true); drawTana(); }); }
     { var pv = host.querySelector('#tn-prev'); if (pv) pv.addEventListener('click', function () { tana.page = Math.max(0, tana.page - 1); drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
     { var nx = host.querySelector('#tn-next'); if (nx) nx.addEventListener('click', function () { tana.page = tana.page + 1; drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }

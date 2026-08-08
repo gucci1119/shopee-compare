@@ -2982,6 +2982,7 @@ function testNews() { var r = fetchNews_(true); Logger.log(r.length + '件 / 例
 //   Gmailの検索は日次上限があるので、1件ずつではなく **仕入元ごとにまとめて数回** だけ検索する。
 var MAIL_SRC = [
   { key: 'メルカリ', q: 'from:(mercari.com OR mercari.jp)' },
+  { key: 'ラクマ', q: 'from:(rakuten.co.jp AND rakuma) OR from:fril.jp' },
   { key: 'Yahoo!フリマ', q: 'from:(paypayfleamarket.yahoo.co.jp OR yahoo-net.jp)' },
   { key: 'ヤフオク', q: 'from:(auctions.yahoo.co.jp OR yahoo-net.jp)' },
   { key: 'Amazon', q: 'from:(amazon.co.jp OR amazon.com)' },
@@ -2994,7 +2995,9 @@ var MAIL_SRC = [
 //   「発送通知の日＋この日数」で到着したものとみなす。厳密な受取日は追わない
 //   （棚卸しで知りたいのは受取日ではなく「今あるか」なので、これで実務上足りる）。
 var MAIL_ARRIVE_DAYS = 3;
-var MAIL_NO_REVIEW = { 'Amazon': 1, '楽天': 1, 'Yahoo!ショッピング': 1, 'オフモール': 1, '駿河屋': 1 };
+// 受取評価があるのは フリマ系（ラクマ/メルカリ/Yahoo!フリマ/ヤフオク）だけ。※ヤフオクは出品者により無い場合もある
+var MAIL_HAS_REVIEW = { 'メルカリ': 1, 'メルカリShops': 1, 'ラクマ': 1, 'フリル': 1, 'Yahoo!フリマ': 1, 'ヤフオク': 1 };
+var MAIL_NO_REVIEW = {};   // 上記以外は全部「評価なし」＝発送日+3日で到着とみなす
 var MAIL_CANCEL = /(キャンセル|取引をキャンセル|取消|中止|返金|注文がキャンセル)/;
 // ★Amazon・楽天には「受け取り評価」が無い。発送通知＝そのうち届く、として到着扱いにする。
 //   メルカリ・ヤフオク系は「取引完了/評価」が確実な到着サイン。
@@ -3028,7 +3031,7 @@ function scanPurchaseMails(daysBack) {
         if (mk) names.push(mk[1]);
         // 評価が無い仕入元は「発送通知＝そのうち届く」。到着とみなす日付を足しておく
         var arrive = when;
-        if (kind === 'done' && MAIL_NO_REVIEW[src.key] && when) {
+        if (kind === 'done' && !MAIL_HAS_REVIEW[src.key] && when) {
           try { arrive = Utilities.formatDate(new Date(Date.parse(when) + MAIL_ARRIVE_DAYS * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd'); } catch (e) { }
         }
         names.forEach(function (n) {
@@ -3036,7 +3039,7 @@ function scanPurchaseMails(daysBack) {
           if (n.length < 4) return;
           var key = src.key + '' + n;
           var cur = hints[key];
-          if (!cur || (kind === 'cancel' && cur.kind !== 'cancel')) hints[key] = { supplier: src.key, name: n, kind: kind, date: when, arrive: arrive, noReview: !!MAIL_NO_REVIEW[src.key], subject: subj.slice(0, 90) };
+          if (!cur || (kind === 'cancel' && cur.kind !== 'cancel')) hints[key] = { supplier: src.key, name: n, kind: kind, date: when, arrive: arrive, noReview: !MAIL_HAS_REVIEW[src.key], subject: subj.slice(0, 90) };
         });
       });
     });
