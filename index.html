@@ -601,6 +601,7 @@
         <option value="在庫保管中">在庫保管中</option>
         <option value="入庫待ち">入庫待ち</option>
         <option value="販売済み">販売済み</option>
+        <option value="仕入キャンセル">仕入キャンセル</option>
       </select>
       <select id="stock-sup"><option value="">仕入元:全て</option></select>
       <select id="stock-origin">
@@ -4551,7 +4552,9 @@
     if (!r.tracking_no) parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
     return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
   }
-  const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み'];
+  // ★仕入元（メルカリ等）都合でキャンセルされ、そもそも届かなかった仕入。
+  //   在庫でも販売済みでもないので独立した状態にする。在庫資産・仕入額から外して数える。
+  const STOCK_STATUS = ['在庫保管中', '入庫待ち', '販売済み', '仕入キャンセル'];
   const STOCK_PSTATUS = ['', '発送待ち', '受取評価待ち', '取引終了'];
   const SUPPLIERS = ['メルカリ', 'メルカリShops', 'ヤフオク', 'Yahoo!フリマ', 'Amazon', 'Yahoo!ショッピング', '楽天', 'セカストオンライン', 'オフモール', 'Nintendo Store'];
   const CONDITIONS = ['新品', '中古'];
@@ -5239,12 +5242,13 @@
     var host = document.getElementById('stock-tana'); if (!host) return;
     if (tana.loading) { host.innerHTML = '<div class="smd-dim" style="padding:20px">読み込み中…</div>'; return; }
     var all = tana.rows || [];
-    var cnt = { keep: 0, sold: 0, wait: 0, gone: 0 };
+    var cnt = { keep: 0, sold: 0, wait: 0, cancel: 0, gone: 0 };
     all.forEach(function (v) {
       var s = String(v.status || '');
       if (s === '在庫保管中') cnt.keep++;
       else if (s === '販売済み') cnt.sold++;
       else if (s === '入庫待ち') cnt.wait++;
+      else if (s === '仕入キャンセル') cnt.cancel++;
       else cnt.gone++;
     });
     var list = tanaFiltered();
@@ -5270,14 +5274,14 @@
         + '<span class="smd-dim" style="font-size:10px">🏷' + esc(String(v.item_id)) + (v.bin ? ' / 棚' + esc(v.bin) : '')
         + (v.price != null ? ' / ¥' + Number(v.price).toLocaleString() : '') + (v.purchase_date ? ' / 仕入 ' + esc(String(v.purchase_date).slice(0, 10)) : '')
         + (v.shopee_sn ? ' / 注文 ' + esc(String(v.shopee_sn)) : '') + '</span></span>'
-        + '<span style="flex:none;display:inline-flex;gap:5px">' + btn('在庫保管中', '在庫あり', '#1a7f37') + btn('販売済み', '販売済み', '#8a8f98') + '</span>'
+        + '<span style="flex:none;display:inline-flex;gap:5px">' + btn('在庫保管中', '在庫あり', '#1a7f37') + btn('販売済み', '販売済み', '#8a8f98') + btn('仕入キャンセル', '届かなかった', '#d93025') + '</span>'
         + '</div>';
     };
     host.innerHTML = '<div class="pagehelp" style="margin:0 0 10px"><b>この画面：在庫台帳を1件ずつ「今あるか・売れたか」に仕分けます。</b>'
       + '<span class="step">1</span>状態で絞り込む <span class="step">2</span>写真と名前を見て <b>在庫あり</b> か <b>販売済み</b> を押す <span class="step">3</span>押した瞬間に保存されます。'
       + '<span style="color:#5a6b8c;font-size:11.5px">※消したり自動判定したりはしません。押した分だけ変わります。</span></div>'
       + '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:9px">'
-      + stBtn('在庫保管中', '在庫あり', cnt.keep) + stBtn('入庫待ち', '入庫待ち', cnt.wait) + stBtn('販売済み', '販売済み', cnt.sold) + stBtn('', '全部', all.length)
+      + stBtn('在庫保管中', '在庫あり', cnt.keep) + stBtn('入庫待ち', '入庫待ち', cnt.wait) + stBtn('販売済み', '販売済み', cnt.sold) + stBtn('仕入キャンセル', '届かなかった', cnt.cancel) + stBtn('', '全部', all.length)
       + '<input id="tn-q" value="' + av(tana.q) + '" placeholder="商品名・在庫Noで探す" style="width:230px;padding:5px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px">'
       + '<button id="tn-sort" class="smd-btn" style="font-size:11px;padding:3px 10px">' + (tana.sort === 'old' ? '古い順' : '新しい順') + '</button>'
       + '<span class="smd-dim" style="font-size:11.5px">' + list.length + '件中 ' + (tana.page * TANA_PER + 1) + '〜' + Math.min(list.length, (tana.page + 1) * TANA_PER) + '件</span>'
@@ -5333,6 +5337,7 @@
       ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal), '在庫保管中'],
       ['入庫待ち', all.filter(r => r.status === '入庫待ち').length + '点', '仕入元から到着待ち', '入庫待ち'],
       ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計', '販売済み'],
+      ['仕入キャンセル', all.filter(r => r.status === '仕入キャンセル').length + '点', '仕入元都合で届かなかった分（資産から除外）', '仕入キャンセル'],
       ['⚠️ 仕分けが必要', needFix.length + '点', '状態と注文の紐付きが食い違っています', '__fix'],
       ['全登録', all.length + '点', 'クリックで絞り込み解除', ''],
     ].map(([t, v, s, f]) => `<div class="kpi stk-kpi" data-f="${esc(f)}" style="cursor:pointer" title="クリックで下の一覧をこの条件で絞り込みます"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
