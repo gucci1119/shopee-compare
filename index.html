@@ -13192,7 +13192,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     // サブタブを記憶（リロードしても同じタブに戻る）
     if (!lst.tab) { try { lst.tab = localStorage.getItem('smdListTab') || 'status'; } catch (_) { lst.tab = 'status'; } }
-    if (lst.tab === 'bulk' && !bulk.sel.size) lst.tab = 'status';   // 🛠は出品一覧で選んでから開く画面。単独では開かない
+    if (lst.tab === 'bulk' && !bulk.sel.size && bulk.view !== 'media') lst.tab = 'status';   // 🛠は出品一覧で選んでから開く画面（🖼は選択不要）
     if (lst.nameW == null) { try { lst.nameW = Number(localStorage.getItem('smdListNameW')) || 150; } catch (_) { lst.nameW = 150; } document.documentElement.style.setProperty('--lst-namew', (lst.nameW || 150) + 'px'); }
     if (lst.colW == null) { try { lst.colW = JSON.parse(localStorage.getItem('smdListColW') || '{}'); } catch (_) { lst.colW = {}; } }
     if (lst.colHide == null) {
@@ -13278,17 +13278,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const selN = bulk.sel.size;
     const chosen = [...bulk.sel.values()];
     const changed = chosen.filter(e => bulkDirty(e));
+    // 🖼画像・動画は「いまの絞り込み結果ぜんぶ」を見る。触った行だけ bulk.sel に載せて💾の対象にする
+    const mAll = (bulk.view === 'media') ? ((lst && lst._mediaRows) || []) : [];
+    const M_PER = 60, mPages = Math.max(1, Math.ceil(mAll.length / M_PER));
+    if ((bulk.mPage || 0) >= mPages) bulk.mPage = 0;
+    const mPage = mAll.slice((bulk.mPage || 0) * M_PER, (bulk.mPage || 0) * M_PER + M_PER);
+    const mEntry = (r) => { const k = r.cc + '|' + r.item_id; if (!bulk.sel.has(k)) bulk.sel.set(k, bulkEntry(r)); return bulk.sel.get(k); };
     host.innerHTML = `
       <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <b style="font-size:13px">🛠 まとめて編集</b>
-        <span class="smd-dim" style="font-size:11.5px">📋出品一覧のチェックで選んだ <b>${selN}</b> 件です。対象を変えるときは一覧に戻ってチェックし直してください。</span>
+        <b style="font-size:13px">${bulk.view === 'media' ? '🖼 画像・動画（メディアセンター）' : '🛠 まとめて編集'}</b>
+        <span class="smd-dim" style="font-size:11.5px">${bulk.view === 'media'
+          ? `いまの絞り込み結果 <b>${mAll.length}</b> 件を、${(bulk.mPage || 0) * M_PER + 1}〜${Math.min(mAll.length, ((bulk.mPage || 0) + 1) * M_PER)} 件目まで表示中。絞り込みは📋出品一覧で変えられます。`
+          : `📋出品一覧のチェックで選んだ <b>${selN}</b> 件です。対象を変えるときは一覧に戻ってチェックし直してください。`}</span>
         <button id="bk-back" class="smd-btn" style="font-size:11px;padding:3px 11px">📋 出品一覧に戻る</button>
         <span class="smd-seg" style="margin-left:auto">
           <button class="bk-view" data-v="edit" style="font-size:11px;padding:3px 12px;border:1px solid #ddd;background:${bulk.view === 'media' ? '#fff' : '#ee4d2d'};color:${bulk.view === 'media' ? '#333' : '#fff'};border-radius:5px 0 0 5px;cursor:pointer">✏️ 内容</button>
           <button class="bk-view" data-v="media" style="font-size:11px;padding:3px 12px;border:1px solid #ddd;border-left:none;background:${bulk.view === 'media' ? '#ee4d2d' : '#fff'};color:${bulk.view === 'media' ? '#fff' : '#333'};border-radius:0 5px 5px 0;cursor:pointer">🖼 画像・動画</button>
         </span>
       </div>
-      ${selN ? `
+      ${(bulk.view === 'media' || selN) ? `
       <div style="border:1px dashed #cdd7ea;border-radius:9px;padding:9px 11px;background:#fafbff;margin-bottom:10px">
         <div style="font-weight:700;color:#3b5bdb;font-size:12.5px;margin-bottom:6px">一括ツール（押した時点では画面上だけ変わります）</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11.5px;margin-bottom:6px">
@@ -13319,8 +13327,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span id="bk-msg" class="smd-dim" style="font-size:11.5px">${bulk.msg || ''}</span>
       </div>
       <div style="border:1px solid #eee;border-radius:9px;overflow:hidden">
-        ${bulk.view === 'media' ? chosen.map(e => bulkMediaHtml(e)).join('') : chosen.map(e => bulkRowHtml(e)).join('')}
-      </div>` : '<div class="smd-dim" style="padding:14px">対象がありません。📋出品一覧でチェックを入れてから「🛠 選んだN件をまとめて編集」で開いてください。</div>'}`;
+        ${bulk.view === 'media' ? (mPage.map(r => bulkMediaHtml(mEntry(r))).join('') || '<div class="smd-dim" style="padding:14px">該当する商品がありません。📋出品一覧で絞り込みを変えてください。</div>') : chosen.map(e => bulkRowHtml(e)).join('')}
+      </div>
+      ${(bulk.view === 'media' && mPages > 1) ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center"><button id="bk-mprev" class="smd-btn" style="font-size:11px;padding:2px 10px">◀ 前</button><span class="smd-dim" style="font-size:11.5px">${(bulk.mPage || 0) + 1}/${mPages}ページ</span><button id="bk-mnext" class="smd-btn" style="font-size:11px;padding:2px 10px">次 ▶</button></div>` : ''}` : '<div class="smd-dim" style="padding:14px">対象がありません。📋出品一覧でチェックを入れてから「🛠 選んだN件をまとめて編集」で開いてください。</div>'}`;
     wireBulk();
   }
   // ---- 🏷 属性(specifics)の一括設定 ----
@@ -13509,6 +13518,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const e = bulk.sel.get(b.dataset.k); if (!e) return; e.imgs = null; drawBulk();
     }));
     host.querySelectorAll('.bk-view').forEach(b => b.addEventListener('click', () => { bulk.view = b.dataset.v; drawBulk(); }));
+    { const p2 = host.querySelector('#bk-mprev'), n2 = host.querySelector('#bk-mnext');
+      if (p2) p2.addEventListener('click', () => { bulk.mPage = Math.max(0, (bulk.mPage || 0) - 1); drawBulk(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+      if (n2) n2.addEventListener('click', () => { bulk.mPage = (bulk.mPage || 0) + 1; drawBulk(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
   }
   const bulkDirty = (e) => e.t !== e.t0 || !!e.vid || e.vdel || !!(e.attrs && e.attrs.length) || !!e.wg || !!e.newCat || !!(e.imgs && e.imgs.length) || e.opts.some(o => o.n !== o.n0 || !!o.url);
   function bulkRowHtml(e) {
@@ -16268,6 +16280,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ <span style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center">${per || '国未選択'}</span>${ccSel.length ? `<span style="color:#ee4d2d;font-weight:700">🌏 ${ccSel.join('・')}のみ</span>` : ''}
         <span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center">
+          <button id="lst-media" class="smd-btn" style="font-size:11.5px;padding:3px 13px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="いまの絞り込み結果ぜんぶの画像・動画を一覧で見て、その場で差し替えます（選択は不要）">🖼 画像・動画で見る</button>
           <button id="lst-pickpage" class="smd-btn" style="font-size:11px;padding:3px 10px" title="いま表示している行を全部、🛠まとめて編集の対象にします">☑ 表示中を選ぶ</button>
           <button id="lst-pickclear" class="smd-btn" style="font-size:11px;padding:3px 10px${bulk.sel.size ? '' : ';display:none'}">選択を外す</button>
           <button id="lst-tobulk" class="smd-btn" style="font-size:11.5px;padding:3px 13px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700${bulk.sel.size ? '' : ';display:none'}">🛠 選んだ ${bulk.sel.size} 件をまとめて編集</button>
@@ -16308,6 +16321,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       let ci = 0;
       shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); if ((cnt.get(k) || 0) >= 2 && !_serMap.has(k)) _serMap.set(k, ci++); });
     } else _serMap = null;
+    lst._mediaRows = rows;   // 🖼画像・動画ビューは「いまの絞り込み結果ぜんぶ」を見る（選択は不要）
     document.getElementById('lst-list').innerHTML = lst.grid ? listingGridHtml(shown) : (shown.map(listingCardHtml).join('') || '<div class="smd-empty">該当する出品はありません（未取得なら🔄更新）</div>');
     // ★上部の横スクロールバーを本体と連動させる。一番下のバーまで行かないと横に動かせず、
     //   上の行を見ながらの横スクロールができなかったため。
@@ -16585,6 +16599,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           bulk.sel.clear();
           document.querySelectorAll('#lst-list .lst-pick').forEach(c => { c.checked = false; });
           refreshBulkBar();
+        }); }
+      { const b = document.getElementById('lst-media');
+        if (b) b.addEventListener('click', () => {
+          bulk.view = 'media'; bulk.mPage = 0; bulk.fromList = true;
+          lst.tab = 'bulk'; try { localStorage.setItem('smdListTab', 'bulk'); } catch (_) {}
+          renderListPage();
+          setTimeout(() => { const h = document.getElementById('list-bulk'); if (h) h.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60);
         }); }
       { const b = document.getElementById('lst-tobulk');
         if (b) b.addEventListener('click', () => {
