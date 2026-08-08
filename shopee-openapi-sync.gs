@@ -3005,15 +3005,29 @@ var MAIL_CANCEL = /(キャンセル|取引をキャンセル|取消|中止|返�
 //   メルカリ・ヤフオク系は「取引完了/評価」が確実な到着サイン。
 var MAIL_DONE = /(取引が完了|受取評価|評価をしました|発送しました|発送されました|お届け(予定|済|完了)|配達完了|商品が届)/;
 
+// ★1回で全部読むと6分制限に当たる（実測でタイムアウト）。
+//   **1回につき1つの仕入元だけ**を読み、どこまで進んだかを Script Properties に覚える。
+//   何度か実行すれば全仕入元を一巡する。5分で自動的に切り上げる。
 function scanPurchaseMails(daysBack) {
   var back = daysBack || 400;
   var after = new Date(Date.now() - back * 86400000);
   var afterStr = Utilities.formatDate(after, 'Asia/Tokyo', 'yyyy/MM/dd');
+  var deadline = now_() + 280;                      // 4分40秒で切り上げ
+  var pr = P_();
+  var idx = parseInt(pr.getProperty('MAIL_SCAN_IDX') || '0', 10) || 0;
+  if (idx >= MAIL_SRC.length) idx = 0;
+  var src = MAIL_SRC[idx];
+  // これまでの候補に足していく（毎回まっさらにしない）
   var hints = {}, scanned = 0;
-  MAIL_SRC.forEach(function (src) {
+  try {
+    var prev = sbSelect_('app_kv', 'select=v&k=eq.stock_mail_hints');
+    ((prev && prev[0] && prev[0].v && prev[0].v.items) || []).forEach(function (h) { hints[h.supplier + '' + h.name] = h; });
+  } catch (e) { }
+  [src].forEach(function (src) {
     var threads = [];
-    try { threads = GmailApp.search(src.q + ' after:' + afterStr, 0, 250); } catch (e) { return; }
+    try { threads = GmailApp.search(src.q + ' after:' + afterStr, 0, 200); } catch (e) { return; }
     threads.forEach(function (th) {
+      if (now_() > deadline) return;
       var msgs;
       try { msgs = th.getMessages(); } catch (e) { return; }
       msgs.forEach(function (m) {
@@ -3047,10 +3061,11 @@ function scanPurchaseMails(daysBack) {
     });
   });
   var items = Object.keys(hints).map(function (k) { return hints[k]; });
+  pr.setProperty('MAIL_SCAN_IDX', String((idx + 1) % MAIL_SRC.length));
   try {
     sbUpsert_('app_kv', [{ k: 'stock_mail_hints', v: { items: items, at: new Date().toISOString(), scanned: scanned }, updated_at: new Date().toISOString() }]);
   } catch (e) { Logger.log('hints保存失敗: ' + e); }
-  Logger.log('メール走査: ' + scanned + '通 / 候補 ' + items.length + '件（キャンセル ' +
+  Logger.log('【' + src.key + '】を走査（' + (idx + 1) + '/' + MAIL_SRC.length + '・次回は次の仕入元）: ' + scanned + '通 / 候補 累計' + items.length + '件（キャンセル ' +
     items.filter(function (x) { return x.kind === 'cancel'; }).length + ' / 完了 ' +
     items.filter(function (x) { return x.kind === 'done'; }).length + '）');
   return { scanned: scanned, hints: items.length };
