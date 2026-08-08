@@ -2325,7 +2325,7 @@ function backfillEscrowUnchanged(limitN) {
     return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id;
   }).slice(0, lim);
   if (!targets.length) { Logger.log('backfillEscrow: 対象なし（すべて確定済み）'); return { done: 0, moved: 0 }; }
-  var deadline = now_() + 300;   // 5分で切り上げ（6分制限に当てない）
+  var deadline = now_() + 170;   // 約3分で切り上げ（1日の実行時間枠90分を守る。毎日回るので数日で消化される）
   var out = [], now2 = new Date().toISOString();
   for (var i = 0; i < targets.length; i++) {
     if (now_() > deadline) { Logger.log('backfillEscrow: 時間切れで中断（' + i + '件処理）'); break; }
@@ -2880,7 +2880,9 @@ function setupTriggers() {
   // ★SLS+の補償（半額保証）は**数か月後**に My Income へ反映され、一度確定した額が変わる。
   //   通常の同期は「直近15日に更新のあった注文」しか見ないので構造的に拾えない。
   //   返品のあった注文を名指しで読み直す処理を、1日1回まわす。
-  ScriptApp.newTrigger('recheckEscrowForReturns').timeBased().everyDays(1).atHour(4).create();
+  //   ※トリガーの合計実行時間は90分/日が上限。RoundRobinだけで約61分使うため、追加分は軽くする。
+  //     補償は数か月後の話なので毎日である必要はない（3日に1回で十分）。
+  ScriptApp.newTrigger('recheckEscrowForReturns').timeBased().everyDays(3).atHour(4).create();
   // ★暫定のまま固まっている入金も毎日少しずつ取り直す（配送中の注文も対象）
   ScriptApp.newTrigger('backfillEscrowUnchanged').timeBased().everyDays(1).atHour(5).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
@@ -3256,7 +3258,7 @@ function recheckEscrowForReturns(limitN) {
   var incs = sbSelect_('income', 'select=cc,sn,amount,shop_id&limit=8000') || [];
   var im = {};
   incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
-  var deadline = now_() + 280, out = [], now2 = new Date().toISOString();
+  var deadline = now_() + 150, out = [], now2 = new Date().toISOString();   // 2分半で切り上げ（日次の実行時間枠を守る）
   for (var i = 0; i < targets.length && out.length < lim; i++) {
     if (now_() > deadline) { Logger.log('時間切れで中断（' + i + '件処理）'); break; }
     var t = targets[i], cur = im[t.cc + ':' + t.order_sn];
