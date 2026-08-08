@@ -5319,6 +5319,7 @@
       + '<span class="smd-dim" style="font-size:11.5px">' + list.length + '件中 ' + (tana.page * TANA_PER + 1) + '〜' + Math.min(list.length, (tana.page + 1) * TANA_PER) + '件</span>'
       + '<label style="font-size:11px;white-space:nowrap"><input type="checkbox" id="tn-old" ' + (tana.oldOnly ? 'checked' : '') + '> 仕入から180日超だけ</label>'
       + '<button id="tn-bulk" class="smd-btn" style="font-size:11.5px;padding:3px 12px;border-color:#8a8f98;color:#555;font-weight:700" title="いま絞り込まれている分をまとめて販売済みにします。実物を数えて残っていたものは、あとからItemIDで検索して「在庫あり」に戻せます">まとめて販売済みにする</button>'
+      + '<button id="tn-imp" class="smd-btn" style="font-size:11.5px;padding:3px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" title="利益管理表から取り込んだ「注文番号↔在庫No」を在庫台帳に反映します（GASでスキャンした結果を使います）">📥 利益管理表の紐付けを反映</button>'
       + '<button id="tn-reload" class="smd-btn" style="font-size:11px;padding:3px 10px;margin-left:auto">🔄 読み直す</button></div>'
       + '<div style="border:1px solid #eee;border-radius:9px;overflow:hidden">' + (page.map(rowHtml).join('') || '<div class="smd-empty">該当なし</div>') + '</div>'
       + (pages > 1 ? '<div style="margin-top:9px;display:flex;gap:6px;align-items:center"><button id="tn-prev" class="smd-btn" style="font-size:11px;padding:2px 10px">◀ 前</button>'
@@ -5357,6 +5358,52 @@
           toast('✓ ' + done + '件を販売済みにしました');
         } catch (e) { alert('反映に失敗: ' + ((e && e.message) || e)); }
         bb.disabled = false; bb.textContent = 'まとめて販売済みにする'; drawTana();
+      }); }
+    { var ib = host.querySelector('#tn-imp');
+      if (ib) ib.addEventListener('click', async function () {
+        if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return; }
+        ib.disabled = true; ib.textContent = '読み込み中…';
+        var cand = [];
+        try {
+          var kv = await sbGetAll('app_kv', 'select=v&k=eq.profit_link_import');
+          cand = (kv && kv[0] && kv[0].v && kv[0].v.items) || [];
+        } catch (e) { }
+        if (!cand.length) { alert('取り込み候補がありません。\n\nGASで importProfitScanFolder を実行してから、もう一度押してください。'); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
+        // 在庫台帳にある在庫Noだけを対象にする（ざっくりでよいので、無いものは黙って飛ばす）
+        var have = {};
+        (tana.rows || []).forEach(function (v) { have[String(v.item_id)] = v; });
+        var rows = [], nCan = 0, nMiss = 0;
+        cand.forEach(function (c) {
+          if (c.cancelled) {
+            (c.stock || []).forEach(function (id) { if (have[id]) { rows.push({ item_id: id, status: '仕入キャンセル' }); nCan++; } });
+            return;
+          }
+          (c.stock || []).forEach(function (id) {
+            if (!have[id]) { nMiss++; return; }
+            var r = { item_id: id, shopee_sn: c.order_sn, status: '販売済み' };
+            if (c.cost > 0 && !(have[id].price > 0)) r.price = c.cost;
+            if (c.supplier && !have[id].supplier) r.supplier = c.supplier;
+            if (c.supplier_url) r.supplier_url = c.supplier_url;
+            rows.push(r);
+          });
+        });
+        if (!rows.length) { alert('在庫台帳と一致する在庫Noがありませんでした（候補 ' + cand.length + '件）'); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
+        if (!confirm('利益管理表から ' + rows.length + '件 を在庫台帳に反映します。\n\n'
+          + '・注文番号を紐付けて「販売済み」にします\n'
+          + '・仕入値/仕入元/仕入元URLが空の在庫には、それも入れます\n'
+          + (nCan ? '・仕入キャンセル ' + nCan + '件\n' : '')
+          + (nMiss ? '・在庫台帳に無い在庫No ' + nMiss + '件は飛ばします\n' : '')
+          + '\nよろしいですか？')) { ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
+        try {
+          for (var i = 0; i < rows.length; i += 200) {
+            ib.textContent = '反映中… ' + i + '/' + rows.length;
+            await sbUpsert('inventory', rows.slice(i, i + 200));
+          }
+          try { logAct('在庫', '利益管理表から紐付け', '', rows.length + '件（キャンセル' + nCan + '・不明' + nMiss + '）'); } catch (e) { }
+          toast('✓ ' + rows.length + '件を反映しました');
+          await tanaLoad(true); drawTana();
+        } catch (e2) { alert('反映に失敗: ' + ((e2 && e2.message) || e2)); }
+        ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映';
       }); }
     { var rb = host.querySelector('#tn-reload'); if (rb) rb.addEventListener('click', async function () { await tanaLoad(true); drawTana(); }); }
     { var pv = host.querySelector('#tn-prev'); if (pv) pv.addEventListener('click', function () { tana.page = Math.max(0, tana.page - 1); drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
