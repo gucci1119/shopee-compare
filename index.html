@@ -5861,7 +5861,7 @@
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
           sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
-          sbGetAll('returns', 'select=cc,refund_amount,currency,create_time,status').catch(() => []),   // 正式な返品リクエストの返金
+          sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),   // 正式な返品リクエストの返金
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
       plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets }, at: Date.now() };
@@ -7095,12 +7095,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!isNaN(n) && n > 1e8) return jstDate(n < 1e11 ? n * 1000 : n).slice(0, 7);   // UNIX秒/ミリ秒
     const t = Date.parse(v); return isNaN(t) ? '' : jstDate(t).slice(0, 7);
   };
-  const retRefundForYm = (rets, ym) => (rets || []).reduce((s2, r) => {
-    if (retYm(r.create_time) !== ym) return s2;
-    const cur = r.currency || RET_CUR[String(r.cc || '').toUpperCase()] || '';
-    const rate = RET_RATE[cur] || 0;
-    return s2 + (Number(r.refund_amount) || 0) * rate;
-  }, 0);
+  // ★実際にお金が動いた返品だけを数える。
+  //   CANCELLED（取り下げられたリクエスト）は返金ではない。同じ注文に複数の返品記録が付くため、
+  //   注文番号で1件に寄せる（2026-08-09 実測：150件中62件がCANCELLED、同一注文の二重計上もあった）。
+  const RET_PAID = /^(ACCEPTED|CLOSED|COMPLETED|REFUND_PAID)$/i;
+  const retRefundForYm = (rets, ym) => {
+    const bySn = new Map();
+    (rets || []).forEach(r => {
+      if (!RET_PAID.test(String(r.status || ''))) return;      // 取り下げ・処理中は除く
+      if (retYm(r.create_time) !== ym) return;
+      const cur = r.currency || RET_CUR[String(r.cc || '').toUpperCase()] || '';
+      const jpy = (Number(r.refund_amount) || 0) * (RET_RATE[cur] || 0);
+      const k = (r.cc || '') + ':' + (r.order_sn || r.return_sn || Math.random());
+      if (!bySn.has(k) || bySn.get(k) < jpy) bySn.set(k, jpy);  // 同じ注文は最大額を1回だけ
+    });
+    let t = 0; bySn.forEach(v => { t += v; }); return t;
+  };
   const refundForYm = (issues, ym) => (issues || []).reduce((s, r) => { if (r.refund_jpy == null) return s; const m = r.refund_date ? String(r.refund_date).slice(0, 7) : (r.created_at ? new Date(Date.parse(r.created_at) + 9 * 3600000).toISOString().slice(0, 7) : ''); return m === ym ? s + (r.refund_jpy || 0) : s; }, 0);
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
