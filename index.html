@@ -5322,18 +5322,34 @@
     const all = stock.rows || [];
     const inStock = all.filter(r => r.status === '在庫保管中');
     const stockVal = inStock.reduce((s, r) => s + (r.price || 0), 0);
+    // ★仕分けが必要＝注文に紐付いていないのに「販売済み」／紐付いているのに「在庫保管中」。
+    //   帳簿と実物の在り処が食い違っている可能性がある分。押すと下の一覧がその条件で絞られる。
+    const needFixOf = (r) => {
+      const linked = !!String(r.shopee_sn || '').trim(), st = String(r.status || '');
+      return (st === '販売済み' && !linked) || (st === '在庫保管中' && linked);
+    };
+    const needFix = all.filter(needFixOf);
     document.getElementById('stock-kpis').innerHTML = [
-      ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal)],
-      ['入庫待ち', all.filter(r => r.status === '入庫待ち').length + '点', '仕入元から到着待ち'],
-      ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計'],
-      ['全登録', all.length + '点', 'InventoryItem'],
-    ].map(([t, v, s]) => `<div class="kpi"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+      ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal), '在庫保管中'],
+      ['入庫待ち', all.filter(r => r.status === '入庫待ち').length + '点', '仕入元から到着待ち', '入庫待ち'],
+      ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計', '販売済み'],
+      ['⚠️ 仕分けが必要', needFix.length + '点', '状態と注文の紐付きが食い違っています', '__fix'],
+      ['全登録', all.length + '点', 'クリックで絞り込み解除', ''],
+    ].map(([t, v, s, f]) => `<div class="kpi stk-kpi" data-f="${esc(f)}" style="cursor:pointer" title="クリックで下の一覧をこの条件で絞り込みます"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
+    document.querySelectorAll('.stk-kpi').forEach(el => el.addEventListener('click', () => {
+      const f = el.dataset.f || '';
+      stock.needFix = (f === '__fix');
+      const sel = document.getElementById('stock-st');
+      if (sel) sel.value = stock.needFix ? '' : f;
+      stockRender();
+    }));
     const supSel = document.getElementById('stock-sup'); // 仕入元フィルタの選択肢を実データから一度だけ生成
     if (supSel && supSel.options.length <= 1) {
       const sups = [...new Set(all.map(r => r.supplier).filter(Boolean))].sort();
       supSel.insertAdjacentHTML('beforeend', sups.map(s => `<option>${esc(s)}</option>`).join(''));
     }
     let rows = all;
+    if (stock.needFix) rows = rows.filter(needFixOf);
     if (stock.st) rows = rows.filter(r => r.status === stock.st);
     if (stock.sup) rows = rows.filter(r => (r.supplier || '') === stock.sup);
     if (stock.origin) rows = rows.filter(r => stkOrigin(r) === stock.origin);
