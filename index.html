@@ -478,6 +478,7 @@
         <div class="ngitems">
           <button data-p="log" title="ポータル上で行った操作の履歴">🧾 操作ログ</button>
           <button data-p="changelog" title="このポータルの改修履歴">🛠 改修履歴</button>
+          <button data-p="rules" title="Shopeeのルール（文字数・画像・価格差・発送期限など）をキーワードで調べる。元ソース付き">📚 レギュレーション</button>
           <button data-p="manual" title="このポータルの使い方マニュアル">📖 マニュアル</button>
         </div>
       </div>
@@ -878,6 +879,10 @@
     <div id="changelog-body" style="padding:12px 20px"></div>
   </div>
   <!-- マニュアル -->
+  <div id="page-rules" style="display:none">
+    <div class="smd-pagehead">📚 レギュレーション <span class="smd-dim" style="font-weight:400;font-size:12px">（Shopeeのルールを調べる・元ソース付き）</span></div>
+    <div id="rules-body" style="padding:12px 20px"></div>
+  </div>
   <div id="page-manual" style="display:none">
     <div class="smd-pagehead">📖 マニュアル</div>
     <div id="manual-body" style="padding:12px 20px"></div>
@@ -3024,7 +3029,7 @@
       stock: renderStock, list: renderListPage, profit: renderProfit,
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, suppliers: renderSuppliers,
-      log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
+      log: renderLog, changelog: renderChangelog, manual: renderManual, rules: renderRules, todo: renderTodo, news: renderNews, messages: renderMessages,
       expenses: renderExpenses, returns: renderReturns, fx: renderFx,
       account: renderAccounts,
     };
@@ -3038,7 +3043,7 @@
       }
     }
   }
-  const PAGE_KEYS = ['dash','todo','orders','stock','buy','profit','expenses','returns','account','customers','plan','suppliers','list','rank','fx','news','messages','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['rules','dash','todo','orders','stock','buy','profit','expenses','returns','account','customers','plan','suppliers','list','rank','fx','news','messages','log','changelog','tools','manual'];
   function saveNavCollapsed() { try { localStorage.setItem('smdNavCollapsed', JSON.stringify([...document.querySelectorAll('#smd-nav .navgroup.collapsed')].map(g => g.dataset.g))); } catch (_) {} }
   { try { JSON.parse(localStorage.getItem('smdNavCollapsed') || '[]').forEach(g => { const el = document.querySelector('#smd-nav .navgroup[data-g="' + g + '"]'); if (el) el.classList.add('collapsed'); }); } catch (_) {} }
   document.getElementById('smd-nav').addEventListener('click', e => {
@@ -9936,6 +9941,97 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
 
   // ---------------- 📖 マニュアル ----------------
+  // ---------------- 📚 レギュレーション：Shopeeのルールをキーワードで調べる（元ソース付き） ----------------
+  // ★外注さんが業務中に自分で調べて解決できるようにするための資料。Shopeeのエデュケーションハブは
+  //   国ごとにバラバラで検索も弱く、結局こちらに聞くしかない状態だったので、ここに集約する。
+  const rulesState = { data: null, q: '', cc: 'ALL', loading: false };
+  const RULE_CCS = ['ALL', 'PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+  async function rulesLoad(force) {
+    if (rulesState.data && !force) return;
+    rulesState.loading = true; drawRules();
+    try {
+      const kv = await sbGetAll('app_kv', 'select=v&k=eq.rules');
+      rulesState.data = (kv && kv[0] && kv[0].v) || { items: [], hub: {} };
+    } catch (_) { rulesState.data = { items: [], hub: {} }; }
+    finally { rulesState.loading = false; }
+  }
+  async function rulesSave() {
+    if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
+    await sbUpsert('app_kv', [{ k: 'rules', v: rulesState.data, updated_at: new Date().toISOString() }]);
+    return true;
+  }
+  // スペース区切りは「すべて含む」／-語で除外（出品一覧の検索と同じ書き方に揃える）
+  function rulesMatch(r, q) {
+    if (!q) return true;
+    const hay = [r.title, r.body, (r.tags || []).join(' '), (r.cc || []).join(' '), r.source].join('  ').toLowerCase();
+    const terms = (q.match(/"[^"]*"|\S+/g) || []).map(t => t.replace(/^"|"$/g, '')).filter(Boolean);
+    const inc = [], exc = [];
+    terms.forEach(t => { if (/^[-!]/.test(t) && t.length > 1) exc.push(t.slice(1).toLowerCase()); else inc.push(t.toLowerCase()); });
+    return inc.every(t => hay.includes(t)) && !exc.some(t => hay.includes(t));
+  }
+  function drawRules() {
+    const host = document.getElementById('rules-body'); if (!host) return;
+    if (rulesState.loading) { host.innerHTML = '<div class="smd-dim" style="padding:20px">読み込み中…</div>'; return; }
+    const d = rulesState.data || { items: [], hub: {} };
+    const all = d.items || [];
+    const list = all.filter(r => (rulesState.cc === 'ALL' || (r.cc || []).includes(rulesState.cc) || (r.cc || []).includes('ALL')))
+      .filter(r => rulesMatch(r, rulesState.q.trim().toLowerCase()));
+    const tagCount = {};
+    all.forEach(r => (r.tags || []).forEach(t => { tagCount[t] = (tagCount[t] || 0) + 1; }));
+    const topTags = Object.keys(tagCount).sort((a, b) => tagCount[b] - tagCount[a]).slice(0, 12);
+    const ccBtn = c => `<button class="rl-cc smd-btn" data-c="${c}" style="font-size:11.5px;padding:3px 10px${rulesState.cc === c ? ';background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : ''}">${c === 'ALL' ? '全部' : c}</button>`;
+    host.innerHTML = `
+      <div class="pagehelp" style="margin:0 0 10px">
+        <b>この画面：Shopeeのルールを調べる資料です。</b><span class="step">1</span>キーワードを入れる（例：<b>文字数</b>／<b>画像</b>／<b>価格差</b>／<b>発送</b>） <span class="step">2</span>国で絞り込む <span class="step">3</span><b>元ソース</b>で根拠を確認。
+        <span style="color:#5a6b8c;font-size:11.5px">※分からないことが出てきたら、まずここを検索してください。</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <input id="rl-q" value="${av(rulesState.q)}" placeholder="キーワードで探す（例: 文字数 / 画像 / 価格差）" style="width:340px;padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px">
+        ${RULE_CCS.map(ccBtn).join('')}
+        <span class="smd-dim" style="font-size:11.5px">${list.length} / ${all.length} 件</span>
+        <button id="rl-add" class="smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700;margin-left:auto">＋ ルールを追加</button>
+      </div>
+      ${topTags.length ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">${topTags.map(t => `<button class="rl-tag" data-t="${av(t)}" style="font-size:10.5px;padding:2px 9px;border:1px solid #dfe3e8;background:#fafbfc;border-radius:11px;cursor:pointer">${esc(t)}</button>`).join('')}</div>` : ''}
+      ${list.length ? list.map(r => `<div class="tool-card" style="margin:0 0 9px;max-width:none;padding:10px 14px">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b style="font-size:13.5px">${esc(r.title)}</b>
+          ${(r.cc || []).map(c => `<span style="font-size:9.5px;font-weight:700;color:#fff;background:${c === 'ALL' ? '#8a8f98' : '#ee4d2d'};border-radius:3px;padding:1px 5px">${esc(c === 'ALL' ? '全7か国' : c)}</span>`).join('')}
+          <button class="rl-edit smd-btn" data-id="${av(r.id)}" style="font-size:10px;padding:2px 8px;margin-left:auto">✎ 直す</button>
+        </div>
+        <div style="font-size:12.5px;line-height:1.7;margin-top:5px;white-space:pre-wrap">${esc(r.body)}</div>
+        <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          ${(r.tags || []).map(t => `<span class="smd-dim" style="font-size:10px;background:#f4f6fa;border-radius:9px;padding:1px 8px">${esc(t)}</span>`).join('')}
+          <span class="smd-dim" style="font-size:10.5px;margin-left:auto">📎 元ソース：${/^https?:/.test(r.source || '') ? `<a href="${esc(r.source)}" target="_blank" rel="noopener" style="color:#1565c0">${esc(String(r.source).slice(0, 60))}</a>` : esc(r.source || '（未記載）')}</span>
+        </div>
+      </div>`).join('') : '<div class="smd-empty">該当するルールがありません。別のキーワードで探すか、「＋ ルールを追加」で書き足してください。</div>'}
+      <div class="tool-card" style="margin:14px 0 0;max-width:none;padding:10px 14px;background:#fafbff;border:1px dashed #cdd7ea">
+        <b style="font-size:13px">🌏 Shopee公式エデュケーションハブ（各国）</b>
+        <div class="smd-dim" style="font-size:11px;margin:4px 0 7px">公式の一次情報です。ここの記事を要約してこのページに取り込んでいきます（順次追加）。</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">${Object.keys(d.hub || {}).map(c => `<a href="${esc(d.hub[c])}" target="_blank" rel="noopener" class="smd-btn" style="font-size:11.5px;padding:4px 12px;text-decoration:none;color:#1565c0">${esc(c)} のハブ ↗</a>`).join('')}</div>
+      </div>`;
+    { const q = host.querySelector('#rl-q');
+      if (q) { let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { rulesState.q = q.value; drawRules(); const q2 = document.getElementById('rl-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); }); } }
+    host.querySelectorAll('.rl-cc').forEach(b => b.addEventListener('click', () => { rulesState.cc = b.dataset.c; drawRules(); }));
+    host.querySelectorAll('.rl-tag').forEach(b => b.addEventListener('click', () => { rulesState.q = b.dataset.t; drawRules(); }));
+    const editOne = async (r0) => {
+      const title = prompt('ルールの見出し', r0 ? r0.title : ''); if (title == null) return;
+      const body = prompt('内容（改行OK）', r0 ? r0.body : ''); if (body == null) return;
+      const tags = prompt('タグ（カンマ区切り。例: 文字数,タイトル）', r0 ? (r0.tags || []).join(',') : ''); if (tags == null) return;
+      const cc = prompt('対象の国（カンマ区切り。全部なら ALL）', r0 ? (r0.cc || ['ALL']).join(',') : 'ALL'); if (cc == null) return;
+      const source = prompt('元ソース（URL または 出典のメモ）', r0 ? (r0.source || '') : ''); if (source == null) return;
+      const rec = { id: r0 ? r0.id : ('r' + Date.now().toString(36)), title: title.trim(), body: body.trim(),
+        tags: tags.split(',').map(x => x.trim()).filter(Boolean), cc: cc.split(',').map(x => x.trim().toUpperCase()).filter(Boolean), source: source.trim() };
+      rulesState.data.items = rulesState.data.items || [];
+      const i = rulesState.data.items.findIndex(x => x.id === rec.id);
+      if (i >= 0) rulesState.data.items[i] = rec; else rulesState.data.items.push(rec);
+      if (await rulesSave()) { toast('✓ 保存しました'); drawRules(); }
+    };
+    { const b = host.querySelector('#rl-add'); if (b) b.addEventListener('click', () => editOne(null)); }
+    host.querySelectorAll('.rl-edit').forEach(b => b.addEventListener('click', () => {
+      const r = (rulesState.data.items || []).find(x => x.id === b.dataset.id); if (r) editOne(r);
+    }));
+  }
+  async function renderRules() { await rulesLoad(false); drawRules(); }
   function renderManual() {
     const body = document.getElementById('manual-body');
     // 見やすさ用の共通インライン部品
