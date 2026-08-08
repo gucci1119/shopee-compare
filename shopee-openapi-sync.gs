@@ -3145,9 +3145,18 @@ function importProfitSheetScan(fileId) {
         if (!/^ITM-|^\d{6,}$/i.test(x) || seen[x]) return;
         seen[x] = 1; stocks.push(x);
       });
-      if (!stocks.length) return;
+      // ★在庫Noが無くても、仕入元URLにメルカリ等の取引ID（m1234567890）があれば手がかりになる。
+      //   在庫台帳の supplier_url にも同じIDが入っているので、ポータル側で突き合わせられる。
+      var supUrl = b.url >= 0 ? String(r[b.url] || '').trim() : '';
+      var mid = (supUrl.match(/\b(m\d{9,})\b/) || [])[1] || '';
+      if (!stocks.length) {
+        if (mid) out.push({ order_sn: sn, stock: [], tab: b.sheet, mercari_id: mid,
+          cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
+          supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '', supplier_url: supUrl });
+        return;
+      }
       out.push({
-        order_sn: sn, stock: stocks, tab: b.sheet,
+        order_sn: sn, stock: stocks, tab: b.sheet, mercari_id: mid,
         cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
         supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '',
         supplier_url: b.url >= 0 ? String(r[b.url] || '').trim() : ''
