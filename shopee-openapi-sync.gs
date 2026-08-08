@@ -3166,7 +3166,9 @@ function importProfitSheetScan(fileId) {
     perTab.push(b.sheet + ':' + cnt);
   });
   var nCan = out.filter(function (x) { return x.order_cancelled; }).length;
-  return { ok: true, name: ss.getName(), tabs: hits.length, perTab: perTab, cancelled: nCan, headerRow: hits[0].row, cols: { order: hits[0].o, stock: hits[0].s, stock2: hits[0].s2, cost: hits[0].c, supplier: hits[0].sup, url: hits[0].url }, found: out.length, sample: out.slice(0, 3), items: out };
+  // ★読めなかったタブも報告する。国別タブが1つでも漏れると、その国ぶんが丸ごと欠ける。
+  var skipped = miss.filter(function (n) { return /_p$|_row$|^[a-z]{2}$/i.test(n); });
+  return { ok: true, name: ss.getName(), tabs: hits.length, perTab: perTab, cancelled: nCan, skipped: skipped, headerRow: hits[0].row, cols: { order: hits[0].o, stock: hits[0].s, stock2: hits[0].s2, cost: hits[0].c, supplier: hits[0].sup, url: hits[0].url }, found: out.length, sample: out.slice(0, 3), items: out };
 }
 
 // フォルダ内の利益管理表を全部スキャンして、取り込める件数を報告する（書き込みはしない）
@@ -3189,7 +3191,8 @@ function importProfitScanFolder(folderId) {
     var r;
     try { r = importProfitSheetScan(f.id); } catch (e) { r = { ok: false, name: f.name, reason: String(e).slice(0, 90) }; }
     if (r.ok) {
-      report.push(f.name + ' → ' + r.found + '件（' + r.perTab.join(' / ') + '）');
+      report.push(f.name + ' → ' + r.found + '件（' + r.perTab.join(' / ') + '）'
+        + ((r.skipped && r.skipped.length) ? '  ⚠読めなかったタブ: ' + r.skipped.join(',') : ''));
       r.items.forEach(function (x) { all.push(x); });
     } else {
       report.push('✗ ' + f.name + ' → ' + r.reason);
@@ -3210,6 +3213,7 @@ function testImportOne() {
   Logger.log('該当タブ ' + r.tabs + '個（' + r.perTab.join(' / ') + '） ' + r.headerRow + '行目がヘッダ\n'
     + '列: 注文=' + r.cols.order + ' 在庫No=' + r.cols.stock + '/' + r.cols.stock2
     + ' 仕入=' + r.cols.cost + ' 仕入元=' + r.cols.supplier + ' URL=' + r.cols.url + '\n'
+    + ((r.skipped && r.skipped.length) ? '⚠読めなかったタブ: ' + r.skipped.join(',') + '\n' : '')
     + '取り込める行: ' + r.found + '件（うち注文キャンセル＝在庫なし ' + r.cancelled + '件 → 実際に紐付くのは ' + (r.found - r.cancelled) + '件）\n見本:\n' + JSON.stringify(r.sample, null, 1));
   return { found: r.found };
 }
