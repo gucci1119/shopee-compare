@@ -3171,3 +3171,15 @@ function importProfitScanFolder(folderId) {
   Logger.log(report.join('\n') + '\n---\n取り込み候補 合計 ' + all.length + '件（app_kv: profit_link_import に保存。ポータルで確認して反映）');
   return { files: files.length, items: all.length };
 }
+
+// ★エディタの関数プルダウンからは引数を渡せないので、引数なしで試せる入口を用意する。
+//   これは **読むだけ**。スプシにもSupabaseにも一切書き込まない。
+function testImportOne() {
+  var r = importProfitSheetScan('1yOhley_fhJUonhqOIvhlrBeD3oUrErBWgRiM0TJcv0k');  // 2026-02
+  if (!r.ok) { Logger.log('自動判定できず: ' + r.reason + '\n' + JSON.stringify(r.sheets, null, 1)); return r; }
+  Logger.log('タブ「' + r.sheet + '」 ' + r.headerRow + '行目がヘッダ\n'
+    + '列: 注文=' + r.cols.order + ' 在庫No=' + r.cols.stock + '/' + r.cols.stock2
+    + ' 仕入=' + r.cols.cost + ' 仕入元=' + r.cols.supplier + ' URL=' + r.cols.url + '\n'
+    + '取り込める行: ' + r.found + '件\n見本:\n' + JSON.stringify(r.sample, null, 1));
+  return { found: r.found };
+}
