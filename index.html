@@ -4124,6 +4124,8 @@
     order_adjustments: { money: ['amount'] },
     inventory:       { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier', 'supplier_name', 'seller'], url: ['url', 'source_url', 'product_url', 'link', 'photo_url', 'image_url', 'PhotoURL', 'supplier_url', 'proof'], text: ['supplier_order'], money: ['price', 'cost'] },
     daily_stats:     { money: ['sales'] },
+    expenses:        { money: ['amount'], text: ['memo', 'note', 'name'], supplier: ['vendor', 'payee'] },   // 🎭経費が実額のまま出ていた
+    suppliers:       { supplier: ['name', 'supplier'], url: ['url'], text: ['memo', 'note'] },
     listing_catalog: { prod: ['name', 'name_supplier', 'title', 'variation'], sku: ['sku', 'parent_sku'], supplier: ['supplier'], url: ['url', 'source_url', 'supplier_url'], money: ['cost', 'price', 'profit', 'buyer_paid', 'fee', 'sls', 'receive'] },
     costs:           { prod: ['name', 'title'], sku: ['sku'], money: ['cost', 'deposit', 'deposit_init'] },
     returns:         { buyer: ['buyer'], prod: ['name', 'title', 'variation'], sku: ['sku'], money: ['refund_amount'] },
@@ -4160,6 +4162,14 @@
         if (/^listing_specs/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.brand) m.brand = dmBrand(m.brand); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^dropship/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.title) m.title = dmProd(m.title); if (m.url) m.url = dmUrl(m.url); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^profit_sheet/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.cost) m.cost = dmMoney(m.cost); if (m.paypal_yen) m.paypal_yen = dmMoney(m.paypal_yen); if (m.paypal_local) m.paypal_local = dmMoney(m.paypal_local); if (m.supplier) m.supplier = dmSupplier(m.supplier); if (m.supplier_url) m.supplier_url = dmUrl(m.supplier_url); if (Array.isArray(m.stock_no)) m.stock_no = m.stock_no.map(dmSku); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+        if (/^plan_cfg/.test(k)) {   // 🎭事業計画の目標額・固定費内訳も実額なのでスケール
+          const c = { ...v };
+          ['targetNet', 'targetTakeHome', 'opexFixed'].forEach(f => { if (c[f] != null && c[f] !== '') c[f] = dmMoney(c[f]); });
+          if (c.monthTargets) { const mt = {}; Object.keys(c.monthTargets).forEach(m => { mt[m] = dmMoney(c.monthTargets[m]); }); c.monthTargets = mt; }
+          if (Array.isArray(c.fixBreak)) c.fixBreak = c.fixBreak.map(x => ({ ...x, name: dmText(x.name), amount: dmMoney(x.amount), memo: x.memo ? dmText(x.memo) : x.memo }));
+          if (c.avgProfit != null && c.avgProfit !== '') c.avgProfit = dmMoney(c.avgProfit);
+          return { ...r, v: c };
+        }
       } catch (_) {}
       return r;
     });
@@ -8700,7 +8710,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function renderChangelog() {
     const body = document.getElementById('changelog-body');
     // 📈 機能の成長マトリクス（時系列で「使えるようになっていった」様子）
-    const MILES = ['〜7/10', '7/11', '7/13', '7/15', '7/17', '7/26', '7/29'];
+    const MILES = ['〜7/10', '7/11', '7/13', '7/15', '7/17', '7/26', '7/29', '8/9'];
     const S = {
       none: { t: '–', bg: '#f4f4f4', fg: '#b8b8b8' },
       bridge: { t: 'ブリッジ', bg: '#efe6fb', fg: '#7b52c4' },
@@ -8744,6 +8754,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['商品ブースト＝上位表示（boost_item）', ['none', 'none', 'none', 'none', 'none', 'noperm']],
       ['チャット送受信（sellerchat）', ['bridge', 'bridge', 'bridge', 'bridge', 'bridge', 'noperm']],
       ['広告・マーケ支出', ['none', 'none', 'none', 'none', 'none', 'na']],
+      // ↓ 2026-08-09 追加：円換算と損益の精度まわり（ここが合っていないと利益の数字そのものが信用できない）
+      ['為替：日次レートで円換算（注文日基準・app_kv.fx_daily）', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
+      ['PayPal差分を入金・月次にも反映（主にBR）', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
+      ['キャンセルの損失仕分け（発送前/日本国内/日本を出た後）', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
+      ['利益明細を国別に分ける＋国別の小計', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
+      ['仕入額が未入力の注文を国別に可視化→その場で明細へ', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
+      ['配送状態の判定を是正（To Receive/Processed/TO_RETURN）', ['none', 'none', 'none', 'none', 'none', 'none', 'none', 'portal']],
     ];
     const cell = k => { const s = S[k] || S.none; return `<td style="border:1px solid #eee;padding:4px 6px;text-align:center;background:${s.bg};color:${s.fg};font-size:10.5px;font-weight:600;white-space:nowrap">${s.t}</td>`; };
     const legend = (k, lbl) => `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${S[k].bg};border:1px solid ${S[k].fg};vertical-align:-1px;margin-right:3px"></span><span style="color:${S[k].fg}">${lbl}</span>`;
@@ -8755,7 +8772,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <thead><tr><th style="border:1px solid #eee;padding:4px 8px;text-align:left;background:#fafafa">機能</th>${MILES.map(m => `<th style="border:1px solid #eee;padding:4px 6px;text-align:center;background:#fafafa;white-space:nowrap">${m}</th>`).join('')}</tr></thead>
           <tbody>${CAP.map(row => `<tr><td style="border:1px solid #eee;padding:4px 8px;white-space:nowrap;font-weight:600">${row[0]}</td>${MILES.map((_, i) => cell(row[1][i] != null ? row[1][i] : row[1][row[1].length - 1])).join('')}</tr>`).join('')}</tbody>
         </table></div>
-        <div style="font-size:11px;color:#666;margin-top:6px">紫→緑に変わった行＝<b>ブリッジ卒業</b>（ブラウザ/拡張の常駐なしで回るように）。<b>2026-07-26</b>＝<b>出品データ同期(get_item_list)・重量一括(update_item weight)を公式API化</b>＋<b>発送手配(ship_order)を配線</b>（<b style="color:#1a7f37">API✅β</b>＝実注文が入ったら1件で検証）。これで<b>中核＋出品同期＋発送まで公式API化済</b>。<b>2026-07-29</b>＝<b>価格・在庫のインライン編集（出品一覧から直接・展開バリエ含む）を100%公式API化</b>＋<b>予約(Pre-order)UIのブリッジ読み書きを撤去→Shopee編集ページへ誘導</b>（一覧からの編集は常駐ブリッジ不要に）＋<b>販売数/閲覧/いいね(get_item_extra_info)を公式API化</b>。さらに<b>2026-07-29</b>＝<b>✎カタログ編集の「開く（読取り）」を公式API化</b>（get_item_base_info＋get_model_listで、タイトル/価格/在庫/バリエ名/重量/予約を取得。<b>ブリッジ未応答でも詰まらず開ける</b>／公式失敗時のみブリッジfallback。実測：Tampermonkey OFF状態でもエディタが即描画）。加えて<b>2026-07-29</b>＝<b>✎カタログ編集の「書込」も公式API化</b>（タイトル/親SKU/重量/予約/属性=update_item、価格=update_price、在庫=update_stock）。読取り＋書込とも公式化で<b>エディタは常駐ブリッジ不要（公式API設定だけで開いて保存できる）</b>。実測：update_item(pre_order付き)のno-op書込がok。<b>残る主なブリッジ依存</b>＝①<b>✎カタログ編集のバリエ名変更・明細SKU</b>（tier再マップが必要で公式の単純APIでは危険→ブリッジ or Shopee編集ページ。それ以外の項目は公式化済）②<b>属性(specifics)選択肢の読取り</b>（get_attribute_tree・当面ブリッジ、未応答時は6秒でrawテキストに降格）③<b>出品コンポーザーの▶自動で出品（newlisting・雛形再利用）</b>＝<b>フォールバック限定</b>（主経路の🚀公式APIで出品＝add_itemは稼働中。🚀が使えるのは公式shop_id登録済みの系統×国＋http画像/書込キーあり時）④<b>属性(specifics)の各国一括</b>（属性ID/選択肢が<b>国×カテゴリで異なり各国一括は危険</b>なため意図的に非対応・単品は✎詳細で編集可）。<b>予約(Pre-order)</b>は<b>✎カタログ編集では公式API(update_item)で書ける</b>（2026-07-29〜）。一覧の簡易インライン編集（価格・在庫のみ）からはShopee編集ページへ誘導。<b style="color:#c0392b">垢権限なし</b>＝公式APIには在るが<b>このCB越境垢では権限なし</b>（2026-07-18 実測：返品/レビュー/割引/クーポン/健全性/チャット等が error_not_found・shop_id invalid で全滅）。first_mile同様この垢は販促/管理系APIが未provision。</div>
+        <div style="font-size:11px;color:#666;margin-top:6px"><b>2026-08-09</b>＝<b>円換算を日次レート化</b>：それまでは REGIONS.rateJpy のハードコード1本で、その値は<b>2024年末時点</b>のもの（BR 28／PH 2.7／SG 115／MY 34／TH 4.4 ≒ 2024-12-31の市場レート）。2026-07の実勢は<b>BR 31.4</b>で、BRは売上の7割を占めるため<b>利益が1年半ぶん古い換算のまま</b>だった。app_kv.fx_daily に日次レート（ECB・2025-01-01〜）を貯め、<b>注文日(JST)のレート</b>で換算（土日祝は直近営業日へフォールバック／VN・TWは無料の日次履歴が無いため定数）。基準日を入金確定日にしないのは、7月の注文の確定が8〜9月にまたがって<b>過去月の利益が後から動く</b>のを避けるため。実測で7月の入金は ¥1,578,670 → ¥1,732,476（+¥153,806）。あわせて<b>PayPal差分</b>（BRで買主から別途徴収した分）を入金額と月次にも加算し、粗利との辻褄を合わせた。<br>紫→緑に変わった行＝<b>ブリッジ卒業</b>（ブラウザ/拡張の常駐なしで回るように）。<b>2026-07-26</b>＝<b>出品データ同期(get_item_list)・重量一括(update_item weight)を公式API化</b>＋<b>発送手配(ship_order)を配線</b>（<b style="color:#1a7f37">API✅β</b>＝実注文が入ったら1件で検証）。これで<b>中核＋出品同期＋発送まで公式API化済</b>。<b>2026-07-29</b>＝<b>価格・在庫のインライン編集（出品一覧から直接・展開バリエ含む）を100%公式API化</b>＋<b>予約(Pre-order)UIのブリッジ読み書きを撤去→Shopee編集ページへ誘導</b>（一覧からの編集は常駐ブリッジ不要に）＋<b>販売数/閲覧/いいね(get_item_extra_info)を公式API化</b>。さらに<b>2026-07-29</b>＝<b>✎カタログ編集の「開く（読取り）」を公式API化</b>（get_item_base_info＋get_model_listで、タイトル/価格/在庫/バリエ名/重量/予約を取得。<b>ブリッジ未応答でも詰まらず開ける</b>／公式失敗時のみブリッジfallback。実測：Tampermonkey OFF状態でもエディタが即描画）。加えて<b>2026-07-29</b>＝<b>✎カタログ編集の「書込」も公式API化</b>（タイトル/親SKU/重量/予約/属性=update_item、価格=update_price、在庫=update_stock）。読取り＋書込とも公式化で<b>エディタは常駐ブリッジ不要（公式API設定だけで開いて保存できる）</b>。実測：update_item(pre_order付き)のno-op書込がok。<b>残る主なブリッジ依存</b>＝①<b>✎カタログ編集のバリエ名変更・明細SKU</b>（tier再マップが必要で公式の単純APIでは危険→ブリッジ or Shopee編集ページ。それ以外の項目は公式化済）②<b>属性(specifics)選択肢の読取り</b>（get_attribute_tree・当面ブリッジ、未応答時は6秒でrawテキストに降格）③<b>出品コンポーザーの▶自動で出品（newlisting・雛形再利用）</b>＝<b>フォールバック限定</b>（主経路の🚀公式APIで出品＝add_itemは稼働中。🚀が使えるのは公式shop_id登録済みの系統×国＋http画像/書込キーあり時）④<b>属性(specifics)の各国一括</b>（属性ID/選択肢が<b>国×カテゴリで異なり各国一括は危険</b>なため意図的に非対応・単品は✎詳細で編集可）。<b>予約(Pre-order)</b>は<b>✎カタログ編集では公式API(update_item)で書ける</b>（2026-07-29〜）。一覧の簡易インライン編集（価格・在庫のみ）からはShopee編集ページへ誘導。<b style="color:#c0392b">垢権限なし</b>＝公式APIには在るが<b>このCB越境垢では権限なし</b>（2026-07-18 実測：返品/レビュー/割引/クーポン/健全性/チャット等が error_not_found・shop_id invalid で全滅）。first_mile同様この垢は販促/管理系APIが未provision。</div>
       </div>`;
     body.innerHTML = matrix +
       `<div class="tool-card" style="margin:0;max-width:1150px;font-size:13px;line-height:1.8">` +
@@ -21519,6 +21536,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!anyFams.length) { label = '取得できず'; color = '#d93025'; }
     else if (swFams.length <= 1) { label = swFams[0] || anyFams[0]; color = '#1a7f37'; }
     else { label = '混在'; color = '#e8710a'; warn = true; }
+    if (demoOn() && anyFams.length) label = dmShop(label);   // 🎭デモ：アカウント系統名も伏せる
     const detail = perCc.map(x => x.cc + '=' + (x.fam || '?') + (x.fam && ccFamilies(x.cc).size <= 1 ? '(専用)' : '')).join(' / ');
     const mark = opts.updating ? ' <span class="smd-dim" style="font-size:9px">…更新中</span>' : (opts.stale ? ' <span class="smd-dim" style="font-size:9px" title="最新取得に失敗＝前回値">前回</span>' : '');
     el.innerHTML = '<span style="font-size:11px" title="' + esc(detail) + '">現在: <b style="color:' + color + '">' + esc(label) + '</b>' + (warn ? ' ⚠️' : '') + '</span>' + mark + ' <button id="acct-cursys-btn" class="smd-btn" style="font-size:9px;padding:0 5px" title="各国のアクティブ店を再判定">🔄</button>';
