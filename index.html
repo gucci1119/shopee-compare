@@ -5846,13 +5846,13 @@
   }
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
-    let orders, income, costs, inv, expenses, kv, tasks, issues, rets;
+    let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta;
     const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝8テーブル毎回取得を解消
-    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets } = pc.data); }
+    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta } = pc.data); }
     else {
       body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費・返金を集計）</span>';
       try {
-        [orders, income, costs, inv, expenses, kv, tasks, issues, rets] = await Promise.all([
+        [orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta] = await Promise.all([
           sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
@@ -5861,10 +5861,11 @@
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
           sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
-          sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),   // 正式な返品リクエストの返金
+          sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
+          sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),   // 返品の区分（戻った/戻らない）＋SLS+補償金   // 正式な返品リクエストの返金
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
-      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets }, at: Date.now() };
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta }, at: Date.now() };
     }
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
@@ -5910,7 +5911,7 @@
     const EF = {}, EO = {}; // EF=固定費実額(ym) / EO=その他経費(ym)
     expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
     const yms = [...new Set([...Object.keys(M), ...Object.keys(EF), ...Object.keys(EO)])].sort().reverse();
-    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = refundForYm(issues || [], ym) + retRefundForYm(rets || [], ym); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
+    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = Math.max(0, refundForYm(issues || [], ym) + retRefundForYm(rets || [], ym) - retCompForYm(rets || [], rmeta, ym));   // SLS+等の補償金は返金から相殺 const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
     const curYm = jstYm();
     const curRow = rows.find(r => r.ym === curYm) || { ym: curYm, n: 0, gn: 0, gmv: 0, dep: 0, cost: 0, exp: 0, gross: 0, net: 0 };
     // 直近3ヶ月（当月除く・実績あり）から 粗利/件・入金/件・平均単価 を推定
@@ -7099,6 +7100,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   CANCELLED（取り下げられたリクエスト）は返金ではない。同じ注文に複数の返品記録が付くため、
   //   注文番号で1件に寄せる（2026-08-09 実測：150件中62件がCANCELLED、同一注文の二重計上もあった）。
   const RET_PAID = /^(ACCEPTED|CLOSED|COMPLETED|REFUND_PAID)$/i;
+  // ★区分ごとに扱いを変える：
+  //   back(戻ってきた)＝再在庫。原価は在庫台帳へ戻すので、ここでは返金だけ引く（原価は紐付け解除で自動的に外れる）
+  //   lost(戻らない)  ＝商品は失われる。原価は損失のまま残し、SLS+補償金を入金側に足して実質損失にする
+  //   part(一部返金)  ＝返金額だけ引く
+  const retCompForYm = (rets, meta, ym) => {
+    const m = (meta && meta[0] && meta[0].v && meta[0].v.items) || {};
+    const seen = new Set(); let t = 0;
+    (rets || []).forEach(r => {
+      if (retYm(r.create_time) !== ym) return;
+      const k = (r.cc || '') + ':' + (r.order_sn || '');
+      if (seen.has(k)) return; seen.add(k);
+      const e = m[k]; if (e && e.comp > 0) t += Number(e.comp);
+    });
+    return t;
+  };
   const retRefundForYm = (rets, ym) => {
     const bySn = new Map();
     (rets || []).forEach(r => {
@@ -7531,6 +7547,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
   }
 
+  // ★返品は3通りある：①戻ってきた（再在庫→原価を戻す）②戻らない（紛失/破損→原価は損失・SLS+補償が入る）
+  //   ③一部返金。APIでは判別できない（実際に荷物を受け取ったかは本人しか知らない）ので、画面で選ぶ。
+  //   保存先は app_kv の return_meta（新テーブル不要）。{ 'cc:order_sn': {kind:'back|lost|part', comp:補償円} }
+  let retMeta = {};
+  async function retMetaLoad() {
+    try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.return_meta'); retMeta = (kv && kv[0] && kv[0].v && kv[0].v.items) || {}; }
+    catch (_) { retMeta = {}; }
+  }
+  async function retMetaSave() {
+    if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
+    await sbUpsert('app_kv', [{ k: 'return_meta', v: { items: retMeta }, updated_at: new Date().toISOString() }]);
+    return true;
+  }
   async function renderReturns(force) {
     const body = document.getElementById('ret-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -7545,6 +7574,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           sbGetAll('order_issues', 'select=*'),
           sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').catch(() => []),
           sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => []),  // Shopee公式 返品/返金リクエスト
+          retMetaLoad(),
         ]);
         renderReturns._cache = { cancelled, issues, adjustments, formalReturns, at: Date.now() };
       } catch (e) { body.innerHTML = errBox(e); return; }
@@ -7785,6 +7815,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <td style="white-space:nowrap"><span style="color:${retStatusColor(r.status)};font-weight:700;font-size:11px">${esc(retStatusJa(r.status))}</span></td>
           <td style="font-size:11px">${esc(retReasonJa(r.reason))}</td>
           <td style="text-align:right;font-size:11px;white-space:nowrap">${Number(r.refund_amount) > 0 ? `${esc(cur)} ${Math.round(r.refund_amount).toLocaleString()}${retRefundJpy(r) ? `<br><span class="smd-dim" style="font-size:9.5px">≈${fmtJpy(retRefundJpy(r))}</span>` : ''}` : '<span class="smd-dim">—</span>'}</td>
+          <td style="white-space:nowrap">${(() => { const k = (r.cc || '') + ':' + (r.order_sn || ''); const mv = (retMeta[k] || {}).kind || '';
+            return `<select class="ret-kind" data-k="${esc(k)}" style="font-size:10.5px;padding:2px 4px;border:1px solid ${mv ? '#7b52c4' : '#ddd'};border-radius:5px">
+              <option value=""${mv ? '' : ' selected'}>未確認</option>
+              <option value="back"${mv === 'back' ? ' selected' : ''}>戻ってきた</option>
+              <option value="lost"${mv === 'lost' ? ' selected' : ''}>戻らない</option>
+              <option value="part"${mv === 'part' ? ' selected' : ''}>一部返金</option>
+            </select>`; })()}</td>
+          <td style="white-space:nowrap">${(() => { const k = (r.cc || '') + ':' + (r.order_sn || ''); const cv = (retMeta[k] || {}).comp;
+            return `<input class="ret-comp" data-k="${esc(k)}" value="${cv != null ? esc(String(cv)) : ''}" inputmode="numeric" placeholder="—" style="width:76px;font-size:10.5px;padding:2px 5px;border:1px solid ${cv ? '#1a7f37' : '#ddd'};border-radius:5px;text-align:right">`; })()}</td>
           <td style="font-size:10.5px;word-break:break-all" class="smd-dim">${esc(r.return_sn || '')}</td>
         </tr>`;
       }).join('');
@@ -7794,7 +7833,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="smd-dim" style="font-size:10.5px">💡 これは「キャンセル」や「payout補償」とは別で、<b>買い手がアプリから正式に申請した返品/返金</b>の実データです。左の「💸返金・補償」は自分の記録＋補償入金、こちらは<b>Shopee側の返品リクエスト原本</b>。</div>
         </div>
         <div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table class="pf-table" style="min-width:1080px">
-          <tr><th>国</th><th>画像</th><th>注文SN</th><th>申請日</th><th>バイヤー</th><th>商品</th><th>状態</th><th>理由</th><th>返金額</th><th>返品SN</th></tr>
+          <tr><th>国</th><th>画像</th><th>注文SN</th><th>申請日</th><th>バイヤー</th><th>商品</th><th>状態</th><th>理由</th><th>返金額</th><th title="商品が手元に戻ってきたか。戻ってきたなら原価は在庫に戻し、戻らないなら損失として残します">品物</th><th title="SLS+などの補償金。大幅に遅れて入るので、入ったら記入してください">補償金(円)</th><th>返品SN</th></tr>
           ${frows}
         </table></div></div>` + pageNav(formalReturns.length, retPer, retPage);
     })();
@@ -7823,6 +7862,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         : rtab === 'refund'
           ? (analysisCard + compCard + adjCard + addTool + cxlToggle + tableBlock)
           : (addTool + tableBlock));
+    // 品物の区分・補償金の入力（変えた瞬間に保存。戻ってきた=在庫の紐付けを外して在庫台帳へ返す）
+    body.querySelectorAll('.ret-kind').forEach(sel => sel.addEventListener('change', async () => {
+      const k = sel.dataset.k, v = sel.value;
+      retMeta[k] = Object.assign({}, retMeta[k], { kind: v || undefined });
+      if (!v) delete retMeta[k].kind;
+      sel.style.borderColor = v ? '#7b52c4' : '#ddd';
+      if (await retMetaSave()) {
+        toast('✓ 保存しました');
+        if (v === 'back') {
+          const sn = k.split(':')[1];
+          try {
+            const hit = await sbGetAll('inventory', 'select=item_id&shopee_sn=eq.' + encodeURIComponent(sn));
+            if (hit && hit.length) {
+              await sbUpsert('inventory', hit.map(x => ({ item_id: x.item_id, shopee_sn: null })));
+              toast('📦 在庫 ' + hit.length + '件を在庫台帳に戻しました（原価はこの注文から外れます）');
+            }
+          } catch (_) {}
+        }
+      }
+    }));
+    body.querySelectorAll('.ret-comp').forEach(inp => inp.addEventListener('change', async () => {
+      const k = inp.dataset.k, n = Number(String(inp.value).replace(/[^\d.-]/g, ''));
+      retMeta[k] = Object.assign({}, retMeta[k], { comp: (n > 0 ? n : undefined) });
+      if (!(n > 0)) delete retMeta[k].comp;
+      inp.style.borderColor = n > 0 ? '#1a7f37' : '#ddd';
+      if (await retMetaSave()) toast('✓ 補償金を保存しました');
+    }));
     body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
     { const cx = body.querySelector('#ret-showcxl'); if (cx) cx.addEventListener('change', () => { renderReturns._showCxl = cx.checked; renderReturns._page = 1; renderReturns(); }); }
     wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
