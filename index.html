@@ -5834,13 +5834,13 @@
   }
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
-    let orders, income, costs, inv, expenses, kv, tasks, issues;
+    let orders, income, costs, inv, expenses, kv, tasks, issues, rets;
     const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝8テーブル毎回取得を解消
-    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues } = pc.data); }
+    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets } = pc.data); }
     else {
       body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費・返金を集計）</span>';
       try {
-        [orders, income, costs, inv, expenses, kv, tasks, issues] = await Promise.all([
+        [orders, income, costs, inv, expenses, kv, tasks, issues, rets] = await Promise.all([
           sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
@@ -5849,9 +5849,10 @@
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
           sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
+          sbGetAll('returns', 'select=cc,refund_amount,currency,create_time,status').catch(() => []),   // 正式な返品リクエストの返金
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
-      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues }, at: Date.now() };
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets }, at: Date.now() };
     }
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
@@ -5897,7 +5898,7 @@
     const EF = {}, EO = {}; // EF=固定費実額(ym) / EO=その他経費(ym)
     expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
     const yms = [...new Set([...Object.keys(M), ...Object.keys(EF), ...Object.keys(EO)])].sort().reverse();
-    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = refundForYm(issues || [], ym); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
+    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = refundForYm(issues || [], ym) + retRefundForYm(rets || [], ym); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
     const curYm = jstYm();
     const curRow = rows.find(r => r.ym === curYm) || { ym: curYm, n: 0, gn: 0, gmv: 0, dep: 0, cost: 0, exp: 0, gross: 0, net: 0 };
     // 直近3ヶ月（当月除く・実績あり）から 粗利/件・入金/件・平均単価 を推定
@@ -7072,6 +7073,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const jstYm = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
   const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
   // 返金の当月合計（JST）。返金日(refund_date)基準。無ければcreated_atをJST換算。編集日(updated_at)は使わない＝編集で月がズレない
+  // ★正式な返品(returns)の返金も月次に足す。create_timeはUNIX秒で入っているので日付に直して使う。
+  //   ここが抜けていたため、月次の「返金」列が全月「—」のままで、実利益が実感より多く出ていた。
+  const RET_RATE = { PHP: 2.7, BRL: 28.0, SGD: 115.0, MYR: 35.0, VND: 0.006, THB: 4.3, TWD: 4.8 };
+  const RET_CUR = { PH: 'PHP', BR: 'BRL', SG: 'SGD', MY: 'MYR', VN: 'VND', TH: 'THB', TW: 'TWD' };
+  const retYm = (v) => {
+    if (v == null || v === '') return '';
+    const n = Number(v);
+    if (!isNaN(n) && n > 1e8) return jstDate(n < 1e11 ? n * 1000 : n).slice(0, 7);   // UNIX秒/ミリ秒
+    const t = Date.parse(v); return isNaN(t) ? '' : jstDate(t).slice(0, 7);
+  };
+  const retRefundForYm = (rets, ym) => (rets || []).reduce((s2, r) => {
+    if (retYm(r.create_time) !== ym) return s2;
+    const cur = r.currency || RET_CUR[String(r.cc || '').toUpperCase()] || '';
+    const rate = RET_RATE[cur] || 0;
+    return s2 + (Number(r.refund_amount) || 0) * rate;
+  }, 0);
   const refundForYm = (issues, ym) => (issues || []).reduce((s, r) => { if (r.refund_jpy == null) return s; const m = r.refund_date ? String(r.refund_date).slice(0, 7) : (r.created_at ? new Date(Date.parse(r.created_at) + 9 * 3600000).toISOString().slice(0, 7) : ''); return m === ym ? s + (r.refund_jpy || 0) : s; }, 0);
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
