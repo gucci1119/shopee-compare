@@ -3125,6 +3125,15 @@ function importProfitSheetScan(fileId) {
       var sn = String(r[b.o] || '').trim();
       if (!sn) return;
       var raw = String(r[b.s] || '') + ' ' + (b.s2 >= 0 ? String(r[b.s2] || '') : '');
+      // ★在庫Noの欄に「キャンセル」と書かれている＝仕入元にキャンセルされた注文。
+      //   せっかく手で記録されているので、仕入キャンセルとして拾う（在庫Noは無い）。
+      if (/キャンセル|cancel/i.test(raw)) {
+        out.push({ order_sn: sn, stock: [], tab: b.sheet, cancelled: true,
+          cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
+          supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '',
+          supplier_url: b.url >= 0 ? String(r[b.url] || '').trim() : '' });
+        cnt++; return;
+      }
       var seen = {}, stocks = [];
       raw.split(/[\s,、\/]+/).forEach(function (x) {
         x = String(x).trim();
@@ -3142,7 +3151,8 @@ function importProfitSheetScan(fileId) {
     });
     perTab.push(b.sheet + ':' + cnt);
   });
-  return { ok: true, name: ss.getName(), tabs: hits.length, perTab: perTab, headerRow: hits[0].row, cols: { order: hits[0].o, stock: hits[0].s, stock2: hits[0].s2, cost: hits[0].c, supplier: hits[0].sup, url: hits[0].url }, found: out.length, sample: out.slice(0, 3), items: out };
+  var nCan = out.filter(function (x) { return x.cancelled; }).length;
+  return { ok: true, name: ss.getName(), tabs: hits.length, perTab: perTab, cancelled: nCan, headerRow: hits[0].row, cols: { order: hits[0].o, stock: hits[0].s, stock2: hits[0].s2, cost: hits[0].c, supplier: hits[0].sup, url: hits[0].url }, found: out.length, sample: out.slice(0, 3), items: out };
 }
 
 // フォルダ内の利益管理表を全部スキャンして、取り込める件数を報告する（書き込みはしない）
@@ -3186,6 +3196,6 @@ function testImportOne() {
   Logger.log('該当タブ ' + r.tabs + '個（' + r.perTab.join(' / ') + '） ' + r.headerRow + '行目がヘッダ\n'
     + '列: 注文=' + r.cols.order + ' 在庫No=' + r.cols.stock + '/' + r.cols.stock2
     + ' 仕入=' + r.cols.cost + ' 仕入元=' + r.cols.supplier + ' URL=' + r.cols.url + '\n'
-    + '取り込める行: ' + r.found + '件\n見本:\n' + JSON.stringify(r.sample, null, 1));
+    + '取り込める行: ' + r.found + '件（うち仕入キャンセル ' + r.cancelled + '件）\n見本:\n' + JSON.stringify(r.sample, null, 1));
   return { found: r.found };
 }
