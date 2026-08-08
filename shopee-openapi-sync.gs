@@ -2114,7 +2114,7 @@ function getOrderSns_(shopId, timeFrom, timeTo) {
 function getOrderDetails_(shopId, sns) {
   var out = [];
   for (var i = 0; i < sns.length; i += 50) {
-    var j = callShop_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'total_amount,item_list,create_time,order_status,pay_time' }, 'get');
+    var j = callShop_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'total_amount,item_list,create_time,order_status,pay_time,buyer_username,recipient_address' }, 'get');
     (((j.response || {}).order_list) || []).forEach(function (o) { out.push(o); });
   }
   return out;
@@ -2127,6 +2127,7 @@ function syncDailyStatsForShop_(tok) {
   var to = now_(), from = to - 3 * 86400;
   var sns = getOrderSns_(tok.shop_id, from, to);
   var details = sns.length ? getOrderDetails_(tok.shop_id, sns) : [];
+  try { saveCustomers_(cc, tok.shop_id, details); } catch (eCu) { Logger.log('customers skip ' + cc + ': ' + eCu); }   // 購入者情報を日次で残す
   var byDay = {};
   details.forEach(function (o) {
     var ct = o.create_time || 0; if (!ct) return;
@@ -2229,6 +2230,30 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
     }
   }
   return { cc: cc, shop_id: tok.shop_id, orders: rows.length };
+}
+// ★購入者情報は時間が経つとAPIで取れなくなる。注文同期のたびに customers へ貯めて残す。
+//   バイヤーネーム(Shopeeのユーザー名)と受取人のフルネーム/連絡先/住所/国の両方を持つ。
+function saveCustomers_(cc, shopId, details) {
+  var rows = [];
+  (details || []).forEach(function (o) {
+    var a = o.recipient_address || {};
+    if (!o.order_sn) return;
+    rows.push({
+      sn: o.order_sn, cc: cc, shop_id: String(shopId),
+      buyer_username: o.buyer_username || '',
+      recipient_name: a.name || '',
+      phone: a.phone || '',
+      address: a.full_address || '',
+      city: a.city || '', state: a.state || '', zipcode: a.zipcode || '',
+      country: a.region || cc,
+      order_time: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
+      synced_at: new Date().toISOString()
+    });
+  });
+  for (var i = 0; i < rows.length; i += 200) {
+    try { sbUpsert_('customers', rows.slice(i, i + 200), 'cc,sn'); } catch (e) { Logger.log('customers skip: ' + e); }
+  }
+  return rows.length;
 }
 function syncOrdersAll(daysWindow, trkMode) {
   var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
