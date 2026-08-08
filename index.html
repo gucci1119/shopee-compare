@@ -19659,7 +19659,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (sh && (Number(sh.cost) > 0 || (sh.stock_no && sh.stock_no.length) || sh.supplier)) {
                 return `<div title="📗利益計算表(スプシ)より取込">${(sh.stock_no && sh.stock_no.length) ? '🏷' + esc(sh.stock_no.join(', ')) : ''}${sh.proof ? ` <a href="${esc(sh.proof)}" target="_blank" rel="noopener" title="仕入れ確証" style="text-decoration:none">📸</a>` : ''}${(sh.supplier || Number(sh.cost) > 0 || sh.supplier_url) ? `<div style="font-size:9.5px;color:#8a7db5;line-height:1.35">${sh.supplier ? '🛒' + esc(sh.supplier) : ''}${Number(sh.cost) > 0 ? ` <b>¥${Number(sh.cost).toLocaleString()}</b>` : ''}${sh.supplier_url ? ` <a href="${esc(sh.supplier_url)}" target="_blank" rel="noopener" title="仕入元ページ" style="text-decoration:none">🔗</a>` : ''}</div>` : ''}<div class="smd-dim" style="font-size:8px">📗計算表</div></div>`;
               }
-              return '<span class="smd-dim" style="font-size:10px" title="在庫紐付け・利益計算表の取込ともに未反映">—</span>';
+              // ★在庫Noが空＝粗利が出せない行。ここから候補を出して1クリックで紐付けられるようにする。
+              return '<span class="smd-dim" style="font-size:10px" title="在庫紐付け・利益計算表の取込ともに未反映">—</span>'
+                + `<br><button class="pf-invsug" data-sn="${av(o.sn)}" data-cc="${av(o.cc)}" data-nm="${av((o.items && o.items[0] && (o.items[0].name || o.items[0].item_name)) || '')}" style="margin-top:3px;font-size:9.5px;padding:2px 7px;border:1px solid #cbbdf0;background:#faf8ff;color:#7a6ba7;border-radius:5px;cursor:pointer" title="この注文に充てられそうな在庫を、商品名の似具合と仕入日から探します">🔎 在庫候補</button>`;
             })()}</td>`,
           paypal: () => `<td style="text-align:right;font-size:11px">${first ? (ppl > 0 ? `<b style="color:#0f9d58" title="PayPalで別途徴収した差分＝追加入金として粗利に加算">+${fmtJpy(ppl)}</b>` : '<span class="smd-dim">—</span>') : ''}</td>`,
           cost: () => { const scost = Number((pfSheet(o) || {}).cost) || 0; return `<td>` +
@@ -19695,6 +19697,45 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     body.innerHTML = html;
     fitScroll('profit');
     wirePageNav(body, p => { pf.page = p; const sc = body.querySelector('.pf-scroll'); if (sc) sc.scrollTop = 0; pfRender(); }); // ★ページ送り（同じ絞り込みなのでsig一致＝1ページ目に戻らずそのページを描画）
+    // 🔎 在庫候補：商品名の似具合＋仕入日で、この注文に充てられそうな在庫を探して紐付ける
+    body.querySelectorAll('.pf-invsug').forEach(btn => btn.addEventListener('click', async () => {
+      const sn = btn.dataset.sn, cc = btn.dataset.cc, nm = btn.dataset.nm || '';
+      if (!nm) { alert('この注文の商品名が取れませんでした'); return; }
+      btn.disabled = true; btn.textContent = '🔎 探しています…';
+      try {
+        // 未引当（どの注文にも紐付いていない）在庫だけを候補にする
+        const used = new Set();
+        (pf.invMap ? [...pf.invMap.values()] : []).forEach(list => (list || []).forEach(v => used.add(String(v.item_id))));
+        const invAll = await sbGetAll('InventoryItem', 'select=item_id,name,name_supplier,price,supplier,supplier_url,purchased_at,proof&limit=8000').catch(() => []);
+        const ord = (pf.rows || []).find(x => x.sn === sn) || {};
+        const ordDate = String(ord.order_date || '').slice(0, 10);
+        const cand = (invAll || [])
+          .filter(v => !used.has(String(v.item_id)))
+          .map(v => {
+            const iname = v.name_supplier || v.name || '';
+            let sc = simPair(nm, iname) || 0;
+            const pd = String(v.purchased_at || '').slice(0, 10);
+            if (pd && ordDate && pd > ordDate) sc -= 0.35;            // 注文より後に仕入れた物は当てにくい
+            return { v, iname, sc, pd };
+          })
+          .filter(x => x.sc >= 0.45)
+          .sort((a, b) => b.sc - a.sc).slice(0, 5);
+        if (!cand.length) { alert('似ている在庫が見つかりませんでした。\n（在庫台帳の商品名が仕入元のままか、まだ登録されていない可能性があります）'); return; }
+        const pick = prompt('この注文に充てる在庫を番号で選んでください（キャンセルで中止）\n注文: ' + nm.slice(0, 48) + '\n\n'
+          + cand.map((x, i) => (i + 1) + '. [' + Math.round(x.sc * 100) + '%] ' + String(x.iname).slice(0, 46)
+            + (x.v.price != null ? ' / ¥' + Number(x.v.price).toLocaleString() : '') + (x.pd ? ' / 仕入' + x.pd : '')
+            + ' / 在庫No ' + x.v.item_id).join('\n'), '1');
+        if (!pick) return;
+        const sel = cand[parseInt(pick, 10) - 1];
+        if (!sel) { alert('番号が正しくありません'); return; }
+        if (!confirm('在庫No ' + sel.v.item_id + '（' + String(sel.iname).slice(0, 40) + '）を\nこの注文（' + sn + '）に紐付けます。よろしいですか？')) return;
+        await sbUpsert('InventoryItem', [{ item_id: sel.v.item_id, order_sn: sn, cc: cc }]);
+        try { logAct('利益', '在庫紐付け', nm.slice(0, 40), cc + ' ' + sn + ' → 在庫No ' + sel.v.item_id + '（一致' + Math.round(sel.sc * 100) + '%）'); } catch (_) {}
+        toast('✓ 在庫No ' + sel.v.item_id + ' を紐付けました');
+        pf._cache = null; renderProfit();
+      } catch (e2) { alert('在庫候補の取得に失敗: ' + ((e2 && e2.message) || e2)); }
+      finally { btn.disabled = false; btn.textContent = '🔎 在庫候補'; }
+    }));
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
       const v = e.target.value === '' ? null : Number(e.target.value);
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
