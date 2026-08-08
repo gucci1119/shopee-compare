@@ -2985,8 +2985,16 @@ var MAIL_SRC = [
   { key: 'Yahoo!フリマ', q: 'from:(paypayfleamarket.yahoo.co.jp OR yahoo-net.jp)' },
   { key: 'ヤフオク', q: 'from:(auctions.yahoo.co.jp OR yahoo-net.jp)' },
   { key: 'Amazon', q: 'from:(amazon.co.jp OR amazon.com)' },
-  { key: '楽天', q: 'from:(rakuten.co.jp OR rakuten.com)' }
+  { key: '楽天', q: 'from:(rakuten.co.jp OR rakuten.com)' },
+  { key: 'Yahoo!ショッピング', q: 'from:(shopping.yahoo.co.jp OR store.shopping.yahoo.co.jp)' },
+  { key: 'オフモール', q: 'from:(netmall.hardoff.co.jp OR hardoff.co.jp OR offmall)' },
+  { key: '駿河屋', q: 'from:(suruga-ya.jp)' }
 ];
+// ★受取評価が無い仕入元（Amazon/楽天/Yahoo!ショッピング/オフモール/駿河屋）は
+//   「発送通知の日＋この日数」で到着したものとみなす。厳密な受取日は追わない
+//   （棚卸しで知りたいのは受取日ではなく「今あるか」なので、これで実務上足りる）。
+var MAIL_ARRIVE_DAYS = 3;
+var MAIL_NO_REVIEW = { 'Amazon': 1, '楽天': 1, 'Yahoo!ショッピング': 1, 'オフモール': 1, '駿河屋': 1 };
 var MAIL_CANCEL = /(キャンセル|取引をキャンセル|取消|中止|返金|注文がキャンセル)/;
 // ★Amazon・楽天には「受け取り評価」が無い。発送通知＝そのうち届く、として到着扱いにする。
 //   メルカリ・ヤフオク系は「取引完了/評価」が確実な到着サイン。
@@ -3018,12 +3026,17 @@ function scanPurchaseMails(daysBack) {
         if (mm) names.push(mm[1]);
         var mk = subj.match(/[「『]([^」』]{4,60})[」』]/);
         if (mk) names.push(mk[1]);
+        // 評価が無い仕入元は「発送通知＝そのうち届く」。到着とみなす日付を足しておく
+        var arrive = when;
+        if (kind === 'done' && MAIL_NO_REVIEW[src.key] && when) {
+          try { arrive = Utilities.formatDate(new Date(Date.parse(when) + MAIL_ARRIVE_DAYS * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd'); } catch (e) { }
+        }
         names.forEach(function (n) {
           n = String(n).replace(/\s+/g, ' ').trim().slice(0, 80);
           if (n.length < 4) return;
           var key = src.key + '' + n;
           var cur = hints[key];
-          if (!cur || (kind === 'cancel' && cur.kind !== 'cancel')) hints[key] = { supplier: src.key, name: n, kind: kind, date: when, subject: subj.slice(0, 90) };
+          if (!cur || (kind === 'cancel' && cur.kind !== 'cancel')) hints[key] = { supplier: src.key, name: n, kind: kind, date: when, arrive: arrive, noReview: !!MAIL_NO_REVIEW[src.key], subject: subj.slice(0, 90) };
         });
       });
     });
