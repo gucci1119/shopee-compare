@@ -8293,7 +8293,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   BRは売上の7割を占めるため、円換算がまるごと1年半ぶん古いまま利益を出していた。
   //   → app_kv.fx_daily に日次レート（現地通貨1単位あたりの円）を貯め、
   //     「その注文の日のレート」で換算する。歴史が無い日は直近の営業日へフォールバック。
-  const FXD = { days: null, flat: {}, spread: 0, at: null };
+  const FXD = { days: null, flat: {}, spread: 0, spreadCc: {}, at: null };
+  // 実効スプレッド＝市場レートと「実際に銀行へ着金する円」の差。
+  //   Shopeeが現地→USDに換算する時のスプレッド＋PayoneerがUSD→円に換算する時のスプレッド。
+  //   payouts（実着金）の from_amount→payout_amount と同期間の市場レートから国別に逆算している。
+  //   BRだけ 4.67% と厚い（他は約2〜3%）ので、一律ではなく国別に持つ。
+  const fxSpread = cc => { const v = (FXD.spreadCc || {})[cc]; return (v == null ? (FXD.spread || 0) : v); };
   // 換算の基準日は【注文日(JST)】。入金確定日にすると、7月の注文の確定が8〜9月にまたがって
   // 過去月の利益が後から動いてしまうため。実際の着金レートとの差は「為替差損益」として別に見る。
   function fxRate(cc, ymd) {
@@ -8311,7 +8316,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     if (r == null) r = FXD.flat[cc];
     if (r == null) return fallback;
-    return r * (1 - (FXD.spread || 0) / 100);   // Payoneer等の手数料ぶんを引いた実効レート
+    return r * (1 - fxSpread(cc) / 100);   // 市場レート → 実際に着金する円
   }
   const fxHasDaily = cc => !!(FXD.days && (FXD.flat[cc] != null || Object.values(FXD.days).some(m => m[cc] != null)));
   async function applyFxRates() {
@@ -8319,12 +8324,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.fx_daily');
       const v = kv && kv[0] && kv[0].v;
       if (v && v.days) {
-        FXD.days = v.days; FXD.flat = v.flat || {}; FXD.spread = Number(v.spread) || 0; FXD.at = v.src || '';
+        FXD.days = v.days; FXD.flat = v.flat || {}; FXD.spread = Number(v.spread) || 0; FXD.spreadCc = v.spreadCc || {}; FXD.at = v.src || '';
         // 日次の最新値を REGIONS へも反映＝日付を持たない画面（出品価格の円換算など）も最新レートになる
         const last = Object.keys(v.days).sort().pop();
         REGIONS.forEach(rg => {
           const r = (v.days[last] || {})[rg.cc] != null ? v.days[last][rg.cc] : FXD.flat[rg.cc];
-          if (r != null) rg.rateJpy = r * (1 - FXD.spread / 100);
+          if (r != null) rg.rateJpy = r * (1 - fxSpread(rg.cc) / 100);
         });
       }
     } catch (e) { /* 未取得ならコード既定値のまま */ }
@@ -8338,8 +8343,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows; try { rows = await sbGetAll('fx_rates', 'select=*'); } catch (e) { body.innerHTML = errBox(e); return; }
     const map = new Map(rows.map(r => [r.cc, r]));
-    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:560px">
-      <div class="smd-dim" style="font-size:12px;margin-bottom:8px">1通貨あたりの円換算レート。保存すると<b>全ページの売上・粗利・ROI・純利益</b>に反映されます（Supabaseに保存＝全端末共通）。</div>
+    // ★この画面の「固定レート」は日次レート(app_kv.fx_daily)を【上書きして無効化する】。
+    //   状態を出さずに保存できると、日次で直したはずの円換算が黙って元へ戻るので、必ず現状を表示する。
+    const dayKeys = FXD.days ? Object.keys(FXD.days).sort() : [];
+    const lastDay = dayKeys.length ? dayKeys[dayKeys.length - 1] : '';
+    const fixedCcs = REGIONS.filter(rg => map.has(rg.cc)).map(rg => rg.cc);
+    const dailyBox = dayKeys.length
+      ? `<div style="background:#e7f5ec;border:1px solid #bfe3cc;border-radius:8px;padding:9px 11px;margin-bottom:10px;font-size:12px;line-height:1.7">
+           📅 <b>日次レートが有効です</b>（${dayKeys.length}日分・${esc(dayKeys[0])}〜${esc(lastDay)}）。売上・利益の円換算は<b>その注文の日のレート</b>で計算しています。<br>
+           <b>実効スプレッド</b>＝市場レートと「実際に銀行へ着金する円」の差（Shopeeの現地→USD換算＋PayoneerのUSD→円換算）。
+           Payoneerの着金実績から国別に逆算しています：
+           ${REGIONS.filter(rg => (FXD.spreadCc || {})[rg.cc] != null).map(rg => `<b style="color:${rg.color}">${rg.cc}</b> −${FXD.spreadCc[rg.cc]}%`).join(' / ') || '—'}
+           ${Object.keys(FXD.flat || {}).length ? `<br><span class="smd-dim">VN・TWは無料の日次履歴が取れないため定数（${Object.keys(FXD.flat).map(c => c + ' ' + FXD.flat[c]).join(' / ')}）</span>` : ''}
+           <br><span class="smd-dim">最新日(${esc(lastDay)})の実効レート：${REGIONS.filter(rg => (FXD.days[lastDay] || {})[rg.cc] != null).map(rg => `${rg.cc} ${fxRate(rg.cc, lastDay).toFixed(4)}`).join(' / ')}</span>
+         </div>`
+      : `<div style="background:#fff4e0;border:1px solid #f0d9a8;border-radius:8px;padding:9px 11px;margin-bottom:10px;font-size:12px">
+           ⚠️ 日次レートが未取得です（app_kv.fx_daily が空）。下の固定レートで換算しています。</div>`;
+    const fixedWarn = fixedCcs.length
+      ? `<div style="background:#fdecea;border:1px solid #f5c2c2;border-radius:8px;padding:9px 11px;margin-bottom:10px;font-size:12px;color:#b3261e">
+           ⚠️ <b>${fixedCcs.join('・')} は固定レートで上書き中</b>＝この国だけ日次レートが使われていません。
+           <button class="smd-btn" id="fx-clear" style="font-size:11px;padding:2px 8px;margin-left:6px">🗑 固定を解除して日次に戻す</button></div>`
+      : '';
+    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:660px">
+      ${dailyBox}${fixedWarn}
+      <div class="smd-dim" style="font-size:12px;margin-bottom:8px">下は<b>手動の固定レート</b>です。<b style="color:#b3261e">保存すると、その国は日次レートを使わなくなります</b>（全端末共通）。通常は保存不要で、日次レートのままで構いません。</div>
       <table class="pf-table"><tr><th>国</th><th>通貨</th><th>1通貨 = ? 円</th><th>最終更新</th></tr>` +
       REGIONS.map(rg => { const r = map.get(rg.cc); return `<tr>
         <td><b style="color:${rg.color}">${rg.cc}</b></td><td>${esc(rg.cur)}</td>
@@ -8347,8 +8374,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td class="smd-dim" style="font-size:11px">${r && r.updated_at ? esc(jstDateTime(r.updated_at)) : '—（コード既定値）'}</td></tr>`; }).join('') +
       `</table>
       <div style="margin-top:10px"><button class="smd-btn primary" id="fx-save">💾 保存して全ページに反映</button> <span id="fx-msg" class="smd-dim" style="font-size:12px"></span></div></div>`;
+    { const cb = document.getElementById('fx-clear'); if (cb) cb.addEventListener('click', async () => {
+        if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+        if (!confirm('手動の固定レートを全て削除して、日次レート（注文日のレート）に戻します。よろしいですか？')) return;
+        try {
+          await sbDelete('fx_rates', 'cc=in.(' + REGIONS.map(r => r.cc).join(',') + ')');
+          logAct('為替レート', '固定を解除', '', '日次レートに戻す');
+          await applyFxRates(); pf.ym = null; try { plan._cache = null; } catch (_) {}
+          renderFx();
+        } catch (e) { alert('解除に失敗: ' + e.message); }
+      }); }
     document.getElementById('fx-save').addEventListener('click', async () => {
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      if (dayKeys.length && !confirm('この固定レートを保存すると、保存した国は【日次レートを使わなくなります】。\n通常は保存せず日次のままで構いません。保存しますか？')) return;
       const ups = [...document.querySelectorAll('.fx-in')].map(i => ({ cc: i.dataset.cc, rate_jpy: Number(i.value), updated_at: new Date().toISOString() })).filter(x => !isNaN(x.rate_jpy) && x.rate_jpy > 0);
       try {
         await sbUpsert('fx_rates', ups);
