@@ -6150,7 +6150,7 @@
         if (!(amt > 0)) { if (stat) { stat.textContent = '金額を入れてください'; stat.style.color = '#d93025'; } return; }
         ab.disabled = true; if (stat) { stat.textContent = '登録中…'; stat.style.color = ''; }
         try {
-          await sbUpsert('expenses', [{ ymd: ym + '-01', category: cat, amount: amt, memo: (ym > curYm ? '予測 ' : '') + (memo || '') || null }]);
+          exp._allRows = null; await sbUpsert('expenses', [{ ymd: ym + '-01', category: cat, amount: amt, memo: (ym > curYm ? '予測 ' : '') + (memo || '') || null }]);
           try { logAct('事業計画', '経費登録', cat, ym + ' ' + amt + '円' + (ym > curYm ? '(予測)' : '')); } catch (_) {}
           plan._cache = null; await renderPlan(true); // 実利益/月次表に即反映
         } catch (e) { ab.disabled = false; if (stat) { stat.textContent = '失敗: ' + e.message; stat.style.color = '#d93025'; } }
@@ -7046,6 +7046,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { [rows, issues, inv, formalRet] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []), ensureInv().catch(() => []), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(() => [])]); }
     catch (e) { body.innerHTML = errBox(e); return; }
     exp.rows = rows;
+    // 過去の遍歴（全月）は別に1回だけ取る。月を切り替えるたびに取り直さない
+    if (!exp._allRows) { try { exp._allRows = await sbGetAll('expenses', 'select=ymd,category,amount&order=ymd.desc'); } catch (_) { exp._allRows = []; } }
     const invMonth = (inv || []).filter(r => invPurDate(r).slice(0, 7) === exp.ym); // 古物台帳CSV用（月次サマリーから統合）
     const invAll = (inv || []).filter(r => invPurDate(r));
     const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
@@ -7113,7 +7115,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn" id="csv-pl">🧮 月次損益サマリー（${exp.ym}）</button>
       </div>
       <div class="smd-dim" style="font-size:11px;margin-top:8px">古物台帳=古物営業法の帳簿用（受入年月日・品目・代価・仕入元・確証URL）。確定申告は損益・経費CSVをそのまま集計に使えます。</div></div>`;
-    body.innerHTML = netCard + form + catCards + table + exportCard;
+    // ★過去の遍歴：月ごとの経費を1画面で見比べられるように（毎回月を切り替えて見るのは手間）
+    const histMap = {};
+    (exp._allRows || []).forEach(x => { const ym = String(x.ymd || '').slice(0, 7); if (!ym) return;
+      const c = String(x.category || '').trim();
+      (histMap[ym] = histMap[ym] || {})[c] = (histMap[ym][c] || 0) + (Number(x.amount) || 0); });
+    const histYms = Object.keys(histMap).sort().reverse();
+    const histCats = [...new Set(histYms.flatMap(y => Object.keys(histMap[y])))];
+    const isFix = c => ['人件費','家賃','地代家賃','倉庫代','倉庫','倉庫代・家賃','倉庫費','保管料','ツール','ツール代','サブスク','固定費','通信費','通信','外注費','外注','オフィス'].includes(c);
+    const yen0 = n => '¥' + Math.round(n || 0).toLocaleString('en-US');
+    const histCard = histYms.length ? `<div class="tool-card" style="margin:0 0 12px">
+      <div style="font-weight:700;font-size:14px;margin-bottom:8px">📆 月ごとの経費（過去の遍歴）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">クリックでその月へ切替／<b>青字＝固定費</b></span></div>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;white-space:nowrap">
+        <thead><tr style="background:#f4f6fa"><th style="text-align:left;padding:4px 8px;position:sticky;left:0;background:#f4f6fa">カテゴリ</th>${histYms.map(y => `<th class="exp-ymh" data-ym="${y}" style="text-align:right;padding:4px 10px;cursor:pointer;color:${y === exp.ym ? '#ee4d2d' : '#333'}" title="この月に切り替える">${y.slice(2)}</th>`).join('')}</tr></thead>
+        <tbody>
+        ${histCats.map(c => `<tr><td style="padding:3px 8px;position:sticky;left:0;background:#fff;color:${isFix(c) ? '#1565c0' : '#333'};font-weight:${isFix(c) ? 700 : 400}">${esc(c)}</td>${histYms.map(y => `<td style="text-align:right;padding:3px 10px;color:${(histMap[y][c] || 0) ? '#333' : '#c9c9c9'}">${(histMap[y][c] || 0) ? yen0(histMap[y][c]) : '—'}</td>`).join('')}</tr>`).join('')}
+        <tr style="border-top:2px solid #e6e9ef;font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff;color:#1565c0">固定費 計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px;color:#1565c0">${yen0(Object.keys(histMap[y]).filter(isFix).reduce((a2, c) => a2 + histMap[y][c], 0))}</td>`).join('')}</tr>
+        <tr style="font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff">経費 合計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px">${yen0(Object.values(histMap[y]).reduce((a2, v) => a2 + v, 0))}</td>`).join('')}</tr>
+        </tbody></table></div></div>` : '';
+    body.innerHTML = `<div style="display:grid;grid-template-columns:minmax(340px,480px) minmax(420px,1fr);gap:14px;align-items:start">
+        <div>${netCard}${catCards}${exportCard}</div>
+        <div>${form}${histCard}${table}</div>
+      </div>`;
+    body.querySelectorAll('.exp-ymh').forEach(th => th.addEventListener('click', () => { exp.ym = th.dataset.ym; renderExpenses(); }));
     { const cb = document.getElementById('csv-ledger-m'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_${exp.ym}.csv`, ledgerRows(invMonth))); }
     { const cb = document.getElementById('csv-ledger-all'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_全期間.csv`, ledgerRows(invAll))); }
     { const cb = document.getElementById('csv-exp2'); if (cb) cb.addEventListener('click', () => downloadCsv(`経費_${exp.ym}.csv`, [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(rows.map(r => [r.ymd || '', r.category || '', r.amount != null ? r.amount : '', r.memo || ''])).concat([['', '経費合計', total, ''], ['', '返金合計', refundTotal, '']]))); }
