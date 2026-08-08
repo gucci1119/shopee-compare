@@ -548,6 +548,7 @@
         <button data-k="sum">国別サマリー</button>
       </span>
       <select id="pf-cc"><option value="">全ての国</option></select>
+      <label style="font-size:12.5px" title="明細を国ごとのブロックに分け、国の切れ目に小計行（件数・入金・仕入・粗利）を挟みます"><input type="checkbox" id="pf-bycc"> 国別に分ける</label>
       <select id="pf-dep" title="入金(Shopeeエスクロー)の状態で絞り込み。確定=入金額が確定済／暫定=リリース前の見込み額(変動しうる)／未取得=入金データをまだ取得できていない">
         <option value="">入金:全て</option>
         <option value="fixed">確定のみ（入金額が確定）</option>
@@ -561,6 +562,8 @@
         <option value="transit">輸送中</option>
         <option value="delivered">到着済</option>
         <option value="completed">完了</option>
+        <option value="returned">返品/返金</option>
+        <option value="cancelled">キャンセル</option>
       </select>
       <label style="font-size:12.5px"><input type="checkbox" id="pf-nocost"> 仕入額未入力のみ</label>
       <label style="font-size:12.5px" title="🔒ON＝在庫No（Stock No.）が付いた注文だけで粗利を計算＝仕入れた実物が到着し在庫台帳に載った「確定分」のみ。到着待ち（在庫No未）は除外＝スプシの粗利に近づく。OFF＝在庫No無しも含む従来集計。"><input type="checkbox" id="pf-strictcost"> 🔒到着済(在庫No)のみ</label>
@@ -19681,6 +19684,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
 
   // ---------------- 利益ページ（明細＋国別サマリー） ----------------
   const pf = { ym: null, view: 'detail', cc: '', nocost: false, showCancel: false, search: '', depFilter: '', stFilter: '',
+    byCc: (function () { try { return localStorage.getItem('smdPfByCc') === '1'; } catch (_) { return false; } })(),
     strictCost: (function () { try { return localStorage.getItem('pfStrictCost') === '1'; } catch (_) { return false; } })(),
     sortKey: 'date', sortDir: 'desc', orders: [], incMap: new Map(), costMap: new Map(), bound: false };
 
@@ -19692,14 +19696,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
 
   // 配送状態の分類キー
+  // ★Shopeeの生ステータスは国・APIで表記がバラつく（To Ship / Processed / Shipping / To Receive / COMPLETED /
+  //   TO_RETURN / IN_CANCEL …）。以前は To Receive・Processed・TO_RETURN が全部 'other' に落ちていて、
+  //   「倉庫スキャン済みか」の判定（＝入金額が確定したかの根拠）から漏れていた。
   function ordStatusKey(s) {
     const t = s || '';
-    if (/to ?ship/i.test(t)) return 'toship';
+    if (/unpaid/i.test(t)) return 'unpaid';
+    if (/cancel/i.test(t)) return 'cancelled';
+    if (/return|refund/i.test(t)) return 'returned';   // TO_RETURN 等。倉庫スキャン済みの後にしか起きない
+    if (/to ?ship|processed|ready ?to ?ship/i.test(t)) return 'toship';  // Processed＝受注済み・未発送
+    if (/to ?receive|out ?for ?delivery/i.test(t)) return 'transit';     // To Receive＝発送済みで買い手の受取待ち
     if (/transit|shipped|shipping/i.test(t)) return 'transit';
     if (/deliver/i.test(t)) return 'delivered';
     if (/complete/i.test(t)) return 'completed';
     return 'other';
   }
+  const ORD_ST_LABEL = { toship: '未発送', transit: '輸送中', delivered: '到着済', completed: '完了',
+    returned: '返品/返金', cancelled: 'キャンセル', unpaid: '未入金', other: 'その他' };
+  // 倉庫スキャン済み＝入金額(escrow)が確定する条件。ここを1か所に集約して二重定義を防ぐ
+  const ORD_SCANNED = ['transit', 'delivered', 'completed', 'returned'];
+  const ordScanned = o => ORD_SCANNED.includes(ordStatusKey(o.status));
 
   function pfBind() {
     if (pf.bound) return;
@@ -19725,6 +19741,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('pf-dep').addEventListener('change', e => { pf.depFilter = e.target.value; pfRender(); });
     document.getElementById('pf-st').addEventListener('change', e => { pf.stFilter = e.target.value; pfRender(); });
     document.getElementById('pf-showcancel').addEventListener('change', e => { pf.showCancel = e.target.checked; pfRender(); });
+    { const bc = document.getElementById('pf-bycc'); if (bc) { bc.checked = pf.byCc; bc.addEventListener('change', e => { pf.byCc = e.target.checked; try { localStorage.setItem('smdPfByCc', pf.byCc ? '1' : '0'); } catch (_) {} pf.page = 1; pfRender(); }); } }
     const ccSel = document.getElementById('pf-cc');
     REGIONS.forEach(r => { const o = document.createElement('option'); o.value = r.cc; o.textContent = r.cc; ccSel.appendChild(o); });
     try { const savedCc = localStorage.getItem('smdPfCc'); if (savedCc && [...ccSel.options].some(o => o.value === savedCc)) { ccSel.value = savedCc; pf.cc = savedCc; } } catch (_) {}
@@ -19824,13 +19841,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // order_dateは各国ローカル日付＝JST月境界とズレる。取得は±2日広めにし、下でorder_ts→JST日付で当月に厳密に絞る（トレンド/ダッシュボードの月次と一致させる）
         const dShift = (s, days) => new Date(Date.parse(s + 'T00:00:00Z') + days * 86400000).toISOString().slice(0, 10);
         const startW = dShift(start, -2), endW = dShift(end, 2);
-        let [orders, income, costs, inv, prods, sheetKv, returns] = await Promise.all([
-          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab&order_date=gte.${startW}&order_date=lt.${endW}&order=order_date.desc`),
+        let [orders, income, costs, inv, prods, sheetKv, issues, returns] = await Promise.all([
+          sbGetAll('orders', `select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab,cancel_reason&order_date=gte.${startW}&order_date=lt.${endW}&order=order_date.desc`),
           sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,fee_total,buyer_paid,fees'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init,cost_at,self_transit_at,wb_count,wb_first_at,wb_last_at'),
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,supplier_url,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
           sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),  // 📗利益計算表(月次スプシ)の取り込み値：仕入値/仕入元/URL/在庫No/PayPal差分
+          sbGetAll('order_issues', 'select=cc,sn,stage,reason').catch(() => []),   // キャンセルの段階（発送前/日本国内/日本を出た後）＝↩️返品・キャンセル管理と共有する唯一の正
           sbGetAll('returns', 'select=cc,order_sn,status,refund_amount').catch(() => []),  // 返品/返金リクエスト：Shopeeが「完了」のまま返金された注文を可視化（粗利計算は変えない＝返品ページで別途損失計上）
         ]);
         if (_pfSeq !== pf._loadSeq) return; // より新しい月切替の読込に追い越された→この結果は捨てる（別月データを別月ラベルで描画しない）
@@ -19842,6 +19860,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         pf.prodMap = new Map(prods.map(p => [p.cc + ':' + p.name, p.item_id]));
         pf.ym = ym;
         pf.orders = orders;
+        pf.issueMap = new Map((issues || []).map(r => [r.cc + ':' + r.sn, r]));
         pf.incMap = new Map(income.map(i => [i.cc + ':' + i.sn, i]));
         pf.costMap = new Map(costs.map(c => [c.cc + ':' + c.sn, c]));
         pf.sheetMap = (sheetKv && sheetKv[0] && sheetKv[0].v && sheetKv[0].v.items) || {};  // {'cc:sn': {cost,supplier,supplier_url,stock_no[],paypal_yen,...}}
@@ -19877,7 +19896,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const sheetFixed = !!(cm && cm.deposit != null && cm.deposit_init != null && cm.deposit !== cm.deposit_init);
     // Shopee Japan倉庫でスキャンされた時点で入金額は確定する（業務ルール）
     // → 未発送(To Ship)より先のステータス＝スキャン済みなので、値の変化が観測できていなくても確定扱い
-    const scanned = ['transit', 'delivered', 'completed'].includes(ordStatusKey(o.status));
+    const scanned = ordScanned(o);
     if (inc && inc.amount != null) {
       const apiFixed = inc.amount_initial != null && inc.amount !== inc.amount_initial;
       const init = inc.amount_initial != null ? inc.amount_initial : (cm && cm.deposit_init != null ? cm.deposit_init : null);
@@ -19922,6 +19941,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   if (pfColPref.order.includes('deposit')) pfColPref.order.splice(pfColPref.order.indexOf('deposit'), 1, 'dep_prov', 'dep_fix');
   if (pfColPref.hidden.includes('deposit')) pfColPref.hidden.splice(pfColPref.hidden.indexOf('deposit'), 1, 'dep_prov', 'dep_fix');
   if (pfColPref.widths.deposit) { pfColPref.widths.dep_prov = pfColPref.widths.dep_prov || pfColPref.widths.deposit; pfColPref.widths.dep_fix = pfColPref.widths.dep_fix || pfColPref.widths.deposit; }
+  // ★配送状態は「入金額が確定したか」の唯一の根拠なので、隠れていると判断できない。一度だけ強制表示してOrder IDの隣へ
+  if (!localStorage.getItem('smdPfColsV3')) {
+    localStorage.setItem('smdPfColsV3', '1');
+    const hi = pfColPref.hidden.indexOf('status');
+    if (hi >= 0) pfColPref.hidden.splice(hi, 1);
+    if (pfColPref.order.length) {
+      const oi = pfColPref.order.indexOf('status');
+      if (oi >= 0) pfColPref.order.splice(oi, 1);
+      const at = pfColPref.order.indexOf('order');
+      pfColPref.order.splice(at >= 0 ? at + 1 : pfColPref.order.length, 0, 'status');
+    }
+    localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
+  }
   const savePfCols = () => localStorage.setItem('smdPfCols', JSON.stringify(pfColPref));
   const pfColOrder = () => {
     const def = PF_COLS.map(c => c.k);
@@ -19961,7 +19993,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (/unpaid/i.test(t)) return '<span style="color:#d93025;font-weight:700">未入金</span>';
     if (/return|refund/i.test(t)) return '<span style="color:#e8710a;font-weight:700">返品/返金</span>';
     if (/cancel/i.test(t)) return '<span style="color:#6b7280">キャンセル</span>';
-    if (/to ?ship/i.test(t)) return '<span style="color:#d93025;font-weight:700">未発送</span>';
+    if (/to ?ship|ready ?to ?ship/i.test(t)) return '<span style="color:#d93025;font-weight:700">未発送</span>';
+    if (/processed/i.test(t)) return '<span style="color:#d93025;font-weight:700">未発送</span><span class="smd-dim" style="font-size:10px">(受注済)</span>';
+    if (/to ?receive/i.test(t)) return '<span style="color:#1a73e8;font-weight:700">輸送中</span><span class="smd-dim" style="font-size:10px">(受取待ち)</span>';
     if (/transit|shipped|shipping/i.test(t)) return '<span style="color:#1a73e8;font-weight:700">輸送中</span>';
     if (/deliver/i.test(t)) return '<span style="color:#1a7f37;font-weight:700">到着済</span>';
     if (/complete/i.test(t)) return '<span style="color:#1a7f37;font-weight:700">完了</span>';
@@ -20119,6 +20153,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
     };
     return orders.slice().sort((a, b) => {
+      if (pf.byCc && a.cc !== b.cc) return a.cc < b.cc ? -1 : 1;   // 「国別に分ける」時は国が第一キー（その中を選択中の並び順で）
       const va = val(a), vb = val(b);
       if (va < vb) return -dir;
       if (va > vb) return dir;
@@ -20171,7 +20206,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const mg = pfMonthGross(); pf.grossTotal = mg.total; pf.grossN = mg.n; pf.grossYm = pf.ym; pf.grossFixN = mg.fixN; pf.grossProvN = mg.provN; }
     document.getElementById('pf-note').textContent = `${orders.length}注文`;
     if (!orders.length) { body.innerHTML = '<div class="smd-dim">該当する注文がありません（未同期の月は💰転記タブでDB同期を実行）</div>'; return; }
-    if (pf.view === 'sum') { pfRenderSummary(body, orders); return; }
+    if (pf.view === 'sum') {
+      pfRenderSummary(body, orders);
+      // 🚫キャンセル段階ボタン（order_issues.stage を更新＝↩️返品ページと同じデータ）
+      body.querySelectorAll('.pf-cank').forEach(el => el.addEventListener('click', () => {
+        el.disabled = true; pfSetStage(el.dataset.cc, el.dataset.sn, el.dataset.k);
+      }));
+      return;
+    }
 
     // 明細ビュー: 注文の商品1点ごとに1行（列構成はPF_COLS・幅/表示はユーザー設定）
     const cols = pfVisibleCols();
@@ -20184,11 +20226,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, tPpl = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0, pairCost = 0, pairFixN = 0, pairProvN = 0, strictSkipN = 0;
     // ★ページ送り：合計は全件で累積し、DOMに出す行だけ現在ページ(100注文)に絞る（旧: 全注文を一括innerHTML＝描画が重い）。絞り込み/並替が変わったらsig不一致で1ページ目へ
     const PER_PF = 100;
-    const _pfSig = orders.length + '|' + (orders[0] ? orders[0].sn : '') + '|' + pf.sortKey + '|' + pf.sortDir + '|' + pf.ym;
+    const _pfSig = orders.length + '|' + (orders[0] ? orders[0].sn : '') + '|' + pf.sortKey + '|' + pf.sortDir + '|' + pf.ym + '|' + (pf.byCc ? 'cc' : '');
     if (_pfSig !== pf._pageSig) { pf.page = 1; pf._pageSig = _pfSig; }
     const _pfPages = Math.max(1, Math.ceil(orders.length / PER_PF));
     pf.page = Math.min(Math.max(1, pf.page || 1), _pfPages);
     const _pfStart = (pf.page - 1) * PER_PF, _pfEnd = _pfStart + PER_PF;
+    // ★「国別に分ける」：国の小計は【ページ送りに関係なく全件】で先に出す。
+    //   ページ内だけで足すと、100件を跨いだ国の小計が実際より小さく見えてしまう。
+    const _ccTot = {};
+    if (pf.byCc) {
+      orders.forEach(o => {
+        const rg2 = regionByCc(o.cc); if (!rg2) return;
+        const t = _ccTot[o.cc] = _ccTot[o.cc] || { n: 0, dep: 0, cost: 0, profit: 0, pairN: 0 };
+        t.n++;
+        const d2 = pfDepInfo(o), c2 = pfCost(o);
+        if (d2) t.dep += d2.amt * rg2.rateJpy;
+        if (c2 != null) t.cost += c2;
+        if (d2 && c2 != null) { t.profit += d2.amt * rg2.rateJpy + pfPaypal(o) - c2; t.pairN++; }
+      });
+    }
+    let _lastCc = null;
     pfSorted(orders).forEach((o, _oi) => {
      try {
       const rg = regionByCc(o.cc);
@@ -20313,7 +20370,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             `</td>`; },
         };
         const trStyle = o.tab === 600 ? ' style="opacity:.4;background:#f4f4f4"' : ''; // キャンセルはグレーアウト
-        if (_oi >= _pfStart && _oi < _pfEnd) html += '<tr' + trStyle + '>' + cols.map(c => CELL[c.k]()).join('') + '</tr>'; // ★現在ページの注文だけDOMに出す（合計は上で全件累積済み）
+        if (_oi >= _pfStart && _oi < _pfEnd) {
+          if (pf.byCc && first && o.cc !== _lastCc) {   // 国が変わったら小計の見出し行を挟む
+            _lastCc = o.cc;
+            const t = _ccTot[o.cc] || { n: 0, dep: 0, cost: 0, profit: 0, pairN: 0 };
+            html += `<tr class="pf-ccsep"><td colspan="${cols.length}" style="background:#eef3fb;border-top:2px solid ${rg.color};padding:6px 8px">` +
+              `<b style="color:${rg.color};font-size:13px">${rg.cc}</b> <span class="smd-dim" style="font-size:11px">${rg.name || ''}</span>` +
+              `<span style="margin-left:14px;font-size:11.5px">${t.n}注文 ／ 入金 <b>${fmtJpy(t.dep)}</b> ／ 仕入 <b>${fmtJpy(t.cost)}</b> ／ 粗利 <b style="color:${t.profit < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(t.profit)}</b>` +
+              `<span class="smd-dim">（両方判明 ${t.pairN}件）</span></span></td></tr>`;
+          }
+          html += '<tr' + trStyle + '>' + cols.map(c => CELL[c.k]()).join('') + '</tr>'; // ★現在ページの注文だけDOMに出す（合計は上で全件累積済み）
+        }
       });
      } catch (err) { console.warn('[利益] 行をスキップ', o && o.sn, err && err.message); }
     });
@@ -20499,9 +20566,108 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
   }
 
+  // 配送状態の内訳チップ（未発送だけ赤・スキャン前が一目で分かるように）
+  const PF_ST_COLOR = { toship: '#d93025', transit: '#1a73e8', delivered: '#1a7f37', completed: '#1a7f37',
+    returned: '#e8710a', cancelled: '#6b7280', unpaid: '#d93025', other: '#6b7280' };
+  const pfStBreak = st => {
+    const ks = Object.keys(st).sort((a, b) => st[b] - st[a]);
+    if (!ks.length) return '<span class="smd-dim">—</span>';
+    return ks.map(k => `<span style="color:${PF_ST_COLOR[k] || '#6b7280'};font-size:11px;white-space:nowrap">${ORD_ST_LABEL[k] || k} ${st[k]}</span>`).join('<br>');
+  };
+  // スキャン済(=確定しているはず) と 観測済(=実際に金額が動いた) を分けて出す。
+  // この2つがズレている＝「暫定と確定が同じ数字」に見える注文の正体なので、隠さず並べる。
+  const pfScanCell = (scanN, obsN, n) => {
+    if (!n) return '<span class="smd-dim">—</span>';
+    const pct = Math.round(scanN * 100 / n);
+    return `<b style="color:${scanN === n ? '#1a7f37' : '#e8710a'}">${scanN}/${n}</b><span class="smd-dim" style="font-size:10px"> (${pct}%)</span>` +
+      `<br><span class="smd-dim" style="font-size:10.5px" title="暫定額から実際に金額が動いたのを観測できた件数。スキャン済との差は「動かなかった＝暫定額のままが最終額だった」注文">観測 ${obsN}件</span>`;
+  };
+
+
+  // ---- キャンセルの損失仕分け -------------------------------------------------
+  // ★キャンセルは売上・粗利の集計から除外している＝「損失も一緒に消えている」。
+  //   ・発送前のキャンセル       → 仕入も発送もしていない＝損失ゼロ
+  //   ・日本国内でのキャンセル   → 荷物が戻る＝在庫に復活（損失ゼロ・SLS+保証の対象外）
+  //   ・日本を出た後のキャンセル → 荷物は戻らない＝仕入額まるごと損失（SLS+半額保証の対象）
+  //   ★段階の判定は ↩️返品・キャンセル管理の order_issues.stage を【唯一の正】として共有する。
+  //     ここで別のキーを作ると同じ情報が2箇所に散って必ず食い違うので、絶対に増やさない。
+  const PF_STAGES = ['発送前', '日本国内', '日本を出た後'];
+  const PF_STAGE_COLOR = { '発送前': '#6b7280', '日本国内': '#1a73e8', '日本を出た後': '#d93025' };
+  // 理由からの推定（返品ページの inferStage と同じルール。手動設定があればそちらが優先）
+  const pfInferStage = raw => {
+    const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
+    if (/Unpaid Order/i.test(t)) return '発送前';
+    if (/Failed Delivery|3PL pickup Fail/i.test(t)) return '日本を出た後';
+    return '';
+  };
+  // 段階が未設定でも、仕入紐付けも伝票も無いなら「発送前」で確定してよい（推定ではなく事実）
+  const pfStageOf = (o, invCnt) => {
+    const iss = (pf.issueMap && pf.issueMap.get(o.cc + ':' + o.sn)) || null;
+    if (iss && iss.stage) return { stage: iss.stage, guess: false };
+    if (!invCnt && !o.tracking) return { stage: '発送前', guess: false };
+    const g = pfInferStage(o.cancel_reason);
+    return { stage: g || '', guess: !!g };
+  };
+
+  async function pfSetStage(cc, sn, stage) {
+    if (!(await saveIssue(cc, sn, { stage: stage || null }))) return;
+    pf.issueMap = pf.issueMap || new Map();
+    const k = cc + ':' + sn;
+    pf.issueMap.set(k, Object.assign({}, pf.issueMap.get(k) || { cc, sn }, { stage: stage || null }));
+    pfRender();
+  }
+
+  // 当月のキャンセルを国別に集計＋要仕分けの一覧
+  function pfCancelCardHtml() {
+    const cans = (pf.orders || []).filter(o => o.tab === 600);
+    if (!cans.length) return '';
+    const per = {}, need = [];
+    let lostJpy = 0, lostN = 0, unknownN = 0;
+    cans.forEach(o => {
+      const its = (pf.invMap && pf.invMap.get(o.sn)) || [];
+      const cost = its.reduce((t, i) => t + (Number(i.price) || 0), 0);
+      const { stage, guess } = pfStageOf(o, its.length);
+      const t = per[o.cc] = per[o.cc] || { n: 0, '発送前': 0, '日本国内': 0, '日本を出た後': 0, unknown: 0, lostJpy: 0 };
+      t.n++;
+      if (stage) t[stage]++; else { t.unknown++; unknownN++; }
+      if (stage === '日本を出た後') { t.lostJpy += cost; lostJpy += cost; lostN++; }
+      // 仕入 or 伝票の形跡があるもの＝損失になりうるので必ず仕分け対象に出す。推定だけの行も確定させたいので出す
+      if (its.length || o.tracking || !stage || guess) need.push({ o, its, cost, stage, guess });
+    });
+    const rows = REGIONS.filter(rg => per[rg.cc]).map(rg => {
+      const t = per[rg.cc];
+      return `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td style="text-align:right">${t.n}</td>` +
+        `<td style="text-align:right;color:#6b7280">${t['発送前']}</td>` +
+        `<td style="text-align:right;color:#1a73e8">${t['日本国内']}</td>` +
+        `<td style="text-align:right;color:#d93025;font-weight:700">${t['日本を出た後']}</td>` +
+        `<td style="text-align:right;color:#e8710a">${t.unknown || ''}</td>` +
+        `<td style="text-align:right;color:#d93025">${t.lostJpy ? '−' + fmtJpy(t.lostJpy) : '—'}</td></tr>`;
+    }).join('');
+    const list = need.length ? need.map(x => {
+      const rg = regionByCc(x.o.cc) || { color: '#333' };
+      const btn = k => `<button class="smd-btn pf-cank" data-cc="${x.o.cc}" data-sn="${esc(x.o.sn)}" data-k="${k}" style="font-size:10px;padding:1px 7px;${(!x.guess && x.stage === k) ? `background:${PF_STAGE_COLOR[k]};color:#fff;border-color:${PF_STAGE_COLOR[k]};font-weight:700` : ''}">${k}</button>`;
+      return `<tr><td><b style="color:${rg.color}">${x.o.cc}</b></td>` +
+        `<td style="font-size:10.5px;word-break:break-all">${esc(x.o.sn)}</td>` +
+        `<td style="font-size:10.5px">${esc(x.o.cancel_reason || '—')}</td>` +
+        `<td style="font-size:10.5px">${x.its.length ? x.its.length + '件 ' + fmtJpy(x.cost) : '<span class="smd-dim">仕入紐付けなし</span>'}${x.o.tracking ? '<br><span style="color:#1a73e8">伝票発行済</span>' : ''}</td>` +
+        `<td style="white-space:nowrap">${PF_STAGES.map(btn).join(' ')}${x.guess ? '<span title="キャンセル理由からの推定。ボタンを押して確定してください" style="color:#e8710a;font-size:10px;margin-left:4px">推定</span>' : ''}</td></tr>`;
+    }).join('') : `<tr><td colspan="5" class="smd-dim" style="font-size:11.5px">仕分けが必要なキャンセルはありません</td></tr>`;
+    return `<div class="tool-card" style="margin:10px 0 0;max-width:960px">` +
+      `<div style="font-weight:700;margin-bottom:4px">🚫 キャンセルの内訳と損失 <span class="smd-dim" style="font-weight:400;font-size:11px">（${cans.length}件・上の売上/粗利からは除外されています）</span></div>` +
+      `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">キャンセルは売上・粗利から除外していますが、<b>仕入れて発送した後のキャンセルは仕入額がまるごと損失</b>になります。` +
+      `<b>発送前</b>＝仕入も発送もしていない（損失なし）／<b style="color:#1a73e8">日本国内</b>＝荷物が戻る＝在庫に復活（損失なし）／<b style="color:#d93025">日本を出た後</b>＝戻らない＝仕入額が損失（SLS+半額保証の対象）。` +
+      `段階は<b>↩️返品・キャンセル管理と同じデータ</b>なので、どちらで直しても両方に反映されます。` +
+      (unknownN ? `<br><b style="color:#e8710a">未判定 ${unknownN}件</b> — 下で段階を押して確定してください（未判定の分は損失に計上されていません）。` : '') +
+      `</div>` +
+      `<table class="pf-table"><tr><th>国</th><th style="text-align:right">キャンセル</th><th style="text-align:right">発送前</th><th style="text-align:right">日本国内</th><th style="text-align:right">日本を出た後</th><th style="text-align:right">未判定</th><th style="text-align:right">損失(仕入額)</th></tr>${rows}` +
+      `<tr class="pf-total"><td>合計</td><td style="text-align:right">${cans.length}</td><td colspan="4" style="text-align:right">日本を出た後 ${lostN}件</td><td style="text-align:right;color:#d93025">${lostJpy ? '−' + fmtJpy(lostJpy) : '—'}</td></tr></table>` +
+      `<div style="font-weight:700;font-size:12.5px;margin:12px 0 4px">要仕分け（${need.length}件）</div>` +
+      `<table class="pf-table"><tr><th>国</th><th>Order ID</th><th>キャンセル理由</th><th>仕入・伝票</th><th>段階（押して確定）</th></tr>${list}</table></div>`;
+  }
+
   function pfRenderSummary(body, orders) {
     const per = {};
-    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0, pair: 0, pairN: 0 });
+    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0, pair: 0, pairN: 0, st: {}, scanN: 0, obsN: 0 });
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg || !per[o.cc]) return;
@@ -20509,28 +20675,40 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       p.n++;
       p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
       p.sales += o.total || 0;
+      const sk = ordStatusKey(o.status);        // 配送状態の内訳（＝入金が確定する根拠）
+      p.st[sk] = (p.st[sk] || 0) + 1;
+      if (ordScanned(o)) p.scanN++;              // 倉庫スキャン済み＝入金額が確定しているはず
+      const _di = pfDepInfo(o);
+      if (_di && _di.observed) p.obsN++;         // 実際に金額が動いたのを観測できた件数
       const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
       if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
       if (cost != null) { p.costJpy += cost; p.costN++; }
       if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * rg.rateJpy + pfPaypal(o) - cost; p.pairN++; }
     });
     let rowsHtml = '';
-    let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0;
+    let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0, tScan = 0, tObs = 0;
+    const tSt = {};
     REGIONS.forEach(rg => {
       const p = per[rg.cc];
       if (!p.n) return;
       tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
-      tPair += p.pair; tPairN += p.pairN;
+      tPair += p.pair; tPairN += p.pairN; tScan += p.scanN; tObs += p.obsN;
+      Object.keys(p.st).forEach(k => tSt[k] = (tSt[k] || 0) + p.st[k]);
       rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
         `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
         `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
         `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span></td>` +
+        `<td>${pfStBreak(p.st)}</td>` +
+        `<td>${pfScanCell(p.scanN, p.obsN, p.n)}</td>` +
         `<td><b style="color:${p.pair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(p.pair)}</b><br><span class="smd-dim">${p.pairN}件(両方判明)</span></td></tr>`;
     });
     body.innerHTML = `<div class="tool-card" style="margin:0;max-width:960px"><table class="pf-table">` +
-      `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th><th>粗利(両方判明分)</th></tr>` + rowsHtml +
-      `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td style="color:${tPair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(tPair)}<br><span class="smd-dim" style="font-weight:400">${tPairN}件</span></td></tr></table>` +
-      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額（手入力/確定 または 在庫連携🏷の自動算出）の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>`;
+      `<tr><th>国</th><th>注文</th><th>売上(販売額)</th><th>入金額(判明)</th><th>仕入額(判明)</th>` +
+      `<th title="Shopee上の配送状態の内訳。倉庫スキャン以降(輸送中/到着済/完了/返品)なら入金額は確定している">配送状態</th>` +
+      `<th title="スキャン済＝入金額が確定しているはずの件数／観測＝暫定額から実際に金額が動いたのを確認できた件数">入金確定</th>` +
+      `<th>粗利(両方判明分)</th></tr>` + rowsHtml +
+      `<tr class="pf-total"><td>合計</td><td>${tN}件 / ${tUnits}点</td><td>${fmtJpy(tSalesJpy)}</td><td>${fmtJpy(tDep)}</td><td>${fmtJpy(tCost)}</td><td style="font-weight:400">${pfStBreak(tSt)}</td><td style="font-weight:400">${pfScanCell(tScan, tObs, tN)}</td><td style="color:${tPair < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(tPair)}<br><span class="smd-dim" style="font-weight:400">${tPairN}件</span></td></tr></table>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額（手入力/確定 または 在庫連携🏷の自動算出）の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>` + pfCancelCardHtml();
   }
 
   let syncRunning = false;
