@@ -3081,6 +3081,9 @@ var IMP_STK = /(stock\s*no|在庫\s*no|在庫番号|itm)/i;
 var IMP_CST = /(purchase amount|仕入(額|れ額|価|値)|購入(金額|額))/i;
 var IMP_SUP = /(supplier|仕入元|仕入先)/i;
 var IMP_URL = /(supplier url|仕入元url|商品url|購入url)/i;
+// ★確定入金額（円）と確定利益。Shopeeの入金APIは直近しか返さないので、古い月はこれが唯一の記録。
+var IMP_DEP = /(confirmed deposit amount[:：]?\s*yen|確定入金額.*円|入金額.*確定.*円)/i;
+var IMP_PRF = /(fixed profit|確定利益)/i;
 
 // シート1つを解析して、取り込める行を返す（書き込みはしない）
 // ★国ごとにタブが分かれている（br_p / ph_p …）ので、条件に合うタブを **全部** 読む。
@@ -3093,7 +3096,7 @@ function importProfitSheetScan(fileId) {
     if (last < 2 || w < 10) { miss.push(sh.getName()); return; }
     var head = sh.getRange(1, 1, last, w).getDisplayValues();
     for (var i = 0; i < head.length; i++) {
-      var h = head[i], o = -1, s = -1, s2 = -1, c = -1, sup = -1, url = -1;
+      var h = head[i], o = -1, s = -1, s2 = -1, c = -1, sup = -1, url = -1, dep = -1, prf = -1;
       for (var j = 0; j < h.length; j++) {
         var v = String(h[j] || '');
         if (o < 0 && IMP_ORD.test(v)) o = j;
@@ -3101,8 +3104,10 @@ function importProfitSheetScan(fileId) {
         if (c < 0 && IMP_CST.test(v)) c = j;
         if (url < 0 && IMP_URL.test(v)) url = j;
         else if (sup < 0 && IMP_SUP.test(v)) sup = j;
+        if (dep < 0 && IMP_DEP.test(v)) dep = j;
+        if (prf < 0 && IMP_PRF.test(v)) prf = j;
       }
-      if (o >= 0 && s >= 0) { hits.push({ sheet: sh.getName(), row: i + 1, o: o, s: s, s2: s2, c: c, sup: sup, url: url, w: w }); return; }
+      if (o >= 0 && s >= 0) { hits.push({ sheet: sh.getName(), row: i + 1, o: o, s: s, s2: s2, c: c, sup: sup, url: url, dep: dep, prf: prf, w: w }); return; }
     }
     miss.push(sh.getName());
   });
@@ -3150,13 +3155,17 @@ function importProfitSheetScan(fileId) {
       var supUrl = b.url >= 0 ? String(r[b.url] || '').trim() : '';
       var mid = (supUrl.match(/\b(m\d{9,})\b/) || [])[1] || '';
       if (!stocks.length) {
-        if (mid) out.push({ order_sn: sn, stock: [], tab: b.sheet, mercari_id: mid,
+        var num0 = function (idx) { if (idx < 0) return null; var v = parseFloat(String(r[idx]).replace(/[^\d.-]/g, '')); return isNaN(v) ? null : v; };
+        if (mid || b.dep >= 0) out.push({ order_sn: sn, stock: [], tab: b.sheet, mercari_id: mid,
+          deposit_jpy: num0(b.dep), profit_jpy: num0(b.prf),
           cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
           supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '', supplier_url: supUrl });
         return;
       }
+      var num = function (idx) { if (idx < 0) return null; var v = parseFloat(String(r[idx]).replace(/[^\d.-]/g, '')); return isNaN(v) ? null : v; };
       out.push({
         order_sn: sn, stock: stocks, tab: b.sheet, mercari_id: mid,
+        deposit_jpy: num(b.dep), profit_jpy: num(b.prf),
         cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
         supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '',
         supplier_url: b.url >= 0 ? String(r[b.url] || '').trim() : ''
