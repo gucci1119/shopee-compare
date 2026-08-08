@@ -3124,7 +3124,10 @@ function importProfitSheetScan(fileId) {
     vals.forEach(function (r) {
       var sn = String(r[b.o] || '').trim();
       if (!sn) return;
-      var raw = String(r[b.s] || '') + ' ' + (b.s2 >= 0 ? String(r[b.s2] || '') : '');
+      // ★「Stock No. New」が正。空のときだけ旧「Stock No.」を使う（両方見ると旧IDを二重に数える）
+      var vNew = b.s2 >= 0 ? String(r[b.s2] || '').trim() : '';
+      var vOld = String(r[b.s] || '').trim();
+      var raw = vNew || vOld;
       // ★在庫Noの欄に「キャンセル」と書かれている＝仕入元にキャンセルされた注文。
       //   せっかく手で記録されているので、仕入キャンセルとして拾う（在庫Noは無い）。
       if (/キャンセル|cancel/i.test(raw)) {
@@ -3135,9 +3138,10 @@ function importProfitSheetScan(fileId) {
         cnt++; return;
       }
       var seen = {}, stocks = [];
-      raw.split(/[\s,、\/]+/).forEach(function (x) {
-        x = String(x).trim();
-        if (!/ITM|^\d{6,}/i.test(x) || seen[x]) return;   // 同じ在庫Noの重複を除く
+      // 「ITM -2025…」のような空白入りや「ITM-…-399(362)」の括弧書きも拾えるように整える
+      raw.replace(/ITM\s*-\s*/gi, 'ITM-').split(/[\s,、\/]+/).forEach(function (x) {
+        x = String(x).trim().replace(/\(.*?\)/g, '');
+        if (!/^ITM-|^\d{6,}$/i.test(x) || seen[x]) return;
         seen[x] = 1; stocks.push(x);
       });
       if (!stocks.length) return;
