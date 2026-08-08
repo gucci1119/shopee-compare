@@ -13266,7 +13266,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const sp0 = (typeof specOf === 'function') ? (specOf(r.item_id) || {}) : {};
     return { cc: r.cc, item_id: r.item_id, shop_id: r.shop_id, image: r.image,
       cat: sp0.cat || 0, catName: sp0.cat ? (catPathOf(r.cc, sp0.cat) || catNameOf(r.cc, sp0.cat) || ('#' + sp0.cat)) : '',
-      attrs: null,
+      attrs: null, wg: '', newCat: 0, newCatName: '',
       t0: String(r.name || ''), t: String(r.name || ''),
       vid: '', vdel: false,
       opts: ms.map((m, oi) => ({ oi, n0: String(m.n || ''), n: String(m.n || ''), img: m.img || '', url: '' })) };
@@ -13342,6 +13342,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${cur ? `<div style="border-top:1px dotted #e6dcf5;padding-top:8px">
         <div style="font-size:11.5px;margin-bottom:6px"><b>${esc(cur.cc)}</b> ／ ${esc(cur.name || '（カテゴリ未取得）')} の <b>${cur.items.length}件</b> に入れます
           <button id="bk-attrclear" class="smd-btn" style="font-size:10.5px;padding:2px 9px;margin-left:8px">この組の設定を消す</button></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px;margin-bottom:8px;padding-bottom:7px;border-bottom:1px dotted #e6dcf5">
+          <span style="color:#444">⚖️ 重量</span>
+          <input id="bk-wg" type="number" min="1" placeholder="例: 700" style="width:86px;padding:4px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px;text-align:right"> g
+          <button id="bk-wgapply" class="smd-btn" style="font-size:11px;padding:3px 11px">この${cur.items.length}件に入れる</button>
+          <span style="width:10px"></span>
+          <span style="color:#444">📁 カテゴリ</span>
+          <input id="bk-cat" placeholder="カテゴリ名で検索" style="width:190px;padding:4px 7px;border:1px solid #ddd;border-radius:5px;font-size:11.5px">
+          <span id="bk-cathit" class="smd-dim" style="font-size:10.5px"></span>
+        </div>
         ${bulkAttr.loading ? '<div class="smd-dim" style="font-size:11.5px">属性を読み込み中…</div>'
           : bulkAttr.err ? `<div style="color:#d93025;font-size:11.5px">${esc(bulkAttr.err)}</div>`
           : (!bulkAttr.tree || !bulkAttr.tree.size) ? '<div class="smd-dim" style="font-size:11.5px">このカテゴリには設定できる属性がありませんでした。</div>'
@@ -13400,13 +13409,39 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         drawBulk();
         toast('🏷 ' + g.items.length + '件に属性 ' + list.length + '項目をセットしました（Shopeeへは💾で書きます）');
       }); }
+    { const wi = host.querySelector('#bk-wg'), wb = host.querySelector('#bk-wgapply');
+      if (wi && wb) wb.addEventListener('click', () => {
+        const v = parseFloat((wi.value || '').replace(/[^\d.]/g, ''));
+        if (!(v > 0)) { alert('重量(g)を入れてください'); return; }
+        const g = bulkGroups().find(x => x.k === bulkAttr.gk); if (!g) return;
+        g.items.forEach(e => { e.wg = v; }); drawBulk();
+        toast('⚖️ ' + g.items.length + '件に ' + v + 'g をセットしました（Shopeeへは💾で書きます）');
+      }); }
+    { const ci = host.querySelector('#bk-cat'), hit = host.querySelector('#bk-cathit');
+      if (ci) { let t; ci.addEventListener('input', () => { clearTimeout(t); t = setTimeout(async () => {
+        const g = bulkGroups().find(x => x.k === bulkAttr.gk); if (!g) return;
+        const q = ci.value.trim().toLowerCase(); if (q.length < 2) { hit.textContent = ''; return; }
+        try {
+          const rg = regionByCc(g.cc) || {};
+          await loadCatFull(g.cc, (g.items[0] || {}).shop_id);
+          const src = catFullCache[g.cc] || {};
+          const cands = Object.keys(src).map(id => ({ id: +id, p: (src[id].p || src[id].n || '') }))
+            .filter(x => !src[x.id].hc && x.p.toLowerCase().includes(q)).slice(0, 6);
+          if (!cands.length) { hit.textContent = '見つかりません'; return; }
+          hit.innerHTML = cands.map(c => `<button class="bk-catpick smd-btn" data-id="${c.id}" data-p="${av(c.p)}" style="font-size:10px;padding:2px 7px;margin:2px 3px 0 0">${esc(c.p)}</button>`).join('');
+          hit.querySelectorAll('.bk-catpick').forEach(b2 => b2.addEventListener('click', () => {
+            g.items.forEach(e => { e.newCat = +b2.dataset.id; e.newCatName = b2.dataset.p; });
+            drawBulk(); toast('📁 ' + g.items.length + '件のカテゴリを「' + b2.dataset.p + '」にセットしました（💾で反映）');
+          }));
+        } catch (e2) { hit.textContent = 'カテゴリを読めません'; }
+      }, 400); }); } }
     { const b = host.querySelector('#bk-attrclear');
       if (b) b.addEventListener('click', () => {
         const g = bulkGroups().find(x => x.k === bulkAttr.gk); if (!g) return;
-        g.items.forEach(e => { e.attrs = null; }); bulkAttr.vals = {}; drawBulk();
+        g.items.forEach(e => { e.attrs = null; e.wg = ''; e.newCat = 0; e.newCatName = ''; }); bulkAttr.vals = {}; drawBulk();
       }); }
   }
-  const bulkDirty = (e) => e.t !== e.t0 || !!e.vid || e.vdel || !!(e.attrs && e.attrs.length) || e.opts.some(o => o.n !== o.n0 || !!o.url);
+  const bulkDirty = (e) => e.t !== e.t0 || !!e.vid || e.vdel || !!(e.attrs && e.attrs.length) || !!e.wg || !!e.newCat || e.opts.some(o => o.n !== o.n0 || !!o.url);
   function bulkRowHtml(e) {
     const k = e.cc + '|' + e.item_id, lim = bulkTitleLim(e.cc), over = e.t.length > lim;
     const dirty = bulkDirty(e);
@@ -13418,6 +13453,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span class="smd-dim" style="font-size:10px;width:56px;flex:none;text-align:right;color:${over ? '#d93025' : '#8a8f98'};font-weight:${over ? 700 : 400}">${e.t.length}/${lim}</span>
         ${e.opts.length ? `<button class="bk-exp" data-k="${esc(k)}" style="flex:none;border:1px solid #ddd;background:#fff;border-radius:5px;font-size:10.5px;padding:3px 8px;cursor:pointer">${bulk.open.has(k) ? '▼' : '▶'} 明細${e.opts.length}</button>` : '<span class="smd-dim" style="font-size:10px;flex:none;width:62px;text-align:center">単品</span>'}
         ${(e.attrs && e.attrs.length) ? `<span style="flex:none;font-size:9.5px;color:#7b52c4;font-weight:700;white-space:nowrap" title="属性(specifics)を ${e.attrs.length}項目 変更します">🏷${e.attrs.length}</span>` : ''}
+        ${e.wg ? `<span style="flex:none;font-size:9.5px;color:#3b5bdb;font-weight:700;white-space:nowrap" title="重量を ${e.wg}g に変更します">⚖️${e.wg}g</span>` : ''}
+        ${e.newCat ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="カテゴリを「${av(e.newCatName)}」に変更します">📁変更</span>` : ''}
         <button class="bk-rm" data-k="${esc(k)}" title="この商品を対象から外す" style="flex:none;border:1px solid #ddd;background:#fff;border-radius:5px;font-size:10px;padding:3px 7px;cursor:pointer">✕</button>
       </div>
       ${bulk.open.has(k) ? `<div style="margin:6px 0 2px 66px">
@@ -13533,8 +13570,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const nI = targets.reduce((a, e) => a + e.opts.filter(o => !!o.url).length, 0);
     const nV = targets.filter(e => e.vid || e.vdel).length;
     const nA = targets.reduce((a, e) => a + ((e.attrs && e.attrs.length) || 0), 0);
+    const nW = targets.filter(e => e.wg).length, nC = targets.filter(e => e.newCat).length;
     if (!confirm('書込先: ' + gw.summary + '\n\n' + targets.length + '件の商品をShopeeに保存します:\n'
-      + '・タイトル ' + nT + '件\n・明細名 ' + nO + '件\n・明細画像 ' + nI + '件\n・動画 ' + nV + '件\n・属性(specifics) ' + nA + '項目\n\nよろしいですか？')) return;
+      + '・タイトル ' + nT + '件\n・明細名 ' + nO + '件\n・明細画像 ' + nI + '件\n・動画 ' + nV + '件\n・属性(specifics) ' + nA + '項目\n・重量 ' + nW + '件\n・カテゴリ ' + nC + '件\n\nよろしいですか？')) return;
     const items = targets.map(e => {
       const o = { cc: e.cc, shop_id: e.shop_id, item_id: e.item_id };
       if (e.t !== e.t0) o.title = e.t;
@@ -13546,6 +13584,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         attribute_id: x.id,
         attribute_value_list: [x.vid != null ? { value_id: x.vid } : { original_value_name: String(x.txt || '') }]
       }));
+      if (e.wg) o.weight = (Number(e.wg) / 1000);          // ShopeeはkgなのでgをkgにしてGASへ
+      if (e.newCat) o.category_id = e.newCat;
       if (e.vid) o.video = e.vid; else if (e.vdel) o.video_remove = true;
       return o;
     });
@@ -13559,7 +13599,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         m.textContent = '✓ 保存しました（成功 ' + ((v.result && v.result.done) || 0) + '件' + ((v.result && v.result.failed) ? '／失敗 ' + v.result.failed + '件' : '') + '）';
         if (v.result && v.result.failed) alert('一部が失敗しました:\n\n' + ((v.result.errors || []).join('\n') || ''));
         delete JOB_MIRROR[key];
-        targets.forEach(e => { e.t0 = e.t; e.opts.forEach(o => { o.n0 = o.n; o.url = ''; }); e.vid = ''; e.vdel = false; e.attrs = null; });
+        targets.forEach(e => { e.t0 = e.t; e.opts.forEach(o => { o.n0 = o.n; o.url = ''; }); e.vid = ''; e.vdel = false; e.attrs = null; e.wg = ''; e.newCat = 0; });
         markStale(); drawBulk(); return; }
       if (v.status === 'error' || v.status === 'cancel') { m.style.color = '#d93025'; m.textContent = v.status === 'cancel' ? '止めました' : ('失敗: ' + (v.error || '')); delete JOB_MIRROR[key]; return; }
       m.style.color = '#3b5bdb'; m.innerHTML = '保存中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');

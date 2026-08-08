@@ -1285,8 +1285,9 @@ function bulkEdit_(kv, jobKey) {
     if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100), step: (i + 1) + '/' + items.length + ' ' + (it.cc || '') + ' ' + (it.item_id || '') });
     try {
       // タイトルと属性(specifics)は同じ update_item なので1回にまとめる
-      if (it.title || (it.attrs && it.attrs.length)) {
-        updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title || null, attribute_list: it.attrs || null });
+      if (it.title || (it.attrs && it.attrs.length) || it.weight || it.category_id) {
+        updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title || null,
+          attribute_list: it.attrs || null, weight: it.weight || null, category_id: it.category_id || null });
       }
       var opts = it.options || [], imgs = it.images || [];
       if (opts.length || imgs.length) bulkEditTier_(it.shop_id, it.item_id, opts, imgs);
@@ -2539,6 +2540,10 @@ function syncListingsForShop_(tok, sinceSec) {
         brand: ((it.brand || {}).original_brand_name || (it.brand || {}).brand_name || '')
       };
       rows.push({
+        // ★重量と動画の有無は get_item_base_info に入っている。保存しておけば
+        //   「重い順に直す」「動画が無いものから入れる」が一覧でそのままできる。
+        weight: (parseFloat(it.weight) || null),
+        has_video: !!((it.video_info || []).length),
         cc: cc, item_id: it.item_id, name: it.item_name || '', image: img,
         status: (statusById[it.item_id] != null ? statusById[it.item_id] : (it.item_status === 'NORMAL' ? 1 : 0)),
         parent_sku: it.item_sku || '', shop_id: String(shopId),
