@@ -4491,7 +4491,9 @@
   }
 
   // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
-  const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', bound: false, adding: false };
+  const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', bound: false, adding: false,
+    sortKey: (function () { try { return localStorage.getItem('smdStkSortK') || ''; } catch (_) { return ''; } })(),
+    sortDir: (function () { try { return localStorage.getItem('smdStkSortD') || 'desc'; } catch (_) { return 'desc'; } })() };
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
   // フリマ系＝取引ページ＋受取評価がある（配達状況を取引画面で確認できる）。EC系(Amazon/楽天/ヤフショ/セカスト/駿河屋/Nintendo等)＝取引ページ・受取評価が無く「届くだけ」＝取引ページリンクは出さない
   const isFleaMarket = (sup) => /メルカリ|ラクマ|ヤフオク|Yahoo!?フリマ|PayPay|フリル/i.test(String(sup || ''));
@@ -5530,6 +5532,39 @@
     const holdDays = (r) => { const d = invPurDate(r); let t = d ? Date.parse(d) : NaN; if (isNaN(t)) t = r.created_at ? Date.parse(r.created_at) : NaN; return isNaN(t) ? 0 : (Date.now() - t) / 86400000; };
     const deadCount = all.filter(r => r.status === '在庫保管中' && holdDays(r) > DEAD_DAYS).length;
     if (stock.dead) { rows = rows.filter(r => r.status === '在庫保管中' && holdDays(r) > DEAD_DAYS).sort((a, b) => holdDays(b) - holdDays(a)); }
+    // 列ヘッダのクリックで並び替え。数値・日付・文字列を型ごとに比較（文字列比較だと ¥1,000 と ¥900 が逆になる）
+    if (stock.sortKey) {
+      const dir = stock.sortDir === 'asc' ? 1 : -1;
+      const V = {
+        item_id: r => String(r.item_id || ''),
+        purchased_at: r => invPurDate(r) || '',
+        created_at: r => r.created_at || '',
+        name: r => String(r.name_supplier || r.name || ''),
+        shopee_sn: r => String(r.shopee_sn || ''),
+        sku: r => String(r.sku || ''),
+        supplier: r => String(r.supplier || ''),
+        seller: r => String(r.seller || r.supplier_seller || ''),
+        price: r => (r.price == null ? null : Number(r.price)),
+        condition: r => String(r.condition || ''),
+        status: r => String(r.status || ''),
+        buy_status: r => String(r.buy_status || r.purchase_status || ''),
+        delivery: r => String(r.delivery_status || ''),
+        bin: r => String(r.bin || ''),
+        proof: r => (r.proof ? 1 : 0),
+        note: r => String(r.note || r.memo || ''),
+      };
+      const f = V[stock.sortKey];
+      if (f) rows = rows.slice().sort((a, b) => {
+        const va = f(a), vb = f(b);
+        // 空欄は方向に関係なく常に最後（探しているのは値が入っている行なので）
+        const ea = va == null || va === '', eb = vb == null || vb === '';
+        if (ea && eb) return 0;
+        if (ea) return 1;
+        if (eb) return -1;
+        if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+        return String(va).localeCompare(String(vb), 'ja') * dir;
+      });
+    }
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
     document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
@@ -5576,7 +5611,19 @@
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">左端☑で複数選び「一括印刷」。仕入元・仕入額・状態などはセルで直接編集（Supabaseに保存）。ItemID横の✂でまとめ分割。</span></div>` +
       `<div id="stk-addform"></div>` +
       `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1520px">` +
-      '<tr><th><input type="checkbox" id="stk-selall" title="表示中を全選択/解除"></th><th>画像</th><th>ItemID</th><th>QR</th><th>仕入日時</th><th>追加日時</th><th>商品名</th><th>Shopee注文</th><th>SKU</th><th>仕入元</th><th>セラー名</th><th>仕入額</th><th>コンディション</th><th>状態</th><th>仕入状況</th><th title="仕入元→自宅の配送状況（メルカリはuserscript連携）">配送</th><th>棚</th><th>確証</th><th>備考</th></tr>' +
+      (function () {   // 列名クリックで昇順/降順。もう一度押すと逆順、3回目で解除（登録順に戻る）
+        const S = (k, label, extra) => {
+          const on = stock.sortKey === k;
+          const ind = on ? (stock.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+          return `<th class="stk-th" data-k="${k}" style="cursor:pointer;${on ? 'color:#ee4d2d' : ''}" title="クリックで昇順⇄降順（もう一度で解除）${extra ? '｜' + extra : ''}">${label}${ind}</th>`;
+        };
+        return '<tr><th><input type="checkbox" id="stk-selall" title="表示中を全選択/解除"></th><th>画像</th>' +
+          S('item_id', 'ItemID') + '<th>QR</th>' + S('purchased_at', '仕入日時') + S('created_at', '追加日時') +
+          S('name', '商品名') + S('shopee_sn', 'Shopee注文') + S('sku', 'SKU') + S('supplier', '仕入元') +
+          S('seller', 'セラー名') + S('price', '仕入額') + S('condition', 'コンディション') + S('status', '状態') +
+          S('buy_status', '仕入状況') + S('delivery', '配送', '仕入元→自宅の配送状況（メルカリはuserscript連携）') +
+          S('bin', '棚') + S('proof', '確証') + S('note', '備考') + '</tr>';
+      })() +
       shown.map(r => {
         const img = stockImg(r);
         const di = `data-id="${esc(r.item_id)}"`;
@@ -5653,6 +5700,16 @@
       const id = e.target.dataset.id;
       if (e.target.checked) stock.sel.add(id); else stock.sel.delete(id);
       updateStkSelUI();
+    }));
+    // 列名クリック：未選択→降順→昇順→解除 の3段。選んだ並びは端末に覚えさせる
+    document.querySelectorAll('.stk-th').forEach(th => th.addEventListener('click', () => {
+      const k = th.dataset.k;
+      if (stock.sortKey !== k) { stock.sortKey = k; stock.sortDir = 'desc'; }
+      else if (stock.sortDir === 'desc') { stock.sortDir = 'asc'; }
+      else { stock.sortKey = ''; stock.sortDir = 'desc'; }
+      try { localStorage.setItem('smdStkSortK', stock.sortKey); localStorage.setItem('smdStkSortD', stock.sortDir); } catch (_) {}
+      stock.page = 1;
+      stockRender();
     }));
     const selAll = document.getElementById('stk-selall');
     if (selAll) selAll.addEventListener('change', e => {
