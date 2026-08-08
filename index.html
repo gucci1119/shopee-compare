@@ -5897,7 +5897,14 @@
     const fbMonthly = x => { const a = Number(x.amount) || 0; return x.freq === 'yearly' ? Math.round(a / 12) : a; }; // 月額換算（年額は÷12）
     const fbInRecurring = x => x.freq !== 'once';                                     // 一回きりは"毎月の恒常固定費"には含めない
     const fixBreakSum = fixBreak.reduce((s, x) => s + (fbInRecurring(x) ? fbMonthly(x) : 0), 0); // 月見込み合計
-    const opexFixed = fixBreak.length ? fixBreakSum : ((cfg.opexFixed === '' || cfg.opexFixed == null) ? 0 : (Number(cfg.opexFixed) || 0)); // 内訳があれば合計、無ければ手入力の見込み
+    // ★固定費を二重管理しない：実額（💴入出金・経費に登録した人件費/家賃/ツール等）を唯一の真実にする。
+    //   直近の実績月（当月を除く・実額がある月）の平均を「実額の固定費」として持ち、
+    //   計画側に内訳の手入力が無ければ**そのまま既定値として使う**（手入力があれば上書きとして尊重）。
+    const fixActualMonths = yms.filter(ym => ym !== curYm && (EF[ym] || 0) > 0).slice(0, 3);
+    const fixActual = fixActualMonths.length
+      ? Math.round(fixActualMonths.reduce((sum, ym) => sum + (EF[ym] || 0), 0) / fixActualMonths.length) : 0;
+    const opexManual = fixBreak.length ? fixBreakSum : ((cfg.opexFixed === '' || cfg.opexFixed == null) ? null : (Number(cfg.opexFixed) || 0));
+    const opexFixed = (opexManual != null && opexManual > 0) ? opexManual : fixActual;   // 手入力が無ければ実額を使う // 内訳があれば合計、無ければ手入力の見込み
     const opexPct = 0; // 変動費は廃止（送料・梱包・手数料は固定費/入金に計上済み）。二重計上を防ぐため0固定
     const taxPct = (cfg.taxPct === '' || cfg.taxPct == null) ? 0 : (Number(cfg.taxPct) || 0);
     const afterTax = v => (v > 0 ? Math.round(v * (1 - taxPct / 100)) : v); // 税引後（黒字にのみ課税・赤字はそのまま）
@@ -5969,7 +5976,7 @@
           <label style="font-size:12px" title="1オーダーあたりの利益（Shopee手数料引き後の粗利＝入金−仕入）。人件費・梱包・国内送料は固定費側なので含めない">🔵 1注文の<b>利益</b> <span class="smd-dim">既定¥1,200</span><br><input id="plan-avg" type="text" inputmode="numeric" value="${cfg.avgProfit === '' || cfg.avgProfit == null ? '' : numFmt(cfg.avgProfit)}" placeholder="1,200" style="width:90px;padding:6px;font-size:14px;margin-top:2px;text-align:right;border:1.6px solid #4a90e2;border-radius:6px"> 円</label>
           <label style="font-size:12px">🔵 月の<b>稼働日数</b><br><input id="plan-days" type="number" value="${workDays}" style="width:64px;padding:6px;font-size:14px;margin-top:2px;border:1.6px solid #4a90e2;border-radius:6px"> 日</label>
           <label style="font-size:12px" title="所得税・住民税・事業税・社会保険などの実効率。手取りの目安に使用。正確な率は税理士に確認を">🔵 税・保険<b>率</b> <span class="smd-dim">手取り算出</span><br><input id="plan-tax" type="number" step="0.1" value="${cfg.taxPct}" style="width:64px;padding:6px;font-size:14px;margin-top:2px;border:1.6px solid #4a90e2;border-radius:6px"> %</label>
-          <label style="font-size:12px" title="下の「固定費の内訳」から自動計算（内訳が空なら手入力）">${fixBreak.length ? '⬜' : '🔵'} 月の<b>固定費</b> <span class="smd-dim">${fixBreak.length ? '内訳から自動' : '手入力'}</span><br><input id="plan-opexf" type="text" inputmode="numeric" value="${numFmt(opexFixed)}"${fixBreak.length ? ' readonly' : ''} style="width:110px;padding:6px;font-size:14px;margin-top:2px;text-align:right;border-radius:6px;${fixBreak.length ? 'border:1px solid #d8dee6;background:#eef1f5;color:#5a6b7b' : 'border:1.6px solid #4a90e2'}"> 円</label>
+          <label style="font-size:12px" title="下の「固定費の内訳」から自動計算（内訳が空なら手入力）">${(opexManual != null && opexManual > 0) ? '⬜' : '🟢'} 月の<b>固定費</b> <span class="smd-dim">${fixBreak.length ? '内訳から自動' : ((opexManual != null && opexManual > 0) ? '手入力' : '💴入出金・経費の実額から自動')}</span>${fixActual > 0 ? `<span style="font-size:10px;margin-left:5px;color:${(opexManual != null && opexManual > 0 && Math.abs(opexManual - fixActual) > fixActual * 0.1) ? '#d93025' : '#8a8f98'}" title="💴入出金・経費に登録した人件費・家賃・ツール等の直近${fixActualMonths.length}か月の平均です。ここと計画が大きくずれていたら、どちらかが古い可能性があります">実額 ¥${fixActual.toLocaleString('en-US')}${(opexManual != null && opexManual > 0) ? `（差 ¥${Math.round(opexManual - fixActual).toLocaleString('en-US')}）` : ''}</span>` : ''}<br><input id="plan-opexf" type="text" inputmode="numeric" value="${numFmt(opexFixed)}"${fixBreak.length ? ' readonly' : ''} style="width:110px;padding:6px;font-size:14px;margin-top:2px;text-align:right;border-radius:6px;${fixBreak.length ? 'border:1px solid #d8dee6;background:#eef1f5;color:#5a6b7b' : 'border:1.6px solid #4a90e2'}"> 円</label>
           <label style="font-size:12px" title="輸出免税で戻る消費税の見込み（仕入から自動推定・実額で上書き可）">⬜ 消費税<b>還付</b>(月) <span class="smd-dim">自動</span><br><input id="plan-vat" type="text" inputmode="numeric" value="${cfg.vatRefund === '' || cfg.vatRefund == null ? '' : numFmt(cfg.vatRefund)}" placeholder="自動:${numFmt(vatAuto)}" style="width:100px;padding:6px;font-size:14px;margin-top:2px;text-align:right;border:1px solid #d8dee6;background:#eef1f5;color:#5a6b7b;border-radius:6px"> 円</label>
           <span id="plan-save-stat" class="smd-dim" style="font-size:11px"></span>
         </div>
