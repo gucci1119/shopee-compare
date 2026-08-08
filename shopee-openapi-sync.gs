@@ -3083,14 +3083,14 @@ var IMP_SUP = /(supplier|仕入元|仕入先)/i;
 var IMP_URL = /(supplier url|仕入元url|商品url|購入url)/i;
 
 // シート1つを解析して、取り込める行を返す（書き込みはしない）
+// ★国ごとにタブが分かれている（br_p / ph_p …）ので、条件に合うタブを **全部** 読む。
 function importProfitSheetScan(fileId) {
   var ss = SpreadsheetApp.openById(fileId);
-  var best = null;
+  var hits = [], miss = [];
   ss.getSheets().forEach(function (sh) {
     var last = Math.min(sh.getLastRow(), 12);
-    if (last < 2) return;
     var w = sh.getLastColumn();
-    if (w < 10) return;
+    if (last < 2 || w < 10) { miss.push(sh.getName()); return; }
     var head = sh.getRange(1, 1, last, w).getDisplayValues();
     for (var i = 0; i < head.length; i++) {
       var h = head[i], o = -1, s = -1, s2 = -1, c = -1, sup = -1, url = -1;
@@ -3102,15 +3102,11 @@ function importProfitSheetScan(fileId) {
         if (url < 0 && IMP_URL.test(v)) url = j;
         else if (sup < 0 && IMP_SUP.test(v)) sup = j;
       }
-      if (o >= 0 && s >= 0) {
-        var score = (c >= 0 ? 1 : 0) + (sup >= 0 ? 1 : 0) + sh.getLastRow();
-        if (!best || score > best.score) best = { name: sh.getName(), row: i + 1, o: o, s: s, s2: s2, c: c, sup: sup, url: url, w: w, rows: sh.getLastRow(), score: score };
-        break;
-      }
+      if (o >= 0 && s >= 0) { hits.push({ sheet: sh.getName(), row: i + 1, o: o, s: s, s2: s2, c: c, sup: sup, url: url, w: w }); return; }
     }
+    miss.push(sh.getName());
   });
-  if (!best) {
-    // 見つからない＝構造が違う。手で対応できるよう、各タブの1行目を返す
+  if (!hits.length) {
     var info = ss.getSheets().slice(0, 12).map(function (sh) {
       var w = Math.min(sh.getLastColumn(), 60);
       var h = w > 0 && sh.getLastRow() > 0 ? sh.getRange(1, 1, 1, w).getDisplayValues()[0] : [];
@@ -3118,25 +3114,35 @@ function importProfitSheetScan(fileId) {
     });
     return { ok: false, name: ss.getName(), reason: '注文番号と在庫Noの列を自動で見つけられませんでした', sheets: info };
   }
-  var sh2 = ss.getSheetByName(best.name);
-  var n = sh2.getLastRow() - best.row;
-  var vals = n > 0 ? sh2.getRange(best.row + 1, 1, n, best.w).getDisplayValues() : [];
-  var out = [];
-  vals.forEach(function (r) {
-    var sn = String(r[best.o] || '').trim();
-    var st = String(r[best.s] || '').trim();
-    var st2 = best.s2 >= 0 ? String(r[best.s2] || '').trim() : '';
-    var stocks = (st + ' ' + st2).split(/[\s,、\/]+/).filter(function (x) { return /ITM|^\d{6,}/i.test(x); });
-    if (!sn || !stocks.length) return;
-    out.push({
-      order_sn: sn,
-      stock: stocks,
-      cost: best.c >= 0 ? (parseFloat(String(r[best.c]).replace(/[^\d.-]/g, '')) || null) : null,
-      supplier: best.sup >= 0 ? String(r[best.sup] || '').trim() : '',
-      supplier_url: best.url >= 0 ? String(r[best.url] || '').trim() : ''
+  var out = [], perTab = [];
+  hits.forEach(function (b) {
+    var sh2 = ss.getSheetByName(b.sheet);
+    var n = sh2.getLastRow() - b.row;
+    if (n <= 0) return;
+    var vals = sh2.getRange(b.row + 1, 1, n, b.w).getDisplayValues();
+    var cnt = 0;
+    vals.forEach(function (r) {
+      var sn = String(r[b.o] || '').trim();
+      if (!sn) return;
+      var raw = String(r[b.s] || '') + ' ' + (b.s2 >= 0 ? String(r[b.s2] || '') : '');
+      var seen = {}, stocks = [];
+      raw.split(/[\s,、\/]+/).forEach(function (x) {
+        x = String(x).trim();
+        if (!/ITM|^\d{6,}/i.test(x) || seen[x]) return;   // 同じ在庫Noの重複を除く
+        seen[x] = 1; stocks.push(x);
+      });
+      if (!stocks.length) return;
+      out.push({
+        order_sn: sn, stock: stocks, tab: b.sheet,
+        cost: b.c >= 0 ? (parseFloat(String(r[b.c]).replace(/[^\d.-]/g, '')) || null) : null,
+        supplier: b.sup >= 0 ? String(r[b.sup] || '').trim() : '',
+        supplier_url: b.url >= 0 ? String(r[b.url] || '').trim() : ''
+      });
+      cnt++;
     });
+    perTab.push(b.sheet + ':' + cnt);
   });
-  return { ok: true, name: ss.getName(), sheet: best.name, headerRow: best.row, cols: { order: best.o, stock: best.s, stock2: best.s2, cost: best.c, supplier: best.sup, url: best.url }, found: out.length, sample: out.slice(0, 3), items: out };
+  return { ok: true, name: ss.getName(), tabs: hits.length, perTab: perTab, headerRow: hits[0].row, cols: { order: hits[0].o, stock: hits[0].s, stock2: hits[0].s2, cost: hits[0].c, supplier: hits[0].sup, url: hits[0].url }, found: out.length, sample: out.slice(0, 3), items: out };
 }
 
 // フォルダ内の利益管理表を全部スキャンして、取り込める件数を報告する（書き込みはしない）
@@ -3159,7 +3165,7 @@ function importProfitScanFolder(folderId) {
     var r;
     try { r = importProfitSheetScan(f.id); } catch (e) { r = { ok: false, name: f.name, reason: String(e).slice(0, 90) }; }
     if (r.ok) {
-      report.push(f.name + ' → ' + r.found + '件（' + r.sheet + '・' + r.headerRow + '行目ヘッダ）');
+      report.push(f.name + ' → ' + r.found + '件（' + r.perTab.join(' / ') + '）');
       r.items.forEach(function (x) { all.push(x); });
     } else {
       report.push('✗ ' + f.name + ' → ' + r.reason);
@@ -3177,7 +3183,7 @@ function importProfitScanFolder(folderId) {
 function testImportOne() {
   var r = importProfitSheetScan('1yOhley_fhJUonhqOIvhlrBeD3oUrErBWgRiM0TJcv0k');  // 2026-02
   if (!r.ok) { Logger.log('自動判定できず: ' + r.reason + '\n' + JSON.stringify(r.sheets, null, 1)); return r; }
-  Logger.log('タブ「' + r.sheet + '」 ' + r.headerRow + '行目がヘッダ\n'
+  Logger.log('該当タブ ' + r.tabs + '個（' + r.perTab.join(' / ') + '） ' + r.headerRow + '行目がヘッダ\n'
     + '列: 注文=' + r.cols.order + ' 在庫No=' + r.cols.stock + '/' + r.cols.stock2
     + ' 仕入=' + r.cols.cost + ' 仕入元=' + r.cols.supplier + ' URL=' + r.cols.url + '\n'
     + '取り込める行: ' + r.found + '件\n見本:\n' + JSON.stringify(r.sample, null, 1));
