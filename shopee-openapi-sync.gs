@@ -2306,6 +2306,47 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   var out = { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
   if (partial) out.partial = true; return out;
 }
+// ★入金額が暫定のまま固まっている注文を、名指しで取り直す。
+//   syncEscrowForShop_ は「直近15日に更新のあった注文」しか見ないため、
+//   7月など古い月の確定額が永久に入らなかった（2026-08-09 実測：完了559件中492件が暫定のまま）。
+//   income表から amount==amount_initial の完了行を拾って get_escrow_detail を直接叩く。
+//   1回で最大300件。実行時間6分に当たらないよう区切って、何度か実行すれば全部埋まる。
+function backfillEscrowUnchanged(limitN) {
+  var lim = limitN || 300, done = 0, moved = 0, errs = 0;
+  var toks = listTokens_(), byShop = {};
+  toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
+  var rows = sbSelect_('income', 'select=cc,sn,amount,amount_initial,shop_id&pending=is.false&limit=5000');
+  var targets = (rows || []).filter(function (r) {
+    return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id;
+  }).slice(0, lim);
+  if (!targets.length) { Logger.log('backfillEscrow: 対象なし（すべて確定済み）'); return { done: 0, moved: 0 }; }
+  var deadline = now_() + 300;   // 5分で切り上げ（6分制限に当てない）
+  var out = [], now2 = new Date().toISOString();
+  for (var i = 0; i < targets.length; i++) {
+    if (now_() > deadline) { Logger.log('backfillEscrow: 時間切れで中断（' + i + '件処理）'); break; }
+    var t = targets[i], shopId = parseInt(t.shop_id, 10);
+    if (!byShop[String(shopId)]) continue;
+    var e;
+    try { e = callShop_(shopId, '/api/v2/payment/get_escrow_detail', { order_sn: t.sn }, 'get'); }
+    catch (ex) { errs++; continue; }
+    var inc = ((e.response || {}).order_income) || {};
+    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) continue;
+    done++;
+    if (amt === parseFloat(t.amount)) continue;      // 本当に動いていない＝そのまま
+    moved++;
+    var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
+    var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
+    out.push({ cc: t.cc, sn: t.sn, amount: amt, amount_at: now2,
+      amount_initial: parseFloat(t.amount_initial), buyer_paid: buyerPaid,
+      fee_total: f_comm + f_serv + f_txn,
+      fees: { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
+        final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0 },
+      synced_at: now2 });
+  }
+  if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
+  Logger.log('backfillEscrow: 照会' + done + '件 / 金額が動いた ' + moved + '件 / エラー ' + errs + '件（残り対象 ' + Math.max(0, targets.length - done) + '件）');
+  return { done: done, moved: moved, errs: errs };
+}
 function syncEscrowAll() {
   if (!bgAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
