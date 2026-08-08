@@ -3230,3 +3230,39 @@ function testImportOne() {
     + '取り込める行: ' + r.found + '件（うち注文キャンセル＝在庫なし ' + r.cancelled + '件 → 実際に紐付くのは ' + (r.found - r.cancelled) + '件）\n見本:\n' + JSON.stringify(r.sample, null, 1));
   return { found: r.found };
 }
+
+// ★確定した入金額でも、後から変わることがある：
+//   ・返金が発生し **SLS+の補償（半額保証）** を受けると My Income に反映される
+//   ・TW/TH は関税が数か月後に引かれるという話がある（未検証）
+//   → 返品のあった注文を名指しで読み直す。確定済みでも対象にする。
+function recheckEscrowForReturns(limitN) {
+  var lim = limitN || 300, done = 0, moved = 0;
+  var toks = listTokens_(), byShop = {};
+  toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
+  var rets = sbSelect_('returns', 'select=cc,order_sn&limit=5000') || [];
+  var seen = {}, targets = [];
+  rets.forEach(function (r) {
+    var k = (r.cc || '') + ':' + (r.order_sn || '');
+    if (!r.order_sn || seen[k]) return; seen[k] = 1; targets.push(r);
+  });
+  var incs = sbSelect_('income', 'select=cc,sn,amount,shop_id&limit=8000') || [];
+  var im = {};
+  incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
+  var deadline = now_() + 280, out = [], now2 = new Date().toISOString();
+  for (var i = 0; i < targets.length && out.length < lim; i++) {
+    if (now_() > deadline) { Logger.log('時間切れで中断（' + i + '件処理）'); break; }
+    var t = targets[i], cur = im[t.cc + ':' + t.order_sn];
+    if (!cur || !cur.shop_id || !byShop[String(cur.shop_id)]) continue;
+    var e;
+    try { e = callShop_(parseInt(cur.shop_id, 10), '/api/v2/payment/get_escrow_detail', { order_sn: t.order_sn }, 'get'); } catch (ex) { continue; }
+    var inc = ((e.response || {}).order_income) || {};
+    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) continue;
+    done++;
+    if (amt === parseFloat(cur.amount)) continue;
+    moved++;
+    out.push({ cc: t.cc, sn: t.order_sn, amount: amt, amount_at: now2, synced_at: now2 });
+  }
+  if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
+  Logger.log('返品ありの注文を再確認: 照会' + done + '件 / 金額が変わった ' + moved + '件（SLS+補償などが反映された分）');
+  return { done: done, moved: moved };
+}
