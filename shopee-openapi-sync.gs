@@ -2289,9 +2289,17 @@ function syncEscrowAll() {
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 function finalizedSns_(cc) {
-  // 確定済み(pending=false)かつ手数料内訳(fee_total)がある行だけスキップ。fees未取得の確定行は1度だけ再取得して埋める。
-  var rows = sbSelect_('income', 'select=sn&cc=eq.' + cc + '&pending=is.false&fee_total=not.is.null&limit=5000');
-  var s = {}; rows.forEach(function (r) { s[r.sn] = 1; }); return s;
+  // ★スキップの条件が緩すぎた（2026-08-08 実測）：pending=false かつ fee_total があるだけで永久にスキップしていたため、
+  //   倉庫スキャン後に金額が動いても二度と読み直さず、暫定額のまま固まっていた
+  //   （incomeの完了行 559件のうち 492件が amount==amount_initial ＝ 実際には動くはずなのに動いていない）。
+  //   「金額が動いたのを実際に観測できた行」だけをスキップする。まだ暫定と同額の行は読み直す。
+  var rows = sbSelect_('income', 'select=sn,amount,amount_initial&cc=eq.' + cc + '&pending=is.false&fee_total=not.is.null&limit=5000');
+  var s = {};
+  rows.forEach(function (r) {
+    var moved = (r.amount_initial != null && parseFloat(r.amount) !== parseFloat(r.amount_initial));
+    if (moved) s[r.sn] = 1;
+  });
+  return s;
 }
 
 // ================= Payoneer入金(payout) → payouts表（いつ・いくらPayoneerに入るか） =================
