@@ -3070,3 +3070,104 @@ function scanPurchaseMails(daysBack) {
     items.filter(function (x) { return x.kind === 'done'; }).length + '）');
   return { scanned: scanned, hints: items.length };
 }
+
+// ★過去の利益管理表から「注文番号 ↔ 在庫No ↔ 仕入額 ↔ 仕入元」を取り込む。
+//   毎月シートの作りが変わっているので、**固定の列位置は使わない**。
+//   ①全タブを見て「注文番号らしい列」と「在庫Noらしい列」が両方ある表を探す
+//   ②ヘッダ行も先頭10行から自動で探す
+//   ③見つからなければ、そのシートの構造を報告して手動マッピングに回す（勝手に諦めない）
+var IMP_ORD = /(order\s*id|order\s*number|注文\s*番号|オーダー\s*(番号|no)|注文no)/i;
+var IMP_STK = /(stock\s*no|在庫\s*no|在庫番号|itm)/i;
+var IMP_CST = /(purchase amount|仕入(額|れ額|価|値)|購入(金額|額))/i;
+var IMP_SUP = /(supplier|仕入元|仕入先)/i;
+var IMP_URL = /(supplier url|仕入元url|商品url|購入url)/i;
+
+// シート1つを解析して、取り込める行を返す（書き込みはしない）
+function importProfitSheetScan(fileId) {
+  var ss = SpreadsheetApp.openById(fileId);
+  var best = null;
+  ss.getSheets().forEach(function (sh) {
+    var last = Math.min(sh.getLastRow(), 12);
+    if (last < 2) return;
+    var w = sh.getLastColumn();
+    if (w < 10) return;
+    var head = sh.getRange(1, 1, last, w).getDisplayValues();
+    for (var i = 0; i < head.length; i++) {
+      var h = head[i], o = -1, s = -1, s2 = -1, c = -1, sup = -1, url = -1;
+      for (var j = 0; j < h.length; j++) {
+        var v = String(h[j] || '');
+        if (o < 0 && IMP_ORD.test(v)) o = j;
+        if (IMP_STK.test(v)) { if (s < 0) s = j; else if (s2 < 0) s2 = j; }
+        if (c < 0 && IMP_CST.test(v)) c = j;
+        if (url < 0 && IMP_URL.test(v)) url = j;
+        else if (sup < 0 && IMP_SUP.test(v)) sup = j;
+      }
+      if (o >= 0 && s >= 0) {
+        var score = (c >= 0 ? 1 : 0) + (sup >= 0 ? 1 : 0) + sh.getLastRow();
+        if (!best || score > best.score) best = { name: sh.getName(), row: i + 1, o: o, s: s, s2: s2, c: c, sup: sup, url: url, w: w, rows: sh.getLastRow(), score: score };
+        break;
+      }
+    }
+  });
+  if (!best) {
+    // 見つからない＝構造が違う。手で対応できるよう、各タブの1行目を返す
+    var info = ss.getSheets().slice(0, 12).map(function (sh) {
+      var w = Math.min(sh.getLastColumn(), 60);
+      var h = w > 0 && sh.getLastRow() > 0 ? sh.getRange(1, 1, 1, w).getDisplayValues()[0] : [];
+      return { sheet: sh.getName(), cols: sh.getLastColumn(), rows: sh.getLastRow(), header: h };
+    });
+    return { ok: false, name: ss.getName(), reason: '注文番号と在庫Noの列を自動で見つけられませんでした', sheets: info };
+  }
+  var sh2 = ss.getSheetByName(best.name);
+  var n = sh2.getLastRow() - best.row;
+  var vals = n > 0 ? sh2.getRange(best.row + 1, 1, n, best.w).getDisplayValues() : [];
+  var out = [];
+  vals.forEach(function (r) {
+    var sn = String(r[best.o] || '').trim();
+    var st = String(r[best.s] || '').trim();
+    var st2 = best.s2 >= 0 ? String(r[best.s2] || '').trim() : '';
+    var stocks = (st + ' ' + st2).split(/[\s,、\/]+/).filter(function (x) { return /ITM|^\d{6,}/i.test(x); });
+    if (!sn || !stocks.length) return;
+    out.push({
+      order_sn: sn,
+      stock: stocks,
+      cost: best.c >= 0 ? (parseFloat(String(r[best.c]).replace(/[^\d.-]/g, '')) || null) : null,
+      supplier: best.sup >= 0 ? String(r[best.sup] || '').trim() : '',
+      supplier_url: best.url >= 0 ? String(r[best.url] || '').trim() : ''
+    });
+  });
+  return { ok: true, name: ss.getName(), sheet: best.name, headerRow: best.row, cols: { order: best.o, stock: best.s, stock2: best.s2, cost: best.c, supplier: best.sup, url: best.url }, found: out.length, sample: out.slice(0, 3), items: out };
+}
+
+// フォルダ内の利益管理表を全部スキャンして、取り込める件数を報告する（書き込みはしない）
+function importProfitScanFolder(folderId) {
+  var root = DriveApp.getFolderById(folderId || '1mkJgzN1FiPL-i5plFndI3QurA9QJof9K');
+  var files = [], stack = [root];
+  while (stack.length) {
+    var f = stack.pop();
+    var it = f.getFiles();
+    while (it.hasNext()) {
+      var x = it.next();
+      if (x.getMimeType() === MimeType.GOOGLE_SHEETS) files.push({ id: x.getId(), name: x.getName() });
+    }
+    var subs = f.getFolders();
+    while (subs.hasNext()) stack.push(subs.next());
+  }
+  files.sort(function (a, b) { return a.name < b.name ? 1 : -1; });
+  var report = [], all = [];
+  files.forEach(function (f) {
+    var r;
+    try { r = importProfitSheetScan(f.id); } catch (e) { r = { ok: false, name: f.name, reason: String(e).slice(0, 90) }; }
+    if (r.ok) {
+      report.push(f.name + ' → ' + r.found + '件（' + r.sheet + '・' + r.headerRow + '行目ヘッダ）');
+      r.items.forEach(function (x) { all.push(x); });
+    } else {
+      report.push('✗ ' + f.name + ' → ' + r.reason);
+    }
+  });
+  try {
+    sbUpsert_('app_kv', [{ k: 'profit_link_import', v: { items: all, at: new Date().toISOString(), report: report }, updated_at: new Date().toISOString() }]);
+  } catch (e) { Logger.log('保存失敗 ' + e); }
+  Logger.log(report.join('\n') + '\n---\n取り込み候補 合計 ' + all.length + '件（app_kv: profit_link_import に保存。ポータルで確認して反映）');
+  return { files: files.length, items: all.length };
+}
