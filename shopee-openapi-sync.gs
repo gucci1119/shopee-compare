@@ -2315,7 +2315,11 @@ function backfillEscrowUnchanged(limitN) {
   var lim = limitN || 300, done = 0, moved = 0, errs = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
-  var rows = sbSelect_('income', 'select=cc,sn,amount,amount_initial,shop_id&pending=is.false&limit=5000');
+  // ★入金額が確定するのは「Shopee倉庫でスキャンされた数日後」。注文の完了(COMPLETED)を待つ必要はない。
+  //   以前は pending=false（完了済み）だけを対象にしていたため、**配送中(pending=true)の注文が
+  //   永久に取り直されず暫定額のまま固まっていた**（2026-08-09 実測：同額のまま未確定 113件）。
+  //   完了・未完了どちらも、暫定額のまま動いていない注文を対象にする。
+  var rows = sbSelect_('income', 'select=cc,sn,amount,amount_initial,shop_id&limit=8000');
   var targets = (rows || []).filter(function (r) {
     return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id;
   }).slice(0, lim);
