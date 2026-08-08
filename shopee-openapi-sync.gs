@@ -2976,3 +2976,64 @@ function translateToJa_(texts) {
   return out;
 }
 function testNews() { var r = fetchNews_(true); Logger.log(r.length + '件 / 例: ' + JSON.stringify(r.slice(0, 3), null, 1)); return r.length; }
+
+// ★仕入元メールから「もう届いた／キャンセルされた」を拾い、古いまま止まっている在庫の候補を出す。
+//   自動で確定はしない。app_kv の stock_mail_hints に候補として貯め、ポータルの🧹棚卸しで押して確定する。
+//   Gmailの検索は日次上限があるので、1件ずつではなく **仕入元ごとにまとめて数回** だけ検索する。
+var MAIL_SRC = [
+  { key: 'メルカリ', q: 'from:(mercari.com OR mercari.jp)' },
+  { key: 'Yahoo!フリマ', q: 'from:(paypayfleamarket.yahoo.co.jp OR yahoo-net.jp)' },
+  { key: 'ヤフオク', q: 'from:(auctions.yahoo.co.jp OR yahoo-net.jp)' },
+  { key: 'Amazon', q: 'from:(amazon.co.jp OR amazon.com)' },
+  { key: '楽天', q: 'from:(rakuten.co.jp OR rakuten.com)' }
+];
+var MAIL_CANCEL = /(キャンセル|取引をキャンセル|取消|中止|返金|注文がキャンセル)/;
+// ★Amazon・楽天には「受け取り評価」が無い。発送通知＝そのうち届く、として到着扱いにする。
+//   メルカリ・ヤフオク系は「取引完了/評価」が確実な到着サイン。
+var MAIL_DONE = /(取引が完了|受取評価|評価をしました|発送しました|発送されました|お届け(予定|済|完了)|配達完了|商品が届)/;
+
+function scanPurchaseMails(daysBack) {
+  var back = daysBack || 400;
+  var after = new Date(Date.now() - back * 86400000);
+  var afterStr = Utilities.formatDate(after, 'Asia/Tokyo', 'yyyy/MM/dd');
+  var hints = {}, scanned = 0;
+  MAIL_SRC.forEach(function (src) {
+    var threads = [];
+    try { threads = GmailApp.search(src.q + ' after:' + afterStr, 0, 250); } catch (e) { return; }
+    threads.forEach(function (th) {
+      var msgs;
+      try { msgs = th.getMessages(); } catch (e) { return; }
+      msgs.forEach(function (m) {
+        scanned++;
+        var subj = '', body = '';
+        try { subj = m.getSubject() || ''; body = (m.getPlainBody() || '').slice(0, 4000); } catch (e) { return; }
+        var text = subj + '\n' + body;
+        var kind = MAIL_CANCEL.test(text) ? 'cancel' : (MAIL_DONE.test(text) ? 'done' : '');
+        if (!kind) return;
+        var when = '';
+        try { when = Utilities.formatDate(m.getDate(), 'Asia/Tokyo', 'yyyy-MM-dd'); } catch (e) { }
+        // 商品名らしき行を拾う（「商品名」「商品」の直後 or 件名の鉤括弧内）
+        var names = [];
+        var mm = text.match(/商品名[：: ]\s*(.+)/);
+        if (mm) names.push(mm[1]);
+        var mk = subj.match(/[「『]([^」』]{4,60})[」』]/);
+        if (mk) names.push(mk[1]);
+        names.forEach(function (n) {
+          n = String(n).replace(/\s+/g, ' ').trim().slice(0, 80);
+          if (n.length < 4) return;
+          var key = src.key + '' + n;
+          var cur = hints[key];
+          if (!cur || (kind === 'cancel' && cur.kind !== 'cancel')) hints[key] = { supplier: src.key, name: n, kind: kind, date: when, subject: subj.slice(0, 90) };
+        });
+      });
+    });
+  });
+  var items = Object.keys(hints).map(function (k) { return hints[k]; });
+  try {
+    sbUpsert_('app_kv', [{ k: 'stock_mail_hints', v: { items: items, at: new Date().toISOString(), scanned: scanned }, updated_at: new Date().toISOString() }]);
+  } catch (e) { Logger.log('hints保存失敗: ' + e); }
+  Logger.log('メール走査: ' + scanned + '通 / 候補 ' + items.length + '件（キャンセル ' +
+    items.filter(function (x) { return x.kind === 'cancel'; }).length + ' / 完了 ' +
+    items.filter(function (x) { return x.kind === 'done'; }).length + '）');
+  return { scanned: scanned, hints: items.length };
+}

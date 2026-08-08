@@ -5217,7 +5217,24 @@
     try {
       tana.rows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,status,purchase_date,shopee_sn,bin&order=purchase_date.asc.nullsfirst');
     } catch (e) { tana.rows = []; }
+    // ★仕入元メールから拾った「届いた／キャンセルされた」の候補（GASの scanPurchaseMails が貯める）
+    try {
+      var kv = await sbGetAll('app_kv', 'select=v&k=eq.stock_mail_hints');
+      tana.hints = (kv && kv[0] && kv[0].v && kv[0].v.items) || [];
+    } catch (e) { tana.hints = []; }
     tana.loading = false;
+  }
+  // 商品名がだいたい一致するメール候補を探す（完全一致でなくても拾えるように前方一致＋部分一致）
+  function tanaHint(v) {
+    var list = tana.hints || []; if (!list.length) return null;
+    var nm = String(tanaName(v)).replace(/\s+/g, '').toLowerCase();
+    if (nm.length < 4) return null;
+    for (var i = 0; i < list.length; i++) {
+      var h = list[i], hn = String(h.name || '').replace(/\s+/g, '').toLowerCase();
+      if (hn.length < 4) continue;
+      if (nm.indexOf(hn) >= 0 || hn.indexOf(nm) >= 0) return h;
+    }
+    return null;
   }
   function tanaName(v) { return v.name_supplier || v.name || '(名前なし)'; }
   function tanaFiltered() {
@@ -5273,7 +5290,13 @@
         + '<span style="display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + av(tanaName(v)) + '">' + esc(tanaName(v)) + '</span>'
         + '<span class="smd-dim" style="font-size:10px">🏷' + esc(String(v.item_id)) + (v.bin ? ' / 棚' + esc(v.bin) : '')
         + (v.price != null ? ' / ¥' + Number(v.price).toLocaleString() : '') + (v.purchase_date ? ' / 仕入 ' + esc(String(v.purchase_date).slice(0, 10)) : '')
-        + (v.shopee_sn ? ' / 注文 ' + esc(String(v.shopee_sn)) : '') + '</span></span>'
+        + (v.shopee_sn ? ' / 注文 ' + esc(String(v.shopee_sn)) : '') + '</span>'
+        + (function () {
+            var h = tanaHint(v); if (!h) return '';
+            var isC = h.kind === 'cancel';
+            return '<span style="display:block;font-size:10px;margin-top:2px;color:' + (isC ? '#d93025' : '#1a7f37') + '" title="' + av(h.subject || '') + '">'
+              + '📧 ' + (isC ? '仕入元からキャンセルのメールがあります' : '発送・完了のメールがあります') + (h.date ? '（' + esc(h.date) + '）' : '') + '</span>';
+          })() + '</span>'
         + '<span style="flex:none;display:inline-flex;gap:5px">' + btn('在庫保管中', '在庫あり', '#1a7f37') + btn('販売済み', '販売済み', '#8a8f98') + btn('仕入キャンセル', '届かなかった', '#d93025') + '</span>'
         + '</div>';
     };
