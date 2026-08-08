@@ -5889,7 +5889,9 @@
       if (o.tab === 200) return; // 未払いは粗利対象外（利益エンジンと同じ）
       const key = o.cc + ':' + o.sn, inc = incBySn[key], cm = costBySn[key];
       const dep = (inc && inc.amount != null) ? Number(inc.amount) : (cm && cm.deposit != null ? Number(cm.deposit) : null);
-      const cost = (cm && cm.cost != null) ? Number(cm.cost) : (invBySn[o.sn] != null ? invBySn[o.sn] : null);
+      // ★仕入は「在庫台帳（実際に紐付けた在庫の仕入値）」を正とする。スプシ取込は在庫が未紐付けのときの控えに降格。
+      //   逆にしていたため、🔎在庫候補で紐付けても数字が変わらず、スプシを切り離せない状態だった（2026-08-09）。
+      const cost = (invBySn[o.sn] != null) ? invBySn[o.sn] : ((cm && cm.cost != null) ? Number(cm.cost) : null);
       if (dep != null && cost != null) { m.dep += dep * rate; m.cost += cost; m.gn++; cc2.dep += dep * rate; cc2.cost += cost; cc2.gn++; }
     });
     // 国×月 純マージン(粗利率=粗利/入金)ヒートマップHTML（直近6か月・データのある国のみ・信頼度低いセルは薄く）
@@ -19656,12 +19658,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const pfInv = o => (pf.invMap && pf.invMap.get(o.sn)) || [];
   const pfSheet = o => (pf.sheetMap && pf.sheetMap[o.cc + ':' + o.sn]) || null;  // 📗利益計算表の取り込み値（Order ID突合）
   const pfPaypal = o => { const s = pfSheet(o); return (s && Number(s.paypal_yen)) || 0; };  // PayPal差分(円)＝追加入金。大半0
+  // ★優先順位：①手入力 → ②在庫台帳（紐付けた在庫の仕入値）→ ③スプシ取込。
+  //   以前は②と③が逆で、スプシに値があると在庫台帳を見ないため、🔎在庫候補で紐付けても数字が変わらなかった。
+  //   スプシは将来切り離す方針なので、ポータル自前のデータ（在庫台帳）を先に見る。
   const pfCost = o => {
     const cm = pf.costMap.get(o.cc + ':' + o.sn);
-    if (cm && cm.cost != null) return cm.cost;         // ①ポータル手入力/確定が最優先
-    const sh = pfSheet(o); if (sh && Number(sh.cost) > 0) return Number(sh.cost);  // ②利益計算表(スプシ)の仕入値(税込)
+    if (cm && cm.cost != null) return cm.cost;         // ①ポータルで手入力/確定した値が最優先
     const inv = pfInv(o).filter(it => it.price != null);
-    return inv.length ? inv.reduce((s, it) => s + it.price, 0) : null;  // ③在庫連携
+    if (inv.length) return inv.reduce((s, it) => s + it.price, 0);   // ②在庫台帳（紐付いた在庫の仕入値）
+    const sh = pfSheet(o); return (sh && Number(sh.cost) > 0) ? Number(sh.cost) : null;  // ③利益計算表(スプシ)の控え
   };
   // 在庫No（Stock No.）が付いているか＝仕入れた実物が到着し在庫台帳に載った注文（到着待ちはstock_no空）。📗スプシ取込のstock_no配列 or 紐付いた在庫で判定。
   const pfStock = o => { const sh = pfSheet(o); return !!((sh && Array.isArray(sh.stock_no) && sh.stock_no.length) || pfInv(o).length); };
