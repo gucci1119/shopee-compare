@@ -13525,9 +13525,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${changed ? `<button class="bk-imgundo" data-k="${esc(k)}" style="font-size:10.5px;padding:3px 9px;border:1px solid #ddd;background:#fff;border-radius:5px;cursor:pointer">↩ 元に戻す</button>` : ''}
       </div>
       ${e.opts.length ? `<div style="margin-top:7px;padding-left:32px;border-top:1px dotted #f0f0f0;padding-top:6px">
-        <div style="font-size:10.5px;color:#5a6b8c;font-weight:700;margin-bottom:4px">明細（バリエーション）の画像　<span class="smd-dim" style="font-weight:400">${e.opts.filter(o => o.img || o.url).length}/${e.opts.length} 枚設定済み　※差し替えは「✏️内容」側の画像URL欄／📁フォルダから</span></div>
+        <div style="font-size:10.5px;color:#5a6b8c;font-weight:700;margin-bottom:4px">明細（バリエーション）の画像　<span class="smd-dim" style="font-weight:400">${e.opts.filter(o => o.img || o.url).length}/${e.opts.length} 枚設定済み　※<b>画像をクリックで差し替え</b></span>
+          <button class="bk-vfolder" data-k="${esc(k)}" style="font-size:10px;padding:2px 8px;margin-left:6px;border:1px solid #ddd;background:#fff;border-radius:5px;cursor:pointer" title="PCのフォルダを選ぶと、ファイル名の先頭の番号（001_…）で明細に自動で紐付けます">📁 フォルダから一括</button>
+          <button class="bk-vclear" data-k="${esc(k)}" style="font-size:10px;padding:2px 8px;margin-left:4px;border:1px solid #ddd;background:#fff;border-radius:5px;cursor:pointer" title="この商品の明細画像の差し替えを取り消す">↩ 取消</button></div>
         <div style="display:flex;gap:5px;flex-wrap:wrap">
-          ${e.opts.map(o => `<span style="display:inline-flex;flex-direction:column;align-items:center;width:46px" title="${av(o.n)}">
+          ${e.opts.map(o => `<span class="bk-vimg" data-k="${esc(k)}" data-oi="${o.oi}" style="display:inline-flex;flex-direction:column;align-items:center;width:46px;cursor:pointer" title="${av(o.n)}｜クリックで画像を差し替え">
             ${(o.url || o.img) ? `<img src="${esc(bulkImgUrl(o.url || o.img))}" referrerpolicy="no-referrer" loading="lazy" style="width:42px;height:42px;object-fit:cover;border-radius:4px;background:#f2f2f2;border:1px solid ${o.url ? '#3b5bdb' : '#eee'}" onerror="this.style.opacity=.15">`
               : `<span style="width:42px;height:42px;border:1px dashed #e0c4c0;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#d93025">なし</span>`}
             <span class="smd-dim" style="font-size:8px;width:46px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(o.n)}</span>
@@ -13562,6 +13564,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           try { a.push(await uploadFileToStorage(fl, e.item_id)); } catch (_) {}
         }
         e.imgs = a; if (msg) msg.textContent = ''; drawBulk();
+      });
+      f.click();
+    }));
+    // 明細画像：クリックで差し替え（URL or PCのファイル）
+    host.querySelectorAll('.bk-vimg').forEach(sp => sp.addEventListener('click', async () => {
+      const e = bulk.sel.get(sp.dataset.k); if (!e) return;
+      const o = e.opts.find(x => String(x.oi) === String(sp.dataset.oi)); if (!o) return;
+      const v = prompt('「' + o.n + '」の画像を差し替えます。\n画像URLを入れてください（空欄でOKを押すとPCのファイルを選べます）', o.url || '');
+      if (v === null) return;
+      if (v.trim()) { if (!/^https?:\/\//.test(v.trim())) { alert('https:// で始まるURLを入れてください'); return; } o.url = v.trim(); drawBulk(); return; }
+      const f = document.createElement('input'); f.type = 'file'; f.accept = 'image/*';
+      f.addEventListener('change', async () => {
+        const fl = (f.files || [])[0]; if (!fl) return;
+        try { o.url = await uploadFileToStorage(fl, e.item_id); drawBulk(); } catch (_) { alert('画像の準備に失敗しました'); }
+      });
+      f.click();
+    }));
+    host.querySelectorAll('.bk-vclear').forEach(b => b.addEventListener('click', (ev) => {
+      ev.stopPropagation(); const e = bulk.sel.get(b.dataset.k); if (!e) return;
+      e.opts.forEach(o => { o.url = ''; }); drawBulk();
+    }));
+    host.querySelectorAll('.bk-vfolder').forEach(b => b.addEventListener('click', (ev) => {
+      ev.stopPropagation(); const e = bulk.sel.get(b.dataset.k); if (!e) return;
+      const f = document.createElement('input'); f.type = 'file'; f.accept = 'image/*'; f.multiple = true;
+      try { f.webkitdirectory = true; } catch (_) {}
+      f.addEventListener('change', async () => {
+        const fs = [...(f.files || [])].filter(x => /^image\//.test(x.type));
+        if (!fs.length) { alert('画像ファイルが見つかりませんでした'); return; }
+        const msg = document.querySelector('#bk-msg'); let ok = 0, ng = 0;
+        for (let i = 0; i < fs.length; i++) {
+          const fl = fs[i];
+          if (msg) { msg.style.color = '#3b5bdb'; msg.textContent = '画像を用意中… ' + (i + 1) + '/' + fs.length; }
+          const nom = (fl.name.match(/^0*(\d{1,3})[_\-. ]/) || [])[1];
+          const o = nom ? e.opts[parseInt(nom, 10) - 1] : null;
+          if (!o) { ng++; continue; }
+          try { o.url = await uploadFileToStorage(fl, e.item_id); ok++; } catch (_) { ng++; }
+        }
+        if (msg) { msg.style.color = ok ? '#1a7f37' : '#d93025'; msg.textContent = '📁 ' + ok + '枚を割り当てました' + (ng ? '／紐付けできず ' + ng + '枚（ファイル名の先頭を 001_ 形式に）' : ''); }
+        drawBulk();
       });
       f.click();
     }));
