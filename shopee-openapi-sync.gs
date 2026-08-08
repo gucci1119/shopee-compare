@@ -2312,6 +2312,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
 //   income表から amount==amount_initial の完了行を拾って get_escrow_detail を直接叩く。
 //   1回で最大300件。実行時間6分に当たらないよう区切って、何度か実行すれば全部埋まる。
 function backfillEscrowUnchanged(limitN) {
+  if (!bgAllowed_()) { Logger.log('backfillEscrowUnchanged skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   var lim = limitN || 300, done = 0, moved = 0, errs = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
@@ -2876,6 +2877,12 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
+  // ★SLS+の補償（半額保証）は**数か月後**に My Income へ反映され、一度確定した額が変わる。
+  //   通常の同期は「直近15日に更新のあった注文」しか見ないので構造的に拾えない。
+  //   返品のあった注文を名指しで読み直す処理を、1日1回まわす。
+  ScriptApp.newTrigger('recheckEscrowForReturns').timeBased().everyDays(1).atHour(4).create();
+  // ★暫定のまま固まっている入金も毎日少しずつ取り直す（配送中の注文も対象）
+  ScriptApp.newTrigger('backfillEscrowUnchanged').timeBased().everyDays(1).atHour(5).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
@@ -3236,6 +3243,7 @@ function testImportOne() {
 //   ・TW/TH は関税が数か月後に引かれるという話がある（未検証）
 //   → 返品のあった注文を名指しで読み直す。確定済みでも対象にする。
 function recheckEscrowForReturns(limitN) {
+  if (!bgAllowed_()) { Logger.log('recheckEscrowForReturns skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   var lim = limitN || 300, done = 0, moved = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
