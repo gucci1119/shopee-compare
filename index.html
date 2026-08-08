@@ -19697,45 +19697,70 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     body.innerHTML = html;
     fitScroll('profit');
     wirePageNav(body, p => { pf.page = p; const sc = body.querySelector('.pf-scroll'); if (sc) sc.scrollTop = 0; pfRender(); }); // ★ページ送り（同じ絞り込みなのでsig一致＝1ページ目に戻らずそのページを描画）
-    // 🔎 在庫候補：商品名の似具合＋仕入日で、この注文に充てられそうな在庫を探して紐付ける
-    body.querySelectorAll('.pf-invsug').forEach(btn => btn.addEventListener('click', async () => {
-      const sn = btn.dataset.sn, cc = btn.dataset.cc, nm = btn.dataset.nm || '';
-      if (!nm) { alert('この注文の商品名が取れませんでした'); return; }
-      btn.disabled = true; btn.textContent = '🔎 探しています…';
-      try {
-        // 未引当（どの注文にも紐付いていない）在庫だけを候補にする
-        const used = new Set();
-        (pf.invMap ? [...pf.invMap.values()] : []).forEach(list => (list || []).forEach(v => used.add(String(v.item_id))));
-        const invAll = await sbGetAll('InventoryItem', 'select=item_id,name,name_supplier,price,supplier,supplier_url,purchased_at,proof&limit=8000').catch(() => []);
-        const ord = (pf.rows || []).find(x => x.sn === sn) || {};
-        const ordDate = String(ord.order_date || '').slice(0, 10);
-        const cand = (invAll || [])
-          .filter(v => !used.has(String(v.item_id)))
-          .map(v => {
-            const iname = v.name_supplier || v.name || '';
-            let sc = simPair(nm, iname) || 0;
-            const pd = String(v.purchased_at || '').slice(0, 10);
-            if (pd && ordDate && pd > ordDate) sc -= 0.35;            // 注文より後に仕入れた物は当てにくい
-            return { v, iname, sc, pd };
-          })
-          .filter(x => x.sc >= 0.45)
-          .sort((a, b) => b.sc - a.sc).slice(0, 5);
-        if (!cand.length) { alert('似ている在庫が見つかりませんでした。\n（在庫台帳の商品名が仕入元のままか、まだ登録されていない可能性があります）'); return; }
-        const pick = prompt('この注文に充てる在庫を番号で選んでください（キャンセルで中止）\n注文: ' + nm.slice(0, 48) + '\n\n'
-          + cand.map((x, i) => (i + 1) + '. [' + Math.round(x.sc * 100) + '%] ' + String(x.iname).slice(0, 46)
-            + (x.v.price != null ? ' / ¥' + Number(x.v.price).toLocaleString() : '') + (x.pd ? ' / 仕入' + x.pd : '')
-            + ' / 在庫No ' + x.v.item_id).join('\n'), '1');
-        if (!pick) return;
-        const sel = cand[parseInt(pick, 10) - 1];
-        if (!sel) { alert('番号が正しくありません'); return; }
-        if (!confirm('在庫No ' + sel.v.item_id + '（' + String(sel.iname).slice(0, 40) + '）を\nこの注文（' + sn + '）に紐付けます。よろしいですか？')) return;
-        await sbUpsert('InventoryItem', [{ item_id: sel.v.item_id, order_sn: sn, cc: cc }]);
-        try { logAct('利益', '在庫紐付け', nm.slice(0, 40), cc + ' ' + sn + ' → 在庫No ' + sel.v.item_id + '（一致' + Math.round(sel.sc * 100) + '%）'); } catch (_) {}
-        toast('✓ 在庫No ' + sel.v.item_id + ' を紐付けました');
-        pf._cache = null; renderProfit();
-      } catch (e2) { alert('在庫候補の取得に失敗: ' + ((e2 && e2.message) || e2)); }
-      finally { btn.disabled = false; btn.textContent = '🔎 在庫候補'; }
-    }));
+    // 🔎 在庫候補：カーソルを合わせるだけで、充てられそうな在庫を画像つきで一覧表示して紐付ける
+    //   ★テーブルは inventory（列: item_id/name/name_supplier/image/price/purchase_date/shopee_sn）。
+    //     紐付けは shopee_sn に注文番号を書く＝在庫台帳側の既存の持ち方に合わせる。
+    let _invAll = null, _invPop = null;
+    const invPopClose = () => { if (_invPop) { _invPop.remove(); _invPop = null; } };
+    document.addEventListener('click', e => { if (_invPop && !_invPop.contains(e.target) && !e.target.closest('.pf-invsug')) invPopClose(); });
+    body.querySelectorAll('.pf-invsug').forEach(btn => {
+      let tmr;
+      const open = async () => {
+        const sn = btn.dataset.sn, cc = btn.dataset.cc, nm = btn.dataset.nm || '';
+        if (!nm) return;
+        invPopClose();
+        const pop = document.createElement('div');
+        _invPop = pop;
+        pop.style.cssText = 'position:fixed;z-index:2147483000;background:#fff;border:1px solid #d8cff0;border-radius:9px;box-shadow:0 8px 26px rgba(0,0,0,.18);padding:8px 10px;font-size:11.5px;max-width:430px;max-height:60vh;overflow:auto';
+        pop.innerHTML = '<span class="smd-dim">在庫を探しています…</span>';
+        document.body.appendChild(pop);
+        const r = btn.getBoundingClientRect();
+        pop.style.left = Math.max(8, Math.min(window.innerWidth - 440, r.left)) + 'px';
+        pop.style.top = Math.min(window.innerHeight - 120, r.bottom + 6) + 'px';
+        try {
+          if (!_invAll) _invAll = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,supplier_url,purchase_date,shopee_sn,bin,status&limit=9000');
+          const ord = (pf.rows || []).find(x => x.sn === sn) || {};
+          const od = String(ord.order_date || '').slice(0, 10);
+          const cand = (_invAll || [])
+            .filter(v => !String(v.shopee_sn || '').trim())            // まだどの注文にも充てていない在庫だけ
+            .map(v => {
+              const iname = v.name_supplier || v.name || '';
+              let sc = simPair(nm, iname) || 0;
+              const pd = String(v.purchase_date || '').slice(0, 10);
+              if (pd && od && pd > od) sc -= 0.35;                     // 注文より後に仕入れた物は当てにくい
+              return { v, iname, sc, pd };
+            })
+            .filter(x => x.sc >= 0.35).sort((a, b) => b.sc - a.sc).slice(0, 8);
+          if (!pop.isConnected) return;
+          if (!cand.length) { pop.innerHTML = '<b>似ている在庫が見つかりませんでした</b><div class="smd-dim" style="margin-top:4px">在庫台帳の商品名が仕入元のままか、まだ登録されていない可能性があります。</div>'; return; }
+          const col = v => v >= 0.75 ? '#1a7f37' : (v >= 0.55 ? '#e8710a' : '#8a8f98');
+          pop.innerHTML = `<div style="font-weight:700;margin-bottom:5px">🔎 充てられそうな在庫 <span class="smd-dim" style="font-weight:400">（一致度順・未使用の在庫のみ）</span></div>`
+            + cand.map(x => `<div style="display:flex;gap:7px;align-items:center;padding:4px 2px;border-top:1px solid #f2f2f2">
+                ${x.v.image ? `<img src="${esc(x.v.image)}" referrerpolicy="no-referrer" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:5px;background:#f2f2f2;flex:none" onerror="this.style.opacity=.15">`
+                  : '<span style="width:44px;height:44px;border:1px dashed #ddd;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#bbb">画像なし</span>'}
+                <span style="flex:1;min-width:0">
+                  <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(x.iname)}">${esc(x.iname)}</span>
+                  <span class="smd-dim" style="font-size:10px">🏷${esc(x.v.item_id)}${x.v.bin ? ' / 棚' + esc(x.v.bin) : ''}${x.v.price != null ? ' / ¥' + Number(x.v.price).toLocaleString() : ''}${x.pd ? ' / 仕入' + esc(x.pd) : ''}</span>
+                </span>
+                <b style="flex:none;color:${col(x.sc)}">${Math.round(x.sc * 100)}%</b>
+                <button class="pf-invpick" data-id="${esc(x.v.item_id)}" data-sn="${av(sn)}" data-nm="${av(x.iname)}" style="flex:none;font-size:10px;padding:3px 9px;border:1px solid #7b52c4;background:#fff;color:#7b52c4;border-radius:5px;cursor:pointer;font-weight:700">充てる</button>
+              </div>`).join('');
+          pop.querySelectorAll('.pf-invpick').forEach(b2 => b2.addEventListener('click', async () => {
+            if (!confirm('在庫No ' + b2.dataset.id + '（' + String(b2.dataset.nm).slice(0, 40) + '）を\nこの注文（' + b2.dataset.sn + '）に充てます。よろしいですか？')) return;
+            b2.disabled = true; b2.textContent = '…';
+            try {
+              await sbUpsert('inventory', [{ item_id: b2.dataset.id, shopee_sn: b2.dataset.sn }]);
+              try { logAct('利益', '在庫紐付け', String(b2.dataset.nm).slice(0, 40), cc + ' ' + b2.dataset.sn + ' → 在庫No ' + b2.dataset.id); } catch (_) {}
+              toast('✓ 在庫No ' + b2.dataset.id + ' を充てました');
+              _invAll = null; invPopClose(); pf._cache = null; renderProfit();
+            } catch (e3) { b2.disabled = false; b2.textContent = '充てる'; alert('紐付けに失敗: ' + ((e3 && e3.message) || e3)); }
+          }));
+        } catch (e2) { if (pop.isConnected) pop.innerHTML = '<span style="color:#d93025">在庫の取得に失敗: ' + esc(String((e2 && e2.message) || e2)) + '</span>'; }
+      };
+      btn.addEventListener('mouseenter', () => { clearTimeout(tmr); tmr = setTimeout(open, 280); });
+      btn.addEventListener('mouseleave', () => clearTimeout(tmr));
+      btn.addEventListener('click', open);
+    });
     body.querySelectorAll('.pf-cost').forEach(inp => inp.addEventListener('change', async e => {
       const v = e.target.value === '' ? null : Number(e.target.value);
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
