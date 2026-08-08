@@ -6125,13 +6125,13 @@
   }
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
-    let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta;
+    let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv;
     const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝8テーブル毎回取得を解消
-    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta } = pc.data); }
+    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv } = pc.data); }
     else {
       body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費・返金を集計）</span>';
       try {
-        [orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta] = await Promise.all([
+        [orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv] = await Promise.all([
           sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
           sbGetAll('income', 'select=cc,sn,amount'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
@@ -6142,9 +6142,10 @@
           sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
           sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
           sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),   // 正式な返品リクエストの返金
+          sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),  // 📗利益計算表：PayPal差分（主にBR・買主から別途徴収した分）
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
-      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta }, at: Date.now() };
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv }, at: Date.now() };
     }
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
@@ -6156,12 +6157,16 @@
     const invBySn = {}; inv.forEach(it => { if (it.shopee_sn) invBySn[it.shopee_sn] = (invBySn[it.shopee_sn] || 0) + (Number(it.price) || 0); });
     const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
     const costBySn = {}; costs.forEach(c => { costBySn[c.cc + ':' + c.sn] = c; });
+    // ★PayPal差分＝Shopeeの入金とは別に買主から受け取った円（主にBR）。利益明細では既に粗利へ足しているので、月次でも同じにする
+    const shMap = (shKv && shKv[0] && shKv[0].v && shKv[0].v.items) || {};
+    const pplOf = o => Number((shMap[o.cc + ':' + o.sn] || {}).paypal_yen) || 0;
     const M = {}, M2 = {}; // M2[ym][cc] = 国×月の {n,dep,cost,gn}（純マージンヒートマップ用・同じ突合ロジック）
     orders.forEach(o => {
       if (o.tab === 600) return; // キャンセル除外
       // 月次バケットはJST(order_ts優先→無ければローカルorder_date)。トレンド/ダッシュボード/損益と月境界で一致させる
-      const ym = (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 7); if (!ym) return;
-      const rg = regionByCc(o.cc), rate = rg ? rg.rateJpy : 0;
+      const ymd = (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || ''));
+      const ym = ymd.slice(0, 7); if (!ym) return;
+      const rg = regionByCc(o.cc), rate = fxRate(o.cc, ymd) || (rg ? rg.rateJpy : 0);   // ★注文日のレートで円換算
       const m = M[ym] = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 };
       const cc2 = (M2[ym] = M2[ym] || {})[o.cc] = (M2[ym][o.cc]) || { n: 0, dep: 0, cost: 0, gn: 0 };
       m.n++; m.gmv += (Number(o.total) || 0) * rate; cc2.n++;
@@ -6171,7 +6176,7 @@
       // ★仕入は「在庫台帳（実際に紐付けた在庫の仕入値）」を正とする。スプシ取込は在庫が未紐付けのときの控えに降格。
       //   逆にしていたため、🔎在庫候補で紐付けても数字が変わらず、スプシを切り離せない状態だった（2026-08-09）。
       const cost = (invBySn[o.sn] != null) ? invBySn[o.sn] : ((cm && cm.cost != null) ? Number(cm.cost) : null);
-      if (dep != null && cost != null) { m.dep += dep * rate; m.cost += cost; m.gn++; cc2.dep += dep * rate; cc2.cost += cost; cc2.gn++; }
+      if (dep != null && cost != null) { const dj = dep * rate + pplOf(o); m.dep += dj; m.cost += cost; m.gn++; cc2.dep += dj; cc2.cost += cost; cc2.gn++; }
     });
     // 国×月 純マージン(粗利率=粗利/入金)ヒートマップHTML（直近6か月・データのある国のみ・信頼度低いセルは薄く）
     const heatMonths = [...new Set(Object.keys(M2))].sort().reverse().slice(0, 6);
@@ -8215,8 +8220,48 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     setupColumns('returns', body);
   }
   // ---------------- 💱 為替レート ----------------
+  // ★ここは「利益がいくらか」を左右する一番効く場所。
+  //   以前は REGIONS.rateJpy のハードコード1本だけで、その値は2024年末時点のものだった
+  //   （BR 28 / PH 2.7 / SG 115 / MY 34 / TH 4.4）。2026-07の実勢は BR 31.4 で、
+  //   BRは売上の7割を占めるため、円換算がまるごと1年半ぶん古いまま利益を出していた。
+  //   → app_kv.fx_daily に日次レート（現地通貨1単位あたりの円）を貯め、
+  //     「その注文の日のレート」で換算する。歴史が無い日は直近の営業日へフォールバック。
+  const FXD = { days: null, flat: {}, spread: 0, at: null };
+  // 換算の基準日は【注文日(JST)】。入金確定日にすると、7月の注文の確定が8〜9月にまたがって
+  // 過去月の利益が後から動いてしまうため。実際の着金レートとの差は「為替差損益」として別に見る。
+  function fxRate(cc, ymd) {
+    const rg = regionByCc(cc);
+    const fallback = rg ? rg.rateJpy : 0;
+    if (!FXD.days || !ymd) return fallback;
+    const d = String(ymd).slice(0, 10);
+    let r = (FXD.days[d] || {})[cc];
+    if (r == null) {                      // 土日・祝日は市場が閉まるので直近の営業日まで遡る
+      const t = Date.parse(d + 'T00:00:00Z');
+      if (!isNaN(t)) for (let i = 1; i <= 10 && r == null; i++) {
+        const k = new Date(t - i * 86400000).toISOString().slice(0, 10);
+        r = (FXD.days[k] || {})[cc];
+      }
+    }
+    if (r == null) r = FXD.flat[cc];
+    if (r == null) return fallback;
+    return r * (1 - (FXD.spread || 0) / 100);   // Payoneer等の手数料ぶんを引いた実効レート
+  }
+  const fxHasDaily = cc => !!(FXD.days && (FXD.flat[cc] != null || Object.values(FXD.days).some(m => m[cc] != null)));
   async function applyFxRates() {
     try {
+      const kv = await sbGetAll('app_kv', 'select=v&k=eq.fx_daily');
+      const v = kv && kv[0] && kv[0].v;
+      if (v && v.days) {
+        FXD.days = v.days; FXD.flat = v.flat || {}; FXD.spread = Number(v.spread) || 0; FXD.at = v.src || '';
+        // 日次の最新値を REGIONS へも反映＝日付を持たない画面（出品価格の円換算など）も最新レートになる
+        const last = Object.keys(v.days).sort().pop();
+        REGIONS.forEach(rg => {
+          const r = (v.days[last] || {})[rg.cc] != null ? v.days[last][rg.cc] : FXD.flat[rg.cc];
+          if (r != null) rg.rateJpy = r * (1 - FXD.spread / 100);
+        });
+      }
+    } catch (e) { /* 未取得ならコード既定値のまま */ }
+    try {   // 手動で上書きした固定レートがあれば、そちらを優先（従来どおり）
       const rows = await sbGetAll('fx_rates', 'select=*');
       rows.forEach(r => { const rg = REGIONS.find(x => x.cc === r.cc); if (rg && r.rate_jpy != null) rg.rateJpy = Number(r.rate_jpy); });
     } catch (e) { /* 未設定ならコード既定値のまま */ }
@@ -20125,15 +20170,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rg = regionByCc(o.cc); if (!rg) return;
       const di = pfDepInfo(o), dep = di ? di.amt : null, cost = pfCost(o);
       // ★会計値(純利益/確定申告CSVの元)は PayPal差分を含め、"表示専用"の🔒到着済トグル(strictCost)では絞らない（税額を静かに変えない）
-      if (dep != null && cost != null) { g += dep * rg.rateJpy + pfPaypal(o) - cost; n++; if (di.fixed) fixN++; else provN++; }
+      if (dep != null && cost != null) { g += dep * ordRate(o) + pfPaypal(o) - cost; n++; if (di.fixed) fixN++; else provN++; }
     });
     return { total: g, n: n, fixN: fixN, provN: provN };
   }
+  // 注文のJST日付（レートの基準日）。order_ts優先→無ければローカルorder_date
+  const ordYmd = o => (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 10);
+  const ordRate = o => fxRate(o.cc, ordYmd(o));   // ★円換算はすべて「注文日のレート」で統一
+
   // ソート（注文単位）
   function pfSorted(orders) {
     const key = pf.sortKey || 'date';
     const dir = pf.sortDir === 'asc' ? 1 : -1;
-    const rgRate = o => { const rg = regionByCc(o.cc); return rg ? rg.rateJpy : 1; };
+    const rgRate = o => ordRate(o) || 1;
     const val = o => {
       switch (key) {
         case 'date': return o.order_ts ? new Date((o.order_ts + 32400) * 1000).toISOString().slice(0, 16) : ((o.order_date || '') + 'T12:00'); // JST基準、時刻無しは正午扱い
@@ -20170,7 +20219,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rg = regionByCc(o.cc); if (!rg) return;
       anyFee = true;
       const a = agg.get(o.cc) || { n: 0, buyerJpy: 0, feeJpy: 0, escrowJpy: 0 };
-      a.n++; a.buyerJpy += (inc.buyer_paid || 0) * rg.rateJpy; a.feeJpy += (inc.fee_total || 0) * rg.rateJpy; a.escrowJpy += (inc.amount || 0) * rg.rateJpy;
+      const _fr = ordRate(o);
+      a.n++; a.buyerJpy += (inc.buyer_paid || 0) * _fr; a.feeJpy += (inc.fee_total || 0) * _fr; a.escrowJpy += (inc.amount || 0) * _fr;
       agg.set(o.cc, a);
     });
     if (!anyFee) return `<div class="tool-card" style="margin:0 0 10px;padding:10px 14px"><b>🧾 手数料内訳・実手数料率</b> <span class="smd-dim" style="font-size:11.5px">入金の手数料データを集計中。<b>自動集計（数時間ごと）</b>が回ると国別の実手数料率がここに出ます。</span></div>`;
@@ -20248,9 +20298,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const t = _ccTot[o.cc] = _ccTot[o.cc] || { n: 0, dep: 0, cost: 0, profit: 0, pairN: 0 };
         t.n++;
         const d2 = pfDepInfo(o), c2 = pfCost(o);
-        if (d2) t.dep += d2.amt * rg2.rateJpy;
+        const _r2 = ordRate(o);
+        if (d2) t.dep += d2.amt * _r2;
         if (c2 != null) t.cost += c2;
-        if (d2 && c2 != null) { t.profit += d2.amt * rg2.rateJpy + pfPaypal(o) - c2; t.pairN++; }
+        if (d2 && c2 != null) { t.profit += d2.amt * _r2 + pfPaypal(o) - c2; t.pairN++; }
       });
     }
     let _lastCc = null;
@@ -20267,8 +20318,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const meta = pfMeta(o);          // 注文メタ（cost_at/self_transit_at/wb_*）
       const invs = pfInv(o);           // 紐付いた在庫
       const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
-      tSales += (o.total || 0) * rg.rateJpy;
-      if (dep != null) tDep += dep * rg.rateJpy;
+      const _fr = ordRate(o);
+      tSales += (o.total || 0) * _fr;
+      if (dep != null) tDep += dep * _fr;
       if (depProv != null) tProv += depProv * rg.rateJpy;
       if (depFix != null) tFix += depFix * rg.rateJpy;
       // 真の売上＝Shopee入金＋PayPal差分（主にBR。差分をPayPalで別途徴収した分を上乗せ。大半は0）※ppl/depJpyは合算より前に宣言（TDZ回避）
@@ -20675,23 +20727,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
 
   function pfRenderSummary(body, orders) {
     const per = {};
-    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0, pair: 0, pairN: 0, st: {}, scanN: 0, obsN: 0 });
+    REGIONS.forEach(r => per[r.cc] = { n: 0, units: 0, sales: 0, depJpy: 0, depN: 0, costJpy: 0, costN: 0, pair: 0, pairN: 0, st: {}, scanN: 0, obsN: 0, salesJpy: 0, pplJpy: 0 });
     orders.forEach(o => {
       const rg = regionByCc(o.cc);
       if (!rg || !per[o.cc]) return;
       const p = per[o.cc];
       p.n++;
       p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
-      p.sales += o.total || 0;
+      p.sales += o.total || 0; p.salesJpy += (o.total || 0) * _fr;
       const sk = ordStatusKey(o.status);        // 配送状態の内訳（＝入金が確定する根拠）
       p.st[sk] = (p.st[sk] || 0) + 1;
       if (ordScanned(o)) p.scanN++;              // 倉庫スキャン済み＝入金額が確定しているはず
       const _di = pfDepInfo(o);
       if (_di && _di.observed) p.obsN++;         // 実際に金額が動いたのを観測できた件数
+      const _fr = ordRate(o);
       const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
-      if (dep != null) { p.depJpy += dep * rg.rateJpy; p.depN++; }
+      if (dep != null) { p.depJpy += dep * _fr; p.depN++; }
+      p.pplJpy += pfPaypal(o);   // PayPal差分＝Shopee入金とは別に買主から受け取った円（主にBR）
       if (cost != null) { p.costJpy += cost; p.costN++; }
-      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * rg.rateJpy + pfPaypal(o) - cost; p.pairN++; }
+      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * _fr + pfPaypal(o) - cost; p.pairN++; }
     });
     let rowsHtml = '';
     let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0, tScan = 0, tObs = 0, tCostN = 0;
@@ -20699,12 +20753,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     REGIONS.forEach(rg => {
       const p = per[rg.cc];
       if (!p.n) return;
-      tN += p.n; tUnits += p.units; tDep += p.depJpy; tCost += p.costJpy; tSalesJpy += p.sales * rg.rateJpy;
+      tN += p.n; tUnits += p.units; tDep += p.depJpy + p.pplJpy; tCost += p.costJpy; tSalesJpy += p.salesJpy;
       tPair += p.pair; tPairN += p.pairN; tScan += p.scanN; tObs += p.obsN; tCostN += p.costN;
       Object.keys(p.st).forEach(k => tSt[k] = (tSt[k] || 0) + p.st[k]);
       rowsHtml += `<tr><td><b style="color:${rg.color}">${rg.cc}</b></td><td>${p.n}件 / ${p.units}点</td>` +
-        `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.sales * rg.rateJpy)}</span></td>` +
-        `<td>${fmtJpy(p.depJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span></td>` +
+        `<td>${fmtLocal(rg, p.sales)}<br><span class="smd-jpy">≈${fmtJpy(p.salesJpy)}</span></td>` +
+        `<td>${fmtJpy(p.depJpy + p.pplJpy)}<br><span class="smd-dim">${p.depN}/${p.n}件判明</span>${p.pplJpy ? `<br><span style="color:#0f9d58;font-size:10.5px" title="Shopeeの入金とは別に、買主からPayPalで受け取った差額（主にBR）。粗利にも同じ額が入っています">内 PayPal +${fmtJpy(p.pplJpy)}</span>` : ''}</td>` +
         `<td>${fmtJpy(p.costJpy)}<br><span class="smd-dim">${p.costN}/${p.n}件判明</span>${p.n - p.costN > 0 ? `<br><button class="smd-btn pf-nocost" data-cc="${rg.cc}" style="font-size:10px;padding:1px 6px;color:#d93025;border-color:#d93025;font-weight:700" title="この国の『仕入額が入っていない注文』だけを明細で開きます">未入力 ${p.n - p.costN}件 ▸</button>` : ''}</td>` +
         `<td>${pfStBreak(p.st)}</td>` +
         `<td>${pfScanCell(p.scanN, p.obsN, p.n)}</td>` +
