@@ -589,10 +589,12 @@
     <div class="smd-toolbar" style="padding:0 20px 4px">
       <span class="smd-seg" id="stock-tab">
         <button data-k="ledger" class="on" title="仕入れた在庫の台帳（登録・状態変更・棚ラベル）">📒 在庫台帳</button>
+        <button data-k="tana" title="在庫台帳を1件ずつ「今あるか・売れたか」に仕分ける（棚卸し）">🧹 棚卸し</button>
         <button data-k="repeat" title="販売履歴から「繰り返し売れている＝先に仕入れておくべき」商品を洗い出す">🎯 有在庫化候補</button>
       </span>
     </div>
     <div id="stock-kpis"></div>
+    <div id="stock-tana" style="display:none;padding:12px 20px"></div>
     <div class="smd-toolbar">
       <select id="stock-st">
         <option value="" selected>全て</option>
@@ -5201,16 +5203,119 @@
 
   // 在庫ページのサブタブ（📒在庫台帳 / 🎯有在庫化候補）。台帳側のKPI・絞り込み・表はまとめて隠す
   let stockTab = (() => { try { return localStorage.getItem('smdStockTab') || 'ledger'; } catch (_) { return 'ledger'; } })();
+  // ---------------- 🧹 棚卸し：今あるのか、売れたのかを1件ずつ仕分けるだけの画面 ----------------
+  // ★判定は自動でしない。同じ商品を複数仕入れるのも、1カタログに現物が複数入るのも普通なので、
+  //   機械的に「重複」「二重引当」と決めつけると正常なものを壊す。目で見て押すだけにする。
+  var tana = { rows: null, loading: false, q: '', st: '在庫保管中', page: 0, sort: 'old' };
+  var TANA_PER = 80;
+  async function tanaLoad(force) {
+    if (tana.rows && !force) return;
+    tana.loading = true; drawTana();
+    try {
+      tana.rows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,status,purchase_date,shopee_sn,bin&order=purchase_date.asc.nullsfirst');
+    } catch (e) { tana.rows = []; }
+    tana.loading = false;
+  }
+  function tanaName(v) { return v.name_supplier || v.name || '(名前なし)'; }
+  function tanaFiltered() {
+    var q = tana.q.trim().toLowerCase();
+    var list = (tana.rows || []).filter(function (v) {
+      if (tana.st && String(v.status || '') !== tana.st) return false;
+      if (q && String(tanaName(v)).toLowerCase().indexOf(q) < 0 && String(v.item_id).indexOf(q) < 0) return false;
+      return true;
+    });
+    if (tana.sort === 'new') list = list.slice().reverse();
+    return list;
+  }
+  async function tanaSet(id, st) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
+    await sbUpsert('inventory', [{ item_id: id, status: st }]);
+    var r = (tana.rows || []).find(function (x) { return String(x.item_id) === String(id); });
+    if (r) r.status = st;
+    try { logAct('在庫', '棚卸し', String(id), st); } catch (e) { }
+    return true;
+  }
+  function drawTana() {
+    var host = document.getElementById('stock-tana'); if (!host) return;
+    if (tana.loading) { host.innerHTML = '<div class="smd-dim" style="padding:20px">読み込み中…</div>'; return; }
+    var all = tana.rows || [];
+    var cnt = { keep: 0, sold: 0, wait: 0, gone: 0 };
+    all.forEach(function (v) {
+      var s = String(v.status || '');
+      if (s === '在庫保管中') cnt.keep++;
+      else if (s === '販売済み') cnt.sold++;
+      else if (s === '入庫待ち') cnt.wait++;
+      else cnt.gone++;
+    });
+    var list = tanaFiltered();
+    var pages = Math.max(1, Math.ceil(list.length / TANA_PER));
+    if (tana.page >= pages) tana.page = 0;
+    var page = list.slice(tana.page * TANA_PER, tana.page * TANA_PER + TANA_PER);
+    var stBtn = function (v, label, n) {
+      return '<button class="tn-st smd-btn" data-s="' + av(v) + '" style="font-size:11.5px;padding:3px 11px'
+        + (tana.st === v ? ';background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : '') + '">' + label + ' ' + n + '</button>';
+    };
+    var rowHtml = function (v) {
+      var s = String(v.status || '');
+      var btn = function (val, label, col) {
+        var on = s === val;
+        return '<button class="tn-set smd-btn" data-id="' + av(String(v.item_id)) + '" data-v="' + av(val) + '"'
+          + ' style="font-size:11px;padding:3px 12px;white-space:nowrap' + (on ? ';background:' + col + ';color:#fff;border-color:' + col + ';font-weight:700' : ';color:' + col + ';border-color:' + col) + '">' + label + '</button>';
+      };
+      return '<div class="tn-row" style="display:flex;gap:9px;align-items:center;padding:6px 8px;border-bottom:1px solid #f2f2f2">'
+        + (v.image ? '<img src="' + esc(v.image) + '" referrerpolicy="no-referrer" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:5px;background:#f2f2f2;flex:none" onerror="this.style.opacity=.15">'
+          : '<span style="width:44px;height:44px;border:1px dashed #ddd;border-radius:5px;flex:none"></span>')
+        + '<span style="flex:1;min-width:0">'
+        + '<span style="display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + av(tanaName(v)) + '">' + esc(tanaName(v)) + '</span>'
+        + '<span class="smd-dim" style="font-size:10px">🏷' + esc(String(v.item_id)) + (v.bin ? ' / 棚' + esc(v.bin) : '')
+        + (v.price != null ? ' / ¥' + Number(v.price).toLocaleString() : '') + (v.purchase_date ? ' / 仕入 ' + esc(String(v.purchase_date).slice(0, 10)) : '')
+        + (v.shopee_sn ? ' / 注文 ' + esc(String(v.shopee_sn)) : '') + '</span></span>'
+        + '<span style="flex:none;display:inline-flex;gap:5px">' + btn('在庫保管中', '在庫あり', '#1a7f37') + btn('販売済み', '販売済み', '#8a8f98') + '</span>'
+        + '</div>';
+    };
+    host.innerHTML = '<div class="pagehelp" style="margin:0 0 10px"><b>この画面：在庫台帳を1件ずつ「今あるか・売れたか」に仕分けます。</b>'
+      + '<span class="step">1</span>状態で絞り込む <span class="step">2</span>写真と名前を見て <b>在庫あり</b> か <b>販売済み</b> を押す <span class="step">3</span>押した瞬間に保存されます。'
+      + '<span style="color:#5a6b8c;font-size:11.5px">※消したり自動判定したりはしません。押した分だけ変わります。</span></div>'
+      + '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:9px">'
+      + stBtn('在庫保管中', '在庫あり', cnt.keep) + stBtn('入庫待ち', '入庫待ち', cnt.wait) + stBtn('販売済み', '販売済み', cnt.sold) + stBtn('', '全部', all.length)
+      + '<input id="tn-q" value="' + av(tana.q) + '" placeholder="商品名・在庫Noで探す" style="width:230px;padding:5px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px">'
+      + '<button id="tn-sort" class="smd-btn" style="font-size:11px;padding:3px 10px">' + (tana.sort === 'old' ? '古い順' : '新しい順') + '</button>'
+      + '<span class="smd-dim" style="font-size:11.5px">' + list.length + '件中 ' + (tana.page * TANA_PER + 1) + '〜' + Math.min(list.length, (tana.page + 1) * TANA_PER) + '件</span>'
+      + '<button id="tn-reload" class="smd-btn" style="font-size:11px;padding:3px 10px;margin-left:auto">🔄 読み直す</button></div>'
+      + '<div style="border:1px solid #eee;border-radius:9px;overflow:hidden">' + (page.map(rowHtml).join('') || '<div class="smd-empty">該当なし</div>') + '</div>'
+      + (pages > 1 ? '<div style="margin-top:9px;display:flex;gap:6px;align-items:center"><button id="tn-prev" class="smd-btn" style="font-size:11px;padding:2px 10px">◀ 前</button>'
+        + '<span class="smd-dim" style="font-size:11.5px">' + (tana.page + 1) + '/' + pages + 'ページ</span>'
+        + '<button id="tn-next" class="smd-btn" style="font-size:11px;padding:2px 10px">次 ▶</button></div>' : '');
+    host.querySelectorAll('.tn-st').forEach(function (b) { b.addEventListener('click', function () { tana.st = b.dataset.s; tana.page = 0; drawTana(); }); });
+    host.querySelectorAll('.tn-set').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        b.disabled = true;
+        var ok = await tanaSet(b.dataset.id, b.dataset.v);
+        b.disabled = false;
+        if (ok) { toast('✓ ' + b.dataset.v + ' にしました'); drawTana(); }
+      });
+    });
+    { var q = host.querySelector('#tn-q');
+      if (q) { var t; q.addEventListener('input', function () { clearTimeout(t); t = setTimeout(function () { tana.q = q.value; tana.page = 0; drawTana(); var q2 = document.getElementById('tn-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); }); } }
+    { var sb = host.querySelector('#tn-sort'); if (sb) sb.addEventListener('click', function () { tana.sort = tana.sort === 'old' ? 'new' : 'old'; drawTana(); }); }
+    { var rb = host.querySelector('#tn-reload'); if (rb) rb.addEventListener('click', async function () { await tanaLoad(true); drawTana(); }); }
+    { var pv = host.querySelector('#tn-prev'); if (pv) pv.addEventListener('click', function () { tana.page = Math.max(0, tana.page - 1); drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
+    { var nx = host.querySelector('#tn-next'); if (nx) nx.addEventListener('click', function () { tana.page = tana.page + 1; drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
+  }
+  async function renderTana() { await tanaLoad(false); drawTana(); }
   function applyStockTab() {
     const isBuy = stockTab === 'repeat';
+    const isTana = stockTab === 'tana';
     document.querySelectorAll('#stock-tab button').forEach(b => b.classList.toggle('on', b.dataset.k === stockTab));
     const show = (el, on) => { if (el) el.style.display = on ? '' : 'none'; };
     show(document.getElementById('stk-buytab'), isBuy);
-    show(document.getElementById('stk-ledger'), !isBuy);
-    show(document.getElementById('stock-kpis'), !isBuy);
+    show(document.getElementById('stock-tana'), isTana);
+    show(document.getElementById('stk-ledger'), !isBuy && !isTana);
+    show(document.getElementById('stock-kpis'), !isBuy && !isTana);
     const pg = document.getElementById('page-stock');
-    if (pg) { const tb = pg.querySelectorAll('.smd-toolbar'); tb.forEach((t, i) => { if (i > 0) show(t, !isBuy); }); }  // 先頭はタブバー自身なので残す
+    if (pg) { const tb = pg.querySelectorAll('.smd-toolbar'); tb.forEach((t, i) => { if (i > 0) show(t, !isBuy && !isTana); }); }  // 先頭はタブバー自身なので残す
     if (isBuy) { try { renderRepeatSellers(); } catch (_) {} }
+    if (isTana) { try { renderTana(); } catch (_) {} }
   }
   function stockRender() {
     const body = document.getElementById('stock-body');
