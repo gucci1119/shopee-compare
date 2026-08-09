@@ -748,6 +748,7 @@
       </span>
       <input type="text" id="ord-search" placeholder="商品名・バイヤー・注文番号で絞り込み">
       <span class="smd-dim" id="ord-note">発送期日が近い順</span>
+      <span id="ord-dts-slot"></span>
     </div>
     <div id="ord-summary"></div>
     <div id="ord-deadline"></div>
@@ -3684,6 +3685,7 @@
     const rc = el.querySelector('.ord-riskclick');
     if (rc) rc.addEventListener('click', () => setFilter('late'));
     el.querySelectorAll('.ord-stagechip').forEach(c => c.addEventListener('click', () => setFilter(c.dataset.k)));
+    { const dts = document.getElementById('ord-dts'); if (dts && !dts.dataset.done) { dts.dataset.done = '1'; dts.innerHTML = dtsTableHtml(); } }
     // 🌏国チップ：クリックでその国だけ表示（再クリック/全国で解除）
     el.querySelectorAll('.ord-ccchip').forEach(c => c.addEventListener('click', () => { const cc = c.dataset.cc; state.orders.ccFilter = (state.orders.ccFilter === cc) ? null : cc; state.orders.page = 1; renderOrders(); }));
     { const ca = el.querySelector('.ord-ccall'); if (ca) ca.addEventListener('click', () => { state.orders.ccFilter = null; state.orders.page = 1; renderOrders(); }); }
@@ -9455,6 +9457,50 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
 
+  // ---------------- 📅 発送期限の早見表（関東圏） ----------------
+  // オーダーが入った曜日ごとに、いつまでに何をすればいいかの一覧。
+  //   ① 発送期日(セラー手配) … 公式ルールではない。③LSR期限から逆算した「関東圏なら遅くともこの日」
+  //   ② Arrange Shipment クリック期限
+  //   ③ LSR（発送遅延）スキャン期限 … ここを超えると発送遅延率が悪化
+  //   ④ NFR（自動キャンセル）スキャン期限 … ここを超えると注文が自動キャンセル
+  // ※本人提供の資料からの転記。Shopee側のルール変更があればここを直すこと。
+  const DTS_ROWS = [
+    { d: 1, w: '月', ship: '木',     grace: '火・水・木（3日）',         arr: '木',     lsr: '金',     nfr: '日 ※1',
+      ex: ['6/15(月)', '6/18(木)', '6/16〜18（3日）', '6/18(木)', '6/19(金)', '6/21(日)※1'] },
+    { d: 2, w: '火', ship: '金',     grace: '水・木・金（3日）',         arr: '金',     lsr: '土',     nfr: '次週 月',
+      ex: ['6/16(火)', '6/19(金)', '6/17〜19（3日）', '6/19(金)', '6/20(土)', '6/22(月)'] },
+    { d: 3, w: '水', ship: '金',     grace: '木・金（2日）',             arr: '土',     lsr: '日 ※1', nfr: '次週 火',
+      ex: ['6/17(水)', '6/19(金)', '6/18〜19（2日）', '6/20(土)', '6/21(日)※1', '6/23(火)'] },
+    { d: 4, w: '木', ship: '次週 火', grace: '金・土・日・月・火（5日）',  arr: '次週 火', lsr: '次週 水', nfr: '次週 金',
+      ex: ['6/18(木)', '6/23(火)', '6/19〜23（5日）', '6/23(火)', '6/24(水)', '6/26(金)'] },
+    { d: 5, w: '金', ship: '次週 水', grace: '土・日・月・火・水（5日）',  arr: '次週 水', lsr: '次週 木', nfr: '次週 土 ※2',
+      ex: ['6/19(金)', '6/24(水)', '6/20〜24（5日）', '6/24(水)', '6/25(木)', '6/27(土)※2'] },
+    { d: 6, w: '土', ship: '次週 水', grace: '日・月・火・水（4日）',      arr: '次週 水', lsr: '次週 木', nfr: '次週 土 ※2',
+      ex: ['6/20(土)', '6/24(水)', '6/21〜24（4日）', '6/24(水)', '6/25(木)', '6/27(土)※2'] },
+    { d: 0, w: '日', ship: '次週 水', grace: '月・火・水（3日）',          arr: '次週 水', lsr: '次週 木', nfr: '次週 土 ※2',
+      ex: ['6/21(日)', '6/24(水)', '6/22〜24（3日）', '6/24(水)', '6/25(木)', '6/27(土)※2'] },
+  ];
+  function dtsTableHtml() {
+    const today = new Date(Date.now() + 9 * 3600000).getUTCDay();   // JSTの曜日
+    const th = (t, w) => `<th style="border:1px solid #e5e5e5;padding:4px 7px;background:#b3261e;color:#fff;font-size:10.5px;white-space:nowrap${w ? ';width:' + w : ''}">${t}</th>`;
+    const rows = DTS_ROWS.map(r => {
+      const on = r.d === today;
+      const bg = on ? 'background:#fff4e0' : '';
+      const td = (t, col) => `<td style="border:1px solid #e5e5e5;padding:3px 7px;font-size:11px;white-space:nowrap;${bg}${col ? ';color:' + col + ';font-weight:700' : ''}">${t}</td>`;
+      return `<tr>${td((on ? '▶ ' : '') + r.w, on ? '#b3261e' : '')}${td(r.ship)}${td(r.grace, '#b26a00')}${td(r.arr)}${td(r.lsr, '#1565c0')}${td(r.nfr, '#b3261e')}</tr>` +
+        `<tr>${r.ex.map((x, i) => `<td style="border:1px solid #e5e5e5;padding:2px 7px;font-size:10px;color:#8a8f98;white-space:nowrap;${bg}">${x}</td>`).join('')}</tr>`;
+    }).join('');
+    return `<details class="tool-card" style="margin:8px 20px 0;padding:8px 14px 10px;max-width:none" ontoggle="try{localStorage.setItem('smdDtsOpen', this.open?'1':'0')}catch(e){}" ${(() => { try { return localStorage.getItem('smdDtsOpen') === '1' ? 'open' : ''; } catch (_) { return ''; } })()}>` +
+      `<summary style="cursor:pointer;list-style:none;font-weight:700;font-size:13px">📅 発送期限の早見表（関東圏）<span class="smd-dim" style="font-weight:400;font-size:11px">　オーダーが入った曜日ごとの締切。今日の曜日を色付きで表示します</span></summary>` +
+      `<div style="overflow-x:auto;margin-top:6px"><table style="border-collapse:collapse">` +
+      `<tr>${th('オーダー<br>発生日')}${th('① 発送期日<br>(セラー手配)')}${th('発送までの猶予<br>(翌日〜発送日)')}${th('② Arrange Shipment<br>クリック期限')}${th('③ LSR<br>発送遅延 期限')}${th('④ NFR<br>自動キャンセル 期限')}</tr>${rows}</table></div>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:7px;line-height:1.8">` +
+      `<b>① 発送期日</b>は<b>公式ルールではありません</b>。③LSR期限から逆算した「関東圏なら遅くともこの日に発送」という運用の目安です。<br>` +
+      `<b>② Arrange Shipment</b>＝2営業日 ／ <b>③ LSR（発送遅延）スキャン</b>＝2営業日＋1暦日 ／ <b>④ NFR（自動キャンセル）スキャン</b>＝2営業日＋4暦日。<br>` +
+      `<b style="color:#1565c0">③を超えると発送遅延率が悪化</b>し、<b style="color:#b3261e">④を超えると注文が自動キャンセル</b>されます。<br>` +
+      `※1 日曜／※2 土曜 は倉庫の稼働に注意。<span style="color:#b26a00">Shopee側のルールが変わったらこの表を直すこと。</span></div></details>`;
+  }
+
   // ---------------- 📈 月次サマリー・エクスポート ----------------
   const nextYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); };
   function downloadCsv(name, rows) {
@@ -15217,6 +15263,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ? `いまの絞り込み結果 <b>${mAll.length}</b> 件を、${(bulk.mPage || 0) * M_PER + 1}〜${Math.min(mAll.length, ((bulk.mPage || 0) + 1) * M_PER)} 件目まで表示中。絞り込みは📋出品一覧で変えられます。`
           : `📋出品一覧のチェックで選んだ <b>${selN}</b> 件です。対象を変えるときは一覧に戻ってチェックし直してください。`}</span>
         <button id="bk-back" class="smd-btn" style="font-size:11px;padding:3px 11px">📋 出品一覧に戻る</button>
+        <button class="smd-btn" id="bk-vall" style="font-size:11px;padding:2px 9px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="選んでいる全カタログに、同じ動画をまとめて設定します（1本アップロードするだけ）">🎬 選択に同じ動画</button>
+        <button class="smd-btn" id="bk-iall" style="font-size:11px;padding:2px 9px;margin-left:4px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="選んでいる全カタログのメイン画像を、同じ画像でまとめて差し替えます">🖼 選択に同じ画像</button>
         <label style="margin-left:auto;font-size:11px;cursor:pointer" title="各行の下に、メイン画像・明細画像・商品動画を出します"><input type="checkbox" id="bk-showmedia" ${bulk.showMedia === false ? '' : 'checked'}> 🖼 画像・動画も表示</label>
       </div>
       ${(bulk.view === 'media' || selN) ? `
@@ -15521,6 +15569,40 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     host.querySelectorAll('.bk-imgundo').forEach(b => b.addEventListener('click', () => {
       const e = bulk.sel.get(b.dataset.k); if (!e) return; e.imgs = null; drawBulk();
     }));
+    // ★同じ動画/画像を「選んだカタログ全部」に一発で入れる。
+    //   1カタログずつ開いて同じファイルを何度も上げるのは時間の無駄なので、
+    //   アップロードは1回だけ行い、その結果のURLを全カタログに配る。
+    const bulkApplyMedia = async (kind) => {
+      const ks = [...bulk.sel.keys()];
+      if (!ks.length) { alert('先にカタログを選んでください'); return; }
+      const label = kind === 'video' ? '動画' : 'メイン画像';
+      const v = prompt(`選んでいる ${ks.length} カタログ全部に、同じ${label}を設定します。\n\n` +
+        `${label}のURLを入れてください（空欄でOKを押すとPCのファイルを選べます）` + (kind === 'video' ? '\n※Shopeeの上限は30MBです' : ''));
+      if (v === null) return;
+      const msg = document.querySelector('#bk-msg');
+      const put = (url) => {
+        ks.forEach(k => { const e = bulk.sel.get(k); if (!e) return;
+          if (kind === 'video') { e.vid = url; e.vdel = false; }
+          else { e.imgs = [url]; } });
+        drawBulk();
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = '✓ ' + ks.length + '件に' + label + 'を設定しました（まだShopeeには送っていません。「まとめてShopeeに保存」で反映）'; }
+      };
+      if (v.trim()) {
+        if (!/^https?:\/\//.test(v.trim())) { alert('https:// で始まるURLを入れてください'); return; }
+        put(v.trim()); return;
+      }
+      const f = document.createElement('input'); f.type = 'file'; f.accept = kind === 'video' ? 'video/*' : 'image/*';
+      f.addEventListener('change', async () => {
+        const fl = (f.files || [])[0]; if (!fl) return;
+        if (kind === 'video' && fl.size > 30 * 1024 * 1024) { alert('動画が大きすぎます（' + Math.round(fl.size / 1048576) + 'MB／上限30MB）'); return; }
+        if (msg) { msg.style.color = '#3b5bdb'; msg.textContent = label + 'を用意中…（アップロードは1回だけです）'; }
+        try { put(await uploadFileToStorage(fl, ks[0])); }
+        catch (_) { if (msg) { msg.style.color = '#d93025'; msg.textContent = label + 'の準備に失敗しました'; } }
+      });
+      f.click();
+    };
+    { const b = host.querySelector('#bk-vall'); if (b) b.addEventListener('click', () => bulkApplyMedia('video')); }
+    { const b = host.querySelector('#bk-iall'); if (b) b.addEventListener('click', () => bulkApplyMedia('image')); }
     { const c = host.querySelector('#bk-showmedia'); if (c) c.addEventListener('change', () => { bulk.showMedia = c.checked; drawBulk(); }); }
     { const p2 = host.querySelector('#bk-mprev'), n2 = host.querySelector('#bk-mnext');
       if (p2) p2.addEventListener('click', () => { bulk.mPage = Math.max(0, (bulk.mPage || 0) - 1); drawBulk(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
