@@ -8587,6 +8587,216 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       } catch (e) { document.getElementById('fx-msg').textContent = '失敗: ' + e.message; }
     });
   }
+  // ---------------- 🧾 確定申告・帳簿 ----------------
+  // 損益計算書の形にまとめる画面。ポイントは2つ。
+  //  ① **売上原価 ＝ 期首棚卸高 ＋ 当期仕入高 − 期末棚卸高**。
+  //     仕入れた時点ではなく「売れた時点」で費用になる。在庫が増えた年は利益が増える。
+  //     ここを「その年に払った仕入額＝経費」と勘違いすると、申告額が大きく狂う。
+  //  ② **為替差損益**。売上は注文日のレートで円換算しているが、実際に受け取る円は
+  //     Payoneerが着金・両替した時のレートで決まる。その差は売上でも経費でもなく
+  //     「為替差損益」という別の科目。混ぜると売上も原価も歪む。
+  const tax = { year: null, cfg: null, _cache: null, bound: false };
+  // 経費のカテゴリ → 確定申告の勘定科目。未知のカテゴリは「雑費」に寄せる（消えるより良い）
+  const TAX_ACCT_DEF = {
+    '人件費': '給料賃金', '外注費': '外注工賃', '外注': '外注工賃',
+    '家賃': '地代家賃', '地代家賃': '地代家賃', '倉庫代': '地代家賃', '倉庫': '地代家賃',
+    '倉庫代・家賃': '地代家賃', '倉庫費': '地代家賃', '保管料': '地代家賃', 'オフィス': '地代家賃',
+    'ツール': '通信費', 'ツール代': '通信費', 'サブスク': '通信費', '通信費': '通信費', '通信': '通信費',
+    '送料': '荷造運賃', '国内送料': '荷造運賃', '梱包': '荷造運賃', '梱包資材': '荷造運賃', '備品費': '消耗品費',
+    '広告宣伝費': '広告宣伝費', '広告費': '広告宣伝費', '手数料': '支払手数料', '振込手数料': '支払手数料',
+    '交通費': '旅費交通費', '旅費交通費': '旅費交通費', '接待': '接待交際費', '接待交際費': '接待交際費',
+    '消耗品費': '消耗品費', '書籍': '新聞図書費', '研修': '研修費', '固定費': '雑費', 'その他': '雑費',
+  };
+  const TAX_ACCTS = ['給料賃金', '外注工賃', '地代家賃', '通信費', '荷造運賃', '消耗品費', '広告宣伝費',
+    '支払手数料', '旅費交通費', '接待交際費', '新聞図書費', '研修費', '雑費'];
+  const taxAcctOf = c => (tax.cfg && tax.cfg.map && tax.cfg.map[c]) || TAX_ACCT_DEF[String(c || '').trim()] || '雑費';
+
+  async function taxSave() {
+    try { await sbUpsert('app_kv', [{ k: 'tax_cfg', v: tax.cfg, updated_at: new Date().toISOString() }]); }
+    catch (e) { toast('❌ 保存できませんでした: ' + e.message); }
+  }
+
+  async function renderTax() {
+    const body = document.getElementById('tax-body');
+    body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
+    let orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts;
+    try {
+      [orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts] = await Promise.all([
+        sbGetAll('orders', 'select=cc,sn,tab,order_date,order_ts'),
+        sbGetAll('income', 'select=cc,sn,amount,buyer_paid,fee_total'),
+        sbGetAll('inventory', 'select=item_id,price,status,shopee_sn,purchase_date,purchase_ts'),
+        sbGetAll('expenses', 'select=ymd,amount,category,memo'),
+        sbGetAll('app_kv', 'select=v&k=eq.tax_cfg').catch(() => []),
+        sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
+        sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
+        sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),
+        sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),
+        sbGetAll('payouts', 'select=cc,payout_amount,from_amount,payout_time').catch(() => []),
+      ]);
+    } catch (e) { body.innerHTML = errBox(e); return; }
+    tax.cfg = (kv && kv[0] && kv[0].v) || { map: {}, open: {}, close: {}, usdJpy: {} };
+    if (!tax.cfg.map) tax.cfg.map = {};
+    if (!tax.cfg.open) tax.cfg.open = {}; if (!tax.cfg.close) tax.cfg.close = {}; if (!tax.cfg.usdJpy) tax.cfg.usdJpy = {};
+    const shMap = (shKv && shKv[0] && shKv[0].v && shKv[0].v.items) || {};
+    const ymdOf = o => (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 10);
+    const years = [...new Set(orders.map(o => ymdOf(o).slice(0, 4)).filter(Boolean))].sort().reverse();
+    if (!years.length) { body.innerHTML = '<div class="smd-dim">注文データがありません</div>'; return; }
+    if (!tax.year || years.indexOf(tax.year) < 0) tax.year = years[0];
+    const Y = tax.year;
+
+    // ---- 売上（その年の注文・注文日のレートで円換算。キャンセル/未払いは除外） ----
+    const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
+    let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, nOrd = 0, nDep = 0;
+    orders.forEach(o => {
+      const d = ymdOf(o);
+      if (d.slice(0, 4) !== Y || o.tab === 600 || o.tab === 200) return;
+      nOrd++;
+      const i = incBySn[o.cc + ':' + o.sn]; if (!i || i.amount == null) return;
+      const r = fxRate(o.cc, d) || 0;
+      sales += Number(i.amount) * r; nDep++;
+      buyerPaid += (Number(i.buyer_paid) || 0) * r;
+      feeTotal += (Number(i.fee_total) || 0) * r;
+      ppl += Number((shMap[o.cc + ':' + o.sn] || {}).paypal_yen) || 0;
+    });
+    sales += ppl;
+
+    // ---- 当期仕入高（その年に仕入れた在庫の合計） ----
+    const invYmd = it => (it.purchase_ts ? String(it.purchase_ts).slice(0, 10) : (it.purchase_date || '')).slice(0, 10);
+    let buys = 0, nBuy = 0;
+    inv.forEach(it => { if (invYmd(it).slice(0, 4) === Y && it.price != null) { buys += Number(it.price); nBuy++; } });
+
+    // ---- 棚卸高。実地棚卸の値が入っていればそれが正。無ければ在庫台帳から推定 ----
+    //   期末＝その年の12/31時点で「在庫保管中」かつ その日までに仕入れた在庫の合計
+    const stockAt = ymd => inv.reduce((t, it) => {
+      if (it.price == null) return t;
+      const d = invYmd(it); if (!d || d > ymd) return t;           // まだ仕入れていない
+      if (it.status === '販売済み' || it.status === '仕入キャンセル') return t;  // ざっくり：売れた分は除く
+      return t + Number(it.price);
+    }, 0);
+    const autoClose = Math.round(stockAt(Y + '-12-31'));
+    const autoOpen = Math.round(stockAt((Number(Y) - 1) + '-12-31'));
+    const openVal = (tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '') ? Number(tax.cfg.open[Y]) : autoOpen;
+    const closeVal = (tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '') ? Number(tax.cfg.close[Y]) : autoClose;
+    const cogs = openVal + buys - closeVal;   // ★売上原価
+
+    // ---- 返金（売上のマイナス） ----
+    const refund = ['01','02','03','04','05','06','07','08','09','10','11','12']
+      .reduce((t, m) => t + Math.max(0, refundForYm(issues || [], Y + '-' + m)
+        + retRefundForYm(rets || [], Y + '-' + m) - retCompForYm(rets || [], rmeta, Y + '-' + m)), 0);   // ★retCompForYmは app_kv の生の配列を受け取る（中で .items を取り出す）
+
+    // ---- 経費（勘定科目別） ----
+    const byAcct = {}; const byCat = {};
+    expenses.forEach(x => {
+      if (String(x.ymd || '').slice(0, 4) !== Y) return;
+      const a = taxAcctOf(x.category), v = Number(x.amount) || 0;
+      byAcct[a] = (byAcct[a] || 0) + v;
+      byCat[x.category || '(未分類)'] = (byCat[x.category || '(未分類)'] || 0) + v;
+    });
+    const expTotal = Object.values(byAcct).reduce((a, b) => a + b, 0);
+
+    // ---- 為替差損益 ----
+    //   計算値 … 注文日のレート×実効スプレッドで積み上げた入金（＝上の売上）
+    //   実着金 … PayoneerのUSD着金 × その年のUSD/JPY（手入力可・未入力なら概算162）
+    const usdJpy = (tax.cfg.usdJpy[Y] != null && tax.cfg.usdJpy[Y] !== '') ? Number(tax.cfg.usdJpy[Y]) : 162;
+    let payUsd = 0, payN = 0;
+    (payouts || []).forEach(x => {
+      if (!x.payout_time) return;
+      const d = jstDate(Number(x.payout_time) * 1000);
+      if (String(d).slice(0, 4) !== Y) return;
+      payUsd += Number(x.payout_amount) || 0; payN++;
+    });
+    const payJpy = Math.round(payUsd * usdJpy);
+
+    const money = (n, c) => `<b style="color:${c || (n < 0 ? '#d93025' : '#333')}">${fmtJpy(n)}</b>`;
+    const gross = sales - refund - cogs;
+    const profit = gross - expTotal;
+    // ★入金額(escrow)は公式API移行より前の注文には入っていない。
+    //   売上が欠けたまま所得を出すと、原価だけが立って**大幅な赤字**に見える（実際には黒字）。
+    //   申告に使う数字なので、被覆率が低い年は所得を出さずに止める。嘘の数字を出す方が害が大きい。
+    const cover = nOrd ? nDep / nOrd : 0;
+    const RELIABLE = cover >= 0.9;
+    const coverBox = RELIABLE ? '' :
+      `<div style="background:#fdecea;border:1px solid #f5c2c2;border-radius:8px;padding:10px 12px;margin:0 0 12px;max-width:760px;font-size:12.5px;line-height:1.8;color:#b3261e">
+         ⚠️ <b>${Y}年は入金額のデータが足りません（${nDep}/${nOrd}件・${Math.round(cover * 100)}%）。所得は出せません。</b><br>
+         <span style="color:#7a2018">入金額(escrow)はShopee公式APIに切り替えてから貯め始めたもので、それ以前の注文には入っていません。
+         売上だけが欠けた状態で計算すると<b>仕入・経費だけが立って大赤字に見えます</b>（実際は違います）。<br>
+         埋めるには、過去の<b>利益管理表</b>から現地通貨の入金額を取り込んで、注文日のレートで換算し直す必要があります（未実装・課題リストに記載）。
+         それまでこの年の数字は<b>売上原価と経費の下ごしらえとしてだけ</b>使ってください。</span></div>`;
+    const yrSel = `<select id="tax-year">${years.map(y => `<option value="${y}"${y === Y ? ' selected' : ''}>${y}年</option>`).join('')}</select>`;
+
+    body.innerHTML =
+      `<div class="smd-toolbar" style="margin:0 0 10px">📅 対象年 ${yrSel}
+        <button class="smd-btn" id="tax-csv" style="margin-left:8px">⬇ CSV（税理士へ渡す用）</button>
+        <span class="smd-dim" style="font-size:11.5px;margin-left:8px">円換算は<b>注文日のレート</b>（💱為替の日次レート）</span></div>` +
+
+      coverBox +
+      `<div class="tool-card" style="margin:0 0 12px;max-width:760px">
+        <div style="font-weight:800;font-size:15px;margin-bottom:6px">📊 ${Y}年 損益計算書</div>
+        <table class="pf-table">
+          <tr><td style="width:230px">売上高 <span class="smd-dim" style="font-size:10.5px">（Shopee入金＋PayPal差分）</span></td><td style="text-align:right">${money(sales)}</td><td style="font-size:10.5px;color:${RELIABLE ? '#8a8f98' : '#b3261e'};font-weight:${RELIABLE ? '400' : '700'}">${nDep}/${nOrd}件が入金判明（${Math.round(cover * 100)}%）</td></tr>
+          <tr><td style="padding-left:18px" class="smd-dim">返品・返金</td><td style="text-align:right">${money(-refund)}</td><td></td></tr>
+          <tr><td><b>純売上高</b></td><td style="text-align:right">${money(sales - refund)}</td><td></td></tr>
+          <tr><td colspan="3" style="padding-top:10px;font-weight:700">売上原価</td></tr>
+          <tr><td style="padding-left:18px">期首棚卸高 <span class="smd-dim" style="font-size:10.5px">（前年末の在庫）</span></td><td style="text-align:right"><input id="tax-open" value="${openVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '手入力' : '在庫台帳から自動 ' + fmtJpy(autoOpen)}</td></tr>
+          <tr><td style="padding-left:18px">当期仕入高</td><td style="text-align:right">${money(buys)}</td><td class="smd-dim" style="font-size:10.5px">${nBuy}件</td></tr>
+          <tr><td style="padding-left:18px">期末棚卸高 <span class="smd-dim" style="font-size:10.5px">（年末に残った在庫）</span></td><td style="text-align:right"><input id="tax-close" value="${closeVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '' ? '手入力' : '在庫台帳から自動 ' + fmtJpy(autoClose)}</td></tr>
+          <tr><td><b>売上原価</b> <span class="smd-dim" style="font-size:10.5px">期首＋仕入−期末</span></td><td style="text-align:right">${money(cogs)}</td><td></td></tr>
+          <tr class="pf-total"><td><b>売上総利益（粗利）</b></td><td style="text-align:right">${RELIABLE ? money(gross, gross < 0 ? '#d93025' : '#1a7f37') : '<span class="smd-dim">—</span>'}</td><td class="smd-dim" style="font-size:10.5px">${RELIABLE ? '' : '売上が不足のため非表示'}</td></tr>
+          <tr><td colspan="3" style="padding-top:10px;font-weight:700">経費</td></tr>
+          ${TAX_ACCTS.filter(a => byAcct[a]).map(a => `<tr><td style="padding-left:18px">${a}</td><td style="text-align:right">${money(byAcct[a])}</td><td></td></tr>`).join('')}
+          <tr><td><b>経費合計</b></td><td style="text-align:right">${money(expTotal)}</td><td></td></tr>
+          <tr class="pf-total"><td><b>所得（事業所得）</b></td><td style="text-align:right;font-size:15px">${RELIABLE ? money(profit, profit < 0 ? '#d93025' : '#1a7f37') : '<span style="color:#b3261e">データ不足</span>'}</td><td class="smd-dim" style="font-size:10.5px">${RELIABLE ? '' : '入金 ' + Math.round(cover * 100) + '%'}</td></tr>
+        </table>
+        <div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">💡 <b>売上原価＝期首棚卸高＋当期仕入高−期末棚卸高</b>。仕入れた時点ではなく<b>売れた時点</b>で費用になります（在庫が増えた年は利益が増える）。
+        棚卸高は<b>実地棚卸の結果を手で入れるのが正</b>です。空欄なら在庫台帳の「在庫保管中」から自動計算しますが、これは実物と一致している保証がありません。
+        <br>⚠️ この画面は計算の下ごしらえです。<b>申告そのものは税理士に確認してください。</b></div>
+      </div>` +
+
+      `<div class="tool-card" style="margin:0 0 12px;max-width:760px">
+        <div style="font-weight:700;margin-bottom:4px">💱 為替差損益 <span class="smd-dim" style="font-weight:400;font-size:11px">（売上にも経費にも混ぜない別科目）</span></div>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">売上は<b>注文日のレート</b>で円換算していますが、実際に受け取る円は<b>Payoneerが着金・両替した時のレート</b>で決まります。その差が為替差損益です。混ぜると売上も原価も歪みます。</div>
+        <table class="pf-table">
+          <tr><td style="width:280px">① 計算上の入金（注文日のレート）</td><td style="text-align:right">${money(sales - ppl)}</td></tr>
+          <tr><td>② Payoneer着金（実績）</td><td style="text-align:right">$${payUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="smd-dim">${payN}回</span></td></tr>
+          <tr><td>　${Y}年の平均USD/JPY <span class="smd-dim" style="font-size:10.5px">（実際に両替したレートを入れてください）</span></td><td style="text-align:right"><input id="tax-usdjpy" value="${usdJpy}" style="width:100px;text-align:right;padding:3px 5px;font-size:12px"></td></tr>
+          <tr><td>② を円換算</td><td style="text-align:right">${money(payJpy)}</td></tr>
+          <tr class="pf-total"><td><b>為替差損益（②−①・目安）</b></td><td style="text-align:right">${money(payJpy - (sales - ppl), (payJpy - (sales - ppl)) < 0 ? '#d93025' : '#1a7f37')}</td></tr>
+        </table>
+        <div class="smd-dim" style="font-size:11px;margin-top:6px">⚠️ ①はその年の<b>注文</b>ベース、②はその年の<b>着金</b>ベースで、対象が1〜2か月ずれます。年をまたぐ分があるので<b>この差額はあくまで目安</b>です。正確に出すなら、Payoneerの取引明細（両替レート入り）を突き合わせてください。</div>
+      </div>` +
+
+      `<div class="tool-card" style="margin:0;max-width:760px">
+        <div style="font-weight:700;margin-bottom:4px">🗂 勘定科目の割り当て <span class="smd-dim" style="font-weight:400;font-size:11px">（💴入出金・経費で使っているカテゴリ → 申告の科目）</span></div>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">割り当てを変えると上の損益計算書とCSVにすぐ反映されます。未設定のカテゴリは<b>雑費</b>に入ります（消えません）。</div>
+        <table class="pf-table"><tr><th>カテゴリ（実際に使っている名前）</th><th style="text-align:right">${Y}年の金額</th><th>勘定科目</th></tr>` +
+        (Object.keys(byCat).length ? Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]).map(c =>
+          `<tr><td>${esc(c)}</td><td style="text-align:right">${fmtJpy(byCat[c])}</td>` +
+          `<td><select class="tax-map" data-c="${esc(c)}">${TAX_ACCTS.map(a => `<option${a === taxAcctOf(c) ? ' selected' : ''}>${a}</option>`).join('')}</select></td></tr>`).join('')
+          : '<tr><td colspan="3" class="smd-dim" style="font-size:12px">この年の経費が登録されていません（💴入出金・経費で登録してください）</td></tr>') +
+        `</table></div>`;
+
+    document.getElementById('tax-year').addEventListener('change', e => { tax.year = e.target.value; renderTax(); });
+    const numOf = v => { const n = Number(String(v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? '' : n; };
+    document.getElementById('tax-open').addEventListener('change', e => { tax.cfg.open[Y] = numOf(e.target.value); taxSave(); renderTax(); });
+    document.getElementById('tax-close').addEventListener('change', e => { tax.cfg.close[Y] = numOf(e.target.value); taxSave(); renderTax(); });
+    document.getElementById('tax-usdjpy').addEventListener('change', e => { tax.cfg.usdJpy[Y] = numOf(e.target.value); taxSave(); renderTax(); });
+    body.querySelectorAll('.tax-map').forEach(el => el.addEventListener('change', () => { tax.cfg.map[el.dataset.c] = el.value; taxSave(); renderTax(); }));
+    document.getElementById('tax-csv').addEventListener('click', () => {
+      const rows = [['項目', '科目', '金額(円)', '備考']];
+      rows.push(['売上高', '売上高', Math.round(sales), 'Shopee入金(注文日レート換算)＋PayPal差分 / ' + nDep + '件']);
+      rows.push(['返品・返金', '売上高(控除)', -Math.round(refund), '']);
+      rows.push(['期首棚卸高', '期首商品棚卸高', Math.round(openVal), tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '実地棚卸(手入力)' : '在庫台帳から自動計算']);
+      rows.push(['当期仕入高', '仕入金額', Math.round(buys), nBuy + '件']);
+      rows.push(['期末棚卸高', '期末商品棚卸高', -Math.round(closeVal), tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '' ? '実地棚卸(手入力)' : '在庫台帳から自動計算']);
+      rows.push(['売上原価', '売上原価', Math.round(cogs), '期首＋仕入−期末']);
+      TAX_ACCTS.filter(a => byAcct[a]).forEach(a => rows.push(['経費', a, Math.round(byAcct[a]), '']));
+      rows.push(['所得', '事業所得', RELIABLE ? Math.round(profit) : '', RELIABLE ? '' : '⚠️入金額データが' + Math.round(cover * 100) + '%しか無いため算出不可（売上が欠けており、このまま計算すると大幅な赤字に見えます）']);
+      rows.push(['為替差損益(目安)', '為替差損益', Math.round(payJpy - (sales - ppl)), 'Payoneer着金$' + Math.round(payUsd) + ' × USD/JPY ' + usdJpy + ' − 計算上の入金。対象期間が1〜2か月ずれるため目安']);
+      downloadCsv('確定申告_' + Y + '年.csv', rows);
+      try { logAct('確定申告', 'CSV出力', Y, '所得 ' + Math.round(profit)); } catch (_) {}
+    });
+  }
+
   // ---------------- 📈 月次サマリー・エクスポート ----------------
   const nextYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); };
   function downloadCsv(name, rows) {
