@@ -4762,6 +4762,28 @@
       //   キーボードの【物理キー e.code】はIMEの影響を受けないので、そこから直接IDを組み立てる。
       //   ハンディスキャナは物理キー入力なので、これで100%正しく取れる。
       let _takBuf = '', _takBufAt = 0, _takBufT = null;
+      // 棚卸モード中は「入力欄にフォーカスさせない」。テキスト欄にフォーカスがある限り
+      // IME（ライブ変換）は必ず割り込んでくる。どこにもフォーカスが無ければIMEは何も変換できず、
+      // キーは素の keydown として届く＝化けようがない。
+      window.__takKeyHandler = (e) => {
+        if (!stock.takScan) return;
+        const t = e.target;
+        if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && t.id !== 'stock-search') return;  // 他の欄を編集中は邪魔しない
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_takUnkT); takCommitBuf(); return; }
+        if (e.key === 'Backspace') { e.preventDefault(); _takBuf = _takBuf.slice(0, -1); takBufShow(); return; }
+        if (e.key === 'Escape') { e.preventDefault(); _takBuf = ''; takBufShow(); return; }
+        const ch = TAK_CODE(e.code);
+        if (!ch) return;
+        e.preventDefault();
+        const now = Date.now();
+        if (now - _takBufAt > 1500) _takBuf = '';
+        _takBufAt = now; _takBuf += ch;
+        takBufShow();
+        clearTimeout(_takBufT);
+        _takBufT = setTimeout(takCommitBuf, 350);
+      };
+      const takBufShow = () => { const el = document.getElementById('stk-bufview'); if (el) el.textContent = _takBuf || '（読み取り待ち）'; };
       const TAK_CODE = c => {
         if (/^Key([A-Z])$/.test(c)) return c.slice(3);
         if (/^Digit(\d)$/.test(c)) return c.slice(5);
@@ -4771,28 +4793,11 @@
       };
       const takCommitBuf = () => {
         clearTimeout(_takBufT);
-        const buf = _takBuf; _takBuf = '';
-        const el = document.getElementById('stock-search');
-        if (el) el.value = '';
+        const buf = _takBuf; _takBuf = ''; takBufShow();
         if (!buf || buf.length < 5) return;
         takProcessValue(buf);
       };
-      document.getElementById('stock-search').addEventListener('keydown', e => {
-        if (!stock.takScan) return;
-        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_takUnkT); takCommitBuf(); return; }
-        const ch = TAK_CODE(e.code);
-        if (!ch) return;
-        const now = Date.now();
-        if (now - _takBufAt > 1500) _takBuf = '';   // 間が空いたら新しい1件の読み取りとみなす
-        _takBufAt = now;
-        _takBuf += ch;
-        // ★IMEが化けさせた文字ではなく、物理キーから組み立てた本当の値を欄に見せる
-        e.preventDefault();
-        e.target.value = _takBuf;
-        // Enterを打たないスキャナ・手打ちのために、打ち終わって350ms経ったら確定
-        clearTimeout(_takBufT);
-        _takBufT = setTimeout(takCommitBuf, 350);
-      });
+      document.addEventListener('keydown', e => { try { window.__takKeyHandler(e); } catch (_) {} }, true);
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
         e.target.disabled = true; e.target.textContent = '⏳ 更新中';
@@ -6119,7 +6124,11 @@
           (todo && (ok || ng) ? `<button class="smd-btn" id="stk-takfin" style="margin-left:10px;border-color:#e8710a;color:#e8710a;font-weight:700" title="✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかを選んでまとめて処理します">✓が付かなかった ${todo}件 を処理…</button>` : '') +
           ((ok || ng) ? `<button class="smd-btn" id="stk-takreset" style="margin-left:6px;font-size:11px" title="✓/✗の記録を全部消して、棚卸をやり直します（在庫の状態は変えません）">🗑 記録をリセット</button>` : '') +
           (scan && stock.imeWarn ? `<div style="margin-top:6px;padding:6px 9px;background:#fdecea;border:1px solid #f5c2c2;border-radius:6px;font-size:11.5px;color:#b3261e">⚠️ <b>日本語入力（IME）がONのままです。</b>「ITM-…」が「APIで-…」のように化けています。番号で照合できているので作業は続けられますが、<b>入力欄をクリックして「英数」キー</b>を押すか、<b>システム設定 → キーボード → 入力ソース → 日本語 → ライブ変換をオフ</b>にすると化けなくなります。</div>` : '') +
-          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37"><b>読んだら即「✓あり」に入ります</b>（チェックを押す必要はありません）。<b>同じ物を2回読んでも消えません</b>＝「読み込み済み」と警告するだけなので、安心して数えてください。取り消したい時は下の一覧の <b>×</b> か、行の「✓あり」ボタンを押してください。<br>📷 QRスキャン ／ <b>検索欄にハンディスキャナで読ませる</b> ／ <b>ItemIDを手打ちして Enter</b>。<br><span class="smd-dim">🔒 <b>日本語入力がONでも化けません</b>：キーボードの物理キーから直接読み取っているため、IMEのライブ変換（ITM→APIで、-→−~ 等）の影響を受けません。</span></div>` : '') +
+          (scan ? `<div style="margin-top:7px;padding:8px 11px;background:#fff;border:2px solid #1a7f37;border-radius:8px">` +
+            `<span style="font-size:11.5px;color:#1a7f37;font-weight:700">読み取り中</span>` +
+            `<span id="stk-bufview" style="margin-left:10px;font-family:monospace;font-size:19px;font-weight:800;letter-spacing:.04em">（読み取り待ち）</span>` +
+            `<span class="smd-dim" style="font-size:10.5px;margin-left:10px">Backspace=1字消す／Esc=やり直し／Enter=確定</span></div>` : '') +
+          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37"><b>読んだら即「✓あり」に入ります</b>（チェックを押す必要はありません）。<b>同じ物を2回読んでも消えません</b>＝「読み込み済み」と警告するだけなので、安心して数えてください。取り消したい時は下の一覧の <b>×</b> か、行の「✓あり」ボタンを押してください。<br>📷 QRスキャン ／ <b>検索欄にハンディスキャナで読ませる</b> ／ <b>ItemIDを手打ちして Enter</b>。<br><span class="smd-dim">🔒 <b>日本語入力がONでも化けません</b>：棚卸モード中は入力欄にフォーカスを置かず、キーボードの物理キーを直接読んでいます。IME（ライブ変換）が割り込む余地がありません。<b>検索欄はクリックしないでください</b>（クリックするとそこにフォーカスが移り、IMEが介入します）。</span></div>` : '') +
           // ★スキャンした物がその場でここに積み上がる。カウンタだけだと「本当に登録されたか」が分からない。
           ((ok || Object.keys(tak.unknown || {}).length) ? (() => {
             const byId = {}; (stock.rows || []).forEach(r => { byId[String(r.item_id)] = r; });
@@ -6271,7 +6280,7 @@
     body.querySelectorAll('.stk-tak').forEach(el => el.addEventListener('click', () => takMark(el.dataset.id, el.dataset.k)));
     { const b = document.getElementById('stk-takscan'); if (b) b.addEventListener('click', () => {
         stock.takScan = !stock.takScan;
-        if (stock.takScan) { stock.q = ''; const se = document.getElementById('stock-search'); if (se) { se.value = ''; se.focus(); } }
+        if (stock.takScan) { stock.q = ''; const se = document.getElementById('stock-search'); if (se) { se.value = ''; se.blur(); } document.activeElement && document.activeElement.blur && document.activeElement.blur(); }
         stockRender();
       }); }
     // ★「在庫あったリスト」＝棚卸の成果物。スプシとItemIDが食い違う分もあるので、
