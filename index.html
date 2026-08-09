@@ -1324,13 +1324,15 @@
         // ★GASは302で script.googleusercontent.com に飛ばすことがあり、その先でCORSに弾かれると
         //   Failed to fetch になる。この時は <script> 経由（CORSの影響を受けない）で取り直す。
         if (/Failed to fetch|NetworkError|CORS/i.test(msg)) {
-          if (isWrite) { lastErr = '結果を確認できませんでした（通信が切れました）。<b>実行された可能性があります</b>ので、画面を開き直して確認してください'; }
+          if (isWrite) { lastErr = '__DISCONNECTED__結果を確認できませんでした（通信が切れました）。GAS側では処理が続いている可能性が高いので、🗂しごとセンターの進捗を見てください'; }
           else { try { return await jsonpScript(url.replace(/&callback=cb$/, ''), timeoutMs || 60000); } catch (e2) { lastErr = 'サーバーに繋がりません（' + msg + '）'; } }
         } else if (msg && lastErr !== msg && !/aborted/i.test(msg)) throw e;
         lastErr = lastErr || msg || 'GAS応答なし';
       } finally { clearTimeout(tm); }
       if (att < tries - 1) await new Promise(r2 => setTimeout(r2, att === 0 ? 700 : 2500));
     }
+    // __DISCONNECTED__ は「通信が切れただけ（GAS側は動いている可能性が高い）」の内部マーカー。
+    // 呼び出し側の判定に使うだけで、画面には出さない。
     throw new Error(lastErr || 'GAS呼び出しに失敗');
   }
 
@@ -2605,6 +2607,7 @@
   }
   // 呼び出し自体が落ちた時（通信断など）に台帳を実行中のまま放置しない
   async function jobRemoteFail(key, msg) {
+    try { msg = String(msg || '').replace('__DISCONNECTED__', ''); } catch (_) {}
     try {
       const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
       const v = (rows && rows[0] && rows[0].v) || {};
@@ -15907,7 +15910,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     bulk.msg = '🗂 しごとに積みました（この画面は閉じてOK）';
     const m0 = document.querySelector('#bk-msg'); if (m0) { m0.style.color = '#3b5bdb'; m0.textContent = bulk.msg; }
     gasSerial(() => gasCall({ action: 'bulk_edit', token: settings.writeToken, kv: kv, job: key }, 900000))
-      .catch(e => jobRemoteFail(key, e && e.message));
+      .catch(e => {
+        // ★通信が切れただけならGAS側は動き続けている。ここで「失敗」にすると、
+        //   実際には保存されているのに失敗表示になり、二重に流し込む事故につながる。
+        //   ジョブは jobPoll が Supabase 経由で追えるので、切断時は失敗にしない。
+        const msg = String((e && e.message) || '');
+        if (/__DISCONNECTED__|通信が切れました|Failed to fetch|NetworkError|timeout/i.test(msg)) {
+          const m2 = document.querySelector('#bk-msg');
+          if (m2) { m2.style.color = '#b26a00'; m2.textContent = '⏳ 送信の応答は途中で切れましたが、GAS側では処理が続いています。🗂しごとセンターの進捗をご覧ください（この画面は閉じてOK）'; }
+          return;
+        }
+        jobRemoteFail(key, msg);
+      });
     try { logAct('出品', 'まとめて編集', '', ccs.join('/') + ' ' + targets.length + '件（タイトル' + nT + '/明細名' + nO + '/画像' + nI + '/動画' + nV + '/属性' + nA + '）'); } catch (_) {}
   }
   function renderBulkEdit() { drawBulk(); }
