@@ -4701,7 +4701,7 @@
       { const el = document.getElementById('stock-hw'); if (el) el.addEventListener('change', e => { stock.hw = e.target.value; stock.page = 1; stockRender(); }); }
       { const el = document.getElementById('stock-cat'); if (el) el.addEventListener('change', e => { stock.cat = e.target.value; stock.page = 1; stockRender(); }); }
       { const el = document.getElementById('stock-tak'); if (el) el.addEventListener('change', e => { stock.tak = e.target.value; stock.page = 1; stockRender(); }); }
-      let t;
+      let t, _takUnkT;
       document.getElementById('stock-search').addEventListener('input', e => {
         clearTimeout(t);
         // ★棚卸モードのときは、読み取ったItemIDをその場で「✓あり」に登録して欄を空にする。
@@ -4727,8 +4727,23 @@
               });
               return;
             }
-            // ★台帳に無いItemIDは、ここでは登録しない。
-            //   手打ちの途中（"ITM-20" など）を拾ってしまうため。Enterを押した時だけ登録する。
+            // 台帳に無いItemID。「ITM-20260712-009」のように日付8桁＋3桁の枝番が揃っていれば記録する。
+            // ただし手打ちだと「…-00」のような打ちかけも一瞬この形を通るので、
+            // **入力が止まって500ms経ってから**確定させる。スキャナは全文字を一瞬で打つので体感は変わらない。
+            const k0 = takNorm(v);
+            if (/^(?:[A-Z]*-?)?\d{8}-\d{3}(?:-\d+)?$/.test(k0)) {
+              clearTimeout(_takUnkT);
+              _takUnkT = setTimeout(async () => {
+                const now = takNorm(document.getElementById('stock-search').value || '');
+                if (now !== k0) return;                       // まだ打っている途中だった
+                if (takFind(k0)) return;                       // その後に台帳と一致した
+                document.getElementById('stock-search').value = '';
+                tak.unknown[k0] = { at: new Date().toISOString(), n: ((tak.unknown[k0] || {}).n || 0) + 1 };
+                takFlash(tak.unknown[k0].n > 1 ? 'dup' : 'unk', k0, '（在庫台帳に該当なし）', tak.unknown[k0].n);
+                await takSave(); stockRender();
+              }, 500);
+              return;
+            }
           }
         }
         t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.page = 1; saveStockFilter(); stockRender(); }, 250);
@@ -4750,8 +4765,7 @@
           stockRender();
           return;
         }
-        if (takNorm(v).length < 5) { toast('❔ ItemIDとして短すぎます：' + v); return; }
-        if (!confirm('「' + v + '」は在庫台帳にありません。\n\n現物はあったものとして記録しますか？\n（スプレッドシートとItemIDが食い違っている分は、あとでCSVで突き合わせます）')) return;
+        if (takNorm(v).length < 5) { takFlash('unk', v, '（短すぎて記録しません）', 1); return; }
         const k = takNorm(v);
         tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
         takFlash(tak.unknown[k].n > 1 ? 'dup' : 'unk', k, '（在庫台帳に該当なし）', tak.unknown[k].n);
