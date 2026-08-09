@@ -2223,8 +2223,11 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   var haveTrk = {};
   try { var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (extr || []).forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; }); } catch (_) {}
   for (var i = 0; i < sns.length; i += 50) {
-    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list' }, 'get');
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address' }, 'get');
     var _ol = ((jd.response || {}).order_list) || [];
+    // ★customers を埋めるのはこの呼び出し。recipient_address は上の response_optional_fields に
+    //   入れておかないと空で返る（別の get_order_detail 呼び出しに足しても意味が無い＝実際に
+    //   581件すべて住所が空になった）。
     _ol.forEach(function (o) { detailsAll.push(o); });   // 購入者情報の保存用に詳細を貯める
     _ol.forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
