@@ -4702,74 +4702,53 @@
       { const el = document.getElementById('stock-cat'); if (el) el.addEventListener('change', e => { stock.cat = e.target.value; stock.page = 1; stockRender(); }); }
       { const el = document.getElementById('stock-tak'); if (el) el.addEventListener('change', e => { stock.tak = e.target.value; stock.page = 1; stockRender(); }); }
       let t, _takUnkT;
+      // ★棚卸モードの読み取りは【1本の処理】にまとめる。
+      //   以前は「一致したら消す／台帳に無ければ消さない」で分岐していたため、
+      //   消されなかった文字列に次のスキャンが連結して
+      //   「202606APIで-20260608-APIで-20260608-030-…」のような値が育ってしまった。
+      //   → 入力が止まったら【必ず】処理して【必ず】欄を空にする。取りこぼしも連結も起きない。
+      const takProcess = async () => {
+        const el = document.getElementById('stock-search');
+        if (!el) return;
+        let raw = String(el.value || '').trim();
+        if (!raw) return;
+        // 日本語入力がONのまま読ませた形跡。番号部分は無事なので、そこだけ取り出す
+        if (/[^\x20-\x7E]/.test(raw)) { stock.imeWarn = true; }
+        let v = takNorm(raw);
+        if (/[^\x20-\x7E]/.test(raw)) {
+          const m = v.match(/\d{8}-\d{2,}(?:-\d+)?$/);   // 化けた語が何度も挟まっても、末尾の正しい1件を採る
+          if (m) v = m[0];
+        }
+        el.value = '';                                   // ★何があってもここで空にする
+        const f = takFind(v);
+        if (f && f.hit) {
+          const res = await takScanMark(f.hit.item_id);
+          takFlash(res.dup ? 'dup' : 'ok', f.hit.item_id, String(f.hit.name_supplier || f.hit.name || ''), res.n);
+          stockRender(); return;
+        }
+        if (f && f.many) { takFlash('unk', v, '候補が複数：' + f.many.slice(0, 3).map(r => r.item_id).join(' / '), 1); stockRender(); return; }
+        if (v.length < 5) { takFlash('unk', v || '(空)', '（短すぎて記録しません）', 1); stockRender(); return; }
+        tak.unknown[v] = { at: new Date().toISOString(), n: ((tak.unknown[v] || {}).n || 0) + 1 };
+        takFlash(tak.unknown[v].n > 1 ? 'dup' : 'unk', v, '（在庫台帳に該当なし）', tak.unknown[v].n);
+        await takSave(); stockRender();
+      };
       document.getElementById('stock-search').addEventListener('input', e => {
-        clearTimeout(t);
-        // ★棚卸モードのときは、読み取ったItemIDをその場で「✓あり」に登録して欄を空にする。
-        //   ハンディスキャナは末尾にEnterを打つ機種もあるので input で拾う（Enter待ちにしない）。
+        clearTimeout(t); clearTimeout(_takUnkT);
         if (stock.takScan) {
-          let v = e.target.value.trim();
-          // 日本語入力がONのまま読ませた形跡（英数字以外が混ざっている）。番号部分は無事なので、その場で直して見せる
-          if (/[^\x20-\x7E]/.test(v)) {
-            const cleaned = takNorm(v).replace(/^[^0-9]*-?/, '');
-            if (/^\d{6,}/.test(cleaned)) {
-              stock.imeWarn = true;
-              v = cleaned; e.target.value = cleaned;
-            }
-          }
-          if (v.length >= 6) {
-            const f = takFind(v);
-            if (f && f.hit) {
-              const hit = f.hit;
-              e.target.value = '';
-              takScanMark(hit.item_id).then(res => {
-                takFlash(res.dup ? 'dup' : 'ok', hit.item_id, String(hit.name_supplier || hit.name || ''), res.n);
-                stockRender();
-              });
-              return;
-            }
-            // 台帳に無いItemID。「ITM-20260712-009」のように日付8桁＋3桁の枝番が揃っていれば記録する。
-            // ただし手打ちだと「…-00」のような打ちかけも一瞬この形を通るので、
-            // **入力が止まって500ms経ってから**確定させる。スキャナは全文字を一瞬で打つので体感は変わらない。
-            const k0 = takNorm(v);
-            if (/^(?:[A-Z]*-?)?\d{8}-\d{3}(?:-\d+)?$/.test(k0)) {
-              clearTimeout(_takUnkT);
-              _takUnkT = setTimeout(async () => {
-                const now = takNorm(document.getElementById('stock-search').value || '');
-                if (now !== k0) return;                       // まだ打っている途中だった
-                if (takFind(k0)) return;                       // その後に台帳と一致した
-                document.getElementById('stock-search').value = '';
-                tak.unknown[k0] = { at: new Date().toISOString(), n: ((tak.unknown[k0] || {}).n || 0) + 1 };
-                takFlash(tak.unknown[k0].n > 1 ? 'dup' : 'unk', k0, '（在庫台帳に該当なし）', tak.unknown[k0].n);
-                await takSave(); stockRender();
-              }, 500);
-              return;
-            }
-          }
+          const v = takNorm(e.target.value);
+          // 台帳のIDと完全に一致した瞬間は待たずに確定（スキャナも手打ちも最速）
+          const f = takFind(v);
+          if (f && f.hit && !f.fuzzy) { takProcess(); return; }
+          // それ以外は入力が止まってから確定＝打ちかけを拾わない／連結も起きない
+          _takUnkT = setTimeout(takProcess, 550);
+          return;
         }
         t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.page = 1; saveStockFilter(); stockRender(); }, 250);
       });
-      // 手打ち／Enterを打たないスキャナの両対応：Enterで確定登録する。
-      // 台帳にあれば✓、無ければ「台帳に無いID」として記録（現物はあったので残す）。
-      document.getElementById('stock-search').addEventListener('keydown', async e => {
+      // Enterでも即確定（末尾にEnterを打つスキャナ・手打ちの両対応）
+      document.getElementById('stock-search').addEventListener('keydown', e => {
         if (e.key !== 'Enter' || !stock.takScan) return;
-        e.preventDefault();
-        const v = String(e.target.value || '').trim();
-        if (!v) return;
-        const f = takFind(v);
-        e.target.value = '';
-        if (f && f.many) { toast('❔ 候補が複数あります：' + f.many.slice(0, 3).map(r => r.item_id).join(' / ')); return; }
-        if (f && f.hit) {
-          const hit = f.hit;
-          const res = await takScanMark(hit.item_id);
-          takFlash(res.dup ? 'dup' : 'ok', hit.item_id, String(hit.name_supplier || hit.name || ''), res.n);
-          stockRender();
-          return;
-        }
-        if (takNorm(v).length < 5) { takFlash('unk', v, '（短すぎて記録しません）', 1); return; }
-        const k = takNorm(v);
-        tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
-        takFlash(tak.unknown[k].n > 1 ? 'dup' : 'unk', k, '（在庫台帳に該当なし）', tak.unknown[k].n);
-        await takSave(); stockRender();
+        e.preventDefault(); clearTimeout(_takUnkT); takProcess();
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
