@@ -4525,10 +4525,12 @@
   // 🧾棚卸（現物の確認）。状態(在庫保管中/販売済み)とは別の軸なので、専用の記録を持つ。
   //   状態を書き換えてしまうと「数えた結果あった」と「まだ数えていない」が区別できなくなる。
   //   round＝棚卸の回。回を始め直すと前回の✓は消える（毎回ゼロから数えるのが棚卸なので）。
-  const tak = { round: '', items: {}, at: '', loaded: false };
+  //   unknown … 現物はあったのに台帳に無かったItemID。スプシとItemIDが食い違っている分がここに落ちる。
+  //   「読み取れなかった＝無かったこと」にすると棚卸の意味がないので、必ず残す。
+  const tak = { round: '', items: {}, unknown: {}, at: '', loaded: false };
   const takOf = id => tak.items[String(id)] || '';
   async function takSave() {
-    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
+    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
     catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
   }
   async function takLoad() {
@@ -4537,7 +4539,7 @@
     try {
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.stocktake');
       const v = kv && kv[0] && kv[0].v;
-      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.at = v.at || ''; }
+      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.at = v.at || ''; }
     } catch (_) {}
   }
   // ---- ハード / カテゴリ の自動判定 -------------------------------------------
@@ -4714,6 +4716,16 @@
               takMark(hit.item_id, 'ok').then(() => {
                 toast(was === 'ok' ? '↩️ 取り消しました：' + hit.item_id : '✓ ' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 26));
               });
+              return;
+            }
+            // ★台帳に無いItemID。スプシとIDが食い違っている分。ここで読み捨てると
+            //   「現物はあったのに無かったこと」になってしまうので、必ず記録に残す。
+            if (/^[A-Za-z0-9][A-Za-z0-9\-_]{5,}$/.test(v)) {
+              e.target.value = '';
+              const k = v.toUpperCase();
+              tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
+              takSave().then(() => stockRender());
+              toast('⚠️ 台帳に無いItemID：' + v + '（現物あり として記録しました）');
               return;
             }
           }
@@ -5947,10 +5959,20 @@
         return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` +
           `<button class="smd-btn" id="stk-takscan" style="${scan ? 'background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="ONにすると、QRスキャン／ハンディスキャナで読み取ったItemIDがその場で「✓あり」に登録されます。現物を1つずつ手に取って読ませてください">📋 棚卸モード ${scan ? 'ON' : 'OFF'}</button>` +
           `<span style="margin-left:10px;font-size:12.5px">在庫保管中 <b>${target.length}</b>件 ／ <b style="color:#1a7f37">✓あり ${ok}</b> ／ <b style="color:#d93025">✗なし ${ng}</b> ／ <b style="color:#e8710a">未確認 ${todo}</b></span>` +
+          ((ok || Object.keys(tak.unknown || {}).length) ? `<button class="smd-btn" id="stk-takcsv" style="margin-left:10px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="✓を付けた在庫＋台帳に無かった読み取りを、1つのCSVに書き出します。スプレッドシートとの突き合わせ用">⬇ 在庫あったリスト（${ok + Object.keys(tak.unknown || {}).length}）</button>` : '') +
           (todo && (ok || ng) ? `<button class="smd-btn" id="stk-takfin" style="margin-left:10px;border-color:#e8710a;color:#e8710a;font-weight:700" title="✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかを選んでまとめて処理します">✓が付かなかった ${todo}件 を処理…</button>` : '') +
           ((ok || ng) ? `<button class="smd-btn" id="stk-takreset" style="margin-left:6px;font-size:11px" title="✓/✗の記録を全部消して、棚卸をやり直します（在庫の状態は変えません）">🗑 記録をリセット</button>` : '') +
           (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37">📷 QRスキャン を押すか、<b>検索欄にハンディスキャナで読み込ませてください</b>。読んだ在庫がその場で「✓あり」になります（同じ物をもう一度読むと取り消し）。</div>` : '') +
-          `<div class="smd-dim" style="margin-top:5px;font-size:11px">✓が付かなかった分は「売れた（販売済み）」か「仕入元がキャンセルした（仕入キャンセル）」のどちらかです。棚卸の記録は在庫の状態とは別に持っているので、押し間違えても状態は壊れません。</div>` +
+          (Object.keys(tak.unknown || {}).length ? (() => {
+            const ks = Object.keys(tak.unknown).sort();
+            return `<div style="margin-top:7px;padding:7px 9px;background:#fff8e6;border:1px solid #f0d9a8;border-radius:7px;font-size:11.5px">` +
+              `⚠️ <b>台帳に無いItemIDを ${ks.length}件 読み取りました（現物はあった分）</b>` +
+              `<button class="smd-btn" id="stk-unkcsv" style="margin-left:8px;font-size:10.5px;padding:1px 8px">⬇ CSV</button>` +
+              `<button class="smd-btn" id="stk-unkclr" style="margin-left:4px;font-size:10.5px;padding:1px 8px" title="読み取りミスなどで消したい時に">🗑 消す</button>` +
+              `<div style="margin-top:4px;font-family:monospace;font-size:11px;word-break:break-all;color:#7a5b00">${ks.slice(0, 60).map(esc).join(' / ')}${ks.length > 60 ? ' …ほか' + (ks.length - 60) + '件' : ''}</div>` +
+              `<div class="smd-dim" style="font-size:10.5px;margin-top:3px">スプレッドシートとItemIDが食い違っている分です。<b>現物はあった</b>ので、スプシ側で突き合わせてください。CSVで書き出せます。</div></div>`;
+          })() : '') +
+          `<div class="smd-dim" style="margin-top:5px;font-size:11px">✓が付かなかった分は「売れた（販売済み）」か「仕入元がキャンセルした（仕入キャンセル）」のどちらかです。棚卸の記録は在庫の状態とは別に持っているので、押し間違えても状態は壊れません。<br><b>台帳に無いItemIDを読んでも、読み捨てずに記録します</b>（現物はあったので）。</div>` +
           `</div>`;
       })() +
       `<button class="smd-btn" id="stk-dead" style="margin-left:6px;${stock.dead ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="在庫保管中のまま${DEAD_DAYS}日超の「死に筋」だけ表示（値下げ・再出品の検討対象）。滞留日数の長い順。">🏚 死に筋${deadCount ? '（' + deadCount + '）' : ''}</button>` +
@@ -6047,9 +6069,40 @@
         if (stock.takScan) { stock.q = ''; const se = document.getElementById('stock-search'); if (se) { se.value = ''; se.focus(); } }
         stockRender();
       }); }
+    // ★「在庫あったリスト」＝棚卸の成果物。スプシとItemIDが食い違う分もあるので、
+    //   台帳で当たった分と当たらなかった分を**1つのファイル**に、区別できる形で出す。
+    { const b = document.getElementById('stk-takcsv'); if (b) b.addEventListener('click', () => {
+        const rows = [['区分', 'ItemID', '商品名', 'ハード', 'カテゴリ', '仕入元', 'セラー', '仕入額(円)', '仕入日', '棚', 'Shopee注文SN', '台帳の状態', '備考']];
+        (stock.rows || []).filter(r => takOf(r.item_id) === 'ok')
+          .sort((a, b2) => String(a.item_id).localeCompare(String(b2.item_id)))
+          .forEach(r => rows.push(['在庫あり(台帳一致)', r.item_id || '', r.name_supplier || r.name || '', invHw(r), invCat(r),
+            r.supplier || '', r.seller || '', r.price != null ? r.price : '', invPurDate(r) || '', r.bin || '',
+            r.shopee_sn || '', r.status || '', '']));
+        Object.keys(tak.unknown || {}).sort().forEach(k => rows.push(['在庫あり(台帳に無し)', k, '', '', '', '', '', '', '', '', '', '',
+          '現物はあったが在庫台帳に該当なし。スプレッドシート側と突き合わせてください（読み取り' + (tak.unknown[k].n || 1) + '回・' + jstDateTime(tak.unknown[k].at) + '）']));
+        const ngs = (stock.rows || []).filter(r => takOf(r.item_id) === 'ng');
+        ngs.sort((a, b2) => String(a.item_id).localeCompare(String(b2.item_id)))
+          .forEach(r => rows.push(['✗現物なし', r.item_id || '', r.name_supplier || r.name || '', invHw(r), invCat(r),
+            r.supplier || '', r.seller || '', r.price != null ? r.price : '', invPurDate(r) || '', r.bin || '',
+            r.shopee_sn || '', r.status || '', '探したが見つからなかった']));
+        downloadCsv('棚卸_在庫あったリスト_' + new Date().toISOString().slice(0, 10) + '.csv', rows);
+        try { logAct('在庫', '棚卸リスト出力', '', (rows.length - 1) + '行'); } catch (_) {}
+      }); }
+    { const b = document.getElementById('stk-unkcsv'); if (b) b.addEventListener('click', () => {
+        const ks = Object.keys(tak.unknown).sort();
+        downloadCsv('棚卸_台帳に無いItemID_' + new Date().toISOString().slice(0, 10) + '.csv',
+          [['ItemID', '読み取り回数', '最初に読んだ日時(JST)', 'メモ']].concat(ks.map(k => [k, tak.unknown[k].n || 1, jstDateTime(tak.unknown[k].at), '現物あり・台帳に該当なし'])));
+      }); }
+    { const b = document.getElementById('stk-unkclr'); if (b) b.addEventListener('click', async () => {
+        const v = prompt('消したいItemIDを入れてください（空欄でEnter＝全部消す）。\n\n※読み取りミスを取り消す用です。', '');
+        if (v === null) return;
+        if (v.trim()) { delete tak.unknown[v.trim().toUpperCase()]; }
+        else { if (!confirm('台帳に無いItemIDの記録を全部消します。よろしいですか？')) return; tak.unknown = {}; }
+        await takSave(); stockRender();
+      }); }
     { const b = document.getElementById('stk-takreset'); if (b) b.addEventListener('click', async () => {
         if (!confirm('棚卸の ✓/✗ の記録を全部消して、やり直します。\n\n在庫の状態（在庫保管中／販売済み）は変わりません。よろしいですか？')) return;
-        tak.items = {}; await takSave(); stockRender();
+        tak.items = {}; tak.unknown = {}; await takSave(); stockRender();
       }); }
     { const b = document.getElementById('stk-takfin'); if (b) b.addEventListener('click', async () => {
         // ✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかは在庫ごとに違うので選ばせる。
