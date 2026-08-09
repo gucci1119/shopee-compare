@@ -4716,10 +4716,12 @@
         if (!raw) return;
         // 日本語入力がONのまま読ませた形跡。番号部分は無事なので、そこだけ取り出す
         if (/[^\x20-\x7E]/.test(raw)) { stock.imeWarn = true; }
-        let v = takNorm(raw);
-        if (/[^\x20-\x7E]/.test(raw)) {
-          const m = v.match(/\d{8}-\d{2,}(?:-\d+)?$/);   // 化けた語が何度も挟まっても、末尾の正しい1件を採る
+        let v = takNorm(raw);          // ★先にハイフン・全角を正規化してから番号を探す
+        if (/[^\x20-\x7E]/.test(v)) {
+          // 化けた語が何度も挟まっても、末尾の「日付8桁-枝番」を1件だけ採る
+          const m = v.match(/\d{8}-\d{2,}(?:-\d+)?$/);
           if (m) v = m[0];
+          else { const m2 = v.match(/\d{6,}[-\dA-Z]*$/); if (m2) v = m2[0]; }   // それでも駄目なら末尾の数字以降
         }
         el.value = '';                                   // ★何があってもここで空にする
         _takBusy = true;
@@ -4947,11 +4949,11 @@
   // ★入力の正規化。IMEやmacOSのテキスト置換が入ると「ITM-2026…」が「APIで-2026…」等に化ける。
   //   数字の部分は壊れないので、そこで拾えるようにする。全角も半角に直す。
   const takNorm = v => String(v || '')
-    .replace(/[Ａ-Ｚａ-ｚ０-９－―‐ー]/g, ch => {
-      const c = ch.charCodeAt(0);
-      if (ch === '－' || ch === '―' || ch === '‐' || ch === 'ー') return '-';
-      return String.fromCharCode(c - 0xFEE0);
-    })
+    // ハイフンに見える文字は全部 '-' に寄せる。IMEのライブ変換は「-」を「—」(EM DASH) や
+    // 「ー」(長音) に変えてくることがあり、ここを取りこぼすと番号照合が丸ごと失敗する。
+    .replace(/[‐‑‒–—―⁃−ー﹘﹣－ｰ~～〜_]/g, '-')   // ~ や ～ もライブ変換が作る。ItemIDに本来出ない字なので全部ハイフン扱いでよい
+    // 全角の英数字を半角へ
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
     .replace(/\s+/g, '').trim().toUpperCase();
   // 在庫台帳からItemIDを探す。①完全一致 →②接頭辞が化けていても「最初のハイフン以降」が一致すれば拾う
   function takFind(raw) {
@@ -6112,6 +6114,7 @@
                   `<span style="font-family:monospace;font-size:10.5px;flex:none;color:${x.unk ? '#b26a00' : '#1a7f37'};font-weight:700">${esc(x.k)}</span>` +
                   `<span style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(nm2)}">${esc(nm2)}</span>` +
                   `<span style="font-size:10.5px;color:#8a8f98;flex:none">${x.r && x.r.price != null ? fmtJpy(x.r.price) : ''}</span>` +
+                  (x.unk ? `<button class="stk-takfix" data-id="${esc(x.k)}" title="ItemIDを直す（読み取りが化けた分をここで修正できます）" style="border:none;background:none;cursor:pointer;color:#e8710a;font-size:13px;flex:none">✏️</button>` : '') +
                   `<button class="stk-takundo" data-id="${esc(x.k)}" data-unk="${x.unk ? '1' : ''}" title="この1件を取り消す" style="border:none;background:none;cursor:pointer;color:#b0b0b0;font-size:13px;flex:none">×</button></div>`;
               }).join('') + `</div></div>`;
           })() : '') +
@@ -6132,6 +6135,7 @@
             return `<div style="margin-top:7px;padding:7px 9px;background:#fff8e6;border:1px solid #f0d9a8;border-radius:7px;font-size:11.5px">` +
               `⚠️ <b>台帳に無いItemIDを ${ks.length}件 読み取りました（現物はあった分）</b>` +
               `<button class="smd-btn" id="stk-unkcsv" style="margin-left:8px;font-size:10.5px;padding:1px 8px">⬇ CSV</button>` +
+              `<button class="smd-btn" id="stk-unkfix" style="margin-left:4px;font-size:10.5px;padding:1px 8px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="「APIで-…」のように化けたIDを、番号部分で台帳と照合し直して「✓あり」へ移します">🔧 化けたIDをまとめて直す</button>` +
               `<button class="smd-btn" id="stk-unkclr" style="margin-left:4px;font-size:10.5px;padding:1px 8px" title="読み取りミスなどで消したい時に">🗑 消す</button>` +
               `<div style="margin-top:4px;font-family:monospace;font-size:11px;word-break:break-all;color:#7a5b00">${ks.slice(0, 60).map(esc).join(' / ')}${ks.length > 60 ? ' …ほか' + (ks.length - 60) + '件' : ''}</div>` +
               `<div class="smd-dim" style="font-size:10.5px;margin-top:3px">スプレッドシートとItemIDが食い違っている分です。<b>現物はあった</b>ので、スプシ側で突き合わせてください。CSVで書き出せます。</div></div>`;
@@ -6240,6 +6244,28 @@
       if (el.dataset.unk) { delete tak.unknown[id]; await takSave(); stockRender(); }
       else takMark(id, 'ok');   // 同じ種類をもう一度＝取り消し
     }));
+    body.querySelectorAll('.stk-takfix').forEach(el => el.addEventListener('click', async () => {
+      const old = el.dataset.id;
+      // 読み取りが化けた分をここで直す。直した結果が台帳にあれば「✓あり」へ昇格させる
+      const v = prompt('ItemIDを直してください。\n\n在庫台帳にあるIDに直すと「✓あり」に入ります。\n台帳に無いままなら、直したIDで記録し直します。', old);
+      if (v === null) return;
+      const nv = takNorm(v);
+      if (!nv) return;
+      const n = (tak.unknown[old] || {}).n || 1;
+      const at = (tak.unknown[old] || {}).at || new Date().toISOString();
+      const f = takFind(nv);
+      delete tak.unknown[old];
+      if (f && f.hit) {
+        tak.items[String(f.hit.item_id)] = 'ok';
+        tak.seq[String(f.hit.item_id)] = at;
+        await takSave(); stockRender();
+        takFlash('ok', f.hit.item_id, String(f.hit.name_supplier || f.hit.name || ''), 1);
+        stockRender();
+        return;
+      }
+      tak.unknown[nv] = { at, n };
+      await takSave(); stockRender();
+    }));
     { const b = document.getElementById('stk-taklistall'); if (b) b.addEventListener('click', () => { stock.takListAll = !stock.takListAll; stockRender(); }); }
     { const b = document.getElementById('stk-takcsv'); if (b) b.addEventListener('click', () => {
         const rows = [['区分', 'ItemID', '商品名', 'ハード', 'カテゴリ', '仕入元', 'セラー', '仕入額(円)', '仕入日', '棚', 'Shopee注文SN', '台帳の状態', '備考']];
@@ -6262,6 +6288,25 @@
         const ks = Object.keys(tak.unknown).sort();
         downloadCsv('棚卸_台帳に無いItemID_' + new Date().toISOString().slice(0, 10) + '.csv',
           [['ItemID', '読み取り回数', '最初に読んだ日時(JST)', 'メモ']].concat(ks.map(k => [k, tak.unknown[k].n || 1, jstDateTime(tak.unknown[k].at), '現物あり・台帳に該当なし'])));
+      }); }
+    { const b = document.getElementById('stk-unkfix'); if (b) b.addEventListener('click', async () => {
+        // 記録済みの「台帳に無いID」を、あらためて番号部分で照合し直す。
+        // 「APIで-20260510—008」のように接頭辞やハイフンが化けた分をまとめて救う。
+        let moved = 0, still = 0;
+        for (const k of Object.keys(tak.unknown)) {
+          let v = takNorm(k);
+          const m = v.match(/\d{8}-\d{2,}(?:-\d+)?$/);
+          if (m) v = m[0];
+          const f = takFind(v);
+          if (f && f.hit && !takOf(f.hit.item_id)) {
+            tak.items[String(f.hit.item_id)] = 'ok';
+            tak.seq[String(f.hit.item_id)] = tak.unknown[k].at || new Date().toISOString();
+            delete tak.unknown[k]; moved++;
+          } else if (f && f.hit) { delete tak.unknown[k]; moved++; }   // 既に✓が付いている＝同じ物
+          else still++;
+        }
+        await takSave(); stockRender();
+        alert(moved + '件を「✓あり」に移しました。\n' + still + '件は番号でも台帳に見つからないので、そのまま残しています（スプレッドシートとの食い違い分）。');
       }); }
     { const b = document.getElementById('stk-unkclr'); if (b) b.addEventListener('click', async () => {
         const v = prompt('消したいItemIDを入れてください（空欄でEnter＝全部消す）。\n\n※読み取りミスを取り消す用です。', '');
