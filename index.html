@@ -4527,10 +4527,10 @@
   //   round＝棚卸の回。回を始め直すと前回の✓は消える（毎回ゼロから数えるのが棚卸なので）。
   //   unknown … 現物はあったのに台帳に無かったItemID。スプシとItemIDが食い違っている分がここに落ちる。
   //   「読み取れなかった＝無かったこと」にすると棚卸の意味がないので、必ず残す。
-  const tak = { round: '', items: {}, unknown: {}, seq: {}, at: '', loaded: false };
+  const tak = { round: '', items: {}, unknown: {}, seq: {}, dup: {}, at: '', loaded: false };
   const takOf = id => tak.items[String(id)] || '';
   async function takSave() {
-    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
+    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
     catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
   }
   async function takLoad() {
@@ -4539,7 +4539,7 @@
     try {
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.stocktake');
       const v = kv && kv[0] && kv[0].v;
-      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.seq = v.seq || {}; tak.at = v.at || ''; }
+      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.seq = v.seq || {}; tak.dup = v.dup || {}; tak.at = v.at || ''; }
     } catch (_) {}
   }
   // ---- ハード / カテゴリ の自動判定 -------------------------------------------
@@ -4721,9 +4721,10 @@
             if (f && f.hit) {
               const hit = f.hit;
               e.target.value = '';
-              const was = takOf(hit.item_id);
-              takMark(hit.item_id, 'ok').then(() => {
-                toast((was === 'ok' ? '↩️ 取り消しました：' : '✓ ') + hit.item_id + (f.fuzzy ? '（入力が化けていたので番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
+              takScanMark(hit.item_id).then(res => {
+                toast(res.dup
+                  ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 22)
+                  : '✓ ' + hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
               });
               return;
             }
@@ -4745,9 +4746,10 @@
         if (f && f.many) { toast('❔ 候補が複数あります：' + f.many.slice(0, 3).map(r => r.item_id).join(' / ')); return; }
         if (f && f.hit) {
           const hit = f.hit;
-          const was = takOf(hit.item_id);
-          await takMark(hit.item_id, 'ok');
-          toast((was === 'ok' ? '↩️ 取り消しました：' : '✓ ') + hit.item_id + (f.fuzzy ? '（入力が化けていたので番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
+          const res = await takScanMark(hit.item_id);
+          toast(res.dup
+            ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 22)
+            : '✓ ' + hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
           return;
         }
         if (takNorm(v).length < 5) { toast('❔ ItemIDとして短すぎます：' + v); return; }
@@ -4755,7 +4757,7 @@
         const k = takNorm(v);
         tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
         await takSave(); stockRender();
-        toast('⚠️ 台帳に無いItemID：' + v + '（現物あり として記録）');
+        toast((tak.unknown[k].n > 1 ? '⚠️ すでに読み込み済み（' + tak.unknown[k].n + '回目）：' : '⚠️ 台帳に無いItemID：') + k + '（現物あり として記録）');
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
@@ -4970,6 +4972,20 @@
       if (cand.length > 1) return { many: cand };
     }
     return null;
+  }
+
+  // 読み取り（スキャン/手打ち/QR）専用。すでに✓が付いていたら【取り消さずに警告】する。
+  //   数えている最中に「2回読んだせいで✓が消える」と、実物はあるのに無い扱いになって致命的。
+  //   取り消しは一覧の × か、行の✓ボタンから明示的に行う。
+  async function takScanMark(id) {
+    const key = String(id);
+    if (takOf(key) === 'ok') {
+      tak.dup[key] = (tak.dup[key] || 1) + 1;
+      await takSave(); stockRender();
+      return { dup: true, n: tak.dup[key] };
+    }
+    await takMark(key, 'ok');
+    return { dup: false, n: 1 };
   }
 
   // 棚卸の記録。同じボタンをもう一度押すと取り消し（押し間違いを直せる）
@@ -6026,7 +6042,7 @@
           (todo && (ok || ng) ? `<button class="smd-btn" id="stk-takfin" style="margin-left:10px;border-color:#e8710a;color:#e8710a;font-weight:700" title="✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかを選んでまとめて処理します">✓が付かなかった ${todo}件 を処理…</button>` : '') +
           ((ok || ng) ? `<button class="smd-btn" id="stk-takreset" style="margin-left:6px;font-size:11px" title="✓/✗の記録を全部消して、棚卸をやり直します（在庫の状態は変えません）">🗑 記録をリセット</button>` : '') +
           (scan && stock.imeWarn ? `<div style="margin-top:6px;padding:6px 9px;background:#fdecea;border:1px solid #f5c2c2;border-radius:6px;font-size:11.5px;color:#b3261e">⚠️ <b>日本語入力（IME）がONのままです。</b>「ITM-…」が「APIで-…」のように化けています。番号で照合できているので作業は続けられますが、<b>入力欄をクリックして「英数」キー</b>を押すか、<b>システム設定 → キーボード → 入力ソース → 日本語 → ライブ変換をオフ</b>にすると化けなくなります。</div>` : '') +
-          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37"><b>読んだら即「✓あり」に入ります</b>（チェックを押す必要はありません／同じ物をもう一度読むと取り消し）。<br>📷 QRスキャン ／ <b>検索欄にハンディスキャナで読ませる</b> ／ <b>ItemIDを手打ちして Enter</b>。<br><span class="smd-dim">IMEやテキスト置換で先頭が化けても（例 <b>APIで-2026…</b>）、番号部分で照合します。台帳に無いIDは Enter または QR で確認のうえ記録します。</span></div>` : '') +
+          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37"><b>読んだら即「✓あり」に入ります</b>（チェックを押す必要はありません）。<b>同じ物を2回読んでも消えません</b>＝「読み込み済み」と警告するだけなので、安心して数えてください。取り消したい時は下の一覧の <b>×</b> か、行の「✓あり」ボタンを押してください。<br>📷 QRスキャン ／ <b>検索欄にハンディスキャナで読ませる</b> ／ <b>ItemIDを手打ちして Enter</b>。<br><span class="smd-dim">IMEやテキスト置換で先頭が化けても（例 <b>APIで-2026…</b>）、番号部分で照合します。台帳に無いIDは Enter または QR で確認のうえ記録します。</span></div>` : '') +
           // ★スキャンした物がその場でここに積み上がる。カウンタだけだと「本当に登録されたか」が分からない。
           ((ok || Object.keys(tak.unknown || {}).length) ? (() => {
             const byId = {}; (stock.rows || []).forEach(r => { byId[String(r.item_id)] = r; });
@@ -6057,6 +6073,18 @@
                   `<button class="stk-takundo" data-id="${esc(x.k)}" data-unk="${x.unk ? '1' : ''}" title="この1件を取り消す" style="border:none;background:none;cursor:pointer;color:#b0b0b0;font-size:13px;flex:none">×</button></div>`;
               }).join('') + `</div></div>`;
           })() : '') +
+          ((() => {   // 2回以上読んだ物。数え漏れ・二度読みの気づきに使う（✓は消していない）
+            const dups = Object.keys(tak.dup || {}).filter(k => (tak.dup[k] || 0) > 1)
+              .concat(Object.keys(tak.unknown || {}).filter(k => ((tak.unknown[k] || {}).n || 0) > 1));
+            if (!dups.length) return '';
+            const byId = {}; (stock.rows || []).forEach(r => { byId[String(r.item_id)] = r; });
+            return `<div style="margin-top:7px;padding:7px 9px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:7px;font-size:11.5px">` +
+              `🔁 <b>2回以上読み込んだもの ${dups.length}件</b><span class="smd-dim">（✓は消していません。同じ棚を二度数えていないかの確認用）</span>` +
+              `<div style="margin-top:4px;max-height:120px;overflow:auto">` +
+              dups.map(k => { const r = byId[k]; const n = (tak.dup[k] || (tak.unknown[k] || {}).n || 2);
+                return `<div style="font-size:11px;padding:1px 0"><b style="color:#3949ab">${n}回</b> <span style="font-family:monospace">${esc(k)}</span> <span class="smd-dim">${esc(String((r && (r.name_supplier || r.name)) || '（台帳に無いID）').slice(0, 34))}</span></div>`;
+              }).join('') + `</div></div>`;
+          })()) +
           (Object.keys(tak.unknown || {}).length ? (() => {
             const ks = Object.keys(tak.unknown).sort();
             return `<div style="margin-top:7px;padding:7px 9px;background:#fff8e6;border:1px solid #f0d9a8;border-radius:7px;font-size:11.5px">` +
@@ -6201,7 +6229,7 @@
       }); }
     { const b = document.getElementById('stk-takreset'); if (b) b.addEventListener('click', async () => {
         if (!confirm('棚卸の ✓/✗ の記録を全部消して、やり直します。\n\n在庫の状態（在庫保管中／販売済み）は変わりません。よろしいですか？')) return;
-        tak.items = {}; tak.unknown = {}; tak.seq = {}; await takSave(); stockRender();
+        tak.items = {}; tak.unknown = {}; tak.seq = {}; tak.dup = {}; await takSave(); stockRender();
       }); }
     { const b = document.getElementById('stk-takfin'); if (b) b.addEventListener('click', async () => {
         // ✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかは在庫ごとに違うので選ばせる。
@@ -9271,9 +9299,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (stock.takScan) {                       // 棚卸モード中は読んだ瞬間に「✓あり」へ入れる（別途チェックを押さない）
               const f = takFind(id);
               if (f && f.hit) {
-                const was = takOf(f.hit.item_id);
-                takMark(f.hit.item_id, 'ok').then(() => {
-                  toast((was === 'ok' ? '↩️ 取り消しました：' : '✓ ') + f.hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(f.hit.name_supplier || f.hit.name || '').slice(0, 24));
+                takScanMark(f.hit.item_id).then(res => {
+                  toast(res.dup
+                    ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + f.hit.item_id + '　' + String(f.hit.name_supplier || f.hit.name || '').slice(0, 22)
+                    : '✓ ' + f.hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(f.hit.name_supplier || f.hit.name || '').slice(0, 24));
                 });
                 if (state.page !== 'stock') showPage('stock');
                 return;
@@ -9283,7 +9312,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               if (k.length >= 5) {                     // 台帳に無い＝ItemIDが食い違っている分。現物はあったので残す
                 tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
                 takSave().then(() => stockRender());
-                toast('⚠️ 台帳に無いItemID：' + k + '（現物あり として記録）');
+                toast((tak.unknown[k].n > 1 ? '⚠️ すでに読み込み済み（' + tak.unknown[k].n + '回目）：' : '⚠️ 台帳に無いItemID：') + k + '（現物あり として記録）');
                 if (state.page !== 'stock') showPage('stock');
                 return;
               }
