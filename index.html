@@ -2605,6 +2605,15 @@
   async function jobRemoteCancel(key) {
     try { const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = (rows && rows[0] && rows[0].v) || {}; v.status = 'cancel'; await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
   }
+  // 「次はここから」を残す＝タブを閉じても開き直せば続きから走れる
+  async function jobRemoteSetResume(key, resume) {
+    try {
+      const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
+      const v = (rows && rows[0] && rows[0].v) || {};
+      v.resume = resume;
+      await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]);
+    } catch (_) {}
+  }
   // 分割実行した全チャンクの累計で完了にする（GASは途中で返るので完了判定は呼び出し側の役目）
   async function jobRemoteDone(key, result) {
     try {
@@ -15279,6 +15288,73 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ★保存できた分は「その場で」画面に反映する。以前は完了後に🔄最新に更新を押さないと
   //   タイトルも動画も古いままで、押し忘れると保存できていないように見えていた。
   //   Shopeeに書けた事実はこちらで分かっているので、手元のデータも同じ形に揃える。
+  // ★メディアセンターの絞り込みは drawBulk と wireBulkMedia の両方から必要になる。
+  //   drawBulk のローカル変数(mAll)を参照していたせいで「絞り込み全N件を選択」が
+  //   スコープ外の参照で例外になり、押しても1ページ分(60件)のままだった。
+  const mImgN = (r) => ((r.images && r.images.length) ? r.images.length : (r.image ? 1 : 0));
+  const mHasVid = (r) => !!(r.has_video || r.video_url);
+  // 選んだ行の編集状態(bulkEntry)を用意する。これも drawBulk のローカルだったため
+  // ハンドラから呼べていなかった。
+  const mEntry = (r) => { const k = r.cc + '|' + r.item_id; if (!bulk.sel.has(k)) bulk.sel.set(k, bulkEntry(r)); return bulk.sel.get(k); };
+  function bkMediaFiltered() {
+    let a = (bulk.view === 'media') ? ((lst && lst._mediaRows) || []) : [];
+    if (bulk.view !== 'media') return a;
+    if (bulk.mCc) a = a.filter(r => r.cc === bulk.mCc);
+    if (bulk.mNoVid) a = a.filter(r => !mHasVid(r));
+    if (bulk.mFewImg) a = a.filter(r => mImgN(r) < Number(bulk.mFewImg));
+    if (bulk.mQ) { const q = String(bulk.mQ).toLowerCase(); a = a.filter(r => String(r.name || '').toLowerCase().includes(q) || String(r.item_id || '').includes(q)); }
+    if (bulk.mSort === 'img') a = a.slice().sort((x, y) => mImgN(x) - mImgN(y));
+    return a;
+  }
+  // ★分割実行の本体。ブラウザ側でループを回すので、タブを閉じると止まる。
+  //   どこまで済んだかを job に書いておき、開き直した時に続きから再開できるようにする
+  //   （4710件のような規模だと数時間かかり、途中で閉じない前提は現実的でないため）。
+  async function bkRunChunks(kv, key, targets, from, done, failed, errors) {
+    from = from || 0; done = done || 0; failed = failed || 0; errors = errors || [];
+    let guard = 0;
+    try {
+      for (;;) {
+        if (++guard > 2000) throw new Error('分割回数が多すぎます');
+        const res = await gasSerial(() => gasCall(
+          { action: 'bulk_edit', token: settings.writeToken, kv: kv, job: key, from: from }, 600000));
+        done += (res && res.done) || 0;
+        failed += (res && res.failed) || 0;
+        if (res && res.errors && res.errors.length) errors = errors.concat(res.errors);
+        // ここまでの分は「もう保存済み」。画面にその場で反映して、最新に更新を押さなくてよくする
+        if (targets) bkApplySaved(targets.slice(from, (res && res.next != null) ? res.next : targets.length));
+        if (!res || res.next == null) break;
+        from = res.next;
+        // 再開できるように「次はここから」を残す。タブが落ちてもこれで拾える
+        await jobRemoteSetResume(key, { kv: kv, from: from, done: done, failed: failed, errors: errors.slice(0, 20) });
+      }
+      await jobRemoteDone(key, { done: done, failed: failed, errors: errors.slice(0, 20) });
+    } catch (e) {
+      const msg = String((e && e.message) || '');
+      // 通信が切れただけならGAS側は動き続けている。失敗にすると二重に流し込む事故になる
+      if (/__DISCONNECTED__|通信が切れました|Failed to fetch|NetworkError/i.test(msg)) {
+        const m2 = document.querySelector('#bk-msg');
+        if (m2) { m2.style.color = '#b26a00'; m2.textContent = '⏳ 応答が途中で切れました。GAS側では処理が続いています。🗂しごとセンターの進捗をご覧ください'; }
+        return;
+      }
+      jobRemoteFail(key, msg + (done ? '（' + done + '件は保存済み）' : ''));
+    }
+  }
+  // 開き直した時に、止まったままの「まとめて編集」を拾って続きから走らせる。
+  // 他のタブがまだ回している可能性があるので、2分以上更新が無いものだけを対象にする。
+  async function bkResumeStalled() {
+    if (!settings.writeToken || !settings.sbSecret) return;
+    let rows = [];
+    try { rows = await sbGetAll('app_kv', 'select=k,v,updated_at&k=like.job_*'); } catch (_) { return; }
+    const now = Date.now();
+    for (const r of (rows || [])) {
+      const v = r.v || {};
+      if (v.kind !== 'bulkedit' || v.status !== 'run' || !v.resume || !v.resume.kv) continue;
+      if (now - new Date(r.updated_at).getTime() < 120000) continue;   // 別タブが動いている最中かもしれない
+      const rz = v.resume;
+      jobPollStart();
+      bkRunChunks(rz.kv, r.k, null, rz.from || 0, rz.done || 0, rz.failed || 0, rz.errors || []);
+    }
+  }
   function bkApplySaved(list) {
     (list || []).forEach(e => {
       if (!e) return;
@@ -15310,20 +15386,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 🖼画像・動画は「いまの絞り込み結果ぜんぶ」を見る。触った行だけ bulk.sel に載せて💾の対象にする
     // ★メディアセンターは「直すべきカタログを見つける」画面。
     //   動画が無い・画像が少ない・特定の国、で絞れないと1904件から探せない。
-    let mAll = (bulk.view === 'media') ? ((lst && lst._mediaRows) || []) : [];
-    const mImgN = (r) => ((r.images && r.images.length) ? r.images.length : (r.image ? 1 : 0));
-    const mHasVid = (r) => !!(r.has_video || r.video_url);
-    if (bulk.view === 'media') {
-      if (bulk.mCc) mAll = mAll.filter(r => r.cc === bulk.mCc);
-      if (bulk.mNoVid) mAll = mAll.filter(r => !mHasVid(r));
-      if (bulk.mFewImg) mAll = mAll.filter(r => mImgN(r) < Number(bulk.mFewImg));
-      if (bulk.mQ) { const q = String(bulk.mQ).toLowerCase(); mAll = mAll.filter(r => String(r.name || '').toLowerCase().includes(q) || String(r.item_id || '').includes(q)); }
-      if (bulk.mSort === 'img') mAll = mAll.slice().sort((a, b) => mImgN(a) - mImgN(b));
-    }
+    const mAll = bkMediaFiltered();
     const M_PER = 60, mPages = Math.max(1, Math.ceil(mAll.length / M_PER));
     if ((bulk.mPage || 0) >= mPages) bulk.mPage = 0;
     const mPage = mAll.slice((bulk.mPage || 0) * M_PER, (bulk.mPage || 0) * M_PER + M_PER);
-    const mEntry = (r) => { const k = r.cc + '|' + r.item_id; if (!bulk.sel.has(k)) bulk.sel.set(k, bulkEntry(r)); return bulk.sel.get(k); };
     host.innerHTML = `
       <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:13px">${bulk.view === 'media' ? '🖼 画像・動画（メディアセンター）' : '🛠 まとめて編集'}</b>
@@ -15748,11 +15814,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   ページをまたいで絞り込み結果ぜんぶを選ぶ。データ(mAll)から直接キーを作るのでDOMに依存しない。
     { const b = host.querySelector('#bk-mselfilt'); if (b) b.addEventListener('click', () => {
         if (!bulk.mSel) bulk.mSel = new Set();
-        const keys = mAll.map(r => r.cc + '|' + r.item_id);
+        const rows = bkMediaFiltered();
+        const keys = rows.map(r => r.cc + '|' + r.item_id);
         const on = keys.some(k => !bulk.mSel.has(k));   // 1つでも未選択なら全部選ぶ、全部選択済みなら解除
         keys.forEach(k => { if (on) bulk.mSel.add(k); else bulk.mSel.delete(k); });
         // 選んだ全部が💾の対象になるよう、実体(bulkEntry)も用意しておく
-        if (on) mAll.forEach(r => mEntry(r));
+        if (on) rows.forEach(r => mEntry(r));
         drawBulk();
       }); }
     // PCのファイルを直接選ばせる。URLを聞かずに即ファイル選択（1回上げて全カタログに配る）
@@ -15956,38 +16023,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       m.style.color = '#3b5bdb'; m.innerHTML = '保存中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');
     };
     jobPollStart();
-    bulk.msg = '🗂 しごとに積みました（この画面は閉じてOK）';
+    bulk.msg = '🗂 しごとに積みました（このタブは開いたままに。閉じても開き直せば続きから再開します）';
     const m0 = document.querySelector('#bk-msg'); if (m0) { m0.style.color = '#3b5bdb'; m0.textContent = bulk.msg; }
     // ★GASは1回6分で強制終了される。60件を1回で渡すと必ず途中で殺され、
     //   画面には「通信が切れました」と出ていた（実体は5分51秒でGASが死亡）。
     //   GASは締切(4分30秒)が来ると next= を返して一旦戻るので、続きから呼び直す。
-    (async () => {
-      let from = 0, done = 0, failed = 0, errors = [], guard = 0;
-      try {
-        for (;;) {
-          if (++guard > 200) throw new Error('分割回数が多すぎます（対象を減らしてください）');
-          const res = await gasSerial(() => gasCall(
-            { action: 'bulk_edit', token: settings.writeToken, kv: kv, job: key, from: from }, 600000));
-          done += (res && res.done) || 0;
-          failed += (res && res.failed) || 0;
-          if (res && res.errors && res.errors.length) errors = errors.concat(res.errors);
-          // ここまでの分は「もう保存済み」。画面にその場で反映して、最新に更新を押さなくてよくする
-          bkApplySaved(targets.slice(from, (res && res.next != null) ? res.next : targets.length));
-          if (!res || res.next == null) break;
-          from = res.next;
-        }
-        await jobRemoteDone(key, { done: done, failed: failed, errors: errors.slice(0, 20) });
-      } catch (e) {
-        const msg = String((e && e.message) || '');
-        // 通信が切れただけならGAS側は動き続けている。失敗にすると二重に流し込む事故になる
-        if (/__DISCONNECTED__|通信が切れました|Failed to fetch|NetworkError/i.test(msg)) {
-          const m2 = document.querySelector('#bk-msg');
-          if (m2) { m2.style.color = '#b26a00'; m2.textContent = '⏳ 応答が途中で切れました。GAS側では処理が続いています。🗂しごとセンターの進捗をご覧ください'; }
-          return;
-        }
-        jobRemoteFail(key, msg + (done ? '（' + done + '件は保存済み）' : ''));
-      }
-    })();
+    bkRunChunks(kv, key, targets, 0, 0, 0, []);
     try { logAct('出品', 'まとめて編集', '', ccs.join('/') + ' ' + targets.length + '件（タイトル' + nT + '/明細名' + nO + '/画像' + nI + '/動画' + nV + '/属性' + nA + '）'); } catch (_) {}
   }
   function renderBulkEdit() { drawBulk(); }
@@ -23257,6 +23298,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     renderSummary();
     jobRender();                // 右下のしごとセンターは常に出す（✕で隠せる／🗂で戻せる）
     jobPollStart();             // ★走っている作業（DB管理）を拾って右下に出す。リロードしても続きが見える
+    // ★まとめて編集はブラウザ側でチャンクを回すので、タブを閉じると止まる。
+    //   止まったまま放置されているものを拾って続きから走らせる（10秒後＝他の初期化とぶつけない）。
+    setTimeout(() => { bkResumeStalled().catch(() => {}); }, 10000);
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
