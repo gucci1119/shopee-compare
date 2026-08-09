@@ -1811,8 +1811,18 @@
       + '<div class="mp-stat" style="margin-top:2px;font-size:11px;font-weight:700"></div>';
     document.body.appendChild(prog);
     const barEl = prog.querySelector('.mp-bar'), cntEl = prog.querySelector('.mp-count'), nowEl = prog.querySelector('.mp-now'), statEl = prog.querySelector('.mp-stat');
+    // ★経過秒ではなく「あと何分」を出す。何分待てばいいかが分からないと席を外せない。
+    const t0 = Date.now();
+    const etaText = (done) => {
+      if (!total || done < 1) return '';
+      const per = (Date.now() - t0) / done;            // 1件あたりの実測
+      const left = Math.max(0, Math.round(per * (total - done) / 1000));
+      if (done >= total) return ' ・完了';
+      if (left >= 90) return ' ・残り約' + Math.ceil(left / 60) + '分';
+      return ' ・残り約' + left + '秒';
+    };
     return {
-      set(done, nowText, statHtml) { const pct = total ? Math.round(done / total * 100) : 0; if (barEl) barEl.style.width = pct + '%'; if (cntEl) cntEl.textContent = done + '/' + total + '（' + pct + '%）'; if (nowText != null && nowEl) nowEl.textContent = nowText; if (statHtml != null && statEl) statEl.innerHTML = statHtml; },
+      set(done, nowText, statHtml) { const pct = total ? Math.round(done / total * 100) : 0; if (barEl) barEl.style.width = pct + '%'; if (cntEl) cntEl.textContent = done + '/' + total + '（' + pct + '%）' + etaText(done); if (nowText != null && nowEl) nowEl.textContent = nowText; if (statHtml != null && statEl) statEl.innerHTML = statHtml; },
       remove() { try { prog.remove(); } catch (_) {} }
     };
   }
@@ -4712,14 +4722,22 @@
     if (!stock.bound) {
       stock.bound = true;
       // 前回のフィルタ（状態・検索）を復元＝毎回リセットされないように
-      try { const sf = JSON.parse(localStorage.getItem('smdStockFilter') || '{}'); if (sf.st != null) stock.st = sf.st; if (sf.q != null) stock.q = sf.q; const stEl = document.getElementById('stock-st'); if (stEl && stock.st) stEl.value = stock.st; const sEl = document.getElementById('stock-search'); if (sEl && stock.q) sEl.value = stock.q; } catch (_) {}
-      const saveStockFilter = () => { try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: stock.st, q: stock.q })); } catch (_) {} };
+      // ★再読み込みでフィルタが飛ぶと、絞り込み直しが毎回発生する。状態/検索だけでなく
+      //   仕入元・由来・ハード・カテゴリ・棚卸も含めて全部覚える。
+      try {
+        const sf = JSON.parse(localStorage.getItem('smdStockFilter') || '{}');
+        ['st', 'q', 'sup', 'origin', 'hw', 'cat', 'tak'].forEach(k => { if (sf[k] != null) stock[k] = sf[k]; });
+        const stEl = document.getElementById('stock-st'); if (stEl && stock.st) stEl.value = stock.st;
+        const sEl = document.getElementById('stock-search'); if (sEl && stock.q) sEl.value = stock.q;
+        ['sup', 'origin', 'tak'].forEach(k => { const el = document.getElementById('stock-' + k); if (el && stock[k]) el.value = stock[k]; });
+      } catch (_) {}
+      const saveStockFilter = () => { try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: stock.st, q: stock.q, sup: stock.sup, origin: stock.origin, hw: stock.hw, cat: stock.cat, tak: stock.tak })); } catch (_) {} };
       document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.showUnk = false; stock.needFix = false; stock.page = 1; saveStockFilter(); stockRender(); });
-      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.page = 1; stockRender(); });
-      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.page = 1; stockRender(); });
-      { const el = document.getElementById('stock-hw'); if (el) el.addEventListener('change', e => { stock.hw = e.target.value; stock.page = 1; stockRender(); }); }
-      { const el = document.getElementById('stock-cat'); if (el) el.addEventListener('change', e => { stock.cat = e.target.value; stock.page = 1; stockRender(); }); }
-      { const el = document.getElementById('stock-tak'); if (el) el.addEventListener('change', e => { stock.tak = e.target.value; stock.page = 1; stockRender(); }); }
+      document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); });
+      document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); });
+      { const el = document.getElementById('stock-hw'); if (el) el.addEventListener('change', e => { stock.hw = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); }); }
+      { const el = document.getElementById('stock-cat'); if (el) el.addEventListener('change', e => { stock.cat = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); }); }
+      { const el = document.getElementById('stock-tak'); if (el) el.addEventListener('change', e => { stock.tak = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); }); }
       let t, _takUnkT;
       // ★棚卸モードの読み取りは【1本の処理】にまとめる。
       //   以前は「一致したら消す／台帳に無ければ消さない」で分岐していたため、
