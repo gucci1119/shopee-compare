@@ -4707,7 +4707,9 @@
       //   消されなかった文字列に次のスキャンが連結して
       //   「202606APIで-20260608-APIで-20260608-030-…」のような値が育ってしまった。
       //   → 入力が止まったら【必ず】処理して【必ず】欄を空にする。取りこぼしも連結も起きない。
+      let _takBusy = false;
       const takProcess = async () => {
+        if (_takBusy) return;                 // 処理中に重ねて呼ばれても二重に登録しない
         const el = document.getElementById('stock-search');
         if (!el) return;
         let raw = String(el.value || '').trim();
@@ -4720,9 +4722,12 @@
           if (m) v = m[0];
         }
         el.value = '';                                   // ★何があってもここで空にする
+        _takBusy = true;
+        setTimeout(() => { _takBusy = false; }, 300);
         const f = takFind(v);
         if (f && f.hit) {
           const res = await takScanMark(f.hit.item_id);
+          if (res.same) return;                          // 同じ読み取りの二重発火＝何も出さない
           takFlash(res.dup ? 'dup' : 'ok', f.hit.item_id, String(f.hit.name_supplier || f.hit.name || ''), res.n);
           stockRender(); return;
         }
@@ -4995,8 +5000,14 @@
   // 読み取り（スキャン/手打ち/QR）専用。すでに✓が付いていたら【取り消さずに警告】する。
   //   数えている最中に「2回読んだせいで✓が消える」と、実物はあるのに無い扱いになって致命的。
   //   取り消しは一覧の × か、行の✓ボタンから明示的に行う。
+  let _takLastId = '', _takLastAt = 0;
   async function takScanMark(id) {
     const key = String(id);
+    // ★スキャナが末尾にCR+LFを送る機種だとEnterが2回発火し、二度打ちする個体もある。
+    //   同じIDを2秒以内にもう一度受けたら「1回の読み取り」とみなす。
+    //   本当に同じ物をもう一度手に取って読むのに2秒未満で戻ってくることは無い。
+    if (key === _takLastId && Date.now() - _takLastAt < 2000) return { same: true, n: tak.dup[key] || 1 };
+    _takLastId = key; _takLastAt = Date.now();
     if (takOf(key) === 'ok') {
       tak.dup[key] = (tak.dup[key] || 1) + 1;
       await takSave(); stockRender();
