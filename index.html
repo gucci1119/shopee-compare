@@ -15251,7 +15251,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const chosen = [...bulk.sel.values()];
     const changed = chosen.filter(e => bulkDirty(e));
     // 🖼画像・動画は「いまの絞り込み結果ぜんぶ」を見る。触った行だけ bulk.sel に載せて💾の対象にする
-    const mAll = (bulk.view === 'media') ? ((lst && lst._mediaRows) || []) : [];
+    // ★メディアセンターは「直すべきカタログを見つける」画面。
+    //   動画が無い・画像が少ない・特定の国、で絞れないと1904件から探せない。
+    let mAll = (bulk.view === 'media') ? ((lst && lst._mediaRows) || []) : [];
+    const mImgN = (r) => ((r.images && r.images.length) ? r.images.length : (r.image ? 1 : 0));
+    const mHasVid = (r) => !!(r.has_video || r.video_url);
+    if (bulk.view === 'media') {
+      if (bulk.mCc) mAll = mAll.filter(r => r.cc === bulk.mCc);
+      if (bulk.mNoVid) mAll = mAll.filter(r => !mHasVid(r));
+      if (bulk.mFewImg) mAll = mAll.filter(r => mImgN(r) < Number(bulk.mFewImg));
+      if (bulk.mQ) { const q = String(bulk.mQ).toLowerCase(); mAll = mAll.filter(r => String(r.name || '').toLowerCase().includes(q) || String(r.item_id || '').includes(q)); }
+      if (bulk.mSort === 'img') mAll = mAll.slice().sort((a, b) => mImgN(a) - mImgN(b));
+    }
     const M_PER = 60, mPages = Math.max(1, Math.ceil(mAll.length / M_PER));
     if ((bulk.mPage || 0) >= mPages) bulk.mPage = 0;
     const mPage = mAll.slice((bulk.mPage || 0) * M_PER, (bulk.mPage || 0) * M_PER + M_PER);
@@ -15260,10 +15271,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:13px">${bulk.view === 'media' ? '🖼 画像・動画（メディアセンター）' : '🛠 まとめて編集'}</b>
         <span class="smd-dim" style="font-size:11.5px">${bulk.view === 'media'
-          ? `いまの絞り込み結果 <b>${mAll.length}</b> 件を、${(bulk.mPage || 0) * M_PER + 1}〜${Math.min(mAll.length, ((bulk.mPage || 0) + 1) * M_PER)} 件目まで表示中。絞り込みは📋出品一覧で変えられます。`
+          ? `<b>${mAll.length}</b> 件${(() => { const src = (lst && lst._mediaRows) || []; const nv = src.filter(r => !mHasVid(r)).length; const fi = src.filter(r => mImgN(r) < 5).length; return src.length ? ` <span style="color:#b3261e">（全${src.length}件中：🎬動画なし ${nv} ／ 画像5枚未満 ${fi}）</span>` : ''; })()}を、${(bulk.mPage || 0) * M_PER + 1}〜${Math.min(mAll.length, ((bulk.mPage || 0) + 1) * M_PER)} 件目まで表示中。絞り込みは📋出品一覧で変えられます。`
           : `📋出品一覧のチェックで選んだ <b>${selN}</b> 件です。対象を変えるときは一覧に戻ってチェックし直してください。`}</span>
         <button id="bk-back" class="smd-btn" style="font-size:11px;padding:3px 11px">📋 出品一覧に戻る</button>
-        <button class="smd-btn" id="bk-vall" style="font-size:11px;padding:2px 9px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="選んでいる全カタログに、同じ動画をまとめて設定します（1本アップロードするだけ）">🎬 選択に同じ動画</button>
+        ${bulk.view === 'media' ? `<span style="display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap;margin-left:4px">
+          <select id="bk-mcc" style="font-size:11px;padding:2px 5px" title="国で絞り込み"><option value="">国:全て</option>${REGIONS.map(rg => `<option value="${rg.cc}"${bulk.mCc === rg.cc ? ' selected' : ''}>${rg.cc}</option>`).join('')}</select>
+          <label style="font-size:11px;cursor:pointer;white-space:nowrap" title="商品動画が設定されていないカタログだけ表示"><input type="checkbox" id="bk-mnovid" ${bulk.mNoVid ? 'checked' : ''}> 🎬動画なし</label>
+          <select id="bk-mfew" style="font-size:11px;padding:2px 5px" title="メイン画像がこの枚数より少ないカタログだけ表示（Shopeeは最大9枚）">
+            <option value="">画像:全て</option>${[3, 5, 7, 9].map(n => `<option value="${n}"${String(bulk.mFewImg) === String(n) ? ' selected' : ''}>${n}枚未満</option>`).join('')}
+          </select>
+          <label style="font-size:11px;cursor:pointer;white-space:nowrap" title="画像が少ない順に並べる"><input type="checkbox" id="bk-msort" ${bulk.mSort === 'img' ? 'checked' : ''}> 画像が少ない順</label>
+          <input type="text" id="bk-mq" value="${av(bulk.mQ || '')}" placeholder="商品名で絞り込み" style="font-size:11px;padding:2px 6px;width:150px">
+          ${(bulk.mCc || bulk.mNoVid || bulk.mFewImg || bulk.mSort || bulk.mQ) ? `<button class="smd-btn" id="bk-mclear" style="font-size:11px;padding:2px 8px;border-color:#d93025;color:#d93025">✕ 絞り込み解除</button>` : ''}
+        </span>` : ''}
+        <button class="smd-btn" id="bk-mselall" style="font-size:11px;padding:2px 9px" title="表示中のカタログを全部選ぶ／解除">☑ 表示中を全選択</button>
+        <span id="bk-mselN" class="smd-dim" style="font-size:11px;margin:0 6px">${bulk.mSel && bulk.mSel.size ? '（' + bulk.mSel.size + '件を選択中）' : ''}</span>
+        <button class="smd-btn" id="bk-vall" style="font-size:11px;padding:2px 9px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="チェックした全カタログに、同じ動画をまとめて設定します（1本アップロードするだけ）">🎬 選択に同じ動画</button>
         <button class="smd-btn" id="bk-iall" style="font-size:11px;padding:2px 9px;margin-left:4px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="選んでいる全カタログのメイン画像を、同じ画像でまとめて差し替えます">🖼 選択に同じ画像</button>
         <label style="margin-left:auto;font-size:11px;cursor:pointer" title="各行の下に、メイン画像・明細画像・商品動画を出します"><input type="checkbox" id="bk-showmedia" ${bulk.showMedia === false ? '' : 'checked'}> 🖼 画像・動画も表示</label>
       </div>
@@ -15433,6 +15456,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const bulkImgUrl = (v) => (typeof resolveImgUrl === 'function' ? resolveImgUrl(v) : v);
   function bulkMediaHtml(e) { const k = e.cc + '|' + e.item_id; return bulkMediaBlock(e, k, true); }
   function bulkMediaBlock(e, k, withHead) {
+    if (!bulk.mSel) bulk.mSel = new Set();
     const list = e.imgs || e.imgs0 || [];
     const changed = !!(e.imgs && e.imgs.length);
     const cell = (v, i) => `<span style="position:relative;display:inline-block">
@@ -15442,9 +15466,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </span>`;
     return `<div style="padding:${withHead ? '9px 11px' : '4px 11px 8px 66px'};${withHead ? 'border-bottom:1px solid #f2f2f2;' : ''}background:${changed ? '#fffdf3' : 'transparent'}">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-        ${withHead ? `<span style="font-size:10px;font-weight:700;color:#ee4d2d;width:24px;flex:none">${esc(e.cc)}</span>
+        ${withHead ? `<label style="flex:none;cursor:pointer;display:inline-flex;align-items:center" title="このカタログを選ぶ（選んだ全部に同じ動画・画像をまとめて入れられます）"><input type="checkbox" class="bk-mpick" data-k="${esc(k)}" ${bulk.mSel && bulk.mSel.has(k) ? 'checked' : ''}></label>
+        <span style="font-size:10px;font-weight:700;color:#ee4d2d;width:24px;flex:none">${esc(e.cc)}</span>
         <span style="flex:1;min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${av(e.t)}">${esc(e.t)}</span>` : '<span style="flex:1"></span>'}
-        <span class="smd-dim" style="font-size:10px;flex:none">画像 ${list.length}/9</span>
+        <span style="font-size:10px;flex:none;font-weight:700;color:${list.length >= 7 ? '#1a7f37' : (list.length >= 4 ? '#e8710a' : '#d93025')}" title="Shopeeは最大9枚。少ないと見られにくい">画像 ${list.length}/9</span>
+        ${!e.videoUrl && !e.vid ? '<span style="flex:none;background:#fdecea;color:#b3261e;font-size:9.5px;font-weight:700;border-radius:9px;padding:1px 7px;white-space:nowrap">🎬動画なし</span>' : ''}
         ${e.videoUrl ? `<span style="flex:none;display:inline-flex;align-items:center;gap:4px">
             <video src="${esc(e.videoUrl)}" preload="metadata" muted playsinline style="width:44px;height:44px;object-fit:cover;border-radius:5px;background:#000;border:1px solid #1a7f37" title="商品動画（クリックで再生）" onclick="this.paused?this.play():this.pause()"></video>
             <a href="${esc(e.videoUrl)}" target="_blank" rel="noopener" style="font-size:10px;font-weight:700;color:#1a7f37;text-decoration:none" title="別タブで開く">🎬 動画あり ↗</a>
@@ -15573,15 +15599,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   1カタログずつ開いて同じファイルを何度も上げるのは時間の無駄なので、
     //   アップロードは1回だけ行い、その結果のURLを全カタログに配る。
     const bulkApplyMedia = async (kind) => {
-      const ks = [...bulk.sel.keys()];
-      if (!ks.length) { alert('先にカタログを選んでください'); return; }
+      // メディア一覧のチェック（bulk.mSel）を優先。無ければ従来の選択（bulk.sel）
+      const ks = (bulk.mSel && bulk.mSel.size) ? [...bulk.mSel] : [...bulk.sel.keys()];
+      if (!ks.length) { alert('先にカタログのチェックを入れてください（各カタログの左端）'); return; }
       const label = kind === 'video' ? '動画' : 'メイン画像';
       const v = prompt(`選んでいる ${ks.length} カタログ全部に、同じ${label}を設定します。\n\n` +
         `${label}のURLを入れてください（空欄でOKを押すとPCのファイルを選べます）` + (kind === 'video' ? '\n※Shopeeの上限は30MBです' : ''));
       if (v === null) return;
       const msg = document.querySelector('#bk-msg');
       const put = (url) => {
-        ks.forEach(k => { const e = bulk.sel.get(k); if (!e) return;
+        ks.forEach(k => { let e = bulk.sel.get(k);
+          if (!e) { const r = (bulk.rows || []).find(x => (x.cc + '|' + x.item_id) === k); if (r) { e = bulkEntry(r); bulk.sel.set(k, e); } }
+          if (!e) return;
           if (kind === 'video') { e.vid = url; e.vdel = false; }
           else { e.imgs = [url]; } });
         drawBulk();
@@ -15601,6 +15630,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       });
       f.click();
     };
+    { const el = host.querySelector('#bk-mcc'); if (el) el.addEventListener('change', () => { bulk.mCc = el.value; bulk.mPage = 0; drawBulk(); }); }
+    { const el = host.querySelector('#bk-mnovid'); if (el) el.addEventListener('change', () => { bulk.mNoVid = el.checked; bulk.mPage = 0; drawBulk(); }); }
+    { const el = host.querySelector('#bk-mfew'); if (el) el.addEventListener('change', () => { bulk.mFewImg = el.value; bulk.mPage = 0; drawBulk(); }); }
+    { const el = host.querySelector('#bk-msort'); if (el) el.addEventListener('change', () => { bulk.mSort = el.checked ? 'img' : ''; bulk.mPage = 0; drawBulk(); }); }
+    { const el = host.querySelector('#bk-mq'); if (el) { let t3; el.addEventListener('input', () => { clearTimeout(t3); t3 = setTimeout(() => { bulk.mQ = el.value.trim(); bulk.mPage = 0; drawBulk(); const e2 = document.querySelector('#bk-mq'); if (e2) { e2.focus(); e2.setSelectionRange(e2.value.length, e2.value.length); } }, 300); }); } }
+    { const el = host.querySelector('#bk-mclear'); if (el) el.addEventListener('click', () => { bulk.mCc = ''; bulk.mNoVid = false; bulk.mFewImg = ''; bulk.mSort = ''; bulk.mQ = ''; bulk.mPage = 0; drawBulk(); }); }
+    host.querySelectorAll('.bk-mpick').forEach(c => c.addEventListener('change', () => {
+      if (!bulk.mSel) bulk.mSel = new Set();
+      if (c.checked) bulk.mSel.add(c.dataset.k); else bulk.mSel.delete(c.dataset.k);
+      const n = document.querySelector('#bk-mselN'); if (n) n.textContent = bulk.mSel.size ? '（' + bulk.mSel.size + '件を選択中）' : '';
+    }));
+    { const b = host.querySelector('#bk-mselall'); if (b) b.addEventListener('click', () => {
+        if (!bulk.mSel) bulk.mSel = new Set();
+        const all = [...host.querySelectorAll('.bk-mpick')];
+        const on = bulk.mSel.size < all.length;
+        all.forEach(c => { c.checked = on; if (on) bulk.mSel.add(c.dataset.k); else bulk.mSel.delete(c.dataset.k); });
+        const n = document.querySelector('#bk-mselN'); if (n) n.textContent = bulk.mSel.size ? '（' + bulk.mSel.size + '件を選択中）' : '';
+      }); }
     { const b = host.querySelector('#bk-vall'); if (b) b.addEventListener('click', () => bulkApplyMedia('video')); }
     { const b = host.querySelector('#bk-iall'); if (b) b.addEventListener('click', () => bulkApplyMedia('image')); }
     { const c = host.querySelector('#bk-showmedia'); if (c) c.addEventListener('change', () => { bulk.showMedia = c.checked; drawBulk(); }); }
