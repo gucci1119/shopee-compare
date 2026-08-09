@@ -4722,9 +4722,8 @@
               const hit = f.hit;
               e.target.value = '';
               takScanMark(hit.item_id).then(res => {
-                toast(res.dup
-                  ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 22)
-                  : '✓ ' + hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
+                takFlash(res.dup ? 'dup' : 'ok', hit.item_id, String(hit.name_supplier || hit.name || ''), res.n);
+                stockRender();
               });
               return;
             }
@@ -4747,17 +4746,16 @@
         if (f && f.hit) {
           const hit = f.hit;
           const res = await takScanMark(hit.item_id);
-          toast(res.dup
-            ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 22)
-            : '✓ ' + hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(hit.name_supplier || hit.name || '').slice(0, 24));
+          takFlash(res.dup ? 'dup' : 'ok', hit.item_id, String(hit.name_supplier || hit.name || ''), res.n);
+          stockRender();
           return;
         }
         if (takNorm(v).length < 5) { toast('❔ ItemIDとして短すぎます：' + v); return; }
         if (!confirm('「' + v + '」は在庫台帳にありません。\n\n現物はあったものとして記録しますか？\n（スプレッドシートとItemIDが食い違っている分は、あとでCSVで突き合わせます）')) return;
         const k = takNorm(v);
         tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
+        takFlash(tak.unknown[k].n > 1 ? 'dup' : 'unk', k, '（在庫台帳に該当なし）', tak.unknown[k].n);
         await takSave(); stockRender();
-        toast((tak.unknown[k].n > 1 ? '⚠️ すでに読み込み済み（' + tak.unknown[k].n + '回目）：' : '⚠️ 台帳に無いItemID：') + k + '（現物あり として記録）');
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
@@ -4972,6 +4970,34 @@
       if (cand.length > 1) return { many: cand };
     }
     return null;
+  }
+
+  // 読み取りの結果を「音」でも返す。棚卸中は手が塞がっていて画面を見続けられない。
+  //   OK＝高い1音／重複＝低い2音。音が違えば手元を見ずに気付ける。
+  let _takAudio = null;
+  function takBeep(kind) {
+    try {
+      _takAudio = _takAudio || new (window.AudioContext || window.webkitAudioContext)();
+      const ac = _takAudio;
+      if (ac.state === 'suspended') ac.resume();
+      const play = (freq, at, dur) => {
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'sine'; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, ac.currentTime + at);
+        g.gain.exponentialRampToValueAtTime(0.22, ac.currentTime + at + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + at + dur);
+        o.connect(g); g.connect(ac.destination);
+        o.start(ac.currentTime + at); o.stop(ac.currentTime + at + dur + 0.02);
+      };
+      if (kind === 'ok') play(1320, 0, 0.09);
+      else if (kind === 'dup') { play(440, 0, 0.13); play(440, 0.17, 0.13); }
+      else { play(300, 0, 0.3); }   // 台帳に無い＝低く長く
+    } catch (_) {}
+  }
+  // 直近の読み取り結果を画面上部に大きく残す（トーストは消えるので見落とす）
+  function takFlash(kind, id, name, n) {
+    stock.lastScan = { kind, id, name: name || '', n: n || 1, at: Date.now() };
+    takBeep(kind);
   }
 
   // 読み取り（スキャン/手打ち/QR）専用。すでに✓が付いていたら【取り消さずに警告】する。
@@ -6023,7 +6049,16 @@
         const ng = target.filter(r => takOf(r.item_id) === 'ng').length;
         const todo = target.length - ok - ng;
         const scan = !!stock.takScan;
-        return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` +
+        const ls = stock.lastScan;
+        const lsBox = (scan && ls) ? (() => {
+          const c = ls.kind === 'ok' ? { bg: '#1a7f37', t: '✓ 読み込みました' }
+            : ls.kind === 'dup' ? { bg: '#d93025', t: '⚠️ すでに読み込み済み（' + ls.n + '回目）' }
+            : { bg: '#e8710a', t: '⚠️ 在庫台帳に無いItemID（現物あり として記録）' };
+          return `<div style="margin:0 0 8px;padding:9px 12px;border-radius:8px;background:${c.bg};color:#fff">` +
+            `<div style="font-size:15px;font-weight:800">${c.t}</div>` +
+            `<div style="font-size:12.5px;margin-top:2px;opacity:.95"><span style="font-family:monospace">${esc(ls.id)}</span>${ls.name ? '　' + esc(String(ls.name).slice(0, 40)) : ''}</div></div>`;
+        })() : '';
+        return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` + lsBox +
           `<button class="smd-btn" id="stk-takscan" style="${scan ? 'background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="ONにすると、QRスキャン／ハンディスキャナで読み取ったItemIDがその場で「✓あり」に登録されます。現物を1つずつ手に取って読ませてください">📋 棚卸モード ${scan ? 'ON' : 'OFF'}</button>` +
           `<span style="margin-left:10px;font-size:12.5px">在庫保管中 <b>${target.length}</b>件 ／ <b style="color:#1a7f37">✓あり ${ok}</b> ／ <b style="color:#d93025">✗なし ${ng}</b> ／ <b style="color:#e8710a">未確認 ${todo}</b></span>` +
           // ★金額の把握が棚卸の目的（期末棚卸高になる）。件数だけでなく仕入額を常に出す。
@@ -9300,9 +9335,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const f = takFind(id);
               if (f && f.hit) {
                 takScanMark(f.hit.item_id).then(res => {
-                  toast(res.dup
-                    ? '⚠️ すでに読み込み済みです（' + res.n + '回目）：' + f.hit.item_id + '　' + String(f.hit.name_supplier || f.hit.name || '').slice(0, 22)
-                    : '✓ ' + f.hit.item_id + (f.fuzzy ? '（番号で照合）' : '') + '　' + String(f.hit.name_supplier || f.hit.name || '').slice(0, 24));
+                  takFlash(res.dup ? 'dup' : 'ok', f.hit.item_id, String(f.hit.name_supplier || f.hit.name || ''), res.n);
+                  stockRender();
                 });
                 if (state.page !== 'stock') showPage('stock');
                 return;
@@ -9311,8 +9345,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const k = takNorm(id);
               if (k.length >= 5) {                     // 台帳に無い＝ItemIDが食い違っている分。現物はあったので残す
                 tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
+                takFlash(tak.unknown[k].n > 1 ? 'dup' : 'unk', k, '（在庫台帳に該当なし）', tak.unknown[k].n);
                 takSave().then(() => stockRender());
-                toast((tak.unknown[k].n > 1 ? '⚠️ すでに読み込み済み（' + tak.unknown[k].n + '回目）：' : '⚠️ 台帳に無いItemID：') + k + '（現物あり として記録）');
                 if (state.page !== 'stock') showPage('stock');
                 return;
               }
