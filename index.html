@@ -4695,7 +4695,7 @@
       // 前回のフィルタ（状態・検索）を復元＝毎回リセットされないように
       try { const sf = JSON.parse(localStorage.getItem('smdStockFilter') || '{}'); if (sf.st != null) stock.st = sf.st; if (sf.q != null) stock.q = sf.q; const stEl = document.getElementById('stock-st'); if (stEl && stock.st) stEl.value = stock.st; const sEl = document.getElementById('stock-search'); if (sEl && stock.q) sEl.value = stock.q; } catch (_) {}
       const saveStockFilter = () => { try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: stock.st, q: stock.q })); } catch (_) {} };
-      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); });
+      document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.showUnk = false; stock.needFix = false; stock.page = 1; saveStockFilter(); stockRender(); });
       document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.page = 1; stockRender(); });
       document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.page = 1; stockRender(); });
       { const el = document.getElementById('stock-hw'); if (el) el.addEventListener('change', e => { stock.hw = e.target.value; stock.page = 1; stockRender(); }); }
@@ -5974,13 +5974,17 @@
       ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計', '販売済み'],
       ['仕入キャンセル', all.filter(r => r.status === '仕入キャンセル').length + '点', '仕入元都合で届かなかった分（資産から除外）', '仕入キャンセル'],
       ['⚠️ 仕分けが必要', needFix.length + '点', '状態と注文の紐付きが食い違っています', '__fix'],
+      // ★棚卸で現物を確認できたのに、この台帳に行が無いItemID。スプシ側にしか登録されていない分。
+      //   棚卸モードを開かないと見えなかったので、常設のタイルにして必ず目に入るようにする。
+      ['📦 台帳に無い現物', Object.keys(tak.unknown || {}).length + '点', '棚卸で読み取れたが台帳に行が無い', '__unk'],
       ['全登録', all.length + '点', 'クリックで絞り込み解除', ''],
     ].map(([t, v, s, f]) => `<div class="kpi stk-kpi" data-f="${esc(f)}" style="cursor:pointer" title="クリックで下の一覧をこの条件で絞り込みます"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
     document.querySelectorAll('.stk-kpi').forEach(el => el.addEventListener('click', () => {
       const f = el.dataset.f || '';
       // ★見た目だけ変えても絞り込まれない。実際に使う stock.st を必ず更新する
       stock.needFix = (f === '__fix');
-      stock.st = stock.needFix ? '' : f;
+      stock.showUnk = (f === '__unk');
+      stock.st = (stock.needFix || stock.showUnk) ? '' : f;
       stock.dead = false;                       // 死に筋の絞り込みが残っていると噛み合わないので解除
       stock.page = 1;
       const sel = document.getElementById('stock-st');
@@ -6205,6 +6209,26 @@
       `<button class="smd-btn" id="stk-dead" style="margin-left:6px;${stock.dead ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="在庫保管中のまま${DEAD_DAYS}日超の「死に筋」だけ表示（値下げ・再出品の検討対象）。滞留日数の長い順。">🏚 死に筋${deadCount ? '（' + deadCount + '）' : ''}</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">左端☑で複数選び「一括印刷」。仕入元・仕入額・状態などはセルで直接編集（Supabaseに保存）。ItemID横の✂でまとめ分割。</span></div>` +
       `<div id="stk-addform"></div>` +
+      (stock.showUnk ? (() => {
+        // 「台帳に無い現物」＝棚卸で読めたのに inventory に行が無いID。
+        // ほとんどはスプレッドシート側で1注文を枝番（-2, -3…）に分割して在庫保有している分で、
+        // ポータルにはその行が作られていないために起きる。現物は手元にある。
+        const ks = Object.keys(tak.unknown || {}).sort();
+        return `<div class="tool-card" style="margin:0 0 10px;max-width:none;background:#fff8e6;border:1px solid #f0d9a8">` +
+          `<div style="font-weight:800;font-size:14px;margin-bottom:4px">📦 台帳に無い現物 ${ks.length}点</div>` +
+          `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px;line-height:1.7">棚卸で<b>現物を確認できた</b>のに、この在庫台帳に行が無いItemIDです。<br>` +
+          `大半は<b>スプレッドシート側で1つの注文を枝番（-2、-3…）に分けて在庫保有している</b>分で、ポータルにはその行が作られていません（仕入額もスプシ側で分割済み）。<br>` +
+          `<b>現物は手元にあります。</b>資産としてはスプシ側に計上されています。` +
+          `<button class="smd-btn" id="stk-unkcsv2" style="margin-left:8px;font-size:11px;padding:2px 9px">⬇ CSV</button></div>` +
+          `<div style="max-height:60vh;overflow:auto;border:1px solid #f0d9a8;border-radius:6px;background:#fff">` +
+          ks.map((k, i) => `<div style="display:flex;align-items:center;gap:10px;padding:5px 10px;border-bottom:1px solid #f6f0e0">` +
+            `<span style="width:34px;text-align:right;color:#b0a68a;font-size:10.5px;flex:none">${i + 1}</span>` +
+            `<span style="font-family:monospace;font-size:12px;font-weight:700;color:#b26a00;flex:none">${esc(k)}</span>` +
+            `<span class="smd-dim" style="font-size:11px;flex:1">読み取り ${(tak.unknown[k] || {}).n || 1}回 ／ ${esc(jstDateTime((tak.unknown[k] || {}).at))}</span>` +
+            `<button class="stk-takfix" data-id="${esc(k)}" title="ItemIDを直す" style="border:none;background:none;cursor:pointer;color:#e8710a;font-size:14px;flex:none">✏️</button>` +
+            `<button class="stk-takundo" data-id="${esc(k)}" data-unk="1" title="この1件を取り消す" style="border:none;background:none;cursor:pointer;color:#b0b0b0;font-size:14px;flex:none">×</button></div>`).join('') +
+          `</div></div>`;
+      })() : '') +
       `<div class="tool-card" style="margin:0;padding:0 8px;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1520px">` +
       (function () {   // 列名クリックで昇順/降順。もう一度押すと逆順、3回目で解除（登録順に戻る）
         const S = (k, label, extra) => {
@@ -6325,6 +6349,12 @@
       tak.unknown[nv] = { at, n };
       await takSave(); stockRender();
     }));
+    { const b = document.getElementById('stk-unkcsv2'); if (b) b.addEventListener('click', () => {
+        const ks = Object.keys(tak.unknown || {}).sort();
+        downloadCsv('棚卸_台帳に無い現物_' + new Date().toISOString().slice(0, 10) + '.csv',
+          [['ItemID', '読み取り回数', '最初に読んだ日時(JST)', '備考']].concat(
+            ks.map(k => [k, (tak.unknown[k] || {}).n || 1, jstDateTime((tak.unknown[k] || {}).at), '現物あり・在庫台帳に行なし（スプレッドシート側の枝番在庫の可能性）'])));
+      }); }
     { const b = document.getElementById('stk-taklistall'); if (b) b.addEventListener('click', () => { stock.takListAll = !stock.takListAll; stockRender(); }); }
     { const b = document.getElementById('stk-takcsv'); if (b) b.addEventListener('click', () => {
         const rows = [['区分', 'ItemID', '商品名', 'ハード', 'カテゴリ', '仕入元', 'セラー', '仕入額(円)', '仕入日', '棚', 'Shopee注文SN', '台帳の状態', '備考']];
