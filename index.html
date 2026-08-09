@@ -8619,9 +8619,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderTax() {
     const body = document.getElementById('tax-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
-    let orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts;
+    let orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv;
     try {
-      [orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts] = await Promise.all([
+      [orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,tab,order_date,order_ts'),
         sbGetAll('income', 'select=cc,sn,amount,buyer_paid,fee_total'),
         sbGetAll('inventory', 'select=item_id,price,status,shopee_sn,purchase_date,purchase_ts'),
@@ -8632,6 +8632,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),
         sbGetAll('payouts', 'select=cc,payout_amount,from_amount,payout_time').catch(() => []),
+        sbGetAll('app_kv', 'select=v&k=eq.profit_amounts').catch(() => []),   // 📗利益管理表から拾った現地通貨の入金額（公式API以前の売上を埋める控え）
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
     tax.cfg = (kv && kv[0] && kv[0].v) || { map: {}, open: {}, close: {}, usdJpy: {} };
@@ -8646,16 +8647,27 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
     // ---- 売上（その年の注文・注文日のレートで円換算。キャンセル/未払いは除外） ----
     const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
-    let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, nOrd = 0, nDep = 0;
+    // ★入金額(escrow)は公式API移行後の注文にしか無い。それ以前は📗利益管理表から拾った
+    //   **現地通貨**の入金額で埋める。円換算は必ず【注文日の日次レート】でやり直す
+    //   （スプシの円換算はレートが2024年末のまま古いので、そのまま使うと過小になる）。
+    const amtMap = (amtKv && amtKv[0] && amtKv[0].v && amtKv[0].v.items) || {};
+    let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, nOrd = 0, nDep = 0, nFromSheet = 0;
     orders.forEach(o => {
       const d = ymdOf(o);
       if (d.slice(0, 4) !== Y || o.tab === 600 || o.tab === 200) return;
       nOrd++;
-      const i = incBySn[o.cc + ':' + o.sn]; if (!i || i.amount == null) return;
       const r = fxRate(o.cc, d) || 0;
-      sales += Number(i.amount) * r; nDep++;
-      buyerPaid += (Number(i.buyer_paid) || 0) * r;
-      feeTotal += (Number(i.fee_total) || 0) * r;
+      const i = incBySn[o.cc + ':' + o.sn];
+      let local = (i && i.amount != null) ? Number(i.amount) : null;
+      if (local == null) {                                   // ← 公式APIに無い分をスプシで補う
+        const a = amtMap[o.sn];
+        if (a && a.loc > 0) { local = Number(a.loc); nFromSheet++; }
+      } else {
+        buyerPaid += (Number(i.buyer_paid) || 0) * r;
+        feeTotal += (Number(i.fee_total) || 0) * r;
+      }
+      if (local == null) return;
+      sales += local * r; nDep++;
       ppl += Number((shMap[o.cc + ':' + o.sn] || {}).paypal_yen) || 0;
     });
     sales += ppl;
@@ -8720,7 +8732,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          ⚠️ <b>${Y}年は入金額のデータが足りません（${nDep}/${nOrd}件・${Math.round(cover * 100)}%）。所得は出せません。</b><br>
          <span style="color:#7a2018">入金額(escrow)はShopee公式APIに切り替えてから貯め始めたもので、それ以前の注文には入っていません。
          売上だけが欠けた状態で計算すると<b>仕入・経費だけが立って大赤字に見えます</b>（実際は違います）。<br>
-         埋めるには、過去の<b>利益管理表</b>から現地通貨の入金額を取り込んで、注文日のレートで換算し直す必要があります（未実装・課題リストに記載）。
+         📗利益管理表からも補完していますが（現地通貨で取り込み、注文日のレートで換算し直し）、それでも足りない年です。
+         スプシ側にも入金額が書かれていない注文が残っているためで、これ以上は自動では埋まりません。
          それまでこの年の数字は<b>売上原価と経費の下ごしらえとしてだけ</b>使ってください。</span></div>`;
     const yrSel = `<select id="tax-year">${years.map(y => `<option value="${y}"${y === Y ? ' selected' : ''}>${y}年</option>`).join('')}</select>`;
 
@@ -8733,7 +8746,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div class="tool-card" style="margin:0 0 12px;max-width:760px">
         <div style="font-weight:800;font-size:15px;margin-bottom:6px">📊 ${Y}年 損益計算書</div>
         <table class="pf-table">
-          <tr><td style="width:230px">売上高 <span class="smd-dim" style="font-size:10.5px">（Shopee入金＋PayPal差分）</span></td><td style="text-align:right">${money(sales)}</td><td style="font-size:10.5px;color:${RELIABLE ? '#8a8f98' : '#b3261e'};font-weight:${RELIABLE ? '400' : '700'}">${nDep}/${nOrd}件が入金判明（${Math.round(cover * 100)}%）</td></tr>
+          <tr><td style="width:230px">売上高 <span class="smd-dim" style="font-size:10.5px">（Shopee入金＋PayPal差分）</span></td><td style="text-align:right">${money(sales)}</td><td style="font-size:10.5px;color:${RELIABLE ? '#8a8f98' : '#b3261e'};font-weight:${RELIABLE ? '400' : '700'}">${nDep}/${nOrd}件が入金判明（${Math.round(cover * 100)}%）${nFromSheet ? `<br><span class="smd-dim" style="font-weight:400">うち ${nFromSheet}件は📗利益管理表から補完</span>` : ''}</td></tr>
           <tr><td style="padding-left:18px" class="smd-dim">返品・返金</td><td style="text-align:right">${money(-refund)}</td><td></td></tr>
           <tr><td><b>純売上高</b></td><td style="text-align:right">${money(sales - refund)}</td><td></td></tr>
           <tr><td colspan="3" style="padding-top:10px;font-weight:700">売上原価</td></tr>
