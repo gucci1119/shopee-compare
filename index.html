@@ -7216,9 +7216,17 @@
     const needAtt = x => x.phase === 'delivered' || x.phase === 'likely' || (x.phase === 'eta' && x.eta < todayStr);
     // 🏃本日届く見込み＝配達中(out)/まもなく配達(arrived)/本日到着予定(eta==today)。当日、梱包を締めるか待つかの判断に使う。
     const needToday = x => x.phase === 'out' || x.phase === 'arrived' || (x.phase === 'eta' && x.eta === todayStr);
+    // ★仕入れたのに仕入元がまだ発送していない＝追跡番号も配送情報も無い(none)。
+    //   仕入元（メルカリ等）にこちらから催促できるので、経過日数で優先度を出す。
+    //   0日=今日買った分（放っておく）／1日/2日=様子見〜声かけ／3日以上=催促、が目安。
+    const notShipped = x => x.phase === 'none' && x.pdays != null;
+    const nsBucket = x => (x.pdays >= 3 ? 3 : x.pdays >= 2 ? 2 : x.pdays >= 1 ? 1 : 0);
+    const nsCnt = b => list.filter(x => notShipped(x) && nsBucket(x) === b).length;
+    const nsTotal = list.filter(x => notShipped(x) && x.pdays >= 1).length;
+    const pushOnly = !!state.buyWaitPush;
     const todayN = list.filter(needToday).length;
     const alertOnly = !!state.buyWaitAlert, todayOnly = !!state.buyWaitToday;
-    const shown = (todayOnly ? list.filter(needToday) : alertOnly ? list.filter(needAtt) : list).slice(0, 800);
+    const shown = (pushOnly ? list.filter(x => notShipped(x) && x.pdays >= 1).sort((a, b) => (b.pdays || 0) - (a.pdays || 0)) : todayOnly ? list.filter(needToday) : alertOnly ? list.filter(needAtt) : list).slice(0, 800);
     const chip = (label, n, col) => `<span style="display:inline-block;background:${col}22;color:${col};font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:5px">${label} ${n}</span>`;
     const etaCol = d => !d ? '#5f6368' : (d < todayStr ? '#d93025' : (d === todayStr ? '#e8710a' : ((daysTo(todayStr, d) || 9) <= 2 ? '#e8710a' : '#1a7f37')));
     const etaTxt = x => {
@@ -7227,6 +7235,10 @@
       if (x.phase === 'out') return `<b style="color:#e65100">🏃 配達中（お近く）</b><br><span style="font-size:10px;color:#e65100;font-weight:600">${esc(arrivalHint(x.r))}</span>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'arrived') return `<b style="color:#00695c">🏣 まもなく配達</b><br><span style="font-size:10px;color:#00695c;font-weight:600">${esc(arrivalHint(x.r))}</span>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
+      if (x.phase === 'none' && x.pdays != null && x.pdays >= 1) {
+        const c = x.pdays >= 3 ? '#d93025' : x.pdays >= 2 ? '#e8710a' : '#6b7280';
+        return `<b style="color:${c}">🔔 未発送 ${x.pdays}日</b><br><span style="font-size:10px;color:${c}">${x.pdays >= 3 ? '催促どき' : x.pdays >= 2 ? 'そろそろ声かけ' : '様子見'}</span>`;
+      }
       if (x.phase === 'linehaul') return `<b style="color:#4527a0">輸送中</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'shipped') return `<b style="color:#283593">発送済</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : (x.di ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.di)}</span>` : '')}`;
       const s = x.ds || x.di; // 追跡中：配送業者の最新状態が無い＝番号未取得/未反映
@@ -7346,9 +7358,15 @@
       `<div style="margin:0 4px 8px;font-size:12px">入庫待ち <b>${list.length}</b>件 ・ 仕入額 ${fmtJpy(val)}　` +
       (todayN ? `<span style="display:inline-block;background:#e65100;color:#fff;font-weight:800;font-size:12px;padding:3px 11px;border-radius:12px;margin-right:8px" title="配達中/まもなく配達/本日到着予定＝今日中に届く見込みの荷物。梱包を締めるか、待って当日便で発送するかの判断に">🏃 本日届く見込み ${todayN}件</span>` : '') +
       chip('✅到着済', cnt('delivered'), '#2e7d32') + chip('🟡到着済見込み', cnt('likely'), '#b26a00') + chip('🚚配達中', cnt('out'), '#e65100') + chip('🏣配達店到着', cnt('arrived'), '#00695c') + chip('📅予定あり', cnt('eta'), '#1565c0') + chip('🚛輸送中', cnt('linehaul'), '#4527a0') + chip('📮発送済', cnt('shipped'), '#283593') + chip('📦追跡中', cnt('transit'), '#3949ab') + chip('❔手配待ち', cnt('none'), '#6b7280') +
+      (nsTotal ? `<br><span style="font-size:11.5px">🔔 <b style="color:#b3261e">仕入元がまだ発送していない ${nsTotal}件</b>　` +
+        (nsCnt(1) ? `<span style="background:#6b728022;color:#6b7280;font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:4px">1日 ${nsCnt(1)}</span>` : '') +
+        (nsCnt(2) ? `<span style="background:#e8710a22;color:#e8710a;font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:4px">2日 ${nsCnt(2)}</span>` : '') +
+        (nsCnt(3) ? `<span style="background:#d9302522;color:#d93025;font-weight:700;font-size:11px;padding:2px 8px;border-radius:11px;margin-right:4px">3日以上 ${nsCnt(3)}</span>` : '') +
+        `<span class="smd-dim" style="font-size:10.5px">（追跡番号も配送情報も無い＝発送前。取引ページから催促できます）</span></span>` : '') +
       `<br><span class="smd-dim">${cnt('likely') ? `🟡 <b style="color:#b26a00">${cnt('likely')}</b>件は想定日数を超過＝届いている可能性大（「✓入荷」で在庫へ）` : '長期未着なし'}${overdue ? ` ・ 到着予定超過 <b style="color:#d93025">${overdue}</b>件` : ''} ・ 追跡番号クリックで配送業者ページ（現在地）へ</span></div>` +
       `<div style="margin:0 4px 8px"><button class="smd-btn" id="wait-today" style="${todayOnly ? 'background:#e65100;border-color:#e65100;color:#fff;font-weight:700' : 'border-color:#e65100;color:#e65100;font-weight:700'}" title="本日届く見込み（配達中/まもなく配達/本日到着予定）だけ表示＝当日発送の判断に">🏃 本日届く見込みのみ${todayN ? '（' + todayN + '）' : ''}</button>` +
       `<button class="smd-btn" id="wait-alert" style="margin-left:6px;${alertOnly ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="到着済・到着済見込み・予定超過だけ表示">🔺 要確認のみ${alertOnly ? '（' + list.filter(needAtt).length + '）' : ''}</button>` +
+      (nsTotal ? `<button class="smd-btn" id="wait-push" style="margin-left:6px;${pushOnly ? 'background:#d93025;border-color:#d93025;color:#fff;font-weight:700' : 'border-color:#d93025;color:#d93025;font-weight:700'}" title="仕入れたのに仕入元がまだ発送していない分だけを、経過日数が長い順に表示します。取引ページから催促してください">🔔 未発送の催促（${nsTotal}）</button>` : '') +
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="到着予定一覧をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
       ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
       (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') +
@@ -7369,8 +7387,9 @@
         `</tr>`;
       }).join('') : `<tr><td colspan="10" class="smd-dim" style="padding:14px">${alertOnly ? '要確認の入庫待ちはありません🎉' : '入庫待ちはありません🎉'}</td></tr>`) +
       `</table></div></div>`;
-    { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; if (state.buyWaitAlert) state.buyWaitToday = false; renderWaiting(host); }); }
-    { const b = document.getElementById('wait-today'); if (b) b.addEventListener('click', () => { state.buyWaitToday = !state.buyWaitToday; if (state.buyWaitToday) state.buyWaitAlert = false; renderWaiting(host); }); }
+    { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; if (state.buyWaitAlert) { state.buyWaitToday = false; state.buyWaitPush = false; } renderWaiting(host); }); }
+    { const b = document.getElementById('wait-today'); if (b) b.addEventListener('click', () => { state.buyWaitToday = !state.buyWaitToday; if (state.buyWaitToday) { state.buyWaitAlert = false; state.buyWaitPush = false; } renderWaiting(host); }); }
+    { const b = document.getElementById('wait-push'); if (b) b.addEventListener('click', () => { state.buyWaitPush = !state.buyWaitPush; if (state.buyWaitPush) { state.buyWaitAlert = false; state.buyWaitToday = false; } renderWaiting(host); }); }
     { const b = document.getElementById('wait-cleanup'); if (b) b.addEventListener('click', () => { state.buyWaitCleanup = true; renderWaiting(host); }); }
     { const b = document.getElementById('wait-showfwd'); if (b) b.addEventListener('click', () => { state.buyWaitShowForwarded = !state.buyWaitShowForwarded; renderWaiting(host); }); }
     { const c = document.getElementById('wait-csv'); if (c) c.addEventListener('click', () => downloadCsv('入庫待ち到着予定_' + todayStr + '.csv', [['状況', '到着見込み', '仕入日', '待ち日数', '受取日時', '商品名', '仕入元', 'セラー', '仕入額(円)', '配送方法', '追跡番号', '発送元', '現在地', 'ItemID']].concat(shown.map(x => [WAIT_PHASE[x.phase].t.replace(/^\S+\s/, ''), x.eta || x.di || '', x.pd || '', x.pdays == null ? '' : x.pdays, deliveredAt(x.r) || '', x.r.name || x.r.name_supplier || '', x.r.supplier || '', x.r.seller || '', x.r.price != null ? x.r.price : '', x.r.ship_method || '', x.r.tracking_no || '', x.r.ship_region || '', x.r.delivery_place || '', x.r.item_id || '']))));  }
