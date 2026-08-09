@@ -2171,6 +2171,7 @@ function imgHash_(it) {
   if (!u) return ''; return String(u).split('?')[0].split('/').pop().replace(/\.\w+$/, '');
 }
 function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
+  var detailsAll = [];   // 注文詳細（購入者情報の保存に使う）
   // 追跡番号の取得は「毎時ぶん回す」と空振りで枠を食う（発送済でも越境SLSはAPIに番号が来ないことが多い）。
   // → doTrk（syncOrdersAllが6時間ゲートで決定 / ⚡今すぐ取得はforce）＝取得する回だけ、かつ 6日以内の新しい注文に限り、店ごと上限で。
   var TRK_CAP = force ? 200 : 40, trkGot = 0;
@@ -2192,7 +2193,9 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   try { var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (extr || []).forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; }); } catch (_) {}
   for (var i = 0; i < sns.length; i += 50) {
     var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list' }, 'get');
-    (((jd.response || {}).order_list) || []).forEach(function (o) {
+    var _ol = ((jd.response || {}).order_list) || [];
+    _ol.forEach(function (o) { detailsAll.push(o); });   // 購入者情報の保存用に詳細を貯める
+    _ol.forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
       if (!tab) return;
       var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, variation: it.model_name || '' }; });
@@ -2217,6 +2220,10 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
       rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
     });
   }
+  // ★購入者情報（受取人名・電話・住所）は時間が経つとAPIで取れなくなる。
+  //   以前は syncDailyStatsForShop_ からしか呼んでおらず、その関数がトリガーに入っていなかったため
+  //   customers が0件のままだった。注文同期は毎時走るので、ここでも必ず保存する。
+  try { saveCustomers_(cc, tok.shop_id, detailsAll); } catch (eCu) { Logger.log('customers skip ' + cc + ': ' + eCu); }
   if (rows.length) {
     // orders表に cancel_reason / packages 列が未追加でも同期が壊れないよう、列エラー時はその項目を外して再試行（列を足していない環境でも安全）
     try { sbUpsert_('orders', rows, 'cc,sn'); }
