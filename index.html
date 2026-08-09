@@ -5581,14 +5581,35 @@
           ['price', 'supplier', 'supplier_url'].forEach(function (f) { if (m[f] == null && r[f] != null) m[f] = r[f]; });
         });
         rows = Object.keys(merged).map(function (k) { return merged[k]; });
-        if (!rows.length) { alert('在庫台帳と一致する在庫Noがありませんでした（候補 ' + cand.length + '件）'); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
-        if (!confirm('利益管理表から ' + rows.length + '件 を在庫台帳に反映します。\n\n'
-          + '・注文番号を紐付けて「販売済み」にします\n'
-          + '・仕入値/仕入元/仕入元URLが空の在庫には、それも入れます\n'
+        // ★何が起きるかを先に見せる。2,000件の候補のうち実際に変わるのは百件程度で、
+        //   その中に「既に別の注文に紐付いているものを張り替える」危ない分が混ざっている
+        //   （キャンセルで在庫に戻り、別の月に別の人へ売れたケース）。区別せずに「◯件反映します」
+        //   とだけ出すと、何を承認したのか分からない。
+        var nNew = 0, nSame = 0, over = [];
+        rows = rows.filter(function (r) {
+          var cur = have[String(r.item_id)] || {};
+          var curSn = String(cur.shopee_sn || '').trim();
+          var changed = (curSn !== r.shopee_sn)
+            || (r.price != null && !(cur.price > 0))
+            || (r.supplier && !cur.supplier) || (r.supplier_url && !cur.supplier_url)
+            || (cur.status !== '販売済み');
+          if (!changed) { nSame++; return false; }          // 何も変わらない行は送らない（無駄な書込を減らす）
+          if (curSn && curSn !== r.shopee_sn) over.push(r.item_id + '：' + curSn + ' → ' + r.shopee_sn);
+          else nNew++;
+          return true;
+        });
+        if (!rows.length) { alert('反映が必要な差分はありませんでした。\n\n候補 ' + cand.length + '件／既に同じ内容 ' + nSame + '件'
+          + (nMiss ? '／在庫台帳に無い在庫No ' + nMiss + '件' : '')); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
+        if (!confirm('利益管理表から在庫台帳へ反映します。\n\n'
+          + '・新しく紐付く（または仕入値などを補う）… ' + nNew + '件\n'
+          + (over.length ? '・⚠️既に別の注文に紐付いているのを張り替える… ' + over.length + '件\n'
+              + '　（キャンセルで在庫に戻り、別の月に別の人へ売れた分。新しい月が正）\n'
+              + '　' + over.slice(0, 8).join('\n　') + (over.length > 8 ? '\n　…ほか' + (over.length - 8) + '件' : '') + '\n' : '')
+          + '・既に同じ内容なので触らない… ' + nSame + '件\n'
           + (nCan ? '・注文キャンセル（在庫なし・対象外）' + nCan + '件\n' : '')
           + (nAmb ? '・まとめ買いで在庫が複数ある ' + nAmb + '件は、どれを充てるか決められないので飛ばします（🔎在庫候補で選べます）\n' : '')
           + (nMiss ? '・在庫台帳に無い在庫No ' + nMiss + '件は飛ばします\n' : '')
-          + '\nよろしいですか？')) { ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
+          + '\n紐付けた在庫は「販売済み」になります。よろしいですか？')) { ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
         try {
           // ★PostgRESTはまとめ送りのとき「全部のオブジェクトが同じキー」でないと拒否する（PGRST102）。
           //   nullで埋めると既存の値を消してしまうので、**キーの組み合わせごとに分けて**送る。
