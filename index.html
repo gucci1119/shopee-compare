@@ -617,6 +617,14 @@
         <option value="auto">自動(メール)</option>
         <option value="sheet">スプレッドシート由来</option>
       </select>
+      <select id="stock-hw" title="ハード（機種）で絞り込み。商品名から自動判定しています（セルで手直し可）"><option value="">ハード:全て</option></select>
+      <select id="stock-cat" title="カテゴリで絞り込み。商品名から自動判定しています（セルで手直し可）"><option value="">カテゴリ:全て</option></select>
+      <select id="stock-tak" title="棚卸（現物の確認）の状態で絞り込み。現物を数えながら「未確認のみ」にしておくと、残りが減っていくのが見えます">
+        <option value="">棚卸:全て</option>
+        <option value="todo">未確認のみ</option>
+        <option value="ok">✓現物あり</option>
+        <option value="ng">✗現物なし</option>
+      </select>
       <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号（ハンディスキャナ可）" style="width:360px;min-width:280px">
       <button class="smd-btn" id="stock-scan" title="カメラで在庫QRを読み取って検索">📷 QRスキャン</button>
       <button class="smd-btn" id="stock-refresh" title="Supabaseから最新を再取得">🔄 更新</button>
@@ -4514,7 +4522,90 @@
   }
 
   // ---------------- 在庫（InventoryItemミラー: 画像付き・編集/登録可） ----------------
-  const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', bound: false, adding: false,
+  // 🧾棚卸（現物の確認）。状態(在庫保管中/販売済み)とは別の軸なので、専用の記録を持つ。
+  //   状態を書き換えてしまうと「数えた結果あった」と「まだ数えていない」が区別できなくなる。
+  //   round＝棚卸の回。回を始め直すと前回の✓は消える（毎回ゼロから数えるのが棚卸なので）。
+  const tak = { round: '', items: {}, at: '', loaded: false };
+  const takOf = id => tak.items[String(id)] || '';
+  async function takSave() {
+    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
+    catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
+  }
+  async function takLoad() {
+    if (tak.loaded) return;
+    tak.loaded = true;
+    try {
+      const kv = await sbGetAll('app_kv', 'select=v&k=eq.stocktake');
+      const v = kv && kv[0] && kv[0].v;
+      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.at = v.at || ''; }
+    } catch (_) {}
+  }
+  // ---- ハード / カテゴリ の自動判定 -------------------------------------------
+  // 商品名から機種と種別を推定する。仕入れ元の商品名は表記がバラバラ（PS2/プレステ2/プレイステーション2…）
+  // なので、拾える書き方を並べて当てる。外れることもあるので**セルで手直しできる**（app_kv inv_class に保存）。
+  // 判定の順番が大事：先に長い名前（PS Vita / Switch）を見ないと、短い名前（PS / SW）に食われる。
+  const HW_RULES = [
+    ['PSVita', /(ps\s*vita|psvita|playstation\s*vita|プレイステーション\s*ヴィータ|ヴィータ)/i],
+    ['PSP', /(\bpsp\b|psp-?\d{4}|プレイステーション\s*ポータブル)/i],
+    ['PS5', /(\bps\s*5\b|playstation\s*5|プレステ\s*5|プレイステーション\s*5)/i],
+    ['PS4', /(\bps\s*4\b|playstation\s*4|プレステ\s*4|プレイステーション\s*4)/i],
+    ['PS3', /(\bps\s*3\b|playstation\s*3|プレステ\s*3|プレイステーション\s*3)/i],
+    ['PS2', /(\bps\s*2\b|playstation\s*2|プレステ\s*2|プレイステーション\s*2)/i],
+    ['PS1', /(\bps\s*1\b|\bps\s*one\b|playstation\s*1|初代\s*プレステ|プレイステーション\s*1|\bpsx\b)/i],
+    ['Switch2', /(switch\s*2|スイッチ\s*2)/i],
+    ['Switch', /(nintendo\s*switch|\bswitch\b|スイッチ|ジョイコン|joy-?con)/i],
+    ['WiiU', /(wii\s*u|ウィーユー)/i],
+    ['Wii', /(\bwii\b|ウィー)/i],
+    ['3DS', /(3\s*ds|ニンテンドー\s*3ds)/i],
+    ['DS', /(\bnds\b|\bds\b|ニンテンドーds|ディーエス)/i],
+    ['GBA', /(game\s*boy\s*advance|\bgba\b|ゲームボーイ\s*アドバンス)/i],
+    ['GBC', /(game\s*boy\s*color|\bgbc\b|ゲームボーイ\s*カラー)/i],
+    ['GB', /(game\s*boy|\bgb\b|ゲームボーイ)/i],
+    ['GC', /(game\s*cube|\bgc\b|ゲームキューブ)/i],
+    ['N64', /(nintendo\s*64|\bn64\b|ロクヨン|ニンテンドー\s*64)/i],
+    ['SFC', /(super\s*famicom|\bsfc\b|スーパーファミコン|スーファミ|\bsnes\b)/i],
+    ['FC', /(famicom|\bfc\b|\bnes\b|ファミコン|ファミリーコンピュータ|ファミリーコンピューター)/i],
+    ['SS', /(sega\s*saturn|セガサターン|\bss\b)/i],
+    ['DC', /(dreamcast|ドリームキャスト|\bdc\b)/i],
+    ['MD', /(mega\s*drive|メガドライブ|\bmd\b|genesis)/i],
+    ['PCE', /(pc\s*engine|\bpce\b|pcエンジン)/i],
+    ['Xbox', /(x\s*box|エックスボックス)/i],
+    ['たまごっち', /(たまごっち|tamagotchi)/i],
+    ['PC', /(windows|\bpc用\b|パソコン)/i],
+  ];
+  const CAT_RULES = [
+    ['周辺機器', /(コントローラ|controller|ジョイコン|joy-?con|メモリー?\s*(カード|スティック)|memory\s*(card|stick)|pro\s*duo|ケーブル|cable|アダプタ|adapter|ac\s*アダプ|充電|charger|スタンド|カバー|ケース|case|保護|フィルム|タッチペン|拡張パック|expansion|マイク|ヘッドセット|リモコン|ヌンチャク|バッテリー|電池|変換|コネクタ|ドック|dock|クリーナー|sdカード|sd\s*card|usb|イヤホン|スピーカー|バッグ|ポーチ|ストラップ|フィギュア|amiibo|アミーボ|カードダス|トレカ)/i],
+    ['ハード', /(本体|console|セット\s*本体|\bpsp-?\d{4}\b|ハード)/i],
+    ['ソフト', /(ソフト|software|カセット|cartridge|カートリッジ|ゲームソフト|game\s*soft|\bdvd\b|ディスク|disc)/i],
+  ];
+  const invHwAuto = name => { const t = String(name || ''); for (const [k, re] of HW_RULES) if (re.test(t)) return k; return ''; };
+  // ★カテゴリはキーワードだけだと当たらない。ゲームソフトの商品名は
+  //   「ドラクエV DS」のようにタイトルだけで「ソフト」とは書かないことが多いため。
+  //   周辺機器でも本体でもなく、ハード（機種）が読み取れたなら、まずソフトとみなす。
+  const invCatAuto = name => {
+    const t = String(name || '');
+    for (const [k, re] of CAT_RULES) if (re.test(t)) return k;
+    return invHwAuto(t) ? 'ソフト' : '';
+  };
+  const HW_LIST = HW_RULES.map(x => x[0]);
+  const CAT_LIST = ['ソフト', 'ハード', '周辺機器', 'その他'];
+  const invCls = { items: {}, loaded: false };   // 手直し {item_id:{hw,cat}}
+  async function invClsLoad() {
+    if (invCls.loaded) return;
+    invCls.loaded = true;
+    try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.inv_class'); invCls.items = (kv && kv[0] && kv[0].v && kv[0].v.items) || {}; } catch (_) {}
+  }
+  async function invClsSave() {
+    try { await sbUpsert('app_kv', [{ k: 'inv_class', v: { items: invCls.items }, updated_at: new Date().toISOString() }]); }
+    catch (e) { toast('❌ 保存できませんでした: ' + e.message); }
+  }
+  const invName = r => String(r.name_supplier || r.name || '');
+  const invHw = r => (invCls.items[r.item_id] || {}).hw || invHwAuto(invName(r));
+  const invCat = r => (invCls.items[r.item_id] || {}).cat || invCatAuto(invName(r));
+  const invHwManual = r => !!((invCls.items[r.item_id] || {}).hw);
+  const invCatManual = r => !!((invCls.items[r.item_id] || {}).cat);
+
+  const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', tak: '', hw: '', cat: '', bound: false, adding: false,
     sortKey: (function () { try { return localStorage.getItem('smdStkSortK') || ''; } catch (_) { return ''; } })(),
     sortDir: (function () { try { return localStorage.getItem('smdStkSortD') || 'desc'; } catch (_) { return 'desc'; } })() };
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
@@ -4605,9 +4696,28 @@
       document.getElementById('stock-st').addEventListener('change', e => { stock.st = e.target.value; stock.page = 1; saveStockFilter(); stockRender(); });
       document.getElementById('stock-sup').addEventListener('change', e => { stock.sup = e.target.value; stock.page = 1; stockRender(); });
       document.getElementById('stock-origin').addEventListener('change', e => { stock.origin = e.target.value; stock.page = 1; stockRender(); });
+      { const el = document.getElementById('stock-hw'); if (el) el.addEventListener('change', e => { stock.hw = e.target.value; stock.page = 1; stockRender(); }); }
+      { const el = document.getElementById('stock-cat'); if (el) el.addEventListener('change', e => { stock.cat = e.target.value; stock.page = 1; stockRender(); }); }
+      { const el = document.getElementById('stock-tak'); if (el) el.addEventListener('change', e => { stock.tak = e.target.value; stock.page = 1; stockRender(); }); }
       let t;
       document.getElementById('stock-search').addEventListener('input', e => {
         clearTimeout(t);
+        // ★棚卸モードのときは、読み取ったItemIDをその場で「✓あり」に登録して欄を空にする。
+        //   ハンディスキャナは末尾にEnterを打つ機種もあるので input で拾う（Enter待ちにしない）。
+        if (stock.takScan) {
+          const v = e.target.value.trim();
+          if (v.length >= 6) {
+            const hit = (stock.rows || []).find(r => String(r.item_id).toLowerCase() === v.toLowerCase());
+            if (hit) {
+              e.target.value = '';
+              const was = takOf(hit.item_id);
+              takMark(hit.item_id, 'ok').then(() => {
+                toast(was === 'ok' ? '↩️ 取り消しました：' + hit.item_id : '✓ ' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 26));
+              });
+              return;
+            }
+          }
+        }
         t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.page = 1; saveStockFilter(); stockRender(); }, 250);
       });
       window.addEventListener('resize', () => fitScroll());
@@ -4798,6 +4908,16 @@
     }
     if (newSn) { if (!pf.invMap.has(newSn)) pf.invMap.set(newSn, []); pf.invMap.get(newSn).push(Object.assign({}, row, patch)); }
     if (state.page === 'profit') { try { pfRender(); } catch (_) {} }
+  }
+
+  // 棚卸の記録。同じボタンをもう一度押すと取り消し（押し間違いを直せる）
+  async function takMark(id, kind, quiet) {
+    if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
+    const cur = takOf(id);
+    if (cur === kind) delete tak.items[String(id)]; else tak.items[String(id)] = kind;
+    await takSave();
+    if (!quiet) stockRender();
+    return true;
   }
 
   // 選択した在庫の状態を一括変更（届いた入庫待ちを「在庫保管中(受取済)」にまとめて片付ける用）
@@ -5674,6 +5794,20 @@
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
     const inStock = all.filter(r => r.status === '在庫保管中');
+    // ハード/カテゴリの選択肢は「実際に在庫にあるものだけ」を件数つきで出す（空の選択肢を並べない）
+    (() => {
+      const fill = (id, get, cur) => {
+        const el = document.getElementById(id); if (!el) return;
+        const c = {}; all.forEach(r => { const v = get(r); if (v) c[v] = (c[v] || 0) + 1; });
+        const keys = Object.keys(c).sort((x, y) => c[y] - c[x]);
+        const label = id === 'stock-hw' ? 'ハード' : 'カテゴリ';
+        el.innerHTML = `<option value="">${label}:全て</option>` +
+          keys.map(k => `<option value="${esc(k)}"${k === cur ? ' selected' : ''}>${esc(k)}（${c[k]}）</option>`).join('');
+      };
+      fill('stock-hw', invHw, stock.hw);
+      fill('stock-cat', invCat, stock.cat);
+      const te = document.getElementById('stock-tak'); if (te && te.value !== stock.tak) te.value = stock.tak;
+    })();
     const stockVal = inStock.reduce((s, r) => s + (r.price || 0), 0);
     // ★仕分けが必要＝注文に紐付いていないのに「販売済み」／紐付いているのに「在庫保管中」。
     //   帳簿と実物の在り処が食い違っている可能性がある分。押すと下の一覧がその条件で絞られる。
@@ -5712,6 +5846,9 @@
     if (stock.st) rows = rows.filter(r => r.status === stock.st);
     if (stock.sup) rows = rows.filter(r => (r.supplier || '') === stock.sup);
     if (stock.origin) rows = rows.filter(r => stkOrigin(r) === stock.origin);
+    if (stock.hw) rows = rows.filter(r => invHw(r) === stock.hw);
+    if (stock.cat) rows = rows.filter(r => invCat(r) === stock.cat);
+    if (stock.tak) rows = rows.filter(r => { const t = takOf(r.item_id); return stock.tak === 'todo' ? !t : t === stock.tak; });
     if (stock.q) rows = rows.filter(r =>
       ((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
        (r.supplier || '') + ' ' + (r.seller || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).toLowerCase().includes(stock.q));
@@ -5739,6 +5876,9 @@
         buy_status: r => String(r.buy_status || r.purchase_status || ''),
         delivery: r => String(r.delivery_status || ''),
         bin: r => String(r.bin || ''),
+        hw: r => invHw(r),
+        cat: r => invCat(r),
+        tak: r => ({ ok: '1あり', ng: '2なし' })[takOf(r.item_id)] || '3未確認',
         proof: r => (r.proof ? 1 : 0),
         note: r => String(r.note || r.memo || ''),
       };
@@ -5796,6 +5936,23 @@
       `<button class="smd-btn" id="stk-bulkrecv" style="margin-left:4px;display:${selCount ? '' : 'none'};background:#e7f5ea;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="選択した入庫待ちを『在庫保管中(受取済)』に一括変更＝届いたのに更新してない在庫をまとめて片付け">✅ 受取済にする${selCount ? '（' + selCount + '）' : ''}</button>` +
       `<button class="smd-btn" id="stk-selclear" style="margin-left:4px;display:${selCount ? '' : 'none'}">選択解除</button>` +
       `<button class="smd-btn" id="stk-csv" style="margin-left:6px" title="表示中（絞り込み後）の在庫をCSVで書き出し">⬇ CSV(${rows.length})</button>` +
+      // ★棚卸バー：現物を数える作業そのもの。1,570件をスクロールして探すのは無理なので、
+      //   QR/ハンディスキャナで読んだItemIDを片っ端から✓に積む「登録制」を主にする。
+      (() => {
+        const target = (stock.rows || []).filter(r => r.status === '在庫保管中');
+        const ok = target.filter(r => takOf(r.item_id) === 'ok').length;
+        const ng = target.filter(r => takOf(r.item_id) === 'ng').length;
+        const todo = target.length - ok - ng;
+        const scan = !!stock.takScan;
+        return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` +
+          `<button class="smd-btn" id="stk-takscan" style="${scan ? 'background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="ONにすると、QRスキャン／ハンディスキャナで読み取ったItemIDがその場で「✓あり」に登録されます。現物を1つずつ手に取って読ませてください">📋 棚卸モード ${scan ? 'ON' : 'OFF'}</button>` +
+          `<span style="margin-left:10px;font-size:12.5px">在庫保管中 <b>${target.length}</b>件 ／ <b style="color:#1a7f37">✓あり ${ok}</b> ／ <b style="color:#d93025">✗なし ${ng}</b> ／ <b style="color:#e8710a">未確認 ${todo}</b></span>` +
+          (todo && (ok || ng) ? `<button class="smd-btn" id="stk-takfin" style="margin-left:10px;border-color:#e8710a;color:#e8710a;font-weight:700" title="✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかを選んでまとめて処理します">✓が付かなかった ${todo}件 を処理…</button>` : '') +
+          ((ok || ng) ? `<button class="smd-btn" id="stk-takreset" style="margin-left:6px;font-size:11px" title="✓/✗の記録を全部消して、棚卸をやり直します（在庫の状態は変えません）">🗑 記録をリセット</button>` : '') +
+          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37">📷 QRスキャン を押すか、<b>検索欄にハンディスキャナで読み込ませてください</b>。読んだ在庫がその場で「✓あり」になります（同じ物をもう一度読むと取り消し）。</div>` : '') +
+          `<div class="smd-dim" style="margin-top:5px;font-size:11px">✓が付かなかった分は「売れた（販売済み）」か「仕入元がキャンセルした（仕入キャンセル）」のどちらかです。棚卸の記録は在庫の状態とは別に持っているので、押し間違えても状態は壊れません。</div>` +
+          `</div>`;
+      })() +
       `<button class="smd-btn" id="stk-dead" style="margin-left:6px;${stock.dead ? 'background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700' : ''}" title="在庫保管中のまま${DEAD_DAYS}日超の「死に筋」だけ表示（値下げ・再出品の検討対象）。滞留日数の長い順。">🏚 死に筋${deadCount ? '（' + deadCount + '）' : ''}</button>` +
       `<span class="smd-dim" style="font-size:11px;margin-left:8px">左端☑で複数選び「一括印刷」。仕入元・仕入額・状態などはセルで直接編集（Supabaseに保存）。ItemID横の✂でまとめ分割。</span></div>` +
       `<div id="stk-addform"></div>` +
@@ -5808,8 +5965,10 @@
         };
         return '<tr><th><input type="checkbox" id="stk-selall" title="表示中を全選択/解除"></th><th>画像</th>' +
           S('item_id', 'ItemID') + '<th>QR</th>' + S('purchased_at', '仕入日時') + S('created_at', '追加日時') +
-          S('name', '商品名') + S('shopee_sn', 'Shopee注文') + S('sku', 'SKU') + S('supplier', '仕入元') +
+          S('name', '商品名') + S('hw', 'ハード', '商品名から自動判定。セルで手直しできます') + S('cat', 'カテゴリ', '商品名から自動判定。セルで手直しできます') +
+          S('shopee_sn', 'Shopee注文') + S('sku', 'SKU') + S('supplier', '仕入元') +
           S('seller', 'セラー名') + S('price', '仕入額') + S('condition', 'コンディション') + S('status', '状態') +
+          S('tak', '棚卸', '現物を数えた結果。✓あり／✗なし。状態(在庫保管中/販売済み)とは別の記録です') +
           S('buy_status', '仕入状況') + S('delivery', '配送', '仕入元→自宅の配送状況（メルカリはuserscript連携）') +
           S('bin', '棚') + S('proof', '確証') + S('note', '備考') + '</tr>';
       })() +
@@ -5826,6 +5985,12 @@
         `<td style="font-size:11px;white-space:nowrap;min-width:96px" title="仕入日時（日本時間。メール登録分は時刻あり／シート由来は日付のみ）">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td>` +
         `<td style="font-size:11px;white-space:nowrap;min-width:96px;color:#9a8fb5" title="ポータル追加日時（日本時間）">${esc(jstDateTime(r.created_at))}</td>` +
         `<td style="min-width:190px"><input class="li stk-name" ${di} value="${esc(r.name || '')}" title="商品名（編集可）" style="width:100%;min-width:180px;font-size:11px;padding:2px 4px">${r.name_supplier && String(r.name_supplier).trim() !== String(r.name || '').trim() ? `<div class="smd-dim" style="font-size:10px;word-break:break-word" title="仕入元での商品名">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
+        `<td style="white-space:nowrap"><select class="li stk-hw" ${di} title="ハード（機種）。空欄は商品名から自動判定。選ぶと手動で固定されます" style="padding:3px;font-size:11px;width:92px;${invHwManual(r) ? '' : 'color:#8a8f98'}">` +
+          `<option value=""${invHwManual(r) ? '' : ' selected'}>${invHwAuto(invName(r)) ? '自動: ' + invHwAuto(invName(r)) : '自動: —'}</option>` +
+          HW_LIST.map(h => `<option${invHwManual(r) && invHw(r) === h ? ' selected' : ''}>${h}</option>`).join('') + `</select></td>` +
+        `<td style="white-space:nowrap"><select class="li stk-cat" ${di} title="カテゴリ。空欄は商品名から自動判定。選ぶと手動で固定されます" style="padding:3px;font-size:11px;width:88px;${invCatManual(r) ? '' : 'color:#8a8f98'}">` +
+          `<option value=""${invCatManual(r) ? '' : ' selected'}>${invCatAuto(invName(r)) ? '自動: ' + invCatAuto(invName(r)) : '自動: —'}</option>` +
+          CAT_LIST.map(h => `<option${invCatManual(r) && invCat(r) === h ? ' selected' : ''}>${h}</option>`).join('') + `</select></td>` +
         `<td style="white-space:nowrap"><input class="li stk-sn" ${di} value="${esc(r.shopee_sn || '')}" placeholder="Shopee注文SN" title="この在庫を当てるShopee注文SN（入力で利益ページに転記＝紐付け）" style="width:calc(100% - 26px);min-width:110px;font-size:11px;padding:2px 4px">` +
           `<button class="stk-ordpick" ${di} title="注文を一覧から選んで割り当てる（SNを手打ちしなくてよい）" style="border:1px solid #cdd3db;background:#fff;border-radius:5px;cursor:pointer;font-size:11px;padding:1px 4px;margin-left:2px">🔎</button></td>` +
         `<td><input class="li stk-sku" ${di} value="${esc(r.sku || '')}" placeholder="—" title="SKU（編集可）" style="width:100%;min-width:90px;font-size:11px;padding:2px 4px"></td>` +
@@ -5843,6 +6008,9 @@
           (r.condition && !CONDITIONS.includes(r.condition) ? `<option selected>${esc(r.condition)}</option>` : '') +
           `</select></td>` +
         `<td><select class="li stk-st" ${di} style="padding:3px;font-size:11px;width:100px">${STOCK_STATUS.map(s => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}${STOCK_STATUS.includes(r.status) ? '' : `<option selected>${esc(r.status || '')}</option>`}</select></td>` +
+        `<td style="white-space:nowrap">${(() => { const t = takOf(r.item_id);
+            const b = (k, l, col) => `<button class="stk-tak" ${di} data-k="${k}" title="${k === 'ok' ? '現物を確認した' : '探したが無かった'}" style="border:1px solid ${t === k ? col : '#cdd3db'};background:${t === k ? col : '#fff'};color:${t === k ? '#fff' : col};border-radius:5px;cursor:pointer;font-size:11px;padding:1px 7px;font-weight:${t === k ? '700' : '400'}">${l}</button>`;
+            return b('ok', '✓あり', '#1a7f37') + ' ' + b('ng', '✗なし', '#d93025'); })()}</td>` +
         `<td><select class="li stk-ps" ${di} style="padding:3px;font-size:11px;width:110px">${STOCK_PSTATUS.map(s => `<option value="${esc(s)}" ${s === (r.purchase_status || '') ? 'selected' : ''}>${s || '—'}</option>`).join('')}${STOCK_PSTATUS.includes(r.purchase_status || '') ? '' : `<option selected>${esc(r.purchase_status)}</option>`}</select></td>` +
         `<td style="white-space:nowrap;font-size:10.5px;min-width:120px">${stkShipCell(r)}</td>` +
         `<td><input class="li stk-bin" ${di} value="${esc(r.bin || '')}" placeholder="—" title="棚（編集可）" style="width:100%;min-width:60px;font-size:11px;padding:2px 4px"></td>` +
@@ -5861,6 +6029,60 @@
     body.querySelectorAll('.stk-cond').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { condition: e.target.value || null })));
     body.querySelectorAll('.stk-price').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { price: e.target.value === '' ? null : Number(e.target.value) })) stockRender(); }));
     body.querySelectorAll('.stk-st').forEach(el => el.addEventListener('change', async e => { if (await stockSave(e.target.dataset.id, { status: e.target.value })) stockRender(); }));
+    body.querySelectorAll('.stk-hw').forEach(el => el.addEventListener('change', async e => {
+      const id = e.target.dataset.id, v = e.target.value;
+      invCls.items[id] = Object.assign({}, invCls.items[id]); if (v) invCls.items[id].hw = v; else delete invCls.items[id].hw;
+      if (!Object.keys(invCls.items[id]).length) delete invCls.items[id];
+      await invClsSave(); stockRender();
+    }));
+    body.querySelectorAll('.stk-cat').forEach(el => el.addEventListener('change', async e => {
+      const id = e.target.dataset.id, v = e.target.value;
+      invCls.items[id] = Object.assign({}, invCls.items[id]); if (v) invCls.items[id].cat = v; else delete invCls.items[id].cat;
+      if (!Object.keys(invCls.items[id]).length) delete invCls.items[id];
+      await invClsSave(); stockRender();
+    }));
+    body.querySelectorAll('.stk-tak').forEach(el => el.addEventListener('click', () => takMark(el.dataset.id, el.dataset.k)));
+    { const b = document.getElementById('stk-takscan'); if (b) b.addEventListener('click', () => {
+        stock.takScan = !stock.takScan;
+        if (stock.takScan) { stock.q = ''; const se = document.getElementById('stock-search'); if (se) { se.value = ''; se.focus(); } }
+        stockRender();
+      }); }
+    { const b = document.getElementById('stk-takreset'); if (b) b.addEventListener('click', async () => {
+        if (!confirm('棚卸の ✓/✗ の記録を全部消して、やり直します。\n\n在庫の状態（在庫保管中／販売済み）は変わりません。よろしいですか？')) return;
+        tak.items = {}; await takSave(); stockRender();
+      }); }
+    { const b = document.getElementById('stk-takfin'); if (b) b.addEventListener('click', async () => {
+        // ✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかは在庫ごとに違うので選ばせる。
+        const target = (stock.rows || []).filter(r => r.status === '在庫保管中' && !takOf(r.item_id));
+        if (!target.length) return;
+        const val = target.reduce((t, r) => t + (Number(r.price) || 0), 0);
+        const linked = target.filter(r => (r.shopee_sn || '').trim()).length;
+        const ans = prompt('✓が付かなかった ' + target.length + '件（仕入額 ' + fmtJpy(val) + '）をまとめて処理します。\n'
+          + (linked ? '※うち ' + linked + '件は注文SNが付いています（＝売れた分の可能性が高い）\n' : '')
+          + '\n1 … 販売済み（売れて手元に無い）\n'
+          + '2 … 仕入キャンセル（仕入元が送ってこなかった＝資産から除外）\n'
+          + '3 … 注文SNが付いている分だけ販売済み、残りは触らない\n\n番号を入れてください（空欄で中止）', '1');
+        if (!ans) return;
+        let list = target, st = '販売済み';
+        if (ans.trim() === '2') st = '仕入キャンセル';
+        else if (ans.trim() === '3') { list = target.filter(r => (r.shopee_sn || '').trim()); st = '販売済み'; }
+        else if (ans.trim() !== '1') { alert('1〜3 のどれかを入れてください'); return; }
+        if (!list.length) { alert('対象がありません'); return; }
+        if (!confirm(list.length + '件 を「' + st + '」にします。よろしいですか？\n\n※あとから在庫台帳のセルで個別に戻せます。')) return;
+        if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+        b.disabled = true;
+        try {
+          for (let i = 0; i < list.length; i += 200) {
+            b.textContent = '反映中… ' + i + '/' + list.length;
+            await sbUpsert('inventory', list.slice(i, i + 200).map(r => ({ item_id: r.item_id, status: st, edited_at: new Date().toISOString() })));
+            list.slice(i, i + 200).forEach(r => { r.status = st; });
+          }
+          try { logAct('在庫', '棚卸しめ', '', list.length + '件を' + st + 'に'); } catch (_) {}
+          toast('✓ ' + list.length + '件を「' + st + '」にしました');
+          try { pf._invAt = 0; plan._cache = null; } catch (_) {}
+          stockRender();
+        } catch (e) { alert('反映に失敗: ' + e.message); b.disabled = false; }
+      }); }
     body.querySelectorAll('.stk-ps').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { purchase_status: e.target.value || null })));
     body.querySelectorAll('.stk-name').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { name: e.target.value.trim() || null })));
     body.querySelectorAll('.stk-note').forEach(el => el.addEventListener('change', e => stockSave(e.target.dataset.id, { note: e.target.value.trim() || null })));
@@ -5926,7 +6148,9 @@
   // 在庫データを一度だけ読み込む（複数ページで共有）
   async function ensureInv() {
     if (stock.rows) return stock.rows;
-    stock.rows = await sbGetAll('inventory', 'select=*&order=item_id.desc');
+    // 棚卸の✓記録とハード/カテゴリの手直しも一緒に読む（在庫台帳の描画で必ず要る）
+    const [rows] = await Promise.all([sbGetAll('inventory', 'select=*&order=item_id.desc'), takLoad(), invClsLoad()]);
+    stock.rows = rows;
     return stock.rows;
   }
   // ---------------- 🏪 仕入れ先 ----------------
