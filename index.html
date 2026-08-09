@@ -4527,10 +4527,10 @@
   //   round＝棚卸の回。回を始め直すと前回の✓は消える（毎回ゼロから数えるのが棚卸なので）。
   //   unknown … 現物はあったのに台帳に無かったItemID。スプシとItemIDが食い違っている分がここに落ちる。
   //   「読み取れなかった＝無かったこと」にすると棚卸の意味がないので、必ず残す。
-  const tak = { round: '', items: {}, unknown: {}, at: '', loaded: false };
+  const tak = { round: '', items: {}, unknown: {}, seq: {}, at: '', loaded: false };
   const takOf = id => tak.items[String(id)] || '';
   async function takSave() {
-    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
+    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
     catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
   }
   async function takLoad() {
@@ -4539,7 +4539,7 @@
     try {
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.stocktake');
       const v = kv && kv[0] && kv[0].v;
-      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.at = v.at || ''; }
+      if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.seq = v.seq || {}; tak.at = v.at || ''; }
     } catch (_) {}
   }
   // ---- ハード / カテゴリ の自動判定 -------------------------------------------
@@ -4718,19 +4718,33 @@
               });
               return;
             }
-            // ★台帳に無いItemID。スプシとIDが食い違っている分。ここで読み捨てると
-            //   「現物はあったのに無かったこと」になってしまうので、必ず記録に残す。
-            if (/^[A-Za-z0-9][A-Za-z0-9\-_]{5,}$/.test(v)) {
-              e.target.value = '';
-              const k = v.toUpperCase();
-              tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
-              takSave().then(() => stockRender());
-              toast('⚠️ 台帳に無いItemID：' + v + '（現物あり として記録しました）');
-              return;
-            }
+            // ★台帳に無いItemIDは、ここでは登録しない。
+            //   手打ちの途中（"ITM-20" など）を拾ってしまうため。Enterを押した時だけ登録する。
           }
         }
         t = setTimeout(() => { stock.q = e.target.value.trim().toLowerCase(); stock.page = 1; saveStockFilter(); stockRender(); }, 250);
+      });
+      // 手打ち／Enterを打たないスキャナの両対応：Enterで確定登録する。
+      // 台帳にあれば✓、無ければ「台帳に無いID」として記録（現物はあったので残す）。
+      document.getElementById('stock-search').addEventListener('keydown', async e => {
+        if (e.key !== 'Enter' || !stock.takScan) return;
+        e.preventDefault();
+        const v = String(e.target.value || '').trim();
+        if (!v) return;
+        const hit = (stock.rows || []).find(r => String(r.item_id).toLowerCase() === v.toLowerCase());
+        e.target.value = '';
+        if (hit) {
+          const was = takOf(hit.item_id);
+          await takMark(hit.item_id, 'ok');
+          toast(was === 'ok' ? '↩️ 取り消しました：' + hit.item_id : '✓ ' + hit.item_id + '　' + String(hit.name_supplier || hit.name || '').slice(0, 26));
+          return;
+        }
+        if (!/^[A-Za-z0-9][A-Za-z0-9\-_]{4,}$/.test(v)) { toast('❔ ItemIDとして短すぎます：' + v); return; }
+        if (!confirm('「' + v + '」は在庫台帳にありません。\n\n現物はあったものとして記録しますか？\n（スプレッドシートとItemIDが食い違っている分は、あとでCSVで突き合わせます）')) return;
+        const k = v.toUpperCase();
+        tak.unknown[k] = { at: new Date().toISOString(), n: ((tak.unknown[k] || {}).n || 0) + 1 };
+        await takSave(); stockRender();
+        toast('⚠️ 台帳に無いItemID：' + v + '（現物あり として記録）');
       });
       window.addEventListener('resize', () => fitScroll());
       document.getElementById('stock-refresh').addEventListener('click', async e => {
@@ -4926,7 +4940,8 @@
   async function takMark(id, kind, quiet) {
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
     const cur = takOf(id);
-    if (cur === kind) delete tak.items[String(id)]; else tak.items[String(id)] = kind;
+    if (cur === kind) { delete tak.items[String(id)]; delete tak.seq[String(id)]; }
+    else { tak.items[String(id)] = kind; tak.seq[String(id)] = new Date().toISOString(); }
     await takSave();
     if (!quiet) stockRender();
     return true;
@@ -5959,10 +5974,52 @@
         return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` +
           `<button class="smd-btn" id="stk-takscan" style="${scan ? 'background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="ONにすると、QRスキャン／ハンディスキャナで読み取ったItemIDがその場で「✓あり」に登録されます。現物を1つずつ手に取って読ませてください">📋 棚卸モード ${scan ? 'ON' : 'OFF'}</button>` +
           `<span style="margin-left:10px;font-size:12.5px">在庫保管中 <b>${target.length}</b>件 ／ <b style="color:#1a7f37">✓あり ${ok}</b> ／ <b style="color:#d93025">✗なし ${ng}</b> ／ <b style="color:#e8710a">未確認 ${todo}</b></span>` +
+          // ★金額の把握が棚卸の目的（期末棚卸高になる）。件数だけでなく仕入額を常に出す。
+          (() => {
+            const okRows = target.filter(r => takOf(r.item_id) === 'ok');
+            const yen = rs => rs.reduce((t, r) => t + (Number(r.price) || 0), 0);
+            const okY = yen(okRows), todoY = yen(target.filter(r => !takOf(r.item_id))), ngY = yen(target.filter(r => takOf(r.item_id) === 'ng'));
+            const allY = yen(target);
+            const noPrice = okRows.filter(r => r.price == null).length;
+            return `<div style="margin-top:6px;font-size:12.5px">💰 <b style="color:#1a7f37">✓あり ${fmtJpy(okY)}</b>` +
+              `<span class="smd-dim"> ／ ✗なし ${fmtJpy(ngY)} ／ 未確認 ${fmtJpy(todoY)} ／ 台帳合計 ${fmtJpy(allY)}</span>` +
+              (noPrice ? `<span style="color:#d93025;margin-left:8px">⚠️ ✓のうち ${noPrice}件は仕入額が空</span>` : '') +
+              `<br><span class="smd-dim" style="font-size:11px">この <b>✓あり ${fmtJpy(okY)}</b> が数え終われば<b>期末棚卸高</b>です（🧾確定申告に手で入れてください）。</span></div>`;
+          })() +
           ((ok || Object.keys(tak.unknown || {}).length) ? `<button class="smd-btn" id="stk-takcsv" style="margin-left:10px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="✓を付けた在庫＋台帳に無かった読み取りを、1つのCSVに書き出します。スプレッドシートとの突き合わせ用">⬇ 在庫あったリスト（${ok + Object.keys(tak.unknown || {}).length}）</button>` : '') +
           (todo && (ok || ng) ? `<button class="smd-btn" id="stk-takfin" style="margin-left:10px;border-color:#e8710a;color:#e8710a;font-weight:700" title="✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかを選んでまとめて処理します">✓が付かなかった ${todo}件 を処理…</button>` : '') +
           ((ok || ng) ? `<button class="smd-btn" id="stk-takreset" style="margin-left:6px;font-size:11px" title="✓/✗の記録を全部消して、棚卸をやり直します（在庫の状態は変えません）">🗑 記録をリセット</button>` : '') +
-          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37">📷 QRスキャン を押すか、<b>検索欄にハンディスキャナで読み込ませてください</b>。読んだ在庫がその場で「✓あり」になります（同じ物をもう一度読むと取り消し）。</div>` : '') +
+          (scan ? `<div style="margin-top:6px;font-size:11.5px;color:#1a7f37">📷 QRスキャン を押す／<b>検索欄にハンディスキャナで読ませる</b>／<b>ItemIDを手打ちして Enter</b>。どれでも「✓あり」に入ります（同じ物をもう一度で取り消し）。<br><span class="smd-dim">台帳に無いIDは <b>Enter</b> を押した時だけ、確認のうえ記録します（打ちかけの文字を拾わないため）。</span></div>` : '') +
+          // ★スキャンした物がその場でここに積み上がる。カウンタだけだと「本当に登録されたか」が分からない。
+          ((ok || Object.keys(tak.unknown || {}).length) ? (() => {
+            const byId = {}; (stock.rows || []).forEach(r => { byId[String(r.item_id)] = r; });
+            const marked = Object.keys(tak.items).filter(k => tak.items[k] === 'ok')
+              .map(k => ({ k, at: tak.seq[k] || '', r: byId[k] }))
+              .concat(Object.keys(tak.unknown || {}).map(k => ({ k, at: (tak.unknown[k] || {}).at || '', r: null, unk: true })))
+              .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+            const N = 40;
+            return `<div style="margin-top:8px;border-top:1px dashed #cfd6dd;padding-top:7px">` +
+              `<div style="font-size:12px;font-weight:700;margin-bottom:4px">📥 在庫あり（読んだ順・新しいものが上）<span class="smd-dim" style="font-weight:400;font-size:11px">　${marked.length}件${marked.length > N ? '／直近' + N + '件を表示（全部見るには上の「棚卸:✓現物あり」）' : ''}</span></div>` +
+              (() => {   // ✓を付けた分の内訳。何がどれだけ残っているかを金額で掴む
+                const rs = marked.filter(x => x.r).map(x => x.r);
+                if (!rs.length) return '';
+                const agg = (get) => { const m = {}; rs.forEach(r => { const k = get(r) || '(未分類)'; const e = m[k] = m[k] || { n: 0, y: 0 }; e.n++; e.y += Number(r.price) || 0; }); return m; };
+                const line = (title, m) => { const ks = Object.keys(m).sort((a, b) => m[b].y - m[a].y); return `<div style="font-size:11px;margin-bottom:2px"><span class="smd-dim">${title}</span> ` + ks.map(k => `<span style="display:inline-block;background:#f1f3f5;border-radius:9px;padding:1px 8px;margin:0 4px 3px 0;white-space:nowrap">${esc(k)} <b>${m[k].n}</b> <span class="smd-dim">${fmtJpy(m[k].y)}</span></span>`).join('') + `</div>`; };
+                return `<div style="margin-bottom:5px">${line('カテゴリ', agg(invCat))}${line('ハード', agg(invHw))}${line('仕入元', agg(r => r.supplier))}</div>`;
+              })() +
+              `<div style="max-height:230px;overflow:auto;border:1px solid #e5e5e5;border-radius:6px;background:#fff">` +
+              marked.slice(0, N).map((x, i) => {
+                const nm2 = x.r ? String(x.r.name_supplier || x.r.name || '') : '（在庫台帳に無いItemID）';
+                const img = x.r ? stockImg(x.r) : '';
+                return `<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-bottom:1px solid #f2f2f2;${i === 0 ? 'background:#eafaf0' : ''}">` +
+                  `<span style="width:26px;text-align:right;color:#8a8f98;font-size:10px;flex:none">${marked.length - i}</span>` +
+                  (img ? `<img src="${esc(img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px;flex:none" loading="lazy" onerror="this.style.visibility='hidden'">` : `<span style="width:26px;flex:none"></span>`) +
+                  `<span style="font-family:monospace;font-size:10.5px;flex:none;color:${x.unk ? '#b26a00' : '#1a7f37'};font-weight:700">${esc(x.k)}</span>` +
+                  `<span style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(nm2)}">${esc(nm2)}</span>` +
+                  `<span style="font-size:10.5px;color:#8a8f98;flex:none">${x.r && x.r.price != null ? fmtJpy(x.r.price) : ''}</span>` +
+                  `<button class="stk-takundo" data-id="${esc(x.k)}" data-unk="${x.unk ? '1' : ''}" title="この1件を取り消す" style="border:none;background:none;cursor:pointer;color:#b0b0b0;font-size:13px;flex:none">×</button></div>`;
+              }).join('') + `</div></div>`;
+          })() : '') +
           (Object.keys(tak.unknown || {}).length ? (() => {
             const ks = Object.keys(tak.unknown).sort();
             return `<div style="margin-top:7px;padding:7px 9px;background:#fff8e6;border:1px solid #f0d9a8;border-radius:7px;font-size:11.5px">` +
@@ -6071,6 +6128,11 @@
       }); }
     // ★「在庫あったリスト」＝棚卸の成果物。スプシとItemIDが食い違う分もあるので、
     //   台帳で当たった分と当たらなかった分を**1つのファイル**に、区別できる形で出す。
+    body.querySelectorAll('.stk-takundo').forEach(el => el.addEventListener('click', async () => {
+      const id = el.dataset.id;
+      if (el.dataset.unk) { delete tak.unknown[id]; await takSave(); stockRender(); }
+      else takMark(id, 'ok');   // 同じ種類をもう一度＝取り消し
+    }));
     { const b = document.getElementById('stk-takcsv'); if (b) b.addEventListener('click', () => {
         const rows = [['区分', 'ItemID', '商品名', 'ハード', 'カテゴリ', '仕入元', 'セラー', '仕入額(円)', '仕入日', '棚', 'Shopee注文SN', '台帳の状態', '備考']];
         (stock.rows || []).filter(r => takOf(r.item_id) === 'ok')
@@ -6102,7 +6164,7 @@
       }); }
     { const b = document.getElementById('stk-takreset'); if (b) b.addEventListener('click', async () => {
         if (!confirm('棚卸の ✓/✗ の記録を全部消して、やり直します。\n\n在庫の状態（在庫保管中／販売済み）は変わりません。よろしいですか？')) return;
-        tak.items = {}; tak.unknown = {}; await takSave(); stockRender();
+        tak.items = {}; tak.unknown = {}; tak.seq = {}; await takSave(); stockRender();
       }); }
     { const b = document.getElementById('stk-takfin'); if (b) b.addEventListener('click', async () => {
         // ✓が付かなかった＝現物が無い。売れたのか、仕入元がキャンセルしたのかは在庫ごとに違うので選ばせる。
