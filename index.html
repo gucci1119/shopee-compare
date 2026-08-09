@@ -2605,6 +2605,17 @@
   async function jobRemoteCancel(key) {
     try { const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = (rows && rows[0] && rows[0].v) || {}; v.status = 'cancel'; await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
   }
+  // 分割実行した全チャンクの累計で完了にする（GASは途中で返るので完了判定は呼び出し側の役目）
+  async function jobRemoteDone(key, result) {
+    try {
+      const rows = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(key));
+      const v = (rows && rows[0] && rows[0].v) || {};
+      v.status = 'done'; v.pct = 100; v.result = result || {};
+      v.step = '完了 ' + ((result && result.done) || 0) + '件'
+        + ((result && result.failed) ? '／失敗 ' + result.failed + '件' : '');
+      await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]);
+    } catch (_) {}
+  }
   // 呼び出し自体が落ちた時（通信断など）に台帳を実行中のまま放置しない
   async function jobRemoteFail(key, msg) {
     try { msg = String(msg || '').replace('__DISCONNECTED__', ''); } catch (_) {}
@@ -15264,6 +15275,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       vid: '', vdel: false,
       opts: ms.map((m, oi) => ({ oi, n0: String(m.n || ''), n: String(m.n || ''), img: m.img || '', url: '' })) };
   }
+
+  // ★保存できた分は「その場で」画面に反映する。以前は完了後に🔄最新に更新を押さないと
+  //   タイトルも動画も古いままで、押し忘れると保存できていないように見えていた。
+  //   Shopeeに書けた事実はこちらで分かっているので、手元のデータも同じ形に揃える。
+  function bkApplySaved(list) {
+    (list || []).forEach(e => {
+      if (!e) return;
+      e.t0 = e.t;
+      (e.opts || []).forEach(o => { o.n0 = o.n; if (o.url) { o.img = o.url; o.url = ''; } });
+      if (e.vid) { e.videoUrl = e.vid; e.hasVideo = true; }
+      else if (e.vdel) { e.videoUrl = ''; e.hasVideo = false; }
+      e.vid = ''; e.vdel = false; e.attrs = null; e.wg = ''; e.newCat = 0; e.newCatName = '';
+      if (e.imgs && e.imgs.length) { e.imgs0 = e.imgs.slice(0, 9); e.image = e.imgs[0] || e.image; }
+      e.imgs = null;
+      // 一覧の元データ(lst)も揃える。ここを直さないと他ページに戻ると古い値に見える
+      try {
+        const row = ((lst.byCc || {})[e.cc] || []).find(x => String(x.item_id) === String(e.item_id));
+        if (row) {
+          row.name = e.t;
+          row.has_video = !!e.hasVideo; row.video_url = e.videoUrl || '';
+          if (e.imgs0 && e.imgs0.length) { row.images = e.imgs0.slice(); row.image = e.imgs0[0]; }
+          row.update_time = Math.floor(Date.now() / 1000);
+        }
+      } catch (_) {}
+    });
+    try { drawBulk(); } catch (_) {}
+  }
   function drawBulk() {
     const host = document.getElementById('list-bulk'); if (!host) return;
     const selN = bulk.sel.size;
@@ -15303,7 +15341,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <input type="text" id="bk-mq" value="${av(bulk.mQ || '')}" placeholder="商品名で絞り込み" style="font-size:11px;padding:2px 6px;width:150px">
           ${(bulk.mCc || bulk.mNoVid || bulk.mFewImg || bulk.mSort || bulk.mQ) ? `<button class="smd-btn" id="bk-mclear" style="font-size:11px;padding:2px 8px;border-color:#d93025;color:#d93025">✕ 絞り込み解除</button>` : ''}
         </span>` : ''}
-        <button class="smd-btn" id="bk-mselall" style="font-size:11px;padding:2px 9px" title="表示中のカタログを全部選ぶ／解除">☑ 表示中を全選択</button>
+        <button class="smd-btn" id="bk-mselall" style="font-size:11px;padding:2px 9px" title="いま画面に出ている（このページの）カタログを全部選ぶ／解除">☑ このページを全選択</button>
+        ${bulk.view === 'media' && mAll.length > 60 ? `<button class="smd-btn" id="bk-mselfilt" style="font-size:11px;padding:2px 9px;margin-left:3px;border-color:#3b5bdb;color:#3b5bdb" title="ページをまたいで、いまの絞り込みに合う${mAll.length}件すべてを選びます">☑☑ 絞り込み全 ${mAll.length} 件</button>` : ''}
         <span id="bk-mselN" class="smd-dim" style="font-size:11px;margin:0 6px">${bulk.mSel && bulk.mSel.size ? '（' + bulk.mSel.size + '件を選択中）' : ''}</span>
         <button class="smd-btn" id="bk-vfile" style="font-size:11px;padding:2px 9px;border-color:#7b52c4;background:#7b52c4;color:#fff;font-weight:700" title="PCから動画ファイルを選んで、チェックした全カタログにまとめて設定します（アップロードは1回だけ）">🎬 動画ファイルを選ぶ</button>
         <button class="smd-btn" id="bk-ifile" style="font-size:11px;padding:2px 9px;margin-left:4px;border-color:#7b52c4;background:#7b52c4;color:#fff;font-weight:700" title="PCから画像ファイルを選んで、チェックした全カタログのメイン画像にまとめて設定します">🖼 画像ファイルを選ぶ</button>
@@ -15705,6 +15744,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         all.forEach(c => { c.checked = on; if (on) bulk.mSel.add(c.dataset.k); else bulk.mSel.delete(c.dataset.k); });
         const n = document.querySelector('#bk-mselN'); if (n) n.textContent = bulk.mSel.size ? '（' + bulk.mSel.size + '件を選択中）' : '';
       }); }
+    // ★「表示中を全選択」はページに出ている60件しか選べず、434件やりたい時に手が出せなかった。
+    //   ページをまたいで絞り込み結果ぜんぶを選ぶ。データ(mAll)から直接キーを作るのでDOMに依存しない。
+    { const b = host.querySelector('#bk-mselfilt'); if (b) b.addEventListener('click', () => {
+        if (!bulk.mSel) bulk.mSel = new Set();
+        const keys = mAll.map(r => r.cc + '|' + r.item_id);
+        const on = keys.some(k => !bulk.mSel.has(k));   // 1つでも未選択なら全部選ぶ、全部選択済みなら解除
+        keys.forEach(k => { if (on) bulk.mSel.add(k); else bulk.mSel.delete(k); });
+        // 選んだ全部が💾の対象になるよう、実体(bulkEntry)も用意しておく
+        if (on) mAll.forEach(r => mEntry(r));
+        drawBulk();
+      }); }
     // PCのファイルを直接選ばせる。URLを聞かずに即ファイル選択（1回上げて全カタログに配る）
     const bulkPickFile = (kind) => {
       const ks = (bulk.mSel && bulk.mSel.size) ? [...bulk.mSel] : [...bulk.sel.keys()];
@@ -15901,27 +15951,43 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         m.textContent = '✓ 保存しました（成功 ' + ((v.result && v.result.done) || 0) + '件' + ((v.result && v.result.failed) ? '／失敗 ' + v.result.failed + '件' : '') + '）';
         if (v.result && v.result.failed) alert('一部が失敗しました:\n\n' + ((v.result.errors || []).join('\n') || ''));
         delete JOB_MIRROR[key];
-        targets.forEach(e => { e.t0 = e.t; e.opts.forEach(o => { o.n0 = o.n; o.url = ''; }); e.vid = ''; e.vdel = false; e.attrs = null; e.wg = ''; e.newCat = 0; if (e.imgs) { e.imgs0 = e.imgs; e.imgs = null; } });
-        markStale(); drawBulk(); return; }
+        bkApplySaved(targets); return; }
       if (v.status === 'error' || v.status === 'cancel') { m.style.color = '#d93025'; m.textContent = v.status === 'cancel' ? '止めました' : ('失敗: ' + (v.error || '')); delete JOB_MIRROR[key]; return; }
       m.style.color = '#3b5bdb'; m.innerHTML = '保存中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key, v.pct || 0), '#3b5bdb');
     };
     jobPollStart();
     bulk.msg = '🗂 しごとに積みました（この画面は閉じてOK）';
     const m0 = document.querySelector('#bk-msg'); if (m0) { m0.style.color = '#3b5bdb'; m0.textContent = bulk.msg; }
-    gasSerial(() => gasCall({ action: 'bulk_edit', token: settings.writeToken, kv: kv, job: key }, 900000))
-      .catch(e => {
-        // ★通信が切れただけならGAS側は動き続けている。ここで「失敗」にすると、
-        //   実際には保存されているのに失敗表示になり、二重に流し込む事故につながる。
-        //   ジョブは jobPoll が Supabase 経由で追えるので、切断時は失敗にしない。
+    // ★GASは1回6分で強制終了される。60件を1回で渡すと必ず途中で殺され、
+    //   画面には「通信が切れました」と出ていた（実体は5分51秒でGASが死亡）。
+    //   GASは締切(4分30秒)が来ると next= を返して一旦戻るので、続きから呼び直す。
+    (async () => {
+      let from = 0, done = 0, failed = 0, errors = [], guard = 0;
+      try {
+        for (;;) {
+          if (++guard > 200) throw new Error('分割回数が多すぎます（対象を減らしてください）');
+          const res = await gasSerial(() => gasCall(
+            { action: 'bulk_edit', token: settings.writeToken, kv: kv, job: key, from: from }, 600000));
+          done += (res && res.done) || 0;
+          failed += (res && res.failed) || 0;
+          if (res && res.errors && res.errors.length) errors = errors.concat(res.errors);
+          // ここまでの分は「もう保存済み」。画面にその場で反映して、最新に更新を押さなくてよくする
+          bkApplySaved(targets.slice(from, (res && res.next != null) ? res.next : targets.length));
+          if (!res || res.next == null) break;
+          from = res.next;
+        }
+        await jobRemoteDone(key, { done: done, failed: failed, errors: errors.slice(0, 20) });
+      } catch (e) {
         const msg = String((e && e.message) || '');
-        if (/__DISCONNECTED__|通信が切れました|Failed to fetch|NetworkError|timeout/i.test(msg)) {
+        // 通信が切れただけならGAS側は動き続けている。失敗にすると二重に流し込む事故になる
+        if (/__DISCONNECTED__|通信が切れました|Failed to fetch|NetworkError/i.test(msg)) {
           const m2 = document.querySelector('#bk-msg');
-          if (m2) { m2.style.color = '#b26a00'; m2.textContent = '⏳ 送信の応答は途中で切れましたが、GAS側では処理が続いています。🗂しごとセンターの進捗をご覧ください（この画面は閉じてOK）'; }
+          if (m2) { m2.style.color = '#b26a00'; m2.textContent = '⏳ 応答が途中で切れました。GAS側では処理が続いています。🗂しごとセンターの進捗をご覧ください'; }
           return;
         }
-        jobRemoteFail(key, msg);
-      });
+        jobRemoteFail(key, msg + (done ? '（' + done + '件は保存済み）' : ''));
+      }
+    })();
     try { logAct('出品', 'まとめて編集', '', ccs.join('/') + ' ' + targets.length + '件（タイトル' + nT + '/明細名' + nO + '/画像' + nI + '/動画' + nV + '/属性' + nA + '）'); } catch (_) {}
   }
   function renderBulkEdit() { drawBulk(); }
@@ -15970,9 +16036,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const add = [];
     live.forEach(r => {
       const ms = mOf(r);
-      const list = ms.length ? ms : [{ id: 0, n: '', img: '', price: null }];
       // そのカタログ自体が初めて＝Shopeeの出品日を使う（過去分もそれっぽい日付で埋まる）
       const isNewItem = !knownItems.has(r.cc + '|' + r.item_id);
+      // ★既に記録があるカタログの models が一時的に空で返ってきた時に、
+      //   model_id=0 の仮行を「今日出品」として作ってしまっていた（2026-08-10 にSGが579件も
+      //   今日扱いになった原因。実際にはその明細は3月の出品）。既知カタログなら何もしない。
+      if (!ms.length && !isNewItem) return;
+      const list = ms.length ? ms : [{ id: 0, n: '', img: '', price: null }];
       const ct = Number(r.create_time) || 0;
       const itemYmd = (isNewItem && ct) ? jstDate(ct < 1e11 ? ct * 1000 : ct) : today;
       const ik = r.cc + '|' + r.item_id;
@@ -15997,7 +16067,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const ccs = Array.from(new Set(part.map(x => x.split('\u0000')[0])));
       try { await sbDelete('listing_log', 'model_id=eq.0&cc=in.(' + ccs.join(',') + ')&item_id=in.(' + ids.join(',') + ')'); } catch (_) {}
     }
-    return { added: add.length, total: kset.size };
+    // ★過去に作られてしまった誤りの掃除：実明細の行があるのに仮行(model_id=0)も残っているカタログ。
+    //   仮行のぶんだけ「その日に出品した」と二重計上されるので消す（0件出品の日を捏造してしまう）。
+    const realItems = new Set(), zeroRows = [];
+    known.forEach(k => { const ik = k.cc + '|' + k.item_id; if (k.model_id) realItems.add(ik); else zeroRows.push(ik); });
+    const bogus = Array.from(new Set(zeroRows.filter(ik => realItems.has(ik))));
+    let cleaned = 0;
+    for (let i = 0; i < bogus.length; i += 50) {
+      const part = bogus.slice(i, i + 50);
+      const ids = part.map(x => x.split('|')[1]);
+      const ccs = Array.from(new Set(part.map(x => x.split('|')[0])));
+      try { await sbDelete('listing_log', 'model_id=eq.0&cc=in.(' + ccs.join(',') + ')&item_id=in.(' + ids.join(',') + ')'); cleaned += part.length; } catch (_) {}
+    }
+    return { added: add.length, total: kset.size, cleaned };
   }
   async function loadListingLog() {
     logState.loading = true; logState.missing = false;
@@ -16066,9 +16148,16 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const n = cnt(d), over = n > maxBar, h = Math.round(Math.min(n, maxBar) / maxBar * 74);
       const isToday = d === today, isSel = d === sel;
       const col = n === 0 ? '#eee' : (n >= goal ? '#1a7f37' : '#f0a35e');
+      // ★横軸に日付が無く、どの棒がいつなのか分からなかった。7日おき＋月初＋今日に目盛りを出す。
+      //   全部の日に出すと90日分で潰れて読めないので間引く。
+      const dd = new Date(d + 'T00:00:00+09:00');
+      const tick = (d === today || d === days[0] || dd.getDate() === 1 || dd.getDay() === 0)
+        ? (dd.getDate() === 1 ? (dd.getMonth() + 1) + '/1' : (dd.getMonth() + 1) + '/' + dd.getDate()) : '';
       return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
         ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}</span>` : ''}
-        <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${col};border-radius:2px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span></div>`;
+        <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${col};border-radius:2px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span>
+        <span style="display:block;height:11px;font-size:8px;line-height:11px;color:${isToday ? '#ee4d2d' : '#b0b4bb'};font-weight:${isToday ? '700' : '400'};white-space:nowrap">${tick}</span>
+      </div>`;
     }).join('');
     const kpi = (label, val, sub, color) => `<div style="flex:1;min-width:118px;border:1px solid #ececec;border-radius:9px;padding:9px 11px;background:#fff">
       <div style="font-size:10.5px;color:#8a8f98">${label}</div><div style="font-size:21px;font-weight:800;color:${color || '#333'};line-height:1.25">${val}</div>

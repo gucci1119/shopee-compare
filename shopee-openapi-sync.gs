@@ -586,7 +586,7 @@ function doGet(e) {
       try {
         var bewt = P_().getProperty('WRITE_TOKEN');
         if (!bewt || p.token !== bewt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        beout = bulkEdit_(String(p.kv || ''), String(p.job || ''));
+        beout = bulkEdit_(String(p.kv || ''), String(p.job || ''), parseInt(p.from || '0', 10) || 0);
       } catch (err) { beout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(becb + '(' + JSON.stringify(beout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1272,14 +1272,28 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
 // ★明細をまとめて追加。画像を並列アップロード→tier更新1回→add_model1回。
 //   1件ずつ（画像DL＋upload_image＋get_model_list＋update_tier_variation＋add_model）の4〜5往復×件数を大幅に削減。
 // ★まとめて編集の本体。items=[{cc,shop_id,item_id,title?,options?:[{oi,name}],images?:[{oi,url}],video?,video_remove?}]
-function bulkEdit_(kv, jobKey) {
+// ★GASは1回の実行が6分で強制終了される。60件まとめて渡されると必ず途中で殺され、
+//   呼び出し側からは「通信が切れました」に見えていた（実際は5分51秒でGASが死んでいた）。
+//   → 締切(4分30秒)が来たら、そこまでの結果と「次に処理すべき番号(next)」を返して一旦終わる。
+//     呼び出し側が from= を付けて呼び直すので、続きから何度でも再開できる。
+var BULK_DEADLINE_MS = 270000;   // 4分30秒。6分の上限に対し、残り1分半を後片付けの余裕にする
+
+function bulkEdit_(kv, jobKey, from) {
   if (!kv) throw new Error('kv 必須');
+  var t0 = new Date().getTime();
   var rows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(kv));
   var pay = (rows && rows[0] && rows[0].v) || {};
   var items = pay.items || [];
   if (!items.length) throw new Error('対象が空です');
+  var start = Math.max(0, parseInt(from || 0, 10) || 0);
   var ok = 0, ng = 0, errs = [];
-  for (var i = 0; i < items.length; i++) {
+  for (var i = start; i < items.length; i++) {
+    // 1件も処理していないうちは締切でも必ず1件はやる（無限ループ防止）
+    if (i > start && new Date().getTime() - t0 > BULK_DEADLINE_MS) {
+      if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100),
+        step: i + '/' + items.length + '件目まで完了。続きを実行します…' });
+      return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), next: i, total: items.length };
+    }
     if (jobCancelled_(jobKey)) throw new Error('中止しました');
     var it = items[i] || {};
     // ★進捗は「全体の何%」と「このカタログの中で何をしているか」を分けて出す。
@@ -1315,8 +1329,8 @@ function bulkEdit_(kv, jobKey) {
     } catch (e) { ng++; errs.push((it.cc || '') + ' ' + (it.item_id || '') + ': ' + String((e && e.message) || e).slice(0, 90)); }
   }
   try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (e2) { }
-  if (jobKey) jobSet_(jobKey, { pct: 100, step: '完了 ' + ok + '件' + (ng ? '／失敗 ' + ng + '件' : '') });
-  return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20) };
+  // next を返さない＝最後まで到達。完了表示は呼び出し側が全チャンクの累計で出す
+  return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), next: null, total: items.length };
 }
 // 明細名と明細画像を1回の update_tier_variation でまとめて反映（対象外の画像・名前はそのまま維持）
 function bulkEditTier_(shopId, itemId, opts, imgs) {
