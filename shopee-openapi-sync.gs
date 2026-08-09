@@ -1282,18 +1282,35 @@ function bulkEdit_(kv, jobKey) {
   for (var i = 0; i < items.length; i++) {
     if (jobCancelled_(jobKey)) throw new Error('中止しました');
     var it = items[i] || {};
-    if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100), step: (i + 1) + '/' + items.length + ' ' + (it.cc || '') + ' ' + (it.item_id || '') });
+    // ★進捗は「全体の何%」と「このカタログの中で何をしているか」を分けて出す。
+    //   1つのカタログで update_item → 明細 → 動画 と複数回叩くので、
+    //   全体%だけだと固まったように見えて、どこで止まっているか分からない。
+    var nm = String(it.name || it.item_id || '').slice(0, 34);
+    var head = (i + 1) + '/' + items.length + '件目　' + (it.cc || '') + ' ' + nm;
+    var steps = [];
+    if (it.title || (it.attrs && it.attrs.length) || it.weight || it.category_id || (it.main_images && it.main_images.length)) steps.push('本体');
+    if ((it.options || []).length || (it.images || []).length) steps.push('明細');
+    if (it.video || it.video_remove) steps.push('動画');
+    var sDone = 0, sAll = Math.max(1, steps.length);
+    var sub = function (label) {
+      if (!jobKey) return;
+      jobSet_(jobKey, { pct: Math.round(i / items.length * 100),
+        step: head + '　▸ ' + label + '（このカタログ ' + Math.round(sDone / sAll * 100) + '%）' });
+    };
+    sub(steps[0] || '確認');
     try {
       // タイトルと属性(specifics)は同じ update_item なので1回にまとめる
       if (it.title || (it.attrs && it.attrs.length) || it.weight || it.category_id || (it.main_images && it.main_images.length)) {
+        sub('本体（タイトル・画像・属性・重量）');
         updateItem_({ shop_id: it.shop_id, item_id: it.item_id, item_name: it.title || null,
           attribute_list: it.attrs || null, weight: it.weight || null, category_id: it.category_id || null,
           images: (it.main_images && it.main_images.length) ? it.main_images : null });   // 🖼メイン画像の差し替え（最大9枚）
+        sDone++;
       }
       var opts = it.options || [], imgs = it.images || [];
-      if (opts.length || imgs.length) bulkEditTier_(it.shop_id, it.item_id, opts, imgs);
-      if (it.video) setItemVideo_(it.shop_id, it.item_id, it.video, jobKey);
-      else if (it.video_remove) callShop_(parseInt(it.shop_id, 10), '/api/v2/product/update_item', null, 'post', { item_id: parseInt(it.item_id, 10), video_upload_id: '' });
+      if (opts.length || imgs.length) { sub('明細（' + (opts.length + imgs.length) + '件）'); bulkEditTier_(it.shop_id, it.item_id, opts, imgs); sDone++; }
+      if (it.video) { sub('動画をアップロード中'); setItemVideo_(it.shop_id, it.item_id, it.video, jobKey); sDone++; }
+      else if (it.video_remove) { sub('動画を削除'); callShop_(parseInt(it.shop_id, 10), '/api/v2/product/update_item', null, 'post', { item_id: parseInt(it.item_id, 10), video_upload_id: '' }); sDone++; }
       ok++;
     } catch (e) { ng++; errs.push((it.cc || '') + ' ' + (it.item_id || '') + ': ' + String((e && e.message) || e).slice(0, 90)); }
   }
