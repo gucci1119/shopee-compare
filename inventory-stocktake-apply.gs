@@ -46,14 +46,34 @@ function foundIds_() {
   return out;
 }
 
+// ItemID と Status を持つシートを自分で探す。1枚目とは限らず、見出しが1行目とも限らない。
+function findSheet_() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var shs = ss.getSheets();
+  // データのタブ名は 'InventoryItem'。まずそれを見て、無ければ全シートを探す
+  var named = ss.getSheetByName('InventoryItem');
+  if (named) shs = [named].concat(shs.filter(function (x) { return x.getSheetId() !== named.getSheetId(); }));
+  for (var s = 0; s < shs.length; s++) {
+    var sh = shs[s];
+    if (sh.getLastRow() < 2 || sh.getLastColumn() < 3) continue;
+    var probe = sh.getRange(1, 1, Math.min(5, sh.getLastRow()), sh.getLastColumn()).getDisplayValues();
+    for (var r = 0; r < probe.length; r++) {
+      var h = probe[r].map(function (x) { return String(x || '').trim(); });
+      var cI = h.indexOf('ItemID'), cS = h.indexOf('Status');
+      if (cI >= 0 && cS >= 0) return { sh: sh, headRow: r + 1, cI: cI, cS: cS, cD: h.indexOf('PurchaseDate') };
+    }
+  }
+  var names = shs.map(function (x) { return x.getName() + '(' + x.getLastRow() + '行)'; }).join(' / ');
+  throw new Error('ItemID / Status の列を持つシートが見つかりません。シート一覧: ' + names);
+}
+
 function plan_() {
   var found = foundIds_();
-  var sh = SpreadsheetApp.openById(SHEET_ID).getSheets()[0];
+  var t = findSheet_();
+  var sh = t.sh, cI = t.cI, cS = t.cS, cD = t.cD;
   var last = sh.getLastRow(), width = sh.getLastColumn();
-  var head = sh.getRange(1, 1, 1, width).getDisplayValues()[0];
-  var cI = head.indexOf('ItemID'), cS = head.indexOf('Status'), cD = head.indexOf('PurchaseDate');
-  if (cI < 0 || cS < 0) throw new Error('ItemID / Status の列が見つかりません');
-  var vals = sh.getRange(2, 1, last - 1, width).getDisplayValues();
+  Logger.log('対象シート: ' + sh.getName() + ' / 見出し' + t.headRow + '行目 / ' + (last - t.headRow) + '行');
+  var vals = sh.getRange(t.headRow + 1, 1, last - t.headRow, width).getDisplayValues();
   var out = [], cnt = {}, nFound = 0;
   for (var i = 0; i < vals.length; i++) {
     var id = norm_(vals[i][cI]);
@@ -68,7 +88,7 @@ function plan_() {
     out.push(nv);
     if (nv !== cur) { var k = (cur || '(空)') + ' → ' + nv; cnt[k] = (cnt[k] || 0) + 1; }
   }
-  return { sh: sh, cS: cS, out: out, cnt: cnt, nFound: nFound, nId: Object.keys(found).length };
+  return { sh: sh, cS: cS, headRow: t.headRow, out: out, cnt: cnt, nFound: nFound, nId: Object.keys(found).length };
 }
 
 function dryRun() {
@@ -82,7 +102,7 @@ function dryRun() {
 function apply() {
   var p = plan_(), t = 0;
   var col = p.out.map(function (x) { return [x]; });
-  p.sh.getRange(2, p.cS + 1, col.length, 1).setValues(col);
+  p.sh.getRange(p.headRow + 1, p.cS + 1, col.length, 1).setValues(col);
   Object.keys(p.cnt).forEach(function (k) { t += p.cnt[k]; });
   Logger.log('✅ 反映しました：' + t + '行を変更（読み取り ' + p.nFound + '件を在庫保管中に）');
 }
