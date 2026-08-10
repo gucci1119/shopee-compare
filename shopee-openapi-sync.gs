@@ -2316,6 +2316,47 @@ function syncOrdersAll(daysWindow, trkMode) {
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
 
+// ── 追跡番号のバックフィル（完了済み注文ぶん）──────────────────────────────
+// 通常の syncOrdersForShop_ は TRACK_STATUSES（手配済〜受取確認前）だけを対象にしているため、
+// 既に COMPLETED になった注文には追跡番号が入らない（2026-08-11実測：過去45日で266件中235件が未取得）。
+// 補償申請やクレーム対応で過去の番号が要る時に、これを手動で回して埋める。
+// 通常同期には一切影響しない独立関数。1回の実行で limitN 件まで（既定300）。
+function backfillTrackingCompleted(limitN, days) {
+  var cap = limitN || 300, win = days || 90, got = 0, upd = [], log = [];
+  var since = now_() - win * 86400;
+  var toks = listTokens_();
+  toks.forEach(function (tok) {
+    if (got >= cap) return;
+    var rows = [];
+    try {
+      // 完了(tab500)で番号が無いものだけ。新しい順に埋める。
+      rows = sbSelect_('orders', 'select=sn,order_ts&shop_id=eq.' + encodeURIComponent(String(tok.shop_id))
+        + '&tab=eq.500&tracking=is.null&order=order_ts.desc.nullslast&limit=' + cap) || [];
+    } catch (e) { log.push({ cc: tok.cc, error: 'select: ' + String(e).slice(0, 100) }); return; }
+    var n = 0;
+    for (var i = 0; i < rows.length && got < cap; i++) {
+      var r = rows[i];
+      if (r.order_ts && Number(r.order_ts) < since) continue;   // 古すぎる分は追わない（APIの無駄）
+      got++;
+      try {
+        var tj = getTracking_(tok.shop_id, r.sn);
+        var t = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null;
+        if (t) { upd.push({ cc: tok.cc, sn: r.sn, tracking: t }); n++; }
+      } catch (e2) { /* 個別の失敗は飛ばす */ }
+    }
+    log.push({ cc: tok.cc, shop_id: tok.shop_id, 対象: rows.length, 引いた: got, 取れた: n });
+  });
+  // 追跡番号だけを上書き（他の列は触らない）
+  for (var k = 0; k < upd.length; k += 100) {
+    try { sbUpsert_('orders', upd.slice(k, k + 100), 'cc,sn'); } catch (e3) { log.push({ error: 'upsert: ' + String(e3).slice(0, 100) }); }
+  }
+  ufPersist_();
+  Logger.log(JSON.stringify({ 更新: upd.length, 明細: log }, null, 1));
+  return { updated: upd.length, log: log };
+}
+// 直近90日ぶんを全部（数回に分けて実行してください。1回300件まで）
+function backfillTrackingCompletedAll() { return backfillTrackingCompleted(300, 90); }
+
 // 入金(escrow) → income（★手数料内訳・買主支払額も保存）
 function syncEscrowForShop_(tok, deadline, finalized) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();

@@ -3987,12 +3987,16 @@
     if (tot < 50) return '';
     const mx = Math.max(...c);
     const ord = [1, 2, 3, 4, 5, 6, 0];   // 月〜日で並べる
-    const low = ord.filter(w => c[w] / tot < 0.07).map(w => W[w]);
+    // ★土曜は【確定で休業日】。土曜に出すと翌日＝日曜に倉庫へ着くが、Shopee Japan倉庫は日曜スキャンをしないため丸損。
+    //   （日曜発送は月曜スキャンで有効なので、休業なのは土曜であって日曜ではない）
+    //   実績が少ないだけの曜日は「候補」として分けて出す。理屈で決まる話と、たまたま少ない話を混ぜない。
+    const low = ord.filter(w => w !== 6 && c[w] / tot < 0.07).map(w => W[w]);
     return `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed #e6d6d3">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px">
         <b style="font-size:11.5px">📊 これまでの実績：曜日別の発送件数</b>
         <span class="smd-dim" style="font-size:10.5px">（${tot.toLocaleString()}件）休業日の判断材料</span>
-        ${low.length ? `<span style="background:#f1f8f3;border:1px solid #c8e6cd;color:#1b5e20;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px">推奨休業日：${low.join('・')}</span>` : ''}
+        <span style="background:#eef4ff;border:1px solid #c3d7f5;color:#1a4fa0;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px" title="土曜に発送すると翌日＝日曜に倉庫へ着きますが、Shopee Japan倉庫は日曜にスキャンしません。だから土曜発送は意味がなく、休業日として確定します（日曜発送は月曜スキャンで有効）">🏭 休業日は土曜で確定</span>
+        ${low.length ? `<span style="background:#f1f8f3;border:1px solid #c8e6cd;color:#1b5e20;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px" title="実績で発送が少ない曜日。理屈で決まる土曜とは別で、あくまで候補です">休業候補（実績が少ない）：${low.join('・')}</span>` : ''}
       </div>
       <div style="display:flex;gap:3px">
         ${ord.map(w => {
@@ -4017,7 +4021,8 @@
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
     const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, preCnt = {}, ordOf = {}, ordScanOf = {}, itemsOf = {};
     const odOf = (r) => {                                   // 注文日 M/D(曜)・JST
-      const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
+      // ★ライブ取得の行は orderTs/orderDate を持たないことがある。注文番号から日付を復元する（注文一覧と同じ手当て）
+      const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || snToDate(r.sn) || '')).slice(0, 10);
       if (!ymd) return '';
       const d = new Date(ymd + 'T00:00:00+09:00');
       return (d.getMonth() + 1) + '/' + String(d.getDate()).padStart(2, '0') + '(' + W[d.getDay()] + ')';
@@ -4127,7 +4132,7 @@
           ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:9px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:${x.isToday ? '700' : '400'};opacity:${x.isToday ? '1' : '.75'}">${x.isToday ? '今日 ' : ''}${x.d.md}</div>${jpHolidayOf(x.d.k) ? `<div style="font-size:8px;color:#c0392b;font-weight:700;line-height:1.2">${jpHolidayOf(x.d.k)}</div>` : '<div style="height:10px"></div>'}`)}
           ${row(head('📦 通常', '#1a7f37', '通常の発送期限。超過すると発送遅延'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}${x.d.pre ? `<span style="font-size:9px;color:#7b52c4;font-weight:700" title="うち予約(pre-order)${x.d.pre}件"> 予${x.d.pre}</span>` : ''}</div>`)}
           ${row(head('🆘 最終', '#c0392b', '超過すると自動キャンセル'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
-          ${row(head('注文日', '#b0b6c0', '発送分の注文日'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.d.n ? esc((Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div>`)}
+          ${row(head('注文日', '#b0b6c0', '発送分の注文日'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(() => { if (!x.d.n) return ''; const t = (Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]; return t ? esc(t) + '注文' : ''; })()}</div>`)}
         </div>`;
       })()}
       ${calAdviceHtml(days, cnt, key)}
