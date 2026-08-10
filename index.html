@@ -8019,6 +8019,56 @@
     return '本日到着見込み';
   };;
   // ⏳ 入庫待ち・到着予定：仕入れたが未入荷の到着スケジュール
+  // 追跡履歴から「最初のスキャン → 配達完了」までの実日数を配送方法ごとに学習する。
+  // ハードコードした日数だと、業者や季節でズレた時に気づけない。手元の実績を使う。
+  function waitEtaStats(rows) {
+    const parseT = (t) => {
+      const m = String(t || '').trim().match(/^(?:(\d{4})\/)?(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
+      if (!m) return null;
+      const y = m[1] ? +m[1] : new Date().getFullYear();
+      return new Date(y, +m[2] - 1, +m[3], m[4] ? +m[4] : 12, m[5] ? +m[5] : 0);
+    };
+    const by = {};
+    (rows || []).forEach(r => {
+      let h = r.delivery_history;
+      if (typeof h === 'string') { try { h = JSON.parse(h); } catch (_) { h = null; } }
+      if (!Array.isArray(h) || !h.length) return;
+      let st = null, en = null;
+      h.forEach(e => {
+        const d = parseT(e && e.t); if (!d) return;
+        const sv = String((e && e.s) || '');
+        if (!st && /(引受|受付|発送)/.test(sv)) st = d;
+        if (/(お届け|配達完了|投函)/.test(sv)) en = d;
+      });
+      if (!st || !en || en < st) return;
+      const k = String(r.ship_method || '').trim() || '(不明)';
+      (by[k] = by[k] || []).push((en - st) / 86400000);
+    });
+    const out = {};
+    Object.keys(by).forEach(k => {
+      const v = by[k].sort((x, y) => x - y);
+      if (v.length < 3) return;                       // 少なすぎる実績は使わない
+      out[k] = { days: v[Math.floor(v.length / 2)], n: v.length };   // 中央値
+    });
+    return out;
+  }
+  // 業者の予定日が無い行に、実績日数から見込みを立てる（YYYY-MM-DD で返す）
+  function waitEtaGuess(r, stats) {
+    if (!r || r.delivery_eta) return null;
+    let h = r.delivery_history;
+    if (typeof h === 'string') { try { h = JSON.parse(h); } catch (_) { h = null; } }
+    if (!Array.isArray(h) || !h.length) return null;
+    const last = h[h.length - 1];
+    const m = String((last && last.t) || '').trim().match(/^(?:(\d{4})\/)?(\d{1,2})\/(\d{1,2})/);
+    if (!m) return null;
+    const base = new Date(m[1] ? +m[1] : new Date().getFullYear(), +m[2] - 1, +m[3]);
+    const k = String(r.ship_method || '').trim() || '(不明)';
+    const st = (stats && (stats[k] || stats['(不明)'])) || null;
+    const add = Math.max(1, Math.ceil(st ? st.days : 2));   // 実績が無い時は2日（安全側）
+    const d = new Date(base.getTime() + add * 86400000);
+    const p2 = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  }
   async function renderWaiting(host) {
     renderWaiting._host = host;   // 📮番号を貼る等の保存後に再描画できるよう最新hostを保持
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -8034,6 +8084,8 @@
     } catch (_) {}
     const hideForwarded = state.buyWaitShowForwarded !== true;
     let fwdHidden = 0;
+    // ★見込み日数は手元の実績（引受→配達完了）から学習する。全行（入荷済も含む）を材料にする
+    const etaStats = waitEtaStats(rows);
     // 各入庫待ちの到着フェーズ・予定日・待ち日数を判定
     const list = rows.filter(r => {
       if (r.status !== '入庫待ち') return false;
@@ -8046,8 +8098,14 @@
       const expDays = WAIT_EXP_DAYS[normSupplier(r.supplier)] || 6;
       const hasCarrier = !!ds;
       // ETA：業者のdelivery_eta優先、無ければメルカリdiの日付（引受/到着/発送=過去スキャンは除外）
-      const etaCand = parseEtaDate(r.delivery_eta || '') || (!/^(引受|到着|発送)/.test(di) ? parseEtaDate(di) : null);
-      const futureEta = (etaCand && etaCand >= todayStr) ? etaCand : null;
+      // ★日本郵便（ゆうゆうメルカリ便）は追跡ページに「お届け予定日」が出ないので delivery_eta が常に空。
+      //   ヤマトだけ予定日が取れていて、郵便は「発送済」のまま見込みが出ていなかった。
+      //   → 追跡履歴の最新スキャン日 ＋ 実績日数（配送方法ごとの中央値）で見込みを立てる。
+      const etaCand = parseEtaDate(r.delivery_eta || '') || (!/^(引受|到着|発送)/.test(di) ? parseEtaDate(di) : null)
+        || null;
+      const etaGuess = etaCand ? null : waitEtaGuess(r, etaStats);   // 業者の予定日が無い時だけ推定
+      const etaUse = etaCand || etaGuess;
+      const futureEta = (etaUse && etaUse >= todayStr) ? etaUse : null;
       let phase, eta = null;
       const st = stageOf(ds, di);
       if (st === 'delivered') phase = 'delivered';
@@ -8060,7 +8118,7 @@
       else phase = 'none';
       // 配送業者の新鮮なデータが無い時だけ、想定日数超で「到着済見込み」に格上げ（例：Amazon＝追跡連携なし）
       if (!hasCarrier && phase !== 'delivered' && phase !== 'eta' && pdays != null && pdays >= expDays) phase = 'likely';
-      return { r, ds, di, pd, pdays, phase, eta, expDays };
+      return { r, ds, di, pd, pdays, phase, eta, expDays, guessed: !!(etaGuess && eta === etaGuess) };
     });
     // 到着予定＝これから来る物（配達中→予定日→追跡中）を上に。到着済/見込み（=要確認の片付けの山）は下、手配待ちは最下。
     const G = { out: 0, arrived: 1, eta: 2, linehaul: 3, shipped: 4, transit: 5, delivered: 6, likely: 7, none: 8 };
@@ -8089,7 +8147,7 @@
       if (x.phase === 'likely') return `<b style="color:#b26a00">届いてるかも</b><br><span class="smd-dim" style="font-size:10px">${x.pdays}日経過${x.di ? '・' + esc(x.di) : ''}</span>`;
       if (x.phase === 'out') return `<b style="color:#e65100">🏃 配達中（お近く）</b><br><span style="font-size:10px;color:#e65100;font-weight:600">${esc(arrivalHint(x.r))}</span>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
       if (x.phase === 'arrived') return `<b style="color:#00695c">🏣 まもなく配達</b><br><span style="font-size:10px;color:#00695c;font-weight:600">${esc(arrivalHint(x.r))}</span>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`;
-      if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
+      if (x.phase === 'eta') { const md = x.eta.slice(5).replace('-', '/'); const rel = x.eta < todayStr ? '（予定超過）' : (x.eta === todayStr ? '（今日）' : ''); return `<b style="color:${etaCol(x.eta)}">${md}${rel}</b>${x.guessed ? '<span class="smd-dim" style="font-size:9.5px;margin-left:3px" title="配送業者が予定日を出していないので、これまでの実績（引受→到着までの日数の中央値）から見込みを出しています">見込み</span>' : ''}${x.ds ? `<br><span class="smd-dim" style="font-size:10px">${esc(x.ds)}</span>` : ''}`; }
       if (x.phase === 'none' && x.pdays != null && x.pdays >= 1) {
         const c = x.pdays >= 3 ? '#d93025' : x.pdays >= 2 ? '#e8710a' : '#6b7280';
         return `<b style="color:${c}">🔔 未発送 ${x.pdays}日</b><br><span style="font-size:10px;color:${c}">${x.pdays >= 3 ? '催促どき' : x.pdays >= 2 ? 'そろそろ声かけ' : '様子見'}</span>`;
