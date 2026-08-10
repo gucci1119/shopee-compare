@@ -1119,6 +1119,22 @@
     roiBase: ROI_CURVE_DEFAULT.slice(),  // 全国共通・〜500g帯の仕入額別ROI(70段)。既定=PHカーブ。全ての最終フォールバック
     roiOverrides: {},       // 国×重量帯の上書き { PH:{"1000":[70段]}, "*":{"1500":[70段]} }（未設定は roiBase にフォールバック。"*"=全国共通）
   }, JSON.parse(localStorage.getItem('smdSettings') || '{}'));
+  // ★日本語入力（IME）の変換中に再描画すると、未確定の文字が確定して打てなくなる。
+  //   「2文字入れると確定してしまい、続けて打てない」の正体はこれ。
+  //   変換が終わる（compositionend）まで待ってから走らせる。全部の検索欄で同じ扱いにする。
+  function wireTypeahead(el, apply, delay) {
+    if (!el || el._imeWired) return; el._imeWired = true;
+    let t = null, composing = false;
+    const run = () => { clearTimeout(t); t = setTimeout(() => { if (composing) return; apply(el.value); }, delay || 400); };
+    el.addEventListener('compositionstart', () => { composing = true; clearTimeout(t); });
+    el.addEventListener('compositionend', () => { composing = false; run(); });
+    el.addEventListener('input', (e) => {
+      if (composing || (e && e.isComposing)) return;    // 変換中は何もしない
+      run();
+    });
+    // 変換中にEnterで確定した直後も走らせる（compositionendが来ない環境向けの保険）
+    el.addEventListener('keyup', (e) => { if (e.key === 'Enter' && !composing) run(); });
+  }
   const saveSettings = () => localStorage.setItem('smdSettings', JSON.stringify(settings));
   // 📱 スマホ用セットアップリンク：#s=<base64({k:読取キー[,s:書込キー]})> を開くと自動でキーを設定（外部にキーを渡さず端末間コピー）
   try {
@@ -4411,11 +4427,8 @@
     state.orders.page = 1;
     renderOrders();
   });
-  let ordSearchTimer;
-  document.getElementById('ord-search').addEventListener('input', e => {
-    clearTimeout(ordSearchTimer);
-    ordSearchTimer = setTimeout(() => { state.orders.search = e.target.value.trim(); state.orders.page = 1; renderOrders(); }, 200);
-  });
+  wireTypeahead(document.getElementById('ord-search'),
+    (v) => { state.orders.search = String(v || '').trim(); state.orders.page = 1; renderOrders(); }, 300);
 
   // ---------------- Supabase（DB蓄積） ----------------
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
@@ -5292,7 +5305,7 @@
       }));
     };
     draw();
-    let t; wrap.querySelector('#op-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(draw, 200); });
+    wireTypeahead(wrap.querySelector('#op-q'), () => draw(), 300);
     wrap.querySelector('#op-free').addEventListener('change', draw);
   }
   const nmText = r => String(r.name_supplier || r.name || r.item_id || '');
@@ -5347,7 +5360,7 @@
       }));
     };
     draw();
-    let t; wrap.querySelector('#ip-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(draw, 200); });
+    wireTypeahead(wrap.querySelector('#ip-q'), () => draw(), 300);
     wrap.querySelector('#ip-free').addEventListener('change', draw);
   }
   document.addEventListener('click', e => {   // 注文管理の行は再描画が多いので委譲で拾う
@@ -6169,7 +6182,7 @@
       });
     });
     { var q = host.querySelector('#tn-q');
-      if (q) { var t; q.addEventListener('input', function () { clearTimeout(t); t = setTimeout(function () { tana.q = q.value; tana.page = 0; drawTana(); var q2 = document.getElementById('tn-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); }); } }
+      if (q) wireTypeahead(q, function (v) { tana.q = v; tana.page = 0; drawTana(); var q2 = document.getElementById('tn-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 350); }
     { var sb = host.querySelector('#tn-sort'); if (sb) sb.addEventListener('click', function () { tana.sort = tana.sort === 'old' ? 'new' : 'old'; drawTana(); }); }
     { var ob = host.querySelector('#tn-old'); if (ob) ob.addEventListener('change', function () { tana.oldOnly = ob.checked; tana.page = 0; drawTana(); }); }
     { var bb = host.querySelector('#tn-bulk');
@@ -12296,7 +12309,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.querySelectorAll('.news-f').forEach(b => b.addEventListener('click', () => { news[b.dataset.k] = b.dataset.v; newsPaint(); }));
     body.querySelectorAll('.news-g').forEach(b => b.addEventListener('click', () => { news.group = b.dataset.v; newsPaint(); }));
     body.querySelectorAll('.news-chip').forEach(b => b.addEventListener('click', () => { news.q = b.dataset.q; newsPaint(); }));
-    const q = document.getElementById('news-q'); if (q) q.addEventListener('input', () => { news.q = q.value; newsList(); });
+    wireTypeahead(document.getElementById('news-q'), (v) => { news.q = v; newsList(); }, 300);
     const rf = document.getElementById('news-refresh'); if (rf) rf.addEventListener('click', () => renderNews(true));
     newsList();
   }
@@ -19928,15 +19941,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }); }
     { const se = document.getElementById('lst-search');
       let t;
+      // ✕ボタンの出し入れだけは打鍵ごとに（再描画しないので軽い）
       se.addEventListener('input', e => {
-        const v = e.target.value;
         lst._focusBack = { id: 'lst-search', s: e.target.selectionStart, e: e.target.selectionEnd, ts: Date.now() };
-        { const x = document.getElementById('lst-searchclr'); if (x) x.style.display = v ? '' : 'none'; }
-        // ★1回の再描画が重い（6千件超の絞り込み＋並べ替え）。打鍵の合間に走らせると入力を取りこぼす＝
-        //   「1文字ごとに検索窓が閉じる／単語が打てない」の正体。打ち終わってから1回だけ走らせる。
-        clearTimeout(t);
-        t = setTimeout(() => { if (lst.search === v) return; lst.search = v; lst.page = 1; drawListingStatus(); }, 600);
+        const x = document.getElementById('lst-searchclr'); if (x) x.style.display = e.target.value ? '' : 'none';
       });
+      // ★1回の再描画が重い（6千件超）ので打ち終わってから1回だけ。IMEの変換中は走らせない
+      wireTypeahead(se, (v) => { if (lst.search === v) return; lst.search = v; lst.page = 1; drawListingStatus(); }, 600);
       { const cb2 = document.getElementById('lst-searchclr');
         if (cb2) cb2.addEventListener('click', () => { se.value = ''; lst.search = ''; lst.page = 1; drawListingStatus(); }); }
       // 検索欄から自分で離れたら復元をやめる（他を触っているのに勝手に戻らないように）
