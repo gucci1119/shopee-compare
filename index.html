@@ -8133,6 +8133,7 @@
     const nm = (d && d.name) || '';
     // ★機種違いは弾く。作品名は同じでも別ハードの版は仕入れても売れない。
     //   実例：「バイオハザード0 PS3」の候補にAmazonの【Wii版】¥1,313が最安で並んでいた。
+    if (d && d.det && d.det.incomplete) return d.det.incomplete;
     if (kt && kt.hw) { const dh = invHwAuto(nm); if (dh && dh !== kt.hw) return '別機種(' + dh + ')'; }
     if (kt && kt.key && srcNrm(nm).indexOf(kt.key) < 0) return '別商品の可能性';
     if (DEAL_BUNDLE.test(nm)) return 'まとめ売り';
@@ -8143,7 +8144,7 @@
     if (DEAL_RISK.test(nm)) f.push({ t: '⚠ジャンク', c: '#d93025', d: 'ジャンク・訳あり・動作未確認。そのまま出品すると返品リスクがあります' }); return f; };
   // ★ゲーム本体でない「関連グッズ」は仕入れ対象外。同じ作品名が入るので必ず候補に混ざる。
   //   実例(戦国BASARA4)：¥300の上位が コースター／ヒーローズガイド／ゲームミュージックCD で埋まっていた。
-  const DEAL_JUNK = /(トレカ|カードダス|サイファ|cipher|ステッカー|シール|同人誌?|チラシ|ポスター|下敷き|特典ペーパー|ペーパー$|説明書のみ|取扱説明書のみ|空箱|ケースのみ|攻略本|ガイドブック|ガイド[-－―\s]*$|ヒーローズガイド|公式ガイド|大百科|設定資料|画集|楽譜|サウンドトラック|サントラ|ミュージックcd|音楽cd|ドラマcd|コースター|クリアファイル|キーホルダー|缶バッジ|缶バッチ|タペストリー|色紙|フィギュア|ぬいぐるみ|アクリルスタンド|アクスタ|マグカップ|タオル|Tシャツ|ラバスト|ラバーストラップ|ピンズ|カレンダー|badge|sticker|poster|flyer|doujin|figure|keychain|coaster)/i;
+  const DEAL_JUNK = /(トレカ|カードダス|サイファ|cipher|ステッカー|シール|同人誌?|チラシ|ポスター|下敷き|特典ペーパー|ペーパー$|説明書のみ|取扱説明書のみ|空箱|ケースのみ|ディスクのみ|ソフトのみ|カセットのみ|本体のみ(?!.*(本体|console))|盤面のみ|ディスク単品|ソフト単品|ケース無し|ケースなし|箱無し|箱なし|ジャケットなし|ジャケなし|攻略本|ガイドブック|ガイド[-－―\s]*$|ヒーローズガイド|公式ガイド|大百科|設定資料|画集|楽譜|サウンドトラック|サントラ|ミュージックcd|音楽cd|ドラマcd|コースター|クリアファイル|キーホルダー|缶バッジ|缶バッチ|タペストリー|色紙|フィギュア|ぬいぐるみ|アクリルスタンド|アクスタ|マグカップ|タオル|Tシャツ|ラバスト|ラバーストラップ|ピンズ|カレンダー|badge|sticker|poster|flyer|doujin|figure|keychain|coaster)/i;
   const dealYen = (t) => { const s = String(t || '').replace(/,/g, ''); const m = s.match(/([0-9]{2,7})\s*円/) || s.match(/[¥￥]\s*([0-9]{2,7})/); return m ? parseInt(m[1], 10) : 0; };
   const dealNear = (a, re) => { let n = a; for (let i = 0; i < 7 && n; i++) { n = n.parentElement; if (!n) break; if (re.test(n.textContent || '')) return n; } return null; };
   const dealName = (a) => { if (!a) return ''; let t = (a.textContent || '').trim(); if (t.length > 3) return t; const img = a.querySelector && a.querySelector('img'); if (img && img.alt && img.alt.length > 3) return img.alt.trim(); return (a.getAttribute && (a.getAttribute('title') || a.getAttribute('aria-label')) || '').trim(); };
@@ -8172,7 +8173,11 @@
       const txt = await bridgeRequest('GET', url, null, { headers: { 'DPoP': await mercariDpop(url, 'GET'), 'X-Platform': 'web' } });
       const d = (JSON.parse(txt) || {}).data || {};
       const sd = d.shipping_duration || {}, fa = d.shipping_from_area || {};
-      out = { days: sd.max_days != null ? Number(sd.max_days) : null, durName: sd.name || '', area: fa.name || '' };
+      // ★ケース・説明書が無い「不完全品」はタイトルに書かれないことが多い（写真だけで分かる出品）。
+      //   商品説明にはたいてい書いてあるので、そこで判定して候補から外す。
+      const desc = String(d.description || '');
+      const incomplete = /(ディスク(のみ|だけ|単品)|ソフト(のみ|だけ|単品)|カセット(のみ|だけ)|盤面のみ|ケース(は)?(なし|無し|付属しません|ありません)|箱(なし|無し)|ジャケット(なし|無し)|説明書(なし|無し|は付属しません)|裸[のでソ])/.test(desc) ? 'ケース等の欠品' : '';
+      out = { days: sd.max_days != null ? Number(sd.max_days) : null, durName: sd.name || '', area: fa.name || '', incomplete, cond: (d.item_condition || {}).name || '' };
     } catch (_) { out = null; }
     mercDetailCache.set(itemId, out);
     return out;
@@ -8190,7 +8195,7 @@
     const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: srcCondIds(), shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
     const txt = await bridgeRequest('POST', url, JSON.stringify(body), { headers: { 'DPoP': dpop, 'X-Platform': 'web' } });
     let j = {}; try { j = JSON.parse(txt); } catch (_) {}
-    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: (x.itemType === 'ITEM_TYPE_BEYOND' || x.shop) ? ('https://jp.mercari.com/shops/product/' + x.id) : ('https://jp.mercari.com/item/' + x.id), cond: MERC_COND[Number(x.itemConditionId)] || '', cid: Number(x.itemConditionId), smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
+    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: (x.itemType === 'ITEM_TYPE_BEYOND' || x.shop) ? ('https://jp.mercari.com/shops/product/' + x.id) : ('https://jp.mercari.com/item/' + x.id), cond: MERC_COND[Number(x.itemConditionId)] || '', img: (x.thumbnails || [])[0] || '', cid: Number(x.itemConditionId), smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
   }
   // ★メルカリの配送方法ID（2026-08-11に api.mercari.jp/items/get で実測して確定。推測ではない）
   //   14=らくらくメルカリ便 / 17=ゆうゆうメルカリ便（どちらも匿名・追跡あり・1〜2日発送が多い）
@@ -8222,7 +8227,7 @@
       parse: doc => { const out = []; doc.querySelectorAll('div.item').forEach(it => { const a = it.querySelector('a[href*="/product/detail/"]'); if (!a) return; const w = it.textContent || ''; if (/品切れ|在庫なし|売切|完売/.test(w)) return; out.push({ name: ((it.querySelector('.product-name') || {}).textContent || '').trim(), price: dealYen((it.querySelector('.item_price,.price_teika') || {}).textContent || w), url: a.href, cond: /中古/.test(w) ? '中古' : /新品/.test(w) ? '新品' : '' }); }); return out; } },
     { k: 'paypay', label: 'Yahoo!フリマ', bg: '#ff0033',
       url: kw => `https://paypayfleamarket.yahoo.co.jp/search/${kw}?open=1&sort=price&order=asc`,
-      parse: doc => { const nx = doc.querySelector('#__NEXT_DATA__'); if (!nx) return []; const out = [], seen = new Set(); try { const j = JSON.parse(nx.textContent); const walk = o => { if (!o || typeof o !== 'object') return; const id = o.id; if (id && /^[a-z0-9]{8,}$/i.test(String(id)) && o.price != null && (o.name || o.title) && !seen.has(id)) { seen.add(id); if (o.itemStatus == null || o.itemStatus === 'OPEN') out.push({ name: String(o.name || o.title), price: +o.price, url: 'https://paypayfleamarket.yahoo.co.jp/item/' + id, cond: '' }); } Object.values(o).forEach(walk); }; walk(j); } catch (e) {} return out; } },
+      parse: doc => { const nx = doc.querySelector('#__NEXT_DATA__'); if (!nx) return []; const out = [], seen = new Set(); try { const j = JSON.parse(nx.textContent); const walk = o => { if (!o || typeof o !== 'object') return; const id = o.id; if (id && /^[a-z0-9]{8,}$/i.test(String(id)) && o.price != null && (o.name || o.title) && !seen.has(id)) { seen.add(id); if (o.itemStatus == null || o.itemStatus === 'OPEN') out.push({ name: String(o.name || o.title), price: +o.price, url: 'https://paypayfleamarket.yahoo.co.jp/item/' + id, cond: '', img: o.thumbnailImageUrl || '' }); } Object.values(o).forEach(walk); }; walk(j); } catch (e) {} return out; } },
     // ★ヤフオクは【今すぐ買える価格】だけを出す。オークションは1円スタートが多く、現在価格は仕入れ判断に使えない。
     //   実測(2026-08-11)：fixed=1＝定額出品のみ / fixed=3＝オークションで即決ありのみ。2回引いて足す。
     //   fixed=2 は現在価格しか出ないので使わない。送料は「＋送料N円」が書いてあれば実質価格に足す。
@@ -8246,7 +8251,7 @@
             }
             if (!price) return;
             const sm = flat.match(/[＋+]送料([0-9]{2,5})円/);                   // 落札者負担の送料が書いてあれば拾う
-            out.push({ name: dealName(li.querySelector('.Product__titleLink') || a), price, url: a.href.split('?')[0], cond, addFee: sm ? +sm[1] : 0 });
+            out.push({ name: dealName(li.querySelector('.Product__titleLink') || a), price, url: a.href.split('?')[0], cond, addFee: sm ? +sm[1] : 0, img: ((li.querySelector('img') || {}).src || '') });
           });
           return out;
         };
@@ -8437,6 +8442,7 @@
     const jg = d => ceil ? srcJudge(d.eff != null ? d.eff : d.price, ceil) : null;
     const rows = deals.slice(0, n).map((d, i) => { const j = jg(d); return `<tr style="${d._sus ? 'background:#f4f4f4;opacity:.55' : (j ? `background:${j.bg}` : (i === 0 ? 'background:#eafaf0' : ''))}" ${d._sus ? `title="${esc(d._sus)}のため下に回しています"` : ''}>
       <td style="text-align:center;color:#6b7280;font-size:11px">${j ? j.icon : (i + 1)}</td>
+      <td>${d.img ? `<img src="${esc(d.img)}" referrerpolicy="no-referrer" loading="lazy" style="width:38px;height:38px;object-fit:cover;border-radius:4px;background:#f2f2f2" onerror="this.style.opacity=.15">` : ''}</td>
       <td><span style="background:${d.bg};color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 6px;white-space:nowrap">${esc(d.site)}</span></td>
       <td style="text-align:right;white-space:nowrap"><b style="color:#c0392b;font-size:13px">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<div class="smd-dim" style="font-size:9.5px" title="送料の目安（⚙️設定で変更可）を足した実質価格">＋送${d.fee.toLocaleString()} = <b>¥${d.eff.toLocaleString()}</b></div>` : ''}</td>
       ${ceil ? `<td style="text-align:right;white-space:nowrap"><b style="color:${j.c};font-size:12px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b><span class="smd-dim" style="font-size:10px"> ROI${j.roi}%</span></td>` : ''}
@@ -8469,7 +8475,7 @@
       abundanceLine +
       (broadKw ? `<div style="font-size:11px;color:#b26a00;background:#fff8e6;border-radius:5px;padding:4px 8px;margin-bottom:6px">🔎 ヒット0のサイトは「<b>${esc(broadKw)}</b>」に広げて再検索しました（英語サブタイトル等を外し作品名＋機種で。別バリエも混じるので現物を確認してください）。</div>` : '') +
       `<div style="margin-bottom:7px">各サイト最安↓ ${chips}</div>` +
-      `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">${ceil ? '判定' : '#'}</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th>${ceil ? '<th style="width:104px;text-align:right">見込み粗利</th>' : ''}<th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
+      `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">${ceil ? '判定' : '#'}</th><th style="width:44px">画像</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th>${ceil ? '<th style="width:104px;text-align:right">見込み粗利</th>' : ''}<th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
     const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20));
   }
   // よく出る英語タイトル → 日本語での検索語（日本の仕入先はJPの方がヒットしやすい）。全一致でなく含めば置換
@@ -8870,13 +8876,15 @@
       if (!top.length) { box.innerHTML = `<div class="smd-dim" style="font-size:10.5px">この検索語に合う出品がありません（取得した ${deals.length}件は<b>まとめ売り・別商品</b>でした）。<b>🔍比較一覧</b>で全部見るか、キーワードを直してください。</div>` + statLine(r); return; }
       const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null; const miss = [];
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:13px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
-          ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
+          ${k === 0 ? '🥇' : (j ? j.icon : '')}${d.img ? `<img src="${esc(d.img)}" referrerpolicy="no-referrer" loading="lazy" style="width:26px;height:26px;object-fit:cover;border-radius:4px;background:#f2f2f2" onerror="this.style.display='none'">` : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${j ? `<b style="color:${j.c};font-size:10px" title="この値段で仕入れた場合の見込み粗利（入金見込み − 仕入額）">粗利${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
       box.innerHTML = head + chips + statLine(r) + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
       // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
       (async () => {
-        const d0 = top[0]; if (!d0 || d0.k !== 'mercari' || d0.det) return;
-        const det = await mercDetail(mercIdOf(d0.url)); if (!det || !box.isConnected) return;
-        d0.det = det; drawSugg(i, r);
+        // メルカリの候補は上位3件まで詳細を見る。ケース欠品なら外して選び直すため。
+        const targets = top.filter(d => d.k === 'mercari' && !d.det).slice(0, 3);
+        if (!targets.length) return;
+        for (const d of targets) { const det = await mercDetail(mercIdOf(d.url)); if (det) d.det = det; }
+        if (box.isConnected) drawSugg(i, r);
       })();
       // 開いた候補を「これを買う」として覚える → ✓仕入れ済にした時に仕入額として記録される
       box.querySelectorAll('.src-pick').forEach(a => a.addEventListener('click', () => {
