@@ -3662,13 +3662,20 @@
     }).catch(liveFetchAll);
   }
 
+  // ★期日欄は【自宅から出す期限】を出す。Shopeeのship_by_dateは倉庫スキャンの期限なので、
+  //   そのまま出すと「まだ余裕がある」と読み違える（発送してから倉庫に着くまで1日かかる）。
+  //   ホバーでスキャン期限（＝自動キャンセルの基準日）も見えるようにする。
+  const ymdJst_ = (sec) => { const d = new Date(sec * 1000 + 9 * 3600 * 1000); return (d.getUTCMonth() + 1) + '/' + d.getUTCDate(); };
   function shipByBadge(shipBy) {
     if (!shipBy) return '<span class="smd-dim">-</span>';
-    const h = Math.round((shipBy - nowSec()) / 3600);
-    if (h < 0) return `<span class="ord-due-red">超過${Math.abs(h)}h</span>`;
-    if (h < 24) return `<span class="ord-due-red">残り${h}h</span>`;
-    if (h < 48) return `<span class="ord-due-orange">残り${h}h</span>`;
-    return `<span class="ord-due-ok">残り${Math.floor(h / 24)}日</span>`;
+    const send = ordShipDeadline({ shipBy: shipBy, tab: 300 }) || (shipBy - 86400);
+    const h = Math.round((send - nowSec()) / 3600);
+    const tip = '自宅から出す期限 ' + ymdJst_(send) + '　／　倉庫スキャン期限 ' + ymdJst_(shipBy) + '（ここを過ぎると自動キャンセル）';
+    const wrap = (cls, txt) => `<span class="${cls}" title="${tip}">${txt}</span>`;
+    if (h < 0) return wrap('ord-due-red', '超過' + Math.abs(h) + 'h');
+    if (h < 24) return wrap('ord-due-red', '残り' + h + 'h');
+    if (h < 48) return wrap('ord-due-orange', '残り' + h + 'h');
+    return wrap('ord-due-ok', '残り' + Math.floor(h / 24) + '日');
   }
   // Shopeeの生ステータスenumを日本語化（注文一覧の状態列。未知値はそのまま表示）
   // GAS(shopee-openapi-sync)はstatusを一部"To Ship/Processed/Shipping/To Receive"に整形して保存し、残り(UNPAID/COMPLETED等)は生enum。両方＋生enumを網羅（キーは大文字化して照合）
@@ -3748,17 +3755,28 @@
   // ★「手配済（伝票発行済）」はまだ荷物が家にある。倉庫へ物理発送して初めて“今日の出荷は終わり”。
   //   だから完了判定は「倉庫へ発送済フラグ or ④発送済」。ここを取り違えると外出判断を誤る。
   const ordDone = (r) => r.tab === 400 || !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
-  const ordDueBucket = (r) => {                    // over/d0/d1/d2/later/none
-    if (r.tab !== 300 || !r.shipBy) return 'none';
-    const now = new Date(), sb = new Date(r.shipBy * 1000);
-    const day = (d) => { const t = new Date(d.getTime() + 9 * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };  // JSTの日付
-    const diff = Math.round((day(sb) - day(now)) / 86400000);
-    if (r.shipBy * 1000 < now.getTime()) return 'over';
-    if (diff <= 0) return 'd0';
+  // ★期限は2つある。混ぜると判断を誤る。
+  //   ・スキャン期限（=Shopeeの ship_by_date）… ここまでに【Shopee Japan倉庫でスキャン】されないと自動キャンセル
+  //   ・発送期限（=スキャン期限の前日）      … ここまでに【自宅から出す】必要がある
+  //   運用実績として、発送した翌日の朝に倉庫へ着き、その日のうちにスキャンされる。
+  //   よって「自分がいつ動くか」を決めるのは発送期限のほう。キャンセルの瀬戸際はスキャン期限。
+  const SCAN_LEAD_DAYS = 1;                       // 発送してから倉庫スキャンまでに要る日数
+  const ordShipDeadline = (r) => (r.shipBy ? r.shipBy - SCAN_LEAD_DAYS * 86400 : 0);
+  const jstDay_ = (ms) => { const t = new Date(ms + 9 * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };
+  const dueBucketOf_ = (sec) => {                 // over/d0/d1/d2/later/none
+    if (!sec) return 'none';
+    const now = Date.now();
+    const diff = Math.round((jstDay_(sec * 1000) - jstDay_(now)) / 86400000);
+    if (diff < 0) return 'over';                  // 日付で見る（時刻ぴったりで急に超過にしない）
+    if (diff === 0) return 'd0';
     if (diff === 1) return 'd1';
     if (diff === 2) return 'd2';
     return 'later';
   };
+  // 既定は発送基準（自分の行動が決まるのはこちら）
+  const ordDueBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordShipDeadline(r));
+  // 倉庫スキャンの期限＝自動キャンセルの基準
+  const ordScanBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(r.shipBy);
   // 期限を大きく過ぎたものはShopee側で自動キャンセルされる恐れがある（国により猶予は違うが、超過48hを警戒線に）
   const ordAutoCancelRisk = (r) => r.tab === 300 && !ordDone(r) && r.shipBy && (nowSec() - r.shipBy) > 48 * 3600;
   function renderShipDeadline() {
@@ -3772,21 +3790,32 @@
     const undone = rows.filter(r => r.tab === 300 && !ordDone(r));
     const by = (k) => undone.filter(r => ordDueBucket(r) === k);
     const over = by('over'), d0 = by('d0'), d1 = by('d1'), d2 = by('d2');
+    // スキャン基準（=Shopeeのship_by_date。ここを過ぎると自動キャンセルの対象）
+    const byS = (k) => undone.filter(r => ordScanBucket(r) === k);
+    const sOver = byS('over'), sD0 = byS('d0'), sD1 = byS('d1');
     const acr = undone.filter(ordAutoCancelRisk);
     const todayTotal = over.length + d0.length;
     const notArranged = (list) => list.filter(r => !ordArranged(r)).length;
     if (!rows.length) { el.innerHTML = ''; return; }
-    const chip = (k, label, list, col) => `<span class="ord-duechip" data-k="due${k}" title="クリックでこの分だけ表示" style="cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:${col}14;color:${col};border:1px solid ${col}55;font-weight:700;font-size:11.5px;padding:3px 10px;border-radius:11px">${label} <b style="font-size:13px">${list.length}</b>${list.length ? `<span style="font-weight:400;font-size:10px;opacity:.85">(未手配${notArranged(list)})</span>` : ''}</span>`;
+    const chip = (k, label, list, col) => `<span class="ord-duechip" data-k="due${k}" title="クリックでこの分だけ表示" style="cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:${col}14;color:${col};border:1px solid ${col}55;font-size:11px;font-weight:700;border-radius:14px;padding:2px 9px">${label} <b style="font-size:12.5px">${list.length}</b>${notArranged(list) ? `<span style="font-weight:400;opacity:.75">（未手配${notArranged(list)}）</span>` : ''}</span>`;
+    const chipS = (k, label, list, col) => `<span class="ord-duechip" data-k="scan${k}" title="Shopee Japan倉庫でスキャンされる期限。過ぎると自動キャンセルの対象になります" style="cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:${col}14;color:${col};border:1px solid ${col}55;font-size:11px;font-weight:700;border-radius:14px;padding:2px 9px">${label} <b style="font-size:12.5px">${list.length}</b></span>`;
     const ok = todayTotal === 0;
     el.innerHTML = `<div style="margin:6px 0 2px;padding:7px 12px;border-radius:9px;border:1px solid ${ok ? '#bfe6c8' : '#f3c2bb'};background:${ok ? '#f2fbf4' : '#fff7f6'}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:12.5px;white-space:nowrap;color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '✅ 今日出す分は全部おわりました（外出してOK）' : '📦 今日出す分 ' + todayTotal + '件 残り'}</b>
-        ${over.length ? chip('over', '🚨 期限超過', over, '#b71c1c') : ''}
+        <span class="smd-dim" style="font-size:10.5px;white-space:nowrap" title="発送した翌日の朝に倉庫へ着き、その日のうちにスキャンされる前提。だから自宅を出る期限はスキャン期限の前日です">遅延基準（自宅から出す）</span>
+        ${over.length ? chip('over', '🚨 発送遅れ', over, '#b71c1c') : ''}
         ${chip('d0', '📮 今日まで', d0, '#d93025')}
         ${chip('d1', '🕑 明日まで', d1, '#e8710a')}
         ${chip('d2', '🗓 明後日まで', d2, '#1565c0')}
-        ${acr.length ? `<span class="ord-duechip" data-k="dueover" title="期限を48時間以上過ぎています。Shopee側で自動キャンセルされる恐れがあります。最優先で発送してください" style="cursor:pointer;background:#b71c1c;color:#fff;font-weight:700;font-size:11.5px;padding:3px 11px;border-radius:11px">⛔ 自動キャンセル警戒 ${acr.length}</span>` : ''}
         <span class="smd-dim" style="font-size:10.5px;margin-left:auto;white-space:nowrap" title="伝票を出しただけ＝まだ家にある、は未完了として数えます">※「倉庫へ発送済」にした分だけ完了</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-top:5px;border-top:1px dashed #e6d6d3">
+        <span class="smd-dim" style="font-size:10.5px;white-space:nowrap" title="Shopeeのship_by_date。ここまでに倉庫でスキャンされないと自動キャンセルの対象">キャンセル基準（倉庫スキャン）</span>
+        ${sOver.length ? chipS('over', '🛑 スキャン期限切れ', sOver, '#b71c1c') : ''}
+        ${chipS('d0', '⏰ 今日中にスキャン', sD0, '#d93025')}
+        ${chipS('d1', '📅 明日まで', sD1, '#e8710a')}
+        ${acr.length ? `<span class="ord-duechip" data-k="scanover" title="期限を48時間以上過ぎています。Shopee側で自動キャンセルされる恐れがあります。最優先で発送してください" style="cursor:pointer;background:#b71c1c;color:#fff;font-size:11px;font-weight:700;border-radius:14px;padding:2px 9px">🔥 自動キャンセル警戒 <b>${acr.length}</b></span>` : ''}
       </div>
     </div>`;
     el.querySelectorAll('.ord-duechip').forEach(c => c.addEventListener('click', () => {
@@ -3807,9 +3836,13 @@
     // 発送フロー4段階：①未手配(Arrange Shipment未)→②伝票発行済(手配済・倉庫へ未発送)→③倉庫スキャン待ち(自社→Shopee倉庫 輸送中)→④発送済(倉庫スキャン済=tab400)
     const _isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
     if (state.orders.filter === 'late') rows = rows.filter(r => ordRisk(r) >= 1); // 遅延＋遅延リスク（未対応で期日が近い/超過）
-    else if (/^due/.test(String(state.orders.filter || ''))) {           // 📅出荷しめきり：超過/今日/明日/明後日
+    else if (/^due/.test(String(state.orders.filter || ''))) {           // 📮発送しめきり（自宅を出る）：超過/今日/明日/明後日
       const want = String(state.orders.filter).slice(3);
       rows = rows.filter(r => !ordDone(r) && ordDueBucket(r) === want);
+    }
+    else if (/^scan/.test(String(state.orders.filter || ''))) {          // ⏰スキャンしめきり（倉庫・自動キャンセルの基準）
+      const want = String(state.orders.filter).slice(4);
+      rows = rows.filter(r => !ordDone(r) && ordScanBucket(r) === want);
     }
     else if (state.orders.filter === 'unarranged') rows = rows.filter(r => r.tab === 300 && !ordArranged(r) && !_isSelfT(r)); // ①未手配：Arrange Shipment未押下（renderのarrangedと同一判定＝食い違い防止）。ここから📦発送手配
     else if (state.orders.filter === 'arranged') rows = rows.filter(r => r.tab === 300 && ordArranged(r) && !_isSelfT(r)); // ②伝票発行済：SLS伝票発行済だが倉庫へ物理未発送
@@ -15354,6 +15387,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       jobPollStart();
       bkRunChunks(rz.kv, r.k, null, rz.from || 0, rz.done || 0, rz.failed || 0, rz.errors || []);
     }
+    // 再開情報を持たない古い実行中は拾えない。「実行中」のまま残ると動いていると誤解するので中断にする
+    for (const r of (rows || [])) {
+      const v = r.v || {};
+      if (v.kind !== 'bulkedit' || v.status !== 'run' || v.resume) continue;
+      if (now - new Date(r.updated_at).getTime() < 600000) continue;   // 10分は様子を見る
+      jobRemoteFail(r.k, '中断されました（画面を閉じたため。もう一度選び直して保存してください）');
+    }
   }
   function bkApplySaved(list) {
     (list || []).forEach(e => {
@@ -16011,6 +16051,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const kv = 'bulkedit_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
     const key = await jobRemoteCreate('bulkedit', 'まとめて編集', ccs.join('/') + ' ' + targets.length + '件');
+    // ★最初のチャンク（最大4分30秒）の途中でタブを閉じても拾えるよう、開始時点で再開情報を入れておく
+    await jobRemoteSetResume(key, { kv: kv, from: 0, done: 0, failed: 0, errors: [] });
     JOB_T0[key] = Date.now();
     JOB_MIRROR[key] = (v) => {
       const m = document.querySelector('#bk-msg'); if (!m || !m.isConnected) return;
