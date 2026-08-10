@@ -8315,6 +8315,13 @@
     [/\bdream ?cast\b/gi, 'ドリームキャスト'], [/\bvisual memory\b/gi, 'ビジュアルメモリ'],
     [/\bexpansion pa[ck]k?\b/gi, '拡張パック'], [/\brumble pa[ck]k?\b/gi, '振動パック'],
     [/\bcontroller pa[ck]k?\b/gi, 'コントローラパック'], [/\bmemory card\b/gi, 'メモリーカード'],
+    // ★BRが注文の約7割。ポルトガル語の一般名詞が訳せていないと、日本の仕入先でも在庫台帳でも一切ヒットしない。
+    //   （実例：Controlador Analógico DualShock の注文に「PS1 メモリーカード」が並んでいた＝機種語だけで点が付いていた）
+    [/\b(controlador|controle|controller)\b/gi, 'コントローラー'], [/\bdual ?shock\b/gi, 'デュアルショック'],
+    [/\banal[óo]gico\b/gi, 'アナログ'], [/\bcart(ucho|ridge)\b/gi, 'カートリッジ'], [/\bfita\b/gi, 'カセット'],
+    [/\b(carregador|fonte)\b/gi, '電源アダプター'], [/\badaptador\b/gi, 'アダプター'], [/\bcabo\b/gi, 'ケーブル'],
+    [/\bbateria\b/gi, 'バッテリー'], [/\bcapa\b/gi, 'カバー'], [/\bfone\b/gi, 'ヘッドホン'],
+    [/\b(console|consola)\b/gi, '本体'], [/\bjogo\b/gi, 'ゲーム'], [/\bcaixa\b/gi, '箱'], [/\bmanual\b/gi, '説明書'],
     [/\b(nintendo ?64|n64)\b/gi, 'ニンテンドー64'],
     [/\bjoy-? ?con\b/gi, 'ジョイコン'], [/\bpro controller\b/gi, 'プロコン'], [/\bcontroller\b/gi, 'コントローラー'],
     [/\bdock(ing station)?\b/gi, 'ドック'], [/\bac adapter\b/gi, 'ACアダプター'], [/\bcharger\b/gi, '充電器'],
@@ -23017,6 +23024,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   function pfSetInvMap(inv) {
     pf.invMap = new Map();
+    // 在庫Noから在庫台帳を直接引く索引。📗利益計算表は「注文合計の仕入額」しか持たないため、
+    // 在庫No 1件ずつの仕入額はここから拾って内訳を出す。
+    pf.invById = new Map();
+    inv.forEach(it => { if (it.item_id) pf.invById.set(String(it.item_id), it); });
     inv.forEach(it => {
       if (!it.shopee_sn) return;
       if (!pf.invMap.has(it.shopee_sn)) pf.invMap.set(it.shopee_sn, []);
@@ -23505,11 +23516,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (!first) return '';
               const sh = pfSheet(o);
               if (sh && (Number(sh.cost) > 0 || (sh.stock_no && sh.stock_no.length) || sh.supplier)) {
-                return `<div title="📗利益計算表(スプシ)より取込">${(sh.stock_no && sh.stock_no.length) ? '🏷' + esc(sh.stock_no.join(', ')) : ''}${sh.proof ? ` <a href="${esc(sh.proof)}" target="_blank" rel="noopener" title="仕入れ確証" style="text-decoration:none">📸</a>` : ''}${(sh.supplier || Number(sh.cost) > 0 || sh.supplier_url) ? `<div style="font-size:9.5px;color:#8a7db5;line-height:1.35">${sh.supplier ? '🛒' + esc(sh.supplier) : ''}${Number(sh.cost) > 0 ? ` <b>¥${Number(sh.cost).toLocaleString()}</b>` : ''}${sh.supplier_url ? ` <a href="${esc(sh.supplier_url)}" target="_blank" rel="noopener" title="仕入元ページ" style="text-decoration:none">🔗</a>` : ''}</div>` : ''}<div class="smd-dim" style="font-size:8px">📗計算表</div></div>`;
+                // ★在庫Noは1行1件で出す（横に繋げると何個あるのか読み取れない）。
+                //   各行には在庫台帳から引いた「その1点の仕入額」を、末尾に合計を出す。
+                const snos = (sh.stock_no || []).filter(Boolean);
+                const each = snos.map(no => { const r = (pf.invById && pf.invById.get(String(no))) || null;
+                  const py = r && r.price != null ? Number(r.price) : null;
+                  return { no, py, nm: r ? (r.name_supplier || r.name || '') : '' }; });
+                const known = each.filter(x => x.py != null);
+                const sumEach = known.reduce((t, x) => t + x.py, 0);
+                const listHtml = each.map(x => `<div title="${esc(x.nm || ('在庫No ' + x.no))}" style="white-space:nowrap">🏷${esc(x.no)}${x.py != null ? ` <b style="color:#7a6ba7">¥${x.py.toLocaleString()}</b>` : ' <span class="smd-dim" style="font-size:9px">台帳に金額なし</span>'}</div>`).join('');
+                const sumHtml = snos.length > 1
+                  ? `<div style="border-top:1px dashed #d5cdf0;margin-top:2px;padding-top:2px;font-size:10px" title="${known.length < snos.length ? '台帳に金額がある分だけの合計です' : '在庫台帳の合計'}">合計 <b style="color:#7a6ba7">${known.length ? '¥' + sumEach.toLocaleString() : '—'}</b>${(known.length && Number(sh.cost) > 0 && sumEach !== Number(sh.cost)) ? `<span class="smd-dim" style="font-size:9px"> ／📗表 ¥${Number(sh.cost).toLocaleString()}</span>` : ''}${known.length < snos.length ? `<span class="smd-dim" style="font-size:9px"> (${snos.length - known.length}件は金額不明)</span>` : ''}</div>`
+                  : '';
+                return `<div title="📗利益計算表(スプシ)より取込">${listHtml}${sumHtml}${sh.proof ? ` <a href="${esc(sh.proof)}" target="_blank" rel="noopener" title="仕入れ確証" style="text-decoration:none">📸</a>` : ''}${(sh.supplier || Number(sh.cost) > 0 || sh.supplier_url) ? `<div style="font-size:9.5px;color:#8a7db5;line-height:1.35">${sh.supplier ? '🛒' + esc(sh.supplier) : ''}${(Number(sh.cost) > 0 && snos.length <= 1) ? ` <b>¥${Number(sh.cost).toLocaleString()}</b>` : ''}${sh.supplier_url ? ` <a href="${esc(sh.supplier_url)}" target="_blank" rel="noopener" title="仕入元ページ" style="text-decoration:none">🔗</a>` : ''}</div>` : ''}<div class="smd-dim" style="font-size:8px">📗計算表</div></div>`;
               }
               // ★在庫Noが空＝粗利が出せない行。ここから候補を出して1クリックで紐付けられるようにする。
               return '<span class="smd-dim" style="font-size:10px" title="在庫紐付け・利益計算表の取込ともに未反映">—</span>'
-                + `<br><button class="pf-invsug" data-sn="${av(o.sn)}" data-cc="${av(o.cc)}" data-nm="${av((o.items && o.items[0] && (o.items[0].name || o.items[0].item_name)) || '')}" style="margin-top:3px;font-size:9.5px;padding:2px 7px;border:1px solid #cbbdf0;background:#faf8ff;color:#7a6ba7;border-radius:5px;cursor:pointer" title="この注文に充てられそうな在庫を、商品名の似具合と仕入日から探します">🔎 在庫候補</button>`;
+                + `<br><button class="pf-invsug" data-sn="${av(o.sn)}" data-cc="${av(o.cc)}" data-nm="${av((o.items && o.items[0] && (o.items[0].name || o.items[0].item_name)) || '')}" data-var="${av((o.items && o.items[0] && o.items[0].variation) || '')}" style="margin-top:3px;font-size:9.5px;padding:2px 7px;border:1px solid #cbbdf0;background:#faf8ff;color:#7a6ba7;border-radius:5px;cursor:pointer" title="この注文に充てられそうな在庫を、商品名の似具合と仕入日から探します">🔎 在庫候補</button>`;
             })()}</td>`,
           paypal: () => `<td style="text-align:right;font-size:11px">${first ? (ppl > 0 ? `<b style="color:#0f9d58" title="PayPalで別途徴収した差分＝追加入金として粗利に加算">+${fmtJpy(ppl)}</b>` : '<span class="smd-dim">—</span>') : ''}</td>`,
           cost: () => { const scost = Number((pfSheet(o) || {}).cost) || 0; return `<td>` +
@@ -23581,49 +23604,78 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const od = String(ord.order_date || '').slice(0, 10);
           // ★文字の似方だけで出すと「Mario Bros」に「KINGDOM HEARTS」が43%で並ぶ。
           //   商品名は日英が混ざるうえ、機種名や「Nintendo」「Used」など共通語が多くて似てしまうため。
-          //   そこで【機種(ハード)が違うものは候補から外す】。これが一番効く足切り。
-          //   さらに仕入日が注文日から離れすぎているものを減点する（無在庫は注文後すぐ仕入れるため）。
+          //   足切りは2段：①機種(ハード)が違うものは外す ②【機種を除いた"中身の語"が1つも一致しない物は外す】。
+          //   ②が無いと、PS1コントローラーの注文に「PS1 メモリーカード」が全部66%で並ぶ（機種語だけで点が付くため）。
           const oHw = invHwAuto(nm);
+          // Shopeeの英語/ポルトガル語名を、仕入れ検索と同じ辞書で日本語の検索語に寄せる
+          const kwJa = (() => { try { return sourcingKeyword(nm, btn.dataset.var || ''); } catch (_) { return ''; } })();
+          const norm = t => String(t || '').toLowerCase().replace(/[\s　・:：\-–—_/()（）\[\]【】。、,.]/g, '');
+          const contentToks = String(kwJa).split(/\s+/).filter(t => t && t.length >= 2 && !MACHINE_TOK.test(t)).map(norm).filter(Boolean);
+          const hitOf = iname => { if (!contentToks.length) return null; const n2 = norm(iname); return contentToks.filter(t => n2.indexOf(t) >= 0).length / contentToks.length; };
           const dayDiff = (a, b) => { const t1 = Date.parse(a + 'T00:00:00Z'), t2 = Date.parse(b + 'T00:00:00Z'); return (isNaN(t1) || isNaN(t2)) ? null : Math.round((t1 - t2) / 86400000); };
-          const cand = (_invAll || [])
-            .filter(v => !String(v.shopee_sn || '').trim())            // まだどの注文にも充てていない在庫だけ
-            .map(v => {
-              const iname = v.name_supplier || v.name || '';
-              const vHw = invHwAuto(iname);
-              let sc = simPair(nm, iname) || 0;
-              let hwNg = false;
-              if (oHw && vHw) { if (oHw === vHw) sc += 0.18; else { hwNg = true; } }   // 機種が分かって食い違う＝別物
-              const pd = String(v.purchase_date || '').slice(0, 10);
-              if (pd && od) {
-                const d = dayDiff(pd, od);
-                if (d != null) {
-                  if (d > 3) sc -= 0.30;                               // 注文より後に仕入れた物は当てにくい
-                  else if (d >= -14) sc += 0.10;                       // 注文の直前〜直後＝無在庫の通常パターン
-                  else if (d < -120) sc -= 0.12;                       // 4か月以上前の在庫は可能性が下がる
-                }
+          const unused = (_invAll || []).filter(v => !String(v.shopee_sn || '').trim());   // まだどの注文にも充てていない在庫だけ
+          const score = v => {
+            const iname = v.name_supplier || v.name || '';
+            const vHw = invHwAuto(iname);
+            const hit = hitOf(iname);
+            let sc = simPair(nm, iname) || 0;
+            if (hit != null) sc = Math.max(sc, hit * 0.85);          // 日本語の中身の語が一致していれば、そちらを採る
+            let hwNg = false;
+            if (oHw && vHw) { if (oHw === vHw) sc += 0.18; else hwNg = true; }   // 機種が分かって食い違う＝別物
+            const pd = String(v.purchase_date || '').slice(0, 10);
+            if (pd && od) {
+              const d = dayDiff(pd, od);
+              if (d != null) {
+                if (d > 3) sc -= 0.30;                               // 注文より後に仕入れた物は当てにくい
+                else if (d >= -14) sc += 0.10;                       // 注文の直前〜直後＝無在庫の通常パターン
+                else if (d < -120) sc -= 0.12;                       // 4か月以上前の在庫は可能性が下がる
               }
-              return { v, iname, sc, pd, vHw, hwNg };
-            })
-            .filter(x => !x.hwNg && x.sc >= 0.42).sort((a, b) => b.sc - a.sc).slice(0, 8);
+            }
+            // ★中身の語が1つも一致しない＝機種が同じだけの別物。ここを通すと誤った紐付けを誘発する
+            if (hit === 0) hwNg = true;
+            return { v, iname, sc, pd, vHw, hwNg, hit };
+          };
+          const cand = unused.map(score).filter(x => !x.hwNg && x.sc >= 0.42).sort((a, b) => b.sc - a.sc).slice(0, 8);
           // ★機種が合っても「同じ機種の別ソフト」は普通に40%台まで上がる（共通語が多いため）。
           //   自信の無い候補を並べると、かえって間違って充ててしまう。
-          //   一番上が0.60未満なら「無い」と言い切る方が正しい（無在庫なら未仕入れが普通）。
           const strong = cand.length && cand[0].sc >= 0.60;
           const shown2 = strong ? cand.filter(x => x.sc >= 0.50) : [];
           if (!pop.isConnected) return;
-          if (!shown2.length) { pop.innerHTML = '<b>充てられそうな在庫はありません</b>' + '<div class="smd-dim" style="margin-top:4px">' + (oHw ? '機種「' + esc(oHw) + '」の未使用在庫に、名前が近いものがありませんでした。' : '名前が近い未使用在庫がありませんでした。') + '<br><b>まだ仕入れていない</b>可能性が高いです（無在庫なら普通のことです）。</div>'; return; }
           const col = v => v >= 0.75 ? '#1a7f37' : (v >= 0.55 ? '#e8710a' : '#8a8f98');
-          pop.innerHTML = `<div style="font-weight:700;margin-bottom:5px">🔎 充てられそうな在庫${oHw ? ' <span style="font-size:10.5px;color:#7b52c4">機種 ' + esc(oHw) + ' に絞り込み</span>' : ''} <span class="smd-dim" style="font-weight:400">（一致度順・未使用の在庫のみ）</span></div>`
-            + shown2.map(x => `<div style="display:flex;gap:7px;align-items:center;padding:4px 2px;border-top:1px solid #f2f2f2">
+          const cardHtml = (x, showPct) => `<div style="display:flex;gap:7px;align-items:center;padding:4px 2px;border-top:1px solid #f2f2f2">
                 ${x.v.image ? `<img src="${esc(x.v.image)}" referrerpolicy="no-referrer" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:5px;background:#f2f2f2;flex:none" onerror="this.style.opacity=.15">`
                   : '<span style="width:44px;height:44px;border:1px dashed #ddd;border-radius:5px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#bbb">画像なし</span>'}
                 <span style="flex:1;min-width:0">
                   <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(x.iname)}">${esc(x.iname)}</span>
                   <span class="smd-dim" style="font-size:10px">${x.vHw ? '<b style="color:#7b52c4">' + esc(x.vHw) + '</b> / ' : ''}🏷${esc(x.v.item_id)}${x.v.bin ? ' / 棚' + esc(x.v.bin) : ''}${x.v.price != null ? ' / ¥' + Number(x.v.price).toLocaleString() : ''}${x.pd ? ' / 仕入' + esc(x.pd) : ''}</span>
                 </span>
-                <b style="flex:none;color:${col(x.sc)}">${Math.round(x.sc * 100)}%</b>
+                ${showPct ? `<b style="flex:none;color:${col(x.sc)}">${Math.round(x.sc * 100)}%</b>` : ''}
                 <button class="pf-invpick" data-id="${esc(x.v.item_id)}" data-sn="${av(sn)}" data-nm="${av(x.iname)}" style="flex:none;font-size:10px;padding:3px 9px;border:1px solid #7b52c4;background:#fff;color:#7b52c4;border-radius:5px;cursor:pointer;font-weight:700">充てる</button>
-              </div>`).join('');
+              </div>`;
+          // 🔎 自動で当たらない時のために、在庫台帳をその場でキーワード検索できるようにする
+          const head = `<div style="font-weight:700;margin-bottom:5px">🔎 充てられそうな在庫${oHw ? ' <span style="font-size:10.5px;color:#7b52c4">機種 ' + esc(oHw) + '</span>' : ''} <span class="smd-dim" style="font-weight:400">（未使用の在庫のみ）</span></div>
+            <div style="display:flex;gap:5px;align-items:center;margin-bottom:5px">
+              <input class="pf-invq" placeholder="商品名・在庫Noで検索（例: デュアルショック）" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #d8cff0;border-radius:6px;font-size:11.5px">
+              <span class="pf-invq-n smd-dim" style="font-size:10px;white-space:nowrap"></span></div>`;
+          const autoHtml = shown2.length
+            ? shown2.map(x => cardHtml(x, true)).join('')
+            : `<div class="smd-dim" style="padding:4px 2px">自動では見つかりませんでした${contentToks.length ? '（「' + esc(kwJa) + '」で照合）' : ''}。<b>まだ仕入れていない</b>か、名前が違う可能性があります。<b>上の検索</b>で探してください。</div>`;
+          const drawList = (q) => {
+            const listEl = pop.querySelector('.pf-invlist'), nEl = pop.querySelector('.pf-invq-n');
+            const toks = String(q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+            if (!toks.length) { listEl.innerHTML = autoHtml; if (nEl) nEl.textContent = ''; wirePick(); return; }
+            const hits = unused.filter(v => { const t = ((v.name_supplier || v.name || '') + ' ' + (v.item_id || '')).toLowerCase(); return toks.every(k => t.indexOf(k) >= 0); })
+              .sort((a, b) => String(b.purchase_date || '').localeCompare(String(a.purchase_date || '')));
+            if (nEl) nEl.textContent = hits.length + '件';
+            listEl.innerHTML = hits.length
+              ? hits.slice(0, 30).map(v => cardHtml({ v, iname: v.name_supplier || v.name || '', vHw: invHwAuto(v.name_supplier || v.name || ''), pd: String(v.purchase_date || '').slice(0, 10), sc: 0 }, false)).join('')
+                + (hits.length > 30 ? `<div class="smd-dim" style="font-size:10px;padding:4px 2px">…ほか${hits.length - 30}件（語を足して絞り込んでください）</div>` : '')
+              : '<div class="smd-dim" style="padding:4px 2px">該当する未使用在庫がありません</div>';
+            wirePick();
+          };
+          pop.innerHTML = head + `<div class="pf-invlist">${autoHtml}</div>`;
+          { const qi = pop.querySelector('.pf-invq'); if (qi) { wireTypeahead(qi, v => drawList(v), 250); qi.addEventListener('keydown', e => e.stopPropagation()); } }
+          function wirePick() {
           pop.querySelectorAll('.pf-invpick').forEach(b2 => b2.addEventListener('click', async () => {
             if (!confirm('在庫No ' + b2.dataset.id + '（' + String(b2.dataset.nm).slice(0, 40) + '）を\nこの注文（' + b2.dataset.sn + '）に充てます。よろしいですか？')) return;
             b2.disabled = true; b2.textContent = '…';
@@ -23635,6 +23687,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               _invAll = null; invPopClose(); pf._cache = null; renderProfit();
             } catch (e3) { b2.disabled = false; b2.textContent = '充てる'; alert('紐付けに失敗: ' + ((e3 && e3.message) || e3)); }
           }));
+          }
+          wirePick();
         } catch (e2) { if (pop.isConnected) pop.innerHTML = '<span style="color:#d93025">在庫の取得に失敗: ' + esc(String((e2 && e2.message) || e2)) + '</span>'; }
       };
       btn.addEventListener('mouseenter', () => { clearTimeout(tmr); tmr = setTimeout(open, 280); });
