@@ -3873,6 +3873,45 @@
       </table></div>
     </div>`;
   }
+  // 💡 山と谷を見て「前もって何をしておくか」を出す。数字を見ても打ち手が浮かばないと意味がない。
+  //   1日にさばける件数は ⚙️の設定（既定20件／実績は1日12〜20件）。
+  const DAY_CAP = () => Number(settings.shipCapPerDay) || 20;
+  function calAdviceHtml(days, cnt, key) {
+    const W = ['日', '月', '火', '水', '木', '金', '土'];
+    const cap = DAY_CAP();
+    const md = (k) => { const d = new Date(k + 'T00:00:00+09:00'); return (d.getMonth() + 1) + '/' + d.getDate() + '(' + W[d.getDay()] + ')'; };
+    const tips = [];
+    // ① キャパ超えの山 → 前の「空いている日」へ何件寄せるか
+    days.forEach((d, i) => {
+      if (d.n <= cap) return;
+      let over = d.n - cap, moved = [];
+      for (let j = i - 1; j >= 0 && over > 0; j--) {          // 手前の空きへ寄せる（前倒しは常に安全）
+        const room = cap - days[j].n;
+        if (room <= 0) continue;
+        const take = Math.min(room, over);
+        moved.push(md(days[j].k) + ' へ ' + take + '件');
+        over -= take;
+      }
+      tips.push({ lv: 2, t: `<b style="color:#b71c1c">${md(d.k)} に ${d.n}件</b>の山があります（1日にさばけるのは約${cap}件）。`
+        + (moved.length ? `<b> ${moved.join('／')}</b> 前倒しすると平らになります。` : ' 前倒しできる空きが手前にありません。<b>応援を入れるか、当日を早く始めてください。</b>')
+        + `<span class="smd-dim"> ※前倒しは常に安全です（早く着いてもスキャンが早まるだけ）</span>` });
+    });
+    // ② 期限を過ぎている分
+    const today = jstDate(Date.now());
+    const past = Object.keys(cnt).filter(k => k < today).reduce((a, k) => a + cnt[k], 0);
+    if (past) tips.push({ lv: 3, t: `<b style="color:#b71c1c">出す期限を過ぎた分が ${past}件</b>あります。発送遅延あつかいになるので<b>今日いちばんに出してください</b>。` });
+    // ③ 今日ぶんが終わっているなら、明日の前倒しを促す
+    const t0 = cnt[today] || 0;
+    const tomo = days[1] ? days[1].n : 0;
+    if (!t0 && tomo) tips.push({ lv: 0, t: `今日は出す分がありません。<b>明日の ${tomo}件を先に梱包しておく</b>と、明日が楽になります。` });
+    if (!tips.length) return '';
+    const col = { 3: '#b71c1c', 2: '#d93025', 0: '#1a7f37' };
+    return `<div style="margin-top:6px;padding:7px 11px;background:#fffdf5;border:1px solid #f0dfae;border-radius:8px">
+      <b style="font-size:11.5px">💡 やっておくと楽なこと</b>
+      <div style="font-size:11.5px;line-height:1.9;margin-top:2px">
+        ${tips.sort((a, b) => b.lv - a.lv).map(x => `<div style="color:${col[x.lv] || '#5a6b8c'}">・${x.t}</div>`).join('')}
+      </div></div>`;
+  }
   function shipCalendarHtml(undone) {
     const list = (undone || []).filter(r => r.shipBy);
     if (!list.length) return '';
@@ -3949,6 +3988,8 @@
         <span style="font-size:10.5px"><b style="color:#1a7f37">上段＝📦家から出す日</b> ／ <b style="color:#7b52c4">下段＝🏭倉庫でスキャンされる日</b></span>
         <span class="smd-dim" style="font-size:10.5px">出した翌朝に倉庫へ着き、その日にスキャンされます／最下段は<b>いつの注文分か</b>（詳しくはマウスを乗せる）</span>
         ${past ? `<span style="background:#b71c1c;color:#fff;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px">🚨 期限を過ぎた分 ${past}件</span>` : ''}
+        <label style="font-size:10.5px;color:#8a8f98;display:inline-flex;align-items:center;gap:3px" title="1日にさばける件数。山を見つける基準に使います（実績は1日12〜20件）">
+          1日 <input type="number" id="ord-cap" value="${DAY_CAP()}" min="1" max="200" style="width:44px;padding:1px 4px;font-size:11px"> 件まで</label>
         ${offDays.length ? `<span style="margin-left:auto;background:#eef4ff;border:1px solid #d6e4ff;color:#1565c0;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px" title="この曜日は出す分が0件です。他の作業に充てられます">🛌 今週 出さなくていい日：${offDays.join('・')}</span>` : ''}
       </div>
       <div style="font-size:10.5px;color:#5a6b8c;line-height:1.8;margin-bottom:3px">
@@ -3961,6 +4002,7 @@
         </table>
       </div>
       <div style="display:flex;gap:3px">${days.map(cell).join('')}</div>
+      ${calAdviceHtml(days, cnt, key)}
     </div>`;
   }
   function renderShipDeadline() {
@@ -4016,6 +4058,9 @@
           倉庫は<b>日曜だけスキャンしません</b>（土曜も月曜もします）。九州・沖縄・北海道あては、さらに1日早めに。</div>
       </div>
     </div>`;
+    { const ic = el.querySelector('#ord-cap'); if (ic) ic.addEventListener('change', () => {
+        settings.shipCapPerDay = Math.max(1, Number(ic.value) || 20); saveSettings(); renderShipDeadline();
+      }); }
     el.querySelectorAll('.ord-cal-nav').forEach(b2 => b2.addEventListener('click', () => {
       const v = Number(b2.dataset.o);
       state.orders.calOfs = (v === 0) ? 0 : (Number(state.orders.calOfs || 0) + v);
