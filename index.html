@@ -8118,6 +8118,20 @@
     }
     if (d && d.fee > 0 && d.k !== 'mercari') f.push({ t: '＋送料¥' + d.fee.toLocaleString(), c: '#b26a00', d: '送料の目安を加算した実質価格で判定しています（⚙️設定で変更可）' });
     return f; };
+  const srcNrm = t => String(t || '').toLowerCase().replace(/[\s　・:：\-–—_/()（）\[\]【】。、,.]/g, '');
+  // 検索語から「作品を特定する語」を取る（機種名は除く。一番長い語＝サブタイトル等が効く）
+  function srcKwToks(kwRaw) {
+    const toks = String(kwRaw || '').split(/\s+/).filter(t => t && t.length >= 2 && !MACHINE_TOK.test(t)).map(srcNrm).filter(Boolean);
+    return { toks, key: toks.slice().sort((a, b) => b.length - a.length)[0] || '' };
+  }
+  // 候補がハズレっぽい理由を返す（''＝問題なし）。除外はせず、行内の提案から外して比較一覧の下段へ回す。
+  function srcSuspect(d, kt) {
+    const nm = (d && d.name) || '';
+    if (kt && kt.key && srcNrm(nm).indexOf(kt.key) < 0) return '別商品の可能性';
+    if (DEAL_BUNDLE.test(nm)) return 'まとめ売り';
+    if (DEAL_RISK.test(nm)) return 'ジャンク・訳あり';
+    return '';
+  }
   const dealFlags = (nm) => { const f = []; if (DEAL_BUNDLE.test(nm)) f.push({ t: '📦セット', c: '#b26a00', d: '複数本のまとめ売りです。1点だけ欲しい場合は割高になることがあります' });
     if (DEAL_RISK.test(nm)) f.push({ t: '⚠ジャンク', c: '#d93025', d: 'ジャンク・訳あり・動作未確認。そのまま出品すると返品リスクがあります' }); return f; };
   const DEAL_JUNK = /(トレカ|カードダス|サイファ|cipher|ステッカー|シール|同人誌?|チラシ|ポスター|下敷き|特典ペーパー|ペーパー$|説明書のみ|取扱説明書のみ|空箱|ケースのみ|攻略本|ガイドブック|大百科|設定資料|画集|楽譜|サウンドトラック|サントラ|カレンダー|badge|sticker|poster|flyer|doujin)/i;
@@ -8279,9 +8293,12 @@
   //   → メーカー名・色・状態語を落として【作品名＋機種の2〜3語】に短縮したものから先に試す。
   const MAKER_TOK = /^(sega|セガ|nintendo|任天堂|ニンテンドー|sony|ソニー|bandai|バンダイ|capcom|カプコン|konami|コナミ|square|スクウェア|enix|エニックス|namco|ナムコ|taito|タイトー|snk|hori|ホリ|microsoft|マイクロソフト|japan|japanese|official|authentic|genuine|used|new)$/i;
   const STATE_TOK = /^(中古|新品|美品|良品|未使用|動作品|動作確認済|箱付|箱なし|説明書付|ソフトのみ|本体のみ)$/;
+  // 検索には入れないが、書いてあれば「当たり」に近い語（版・色・絵柄など）
+  const BOOST_TOK = /^(絵柄|限定|初回|廉価|ベスト|復刻|海外版|北米版|欧州版|完全版|ホワイト|ブラック|レッド|ブルー|グリーン|イエロー|ゴールド|シルバー|パープル|ピンク|オレンジ|グレー|グレイ|クリア|ネイビー|ベージュ|ブラウン)$/;
+  const srcBoostToks = kwRaw => String(kwRaw || '').split(/\s+/).filter(t => BOOST_TOK.test(t)).map(srcNrm);
   function srcFleaKeyword(kwRaw) {
     const toks = String(kwRaw || '').split(/\s+/).filter(Boolean);
-    const kept = toks.filter(t => !MAKER_TOK.test(t) && !COLOR_TOK.test(t) && !STATE_TOK.test(t) && !GENERIC_TOK.test(t));
+    const kept = toks.filter(t => !MAKER_TOK.test(t) && !BOOST_TOK.test(t) && !STATE_TOK.test(t) && !GENERIC_TOK.test(t) && !/^(19|20)\d{2}$/.test(t));
     if (!kept.length) return '';
     // 作品名（長い語）を優先しつつ機種は1つ残す。全体で3語まで。
     const mach = kept.filter(t => MACHINE_TOK.test(t)).slice(0, 1);
@@ -8381,7 +8398,14 @@
     //   作品名が壊れる。実例：Dragon Ball "Advance Adventure" の Advance が機種語として消えて
     //   「ドラゴンボール アドバンス」になっていた（正しくは アドバンスアドベンチャー）。
     [/\badvance adventure\b/gi, 'アドバンスアドベンチャー'],
-    [/\bdouble dragon\b/gi, 'ダブルドラゴン'], [/\bgolden sun\b/gi, '黄金の太陽'],
+    // ★複合語は【単語より先】に置く。後だと Shining/Pearl が別々に訳されて「Shining パール」になる。
+    [/\bshining pearl\b/gi, 'シャイニングパール'], [/\bbrilliant diamond\b/gi, 'ブリリアントダイヤモンド'],
+    [/\blegends?\s*arceus\b/gi, 'レジェンズアルセウス'], [/\bsword\s*(and|&)?\s*shield\b/gi, 'ソードシールド'],
+    [/\bscarlet\s*(and|&)?\s*violet\b/gi, 'スカーレットバイオレット'], [/\blet'?s go\s*(pikachu|eevee)\b/gi, m => 'レッツゴー' + (/pikachu/i.test(m) ? 'ピカチュウ' : 'イーブイ')],
+    [/\bmystery dungeon\b/gi, '不思議のダンジョン'], [/\bsoul ?silver\b/gi, 'ソウルシルバー'], [/\bheart ?gold\b/gi, 'ハートゴールド'],
+    [/\bomega ruby\b/gi, 'オメガルビー'], [/\balpha sapphire\b/gi, 'アルファサファイア'],
+    [/\bultra (sun|moon)\b/gi, m => 'ウルトラ' + (/sun/i.test(m) ? 'サン' : 'ムーン')],
+    [/\bmario\s*bros\.?\b/gi, 'マリオブラザーズ'], [/\bpicture label\b/gi, '絵柄'], [/\bdouble dragon\b/gi, 'ダブルドラゴン'], [/\bgolden sun\b/gi, '黄金の太陽'],
     // ★ハード・周辺機器（辞書に無いと英語のまま残り、日本の仕入先で1件も出ない）
     [/\bdream ?cast\b/gi, 'ドリームキャスト'], [/\bvisual memory\b/gi, 'ビジュアルメモリ'],
     [/\bexpansion pa[ck]k?\b/gi, '拡張パック'], [/\brumble pa[ck]k?\b/gi, '振動パック'],
@@ -8477,6 +8501,7 @@
     s = s.replace(/\b\d+\s?(gb|mb|tb)\b/gi, ' ').replace(/\b(pack|pak|memory|adapter|working|authentic)\b/gi, ' ');
     s = s.replace(/\b(special|games|class|edition|type|version|main|rpg|all|new|collection|complete|deluxe|premium|standard)\b/gi, ' '); // 版名/ジャンルの英語カス（Special/Main/RPG/All等）を除去してセンスUP
     s = s.replace(/[\/|｜,、，~〜:：#＃]+/g, ' ').replace(/\s+/g, ' ').trim();
+    s = s.replace(/(^|\s)([^\s]+?)[.．]+(?=\s|$)/g, '$1$2');   // 語末のピリオド残り（Mario Bros. → マリオブラザーズ.）
     // ローマ数字→算用数字（IVと4の二重を防ぐ＝この後のdedupで消える）。I/V/X単独は曖昧(Ver/ロックマンX等)なので変換しない
     s = s.replace(/\b(VIII|VII|VI|IX|IV|III|II)\b/g, m => ({ VIII: '8', VII: '7', VI: '6', IX: '9', IV: '4', III: '3', II: '2' })[m]);
     // 重複語を除去（順序維持）
@@ -8522,7 +8547,8 @@
   function dropGenericToks(kw) {
     const toks = String(kw || '').split(/\s+/).filter(Boolean);
     if (!toks.some(isJaContentTok)) return kw;            // 日本語の作品名が無いなら触らない
-    const kept = toks.filter(t => !GENERIC_TOK.test(t)).map(t => t.replace(GENERIC_PREFIX, ''));
+    // メーカー名(SEGA/Nintendo…)と発売年(1983)も、フリマ・中古店の出品者はまず入れない＝検索を外す原因
+    const kept = toks.filter(t => !GENERIC_TOK.test(t) && !MAKER_TOK.test(t) && !/^(19|20)\d{2}$/.test(t)).map(t => t.replace(GENERIC_PREFIX, ''));
     return kept.length ? kept.join(' ') : kw;
   }
   const kwStoreKey = (name, vari) => 'srckw:' + (String(name || '') + '|' + String(vari || '')).slice(0, 140);
@@ -8546,6 +8572,18 @@
     const items = [];
     orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
     await srcLoadListings(items);   // 🎯 上限仕入値の算出に「現在の売値・重量」が要る
+    // ★もう仕入れ・発送が済んだ注文は「仕入れを探す」対象ではない。3つの根拠で外す：
+    //   ①tracking＝SLS伝票発行済＝現物が手元にある ②🚚倉庫へ発送済フラグ ③在庫台帳に紐付いている
+    let srcShipped = new Set(), srcStocked = new Set();
+    try {
+      const [tr, iv] = await Promise.all([
+        sbGetAll('costs', 'select=cc,sn,self_transit_at&self_transit_at=not.is.null').catch(() => []),
+        sbGetAll('inventory', 'select=shopee_sn&shopee_sn=not.is.null').catch(() => []),
+      ]);
+      (tr || []).forEach(r => srcShipped.add(r.cc + ':' + r.sn));
+      (iv || []).forEach(r => { if (r.shopee_sn) srcStocked.add(String(r.shopee_sn).trim()); });
+    } catch (_) {}
+    const srcDoneReason = (o) => (o.tracking ? '伝票発行済' : (srcShipped.has(o.cc + ':' + o.sn) ? '倉庫へ発送済' : (srcStocked.has(o.sn) ? '在庫紐付け済' : '')));
     if (!items.length) {
       host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
       return;
@@ -8559,10 +8597,13 @@
     let disp = items.slice();
     if (sortMode === 'deadline') disp.sort((a, b) => (a.o.ship_by || 9e15) - (b.o.ship_by || 9e15) || tsOf(b.o) - tsOf(a.o));
     else disp.sort((a, b) => tsOf(b.o) - tsOf(a.o));
+    const shippedN = items.filter(x => srcDoneReason(x.o)).length;
+    disp = disp.filter(x => renderSourcing._showShipped || !srcDoneReason(x.o));   // 発送済・仕入れ済は既定で非表示
     if (renderSourcing._hideDone) disp = disp.filter(x => !isDone(x));
     const buyPer = 30, buyPages = Math.max(1, Math.ceil(disp.length / buyPer)), buyPage = Math.min(Math.max(1, renderSourcing._page || 1), buyPages); // 1ページ30点
     host.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 4px 10px">
-        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b style="color:#c0392b">未手配 ${items.length - doneN}</b>・<b style="color:#1a7f37">仕入れ済 ${doneN}</b>）</span>
+        <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b style="color:#c0392b">未手配 ${items.length - doneN - shippedN}</b>・<b style="color:#1a7f37">仕入れ済 ${doneN}</b>${shippedN ? `・<b style="color:#8a8f98">発送済 ${shippedN}（非表示）</b>` : ''}）</span>
+        ${shippedN ? `<label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="伝票発行済・倉庫へ発送済・在庫紐付け済＝もう仕入れる必要のない注文です"><input type="checkbox" id="src-showshipped" ${renderSourcing._showShipped ? 'checked' : ''}>発送済も表示</label>` : ''}
         <span class="smd-seg" id="src-sort" style="font-size:11px"><button data-s="new" class="${sortMode === 'new' ? 'on' : ''}" title="注文が新しい順">🆕新しい順</button><button data-s="deadline" class="${sortMode === 'deadline' ? 'on' : ''}" title="発送期限が近い順＝期限直前を先に仕入れる">⏰期限が近い順</button></span>
         <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="✓仕入れ済にした商品を一覧から隠す（残タスクだけ表示）"><input type="checkbox" id="src-hidedone" ${renderSourcing._hideDone ? 'checked' : ''}>仕入れ済を隠す</label>
         <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="ページを開いた時点で、メルカリ・Yahoo!フリマ等を自動で検索して候補を並べます（購入はしません）"><input type="checkbox" id="src-auto" ${srcAutoOn() ? 'checked' : ''}>🎯 自動で候補を出す</label>
@@ -8583,7 +8624,7 @@
         const dueH = o.ship_by ? Math.floor((o.ship_by - (Date.now() / 1000)) / 3600) : null; // 発送期限まで残り時間
         const dueCell = dueH == null ? '<span class="smd-dim">—</span>' : (dueH < 0 ? `<b style="color:#d93025">超過${-dueH}h</b>` : `<span style="color:${dueH < 24 ? '#e8710a' : '#666'};font-weight:${dueH < 24 ? 700 : 400}">残${dueH}h</span>`);
         return `<tr data-row="${gi}"${done ? ' style="opacity:.5;background:#f4faf5"' : ''}>
-          <td style="text-align:center"><button class="src-done" data-i="${gi}" title="${done ? '仕入れ済を解除' : 'この商品を仕入れ済にする（二重買い防止・一覧から隠せる）'}" style="border:1px solid ${done ? '#1a7f37' : '#cdd3db'};background:${done ? '#1a7f37' : '#fff'};color:${done ? '#fff' : '#888'};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap">${done ? '✓済' : '仕入れ済'}</button>${pick ? `<div class="smd-dim" style="font-size:9px;margin-top:1px" title="${esc(pick.site || '')}で開いた候補の金額です。実際に買ったら上のボタンを押してください">開いた ¥${Number(pick.cost).toLocaleString()}</div>` : ''}</td>
+          <td style="text-align:center"><button class="src-done" data-i="${gi}" title="${done ? 'クリックで「未仕入れ」に戻す' : 'まだ仕入れていません。実際に買ったらクリックして仕入れ済にします（二重買い防止・一覧から隠せる）'}" style="border:1px solid ${done ? '#1a7f37' : '#cdd3db'};background:${done ? '#1a7f37' : '#fff'};color:${done ? '#fff' : '#888'};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap">${done ? '✓ 仕入れ済' : '□ 未仕入れ'}</button>${(done && pick) ? `<div class="smd-dim" style="font-size:9px;margin-top:1px" title="${esc(pick.site || '')}で開いた候補の金額">¥${Number(pick.cost).toLocaleString()}</div>` : ''}</td>
           <td>${img}</td>
           <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
           <td style="white-space:nowrap;font-size:11px">${dueCell}</td>
@@ -8605,6 +8646,7 @@
       renderSourcing(host);
     }));
     { const seg = host.querySelector('#src-sort'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; renderSourcing._sort = b.dataset.s; renderSourcing._page = 1; renderSourcing(host); }); }
+    { const sh = host.querySelector('#src-showshipped'); if (sh) sh.addEventListener('change', () => { renderSourcing._showShipped = sh.checked; renderSourcing._page = 1; renderSourcing(host); }); }
     { const hd = host.querySelector('#src-hidedone'); if (hd) hd.addEventListener('change', () => { renderSourcing._hideDone = hd.checked; renderSourcing._page = 1; renderSourcing(host); }); }
     const kwOf = (i) => encodeURIComponent(((host.querySelector(`.src-kw[data-i="${i}"]`) || {}).value || '').trim().replace(/\s+/g, ' '));
     // 手直しを記憶（編集したらその商品のキーワードとして保存）
