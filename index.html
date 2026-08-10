@@ -3708,7 +3708,7 @@
       + '<span class="smd-dim" style="font-size:10px">発送済</span><br>'
       + '<span style="font-size:11px;font-weight:700;color:' + col + '">🏭' + mdw_(scan) + '</span></span>';   // 家を出た後はスキャン待ちだけ
   }
-  function shipByBadge(shipBy) {
+  function shipByBadge(shipBy, pre) {
     if (!shipBy) return '<span class="smd-dim">-</span>';
     const r0 = { shipBy: shipBy, tab: 300 };
     const send = ordShipDeadline(r0), lsr = ordLsrScan(r0), nfr = ordNfrScan(r0);
@@ -3723,6 +3723,7 @@
     const last = nfr - 86400;                       // 自動キャンセルにしない最終の発送日
     return '<span title="' + tip + '" style="display:inline-block;line-height:1.3">'
       + '<span class="' + cls + '" style="display:inline-block">📦' + mdw_(send) + '</span>'
+      + (pre ? '<br><span style="font-size:9px;color:#7b52c4;font-weight:700" title="予約(pre-order)：発送までの猶予が長い商品です">予約</span>' : '')
       + '<br><span style="font-size:9.5px;color:#8a8f98">' + rest + '</span>'
       + '<br><span style="font-size:9.5px;color:#c0392b">🆘' + mdw_(last) + '</span></span>';
   }
@@ -3818,6 +3819,17 @@
   const noSunday_ = (sec) => (jstDow_(sec) === 0 ? sec - 86400 : sec);           // 日曜はスキャンされない
   const ordLsrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy) : 0;           // 遅延の線＝ship_by そのもの
   const ordNfrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy + NFR_ADD_DAYS * 86400) : 0;   // 自動キャンセルの線
+  // ★orders.pre_order は全件 false で取り込みが壊れている（2026-08-10 実測）。
+  //   代わりに「注文→スキャン期限」の日数で見る。実データは +7日45件 → +8日219件 と
+  //   ここに段差があり、通常発送(2〜4日が65%)とはっきり分かれる。
+  const PREORDER_GAP_DAYS = 8;
+  const ordIsPre = (r) => {
+    if (!r || !r.shipBy) return false;
+    const od = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
+    if (!od) return false;
+    const gap = Math.round((r.shipBy * 1000 - new Date(od + 'T00:00:00+09:00').getTime()) / 86400000);
+    return gap >= PREORDER_GAP_DAYS;
+  };
   const ordShipDeadline = (r) => {                                              // 家から出す期限（遅延を出さない線）
     const scan = ordLsrScan(r);
     return scan ? scan - SCAN_LEAD_DAYS * 86400 : 0;
@@ -3862,27 +3874,39 @@
         moved.push(md(days[j].k) + ' へ ' + take + '件');
         over -= take;
       }
-      tips.push({ lv: 2, t: `<b style="color:#b71c1c">${md(d.k)} に ${d.n}件</b>の山があります（1日にさばけるのは約${cap}件）。`
-        + (moved.length ? `<b> ${moved.join('／')}</b> 前倒しすると平らになります。` : ' 前倒しできる空きが手前にありません。<b>応援を入れるか、当日を早く始めてください。</b>')
-        + `<span class="smd-dim"> ※前倒しは常に安全です（早く着いてもスキャンが早まるだけ）</span>` });
+      tips.push({ lv: 2, t: `<b style="color:#b71c1c">${md(d.k)} に ${d.n}件</b>（1日${cap}件が目安）。`
+        + (moved.length ? `<b>${moved.join('／')}</b> 前倒しすれば平らになります。` : ' 手前に空きがありません。<b>応援を入れるか早く始めてください。</b>') });
     });
     // ② 期限を過ぎている分
     const today = jstDate(Date.now());
     const past = Object.keys(cnt).filter(k => k < today).reduce((a, k) => a + cnt[k], 0);
-    if (past) tips.push({ lv: 3, t: `<b style="color:#b71c1c">出す期限を過ぎた分が ${past}件</b>あります。発送遅延あつかいになるので<b>今日いちばんに出してください</b>。` });
+    // ★「倉庫へ発送済」にしたのに、スキャン期限を過ぎてもtab400にならない分＝倉庫に着いていない/スキャン漏れ。
+    //   カレンダーの対象から外れるので、ここで拾わないと完全に見えなくなる（Shopee側ではLate Shipment）。
+    { let stuck = 0;
+      REGIONS.filter(x => state.enabled.has(x.cc)).forEach(rg2 => {
+        const oc = state.orders.perCountry.get(rg2.cc);
+        (oc && oc.rows || []).forEach(r => {
+          if (r.tab !== 300 || !r.shipBy) return;
+          if (!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn))) return;
+          if (nowSec() > ordLsrScan(r)) stuck++;      // スキャン期限を過ぎてもまだ倉庫に着いていない
+        });
+      });
+      if (stuck) tips.push({ lv: 5, t: `<b style="color:#b71c1c">🚚倉庫へ発送済にした ${stuck}件が、まだスキャンされていません</b>。Shopee側では発送遅延になっています。追跡を確認してください（③倉庫スキャン待ちタブ）。` });
+    }
+    if (past) tips.push({ lv: 3, t: `<b style="color:#b71c1c">期限を過ぎた ${past}件</b>を<b>今日いちばんに</b>出してください。` });
     // ③ 今日ぶんが終わっているなら、明日の前倒しを促す
     const t0 = cnt[today] || 0;
     const tomo = days[1] ? days[1].n : 0;
-    if (!t0 && tomo) tips.push({ lv: 0, t: `今日は出す分がありません。<b>明日の ${tomo}件を先に梱包しておく</b>と、明日が楽になります。` });
+    if (!t0 && tomo) tips.push({ lv: 0, t: `今日は出す分なし。<b>明日の ${tomo}件を先に梱包</b>しておくと楽です。` });
     // ④ ★遅延を出さないのが最優先。今日出す分が残っているなら、それを一番上に置く
-    if (t0) tips.push({ lv: 4, t: `<b style="color:#b71c1c">今日じゅうに ${t0}件</b> 家から出してください。出さないと<b>発送遅延</b>になります（Shopeeの期日は明日）。` });
+    if (t0) tips.push({ lv: 4, t: `<b style="color:#b71c1c">今日じゅうに ${t0}件</b>出す。出さないと発送遅延です。` });
     // ⑤ 明日ぶんも今日出せるなら出しておく（前倒しは常に安全）
     const d1 = days[1];
-    if (d1 && d1.n && (t0 + d1.n) <= cap) tips.push({ lv: 1, t: `明日の ${d1.n}件も、<b>今日いっしょに出しておける余裕があります</b>（今日${t0}件＋明日${d1.n}件＝${t0 + d1.n}件／1日${cap}件まで）。前倒しは常に安全です。` });
+    if (d1 && d1.n && (t0 + d1.n) <= cap) tips.push({ lv: 1, t: `明日の ${d1.n}件も<b>今日いっしょに出せます</b>（計${t0 + d1.n}件／1日${cap}件まで）。` });
     if (!tips.length) return '';
-    const col = { 4: '#b71c1c', 3: '#b71c1c', 2: '#d93025', 1: '#1565c0', 0: '#1a7f37' };
+    const col = { 5: '#b71c1c', 4: '#b71c1c', 3: '#b71c1c', 2: '#d93025', 1: '#1565c0', 0: '#1a7f37' };
     return `<div style="margin-top:6px;padding:7px 11px;background:#fffdf5;border:1px solid #f0dfae;border-radius:8px">
-      <b style="font-size:11.5px">💡 遅延を出さないために</b>
+      <b style="font-size:11.5px">💡 やること</b>
       <div style="font-size:11.5px;line-height:1.9;margin-top:2px">
         ${tips.sort((a, b) => b.lv - a.lv).map(x => `<div style="color:${col[x.lv] || '#5a6b8c'}">・${x.t}</div>`).join('')}
       </div></div>`;
@@ -3896,7 +3920,7 @@
     //   send = 自分の手から離れないといけない日（家を出る日）
     //   scan = Shopee Japan倉庫でスキャンされないといけない日（＝Shopeeのship_by_date）
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
-    const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, ordOf = {}, ordScanOf = {};
+    const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, preCnt = {}, ordOf = {}, ordScanOf = {};
     const odOf = (r) => {                                   // 注文日 M/D(曜)・JST
       const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
       if (!ymd) return '';
@@ -3913,6 +3937,7 @@
       const lastSec = ordNfrScan(r) - 86400;                  // ②
       const late = key(sendSec) < today0;                     // ①をもう過ぎている
       const ks = key(sendSec); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
+      if (ordIsPre(r)) preCnt[ks] = (preCnt[ks] || 0) + 1;      // 予約(pre-order)ぶん
       // ★②も①と同じ全件を数える。同じ注文が「遅延の線」と「自動キャンセルの線」に1回ずつ出るので、
       //   2つのレーンの合計は必ず一致する（片方だけ寄せ直すと数が合わなくなる）。
       const kl = key(lastSec);
@@ -3937,7 +3962,7 @@
     for (let i = 0; i < 14; i++) {
       const d = new Date(Date.now() + 9 * 3600 * 1000 + (i + ofs) * 86400000);
       const k = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
-      days.push({ k, w: d.getUTCDay(), md: (d.getUTCMonth() + 1) + '/' + d.getUTCDate(), n: cnt[k] || 0, sc: scanCnt[k] || 0, nf: nfrCnt[k] || 0, lt: lastCnt[k] || 0, lg: lateCnt[k] || 0, src: srcLabel(ordOf, k), srcSc: srcLabel(ordScanOf, k) });
+      days.push({ k, w: d.getUTCDay(), md: (d.getUTCMonth() + 1) + '/' + d.getUTCDate(), n: cnt[k] || 0, sc: scanCnt[k] || 0, nf: nfrCnt[k] || 0, lt: lastCnt[k] || 0, lg: lateCnt[k] || 0, pre: preCnt[k] || 0, src: srcLabel(ordOf, k), srcSc: srcLabel(ordScanOf, k) });
     }
     const cell = (d) => {
       const isToday = d.k === jstDate(Date.now());
@@ -3950,7 +3975,7 @@
       const md2 = (k2) => { const t2 = new Date(k2 + 'T00:00:00+09:00'); return (t2.getMonth() + 1) + '/' + t2.getDate() + '(' + W[t2.getDay()] + ')'; };
       const nx = (k2, dd) => { const t2 = new Date(k2 + 'T00:00:00+09:00'); t2.setDate(t2.getDate() + dd); return (t2.getMonth() + 1) + '/' + t2.getDate() + '(' + W[t2.getDay()] + ')'; };
       const tip = md2(d.k) + '\n'
-        + (d.n ? '\n📦 この日に家から出す ' + d.n + '件'
+        + (d.n ? '\n📦 この日に家から出す ' + d.n + '件' + (d.pre ? '（うち予約 ' + d.pre + '件）' : '')
                  + '\n　 → ' + nx(d.k, 1) + ' に倉庫でスキャンされます（これで遅延なし）'
                  + (d.src ? '\n　 内訳：' + d.src : '') : '\n📦 この日に出す分はありません')
         + (d.sc ? '\n\n🏭 この日にスキャンされる期限 ' + d.sc + '件'
@@ -3973,14 +3998,14 @@
     const offDays = week.filter(d => d.n === 0).map(d => W[d.w]);
     return `<div style="margin-top:7px;padding-top:7px;border-top:1px dashed #e6d6d3">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
-        <b style="font-size:12px">📆 いつ何件出すか（2週間）</b>
+        <b style="font-size:12.5px">📆 いつ家から出すか</b>
         <span style="display:inline-flex;gap:3px;align-items:center">
           <button class="smd-btn ord-cal-nav" data-o="-7" title="1週間もどる" style="font-size:11px;padding:1px 7px">◀</button>
           <button class="smd-btn ord-cal-nav" data-o="0" title="今日を先頭に戻す" style="font-size:11px;padding:1px 9px;${ofs ? 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700' : ''}">今日</button>
           <button class="smd-btn ord-cal-nav" data-o="7" title="1週間すすむ" style="font-size:11px;padding:1px 7px">▶</button>
         </span>
         ${ofs ? `<span class="smd-dim" style="font-size:10.5px">${ofs > 0 ? '+' + ofs : ofs}日ずらして表示中</span>` : ''}
-        <span class="smd-dim" style="font-size:10.5px">出した翌朝に倉庫へ着き、その日にスキャンされます（詳しくはマウスを乗せる）</span>
+
         ${past ? `<span style="background:#b71c1c;color:#fff;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px">🚨 期限を過ぎた分 ${past}件</span>` : ''}
         <label style="font-size:10.5px;color:#8a8f98;display:inline-flex;align-items:center;gap:3px" title="1日にさばける件数。山を見つける基準に使います（実績は1日12〜20件）">
           1日 <input type="number" id="ord-cap" value="${DAY_CAP()}" min="1" max="200" style="width:44px;padding:1px 4px;font-size:11px"> 件まで</label>
@@ -3988,13 +4013,13 @@
       </div>
       ${(() => {
         const C = days.map(cell);
-        const head = (t, col, tip2) => `<div style="flex:none;width:82px;text-align:right;padding-right:6px;font-size:10.5px;font-weight:700;color:${col};white-space:nowrap" title="${tip2}">${t}</div>`;
+        const head = (t, col, tip2) => `<div style="flex:none;width:64px;text-align:right;padding-right:6px;font-size:10.5px;font-weight:700;color:${col};white-space:nowrap" title="${tip2}">${t}</div>`;
         const row = (h2, render) => `<div style="display:flex;gap:3px;align-items:center">${h2}${C.map(x => `<div class="${x.d.n ? 'ord-calday' : ''}" data-d="${x.d.k}" title="${esc(x.tip)}" style="${x.cellSty}">${render(x)}</div>`).join('')}</div>`;
         return `<div style="display:flex;flex-direction:column;gap:1px">
           ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:9px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:${x.isToday ? '700' : '400'};opacity:${x.isToday ? '1' : '.75'}">${x.isToday ? '今日 ' : ''}${x.d.md}</div>`)}
-          ${row(head('📦 家から出す', '#1a7f37', 'ふだんはこの日までに家から出す。過ぎると発送遅延あつかいになります'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}</div>`)}
-          ${row(head('🆘 出す（最終）', '#c0392b', 'この日までに家から出さないと自動キャンセルになります'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
-          ${row(head('いつの注文', '#b0b6c0', 'その日に出す分が、いつ入った注文か'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.d.n ? esc((Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div>`)}
+          ${row(head('📦 ふつう', '#1a7f37', 'ふだんはこの日までに家から出す。過ぎると発送遅延あつかいになります'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}${x.d.pre ? `<span style="font-size:9px;color:#7b52c4;font-weight:700" title="うち予約(pre-order)が${x.d.pre}件"> 予${x.d.pre}</span>` : ''}</div>`)}
+          ${row(head('🆘 最終', '#c0392b', 'この日までに家から出さないと自動キャンセルになります'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
+          ${row(head('注文日', '#b0b6c0', 'その日に出す分が、いつ入った注文か'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.d.n ? esc((Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div>`)}
         </div>`;
       })()}
       ${calAdviceHtml(days, cnt, key)}
@@ -4024,19 +4049,11 @@
     el.innerHTML = `<div style="margin:6px 0 2px;padding:7px 12px;border-radius:9px;border:1px solid ${ok ? '#bfe6c8' : '#f3c2bb'};background:${ok ? '#f2fbf4' : '#fff7f6'}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <b style="font-size:12.5px;white-space:nowrap;color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '✅ 今日出す分は全部おわりました（外出してOK）' : '📦 今日出す分 ' + todayTotal + '件 残り'}</b>
-        <span style="font-size:10.5px;white-space:nowrap;color:#1a7f37;font-weight:700" title="発送した翌日の朝に倉庫へ着き、その日のうちにスキャンされる前提。だから自宅を出る期限はスキャン期限の前日です">📦 いつ家から出すか</span>
         ${over.length ? chip('over', '🚨 出し遅れ', over, '#b71c1c') : ''}
-        ${chip('d0', '📮 今日 出す', d0, '#d93025')}
-        ${chip('d1', '🕑 明日 出す', d1, '#e8710a')}
-        ${chip('d2', '🗓 明後日 出す', d2, '#1565c0')}
+        ${chip('d0', '今日 出す', d0, '#d93025')}
+        ${chip('d1', '明日 出す', d1, '#e8710a')}
+        ${chip('d2', '明後日 出す', d2, '#1565c0')}
         <span class="smd-dim" style="font-size:10.5px;margin-left:auto;white-space:nowrap" title="伝票を出しただけ＝まだ家にある、は未完了として数えます">※「倉庫へ発送済」にした分だけ完了</span>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:5px;padding-top:5px;border-top:1px dashed #e6d6d3">
-        <span style="font-size:10.5px;white-space:nowrap;color:#7b52c4;font-weight:700" title="Shopeeのship_by_date。ここまでに倉庫でスキャンされないと自動キャンセルの対象">🏭 いつ倉庫でスキャンされるか<span style="font-weight:400;color:#8a8f98">（＝自動キャンセルの線）</span></span>
-        ${sOver.length ? chipS('over', '🛑 スキャン期限ぎれ', sOver, '#b71c1c') : ''}
-        ${chipS('d0', '⏰ 今日 スキャンされる期限', sD0, '#d93025')}
-        ${chipS('d1', '📅 明日 スキャンされる期限', sD1, '#e8710a')}
-        ${acr.length ? `<span class="ord-duechip" data-k="scanover" title="期限を48時間以上過ぎています。Shopee側で自動キャンセルされる恐れがあります。最優先で発送してください" style="cursor:pointer;background:#b71c1c;color:#fff;font-size:11px;font-weight:700;border-radius:14px;padding:2px 9px">🔥 自動キャンセル警戒 <b>${acr.length}</b></span>` : ''}
       </div>
       ${shipCalendarHtml(undone)}
       <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #e6d6d3;font-size:11px;line-height:1.8;color:#5a6b8c">
@@ -4188,8 +4205,8 @@
         `<div class="ord-c-acct">${acctChip(r.shopId)}</div>` +
         `<span class="ord-due">${r.tab === 300
             ? (inTransit ? scanOnlyBadge(r.shipBy)
-               : arranged ? '<span class="smd-dim" style="font-size:10px">手配済</span><br>' + shipByBadge(r.shipBy)
-               : shipByBadge(r.shipBy))
+               : arranged ? '<span class="smd-dim" style="font-size:10px">手配済</span><br>' + shipByBadge(r.shipBy, ordIsPre(r))
+               : shipByBadge(r.shipBy, ordIsPre(r)))
             : /unpaid/i.test(r.status || '') ? '<span style="color:#d93025;font-weight:700">未入金</span>'
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
             : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝出荷期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
