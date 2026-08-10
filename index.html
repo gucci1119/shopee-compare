@@ -86,6 +86,8 @@
   #img-lightbox img { max-width: 94vw; max-height: 94vh; object-fit: contain; border-radius: 8px; box-shadow: 0 10px 50px rgba(0,0,0,.5); }
   #img-lightbox .ilb-close { position: fixed; top: 16px; right: 22px; color: #fff; font-size: 30px; cursor: pointer; line-height: 1; }
   .pf-table td { padding: 8px 8px; border-bottom: 1px solid #f3f3f3; vertical-align: top; overflow: hidden; }
+  /* 合計行を表の上端（ヘッダの下）に貼り付ける。行数が多くても常に見える */
+  .pf-table .pf-total-top td { position: sticky; top: 27px; z-index: 7; background: #f7f9fc; border-bottom: 2px solid #d7dde6; }
   .pf-table .pf-total td { border-top: 2px solid #ddd; font-weight: 700;
     position: sticky; bottom: 0; background: #fff; z-index: 4; }
   .pf-rs { position: absolute; right: 0; top: 0; width: 8px; height: 100%; cursor: col-resize; user-select: none; }
@@ -9645,7 +9647,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const gd = body.querySelector('.al-godead'); if (gd) gd.addEventListener('click', () => { try { stock.dead = true; stock.st = ''; stock.q = ''; } catch (_) {} showPage('stock'); }); }
   }
   // ---------------- 💴 入出金・経費（純利益） ----------------
-  const EXP_CATS = ['人件費', '家賃', 'ツール', '通信費', '外注費', '送料', '梱包資材', 'Shopee手数料', '広告費', '仕入送料', 'その他'];
+  // 大分類ごとに実際の内訳を並べる。既存データのカテゴリ名は残したまま（互換）、選べる幅だけ増やす。
+  const EXP_CAT_GROUPS = [
+    ['人件費', ['人件費（出品）', '人件費（梱包・発送）', '人件費（顧客対応）', '人件費（仕入れ）', '人件費（その他）', '外注費']],
+    ['場所・設備', ['家賃', '倉庫代', '水道光熱費', '備品費', '什器・棚']],
+    ['ツール・通信', ['ツール代（出品）', 'ツール代（分析）', 'ツール代（その他）', '通信費']],
+    ['物流', ['送料', '仕入送料', '梱包資材', '関税・輸入諸費用']],
+    ['販売', ['Shopee手数料', '決済手数料', '広告費', '返金・補償の自己負担']],
+    ['その他', ['交通費', '会議費', '新聞図書費', '支払手数料', '税理士・専門家報酬', 'その他']],
+  ];
+  const EXP_CATS = EXP_CAT_GROUPS.reduce((a2, g) => a2.concat(g[1]), []).concat(['ツール', '外注費']).filter((v, i, a3) => a3.indexOf(v) === i);
   const exp = { ym: null, rows: null };
   const jstYm = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
   const jstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
@@ -9737,7 +9748,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px;border-top:1px solid #e5efe8;padding-top:6px">📈 <b>月ごとの推移・固定費込みの実利益</b>は <button class="smd-btn" id="exp-goplan" style="font-size:10px;padding:1px 7px">事業計画</button> に一本化しています（この表は当月の確定利益）。</div>
     </div>`;
     // 入力フォーム
-    const catOpts = EXP_CATS.map(c => `<option>${c}</option>`).join('');
+    // 既存データにしか無いカテゴリも末尾に残す（過去分が選べなくなると編集できない）
+    const known = new Set(EXP_CATS);
+    const extra = Object.keys(byCat).filter(c => !known.has(c));
+    const catOpts = EXP_CAT_GROUPS.map(g => `<optgroup label="${esc(g[0])}">${g[1].map(c => `<option>${esc(c)}</option>`).join('')}</optgroup>`).join('')
+      + (extra.length ? `<optgroup label="これまでに使った分類">${extra.map(c => `<option>${esc(c)}</option>`).join('')}</optgroup>` : '');
     const form = `<div class="tool-card" style="margin:0 0 12px;max-width:none">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span style="font-weight:700">月:</span>
@@ -9781,7 +9796,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (histMap[ym] = histMap[ym] || {})[c] = (histMap[ym][c] || 0) + (Number(x.amount) || 0); });
     const histYms = Object.keys(histMap).sort().reverse();
     const histCats = [...new Set(histYms.flatMap(y => Object.keys(histMap[y])))];
-    const isFix = c => ['人件費','家賃','地代家賃','倉庫代','倉庫','倉庫代・家賃','倉庫費','保管料','ツール','ツール代','サブスク','固定費','通信費','通信','外注費','外注','オフィス'].includes(c);
+    const isFix = c => /^(人件費|家賃|地代家賃|倉庫代|倉庫|倉庫代・家賃|倉庫費|保管料|ツール|ツール代|サブスク|固定費|通信費|通信|外注費|外注|オフィス|水道光熱費|什器・棚)/.test(String(c || ''));
     const yen0 = n => '¥' + Math.round(n || 0).toLocaleString('en-US');
     const histCard = histYms.length ? `<div class="tool-card" style="margin:0 0 12px">
       <div style="font-weight:700;font-size:14px;margin-bottom:8px">📆 月ごとの経費（過去の遍歴）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">クリックでその月へ切替／<b>青字＝固定費</b></span></div>
@@ -10628,6 +10643,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const tax = { year: null, cfg: null, _cache: null, bound: false };
   // 経費のカテゴリ → 確定申告の勘定科目。未知のカテゴリは「雑費」に寄せる（消えるより良い）
   const TAX_ACCT_DEF = {
+    // 内訳つきカテゴリ（人件費（出品）等）も同じ科目に寄せる。未知は末尾の既定で雑費へ
+    '人件費（出品）': '給料賃金', '人件費（梱包・発送）': '給料賃金', '人件費（顧客対応）': '給料賃金',
+    '人件費（仕入れ）': '給料賃金', '人件費（その他）': '給料賃金',
+    'ツール代（出品）': '通信費', 'ツール代（分析）': '通信費', 'ツール代（その他）': '通信費',
+    '水道光熱費': '水道光熱費', '什器・棚': '消耗品費', '関税・輸入諸費用': '荷造運賃',
+    '決済手数料': '支払手数料', '返金・補償の自己負担': '雑費', '会議費': '接待交際費',
+    '新聞図書費': '新聞図書費', '税理士・専門家報酬': '支払手数料', '支払手数料': '支払手数料',
     '人件費': '給料賃金', '外注費': '外注工賃', '外注': '外注工賃',
     '家賃': '地代家賃', '地代家賃': '地代家賃', '倉庫代': '地代家賃', '倉庫': '地代家賃',
     '倉庫代・家賃': '地代家賃', '倉庫費': '地代家賃', '保管料': '地代家賃', 'オフィス': '地代家賃',
@@ -23812,7 +23834,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       '<tr>' + cols.map(c => {
         const ind = pf.sortKey === c.k ? (pf.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
         return `<th class="pf-th" data-k="${c.k}" draggable="true" style="cursor:pointer" title="クリックでソート / ドラッグで列移動">${c.l}${ind}<span class="pf-rs" data-k="${c.k}"></span></th>`;
-      }).join('') + '</tr>';
+      }).join('') + '</tr><!--PF_TOTAL_SLOT-->';
     let tSales = 0, tDep = 0, tProv = 0, tFix = 0, tCost = 0, tPpl = 0, shown = 0, pairProfit = 0, pairN = 0, pairDep = 0, pairCost = 0, pairFixN = 0, pairProvN = 0, strictSkipN = 0;
     // ★ページ送り：合計は全件で累積し、DOMに出す行だけ現在ページ(100注文)に絞る（旧: 全注文を一括innerHTML＝描画が重い）。絞り込み/並替が変わったらsig不一致で1ページ目へ
     const PER_PF = 100;
@@ -24006,7 +24028,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 🧾 手数料内訳パネルを明細の上に差し込む（公式escrom由来・絞り込み反映）
     html = pfFeePanelHtml(orders) + html;
     // ※ pf.grossTotal はpfRender冒頭でpfMonthGross()から確定済み（絞り込みに依存させない）。ここの pairProfit は表の「合計」行=絞り込み後の表示用。
-    html += '<tr class="pf-total">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr></table></div>' +
+    // 合計行はヘッダ直下（sticky）に差し込む。末尾に置くと100行スクロールしないと見えない。
+    const totalRow = '<tr class="pf-total pf-total-top">' + cols.map(c => `<td>${TOTAL[c.k] ? TOTAL[c.k]() : ''}</td>`).join('') + '</tr>';
+    html = html.replace('<!--PF_TOTAL_SLOT-->', totalRow);
+    html += '</table></div>' +
       '<div style="text-align:center;margin:10px 0 2px">' + pageNav(orders.length, PER_PF, pf.page) + '</div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${pf.strictCost ? `<b style="color:#1565c0">🔒到着済(在庫No)のみ表示中</b>（在庫Noが付いた＝到着し在庫台帳に載った注文だけで粗利計算）。${strictSkipN ? `<b style="color:#c5760a">到着待ち ${strictSkipN}件を粗利から除外中</b>（在庫No未＝実物未着）。` : ''}` : ''}粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。<b>仕入額の優先＝①手入力 ＞ ②📗利益計算表(スプシ)の取込 ＞ ③在庫連携🏷</b>。<b>粗利＝(Shopee入金＋PayPal差分)−仕入</b>（PayPal差分は主にBR・大半0）。仕入額が全く無い注文は空欄。キャンセルはグレー表示。列幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」。</div></div>`;
     body.innerHTML = html;
