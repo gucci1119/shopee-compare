@@ -8136,13 +8136,19 @@
     const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(si));
     return si + '.' + b64u(sig);
   }
+  // ★メルカリのコンディションID（2026-08-11 実測確定）
+  //   1=新品、未使用 / 2=未使用に近い / 3=目立った傷や汚れなし / 4=やや傷や汚れあり
+  //   5=傷や汚れあり / 6=全体的に状態が悪い ← 5,6は再販に向かないので既定で検索から外す
+  const MERC_COND = { 1: '新品', 2: '未使用に近い', 3: '傷汚れなし', 4: 'やや傷汚れ', 5: '傷汚れあり', 6: '状態が悪い' };
+  const srcStrictOn = () => { try { return localStorage.getItem('srcStrict') !== '0'; } catch (_) { return true; } };
+  const srcCondIds = () => srcStrictOn() ? [1, 2, 3, 4] : [];   // 空＝すべて
   async function mercariSearch(keyword) {
     const url = 'https://api.mercari.jp/v2/entities:search';
     const dpop = await mercariDpop(url, 'POST');
-    const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: [], shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
+    const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: srcCondIds(), shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
     const txt = await bridgeRequest('POST', url, JSON.stringify(body), { headers: { 'DPoP': dpop, 'X-Platform': 'web' } });
     let j = {}; try { j = JSON.parse(txt); } catch (_) {}
-    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: 'https://jp.mercari.com/item/' + x.id, cond: '', smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
+    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: 'https://jp.mercari.com/item/' + x.id, cond: MERC_COND[Number(x.itemConditionId)] || '', cid: Number(x.itemConditionId), smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
   }
   // ★メルカリの配送方法ID（2026-08-11に api.mercari.jp/items/get で実測して確定。推測ではない）
   //   14=らくらくメルカリ便 / 17=ゆうゆうメルカリ便（どちらも匿名・追跡あり・1〜2日発送が多い）
@@ -8277,7 +8283,10 @@
     await Promise.all(DEAL_SITES.map(async site => {
       const grab = async (enc, raw) => {
         const items = site.custom ? await site.custom(raw) : site.parse(new DOMParser().parseFromString(await bridgeRequest('GET', site.url(enc)), 'text/html'));
-        return items.filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
+        let out = items.filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
+        // ★普通郵便(定形外・追跡なし)と着払いは仕入れに向かないので既定で外す。「遅い・状態の悪い出品も表示」でOFFにできる
+        if (site.k === 'mercari' && srcStrictOn()) out = out.filter(x => !MERC_SLOW.has(x.smid) && x.spid !== 1);
+        return out;
       };
       try {
         let items = await grab(kwEnc, kwRaw);
@@ -8518,6 +8527,7 @@
         <span class="smd-seg" id="src-sort" style="font-size:11px"><button data-s="new" class="${sortMode === 'new' ? 'on' : ''}" title="注文が新しい順">🆕新しい順</button><button data-s="deadline" class="${sortMode === 'deadline' ? 'on' : ''}" title="発送期限が近い順＝期限直前を先に仕入れる">⏰期限が近い順</button></span>
         <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="✓仕入れ済にした商品を一覧から隠す（残タスクだけ表示）"><input type="checkbox" id="src-hidedone" ${renderSourcing._hideDone ? 'checked' : ''}>仕入れ済を隠す</label>
         <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="ページを開いた時点で、メルカリ・Yahoo!フリマ等を自動で検索して候補を並べます（購入はしません）"><input type="checkbox" id="src-auto" ${srcAutoOn() ? 'checked' : ''}>🎯 自動で候補を出す</label>
+        <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="メルカリの【傷や汚れあり・全体的に状態が悪い】と【普通郵便(定形外＝追跡なし・遅い)・着払い】を候補から外します。外すと候補が少なすぎる時だけチェックを外してください"><input type="checkbox" id="src-strict" ${srcStrictOn() ? 'checked' : ''}>✨ 状態が良く発送が早いものだけ</label>
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="保存済みの結果を使わず、全行を今の在庫・価格で取り直します（少し時間がかかります）">🔄 全行を再取得</button>
         <button id="src-auto-stop" style="background:#fff;color:#666;border:1px solid #cdd3db;border-radius:6px;padding:5px 11px;font-size:11px;cursor:pointer" title="実行中の自動検索を止めます">■ 停止</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
@@ -8620,9 +8630,10 @@
       const nrm = t => String(t || '').toLowerCase().replace(/[\s　・:：\-–—_/()（）\[\]【】。、,.]/g, '');
       const kwToks = kwRaw.split(/\s+/).filter(t => t && t.length >= 2 && !MACHINE_TOK.test(t)).map(nrm).filter(Boolean);
       // ★1語でも欠けたら警告にすると、ほぼ全件に付いて意味を成さなくなる（実画面で確認）。
-      //   「1語も一致しない＝まず別商品」の時だけ出す。
-      const missOf = d => { if (!kwToks.length) return []; const n2 = nrm(d.name);
-        const miss = kwToks.filter(t => n2.indexOf(t) < 0); return miss.length === kwToks.length ? miss : []; };
+      //   逆に「1語も一致しない時だけ」だと、トレカ等（ドラゴンボールは合うが作品名が違う）を素通りさせる。
+      //   → 【一番長い語＝作品を特定する語】が無い時に出す。例:「アドバンスアドベンチャー」が無ければ別商品。
+      const keyTok = kwToks.slice().sort((a, b) => b.length - a.length)[0] || '';
+      const missOf = d => (keyTok && nrm(d.name).indexOf(keyTok) < 0) ? [keyTok] : [];
       const head = !ceil
         ? '<div class="smd-dim" style="font-size:10px;margin-bottom:3px">🎯 上限仕入値は出品データが無いため未算出</div>'
         : ceil.ceil <= 0
@@ -8671,6 +8682,11 @@
       ab.disabled = false; ab.textContent = orig;
     }); }
     { const sb = document.getElementById('src-auto-stop'); if (sb) sb.addEventListener('click', () => { renderSourcing._stop = true; sb.textContent = '停止中…'; }); }
+    { const st = document.getElementById('src-strict'); if (st) st.addEventListener('change', () => {
+      try { localStorage.setItem('srcStrict', st.checked ? '1' : '0'); } catch (_) {}
+      try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals3:')).forEach(k => localStorage.removeItem(k)); } catch (_) {}   // 条件が変わったので保存結果は捨てる
+      renderSourcing._stop = false; renderSourcing(host);
+    }); }
     { const at = document.getElementById('src-auto'); if (at) at.addEventListener('change', () => {
       try { localStorage.setItem('srcAuto', at.checked ? '1' : '0'); } catch (_) {}
       if (at.checked) { renderSourcing._stop = false; autoSuggest(); }
