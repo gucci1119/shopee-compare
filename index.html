@@ -52,6 +52,13 @@
   .pf-table th { text-align: left; color: #888; font-size: 11px; padding: 6px 8px; border-bottom: 1px solid #eee;
     position: sticky; top: 0; z-index: 5; background: #fff; white-space: nowrap; overflow: hidden; }
   .pf-scroll { max-height: calc(100vh - 165px); overflow: auto; }
+  /* 表の上に出す横スクロールバー（中身は高さ1pxのダミー。バーだけを見せる） */
+  .pf-topscroll { overflow-x: auto; overflow-y: hidden; }
+  .pf-topscroll > div { height: 1px; }
+  .pf-topscroll::-webkit-scrollbar { height: 11px; }
+  .pf-topscroll::-webkit-scrollbar-thumb { background: #c3cad6; border-radius: 6px; }
+  .pf-topscroll::-webkit-scrollbar-thumb:hover { background: #a7b1c2; }
+  .pf-topscroll::-webkit-scrollbar-track { background: #f1f3f7; border-radius: 6px; }
   #pf-zoom { position: fixed; z-index: 99999; display: none; pointer-events: none; background: #fff;   /* ★オーバーレイ(カタログ編集z400/注文明細z9999)より前に出す。pointer-events:noneなので操作は邪魔しない */
     padding: 5px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.3); }
   #pf-zoom img { width: min(42vw, 420px); height: min(42vw, 420px); object-fit: contain; display: block; }
@@ -5595,6 +5602,37 @@
     sc.style.maxHeight = Math.max(220, window.innerHeight - top - 16) + 'px';
   }
   const fitStockScroll = () => fitScroll('stock');
+  // ═══ 表の【上にも】横スクロールバーを出す ═══════════════════════════
+  // 横に長い表は下端のバーまで一度スクロールしないと横に動かせない。表の直前に
+  // 同じ幅のダミー領域を置き、双方向で scrollLeft を同期する（表のDOMは触らない）。
+  function wireTopScroll(root) {
+    (root || document).querySelectorAll('.pf-scroll').forEach(sc => {
+      if (sc.dataset.topscroll) return;
+      const tbl = sc.querySelector('table'); if (!tbl) return;
+      sc.dataset.topscroll = '1';
+      const bar = document.createElement('div');
+      bar.className = 'pf-topscroll';
+      bar.innerHTML = '<div></div>';
+      sc.parentNode.insertBefore(bar, sc);
+      const inner = bar.firstElementChild;
+      let lock = false;
+      const sync = () => {
+        const w = tbl.scrollWidth;
+        inner.style.width = w + 'px';
+        bar.style.display = (w > sc.clientWidth + 2) ? 'block' : 'none';   // 横に溢れていない表には出さない
+      };
+      bar.addEventListener('scroll', () => { if (lock) return; lock = true; sc.scrollLeft = bar.scrollLeft; lock = false; });
+      sc.addEventListener('scroll', () => { if (lock) return; lock = true; bar.scrollLeft = sc.scrollLeft; lock = false; });
+      sync();
+      try { new ResizeObserver(sync).observe(tbl); } catch (_) { setTimeout(sync, 400); }
+    });
+  }
+  // 各ページの描画後に自動で拾う（描画箇所が多いので、DOM変化を見て後追いで付ける）
+  try {
+    let tsT = null;
+    new MutationObserver(() => { clearTimeout(tsT); tsT = setTimeout(() => wireTopScroll(), 120); })
+      .observe(document.body, { childList: true, subtree: true });
+  } catch (_) {}
   // ===== 汎用・列カスタム（表示/非表示＋並べ替え＋保存）。描画済みの.pf-tableにかぶせる（テーブル構造は非破壊） =====
   const loadColCfg = (pid) => { try { const c = JSON.parse(localStorage.getItem('colcfg:' + pid) || '{}'); return { hidden: new Set(c.hidden || []), order: c.order || [] }; } catch { return { hidden: new Set(), order: [] }; } };
   const saveColCfg = (pid, cfg) => localStorage.setItem('colcfg:' + pid, JSON.stringify({ hidden: [...cfg.hidden], order: cfg.order }));
@@ -8133,6 +8171,64 @@
     const j = trimmed.join(' ').trim();
     return (j && j.replace(/\s+/g, '') !== String(kwRaw).replace(/\s+/g, '')) ? j : '';
   }
+  // ══ 🎯 仕入れ提案の頭脳 ══════════════════════════════════════════════
+  // 「この注文、いくらまでで仕入れれば目標粗利が残るか」を【売値から逆算】する。
+  //   入金見込み(円) = 出品価格 →(想定値引き)→(Shopee手数料)→(SLS送料)→(固定控除)→(入金為替) ＝ priceProfitFor
+  //   上限仕入値      = 入金見込み − 目標粗利(⚙️ targetGross・既定¥1,200)
+  // ★仕入額は入金見込みに影響しない（手数料は売値側にしか掛からない）ので costJpy=0 で呼んで payoutJpy だけ使う。
+  const srcListingIx = {};       // 'cc|item_id' → listings行（現在価格・重量）
+  const srcListingTried = new Set();   // 取りに行った item_id（消えた出品を毎回引き直さない）
+  async function srcLoadListings(items) {
+    const need = [...new Set(items.map(x => x.it && x.it.item_id).filter(Boolean))].filter(id => !srcListingTried.has(id));
+    need.forEach(id => srcListingTried.add(id));
+    for (let i = 0; i < need.length; i += 80) {
+      const chunk = need.slice(i, i + 80);
+      try {
+        const rows = await sbGetAll('listings', `select=cc,item_id,price_min,models,weight&item_id=in.(${chunk.join(',')})`);
+        rows.forEach(r => { srcListingIx[r.cc + '|' + r.item_id] = r; });
+      } catch (_) { /* 取れなくても検索自体は動く（上限が出ないだけ） */ }
+    }
+  }
+  function srcCeilingFor(o, it) {
+    const L = srcListingIx[o.cc + '|' + (it || {}).item_id];
+    if (!L) return null;
+    let price = 0;
+    if (it.variation && Array.isArray(L.models)) {
+      const v = String(it.variation).trim();
+      const m = L.models.find(x => String(x.n || '').trim() === v) || L.models.find(x => String(x.n || '').trim().toLowerCase() === v.toLowerCase());
+      if (m && m.price) price = Number(m.price);
+    }
+    if (!price) price = Number(L.price_min) || 0;
+    if (!price) return null;
+    const wReal = (Number(L.weight) || 0) * 1000;
+    const weightG = wReal || Number(settings.weightG) || 0;   // 出品に重量が無ければ既定値で代用（SLSが効く国では誤差が大きい）
+    let pf; try { pf = priceProfitFor(o.cc, 0, price, { weightG, dimW: 0, dimH: 0, dimD: 0 }); } catch (_) { return null; }
+    const payout = Number(pf.payoutJpy) || 0;
+    if (payout <= 0) return null;
+    const target = TARGET_GROSS();
+    return { cc: o.cc, cur: (regionByCc(o.cc) || {}).cur || '', price, weightG, wEst: !wReal, payout, target, ceil: Math.round(payout - target), slsJpy: pf.slsJpy, feePct: pf.feePct };
+  }
+  // 候補1件の判定：🟢目標クリア / 🟡黒字だが目標未達 / 🔴赤字
+  function srcJudge(costJpy, ceil) {
+    const profit = ceil.payout - costJpy;
+    const roi = costJpy > 0 ? profit / costJpy * 100 : 0;
+    const lv = costJpy <= ceil.ceil ? 'ok' : (profit > 0 ? 'thin' : 'ng');
+    return { profit: Math.round(profit), roi: Math.round(roi), lv,
+      c: lv === 'ok' ? '#1a7f37' : lv === 'thin' ? '#b26a00' : '#d93025',
+      bg: lv === 'ok' ? '#eafaf0' : lv === 'thin' ? '#fff8e6' : '#fff0f0',
+      icon: lv === 'ok' ? '🟢' : lv === 'thin' ? '🟡' : '🔴' };
+  }
+  // 取得結果のキャッシュ（同じ商品を開くたびに各サイトを叩き直さないため）。既定6時間。
+  const DEAL_TTL_MS = 6 * 3600 * 1000;
+  function dealCacheGet(kw) {
+    try { const j = JSON.parse(localStorage.getItem('srcDeals:' + kw) || 'null');
+      if (j && (Date.now() - j.at) < DEAL_TTL_MS) return j; } catch (_) {}
+    return null;
+  }
+  function dealCacheSet(kw, deals, broadKw) {
+    try { localStorage.setItem('srcDeals:' + kw, JSON.stringify({ at: Date.now(), deals: deals.slice(0, 25), broadKw: broadKw || '' })); }
+    catch (_) { try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals:')).slice(0, 60).forEach(k => localStorage.removeItem(k)); } catch (__) {} }
+  }
   async function srcFetchDeals(kwEnc, onSite) {
     let kwRaw = kwEnc; try { kwRaw = decodeURIComponent(kwEnc); } catch (_) {}
     const kwBroad = broadenKeyword(kwRaw);
@@ -8157,7 +8253,7 @@
     return { deals: results, broadKw: usedBroad.length ? kwBroad : '' };
   }
   // 取得した出品を「サイト横断・安い順の比較一覧」で描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
-  function renderDeals(container, deals, showN, broadKw) {
+  function renderDeals(container, deals, showN, broadKw, ceil) {
     if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした。<b>英語のサブタイトルは日本のサイトに無い</b>ことが多いです（例：Sacred Stones→聖魔の光石）。キーワードを<b>日本語の作品名＋機種</b>に手直しするか、各サイトの検索ボタンで確認を。</span>'; return; }
     // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
     const bySite = {};
@@ -8165,13 +8261,16 @@
     const chips = Object.values(bySite).sort((a, b) => a.price - b.price).map((d, i) =>
       `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:#fff;border:1px solid ${i === 0 ? '#1a7f37' : '#e0e0e0'};border-radius:14px;padding:2px 9px;margin:0 5px 5px 0;font-size:11.5px">${i === 0 ? '🏆' : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span> <b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.cond ? `<span style="color:#888;font-size:9.5px">${esc(d.cond)}</span>` : ''}</a>`).join('');
     const n = showN || 15;
-    const rows = deals.slice(0, n).map((d, i) => `<tr style="${i === 0 ? 'background:#eafaf0' : ''}">
-      <td style="text-align:center;color:#6b7280;font-size:11px">${i + 1}</td>
+    // 🎯 上限仕入値が出せる時は、1件ずつ「この値段で買ったら粗利いくら」を出して 🟢🟡🔴 で色分けする
+    const jg = d => ceil ? srcJudge(d.price, ceil) : null;
+    const rows = deals.slice(0, n).map((d, i) => { const j = jg(d); return `<tr style="${j ? `background:${j.bg}` : (i === 0 ? 'background:#eafaf0' : '')}">
+      <td style="text-align:center;color:#6b7280;font-size:11px">${j ? j.icon : (i + 1)}</td>
       <td><span style="background:${d.bg};color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 6px;white-space:nowrap">${esc(d.site)}</span></td>
       <td style="text-align:right;white-space:nowrap"><b style="color:#c0392b;font-size:13px">¥${d.price.toLocaleString()}</b></td>
+      ${ceil ? `<td style="text-align:right;white-space:nowrap"><b style="color:${j.c};font-size:12px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b><span class="smd-dim" style="font-size:10px"> ROI${j.roi}%</span></td>` : ''}
       <td style="font-size:10.5px;color:#666;white-space:nowrap">${esc(d.cond || '')}</td>
       <td style="font-size:11.5px">${esc(d.name.slice(0, 70))}</td>
-      <td style="white-space:nowrap"><a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#1a7f37;font-weight:700;font-size:11.5px;text-decoration:none">開く→</a></td></tr>`).join('');
+      <td style="white-space:nowrap"><a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#1a7f37;font-weight:700;font-size:11.5px;text-decoration:none">開く→</a></td></tr>`; }).join('');
     const more = deals.length > n ? `<div style="text-align:center;margin-top:6px"><button class="src-deal-more" style="background:none;border:1px solid #ccc;border-radius:5px;color:#7b52c4;font-size:11px;cursor:pointer;padding:3px 10px">▼ もっと見る（残り ${deals.length - n}件）</button></div>` : '';
     // 📦 市場在庫の豊富さ＝今すぐ買える件数（取り寄せ/無在庫の調達しやすさの目安）。別バリエ/類似が混じるので目安
     const cntBySite = {}; deals.forEach(d => { cntBySite[d.site] = (cntBySite[d.site] || 0) + 1; });
@@ -8179,12 +8278,26 @@
     const lvl = total >= 20 ? { t: '豊富', c: '#1a7f37', bg: '#eafaf0' } : total >= 8 ? { t: 'まずまず', c: '#1a7f37', bg: '#f0f9f2' } : total >= 3 ? { t: '少なめ', c: '#b26a00', bg: '#fff8e6' } : { t: '僅少', c: '#d93025', bg: '#fff0f0' };
     const siteBreak = Object.entries(cntBySite).sort((a, b) => b[1] - a[1]).map(([s, c]) => `${esc(s)} ${c}`).join(' / ');
     const abundanceLine = `<div style="font-size:11.5px;background:${lvl.bg};border-radius:6px;padding:5px 9px;margin-bottom:7px">📦 <b>市場在庫: <span style="color:${lvl.c}">${lvl.t}（${total}件が今すぐ買える）</span></b> <span class="smd-dim" style="font-size:10.5px">${siteBreak}　※豊富＝取り寄せ(無在庫)でも安定調達しやすい／少ない＝欠品・仕入れ競争リスク。別バリエ/類似が混じるので件数は目安</span></div>`;
+    // 🎯 上限仕入値の帯：この金額以下で仕入れれば目標粗利が残る＝「買っていいか」を数字で先に出す
+    const best = ceil ? deals.find(d => d.price <= ceil.ceil) : null;
+    const ceilLine = !ceil ? '' : ceil.ceil <= 0 ?
+      `<div style="font-size:12px;background:#fff0f0;border:1px solid #f3c5c5;border-radius:7px;padding:6px 10px;margin-bottom:7px">
+        🔴 <b style="color:#d93025">この売値では仕入れても目標粗利が出ません</b>
+        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()} − 手数料${ceil.feePct}% − SLS¥${ceil.slsJpy.toLocaleString()} ＝ <b>入金見込み ¥${ceil.payout.toLocaleString()}</b>。SLS送料が重い＝<b>重量${ceil.weightG}g</b>を見直すか値上げを）</span>
+      </div>` :
+      `<div style="font-size:12px;background:#f0f6ff;border:1px solid #cfe0ff;border-radius:7px;padding:6px 10px;margin-bottom:7px">
+        🎯 <b>上限仕入値 <span style="color:#1a4fa0;font-size:14px">¥${ceil.ceil.toLocaleString()}</span></b> まで
+        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()} → 手数料${ceil.feePct}%・SLS¥${ceil.slsJpy.toLocaleString()}(${ceil.weightG}g)を引いた<b>入金見込み ¥${ceil.payout.toLocaleString()}</b> − 目標粗利 ¥${ceil.target.toLocaleString()}${ceil.wEst ? '／⚠出品に重量が無いため既定値で計算' : ''}）</span>
+        ${best ? `　<b style="color:#1a7f37">🥇 ${esc(best.site)} ¥${best.price.toLocaleString()}</b> <a href="${esc(best.url)}" target="_blank" rel="noopener" style="color:#fff;background:#1a7f37;border-radius:5px;padding:2px 9px;text-decoration:none;font-weight:700;font-size:11.5px">購入ページを開く→</a>`
+          : `　<b style="color:#d93025">上限内の候補なし</b><span class="smd-dim" style="font-size:10.5px">（最安 ¥${deals[0].price.toLocaleString()}＝目標粗利に ¥${(deals[0].price - ceil.ceil).toLocaleString()} 届かない）</span>`}
+      </div>`;
     container.innerHTML =
       `<div style="font-size:12px;font-weight:700;margin-bottom:5px">💰 サイト横断・安い順で比較（${deals.length}件）<span class="smd-dim" style="font-weight:400;font-size:10.5px">　※開く＝実際の商品ページ。決済ボタンはご自身で（購入は自動化しません）</span></div>` +
+      ceilLine +
       abundanceLine +
       (broadKw ? `<div style="font-size:11px;color:#b26a00;background:#fff8e6;border-radius:5px;padding:4px 8px;margin-bottom:6px">🔎 ヒット0のサイトは「<b>${esc(broadKw)}</b>」に広げて再検索しました（英語サブタイトル等を外し作品名＋機種で。別バリエも混じるので現物を確認してください）。</div>` : '') +
       `<div style="margin-bottom:7px">各サイト最安↓ ${chips}</div>` +
-      `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">#</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th><th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
+      `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">${ceil ? '判定' : '#'}</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th>${ceil ? '<th style="width:104px;text-align:right">見込み粗利</th>' : ''}<th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
     const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20));
   }
   // よく出る英語タイトル → 日本語での検索語（日本の仕入先はJPの方がヒットしやすい）。全一致でなく含めば置換
@@ -8335,6 +8448,7 @@
     catch (e) { host.innerHTML = errBox(e); return; }
     const items = [];
     orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
+    await srcLoadListings(items);   // 🎯 上限仕入値の算出に「現在の売値・重量」が要る
     if (!items.length) {
       host.innerHTML = `<div class="smd-empty">未発送の注文はありません🎉（注文管理で同期すると表示されます）</div>`;
       return;
@@ -8354,9 +8468,11 @@
         <span class="smd-dim" style="font-size:12px">未発送 ${orders.length}件 / 商品 ${items.length}点（<b style="color:#c0392b">未手配 ${items.length - doneN}</b>・<b style="color:#1a7f37">仕入れ済 ${doneN}</b>）</span>
         <span class="smd-seg" id="src-sort" style="font-size:11px"><button data-s="new" class="${sortMode === 'new' ? 'on' : ''}" title="注文が新しい順">🆕新しい順</button><button data-s="deadline" class="${sortMode === 'deadline' ? 'on' : ''}" title="発送期限が近い順＝期限直前を先に仕入れる">⏰期限が近い順</button></span>
         <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="✓仕入れ済にした商品を一覧から隠す（残タスクだけ表示）"><input type="checkbox" id="src-hidedone" ${renderSourcing._hideDone ? 'checked' : ''}>仕入れ済を隠す</label>
-        <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="表示中の全行について、対応サイトから今すぐ買える出品を安い順に取得（購入はしません／上から順に取得するため少し時間がかかります）">🔍 表示中を一括で最安取得</button>
+        <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px" title="ページを開いた時点で、メルカリ・Yahoo!フリマ等を自動で検索して候補を並べます（購入はしません）"><input type="checkbox" id="src-auto" ${srcAutoOn() ? 'checked' : ''}>🎯 自動で候補を出す</label>
+        <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="保存済みの結果を使わず、全行を今の在庫・価格で取り直します（少し時間がかかります）">🔄 全行を再取得</button>
+        <button id="src-auto-stop" style="background:#fff;color:#666;border:1px solid #cdd3db;border-radius:6px;padding:5px 11px;font-size:11px;cursor:pointer" title="実行中の自動検索を止めます">■ 停止</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
-      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 各行の<b style="color:#1a7f37">🔍比較一覧</b>＝<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストから<b>今すぐ買える出品を取得し、サイト横断で安い順の比較一覧</b>を出します。開いて決済ボタンを押すだけ（<b>購入は自動化しません</b>）。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
+      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 <b style="color:#1a7f37">🎯自動で候補を出す</b>＝ページを開くと<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストを<b>まとめて検索</b>し、各行に<b>上限仕入値</b>と<b>安い順の上位3件</b>を出します。<b style="color:#1a7f37">🟢</b>＝この値段なら目標粗利が残る／<b style="color:#b26a00">🟡</b>＝黒字だが目標未達／<b style="color:#d93025">🔴</b>＝赤字。<b>開く→</b>で商品ページへ直行、<b>決済ボタンはご自身で押してください</b>（購入は自動化しません）。結果は6時間保存＝2回目以降は即表示。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1330px"><tr><th>仕入れ</th><th>画像</th><th>国</th><th>期限</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       disp.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
         const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
@@ -8365,17 +8481,19 @@
         const saved = localStorage.getItem(kwStoreKey(it.name, it.variation));
         const kw = saved != null ? saved : sourcingKeyword(it.name, it.variation);
         const done = isDone({ o, ix });
+        const pick = (() => { try { return JSON.parse(localStorage.getItem('srcPick:' + doneKey({ o, ix })) || 'null'); } catch (_) { return null; } })();
         const dueH = o.ship_by ? Math.floor((o.ship_by - (Date.now() / 1000)) / 3600) : null; // 発送期限まで残り時間
         const dueCell = dueH == null ? '<span class="smd-dim">—</span>' : (dueH < 0 ? `<b style="color:#d93025">超過${-dueH}h</b>` : `<span style="color:${dueH < 24 ? '#e8710a' : '#666'};font-weight:${dueH < 24 ? 700 : 400}">残${dueH}h</span>`);
         return `<tr data-row="${gi}"${done ? ' style="opacity:.5;background:#f4faf5"' : ''}>
-          <td style="text-align:center"><button class="src-done" data-i="${gi}" title="${done ? '仕入れ済を解除' : 'この商品を仕入れ済にする（二重買い防止・一覧から隠せる）'}" style="border:1px solid ${done ? '#1a7f37' : '#cdd3db'};background:${done ? '#1a7f37' : '#fff'};color:${done ? '#fff' : '#888'};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap">${done ? '✓済' : '仕入れ済'}</button></td>
+          <td style="text-align:center"><button class="src-done" data-i="${gi}" title="${done ? '仕入れ済を解除' : 'この商品を仕入れ済にする（二重買い防止・一覧から隠せる）'}" style="border:1px solid ${done ? '#1a7f37' : '#cdd3db'};background:${done ? '#1a7f37' : '#fff'};color:${done ? '#fff' : '#888'};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap">${done ? (pick ? `✓¥${Number(pick.cost).toLocaleString()}` : '✓済') : (pick ? `買った ¥${Number(pick.cost).toLocaleString()}` : '仕入れ済')}</button></td>
           <td>${img}</td>
           <td><span class="ord-cc" style="background:${region ? region.color : '#888'}">${esc(o.cc)}</span></td>
           <td style="white-space:nowrap;font-size:11px">${dueCell}</td>
           <td style="font-size:11.5px;max-width:320px;white-space:normal;word-break:break-word;line-height:1.4">${esc(it.name)}${it.variation ? `<br><span class="smd-dim">${esc(it.variation)}</span>` : ''}</td>
           <td><input class="src-kw" data-i="${gi}" value="${esc(kw)}" style="width:340px;max-width:44vw;font-size:12.5px;padding:6px 9px;border:1px solid #ccc;border-radius:5px" title="編集するとこの商品のキーワードとして記憶されます">${saved != null ? '<span title="手直し済み" style="color:#3ecf8e;font-size:11px;margin-left:3px">✎</span>' : ''}</td>
           <td style="min-width:300px">
-            <button class="src-deals-go" data-i="${gi}" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:5px 11px;font-size:11.5px;font-weight:700;cursor:pointer;margin-bottom:5px" title="対応サイトから『今すぐ買える出品』を取得し、サイト横断で安い順に比較一覧を表示します（購入はしません）">🔍 比較一覧</button>
+            <div class="src-sugg" data-i="${gi}" style="margin-bottom:5px;font-size:11.5px"></div>
+            <button class="src-deals-go" data-i="${gi}" style="background:#fff;color:#1a7f37;border:1px solid #1a7f37;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;margin-bottom:5px" title="対応サイトから『今すぐ買える出品』を取得し、サイト横断で安い順に比較一覧を表示します（購入はしません）">🔍 比較一覧</button>
             <div class="src-btns" data-i="${gi}" style="display:flex;flex-wrap:wrap;gap:4px;max-width:360px">${SRC_SITES.map(s => `<button class="src-go" data-site="${s.k}" style="background:${s.bg};color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer">${s.label}</button>`).join('')}<button class="src-all" style="background:#333;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="全サイトを一気に開いて横断比較">全部</button>${it.image ? `<button class="src-lens" style="background:#4285f4;color:#fff;border:none;border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer" title="この商品画像でGoogle画像検索（同一商品を探す）">📷画像</button>` : ''}</div></td>
           <td>${region ? `<a href="https://${region.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" title="Shopeeでこの注文を開く（userscript導入で詳細へ直行／未導入は一覧＋注文番号で検索）">📄</a>` : ''}</td>
         </tr>`;
@@ -8413,7 +8531,7 @@
       window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(imgUrl), '_blank');
     }));
     // 🔍 比較一覧：対応サイトから今すぐ買える出品を取得し、商品行の直下に全幅で比較一覧を表示（購入は一切しない）
-    async function runDeals(i) {
+    async function runDeals(i, force) {
       const itemTr = host.querySelector(`tr[data-row="${i}"]`);
       const btn = host.querySelector(`.src-deals-go[data-i="${i}"]`);
       if (!itemTr) return;
@@ -8428,18 +8546,82 @@
       if (!kw) { cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px">キーワードが空です</span>'; return; }
       if (btn) { btn.disabled = true; btn.textContent = '🔍 取得中…'; }
       cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px"><span class="smd-spin"></span> 各サイトから取得して比較中…</span>';
-      try { const { deals, broadKw } = await srcFetchDeals(kw); renderDeals(cont, deals, undefined, broadKw); }
+      try { const r = await srcDealsFor(i, force); renderDeals(cont, r.deals, undefined, r.broadKw, ceilOf(i)); }
       catch (e) { cont.innerHTML = `<span style="color:#d93025;font-size:11.5px">取得失敗：${esc(e.message || e)}（ブリッジ稼働を確認）</span>`; }
       finally { if (btn) { btn.disabled = false; btn.textContent = '🔍 比較を再取得'; } }
     }
-    host.querySelectorAll('.src-deals-go').forEach(btn => btn.addEventListener('click', () => runDeals(+btn.dataset.i)));
+    // ── 🎯 行内の仕入れ提案：メルカリ/Yahoo!フリマ等を自動で検索し、上限仕入値つきで上位3件を出す
+    //    ＝各サイトを開いて検索し直す手間をなくすのが目的。購入・決済は自動化しない（リンクを開くだけ）。
+    const ceilOf = (i) => { const x = disp[i]; return x ? srcCeilingFor(x.o, x.it) : null; };
+    async function srcDealsFor(i, force) {
+      const kw = kwOf(i); if (!kw) throw new Error('キーワードが空です');
+      if (!force) { const c = dealCacheGet(kw); if (c) return { deals: c.deals, broadKw: c.broadKw, cached: true }; }
+      const { deals, broadKw } = await srcFetchDeals(kw);
+      dealCacheSet(kw, deals, broadKw);
+      return { deals, broadKw };
+    }
+    function drawSugg(i, r, err) {
+      const box = host.querySelector(`.src-sugg[data-i="${i}"]`); if (!box) return;
+      if (err) { box.innerHTML = `<span style="color:#d93025;font-size:10.5px">自動検索できませんでした（${esc(String(err).slice(0, 40))}）</span>`; return; }
+      const ceil = ceilOf(i), deals = (r && r.deals) || [];
+      if (!deals.length) { box.innerHTML = '<span class="smd-dim" style="font-size:10.5px">今すぐ買える出品なし（キーワードを日本語の作品名＋機種に）</span>'; return; }
+      const top = deals.slice(0, 3);
+      const head = !ceil
+        ? '<div class="smd-dim" style="font-size:10px;margin-bottom:3px">🎯 上限仕入値は出品データが無いため未算出</div>'
+        : ceil.ceil <= 0
+          ? `<div style="margin-bottom:3px;color:#d93025;font-size:10.5px">🔴 <b>この売値では赤字</b>（入金見込¥${ceil.payout.toLocaleString()}）</div>`
+          : `<div style="margin-bottom:3px">🎯 <b>上限 ¥${ceil.ceil.toLocaleString()}</b><span class="smd-dim" style="font-size:10px">（入金見込¥${ceil.payout.toLocaleString()}−目標¥${ceil.target.toLocaleString()}）</span></div>`;
+      const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null;
+        return `<a class="src-pick" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:13px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
+          ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
+      box.innerHTML = head + chips + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
+      // 開いた候補を「これを買う」として覚える → ✓仕入れ済にした時に仕入額として記録される
+      box.querySelectorAll('.src-pick').forEach(a => a.addEventListener('click', () => {
+        const x = disp[+a.dataset.i]; if (!x) return;
+        try { localStorage.setItem('srcPick:' + doneKey(x), JSON.stringify({ cost: +a.dataset.cost, site: a.dataset.site, url: a.href, at: Date.now() })); } catch (_) {}
+        const b2 = host.querySelector(`.src-done[data-i="${a.dataset.i}"]`);
+        if (b2 && b2.textContent.indexOf('済') < 0) { b2.textContent = `買った ¥${(+a.dataset.cost).toLocaleString()}`; b2.style.borderColor = '#1a7f37'; b2.style.color = '#1a7f37'; b2.title = `${a.dataset.site} で ¥${(+a.dataset.cost).toLocaleString()}。購入したら押して仕入れ済にします`; }
+      }));
+    }
+    host.querySelectorAll('.src-deals-go').forEach(btn => btn.addEventListener('click', () => runDeals(+btn.dataset.i, true)));
+    // 開いた時点で自動的に候補を集める（同時2件・6時間キャッシュ）。⚙のトグルでOFFにできる。
+    async function autoSuggest() {
+      const boxes = [...host.querySelectorAll('.src-sugg')];
+      const msg = document.getElementById('src-deals-all-msg');
+      boxes.forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px"><span class="smd-spin"></span> 候補を検索中…</span>'; });
+      let done = 0, q = boxes.map(b => +b.dataset.i);
+      const worker = async () => {
+        while (q.length) {
+          if (renderSourcing._stop) return;
+          const i = q.shift();
+          try { drawSugg(i, await srcDealsFor(i)); } catch (e) { drawSugg(i, null, e.message || e); }
+          done++; if (msg) msg.textContent = `自動検索 ${done}/${boxes.length}`;
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      if (msg) msg.textContent = renderSourcing._stop ? '停止しました' : `自動検索 完了（${boxes.length}件）`;
+    }
     { const ab = document.getElementById('src-deals-all'); if (ab) ab.addEventListener('click', async () => {
-      const gos = [...host.querySelectorAll('.src-deals-go')], msg = document.getElementById('src-deals-all-msg');
-      ab.disabled = true; const orig = ab.textContent;
-      for (let i = 0; i < gos.length; i++) { if (msg) msg.textContent = `取得中… ${i + 1}/${gos.length}`; await runDeals(+gos[i].dataset.i); }
-      if (msg) msg.textContent = `完了（${gos.length}件）`; ab.disabled = false; ab.textContent = orig;
+      ab.disabled = true; const orig = ab.textContent; ab.textContent = '🔍 再取得中…';
+      renderSourcing._stop = false;
+      const boxes = [...host.querySelectorAll('.src-sugg')];
+      const msg = document.getElementById('src-deals-all-msg');
+      let done = 0, q = boxes.map(b => +b.dataset.i);
+      const worker = async () => { while (q.length) { if (renderSourcing._stop) return; const i = q.shift();
+        try { drawSugg(i, await srcDealsFor(i, true)); } catch (e) { drawSugg(i, null, e.message || e); }
+        done++; if (msg) msg.textContent = `再取得 ${done}/${boxes.length}`; } };
+      await Promise.all([worker(), worker()]);
+      ab.disabled = false; ab.textContent = orig;
     }); }
+    { const sb = document.getElementById('src-auto-stop'); if (sb) sb.addEventListener('click', () => { renderSourcing._stop = true; sb.textContent = '停止中…'; }); }
+    { const at = document.getElementById('src-auto'); if (at) at.addEventListener('change', () => {
+      try { localStorage.setItem('srcAuto', at.checked ? '1' : '0'); } catch (_) {}
+      if (at.checked) { renderSourcing._stop = false; autoSuggest(); }
+    }); }
+    if (srcAutoOn()) { renderSourcing._stop = false; autoSuggest(); }
+    else host.querySelectorAll('.src-sugg').forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">自動検索OFF（上のチェックでON／🔍比較一覧で個別に取得）</span>'; });
   }
+  const srcAutoOn = () => { try { return localStorage.getItem('srcAuto') !== '0'; } catch (_) { return true; } };
 
   // 配送情報文字列(delivery_info)から到着予定日を推定："2026-07-15" / "7/15" / "7月15日" を拾う（年跨ぎは補正）
   function parseEtaDate(s) {
