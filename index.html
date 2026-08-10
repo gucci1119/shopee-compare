@@ -7207,6 +7207,88 @@
     try { await sbUpsert('app_kv', [{ k: 'plan_cfg', v: plan.cfg, updated_at: new Date().toISOString() }]); if (st) { st.textContent = '✓ 保存（全PC同期）'; st.style.color = '#1a7f37'; } }
     catch (e) { if (st) { st.textContent = '✓ この端末に保存（同期は設定の秘密キーが必要）'; st.style.color = '#888'; } }
   }
+  // 📋 週次報告：当月の「今日まで」の結果・目標・着地予測。数字を作るのに毎回手計算しなくて済むように。
+  const planRepTarget = (cfg, ym) => Object.assign({ sales: '', gross: '', orders: '' }, ((cfg.repTargets || {})[ym] || {}));
+  function planReportHtml(M, M2, cfg) {
+    const now = new Date(Date.now() + 9 * 3600 * 1000);            // JST
+    const ym = now.getUTCFullYear() + '-' + String(now.getUTCMonth() + 1).padStart(2, '0');
+    const dayNow = now.getUTCDate();
+    const dim = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();  // 月の日数
+    const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 };
+    const gross = m.dep - m.cost;                                   // 粗利＝入金(円) − 仕入
+    const t = planRepTarget(cfg, ym);
+    const pace = v => (dayNow > 0 ? v / dayNow * dim : 0);          // 着地予測＝1日あたり×月の日数
+    const yen = v => '¥' + Math.round(v || 0).toLocaleString();
+    const man = v => (Math.round((v || 0) / 1000) / 10).toFixed(1) + '万円';
+    const line = (label, res, tgt, fmt) => {
+      const land = pace(res), has = tgt !== '' && Number(tgt) > 0;
+      const ok = has && land >= Number(tgt);
+      const pct = has ? Math.round(land / Number(tgt) * 100) : null;
+      return `<tr>
+        <td style="font-weight:700">${label}</td>
+        <td style="text-align:right">${has ? fmt(Number(tgt)) : '<span class="smd-dim">未設定</span>'}</td>
+        <td style="text-align:right;font-weight:700">${fmt(res)}</td>
+        <td style="text-align:right;font-weight:700;color:${!has ? '#8a8f98' : ok ? '#1a7f37' : '#c0392b'}">${fmt(land)}</td>
+        <td style="text-align:right">${has ? `<b style="color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '達成ペース' : '未達ペース'}</b> <span class="smd-dim">${pct}%</span>` : '<span class="smd-dim">-</span>'}</td>
+      </tr>`;
+    };
+    // 国別（当月）
+    const ccs = Object.keys(M2[ym] || {}).sort((a2, b2) => (M2[ym][b2].n - M2[ym][a2].n));
+    const ccRows = ccs.map(cc => {
+      const c = M2[ym][cc];
+      return `<tr><td><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${esc(cc)}</b></td>
+        <td style="text-align:right">${c.n}件</td>
+        <td style="text-align:right">${yen(c.dep)}</td>
+        <td style="text-align:right">${yen(c.dep - c.cost)}</td>
+        <td style="text-align:right">${c.gn ? yen((c.dep - c.cost) / c.gn) : '-'}</td></tr>`;
+    }).join('');
+    // Discordにそのまま貼れるテキスト
+    const fmtM = v => man(v), fmtN = v => Math.round(v).toLocaleString() + '件';
+    const tline = (label, res, tgt, fmt) => {
+      const land = pace(res), has = tgt !== '' && Number(tgt) > 0;
+      return label + '：' + (has ? '目標 ' + fmt(Number(tgt)) + ' ／ ' : '') + '結果 ' + fmt(res)
+        + ' ／ 着地予測 ' + fmt(land) + (has ? '（' + (land >= Number(tgt) ? '達成ペース' : '未達ペース') + '）' : '');
+    };
+    const txt = [
+      '【' + ym.replace('-', '年') + '月 進捗】' + ym.slice(5) + '/1〜' + ym.slice(5) + '/' + dayNow + '（' + dayNow + '日経過 / ' + dim + '日）',
+      '※ 経過日数から日割りで月末を予測',
+      tline('売上（入金ベース）', m.dep, t.sales, fmtM),
+      tline('粗利', gross, t.gross, fmtM),
+      tline('注文数', m.n, t.orders, fmtN),
+      '',
+      '国別：' + (ccs.map(cc => cc + ' ' + M2[ym][cc].n + '件/' + man(M2[ym][cc].dep - M2[ym][cc].cost)).join('　') || '-'),
+      '粗利/件：' + (m.gn ? yen(gross / m.gn) : '-'),
+    ].join('\n');
+    return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-color:#c7d7ee;background:#f8fbff">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+        <b style="font-size:15px">📋 今月の進捗（報告用）</b>
+        <span class="smd-dim" style="font-size:11.5px">${ym.slice(5)}/1〜${ym.slice(5)}/${dayNow}　${dayNow}日経過 / ${dim}日</span>
+        <button class="smd-btn" id="plan-rep-copy" style="font-size:11px;padding:3px 11px;margin-left:auto;border-color:#1a73e8;color:#1a73e8">📋 コピー（Discordに貼る）</button>
+      </div>
+      <div class="pagehelp" style="margin:0 0 8px">この画面：<b>今日までの当月の結果</b>と、そのペースで進んだ場合の<b>月末の着地予測</b>です。
+        目標を入れると達成／未達のペース判定が出ます。右上のボタンでそのまま報告に貼れる形をコピーできます。</div>
+      <table class="pf-table" style="width:100%;font-size:12px;margin-bottom:8px"><tr>
+        <th style="width:120px"></th><th style="width:110px;text-align:right">目標（月）</th>
+        <th style="width:120px;text-align:right">結果（今日まで）</th><th style="width:120px;text-align:right">着地予測</th><th style="width:150px;text-align:right">判定</th></tr>
+        ${line('売上（入金）', m.dep, t.sales, man)}
+        ${line('粗利', gross, t.gross, man)}
+        ${line('注文数', m.n, t.orders, v => Math.round(v).toLocaleString() + '件')}
+      </table>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <span class="smd-dim" style="font-size:11px">今月の目標（月あたり）</span>
+        <label style="font-size:11px">売上 <input type="number" class="plan-rep-t" data-f="sales" value="${esc(String(t.sales))}" placeholder="1900000" style="width:100px;padding:2px 5px;font-size:11px"></label>
+        <label style="font-size:11px">粗利 <input type="number" class="plan-rep-t" data-f="gross" value="${esc(String(t.gross))}" placeholder="342000" style="width:100px;padding:2px 5px;font-size:11px"></label>
+        <label style="font-size:11px">注文数 <input type="number" class="plan-rep-t" data-f="orders" value="${esc(String(t.orders))}" placeholder="760" style="width:80px;padding:2px 5px;font-size:11px"></label>
+        <span class="smd-dim" style="font-size:10.5px">※円で入力（190万なら1900000）。月ごとに保存されます</span>
+      </div>
+      <details><summary style="cursor:pointer;font-size:12px;font-weight:700">国別の内訳（当月）</summary>
+        <table class="pf-table" style="width:100%;font-size:11.5px;margin-top:6px"><tr>
+          <th style="width:50px">国</th><th style="text-align:right">注文</th><th style="text-align:right">入金</th><th style="text-align:right">粗利</th><th style="text-align:right">粗利/件</th></tr>
+          ${ccRows || '<tr><td colspan="5" class="smd-dim">まだありません</td></tr>'}
+        </table></details>
+      <textarea id="plan-rep-txt" style="position:absolute;left:-9999px">${esc(txt)}</textarea>
+    </div>`;
+  }
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
     let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv;
@@ -7373,7 +7455,9 @@
     const secBtn = (k, label, sub) => `<button class="plan-sec" data-k="${k}" style="flex:1;min-width:200px;text-align:left;padding:8px 14px;border:1px solid ${planSec === k ? '#1a73e8' : '#e0e4ea'};background:${planSec === k ? '#eaf2fe' : '#fff'};border-radius:9px;cursor:pointer">`
       + `<div style="font-weight:700;font-size:13px;color:${planSec === k ? '#1a73e8' : '#333'}">${label}</div>`
       + `<div class="smd-dim" style="font-size:10.5px;margin-top:2px">${sub}</div></button>`;
-    body.innerHTML =
+    // ★📋 週次報告用：月初〜今日までの結果と着地予測。Discordの報告にそのまま貼れる形にする
+    const repHtml = planReportHtml(M, M2, cfg);
+    body.innerHTML = repHtml +
       `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:0 0 12px">`
       + secBtn('sim', '🎯 これからの計画（シミュレーション）', '目標を決めて、必要な注文数・固定費・達成ペースを逆算する')
       + secBtn('hist', '📊 これまでの実績（履歴）', '月ごとの売上・入金・仕入・経費・実利益を振り返る')
@@ -7518,6 +7602,21 @@
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopeeの預かり金（escrow）を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入値を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
       </div>`);
+    // 📋 報告用：コピー＆目標の保存
+    { const cb = body.querySelector('#plan-rep-copy'); if (cb) cb.addEventListener('click', () => {
+        const ta = body.querySelector('#plan-rep-txt'); if (!ta) return;
+        navigator.clipboard.writeText(ta.value).then(
+          () => { cb.textContent = '✓ コピーしました'; setTimeout(() => { cb.textContent = '📋 コピー（Discordに貼る）'; }, 1800); },
+          () => { ta.style.position = 'static'; ta.style.left = '0'; ta.style.width = '100%'; ta.style.height = '160px'; ta.select(); }
+        );
+      }); }
+    body.querySelectorAll('.plan-rep-t').forEach(el => el.addEventListener('change', async () => {
+      const now = new Date(Date.now() + 9 * 3600 * 1000);
+      const ym = now.getUTCFullYear() + '-' + String(now.getUTCMonth() + 1).padStart(2, '0');
+      cfg.repTargets = cfg.repTargets || {};
+      cfg.repTargets[ym] = Object.assign({}, cfg.repTargets[ym] || {}, { [el.dataset.f]: el.value });
+      await planSave(); renderPlan();
+    }));
     body.querySelectorAll('.plan-sec').forEach(b => b.addEventListener('click', () => {
       try { localStorage.setItem('smdPlanSec', b.dataset.k); } catch (_) {}
       renderPlan();
