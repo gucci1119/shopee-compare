@@ -8105,6 +8105,21 @@
   ];
   // ▼ 実出品の最安取得：各サイトのHTMLをブリッジで取得→パースし「今すぐ買える出品」を安い順に並べる。
   //   ※購入・決済は一切しない（直リンクを出すだけ。クリック→実際の商品ページ→決済はユーザーが押す）。
+  // 単品ではない/そのままでは売れない出品。除外はせず【印を付ける】（まとめ買いが得なこともあるため判断は本人）
+  const DEAL_BUNDLE = /(まとめ売り|まとめ買い|セット売り|[0-9０-９]+\s*(本|枚|点|個)\s*(セット|まとめ)|本セット|枚セット|点セット|詰め合わせ|lot of|bundle)/i;
+  const DEAL_RISK = /(ジャンク|訳あり|わけあり|難あり|部品取り|動作未確認|未確認品|破損|不動|junk|for parts)/i;
+  // メルカリは検索APIから配送方法が取れるので、遅い配送(定形外)・着払いをその場で見分ける
+  const shipFlags = (d) => { const f = [];
+    if (d && d.k === 'mercari') {
+      if (d.spid === 1) f.push({ t: '💸着払い', c: '#d93025', d: '送料が別途かかります（実質価格に加算しています）' });
+      if (MERC_SLOW.has(d.smid)) f.push({ t: '🐌普通郵便', c: '#d93025', d: '定形外など＝追跡なしで到着が遅い。発送期限が近い注文には向きません' });
+      else if (MERC_UNSET.has(d.smid)) f.push({ t: '🚚未定', c: '#b26a00', d: '配送方法が未定（出品者任せ）。遅い方法になることがあります' });
+      else if (MERC_SHIP[d.smid]) f.push({ t: '⚡' + MERC_SHIP[d.smid], c: '#1a7f37', d: '匿名・追跡あり。1〜2日発送が多く到着が早い' });
+    }
+    if (d && d.fee > 0 && d.k !== 'mercari') f.push({ t: '＋送料¥' + d.fee.toLocaleString(), c: '#b26a00', d: '送料の目安を加算した実質価格で判定しています（⚙️設定で変更可）' });
+    return f; };
+  const dealFlags = (nm) => { const f = []; if (DEAL_BUNDLE.test(nm)) f.push({ t: '📦セット', c: '#b26a00', d: '複数本のまとめ売りです。1点だけ欲しい場合は割高になることがあります' });
+    if (DEAL_RISK.test(nm)) f.push({ t: '⚠ジャンク', c: '#d93025', d: 'ジャンク・訳あり・動作未確認。そのまま出品すると返品リスクがあります' }); return f; };
   const DEAL_JUNK = /(トレカ|カードダス|サイファ|cipher|ステッカー|シール|同人誌?|チラシ|ポスター|下敷き|特典ペーパー|ペーパー$|説明書のみ|取扱説明書のみ|空箱|ケースのみ|攻略本|ガイドブック|大百科|設定資料|画集|楽譜|サウンドトラック|サントラ|カレンダー|badge|sticker|poster|flyer|doujin)/i;
   const dealYen = (t) => { const s = String(t || '').replace(/,/g, ''); const m = s.match(/([0-9]{2,7})\s*円/) || s.match(/[¥￥]\s*([0-9]{2,7})/); return m ? parseInt(m[1], 10) : 0; };
   const dealNear = (a, re) => { let n = a; for (let i = 0; i < 7 && n; i++) { n = n.parentElement; if (!n) break; if (re.test(n.textContent || '')) return n; } return null; };
@@ -8127,8 +8142,28 @@
     const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: [], shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
     const txt = await bridgeRequest('POST', url, JSON.stringify(body), { headers: { 'DPoP': dpop, 'X-Platform': 'web' } });
     let j = {}; try { j = JSON.parse(txt); } catch (_) {}
-    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: 'https://jp.mercari.com/item/' + x.id, cond: '' }));
+    return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: 'https://jp.mercari.com/item/' + x.id, cond: '', smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
   }
+  // ★メルカリの配送方法ID（2026-08-11に api.mercari.jp/items/get で実測して確定。推測ではない）
+  //   14=らくらくメルカリ便 / 17=ゆうゆうメルカリ便（どちらも匿名・追跡あり・1〜2日発送が多い）
+  //   9 =郵便（定型・定形外・書留など）＝追跡なしで遅い → 避ける
+  //   1,5=未定（出品者任せ）／ shippingPayerId は 1=着払い(購入者負担) 2=送料込み
+  const MERC_SHIP = { 14: 'らくらく', 17: 'ゆうゆう', 9: '普通郵便', 1: '未定', 5: '未定' };
+  const MERC_SLOW = new Set([9]);          // 定形外など＝遅い・追跡なし
+  const MERC_UNSET = new Set([1, 5]);      // 未定＝出品者任せ
+  // ★仕入先ごとの送料の目安（円）。フリマ・オークションは送料込み出品が基本、EC/中古店は別途かかる。
+  //   「駿河屋は送料で結局高い」を価格比較に反映するため、判定は【送料込みの実質価格】で行う。
+  //   金額はあくまで目安なので ⚙️設定 の srcShipFee で変更できる。
+  const SHIP_FEE_DEFAULT = { mercari: 0, paypay: 0, yahuoku: 0, surugaya: 440, rakuten: 500, yshopping: 500, amazon: 500, secondstreet: 550 };
+  const SHIP_FREE_OVER = { surugaya: 1500 };   // この額以上なら送料無料
+  function shipFeeOf(k, price, d) {
+    if (k === 'mercari' && d && d.spid === 1) return Number((settings.srcShipFee || {}).mercariCod) || 700;  // 着払い＝購入者が送料を払う
+    const t = settings.srcShipFee || {};
+    const f = Number(t[k] != null ? t[k] : SHIP_FEE_DEFAULT[k]) || 0;
+    const over = Number((settings.srcShipFreeOver || SHIP_FREE_OVER)[k]) || 0;
+    return (over && price >= over) ? 0 : f;
+  }
+  const effPriceOf = (d) => (Number(d.price) || 0) + shipFeeOf(d.k || '', Number(d.price) || 0, d);
   // 各サイト：url(kwEnc)+parse(doc) でHTML取得→パース。custom(kwRaw) があればそれで直接取得（メルカリのAPI等）。
   const DEAL_SITES = [
     { k: 'mercari', label: 'メルカリ', bg: '#ff0211', custom: kwRaw => mercariSearch(kwRaw) },
@@ -8225,13 +8260,13 @@
   // 取得結果のキャッシュ（同じ商品を開くたびに各サイトを叩き直さないため）。既定6時間。
   const DEAL_TTL_MS = 6 * 3600 * 1000;
   function dealCacheGet(kw) {
-    try { const j = JSON.parse(localStorage.getItem('srcDeals2:' + kw) || 'null');
+    try { const j = JSON.parse(localStorage.getItem('srcDeals3:' + kw) || 'null');
       if (j && (Date.now() - j.at) < DEAL_TTL_MS) return j; } catch (_) {}
     return null;
   }
   function dealCacheSet(kw, deals, broadKw) {
-    try { localStorage.setItem('srcDeals2:' + kw, JSON.stringify({ at: Date.now(), deals: deals.slice(0, 25), broadKw: broadKw || '' })); }
-    catch (_) { try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals2:')).slice(0, 60).forEach(k => localStorage.removeItem(k)); } catch (__) {} }
+    try { localStorage.setItem('srcDeals3:' + kw, JSON.stringify({ at: Date.now(), deals: deals.slice(0, 25), broadKw: broadKw || '' })); }
+    catch (_) { try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals3:')).slice(0, 60).forEach(k => localStorage.removeItem(k)); } catch (__) {} }
   }
   async function srcFetchDeals(kwEnc, onSite) {
     let kwRaw = kwEnc; try { kwRaw = decodeURIComponent(kwEnc); } catch (_) {}
@@ -8247,13 +8282,16 @@
       try {
         let items = await grab(kwEnc, kwRaw);
         if (!items.length && kwBroadEnc) { items = await grab(kwBroadEnc, kwBroad); if (items.length) usedBroad.push(site.k); } // 0件なら作品名＋機種に広げて再検索
-        items.forEach(x => { x.site = site.label; x.bg = site.bg; });
-        items.sort((a, b) => a.price - b.price);
+        items.forEach(x => { x.site = site.label; x.bg = site.bg; x.k = site.k; x.eff = effPriceOf(x); x.fee = x.eff - x.price; });
+        items.sort((a, b) => a.eff - b.eff);
         results.push(...items);
         if (onSite) onSite(site.k, items.length);
       } catch (e) { if (onSite) onSite(site.k, -1); }
     }));
-    results.sort((a, b) => a.price - b.price);
+    // 並び：①送料込みの実質価格 ②遅い配送(定形外等)・着払いは後ろ ③同額ならフリマ(メルカリ/Yahoo!フリマ)を先に
+    const rank = d => (d.k === 'mercari' || d.k === 'paypay') ? 0 : 1;
+    const slow = d => (d.k === 'mercari' && (MERC_SLOW.has(d.smid) || d.spid === 1)) ? 1 : 0;
+    results.sort((a, b) => (slow(a) - slow(b)) || (a.eff - b.eff) || (rank(a) - rank(b)));
     return { deals: results, broadKw: usedBroad.length ? kwBroad : '' };
   }
   // 取得した出品を「サイト横断・安い順の比較一覧」で描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
@@ -8261,19 +8299,19 @@
     if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした。<b>英語のサブタイトルは日本のサイトに無い</b>ことが多いです（例：Sacred Stones→聖魔の光石）。キーワードを<b>日本語の作品名＋機種</b>に手直しするか、各サイトの検索ボタンで確認を。</span>'; return; }
     // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
     const bySite = {};
-    deals.forEach(d => { if (!bySite[d.site] || d.price < bySite[d.site].price) bySite[d.site] = d; });
+    deals.forEach(d => { const e = d.eff != null ? d.eff : d.price; if (!bySite[d.site] || e < (bySite[d.site].eff != null ? bySite[d.site].eff : bySite[d.site].price)) bySite[d.site] = d; });
     const chips = Object.values(bySite).sort((a, b) => a.price - b.price).map((d, i) =>
       `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:#fff;border:1px solid ${i === 0 ? '#1a7f37' : '#e0e0e0'};border-radius:14px;padding:2px 9px;margin:0 5px 5px 0;font-size:11.5px">${i === 0 ? '🏆' : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span> <b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.cond ? `<span style="color:#888;font-size:9.5px">${esc(d.cond)}</span>` : ''}</a>`).join('');
     const n = showN || 15;
     // 🎯 上限仕入値が出せる時は、1件ずつ「この値段で買ったら粗利いくら」を出して 🟢🟡🔴 で色分けする
-    const jg = d => ceil ? srcJudge(d.price, ceil) : null;
+    const jg = d => ceil ? srcJudge(d.eff != null ? d.eff : d.price, ceil) : null;
     const rows = deals.slice(0, n).map((d, i) => { const j = jg(d); return `<tr style="${j ? `background:${j.bg}` : (i === 0 ? 'background:#eafaf0' : '')}">
       <td style="text-align:center;color:#6b7280;font-size:11px">${j ? j.icon : (i + 1)}</td>
       <td><span style="background:${d.bg};color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 6px;white-space:nowrap">${esc(d.site)}</span></td>
-      <td style="text-align:right;white-space:nowrap"><b style="color:#c0392b;font-size:13px">¥${d.price.toLocaleString()}</b></td>
+      <td style="text-align:right;white-space:nowrap"><b style="color:#c0392b;font-size:13px">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<div class="smd-dim" style="font-size:9.5px" title="送料の目安（⚙️設定で変更可）を足した実質価格">＋送${d.fee.toLocaleString()} = <b>¥${d.eff.toLocaleString()}</b></div>` : ''}</td>
       ${ceil ? `<td style="text-align:right;white-space:nowrap"><b style="color:${j.c};font-size:12px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b><span class="smd-dim" style="font-size:10px"> ROI${j.roi}%</span></td>` : ''}
-      <td style="font-size:10.5px;color:#666;white-space:nowrap">${esc(d.cond || '')}</td>
-      <td style="font-size:11.5px">${esc(d.name.slice(0, 70))}</td>
+      <td style="font-size:10.5px;color:#666;white-space:nowrap">${esc(d.cond || '')}${shipFlags(d).map(f => `<div style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</div>`).join('')}</td>
+      <td style="font-size:11.5px">${dealFlags(d.name).map(f => `<span style="color:${f.c};font-weight:700;font-size:10px;margin-right:4px" title="${esc(f.d)}">${f.t}</span>`).join('')}${esc(d.name.slice(0, 70))}</td>
       <td style="white-space:nowrap"><a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#1a7f37;font-weight:700;font-size:11.5px;text-decoration:none">開く→</a></td></tr>`; }).join('');
     const more = deals.length > n ? `<div style="text-align:center;margin-top:6px"><button class="src-deal-more" style="background:none;border:1px solid #ccc;border-radius:5px;color:#7b52c4;font-size:11px;cursor:pointer;padding:3px 10px">▼ もっと見る（残り ${deals.length - n}件）</button></div>` : '';
     // 📦 市場在庫の豊富さ＝今すぐ買える件数（取り寄せ/無在庫の調達しやすさの目安）。別バリエ/類似が混じるので目安
@@ -8283,7 +8321,7 @@
     const siteBreak = Object.entries(cntBySite).sort((a, b) => b[1] - a[1]).map(([s, c]) => `${esc(s)} ${c}`).join(' / ');
     const abundanceLine = `<div style="font-size:11.5px;background:${lvl.bg};border-radius:6px;padding:5px 9px;margin-bottom:7px">📦 <b>市場在庫: <span style="color:${lvl.c}">${lvl.t}（${total}件が今すぐ買える）</span></b> <span class="smd-dim" style="font-size:10.5px">${siteBreak}　※豊富＝取り寄せ(無在庫)でも安定調達しやすい／少ない＝欠品・仕入れ競争リスク。別バリエ/類似が混じるので件数は目安</span></div>`;
     // 🎯 上限仕入値の帯：この金額以下で仕入れれば目標粗利が残る＝「買っていいか」を数字で先に出す
-    const best = ceil ? deals.find(d => d.price <= ceil.ceil) : null;
+    const best = ceil ? deals.find(d => (d.eff != null ? d.eff : d.price) <= ceil.ceil) : null;
     const ceilLine = !ceil ? '' : ceil.ceil <= 0 ?
       `<div style="font-size:12px;background:#fff0f0;border:1px solid #f3c5c5;border-radius:7px;padding:6px 10px;margin-bottom:7px">
         🔴 <b style="color:#d93025">この売値では仕入れても目標粗利が出ません</b>
@@ -8483,7 +8521,7 @@
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="保存済みの結果を使わず、全行を今の在庫・価格で取り直します（少し時間がかかります）">🔄 全行を再取得</button>
         <button id="src-auto-stop" style="background:#fff;color:#666;border:1px solid #cdd3db;border-radius:6px;padding:5px 11px;font-size:11px;cursor:pointer" title="実行中の自動検索を止めます">■ 停止</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
-      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 <b style="color:#1a7f37">🎯自動で候補を出す</b>＝ページを開くと<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストを<b>まとめて検索</b>し、各行に<b>上限仕入値</b>と<b>安い順の上位3件</b>を出します。<b style="color:#1a7f37">🟢</b>＝この値段なら目標粗利が残る／<b style="color:#b26a00">🟡</b>＝黒字だが目標未達／<b style="color:#d93025">🔴</b>＝赤字。<b>開く→</b>で商品ページへ直行、<b>決済ボタンはご自身で押してください</b>（購入は自動化しません）。結果は6時間保存＝2回目以降は即表示。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
+      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 <b style="color:#1a7f37">🎯自動で候補を出す</b>＝ページを開くと<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストを<b>まとめて検索</b>し、各行に<b>上限仕入値</b>と<b>安い順の上位3件</b>を出します。判定は<b>送料込みの実質価格</b>です（フリマは送料込み・EC/中古店は目安を加算。⚙️で変更可）。メルカリは<b>配送方法まで見て</b>、<b style="color:#d93025">🐌普通郵便（定形外＝追跡なし・遅い）</b>と<b style="color:#d93025">💸着払い</b>を後ろに回します。<b style="color:#1a7f37">🟢</b>＝この値段なら目標粗利が残る／<b style="color:#b26a00">🟡</b>＝黒字だが目標未達／<b style="color:#d93025">🔴</b>＝赤字。<b>開く→</b>で商品ページへ直行、<b>決済ボタンはご自身で押してください</b>（購入は自動化しません）。結果は6時間保存＝2回目以降は即表示。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1330px"><tr><th>仕入れ</th><th>画像</th><th>国</th><th>期限</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       disp.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
         const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
@@ -8581,7 +8619,10 @@
       const kwRaw = (() => { try { return decodeURIComponent(kwOf(i)); } catch (_) { return ''; } })();
       const nrm = t => String(t || '').toLowerCase().replace(/[\s　・:：\-–—_/()（）\[\]【】。、,.]/g, '');
       const kwToks = kwRaw.split(/\s+/).filter(t => t && t.length >= 2 && !MACHINE_TOK.test(t)).map(nrm).filter(Boolean);
-      const missOf = d => { if (!kwToks.length) return []; const n2 = nrm(d.name); return kwToks.filter(t => n2.indexOf(t) < 0); };
+      // ★1語でも欠けたら警告にすると、ほぼ全件に付いて意味を成さなくなる（実画面で確認）。
+      //   「1語も一致しない＝まず別商品」の時だけ出す。
+      const missOf = d => { if (!kwToks.length) return []; const n2 = nrm(d.name);
+        const miss = kwToks.filter(t => n2.indexOf(t) < 0); return miss.length === kwToks.length ? miss : []; };
       const head = !ceil
         ? '<div class="smd-dim" style="font-size:10px;margin-bottom:3px">🎯 上限仕入値は出品データが無いため未算出</div>'
         : ceil.ceil <= 0
@@ -8589,7 +8630,7 @@
           : `<div style="margin-bottom:3px">🎯 <b>上限 ¥${ceil.ceil.toLocaleString()}</b><span class="smd-dim" style="font-size:10px">（入金見込¥${ceil.payout.toLocaleString()}−目標¥${ceil.target.toLocaleString()}）</span></div>`;
       const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null; const miss = missOf(d);
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:13px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
-          ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
+          ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
       box.innerHTML = head + chips + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
       // 開いた候補を「これを買う」として覚える → ✓仕入れ済にした時に仕入額として記録される
       box.querySelectorAll('.src-pick').forEach(a => a.addEventListener('click', () => {
