@@ -8110,6 +8110,10 @@
   const DEAL_RISK = /(ジャンク|訳あり|わけあり|難あり|部品取り|動作未確認|未確認品|破損|不動|junk|for parts)/i;
   // メルカリは検索APIから配送方法が取れるので、遅い配送(定形外)・着払いをその場で見分ける
   const shipFlags = (d) => { const f = [];
+    if (d && d.det) {
+      if (d.det.days != null) f.push({ t: (d.det.days <= 2 ? '⏱' : '🐌') + d.det.durName, c: d.det.days <= 2 ? '#1a7f37' : '#b26a00', d: '出品者が設定した発送までの日数。発送期限が近い注文では短い方を選んでください' });
+      if (d.det.area) f.push({ t: (MERC_FAR.test(d.det.area) ? '📍⚠' : '📍') + d.det.area, c: MERC_FAR.test(d.det.area) ? '#b26a00' : '#8a8f98', d: MERC_FAR.test(d.det.area) ? '北海道・九州・沖縄からは到着が1日多くかかります' : '発送元の地域' });
+    }
     if (d && d.k === 'mercari') {
       if (d.spid === 1) f.push({ t: '💸着払い', c: '#d93025', d: '送料が別途かかります（実質価格に加算しています）' });
       if (MERC_SLOW.has(d.smid)) f.push({ t: '🐌普通郵便', c: '#d93025', d: '定形外など＝追跡なしで到着が遅い。発送期限が近い注文には向きません' });
@@ -8150,6 +8154,25 @@
     const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(si));
     return si + '.' + b64u(sig);
   }
+  // ── メルカリ商品の詳細（発送までの日数・発送元地域）。検索APIには無く items/get にだけある。
+  //    ★呼びすぎるとレート制限に当たる（無間隔で5件叩いて失敗を確認）。本命候補だけ・順番に取る。
+  const MERC_FAR = /(北海道|沖縄|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島)/;   // 東京より1日多くかかる（仕入れ到着の実績と同じ基準）
+  const mercDetailCache = new Map();
+  async function mercDetail(itemId) {
+    if (!itemId) return null;
+    if (mercDetailCache.has(itemId)) return mercDetailCache.get(itemId);
+    let out = null;
+    try {
+      const url = 'https://api.mercari.jp/items/get?id=' + encodeURIComponent(itemId);
+      const txt = await bridgeRequest('GET', url, null, { headers: { 'DPoP': await mercariDpop(url, 'GET'), 'X-Platform': 'web' } });
+      const d = (JSON.parse(txt) || {}).data || {};
+      const sd = d.shipping_duration || {}, fa = d.shipping_from_area || {};
+      out = { days: sd.max_days != null ? Number(sd.max_days) : null, durName: sd.name || '', area: fa.name || '' };
+    } catch (_) { out = null; }
+    mercDetailCache.set(itemId, out);
+    return out;
+  }
+  const mercIdOf = (url) => { const m = String(url || '').match(/\/item\/([A-Za-z0-9]+)/); return m ? m[1] : ''; };
   // ★メルカリのコンディションID（2026-08-11 実測確定）
   //   1=新品、未使用 / 2=未使用に近い / 3=目立った傷や汚れなし / 4=やや傷や汚れあり
   //   5=傷や汚れあり / 6=全体的に状態が悪い ← 5,6は再販に向かないので既定で検索から外す
@@ -8336,7 +8359,7 @@
     }));
     // 並び：①送料込みの実質価格 ②遅い配送(定形外等)・着払いは後ろ ③同額ならフリマ(メルカリ/Yahoo!フリマ)を先に
     const rank = d => (d.k === 'mercari' || d.k === 'paypay') ? 0 : 1;
-    const slow = d => (d.k === 'mercari' && (MERC_SLOW.has(d.smid) || d.spid === 1)) ? 1 : 0;
+    const slow = d => (d.k === 'mercari' && (MERC_SLOW.has(d.smid) || d.spid === 1 || (d.det && d.det.days > 3))) ? 1 : 0;
     results.sort((a, b) => (slow(a) - slow(b)) || (a.eff - b.eff) || (rank(a) - rank(b)));
     return { deals: results, broadKw: usedBroad.length ? kwBroad : '', fleaKw: usedFlea.length ? srcFleaKeyword(kwRaw) : '' };
   }
@@ -8689,7 +8712,14 @@
       if (!kw) { cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px">キーワードが空です</span>'; return; }
       if (btn) { btn.disabled = true; btn.textContent = '🔍 取得中…'; }
       cont.innerHTML = '<span class="smd-dim" style="font-size:11.5px"><span class="smd-spin"></span> 各サイトから取得して比較中…</span>';
-      try { const r = await srcDealsFor(i, force); let kwR = ''; try { kwR = decodeURIComponent(kwOf(i)); } catch (_) {} renderDeals(cont, r.deals, undefined, r.broadKw, ceilOf(i), kwR); }
+      try { const r = await srcDealsFor(i, force); let kwR = ''; try { kwR = decodeURIComponent(kwOf(i)); } catch (_) {} renderDeals(cont, r.deals, undefined, r.broadKw, ceilOf(i), kwR);
+        // 表示中のメルカリ候補（上位5件）の発送までの日数・発送元を順に足す。呼びすぎるとレート制限に当たるので直列。
+        (async () => {
+          const targets = r.deals.filter(d => d.k === 'mercari' && !d.det).slice(0, 5);
+          for (const d of targets) { const det = await mercDetail(mercIdOf(d.url)); if (det) d.det = det; }
+          if (targets.length && cont.isConnected) renderDeals(cont, r.deals, undefined, r.broadKw, ceilOf(i), kwR);
+        })();
+      }
       catch (e) { cont.innerHTML = `<span style="color:#d93025;font-size:11.5px">取得失敗：${esc(e.message || e)}（ブリッジ稼働を確認）</span>`; }
       finally { if (btn) { btn.disabled = false; btn.textContent = '🔍 比較を再取得'; } }
     }
@@ -8724,6 +8754,12 @@
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:13px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
           ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
       box.innerHTML = head + chips + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
+      // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
+      (async () => {
+        const d0 = top[0]; if (!d0 || d0.k !== 'mercari' || d0.det) return;
+        const det = await mercDetail(mercIdOf(d0.url)); if (!det || !box.isConnected) return;
+        d0.det = det; drawSugg(i, r);
+      })();
       // 開いた候補を「これを買う」として覚える → ✓仕入れ済にした時に仕入額として記録される
       box.querySelectorAll('.src-pick').forEach(a => a.addEventListener('click', () => {
         const x = disp[+a.dataset.i]; if (!x) return;
