@@ -3815,10 +3815,45 @@
   //   家から出すのはその前日。翌朝に倉庫へ着いて、その日のうちにスキャンされるため。
   const SCAN_LEAD_DAYS = 1;
   const NFR_ADD_DAYS = 2;                        // 自動キャンセルはスキャン期限の+2暦日
+  // ★お盆・年末年始・祝日は倉庫も配送も動きが鈍る。Shopeeも期日を後ろ倒しにしてくる。
+  //   実測（2026-08）：8/14〜8/17 の期日がほぼ空で、盆明けの 8/18(火) に61件が集中していた。
+  //   カレンダーに出しておかないと「なぜこの日に山ができるのか」が分からない。
+  //   祝日は手で持たない（毎年変わるし、国民の休日のような臨時のものを取りこぼす。
+  //   実際、手書きしたら 2026-09-22「国民の休日」が抜けていた）。
+  //   holidays-jp（内閣府CSVが出どころ）から取って localStorage に置く。取れなければ空でも動く。
+  //   お盆・年末年始は法定休日ではないので、こちらだけ固定で持つ。
+  const JP_CLOSED = {
+    '08-13': 'お盆', '08-14': 'お盆', '08-15': 'お盆', '08-16': 'お盆',
+    '12-29': '年末', '12-30': '年末', '12-31': '年末', '01-01': '年始', '01-02': '年始', '01-03': '年始',
+  };
+  const JP_HOLIDAYS = (() => {
+    try { return JSON.parse(localStorage.getItem('smdJpHolidays') || '{}'); } catch (_) { return {}; }
+  })();
+  const jpHolidayOf = (k) => JP_HOLIDAYS[k] || JP_CLOSED[String(k).slice(5)] || '';
+  async function loadJpHolidays() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('smdJpHolidaysMeta') || '{}');
+      if (saved.at && Date.now() - saved.at < 30 * 86400000) return;      // 30日に1回でよい
+      const y = new Date().getFullYear();
+      const out = {};
+      for (const yy of [y, y + 1]) {
+        const r = await fetch('https://holidays-jp.github.io/api/v1/' + yy + '/date.json');
+        if (!r.ok) continue;
+        Object.assign(out, await r.json());
+      }
+      if (Object.keys(out).length) {
+        localStorage.setItem('smdJpHolidays', JSON.stringify(out));
+        localStorage.setItem('smdJpHolidaysMeta', JSON.stringify({ at: Date.now(), n: Object.keys(out).length }));
+        Object.assign(JP_HOLIDAYS, out);
+      }
+    } catch (_) { /* 取れなくても表示が寂しくなるだけ */ }
+  }
   const jstDow_ = (sec) => new Date(sec * 1000 + 9 * 3600 * 1000).getUTCDay();   // 0=日
-  const noSunday_ = (sec) => (jstDow_(sec) === 0 ? sec - 86400 : sec);           // 日曜はスキャンされない
-  const ordLsrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy) : 0;           // 遅延の線＝ship_by そのもの
-  const ordNfrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy + NFR_ADD_DAYS * 86400) : 0;   // 自動キャンセルの線
+  // ★こちらで営業日を計算しない。Shopeeが返す ship_by_date が一次情報で、
+  //   祝日・お盆・日曜はShopee側で既に織り込まれている（実測：ship_by が日曜なのは3,356件中11件だけ）。
+  //   自前で補正すると、Shopeeの判断と食い違って逆に間違える。
+  const ordLsrScan = (r) => (r && r.shipBy) ? r.shipBy : 0;                                     // 遅延の線＝ship_by そのもの
+  const ordNfrScan = (r) => (r && r.shipBy) ? r.shipBy + NFR_ADD_DAYS * 86400 : 0;              // 自動キャンセルの線
   // ★pre-order の判別は現状できない。
   //   orders.pre_order は全件 false（取り込みが壊れている）。
   //   猶予日数で代用しようとしたが、実データを1件ずつ見ると
@@ -3982,7 +4017,7 @@
         + (d.nf ? '\n\n🛑 この日に自動キャンセルされる ' + d.nf + '件' : '')
         + (d.n ? '\n\nクリックでこの分だけ一覧に表示' : '');
       // 選択中は黄色。青にすると土曜の色と見分けが付かない
-      const bg = isSel ? '#fff8d6' : isToday ? '#fff3ec' : isPast ? '#fff7f6' : (d.w === 0 ? '#fffafa' : d.w === 6 ? '#fafcff' : '#fff');
+      const bg = isSel ? '#fff8d6' : isToday ? '#fff3ec' : isPast ? '#fff7f6' : (jpHolidayOf(d.k) ? '#fdf3f2' : d.w === 0 ? '#fffafa' : d.w === 6 ? '#fafcff' : '#fff');
       const cellSty = 'flex:1;min-width:38px;text-align:center;padding:2px 1px;' + (d.n ? 'cursor:pointer;' : '')
 
         + 'background:' + bg + ';border-radius:6px';
@@ -4013,7 +4048,7 @@
         const head = (t, col, tip2) => `<div style="flex:none;width:64px;text-align:right;padding-right:6px;font-size:10.5px;font-weight:700;color:${col};white-space:nowrap" title="${tip2}">${t}</div>`;
         const row = (h2, render) => `<div style="display:flex;gap:3px;align-items:center">${h2}${C.map(x => `<div class="${x.d.n ? 'ord-calday' : ''}" data-d="${x.d.k}" title="${esc(x.tip)}" style="${x.cellSty}">${render(x)}</div>`).join('')}</div>`;
         return `<div style="display:flex;flex-direction:column;gap:1px">
-          ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:9px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:${x.isToday ? '700' : '400'};opacity:${x.isToday ? '1' : '.75'}">${x.isToday ? '今日 ' : ''}${x.d.md}</div>`)}
+          ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:9px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:${x.isToday ? '700' : '400'};opacity:${x.isToday ? '1' : '.75'}">${x.isToday ? '今日 ' : ''}${x.d.md}</div>${jpHolidayOf(x.d.k) ? `<div style="font-size:8px;color:#c0392b;font-weight:700;line-height:1.2">${jpHolidayOf(x.d.k)}</div>` : '<div style="height:10px"></div>'}`)}
           ${row(head('📦 ふつう', '#1a7f37', 'ふだんはこの日までに家から出す。過ぎると発送遅延あつかいになります'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}${x.d.pre ? `<span style="font-size:9px;color:#7b52c4;font-weight:700" title="うち予約(pre-order)が${x.d.pre}件"> 予${x.d.pre}</span>` : ''}</div>`)}
           ${row(head('🆘 最終', '#c0392b', 'この日までに家から出さないと自動キャンセルになります'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
           ${row(head('注文日', '#b0b6c0', 'その日に出す分が、いつ入った注文か'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.d.n ? esc((Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div>`)}
@@ -24557,6 +24592,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★まとめて編集はブラウザ側でチャンクを回すので、タブを閉じると止まる。
     //   止まったまま放置されているものを拾って続きから走らせる（10秒後＝他の初期化とぶつけない）。
     setTimeout(() => { bkResumeStalled().catch(() => {}); }, 10000);
+    loadJpHolidays();           // 祝日（内閣府CSV由来）。30日に1回だけ取り直す
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
