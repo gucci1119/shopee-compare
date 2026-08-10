@@ -3834,17 +3834,19 @@
     };
     const key = (sec) => { const d = new Date(sec * 1000 + 9 * 3600 * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); };
     const today = jstDate(Date.now());
+    // ★ship_by は秒まで入るので、同じ日でも時刻が違うと別グループになってしまう。
+    //   見たいのは「日付のかたまり」なので、JSTの日付でまとめる。
     const g = new Map();
     list.forEach(r => {
       if (!r.shipBy) return;
-      const k = r.shipBy;
+      const k = key(r.shipBy);
       let e = g.get(k);
-      if (!e) { e = { sb: k, lsr: ordLsrScan(r), nfr: ordNfrScan(r), send: ordShipDeadline(r), n: 0, ords: {} }; g.set(k, e); }
+      if (!e) { e = { sb: r.shipBy, lsr: ordLsrScan(r), nfr: ordNfrScan(r), send: ordShipDeadline(r), n: 0, ords: {} }; g.set(k, e); }
       e.n++;
       const od = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
       if (od) e.ords[od] = (e.ords[od] || 0) + 1;
     });
-    const rows = [...g.values()].sort((a, b) => a.sb - b.sb);
+    const rows = [...g.values()].sort((a, b) => a.sb - b.sb);   // 期日の早い順
     const odCell = (o) => Object.entries(o).sort((a, b) => a[0].localeCompare(b[0]))
       .map(([d, n]) => { const dd = new Date(d + 'T00:00:00+09:00'); return md(dd.getTime() / 1000) + (Object.keys(o).length > 1 ? ' ' + n + '件' : ''); }).join('・') || '—';
     return `<div style="margin-top:7px;padding-top:7px;border-top:1px dashed #e6d6d3">
@@ -3855,7 +3857,7 @@
           const late = key(e.send) < today, todayIs = key(e.send) === today;
           const nfrOver = nowSec() > e.nfr;
           return `<tr style="${nfrOver ? 'background:#fdecea' : late ? 'background:#fff7f6' : todayIs ? 'background:#fffbe9' : ''}">
-            <td style="font-size:11px">${esc(odCell(e.ords))}</td>
+            <td style="font-size:11px">${odCell(e.ords)}</td>
             <td class="smd-dim" style="font-size:11px">${md(e.sb)}</td>
             <td style="font-weight:700">${md(e.send)}${late ? '<span style="color:#c0392b"> ⚠</span>' : todayIs ? '<span style="color:#d93025"> ●</span>' : ''}</td>
             <td>${md(e.lsr)}</td>
@@ -3877,7 +3879,12 @@
     //   scan = Shopee Japan倉庫でスキャンされないといけない日（＝Shopeeのship_by_date）
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
     const cnt = {}, scanCnt = {}, ordOf = {}, ordScanOf = {};
-    const odOf = (r) => (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(5).replace('-', '/');   // 注文日 M/D(JST)
+    const odOf = (r) => {                                   // 注文日 M/D(曜)・JST
+      const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
+      if (!ymd) return '';
+      const d = new Date(ymd + 'T00:00:00+09:00');
+      return (d.getMonth() + 1) + '/' + String(d.getDate()).padStart(2, '0') + '(' + W[d.getDay()] + ')';
+    };
     const push = (m, k, v) => { if (!v) return; (m[k] = m[k] || {})[v] = (m[k][v] || 0) + 1; };
     list.forEach(r => {
       const ks = key(ordShipDeadline(r)); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
