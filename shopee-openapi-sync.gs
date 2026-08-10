@@ -2205,8 +2205,13 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   var detailsAll = [];   // 注文詳細（購入者情報の保存に使う）
   // 追跡番号の取得は「毎時ぶん回す」と空振りで枠を食う（発送済でも越境SLSはAPIに番号が来ないことが多い）。
   // → doTrk（syncOrdersAllが6時間ゲートで決定 / ⚡今すぐ取得はforce）＝取得する回だけ、かつ 6日以内の新しい注文に限り、店ごと上限で。
-  var TRK_CAP = force ? 200 : 40, trkGot = 0;
-  var trkFresh_ = function (o) { return !!o.create_time && (now_() - o.create_time) <= 6 * 86400; };
+  var TRK_CAP = force ? 300 : 60, trkGot = 0;
+  // ★以前は「注文から6日以内」だけ追跡番号を引いていた。
+  //   BRは越境で発送手配が遅く、6日を過ぎてから arrange shipment する注文が多いため、
+  //   その分は【永久に番号が入らない】状態だった（2026-08-11実測：8月の発送済105件中29件が追跡なし・全てBR）。
+  //   対象は TRACK_STATUSES（手配済以降）かつ番号未取得の注文だけなので、窓を広げてもコールは有限。
+  //   毎時トリガーが CAP の範囲で少しずつ埋める。
+  var trkFresh_ = function (o) { return !!o.create_time && (now_() - o.create_time) <= 45 * 86400; };
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var tz = CC_TZ[cc] != null ? CC_TZ[cc] : 8;
   var to = now_(), from = to - (daysWindow > 0 ? daysWindow : 15) * 86400, sns = [], cursor = ''; // on-demand(⚡今すぐ取得/まとめて更新)は短窓で高速化。毎時トリガーは15日で状態変化も拾う
