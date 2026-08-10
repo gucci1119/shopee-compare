@@ -8154,7 +8154,8 @@
   //   実例(戦国BASARA4)：¥300の上位が コースター／ヒーローズガイド／ゲームミュージックCD で埋まっていた。
   const DEAL_JUNK = /(トレカ|カードダス|サイファ|cipher|ステッカー|シール|同人誌?|チラシ|ポスター|下敷き|特典ペーパー|ペーパー$|説明書のみ|取扱説明書のみ|空箱|ケースのみ|ディスクのみ|ソフトのみ|カセットのみ|本体のみ(?!.*(本体|console))|盤面のみ|ディスク単品|ソフト単品|ケース無し|ケースなし|箱無し|箱なし|ジャケットなし|ジャケなし|攻略本|ガイドブック|探求の書|究極本|公式ガイド|ファンブック|パーフェクトガイド|コンプリートガイド|Vジャンプブックス|ぶんか社|ムック|全書|大全|ガイド[-－―\s]*$|ヒーローズガイド|公式ガイド|大百科|設定資料|画集|楽譜|サウンドトラック|サントラ|ミュージックcd|音楽cd|ドラマcd|コースター|クリアファイル|キーホルダー|缶バッジ|缶バッチ|タペストリー|色紙|フィギュア|ぬいぐるみ|アクリルスタンド|アクスタ|マグカップ|タオル|Tシャツ|ラバスト|ラバーストラップ|ピンズ|カレンダー|badge|sticker|poster|flyer|doujin|figure|keychain|coaster)/i;
   const dealYen = (t) => { const s = String(t || '').replace(/,/g, ''); const m = s.match(/([0-9]{2,7})\s*円/) || s.match(/[¥￥]\s*([0-9]{2,7})/); return m ? parseInt(m[1], 10) : 0; };
-  const dealNear = (a, re) => { let n = a; for (let i = 0; i < 7 && n; i++) { n = n.parentElement; if (!n) break; if (re.test(n.textContent || '')) return n; } return null; };
+  // ★祖先を7段も辿ると textContent の生成が重く、商品数×段数で効いてUIが固まる。3段までにする。
+  const dealNear = (a, re) => { let n = a; for (let i = 0; i < 3 && n; i++) { n = n.parentElement; if (!n) break; if (re.test(n.textContent || '')) return n; } return null; };
   const dealName = (a) => { if (!a) return ''; let t = (a.textContent || '').trim(); if (t.length > 3) return t; const img = a.querySelector && a.querySelector('img'); if (img && img.alt && img.alt.length > 3) return img.alt.trim(); return (a.getAttribute && (a.getAttribute('title') || a.getAttribute('aria-label')) || '').trim(); };
   // メルカリ検索：SPAでHTMLに一覧が無いため、公式検索API(api.mercari.jp)をDPoP署名(ES256/WebCrypto)で叩く。ブリッジ(GM_xhr)経由でCORS回避＋ヘッダ転送。取得のみ・購入はしない。
   async function mercariDpop(htu, htm) {
@@ -8436,7 +8437,15 @@
     const results = [];
     await Promise.all(DEAL_SITES.map(async site => {
       const grab = async (enc, raw) => {
-        const items = site.custom ? await site.custom(raw) : site.parse(new DOMParser().parseFromString(await bridgeRequest('GET', site.url(enc)), 'text/html'));
+        let items;
+        if (site.custom) items = await site.custom(raw);
+        else {
+          // ★巨大HTMLをまるごとDOM化すると同期処理でUIが固まる（「ページが応答しません」が実際に出た）。
+          //   商品一覧は前半に入っているので上限を設けて切る。
+          const html = String(await bridgeRequest('GET', site.url(enc))).slice(0, 400000);
+          items = site.parse(new DOMParser().parseFromString(html, 'text/html'));
+        }
+        await new Promise(r => setTimeout(r, 0));   // 1サイト解析ごとに描画の隙間を作る
         let out = items.filter(x => x.price > 0 && x.name && !DEAL_JUNK.test(x.name));
         // ★普通郵便(定形外・追跡なし)と着払いは仕入れに向かないので既定で外す。「遅い・状態の悪い出品も表示」でOFFにできる
         if (site.k === 'mercari' && srcStrictOn()) out = out.filter(x => !MERC_SLOW.has(x.smid) && x.spid !== 1);
@@ -8776,7 +8785,7 @@
         <button id="src-deals-all" style="background:#1a7f37;color:#fff;border:none;border-radius:6px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer" title="保存済みの結果を使わず、全行を今の在庫・価格で取り直します（少し時間がかかります）">🔄 全行を再取得</button>
         <button id="src-auto-stop" style="background:#fff;color:#666;border:1px solid #cdd3db;border-radius:6px;padding:5px 11px;font-size:11px;cursor:pointer" title="実行中の自動検索を止めます">■ 停止</button>
         <span id="src-deals-all-msg" class="smd-dim" style="font-size:11px"></span></div>
-      <div class="smd-dim" style="font-size:11px;margin:0 4px 10px">💡 <b style="color:#1a7f37">🎯自動で候補を出す</b>＝ページを開くと<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストを<b>まとめて検索</b>し、各行に<b>上限仕入値</b>と<b>安い順の上位3件</b>を出します。判定は<b>送料込みの実質価格</b>です（フリマは送料込み・EC/中古店は目安を加算。⚙️で変更可）。メルカリは<b>配送方法まで見て</b>、<b style="color:#d93025">🐌普通郵便（定形外＝追跡なし・遅い）</b>と<b style="color:#d93025">💸着払い</b>を後ろに回します。<b style="color:#1a7f37">🟢</b>＝この値段なら目標粗利が残る／<b style="color:#b26a00">🟡</b>＝黒字だが目標未達／<b style="color:#d93025">🔴</b>＝赤字。<b>開く→</b>で商品ページへ直行、<b>決済ボタンはご自身で押してください</b>（購入は自動化しません）。結果は6時間保存＝2回目以降は即表示。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div>` +
+      <details style="margin:0 4px 10px"><summary class="smd-dim" style="font-size:11px;cursor:pointer;user-select:none;outline:none">💡 この画面の使い方（クリックで開く）</summary><div class="smd-dim" style="font-size:11px;margin-top:5px;line-height:1.7">💡 <b style="color:#1a7f37">🎯自動で候補を出す</b>＝ページを開くと<b>メルカリ</b>/<b>Yahoo!フリマ</b>/駿河屋/楽天/Yショッピング/ヤフオク(即決)/Amazon/セカストを<b>まとめて検索</b>し、各行に<b>上限仕入値</b>と<b>安い順の上位3件</b>を出します。判定は<b>送料込みの実質価格</b>です（フリマは送料込み・EC/中古店は目安を加算。⚙️で変更可）。メルカリは<b>配送方法まで見て</b>、<b style="color:#d93025">🐌普通郵便（定形外＝追跡なし・遅い）</b>と<b style="color:#d93025">💸着払い</b>を後ろに回します。<b style="color:#1a7f37">🟢</b>＝この値段なら目標粗利が残る／<b style="color:#b26a00">🟡</b>＝黒字だが目標未達／<b style="color:#d93025">🔴</b>＝赤字。<b>開く→</b>で商品ページへ直行、<b>決済ボタンはご自身で押してください</b>（購入は自動化しません）。結果は6時間保存＝2回目以降は即表示。0件のサイトは自動で「作品名＋機種」に広げて再検索。キーワードは<b>手直しすると記憶</b>。<b style="color:#c0392b">※要ブリッジ v1.5.0+</b>（古いと取得できません→<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">再インストール</a>）</div></details>` +
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1330px"><tr><th>仕入れ</th><th>画像</th><th>国</th><th>期限</th><th>Shopee商品名</th><th>検索キーワード（編集可）</th><th>仕入先で検索（安い順）</th><th>注文</th></tr>` +
       disp.slice((buyPage - 1) * buyPer, buyPage * buyPer).map(({ o, it, ix }, li) => {
         const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
@@ -8956,6 +8965,7 @@
           const i = q.shift();
           try { drawSugg(i, await srcDealsFor(i)); } catch (e) { drawSugg(i, null, e.message || e); }
           done++; if (msg) msg.textContent = `自動検索 ${done}/${boxes.length}`;
+          await new Promise(r => setTimeout(r, 120));   // 描画とスクロールを止めないための間
         }
       };
       await worker();   // 1行ずつ。1行の中で最大8サイトを同時に叩くため、行を並列にするとブリッジ(6枠)が詰まる
