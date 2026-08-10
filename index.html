@@ -8242,6 +8242,11 @@
   // 日本語の作品名がある時だけ、翻訳できてない英語(サブタイトル等)を落として「作品名＋機種＋数字」に寄せる。機種だけ(＝英語がゲーム名)の時は触らない。
   function trimEnSubtitle(tokens) {
     if (!tokens.some(isJaContentTok)) return tokens; // 日本語作品名が無い＝英語がゲーム名なので保持
+    // ★英語が1〜2語なら版名（Golden / Zero / DX 等）＝版を特定する語なので残す。
+    //   落とすと「ペルソナ4 Vita」になり、無印とゴールデンの区別が付かない。
+    //   3語以上は訳せていない長いサブタイトル＝日本の仕入先には無いので落とす（0件時はさらに広げて再検索する）。
+    const en = tokens.filter(t => !isJaContentTok(t) && !MACHINE_TOK.test(t) && !/^[0-9]{1,4}$/.test(t));
+    if (en.length <= 2) return tokens;
     const kept = tokens.filter(t => isJaContentTok(t) || MACHINE_TOK.test(t) || /^[0-9]{1,4}$/.test(t));
     return kept.length ? kept : tokens;
   }
@@ -8314,7 +8319,7 @@
   // ★フリマ（メルカリ/Yahoo!フリマ）は素人が付けたタイトルなので、語を足すほど当たらなくなる。
   //   例：「ドリームキャスト ビジュアルメモリ SEGA ホワイト」→ SEGAや色を入れている出品者はむしろ少数。
   //   → メーカー名・色・状態語を落として【作品名＋機種の2〜3語】に短縮したものから先に試す。
-  const MAKER_TOK = /^(sega|セガ|nintendo|任天堂|ニンテンドー|sony|ソニー|bandai|バンダイ|capcom|カプコン|konami|コナミ|square|スクウェア|enix|エニックス|namco|ナムコ|taito|タイトー|snk|hori|ホリ|microsoft|マイクロソフト|japan|japanese|official|authentic|genuine|used|new)$/i;
+  const MAKER_TOK = /^(sega|セガ|nintendo|任天堂|ニンテンドー|sony|ソニー|bandai|バンダイ|capcom|カプコン|konami|コナミ|square|スクウェア|enix|エニックス|squareenix|namco|ナムコ|taito|タイトー|snk|hori|ホリ|atlus|アトラス|koei|コーエー|tecmo|テクモ|falcom|ファルコム|chunsoft|チュンソフト|spike|irem|アイレム|microsoft|マイクロソフト|japan|japanese|official|authentic|genuine|used|new)$/i;
   const STATE_TOK = /^(中古|新品|美品|良品|未使用|動作品|動作確認済|箱付|箱なし|説明書付|ソフトのみ|本体のみ)$/;
   // 検索には入れないが、書いてあれば「当たり」に近い語（版・色・絵柄など）
   const BOOST_TOK = /^(絵柄|限定|初回|廉価|ベスト|復刻|海外版|北米版|欧州版|完全版|ホワイト|ブラック|レッド|ブルー|グリーン|イエロー|ゴールド|シルバー|パープル|ピンク|オレンジ|グレー|グレイ|クリア|ネイビー|ベージュ|ブラウン)$/;
@@ -8324,10 +8329,12 @@
     const kept = toks.filter(t => !MAKER_TOK.test(t) && !BOOST_TOK.test(t) && !STATE_TOK.test(t) && !GENERIC_TOK.test(t) && !/^(19|20)\d{2}$/.test(t));
     if (!kept.length) return '';
     // 作品名（長い語）を優先しつつ機種は1つ残す。全体で3語まで。
+    const VER_TOK = /^(dx|hd|ex|gt|plus|\+|r|remaster|リマスター|ゴールデン|完全版|新訳)$/i;   // 短いが版を決める語＝落とさない
     const mach = kept.filter(t => MACHINE_TOK.test(t)).slice(0, 1);
-    const body = kept.filter(t => !MACHINE_TOK.test(t)).sort((a, b) => b.length - a.length).slice(0, 2);
+    const vers = kept.filter(t => VER_TOK.test(t)).slice(0, 1);
+    const body = kept.filter(t => !MACHINE_TOK.test(t) && !VER_TOK.test(t)).sort((a, b) => b.length - a.length).slice(0, 2);
     // 元の並び順に戻す（検索エンジンは語順を見ないが、人が見て分かるように）
-    const pick = new Set(body.concat(mach));
+    const pick = new Set(body.concat(vers, mach));
     const out = toks.filter(t => pick.has(t)).join(' ');
     return (out && out.replace(/\s+/g, '') !== String(kwRaw).replace(/\s+/g, '')) ? out : '';
   }
@@ -8426,12 +8433,16 @@
     //   「ドラゴンボール アドバンス」になっていた（正しくは アドバンスアドベンチャー）。
     [/\badvance adventure\b/gi, 'アドバンスアドベンチャー'],
     // ★複合語は【単語より先】に置く。後だと Shining/Pearl が別々に訳されて「Shining パール」になる。
-    [/\bshining pearl\b/gi, 'シャイニングパール'], [/\bbrilliant diamond\b/gi, 'ブリリアントダイヤモンド'],
+    [/\bps\s*vita\b/gi, 'Vita'], [/\bshining pearl\b/gi, 'シャイニングパール'], [/\bbrilliant diamond\b/gi, 'ブリリアントダイヤモンド'],
     [/\blegends?\s*arceus\b/gi, 'レジェンズアルセウス'], [/\bsword\s*(and|&)?\s*shield\b/gi, 'ソードシールド'],
     [/\bscarlet\s*(and|&)?\s*violet\b/gi, 'スカーレットバイオレット'], [/\blet'?s go\s*(pikachu|eevee)\b/gi, m => 'レッツゴー' + (/pikachu/i.test(m) ? 'ピカチュウ' : 'イーブイ')],
     [/\bmystery dungeon\b/gi, '不思議のダンジョン'], [/\bsoul ?silver\b/gi, 'ソウルシルバー'], [/\bheart ?gold\b/gi, 'ハートゴールド'],
     [/\bomega ruby\b/gi, 'オメガルビー'], [/\balpha sapphire\b/gi, 'アルファサファイア'],
     [/\bultra (sun|moon)\b/gi, m => 'ウルトラ' + (/sun/i.test(m) ? 'サン' : 'ムーン')],
+    [/\bthe golden\b/gi, 'ゴールデン'], [/\bgolden\b/gi, 'ゴールデン'], [/\bpokk[eé]n tournament\b/gi, 'ポッ拳 トーナメント'], [/\blive a live\b/gi, 'ライブアライブ'],
+    [/\bsplatoon\b/gi, 'スプラトゥーン'], [/\bmario kart\b/gi, 'マリオカート'], [/\bsmash bros\.?\b/gi, 'スマブラ'],
+    [/\bxenoblade\b/gi, 'ゼノブレイド'], [/\bkirby\b/gi, 'カービィ'], [/\bmetroid\b/gi, 'メトロイド'],
+    [/\bzelda\b/gi, 'ゼルダ'], [/\bmonster hunter\b/gi, 'モンスターハンター'], [/\bpikmin\b/gi, 'ピクミン'],
     [/\bdoraemon\b/gi, 'ドラえもん'], [/\bmario\s*bros\.?\b/gi, 'マリオブラザーズ'], [/\bpicture label\b/gi, '絵柄'], [/\bdouble dragon\b/gi, 'ダブルドラゴン'], [/\bgolden sun\b/gi, '黄金の太陽'],
     // ★ハード・周辺機器（辞書に無いと英語のまま残り、日本の仕入先で1件も出ない）
     [/\bdream ?cast\b/gi, 'ドリームキャスト'], [/\bvisual memory\b/gi, 'ビジュアルメモリ'],
@@ -8528,14 +8539,26 @@
     s = s.replace(/\b\d+\s?(gb|mb|tb)\b/gi, ' ').replace(/\b(pack|pak|memory|adapter|working|authentic)\b/gi, ' ');
     s = s.replace(/\b(special|games|class|edition|type|version|main|rpg|all|new|collection|complete|deluxe|premium|standard)\b/gi, ' ');
     // 出品説明の常套句。日本の仕入先では誰も検索語に使わない（実例：キューブ 本体 Gaming バイオレット／Cassette Doraemon）
-    s = s.replace(/\b(gaming|retro|vintage|cassette|tested|working|boxed|region ?free|console only|no accessories|accessories|import|ntsc|ntsc-?j|pal)\b/gi, ' '); // 版名/ジャンルの英語カス（Special/Main/RPG/All等）を除去してセンスUP
+    s = s.replace(/\b(gaming|retro|vintage|cassette|tested|working|boxed|region ?free|console only|no accessories|accessories|import|ntsc|ntsc-?j|pal)\b/gi, ' ');
+    s = s.replace(/\b(atlus|koei|tecmo|falcom|chunsoft|spike|irem|square ?enix|arc ?system ?works|from ?software)\b/gi, ' ');
+    // 数字の版が既にあるのに英語で重ねて書いている分（Biohazard 0 Zero）は片方でよい
+    if (/(^|\s)0(\s|$)/.test(s)) s = s.replace(/\bzero\b/gi, ' '); // 版名/ジャンルの英語カス（Special/Main/RPG/All等）を除去してセンスUP
     s = s.replace(/[\/|｜,、，~〜:：#＃]+/g, ' ').replace(/\s+/g, ' ').trim();
     s = s.replace(/(^|\s)([^\s]+?)[.．]+(?=\s|$)/g, '$1$2');   // 語末のピリオド残り（Mario Bros. → マリオブラザーズ.）
     // ローマ数字→算用数字（IVと4の二重を防ぐ＝この後のdedupで消える）。I/V/X単独は曖昧(Ver/ロックマンX等)なので変換しない
     s = s.replace(/\b(VIII|VII|VI|IX|IV|III|II)\b/g, m => ({ VIII: '8', VII: '7', VI: '6', IX: '9', IV: '4', III: '3', II: '2' })[m]);
+    // ★単独の V も作品名の直後なら数字（Dragon Quest V→ドラゴンクエスト5）。これが無いと版が消えて
+    //   「ドラゴンクエスト DS」になり、どの作品か分からなくなる。
+    //   X と I は変換しない（ロックマンX等シリーズ名に使われる／Ver.やI/Oと紛らわしい）。
+    s = s.replace(/([A-Za-zァ-ヶ一-龠])\s+V\b(?![\w.])/g, '$1 5');
     // 重複語を除去（順序維持）
     const seen = new Set(), uniq = [];
-    s.split(' ').filter(Boolean).forEach(w => { const k = w.toLowerCase(); if (!seen.has(k)) { seen.add(k); uniq.push(w); } });
+    s.split(' ').filter(Boolean).forEach(w => {
+      const k = w.toLowerCase();
+      // 短い英単語（LIVE A LIVE の LIVE 等）は作品名の一部なので重複を許す
+      if (!(w.length >= 6 || /[ぁ-んァ-ヶ一-龠]/.test(w) || MACHINE_TOK.test(w))) { uniq.push(w); return; }
+      if (!seen.has(k)) { seen.add(k); uniq.push(w); }
+    });
     // 日本語の作品名がある時は、翻訳できてない英語サブタイトルを落として「作品名＋機種」に寄せる（例:ファイアーエムブレム Sacred Stones GBA→ファイアーエムブレム GBA）。
     // ただしバリエーション由来（実商品の版名＝Integral/Peace Walker等が識別に必須）の時は削らない
     let outToks = (generic && vari) ? uniq : trimEnSubtitle(uniq);
