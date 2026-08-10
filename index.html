@@ -5607,8 +5607,7 @@
   // 同じ幅のダミー領域を置き、双方向で scrollLeft を同期する（表のDOMは触らない）。
   function wireTopScroll(root) {
     // .pf-scroll だけでなく、インラインで overflow-x を持つ表の囲みも対象にする（ページによって書き方が違うため）
-    const targets = new Set();
-    (root || document).querySelectorAll('.pf-scroll, [style*="overflow-x"], [style*="overflow:auto"]').forEach(el => targets.add(el));
+    const targets = (root || document).querySelectorAll('.pf-scroll:not([data-topscroll])');
     targets.forEach(sc => {
       if (sc.dataset.topscroll) return;
       const tbl = sc.querySelector('table') || sc.firstElementChild; if (!tbl) return;   // divグリッドのページは先頭の子で幅を測る
@@ -5633,9 +5632,16 @@
   }
   // 各ページの描画後に自動で拾う（描画箇所が多いので、DOM変化を見て後追いで付ける）
   try {
-    let tsT = null;
-    new MutationObserver(() => { clearTimeout(tsT); tsT = setTimeout(() => wireTopScroll(), 120); })
-      .observe(document.body, { childList: true, subtree: true });
+    let tsT = null, tsBusy = false;
+    new MutationObserver(() => {
+      if (tsBusy) return;
+      clearTimeout(tsT);
+      tsT = setTimeout(() => {
+        // 未処理の表が無いなら何もしない（走査コストを毎回払わない）
+        if (!document.querySelector('.pf-scroll:not([data-topscroll])')) return;
+        tsBusy = true; try { wireTopScroll(); } finally { tsBusy = false; }
+      }, 600);
+    }).observe(document.body, { childList: true, subtree: true });
   } catch (_) {}
   // ===== 汎用・列カスタム（表示/非表示＋並べ替え＋保存）。描画済みの.pf-tableにかぶせる（テーブル構造は非破壊） =====
   const loadColCfg = (pid) => { try { const c = JSON.parse(localStorage.getItem('colcfg:' + pid) || '{}'); return { hidden: new Set(c.hidden || []), order: c.order || [] }; } catch { return { hidden: new Set(), order: [] }; } };
@@ -8893,11 +8899,15 @@
       box.innerHTML = head + chips + statLine(r) + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
       // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
       (async () => {
-        // メルカリの候補は上位3件まで詳細を見る。ケース欠品なら外して選び直すため。
-        const targets = top.filter(d => d.k === 'mercari' && !d.det).slice(0, 3);
-        if (!targets.length) return;
-        for (const d of targets) { const det = await mercDetail(mercIdOf(d.url)); if (det) d.det = det; }
-        if (box.isConnected) drawSugg(i, r);
+        // まず本命1件だけ詳細を見る。攻略本やケース欠品だった時に限り、次の候補を追加で見る（最大3回）。
+        let changed = false;
+        for (let n = 0; n < 3; n++) {
+          const d = clean.find(x => x.k === 'mercari' && !x.det); if (!d) break;
+          const det = await mercDetail(mercIdOf(d.url)); if (!det) break;
+          d.det = det; changed = true;
+          if (!srcSuspect(d, kt)) break;      // 問題なし＝ここで打ち切り
+        }
+        if (changed && box.isConnected) drawSugg(i, r);
       })();
       // 開いた候補を「これを買う」として覚える → ✓仕入れ済にした時に仕入額として記録される
       box.querySelectorAll('.src-pick').forEach(a => a.addEventListener('click', () => {
@@ -8913,7 +8923,10 @@
     async function autoSuggest() {
       const all = [...host.querySelectorAll('.src-sugg')];
       all.filter(b => srcSkip(+b.dataset.i)).forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">✓ 仕入れ済のため検索しません</span>'; });
-      const boxes = all.filter(b => !srcSkip(+b.dataset.i));
+      const AUTO_MAX = 12;   // 開いた瞬間に何十行も走らせると画面が固まる。続きは「🔄全行を再取得」で
+      const pending = all.filter(b => !srcSkip(+b.dataset.i));
+      const boxes = pending.slice(0, AUTO_MAX);
+      pending.slice(AUTO_MAX).forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">🔍比較一覧 で取得（自動は上位' + AUTO_MAX + '行まで）</span>'; });
       const msg = document.getElementById('src-deals-all-msg');
       boxes.forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px"><span class="smd-spin"></span> 候補を検索中…</span>'; });
       let done = 0, q = boxes.map(b => +b.dataset.i);
@@ -8925,7 +8938,7 @@
           done++; if (msg) msg.textContent = `自動検索 ${done}/${boxes.length}`;
         }
       };
-      await Promise.all([worker(), worker()]);
+      await worker();   // 1行ずつ。1行の中で最大8サイトを同時に叩くため、行を並列にするとブリッジ(6枠)が詰まる
       if (msg) msg.textContent = renderSourcing._stop ? '停止しました' : `自動検索 完了（${boxes.length}件）`;
     }
     { const ab = document.getElementById('src-deals-all'); if (ab) ab.addEventListener('click', async () => {
@@ -8937,7 +8950,7 @@
       const worker = async () => { while (q.length) { if (renderSourcing._stop) return; const i = q.shift();
         try { drawSugg(i, await srcDealsFor(i, true)); } catch (e) { drawSugg(i, null, e.message || e); }
         done++; if (msg) msg.textContent = `再取得 ${done}/${boxes.length}`; } };
-      await Promise.all([worker(), worker()]);
+      await worker();
       ab.disabled = false; ab.textContent = orig;
     }); }
     { const sb = document.getElementById('src-auto-stop'); if (sb) sb.addEventListener('click', () => { renderSourcing._stop = true; sb.textContent = '停止中…'; }); }
