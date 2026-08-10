@@ -18692,14 +18692,28 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🔁 未公開(取り下げ)をまとめて公開に戻す。
   // ★出品枠（Listing Limit）に当たると以降は全部失敗する。連続で失敗したら止めて、
   //   「枠が上限です」と伝える（全部叩ききってから気づくと時間もAPI枠も無駄になる）。
-  async function unlistBulkPublish(cc, targets) {
+  async function unlistBulkPublish(cc, targets) {   // targets は枠の空きぶんに切り詰める
     if (!targets || !targets.length) return;
     if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定の「OpenAPI同期GAS URL」と「WRITE_TOKEN」が要ります'); return; }
     const rg = regionByCc(cc) || {};
-    if (!confirm(cc + ' の未公開 ' + targets.length + '件を公開に戻します。\n\n'
+    const lim = quotaLimit(cc), live = (lst.byCc[cc] || []).filter(x => x.status === 1).length;
+    const room = lim ? (lim - live) : null;
+    if (room != null && room <= 0) {
+      alert(cc + ' は出品枠がいっぱいです（公開中 ' + live + ' / 枠 ' + lim + '）。\n\n'
+        + '枠に空きが無いと、そもそも公開できません（APIが弾きます）。\n'
+        + 'この山は「枠が足りずShopeeが公開中の商品を非公開にした」分です。\n\n'
+        + '先に「売れていない公開中の出品」を下げて空きを作ってください。\n'
+        + '（出品一覧で 販売0・閲覧が少ない順に並べると見つけやすいです）\n\n'
+        + '※出品枠は売上実績で増減します。枠そのものを増やすには、売上を伸ばすのが本筋です。');
+      return;
+    }
+    const n = (room != null && room < targets.length) ? room : targets.length;
+    if (!confirm(cc + ' の未公開を公開に戻します。\n\n'
+      + '対象 ' + targets.length + '件' + (room != null ? '／出品枠の空き ' + room + '件 → 今回は ' + n + '件まで' : '') + '\n\n'
       + '・Shopeeに商品は残っているので、公開に戻すだけです\n'
       + '・出品枠の上限に当たると、そこで止めます（途中まではそのまま反映されます）\n'
-      + '・在庫0の商品は公開してもすぐ落ちることがあります\n\n進めますか？')) return;
+      + '・在庫0の商品は対象から外しています\n\n進めますか？')) return;
+    targets = targets.slice(0, n);
     const prog = document.getElementById('an-unl-prog');
     const say = (t, col) => { if (prog) { prog.style.color = col || '#3b5bdb'; prog.innerHTML = t; } };
     let ok = 0, ng = 0, streak = 0; const errs = [];
@@ -18986,9 +19000,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <b style="font-size:13px">🔁 戻せる ${back.length}件</b>
             ${byCcOf(back).map(([cc, n]) => {
               const st = back.filter(x => x.cc === cc && (x.models || []).reduce((a2, m) => a2 + (Number(m.stock) || 0), 0) > 0).length;
-              return `<button class="smd-btn an-unl-bulk" data-cc="${esc(cc)}" style="font-size:11px;padding:3px 10px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="在庫がある${st}件だけを公開に戻します（在庫0は公開してもすぐ落ちるため）">▶ ${esc(cc)} の ${st}件を公開に戻す${st < n ? `<span style="font-weight:400"> （在庫0の${n - st}件は除く）</span>` : ''}</button>`;
+              // ★出品枠(Listing Limit)は【公開中(status=1)だけ】を数える。空きが無いのに戻すと、
+              //   Shopeeが別の出品を落とすか、そもそも戻せない。押す前に空きを見せる。
+              const lim = quotaLimit(cc), live = (lst.byCc[cc] || []).filter(x => x.status === 1).length;
+              const room = lim ? (lim - live) : null;
+              const full = room != null && room <= 0;
+              return `<button class="smd-btn an-unl-bulk" data-cc="${esc(cc)}" data-room="${room == null ? '' : room}" style="font-size:11px;padding:3px 10px;${full ? 'border-color:#c0392b;color:#c0392b' : 'border-color:#1a7f37;color:#1a7f37'};font-weight:700" title="${full ? '出品枠に空きがありません。戻す前に、売れていない公開中の出品を下げる必要があります' : '在庫がある' + st + '件だけを公開に戻します（在庫0は公開してもすぐ落ちるため）'}">▶ ${esc(cc)} の ${st}件を公開に戻す${st < n ? `<span style="font-weight:400"> （在庫0の${n - st}件は除く）</span>` : ''}</button>`
+                + (lim ? `<span style="font-size:10.5px;margin-left:-3px;margin-right:6px;color:${full ? '#c0392b' : '#8a8f98'}">枠 ${live}/${lim}${full ? '（空きなし）' : '（空き ' + room + '）'}</span>` : `<span class="smd-dim" style="font-size:10.5px;margin-left:-3px;margin-right:6px">枠 未取得</span>`);
             }).join('')}
-            <span class="smd-dim" style="font-size:10.5px">出品枠の上限に当たると途中で止まります。止まった所までは反映されます</span>
+            <span class="smd-dim" style="font-size:10.5px">※ 出品枠は<b>公開中だけ</b>を数えます。<b>空きが無いと、そもそも公開できません</b>（Shopeeが枠不足で公開中の商品を非公開にしたのが、この山の正体です）。
+              先に「売れていない公開中の出品」を下げて空きを作ってください。<b>枠そのものは売上実績で増減します</b>。</span>
           </div>
           <div id="an-unl-prog" style="font-size:11.5px;margin-bottom:5px"></div>
           <div class="pf-scroll" style="max-height:320px"><table class="pf-table" style="width:100%"><tr><th style="width:38px">画像</th><th style="width:36px">国</th><th>商品名</th><th style="width:110px">状態</th><th style="width:56px">在庫</th><th style="width:64px"></th></tr>${rowsOf(back)}</table></div>
