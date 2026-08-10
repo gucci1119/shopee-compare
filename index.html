@@ -17768,6 +17768,92 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     mp.remove();
     lst._leakHtmlCache = null; renderListingAnalysis();
   }
+  // 実績の粗利で「儲かっていない出品」を出す。目標は⚙️の1件あたり目標粗利（既定¥1,200）
+  const TARGET_GROSS = () => Number(settings.targetGross) || 1200;
+  async function lowMarginHtml() {
+    let orders, income, inv;
+    try {
+      [orders, income, inv] = await Promise.all([
+        sbGetAll('orders', 'select=cc,sn,order_date,order_ts,status,items'),
+        sbGetAll('income', 'select=cc,sn,amount,pending'),
+        sbGetAll('inventory', 'select=shopee_sn,price'),
+      ]);
+    } catch (e) { return ''; }
+    const incMap = new Map(income.map(x => [x.cc + ':' + x.sn, x]));
+    const costBySn = new Map();
+    inv.forEach(v => { const sn = String(v.shopee_sn || '').trim(); if (!sn || v.price == null) return; costBySn.set(sn, (costBySn.get(sn) || 0) + Number(v.price)); });
+    // 出品(item_id)ごとに、確定した注文の粗利を集める
+    const agg = new Map();
+    orders.forEach(o => {
+      const e = incMap.get(o.cc + ':' + o.sn);
+      if (!e || e.pending) return;                       // 未確定は入れない（あとで動く）
+      const cost = costBySn.get(o.sn);
+      if (!(cost > 0)) return;                           // 仕入が分からない注文は判定できない
+      const r = ordRate(o); if (!r) return;
+      const gross = (Number(e.amount) || 0) * r - cost;
+      const its = (o.items || []).filter(it => it.item_id);
+      if (!its.length) return;
+      const share = gross / its.length;                  // 複数商品の注文は頭割り（目安）
+      its.forEach(it => {
+        const k = o.cc + '|' + it.item_id;
+        let a2 = agg.get(k);
+        if (!a2) { a2 = { cc: o.cc, item_id: it.item_id, name: it.name || '', image: it.image || '', n: 0, sum: 0, worst: Infinity, last: '' }; agg.set(k, a2); }
+        a2.n++; a2.sum += share; a2.worst = Math.min(a2.worst, share);
+        const d = ordYmd(o); if (d > a2.last) a2.last = d;
+      });
+    });
+    const T = TARGET_GROSS();
+    const rows = [...agg.values()].map(a2 => ({ ...a2, avg: a2.sum / a2.n }))
+      .filter(a2 => a2.avg < T)
+      .sort((a2, b2) => (b2.n * (T - b2.avg)) - (a2.n * (T - a2.avg)));   // 件数×不足額＝取り逃がしの大きい順
+    if (!rows.length) return '';
+    const loss = rows.reduce((s2, a2) => s2 + a2.n * (T - a2.avg), 0);
+    const neg = rows.filter(a2 => a2.avg < 0);
+    const live = (cc, id) => (lst.byCc[cc] || []).find(x => String(x.item_id) === String(id));
+    const yen = n2 => '¥' + Math.round(n2).toLocaleString();
+    return `<div class="tool-card" style="max-width:none;border-color:#f3c2bb">
+      <h3 style="margin-top:0">💸 売れてるのに儲かっていない出品 <span class="smd-dim" style="font-weight:400;font-size:12px">（実際に入金が確定した注文の粗利で判定）</span></h3>
+      <div class="pagehelp">この画面：<b>売れているのに1件あたりの粗利が目標(${yen(T)})に届いていない出品</b>です。
+        値上げするか、仕入れ値を下げるか、やめるかを決めます。並びは<b>取り逃がしの大きい順</b>（売れた件数 × 目標との差）。
+        ${neg.length ? `<b style="color:#c0392b">うち${neg.length}件は赤字</b>（売れるほど損をします）。` : ''}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 10px">
+        <div style="flex:1;min-width:170px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:9px;padding:9px 12px">
+          <div style="font-size:10.5px;color:#8a8f98">目標に届いていない出品</div>
+          <div style="font-size:22px;font-weight:800;color:#c0392b">${rows.length}<span style="font-size:12px">件</span></div></div>
+        <div style="flex:1;min-width:170px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:9px;padding:9px 12px">
+          <div style="font-size:10.5px;color:#8a8f98">取り逃がしている粗利（累計）</div>
+          <div style="font-size:22px;font-weight:800;color:#c0392b">${yen(loss)}</div>
+          <div style="font-size:10px;color:#8a8f98">家賃¥73,000の ${(loss / 73000).toFixed(1)}か月ぶん</div></div>
+        <div style="flex:1;min-width:170px;border:1px solid #ececec;border-radius:9px;padding:9px 12px;background:#fff">
+          <div style="font-size:10.5px;color:#8a8f98">赤字で売れている</div>
+          <div style="font-size:22px;font-weight:800;color:${neg.length ? '#b71c1c' : '#1a7f37'}">${neg.length}<span style="font-size:12px">件</span></div></div>
+      </div>
+      <div class="pf-scroll" style="max-height:52vh"><table class="pf-table" style="width:100%;min-width:900px;font-size:11.5px"><tr>
+        <th style="width:30px"></th><th style="width:34px">国</th><th>商品</th>
+        <th style="width:56px">売れた</th><th style="width:92px">粗利/件</th><th style="width:88px">最悪の1件</th>
+        <th style="width:96px">取り逃がし</th><th style="width:96px">今の価格</th><th style="width:74px">最終</th><th style="width:60px"></th></tr>
+        ${rows.slice(0, 120).map((a2, i) => {
+          const l = live(a2.cc, a2.item_id);
+          const gap = a2.n * (T - a2.avg);
+          const col = a2.avg < 0 ? '#b71c1c' : '#c0392b';
+          return `<tr>
+            <td style="text-align:center;color:#8a8f98">${i + 1}</td>
+            <td><b style="color:${(regionByCc(a2.cc) || {}).color || '#333'}">${esc(a2.cc)}</b></td>
+            <td>${a2.image ? `<img src="${IMG_CDN}${esc(a2.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(a2.name, '340px')}</td>
+            <td style="text-align:right">${a2.n}</td>
+            <td style="text-align:right;font-weight:700;color:${col}">${yen(a2.avg)}</td>
+            <td style="text-align:right;color:${a2.worst < 0 ? '#b71c1c' : '#8a8f98'}">${yen(a2.worst)}</td>
+            <td style="text-align:right;color:#c0392b">${yen(gap)}</td>
+            <td style="text-align:right">${l && l.price_min != null ? esc(String(l.price_min)) : '<span class="smd-dim">-</span>'}</td>
+            <td style="font-size:10.5px;color:#8a8f98">${esc(String(a2.last || '').slice(5))}</td>
+            <td>${l ? `<button class="smd-btn an-low-edit" data-cc="${esc(a2.cc)}" data-id="${esc(a2.item_id)}" data-name="${esc(a2.name)}" style="font-size:10.5px;padding:2px 7px">✎編集</button>` : ''}</td>
+          </tr>`;
+        }).join('')}
+      </table></div>
+      ${rows.length > 120 ? `<div class="smd-dim" style="font-size:11px;margin-top:5px">…ほか ${rows.length - 120}件</div>` : ''}
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">※ 入金が確定し、かつ仕入額が分かる注文だけで計算しています（未確定・仕入不明は除外）。複数商品の注文は頭割りの目安です。</div>
+    </div>`;
+  }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -17942,8 +18028,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${rows.slice(0, 100).map(r => { const l = r.l, rg = r.rg; let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (r.cm) { floorTd = (r.floor && r.floor < r.cur) ? `<b style="color:#1a7f37">${rg.cur || ''}${r.floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${nm(l.name, '260px')}${r.isSingle ? '' : ' <span class="smd-dim" style="font-size:9px" title="バリエ品＝一括値下げ対象外（個別に）">ﾊﾞﾘｴ</span>'}</td><td style="text-align:right;font-weight:700;color:#555">${r.x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${r.x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${r.cur.toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
       </div>`;
     } catch (e) { dealHtml = ''; }
+    // ★💸 売れてるのに儲かっていない出品（実績ベース）
+    //   台帳(listing_catalog)の原価はまだ埋まっていない行が多く、想定利益では判定できない。
+    //   実際に「入金が確定した注文」の粗利＝入金(円) − 仕入 を出品ごとに束ねて、
+    //   1件あたりの粗利が目標(既定¥1,200)に届いていないものを炙り出す。
+    //   実測（2026-07）: 204件中105件(51%)が¥1,200未満、27件(13%)が赤字。ここが月末の数字を決めている。
+    let lowHtml = '';
+    try { lowHtml = await lowMarginHtml(); } catch (e) { console.warn('[儲かっていない出品]', e && e.message); }
     host.innerHTML =
       '<div id="an-playbook"></div>' +
+      lowHtml +
       sugHtml +
       leakHtml +
       dealHtml +
@@ -17973,6 +18067,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🔥 売れ筋バリエーション TOP25</h3>
         <div class="pf-scroll"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品/バリエ</th><th>価格</th><th>販売数</th><th>在庫</th></tr>${top.map(v => { const rc = regionByCc(v.cc) || { cur: '' }; return `<tr><td>${v.img ? `<img src="${IMG_CDN}${esc(v.img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(v.cc)}</td><td style="font-size:11px"><b>${esc(v.n || '（既定）')}</b> <span class="smd-dim">${nm(v.pname, '240px')}</span></td><td style="font-size:11px;color:#1565c0">${(rc.cur || '') + lfmt(v.price)}</td><td style="font-weight:700;color:#e8710a">${v.sold}</td><td>${v.stock}</td></tr>`; }).join('')}</table></div>
+    // 💸儲かっていない出品 → その場でカタログ編集を開く（値上げ・原価の見直しに直行）
+    host.querySelectorAll('.an-low-edit').forEach(b2 => b2.addEventListener('click', () => {
+      const rg = regionByCc(b2.dataset.cc);
+      if (!rg || !rg.host) { alert('この国のホストが分かりません'); return; }
+      openCatalogEditor(b2.dataset.cc, rg.host, b2.dataset.id, b2.dataset.name || '');
+    }));
       </div>
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🗂 未公開の棚卸し（${unlisted.length}件・復活/削除の判断用）</h3>
