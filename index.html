@@ -750,6 +750,7 @@
         <button data-k="pre" title="Pre-order（予約商品）の注文">🕒Pre-order</button>
       </span>
       <input type="text" id="ord-search" placeholder="商品名・バイヤー・注文番号で絞り込み">
+      <span id="ord-filterinfo"></span>
       <span class="smd-dim" id="ord-note">発送期日が近い順</span>
       <span id="ord-dts-slot"></span>
     </div>
@@ -3774,7 +3775,7 @@
       `<span class="smd-dim" style="font-size:10.5px">①未手配＝Arrange Shipment未 → ②押済で伝票発行 → ③倉庫へ送って輸送中 → ④倉庫スキャンで発送済</span></div>`;
     const ccClear = state.orders.ccFilter ? `<span class="ord-ccall" style="cursor:pointer;color:#1565c0;font-weight:700" title="国の絞り込みを解除して全国表示に戻す">🌏全国に戻す</span> ｜ ` : '';
     el.innerHTML = `取扱中の注文 <b>${total}</b>件（未発送＋発送済）${riskTag} ｜ ${ccClear}` + parts.join(' ｜ ') + stageLine;
-    const setFilter = (k) => { state.orders.filter = k; state.orders.page = 1; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === k)); renderOrders(); };
+    const setFilter = (k) => { state.orders.filter = k; state.orders.page = 1; state.orders.calOfs = 0; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === k)); renderOrders(); };
     const rc = el.querySelector('.ord-riskclick');
     if (rc) rc.addEventListener('click', () => setFilter('late'));
     el.querySelectorAll('.ord-stagechip').forEach(c => c.addEventListener('click', () => setFilter(c.dataset.k)));
@@ -4067,6 +4068,27 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (oc && oc.rows && oc.rows.length) rows = rows.concat(oc.rows);
     });
+    // ★上のタブと、カレンダー/期日チップの絞り込みが混ざると「今どれで見ているか」が分からなくなる。
+    //   タブ以外で絞っている時は、その旨と解除ボタンを必ず出す。
+    { const fi = document.getElementById('ord-filterinfo');
+      if (fi) {
+        const f = String(state.orders.filter || '');
+        const W2 = ['日', '月', '火', '水', '木', '金', '土'];
+        let lab = '';
+        if (/^send:/.test(f)) { const d = new Date(f.slice(5) + 'T00:00:00+09:00'); lab = '📆 ' + (d.getMonth() + 1) + '/' + d.getDate() + '(' + W2[d.getDay()] + ') に家から出す分'; }
+        else if (/^due/.test(f)) lab = '📦 家から出す期限で絞り込み中';
+        else if (/^scan/.test(f)) lab = '🏭 倉庫でスキャンされる期限で絞り込み中';
+        fi.innerHTML = lab
+          ? `<span style="display:inline-flex;align-items:center;gap:6px;background:#eef4ff;border:1px solid #c7d7ee;color:#1565c0;font-size:11.5px;font-weight:700;border-radius:14px;padding:2px 4px 2px 10px">${esc(lab)}
+              <button id="ord-filterclr" title="この絞り込みを解除して「すべて」に戻す" style="border:none;background:#1565c0;color:#fff;border-radius:11px;font-size:11px;padding:1px 8px;cursor:pointer">✕ 解除</button></span>`
+          : '';
+        const cb = document.getElementById('ord-filterclr');
+        if (cb) cb.addEventListener('click', () => {
+          state.orders.filter = 'all'; state.orders.page = 1; state.orders.calOfs = 0;
+          document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === 'all'));
+          renderShipDeadline(); renderOrders();
+        });
+      } }
     // 発送フロー4段階：①未手配(Arrange Shipment未)→②伝票発行済(手配済・倉庫へ未発送)→③倉庫スキャン待ち(自社→Shopee倉庫 輸送中)→④発送済(倉庫スキャン済=tab400)
     const _isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
     if (state.orders.filter === 'late') rows = rows.filter(r => ordRisk(r) >= 1); // 遅延＋遅延リスク（未対応で期日が近い/超過）
@@ -4382,6 +4404,8 @@
     b.classList.add('on');
     state.orders.filter = b.dataset.k;
     state.orders.page = 1;
+    state.orders.calOfs = 0;          // タブで絞ったらカレンダーのズレと選択も戻す
+    renderShipDeadline();
     renderOrders();
   });
   wireTypeahead(document.getElementById('ord-search'),
