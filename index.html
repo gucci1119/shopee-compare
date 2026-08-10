@@ -8307,8 +8307,8 @@
       if (j && (Date.now() - j.at) < DEAL_TTL_MS) return j; } catch (_) {}
     return null;
   }
-  function dealCacheSet(kw, deals, broadKw) {
-    try { localStorage.setItem('srcDeals3:' + kw, JSON.stringify({ at: Date.now(), deals: deals.slice(0, 25), broadKw: broadKw || '' })); }
+  function dealCacheSet(kw, deals, broadKw, siteStat) {
+    try { localStorage.setItem('srcDeals3:' + kw, JSON.stringify({ at: Date.now(), deals: deals.slice(0, 25), broadKw: broadKw || '', siteStat: siteStat || null })); }
     catch (_) { try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals3:')).slice(0, 60).forEach(k => localStorage.removeItem(k)); } catch (__) {} }
   }
   // ★フリマ（メルカリ/Yahoo!フリマ）は素人が付けたタイトルなので、語を足すほど当たらなくなる。
@@ -8335,7 +8335,7 @@
     let kwRaw = kwEnc; try { kwRaw = decodeURIComponent(kwEnc); } catch (_) {}
     const kwBroad = broadenKeyword(kwRaw);
     const kwBroadEnc = kwBroad ? encodeURIComponent(kwBroad) : '';
-    const usedBroad = [], usedFlea = [];
+    const usedBroad = [], usedFlea = [], siteStat = {};
     const results = [];
     await Promise.all(DEAL_SITES.map(async site => {
       const grab = async (enc, raw) => {
@@ -8354,14 +8354,18 @@
         items.forEach(x => { x.site = site.label; x.bg = site.bg; x.k = site.k; x.eff = effPriceOf(x); x.fee = x.eff - x.price; });
         items.sort((a, b) => a.eff - b.eff);
         results.push(...items);
+        siteStat[site.k] = { label: site.label, n: items.length };
         if (onSite) onSite(site.k, items.length);
-      } catch (e) { if (onSite) onSite(site.k, -1); }
+      } catch (e) { siteStat[site.k] = { label: site.label, n: -1, err: String((e && e.message) || e).slice(0, 60) }; if (onSite) onSite(site.k, -1); }
     }));
     // 並び：①送料込みの実質価格 ②遅い配送(定形外等)・着払いは後ろ ③同額ならフリマ(メルカリ/Yahoo!フリマ)を先に
     const rank = d => (d.k === 'mercari' || d.k === 'paypay') ? 0 : 1;
     const slow = d => (d.k === 'mercari' && (MERC_SLOW.has(d.smid) || d.spid === 1 || (d.det && d.det.days > 3))) ? 1 : 0;
     results.sort((a, b) => (slow(a) - slow(b)) || (a.eff - b.eff) || (rank(a) - rank(b)));
-    return { deals: results, broadKw: usedBroad.length ? kwBroad : '', fleaKw: usedFlea.length ? srcFleaKeyword(kwRaw) : '' };
+    // ★同じ商品が複数回パースされることがある（駿河屋で同額が3件並んでいた）。URLで重複を落とす。
+    const seenUrl = new Set();
+    const uniq = results.filter(d => { const u = String(d.url || ''); if (!u || seenUrl.has(u)) return false; seenUrl.add(u); return true; });
+    return { deals: uniq, broadKw: usedBroad.length ? kwBroad : '', fleaKw: usedFlea.length ? srcFleaKeyword(kwRaw) : '', siteStat };
   }
   // 取得した出品を「サイト横断・安い順の比較一覧」で描画（直リンク。開く＝実際の商品ページ→決済はユーザーが押す）
   function renderDeals(container, deals, showN, broadKw, ceil, kwRaw) {
@@ -8728,10 +8732,22 @@
     const ceilOf = (i) => { const x = disp[i]; return x ? srcCeilingFor(x.o, x.it) : null; };
     async function srcDealsFor(i, force) {
       const kw = kwOf(i); if (!kw) throw new Error('キーワードが空です');
-      if (!force) { const c = dealCacheGet(kw); if (c) return { deals: c.deals, broadKw: c.broadKw, cached: true }; }
-      const { deals, broadKw } = await srcFetchDeals(kw);
-      dealCacheSet(kw, deals, broadKw);
-      return { deals, broadKw };
+      if (!force) { const c = dealCacheGet(kw); if (c) return { deals: c.deals, broadKw: c.broadKw, siteStat: c.siteStat, cached: true }; }
+      const { deals, broadKw, siteStat } = await srcFetchDeals(kw);
+      dealCacheSet(kw, deals, broadKw, siteStat);
+      return { deals, broadKw, siteStat };
+    }
+    // サイトごとの取得結果。0件と取得失敗は意味が違うので必ず区別して出す。
+    function statLine(r) {
+      const st = r && r.siteStat; if (!st) return '';
+      const ks = Object.keys(st); if (!ks.length) return '';
+      const bad = ks.filter(k => st[k].n < 0), zero = ks.filter(k => st[k].n === 0);
+      const oks = ks.filter(k => st[k].n > 0).map(k => `${esc(st[k].label)}${st[k].n}`);
+      if (!bad.length && !zero.length) return `<div class="smd-dim" style="font-size:9px;margin-top:2px">取得: ${oks.join(' / ')}</div>`;
+      return `<div style="font-size:9px;margin-top:2px" class="smd-dim">取得: ${oks.join(' / ') || 'なし'}`
+        + (zero.length ? ` ／ <span style="color:#8a8f98">0件: ${zero.map(k => esc(st[k].label)).join('・')}</span>` : '')
+        + (bad.length ? ` ／ <b style="color:#d93025" title="${esc(bad.map(k => st[k].label + ': ' + (st[k].err || '')).join(' / '))}">✕失敗: ${bad.map(k => esc(st[k].label)).join('・')}</b>（ブリッジの稼働・再インストールを確認）` : '')
+        + `</div>`;
     }
     function drawSugg(i, r, err) {
       const box = host.querySelector(`.src-sugg[data-i="${i}"]`); if (!box) return;
@@ -8749,11 +8765,11 @@
         : ceil.ceil <= 0
           ? `<div style="margin-bottom:3px;color:#d93025;font-size:10.5px">🔴 <b>この売値では赤字</b>（入金見込¥${ceil.payout.toLocaleString()}）</div>`
           : `<div style="margin-bottom:3px">🎯 <b>上限 ¥${ceil.ceil.toLocaleString()}</b><span class="smd-dim" style="font-size:10px">（入金見込¥${ceil.payout.toLocaleString()}−目標¥${ceil.target.toLocaleString()}）</span></div>`;
-      if (!top.length) { box.innerHTML = `<div class="smd-dim" style="font-size:10.5px">この検索語に合う出品がありません（取得した ${deals.length}件は<b>まとめ売り・別商品</b>でした）。<b>🔍比較一覧</b>で全部見るか、キーワードを直してください。</div>`; return; }
+      if (!top.length) { box.innerHTML = `<div class="smd-dim" style="font-size:10.5px">この検索語に合う出品がありません（取得した ${deals.length}件は<b>まとめ売り・別商品</b>でした）。<b>🔍比較一覧</b>で全部見るか、キーワードを直してください。</div>` + statLine(r); return; }
       const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null; const miss = [];
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:13px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
           ${k === 0 ? '🥇' : (j ? j.icon : '')}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${j ? `<b style="color:${j.c};font-size:10px">${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
-      box.innerHTML = head + chips + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
+      box.innerHTML = head + chips + statLine(r) + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
       // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
       (async () => {
         const d0 = top[0]; if (!d0 || d0.k !== 'mercari' || d0.det) return;
