@@ -3383,3 +3383,6 @@ function recheckEscrowForReturns(limitN) {
   Logger.log('返品ありの注文を再確認: 照会' + done + '件 / 金額が変わった ' + moved + '件（SLS+補償などが反映された分）');
   return { done: done, moved: moved };
 }
+
+// 手動用：注文同期を追跡番号つきで強制実行（毎時トリガーの6時間しばり・背景枠ガードを回避）
+function runOrdersForceNow() { return syncOrdersAll(15, 'force'); }
