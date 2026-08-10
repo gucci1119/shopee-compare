@@ -2612,7 +2612,11 @@ function listItemIds_(shopId, sinceSec) {
       if (sinceSec) { q.update_time_from = sinceSec; q.update_time_to = now_(); } // ★増分：変更のあった出品だけ（頻繁な画像/タイトル/在庫/価格変更を高速反映）
       var j = callShop_(shopId, '/api/v2/product/get_item_list', q, 'get');
       var r = j.response || {};
-      (r.item || []).forEach(function (it) { out.push({ item_id: it.item_id, status: (st === 'NORMAL' ? 1 : 0) }); });
+      // ★ポータル側の意味付け：1=出品中 / 8=未公開(取り下げ・戻せる) / 0=削除(戻せない) / 2=BAN
+      //   ここで UNLIST を 0 にしていたため、取り下げただけの出品が「削除」と表示され、
+      //   「もう戻せない」と読めてしまっていた（実際は unlist_item で公開に戻せる）。
+      var stCode = (st === 'NORMAL') ? 1 : (st === 'UNLIST') ? 8 : (st === 'BANNED') ? 2 : 0;
+      (r.item || []).forEach(function (it) { out.push({ item_id: it.item_id, status: stCode }); });
       if (!r.has_next_page) break;
       offset = (r.next_offset != null) ? r.next_offset : (offset + 100);
     }
@@ -2671,7 +2675,8 @@ function syncListingsForShop_(tok, sinceSec) {
         images: imgList,
         video_url: (((it.video_info || [])[0] || {}).video_url || null),
         cc: cc, item_id: it.item_id, name: it.item_name || '', image: img,
-        status: (statusById[it.item_id] != null ? statusById[it.item_id] : (it.item_status === 'NORMAL' ? 1 : 0)),
+        status: (statusById[it.item_id] != null ? statusById[it.item_id]
+                 : (it.item_status === 'NORMAL' ? 1 : it.item_status === 'UNLIST' ? 8 : it.item_status === 'BANNED' ? 2 : 0)),
         parent_sku: it.item_sku || '', shop_id: String(shopId),
         price_min: price_min, price_max: price_max, stock: stock,
         model_count: model_count, models: models,

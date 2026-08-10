@@ -18689,6 +18689,44 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">※ 入金が確定し、かつ仕入額が分かる注文だけで計算しています（未確定・仕入不明は除外）。複数商品の注文は頭割りの目安です。</div>
     </div>`;
   }
+  // 🔁 未公開(取り下げ)をまとめて公開に戻す。
+  // ★出品枠（Listing Limit）に当たると以降は全部失敗する。連続で失敗したら止めて、
+  //   「枠が上限です」と伝える（全部叩ききってから気づくと時間もAPI枠も無駄になる）。
+  async function unlistBulkPublish(cc, targets) {
+    if (!targets || !targets.length) return;
+    if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定の「OpenAPI同期GAS URL」と「WRITE_TOKEN」が要ります'); return; }
+    const rg = regionByCc(cc) || {};
+    if (!confirm(cc + ' の未公開 ' + targets.length + '件を公開に戻します。\n\n'
+      + '・Shopeeに商品は残っているので、公開に戻すだけです\n'
+      + '・出品枠の上限に当たると、そこで止めます（途中まではそのまま反映されます）\n'
+      + '・在庫0の商品は公開してもすぐ落ちることがあります\n\n進めますか？')) return;
+    const prog = document.getElementById('an-unl-prog');
+    const say = (t, col) => { if (prog) { prog.style.color = col || '#3b5bdb'; prog.innerHTML = t; } };
+    let ok = 0, ng = 0, streak = 0; const errs = [];
+    for (let i = 0; i < targets.length; i++) {
+      const x = targets[i];
+      say('🔁 ' + (i + 1) + '/' + targets.length + ' を公開中…（成功 ' + ok + '／失敗 ' + ng + '）');
+      try {
+        await openapiUnlistItem(x.shop_id || (settings.shopIds || {})[cc], x.item_id, false);
+        x.status = 1; ok++; streak = 0;
+      } catch (e) {
+        ng++; streak++;
+        const m = String((e && e.message) || e);
+        if (errs.length < 8) errs.push(String(x.name || x.item_id).slice(0, 30) + '：' + m.slice(0, 70));
+        // ★同じ理由で3連続落ちたら枠上限とみなして止める
+        if (streak >= 3) {
+          say('⛔ 3件つづけて失敗したので止めました（' + ok + '件は公開済み）。<br>出品枠が上限の可能性があります：' + esc(m.slice(0, 120)), '#c0392b');
+          break;
+        }
+      }
+      await new Promise(r => setTimeout(r, 150));   // API枠を焼かないよう間隔をあける
+    }
+    if (streak < 3) say('✓ 公開に戻しました：成功 ' + ok + '件' + (ng ? '／失敗 ' + ng + '件' : ''), ok ? '#1a7f37' : '#c0392b');
+    if (errs.length) console.warn('[公開に戻す]', errs);
+    try { logAct('出品', '未公開をまとめて公開', cc, '成功' + ok + '/失敗' + ng + '（対象' + targets.length + '）'); } catch (_) {}
+    lst._leakHtmlCache = null;
+    setTimeout(() => renderListingAnalysis(), 600);
+  }
   async function renderListingAnalysis() {
     const host = document.getElementById('list-analysis');
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -18939,10 +18977,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               <div style="font-size:10.5px;color:#8a8f98">🧱 作り直しが要る（削除・BAN）</div>
               <div style="font-size:24px;font-weight:800;color:#c0392b">${gone.length}<span style="font-size:13px">件</span></div>
               <div style="margin-top:5px">${chips(gone, '#c0392b')}</div>
-              <div style="font-size:11px;color:#666;margin-top:4px">Shopee上から消えています。<b>戻せません</b>。出し直すか、あきらめるかの判断</div>
+              <div style="font-size:11px;color:#666;margin-top:4px">Shopee上から消えています。<b>戻せません</b>。出し直すか、あきらめるかの判断
+                <br><b style="color:#c0392b">※ここに大量に入っている場合は、GAS(shopee-openapi-sync)が古い版の可能性があります。</b>
+                <span class="smd-dim">2026-08-10まで、取り下げただけの出品(UNLIST)を「削除」として保存していました。貼り替えて🔄同期すると🔁戻せる側に移ります。</span></div>
             </div>
           </div>
-          ${back.length ? `<div style="font-weight:700;font-size:13px;margin:10px 0 5px">🔁 戻せる ${back.length}件</div>
+          ${back.length ? `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 5px">
+            <b style="font-size:13px">🔁 戻せる ${back.length}件</b>
+            ${byCcOf(back).map(([cc, n]) => {
+              const st = back.filter(x => x.cc === cc && (x.models || []).reduce((a2, m) => a2 + (Number(m.stock) || 0), 0) > 0).length;
+              return `<button class="smd-btn an-unl-bulk" data-cc="${esc(cc)}" style="font-size:11px;padding:3px 10px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="在庫がある${st}件だけを公開に戻します（在庫0は公開してもすぐ落ちるため）">▶ ${esc(cc)} の ${st}件を公開に戻す${st < n ? `<span style="font-weight:400"> （在庫0の${n - st}件は除く）</span>` : ''}</button>`;
+            }).join('')}
+            <span class="smd-dim" style="font-size:10.5px">出品枠の上限に当たると途中で止まります。止まった所までは反映されます</span>
+          </div>
+          <div id="an-unl-prog" style="font-size:11.5px;margin-bottom:5px"></div>
           <div class="pf-scroll" style="max-height:320px"><table class="pf-table" style="width:100%"><tr><th style="width:38px">画像</th><th style="width:36px">国</th><th>商品名</th><th style="width:110px">状態</th><th style="width:56px">在庫</th><th style="width:64px"></th></tr>${rowsOf(back)}</table></div>
           ${back.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件（残り${back.length - 200}件）</div>` : ''}` : ''}
           ${gone.length ? `<div style="font-weight:700;font-size:13px;margin:14px 0 5px">🧱 作り直しが要る ${gone.length}件</div>
@@ -18950,6 +18998,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${gone.length > 200 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…先頭200件（残り${gone.length - 200}件）</div>` : ''}` : ''}`;
         })()}
       </div>`;
+    // 🔁 国ごとに、未公開(status=8)をまとめて公開に戻す
+    host.querySelectorAll('.an-unl-bulk').forEach(b2 => b2.addEventListener('click', () => {
+      const cc = b2.dataset.cc;
+      // 在庫0は公開してもすぐ落ちるので対象から外す
+      const targets = (lst.byCc[cc] || []).filter(x => x.status === 8 && (x.models || []).reduce((a2, m) => a2 + (Number(m.stock) || 0), 0) > 0);
+      unlistBulkPublish(cc, targets);
+    }));
     // 止まっている出品 → そのままカタログ編集を開く
     host.querySelectorAll('.an-unl-edit').forEach(b2 => b2.addEventListener('click', () => {
       const rg = regionByCc(b2.dataset.cc);
