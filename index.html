@@ -8118,7 +8118,7 @@
       if (d.spid === 1) f.push({ t: '💸着払い', c: '#d93025', d: '送料が別途かかります（実質価格に加算しています）' });
       if (MERC_SLOW.has(d.smid)) f.push({ t: '🐌普通郵便', c: '#d93025', d: '定形外など＝追跡なしで到着が遅い。発送期限が近い注文には向きません' });
       else if (MERC_UNSET.has(d.smid)) f.push({ t: '🚚未定', c: '#b26a00', d: '配送方法が未定（出品者任せ）。遅い方法になることがあります' });
-      else if (MERC_SHIP[d.smid]) f.push({ t: '⚡' + MERC_SHIP[d.smid], c: '#1a7f37', d: '匿名・追跡あり。1〜2日発送が多く到着が早い' });
+      else if (MERC_SHIP[d.smid]) f.push({ t: '⚡' + MERC_SHIP[d.smid], c: '#1a7f37', d: d.smid === 14 ? 'らくらくメルカリ便（匿名・追跡あり）。ゆうゆうより到着が1日早いので優先しています' : 'ゆうゆうメルカリ便（匿名・追跡あり）。らくらくより到着が1日遅めです' });
     }
     if (d && d.fee > 0 && d.k !== 'mercari') f.push({ t: '＋送料¥' + d.fee.toLocaleString(), c: '#b26a00', d: '送料の目安を加算した実質価格で判定しています（⚙️設定で変更可）' });
     return f; };
@@ -8194,6 +8194,8 @@
   //   9 =郵便（定型・定形外・書留など）＝追跡なしで遅い → 避ける
   //   1,5=未定（出品者任せ）／ shippingPayerId は 1=着払い(購入者負担) 2=送料込み
   const MERC_SHIP = { 14: 'らくらく', 17: 'ゆうゆう', 9: '普通郵便', 1: '未定', 5: '未定' };
+  // 到着の早い順：らくらく(14) → ゆうゆう(17) → それ以外（Shops/未定）。**らくらくの方がリードタイムが1日短い**
+  const mercRank = d => (d && d.k === 'mercari') ? (d.smid === 14 ? 0 : (d.smid === 17 ? 1 : 2)) : 3;
   const MERC_SLOW = new Set([9]);          // 定形外など＝遅い・追跡なし
   const MERC_UNSET = new Set([1, 5]);      // 未定＝出品者任せ
   // ★仕入先ごとの送料の目安（円）。フリマ・オークションは送料込み出品が基本、EC/中古店は別途かかる。
@@ -8409,7 +8411,7 @@
     // 並び：①送料込みの実質価格 ②遅い配送(定形外等)・着払いは後ろ ③同額ならフリマ(メルカリ/Yahoo!フリマ)を先に
     const rank = d => (d.k === 'mercari' || d.k === 'paypay') ? 0 : 1;
     const slow = d => (d.k === 'mercari' && (MERC_SLOW.has(d.smid) || d.spid === 1 || (d.det && d.det.days > 3))) ? 1 : 0;
-    results.sort((a, b) => (slow(a) - slow(b)) || (a.eff - b.eff) || (rank(a) - rank(b)));
+    results.sort((a, b) => (slow(a) - slow(b)) || (a.eff - b.eff) || (mercRank(a) - mercRank(b)) || (rank(a) - rank(b)));
     // ★同じ商品が複数回パースされることがある（駿河屋で同額が3件並んでいた）。URLで重複を落とす。
     const seenUrl = new Set();
     const uniq = results.filter(d => { const u = String(d.url || ''); if (!u || seenUrl.has(u)) return false; seenUrl.add(u); return true; });
@@ -8844,7 +8846,15 @@
       const kwRaw = (() => { try { return decodeURIComponent(kwOf(i)); } catch (_) { return ''; } })();
       const kt = srcKwToks(kwRaw);
       const clean = deals.filter(d => !srcSuspect(d, kt));
-      const pickBy = k => clean.find(d => d.k === k);
+      // メルカリ枠は【らくらく便を優先】。ゆうゆうより到着が1日早く、発送期限に効く。
+      //   ただし極端に高くなるなら意味がないので、最安の1.15倍までを「同等」とみなす。
+      const pickBy = k => {
+        const c = clean.filter(d => d.k === k); if (!c.length) return null;
+        if (k !== 'mercari') return c[0];
+        const cheapest = c[0].eff != null ? c[0].eff : c[0].price;
+        const near = c.filter(d => (d.eff != null ? d.eff : d.price) <= cheapest * 1.15);
+        return near.slice().sort((x, y) => (mercRank(x) - mercRank(y)) || ((x.eff != null ? x.eff : x.price) - (y.eff != null ? y.eff : y.price)))[0] || c[0];
+      };
       const top = [];
       [pickBy('mercari'), pickBy('paypay')].forEach(d => { if (d) top.push(d); });          // メルカリ・Yahoo!フリマの最安は必ず1枠ずつ
       clean.forEach(d => { if (top.length < 3 && !top.includes(d)) top.push(d); });          // 残り枠は全体の安い順で埋める
