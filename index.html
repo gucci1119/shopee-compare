@@ -3766,7 +3766,18 @@
   //   運用実績として、発送した翌日の朝に倉庫へ着き、その日のうちにスキャンされる。
   //   よって「自分がいつ動くか」を決めるのは発送期限のほう。キャンセルの瀬戸際はスキャン期限。
   const SCAN_LEAD_DAYS = 1;                       // 発送してから倉庫スキャンまでに要る日数
-  const ordShipDeadline = (r) => (r.shipBy ? r.shipBy - SCAN_LEAD_DAYS * 86400 : 0);
+  // ★Shopee Japan倉庫は【日曜はスキャンしない】（土曜はする）。ここを入れないと日付が1日ズレる。
+  //   ・スキャン期限が日曜に当たる分は、実質「土曜までにスキャン」
+  //   ・出す日が日曜になる分は、日曜に出しても意味がないので土曜へ前倒し
+  const jstDow_ = (sec) => new Date(sec * 1000 + 9 * 3600 * 1000).getUTCDay();   // 0=日
+  const ordShipDeadline = (r) => {
+    if (!r || !r.shipBy) return 0;
+    let scan = r.shipBy;
+    if (jstDow_(scan) === 0) scan -= 86400;                    // 期限が日曜 → 土曜までに
+    let send = scan - SCAN_LEAD_DAYS * 86400;
+    if (jstDow_(send) === 0) send -= 86400;                    // 出す日が日曜 → 土曜に前倒し
+    return send;
+  };
   const jstDay_ = (ms) => { const t = new Date(ms + 9 * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };
   const dueBucketOf_ = (sec) => {                 // over/d0/d1/d2/later/none
     if (!sec) return 'none';
@@ -3781,7 +3792,11 @@
   // 既定は発送基準（自分の行動が決まるのはこちら）
   const ordDueBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordShipDeadline(r));
   // 倉庫スキャンの期限＝自動キャンセルの基準
-  const ordScanBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(r.shipBy);
+  const ordScanBucket = (r) => {
+    if (r.tab !== 300 || !r.shipBy) return 'none';
+    const scan = (jstDow_(r.shipBy) === 0) ? r.shipBy - 86400 : r.shipBy;   // 日曜はスキャンされない
+    return dueBucketOf_(scan);
+  };
   // 期限を大きく過ぎたものはShopee側で自動キャンセルされる恐れがある（国により猶予は違うが、超過48hを警戒線に）
   const ordAutoCancelRisk = (r) => r.tab === 300 && !ordDone(r) && r.shipBy && (nowSec() - r.shipBy) > 48 * 3600;
   // 📆 これから2週間、どの日に何件出す必要があるか。
@@ -3800,7 +3815,7 @@
     const cnt = {}, scanCnt = {};
     list.forEach(r => {
       const ks = key(ordShipDeadline(r)); cnt[ks] = (cnt[ks] || 0) + 1;
-      const kc = key(r.shipBy); scanCnt[kc] = (scanCnt[kc] || 0) + 1;
+      const kc = key(jstDow_(r.shipBy) === 0 ? r.shipBy - 86400 : r.shipBy); scanCnt[kc] = (scanCnt[kc] || 0) + 1;
     });
     const today = jstDate(Date.now());
     const past = Object.keys(cnt).filter(k => k < today).reduce((a, k) => a + cnt[k], 0);
