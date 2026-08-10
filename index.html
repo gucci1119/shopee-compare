@@ -3844,7 +3844,13 @@
       if (!e) { e = { sb: r.shipBy, lsr: ordLsrScan(r), nfr: ordNfrScan(r), send: ordShipDeadline(r), n: 0, ords: {} }; g.set(k, e); }
       e.n++;
       const od = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
-      if (od) e.ords[od] = (e.ords[od] || 0) + 1;
+      if (od) {
+        e.ords[od] = (e.ords[od] || 0) + 1;
+        // ★同じ日の注文でも、商品ごとのDTS（発送までの日数）設定が違うと期日が割れる。
+        //   何日ぶんの猶予なのかを出さないと「なぜ3行あるのか」が分からない。
+        const gap = Math.round((new Date(key(r.shipBy) + 'T00:00:00+09:00') - new Date(od + 'T00:00:00+09:00')) / 86400000);
+        if (gap >= 0) { e.gapMin = Math.min(e.gapMin == null ? gap : e.gapMin, gap); e.gapMax = Math.max(e.gapMax == null ? gap : e.gapMax, gap); }
+      }
     });
     const rows = [...g.values()].sort((a, b) => a.sb - b.sb);   // 期日の早い順
     const odCell = (o) => Object.entries(o).sort((a, b) => a[0].localeCompare(b[0]))
@@ -3853,14 +3859,16 @@
       <div style="font-size:11.5px;font-weight:700;margin-bottom:4px">📋 期限のかたまり
         <span class="smd-dim" style="font-weight:400;font-size:10.5px">（いつの注文が、いつまでか）</span>
         <span style="font-weight:400;font-size:10.5px;margin-left:6px">対象は<b>まだ家にある ${list.length}件</b>
-        <span class="smd-dim">／「🚚倉庫へ発送済」にした分は、もう手を打ち終わっているので入れていません</span></span></div>
+        <span class="smd-dim">／「🚚倉庫へ発送済」にした分は、もう手を打ち終わっているので入れていません</span></span>
+        <div class="smd-dim" style="font-weight:400;font-size:10.5px;margin-top:2px">※ 同じ日の注文でも行が分かれるのは、<b>商品ごとに発送までの日数（DTS）の設定が違う</b>ためです（「猶予」列）。</div></div>
       <div class="pf-scroll"><table class="pf-table" style="width:100%;min-width:640px;font-size:11.5px">
-        <tr><th style="width:150px">いつの注文</th><th style="width:100px">Shopeeの期日</th><th style="width:96px">📦家から出す</th><th style="width:96px">🏭スキャン</th><th style="width:96px">🛑自動キャンセル</th><th style="width:64px;text-align:right">件数</th><th style="width:90px"></th></tr>
+        <tr><th style="width:150px">いつの注文</th><th style="width:56px" title="注文から期日までの日数。商品ごとのDTS設定で変わります">猶予</th><th style="width:100px">Shopeeの期日</th><th style="width:96px">📦家から出す</th><th style="width:96px">🏭スキャン</th><th style="width:96px">🛑自動キャンセル</th><th style="width:64px;text-align:right">件数</th><th style="width:90px"></th></tr>
         ${rows.map(e => {
           const late = key(e.send) < today, todayIs = key(e.send) === today;
           const nfrOver = nowSec() > e.nfr;
           return `<tr style="${nfrOver ? 'background:#fdecea' : late ? 'background:#fff7f6' : todayIs ? 'background:#fffbe9' : ''}">
             <td style="font-size:11px">${odCell(e.ords)}</td>
+            <td style="font-size:11px;text-align:center;color:${e.gapMax >= 8 ? '#7b52c4' : '#8a8f98'}" title="注文から期日までの日数（商品のDTS設定）">${e.gapMin == null ? '—' : (e.gapMin === e.gapMax ? '+' + e.gapMin + '日' : '+' + e.gapMin + '〜' + e.gapMax + '日')}</td>
             <td class="smd-dim" style="font-size:11px">${md(e.sb)}</td>
             <td style="font-weight:700">${md(e.send)}${late ? '<span style="color:#c0392b"> ⚠</span>' : todayIs ? '<span style="color:#d93025"> ●</span>' : ''}</td>
             <td>${md(e.lsr)}</td>
@@ -3869,7 +3877,7 @@
             <td style="font-size:10.5px">${nfrOver ? '<b style="color:#b71c1c">自動キャンセル済かも</b>' : late ? '<b style="color:#c0392b">出し遅れ</b>' : todayIs ? '<b style="color:#d93025">今日出す</b>' : ''}</td>
           </tr>`;
         }).join('')}
-        <tr style="background:#f6f7f9;font-weight:700"><td colspan="5" style="text-align:right">合計</td><td style="text-align:right">${rows.reduce((a, e) => a + e.n, 0)}</td><td></td></tr>
+        <tr style="background:#f6f7f9;font-weight:700"><td colspan="6" style="text-align:right">合計</td><td style="text-align:right">${rows.reduce((a, e) => a + e.n, 0)}</td><td></td></tr>
       </table></div>
     </div>`;
   }
