@@ -2226,7 +2226,19 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   var rows = [];
   // ★既存の追跡番号を読む＝既に番号がある注文は get_tracking_number を再度叩かない（API節約＝全同期＆⚡今すぐ取得を高速化）。番号未取得(発送手配直後)の分だけ引く。
   var haveTrk = {};
-  try { var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (extr || []).forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; }); } catch (_) {}
+  // ★PostgRESTは1リクエストの返却行数に上限（既定1000）がある。limit=10000 と書いても1000件しか返らず、
+  //   読めなかった分は trk=null のまま upsert され【既に入っていた追跡番号を消していた】。
+  //   注文が最も多いBRで顕著だった（2026-08-11：同期のたびに追跡なしが100→173件へ増加）。
+  //   → 番号が入っている行だけを、1000件ずつページングして全部読む。
+  try {
+    for (var _o = 0; _o < 40; _o++) {
+      var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id))
+        + '&tracking=not.is.null&order=sn.asc&limit=1000&offset=' + (_o * 1000));
+      if (!extr || !extr.length) break;
+      extr.forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; });
+      if (extr.length < 1000) break;
+    }
+  } catch (_) {}
   for (var i = 0; i < sns.length; i += 50) {
     var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
     var _ol = ((jd.response || {}).order_list) || [];
