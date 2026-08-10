@@ -3877,10 +3877,15 @@
     const t0 = cnt[today] || 0;
     const tomo = days[1] ? days[1].n : 0;
     if (!t0 && tomo) tips.push({ lv: 0, t: `今日は出す分がありません。<b>明日の ${tomo}件を先に梱包しておく</b>と、明日が楽になります。` });
+    // ④ ★遅延を出さないのが最優先。今日出す分が残っているなら、それを一番上に置く
+    if (t0) tips.push({ lv: 4, t: `<b style="color:#b71c1c">今日じゅうに ${t0}件</b> 家から出してください。出さないと<b>発送遅延</b>になります（Shopeeの期日は明日）。` });
+    // ⑤ 明日ぶんも今日出せるなら出しておく（前倒しは常に安全）
+    const d1 = days[1];
+    if (d1 && d1.n && (t0 + d1.n) <= cap) tips.push({ lv: 1, t: `明日の ${d1.n}件も、<b>今日いっしょに出しておける余裕があります</b>（今日${t0}件＋明日${d1.n}件＝${t0 + d1.n}件／1日${cap}件まで）。前倒しは常に安全です。` });
     if (!tips.length) return '';
-    const col = { 3: '#b71c1c', 2: '#d93025', 0: '#1a7f37' };
+    const col = { 4: '#b71c1c', 3: '#b71c1c', 2: '#d93025', 1: '#1565c0', 0: '#1a7f37' };
     return `<div style="margin-top:6px;padding:7px 11px;background:#fffdf5;border:1px solid #f0dfae;border-radius:8px">
-      <b style="font-size:11.5px">💡 やっておくと楽なこと</b>
+      <b style="font-size:11.5px">💡 遅延を出さないために</b>
       <div style="font-size:11.5px;line-height:1.9;margin-top:2px">
         ${tips.sort((a, b) => b.lv - a.lv).map(x => `<div style="color:${col[x.lv] || '#5a6b8c'}">・${x.t}</div>`).join('')}
       </div></div>`;
@@ -3894,7 +3899,7 @@
     //   send = 自分の手から離れないといけない日（家を出る日）
     //   scan = Shopee Japan倉庫でスキャンされないといけない日（＝Shopeeのship_by_date）
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
-    const cnt = {}, scanCnt = {}, nfrCnt = {}, ordOf = {}, ordScanOf = {};
+    const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, ordOf = {}, ordScanOf = {};
     const odOf = (r) => {                                   // 注文日 M/D(曜)・JST
       const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || '')).slice(0, 10);
       if (!ymd) return '';
@@ -3902,8 +3907,18 @@
       return (d.getMonth() + 1) + '/' + String(d.getDate()).padStart(2, '0') + '(' + W[d.getDay()] + ')';
     };
     const push = (m, k, v) => { if (!v) return; (m[k] = m[k] || {})[v] = (m[k][v] || 0) + 1; };
+    const today0 = jstDate(Date.now());
     list.forEach(r => {
-      const ks = key(ordShipDeadline(r)); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
+      // ★「家から出す期日」は2本ある。混ぜると打ち手が決まらない。
+      //   ① 遅延にしない線 ＝ 🏭スキャン期限の前日（ふだんはこれを守る）
+      //   ② 注文を消さない最終ライン ＝ 🛑自動キャンセルの前日（①を過ぎたら、次はここ）
+      const sendSec = ordShipDeadline(r);                     // ①
+      const lastSec = ordNfrScan(r) - 86400;                  // ②
+      const late = key(sendSec) < today0;                     // ①をもう過ぎている
+      const ks = key(sendSec); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
+      const kl = key(Math.max(lastSec, late ? Date.now() / 1000 : lastSec));
+      lastCnt[kl] = (lastCnt[kl] || 0) + 1;                   // ②のレーン（全件・遅れている分は今日以降へ）
+      if (late) { lateCnt[ks] = (lateCnt[ks] || 0) + 1; }     // ①を過ぎた分（過去の日に赤で残す）
       const kc = key(ordLsrScan(r)); scanCnt[kc] = (scanCnt[kc] || 0) + 1; push(ordScanOf, kc, odOf(r));
       const kn = key(ordNfrScan(r)); nfrCnt[kn] = (nfrCnt[kn] || 0) + 1;
     });
@@ -3923,9 +3938,8 @@
     for (let i = 0; i < 14; i++) {
       const d = new Date(Date.now() + 9 * 3600 * 1000 + (i + ofs) * 86400000);
       const k = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
-      days.push({ k, w: d.getUTCDay(), md: (d.getUTCMonth() + 1) + '/' + d.getUTCDate(), n: cnt[k] || 0, sc: scanCnt[k] || 0, nf: nfrCnt[k] || 0, src: srcLabel(ordOf, k), srcSc: srcLabel(ordScanOf, k) });
+      days.push({ k, w: d.getUTCDay(), md: (d.getUTCMonth() + 1) + '/' + d.getUTCDate(), n: cnt[k] || 0, sc: scanCnt[k] || 0, nf: nfrCnt[k] || 0, lt: lastCnt[k] || 0, lg: lateCnt[k] || 0, src: srcLabel(ordOf, k), srcSc: srcLabel(ordScanOf, k) });
     }
-    const mx = Math.max(1, ...days.map(d => d.n));
     const cell = (d) => {
       const isToday = d.k === jstDate(Date.now());
       const isSel = String(state.orders.filter || '') === ('send:' + d.k);
@@ -3933,22 +3947,16 @@
       const isPast = d.k < jstDate(Date.now());
       const wCol = d.w === 0 ? '#c0392b' : d.w === 6 ? '#1565c0' : '#8a8f98';   // 日=赤 土=青
       const col = off ? '#8a8f98' : isPast ? '#b71c1c' : (d.n >= 20 ? '#b71c1c' : d.n >= 8 ? '#d93025' : '#1a7f37');
-      const h = Math.round(d.n / mx * 26);
       const tip = d.k + '（' + W[d.w] + '）'
         + '\n📦 家から出す ' + d.n + '件' + (d.src ? '\n　　└ ' + d.src : '')
         + '\n🏭 倉庫でスキャン ' + d.sc + '件' + (d.srcSc ? '\n　　└ ' + d.srcSc : '')
         + '\n🛑 自動キャンセル ' + d.nf + '件'
         + (d.n ? '\n\nクリックでこの分だけ表示' : '');
       const bg = isPast ? '#fff7f6' : (d.w === 0 ? '#fffafa' : d.w === 6 ? '#fafcff' : '#fff');
-      const num = (v, col, title) => `<div style="font-size:${v ? '13' : '11'}px;font-weight:${v ? '800' : '400'};color:${v ? col : '#c9ced6'};line-height:1.35" title="${title}">${v}</div>`;
-      return `<div class="${d.n ? 'ord-calday' : ''}" data-d="${d.k}" title="${esc(tip)}" style="flex:1;min-width:38px;text-align:center;border-radius:6px;padding:3px 1px;${d.n ? 'cursor:pointer;' : ''}${isSel ? 'outline:2px solid #3b5bdb;outline-offset:-2px;' : isToday ? 'outline:2px solid #ee4d2d;outline-offset:-2px;' : ''}background:${bg}">
-        <div style="font-size:9.5px;color:${wCol};font-weight:700">${W[d.w]}</div>
-        <div style="font-size:9px;color:${wCol};opacity:.75">${d.md}</div>
-        <div style="height:20px;display:flex;align-items:flex-end;justify-content:center;margin:1px 0"><span style="display:block;width:13px;height:${Math.max(2, h)}px;background:${d.n ? col : '#e6e9ee'};border-radius:2px 2px 0 0"></span></div>
-        ${num(d.n, isPast ? '#b71c1c' : '#1a7f37', '📦 家から出す')}
-        ${num(d.sc, '#7b52c4', '🏭 倉庫でスキャンされる')}
-        ${num(d.nf, '#c0392b', '🛑 自動キャンセル')}
-        <div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.n ? esc((Object.entries(ordOf[d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div></div>`;
+      const cellSty = 'flex:1;min-width:38px;text-align:center;padding:2px 1px;' + (d.n ? 'cursor:pointer;' : '')
+        + (isSel ? 'outline:2px solid #3b5bdb;outline-offset:-2px;' : isToday ? 'outline:2px solid #ee4d2d;outline-offset:-2px;' : '')
+        + 'background:' + bg + ';border-radius:6px';
+      return { d, tip, isPast, isSel, isToday, wCol, bg, cellSty };
     };
     const week = [];
     for (let i = 0; i < 7; i++) { const d = new Date(Date.now() + 9 * 3600 * 1000 + i * 86400000);
@@ -3964,8 +3972,7 @@
           <button class="smd-btn ord-cal-nav" data-o="7" title="1週間すすむ" style="font-size:11px;padding:1px 7px">▶</button>
         </span>
         ${ofs ? `<span class="smd-dim" style="font-size:10.5px">${ofs > 0 ? '+' + ofs : ofs}日ずらして表示中</span>` : ''}
-        <span style="font-size:10.5px"><b style="color:#1a7f37">📦家から出す</b> ／ <b style="color:#7b52c4">🏭倉庫でスキャン</b> ／ <b style="color:#c0392b">🛑自動キャンセル</b> の順</span>
-        <span class="smd-dim" style="font-size:10.5px">出した翌朝に倉庫へ着き、その日にスキャンされます／最下段は<b>いつの注文分か</b>（詳しくはマウスを乗せる）</span>
+        <span class="smd-dim" style="font-size:10.5px">出した翌朝に倉庫へ着き、その日にスキャンされます（詳しくはマウスを乗せる）</span>
         ${past ? `<span style="background:#b71c1c;color:#fff;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px">🚨 期限を過ぎた分 ${past}件</span>` : ''}
         <label style="font-size:10.5px;color:#8a8f98;display:inline-flex;align-items:center;gap:3px" title="1日にさばける件数。山を見つける基準に使います（実績は1日12〜20件）">
           1日 <input type="number" id="ord-cap" value="${DAY_CAP()}" min="1" max="200" style="width:44px;padding:1px 4px;font-size:11px"> 件まで</label>
@@ -3980,7 +3987,19 @@
               <td style="padding:1px 0">→ <b style="color:#7b52c4">月曜にスキャン</b>　＝　<b style="color:#1a7f37">📦日曜に家から出す</b>　<span class="smd-dim">※日曜に休むなら土曜に出しておけばよい（日曜に着いてもスキャンは月曜になるだけ）</span></td></tr>
         </table>
       </div>
-      <div style="display:flex;gap:3px">${days.map(cell).join('')}</div>
+      ${(() => {
+        const C = days.map(cell);
+        const head = (t, col, tip2) => `<div style="flex:none;width:96px;text-align:right;padding-right:6px;font-size:10.5px;font-weight:700;color:${col};white-space:nowrap" title="${tip2}">${t}</div>`;
+        const row = (h2, render) => `<div style="display:flex;gap:3px;align-items:center">${h2}${C.map(x => `<div class="${x.d.n ? 'ord-calday' : ''}" data-d="${x.d.k}" title="${esc(x.tip)}" style="${x.cellSty}">${render(x)}</div>`).join('')}</div>`;
+        return `<div style="display:flex;flex-direction:column;gap:1px">
+          ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:9px;color:${x.wCol};opacity:.75">${x.d.md}</div>`)}
+          ${row(head('📦 出す（遅延にしない）', '#1a7f37', 'ふだんはこの日までに家から出す。過ぎると発送遅延あつかいになります'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}</div>`)}
+          ${row(head('🆘 出す（最終ライン）', '#c0392b', '遅延はもう避けられない分の最後の線。ここを過ぎると注文そのものが消えます'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
+          ${row(head('🏭 倉庫でスキャン', '#7b52c4', 'Shopeeが出している期日。超えると発送遅延あつかい'), x => `<div style="font-size:${x.d.sc ? '11' : '10'}px;font-weight:${x.d.sc ? '700' : '400'};color:${x.d.sc ? '#7b52c4' : '#c9ced6'}">${x.d.sc}</div>`)}
+          ${row(head('🛑 自動キャンセル', '#b0b6c0', 'ここを超えると注文が消えます'), x => `<div style="font-size:${x.d.nf ? '11' : '10'}px;font-weight:${x.d.nf ? '700' : '400'};color:${x.d.nf ? '#8a8f98' : '#c9ced6'}">${x.d.nf}</div>`)}
+          ${row(head('いつの注文', '#b0b6c0', 'その日に出す分が、いつ入った注文か'), x => `<div style="font-size:8.5px;color:#b0b6c0;line-height:1.25;min-height:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.d.n ? esc((Object.entries(ordOf[x.d.k] || {}).sort((a2, b2) => b2[1] - a2[1])[0] || [''])[0]) + '注文' : ''}</div>`)}
+        </div>`;
+      })()}
       ${calAdviceHtml(days, cnt, key)}
     </div>`;
   }
