@@ -618,10 +618,12 @@
         <button data-k="ledger" class="on" title="仕入れた在庫の台帳（登録・状態変更・棚ラベル）">📒 在庫台帳</button>
         <button data-k="tana" title="在庫台帳を1件ずつ「今あるか・売れたか」に仕分ける（棚卸し）">🧹 棚卸し</button>
         <button data-k="repeat" title="販売履歴から「繰り返し売れている＝先に仕入れておくべき」商品を洗い出す">🎯 有在庫化候補</button>
+        <button data-k="dupid" title="同じ仕入れなのにポータルとスプシで別のIDが付いてしまった分（在庫金額が二重に乗ります）">🔁 二重採番</button>
       </span>
     </div>
     <div id="stock-kpis"></div>
     <div id="stock-tana" style="display:none;padding:12px 20px"></div>
+    <div id="stock-dupid" style="display:none;padding:12px 20px"></div>
     <div class="smd-toolbar">
       <select id="stock-st">
         <option value="" selected>全て</option>
@@ -6038,20 +6040,145 @@
     { var pv = host.querySelector('#tn-prev'); if (pv) pv.addEventListener('click', function () { tana.page = Math.max(0, tana.page - 1); drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
     { var nx = host.querySelector('#tn-next'); if (nx) nx.addEventListener('click', function () { tana.page = tana.page + 1; drawTana(); window.scrollTo({ top: 0, behavior: 'smooth' }); }); }
   }
+  // ============ 🔁 二重採番（ポータルのPITM- と スプシのITM- が同じ仕入れに付く） ============
+  // ★仕組み上、Gmail自動取込は「購入した直後」に走る。その時点でスプシにはまだ手入力されていないので
+  //   照合が空振りしてポータル採番(PITM-)になる。あとからスプシに入れると別IDが付く＝同じ物が2行。
+  //   しかもスプシ側はまとめ買いを分割して金額を按分するので、在庫金額が1.5〜2倍に膨らむ。
+  const dupKeyOf = r => String(r.supplier_order || '').trim();
+  function dupIdScan(rows) {
+    const all = rows || stock.rows || [];
+    const sheetByOrd = new Map();
+    all.forEach(r => {
+      if (String(r.item_id || '').indexOf('ITM-') !== 0) return;
+      const k = dupKeyOf(r); if (!k) return;
+      if (!sheetByOrd.has(k)) sheetByOrd.set(k, []);
+      sheetByOrd.get(k).push(r);
+    });
+    const pairs = [], orphans = [];
+    all.forEach(r => {
+      if (String(r.item_id || '').indexOf('PITM-') !== 0) return;
+      const k = dupKeyOf(r);
+      const mates = k ? (sheetByOrd.get(k) || []) : [];
+      if (mates.length) pairs.push({ p: r, mates });
+      else orphans.push(r);
+    });
+    return { pairs, orphans };
+  }
+  async function renderDupId() {
+    const host = document.getElementById('stock-dupid'); if (!host) return;
+    host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
+    if (!stock.rows) {
+      try { stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); }
+      catch (e) { host.innerHTML = errBox(e); return; }
+    }
+    const { pairs, orphans } = dupIdScan(stock.rows);
+    const yen = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
+    const dupMoney = pairs.reduce((a, x) => a + (Number(x.p.price) || 0), 0);
+    host.innerHTML = `
+      <div class="pagehelp">この画面：<b>同じ仕入れなのにIDが2つ付いてしまった分</b>を見つけて片付けます。
+        Gmailの自動取込は購入した直後に走るので、その時点でスプシにまだ書いていないと、ポータルが自分でID(<code>PITM-</code>)を作ります。
+        あとからスプシに入れると別のID(<code>ITM-</code>)が付くので、同じ物が2行になります。
+        <b>在庫金額が二重に乗る</b>ので、見つけ次第まとめてください。</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px">
+        <div style="flex:1;min-width:190px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:9px;padding:10px 13px">
+          <div style="font-size:10.5px;color:#8a8f98">二重に登録されている</div>
+          <div style="font-size:24px;font-weight:800;color:#c0392b">${pairs.length}<span style="font-size:13px">件</span></div>
+          <div style="font-size:10.5px;color:#8a8f98">在庫金額が ${yen(dupMoney)} ぶん多く出ています</div>
+        </div>
+        <div style="flex:1;min-width:190px;border:1px solid #ececec;border-radius:9px;padding:10px 13px;background:#fff">
+          <div style="font-size:10.5px;color:#8a8f98">スプシに無い（ポータルだけ）</div>
+          <div style="font-size:24px;font-weight:800;color:#b26a00">${orphans.length}<span style="font-size:13px">件</span></div>
+          <div style="font-size:10.5px;color:#8a8f98">スプシ基準の棚卸・確定申告から漏れます</div>
+        </div>
+      </div>
+      ${pairs.length ? `<div style="display:flex;gap:8px;align-items:center;margin-bottom:7px">
+        <b style="font-size:12.5px">二重登録 ${pairs.length}件</b>
+        <button class="smd-btn" id="dup-mergeall" style="font-size:11px;padding:3px 11px;border-color:#c0392b;color:#c0392b">🧹 全部まとめる（ポータル側を消す）</button>
+        <span class="smd-dim" style="font-size:10.5px">画像・仕入れURL・追跡番号は、スプシ側に空きがあれば移してから消します</span>
+      </div>
+      <div class="pf-scroll"><table class="pf-table" style="min-width:960px;font-size:11.5px"><tr>
+        <th style="width:34px"></th><th>商品</th><th style="width:180px">ポータルのID</th><th style="width:80px">金額</th>
+        <th style="width:200px">スプシのID</th><th style="width:110px">金額(合計)</th><th style="width:90px">操作</th></tr>
+        ${pairs.map((x, i) => {
+          const sm = x.mates.reduce((a, m) => a + (Number(m.price) || 0), 0);
+          return `<tr>
+            <td style="text-align:center;color:#8a8f98">${i + 1}</td>
+            <td>${x.p.image ? `<img src="${esc(x.p.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(x.p.name_supplier || x.p.name || '')}</td>
+            <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#b26a00">${esc(x.p.item_id)}</td>
+            <td style="text-align:right">${yen(x.p.price)}</td>
+            <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#1a7f37">${x.mates.map(m => esc(m.item_id)).join('<br>')}</td>
+            <td style="text-align:right">${yen(sm)}${x.mates.length > 1 ? `<span class="smd-dim" style="font-size:10px">（${x.mates.length}行）</span>` : ''}</td>
+            <td><button class="smd-btn dup-merge" data-id="${esc(x.p.item_id)}" style="font-size:10.5px;padding:2px 8px">まとめる</button></td>
+          </tr>`;
+        }).join('')}
+      </table></div>` : '<div class="smd-empty">二重登録はありません🎉</div>'}
+      ${orphans.length ? `<div style="display:flex;gap:8px;align-items:center;margin:16px 0 7px">
+        <b style="font-size:12.5px">スプシに無い ${orphans.length}件</b>
+        <button class="smd-btn" id="dup-csv" style="font-size:11px;padding:3px 11px">📄 CSVでコピー（スプシに貼る用）</button>
+      </div>
+      <div class="pf-scroll"><table class="pf-table" style="min-width:860px;font-size:11.5px"><tr>
+        <th style="width:34px"></th><th>商品</th><th style="width:180px">ポータルのID</th><th style="width:96px">仕入日</th><th style="width:80px">金額</th><th style="width:110px">仕入先</th><th style="width:110px">状態</th></tr>
+        ${orphans.slice(0, 300).map((r, i) => `<tr>
+          <td style="text-align:center;color:#8a8f98">${i + 1}</td>
+          <td>${r.image ? `<img src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(r.name_supplier || r.name || '')}</td>
+          <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#b26a00">${esc(r.item_id)}</td>
+          <td>${esc(String(r.purchase_date || '').slice(0, 10))}</td>
+          <td style="text-align:right">${yen(r.price)}</td><td>${esc(r.supplier || '')}</td><td>${esc(r.status || '')}</td></tr>`).join('')}
+      </table></div>${orphans.length > 300 ? `<div class="smd-dim" style="font-size:11px;margin-top:5px">…ほか ${orphans.length - 300}件（CSVには全部入ります）</div>` : ''}` : ''}`;
+    host.querySelectorAll('.dup-merge').forEach(b => b.addEventListener('click', () => dupMerge([b.dataset.id])));
+    { const b = host.querySelector('#dup-mergeall'); if (b) b.addEventListener('click', () => dupMerge(pairs.map(x => x.p.item_id))); }
+    { const b = host.querySelector('#dup-csv'); if (b) b.addEventListener('click', () => {
+        const head = 'ItemID,仕入日,商品名,金額,仕入先,注文ID,URL,状態';
+        const body = orphans.map(r => [r.item_id, String(r.purchase_date || '').slice(0, 10), r.name_supplier || r.name || '',
+          r.price || '', r.supplier || '', r.supplier_order || '', r.supplier_url || '', r.status || '']
+          .map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+        navigator.clipboard.writeText(head + '\n' + body).then(() => alert('コピーしました（' + orphans.length + '件）。スプシに貼り付けてください'));
+      }); }
+  }
+  // ポータル側(PITM-)の情報をスプシ側(ITM-)に移してから、ポータル側の行を消す。
+  // ★消すのはポータルが自分で作った行だけ。スプシ側は触らない（本人の台帳を壊さないため）。
+  async function dupMerge(ids) {
+    if (!ids || !ids.length) return;
+    if (!confirm(ids.length + '件をまとめます。\n\nポータルが作った行（PITM-）を消して、画像・仕入れURL・追跡番号はスプシ側(ITM-)に空きがあれば移します。\nスプシ側の行と金額はそのままです。\n\n進めますか？')) return;
+    const { pairs } = dupIdScan(stock.rows);
+    const byId = new Map(pairs.map(x => [x.p.item_id, x]));
+    let moved = 0, del = 0, ng = 0;
+    for (const id of ids) {
+      const x = byId.get(id); if (!x) continue;
+      try {
+        const t = x.mates[0];
+        const patch = {};
+        ['image', 'supplier_url', 'tracking_no', 'proof', 'supplier', 'seller', 'note'].forEach(f => {
+          if (!t[f] && x.p[f]) patch[f] = x.p[f];      // スプシ側が空の項目だけ埋める（上書きしない）
+        });
+        if (Object.keys(patch).length) { patch.item_id = t.item_id; await sbUpsert('inventory', [patch]); moved++; }
+        await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id));
+        del++;
+      } catch (e) { ng++; console.warn('[二重採番]', id, e && e.message); }
+    }
+    alert('まとめました：' + del + '件を統合' + (moved ? '（うち' + moved + '件は情報をスプシ側へ移動）' : '') + (ng ? '／失敗 ' + ng + '件' : ''));
+    stock.rows = null;
+    try { stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); } catch (_) {}
+    renderDupId();
+  }
   async function renderTana() { await tanaLoad(false); drawTana(); }
   function applyStockTab() {
     const isBuy = stockTab === 'repeat';
     const isTana = stockTab === 'tana';
+    const isDup = stockTab === 'dupid';
     document.querySelectorAll('#stock-tab button').forEach(b => b.classList.toggle('on', b.dataset.k === stockTab));
     const show = (el, on) => { if (el) el.style.display = on ? '' : 'none'; };
     show(document.getElementById('stk-buytab'), isBuy);
     show(document.getElementById('stock-tana'), isTana);
-    show(document.getElementById('stk-ledger'), !isBuy && !isTana);
-    show(document.getElementById('stock-kpis'), !isBuy && !isTana);
+    show(document.getElementById('stock-dupid'), isDup);
+    const plain = !isBuy && !isTana && !isDup;
+    show(document.getElementById('stk-ledger'), plain);
+    show(document.getElementById('stock-kpis'), plain);
     const pg = document.getElementById('page-stock');
-    if (pg) { const tb = pg.querySelectorAll('.smd-toolbar'); tb.forEach((t, i) => { if (i > 0) show(t, !isBuy && !isTana); }); }  // 先頭はタブバー自身なので残す
+    if (pg) { const tb = pg.querySelectorAll('.smd-toolbar'); tb.forEach((t, i) => { if (i > 0) show(t, plain); }); }  // 先頭はタブバー自身なので残す
     if (isBuy) { try { renderRepeatSellers(); } catch (_) {} }
     if (isTana) { try { renderTana(); } catch (_) {} }
+    if (isDup) { try { renderDupId(); } catch (_) {} }
   }
   function stockRender() {
     const body = document.getElementById('stock-body');
