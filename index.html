@@ -3706,24 +3706,25 @@
     const col = h < 0 ? '#b71c1c' : h < 24 ? '#d93025' : '#7b52c4';
     return '<span title="倉庫でスキャンされる期限。家からは出したので、あとは着いてスキャンされるのを待つだけです" style="display:inline-block;line-height:1.35">'
       + '<span class="smd-dim" style="font-size:10px">発送済</span><br>'
-      + '<span style="font-size:11px;font-weight:700;color:' + col + '">🏭' + mdw_(scan) + '</span></span>';
+      + '<span style="font-size:11px;font-weight:700;color:' + col + '">🏭' + mdw_(scan) + '</span></span>';   // 家を出た後はスキャン待ちだけ
   }
   function shipByBadge(shipBy) {
     if (!shipBy) return '<span class="smd-dim">-</span>';
     const r0 = { shipBy: shipBy, tab: 300 };
     const send = ordShipDeadline(r0), lsr = ordLsrScan(r0), nfr = ordNfrScan(r0);
     const h = Math.round((send - nowSec()) / 3600);
-    const tip = '📦家から出す ' + mdw_(send) + '（この日に出せば遅延にならない）'
-      + '\n🏭倉庫でスキャン ' + mdw_(lsr) + '（Shopeeの期日。超えると発送遅延あつかい）'
-      + '\n🛑自動キャンセル ' + mdw_(nfr) + '（超えると注文が消える）';
+    const tip = '📦 家から出す ' + mdw_(send) + '（この日に出せば発送遅延にならない）'
+      + '\n🆘 最終 ' + mdw_(nfr - 86400) + '（この日に出さないと自動キャンセル）'
+      + '\n\n参考：倉庫でのスキャン期限 ' + mdw_(lsr) + ' ／ 自動キャンセル ' + mdw_(nfr);
     const cls = h < 0 ? 'ord-due-red' : h < 24 ? 'ord-due-red' : h < 48 ? 'ord-due-orange' : 'ord-due-ok';
     const rest = h < 0 ? ('超過' + Math.abs(h) + 'h') : h < 48 ? ('残り' + h + 'h') : ('残り' + Math.floor(h / 24) + '日');
     // ★日付が見えないと「いつまでか」が分からない。出す日を主、スキャン期限と自動キャンセルを従で出す。
+    // ★どちらも「家から出す日」。スキャン期限そのものは出さない（前日に出すのは分かりきっているため）
+    const last = nfr - 86400;                       // 自動キャンセルにしない最終の発送日
     return '<span title="' + tip + '" style="display:inline-block;line-height:1.3">'
       + '<span class="' + cls + '" style="display:inline-block">📦' + mdw_(send) + '</span>'
       + '<br><span style="font-size:9.5px;color:#8a8f98">' + rest + '</span>'
-      + '<br><span style="font-size:9.5px;color:#7b52c4">🏭' + mdw_(lsr) + '</span>'
-      + '<br><span style="font-size:9px;color:#b0b6c0">🛑' + mdw_(nfr) + '</span></span>';
+      + '<br><span style="font-size:9.5px;color:#c0392b">🆘' + mdw_(last) + '</span></span>';
   }
   // Shopeeの生ステータスenumを日本語化（注文一覧の状態列。未知値はそのまま表示）
   // GAS(shopee-openapi-sync)はstatusを一部"To Ship/Processed/Shipping/To Receive"に整形して保存し、残り(UNPAID/COMPLETED等)は生enum。両方＋生enumを網羅（キーは大文字化して照合）
@@ -3808,18 +3809,14 @@
   //   ・発送期限（=スキャン期限の前日）      … ここまでに【自宅から出す】必要がある
   //   運用実績として、発送した翌日の朝に倉庫へ着き、その日のうちにスキャンされる。
   //   よって「自分がいつ動くか」を決めるのは発送期限のほう。キャンセルの瀬戸際はスキャン期限。
-  // ★期限は3つある。Shopeeが返す ship_by_date は【Arrange Shipmentのクリック期限】であって、
-  //   スキャン期限でも自動キャンセルの線でもない。DTS表の定義：
-  //     ② Arrange Shipment クリック期限 = ship_by_date（DTS 2営業日）
-  //     ③ LSR（発送遅延）スキャン期限   = ship_by_date + 1暦日 … 超えると発送遅延率が悪化
-  //     ④ NFR（自動キャンセル）スキャン期限 = ship_by_date + 4暦日 … 超えると注文が消える
-  //   倉庫は【日曜はスキャンしない】（土曜・月曜はする）ので、期限が日曜に当たる分は土曜へ繰り上げ。
-  //   家から出す期限は「スキャンされる日の前日」（発送の翌朝に着いてその日にスキャンされるため）。
+  // ★Shopeeが返す ship_by_date は【倉庫でスキャンされる期限】そのもの。
+  //   実データで確認済み：8/08(土)注文の ship_by = 8/13(木)＝「土曜注文のスキャン期日は木曜」
+  //   家から出すのはその前日。翌朝に倉庫へ着いて、その日のうちにスキャンされるため。
   const SCAN_LEAD_DAYS = 1;
-  const LSR_ADD_DAYS = 1, NFR_ADD_DAYS = 4;
+  const NFR_ADD_DAYS = 2;                        // 自動キャンセルはスキャン期限の+2暦日
   const jstDow_ = (sec) => new Date(sec * 1000 + 9 * 3600 * 1000).getUTCDay();   // 0=日
   const noSunday_ = (sec) => (jstDow_(sec) === 0 ? sec - 86400 : sec);           // 日曜はスキャンされない
-  const ordLsrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy + LSR_ADD_DAYS * 86400) : 0;   // 遅延の線
+  const ordLsrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy) : 0;           // 遅延の線＝ship_by そのもの
   const ordNfrScan = (r) => (r && r.shipBy) ? noSunday_(r.shipBy + NFR_ADD_DAYS * 86400) : 0;   // 自動キャンセルの線
   const ordShipDeadline = (r) => {                                              // 家から出す期限（遅延を出さない線）
     const scan = ordLsrScan(r);
