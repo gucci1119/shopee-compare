@@ -2342,7 +2342,7 @@ function backfillTrackingCompleted(limitN, days) {
     var rows = [];
     try {
       // 完了(tab500)で番号が無いものだけ。新しい順に埋める。
-      rows = sbSelect_('orders', 'select=sn,order_ts&shop_id=eq.' + encodeURIComponent(String(tok.shop_id))
+      rows = sbSelect_('orders', 'select=sn,order_id,order_ts&shop_id=eq.' + encodeURIComponent(String(tok.shop_id))
         + '&tab=eq.500&tracking=is.null&order=order_ts.desc.nullslast&limit=' + cap) || [];
     } catch (e) { log.push({ cc: tok.cc, error: 'select: ' + String(e).slice(0, 100) }); return; }
     var n = 0;
@@ -2353,7 +2353,8 @@ function backfillTrackingCompleted(limitN, days) {
       try {
         var tj = getTracking_(tok.shop_id, r.sn);
         var t = (tj && (tj.tracking_number || tj.first_mile_tracking_number || tj.last_mile_tracking_number)) || null;
-        if (t) { upd.push({ cc: tok.cc, sn: r.sn, tracking: t }); n++; }
+        // ★order_id は NOT NULL。送らないと upsert が 23502 で落ちる（実測）
+        if (t) { upd.push({ cc: tok.cc, sn: r.sn, order_id: r.order_id || r.sn, tracking: t }); n++; }
       } catch (e2) { /* 個別の失敗は飛ばす */ }
     }
     log.push({ cc: tok.cc, shop_id: tok.shop_id, 対象: rows.length, 引いた: got, 取れた: n });
