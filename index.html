@@ -725,7 +725,8 @@
           <input type="number" id="pc-d" placeholder="D" style="width:56px;font-size:13px;padding:5px 6px"></label>
         <label style="font-size:12px" title="空欄なら仕入額と重量から自動（⚙️の帯別ROI）">目標ROI %（任意）<br><input type="number" id="pc-roi" placeholder="自動" style="width:86px;font-size:13px;padding:5px 8px"></label>
         <label style="font-size:12px" title="②のパターンで、Shopeeにいくらで載せるか。①の何%かで指定します（例50＝半額）。残りはPayPalで受け取ります">Shopee掲載＝①の何%<br><input type="number" id="pc-ratio" value="50" style="width:86px;font-size:13px;padding:5px 8px"></label>
-        <button class="smd-btn primary" id="pc-go" style="padding:6px 18px">計算する</button>
+        <label style="font-size:12px" title="PayPalで受け取る時に引かれる手数料の目安。海外からの受取は概ね 4.1% ＋ 固定40円（通貨・国により変動）">PayPal手数料<br><input type="number" id="pc-ppfee" value="4.1" step="0.1" style="width:64px;font-size:13px;padding:5px 8px">%＋<input type="number" id="pc-ppfix" value="40" style="width:56px;font-size:13px;padding:5px 8px">円</label>
+        <button class="smd-btn" id="pc-go" style="padding:6px 14px" title="入力すると自動で計算されます。押し直したい時だけ使ってください">再計算</button>
         <span id="pc-msg" class="smd-dim" style="font-size:11.5px"></span>
       </div>
       <div id="pc-out"></div>
@@ -3202,9 +3203,11 @@
     const num = (id) => { const v = (document.getElementById(id) || {}).value; const n = Number(v); return (v === '' || isNaN(n)) ? null : n; };
     const cost = num('pc-cost'), wg = num('pc-weight');
     const dW = num('pc-w'), dH = num('pc-h'), dD = num('pc-d'), roi = num('pc-roi');
-    if (!cost || cost <= 0) { msg.textContent = '仕入値を入れてください'; out.innerHTML = ''; return; }
+    if (!cost || cost <= 0) { msg.textContent = ''; out.innerHTML = '<div class="smd-dim" style="font-size:12px;padding:6px 2px">仕入値を入れると、7か国ぶんの出品価格がここに出ます（打ちながら自動で更新されます）。</div>'; return; }
     msg.textContent = '';
     const ratio = Math.min(1, Math.max(0.05, (num('pc-ratio') || 50) / 100));   // ②でShopeeに載せる割合
+    const ppRate = Math.min(0.5, Math.max(0, (num('pc-ppfee') != null ? num('pc-ppfee') : 4.1) / 100)); // PayPal料率
+    const ppFix = Math.max(0, num('pc-ppfix') != null ? num('pc-ppfix') : 40);                          // PayPal固定手数料(円)
     const opt = { weightG: wg || 0, dimW: dW || 0, dimH: dH || 0, dimD: dD || 0 };
     if (roi != null) opt.roiPct = roi;
     const target = TARGET_GROSS();
@@ -3217,60 +3220,84 @@
       //    掲載価格を下げるほどShopee手数料が減るので、同じ粗利でも買い手の総支払は安くなる
       const lowLocal = roundLocal(local * ratio, rg.priceUnit || 1);          // ②の掲載価格＝①×指定比率
       const lowPf = priceProfitFor(cc, cost, lowLocal, opt);
-      const ppNeed = Math.max(0, Math.round((pf.profit - lowPf.profit)));     // PayPalで埋める円
-      return { rg, cc, local, pf, lowLocal, lowPf, ppNeed };
+      // ①と同じ手取りに届かせるのに必要な「PayPalの請求額」。手数料で目減りするので、その分を上乗せして請求する。
+      //   手取り = 請求 ×(1−料率) − 固定  →  請求 = (必要手取り + 固定) ÷ (1−料率)
+      const need = Math.max(0, pf.profit - lowPf.profit);                      // ①に届かせるのに要る手取り(円)
+      const ppAsk = need > 0 ? Math.round((need + ppFix) / (1 - ppRate)) : 0;  // 買い手に請求するPayPal額
+      const ppFee = Math.max(0, ppAsk - need ? Math.round(ppAsk * ppRate + ppFix) : 0);
+      const ppNet = Math.max(0, Math.round(ppAsk - (ppAsk * ppRate + ppFix)));  // 実際に手元に残る
+      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet };
     });
+    const vol = (dW && dH && dD) ? Math.round(dW * dH * dD / 6) : 0;   // 容積重量(g)
+    const chargeG = Math.max(wg || 0, vol);                            // 実際にSLSが課金される重量
     const y = (n) => '¥' + Math.round(n).toLocaleString();
     const cur = (rg, v) => rg.cur + Math.round(v).toLocaleString();
-    out.innerHTML = `<div class="pf-scroll" style="max-height:none"><table class="pf-table" style="min-width:900px">
+    out.innerHTML =
+      // ── ① Shopeeだけで完結 ─────────────────────────────
+      `<div style="font-weight:700;font-size:13px;margin:2px 0 6px">① Shopeeだけで出す</div>
+      <div class="pf-scroll" style="max-height:none"><table class="pf-table" style="min-width:760px">
       <tr><th style="width:52px">国</th>
-        <th style="text-align:right">① Shopeeだけ<br><span class="smd-dim" style="font-weight:400;font-size:9.5px">出品価格</span></th>
-        <th style="text-align:right">買い手の支払<br><span class="smd-dim" style="font-weight:400;font-size:9.5px">円換算</span></th>
-        <th style="text-align:right">手数料</th><th style="text-align:right">SLS送料</th>
-        <th style="text-align:right">入金</th><th style="text-align:right">粗利</th><th style="text-align:right">ROI</th>
-        <th style="text-align:right;background:#f6f2ff">② Shopee掲載<br><span class="smd-dim" style="font-weight:400;font-size:9.5px">抑えた価格</span></th>
-        <th style="text-align:right;background:#f6f2ff">＋PayPal</th>
-        <th style="text-align:right;background:#f6f2ff">合計粗利</th></tr>
-      ${rows.map(r => {
-        const ok = r.pf.profit >= target;
-        return `<tr>
+        <th style="text-align:right">出品価格</th>
+        <th style="text-align:right">買い手の支払<span class="smd-dim" style="font-weight:400;font-size:9.5px">（円）</span></th>
+        <th style="text-align:right">手数料</th><th style="text-align:right">SLS送料<span class="smd-dim" style="font-weight:400;font-size:9.5px"><br>課金重量</span></th>
+        <th style="text-align:right">入金</th><th style="text-align:right">粗利</th><th style="text-align:right">ROI</th></tr>
+      ${rows.map(r => { const ok = r.pf.profit >= target; return `<tr>
         <td><span class="ord-cc" style="background:${r.rg.color}">${r.cc}</span></td>
-        <td style="text-align:right;font-weight:700;font-size:13px">${cur(r.rg, r.local)}</td>
+        <td style="text-align:right;font-weight:700;font-size:14px">${cur(r.rg, r.local)}</td>
         <td style="text-align:right">${y(r.pf.buyerJpy)}</td>
         <td style="text-align:right;color:#c0392b">−${y(r.pf.feeJpy)}<div class="smd-dim" style="font-size:9px">${r.pf.feePct}%</div></td>
-        <td style="text-align:right;color:#c0392b">−${y(r.pf.slsJpy)}</td>
-        <td style="text-align:right">${y(r.pf.payoutJpy)}</td>
+        <td style="text-align:right;color:#c0392b">−${y(r.pf.slsJpy)}<div class="smd-dim" style="font-size:9px">${chargeG}g${r.cc === 'MY' && !vol ? ' <span style="color:#d93025" title="マレーシアは容積重量で課金されます。寸法(W×H×D)を入れないとSLS送料が実際より安く出ます">⚠寸法未入力</span>' : ''}</div></td>
+        <td style="text-align:right">${y(r.pf.payoutJpy)}<div class="smd-dim" style="font-size:9px" title="Payoneerの入金為替手数料（⚙️設定 pricePayoutFxPct）を引いた後">Payoneer−${y(r.pf.payFxJpy)}</div></td>
         <td style="text-align:right;font-weight:700;color:${ok ? '#1a7f37' : (r.pf.profit > 0 ? '#b26a00' : '#d93025')}">${y(r.pf.profit)}</td>
-        <td style="text-align:right;color:${ok ? '#1a7f37' : '#b26a00'}">${Math.round(r.pf.roi)}%</td>
-        <td style="text-align:right;background:#faf8ff">${cur(r.rg, r.lowLocal)}<div class="smd-dim" style="font-size:9px">${y(r.lowPf.payoutJpy)}入金</div></td>
-        <td style="text-align:right;background:#faf8ff;font-weight:700;color:#5b3fa8">${y(r.ppNeed)}</td>
-        <td style="text-align:right;background:#faf8ff;font-weight:700;color:#1a7f37">${y(r.lowPf.profit + r.ppNeed)}</td>
-      </tr>`; }).join('')}
-    </table></div>
-    <div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.8">
-      仕入 <b>${y(cost)}</b>${wg ? ' ／ 重量 <b>' + wg + 'g</b>' : ''}${(dW && dH && dD) ? ' ／ 寸法 ' + dW + '×' + dH + '×' + dD + 'cm（容積重量 ' + Math.round(dW * dH * dD / 6) + 'g と重い方でSLSを計算）' : ''}${roi != null ? ' ／ 目標ROI ' + roi + '%' : ' ／ 目標ROIは⚙️の仕入額×重量帯から自動'}。目標粗利 <b>${y(target)}</b>。<br>
-      <b style="color:#5b3fa8">② Shopee＋PayPal</b>＝Shopee掲載を抑えて（①の${Math.round(ratio * 100)}%）、不足分をPayPalで別途受け取る形。
-      <b>Shopee手数料は掲載価格にしか掛からない</b>ので、買い手の総支払が同じでも<b>手取りが増えます</b>。掲載価格は買い手と相談のうえ決めてください。<br>
-      ※価格・手数料・SLS送料・為替の前提は<b>⚙️設定</b>の値を使っています（出品を作る画面と同じ計算）。
-    </div>
-    <details style="margin-top:8px"><summary class="smd-dim" style="font-size:11px;cursor:pointer">🧮 計算の中身（クリックで開く）</summary>
-      <div class="smd-dim" style="font-size:11px;line-height:1.9;margin-top:6px">
-        <b>① 出品価格の出し方</b><br>
-        　出品価格(現地) ＝ K ÷ 為替　／　K(円) ＝ ( 仕入 × (1＋ROI) ÷ (1−FXマージン) ＋ SLS送料 ) ÷ (1−合計手数料%) ÷ (1−利益バッファ)<br>
-        　・<b>SLS送料</b>は「実重量」と「容積重量(W×H×D÷6)」の<b>重い方</b>を50g単位で課金<br>
-        　・<b>ROI</b>は⚙️の仕入額×重量帯の表から自動（手入力で上書き可）。仕入は帯の上限で計算（スプシと同じ挙動）<br>
-        　・最後に国ごとの価格単位（VNは1,000刻み等）で丸め<br><br>
-        <b>手取りの出し方（表の右側）</b><br>
-        　買い手支払 ＝ 出品価格 ×(1−想定値引き) → ×(1−手数料) → −SLS送料 → −固定控除 → ×(1−入金為替手数料) ＝ <b>入金</b><br>
-        　粗利 ＝ 入金 − 仕入　／　ROI ＝ 粗利 ÷ 仕入<br><br>
-        <b>② Shopee＋PayPal の考え方</b><br>
-        　<b>Shopee手数料は「Shopeeに載せた価格」にしか掛かりません。</b>だから掲載を下げると手数料も下がります。<br>
-        　・Shopee掲載 ＝ ①の指定%　→ その入金額を計算<br>
-        　・PayPalで受け取る額 ＝ <b>①の粗利 − ②の粗利</b>（①と同じ手取りに届くまでの不足分）<br>
-        　・合計粗利 ＝ ②の粗利 ＋ PayPal額<br>
-        　※PayPal側の手数料はこの計算に<b>含めていません</b>（受取方法により変わるため）。実際はその分だけ目減りします。<br>
-        　※掲載価格の決め方（BRの価格上限に合わせる／買い手と相談した額 等）が決まっていれば、%指定でなくその額を直接入れる形にできます。
-      </div></details>`;
+        <td style="text-align:right;color:${ok ? '#1a7f37' : '#b26a00'}">${Math.round(r.pf.roi)}%</td></tr>`; }).join('')}
+      </table></div>` +
+      // ── ② Shopee＋PayPal ────────────────────────────────
+      `<div style="font-weight:700;font-size:13px;margin:18px 0 6px;color:#5b3fa8">② Shopeeに抑えて出し、差額をPayPalでもらう
+        <span class="smd-dim" style="font-weight:400;font-size:11px">（Shopee掲載＝①の${Math.round(ratio * 100)}%）</span></div>
+      <div class="pf-scroll" style="max-height:none"><table class="pf-table" style="min-width:820px">
+      <tr><th style="width:52px">国</th>
+        <th style="text-align:right">Shopee掲載価格</th>
+        <th style="text-align:right">Shopeeから入金</th>
+        <th style="text-align:right">PayPal請求</th>
+        <th style="text-align:right">PayPal手数料</th>
+        <th style="text-align:right">PayPal手取り</th>
+        <th style="text-align:right">合計粗利</th>
+        <th style="text-align:right">①との差</th></tr>
+      ${rows.map(r => { const tot = r.lowPf.profit + r.ppNet; const diff = tot - r.pf.profit; return `<tr>
+        <td><span class="ord-cc" style="background:${r.rg.color}">${r.cc}</span></td>
+        <td style="text-align:right;font-weight:700;font-size:14px">${cur(r.rg, r.lowLocal)}</td>
+        <td style="text-align:right">${y(r.lowPf.payoutJpy)}</td>
+        <td style="text-align:right;font-weight:700;color:#5b3fa8">${y(r.ppAsk)}</td>
+        <td style="text-align:right;color:#c0392b">−${y(r.ppAsk - r.ppNet)}</td>
+        <td style="text-align:right">${y(r.ppNet)}</td>
+        <td style="text-align:right;font-weight:700;color:${tot >= target ? '#1a7f37' : (tot > 0 ? '#b26a00' : '#d93025')}">${y(tot)}</td>
+        <td style="text-align:right;color:${diff >= 0 ? '#1a7f37' : '#c0392b'}">${diff >= 0 ? '+' : '−'}${y(Math.abs(diff))}</td></tr>`; }).join('')}
+      </table></div>` +
+      `<div class="smd-dim" style="font-size:11px;margin-top:10px;line-height:1.8">
+        仕入 <b>${y(cost)}</b>${wg ? ' ／ 重量 <b>' + wg + 'g</b>' : ''}${(dW && dH && dD) ? ' ／ 寸法 ' + dW + '×' + dH + '×' + dD + 'cm（容積重量 ' + Math.round(dW * dH * dD / 6) + 'g と重い方でSLSを計算）' : ''}${roi != null ? ' ／ 目標ROI ' + roi + '%' : ' ／ 目標ROIは⚙️の仕入額×重量帯から自動'}　目標粗利 <b>${y(target)}</b>　PayPal手数料 <b>${(ppRate * 100).toFixed(1)}%＋${y(ppFix)}</b>
+      </div>` +
+      // ── 計算ロジック（常時表示。折りたたまない）─────────────
+      `<div style="margin-top:14px;background:#fbfbfd;border:1px solid #e6e8ef;border-radius:8px;padding:11px 14px">
+        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px">🧮 計算ロジック</div>
+        <div style="font-size:11.5px;line-height:2;color:#4a5568">
+          <b>① 出品価格</b><br>
+          　出品価格(現地) ＝ K ÷ 為替　／　K(円) ＝ ( 仕入 × (1＋ROI) ÷ (1−FXマージン) ＋ SLS送料 ) ÷ (1−合計手数料%) ÷ (1−利益バッファ)<br>
+          　・<b>SLS送料</b>＝「実重量」と「容積重量(W×H×D÷6)」の<b>重い方</b>を50g単位で課金<br>
+          　　<b style="color:#d93025">マレーシアは容積重量で課金されます。</b>寸法を入れないと実重量で計算され、SLS送料が実際より安く出ます<br>
+          　・<b>ROI</b>＝⚙️の仕入額×重量帯の表から自動（手入力で上書き可）。仕入は<b>帯の上限</b>で計算（スプレッドシートと同じ）<br>
+          　・最後に国ごとの価格単位で丸め（VNは1,000刻み 等）<br>
+          <b>手取り</b><br>
+          　出品価格 ×(1−想定値引き) → ×(1−Shopee手数料) → −SLS送料 → −国別の固定控除 → <b>×(1−Payoneer入金為替手数料)</b> ＝ <b>入金</b>　／　粗利 ＝ 入金 − 仕入<br>
+          　※Payoneerの手数料（⚙️設定の入金為替手数料）は<b>①②とも Shopee入金分に掛かります</b>。表の「入金」欄に控除額を出しています。PayPalで受け取る分にはPayoneerは関係しません<br>
+          <b>② Shopee＋PayPal</b><br>
+          　<b>Shopee手数料は「Shopeeに載せた価格」にしか掛からない</b>ので、掲載を下げると手数料も下がります。<br>
+          　・必要な手取り ＝ ①の粗利 − ②の粗利<br>
+          　・<b>PayPal請求 ＝ ( 必要な手取り ＋ 固定手数料 ) ÷ (1 − 料率)</b>　←手数料で目減りする分を上乗せして請求<br>
+          　・合計粗利 ＝ ②の粗利 ＋ PayPal手取り<br>
+          　※PayPal手数料は<b>目安</b>です（海外受取は概ね 4.1%＋40円。通貨・国で変わるので入力欄で調整してください）<br>
+          　※手数料・SLS送料・為替・想定値引き・固定控除はすべて<b>⚙️設定</b>の値。「出品を作る」と同じ計算です。
+        </div>
+      </div>`;
   }
   function showPage(p) {
     // 旧「⚠️アラート」「✅タスク管理」は「🎯やること」ページのサブタブに統合（既存の showPage('alerts'/'tasks') 呼び出しは互換）
@@ -3326,10 +3353,15 @@
   document.querySelectorAll('.fin-tab').forEach(b => b.addEventListener('click', () => showPage(b.dataset.fp)));
   // 💴 出品価格の計算機：ボタンとEnterキーで走らせる
   { const go = document.getElementById('pc-go'); if (go) go.addEventListener('click', priceCalcRun);
-    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio'].forEach(id => {
+    // ★打ちながら即座に出す（ボタンを押させない）。打鍵のたびの再計算は重くないが、
+    //   入力途中の値でチラつかないよう軽くデバウンスする。
+    let pcT = null;
+    const live = () => { clearTimeout(pcT); pcT = setTimeout(priceCalcRun, 220); };
+    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'].forEach(id => {
       const el = document.getElementById(id); if (!el) return;
-      el.addEventListener('keydown', e => { if (e.key === 'Enter') priceCalcRun(); });
-      el.addEventListener('change', () => { if ((document.getElementById('pc-cost') || {}).value) priceCalcRun(); });
+      el.addEventListener('input', live);
+      el.addEventListener('change', live);
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(pcT); priceCalcRun(); } });
     }); }
   { const rg = document.getElementById('rank-goedit'); if (rg) rg.addEventListener('click', () => { try { lst.tab = 'analysis'; lst.anaSub = 'coverage'; localStorage.setItem('smdListTab', 'analysis'); } catch (_) {} showPage('list'); }); }
   document.querySelectorAll('.rank-go').forEach(b => b.addEventListener('click', () => {
@@ -23384,19 +23416,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }
         keys = seqK.reverse();  // 古い→新しい
       }
-      // ★描画のたびに右端（＝直近＝今日）へ寄せる。左端から始まると今日が画面外で、毎回スクロールが要る。
-      //   ユーザーが自分で左へ動かした後は尊重する（同じ期間のうちは再スクロールしない）。
-      { const sc = document.getElementById('trend-scroll');
-        if (sc) {
-          const sig = period + '|' + keys.length + '|' + (keys[keys.length - 1] || '');
-          if (renderTrend._scrollSig !== sig) {
-            renderTrend._scrollSig = sig;
-            // レイアウト確定前だと scrollWidth が正しくないので、数回だけ確実に右端へ寄せる
-            const toEnd = () => { try { sc.scrollLeft = sc.scrollWidth; } catch (_) {} };
-            toEnd(); requestAnimationFrame(toEnd);
-            setTimeout(toEnd, 60); setTimeout(toEnd, 250); setTimeout(toEnd, 700);
-          }
-        } }
       const noteEl = document.getElementById('trend-note');
       if (!Object.keys(buk).length) { el.innerHTML = '<span class="smd-dim">データがありません（注文を同期すると表示されます）</span>'; noteEl.textContent = ''; return; }
       const EMPTY = { count: 0, units: 0, sales: 0, cancel: 0, byCc: {} };
@@ -23447,6 +23466,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             `<div style="width:100%;height:${h}px;border-radius:${last && projected ? '0' : '3px 3px 0 0'};overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
             `<div style="font-size:${isMobile ? 7.5 : 9}px;color:#6b7280;margin-top:${denseX ? 8 : 3}px;white-space:nowrap;height:${denseX ? 0 : 'auto'};transform:${denseX ? 'rotate(-50deg)' : 'none'};transform-origin:center top">${trendLabel(k, effPeriod)}</div></div>`;
         }).join('') + '</div></div>';
+      // ★右端（＝直近＝今日）へ寄せる。左端から始まると今日が画面外で毎回スクロールが要る。
+      //   ※必ず el.innerHTML の【後】。前に置くと要素がまだ無くて何も起きない（実際にそうなっていた）
+      { const sc = document.getElementById('trend-scroll');
+        if (sc) {
+          const sig = effPeriod + '|' + keys.length + '|' + (keys[keys.length - 1] || '');
+          if (renderTrend._scrollSig !== sig) {
+            renderTrend._scrollSig = sig;
+            const toEnd = () => { try { sc.scrollLeft = sc.scrollWidth; } catch (_) {} };
+            toEnd(); requestAnimationFrame(toEnd);
+            setTimeout(toEnd, 60); setTimeout(toEnd, 250); setTimeout(toEnd, 700);
+          }
+        } }
       const total = keys.reduce((s, k) => s + val(k), 0);
       const pName = (TREND_PERIODS.find(p => p[0] === effPeriod) || ['', ''])[1];
       const rangePrefix = rr ? `<b>${rr.label}</b>（${rr.s}〜${rr.e}）・` : '';
