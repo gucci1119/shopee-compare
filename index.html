@@ -3295,6 +3295,17 @@
   //   ① Shopeeだけで完結  … 通常。出品価格＝priceLocalFor
   //   ② Shopee＋PayPalで差額 … Shopee側は「抑えた価格」で出し、不足分をPayPalで別途受け取る運用。
   //      Shopee手数料は掲載価格にしか掛からないので、同じ手取りでも【手数料が減る＝利益が増える】。
+  // 入力を憶えておく：ページを開き直すたびに打ち直すのが面倒なので、前回の値を復元する
+  const PC_IDS = ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'];
+  function priceCalcSave() {
+    const o = {}; PC_IDS.forEach(id => { const el = document.getElementById(id); if (el) o[id] = el.value; });
+    try { localStorage.setItem('smdPriceCalc', JSON.stringify(o)); } catch (_) {}
+  }
+  function priceCalcRestore() {
+    let o = null; try { o = JSON.parse(localStorage.getItem('smdPriceCalc') || 'null'); } catch (_) {}
+    if (!o) return;
+    PC_IDS.forEach(id => { const el = document.getElementById(id); if (el && o[id] != null && el.value === '') el.value = o[id]; });
+  }
   function priceCalcRun() {
     const out = document.getElementById('pc-out'), msg = document.getElementById('pc-msg');
     const num = (id) => { const v = (document.getElementById(id) || {}).value; const n = Number(v); return (v === '' || isNaN(n)) ? null : n; };
@@ -3434,7 +3445,7 @@
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, tax: renderTax, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
-      expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: priceCalcRun,
+      expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); },
       account: renderAccounts,
     };
     const fn = RENDER[p];
@@ -3469,7 +3480,7 @@
     // ★打ちながら即座に出す（ボタンを押させない）。打鍵のたびの再計算は重くないが、
     //   入力途中の値でチラつかないよう軽くデバウンスする。
     let pcT = null;
-    const live = () => { clearTimeout(pcT); pcT = setTimeout(priceCalcRun, 220); };
+    const live = () => { clearTimeout(pcT); pcT = setTimeout(() => { priceCalcSave(); priceCalcRun(); }, 220); };
     ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'].forEach(id => {
       const el = document.getElementById(id); if (!el) return;
       el.addEventListener('input', live);
@@ -16654,21 +16665,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // カタログ単位の「🌏統括編集」：統括タイトル→全国／国別タイトル編集・書込／価格×係数一括。細かい価格・バリエは各行の✎詳細(openCatalogEditor)
   // 出品一覧の行から「各国まとめ編集」を直接開く：同じタイトルの各国出品を束ねて covCatData を即席で作る（SKU未統一でもタイトルで横断）
+  // 束ねるキー：①親SKU（国をまたいで同じ管理コードなら同一商品）→ ②正規化タイトル。
+  //   タイトルだけだと国ごとに文言が違って半分以上束ねられない（実測：2か国以上の商品の56%が名前で束ねられない）。
+  //   親SKUは95%が埋まっており矛盾は2%だけ（実測）なので、SKU一致を先に見てからタイトルで拾う。
+  const uniSkuNorm = s => String(s || '').trim().toUpperCase().replace(/\s+/g, '');
+  const uniSkuUsable = s => uniSkuNorm(s).length >= 4;   // 1〜3文字は連番などの誤爆が怖いので使わない
   function openUnifyFromListing(repName) {
     const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
     const target = norm(repName);
     if (!target) { alert('この商品はタイトルが空のため、各国をまとめられません。'); return false; }
+    const all = [];
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(l => all.push({ cc, l })));
+    // ① 名前が一致するものを種にして、そこから親SKUを拾う
+    const skus = new Set();
+    all.forEach(({ l }) => { if (norm(l.name) === target && uniSkuUsable(l.parent_sku)) skus.add(uniSkuNorm(l.parent_sku)); });
     const listings = []; const seen = new Set();
-    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(l => {
-      if (norm(l.name) !== target) return;
+    all.forEach(({ cc, l }) => {
+      const byTitle = norm(l.name) === target;
+      const bySku = uniSkuUsable(l.parent_sku) && skus.has(uniSkuNorm(l.parent_sku));
+      if (!byTitle && !bySku) return;
       const k = cc + ':' + l.item_id; if (seen.has(k)) return; seen.add(k);
       const rg = regionByCc(cc) || {};
-      listings.push({ cc, host: rg.host || '', item_id: l.item_id, parent_sku: l.parent_sku || '', name: l.name || '', price: l.price_min });
-    }));
+      listings.push({ cc, host: rg.host || '', item_id: l.item_id, parent_sku: l.parent_sku || '', name: l.name || '', price: l.price_min, via: byTitle ? 'title' : 'sku' });
+    });
     if (!listings.length) return false;
     const key = '__row__::' + target.slice(0, 60);
     lst.covCatData = lst.covCatData || {};
-    lst.covCatData[key] = { rep: repName, curSku: (listings[0] || {}).parent_sku || '', recSku: '', listings };
+    lst.covCatData[key] = { rep: repName, curSku: (listings.find(x => uniSkuUsable(x.parent_sku)) || {}).parent_sku || '', recSku: '', listings };
     openUnifyEditor(key);
     return true;
   }
