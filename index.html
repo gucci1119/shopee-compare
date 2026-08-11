@@ -721,6 +721,7 @@
           <input type="number" id="pc-h" placeholder="H" style="width:56px;font-size:13px;padding:5px 6px">
           <input type="number" id="pc-d" placeholder="D" style="width:56px;font-size:13px;padding:5px 6px"></label>
         <label style="font-size:12px" title="空欄なら仕入額と重量から自動（⚙️の帯別ROI）">目標ROI %（任意）<br><input type="number" id="pc-roi" placeholder="自動" style="width:86px;font-size:13px;padding:5px 8px"></label>
+        <label style="font-size:12px" title="②のパターンで、Shopeeにいくらで載せるか。①の何%かで指定します（例50＝半額）。残りはPayPalで受け取ります">Shopee掲載＝①の何%<br><input type="number" id="pc-ratio" value="50" style="width:86px;font-size:13px;padding:5px 8px"></label>
         <button class="smd-btn primary" id="pc-go" style="padding:6px 18px">計算する</button>
         <span id="pc-msg" class="smd-dim" style="font-size:11.5px"></span>
       </div>
@@ -3198,6 +3199,7 @@
     const dW = num('pc-w'), dH = num('pc-h'), dD = num('pc-d'), roi = num('pc-roi');
     if (!cost || cost <= 0) { msg.textContent = '仕入値を入れてください'; out.innerHTML = ''; return; }
     msg.textContent = '';
+    const ratio = Math.min(1, Math.max(0.05, (num('pc-ratio') || 50) / 100));   // ②でShopeeに載せる割合
     const opt = { weightG: wg || 0, dimW: dW || 0, dimH: dH || 0, dimD: dD || 0 };
     if (roi != null) opt.roiPct = roi;
     const target = TARGET_GROSS();
@@ -3208,7 +3210,7 @@
       const pf = priceProfitFor(cc, cost, local, opt);
       // ② PayPal併用：Shopee掲載を「仕入がちょうど回収できる線」まで下げ、残りをPayPalで受け取る
       //    掲載価格を下げるほどShopee手数料が減るので、同じ粗利でも買い手の総支払は安くなる
-      const lowLocal = roundLocal(local * 0.5, rg.priceUnit || 1);           // 目安：掲載を半額に
+      const lowLocal = roundLocal(local * ratio, rg.priceUnit || 1);          // ②の掲載価格＝①×指定比率
       const lowPf = priceProfitFor(cc, cost, lowLocal, opt);
       const ppNeed = Math.max(0, Math.round((pf.profit - lowPf.profit)));     // PayPalで埋める円
       return { rg, cc, local, pf, lowLocal, lowPf, ppNeed };
@@ -3242,10 +3244,28 @@
     </table></div>
     <div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.8">
       仕入 <b>${y(cost)}</b>${wg ? ' ／ 重量 <b>' + wg + 'g</b>' : ''}${(dW && dH && dD) ? ' ／ 寸法 ' + dW + '×' + dH + '×' + dD + 'cm（容積重量 ' + Math.round(dW * dH * dD / 6) + 'g と重い方でSLSを計算）' : ''}${roi != null ? ' ／ 目標ROI ' + roi + '%' : ' ／ 目標ROIは⚙️の仕入額×重量帯から自動'}。目標粗利 <b>${y(target)}</b>。<br>
-      <b style="color:#5b3fa8">② Shopee＋PayPal</b>＝Shopee掲載を抑えて（ここでは①の半額）、不足分をPayPalで別途受け取る形。
+      <b style="color:#5b3fa8">② Shopee＋PayPal</b>＝Shopee掲載を抑えて（①の${Math.round(ratio * 100)}%）、不足分をPayPalで別途受け取る形。
       <b>Shopee手数料は掲載価格にしか掛からない</b>ので、買い手の総支払が同じでも<b>手取りが増えます</b>。掲載価格は買い手と相談のうえ決めてください。<br>
       ※価格・手数料・SLS送料・為替の前提は<b>⚙️設定</b>の値を使っています（出品を作る画面と同じ計算）。
-    </div>`;
+    </div>
+    <details style="margin-top:8px"><summary class="smd-dim" style="font-size:11px;cursor:pointer">🧮 計算の中身（クリックで開く）</summary>
+      <div class="smd-dim" style="font-size:11px;line-height:1.9;margin-top:6px">
+        <b>① 出品価格の出し方</b><br>
+        　出品価格(現地) ＝ K ÷ 為替　／　K(円) ＝ ( 仕入 × (1＋ROI) ÷ (1−FXマージン) ＋ SLS送料 ) ÷ (1−合計手数料%) ÷ (1−利益バッファ)<br>
+        　・<b>SLS送料</b>は「実重量」と「容積重量(W×H×D÷6)」の<b>重い方</b>を50g単位で課金<br>
+        　・<b>ROI</b>は⚙️の仕入額×重量帯の表から自動（手入力で上書き可）。仕入は帯の上限で計算（スプシと同じ挙動）<br>
+        　・最後に国ごとの価格単位（VNは1,000刻み等）で丸め<br><br>
+        <b>手取りの出し方（表の右側）</b><br>
+        　買い手支払 ＝ 出品価格 ×(1−想定値引き) → ×(1−手数料) → −SLS送料 → −固定控除 → ×(1−入金為替手数料) ＝ <b>入金</b><br>
+        　粗利 ＝ 入金 − 仕入　／　ROI ＝ 粗利 ÷ 仕入<br><br>
+        <b>② Shopee＋PayPal の考え方</b><br>
+        　<b>Shopee手数料は「Shopeeに載せた価格」にしか掛かりません。</b>だから掲載を下げると手数料も下がります。<br>
+        　・Shopee掲載 ＝ ①の指定%　→ その入金額を計算<br>
+        　・PayPalで受け取る額 ＝ <b>①の粗利 − ②の粗利</b>（①と同じ手取りに届くまでの不足分）<br>
+        　・合計粗利 ＝ ②の粗利 ＋ PayPal額<br>
+        　※PayPal側の手数料はこの計算に<b>含めていません</b>（受取方法により変わるため）。実際はその分だけ目減りします。<br>
+        　※掲載価格の決め方（BRの価格上限に合わせる／買い手と相談した額 等）が決まっていれば、%指定でなくその額を直接入れる形にできます。
+      </div></details>`;
   }
   function showPage(p) {
     // 旧「⚠️アラート」「✅タスク管理」は「🎯やること」ページのサブタブに統合（既存の showPage('alerts'/'tasks') 呼び出しは互換）
@@ -3301,7 +3321,7 @@
   document.querySelectorAll('.fin-tab').forEach(b => b.addEventListener('click', () => showPage(b.dataset.fp)));
   // 💴 出品価格の計算機：ボタンとEnterキーで走らせる
   { const go = document.getElementById('pc-go'); if (go) go.addEventListener('click', priceCalcRun);
-    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi'].forEach(id => {
+    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio'].forEach(id => {
       const el = document.getElementById(id); if (!el) return;
       el.addEventListener('keydown', e => { if (e.key === 'Enter') priceCalcRun(); });
       el.addEventListener('change', () => { if ((document.getElementById('pc-cost') || {}).value) priceCalcRun(); });
@@ -10375,8 +10395,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       && (!F.comp || (F.comp === 'yes' ? isCompRow(o) : !isCompRow(o)))
       && (!F.cc || o.cc === F.cc)
       && (!F.q || textOfRow(o).indexOf(F.q.toLowerCase()) >= 0));
+    // ── 並べ替え（既定＝注文日の新しい順）
+    const SORTS = [
+      ['date_desc', '注文日：新しい順'], ['date_asc', '注文日：古い順'],
+      ['pay_desc', '補償の入金日：新しい順'], ['pay_asc', '補償の入金日：古い順'],
+      ['comp_desc', '補償額：大きい順'], ['refund_desc', '返金額：大きい順'],
+    ];
+    const SK = renderReturns._sort || 'date_desc';
+    const compOf = o => (adjComp.get(o.cc + ':' + o.sn) || 0) || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0);
+    const payOf = o => adjCompPay.get(o.cc + ':' + o.sn) || 0;
+    const refundOf = o => (issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0;
+    const sortRows = (arr) => {
+      const a2 = arr.slice();
+      // 値が無い行（入金日なし等）は常に後ろへ。昇順でも先頭を空で埋めない
+      const nz = (f) => (o) => { const v = f(o); return v ? v : null; };
+      const cmp = {
+        date_desc: (x, y) => dateKeyOf(y) - dateKeyOf(x),
+        date_asc: (x, y) => dateKeyOf(x) - dateKeyOf(y),
+        pay_desc: (x, y) => (payOf(y) - payOf(x)) || (dateKeyOf(y) - dateKeyOf(x)),
+        pay_asc: (x, y) => { const a3 = nz(payOf)(x), b3 = nz(payOf)(y); if (a3 === null && b3 === null) return dateKeyOf(y) - dateKeyOf(x); if (a3 === null) return 1; if (b3 === null) return -1; return a3 - b3; },
+        comp_desc: (x, y) => (compOf(y) - compOf(x)) || (dateKeyOf(y) - dateKeyOf(x)),
+        refund_desc: (x, y) => (refundOf(y) - refundOf(x)) || (dateKeyOf(y) - dateKeyOf(x)),
+      }[SK] || cmpDefault;
+      return a2.sort(cmp);
+    };
+    const cmpDefault = (x, y) => dateKeyOf(y) - dateKeyOf(x);
     const beforeF = rowsView.length;
-    rowsView = applyF(rowsView);
+    rowsView = sortRows(applyF(rowsView));
     const filteredN = beforeF - rowsView.length;
     if (rtab === 'refund' && renderReturns._showCxl !== true) { rowsView = rowsView.filter(o => { const c = retStatusOf(o) === 'CANCELLED'; if (c) cxlHidden++; return !c; }); }
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
@@ -10583,6 +10628,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <select id="rf-comp" style="font-size:11.5px;padding:3px 6px">${opt('', F.comp, '補償：すべて')}${opt('yes', F.comp, '補償あり')}${opt('no', F.comp, '補償なし')}</select>
       <select id="rf-cc" style="font-size:11.5px;padding:3px 6px">${opt('', F.cc, '国：すべて')}${ccAll.map(c => opt(c, F.cc, c)).join('')}</select>
       <input id="rf-q" value="${esc(F.q)}" placeholder="商品名・注文番号・バイヤー・理由" style="font-size:11.5px;padding:3px 8px;width:230px">
+      <span class="smd-dim" style="margin-left:10px">並べ替え:</span>
+      <select id="rf-sort" style="font-size:11.5px;padding:3px 6px">${SORTS.map(x => `<option value="${x[0]}" ${SK === x[0] ? 'selected' : ''}>${esc(x[1])}</option>`).join('')}</select>
       ${(F.kind || F.stage || F.restock || F.comp || F.cc || F.q) ? `<button class="smd-btn" id="rf-clear" style="font-size:11px;padding:2px 10px">× 解除</button><span class="smd-dim">${filteredN}件を除外中</span>` : ''}
     </div>`;
     body.innerHTML = tabBar + summary +
@@ -10594,6 +10641,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const bind = (id, key) => { const el = document.getElementById(id); if (!el) return;
         el.addEventListener('change', () => { renderReturns._f[key] = el.value; renderReturns._page = 1; renderReturns(); }); };
       bind('rf-kind', 'kind'); bind('rf-stage', 'stage'); bind('rf-restock', 'restock'); bind('rf-comp', 'comp'); bind('rf-cc', 'cc');
+      { const so = document.getElementById('rf-sort'); if (so) so.addEventListener('change', () => { renderReturns._sort = so.value; renderReturns._page = 1; renderReturns(); }); }
       const q = document.getElementById('rf-q');
       if (q) wireTypeahead(q, v => { renderReturns._f.q = v; renderReturns._page = 1; renderReturns(); }, 300);
       const cl = document.getElementById('rf-clear');
