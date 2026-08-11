@@ -275,6 +275,7 @@
   .pc-mi{display:inline-flex;align-items:baseline;gap:4px;font-size:11px;white-space:nowrap;}
   .pc-mi b{font-size:14px;color:#ee4d2d;font-weight:800;}
   .pc-mi u{text-decoration:none;font-size:10px;font-weight:700;}
+  .smd-stuck{box-shadow:0 3px 12px rgba(15,23,42,.09);}
   #pc-inputs.pc-stuck{padding-top:7px;padding-bottom:7px;border-radius:0 0 10px 10px;}
   #pc-inputs.pc-stuck .pc-f em{display:none;}
   #pc-inputs.pc-stuck ~ * #pc-msg,#pc-inputs.pc-stuck #pc-msg{display:none;}
@@ -3516,6 +3517,7 @@
         </div>
       </div>`;
   }
+  const SHOW_PAGE_HOOKS = [];   // ページ切替後に走らせたい処理（貼り付きバーの再計測など）
   function showPage(p) {
     // 旧「⚠️アラート」「✅タスク管理」は「🎯やること」ページのサブタブに統合（既存の showPage('alerts'/'tasks') 呼び出しは互換）
     if (p === 'alerts') { todoState.tab = 'alerts'; p = 'todo'; }
@@ -3538,7 +3540,7 @@
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, tax: renderTax, suppliers: renderSuppliers,
       log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
-      expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); try { priceCalcRun._fitSticky && priceCalcRun._fitSticky(); } catch (_) {} setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
+      expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
       account: renderAccounts,
     };
     const fn = RENDER[p];
@@ -3550,6 +3552,7 @@
         if (pg) pg.insertAdjacentHTML('afterbegin', `<div style="margin:10px 20px;padding:8px 12px;background:#fff0f0;border:1px solid #f5c2c2;border-radius:6px;color:#b00;font-size:12px">描画エラー(${p}): ${esc(e.message)}（コンソールに詳細）</div>`);
       }
     }
+    SHOW_PAGE_HOOKS.forEach(h => { try { h(); } catch (_) {} });
   }
   const PAGE_KEYS = ['dash','todo','orders','stock','buy','profit','expenses','returns','account','customers','plan','pricecalc','tax','suppliers','list','rank','fx','news','messages','log','changelog','tools','manual'];
   function saveNavCollapsed() { try { localStorage.setItem('smdNavCollapsed', JSON.stringify([...document.querySelectorAll('#smd-nav .navgroup.collapsed')].map(g => g.dataset.g))); } catch (_) {} }
@@ -3574,16 +3577,31 @@
     //   入力途中の値でチラつかないよう軽くデバウンスする。
     let pcT = null;
     // 下へスクロールすると入力バーが上に貼り付く。貼り付いている間は説明を隠して薄く（場所を取らない）
-    // 入力バーを上に貼り付ける。★アカウントバーは幅で折り返して高さが変わるので、実測した高さに合わせる
-    //   （31px 固定にしていたらバーごとアカウントバーの裏に隠れて「付いてこない」ように見えていた）
-    { const card = document.getElementById('pc-inputs');
+    // ===== 操作バーを上に貼り付ける（どのページでも「操作しながら結果を見られる」ように）=====
+    //  ★アカウントバーは画面幅で折り返して高さが変わる（31px〜155px）。固定値にすると
+    //    貼り付いたバーがアカウントバーの裏に隠れて「付いてこない」ように見えるので、実測して追従する。
+    { const bars = [];
       const barH = () => { const b = document.getElementById('smd-acctbar'); return b ? Math.round(b.getBoundingClientRect().height) : 31; };
-      const fit = () => { if (card) card.style.top = barH() + 'px'; };
+      const reg = (el, stuckCls) => {
+        if (!el || bars.some(x => x.el === el)) return;
+        el.style.position = 'sticky'; el.style.zIndex = el.style.zIndex || '12';
+        const bg = getComputedStyle(el).backgroundColor;
+        if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') el.style.background = '#fff';
+        bars.push({ el, cls: stuckCls || 'smd-stuck' });
+      };
+      const layout = () => { const h = barH(); bars.forEach(b => { b.el.style.top = h + 'px'; if (b.el.offsetParent !== null) b.el.classList.toggle(b.cls, b.el.getBoundingClientRect().top <= h + 1); }); };
       let raf = 0;
-      const onScroll = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (!card || card.offsetParent === null) return; card.classList.toggle('pc-stuck', card.getBoundingClientRect().top <= barH() + 1); }); };
-      fit(); window.addEventListener('resize', () => { fit(); onScroll(); });
+      const onScroll = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; layout(); }); };
+      // 価格計算＝入力バー（貼り付き中は説明を畳み、各国の価格と粗利のミニ帯を出す）
+      reg(document.getElementById('pc-inputs'), 'pc-stuck');
+      // 一覧系＝絞り込み・検索の操作バー。長い一覧を下まで見ながら条件を変えられる
+      ['stock-search', 'pf-search', 'ret-refresh', 'ord-search'].forEach(id => {
+        const e = document.getElementById(id); if (e && e.parentElement) reg(e.parentElement);
+      });
+      reg(document.getElementById('ord-head'));
+      layout(); window.addEventListener('resize', () => { layout(); });
       window.addEventListener('scroll', onScroll, { passive: true });
-      priceCalcRun._fitSticky = () => { fit(); onScroll(); };
+      SHOW_PAGE_HOOKS.push(layout);   // ページ切替のたびに位置を測り直す
     }
     const live = () => { clearTimeout(pcT); pcT = setTimeout(() => { priceCalcSave(); priceCalcRun(); }, 220); };
     ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'].forEach(id => {
