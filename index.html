@@ -768,7 +768,7 @@
     <div class="pagehelp" style="margin:6px 20px 8px"><b>仕入値を入れると、7か国それぞれの出品価格と手取りが出ます。</b><span style="color:#5a6b8c;font-size:11.5px">手数料・SLS送料・為替・目標ROIは⚙️設定の値＝「出品を作る」と同じ数字。①Shopeeのみ／②Shopee＋PayPal／③Shopee最小＋PayPal の3通り。</span></div>
     <!-- 💴 出品価格の計算機：リクエストが来た商品を「いくらで出すか」を国別に出す -->
     <div id="pc-sentinel" style="height:1px"></div>
-    <div class="tool-card" id="pc-inputs" style="margin:0 20px 12px;max-width:none;position:sticky;top:31px;z-index:12;background:#fff;box-shadow:0 3px 12px rgba(15,23,42,.07)">
+    <div class="tool-card" id="pc-inputs" style="margin:0 20px 12px;max-width:none;background:#fff">
       <div class="pc-row">
         <span class="pc-f"><span class="pc-l"><span class="pc-no">1</span>仕入値<input type="number" id="pc-cost" placeholder="1500" style="width:86px"><i>円</i><span class="req">必須</span></span><em>いくらで仕入れるか。送料込みの支払額</em></span>
         <span class="pc-f"><span class="pc-l"><span class="pc-no">2</span>重量<input type="number" id="pc-weight" placeholder="500" style="width:68px"><i>g</i></span><em>梱包材こみ。空欄なら<b>500g</b>で計算</em></span>
@@ -3632,30 +3632,60 @@
     let pcT = null;
     // 下へスクロールすると入力バーが上に貼り付く。貼り付いている間は説明を隠して薄く（場所を取らない）
     // ===== 操作バーを上に貼り付ける（どのページでも「操作しながら結果を見られる」ように）=====
-    //  ★アカウントバーは画面幅で折り返して高さが変わる（31px〜155px）。固定値にすると
-    //    貼り付いたバーがアカウントバーの裏に隠れて「付いてこない」ように見えるので、実測して追従する。
+    //  ★position:sticky は親要素やレイアウト条件で黙って効かないことがあるため使わない。
+    //    「本来の位置に高さ合わせのダミーを置き、バー自身は position:fixed で固定する」確実な方式にする。
+    //  ★アカウントバーは画面幅で折り返して高さが変わる（35px〜155px）ので、毎回実測して下に付ける。
     { const bars = [];
       const barH = () => { const b = document.getElementById('smd-acctbar'); return b ? Math.round(b.getBoundingClientRect().height) : 31; };
       const reg = (el, stuckCls) => {
         if (!el || bars.some(x => x.el === el)) return;
-        el.style.position = 'sticky'; el.style.zIndex = el.style.zIndex || '12';
+        el.style.position = '';   // 以前の sticky 指定が残っていても打ち消す
+        el.style.top = '';
         const bg = getComputedStyle(el).backgroundColor;
         if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') el.style.background = '#fff';
-        bars.push({ el, cls: stuckCls || 'smd-stuck' });
+        const ph = document.createElement('div');           // 固定した分の高さを埋めるダミー
+        ph.className = 'smd-barph'; ph.style.display = 'none';
+        el.parentNode.insertBefore(ph, el);
+        bars.push({ el, ph, cls: stuckCls || 'smd-stuck', fixed: false });
       };
-      const layout = () => { const h = barH(); bars.forEach(b => { b.el.style.top = h + 'px'; if (b.el.offsetParent !== null) b.el.classList.toggle(b.cls, b.el.getBoundingClientRect().top <= h + 1); }); };
+      const layout = () => {
+        const h = barH();
+        bars.forEach(b => {
+          const el = b.el, ph = b.ph;
+          if (el.offsetParent === null && !b.fixed) return;                 // 表示されていないページは触らない
+          const anchor = b.fixed ? ph : el;                                  // 固定中は本来位置＝ダミーの位置
+          const rect = anchor.getBoundingClientRect();
+          const shouldFix = rect.top <= h && el.offsetParent !== null;
+          if (shouldFix && !b.fixed) {
+            const r = el.getBoundingClientRect();
+            ph.style.height = r.height + 'px'; ph.style.display = 'block';
+            el.style.position = 'fixed'; el.style.top = h + 'px';
+            el.style.left = r.left + 'px'; el.style.width = r.width + 'px';
+            el.style.zIndex = '12'; el.style.boxSizing = 'border-box';
+            el.classList.add(b.cls); b.fixed = true;
+            // 説明を畳んで細くなるぶん、ダミーの高さも合わせ直す
+            requestAnimationFrame(() => { if (b.fixed) ph.style.height = el.getBoundingClientRect().height + 'px'; });
+          } else if (!shouldFix && b.fixed) {
+            el.style.position = ''; el.style.top = ''; el.style.left = ''; el.style.width = ''; el.style.zIndex = '';
+            ph.style.display = 'none'; el.classList.remove(b.cls); b.fixed = false;
+          } else if (b.fixed) {                                              // 固定中も横幅・位置を追従（ウィンドウ幅変更時）
+            const pr = ph.getBoundingClientRect();
+            el.style.top = h + 'px'; el.style.left = pr.left + 'px'; el.style.width = pr.width + 'px';
+          }
+        });
+      };
       let raf = 0;
       const onScroll = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; layout(); }); };
-      // 価格計算＝入力バー（貼り付き中は説明を畳み、各国の価格と粗利のミニ帯を出す）
+      // 価格計算＝入力バー（固定中は説明を畳み、各国の価格と粗利のミニ帯を出す）
       reg(document.getElementById('pc-inputs'), 'pc-stuck');
       // 一覧系＝絞り込み・検索の操作バー。長い一覧を下まで見ながら条件を変えられる
       ['stock-search', 'pf-search', 'ret-refresh', 'ord-search'].forEach(id => {
         const e = document.getElementById(id); if (e && e.parentElement) reg(e.parentElement);
       });
-      reg(document.getElementById('ord-head'));
-      layout(); window.addEventListener('resize', () => { layout(); });
       window.addEventListener('scroll', onScroll, { passive: true });
-      SHOW_PAGE_HOOKS.push(layout);   // ページ切替のたびに位置を測り直す
+      window.addEventListener('resize', onScroll);
+      SHOW_PAGE_HOOKS.push(() => { bars.forEach(b => { if (b.fixed) { b.el.style.position = ''; b.el.style.top = ''; b.el.style.left = ''; b.el.style.width = ''; b.el.style.zIndex = ''; b.ph.style.display = 'none'; b.el.classList.remove(b.cls); b.fixed = false; } }); onScroll(); });
+      setTimeout(layout, 300);
     }
     const live = () => { clearTimeout(pcT); pcT = setTimeout(() => { priceCalcSave(); priceCalcRun(); }, 220); };
     ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'].forEach(id => {
