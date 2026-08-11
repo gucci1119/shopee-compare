@@ -8910,13 +8910,20 @@
   function srcCeilingFor(o, it) {
     const L = srcListingIx[o.cc + '|' + (it || {}).item_id];
     if (!L) return null;
-    let price = 0;
-    if (it.variation && Array.isArray(L.models)) {
+    // ★売値は【この注文が実際にいくらで売れたか】が正解。出品価格は「今の値付け」であって
+    //   この注文の売値ではない（値引き・クーポン・値上げ後でズレる）。
+    //   さらに price_min はバリエ最安値なので、多バリエ商品だと極端に安い値を拾って
+    //   「入金見込¥96＝全部赤字」のような誤判定になっていた（2026-08-12 実画面で確認）。
+    //   優先順：① 実売額（単品1点の注文のみ）→ ② バリエ名が一致した出品価格 → ③ 最安バリエ価格（目安）
+    let price = 0, basis = '';
+    const its = (o.items || []);
+    if (its.length === 1 && (Number(its[0].qty) || 1) === 1 && Number(o.total) > 0) { price = Number(o.total); basis = 'sold'; }
+    if (!price && it.variation && Array.isArray(L.models)) {
       const v = String(it.variation).trim();
       const m = L.models.find(x => String(x.n || '').trim() === v) || L.models.find(x => String(x.n || '').trim().toLowerCase() === v.toLowerCase());
-      if (m && m.price) price = Number(m.price);
+      if (m && m.price) { price = Number(m.price); basis = 'model'; }
     }
-    if (!price) price = Number(L.price_min) || 0;
+    if (!price) { price = Number(L.price_min) || 0; basis = 'min'; }
     if (!price) return null;
     const wReal = (Number(L.weight) || 0) * 1000;
     const weightG = wReal || Number(settings.weightG) || 0;   // 出品に重量が無ければ既定値で代用（SLSが効く国では誤差が大きい）
@@ -8924,7 +8931,7 @@
     const payout = Number(pf.payoutJpy) || 0;
     if (payout <= 0) return null;
     const target = TARGET_GROSS();
-    return { cc: o.cc, cur: (regionByCc(o.cc) || {}).cur || '', price, weightG, wEst: !wReal, payout, target, ceil: Math.round(payout - target), slsJpy: pf.slsJpy, feePct: pf.feePct };
+    return { cc: o.cc, cur: (regionByCc(o.cc) || {}).cur || '', price, basis, weightG, wEst: !wReal, payout, target, ceil: Math.round(payout - target), slsJpy: pf.slsJpy, feePct: pf.feePct };
   }
   // 候補1件の判定：🟢目標クリア / 🟡黒字だが目標未達 / 🔴赤字
   function srcJudge(costJpy, ceil) {
@@ -9061,11 +9068,11 @@
     const ceilLine = !ceil ? '' : ceil.ceil <= 0 ?
       `<div style="font-size:12px;background:#fff0f0;border:1px solid #f3c5c5;border-radius:6px;padding:6px 10px;margin-bottom:7px">
         🔴 <b style="color:#d93025">この売値では仕入れても目標粗利が出ません</b>
-        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()} − 手数料${ceil.feePct}% − SLS¥${ceil.slsJpy.toLocaleString()} ＝ <b>入金見込み ¥${ceil.payout.toLocaleString()}</b>。SLS送料が重い＝<b>重量${ceil.weightG}g</b>を見直すか値上げを）</span>
+        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()}${ceil.basis === 'sold' ? '<span title="この注文が実際に売れた額から計算しています（いちばん正確）">＝実売</span>' : ceil.basis === 'min' ? '<span style="color:#b26a00" title="この注文の売値が取れず、出品の最安バリエ価格で代用しています。多バリエ商品では実際より安く出るので目安です">＝最安バリエ(目安)</span>' : ''} − 手数料${ceil.feePct}% − SLS¥${ceil.slsJpy.toLocaleString()} ＝ <b>入金見込み ¥${ceil.payout.toLocaleString()}</b>。SLS送料が重い＝<b>重量${ceil.weightG}g</b>を見直すか値上げを）</span>
       </div>` :
       `<div style="font-size:12px;background:#f0f6ff;border:1px solid #cfe0ff;border-radius:6px;padding:6px 10px;margin-bottom:7px">
         🎯 <b>上限仕入額 <span style="color:#1a4fa0;font-size:14px">¥${ceil.ceil.toLocaleString()}</span></b> まで
-        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()} → 手数料${ceil.feePct}%・SLS¥${ceil.slsJpy.toLocaleString()}(${ceil.weightG}g)を引いた<b>入金見込み ¥${ceil.payout.toLocaleString()}</b> − 目標粗利 ¥${ceil.target.toLocaleString()}${ceil.wEst ? '／⚠出品に重量が無いため既定値で計算' : ''}）</span>
+        <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()}${ceil.basis === 'sold' ? '<span title="この注文が実際に売れた額から計算しています（いちばん正確）">＝実売</span>' : ceil.basis === 'min' ? '<span style="color:#b26a00" title="この注文の売値が取れず、出品の最安バリエ価格で代用しています。多バリエ商品では実際より安く出るので目安です">＝最安バリエ(目安)</span>' : ''} → 手数料${ceil.feePct}%・SLS¥${ceil.slsJpy.toLocaleString()}(${ceil.weightG}g)を引いた<b>入金見込み ¥${ceil.payout.toLocaleString()}</b> − 目標粗利 ¥${ceil.target.toLocaleString()}${ceil.wEst ? '／⚠出品に重量が無いため既定値で計算' : ''}）</span>
         ${best ? `　<b style="color:#1a7f37">🥇 ${esc(best.site)} ¥${best.price.toLocaleString()}</b> <a href="${esc(best.url)}" target="_blank" rel="noopener" style="color:#fff;background:#1a7f37;border-radius:6px;padding:2px 9px;text-decoration:none;font-weight:700;font-size:11.5px">購入ページを開く→</a>`
           : `　<b style="color:#d93025">上限内の候補なし</b><span class="smd-dim" style="font-size:10.5px">（最安 ¥${deals[0].price.toLocaleString()}＝目標粗利に ¥${(deals[0].price - ceil.ceil).toLocaleString()} 届かない）</span>`}
       </div>`;
@@ -9084,6 +9091,26 @@
     //   作品名が壊れる。実例：Dragon Ball "Advance Adventure" の Advance が機種語として消えて
     //   「ドラゴンボール アドバンス」になっていた（正しくは アドバンスアドベンチャー）。
     [/\badvance adventure\b/gi, 'アドバンスアドベンチャー'],
+    // ★2026-08-12 実画面で外していたもの。英語のまま日本の仕入先を探しても当たらない。
+    [/\bnew translation\b/gi, 'ニュートランスレーション'],   // SIREN New Translation（「New」は不要語で消えて「SIREN Translation」になっていた）
+    [/\bdirector'?s cut\b/gi, 'ディレクターズカット'],       // アポストロフィ付きの英語は日本のフリマにほぼ無い
+    [/\bplayers?'? choice\b/gi, 'プレイヤーズチョイス'], [/\bvalue selection\b/gi, 'バリューセレクション'],
+    [/\bwelcome price\b/gi, 'ウェルカムプライス'], [/\bmega ?hit\b/gi, 'メガヒット'],
+    [/\bshadow of the colossus\b/gi, 'ワンダと巨像'], [/\bparasite eve\b/gi, 'パラサイトイヴ'],
+    [/\bdino crisis\b/gi, 'ディノクライシス'], [/\bsakura (wars|taisen)\b/gi, 'サクラ大戦'],
+    [/\bchrono cross\b/gi, 'クロノクロス'], [/\bsecret of mana\b/gi, '聖剣伝説2'], [/\bseiken densetsu\b/gi, '聖剣伝説'],
+    [/\bwild arms\b/gi, 'ワイルドアームズ'], [/\bgrandia\b/gi, 'グランディア'], [/\bxenogears\b/gi, 'ゼノギアス'],
+    [/\bxenosaga\b/gi, 'ゼノサーガ'], [/\bshadow hearts\b/gi, 'シャドウハーツ'], [/\bvalkyrie profile\b/gi, 'ヴァルキリープロファイル'],
+    [/\bdisgaea\b/gi, 'ディスガイア'], [/\brune factory\b/gi, 'ルーンファクトリー'], [/\bar tonelico\b/gi, 'アルトネリコ'],
+    [/\bmonster rancher\b/gi, 'モンスターファーム'], [/\bpuyo ?puyo\b/gi, 'ぷよぷよ'], [/\bbomberman\b/gi, 'ボンバーマン'],
+    [/\bculdcept\b/gi, 'カルドセプト'], [/\bderby stallion\b/gi, 'ダービースタリオン'],
+    [/\bmomotaro dentetsu\b/gi, '桃太郎電鉄'], [/\bcustom robo\b/gi, 'カスタムロボ'], [/\bmedarot\b/gi, 'メダロット'],
+    [/\bsuper robot (wars|taisen)\b/gi, 'スーパーロボット大戦'], [/\barmored core\b/gi, 'アーマードコア'],
+    [/\bace combat\b/gi, 'エースコンバット'], [/\bridge racer\b/gi, 'リッジレーサー'],
+    [/\binazuma eleven\b/gi, 'イナズマイレブン'], [/\byo-? ?kai watch\b/gi, '妖怪ウォッチ'],
+    [/\bklonoa\b/gi, '風のクロノア'], [/\bokami\b/gi, '大神'], [/\bkatamari\b/gi, '塊魂'],
+    [/\bviewtiful joe\b/gi, 'ビューティフルジョー'], [/\bgod hand\b/gi, 'ゴッドハンド'],
+
     // ★複合語は【単語より先】に置く。後だと Shining/Pearl が別々に訳されて「Shining パール」になる。
     [/\bps\s*vita\b/gi, 'Vita'], [/\bshining pearl\b/gi, 'シャイニングパール'], [/\bbrilliant diamond\b/gi, 'ブリリアントダイヤモンド'],
     [/\blegends?\s*arceus\b/gi, 'レジェンズアルセウス'], [/\bsword\s*(and|&)?\s*shield\b/gi, 'ソードシールド'],
