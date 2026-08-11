@@ -248,6 +248,8 @@
   .pc-table .pc-sec{background:#eef2f9;font-weight:800;font-size:12px;padding:4px 8px;}
   .pc-table tr.pc-hl td{background:#f7fdf8;}
   .pc-table tr.pc-hl td.pc-lbl{background:#eef8f0;}
+  .pc-table tr.pc-hl3 td{background:#f2fbfc;}
+  .pc-table tr.pc-hl3 td.pc-lbl{background:#e6f5f8;}
   .pc-table tr.pc-hl2 td{background:#faf8ff;}
   .pc-table tr.pc-hl2 td.pc-lbl{background:#f3efff;}
   .pc-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px;margin:2px 0 12px;}
@@ -754,8 +756,8 @@
         </div>
         <div class="pc-fld">
           <label><span class="pc-no">2</span>重量（g）</label>
-          <div class="pc-in"><input type="number" id="pc-weight" placeholder="150"><span class="pc-unit">g</span></div>
-          <div class="pc-hint"><b>梱包材を含めた重さ</b>。SLS送料が変わります。空欄なら150gで計算します。</div>
+          <div class="pc-in"><input type="number" id="pc-weight" placeholder="500"><span class="pc-unit">g</span></div>
+          <div class="pc-hint"><b>梱包材を含めた重さ</b>。SLS送料が変わります。<b>空欄なら500g</b>（ほとんどの商品がこの帯）で計算します。</div>
         </div>
         <div class="pc-fld">
           <label><span class="pc-no">3</span>寸法 W×H×D（cm）</label>
@@ -3369,7 +3371,7 @@
     // ★表は最初から出す：仕入値が空のときは「例（¥1,500・150g）」で描いておき、打ち替えたら即座に本物へ差し替わる
     const sample = !(num('pc-cost') > 0);
     const cost = sample ? 1500 : num('pc-cost');
-    const wg = sample && num('pc-weight') == null ? 150 : num('pc-weight');
+    const wg = num('pc-weight') != null ? num('pc-weight') : 500;   // 実務上ほとんど500g（本人確認）
     const dW = num('pc-w'), dH = num('pc-h'), dD = num('pc-d'), roi = num('pc-roi');
     msg.textContent = '';
     const ratio = Math.min(1, Math.max(0.05, (num('pc-ratio') || 50) / 100));   // ②でShopeeに載せる割合
@@ -3393,7 +3395,20 @@
       const ppAsk = need > 0 ? Math.round((need + ppFix) / (1 - ppRate)) : 0;  // 買い手に請求するPayPal額
       const ppFee = Math.max(0, ppAsk - need ? Math.round(ppAsk * ppRate + ppFix) : 0);
       const ppNet = Math.max(0, Math.round(ppAsk - (ppAsk * ppRate + ppFix)));  // 実際に手元に残る
-      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet };
+      // ③ Shopee掲載を「送料・手数料をまかなうだけ」の最低額まで下げ、残り全部をPayPalでもらう
+      //   Shopee手数料は【掲載した額】にしかかからないので、掲載を下げるほど手数料が減り、買い手の総支払が最も安くなる。
+      //   最低額＝Shopee側の受取がちょうど0になる価格： L×(1−想定値引き)×(1−手数料) = SLS送料 + 固定控除
+      const unit = rg.priceUnit || 1;
+      const disc3 = (Number(settings.priceDiscountPct) || 0) / 100;
+      const slsL = pf.slsJpy / rg.rateJpy;                                   // 現地通貨のSLS送料
+      const fixedL = Number((settings.priceFixedFee || {})[cc]) || 0;        // 現地通貨の固定控除
+      const minRaw = (slsL + fixedL) / Math.max(0.05, (1 - disc3) * feeKeep(cc));
+      const minLocal = Math.max(unit, Math.ceil(minRaw / unit) * unit);      // 切り上げ（下回るとShopee側が赤字）
+      const minPf = priceProfitFor(cc, cost, minLocal, opt);
+      const need3 = Math.max(0, pf.profit - minPf.profit);
+      const pp3Ask = need3 > 0 ? Math.round((need3 + ppFix) / (1 - ppRate)) : 0;
+      const pp3Net = Math.max(0, Math.round(pp3Ask - (pp3Ask * ppRate + ppFix)));
+      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net };
     });
     const vol = (dW && dH && dD) ? Math.round(dW * dH * dD / 6) : 0;   // 容積重量(g)
     const chargeG = Math.max(wg || 0, vol);                            // 実際にSLSが課金される重量
@@ -3419,7 +3434,7 @@
     const slsWarn = (r) => (r.cc === 'MY' && !vol) ? ' <span style="color:#d93025" title="マレーシアは容積重量で課金されます。寸法(W×H×D)を入れないとSLS送料が実際より安く出ます">⚠寸法</span>' : '';
     out.innerHTML =
       (sample ? `<div style="background:#fff8e6;border:1px solid #f0d9a0;border-radius:8px;padding:6px 12px;margin-bottom:7px;font-size:12px;color:#7a5a10">
-        📝 <b>例（仕入 ¥1,500・150g）で表示中です。</b>上の「仕入値」を打ち替えると、その場で本物の数字に切り替わります。</div>` : '') +
+        📝 <b>例（仕入 ¥1,500・500g）で表示中です。</b>上の「仕入値」を打ち替えると、その場で本物の数字に切り替わります。</div>` : '') +
       `<div style="font-size:12px;font-weight:700;color:#0f172a;margin:2px 0 5px">📌 各国で設定する出品価格</div>`+
       `<div class="pc-cards">${rows.map(r => {
         const ok1 = r.pf.profit >= target;
@@ -3429,6 +3444,7 @@
           <div class="pc-card-jpy">${y(r.local * r.rg.rateJpy)}</div>
           <div class="pc-card-prof" style="color:${ok1 ? '#1a7f37' : (r.pf.profit > 0 ? '#b26a00' : '#d93025')}">粗利 ${y(r.pf.profit)}<span style="font-weight:400;color:#8a8f98"> / ROI ${Math.round(r.pf.roi)}%</span></div>
           <div class="pc-card-pp">②なら <b>${cur(r.rg, r.lowLocal)}</b> ＋ PayPal <b>${cur(r.rg, r.ppAsk / r.rg.rateJpy)}</b></div>
+          <div class="pc-card-pp" style="color:#0b7285">③なら <b>${cur(r.rg, r.minLocal)}</b> ＋ PayPal <b>${cur(r.rg, r.pp3Ask / r.rg.rateJpy)}</b></div>
         </div>`;
       }).join('')}</div>` +
       `<div class="pf-scroll" style="max-height:none"><table class="pf-table pc-table">
@@ -3450,6 +3466,15 @@
       ${line('SLS送料', '課金重量 ' + chargeG + 'g', cellsOf(r => `<span style="color:#c0392b">−${y(r.lowPf.slsJpy)}</span>`))}
       ${line('その他の控除', '固定＋Payoneer入金為替', cellsOf(r => otherOf(r.lowPf)))}
       ${line('受取額（円）', 'Payoneer経由で口座に入る額', cellsOf(r => `<b>${y(r.lowPf.payoutJpy)}</b>`))}
+      ${sec('③ Shopee掲載を最小にして、ほとんどをPayPalでもらう（買い手の総支払がいちばん安い）', '#0b7285')}
+      ${line('粗利', 'Shopee＋PayPal 合計', cellsOf(r => { const t3 = r.minPf.profit + r.pp3Net; return prof(r, t3, cost > 0 ? Math.round(t3 / cost * 100) : 0, '　①比 ' + (t3 - r.pf.profit >= 0 ? '+' : '−') + y(Math.abs(t3 - r.pf.profit))); }), 'pc-hl')}
+      ${line('出品価格', '送料・手数料ぶんだけ', cellsOf(r => `<b style="font-size:14px;color:#0b7285">${cur(r.rg, r.minLocal)}</b><span class="pc-sub">${y(r.minLocal * r.rg.rateJpy)}</span>`))}
+      ${line('PayPal請求', '買い手に別途もらう額', cellsOf(r => `<b style="color:#0b7285;font-size:14px">${cur(r.rg, r.pp3Ask / r.rg.rateJpy)}</b><span class="pc-sub" style="color:#3a8fa0">${y(r.pp3Ask)}</span><span class="pc-brk">手取り <b style="color:#0b7285">${y(r.pp3Net)}</b>（手数料 −${y(r.pp3Ask - r.pp3Net)}）</span>`), 'pc-hl3')}
+      ${line('買い手の支払', 'Shopee＋PayPal の合計', cellsOf(r => { const tot = r.minPf.buyerJpy + r.pp3Ask; return `<b>${y(tot)}</b><span class="pc-sub">Shopee ${y(r.minPf.buyerJpy)}</span><span class="pc-brk">①より ${tot <= r.pf.buyerJpy ? '<b style="color:#1a7f37">' + y(r.pf.buyerJpy - tot) + ' 安い</b>' : '<b>' + y(tot - r.pf.buyerJpy) + ' 高い</b>'}</span>`; }))}
+      ${line('Shopee手数料', '掲載が小さい＝手数料もごくわずか', cellsOf(r => feeOf(r, r.minPf)))}
+      ${line('SLS送料', '課金重量 ' + chargeG + 'g', cellsOf(r => `<span style="color:#c0392b">−${y(r.minPf.slsJpy)}</span>`))}
+      ${line('その他の控除', '固定＋Payoneer入金為替', cellsOf(r => otherOf(r.minPf)))}
+      ${line('受取額（円）', 'Payoneer経由で口座に入る額', cellsOf(r => `<b>${y(r.minPf.payoutJpy)}</b>`))}
       </table></div>` +
       `<div style="font-size:11.5px;margin-top:8px;padding:7px 12px;background:#f2fbf4;border:1px solid #cfe8d6;border-radius:8px;color:#1a5b2c;line-height:1.7">💡 <b>粗利はどの国もほぼ同じ額になります</b>（目標ROIから価格を逆算しているため）。国ごとに違うのは<b>出品価格＝買い手がいくら払うか</b>で、手数料やSLS送料が高い国ほど高く出すことになります。<b>その価格でも売れそうか</b>で国を選んでください。</div>` +
       `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.8">
@@ -3466,12 +3491,12 @@
           　・最後に国ごとの価格単位で丸め（VNは1,000刻み 等）<br>
           <b>受取額（手取り）</b><br>
           　出品価格 ×(1−想定値引き) → ×(1−Shopee手数料) → −SLS送料 → −国別の固定控除 → <b>×(1−Payoneer入金為替手数料)</b> ＝ <b>受取額（円）</b><br>　　※Shopeeから出た額ではなく、<b>Payoneerを通って口座に入るまでを引き切った後</b>の円です。　粗利 ＝ 受取額 − 仕入<br>
-          <b>② Shopee＋PayPal</b><br>
+          <b>②③ Shopee＋PayPal</b><br>
           　<b>Shopee手数料は「Shopeeに載せた価格」にしか掛からない</b>ので、掲載を下げると手数料も下がります（表の「①より◯円安い」）。<br>
           　・必要な手取り ＝ ①の粗利 − ②の粗利<br>
           　・<b>PayPal請求 ＝ ( 必要な手取り ＋ 固定手数料 ) ÷ (1 − 料率)</b>　←手数料で目減りする分を上乗せして請求<br>
           　・粗利 ＝ ②のShopee側の粗利 ＋ PayPal手取り<br>
-          　※PayPal手数料は<b>目安</b>（海外受取は概ね 4.1%＋40円）。Payoneerは<b>Shopee入金分にだけ</b>掛かります<br>
+          　・<b>③</b>は掲載を「SLS送料＋固定控除をまかなうだけ」の最低額まで下げる（Shopee側の受取がちょうど0になる価格）。Shopee手数料がほぼ消えるので<b>買い手の総支払がいちばん安く</b>なり、粗利は①と同じに揃えます<br>          　　<b style="color:#d93025">※③は掲載価格が極端に安く見えます。</b>各国の最低価格・見え方・規約面は自己判断でどうぞ（ポータルは計算だけします）<br>          　※PayPal手数料は<b>目安</b>（海外受取は概ね 4.1%＋40円）。Payoneerは<b>Shopeeからの入金分にだけ</b>掛かります<br>
           　※手数料・SLS送料・為替・想定値引き・固定控除はすべて<b>⚙️設定</b>の値。「出品を作る」と同じ計算です。
         </div>
       </div>`;
