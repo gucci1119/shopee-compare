@@ -2496,8 +2496,10 @@ function payoutAdjRows_(list, cc, shopId, nowIso) {
       var sn = a.order_sn || '';
       var scen = a.scenario || '', mod = a.module || '', rmk = a.remark || '';
       var kind = adjKind_(amt, mod + ' ' + scen);
-      // 一意キー：payout時刻+注文+金額+シナリオ+remark(小包番号等)。同一バッチ内で被れば連番で分離（21000重複エラー回避）
-      var base = pt + '_' + sn + '_' + Math.round(amt) + '_' + (scen + rmk).replace(/\W+/g, '').slice(0, 40);
+      // ★一意キーは【文言の長さに依存させない】。以前は (scen+rmk) の切り詰め長を 20→40 に変えたせいで
+      //   同じ調整が別IDとして二重に入った（2026-08-11実測：265件中61行が余剰）。
+      //   Shopee側の文言が変わっても揺れないよう、module と remark の有無だけを使う短い固定形にする。
+      var base = pt + '_' + sn + '_' + amt.toFixed(2) + '_' + String(mod).replace(/\W+/g, '').slice(0, 12) + (rmk ? '_r' : '');
       var key = base, n = 0; while (seen[key]) key = base + '_' + (++n);
       seen[key] = 1;
       out.push({ adj_id: key, cc: cc, shop_id: String(shopId), order_sn: sn, amount: amt, module: mod, scenario: scen, remark: a.remark || null, payout_time: pt, kind: kind, synced_at: nowIso });
