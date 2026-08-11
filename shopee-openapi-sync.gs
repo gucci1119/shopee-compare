@@ -2542,6 +2542,7 @@ function syncPayoutsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
 }
 function syncPayoutsAll() {
+  ensureAdjTrigger_();   // 補償チェックの毎朝トリガーを自動で用意する
   if (!bgAllowed_()) { Logger.log('syncPayoutsAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
@@ -2982,6 +2983,50 @@ function addListingsTrigger() {
   return 'added';
 }
 
+// ── 毎日：補償・返金の調整明細を取り込み、新しく入った分をメールで知らせる ──────────
+// SLS+の半額保証は「いつ入るか分からない・数か月遅れる」ので、入ったかどうかを毎日見に行く。
+// payout同期に相乗りしているだけだと取りこぼすため、直近30日を毎日引き直す（重複はadj_idで弾かれる）。
+var ADJ_MAIL_TO = 'gcsonlinestore631@gmail.com';
+function dailyAdjustmentsCheck() {
+  // 取り込み前に「今ある補償のキー」を控える → 差分＝今日入った分
+  var before = {};
+  try {
+    for (var o = 0; o < 20; o++) {
+      var pre = sbSelect_('order_adjustments', 'select=adj_id&kind=eq.compensation&limit=1000&offset=' + (o * 1000));
+      if (!pre || !pre.length) break;
+      pre.forEach(function (r) { before[r.adj_id] = 1; });
+      if (pre.length < 1000) break;
+    }
+  } catch (e) { Logger.log('事前取得に失敗: ' + e); }
+
+  try { backfillAdjustments(30, 8); } catch (e2) { Logger.log('取り込み失敗: ' + e2); }
+
+  // 差分を出す
+  var fresh = [];
+  try {
+    for (var o2 = 0; o2 < 20; o2++) {
+      var af = sbSelect_('order_adjustments', 'select=adj_id,cc,order_sn,amount,scenario,payout_time&kind=eq.compensation&limit=1000&offset=' + (o2 * 1000));
+      if (!af || !af.length) break;
+      af.forEach(function (r) { if (!before[r.adj_id]) fresh.push(r); });
+      if (af.length < 1000) break;
+    }
+  } catch (e3) { Logger.log('事後取得に失敗: ' + e3); }
+
+  if (!fresh.length) { Logger.log('本日の新規補償: なし'); return { newCount: 0 }; }
+
+  var lines = fresh.map(function (r) {
+    var d = r.payout_time ? Utilities.formatDate(new Date(r.payout_time * 1000), 'Asia/Tokyo', 'yyyy-MM-dd') : '—';
+    return '・' + r.cc + '  ' + r.amount + '  入金 ' + d + '\n   注文 ' + r.order_sn + '\n   ' + String(r.scenario || '').slice(0, 60);
+  }).join('\n');
+  var subj = '💰 SLS+補償が入りました（' + fresh.length + '件）';
+  var body = 'Shopee の入金明細に、新しく補償が入りました。\n\n' + lines
+    + '\n\n※金額は現地通貨です。円換算と注文別の内訳はポータルの「返品・キャンセル」ページで確認できます。\n'
+    + '※補償は申請から数か月遅れて入ることがあります。';
+  try { MailApp.sendEmail(ADJ_MAIL_TO, subj, body, { name: 'Shopee OS' }); } catch (e4) { Logger.log('メール送信失敗: ' + e4); }
+  Logger.log('本日の新規補償: ' + fresh.length + '件を通知');
+  return { newCount: fresh.length };
+}
+
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
@@ -3000,6 +3045,8 @@ function setupTriggers() {
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
   //   👁閲覧/❤️いいね/🛒販売数(listing_stats)の同期だけ復活せず、ずっと0のままになる（実際に発生）。
   ScriptApp.newTrigger('syncListingStats').timeBased().everyHours(6).create();
+  // ★SLS+補償が入ったかを毎朝チェックしてメール通知（入るのが数か月遅れるので、毎日見に行かないと気づけない）
+  ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
   Logger.log('✅ トリガー設定'); return 'ok';
 }
 
@@ -3389,3 +3436,14 @@ function recheckEscrowForReturns(limitN) {
 
 // 手動用：注文同期を追跡番号つきで強制実行（毎時トリガーの6時間しばり・背景枠ガードを回避）
 function runOrdersForceNow() { return syncOrdersAll(15, 'force'); }
+
+// 毎朝の補償チェックのトリガーが無ければ作る。既定の定期処理から毎回呼ぶので、手で実行しなくても必ず登録される。
+// （Apps Scriptの関数セレクタは実行のたびに戻ることがあり、手動実行に頼ると登録漏れが起きるため）
+function ensureAdjTrigger_() {
+  try {
+    var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'dailyAdjustmentsCheck'; });
+    if (has) return;
+    ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
+    Logger.log('毎朝7時の補償チェックを登録しました');
+  } catch (e) { Logger.log('トリガー登録に失敗: ' + e); }
+}
