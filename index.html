@@ -3035,6 +3035,7 @@
     '固定費の内訳に登録しました': 'Added to the fixed-cost breakdown',
     '単価の決め方': 'How to decide the rate', '外注（梱包発送）': 'Outsourced (packing & shipping)', '外注（メッセージ対応）': 'Outsourced (message handling)',
     '人件費': 'Labour cost',
+    '追跡の取り込み記録がありません（配送追跡GASが動いていない可能性）。': 'No tracking sync has been recorded (the tracking script may not be running).',
     '🛒 注文': '🛒 Orders',
     'すべて': 'All', '📦 荷物': '📦 Parcels', '📮 発送': '📮 Shipping', '💰 お金': '💰 Money', '⚠️ 要対応': '⚠️ Needs action',
     '📦 注文を見る': '📦 Open orders', '💹 損益を見る': '💹 Open profit & cash',
@@ -4139,6 +4140,7 @@
     [/^約([\d.]+)分＝時給換算$/, 'about $1 min = hourly equivalent'], [/^1件あたり (.+)$/, 'per order $1'],
     [/^人件費 (.+)／資材 (.+)$/, 'Labour $1 / materials $2'], [/^施設 (\d+)件$/, 'facility $1 orders'],
     [/^売れました：(.+)$/, 'Sold: $1'], [/^注文 (.+)$/, 'Ordered $1'], [/^注文番号 (.+)$/, 'Order no. $1'], [/^ほか(\d+)点$/, '+$1 more items'],
+    [/^追跡の最終取り込み (.+)$/, 'Tracking last synced $1'], [/^（(\d+)分前）。取り込みは$/, '($1 min ago). It syncs'],
     [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'], [/^入金 (.+)$/, 'Paid $1'],
     [/^発送期限が過ぎています：(.+)$/, 'Shipping deadline has passed: $1'], [/^今日が発送期限です：(.+)$/, 'Shipping deadline is today: $1'],
     [/^入金がありました：(.+)$/, 'Payment received: $1'], [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
@@ -10869,7 +10871,9 @@
   // 配送業者の最新ステータス文言(ds)＋メルカリ由来(di)→配送段階に分類。発送直後/輸送中/配達店到着/配達中を区別（追跡中を細かく）
   const stageOf = (ds, di) => {
     const s = String(ds || ''), d = String(di || '');
-    if (/(配達完了|お届け.*済|投函完了|受取)/.test(s) || /^(配達済|受取|お受け取り|お届け済)/.test(d)) return 'delivered';
+    // ★「持ち戻り／ご不在／保管」は届いていない。先に弾かないと「お届け.*済」等に巻き込まれる
+    if (/(持ち戻り|ご不在|返送|保管中)/.test(s)) return 'arrived';
+    if (/(配達完了|お届け.*済|投函完了|窓口でお渡し|受取)/.test(s) || /^(配達済|受取|お受け取り|お届け済)/.test(d)) return 'delivered';
     if (/(持ち出し|持出|配達中|配達のため|お届けにあが|お届け中|ご不在|配達に伺|本日.*お届け)/.test(s) || /^(配達中|お届け中)/.test(d)) return 'out'; // 郵便/ゆうパケットポスト等の「お届け中/ご不在」も配達中に
     if (/(到着|お届け先|最寄|配達担当|配達店|配達局|お預かり|保管)/.test(s)) return 'arrived';
     if (/(輸送中|作業店通過|中継|通過|センター|発送)/.test(s) || /輸送中|中継/.test(d)) return 'linehaul';
@@ -12845,7 +12849,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let rows = [];
     try {
       rows = await sbGetAll('inventory',
-        'select=item_id,name,name_supplier,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
+        'select=item_id,name,name_supplier,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
     } catch (_) { rows = []; }
     const today = jstDate(Date.now());
     const daysFrom = (d) => { if (!d) return null; const t = Date.parse(String(d).slice(0, 10) + 'T00:00:00+09:00'); return isFinite(t) ? Math.floor((Date.parse(today + 'T00:00:00+09:00') - t) / 86400000) : null; };
@@ -12876,7 +12880,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           sb: (r.supplier || '') + '　仕入から ' + pdays + '日（目安 ' + exp + '日）　追跡情報なし', itemId: r.item_id });
       }
     });
-    notif.diag = { waiting: rows.length, tracked: rows.filter(r => r.tracking_no).length, hit: out.length };
+    // 追跡の取り込みは1時間ごとのGAS。最後にいつ回ったかを出さないと
+    // 「届いたのに通知が来ない」が仕様なのか故障なのか区別できない。
+    let lastSync = '';
+    rows.forEach(r => { const v = String(r.delivery_synced_at || ''); if (v > lastSync) lastSync = v; });
+    notif.diag = { waiting: rows.length, tracked: rows.filter(r => r.tracking_no).length, hit: out.length, lastSync };
     // ── 📮 発送：期限が過ぎた／今日中の未手配注文（既にアラートが取ってある注文データを使い回す）
     try {
       const ach = notifBuild._ord && (Date.now() - notifBuild._ord.at < 300000) ? notifBuild._ord
@@ -12979,7 +12987,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function notifDiagHtml() {
     const d = notif.diag; if (!d) return '';
+    const ls = d.lastSync ? epochMs(d.lastSync) : NaN;
+    const mins = isFinite(ls) ? Math.round((Date.now() - ls) / 60000) : null;
     return `<div class="smd-dim" style="padding:9px 14px;font-size:10.5px;line-height:1.7;border-top:1px solid #f2f4f8;background:#fbfcfe">
+      ${d.lastSync ? `🚚 <b>追跡の最終取り込み ${notifWhen(jstDateTime(ls), '')}</b>（${mins}分前）。取り込みは<b>1時間ごと</b>なので、届いてから最大1時間はここに出ません。<br>` : '🚚 追跡の取り込み記録がありません（配送追跡GASが動いていない可能性）。<br>'}
       入庫待ち <b>${d.waiting}</b>件のうち、追跡番号があるのは <b>${d.tracked}</b>件です。
       <b>追跡番号が無い荷物は、届いても「📦届きました」を出せません</b>（想定日数を過ぎたら🟡で出ます）。
       メルカリ/Yahooの取り込みスクリプトを回すと番号が入り、到着がそのまま出るようになります。</div>`;

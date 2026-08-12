@@ -75,7 +75,13 @@ function syncTracking() {
 }
 
 function isYamato_(m) { return /らくらく|ヤマト|宅急便|クロネコ/.test(String(m || '')); }
-function isDelivered_(s) { return /(配達完了|お届け(先にお届け)?済|投函完了|ご不在)/.test(String(s || '')) && !/持ち出し|配達中/.test(String(s || '')); }
+// ★「ご不在」は【届いていない】。ここに入れていたため、不在持ち戻りを自動で在庫保管中にしてしまう恐れがあった（2026-08-12 是正）。
+//   日本郵便の完了表現は「お届け先にお届け済み」「窓口でお渡し」。持ち戻り/保管は未完了として扱う。
+function isDelivered_(s) {
+  var t = String(s || '');
+  if (/持ち出し|配達中|持ち戻り|保管|ご不在|返送/.test(t)) return false;
+  return /(配達完了|お届け(先にお届け)?済|お届け済|投函完了|窓口でお渡し|受取)/.test(t);
+}
 
 function trackRequest_(r) {
   var no = String(r.tracking_no).replace(/[^0-9A-Za-z]/g, '');
