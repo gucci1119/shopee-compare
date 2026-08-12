@@ -3516,6 +3516,8 @@
     "商品名・バイヤー・注文番号": "Item name, buyer or order number",
     "表に出す列を選ぶ": "Choose which columns to show",
     "表示を最新に更新（DBを再読み込み）": "Refresh the view (reload from the database)",
+    "小さい順に並べたときのまん中。突出した1日に引っ張られないので『ふつうの日』はこれくらい、という見方をします。平均とかけ離れていれば、山が一部の日に寄っているということ": "The middle value when sorted. It is not pulled by one outlier day, so read it as \"a normal day looks like this.\" If it is far from the average, the volume is concentrated in a few days.",
+    "中央値": "Median",
     "押すとShopeeへ「直近24時間で作られた/変わった出品」を取りに行き、そのあと画面を更新します。&#10;さっき作った出品もこれで出ます（国を1つに絞っていると、その店だけなので速い）": "Fetches listings created or changed in the last 24 hours from Shopee, then refreshes the view.&#10;A listing you just created shows up this way (filtering to a single country limits it to that shop, so it is faster).",
     "出品データは公式APIで自動同期＝ブラウザを開かなくても最新。ただし1回に1店ずつなので、ある店の全件が回ってくるのは数時間に1回、変更ぶんの取り込みは2時間おきです。&#10;＝作りたての出品はここには出ません。🔄最新に更新を押すと、その場でShopeeへ取りに行きます。": "Listing data syncs automatically through the official API, so it stays current without opening a browser. But it processes one shop at a time: a full pass over a given shop comes around every few hours, and changed items are picked up every 2 hours.&#10;So a listing you just created will not be here yet. Press Refresh to fetch it from Shopee right now.",
     "Shopeeから新しい出品を取りに行っています…（全店・1〜3分）": "Fetching new listings from Shopee... (all shops, 1-3 min)",
@@ -13071,9 +13073,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       notif.items.forEach(x => { notif.read[x.id] = now; });
       notifPaint(); notifRender(); await notifReadSave();
     });
+    // 見出しへ飛ぶ。★offsetTop は使わない：見出しは position:sticky なので、貼り付いている状態だと
+    //   基準がずれて「動かない」「押すたび少しずつ上がる」という挙動になっていた（2026-08-13 是正）。
+    //   実測の位置差（rect）で出し、smoothもやめる＝連打しても取り合いにならず一発で決まる。
     pn.querySelectorAll('.nf-tab[data-c]').forEach(b => b.addEventListener('click', () => {
       const sec = pn.querySelector('#nf-sec-' + b.dataset.c);
-      if (sec) pn.scrollTo({ top: Math.max(0, sec.offsetTop - 78), behavior: 'smooth' });
+      if (!sec) return;
+      const delta = sec.getBoundingClientRect().top - pn.getBoundingClientRect().top;
+      pn.scrollTop = Math.max(0, pn.scrollTop + delta - 4);
+      pn.querySelectorAll('.nf-tab[data-c]').forEach(x => x.classList.toggle('on', x === b));   // いまどこを見ているか
+      sec.style.transition = 'none'; sec.style.background = '#fff3cd';
+      setTimeout(() => { sec.style.transition = 'background .6s'; sec.style.background = ''; }, 260);
     }));
     pn.querySelectorAll('.nf-orders').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('orders'); }));
     pn.querySelectorAll('.nf-money').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('profit'); }));
@@ -17444,18 +17454,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const n = names.filter(Boolean).length || 1;
               const common = new Set(Object.keys(freq).filter(w => freq[w] / n >= 0.5 && !/^\d+$/.test(w)));
               const tpl = String(tplEl.value || '{name}').trim() || '{name}';
-              const seen = new Map(); let changed = 0, dup = 0, empty = 0;
+              // ★かぶった名前は【作らない】。Shopeeは同じ明細名を2つ持てず、保存が丸ごと失敗する。
+              //   ぶつかったら ①元の名前に戻す → ②それもぶつかるなら末尾に 2,3… を付ける、の順で必ず一意にする。
+              const seen = new Map(); let changed = 0, kept = 0, numbered = 0, empty = 0;
+              const uniq = (want, orig) => {
+                const free = (v) => v && !seen.has(v.toLowerCase());
+                if (free(want)) return want;
+                if (free(orig)) return orig;                       // ①元の名前で回避
+                const base = (want || orig || '').slice(0, 27);
+                for (let n = 2; n <= 99; n++) { const c = (base + ' ' + n).trim(); if (free(c)) return c; }
+                return '';
+              };
               inputs.forEach((inp, i) => {
                 const ws = words[i] || [];
                 let core = ws.filter(w => !common.has(w.toLowerCase()) && !/^\d+$/.test(w)).join(' ').trim();
-                if (!core) { empty++; inp.style.background = '#fdecea'; return; }   // 核が取れない＝定型語だけの名前。手で直す
-                let nv = tpl.replace(/\{name\}/g, core).replace(/\s+/g, ' ').trim().slice(0, 30);
-                const k = nv.toLowerCase();
-                if (seen.has(k)) { dup++; inp.style.background = '#fff4e5'; } else { seen.set(k, i); inp.style.background = nv !== names[i] ? '#eef7ee' : ''; }
+                if (!core) { empty++; inp.style.background = '#fdecea'; if (names[i]) seen.set(names[i].toLowerCase(), i); return; }   // 核が取れない＝定型語だけの名前。手で直す
+                const want = tpl.replace(/\{name\}/g, core).replace(/\s+/g, ' ').trim().slice(0, 30);
+                const nv = uniq(want, names[i]);
+                if (!nv) { empty++; inp.style.background = '#fdecea'; return; }
+                seen.set(nv.toLowerCase(), i);
+                if (nv !== want) { if (nv === names[i]) kept++; else numbered++; inp.style.background = '#fff4e5'; }
+                else inp.style.background = nv !== names[i] ? '#eef7ee' : '';
                 if (nv !== names[i]) { changed++; inp.value = nv; inp.dispatchEvent(new Event('input', { bubbles: true })); }
               });
               if (msgEl) msgEl.innerHTML = '書き換え <b>' + changed + '</b>件'
-                + (dup ? '　<b style="color:#e8710a">同じ名前になった ' + dup + '件（要確認）</b>' : '')
+                + (kept ? '　<b style="color:#e8710a">かぶるので元の名前のままにした ' + kept + '件</b>' : '')
+                + (numbered ? '　<b style="color:#e8710a">かぶるので末尾に番号を付けた ' + numbered + '件</b>' : '')
                 + (empty ? '　<b style="color:#d93025">核が取れない ' + empty + '件（赤い行を手直し）</b>' : '')
                 + '　<span style="color:#8a8f98">外した定型語: ' + [...common].slice(0, 8).join(' / ') + '</span>'
                 + '　<b style="color:#ee4d2d">まだShopeeには反映していません。下の「Shopeeに保存」で確定します</b>';
@@ -18298,6 +18322,41 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           });
         } }
       body.querySelector('.ed-save').addEventListener('click', async () => {
+        // ★明細名の重複は【送る前に】止める。Shopeeは update_tier_variation で
+        //   「The tier option name is duplicated」を返すが、そこまで1分近くかかるうえ、
+        //   どの明細がぶつかっているのかが分からない（2026-08-13 実際に踏んだ）。
+        {
+          const rows = [...body.querySelectorAll('.ed-tierrow .ed-tier')];
+          const seen = new Map();
+          rows.forEach((el, i) => {
+            const k = String(el.value || '').trim();
+            if (!k) return;
+            if (!seen.has(k)) seen.set(k, []);
+            seen.get(k).push({ el, no: i + 1 });
+          });
+          const dup = [...seen.entries()].filter(([, v]) => v.length > 1);
+          rows.forEach(el => { el.style.background = ''; el.style.borderColor = ''; });
+          if (dup.length) {
+            const marks = [];
+            dup.forEach(([, v]) => v.forEach(x => {
+              x.el.style.background = '#fdecea'; x.el.style.borderColor = '#d93025';
+              // 明細テーブル側の同じ行にも印を付ける（どちらを見ていても分かるように）
+              const m2 = body.querySelector('.ed-tier2[data-oi="' + x.el.dataset.oi + '"]');
+              if (m2) { m2.style.background = '#fdecea'; m2.style.borderColor = '#d93025'; }
+              marks.push(x.el);
+            }));
+            const lines = dup.slice(0, 12).map(([k, v]) => '・「' + k + '」… ' + v.map(x => x.no + '番目').join(' と ')).join('\n');
+            const more = dup.length > 12 ? '\n（ほか ' + (dup.length - 12) + '件）' : '';
+            if (marks[0]) { marks[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); try { marks[0].focus(); } catch (_) {} }
+            const msgEl = body.querySelector('.ed-msg');
+            if (msgEl) { msgEl.style.color = '#d93025'; msgEl.textContent = '✗ 明細名が重複しています（赤い欄）。直してからもう一度保存してください'; }
+            alert('✗ 明細名がかぶっているので保存できません。\n\n'
+              + 'Shopeeは同じ明細名を2つ持てません。かぶっているのは次のとおりです。\n\n'
+              + lines + more
+              + '\n\n赤くした欄を直してから、もう一度「Shopeeに保存」を押してください。');
+            return;
+          }
+        }
         // ★出してしまってから目視で消すのを無くす：保存の直前に「疑わしい行」が残っていたら必ず止める。
         //   まとめて追加の行に付いた 3種類の印（過去に出したURL／この中で重複／既存明細に似ている）を数える。
         {
@@ -25741,7 +25800,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rangePrefix = rr ? `<b>${rr.label}</b>（${rr.s}〜${rr.e}）・` : '';
       const topK = keys.reduce((a, k) => val(k) > val(a) ? k : a, keys[0]);
       const maxActual = Math.max(...keys.map(val), 0);   // 「最高」は実績のみ（maxは見込みを含むため別に持つ）
-      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric !== 'sales' ? (inclCancel ? '・キャンセル含む' : '・キャンセル除く') : ''}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／最高 <b>${fmtFull(maxActual)}</b>（${topK}）` +
+      // 中央値：突出した1日に引っ張られない「ふつうの日」の水準。平均と離れていれば、それは山が一部の日に寄っているということ
+      const medDay = (() => {
+        const v = keys.map(val).sort((x, y) => x - y); if (!v.length) return 0;
+        const h = v.length >> 1; return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2;
+      })();
+      noteEl.innerHTML = `${rangePrefix}${keys.length}${pName}分・日本時間${metric === 'sales' ? '・円換算(買い手支払額×レート・速報)' : ''}${metric !== 'sales' ? (inclCancel ? '・キャンセル含む' : '・キャンセル除く') : ''}。<b>合計 ${fmtFull(total)}</b>／${pName}平均 <b>${fmtFull(Math.round(avg))}</b>／<span title="小さい順に並べたときのまん中。突出した1日に引っ張られないので『ふつうの日』はこれくらい、という見方をします。平均とかけ離れていれば、山が一部の日に寄っているということ" style="cursor:help;text-decoration:underline dotted">中央値</span> <b>${fmtFull(Math.round(medDay * 10) / 10)}</b>／最高 <b>${fmtFull(maxActual)}</b>（${topK}）` +
         (projected ? (() => {
           const u = prog.unit || '日';
           const nowName = { '日': '今日', '週': '今週', '月': '今月', '四半期': 'この四半期', '半年': 'この半期', '年': '今年' }[pName] || ('この' + pName);
