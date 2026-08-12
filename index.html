@@ -17738,6 +17738,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           //   以降はGASを試さずブラウザ直行に切り替える（無駄な待ちを作らない）。
           const bridgeOk = await detectBridge();
           let gasBad = false;
+          // ★メルカリはGoogleのIP（＝GAS）から読むとほぼ全滅する（2026-08-08 実測）。
+          //   それが分かっているのに毎回GASを試すと、最初のチャンクで最大◯十秒を無駄に待って
+          //   「0/50のまま固まった」ように見える。ブリッジがあるなら最初からブラウザ直行にする。
+          const GAS_BLOCKED = /(^|\/\/)(jp\.)?mercari\.com|mercari-shops|fril\.jp|paypayfleamarket/i;
+          if (bridgeOk && urls.every(u => GAS_BLOCKED.test(u))) gasBad = true;
+          let bridgeDone = 0;
           const viaBridge = async (i4) => {
             const r = out[i4];
             try {
@@ -17747,6 +17753,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const add = String((e4 && e4.message) || e4).slice(0, 24);
               r.err = r.err ? (r.err + '／端末でも失敗:' + add) : ('端末で失敗:' + add);
             }
+            bridgeDone++;
+            if (bm) bm.textContent = '取り込み中… ' + (fin + bridgeDone) + '/' + urls.length + '（この端末のブラウザで取得中）';
             await finish(i4, r);
           };
           for (let i3 = 0; i3 < urls.length; i3 += 12) {
@@ -17756,10 +17764,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (useGas ? '（まとめて取得中）' : '（この端末のブラウザで取得中）');
             let metas = [];
             if (useGas) {
+              // 待っている間も秒数を出す＝止まって見えないように。落ちるなら早く落として端末側へ回す
+              const t0 = Date.now();
+              const tick = setInterval(() => {
+                if (!bm) return;
+                const sec = Math.round((Date.now() - t0) / 1000);
+                bm.textContent = '取り込み中… ' + fin + '/' + urls.length + '（まとめて取得中 ' + sec + '秒／最大30秒で端末側に切替）';
+              }, 1000);
               try {
-                const res = await gasSerial(() => gasCall({ action: 'fetch_metas', urls: chunk.join('\u0001') }, 120000));
+                const res = await gasSerial(() => gasCall({ action: 'fetch_metas', urls: chunk.join('\u0001') }, 30000));
                 metas = (res && res.metas) || [];
               } catch (e) { metas = []; }
+              clearInterval(tick);
             }
             chunk.forEach((u, k) => {
               const m = metas[k] || {};
@@ -17780,7 +17796,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               if (out[i4] && out[i4].err) return bridgeOk ? viaBridge(i4) : finish(i4, out[i4]);
               return finish(i4, out[i4]);
             }));
-            fin += chunk.length;
+            fin += chunk.length; bridgeDone = 0;
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
           }
           return out.filter(Boolean);
