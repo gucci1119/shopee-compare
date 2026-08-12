@@ -1724,7 +1724,7 @@ function uploadImageData_(body) {
   var blob = Utilities.newBlob(bytes, mime, 'upload.' + (mime.indexOf('png') >= 0 ? 'png' : 'jpg'));
   var ts = now_(), path = '/api/v2/media_space/upload_image';
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var res = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
   var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
@@ -1732,12 +1732,28 @@ function uploadImageData_(body) {
   if (!id) throw new Error('image_idが取れませんでした');
   return { ok: true, image_id: id };
 }
+// ★Googleから外に出る通信は、たまに「使用できないアドレス（Address unavailable）」で落ちる。
+//   コードの誤りではなく一時的な通信断なので、少し待って数回だけ投げ直す（2026-08-13 実際に画像アップで発生）。
+function fetchRetry_(url, opts, tries) {
+  tries = tries || 3;
+  var last = null;
+  for (var i = 0; i < tries; i++) {
+    try { return UrlFetchApp.fetch(url, opts); }
+    catch (e) {
+      last = e;
+      var msg = String((e && e.message) || e);
+      if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out/i.test(msg)) throw e;
+      Utilities.sleep(800 * (i + 1));
+    }
+  }
+  throw new Error('Shopeeに接続できませんでした（' + String((last && last.message) || last).slice(0, 120) + '）');
+}
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
 function uploadImageUrl_(imageUrl) {
   var ts = now_(), path = '/api/v2/media_space/upload_image';
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var blob = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true }).getBlob();
-  var res = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true }).getBlob();
+  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
   var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
