@@ -2798,7 +2798,8 @@
   async function jobRemoteDelete(key) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(key)); } catch (_) {} }
   // 自動ダウンロード済みの印（端末ごと・最新50件だけ覚える）
   const jobOpened = (k) => { try { return (JSON.parse(localStorage.getItem('smdJobOpened') || '[]')).includes(k); } catch (_) { return false; } };
-  const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-50))); } catch (_) {} };
+  const JOB_DL_DONE = new Set();   // この画面が生きている間の「もう落とした」印
+  const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); if (a.indexOf(k) < 0) a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-400))); } catch (_) {} };
   // ★しごとが終わった時に画面を追従させるためのコールバック（同じ画面を開いたままの場合のみ）
   const JOB_DONE_CB = {};
   // ★しごとの進み具合を、開いている画面のその場にも映す（右下パネルを見に行かなくて済むように）
@@ -2842,8 +2843,14 @@
     });
   }
   let jobPollTimer = null;
+  let jobPollBusy = false;
   async function jobPoll() {
     if (!settings.sbKey && !settings.sbSecret) return;
+    if (jobPollBusy) return;      // ★前回の巡回がまだ終わっていない。重なると同じZIPを何度も落とす
+    jobPollBusy = true;
+    try { await jobPollOnce(); } finally { jobPollBusy = false; }
+  }
+  async function jobPollOnce() {
     let rows = [];
     try { rows = await sbGetAll('app_kv', 'select=k,v&k=like.job_*'); } catch (_) { return; }
     const cut = Date.now() - 7 * 86400 * 1000;   // 作業ログとして見返せるよう1週間は残す
@@ -2863,9 +2870,16 @@
       if (wasRun && j.state === 'done' && JOB_DONE_CB[r.k]) { try { JOB_DONE_CB[r.k](v); } catch (_) {} delete JOB_DONE_CB[r.k]; }
       // ★完了したZIPの自動ダウンロードは「この端末で1回だけ」。
       //   メモリだけで持つとリロードのたびに再ダウンロードされるので、開いた印はlocalStorageに残す。
-      if (v.status === 'done' && v.result && v.result.url && !jobOpened(r.k)) {
-        jobOpenedMark(r.k);
-        try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {}
+      // ★同じZIPが何度も落ちる事故があったので、止め方を三重にする：
+      //   (1) この画面が生きている間はメモリのSetで確実に1回だけ
+      //   (2) リロードをまたぐ分は localStorage の印
+      //   (3) 万一その印が失われても、【終わってから30分以上経った作業は落とさない】
+      //       ＝過去の完了ぶんが蒸し返されて延々ダウンロードされることを構造的に防ぐ
+      if (v.status === 'done' && v.result && v.result.url && !JOB_DL_DONE.has(r.k) && !jobOpened(r.k)) {
+        const fin = Date.parse(v.updated_at || v.created_at || 0) || 0;
+        const fresh = !fin || (Date.now() - fin) < 30 * 60000;
+        JOB_DL_DONE.add(r.k); jobOpenedMark(r.k);
+        if (fresh) { try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {} }
       }
       // ★GASが6分制限で強制終了すると台帳は run のまま残る＝永遠に「実行中」に見える。
       //   一定時間更新が無ければ「応答なし」に倒して、消せる状態にする。
