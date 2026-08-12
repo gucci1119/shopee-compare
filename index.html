@@ -22161,6 +22161,35 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'product_ids', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] product_ids保存失敗', e));
     }, 500);
   }
+  // 🔁 同じJAN/型番が【別のカタログ】にも付いていたら重複出品の疑い。
+  //   JANの無い商品は自社コード（例 BANDAI-PKFP-PIKACHU）を同じ欄に入れれば、同じ仕組みで重複を検知できる。
+  //   値 → それが付いているキーの集合。キーの頭が別のカタログなら「被っている」と判断する。
+  let _pidDupCache = null, _pidDupAt = 0;
+  function pidDupMap() {
+    if (_pidDupCache && Date.now() - _pidDupAt < 3000) return _pidDupCache;
+    const byVal = {};
+    Object.keys(productIds || {}).forEach(k => {
+      const v = productIds[k] || {};
+      [v.jan, v.mpn].forEach(x => {
+        const t = String(x || '').trim().toLowerCase();
+        if (t.length < 3) return;                       // 短すぎる値は誤検知のもと
+        (byVal[t] = byVal[t] || []).push(k);
+      });
+    });
+    const dup = {};
+    Object.keys(byVal).forEach(t => {
+      // 同じ値でも「同じ商品の各国ぶん」は重複ではない。キーの親（｜より前）が2種類以上なら本当の重複。
+      const roots = new Set(byVal[t].map(k => String(k).split('｜')[0]));
+      if (roots.size > 1) dup[t] = [...roots];
+    });
+    _pidDupCache = dup; _pidDupAt = Date.now();
+    return dup;
+  }
+  const pidDupOf = (pv) => {
+    const d = pidDupMap();
+    const hit = [pv.jan, pv.mpn].map(x => String(x || '').trim().toLowerCase()).find(t => t && d[t]);
+    return hit ? d[hit] : null;
+  };
   const pidOf = (key) => (productIds && key && productIds[key]) || {};
   // 🔖 明細（バリエ）ごとのJAN/型番キー。
   //   JANは「そのモノ」に付くので、各国で同じ明細なら同じ値を共有したい。
@@ -22351,7 +22380,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <button class="lst-toord" data-q="${av((isSingle ? r.name : (m.n || r.name)) || '')}" title="この明細が売れた注文を📦注文管理で見る" style="border:none;background:none;color:#3b5bdb;cursor:pointer;font-size:10px;padding:0 3px;margin-left:4px">🧾</button></span>${m.sku ? `<span style="flex:none;font-family:monospace;font-size:10px;color:#8a6d3b;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="SKU: ${av(m.sku)}">🔖${esc(m.sku)}</span>` : '<span style="flex:none;font-size:9px;color:#c9c9c9;white-space:nowrap">SKU無</span>'}${(() => {
         const pk = pidKeyModel(r, m), pv = pidOf(pk);
         const val = [pv.jan || '', pv.mpn || ''].filter(Boolean).join(' / ');
-        return `<input class="lst-mjan" data-k="${av(pk)}" value="${av(val)}" placeholder="JAN/型番" title="この明細のJANコード・型番。&#10;親SKU＋明細名で各国に共有されます（同じ明細なら他の国でも同じ値になります）。&#10;「JAN / 型番」のように / で区切って両方入れられます。" style="flex:none;width:126px;padding:2px 6px;border:1px solid #e3e6ec;border-radius:6px;font-size:10px;font-family:monospace;background:${val ? '#fffdf5' : '#fff'}">`;
+        const dup = val ? pidDupOf(pv) : null;
+        return `<input class="lst-mjan" data-k="${av(pk)}" value="${av(val)}" placeholder="JAN/型番・自社コード" title="この明細のJANコード・型番。JANが無い商品は自社コード（例 BANDAI-PKFP-PIKACHU）を入れてください。&#10;親SKU＋明細名で各国に共有されます（同じ明細なら他の国でも同じ値になります）。&#10;「JAN / 型番」のように / で区切って両方入れられます。" style="flex:none;width:126px;padding:2px 6px;border:1px solid ${dup ? '#d93025' : '#e3e6ec'};border-radius:6px;font-size:10px;font-family:monospace;background:${dup ? '#fdecea' : (val ? '#fffdf5' : '#fff')}">${dup ? `<span class="smd-dim" style="flex:none;font-size:9px;color:#d93025;font-weight:700;white-space:nowrap" title="同じJAN/型番が別の商品にも付いています（${dup.length}件）。出品が被っている可能性があります">⚠重複</span>` : ''}`;
       })()}<span style="flex:none;text-align:right;white-space:nowrap">${canEdit ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:74px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span> <span class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? jyen(m.price) : ''}</span>` : `<b style="color:#1565c0">${priceLoc(m.price)}</b>`}</span><span style="flex:none;text-align:right;white-space:nowrap"><span style="font-size:10px;color:#888">在庫</span> ${canEdit ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">` : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`}</span><span style="flex:none;font-size:10px;color:#999;white-space:nowrap">売${m.sold}</span>${!isSingle && canEdit ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="flex:none;white-space:nowrap;cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>` : ''}</div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px;position:sticky;left:16px;width:fit-content;max-width:calc(100vw - 120px);background:var(--lst-stick);z-index:3;padding-right:10px;border-radius:6px">${(!isSingle && rg.host) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます。ここのリンクはShopee編集ページを直接開く用">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
@@ -23240,6 +23270,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!jan && !mpn) delete productIds[key];
       else productIds[key] = { jan: jan, mpn: mpn, at: Date.now() };
       el.style.background = (jan || mpn) ? '#fffdf5' : '#fff';
+      _pidDupCache = null;
       saveProductIds();
       try { logAct('出品', '明細のJAN/型番', key, raw); } catch (_) {}
       // 同じキー（＝各国の同じ明細）が画面に出ていれば、その場で揃える
