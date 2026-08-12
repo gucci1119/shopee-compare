@@ -112,6 +112,32 @@ function doGet(e) {
       } catch (lerr) { lout = { ok: false, error: String((lerr && lerr.message) || lerr) }; }
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★いま作ったばかりの出品を、その場で取り込む：listings_now
+    //   定例のRRは【30分に1店】＝1店ぶんが回ってくるのに数時間かかる。増分(changed)も最短2時間おき。
+    //   そのため「1分前に作った出品がポータルに出てこない」が起きる。ここは
+    //   get_item_list の update_time_from を使って【直近hours時間で作られた/変わった出品だけ】を取る＝速い。
+    //   ?action=listings_now&token=&hours=12&shop_id=（shop_id省略時は全店）
+    if (p.action === 'listings_now') {
+      var ncb2 = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var nout2;
+      try {
+        var nwt2 = P_().getProperty('WRITE_TOKEN');
+        if (!nwt2 || p.token !== nwt2) throw new Error('WRITE_TOKEN不正');
+        var nhr = parseInt(p.hours, 10) || 12; if (nhr < 1) nhr = 1; if (nhr > 72) nhr = 72;
+        var nsid = String(p.shop_id || '').replace(/\D/g, '');
+        var nsince = now_() - nhr * 3600;
+        var ntoks = listTokens_();
+        if (nsid) ntoks = ntoks.filter(function (t) { return String(t.shop_id) === nsid; });
+        var nlog = [], ntotal = 0;
+        ntoks.forEach(function (t) {
+          try { var r2 = syncListingsForShop_(t, nsince); ntotal += (r2.listings || 0); nlog.push(r2); }
+          catch (e2) { nlog.push({ cc: t.cc, shop_id: t.shop_id, error: String(e2).slice(0, 140) }); }
+        });
+        try { ufPersist_(); } catch (eU) {}
+        nout2 = { ok: true, action: 'listings_now', hours: nhr, shops: ntoks.length, listings: ntotal, log: nlog };
+      } catch (nerr2) { nout2 = { ok: false, error: String((nerr2 && nerr2.message) || nerr2) }; }
+      return ContentService.createTextOutput(ncb2 + '(' + JSON.stringify(nout2) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★ポータル新規登録の完了メール：登録者本人＋オーナーへ通知（URL付き）。WRITE_TOKEN必須。
     //   ポータルから ?action=notify_signup&token=&email=&url=&callback=
     if (p.action === 'notify_signup') {

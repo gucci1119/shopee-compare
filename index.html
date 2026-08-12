@@ -3516,6 +3516,9 @@
     "商品名・バイヤー・注文番号": "Item name, buyer or order number",
     "表に出す列を選ぶ": "Choose which columns to show",
     "表示を最新に更新（DBを再読み込み）": "Refresh the view (reload from the database)",
+    "押すとShopeeへ「直近24時間で作られた/変わった出品」を取りに行き、そのあと画面を更新します。&#10;さっき作った出品もこれで出ます（国を1つに絞っていると、その店だけなので速い）": "Fetches listings created or changed in the last 24 hours from Shopee, then refreshes the view.&#10;A listing you just created shows up this way (filtering to a single country limits it to that shop, so it is faster).",
+    "出品データは公式APIで自動同期＝ブラウザを開かなくても最新。ただし1回に1店ずつなので、ある店の全件が回ってくるのは数時間に1回、変更ぶんの取り込みは2時間おきです。&#10;＝作りたての出品はここには出ません。🔄最新に更新を押すと、その場でShopeeへ取りに行きます。": "Listing data syncs automatically through the official API, so it stays current without opening a browser. But it processes one shop at a time: a full pass over a given shop comes around every few hours, and changed items are picked up every 2 hours.&#10;So a listing you just created will not be here yet. Press Refresh to fetch it from Shopee right now.",
+    "Shopeeから新しい出品を取りに行っています…（全店・1〜3分）": "Fetching new listings from Shopee... (all shops, 1-3 min)",
     "利益計算表(スプシ)を今すぐ取り込む（仕入額/仕入元/在庫No/PayPal差分）。さっき書いた分を即反映。自動でも1時間毎に取込。": "Import the profit spreadsheet now (cost, supplier, stock No., PayPal difference) so what you just typed shows up immediately. It also imports automatically every hour.",
     "仕入額が未入力の注文に、未紐付けの在庫を名前で照合してワンクリック紐付け（利益・確定申告を埋める）": "Match unlinked stock to orders with no cost by name, and link them in one click (fills in profit and tax figures)",
     "仕入れた在庫の台帳（登録・状態変更・棚ラベル）": "The ledger of stock you bought (register, change status, shelf labels)",
@@ -16283,6 +16286,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (lst.tab === 'analysis' && lst.anaSub === 'coverage') { try { renderCoverage(); } catch (_) {} }
     }
   }
+  // ★「さっき作った出品が出てこない」への対処。
+  //   定例の自動同期は【30分に1店ずつ】なので、1店ぶんが回ってくるのに数時間かかる（増分も最短2時間おき）。
+  //   ＝DBを読み直すだけでは、作りたての出品はどうやっても出ない。
+  //   ここでGASに「直近24時間で作られた/変わった出品だけ」を取りに行かせてから読み直す。
+  //   国を1つに絞っているときはその店だけ＝速い。絞っていなければ全店。
+  async function pullListingsNow() {
+    if (!settings.openapiUrl || !settings.writeToken) { await reloadListingsFromDb(); return; }
+    const ccs = Array.isArray(lst.ccs) ? lst.ccs : [];
+    const sid = (ccs.length === 1) ? ((settings.shopIds || {})[ccs[0]] || '') : '';
+    lst.syncing = true;
+    lst.note = sid ? `Shopeeから${ccs[0]}の新しい出品を取りに行っています…（30秒〜2分）` : 'Shopeeから新しい出品を取りに行っています…（全店・1〜3分）';
+    drawListingStatus();
+    try {
+      const r = await gasCall({ action: 'listings_now', token: settings.writeToken, hours: 24, shop_id: sid }, 300000);
+      if (!r || !r.ok) throw new Error((r && r.error) || '応答なし');
+      lst.note = `Shopeeから ${r.listings || 0}件を取り込みました（${r.shops || 0}店・直近${r.hours}時間ぶん）`;
+      lst.loaded = false; await ensureListings();
+      if (typeof toast === 'function') toast(`✓ 新しい出品 ${r.listings || 0}件を取り込みました`);
+    } catch (e) {
+      // 取りに行けなくても、せめてDBの最新は見せる（何も起きないのがいちばん困る）
+      lst.note = '';
+      try { lst.loaded = false; await ensureListings(); } catch (_) {}
+      alert('Shopeeからの取り込みに失敗しました: ' + (e.message || e)
+        + '\n\n表示はDBの最新に更新しました。GAS側に listings_now を貼っていない場合はこのエラーになります。');
+    }
+    finally {
+      lst.syncing = false; drawListingStatus();
+      if (lst.tab === 'analysis' && lst.anaSub === 'coverage') { try { renderCoverage(); } catch (_) {} }
+    }
+  }
   async function syncListings() {
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
     if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）でのみ更新できます'); return; }
@@ -22968,7 +23001,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     host.innerHTML =
       `<div class="smd-toolbar" style="margin-bottom:8px">
-        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '出品データはGASが自動同期しています（約30分ごと・数店ずつ）。ここは最新のDBを取り直します'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
+        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '押すとShopeeへ「直近24時間で作られた/変わった出品」を取りに行き、そのあと画面を更新します。&#10;さっき作った出品もこれで出ます（国を1つに絞っていると、その店だけなので速い）'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
         <span class="smd-seg" id="lst-filter">
           <button data-k="all" class="${!lst.filter || lst.filter === 'all' ? 'on' : ''}">すべて</button>
           <button data-k="live" class="${lst.filter === 'live' ? 'on' : ''}">出品中</button>
@@ -23037,7 +23070,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;font-size:11px;color:#8a8f98">
         <span>🕒 最終同期 <b style="color:#555">${listSyncStr()}</b></span>
-        <span title="出品データは公式APIで自動同期（約30分ごと・数店ずつ）＝ブラウザを開かなくても最新。Shopeeで直接変えた在庫・公開状態も最大30分ほどで自動反映されます。すぐ取り直したい時は🔄最新に更新を。" style="cursor:help;text-decoration:underline dotted">🤖自動同期ⓘ</span>
+        <span title="出品データは公式APIで自動同期＝ブラウザを開かなくても最新。ただし1回に1店ずつなので、ある店の全件が回ってくるのは数時間に1回、変更ぶんの取り込みは2時間おきです。&#10;＝作りたての出品はここには出ません。🔄最新に更新を押すと、その場でShopeeへ取りに行きます。" style="cursor:help;text-decoration:underline dotted">🤖自動同期ⓘ</span>
         ${state.mode === 'live' && settings.sbSecret ? `<button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;font-size:10.5px;padding:1px 8px" title="この端末（🟢ライブ）からShopeeへ直接取りに行って即時最新化。通常は公式APIの自動同期で足りるため不要です">🟢即時取得</button>` : ''}
       </div>
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ <span style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center">${per || '国未選択'}</span>${ccSel.length ? `<span style="color:#ee4d2d;font-weight:700">🌏 ${ccSel.join('・')}のみ</span>` : ''}
@@ -23108,7 +23141,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('lst-sync').addEventListener('click', () => {
       // 🟢ライブPCならShopeeへ直接。そうでなければGASが自動同期したDBを取り直す（ブリッジ不要）
       if (state.mode === 'live' && settings.sbSecret) syncListings();
-      else reloadListingsFromDb();
+      else pullListingsNow();
     });
     { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.page = 1; drawListingStatus(); });
