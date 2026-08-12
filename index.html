@@ -22162,6 +22162,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }, 500);
   }
   const pidOf = (key) => (productIds && key && productIds[key]) || {};
+  // 🔖 明細（バリエ）ごとのJAN/型番キー。
+  //   JANは「そのモノ」に付くので、各国で同じ明細なら同じ値を共有したい。
+  //   束ねるのは【親SKU＋明細名】（SKUは同じでも別商品のことがあるが、親SKU＋明細名まで一致すれば同一とみなせる）。
+  //   親SKUが無い商品は各国で束ねようがないので item_id#model_id に落とす。
+  const pidKeyModel = (r, m) => {
+    if (!m || m.id === 0) return pidKey(r.parent_sku);                 // 単品＝カタログのJANと同じ
+    const base = pidKey(r.parent_sku);
+    const nm = String(m.n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (base && nm) return base + '｜' + nm;
+    return 'id:' + r.item_id + '#' + m.id;
+  };
   const pidKey = (sku) => { const s = (sku == null ? '' : String(sku)).trim(); return s || null; }; // JAN/型番のキー＝parent_sku（商品単位・各国横断で共有。空なら不可＝先にSKU設定が要る）
   // 明細(model)単位の在庫0固定：カタログ(keep0)がONなら全明細に自動適用、無ければ keep0m[model_id] を見る
   const keep0OfModel = (id, mid) => { const m = metaOf(id); return !!(m.keep0 || (m.keep0m && m.keep0m[mid])); };
@@ -22337,7 +22348,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const canPreorderRow = false;          // 簡易インライン編集は価格・在庫のみ（100%公式API・展開時のproductReadも走らない）。予約(Pre-order)は行の ✎カタログ編集で公式API(update_item)編集できるのでここには出さない
     const varRows = opened
       ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${editModels.map(m => `<div style="display:flex;align-items:center;gap:12px;font-size:11px;padding:4px 0 4px 16px;border-bottom:1px solid #f4f4f4">${m.img ? `<img src="${/^https?:/.test(m.img) ? esc(m.img) : IMG_CDN + esc(m.img)}" title="${av(m.n || '')}" style="width:42px;height:28px;object-fit:cover;border-radius:4px;background:#eee;flex:none;position:sticky;left:16px;z-index:2" loading="lazy" onerror="this.style.opacity=.15">` : `<span style="width:42px;flex:none;text-align:center;color:#c9c9c9;position:sticky;left:16px;z-index:2;background:var(--lst-stick)">↳</span>`}<span style="flex:1;min-width:130px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;position:sticky;left:70px;z-index:2;background:var(--lst-stick);box-shadow:-16px 0 0 0 var(--lst-stick),12px 0 0 0 var(--lst-stick),13px 0 9px -6px rgba(0,0,0,.22)" title="${av(m.n || '')}">${isSingle ? '<span class="smd-dim">（この単品）</span>' : esc(m.n || '（既定）') + `<span class="smd-dim" style="font-size:9px;margin-left:5px">${(m.n || '').length}字</span>`}
-      <button class="lst-toord" data-q="${av((isSingle ? r.name : (m.n || r.name)) || '')}" title="この明細が売れた注文を📦注文管理で見る" style="border:none;background:none;color:#3b5bdb;cursor:pointer;font-size:10px;padding:0 3px;margin-left:4px">🧾</button></span>${m.sku ? `<span style="flex:none;font-family:monospace;font-size:10px;color:#8a6d3b;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="SKU: ${av(m.sku)}">🔖${esc(m.sku)}</span>` : '<span style="flex:none;font-size:9px;color:#c9c9c9;white-space:nowrap">SKU無</span>'}<span style="flex:none;text-align:right;white-space:nowrap">${canEdit ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:74px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span> <span class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? jyen(m.price) : ''}</span>` : `<b style="color:#1565c0">${priceLoc(m.price)}</b>`}</span><span style="flex:none;text-align:right;white-space:nowrap"><span style="font-size:10px;color:#888">在庫</span> ${canEdit ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">` : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`}</span><span style="flex:none;font-size:10px;color:#999;white-space:nowrap">売${m.sold}</span>${!isSingle && canEdit ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="flex:none;white-space:nowrap;cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>` : ''}</div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px;position:sticky;left:16px;width:fit-content;max-width:calc(100vw - 120px);background:var(--lst-stick);z-index:3;padding-right:10px;border-radius:6px">${(!isSingle && rg.host) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます。ここのリンクはShopee編集ページを直接開く用">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
+      <button class="lst-toord" data-q="${av((isSingle ? r.name : (m.n || r.name)) || '')}" title="この明細が売れた注文を📦注文管理で見る" style="border:none;background:none;color:#3b5bdb;cursor:pointer;font-size:10px;padding:0 3px;margin-left:4px">🧾</button></span>${m.sku ? `<span style="flex:none;font-family:monospace;font-size:10px;color:#8a6d3b;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="SKU: ${av(m.sku)}">🔖${esc(m.sku)}</span>` : '<span style="flex:none;font-size:9px;color:#c9c9c9;white-space:nowrap">SKU無</span>'}${(() => {
+        const pk = pidKeyModel(r, m), pv = pidOf(pk);
+        const val = [pv.jan || '', pv.mpn || ''].filter(Boolean).join(' / ');
+        return `<input class="lst-mjan" data-k="${av(pk)}" value="${av(val)}" placeholder="JAN/型番" title="この明細のJANコード・型番。&#10;親SKU＋明細名で各国に共有されます（同じ明細なら他の国でも同じ値になります）。&#10;「JAN / 型番」のように / で区切って両方入れられます。" style="flex:none;width:126px;padding:2px 6px;border:1px solid #e3e6ec;border-radius:6px;font-size:10px;font-family:monospace;background:${val ? '#fffdf5' : '#fff'}">`;
+      })()}<span style="flex:none;text-align:right;white-space:nowrap">${canEdit ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:74px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span> <span class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? jyen(m.price) : ''}</span>` : `<b style="color:#1565c0">${priceLoc(m.price)}</b>`}</span><span style="flex:none;text-align:right;white-space:nowrap"><span style="font-size:10px;color:#888">在庫</span> ${canEdit ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">` : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`}</span><span style="flex:none;font-size:10px;color:#999;white-space:nowrap">売${m.sold}</span>${!isSingle && canEdit ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="flex:none;white-space:nowrap;cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>` : ''}</div>`).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px;position:sticky;left:16px;width:fit-content;max-width:calc(100vw - 120px);background:var(--lst-stick);z-index:3;padding-right:10px;border-radius:6px">${(!isSingle && rg.host) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます。ここのリンクはShopee編集ページを直接開く用">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     // 販売ページURL：settings.shopIdsが空でも出品行のr.shop_idから直接生成（🛍️が出ない対策）
@@ -22673,7 +22688,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const hay = (r) => {
         const p = pidOf(pidKey(r.parent_sku));
         return [(r.name || ''), String(r.item_id), (r.parent_sku || ''), (p.jan || ''), (p.mpn || ''),
-          ((r.models || []).map(m => m.n || '').join(' '))].join(' \u0001 ').toLowerCase();   // 🔖JAN/型番・親SKU・明細名も検索対象
+          ((r.models || []).map(m => m.n || '').join(' ')),
+          ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ').toLowerCase();   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
       };
       rows = rows.filter(r => { const h = hay(r); return inc.every(t => h.includes(t)) && !exc.some(t => h.includes(t)); });
     }
@@ -23214,6 +23230,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     document.querySelectorAll('#lst-list .lst-memo').forEach(inp => inp.addEventListener('input', () => { const id = inp.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.note = inp.value; m.at = Date.now(); saveListingMeta(); }));
     document.querySelectorAll('#lst-list .lst-pid').forEach(el => el.addEventListener('click', () => { const key = el.dataset.key; const cur = pidOf(key); const jan = prompt('JANコード（バーコード13桁など。空で削除）', cur.jan || ''); if (jan === null) return; const mpn = prompt('型番・モデル番号（任意。空で削除）', cur.mpn || ''); if (mpn === null) return; productIds = productIds || {}; productIds[key] = { jan: (jan || '').trim(), mpn: (mpn || '').trim(), at: Date.now() }; saveProductIds(); drawListingStatus(); })); // 🔖JAN/型番設定（parent_sku単位・各国そろえると共有）
+    // 🔖 明細ごとのJAN/型番：打ったら保存（「JAN / 型番」の / 区切りで両方入れられる）
+    document.querySelectorAll('#lst-list .lst-mjan').forEach(el => el.addEventListener('change', () => {
+      const key = el.dataset.k; if (!key) return;
+      const raw = String(el.value || '').trim();
+      const parts = raw.split('/').map(x => x.trim());
+      const jan = parts[0] || '', mpn = parts.slice(1).join(' / ').trim();
+      productIds = productIds || {};
+      if (!jan && !mpn) delete productIds[key];
+      else productIds[key] = { jan: jan, mpn: mpn, at: Date.now() };
+      el.style.background = (jan || mpn) ? '#fffdf5' : '#fff';
+      saveProductIds();
+      try { logAct('出品', '明細のJAN/型番', key, raw); } catch (_) {}
+      // 同じキー（＝各国の同じ明細）が画面に出ていれば、その場で揃える
+      document.querySelectorAll('#lst-list .lst-mjan').forEach(o => { if (o !== el && o.dataset.k === key) { o.value = raw; o.style.background = el.style.background; } });
+    }));
     document.querySelectorAll('#lst-list .lst-keep0').forEach(cb => cb.addEventListener('change', () => { const id = cb.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.keep0 = cb.checked; m.at = Date.now(); saveListingMeta(); drawListingStatus(); }));
     // 📗原価セル：クリックでその場の原価エディタを開閉／中の仕入入力は利益台帳と同じsaveLedgerCost（保存後reRenderAfterCostで一覧を再描画・costOpenは保持されるので開いたまま）
     document.querySelectorAll('#lst-list .lst-costcell').forEach(el => el.addEventListener('click', () => { const id = el.dataset.id; lst.costOpen = lst.costOpen || new Set(); if (lst.costOpen.has(id)) lst.costOpen.delete(id); else lst.costOpen.add(id); drawListingStatus(); }));
