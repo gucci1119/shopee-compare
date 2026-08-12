@@ -17576,6 +17576,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 <button class="ed-delurl smd-btn" style="font-size:11px;padding:3px 10px" title="同じ仕入元URLから過去に出したことがある行。別のURLから同じ商品を買うことも普通にあるので【参考】です">仕入元URLが既出（${bChecking ? '…' : rows.filter(r => r.dup).length}）</button>
 
                 <button class="ed-delnoprice smd-btn" style="font-size:11px;padding:3px 10px">価格が空（${rows.filter(r => !(parseFloat(r.price) > 0)).length}）</button>
+                ${(() => { const n = rows.filter(r => r.err || !r.src).length; return n ? `<button class="ed-reload smd-btn" style="font-size:11px;padding:3px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700"${bChecking ? ' disabled' : ''} title="取れなかった行だけ、もう一度だけ取りに行きます。&#10;入力済みの名前・仕入値は上書きしません">🔄 取れなかった行だけ取り直す（${n}）</button>` : ''; })()}
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:6px 9px;border:1px dashed #cdd7ea;border-radius:6px;background:#fafbff;font-size:11px">
                 <b style="color:#3b5bdb">重量をまとめて変更</b>
@@ -17708,7 +17709,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const b2 = bx.querySelector('.ed-deldup'); if (b2) b2.addEventListener('click', () => rm(r => !!r.same, 'この中で重複'));
             const b3 = bx.querySelector('.ed-delexist'); if (b3) b3.addEventListener('click', () => rm(r => !!(r.exists || r.near), '名前がかぶってる'));
             const b3u = bx.querySelector('.ed-delurl'); if (b3u) b3u.addEventListener('click', () => rm(r => !!r.dup, '仕入元URLが既出'));
-            const b4b = bx.querySelector('.ed-delnoprice'); if (b4b) b4b.addEventListener('click', () => rm(r => !(parseFloat(r.price) > 0), '価格が空')); }
+            const b4b = bx.querySelector('.ed-delnoprice'); if (b4b) b4b.addEventListener('click', () => rm(r => !(parseFloat(r.price) > 0), '価格が空'));
+            // ★取れなかった行だけ取り直す。相手側が一時的に弾いてくることがあるので、消して貼り直すより速い。
+            const rl = bx.querySelector('.ed-reload');
+            if (rl) rl.addEventListener('click', async () => {
+              const idx = rows.map((r, i) => (r.err || !r.src) ? i : -1).filter(i => i >= 0);
+              if (!idx.length) return;
+              bAbort = false; bChecking = true; rl.disabled = true;
+              idx.forEach(i => { rows[i].pending = true; rows[i].err = ''; paintRow(i); });
+              if (bm) bm.textContent = '取り直し中… 0/' + idx.length;
+              const got = await runPool(idx.map(i => rows[i].url), (k, r) => {
+                const i = idx[k]; if (!rows[i]) return;
+                // 手で入れた名前・仕入値は消さない（取れた分だけ埋める）
+                const keep = { name: rows[i].name, cost: rows[i].cost, wg: rows[i].wg };
+                Object.assign(rows[i], r, { pending: false, wg: keep.wg });
+                if (keep.name) rows[i].name = keep.name;
+                if (keep.cost > 0 && !(rows[i].cost > 0)) rows[i].cost = keep.cost;
+                paintRow(i);
+              });
+              got.forEach((r, k) => { const i = idx[k]; if (rows[i] && r) { rows[i].pending = false; } });
+              bChecking = false;
+              const still = idx.filter(i => rows[i].err || !rows[i].src).length;
+              if (bm) bm.innerHTML = '取り直し ' + idx.length + '件 → <b>' + (idx.length - still) + '件</b>取れました'
+                + (still ? '　<b style="color:#d93025">まだ ' + still + '件は取れません</b>（相手側で弾かれている可能性。名前・仕入値は手で入れられます）' : '');
+              draw();
+            }); }
           { const wa = bx.querySelector('.ed-bulkwgapply'), wi = bx.querySelector('.ed-bulkwg');
             if (wa && wi) wa.addEventListener('click', () => {
               const v = parseFloat((wi.value || '').replace(/[^\d.]/g, ''));
@@ -17925,7 +17950,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 r.cost = m.price || 0;
                 if (m.image && !r.image) r.image = m.image;
                 r.src = m.title || '';
-              } else r.err = String(m.error || (useGas ? '取得できませんでした' : '')).slice(0, 40);
+                // ★okでも中身が空のことがある（相手側の作りが変わった/弾かれた）。
+                //   これを成功扱いにしていたため「読取失敗0件なのに名前も値段も全部空」になっていた（2026-08-13）。
+                if (!r.src && !(r.cost > 0)) r.err = '中身が取れませんでした';
+              } else r.err = String(m.error || '取得できませんでした').slice(0, 40);
               out[i3 + k] = r;
             });
             const ng = chunk.map((u, k) => (out[i3 + k] && out[i3 + k].err) ? (i3 + k) : -1).filter(x => x >= 0);
