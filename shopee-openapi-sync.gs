@@ -264,7 +264,14 @@ function doGet(e) {
             };
             var pr = parseInt(String(mt('product:price:amount') || '').replace(/[^0-9]/g, ''), 10) || 0;
             if (!pr) { var mp2 = html2.match(/"price"\s*:\s*"?(\d{2,9})"?/); if (mp2) pr = parseInt(mp2[1], 10) || 0; }
-            return { ok: true, title: mt('og:title'), price: pr, currency: mt('product:price:currency') || 'JPY', image: mt('og:image') };
+            var ti2 = mt('og:title'), im2 = mt('og:image');
+            // ★200が返っていても中身が空のことがある（ボット判定のページ等）。
+            //   これを ok:true で返していたため、ポータル側が「読取失敗0件なのに名前も値段も全部空」になっていた（2026-08-13）。
+            if (!ti2 && !pr) {
+              var hint2 = /captcha|challenge|robot|automated|アクセスが集中|不正なアクセス|しばらく/i.test(html2.slice(0, 6000)) ? '・弾かれている可能性' : '';
+              return { ok: false, error: '中身が読めません（HTTP ' + r.getResponseCode() + hint2 + '）' };
+            }
+            return { ok: true, title: ti2, price: pr, currency: mt('product:price:currency') || 'JPY', image: im2 };
           } catch (e2) { return { ok: false, error: String(e2 && e2.message || e2).slice(0, 120) }; }
         });
         fmout2 = { ok: true, metas: arr2 };
