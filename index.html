@@ -299,13 +299,23 @@
   /* 🔔 お知らせボックス */
   #smd-notif-badge { position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; border-radius:9px; background:#d93025; color:#fff; font-size:10px; font-weight:800; line-height:16px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.25); }
   #smd-notif-panel { position:fixed; z-index:210; width:min(420px,94vw); max-height:70vh; overflow:auto; background:#fff; border:1px solid #e0e4ec; border-radius:12px; box-shadow:0 12px 40px rgba(15,23,42,.22); display:none; }
-  #smd-notif-panel .nh { position:sticky; top:0; background:#fff; border-bottom:1px solid #eef1f6; padding:10px 14px; display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; }
-  .nf-tabs { display:flex; gap:4px; padding:8px 10px; border-bottom:1px solid #eef1f6; flex-wrap:wrap; position:sticky; top:41px; background:#fff; z-index:1; }
+  #smd-notif-panel .nh { position:sticky; top:0; z-index:2; background:#fff; border-bottom:1px solid #eef1f6; padding:9px 12px; display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; white-space:nowrap; }
+  #smd-notif-panel .nh .nh-t { flex:none; }
+  #smd-notif-panel .nh .nh-s { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  #smd-notif-panel .nh button { flex:none; white-space:nowrap; }
+  .nf-tabs { display:flex; gap:4px; padding:7px 10px; border-bottom:1px solid #eef1f6; flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; position:sticky; top:38px; background:#fff; z-index:2; scrollbar-width:none; }
+  .nf-tabs::-webkit-scrollbar { display:none; }
   .nf-tab { position:relative; font-size:11.5px; padding:3px 9px; border:1px solid #e0e4ec; background:#fff; border-radius:14px; cursor:pointer; white-space:nowrap; }
   .nf-tab.on { border-color:#ee4d2d; color:#ee4d2d; background:#fff5f2; font-weight:700; }
   .nf-tab b { font-weight:700; }
   .nf-dot { position:absolute; top:2px; right:3px; width:6px; height:6px; border-radius:50%; background:#d93025; }
-  .nf-sec { position:sticky; top:76px; z-index:1; background:#f7f9fc; border-top:1px solid #eef1f6; border-bottom:1px solid #eef1f6; padding:5px 14px; font-size:11.5px; font-weight:700; color:#475569; }
+  @media (max-width: 700px) {
+    #smd-notif-panel { left:8px !important; width:calc(100vw - 16px) !important; max-height:78vh; }
+    #smd-notif-panel .nh .nh-s { display:none; }        /* 狭い時は副題を畳んで見出しを1行に保つ */
+    .nf-item { padding:9px 10px; }
+    .nf-ac button { padding:4px 10px; }                  /* 指で押しやすく */
+  }
+  .nf-sec { position:sticky; top:74px; z-index:1; background:#f7f9fc; border-top:1px solid #eef1f6; border-bottom:1px solid #eef1f6; padding:5px 14px; font-size:11.5px; font-weight:700; color:#475569; }
   .nf-tab.off { opacity:.42; cursor:default; }
   .nf-item { display:flex; gap:9px; padding:10px 14px; border-bottom:1px solid #f2f4f8; font-size:12.5px; line-height:1.6; }
   .nf-item.unread { background:#fffdf5; }
@@ -12082,6 +12092,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { await sbUpsert('app_kv', [{ k: 'notif_read', v: notif.read || {}, updated_at: new Date().toISOString() }]); } catch (_) {}
   }
   // 届いた荷物を拾う。全在庫を読むと重いので「入庫待ち」だけ・必要な列だけ取る。
+  // ★Shopeeのタイムスタンプは【秒】。ミリ秒として扱うと1970年になる（実際に入金日が全部「1/22 01:14」になっていた）。
+  //   秒・ミリ秒・ISO文字列のどれで来ても正しいミリ秒に直す。
+  function epochMs(v) {
+    if (v == null || v === '') return NaN;
+    if (typeof v === 'number' || /^\d+$/.test(String(v))) { const n = Number(v); return n < 1e11 ? n * 1000 : n; }
+    const t = Date.parse(v); return isFinite(t) ? t : NaN;
+  }
   // スキャン時刻の表記ゆれ（2026/08/10 14:32 / 08/10 14:32 / 8月10日 14:32）を「今日 14:32」等の読みやすい形に
   function notifWhen(t, label) {
     const raw = String(t || '').trim(); if (!raw) return '';
@@ -12091,8 +12108,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     else { m = raw.match(/(\d{1,2})[\/\-月](\d{1,2})日?[\s]*(\d{1,2}:\d{2})?/); if (!m) return label + ' ' + raw; mo = +m[1]; d = +m[2]; hm = m[3] || ''; y = new Date().getFullYear(); }
     const today = jstDate(Date.now()), ymd = y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
     const diff = Math.round((Date.parse(today) - Date.parse(ymd)) / 86400000);
-    const day = (diff === 0) ? '今日' : (diff === 1) ? '昨日' : (diff === 2) ? '一昨日' : (mo + '/' + d);
-    return label + ' ' + day + (hm ? ' ' + hm : '');
+    const thisYear = new Date(Date.parse(today)).getFullYear();
+    const md = (y === thisYear ? '' : y + '/') + mo + '/' + d;                     // 去年以前は年も出す
+    const day = (diff === 0) ? '今日' : (diff === 1) ? '昨日' : (diff === 2) ? '一昨日' : md;
+    const suffix = (diff >= 0 && diff <= 2) ? '（' + md + '）' : '';                 // 今日/昨日でも実日付を必ず添える
+    return label + ' ' + day + (hm ? ' ' + hm : '') + suffix;
   }
   // 並べ替えは「届いた時刻が新しい順」。時刻が取れない物は仕入日で代用する。
   function notifSortKey(t, pd) {
@@ -12157,9 +12177,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const it = (o.items || [])[0] || {};
         const due = new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16).replace('-', '/');
         out.push({ id: 'ship:' + o.cc + ':' + o.sn + ':' + (left < 0 ? 'over' : 'today'), ic: left < 0 ? '🚨' : '⏰',
-          cat: 'ship', kind: 'ship', at: '9' + String(o.ship_by),
+          cat: 'ship', kind: 'ship', at: notifSortKey(jstDateTime(o.ship_by * 1000), ''),
           ti: (left < 0 ? '発送期限が過ぎています：' : '今日が発送期限です：') + (it.name || o.sn),
-          sb: [o.cc, '期限 ' + due, '注文番号 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
+          sb: [notifWhen(jstDateTime(o.ship_by * 1000), '期限'), o.cc, '注文番号 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
       });
     } catch (_) {}
     // ── 🛒 注文：新しく入った注文（直近48時間）。売れたことにすぐ気づけるように。
@@ -12169,7 +12189,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const cut = Date.now() - 48 * 3600000;
       (ords || []).forEach(o => {
         if (o.tab === 600) return;                                   // キャンセルは対象外
-        const ts = o.order_ts ? (Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : NaN;
+        const ts = epochMs(o.order_ts);
         if (isFinite(ts) && ts < cut) return;
         const rg = regionByCc(o.cc) || {};
         const its = o.items || [], it = its[0] || {};
@@ -12184,26 +12204,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     } catch (_) {}
     // ── 💰 お金：Shopeeからの調整金（SLS+の補償など）が入った
     try {
-      const adj = await sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,remark,payout_time&amount=gt.0&order=payout_time.desc&limit=40');
+      const adj = await sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,remark,payout_time&amount=gt.0&order=payout_time.desc&limit=60');
       const lim = Date.now() - 45 * 86400000;
       (adj || []).forEach(a => {
-        const t = a.payout_time ? Date.parse(a.payout_time) : NaN;
-        if (isFinite(t) && t < lim) return;
+        const ms = epochMs(a.payout_time);
+        if (!isFinite(ms) || ms < lim) return;     // 日付が取れない/45日より前は出さない
         const rg = regionByCc(a.cc) || {};
         out.push({ id: 'adj:' + a.cc + ':' + a.order_sn + ':' + a.amount, ic: '💰', cat: 'money', kind: 'money',
-          at: notifSortKey(jstDateTime(a.payout_time) || '', jstDate(a.payout_time) || ''),
+          at: notifSortKey(jstDateTime(ms), jstDate(ms)),
           ti: '入金がありました：' + (rg.cur || '') + Math.round(Number(a.amount) || 0).toLocaleString(),
-          sb: [notifWhen(jstDateTime(a.payout_time) || jstDate(a.payout_time), '入金'), a.cc, a.module || '', a.remark || '', '注文番号 ' + a.order_sn].filter(Boolean).join('　') });
+          sb: [notifWhen(jstDateTime(ms), '入金'), a.cc, a.module || '', a.remark || '', '注文番号 ' + a.order_sn].filter(Boolean).join('　') });
       });
     } catch (_) {}
     // ── ⚠️ 要対応：発送済なのに追跡番号が無い（＝配送事故を見逃す）
     try {
-      const bad = await sbGetAll('orders', 'select=cc,sn,status,items,tab,tracking&tab=eq.400&tracking=is.null&limit=30');
+      const bad = await sbGetAll('orders', 'select=cc,sn,status,items,tab,tracking,order_ts,order_date&tab=eq.400&tracking=is.null&order=order_date.desc&limit=30');
       (bad || []).forEach(o => {
         if (/(cancel|return|refund|complete|キャンセル|返品|返金|完了)/i.test(String(o.status || ''))) return;
         const it = (o.items || [])[0] || {};
-        out.push({ id: 'notrk:' + o.cc + ':' + o.sn, ic: '⚠️', cat: 'todo', kind: 'notrack', at: '1',
-          ti: '発送済なのに追跡番号がありません：' + (it.name || o.sn), sb: [o.cc, '注文番号 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
+        const ms = epochMs(o.order_ts);
+        out.push({ id: 'notrk:' + o.cc + ':' + o.sn, ic: '⚠️', cat: 'todo', kind: 'notrack',
+          at: isFinite(ms) ? notifSortKey(jstDateTime(ms), o.order_date) : String(o.order_date || ''),
+          ti: '発送済なのに追跡番号がありません：' + (it.name || o.sn),
+          sb: [notifWhen(isFinite(ms) ? jstDateTime(ms) : o.order_date, '注文'), o.cc, '注文番号 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
       });
     } catch (_) {}
     // 全部そろってから、新しい順に並べる（荷物＝到着時刻／発送＝期限／お金＝入金日）
@@ -12274,8 +12297,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function notifRender() {
     const pn = document.getElementById('smd-notif-panel'); if (!pn) return;
-    pn.innerHTML = `<div class="nh">🔔 お知らせ <span class="smd-dim" style="font-weight:400;font-size:11px">（注文・荷物・発送・お金・要対応）</span>
-        <span style="flex:1"></span>
+    pn.innerHTML = `<div class="nh"><span class="nh-t">🔔 お知らせ</span> <span class="nh-s smd-dim" style="font-weight:400;font-size:11px">（注文・荷物・発送・お金・要対応）</span>
         <button class="smd-btn nf-allread" style="font-size:11px;padding:2px 8px">すべて既読</button>
         <button class="smd-btn nf-close" style="font-size:11px;padding:2px 8px" title="閉じる">✕</button></div>` + notifPanelHtml();
     pn.querySelector('.nf-close').addEventListener('click', notifClose);
@@ -12309,7 +12331,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!btn || !pn) return;
     const r = btn.getBoundingClientRect();
     pn.style.top = Math.round(r.bottom + 6) + 'px';
-    pn.style.left = Math.round(Math.min(r.left, window.innerWidth - pn.offsetWidth - 12)) + 'px';
+    if (window.innerWidth <= 700) { pn.style.left = '8px'; pn.style.width = 'calc(100vw - 16px)'; return; }
+    pn.style.width = '';
+    pn.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - pn.offsetWidth - 12))) + 'px';
   }
   function notifClose() { notif.open = false; const pn = document.getElementById('smd-notif-panel'); if (pn) pn.style.display = 'none'; }
   async function notifOpen() {
