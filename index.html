@@ -17838,6 +17838,39 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
             ba.disabled = true;
             // ★しごと化＋GAS側で一括処理。1件ずつだと 4〜5往復×件数 かかっていた（62件で数分）。
+            // ★まとめて追加した明細の【仕入¥・重量】を出品台帳(listing_catalog)にも残す。
+            //   ここを書いていなかったので、一覧の「📗原価」「ROI」がずっと空だった（本人指摘 2026-08-13）。
+            //   台帳は「出品を作る」からしか書かれていなかった＝カタログ編集で足した明細は原価なしになる。
+            const ledgerAddVars = async (added) => {
+              try {
+                if (!settings.sbSecret) return;                       // 書き込みキーが無い端末では何もしない
+                const sku = String((pi && pi.parent_sku) || '').trim();
+                const title = String(repName || pi.name || '').trim();
+                const id = 'lst|' + (sku || title || 'untitled').slice(0, 90);
+                let cur = null;
+                try { const got = await sbGet('listing_catalog', 'select=*&id=eq.' + encodeURIComponent(id) + '&limit=1'); cur = (got || [])[0] || null; } catch (_) {}
+                const vars = (cur && Array.isArray(cur.variations)) ? cur.variations.slice() : [];
+                const byName = {}; vars.forEach((v, i) => { byName[String(v.name || '').toLowerCase().trim()] = i; });
+                (added || []).forEach(x => {
+                  const rec = { name: x.name || '', sku: '', cost: Number(x.cost) || 0, weightG: Number(x.wg) || 0 };
+                  const k = String(rec.name).toLowerCase().trim();
+                  if (byName[k] != null) vars[byName[k]] = Object.assign({}, vars[byName[k]], rec); else vars.push(rec);
+                });
+                const costs = vars.map(v => Number(v.cost) || 0).filter(v => v > 0);
+                const snap = Object.assign({}, cur || {}, {
+                  id: id, name: title, title: title, parent_sku: sku,
+                  weight_g: (cur && cur.weight_g) || (Number((added || [])[0] && (added[0].wg)) || 0),
+                  variations: vars,
+                  // 原価の代表値＝いちばん安い明細（1個あたりの仕入）。合計にすると明細を足すほど膨らんで意味を失う
+                  cost_total: costs.length ? Math.min(...costs) : 0,
+                  updated_at: new Date().toISOString()
+                });
+                await sbUpsert('listing_catalog', [snap]);
+                lst._ledgerReload = true; lst._catalogBySku = null; lst._catalogByName = null; rankCost = null;
+                try { toast('💰 仕入' + (added || []).length + '件を出品台帳に記録しました（📗原価に出ます）'); } catch (_) {}
+                try { if (document.getElementById('lst-list')) drawListingStatus(); } catch (_) {}
+              } catch (_) {}
+            };
             const items2 = list.map(x => ({ option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' }));
             const kv2 = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
             try {
@@ -17846,7 +17879,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               JOB_T0[key2] = Date.now();
               JOB_MIRROR[key2] = (v) => {
                 if (!ba || !ba.isConnected) return;
-                if (v.status === 'done') { ba.disabled = false; ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100) + ((v.result && v.result.imgAdjust) ? '<span class="smd-dim" style="margin-left:6px">' + esc(v.result.imgAdjust) + '</span>' : ''); markStale(); delete JOB_MIRROR[key2]; return; }
+                if (v.status === 'done') { ba.disabled = false; ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100) + ((v.result && v.result.imgAdjust) ? '<span class="smd-dim" style="margin-left:6px">' + esc(v.result.imgAdjust) + '</span>' : ''); markStale(); try { ledgerAddVars(list); } catch (_) {} delete JOB_MIRROR[key2]; return; }
                 if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + apiErrJa(v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
                 ba.innerHTML = '② 追加中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key2, v.pct || 0), '#3b5bdb');
               };
