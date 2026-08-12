@@ -300,6 +300,11 @@
   #smd-notif-badge { position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; border-radius:9px; background:#d93025; color:#fff; font-size:10px; font-weight:800; line-height:16px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.25); }
   #smd-notif-panel { position:fixed; z-index:210; width:min(420px,94vw); max-height:70vh; overflow:auto; background:#fff; border:1px solid #e0e4ec; border-radius:12px; box-shadow:0 12px 40px rgba(15,23,42,.22); display:none; }
   #smd-notif-panel .nh { position:sticky; top:0; background:#fff; border-bottom:1px solid #eef1f6; padding:10px 14px; display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; }
+  .nf-tabs { display:flex; gap:4px; padding:8px 10px; border-bottom:1px solid #eef1f6; flex-wrap:wrap; position:sticky; top:41px; background:#fff; z-index:1; }
+  .nf-tab { position:relative; font-size:11.5px; padding:3px 9px; border:1px solid #e0e4ec; background:#fff; border-radius:14px; cursor:pointer; white-space:nowrap; }
+  .nf-tab.on { border-color:#ee4d2d; color:#ee4d2d; background:#fff5f2; font-weight:700; }
+  .nf-tab b { font-weight:700; }
+  .nf-dot { position:absolute; top:2px; right:3px; width:6px; height:6px; border-radius:50%; background:#d93025; }
   .nf-item { display:flex; gap:9px; padding:10px 14px; border-bottom:1px solid #f2f4f8; font-size:12.5px; line-height:1.6; }
   .nf-item.unread { background:#fffdf5; }
   .nf-ic { font-size:16px; line-height:1.3; }
@@ -2996,6 +3001,10 @@
       '⚠️ The shop_id column does not exist yet, so per-account view is off (everything stays combined). Run the SQL at the bottom of the Accounts page once and re-sync to enable it.',
     '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます': 'Older awaiting-arrival items can be received in bulk under “Check long-stale items”',
     '今日': 'today', '昨日': 'yesterday', '一昨日': 'the day before yesterday',
+    'すべて': 'All', '📦 荷物': '📦 Parcels', '📮 発送': '📮 Shipping', '💰 お金': '💰 Money', '⚠️ 要対応': '⚠️ Needs action',
+    '📦 注文を見る': '📦 Open orders', '💹 損益を見る': '💹 Open profit & cash',
+    '注文管理を開きます': 'Opens Orders', '損益・入出金を開きます': 'Opens Profit & Cash',
+    '追跡番号が無い荷物は、届いても「📦届きました」を出せません': 'Parcels without a tracking number cannot show “Arrived” even when they do arrive',
     '🔔 お知らせ': '🔔 Alerts', 'お知らせ': 'Alerts', '（届いた荷物・配達中）': '(arrived parcels and deliveries in progress)',
     'すべて既読': 'Mark all read', '既読にする': 'Mark read', '✅ 受け取った': '✅ Received',
     '⏳ 入庫待ちを見る': '⏳ Open awaiting arrival',
@@ -3522,7 +3531,10 @@
     [/^／ 重量 (.+)$/, '/ Weight $1'], [/^／ 容積重量 (.+)$/, '/ Volumetric weight $1'],
     [/^PayPal手数料 (.+)$/, 'PayPal fee $1'],
     [/^ほか (\d+)件あります$/, '$1 more'],
-    [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'],
+    [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'], [/^入金 (.+)$/, 'Paid $1'],
+    [/^発送期限が過ぎています：(.+)$/, 'Shipping deadline has passed: $1'], [/^今日が発送期限です：(.+)$/, 'Shipping deadline is today: $1'],
+    [/^入金がありました：(.+)$/, 'Payment received: $1'], [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
+    [/^期限 (.+)$/, 'Due $1'], [/^注文 (.+)$/, 'Order $1'],
     [/^届きました：(.+)$/, 'Arrived: $1'], [/^配達中です：(.+)$/, 'Out for delivery: $1'],
     [/^届いているかもしれません：(.+)$/, 'May have arrived: $1'],
     [/^(.+)　仕入から (\d+)日（目安 (\d+)日）　追跡情報なし$/, '$1  $2 days since purchase (expected $3)  no tracking information'],
@@ -12055,7 +12067,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //  目的：仕入れた荷物が届いたことに気づけるようにする。
   //  作りの方針：新しいテーブルは作らない。既にある inventory の配送段階（stageOf）から
   //  その場で組み立て、「読んだ／片付けた」だけを app_kv に持つ（複数PCで共有される）。
-  const notif = { items: [], read: null, open: false, loading: false };
+  const notif = { items: [], read: null, open: false, loading: false, cat: 'all', diag: null };
   async function notifReadLoad() {
     if (notif.read) return notif.read;
     let v = {};
@@ -12104,12 +12116,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const lastScan = (() => { try { const h = JSON.parse(r.delivery_history || 'null'); return Array.isArray(h) && h.length ? (h[h.length - 1].t || '') : ''; } catch (_) { return ''; } })();
       if (ph === 'delivered') {
         const at = deliveredAt(r) || lastScan;
-        out.push({ id: 'arr:' + r.item_id, ic: '📦', kind: 'arrived', at: notifSortKey(at, pd),
+        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', at: notifSortKey(at, pd),
           ti: '届きました：' + nm,
           sb: [notifWhen(at, '到着'), r.supplier || '', pd ? '仕入 ' + pd : '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       } else if (ph === 'out') {
-        out.push({ id: 'out:' + r.item_id, ic: '🚚', kind: 'out', at: notifSortKey(lastScan, pd),
+        out.push({ id: 'out:' + r.item_id, ic: '🚚', cat: 'parcel', kind: 'out', at: notifSortKey(lastScan, pd),
           ti: '配達中です：' + nm,
           sb: [notifWhen(lastScan, '最新'), r.supplier || '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
@@ -12117,21 +12129,68 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       //   何年も前の滞留分でベルが埋まって役に立たないので、【最近の仕入れだけ】に絞る。
       //   古い滞留は 🛒仕入れ管理 ＞ ⏳入庫待ち の「🧹長期滞留の点検」でまとめて処理する。
       } else if (!ph && pdays != null && pdays >= exp && pdays <= 60) {
-        out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', kind: 'likely', at: pd,
+        out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', cat: 'parcel', kind: 'likely', at: pd,
           ti: '届いているかもしれません：' + nm,
           sb: (r.supplier || '') + '　仕入から ' + pdays + '日（目安 ' + exp + '日）　追跡情報なし', itemId: r.item_id });
       }
     });
-    // 新しい順（仕入日）に。同日は商品名で安定させる
+    notif.diag = { waiting: rows.length, tracked: rows.filter(r => r.tracking_no).length, hit: out.length };
+    // ── 📮 発送：期限が過ぎた／今日中の未手配注文（既にアラートが取ってある注文データを使い回す）
+    try {
+      const ach = notifBuild._ord && (Date.now() - notifBuild._ord.at < 300000) ? notifBuild._ord
+        : (renderAlerts._cache && (Date.now() - renderAlerts._cache.at < 300000) ? { orders: renderAlerts._cache.orders, at: renderAlerts._cache.at } : null);
+      let orders = ach && ach.orders;
+      if (!orders) {
+        orders = await sbGetAll('orders', 'select=cc,sn,status,ship_by,items,tab,tracking&tab=lt.500&order=ship_by.asc');
+        notifBuild._ord = { orders, at: Date.now() };
+      }
+      const nowSec = Date.now() / 1000;
+      (orders || []).forEach(o => {
+        if (!/to ?ship/i.test(o.status || '') || o.tracking) return;      // 手配済み(追跡あり)は対象外
+        if (!o.ship_by) return;
+        const left = o.ship_by - nowSec;
+        if (left > 86400) return;                                          // 24時間より先はまだ急がない
+        const it = (o.items || [])[0] || {};
+        const due = new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16).replace('-', '/');
+        out.push({ id: 'ship:' + o.cc + ':' + o.sn + ':' + (left < 0 ? 'over' : 'today'), ic: left < 0 ? '🚨' : '⏰',
+          cat: 'ship', kind: 'ship', at: '9' + String(o.ship_by),
+          ti: (left < 0 ? '発送期限が過ぎています：' : '今日が発送期限です：') + (it.name || o.sn),
+          sb: [o.cc, '期限 ' + due, '注文 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
+      });
+    } catch (_) {}
+    // ── 💰 お金：Shopeeからの調整金（SLS+の補償など）が入った
+    try {
+      const adj = await sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,remark,payout_time&amount=gt.0&order=payout_time.desc&limit=40');
+      const lim = Date.now() - 45 * 86400000;
+      (adj || []).forEach(a => {
+        const t = a.payout_time ? Date.parse(a.payout_time) : NaN;
+        if (isFinite(t) && t < lim) return;
+        const rg = regionByCc(a.cc) || {};
+        out.push({ id: 'adj:' + a.cc + ':' + a.order_sn + ':' + a.amount, ic: '💰', cat: 'money', kind: 'money',
+          at: notifSortKey(jstDateTime(a.payout_time) || '', jstDate(a.payout_time) || ''),
+          ti: '入金がありました：' + (rg.cur || '') + Math.round(Number(a.amount) || 0).toLocaleString(),
+          sb: [notifWhen(jstDateTime(a.payout_time) || jstDate(a.payout_time), '入金'), a.cc, a.module || '', a.remark || '', '注文 ' + a.order_sn].filter(Boolean).join('　') });
+      });
+    } catch (_) {}
+    // ── ⚠️ 要対応：発送済なのに追跡番号が無い（＝配送事故を見逃す）
+    try {
+      const bad = await sbGetAll('orders', 'select=cc,sn,status,items,tab,tracking&tab=eq.400&tracking=is.null&limit=30');
+      (bad || []).forEach(o => {
+        if (/(cancel|return|refund|complete|キャンセル|返品|返金|完了)/i.test(String(o.status || ''))) return;
+        const it = (o.items || [])[0] || {};
+        out.push({ id: 'notrk:' + o.cc + ':' + o.sn, ic: '⚠️', cat: 'todo', kind: 'notrack', at: '1',
+          ti: '発送済なのに追跡番号がありません：' + (it.name || o.sn), sb: [o.cc, '注文 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
+      });
+    } catch (_) {}
+    // 全部そろってから、新しい順に並べる（荷物＝到着時刻／発送＝期限／お金＝入金日）
     out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')) || String(a.ti).localeCompare(String(b.ti)));
-    if (out.length > 50) {   // 多すぎる時は先頭だけ出し、残りは点検ビューへ誘導（ベルが埋まると読まなくなる）
-      const rest = out.length - 50;
-      out.length = 50;
-      out.push({ id: 'more:' + today, ic: '🧹', kind: 'more', at: '',
-        ti: 'ほか ' + rest + '件あります', sb: '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます' });
-    }
-    notif.items = out;
-    return out;
+    // カテゴリごとに上限をかける（ベルが埋まると読まなくなる）
+    const cap = { parcel: 40, ship: 30, money: 20, todo: 20 }, seen = {}, kept = [], over = {};
+    out.forEach(x => { const c = x.cat || 'todo'; seen[c] = (seen[c] || 0) + 1; if (seen[c] <= (cap[c] || 20)) kept.push(x); else over[c] = (over[c] || 0) + 1; });
+    if (over.parcel) kept.push({ id: 'more:' + jstDate(Date.now()), ic: '🧹', cat: 'parcel', kind: 'more', at: '',
+      ti: 'ほか ' + over.parcel + '件あります', sb: '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます' });
+    notif.items = kept;
+    return kept;
   }
   function notifUnread() { const rd = notif.read || {}; return notif.items.filter(x => !rd[x.id]).length; }
   function notifPaint() {
@@ -12140,11 +12199,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     b.textContent = n > 99 ? '99+' : String(n);
     b.style.display = n ? 'block' : 'none';
   }
+  const NOTIF_CATS = [['all', 'すべて'], ['parcel', '📦 荷物'], ['ship', '📮 発送'], ['money', '💰 お金'], ['todo', '⚠️ 要対応']];
+  function notifList() { const c = notif.cat || 'all'; return c === 'all' ? notif.items : notif.items.filter(x => (x.cat || 'todo') === c); }
+  function notifTabsHtml() {
+    const rd = notif.read || {};
+    return `<div class="nf-tabs">` + NOTIF_CATS.map(([k, label]) => {
+      const arr = k === 'all' ? notif.items : notif.items.filter(x => (x.cat || 'todo') === k);
+      const un = arr.filter(x => !rd[x.id]).length;
+      return `<button class="nf-tab${(notif.cat || 'all') === k ? ' on' : ''}" data-c="${k}">${label}${arr.length ? ` <b>${arr.length}</b>` : ''}${un ? `<span class="nf-dot"></span>` : ''}</button>`;
+    }).join('') + `</div>`;
+  }
+  function notifDiagHtml() {
+    const d = notif.diag; if (!d) return '';
+    return `<div class="smd-dim" style="padding:9px 14px;font-size:10.5px;line-height:1.7;border-top:1px solid #f2f4f8;background:#fbfcfe">
+      入庫待ち <b>${d.waiting}</b>件のうち、追跡番号があるのは <b>${d.tracked}</b>件です。
+      <b>追跡番号が無い荷物は、届いても「📦届きました」を出せません</b>（想定日数を過ぎたら🟡で出ます）。
+      メルカリ/Yahooの取り込みスクリプトを回すと番号が入り、到着がそのまま出るようになります。</div>`;
+  }
   function notifPanelHtml() {
     const rd = notif.read || {};
     if (notif.loading) return '<div class="smd-dim" style="padding:16px;font-size:12px"><span class="smd-spin"></span> 読み込み中…</div>';
-    if (!notif.items.length) return '<div class="smd-dim" style="padding:18px 14px;font-size:12.5px;line-height:1.8">お知らせはありません。<br><span style="font-size:11px">仕入れた荷物が届いたら、ここに出ます（配送業者の追跡が「配達完了」になった時／追跡が無い場合は仕入から想定日数が過ぎた時）。</span></div>';
-    return notif.items.map(x => {
+    const list = notifList();
+    if (!list.length) return notifTabsHtml() + '<div class="smd-dim" style="padding:18px 14px;font-size:12.5px;line-height:1.8">お知らせはありません。<br><span style="font-size:11px">仕入れた荷物が届いたら、ここに出ます（配送業者の追跡が「配達完了」になった時／追跡が無い場合は仕入から想定日数が過ぎた時）。</span></div>' + notifDiagHtml();
+    return notifTabsHtml() + list.map(x => {
       const un = !rd[x.id];
       return `<div class="nf-item${un ? ' unread' : ''}" data-id="${esc(x.id)}">
         <div class="nf-ic">${x.ic}</div>
@@ -12153,11 +12230,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="nf-sb">${esc(x.sb)}</div>
           <div class="nf-ac">
             ${x.kind === 'arrived' || x.kind === 'likely' ? `<button class="ok nf-recv" data-item="${esc(x.itemId)}" title="在庫台帳の状態を「在庫保管中」にします">✅ 受け取った</button>` : ''}
-            <button class="go nf-go" title="仕入れ管理の入庫待ちを開きます">⏳ 入庫待ちを見る</button>
+            ${x.cat === 'parcel' ? '<button class="go nf-go" title="仕入れ管理の入庫待ちを開きます">⏳ 入庫待ちを見る</button>' : ''}
+            ${x.cat === 'ship' || x.cat === 'todo' ? '<button class="go nf-orders" title="注文管理を開きます">📦 注文を見る</button>' : ''}
+            ${x.cat === 'money' ? '<button class="go nf-money" title="損益・入出金を開きます">💹 損益を見る</button>' : ''}
             ${un ? '<button class="nf-read">既読にする</button>' : ''}
           </div>
         </div></div>`;
-    }).join('');
+    }).join('') + notifDiagHtml();
   }
   function notifRender() {
     const pn = document.getElementById('smd-notif-panel'); if (!pn) return;
@@ -12168,9 +12247,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     pn.querySelector('.nf-close').addEventListener('click', notifClose);
     pn.querySelector('.nf-allread').addEventListener('click', async () => {
       notif.read = notif.read || {}; const now = new Date().toISOString();
-      notif.items.forEach(x => { notif.read[x.id] = now; });
+      notifList().forEach(x => { notif.read[x.id] = now; });
       notifPaint(); notifRender(); await notifReadSave();
     });
+    pn.querySelectorAll('.nf-tab').forEach(b => b.addEventListener('click', () => { notif.cat = b.dataset.c; notifRender(); }));
+    pn.querySelectorAll('.nf-orders').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('orders'); }));
+    pn.querySelectorAll('.nf-money').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('profit'); }));
     pn.querySelectorAll('.nf-item').forEach(el => {
       const id = el.dataset.id;
       const mark = async () => { notif.read = notif.read || {}; notif.read[id] = new Date().toISOString(); notifPaint(); notifRender(); await notifReadSave(); };
