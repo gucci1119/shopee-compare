@@ -198,9 +198,11 @@ function whsDate_(s, year) {
 
 // すでに立っている注文を引く（人が付けた値を上書きしないため）
 function whsExisting_(sb, keys) {
+  // ★1回に詰め込みすぎるとURLが長すぎて GAS の URLFetch が落ちる（Limit Exceeded: URLFetch URL Length／上限2,082字）。
+  //   注文番号は16字前後なので、30件ずつなら余裕をもって収まる（実測でここが原因だった 2026-08-13）。
   var map = {}, sns = keys.map(function (k) { return k.split(':')[1]; });
-  for (var i = 0; i < sns.length; i += 150) {
-    var part = sns.slice(i, i + 150).map(function (s) { return '"' + s + '"'; }).join(',');
+  for (var i = 0; i < sns.length; i += 30) {
+    var part = sns.slice(i, i + 30).map(function (s) { return '"' + s + '"'; }).join(',');
     var url = sb.url + '/rest/v1/costs?select=cc,sn,self_transit_at&self_transit_at=not.is.null&sn=in.(' + encodeURIComponent(part) + ')';
     var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: whsHeaders_(sb) });
     if (res.getResponseCode() >= 300) continue;
