@@ -2798,9 +2798,29 @@
   async function jobRemoteDelete(key) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(key)); } catch (_) {} }
   // 自動ダウンロード済みの印（端末ごと・最新50件だけ覚える）
   const jobOpened = (k) => { try { return (JSON.parse(localStorage.getItem('smdJobOpened') || '[]')).includes(k); } catch (_) { return false; } };
+  // ★localStorageが一杯だと「もう落とした」印が保存できず、ZIPが延々ダウンロードされる事故になった。
+  //   溢れたら、消えても困らないキャッシュ（下書き・一時データ）から捨てて空きを作る。
+  function lsPrune_() {
+    try {
+      const drop = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (/^(smdCache|smdTmp|smdSrc|smdDeal|smdKw|smdListCache)/.test(k || '')) drop.push(k);
+      }
+      drop.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} });
+      console.warn('[保存領域] 一杯だったのでキャッシュ ' + drop.length + '件を捨てました');
+    } catch (_) {}
+  }
   const JOB_DL_DONE = new Set();   // この画面が生きている間の「もう落とした」印
   let JOB_DL_COUNT = 0;            // 1回の表示で自動ダウンロードする上限（暴走の安全弁）
-  const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); if (a.indexOf(k) < 0) a.push(k); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-400))); } catch (_) {} };
+  // ★タブを何枚も開いていると、タブごとに巡回する＝同じZIPがタブの数だけ落ちる。
+  //   1枚が落としたことを他のタブへ即座に知らせて、二重に落とさないようにする。
+  let JOB_DL_CH = null;
+  try {
+    JOB_DL_CH = new BroadcastChannel('smd-job-dl');
+    JOB_DL_CH.onmessage = (e) => { const k = e && e.data && e.data.k; if (k) JOB_DL_DONE.add(k); };
+  } catch (_) { JOB_DL_CH = null; }
+  const jobOpenedMark = (k) => { try { const a = JSON.parse(localStorage.getItem('smdJobOpened') || '[]'); if (a.indexOf(k) < 0) a.push(k); try { localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-400))); } catch (q) { lsPrune_(); localStorage.setItem('smdJobOpened', JSON.stringify(a.slice(-50))); } } catch (_) {} };
   // ★しごとが終わった時に画面を追従させるためのコールバック（同じ画面を開いたままの場合のみ）
   const JOB_DONE_CB = {};
   // ★しごとの進み具合を、開いている画面のその場にも映す（右下パネルを見に行かなくて済むように）
@@ -2882,6 +2902,7 @@
         JOB_DL_DONE.add(r.k); jobOpenedMark(r.k);
         // ★安全弁：万一また暴走しても、1回の表示で自動ダウンロードは3件まで。
         //   （同じZIPが20個以上落ちる事故があったため。超えたら以降は落とさずリンクだけ出す）
+        try { if (JOB_DL_CH) JOB_DL_CH.postMessage({ k: r.k }); } catch (_) {}   // 他のタブにも「落とした」を伝える
         if (fresh && JOB_DL_COUNT < 3) { JOB_DL_COUNT++; try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {} }
       }
       // ★GASが6分制限で強制終了すると台帳は run のまま残る＝永遠に「実行中」に見える。
