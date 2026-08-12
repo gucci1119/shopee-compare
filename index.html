@@ -2786,6 +2786,30 @@
     } catch (_) {}
   }
   // 呼び出し自体が落ちた時（通信断など）に台帳を実行中のまま放置しない
+  // ★Shopeeが返すエラーは英語で、原文だけ出しても何をすればいいか分からない（本人指摘 2026-08-13）。
+  //   よく出るものを日本語＋【どうすれば直るか】に言い換える。原文も後ろに残す（問い合わせ・検索のため）。
+  const API_ERR_JA = [
+    [/price ratio .*(exceeds|greater than) *(\d+)/i, (m) => '明細どうしの値段が離れすぎです。いちばん高い明細と安い明細の差は【' + (m[2] || 5) + '倍以内】までというShopeeの決まりです。高い明細を別のカタログに分けるか、安い明細の値段を上げてください'],
+    [/error_price_ratio/i, () => '明細どうしの値段が離れすぎです（Shopeeの上限は5倍）。高い明細を別カタログに分けてください'],
+    [/tier option name is duplicated|name is duplicated/i, () => '明細名がかぶっています。同じ名前は2つ持てません'],
+    [/tier.*(30|max).*(char|length)|name.*too long/i, () => '明細名が長すぎます（30字まで）'],
+    [/invalid access_token|access_token.*(expire|invalid)|error_auth/i, () => 'Shopeeのログイン（トークン）が切れています。⚙️設定から取り直してください'],
+    [/error_permission|no permission/i, () => 'この操作の権限がありません（アカウント/店舗の選び間違いかも）'],
+    [/item not found|error_not_exist/i, () => 'その商品がShopee側に見つかりません（削除済みかも）。🔄最新に更新を'],
+    [/price.*(lower|less).*(than).*(min|limit)/i, () => '価格がその国の下限を下回っています'],
+    [/price.*(higher|exceed|greater).*(than).*(max|limit|ceil)/i, () => '価格がその国の上限を超えています（PayPal併用で下げられます／💴価格計算を参照）'],
+    [/stock.*(not enough|invalid)/i, () => '在庫の数が不正です'],
+    [/image.*(invalid|fail|not)/i, () => '画像が受け付けられませんでした（形式・サイズ・枚数）'],
+    [/exceed.*(max|limit).*(model|variation)/i, () => '明細（バリエーション）の数が上限を超えています'],
+    [/error_param|invalid.*param/i, () => '送った内容にShopeeが受け付けない値が混じっています'],
+    [/timeout|timed out/i, () => '時間内に返事が来ませんでした。もう一度お試しください'],
+  ];
+  function apiErrJa(raw) {
+    const t = String(raw == null ? '' : raw);
+    if (!t) return '';
+    for (const [re, f] of API_ERR_JA) { const m = t.match(re); if (m) return f(m) + '（' + t.slice(0, 160) + '）'; }
+    return t;
+  }
   async function jobRemoteFail(key, msg) {
     try { msg = String(msg || '').replace('__DISCONNECTED__', ''); } catch (_) {}
     try {
@@ -17777,6 +17801,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             { const taken = new Set(existNames); let fixed = 0;
               list.forEach(x => { const u = uniqName(x.name, taken); if (u !== x.name) { x.name = u; x.el.querySelector('.eb-name').value = u; fixed++; } });
               if (fixed) toast('明細名が重複していた ' + fixed + '件に連番を付けました'); }
+            // ★Shopeeは【いちばん高い明細 ÷ いちばん安い明細 が5倍まで】。超えると add_model が丸ごと失敗する。
+            //   今までは全部送ったあとに英語のエラーで落ちていたので、送る前に止めて「どれを外せばいいか」まで出す。
+            { const RATIO = 5;
+              const cur = (models || []).map(m => Number(m.price) || 0).filter(v => v > 0);
+              const add = list.map(x => ({ name: x.name, p: Number(x.price) || 0 })).filter(x => x.p > 0);
+              const all = cur.concat(add.map(x => x.p));
+              if (all.length >= 2) {
+                const lo = Math.min(...all), hi = Math.max(...all);
+                if (lo > 0 && hi / lo > RATIO) {
+                  const over = add.filter(x => x.p / lo > RATIO).sort((a, b) => b.p - a.p);
+                  const f = v => (rg.cur || '') + Math.round(v).toLocaleString();
+                  alert('✗ このままだとShopeeに弾かれます。\n\n'
+                    + 'Shopeeは【いちばん高い明細 ÷ いちばん安い明細 が ' + RATIO + '倍まで】という決まりです。\n'
+                    + 'いま：安いほう ' + f(lo) + ' ／ 高いほう ' + f(hi) + ' ＝ ' + (Math.round(hi / lo * 10) / 10) + '倍\n\n'
+                    + (over.length
+                        ? '外すか、別のカタログに分けたほうがいいのはこの行です（' + f(lo * RATIO) + ' を超えている分）:\n'
+                          + over.slice(0, 10).map(x => '・' + x.name + '　' + f(x.p)).join('\n')
+                          + (over.length > 10 ? '\n…ほか' + (over.length - 10) + '件' : '')
+                        : 'すでにこのカタログにある明細との差で超えています。安い明細の値段を上げるか、高い明細を別カタログへ。')
+                    + '\n\n※値段を直してから、もう一度「②まとめて追加」を押してください。');
+                  return;
+                }
+              } }
             const gwB = await guardWriteCountries([cc]); if (!gwB.ok) { alert(gwB.msg); return; }
             if (!confirm('書込先: ' + gwB.summary + '\n\n' + cc + ' の item ' + itemId + ' に ' + list.length + ' 件の明細を追加します:\n\n'
               + list.map((x, i2) => (i2 + 1) + '. ' + x.name + ' / ' + (rg.cur || '') + x.price).join('\n') + '\n\nよろしいですか？')) return;
@@ -17791,7 +17838,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               JOB_MIRROR[key2] = (v) => {
                 if (!ba || !ba.isConnected) return;
                 if (v.status === 'done') { ba.disabled = false; ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100) + ((v.result && v.result.imgAdjust) ? '<span class="smd-dim" style="margin-left:6px">' + esc(v.result.imgAdjust) + '</span>' : ''); markStale(); delete JOB_MIRROR[key2]; return; }
-                if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + (v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
+                if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + apiErrJa(v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
                 ba.innerHTML = '② 追加中 ' + jobBar(v.pct || 0, (v.step || '') + jobEta(key2, v.pct || 0), '#3b5bdb');
               };
               jobPollStart();
@@ -18610,9 +18657,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
               markStale();   // 更新順に即反映
             }
-            else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: code=' + res.code + ' ' + res.msg; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
+            else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: ' + apiErrJa(res.msg) + '（code=' + res.code + '）'; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
           }
-        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ エラー: ' + e.message; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
+        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + apiErrJa(e.message); btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
       });
     }).catch(e => { body.innerHTML = `<div style="color:#d93025;padding:8px">読込エラー: ${esc(e.message)}<br><span class="smd-dim">Shopeeから現在の内容を取得できませんでした。ブリッジ（Tampermonkey）が応答していない可能性があります＝画面上部の赤帯の指示（Tampermonkey OFF→ON／再読込）をお試しください。<br>急ぐ場合は上の「<b>Shopeeで開く↗</b>」からShopeeの編集ページで直接編集できます。</span></div><div style="text-align:right;margin-top:10px"><button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:7px 14px;cursor:pointer">閉じる</button></div>`; const b = body.querySelector('.ed-close2'); if (b) b.addEventListener('click', close); });
   }
