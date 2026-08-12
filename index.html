@@ -17411,7 +17411,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const BW = { no: 20, img: 30, cost: 62, wg: 46, price: 76, stock: 40, prof: 96, st: 68, del: 22, nameMin: 80 };
         let _rid = 0;
         const ridOf = (r) => (r._id || (r._id = 'r' + (++_rid) + '_' + Math.random().toString(36).slice(2, 6)));
-        const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" data-rid="${ridOf(r)}" style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
+        const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" data-rid="${ridOf(r)}"${r.dup ? ' data-flag="dup"' : (r.same ? ' data-flag="same"' : (r.near ? ' data-flag="near"' : ''))} style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.no}px;flex:none;text-align:right;font-size:10px;color:#98a2b3;font-weight:700">${i + 1}</span>
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
           <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" title="${av(r.src || '')}" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid ${r.dup ? '#d93025' : '#ddd'};border-radius:6px;font-size:11.5px">
@@ -17474,7 +17474,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 <b style="color:#c0392b">いらない行をまとめて外す</b>
                 <button class="ed-delerr smd-btn" style="font-size:11px;padding:3px 10px">✗ 読取失敗（${rows.filter(r => r.err).length}）</button>
                 <button class="ed-deldup smd-btn" style="font-size:11px;padding:3px 10px">⚠ この中で重複（${rows.filter(r => r.same).length}）</button>
-                <button class="ed-delexist smd-btn" style="font-size:11px;padding:3px 10px">⚠ 既出・似た出品（${rows.filter(r => r.dup || r.near).length}）</button>
+                <button class="ed-delexist smd-btn" style="font-size:11px;padding:3px 10px"${bChecking ? ' disabled' : ''}>⚠ 既出・似た出品（${bChecking ? '判定中…' : rows.filter(r => r.dup || r.near).length}）</button>
                 <button class="ed-delnoprice smd-btn" style="font-size:11px;padding:3px 10px">価格が空（${rows.filter(r => !(parseFloat(r.price) > 0)).length}）</button>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:6px 9px;border:1px dashed #cdd7ea;border-radius:6px;background:#fafbff;font-size:11px">
@@ -17744,6 +17744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (onlyItemEl) onlyItemEl.addEventListener('change', drawCount);
         drawCount();
         let bAbort = false;
+        let bChecking = false;   // 取り込み〜重複判定が終わるまで true（0件を見て安心させないため）
         if (bstop) bstop.addEventListener('click', () => { bAbort = true; bstop.textContent = '中断中…'; });
         // 1件ぶんの取り込み（名前は英語30字に整える）
         const loadOne = async (u) => {
@@ -17846,7 +17847,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (!confirm('この商品に追加できる明細は残り ' + slotN + '件です（Shopeeの上限' + MODEL_MAX + '件）。\n貼られた ' + urls.length + '件のうち先頭 ' + slotN + '件だけ取り込みます。よろしいですか？')) return;
             urls = urls.slice(0, slotN);
           }
-          bAbort = false; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
+          bAbort = false; bChecking = true; bl.disabled = true; if (bstop) { bstop.style.display = ''; bstop.textContent = '■ 中断'; }
           // ★全部揃うまで真っ白で待たせない。枠と画像はURLだけで先に出せるので、先に表を出して
           //   取れた行から順に埋めていく（体感が段違いに速い）。
           rows = urls.map(u => ({ url: u, name: '', cost: 0, image: (typeof mercariImg === 'function' ? (mercariImg(u) || '') : ''), price: '', err: '', src: '', wg: wDefB(), pending: true }));
@@ -17865,12 +17866,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               const tk = rows[k].src || rows[k].name;
               if (!String(tk || '').trim()) continue;
               const sc = simPair(ti, tk);
-              if (sc >= 0.75) { r.same = { i: k + 1, rid: ridOf(rows[k]), name: rows[k].name, score: Math.round(sc * 100) }; break; }
+              if (sc >= 0.68) { r.same = { i: k + 1, rid: ridOf(rows[k]), name: rows[k].name, score: Math.round(sc * 100) }; break; }
             }
             // ★索引はShopeeの明細名（英語）。日本語の元タイトルで引いても当たらないので、
             //   既存出品との照合は「生成した英語名どうし」で行う。行どうしの比較は日本語(src)のままでよい。
-            if (!r.same && r.name) { const f = simFind(cc, r.name, 0.72, pi.name || repName || '', itemId); if (f) r.near = { name: f.t, item_id: f.item_id, cat: f.name, score: Math.round(f.score * 100), self: !!f.self }; }
+            if (!r.same && r.name) { const f = simFind(cc, r.name, 0.62, pi.name || repName || '', itemId); if (f) r.near = { name: f.t, item_id: f.item_id, cat: f.name, score: Math.round(f.score * 100), self: !!f.self }; }
           });
+          bChecking = false;
           const ng = rows.filter(r => r.err).length;
           const dupN = rows.filter(r => r.dup).length;
           const sameN = rows.filter(r => r.same).length, nearN = rows.filter(r => r.near).length;
@@ -18203,6 +18205,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           });
         } }
       body.querySelector('.ed-save').addEventListener('click', async () => {
+        // ★出してしまってから目視で消すのを無くす：保存の直前に「疑わしい行」が残っていたら必ず止める。
+        //   まとめて追加の行に付いた 3種類の印（過去に出したURL／この中で重複／既存明細に似ている）を数える。
+        {
+          const bad = [...body.querySelectorAll('.ed-brow[data-flag]')];
+          if (bad.length) {
+            const byKind = {};
+            bad.forEach(el => { const k = el.dataset.flag; byKind[k] = (byKind[k] || 0) + 1; });
+            const label = { dup: '過去に出した仕入元URL', same: 'この中で重複', near: '既に出している明細に似ている' };
+            const lines = Object.keys(byKind).map(k => '・' + (label[k] || k) + '　' + byKind[k] + '件').join('\n');
+            if (!confirm('⚠ 重複の疑いがある明細が ' + bad.length + '件 残っています。\n\n' + lines
+              + '\n\nこのまま出すと、あとで目視で消すことになります。\n上の「⚠ 既出・似た出品」ボタンでまとめて外せます。\n\nそれでも保存しますか？')) return;
+          }
+        }
         const patch = {}, summary = [];
         // ★「何を変えたか」だけでなく「いくつからいくつに変えたか」を残す（履歴＝📜編集履歴／🧾操作ログ）
         const diffs = [];
