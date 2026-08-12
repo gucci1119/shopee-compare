@@ -2994,6 +2994,7 @@
     '未判別（shop_id無し・再同期前の既存データ）': 'Unidentified (no shop_id — data from before the re-sync)',
     '⚠️ shop_id列が未作成＝アカウント別表示は無効（全合算のまま）。🔑アカウントページ下部のSQLを1回実行＋再同期で有効化':
       '⚠️ The shop_id column does not exist yet, so per-account view is off (everything stays combined). Run the SQL at the bottom of the Accounts page once and re-sync to enable it.',
+    '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます': 'Older awaiting-arrival items can be received in bulk under “Check long-stale items”',
     '🔔 お知らせ': '🔔 Alerts', 'お知らせ': 'Alerts', '（届いた荷物・配達中）': '(arrived parcels and deliveries in progress)',
     'すべて既読': 'Mark all read', '既読にする': 'Mark read', '✅ 受け取った': '✅ Received',
     '⏳ 入庫待ちを見る': '⏳ Open awaiting arrival',
@@ -3519,6 +3520,7 @@
     [/^／ 目標ROIは⚙️の仕入額×重量帯から自動\s*目標粗利$/, '/ Target ROI is auto from the cost × weight table in Settings   Target gross profit'],
     [/^／ 重量 (.+)$/, '/ Weight $1'], [/^／ 容積重量 (.+)$/, '/ Volumetric weight $1'],
     [/^PayPal手数料 (.+)$/, 'PayPal fee $1'],
+    [/^ほか (\d+)件あります$/, '$1 more'],
     [/^届きました：(.+)$/, 'Arrived: $1'], [/^配達中です：(.+)$/, 'Out for delivery: $1'],
     [/^届いているかもしれません：(.+)$/, 'May have arrived: $1'],
     [/^(.+)　仕入から (\d+)日（目安 (\d+)日）　追跡情報なし$/, '$1  $2 days since purchase (expected $3)  no tracking information'],
@@ -12084,7 +12086,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       } else if (ph === 'out') {
         out.push({ id: 'out:' + r.item_id, ic: '🚚', kind: 'out', at: pd,
           ti: '配達中です：' + nm, sb: (r.supplier || '') + '　' + (r.delivery_status || r.delivery_info || ''), itemId: r.item_id });
-      } else if (!ph && pdays != null && pdays >= exp) {
+      // ★追跡番号が無い在庫が大半（実測：入庫待ちの9割）。全部を「届いたかも」にすると
+      //   何年も前の滞留分でベルが埋まって役に立たないので、【最近の仕入れだけ】に絞る。
+      //   古い滞留は 🛒仕入れ管理 ＞ ⏳入庫待ち の「🧹長期滞留の点検」でまとめて処理する。
+      } else if (!ph && pdays != null && pdays >= exp && pdays <= 60) {
         out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', kind: 'likely', at: pd,
           ti: '届いているかもしれません：' + nm,
           sb: (r.supplier || '') + '　仕入から ' + pdays + '日（目安 ' + exp + '日）　追跡情報なし', itemId: r.item_id });
@@ -12092,6 +12097,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     // 新しい順（仕入日）に。同日は商品名で安定させる
     out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')) || String(a.ti).localeCompare(String(b.ti)));
+    if (out.length > 50) {   // 多すぎる時は先頭だけ出し、残りは点検ビューへ誘導（ベルが埋まると読まなくなる）
+      const rest = out.length - 50;
+      out.length = 50;
+      out.push({ id: 'more:' + today, ic: '🧹', kind: 'more', at: '',
+        ti: 'ほか ' + rest + '件あります', sb: '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます' });
+    }
     notif.items = out;
     return out;
   }
