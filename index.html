@@ -18500,6 +18500,46 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         });
         const modelChanged = priceCh || skuCh || stockCh;
         if (modelChanged) { patch.model_list = newModels; summary.push([priceCh && '価格', stockCh && '在庫', skuCh && '明細SKU'].filter(Boolean).join('/')); }
+        // ★保存したら【その場で一覧にも反映】する。以前は商品名と親SKUしか戻していなかったので、
+        //   価格・在庫・明細名・画像を直しても一覧は古いままで、毎回「🔄最新に更新」が要った。
+        //   同じカタログを続けて直すことが多いので、ここが効く（本人指摘 2026-08-13）。
+        const applyToList = async () => {
+          try {
+            const row = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(itemId));
+            if (!row) return;
+            if (patch.name != null) row.name = patch.name;
+            if (patch.parent_sku != null) row.parent_sku = patch.parent_sku;
+            if (patch.images && patch.images.length) { row.images = patch.images.slice(0, 9); row.image = patch.images[0]; }
+            // 明細名（単一バリエのときだけ入力欄がある）
+            const tierVals = [...body.querySelectorAll('.ed-tierrow .ed-tier')].map(i => String(i.value || '').trim());
+            const nameOf = (m) => (tiers.length === 1 ? (tierVals[(m.tier_index || [])[0] || 0] || '') : '');
+            if (Array.isArray(row.models) && row.models.length) {
+              const byId = {}; (patch.model_list || []).forEach(e => { byId[e.id] = e; });
+              row.models = row.models.map(rm => {
+                const e = byId[rm.id], src = (models || []).find(x => String(x.id) === String(rm.id));
+                const out = Object.assign({}, rm);
+                if (e) {
+                  if (e.price != null && e.price !== '') out.price = parseFloat(e.price) || 0;
+                  if (e.sku != null) out.sku = e.sku;
+                  const st = (e.stock_setting_list || [])[0];
+                  if (st && st.sellable_stock != null) out.stock = st.sellable_stock;
+                }
+                const nn = src ? nameOf(src) : '';
+                if (nn) out.n = nn;
+                return out;
+              });
+              const ps = row.models.map(m => Number(m.price) || 0).filter(v => v > 0);
+              if (ps.length) { row.price_min = Math.min(...ps); row.price_max = Math.max(...ps); }
+              row.stock = row.models.reduce((a, m) => a + (Number(m.stock) || 0), 0);
+            }
+            row.update_time = Math.floor(Date.now() / 1000);
+            // DBにも書いておく＝画面を開き直しても戻らない（公式同期が回れば正で上書きされる）
+            const p2 = { name: row.name, parent_sku: row.parent_sku, models: row.models || [], price_min: row.price_min, price_max: row.price_max, stock: row.stock, images: row.images || [], image: row.image || '', update_time: row.update_time };
+            try { await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
+            // 出品一覧を開いていれば描き直す
+            try { if (document.getElementById('lst-list')) drawListingStatus(); } catch (_) {}
+          } catch (_) {}
+        };
         // pre-order（予約設定）
         const poOn = body.querySelector('.ed-preorder').checked;
         const dtsRaw = (body.querySelector('.ed-dts').value || '').trim();
@@ -18647,7 +18687,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             msg.style.color = leftoverNote ? '#a8650a' : '#1a7f37';
             msg.textContent = (done.length ? '✓ 公式APIで保存（' + done.join('・') + '）' : '✓ 保存') + leftoverNote; btn.textContent = '保存済 ✓';
             setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
-            try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
+            await applyToList();
             try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
             try { openCatalogEditor._cache.delete(ck); } catch (_) {}   // 保存後は再取得（古い内容を出さない）
             try { logAct('出品', 'カタログ編集(公式)', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
@@ -18657,7 +18697,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             if (res.ok) {
               msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（一覧にも即反映）'; btn.textContent = '保存済 ✓';
               setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
-              try { const row = (lst.byCc[cc] || []).find(x => x.item_id === itemId); if (row) { if (patch.name != null) row.name = patch.name; if (patch.parent_sku != null) row.parent_sku = patch.parent_sku; } } catch (_) {}
+              await applyToList();
               try { const p2 = {}; if (patch.name != null) p2.name = patch.name; if (patch.parent_sku != null) p2.parent_sku = patch.parent_sku; if (Object.keys(p2).length) await sbPatch('listings', 'item_id=eq.' + itemId, p2); } catch (_) {}
               try { logAct('出品', 'カタログ編集', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
               markStale();   // 更新順に即反映
