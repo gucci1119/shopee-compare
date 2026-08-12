@@ -151,32 +151,35 @@ function whsReadRows_(fileId, fileName) {
     var head = sh.getRange(1, 1, scan, lastCol).getDisplayValues();
     var hRow = -1, cOrder = -1, cShip = -1, cCc = -1, cStatus = -1;
     for (var r = 0; r < scan; r++) {
-      var o = -1, s = -1, c = -1, st = -1;
+      var o = -1, sp = -1, c = -1, st = -1;
       for (var k = 0; k < lastCol; k++) {
         var v = String(head[r][k] || '').trim().toLowerCase();
         if (v === 'order id') o = k;
-        else if (v === 'shipping date') s = k;
+        else if (v === 'shipping date') sp = k;
         else if (v === 'country') c = k;
         else if (v === 'paste status_translation' || v === 'status when pasted') { if (st < 0) st = k; }
       }
-      if (o >= 0 && s >= 0) { hRow = r; cOrder = o; cShip = s; cCc = c; cStatus = st; break; }
+      if (o >= 0 && sp >= 0) { hRow = r; cOrder = o; cShip = sp; cCc = c; cStatus = st; break; }
     }
     if (hRow < 0) return;   // このシートは明細ではない
 
     var n = last - (hRow + 1);
     if (n <= 0) return;
-    var vals = sh.getRange(hRow + 2, 1, n, lastCol).getDisplayValues();
-    vals.forEach(function (row) {
-      var sn = String(row[cOrder] || '').trim();
-      var ship = String(row[cShip] || '').trim();
-      if (!sn || !ship) return;
-      if (cStatus >= 0 && /cancel|キャンセル/i.test(String(row[cStatus] || ''))) return;
+    // ★必要な列だけを取る。全列×全行(60列×数千行)を getDisplayValues すると
+    //   1ファイルで数分かかり、GASの6分制限に当たっていた（2026-08-13 実測）。
+    var col = function (idx) { return idx < 0 ? null : sh.getRange(hRow + 2, idx + 1, n, 1).getDisplayValues(); };
+    var vOrder = col(cOrder), vShip = col(cShip), vCc = col(cCc), vSt = col(cStatus);
+    for (var q = 0; q < n; q++) {
+      var sn = String(vOrder[q][0] || '').trim();
+      var ship = String(vShip[q][0] || '').trim();
+      if (!sn || !ship) continue;
+      if (vSt && /cancel|キャンセル/i.test(String(vSt[q][0] || ''))) continue;
       var d = whsDate_(ship, year);
-      if (!d) return;
-      var cc = cCc >= 0 ? String(row[cCc] || '').trim().toUpperCase() : '';
-      if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) return;
+      if (!d) continue;
+      var cc = vCc ? String(vCc[q][0] || '').trim().toUpperCase() : '';
+      if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) continue;
       out.push({ cc: cc, sn: sn, shipped: d });
-    });
+    }
   });
   return out;
 }
@@ -198,16 +201,13 @@ function whsDate_(s, year) {
 
 // すでに立っている注文を引く（人が付けた値を上書きしないため）
 function whsExisting_(sb, keys) {
-  // ★1回に詰め込みすぎるとURLが長すぎて GAS の URLFetch が落ちる（Limit Exceeded: URLFetch URL Length／上限2,082字）。
-  //   注文番号は16字前後なので、30件ずつなら余裕をもって収まる（実測でここが原因だった 2026-08-13）。
-  var map = {}, sns = keys.map(function (k) { return k.split(':')[1]; });
-  for (var i = 0; i < sns.length; i += 30) {
-    var part = sns.slice(i, i + 30).map(function (s) { return '"' + s + '"'; }).join(',');
-    var url = sb.url + '/rest/v1/costs?select=cc,sn,self_transit_at&self_transit_at=not.is.null&sn=in.(' + encodeURIComponent(part) + ')';
-    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: whsHeaders_(sb) });
-    if (res.getResponseCode() >= 300) continue;
-    JSON.parse(res.getContentText() || '[]').forEach(function (r) { map[r.cc + ':' + r.sn] = r.self_transit_at; });
-  }
+  // ★以前は sn=in.(...) を小分けに何十回も投げていた。URLが長すぎて落ちる（URLFetch URL Length）うえ、
+  //   回数がかさんで遅い。すでに立っている注文は多くないので【1回でまとめて引いて手元で突き合わせる】。
+  var map = {};
+  var url = sb.url + '/rest/v1/costs?select=cc,sn&self_transit_at=not.is.null&limit=100000';
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: whsHeaders_(sb) });
+  if (res.getResponseCode() >= 300) throw new Error('既存の照会に失敗 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 160));
+  JSON.parse(res.getContentText() || '[]').forEach(function (r) { map[r.cc + ':' + r.sn] = 1; });
   return map;
 }
 
