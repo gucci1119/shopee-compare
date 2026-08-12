@@ -3013,6 +3013,11 @@
       '⚠️ The shop_id column does not exist yet, so per-account view is off (everything stays combined). Run the SQL at the bottom of the Accounts page once and re-sync to enable it.',
     '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます': 'Older awaiting-arrival items can be received in bulk under “Check long-stale items”',
     '今日': 'today', '昨日': 'yesterday', '一昨日': 'the day before yesterday',
+    '📦 梱包発送はサイズ別の出来高にする': '📦 Pay packing & shipping as a piece rate by size',
+    'サイズ': 'Size', '構成比%': 'Mix %', '件数': 'Orders', '単価(円/件)': 'Rate (JPY/order)', '資材(円/件)': 'Materials (JPY/order)',
+    '小計': 'Subtotal', '目安の作業時間': 'Rough time per order',
+    '小（〜500g・ソフト等）': 'Small (≤500g, game discs etc.)', '中（〜1kg）': 'Medium (≤1kg)', '大（1kg超・本体等）': 'Large (>1kg, consoles etc.)',
+    '📦 梱包発送 計': '📦 Packing & shipping total', 'サイズ別にする理由': 'Why split by size',
     '👥 外注（梱包発送・メッセージ対応）はいくらまで払えるか': '👥 How much you can pay for outsourcing (packing/shipping and messages)',
     '📦 梱包発送（円/件）': '📦 Packing & shipping (JPY/order)', '💬 メッセージ対応（月額）': '💬 Message handling (per month)',
     '🏭 就労支援施設（円/件）': '🏭 Employment-support facility (JPY/order)', '🏭 施設に回す割合（%）': '🏭 Share handled by the facility (%)',
@@ -3848,6 +3853,8 @@
     [/^／ 重量 (.+)$/, '/ Weight $1'], [/^／ 容積重量 (.+)$/, '/ Volumetric weight $1'],
     [/^PayPal手数料 (.+)$/, 'PayPal fee $1'],
     [/^ほか (\d+)件あります$/, '$1 more'],
+    [/^約([\d.]+)分＝時給換算$/, 'about $1 min = hourly equivalent'], [/^1件あたり (.+)$/, 'per order $1'],
+    [/^人件費 (.+)／資材 (.+)$/, 'Labour $1 / materials $2'], [/^施設 (\d+)件$/, 'facility $1 orders'],
     [/^売れました：(.+)$/, 'Sold: $1'], [/^注文 (.+)$/, 'Ordered $1'], [/^注文番号 (.+)$/, 'Order no. $1'], [/^ほか(\d+)点$/, '+$1 more items'],
     [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'], [/^入金 (.+)$/, 'Paid $1'],
     [/^発送期限が過ぎています：(.+)$/, 'Shipping deadline has passed: $1'], [/^今日が発送期限です：(.+)$/, 'Shipping deadline is today: $1'],
@@ -8992,7 +8999,7 @@
   }
   // ---------------- 📈 事業計画（目標逆算 ＋ 月次収支履歴） ----------------
   const plan = { cfg: null };
-  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', targetTakeHome: '', costPer: '', cashCycle: 1, monthTargets: {}, fixBreak: [], outPack: 70, outMsg: 40000, outFacPer: 0, outFacShare: 0 });
+  const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', targetTakeHome: '', costPer: '', cashCycle: 1, monthTargets: {}, fixBreak: [], outPack: 70, outMsg: 40000, outFacPer: 0, outFacShare: 0, outS: 50, outM: 80, outL: 120, outMatS: 25, outMatM: 45, outMatL: 90, outMixS: '', outMixM: '', outMixL: '' });
   function planLoadLocal() { try { return JSON.parse(localStorage.getItem('smdPlanCfg') || 'null'); } catch (_) { return null; } }
   async function planSave() {
     const st = document.getElementById('plan-save-stat');
@@ -9001,6 +9008,19 @@
     try { await sbUpsert('app_kv', [{ k: 'plan_cfg', v: plan.cfg, updated_at: new Date().toISOString() }]); if (st) { st.textContent = '✓ 保存（全PC同期）'; st.style.color = '#1a7f37'; } }
     catch (e) { if (st) { st.textContent = '✓ この端末に保存（同期は設定の秘密キーが必要）'; st.style.color = '#888'; } }
   }
+  // 出品台帳の重量から「小・中・大」の構成比を出す。小さい物が多いなら単価も小さくてよい＝一律単価にしない。
+  //  小＝〜500g（ゲームソフト等・封筒〜小箱）／中＝〜1kg／大＝1kg超（本体・箱物）
+  const PACK_BUCKET = g => (g <= 500 ? 'S' : g <= 1000 ? 'M' : 'L');
+  async function planPackMixLoad() {
+    if (planPackMixLoad._v) return planPackMixLoad._v;
+    let rows = [];
+    try { rows = await sbGetAll('listing_catalog', 'select=weight_g'); } catch (_) { rows = []; }
+    const c = { S: 0, M: 0, L: 0 };
+    (rows || []).forEach(r => { const g = Number(r.weight_g) || 0; if (g > 0) c[PACK_BUCKET(g)]++; });
+    const n = c.S + c.M + c.L;
+    planPackMixLoad._v = n ? { n, S: c.S / n * 100, M: c.M / n * 100, L: c.L / n * 100 } : { n: 0 };
+    return planPackMixLoad._v;
+  }
   // ---- 👥 外注（梱包発送・メッセージ対応）の単価と採算 ----
   //  考え方：物販で人件費が健全に収まるのは【粗利の15〜25%】。1件の粗利からの逆算で
   //  「1件いくらまで払えるか」を先に出し、実際の単価がその天井に収まっているかを見る。
@@ -9008,13 +9028,31 @@
     const n = Math.max(0, Number(needOrders) || 0);
     planOutsourceHtml._lastN = n;
     const gp = Math.max(0, Number(cfg.avgProfit) || 0);            // 1件の粗利
-    const pack = Math.max(0, Number(cfg.outPack) || 0);            // 梱包発送 円/件（個人外注）
     const msg = Math.max(0, Number(cfg.outMsg) || 0);              // メッセージ対応 月額
     const facPer = Math.max(0, Number(cfg.outFacPer) || 0);        // 就労支援施設 円/件
     const facShare = Math.min(100, Math.max(0, Number(cfg.outFacShare) || 0)); // 施設に回す割合%
-    const nFac = Math.round(n * facShare / 100), nOwn = n - nFac;
-    const costPack = nOwn * pack + nFac * facPer;
+    // ★サイズ別の出来高。小さい物（ゲームソフト等）が多いので、一律単価にすると
+    //   小さい物に払いすぎ／大きい物を誰もやりたがらない、の両方が起きる。
+    const mix = planOutsourceHtml._mix || { n: 0 };
+    const mS = cfg.outMixS !== '' && cfg.outMixS != null ? Number(cfg.outMixS) : (mix.n ? Math.round(mix.S) : 70);
+    const mM = cfg.outMixM !== '' && cfg.outMixM != null ? Number(cfg.outMixM) : (mix.n ? Math.round(mix.M) : 20);
+    const mL = cfg.outMixL !== '' && cfg.outMixL != null ? Number(cfg.outMixL) : (mix.n ? Math.max(0, 100 - Math.round(mix.S) - Math.round(mix.M)) : 10);
+    const mSum = Math.max(1, mS + mM + mL);
+    const SZ = [
+      { k: 'S', label: '小（〜500g・ソフト等）', per: Math.max(0, Number(cfg.outS) || 0), mat: Math.max(0, Number(cfg.outMatS) || 0), share: mS / mSum, min: 1.5 },
+      { k: 'M', label: '中（〜1kg）', per: Math.max(0, Number(cfg.outM) || 0), mat: Math.max(0, Number(cfg.outMatM) || 0), share: mM / mSum, min: 2.5 },
+      { k: 'L', label: '大（1kg超・本体等）', per: Math.max(0, Number(cfg.outL) || 0), mat: Math.max(0, Number(cfg.outMatL) || 0), share: mL / mSum, min: 4 },
+    ];
+    SZ.forEach(z => { z.n = Math.round(n * z.share); });
+    const nFacAll = Math.round(n * facShare / 100);
+    let facLeft = nFacAll;
+    SZ.forEach(z => { const f = Math.min(z.n, Math.round(nFacAll * z.share)); z.nFac = f; z.nOwn = z.n - f; facLeft -= f; });
+    const wage = SZ.reduce((a, z) => a + z.nOwn * z.per + z.nFac * facPer, 0);   // 人件費
+    const matCost = SZ.reduce((a, z) => a + z.n * z.mat, 0);                     // 梱包資材費
+    const costPack = wage + matCost;
     const total = costPack + msg;
+    const packAvg = n ? Math.round(costPack / n) : 0;
+    planOutsourceHtml._lastPack = costPack;
     const gross = n * gp;                                          // 目標達成時の粗利
     const pct = gross > 0 ? (total / gross * 100) : 0;
     const perOrder = n > 0 ? Math.round(total / n) : 0;
@@ -9026,8 +9064,6 @@
       <div style="font-size:12.5px;font-weight:800;color:#0f172a;margin-bottom:2px">👥 外注（梱包発送・メッセージ対応）はいくらまで払えるか</div>
       <div class="smd-dim" style="font-size:11px;margin-bottom:10px">上の必要販売数 <b>${numFmt(n)}件/月</b> で回したときの人件費です。打つとその場で変わります。</div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
-        <label style="font-size:12px">📦 梱包発送（円/件）<br>${inp('plan-out-pack', pack)}
-          <div class="smd-dim" style="font-size:10px;margin-top:2px">出来高。1件2〜3分＝時給換算 ¥1,200〜2,400</div></label>
         <label style="font-size:12px">💬 メッセージ対応（月額）<br>${inp('plan-out-msg', msg, 92)}
           <div class="smd-dim" style="font-size:10px;margin-top:2px">海外なら1日1時間で月3〜5万が目安</div></label>
         <label style="font-size:12px">🏭 就労支援施設（円/件）<br>${inp('plan-out-fac', facPer)}
@@ -9035,15 +9071,25 @@
         <label style="font-size:12px">🏭 施設に回す割合（%）<br>${inp('plan-out-facshare', facShare)}
           <div class="smd-dim" style="font-size:10px;margin-top:2px">残りは個人外注が担当</div></label>
       </div>
+      <div style="font-size:12px;font-weight:700;margin:2px 0 4px">📦 梱包発送はサイズ別の出来高にする
+        <span class="smd-dim" style="font-weight:400;font-size:10.5px">${mix.n ? `　構成比は出品台帳の重量 ${numFmt(mix.n)}件から自動（欄に入れると上書き）` : '　※出品台帳に重量が入ると構成比を自動で出します'}</span></div>
       <div class="pf-scroll" style="max-height:none"><table class="pf-table" style="width:100%">
-        <tr><th>項目</th><th style="text-align:right">月あたり</th><th style="text-align:right">1件あたり</th><th>内訳</th></tr>
-        <tr><td>📦 梱包発送</td><td style="text-align:right">${y(costPack)}</td><td style="text-align:right">${n ? y(costPack / n) : '—'}</td>
-          <td class="smd-dim" style="font-size:11px">個人 ${numFmt(nOwn)}件×${y(pack)}${nFac ? ` ／ 施設 ${numFmt(nFac)}件×${y(facPer)}` : ''}</td></tr>
-        <tr><td>💬 メッセージ対応</td><td style="text-align:right">${y(msg)}</td><td style="text-align:right">${n ? y(msg / n) : '—'}</td>
-          <td class="smd-dim" style="font-size:11px">件数に比例しない＝件数が増えるほど1件あたりは下がる</td></tr>
-        <tr style="border-top:2px solid #e6e8ef"><td><b>合計</b></td><td style="text-align:right"><b style="font-size:15px">${y(total)}</b></td>
-          <td style="text-align:right"><b style="font-size:15px;color:${perOrder <= ceil ? '#1a7f37' : '#d93025'}">${n ? y(perOrder) : '—'}</b></td>
-          <td style="font-size:11px">粗利の <b style="color:${lv.c}">${pct.toFixed(1)}%</b> <span style="color:${lv.c};font-weight:700">${lv.t}</span></td></tr>
+        <tr><th>サイズ</th><th style="text-align:right">構成比%</th><th style="text-align:right">件数</th><th style="text-align:right">単価(円/件)</th><th style="text-align:right">資材(円/件)</th><th style="text-align:right">小計</th><th>目安の作業時間</th></tr>
+        ${SZ.map(z => `<tr><td>${z.label}</td>
+          <td style="text-align:right">${inp('plan-out-mix' + z.k, z.k === 'S' ? mS : z.k === 'M' ? mM : mL, 52)}</td>
+          <td style="text-align:right">${numFmt(z.n)}件</td>
+          <td style="text-align:right">${inp('plan-out-' + z.k.toLowerCase(), z.per, 62)}</td>
+          <td style="text-align:right">${inp('plan-out-mat' + z.k.toLowerCase(), z.mat, 56)}</td>
+          <td style="text-align:right">${y(z.nOwn * z.per + z.nFac * facPer + z.n * z.mat)}</td>
+          <td class="smd-dim" style="font-size:11px">約${z.min}分＝時給換算 <b>${z.per ? y(Math.round(z.per * 60 / z.min)) : '—'}</b>${z.nFac ? `　施設 ${numFmt(z.nFac)}件` : ''}</td></tr>`).join('')}
+        <tr style="background:#fbfbfd"><td><b>📦 梱包発送 計</b></td><td colspan="2" style="text-align:right">${numFmt(n)}件</td>
+          <td colspan="2" class="smd-dim" style="text-align:right;font-size:11px">人件費 ${y(wage)}／資材 ${y(matCost)}</td>
+          <td style="text-align:right"><b>${y(costPack)}</b></td><td class="smd-dim" style="font-size:11px">1件あたり ${y(packAvg)}</td></tr>
+        <tr><td><b>💬 メッセージ対応</b></td><td colspan="4" class="smd-dim" style="text-align:right;font-size:11px">件数に比例しない＝件数が増えるほど1件あたりは下がる</td>
+          <td style="text-align:right"><b>${y(msg)}</b></td><td class="smd-dim" style="font-size:11px">1件あたり ${n ? y(msg / n) : '—'}</td></tr>
+        <tr style="border-top:2px solid #e6e8ef"><td><b>合計</b></td><td colspan="4"></td>
+          <td style="text-align:right"><b style="font-size:15px">${y(total)}</b></td>
+          <td style="font-size:11px">1件 <b style="font-size:14px;color:${perOrder <= ceil ? '#1a7f37' : '#d93025'}">${n ? y(perOrder) : '—'}</b>　粗利の <b style="color:${lv.c}">${pct.toFixed(1)}%</b> <span style="color:${lv.c};font-weight:700">${lv.t}</span></td></tr>
       </table></div>
       <div style="margin-top:9px;padding:8px 12px;border-radius:8px;background:${perOrder <= ceil ? '#f2fbf4' : '#fdecea'};border:1px solid ${perOrder <= ceil ? '#cfe8d6' : '#f5c6c0'};font-size:11.5px;line-height:1.8;color:${perOrder <= ceil ? '#1a5b2c' : '#8a2018'}">
         1件の粗利 <b>${y(gp)}</b> なので、人件費の天井（粗利の20%）は <b>1件 ${y(ceil)}</b> まで。
@@ -9055,7 +9101,7 @@
         <span class="smd-dim" style="font-size:10.5px">登録すると固定費の合計に反映され、必要販売数の逆算にも効きます</span>
       </div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:8px;line-height:1.8">
-        <b>単価の決め方</b>：梱包発送は<b>最初の1か月を時給で実測</b>してから出来高に移す（実所要時間が分からないまま出来高を決めると、安すぎて人が来ないか高すぎて利益が消えます）。
+        <b>サイズ別にする理由</b>：一律単価だと、<b>小さい物には払いすぎ・大きい物は誰もやりたがらない</b>の両方が起きます。うちはゲームソフト等の小型が中心なので、小は安く・大は厚く。<b>資材費（封筒/箱・緩衝材）は人件費と別</b>に見ないと、1件あたりの本当のコストが分かりません。<br><b>単価の決め方</b>：梱包発送は<b>最初の1か月を時給で実測</b>してから出来高に移す（実所要時間が分からないまま出来高を決めると、安すぎて人が来ないか高すぎて利益が消えます）。
         メッセージは<b>定型文と対応ガイドを先に整備</b>すると「選んで送るだけ」になり、安い単価でも品質が保てます。
         就労支援施設は<b>締切（集荷17時）に追随しにくい</b>ので事前梱包までにとどめ、<b>伝票（購入者の氏名住所）は渡さない</b>設計が安全です。
       </div>
@@ -9484,8 +9530,12 @@
     { const g = document.getElementById('plan-exp-manage'); if (g) g.addEventListener('click', () => showPage('expenses')); }
     // 固定費の内訳：項目追加/削除／選択月に一括登録
     // 👥 外注の単価：打つとその場で再計算（計算ボタンは置かない）
+    if (!planOutsourceHtml._mix) { planPackMixLoad().then(v => { planOutsourceHtml._mix = v; if (state.page === 'plan') renderPlan(); }).catch(() => { planOutsourceHtml._mix = { n: 0 }; }); }
     { let ot = null;
-      [['plan-out-pack', 'outPack'], ['plan-out-msg', 'outMsg'], ['plan-out-fac', 'outFacPer'], ['plan-out-facshare', 'outFacShare']].forEach(([id, key]) => {
+      [['plan-out-msg', 'outMsg'], ['plan-out-fac', 'outFacPer'], ['plan-out-facshare', 'outFacShare'],
+       ['plan-out-s', 'outS'], ['plan-out-m', 'outM'], ['plan-out-l', 'outL'],
+       ['plan-out-mats', 'outMatS'], ['plan-out-matm', 'outMatM'], ['plan-out-matl', 'outMatL'],
+       ['plan-out-mixS', 'outMixS'], ['plan-out-mixM', 'outMixM'], ['plan-out-mixL', 'outMixL']].forEach(([id, key]) => {
         const el = document.getElementById(id); if (!el) return;
         el.addEventListener('input', () => {
           plan.cfg[key] = Number(String(el.value).replace(/[^\d.]/g, '')) || 0;
@@ -9494,12 +9544,10 @@
       });
       const tf = document.getElementById('plan-out-tofix');
       if (tf) tf.addEventListener('click', () => {
-        const c = plan.cfg, n = Number(planOutsourceHtml._lastN) || 0;
-        const nFac = Math.round(n * (Number(c.outFacShare) || 0) / 100), nOwn = n - nFac;
-        const packCost = nOwn * (Number(c.outPack) || 0) + nFac * (Number(c.outFacPer) || 0);
+        const c = plan.cfg, packCost = Number(planOutsourceHtml._lastPack) || 0, n = Number(planOutsourceHtml._lastN) || 0;
         if (!Array.isArray(c.fixBreak)) c.fixBreak = [];
         c.fixBreak = c.fixBreak.filter(x => !/^外注（/.test(x.name || ''));   // 二重登録を防ぐ
-        if (packCost > 0) c.fixBreak.push({ name: '外注（梱包発送）', amount: Math.round(packCost), freq: 'monthly', cat: '人件費', memo: n + '件/月 × 単価' });
+        if (packCost > 0) c.fixBreak.push({ name: '外注（梱包発送）', amount: Math.round(packCost), freq: 'monthly', cat: '人件費', memo: n + '件/月・サイズ別単価＋資材費' });
         if ((Number(c.outMsg) || 0) > 0) c.fixBreak.push({ name: '外注（メッセージ対応）', amount: Math.round(Number(c.outMsg)), freq: 'monthly', cat: '人件費' });
         planSave(); renderPlan();
         try { toast('固定費の内訳に登録しました'); } catch (_) {}
