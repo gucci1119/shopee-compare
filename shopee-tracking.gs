@@ -137,3 +137,32 @@ function setupTrackingTrigger() {
   Logger.log('旧トリガー ' + removed + '件を削除し、syncTracking を1時間ごとに設定しました。');
   return '旧' + removed + '件削除→1時間ごとに設定';
 }
+
+// ===== 貼り替え後の自己チェック（これを1回 Run するだけ）=====
+//  Script Properties が揃っているか／Supabaseに届くか／対象が何件あるかを、書き込みせずに確認する。
+function trackingSelfCheck() {
+  var P = PropertiesService.getScriptProperties();
+  var SB = P.getProperty('SB_URL'), KEY = P.getProperty('SB_SERVICE_KEY'), AA = P.getProperty('AUTO_ARRIVE');
+  var log = [];
+  log.push('SB_URL         : ' + (SB ? 'OK ' + SB : '❌ 未設定'));
+  log.push('SB_SERVICE_KEY : ' + (KEY ? 'OK (' + String(KEY).length + '文字)' : '❌ 未設定'));
+  log.push('AUTO_ARRIVE    : ' + (AA === '1' ? "'1' ＝配達完了で自動的に在庫保管中へ移す" : (AA || '(未設定) ＝自動では移さない')));
+  if (!SB || !KEY) { Logger.log(log.join('\n') + '\n\n→ 先に Script Properties を設定してください。'); return; }
+  var q = SB + '/rest/v1/inventory?status=eq.' + encodeURIComponent('入庫待ち') + '&tracking_no=not.is.null&select=item_id,ship_method,tracking_no&limit=2000';
+  var res = UrlFetchApp.fetch(q, { muteHttpExceptions: true, headers: { apikey: KEY, Authorization: 'Bearer ' + KEY } });
+  log.push('Supabase接続   : HTTP ' + res.getResponseCode());
+  if (res.getResponseCode() < 300) {
+    var rows = JSON.parse(res.getContentText() || '[]');
+    var valid = rows.filter(function (r) { return String(r.tracking_no || '').replace(/\D/g, '').length >= 10; });
+    var ym = valid.filter(function (r) { return isYamato_(r.ship_method); }).length;
+    log.push('追跡対象       : ' + valid.length + '件（ヤマト ' + ym + ' / 日本郵便ほか ' + (valid.length - ym) + '）');
+    log.push('※ 入庫待ちで追跡番号ありの件数。ここが0なら、そもそも取り込むものがありません。');
+  } else {
+    log.push('本文: ' + res.getContentText().slice(0, 200));
+  }
+  log.push('');
+  log.push('判定テスト（配達済みかどうか）:');
+  ['お届け先にお届け済み', '配達完了', '投函完了', '窓口でお渡し', 'ご不在のため持ち戻り', '持ち出し中', '配達中', '保管']
+    .forEach(function (t) { log.push('  ' + t + ' → ' + (isDelivered_(t) ? '届いた' : '届いていない')); });
+  Logger.log(log.join('\n'));
+}
