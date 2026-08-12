@@ -3463,6 +3463,14 @@ function recheckEscrowForReturns(limitN) {
 // 手動用：注文同期を追跡番号つきで強制実行（毎時トリガーの6時間しばり・背景枠ガードを回避）
 function runOrdersForceNow() { return syncOrdersAll(15, 'force'); }
 
+// 既存のトリガーを消さずに、補償チェックの毎朝トリガーだけ足す（GASエディタから手で1回Runする用）
+function addAdjTrigger() {
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'dailyAdjustmentsCheck'; });
+  if (has) { Logger.log('既に登録済み'); return 'exists'; }
+  ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
+  Logger.log('毎朝7時の補償チェックを登録しました'); return 'created';
+}
+
 // 毎朝の補償チェックのトリガーが無ければ作る。既定の定期処理から毎回呼ぶので、手で実行しなくても必ず登録される。
 // （Apps Scriptの関数セレクタは実行のたびに戻ることがあり、手動実行に頼ると登録漏れが起きるため）
 function ensureAdjTrigger_() {
