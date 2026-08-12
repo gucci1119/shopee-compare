@@ -2691,6 +2691,7 @@
         </div>
         <div style="font-size:10.5px;color:#8a8f98;margin-left:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.sub || '')}　${esc(j.msg || '')}">${esc(j.sub || '')}${j.msg ? '　' + esc(j.msg) : ''}</div>
         <div style="font-size:9.5px;color:#b0b6c0;margin-left:20px">${jobTimeStr(j)}</div>
+        ${j.dlUrl ? `<div style="margin:4px 0 0 20px"><a href="${esc(j.dlUrl)}" target="_blank" rel="noopener" download style="display:inline-block;font-size:11px;font-weight:700;color:#fff;background:#1a7f37;border-radius:6px;padding:3px 12px;text-decoration:none">⬇ ダウンロード</a></div>` : ''}
         ${(j.state === 'run' || j.state === 'wait') ? `<div style="height:6px;background:#eee;border-radius:4px;margin:4px 0 0 20px;overflow:hidden"><div style="height:100%;width:${j.pct || 0}%;background:${col[j.state]};transition:width .3s"></div></div>` : ''}
       </div>`;
     el.innerHTML = `<div style="background:#fff;border:1px solid #dfe3ea;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.16);overflow:hidden">
@@ -2891,20 +2892,14 @@
       if (wasRun && j.state === 'done' && JOB_DONE_CB[r.k]) { try { JOB_DONE_CB[r.k](v); } catch (_) {} delete JOB_DONE_CB[r.k]; }
       // ★完了したZIPの自動ダウンロードは「この端末で1回だけ」。
       //   メモリだけで持つとリロードのたびに再ダウンロードされるので、開いた印はlocalStorageに残す。
-      // ★同じZIPが何度も落ちる事故があったので、止め方を三重にする：
-      //   (1) この画面が生きている間はメモリのSetで確実に1回だけ
-      //   (2) リロードをまたぐ分は localStorage の印
-      //   (3) 万一その印が失われても、【終わってから30分以上経った作業は落とさない】
-      //       ＝過去の完了ぶんが蒸し返されて延々ダウンロードされることを構造的に防ぐ
-      if (v.status === 'done' && v.result && v.result.url && !JOB_DL_DONE.has(r.k) && !jobOpened(r.k)) {
-        const fin = Date.parse(v.updated_at || v.created_at || 0) || 0;
-        const fresh = !fin || (Date.now() - fin) < 30 * 60000;
+      // ★自動ダウンロードは【やめた】。同じZIPが何十個も落ちる事故が起きたため。
+      //   完成したら右下の🗂しごとに「⬇ ダウンロード」を出すだけにする＝押した時だけ落ちる。
+      if (v.status === 'done' && v.result && v.result.url && !JOB_DL_DONE.has(r.k)) {
         JOB_DL_DONE.add(r.k); jobOpenedMark(r.k);
-        // ★安全弁：万一また暴走しても、1回の表示で自動ダウンロードは3件まで。
-        //   （同じZIPが20個以上落ちる事故があったため。超えたら以降は落とさずリンクだけ出す）
-        try { if (JOB_DL_CH) JOB_DL_CH.postMessage({ k: r.k }); } catch (_) {}   // 他のタブにも「落とした」を伝える
-        if (fresh && JOB_DL_COUNT < 3) { JOB_DL_COUNT++; try { const a2 = document.createElement('a'); a2.href = v.result.url; a2.target = '_blank'; a2.rel = 'noopener'; a2.click(); } catch (_) {} }
+        try { if (JOB_DL_CH) JOB_DL_CH.postMessage({ k: r.k }); } catch (_) {}
+        try { toast('✓ ZIPができました。右下の🗂しごとから落とせます'); } catch (_) {}
       }
+      j.dlUrl = (v.status === 'done' && v.result && v.result.url) ? v.result.url : '';
       // ★GASが6分制限で強制終了すると台帳は run のまま残る＝永遠に「実行中」に見える。
       //   一定時間更新が無ければ「応答なし」に倒して、消せる状態にする。
       if (v.status === 'run') {
@@ -17389,6 +17384,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         });
         // ★明細テーブル側の名前欄と上のバリエ欄を双方向で同期（保存は .ed-tier を読むため）
         const tierByOi = (oi) => [...body.querySelectorAll('.ed-tier')].find(x => String(x.dataset.oi) === String(oi) && String(x.dataset.ti) === '0');
+        // 🧹 明細名の整え：全明細に共通して出る語＝定型語とみなして外し、残りを「核」としてテンプレートへ流す。
+        //   規則は商品ごとに違うので、テンプレートは商品ごとに覚える（metaOf(itemId).nameTpl）。
+        {
+          const tplEl = body.querySelector('.ed-nmtpl'), goEl = body.querySelector('.ed-nmapply'), msgEl = body.querySelector('.ed-nmmsg');
+          if (tplEl && goEl) {
+            tplEl.addEventListener('change', () => {
+              lstMeta = lstMeta || {}; const mm = lstMeta[itemId] || (lstMeta[itemId] = {});
+              const v = String(tplEl.value || '').trim();
+              if (v && v !== '{name}') mm.nameTpl = v.slice(0, 60); else delete mm.nameTpl;
+              mm.at = Date.now(); saveListingMeta();
+            });
+            goEl.addEventListener('click', () => {
+              const inputs = [...body.querySelectorAll('.ed-tier2')].filter(x => x.offsetParent !== null || true);
+              const names = inputs.map(x => String(x.value || '').trim());
+              const words = names.map(n => n.split(/[\s\/_\-]+/).filter(Boolean));
+              // 何割の明細に出てくるか。半分以上に出る語＝この商品の定型語（Pokemon / Finger / Puppet など）
+              const freq = {};
+              words.forEach(ws => { new Set(ws.map(w => w.toLowerCase())).forEach(w => { freq[w] = (freq[w] || 0) + 1; }); });
+              const n = names.filter(Boolean).length || 1;
+              const common = new Set(Object.keys(freq).filter(w => freq[w] / n >= 0.5 && !/^\d+$/.test(w)));
+              const tpl = String(tplEl.value || '{name}').trim() || '{name}';
+              const seen = new Map(); let changed = 0, dup = 0, empty = 0;
+              inputs.forEach((inp, i) => {
+                const ws = words[i] || [];
+                let core = ws.filter(w => !common.has(w.toLowerCase()) && !/^\d+$/.test(w)).join(' ').trim();
+                if (!core) { empty++; inp.style.background = '#fdecea'; return; }   // 核が取れない＝定型語だけの名前。手で直す
+                let nv = tpl.replace(/\{name\}/g, core).replace(/\s+/g, ' ').trim().slice(0, 30);
+                const k = nv.toLowerCase();
+                if (seen.has(k)) { dup++; inp.style.background = '#fff4e5'; } else { seen.set(k, i); inp.style.background = nv !== names[i] ? '#eef7ee' : ''; }
+                if (nv !== names[i]) { changed++; inp.value = nv; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+              });
+              if (msgEl) msgEl.innerHTML = '書き換え <b>' + changed + '</b>件'
+                + (dup ? '　<b style="color:#e8710a">同じ名前になった ' + dup + '件（要確認）</b>' : '')
+                + (empty ? '　<b style="color:#d93025">核が取れない ' + empty + '件（赤い行を手直し）</b>' : '')
+                + '　<span style="color:#8a8f98">外した定型語: ' + [...common].slice(0, 8).join(' / ') + '</span>'
+                + '　<b style="color:#ee4d2d">まだShopeeには反映していません。下の「Shopeeに保存」で確定します</b>';
+            });
+          }
+        }
         body.querySelectorAll('.ed-tier2').forEach(i2 => i2.addEventListener('input', () => {
           const t2 = tierByOi(i2.dataset.oi); if (t2) { t2.value = i2.value; sync(); }
         }));
@@ -17477,6 +17511,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 <button class="ed-deldup smd-btn" style="font-size:11px;padding:3px 10px">⚠ この中で重複（${rows.filter(r => r.same).length}）</button>
                 <button class="ed-delexist smd-btn" style="font-size:11px;padding:3px 10px;border-color:#d93025;color:#d93025;font-weight:700"${bChecking ? ' disabled' : ''} title="同じ明細名がもうある／既存の出品によく似ている行をまとめて外します">⚠ 名前がかぶってる（${bChecking ? '判定中…' : rows.filter(r => r.exists || r.near).length}）</button>
                 <button class="ed-delurl smd-btn" style="font-size:11px;padding:3px 10px" title="同じ仕入元URLから過去に出したことがある行。別のURLから同じ商品を買うことも普通にあるので【参考】です">仕入元URLが既出（${bChecking ? '…' : rows.filter(r => r.dup).length}）</button>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;padding-top:6px;border-top:1px dashed #e6e8ef">
+                <span style="font-size:11.5px;font-weight:700;color:#0f172a;white-space:nowrap">🧹 名前をそろえる</span>
+                <input class="ed-nmtpl" value="${av((metaOf(itemId).nameTpl) || '{name}')}" placeholder="{name}" title="この商品の明細名の付け方。&#10;{name} のところに、各明細から取り出した【核（キャラ名など）】が入ります。&#10;例) {name} → Pikachu ／ Pokemon {name} Finger → Pokemon Pikachu Finger&#10;※規則は商品ごとに違うので、この商品用として覚えます" style="width:230px;padding:4px 8px;border:1px solid #cdd3db;border-radius:6px;font-size:11.5px;font-family:monospace">
+                <button class="ed-nmapply smd-btn" style="font-size:11px;padding:3px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="全明細の名前から、共通して出てくる定型語（Pokemon / Finger / Puppet など）を自動で見つけて外し、残った核をテンプレートに流し込みます。&#10;書き換えるのは入力欄までで、Shopeeには「Shopeeに保存」を押すまで反映しません">▶ この規則で書き換える</button>
+                <span class="ed-nmmsg smd-dim" style="font-size:11px"></span>
                 <button class="ed-delnoprice smd-btn" style="font-size:11px;padding:3px 10px">価格が空（${rows.filter(r => !(parseFloat(r.price) > 0)).length}）</button>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:6px 9px;border:1px dashed #cdd7ea;border-radius:6px;background:#fafbff;font-size:11px">
