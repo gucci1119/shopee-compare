@@ -49,7 +49,9 @@ function whsSb_() {
   var P = PropertiesService.getScriptProperties();
   if (!url) url = P.getProperty('SB_URL') || '';
   if (!key) key = P.getProperty('SB_SERVICE_KEY') || P.getProperty('SB_KEY') || '';
-  url = String(url).replace(/\s+/g, '').replace(/\/+$/, '');
+  // ★既存プロジェクトの SB_URL は末尾に /rest/v1 まで入っていることがある。そのまま繋ぐと
+  //   /rest/v1/rest/v1/... になり PGRST125「Invalid path」で落ちる（2026-08-13 実測）。
+  url = String(url).replace(/\s+/g, '').replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
   key = String(key).replace(/\s+/g, '');          // 貼り付け時の改行混入を除去
   if (!url || !key) throw new Error('SupabaseのURL/キーが見つかりません（既存の SB_URL / sbKey() も Script Properties も未設定）');
   return { url: url, key: key };
