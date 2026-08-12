@@ -21362,7 +21362,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 検索フィルタ（表示のみ絞る。covCatDataは全件のまま）
     let dcats = cats, dsgl = sgl;
     if (q) {
-      const mm = (o) => { const p = pidOf(pidKey(o.curSku)); return (((o.rep || '') + ' ' + (o.curSku || '') + ' ' + recommendSku(o.key) + ' ' + (p.jan || '') + ' ' + (p.mpn || '') + ' ' + [...(o.items ? o.items.values() : [])].map(x => x.rep || '').join(' ')).toLowerCase()).includes(q); };
+      const mm = (o) => { const p = pidOf(pidKey(o.curSku)); return (((o.rep || '') + ' ' + (o.curSku || '') + ' ' + recommendSku(o.key) + ' ' + (p.jan || '') + ' ' + (p.mpn || '') + ' ' + (p.own || '') + ' ' + [...(o.items ? o.items.values() : [])].map(x => x.rep || '').join(' ')).toLowerCase()).includes(q); };
       dcats = cats.filter(mm); dsgl = sgl.filter(mm);
     }
     const catRows = dcats.slice(0, 300).map(c => {
@@ -22495,7 +22495,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     Object.keys(productIds || {}).forEach(k => {
       const v = productIds[k] || {};
       const cond = String(v.cond || '').trim();          // ★状態が違えば別物。JANだけで重複にしない
-      [v.jan, v.mpn].forEach(x => {
+      [v.jan, v.mpn, v.own].forEach(x => {
         const t = String(x || '').trim().toLowerCase();
         if (t.length < 3) return;                       // 短すぎる値は誤検知のもと
         const key = t + '\u0001' + cond;
@@ -22513,7 +22513,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   const pidDupOf = (pv) => {
     const d = pidDupMap(), cond = String((pv && pv.cond) || '').trim();
-    const hit = [pv.jan, pv.mpn].map(x => String(x || '').trim().toLowerCase())
+    const hit = [pv.jan, pv.mpn, pv.own].map(x => String(x || '').trim().toLowerCase())
       .map(t => t ? (t + '\u0001' + cond) : '').find(t => t && d[t]);
     return hit ? d[hit] : null;
   };
@@ -22523,17 +22523,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   1つの欄に「JAN / 型番」と押し込んでいたため、どちらを入れたのか後から分からなかった。
   const janOk = (v) => { const d = String(v || '').replace(/\D/g, ''); return !d || d.length === 8 || d.length === 13; };
   function pidInputs(pk, pv, ruleHint, dup) {
-    const jan = String(pv.jan || ''), mpn = String(pv.mpn || '');
+    const jan = String(pv.jan || ''), mpn = String(pv.mpn || ''), own = String(pv.own || '');
     const bad = jan && !janOk(jan);
-    const box = (cls, val, ph, ttl, mono, bd, bg) =>
-      `<input class="${cls}"${cls === 'lst-mjan' ? ' inputmode="numeric"' : ''} data-k="${av(pk)}" value="${av(val)}" placeholder="${av(ph)}" title="${av(ttl)}" style="width:100%;padding:2px 6px;border:1px solid ${bd};border-radius:6px;font-size:10px;${mono ? 'font-family:monospace;' : ''}background:${bg}">`;
+    const box = (cls, val, ph, ttl, bd, bg) =>
+      `<input class="${cls}"${cls === 'lst-mjan' ? ' inputmode="numeric"' : ''} data-k="${av(pk)}" value="${av(val)}" placeholder="${av(ph)}" title="${av(ttl)}" style="width:100%;padding:2px 6px;border:1px solid ${bd};border-radius:6px;font-size:10px;font-family:monospace;background:${bg}">`;
+    const bd0 = dup ? '#d93025' : '#e3e6ec', bg0 = v => dup ? '#fdecea' : (v ? '#fffdf5' : '#fff');
     return '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">'
       + box('lst-mjan', jan, 'JAN（数字13桁）',
-          'JANコード＝商品パッケージのバーコードの数字（8桁か13桁）。無ければ空のままで構いません。\n親SKU＋明細名で各国に共有されます。',
-          true, bad ? '#e8710a' : (dup ? '#d93025' : '#e3e6ec'), bad ? '#fff8ef' : (dup ? '#fdecea' : (jan ? '#fffdf5' : '#fff')))
-      + box('lst-mmpn', mpn, (ruleHint || '型番・自社コード'),
-          'メーカーの型番。無ければ自社コード（例 BANDAI-PKFP-PIKACHU-2020）。\nJANが無い商品はここだけでも重複を見つけられます。',
-          true, dup ? '#d93025' : '#e3e6ec', dup ? '#fdecea' : (mpn ? '#fffdf5' : '#fff'))
+          'JANコード＝パッケージのバーコードの数字（8桁か13桁）。無ければ空でOK。\n親SKU＋明細名で各国に共有されます。',
+          bad ? '#e8710a' : bd0, bad ? '#fff8ef' : bg0(jan))
+      + box('lst-mmpn', mpn, '型番（メーカー品番）',
+          'メーカーが付けている品番。例 SLPS-01234 / HAC-P-AAAAA。\nJANが無くても、これが同じなら同じモノです。',
+          bd0, bg0(mpn))
+      + box('lst-mown', own, (ruleHint || '自社コード'),
+          '自分で決めるコード。JANも型番も無い商品（雑貨・ガチャ等）を見分けるため。\n例 BANDAI-PKFP-PIKACHU-2020（メーカー-シリーズ-キャラ-版）。\n付け方は右の「コード規則」に書いておくと、ここにヒントで出ます。',
+          bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
       + (dup ? '<div style="font-size:9px;color:#d93025;font-weight:700">⚠重複</div>' : '')
       + '</div>';
@@ -22639,7 +22643,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 20列：cc/img/商品(1fr)/状態/アカウント/価格/在庫/🛒販売/👁閲覧/❤️/💰実売/📗原価/ROI/🌏国/ブランド/📁カテゴリ/SKU/JAN/🆔ID/操作
   // 商品名の幅は可変（--lst-namew）。長いタイトルを読みたい時に広げられるように。
   // ★列幅は全部CSS変数で持つ＝ヘッダーの境目をドラッグしたら再描画なしで即反映できる。
-  const LCOLW = [36, 42, 0, 46, 132, 118, 48, 58, 58, 54, 92, 122, 70, 84, 92, 110, 118, 152, 108, 128]; // [2]=商品名は可変(1fr)
+  const LCOLW = [36, 42, 0, 46, 132, 118, 48, 58, 58, 54, 92, 122, 70, 84, 92, 110, 118, 168, 108, 128]; // [2]=商品名は可変(1fr)
   const LGRID = 'display:grid;grid-template-columns:' + LCOLW.map((w, i) => i === 2 ? 'minmax(var(--lst-namew,150px),1fr)' : ('var(--lst-c' + i + ',' + w + 'px)')).join(' ') + ';column-gap:12px;row-gap:2px;align-items:start';
   const LMINW_GET = () => {
     const cw = lst.colW || {}, hid = lst.colHide || {};
@@ -22647,7 +22651,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     LCOLW.forEach((w, i) => { total += (i === 2 ? (lst.nameW || 150) : (hid[i] ? 0 : (cw[i] != null ? cw[i] : w))); });
     return Math.round(total);
   };
-  const LMINW = 2000; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
+  const LMINW = 2016; // カード表示の全列合計幅（ヘッダー/カード/明細行を同じ幅にして整列＋この幅でコンテナを横スクロール）
   // 横スクロールしても常に見えるよう、左端(cc/img/商品名)を左固定・操作を右固定。left値=14(padding)+各トラック累積
   // box-shadow:12px 0 0 #fff で右側のgap(12px)を白で塗り、スクロール内容の透けを防ぐ。左端はleft:0基点
   // 商品名(3列目)に左向き大box-shadow(-160px)で左端ゾーン全体を不透明化＝透け防止。cc/imgはz-indexを高くして商品名の影の上に出す
@@ -22739,7 +22743,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // ★親行と【同じ列グリッド】に載せる＝ヘッダーの「状態／価格／在庫／販売／SKU／JAN」の真下に並ぶ。
         //   以前は flex で横並びにしていたので、どの数字が何の列か分からなかった。
         const pk = pidKeyModel(r, m), pv = pidOf(pk);
-        const jval = [pv.jan || '', pv.mpn || ''].filter(Boolean).join(' ');
+        const jval = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
         const jdup = jval ? pidDupOf(pv) : null;
         const cell = (col, style, html) => `<div style="grid-column:${col + 1};${style || ''}">${html}</div>`;
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
@@ -22841,7 +22845,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const pk = pidKey(r.parent_sku);
           if (!pk) return '<span class="smd-dim" style="font-size:9px" title="JAN/型番は親SKU単位で保存します。先に親SKUを設定してください">親SKUを入れると使えます</span>';
           const pv = pidOf(pk);
-          const val = [pv.jan || '', pv.mpn || ''].filter(Boolean).join(' ');
+          const val = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
           const dup = val ? pidDupOf(pv) : null;
           return pidInputs(pk, pv, meta.codeRule, dup);
         })()}</div>
@@ -23120,7 +23124,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const p = pidOf(pidKey(r.parent_sku));
         return [(r.name || ''), String(r.item_id), (r.parent_sku || ''), (p.jan || ''), (p.mpn || ''),
           ((r.models || []).map(m => m.n || '').join(' ')),
-          ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ').toLowerCase();   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
+          ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ').toLowerCase();   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
       };
       rows = rows.filter(r => { const h = hay(r); return inc.every(t => h.includes(t)) && !exc.some(t => h.includes(t)); });
     }
@@ -23682,18 +23686,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (which === 'jan' && v !== el.value) el.value = v;
       const jan = which === 'jan' ? v : String(prev.jan || '');
       const mpn = which === 'mpn' ? v : String(prev.mpn || '');
-      if (!jan && !mpn && !prev.cond) delete productIds[key];
-      else productIds[key] = { jan: jan, mpn: mpn, cond: prev.cond || '', at: Date.now() };
+      const own = which === 'own' ? v : String(prev.own || '');
+      if (!jan && !mpn && !own && !prev.cond) delete productIds[key];
+      else productIds[key] = { jan: jan, mpn: mpn, own: own, cond: prev.cond || '', at: Date.now() };
       _pidDupCache = null;
       saveProductIds();
-      try { logAct('出品', which === 'jan' ? 'JANコード' : '型番', key, v); } catch (_) {}
+      try { logAct('出品', which === 'jan' ? 'JANコード' : (which === 'mpn' ? '型番' : '自社コード'), key, v); } catch (_) {}
       // 同じキー（＝各国の同じ明細）が画面に出ていれば、その場で揃える
-      const cls = which === 'jan' ? '.lst-mjan' : '.lst-mmpn';
+      const cls = which === 'jan' ? '.lst-mjan' : (which === 'mpn' ? '.lst-mmpn' : '.lst-mown');
       document.querySelectorAll('#lst-list ' + cls).forEach(o => { if (o !== el && o.dataset.k === key) o.value = v; });
       el.style.background = v ? '#fffdf5' : '#fff';
     };
     document.querySelectorAll('#lst-list .lst-mjan').forEach(el => el.addEventListener('change', () => pidSaveFrom(el, 'jan')));
     document.querySelectorAll('#lst-list .lst-mmpn').forEach(el => el.addEventListener('change', () => pidSaveFrom(el, 'mpn')));
+    document.querySelectorAll('#lst-list .lst-mown').forEach(el => el.addEventListener('change', () => pidSaveFrom(el, 'own')));
     // 🏷 コード規則（JANが無い商品の自社コードの付け方）をカタログごとに覚えておく
     document.querySelectorAll('#lst-list .lst-coderule').forEach(inp => inp.addEventListener('change', () => {
       const id = inp.dataset.id; lstMeta = lstMeta || {};
@@ -23702,7 +23708,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (v) m.codeRule = v.slice(0, 80); else delete m.codeRule;
       m.at = Date.now(); saveListingMeta();
       // 同じカタログの明細JAN欄のヒントをその場で差し替える
-      document.querySelectorAll('#lst-list .lst-mmpn').forEach(o => { o.placeholder = v || '型番・自社コード'; });
+      document.querySelectorAll('#lst-list .lst-mown').forEach(o => { o.placeholder = v || '自社コード'; });
       inp.style.background = v ? '#fbfaff' : 'transparent';
     }));
     // 🎮 状態（箱・説明書の有無）。JANが同じでも状態が違えば別物として扱う
