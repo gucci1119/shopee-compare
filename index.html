@@ -22836,9 +22836,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">`
               : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`)
           + cell(7, 'text-align:right;color:#999;white-space:nowrap', String(m.sold || 0))
-          + cell(16, 'min-width:0', m.sku
-              ? `<span style="font-family:monospace;font-size:10px;color:#8a6d3b;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="SKU: ${av(m.sku)}">🔖${esc(m.sku)}</span>`
-              : '<span style="font-size:9px;color:#c9c9c9">SKU無</span>')
+          + cell(16, 'min-width:0', `<input class="lst-msku" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="SKU" title="この明細のSKU。入れるとその場でShopeeへ送ります（公式APIが使えないときはライブPCのブリッジ経由）。&#10;Enterか、欄の外をクリックで保存します。" style="width:100%;padding:2px 6px;border:1px solid ${m.sku ? '#e3e6ec' : '#eee'};border-radius:6px;font-size:10px;font-family:monospace;background:${m.sku ? '#fffdf5' : '#fff'}"><span class="lst-mskumsg" style="font-size:9px"></span>`)
           + cell(17, 'min-width:0', pidInputs(pk, pv, metaOf(r.item_id).codeRule, jdup))
           + cell(19, 'text-align:center;white-space:nowrap', (!isSingle && canEdit)
               ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>`
@@ -23849,6 +23847,47 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       drawListingStatus();
       toast('⚡ 自社コードを ' + n + '件 入れました' + (skip ? '（入力済み ' + skip + '件はそのまま）' : '') + (ng ? '／作れなかった ' + ng + '件' : ''));
     }));
+    // 🔖 明細SKUをその場で保存。①公式API(update_model) → ②だめならライブPCのブリッジ、の順で必ずShopeeへ送る。
+    document.querySelectorAll('#lst-list .lst-msku').forEach(inp => {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+      inp.addEventListener('change', async () => {
+        const cc = inp.dataset.cc, itemId = Number(inp.dataset.item), mid = Number(inp.dataset.mid);
+        const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+        const m = row && (row.models || []).find(x => String(x.id) === String(mid));
+        const val = String(inp.value || '').trim();
+        if (!m || String(m.sku || '') === val) return;
+        const msg = inp.parentNode.querySelector('.lst-mskumsg');
+        const say = (t, ok) => { if (msg) { msg.textContent = t; msg.style.color = ok ? '#1a7f37' : '#d93025'; } };
+        const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); inp.value = m.sku || ''; return; }
+        inp.disabled = true; say('保存中…', true);
+        let ok = false, err = '';
+        const sid = shopIdOfListing(cc, itemId);
+        if (settings.openapiUrl && settings.writeToken && sid) {
+          try {
+            const r = await gasCall({ action: 'update_model_sku', token: settings.writeToken, shop_id: sid, item_id: itemId, model_id: String(mid), sku: val }, 60000);
+            if (r && r.ok) ok = true; else err = (r && r.error) || '応答なし';
+          } catch (e) { err = (e && e.message) || String(e); }
+        } else err = '公式APIの設定が足りません';
+        if (!ok && state.mode === 'live') {                      // ②ブリッジに回す（tier構造ごと書く従来の道）
+          try {
+            const models = (row.models || []).map(x => ({ id: x.id, tier_index: x.tier_index || [], price: x.price, sku: String(x.id) === String(mid) ? val : (x.sku || '') }));
+            const rb = await productWrite((regionByCc(cc) || {}).host, itemId, { model_list: models });
+            if (rb && rb.ok) { ok = true; err = ''; } else err = (rb && rb.msg) || err;
+          } catch (e) { err = (e && e.message) || err; }
+        }
+        inp.disabled = false;
+        if (ok) {
+          m.sku = val; inp.style.background = val ? '#fffdf5' : '#fff';
+          say('✓ 保存', true); setTimeout(() => say('', true), 1500);
+          try { await sbPatch('listings', 'item_id=eq.' + itemId, { models: row.models }); } catch (_) {}
+          try { logAct('出品', '明細SKU', cc + ' ' + itemId + '#' + mid, val); } catch (_) {}
+        } else {
+          inp.value = m.sku || '';
+          say('✗ ' + apiErrJa(err).slice(0, 40), false);
+          alert('明細SKUを保存できませんでした。\n\n' + apiErrJa(err) + (state.mode === 'live' ? '' : '\n\n※この端末はライブ（ブリッジ）ではありません。ライブPCなら別の経路で保存できます。'));
+        }
+      });
+    });
     // 📷 画像に写っているバーコードからJANを読む
     document.querySelectorAll('#lst-list .lst-janscan').forEach(btn => btn.addEventListener('click', async () => {
       if (!bcReady()) { alert('この機能はChrome（またはEdge）でのみ使えます。\nお使いのブラウザにバーコード読み取りが入っていません。'); return; }
