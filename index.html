@@ -13075,13 +13075,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   中身は最初から全部（カテゴリ見出しで区切って）出す。0件のカテゴリは押せない。
   function notifTabsHtml() {
     const rd = notif.read || {};
-    return `<div class="nf-tabs">` + NOTIF_CATS.filter(([k]) => k !== 'all').map(([k, label]) => {
-      const arr = notif.items.filter(x => (x.cat || 'todo') === k);
+    const cur = notif.cat || 'all';
+    // ★見出しへ飛ばす方式は、見出しが全部 position:sticky で重なるため位置が定まらず、
+    //   4回作り直しても安定しなかった（2026-08-13）。押したカテゴリだけ描き直す＝確実に動く形に戻す。
+    return `<div class="nf-tabs">` + NOTIF_CATS.map(([k, label]) => {
+      const arr = k === 'all' ? notif.items : notif.items.filter(x => (x.cat || 'todo') === k);
       const un = arr.filter(x => !rd[x.id]).length;
-      if (!arr.length) return `<span class="nf-tab off" title="今はありません">${label} 0</span>`;
-      return `<button class="nf-tab" data-c="${k}" title="ここへ移動">${label} <b>${arr.length}</b>${un ? `<span class="nf-dot"></span>` : ''}</button>`;
+      const on = cur === k;
+      return `<button class="nf-tab${on ? ' on' : ''}${!arr.length && k !== 'all' ? ' off' : ''}" data-c="${k}" title="${k === 'all' ? 'すべて表示' : label + 'だけ表示'}">${label} <b>${arr.length}</b>${un ? `<span class="nf-dot"></span>` : ''}</button>`;
     }).join('') + `</div>`;
   }
+
   function notifDiagHtml() {
     const d = notif.diag; if (!d) return '';
     const ls = d.lastSync ? epochMs(d.lastSync) : NaN;
@@ -13096,11 +13100,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rd = notif.read || {};
     if (notif.loading) return '<div class="smd-dim" style="padding:16px;font-size:12px"><span class="smd-spin"></span> 読み込み中…</div>';
     if (!notif.items.length) return notifTabsHtml() + '<div class="smd-dim" style="padding:18px 14px;font-size:12.5px;line-height:1.8">お知らせはありません。<br><span style="font-size:11px">仕入れた荷物が届いたら、ここに出ます（配送業者の追跡が「配達完了」になった時／追跡が無い場合は仕入から想定日数が過ぎた時）。</span></div>' + notifDiagHtml();
-    const body = NOTIF_CATS.filter(([k]) => k !== 'all').map(([k, label]) => {
+    const cur = notif.cat || 'all';
+    const body = NOTIF_CATS.filter(([k]) => k !== 'all' && (cur === 'all' || cur === k)).map(([k, label]) => {
       const arr = notif.items.filter(x => (x.cat || 'todo') === k);
       if (!arr.length) return '';
       return `<div class="nf-sec" id="nf-sec-${k}">${label} <b>${arr.length}</b></div>` + notifRows(arr, rd);
-    }).join('');
+    }).join('') || '<div class="smd-dim" style="padding:18px 14px;font-size:12.5px">この種類のお知らせはありません</div>';
     return notifTabsHtml() + body + notifDiagHtml();
   }
   function notifRows(list, rd) {
@@ -13132,42 +13137,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       notif.items.forEach(x => { notif.read[x.id] = now; });
       notifPaint(); notifRender(); await notifReadSave();
     });
-    // 見出しへ飛ぶ。★offsetTop は使わない：見出しは position:sticky なので、貼り付いている状態だと
-    //   基準がずれて「動かない」「押すたび少しずつ上がる」という挙動になっていた（2026-08-13 是正）。
-    //   実測の位置差（rect）で出し、smoothもやめる＝連打しても取り合いにならず一発で決まる。
     pn.querySelectorAll('.nf-tab[data-c]').forEach(b => b.addEventListener('click', () => {
-      const sec = pn.querySelector('#nf-sec-' + b.dataset.c);
-      if (!sec) return;
-      // ★2026-08-13：ここは3回作り直した。offsetTop も scrollIntoView も単独では動かない場面があったので、
-      //   ①offsetTopで直接入れる → ②変わらなければscrollIntoView、の二段構えにして必ず動くようにする。
-      const hd = pn.querySelector('.nh'), tb = pn.querySelector('.nf-tabs');
-      const off = (hd ? hd.offsetHeight : 40) + (tb ? tb.offsetHeight : 38);
-      const before = pn.scrollTop;
-      const want = Math.max(0, (sec.offsetTop || 0) - off - 2);
-      pn.scrollTop = want;
-      if (Math.abs(pn.scrollTop - before) < 2 && Math.abs(want - before) > 4) {
-        try { sec.scrollIntoView({ block: 'start' }); pn.scrollTop = Math.max(0, pn.scrollTop - off + 2); } catch (_) {}
-      }
-      pn.querySelectorAll('.nf-tab[data-c]').forEach(x => x.classList.toggle('on', x === b));   // いまどこを見ているか
-      sec.style.transition = 'none'; sec.style.background = '#fff3cd';
-      setTimeout(() => { sec.style.transition = 'background .6s'; sec.style.background = ''; }, 260);
+      notif.cat = (notif.cat === b.dataset.c) ? 'all' : b.dataset.c;   // 同じものを押したら全部に戻る
+      notifRender();
+      const p2 = document.getElementById('smd-notif-panel'); if (p2) p2.scrollTop = 0;
     }));
-    // ★スクロールしていま見えている節に合わせてチップを光らせる。
-    //   押したチップを光らせるだけだと、下へ流したときに「荷物が選択中なのに要対応が見えている」
-    //   という食い違いが起きる（本人指摘 2026-08-13）。
-    { let tick = null;
-      const syncTab = () => {
-        const secs = [...pn.querySelectorAll('.nf-sec')];
-        if (!secs.length) return;
-        const top = pn.getBoundingClientRect().top + 90;
-        let cur = secs[0];
-        secs.forEach(sc => { if (sc.getBoundingClientRect().top <= top) cur = sc; });
-        const k = String(cur.id || '').replace('nf-sec-', '');
-        pn.querySelectorAll('.nf-tab[data-c]').forEach(x => x.classList.toggle('on', x.dataset.c === k));
-      };
-      pn.addEventListener('scroll', () => { if (tick) return; tick = setTimeout(() => { tick = null; syncTab(); }, 80); });
-      syncTab();
-    }
     pn.querySelectorAll('.nf-orders').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('orders'); }));
     pn.querySelectorAll('.nf-money').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('profit'); }));
     pn.querySelectorAll('.nf-item').forEach(el => {
