@@ -319,7 +319,7 @@
   .nf-tab.off { opacity:.42; cursor:default; }
   .nf-item { display:flex; gap:9px; padding:10px 14px; border-bottom:1px solid #f2f4f8; font-size:12.5px; line-height:1.6; }
   .nf-item.unread { background:#fffdf5; }
-  .nf-ic { font-size:16px; line-height:1.3; }
+  .nf-ic { font-size:16px; line-height:1.3; width:34px; flex:none; }
   .nf-bd { flex:1; min-width:0; }
   .nf-ti { font-weight:700; color:#0f172a; }
   .nf-sb { color:#64748b; font-size:11px; margin-top:1px; }
@@ -13095,7 +13095,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let rows = [];
     try {
       rows = await sbGetAll('inventory',
-        'select=item_id,name,name_supplier,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
+        'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
     } catch (_) { rows = []; }
     const today = jstDate(Date.now());
     const daysFrom = (d) => { if (!d) return null; const t = Date.parse(String(d).slice(0, 10) + 'T00:00:00+09:00'); return isFinite(t) ? Math.floor((Date.parse(today + 'T00:00:00+09:00') - t) / 86400000) : null; };
@@ -13111,12 +13111,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         //   代用したことが分かるようにする（＝いつ届いたか本当は分からない、を隠さない）。2026-08-13
         const da = deliveredAt(r);
         const at = da || lastScan;
-        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', at: notifSortKey(at, pd), day: receivedDay(at),
+        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', img: r.image || '', at: notifSortKey(at, pd), day: receivedDay(at),
           ti: '届きました：' + nm,
           sb: [notifWhen(at, da ? '到着' : '最終記録'), (da ? '' : '（配達完了の記録が無く、最後のスキャン時刻です）'), r.supplier || '', pd ? '仕入 ' + pd : '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       } else if (ph === 'out') {
-        out.push({ id: 'out:' + r.item_id, ic: '🚚', cat: 'parcel', kind: 'out', at: notifSortKey(lastScan, pd),
+        out.push({ id: 'out:' + r.item_id, ic: '🚚', cat: 'parcel', kind: 'out', img: r.image || '', at: notifSortKey(lastScan, pd),
           ti: '配達中です：' + nm,
           sb: [notifWhen(lastScan, '最新'), r.supplier || '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
@@ -13124,7 +13124,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       //   何年も前の滞留分でベルが埋まって役に立たないので、【最近の仕入れだけ】に絞る。
       //   古い滞留は 🛒仕入れ管理 ＞ ⏳入庫待ち の「🧹長期滞留の点検」でまとめて処理する。
       } else if (!ph && pdays != null && pdays >= exp && pdays <= 60) {
-        out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', cat: 'parcel', kind: 'likely', at: pd,
+        out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', cat: 'parcel', kind: 'likely', img: r.image || '', at: pd,
           ti: '届いているかもしれません：' + nm,
           sb: (r.supplier || '') + '　仕入から ' + pdays + '日（目安 ' + exp + '日）　追跡情報なし', itemId: r.item_id });
       }
@@ -13170,7 +13170,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const its = o.items || [], it = its[0] || {};
         const more = its.length > 1 ? `　ほか${its.length - 1}点` : '';
         const when = isFinite(ts) ? notifWhen(jstDateTime(ts), '注文') : (o.order_date ? '注文 ' + o.order_date : '');
-        out.push({ id: 'ord:' + o.cc + ':' + o.sn, ic: '🛒', cat: 'order', kind: 'order',
+        out.push({ id: 'ord:' + o.cc + ':' + o.sn, ic: '🛒', cat: 'order', kind: 'order', img: it.image || '',
           at: isFinite(ts) ? notifSortKey(jstDateTime(ts), o.order_date) : String(o.order_date || ''),
           ti: '売れました：' + (it.name || o.sn) + more,
           sb: [when, o.cc, o.total != null ? (rg.cur || '') + Math.round(Number(o.total)).toLocaleString() : '', '注文番号 ' + o.sn].filter(Boolean).join('　'),
@@ -13276,7 +13276,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return list.map(x => {
       const un = !rd[x.id];
       return `<div class="nf-item${un ? ' unread' : ''}" data-id="${esc(x.id)}">
-        <div class="nf-ic">${x.ic}</div>
+        <div class="nf-ic">${x.img
+          ? `<img src="${/^https?:/.test(x.img) ? esc(x.img) : IMG_CDN + esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" title="${av(x.ti || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:6px;background:#f2f2f2;display:block" onerror="this.replaceWith(document.createTextNode('${x.ic}'))">`
+          : x.ic}</div>
         <div class="nf-bd">
           <div class="nf-ti">${esc(x.ti)}</div>
           <div class="nf-sb">${esc(x.sb)}</div>
