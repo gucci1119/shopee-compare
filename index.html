@@ -22754,6 +22754,28 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   出品名は英語（Shopee向け）なので「ポケモン」で探しても素直には当たらない。
   //   出品名を作るときに使っている日本語→英語の辞書(VAR_TERMS)と、仕入れ検索の辞書(VS_JP_EN)を
   //   そのまま流用して、検索語を英語にも展開する＝どちらで打っても当たる。完璧は狙わない。
+  // 📷 商品画像にバーコードが写っていればJANを読む。Chrome内蔵の BarcodeDetector を使う＝ライブラリ不要。
+  //   ※表紙だけの写真には普通バーコードが無い（裏面）。写っている物だけ拾える、程度のもの。
+  let _bcDet = null;
+  function bcReady() { return typeof BarcodeDetector !== 'undefined'; }
+  async function janFromImageUrl(url) {
+    if (!bcReady() || !url) return '';
+    if (!_bcDet) _bcDet = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128'] });
+    let bmp;
+    try {
+      const { bytes, mime } = await fetchImgBytes(url);           // CORSで弾かれたらGAS経由に落ちる
+      bmp = await createImageBitmap(new Blob([bytes], { type: mime }));
+    } catch (_) { return ''; }
+    try {
+      const found = await _bcDet.detect(bmp);
+      for (const f of (found || [])) {
+        const v = String(f.rawValue || '').replace(/\D/g, '');
+        if (v.length === 13 || v.length === 8) return v;
+      }
+    } catch (_) {}
+    finally { try { bmp.close(); } catch (_) {} }
+    return '';
+  }
   const _kwExpandCache = new Map();
   function kwExpand(term) {
     const t = String(term || '').trim().toLowerCase();
@@ -22899,7 +22921,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const dup = val ? pidDupOf(pv) : null;
           return pidInputs(pk, pv, meta.codeRule, dup);
         })()}</div>
-        <div style="min-width:0"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}">${(meta.codeRule || '') ? `<button class="lst-codefill" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}</div>
+        <div style="min-width:0"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}">${(meta.codeRule || '') ? `<button class="lst-codefill" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}<button class="lst-janscan" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細の画像にバーコードが写っていれば、そこからJANを読み取って空いている欄に入れます。&#10;※表紙だけの写真にはたいてい写っていません（バーコードは裏面）。写っている物だけ拾えます。&#10;すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">📷 画像からJANを読む</button></div>
         <div style="font-size:9.5px;word-break:break-all;min-width:0;line-height:1.2;color:#8a8f98" title="ShopeeのItem ID（各国ごと）">${r.item_id}</div>
         <div style="display:flex;flex-direction:column;gap:2px;align-items:stretch;min-width:0;${LSTKR}">
           <div style="display:flex;gap:2px">
@@ -23790,6 +23812,35 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { logAct('出品', '自社コードを規則で自動入力', String(id), rule + ' → ' + n + '件'); } catch (_) {}
       drawListingStatus();
       toast('⚡ 自社コードを ' + n + '件 入れました' + (skip ? '（入力済み ' + skip + '件はそのまま）' : '') + (ng ? '／作れなかった ' + ng + '件' : ''));
+    }));
+    // 📷 画像に写っているバーコードからJANを読む
+    document.querySelectorAll('#lst-list .lst-janscan').forEach(btn => btn.addEventListener('click', async () => {
+      if (!bcReady()) { alert('この機能はChrome（またはEdge）でのみ使えます。\nお使いのブラウザにバーコード読み取りが入っていません。'); return; }
+      const id = btn.dataset.id, cc = btn.dataset.cc;
+      const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(id));
+      if (!row) return;
+      productIds = productIds || {};
+      const targets = (row.models || []).filter(m => {
+        const k = pidKeyModel(row, m); if (!k) return false;
+        return !String((productIds[k] || {}).jan || '').trim() && !!(m.img || row.image);
+      });
+      if (!targets.length) { toast('読み取る対象がありません（画像なし、または全部入力済み）', true); return; }
+      const old = btn.textContent; btn.disabled = true;
+      let hit = 0, i = 0;
+      for (const m of targets) {
+        i++; btn.textContent = '📷 読み取り中 ' + i + '/' + targets.length;
+        const raw = m.img || row.image || '';
+        const url = /^https?:\/\//.test(raw) ? raw : (IMG_CDN + raw);
+        const jan = await janFromImageUrl(url);
+        if (jan) {
+          const k = pidKeyModel(row, m); const prev = productIds[k] || {};
+          productIds[k] = { jan: jan, mpn: prev.mpn || '', own: prev.own || '', cond: prev.cond || '', at: Date.now() };
+          hit++;
+        }
+      }
+      btn.disabled = false; btn.textContent = old;
+      if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
+      toast(hit ? ('📷 ' + hit + '/' + targets.length + '件からJANを読み取りました') : ('📷 ' + targets.length + '件見ましたが、バーコードは写っていませんでした（表紙の写真だと入っていないのが普通です）'), !hit);
     }));
     // 🎮 状態（箱・説明書の有無）。JANが同じでも状態が違えば別物として扱う
     document.querySelectorAll('#lst-list .lst-mcond').forEach(sel => sel.addEventListener('change', () => {
