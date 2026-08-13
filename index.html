@@ -2890,6 +2890,27 @@
       sel('.ed-mth-empty').forEach(sp => { sp.outerHTML = '<img class="zimg ed-mth" data-opt="' + option.replace(/"/g, '&quot;') + '" src="' + url + '" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:6px;background:#f2f2f2;cursor:zoom-in">'; });
     });
   }
+  // ★画像を差し替えたら【出品一覧にもその場で反映】する。以前は編集画面のサムネしか変えていなかったので、
+  //   一覧は古い画像のままで、わざわざ「🟢即時取得」を押す必要があった（本人指摘 2026-08-13）。
+  //   Shopee側は自前のCDNに置き直すので、次の自動同期で正のURLに上書きされる（それまでの見た目を合わせる）。
+  async function applyVarImagesToList(cc, itemId, pairs) {
+    try {
+      const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+      if (!row || !Array.isArray(row.models) || !row.models.length) return;
+      const byOpt = {}; (pairs || []).forEach(x => { if (x && x.option && x.url) byOpt[String(x.option).trim().toLowerCase()] = x.url; });
+      let n = 0;
+      row.models = row.models.map(m => {
+        const u = byOpt[String(m.n || '').trim().toLowerCase()];
+        if (!u) return m;
+        n++; return Object.assign({}, m, { img: u });
+      });
+      if (!n) return;
+      row.update_time = Math.floor(Date.now() / 1000);
+      try { await sbPatch('listings', 'item_id=eq.' + itemId, { models: row.models, update_time: row.update_time }); } catch (_) {}
+      try { if (document.getElementById('lst-list')) drawListingStatus(); } catch (_) {}
+      try { toast('🖼 出品一覧の画像も ' + n + '件 差し替えました'); } catch (_) {}
+    } catch (_) {}
+  }
   let jobPollTimer = null;
   let jobPollBusy = false;
   async function jobPoll() {
@@ -17185,7 +17206,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               };
               jobPollStart();
               // 反映が終わったら、開いたままのエディタのサムネも新しい画像に差し替える
-              JOB_DONE_CB[key] = () => { applyVarThumbs(items); toast('🖼 画面のサムネも新しい画像に更新しました'); };
+              JOB_DONE_CB[key] = () => { applyVarThumbs(items); applyVarImagesToList(cc, itemId, items); };
               gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: key }, 300000))
                 .catch(e => jobRemoteFail(key, e && e.message));
               try { logAct('出品', '明細画像の一括差替', repName || (pi.name || ''), cc + ' ' + items.length + '件 → ' + label); } catch (_) {}
