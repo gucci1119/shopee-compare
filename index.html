@@ -22750,6 +22750,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       toast('✓ このカタログを最新にしました' + (settings.sbSecret ? '' : '（この端末は表示のみ。DBは次の自動同期で揃います）'));
     } catch (_) {}
   }
+  // 🔤 日本語で打っても英語タイトルの出品に当たるようにする。
+  //   出品名は英語（Shopee向け）なので「ポケモン」で探しても素直には当たらない。
+  //   出品名を作るときに使っている日本語→英語の辞書(VAR_TERMS)と、仕入れ検索の辞書(VS_JP_EN)を
+  //   そのまま流用して、検索語を英語にも展開する＝どちらで打っても当たる。完璧は狙わない。
+  const _kwExpandCache = new Map();
+  function kwExpand(term) {
+    const t = String(term || '').trim().toLowerCase();
+    if (!t) return [t];
+    if (_kwExpandCache.has(t)) return _kwExpandCache.get(t);
+    const out = [t];
+    const add = (x) => { const v = String(x || '').trim().toLowerCase(); if (v && out.indexOf(v) < 0) out.push(v); };
+    if (/[ぁ-んァ-ヶ一-龠]/.test(t)) {                       // 日本語を含むときだけ英語へ広げる
+      try { Object.keys(VS_JP_EN || {}).forEach(k => { if (t.indexOf(k.toLowerCase()) >= 0 || k.toLowerCase().indexOf(t) >= 0) add(VS_JP_EN[k]); }); } catch (_) {}
+      try { (VAR_TERMS || []).forEach(([re, en]) => { try { if (new RegExp(re.source, 'i').test(t)) add(en); } catch (_) {} }); } catch (_) {}
+    }
+    _kwExpandCache.set(t, out);
+    return out;
+  }
   function listingCardHtml(r) {
     const rg = regionByCc(r.cc) || { color: '#333', host: '' };
     const key = r.cc + ':' + r.item_id;
@@ -23158,7 +23176,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ((r.models || []).map(m => m.n || '').join(' ')),
           ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ').toLowerCase();   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
       };
-      rows = rows.filter(r => { const h = hay(r); return inc.every(t => h.includes(t)) && !exc.some(t => h.includes(t)); });
+      // 日本語で打った語は英語にも広げて、どちらでも当たるようにする（除外語も同じ扱い）
+      const incV = inc.map(kwExpand), excV = exc.map(kwExpand);
+      rows = rows.filter(r => { const h = hay(r);
+        return incV.every(vs => vs.some(t => h.includes(t))) && !excV.some(vs => vs.some(t => h.includes(t))); });
     }
     // 公開/非公開（status 1=公開・それ以外=非公開）
     if (lst.pub === 'pub') rows = rows.filter(r => r.status === 1);
@@ -23293,9 +23314,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </span>
         <button class="smd-btn" id="lst-stats" title="👁閲覧・❤️いいね・🛒販売数をShopeeから取り直します（全店で1〜3分。通常は6時間ごとに自動更新）">📊 統計を更新</button>
         <span style="position:relative;display:inline-flex;align-items:center">
-          <input type="text" id="lst-search" placeholder="商品名・明細名・item_id（-語 で除外）" value="${esc(lst.search || '')}" title="スペース区切りで全部を含む商品を出します（AND）。&#10;先頭に - を付けた語は【除外】します。例）pokemon -card&#10;スペースを含めて1語にしたいときは &quot;…&quot; で囲みます。&#10;商品名・明細名・親SKU・JAN/型番・item_id が対象です。" style="padding-right:22px;width:320px;min-width:260px">
+          <input type="text" id="lst-search" placeholder="商品名・明細名・item_id（日本語でもOK）" value="${esc(lst.search || '')}" title="スペース区切りで全部を含む商品を出します（AND）。&#10;先頭に - を付けた語は【除外】します。例）pokemon -card&#10;スペースを含めて1語にしたいときは &quot;…&quot; で囲みます。&#10;商品名・明細名・親SKU・JAN/型番・item_id が対象です。" style="padding-right:22px;width:320px;min-width:260px">
           <button id="lst-searchclr" title="検索を消す" style="position:absolute;right:4px;border:none;background:none;color:#aaa;font-size:14px;line-height:1;cursor:pointer;${(lst.search || '') ? '' : 'display:none'}">✕</button>
-          <span class="smd-dim" style="position:absolute;left:2px;top:100%;margin-top:2px;font-size:10px;white-space:nowrap;color:#8a8f98">スペース＝すべて含む／<b style="color:#d93025">-語</b>＝その語を除く（例: pokemon -card）</span>
+          <span class="smd-dim" style="position:absolute;left:2px;top:100%;margin-top:2px;font-size:10px;white-space:nowrap;color:#8a8f98">スペース＝すべて含む／<b style="color:#d93025">-語</b>＝その語を除く（例: pokemon -card）／<b style="color:#1a7f37">日本語で打っても英語の出品に当たります</b>（ポケモン→Pokemon）</span>
         </span>
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
