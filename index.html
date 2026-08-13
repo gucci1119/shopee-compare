@@ -12958,10 +12958,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ★「いつ届いたか」は配送業者のスキャン履歴(delivery_history)にしか無い。最後のスキャン時刻を出す。
       const lastScan = (() => { try { const h = JSON.parse(r.delivery_history || 'null'); return Array.isArray(h) && h.length ? (h[h.length - 1].t || '') : ''; } catch (_) { return ''; } })();
       if (ph === 'delivered') {
-        const at = deliveredAt(r) || lastScan;
-        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', at: notifSortKey(at, pd),
+        // ★「到着」は配送業者が配達完了を記録した時刻を出す。取れないときだけ最終スキャンで代用し、
+        //   代用したことが分かるようにする（＝いつ届いたか本当は分からない、を隠さない）。2026-08-13
+        const da = deliveredAt(r);
+        const at = da || lastScan;
+        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', at: notifSortKey(at, pd), day: receivedDay(at),
           ti: '届きました：' + nm,
-          sb: [notifWhen(at, '到着'), r.supplier || '', pd ? '仕入 ' + pd : '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
+          sb: [notifWhen(at, da ? '到着' : '最終記録'), (da ? '' : '（配達完了の記録が無く、最後のスキャン時刻です）'), r.supplier || '', pd ? '仕入 ' + pd : '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       } else if (ph === 'out') {
         out.push({ id: 'out:' + r.item_id, ic: '🚚', cat: 'parcel', kind: 'out', at: notifSortKey(lastScan, pd),
@@ -13092,6 +13095,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const mins = isFinite(ls) ? Math.round((Date.now() - ls) / 60000) : null;
     return `<div class="smd-dim" style="padding:9px 14px;font-size:10.5px;line-height:1.7;border-top:1px solid #f2f4f8;background:#fbfcfe">
       ${d.lastSync ? `🚚 <b>追跡の最終取り込み ${notifWhen(jstDateTime(ls), '')}</b>（${mins}分前）。取り込みは<b>1時間ごと</b>なので、届いてから最大1時間はここに出ません。<br>` : '🚚 追跡の取り込み記録がありません（配送追跡GASが動いていない可能性）。<br>'}
+      ${(() => {
+        // ★「今日届いた荷物は本当に無いのか」をその場で答える。到着日ごとの内訳を出す。
+        const arr = (notif.items || []).filter(x => x.kind === 'arrived');
+        if (!arr.length) return '';
+        const cnt = {};
+        arr.forEach(x => { const dd = x.day || '(日付不明)'; cnt[dd] = (cnt[dd] || 0) + 1; });
+        const today = jstDateTime(Date.now()).slice(0, 10);
+        const yest = jstDateTime(Date.now() - 86400000).slice(0, 10);
+        const n = (k) => cnt[k] || 0;
+        const rest = Object.keys(cnt).filter(k => k !== today && k !== yest).sort().reverse().slice(0, 3).map(k => k + ' ' + cnt[k] + '件').join('／');
+        return `📦 到着の内訳：<b>今日 ${n(today)}件</b>／昨日 ${n(yest)}件${rest ? '／' + rest : ''}${n(today) ? '' : '　<b style="color:#b26a00">今日ぶんが0なのは、届いていないか、追跡番号が無くて分からないかのどちらかです</b>'}<br>`;
+      })()}
       入庫待ち <b>${d.waiting}</b>件のうち、追跡番号があるのは <b>${d.tracked}</b>件です。
       <b>追跡番号が無い荷物は、届いても「📦届きました」を出せません</b>（想定日数を過ぎたら🟡で出ます）。
       メルカリ/Yahooの取り込みスクリプトを回すと番号が入り、到着がそのまま出るようになります。</div>`;
