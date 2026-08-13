@@ -18913,7 +18913,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const row = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(itemId));
             if (!row) return;
             if (patch.name != null) row.name = patch.name;
-            if (patch.parent_sku != null) row.parent_sku = patch.parent_sku;
+            if (patch.parent_sku != null) {
+              // ★親SKUを変えたら、JAN・型番・自社コード・識別項目・出品台帳の原価も新しい鍵へ引っ越す
+              const before = String(row.parent_sku || '').trim();
+              row.parent_sku = patch.parent_sku;
+              try { const mg = await migrateSkuKeys(before, patch.parent_sku); if (mg.ids || mg.ledger) toast('🔁 親SKUの変更に合わせて JAN・識別・原価を移しました'); } catch (_) {}
+            }
             if (patch.images && patch.images.length) { row.images = patch.images.slice(0, 9); row.image = patch.images[0]; }
             // 明細名（単一バリエのときだけ入力欄がある）
             const tierVals = [...body.querySelectorAll('.ed-tierrow .ed-tier')].map(i => String(i.value || '').trim());
@@ -22912,6 +22917,53 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     _grpMap = m; _grpAt = Date.now();
     return m;
   }
+  // 🔁 親SKUを変えたら、その親SKUを鍵にしている情報を新しい鍵へ引っ越す。
+  //   放っておくと JAN・型番・自社コード・識別項目・出品台帳の原価が【前のSKUに取り残されて見えなくなる】。
+  //   鍵は productIds が「親SKU」と「親SKU｜明細名」、出品台帳が「lst|親SKU」。
+  //   ※すでに新しい鍵に値があるものは上書きしない（手で入れた新しい方を優先）。
+  async function migrateSkuKeys(oldSku, newSku) {
+    const o = String(oldSku || '').trim(), n = String(newSku || '').trim();
+    if (!o || !n || o === n) return { ids: 0, ledger: false };
+    let ids = 0;
+    productIds = productIds || {};
+    Object.keys(productIds).forEach(k => {
+      let nk = null;
+      if (k === o) nk = n;
+      else if (k.indexOf(o + '｜') === 0) nk = n + k.slice(o.length);
+      if (!nk || productIds[nk]) return;                       // 既に値があるものは触らない
+      productIds[nk] = productIds[k]; delete productIds[k]; ids++;
+    });
+    if (ids) { _pidDupCache = null; try { await saveProductIds(); } catch (_) {} }
+
+    let ledger = false;
+    try {
+      if (settings.sbSecret) {
+        const oid = 'lst|' + o.slice(0, 90), nid = 'lst|' + n.slice(0, 90);
+        const got = await sbGet('listing_catalog', 'select=*&id=eq.' + encodeURIComponent(oid) + '&limit=1');
+        const src = (got || [])[0];
+        if (src) {
+          const cur = ((await sbGet('listing_catalog', 'select=*&id=eq.' + encodeURIComponent(nid) + '&limit=1')) || [])[0];
+          if (!cur) {
+            const row = Object.assign({}, src, { id: nid, parent_sku: n, updated_at: new Date().toISOString() });
+            await sbUpsert('listing_catalog', [row]);
+            try { await sbDelete('listing_catalog', 'id=eq.' + encodeURIComponent(oid)); } catch (_) {}
+            ledger = true;
+          } else {
+            // 既に新SKUの台帳がある＝明細だけ足りない分を寄せる
+            const vs = Array.isArray(cur.variations) ? cur.variations.slice() : [];
+            const have = new Set(vs.map(v => String(v.name || '').toLowerCase().trim()));
+            (src.variations || []).forEach(v => { const k2 = String(v.name || '').toLowerCase().trim(); if (!have.has(k2)) { vs.push(v); have.add(k2); } });
+            const costs = vs.map(v => Number(v.cost) || 0).filter(v => v > 0);
+            await sbUpsert('listing_catalog', [Object.assign({}, cur, { variations: vs, cost_total: costs.length ? Math.min(...costs) : cur.cost_total, updated_at: new Date().toISOString() })]);
+            try { await sbDelete('listing_catalog', 'id=eq.' + encodeURIComponent(oid)); } catch (_) {}
+            ledger = true;
+          }
+          lst._ledgerReload = true; lst._catalogBySku = null; lst._catalogByName = null; rankCost = null;
+        }
+      }
+    } catch (_) {}
+    return { ids, ledger };
+  }
   const IDF_MAX = 4;
   // 🎮 状態の内訳。ゲームは「箱・説明書・本体」の有無で値段が変わるが、
   //   組み合わせを選択肢にすると増えすぎる。チェックで持ち、既存の状態コードを自動で決める。
@@ -24394,14 +24446,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         + targets.map(x => '・' + String(x.name || '').slice(0, 40) + '　' + (x.parent_sku || '(空)') + ' → ' + base).join('\n')
         + '\n\n揃えると、JAN・型番・識別項目・自社コード・出品台帳の原価が①②③で共有されます。よろしいですか？')) return;
       el.textContent = '揃えています…';
-      let ok = 0, ng = [];
+      let ok = 0, moved = 0, ng = [];
       for (const x of targets) {
         try {
           const sid = shopIdOfListing(cc, x.item_id);
           if (!sid) throw new Error('shop_idが分かりません');
           const r2 = await openapiUpdateItem({ shop_id: sid, item_id: x.item_id, sku: base });
           if (!r2 || !r2.ok) throw new Error((r2 && r2.error) || '失敗');
+          const before = String(x.parent_sku || '').trim();
           x.parent_sku = base;
+          const mg = await migrateSkuKeys(before, base);        // JAN・識別・原価を新しいSKUへ引っ越す
+          if (mg.ids || mg.ledger) moved += mg.ids;
           try { await sbPatch('listings', 'item_id=eq.' + x.item_id, { parent_sku: base }); } catch (_) {}
           ok++;
         } catch (e) { ng.push(String(x.name || '').slice(0, 20) + '：' + apiErrJa((e && e.message) || e)); }
@@ -24409,7 +24464,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       _grpMap = null; _pidDupCache = null;
       drawListingStatus();
       if (ng.length) alert('揃えられなかったものがあります。\n\n' + ng.join('\n'));
-      else try { toast('👥 親SKUを ' + ok + '件 揃えました（JAN・識別・原価が共有されます）'); } catch (_) {}
+      else try { toast('👥 親SKUを ' + ok + '件 揃えました' + (moved ? '／JAN・識別を ' + moved + '件 引っ越しました' : '') + '（原価も新しいSKUへ移しました）'); } catch (_) {}
     }));
     // 🧩 識別項目の名前を1つずつ決める
     document.querySelectorAll('#lst-list .lst-idfname').forEach(inp => inp.addEventListener('change', () => {
