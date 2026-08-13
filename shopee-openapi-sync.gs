@@ -207,6 +207,21 @@ function doGet(e) {
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★公開/非公開の切替（unlist_item）。params: shop_id, item_id, unlist(1=非公開/0=公開)。「公開」ボタン＝unlist=0。
+    // 明細SKUを公式APIで保存（?action=update_model_sku&token=&shop_id=&item_id=&model_id=&sku=）
+    //   まとめて送るときは model_id / sku をカンマ区切り（同じ並び）。
+    if (p.action === 'update_model_sku') {
+      var mscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var msout;
+      try {
+        var mswt = P_().getProperty('WRITE_TOKEN');
+        if (!mswt || p.token !== mswt) throw new Error('WRITE_TOKEN不正');
+        var ids = String(p.model_id || '').split(',');
+        var sks = String(p.sku == null ? '' : p.sku).split('\u0001');
+        var lst2 = ids.map(function (id, i) { return { model_id: id, sku: sks[i] != null ? sks[i] : '' }; });
+        msout = updateModelSku_(p.shop_id, p.item_id, lst2);
+      } catch (mserr) { msout = { ok: false, error: String((mserr && mserr.message) || mserr) }; }
+      return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'unlist_item') {
       var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var lo;
@@ -1755,6 +1770,20 @@ function fetchRetry_(url, opts, tries) {
     }
   }
   throw new Error('Shopeeに接続できませんでした（' + String((last && last.message) || last).slice(0, 120) + '）');
+}
+// 明細(model)のSKUを公式APIで書く。Shopee v2 の update_model を使う。
+// ★このエンドポイントが使えるかは実機で確かめる必要があるため、失敗したらShopeeの返答をそのまま返す
+//   （ポータル側でブリッジに回すか、ポータル内だけの値として扱うかを判断できるように）。
+function updateModelSku_(shopId, itemId, list) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!shopId || !itemId) throw new Error('shop_id / item_id 必須');
+  var models = (list || []).map(function (m) {
+    return { model_id: parseInt(m.model_id, 10), model_sku: String(m.sku == null ? '' : m.sku).slice(0, 100) };
+  }).filter(function (m) { return m.model_id; });
+  if (!models.length) throw new Error('対象の明細がありません');
+  var j = callShop_(shopId, '/api/v2/product/update_model', null, 'post', { item_id: itemId, model: models });
+  if (j.error && j.error !== '') throw new Error('update_model ' + j.error + ' ' + (j.message || ''));
+  return { ok: true, n: models.length, response: j.response || null };
 }
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
 function uploadImageUrl_(imageUrl) {
