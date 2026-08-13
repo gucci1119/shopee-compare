@@ -19529,6 +19529,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (lst.colW == null) { try { lst.colW = JSON.parse(localStorage.getItem('smdListColW') || '{}'); } catch (_) { lst.colW = {}; } }
     if (lst.colHide == null) {
       try { const raw = localStorage.getItem('smdListColHide'); lst.colHide = raw ? JSON.parse(raw) : {}; } catch (_) { lst.colHide = {}; }
+      try { const ro = localStorage.getItem('smdListColOrder'); if (ro) lst.colOrder = JSON.parse(ro); } catch (_) {}
       applyColW();
     }
     if (lst.moreFil == null) { try { lst.moreFil = localStorage.getItem('smdListMoreFil') === '1'; } catch (_) { lst.moreFil = false; } }
@@ -22817,7 +22818,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const pk = pidKeyModel(r, m), pv = pidOf(pk);
         const jval = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
         const jdup = jval ? pidDupOf(pv) : null;
-        const cell = (col, style, html) => `<div style="grid-column:${col + 1};${style || ''}">${html}</div>`;
+        const cell = (col, style, html) => `<div style="grid-column:${colPos(col) + 1};${style || ''}">${html}</div>`;
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
           + cell(0, 'text-align:center;color:#c9c9c9', '↳')
           + cell(1, 'background:var(--lst-stick)', m.img
@@ -23024,19 +23025,47 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 列の名前（表示/非表示の切替UI用）。0=国,1=画像,2=商品名,19=操作 は常に表示
   const LCOLNAME = ['国', '画像', '商品名', '状態', 'アカウント', '価格', '在庫', '🛒販売', '👁閲覧', '❤️いいね', '💰実売', '📗原価', 'ROI', '🌏国', 'ブランド', '📁カテゴリ', 'SKU', '📇JAN/型番', '🆔ID', '操作'];
   const LCOL_FIXED = new Set([0, 1, 2, 19]);
+  // 🔀 列の並べ替え。左の固定3列(国・画像・商品名)と右端の操作は動かさない＝固定表示が壊れないようにする。
+  //   幅はCSS変数(--lst-cN)で「N番目の位置」に流し込み、中身は grid-column で位置指定する＝
+  //   グリッドの定義(LGRID)は触らずに順番だけ変えられる。
+  const LCOL_MOVE = LCOLNAME.map((_, i) => i).filter(i => !LCOL_FIXED.has(i));   // 動かせる列
+  function colOrder() {
+    let o = lst.colOrder;
+    if (!Array.isArray(o) || o.length !== LCOLNAME.length || LCOLNAME.some((_, i) => o.indexOf(i) < 0)) {
+      o = LCOLNAME.map((_, i) => i); lst.colOrder = o;
+    }
+    return o;
+  }
+  const colPos = (i) => Math.max(0, colOrder().indexOf(i));      // 列iが何番目に出るか
+  function colOrderSave() {
+    try { localStorage.setItem('smdListColOrder', JSON.stringify(colOrder())); } catch (_) {}
+  }
+  function colMove(i, dir) {
+    const o = colOrder().slice();
+    const at = o.indexOf(i); if (at < 0) return false;
+    // 動かせる列どうしでだけ入れ替える（固定列は飛び越す）
+    let j = at + dir;
+    while (j > 0 && j < o.length && LCOL_FIXED.has(o[j])) j += dir;
+    if (j <= 2 || j >= o.length - 1 || LCOL_FIXED.has(o[j])) return false;
+    const t = o[at]; o[at] = o[j]; o[j] = t;
+    lst.colOrder = o; colOrderSave();
+    return true;
+  }
   // 列幅をCSS変数に流し込む（再描画不要）。非表示の列は幅0にして中身も隠す。
   function applyColW() {
     const cw = lst.colW || {}, hid = lst.colHide || {};
-    LCOLW.forEach((w, i) => {
-      if (i === 2) return;
-      const px = hid[i] ? 0 : (cw[i] != null ? cw[i] : w);
-      document.documentElement.style.setProperty('--lst-c' + i, px + 'px');
+    const ord = colOrder();
+    ord.forEach((i, pos) => {                                   // pos番目のトラック幅＝そこに置く列iの幅
+      if (pos === 2) return;                                    // 3番目(商品名)は 1fr 固定
+      const px = hid[i] ? 0 : (cw[i] != null ? cw[i] : LCOLW[i]);
+      document.documentElement.style.setProperty('--lst-c' + pos, px + 'px');
     });
     // 中身も消す（幅0でも文字がはみ出すため）
     // ★隠した列は幅0になるため、中身が縦に積み上がって行が異常に高くなる（実測884px）。
     //   高さも0に潰して完全に無かったことにする。
     const apply = (grid) => { [...grid.children].forEach((c, i) => {
       if (i >= LCOLW.length) return;
+      { const gc = String(colPos(i) + 1); if (c.style.gridColumn !== gc) c.style.gridColumn = gc; }   // 並べ替え
       if (hid[i]) { c.style.visibility = 'hidden'; c.style.overflow = 'hidden'; c.style.height = '0'; c.style.maxHeight = '0'; c.style.padding = '0'; c.style.margin = '0'; }
       else { c.style.visibility = ''; c.style.height = ''; c.style.maxHeight = ''; c.style.padding = ''; c.style.margin = ''; if (i !== 2) c.style.overflow = ''; }
     }); };
@@ -23064,7 +23093,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const mv = (ev) => {
           const w = Math.max(28, Math.round(w0 + (ev.clientX - x0)));
           if (i === 2) { lst.nameW = w; document.documentElement.style.setProperty('--lst-namew', w + 'px'); const nv = document.getElementById('lst-namewv'); if (nv) nv.textContent = w + 'px'; const nw = document.getElementById('lst-namew'); if (nw) nw.value = Math.min(640, w); }
-          else { lst.colW = lst.colW || {}; lst.colW[i] = w; document.documentElement.style.setProperty('--lst-c' + i, w + 'px'); }
+          else { lst.colW = lst.colW || {}; lst.colW[i] = w; document.documentElement.style.setProperty('--lst-c' + colPos(i), w + 'px'); }
           const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px';
         };
         const up = () => {
@@ -23079,7 +23108,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       h.addEventListener('dblclick', (e) => {
         e.preventDefault(); e.stopPropagation();
         if (i === 2) { lst.nameW = 150; document.documentElement.style.setProperty('--lst-namew', '150px'); }
-        else { lst.colW = lst.colW || {}; delete lst.colW[i]; document.documentElement.style.setProperty('--lst-c' + i, LCOLW[i] + 'px'); }
+        else { lst.colW = lst.colW || {}; delete lst.colW[i]; document.documentElement.style.setProperty('--lst-c' + colPos(i), LCOLW[i] + 'px'); }
         try { localStorage.setItem('smdListColW', JSON.stringify(lst.colW || {})); localStorage.setItem('smdListNameW', String(lst.nameW || 150)); } catch (_) {}
         const wrap = document.querySelector('#lst-scroll > div'); if (wrap) wrap.style.minWidth = LMINW_GET() + 'px';
       });
@@ -23386,7 +23415,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </span>${brands.length ? `<label style="color:#555">ブランド<select id="lst-brand" style="font-size:11px;padding:2px 4px;border:1px solid #ccc;border-radius:6px"><option value="">すべて</option>${brands.map(b => `<option value="${av(b)}" ${lst.brand === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select></label>` : ''}` : ''}
         <span style="width:1px;height:18px;background:#e3e6ec"></span>
         <span style="font-size:10px;color:#7b52c4;font-weight:700">表示する列</span>
-        <span id="lst-colpick" style="display:inline-flex;flex-wrap:wrap;gap:3px;align-items:center">${LCOLNAME.map((n, i) => LCOL_FIXED.has(i) ? '' : `<button class="lst-colt smd-btn" data-i="${i}" style="font-size:10px;padding:1px 6px;${(lst.colHide || {})[i] ? 'opacity:.45;text-decoration:line-through' : 'border-color:#7b52c4;color:#7b52c4;font-weight:700'}">${n}</button>`).join('')}<button class="smd-btn" id="lst-colreset" style="font-size:10px;padding:1px 8px;margin-left:6px" title="消した列を全部戻し、ドラッグで変えた幅も元に戻します">↺ 列をリセット</button></span>
+        <span id="lst-colpick" style="display:inline-flex;flex-wrap:wrap;gap:3px;align-items:center">${colOrder().filter(i => !LCOL_FIXED.has(i)).map(i => { const n = LCOLNAME[i]; return `<span style="display:inline-flex;align-items:center;border:1px solid ${(lst.colHide || {})[i] ? '#dfe3e8' : '#7b52c4'};border-radius:12px;overflow:hidden;background:#fff"><button class="lst-colmv" data-i="${i}" data-d="-1" title="この列を左へ" style="border:none;background:none;color:#8a8f98;font-size:10px;padding:1px 3px;cursor:pointer">◀</button><button class="lst-colt" data-i="${i}" title="クリックで隠す／戻す" style="border:none;background:none;font-size:10px;padding:1px 3px;cursor:pointer;${(lst.colHide || {})[i] ? 'opacity:.45;text-decoration:line-through' : 'color:#7b52c4;font-weight:700'}">${n}</button><button class="lst-colmv" data-i="${i}" data-d="1" title="この列を右へ" style="border:none;background:none;color:#8a8f98;font-size:10px;padding:1px 3px;cursor:pointer">▶</button></span>`; }).join('')}<button class="smd-btn" id="lst-colreset" style="font-size:10px;padding:1px 8px;margin-left:6px" title="消した列を全部戻し、ドラッグで変えた幅も元に戻します">↺ 列と並びをリセット</button></span>
         <span id="lst-fitnote" style="font-size:10px;color:#1a7f37;flex-basis:100%"></span>
         <span class="smd-dim" style="font-size:10px;flex-basis:100%">※列の幅は<b>ヘッダーの境目をドラッグ</b>で変えられます（ダブルクリックで既定に戻す）</span>
       </div>
@@ -23570,6 +23599,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 列の表示/非表示・画面に収める・既定に戻す
     { const cp = document.getElementById('lst-colpick');
       if (cp) cp.addEventListener('click', e => {
+        const mv = e.target.closest('.lst-colmv');
+        if (mv) { if (colMove(+mv.dataset.i, +mv.dataset.d)) drawListingStatus(); return; }   // ◀▶で並べ替え
         const b = e.target.closest('.lst-colt'); if (!b) return;
         const i = +b.dataset.i; lst.colHide = lst.colHide || {};
         if (lst.colHide[i]) delete lst.colHide[i]; else lst.colHide[i] = 1;
@@ -23579,8 +23610,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const cr = document.getElementById('lst-colreset');
       if (cr) cr.addEventListener('click', () => {
         lst.colHide = {}; lst.colW = {}; lst.nameW = 150;
+        lst.colOrder = LCOLNAME.map((_, i) => i);                       // 並び順も既定へ
         document.documentElement.style.setProperty('--lst-namew', '150px');
-        try { localStorage.setItem('smdListColHide', JSON.stringify(lst.colHide)); localStorage.setItem('smdListColW', '{}'); localStorage.setItem('smdListNameW', '150'); } catch (_) {}
+        try { localStorage.setItem('smdListColHide', JSON.stringify(lst.colHide)); localStorage.setItem('smdListColW', '{}'); localStorage.setItem('smdListNameW', '150'); localStorage.removeItem('smdListColOrder'); } catch (_) {}
         drawListingStatus();
       }); }
     // 🔁 似た出品を探す（表示中の出品が対象・同じ国の中だけ）
