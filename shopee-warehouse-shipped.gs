@@ -26,7 +26,9 @@
  * ■ 使い方
  *   1) 既存プロジェクトの末尾にこのブロックを貼る（新規ファイルを作って貼ってもOK）
  *   2) ★まず whsDryRun() を Run（書き込みせず、何件立つか・どの注文かだけログに出す）
- *   3) 納得したら whsSetupTrigger() を Run（毎日1回・21時台）
+ *   3) 納得したら whsSetupTrigger() を Run（毎日2回・18時台と21時台）
+ *      ・18時台＝集荷（17時まで）のあと。今日出した分をその日のうちに反映する
+ *      ・21時台＝取りこぼしの拾い直し
  *
  * ■ 安全のための約束
  *   ・スプレッドシートには一切書き込まない（読むだけ）
@@ -213,12 +215,19 @@ function whsExisting_(sb, keys) {
   return map;
 }
 
-// 毎日1回のトリガーを張る（21時台）
+// 毎日のトリガーを張る（18時台＋21時台）
+// ★18時台をなぜ足したか：集荷は17時まで。21時の1回だけだと「今日出した分」が翌日まで
+//   ポータルに反映されず、まだ家にあるように見えていた（実際は倉庫へ向かっている）。
+//   集荷後の18時台にもう一度読めば、その日のうちに 🚚倉庫へ発送済 が立つ。
+//   ※ 何度走らせても、すでに self_transit_at が入っている注文は触らない＝二重書き込みにならない。
+var WHS_HOURS = [18, 21];
 function whsSetupTrigger() {
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'syncWarehouseShipped') { ScriptApp.deleteTrigger(t); removed++; }
   });
-  ScriptApp.newTrigger('syncWarehouseShipped').timeBased().everyDays(1).atHour(21).create();
-  Logger.log('✅ 毎日21時台のトリガーを作成（既存 ' + removed + ' 件は削除）');
+  WHS_HOURS.forEach(function (h) {
+    ScriptApp.newTrigger('syncWarehouseShipped').timeBased().everyDays(1).atHour(h).create();
+  });
+  Logger.log('✅ 毎日 ' + WHS_HOURS.join('時台 / ') + '時台 のトリガーを作成（既存 ' + removed + ' 件は削除）');
 }
