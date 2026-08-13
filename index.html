@@ -16815,6 +16815,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               <button class="ed-idfpre smd-btn" data-p="game" style="font-size:10px;padding:2px 8px">ゲーム</button>
               <button class="ed-idfpre smd-btn" data-p="medal" style="font-size:10px;padding:2px 8px">メダル</button>
               <button class="ed-idfpre smd-btn" data-p="card" style="font-size:10px;padding:2px 8px">カード</button>
+              <label style="font-size:10.5px;color:#5a6b8c;white-space:nowrap;cursor:pointer" title="ゲームのように「箱・説明書・本体」の有無で値段が変わるものは、これをONにすると&#10;出品一覧の状態欄がチェック式になり、組み合わせから状態（完品／説明書なし／ソフトのみ）が自動で決まります。&#10;メダルやカードのように箱の概念が無いものはOFFのままで。"><input type="checkbox" class="ed-cparts" ${cpartsOf(itemId).length ? 'checked' : ''} style="vertical-align:middle;margin-right:3px">状態を「箱／説明書／本体」で持つ</label>
             </div>
             <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
               <span style="font-size:11px;color:#5a6b8c;white-space:nowrap" title="上の項目を { } で並べると、明細ごとの【自社コード】が自動で作られます。&#10;例) YW-{弾}-{キャラ} → YW-Y01-JIBANYAN&#10;重複チェックはこのコード＋状態で見ます。">自社コードの規則</span>
@@ -17523,6 +17524,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             mm.at = Date.now(); saveListingMeta();
           };
           body.querySelectorAll('.ed-idf').forEach(x => x.addEventListener('change', () => { saveDef(); say('保存しました。明細表の列は、いったん閉じて開き直すと出ます'); }));
+          { const cpEl = body.querySelector('.ed-cparts');
+            if (cpEl) cpEl.addEventListener('change', () => {
+              lstMeta = lstMeta || {}; const mm = lstMeta[itemId] || (lstMeta[itemId] = {});
+              if (cpEl.checked) mm.cparts = CPART_PRESET.slice(); else delete mm.cparts;
+              mm.at = Date.now(); saveListingMeta();
+              say(cpEl.checked ? '出品一覧の状態欄が「箱／説明書／本体」のチェックになります' : '状態欄をプルダウンに戻しました');
+            }); }
           body.querySelectorAll('.ed-idfpre').forEach(b => b.addEventListener('click', () => {
             const pre = IDF_PRESETS[b.dataset.p] || [];
             body.querySelectorAll('.ed-idf').forEach((x, i) => { x.value = pre[i] || ''; });
@@ -22622,6 +22630,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   カテゴリで必要な軸が違うので、固定の列は作らない（使わない列が並んで邪魔になるだけ）。
   //   値は明細ごとに持ち、規則（例 YW-{弾}-{キャラ}）に流し込んで【自社コードを自動生成】する。
   const IDF_MAX = 4;
+  // 🎮 状態の内訳。ゲームは「箱・説明書・本体」の有無で値段が変わるが、
+  //   組み合わせを選択肢にすると増えすぎる。チェックで持ち、既存の状態コードを自動で決める。
+  //   ※このカタログで使わないなら定義しない＝欄も出ない（メダルやカードには箱の概念が無い）。
+  const CPART_PRESET = ['箱', '説明書', '本体'];
+  const cpartsOf = (itemId) => { const a = (metaOf(itemId) || {}).cparts; return Array.isArray(a) ? a.filter(Boolean).slice(0, 3) : []; };
+  function condFromParts(cp) {
+    const has = (k) => !!(cp || {})[k];
+    if (!has('本体')) return has('箱') ? 'boxonly' : '';
+    if (has('箱') && has('説明書')) return 'cib';
+    if (has('箱')) return 'nomanual';
+    return 'loose';
+  }
   const idfOf = (itemId) => { const a = (metaOf(itemId) || {}).idf; return Array.isArray(a) ? a.slice(0, IDF_MAX) : []; };
   const idfNames = (itemId) => idfOf(itemId).map(x => String(x || '').trim()).filter(Boolean);
   const idfCode = (rule, vals) => {
@@ -22923,7 +22943,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               (isSingle ? '<span class="smd-dim">（この単品）</span>'
                 : `<span title="${av(m.n || '')}" style="display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom">${esc(m.n || '（既定）')}</span><span class="smd-dim" style="font-size:9px;margin-left:5px">${(m.n || '').length}字</span>`)
               + `<button class="lst-toord" data-q="${av((isSingle ? r.name : (m.n || r.name)) || '')}" title="この明細が売れた注文を📦注文管理で見る" style="border:none;background:none;color:#3b5bdb;cursor:pointer;font-size:10px;padding:0 3px">🧾</button>`)
-          + cell(3, '', `<select class="lst-mcond" data-k="${av(pk)}" title="同じソフトでも、箱や説明書の有無で別物です。JAN/型番は【作品そのもの】、この欄は【状態】。重複の判定は「JAN＋状態」がどちらも同じときだけ効きます。" style="width:100%;font-size:9.5px;padding:2px 3px;border:1px solid #e3e6ec;border-radius:6px;background:${pv.cond ? '#f3f8ff' : '#fff'};color:${pv.cond ? '#1565c0' : '#8a8f98'}">${PID_COND_OPTS.map(o => `<option value="${o[0]}" ${pv.cond === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>`)
+          + cell(3, '', (cpartsOf(r.item_id).length
+              ? cpartsOf(r.item_id).map(k => `<label style="display:block;font-size:9.5px;color:#1565c0;white-space:nowrap;cursor:pointer" title="この明細に「${av(k)}」が付いているか。&#10;組み合わせから状態（完品／説明書なし／ソフトのみ）が自動で決まります"><input type="checkbox" class="lst-cpart" data-k="${av(pk)}" data-p="${av(k)}" ${((pv.cp || {})[k] ? 'checked' : '')} style="vertical-align:middle;margin-right:2px">${esc(k)}</label>`).join('')
+                + `<div class="smd-dim" style="font-size:9px">${esc(pidCondLabel(pv.cond) || '—')}</div>`
+              : `<select class="lst-mcond" data-k="${av(pk)}" title="同じソフトでも、箱や説明書の有無で別物です。JAN/型番は【作品そのもの】、この欄は【状態】。重複の判定は「JAN＋状態」がどちらも同じときだけ効きます。" style="width:100%;font-size:9.5px;padding:2px 3px;border:1px solid #e3e6ec;border-radius:6px;background:${pv.cond ? '#f3f8ff' : '#fff'};color:${pv.cond ? '#1565c0' : '#8a8f98'}">${PID_COND_OPTS.map(o => `<option value="${o[0]}" ${pv.cond === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>`))
           + cell(5, 'text-align:right;white-space:nowrap', canEdit
               ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:70px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? fmtJpy(Math.round(m.price * rg.rateJpy)) : ''}</div>`
               : `<b>${cur}${lfmt(m.price)}</b>`)
@@ -23983,6 +24006,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }
       });
     });
+    // 🎮 状態の内訳（箱・説明書・本体）。チェックから状態を自動で決めて保存する。
+    document.querySelectorAll('#lst-list .lst-cpart').forEach(el => el.addEventListener('change', () => {
+      const k = el.dataset.k, part = el.dataset.p; if (!k || !part) return;
+      productIds = productIds || {};
+      const prev = productIds[k] || {};
+      const cp = Object.assign({}, prev.cp || {});
+      if (el.checked) cp[part] = 1; else delete cp[part];
+      const cond = condFromParts(cp);
+      productIds[k] = Object.assign({}, prev, { cp: cp, cond: cond, at: Date.now() });
+      _pidDupCache = null; saveProductIds();
+      // 同じキーが画面に複数出ていれば揃える＋自動で決まった呼び名を出す
+      document.querySelectorAll('#lst-list .lst-cpart').forEach(o => { if (o.dataset.k === k && o.dataset.p === part) o.checked = el.checked; });
+      const box = el.closest('div'); const lab = box && box.querySelector('.smd-dim');
+      if (lab) lab.textContent = pidCondLabel(cond) || '—';
+      try { toast('状態: ' + (pidCondLabel(cond) || '—')); } catch (_) {}
+    }));
     // 🧩 識別項目の値（一覧から直接）。入れたら自社コードも作り直す。
     document.querySelectorAll('#lst-list .lst-idfv').forEach(inp => inp.addEventListener('change', () => {
       const k = inp.dataset.k, f = inp.dataset.f; if (!k || !f) return;
