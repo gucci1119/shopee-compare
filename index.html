@@ -19243,7 +19243,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ===== 一括編集の公式API優先ヘルパー（shop_id判明+writeToken→公式API、無ければブリッジに自動フォールバック） =====
   function shopIdOfListing(cc, itemId) { const row = ((lst.byCc && lst.byCc[cc]) || []).find(x => x.item_id === itemId); return row && row.shop_id ? row.shop_id : null; }
   // 1商品だけをライブ最新化（全件取り直さず、公式API get_model_list でその商品の在庫・価格だけ取り直す）
-  async function refreshOneListing(cc, itemId) {
+  // ※旧版。同名の関数が2つあり、後から定義した方(下)に上書きされていて【こちらは呼ばれていなかった】。
+  //   在庫・価格しか直さない簡易版なので、名前を変えて残すだけにする（呼び出しは新しい方へ）。
+  async function refreshOneListingStock(cc, itemId) {
     const row = ((lst.byCc && lst.byCc[cc]) || []).find(x => String(x.item_id) === String(itemId));
     if (!row) { toast('対象の商品が見つかりません', true); return; }
     itemId = row.item_id;   // DBの型（数値）に揃える
@@ -22710,10 +22712,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // ★1カタログだけShopeeから読み直してDB(listings)と画面に反映する。編集直後に自動で走る。
   //   全件同期(最新に更新)を待たずに次のカタログへ移れるようにするための仕組み。
+  // ★カタログを直したら、その1件だけShopeeから読み直して画面とDBに反映する。
+  //   以前は「書き込みキーが無い」「shop_idが分からない」だけで【黙って何もしない】ため、
+  //   画面が古いままなのに理由も出ず、結局🔄を押す羽目になっていた（本人指摘 2026-08-13）。
+  //   → shop_idは設定から補い、DBに書けなくても【画面だけは最新にする】。失敗したら理由を出す。
   async function refreshOneListing(cc, itemId, shopId) {
-    if (!settings.sbSecret || !shopId) return;
+    shopId = shopId || (settings.shopIds || {})[cc];
+    if (!shopId) { try { toast('この国のshop_idが分からないため自動更新できません（🔄最新に更新で入ります）', true); } catch (_) {} return; }
     let d;
-    try { d = await openapiGetItemInfo(shopId, itemId, 45000); } catch (_) { return; }
+    try { d = await openapiGetItemInfo(shopId, itemId, 45000); }
+    catch (e) { try { toast('自動更新できませんでした: ' + apiErrJa((e && e.message) || e), true); } catch (_) {} return; }
     const info = (d && (d.info || d.item || d)) || {};
     const ms = (d && (d.models || d.model)) || [];
     const models = (ms || []).map(m => ({ id: m.model_id || m.id, n: m.name || m.n || '', sku: m.sku || '',
@@ -22731,13 +22739,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     if (info.weight != null) row.weight = parseFloat(info.weight) || null;
     if (info.video_info) { row.has_video = !!(info.video_info || []).length; row.video_url = ((info.video_info || [])[0] || {}).video_url || null; }
-    try { await sbUpsert('listings', [row]); } catch (_) { return; }
+    // DBに書けない端末（書き込みキー未設定）でも、画面だけは最新にする
+    if (settings.sbSecret) { try { await sbUpsert('listings', [row]); } catch (_) {} }
     // 画面のその行だけ差し替えて再描画（全件取り直さない）
     try {
       const cur = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(itemId));
       if (cur) Object.assign(cur, row);
-      if (lst.tab === 'status') drawListingStatus();
-      toast('✓ このカタログを最新にしました（全体の更新を待たずに次へ進めます）');
+      if (typeof rankCost !== 'undefined') rankCost = null;
+      if (document.getElementById('lst-list')) drawListingStatus();
+      toast('✓ このカタログを最新にしました' + (settings.sbSecret ? '' : '（この端末は表示のみ。DBは次の自動同期で揃います）'));
     } catch (_) {}
   }
   function listingCardHtml(r) {
@@ -23646,7 +23656,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       renderListPage();
       if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました（タイトルが各国で異なるため直接まとめられませんでした。該当カタログの🌍各国まとめ編集から操作してください）');
     }));
-    document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
+    document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
     // 📝メモ（入力＝再描画せず保存＝フォーカス維持）／⚠️在庫0固定（トグル＝保存して再描画で赤帯反映）
     // ---- 🛠 まとめて編集：この一覧の絞り込み結果からそのまま対象を選ぶ ----
     // ★別タブで似た絞り込みを作り直すより、既にある強力な絞り込み（空き枠・明細数・シリーズ・同名複数…）を
