@@ -22805,6 +22805,43 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   例) 妖怪メダル＝弾/キャラ/仕様、ゲーム＝機種/作品/版、カード＝弾/番号/キャラ/レア度。
   //   カテゴリで必要な軸が違うので、固定の列は作らない（使わない列が並んで邪魔になるだけ）。
   //   値は明細ごとに持ち、規則（例 YW-{弾}-{キャラ}）に流し込んで【自社コードを自動生成】する。
+  // 👥 カタログ群：Shopeeのバリエは1カタログ100件までなので、同じ商品を ①②③ に割って出している。
+  //   タイトル末尾の丸数字・(2)・Part2・No.2 などを落とせば、同じ群だと分かる。
+  //   手で決めたいときは lstMeta[itemId].grp が優先（自動判定が効かない付け方のとき用）。
+  const GRP_MARK = /[\s　]*(?:[①-⑳]|[❶-❿]|[（(【\[]?\s*(?:no\.?|part|vol\.?|その|第)?\s*([0-9０-９]{1,2})\s*[）)】\]]?)\s*$/i;
+  function grpAuto(name) {
+    let t = String(name || '').trim();
+    if (!t) return '';
+    const m = t.match(GRP_MARK);
+    if (m && (m[0] || '').trim()) t = t.slice(0, t.length - m[0].length).trim();
+    return t.replace(/[\s　]+/g, ' ').toLowerCase();
+  }
+  const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+  function grpNo(name) {                                  // その群の何番目か（分からなければ0）
+    const m = String(name || '').trim().match(GRP_MARK);
+    if (!m) return 0;
+    const c = (m[0] || '').trim();
+    const ci = CIRCLED.indexOf(c);
+    if (ci >= 0) return ci + 1;
+    const d = (m[1] || '').replace(/[０-９]/g, x => String.fromCharCode(x.charCodeAt(0) - 0xFEE0));
+    return parseInt(d, 10) || 0;
+  }
+  const grpOf = (r) => String((metaOf(r.item_id) || {}).grp || '').trim().toLowerCase() || grpAuto(r.name);
+  // いま読み込んでいる出品から「群 → 同じ群の出品たち」を作る（同じ国・同じアカウントの中で数える）
+  let _grpMap = null, _grpAt = 0;
+  function grpIndex() {
+    if (_grpMap && Date.now() - _grpAt < 4000) return _grpMap;
+    const m = new Map();
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const g = grpOf(r); if (!g) return;
+      const k = cc + '|' + g;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }));
+    m.forEach(v => v.sort((a, b) => (grpNo(a.name) || 99) - (grpNo(b.name) || 99)));
+    _grpMap = m; _grpAt = Date.now();
+    return m;
+  }
   const IDF_MAX = 4;
   // 🎮 状態の内訳。ゲームは「箱・説明書・本体」の有無で値段が変わるが、
   //   組み合わせを選択肢にすると増えすぎる。チェックで持ち、既存の状態コードを自動で決める。
@@ -23187,7 +23224,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <img src="${IMG_CDN}${esc(r.image)}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#eee;${LSTKL[1]}" loading="lazy" onerror="this.style.opacity=.15">
         <div style="min-width:0;${LSTKL[2]}">
           <div style="font-size:12px;line-height:1.3">${editUrl !== '#' ? `<a href="${editUrl}" target="_blank" class="lst-nm" title="${av(r.name || '')}｜クリックでShopee編集ページを開く">${esc(r.name)}</a>` : `<span class="lst-nm" style="color:#333;cursor:default" title="${av(r.name || '')}">${esc(r.name)}</span>`}<span class="smd-dim" style="font-size:9px;margin-left:5px;font-weight:400">${(r.name || '').length}字</span></div>
-          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${varCount(r) ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600" title="明細 ${varCount(r)}件／上限${MODEL_CAP}件・あと${Math.max(0, MODEL_CAP - varCount(r))}件">${opened ? '▼' : '▶'} ${varCount(r)}バリエーション<span style="color:${MODEL_CAP - varCount(r) <= 0 ? '#d93025' : (MODEL_CAP - varCount(r) <= 10 ? '#e8710a' : '#1a7f37')};font-weight:700"> 🈳${Math.max(0, MODEL_CAP - varCount(r))}</span></span>`
+          <div style="font-size:11px;color:#777;margin-top:2px">${statusBadge} ${watchBadgeHtml(r)} ${(() => {
+            // 👥 100件上限で①②に割ったカタログを「仲間」として見せる
+            const g = grpOf(r); if (!g) return '';
+            const sib = grpIndex().get(r.cc + '|' + g) || [];
+            if (sib.length < 2) return '';
+            const idx = sib.findIndex(x => String(x.item_id) === String(r.item_id));
+            const no = grpNo(r.name) || (idx + 1);
+            return `<span class="lst-grp" data-cc="${av(r.cc)}" data-g="${av(g)}" title="同じ商品を100件の上限で分けたカタログの仲間です（全${sib.length}枚）。&#10;クリックすると、この仲間だけに絞り込みます。&#10;仲間: ${av(sib.map(x => x.name).join(' / ').slice(0, 300))}" style="background:#eef3fb;color:#3b5bdb;border:1px solid #cdd7ea;border-radius:4px;padding:1px 5px;font-size:9.5px;font-weight:700;cursor:pointer;margin-right:3px">👥 ${no}/${sib.length}枚</span>`;
+          })()} ${varCount(r) ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#7b52c4;font-weight:600" title="明細 ${varCount(r)}件／上限${MODEL_CAP}件・あと${Math.max(0, MODEL_CAP - varCount(r))}件">${opened ? '▼' : '▶'} ${varCount(r)}バリエーション<span style="color:${MODEL_CAP - varCount(r) <= 0 ? '#d93025' : (MODEL_CAP - varCount(r) <= 10 ? '#e8710a' : '#1a7f37')};font-weight:700"> 🈳${Math.max(0, MODEL_CAP - varCount(r))}</span></span>`
             : (r.model_count ? `<span class="lst-exp" data-k="${esc(key)}" style="cursor:pointer;color:#8a8f98;font-weight:600" title="バリエーションなし（明細に名前が付いていない＝単品）">${opened ? '▼' : '▶'} 単品</span>` : '')}</div>
           <div style="font-size:10px;color:#98a2b3;margin-top:1px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
             <span class="smd-copy" data-copy="${r.item_id}" title="ShopeeのItem ID（クリックでコピー）。同じタイトルが並ぶ時の見分けに" style="cursor:pointer;white-space:nowrap">🆔${r.item_id}</span>
@@ -24247,6 +24292,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }
       });
     });
+    // 👥 群バッジ：押すと同じ群（①②③）だけに絞る
+    document.querySelectorAll('#lst-list .lst-grp').forEach(el => el.addEventListener('click', () => {
+      const sib = grpIndex().get(el.dataset.cc + '|' + el.dataset.g) || [];
+      if (!sib.length) return;
+      lst.search = sib.map(x => (x.name || '').trim()).map(n => grpAuto(n)).filter(Boolean)[0] || '';
+      lst.page = 1;
+      const box = document.getElementById('lst-search'); if (box) box.value = lst.search;
+      drawListingStatus();
+      try { toast('👥 この群の ' + sib.length + '枚に絞り込みました（検索を消すと戻ります）'); } catch (_) {}
+    }));
     // 🧩 識別項目の名前を1つずつ決める
     document.querySelectorAll('#lst-list .lst-idfname').forEach(inp => inp.addEventListener('change', () => {
       const id = inp.dataset.id, k = +inp.dataset.i;
