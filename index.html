@@ -18354,7 +18354,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           try {
             // ★先に「しごと」を登録してから上げる。逆だと、アップロード中（30MBなら数十秒）は
             //   しごとセンターに何も出ず「動いていない」ように見える。
-            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）', { cc: cc, item_id: itemId });
+            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）', { cc: cc, item_id: itemId, shop_id: (typeof shopIdOfListing === 'function' ? shopIdOfListing(cc, itemId) : null) });
             JOB_T0[key] = Date.now();
             jobPollStart();
             try { await sbUpsert('app_kv', [{ k: key, v: { kind: 'video', title: '商品動画の設定', sub: cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24), status: 'run', pct: 5, step: 'この端末から動画を送っています', created_at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); } catch (_) {}
@@ -18476,7 +18476,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (msgI) { msgI.style.color = '#3b5bdb'; msgI.innerHTML = '🗂 <b>しごと</b>に積みました（右下で進み具合が見られます）。この画面は閉じて大丈夫です'; }
           (async () => {
             // ★状態はDBに置く＝ページをリロードしても走り続け、進み具合も戻ってくる
-            const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚' + (nos.length ? '・選択分' : '') + '）', { cc: cc, item_id: itemId });
+            const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚' + (nos.length ? '・選択分' : '') + '）', { cc: cc, item_id: itemId, shop_id: (typeof shopIdOfListing === 'function' ? shopIdOfListing(cc, itemId) : null) });
             JOB_T0[key] = Date.now();
             JOB_MIRROR[key] = (v) => {
               if (!msgI || !msgI.isConnected) return;
@@ -18566,7 +18566,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
               // ③ ここから先はDB管理のしごとに引き継ぐ＝リロードしても続く
               ctx.progress(100, '準備完了');
-              const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）', { cc: cc, item_id: itemId });
+              const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）', { cc: cc, item_id: itemId, shop_id: (typeof shopIdOfListing === 'function' ? shopIdOfListing(cc, itemId) : null) });
               JOB_T0[key] = Date.now();
               JOB_MIRROR[key] = (v) => {
                 if (!go || !go.isConnected) return;
@@ -19331,7 +19331,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const kv2 = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
             try {
               await sbUpsert('app_kv', [{ k: kv2, v: { items: items2 }, updated_at: new Date().toISOString() }]);
-              const key2 = await jobRemoteCreate('addvar', '明細をまとめて追加', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items2.length + '件）', { cc: cc, item_id: itemId });
+              const key2 = await jobRemoteCreate('addvar', '明細をまとめて追加', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items2.length + '件）', { cc: cc, item_id: itemId, shop_id: (typeof shopIdOfListing === 'function' ? shopIdOfListing(cc, itemId) : null) });
               JOB_T0[key2] = Date.now();
               JOB_MIRROR[key2] = (v) => {
                 // ★カタログを取り直すのは【ボタンが画面に残っているかに関係なく】必ずやる。
@@ -24324,8 +24324,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   画面が古いままなのに理由も出ず、結局🔄を押す羽目になっていた（本人指摘 2026-08-13）。
   //   → shop_idは設定から補い、DBに書けなくても【画面だけは最新にする】。失敗したら理由を出す。
   async function refreshOneListing(cc, itemId, shopId) {
-    shopId = shopId || (settings.shopIds || {})[cc];
-    if (!shopId) { try { toast('この国のshop_idが分からないため自動更新できません（🔄最新に更新で入ります）', true); } catch (_) {} return; }
+    // ★shop_id は【その出品の行が持っている】のが一番確か（アカウントが複数あるので settings.shopIds は
+    //   最後に使った1つしか持っていない）。渡ってこなかった時はここで拾う。
+    //   これを見ていなかったため「この国のshop_idが分からないため自動更新できません」で止まっていた（2026-08-14）。
+    if (!shopId) {
+      const row0 = ((lst.byCc && lst.byCc[cc]) || []).find(x => String(x.item_id) === String(itemId));
+      shopId = (row0 && row0.shop_id) || (settings.shopIds || {})[cc] || (state.orders && state.orders.presumedShop && state.orders.presumedShop[cc]) || null;
+    }
+    if (!shopId) { try { toast('この出品のshop_idが分かりません（🔄最新に更新で入ります）', true); } catch (_) {} return; }
     let d;
     try { d = await openapiGetItemInfo(shopId, itemId, 45000); }
     catch (e) { try { toast('自動更新できませんでした: ' + apiErrJa((e && e.message) || e), true); } catch (_) {} return; }
