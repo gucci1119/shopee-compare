@@ -11342,13 +11342,17 @@
         }
       }
     }
-    // 仕入日から推定（「この日から」が入っているものだけ・日付が新しい順に最初に該当したもの）
+    // 仕入日から推定。「この日から」が新しい順に最初に該当したもの。
+    // ★どれにも該当しない＝切替日より前 → 「この日から」が空の届け先（＝移転前からの住所）に落とす。
+    //   ここを「対象外」にすると、移転日より前の仕入れが全部『不明』になる（2026-08-14 実際にそうなった）。
     const pd = String(invPurDate(r) || '').slice(0, 10);
+    const dated = list.filter(a => a.from).slice().sort((x, y) => String(y.from).localeCompare(String(x.from)));
     if (pd) {
-      const dated = list.filter(a => a.from).slice().sort((x, y) => String(y.from).localeCompare(String(x.from)));
       const hit = dated.find(a => pd >= String(a.from).slice(0, 10));
       if (hit) return { a: hit, why: '仕入日 ' + pd.replace(/-/g, '/') + '（' + String(hit.from).replace(/-/g, '/') + 'から）', sure: false };
     }
+    const base = list.find(a => !a.from);
+    if (base) return { a: base, why: pd ? ('仕入日 ' + pd.replace(/-/g, '/') + (dated.length ? '（' + String(dated[dated.length - 1].from).replace(/-/g, '/') + 'より前）' : '') ) : '切替日より前の仕入れ' , sure: false };
     return null;
   }
   const ADDR_COLORS = ['#1565c0', '#2e7d32', '#7b52c4', '#e65100', '#b3261e'];
@@ -11357,17 +11361,23 @@
   function addrBadge(r) {
     if (!(delAddrs || []).length) return '';
     const h = addrOf(r);
-    if (!h) return '<span class="smd-dim" style="font-size:10.5px" title="追跡の地名にも判定キーワードが当たらず、仕入日も「この日から」の範囲に入りません">🏢 不明</span>';
+    if (!h) return '<span class="smd-dim" style="font-size:10.5px" title="追跡の地名にも判定キーワードが当たらず、仕入日も「この日から」の範囲に入りません（「この日から」が空の届け先を1つ作ると、それ以前は全部そこになります）">🏢 不明</span>';
     const c = addrColor(h.a);
     const full = [h.a.zip ? '〒' + h.a.zip : '', h.a.addr || ''].filter(Boolean).join(' ');
+    // ★「?」は「追跡で確定できたはずなのに、まだ確定していない」ときだけ付ける。
+    //   同じ市内の移転（番地だけ違う）のように**追跡では原理的に区別できない**場合は、
+    //   全部に「?」が付いて意味を失うので付けない（判定キーワードが1つも無い＝その状態）。
+    const anyKw = (delAddrs || []).some(a => String(a.kw || '').trim());
     return `<span style="font-size:10.5px;color:${c};font-weight:700;white-space:nowrap;border:1px ${h.sure ? 'solid' : 'dashed'} ${c}44;border-radius:9px;padding:1px 6px" ` +
-      `title="${esc(h.a.name + (full ? '\n' + full : '') + '\n根拠：' + h.why + (h.sure ? '（追跡の地名と一致＝確定）' : '（仕入日からの推定）'))}">🏢 ${esc(h.a.name)}${h.sure ? '' : '?'}</span>`;
+      `title="${esc(h.a.name + (full ? '\n' + full : '') + '\n根拠：' + h.why + (h.sure ? '（追跡の地名と一致＝確定）' : '（仕入日からの推定）'))}">🏢 ${esc(h.a.name)}${(!h.sure && anyKw) ? '?' : ''}</span>`;
   }
   // お知らせ等の1行テキスト用（バッジではなく文字で「🏢 旧事務所」）。未登録・判定不能なら空文字
   function addrText(r) {
     if (!(delAddrs || []).length) return '';
     const h = addrOf(r);
-    return h ? '🏢 ' + h.a.name + (h.sure ? '' : '?') : '';
+    if (!h) return '';
+    const anyKw = (delAddrs || []).some(a => String(a.kw || '').trim());
+    return '🏢 ' + h.a.name + ((!h.sure && anyKw) ? '?' : '');
   }
   // 🏢届け先パネル：件数サマリ（＝押さなくても最初から見える）＋登録フォーム
   //   未登録のときは説明つきで開いた状態、登録済みなら「✎届け先を編集」で開く（補足なので畳んでよい）。
