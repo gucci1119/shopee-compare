@@ -112,6 +112,21 @@ function doGet(e) {
       } catch (lerr) { lout = { ok: false, error: String((lerr && lerr.message) || lerr) }; }
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // 返品リクエストをその場で取り込む（ポータルの「まとめて更新」用）。
+    // ★定例の syncReturnsAll() は bgAllowed_() で手動枠を守るため**黙ってスキップ**することがある。
+    //   これは人が押した手動更新なので、枠を気にせず syncReturnsRange_ を直接叩く。
+    if (p.action === 'run_returns') {
+      var rtcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rtout;
+      try {
+        var rtwt = P_().getProperty('WRITE_TOKEN');
+        if (!rtwt || p.token !== rtwt) throw new Error('WRITE_TOKEN不正');
+        var rtn = syncReturnsRange_(45);
+        ufPersist_();
+        rtout = { ok: true, action: 'run_returns', rows: rtn };
+      } catch (rterr) { rtout = { ok: false, error: String((rterr && rterr.message) || rterr) }; }
+      return ContentService.createTextOutput(rtcb + '(' + JSON.stringify(rtout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★いま作ったばかりの出品を、その場で取り込む：listings_now
     //   定例のRRは【30分に1店】＝1店ぶんが回ってくるのに数時間かかる。増分(changed)も最短2時間おき。
     //   そのため「1分前に作った出品がポータルに出てこない」が起きる。ここは
