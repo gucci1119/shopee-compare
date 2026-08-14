@@ -3091,6 +3091,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "⚠ 中身なし": "⚠ Empty slot",
     "⚠ 中身のない明細 ": "⚠ Empty variation slots ",
     "🆕 新しいバージョンがあります": "🆕 A new version is available",
     "今すぐ更新": "Update now",
@@ -14502,6 +14503,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '👻 <b>中身のない明細も一覧に行として出す</b>。存在するのに一覧から消していたため、✎カタログ編集やShopeeと番号がずれて見え、しかも原因（枠だけ残っている）が画面から分からなかった。<b>枠を基準に並べ、中身が無い枠は「⚠ 中身なし」の行</b>として出す。',
       '🔑 <b>JAN・型番・自社コード・識別項目の鍵を「変わらないID」に変更</b>。これまで鍵が<b>親SKU</b>／<b>親SKU｜明細名</b>だったため、<b>親SKUや明細名を変えた瞬間に、調べて入力した値が画面から消えて見えていた</b>（実際に発生）。今後は `item_id` / `model_id` を鍵にする。<b>古い鍵も読み、見つけたら新しい鍵へ写す</b>（古い方は消さない）。親SKUが変わって古い鍵すら当たらない分は<b>明細名で探して拾い直す</b>（同名が複数ある時は拾わない）。',
       '🔢 <b>展開した明細の番号を「枠の番号そのまま」に</b>。詰めて振り直していたため、「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が分からなくなっていた。<b>欠番＝そこに中身のない枠がある</b>と読めるようにした。',
       '🔢 <b>展開した明細に番号を出し、Shopeeと同じ並び順に</b>。これまでは `↳` だけで番号が無く、しかも並びが <b>get_model_list が返すモデル配列の順</b>のままだったので、✎カタログ編集やShopeeの商品ページと順番が違って見えていた。<b>オプションの並び順（tier_index）で並べ、1・2・3… を表示</b>する。',
@@ -24392,6 +24394,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
     if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
     if (optCount) row.opt_count = optCount;
+    // ★枠（オプション）の名前も持つ。中身が無い枠も一覧に行として出すため（存在するのに消すと番号がずれて見える）
+    { const ov = (((pi.std_tier_variation_list || [])[0] || {}).value_list || []).map(o => String(o.custom_value || ''));
+      if (ov.length) row.opts = ov; }
     if (models.length) {
       row.models = models; row.model_count = models.length;
       row.stock = models.reduce((a, m) => a + (Number(m.stock) || 0), 0);
@@ -24481,13 +24486,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // ★並び順は【オプションの順】に揃える。get_model_list が返すモデル配列の順のままだと
         //   ✎カタログ編集やShopeeの商品ページと並びが違って見え、何番目の明細か分からなかった（2026-08-14）。
         //   ti（tier_index）を持っている行はそれで並べ、無ければ元の順のまま。
-        editModels.map((m, _i) => ({ m, _i })).sort((a, b) => {
-          const ta = a.m.ti, tb = b.m.ti;
-          if (ta == null && tb == null) return a._i - b._i;
-          if (ta == null) return 1;
-          if (tb == null) return -1;
-          return ta - tb;
-        }).map(({ m }, _n) => {
+        (() => {
+          // ★並べる基準は【枠(オプション)】。中身(モデル)だけを並べると、中身のない枠が消えて
+          //   ✎カタログ編集やShopeeと番号がずれ、しかも「存在するのに見えない」状態になる（2026-08-14）。
+          const sorted = editModels.map((m, _i) => ({ m, _i })).sort((a, b) => {
+            const ta = a.m.ti, tb = b.m.ti;
+            if (ta == null && tb == null) return a._i - b._i;
+            if (ta == null) return 1; if (tb == null) return -1;
+            return ta - tb;
+          }).map(x => x.m);
+          const optNames = (!isSingle && Array.isArray(r.opts) && r.opts.length) ? r.opts : null;
+          if (!optNames) return sorted;
+          const byTi = new Map(); sorted.forEach(m => { if (m.ti != null) byTi.set(m.ti, m); });
+          const rows = optNames.map((n, i) => byTi.get(i) || { id: null, n: n, ghost: true, ti: i, price: 0, stock: 0, sku: '', img: '', sold: 0 });
+          sorted.forEach(m => { if (m.ti == null) rows.push(m); });   // 枠に結びつかない分は後ろへ
+          return rows;
+        })().map((m, _n) => {
         // ★番号は【枠(オプション)の番号】をそのまま出す。詰めて振り直すと、
         //   「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が見えなくなる（2026-08-14）。
         //   欠番＝そこに中身のない枠がある、と分かるようにする。
@@ -24498,6 +24512,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const jval = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
         const jdup = jval ? pidDupOf(pv) : null;
         const cell = (col, style, html) => `<div style="grid-column:${colPos(col) + 1};${style || ''}">${html}</div>`;
+        // ★中身のない枠：価格も在庫も無いので入力欄は出さず、行として存在だけ示す（Shopee側では保存を止める原因）
+        if (m.ghost) {
+          return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px;background:#fff8f6">`
+            + cell(0, 'text-align:center;color:#b3261e;font-size:10px;font-weight:700;' + LSTKL[0], _no)
+            + cell(1, LSTKL[1], '<span style="color:#c9c9c9">—</span>')
+            + cell(2, LSTKL[2] + ';min-width:0', `<span title="${av(m.n || '')}" style="color:#b3261e">${esc(m.n || '')}</span>`
+                + ' <span style="background:#fdecea;color:#b3261e;border:1px solid #f5c2c2;border-radius:8px;padding:0 6px;font-size:10px;font-weight:700;white-space:nowrap" '
+                + 'title="この明細は枠だけあって中身（価格・在庫）がありません。Shopee側では価格・重量が空の行になり、この商品はどの保存も通りません。✎カタログ編集の🧹で掃除できます">⚠ 中身なし</span>')
+            + `</div>`;
+        }
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
           + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;' + LSTKL[0], isSingle ? '↳' : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'))
           + cell(1, LSTKL[1], m.img
