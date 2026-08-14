@@ -14502,6 +14502,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🔑 <b>JAN・型番・自社コード・識別項目の鍵を「変わらないID」に変更</b>。これまで鍵が<b>親SKU</b>／<b>親SKU｜明細名</b>だったため、<b>親SKUや明細名を変えた瞬間に、調べて入力した値が画面から消えて見えていた</b>（実際に発生）。今後は `item_id` / `model_id` を鍵にする。<b>古い鍵も読み、見つけたら新しい鍵へ写す</b>（古い方は消さない）。親SKUが変わって古い鍵すら当たらない分は<b>明細名で探して拾い直す</b>（同名が複数ある時は拾わない）。',
+      '🔢 <b>展開した明細の番号を「枠の番号そのまま」に</b>。詰めて振り直していたため、「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が分からなくなっていた。<b>欠番＝そこに中身のない枠がある</b>と読めるようにした。',
       '🔢 <b>展開した明細に番号を出し、Shopeeと同じ並び順に</b>。これまでは `↳` だけで番号が無く、しかも並びが <b>get_model_list が返すモデル配列の順</b>のままだったので、✎カタログ編集やShopeeの商品ページと順番が違って見えていた。<b>オプションの並び順（tier_index）で並べ、1・2・3… を表示</b>する。',
       '🗑 <b>明細を1つ消すと2つ減る／その商品が保存できなくなる</b>のを修正。削除は「消す対象以外は全部残す」作りだったため、過去の追加失敗で残った<b>枠だけの明細（オプションはあるがモデルが無い）</b>を毎回温存し、Shopee側では<b>価格・重量が空の行</b>になって<b>以後その商品はどの保存も通らなくなっていた</b>（77→1件削除→75表示の正体）。①残すのは<b>中身のある枠だけ</b>＝削除のついでに掃除 ②<b>枠と中身の数が合わなければ中止</b> ③削除後に読み直して<b>ずれていたら自動で掃除</b>（自己修復）。あわせて一覧のカードに <b>⚠ 中身のない明細 N件</b> を出して、Shopeeに弾かれる前に気づけるようにした。',
       '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
@@ -24178,12 +24180,42 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     ['boxonly', '箱のみ'],
   ];
   const pidCondLabel = (v) => (PID_COND_OPTS.find(x => x[0] === v) || ['', ''])[1];
+  // ★JAN・型番・自社コード・識別項目の鍵は【変わらないID】にする（2026-08-14）。
+  //   以前は「親SKU」「親SKU｜明細名」を鍵にしていたが、**親SKUは頻繁に更新する**運用なので、
+  //   親SKUや明細名を1文字でも変えた瞬間に、調べて入力した値が画面から消えて見えていた（実際に発生）。
+  //   ・新しい鍵：`id:<item_id>` （カタログ／単品）／`id:<item_id>#<model_id>` （明細ごと）
+  //   ・古い鍵も読む。値が見つかったら**新しい鍵へ写して**、二度と外れないようにする（古い方は消さない＝安全）
+  //   ・親SKUが変わってしまって古い鍵すら当たらないときは、**明細名で探して拾い直す**（下の _pidLegacyByName）
+  let _pidSaveT2 = null;
+  const _pidTouch = () => { if (_pidSaveT2) clearTimeout(_pidSaveT2); _pidSaveT2 = setTimeout(() => { try { saveProductIds(); } catch (_) {} }, 800); };
+  const _pidHas = (k) => { const v = k && productIds && productIds[k]; return !!(v && (v.jan || v.mpn || v.own || (v.f && Object.keys(v.f).length))); };
+  // 明細名 → その名前で保存されている旧キーの値（親SKUが変わって行方不明になった分の救出用）
+  let _pidNameIdx = null, _pidNameAt = 0;
+  function _pidLegacyByName(nm) {
+    if (!nm) return null;
+    if (!_pidNameIdx || Date.now() - _pidNameAt > 4000) {
+      _pidNameIdx = new Map();
+      Object.keys(productIds || {}).forEach(k => {
+        const i = k.indexOf('｜'); if (i < 0) return;
+        const n2 = k.slice(i + 1);
+        if (!_pidHas(k)) return;
+        if (!_pidNameIdx.has(n2)) _pidNameIdx.set(n2, []);
+        _pidNameIdx.get(n2).push(productIds[k]);
+      });
+      _pidNameAt = Date.now();
+    }
+    const hit = _pidNameIdx.get(nm);
+    return (hit && hit.length === 1) ? hit[0] : null;   // 同名が複数あるときは当てずっぽうで拾わない
+  }
   const pidKeyModel = (r, m) => {
-    if (!m || m.id === 0) return pidKey(r.parent_sku);                 // 単品＝カタログのJANと同じ
+    const idk = (!m || m.id === 0) ? ('id:' + r.item_id) : ('id:' + r.item_id + '#' + m.id);
+    if (_pidHas(idk)) return idk;
     const base = pidKey(r.parent_sku);
-    const nm = String(m.n || '').trim().toLowerCase().replace(/\s+/g, ' ');
-    if (base && nm) return base + '｜' + nm;
-    return 'id:' + r.item_id + '#' + m.id;
+    const nm = m ? String(m.n || '').trim().toLowerCase().replace(/\s+/g, ' ') : '';
+    const legacy = (!m || m.id === 0) ? base : ((base && nm) ? base + '｜' + nm : null);
+    if (_pidHas(legacy)) { productIds[idk] = productIds[legacy]; _pidTouch(); return idk; }   // 旧鍵から引っ越す
+    if (nm) { const rescued = _pidLegacyByName(nm); if (rescued) { productIds[idk] = rescued; _pidTouch(); return idk; } }  // 親SKUが変わって迷子になった分を救出
+    return idk;
   };
   const pidKey = (sku) => { const s = (sku == null ? '' : String(sku)).trim(); return s || null; }; // JAN/型番のキー＝parent_sku（商品単位・各国横断で共有。空なら不可＝先にSKU設定が要る）
   // 明細(model)単位の在庫0固定：カタログ(keep0)がONなら全明細に自動適用、無ければ keep0m[model_id] を見る
@@ -24456,7 +24488,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (tb == null) return -1;
           return ta - tb;
         }).map(({ m }, _n) => {
-        const _no = _n + 1;
+        // ★番号は【枠(オプション)の番号】をそのまま出す。詰めて振り直すと、
+        //   「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が見えなくなる（2026-08-14）。
+        //   欠番＝そこに中身のない枠がある、と分かるようにする。
+        const _no = (m.ti != null ? m.ti + 1 : _n + 1);
         // ★親行と【同じ列グリッド】に載せる＝ヘッダーの「状態／価格／在庫／販売／SKU／JAN」の真下に並ぶ。
         //   以前は flex で横並びにしていたので、どの数字が何の列か分からなかった。
         const pk = pidKeyModel(r, m), pv = pidOf(pk);
@@ -24464,7 +24499,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const jdup = jval ? pidDupOf(pv) : null;
         const cell = (col, style, html) => `<div style="grid-column:${colPos(col) + 1};${style || ''}">${html}</div>`;
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
-          + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;' + LSTKL[0], isSingle ? '↳' : ('<span title="この商品の中での明細の並び順（Shopeeの商品ページと同じ順）">' + _no + '</span>'))
+          + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;' + LSTKL[0], isSingle ? '↳' : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'))
           + cell(1, LSTKL[1], m.img
               ? `<img src="${/^https?:/.test(m.img) ? esc(m.img) : IMG_CDN + esc(m.img)}" title="${av(m.n || '')}" style="width:40px;height:28px;object-fit:cover;border-radius:4px;background:#eee" loading="lazy" onerror="this.style.opacity=.15">`
               : '<span style="color:#c9c9c9">—</span>')
