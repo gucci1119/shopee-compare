@@ -14502,6 +14502,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🔢 <b>展開した明細に番号を出し、Shopeeと同じ並び順に</b>。これまでは `↳` だけで番号が無く、しかも並びが <b>get_model_list が返すモデル配列の順</b>のままだったので、✎カタログ編集やShopeeの商品ページと順番が違って見えていた。<b>オプションの並び順（tier_index）で並べ、1・2・3… を表示</b>する。',
       '🗑 <b>明細を1つ消すと2つ減る／その商品が保存できなくなる</b>のを修正。削除は「消す対象以外は全部残す」作りだったため、過去の追加失敗で残った<b>枠だけの明細（オプションはあるがモデルが無い）</b>を毎回温存し、Shopee側では<b>価格・重量が空の行</b>になって<b>以後その商品はどの保存も通らなくなっていた</b>（77→1件削除→75表示の正体）。①残すのは<b>中身のある枠だけ</b>＝削除のついでに掃除 ②<b>枠と中身の数が合わなければ中止</b> ③削除後に読み直して<b>ずれていたら自動で掃除</b>（自己修復）。あわせて一覧のカードに <b>⚠ 中身のない明細 N件</b> を出して、Shopeeに弾かれる前に気づけるようにした。',
       '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
       '🆕 <b>直したものが、読み直さなくても自動で反映されるように</b>。これまではブラウザが古い画面を持ったままで、<b>ハードリロードしても直らない</b>ように見えることがあった。3分ごと＋タブに戻ったときに新しい版が出ていないか確認し（本体は落とさずヘッダだけ見る）、<b>入力中・モーダル・ジョブ実行中でなければ自動で読み直す</b>。作業中は「🆕新しいバージョンがあります／今すぐ更新」を出して終わるまで待つ。',
@@ -24343,7 +24344,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const pi = d || {};
     const ms = pi.model_list || [];
     const models = (ms || []).map(m => ({
-      id: m.id || m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '',
+      id: m.id || m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', ti: (m.tier_index || [])[0],
       price: parseFloat(((m.price_info || {}).input_normal_price != null ? m.price_info.input_normal_price : (m.price_info || {}).normal_price)) || 0,
       stock: (((((m.stock_detail || {}).seller_stock_info) || [])[0] || {}).sellable_stock) || 0,
       sold: 0
@@ -24444,7 +24445,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const editModels = isSingle ? [{ id: 0, n: '（この単品）', sku: r.parent_sku || '', img: '', price: r.price_min, stock: r.stock, sold: 0 }] : r.models;
     const canPreorderRow = false;          // 簡易インライン編集は価格・在庫のみ（100%公式API・展開時のproductReadも走らない）。予約(Pre-order)は行の ✎カタログ編集で公式API(update_item)編集できるのでここには出さない
     const varRows = opened
-      ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${editModels.map(m => {
+      ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px">${
+        // ★並び順は【オプションの順】に揃える。get_model_list が返すモデル配列の順のままだと
+        //   ✎カタログ編集やShopeeの商品ページと並びが違って見え、何番目の明細か分からなかった（2026-08-14）。
+        //   ti（tier_index）を持っている行はそれで並べ、無ければ元の順のまま。
+        editModels.map((m, _i) => ({ m, _i })).sort((a, b) => {
+          const ta = a.m.ti, tb = b.m.ti;
+          if (ta == null && tb == null) return a._i - b._i;
+          if (ta == null) return 1;
+          if (tb == null) return -1;
+          return ta - tb;
+        }).map(({ m }, _n) => {
+        const _no = _n + 1;
         // ★親行と【同じ列グリッド】に載せる＝ヘッダーの「状態／価格／在庫／販売／SKU／JAN」の真下に並ぶ。
         //   以前は flex で横並びにしていたので、どの数字が何の列か分からなかった。
         const pk = pidKeyModel(r, m), pv = pidOf(pk);
@@ -24452,7 +24464,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const jdup = jval ? pidDupOf(pv) : null;
         const cell = (col, style, html) => `<div style="grid-column:${colPos(col) + 1};${style || ''}">${html}</div>`;
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
-          + cell(0, 'text-align:center;color:#c9c9c9;' + LSTKL[0], '↳')
+          + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;' + LSTKL[0], isSingle ? '↳' : ('<span title="この商品の中での明細の並び順（Shopeeの商品ページと同じ順）">' + _no + '</span>'))
           + cell(1, LSTKL[1], m.img
               ? `<img src="${/^https?:/.test(m.img) ? esc(m.img) : IMG_CDN + esc(m.img)}" title="${av(m.n || '')}" style="width:40px;height:28px;object-fit:cover;border-radius:4px;background:#eee" loading="lazy" onerror="this.style.opacity=.15">`
               : '<span style="color:#c9c9c9">—</span>')

@@ -2858,7 +2858,7 @@ function syncListingsForShop_(tok, sinceSec) {
       if (it.has_model) {
         try {
           var g = getModels_(shopId, it.item_id);
-          models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0 }; });
+          models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0, ti: (m.tier_index || [])[0] }; });
           model_count = models.length;
           var prices = models.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
           if (prices.length) { price_min = Math.min.apply(null, prices); price_max = Math.max.apply(null, prices); }
