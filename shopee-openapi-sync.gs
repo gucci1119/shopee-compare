@@ -1316,8 +1316,19 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   if (unknown.length) throw new Error('この明細が今のShopee側に見つかりません（画面を開き直してください）: ' + unknown.join(', '));
   // ★数が合わないまま進めると別の明細まで消える。安全側に倒して必ず止める。
   if (Object.keys(delIdx).length !== want) throw new Error('消す対象の数が合いません（' + Object.keys(delIdx).length + '/' + want + '）。安全のため中止しました');
-  var keep = [];
-  for (var i = 0; i < cur.length; i++) if (!delIdx[i]) keep.push(i);
+  // ★残すオプションは【削除対象でない】かつ【モデルが紐づいている】ものだけ。
+  //   以前は「削除対象以外は全部残す」だったため、過去の追加失敗で生まれた
+  //   **中身のない明細（オプションだけでモデルが無い）が削除のたびに温存**されていた。
+  //   Shopee側ではそれが「価格・重量が空の行」として出て、以後その商品は保存が通らなくなる
+  //   （Seller Centerで This field cannot be empty）＝「1つ消すたびに毎回困難になる」の正体（2026-08-14）。
+  var usedByModel = {};
+  models.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) usedByModel[oi] = 1; });
+  var keep = [], orphan = [];
+  for (var i = 0; i < cur.length; i++) {
+    if (delIdx[i]) continue;
+    if (usedByModel[i]) keep.push(i);
+    else orphan.push(cur[i]);            // 中身のない明細＝この機会に掃除する
+  }
   if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
   // 1) 対象modelを削除
   var delModels = models.filter(function (m) { return delIdx[(m.tier_index || [])[0]]; });
@@ -1328,8 +1339,10 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   // 2) tierのオプションを詰め直し、残ったmodelのtier_indexを 0,1,2... に振り直す（番号の穴を作らない）
   var map = {}, newOpts = [];
   keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
-  var remap = models.filter(function (m) { return !delIdx[(m.tier_index || [])[0]]; })
+  var remap = models.filter(function (m) { var oi = (m.tier_index || [])[0]; return oi != null && !delIdx[oi] && map[oi] != null; })
     .map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
+  // ★オプションの数とモデルの数が合わないまま送ると、Shopee側に中身のない行が生まれる。必ず止める。
+  if (remap.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap.length + '/' + newOpts.length + '）。安全のため中止しました');
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   // ★消したつもりが消えていない／余分に消えた を画面で確認できるよう、実際の残り件数を読み直して返す
   var after = {};
@@ -1338,7 +1351,8 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     var t2 = ((j2.response || {}).tier_variation || [])[0] || {};
     after = { remain: (t2.option_list || []).length, names: (t2.option_list || []).map(function (o) { return o.option; }) };
   } catch (e) { after = { remain: newOpts.length }; }
-  return { ok: true, deleted: resolved.length, deleted_names: resolved, remain: after.remain, remain_names: after.names || [] };
+  return { ok: true, deleted: resolved.length, deleted_names: resolved, remain: after.remain, remain_names: after.names || [],
+           orphan_cleaned: orphan.length, orphan_names: orphan.slice(0, 20) };
 }
 // ★明細をまとめて追加。画像を並列アップロード→tier更新1回→add_model1回。
 //   1件ずつ（画像DL＋upload_image＋get_model_list＋update_tier_variation＋add_model）の4〜5往復×件数を大幅に削減。
