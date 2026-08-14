@@ -2815,7 +2815,7 @@
   const API_ERR_JA = [
     [/price ratio .*(exceeds|greater than) *(\d+)/i, (m) => '明細どうしの値段が離れすぎです。いちばん高い明細と安い明細の差は【' + (m[2] || 5) + '倍以内】までというShopeeの決まりです。高い明細を別のカタログに分けるか、安い明細の値段を上げてください'],
     [/error_price_ratio/i, () => '明細どうしの値段が離れすぎです（Shopeeの上限は5倍）。高い明細を別カタログに分けてください'],
-    [/tier option name is duplicated|name is duplicated/i, () => '明細名がかぶっています。同じ名前は2つ持てません'],
+    [/tier option name is duplicated|name is duplicated/i, () => '明細名がかぶっています。同じ名前は2つ持てません' + edDupNote()],
     [/tier.*(30|max).*(char|length)|name.*too long/i, () => '明細名が長すぎます（30字まで）'],
     [/invalid access_token|access_token.*(expire|invalid)|error_auth/i, () => 'Shopeeのログイン（トークン）が切れています。⚙️設定から取り直してください'],
     [/error_permission|no permission/i, () => 'この操作の権限がありません（アカウント/店舗の選び間違いかも）'],
@@ -14503,6 +14503,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🔤 <b>明細名の重複チェックをShopeeと同じ判定に</b>。こちらは<b>完全一致</b>で見ていたため、「大文字小文字だけ違う／全角半角だけ違う／スペースが2つ」はすり抜けて、Shopeeに送ってから弾かれていた。<b>NFKC＋小文字＋連続スペースを1つ</b>に揃えて比べる。あわせて、Shopee側のエラーが返ったときも<b>どれとどれがかぶっているか（番号と名前）</b>を出して該当行を赤くする。',
       '👻 <b>中身のない明細も一覧に行として出す</b>。存在するのに一覧から消していたため、✎カタログ編集やShopeeと番号がずれて見え、しかも原因（枠だけ残っている）が画面から分からなかった。<b>枠を基準に並べ、中身が無い枠は「⚠ 中身なし」の行</b>として出す。',
       '🔑 <b>JAN・型番・自社コード・識別項目の鍵を「変わらないID」に変更</b>。これまで鍵が<b>親SKU</b>／<b>親SKU｜明細名</b>だったため、<b>親SKUや明細名を変えた瞬間に、調べて入力した値が画面から消えて見えていた</b>（実際に発生）。今後は `item_id` / `model_id` を鍵にする。<b>古い鍵も読み、見つけたら新しい鍵へ写す</b>（古い方は消さない）。親SKUが変わって古い鍵すら当たらない分は<b>明細名で探して拾い直す</b>（同名が複数ある時は拾わない）。',
       '🔢 <b>展開した明細の番号を「枠の番号そのまま」に</b>。詰めて振り直していたため、「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が分からなくなっていた。<b>欠番＝そこに中身のない枠がある</b>と読めるようにした。',
@@ -19917,10 +19918,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const rows = [...body.querySelectorAll('.ed-tierrow .ed-tier')];
           const seen = new Map();
           rows.forEach((el, i) => {
-            const k = String(el.value || '').trim();
-            if (!k) return;
+            const raw = String(el.value || '').trim();
+            if (!raw) return;
+            // ★Shopeeの重複判定に合わせる。こちらは完全一致で見ていたので
+            //   「大文字小文字だけ違う／全角半角だけ違う／スペースが2つ」はすり抜け、
+            //   送ってから update_tier_variation に弾かれていた（2026-08-14 実際に発生）。
+            const k = raw.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
             if (!seen.has(k)) seen.set(k, []);
-            seen.get(k).push({ el, no: i + 1 });
+            seen.get(k).push({ el, no: i + 1, raw });
           });
           const dup = [...seen.entries()].filter(([, v]) => v.length > 1);
           rows.forEach(el => { el.style.background = ''; el.style.borderColor = ''; });
@@ -19933,7 +19938,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               if (m2) { m2.style.background = '#fdecea'; m2.style.borderColor = '#d93025'; }
               marks.push(x.el);
             }));
-            const lines = dup.slice(0, 12).map(([k, v]) => '・「' + k + '」… ' + v.map(x => x.no + '番目').join(' と ')).join('\n');
+            const lines = dup.slice(0, 12).map(([, v]) => '・「' + v[0].raw + '」… ' + v.map(x => x.no + '番目（' + x.raw + '）').join(' と ')).join('\n');
             const more = dup.length > 12 ? '\n（ほか ' + (dup.length - 12) + '件）' : '';
             if (marks[0]) { marks[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); try { marks[0].focus(); } catch (_) {} }
             const msgEl = body.querySelector('.ed-msg');
@@ -23996,6 +24001,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       .map(t => t ? (t + '\u0001' + cond) : '').find(t => t && d[t]);
     return hit ? d[hit] : null;
   };
+  // ★「明細名がかぶっています」だけ言われても、どれとどれか分からないと直せない（本人指摘 2026-08-14）。
+  //   開いているカタログ編集の明細名を突き合わせて、**番号と名前**で示す。あわせて該当行を赤くする。
+  //   Shopeeの判定に合わせて、前後の空白と大文字小文字は無視して比べる。
+  function edDupGroups() {
+    const rows = [...document.querySelectorAll('.ed-tierrow')];
+    if (!rows.length) return [];
+    const by = new Map();
+    rows.forEach((r, i) => {
+      const inp = r.querySelector('.ed-tier'); if (!inp) return;
+      const raw = String(inp.value || '').trim();
+      if (!raw) return;
+      const k = raw.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push({ no: i + 1, name: raw, el: inp });
+    });
+    return [...by.values()].filter(g => g.length > 1);
+  }
+  function edDupNote() {
+    let g = [];
+    try { g = edDupGroups(); } catch (_) { return ''; }
+    if (!g.length) return '';
+    // 該当行を赤くして、最初の1件までスクロール
+    try {
+      g.forEach(list => list.forEach(x => { x.el.style.borderColor = '#d93025'; x.el.style.background = '#fdecea'; }));
+      const first = g[0][0].el; if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' });
+    } catch (_) {}
+    return '\n\nかぶっているのはここです：\n' + g.map(list =>
+      '・「' + list[0].name + '」 → ' + list.map(x => x.no + '番').join(' と ')
+    ).join('\n');
+  }
   const pidOf = (key) => (productIds && key && productIds[key]) || {};
   // 🧩 識別項目：カタログごとに「これが違えば別商品」という軸を最大4つ決めておく。
   //   例) 妖怪メダル＝弾/キャラ/仕様、ゲーム＝機種/作品/版、カード＝弾/番号/キャラ/レア度。
