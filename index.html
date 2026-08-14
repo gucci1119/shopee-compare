@@ -3080,6 +3080,9 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "🆕 新しいバージョンがあります": "🆕 A new version is available",
+    "今すぐ更新": "Update now",
+    "作業が終わったら自動で更新します": "It will update automatically once you finish",
     "⚠ 親SKUが別シリーズと重複（": "⚠ Parent SKU clashes with another series (",
     "🖨 きょうの作業指示": "🖨 Today's work sheet",
     "🖨 きょうの作業指示を印刷": "🖨 Print today's work sheet",
@@ -5123,6 +5126,66 @@
     location.reload();
   }
   applyDemoUI();
+  // ===== 🆕 新しいバージョンを自動で取り込む（2026-08-14） =====
+  // ★これまでは私が直しても、ブラウザが古い index.html を持ったままで反映されず、
+  //   本人が「ハードリロードしても直らない」に当たっていた。**読み直さなくても自動で新しくなる**ようにする。
+  //   仕組み：自分自身にHEADを投げて ETag / Last-Modified を見るだけ（本体2.7MBは落とさない）。
+  //   安全な時だけ勝手に読み直す。入力中・モーダル・ジョブ実行中は読み直さず、バナーで知らせて待つ。
+  let _appTag = null, _appNew = false, _appTimer = null;
+  async function appTag() {
+    try {
+      const r = await fetch(location.pathname, { method: 'HEAD', cache: 'no-store' });
+      return r.headers.get('etag') || r.headers.get('last-modified') || null;
+    } catch (_) { return null; }
+  }
+  function appBusy() {
+    try {
+      const ae = document.activeElement;
+      if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;          // 入力中
+      const m = document.getElementById('smd-modal');
+      if (m && m.classList.contains('open')) return true;                            // モーダル
+      if (document.querySelector('[style*="position:fixed"][style*="inset:0"]')) return true;  // 全画面オーバーレイ
+      if (typeof JOB_MIRROR !== 'undefined' && Object.keys(JOB_MIRROR).length) return true;    // 追加/画像などのジョブ
+      if (typeof JOBS !== 'undefined' && JOBS.list && JOBS.list.some(j => j.state === 'run' || j.state === 'wait')) return true;
+    } catch (_) {}
+    return false;
+  }
+  function appUpdateBanner() {
+    if (document.getElementById('smd-appup')) return;
+    const b = document.createElement('div');
+    b.id = 'smd-appup'; b.setAttribute('data-noi18n', '');
+    b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:10px;z-index:9999;background:#1a7f37;color:#fff;'
+      + 'border-radius:20px;padding:7px 14px;font-size:12.5px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.22);'
+      + 'display:flex;align-items:center;gap:10px;cursor:default';
+    b.innerHTML = '🆕 新しいバージョンがあります'
+      + '<button id="smd-appup-now" style="border:none;background:#fff;color:#1a7f37;border-radius:14px;padding:3px 10px;font-weight:700;cursor:pointer">今すぐ更新</button>'
+      + '<span id="smd-appup-note" style="font-weight:400;font-size:11px;opacity:.9"></span>';
+    document.body.appendChild(b);
+    document.getElementById('smd-appup-now').addEventListener('click', () => location.reload());
+  }
+  function appUpdateApply() {
+    if (!_appNew) return;
+    if (!appBusy()) { location.reload(); return; }
+    // 作業中は待つ（勝手に消すと入力が飛ぶ）。理由も出しておく
+    const n = document.getElementById('smd-appup-note');
+    if (n) n.textContent = '作業が終わったら自動で更新します';
+    clearTimeout(_appTimer);
+    _appTimer = setTimeout(appUpdateApply, 15000);
+  }
+  async function appUpdateCheck() {
+    const t = await appTag();
+    if (!t) return;
+    if (!_appTag) { _appTag = t; return; }
+    if (t === _appTag || _appNew) return;
+    _appNew = true;
+    appUpdateBanner();
+    appUpdateApply();
+  }
+  appUpdateCheck();
+  setInterval(appUpdateCheck, 180000);                                   // 3分ごと
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) appUpdateCheck(); });  // タブに戻った時
+  window.addEventListener('focus', () => appUpdateCheck());
+
   { const lg = document.getElementById('smd-lang-toggle');
     if (lg) { lg.textContent = i18nOn() ? '🌐 Back to Japanese' : '🌐 English'; lg.addEventListener('click', i18nToggle); } }
   try { i18nWatch(); } catch (_) {}
@@ -14428,6 +14491,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-08-14', items: [
       '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
+      '🆕 <b>直したものが、読み直さなくても自動で反映されるように</b>。これまではブラウザが古い画面を持ったままで、<b>ハードリロードしても直らない</b>ように見えることがあった。3分ごと＋タブに戻ったときに新しい版が出ていないか確認し（本体は落とさずヘッダだけ見る）、<b>入力中・モーダル・ジョブ実行中でなければ自動で読み直す</b>。作業中は「🆕新しいバージョンがあります／今すぐ更新」を出して終わるまで待つ。',
       '🖼 <b>読めない画像の説明文で行が異常に高くなる</b>のを修正。画像枠は34pxしかないので、失敗時の代替テキストが<b>1文字ずつ縦に並んで</b>行を押し広げていた。斜線の枠だけ残して文字は出さない（理由はホバーの説明で分かる）。',
       '🔢 <b>バリエ数のキャッシュが残って「1バリエーション」のままだった</b>のも修正。カタログを取り直して中身を入れ替えても、行オブジェクト単位のキャッシュ（WeakMap）が効いたままで、画面の数字が変わらなかった。取り直したらキャッシュを捨てるようにした。',
       '➕ <b>明細を一括追加したのに一覧の数字が変わらない</b>のを修正。Shopee側には入っているのに「73バリエーション・空27」のままで壊れて見えていた（追加後にそのカタログを取り直していなかった）。<b>追加が終わった時点で、その1件だけShopeeから読み直して数字を更新</b>する（✎カタログ編集で直したときと同じ扱いに揃えた）。',
