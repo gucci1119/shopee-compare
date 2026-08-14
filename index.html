@@ -4027,6 +4027,20 @@
     "📦 家から出す日": "📦 Day to send from home",
     "✕ 解除": "✕ Clear",
     "🚚倉庫へ発送済": "🚚 Sent to warehouse",
+    "届け先": "Deliver to",
+    "🏢 <b>届け先ごとの荷物</b>　": "🏢 <b>Parcels by destination</b>　",
+    "✎ 届け先を編集": "✎ Edit destinations",
+    "🏢 届け先（事務所）の登録": "🏢 Register destinations (offices)",
+    "＋ 届け先を追加": "＋ Add destination",
+    "🏢 不明": "🏢 Unknown",
+    "？不明": "? Unknown",
+    "①名前": "1. Name",
+    "②〒": "2. Postcode",
+    "③住所": "3. Address",
+    "④この日から": "4. From this date",
+    "⑤判定キーワード": "5. Match keywords",
+    "まだ登録がありません。「＋ 届け先を追加」から。": "Nothing registered yet — use “＋ Add destination”.",
+    "🏢 届け先を保存しました": "🏢 Destinations saved",
     "倉庫へ未発送": "Not sent to warehouse",
     "手配済": "Arranged",
     "追跡なし": "No tracking",
@@ -11287,8 +11301,154 @@
     const p2 = n => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
   }
+  // 🏢 届け先（事務所）の登録と判定
+  //   事務所移転のように**届け先が途中で変わる**と、「この荷物はどっちに届くのか」が分からなくなる。
+  //   仕入元（メルカリ等）は購入時に選んだ住所へ送るだけで、その住所はどこにも保存されていない。
+  //   そこで【届け先を登録しておき、2つの手がかりで荷物ごとに judge する】。
+  //     ① 追跡の取扱局・県（delivery_place / 配送履歴の最後の地点）に判定キーワードが含まれる＝確定
+  //     ② 仕入日が「この日から」以降＝推定（購入時に既定の住所を切り替えた前提）
+  //   保存は app_kv k='deliver_addrs'（新テーブル不要・全PCで共有）。
+  let delAddrs = null;   // [{id,name,zip,addr,from,kw}]
+  function loadDelAddrs() {
+    if (delAddrs !== null) return Promise.resolve(delAddrs);
+    delAddrs = [];
+    return sbGetAll('app_kv', 'select=v&k=eq.deliver_addrs')
+      .then(rows => { const v = (rows && rows[0] && rows[0].v) || {}; delAddrs = Array.isArray(v.list) ? v.list : []; return delAddrs; })
+      .catch(() => delAddrs);
+  }
+  function saveDelAddrs() {
+    return sbUpsert('app_kv', [{ k: 'deliver_addrs', v: { list: delAddrs || [] }, updated_at: new Date().toISOString() }]);
+  }
+  // 追跡から見える地名（現在地＋履歴の全地点）
+  function trackPlaces(r) {
+    const out = [];
+    if (r.delivery_place) out.push(String(r.delivery_place));
+    let h = r.delivery_history;
+    if (typeof h === 'string') { try { h = JSON.parse(h); } catch (_) { h = null; } }
+    if (Array.isArray(h)) h.forEach(e => { if (e && e.p) out.push(String(e.p)); });
+    return out;
+  }
+  // 荷物 → 届け先。{ a:登録した届け先, why:根拠, sure:確定か } / 判定不能は null
+  function addrOf(r) {
+    const list = delAddrs || [];
+    if (!list.length) return null;
+    const places = trackPlaces(r);
+    if (places.length) {
+      for (const a of list) {
+        const kws = String(a.kw || '').split(/[,、\s]+/).map(s => s.trim()).filter(Boolean);
+        for (const k of kws) {
+          const hit = places.find(p => p.indexOf(k) >= 0);
+          if (hit) return { a: a, why: '追跡：' + hit, sure: true };
+        }
+      }
+    }
+    // 仕入日から推定（「この日から」が入っているものだけ・日付が新しい順に最初に該当したもの）
+    const pd = String(invPurDate(r) || '').slice(0, 10);
+    if (pd) {
+      const dated = list.filter(a => a.from).slice().sort((x, y) => String(y.from).localeCompare(String(x.from)));
+      const hit = dated.find(a => pd >= String(a.from).slice(0, 10));
+      if (hit) return { a: hit, why: '仕入日 ' + pd.replace(/-/g, '/') + '（' + String(hit.from).replace(/-/g, '/') + 'から）', sure: false };
+    }
+    return null;
+  }
+  const ADDR_COLORS = ['#1565c0', '#2e7d32', '#7b52c4', '#e65100', '#b3261e'];
+  const addrColor = (a) => ADDR_COLORS[Math.max(0, (delAddrs || []).findIndex(x => x.id === a.id)) % ADDR_COLORS.length];
+  // 行に出す 🏢バッジ（確定は実線・推定は点線＝どっちの根拠で言っているかを隠さない）
+  function addrBadge(r) {
+    if (!(delAddrs || []).length) return '';
+    const h = addrOf(r);
+    if (!h) return '<span class="smd-dim" style="font-size:10.5px" title="追跡の地名にも判定キーワードが当たらず、仕入日も「この日から」の範囲に入りません">🏢 不明</span>';
+    const c = addrColor(h.a);
+    const full = [h.a.zip ? '〒' + h.a.zip : '', h.a.addr || ''].filter(Boolean).join(' ');
+    return `<span style="font-size:10.5px;color:${c};font-weight:700;white-space:nowrap;border:1px ${h.sure ? 'solid' : 'dashed'} ${c}44;border-radius:9px;padding:1px 6px" ` +
+      `title="${esc(h.a.name + (full ? '\n' + full : '') + '\n根拠：' + h.why + (h.sure ? '（追跡の地名と一致＝確定）' : '（仕入日からの推定）'))}">🏢 ${esc(h.a.name)}${h.sure ? '' : '?'}</span>`;
+  }
+  // お知らせ等の1行テキスト用（バッジではなく文字で「🏢 旧事務所」）。未登録・判定不能なら空文字
+  function addrText(r) {
+    if (!(delAddrs || []).length) return '';
+    const h = addrOf(r);
+    return h ? '🏢 ' + h.a.name + (h.sure ? '' : '?') : '';
+  }
+  // 🏢届け先パネル：件数サマリ（＝押さなくても最初から見える）＋登録フォーム
+  //   未登録のときは説明つきで開いた状態、登録済みなら「✎届け先を編集」で開く（補足なので畳んでよい）。
+  function addrPanel(items) {
+    const list = delAddrs || [];
+    const cnt = {}; let unknown = 0;
+    (items || []).forEach(x => { const h = addrOf(x.r); if (h) cnt[h.a.id] = (cnt[h.a.id] || 0) + 1; else unknown++; });
+    const open = state.buyWaitAddrEdit || !list.length;
+    const chipOf = (id, label, n, col) =>
+      `<button class="smd-btn wait-addrchip" data-id="${esc(id)}" style="margin-right:5px;font-size:11.5px;${state.buyWaitAddr === id ? `background:${col};border-color:${col};color:#fff;font-weight:700` : `border-color:${col};color:${col}`}" title="この届け先の荷物だけ表示（もう一度押すと解除）">${label} ${n}</button>`;
+    const summary = list.length
+      ? `<div style="margin:0 4px 6px;font-size:12px">🏢 <b>届け先ごとの荷物</b>　` +
+        list.map(a => chipOf(a.id, '🏢 ' + esc(a.name), cnt[a.id] || 0, addrColor(a))).join('') +
+        (unknown ? chipOf('?unknown', '？不明', unknown, '#6b7280') : '') +
+        `<button class="smd-btn" id="wait-addredit" style="margin-left:6px;font-size:11.5px" title="届け先の追加・編集・削除">✎ 届け先を編集</button>` +
+        `<div class="smd-dim" style="font-size:10.5px;margin-top:3px">追跡の地名が判定キーワードに一致＝確定。一致しないものは仕入日から推定（<b>?</b>付き）。</div></div>`
+      : '';
+    if (!open) return summary;
+    const row = (a, i) => `<tr data-id="${esc(a.id)}">` +
+      `<td style="padding:3px 4px"><input class="wa-name" value="${av(a.name || '')}" placeholder="旧事務所" style="width:110px"></td>` +
+      `<td style="padding:3px 4px"><input class="wa-zip" value="${av(a.zip || '')}" placeholder="123-4567" style="width:88px"></td>` +
+      `<td style="padding:3px 4px"><input class="wa-addr" value="${av(a.addr || '')}" placeholder="千葉県千葉市…" style="width:280px"></td>` +
+      `<td style="padding:3px 4px"><input class="wa-from" type="date" value="${av(String(a.from || '').slice(0, 10))}" style="width:132px"></td>` +
+      `<td style="padding:3px 4px"><input class="wa-kw" value="${av(a.kw || '')}" placeholder="千葉,幕張" style="width:150px"></td>` +
+      `<td style="padding:3px 4px"><button class="smd-btn wa-del" title="この届け先を削除" style="border-color:#b3261e;color:#b3261e">✕</button></td></tr>`;
+    return summary +
+      `<div class="tool-card" id="wait-addrbox" style="margin:0 4px 10px;max-width:none;background:#f7f9ff">` +
+      `<div style="font-weight:700;font-size:13px;margin-bottom:4px">🏢 届け先（事務所）の登録</div>` +
+      `<div class="smd-dim" style="font-size:11.5px;line-height:1.6;margin-bottom:7px">` +
+      `仕入元は「購入時に選んだ住所」へ送るだけで、その住所はどこにも残りません。<b>移転のように途中で届け先が変わると、どの荷物がどっちに届くか分からなくなります</b>。ここに登録すると、荷物ごとに 🏢 が付きます。<br>` +
+      `<b>①名前</b>＝画面に出る呼び方　<b>②〒・③住所</b>＝控え（判定には使いません）　<b>④この日から</b>＝購入時の既定の住所を切り替えた日（この日以降の仕入れはここへ届く、と推定）　<b>⑤判定キーワード</b>＝追跡に出る地名（例：千葉／幕張／江東）。<b>一致すれば推定でなく確定</b>になります。カンマ区切りで複数可。` +
+      `</div>` +
+      `<table class="pf-table" style="min-width:0"><tr><th>①名前</th><th>②〒</th><th>③住所</th><th>④この日から</th><th>⑤判定キーワード</th><th></th></tr>` +
+      (list.length ? list.map(row).join('') : `<tr><td colspan="6" class="smd-dim" style="padding:8px">まだ登録がありません。「＋ 届け先を追加」から。</td></tr>`) +
+      `</table>` +
+      `<div style="margin-top:7px"><button class="smd-btn" id="wa-add">＋ 届け先を追加</button>` +
+      `<button class="smd-btn" id="wa-save" style="margin-left:6px;background:#1565c0;border-color:#1565c0;color:#fff;font-weight:700">保存</button>` +
+      (list.length ? `<button class="smd-btn" id="wa-close" style="margin-left:6px">閉じる</button>` : '') +
+      `<span id="wa-msg" class="smd-dim" style="margin-left:8px;font-size:11.5px"></span></div></div>`;
+  }
+  // 届け先パネルの操作を配線（保存はSupabase・保存後に再描画）
+  function wireAddrPanel(host) {
+    { const b = document.getElementById('wait-addredit'); if (b) b.addEventListener('click', () => { state.buyWaitAddrEdit = true; renderWaiting(host); }); }
+    { const b = document.getElementById('wa-close'); if (b) b.addEventListener('click', () => { state.buyWaitAddrEdit = false; renderWaiting(host); }); }
+    document.querySelectorAll('.wait-addrchip').forEach(b => b.addEventListener('click', () => {
+      const id = b.dataset.id; state.buyWaitAddr = (state.buyWaitAddr === id) ? '' : id; renderWaiting(host);
+    }));
+    { const b = document.getElementById('wa-add'); if (b) b.addEventListener('click', () => {
+      readAddrForm(); delAddrs.push({ id: 'a' + Date.now().toString(36), name: '', zip: '', addr: '', from: '', kw: '' }); state.buyWaitAddrEdit = true; renderWaiting(host);
+    }); }
+    document.querySelectorAll('.wa-del').forEach(b => b.addEventListener('click', async () => {
+      const tr = b.closest('tr'); const id = tr && tr.dataset.id;
+      const a = (delAddrs || []).find(x => x.id === id);
+      if (!a) return;
+      if (!confirm('届け先「' + (a.name || '(名前なし)') + '」を削除します。よろしいですか？')) return;
+      readAddrForm(); delAddrs = delAddrs.filter(x => x.id !== id);
+      try { await saveDelAddrs(); } catch (e) { alert('保存に失敗: ' + e.message); }
+      renderWaiting(host);
+    }));
+    { const b = document.getElementById('wa-save'); if (b) b.addEventListener('click', async () => {
+      readAddrForm();
+      const msg = document.getElementById('wa-msg');
+      if (msg) msg.textContent = '保存中…';
+      try { await saveDelAddrs(); state.buyWaitAddrEdit = false; toast('🏢 届け先を保存しました'); renderWaiting(host); }
+      catch (e) { if (msg) { msg.textContent = '❌ ' + e.message; msg.style.color = '#d93025'; } }
+    }); }
+  }
+  // 画面の入力欄をそのまま delAddrs に取り込む（描き直しで消えないように）
+  function readAddrForm() {
+    const box = document.getElementById('wait-addrbox');
+    if (!box) return;
+    box.querySelectorAll('tr[data-id]').forEach(tr => {
+      const a = (delAddrs || []).find(x => x.id === tr.dataset.id);
+      if (!a) return;
+      const v = (cls) => { const el = tr.querySelector(cls); return el ? el.value.trim() : ''; };
+      a.name = v('.wa-name'); a.zip = v('.wa-zip'); a.addr = v('.wa-addr'); a.from = v('.wa-from'); a.kw = v('.wa-kw');
+    });
+  }
   async function renderWaiting(host) {
     renderWaiting._host = host;   // 📮番号を貼る等の保存後に再描画できるよう最新hostを保持
+    await loadDelAddrs();
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = errBox(e); return; }
     const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
@@ -11366,6 +11526,9 @@
     let shown = (pushOnly ? list.filter(x => notShipped(x) && x.pdays >= 1).sort((a, b) => (b.pdays || 0) - (a.pdays || 0)) : todayOnly ? list.filter(needToday) : alertOnly ? list.filter(needAtt) : list).slice(0, 800);
     const shownAll = shown;
     if (wTerms.length) shown = shown.filter(x => { const h = wHay(x); return wTerms.every(t => h.includes(t)); });
+    // 🏢届け先で絞る（'?unknown' は判定できなかった分）。件数は絞る前の母数で数える
+    const beforeAddr = shown;
+    if (state.buyWaitAddr) shown = shown.filter(x => { const h = addrOf(x.r); return state.buyWaitAddr === '?unknown' ? !h : (h && h.a.id === state.buyWaitAddr); });
     const chip = (label, n, col) => `<span style="display:inline-block;background:${col}22;color:${col};font-weight:700;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:5px">${label} ${n}</span>`;
     const etaCol = d => !d ? '#5f6368' : (d < todayStr ? '#d93025' : (d === todayStr ? '#e8710a' : ((daysTo(todayStr, d) || 9) <= 2 ? '#e8710a' : '#1a7f37')));
     const etaTxt = x => {
@@ -11515,7 +11678,8 @@
       ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
       (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') +
       ((fwdHidden || state.buyWaitShowForwarded) ? `<button class="smd-btn" id="wait-showfwd" style="margin-left:6px;${state.buyWaitShowForwarded ? 'background:#eef2ff;border-color:#3949ab;color:#3949ab;font-weight:700' : ''}" title="紐づくShopee注文が『倉庫スキャン待ち(自社倉庫→Shopee倉庫へ発送済)』以降の仕入れは、本日発送すべき物量ではないため既定で非表示。ここで表示/非表示を切替。">${state.buyWaitShowForwarded ? '🚚 倉庫発送済も表示中（クリックで隠す）' : ('🚚 倉庫発送済を表示（' + fwdHidden + '件を非表示中）')}</button>` : '') + `</div>` +
-      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
+      addrPanel(beforeAddr) +
+      `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll"><table class="pf-table" style="min-width:1160px"><tr><th>状況</th><th>到着見込み</th><th>画像</th><th>仕入日<br>待ち</th><th>商品名</th><th>仕入元/セラー</th><th>仕入額</th><th title="この荷物が届く先（登録した事務所/自宅）。追跡の地名が判定キーワードに当たれば確定、当たらなければ仕入日から推定（?付き）">届け先</th><th title="運送会社（らくらく便=ヤマト/ゆうゆう便=日本郵便）＋追跡番号＋現在地">配送・現在地</th><th>確証</th><th></th></tr>` +
       (shown.length ? shown.map((x, idx) => { const r = x.r, ph = WAIT_PHASE[x.phase];
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
         `<td><span style="background:${ph.bg};color:${ph.c};font-weight:700;font-size:10.5px;padding:2px 7px;border-radius:10px;white-space:nowrap">${ph.t}</span></td>` +
@@ -11525,12 +11689,14 @@
         `<td style="font-size:11px">${nm(r.name || r.name_supplier, '260px')}</td>` +
         `<td style="font-size:10.5px">${esc(r.supplier || '')}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
         `<td style="font-size:11px;white-space:nowrap">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
+        `<td style="white-space:nowrap">${addrBadge(r) || '<span class="smd-dim" style="font-size:10.5px">—</span>'}</td>` +
         `<td style="line-height:1.6">${deliveryCell(r, idx)}</td>` +
         `<td>${r.proof ? `<a href="${esc(r.proof)}" target="_blank" style="text-decoration:none">📸</a>` : ''}</td>` +
         `<td><button class="wait-arrive" data-id="${esc(r.item_id)}" title="入荷完了→在庫保管中に移す" style="border:1px solid ${(x.phase === 'delivered' || x.phase === 'likely') ? '#2e7d32' : '#ccc'};background:${(x.phase === 'delivered' || x.phase === 'likely') ? '#e8f5e9' : '#fff'};color:${(x.phase === 'delivered' || x.phase === 'likely') ? '#2e7d32' : '#555'};border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">✓入荷</button></td>` +
         `</tr>`;
-      }).join('') : `<tr><td colspan="10" class="smd-dim" style="padding:14px">${alertOnly ? '要確認の入庫待ちはありません🎉' : '入庫待ちはありません🎉'}</td></tr>`) +
+      }).join('') : `<tr><td colspan="11" class="smd-dim" style="padding:14px">${alertOnly ? '要確認の入庫待ちはありません🎉' : '入庫待ちはありません🎉'}</td></tr>`) +
       `</table></div></div>`;
+    wireAddrPanel(host);
     { const b = document.getElementById('wait-alert'); if (b) b.addEventListener('click', () => { state.buyWaitAlert = !state.buyWaitAlert; if (state.buyWaitAlert) { state.buyWaitToday = false; state.buyWaitPush = false; } renderWaiting(host); }); }
     { const q = document.getElementById('wait-q');
       if (q) { let t = null;
@@ -13199,9 +13365,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function notifBuild() {
     const out = [];
     let rows = [];
+    try { await loadDelAddrs(); } catch (_) {}   // 🏢届け先（お知らせの荷物にも「どこへ届くか」を出す）
     try {
       rows = await sbGetAll('inventory',
-        'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
+        'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
     } catch (_) { rows = []; }
     const today = jstDate(Date.now());
     const daysFrom = (d) => { if (!d) return null; const t = Date.parse(String(d).slice(0, 10) + 'T00:00:00+09:00'); return isFinite(t) ? Math.floor((Date.parse(today + 'T00:00:00+09:00') - t) / 86400000) : null; };
@@ -13219,12 +13386,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const at = da || lastScan;
         out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', img: r.image || '', at: notifSortKey(at, pd), day: receivedDay(at),
           ti: '届きました：' + nm,
-          sb: [notifWhen(at, da ? '到着' : '最終記録'), (da ? '' : '（配達完了の記録が無く、最後のスキャン時刻です）'), r.supplier || '', pd ? '仕入 ' + pd : '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
+          sb: [notifWhen(at, da ? '到着' : '最終記録'), (da ? '' : '（配達完了の記録が無く、最後のスキャン時刻です）'), r.supplier || '', pd ? '仕入 ' + pd : '', addrText(r), r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       } else if (ph === 'out') {
         out.push({ id: 'out:' + r.item_id, ic: '🚚', cat: 'parcel', kind: 'out', img: r.image || '', at: notifSortKey(lastScan, pd),
           ti: '配達中です：' + nm,
-          sb: [notifWhen(lastScan, '最新'), r.supplier || '', r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
+          sb: [notifWhen(lastScan, '最新'), r.supplier || '', addrText(r), r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       // ★追跡番号が無い在庫が大半（実測：入庫待ちの9割）。全部を「届いたかも」にすると
       //   何年も前の滞留分でベルが埋まって役に立たないので、【最近の仕入れだけ】に絞る。
@@ -13232,7 +13399,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       } else if (!ph && pdays != null && pdays >= exp && pdays <= 60) {
         out.push({ id: 'late:' + r.item_id + ':' + Math.floor(pdays / 7), ic: '🟡', cat: 'parcel', kind: 'likely', img: r.image || '', at: pd,
           ti: '届いているかもしれません：' + nm,
-          sb: (r.supplier || '') + '　仕入から ' + pdays + '日（目安 ' + exp + '日）　追跡情報なし', itemId: r.item_id });
+          sb: [(r.supplier || ''), '仕入から ' + pdays + '日（目安 ' + exp + '日）', addrText(r), '追跡情報なし'].filter(Boolean).join('　'), itemId: r.item_id });
       }
     });
     // 追跡の取り込みは1時間ごとのGAS。最後にいつ回ったかを出さないと
@@ -13560,6 +13727,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🏢 <b>荷物が「どっちの住所に届くか」が分かるように</b>（事務所移転の期間用）。仕入元は購入時に選んだ住所へ送るだけで、その住所はどこにも残らない＝移転中はどの荷物が旧事務所行きか分からなかった。⏳入庫待ちに<b>届け先の登録</b>（名前/〒/住所/この日から/判定キーワード）を足し、<b>荷物ごとに🏢バッジ・届け先ごとの件数・絞り込み</b>を追加。🔔お知らせの荷物にも出る。判定は<b>①追跡に出る地名が判定キーワードに一致＝確定 ②仕入日が「この日から」以降＝推定（?付き）</b>で、どちらの根拠かを隠さない。',
       '🚚 <b>「倉庫へ発送済」の自動反映を1日2回に</b>（18時台＋21時台）。集荷は17時までなのに読み取りが21時の1回だけで、<b>今日出した分が翌日まで「まだ家にある」ように見えていた</b>。集荷後の18時台にも利益管理表の Shipping date を読むようにして、その日のうちに立つようにした（すでに立っている注文は触らないので二重にはならない）。',
       '✂️ <b>分割注文の別行表示は作らない</b>と決めた。VNの購入限度額が 100万→<b>500万VND（約30,000円）</b>に上がり、分割が必要な場面がほぼ無くなったため（TWも自宅配送50,000TWD）。✂️分割エディタ自体はそのまま使える。'
     ] },
