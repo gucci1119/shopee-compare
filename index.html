@@ -14503,6 +14503,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🧹 <b>「明細名をそろえる」が作る名前がShopee的にかぶっていた</b>のを修正。そろえる側のかぶり判定が <code>toLowerCase</code> だけで、<b>全角半角・連続スペースを同一視していなかった</b>ため、「かぶらないように付けた名前」で保存が落ちていた。判定を保存前チェックと同じ物差し（NFKC＋小文字＋空白1つ）に統一。さらに<b>そろえた直後に、残っている重複を番号つきでその場で表示</b>する（保存して初めて知る、をやめる）。',
       '🔤 <b>明細名の重複チェックをShopeeと同じ判定に</b>。こちらは<b>完全一致</b>で見ていたため、「大文字小文字だけ違う／全角半角だけ違う／スペースが2つ」はすり抜けて、Shopeeに送ってから弾かれていた。<b>NFKC＋小文字＋連続スペースを1つ</b>に揃えて比べる。あわせて、Shopee側のエラーが返ったときも<b>どれとどれがかぶっているか（番号と名前）</b>を出して該当行を赤くする。',
       '👻 <b>中身のない明細も一覧に行として出す</b>。存在するのに一覧から消していたため、✎カタログ編集やShopeeと番号がずれて見え、しかも原因（枠だけ残っている）が画面から分からなかった。<b>枠を基準に並べ、中身が無い枠は「⚠ 中身なし」の行</b>として出す。',
       '🔑 <b>JAN・型番・自社コード・識別項目の鍵を「変わらないID」に変更</b>。これまで鍵が<b>親SKU</b>／<b>親SKU｜明細名</b>だったため、<b>親SKUや明細名を変えた瞬間に、調べて入力した値が画面から消えて見えていた</b>（実際に発生）。今後は `item_id` / `model_id` を鍵にする。<b>古い鍵も読み、見つけたら新しい鍵へ写す</b>（古い方は消さない）。親SKUが変わって古い鍵すら当たらない分は<b>明細名で探して拾い直す</b>（同名が複数ある時は拾わない）。',
@@ -18954,8 +18955,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               // ★かぶった名前は【作らない】。Shopeeは同じ明細名を2つ持てず、保存が丸ごと失敗する。
               //   ぶつかったら ①元の名前に戻す → ②それもぶつかるなら末尾に 2,3… を付ける、の順で必ず一意にする。
               const seen = new Map(); let changed = 0, kept = 0, numbered = 0, empty = 0;
+              // ★かぶり判定は【Shopeeと同じ物差し】で。toLowerCase だけだと
+              //   「全角半角だけ違う／スペースが2つ」がすり抜け、そろえた直後の保存が
+              //   update_tier_variation の duplicated で落ちる（2026-08-14 実際に発生）。
+              const nkey = (v) => String(v || '').trim().normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
               const uniq = (want, orig) => {
-                const free = (v) => v && !seen.has(v.toLowerCase());
+                const free = (v) => v && !seen.has(nkey(v));
                 if (free(want)) return want;
                 if (free(orig)) return orig;                       // ①元の名前で回避
                 const base = (want || orig || '').slice(0, 27);
@@ -18965,11 +18970,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               inputs.forEach((inp, i) => {
                 const ws = words[i] || [];
                 let core = ws.filter(w => !common.has(w.toLowerCase()) && !/^\d+$/.test(w)).join(' ').trim();
-                if (!core) { empty++; inp.style.background = '#fdecea'; if (names[i]) seen.set(names[i].toLowerCase(), i); return; }   // 核が取れない＝定型語だけの名前。手で直す
+                if (!core) { empty++; inp.style.background = '#fdecea'; if (names[i]) seen.set(nkey(names[i]), i); return; }   // 核が取れない＝定型語だけの名前。手で直す
                 const want = tpl.replace(/\{name\}/g, core).replace(/\s+/g, ' ').trim().slice(0, 30);
                 const nv = uniq(want, names[i]);
                 if (!nv) { empty++; inp.style.background = '#fdecea'; return; }
-                seen.set(nv.toLowerCase(), i);
+                seen.set(nkey(nv), i);
                 if (nv !== want) { if (nv === names[i]) kept++; else numbered++; inp.style.background = '#fff4e5'; }
                 else inp.style.background = nv !== names[i] ? '#eef7ee' : '';
                 if (nv !== names[i]) { changed++; inp.value = nv; inp.dispatchEvent(new Event('input', { bubbles: true })); }
@@ -18979,7 +18984,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 + (numbered ? '　<b style="color:#e8710a">かぶるので末尾に番号を付けた ' + numbered + '件</b>' : '')
                 + (empty ? '　<b style="color:#d93025">核が取れない ' + empty + '件（赤い行を手直し）</b>' : '')
                 + '　<span style="color:#8a8f98">外した定型語: ' + [...common].slice(0, 8).join(' / ') + '</span>'
-                + '　<b style="color:#ee4d2d">まだShopeeには反映していません。下の「Shopeeに保存」で確定します</b>';
+                + '　<b style="color:#ee4d2d">まだShopeeには反映していません。下の「Shopeeに保存」で確定します</b>'
+                // ★そろえた直後に、まだ残っている重複をその場で出す（保存で初めて知る、をやめる）
+                + (() => { let g = []; try { g = edDupGroups(); } catch (_) { return ''; }
+                    if (!g.length) return '';
+                    g.forEach(list => list.forEach(x => { x.el.style.background = '#fdecea'; x.el.style.borderColor = '#d93025'; }));
+                    return '<div style="margin-top:4px;color:#d93025;font-weight:700">✗ まだかぶっています：'
+                      + g.slice(0, 8).map(list => '「' + list[0].name + '」' + list.map(x => x.no + '番').join('と')).join(' ／ ')
+                      + (g.length > 8 ? ' ほか' + (g.length - 8) + '件' : '') + '</div>'; })();
             });
           }
         }
