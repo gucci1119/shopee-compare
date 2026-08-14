@@ -2859,10 +2859,19 @@ function syncListingsForShop_(tok, sinceSec) {
         try {
           var g = getModels_(shopId, it.item_id);
           models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0, ti: (m.tier_index || [])[0] }; });
-          model_count = models.length;
-          var prices = models.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
+          // ★中身のない枠（オプションはあるがモデルが無い）も models に混ぜる。列は増やさない
+          //   （新しい列を足すと既存DBに無くて upsert がまるごと失敗する。2026-08-14 実際に踏んだ）
+          var _opt = (((g.tier_variation || [])[0] || {}).option_list || []);
+          if (_opt.length) {
+            var _used = {}; models.forEach(function (m) { if (m.ti != null) _used[m.ti] = 1; });
+            _opt.forEach(function (o, i) { if (!_used[i]) models.push({ id: null, ghost: true, ti: i, n: String(o.option || ''), sku: '', img: '', price: 0, stock: 0, sold: 0 }); });
+            models.sort(function (a, b) { return (a.ti == null ? 1e9 : a.ti) - (b.ti == null ? 1e9 : b.ti); });
+          }
+          var _real = models.filter(function (m) { return !m.ghost; });   // ★中身のない枠は件数・価格・在庫に数えない
+          model_count = _real.length;
+          var prices = _real.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
           if (prices.length) { price_min = Math.min.apply(null, prices); price_max = Math.max.apply(null, prices); }
-          stock = models.reduce(function (s, m) { return s + (Number(m.stock) || 0); }, 0);
+          stock = _real.reduce(function (s, m) { return s + (Number(m.stock) || 0); }, 0);
         } catch (e) { /* モデル取得失敗時は単品扱いで継続 */ }
       }
       if (!it.has_model || !models.length) {
@@ -2889,8 +2898,7 @@ function syncListingsForShop_(tok, sinceSec) {
         parent_sku: it.item_sku || '', shop_id: String(shopId),
         price_min: price_min, price_max: price_max, stock: stock,
         model_count: model_count, models: models,
-        // ★枠(オプション)の名前。中身のないもの＝モデルが無い枠も一覧に行として出すために必要
-        opts: (((g.tier_variation || [])[0] || {}).option_list || []).map(function (o) { return String(o.option || ''); }),
+
         create_time: it.create_time || null, update_time: it.update_time || null, synced_at: new Date().toISOString()
       });
     });

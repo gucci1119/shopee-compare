@@ -14503,6 +14503,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🛑 <b>🔄（この商品だけ最新にする）が保存に失敗し続けていた</b>のを修正。今日足した <code>opts</code> / <code>opt_count</code> を<b>DBに存在しない列</b>へ書こうとしていたため、<b>upsertがまるごと失敗</b>し、何回押しても何も保存されていなかった（エラーを握りつぶしていたので無反応に見えた）。<b>列は増やさず</b>、中身のない枠は <code>models</code> の中に印付きで入れる方式に変更。件数・価格・在庫の集計からは除外する。',
       '🧹 <b>「明細名をそろえる」が作る名前がShopee的にかぶっていた</b>のを修正。そろえる側のかぶり判定が <code>toLowerCase</code> だけで、<b>全角半角・連続スペースを同一視していなかった</b>ため、「かぶらないように付けた名前」で保存が落ちていた。判定を保存前チェックと同じ物差し（NFKC＋小文字＋空白1つ）に統一。さらに<b>そろえた直後に、残っている重複を番号つきでその場で表示</b>する（保存して初めて知る、をやめる）。',
       '🔤 <b>明細名の重複チェックをShopeeと同じ判定に</b>。こちらは<b>完全一致</b>で見ていたため、「大文字小文字だけ違う／全角半角だけ違う／スペースが2つ」はすり抜けて、Shopeeに送ってから弾かれていた。<b>NFKC＋小文字＋連続スペースを1つ</b>に揃えて比べる。あわせて、Shopee側のエラーが返ったときも<b>どれとどれがかぶっているか（番号と名前）</b>を出して該当行を赤くする。',
       '👻 <b>中身のない明細も一覧に行として出す</b>。存在するのに一覧から消していたため、✎カタログ編集やShopeeと番号がずれて見え、しかも原因（枠だけ残っている）が画面から分からなかった。<b>枠を基準に並べ、中身が無い枠は「⚠ 中身なし」の行</b>として出す。',
@@ -24430,23 +24431,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       stock: (((((m.stock_detail || {}).seller_stock_info) || [])[0] || {}).sellable_stock) || 0,
       sold: 0
     }));
-    const prices = models.map(m => m.price).filter(x => x > 0);
-    // ★オプション（明細の枠）の数。モデル数より多い＝「中身のない明細」が居る。
-    //   Shopee側では価格・重量が空の行になり、**その商品は以後どの保存も通らなくなる**ので、
-    //   一覧のカードで気づけるように控えておく（2026-08-14）。
-    const optCount = (((pi.std_tier_variation_list || [])[0] || {}).value_list || []).length;
+    const prices = models.filter(m => !m.ghost).map(m => m.price).filter(x => x > 0);
+    // ★中身のない枠（オプションはあるがモデルが無い）は models の中に ghost として入れる。
+    //   ★列を増やすと既存DBに無くて upsert がまるごと失敗する（実際 opts 列が無く、
+    //     🔄を押しても何も保存されていなかった。2026-08-14）。**列は増やさない**。
+    const optNames = (((pi.std_tier_variation_list || [])[0] || {}).value_list || []).map(o => String(o.custom_value || ''));
+    if (optNames.length) {
+      const used = new Set(models.map(m => m.ti).filter(x => x != null));
+      optNames.forEach((n, i) => { if (!used.has(i)) models.push({ id: null, ghost: true, ti: i, n: n, sku: '', img: '', price: 0, stock: 0, sold: 0 }); });
+      models.sort((a, b) => (a.ti == null ? 1e9 : a.ti) - (b.ti == null ? 1e9 : b.ti));
+    }
     const imgs = (pi.image_ids || []).slice();
     const row = { cc, item_id: itemId, update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
     if (pi.name) row.name = pi.name;
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
     if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
-    if (optCount) row.opt_count = optCount;
-    // ★枠（オプション）の名前も持つ。中身が無い枠も一覧に行として出すため（存在するのに消すと番号がずれて見える）
-    { const ov = (((pi.std_tier_variation_list || [])[0] || {}).value_list || []).map(o => String(o.custom_value || ''));
-      if (ov.length) row.opts = ov; }
     if (models.length) {
-      row.models = models; row.model_count = models.length;
-      row.stock = models.reduce((a, m) => a + (Number(m.stock) || 0), 0);
+      row.models = models; row.model_count = models.filter(m => !m.ghost).length;
+      row.stock = models.filter(m => !m.ghost).reduce((a, m) => a + (Number(m.stock) || 0), 0);
       if (prices.length) { row.price_min = Math.min(...prices); row.price_max = Math.max(...prices); }
     }
     { const w = (pi.weight || {}).value; if (w !== '' && w != null) row.weight = parseFloat(w) || null; }
@@ -24542,12 +24544,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             if (ta == null) return 1; if (tb == null) return -1;
             return ta - tb;
           }).map(x => x.m);
-          const optNames = (!isSingle && Array.isArray(r.opts) && r.opts.length) ? r.opts : null;
-          if (!optNames) return sorted;
-          const byTi = new Map(); sorted.forEach(m => { if (m.ti != null) byTi.set(m.ti, m); });
-          const rows = optNames.map((n, i) => byTi.get(i) || { id: null, n: n, ghost: true, ti: i, price: 0, stock: 0, sku: '', img: '', sold: 0 });
-          sorted.forEach(m => { if (m.ti == null) rows.push(m); });   // 枠に結びつかない分は後ろへ
-          return rows;
+          return sorted;   // ★中身のない枠(ghost)は models の中に入っているので、この並びに含まれている
         })().map((m, _n) => {
         // ★番号は【枠(オプション)の番号】をそのまま出す。詰めて振り直すと、
         //   「中身のない明細」がいるときに ✎カタログ編集と1つずれて見え、原因が見えなくなる（2026-08-14）。
@@ -24669,8 +24666,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${(() => { const sh = sibHtml(r); return sh ? `<div style="margin-top:1px;line-height:1.7">${sh}</div>` : ''; })()}
           ${(() => {
             // ⚠ 中身のない明細（枠だけあって価格・在庫が無い）。放置するとShopee側でその商品の保存が全部通らなくなる
-            const oc = Number(r.opt_count || 0), mc = varCount(r);
-            if (!oc || oc <= mc) return '';
+            let _ms = r.models; if (!Array.isArray(_ms)) { try { _ms = JSON.parse(_ms || '[]'); } catch (_e) { _ms = []; } }
+            const gh = (_ms || []).filter(m => m && m.ghost).length;
+            if (!gh) return '';
+            const mc = varCount(r), oc = mc + gh;
             return `<div style="margin-top:2px"><span class="lst-orphan" data-cc="${av(r.cc)}" data-id="${av(r.item_id)}" ` +
               `title="明細の枠が ${oc} 件あるのに、中身（価格・在庫）があるのは ${mc} 件です。&#10;差の ${oc - mc} 件は「枠だけの明細」で、Shopeeでは価格・重量が空の行として出ます。&#10;この状態だと、その商品は以後どの保存も通らなくなります。&#10;✎編集を開いて 🧹 で掃除してください。" ` +
               `style="cursor:help;background:#fff4e5;color:#b26a00;border:1px solid #ffd8a8;border-radius:9px;padding:1px 7px;font-size:10.5px;font-weight:700;white-space:nowrap">⚠ 中身のない明細 ${oc - mc}件</span></div>`;
@@ -24834,7 +24833,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (_varCntCache.has(r)) return _varCntCache.get(r);
     let ms = r.models;
     if (!Array.isArray(ms)) { try { ms = JSON.parse(ms || '[]'); } catch (_) { ms = []; } }
-    const n = ms.filter(m => m && String(m.n || '').trim()).length;
+    const n = ms.filter(m => m && !m.ghost && String(m.n || '').trim()).length;   // ★中身のない枠(ghost)は明細数に数えない
     _varCntCache.set(r, n);
     return n;
   }
