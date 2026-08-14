@@ -1520,7 +1520,26 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
     throw eAdd;
   }
-  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust };
+  // ④ ★仕上げに必ず突き合わせる：明細の枠（option）と中身（model）の数が合っているか。
+  //   合っていない＝「枠だけの明細」ができている状態で、Shopee側では価格・重量が空の行になり
+  //   **以後その商品はどの保存も通らなくなる**（2026-08-14 実際に発生）。
+  //   add_model が一部だけ通った／上限100に当たった等でも起きるので、**成功扱いのときも必ず確認**し、
+  //   ずれていればその場で掃除する（人が🧹を押しに来るまで壊れたまま、を作らない）。
+  var healed = 0, finalOpt = 0, finalModel = 0;
+  try {
+    var jv = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+    var rv = jv.response || {};
+    finalOpt = (((rv.tier_variation || [])[0] || {}).option_list || []).length;
+    finalModel = (rv.model || []).length;
+    if (finalOpt !== finalModel) {
+      try { var cv = cleanVariation_(shopId, itemId); healed = (cv && cv.removed) || 0; } catch (e3) {}
+      var jv2 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+      finalOpt = ((((jv2.response || {}).tier_variation || [])[0] || {}).option_list || []).length;
+      finalModel = ((jv2.response || {}).model || []).length;
+    }
+  } catch (e4) {}
+  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust,
+           healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {
