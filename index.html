@@ -3076,6 +3076,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "⚠ 親SKUが別シリーズと重複（": "⚠ Parent SKU clashes with another series (",
     "🖨 きょうの作業指示": "🖨 Today's work sheet",
     "🖨 きょうの作業指示を印刷": "🖨 Print today's work sheet",
     "🖨 きょうの作業指示（外注さんに渡す紙）": "🖨 Today's work sheet (the sheet you hand to staff)",
@@ -14422,6 +14423,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
+      '➕ <b>明細を一括追加したのに一覧の数字が変わらない</b>のを修正。Shopee側には入っているのに「73バリエーション・空27」のままで壊れて見えていた（追加後にそのカタログを取り直していなかった）。<b>追加が終わった時点で、その1件だけShopeeから読み直して数字を更新</b>する（✎カタログ編集で直したときと同じ扱いに揃えた）。',
       '🖨 <b>きょうの作業指示（A4 1枚）</b>を追加（📖マニュアル＞📦梱包・発送／📦注文管理から印刷）。タイミー等で<b>毎回ちがう人が来る</b>前提の紙で、<b>手順は4つだけ・判断は「保留トレー」で回避・チェックは「伝票の枚数＝荷物の数」だけ</b>。<b>17時の集荷</b>が仕事の核なのでそこだけ枠を大きくした。日付と本日の発送件数は自動で入る。カゴの色・集荷時刻・連絡先は⚙️設定で変更可。',
       '🌐 <b>英語表示の未訳を一掃</b>：ボタン・ラベル・短い説明の未訳 <b>408件</b>を辞書に追加（辞書は約1,640語に）。外注さんが英語で開いたときに日本語のまま残る箇所を大幅に削減。残りは長文のツールチップ（開発者向けの注記が多い）。',
       '🔄 <b>「まとめて更新」が名前どおり全部を取りに行くように</b>。これまでは注文・売上・入金・出品だけで、<b>荷物の追跡／仕入れメールの取込／🚚倉庫へ発送済／♾️無在庫の在庫監視／↩️返品／📗利益計算表は各自のトリガー任せ</b>（1時間〜12時間おき）＝「今すぐ最新にしたい」に応えられていなかった。押した時点で全部を並列で取りに行き、<b>何が取れて何が落ちたかを ✓/△ で1つずつ表示</b>する（1つ落ちても他は進む）。入金(escrow)だけは重いので従来どおり背景取得。',
@@ -23920,6 +23923,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     _grpMap = m; _grpAt = Date.now();
     return m;
   }
+  // ⚠ 親SKUの「相乗り」を見つける（2026-08-14）
+  //   親SKUは JAN・型番・自社コード・識別項目・出品台帳の原価 の鍵。
+  //   ★①②③のような【同じ群】が同じ親SKUを使うのは**正しい**（明細ごとの鍵は「親SKU｜明細名」で衝突しない）。
+  //   問題なのは【別の群なのに同じ親SKU】＝別商品の原価や識別が混ざる。ここだけ警告する。
+  let _skuMap = null, _skuAt = 0;
+  function skuIndex() {
+    if (_skuMap && Date.now() - _skuAt < 4000) return _skuMap;
+    const m = new Map();
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const sku = String(r.parent_sku || '').trim();
+      if (!sku) return;
+      const k = cc + '|' + sku.toLowerCase();
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }));
+    _skuMap = m; _skuAt = Date.now();
+    return m;
+  }
+  // その出品の親SKUを、別の群のカタログにも使われていたら [相手…] を返す（無ければ空配列）
+  function skuClash(r) {
+    const sku = String(r.parent_sku || '').trim();
+    if (!sku) return [];
+    const mine = grpOf(r);
+    const all = skuIndex().get(r.cc + '|' + sku.toLowerCase()) || [];
+    return all.filter(x => String(x.item_id) !== String(r.item_id) && grpOf(x) !== mine);
+  }
+
   // 🔁 親SKUを変えたら、その親SKUを鍵にしている情報を新しい鍵へ引っ越す。
   //   放っておくと JAN・型番・自社コード・識別項目・出品台帳の原価が【前のSKUに取り残されて見えなくなる】。
   //   鍵は productIds が「親SKU」と「親SKU｜明細名」、出品台帳が「lst|親SKU」。
@@ -24403,6 +24433,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="Shopeeの販売(公開)ページを開く" style="text-decoration:none;color:#ee4d2d;font-weight:600;white-space:nowrap">🛍️販売ページ</a>` : ''}
           </div>
           ${(() => { const sh = sibHtml(r); return sh ? `<div style="margin-top:1px;line-height:1.7">${sh}</div>` : ''; })()}
+          ${(() => {
+            // ⚠ 別の群のカタログと親SKUがぶつかっている＝JAN・自社コード・識別項目・台帳の原価が混ざる
+            const cl = skuClash(r); if (!cl.length) return '';
+            const names = cl.slice(0, 3).map(x => String(x.name || '')).join('\n');   // 商品名は切らない（ツールチップなので全文でよい）
+            return `<div style="margin-top:2px"><span class="lst-skuclash" data-cc="${av(r.cc)}" data-sku="${av(r.parent_sku || '')}" ` +
+              `title="親SKU「${av(r.parent_sku || '')}」を、別のシリーズのカタログ ${cl.length}件も使っています。&#10;親SKUは JAN・型番・自社コード・識別項目・出品台帳の原価の鍵なので、&#10;このままだと別商品の情報が混ざります。どちらかの親SKUを変えてください。&#10;&#10;${av(names)}${cl.length > 3 ? '&#10;…ほか' + (cl.length - 3) + '件' : ''}" ` +
+              `style="cursor:help;background:#fdecea;color:#b3261e;border:1px solid #f5c2c2;border-radius:9px;padding:1px 7px;font-size:10.5px;font-weight:700;white-space:nowrap">⚠ 親SKUが別シリーズと重複（${cl.length}）</span></div>`;
+          })()}
         </div>
         <div style="font-size:10px;min-width:0" title="コンディション（新品／中古）">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:4px;padding:1px 4px;white-space:nowrap">${condLabel(sp.cond)}</span>` : `<span class="smd-dim" style="font-size:9px;border:1px dashed #dfe3e8;border-radius:4px;padding:0 3px;white-space:nowrap" title="この商品のコンディションをまだ取得できていません（設定が無いのではなく、未取得です）。上の「🔄 最新に更新」で埋まります">未取得</span>`}</div>
         <div style="min-width:0;font-size:9.5px" title="箱・説明書・本体の有無。明細ごとに持つので、ここでは商品全体の目安だけ出します">${(() => {
