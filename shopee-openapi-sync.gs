@@ -2889,6 +2889,8 @@ function syncListingsForShop_(tok, sinceSec) {
         parent_sku: it.item_sku || '', shop_id: String(shopId),
         price_min: price_min, price_max: price_max, stock: stock,
         model_count: model_count, models: models,
+        // ★枠(オプション)の名前。中身のないもの＝モデルが無い枠も一覧に行として出すために必要
+        opts: (((g.tier_variation || [])[0] || {}).option_list || []).map(function (o) { return String(o.option || ''); }),
         create_time: it.create_time || null, update_time: it.update_time || null, synced_at: new Date().toISOString()
       });
     });
