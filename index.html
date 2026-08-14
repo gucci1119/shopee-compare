@@ -2777,9 +2777,12 @@
   }
   // ★リロードしても消えない作業：状態を app_kv（key = job_*）に置き、GAS側が完了/失敗を書き戻す。
   //   ポータルは起動時と5秒おきにそれを読むだけ。開発でページを更新しても走り続ける。
-  async function jobRemoteCreate(kind, title, sub) {
+  // target = { cc, item_id, shop_id }。**リロードしても**完了時にそのカタログを取り直せるように、
+  // 対象を仕事の記録そのものに持たせる（ブラウザ側の紐付けはリロードで消えるため。2026-08-14）
+  async function jobRemoteCreate(kind, title, sub, target) {
     const key = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     const v = { kind, title, sub, status: 'run', pct: 0, step: '開始しています', created_at: new Date().toISOString() };
+    if (target && target.item_id) v.target = { cc: target.cc || '', item_id: String(target.item_id), shop_id: target.shop_id || '' };
     try { await sbUpsert('app_kv', [{ k: key, v, updated_at: new Date().toISOString() }]); } catch (_) {}
     return key;
   }
@@ -2937,6 +2940,7 @@
     } catch (_) {}
   }
   let jobPollTimer = null;
+  const JOB_REFRESHED = new Set();   // 完了後にカタログを取り直した仕事（同じ仕事で2回やらない）
   let jobPollBusy = false;
   async function jobPoll() {
     if (!settings.sbKey && !settings.sbSecret) return;
@@ -2966,6 +2970,13 @@
       const wasRun = j.state === 'run' || j.state === 'wait';
       j.state = v.status === 'done' ? 'done' : (v.status === 'error' ? 'err' : (v.status === 'cancel' ? 'stop' : 'run'));
       if (wasRun && j.state === 'done' && JOB_DONE_CB[r.k]) { try { JOB_DONE_CB[r.k](v); } catch (_) {} delete JOB_DONE_CB[r.k]; }
+      // ★仕事が終わったら、その対象カタログをShopeeから取り直して一覧の数字を合わせる。
+      //   ブラウザ側の紐付け（JOB_MIRROR）はリロードで消えるので、**仕事の記録に入れた target** で判定する。
+      //   これが無いと「Shopeeには入っているのに一覧は 1バリエーションのまま」になる（2026-08-14）。
+      if (wasRun && j.state === 'done' && v.target && v.target.item_id && !JOB_REFRESHED.has(r.k)) {
+        JOB_REFRESHED.add(r.k);
+        try { refreshOneListing(v.target.cc, v.target.item_id, v.target.shop_id); } catch (_) {}
+      }
       // ★完了したZIPの自動ダウンロードは「この端末で1回だけ」。
       //   メモリだけで持つとリロードのたびに再ダウンロードされるので、開いた印はlocalStorageに残す。
       // ★自動ダウンロードは【やめた】。同じZIPが何十個も落ちる事故が起きたため。
@@ -14493,6 +14504,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
       '🆕 <b>直したものが、読み直さなくても自動で反映されるように</b>。これまではブラウザが古い画面を持ったままで、<b>ハードリロードしても直らない</b>ように見えることがあった。3分ごと＋タブに戻ったときに新しい版が出ていないか確認し（本体は落とさずヘッダだけ見る）、<b>入力中・モーダル・ジョブ実行中でなければ自動で読み直す</b>。作業中は「🆕新しいバージョンがあります／今すぐ更新」を出して終わるまで待つ。',
       '🖼 <b>読めない画像の説明文で行が異常に高くなる</b>のを修正。画像枠は34pxしかないので、失敗時の代替テキストが<b>1文字ずつ縦に並んで</b>行を押し広げていた。斜線の枠だけ残して文字は出さない（理由はホバーの説明で分かる）。',
+      '🔁 <b>🔄（この商品だけ最新にする）が実は何も更新していなかった</b>のを修正。取得結果は内部形（name / model_list …）で返るのに、公式APIの生の形（item_name / models …）を読む書き方のままで<b>どのキーも当たっていなかった</b>。明細数・価格・在庫・画像・重量が一切反映されず、押しても数字が変わらない状態だった。あわせて<b>仕事が終わったら（リロードしていても）対象カタログを自動で取り直す</b>ようにした。',
       '🔢 <b>バリエ数のキャッシュが残って「1バリエーション」のままだった</b>のも修正。カタログを取り直して中身を入れ替えても、行オブジェクト単位のキャッシュ（WeakMap）が効いたままで、画面の数字が変わらなかった。取り直したらキャッシュを捨てるようにした。',
       '➕ <b>明細を一括追加したのに一覧の数字が変わらない</b>のを修正。Shopee側には入っているのに「73バリエーション・空27」のままで壊れて見えていた（追加後にそのカタログを取り直していなかった）。<b>追加が終わった時点で、その1件だけShopeeから読み直して数字を更新</b>する（✎カタログ編集で直したときと同じ扱いに揃えた）。',
       '🖨 <b>きょうの作業指示（A4 1枚）</b>を追加（📖マニュアル＞📦梱包・発送／📦注文管理から印刷）。タイミー等で<b>毎回ちがう人が来る</b>前提の紙で、<b>手順は4つだけ・判断は「保留トレー」で回避・チェックは「伝票の枚数＝荷物の数」だけ</b>。<b>17時の集荷</b>が仕事の核なのでそこだけ枠を大きくした。日付と本日の発送件数は自動で入る。カゴの色・集荷時刻・連絡先は⚙️設定で変更可。',
@@ -18342,7 +18354,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           try {
             // ★先に「しごと」を登録してから上げる。逆だと、アップロード中（30MBなら数十秒）は
             //   しごとセンターに何も出ず「動いていない」ように見える。
-            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）');
+            const key = await jobRemoteCreate('video', '商品動画の設定', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + Math.round(f.size / 1048576 * 10) / 10 + 'MB）', { cc: cc, item_id: itemId });
             JOB_T0[key] = Date.now();
             jobPollStart();
             try { await sbUpsert('app_kv', [{ k: key, v: { kind: 'video', title: '商品動画の設定', sub: cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24), status: 'run', pct: 5, step: 'この端末から動画を送っています', created_at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); } catch (_) {}
@@ -18464,7 +18476,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (msgI) { msgI.style.color = '#3b5bdb'; msgI.innerHTML = '🗂 <b>しごと</b>に積みました（右下で進み具合が見られます）。この画面は閉じて大丈夫です'; }
           (async () => {
             // ★状態はDBに置く＝ページをリロードしても走り続け、進み具合も戻ってくる
-            const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚' + (nos.length ? '・選択分' : '') + '）');
+            const key = await jobRemoteCreate('zip', '明細画像ZIP', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + targets.length + '枚' + (nos.length ? '・選択分' : '') + '）', { cc: cc, item_id: itemId });
             JOB_T0[key] = Date.now();
             JOB_MIRROR[key] = (v) => {
               if (!msgI || !msgI.isConnected) return;
@@ -18554,7 +18566,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
               // ③ ここから先はDB管理のしごとに引き継ぐ＝リロードしても続く
               ctx.progress(100, '準備完了');
-              const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）');
+              const key = await jobRemoteCreate('varimg', '明細画像の一括反映', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items.length + '枚）', { cc: cc, item_id: itemId });
               JOB_T0[key] = Date.now();
               JOB_MIRROR[key] = (v) => {
                 if (!go || !go.isConnected) return;
@@ -19319,7 +19331,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             const kv2 = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
             try {
               await sbUpsert('app_kv', [{ k: kv2, v: { items: items2 }, updated_at: new Date().toISOString() }]);
-              const key2 = await jobRemoteCreate('addvar', '明細をまとめて追加', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items2.length + '件）');
+              const key2 = await jobRemoteCreate('addvar', '明細をまとめて追加', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + items2.length + '件）', { cc: cc, item_id: itemId });
               JOB_T0[key2] = Date.now();
               JOB_MIRROR[key2] = (v) => {
                 // ★カタログを取り直すのは【ボタンが画面に残っているかに関係なく】必ずやる。
@@ -24317,23 +24329,30 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let d;
     try { d = await openapiGetItemInfo(shopId, itemId, 45000); }
     catch (e) { try { toast('自動更新できませんでした: ' + apiErrJa((e && e.message) || e), true); } catch (_) {} return; }
-    const info = (d && (d.info || d.item || d)) || {};
-    const ms = (d && (d.models || d.model)) || [];
-    const models = (ms || []).map(m => ({ id: m.model_id || m.id, n: m.name || m.n || '', sku: m.sku || '',
-      img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0 }));
+    // ★openapiGetItemInfo は apiPiFromFull() を通した【pi 形】を返す（name / model_list / image_ids …）。
+    //   ここは公式APIの生レスポンス（item_name / models / image.image_id_list）を読む書き方のままで、
+    //   **どのキーも当たっていなかった**＝🔄を押しても明細数が一切変わらなかった（2026-08-14 実測で判明）。
+    const pi = d || {};
+    const ms = pi.model_list || [];
+    const models = (ms || []).map(m => ({
+      id: m.id || m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '',
+      price: parseFloat(((m.price_info || {}).input_normal_price != null ? m.price_info.input_normal_price : (m.price_info || {}).normal_price)) || 0,
+      stock: (((((m.stock_detail || {}).seller_stock_info) || [])[0] || {}).sellable_stock) || 0,
+      sold: 0
+    }));
     const prices = models.map(m => m.price).filter(x => x > 0);
-    const imgs = ((info.image || {}).image_id_list) || [];
+    const imgs = (pi.image_ids || []).slice();
     const row = { cc, item_id: itemId, update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
-    if (info.item_name) row.name = info.item_name;
+    if (pi.name) row.name = pi.name;
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
-    if (info.item_sku != null) row.parent_sku = info.item_sku || '';
+    if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
     if (models.length) {
       row.models = models; row.model_count = models.length;
       row.stock = models.reduce((a, m) => a + (Number(m.stock) || 0), 0);
       if (prices.length) { row.price_min = Math.min(...prices); row.price_max = Math.max(...prices); }
     }
-    if (info.weight != null) row.weight = parseFloat(info.weight) || null;
-    if (info.video_info) { row.has_video = !!(info.video_info || []).length; row.video_url = ((info.video_info || [])[0] || {}).video_url || null; }
+    { const w = (pi.weight || {}).value; if (w !== '' && w != null) row.weight = parseFloat(w) || null; }
+    if (pi.video !== undefined) { row.has_video = !!pi.video; row.video_url = (pi.video && pi.video.url) || null; }
     // DBに書けない端末（書き込みキー未設定）でも、画面だけは最新にする
     if (settings.sbSecret) { try { await sbUpsert('listings', [row]); } catch (_) {} }
     // 画面のその行だけ差し替えて再描画（全件取り直さない）
