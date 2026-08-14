@@ -3091,6 +3091,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "⚠ 中身のない明細 ": "⚠ Empty variation slots ",
     "🆕 新しいバージョンがあります": "🆕 A new version is available",
     "今すぐ更新": "Update now",
     "作業が終わったら自動で更新します": "It will update automatically once you finish",
@@ -14501,6 +14502,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🗑 <b>明細を1つ消すと2つ減る／その商品が保存できなくなる</b>のを修正。削除は「消す対象以外は全部残す」作りだったため、過去の追加失敗で残った<b>枠だけの明細（オプションはあるがモデルが無い）</b>を毎回温存し、Shopee側では<b>価格・重量が空の行</b>になって<b>以後その商品はどの保存も通らなくなっていた</b>（77→1件削除→75表示の正体）。①残すのは<b>中身のある枠だけ</b>＝削除のついでに掃除 ②<b>枠と中身の数が合わなければ中止</b> ③削除後に読み直して<b>ずれていたら自動で掃除</b>（自己修復）。あわせて一覧のカードに <b>⚠ 中身のない明細 N件</b> を出して、Shopeeに弾かれる前に気づけるようにした。',
       '⚠️ <b>親SKUが別シリーズと重複していたら警告</b>：親SKUは JAN・型番・自社コード・識別項目・<b>出品台帳の原価</b>の鍵なので、別商品どうしが同じ親SKUだと情報が混ざる。カードに「⚠ 親SKUが別シリーズと重複」を出すようにした。<b>①②③のような同じ群が同じ親SKUを使うのは正しい</b>（明細ごとの鍵は「親SKU｜明細名」で衝突しない）ので、そこには出さない。',
       '🆕 <b>直したものが、読み直さなくても自動で反映されるように</b>。これまではブラウザが古い画面を持ったままで、<b>ハードリロードしても直らない</b>ように見えることがあった。3分ごと＋タブに戻ったときに新しい版が出ていないか確認し（本体は落とさずヘッダだけ見る）、<b>入力中・モーダル・ジョブ実行中でなければ自動で読み直す</b>。作業中は「🆕新しいバージョンがあります／今すぐ更新」を出して終わるまで待つ。',
       '🖼 <b>読めない画像の説明文で行が異常に高くなる</b>のを修正。画像枠は34pxしかないので、失敗時の代替テキストが<b>1文字ずつ縦に並んで</b>行を押し広げていた。斜線の枠だけ残して文字は出さない（理由はホバーの説明で分かる）。',
@@ -24347,11 +24349,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       sold: 0
     }));
     const prices = models.map(m => m.price).filter(x => x > 0);
+    // ★オプション（明細の枠）の数。モデル数より多い＝「中身のない明細」が居る。
+    //   Shopee側では価格・重量が空の行になり、**その商品は以後どの保存も通らなくなる**ので、
+    //   一覧のカードで気づけるように控えておく（2026-08-14）。
+    const optCount = (((pi.std_tier_variation_list || [])[0] || {}).value_list || []).length;
     const imgs = (pi.image_ids || []).slice();
     const row = { cc, item_id: itemId, update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
     if (pi.name) row.name = pi.name;
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
     if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
+    if (optCount) row.opt_count = optCount;
     if (models.length) {
       row.models = models; row.model_count = models.length;
       row.stock = models.reduce((a, m) => a + (Number(m.stock) || 0), 0);
@@ -24542,6 +24549,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="Shopeeの販売(公開)ページを開く" style="text-decoration:none;color:#ee4d2d;font-weight:600;white-space:nowrap">🛍️販売ページ</a>` : ''}
           </div>
           ${(() => { const sh = sibHtml(r); return sh ? `<div style="margin-top:1px;line-height:1.7">${sh}</div>` : ''; })()}
+          ${(() => {
+            // ⚠ 中身のない明細（枠だけあって価格・在庫が無い）。放置するとShopee側でその商品の保存が全部通らなくなる
+            const oc = Number(r.opt_count || 0), mc = varCount(r);
+            if (!oc || oc <= mc) return '';
+            return `<div style="margin-top:2px"><span class="lst-orphan" data-cc="${av(r.cc)}" data-id="${av(r.item_id)}" ` +
+              `title="明細の枠が ${oc} 件あるのに、中身（価格・在庫）があるのは ${mc} 件です。&#10;差の ${oc - mc} 件は「枠だけの明細」で、Shopeeでは価格・重量が空の行として出ます。&#10;この状態だと、その商品は以後どの保存も通らなくなります。&#10;✎編集を開いて 🧹 で掃除してください。" ` +
+              `style="cursor:help;background:#fff4e5;color:#b26a00;border:1px solid #ffd8a8;border-radius:9px;padding:1px 7px;font-size:10.5px;font-weight:700;white-space:nowrap">⚠ 中身のない明細 ${oc - mc}件</span></div>`;
+          })()}
           ${(() => {
             // ⚠ 別の群のカタログと親SKUがぶつかっている＝JAN・自社コード・識別項目・台帳の原価が混ざる
             const cl = skuClash(r); if (!cl.length) return '';
