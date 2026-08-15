@@ -27319,18 +27319,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let sum = 0; for (let i = 0; i < 12; i++) sum += (+d[i]) * (i % 2 ? 3 : 1);
     return ((10 - (sum % 10)) % 10) === (+d[12]);
   }
-  // 検索キーワード → [{url, title}]（上位のみ）
+  // 検索キーワード → 商品ページURLの配列（上位のみ）
+  // ★リンクは /2818109012/?q=... のように**クエリが付く**。ここを見落として0件になっていた（2026-08-16）
   async function yamadaSearch(kw) {
     const q = String(kw || '').trim(); if (!q) return [];
     const html = String(await bridgeRequest('GET', YAMADA + '/search?q=' + encodeURIComponent(q), null, { timeout: 20000 }));
     const out = [], seen = {};
-    const re = /<a[^>]+href=["']\/(\d{6,})\/?["'][^>]*>([\s\S]{0,400}?)<\/a>/gi;
+    const re = /href=["'](?:https?:\/\/www\.yamada-denkiweb\.com)?\/(\d{6,})\/?(?:\?[^"']*)?["']/gi;
     let m;
-    while ((m = re.exec(html)) && out.length < 8) {
+    while ((m = re.exec(html)) && out.length < 4) {
       const id = m[1]; if (seen[id]) continue; seen[id] = 1;
-      const title = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-      if (!title) continue;
-      out.push({ url: YAMADA + '/' + id + '/', title: title });
+      out.push(YAMADA + '/' + id + '/');
     }
     return out;
   }
@@ -27345,23 +27344,32 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const pm = flat.match(/[■\n]\s*型番[\s\n:：]*([A-Za-z0-9][A-Za-z0-9\-]{4,24})/);
     if (pm) mpn = pm[1];
     const tm = html.match(/<title>([\s\S]{0,200}?)<\/title>/i);
-    const title = tm ? tm[1].replace(/\s*\|\s*ヤマダウェブコム\s*$/, '').replace(/\s+/g, ' ').trim() : '';
+    const title = tm ? tm[1].replace(/\s*[|｜]\s*ヤマダウェブコム\s*$/, '').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim() : '';
     if (!mpn && title) { const t2 = title.match(/\b([A-Z]{2,4}-[A-Z0-9]{1,4}-[A-Z0-9]{3,8})\b/); if (t2) mpn = t2[1]; }
     return { jan: jan, mpn: mpn, title: title, url: url };
   }
   // 明細名（英語）＋カタログ名から検索語を作り、いちばんそれらしい商品のJANを返す
   // 返り値 null＝見つからなかった（当てずっぽうで返さない）
   async function janLookupOne(kw) {
-    const hits = await yamadaSearch(kw);
-    if (!hits.length) return null;
-    // 語がどれだけ含まれているかで並べ替え（短い語・記号は無視）
-    const words = String(kw).toLowerCase().split(/[\s　]+/).filter(w => w.length >= 2);
-    const score = t => { const s = t.toLowerCase(); return words.filter(w => s.includes(w)).length; };
-    hits.sort((a, b) => score(b.title) - score(a.title));
-    const best = hits[0];
-    if (words.length >= 2 && score(best.title) < 2) return null;   // 1語しか合っていない＝別物の疑い
-    const pr = await yamadaProduct(best.url);
-    return pr.jan ? pr : null;
+    const urls = await yamadaSearch(kw);
+    if (!urls.length) return null;
+    // ★検索結果のHTMLからは商品名を安定して取れない（画像だけのリンクがある）。
+    //   **商品ページの<title>で判定する**。確実な代わりに1件につき数回取りに行く。
+    const words = String(kw).toLowerCase().replace(/[:：]/g, ' ').split(/[\s　]+/).filter(w => w.length >= 2);
+    const need = Math.max(2, Math.ceil(words.length * 0.5));
+    const score = t => { const s = String(t).toLowerCase(); return words.filter(w => s.includes(w)).length; };
+    let best = null, bestSc = 0;
+    for (const u of urls) {
+      let pr = null; try { pr = await yamadaProduct(u); } catch (_) { continue; }
+      if (!pr || !pr.jan) continue;
+      const sc = score(pr.title);
+      if (sc > bestSc) { best = pr; bestSc = sc; }
+      if (sc >= need) break;                       // 十分に合っていれば残りは見ない
+    }
+    if (!best) return null;
+    if (words.length >= 2 && bestSc < 2) return null;   // 1語しか合っていない＝別物の疑い
+    best.score = bestSc + '/' + words.length;
+    return best;
   }
 
   // 🔎ヤマダ用の検索語。**フリマ用（sourcingKeyword）とは作り方が違う**。
