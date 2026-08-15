@@ -14683,6 +14683,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '⛔ <b>ヤマダは連続で叩くとIPごと制限されます</b>（実際に踏みました）。JAN探しは<b>2.2秒以上の間隔・直列</b>で、同じURLは1回しか取りに行かず、<b>制限ページを見たらその場で全部止める</b>ようにしました。制限中はそのことを画面に出します（黙って「見つかりません」にしない）。時間を置けば戻ります。',
       '🔎 <b>ネットからJANを探せるようにしました</b>（出品一覧のJAN/型番欄・カタログごと）。明細名から<b>ヤマダウェブコム</b>を検索し、商品ページの JAN と型番を<b>空いている欄だけ</b>に入れます。検索はGAS（サーバのIP）だと403ですが、ブリッジ＝本人のブラウザからなら通ります。<b>拾った商品名を欄の下に必ず出す</b>ので、違う商品を拾っていればその場で分かります。1語しか一致しない候補は<b>入れません</b>（当てずっぽうを入れない）。JANは検査数字まで確かめます。',
       '🧯 <b>【重要】自社コードと識別項目が保存で消えていたのを修正</b>。JAN/型番の保存処理が <code>own</code>（自社コード）と <code>f</code>（識別項目）を書き戻しておらず、入力しても0.5秒後に消えていました。⚡この規則で自動で埋める・🔖自社コードを明細SKUに書く・識別項目が、まとめて効かない状態でした。',
       '📄 <b>複製で属性(specifics)が引き継げなかったのを修正</b>。Shopeeは選択式の属性でも value_id を 0 で返すことがあり、そのまま送ると <code>ValueId is required</code> で<b>属性がまるごと落ちて</b>いました。カテゴリの選択肢表から<b>名前でIDを引き直す</b>ようにし、引けない属性は<b>その属性だけ</b>捨てて名前を通知します。属性で失敗しても<b>親SKUは入れ直す</b>ようにしました。',
@@ -26270,8 +26271,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         i++; btn.textContent = '🔎 探しています ' + i + '/' + targets.length;
         const q = janKeyword(row, m);
         if (!q || !q.kw) continue;
-        let res = null;
-        try { res = await janLookupOne(q.kw, q.machine); } catch (e) { console.warn('[JAN] ' + q.kw, e); }
+        let res = null, blocked = false;
+        try { res = await janLookupOne(q.kw, q.machine); }
+        catch (e) { if (String(e && e.message) === '__YD_BLOCKED__') blocked = true; else console.warn('[JAN] ' + q.kw, e); }
+        if (blocked) { missed.push('※ ヤマダ側にアクセスを制限されたため、ここで中止しました'); break; }
         const pr = res && res.hit;
         if (!pr) { missed.push('・' + (m.n || '(単品)') + '\n　 探した語: ' + q.kw
           + ((res && res.q && res.q !== q.kw) ? '（短くして「' + res.q + '」でも探しました）' : '')
@@ -26284,7 +26287,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       btn.disabled = false; btn.textContent = old;
       if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
       // ★何を拾ったかを**必ず見せる**。JANだけ出しても正しいか判断できない
-      alert('🔎 ' + hit + '/' + targets.length + '件にJANを入れました。\n\n'
+      if (_ydBlocked) alert('⛔ ヤマダ側にアクセスを制限されました。\n\n'
+        + '短い時間に何度も見に行くとこうなります。**しばらく（30分〜数時間）空けてから**もう一度お試しください。\n'
+        + '入れられた分（' + hit + '件）はそのまま残っています。\n\n'
+        + '※このままだと普通の買い物でもヤマダが開けないことがあります。時間を置けば戻ります。');
+      else alert('🔎 ' + hit + '/' + targets.length + '件にJANを入れました。\n\n'
         + (found.length ? '【入れた分】拾った商品名を確認してください（違っていればJAN欄を消してください）\n' + found.join('\n') + '\n\n' : '')
         + (missed.length ? '【入らなかった分】見た候補と理由\n' + missed.join('\n') : ''));
     }));
@@ -27316,6 +27323,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★間違ったJANが付くのが一番こわいので、**必ず出典（拾った商品名とURL）を一緒に残す**。
   //   拾った名前が想像と違えば、一覧を見た瞬間に分かる。
   const YAMADA = 'https://www.yamada-denkiweb.com';
+  // ★ヤマダは連続で叩くと **IPごと「アクセスが制限されました。」** になる（2026-08-16 実際に踏んだ）。
+  //   ここを守らないと、探せないどころか**本人のブラウザから普通に買い物もできなくなる**。
+  //   ・呼び出しの間隔を必ず空ける（直列・最低2秒）
+  //   ・同じURLは1回しか取りに行かない（画面を開き直すまで覚えておく）
+  //   ・制限ページを見たら**その場で全部やめる**（叩き続けると制限が伸びる）
+  let _ydLast = 0, _ydBlocked = false; const _ydCache = new Map();
+  const YD_GAP = 2200;
+  async function yamadaGet(url) {
+    if (_ydBlocked) throw new Error('__YD_BLOCKED__');
+    if (_ydCache.has(url)) return _ydCache.get(url);
+    const wait = _ydLast + YD_GAP - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _ydLast = Date.now();
+    const html = String(await bridgeRequest('GET', url, null, { timeout: 20000 }));
+    if (/アクセスが制限されました/.test(html)) { _ydBlocked = true; throw new Error('__YD_BLOCKED__'); }
+    _ydCache.set(url, html);
+    return html;
+  }
   const janNorm = s => String(s || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\D/g, '');
   // JANの検査数字（13桁）。ページから拾った数字が本当にJANかを確かめる
   function janValid(code) {
@@ -27327,11 +27352,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★リンクは /2818109012/?q=... のように**クエリが付く**。ここを見落として0件になっていた（2026-08-16）
   async function yamadaSearch(kw) {
     const q = String(kw || '').trim(); if (!q) return [];
-    const html = String(await bridgeRequest('GET', YAMADA + '/search?q=' + encodeURIComponent(q), null, { timeout: 20000 }));
+    const html = await yamadaGet(YAMADA + '/search?q=' + encodeURIComponent(q));
     const out = [], seen = {};
     const re = /href=["'](?:https?:\/\/www\.yamada-denkiweb\.com)?\/(\d{6,})\/?(?:\?[^"']*)?["']/gi;
     let m;
-    while ((m = re.exec(html)) && out.length < 4) {
+    while ((m = re.exec(html)) && out.length < 3) {
       const id = m[1]; if (seen[id]) continue; seen[id] = 1;
       out.push(YAMADA + '/' + id + '/');
     }
@@ -27339,7 +27364,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 商品ページ → {jan, mpn, title}
   async function yamadaProduct(url) {
-    const html = String(await bridgeRequest('GET', url, null, { timeout: 20000 }));
+    const html = await yamadaGet(url);
     const flat = html.replace(/<[^>]+>/g, '\n').replace(/&amp;/g, '&').replace(/[ \t]+/g, ' ');
     let jan = '';
     const jm = flat.match(/JAN[\s\n:：]*([0-9０-９]{13})/);
@@ -27395,7 +27420,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function janLookupOne(kw, machine) {
     let urls = [], usedQ = '';
     for (const q of janQueries(kw, machine)) {
-      try { urls = await yamadaSearch(q); } catch (_) { urls = []; }
+      try { urls = await yamadaSearch(q); }
+      catch (e) { if (String(e && e.message) === '__YD_BLOCKED__') throw e; urls = []; }   // 制限は握りつぶさない
       if (urls.length) { usedQ = q; break; }
     }
     if (!urls.length) return { hit: null, tried: [], urls: 0 };
@@ -27406,7 +27432,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const score = t => { const s = String(t).toLowerCase(); return words.filter(w => s.includes(w)).length; };
     let best = null, bestSc = 0; const tried = [];
     for (const u of urls) {
-      let pr = null; try { pr = await yamadaProduct(u); } catch (e) { tried.push('(取得できず) ' + u); continue; }
+      let pr = null;
+      try { pr = await yamadaProduct(u); }
+      catch (e) { if (String(e && e.message) === '__YD_BLOCKED__') throw e; tried.push('(取得できず) ' + u); continue; }
       if (!pr) continue;
       if (!pr.jan) { tried.push('JANなし: ' + (pr.title || u)); continue; }
       if (!machineOk(pr.title, machine)) { tried.push('機種ちがい: ' + pr.title); continue; }
