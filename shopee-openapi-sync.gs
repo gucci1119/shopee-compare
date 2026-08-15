@@ -2821,6 +2821,12 @@ function backfillReturns() { return syncReturnsRange_(730); }    // 初回バッ
 // 作り方：inventory.shopee_sn ↔ orders.sn で突合し、その注文の明細名 → inventory.name_supplier。
 //   同じ明細名が複数あれば**新しい仕入れを優先**（在庫の作成順で後勝ち）。
 // 置き場所：app_kv k='sourcing_dict' → { at, n, d:{ <正規化した明細名>: 日本語タイトル } }
+// 辞書に入れてはいけないもの
+//  ・SD_GENERIC＝色名など、**どのカタログにも出る明細名**（Black / White / Violet …）。
+//    別商品の名前が付くので危険（実測で Black → 「Switch ドック×8, ハンドル×5…」が入っていた）
+//  ・SD_BUNDLE ＝まとめ買いの在庫名。1明細の検索語としては役に立たない
+var SD_GENERIC = /^(black|white|red|blue|green|violet|purple|yellow|pink|gray|grey|silver|gold|navy|orange|brown|clear|multi|set|used|new|other|none|na|n\/a|白|黒|赤|青|緑|紫|黄|桃|銀|金|茶|透明)$/i;
+var SD_BUNDLE = /([×x]\s*\d|\d+\s*(点|個|本|枚|台)\s*(セット|まとめ)|まとめ売り|セット売り|ジャンク品?まとめ)/i;
 function buildSourcingDict() {
   var nk = function (v) { return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' '); };
   // ★1対1で結びつくものだけ使う。ここを緩めると【全然違う商品の名前】が付く。
@@ -2841,7 +2847,9 @@ function buildSourcingDict() {
     var its = o.items; if (typeof its === 'string') { try { its = JSON.parse(its); } catch (e) { its = []; } }
     if (!its || its.length !== 1) { if (its && its.length > 1) skipMulti++; return; }   // 明細2件以上＝どれか分からない
     var v = nk(its[0] && its[0].variation); if (!v) return;
+    if (SD_GENERIC.test(v) || v.length < 4) return;                  // 色名など、どのカタログにも出る名前は当てにならない
     var ja = bySn[sn]; if (!ja) return;
+    if (SD_BUNDLE.test(ja)) return;                                  // まとめ買いの在庫名（×8・セット等）は検索語にならない
     used++;
     if (!cand[v]) cand[v] = {};
     cand[v][ja] = (cand[v][ja] || 0) + 1;
