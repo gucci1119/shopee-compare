@@ -26265,14 +26265,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       if (!targets.length) { toast('JANが空いている明細がありません', true); return; }
       const old = btn.textContent; btn.disabled = true;
-      let hit = 0, i = 0; const found = [];
+      let hit = 0, i = 0; const found = [], missed = [];
       for (const m of targets) {
         i++; btn.textContent = '🔎 探しています ' + i + '/' + targets.length;
         const q = janKeyword(row, m);
         if (!q || !q.kw) continue;
-        let pr = null;
-        try { pr = await janLookupOne(q.kw, q.machine); } catch (e) { console.warn('[JAN] ' + q.kw, e); }
-        if (!pr) continue;
+        let res = null;
+        try { res = await janLookupOne(q.kw, q.machine); } catch (e) { console.warn('[JAN] ' + q.kw, e); }
+        const pr = res && res.hit;
+        if (!pr) { missed.push('・' + (m.n || '(単品)') + '\n　 探した語: ' + q.kw
+          + '\n　 ' + (res && res.tried && res.tried.length ? res.tried.join('\n　 ') : 'ヤマダに候補なし')); continue; }
         const k = pidKeyModel(row, m); const prev = productIds[k] || {};
         productIds[k] = { jan: pr.jan, mpn: prev.mpn || pr.mpn || '', own: prev.own || '', cond: prev.cond || '',
           src: pr.title, srcUrl: pr.url, at: Date.now() };
@@ -26281,8 +26283,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       btn.disabled = false; btn.textContent = old;
       if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
       // ★何を拾ったかを**必ず見せる**。JANだけ出しても正しいか判断できない
-      if (hit) alert('🔎 ' + hit + '/' + targets.length + '件にJANを入れました。\n\n拾った商品名を確認してください（違っていればJAN欄を消してください）\n\n' + found.join('\n'));
-      else toast('🔎 ' + targets.length + '件を探しましたが、確かなものは見つかりませんでした（当てずっぽうでは入れません）', true);
+      alert('🔎 ' + hit + '/' + targets.length + '件にJANを入れました。\n\n'
+        + (found.length ? '【入れた分】拾った商品名を確認してください（違っていればJAN欄を消してください）\n' + found.join('\n') + '\n\n' : '')
+        + (missed.length ? '【入らなかった分】見た候補と理由\n' + missed.join('\n') : ''));
     }));
     // 🎮 状態（箱・説明書の有無）。JANが同じでも状態が違えば別物として扱う
     document.querySelectorAll('#lst-list .lst-mcond').forEach(sel => sel.addEventListener('change', () => {
@@ -27382,19 +27385,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const words = String(kw).toLowerCase().replace(/[:：]/g, ' ').split(/[\s　]+/).filter(w => w.length >= 2);
     const need = Math.max(2, Math.ceil(words.length * 0.5));
     const score = t => { const s = String(t).toLowerCase(); return words.filter(w => s.includes(w)).length; };
-    let best = null, bestSc = 0;
+    let best = null, bestSc = 0; const tried = [];
     for (const u of urls) {
-      let pr = null; try { pr = await yamadaProduct(u); } catch (_) { continue; }
-      if (!pr || !pr.jan) continue;
-      if (!machineOk(pr.title, machine)) continue;   // 機種違いは点数を見るまでもなく捨てる
+      let pr = null; try { pr = await yamadaProduct(u); } catch (e) { tried.push('(取得できず) ' + u); continue; }
+      if (!pr) continue;
+      if (!pr.jan) { tried.push('JANなし: ' + (pr.title || u)); continue; }
+      if (!machineOk(pr.title, machine)) { tried.push('機種ちがい: ' + pr.title); continue; }
       const sc = score(pr.title);
+      tried.push(sc + '点: ' + pr.title);
       if (sc > bestSc) { best = pr; bestSc = sc; }
       if (sc >= need) break;                       // 十分に合っていれば残りは見ない
     }
-    if (!best) return null;
-    if (words.length >= 2 && bestSc < 2) return null;   // 1語しか合っていない＝別物の疑い
+    // ★見つからない時に**なぜか**を返す。黙って0件にすると直しようがない
+    if (!best || (words.length >= 2 && bestSc < 2)) return { hit: null, tried: tried, urls: urls.length };
     best.score = bestSc + '/' + words.length;
-    return best;
+    return { hit: best, tried: tried, urls: urls.length };
   }
 
   // 🔎ヤマダ用の検索語。**フリマ用（sourcingKeyword）とは作り方が違う**。
