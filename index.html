@@ -26274,6 +26274,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         try { res = await janLookupOne(q.kw, q.machine); } catch (e) { console.warn('[JAN] ' + q.kw, e); }
         const pr = res && res.hit;
         if (!pr) { missed.push('・' + (m.n || '(単品)') + '\n　 探した語: ' + q.kw
+          + ((res && res.q && res.q !== q.kw) ? '（短くして「' + res.q + '」でも探しました）' : '')
           + '\n　 ' + (res && res.tried && res.tried.length ? res.tried.join('\n　 ') : 'ヤマダに候補なし')); continue; }
         const k = pidKeyModel(row, m); const prev = productIds[k] || {};
         productIds[k] = { jan: pr.jan, mpn: prev.mpn || pr.mpn || '', own: prev.own || '', cond: prev.cond || '',
@@ -27377,9 +27378,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (pat[1] && pat[1].test(t)) return false;  // 別機種の印がある＝違う
     return pat[0].test(t);
   }
+  // ★ヤマダの検索は語をそのまま突き合わせるので**長いと0件**になる（実測: 「The Last of us Best PS4」で0件）。
+  //   そこで【長い順に短くしながら】候補が出るまで試す。短くしても機種の判定は最後にかかるので、別機種は入らない。
+  function janQueries(kw, machine) {
+    const base = String(kw).replace(new RegExp('\\s+' + String(machine || '\u0000') + '$', 'i'), '').trim();
+    const w = base.split(/\s+/).filter(Boolean);
+    const list = [kw];
+    if (base && base !== kw) list.push(base);
+    for (let n = Math.min(w.length - 1, 4); n >= 2; n--) {
+      const short = w.slice(0, n).join(' ');
+      if (machine) list.push(short + ' ' + machine);
+      list.push(short);
+    }
+    return [...new Set(list.filter(x => x && x.length >= 3))].slice(0, 6);
+  }
   async function janLookupOne(kw, machine) {
-    const urls = await yamadaSearch(kw);
-    if (!urls.length) return null;
+    let urls = [], usedQ = '';
+    for (const q of janQueries(kw, machine)) {
+      try { urls = await yamadaSearch(q); } catch (_) { urls = []; }
+      if (urls.length) { usedQ = q; break; }
+    }
+    if (!urls.length) return { hit: null, tried: [], urls: 0 };
     // ★検索結果のHTMLからは商品名を安定して取れない（画像だけのリンクがある）。
     //   **商品ページの<title>で判定する**。確実な代わりに1件につき数回取りに行く。
     const words = String(kw).toLowerCase().replace(/[:：]/g, ' ').split(/[\s　]+/).filter(w => w.length >= 2);
@@ -27397,7 +27416,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (sc >= need) break;                       // 十分に合っていれば残りは見ない
     }
     // ★見つからない時に**なぜか**を返す。黙って0件にすると直しようがない
-    if (!best || (words.length >= 2 && bestSc < 2)) return { hit: null, tried: tried, urls: urls.length };
+    if (!best || (words.length >= 2 && bestSc < 2)) return { hit: null, tried: tried, urls: urls.length, q: usedQ };
     best.score = bestSc + '/' + words.length;
     return { hit: best, tried: tried, urls: urls.length };
   }
@@ -27414,6 +27433,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const mm = v.match(/^\s*([A-Za-z0-9]{1,8})\s*[:：]\s*(.+)$/);
     if (mm && MACHINE_TOK.test(mm[1])) { machine = mm[1]; v = mm[2]; }
     v = v.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')
+      .replace(/([A-Za-z])([Ⅰ-Ⅹ])/g, '$1 $2')                                   // PartⅡ → Part Ⅱ（詰まっていると検索が0件になる）
       .replace(/[Ⅰ-Ⅹ]/g, c => ['I','II','III','IV','V','VI','VII','VIII','IX','X'][c.charCodeAt(0) - 0x2160])
       .replace(/[（(].*?[）)]/g, ' ').replace(/\s+/g, ' ').trim();
     if (!v || v.length < 3) return null;
