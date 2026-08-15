@@ -14683,6 +14683,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🔎 <b>ネットからJANを探せるようにしました</b>（出品一覧のJAN/型番欄・カタログごと）。明細名から<b>ヤマダウェブコム</b>を検索し、商品ページの JAN と型番を<b>空いている欄だけ</b>に入れます。検索はGAS（サーバのIP）だと403ですが、ブリッジ＝本人のブラウザからなら通ります。<b>拾った商品名を欄の下に必ず出す</b>ので、違う商品を拾っていればその場で分かります。1語しか一致しない候補は<b>入れません</b>（当てずっぽうを入れない）。JANは検査数字まで確かめます。',
+      '🧯 <b>【重要】自社コードと識別項目が保存で消えていたのを修正</b>。JAN/型番の保存処理が <code>own</code>（自社コード）と <code>f</code>（識別項目）を書き戻しておらず、入力しても0.5秒後に消えていました。⚡この規則で自動で埋める・🔖自社コードを明細SKUに書く・識別項目が、まとめて効かない状態でした。',
       '📄 <b>複製で属性(specifics)が引き継げなかったのを修正</b>。Shopeeは選択式の属性でも value_id を 0 で返すことがあり、そのまま送ると <code>ValueId is required</code> で<b>属性がまるごと落ちて</b>いました。カテゴリの選択肢表から<b>名前でIDを引き直す</b>ようにし、引けない属性は<b>その属性だけ</b>捨てて名前を通知します。属性で失敗しても<b>親SKUは入れ直す</b>ようにしました。',
       '🧨 <b>【重要】明細の削除は「一番下」だけ可能にしました</b>（テスト用カタログで実証）。Shopeeの公式APIは<b>位置が変わる明細を保持できず</b>、途中の明細を消すと<b>後ろの明細がShopee側で消えます</b>（価格・在庫を載せる／新しい位置順に並べる／削除直後に読み直す、いずれでも防げませんでした）。そこで<b>一番下の明細だけ削除可能</b>にし、途中はGAS側でも事前に断ります。途中を消したいときはShopeeの編集画面から。',
       '🛑 <b>（経緯）明細の削除で3件失いました</b>。実データで確認したところ、<b>1件だけ消したつもりが3件消えていました</b>（意図した1件＋隣の1件が消え、さらに1件が「中身のない枠」になった）。原因の可能性（<code>update_tier_variation</code> に<b>価格・在庫を載せずに model_id と位置だけ送っていた</b>）は直しましたが、<b>安全が実機で確認できるまで削除ボタンは動きません</b>。削除が要る場合はShopeeの編集画面からお願いします。',
@@ -24195,7 +24197,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function saveProductIds() {
     if (_pidSaveT) clearTimeout(_pidSaveT);
     _pidSaveT = setTimeout(() => {
-      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (m && (((m.jan || '').trim()) || ((m.mpn || '').trim()) || ((m.cond || '').trim()))) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), at: m.at || Date.now() }; });
+      // ★2026-08-16：ここで **own（自社コード）と f（識別項目）を書き戻していなかった**。
+      //   500ms後の保存で毎回消えるため、⚡自動で埋める・🔖自社コードを明細SKUに書く・識別項目が
+      //   すべて「入れても消える」状態だった（product_ids が0件だった一因）。残す項目に加えた。
+      const has = m => !!(m && (String(m.jan || '').trim() || String(m.mpn || '').trim() || String(m.cond || '').trim()
+        || String(m.own || '').trim() || (m.f && Object.keys(m.f).some(x => String(m.f[x] || '').trim()))));
+      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), at: m.at || Date.now() }; });
       productIds = items;
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'product_ids', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] product_ids保存失敗', e));
     }, 500);
@@ -24462,6 +24469,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           '自分で決めるコード。JANも型番も無い商品（雑貨・ガチャ等）を見分けるため。\n例 BANDAI-PKFP-PIKACHU-2020（メーカー-シリーズ-キャラ-版）。\n付け方は右の「コード規則」に書いておくと、ここにヒントで出ます。',
           bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
+      // ★ネットから拾ったJANは【どの商品から拾ったか】を必ず出す。数字だけ見せても正しいか判断できない
+      + (pv.src ? '<div class="smd-dim" style="font-size:9px;line-height:1.25" title="' + av('🔎ネットから自動で入れた値です。拾った商品：' + pv.src + '\n' + (pv.srcUrl || '') + '\n違っていればJAN欄を消してください') + '">🔎 ' + esc(String(pv.src).slice(0, 40)) + (String(pv.src).length > 40 ? '…' : '') + '</div>' : '')
       + (dup ? (() => { const t = pidDupText(dup, itemId);
           return '<div style="font-size:9px;color:#d93025;font-weight:700" title="' + av('同じJAN／型番／自社コードが他の明細にも入っています（状態が同じもの同士だけを比べています）。\n' + (t || '')) + '">⚠ ' + (t ? esc(t) + 'と重複' : '重複') + '</div>'; })() : '')
       + '</div>';
@@ -24984,7 +24993,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const val = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
           const dup = val ? pidDupOf(pv) : null;
           return pidInputs(pk, pv, meta.codeRule, dup, r.item_id);
-})()}<div style="margin-top:3px;border-top:1px dotted #e3e6ec;padding-top:3px"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}"><div style="display:flex;gap:2px;flex-wrap:wrap;margin-top:2px">${[['game', 'ゲーム'], ['medal', 'メダル'], ['card', 'カード'], ['set', 'セット']].map(([k, n]) => `<button class="lst-idfpre" data-id="${r.item_id}" data-p="${k}" title="この商品の識別項目と自社コードの規則を、${n}向けの形にします。&#10;ゲーム＝機種/作品/版　メダル＝弾/キャラ/仕様　カード＝弾/番号/キャラ/レア度&#10;決めると、下の明細に入力欄が出ます" style="border:1px solid #cdd7ea;background:#f7fbff;color:#1565c0;border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">${n}</button>`).join('')}<button class="lst-cparts" data-id="${r.item_id}" title="ゲームのように「箱・説明書・本体」の有無で値段が変わるものはON。&#10;状態欄がチェック式になり、組み合わせから完品／説明書なし／ソフトのみが自動で決まります。" style="border:1px solid ${cpartsOf(r.item_id).length ? '#1a7f37' : '#dfe3e8'};background:${cpartsOf(r.item_id).length ? '#eafaef' : '#fff'};color:${cpartsOf(r.item_id).length ? '#1a7f37' : '#8a8f98'};border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">箱/説/本</button>${idfNames(r.item_id).length ? `<span class="smd-dim" style="font-size:9px;width:100%">${esc(idfNames(r.item_id).join(' / '))}</span>` : ''}</div>${(meta.codeRule || '') ? `<button class="lst-codefill" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}<button class="lst-janscan" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細の画像にバーコードが写っていれば、そこからJANを読み取って空いている欄に入れます。&#10;※表紙だけの写真にはたいてい写っていません（バーコードは裏面）。写っている物だけ拾えます。&#10;すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">📷 画像からJANを読む</button>${(() => {
+})()}<div style="margin-top:3px;border-top:1px dotted #e3e6ec;padding-top:3px"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}"><div style="display:flex;gap:2px;flex-wrap:wrap;margin-top:2px">${[['game', 'ゲーム'], ['medal', 'メダル'], ['card', 'カード'], ['set', 'セット']].map(([k, n]) => `<button class="lst-idfpre" data-id="${r.item_id}" data-p="${k}" title="この商品の識別項目と自社コードの規則を、${n}向けの形にします。&#10;ゲーム＝機種/作品/版　メダル＝弾/キャラ/仕様　カード＝弾/番号/キャラ/レア度&#10;決めると、下の明細に入力欄が出ます" style="border:1px solid #cdd7ea;background:#f7fbff;color:#1565c0;border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">${n}</button>`).join('')}<button class="lst-cparts" data-id="${r.item_id}" title="ゲームのように「箱・説明書・本体」の有無で値段が変わるものはON。&#10;状態欄がチェック式になり、組み合わせから完品／説明書なし／ソフトのみが自動で決まります。" style="border:1px solid ${cpartsOf(r.item_id).length ? '#1a7f37' : '#dfe3e8'};background:${cpartsOf(r.item_id).length ? '#eafaef' : '#fff'};color:${cpartsOf(r.item_id).length ? '#1a7f37' : '#8a8f98'};border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">箱/説/本</button>${idfNames(r.item_id).length ? `<span class="smd-dim" style="font-size:9px;width:100%">${esc(idfNames(r.item_id).join(' / '))}</span>` : ''}</div>${(meta.codeRule || '') ? `<button class="lst-codefill" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}<button class="lst-janscan" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細の画像にバーコードが写っていれば、そこからJANを読み取って空いている欄に入れます。&#10;※表紙だけの写真にはたいてい写っていません（バーコードは裏面）。写っている物だけ拾えます。&#10;すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">📷 画像からJANを読む</button><button class="lst-janweb" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細名から【ヤマダウェブコム】を検索して、JANと型番を空いている欄に入れます。&#10;拾った商品名とURLも一緒に残すので、違う商品を拾っていればその場で分かります。&#10;※すでに入っている欄は触りません。見つからなければ何も入れません（当てずっぽうで入れません）" style="margin-top:2px;width:100%;border:1px solid #1565c0;background:#f2f8ff;color:#1565c0;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔎 ネットからJANを探す</button>${(() => {
                   const n = (r.models || []).filter(m => { const k = pidKeyModel(r, m); return k && String((pidOf(k).own || '')).trim() && String((pidOf(k).own || '')).trim() !== String(m.sku || '').trim(); }).length;
                   if (!n) return '';
                   return `<button class="lst-skuwrite" data-cc="${av(r.cc)}" data-id="${r.item_id}" title="自社コードを、そのままShopeeの明細SKUとして書き込みます（${n}件）。&#10;明細名を直してもSKUは変わらないので、注文明細から棚の商品を引けるようになります。&#10;※すでに同じ値が入っている明細は飛ばします" style="margin-top:2px;width:100%;border:1px solid #b26a00;background:#fffaf0;color:#b26a00;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔖 自社コードを明細SKUに書く（${n}）</button>`;
@@ -26242,6 +26251,39 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
       toast(hit ? ('📷 ' + hit + '/' + targets.length + '件からJANを読み取りました') : ('📷 ' + targets.length + '件見ましたが、バーコードは写っていませんでした（表紙の写真だと入っていないのが普通です）'), !hit);
     }));
+    // 🔎 ヤマダウェブコムから JAN・型番を拾う（空いている欄だけ）
+    document.querySelectorAll('#lst-list .lst-janweb').forEach(btn => btn.addEventListener('click', async () => {
+      if (state.mode !== 'live') { alert('この機能は他サイトの取得にブラウザ拡張（ブリッジ）を使います。\nShopeeにログインした状態で開いてください。'); return; }
+      const id = btn.dataset.id, cc = btn.dataset.cc;
+      const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(id));
+      if (!row) return;
+      productIds = productIds || {};
+      const targets = (row.models || []).filter(m => {
+        if (m.ghost) return false;
+        const k = pidKeyModel(row, m); if (!k) return false;
+        return !String((productIds[k] || {}).jan || '').trim();
+      });
+      if (!targets.length) { toast('JANが空いている明細がありません', true); return; }
+      const old = btn.textContent; btn.disabled = true;
+      let hit = 0, i = 0; const found = [];
+      for (const m of targets) {
+        i++; btn.textContent = '🔎 探しています ' + i + '/' + targets.length;
+        const kw = sourcingKeyword(row.name, m.n || '');
+        if (!kw) continue;
+        let pr = null;
+        try { pr = await janLookupOne(kw); } catch (e) { console.warn('[JAN] ' + kw, e); }
+        if (!pr) continue;
+        const k = pidKeyModel(row, m); const prev = productIds[k] || {};
+        productIds[k] = { jan: pr.jan, mpn: prev.mpn || pr.mpn || '', own: prev.own || '', cond: prev.cond || '',
+          src: pr.title, srcUrl: pr.url, at: Date.now() };
+        hit++; found.push((m.n || '(単品)') + ' → ' + pr.title);
+      }
+      btn.disabled = false; btn.textContent = old;
+      if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
+      // ★何を拾ったかを**必ず見せる**。JANだけ出しても正しいか判断できない
+      if (hit) alert('🔎 ' + hit + '/' + targets.length + '件にJANを入れました。\n\n拾った商品名を確認してください（違っていればJAN欄を消してください）\n\n' + found.join('\n'));
+      else toast('🔎 ' + targets.length + '件を探しましたが、確かなものは見つかりませんでした（当てずっぽうでは入れません）', true);
+    }));
     // 🎮 状態（箱・説明書の有無）。JANが同じでも状態が違えば別物として扱う
     document.querySelectorAll('#lst-list .lst-mcond').forEach(sel => sel.addEventListener('change', () => {
       const key = sel.dataset.k; if (!key) return;
@@ -27261,6 +27303,65 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const out = [], seen = {};
     if (map) for (const asin in map) { if (/^[A-Z0-9]{10}$/i.test(asin) && !seen[asin]) { seen[asin] = 1; const lbl = (Array.isArray(map[asin]) ? map[asin].join(' ') : String(map[asin])).replace(/\s+/g, ' ').trim(); out.push({ asin: asin.toUpperCase(), label: lbl || asin }); } }
     return out;
+  }
+
+  // ================= 🔎 ネットからJANを探す（ヤマダウェブコム） =================
+  // ★なぜヤマダか：駿河屋/ヨドバシ/Amazon/メルカリは**JANを出していない**か、載っていても機械で拾えない。
+  //   ヤマダは商品ページに「JAN 4902370550337」「型番 HAC-P-AV5JA」が素で載っている（2026-08-16 実測）。
+  //   検索はGAS（サーバのIP）からだと403。**ブリッジ＝本人のブラウザから**なら通る（実測）。
+  // ★間違ったJANが付くのが一番こわいので、**必ず出典（拾った商品名とURL）を一緒に残す**。
+  //   拾った名前が想像と違えば、一覧を見た瞬間に分かる。
+  const YAMADA = 'https://www.yamada-denkiweb.com';
+  const janNorm = s => String(s || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\D/g, '');
+  // JANの検査数字（13桁）。ページから拾った数字が本当にJANかを確かめる
+  function janValid(code) {
+    const d = janNorm(code); if (d.length !== 13) return false;
+    let sum = 0; for (let i = 0; i < 12; i++) sum += (+d[i]) * (i % 2 ? 3 : 1);
+    return ((10 - (sum % 10)) % 10) === (+d[12]);
+  }
+  // 検索キーワード → [{url, title}]（上位のみ）
+  async function yamadaSearch(kw) {
+    const q = String(kw || '').trim(); if (!q) return [];
+    const html = String(await bridgeRequest('GET', YAMADA + '/search?q=' + encodeURIComponent(q), null, { timeout: 20000 }));
+    const out = [], seen = {};
+    const re = /<a[^>]+href=["']\/(\d{6,})\/?["'][^>]*>([\s\S]{0,400}?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html)) && out.length < 8) {
+      const id = m[1]; if (seen[id]) continue; seen[id] = 1;
+      const title = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+      if (!title) continue;
+      out.push({ url: YAMADA + '/' + id + '/', title: title });
+    }
+    return out;
+  }
+  // 商品ページ → {jan, mpn, title}
+  async function yamadaProduct(url) {
+    const html = String(await bridgeRequest('GET', url, null, { timeout: 20000 }));
+    const flat = html.replace(/<[^>]+>/g, '\n').replace(/&amp;/g, '&').replace(/[ \t]+/g, ' ');
+    let jan = '';
+    const jm = flat.match(/JAN[\s\n:：]*([0-9０-９]{13})/);
+    if (jm && janValid(jm[1])) jan = janNorm(jm[1]);
+    let mpn = '';
+    const pm = flat.match(/[■\n]\s*型番[\s\n:：]*([A-Za-z0-9][A-Za-z0-9\-]{4,24})/);
+    if (pm) mpn = pm[1];
+    const tm = html.match(/<title>([\s\S]{0,200}?)<\/title>/i);
+    const title = tm ? tm[1].replace(/\s*\|\s*ヤマダウェブコム\s*$/, '').replace(/\s+/g, ' ').trim() : '';
+    if (!mpn && title) { const t2 = title.match(/\b([A-Z]{2,4}-[A-Z0-9]{1,4}-[A-Z0-9]{3,8})\b/); if (t2) mpn = t2[1]; }
+    return { jan: jan, mpn: mpn, title: title, url: url };
+  }
+  // 明細名（英語）＋カタログ名から検索語を作り、いちばんそれらしい商品のJANを返す
+  // 返り値 null＝見つからなかった（当てずっぽうで返さない）
+  async function janLookupOne(kw) {
+    const hits = await yamadaSearch(kw);
+    if (!hits.length) return null;
+    // 語がどれだけ含まれているかで並べ替え（短い語・記号は無視）
+    const words = String(kw).toLowerCase().split(/[\s　]+/).filter(w => w.length >= 2);
+    const score = t => { const s = t.toLowerCase(); return words.filter(w => s.includes(w)).length; };
+    hits.sort((a, b) => score(b.title) - score(a.title));
+    const best = hits[0];
+    if (words.length >= 2 && score(best.title) < 2) return null;   // 1語しか合っていない＝別物の疑い
+    const pr = await yamadaProduct(best.url);
+    return pr.jan ? pr : null;
   }
 
   function listImgPrev() {
