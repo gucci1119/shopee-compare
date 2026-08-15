@@ -2860,14 +2860,39 @@ function cloneItem_(shopId, itemId, newName, publish) {
   };
   if (base.dimension) body.dimension = base.dimension;
   var out = addItem_(body);
+  // ★バリエーションの【軸名】（例: Title）と**置き場**を作る。明細（オプション）は引き継がず
+  //   「test」1件だけ入れておく＝本人のいつもの手順（1明細で作って、あとからまとめて追加）に合わせる。
+  //   これが無いと tier が存在せず「まとめて追加」が通らない。
+  if (out && out.item_id) {
+    var tierName = (((full.model || {}).tier_variation || [])[0] || {}).name || 'Title';
+    try {
+      callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', {
+        item_id: out.item_id,
+        tier_variation: [{ name: String(tierName).slice(0, 20), option_list: [{ option: 'test' }] }],
+        model: [{ tier_index: [0], original_price: price, seller_stock: [{ stock: 1 }], model_sku: '' }]
+      });
+      out.tier_name = tierName;
+    } catch (e) { out.tier_warn = String((e && e.message) || e); }
+  }
+  // ★商品動画も引き継ぐ（Shopeeは1本まで）。add_item では送れないので作成後に付ける
+  var vsrc = ((base.video_info || [])[0] || {});
+  var vurl = vsrc.video_url || '';
+  if (out && out.item_id && vurl) {
+    try { setItemVideo_(shopId, out.item_id, vurl); out.video = 1; }
+    catch (e) { out.video_warn = String((e && e.message) || e); }
+  }
   // 属性(specifics)は add_item では送れないので、作成後に update_item で移す（カテゴリが同じなのでそのまま通る）
   var attrs = (base.attribute_list || []).map(function (a) {
     return { attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).map(function (v) {
       return v.value_id ? { value_id: v.value_id, value_unit: v.value_unit } : { original_value_name: v.original_value_name };
     }) };
   }).filter(function (a) { return a.attribute_value_list.length; });
-  if (out && out.item_id && attrs.length) {
-    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, attribute_list: attrs }); }
+  // 属性＋親SKUをまとめて反映（親SKUは引き継いでから本人が①→②等にアレンジする）
+  if (out && out.item_id && (attrs.length || base.item_sku)) {
+    var up = { item_id: out.item_id };
+    if (attrs.length) up.attribute_list = attrs;
+    if (base.item_sku) up.item_sku = String(base.item_sku).slice(0, 100);
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', up); out.parent_sku = up.item_sku || ''; }
     catch (e) { out.attr_warn = String((e && e.message) || e); }
   }
   out.from_item_id = itemId;
