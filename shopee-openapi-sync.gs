@@ -2880,7 +2880,11 @@ function cloneItem_(shopId, itemId, newName, publish) {
     brand_id: ((base.brand || {}).brand_id) || 0,
     publish: publish ? 1 : 0        // 既定は非公開
   };
-  if (base.dimension) body.dimension = base.dimension;
+  // ★寸法は0が入っていることがあり、そのまま送ると add_item が
+  //   「Dimension.PackageLength: value must be greater than 0」で落ちる（2026-08-15 実測）。
+  //   3辺すべてが正のときだけ引き継ぐ。
+  var dim = base.dimension || {};
+  if ((dim.package_length > 0) && (dim.package_width > 0) && (dim.package_height > 0)) body.dimension = dim;
   var out = addItem_(body);
   // ★バリエーションの【軸名】（例: Title）と**置き場**を作る。明細（オプション）は引き継がず
   //   「test」1件だけ入れておく＝本人のいつもの手順（1明細で作って、あとからまとめて追加）に合わせる。
