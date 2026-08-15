@@ -1079,7 +1079,16 @@ function remapEntry_(m, newIdx) {
 }
 function updateTierVariation_(shopId, itemId, tierVariation, model) {
   var body = { item_id: parseInt(itemId, 10), tier_variation: tierVariation };
-  if (model) body.model = model;
+  // ★modelは【新しいtier_indexの昇順】に並べてから送る。
+  //   get_model_list が返す並びは tier_index 順とは限らず、その順のまま送ると
+  //   Shopee側が位置で解釈してズレ、**隣の明細の中身が消える**（2026-08-15 実測：
+  //   ゴースト1件を掃除したら Resident Evil Village 2 の中身が消えた）。
+  if (model) {
+    body.model = model.slice().sort(function (a, b) {
+      var ai = ((a.tier_index || [])[0]); var bi = ((b.tier_index || [])[0]);
+      return (ai == null ? 1e9 : ai) - (bi == null ? 1e9 : bi);
+    });
+  }
   var j = callShop_(shopId, '/api/v2/product/update_tier_variation', null, 'post', body);
   return (j && j.response) || j;
 }
