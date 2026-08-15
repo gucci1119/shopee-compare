@@ -3111,6 +3111,8 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "⚠ 保存に失敗 ": "⚠ Save failed ",
+    "📋 保存失敗の記録をコピーしました": "📋 Copied the save-failure log",
     "⚠ 中身なし": "⚠ Empty slot",
     "⚠ 中身のない明細 ": "⚠ Empty variation slots ",
     "🆕 新しいバージョンがあります": "🆕 A new version is available",
@@ -7350,6 +7352,38 @@
   // ---------------- Supabase（DB蓄積） ----------------
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
   const INV_SHEET_ID = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE'; // InventoryItem（QR在庫管理）
+  // ★書き込みの失敗を【黙って捨てない】ための番人（2026-08-15 新設）
+  //   きっかけ：存在しない列に書こうとして upsert がまるごと失敗していたのに、呼び出し側が
+  //   `catch (_) {}` で握りつぶしていたため、🔄を何度押しても無反応＝原因に気づくまで数時間かかった。
+  //   呼び出し側は32か所あり全部直すのは危ないので、**書き込み関数の側で必ず記録**する。
+  //   ・コンソールに必ず出す（後から追える）
+  //   ・画面右下に「⚠ 保存に失敗 N件」を出す（押すと直近の内容をコピー）。10秒に1回だけ更新＝邪魔しない
+  const sbFails = [];
+  let _sbFailT = null;
+  function sbWriteFail(op, table, err) {
+    const msg = (err && err.message) || String(err);
+    sbFails.push({ at: new Date().toISOString(), op, table, msg });
+    if (sbFails.length > 50) sbFails.shift();
+    try { console.warn('[SMD] 保存に失敗', op, table, msg); } catch (_) {}
+    if (_sbFailT) return;                       // 連打で画面が埋まらないよう10秒に1回
+    _sbFailT = setTimeout(() => { _sbFailT = null; sbFailBadge(); }, 10000);
+    sbFailBadge();
+  }
+  function sbFailBadge() {
+    let b = document.getElementById('smd-sbfail');
+    if (!sbFails.length) { if (b) b.remove(); return; }
+    if (!b) {
+      b = document.createElement('button');
+      b.id = 'smd-sbfail'; b.className = 'smd-btn'; b.setAttribute('data-noi18n', '');
+      b.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:9998;background:#fdecea;border-color:#f5c2c2;color:#b3261e;font-weight:700;font-size:11.5px';
+      b.title = 'データの保存に失敗した回数。押すと内容をコピーします（原因を調べるため）。ネットワークかDBの列違いが主な原因です';
+      b.addEventListener('click', () => {
+        try { copyText(sbFails.map(f => `${f.at} ${f.op} ${f.table} ${f.msg}`).join('\n')); toast('📋 保存失敗の記録をコピーしました'); } catch (_) {}
+      });
+      document.body.appendChild(b);
+    }
+    b.textContent = '⚠ 保存に失敗 ' + sbFails.length + '件';
+  }
   async function sbUpsert(table, rows) {
     if (!rows.length) return 0;
     const key = settings.sbSecret;
@@ -7361,7 +7395,7 @@
           Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify(rows.slice(i, i + 500)),
       });
-      if (!r.ok) throw new Error(`${table}保存 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+      if (!r.ok) { const e = new Error(`${table}保存 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('upsert', table, e); throw e; }
     }
     return rows.length;
   }
@@ -7372,7 +7406,7 @@
       method: 'DELETE',
       headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' },
     });
-    if (!r.ok) throw new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+    if (!r.ok) { const e = new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('delete', table, e); throw e; }
   }
   async function sbPatch(table, qs, patch) { // 主キー(item_id)自体の変更など、キー指定での更新
     const key = settings.sbSecret;
@@ -7382,7 +7416,7 @@
       headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
       body: JSON.stringify(patch),
     });
-    if (!r.ok) throw new Error(`${table}更新 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+    if (!r.ok) { const e = new Error(`${table}更新 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('patch', table, e); throw e; }
   }
   const snToDate = sn => {
     const m = /^(\d{2})(\d{2})(\d{2})/.exec(sn || '');
@@ -14647,6 +14681,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🚨 <b>データの保存に失敗したら必ず気づけるようにした</b>。呼び出し側の32か所が <code>catch (_) {}</code> で握りつぶしていたため、<b>存在しない列に書いて失敗し続けていたのに画面は無反応</b>で、原因に気づくまで何時間もかかった（実際に発生）。書き込み関数の側で<b>必ずコンソールに出し、画面右下に「⚠ 保存に失敗 N件」</b>を出す（押すと内容をコピー）。呼び出し側は触らないので既存の動きは変えない。',
       '📉 <b>推移チャートの平均と中央値が見分けにくい</b>のを修正。似た色の破線が2本並んでいた。<b>平均＝うすいグレーの破線／中央値＝黒の点線・太め</b>に変え、凡例の線も同じ見た目にした（中央値の方が「普段の水準」なので目立たせる）。',
       '🧪 <b>push前の構文チェックを追加</b>（<code>chk.sh</code>）。角括弧が二重になっただけで<b>ポータル全体が起動不能</b>になった事故を受けて。macOS標準のJXAで <code>new Function()</code> を試すだけなのでNode等は不要。index.html と全 .gs をまとめて検査する。※TDZ（宣言より前で const を使う）は実行時エラーなのでここでは出ない → デプロイ後にコンソールを読むこと。',
       '📊 <b>ダッシュボードの「未発送」に輸送中が混ざっていた</b>のを修正。🚚倉庫へ発送済の印は <code>costs</code> にあるが、<b>注文管理ページを開くまで読み込まれていなかった</b>ため、ダッシュボードだけ輸送中27件を除外できず<b>52件</b>と出ていた（正しくは<b>25件</b>）。ダッシュボードでも必ず読むようにした。',
