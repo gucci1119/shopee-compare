@@ -14683,6 +14683,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🔖 <b>JAN等の「⚠重複」が、何番とかぶっているか出るように</b>。これまでは「⚠重複」だけで<b>どれと重複しているのか分からず直せなかった</b>。同じカタログ内なら <b>2番・15番と重複</b>、別カタログなら <b>国＋商品名＋番号</b>を出す（3件以上にも対応）。',
+      '🗑 <b>出品一覧からも明細を削除できるように</b>。これまでは✎カタログ編集を開く必要があった。<b>model_idで消す</b>ので別の明細を巻き込まない。削除後は番号の詰め直しと、中身のない枠の掃除まで自動で走る。',
       '📄 <b>カタログの複製（①→②）を出品一覧から作れるように</b>（Shopeeの Copy 相当）。<b>引き継ぐ＝画像／説明文／動画／カテゴリ／属性(specifics)／重量／ブランド／親SKU／バリエーションの軸名</b>、これまでは<b>Seller Centerの複製で1本5分</b>かかっていた。行の <b>📄</b> から、<b>画像・カテゴリ・属性・重量・説明・ブランド</b>を引き継いで作成。<b>引き継がない＝明細の中身</b>（「test」1件だけ入れて作る＝いつもの手順に合わせる）。画像は<b>image_idをそのまま使う</b>ので再アップロード不要。番号は同じ群の最大＋1（①②があれば③）。<b>非公開（下書き）で作る</b>ので、中身が空のまま公開される事故が起きない。明細は作成後に「まとめて追加」で入れる。',
       '🚨 <b>データの保存に失敗したら必ず気づけるようにした</b>。呼び出し側の32か所が <code>catch (_) {}</code> で握りつぶしていたため、<b>存在しない列に書いて失敗し続けていたのに画面は無反応</b>で、原因に気づくまで何時間もかかった（実際に発生）。書き込み関数の側で<b>必ずコンソールに出し、画面右下に「⚠ 保存に失敗 N件」</b>を出す（押すと内容をコピー）。呼び出し側は触らないので既存の動きは変えない。',
       '📉 <b>推移チャートの平均と中央値が見分けにくい</b>のを修正。似た色の破線が2本並んでいた。<b>平均＝うすいグレーの破線／中央値＝黒の点線・太め</b>に変え、凡例の線も同じ見た目にした（中央値の方が「普段の水準」なので目立たせる）。',
@@ -24390,6 +24392,39 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   JAN＝流通の共通コード（8桁/13桁の数字）。型番＝メーカーの品番、無ければ自社コード。
   //   1つの欄に「JAN / 型番」と押し込んでいたため、どちらを入れたのか後から分からなかった。
   const janOk = (v) => { const d = String(v || '').replace(/\D/g, ''); return !d || d.length === 8 || d.length === 13; };
+  // 🔖 重複している相手が【どの明細か】を人に分かる形にする（本人指摘 2026-08-15）。
+  //   「⚠重複」だけだと、何番とかぶっているのか分からず直しようがない。3件以上あることもある。
+  //   鍵は id:<item_id>#<model_id>（不変ID）なので、そこから行と明細を引いて **N番** を出す。
+  function pidKeyWhere(key) {
+    const m = /^id:(\d+)(?:#(\d+))?$/.exec(String(key || ''));
+    if (!m) return { label: String(key || ''), same: false };     // 旧鍵（親SKU｜明細名）はそのまま出す
+    const itemId = m[1], mid = m[2];
+    const ccs = Object.keys(lst.byCc || {});
+    for (const cc of ccs) {
+      const row = (lst.byCc[cc] || []).find(x => String(x.item_id) === itemId);
+      if (!row) continue;
+      let ms = row.models; if (!Array.isArray(ms)) { try { ms = JSON.parse(ms || '[]'); } catch (_) { ms = []; } }
+      const mm = (ms || []).find(x => String(x.id) === String(mid));
+      const no = (mm && mm.ti != null) ? (mm.ti + 1) : null;
+      return { cc, itemId, name: row.name || '', no, mn: (mm && mm.n) || '', label: (no ? no + '番' : 'ID' + mid) };
+    }
+    return { label: 'ID' + (mid || itemId), same: false };
+  }
+  function pidDupText(dup, itemId) {
+    if (!dup || !dup.length) return '';
+    const mine = String(itemId || '');
+    const here = [], other = [];
+    dup.forEach(k => {
+      const w = pidKeyWhere(k);
+      if (String(w.itemId || '') === mine) { if (w.no) here.push(w.no); }
+      else other.push(w);
+    });
+    here.sort((a, b) => a - b);
+    const parts = [];
+    if (here.length) parts.push(here.map(n => n + '番').join('・'));
+    if (other.length) parts.push(other.slice(0, 3).map(w => (w.cc ? w.cc + ' ' : '') + (w.name ? String(w.name).slice(0, 14) + ' ' : '') + w.label).join('／') + (other.length > 3 ? ' ほか' + (other.length - 3) : ''));
+    return parts.join(' ／ ');
+  }
   function pidInputs(pk, pv, ruleHint, dup, itemId) {
     const jan = String(pv.jan || ''), mpn = String(pv.mpn || ''), own = String(pv.own || '');
     const bad = jan && !janOk(jan);
@@ -24407,7 +24442,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           '自分で決めるコード。JANも型番も無い商品（雑貨・ガチャ等）を見分けるため。\n例 BANDAI-PKFP-PIKACHU-2020（メーカー-シリーズ-キャラ-版）。\n付け方は右の「コード規則」に書いておくと、ここにヒントで出ます。',
           bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
-      + (dup ? '<div style="font-size:9px;color:#d93025;font-weight:700">⚠重複</div>' : '')
+      + (dup ? (() => { const t = pidDupText(dup, itemId);
+          return '<div style="font-size:9px;color:#d93025;font-weight:700" title="' + av('同じJAN／型番／自社コードが他の明細にも入っています（状態が同じもの同士だけを比べています）。\n' + (t || '')) + '">⚠ ' + (t ? esc(t) + 'と重複' : '重複') + '</div>'; })() : '')
       + '</div>';
   }
   // 🔖 明細（バリエ）ごとのJAN/型番キー。
@@ -24799,9 +24835,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const v = ((pv.f) || {})[nm] || '';
               return cell(19 + k, 'min-width:0', `<input class="lst-idfv" data-k="${av(pk)}" data-f="${av(nm)}" value="${av(v)}" placeholder="${av(nm)}" title="識別項目「${av(nm)}」。ここが違えば別商品として扱います（自社コードもこの値から作られます）" style="width:100%;padding:2px 6px;border:1px solid #cdd7ea;border-radius:6px;font-size:10px;background:${v ? '#f3f8ff' : '#fff'}">`);
             }).join('')
-          + cell(24, 'text-align:center;white-space:nowrap;' + LSTKR, (!isSingle && canEdit)
+          + cell(24, 'text-align:center;white-space:nowrap;' + LSTKR,
+              // 🗑 この明細を削除（一覧からも消せるように。本人要望 2026-08-15）
+              ((!isSingle && canOfficialEdit && m.id) ? `<span class="lst-mdel" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" data-name="${av(m.n || '')}" data-no="${_no}" title="この明細をShopeeから削除します（元に戻せません）。削除後は番号を詰め直し、中身のない枠も一緒に掃除します" style="cursor:pointer;color:#b3261e;font-size:12px;line-height:1;margin-right:6px">🗑</span>` : '')
+              + ((!isSingle && canEdit)
               ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>`
-              : '')
+              : ''))
           + `</div>`;
       }).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px">${(!isSingle) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
@@ -25817,6 +25856,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { localStorage.setItem('smdListTab', 'analysis'); } catch (_) {}
       renderListPage();
       if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました（タイトルが各国で異なるため直接まとめられませんでした。該当カタログの🌍各国まとめ編集から操作してください）');
+    }));
+    // 🗑 一覧から明細を削除。model_idで消す＝別の明細を巻き込まない（2026-08-08の教訓）。
+    //   削除後はGAS側が番号を詰め直し、中身のない枠があれば一緒に掃除する（自己修復）。
+    document.querySelectorAll('#lst-list .lst-mdel').forEach(el => el.addEventListener('click', async () => {
+      const cc = el.dataset.cc, itemId = el.dataset.item, mid = el.dataset.mid, nm = el.dataset.name || '', no = el.dataset.no || '';
+      if (!settings.openapiUrl || !settings.writeToken) { toast('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です', true); return; }
+      const sid = shopIdOfListing(cc, itemId);
+      if (!sid) { toast('この出品のshop_idが分かりません', true); return; }
+      const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+      if (!confirm('書込先: ' + gw.summary + '\n\n' + no + '番「' + nm + '」をShopeeから削除します。\n\n元に戻せません。よろしいですか？')) return;
+      const org = el.textContent; el.textContent = '⏳';
+      try {
+        const r = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: String(mid), names: '', idx: '' }, 90000);
+        if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
+        try { logAct('出品', '明細削除', nm, cc + ' ' + itemId + ' #' + mid); } catch (_) {}
+        toast('🗑 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）' + (r.orphan_cleaned ? ' ・中身のない明細を ' + r.orphan_cleaned + '件 掃除' : ''));
+        await refreshOneListing(cc, itemId, sid);
+        markStale();
+      } catch (e) { el.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
     }));
     document.querySelectorAll('#lst-list .lst-clone').forEach(el => el.addEventListener('click', () => cloneCatalog(el.dataset.cc, el.dataset.id)));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
