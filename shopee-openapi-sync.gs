@@ -127,6 +127,17 @@ function doGet(e) {
       } catch (rterr) { rtout = { ok: false, error: String((rterr && rterr.message) || rterr) }; }
       return ContentService.createTextOutput(rtcb + '(' + JSON.stringify(rtout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // 仕入れ検索の辞書を作り直す（英語の明細名 → 実際に仕入れたときの日本語タイトル）
+    if (p.action === 'run_dict') {
+      var sdcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var sdout;
+      try {
+        var sdwt = P_().getProperty('WRITE_TOKEN');
+        if (!sdwt || p.token !== sdwt) throw new Error('WRITE_TOKEN不正');
+        sdout = buildSourcingDict();
+      } catch (sderr) { sdout = { ok: false, error: String((sderr && sderr.message) || sderr) }; }
+      return ContentService.createTextOutput(sdcb + '(' + JSON.stringify(sdout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★いま作ったばかりの出品を、その場で取り込む：listings_now
     //   定例のRRは【30分に1店】＝1店ぶんが回ってくるのに数時間かかる。増分(changed)も最短2時間おき。
     //   そのため「1分前に作った出品がポータルに出てこない」が起きる。ここは
@@ -2801,6 +2812,35 @@ function syncReturnsRange_(days, ccList) {
 function syncReturnsAll() { if (!bgAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; } var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
+
+// ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
+// ★狙い：売れた明細を仕入れ直すとき、**過去に自分が実際に買ったときの日本語タイトル**をそのまま検索語にする。
+//   Shopeeの英語タイトルから逆算するより確実（実績のある文字列なので必ず当たる）。
+//   実測（2026-08-14）：在庫2,607件×注文3,921件から **588語** の辞書ができ、
+//   いま仕入れ待ちの明細（バリエ名あり35件）の **46%** が一致した。
+// 作り方：inventory.shopee_sn ↔ orders.sn で突合し、その注文の明細名 → inventory.name_supplier。
+//   同じ明細名が複数あれば**新しい仕入れを優先**（在庫の作成順で後勝ち）。
+// 置き場所：app_kv k='sourcing_dict' → { at, n, d:{ <正規化した明細名>: 日本語タイトル } }
+function buildSourcingDict() {
+  var nk = function (v) { return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' '); };
+  var inv = sbSelectAll_('inventory', 'select=shopee_sn,name_supplier&shopee_sn=not.is.null&name_supplier=not.is.null');
+  var bySn = {};
+  inv.forEach(function (r) { var s = String(r.shopee_sn || '').trim(); if (s && r.name_supplier) bySn[s] = r.name_supplier; });
+  var ord = sbSelectAll_('orders', 'select=sn,items,order_date');
+  var d = {}, linked = 0;
+  ord.sort(function (a, b) { return String(a.order_date || '').localeCompare(String(b.order_date || '')); });  // 古い順＝新しいもので上書き
+  ord.forEach(function (o) {
+    var ja = bySn[String(o.sn || '').trim()]; if (!ja) return;
+    linked++;
+    var its = o.items; if (typeof its === 'string') { try { its = JSON.parse(its); } catch (e) { its = []; } }
+    (its || []).forEach(function (it) { var v = nk(it && it.variation); if (v) d[v] = ja; });
+  });
+  var v = { at: new Date().toISOString(), n: Object.keys(d).length, linked: linked, d: d };
+  sbUpsert_('app_kv', [{ k: 'sourcing_dict', v: v, updated_at: new Date().toISOString() }]);
+  Logger.log('仕入れ辞書: ' + v.n + '語（注文と在庫が紐づいた ' + linked + '件）');
+  return { ok: true, n: v.n, linked: linked };
+}
+
 // ================= 出品(listings)同期：公式 get_item_list でブリッジ卒業 =================
 // ポータルの listings テーブル（＝出品一覧／各国そろえる／横断の土台）を公式APIだけで埋める。
 // 従来はブリッジPC(mpsku)でしか取れなかった出品データを、注文と同じくGASがサーバー側で自動同期。
@@ -3073,6 +3113,18 @@ function sbSelect_(table, query) {
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   return JSON.parse(res.getContentText());
+}
+// 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
+function sbSelectAll_(table, query) {
+  var out = [], from = 0;
+  for (var i = 0; i < 20; i++) {
+    var part = sbSelect_(table, query + '&limit=1000&offset=' + from);
+    if (!part || !part.length) break;
+    out = out.concat(part);
+    if (part.length < 1000) break;
+    from += 1000;
+  }
+  return out;
 }
 function sbUpsert_(table, rows, onConflict) {
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : ''), key = cfg_('SB_SERVICE_KEY');
