@@ -3016,6 +3016,24 @@
     el.textContent = msg; el.className = 'show' + (isErr ? ' err' : '');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = ''; }, 1800);
   }
+  // ★消す前に確認ダイアログを出すより、**消してから取り消せる**方が邪魔にならない。
+  //   6秒だけ「↩ 取消」を出す。押さなければそのまま消える（本人指摘 2026-08-15）。
+  let _undoT = null;
+  function toastUndo(msg, undo) {
+    let el = document.getElementById('smd-toast-undo');
+    if (!el) {
+      el = document.createElement('div'); el.id = 'smd-toast-undo';
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:10000;background:#333;color:#fff;'
+        + 'border-radius:20px;padding:8px 14px;font-size:12.5px;box-shadow:0 4px 14px rgba(0,0,0,.25);display:none;align-items:center;gap:10px';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = '<span></span><button style="border:none;background:#fff;color:#333;border-radius:14px;padding:3px 12px;font-weight:700;cursor:pointer">↩ 取消</button>';
+    el.firstChild.textContent = msg;
+    el.style.display = 'flex';
+    const hide = () => { el.style.display = 'none'; };
+    el.querySelector('button').onclick = async () => { hide(); try { await undo(); } catch (_) {} };
+    clearTimeout(_undoT); _undoT = setTimeout(hide, 6000);
+  }
   try { window.__smdOpenSettings = () => { const g = document.getElementById('smd-gear'); if (g) g.click(); }; } catch (_) {}
   // 共通エラー表示：生エラーを平易な日本語＋次の一手（再読み込み/設定）に。技術詳細は折りたたみ
   function errBox(e) {
@@ -5610,10 +5628,22 @@
           catch (e) { alert('保存エラー: ' + e.message); inp.value = inp.defaultValue; }
         });
       });
+      // ★確認ダイアログは出さない。ToDoの1行を消すのに毎回はさむのは邪魔なだけ（本人指摘 2026-08-15）。
+      //   代わりに**消したものを覚えておいて、トーストの「↩ 取消」で元に戻せる**ようにする。
       host.querySelectorAll('.tt-del').forEach(b => b.addEventListener('click', async () => {
         const row = b.closest('div'); const nm = (row && row.querySelector('.tt-title') || {}).value || '';
-        if (!confirm('削除しますか？\n\n' + nm)) return;
-        try { await sbDelete('tasks', 'id=eq.' + Number(b.dataset.id)); renderTodoToday(); } catch (e) { alert(e.message); }
+        const id = Number(b.dataset.id);
+        let bak = null;
+        try { const got = await sbGet('tasks', 'select=*&id=eq.' + id + '&limit=1'); bak = (got || [])[0] || null; } catch (_) {}
+        try {
+          await sbDelete('tasks', 'id=eq.' + id);
+          renderTodoToday();
+          toastUndo('🗑 消しました：' + (nm || 'やること'), async () => {
+            if (!bak) return;
+            const row2 = Object.assign({}, bak); delete row2.id;      // idはDB採番に任せる
+            try { await sbUpsert('tasks', [row2]); renderTodoToday(); } catch (e) { alert('戻せませんでした: ' + e.message); }
+          });
+        } catch (e) { alert(e.message); }
       }));
       host.querySelectorAll('.tt-done').forEach(c => c.addEventListener('change', async () => {
         try { await sbUpsert('tasks', [{ id: Number(c.dataset.id), done: true }]); renderTodoToday(); } catch (e) { alert(e.message); }
@@ -7571,12 +7601,13 @@
       (income || []).forEach(i => { const v = Number(i.buyer_paid); if (v > 0) snPaid.set(i.cc + '|' + i.sn, v); });
       // 注文数(件)と商品数(点=item qtyの合計)を両方数える。1注文で複数商品のことがあるので両方見せる
       const tCcO = {}, tCcU = {}, tCcL = {}, yCcL = {};  // cc → 注文数 / 商品数 / 現地売上(今日) / 現地売上(昨日)
+      let yOrders = 0, yUnits = 0;                       // 昨日の注文数・点数
       (recentOrders || []).forEach(o => {
         if (o.tab === 600) return;  // キャンセル除外
         const d = odDate(o), units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
         const paid = snPaid.has(o.cc + '|' + o.sn) ? snPaid.get(o.cc + '|' + o.sn) : (Number(o.total) || 0);
         if (d === jstToday) { tCcO[o.cc] = (tCcO[o.cc] || 0) + 1; tCcU[o.cc] = (tCcU[o.cc] || 0) + units; tCcL[o.cc] = (tCcL[o.cc] || 0) + paid; }
-        else if (d === jstYest) yCcL[o.cc] = (yCcL[o.cc] || 0) + paid;
+        else if (d === jstYest) { yCcL[o.cc] = (yCcL[o.cc] || 0) + paid; yOrders++; yUnits += units; }   // ★昨日も件数・点数を数える（今日だけだと伸びが分からない）
       });
       let todayJpy = 0, yestJpy = 0, todayOrders = 0, todayUnits = 0;
       const tCc = {};  // cc → {orders, units, local}
@@ -7587,7 +7618,14 @@
         todayJpy += local * rg.rateJpy; todayOrders += ord; todayUnits += u;
       });
       // 「未発送」は"未対応の未発送"だけ＝発送手配済(ordArranged=PROCESSED/tracking有)や🚚倉庫へ輸送中(selfTransit)は除外。tracking単体でなくordArrangedで判定し、注文一覧の📦未手配と件数を一致させる
-      const toShip = orders.filter(o => o.tab === 300 && !ordArranged(o) && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
+      // ★「未発送」＝**まだ手元にある注文**（①未手配＋②伝票発行済）。
+      //   以前は①未手配だけを数えていて「1件」と実態とかけ離れていた（2026-08-15 本人指摘）。
+      //   ③倉庫へ発送済＝**もう手を離れて倉庫へ輸送中**なので、ここには入れない（本人指摘）。
+      const held = (o) => !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn));
+      const notShipped = orders.filter(o => o.tab === 300 && held(o));
+      const toShip = notShipped.filter(o => !ordArranged(o));                                                    // ①未手配
+      const arrangedN = notShipped.length - toShip.length;                                                        // ②伝票発行済（まだ手元）
+      const inTransitN = orders.filter(o => o.tab === 300 && !held(o)).length;                                    // ③倉庫へ発送済（手を離れた）
       // 期限の緊急度も同じ母集団（toShipは既に未手配のみ）
       const unarr = toShip;
       const overdueShip = unarr.filter(o => o.ship_by && (o.ship_by - nowSec()) < 0);           // 未手配で既に期限切れ（最優先）
@@ -7603,8 +7641,8 @@
       const arrivedNotRecv = waiting.filter(r => deliveredAt(r)).length;
       kpis.innerHTML = [
         ['今日の売上', fmtJpy(todayJpy), `${todayOrders}件 / ${todayUnits}点（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。件＝注文数（チャートの注文数と一致）／点＝商品数（1注文に複数商品のことあり）。'],
-        ['昨日の売上', fmtJpy(yestJpy), '前日の売上（日本時間・速報）', '昨日1日分（日本時間）の売上（円換算）。買い手支払額(escrow)ベースの速報値でキャンセルは除外済み。入金確定で微増減することあり。今日との比較の基準に。'],
-        ['未発送', toShip.length + '件', overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件${due24.length ? ` ・24h以内 ${due24.length}件` : ''}` : (due24.length ? `⚠ 期限24h以内 ${due24.length}件` : '期限に余裕あり'), '発送待ちの注文数。🔴期限切れは即発送（ペナルティ対象）。次いで24h以内を優先。', 'orders'],
+        ['昨日の売上', fmtJpy(yestJpy), `${yOrders}件 / ${yUnits}点（日本時間・昨日）`, '昨日1日分（日本時間）の売上（円換算）。買い手支払額(escrow)ベースの速報値でキャンセルは除外済み。入金確定で微増減することあり。今日との比較の基準に。'],
+        ['未発送', notShipped.length + '件', (overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件 ・` : (due24.length ? `⚠ 24h以内 ${due24.length}件 ・` : '')) + `①未手配 ${toShip.length} / ②伝票発行済 ${arrangedN}` + (inTransitN ? ` ・🚚倉庫へ ${inTransitN}` : ''), '**まだ手元にある**注文の数（①未手配＋②伝票発行済）。①＝Shopeeで発送手配をまだ押していない ②＝手配して伝票が出た（まだ手元）。🚚倉庫へ＝もう手を離れて倉庫へ輸送中なので、この数には入れていません。', 'orders']],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeがまだ支払っていない（リリース前に預かり中＝escrow）の入金見込み額。リリース後はここから外れて実入金になる。'],
         ['⏳入庫待ち', waiting.length + '件', '仕入れ ' + fmtJpy(waitVal) + (arrivedNotRecv ? ` ・📥到着済未反映${arrivedNotRecv}` : ''), '仕入元（メルカリ等）から到着待ちの在庫。📥到着済未反映は受取処理が必要（詳細はクリック→仕入れ管理/アラート）。', 'buy'],
         ['🏚死に筋(90日超)', deadArr.length + '件', deadArr.length ? fmtJpy(deadVal) + ' 滞留' : 'なし🎉', '仕入から90日超で在庫保管中＝資金が寝ている状態。値下げ／損切りの検討対象。明細はクリック→アラートに一本化。', deadArr.length ? 'alerts' : ''],
@@ -14604,6 +14642,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-08-15', items: [
+      '📊 <b>ダッシュボードの「未発送」が実態とかけ離れていた</b>のを修正。①未手配だけを数えていて「1件」と出ていた。<b>まだ手元にある注文（①未手配＋②伝票発行済）</b>を数え、内訳も出す。<b>③倉庫へ発送済はもう手を離れているので含めない</b>（本人指摘）。',
+      '📊 <b>昨日の売上にも件数・点数を表示</b>（今日だけだと伸びが分からない）。',
+      '🗑 <b>やることの削除で確認ダイアログを出すのをやめた</b>。1行消すのに毎回はさむのは邪魔なだけ。代わりに<b>消してから「↩ 取消」で戻せる</b>ようにした（6秒間）。',
+    ] },
     { date: '2026-08-14', items: [
       '🔐 <b>公開ファイルに書き込みトークンを埋め込むのをやめた</b>。<code>index.html</code> はGitHub Pagesで<b>公開</b>されているのに、設定が空のときのフォールバックとして<b>本物のトークンが書かれていた</b>＝URLを知られれば誰でも同期を叩ける状態だった（GAS枠の浪費・DB更新が起こりうる）。フォールバックを空にし、⚙️設定のWRITE_TOKENだけを使う。',
       '🔴 <b>ポケモン本編は「色＝版名」で検索する</b>ようにした。<code>GB:Blue</code> が「ポケモン ブルー」になり、日本では使わない語なので<b>まったく別の商品（¥300のジャンク等）が候補に出ていた</b>。赤/緑/青/<b>ピカチュウ</b>（黄ではない）/金/銀/クリスタル…と、日本版の呼び方で検索する。',
