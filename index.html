@@ -3111,6 +3111,8 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "📄 複製を作っています…（30秒〜1分）": "📄 Creating the copy… (30s–1min)",
+    "✅ 複製しました（非公開）。明細を入れて公開してください": "✅ Copied (unlisted). Add variations, then publish",
     "⚠ 保存に失敗 ": "⚠ Save failed ",
     "📋 保存失敗の記録をコピーしました": "📋 Copied the save-failure log",
     "⚠ 中身なし": "⚠ Empty slot",
@@ -14681,6 +14683,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '📄 <b>カタログの複製（①→②）を出品一覧から作れるように</b>。1カタログ100明細までなので、満杯になったら同じ設定の②を作って続きを入れる運用だが、これまでは<b>Seller Centerの複製で1本5分</b>かかっていた。行の <b>📄</b> から、<b>画像・カテゴリ・属性・重量・説明・ブランド</b>を引き継いで作成。画像は<b>image_idをそのまま使う</b>ので再アップロード不要。番号は同じ群の最大＋1（①②があれば③）。<b>非公開（下書き）で作る</b>ので、中身が空のまま公開される事故が起きない。明細は作成後に「まとめて追加」で入れる。',
       '🚨 <b>データの保存に失敗したら必ず気づけるようにした</b>。呼び出し側の32か所が <code>catch (_) {}</code> で握りつぶしていたため、<b>存在しない列に書いて失敗し続けていたのに画面は無反応</b>で、原因に気づくまで何時間もかかった（実際に発生）。書き込み関数の側で<b>必ずコンソールに出し、画面右下に「⚠ 保存に失敗 N件」</b>を出す（押すと内容をコピー）。呼び出し側は触らないので既存の動きは変えない。',
       '📉 <b>推移チャートの平均と中央値が見分けにくい</b>のを修正。似た色の破線が2本並んでいた。<b>平均＝うすいグレーの破線／中央値＝黒の点線・太め</b>に変え、凡例の線も同じ見た目にした（中央値の方が「普段の水準」なので目立たせる）。',
       '🧪 <b>push前の構文チェックを追加</b>（<code>chk.sh</code>）。角括弧が二重になっただけで<b>ポータル全体が起動不能</b>になった事故を受けて。macOS標準のJXAで <code>new Function()</code> を試すだけなのでNode等は不要。index.html と全 .gs をまとめて検査する。※TDZ（宣言より前で const を使う）は実行時エラーなのでここでは出ない → デプロイ後にコンソールを読むこと。',
@@ -24954,6 +24957,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <a href="${editUrl}" target="_blank" title="Shopee編集画面を開く" style="text-decoration:none;font-size:14px">✏️</a>
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
             <span class="lst-edithist" data-name="${av(r.name || '')}" title="この商品の編集履歴（価格・在庫・タイトル等の変更ログ）" style="cursor:pointer;font-size:13px;line-height:1">📜</span>
+            ${(!isSingle && canOfficialEdit) ? `<span class="lst-clone" data-cc="${r.cc}" data-id="${r.item_id}" title="このカタログの複製を作る（満杯の①から②を作る）。画像・カテゴリ・属性・重量・説明を引き継いで【非公開】で作成。明細は作成後に「まとめて追加」で入れます" style="cursor:pointer;font-size:13px;line-height:1">📄</span>` : ''}
             <span class="lst-more1" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" data-buy="${esc(buyUrl || '')}" title="公開/非公開の切替・削除など" style="cursor:pointer;font-size:14px;line-height:1;color:#8a8f98;font-weight:700">⋯</span>
             ${isSingle && canEdit ? `<button class="lst-save" title="価格・在庫を公式APIで保存" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:2px 6px;cursor:pointer;font-size:10px;font-weight:700">💾保存</button>` : ''}
           </div>
@@ -25019,6 +25023,41 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     for (let i = 0; i < CIRC.length; i++) if (t.includes(CIRC[i])) return i + 1;
     const m = /(?:no\.?|#|part|vol\.?)?\s*[\(（\[【]?\s*(\d{1,3})\s*[\)）\]】]?\s*$/i.exec(t.trim());
     return m ? parseInt(m[1], 10) : 0;
+  }
+  // 📄 カタログの複製（満杯の①から②を作る）。1カタログ100明細までなので、続きを入れる箱を作る。
+  //   ・次の番号は【同じ群の既存カタログ】から決める（①②があれば③）
+  //   ・非公開で作る（中身が空のまま公開されない）。明細は作成後に「まとめて追加」で入れる
+  async function cloneCatalog(cc, itemId) {
+    const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+    if (!row) { toast('元のカタログが見つかりません', true); return; }
+    if (!settings.openapiUrl || !settings.writeToken) { toast('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です', true); return; }
+    const sid = shopIdOfListing(cc, itemId) || row.shop_id;
+    if (!sid) { toast('この出品のshop_idが分かりません', true); return; }
+    // 同じ群の最大番号＋1（①②→③）。番号が無ければ ② から
+    const sibs = grpIndex().get(cc + '|' + grpOf(row)) || [row];
+    const maxNo = Math.max(1, ...sibs.map(x => seriesNo(x.name) || 1));
+    const nextNo = maxNo + 1;
+    const mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
+    const cur = String(row.name || '');
+    const curMark = CIRC[(seriesNo(cur) || 1) - 1];
+    // ①が付いていれば置き換え、無ければ末尾に足す（30字制限は各国側で別途チェック）
+    const newName = (curMark && cur.includes(curMark)) ? cur.replace(curMark, mark) : (cur.trim() + ' ' + mark);
+    const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+    if (!confirm('書込先: ' + gw.summary + '\n\n' + cc + ' に、このカタログの複製を作ります。\n\n'
+      + '元: ' + cur + '\n新: ' + newName + '\n\n'
+      + '・画像・カテゴリ・属性・重量・説明・ブランドを引き継ぎます\n'
+      + '・**非公開（下書き）**で作ります。明細を入れてから公開してください\n'
+      + '・明細（バリエ）は空です。作成後に「まとめて追加」で入れてください')) return;
+    toast('📄 複製を作っています…（30秒〜1分）');
+    try {
+      const r = await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: itemId, name: newName, publish: 0 }, 120000);
+      if (!r || !r.ok) throw new Error((r && r.error) || '複製に失敗');
+      try { logAct('出品', 'カタログ複製', newName, cc + ' ' + itemId + ' → ' + r.item_id); } catch (_) {}
+      toast('✅ 複製しました（非公開）。明細を入れて公開してください');
+      try { await refreshOneListing(cc, String(r.item_id), sid); } catch (_) {}
+      markStale();
+      if (r.attr_warn) toast('⚠ 属性(specifics)の引き継ぎだけ失敗: ' + apiErrJa(r.attr_warn), true);
+    } catch (e) { alert('複製に失敗: ' + apiErrJa((e && e.message) || e)); }
   }
   const _varCntCache = new WeakMap();
   function varCount(r) {
@@ -25777,6 +25816,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       renderListPage();
       if (typeof toast === 'function') toast('🌍「各国そろえる」で開きました（タイトルが各国で異なるため直接まとめられませんでした。該当カタログの🌍各国まとめ編集から操作してください）');
     }));
+    document.querySelectorAll('#lst-list .lst-clone').forEach(el => el.addEventListener('click', () => cloneCatalog(el.dataset.cc, el.dataset.id)));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
     // 📝メモ（入力＝再描画せず保存＝フォーカス維持）／⚠️在庫0固定（トグル＝保存して再描画で赤帯反映）
     // ---- 🛠 まとめて編集：この一覧の絞り込み結果からそのまま対象を選ぶ ----

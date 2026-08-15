@@ -127,6 +127,18 @@ function doGet(e) {
       } catch (rterr) { rtout = { ok: false, error: String((rterr && rterr.message) || rterr) }; }
       return ContentService.createTextOutput(rtcb + '(' + JSON.stringify(rtout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // 📄 カタログの複製（満杯になった①から②を作る）
+    if (p.action === 'clone_item') {
+      var ccb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var cout;
+      try {
+        var cwt = P_().getProperty('WRITE_TOKEN');
+        if (!cwt || p.token !== cwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var cshop = parseInt(p.shop_id, 10); if (!getToken_(cshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        cout = cloneItem_(cshop, p.item_id, String(p.name || ''), p.publish === '1' || p.publish === 1);
+      } catch (cerr) { cout = { ok: false, error: String((cerr && cerr.message) || cerr) }; }
+      return ContentService.createTextOutput(ccb + '(' + JSON.stringify(cout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // 仕入れ検索の辞書を作り直す（英語の明細名 → 実際に仕入れたときの日本語タイトル）
     if (p.action === 'run_dict') {
       var sdcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -2812,6 +2824,56 @@ function syncReturnsRange_(days, ccList) {
 function syncReturnsAll() { if (!bgAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; } var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
+
+
+// ================= 📄 カタログの複製（Switch① → Switch②） =================
+// ★なぜ必要か：Shopeeは1カタログ100明細まで。満杯になったら**同じ設定の②を作って続きを入れる**運用。
+//   これまでは Seller Center の複製で1本5分かかっていた（Obsidian 11_運用フロー）。
+// やること：元カタログを読み、**画像・カテゴリ・属性・重量・説明・ブランド・配送**をそのまま引き継いで新規作成。
+//   ・画像は image_id をそのまま使う（再アップロードしない＝速い・枠を使わない）
+//   ・**非公開(UNLIST)で作る**。中身が空のまま公開されるのを防ぐ（明細を入れてから自分で公開する）
+//   ・明細（バリエ）は作らない。作成後にポータルの「まとめて追加」で入れる＝いつもの手順に合わせる
+//   ・タイトルは呼び出し側が決めて渡す（①→②の付け替えはポータル側で計算）
+function cloneItem_(shopId, itemId, newName, publish) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var full = getItemFull_(shopId, itemId);
+  var base = full.base || {};
+  var imgIds = ((base.image || {}).image_id_list || []).slice(0, 9);
+  if (!imgIds.length) throw new Error('元のカタログに画像がありません');
+  var price = 0;
+  var ms = (full.model || {}).models || [];
+  ms.forEach(function (m) { var p = parseFloat(m.price) || 0; if (p > 0 && (!price || p < price)) price = p; });
+  if (!price) price = parseFloat(((base.price_info || [])[0] || {}).original_price) || 0;
+  if (!price) throw new Error('元のカタログの価格が読めません');
+  var body = {
+    shop_id: shopId,
+    item_name: String(newName || base.item_name || '').slice(0, 120),
+    description: base.description || '',
+    price: price,
+    stock: 1,
+    weight: base.weight || 0.5,
+    image_ids: imgIds,
+    category_id: base.category_id,
+    condition: base.condition || 'USED',
+    brand_id: ((base.brand || {}).brand_id) || 0,
+    publish: publish ? 1 : 0        // 既定は非公開
+  };
+  if (base.dimension) body.dimension = base.dimension;
+  var out = addItem_(body);
+  // 属性(specifics)は add_item では送れないので、作成後に update_item で移す（カテゴリが同じなのでそのまま通る）
+  var attrs = (base.attribute_list || []).map(function (a) {
+    return { attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).map(function (v) {
+      return v.value_id ? { value_id: v.value_id, value_unit: v.value_unit } : { original_value_name: v.original_value_name };
+    }) };
+  }).filter(function (a) { return a.attribute_value_list.length; });
+  if (out && out.item_id && attrs.length) {
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, attribute_list: attrs }); }
+    catch (e) { out.attr_warn = String((e && e.message) || e); }
+  }
+  out.from_item_id = itemId;
+  out.name = body.item_name;
+  return out;
+}
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
 // ★狙い：売れた明細を仕入れ直すとき、**過去に自分が実際に買ったときの日本語タイトル**をそのまま検索語にする。
