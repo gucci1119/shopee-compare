@@ -26268,10 +26268,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       let hit = 0, i = 0; const found = [];
       for (const m of targets) {
         i++; btn.textContent = '🔎 探しています ' + i + '/' + targets.length;
-        const kw = janKeyword(row, m);
-        if (!kw) continue;
+        const q = janKeyword(row, m);
+        if (!q || !q.kw) continue;
         let pr = null;
-        try { pr = await janLookupOne(kw); } catch (e) { console.warn('[JAN] ' + kw, e); }
+        try { pr = await janLookupOne(q.kw, q.machine); } catch (e) { console.warn('[JAN] ' + q.kw, e); }
         if (!pr) continue;
         const k = pidKeyModel(row, m); const prev = productIds[k] || {};
         productIds[k] = { jan: pr.jan, mpn: prev.mpn || pr.mpn || '', own: prev.own || '', cond: prev.cond || '',
@@ -27350,7 +27350,31 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 明細名（英語）＋カタログ名から検索語を作り、いちばんそれらしい商品のJANを返す
   // 返り値 null＝見つからなかった（当てずっぽうで返さない）
-  async function janLookupOne(kw) {
+  // ★機種が違う候補は**問答無用で捨てる**。
+  //   実測(2026-08-16)：「The Last of us Best PS4」に対して PS5版を拾った。
+  //   語の一致数だけで選ぶと、機種名は1語ぶんの重みしかなく負ける。機種は一致条件であって加点条件ではない。
+  const MACH_PAT = {
+    ps1: [/ps1|プレイステーション(?!\s*[2-5])/i, /ps[2-5]/i], ps2: [/ps2|プレイステーション\s*2/i, /ps[1345]/i],
+    ps3: [/ps3|プレイステーション\s*3/i, /ps[1245]/i], ps4: [/ps4|プレイステーション\s*4/i, /ps[1235]/i],
+    ps5: [/ps5|プレイステーション\s*5/i, /ps[1234]/i],
+    switch: [/switch|スイッチ/i, /switch\s*2|スイッチ\s*2/i], ns: [/switch|スイッチ/i, /switch\s*2/i],
+    psp: [/psp/i, null], vita: [/vita|ヴィータ/i, null], ds: [/\bds\b|ニンテンドーds/i, /3ds/i],
+    '3ds': [/3ds/i, null], wii: [/wii/i, /wii\s*u/i], wiiu: [/wii\s*u/i, null],
+    gba: [/gba|アドバンス/i, null], gbc: [/gbc|ゲームボーイカラー/i, null], gb: [/ゲームボーイ|gb/i, null],
+    gc: [/ゲームキューブ|gamecube/i, null], gamecube: [/ゲームキューブ|gamecube/i, null],
+    n64: [/64/i, null], sfc: [/スーパーファミコン|sfc/i, null], fc: [/ファミコン/i, /スーパーファミコン/i],
+    ss: [/サターン/i, null], saturn: [/サターン/i, null], dc: [/ドリームキャスト/i, null], dreamcast: [/ドリームキャスト/i, null],
+    md: [/メガドライブ/i, null], xbox: [/xbox/i, null]
+  };
+  function machineOk(title, machine) {
+    if (!machine) return true;
+    const pat = MACH_PAT[String(machine).toLowerCase()];
+    if (!pat) return true;                       // 知らない機種は判定しない（落とさない）
+    const t = String(title || '');
+    if (pat[1] && pat[1].test(t)) return false;  // 別機種の印がある＝違う
+    return pat[0].test(t);
+  }
+  async function janLookupOne(kw, machine) {
     const urls = await yamadaSearch(kw);
     if (!urls.length) return null;
     // ★検索結果のHTMLからは商品名を安定して取れない（画像だけのリンクがある）。
@@ -27362,6 +27386,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     for (const u of urls) {
       let pr = null; try { pr = await yamadaProduct(u); } catch (_) { continue; }
       if (!pr || !pr.jan) continue;
+      if (!machineOk(pr.title, machine)) continue;   // 機種違いは点数を見るまでもなく捨てる
       const sc = score(pr.title);
       if (sc > bestSc) { best = pr; bestSc = sc; }
       if (sc >= need) break;                       // 十分に合っていれば残りは見ない
@@ -27377,17 +27402,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ヤマダは正式な商品名なので**削ると当たらなくなる**（実測: 「Last us Last us PartⅡ PS4」で0件）。
   //   ここでは「機種の頭（PS4:）を後ろに回す」「記号を整える」だけにして、語は落とさない。
   function janKeyword(row, m) {
-    { const ja = sourcingKeywordFromDict(m && m.n); if (ja) return ja; }   // 実際に仕入れた日本語名があれば最優先
+    { const ja = sourcingKeywordFromDict(m && m.n); if (ja) return { kw: ja, machine: '' }; }   // 実際に仕入れた日本語名があれば最優先
     let v = String((m && m.n) || '').trim();
-    if (!v) return '';
+    if (!v) return null;
     let machine = '';
     const mm = v.match(/^\s*([A-Za-z0-9]{1,8})\s*[:：]\s*(.+)$/);
     if (mm && MACHINE_TOK.test(mm[1])) { machine = mm[1]; v = mm[2]; }
     v = v.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')
       .replace(/[Ⅰ-Ⅹ]/g, c => ['I','II','III','IV','V','VI','VII','VIII','IX','X'][c.charCodeAt(0) - 0x2160])
       .replace(/[（(].*?[）)]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!v || v.length < 3) return '';
-    return machine ? (v + ' ' + machine) : v;
+    if (!v || v.length < 3) return null;
+    return { kw: machine ? (v + ' ' + machine) : v, machine: machine };
   }
 
   function listImgPrev() {
