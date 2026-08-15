@@ -11562,7 +11562,37 @@
     [/\bplaystation\s*portable\b/gi, 'PSP'], [/\bplaystation\s*([2-5])\b/gi, 'PS$1'], // PSP/PS2-5に正規化（重複はdedupで消える）
   ];
   // Shopee商品名(＋バリエーション) → 日本の仕入先で検索しやすいキーワードへ自動整形
+  // 🔎 仕入れ検索の辞書：英語の明細名 → **実際に仕入れたときの日本語タイトル**（GASが app_kv に作る）
+  //   Shopeeの英語タイトルから逆算するより確実。実測（2026-08-14）で、いま仕入れ待ちの
+  //   バリエ名ありの明細の **46%** がこれで当たった（残りは初めて売れた商品なので従来の整形に回す）。
+  let srcDict = null;
+  function loadSrcDict() {
+    if (srcDict !== null) return Promise.resolve(srcDict);
+    srcDict = {};
+    return sbGetAll('app_kv', 'select=v&k=eq.sourcing_dict')
+      .then(rows => { const v = (rows && rows[0] && rows[0].v) || {}; srcDict = v.d || {}; return srcDict; })
+      .catch(() => srcDict);
+  }
+  const srcDictKey = (v) => String(v == null ? '' : v).trim().normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
+  // 仕入れたときの日本語タイトルから、検索に効かない飾りを落とす（【動作確認済】等）
+  function srcDictClean(ja) {
+    return String(ja || '')
+      .replace(/[【〔\[][^】〕\]]{0,20}[】〕\]]/g, ' ')
+      .replace(/[（(][^）)]{0,20}[）)]/g, ' ')
+      .replace(/(送料無料|即決|新品未開封|中古美品|美品|動作確認済み?|動作品|即日発送|匿名配送)/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+  }
+  function sourcingKeywordFromDict(variation) {
+    const k = srcDictKey(variation);
+    if (!k || !srcDict) return '';
+    const ja = srcDict[k];
+    if (!ja) return '';
+    const c = srcDictClean(ja);
+    return c.length >= 4 ? c : String(ja).trim();
+  }
   function sourcingKeyword(name, variation) {
+    // ★過去に自分が買ったときの日本語タイトルがあれば、それが最も正確なので最優先で使う
+    { const hit = sourcingKeywordFromDict(variation); if (hit) return hit; }
     const strip = (raw) => String(raw || '')
       .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}①-⓿️‍✅⭐️]/gu, ' ') // 絵文字・丸数字①②・記号
       .replace(/[【〔\[].*?[】〕\]]/g, ' ')   // 【..】[..]
@@ -11689,6 +11719,7 @@
   // 🔎 仕入れ検索：Shopee未発送(=売れた)注文を各サイトで最安検索
   async function renderSourcing(host) {
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
+    try { await loadSrcDict(); } catch (_) {}   // 🔎過去の仕入れタイトル辞書（検索語の精度）
     let orders;
     try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,order_ts,order_date&tab=eq.300&order=order_ts.desc.nullslast,order_date.desc.nullslast,sn.desc'); }
     catch (e) { host.innerHTML = errBox(e); return; }
@@ -14503,6 +14534,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '🔎 <b>仕入れ検索のキーワードに「過去に自分が買ったときの日本語タイトル」を使う</b>。Shopeeの英語タイトルから逆算するより確実（実績のある文字列なので必ず当たる）。在庫と注文を突合して<b>英語の明細名→日本語タイトルの辞書</b>をGASが毎日作る（実測で588語）。いま仕入れ待ちの明細のうち、<b>バリエ名があるものの46%がこれで一致</b>（例：CRISIS CORE FF VII REUNION → クライシス コア -ファイナルファンタジーVII- リユニオン）。残り（初めて売れた商品）は従来の整形にそのまま回す。',
       '🛑 <b>🔄（この商品だけ最新にする）が保存に失敗し続けていた</b>のを修正。今日足した <code>opts</code> / <code>opt_count</code> を<b>DBに存在しない列</b>へ書こうとしていたため、<b>upsertがまるごと失敗</b>し、何回押しても何も保存されていなかった（エラーを握りつぶしていたので無反応に見えた）。<b>列は増やさず</b>、中身のない枠は <code>models</code> の中に印付きで入れる方式に変更。件数・価格・在庫の集計からは除外する。',
       '🧹 <b>「明細名をそろえる」が作る名前がShopee的にかぶっていた</b>のを修正。そろえる側のかぶり判定が <code>toLowerCase</code> だけで、<b>全角半角・連続スペースを同一視していなかった</b>ため、「かぶらないように付けた名前」で保存が落ちていた。判定を保存前チェックと同じ物差し（NFKC＋小文字＋空白1つ）に統一。さらに<b>そろえた直後に、残っている重複を番号つきでその場で表示</b>する（保存して初めて知る、をやめる）。',
       '🔤 <b>明細名の重複チェックをShopeeと同じ判定に</b>。こちらは<b>完全一致</b>で見ていたため、「大文字小文字だけ違う／全角半角だけ違う／スペースが2つ」はすり抜けて、Shopeeに送ってから弾かれていた。<b>NFKC＋小文字＋連続スペースを1つ</b>に揃えて比べる。あわせて、Shopee側のエラーが返ったときも<b>どれとどれがかぶっているか（番号と名前）</b>を出して該当行を赤くする。',
