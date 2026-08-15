@@ -1373,6 +1373,14 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     else orphan.push(cur[i]);            // 中身のない明細＝この機会に掃除する
   }
   if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
+  // ★途中の明細は削除できない（上記のとおりShopee側で他が消える）。**やる前に断る**。
+  var maxKeep = -1;
+  for (var kk = 0; kk < cur.length; kk++) if (!delIdx[kk]) maxKeep = kk;
+  var delMin = Math.min.apply(null, Object.keys(delIdx).map(Number));
+  if (delMin < maxKeep) {
+    throw new Error('この明細は途中にあるため、公式APIでは安全に削除できません（Shopee側で後ろの明細が消えます）。'
+      + '最後尾の明細は削除できます。途中の明細はShopeeの編集画面から削除してください。');
+  }
   // 1) 対象modelを削除
   var delModels = models.filter(function (m) { return delIdx[(m.tier_index || [])[0]]; });
   delModels.forEach(function (m) {
@@ -1393,8 +1401,19 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   models2.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) used2[oi] = 1; });
   var keep2 = [], orphan2 = [];
   for (var k2 = 0; k2 < optList2.length; k2++) { if (used2[k2]) keep2.push(k2); else orphan2.push(optList2[k2].option); }
-  // 既に「隙間なし」なら何も送らない＝余計な更新でリスクを取らない
+  // ★★ Shopeeの公式APIは【位置が変わるモデルを保持できない】（2026-08-15 テスト用カタログで実証）。
+  //   ・最後尾の枠を削る → 残りの位置が変わらない → **安全**
+  //   ・途中の枠を削る   → 後ろの位置がずれる     → **そのモデルがShopee側で消える**
+  //   （価格・在庫を載せても、新しい位置の昇順に並べても、削除直後に読み直しても消えた）
+  //   なので **位置が変わる並び直しは絶対にやらない**。安全な場合だけ枠を詰める。
   var needFix = (keep2.length !== optList2.length);
+  var shifts = keep2.some(function (oi, ni) { return oi !== ni; });     // 1つでも位置が動くなら危険
+  if (needFix && shifts) {
+    // 途中に空き枠が残る形。ここで詰めると他の明細が消えるので**触らない**。
+    diag.left_empty = optList2.length - keep2.length;
+    diag.reason = 'middle';
+    needFix = false;
+  }
   var map = {}, newOpts = [];
   keep2.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList2[oi])); });
   if (needFix) {
@@ -1403,7 +1422,7 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     if (remap2.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap2.length + '/' + newOpts.length + '）。安全のため中止しました');
     updateTierVariation_(shopId, itemId, [{ name: tier2.name, option_list: newOpts }], remap2);
   }
-  orphan = orphan.concat(orphan2);
+  if (needFix || !shifts) orphan = orphan.concat(orphan2);
   var _skipOld = true;
   if (!_skipOld) {
   // ★残すモデルは【price/stock/SKUまで載せて】送る。model_idと位置だけだと、Shopee側で
