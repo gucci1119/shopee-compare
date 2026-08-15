@@ -2823,22 +2823,41 @@ function backfillReturns() { return syncReturnsRange_(730); }    // 初回バッ
 // 置き場所：app_kv k='sourcing_dict' → { at, n, d:{ <正規化した明細名>: 日本語タイトル } }
 function buildSourcingDict() {
   var nk = function (v) { return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' '); };
+  // ★1対1で結びつくものだけ使う。ここを緩めると【全然違う商品の名前】が付く。
+  //   実測(2026-08-14)：在庫SN 1,958種のうち **402種は同じSNに在庫が複数**（最大12件）。
+  //   注文も **421件が明細2件以上**。この状態で「そのSNの在庫の最後の1件」を拾っていたため、
+  //   CRISIS CORE → スーパーマリオRPG のような取り違えが出た（危険なので不採用に変更）。
   var inv = sbSelectAll_('inventory', 'select=shopee_sn,name_supplier&shopee_sn=not.is.null&name_supplier=not.is.null');
-  var bySn = {};
-  inv.forEach(function (r) { var s = String(r.shopee_sn || '').trim(); if (s && r.name_supplier) bySn[s] = r.name_supplier; });
-  var ord = sbSelectAll_('orders', 'select=sn,items,order_date');
-  var d = {}, linked = 0;
-  ord.sort(function (a, b) { return String(a.order_date || '').localeCompare(String(b.order_date || '')); });  // 古い順＝新しいもので上書き
-  ord.forEach(function (o) {
-    var ja = bySn[String(o.sn || '').trim()]; if (!ja) return;
-    linked++;
-    var its = o.items; if (typeof its === 'string') { try { its = JSON.parse(its); } catch (e) { its = []; } }
-    (its || []).forEach(function (it) { var v = nk(it && it.variation); if (v) d[v] = ja; });
+  var bySn = {}, cnt = {};
+  inv.forEach(function (r) {
+    var sn = String(r.shopee_sn || '').trim(); if (!sn || !r.name_supplier) return;
+    cnt[sn] = (cnt[sn] || 0) + 1; bySn[sn] = r.name_supplier;
   });
-  var v = { at: new Date().toISOString(), n: Object.keys(d).length, linked: linked, d: d };
-  sbUpsert_('app_kv', [{ k: 'sourcing_dict', v: v, updated_at: new Date().toISOString() }]);
-  Logger.log('仕入れ辞書: ' + v.n + '語（注文と在庫が紐づいた ' + linked + '件）');
-  return { ok: true, n: v.n, linked: linked };
+  var ord = sbSelectAll_('orders', 'select=sn,items,order_date');
+  var cand = {}, used = 0, skipMulti = 0;
+  ord.forEach(function (o) {
+    var sn = String(o.sn || '').trim();
+    if (cnt[sn] !== 1) { if (cnt[sn]) skipMulti++; return; }        // 同じSNに在庫が複数＝どれか分からない
+    var its = o.items; if (typeof its === 'string') { try { its = JSON.parse(its); } catch (e) { its = []; } }
+    if (!its || its.length !== 1) { if (its && its.length > 1) skipMulti++; return; }   // 明細2件以上＝どれか分からない
+    var v = nk(its[0] && its[0].variation); if (!v) return;
+    var ja = bySn[sn]; if (!ja) return;
+    used++;
+    if (!cand[v]) cand[v] = {};
+    cand[v][ja] = (cand[v][ja] || 0) + 1;
+  });
+  // 同じ明細名に別々の日本語が付く場合：**最頻が単独1位のときだけ**採用。割れたら捨てる（間違った名前で買わせない）
+  var d = {}, dropped = 0;
+  Object.keys(cand).forEach(function (v) {
+    var m = cand[v], names = Object.keys(m);
+    if (names.length === 1) { d[v] = names[0]; return; }
+    names.sort(function (a, b) { return m[b] - m[a]; });
+    if (m[names[0]] > m[names[1]]) d[v] = names[0]; else dropped++;
+  });
+  var val = { at: new Date().toISOString(), n: Object.keys(d).length, used: used, skipped: skipMulti, dropped: dropped, d: d };
+  sbUpsert_('app_kv', [{ k: 'sourcing_dict', v: val, updated_at: new Date().toISOString() }]);
+  Logger.log('仕入れ辞書: ' + val.n + '語（採用 ' + used + ' / 曖昧で除外 ' + skipMulti + ' / 割れて破棄 ' + dropped + '）');
+  return { ok: true, n: val.n, used: used, skipped: skipMulti, dropped: dropped };
 }
 
 // ================= 出品(listings)同期：公式 get_item_list でブリッジ卒業 =================
