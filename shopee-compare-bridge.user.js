@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.5.0
+// @version      1.6.0
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -32,6 +32,7 @@
 // @connect      jp.mercari.com
 // @connect      mercari.com
 // @connect      static.mercdn.net
+// @connect      yamada-denkiweb.com
 // @connect      *
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
@@ -44,7 +45,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.5.0';
+  const VER = '1.6.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -58,6 +59,8 @@
     'www.suruga-ya.jp', 'suruga-ya.jp',
     'auctions.yahoo.co.jp', 'paypayfleamarket.yahoo.co.jp', 'shopping.yahoo.co.jp',
     'search.rakuten.co.jp', 'www.amazon.co.jp', 'www.2ndstreet.jp',
+    // 🔎JAN/型番を探す用。ヤマダは商品ページに JAN と型番が素で載っている（他店は載せていないか機械で拾えない）
+    'www.yamada-denkiweb.com', 'yamada-denkiweb.com',
   ];
 
   // 注意: Tampermonkeyサンドボックスでは e.source === window が成立しないことがあるため
