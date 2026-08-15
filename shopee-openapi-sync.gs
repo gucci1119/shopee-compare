@@ -1066,6 +1066,17 @@ function updateStockList_(shopId, itemId, list) {
   return { updated: sl.length, response: (j && j.response) || j };
 }
 // ★バリエ構成(tier)を更新（オプション追加/名称変更）。既存modelを新indexへ再マップ。model=[{model_id,tier_index}]
+// ★並び位置(tier_index)を付け替えて送るときは、**価格・在庫・SKUまで必ず載せる**。
+//   model_idと位置だけで送ると、Shopee側で中身が空とみなされて【巻き添えで明細が消える】
+//   （2026-08-15：1件消したつもりが3件消えた＝隣が消滅＋1件がゴースト化）。
+//   位置が変わらない更新（追加・画像差替など）では price を送らない＝意図しない価格上書きを避ける。
+function remapEntry_(m, newIdx) {
+  var e = { model_id: m.model_id, tier_index: [newIdx] };
+  var pr = parseFloat(m.price); if (pr > 0) e.original_price = pr;
+  var stk = (m.stock != null ? parseInt(m.stock, 10) : null); if (stk != null && !isNaN(stk)) e.seller_stock = [{ stock: stk }];
+  if (m.sku) e.model_sku = String(m.sku);
+  return e;
+}
 function updateTierVariation_(shopId, itemId, tierVariation, model) {
   var body = { item_id: parseInt(itemId, 10), tier_variation: tierVariation };
   if (model) body.model = model;
@@ -1106,7 +1117,7 @@ function reorderVariation_(shopId, itemId, orderNames) {
   var remap = models.map(function (m) {
     var old = (m.tier_index || [])[0];
     if (map[old] == null) throw new Error('対応の取れない明細があります');
-    return { model_id: m.model_id, tier_index: [map[old]] };
+    return remapEntry_(m, map[old]);
   });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, order: orderNames };
@@ -1295,7 +1306,7 @@ function cleanVariation_(shopId, itemId) {
   if (!keep.length) throw new Error('全ての明細に中身がありません（この商品はここでは直せません）');
   var map = {}, newOpts = [];
   keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
-  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
+  var remap = models.map(function (m) { return remapEntry_(m, map[(m.tier_index || [])[0]]); });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
   return { ok: true, removed: removed.length, names: removed.slice(0, 20), remain: newOpts.length };
 }
@@ -1365,13 +1376,7 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   // ★残すモデルは【price/stock/SKUまで載せて】送る。model_idと位置だけだと、Shopee側で
   //   中身が空とみなされて**巻き添えで消える**（2026-08-15：1件消したつもりが3件消えた）。
   var remap = models.filter(function (m) { var oi = (m.tier_index || [])[0]; return oi != null && !delIdx[oi] && map[oi] != null; })
-    .map(function (m) {
-      var e = { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] };
-      var pr = parseFloat(m.price); if (pr > 0) e.original_price = pr;
-      var stk = (m.stock != null ? parseInt(m.stock, 10) : null); if (stk != null && !isNaN(stk)) e.seller_stock = [{ stock: stk }];
-      if (m.sku) e.model_sku = String(m.sku);
-      return e;
-    });
+    .map(function (m) { return remapEntry_(m, map[(m.tier_index || [])[0]]); });
   // ★オプションの数とモデルの数が合わないまま送ると、Shopee側に中身のない行が生まれる。必ず止める。
   if (remap.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap.length + '/' + newOpts.length + '）。安全のため中止しました');
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
