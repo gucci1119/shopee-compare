@@ -11705,6 +11705,39 @@
     return kept.length ? kept.join(' ') : kw;
   }
   const kwStoreKey = (name, vari) => 'srckw:' + (String(name || '') + '|' + String(vari || '')).slice(0, 140);
+  // ★手で直した検索語は【全PCで共有・永久に残す】。以前は localStorage だけだったので、
+  //   PCを変えると消え、他の端末では効かなかった。1回直せば次からずっと効くのが本来の姿。
+  //   保存先：app_kv k='sourcing_kw' → { items: { <kwStoreKey>: 検索語 } }
+  let kwFix = null, _kwSaveT = null;
+  function loadKwFix() {
+    if (kwFix !== null) return Promise.resolve(kwFix);
+    kwFix = {};
+    return sbGetAll('app_kv', 'select=v&k=eq.sourcing_kw')
+      .then(rows => {
+        kwFix = ((rows && rows[0] && rows[0].v) || {}).items || {};
+        // この端末の localStorage にだけ残っている分を拾って共有へ移す（1回だけ）
+        let moved = 0;
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k || k.indexOf('srckw:') !== 0) continue;
+            const v = localStorage.getItem(k);
+            if (v && !kwFix[k]) { kwFix[k] = v; moved++; }
+          }
+        } catch (_) {}
+        if (moved) saveKwFix();
+        return kwFix;
+      })
+      .catch(() => kwFix);
+  }
+  function saveKwFix() {
+    if (_kwSaveT) clearTimeout(_kwSaveT);
+    _kwSaveT = setTimeout(() => {
+      if (!settings.sbSecret) return;                     // 書き込みキーが無い端末は共有しない（localStorageには残る）
+      sbUpsert('app_kv', [{ k: 'sourcing_kw', v: { items: kwFix || {} }, updated_at: new Date().toISOString() }])
+        .catch(e => console.warn('[SMD] 検索語の共有保存に失敗', e));
+    }, 600);
+  }
 
   async function renderBuy() {
     const wrap = document.getElementById('buy-body');
@@ -11720,6 +11753,7 @@
   async function renderSourcing(host) {
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     try { await loadSrcDict(); } catch (_) {}   // 🔎過去の仕入れタイトル辞書（検索語の精度）
+    try { await loadKwFix(); } catch (_) {}     // ✍️手で直した検索語（全PC共有・最優先）
     let orders;
     try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,order_ts,order_date&tab=eq.300&order=order_ts.desc.nullslast,order_date.desc.nullslast,sn.desc'); }
     catch (e) { host.innerHTML = errBox(e); return; }
@@ -11781,7 +11815,8 @@
         const gi = (buyPage - 1) * buyPer + li; // data-i はグローバル添字（items[gi] を引くハンドラのため）
         const region = regionByCc(o.cc);
         const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
-        const saved = localStorage.getItem(kwStoreKey(it.name, it.variation));
+        const _kk = kwStoreKey(it.name, it.variation);
+        const saved = (kwFix && kwFix[_kk]) || localStorage.getItem(_kk);   // 共有 → この端末 の順
         const kw = saved != null ? saved : sourcingKeyword(it.name, it.variation);
         const done = isDone({ o, ix });
         const pick = (() => { try { return JSON.parse(localStorage.getItem('srcPick:' + doneKey({ o, ix })) || 'null'); } catch (_) { return null; } })();
@@ -11816,7 +11851,11 @@
     // 手直しを記憶（編集したらその商品のキーワードとして保存）
     host.querySelectorAll('.src-kw').forEach(inp => inp.addEventListener('change', () => {
       const { it } = disp[+inp.dataset.i];
-      try { localStorage.setItem(kwStoreKey(it.name, it.variation), inp.value); } catch (e) {}
+      const kk = kwStoreKey(it.name, it.variation);
+      try { localStorage.setItem(kk, inp.value); } catch (e) {}
+      kwFix = kwFix || {};
+      if (String(inp.value || '').trim()) kwFix[kk] = inp.value; else delete kwFix[kk];
+      saveKwFix();                                        // ★全PCで共有（次からどの端末でも効く）
     }));
     host.querySelectorAll('.src-go').forEach(btn => btn.addEventListener('click', () => {
       const site = SRC_SITES.find(s => s.k === btn.dataset.site);
@@ -14534,6 +14573,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-14', items: [
+      '✍️ <b>手で直した仕入れ検索の語を全PCで共有・永久保存</b>。これまで <code>localStorage</code> にしか残らず、<b>PCを変えると消え、他の端末では効かなかった</b>。<code>app_kv</code> に移して共有し、<b>1回直せば次からどの端末でもその語で検索</b>されるようにした。この端末に既に残っていた分は初回に自動で吸い上げる。優先順は <b>手で直した語 → 過去に買った日本語タイトル → 自動整形</b>。',
       '🔎 <b>仕入れ検索のキーワードに「過去に自分が買ったときの日本語タイトル」を使う</b>。Shopeeの英語タイトルから逆算するより確実（実績のある文字列なので必ず当たる）。在庫と注文を突合して<b>英語の明細名→日本語タイトルの辞書</b>をGASが毎日作る（実測で588語）。いま仕入れ待ちの明細のうち、<b>バリエ名があるものの46%がこれで一致</b>（例：CRISIS CORE FF VII REUNION → クライシス コア -ファイナルファンタジーVII- リユニオン）。残り（初めて売れた商品）は従来の整形にそのまま回す。',
       '🛑 <b>🔄（この商品だけ最新にする）が保存に失敗し続けていた</b>のを修正。今日足した <code>opts</code> / <code>opt_count</code> を<b>DBに存在しない列</b>へ書こうとしていたため、<b>upsertがまるごと失敗</b>し、何回押しても何も保存されていなかった（エラーを握りつぶしていたので無反応に見えた）。<b>列は増やさず</b>、中身のない枠は <code>models</code> の中に印付きで入れる方式に変更。件数・価格・在庫の集計からは除外する。',
       '🧹 <b>「明細名をそろえる」が作る名前がShopee的にかぶっていた</b>のを修正。そろえる側のかぶり判定が <code>toLowerCase</code> だけで、<b>全角半角・連続スペースを同一視していなかった</b>ため、「かぶらないように付けた名前」で保存が落ちていた。判定を保存前チェックと同じ物差し（NFKC＋小文字＋空白1つ）に統一。さらに<b>そろえた直後に、残っている重複を番号つきでその場で表示</b>する（保存して初めて知る、をやめる）。',
