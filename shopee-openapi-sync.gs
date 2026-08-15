@@ -1379,16 +1379,36 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: m.model_id });
     if (dj && dj.error && dj.error !== '') throw new Error('明細の削除に失敗: ' + dj.error + ' ' + (dj.message || ''));
   });
-  // 2) tierのオプションを詰め直し、残ったmodelのtier_indexを 0,1,2... に振り直す（番号の穴を作らない）
+  // 2) ★並び直しは【削除直後にShopeeから読み直した状態】を元にする。
+  //    削除前のスナップショットで組み立てると、Shopee側が既に詰めていた場合に位置がズレ、
+  //    **隣の明細の中身が消える**（2026-08-15 実測：BBBを消すとCCCまで消えた）。
+  var j2 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var r2 = j2.response || {};
+  var tier2 = (r2.tier_variation || [])[0] || tier;
+  var optList2 = tier2.option_list || [];
+  var models2 = r2.model || [];
+  var diag = { after_delete_opts: optList2.length, after_delete_models: models2.length };
+  // 中身(model)が付いている枠だけを、今の並びのまま残す
+  var used2 = {};
+  models2.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) used2[oi] = 1; });
+  var keep2 = [], orphan2 = [];
+  for (var k2 = 0; k2 < optList2.length; k2++) { if (used2[k2]) keep2.push(k2); else orphan2.push(optList2[k2].option); }
+  // 既に「隙間なし」なら何も送らない＝余計な更新でリスクを取らない
+  var needFix = (keep2.length !== optList2.length);
   var map = {}, newOpts = [];
-  keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
+  keep2.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList2[oi])); });
+  if (needFix) {
+    var remap2 = models2.filter(function (m) { var oi = (m.tier_index || [])[0]; return oi != null && map[oi] != null; })
+      .map(function (m) { return remapEntry_(m, map[(m.tier_index || [])[0]]); });
+    if (remap2.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap2.length + '/' + newOpts.length + '）。安全のため中止しました');
+    updateTierVariation_(shopId, itemId, [{ name: tier2.name, option_list: newOpts }], remap2);
+  }
+  orphan = orphan.concat(orphan2);
+  var _skipOld = true;
+  if (!_skipOld) {
   // ★残すモデルは【price/stock/SKUまで載せて】送る。model_idと位置だけだと、Shopee側で
   //   中身が空とみなされて**巻き添えで消える**（2026-08-15：1件消したつもりが3件消えた）。
-  var remap = models.filter(function (m) { var oi = (m.tier_index || [])[0]; return oi != null && !delIdx[oi] && map[oi] != null; })
-    .map(function (m) { return remapEntry_(m, map[(m.tier_index || [])[0]]); });
-  // ★オプションの数とモデルの数が合わないまま送ると、Shopee側に中身のない行が生まれる。必ず止める。
-  if (remap.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap.length + '/' + newOpts.length + '）。安全のため中止しました');
-  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
+  }
   // ★消したつもりが消えていない／余分に消えた を画面で確認できるよう、実際の残り件数を読み直して返す。
   //   さらに【オプション数 ≠ モデル数】になっていたら、その場で自動で掃除する（自己修復）。
   //   この状態＝「中身のない明細」で、放置するとShopee側で価格・重量が空の行になり
@@ -1407,7 +1427,7 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     after = { remain: (t2.option_list || []).length, names: (t2.option_list || []).map(function (o) { return o.option; }) };
   } catch (e) { after = { remain: newOpts.length }; }
   return { ok: true, deleted: resolved.length, deleted_names: resolved, remain: after.remain, remain_names: after.names || [],
-           orphan_cleaned: orphan.length + healed, orphan_names: orphan.slice(0, 20) };
+           orphan_cleaned: orphan.length + healed, orphan_names: orphan.slice(0, 20), diag: diag };
 }
 // ★明細をまとめて追加。画像を並列アップロード→tier更新1回→add_model1回。
 //   1件ずつ（画像DL＋upload_image＋get_model_list＋update_tier_variation＋add_model）の4〜5往復×件数を大幅に削減。
