@@ -14683,7 +14683,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
-      '🛑 <b>【重要】明細の削除を一時停止しました</b>。実データで確認したところ、<b>1件だけ消したつもりが3件消えていました</b>（意図した1件＋隣の1件が消え、さらに1件が「中身のない枠」になった）。原因の可能性（<code>update_tier_variation</code> に<b>価格・在庫を載せずに model_id と位置だけ送っていた</b>）は直しましたが、<b>安全が実機で確認できるまで削除ボタンは動きません</b>。削除が要る場合はShopeeの編集画面からお願いします。',
+      '🧨 <b>【重要】明細の削除は「一番下」だけ可能にしました</b>（テスト用カタログで実証）。Shopeeの公式APIは<b>位置が変わる明細を保持できず</b>、途中の明細を消すと<b>後ろの明細がShopee側で消えます</b>（価格・在庫を載せる／新しい位置順に並べる／削除直後に読み直す、いずれでも防げませんでした）。そこで<b>一番下の明細だけ削除可能</b>にし、途中はGAS側でも事前に断ります。途中を消したいときはShopeeの編集画面から。',
+      '🛑 <b>（経緯）明細の削除で3件失いました</b>。実データで確認したところ、<b>1件だけ消したつもりが3件消えていました</b>（意図した1件＋隣の1件が消え、さらに1件が「中身のない枠」になった）。原因の可能性（<code>update_tier_variation</code> に<b>価格・在庫を載せずに model_id と位置だけ送っていた</b>）は直しましたが、<b>安全が実機で確認できるまで削除ボタンは動きません</b>。削除が要る場合はShopeeの編集画面からお願いします。',
       '🐞 <b>一覧からの明細削除で「削除に失敗: markStale is not defined」</b>と出るのを修正。<b>削除自体は成功していて</b>、その直後の1行（編集画面の中だけにある関数を呼んでいた）で落ちて<b>失敗と表示されていた</b>だけ。紛らわしいので削除。同じ理由で📄複製も同じ行を外した。',
       '🆔 <b>「この出品のshop_idが分かりません」で操作できない</b>のを修正。item_idは<b>DBは数値・画面のdata属性は文字列</b>なのに <code>===</code> で比べていて当たらなかった。🗑明細削除・📄複製・各国まとめ編集の保存などが動かない原因。比較を揃えた。',
       '🔖 <b>JAN等の「⚠重複」が、何番とかぶっているか出るように</b>。これまでは「⚠重複」だけで<b>どれと重複しているのか分からず直せなかった</b>。同じカタログ内なら <b>2番・15番と重複</b>、別カタログなら <b>国＋商品名＋番号</b>を出す（3件以上にも対応）。',
@@ -18819,9 +18820,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // ★2026-08-15：1件消したつもりが【3件】消えた（隣が巻き添え＋1件がゴースト化）。
         //   原因候補（update_tier_variation に価格・在庫を載せていなかった）は直したが、
         //   実機で安全確認が済むまでは止める。消える操作は疑いのまま出さない。
-        alert('⚠ 明細の削除は現在【停止中】です。\n\n'
-          + '2026-08-15に「1件だけ消したつもりが3件消える」事故が起きたため、安全確認が終わるまで止めています。\n\n'
-          + '削除が必要な場合は Shopee の編集画面から消してください。');
+        alert('明細の削除は【出品一覧の展開行】から行ってください。\n\n'
+          + 'Shopeeの公式APIは位置が変わる明細を保持できず、途中の明細を消すと後ろが消えます（実際に発生）。\n'
+          + '一番下の明細だけが安全に削除できるため、判定できる一覧側に集約しました。\n\n'
+          + '途中の明細はShopeeの編集画面から削除してください。');
         return;
         /* eslint-disable no-unreachable */
         if (!needOfficial()) return;
@@ -25884,15 +25886,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!settings.openapiUrl || !settings.writeToken) { toast('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です', true); return; }
       const sid = shopIdOfListing(cc, itemId);
       if (!sid) { toast('この出品のshop_idが分かりません', true); return; }
-      // ★2026-08-15：1件消したつもりが【3件】消えた（隣の明細が巻き添え＋1件がゴースト化）。
-      //   原因の可能性（update_tier_variationに価格/在庫を載せていなかった）は直したが、
-      //   実機で安全が確認できるまでは**止める**。データが消える操作を疑いのまま出さない。
-      if (!confirm('⚠ 明細の削除は現在【停止中】です。\n\n'
-        + '2026-08-15に「1件だけ消したつもりが3件消える」事故が起きたため、安全確認が終わるまで止めています。\n\n'
-        + '削除が必要な場合は Shopee の編集画面から消してください。\n\n'
-        + '（OKを押しても削除は実行しません）')) return;
-      return;
-      /* eslint-disable no-unreachable */
+      // ★Shopeeの公式APIは【位置が変わるモデルを保持できない】（2026-08-15 実証）。
+      //   最後尾の明細だけは安全に消せるが、途中を消すと**後ろの明細がShopee側で消える**。
+      //   なので最後尾以外はここで断る（実際に3件失う事故が起きたため）。
+      { const row0 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+        let ms0 = row0 && row0.models; if (!Array.isArray(ms0)) { try { ms0 = JSON.parse(ms0 || '[]'); } catch (_) { ms0 = []; } }
+        const maxTi = Math.max(-1, ...(ms0 || []).map(x => (x && x.ti != null) ? x.ti : -1));
+        const me = (ms0 || []).find(x => String(x.id) === String(mid));
+        if (!me || me.ti == null || me.ti !== maxTi) {
+          alert('この明細は【途中】にあるため、ここからは削除できません。\n\n'
+            + 'Shopeeの公式APIは、位置が変わる明細を保持できず、後ろの明細が消えてしまいます（実際に発生）。\n\n'
+            + '・一番下の明細は、ここから削除できます\n'
+            + '・途中の明細は、Shopeeの編集画面から削除してください');
+          return;
+        }
+      }
       const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
       if (!confirm('書込先: ' + gw.summary + '\n\n' + no + '番「' + nm + '」をShopeeから削除します。\n\n元に戻せません。よろしいですか？')) return;
       const org = el.textContent; el.textContent = '⏳';
@@ -25903,7 +25911,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         toast('🗑 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）' + (r.orphan_cleaned ? ' ・中身のない明細を ' + r.orphan_cleaned + '件 掃除' : ''));
         await refreshOneListing(cc, itemId, sid);   // ★取り直しで一覧・DBとも最新になる（markStaleは編集画面の中だけの関数なので呼ばない）
       } catch (e) { el.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
-      /* eslint-enable no-unreachable */
     }));
     document.querySelectorAll('#lst-list .lst-clone').forEach(el => el.addEventListener('click', () => cloneCatalog(el.dataset.cc, el.dataset.id)));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
