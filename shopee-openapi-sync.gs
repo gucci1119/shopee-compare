@@ -2946,19 +2946,51 @@ function cloneItem_(shopId, itemId, newName, publish) {
     try { setItemVideo_(shopId, out.item_id, vurl); out.video = 1; }
     catch (e) { out.video_warn = String((e && e.message) || e); }
   }
-  // 属性(specifics)は add_item では送れないので、作成後に update_item で移す（カテゴリが同じなのでそのまま通る）
+  // 属性(specifics)は add_item では送れないので、作成後に update_item で移す。
+  // ★ここで `AttributeValue.ValueId: ValueId is required` で丸ごと落ちていた（2026-08-15）。
+  //   get_item_base_info は選択式の属性でも value_id を 0 で返すことがあり、
+  //   そのまま original_value_name だけ送ると「選択式なのにIDが無い」と弾かれる。
+  //   → カテゴリの選択肢表から**名前でIDを引き直す**。引けない選択式は**その属性だけ捨てる**
+  //     （1つのために全部落とさない。捨てた分は warn で返してポータルに出す）。
+  var attrTree = [];
+  try { attrTree = getAttributeTree_(shopId, body.category_id, 'en') || []; } catch (e) { out.attr_tree_warn = String((e && e.message) || e); }
+  var atById = {};
+  attrTree.forEach(function (a) { atById[a.attribute_id] = a; });
+  var vkey = function (x) { return String(x == null ? '' : x).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  var dropped = [];
   var attrs = (base.attribute_list || []).map(function (a) {
-    return { attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).map(function (v) {
-      return v.value_id ? { value_id: v.value_id, value_unit: v.value_unit } : { original_value_name: v.original_value_name };
-    }) };
+    var def = atById[a.attribute_id] || null;
+    var opts = (def && def.options) || [];
+    var byName = {};
+    opts.forEach(function (o) { if (o && o.id) byName[vkey(o.name)] = o.id; });
+    var vals = (a.attribute_value_list || []).map(function (v) {
+      if (v.value_id) return { value_id: v.value_id, value_unit: v.value_unit };
+      var hit = byName[vkey(v.original_value_name)];
+      if (hit) return { value_id: hit, value_unit: v.value_unit };
+      // 選択肢を持つ属性＝選択式。IDが引けないものは送れない
+      if (opts.length) return null;
+      return { original_value_name: v.original_value_name };
+    }).filter(function (v) { return v && (v.value_id || v.original_value_name); });
+    if (!vals.length && (a.attribute_value_list || []).length) {
+      dropped.push((def && def.name) || ('#' + a.attribute_id));
+    }
+    return { attribute_id: a.attribute_id, attribute_value_list: vals };
   }).filter(function (a) { return a.attribute_value_list.length; });
+  if (dropped.length) out.attr_dropped = dropped;
   // 属性＋親SKUをまとめて反映（親SKUは引き継いでから本人が①→②等にアレンジする）
   if (out && out.item_id && (attrs.length || base.item_sku)) {
     var up = { item_id: out.item_id };
     if (attrs.length) up.attribute_list = attrs;
     if (base.item_sku) up.item_sku = String(base.item_sku).slice(0, 100);
-    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', up); out.parent_sku = up.item_sku || ''; }
-    catch (e) { out.attr_warn = String((e && e.message) || e); }
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', up); out.parent_sku = up.item_sku || ''; out.attr_n = attrs.length; }
+    catch (e) {
+      // ★属性で落ちても【複製そのものは捨てない】。親SKUだけでも入れ直して、属性は警告で返す。
+      out.attr_warn = String((e && e.message) || e);
+      if (up.item_sku) {
+        try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, item_sku: up.item_sku }); out.parent_sku = up.item_sku; }
+        catch (e2) { out.sku_warn = String((e2 && e2.message) || e2); }
+      }
+    }
   }
   out.from_item_id = itemId;
   out.name = body.item_name;
