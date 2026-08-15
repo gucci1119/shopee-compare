@@ -1362,8 +1362,16 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
   // 2) tierのオプションを詰め直し、残ったmodelのtier_indexを 0,1,2... に振り直す（番号の穴を作らない）
   var map = {}, newOpts = [];
   keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
+  // ★残すモデルは【price/stock/SKUまで載せて】送る。model_idと位置だけだと、Shopee側で
+  //   中身が空とみなされて**巻き添えで消える**（2026-08-15：1件消したつもりが3件消えた）。
   var remap = models.filter(function (m) { var oi = (m.tier_index || [])[0]; return oi != null && !delIdx[oi] && map[oi] != null; })
-    .map(function (m) { return { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] }; });
+    .map(function (m) {
+      var e = { model_id: m.model_id, tier_index: [map[(m.tier_index || [])[0]]] };
+      var pr = parseFloat(m.price); if (pr > 0) e.original_price = pr;
+      var stk = (m.stock != null ? parseInt(m.stock, 10) : null); if (stk != null && !isNaN(stk)) e.seller_stock = [{ stock: stk }];
+      if (m.sku) e.model_sku = String(m.sku);
+      return e;
+    });
   // ★オプションの数とモデルの数が合わないまま送ると、Shopee側に中身のない行が生まれる。必ず止める。
   if (remap.length !== newOpts.length) throw new Error('明細とオプションの数が合いません（' + remap.length + '/' + newOpts.length + '）。安全のため中止しました');
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], remap);
