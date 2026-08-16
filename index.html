@@ -2425,8 +2425,8 @@
     const noShop = orderRows.filter(o => !detCcs.has(o.cc)).map(({ shop_id, ...rest }) => rest);
     const doUpsert = async (rows) => {
       if (!rows.length) return;
-      try { await sbUpsert('orders', rows); }
-      catch (e) { if (/pre_order/i.test(e.message)) await sbUpsert('orders', rows.map(({ pre_order, ...rest }) => rest)); else throw e; }
+      try { await sbUpsert('orders', rows, 'cc,sn'); }
+      catch (e) { if (/pre_order/i.test(e.message)) await sbUpsert('orders', rows.map(({ pre_order, ...rest }) => rest), 'cc,sn'); else throw e; }
     };
     await doUpsert(withShop); await doUpsert(noShop);
   }
@@ -7386,12 +7386,16 @@
     }
     b.textContent = '⚠ 保存に失敗 ' + sbFails.length + '件';
   }
-  async function sbUpsert(table, rows) {
+  // ★onConflict：どの列の組み合わせで「同じ行」と見なすかを明示する。
+  //   指定しないと主キーだけが対象になり、**別に張られた一意制約**（例 orders の (cc, sn)）に当たったとき
+  //   upsertにならず 409 duplicate key で落ちる。実際に orders でこれが起きていた（2026-08-16）。
+  async function sbUpsert(table, rows, onConflict) {
     if (!rows.length) return 0;
     const key = settings.sbSecret;
     if (!key) throw new Error('このPCは書き込みキー未設定です（⚙️設定でservice_roleキーを入力）');
+    const qs = onConflict ? ('?on_conflict=' + encodeURIComponent(onConflict)) : '';
     for (let i = 0; i < rows.length; i += 500) {
-      const r = await fetch(`${SB_URL}/rest/v1/${table}`, {
+      const r = await fetch(`${SB_URL}/rest/v1/${table}${qs}`, {
         method: 'POST',
         headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json',
           Prefer: 'resolution=merge-duplicates,return=minimal' },
@@ -14683,6 +14687,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🧯 <b>注文の保存が409（重複キー）で失敗していたのを修正</b>。upsertが主キーしか見ておらず、別に張られた一意制約 <code>(cc, sn)</code> に当たると保存できず、右下の「⚠ 保存に失敗」が点きっぱなしになっていました。どの列で同じ行と見なすかを明示するようにしました。',
       '⛔ <b>ヤマダは連続で叩くとIPごと制限されます</b>（実際に踏みました）。JAN探しは<b>2.2秒以上の間隔・直列</b>で、同じURLは1回しか取りに行かず、<b>制限ページを見たらその場で全部止める</b>ようにしました。制限中はそのことを画面に出します（黙って「見つかりません」にしない）。時間を置けば戻ります。',
       '🔎 <b>ネットからJANを探せるようにしました</b>（出品一覧のJAN/型番欄・カタログごと）。明細名から<b>ヤマダウェブコム</b>を検索し、商品ページの JAN と型番を<b>空いている欄だけ</b>に入れます。検索はGAS（サーバのIP）だと403ですが、ブリッジ＝本人のブラウザからなら通ります。<b>拾った商品名を欄の下に必ず出す</b>ので、違う商品を拾っていればその場で分かります。1語しか一致しない候補は<b>入れません</b>（当てずっぽうを入れない）。JANは検査数字まで確かめます。',
       '🧯 <b>【重要】自社コードと識別項目が保存で消えていたのを修正</b>。JAN/型番の保存処理が <code>own</code>（自社コード）と <code>f</code>（識別項目）を書き戻しておらず、入力しても0.5秒後に消えていました。⚡この規則で自動で埋める・🔖自社コードを明細SKUに書く・識別項目が、まとめて効かない状態でした。',
