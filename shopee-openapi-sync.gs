@@ -129,6 +129,21 @@ function doGet(e) {
     }
     // 📄 カタログの複製（満杯になった①から②を作る）
     // 🏷 属性(specifics)だけを別カタログへ写す（複製で失敗した時に**作り直さず**やり直せるように）
+    // 📚 作品マスタの取り込み（ハード別・Wikidata）。母数を数えるための土台
+    if (p.action === 'fetch_titles') {
+      var ftcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var ftout;
+      try {
+        var wtF = P_().getProperty('WRITE_TOKEN');
+        if (!wtF || p.token !== wtF) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var hws = String(p.hw || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+        if (!hws.length) hws = Object.keys(TITLE_HW);
+        var got = [];
+        hws.forEach(function (h) { try { got.push(fetchTitles_(h)); } catch (e1) { got.push({ hw: h, error: String((e1 && e1.message) || e1) }); } });
+        ftout = { ok: true, got: got, all: Object.keys(TITLE_HW) };
+      } catch (err) { ftout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ftcb + '(' + JSON.stringify(ftout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'copy_attrs') {
       var cacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var caout;
@@ -3031,6 +3046,65 @@ function copyAttrs_(shopId, srcItemId, dstItemId, base) {
 }
 
 
+
+
+// ================= 📚 作品マスタ（ハード別の全ソフト一覧）=================
+// ★狙い：**出品の母数を増やす**。「このハードに何本あって、自分は何本出しているか」を数字で出す。
+//   出品数(母数)→sold→価格を戻す の連鎖の一番上。ここが埋まらないと下も伸びない。
+// 出どころ：Wikidata（全ハードで同じ形・日本語/英語ラベルの両方が付く）。
+//   ※Wikipediaの「ゲームタイトル一覧」はハードごとに表の作りがバラバラで、PSP以外は素直に取れない（実測）。
+//   ※どちらも**廉価版・Best版などの「版違い」は載っていない**。版は仕入れで出会った分を足す前提。
+// 置き場：app_kv k='titles_<hw>' → { at, n, rows:[{ja,en,y}] }。新しいテーブルは作らない（SQLを1回叩く手間を増やさない）。
+var TITLE_HW = {
+  switch: { q: 'Q19610114', name: 'Nintendo Switch' },
+  ps4:    { q: 'Q5014725',  name: 'PlayStation 4' },
+  ps3:    { q: 'Q10683',    name: 'PlayStation 3' },
+  ps2:    { q: 'Q10680',    name: 'PlayStation 2' },
+  ps1:    { q: 'Q10677',    name: 'PlayStation' },
+  psp:    { q: 'Q170325',   name: 'PlayStation Portable' },
+  vita:   { q: 'Q188808',   name: 'PlayStation Vita' },
+  ds:     { q: 'Q170323',   name: 'ニンテンドーDS' },
+  '3ds':  { q: 'Q203597',   name: 'ニンテンドー3DS' },
+  wii:    { q: 'Q8079',     name: 'Wii' },
+  wiiu:   { q: 'Q56942',    name: 'Wii U' },
+  gc:     { q: 'Q182172',   name: 'ゲームキューブ' },
+  n64:    { q: 'Q184839',   name: 'NINTENDO64' },
+  sfc:    { q: 'Q183259',   name: 'スーパーファミコン' },
+  fc:     { q: 'Q172742',   name: 'ファミリーコンピュータ' },
+  gba:    { q: 'Q188642',   name: 'ゲームボーイアドバンス' },
+  gb:     { q: 'Q186437',   name: 'ゲームボーイ' },
+  md:     { q: 'Q10676',    name: 'メガドライブ' },
+  ss:     { q: 'Q200912',   name: 'セガサターン' },
+  dc:     { q: 'Q184198',   name: 'ドリームキャスト' }
+};
+function fetchTitles_(hw) {
+  var def = TITLE_HW[String(hw || '').toLowerCase()];
+  if (!def) throw new Error('知らないハードです: ' + hw + '（' + Object.keys(TITLE_HW).join('/') + '）');
+  var q = 'SELECT ?item ?ja ?en ?d WHERE {'
+    + ' ?item wdt:P400 wd:' + def.q + ' .'
+    + ' OPTIONAL { ?item rdfs:label ?ja FILTER(lang(?ja)="ja") }'
+    + ' OPTIONAL { ?item rdfs:label ?en FILTER(lang(?en)="en") }'
+    + ' OPTIONAL { ?item wdt:P577 ?d }'
+    + ' }';
+  var url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(q);
+  // ★User-Agent を入れないと弾かれる。連絡先を入れるのがWikimediaの作法。
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'Accept': 'application/sparql-results+json', 'User-Agent': 'shopee-os/1.0 (gcsonlinestore631@gmail.com)' } });
+  if (res.getResponseCode() !== 200) throw new Error('Wikidata HTTP ' + res.getResponseCode() + '（混んでいる時は少し待って再実行）');
+  var bind = ((JSON.parse(res.getContentText()).results) || {}).bindings || [];
+  var by = {};
+  bind.forEach(function (r) {
+    var k = (r.item || {}).value; if (!k) return;
+    var e = by[k] || (by[k] = { ja: '', en: '', y: '' });
+    if (!e.ja && r.ja) e.ja = r.ja.value;
+    if (!e.en && r.en) e.en = r.en.value;
+    if (r.d && r.d.value) { var y = String(r.d.value).slice(0, 4); if (!e.y || y < e.y) e.y = y; }  // 一番古い＝初出年
+  });
+  var rows = [];
+  Object.keys(by).forEach(function (k) { var e = by[k]; if (e.ja || e.en) rows.push(e); });
+  rows.sort(function (a, b) { return String(a.y || '9999').localeCompare(String(b.y || '9999')); });
+  sbUpsert_('app_kv', [{ k: 'titles_' + hw, v: { at: new Date().toISOString(), hw: hw, name: def.name, n: rows.length, rows: rows }, updated_at: new Date().toISOString() }], 'k');
+  return { hw: hw, name: def.name, n: rows.length, ja: rows.filter(function (r) { return r.ja; }).length, en: rows.filter(function (r) { return r.en; }).length };
+}
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
 // ★狙い：売れた明細を仕入れ直すとき、**過去に自分が実際に買ったときの日本語タイトル**をそのまま検索語にする。
