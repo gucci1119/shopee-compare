@@ -10606,7 +10606,7 @@
   }
   // 📋 週次報告：当月の「今日まで」の結果・目標・着地予測。数字を作るのに毎回手計算しなくて済むように。
   const planRepTarget = (cfg, ym) => Object.assign({ sales: '', gross: '', orders: '' }, ((cfg.repTargets || {})[ym] || {}));
-  function planReportHtml(M, M2, cfg) {
+  function planReportHtml(M, M2, cfg, pl) {
     const now = new Date(Date.now() + 9 * 3600 * 1000);            // JST
     const ym = now.getUTCFullYear() + '-' + String(now.getUTCMonth() + 1).padStart(2, '0');
     const dayNow = now.getUTCDate();
@@ -10652,6 +10652,10 @@
       tline('売上（入金ベース）', m.dep, t.sales, fmtM),
       tline('粗利', gross, t.gross, fmtM),
       tline('注文数', m.n, t.orders, fmtN),
+      ...((pl && pl.fix >= 0 && dim > 0 && dayNow > 0)
+        ? ['実利益：' + ((Number(pl.targetNet) || 0) > 0 ? '目標 ' + man(Number(pl.targetNet)) + ' ／ ' : '') + '結果 ' + man(pl.now)
+          + ' ／ 着地予測 ' + man(gross / (dayNow / dim) - pl.fix - (pl.other || 0) / (dayNow / dim) - (pl.refund || 0) / (dayNow / dim))
+          + '（固定費 ' + man(pl.fix) + ' は月額のまま計上）'] : []),
       '',
       '国別：' + (ccs.map(cc => cc + ' ' + M2[ym][cc].n + '件/' + man(M2[ym][cc].dep - M2[ym][cc].cost)).join('　') || '-'),
       '粗利/件：' + (m.gn ? yen(gross / m.gn) : '-'),
@@ -10670,6 +10674,21 @@
         ${line('売上（入金）', m.dep, t.sales, man)}
         ${line('粗利', gross, t.gross, man)}
         ${line('注文数', m.n, t.orders, v => Math.round(v).toLocaleString() + '件')}
+        ${(() => {
+          // ★実利益の着地は**単純な日割りにしてはいけない**。固定費（家賃・人件費等）は月額でもう全額決まっており、
+          //   月末に向けて増えないため。伸ばすのは 入金・仕入・その他経費・返金（＝件数に比例するもの）だけ。
+          if (!pl || !(pl.fix >= 0)) return '';
+          const frac = dim > 0 ? dayNow / dim : 0; if (frac <= 0) return '';
+          const landOp = gross / frac - pl.fix - (pl.other || 0) / frac - (pl.refund || 0) / frac;
+          const tgt = Number(pl.targetNet) || 0, has = tgt > 0, ok = has && landOp >= tgt;
+          return `<tr style="background:#f2f8ff">
+            <td style="font-weight:700">実利益 <span class="smd-dim" style="font-weight:400;font-size:10px">（固定費を引いた後）</span></td>
+            <td style="text-align:right">${has ? man(tgt) : '<span class="smd-dim">未設定</span>'}</td>
+            <td style="text-align:right;font-weight:700">${man(pl.now)}</td>
+            <td style="text-align:right;font-weight:700;color:${!has ? '#8a8f98' : ok ? '#1a7f37' : '#c0392b'}">${man(landOp)}</td>
+            <td style="text-align:right">${has ? `<b style="color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '達成ペース' : '未達ペース'}</b> <span class="smd-dim">${Math.round(landOp / tgt * 100)}%</span>` : '<span class="smd-dim">-</span>'}</td>
+          </tr>`;
+        })()}
       </table>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <span class="smd-dim" style="font-size:11px">今月の目標（月あたり）</span>
@@ -10853,7 +10872,7 @@
       + `<div style="font-weight:700;font-size:13px;color:${planSec === k ? '#1a73e8' : '#333'}">${label}</div>`
       + `<div class="smd-dim" style="font-size:10.5px;margin-top:2px">${sub}</div></button>`;
     // ★📋 週次報告用：月初〜今日までの結果と着地予測。Discordの報告にそのまま貼れる形にする
-    const repHtml = planReportHtml(M, M2, cfg);
+    const repHtml = planReportHtml(M, M2, cfg, { fix: effFixedOf(curRow), other: curRow.other || 0, refund: curRow.refund || 0, now: curOp, targetNet: targetNet });
     body.innerHTML = repHtml +
       `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:0 0 12px">`
       + secBtn('sim', '🎯 これからの計画（シミュレーション）', '目標を決めて、必要な注文数・固定費・達成ペースを逆算する')
@@ -10973,43 +10992,6 @@
             <div class="smd-dim" style="font-size:10px;margin-top:4px">入金 ${fmtJpy(curRow.dep)} − 仕入 ${fmtJpy(curRow.cost)} − 固定費 ${fmtJpy(effFixedOf(curRow))}${fixEstimated(curRow) ? '(見込)' : ''} − その他経費 ${fmtJpy(curRow.other)}</div>
           </div>
         </div>
-        ${(() => {
-          // 📉 着地見込み＝今日までのペースがこのまま続いた場合の月末。押さなくても常に出す。
-          //   frac＝月のどこまで来たか。序盤(3日未満)は振れが大きすぎるので出さない。
-          if (dom < 3 || frac <= 0) return '<div class="smd-dim" style="font-size:11px;margin-top:10px">着地見込みは月初3日を過ぎてから出します（それまでは振れが大きすぎます）。</div>';
-          const land = v => (v || 0) / frac;
-          const cell = (label, now2, tgt2, col) => {
-            const l = land(now2);
-            const ok = tgt2 > 0 ? l >= tgt2 : null;
-            return `<div style="flex:1;min-width:150px">
-              <div class="smd-dim" style="font-size:10.5px">${label}</div>
-              <div style="font-size:15px;font-weight:700;color:${col}">${typeof now2 === 'number' && label.indexOf('注文') >= 0 ? Math.round(l) + '件' : fmtJpy(l)}</div>
-              <div class="smd-dim" style="font-size:10px">今 ${label.indexOf('注文') >= 0 ? (now2 || 0) + '件' : fmtJpy(now2)}${tgt2 > 0 ? ' ／ 目標 ' + (label.indexOf('注文') >= 0 ? Math.ceil(tgt2) + '件' : fmtJpy(tgt2)) : ''}</div>
-              ${tgt2 > 0 ? `<div style="font-size:10.5px;font-weight:700;color:${ok ? '#1a7f37' : '#d93025'}">${ok ? '✅ 届く見込み' : '⚠️ 不足 ' + (label.indexOf('注文') >= 0 ? Math.ceil(tgt2 - l) + '件' : fmtJpy(tgt2 - l))}</div>` : ''}
-            </div>`;
-          };
-          return `<div style="margin-top:12px;padding-top:10px;border-top:1px dashed #e5e5e5">
-            <div style="font-size:12px;font-weight:700;margin-bottom:6px">📉 このペースだと月末は（${dom}/${dim}日 経過・残り${dim - dom}日）</div>
-            <div style="display:flex;gap:14px;flex-wrap:wrap">
-              ${cell('注文数', curRow.n, needOrders, '#1565c0')}
-              ${cell('入金', curRow.dep, 0, '#1565c0')}
-              ${(() => {
-                // ★実利益は単純に割り戻してはいけない。固定費は月額で**もう全額決まっている**ので伸ばさない。
-                //   伸ばすのは 入金・仕入・その他経費（＝件数に比例するもの）だけ。
-                const fixM = effFixedOf(curRow);
-                const landOp = ((curRow.dep || 0) - (curRow.cost || 0)) / frac - fixM - (curRow.other || 0) / frac;
-                const okOp = targetNet > 0 ? landOp >= targetNet : null;
-                return `<div style="flex:1;min-width:150px">
-                  <div class="smd-dim" style="font-size:10.5px">実利益</div>
-                  <div style="font-size:15px;font-weight:700;color:${landOp < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(landOp)}</div>
-                  <div class="smd-dim" style="font-size:10px">今 ${fmtJpy(curOp)}${targetNet > 0 ? ' ／ 目標 ' + fmtJpy(targetNet) : ''}</div>
-                  ${targetNet > 0 ? `<div style="font-size:10.5px;font-weight:700;color:${okOp ? '#1a7f37' : '#d93025'}">${okOp ? '✅ 届く見込み' : '⚠️ 不足 ' + fmtJpy(targetNet - landOp)}</div>` : ''}
-                </div>`;
-              })()}
-            </div>
-            <div class="smd-dim" style="font-size:10px;margin-top:5px">今日までの実績を月の経過日数で割って月末まで伸ばしています。<b>固定費（${fmtJpy(effFixedOf(curRow))}）は月額でもう全額決まっているので伸ばさず、そのまま引いています</b>（入金・仕入・その他経費だけを伸ばす）。</div>
-          </div>`;
-        })()}
         <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #e5e5e5;display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:12px">
           <span>🗓 <b>今日のノルマ:</b> 約 <b style="color:#ee4d2d">${needPerDay ? Math.ceil(needPerDay) : '—'}</b> 件（仕入・出品・発送）</span>
           <span>✅ 未完タスク: <b>${undone}</b> 件 <button class="smd-btn" id="plan-gotasks" style="font-size:10px;padding:2px 8px">タスク管理へ</button></span>
@@ -14732,7 +14714,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
-      '📉 <b>事業計画に「このペースだと月末は」を追加</b>（D9）。注文数・入金・実利益の着地見込みを、目標に対して届くかどうかと合わせて常時表示します（押さなくても出ます）。<b>固定費は月額でもう全額決まっているので伸ばさず</b>、入金・仕入・その他経費だけを日割りで伸ばしています。月初3日間は振れが大きいので出しません。',
+      '📉 <b>着地予測に「実利益」を追加</b>（D9）。売上・粗利・注文数はありましたが、<b>目標を測る当の実利益が無く</b>、月末にいくら残るかが分かりませんでした。今月の進捗（常時表示）に行を足しています。<b>固定費は月額でもう全額決まっているので日割りで伸ばさず</b>、入金・仕入・その他経費・返金だけを伸ばして計算します。Discordへのコピーにも入ります。',
       '📜 <b>価格・在庫の変更に「いくつからいくつに」を残すようにしました</b>（C1）。✎編集では既に残していましたが、<b>出品一覧からのインライン編集</b>と<b>一括値上げ/一括値下げ</b>は「価格を変えた」としか記録しておらず、<b>戻したくても元の値が分からない</b>状態でした。🧾操作ログに <code>価格 明細名: 2,200 → 2,480</code> の形で残します（一括は先頭20件＋件数）。',
       '🧯 <b>【重要】国別サマリーが開けなかったのを修正</b>。円換算レートを<b>宣言する前に使って</b>いて、<code>Cannot access &#39;_fr&#39; before initialization</code> で描画が丸ごと落ちていました（国別の売上・粗利が一切見られない状態）。',
       '🧯 <b>注文の保存が409（重複キー）で失敗していたのを修正</b>。upsertが主キーしか見ておらず、別に張られた一意制約 <code>(cc, sn)</code> に当たると保存できず、右下の「⚠ 保存に失敗」が点きっぱなしになっていました。どの列で同じ行と見なすかを明示するようにしました。',
