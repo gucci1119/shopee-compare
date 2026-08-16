@@ -130,6 +130,19 @@ function doGet(e) {
     // 📄 カタログの複製（満杯になった①から②を作る）
     // 🏷 属性(specifics)だけを別カタログへ写す（複製で失敗した時に**作り直さず**やり直せるように）
     // 📚 作品マスタの取り込み（ハード別・Wikidata）。母数を数えるための土台
+    // 🖼 タイトルの商品画像を駿河屋から（画面に見えている分だけ・間隔を空ける）
+    if (p.action === 'title_imgs') {
+      var ticb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var tiout;
+      try {
+        var wtI = P_().getProperty('WRITE_TOKEN');
+        if (!wtI || p.token !== wtI) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var ws = JSON.parse(p.q || '[]');
+        tiout = titleImgs_(String(p.hw || 'x'), ws);
+        tiout.ok = true;
+      } catch (err) { tiout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ticb + '(' + JSON.stringify(tiout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'fetch_titles') {
       var ftcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ftout;
@@ -3132,6 +3145,38 @@ function fetchTitles_(hw) {
   idx[hw] = { name: def.name, n: rows.length, ja: ja, en: en, dlOnly: dlOnly, at: new Date().toISOString() };
   sbUpsert_('app_kv', [{ k: 'titles_index', v: idx, updated_at: new Date().toISOString() }], 'k');
   return { hw: hw, name: def.name, n: rows.length, ja: ja, en: en, dlOnly: dlOnly };
+}
+
+
+// ================= 🖼 タイトルの商品画像（駿河屋） =================
+// ★なぜ駿河屋か：Wikidataのパッケージ画像(P18)は**実測2%しか無い**（ゲームの箱絵は著作物でCommonsに載らない）。
+//   駿河屋は中古商品なので必ず写真がある。検索結果の1件目の商品IDが分かれば画像URLは組み立てられる：
+//   https://www.suruga-ya.jp/database/photo.php?shinaban=<id>&size=m
+// ★叩きすぎない：**画面に見えている分だけ**を少しずつ。1件ごとに間隔を空ける（ヤマダでIP制限を踏んだ教訓）。
+//   一度引いたら app_kv timg_<hw> に貯めて二度と引かない。
+function surugaFindId_(kw) {
+  var url = 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(String(kw || '').slice(0, 80));
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36' } });
+  if (res.getResponseCode() !== 200) return '';
+  var h = res.getContentText();
+  var m = h.match(/\/product\/detail\/(\d+)/);
+  return m ? m[1] : '';
+}
+function titleImgs_(hw, words) {
+  var key = 'timg_' + hw, cache = {};
+  try { var cur = sbSelect_('app_kv', 'select=v&k=eq.' + key); cache = ((cur || [])[0] || {}).v || {}; } catch (e) {}
+  var out = {}, got = 0;
+  for (var i = 0; i < words.length && i < 20; i++) {     // 1回20件まで＝叩きすぎない
+    var w = String(words[i] || '').trim(); if (!w) continue;
+    if (cache[w] !== undefined) { out[w] = cache[w]; continue; }
+    if (got > 0) Utilities.sleep(800);                    // 間隔を空ける
+    var id = '';
+    try { id = surugaFindId_(w); } catch (e2) { id = ''; }
+    cache[w] = id; out[w] = id; got++;
+  }
+  if (got) { try { sbUpsert_('app_kv', [{ k: key, v: cache, updated_at: new Date().toISOString() }], 'k'); } catch (e3) {} }
+  return { map: out, fetched: got };
 }
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================

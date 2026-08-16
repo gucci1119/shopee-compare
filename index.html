@@ -14744,6 +14744,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🖼 <b>母数の内訳に商品画像を出せるようにしました（駿河屋）</b>。Wikidataのパッケージ画像は<b>実測2%しか無く</b>（箱絵は著作物なのでCommonsに載らない）使い物にならなかったため、駿河屋の商品写真を使います。<b>画面に見えているカードの分だけ・20件ずつ・間隔を空けて</b>取り、一度引いたら覚えます（ヤマダでIP制限を踏んだ教訓）。検索語は<b>日本語名＋機種</b>です。',
+      '📚 <b>母数マスタからシリーズ記事を除外</b>（マリオシリーズ等）。ゲーム作品であることを条件に加え、PSPで1,411→1,314件・シリーズ語0件になりました。',
       '🧯 <b>【重要】ブラウザの保存領域が満杯で、設定が黙って保存できていませんでした</b>。実測で <b>10.00MB＝上限ぴったり</b>。その状態だと <code>localStorage.setItem</code> が毎回失敗しますが、どこも握りつぶしていたため気づけず、<b>ハードリロードすると必ず為替画面に戻る</b>（＝最後に開いたページを覚えられない）で発覚しました。掃除の対象が実際に食っている大物（下書き3.8MB・カテゴリ名2.9MB）に届いていなかったので、<b>大きいものから捨てて入れ直し</b>、それでもダメなら<b>画面に出す</b>ようにしました（黙って忘れない）。',
       '📚 <b>母数の内訳に「ダウンロード専売を除外」「並べ替え」を追加</b>。中古で扱えないダウンロード専売はマスタに入れません（流通形態が未記入のものは残す＝取りこぼさない）。並べ替えは<b>発売が新しい／古い・あいうえお順・A→Z・画像があるものを先に</b>。',
       '📚 <b>母数の内訳を画像付きで開けるようにしました</b>。ハードの行をクリックすると、<b>まだ出していない／出している</b>をカードで一覧（パッケージ画像はWikidataにあるもの）。そこから駿河屋・メルカリの検索へ直行できます。あわせて<b>出品データを読む前に数えて全部0になっていたのを修正</b>し、件数だけの索引を持たせて<b>13ハード分が表に出なかったのも修正</b>しました。',
@@ -21396,6 +21398,44 @@ grant all on public.tasks to anon, authenticated, service_role;`;
 
   // 📚 1ハードの内訳。「出している／まだ出していない」を画像付きで出す。
   //   ★画像はWikidata(P18)にあるものだけ。無い方が多いので、無い時は枠だけ出して詰まらせない。
+
+  // 🖼 画面に見えているカードの画像だけを駿河屋から取る。
+  //   ★Wikidataの画像は実測2%しか無いので、実務では駿河屋の商品写真を使う。
+  //   ★数万件を一括で舐めない（ヤマダでIP制限を踏んだ）。見えている分だけ・20件ずつ・一度引いたら覚える。
+  let _tmBusy = false;
+  async function tmFillImages(hw, box) {
+    if (!settings.openapiUrl || !settings.writeToken) return;
+    lst.tmImg = lst.tmImg || {};
+    if (!lst.tmImgLoaded) {                      // 既に貯めてある分をまとめて読む（1回だけ）
+      lst.tmImgLoaded = {};
+    }
+    if (!lst.tmImgLoaded[hw]) {
+      lst.tmImgLoaded[hw] = 1;
+      try { const r = await sbGetAll('app_kv', 'select=v&k=eq.timg_' + encodeURIComponent(hw)); Object.assign(lst.tmImg, (r && r[0] && r[0].v) || {}); } catch (_) {}
+      if (document.getElementById('tm-detail')) renderTitleDetailImgs(box);
+    }
+    if (_tmBusy) return;
+    const need = [...box.querySelectorAll('.tm-img')]
+      .filter(el => { const q = el.dataset.q; return q && lst.tmImg[q] === undefined && el.getBoundingClientRect().top < window.innerHeight + 600; })
+      .slice(0, 20).map(el => el.dataset.q);
+    if (!need.length) return;
+    _tmBusy = true;
+    try {
+      const r = await gasCall({ action: 'title_imgs', token: settings.writeToken, hw: hw, q: JSON.stringify(need) }, 120000);
+      if (r && r.ok) { Object.assign(lst.tmImg, r.map || {}); renderTitleDetailImgs(box); }
+    } catch (_) {}
+    _tmBusy = false;
+  }
+  // 画像だけ差し替える（並び替えや絞り込みを崩さない）
+  function renderTitleDetailImgs(box) {
+    box.querySelectorAll('.tm-img').forEach(el => {
+      const q = el.dataset.q, sid = (lst.tmImg || {})[q];
+      if (sid === undefined || el.querySelector('img')) return;
+      if (!sid) { el.textContent = '画像なし'; el.style.color = '#c9c9c9'; el.style.fontSize = '10px'; return; }
+      el.innerHTML = '<img src="https://www.suruga-ya.jp/database/photo.php?shinaban=' + esc(sid) + '&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display=\'none\';this.parentElement.textContent=\'画像なし\';this.parentElement.style.color=\'#c9c9c9\';this.parentElement.style.fontSize=\'10px\'">';
+    });
+  }
+
   async function renderTitleDetail(hw, own) {
     const box = document.getElementById('tm-detail'); if (!box) return;
     box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
@@ -21405,7 +21445,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const nk = v => String(v || '').toLowerCase().replace(/[™®©]/g, '').replace(/[^a-z0-9ぁ-んァ-ヶ一-龠]+/g, ' ').replace(/\s+/g, ' ').trim();
     const mineN = new Set([...mine].map(nk));
     // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
-    const list = rows.map(r => Object.assign({}, r, { has: (r.en && mineN.has(nk(r.en))) || (r.ja && mineN.has(nk(r.ja))) }));
+    const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
+    // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
+    const list = rows.map(r => Object.assign({}, r, {
+      has: (r.en && mineN.has(nk(r.en))) || (r.ja && mineN.has(nk(r.ja))),
+      q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
+    }));
     const hasN = list.filter(x => x.has).length;
     lst.tmFil = lst.tmFil || 'no';
     const shown = list.filter(x => lst.tmFil === 'all' ? true : (lst.tmFil === 'yes' ? x.has : !x.has));
@@ -21424,8 +21469,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     shown2.sort(cmp[lst.tmSort] || cmp.ynew);
     const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">${label} ${n}</button>`;
     const card = x => `<div style="border:1px solid ${x.has ? '#cfe6d6' : '#e6e6e6'};background:${x.has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px">
-      <div style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
-        ${x.img ? `<img src="${esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">` : '<span style="color:#c9c9c9;font-size:10px">画像なし</span>'}
+      <div class="tm-img" data-q="${av(x.q)}" style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+        ${(() => { const sid = (lst.tmImg || {})[x.q]; const u = sid ? ('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m') : x.img;
+          return u ? `<img src="${esc(u)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">`
+            : (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>'); })()}
       </div>
       <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.ja || x.en || '')}</div>
       ${x.ja && x.en ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.en)}</div>` : ''}
@@ -21446,11 +21493,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         </select>
         <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:170px">
       </div>
-      <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。<b>ダウンロード専売は入れていません</b>（中古で扱えないため）。画像はWikidataにあるものだけで、<b>取り込み直すと入ります</b>。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
+      <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。<b>ダウンロード専売は入れていません</b>（中古で扱えないため）。画像は<b>駿河屋の商品写真</b>を、<b>画面に見えているカードの分だけ</b>取りに行きます（20件ずつ・一度引いたら覚えます）。数万件を一括では叩きません。Wikidataの画像は実測2%しか無いため補助です。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>
     </div>`;
     box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
     { const ss = document.getElementById('tm-sort'); if (ss) ss.addEventListener('change', () => { lst.tmSort = ss.value; renderTitleDetail(hw, own); }); }
+    tmFillImages(hw, box);
     const qi = document.getElementById('tm-q');
     if (qi) { let t = null; qi.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { lst.tmQ = qi.value; renderTitleDetail(hw, own); setTimeout(() => { const e2 = document.getElementById('tm-q'); if (e2) { e2.focus(); e2.setSelectionRange(e2.value.length, e2.value.length); } }, 0); }, 350); }); }
   }
