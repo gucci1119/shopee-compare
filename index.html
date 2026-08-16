@@ -14695,6 +14695,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '📜 <b>価格・在庫の変更に「いくつからいくつに」を残すようにしました</b>（C1）。✎編集では既に残していましたが、<b>出品一覧からのインライン編集</b>と<b>一括値上げ/一括値下げ</b>は「価格を変えた」としか記録しておらず、<b>戻したくても元の値が分からない</b>状態でした。🧾操作ログに <code>価格 明細名: 2,200 → 2,480</code> の形で残します（一括は先頭20件＋件数）。',
       '🧯 <b>【重要】国別サマリーが開けなかったのを修正</b>。円換算レートを<b>宣言する前に使って</b>いて、<code>Cannot access &#39;_fr&#39; before initialization</code> で描画が丸ごと落ちていました（国別の売上・粗利が一切見られない状態）。',
       '🧯 <b>注文の保存が409（重複キー）で失敗していたのを修正</b>。upsertが主キーしか見ておらず、別に張られた一意制約 <code>(cc, sn)</code> に当たると保存できず、右下の「⚠ 保存に失敗」が点きっぱなしになっていました。どの列で同じ行と見なすかを明示するようにしました。',
       '⛔ <b>ヤマダは連続で叩くとIPごと制限されます</b>（実際に踏みました）。JAN探しは<b>2.2秒以上の間隔・直列</b>で、同じURLは1回しか取りに行かず、<b>制限ページを見たらその場で全部止める</b>ようにしました。制限中はそのことを画面に出します（黙って「見つかりません」にしない）。時間を置けば戻ります。',
@@ -23541,9 +23542,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!gw.ok) { alert(gw.msg); return; }
     if (!confirm(`🎯 目標ROI(${targetRoi}%)に一括値上げします。\n\n書込先: ${gw.summary}\n対象: ${leaks.length}件（${ccSummary}）\n\n例:\n${examples}${leaks.length > 8 ? `\n…ほか${leaks.length - 8}件` : ''}\n\n${warnLines.length ? '⚠️ 価格制約に注意:\n - ' + warnLines.join('\n - ') + '\n\n' : ''}本番のShopee価格を公式APIで更新します。実行しますか？`)) return;
     const groups = {};
-    leaks.forEach(x => { const k = x.shop_id + ':' + x.item_id; (groups[k] = groups[k] || { shop_id: x.shop_id, item_id: x.item_id, cc: x.cc, list: [] }); groups[k].list.push({ model_id: x.model_id, price: x.newPrice }); });
+    // ★変更前も一緒に持たせる（履歴に「いくつからいくつに」を残すため。値だけ書くと後から戻せない）
+    leaks.forEach(x => { const k = x.shop_id + ':' + x.item_id; (groups[k] = groups[k] || { shop_id: x.shop_id, item_id: x.item_id, cc: x.cc, list: [], src: [] }); groups[k].list.push({ model_id: x.model_id, price: x.newPrice }); groups[k].src.push(x); });
     const gArr = Object.keys(groups).map(k => groups[k]);
-    let okItems = 0, okModels = 0, fail = 0; const errs = [];
+    let okItems = 0, okModels = 0, fail = 0; const errs = [], appliedLines = [];
     const btn = document.querySelector('.leak-fixall'); if (btn) btn.disabled = true;
     const mp = makeProgressMeter('🎯 目標ROIへ一括値上げ中…', gArr.length, '#1a7f37');
     const stat = () => '<span style="color:#1a7f37">✅' + okItems + '出品</span> <span style="color:#d93025">❌' + fail + '</span>';
@@ -23554,13 +23556,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const r = await openapiUpdatePriceList(g.shop_id, g.item_id, g.list);
         if (r && r.ok) {
           okItems++; okModels += g.list.length;
+          (g.src || []).forEach(x => appliedLines.push(x.cc + ' ' + String(x.name || '').slice(0, 24) + ': ' + x.cur + x.price + ' → ' + x.cur + x.newPrice));
           try { const row = (lst.byCc[g.cc] || []).find(y => y.item_id === g.item_id); if (row) { g.list.forEach(pl => { if (pl.model_id && row.models) { const rm = row.models.find(mm => mm.id === pl.model_id); if (rm) rm.price = pl.price; } else { row.price_min = pl.price; row.price_max = pl.price; } }); if (row.models && row.models.length) { const ps = row.models.map(mm => Number(mm.price)).filter(p => p > 0); if (ps.length) { row.price_min = Math.min.apply(null, ps); row.price_max = Math.max.apply(null, ps); } } } } catch (_) {}
         } else { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + ((r && r.error) || '失敗')); }
       } catch (e) { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + (e.message || e)); }
       mp.set(i + 1, null, stat());
     }
     mp.set(gArr.length, '✅ 完了', stat());
-    try { logAct('価格調整', 'マージン漏れ一括修正(公式)', '', `${okItems}出品/${okModels}明細 成功・${fail}失敗（目標ROI${targetRoi}%）`); } catch (_) {}
+    try { logAct('価格調整', 'マージン漏れ一括修正(公式)', '', `${okItems}出品/${okModels}明細 成功・${fail}失敗（目標ROI${targetRoi}%）　` + appliedLines.slice(0, 20).join(' / ') + (appliedLines.length > 20 ? ` ほか${appliedLines.length - 20}件` : '')); } catch (_) {}
     if (btn) btn.disabled = false;
     alert(`🎯 一括修正 完了\n\n成功: ${okItems}出品 / ${okModels}明細\n失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 8).join('\n') : ''}`);
     mp.remove();
@@ -23579,9 +23582,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!gw.ok) { alert(gw.msg); return; }
     if (!confirm(`🎯 ROI維持の下限まで一括値下げします（目標ROI${roiT}%は確保）。\n\n書込先: ${gw.summary}\n対象: ${cuts.length}件（${ccSummary}）\n\n例:\n${examples}${cuts.length > 8 ? `\n…ほか${cuts.length - 8}件` : ''}\n\n本番のShopee価格を公式APIで下げます。実行しますか？`)) return;
     const groups = {};
-    cuts.forEach(x => { const k = x.shop_id + ':' + x.item_id; (groups[k] = groups[k] || { shop_id: x.shop_id, item_id: x.item_id, cc: x.cc, list: [] }); groups[k].list.push({ model_id: x.model_id, price: x.newPrice }); });
+    cuts.forEach(x => { const k = x.shop_id + ':' + x.item_id; (groups[k] = groups[k] || { shop_id: x.shop_id, item_id: x.item_id, cc: x.cc, list: [], src: [] }); groups[k].list.push({ model_id: x.model_id, price: x.newPrice }); groups[k].src.push(x); });   // ★変更前も残す
     const gArr = Object.keys(groups).map(k => groups[k]);
-    let okItems = 0, fail = 0; const errs = [];
+    let okItems = 0, fail = 0; const errs = [], appliedLines = [];
     const btn = document.querySelector('.deal-cutall'); if (btn) btn.disabled = true;
     const mp = makeProgressMeter('🎯 ROI維持の下限へ一括値下げ中…', gArr.length, '#c2185b');
     const stat = () => '<span style="color:#1a7f37">✅' + okItems + '出品</span> <span style="color:#d93025">❌' + fail + '</span>';
@@ -23590,13 +23593,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       mp.set(i, g.cc + ' item' + g.item_id + ' を値下げ中…', stat());
       try {
         const r = await openapiUpdatePriceList(g.shop_id, g.item_id, g.list);
-        if (r && r.ok) { okItems++; try { const row = (lst.byCc[g.cc] || []).find(y => y.item_id === g.item_id); if (row) { g.list.forEach(pl => { row.price_min = pl.price; row.price_max = pl.price; }); } } catch (_) {} }
+        if (r && r.ok) { okItems++; (g.src || []).forEach(x => appliedLines.push(x.cc + ' ' + String(x.name || '').slice(0, 24) + ': ' + x.cur + x.price + ' → ' + x.cur + x.newPrice)); try { const row = (lst.byCc[g.cc] || []).find(y => y.item_id === g.item_id); if (row) { g.list.forEach(pl => { row.price_min = pl.price; row.price_max = pl.price; }); } } catch (_) {} }
         else { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + ((r && r.error) || '失敗')); }
       } catch (e) { fail++; errs.push(g.cc + ' item' + g.item_id + ': ' + (e.message || e)); }
       mp.set(i + 1, null, stat());
     }
     mp.set(gArr.length, '✅ 完了', stat());
-    try { logAct('価格調整', '見られて売れない一括値下げ(公式)', '', `${okItems}出品 成功・${fail}失敗（ROI維持下限・目標${roiT}%）`); } catch (_) {}
+    try { logAct('価格調整', '見られて売れない一括値下げ(公式)', '', `${okItems}出品 成功・${fail}失敗（ROI維持下限・目標${roiT}%）　` + appliedLines.slice(0, 20).join(' / ') + (appliedLines.length > 20 ? ` ほか${appliedLines.length - 20}件` : '')); } catch (_) {}
     if (btn) btn.disabled = false;
     alert(`🎯 一括値下げ 完了\n\n成功: ${okItems}出品\n失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 8).join('\n') : ''}`);
     mp.remove();
@@ -25752,6 +25755,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const sv = stkInp ? stkInp.value.trim() : ''; if (sv !== '' && String(parseInt(sv, 10)) !== String(row.stock)) stockList.push({ model_id: 0, stock: parseInt(sv, 10) || 0 });
       if (!priceList.length && !stockList.length) { if (typeof toast === 'function') toast('変更なし'); return; }
       const chg = [priceList.length ? '価格' : '', stockList.length ? '在庫' : ''].filter(Boolean).join('・');
+      const diffTxt = priceList.map(x => '価格: ' + row.price_min + ' → ' + x.price)
+        .concat(stockList.map(x => '在庫: ' + row.stock + ' → ' + x.stock)).join(' / ');   // ★変更前も残す
       const warn = priceList.length ? countryListingWarnings({ cc, title: '', prices: priceList.map(x => x.price) }) : [];
       if (warn.length && !confirm(`⚠️ ${cc}の価格制約に注意:\n - ${warn.join('\n - ')}\n\nこのまま書き込みますか？`)) return;
       const k0Increase = stockList.filter(s => (s.stock || 0) > 0 && keep0OfModel(id, 0));
@@ -25764,7 +25769,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         priceList.forEach(pl => { row.price_min = pl.price; row.price_max = pl.price; });
         stockList.forEach(sl => { row.stock = sl.stock; });
         btn.textContent = '✓'; btn.style.background = '#1a7f37'; btn.style.color = '#fff';
-        try { logAct('出品', '価格在庫編集(グリッド)', row.name || '', cc + ' ' + chg); } catch (_) {}
+        try { logAct('出品', '価格在庫編集(グリッド)', row.name || '', cc + ' ' + chg + '　' + diffTxt); } catch (_) {}
       } catch (e) { alert('✗ ' + (e.message || e)); btn.disabled = false; btn.textContent = oldTxt; }
     }));
     // 詳しい絞り込みの開閉／条件クリア／タイトル幅
@@ -26402,6 +26407,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         });
         if (!priceList.length && !stockList.length) { msg.textContent = '変更なし'; return; }
         const chg = [priceList.length ? '価格' + priceList.length : '', stockList.length ? '在庫' + stockList.length : ''].filter(Boolean).join('・');
+        // ★「いくつからいくつに変えたか」を残す。値だけ書いて履歴に残さないと、
+        //   あとで「なぜこの値段なのか」「戻すならいくつか」が分からなくなる（✎編集では既に残している）。
+        const nmOf = mid => { const m0 = (row.models || []).find(x => String(x.id) === String(mid)); return m0 ? (m0.n || '(名前なし)') : '(単品)'; };
+        const befP = mid => { if (String(mid) === '0') return row.price_min; const m0 = (row.models || []).find(x => String(x.id) === String(mid)); return m0 ? m0.price : ''; };
+        const befS = mid => { if (String(mid) === '0') return row.stock; const m0 = (row.models || []).find(x => String(x.id) === String(mid)); return m0 ? m0.stock : ''; };
+        const diffTxt = priceList.map(x => '価格 ' + nmOf(x.model_id) + ': ' + befP(x.model_id) + ' → ' + x.price)
+          .concat(stockList.map(x => '在庫 ' + nmOf(x.model_id) + ': ' + befS(x.model_id) + ' → ' + x.stock)).join(' / ');
         const warn = priceList.length ? countryListingWarnings({ cc, title: '', prices: priceList.map(x => x.price) }) : [];
         if (warn.length && !confirm(`⚠️ ${cc}の価格制約に注意:\n - ${warn.join('\n - ')}\n\nこのまま書き込みますか？`)) return;
         // ⚠️在庫0固定フラグ：仕入元が過少で在庫0運用の出品。在庫を増やそうとしたら警告（誤って増やす事故防止）
@@ -26423,7 +26435,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             row.stock = (row.models || []).reduce((s, m) => s + (m.stock || 0), 0);
             const prices2 = (row.models || []).map(m => Number(m.price)).filter(p => p > 0); if (prices2.length) { row.price_min = Math.min.apply(null, prices2); row.price_max = Math.max.apply(null, prices2); }
           }
-          try { logAct('出品', '価格在庫編集(公式)', row.name || '', cc + ' ' + chg); } catch (_) {}
+          try { logAct('出品', '価格在庫編集(公式)', row.name || '', cc + ' ' + chg + '　' + diffTxt); } catch (_) {}
         } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + (e.message || e); btn.disabled = false; btn.textContent = '💾 価格・在庫を保存'; }
         return;
       }
