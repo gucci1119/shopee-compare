@@ -3154,16 +3154,22 @@ function fetchTitles_(hw) {
 //   https://www.suruga-ya.jp/database/photo.php?shinaban=<id>&size=m
 // ★叩きすぎない：**画面に見えている分だけ**を少しずつ。1件ごとに間隔を空ける（ヤマダでIP制限を踏んだ教訓）。
 //   一度引いたら app_kv timg_<hw> に貯めて二度と引かない。
+var _sgDiag = null;   // 直近の1件の様子（なぜ取れないかを画面に返すため）
 function surugaFindId_(kw) {
   var url = 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(String(kw || '').slice(0, 80));
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true,
-    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36' } });
-  if (res.getResponseCode() !== 200) return '';
-  var h = res.getContentText();
-  var m = h.match(/\/product\/detail\/(\d+)/);
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'ja,en;q=0.8' } });
+  var code = res.getResponseCode();
+  var h = code === 200 ? res.getContentText() : '';
+  var m = h ? h.match(/\/product\/detail\/(\d+)/) : null;
+  // ★取れない時に「叩けていないのか／検索が0件なのか」を切り分けられるようにする
+  if (!_sgDiag) _sgDiag = { kw: kw, code: code, len: h.length, title: (h.match(/<title>([\s\S]{0,90}?)<\/title>/) || ['', ''])[1].replace(/\s+/g, ' ').trim(), hit: !!m,
+    hits: ((h.match(/([0-9,]{1,9})\s*件/) || ['', ''])[1]) };
   return m ? m[1] : '';
 }
 function titleImgs_(hw, words) {
+  _sgDiag = null;
   var key = 'timg_' + hw, cache = {};
   try { var cur = sbSelect_('app_kv', 'select=v&k=eq.' + key); cache = ((cur || [])[0] || {}).v || {}; } catch (e) {}
   var out = {}, got = 0;
@@ -3176,7 +3182,7 @@ function titleImgs_(hw, words) {
     cache[w] = id; out[w] = id; got++;
   }
   if (got) { try { sbUpsert_('app_kv', [{ k: key, v: cache, updated_at: new Date().toISOString() }], 'k'); } catch (e3) {} }
-  return { map: out, fetched: got };
+  return { map: out, fetched: got, diag: _sgDiag };
 }
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
