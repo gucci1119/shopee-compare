@@ -3081,7 +3081,11 @@ function fetchTitles_(hw) {
   var def = TITLE_HW[String(hw || '').toLowerCase()];
   if (!def) throw new Error('知らないハードです: ' + hw + '（' + Object.keys(TITLE_HW).join('/') + '）');
   var q = 'SELECT ?item ?ja ?en ?d ?img WHERE {'
-    + ' ?item wdt:P400 wd:' + def.q + ' .'
+    // ★「その機種のもの」だけだと**シリーズの記事**（マリオシリーズ等）が混ざる。
+    //   ゲーム作品であること（P31あり）を条件にし、シリーズ(Q7058673)は明示的に除く。
+    //   実測(PSP)：1,411件 → 1,314件になり、シリーズ語を含む行は0件になった。
+    + ' ?item wdt:P400 wd:' + def.q + ' ; wdt:P31 ?cls .'
+    + ' FILTER NOT EXISTS { ?item wdt:P31 wd:Q7058673 }'
     + ' OPTIONAL { ?item rdfs:label ?ja FILTER(lang(?ja)="ja") }'
     + ' OPTIONAL { ?item rdfs:label ?en FILTER(lang(?en)="en") }'
     + ' OPTIONAL { ?item wdt:P577 ?d }'
