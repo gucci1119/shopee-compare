@@ -21367,7 +21367,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
           <b style="font-size:15px">📚 母数（ハード別の網羅）</b>
           <span style="font-size:13px">マスタ合計 <b>${num(tot)}</b> ／ 出している <b style="color:#1565c0">${num(totOwn)}</b> ／ <b style="color:#c0392b">空白 ${num(Math.max(0, tot - totOwn))}</b></span>
-          <button class="smd-btn" id="tm-fetch" style="margin-left:auto;font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
+          <button class="smd-btn" id="tm-imgclear" style="margin-left:auto;font-size:11px" title="「画像なし」と覚えてしまった分を忘れて、もう一度探し直します（取得に失敗した分が焼き付いた時に使います）">🧹 画像の記憶を消す</button>
+          <button class="smd-btn" id="tm-fetch" style="font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
         </div>
         <div style="overflow-x:auto"><table class="smd-table" style="width:100%;font-size:12px">
           <tr><th>ハード</th><th style="text-align:right">マスタ</th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:right">網羅率</th><th></th><th></th><th>取込日</th></tr>
@@ -21380,6 +21381,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       renderTitleMaster();
     }));
     if (lst.tmOpen) renderTitleDetail(lst.tmOpen, own);
+    { const cb = document.getElementById('tm-imgclear');
+      if (cb) cb.addEventListener('click', async () => {
+        if (!confirm('「画像なし」と覚えた分を忘れて、探し直せるようにします。よろしいですか？')) return;
+        lst.tmImg = {}; lst.tmImgLoaded = {}; lst._tmWarned = 0;
+        try { for (const h of Object.keys(TITLE_HW_JA)) { try { await sbDelete('app_kv', 'k=eq.timg_' + encodeURIComponent(h)); } catch (_) {} } } catch (_) {}
+        toast('🧹 画像の記憶を消しました。もう一度開くと探し直します');
+        renderTitleMaster();
+      }); }
     const b = document.getElementById('tm-fetch');
     if (b) b.addEventListener('click', async () => {
       if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です'); return; }
@@ -21425,13 +21434,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   ヤマダと同じ経路。1件ずつ・1.2秒あけて叩く（一括で舐めない）。
     const found = {};
     for (const q of need) {
-      let id = '';
+      let id = '', ok = false;
       try {
         const html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(q.slice(0, 80)), null, { timeout: 20000 }));
+        ok = /suruga-ya/i.test(html) && html.length > 20000;          // ちゃんと検索ページが返ってきたか
         const m = html.match(/\/product\/detail\/(\d+)/);
         id = m ? m[1] : '';
-        if (!id && !lst._tmWarned && !/suruga/i.test(html)) { lst._tmWarned = 1; toast('⚠ 駿河屋のページを取得できませんでした（ブリッジ経由）', true); }
+        if (!ok && !lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋のページが返ってきません（ブリッジ経由）', true); }
       } catch (e) { if (!lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋を取得できません: ' + apiErrJa((e && e.message) || e), true); } break; }
+      // ★取得そのものが失敗した時は【空を覚えない】。覚えると二度と取りに行かなくなる
+      //   （GAS経由で失敗した分が空で焼き付き、経路を直しても直らなかった）
+      if (!ok) break;
       lst.tmImg[q] = id; found[q] = id;
       renderTitleDetailImgs(box);
       await new Promise(r => setTimeout(r, 1200));
