@@ -21265,15 +21265,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]
   ];
   const hwOf = (txt) => { const t = String(txt || ''); for (const [k, re] of HW_PAT) if (re.test(t)) return k; return ''; };
-  let titleMaster = null;         // { hw: {n, rows, at} }
+  let titleMaster = null;         // { hw: {n, ja, en, at} } ＝件数だけの索引
+  // ★表に要るのは「何本あるか」だけ。全ハードの全行(2万件超)を読むと重すぎて
+  //   一部のハードが表示されない（2026-08-16 実際に13ハード分が欠けた）。索引だけ読む。
   async function loadTitleMaster() {
     if (titleMaster) return titleMaster;
     titleMaster = {};
     try {
-      const rows = await sbGetAll('app_kv', 'select=k,v&k=like.titles_*');
-      (rows || []).forEach(r => { const hw = String(r.k || '').replace(/^titles_/, ''); if (hw && r.v) titleMaster[hw] = r.v; });
+      const rows = await sbGetAll('app_kv', 'select=v&k=eq.titles_index');
+      titleMaster = (rows && rows[0] && rows[0].v) || {};
     } catch (_) {}
     return titleMaster;
+  }
+  // 1ハード分の全タイトル（突合するときだけ読む）
+  async function loadTitleRows(hw) {
+    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw)); return ((r && r[0] && r[0].v) || {}).rows || []; }
+    catch (_) { return []; }
   }
   // 自社が出している明細数を機種ごとに数える（同じ作品が各国に出ていても1本として数える＝母数の意味）
   function ownTitleCounts() {
@@ -21320,7 +21327,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     box.innerHTML = `
       <div class="pagehelp" style="margin:0 0 10px">この画面：<b>ハードごとに「世の中に何本あって、自分は何本出しているか」</b>です。出品数（母数）が売上の起点なので、ここの「空白」が伸びしろそのものになります。
         <br>※明細（バリエーション）で足す分には<b>出品枠を消費しません</b>（1カタログ100明細）。レアで仕入れが難しいものは<b>出品だけして在庫0</b>で構いません。
-        <br>※マスタはWikidata（作品単位）。<b>廉価版・Best版などの版違いは含みません</b>——版は仕入れで出会った分を足す前提です。駿河屋の数は<b>版違い込みの取扱数</b>なので、そちらの方が多く出ます。</div>
+        <br>※マスタはWikidata（作品単位）。<b>廉価版・Best版などの版違いは含みません</b>——版は仕入れで出会った分を足す前提です。駿河屋の数は<b>版違い込みの取扱数</b>なので、そちらの方が多く出ます。
+        <br>※「出している」は<b>バリエーションの明細</b>を数えています（カタログ数ではありません）。<b>各国に同じ物を出していても1本</b>として数えます。ただし<b>同じ作品でも綴りが違うと別物として二重に数えます</b>（例 <code>Pokemon Ruby</code> と <code>Pokémon Ruby</code>）。実数はここより少なめに見てください。</div>
       <div class="tool-card" style="margin:0;max-width:none">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
           <b style="font-size:15px">📚 母数（ハード別の網羅）</b>

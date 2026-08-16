@@ -3102,8 +3102,15 @@ function fetchTitles_(hw) {
   var rows = [];
   Object.keys(by).forEach(function (k) { var e = by[k]; if (e.ja || e.en) rows.push(e); });
   rows.sort(function (a, b) { return String(a.y || '9999').localeCompare(String(b.y || '9999')); });
+  var ja = rows.filter(function (r) { return r.ja; }).length, en = rows.filter(function (r) { return r.en; }).length;
   sbUpsert_('app_kv', [{ k: 'titles_' + hw, v: { at: new Date().toISOString(), hw: hw, name: def.name, n: rows.length, rows: rows }, updated_at: new Date().toISOString() }], 'k');
-  return { hw: hw, name: def.name, n: rows.length, ja: rows.filter(function (r) { return r.ja; }).length, en: rows.filter(function (r) { return r.en; }).length };
+  // ★件数だけの軽い索引を別に持つ。母数の表は「何本あるか」しか要らないのに、
+  //   全ハードの全行(2万件超)を読みに行くと重すぎて表示が欠ける（実際に13ハード分が出なかった）。
+  var idx = {};
+  try { var cur0 = sbSelect_('app_kv', 'select=v&k=eq.titles_index'); idx = ((cur0 || [])[0] || {}).v || {}; } catch (e0) {}
+  idx[hw] = { name: def.name, n: rows.length, ja: ja, en: en, at: new Date().toISOString() };
+  sbUpsert_('app_kv', [{ k: 'titles_index', v: idx, updated_at: new Date().toISOString() }], 'k');
+  return { hw: hw, name: def.name, n: rows.length, ja: ja, en: en };
 }
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
