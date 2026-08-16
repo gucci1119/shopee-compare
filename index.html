@@ -783,6 +783,7 @@
         <button data-k="ledger" title="出品ごとの仕入・各国価格・手数料・利益・ROIの台帳（価格改定の参考）">💰 利益台帳</button>
         <button data-k="log" title="日ごとに何件出品したか＋その日に出した商品。バリエの明細1件＝1商品として数えます">📅 出品ログ（日別）</button>
         <button data-k="rank" title="売れ行きランキングを見ながら、売れていない出品の値下げを検討する">📉 売れ行き・値下げ</button>
+        <button data-k="titles" title="ハードごとに「世の中に何本あって、自分は何本出しているか」。出品の母数を増やすための一覧">📚 母数（ハード別の網羅）</button>
         <button data-k="composer" title="新しい商品をShopeeに出品する下書きを作る">✍️ 出品を作る</button>
         <button data-k="dropship" title="無在庫（取り寄せ）出品＆在庫監視：手元に在庫を持たず、売れてから仕入れる出品。仕入元(フリマ/EC)の商品URLを見張り、売り切れたら取り下げ候補として提示（取り下げ/在庫0の実行は手動で確定）。多国同時出品・売れたら他国の取り下げ候補も表示">♾️ 無在庫（取り寄せ）・在庫監視</button>
       </span>
@@ -790,6 +791,7 @@
     <div id="list-anasub" style="display:none;padding:6px 20px 0"></div>
     <div class="pagehelp" id="list-help" style="margin:8px 20px 0"></div>
     <div id="list-status" style="padding:12px 20px"></div>
+    <div id="list-titles" style="display:none;padding:12px 20px"></div>
     <div id="list-coverage" style="display:none;padding:12px 20px"></div>
     <div id="list-analysis" style="display:none;padding:12px 20px"></div>
     <div id="list-ledger" style="display:none;padding:12px 20px"></div>
@@ -14714,6 +14716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '📚 <b>「母数（ハード別の網羅）」を追加</b>（出品管理のタブ）。ハードごとに<b>世の中に何本あって・自分は何本出しているか・空白は何本か</b>を出します。マスタは<b>Wikidata</b>（全ハードを同じ形で取れる／日本語・英語ラベル付き）。Wikipediaの一覧はハードごとに表の作りが違い、PSP以外は取れませんでした（実測）。<b>版違い（廉価版・Best版）はマスタに含まれません</b>ので、版違い込みの数は駿河屋のリンクから見られるようにしています。明細で足す分には<b>出品枠を消費しません</b>。',
       '🎨 <b>シリーズの色帯が行ごとに欠けていた本当の原因を修正</b>。固定列の <code>box-shadow:-200px 0 0</code>（固定列より左の余白を埋める塗り）が<b>行き過ぎてカード左端の帯まで塗りつぶして</b>いました。必要な幅ちょうどに絞り、帯がグループを1本で通るようにしました。',
       '🏷 <b>複製で属性(specifics)が入らない件：理由が分かるようにし、やり直せるようにしました</b>。実測で<b>元カタログ7項目に対して複製先0項目</b>でした。属性コピーを単体で叩けるようにし（<code>copy_attrs</code>）、<b>元にいくつあったか／送れたのは何件か／選択肢表は引けたか／どのエラーで落ちたか</b>を返します。まとめて送って落ちた時は<b>1件ずつ入れ直して、通るものだけでも入れます</b>。複製で作った行には <b>🏷</b> が出て、いつでもやり直せます（作り直し不要）。',
       '🎨 <b>シリーズの色帯が途切れて見えるのを修正</b>。カードの角丸12pxが左の帯にも掛かって上下が丸く削れ、さらにカード間に2pxの隙間があったため、<b>同じシリーズなのに帯がぶつ切り</b>に見えていました。帯側の角丸を外して隙間を詰め、<b>グループを1本の線で通す</b>ようにしました（在庫0固定の赤帯も同じ）。',
@@ -21245,6 +21248,105 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     function onKey(e) { if (e.key === 'Escape') close(); }
     setTimeout(() => { document.addEventListener('click', onDoc, true); document.addEventListener('keydown', onKey, true); }, 0);
   }
+  // ================= 📚 母数（ハード別の網羅状況） =================
+  // ★出品数(母数)が全ての起点。「このハードに何本あって、自分は何本出しているか」を数字で出す。
+  //   押さないと見えない作りにしない＝開いた時点で表を出し、取り込みボタンは外部書込なので残す。
+  // マスタ＝app_kv.titles_<hw>（GASがWikidataから取り込む）。自社の数＝listingsの明細を機種で振り分け。
+  const TITLE_HW_JA = { switch: 'Nintendo Switch', ps5: 'PlayStation 5', ps4: 'PlayStation 4', ps3: 'PlayStation 3', ps2: 'PlayStation 2', ps1: 'PlayStation', psp: 'PSP', vita: 'PS Vita', ds: 'ニンテンドーDS', '3ds': 'ニンテンドー3DS', wii: 'Wii', wiiu: 'Wii U', gc: 'ゲームキューブ', n64: 'NINTENDO64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'ゲームボーイアドバンス', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'セガサターン', dc: 'ドリームキャスト' };
+  // 駿河屋のハード別カテゴリ（版違い＝廉価版/Best版も別商品として持っている。総数の目安）
+  const SURUGA_CAT = { sfc: '20009', fc: '20008', ss: '20014', dc: '20015', md: '20013', gc: '20005', wii: '20000', n64: '20010', wiiu: '20035', ds: '20101', gb: '20105', gba: '20104', '3ds': '20100' };
+  // カタログ名・明細名から機種を当てる。カタログは「PSP Playstation Portable Series…」のように機種名を含む
+  const HW_PAT = [
+    ['switch', /switch\s*2|nintendo\s*switch|スイッチ/i], ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i],
+    ['ps3', /\bps3\b|playstation\s*3/i], ['ps2', /\bps2\b|playstation\s*2/i], ['psp', /\bpsp\b|playstation\s*portable/i],
+    ['vita', /\bvita\b/i], ['3ds', /\b3ds\b/i], ['ds', /\bds\b|nintendo\s*ds/i], ['wiiu', /wii\s*u/i], ['wii', /\bwii\b/i],
+    ['gc', /gamecube|ゲームキューブ|\bgc\b/i], ['n64', /nintendo\s*64|\bn64\b/i], ['sfc', /super\s*(famicom|nintendo)|\bsfc\b|\bsnes\b/i],
+    ['fc', /famicom|\bfc\b|\bnes\b/i], ['gba', /game\s*boy\s*advance|\bgba\b/i], ['gb', /game\s*boy|\bgbc?\b/i],
+    ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]
+  ];
+  const hwOf = (txt) => { const t = String(txt || ''); for (const [k, re] of HW_PAT) if (re.test(t)) return k; return ''; };
+  let titleMaster = null;         // { hw: {n, rows, at} }
+  async function loadTitleMaster() {
+    if (titleMaster) return titleMaster;
+    titleMaster = {};
+    try {
+      const rows = await sbGetAll('app_kv', 'select=k,v&k=like.titles_*');
+      (rows || []).forEach(r => { const hw = String(r.k || '').replace(/^titles_/, ''); if (hw && r.v) titleMaster[hw] = r.v; });
+    } catch (_) {}
+    return titleMaster;
+  }
+  // 自社が出している明細数を機種ごとに数える（同じ作品が各国に出ていても1本として数える＝母数の意味）
+  function ownTitleCounts() {
+    const per = {}, names = {};
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const hw = hwOf((r.name || '') + ' ' + (r.parent_sku || ''));
+      const ms = (r.models || []).filter(m => m && !m.ghost);
+      const list = ms.length ? ms.map(m => m.n || '') : [r.name || ''];
+      list.forEach(n => {
+        const h = hwOf(n) || hw; if (!h) return;
+        const key = String(n).toLowerCase().replace(/^[a-z0-9]{1,8}\s*[:：]\s*/i, '').replace(/\s+/g, ' ').trim();
+        if (!key) return;
+        (names[h] = names[h] || new Set()).add(key);
+      });
+    }));
+    Object.keys(names).forEach(h => per[h] = names[h].size);
+    return { per, names };
+  }
+  async function renderTitleMaster() {
+    const box = document.getElementById('list-titles'); if (!box) return;
+    box.innerHTML = '<div class="smd-dim" style="font-size:12px">読み込み中…</div>';
+    const m = await loadTitleMaster();
+    const own = ownTitleCounts();
+    const hws = Object.keys(TITLE_HW_JA);
+    const num = v => (v == null ? '—' : Number(v).toLocaleString());
+    let tot = 0, totOwn = 0;
+    const rows = hws.map(h => {
+      const mm = m[h] || null, n = mm ? (mm.n || (mm.rows || []).length) : null;
+      const o = own.per[h] || 0;
+      if (n) { tot += n; totOwn += Math.min(o, n); }
+      const rate = n ? Math.round(o / n * 100) : null;
+      const gap = n ? Math.max(0, n - o) : null;
+      return `<tr>
+        <td style="font-weight:700;white-space:nowrap">${esc(TITLE_HW_JA[h])}</td>
+        <td style="text-align:right">${num(n)}</td>
+        <td style="text-align:right;font-weight:700;color:#1565c0">${num(o)}</td>
+        <td style="text-align:right;font-weight:700;color:${gap ? '#c0392b' : '#1a7f37'}">${num(gap)}</td>
+        <td style="text-align:right">${rate == null ? '—' : rate + '%'}</td>
+        <td style="min-width:120px">${n ? `<div style="background:#eceff3;border-radius:6px;height:10px;overflow:hidden"><div style="width:${Math.min(100, rate)}%;height:100%;background:#1565c0"></div></div>` : ''}</td>
+        <td style="text-align:right;font-size:11px" class="smd-dim">${SURUGA_CAT[h] ? `<a href="https://www.suruga-ya.jp/search?category=${SURUGA_CAT[h]}" target="_blank" rel="noopener" style="color:#c30d23;font-weight:700;text-decoration:none">駿河屋で見る</a>` : ''}</td>
+        <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${mm && mm.at ? String(mm.at).slice(0, 10) : '<span style="color:#c0392b">未取込</span>'}</td>
+      </tr>`;
+    }).join('');
+    box.innerHTML = `
+      <div class="pagehelp" style="margin:0 0 10px">この画面：<b>ハードごとに「世の中に何本あって、自分は何本出しているか」</b>です。出品数（母数）が売上の起点なので、ここの「空白」が伸びしろそのものになります。
+        <br>※明細（バリエーション）で足す分には<b>出品枠を消費しません</b>（1カタログ100明細）。レアで仕入れが難しいものは<b>出品だけして在庫0</b>で構いません。
+        <br>※マスタはWikidata（作品単位）。<b>廉価版・Best版などの版違いは含みません</b>——版は仕入れで出会った分を足す前提です。駿河屋の数は<b>版違い込みの取扱数</b>なので、そちらの方が多く出ます。</div>
+      <div class="tool-card" style="margin:0;max-width:none">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+          <b style="font-size:15px">📚 母数（ハード別の網羅）</b>
+          <span style="font-size:13px">マスタ合計 <b>${num(tot)}</b> ／ 出している <b style="color:#1565c0">${num(totOwn)}</b> ／ <b style="color:#c0392b">空白 ${num(Math.max(0, tot - totOwn))}</b></span>
+          <button class="smd-btn" id="tm-fetch" style="margin-left:auto;font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
+        </div>
+        <div style="overflow-x:auto"><table class="smd-table" style="width:100%;font-size:12px">
+          <tr><th>ハード</th><th style="text-align:right">マスタ</th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:right">網羅率</th><th></th><th></th><th>取込日</th></tr>
+          ${rows}
+        </table></div>
+      </div>`;
+    const b = document.getElementById('tm-fetch');
+    if (b) b.addEventListener('click', async () => {
+      if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です'); return; }
+      if (!confirm('Wikidataから全ハードのソフト一覧を取り込みます。\n\n数分かかります（外部サイトへの読み取りのみ・Shopeeには何も書きません）。よろしいですか？')) return;
+      b.disabled = true; b.textContent = '取り込み中…';
+      try {
+        const r = await gasCall({ action: 'fetch_titles', token: settings.writeToken }, 600000);
+        if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
+        alert('📚 取り込みました\n\n' + (r.got || []).map(g => g.error ? ('・' + g.hw + ' … ✗ ' + g.error) : ('・' + (g.name || g.hw) + ' … ' + g.n + '件（日本語' + g.ja + '／英語' + g.en + '）')).join('\n'));
+        titleMaster = null; renderTitleMaster();
+      } catch (e) { alert('取り込みに失敗: ' + apiErrJa((e && e.message) || e)); }
+      b.disabled = false; b.textContent = '⬇ マスタを取り込む';
+    });
+  }
+
   function renderListPage() {
     if (!lst.wired) {
       lst.wired = true;
@@ -21289,6 +21391,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     document.getElementById('list-ledger').style.display = tab === 'ledger' ? '' : 'none';
     { const lg = document.getElementById('list-log'); if (lg) lg.style.display = tab === 'log' ? '' : 'none'; }
     { const bk = document.getElementById('list-bulk'); if (bk) bk.style.display = tab === 'bulk' ? '' : 'none'; }
+    { const tt = document.getElementById('list-titles'); if (tt) { tt.style.display = tab === 'titles' ? '' : 'none'; if (tab === 'titles') renderTitleMaster(); } }
     document.getElementById('list-composer').style.display = tab === 'composer' ? '' : 'none';
     { const dd = document.getElementById('list-dropship'); if (dd) dd.style.display = tab === 'dropship' ? '' : 'none'; }
     // 統一感：各サブタブに他ページと同じ.pagehelp説明バナー（コンポーザーは自前の詳細バナーがあるので非表示）
