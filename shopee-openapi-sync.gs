@@ -608,7 +608,9 @@ function doGet(e) {
       var odout;
       try {
         var odshop = parseInt(p.shop_id, 10); if (!getToken_(odshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        var odj = callShop_(odshop, '/api/v2/order/get_order_detail', { order_sn_list: p.order_sn, response_optional_fields: 'item_list,package_list' }, 'get', null);
+        // ★pre_order / days_to_ship も一緒に返す。orders.pre_order が全件falseの原因が
+        //   「APIが返していない」のか「本当に予約注文が無い」のかを、推測せず現物で切り分けるため。
+        var odj = callShop_(odshop, '/api/v2/order/get_order_detail', { order_sn_list: p.order_sn, response_optional_fields: 'item_list,package_list,pre_order,days_to_ship,ship_by_date,create_time' }, 'get', null);
         odout = { ok: true, response: odj.response || odj };
       } catch (err) { odout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(odcb + '(' + JSON.stringify(odout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
