@@ -14714,6 +14714,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '📄 <b>複製したらそのまま編集画面が開くようにしました</b>＋<b>複製直後に「shop_idが未取得」でブリッジ表示に落ちていたのを修正</b>。1件だけ最新化する処理が <code>shop_id</code> を書いておらず、複製で作った新カタログは他に情報源が無いため「公式APIで読めなかった」表示になり、<b>説明文・画像・属性が出ず編集もできない</b>状態でした。',
       '📉 <b>着地予測に「実利益」を追加</b>（D9）。売上・粗利・注文数はありましたが、<b>目標を測る当の実利益が無く</b>、月末にいくら残るかが分かりませんでした。今月の進捗（常時表示）に行を足しています。<b>固定費は月額でもう全額決まっているので日割りで伸ばさず</b>、入金・仕入・その他経費・返金だけを伸ばして計算します。Discordへのコピーにも入ります。',
       '📜 <b>価格・在庫の変更に「いくつからいくつに」を残すようにしました</b>（C1）。✎編集では既に残していましたが、<b>出品一覧からのインライン編集</b>と<b>一括値上げ/一括値下げ</b>は「価格を変えた」としか記録しておらず、<b>戻したくても元の値が分からない</b>状態でした。🧾操作ログに <code>価格 明細名: 2,200 → 2,480</code> の形で残します（一括は先頭20件＋件数）。',
       '🧯 <b>【重要】国別サマリーが開けなかったのを修正</b>。円換算レートを<b>宣言する前に使って</b>いて、<code>Cannot access &#39;_fr&#39; before initialization</code> で描画が丸ごと落ちていました（国別の売上・粗利が一切見られない状態）。',
@@ -24741,7 +24742,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       models.sort((a, b) => (a.ti == null ? 1e9 : a.ti) - (b.ti == null ? 1e9 : b.ti));
     }
     const imgs = (pi.image_ids || []).slice();
-    const row = { cc, item_id: itemId, update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
+    // ★shop_id を書いていなかった（2026-08-16）。複製で作った新カタログは他に情報源が無いため
+    //   shop_id 無しのまま登録され、✎編集が「この商品のshop_idが未取得」でブリッジ表示に落ちていた。
+    //   ここで取れている shopId は**その商品を実際に読めたショップ**なので、いちばん確か。
+    const row = { cc, item_id: itemId, shop_id: String(shopId), update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
     if (pi.name) row.name = pi.name;
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
     if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
@@ -25164,6 +25168,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!r || !r.ok) throw new Error((r && r.error) || '複製に失敗');
       try { logAct('出品', 'カタログ複製', finalName, cc + ' ' + itemId + ' → ' + r.item_id); } catch (_) {}
       toast('✅ 複製しました（非公開）。タイトル・親SKUを直し、明細を入れてから公開してください');
+      // ★複製したら、そのまま直せるように**編集画面を開く**（作って終わりではなく、必ず手を入れるため）
       if (r.video_warn) toast('⚠ 動画だけ引き継げませんでした: ' + apiErrJa(r.video_warn), true);
       if (r.tier_warn) toast('⚠ バリエーションの枠を作れませんでした: ' + apiErrJa(r.tier_warn), true);
       try { await refreshOneListing(cc, String(r.item_id), sid); } catch (_) {}
@@ -25171,6 +25176,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★選択肢からIDを引けなかった属性は**その属性だけ**捨てている。黙って落とすと気づけないので必ず出す
       if (r.attr_dropped && r.attr_dropped.length) toast('⚠ 引き継げなかった属性: ' + r.attr_dropped.join('・') + '（Shopeeの編集画面で選び直してください）', true);
       if (r.sku_warn) toast('⚠ 親SKUを入れられませんでした: ' + apiErrJa(r.sku_warn), true);
+      // ★複製は「作って終わり」ではなく、必ずタイトル・SKU・明細に手を入れる作業。
+      //   一覧に戻して探させるのは手間なので、そのまま編集画面を開く。
+      try { const rg = regionByCc(cc) || {}; openCatalogEditor(cc, rg.host || '', String(r.item_id), finalName); } catch (_) {}
     } catch (e) { alert('複製に失敗: ' + apiErrJa((e && e.message) || e)); }
   }
   const _varCntCache = new WeakMap();
