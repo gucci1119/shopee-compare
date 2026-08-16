@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🔗 <b>マスタに当たらない明細を「対応させる」ようにしました</b>。略称や独自表記（<code>P4G: Persona 4 The Golden</code>、<code>GC:4</code>）は正規化では当たらないので、<b>候補を並べて押すだけで紐づけ</b>られます。<b>機械には確定させません</b>——勝手に紐づけると違う作品を数えて母数が嘘になるためです。一度決めた対応は覚えて<b>全ハード・全国で効きます</b>。内訳の「🔗 対応させる」から。',
       '🔗 <b>母数の「出している」をマスタと突き合わせた実数にしました</b>。これまでは明細名をそのまま数えており、<b>綴りが違うと同じ作品を二重に数えて</b>いました（実測5,431件は多め）。突合キーを強くして、<b>全角半角・記号・アクセント記号（Pokémon→Pokemon）・機種名・版名（Best/廉価版）・状態語（Used/Japan）</b>を落として比べます。ハードごとに順に計算し、出たそばから表を更新します。',
       '🖼 <b>母数の内訳に商品画像を出せるようにしました（駿河屋）</b>。Wikidataのパッケージ画像は<b>実測2%しか無く</b>（箱絵は著作物なのでCommonsに載らない）使い物にならなかったため、駿河屋の商品写真を使います。<b>画面に見えているカードの分だけ・20件ずつ・間隔を空けて</b>取り、一度引いたら覚えます（ヤマダでIP制限を踏んだ教訓）。検索語は<b>日本語名＋機種</b>です。',
       '📚 <b>母数マスタからシリーズ記事を除外</b>（マリオシリーズ等）。ゲーム作品であることを条件に加え、PSPで1,411→1,314件・シリーズ語0件になりました。',
@@ -21337,6 +21338,45 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     catch (_) { return []; }
   }
   // 自社が出している明細数を機種ごとに数える（同じ作品が各国に出ていても1本として数える＝母数の意味）
+  // 📚 明細名 ↔ マスタの手動対応表。app_kv.title_link = { "<正規化した明細名>": "<マスタの正規化キー>" }
+  //   ★機械に確定させない。略称（P4G→ペルソナ4 ザ・ゴールデン）は候補までを出して、押すのは本人。
+  //     勝手に紐づけると**違う作品を数えて母数の数字が嘘になる**ため。一度決めたら全ハード・全国で効く。
+  let titleLink = null;
+  async function loadTitleLink() {
+    if (titleLink) return titleLink;
+    titleLink = {};
+    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.title_link'); titleLink = (r && r[0] && r[0].v) || {}; } catch (_) {}
+    return titleLink;
+  }
+  async function saveTitleLink(fromKey, toKey) {
+    titleLink = titleLink || {};
+    if (toKey) titleLink[fromKey] = toKey; else delete titleLink[fromKey];
+    try { await sbUpsert('app_kv', [{ k: 'title_link', v: titleLink, updated_at: new Date().toISOString() }], 'k'); }
+    catch (e) { toast('対応表を保存できませんでした: ' + ((e && e.message) || e), true); }
+  }
+  // 明細名 → 候補のマスタ行。完全一致が無い時だけ使う。語の重なりで並べる
+  function tmCandidates(name, rows, limit) {
+    const k = tmKey(name);
+    if (!k) return [];
+    const toks = k.split(' ').filter(w => w.length >= 2);
+    if (!toks.length) return [];
+    const scored = [];
+    for (const r of rows) {
+      const kj = r._kj || (r._kj = tmKey(r.ja)), ke = r._ke || (r._ke = tmKey(r.en));
+      let best = 0;
+      for (const mk of [kj, ke]) {
+        if (!mk) continue;
+        if (mk === k) { best = 999; break; }
+        if (mk.includes(k) || k.includes(mk)) { best = Math.max(best, 50 + Math.min(k.length, mk.length)); continue; }
+        const hit = toks.filter(w => mk.includes(w)).length;
+        if (hit) best = Math.max(best, hit * 10 - Math.abs(mk.length - k.length) / 10);
+      }
+      if (best > 0) scored.push([best, r]);
+    }
+    scored.sort((a, b) => b[0] - a[0]);
+    return scored.slice(0, limit || 5).map(x => x[1]);
+  }
+
   function ownTitleCounts() {
     const per = {}, names = {};
     Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
@@ -21370,7 +21410,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     _tmMatching = true;
     for (const h of todo) {
       const rows = await loadTitleRows(h);
-      const mine = new Set([...((own.names || {})[h] || [])].map(tmKey));
+      const lk = await loadTitleLink();
+      const mine = new Set([...((own.names || {})[h] || [])].map(n => lk[tmKey(n)] || tmKey(n)));
       let hit = 0;
       rows.forEach(r => { if ((r.en && mine.has(tmKey(r.en))) || (r.ja && mine.has(tmKey(r.ja)))) hit++; });
       lst.tmMatch[h] = hit;
@@ -21527,7 +21568,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rows = await loadTitleRows(hw);
     if (!rows.length) { box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">まだマスタを取り込んでいません（右上の「⬇ マスタを取り込む」）。</span></div>'; return; }
     const mine = (own && own.names && own.names[hw]) || new Set();
-    const mineN = new Set([...mine].map(tmKey));
+    const link = await loadTitleLink();
+    // 手で決めた対応があればそちらを使う（略称のような機械では当たらない分）
+    const mineN = new Set([...mine].map(n => link[tmKey(n)] || tmKey(n)));
     // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
     const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
     // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
@@ -21537,6 +21580,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     const hasN = list.filter(x => x.has).length;
     lst.tmFil = lst.tmFil || 'no';
+    // 🔗 マスタに当たらなかった自社の明細（＝略称や独自表記）。ここを人が当てると母数の数字が正しくなる
+    const masterKeys = new Set(); rows.forEach(r => { if (r.ja) masterKeys.add(tmKey(r.ja)); if (r.en) masterKeys.add(tmKey(r.en)); });
+    const unlinked = [...mine].filter(n => { const k = link[tmKey(n)] || tmKey(n); return k && !masterKeys.has(k); });
     const shown = list.filter(x => lst.tmFil === 'all' ? true : (lst.tmFil === 'yes' ? x.has : !x.has));
     const q = (lst.tmQ || '').toLowerCase().trim();
     let shown2 = q ? shown.filter(x => ((x.ja || '') + ' ' + (x.en || '')).toLowerCase().includes(q)) : shown.slice();
@@ -21568,20 +21614,47 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </div>
     </div>`;
     const CAP = 300;
+    // 🔗「対応させる」＝マスタに当たらない明細に、候補を並べて本人が押して決める
+    const linkPanel = () => {
+      const q2 = (lst.tmQ || '').toLowerCase().trim();
+      const targets = (q2 ? unlinked.filter(n => n.toLowerCase().includes(q2)) : unlinked).slice(0, 60);
+      if (!targets.length) return '<span class="smd-dim" style="font-size:12px">マスタに当たらない明細はありません 🎉</span>';
+      return '<div style="display:flex;flex-direction:column;gap:6px">' + targets.map(n => {
+        const cands = tmCandidates(n, rows, 5);
+        return `<div style="border:1px solid #e6e6e6;border-radius:8px;padding:6px 8px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
+          <div style="min-width:200px;flex:0 0 240px">
+            <div style="font-size:12px;font-weight:700">${esc(n)}</div>
+            <div class="smd-dim" style="font-size:10px">この明細名がマスタに見つかりません</div>
+          </div>
+          <div style="flex:1;min-width:240px;display:flex;flex-wrap:wrap;gap:5px">
+            ${cands.length ? cands.map(c => `<button class="tm-link" data-from="${av(tmKey(n))}" data-to="${av(tmKey(c.ja || c.en))}" title="この作品として数えます（全ハード・全国で効きます）" style="border:1px solid #1565c0;background:#f2f8ff;color:#1565c0;border-radius:12px;padding:2px 9px;font-size:11px;cursor:pointer">${esc((c.ja || c.en || '').slice(0, 34))}${c.y ? ' <span style="opacity:.6">' + esc(c.y) + '</span>' : ''}</button>`).join('')
+              : '<span class="smd-dim" style="font-size:11px">候補が見つかりません（マスタに無い版・海外版の可能性）</span>'}
+            <a href="https://www.suruga-ya.jp/search?search_word=${encodeURIComponent(n)}" target="_blank" rel="noopener" style="color:#c30d23;font-size:10.5px;font-weight:700;text-decoration:none;align-self:center">駿河屋で確認</a>
+          </div>
+        </div>`;
+      }).join('') + '</div>';
+    };
     box.innerHTML = `<div class="tool-card" style="margin:0;max-width:none">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)} の内訳</b>
-        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)}
+        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)}
         <select id="tm-sort" style="margin-left:auto;padding:3px 6px;border:1px solid #ddd;border-radius:6px;font-size:11px">
           ${[['ynew', '発売が新しい順'], ['yold', '発売が古い順'], ['ja', 'あいうえお順'], ['en', 'A→Z順'], ['img', '画像があるものを先に']].map(o => `<option value="${o[0]}"${lst.tmSort === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}
         </select>
         <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:170px">
       </div>
       <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。<b>ダウンロード専売は入れていません</b>（中古で扱えないため）。画像は<b>駿河屋の商品写真</b>を、<b>画面に見えているカードの分だけ</b>取りに行きます（20件ずつ・一度引いたら覚えます）。数万件を一括では叩きません。Wikidataの画像は実測2%しか無いため補助です。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>
+      ${lst.tmFil === 'link' ? linkPanel() : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>`}
     </div>`;
     box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
     { const ss = document.getElementById('tm-sort'); if (ss) ss.addEventListener('change', () => { lst.tmSort = ss.value; renderTitleDetail(hw, own); }); }
+    box.querySelectorAll('.tm-link').forEach(b3 => b3.addEventListener('click', async () => {
+      b3.disabled = true; b3.textContent = '…';
+      await saveTitleLink(b3.dataset.from, b3.dataset.to);
+      lst.tmMatch = {};                       // 数え直す
+      toast('🔗 対応させました（全ハード・全国で効きます）');
+      renderTitleDetail(hw, own); renderTitleMaster();
+    }));
     tmFillImages(hw, box);
     const qi = document.getElementById('tm-q');
     if (qi) { let t = null; qi.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { lst.tmQ = qi.value; renderTitleDetail(hw, own); setTimeout(() => { const e2 = document.getElementById('tm-q'); if (e2) { e2.focus(); e2.setSelectionRange(e2.value.length, e2.value.length); } }, 0); }, 350); }); }
