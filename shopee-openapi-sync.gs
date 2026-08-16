@@ -3086,6 +3086,7 @@ function fetchTitles_(hw) {
     + ' OPTIONAL { ?item rdfs:label ?en FILTER(lang(?en)="en") }'
     + ' OPTIONAL { ?item wdt:P577 ?d }'
     + ' OPTIONAL { ?item wdt:P18 ?img }'      // パッケージ画像（あるものだけ）
+    + ' OPTIONAL { ?item wdt:P437 ?fmt }'     // 流通形態（物理かダウンロードか）
     + ' }';
   var url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(q);
   // ★User-Agent を入れないと弾かれる。連絡先を入れるのがWikimediaの作法。
@@ -3095,7 +3096,7 @@ function fetchTitles_(hw) {
   var by = {};
   bind.forEach(function (r) {
     var k = (r.item || {}).value; if (!k) return;
-    var e = by[k] || (by[k] = { ja: '', en: '', y: '', img: '' });
+    var e = by[k] || (by[k] = { ja: '', en: '', y: '', img: '', dl: 0, phys: 0 });
     if (!e.ja && r.ja) e.ja = r.ja.value;
     if (!e.en && r.en) e.en = r.en.value;
     // ★画像は原寸だと重いので、Wikimediaのサムネイル(200px)に直して持つ
@@ -3104,9 +3105,19 @@ function fetchTitles_(hw) {
       e.img = 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=200';
     }
     if (r.d && r.d.value) { var y = String(r.d.value).slice(0, 4); if (!e.y || y < e.y) e.y = y; }  // 一番古い＝初出年
+    // ★ダウンロード専売は中古で売れないので落とす。「デジタルの印しか無い」ものだけを除外し、
+    //   流通形態が未記入のもの（古いソフトに多い）は残す＝取りこぼさない。
+    if (r.fmt && r.fmt.value) {
+      var fq = String(r.fmt.value).split('/').pop();
+      if (fq === 'Q54820071' || fq === 'Q269415') e.dl = 1; else e.phys = 1;
+    }
   });
-  var rows = [];
-  Object.keys(by).forEach(function (k) { var e = by[k]; if (e.ja || e.en) rows.push(e); });
+  var rows = [], dlOnly = 0;
+  Object.keys(by).forEach(function (k) {
+    var e = by[k]; if (!(e.ja || e.en)) return;
+    if (e.dl && !e.phys) { dlOnly++; return; }              // ダウンロード専売＝扱えないので入れない
+    rows.push({ ja: e.ja, en: e.en, y: e.y, img: e.img });
+  });
   rows.sort(function (a, b) { return String(a.y || '9999').localeCompare(String(b.y || '9999')); });
   var ja = rows.filter(function (r) { return r.ja; }).length, en = rows.filter(function (r) { return r.en; }).length;
   sbUpsert_('app_kv', [{ k: 'titles_' + hw, v: { at: new Date().toISOString(), hw: hw, name: def.name, n: rows.length, rows: rows }, updated_at: new Date().toISOString() }], 'k');
@@ -3114,9 +3125,9 @@ function fetchTitles_(hw) {
   //   全ハードの全行(2万件超)を読みに行くと重すぎて表示が欠ける（実際に13ハード分が出なかった）。
   var idx = {};
   try { var cur0 = sbSelect_('app_kv', 'select=v&k=eq.titles_index'); idx = ((cur0 || [])[0] || {}).v || {}; } catch (e0) {}
-  idx[hw] = { name: def.name, n: rows.length, ja: ja, en: en, at: new Date().toISOString() };
+  idx[hw] = { name: def.name, n: rows.length, ja: ja, en: en, dlOnly: dlOnly, at: new Date().toISOString() };
   sbUpsert_('app_kv', [{ k: 'titles_index', v: idx, updated_at: new Date().toISOString() }], 'k');
-  return { hw: hw, name: def.name, n: rows.length, ja: ja, en: en };
+  return { hw: hw, name: def.name, n: rows.length, ja: ja, en: en, dlOnly: dlOnly };
 }
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================

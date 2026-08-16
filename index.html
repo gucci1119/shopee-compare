@@ -2854,16 +2854,44 @@
   const jobOpened = (k) => { try { return (JSON.parse(localStorage.getItem('smdJobOpened') || '[]')).includes(k); } catch (_) { return false; } };
   // ★localStorageが一杯だと「もう落とした」印が保存できず、ZIPが延々ダウンロードされる事故になった。
   //   溢れたら、消えても困らないキャッシュ（下書き・一時データ）から捨てて空きを作る。
-  function lsPrune_() {
+  // ★2026-08-16：実機で **10.00MB＝上限ぴったり** まで埋まっていた。
+  //   その状態だと localStorage.setItem が毎回失敗するが、どこも catch で握っていたため
+  //   **設定も画面の記憶も黙って保存されない**（ハードリロードすると必ず為替画面に戻る、で発覚）。
+  //   捨てる対象が smdCache 等だけで、実際に食っていた大物（下書き・カテゴリ名キャッシュ）に届いていなかった。
+  const lsSize = () => { let t = 0; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); t += (k.length + (localStorage.getItem(k) || '').length) * 2; } } catch (_) {} return t; };
+  const LS_REGEN = /^(smdCache|smdTmp|smdSrc|smdDeal|smdKw|smdListCache|srcDeals|smdCatNames|smdBulkUrls_|smdTrCache|mercCat|smdStatsCache)/;  // 消えても作り直せるもの
+  function lsPrune_(needBytes) {
+    let freed = 0, n = 0;
     try {
-      const drop = [];
+      const cands = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (/^(smdCache|smdTmp|smdSrc|smdDeal|smdKw|smdListCache)/.test(k || '')) drop.push(k);
+        if (LS_REGEN.test(k || '')) cands.push([k, (k.length + (localStorage.getItem(k) || '').length) * 2]);
       }
-      drop.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} });
-      console.warn('[保存領域] 一杯だったのでキャッシュ ' + drop.length + '件を捨てました');
+      cands.sort((a, b) => b[1] - a[1]);                      // 大物から捨てる＝1回で空く
+      for (const [k, b] of cands) {
+        try { localStorage.removeItem(k); freed += b; n++; } catch (_) {}
+        if (needBytes && freed >= needBytes) break;
+      }
+      if (n) console.warn('[保存領域] ' + n + '件・' + Math.round(freed / 1024) + 'KB を捨てました（作り直せるキャッシュのみ）');
     } catch (_) {}
+    return freed;
+  }
+  let _lsWarned = false;
+  // 保存に失敗したら**黙らない**。捨てて入れ直し、それでもダメなら1回だけ知らせる。
+  function lsSet(key, val) {
+    try { localStorage.setItem(key, val); return true; } catch (_) {}
+    lsPrune_((String(val).length + key.length) * 2 + 512 * 1024);
+    try { localStorage.setItem(key, val); return true; } catch (_) {}
+    if (!_lsWarned) {
+      _lsWarned = true;
+      const big = [];
+      try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); big.push([k, (k.length + (localStorage.getItem(k) || '').length) * 2]); } } catch (_) {}
+      big.sort((a, b) => b[1] - a[1]);
+      try { toast('⚠ このブラウザの保存領域が一杯で、設定を保存できません（' + (lsSize() / 1048576).toFixed(1) + 'MB）。大きいもの: ' + big.slice(0, 3).map(x => x[0] + ' ' + Math.round(x[1] / 1024) + 'KB').join(' / '), true); } catch (_) {}
+      console.warn('[保存領域] 満杯で保存できません', big.slice(0, 6));
+    }
+    return false;
   }
   const JOB_DL_DONE = new Set();   // この画面が生きている間の「もう落とした」印
   let JOB_DL_COUNT = 0;            // 1回の表示で自動ダウンロードする上限（暴走の安全弁）
@@ -5869,7 +5897,7 @@
     state.page = p;
     { const b = document.getElementById('sticky-hscroll'); if (b && p !== 'list') b.style.display = 'none'; } // ページ切替で下端の横スクロールバーを即座に隠す（listページ以外）
     setTimeout(() => { try { if (setStickyHScroll._refresh) setStickyHScroll._refresh(); } catch (_) {} }, 60); // DOM更新後に再判定
-    try { localStorage.setItem('smdPage', p); } catch (e) {} // 再読み込みで同じページに戻すため保存
+    lsSet('smdPage', p); // 再読み込みで同じページに戻すため保存（満杯なら知らせる＝黙って忘れない）
     // 損益グループのページでは「損益・入出金」ナビをハイライト
     document.querySelectorAll('#smd-nav button').forEach(b => b.classList.toggle('on', b.dataset.p === p || (b.dataset.p === 'finance' && FIN_GROUP.includes(p))));
     // 損益サブタブのアクティブ表示
@@ -14716,6 +14744,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🧯 <b>【重要】ブラウザの保存領域が満杯で、設定が黙って保存できていませんでした</b>。実測で <b>10.00MB＝上限ぴったり</b>。その状態だと <code>localStorage.setItem</code> が毎回失敗しますが、どこも握りつぶしていたため気づけず、<b>ハードリロードすると必ず為替画面に戻る</b>（＝最後に開いたページを覚えられない）で発覚しました。掃除の対象が実際に食っている大物（下書き3.8MB・カテゴリ名2.9MB）に届いていなかったので、<b>大きいものから捨てて入れ直し</b>、それでもダメなら<b>画面に出す</b>ようにしました（黙って忘れない）。',
+      '📚 <b>母数の内訳に「ダウンロード専売を除外」「並べ替え」を追加</b>。中古で扱えないダウンロード専売はマスタに入れません（流通形態が未記入のものは残す＝取りこぼさない）。並べ替えは<b>発売が新しい／古い・あいうえお順・A→Z・画像があるものを先に</b>。',
       '📚 <b>母数の内訳を画像付きで開けるようにしました</b>。ハードの行をクリックすると、<b>まだ出していない／出している</b>をカードで一覧（パッケージ画像はWikidataにあるもの）。そこから駿河屋・メルカリの検索へ直行できます。あわせて<b>出品データを読む前に数えて全部0になっていたのを修正</b>し、件数だけの索引を持たせて<b>13ハード分が表に出なかったのも修正</b>しました。',
       '📚 <b>「母数（ハード別の網羅）」を追加</b>（出品管理のタブ）。ハードごとに<b>世の中に何本あって・自分は何本出しているか・空白は何本か</b>を出します。マスタは<b>Wikidata</b>（全ハードを同じ形で取れる／日本語・英語ラベル付き）。Wikipediaの一覧はハードごとに表の作りが違い、PSP以外は取れませんでした（実測）。<b>版違い（廉価版・Best版）はマスタに含まれません</b>ので、版違い込みの数は駿河屋のリンクから見られるようにしています。明細で足す分には<b>出品枠を消費しません</b>。',
       '🎨 <b>シリーズの色帯が行ごとに欠けていた本当の原因を修正</b>。固定列の <code>box-shadow:-200px 0 0</code>（固定列より左の余白を埋める塗り）が<b>行き過ぎてカード左端の帯まで塗りつぶして</b>いました。必要な幅ちょうどに絞り、帯がグループを1本で通るようにしました。',
@@ -18083,7 +18113,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const j = JSON.parse(m[1]); if (!j || !j.ok || !j.map) return;
       const flat = {}; Object.keys(j.map).forEach(k => { flat[k] = { n: j.map[k].n || '', p: j.map[k].p || '' }; });
       catNameCache[cc] = flat;
-      try { localStorage.setItem('smdCatNames2', JSON.stringify(catNameCache)); } catch (_) {}
+      lsSet('smdCatNames2', JSON.stringify(catNameCache));
     } catch (_) { }
   }
   const _catEnt = (cc, id) => (catNameCache[cc] && catNameCache[cc][String(id)]) || null;
@@ -21380,7 +21410,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     lst.tmFil = lst.tmFil || 'no';
     const shown = list.filter(x => lst.tmFil === 'all' ? true : (lst.tmFil === 'yes' ? x.has : !x.has));
     const q = (lst.tmQ || '').toLowerCase().trim();
-    const shown2 = q ? shown.filter(x => ((x.ja || '') + ' ' + (x.en || '')).toLowerCase().includes(q)) : shown;
+    let shown2 = q ? shown.filter(x => ((x.ja || '') + ' ' + (x.en || '')).toLowerCase().includes(q)) : shown.slice();
+    // 並べ替え。★あいうえお順は日本語名で（無いものは後ろ）、A-Zは英語名で。発売日は年しか持っていない
+    lst.tmSort = lst.tmSort || 'ynew';
+    const kana = v => String(v || '').replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));   // カタカナ→ひらがなで並びを揃える
+    const cmp = {
+      ynew: (a, b) => String(b.y || '0000').localeCompare(String(a.y || '0000')),
+      yold: (a, b) => String(a.y || '9999').localeCompare(String(b.y || '9999')),
+      ja: (a, b) => (a.ja ? 0 : 1) - (b.ja ? 0 : 1) || kana(a.ja).localeCompare(kana(b.ja), 'ja'),
+      en: (a, b) => (a.en ? 0 : 1) - (b.en ? 0 : 1) || String(a.en || '').toLowerCase().localeCompare(String(b.en || '').toLowerCase()),
+      img: (a, b) => (a.img ? 0 : 1) - (b.img ? 0 : 1) || String(b.y || '').localeCompare(String(a.y || ''))
+    };
+    shown2.sort(cmp[lst.tmSort] || cmp.ynew);
     const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">${label} ${n}</button>`;
     const card = x => `<div style="border:1px solid ${x.has ? '#cfe6d6' : '#e6e6e6'};background:${x.has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px">
       <div style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
@@ -21400,12 +21441,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)} の内訳</b>
         ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)}
-        <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="margin-left:auto;padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:180px">
+        <select id="tm-sort" style="margin-left:auto;padding:3px 6px;border:1px solid #ddd;border-radius:6px;font-size:11px">
+          ${[['ynew', '発売が新しい順'], ['yold', '発売が古い順'], ['ja', 'あいうえお順'], ['en', 'A→Z順'], ['img', '画像があるものを先に']].map(o => `<option value="${o[0]}"${lst.tmSort === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}
+        </select>
+        <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:170px">
       </div>
-      <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。画像はWikidataにあるものだけです。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
+      <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。<b>ダウンロード専売は入れていません</b>（中古で扱えないため）。画像はWikidataにあるものだけで、<b>取り込み直すと入ります</b>。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>
     </div>`;
     box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
+    { const ss = document.getElementById('tm-sort'); if (ss) ss.addEventListener('change', () => { lst.tmSort = ss.value; renderTitleDetail(hw, own); }); }
     const qi = document.getElementById('tm-q');
     if (qi) { let t = null; qi.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { lst.tmQ = qi.value; renderTitleDetail(hw, own); setTimeout(() => { const e2 = document.getElementById('tm-q'); if (e2) { e2.focus(); e2.setSelectionRange(e2.value.length, e2.value.length); } }, 0); }, 350); }); }
   }
