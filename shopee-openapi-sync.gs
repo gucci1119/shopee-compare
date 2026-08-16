@@ -3080,11 +3080,12 @@ var TITLE_HW = {
 function fetchTitles_(hw) {
   var def = TITLE_HW[String(hw || '').toLowerCase()];
   if (!def) throw new Error('知らないハードです: ' + hw + '（' + Object.keys(TITLE_HW).join('/') + '）');
-  var q = 'SELECT ?item ?ja ?en ?d WHERE {'
+  var q = 'SELECT ?item ?ja ?en ?d ?img WHERE {'
     + ' ?item wdt:P400 wd:' + def.q + ' .'
     + ' OPTIONAL { ?item rdfs:label ?ja FILTER(lang(?ja)="ja") }'
     + ' OPTIONAL { ?item rdfs:label ?en FILTER(lang(?en)="en") }'
     + ' OPTIONAL { ?item wdt:P577 ?d }'
+    + ' OPTIONAL { ?item wdt:P18 ?img }'      // パッケージ画像（あるものだけ）
     + ' }';
   var url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(q);
   // ★User-Agent を入れないと弾かれる。連絡先を入れるのがWikimediaの作法。
@@ -3094,9 +3095,14 @@ function fetchTitles_(hw) {
   var by = {};
   bind.forEach(function (r) {
     var k = (r.item || {}).value; if (!k) return;
-    var e = by[k] || (by[k] = { ja: '', en: '', y: '' });
+    var e = by[k] || (by[k] = { ja: '', en: '', y: '', img: '' });
     if (!e.ja && r.ja) e.ja = r.ja.value;
     if (!e.en && r.en) e.en = r.en.value;
+    // ★画像は原寸だと重いので、Wikimediaのサムネイル(200px)に直して持つ
+    if (!e.img && r.img && r.img.value) {
+      var f = decodeURIComponent(String(r.img.value).split('/').pop());
+      e.img = 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=200';
+    }
     if (r.d && r.d.value) { var y = String(r.d.value).slice(0, 4); if (!e.y || y < e.y) e.y = y; }  // 一番古い＝初出年
   });
   var rows = [];

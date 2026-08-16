@@ -14716,6 +14716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '📚 <b>母数の内訳を画像付きで開けるようにしました</b>。ハードの行をクリックすると、<b>まだ出していない／出している</b>をカードで一覧（パッケージ画像はWikidataにあるもの）。そこから駿河屋・メルカリの検索へ直行できます。あわせて<b>出品データを読む前に数えて全部0になっていたのを修正</b>し、件数だけの索引を持たせて<b>13ハード分が表に出なかったのも修正</b>しました。',
       '📚 <b>「母数（ハード別の網羅）」を追加</b>（出品管理のタブ）。ハードごとに<b>世の中に何本あって・自分は何本出しているか・空白は何本か</b>を出します。マスタは<b>Wikidata</b>（全ハードを同じ形で取れる／日本語・英語ラベル付き）。Wikipediaの一覧はハードごとに表の作りが違い、PSP以外は取れませんでした（実測）。<b>版違い（廉価版・Best版）はマスタに含まれません</b>ので、版違い込みの数は駿河屋のリンクから見られるようにしています。明細で足す分には<b>出品枠を消費しません</b>。',
       '🎨 <b>シリーズの色帯が行ごとに欠けていた本当の原因を修正</b>。固定列の <code>box-shadow:-200px 0 0</code>（固定列より左の余白を埋める塗り）が<b>行き過ぎてカード左端の帯まで塗りつぶして</b>いました。必要な幅ちょうどに絞り、帯がグループを1本で通るようにしました。',
       '🏷 <b>複製で属性(specifics)が入らない件：理由が分かるようにし、やり直せるようにしました</b>。実測で<b>元カタログ7項目に対して複製先0項目</b>でした。属性コピーを単体で叩けるようにし（<code>copy_attrs</code>）、<b>元にいくつあったか／送れたのは何件か／選択肢表は引けたか／どのエラーで落ちたか</b>を返します。まとめて送って落ちた時は<b>1件ずつ入れ直して、通るものだけでも入れます</b>。複製で作った行には <b>🏷</b> が出て、いつでもやり直せます（作り直し不要）。',
@@ -21302,6 +21303,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderTitleMaster() {
     const box = document.getElementById('list-titles'); if (!box) return;
     box.innerHTML = '<div class="smd-dim" style="font-size:12px">読み込み中…</div>';
+    try { await ensureListings(); } catch (_) {}      // ★出品データを読む前に数えると全部0になる（2026-08-16）
     const m = await loadTitleMaster();
     const own = ownTitleCounts();
     const hws = Object.keys(TITLE_HW_JA);
@@ -21313,8 +21315,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (n) { tot += n; totOwn += Math.min(o, n); }
       const rate = n ? Math.round(o / n * 100) : null;
       const gap = n ? Math.max(0, n - o) : null;
-      return `<tr>
-        <td style="font-weight:700;white-space:nowrap">${esc(TITLE_HW_JA[h])}</td>
+      return `<tr class="tm-row" data-hw="${h}" style="cursor:pointer" title="クリックすると、このハードの内訳（出している／まだ出していない）を画像付きで開きます">
+        <td style="font-weight:700;white-space:nowrap">${(lst.tmOpen === h) ? '▼' : '▶'} ${esc(TITLE_HW_JA[h])}</td>
         <td style="text-align:right">${num(n)}</td>
         <td style="text-align:right;font-weight:700;color:#1565c0">${num(o)}</td>
         <td style="text-align:right;font-weight:700;color:${gap ? '#c0392b' : '#1a7f37'}">${num(gap)}</td>
@@ -21339,7 +21341,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><th>ハード</th><th style="text-align:right">マスタ</th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:right">網羅率</th><th></th><th></th><th>取込日</th></tr>
           ${rows}
         </table></div>
-      </div>`;
+      </div>
+      <div id="tm-detail" style="margin-top:12px"></div>`;
+    box.querySelectorAll('.tm-row').forEach(tr => tr.addEventListener('click', () => {
+      lst.tmOpen = (lst.tmOpen === tr.dataset.hw) ? '' : tr.dataset.hw;
+      renderTitleMaster();
+    }));
+    if (lst.tmOpen) renderTitleDetail(lst.tmOpen, own);
     const b = document.getElementById('tm-fetch');
     if (b) b.addEventListener('click', async () => {
       if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です'); return; }
@@ -21353,6 +21361,53 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       } catch (e) { alert('取り込みに失敗: ' + apiErrJa((e && e.message) || e)); }
       b.disabled = false; b.textContent = '⬇ マスタを取り込む';
     });
+  }
+
+
+  // 📚 1ハードの内訳。「出している／まだ出していない」を画像付きで出す。
+  //   ★画像はWikidata(P18)にあるものだけ。無い方が多いので、無い時は枠だけ出して詰まらせない。
+  async function renderTitleDetail(hw, own) {
+    const box = document.getElementById('tm-detail'); if (!box) return;
+    box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
+    const rows = await loadTitleRows(hw);
+    if (!rows.length) { box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">まだマスタを取り込んでいません（右上の「⬇ マスタを取り込む」）。</span></div>'; return; }
+    const mine = (own && own.names && own.names[hw]) || new Set();
+    const nk = v => String(v || '').toLowerCase().replace(/[™®©]/g, '').replace(/[^a-z0-9ぁ-んァ-ヶ一-龠]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const mineN = new Set([...mine].map(nk));
+    // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
+    const list = rows.map(r => Object.assign({}, r, { has: (r.en && mineN.has(nk(r.en))) || (r.ja && mineN.has(nk(r.ja))) }));
+    const hasN = list.filter(x => x.has).length;
+    lst.tmFil = lst.tmFil || 'no';
+    const shown = list.filter(x => lst.tmFil === 'all' ? true : (lst.tmFil === 'yes' ? x.has : !x.has));
+    const q = (lst.tmQ || '').toLowerCase().trim();
+    const shown2 = q ? shown.filter(x => ((x.ja || '') + ' ' + (x.en || '')).toLowerCase().includes(q)) : shown;
+    const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">${label} ${n}</button>`;
+    const card = x => `<div style="border:1px solid ${x.has ? '#cfe6d6' : '#e6e6e6'};background:${x.has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px">
+      <div style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+        ${x.img ? `<img src="${esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">` : '<span style="color:#c9c9c9;font-size:10px">画像なし</span>'}
+      </div>
+      <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.ja || x.en || '')}</div>
+      ${x.ja && x.en ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.en)}</div>` : ''}
+      <div style="display:flex;align-items:center;gap:5px;margin-top:auto">
+        <span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;background:${x.has ? '#1a7f37' : '#fdecea'};color:${x.has ? '#fff' : '#b3261e'}">${x.has ? '出している' : 'まだ'}</span>
+        ${x.y ? `<span class="smd-dim" style="font-size:9.5px">${esc(x.y)}</span>` : ''}
+        <a href="https://www.suruga-ya.jp/search?search_word=${encodeURIComponent(x.ja || x.en || '')}" target="_blank" rel="noopener" style="margin-left:auto;color:#c30d23;font-size:9.5px;font-weight:700;text-decoration:none">駿河屋</a>
+        <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.ja || x.en || '')}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
+      </div>
+    </div>`;
+    const CAP = 300;
+    box.innerHTML = `<div class="tool-card" style="margin:0;max-width:none">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)} の内訳</b>
+        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)}
+        <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="margin-left:auto;padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:180px">
+      </div>
+      <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。画像はWikidataにあるものだけです。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>
+    </div>`;
+    box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
+    const qi = document.getElementById('tm-q');
+    if (qi) { let t = null; qi.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { lst.tmQ = qi.value; renderTitleDetail(hw, own); setTimeout(() => { const e2 = document.getElementById('tm-q'); if (e2) { e2.focus(); e2.setSelectionRange(e2.value.length, e2.value.length); } }, 0); }, 350); }); }
   }
 
   function renderListPage() {
