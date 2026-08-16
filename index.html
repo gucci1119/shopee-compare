@@ -21404,7 +21404,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   ★数万件を一括で舐めない（ヤマダでIP制限を踏んだ）。見えている分だけ・20件ずつ・一度引いたら覚える。
   let _tmBusy = false;
   async function tmFillImages(hw, box) {
-    if (!settings.openapiUrl || !settings.writeToken) return;
+    if (state.mode !== 'live') return;      // 他サイトの取得はブリッジ（本人のブラウザ）が要る
     lst.tmImg = lst.tmImg || {};
     if (!lst.tmImgLoaded) {                      // 既に貯めてある分をまとめて読む（1回だけ）
       lst.tmImgLoaded = {};
@@ -21420,16 +21420,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .slice(0, 20).map(el => el.dataset.q);
     if (!need.length) return;
     _tmBusy = true;
-    try {
-      const r = await gasCall({ action: 'title_imgs', token: settings.writeToken, hw: hw, q: JSON.stringify(need) }, 120000);
-      if (r && r.ok) {
-        Object.assign(lst.tmImg, r.map || {});
-        renderTitleDetailImgs(box);
-        // ★1件も取れない時は黙らない。叩けていないのか／検索が0件なのかを出す
-        const got = Object.values(r.map || {}).filter(Boolean).length;
-        if (!got && r.diag && !lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋から画像を取れませんでした（' + (r.diag.code || '?') + '・' + (r.diag.title || '応答なし') + '）', true); console.warn('[母数画像] 駿河屋', r.diag); }
-      }
-    } catch (_) {}
+    // ★GAS（GoogleのIP）からは駿河屋の商品IDが1件も取れなかった（実測20件すべて空）。
+    //   同じURLを手元のPCから叩くと普通に取れるので、**ブリッジ＝本人のブラウザ**から取りに行く。
+    //   ヤマダと同じ経路。1件ずつ・1.2秒あけて叩く（一括で舐めない）。
+    const found = {};
+    for (const q of need) {
+      let id = '';
+      try {
+        const html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(q.slice(0, 80)), null, { timeout: 20000 }));
+        const m = html.match(/\/product\/detail\/(\d+)/);
+        id = m ? m[1] : '';
+        if (!id && !lst._tmWarned && !/suruga/i.test(html)) { lst._tmWarned = 1; toast('⚠ 駿河屋のページを取得できませんでした（ブリッジ経由）', true); }
+      } catch (e) { if (!lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋を取得できません: ' + apiErrJa((e && e.message) || e), true); } break; }
+      lst.tmImg[q] = id; found[q] = id;
+      renderTitleDetailImgs(box);
+      await new Promise(r => setTimeout(r, 1200));
+    }
+    // 引いた分は貯めておく＝次からは叩かない
+    if (Object.keys(found).length && settings.sbSecret) {
+      try {
+        const cur = await sbGetAll('app_kv', 'select=v&k=eq.timg_' + encodeURIComponent(hw));
+        const merged = Object.assign({}, (cur && cur[0] && cur[0].v) || {}, found);
+        await sbUpsert('app_kv', [{ k: 'timg_' + hw, v: merged, updated_at: new Date().toISOString() }], 'k');
+      } catch (_) {}
+    }
     _tmBusy = false;
   }
   // 画像だけ差し替える（並び替えや絞り込みを崩さない）
