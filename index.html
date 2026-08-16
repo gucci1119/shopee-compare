@@ -14714,6 +14714,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🏷 <b>複製で属性(specifics)が入らない件：理由が分かるようにし、やり直せるようにしました</b>。実測で<b>元カタログ7項目に対して複製先0項目</b>でした。属性コピーを単体で叩けるようにし（<code>copy_attrs</code>）、<b>元にいくつあったか／送れたのは何件か／選択肢表は引けたか／どのエラーで落ちたか</b>を返します。まとめて送って落ちた時は<b>1件ずつ入れ直して、通るものだけでも入れます</b>。複製で作った行には <b>🏷</b> が出て、いつでもやり直せます（作り直し不要）。',
       '🎨 <b>シリーズの色帯が途切れて見えるのを修正</b>。カードの角丸12pxが左の帯にも掛かって上下が丸く削れ、さらにカード間に2pxの隙間があったため、<b>同じシリーズなのに帯がぶつ切り</b>に見えていました。帯側の角丸を外して隙間を詰め、<b>グループを1本の線で通す</b>ようにしました（在庫0固定の赤帯も同じ）。',
       '📄 <b>複製したらそのまま編集画面が開くようにしました</b>＋<b>複製直後に「shop_idが未取得」でブリッジ表示に落ちていたのを修正</b>。1件だけ最新化する処理が <code>shop_id</code> を書いておらず、複製で作った新カタログは他に情報源が無いため「公式APIで読めなかった」表示になり、<b>説明文・画像・属性が出ず編集もできない</b>状態でした。',
       '📉 <b>着地予測に「実利益」を追加</b>（D9）。売上・粗利・注文数はありましたが、<b>目標を測る当の実利益が無く</b>、月末にいくら残るかが分かりませんでした。今月の進捗（常時表示）に行を足しています。<b>固定費は月額でもう全額決まっているので日割りで伸ばさず</b>、入金・仕入・その他経費・返金だけを伸ばして計算します。Discordへのコピーにも入ります。',
@@ -25069,6 +25070,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             ${buyUrl ? `<a href="${buyUrl}" target="_blank" title="販売(公開)ページ" style="text-decoration:none;font-size:13px">🛍️</a>` : ''}
             <span class="lst-edithist" data-name="${av(r.name || '')}" title="この商品の編集履歴（価格・在庫・タイトル等の変更ログ）" style="cursor:pointer;font-size:13px;line-height:1">📜</span>
             ${(!isSingle && canOfficialEdit) ? `<span class="lst-clone" data-cc="${r.cc}" data-id="${r.item_id}" title="このカタログの複製を作る（満杯の①から②を作る）。画像・カテゴリ・属性・重量・説明を引き継いで【非公開】で作成。明細は作成後に「まとめて追加」で入れます" style="cursor:pointer;font-size:13px;line-height:1">📄</span>` : ''}
+            ${(() => { const cs = (lst._cloneSrc || {})[String(r.item_id)]; return cs ? `<span class="lst-attrcopy" data-cc="${r.cc}" data-id="${r.item_id}" data-src="${esc(cs.src)}" data-sid="${esc(String(cs.sid || ''))}" title="複製元（item ${esc(cs.src)}）から属性(specifics)をもう一度コピーします。複製時に入らなかった時に使います" style="cursor:pointer;font-size:13px;line-height:1">🏷</span>` : ''; })()}
             <span class="lst-more1" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" data-name="${av(r.name || '')}" data-buy="${esc(buyUrl || '')}" title="公開/非公開の切替・削除など" style="cursor:pointer;font-size:14px;line-height:1;color:#8a8f98;font-weight:700">⋯</span>
             ${isSingle && canEdit ? `<button class="lst-save" title="価格・在庫を公式APIで保存" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:2px 6px;cursor:pointer;font-size:10px;font-weight:700">💾保存</button>` : ''}
           </div>
@@ -25173,15 +25175,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (r.video_warn) toast('⚠ 動画だけ引き継げませんでした: ' + apiErrJa(r.video_warn), true);
       if (r.tier_warn) toast('⚠ バリエーションの枠を作れませんでした: ' + apiErrJa(r.tier_warn), true);
       try { await refreshOneListing(cc, String(r.item_id), sid); } catch (_) {}
-      if (r.attr_warn) toast('⚠ 属性(specifics)の引き継ぎだけ失敗: ' + apiErrJa(r.attr_warn) + '（Shopeeの編集画面で入れてください）', true);
-      // ★選択肢からIDを引けなかった属性は**その属性だけ**捨てている。黙って落とすと気づけないので必ず出す
-      if (r.attr_dropped && r.attr_dropped.length) toast('⚠ 引き継げなかった属性: ' + r.attr_dropped.join('・') + '（Shopeeの編集画面で選び直してください）', true);
+      // ★属性は黙って落ちると「属性だけ空のカタログ」ができる。**消えるトーストで済ませない**。
+      //   何件入ったか・何が入らなかったか・なぜかを、その場で読める形で出す。
+      if (r.attr_warn || (r.attr_dropped && r.attr_dropped.length)) {
+        const d = r.attr_debug || {};
+        alert('⚠ 属性(specifics)が全部は入りませんでした\n\n'
+          + (r.attr_warn ? apiErrJa(r.attr_warn) + '\n\n' : '')
+          + (r.attr_dropped && r.attr_dropped.length ? '入らなかった項目: ' + r.attr_dropped.join('・') + '\n\n' : '')
+          + '元の属性 ' + (d.src_n != null ? d.src_n : '?') + '件／送れた ' + (d.sent_n != null ? d.sent_n : '?') + '件'
+          + (d.tree_n != null ? '／選択肢表 ' + d.tree_n + '項目' : '') + (d.tree_err ? '（選択肢表エラー: ' + d.tree_err + '）' : '')
+          + (d.bulk_err ? '\nまとめて送った時のエラー: ' + d.bulk_err : '')
+          + '\n\n編集画面の「🏷 元から属性をコピー」でやり直せます。');
+      }
       if (r.sku_warn) toast('⚠ 親SKUを入れられませんでした: ' + apiErrJa(r.sku_warn), true);
+      lst._cloneSrc = lst._cloneSrc || {}; lst._cloneSrc[String(r.item_id)] = { cc, src: String(itemId), sid };   // 後でやり直せるよう元を覚えておく
+      try { localStorage.setItem('smd_clone_src', JSON.stringify(lst._cloneSrc)); } catch (_) {}
       // ★複製は「作って終わり」ではなく、必ずタイトル・SKU・明細に手を入れる作業。
       //   一覧に戻して探させるのは手間なので、そのまま編集画面を開く。
       try { const rg = regionByCc(cc) || {}; openCatalogEditor(cc, rg.host || '', String(r.item_id), finalName); } catch (_) {}
     } catch (e) { alert('複製に失敗: ' + apiErrJa((e && e.message) || e)); }
   }
+  try { lst._cloneSrc = JSON.parse(localStorage.getItem('smd_clone_src') || '{}'); } catch (_) { lst._cloneSrc = {}; }   // 複製元の記憶（🏷属性コピーのやり直し用）
   const _varCntCache = new WeakMap();
   function varCount(r) {
     if (!r || typeof r !== 'object') return 0;
@@ -25975,6 +25989,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (e) { el.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
     }));
     document.querySelectorAll('#lst-list .lst-clone').forEach(el => el.addEventListener('click', () => cloneCatalog(el.dataset.cc, el.dataset.id)));
+    // 🏷 複製元から属性(specifics)をもう一度コピー（複製時に入らなかった分をやり直す）
+    document.querySelectorAll('#lst-list .lst-attrcopy').forEach(el => el.addEventListener('click', async () => {
+      const cc = el.dataset.cc, id = el.dataset.id, src = el.dataset.src;
+      const sid = el.dataset.sid || shopIdOfListing(cc, id);
+      if (!sid) { alert('この出品のshop_idが分かりません（🔄最新に更新で入ります）'); return; }
+      if (!settings.writeToken) { alert('⚙️設定のWRITE_TOKENが必要です'); return; }
+      if (!confirm('複製元（item ' + src + '）の属性(specifics)を、この出品（item ' + id + '）へコピーします。よろしいですか？')) return;
+      const org = el.textContent; el.textContent = '⏳';
+      try {
+        const r = await gasCall({ action: 'copy_attrs', token: settings.writeToken, shop_id: sid, src_item_id: src, item_id: id }, 90000);
+        const d = (r && r.debug) || {};
+        alert((r && r.sent ? '✅ ' + r.sent + '件の属性を入れました' : '⚠ 入りませんでした')
+          + '\n\n元の属性 ' + (d.src_n != null ? d.src_n : '?') + '件／送れた ' + (d.sent_n != null ? d.sent_n : '?') + '件'
+          + (d.tree_n != null ? '／選択肢表 ' + d.tree_n + '項目' : '') + (d.tree_err ? '（選択肢表エラー: ' + d.tree_err + '）' : '')
+          + (r && r.warn ? '\n\n' + apiErrJa(r.warn) : '')
+          + (d.bulk_err ? '\n\nまとめて送った時のエラー: ' + d.bulk_err : '')
+          + (r && r.dropped && r.dropped.length ? '\n\n送れなかった項目: ' + r.dropped.join('・') : ''));
+      } catch (e) { alert('失敗: ' + apiErrJa((e && e.message) || e)); }
+      el.textContent = org;
+    }));
     document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
     // 📝メモ（入力＝再描画せず保存＝フォーカス維持）／⚠️在庫0固定（トグル＝保存して再描画で赤帯反映）
     // ---- 🛠 まとめて編集：この一覧の絞り込み結果からそのまま対象を選ぶ ----
