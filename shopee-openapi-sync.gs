@@ -128,6 +128,18 @@ function doGet(e) {
       return ContentService.createTextOutput(rtcb + '(' + JSON.stringify(rtout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 📄 カタログの複製（満杯になった①から②を作る）
+    // 🏷 属性(specifics)だけを別カタログへ写す（複製で失敗した時に**作り直さず**やり直せるように）
+    if (p.action === 'copy_attrs') {
+      var cacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var caout;
+      try {
+        var wtA = P_().getProperty('WRITE_TOKEN');
+        if (!wtA || p.token !== wtA) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        caout = copyAttrs_(p.shop_id, p.src_item_id, p.item_id, null);
+        caout.ok = true;
+      } catch (err) { caout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(cacb + '(' + JSON.stringify(caout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'clone_item') {
       var ccb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var cout;
@@ -2948,56 +2960,77 @@ function cloneItem_(shopId, itemId, newName, publish) {
     try { setItemVideo_(shopId, out.item_id, vurl); out.video = 1; }
     catch (e) { out.video_warn = String((e && e.message) || e); }
   }
-  // 属性(specifics)は add_item では送れないので、作成後に update_item で移す。
-  // ★ここで `AttributeValue.ValueId: ValueId is required` で丸ごと落ちていた（2026-08-15）。
-  //   get_item_base_info は選択式の属性でも value_id を 0 で返すことがあり、
-  //   そのまま original_value_name だけ送ると「選択式なのにIDが無い」と弾かれる。
-  //   → カテゴリの選択肢表から**名前でIDを引き直す**。引けない選択式は**その属性だけ捨てる**
-  //     （1つのために全部落とさない。捨てた分は warn で返してポータルに出す）。
-  var attrTree = [];
-  try { attrTree = getAttributeTree_(shopId, body.category_id, 'en') || []; } catch (e) { out.attr_tree_warn = String((e && e.message) || e); }
-  var atById = {};
-  attrTree.forEach(function (a) { atById[a.attribute_id] = a; });
-  var vkey = function (x) { return String(x == null ? '' : x).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(); };
-  var dropped = [];
-  var attrs = (base.attribute_list || []).map(function (a) {
-    var def = atById[a.attribute_id] || null;
-    var opts = (def && def.options) || [];
-    var byName = {};
-    opts.forEach(function (o) { if (o && o.id) byName[vkey(o.name)] = o.id; });
-    var vals = (a.attribute_value_list || []).map(function (v) {
-      if (v.value_id) return { value_id: v.value_id, value_unit: v.value_unit };
-      var hit = byName[vkey(v.original_value_name)];
-      if (hit) return { value_id: hit, value_unit: v.value_unit };
-      // 選択肢を持つ属性＝選択式。IDが引けないものは送れない
-      if (opts.length) return null;
-      return { original_value_name: v.original_value_name };
-    }).filter(function (v) { return v && (v.value_id || v.original_value_name); });
-    if (!vals.length && (a.attribute_value_list || []).length) {
-      dropped.push((def && def.name) || ('#' + a.attribute_id));
-    }
-    return { attribute_id: a.attribute_id, attribute_value_list: vals };
-  }).filter(function (a) { return a.attribute_value_list.length; });
-  if (dropped.length) out.attr_dropped = dropped;
-  // 属性＋親SKUをまとめて反映（親SKUは引き継いでから本人が①→②等にアレンジする）
-  if (out && out.item_id && (attrs.length || base.item_sku)) {
-    var up = { item_id: out.item_id };
-    if (attrs.length) up.attribute_list = attrs;
-    if (base.item_sku) up.item_sku = String(base.item_sku).slice(0, 100);
-    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', up); out.parent_sku = up.item_sku || ''; out.attr_n = attrs.length; }
-    catch (e) {
-      // ★属性で落ちても【複製そのものは捨てない】。親SKUだけでも入れ直して、属性は警告で返す。
-      out.attr_warn = String((e && e.message) || e);
-      if (up.item_sku) {
-        try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, item_sku: up.item_sku }); out.parent_sku = up.item_sku; }
-        catch (e2) { out.sku_warn = String((e2 && e2.message) || e2); }
-      }
-    }
+  var acp = copyAttrs_(shopId, itemId, out.item_id, base);
+  out.attr_debug = acp.debug;
+  if (acp.warn) out.attr_warn = acp.warn;
+  if (acp.dropped && acp.dropped.length) out.attr_dropped = acp.dropped;
+  if (base.item_sku) {
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, item_sku: String(base.item_sku).slice(0, 100) }); out.parent_sku = base.item_sku; }
+    catch (e) { out.sku_warn = String((e && e.message) || e); }
   }
   out.from_item_id = itemId;
   out.name = body.item_name;
   return out;
 }
+
+// 🏷 属性(specifics)を別カタログへ写す。**複製から呼ぶほか、単体でも叩ける**（失敗した時に作り直さず直せるように）。
+// 返す: {ok, sent, dropped[], warn, debug{}}  debugには「元にいくつあったか／選択肢表が引けたか／何を送ったか」を入れる。
+//   ★ここが黙って失敗すると「属性だけ空のカタログ」ができる。理由が分からないと直せないので必ず debug を返す。
+function copyAttrs_(shopId, srcItemId, dstItemId, base) {
+  shopId = parseInt(shopId, 10);
+  var dbg = {};
+  if (!base) {
+    var b0 = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(srcItemId), need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
+    base = (((b0.response || {}).item_list) || [])[0] || {};
+  }
+  var srcAttrs = base.attribute_list || [];
+  dbg.src_n = srcAttrs.length;
+  dbg.src_sample = srcAttrs.slice(0, 3).map(function (a) {
+    return { id: a.attribute_id, vals: (a.attribute_value_list || []).map(function (v) { return { vid: v.value_id, nm: v.original_value_name }; }) };
+  });
+  if (!srcAttrs.length) return { ok: true, sent: 0, dropped: [], debug: dbg, warn: '元のカタログに属性が入っていません' };
+  var tree = [], atById = {};
+  try { tree = getAttributeTree_(shopId, base.category_id, 'en') || []; } catch (e) { dbg.tree_err = String((e && e.message) || e); }
+  tree.forEach(function (a) { atById[a.attribute_id] = a; });
+  dbg.tree_n = tree.length;
+  var vkey = function (x) { return String(x == null ? '' : x).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  var dropped = [];
+  var attrs = srcAttrs.map(function (a) {
+    var def = atById[a.attribute_id] || null;
+    var opts = (def && def.options) || [];
+    var byName = {};
+    opts.forEach(function (o) { if (o && o.id) byName[vkey(o.name)] = o.id; });
+    var vals = (a.attribute_value_list || []).map(function (v) {
+      if (v.value_id) return v.value_unit ? { value_id: v.value_id, value_unit: v.value_unit } : { value_id: v.value_id };
+      var hit = byName[vkey(v.original_value_name)];
+      if (hit) return { value_id: hit };
+      if (opts.length) return null;                       // 選択肢式でIDが引けない＝送れない
+      return { original_value_name: v.original_value_name };
+    }).filter(function (v) { return v && (v.value_id || v.original_value_name); });
+    if (!vals.length && (a.attribute_value_list || []).length) dropped.push((def && def.name) || ('#' + a.attribute_id));
+    return { attribute_id: a.attribute_id, attribute_value_list: vals };
+  }).filter(function (a) { return a.attribute_value_list.length; });
+  dbg.sent_n = attrs.length;
+  dbg.sent_sample = attrs.slice(0, 3);
+  if (!attrs.length) return { ok: false, sent: 0, dropped: dropped, debug: dbg, warn: '送れる属性が1つも残りませんでした' };
+  try {
+    callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(dstItemId, 10), attribute_list: attrs });
+    return { ok: true, sent: attrs.length, dropped: dropped, debug: dbg };
+  } catch (e) {
+    // ★1つでも通らない属性があると全部落ちる。**1件ずつ**に切り替えて、通るものだけでも入れる。
+    dbg.bulk_err = String((e && e.message) || e);
+    var okN = 0, ng = [];
+    for (var i = 0; i < attrs.length; i++) {
+      try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(dstItemId, 10), attribute_list: [attrs[i]] }); okN++; }
+      catch (e2) { ng.push(((atById[attrs[i].attribute_id] || {}).name || ('#' + attrs[i].attribute_id)) + '＝' + String((e2 && e2.message) || e2).slice(0, 80)); }
+    }
+    dbg.one_by_one = { ok: okN, ng: ng.length };
+    return { ok: okN > 0, sent: okN, dropped: dropped, debug: dbg,
+      warn: ng.length ? (okN + '件は入りましたが ' + ng.length + '件が入りません: ' + ng.slice(0, 4).join(' / ')) : null };
+  }
+}
+
+
 
 // ================= 🔎仕入れ検索の辞書：英語の明細名 → 実際に仕入れたときの日本語タイトル =================
 // ★狙い：売れた明細を仕入れ直すとき、**過去に自分が実際に買ったときの日本語タイトル**をそのまま検索語にする。
