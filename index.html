@@ -7391,6 +7391,14 @@
   //   upsertにならず 409 duplicate key で落ちる。実際に orders でこれが起きていた（2026-08-16）。
   async function sbUpsert(table, rows, onConflict) {
     if (!rows.length) return 0;
+    // ★同じ束の中に同じキーの行が2つあると Postgres が落ちる（同じ行は1回しか更新できない）。
+    //   注文は「未発送」と「発送済み」の両方に出てくることがあり、実際に重複していた。後の方を採用する。
+    if (onConflict) {
+      const cols = String(onConflict).split(',').map(x => x.trim()).filter(Boolean);
+      const seen = new Map();
+      rows.forEach(r => seen.set(cols.map(c => String(r[c])).join('\u0001'), r));
+      if (seen.size !== rows.length) rows = [...seen.values()];
+    }
     const key = settings.sbSecret;
     if (!key) throw new Error('このPCは書き込みキー未設定です（⚙️設定でservice_roleキーを入力）');
     const qs = onConflict ? ('?on_conflict=' + encodeURIComponent(onConflict)) : '';
@@ -30037,7 +30045,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             if (j.code !== 0) continue;
             ((j.data || {}).card_list || []).forEach(c => { const oc2 = c && c.order_card; if (oc2) rows.push(orderRowToDb(parseOrderCard(region, oc2, 500))); });
           }
-          await sbUpsert('orders', rows);
+          await sbUpsert('orders', rows, 'cc,sn');
           doneNew += rows.length;
         } catch (e) { say(`　${region.cc} 完了: ⚠ ${String(e.message).slice(0, 40)}`); }
       }
@@ -30062,7 +30070,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           }));
           if (i && i % 60 === 0) { log[log.length - 1] = `🕒 注文時刻: ${i}/${tsTargets.length}...`; st(log.join('\n')); }
         }
-        if (tsUpdates.length) await sbUpsert('orders', tsUpdates);
+        if (tsUpdates.length) await sbUpsert('orders', tsUpdates, 'cc,sn');
         log[log.length - 1] = `🕒 注文時刻 ${tsUpdates.length}件 補完 ✅${noTs.length > tsTargets.length ? `（残り${noTs.length - tsTargets.length}件は次回同期で）` : ''}`; st(log.join('\n'));
       } catch (e) { say(`🕒 注文時刻: ⚠ ${String(e.message).slice(0, 40)}`); }
 
@@ -30096,7 +30104,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (j.code !== 0) continue;
               ((j.data || {}).card_list || []).forEach(c => { const oc2 = c && c.order_card; if (oc2) rows.push(orderRowToDb(parseOrderCard(region, oc2, tab))); });
             }
-            if (rows.length) await sbUpsert('orders', rows);
+            if (rows.length) await sbUpsert('orders', rows, 'cc,sn');
             extraNew += rows.length;
           } catch (e) { say(`　${region.cc} tab${tab}: ⚠ ${String(e.message).slice(0, 40)}`); }
         }
