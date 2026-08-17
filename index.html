@@ -21808,13 +21808,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 駿河屋の中古最安から「PHで出したときの手取り(円)」。並べ替えとカード表示で使う。
   //   ★重量は150g（ソフト1本）で試算。実際の重量は出す時に入れ直す前提の**目安**。
   const _tmProfCache = new Map();
+  // 仕入れ額（駿河屋の中古最安）から、各国の出品価格と手取りを出す。
+  //   ★重量150g（ソフト1本）で試算。実際の重量は出す時に入れ直す前提の**目安**。
+  function tmProfitAll(costJpy) {
+    if (!costJpy) return null;
+    if (_tmProfCache.has(costJpy)) return _tmProfCache.get(costJpy);
+    const out = [];
+    ['PH', 'BR', 'SG', 'MY', 'VN', 'TH', 'TW'].forEach(cc => {
+      try {
+        const lp = Math.round(priceLocalFor(cc, costJpy, { weightG: 150 }));
+        if (!(lp > 0)) return;
+        const pr = priceProfitFor(cc, costJpy, lp, { weightG: 150 }) || {};
+        out.push({ cc, local: lp, profit: Math.round(pr.profit || 0), roi: Math.round(pr.roi || 0) });
+      } catch (_) {}
+    });
+    out.sort((a, b) => b.profit - a.profit);
+    _tmProfCache.set(costJpy, out);
+    return out;
+  }
   function tmProfit(x) {
     if (!x || !x.sgp) return -1e9;
-    if (_tmProfCache.has(x.sgp)) return _tmProfCache.get(x.sgp);
-    let v = -1e9;
-    try { const lp = Math.round(priceLocalFor('PH', x.sgp, { weightG: 150 })); v = Math.round((priceProfitFor('PH', x.sgp, lp, { weightG: 150 }) || {}).profit || 0); } catch (_) {}
-    _tmProfCache.set(x.sgp, v);
-    return v;
+    const a = tmProfitAll(x.sgp);
+    return (a && a.length) ? a[0].profit : -1e9;      // 一番手取りが大きい国で比べる
   }
 
   // 🎮 駿河屋の区分は「◯◯ソフト／◯◯ハード」の2つしか無く、ハードの中に
@@ -21935,9 +21950,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;background:${x.has ? '#1a7f37' : '#fdecea'};color:${x.has ? '#fff' : '#b3261e'}">${x.has ? '出している' : 'まだ'}</span>
         ${x.sgp ? (() => {
           // 仕入れ＝駿河屋の中古最安。そこからPHの出品価格と手取りを出す＝出すかどうかをその場で判断できる
-          let ph = 0, prof = 0;
-          try { const lp = priceLocalFor('PH', x.sgp, { weightG: 150 }); ph = Math.round(lp); const pr = priceProfitFor('PH', x.sgp, ph, { weightG: 150 }); prof = Math.round(pr.profit || 0); } catch (_) {}
-          return `<span title="${av('駿河屋の中古最安 ¥' + Number(x.sgp).toLocaleString() + '（' + x.sgt + '）' + (ph ? '\nPHで出すなら ₱' + ph + '／手取り ¥' + prof + '（重量150gで試算）' : ''))}" style="font-size:9.5px;font-weight:700;color:${prof > 0 ? '#1a7f37' : '#c30d23'}">¥${Number(x.sgp).toLocaleString()}${prof ? ' <span style="opacity:.75">→' + (prof > 0 ? '+' : '') + prof + '</span>' : ''}</span>`;
+          const all = tmProfitAll(x.sgp) || [];
+          const best = all[0];
+          const tip = '駿河屋の中古最安 ¥' + Number(x.sgp).toLocaleString() + '（' + x.sgt + '）\n重量150gで試算した各国の手取り：\n'
+            + all.map(a => '　' + a.cc + '  ' + a.local.toLocaleString() + '  → 手取り ¥' + a.profit.toLocaleString() + '（ROI ' + a.roi + '%）').join('\n');
+          return `<span title="${av(tip)}" style="font-size:9.5px;font-weight:700;color:${best && best.profit > 0 ? '#1a7f37' : '#c30d23'}">¥${Number(x.sgp).toLocaleString()}${best ? ' <span style="opacity:.8">→' + best.cc + (best.profit > 0 ? '+' : '') + best.profit.toLocaleString() + '</span>' : ''}</span>`;
         })() : ''}
         ${x.y ? `<span class="smd-dim" style="font-size:9.5px">${esc(x.y)}</span>` : ''}
         <a href="https://www.suruga-ya.jp/search?search_word=${encodeURIComponent(x.ja || x.en || '')}" target="_blank" rel="noopener" style="margin-left:auto;color:#c30d23;font-size:9.5px;font-weight:700;text-decoration:none">駿河屋</a>
