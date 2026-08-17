@@ -13650,6 +13650,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     rowsView = sortRows(applyF(rowsView));
     const filteredN = beforeF - rowsView.length;
     if (rtab === 'refund' && renderReturns._showCxl !== true) { rowsView = rowsView.filter(o => { const c = retStatusOf(o) === 'CANCELLED'; if (c) cxlHidden++; return !c; }); }
+    // 🚨 補償の取りこぼし＝荷物未着・中身なしなのに補償が入っていないもの。
+    //   実測(2026-08-17)：未着41件のうち**補償がついたのは2件だけ**、32件が未回収で仕入額の合計¥41,576。
+    //   赤字の最大の穴なので、その場で絞り込めるようにする。
+    const isLostRow = o => /NOT_RECEIPT|ITEM_MISSING|未着|中身/i.test(String(o.retReason || o.reason || ''));
+    const lostAll = rowsAll.filter(o => isLostRow(o) && !isCompRow(o));
+    if (renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
@@ -13841,6 +13847,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (rowsView.length ? rowHtml : `<tr><td colspan="14" class="smd-dim" style="padding:12px">${rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。'}</td></tr>`) +
       `</table></div></div>` +
       pageNav(rowsView.length, retPer, retPage);
+    const lostToggle = lostAll.length ? `<div style="margin:0 4px 8px;padding:6px 10px;background:#fff6f5;border:1px solid #f3d6d3;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <b style="font-size:12px;color:#b3261e">🚨 補償の取りこぼし ${lostAll.length}件</b>
+      <span class="smd-dim" style="font-size:11px">荷物未着・中身なしなのに<b>補償が入っていない</b>ものです。SLS+半額保証の対象なので、Shopeeへ申請すれば取り戻せる可能性があります。</span>
+      <label style="font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;margin-left:auto"><input type="checkbox" id="ret-lostonly" ${renderReturns._lostOnly === true ? 'checked' : ''}>これだけ表示</label>
+    </div>` : '';
     const cxlToggle = (rtab === 'refund') ? `<div style="margin:0 4px 8px"><label style="font-size:12px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:5px" title="返金リクエストが取消(CANCELLED)された行＝買い手が申請を取り消した＝存在しないリクエスト。既定では隠しています"><input type="checkbox" id="ret-showcxl" ${renderReturns._showCxl === true ? 'checked' : ''}>🚫取消された返金リクエストも表示${cxlHidden ? `<span class="smd-dim">（${cxlHidden}件を非表示中）</span>` : ''}</label>
         <span style="font-size:11px;color:#5a6b8c;margin-left:16px" id="ret-legend">行の色：<span style="display:inline-block;width:11px;height:11px;background:#f2fbf5;border:1px solid #bfe5cc;border-radius:3px;vertical-align:-1px"></span> 補償が入った　<span style="display:inline-block;width:11px;height:11px;background:#fdf3f2;border:1px solid #f0cfcb;border-radius:3px;vertical-align:-1px;margin-left:8px"></span> 返品リクエスト</span></div>` : '';
     // 列でしぼり込むバー（正式リクエストのタブ以外で出す）
@@ -13862,7 +13873,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (rtab === 'formal'
         ? formalBlock
         : rtab === 'refund'
-          ? (analysisCard + compCard + adjCard + addTool + cxlToggle + filterBar + tableBlock)
+          ? (analysisCard + compCard + adjCard + addTool + lostToggle + cxlToggle + filterBar + tableBlock)
           : (addTool + filterBar + tableBlock));
     { const bind = (id, key) => { const el = document.getElementById(id); if (!el) return;
         el.addEventListener('change', () => { renderReturns._f[key] = el.value; renderReturns._page = 1; renderReturns(); }); };
@@ -13907,6 +13918,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const c = body.querySelector('#ret-showcanc'); if (c) c.addEventListener('change', () => { renderReturns._showCanc = c.checked; renderReturns._page = 1; renderReturns(); }); }
     body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
     { const cx = body.querySelector('#ret-showcxl'); if (cx) cx.addEventListener('change', () => { renderReturns._showCxl = cx.checked; renderReturns._page = 1; renderReturns(); }); }
+    { const lo = body.querySelector('#ret-lostonly'); if (lo) lo.addEventListener('change', () => { renderReturns._lostOnly = lo.checked; renderReturns._page = 1; renderReturns(); }); }
     wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
@@ -14752,6 +14764,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '💴 <b>母数の内訳に「仕入れいくら → 手取りいくら」を出しました</b>。駿河屋の<b>中古最安</b>を仕入れ額として、PHで出したときの手取り（重量150gの目安）をカードに <code>¥590 →+1,120</code> の形で表示します。版違いが複数ある作品は<b>一番安いもの</b>を代表にします（仕入れの下限が見える）。並べ替えに<b>仕入れが安い順／高い順／手取りが大きい順</b>を追加しました。出すかどうかをその場で判断できます。',
       '🧯 <b>【重要】ダウンロード専売の除外が効きすぎていたのを是正</b>。Wikidataの流通形態で「デジタルのみ」を落とすと、<b>Switchが7,131→1,416（5,715件が消失）</b>・PS4 6,073→1,647・PS5 2,981→844 になっていました。現行機は<b>パッケージ版があっても配信のことしか書かれていない</b>ためです（PSPでは100件程度しか落ちず気づけませんでした）。マスタからは落とさず印だけ付け、<b>物理かどうかは「駿河屋に商品があるか」で判定</b>します（中古で流通している＝物理、が一番確かなため）。内訳に <b>🏪駿河屋にあるものだけ</b> の絞り込みを追加しました。',
       '🏪 <b>駿河屋のハード別一覧を取り込めるようにしました</b>（母数の内訳）。1件ずつ検索する方式は<b>1件7秒</b>でPSP全部に2.5時間・Switchに14時間かかり実用外でした。カテゴリ一覧なら<b>1ページ21件</b>＝20倍速く、<b>版違い（廉価版・Best版）と中古相場</b>も同時に手に入ります（Wikidataに無かった部分）。取り込んだ一覧から画像を一気に当てます。経路はブリッジ＝本人のブラウザ（GASのIPだと駿河屋は中身を返しません）。カテゴリID：Switch 20038／PS5 20039／PS4 20036／PS3 20001／PS2 20002／PS1 20004／PSP 20103／Vita 20102／DS 20101／3DS 20100 ほか全機種。',
+      '🚨 <b>補償の取りこぼしを見えるようにしました</b>（返品・キャンセル）。実測で<b>荷物未着・中身なし41件のうち、補償が入ったのは2件だけ</b>——<b>32件・仕入額合計¥41,576が未回収</b>でした（BR 22件）。SLS+半額保証の対象なので申請すれば取り戻せる可能性があります。赤字120件・損失¥201,858の最大の穴がここです。返品ページ上部に件数を出し、「これだけ表示」で絞れます。',
       '📜 <b>明細が多いカタログを開いても、他の出品が押し流されないようにしました</b>（D3）。明細が<b>20件を超えるときだけ</b>、その明細の並びを枠の中でスクロールさせます（最大60vh）。100明細のカタログを開いて一覧が縦に伸びきる問題が解消します。件数も上に出ます。',
       '💾 <b>変更が無くても保存できるようにしました</b>（C11）。これまで「変更なし」で止まっていたため、<b>Shopee側で勝手に変わった値（在庫を0にされた等）を戻せません</b>でした。同じ値でも確認ダイアログの上で押し込めます（黙ってやらず「同じ値です」と伝えます）。',
       '🧯 <b>【重要】明細名の上限を20字と誤って切っていたのを是正（→30字）</b>。実データで確認すると<b>軸ごとに割った最長が30字・21字以上が7,896件</b>ありました。過去の改修履歴にも「バリエ名上限を20→30字に是正」と残っており、<b>私がそれを見落として再び20字にしていました</b>。必要のない切り詰めをしていたことになります。',
