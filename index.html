@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '💴 <b>母数の内訳に「仕入れいくら → 手取りいくら」を出しました</b>。駿河屋の<b>中古最安</b>を仕入れ額として、PHで出したときの手取り（重量150gの目安）をカードに <code>¥590 →+1,120</code> の形で表示します。版違いが複数ある作品は<b>一番安いもの</b>を代表にします（仕入れの下限が見える）。並べ替えに<b>仕入れが安い順／高い順／手取りが大きい順</b>を追加しました。出すかどうかをその場で判断できます。',
       '🧯 <b>【重要】ダウンロード専売の除外が効きすぎていたのを是正</b>。Wikidataの流通形態で「デジタルのみ」を落とすと、<b>Switchが7,131→1,416（5,715件が消失）</b>・PS4 6,073→1,647・PS5 2,981→844 になっていました。現行機は<b>パッケージ版があっても配信のことしか書かれていない</b>ためです（PSPでは100件程度しか落ちず気づけませんでした）。マスタからは落とさず印だけ付け、<b>物理かどうかは「駿河屋に商品があるか」で判定</b>します（中古で流通している＝物理、が一番確かなため）。内訳に <b>🏪駿河屋にあるものだけ</b> の絞り込みを追加しました。',
       '🏪 <b>駿河屋のハード別一覧を取り込めるようにしました</b>（母数の内訳）。1件ずつ検索する方式は<b>1件7秒</b>でPSP全部に2.5時間・Switchに14時間かかり実用外でした。カテゴリ一覧なら<b>1ページ21件</b>＝20倍速く、<b>版違い（廉価版・Best版）と中古相場</b>も同時に手に入ります（Wikidataに無かった部分）。取り込んだ一覧から画像を一気に当てます。経路はブリッジ＝本人のブラウザ（GASのIPだと駿河屋は中身を返しません）。カテゴリID：Switch 20038／PS5 20039／PS4 20036／PS3 20001／PS2 20002／PS1 20004／PSP 20103／Vita 20102／DS 20101／3DS 20100 ほか全機種。',
       '✂ <b>明細名が20字で意味を壊さないようにしました</b>。実測で <code>Atari Classics Evolved</code> が <code>Atari Classics Evolv</code> と<b>単語の途中で切れて</b>いました。①削れる語を先に落とす（<code>The</code>／<code>- Special Edition</code>／<code>Volume→Vol</code> など）②それでも長ければ<b>単語の切れ目で切る</b>。カードに <b>✂20字超</b> と入る名前を出し、追加前の確認にも一覧で出します。<b>✂20字超を外す</b>で、名前を決めてから入れる運用もできます。',
@@ -21606,8 +21607,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try {
         lst.sgRows = lst.sgRows || {};
         if (!lst.sgRows[hw]) { const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw)); lst.sgRows[hw] = ((g && g[0] && g[0].v) || {}).rows || []; }
+        // ★商品ID・中古相場・発売日をまとめて引けるようにする（相場は仕入れ判断にそのまま使う）
         const idx = {};
-        (lst.sgRows[hw] || []).forEach(r2 => { const k2 = tmKey(r2.t); if (k2 && !idx[k2]) idx[k2] = r2.id; });
+        (lst.sgRows[hw] || []).forEach(r2 => {
+          const k2 = tmKey(r2.t); if (!k2) return;
+          const cur = idx[k2];
+          // 同じ作品で版違いが複数ある時は【一番安いもの】を代表にする＝仕入れの下限が見える
+          if (!cur || (r2.p && (!cur.p || r2.p < cur.p))) idx[k2] = { id: r2.id, p: r2.p || 0, d: r2.d || '', t: r2.t };
+        });
         lst._sgIdx = lst._sgIdx || {}; lst._sgIdx[hw] = idx;
       } catch (_) {}
       if (document.getElementById('tm-detail')) renderTitleDetailImgs(box);
@@ -21664,7 +21671,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const q = el.dataset.q;
       // ★駿河屋の一覧から当たればそれを使う（取り込み済みなら検索しない＝速い）
       let sid = (lst.tmImg || {})[q];
-      if (sid === undefined) { const hit = idx[tmKey(el.dataset.t || q)]; if (hit) sid = hit; }
+      if (sid === undefined) { const hit = idx[tmKey(el.dataset.t || q)]; if (hit) sid = hit.id; }
       if (sid === undefined || el.querySelector('img')) return;
       if (!sid) { el.textContent = '画像なし'; el.style.color = '#c9c9c9'; el.style.fontSize = '10px'; return; }
       el.innerHTML = '<img src="https://www.suruga-ya.jp/database/photo.php?shinaban=' + esc(sid) + '&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display=\'none\';this.parentElement.textContent=\'画像なし\';this.parentElement.style.color=\'#c9c9c9\';this.parentElement.style.fontSize=\'10px\'">';
@@ -21771,6 +21778,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (btn) { btn.disabled = false; btn.textContent = '▶ 在庫0で明細を追加'; }
   }
 
+  // 駿河屋の中古最安から「PHで出したときの手取り(円)」。並べ替えとカード表示で使う。
+  //   ★重量は150g（ソフト1本）で試算。実際の重量は出す時に入れ直す前提の**目安**。
+  const _tmProfCache = new Map();
+  function tmProfit(x) {
+    if (!x || !x.sgp) return -1e9;
+    if (_tmProfCache.has(x.sgp)) return _tmProfCache.get(x.sgp);
+    let v = -1e9;
+    try { const lp = Math.round(priceLocalFor('PH', x.sgp, { weightG: 150 })); v = Math.round((priceProfitFor('PH', x.sgp, lp, { weightG: 150 }) || {}).profit || 0); } catch (_) {}
+    _tmProfCache.set(x.sgp, v);
+    return v;
+  }
+
   async function renderTitleDetail(hw, own) {
     const box = document.getElementById('tm-detail'); if (!box) return;
     box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
@@ -21787,7 +21806,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const list = rows.map(r => Object.assign({}, r, {
       has: tmHas(r, mineN, mineArr),
       q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
-    })).map(x => Object.assign(x, { sg: !!(((lst._sgIdx || {})[hw] || {})[tmKey(x.ja)] || ((lst._sgIdx || {})[hw] || {})[tmKey(x.en)]) }));
+    })).map(x => { const g = ((lst._sgIdx || {})[hw] || {}); const hit = g[tmKey(x.ja)] || g[tmKey(x.en)]; return Object.assign(x, { sg: !!hit, sgp: hit ? hit.p : 0, sgt: hit ? hit.t : '' }); });
     const hasN = list.filter(x => x.has).length;
     lst.tmFil = lst.tmFil || 'no';
     // 🏪 駿河屋にあるか＝**中古で流通している物理ソフト**の一番確かな印。
@@ -21814,7 +21833,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       yold: (a, b) => String(a.y || '9999').localeCompare(String(b.y || '9999')),
       ja: (a, b) => (a.ja ? 0 : 1) - (b.ja ? 0 : 1) || kana(a.ja).localeCompare(kana(b.ja), 'ja'),
       en: (a, b) => (a.en ? 0 : 1) - (b.en ? 0 : 1) || String(a.en || '').toLowerCase().localeCompare(String(b.en || '').toLowerCase()),
-      img: (a, b) => (a.img ? 0 : 1) - (b.img ? 0 : 1) || String(b.y || '').localeCompare(String(a.y || ''))
+      img: (a, b) => (a.img ? 0 : 1) - (b.img ? 0 : 1) || String(b.y || '').localeCompare(String(a.y || '')),
+      plow: (a, b) => (a.sgp ? 0 : 1) - (b.sgp ? 0 : 1) || (a.sgp || 0) - (b.sgp || 0),
+      phigh: (a, b) => (a.sgp ? 0 : 1) - (b.sgp ? 0 : 1) || (b.sgp || 0) - (a.sgp || 0),
+      prof: (a, b) => (tmProfit(b) - tmProfit(a))
     };
     shown2.sort(cmp[lst.tmSort] || cmp.ynew);
     const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">${label} ${n}</button>`;
@@ -21830,6 +21852,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${x.ja && x.en ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.en)}</div>` : ''}
       <div style="display:flex;align-items:center;gap:5px;margin-top:auto">
         <span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;background:${x.has ? '#1a7f37' : '#fdecea'};color:${x.has ? '#fff' : '#b3261e'}">${x.has ? '出している' : 'まだ'}</span>
+        ${x.sgp ? (() => {
+          // 仕入れ＝駿河屋の中古最安。そこからPHの出品価格と手取りを出す＝出すかどうかをその場で判断できる
+          let ph = 0, prof = 0;
+          try { const lp = priceLocalFor('PH', x.sgp, { weightG: 150 }); ph = Math.round(lp); const pr = priceProfitFor('PH', x.sgp, ph, { weightG: 150 }); prof = Math.round(pr.profit || 0); } catch (_) {}
+          return `<span title="${av('駿河屋の中古最安 ¥' + Number(x.sgp).toLocaleString() + '（' + x.sgt + '）' + (ph ? '\nPHで出すなら ₱' + ph + '／手取り ¥' + prof + '（重量150gで試算）' : ''))}" style="font-size:9.5px;font-weight:700;color:${prof > 0 ? '#1a7f37' : '#c30d23'}">¥${Number(x.sgp).toLocaleString()}${prof ? ' <span style="opacity:.75">→' + (prof > 0 ? '+' : '') + prof + '</span>' : ''}</span>`;
+        })() : ''}
         ${x.y ? `<span class="smd-dim" style="font-size:9.5px">${esc(x.y)}</span>` : ''}
         <a href="https://www.suruga-ya.jp/search?search_word=${encodeURIComponent(x.ja || x.en || '')}" target="_blank" rel="noopener" style="margin-left:auto;color:#c30d23;font-size:9.5px;font-weight:700;text-decoration:none">駿河屋</a>
         <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.ja || x.en || '')}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
@@ -21862,7 +21890,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)}
         ${sgOn ? `<label style="font-size:11px;display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="駿河屋に商品があるもの＝中古で流通している物理ソフト。ダウンロード専売やパッケージが出ていないものを外せます"><input type="checkbox" id="tm-physonly"${lst.tmPhys ? ' checked' : ''}> 🏪 駿河屋にあるものだけ</label>` : '<span class="smd-dim" style="font-size:10.5px">🏪 駿河屋の一覧を取り込むと「物理ソフトだけ」に絞れます</span>'}
         <select id="tm-sort" style="margin-left:auto;padding:3px 6px;border:1px solid #ddd;border-radius:6px;font-size:11px">
-          ${[['ynew', '発売が新しい順'], ['yold', '発売が古い順'], ['ja', 'あいうえお順'], ['en', 'A→Z順'], ['img', '画像があるものを先に']].map(o => `<option value="${o[0]}"${lst.tmSort === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}
+          ${[['ynew', '発売が新しい順'], ['yold', '発売が古い順'], ['ja', 'あいうえお順'], ['en', 'A→Z順'], ['img', '画像があるものを先に'], ['plow', '仕入れが安い順（駿河屋）'], ['phigh', '仕入れが高い順（駿河屋）'], ['prof', '手取りが大きい順']].map(o => `<option value="${o[0]}"${lst.tmSort === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}
         </select>
         <input id="tm-q" value="${av(lst.tmQ || '')}" placeholder="タイトルで絞り込み" style="padding:3px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px;min-width:170px">
       </div>
