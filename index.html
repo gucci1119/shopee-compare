@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🔁 <b>二重出品（同じ明細名を別カタログに出している）を出せるようにしました</b>（母数の内訳）。実測で <b>2,228件</b>（BR 674／VN 526／TH 317／SG 306／PH 203／TW 175／MY 27）。同じ商品が検索結果に並ぶと<b>片方が売れ残ります</b>。既存の「🔁似た出品を探す」は<b>カタログのタイトル</b>で比べますが、こちらは<b>明細名</b>で比べる別の切り口です。色名や注記（white／available only on amazon 等）は同名でも別商品なので除いています。',
       '🔧 <b>本体・コントローラの分類を実データで直しました</b>。「プレイステーション本体(SCPH-7500)（箱・ケース不備）」が<b>ケース扱い</b>、「本体(SCPH-7000/箱・説明書無し)」が<b>紙もの扱い</b>になっていました（状態の注記に反応していた）。<b>状態の注記を先に落としてから、本体を最優先で判定</b>するようにし、さらに「本体収納バッグ」のように<b>別の商品の説明として「本体」が出る</b>場合は本体としないようにしました。PS1実測：ソフト5,110／コントローラ117／メモカ77／本体52。',
       '🎮 <b>本体・コントローラ・メモリーカード等も母数に入れました</b>。駿河屋の一覧からハードを除いていたのをやめました。ただし<b>駿河屋の区分は「ソフト／ハード」の2つだけ</b>で、ハードの中に本体もコントローラもポーチも混ざっているため、商品名から <b>🎮本体／🕹コントローラ／💾メモリ・カード／🔌ケーブル・充電／🧳ケース・保護／📦その他</b> に分けて件数つきで切り替えられるようにしました。本体類は作品マスタに載らないので、駿河屋の商品をそのまま安い順に並べ、出しているかどうかも突き合わせます。',
       '🎮 <b>本体・周辺機器も母数に入れました</b>（メモリーカード・アダプタ・ケーブル含む）。駿河屋の一覧から<b>ハード本体と周辺機器を除いていたのをやめ</b>、区分を残して <b>💿ソフト／🎮本体／🕹周辺機器</b> で切り替えられるようにしました。本体・周辺機器は<b>作品マスタ（Wikidata）に載らない</b>ので、駿河屋で売られているものをそのまま安い順に並べ、自分が出しているかどうかも突き合わせます。Switchはカテゴリ約5,000に対しソフトが2,068＝<b>残り約3,000が本体・周辺機器</b>でした。',
@@ -21526,6 +21527,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return rows;
   }
 
+  // 🔁 同じ国の中で、同じ明細名が【別のカタログ】にある＝同じ商品を二重に出している疑い。
+  //   ★既存の「似た出品を探す」は**カタログのタイトル**で比べる。こちらは**明細名**で比べる別の切り口。
+  //   ★色名や注記（white／available only on amazon 等）は同名でも別商品なので除く。
+  //     実測で弾かないとPHの上位が color だらけになる（2,511件→2,228件）。
+  const DUP_GENERIC = /^(black|white|red|blue|green|yellow|pink|purple|violet|gray|grey|silver|gold|navy|orange|brown|clear|multi|set|used|new|other|none|na|随時|色|ランダム)$|^(available only on|no amazon only|amazon only)/i;
+  function tmDupList(hw) {
+    const per = {};
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      if (hw && hwOf((r.name || '') + ' ' + (r.parent_sku || '')) !== hw) return;
+      (r.models || []).forEach(m => {
+        if (!m || m.ghost) return;
+        const raw = String(m.n || '').trim();
+        const k = tmKey(raw);
+        if (!k || k.length < 6 || DUP_GENERIC.test(raw) || DUP_GENERIC.test(k)) return;
+        per[cc] = per[cc] || {};
+        (per[cc][k] = per[cc][k] || []).push({ item_id: r.item_id, name: r.name || '', opt: raw });
+      });
+    }));
+    const out = [];
+    Object.keys(per).forEach(cc => Object.keys(per[cc]).forEach(k => {
+      const list = per[cc][k];
+      const items = [...new Set(list.map(x => String(x.item_id)))];
+      if (items.length > 1) out.push({ cc, key: k, opt: list[0].opt, items, rows: list });
+    }));
+    out.sort((a, b) => b.items.length - a.items.length || a.cc.localeCompare(b.cc));
+    return out;
+  }
+
   async function renderTitleMaster() {
     const box = document.getElementById('list-titles'); if (!box) return;
     box.innerHTML = '<div class="smd-dim" style="font-size:12px">読み込み中…</div>';
@@ -21987,6 +22016,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.ja || x.en || '')}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
       </div>
     </div>`;
+    const dups = tmDupList(hw), dupN = dups.length;
+    const dupPanel = () => {
+      if (!dups.length) return '<span class="smd-dim" style="font-size:12px">同じ明細名を二重に出しているものはありません 🎉</span>';
+      const q3 = (lst.tmQ || '').toLowerCase().trim();
+      const show = (q3 ? dups.filter(d => d.opt.toLowerCase().includes(q3)) : dups).slice(0, 120);
+      return `<div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">同じ国の中で、<b>同じ明細名が別のカタログにある</b>ものです（＝同じ商品を二重に出している疑い）。同じ商品が検索結果に並ぶと<b>片方が売れ残ります</b>。色名や注記は同名でも別商品なので除いています。</div>
+        <div style="display:flex;flex-direction:column;gap:5px">${show.map(d => `<div style="border:1px solid #f3d6d3;background:#fffaf9;border-radius:8px;padding:5px 9px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span class="ord-cc" style="background:${(regionByCc(d.cc) || {}).color || '#888'};padding:1px 6px">${esc(d.cc)}</span>
+          <b style="font-size:12px">${esc(d.opt)}</b>
+          <span style="font-size:10.5px;color:#b3261e;font-weight:700">${d.items.length}つのカタログ</span>
+          <span class="smd-dim" style="font-size:10px;flex:1;min-width:200px">${d.rows.slice(0, 3).map(x => esc(String(x.name).slice(0, 34)) + '（' + x.item_id + '）').join(' ／ ')}${d.rows.length > 3 ? ' ほか' + (d.rows.length - 3) : ''}</span>
+        </div>`).join('')}</div>
+        ${dups.length > show.length ? `<div class="smd-dim" style="font-size:10.5px;margin-top:6px">表示は${show.length}件（該当${dups.length}件）</div>` : ''}`;
+    };
     const CAP = 300;
     // 🔗「対応させる」＝マスタに当たらない明細に、候補を並べて本人が押して決める
     const linkPanel = () => {
@@ -22011,7 +22054,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     box.innerHTML = `<div class="tool-card" style="margin:0;max-width:none">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)} の内訳</b>
-        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)}
+        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)} ${seg('dup', '🔁 二重出品', dupN)}
         ${sgOn ? `<label style="font-size:11px;display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="駿河屋に商品があるもの＝中古で流通している物理ソフト。ダウンロード専売やパッケージが出ていないものを外せます"><input type="checkbox" id="tm-physonly"${lst.tmPhys ? ' checked' : ''}> 🏪 駿河屋にあるものだけ</label>` : '<span class="smd-dim" style="font-size:10.5px">🏪 駿河屋の一覧を取り込むと「物理ソフトだけ」に絞れます</span>'}
         ${sgOn ? `<span class="smd-seg" id="tm-kind" style="font-size:11px" title="本体・コントローラも扱うので、区分で切り替えられます">${(() => { const kc = {}; ((lst.sgRows || {})[hw] || []).forEach(r => { const k = sgKindOf(r); kc[k] = (kc[k] || 0) + 1; });
           const hwN = Object.keys(kc).filter(k => k !== 'soft').reduce((a, k) => a + kc[k], 0);
