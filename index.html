@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '🏪 <b>駿河屋のハード別一覧を取り込めるようにしました</b>（母数の内訳）。1件ずつ検索する方式は<b>1件7秒</b>でPSP全部に2.5時間・Switchに14時間かかり実用外でした。カテゴリ一覧なら<b>1ページ21件</b>＝20倍速く、<b>版違い（廉価版・Best版）と中古相場</b>も同時に手に入ります（Wikidataに無かった部分）。取り込んだ一覧から画像を一気に当てます。経路はブリッジ＝本人のブラウザ（GASのIPだと駿河屋は中身を返しません）。カテゴリID：Switch 20038／PS5 20039／PS4 20036／PS3 20001／PS2 20002／PS1 20004／PSP 20103／Vita 20102／DS 20101／3DS 20100 ほか全機種。',
       '✂ <b>明細名が20字で意味を壊さないようにしました</b>。実測で <code>Atari Classics Evolved</code> が <code>Atari Classics Evolv</code> と<b>単語の途中で切れて</b>いました。①削れる語を先に落とす（<code>The</code>／<code>- Special Edition</code>／<code>Volume→Vol</code> など）②それでも長ければ<b>単語の切れ目で切る</b>。カードに <b>✂20字超</b> と入る名前を出し、追加前の確認にも一覧で出します。<b>✂20字超を外す</b>で、名前を決めてから入れる運用もできます。',
       '▶ <b>まだ出していないタイトルを選んで、そのまま明細として追加できるようにしました</b>（母数の内訳）。追加先は<b>そのハードの空き枠があるカタログ</b>から選び、<b>在庫0</b>で登録します——まず枠を押さえて母数を作るための操作なので、売れません。価格は空欄なら<b>そのカタログの平均</b>を入れます（Shopeeは価格なしで明細を作れないため）。仕入れが決まったら価格と在庫を入れ直してください。すでに同じ名前がある明細は自動で除きます。',
       '🔗 <b>マスタに当たらない明細を「対応させる」ようにしました</b>。略称や独自表記（<code>P4G: Persona 4 The Golden</code>、<code>GC:4</code>）は正規化では当たらないので、<b>候補を並べて押すだけで紐づけ</b>られます。<b>機械には確定させません</b>——勝手に紐づけると違う作品を数えて母数が嘘になるためです。一度決めた対応は覚えて<b>全ハード・全国で効きます</b>。内訳の「🔗 対応させる」から。',
@@ -21291,7 +21292,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // マスタ＝app_kv.titles_<hw>（GASがWikidataから取り込む）。自社の数＝listingsの明細を機種で振り分け。
   const TITLE_HW_JA = { switch: 'Nintendo Switch', ps5: 'PlayStation 5', ps4: 'PlayStation 4', ps3: 'PlayStation 3', ps2: 'PlayStation 2', ps1: 'PlayStation', psp: 'PSP', vita: 'PS Vita', ds: 'ニンテンドーDS', '3ds': 'ニンテンドー3DS', wii: 'Wii', wiiu: 'Wii U', gc: 'ゲームキューブ', n64: 'NINTENDO64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'ゲームボーイアドバンス', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'セガサターン', dc: 'ドリームキャスト' };
   // 駿河屋のハード別カテゴリ（版違い＝廉価版/Best版も別商品として持っている。総数の目安）
-  const SURUGA_CAT = { sfc: '20009', fc: '20008', ss: '20014', dc: '20015', md: '20013', gc: '20005', wii: '20000', n64: '20010', wiiu: '20035', ds: '20101', gb: '20105', gba: '20104', '3ds': '20100' };
+  // 駿河屋のハード別カテゴリ。★版違い（廉価版・Best版）を別商品として持っているのが強み。
+  //   1ページ21件・画像と価格つきで並ぶので、1件ずつ検索するより20倍速い。
+  const SURUGA_CAT = {
+    switch: '20038', ps5: '20039', ps4: '20036', ps3: '20001', ps2: '20002', ps1: '20004',
+    psp: '20103', vita: '20102', ds: '20101', '3ds': '20100', wii: '20000', wiiu: '20035',
+    gc: '20005', n64: '20010', sfc: '20009', fc: '20008', gba: '20104', gb: '20105',
+    md: '20013', ss: '20014', dc: '20015'
+  };
   // カタログ名・明細名から機種を当てる。カタログは「PSP Playstation Portable Series…」のように機種名を含む
   const HW_PAT = [
     ['switch', /switch\s*2|nintendo\s*switch|スイッチ/i], ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i],
@@ -21427,6 +21435,43 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     _tmMatching = false;
   }
 
+
+  // ================= 🏪 駿河屋のハード別一覧を取り込む =================
+  // ★なぜ：①画像が1ページで21件ぶん取れる（1件ずつ検索する方式は1件7秒で全然終わらない・実測）
+  //   ②**版違い（廉価版・Best版）を持っている**＝Wikidataに無い部分。本人方針は版違いも別明細で出す
+  //   ③中古の相場が付いてくる＝仕入れ判断にそのまま使える
+  // ★経路はブリッジ（本人のブラウザ）。GAS（GoogleのIP）だと駿河屋は中身を返さない（実測）。
+  // 置き場：app_kv sg_<hw> = { at, n, rows:[{t:商品名, id:商品ID, p:価格}] }
+  async function surugaCrawl(hw, onProg) {
+    const cat = SURUGA_CAT[hw]; if (!cat) throw new Error('この機種は駿河屋のカテゴリが未設定です');
+    const rows = [], seen = new Set();
+    let page = 1, empty = 0;
+    while (page <= 400) {
+      const url = 'https://www.suruga-ya.jp/search?category=' + cat + '&page=' + page + '&restrict=0';
+      let html = '';
+      try { html = String(await bridgeRequest('GET', url, null, { timeout: 25000 })); }
+      catch (e) { throw new Error('駿河屋を取得できません: ' + ((e && e.message) || e)); }
+      if (!/suruga-ya/i.test(html)) throw new Error('駿河屋のページが返ってきません（少し時間を置いてください）');
+      // 1商品 = <a href="…/product/detail/ID"><img …></a> … 商品名は別のaに入る
+      const before = rows.length;
+      const re = /\/product\/detail\/(\d+)[^>]*>([\s\S]{0,300}?)<\/a>/g;
+      let m;
+      while ((m = re.exec(html))) {
+        const id = m[1];
+        const txt = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+        if (!txt || txt.length < 3) continue;             // 画像だけのリンクは飛ばす（商品名が入っている方を採る）
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rows.push({ t: txt.slice(0, 120), id: id });
+      }
+      if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
+      if (onProg) onProg(page, rows.length);
+      page++;
+      await new Promise(r => setTimeout(r, 900));          // 叩きすぎない
+    }
+    return rows;
+  }
+
   async function renderTitleMaster() {
     const box = document.getElementById('list-titles'); if (!box) return;
     box.innerHTML = '<div class="smd-dim" style="font-size:12px">読み込み中…</div>';
@@ -21465,7 +21510,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
           <b style="font-size:15px">📚 母数（ハード別の網羅）</b>
           <span style="font-size:13px">マスタ合計 <b>${num(tot)}</b> ／ 出している <b style="color:#1565c0">${num(totOwn)}</b> ／ <b style="color:#c0392b">空白 ${num(Math.max(0, tot - totOwn))}</b></span>
-          <button class="smd-btn" id="tm-imgclear" style="margin-left:auto;font-size:11px" title="「画像なし」と覚えてしまった分を忘れて、もう一度探し直します（取得に失敗した分が焼き付いた時に使います）">🧹 画像の記憶を消す</button>
+          <button class="smd-btn" id="tm-sg" style="margin-left:auto;font-size:11px;border-color:#c30d23;color:#c30d23;font-weight:700" title="開いているハードについて、駿河屋のカテゴリ一覧を最初から最後までたどって、商品名・画像・商品IDを取り込みます。版違い（廉価版・Best版）も入ります">🏪 駿河屋の一覧を取り込む</button>
+          <button class="smd-btn" id="tm-imgclear" style="font-size:11px" title="「画像なし」と覚えてしまった分を忘れて、もう一度探し直します（取得に失敗した分が焼き付いた時に使います）">🧹 画像の記憶を消す</button>
           <button class="smd-btn" id="tm-fetch" style="font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
         </div>
         <div style="overflow-x:auto"><table class="smd-table" style="width:100%;font-size:12px">
@@ -21480,6 +21526,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     if (lst.tmOpen) renderTitleDetail(lst.tmOpen, own);
     tmMatchAll(m, own);
+    { const sg = document.getElementById('tm-sg');
+      if (sg) sg.addEventListener('click', async () => {
+        const hw = lst.tmOpen;
+        if (!hw) { alert('先にハードの行をクリックして開いてください'); return; }
+        if (state.mode !== 'live') { alert('この取り込みはブラウザ拡張（ブリッジ）を使います。Shopeeにログインした状態で開いてください。'); return; }
+        if (!confirm(TITLE_HW_JA[hw] + ' の駿河屋一覧を取り込みます。\n\n1ページ21件ずつ、最後までたどります（数分かかります）。\n読み取りだけで、どこにも書き込みません。よろしいですか？')) return;
+        sg.disabled = true;
+        try {
+          const rows = await surugaCrawl(hw, (pg, n) => { sg.textContent = '🏪 ' + pg + 'ページ目 / ' + n + '件'; });
+          if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: { at: new Date().toISOString(), hw, n: rows.length, rows }, updated_at: new Date().toISOString() }], 'k');
+          lst.sgRows = lst.sgRows || {}; lst.sgRows[hw] = rows;
+          alert('🏪 ' + TITLE_HW_JA[hw] + '：' + rows.length + '件を取り込みました（版違い込み）。\n\nマスタ（Wikidata）は作品単位なので、こちらの方が多く出ます。');
+          renderTitleMaster();
+        } catch (e) { alert('取り込みに失敗: ' + ((e && e.message) || e)); }
+        sg.disabled = false; sg.textContent = '🏪 駿河屋の一覧を取り込む';
+      }); }
     { const cb = document.getElementById('tm-imgclear');
       if (cb) cb.addEventListener('click', async () => {
         if (!confirm('「画像なし」と覚えた分を忘れて、探し直せるようにします。よろしいですか？')) return;
@@ -21520,11 +21582,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!lst.tmImgLoaded[hw]) {
       lst.tmImgLoaded[hw] = 1;
       try { const r = await sbGetAll('app_kv', 'select=v&k=eq.timg_' + encodeURIComponent(hw)); Object.assign(lst.tmImg, (r && r[0] && r[0].v) || {}); } catch (_) {}
+      // ★駿河屋の一覧を取り込んであれば、そこから**一気に**当てる（1件ずつ検索するより桁違いに速い）
+      try {
+        lst.sgRows = lst.sgRows || {};
+        if (!lst.sgRows[hw]) { const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw)); lst.sgRows[hw] = ((g && g[0] && g[0].v) || {}).rows || []; }
+        const idx = {};
+        (lst.sgRows[hw] || []).forEach(r2 => { const k2 = tmKey(r2.t); if (k2 && !idx[k2]) idx[k2] = r2.id; });
+        lst._sgIdx = lst._sgIdx || {}; lst._sgIdx[hw] = idx;
+      } catch (_) {}
       if (document.getElementById('tm-detail')) renderTitleDetailImgs(box);
     }
     if (_tmBusy) return;
     const need = [...box.querySelectorAll('.tm-img')]
-      .filter(el => { const q = el.dataset.q; return q && lst.tmImg[q] === undefined && el.getBoundingClientRect().top < window.innerHeight + 600; })
+      .filter(el => { const q = el.dataset.q; if (!q || lst.tmImg[q] !== undefined) return false;
+        if (((lst._sgIdx || {})[hw] || {})[tmKey(el.dataset.t || q)]) return false;   // 駿河屋の一覧から当たっている分は検索しない
+        return el.getBoundingClientRect().top < window.innerHeight + 600; })
       .slice(0, 20).map(el => el.dataset.q);
     if (!need.length) return;
     _tmBusy = true;
@@ -21567,8 +21639,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // 画像だけ差し替える（並び替えや絞り込みを崩さない）
   function renderTitleDetailImgs(box) {
+    const idx = ((lst._sgIdx || {})[lst.tmOpen] || {});
     box.querySelectorAll('.tm-img').forEach(el => {
-      const q = el.dataset.q, sid = (lst.tmImg || {})[q];
+      const q = el.dataset.q;
+      // ★駿河屋の一覧から当たればそれを使う（取り込み済みなら検索しない＝速い）
+      let sid = (lst.tmImg || {})[q];
+      if (sid === undefined) { const hit = idx[tmKey(el.dataset.t || q)]; if (hit) sid = hit; }
       if (sid === undefined || el.querySelector('img')) return;
       if (!sid) { el.textContent = '画像なし'; el.style.color = '#c9c9c9'; el.style.fontSize = '10px'; return; }
       el.innerHTML = '<img src="https://www.suruga-ya.jp/database/photo.php?shinaban=' + esc(sid) + '&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display=\'none\';this.parentElement.textContent=\'画像なし\';this.parentElement.style.color=\'#c9c9c9\';this.parentElement.style.fontSize=\'10px\'">';
@@ -21713,7 +21789,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">${label} ${n}</button>`;
     const card = x => `<div style="border:1px solid ${x.has ? '#cfe6d6' : '#e6e6e6'};background:${x.has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;position:relative">
       ${x.has ? '' : `<label style="position:absolute;top:4px;left:4px;z-index:2;background:rgba(255,255,255,.9);border-radius:4px;padding:0 3px;cursor:pointer"><input type="checkbox" class="tm-pick" data-en="${av(x.en || '')}" data-ja="${av(x.ja || '')}"${(lst.tmPick || new Set()).has(x.en || x.ja) ? ' checked' : ''}></label>`}
-      <div class="tm-img" data-q="${av(x.q)}" style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+      <div class="tm-img" data-q="${av(x.q)}" data-t="${av(x.ja || x.en || '')}" style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
         ${(() => { const sid = (lst.tmImg || {})[x.q]; const u = sid ? ('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m') : x.img;
           return u ? `<img src="${esc(u)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">`
             : (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>'); })()}
