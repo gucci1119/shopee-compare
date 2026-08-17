@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '▶ <b>まだ出していないタイトルを選んで、そのまま明細として追加できるようにしました</b>（母数の内訳）。追加先は<b>そのハードの空き枠があるカタログ</b>から選び、<b>在庫0</b>で登録します——まず枠を押さえて母数を作るための操作なので、売れません。価格は空欄なら<b>そのカタログの平均</b>を入れます（Shopeeは価格なしで明細を作れないため）。仕入れが決まったら価格と在庫を入れ直してください。すでに同じ名前がある明細は自動で除きます。',
       '🔗 <b>マスタに当たらない明細を「対応させる」ようにしました</b>。略称や独自表記（<code>P4G: Persona 4 The Golden</code>、<code>GC:4</code>）は正規化では当たらないので、<b>候補を並べて押すだけで紐づけ</b>られます。<b>機械には確定させません</b>——勝手に紐づけると違う作品を数えて母数が嘘になるためです。一度決めた対応は覚えて<b>全ハード・全国で効きます</b>。内訳の「🔗 対応させる」から。',
       '🔗 <b>母数の「出している」をマスタと突き合わせた実数にしました</b>。これまでは明細名をそのまま数えており、<b>綴りが違うと同じ作品を二重に数えて</b>いました（実測5,431件は多め）。突合キーを強くして、<b>全角半角・記号・アクセント記号（Pokémon→Pokemon）・機種名・版名（Best/廉価版）・状態語（Used/Japan）</b>を落として比べます。ハードごとに順に計算し、出たそばから表を更新します。',
       '🖼 <b>母数の内訳に商品画像を出せるようにしました（駿河屋）</b>。Wikidataのパッケージ画像は<b>実測2%しか無く</b>（箱絵は著作物なのでCommonsに載らない）使い物にならなかったため、駿河屋の商品写真を使います。<b>画面に見えているカードの分だけ・20件ずつ・間隔を空けて</b>取り、一度引いたら覚えます（ヤマダでIP制限を踏んだ教訓）。検索語は<b>日本語名＋機種</b>です。',
@@ -21566,6 +21567,69 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
 
+  // 📚 追加先の候補＝そのハードのカタログのうち、明細の空きがあるもの（空きが多い順）
+  function tmTargets() {
+    const hw = lst.tmOpen; if (!hw) return [];
+    const out = [];
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      if (hwOf((r.name || '') + ' ' + (r.parent_sku || '')) !== hw) return;
+      const used = (r.models || []).length;           // 空き枠は【中身のない枠(ghost)も含めて】数える＝Shopeeの上限と同じ
+      const free = 100 - used;
+      if (free > 0 && (r.models || []).length) out.push({ cc, item_id: r.item_id, name: r.name || '', free });
+    }));
+    out.sort((a, b) => b.free - a.free);
+    return out.slice(0, 40);
+  }
+
+
+  // ▶ 選んだ未出品タイトルを、指定カタログに【在庫0】で明細として足す。
+  //   ★在庫0＝売れない。まず枠を押さえて母数を作るための操作（レア物や仕入未定のもの）。
+  //   価格は空欄なら**そのカタログの平均**を入れる。Shopeeは価格なしで明細を作れないため。
+  async function tmAddPicked(hw, own) {
+    const sel = document.getElementById('tm-picktgt'); const v = sel && sel.value;
+    if (!v) { alert('追加先のカタログがありません（空き枠のあるカタログが要ります）'); return; }
+    const [cc, itemId] = v.split('|');
+    const names = [...(lst.tmPick || new Set())].filter(Boolean);
+    if (!names.length) { alert('タイトルを選んでください'); return; }
+    const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+    if (!row) { alert('カタログが見つかりません'); return; }
+    const free = 100 - (row.models || []).length;
+    if (names.length > free) { alert('選んだ' + names.length + '件に対して、このカタログの空きは' + free + '件です。減らすか、別のカタログを選んでください。'); return; }
+    const sidCat = shopIdOfListing(cc, itemId) || row.shop_id;
+    if (!sidCat) { alert('この出品のshop_idが分かりません（🔄最新に更新で入ります）'); return; }
+    if (!settings.writeToken) { alert('⚙️設定のWRITE_TOKENが必要です'); return; }
+    const pin = document.getElementById('tm-pickprice');
+    let price = parseFloat((pin && pin.value || '').trim());
+    if (!(price > 0)) {
+      const ps = (row.models || []).map(m => Number(m.price)).filter(x => x > 0);
+      price = ps.length ? Math.round(ps.reduce((a, b) => a + b, 0) / ps.length) : 0;
+    }
+    if (!(price > 0)) { alert('価格が決められません。価格欄に数字を入れてください。'); return; }
+    const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
+    const dup = new Set((row.models || []).map(m => tmKey(m.n)));
+    const items = names.filter(n => !dup.has(tmKey(n))).map(n => ({ option: String(n).slice(0, 20), price: price, stock: 0, sku: '', image: '' }));
+    if (!items.length) { alert('選んだものは、すべてこのカタログに既にあります'); return; }
+    if (!confirm('書込先: ' + gw.summary + '\n\n' + cc + ' 「' + String(row.name || '').slice(0, 30) + '」に\n'
+      + items.length + '件を【在庫0・価格' + price + '】で明細として追加します。\n\n'
+      + '※Shopeeの明細名は20字までなので、長い名前は切り詰めます。\n※在庫0なので売れません。仕入れが決まったら価格と在庫を入れ直してください。\n\nよろしいですか？')) return;
+    const btn = document.getElementById('tm-pickadd'); if (btn) { btn.disabled = true; btn.textContent = '追加中…'; }
+    try {
+      const kv = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
+      await sbUpsert('app_kv', [{ k: kv, v: { items }, updated_at: new Date().toISOString() }]);
+      const job = await jobRemoteCreate('addvar', '明細をまとめて追加（母数）', cc + ' / ' + String(row.name || itemId).slice(0, 24) + '（' + items.length + '件）', { cc, item_id: itemId, shop_id: sidCat });
+      JOB_MIRROR[job] = (st) => {
+        if (st && st.status === 'done' && !JOB_MIRROR['_done' + job]) { JOB_MIRROR['_done' + job] = 1; try { refreshOneListing(cc, itemId, sidCat); } catch (_) {} delete JOB_MIRROR[job]; }
+      };
+      jobPollStart();
+      gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv, job: job }, 600000))
+        .catch(e => jobRemoteFail(job, e && e.message));
+      try { logAct('出品', '明細追加(母数から)', row.name || '', cc + ' ' + items.length + '件・在庫0・価格' + price); } catch (_) {}
+      toast('▶ しごとに積みました（' + items.length + '件）。進み具合は🗂しごとセンターで見られます');
+      lst.tmPick.clear(); renderTitleDetail(hw, own);
+    } catch (e) { alert('追加に失敗: ' + apiErrJa((e && e.message) || e)); }
+    if (btn) { btn.disabled = false; btn.textContent = '▶ 在庫0で明細を追加'; }
+  }
+
   async function renderTitleDetail(hw, own) {
     const box = document.getElementById('tm-detail'); if (!box) return;
     box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
@@ -21654,7 +21718,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <b style="font-size:12px">選んだ <span id="tm-pickn">${(lst.tmPick || new Set()).size}</span> 件</b>
         <button class="smd-btn" id="tm-pickclear" style="font-size:11px">選択を解除</button>
         <button class="smd-btn" id="tm-pickcopy" style="font-size:11px" title="明細名として使える形でコピーします（英語名を優先）">📋 名前をコピー</button>
-        <span class="smd-dim" style="font-size:10.5px;margin-left:auto">コピーした名前は ✎編集 の「📋まとめて追加」に貼れます。仕入元が無いものは<b>在庫0</b>で出す前提です</span>
+        <span style="font-size:11px">追加先</span>
+        <select id="tm-picktgt" style="padding:3px 6px;border:1px solid #cfe0f7;border-radius:6px;font-size:11px;max-width:320px">${tmTargets().map(t => `<option value="${av(t.cc + '|' + t.item_id)}">${esc(t.cc)} ${esc(nm(t.name, '220px', true))} — 空き${t.free}</option>`).join('') || '<option value="">空きのあるカタログがありません</option>'}</select>
+        <span style="font-size:11px">価格</span>
+        <input id="tm-pickprice" placeholder="自動" style="width:76px;padding:3px 6px;border:1px solid #cfe0f7;border-radius:6px;font-size:11px;text-align:right" title="空欄なら、そのカタログの平均価格を入れます。売る気になった時に入れ直す前提です">
+        <button class="smd-btn" id="tm-pickadd" style="font-size:11px;border-color:#1a7f37;color:#1a7f37;font-weight:700" title="選んだタイトルを、そのカタログに【在庫0】で明細として足します。枠だけ先に確保する使い方です">▶ 在庫0で明細を追加</button>
+        <span class="smd-dim" style="font-size:10.5px;width:100%">仕入れが決まった時に価格と在庫を入れ直します。<b>在庫0なので売れません</b>（出品枠は明細では消費しません）。名前のコピーは ✎編集 の「📋まとめて追加」にも貼れます</span>
       </div>`}
     </div>`;
     box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
@@ -21672,6 +21741,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       pickSync();
     }));
     { const c1 = document.getElementById('tm-pickclear'); if (c1) c1.addEventListener('click', () => { lst.tmPick.clear(); renderTitleDetail(hw, own); }); }
+    { const ad = document.getElementById('tm-pickadd'); if (ad) ad.addEventListener('click', () => tmAddPicked(hw, own)); }
     { const c2 = document.getElementById('tm-pickcopy'); if (c2) c2.addEventListener('click', () => {
         try { copyText([...lst.tmPick].join('\n')); toast('📋 ' + lst.tmPick.size + '件の名前をコピーしました'); } catch (_) {}
       }); }
