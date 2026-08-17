@@ -21531,8 +21531,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ★GAS（GoogleのIP）からは駿河屋の商品IDが1件も取れなかった（実測20件すべて空）。
     //   同じURLを手元のPCから叩くと普通に取れるので、**ブリッジ＝本人のブラウザ**から取りに行く。
     //   ヤマダと同じ経路。1件ずつ・1.2秒あけて叩く（一括で舐めない）。
+    // ★1件ずつ1.2秒だと画面1つ分（約24枚）で30秒かかって使い物にならない。
+    //   3本まで同時に走らせ、1本ごとに少し間を置く（＝毎秒3件前後）。ブリッジのプールが6枠なので詰まらせない。
     const found = {};
-    for (const q of need) {
+    let stop = false;
+    const one = async (q) => {
+      if (stop) return;
       let id = '', ok = false;
       try {
         const html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(q.slice(0, 80)), null, { timeout: 20000 }));
@@ -21540,14 +21544,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const m = html.match(/\/product\/detail\/(\d+)/);
         id = m ? m[1] : '';
         if (!ok && !lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋のページが返ってきません（ブリッジ経由）', true); }
-      } catch (e) { if (!lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋を取得できません: ' + apiErrJa((e && e.message) || e), true); } break; }
+      } catch (e) { if (!lst._tmWarned) { lst._tmWarned = 1; toast('⚠ 駿河屋を取得できません: ' + apiErrJa((e && e.message) || e), true); } stop = true; return; }
       // ★取得そのものが失敗した時は【空を覚えない】。覚えると二度と取りに行かなくなる
-      //   （GAS経由で失敗した分が空で焼き付き、経路を直しても直らなかった）
-      if (!ok) break;
+      if (!ok) { stop = true; return; }
       lst.tmImg[q] = id; found[q] = id;
       renderTitleDetailImgs(box);
-      await new Promise(r => setTimeout(r, 1200));
-    }
+    };
+    const queue = need.slice();
+    const worker = async () => { while (queue.length && !stop) { await one(queue.shift()); await new Promise(r => setTimeout(r, 350)); } };
+    await Promise.all([worker(), worker(), worker()]);
     // 引いた分は貯めておく＝次からは叩かない
     if (Object.keys(found).length && settings.sbSecret) {
       try {
@@ -21557,6 +21562,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       } catch (_) {}
     }
     _tmBusy = false;
+    // まだ画面内に未取得が残っていれば続ける（スクロールに追随して埋まる）
+    if (!stop && Object.keys(found).length) setTimeout(() => { const b2 = document.getElementById('tm-detail'); if (b2 && lst.tmOpen === hw) tmFillImages(hw, b2); }, 300);
   }
   // 画像だけ差し替える（並び替えや絞り込みを崩さない）
   function renderTitleDetailImgs(box) {
