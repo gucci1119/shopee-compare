@@ -7419,8 +7419,26 @@
   // ★onConflict：どの列の組み合わせで「同じ行」と見なすかを明示する。
   //   指定しないと主キーだけが対象になり、**別に張られた一意制約**（例 orders の (cc, sn)）に当たったとき
   //   upsertにならず 409 duplicate key で落ちる。実際に orders でこれが起きていた（2026-08-16）。
+  // ★デモ表示モードのまま書き込むと、ダミー名・0.73倍の金額が【本番DBに焼き付く】。
+  //   2026-08-17 13:47 に実際に起きた：BRの発送済み9件が「サンプル商品 V-549 / 購入者921 / 売上null」で
+  //   上書きされていた（1回のupsert・全件同じ synced_at）。経路は特定できなかったので、
+  //   経路を潰すのではなく【入口で止める】。読取(sbGet/sbGetAll)でマスクしている以上、
+  //   読んだものを書き戻す経路がひとつでもあれば必ず同じ事故が起きる。
+  const DEMO_MASK_RE = /サンプル商品 [A-Z]-\d{3}|購入者\d{3}|仕入先[A-Z]\b|ブランド[A-Z]\b|ユーザー\d{3}|（デモ非表示）/;
+  function demoWriteGuard(op, table, payload) {
+    if (demoOn()) {
+      const e = new Error(`🎭 デモ表示モードのままです。「${table}」への保存を中止しました（ダミーの商品名や0.73倍の金額が本番データに書き込まれるため）。🎭を戻してからやり直してください`);
+      sbWriteFail(op, table, e); toast(e.message); throw e;
+    }
+    let s = ''; try { s = JSON.stringify(payload); } catch (_) { return; }
+    if (s && DEMO_MASK_RE.test(s)) {   // デモを切った直後でも、マスク済みの値を握ったままの経路がありうる
+      const e = new Error(`🎭 ダミー化された値が「${table}」に混ざっていたため保存を中止しました。画面を再読み込みしてからやり直してください`);
+      sbWriteFail(op, table, e); toast(e.message); throw e;
+    }
+  }
   async function sbUpsert(table, rows, onConflict) {
     if (!rows.length) return 0;
+    demoWriteGuard('upsert', table, rows);
     // ★同じ束の中に同じキーの行が2つあると Postgres が落ちる（同じ行は1回しか更新できない）。
     //   注文は「未発送」と「発送済み」の両方に出てくることがあり、実際に重複していた。後の方を採用する。
     if (onConflict) {
@@ -7444,6 +7462,7 @@
     return rows.length;
   }
   async function sbDelete(table, qs) {
+    demoWriteGuard('delete', table, qs);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
     const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
@@ -7453,6 +7472,7 @@
     if (!r.ok) { const e = new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('delete', table, e); throw e; }
   }
   async function sbPatch(table, qs, patch) { // 主キー(item_id)自体の変更など、キー指定での更新
+    demoWriteGuard('patch', table, patch);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
     const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
