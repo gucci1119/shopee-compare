@@ -2731,7 +2731,7 @@ function syncEscrowAll() {
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
   toks.forEach(function (tok) { try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   // 入金を取り込んだ直後に、売上(total)が空の注文を埋める。別トリガーにすると立て忘れて気づけない。
-  try { log.push({ 売上補完: backfillOrderTotals(2000) }); } catch (e) { log.push({ 売上補完: 'error ' + String(e).slice(0, 100) }); }
+  try { log.push({ 売上補完: backfillOrderTotals() }); } catch (e) { log.push({ 売上補完: 'error ' + String(e).slice(0, 100) }); }
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
@@ -2747,9 +2747,9 @@ function syncEscrowAll() {
  *   注文側だけ見ていても埋まらないので、入金側から後追いで補完する。埋まらないのは未払い(Unpaid)だけ＝正しい。
  * 他の列は一切触らない（sn・order_id・total のみ送る）。
  */
-function backfillOrderTotals(limitN) {
-  var cap = limitN || 2000;
-  var miss = sbSelect_('orders', 'select=cc,sn,order_id,status&total=is.null&limit=' + cap) || [];
+function backfillOrderTotals() {
+  // ★sbSelect_ は PostgREST の既定上限1000件で頭打ちになる。空が1000件を超えると取りこぼすので全件版を使う。
+  var miss = sbSelectAll_('orders', 'select=cc,sn,order_id,status&total=is.null&order=sn') || [];
   if (!miss.length) { Logger.log('売上が空の注文なし'); return 0; }
   var bySn = {}, sns = [];
   miss.forEach(function (o) { if (o.sn) { bySn[o.sn] = o; sns.push(o.sn); } });
