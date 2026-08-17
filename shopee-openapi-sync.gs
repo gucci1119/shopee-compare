@@ -2730,9 +2730,49 @@ function syncEscrowAll() {
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
   toks.forEach(function (tok) { try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  // 入金を取り込んだ直後に、売上(total)が空の注文を埋める。別トリガーにすると立て忘れて気づけない。
+  try { log.push({ 売上補完: backfillOrderTotals(2000) }); } catch (e) { log.push({ 売上補完: 'error ' + String(e).slice(0, 100) }); }
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
+/**
+ * 注文の売上(orders.total)が空の行を、入金(income.buyer_paid)から埋める。
+ *
+ * ★2026-08-18 実測：total が空の注文が 344件あり、うち 340件は income に buyer_paid があった。
+ *   円に直すと ¥2,528,426（BR 2026-08 だけで ¥1,559,352）。この分が売上・月次から丸ごと落ちていた。
+ *   健全な行 522件で total と buyer_paid を突き合わせたところ 522/522 完全一致だったので、
+ *   buyer_paid は「その注文で買主が払った額」＝ total と同じもの。埋めて問題ない。
+ *
+ * なぜ空になるか：注文APIの取得タイミングによって金額が付いてこないことがある（未払い→支払い済みの遷移中など）。
+ *   注文側だけ見ていても埋まらないので、入金側から後追いで補完する。埋まらないのは未払い(Unpaid)だけ＝正しい。
+ * 他の列は一切触らない（sn・order_id・total のみ送る）。
+ */
+function backfillOrderTotals(limitN) {
+  var cap = limitN || 2000;
+  var miss = sbSelect_('orders', 'select=cc,sn,order_id,status&total=is.null&limit=' + cap) || [];
+  if (!miss.length) { Logger.log('売上が空の注文なし'); return 0; }
+  var bySn = {}, sns = [];
+  miss.forEach(function (o) { if (o.sn) { bySn[o.sn] = o; sns.push(o.sn); } });
+  var paid = {};
+  for (var i = 0; i < sns.length; i += 100) {                       // in句が長くなりすぎないよう100件ずつ
+    var q = sns.slice(i, i + 100).map(function (s) { return '"' + s + '"'; }).join(',');
+    var rows = [];
+    try { rows = sbSelect_('income', 'select=sn,buyer_paid&buyer_paid=not.is.null&sn=in.(' + q + ')') || []; } catch (e) { }
+    rows.forEach(function (r) { paid[r.sn] = r.buyer_paid; });
+  }
+  var upd = [];
+  Object.keys(bySn).forEach(function (sn) {
+    if (paid[sn] == null) return;
+    var o = bySn[sn];
+    upd.push({ cc: o.cc, sn: sn, order_id: o.order_id || sn, total: parseFloat(paid[sn]) });   // order_id は NOT NULL
+  });
+  for (var k = 0; k < upd.length; k += 200) {
+    try { sbUpsert_('orders', upd.slice(k, k + 200), 'cc,sn'); } catch (e2) { Logger.log('⚠ 売上補完のupsert失敗: ' + String(e2).slice(0, 120)); }
+  }
+  Logger.log('✅ 売上を補完 ' + upd.length + '件 / 空だった ' + miss.length + '件（残りは入金データ自体が無い＝未払いなど）');
+  return upd.length;
+}
+
 function finalizedSns_(cc) {
   // ★スキップの条件が緩すぎた（2026-08-08 実測）：pending=false かつ fee_total があるだけで永久にスキップしていたため、
   //   倉庫スキャン後に金額が動いても二度と読み直さず、暫定額のまま固まっていた
