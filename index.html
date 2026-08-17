@@ -14744,6 +14744,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-15', items: [
+      '✂ <b>明細名が20字で意味を壊さないようにしました</b>。実測で <code>Atari Classics Evolved</code> が <code>Atari Classics Evolv</code> と<b>単語の途中で切れて</b>いました。①削れる語を先に落とす（<code>The</code>／<code>- Special Edition</code>／<code>Volume→Vol</code> など）②それでも長ければ<b>単語の切れ目で切る</b>。カードに <b>✂20字超</b> と入る名前を出し、追加前の確認にも一覧で出します。<b>✂20字超を外す</b>で、名前を決めてから入れる運用もできます。',
       '▶ <b>まだ出していないタイトルを選んで、そのまま明細として追加できるようにしました</b>（母数の内訳）。追加先は<b>そのハードの空き枠があるカタログ</b>から選び、<b>在庫0</b>で登録します——まず枠を押さえて母数を作るための操作なので、売れません。価格は空欄なら<b>そのカタログの平均</b>を入れます（Shopeeは価格なしで明細を作れないため）。仕入れが決まったら価格と在庫を入れ直してください。すでに同じ名前がある明細は自動で除きます。',
       '🔗 <b>マスタに当たらない明細を「対応させる」ようにしました</b>。略称や独自表記（<code>P4G: Persona 4 The Golden</code>、<code>GC:4</code>）は正規化では当たらないので、<b>候補を並べて押すだけで紐づけ</b>られます。<b>機械には確定させません</b>——勝手に紐づけると違う作品を数えて母数が嘘になるためです。一度決めた対応は覚えて<b>全ハード・全国で効きます</b>。内訳の「🔗 対応させる」から。',
       '🔗 <b>母数の「出している」をマスタと突き合わせた実数にしました</b>。これまでは明細名をそのまま数えており、<b>綴りが違うと同じ作品を二重に数えて</b>いました（実測5,431件は多め）。突合キーを強くして、<b>全角半角・記号・アクセント記号（Pokémon→Pokemon）・機種名・版名（Best/廉価版）・状態語（Used/Japan）</b>を落として比べます。ハードごとに順に計算し、出たそばから表を更新します。',
@@ -21567,6 +21568,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
   }
 
+  // 📚 明細名は【20字まで】。機械的に切ると "Atari Classics Evolved"→"Atari Classics Evolv" のように
+  //   単語の途中で切れて意味が壊れる（実測）。①削れる語を先に落とす ②それでも長ければ単語の切れ目で切る。
+  //   ★どうしても収まらないものは切らずに返し、呼び出し側で「要調整」として扱う。
+  const TM_SHRINK = [
+    [/\s*[-–—:：]\s*(special|limited|deluxe|premium|collector'?s|anniversary|complete|definitive|remaster(ed)?|hd)\s+edition\b/ig, ''],
+    [/\b(the|a|an)\s+/ig, ''],
+    [/\s*\((?!.*\d).*?\)\s*/g, ' '],          // 数字の入らない括弧書きは落とす
+    [/\s*&\s*/g, ' & '],
+    [/\bvolume\b/ig, 'Vol'], [/\bversion\b/ig, 'Ver'], [/\bspecial\b/ig, 'SP'],
+    [/\bcollection\b/ig, 'Coll'], [/\badventures?\b/ig, 'Adv'], [/\bchronicles?\b/ig, 'Chron'],
+    [/\s+/g, ' ']
+  ];
+  function tmFitName(name, max) {
+    const LIM = max || 20;
+    let t = String(name || '').trim();
+    if (t.length <= LIM) return { name: t, cut: false };
+    for (const [re, to] of TM_SHRINK) {
+      t = t.replace(re, to).trim();
+      if (t.length <= LIM) return { name: t, cut: false };
+    }
+    // 単語の切れ目で切る（半角の空白がある＝英語タイトルの時だけ。日本語は詰めて入れる）
+    if (/\s/.test(t)) {
+      const w = t.slice(0, LIM + 1).split(/\s+/);
+      w.pop();
+      const j = w.join(' ').trim();
+      if (j.length >= 6) return { name: j, cut: true };      // 短すぎると何の作品か分からない
+    }
+    return { name: t.slice(0, LIM), cut: true };
+  }
+
   // 📚 追加先の候補＝そのハードのカタログのうち、明細の空きがあるもの（空きが多い順）
   function tmTargets() {
     const hw = lst.tmOpen; if (!hw) return [];
@@ -21607,11 +21638,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!(price > 0)) { alert('価格が決められません。価格欄に数字を入れてください。'); return; }
     const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
     const dup = new Set((row.models || []).map(m => tmKey(m.n)));
-    const items = names.filter(n => !dup.has(tmKey(n))).map(n => ({ option: String(n).slice(0, 20), price: price, stock: 0, sku: '', image: '' }));
+    const fit = names.filter(n => !dup.has(tmKey(n))).map(n => Object.assign({ src: n }, tmFitName(n, 20)));
+    const cutList = fit.filter(x => x.cut);
+    const items = fit.map(x => ({ option: x.name, price: price, stock: 0, sku: '', image: '' }));
     if (!items.length) { alert('選んだものは、すべてこのカタログに既にあります'); return; }
     if (!confirm('書込先: ' + gw.summary + '\n\n' + cc + ' 「' + String(row.name || '').slice(0, 30) + '」に\n'
       + items.length + '件を【在庫0・価格' + price + '】で明細として追加します。\n\n'
-      + '※Shopeeの明細名は20字までなので、長い名前は切り詰めます。\n※在庫0なので売れません。仕入れが決まったら価格と在庫を入れ直してください。\n\nよろしいですか？')) return;
+      + (cutList.length ? '⚠ 20字に収まらず【名前が切れる】ものが ' + cutList.length + '件あります：\n'
+          + cutList.slice(0, 6).map(x => '　' + x.src + '\n　　→ ' + x.name).join('\n')
+          + (cutList.length > 6 ? '\n　ほか' + (cutList.length - 6) + '件' : '')
+          + '\n\nこのまま入れると、あとで名前を直す手間が出ます。\n先に外して、名前を決めてから入れることもできます。\n\n'
+        : '')
+      + '※在庫0なので売れません。仕入れが決まったら価格と在庫を入れ直してください。\n\nよろしいですか？')) return;
     const btn = document.getElementById('tm-pickadd'); if (btn) { btn.disabled = true; btn.textContent = '追加中…'; }
     try {
       const kv = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
@@ -21674,6 +21712,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             : (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>'); })()}
       </div>
       <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.ja || x.en || '')}</div>
+      ${(() => { if (x.has) return ''; const f = tmFitName(x.en || x.ja || '', 20); return f.cut ? `<div title="${av('明細名は20字までです。このまま入れると「' + f.name + '」になります')}" style="font-size:9.5px;color:#b26a00;font-weight:700">✂ 20字超（${esc(f.name)}）</div>` : ''; })()}
       ${x.ja && x.en ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.en)}</div>` : ''}
       <div style="display:flex;align-items:center;gap:5px;margin-top:auto">
         <span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;background:${x.has ? '#1a7f37' : '#fdecea'};color:${x.has ? '#fff' : '#b3261e'}">${x.has ? '出している' : 'まだ'}</span>
@@ -21717,6 +21756,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${lst.tmFil === 'link' ? '' : `<div id="tm-pickbar" style="position:sticky;bottom:0;margin-top:8px;padding:7px 10px;background:#f2f8ff;border:1px solid #cfe0f7;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;${(lst.tmPick && lst.tmPick.size) ? '' : 'display:none'}">
         <b style="font-size:12px">選んだ <span id="tm-pickn">${(lst.tmPick || new Set()).size}</span> 件</b>
         <button class="smd-btn" id="tm-pickclear" style="font-size:11px">選択を解除</button>
+        <button class="smd-btn" id="tm-pickfit" style="font-size:11px" title="20字に収まらないものを選択から外します（名前を決めてから入れる用）">✂ 20字超を外す</button>
         <button class="smd-btn" id="tm-pickcopy" style="font-size:11px" title="明細名として使える形でコピーします（英語名を優先）">📋 名前をコピー</button>
         <span style="font-size:11px">追加先</span>
         <select id="tm-picktgt" style="padding:3px 6px;border:1px solid #cfe0f7;border-radius:6px;font-size:11px;max-width:320px">${tmTargets().map(t => `<option value="${av(t.cc + '|' + t.item_id)}">${esc(t.cc)} ${esc(String(t.name).length > 42 ? String(t.name).slice(0, 42) + '…' : t.name)} — 空き${t.free}</option>`).join('') || '<option value="">空きのあるカタログがありません</option>'}</select>
@@ -21742,6 +21782,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     { const c1 = document.getElementById('tm-pickclear'); if (c1) c1.addEventListener('click', () => { lst.tmPick.clear(); renderTitleDetail(hw, own); }); }
     { const ad = document.getElementById('tm-pickadd'); if (ad) ad.addEventListener('click', () => tmAddPicked(hw, own)); }
+    { const cf = document.getElementById('tm-pickfit'); if (cf) cf.addEventListener('click', () => {
+        const before = lst.tmPick.size;
+        [...lst.tmPick].forEach(n => { if (tmFitName(n, 20).cut) lst.tmPick.delete(n); });
+        toast('✂ ' + (before - lst.tmPick.size) + '件を外しました（残り' + lst.tmPick.size + '件）');
+        renderTitleDetail(hw, own);
+      }); }
     { const c2 = document.getElementById('tm-pickcopy'); if (c2) c2.addEventListener('click', () => {
         try { copyText([...lst.tmPick].join('\n')); toast('📋 ' + lst.tmPick.size + '件の名前をコピーしました'); } catch (_) {}
       }); }
