@@ -21365,6 +21365,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     catch (e) { toast('対応表を保存できませんでした: ' + ((e && e.message) || e), true); }
   }
   // 明細名 → 候補のマスタ行。完全一致が無い時だけ使う。語の重なりで並べる
+  // 📚 マスタ1行が「自分の出品名に含まれているか」。
+  //   ★単品の出品はタイトルが宣伝文込み（"Used Enemy Zero for Sega Saturn - Japan Region Title"）なので
+  //     完全一致では当たらない。マスタ名がその中に**丸ごと入っていれば**同じ作品とみなす。
+  //     短い名前（"Sonic R"）で誤って当たらないよう、**8文字以上**のマスタ名だけに使う。
+  function tmHas(r, exactSet, ownKeys) {
+    const kj = r._kj || (r._kj = tmKey(r.ja)), ke = r._ke || (r._ke = tmKey(r.en));
+    if ((kj && exactSet.has(kj)) || (ke && exactSet.has(ke))) return true;
+    for (const mk of [kj, ke]) {
+      if (!mk || mk.length < 8) continue;
+      for (let i = 0; i < ownKeys.length; i++) if (ownKeys[i].length > mk.length && ownKeys[i].includes(mk)) return true;
+    }
+    return false;
+  }
+
   function tmCandidates(name, rows, limit) {
     const k = tmKey(name);
     if (!k) return [];
@@ -21427,7 +21441,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const lk = await loadTitleLink();
       const mine = new Set([...((own.names || {})[h] || [])].map(n => lk[tmKey(n)] || tmKey(n)));
       let hit = 0;
-      rows.forEach(r => { if ((r.en && mine.has(tmKey(r.en))) || (r.ja && mine.has(tmKey(r.ja)))) hit++; });
+      const arr = [...mine];
+      rows.forEach(r => { if (tmHas(r, mine, arr)) hit++; });
       lst.tmMatch[h] = hit;
       if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster();   // 出たそばから表を更新
       await new Promise(r => setTimeout(r, 30));
@@ -21447,22 +21462,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rows = [], seen = new Set();
     let page = 1, empty = 0;
     while (page <= 400) {
-      const url = 'https://www.suruga-ya.jp/search?category=' + cat + '&page=' + page + '&restrict=0';
+      // ★restrict=0 を付けると 404 になる（実測）。素の category と page だけにする
+      const url = 'https://www.suruga-ya.jp/search?category=' + cat + '&page=' + page;
       let html = '';
       try { html = String(await bridgeRequest('GET', url, null, { timeout: 25000 })); }
       catch (e) { throw new Error('駿河屋を取得できません: ' + ((e && e.message) || e)); }
       if (!/suruga-ya/i.test(html)) throw new Error('駿河屋のページが返ってきません（少し時間を置いてください）');
-      // 1商品 = <a href="…/product/detail/ID"><img …></a> … 商品名は別のaに入る
+      // 1商品 = 「detail/ID」のリンク → 少し後ろに <h3 class="product-name">商品名</h3>、さらに後ろに 中古：￥価格
+      //   （画像だけのリンクが先に来るので、商品名は h3 から拾う）
       const before = rows.length;
-      const re = /\/product\/detail\/(\d+)[^>]*>([\s\S]{0,300}?)<\/a>/g;
+      //   価格は表記ゆれ（￥/¥/円）があるので**必須にしない**。取れたら入れる程度にする
+      const re = /\/product\/detail\/(\d+)[\s\S]{0,500}?<h3[^>]*product-name[^>]*>([\s\S]{0,160}?)<\/h3>([\s\S]{0,700})/g;
       let m;
       while ((m = re.exec(html))) {
         const id = m[1];
-        const txt = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-        if (!txt || txt.length < 3) continue;             // 画像だけのリンクは飛ばす（商品名が入っている方を採る）
         if (seen.has(id)) continue;
+        const t = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+        if (!t) continue;
+        const pm = String(m[3] || '').replace(/<[^>]+>/g, ' ').match(/[￥¥]\s*([\d,]+)|([\d,]{3,7})\s*円/);
         seen.add(id);
-        rows.push({ t: txt.slice(0, 120), id: id });
+        rows.push({ t: t.slice(0, 120), id: id, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 });
       }
       if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
       if (onProg) onProg(page, rows.length);
@@ -21763,15 +21782,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
     const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
     // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
+    const mineArr = [...mineN];
     const list = rows.map(r => Object.assign({}, r, {
-      has: (r.en && mineN.has(tmKey(r.en))) || (r.ja && mineN.has(tmKey(r.ja))),
+      has: tmHas(r, mineN, mineArr),
       q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
     }));
     const hasN = list.filter(x => x.has).length;
     lst.tmFil = lst.tmFil || 'no';
     // 🔗 マスタに当たらなかった自社の明細（＝略称や独自表記）。ここを人が当てると母数の数字が正しくなる
     const masterKeys = new Set(); rows.forEach(r => { if (r.ja) masterKeys.add(tmKey(r.ja)); if (r.en) masterKeys.add(tmKey(r.en)); });
-    const unlinked = [...mine].filter(n => { const k = link[tmKey(n)] || tmKey(n); return k && !masterKeys.has(k); });
+    // ★「含まれている」で当たったものは対応不要なので、未対応から外す
+    const mkLong = [...masterKeys].filter(k => k.length >= 8);
+    const unlinked = [...mine].filter(n => { const k = link[tmKey(n)] || tmKey(n);
+      if (!k || masterKeys.has(k)) return false;
+      return !mkLong.some(mk => k.length > mk.length && k.includes(mk)); });
     const shown = list.filter(x => lst.tmFil === 'all' ? true : (lst.tmFil === 'yes' ? x.has : !x.has));
     const q = (lst.tmQ || '').toLowerCase().trim();
     let shown2 = q ? shown.filter(x => ((x.ja || '') + ' ' + (x.en || '')).toLowerCase().includes(q)) : shown.slice();

@@ -3070,6 +3070,7 @@ function copyAttrs_(shopId, srcItemId, dstItemId, base) {
 // 置き場：app_kv k='titles_<hw>' → { at, n, rows:[{ja,en,y}] }。新しいテーブルは作らない（SQLを1回叩く手間を増やさない）。
 var TITLE_HW = {
   switch: { q: 'Q19610114', name: 'Nintendo Switch' },
+  ps5:    { q: 'Q63184502', name: 'PlayStation 5' },
   ps4:    { q: 'Q5014725',  name: 'PlayStation 4' },
   ps3:    { q: 'Q10683',    name: 'PlayStation 3' },
   ps2:    { q: 'Q10680',    name: 'PlayStation 2' },
