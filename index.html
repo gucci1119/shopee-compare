@@ -6871,6 +6871,18 @@
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
     const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, preCnt = {}, ordOf = {}, ordScanOf = {}, itemsOf = {};
     const ordYmdOf_ = (r) => (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || snToDate(r.sn) || '')).slice(0, 10);
+    // ★「なぜ昨日の注文がもう今日発送なのか」に毎回つまずくので、Shopeeがくれた猶予を数字で出す。
+    //   同じ発送日に集まるのは、Shopeeの猶予が注文ごとに +2〜+6日 とばらつくため（実測）。
+    const graceNote_ = (list) => {
+      const g = (list || []).map(r => {
+        const ts = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) : Number(r.orderTs) / 1000) : 0;
+        return (ts && r.shipBy) ? (r.shipBy - ts) / 86400 : null;
+      }).filter(x => x != null);
+      if (!g.length) return '';
+      const lo = Math.round(Math.min.apply(null, g) * 10) / 10, hi = Math.round(Math.max.apply(null, g) * 10) / 10;
+      return '\n　 Shopeeがくれた猶予：注文から ' + (lo === hi ? '+' + lo + '日' : '+' + lo + '〜+' + hi + '日')
+        + (lo === hi ? '' : '（幅があるので何日分もの注文が同じ日に集まります）');
+    };
     const odOf = (r) => {                                   // 注文日 M/D(曜)・JST
       // ★ライブ取得の行は orderTs/orderDate を持たないことがある。注文番号から日付を復元する（注文一覧と同じ手当て）
       const ymd = (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || snToDate(r.sn) || '')).slice(0, 10);
@@ -6929,7 +6941,7 @@
       const tip = md2(d.k) + '\n'
         + (d.n ? '\n📦 この日の発送 ' + d.n + '件' + (d.pre ? '（内 予約 ' + d.pre + '件）' : '')
                  + '\n　 → ' + nx(d.k, 1) + ' に倉庫でスキャン（遅延なし）'
-                 + (d.src ? '\n　 内訳：' + d.src : '') : '\n📦 この日の発送予定はありません')
+                 + (d.src ? '\n　 内訳：' + d.src : '') + graceNote_(itemsOf[d.k]) : '\n📦 この日の発送予定はありません')
         + (d.sc ? '\n\n🏭 この日がスキャン期限 ' + d.sc + '件'
                   + '\n　 → ' + nx(d.k, -1) + ' までに発送が必要です'
                   + (d.srcSc ? '\n　 内訳：' + d.srcSc : '') : '')
@@ -7038,6 +7050,7 @@
       ${shipCalendarHtml(undone)}
       <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #e6d6d3;font-size:11px;line-height:1.8;color:#5a6b8c">
         <b>📦 家から出す日</b>だけ見れば大丈夫です。<span class="smd-dim">Shopeeの期日の前日＝この日に発送しないと遅延になります（当日発送では間に合いません）。<b>集荷は17時まで</b>（超過分は翌日発送扱い）。倉庫は東京のみ・日曜はスキャンなし。</span>
+        <div class="smd-dim" style="font-size:10.5px;margin-top:3px">🗂 1日に出す分は<b>1日分の注文ではありません</b>。Shopeeがくれる猶予が<b>注文ごとに +2〜+6日とばらつく</b>ため、何日分もの注文が同じ発送日に集まります（上の「注文日」の幅がそれ）。<b>昨日の注文がもう今日発送なのは、その注文の猶予が最短の+2日だった</b>ためです。</div>
         <div class="smd-dim" style="font-size:10.5px;margin-top:3px" title="2026-08-18に「倉庫へ発送済」にした624件で実測">📊 これまでの実績＝実際に家から出したのは <b>期日の2日前 20%／1日前 19%／当日 14%</b>。<b style="color:#c0392b">期日を過ぎてから出した分も 16%（97件）</b>あります。<b>「前日に出す」はこの実績と合っており、早すぎる設定ではありません</b>。期日が近く感じるのは、Shopeeが期日を<b>注文の2日後</b>で切ってくるためです（実測で最多）。</div>
       </div>
     </div>`;
@@ -14822,6 +14835,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-18', items: [
+      '🗂 <b>「なぜ昨日の注文がもう今日発送なのか」を画面で説明</b>（本人質問）。1日に出す分は<b>1日分の注文ではなく</b>、<b>Shopeeの期日が同じ日の注文ぜんぶ</b>です。Shopeeがくれる猶予は<b>注文ごとに +2〜+6日とばらつく</b>ため、8/13〜8/17の注文が全部「8/19が期日」に集まります（実測：8/18に出す12件の猶予は +2.0〜+6.0日／8/17の注文はいちばん短い +2.0日）。この説明を発送ページに常時表示し、各日のホバーにも<b>その日ぶんの猶予の幅</b>を出すようにしました。',
       '📦 <b>「本日の発送 12件」が少なく見える</b>のを解消（本人指摘）。本日ぶんは<b>本当は46件</b>あり、うち<b>34件は既に「倉庫へ発送済」</b>にしてあるので残りが12件でした。数字自体は正しかったのですが、<b>分母が見えない</b>ため実感と合いませんでした。<b>「（本日ぶん46件中 34件は発送済）」を併記</b>します。',
       '📅 <b>発送スケジュールの「注文日」が実態と食い違っていた</b>のを修正（本人指摘）。<b>いちばん多い注文日を1つだけ</b>出していたため、「8/16(日)注文」と書いてあるのに一覧には<b>8/17の注文</b>が並んでいました。1日に出す分は何日分もの注文が混ざる（実測：8/18ぶんは8/11〜8/17の6日分）ので、<b>「8/13(水)〜8/17(月)注文」のように幅で</b>出します。',
       '📊 <b>「期日が早すぎないか」を実績で検証</b>しました。「倉庫へ発送済」にした624件で見ると、実際に家から出したのは<b>期日の2日前20%／1日前19%／当日14%</b>で、<b>ポータルが推奨する「前日に出す」は実績と合致</b>しています（早すぎる設定ではない）。期日が近く感じるのは<b>Shopee側が期日を注文の2日後で切ってくる</b>ため（実測で最多）。なお<b>期日を過ぎてから出した分が16%（97件）</b>あることも分かったので、この実績を画面にも出しました。',
