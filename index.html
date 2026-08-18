@@ -14846,6 +14846,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-08-19', items: [
+      '📖 <b>各ハードの母数を外部の一次情報で裏取りし、出典つきで併記しました</b>（本人指摘「本当に合っている？特に少ないハードが気になる」）。Wikipedia日本語版の各「ゲームタイトル一覧」と<b>任天堂IRの「発売ソフトタイトル数推移表」</b>から、<b>日本で発売されたパッケージ版の本数</b>を21ハードぶん収集しました（DL専売は除外）。例：<b>WiiU 113本</b>（任天堂IRとWikipediaが完全一致）／<b>Wii 461</b>／<b>3DS 664</b>（日本発売1,349本のうちDL専売687本を除く）／<b>PS1 3,289</b>／<b>PS2 2,927</b>／<b>SFC 1,398</b>／<b>SS 1,057</b>（3系統が完全一致）。表に<b>📖発売本数</b>列を足し、数字は出典へのリンク、カーソルを当てると「何を含み何を含まないか」が出ます。',
+      '🔧 <b>駿河屋の取り込みが全ハードで2〜3割足りていなかった</b>のを発見しました。クローラが「新規ゼロが2ページ続いたら打ち切り」で、途中の重複ページで早期終了していました（実測：WiiU 在庫510に対し取得383、Switch 4,597に対し3,595）。打ち切り条件を「商品が1件もパースできないページが3回続いたら」に直して取り直しました。ただし<b>駿河屋自体が190ページ超でページングを止める</b>ため全部は取れません（Switch 3,639まで）。そのぶんは上の📖発売本数で補い、<b>母数は「駿河屋／作品マスタ／発売本数」のいちばん多い数</b>を採るようにしました＝取りこぼしで過少にならないようにしています。',
+    ] },
     { date: '2026-08-18', items: [
       '🚫 <b>ダウンロード版を母数から全部外しました</b>（本人指定）。判定は「作品マスタでDL版の印しかない」<b>かつ</b>「駿河屋に商品が無い」＝中古で扱えないもの。駿河屋に商品があればDL印が付いていても残します（パッケージが出ているため）。<b>母数＝①駿河屋の取扱数（物理・版違い込み）と②作品マスタからDL専売を引いた数の、多い方</b>にしました。<b>Switch 7,131→2,292／PS5 2,981→938／PS4 6,073→1,885／WiiU 872→357</b>。②を併用しているので、<b>駿河屋の取込が薄いハード（Wii は駿河屋514件）でも過少になりません</b>（Wii 1,500）。内訳の一覧からもDL専売の行が消えます。',
       '📚 <b>母数を「物理ソフト」に切り替えました</b>（本人指摘「Switchが7,000本もあるわけない」）。これまでは<b>作品マスタ(Wikidata)と駿河屋の多い方</b>を母数にしていたため、現行機は<b>ダウンロード専売込みのWikidata</b>が採用され実態の3倍になっていました（Switch 母数7,131／実際に扱える物理ソフトは<b>2,292</b>）。<b>母数＝駿河屋で中古が流通している物理ソフト</b>に変更し、作品マスタの数は参考として薄字で併記します。駿河屋を未取込のハードだけ暫定でWikidataを使い、その旨を明示します。網羅率もこの物理の母数に対する率になります（Switchは2%→6%）。',
@@ -21500,6 +21504,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const g = await sbGetAll('app_kv', 'select=k,v&k=eq.sg_index');
       lst.sgHave = (g && g[0] && g[0].v) || {};
     } catch (_) {}
+    // 📖 外部の一次情報（日本で発売されたパッケージ版の本数）。Wikipedia日本語版・任天堂IRの公表値。
+    //    「この母数は本当に合っているのか」を毎回議論しないために、出典つきで画面に併記する。
+    try {
+      const rf = await sbGetAll('app_kv', 'select=v&k=eq.title_ref');
+      lst.tmRef = ((rf && rf[0] && rf[0].v) || {}).rows || {};
+    } catch (_) { lst.tmRef = {}; }
     return titleMaster;
   }
   // 1ハード分の全タイトル（突合するときだけ読む）
@@ -21727,7 +21737,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       //   ・Wikidataは dlOnly（DL版の印しかない作品）を引いて物理ぶんだけにする
       //   両方を見て**多い方**を採る＝駿河屋の取込が薄いハード（Wii 514件など）でも過少にならない。
       const wdPhys = wdN ? Math.max(0, wdN - (mm.dlOnly || 0)) : null;
-      const n = (sgN && wdPhys) ? Math.max(sgN, wdPhys) : (sgN || wdPhys || wdN);
+      // ★駿河屋は190ページ超でページングが止まり全部は取れない（実測：Switch 在庫4,597に対し取得3,639）。
+      //   外部の一次情報（日本のパッケージ版本数）も候補に入れて、いちばん多い数を母数にする＝過少にしない。
+      const rf = (lst.tmRef || {})[h] || null;
+      const n = Math.max(sgN || 0, wdPhys || 0, (rf && rf.n) || 0) || wdN || null;
       // ★「出している」は**マスタと突き合わせた実数**を出す（綴り違いで二重に数えないため）。
       //   突合はハードごとに順に計算する（全部を一度に読むと重い）。計算前は生の数を薄字で出す。
       const mt = (lst.tmMatch || {})[h];
@@ -21746,13 +21759,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           return g && g.n ? `<span style="color:#c30d23;font-weight:700" title="${av('駿河屋で中古が流通している数（版違い込み）'
               + (g.soft != null ? '\nソフト ' + g.soft + '／ソフト以外（本体・コントローラ・ケース等） ' + ((g.n || 0) - (g.soft || 0)) : ''))}">${Number(g.soft || g.n).toLocaleString()}${(g.soft != null && g.n > g.soft) ? `<span class="smd-dim" style="font-weight:400;font-size:9.5px"><br>＋ハード ${(g.n - g.soft).toLocaleString()}</span>` : ''}</span>`
             : (SURUGA_CAT[h] ? `<a href="https://www.suruga-ya.jp/search?category=${SURUGA_CAT[h]}" target="_blank" rel="noopener" class="smd-dim" style="color:#c30d23;text-decoration:none">未取込</a>` : ''); })()}</td>
+        <td style="text-align:right;font-size:11px;white-space:nowrap">${(() => { const r2 = (lst.tmRef || {})[h];
+          return r2 ? `<a href="${av(r2.src)}" target="_blank" rel="noopener" style="color:#1565c0;font-weight:700;text-decoration:none" title="${av(String(r2.note || '') + '\n出典: ' + r2.src)}">${Number(r2.n).toLocaleString()}</a>` : '<span class="smd-dim">—</span>'; })()}</td>
         <td class="smd-dim" style="font-size:10.5px;white-space:nowrap">${mm && mm.at ? String(mm.at).slice(0, 10) : '<span style="color:#c0392b">未取込</span>'}</td>
       </tr>`;
     }).join('');
     box.innerHTML = `
       <div class="pagehelp" style="margin:0 0 10px">この画面：<b>ハードごとに「世の中に何本あって、自分は何本出しているか」</b>です。出品数（母数）が売上の起点なので、ここの「空白」が伸びしろそのものになります。
         <br>※明細（バリエーション）で足す分には<b>出品枠を消費しません</b>（1カタログ100明細）。レアで仕入れが難しいものは<b>出品だけして在庫0</b>で構いません。
-        <br>※<b>ダウンロード版は母数に入れていません</b>（中古で扱えないため）。母数は<b>①駿河屋の取扱数（物理・版違い込み）</b>と<b>②作品マスタからDL専売を引いた数</b>の<b>多い方</b>です。<br>　例：Switch は作品マスタ7,131件のうち<b>5,715件がDL版の印だけ</b>。物理は<b>2,292件</b>です。PS5は2,981→<b>938</b>、PS4は6,073→<b>1,885</b>。<br>　駿河屋の取込が薄いハード（Wii など）は②で拾うので過少になりません。駿河屋を未取込のハードは<b style="color:#c30d23">駿河屋 未取込</b>と出ます（②の暫定値）。
+        <br>※<b>ダウンロード版は母数に入れていません</b>（中古で扱えないため）。母数は<b>①駿河屋の取扱数（物理・版違い込み）／②作品マスタからDL専売を引いた数／③外部の一次情報（日本の発売本数）</b>の<b>いちばん多い数</b>です。<b style="color:#1565c0">📖発売本数</b>の列は出典リンク付きで、数字にカーソルを当てると根拠が出ます（Wikipedia日本語版・任天堂IRの公表値）。<br>　<b>駿河屋の数が発売本数より多いのは正常</b>です（廉価版・Best版・箱説なしを別商品として持っているため。例：PS1は発売3,289本に対し駿河屋5,110商品）。逆に<b>駿河屋は190ページ超で打ち切られる</b>ため取りこぼしがあり（Switchは在庫4,597に対し取得3,639）、③で補っています。<br>　例：Switch は作品マスタ7,131件のうち<b>5,715件がDL版の印だけ</b>。物理は<b>2,292件</b>です。PS5は2,981→<b>938</b>、PS4は6,073→<b>1,885</b>。<br>　駿河屋の取込が薄いハード（Wii など）は②で拾うので過少になりません。駿河屋を未取込のハードは<b style="color:#c30d23">駿河屋 未取込</b>と出ます（②の暫定値）。
         <br>※「出している」は<b>バリエーションの明細</b>を数えています（カタログ数ではありません）。<b>各国に同じ物を出していても1本</b>として数えます。ただし<b>同じ作品でも綴りが違うと別物として二重に数えます</b>（例 <code>Pokemon Ruby</code> と <code>Pokémon Ruby</code>）。実数はここより少なめに見てください。</div>
       <div class="tool-card" style="margin:0;max-width:none">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
@@ -21763,7 +21778,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <button class="smd-btn" id="tm-fetch" style="font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
         </div>
         <div style="overflow-x:auto"><table class="smd-table" style="width:100%;font-size:12px">
-          <tr><th>ハード</th><th style="text-align:right" title="ダウンロード版を除いた【物理ソフト】の数。駿河屋の取扱数（版違い込み）と、作品マスタからDL専売を引いた数の、多い方を採っています">母数<span style="font-size:9px;font-weight:400;color:#c30d23"><br>物理のみ</span></th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:right">網羅率</th><th></th><th style="text-align:right;color:#c30d23" title="駿河屋で中古が流通している数。上段＝ソフト（版違い込み）／下段＝本体・コントローラ・ケース等">🏪中古</th><th>取込日</th></tr>
+          <tr><th>ハード</th><th style="text-align:right" title="ダウンロード版を除いた【物理ソフト】の数。駿河屋の取扱数（版違い込み）と、作品マスタからDL専売を引いた数の、多い方を採っています">母数<span style="font-size:9px;font-weight:400;color:#c30d23"><br>物理のみ</span></th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:right">網羅率</th><th></th><th style="text-align:right;color:#c30d23" title="駿河屋で中古が流通している数。上段＝ソフト（版違い込み）／下段＝本体・コントローラ・ケース等">🏪中古</th><th style="text-align:right;color:#1565c0" title="日本で発売されたパッケージ版の本数（外部の一次情報）。Wikipedia日本語版・任天堂IRの公表値。廉価版・版違いは含まないので、駿河屋の取扱数より少なく出ます">📖 発売本数<span style="font-size:9px;font-weight:400"><br>（出典あり）</span></th><th>取込日</th></tr>
           ${rows}
         </table></div>
       </div>
