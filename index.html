@@ -3187,6 +3187,9 @@
     "⚠赤字あり": "⚠ Some are loss-making",
     "⚠赤字です": "⚠ Loss-making",
     "⚠超過": "⚠ Over the limit",
+    "本日の集荷は終了": "Today's pickup has closed",
+    "今日中（集荷17時まで）": "Today (pickup closes 17:00)",
+    "明日まで": "By tomorrow",
     "⚠️ tasksテーブルが未作成です": "⚠️ The tasks table has not been created",
     "⚠️ 取り込みツールが動いていません": "⚠️ The import tool is not running",
     "⚠️税込": "⚠️ Tax included",
@@ -6551,6 +6554,13 @@
   const ymdJst_ = (sec) => { const d = new Date(sec * 1000 + 9 * 3600 * 1000); return (d.getUTCMonth() + 1) + '/' + d.getUTCDate(); };
   const WDJ = ['日', '月', '火', '水', '木', '金', '土'];
   const mdw_ = (sec) => { const d = new Date(sec * 1000 + 9 * 3600 * 1000); return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '(' + WDJ[d.getUTCDay()] + ')'; };
+  // ★期限は【日】で見る。時刻で引き算すると「今日が期日なのに超過」と出て、日単位の発送スケジュールと食い違う。
+  const PICKUP_HOUR = 17;                       // 集荷の締め（これを過ぎた発送は翌日扱い）
+  const jstHour_ = () => new Date(Date.now() + 9 * 3600 * 1000).getUTCHours();
+  const dueDayDiff_ = (sec) => {                // その期限は今日から何日後か（-1=昨日 / 0=今日）
+    const day = (ms) => { const t = new Date(ms + 9 * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };
+    return Math.round((day(sec * 1000) - day(Date.now())) / 86400000);
+  };
   // 倉庫へ発送済（もう家を出た）＝「出す期限」は役目を終えている。残るのはスキャンされる期限だけ。
   function scanOnlyBadge(shipBy) {
     if (!shipBy) return '<span class="smd-dim">-</span>';
@@ -6565,12 +6575,19 @@
     if (!shipBy) return '<span class="smd-dim">-</span>';
     const r0 = { shipBy: shipBy, tab: 300 };
     const send = ordShipDeadline(r0), lsr = ordLsrScan(r0), nfr = ordNfrScan(r0);
-    const h = Math.round((send - nowSec()) / 3600);
+    // ★残りの出し方は【日単位】。以前は時刻で引き算していたため、上の発送スケジュール（日単位で
+    //   「8/18に12件」）と同じ注文が、カードでは「超過8h」と出て矛盾して見えた（2026-08-18 本人指摘）。
+    //   実務で意味があるのは「どの日に家から出すか」で、その日の何時かではない（集荷は17時まで）。
+    const d = dueDayDiff_(send);                       // -1=昨日まで / 0=今日 / 1=明日 …
+    const afterPickup = d === 0 && jstHour_() >= PICKUP_HOUR;   // 今日ぶんだが集荷時刻を過ぎた
     const tip = '📦 家から出す ' + mdw_(send) + '（この日に発送すれば遅延になりません）'
       + '\n🆘 最終 ' + mdw_(nfr - 86400) + '（この日に発送しないと自動キャンセル）'
-      + '\n\n参考：倉庫でのスキャン期限 ' + mdw_(lsr) + ' ／ 自動キャンセル ' + mdw_(nfr);
-    const cls = h < 0 ? 'ord-due-red' : h < 24 ? 'ord-due-red' : h < 48 ? 'ord-due-orange' : 'ord-due-ok';
-    const rest = h < 0 ? ('超過' + Math.abs(h) + 'h') : h < 48 ? ('残り' + h + 'h') : ('残り' + Math.floor(h / 24) + '日');
+      + '\n\n参考：倉庫でのスキャン期限 ' + mdw_(lsr) + ' ／ 自動キャンセル ' + mdw_(nfr)
+      + '\n※集荷は' + PICKUP_HOUR + '時まで。過ぎた分は翌日発送の扱いになります';
+    const cls = d < 0 ? 'ord-due-red' : d === 0 ? 'ord-due-red' : d === 1 ? 'ord-due-orange' : 'ord-due-ok';
+    const rest = d < 0 ? (Math.abs(d) + '日 超過')
+      : d === 0 ? (afterPickup ? '本日の集荷は終了' : '今日中（集荷' + PICKUP_HOUR + '時まで）')
+      : d === 1 ? '明日まで' : ('あと' + d + '日');
     // ★日付が見えないと「いつまでか」が分からない。出す日を主、スキャン期限と自動キャンセルを従で出す。
     // ★どちらも「家から出す日」。スキャン期限そのものは出さない（前日に出すのは分かりきっているため）
     const last = nfr - 86400;                       // 自動キャンセルにしない最終の発送日
@@ -6787,7 +6804,10 @@
     const tomo = days[1] ? days[1].n : 0;
     if (!t0 && tomo) tips.push({ lv: 0, t: `本日の発送予定なし。<b>翌日分 ${tomo}件を先行して梱包</b>すると余裕が生まれます。` });
     // ④ ★遅延を出さないのが最優先。今日出す分が残っているなら、それを一番上に置く
-    if (t0) tips.push({ lv: 4, t: `<b style="color:#b71c1c">本日中に ${t0}件</b>発送。<b>集荷は17時まで</b>（超過すると翌日扱い＝遅延）。` });
+    // ★集荷（17時）を過ぎてから「本日中に」と言われても間に合わない。時刻で言い方を変える。
+    if (t0) tips.push(jstHour_() >= PICKUP_HOUR
+      ? { lv: 4, t: `<b style="color:#b71c1c">本日の集荷は終了しました（${PICKUP_HOUR}時まで）</b>。残り ${t0}件は<b>明日いちばんで発送</b>してください（Shopeeの期日にはまだ間に合います）。` }
+      : { lv: 4, t: `<b style="color:#b71c1c">本日中に ${t0}件</b>発送。<b>集荷は${PICKUP_HOUR}時まで</b>（超過すると翌日扱い＝遅延）。` });
     // ⑤ 明日ぶんも今日出せるなら出しておく（前倒しは常に安全）
     const d1 = days[1];
     if (d1 && d1.n && (t0 + d1.n) <= cap) tips.push({ lv: 1, t: `翌日分 ${d1.n}件も<b>本日まとめて発送可能</b>です（計${t0 + d1.n}件／上限${cap}件）。` });
@@ -14786,6 +14806,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-18', items: [
+      '📆 <b>「今日が期日なのに超過と出る」を修正</b>（本人指摘）。上の発送スケジュールは<b>日単位</b>で「8/18に12件（今日出せばOK）」と出すのに、各カードの期日バッジだけ<b>時刻で引き算</b>していたため、同じ注文が「超過8h」と表示されていました（例：家から出す期限 8/18 14:44 を22時に見ると超過8h）。実務で意味があるのは<b>どの日に家から出すか</b>で、その日の何時かではありません。バッジを<b>日単位に統一</b>し、<b>今日中（集荷17時まで）／本日の集荷は終了／明日まで／あとN日／N日 超過</b>で出すようにしました。あわせて「💡要対応」も<b>17時を過ぎたら「本日の集荷は終了しました。明日いちばんで」</b>に変わります（22時に「本日中に12件」と言われても間に合わないため）。',
       '💰 <b>売上が丸ごと落ちていた注文が344件ありました</b>（Shopeeから金額が付いてこないことがあり、そのまま空で入っていた）。入金データの「買主が払った額」と突き合わせると<b>健全な522件は522件とも完全一致</b>だったので、そこから<b>340件を復元</b>しました。円換算で <b>¥2,528,426</b>（BR 2026-08 ¥1,559,352／BR 2026-07 ¥667,938／PH ¥157,164 ほか）。残り4件は未払いなので売上に数えないのが正しい状態です。GAS側も<b>入金を取り込んだ直後に自動で埋める</b>ようにしたので、今後は放っておいても穴が塞がります。',
       '🎭 <b>デモ表示モードのまま本番データへ書き込むのを止めました</b>。BRの発送済み<b>9件</b>が「サンプル商品 V-549／購入者921／売上が空」で上書きされていました（1回の保存・全件同じ時刻）。経路は特定できなかったので、<b>保存の入口すべて（追加・更新・削除）でデモ中なら中止</b>し、デモを切った直後でもダミー化された値が混ざっていれば止めるようにしました。9件は<b>出品データと入金データから本来の商品名・バリエ名・売上を復元済み</b>です（購入者名だけは復元できないため空にしました）。',
       '💱 <b>実効スプレッドが全国一律3%のままでした</b>。国別に逆算するGAS（syncFxSpread）が<b>一度も走っていなかった</b>ためです（別トリガーを立て忘れると誰も気づけない）。実測して入れ直しました：<b>BR 3.19％／VN 3.25／SG 3.77／TH 3.39／TW 2.95／PH 2.44／MY 2.39</b>（うちShopeeの現地→USD分は0.4〜1.8％、残りはPayoneerの円転2％）。あわせて<b>日次レートの更新の最後で、古ければ自動でスプレッドも測り直す</b>ようにしました。',
