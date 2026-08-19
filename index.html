@@ -2624,6 +2624,59 @@
     });
   }
   const hashSim = (a, b) => { if (!a || !b || a.length !== b.length) return 0; let same = 0; for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++; return same / a.length; };
+
+  // ══ 🔤 写真の中の文字を読む（OCR）══════════════════════════════════════
+  //  ★なぜ要るか：dHash は「同じ写真」しか当たらない。別の出品者が撮った写真は
+  //    背景・角度・光が違うので、**同じ商品でも一致しない**（2026-08-06に確認済み）。
+  //    ゲームソフトは**パッケージにタイトルが大きく印刷されている**ので、
+  //    写真から文字を読んで突き合わせれば「同じ商品・別写真」を拾える（本人指示 2026-08-20）。
+  //  ★ブラウザ側で回す。GASに新しい権限（Drive）を足すと再認証が要るため。
+  //    画像はShopeeのCDNが直取りを弾くので、既存の fetchImgsViaGas（GAS経由）で取る。
+  //  ★1枚あたり1〜3秒かかるので、**名前で候補に挙がった分だけ**に限る。結果は覚える。
+  let _ocrWorker = null, _ocrLoading = null;
+  const _ocrCache = new Map();          // 画像URL → 読み取った文字
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve();
+    if (_ocrLoading) return _ocrLoading;
+    return _ocrLoading = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      s.onload = () => res(); s.onerror = () => rej(new Error('文字読み取りライブラリの読み込みに失敗（オフライン？）'));
+      document.head.appendChild(s);
+    });
+  }
+  async function ocrWorker() {
+    if (_ocrWorker) return _ocrWorker;
+    await loadTesseract();
+    // 日本語パッケージが多いので jpn＋eng。初回だけ辞書のダウンロードで少し待つ（以後はブラウザが覚える）
+    _ocrWorker = await Tesseract.createWorker(['jpn', 'eng']);
+    return _ocrWorker;
+  }
+  // 文字を「比べられる形」にする：記号・空白を落とし、全角半角を揃え、小文字に
+  const ocrKey = (t) => String(t || '').normalize('NFKC').toLowerCase()
+    .replace(/[\s\u3000]+/g, '').replace(/[!-\/:-@\[-`{-~・：－―ー〜。、．，'"]/g, '');
+  async function ocrTexts(urls) {
+    const need = urls.filter(u => u && !_ocrCache.has(u));
+    if (need.length) {
+      const uniq = [...new Set(need)];
+      for (let i = 0; i < uniq.length; i += 6) {
+        const chunk = uniq.slice(i, i + 6);
+        let got = [];
+        try { got = await fetchImgsViaGas(chunk); } catch (_) { got = []; }
+        const w = await ocrWorker();
+        for (let k = 0; k < chunk.length; k++) {
+          const r = got[k];
+          if (!r) { _ocrCache.set(chunk[k], ''); continue; }
+          try {
+            const blob = new Blob([r.bytes], { type: r.mime || 'image/jpeg' });
+            const out = await w.recognize(blob);
+            _ocrCache.set(chunk[k], String(((out || {}).data || {}).text || '').slice(0, 400));
+          } catch (_) { _ocrCache.set(chunk[k], ''); }
+        }
+      }
+    }
+    return urls.map(u => _ocrCache.get(u) || '');
+  }
   // URL群 → 指紋。ShopeeのCDNはブラウザ直取りを弾くのでGAS経由でまとめて取る
   async function hashesFor(urls) {
     const out = new Array(urls.length).fill(null);
@@ -14871,6 +14924,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-20', items: [
+      '🔤 <b>「同じ商品だけど別の写真」も重複として検知できるようにしました</b>（本人要望）。これまでの画像照合は<b>dHash</b>で、<b>同じ写真しか当たりません</b>（別の出品者が撮った写真は背景・角度・光が違うため。2026-08-06に確認済み）。ゲームソフトは<b>パッケージにタイトルが大きく印刷されている</b>ので、<b>写真の中の文字を読んで（OCR）突き合わせる</b>ようにしました。<b>🔤N%</b> がその一致度です（70%以上＝同じ商品の可能性が高い／50〜69%＝似ている）。<br>写真が88%以上一致した組は既に確定なので<b>文字は読みません</b>（無駄に時間を使わない）。読むのは<b>名前で候補に挙がった分だけ</b>——既存の明細画像は数万枚あり、全件の照合は現実的でないためです。文字読み取りは<b>ブラウザ側</b>で動かしています（GASに新しい権限を足すと再認証が必要になるため）。1枚1〜3秒、初回だけ辞書のダウンロードで少し待ちます。まとめて追加の前の確認にも<b>🔤70%以上</b>を含めました。',
       '🛒 <b>メルカリShopsのURLが「商品ページでない」として捨てられていた</b>のを修正（本人指摘）。メルカリShopsには<b>2つの形</b>があり、<code>mercari-shops.com/products/…</code> は通していたのに、メルカリ本体から開いた時の <code>jp.mercari.com/shops/product/…</code> が抜けていました（実測：貼った38件のうち33件が除外）。両方を通します。',
       '🔍 <b>重複の判定から「仕入元URLが既出」を外し、画像の照合を自動にしました</b>（本人指示）。仕入元URLの突合は<b>2026-08-06に「効かない手」として捨てた判定</b>です（同じ商品でも出品者が違えばURLは毎回別物）。それなのに<b>⚠既出という赤字＋入力欄の赤枠</b>で強い警告として出続けていたので、画面から外しました（台帳への記録は残すので後から追えます）。あわせて<b>「🔍画像でも確かめる」を押さなくても自動で走る</b>ようにしました——名前が似ているだけでは別物のことも多く、押さないと確度が上がらないのは<b>「押さないと出ない」形</b>だったためです。全件の画像照合は既存の明細画像が数万枚あって現実的でないので、<b>名前で候補に挙がった分だけ</b>照合します（🖼一致度88%以上＝同じ写真＝重複濃厚／75〜87%＝似ている）。',
       '🖼 <b>まとめて追加が画像アップの通信エラーで止まっていた</b>のを修正（本人の画面で発生）。原因は3つでした。<b>①並列取得(<code>fetchAll</code>)にリトライが無く、12件まとめて投げたうちの1本が落ちるだけで12件ぶんが巻き添え</b>で消えていた → 数回やり直し、それでもダメなら<b>1本ずつに落として、落ちた画像だけ諦めて残りは通す</b>ようにしました。<b>②リトライが3回・合計5秒しかなかった</b> → <b>5回・合計15秒</b>（1→2→4→8秒）まで粘ります。<b>③署名を画像のダウンロード前に作っていた</b> → 取得に手間取ると署名が古くなって弾かれるので、<b>画像を取った後に作る</b >ようにしました。明細画像の一括差し替え・ZIP出力など、画像を並列で扱う4か所すべてに同じ手当てをしています。',
@@ -19512,6 +19566,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 台帳(srcMap)への記録は残す＝あとから追える。重複の判定は下の
                 【明細名の類似 → 画像の一致】でやる。 */ ''}
           ${r.imgSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
+          ${r.txtSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.txtSim >= 70 ? '#d93025' : (r.txtSim >= 50 ? '#e8710a' : '#8a8f98')}" title="${av('写真に写っている文字（パッケージのタイトル）の一致度 ' + r.txtSim + '%。\n写真そのものが違っても【同じ商品】なら、パッケージの文字は同じになります。\n70%以上＝同じ商品の可能性が高い／50〜69%＝似ている／49%以下＝別物の可能性')}">🔤${r.txtSim}%</span>` : ''}
           ${r.same ? `<span class="eb-jump" data-rid="${esc(r.same.rid || '')}" style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap;cursor:pointer;text-decoration:underline dotted" title="${r.same.i}番「${esc(r.same.name)}」と ${r.same.score}% 一致。クリックでその行へ移動します">⚠${r.same.i}番と重複</span>`
             : (r.exists ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="${av('この商品にはもう「' + (r.exists.name || '') + '」という明細があります＝同じものを二重に出そうとしています')}">⚠同名あり</span>`
             : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ「' + esc(String(r.near.cat || '').slice(0, 34)) + '」(item ' + esc(String(r.near.item_id)) + ')'}の「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : ''))}
@@ -19674,6 +19729,24 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 const h1 = got[n * 2], h2 = got[n * 2 + 1];
                 x.r.imgSim = (h1 && h2) ? Math.round(hashSim(h1, h2) * 100) : null;
               });
+              draw();
+              // ★写真が一致しなかった組だけ、次は【写真の中の文字】で確かめる。
+              //   dHashは同じ写真しか当たらないので、別の人が撮った同じ商品はここで拾う。
+              //   一致した組（88%以上）は既に確定なのでOCRしない＝無駄に時間を使わない。
+              const need = tg.filter(x => (x.r.imgSim == null || x.r.imgSim < 88));
+              if (need.length) {
+                try {
+                  ic.textContent = '🔤 写真の文字を読んでいます… 0/' + need.length;
+                  const pairs = [];
+                  need.forEach(x => { pairs.push(x.r.image || ''); pairs.push(x.r.near ? (x.r.near.img || '') : ((rows[x.r.same.i - 1] || {}).image || '')); });
+                  const txts = await ocrTexts(pairs);
+                  need.forEach((x, n) => {
+                    const t1 = ocrKey(txts[n * 2]), t2 = ocrKey(txts[n * 2 + 1]);
+                    x.r.txtSim = (t1.length >= 6 && t2.length >= 6) ? Math.round((simPair(t1, t2) || 0) * 100) : null;
+                    ic.textContent = '🔤 写真の文字を読んでいます… ' + (n + 1) + '/' + need.length;
+                  });
+                } catch (e) { toast('写真の文字読み取りに失敗: ' + (e.message || e), true); }
+              }
               ic.disabled = false; ic.textContent = '🔍 画像でも確かめる（候補だけ）';
               draw();
             };
@@ -19785,7 +19858,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               if (slot - list.length <= 3) {
                 if (!confirm('追加すると ' + (nowN + list.length) + '/' + MODEL_CAP + '件になり、残りは ' + (slot - list.length) + '件です。\n続けますか？')) return;
               } }
-            { const risky = [...bx.querySelectorAll('.ed-brow')].map(rw => rows[+rw.dataset.i]).filter(r => r && (r.same || r.near));
+            { const risky = [...bx.querySelectorAll('.ed-brow')].map(rw => rows[+rw.dataset.i]).filter(r => r && (r.same || r.near || (r.txtSim != null && r.txtSim >= 70)));
               if (risky.length && !confirm('⚠ 重複の可能性がある行が ' + risky.length + '件あります\n\n'
                 + risky.slice(0, 8).map(r => '・' + r.name + (r.same ? '（この中の' + r.same.i + '行目と' + r.same.score + '%一致）' : '（' + (r.near.self ? 'このカタログの「' + r.near.name + '」' : '別カタログの「' + r.near.name + '」') + 'と' + r.near.score + '%一致）')).join('\n')
                 + (risky.length > 8 ? '\n…ほか' + (risky.length - 8) + '件' : '')
