@@ -1241,8 +1241,8 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
   var blobs = [];
   for (var i = 0; i < items.length; i += 25) {
     var part = items.slice(i, i + 25);
-    var rs = UrlFetchApp.fetchAll(part.map(function (x) { return { url: x.url, muteHttpExceptions: true, followRedirects: true }; }));
-    rs.forEach(function (r) { blobs.push(r.getResponseCode() < 400 ? r.getBlob() : null); });
+    var rs = fetchAllRetry_(part.map(function (x) { return { url: x.url, muteHttpExceptions: true, followRedirects: true }; }));
+    rs.forEach(function (r) { blobs.push((r && r.getResponseCode() < 400) ? r.getBlob() : null); });
   }
   // ② Shopeeのmedia_spaceへ並列アップロード（署名はリクエストごとに作る）
   var ids = [], path = '/api/v2/media_space/upload_image';
@@ -1258,8 +1258,9 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
       idx.push(k);
     }
     if (!reqs.length) continue;
-    var rs2 = UrlFetchApp.fetchAll(reqs);
+    var rs2 = fetchAllRetry_(reqs);
     rs2.forEach(function (r2, k2) {
+      if (!r2) return;                      // この1本だけ失敗＝他は通す
       try {
         var j2 = JSON.parse(r2.getContentText());
         var info = (j2.response || {}).image_info || (((j2.response || {}).image_info_list || [])[0]) || {};
@@ -1314,8 +1315,9 @@ function zipVariationImages_(shopId, itemId, cc, jobKey, nos) {
     if (jobCancelled_(jobKey)) throw new Error('中止しました');
     if (jobKey) jobSet_(jobKey, { pct: Math.round(b0 / todo.length * 80), step: '画像を取得中 ' + b0 + '/' + todo.length });
     var part = todo.slice(b0, b0 + 30);
-    var rs = UrlFetchApp.fetchAll(part.map(function (t) { return { url: t.url, muteHttpExceptions: true, followRedirects: true }; }));
+    var rs = fetchAllRetry_(part.map(function (t) { return { url: t.url, muteHttpExceptions: true, followRedirects: true }; }));
     rs.forEach(function (r, k) {
+      if (!r) return;                       // この1本だけ失敗＝他は通す
       var t = part[k];
       try {
         if (r.getResponseCode() >= 400) { ng.push(t.no); return; }
@@ -1588,17 +1590,19 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     var part = items.slice(i, i + 12), reqs = [], idx = [];
     part.forEach(function (x, k) { if (x.image) { reqs.push({ url: x.image, muteHttpExceptions: true, followRedirects: true }); idx.push(i + k); } });
     if (reqs.length) {
-      var rs = UrlFetchApp.fetchAll(reqs), ureqs = [], uidx = [];
+      var rs = fetchAllRetry_(reqs), ureqs = [], uidx = [];
       rs.forEach(function (r, k2) {
-        if (r.getResponseCode() >= 400) return;
+        if (!r || r.getResponseCode() >= 400) return;      // 取れなかった画像はここで落とす（他は通す）
+        // ★署名は【画像を取った後】に作る。先に作ると取得に手間取った分だけ timestamp が古くなる
         var ts = now_(), path = '/api/v2/media_space/upload_image';
         ureqs.push({ url: HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts),
                      method: 'post', muteHttpExceptions: true, payload: { image: r.getBlob() } });
         uidx.push(idx[k2]);
       });
       if (ureqs.length) {
-        var urs = UrlFetchApp.fetchAll(ureqs);
+        var urs = fetchAllRetry_(ureqs);
         urs.forEach(function (r3, k3) {
+          if (!r3) return;                                  // このアップだけ失敗＝画像なしで明細は作る
           try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; } catch (e) {}
         });
       }
@@ -1942,18 +1946,41 @@ function uploadImageData_(body) {
 // ★Googleから外に出る通信は、たまに「使用できないアドレス（Address unavailable）」で落ちる。
 //   コードの誤りではなく一時的な通信断なので、少し待って数回だけ投げ直す（2026-08-13 実際に画像アップで発生）。
 function fetchRetry_(url, opts, tries) {
-  tries = tries || 3;
+  // ★2026-08-20 強化。3回・合計5秒では足りず、画像アップの途中で諦めて
+  //   まとめて追加が止まっていた（本人の画面で発生）。**5回・合計15秒**まで粘る。
+  //   一時的と判断する文言も増やした（Googleの言い回しが環境によって変わるため）。
+  tries = tries || 5;
   var last = null;
   for (var i = 0; i < tries; i++) {
     try { return UrlFetchApp.fetch(url, opts); }
     catch (e) {
       last = e;
       var msg = String((e && e.message) || e);
-      if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out/i.test(msg)) throw e;
-      Utilities.sleep(800 * (i + 1));
+      if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out|一時的|temporarily|unexpected error|接続できません|reset by peer|Service invoked too many times/i.test(msg)) throw e;
+      Utilities.sleep(1000 * Math.pow(2, i));      // 1s → 2s → 4s → 8s
     }
   }
   throw new Error('Shopeeに接続できませんでした（' + String((last && last.message) || last).slice(0, 120) + '）');
+}
+// ★fetchAll（並列取得）は【1本でも通信が落ちると全部まとめて例外】になる。
+//   画像アップは12件ずつ並列で投げているので、たまたま1本が「使用できないアドレス」になるだけで
+//   12件ぶんが巻き添えで消え、まとめて追加が途中で止まっていた（2026-08-20 本人の画面で発生）。
+//   → ①まず fetchAll を数回やり直す ②それでもダメなら【1本ずつ】に落として、
+//      落ちた分だけ null にして残りは通す。全部を巻き添えにしない。
+function fetchAllRetry_(reqs, tries) {
+  tries = tries || 3;
+  for (var i = 0; i < tries; i++) {
+    try { return UrlFetchApp.fetchAll(reqs); }
+    catch (e) {
+      var msg = String((e && e.message) || e);
+      if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out|一時的|temporarily|unexpected error|接続できません|reset by peer/i.test(msg)) throw e;
+      Utilities.sleep(1000 * Math.pow(2, i));
+    }
+  }
+  // 最後の手段：1本ずつ。落ちたものは null にして返す（呼び出し側は null を「その画像だけ失敗」として扱う）
+  return reqs.map(function (r) {
+    try { return fetchRetry_(r.url, r, 3); } catch (e2) { return null; }
+  });
 }
 // 明細(model)のSKUを公式APIで書く。Shopee v2 の update_model を使う。
 // ★このエンドポイントが使えるかは実機で確かめる必要があるため、失敗したらShopeeの返答をそのまま返す
@@ -1971,9 +1998,11 @@ function updateModelSku_(shopId, itemId, list) {
 }
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
 function uploadImageUrl_(imageUrl) {
+  // ★署名は【画像を取ってきた後】に作る。先に作ると、画像のダウンロードで手間取った分だけ
+  //   timestamp が古くなり、Shopee側で署名切れとして弾かれる（リトライで待つほど危なくなる）。
+  var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true }).getBlob();
   var ts = now_(), path = '/api/v2/media_space/upload_image';
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true }).getBlob();
   var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
