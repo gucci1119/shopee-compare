@@ -13736,7 +13736,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   実際に補償が入った41件を見ると **返金額に対して中央値57%** が戻っている
     //   （Non-Receipt が21件で最多＝"Compensation for non-receipt parcel - Add:KRJP"）。
     //   → 32件の回収見込みは **約¥134,000**。赤字の最大の穴なので、その場で絞り込める＋CSVで出せるようにする。
-    const COMP_RATE = 0.57;   // 返金額に対する補償の実績中央値（41件の実測）
+    //   ※ 補償率 COMP_RATE は下の「実質損失」ブロックで宣言しているものを使う（二重に const すると
+    //     同じ関数スコープなので **SyntaxError でポータル全体が起動しなくなる**。2026-08-19に実際に発生）
     const isLostRow = o => /NOT_RECEIPT|ITEM_MISSING|未着|中身/i.test(String(o.retReason || o.reason || ''));
     const lostAll = rowsAll.filter(o => isLostRow(o) && !isCompRow(o));
     if (renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));
@@ -13795,7 +13796,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </details>`;
     })();
     // SLS+補償 待ちリスト：主眼は「補償に頼らない実質損失の把握」。補償は数ヶ月〜大幅遅延（Shopee公式）のため見込み回収は別枠・不確実扱い。
-    const COMP_RATE = 0.5, COMP_OLD_DAYS = 120; // 見込み補償≈返金の50%・120日超は特に遅延
+    // ★2026-08-19 実測で 0.5 → 0.57 に更新。実際に補償が入った41件で、返金額に対する補償の**中央値が57%**だった
+    //   （最多は Non-Receipt の "Compensation for non-receipt parcel - Add:KRJP" 21件）
+    const COMP_RATE = 0.57, COMP_OLD_DAYS = 120; // 見込み補償≈返金の57%・120日超は特に遅延
     const compCard = (() => {
       // SLS+補償の対象は「日本を出た後」の返金のみ（発送前=損失なし/日本国内=商品戻るので保証外）
       const anyRefund = rows.map(o => ({ o, iss: issueMap.get(o.cc + ':' + o.sn) || {} })).filter(x => (x.iss.refund_jpy || 0) > 0);
@@ -14868,6 +14871,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-19', items: [
+      '🚑 <b>ポータルが一時的に起動不能になっていたのを修正</b>（本日の補償の改修で混入）。同じ関数の中で <code>COMP_RATE</code> を<b>2回 const 宣言</b>してしまい、<code>SyntaxError</code> で全体が動かなくなっていました。<b>push前の構文チェックがこれを見逃していた</b>のが本当の問題で、原因は<b>「最初に見つかった &lt;/script&gt; まで」しか検査していなかった</b>こと（JS文字列の中に同じ並びが出てくると、そこから先が素通り）。<b>最後の閉じタグまで丸ごと検査</b>するよう直し、<b>同名constの二重宣言の警告</b>も足しました。補償率は実測に合わせて <b>50%→57%</b> に更新しています。',
       '🔁 <b>二重出品の「どちらを残すか」を実売で判定するようにしました</b>。これまで出品データの販売数（<code>models[].sold</code>）で比べていましたが、実測すると<b>ほぼ0で判定に使えていませんでした</b>（判断できたのは1組だけ）。注文の明細（item_id × 明細名）から数え直したところ、<b>1,858組のうち116組で片側だけが売れている</b>と分かりました（BR96／VN15／PH4／TH1）。残り1,741組は<b>どちらも販売0</b>で材料がないので様子見で構いません。<br>⚠️ あわせて画面に<b>「片方の明細を消すのではなく在庫0にしてください」</b>と明記しました。Shopeeの仕様上<b>明細の削除は一番下しか安全でない</b>（途中を消すと後ろの明細が消える）ためです。',
       '🚨 <b>補償の取りこぼしに「回収見込み額」と申請用CSVを付けました</b>。荷物未着・中身なしなのに補償が入っていない<b>32件</b>、返金額の合計は<b>¥235,891</b>です。実際に補償が入った41件を調べると<b>返金額に対して中央値57%</b>が戻っており（Non-Receiptが21件で最多／<code>Compensation for non-receipt parcel - Add:KRJP</code>）、<b>回収見込みは約¥134,000</b>。⬇申請用CSVで<b>注文番号・返品番号・追跡番号・金額・見込み額</b>を金額の大きい順に書き出せます（追跡番号は32件すべてに入っているので申請に使えます）。',
       '🎮 <b>本体・コントローラ・周辺機器を母数の「小タブ」に分けました</b>（本人指定）。<b>💿ソフト／🎮本体／🕹コントローラ／💾メモリ・カード／🔌ケーブル・充電／🧳ケース・保護／🎧音響／🧸amiibo／📦その他</b>で切り替わり、表の母数・出している・空白・網羅率がその区分の数字になります。<b>ソフトと混ぜると網羅率の意味が変わる</b>ので別枠にしました。本体・周辺機器は作品マスタに載らないため<b>駿河屋の商品数がそのまま母数</b>で、「出している」は自社の明細名を駿河屋と同じ物差しで分類して数えます。全ハード合計＝<b>本体1,236／コントローラ1,558／ケース662／ケーブル659／メモリ246</b>。',

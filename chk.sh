@@ -1,68 +1,38 @@
-#!/bin/zsh
-# 構文チェック（push前に必ず通す）
-#
-# なぜ必要か：2026-08-15 に index.html の角括弧が二重になっただけで
-#   **ポータル全体が起動不能**になった（ログイン画面から進まない）。
-#   ログイン画面は静的HTMLなので、画面が出ること＝正常ではない。
-#   本人に見つけてもらう前に、ここで止める。
-#
-# 仕組み：macOS標準の JXA（osascript -l JavaScript）で new Function(src) を試すだけ。
-#   Node も何も要らない。IIFE 形式のスクリプトならこれで構文エラーが出る。
-#   ※ TDZ（宣言より前で const を使う）は実行時エラーなので**ここでは見つからない**。
-#     それはデプロイ後にブラウザのコンソールを読むこと。
-#
-# 使い方：  ./chk.sh            … index.html と *.gs を全部チェック
-#           ./chk.sh a.gs b.gs  … 指定ファイルだけ
-
+#!/bin/bash
+# push前の構文チェック。index.html と全 .gs をまとめて検査する。
+# ★2026-08-19 全面改訂。以前は「最初に見つかった </script> まで」を切り出して検査しており、
+#   JS文字列の中に </script> が現れると**そこから先を検査していなかった**。
+#   実際 COMP_RATE の二重宣言（同じ関数スコープで const を2回）を見逃し、
+#   デプロイ後にポータル全体が起動不能になった。→ 最後の </script> までを丸ごと検査する。
 set -u
 cd "$(dirname "$0")"
-
-check_js() {   # $1=表示名  $2=JSソースのファイル
-  local name="$1" src="$2"
-  local out
-  out=$(osascript -l JavaScript -e '
-    ObjC.import("Foundation");
-    var p = "'"$src"'";
-    var s = $.NSString.stringWithContentsOfFileEncodingError(p, 4, null).js;
-    try { new Function(s); "OK" } catch (e) { "ERR: " + e.message }
-  ' 2>&1)
-  if [[ "$out" == OK* ]]; then
-    print "  ✅ $name"
-    return 0
-  else
-    print "  ❌ $name  $out"
-    return 1
-  fi
-}
-
-tmp="${TMPDIR:-/tmp}/chk.$$"
-mkdir -p "$tmp"
-ng=0
-
-files=("$@")
-if (( ${#files} == 0 )); then
-  files=(index.html *.gs)
-fi
-
-for f in $files; do
-  [[ -f "$f" ]] || continue
-  if [[ "$f" == *.html ]]; then
-    # <script> の中身だけ取り出す（type付き=テンプレート等は除く）
-    python3 - "$f" "$tmp/page.js" <<'PY'
-import io, re, sys
-src = io.open(sys.argv[1], encoding='utf-8').read()
-parts = re.findall(r'<script(?![^>]*\stype=)[^>]*>(.*?)</script>', src, re.S | re.I)
-io.open(sys.argv[2], 'w', encoding='utf-8').write('\n;\n'.join(parts))
+NG=0
+python3 - << 'PY'
+import io, re, subprocess, sys, glob, os
+def check(name, code):
+    p='/tmp/_chk_%s.js' % re.sub(r'\W','_',name)
+    io.open(p,'w',encoding='utf-8').write(code)
+    r=subprocess.run(['osascript','-l','JavaScript','-e',
+      'var a=$.NSString.alloc.initWithContentsOfFile("%s").js; try{ new Function(a); "OK" }catch(e){ "NG "+e }'%p],
+      capture_output=True,text=True)
+    out=(r.stdout or r.stderr).strip()
+    print('%-28s %s' % (name, out))
+    return out.startswith('OK')
+ok=True
+s=io.open('index.html',encoding='utf-8').read()
+i=s.find('<script')
+if i>=0:
+    j=s.rfind('</script>')                      # ★最後の閉じタグまで（途中で切らない）
+    body=s[s.find('>',i)+1:j]
+    ok &= check('index.html(js)', body)
+    # 同じ名前を const で2回宣言していないか（スコープ違いは許すので、行頭インデントが同じものだけ見る）
+    d={}
+    for m in re.finditer(r'^(\s*)const\s+([A-Z][A-Z0-9_]{2,})\s*=', body, re.M):
+        d.setdefault(m.group(2), []).append(m.group(1))
+    dupe=[k for k,v in d.items() if len(v)>1 and len(set(v))<len(v)]
+    if dupe:
+        print('⚠ 同名の const が同じ深さで複数あります（二重宣言の疑い）: ' + ', '.join(dupe))
+for f in sorted(glob.glob('*.gs')):
+    ok &= check(f, io.open(f,encoding='utf-8').read())
+sys.exit(0 if ok else 1)
 PY
-    check_js "$f" "$tmp/page.js" || ng=1
-  else
-    check_js "$f" "$PWD/$f" || ng=1
-  fi
-done
-
-rm -rf "$tmp"
-if (( ng )); then
-  print "\n構文エラーがあります。push しないでください。"
-  exit 1
-fi
-print "\nすべて OK"
