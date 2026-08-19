@@ -14871,6 +14871,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-20', items: [
+      '💹 <b>「仕入額ごとの採算」を利益ページに追加</b>。全期間を実測したところ、<b>仕入が高いほど赤字率が跳ね上がる</b>と分かりました：<b>¥0〜2,000 4%／〜4,000 7%／〜6,000 17%／〜10,000 26%／〜20,000 <span style="color:#b3261e">50%</span>／¥20,000〜 67%</b>。しかも1件あたりの粗利は<b>¥10,000までどの帯もほぼ¥1,400で一定</b>なのに、そこを超えると<b>ほぼ0</b>になります。＝<b>高額品は「当たれば大きい」ではなく、いまの値付けだと割に合っていない</b>。<br>あわせて<b>赤字の原因わけ</b>も実測しました（2026-04以降・粗利が判明した890件）：<b>返金起因 21件 ¥77,548</b>／<b>値付け 81件 ¥85,262</b>。<b style="color:#b3261e">以前「赤字は値付けでなく返品が主因」と報告しましたが、件数でも金額でも値付けの方が多く、誤りでした</b>。訂正します。',
       '📌 <b>バリエーションの▶を押すと画面が一番上に戻っていた</b>のを修正（本人指摘）。一覧を作り直す作りなので、押した行がどこにあったか分からなくなっていました。<b>押した行の画面上の位置を覚えておいて、開いたあと同じ高さに戻す</b>ようにしたので、<b>その場で開いて見えます</b>。',
       '📅 <b>出品一覧に「いつ出品したか」を表示</b>（本人要望）。商品名の下に <b>📅出品日・◯日前</b> が出ます（Shopeeの <code>create_time</code>）。<b>180日以上たったものは色を変えて</b>目立たせます＝「出してから半年売れていない」がその場で分かります。カーソルを当てると<b>最終更新日</b>（Shopee側で価格・在庫などが変わった日）も出ます。並び替えの「出品日（新しい/古い）」と合わせて使えます。',
     ] },
@@ -30633,6 +30634,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!orders.length) { body.innerHTML = '<div class="smd-dim">該当する注文がありません（未同期の月は💰転記タブでDB同期を実行）</div>'; return; }
     if (pf.view === 'sum') {
       pfRenderSummary(body, orders);
+      try { body.insertAdjacentHTML('beforeend', pfCostBandHtml(orders)); } catch (_) { }
       // 🚫キャンセル段階ボタン（order_issues.stage を更新＝↩️返品ページと同じデータ）
       body.querySelectorAll('.pf-cank').forEach(el => el.addEventListener('click', () => {
         el.disabled = true; pfSetStage(el.dataset.cc, el.dataset.sn, el.dataset.k);
@@ -31177,6 +31179,49 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<tr class="pf-total"><td>合計</td><td style="text-align:right">${cans.length}</td><td colspan="4" style="text-align:right">日本を出た後 ${lostN}件</td><td style="text-align:right;color:#d93025">${lostJpy ? '−' + fmtJpy(lostJpy) : '—'}</td></tr></table>` +
       `<div style="font-weight:700;font-size:12.5px;margin:12px 0 4px">要仕分け（${need.length}件）</div>` +
       `<table class="pf-table"><tr><th>国</th><th>Order ID</th><th>キャンセル理由</th><th>仕入・伝票</th><th>段階（押して確定）</th></tr>${list}</table></div>`;
+  }
+
+  // 💹 仕入額の帯ごとの採算。★2026-08-19 実測で【仕入が高いほど赤字率が跳ね上がる】と判明した。
+  //   ¥0〜2,000 4% ／ 〜4,000 7% ／ 〜6,000 17% ／ 〜10,000 26% ／ **〜20,000 50%** ／ 20,000〜 67%。
+  //   1件あたりの粗利は ¥10,000 まではどの帯もほぼ ¥1,400 で一定なのに、そこを超えると **ほぼ0**になる。
+  //   ＝高額品は「当たれば大きい」のではなく、いまの値付けでは**割に合っていない**。
+  //   返金起因（入金がマイナス）は別問題なので、ここでは**入金がプラスの注文だけ**で見る。
+  function pfCostBandHtml(orders) {
+    const B = [[0, 2000], [2000, 4000], [4000, 6000], [6000, 10000], [10000, 20000], [20000, Infinity]];
+    const rows = [];
+    (orders || []).forEach(o => {
+      const dep = pfDep(o), cost = pfCost(o);
+      if (dep == null || cost == null || !cost) return;
+      const fr = ordRate(o) || 0;
+      const d = dep * fr + (pfPaypal(o) || 0);
+      if (d <= 0) return;                                  // 返金起因は値付けの話ではないので外す
+      rows.push({ g: d - cost, cost: cost });
+    });
+    if (rows.length < 20) return '';
+    const cell = (b) => {
+      const g = rows.filter(r => r.cost >= b[0] && r.cost < b[1]);
+      if (!g.length) return null;
+      const ng = g.filter(r => r.g < 0).length;
+      const avg = Math.round(g.reduce((s, r) => s + r.g, 0) / g.length);
+      const rate = Math.round(100 * ng / g.length);
+      const lab = b[1] === Infinity ? ('¥' + b[0].toLocaleString() + '〜') : ('¥' + b[0].toLocaleString() + '〜' + b[1].toLocaleString());
+      const col = rate >= 40 ? '#b3261e' : rate >= 20 ? '#e8710a' : '#1a7f37';
+      return `<tr><td style="padding:3px 8px;white-space:nowrap">${lab}</td>
+        <td style="padding:3px 8px;text-align:right">${g.length}</td>
+        <td style="padding:3px 8px;text-align:right;color:${col};font-weight:700">${ng}（${rate}%）</td>
+        <td style="padding:3px 8px;text-align:right;color:${avg < 300 ? '#b3261e' : '#333'};font-weight:700">${fmtJpy(avg)}</td></tr>`;
+    };
+    const body2 = B.map(cell).filter(Boolean).join('');
+    if (!body2) return '';
+    return `<div style="margin-top:12px;padding:9px 12px;border:1px solid #e3e6ec;border-radius:10px;background:#fbfcfe">
+      <b style="font-size:12.5px">💹 仕入額ごとの採算</b>
+      <span class="smd-dim" style="font-size:11px;margin-left:8px">返金で赤字になった分は除いています（値付けの話だけ）。1件あたりの粗利がどの帯でいくら残るか。</span>
+      <table style="border-collapse:collapse;font-size:11.5px;margin-top:6px">
+        <tr style="color:#8a8f98"><th style="text-align:left;padding:3px 8px">仕入額</th><th style="text-align:right;padding:3px 8px">件数</th><th style="text-align:right;padding:3px 8px">赤字</th><th style="text-align:right;padding:3px 8px">平均粗利/件</th></tr>
+        ${body2}
+      </table>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:5px">💡 全期間の実測では <b>¥10,000を超えると赤字率が50%・平均粗利がほぼ0</b> になります（¥10,000までは帯によらず1件¥1,400前後で一定）。<b>高額品は「当たれば大きい」ではなく、いまの値付けだと割に合っていない</b>という形です。仕入れる時の上限や、高額帯だけROIを上げることを検討してください。</div>
+    </div>`;
   }
 
   function pfRenderSummary(body, orders) {
