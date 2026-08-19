@@ -1406,8 +1406,20 @@
     const html = await bridgeRequest('GET', url, null, { timeout: 20000 });
     if (!html || html.length < 500) throw new Error('空/短すぎ');
     const title = metaFromHtml(html, 'og:title').replace(/\s*by メルカリ\s*$/, '').trim();
+    // ★価格の拾い方。メルカリShopsは og の product:price:amount が無く、
+    //   JSONの形も "price":{"amount":1800} のように入れ子のことがあるため何通りか試す
+    //   （実測 2026-08-20：Shopsの36件中31件で価格が取れず、出品価格が空のままだった）。
     let price = parseInt(String(metaFromHtml(html, 'product:price:amount') || '').replace(/[^0-9]/g, ''), 10) || 0;
     if (!price) { const mp = html.match(/"price"\s*:\s*"?(\d{2,9})"?/); if (mp) price = parseInt(mp[1], 10) || 0; }
+    if (!price) { const mp = html.match(/"price"\s*:\s*\{[^{}]*?"(?:amount|value|price)"\s*:\s*"?(\d{2,9})"?/); if (mp) price = parseInt(mp[1], 10) || 0; }
+    if (!price) { const mp = html.match(/"(?:sellPrice|itemPrice|priceIncludingTax|salePrice|amountIncludingTax)"\s*:\s*"?(\d{2,9})"?/i); if (mp) price = parseInt(mp[1], 10) || 0; }
+    if (!price) {
+      // 最後の手段：本文に出ている「¥1,800」「1,800円」の【最初の1つ】を使う。
+      //   送料やクーポンを拾うことがあるので、上のJSONで取れた時は使わない。
+      const plain = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ');
+      const mp = plain.match(/[¥￥]\s?([0-9][0-9,]{1,8})|([0-9][0-9,]{1,8})\s?円/);
+      if (mp) price = parseInt(String(mp[1] || mp[2]).replace(/,/g, ''), 10) || 0;
+    }
     const image = metaFromHtml(html, 'og:image');
     if (!title && !image) throw new Error('og情報なし');
     return { title, price, image };
@@ -14924,6 +14936,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-20', items: [
+      '🚑 <b>画像の照合が終わらず何度も0からやり直していた</b>のを修正（本人指摘）。取得できなかった組を「まだ照合していない」と同じ扱い（空）にしていたため、描き直すたびに自動照合が走って<b>永久ループ</b>していました。取得できなかったことも記録し、<b>自動照合はこの行セットにつき1回だけ</b>にしました。GASの通信枠を無駄に使っていたので、その分も止まります。',
+      '💴 <b>メルカリShopsで仕入額が取れず「価格が空」が大量に出ていた</b>のを修正（実測：36件中31件）。Shopsは <code>product:price:amount</code> を持っておらず、JSONの形も <code>"price":{"amount":1800}</code> のように入れ子で、いままでの拾い方に当たりませんでした。<b>入れ子・別名（sellPrice等）・本文の「¥1,800」表記</b>まで順に試すようにしました。あわせて<b>「↻ 取れなかった行だけ取り直す」</b>が<b>価格が空の行にも効く</b>ようになり、件数も出ます（これまでは読取失敗の行だけでした）。',
       '🔤 <b>「同じ商品だけど別の写真」も重複として検知できるようにしました</b>（本人要望）。これまでの画像照合は<b>dHash</b>で、<b>同じ写真しか当たりません</b>（別の出品者が撮った写真は背景・角度・光が違うため。2026-08-06に確認済み）。ゲームソフトは<b>パッケージにタイトルが大きく印刷されている</b>ので、<b>写真の中の文字を読んで（OCR）突き合わせる</b>ようにしました。<b>🔤N%</b> がその一致度です（70%以上＝同じ商品の可能性が高い／50〜69%＝似ている）。<br>写真が88%以上一致した組は既に確定なので<b>文字は読みません</b>（無駄に時間を使わない）。読むのは<b>名前で候補に挙がった分だけ</b>——既存の明細画像は数万枚あり、全件の照合は現実的でないためです。文字読み取りは<b>ブラウザ側</b>で動かしています（GASに新しい権限を足すと再認証が必要になるため）。1枚1〜3秒、初回だけ辞書のダウンロードで少し待ちます。まとめて追加の前の確認にも<b>🔤70%以上</b>を含めました。',
       '🛒 <b>メルカリShopsのURLが「商品ページでない」として捨てられていた</b>のを修正（本人指摘）。メルカリShopsには<b>2つの形</b>があり、<code>mercari-shops.com/products/…</code> は通していたのに、メルカリ本体から開いた時の <code>jp.mercari.com/shops/product/…</code> が抜けていました（実測：貼った38件のうち33件が除外）。両方を通します。',
       '🔍 <b>重複の判定から「仕入元URLが既出」を外し、画像の照合を自動にしました</b>（本人指示）。仕入元URLの突合は<b>2026-08-06に「効かない手」として捨てた判定</b>です（同じ商品でも出品者が違えばURLは毎回別物）。それなのに<b>⚠既出という赤字＋入力欄の赤枠</b>で強い警告として出続けていたので、画面から外しました（台帳への記録は残すので後から追えます）。あわせて<b>「🔍画像でも確かめる」を押さなくても自動で走る</b>ようにしました——名前が似ているだけでは別物のことも多く、押さないと確度が上がらないのは<b>「押さないと出ない」形</b>だったためです。全件の画像照合は既存の明細画像が数万枚あって現実的でないので、<b>名前で候補に挙がった分だけ</b>照合します（🖼一致度88%以上＝同じ写真＝重複濃厚／75〜87%＝似ている）。',
@@ -19565,8 +19579,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
                 それなのに赤字＋赤枠で強い警告として出続けていたので、画面から外した（2026-08-20 本人指示）。
                 台帳(srcMap)への記録は残す＝あとから追える。重複の判定は下の
                 【明細名の類似 → 画像の一致】でやる。 */ ''}
-          ${r.imgSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
-          ${r.txtSim != null ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.txtSim >= 70 ? '#d93025' : (r.txtSim >= 50 ? '#e8710a' : '#8a8f98')}" title="${av('写真に写っている文字（パッケージのタイトル）の一致度 ' + r.txtSim + '%。\n写真そのものが違っても【同じ商品】なら、パッケージの文字は同じになります。\n70%以上＝同じ商品の可能性が高い／50〜69%＝似ている／49%以下＝別物の可能性')}">🔤${r.txtSim}%</span>` : ''}
+          ${(r.imgSim != null && r.imgSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
+          ${(r.txtSim != null && r.txtSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.txtSim >= 70 ? '#d93025' : (r.txtSim >= 50 ? '#e8710a' : '#8a8f98')}" title="${av('写真に写っている文字（パッケージのタイトル）の一致度 ' + r.txtSim + '%。\n写真そのものが違っても【同じ商品】なら、パッケージの文字は同じになります。\n70%以上＝同じ商品の可能性が高い／50〜69%＝似ている／49%以下＝別物の可能性')}">🔤${r.txtSim}%</span>` : ''}
           ${r.same ? `<span class="eb-jump" data-rid="${esc(r.same.rid || '')}" style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap;cursor:pointer;text-decoration:underline dotted" title="${r.same.i}番「${esc(r.same.name)}」と ${r.same.score}% 一致。クリックでその行へ移動します">⚠${r.same.i}番と重複</span>`
             : (r.exists ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="${av('この商品にはもう「' + (r.exists.name || '') + '」という明細があります＝同じものを二重に出そうとしています')}">⚠同名あり</span>`
             : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ「' + esc(String(r.near.cat || '').slice(0, 34)) + '」(item ' + esc(String(r.near.item_id)) + ')'}の「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : ''))}
@@ -19638,7 +19652,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 <span class="smd-dim" style="font-size:10.5px">※出品価格も自動で計算し直します（手で直した価格も上書きされます）</span>
               </div>
               <div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px ${BW.no + BW.img + 10}px"><span style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px">明細名</span><span style="width:${BW.cost}px;flex:none;text-align:right">仕入¥</span><span style="width:${BW.wg}px;flex:none;text-align:right">重量g</span><span style="width:${BW.price}px;flex:none;text-align:right">出品価格</span><span style="width:${BW.stock}px;flex:none;text-align:right">在庫</span><span style="width:${BW.prof}px;flex:none;text-align:right">取れる利益</span><span style="width:${BW.st}px;flex:none">状態</span><span style="width:${BW.del}px;flex:none"></span></div>`
-              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkimgchk smd-btn" style="font-size:11px;padding:6px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700;${rows.some(r => r.near || r.same) ? '' : 'display:none'}">🔍 画像でも確かめる（候補だけ）</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err) ? '' : 'display:none'}">↻ 失敗した行だけ取り直す</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
+              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button><button class="ed-bulkimgchk smd-btn" style="font-size:11px;padding:6px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700;${rows.some(r => r.near || r.same) ? '' : 'display:none'}">🔍 画像でも確かめる（候補だけ）</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err || !(parseFloat(r.cost) > 0)) ? '' : 'display:none'}" title="読み取りに失敗した行と、仕入が取れなかった行（価格が空）をもう一度取りに行きます">↻ 取れなかった行だけ取り直す（${rows.filter(r => r.err || !(parseFloat(r.cost) > 0)).length}）</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
@@ -19727,13 +19741,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               }
               tg.forEach((x, n) => {
                 const h1 = got[n * 2], h2 = got[n * 2 + 1];
-                x.r.imgSim = (h1 && h2) ? Math.round(hashSim(h1, h2) * 100) : null;
+                // ★取れなかった時に null のままにすると「まだ照合していない」と見なされ、
+                //   描き直すたびに自動照合が走って**永久ループ**になる（2026-08-20 実際に発生）。
+                //   取れなかったことも -1 として記録する。表示は 0 以上の時だけ。
+                x.r.imgSim = (h1 && h2) ? Math.round(hashSim(h1, h2) * 100) : -1;
               });
               draw();
               // ★写真が一致しなかった組だけ、次は【写真の中の文字】で確かめる。
               //   dHashは同じ写真しか当たらないので、別の人が撮った同じ商品はここで拾う。
               //   一致した組（88%以上）は既に確定なのでOCRしない＝無駄に時間を使わない。
-              const need = tg.filter(x => (x.r.imgSim == null || x.r.imgSim < 88));
+              const need = tg.filter(x => (x.r.imgSim == null || x.r.imgSim < 88) && x.r.txtSim == null);
               if (need.length) {
                 try {
                   ic.textContent = '🔤 写真の文字を読んでいます… 0/' + need.length;
@@ -19742,7 +19759,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                   const txts = await ocrTexts(pairs);
                   need.forEach((x, n) => {
                     const t1 = ocrKey(txts[n * 2]), t2 = ocrKey(txts[n * 2 + 1]);
-                    x.r.txtSim = (t1.length >= 6 && t2.length >= 6) ? Math.round((simPair(t1, t2) || 0) * 100) : null;
+                    x.r.txtSim = (t1.length >= 6 && t2.length >= 6) ? Math.round((simPair(t1, t2) || 0) * 100) : -1;
                     ic.textContent = '🔤 写真の文字を読んでいます… ' + (n + 1) + '/' + need.length;
                   });
                 } catch (e) { toast('写真の文字読み取りに失敗: ' + (e.message || e), true); }
@@ -19754,11 +19771,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             // ★候補が出たら【自動で】画像まで照合する（本人指示 2026-08-20「出品時にも画像判定で重複検知」）。
             //   名前が似ているだけでは別物のことも多く、押さないと確度が上がらないのは「押さないと出ない」形。
             //   全件は無理（既存の明細画像が数万枚）なので、名前で挙がった候補だけ。
-            if (ic && rows.some(r => (r.near || r.same) && r.imgSim == null)) setTimeout(() => { try { runImgCheck(); } catch (_) { } }, 300);
+            // ★自動照合は【この行セットにつき1回だけ】。runImgCheck の中で draw() すると
+            //   ここがまた走るので、印を付けておかないと延々と繰り返す。
+            if (ic && !rows._imgAuto && rows.some(r => (r.near || r.same) && r.imgSim == null)) {
+              rows._imgAuto = true;
+              setTimeout(() => { try { runImgCheck(); } catch (_) { } }, 300);
+            }
           }
           { const rb = bx.querySelector('.ed-bulkretry');
             if (rb) rb.addEventListener('click', async () => {
-              const idx = rows.map((r6, i6) => r6.err ? i6 : -1).filter(i6 => i6 >= 0);
+              // ★「読取失敗」だけでなく【仕入が取れなかった行】も取り直す。
+              //   メルカリShopsは価格の入り方が違って空になることがあり、そこを手で埋めるのは大変（2026-08-20）。
+              const idx = rows.map((r6, i6) => (r6.err || !(parseFloat(r6.cost) > 0)) ? i6 : -1).filter(i6 => i6 >= 0);
               if (!idx.length) return;
               rb.disabled = true; bAbort = false;
               const wg6 = wDefB(), ro6 = roiB();
