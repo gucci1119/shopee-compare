@@ -14868,6 +14868,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-19', items: [
+      '🔁 <b>二重出品の「どちらを残すか」を実売で判定するようにしました</b>。これまで出品データの販売数（<code>models[].sold</code>）で比べていましたが、実測すると<b>ほぼ0で判定に使えていませんでした</b>（判断できたのは1組だけ）。注文の明細（item_id × 明細名）から数え直したところ、<b>1,858組のうち116組で片側だけが売れている</b>と分かりました（BR96／VN15／PH4／TH1）。残り1,741組は<b>どちらも販売0</b>で材料がないので様子見で構いません。<br>⚠️ あわせて画面に<b>「片方の明細を消すのではなく在庫0にしてください」</b>と明記しました。Shopeeの仕様上<b>明細の削除は一番下しか安全でない</b>（途中を消すと後ろの明細が消える）ためです。',
       '🚨 <b>補償の取りこぼしに「回収見込み額」と申請用CSVを付けました</b>。荷物未着・中身なしなのに補償が入っていない<b>32件</b>、返金額の合計は<b>¥235,891</b>です。実際に補償が入った41件を調べると<b>返金額に対して中央値57%</b>が戻っており（Non-Receiptが21件で最多／<code>Compensation for non-receipt parcel - Add:KRJP</code>）、<b>回収見込みは約¥134,000</b>。⬇申請用CSVで<b>注文番号・返品番号・追跡番号・金額・見込み額</b>を金額の大きい順に書き出せます（追跡番号は32件すべてに入っているので申請に使えます）。',
       '🎮 <b>本体・コントローラ・周辺機器を母数の「小タブ」に分けました</b>（本人指定）。<b>💿ソフト／🎮本体／🕹コントローラ／💾メモリ・カード／🔌ケーブル・充電／🧳ケース・保護／🎧音響／🧸amiibo／📦その他</b>で切り替わり、表の母数・出している・空白・網羅率がその区分の数字になります。<b>ソフトと混ぜると網羅率の意味が変わる</b>ので別枠にしました。本体・周辺機器は作品マスタに載らないため<b>駿河屋の商品数がそのまま母数</b>で、「出している」は自社の明細名を駿河屋と同じ物差しで分類して数えます。全ハード合計＝<b>本体1,236／コントローラ1,558／ケース662／ケーブル659／メモリ246</b>。',
       '🎯 <b>母数の計算から作品マスタ(Wikidata)を外しました</b>。全世界の作品が入るうえDL判定が当てにならず、<b>WiiUではDL印を引いても339本</b>と出ていました。実際は<b>任天堂IRとWikipediaが一致する113本</b>で、駿河屋の在庫106本ともほぼ一致します（Wikidataだけ3倍に外れる）。母数は<b>「駿河屋の取扱数」と「日本の発売本数」の多い方</b>に統一しました。Wikidataは一覧の中身（英語名・発売年）の補助として残します。',
@@ -21710,8 +21711,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   ★色名や注記（white／available only on amazon 等）は同名でも別商品なので除く。
   //     実測で弾かないとPHの上位が color だらけになる（2,511件→2,228件）。
   const DUP_GENERIC = /^(black|white|red|blue|green|yellow|pink|purple|violet|gray|grey|silver|gold|navy|orange|brown|clear|multi|set|used|new|other|none|na|随時|色|ランダム)$|^(available only on|no amazon only|amazon only)/i;
+  // ★どちらを残すかは【その明細が実際に売れたか】で決める。
+  //   出品データの models[].sold は 0 のことが多く（実測：判定に使えたのは1組だけ）、
+  //   注文の明細（item_id × 明細名）から数え直すと **116組**で片側だけが売れていると分かった。
+  //   注文はページを開いた時に1回だけ読む（画面の state には未発送ぶんしか無いため、DBから全件）。
+  let _dupSold = null;
+  async function ensureDupSold() {
+    if (_dupSold) return _dupSold;
+    const m = new Map();
+    try {
+      const rows = await sbGetAll('orders', 'select=items,tab');
+      (rows || []).forEach(o => {
+        if (o.tab === 600) return;                     // キャンセルは数えない
+        (o.items || []).forEach(it => { if (!it.item_id) return;
+          const k = String(it.item_id) + '|' + tmKey(it.variation || '');
+          m.set(k, (m.get(k) || 0) + 1); });
+      });
+    } catch (_) { }
+    return _dupSold = m;
+  }
+  const dupSoldMap = () => _dupSold || new Map();
   function tmDupList(hw) {
     const per = {};
+    const soldMap = dupSoldMap();
     Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
       if (hw && hwOf((r.name || '') + ' ' + (r.parent_sku || '')) !== hw) return;
       (r.models || []).forEach(m => {
@@ -21721,8 +21743,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (!k || k.length < 6 || DUP_GENERIC.test(raw) || DUP_GENERIC.test(k)) return;
         per[cc] = per[cc] || {};
         // ★どちらを残すか決めるには【売れているか】が要る。明細ごとの数字を持たせる
+        // 注文から数えた実売を優先し、無ければ出品データの数字で代用
+        const ordSold = soldMap.get(String(r.item_id) + '|' + k) || 0;
         (per[cc][k] = per[cc][k] || []).push({ item_id: r.item_id, name: r.name || '', opt: raw,
-          sold: Number(m.sold || 0) || 0, stock: Number(m.stock || 0) || 0 });
+          sold: ordSold || (Number(m.sold || 0) || 0), ordSold: ordSold, stock: Number(m.stock || 0) || 0 });
       });
     }));
     const out = [];
@@ -22278,12 +22302,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.ja || x.en || '')}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
       </div>
     </div>`;
+    await ensureDupSold();                      // ★どちらを残すかの判定に実売が要る
     const dups = tmDupList(hw), dupN = dups.length;
     const dupPanel = () => {
       if (!dups.length) return '<span class="smd-dim" style="font-size:12px">同じ明細名を二重に出しているものはありません 🎉</span>';
       const q3 = (lst.tmQ || '').toLowerCase().trim();
       const show = (q3 ? dups.filter(d => d.opt.toLowerCase().includes(q3)) : dups).slice(0, 120);
-      return `<div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">同じ国の中で、<b>同じ明細名が別のカタログにある</b>ものです（＝同じ商品を二重に出している疑い）。同じ商品が検索結果に並ぶと<b>片方が売れ残ります</b>。色名や注記は同名でも別商品なので除いています。</div>
+      const judged = dups.filter(d => (d.rows[0] || {}).sold > 0 && d.rows.some(x => !x.sold));
+      return `<div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">同じ国の中で、<b>同じ明細名が別のカタログにある</b>ものです（＝同じ商品を二重に出している疑い）。同じ商品が検索結果に並ぶと<b>片方が売れ残ります</b>。色名や注記は同名でも別商品なので除いています。
+        <br><b style="color:#b3261e">どちらを残すかは「その明細が実際に売れたか」で判定</b>しています（注文の明細から数え直し）。<b>${judged.length}組</b>は片側だけが売れていて判断できます。残りは<b>どちらも販売0</b>で材料がないので、様子見で構いません。
+        <br>⚠️ <b>片方の明細を消すのではなく「在庫0」にしてください</b>。Shopeeの仕様上、<b>明細の削除は一番下しか安全でない</b>（途中を消すと後ろの明細が消える）ためです。</div>
         <div style="display:flex;flex-direction:column;gap:5px">${show.map(d => `<div style="border:1px solid #f3d6d3;background:#fffaf9;border-radius:8px;padding:5px 9px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <span class="ord-cc" style="background:${(regionByCc(d.cc) || {}).color || '#888'};padding:1px 6px">${esc(d.cc)}</span>
           <b style="font-size:12px">${esc(d.opt)}</b>
