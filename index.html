@@ -13732,8 +13732,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const filteredN = beforeF - rowsView.length;
     if (rtab === 'refund' && renderReturns._showCxl !== true) { rowsView = rowsView.filter(o => { const c = retStatusOf(o) === 'CANCELLED'; if (c) cxlHidden++; return !c; }); }
     // 🚨 補償の取りこぼし＝荷物未着・中身なしなのに補償が入っていないもの。
-    //   実測(2026-08-17)：未着41件のうち**補償がついたのは2件だけ**、32件が未回収で仕入額の合計¥41,576。
-    //   赤字の最大の穴なので、その場で絞り込めるようにする。
+    //   実測(2026-08-19)：**32件・返金額の合計 ¥235,891** が未回収。
+    //   実際に補償が入った41件を見ると **返金額に対して中央値57%** が戻っている
+    //   （Non-Receipt が21件で最多＝"Compensation for non-receipt parcel - Add:KRJP"）。
+    //   → 32件の回収見込みは **約¥134,000**。赤字の最大の穴なので、その場で絞り込める＋CSVで出せるようにする。
+    const COMP_RATE = 0.57;   // 返金額に対する補償の実績中央値（41件の実測）
     const isLostRow = o => /NOT_RECEIPT|ITEM_MISSING|未着|中身/i.test(String(o.retReason || o.reason || ''));
     const lostAll = rowsAll.filter(o => isLostRow(o) && !isCompRow(o));
     if (renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));
@@ -13930,7 +13933,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       pageNav(rowsView.length, retPer, retPage);
     const lostToggle = lostAll.length ? `<div style="margin:0 4px 8px;padding:6px 10px;background:#fff6f5;border:1px solid #f3d6d3;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <b style="font-size:12px;color:#b3261e">🚨 補償の取りこぼし ${lostAll.length}件</b>
-      <span class="smd-dim" style="font-size:11px">荷物未着・中身なしなのに<b>補償が入っていない</b>ものです。SLS+半額保証の対象なので、Shopeeへ申請すれば取り戻せる可能性があります。</span>
+      ${(() => { const g = lostAll.reduce((s2, o) => s2 + (Number(o.refund_jpy || o._refundJpy || 0) || 0), 0);
+        return g ? `<b style="font-size:12px;color:#b3261e">返金額 ${fmtJpy(g)} ／ 回収見込み <span style="color:#188038">${fmtJpy(Math.round(g * COMP_RATE))}</span></b>` : ''; })()}
+      <span class="smd-dim" style="font-size:11px">荷物未着・中身なしなのに<b>補償が入っていない</b>ものです。実際に補償が入った41件では<b>返金額の中央値57%</b>が戻っています（Non-Receiptが最多）。Shopeeへ申請すれば取り戻せる可能性があります。</span>
+      <button class="smd-btn" id="ret-lostcsv" style="font-size:11px;padding:2px 9px;border-color:#b3261e;color:#b3261e;font-weight:700" title="申請用に、注文番号・返品番号・追跡番号・金額を並べたCSVを書き出します">⬇ 申請用CSV</button>
       <label style="font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;margin-left:auto"><input type="checkbox" id="ret-lostonly" ${renderReturns._lostOnly === true ? 'checked' : ''}>これだけ表示</label>
     </div>` : '';
     const cxlToggle = (rtab === 'refund') ? `<div style="margin:0 4px 8px"><label style="font-size:12px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:5px" title="返金リクエストが取消(CANCELLED)された行＝買い手が申請を取り消した＝存在しないリクエスト。既定では隠しています"><input type="checkbox" id="ret-showcxl" ${renderReturns._showCxl === true ? 'checked' : ''}>🚫取消された返金リクエストも表示${cxlHidden ? `<span class="smd-dim">（${cxlHidden}件を非表示中）</span>` : ''}</label>
@@ -14000,6 +14006,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.querySelectorAll('.ret-tab').forEach(el => el.addEventListener('click', () => { renderReturns._tab = el.dataset.tab; renderReturns._page = 1; renderReturns(); }));
     { const cx = body.querySelector('#ret-showcxl'); if (cx) cx.addEventListener('change', () => { renderReturns._showCxl = cx.checked; renderReturns._page = 1; renderReturns(); }); }
     { const lo = body.querySelector('#ret-lostonly'); if (lo) lo.addEventListener('change', () => { renderReturns._lostOnly = lo.checked; renderReturns._page = 1; renderReturns(); }); }
+    // ⬇ 申請用CSV：Shopeeへ補償を申請するのに要る項目だけを、金額の大きい順に並べて出す。
+    //   （実測で補償は返金額の中央値57%。見込み額も入れて、どれから出すか決められるようにする）
+    { const lc = body.querySelector('#ret-lostcsv'); if (lc) lc.addEventListener('click', () => {
+        const rs = lostAll.slice().sort((a2, b2) => (Number(b2.refund_jpy || 0) || 0) - (Number(a2.refund_jpy || 0) || 0));
+        const head = ['国', '注文番号', '返品番号', '注文日', '追跡番号', '理由', '返金額(現地)', '通貨', '返金額(円)', '回収見込み(円)', '商品名', '購入者'];
+        const out = [head].concat(rs.map(o => {
+          const it = (o.items || [])[0] || {};
+          const j = Number(o.refund_jpy || 0) || 0;
+          return [o.cc, o.sn, o.ret_sn || o.return_sn || '', o.order_date || snToDate(o.sn) || '', o.tracking || '',
+            retReasonJa(o.ret_reason) || o.ret_reason || '', o.refund_amount != null ? o.refund_amount : '', o.currency || '',
+            j || '', j ? Math.round(j * COMP_RATE) : '', it.name || '', o.buyer || ''];
+        }));
+        downloadCsv('補償申請_取りこぼし_' + jstDate(Date.now()) + '.csv', out);
+        try { logAct('返品', '補償申請CSV', '', lostAll.length + '件'); } catch (_) {}
+      }); }
     wirePageNav(body, p => { renderReturns._page = p; renderReturns(); });
     // ハンドラ
     body.querySelectorAll('.ri-kind').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { kind: e.target.value })));
@@ -14847,6 +14868,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-19', items: [
+      '🚨 <b>補償の取りこぼしに「回収見込み額」と申請用CSVを付けました</b>。荷物未着・中身なしなのに補償が入っていない<b>32件</b>、返金額の合計は<b>¥235,891</b>です。実際に補償が入った41件を調べると<b>返金額に対して中央値57%</b>が戻っており（Non-Receiptが21件で最多／<code>Compensation for non-receipt parcel - Add:KRJP</code>）、<b>回収見込みは約¥134,000</b>。⬇申請用CSVで<b>注文番号・返品番号・追跡番号・金額・見込み額</b>を金額の大きい順に書き出せます（追跡番号は32件すべてに入っているので申請に使えます）。',
       '🎮 <b>本体・コントローラ・周辺機器を母数の「小タブ」に分けました</b>（本人指定）。<b>💿ソフト／🎮本体／🕹コントローラ／💾メモリ・カード／🔌ケーブル・充電／🧳ケース・保護／🎧音響／🧸amiibo／📦その他</b>で切り替わり、表の母数・出している・空白・網羅率がその区分の数字になります。<b>ソフトと混ぜると網羅率の意味が変わる</b>ので別枠にしました。本体・周辺機器は作品マスタに載らないため<b>駿河屋の商品数がそのまま母数</b>で、「出している」は自社の明細名を駿河屋と同じ物差しで分類して数えます。全ハード合計＝<b>本体1,236／コントローラ1,558／ケース662／ケーブル659／メモリ246</b>。',
       '🎯 <b>母数の計算から作品マスタ(Wikidata)を外しました</b>。全世界の作品が入るうえDL判定が当てにならず、<b>WiiUではDL印を引いても339本</b>と出ていました。実際は<b>任天堂IRとWikipediaが一致する113本</b>で、駿河屋の在庫106本ともほぼ一致します（Wikidataだけ3倍に外れる）。母数は<b>「駿河屋の取扱数」と「日本の発売本数」の多い方</b>に統一しました。Wikidataは一覧の中身（英語名・発売年）の補助として残します。',
       '📖 <b>各ハードの母数を外部の一次情報で裏取りし、出典つきで併記しました</b>（本人指摘「本当に合っている？特に少ないハードが気になる」）。Wikipedia日本語版の各「ゲームタイトル一覧」と<b>任天堂IRの「発売ソフトタイトル数推移表」</b>から、<b>日本で発売されたパッケージ版の本数</b>を21ハードぶん収集しました（DL専売は除外）。例：<b>WiiU 113本</b>（任天堂IRとWikipediaが完全一致）／<b>Wii 461</b>／<b>3DS 664</b>（日本発売1,349本のうちDL専売687本を除く）／<b>PS1 3,289</b>／<b>PS2 2,927</b>／<b>SFC 1,398</b>／<b>SS 1,057</b>（3系統が完全一致）。表に<b>📖発売本数</b>列を足し、数字は出典へのリンク、カーソルを当てると「何を含み何を含まないか」が出ます。',
