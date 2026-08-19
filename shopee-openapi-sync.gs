@@ -2732,6 +2732,8 @@ function syncEscrowAll() {
   toks.forEach(function (tok) { try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   // 入金を取り込んだ直後に、売上(total)が空の注文を埋める。別トリガーにすると立て忘れて気づけない。
   try { log.push({ 売上補完: backfillOrderTotals() }); } catch (e) { log.push({ 売上補完: 'error ' + String(e).slice(0, 100) }); }
+  // 在庫↔注文の紐付けも一緒に直す（放っておくと原価の実績がその月だけ空になる）
+  try { log.push({ 在庫紐付け: relinkInventoryFromProfitSheet() }); } catch (e) { log.push({ 在庫紐付け: 'error ' + String(e).slice(0, 100) }); }
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
@@ -2771,6 +2773,52 @@ function backfillOrderTotals() {
   }
   Logger.log('✅ 売上を補完 ' + upd.length + '件 / 空だった ' + miss.length + '件（残りは入金データ自体が無い＝未払いなど）');
   return upd.length;
+}
+
+/**
+ * 在庫台帳の「売却SN(shopee_sn)」を、利益管理表の取り込み（app_kv.profit_sheet）から復元する。
+ *
+ * ★2026-08-19 実測で発覚：注文↔在庫の紐付けが **7月途中から壊れていた**。
+ *   2026-05 99% ／ 06 99% ／ **07 77%** ／ **08 1%**。
+ *   原因は「スプシの在庫ミラー取込を止めた」こと。以降この列を埋めるのは**画面での手作業だけ**になっていた。
+ *   紐付いていないと、📗原価の【実績】・死に筋・回転速度・有在庫化候補が**その月だけ機能しない**。
+ *
+ * 利益管理表側には **注文ごとに在庫No（ITM-…）** が入っているので、そこから逆に埋められる。
+ *   profit_sheet.items["<国>:<注文番号>"].stock_no = ["ITM-20260203-002-3", ...]
+ * 実測：これで 07月 77%→90%／08月 1%→55% まで戻った（利益管理表に載っていない分は埋まらない）。
+ *
+ * ★既に別の注文に紐付いている行は【触らない】（実測12件）。上書きすると原価の付け替えになる。
+ */
+function relinkInventoryFromProfitSheet() {
+  var kv = sbSelect_('app_kv', 'select=v&k=eq.profit_sheet');
+  var items = (kv && kv[0] && kv[0].v && kv[0].v.items) || null;
+  if (!items) { Logger.log('profit_sheet が未取込。何もしない'); return 0; }
+  // 在庫台帳（item_id → 今の売却SN）
+  var inv = sbSelectAll_('inventory', 'select=item_id,shopee_sn') || [];
+  var cur = {};
+  inv.forEach(function (r) { cur[String(r.item_id)] = String(r.shopee_sn || '').trim(); });
+  // 実在する注文だけを対象にする（消えた注文に紐付けない）
+  var ords = sbSelectAll_('orders', 'select=sn') || [];
+  var live = {}; ords.forEach(function (o) { live[o.sn] = 1; });
+  var rows = [], seen = {}, conflict = 0, same = 0;
+  Object.keys(items).forEach(function (k) {
+    var sn = k.indexOf(':') >= 0 ? k.split(':')[1] : k;
+    if (!sn || !live[sn]) return;
+    var list = (items[k] || {}).stock_no || [];
+    list.forEach(function (id) {
+      id = String(id);
+      if (!(id in cur) || seen[id]) return;
+      if (cur[id] === sn) { same++; return; }
+      if (cur[id]) { conflict++; return; }        // ★既に別注文に紐付いている＝触らない
+      seen[id] = 1; rows.push({ item_id: id, shopee_sn: sn });
+    });
+  });
+  for (var i = 0; i < rows.length; i += 200) {
+    try { sbUpsert_('inventory', rows.slice(i, i + 200), 'item_id'); }
+    catch (e) { Logger.log('⚠ 在庫の紐付け書込失敗: ' + String(e).slice(0, 120)); }
+  }
+  Logger.log('✅ 在庫の売却SNを復元 ' + rows.length + '件（既に一致 ' + same + ' / 別注文に紐付済みで据え置き ' + conflict + '）');
+  return rows.length;
 }
 
 function finalizedSns_(cc) {
