@@ -14935,6 +14935,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-08-21', items: [
+      '👻 <b>「誰にも見られていない出品」を分析に追加</b>。Shopee側の販売数で全出品を見たところ、<b>出品から180日以上たって累計販売0が2,816件</b>、そのうち<b>閲覧も0が1,783件</b>ありました。これは「👀見られてるのに売れない（1,033件）」とは<b>まったく別の問題</b>で、<b>値下げしても1件も動きません</b>（そもそも検索に出ていない）。疑う順に<b>①タイトルに検索語が入っていない ②カテゴリ違い ③二重出品で共食い ④在庫0で表示されない</b>を案内します。国別は MY 885／SG 492／BR 439／PH 422／VN 420 ほか。<br>※ 最初は注文データの item_id で販売実績を数えようとしましたが、<b>2025年は25%・2026年でも59%しか item_id が入っておらず</b>「売れていない」が大幅に過大に出ました。<b>Shopee側の累計販売数（listing_stats）</b>で取り直しています。',
+    ] },
     { date: '2026-08-20', items: [
       '🚑 <b>画像の照合が終わらず何度も0からやり直していた</b>のを修正（本人指摘）。取得できなかった組を「まだ照合していない」と同じ扱い（空）にしていたため、描き直すたびに自動照合が走って<b>永久ループ</b>していました。取得できなかったことも記録し、<b>自動照合はこの行セットにつき1回だけ</b>にしました。GASの通信枠を無駄に使っていたので、その分も止まります。',
       '💴 <b>メルカリShopsで仕入額が取れず「価格が空」が大量に出ていた</b>のを修正（実測：36件中31件）。Shopsは <code>product:price:amount</code> を持っておらず、JSONの形も <code>"price":{"amount":1800}</code> のように入れ子で、いままでの拾い方に当たりませんでした。<b>入れ子・別名（sellPrice等）・本文の「¥1,800」表記</b>まで順に試すようにしました。あわせて<b>「↻ 取れなかった行だけ取り直す」</b>が<b>価格が空の行にも効く</b>ようになり、件数も出ます（これまでは読取失敗の行だけでした）。',
@@ -25241,6 +25244,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         cuts.push({ cc: r.l.cc, name: r.l.name, item_id: r.l.item_id, model_id: 0, shop_id: shopId, cur: (r.rg.cur || ''), host: r.rg.host, price: r.cur, newPrice: r.floor, roi: roiT });
       });
       lst._dealCuts = cuts;
+      // ★対になる問題＝【誰にも見られていない】出品。値下げでは1件も動かない（そもそも見られていない）。
+      //   実測 2026-08-21：出品から180日以上たって累計販売0が2,816件、うち**閲覧0が1,783件**。
+      //   閲覧があるのに売れない1,033件＝値下げの話（上のパネル）、閲覧0＝露出の話でまったく別物。
+      //   分けて出さないと「売れない出品」がひとまとめになって打ち手が決まらない。
+      const _now = Date.now() / 1000;
+      const unseen = all.filter(l => l.status === 1).map(l => {
+        const st = statMap[String(l.item_id)] || {};
+        return { l, views: Number(st.views) || 0, sale: Number(st.sale) || 0, age: l.create_time ? Math.floor((_now - Number(l.create_time)) / 86400) : null };
+      }).filter(x => x.age != null && x.age >= 180 && x.sale === 0 && x.views === 0);
+      const unseenByCc = {};
+      unseen.forEach(x => { unseenByCc[x.l.cc] = (unseenByCc[x.l.cc] || 0) + 1; });
+      const unseenHtml = unseen.length ? `<div class="tool-card" style="max-width:none">
+        <h3 style="margin-top:0">👻 誰にも見られていない出品 <span class="smd-dim" style="font-weight:400;font-size:12px">（出品から180日以上・累計販売0・<b>閲覧も0</b>）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 上の「見られてるのに売れない」とは<b>まったく別の問題</b>です。<b>値下げしても1件も動きません</b>（そもそも検索に出ていない）。疑うのは <b>①タイトル（検索語が入っていない）②カテゴリ違い ③二重出品で共食い ④在庫0で表示されない</b> の順。<br>該当 <b>${unseen.length}</b>件：${Object.keys(unseenByCc).sort((a2, b2) => unseenByCc[b2] - unseenByCc[a2]).map(cc => `<b style="color:${(regionByCc(cc) || {}).color || '#888'}">${cc} ${unseenByCc[cc]}</b>`).join(' ／ ')}</div>
+        <div class="pf-scroll" style="max-height:36vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">出品から</th><th style="text-align:right">明細</th><th style="text-align:right">在庫</th><th style="text-align:right">価格</th></tr>${unseen.sort((a2, b2) => b2.age - a2.age).slice(0, 100).map(x => { const l = x.l, rg = regionByCc(l.cc) || {}; const mn = (l.models || []).length; return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a></td><td style="font-size:11px">${nm(l.name, '300px')}</td><td style="text-align:right;color:#b26a00;font-weight:700">${x.age}日</td><td style="text-align:right">${mn || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${(Number(l.price_min) || 0).toLocaleString()}</td></tr>`; }).join('')}</table></div>
+        ${unseen.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…古い順に100件</div>` : ''}
+      </div>` : '';
+      lst._unseenHtml = unseenHtml;
       const canApiCut = !!(settings.openapiUrl && settings.writeToken);
       dealHtml = `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">👀 見られてるのに売れない → 値下げ/見直し <span class="smd-dim" style="font-weight:400;font-size:12px">（閲覧${VIEW_MIN}以上あるのに販売0の出品中＝注目は集めているのに買われていない。価格・タイトル・画像の見直しで売上に化ける候補）</span></h3>
@@ -25261,7 +25282,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       lowHtml +
       sugHtml +
       leakHtml +
-      dealHtml +
+      dealHtml + (lst._unseenHtml || '') +
       imgClustHtml +
       childSkuHtml +
       `<div class="tool-card" style="max-width:none">
