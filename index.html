@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '📊 <b>削除で販売数がズレる件、表示は正しい数に戻します</b>（本人「ズレて更新すれば戻るのか？／最終的に戻ればいい」）。<b>Shopee側は戻りません</b>——販売数を<b>枠(model_id)</b>に持っているので、同期し直しても同じ数字を読み直すだけです。<br>そこで<b>消す瞬間に「その時点の販売数」を明細名で控えておき</b>、表示のときに足し戻します。<code>表示 = 控えた販売数（明細名で引く）＋（いまの枠の販売数 − 控えた時点の枠の販売数）</code>——後半は<b>詰め直した後にその枠で売れた分</b>＝新しい中身の売上なので足すのが正しい数です。何度消しても積み上がります。数字にマウスを乗せると<b>Shopeeの表示との違い</b>が出ます。',
       '🗑 <b>明細を【順番を崩さずに】1件だけ削除できるようにしました</b>（本人指摘「順番崩さずに消したい／1個・2個を消すことがほとんど」）。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ため、これまでは一番下しか消せませんでした。そこで<b>位置を1つも動かさない</b>やり方に変えました——消したい枠を消すのではなく、<b>下の明細の中身（名前・画像・価格・在庫・SKU）を1つずつ上へ書き写し、あまった末尾の枠だけを消します</b>。見た目は「途中の1件が消えて詰まった」ままで、Shopee側では位置が動く明細が1つも無いので巻き添えが出ません。<br>⚠️ この作りのため<b>販売数の表示だけ1つずれます</b>（Shopeeが販売数を枠に持っているため）。価格・在庫・SKU・画像は正しく移ります。',
       '🗑 <b>参考：「そこから一番下まで」のまとめ削除</b>（本人指摘「どこから消せばええのさ／1件ずつでは全然便利じゃない」）。これまでは<b>一番下の1件しか消せず</b>、31件消すのに31回かかっていました。しかも✎カタログ編集からは「一覧でやって」、一覧では「途中だから無理」と<b>たらい回しになっていました</b>。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ので「途中の1件だけ」は今も消せません。ただし<b>その明細から一番下までをまとめて消すのは、残る側の位置が1つも動かないので安全</b>です。🗑 を押すと<b>消す範囲と件数・残る件数</b>を出して確認します。',
       '📌 <b>明細（バリエ）の画像と明細名も左に固定されるようになりました</b>（本人指摘「じゃないと右側の各列の項目触る時に、どの明細かわからなくなる」）。カタログ行の画像・タイトルと同じ動きです。<br>原因は<b>明細が20件を超えたときだけ付けていた「枠の中でスクロール」</b>でした。CSSは<b>片方の軸に overflow を付けると、もう片方も自動でスクロール箱になります</b>。すると明細行の左固定は<b>その枠</b>に対して効いてしまい、枠ごと横に流れて消えていました。枠内スクロールをやめ、カタログ行と同じ土俵で固定します。<br>あわせて、固定した列の<b>下から裏の価格がはみ出して見えていた</b>のも直しました（グリッドが <code>align-items:start</code> なので固定列が中身の高さぶんしか背景を持たず、背の高い入力欄が透けていました）。',
@@ -26403,7 +26404,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + cell(7, 'text-align:right;white-space:nowrap', canEdit
               ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">`
               : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`)
-          + cell(8, 'text-align:right;color:#999;white-space:nowrap', String(m.sold || 0))
+          + cell(8, 'text-align:right;color:#999;white-space:nowrap', (() => {
+              // 詰め直しで消した後は、Shopeeの数字ではなく【明細名で引き直した数】を出す
+              const sh = (typeof soldShown === 'function') ? soldShown(r.cc, r.item_id, m) : (m.sold || 0);
+              const raw = Number(m.sold) || 0;
+              return sh !== raw
+                ? '<span title="Shopeeは販売数を【枠】に持っているため、明細を消して詰めるとズレます。&#10;消した時点の数を明細名で控えてあるので、こちらが正しい数です（Shopeeの表示: ' + raw + '）">' + sh + '</span>'
+                : String(raw);
+            })())
           + cell(17, 'min-width:0', `<input class="lst-msku" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="SKU" title="この明細のSKU。入れるとその場でShopeeへ送ります（公式APIが使えないときはライブPCのブリッジ経由）。&#10;Enterか、欄の外をクリックで保存します。" style="width:100%;padding:2px 6px;border:1px solid ${m.sku ? '#e3e6ec' : '#eee'};border-radius:6px;font-size:10px;font-family:monospace;background:${m.sku ? '#fffdf5' : '#fff'}"><span class="lst-mskumsg" style="font-size:9px"></span>`)
           + cell(18, 'min-width:0', pidInputs(pk, pv, metaOf(r.item_id).codeRule, jdup, r.item_id)
               + ((idfNames(r.item_id).indexOf('内容') >= 0 || idfNames(r.item_id).indexOf('種別') >= 0)
@@ -26893,7 +26901,57 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         return `<span class="lst-sib" data-cc="${esc(x.cc)}" data-host="${esc(x.host || '')}" data-id="${x.item_id}" data-name="${av(x.name || '')}" title="${esc(x.name || '')}（明細${x.cnt}件・あと${MODEL_CAP - x.cnt}件・item ${x.item_id}）｜クリックで編集を開く" style="cursor:pointer;border:1px solid #a5d6a7;background:#f1f8f2;color:#1a7f37;border-radius:8px;padding:0 6px;font-size:10px;font-weight:700;margin-right:3px;display:inline-block;white-space:nowrap;vertical-align:middle">🈳${MODEL_CAP - x.cnt} ${esc(tag)}</span>`;
       })()).join('') + (all2.length > others.length ? `<span style="font-size:10px;color:#8a8f98;white-space:nowrap">他${all2.length - others.length}</span>` : '');
   }
+  // ★【販売数の付け替え】詰め直し方式で明細を消すと、Shopeeの販売数は【枠】に残るのでズレる。
+  //   同期し直しても同じ数字を読み直すだけで**戻らない**（Shopee側がそういう持ち方をしている）。
+  //   なので消す瞬間に「その時点の販売数」を明細名で控えておき、表示のときに足し戻す。
+  //     表示 = 控えた販売数（明細名で引く） + （いまの枠の販売数 − 控えた時点の枠の販売数）
+  //   後半は「詰め直した後にその枠で売れた分」＝新しい中身の売上なので、足すのが正しい。
+  let _soldBase = null, _soldBaseLoading = null;
+  const soldBaseKey = (cc, itemId) => 'soldbase_' + cc + '_' + itemId;
+  async function ensureSoldBase(force) {
+    if (_soldBase && !force) return _soldBase;
+    if (_soldBaseLoading && !force) return _soldBaseLoading;
+    _soldBaseLoading = (async () => {
+      const m = new Map();
+      try {
+        const rows = await sbGetAll('app_kv', 'select=k,v&k=like.soldbase_*');
+        (rows || []).forEach(x => m.set(x.k, x.v || {}));
+      } catch (_) { }
+      _soldBase = m; return m;
+    })();
+    return _soldBaseLoading;
+  }
+  // 表示用の販売数（補正が無ければそのまま）
+  function soldShown(cc, itemId, m) {
+    const raw = Number(m && m.sold) || 0;
+    const rec = _soldBase && _soldBase.get(soldBaseKey(cc, itemId));
+    if (!rec || !rec.names || m.ti == null) return raw;
+    const base = rec.names[tmKey(String(m.n || ''))];
+    if (base == null) return raw;
+    const slotBase = Number((rec.slots || {})[String(m.ti)] || 0);
+    return Number(base) + Math.max(0, raw - slotBase);
+  }
+  // 消す直前に「いまの販売数」を控える（次に消すときは補正後の数を控える＝何回消しても積み上がる）
+  async function soldBaseSnapshot(cc, itemId, models, delMid) {
+    try {
+      await ensureSoldBase();
+      const names = {}, slots = {};
+      (models || []).forEach(x => {
+        if (!x || x.ti == null) return;
+        slots[String(x.ti)] = Number(x.sold) || 0;
+        if (String(x.id) === String(delMid)) return;              // 消す明細は控えない
+        names[tmKey(String(x.n || ''))] = soldShown(cc, itemId, x);
+      });
+      const k = soldBaseKey(cc, itemId);
+      const v = { names, slots, ts: Date.now() };
+      await sbUpsert('app_kv', [{ k, v, updated_at: new Date().toISOString() }]);
+      if (_soldBase) _soldBase.set(k, v);
+    } catch (_) { }
+  }
+
   function drawListingStatus() {
+    // 販売数の付け替え台帳を一度だけ読む（普段は空。詰め直し削除をした商品だけ入る）
+    if (!_soldBase && !_soldBaseLoading) ensureSoldBase().then(m => { if (m && m.size) drawListingStatus(); });
     const host = document.getElementById('list-status'); if (!host) return;
     lstLoadState();      // リロード直後は保存した絞り込みを復元
     lstSaveState();      // 以後は描画のたびに現在の条件を保存
@@ -27551,6 +27609,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const org = el.textContent; el.textContent = '⏳';
       const delN = 1, mids = String(mid);
       try {
+        // ★消す前に販売数を控える（Shopeeの販売数は枠に残るので、これが無いと二度と正しい数に戻らない）
+        { const row1 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+          let ms1 = row1 && row1.models; if (!Array.isArray(ms1)) { try { ms1 = JSON.parse(ms1 || '[]'); } catch (_) { ms1 = []; } }
+          await soldBaseSnapshot(cc, itemId, ms1 || [], mid); }
         const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids }, 300000);
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
         try { logAct('出品', '明細削除', nm, cc + ' ' + itemId + ' ' + delN + '件 #' + mids); } catch (_) {}
