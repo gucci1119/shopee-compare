@@ -1408,7 +1408,31 @@
   // ★仕入元サイトの og: を「この端末のブラウザ」から読む（Tampermonkey経由）。
   //   GAS(=Googleのサーバ)からだと相手サイトにブロックされて読めないことがあるため、その受け皿。
   //   メルカリ以外（ヤフオク/駿河屋/フリマ等）も og: があれば同じ形で読める。
+  // ★メルカリShopsは【ページのHTMLに価格が入っていない】（クライアント側で読み込む作り）。
+  //   実測 2026-08-22：og:title は取れるのに product:price:amount も "price" も無く、
+  //   本文に出ている ¥300 はクーポンの表示で商品価格ではない（＝拾うと原価が嘘になる）。
+  //   公式APIに **DPoP署名を付けて** 叩くと 200 で価格が返る（署名なしは400）。
+  //     GET https://api.mercari.jp/v1/marketplaces/shops/products/<id>
+  //     → {"name":"<id>","displayName":"<商品名>", ... "price":"800" ...}
+  //   ※ /items/get は通常出品用。Shops のIDでは 400 になる（別物）。
+  const shopsIdOf = (u) => (String(u || '').match(/(?:jp\.mercari\.com\/shops\/product|mercari-shops\.com\/products)\/([A-Za-z0-9_-]{8,})/) || [])[1] || '';
+  async function metaViaShopsApi(url) {
+    const pid = shopsIdOf(url); if (!pid) return null;
+    const api = 'https://api.mercari.jp/v1/marketplaces/shops/products/' + encodeURIComponent(pid);
+    const txt = await bridgeRequest('GET', api, null, { headers: { 'DPoP': await mercariDpop(api, 'GET'), 'X-Platform': 'web' }, timeout: 20000 });
+    let j = null; try { j = JSON.parse(txt); } catch (_) { return null; }
+    if (!j || j.result === 'error') return null;
+    const price = parseInt(String(j.price != null ? j.price : '').replace(/[^0-9]/g, ''), 10) || 0;
+    const title = String(j.displayName || j.name || '').trim();
+    const image = (Array.isArray(j.assets) && j.assets.length ? (j.assets[0].imageUrl || j.assets[0].url || '') : (j.thumbnail || j.imageUrl || '')) || '';
+    if (!price && !title) return null;
+    return { title, price, image };
+  }
   async function metaViaBridge(url) {
+    // Shopsは先に公式APIで取る（HTMLには価格が無いので、HTMLだけ見ても永久に空のまま）
+    if (shopsIdOf(url)) {
+      try { const m = await metaViaShopsApi(url); if (m && (m.price > 0 || m.title)) return m; } catch (_) { }
+    }
     const html = await bridgeRequest('GET', url, null, { timeout: 20000 });
     if (!html || html.length < 500) throw new Error('空/短すぎ');
     const title = metaFromHtml(html, 'og:title').replace(/\s*by メルカリ\s*$/, '').trim();
@@ -1419,9 +1443,9 @@
     if (!price) { const mp = html.match(/"price"\s*:\s*"?(\d{2,9})"?/); if (mp) price = parseInt(mp[1], 10) || 0; }
     if (!price) { const mp = html.match(/"price"\s*:\s*\{[^{}]*?"(?:amount|value|price)"\s*:\s*"?(\d{2,9})"?/); if (mp) price = parseInt(mp[1], 10) || 0; }
     if (!price) { const mp = html.match(/"(?:sellPrice|itemPrice|priceIncludingTax|salePrice|amountIncludingTax)"\s*:\s*"?(\d{2,9})"?/i); if (mp) price = parseInt(mp[1], 10) || 0; }
-    if (!price) {
+    if (!price && !shopsIdOf(url)) {
       // 最後の手段：本文に出ている「¥1,800」「1,800円」の【最初の1つ】を使う。
-      //   送料やクーポンを拾うことがあるので、上のJSONで取れた時は使わない。
+      //   ★Shopsでは使わない。実測でクーポンの「¥300」を拾ってしまい、原価が嘘になる（2026-08-22）。
       const plain = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ');
       const mp = plain.match(/[¥￥]\s?([0-9][0-9,]{1,8})|([0-9][0-9,]{1,8})\s?円/);
       if (mp) price = parseInt(String(mp[1] || mp[2]).replace(/,/g, ''), 10) || 0;
@@ -14942,6 +14966,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '💴 <b>メルカリShopsの仕入額が取れなかった真因が判明しました</b>。Shopsの商品ページは<b>価格がHTMLに入っていません</b>（画面を開いてから読み込む作り）。実測すると <code>og:title</code> は取れるのに <code>product:price:amount</code> も <code>"price"</code> も無く、本文に見えている <b>¥300 はクーポンの表示で商品価格ではありません</b>（拾うと原価が嘘になります）。<br>公式APIに<b>DPoP署名を付けて</b>叩くと価格が返ることを実機で確認しました（署名なしは400）：<code>GET api.mercari.jp/v1/marketplaces/shops/products/&lt;id&gt;</code> → <code>{"displayName":"…","price":"800"}</code>。Shopsは<b>先にこのAPIで取る</b>ようにしました。<code>/items/get</code> は通常出品用で、ShopsのIDでは400になる別物です。<br>あわせて<b>本文の¥表記から拾う保険はShopsでは使わない</b>ようにしました（クーポンを拾うため）。',
+      '🎨 <b>明細名の欄が警告バッジに押しつぶされて読めなかった</b>のを修正（本人指摘）。<b>⚠別カタログに有／🖼45%／🔤3%／⚠3番と重複</b> を名前の右に並べていたため、名前の入力欄が細くなっていました。<b>バッジは名前の下の段</b>に移し、名前欄は横幅いっぱいを使います。',
       '🌉 <b>メルカリShopsは「取り直す」を押しても永久に取れませんでした</b>（本人指摘で発覚）。原因は<b>拡張（ブリッジ）の中継許可リストに <code>mercari-shops.com</code> が入っていなかった</b>こと。<code>jp.mercari.com</code> はあったのですが、<b>Shopsは別ドメイン</b>なので<b>中継そのものが拒否</b>され、何度押しても結果が変わりませんでした。<b>ブリッジ v1.7.0</b> で許可しています——<b>拡張の再インストールが必要</b>です（<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">ここから</a>）。<br>あわせて、取れなかった時に<b>「拡張が動いていない」「拡張が古い（版と必要な版を表示）」</b>を理由として出すようにしました。これまでは原因が画面から分からず、押し続けるしかありませんでした。',
     ] },
     { date: '2026-08-21', items: [
@@ -19586,17 +19612,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const rowHtml = (r, i) => `<div class="ed-brow" data-i="${i}" data-rid="${ridOf(r)}"${r.exists ? ' data-flag="exists"' : (r.same ? ' data-flag="same"' : (r.near ? ' data-flag="near"' : ''))} style="display:flex;gap:5px;align-items:center;padding:4px 0;border-top:1px solid #f0f0f0;flex-wrap:wrap">
           <span style="width:${BW.no}px;flex:none;text-align:right;font-size:10px;color:#98a2b3;font-weight:700">${i + 1}</span>
           <span style="width:${BW.img}px;flex:none">${r.image ? `<img class="zimg" src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:32px;height:32px;object-fit:cover;border-radius:4px;background:#f2f2f2;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:9px;color:#aaa">なし</span>'}</span>
-          <input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" title="${av(r.src || '')}" style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
+          <span style="display:flex;flex-direction:column;gap:2px;flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px"><input class="eb-name" maxlength="30" value="${av(r.name)}" placeholder="明細名(30字)" title="${av(r.src || '')}" style="width:100%;box-sizing:border-box;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11.5px">
+            <span style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${(r.imgSim != null && r.imgSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
+          ${(r.txtSim != null && r.txtSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.txtSim >= 70 ? '#d93025' : (r.txtSim >= 50 ? '#e8710a' : '#8a8f98')}" title="${av('写真に写っている文字（パッケージのタイトル）の一致度 ' + r.txtSim + '%。\n写真そのものが違っても【同じ商品】なら、パッケージの文字は同じになります。\n70%以上＝同じ商品の可能性が高い／50〜69%＝似ている／49%以下＝別物の可能性')}">🔤${r.txtSim}%</span>` : ''}
+          ${r.same ? `<span class="eb-jump" data-rid="${esc(r.same.rid || '')}" style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap;cursor:pointer;text-decoration:underline dotted" title="${r.same.i}番「${esc(r.same.name)}」と ${r.same.score}% 一致。クリックでその行へ移動します">⚠${r.same.i}番と重複</span>`
+            : (r.exists ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="${av('この商品にはもう「' + (r.exists.name || '') + '」という明細があります＝同じものを二重に出そうとしています')}">⚠同名あり</span>`
+            : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ「' + esc(String(r.near.cat || '').slice(0, 34)) + '」(item ' + esc(String(r.near.item_id)) + ')'}の「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : ''))}</span>
+          </span>
+          ${'' /* ↓の警告バッジは名前欄の【下】に出す。右に並べると名前欄が潰れて読めない（本人指摘 2026-08-22） */}
           ${/* ★仕入元URLの一致（⚠既出）は【捨てた手】。同じ商品でも出品者が違えばURLは毎回別物で、
                 ほぼ意味がないと2026-08-06に結論している（20_Shopeeナレッジ「重複出品の検知」）。
                 それなのに赤字＋赤枠で強い警告として出続けていたので、画面から外した（2026-08-20 本人指示）。
                 台帳(srcMap)への記録は残す＝あとから追える。重複の判定は下の
                 【明細名の類似 → 画像の一致】でやる。 */ ''}
-          ${(r.imgSim != null && r.imgSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.imgSim >= 88 ? '#d93025' : (r.imgSim >= 75 ? '#e8710a' : '#8a8f98')}" title="画像の一致度 ${r.imgSim}%（${r.imgSim >= 88 ? '同じ写真の可能性が高い＝重複濃厚' : (r.imgSim >= 75 ? '似ている' : '別の写真。撮った人が違うだけかもしれないので参考程度')}）">🖼${r.imgSim}%</span>` : ''}
-          ${(r.txtSim != null && r.txtSim >= 0) ? `<span style="flex:none;font-size:9.5px;font-weight:700;white-space:nowrap;color:${r.txtSim >= 70 ? '#d93025' : (r.txtSim >= 50 ? '#e8710a' : '#8a8f98')}" title="${av('写真に写っている文字（パッケージのタイトル）の一致度 ' + r.txtSim + '%。\n写真そのものが違っても【同じ商品】なら、パッケージの文字は同じになります。\n70%以上＝同じ商品の可能性が高い／50〜69%＝似ている／49%以下＝別物の可能性')}">🔤${r.txtSim}%</span>` : ''}
-          ${r.same ? `<span class="eb-jump" data-rid="${esc(r.same.rid || '')}" style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap;cursor:pointer;text-decoration:underline dotted" title="${r.same.i}番「${esc(r.same.name)}」と ${r.same.score}% 一致。クリックでその行へ移動します">⚠${r.same.i}番と重複</span>`
-            : (r.exists ? `<span style="flex:none;font-size:9.5px;color:#d93025;font-weight:700;white-space:nowrap" title="${av('この商品にはもう「' + (r.exists.name || '') + '」という明細があります＝同じものを二重に出そうとしています')}">⚠同名あり</span>`
-            : (r.near ? `<span style="flex:none;font-size:9.5px;color:#e8710a;font-weight:700;white-space:nowrap" title="${r.near.self ? 'このカタログの明細' : '別カタログ「' + esc(String(r.near.cat || '').slice(0, 34)) + '」(item ' + esc(String(r.near.item_id)) + ')'}の「${esc(r.near.name)}」と ${r.near.score}% 一致">⚠${r.near.self ? 'この中に既にある' : '別カタログに有'}</span>` : ''))}
           <input class="eb-cost" value="${av(String(r.cost || ''))}" inputmode="numeric" title="仕入(円)" style="width:${BW.cost}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;text-align:right">
           <input class="eb-wg" value="${av(String(r.wg || ''))}" inputmode="numeric" title="重量(g)。空なら上の既定値を使います。SLS送料＝価格に効きます" placeholder="—" style="width:${BW.wg}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;text-align:right">
           <input class="eb-price" value="${av(String(r.price || ''))}" inputmode="decimal" title="出品価格" style="width:${BW.price}px;flex:none;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:11.5px;text-align:right;background:#fffdf5">
