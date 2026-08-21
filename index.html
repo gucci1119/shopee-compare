@@ -1305,13 +1305,19 @@
   if (settings.roiWeightBands) { delete settings.roiWeightBands; saveSettings(); }
 
   // ---------------- ブリッジ（Tampermonkey userscript との postMessage 通信） ----------------
-  let bridgeAvailable = false;
+  let bridgeAvailable = false, bridgeVer = '';
+  // ★ブリッジの版が古いと、対応していない仕入元は【中継そのものを拒否】される。
+  //   画面にはただ「取れませんでした」としか出ず原因が分からないので、版を持っておいて理由に添える。
+  //   例：メルカリShops(mercari-shops.com)は v1.7.0 から許可リストに入った（それ以前は永久に取れない）。
+  const BRIDGE_MIN = '1.7.0';
+  const verLt = (a2, b2) => { const p1 = String(a2 || '0').split('.').map(Number), p2 = String(b2).split('.').map(Number); for (let i = 0; i < 3; i++) { const x = p1[i] || 0, y = p2[i] || 0; if (x !== y) return x < y; } return false; };
+  const bridgeOld = () => bridgeAvailable && verLt(bridgeVer, BRIDGE_MIN);
   const pendingReq = new Map();
   let reqSeq = 0;
   window.addEventListener('message', e => {
     const d = e.data;
     if (!d || e.source !== window) return;
-    if (d.__smd === 'pong') { bridgeAvailable = true; return; }
+    if (d.__smd === 'pong') { bridgeAvailable = true; bridgeVer = String(d.v || ''); return; }
     if (d.__smd === 'res' && pendingReq.has(d.id)) {
       const { resolve, reject, timer } = pendingReq.get(d.id);
       clearTimeout(timer);
@@ -14935,6 +14941,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-08-22', items: [
+      '🌉 <b>メルカリShopsは「取り直す」を押しても永久に取れませんでした</b>（本人指摘で発覚）。原因は<b>拡張（ブリッジ）の中継許可リストに <code>mercari-shops.com</code> が入っていなかった</b>こと。<code>jp.mercari.com</code> はあったのですが、<b>Shopsは別ドメイン</b>なので<b>中継そのものが拒否</b>され、何度押しても結果が変わりませんでした。<b>ブリッジ v1.7.0</b> で許可しています——<b>拡張の再インストールが必要</b>です（<a href="https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js" target="_blank">ここから</a>）。<br>あわせて、取れなかった時に<b>「拡張が動いていない」「拡張が古い（版と必要な版を表示）」</b>を理由として出すようにしました。これまでは原因が画面から分からず、押し続けるしかありませんでした。',
+    ] },
     { date: '2026-08-21', items: [
       '🚑 <b>「↻ 取れなかった行だけ取り直す」が効かなかった</b>のを修正（本人指摘）。取り込み処理が結果の配列を <code>filter(Boolean)</code> で<b>詰めて返していた</b>ため、取れなかった行が混ざると<b>行番号がズレて別の行に書き込むか、何も起きない</b>状態でした。穴は穴のまま返すようにしています。<br>あわせて<b>終わったら必ず結果を出す</b>ようにしました（「N/M件の仕入を取れました」／取れなかった時は理由）。これまでは黙って終わるので、動いたのか失敗したのか分かりませんでした。',
       '👻 <b>「誰にも見られていない出品」を分析に追加</b>。Shopee側の販売数で全出品を見たところ、<b>出品から180日以上たって累計販売0が2,816件</b>、そのうち<b>閲覧も0が1,783件</b>ありました。これは「👀見られてるのに売れない（1,033件）」とは<b>まったく別の問題</b>で、<b>値下げしても1件も動きません</b>（そもそも検索に出ていない）。疑う順に<b>①タイトルに検索語が入っていない ②カテゴリ違い ③二重出品で共食い ④在庫0で表示されない</b>を案内します。国別は MY 885／SG 492／BR 439／PH 422／VN 420 ほか。<br>※ 最初は注文データの item_id で販売実績を数えようとしましたが、<b>2025年は25%・2026年でも59%しか item_id が入っておらず</b>「売れていない」が大幅に過大に出ました。<b>Shopee側の累計販売数（listing_stats）</b>で取り直しています。',
@@ -19811,7 +19820,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               if (okN) toast('↻ ' + okN + '/' + idx.length + '件の仕入を取れました' + (ngRows.length ? '（' + ngRows.length + '件はまだ空）' : ''));
               else {
                 const why = (rows[ngRows[0]] || {}).err || '';
-                toast('↻ 取れませんでした（' + idx.length + '件）' + (why ? '：' + why : '。仕入元サイト側で弾かれている可能性があります'), true);
+                const hint = !bridgeAvailable
+                  ? '。この端末で拡張(ブリッジ)が動いていません＝メルカリ系は取得できません'
+                  : (bridgeOld() ? '。拡張(ブリッジ)が古いです（' + bridgeVer + '／必要 ' + BRIDGE_MIN + '以上）。メルカリShopsは新しい版でないと中継が拒否されます→再インストールしてください' : '');
+                toast('↻ 取れませんでした（' + idx.length + '件）' + (why ? '：' + why : '') + (hint || (why ? '' : '。仕入元サイト側で弾かれている可能性があります')), true);
               }
             }); }
           { const rm = (pred, label) => {

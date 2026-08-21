@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.6.0
+// @version      1.7.0
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -31,7 +31,9 @@
 // メルカリ商品データ取得用（リンク→タイトル/価格/画像）。取得のみ・書き込みはしない
 // @connect      jp.mercari.com
 // @connect      mercari.com
+// @connect      mercari-shops.com
 // @connect      static.mercdn.net
+// @connect      assets.mercari-shops-static.com
 // @connect      yamada-denkiweb.com
 // @connect      *
 // @grant        GM_xmlhttpRequest
@@ -45,7 +47,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.6.0';
+  const VER = '1.7.0';
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 
@@ -55,6 +57,9 @@
     'seller.shopee.vn', 'banhang.shopee.vn', 'seller.shopee.co.th', 'seller.shopee.tw',
     'script.google.com', 'script.googleusercontent.com',
     'jp.mercari.com', 'mercari.com', 'static.mercdn.net', 'api.mercari.jp',
+    // ★メルカリShopsは【別ドメイン】。ここに無いと中継が拒否され、
+    //   ポータル側で「取り直す」を押しても永久に仕入額が取れない（2026-08-22 本人指摘で発覚）。
+    'mercari-shops.com', 'www.mercari-shops.com', 'assets.mercari-shops-static.com',
     // 仕入れ比較（各サイトの検索取得）用
     'www.suruga-ya.jp', 'suruga-ya.jp',
     'auctions.yahoo.co.jp', 'paypayfleamarket.yahoo.co.jp', 'shopping.yahoo.co.jp',
