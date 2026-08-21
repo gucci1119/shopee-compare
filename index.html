@@ -24353,6 +24353,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const data = await listingsFromDb();
     if (seq !== lst._seq) return;                    // より新しい読込に追い越された→この結果は破棄
     lst.byCc = data;
+    // ★販売数の付け替え補正は【ここ1か所】で当てる。読み込んだ時点で正しい数にしておけば、
+    //   一覧・分析・母数・カバレッジ・クラスタ…どこで数えても自動でズレない。
+    //   （表示のたびに直す方式だと、必ずどこかに直し忘れが残る）
+    try {
+      await ensureSoldBase();
+      if (_soldBase && _soldBase.size) {
+        Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(l => {
+          if (!_soldBase.get(soldBaseKey(cc, l.item_id))) return;
+          (l.models || []).forEach(m => {
+            if (!m || m._soldFixed) return;
+            const fixed = soldShown(cc, l.item_id, m);
+            if (fixed !== (Number(m.sold) || 0)) { m.soldRaw = Number(m.sold) || 0; m.sold = fixed; }
+            m._soldFixed = 1;
+          });
+        }));
+      }
+    } catch (_) { }
     // シリーズ分類は静的なので1商品1回だけ計算してキャッシュ（毎レンダーの再計算＝検索/展開の重さを解消）
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => {
       if (l._fr === undefined) { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }
@@ -26404,14 +26421,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + cell(7, 'text-align:right;white-space:nowrap', canEdit
               ? `<input class="lst-stk" data-mid="${m.id}" value="${m.stock}" inputmode="numeric" style="width:52px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px">`
               : `<b style="color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'}">${m.stock}</b>`)
-          + cell(8, 'text-align:right;color:#999;white-space:nowrap', (() => {
-              // 詰め直しで消した後は、Shopeeの数字ではなく【明細名で引き直した数】を出す
-              const sh = (typeof soldShown === 'function') ? soldShown(r.cc, r.item_id, m) : (m.sold || 0);
-              const raw = Number(m.sold) || 0;
-              return sh !== raw
-                ? '<span title="Shopeeは販売数を【枠】に持っているため、明細を消して詰めるとズレます。&#10;消した時点の数を明細名で控えてあるので、こちらが正しい数です（Shopeeの表示: ' + raw + '）">' + sh + '</span>'
-                : String(raw);
-            })())
+          + cell(8, 'text-align:right;color:#999;white-space:nowrap', (m.soldRaw != null && m.soldRaw !== m.sold)
+              ? '<span title="Shopeeは販売数を【枠】に持っているため、明細を消して詰めるとズレます。&#10;消した時点の数を明細名で控えてあるので、こちらが正しい数です（Shopeeが返す数: ' + m.soldRaw + '）" style="border-bottom:1px dotted #c9c9c9">' + (m.sold || 0) + '</span>'
+              : String(m.sold || 0))
           + cell(17, 'min-width:0', `<input class="lst-msku" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="SKU" title="この明細のSKU。入れるとその場でShopeeへ送ります（公式APIが使えないときはライブPCのブリッジ経由）。&#10;Enterか、欄の外をクリックで保存します。" style="width:100%;padding:2px 6px;border:1px solid ${m.sku ? '#e3e6ec' : '#eee'};border-radius:6px;font-size:10px;font-family:monospace;background:${m.sku ? '#fffdf5' : '#fff'}"><span class="lst-mskumsg" style="font-size:9px"></span>`)
           + cell(18, 'min-width:0', pidInputs(pk, pv, metaOf(r.item_id).codeRule, jdup, r.item_id)
               + ((idfNames(r.item_id).indexOf('内容') >= 0 || idfNames(r.item_id).indexOf('種別') >= 0)
@@ -26906,8 +26918,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   なので消す瞬間に「その時点の販売数」を明細名で控えておき、表示のときに足し戻す。
   //     表示 = 控えた販売数（明細名で引く） + （いまの枠の販売数 − 控えた時点の枠の販売数）
   //   後半は「詰め直した後にその枠で売れた分」＝新しい中身の売上なので、足すのが正しい。
-  let _soldBase = null, _soldBaseLoading = null;
-  const soldBaseKey = (cc, itemId) => 'soldbase_' + cc + '_' + itemId;
+  // ★宣言は var / function にする。使う場所（ensureListings）がこの行より【前】にあるため、
+  //   let/const だと TDZ で全体が落ちる（2026-08-12 に同じ形で全機能が死んでいる）。
+  var _soldBase = null, _soldBaseLoading = null;
+  function soldBaseKey(cc, itemId) { return 'soldbase_' + cc + '_' + itemId; }
   async function ensureSoldBase(force) {
     if (_soldBase && !force) return _soldBase;
     if (_soldBaseLoading && !force) return _soldBaseLoading;
@@ -26923,7 +26937,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 表示用の販売数（補正が無ければそのまま）
   function soldShown(cc, itemId, m) {
-    const raw = Number(m && m.sold) || 0;
+    const raw = Number((m && m.soldRaw != null) ? m.soldRaw : (m && m.sold)) || 0;   // 二重に足さない
     const rec = _soldBase && _soldBase.get(soldBaseKey(cc, itemId));
     if (!rec || !rec.names || m.ti == null) return raw;
     const base = rec.names[tmKey(String(m.n || ''))];
@@ -26938,7 +26952,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const names = {}, slots = {};
       (models || []).forEach(x => {
         if (!x || x.ti == null) return;
-        slots[String(x.ti)] = Number(x.sold) || 0;
+        slots[String(x.ti)] = Number(x.soldRaw != null ? x.soldRaw : x.sold) || 0;   // Shopeeが返す生の数
         if (String(x.id) === String(delMid)) return;              // 消す明細は控えない
         names[tmKey(String(x.n || ''))] = soldShown(cc, itemId, x);
       });
