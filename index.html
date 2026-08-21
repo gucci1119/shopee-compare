@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '☑️ <b>明細をチェックして、まとめて削除できるようにしました</b>（本人「複数選択して消せたりしない？」）。番号の下のチェックを入れると、明細のかたまりの下に「🗑 選んだ明細をまとめて削除」が出ます（<b>チェックは左に固定される列</b>にあるので、横に振っても付いてきます）。<b>位置はバラバラでもOK</b>——1番と50番と98番を同時に選んでも、残りの順番は崩れません。',
       '📊 <b>削除で販売数がズレる件、表示は正しい数に戻します</b>（本人「ズレて更新すれば戻るのか？／最終的に戻ればいい」）。<b>Shopee側は戻りません</b>——販売数を<b>枠(model_id)</b>に持っているので、同期し直しても同じ数字を読み直すだけです。<br>そこで<b>消す瞬間に「その時点の販売数」を明細名で控えておき</b>、表示のときに足し戻します。<code>表示 = 控えた販売数（明細名で引く）＋（いまの枠の販売数 − 控えた時点の枠の販売数）</code>——後半は<b>詰め直した後にその枠で売れた分</b>＝新しい中身の売上なので足すのが正しい数です。何度消しても積み上がります。数字にマウスを乗せると<b>Shopeeの表示との違い</b>が出ます。',
       '🗑 <b>明細を【順番を崩さずに】1件だけ削除できるようにしました</b>（本人指摘「順番崩さずに消したい／1個・2個を消すことがほとんど」）。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ため、これまでは一番下しか消せませんでした。そこで<b>位置を1つも動かさない</b>やり方に変えました——消したい枠を消すのではなく、<b>下の明細の中身（名前・画像・価格・在庫・SKU）を1つずつ上へ書き写し、あまった末尾の枠だけを消します</b>。見た目は「途中の1件が消えて詰まった」ままで、Shopee側では位置が動く明細が1つも無いので巻き添えが出ません。<br>⚠️ この作りのため<b>販売数の表示だけ1つずれます</b>（Shopeeが販売数を枠に持っているため）。価格・在庫・SKU・画像は正しく移ります。',
       '🗑 <b>参考：「そこから一番下まで」のまとめ削除</b>（本人指摘「どこから消せばええのさ／1件ずつでは全然便利じゃない」）。これまでは<b>一番下の1件しか消せず</b>、31件消すのに31回かかっていました。しかも✎カタログ編集からは「一覧でやって」、一覧では「途中だから無理」と<b>たらい回しになっていました</b>。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ので「途中の1件だけ」は今も消せません。ただし<b>その明細から一番下までをまとめて消すのは、残る側の位置が1つも動かないので安全</b>です。🗑 を押すと<b>消す範囲と件数・残る件数</b>を出して確認します。',
@@ -26403,7 +26404,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             + `</div>`;
         }
         return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
-          + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;align-self:stretch;' + LSTKL[0], isSingle ? '↳' : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'))
+          + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;align-self:stretch;' + LSTKL[0], isSingle ? '↳'
+              : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'
+                 // ★まとめて消すための選択。番号のところ＝左に固定される列なので、横に振っても付いてくる
+                 + ((!isSingle && canOfficialEdit && m.id) ? '<br><input type="checkbox" class="lst-mpick" data-cc="' + av(r.cc) + '" data-item="' + r.item_id + '" data-mid="' + m.id + '" data-no="' + _no + '" data-name="' + av(m.n || '') + '" title="まとめて削除する明細を選ぶ" style="margin:2px 0 0;cursor:pointer">' : '')))
           + cell(1, LSTKL[1] + ';align-self:stretch', m.img
               ? `<img src="${/^https?:/.test(m.img) ? esc(m.img) : IMG_CDN + esc(m.img)}" title="${av(m.n || '')}" style="width:40px;height:28px;object-fit:cover;border-radius:4px;background:#eee" loading="lazy" onerror="this.style.opacity=.15">`
               : '<span style="color:#c9c9c9">—</span>')
@@ -26448,7 +26452,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               ? `<label title="この明細だけ在庫0固定（在庫を増やす保存時に警告）。カタログ側⚠️をONにすると全明細に自動適用" style="cursor:pointer;font-size:10px;color:${keep0OfModel(r.item_id, m.id) ? '#b71c1c' : '#c9c9c9'}"><input type="checkbox" class="lst-keep0m" data-id="${r.item_id}" data-mid="${m.id}" ${keep0OfModel(r.item_id, m.id) ? 'checked' : ''} ${meta.keep0 ? 'disabled' : ''}>⚠️0</label>`
               : ''))
           + `</div>`;
-      }).join('')}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px">${(!isSingle) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
+      }).join('')}${(!isSingle && canOfficialEdit) ? `<div class="lst-pickbar" data-cc="${av(r.cc)}" data-item="${r.item_id}" style="display:none;gap:9px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #f0c4bd;padding-top:6px">
+        <b style="color:#c0392b;font-size:11.5px">選択 <span class="lst-pickn">0</span>件</b>
+        <button class="lst-pickdel smd-btn" style="font-size:11.5px;padding:4px 13px;border-color:#d93025;color:#d93025;font-weight:700">🗑 選んだ明細をまとめて削除</button>
+        <button class="lst-pickclr smd-btn" style="font-size:11px;padding:4px 11px">選択を外す</button>
+        <span class="smd-dim" style="font-size:10.5px">※残りの順番は崩れません（下の中身を上へ詰めます）</span>
+      </div>` : ''}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px">${(!isSingle) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     // 販売ページURL：settings.shopIdsが空でも出品行のr.shop_idから直接生成（🛍️が出ない対策）
@@ -26946,14 +26955,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return Number(base) + Math.max(0, raw - slotBase);
   }
   // 消す直前に「いまの販売数」を控える（次に消すときは補正後の数を控える＝何回消しても積み上がる）
-  async function soldBaseSnapshot(cc, itemId, models, delMid) {
+  async function soldBaseSnapshot(cc, itemId, models, delMids) {
+    const delSet = new Set((Array.isArray(delMids) ? delMids : [delMids]).map(String));
     try {
       await ensureSoldBase();
       const names = {}, slots = {};
       (models || []).forEach(x => {
         if (!x || x.ti == null) return;
         slots[String(x.ti)] = Number(x.soldRaw != null ? x.soldRaw : x.sold) || 0;   // Shopeeが返す生の数
-        if (String(x.id) === String(delMid)) return;              // 消す明細は控えない
+        if (delSet.has(String(x.id))) return;                     // 消す明細は控えない
         names[tmKey(String(x.n || ''))] = soldShown(cc, itemId, x);
       });
       const k = soldBaseKey(cc, itemId);
@@ -27591,49 +27601,71 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // 🗑 一覧から明細を削除。model_idで消す＝別の明細を巻き込まない（2026-08-08の教訓）。
     //   削除後はGAS側が番号を詰め直し、中身のない枠があれば一緒に掃除する（自己修復）。
-    document.querySelectorAll('#lst-list .lst-mdel').forEach(el => el.addEventListener('click', async () => {
-      const cc = el.dataset.cc, itemId = el.dataset.item, mid = el.dataset.mid, nm = el.dataset.name || '', no = el.dataset.no || '';
+    // ★【順番を崩さない】明細削除（1件でも複数でも同じ道を通る）。
+    //   Shopeeは位置が変わる明細を保持できないので、位置は動かさず
+    //   「下の中身を1つ上へ書き写して、あまった末尾の枠だけ消す」（GAS: delete_variation_shift）。
+    async function deleteVariationsShift(cc, itemId, picks, btn) {
       if (!settings.openapiUrl || !settings.writeToken) { toast('⚙️設定のOpenAPI URLとWRITE_TOKENが必要です', true); return; }
       const sid = shopIdOfListing(cc, itemId);
       if (!sid) { toast('この出品のshop_idが分かりません', true); return; }
-      // ★Shopeeの公式APIは【位置が変わるモデルを保持できない】（2026-08-15 実証）。
-      //   最後尾の明細だけは安全に消せるが、途中を消すと**後ろの明細がShopee側で消える**。
-      //   なので最後尾以外はここで断る（実際に3件失う事故が起きたため）。
-      // ★途中の1件だけは公式APIで安全に消せない（位置が変わる明細をShopeeが保持しない）。
-      //   ただし【そこから一番下まで】をまとめて消すのは、残る側の位置が1つも動かないので安全。
-      //   1件ずつしか消せないと31件で31回＝使い物にならない（2026-08-22 本人指摘）。
-      // ★【順番を崩さない】削除。途中の1〜2件を消すのが実務ではほとんど（2026-08-22 本人）。
-      //   Shopeeは位置が変わる明細を保持できないので、位置は動かさず
-      //   「下の中身を1つ上へ書き写して、あまった末尾の枠だけ消す」（GAS: delete_variation_shift）。
-      let below = 0;
-      { const row0 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
-        let ms0 = row0 && row0.models; if (!Array.isArray(ms0)) { try { ms0 = JSON.parse(ms0 || '[]'); } catch (_) { ms0 = []; } }
-        const withTi = (ms0 || []).filter(x => x && x.ti != null).sort((a2, b2) => a2.ti - b2.ti);
-        const me = withTi.find(x => String(x.id) === String(mid));
-        if (!me) { alert('この明細が今の一覧に見つかりません。🔄最新に更新してからやり直してください'); return; }
-        if (withTi.length <= 1) { alert('最後の1件は削除できません（バリエ商品として成立しなくなります）'); return; }
-        below = withTi.filter(x => x.ti > me.ti).length;
-      }
+      const row0 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
+      let ms0 = row0 && row0.models; if (!Array.isArray(ms0)) { try { ms0 = JSON.parse(ms0 || '[]'); } catch (_) { ms0 = []; } }
+      const withTi = (ms0 || []).filter(x => x && x.ti != null).sort((a2, b2) => a2.ti - b2.ti);
+      const targets = picks.map(p2 => withTi.find(x => String(x.id) === String(p2.mid))).filter(Boolean);
+      if (targets.length !== picks.length) { alert('選んだ明細が今の一覧と合いません。🔄最新に更新してからやり直してください'); return; }
+      if (!targets.length) return;
+      if (withTi.length - targets.length < 1) { alert('全部は削除できません（最低1件は残してください）'); return; }
+      const minTi = Math.min.apply(null, targets.map(x => x.ti));
+      const below = withTi.filter(x => x.ti > minTi).length;
+      const listTxt = targets.slice(0, 10).map(x => (x.ti + 1) + '番「' + (x.n || '（無名）') + '」').join('\n');
       const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
-      if (!confirm('書込先: ' + gw.summary + '\n\n' + no + '番「' + nm + '」をShopeeから削除します。\n'
-        + '残りの明細の順番は崩れません。\n\n'
-        + (below ? '※下の ' + below + '件の中身（名前・価格・在庫・SKU・画像）を1つずつ上へ書き写してから、あまった末尾の枠を消します。\n'
-                 + '※この作りのため【販売数の表示だけ1つずれます】（Shopeeが販売数を枠に持っているため）。\n\n' : '')
-        + '元に戻せません。よろしいですか？')) return;
-      const org = el.textContent; el.textContent = '⏳';
-      const delN = 1, mids = String(mid);
+      if (!confirm('書込先: ' + gw.summary + '\n\n以下の ' + targets.length + '件をShopeeから削除します。\n'
+        + listTxt + (targets.length > 10 ? '\n…ほか' + (targets.length - 10) + '件' : '')
+        + '\n\n残りの明細の順番は崩れません。\n'
+        + (below ? '※下の明細の中身（名前・価格・在庫・SKU・画像）を1つずつ上へ書き写してから、あまった末尾の枠を消します。\n'
+                 + '※この作りのため【Shopee側の明細ごとの販売数だけ1つずれます】（ポータルの表示は補正します）。\n' : '')
+        + '\n元に戻せません。よろしいですか？')) return;
+      const org = btn ? btn.textContent : '';
+      if (btn) { btn.textContent = '⏳ 削除中…'; btn.disabled = true; }
+      const mids = targets.map(x => x.id).join(',');
       try {
         // ★消す前に販売数を控える（Shopeeの販売数は枠に残るので、これが無いと二度と正しい数に戻らない）
-        { const row1 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
-          let ms1 = row1 && row1.models; if (!Array.isArray(ms1)) { try { ms1 = JSON.parse(ms1 || '[]'); } catch (_) { ms1 = []; } }
-          await soldBaseSnapshot(cc, itemId, ms1 || [], mid); }
+        await soldBaseSnapshot(cc, itemId, withTi, targets.map(x => String(x.id)));
         const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids }, 300000);
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
-        try { logAct('出品', '明細削除', nm, cc + ' ' + itemId + ' ' + delN + '件 #' + mids); } catch (_) {}
-        toast('🗑 ' + delN + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）' + (r.orphan_cleaned ? ' ・中身のない明細を ' + r.orphan_cleaned + '件 掃除' : ''));
-        await refreshOneListing(cc, itemId, sid);   // ★取り直しで一覧・DBとも最新になる（markStaleは編集画面の中だけの関数なので呼ばない）
-      } catch (e) { el.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
-    }));
+        try { logAct('出品', '明細削除', targets.map(x => x.n).join(' / ').slice(0, 60), cc + ' ' + itemId + ' ' + targets.length + '件 #' + mids); } catch (_) {}
+        toast('🗑 ' + targets.length + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）');
+        await refreshOneListing(cc, itemId, sid);
+      } catch (e) { if (btn) { btn.textContent = org; btn.disabled = false; } alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
+    }
+    // 行の 🗑（1件）
+    document.querySelectorAll('#lst-list .lst-mdel').forEach(el => el.addEventListener('click', () =>
+      deleteVariationsShift(el.dataset.cc, el.dataset.item, [{ mid: el.dataset.mid }], el)));
+    // 選択して まとめて削除
+    { const barOf = (cc, itemId) => [...document.querySelectorAll('#lst-list .lst-pickbar')]
+        .find(b => b.dataset.cc === cc && String(b.dataset.item) === String(itemId));
+      const syncBar = (cc, itemId) => {
+        const bar = barOf(cc, itemId); if (!bar) return;
+        const n = [...document.querySelectorAll('#lst-list .lst-mpick:checked')]
+          .filter(c => c.dataset.cc === cc && String(c.dataset.item) === String(itemId)).length;
+        bar.style.display = n ? 'flex' : 'none';
+        const el2 = bar.querySelector('.lst-pickn'); if (el2) el2.textContent = n;
+      };
+      document.querySelectorAll('#lst-list .lst-mpick').forEach(c => c.addEventListener('change', () => syncBar(c.dataset.cc, c.dataset.item)));
+      document.querySelectorAll('#lst-list .lst-pickclr').forEach(b => b.addEventListener('click', () => {
+        const cc = b.closest('.lst-pickbar').dataset.cc, itemId = b.closest('.lst-pickbar').dataset.item;
+        document.querySelectorAll('#lst-list .lst-mpick').forEach(c => { if (c.dataset.cc === cc && String(c.dataset.item) === String(itemId)) c.checked = false; });
+        syncBar(cc, itemId);
+      }));
+      document.querySelectorAll('#lst-list .lst-pickdel').forEach(b => b.addEventListener('click', () => {
+        const bar = b.closest('.lst-pickbar'); const cc = bar.dataset.cc, itemId = bar.dataset.item;
+        const picks = [...document.querySelectorAll('#lst-list .lst-mpick:checked')]
+          .filter(c => c.dataset.cc === cc && String(c.dataset.item) === String(itemId))
+          .map(c => ({ mid: c.dataset.mid }));
+        if (!picks.length) return;
+        deleteVariationsShift(cc, itemId, picks, b);
+      }));
+    }
     document.querySelectorAll('#lst-list .lst-clone').forEach(el => el.addEventListener('click', () => cloneCatalog(el.dataset.cc, el.dataset.id)));
     // 🏷 複製元から属性(specifics)をもう一度コピー（複製時に入らなかった分をやり直す）
     document.querySelectorAll('#lst-list .lst-attrcopy').forEach(el => el.addEventListener('click', async () => {
