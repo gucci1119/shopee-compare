@@ -14973,6 +14973,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🔎 <b>取り直しが「1件しか取れない」ときに、理由が画面に出ませんでした</b>（本人指摘）。実機で調べたところ、対象32件のうち<b>メルカリShopsの31件すべてが仕入元から消えていました</b>（商品ページを開いても「ページが見つかりませんでした」／公式APIも31/31が404）。取れた1件は通常メルカリで、画像が生きていた分です。<br>これまでは「✓ 完了 1/1件」としか出ず、<b>何が起きたのか分からない</b>状態でした。今後は<b>「仕入元のページが消えている 31件」のように理由を数えて出します</b>。',
       '🖼 <b>同じ写真が31明細に貼られてShopeeに上がっていました</b>（本人指摘「画像が何かおかしいことになってるぞ」）。原因は<b>メルカリShopsの <code>og:image</code> が全商品で同じ1枚</b>（メルカリの汎用画像）だったこと。実測で <b>PH item56066111063 の98明細のうち35件が同一画像</b>、内訳は<b>Shops由来31件／通常メルカリ0件</b>——<b>通常メルカリの63件は全部正しい写真</b>でした。<br>直したのは3点。①<b>ShopsのHTMLからは画像を採らない</b>（正しいのは公式APIの thumbnail だけ）②<b>GAS経由の読取結果もShopsでは使わない</b>（価格も画像も取れないため端末側の公式APIへ回す）③<b>取り込み画面で「同じ写真が2件以上」に付いたら、その画像を外して⚠を出す</b>——<b>間違った写真を貼るより、貼らない方がずっとマシ</b>だからです。',
       '🔁 <b>すでに上がってしまった画像を、仕入元から取り直してShopeeに戻せる</b>ようにしました。✎編集を開くと<b>「同じ写真がN件の明細に付いています」を自動で表示</b>します（押さないと出ない、にはしていません）。<b>Joy-Conの色違いのように、わざと1枚に揃えている出品を誤爆しない</b>よう、対象は<b>仕入元URLが台帳に残っている明細だけ</b>です（手で揃えた分は台帳に無いので出てきません）。取り直した写真が<b>また全部同じだった場合はShopeeに送りません</b>。全6,477カタログを調べたところ、<b>今回の事故に当たるのはこの1カタログだけ</b>でした。',
       '💴 <b>メルカリShopsの仕入額が取れなかった真因が判明しました</b>。Shopsの商品ページは<b>価格がHTMLに入っていません</b>（画面を開いてから読み込む作り）。実測すると <code>og:title</code> は取れるのに <code>product:price:amount</code> も <code>"price"</code> も無く、本文に見えている <b>¥300 はクーポンの表示で商品価格ではありません</b>（拾うと原価が嘘になります）。<br>公式APIに<b>DPoP署名を付けて</b>叩くと価格が返ることを実機で確認しました（署名なしは400）：<code>GET api.mercari.jp/v1/marketplaces/shops/products/&lt;id&gt;</code> → <code>{"displayName":"…","price":"800"}</code>。Shopsは<b>先にこのAPIで取る</b>ようにしました。<code>/items/get</code> は通常出品用で、ShopsのIDでは400になる別物です。<br>あわせて<b>本文の¥表記から拾う保険はShopsでは使わない</b>ようにしました（クーポンを拾うため）。',
@@ -19227,23 +19228,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           if (!confirm('書込先: ' + gwD.summary + '\n\n' + cc + ' の item ' + itemId + ' の明細画像を、仕入元から取り直して ' + targets.length + '件 差し替えます。\n価格・在庫・明細名は変わりません。\n\nよろしいですか？')) return;
           const msg = box.querySelector('.ed-dupmsg');
           fx.disabled = true;
-          const got = [];
+          const got = []; let gone = 0, noimg = 0, other = 0;
           for (let i = 0; i < targets.length; i++) {
             if (msg) msg.textContent = '仕入元から取得中… ' + (i + 1) + '/' + targets.length + '（取れた ' + got.length + '件）';
-            try { const m2 = await metaViaBridge(targets[i].url); if (m2 && m2.image) got.push({ option: targets[i].opt, url: m2.image }); } catch (_) {}
+            try {
+              const m2 = await metaViaBridge(targets[i].url);
+              if (m2 && m2.image) got.push({ option: targets[i].opt, url: m2.image }); else noimg++;
+            } catch (e2) {
+              // ★何件失敗したかだけでなく【なぜ失敗したか】を出す。
+              //   2026-08-22、31件すべて仕入元が消えていたのに「完了 1/1件」としか出ず、
+              //   何が起きたのか画面から分からなかった（本人「1個しか取れなかったけど…」）。
+              if (/40[34]|404/.test(String(e2 && e2.message || e2))) gone++; else other++;
+            }
           }
+          const why = [gone ? '仕入元のページが消えている ' + gone + '件' : '', noimg ? '画像が無い ' + noimg + '件' : '', other ? '読めなかった ' + other + '件' : ''].filter(Boolean).join('／');
           // 取り直した画像がまた全部同じなら、それは商品の写真ではない＝送らない
           const c2 = new Map(); got.forEach(x => c2.set(x.url, (c2.get(x.url) || 0) + 1));
           const ok2 = got.filter(x => (c2.get(x.url) || 0) === 1);
-          if (!ok2.length) { fx.disabled = false; if (msg) msg.textContent = '⚠ 商品ごとの写真を取れませんでした（仕入元のページが消えている可能性）'; return; }
-          if (msg) msg.textContent = 'Shopeeへ反映を始めます（' + ok2.length + '件' + (ok2.length < targets.length ? '／' + (targets.length - ok2.length) + '件は取れず' : '') + '）';
+          if (!ok2.length) { fx.disabled = false; if (msg) msg.textContent = '⚠ 1枚も取れませんでした（' + (why || '理由不明') + '）。仕入元が消えていると、もう取り直せません'; return; }
+          if (msg) msg.textContent = 'Shopeeへ反映を始めます（' + ok2.length + '件' + (why ? '／取れず: ' + why : '') + '）';
           const kvD = 'varimg_' + cc + '_' + itemId + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
           await sbUpsert('app_kv', [{ k: kvD, v: { items: ok2 }, updated_at: new Date().toISOString() }]);
           const keyD = await jobRemoteCreate('varimg', '明細画像の取り直し', cc + ' / ' + String(repName || pi.name || itemId).slice(0, 24) + '（' + ok2.length + '枚）', { cc: cc, item_id: itemId, shop_id: sidCat });
           JOB_T0[keyD] = Date.now();
           JOB_MIRROR[keyD] = (v) => {
             if (!msg || !msg.isConnected) return;
-            if (v.status === 'done') { fx.disabled = false; msg.textContent = '✓ 完了 ' + ((v.result && v.result.applied) || ok2.length) + '/' + ok2.length + '件'; delete JOB_MIRROR[keyD]; return; }
+            if (v.status === 'done') { fx.disabled = false; msg.textContent = '✓ 完了 ' + ((v.result && v.result.applied) || ok2.length) + '/' + ok2.length + '件' + (why ? '（取れなかった分: ' + why + '）' : ''); delete JOB_MIRROR[keyD]; return; }
             if (v.status === 'error' || v.status === 'cancel') { fx.disabled = false; msg.textContent = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ 失敗: ' + (v.error || '')); delete JOB_MIRROR[keyD]; return; }
             msg.textContent = 'Shopeeへ反映中 ' + Math.round(jobPct(v.pct)) + '%';
           };
