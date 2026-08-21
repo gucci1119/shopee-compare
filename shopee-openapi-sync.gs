@@ -1731,12 +1731,15 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
   //   1枚も無ければ全部から画像を外して「全部なし」に揃える。
   var withImg = 0, firstImg = null;
   optObjs.forEach(function (o) { if (o.image && o.image.image_id) { withImg++; if (!firstImg) firstImg = o.image.image_id; } });
-  var imgAdjust = '';
+  var imgAdjust = '', imgBorrowed = [];
   if (withImg > 0 && withImg < optObjs.length) {
     if (firstImg) {
-      var filled = 0;
-      optObjs.forEach(function (o) { if (!(o.image && o.image.image_id)) { o.image = { image_id: firstImg }; filled++; } });
-      imgAdjust = '画像が無い' + filled + '件に代わりの画像を当てました';
+      // ★Shopeeは「全部に画像あり」か「全部なし」しか許さないので、取れなかった分は
+      //   既にある画像を借りるしかない。ただし**借りた先は必ず名前で返す**。
+      //   2026-08-22：ここで黙って1枚目（家庭教師ヒットマン）を6件に当てており、
+      //   本番の出品に別ゲームの表紙が付いていた。件数だけの報告では気づけない。
+      optObjs.forEach(function (o) { if (!(o.image && o.image.image_id)) { o.image = { image_id: firstImg }; imgBorrowed.push(o.option); } });
+      imgAdjust = '画像が取れなかった' + imgBorrowed.length + '件に、他の明細の画像を借りて当てました（要差し替え）: ' + imgBorrowed.slice(0, 8).join(' / ');
     } else {
       optObjs.forEach(function (o) { delete o.image; });
       imgAdjust = '画像を全て外しました';
@@ -1770,7 +1773,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
       finalModel = ((jv2.response || {}).model || []).length;
     }
   } catch (e4) {}
-  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust,
+  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40),
            healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
