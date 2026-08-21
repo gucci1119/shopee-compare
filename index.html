@@ -14936,6 +14936,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-21', items: [
+      '🚑 <b>「↻ 取れなかった行だけ取り直す」が効かなかった</b>のを修正（本人指摘）。取り込み処理が結果の配列を <code>filter(Boolean)</code> で<b>詰めて返していた</b>ため、取れなかった行が混ざると<b>行番号がズレて別の行に書き込むか、何も起きない</b>状態でした。穴は穴のまま返すようにしています。<br>あわせて<b>終わったら必ず結果を出す</b>ようにしました（「N/M件の仕入を取れました」／取れなかった時は理由）。これまでは黙って終わるので、動いたのか失敗したのか分かりませんでした。',
       '👻 <b>「誰にも見られていない出品」を分析に追加</b>。Shopee側の販売数で全出品を見たところ、<b>出品から180日以上たって累計販売0が2,816件</b>、そのうち<b>閲覧も0が1,783件</b>ありました。これは「👀見られてるのに売れない（1,033件）」とは<b>まったく別の問題</b>で、<b>値下げしても1件も動きません</b>（そもそも検索に出ていない）。疑う順に<b>①タイトルに検索語が入っていない ②カテゴリ違い ③二重出品で共食い ④在庫0で表示されない</b>を案内します。国別は MY 885／SG 492／BR 439／PH 422／VN 420 ほか。<br>※ 最初は注文データの item_id で販売実績を数えようとしましたが、<b>2025年は25%・2026年でも59%しか item_id が入っておらず</b>「売れていない」が大幅に過大に出ました。<b>Shopee側の累計販売数（listing_stats）</b>で取り直しています。',
     ] },
     { date: '2026-08-20', items: [
@@ -19798,9 +19799,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 Object.assign(rows[i6], r7, { pending: false, wg: rows[i6].wg });
                 paintRow(i6);
               };
-              const got7 = await runPool(idx.map(i6 => rows[i6].url), apply7);
-              got7.forEach((r7, k7) => apply7(k7, r7));
+              let got7 = [];
+              try { got7 = await runPool(idx.map(i6 => rows[i6].url), apply7); }
+              catch (e7) { toast('取り直しでエラー: ' + ((e7 && e7.message) || e7), true); }
+              (got7 || []).forEach((r7, k7) => { if (r7) apply7(k7, r7); });
+              // ★何も言わずに終わると「押しても動かない」に見える。必ず結果を出す。
+              const okN = idx.filter(i6 => parseFloat(rows[i6].cost) > 0).length;
+              const ngRows = idx.filter(i6 => !(parseFloat(rows[i6].cost) > 0));
+              rows.forEach(r7 => { r7.pending = false; });
               rb.disabled = false; draw();
+              if (okN) toast('↻ ' + okN + '/' + idx.length + '件の仕入を取れました' + (ngRows.length ? '（' + ngRows.length + '件はまだ空）' : ''));
+              else {
+                const why = (rows[ngRows[0]] || {}).err || '';
+                toast('↻ 取れませんでした（' + idx.length + '件）' + (why ? '：' + why : '。仕入元サイト側で弾かれている可能性があります'), true);
+              }
             }); }
           { const rm = (pred, label) => {
               const n = rows.filter(pred).length;
@@ -20152,7 +20164,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             fin += chunk.length; bridgeDone = 0;
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (bAbort ? '（中断）' : '');
           }
-          return out.filter(Boolean);
+          // ★ここで filter(Boolean) すると【穴が詰まって行番号がズレる】。
+          //   取り直し（ed-bulkretry）は「何番目の行か」で戻すので、ズレると別の行に書き込むか
+          //   何も起きないように見える（2026-08-21 本人指摘「押しても取り直してくれない」）。
+          //   穴は穴のまま返し、受け取る側が null を飛ばす。
+          return out;
         };
         if (bl) bl.addEventListener('click', async () => {
           let urls = parseUrls();
@@ -20168,7 +20184,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           draw();
           await srcMapLoad();                                   // 既に出したURLの台帳
           const got0 = await runPool(urls, (k, r) => { if (rows[k]) { Object.assign(rows[k], r, { pending: false, wg: rows[k].wg }); paintRow(k); } });
-          got0.forEach((r, k) => { if (rows[k]) Object.assign(rows[k], r, { pending: false, wg: rows[k].wg }); });
+          got0.forEach((r, k) => { if (r && rows[k]) Object.assign(rows[k], r, { pending: false, wg: rows[k].wg }); });
           rows.forEach(r => { r.dup = srcDupOf(r.url); });
           dedupeRows(rows);
           // ★同じ商品を別の出品者から買うのが普通なので、仕入元URLでは重複を防げない（在庫管理もしていない）。
