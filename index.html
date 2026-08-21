@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🔄 <b>明細を足した／消したら、開いたままの✎カタログ編集にもすぐ出るようにしました</b>（本人「明細追加したらすぐここにも反映されるよね？」「ここにも」）。これまでは<b>閉じて開き直さないと</b>、<b>明細名（並び替え）も 価格・在庫・SKUの表も</b>件数が変わりませんでした（この画面は組み立て直しが要るため）。追加のしごとが終わったとき／削除したときに、<b>見ていた位置を保ったまま</b>描き直します。',
       '🔄 <b>消したのに「消えてない」ように見えたのを直しました</b>（本人指摘）。✎カタログ編集は<b>3分キャッシュ</b>を持っているため、削除の直後に開くと<b>消す前の明細一覧</b>が出ていました。実データは正しく消えています（実測：98→94件・ゴースト0・選んだ4件ちょうど／台帳95件と突合して取り違えゼロ）。削除したらそのカタログのキャッシュを必ず捨てるようにしました。',
       '☑️ <b>明細をチェックして、まとめて削除できるようにしました</b>（本人「複数選択して消せたりしない？」）。番号の下のチェックを入れると、明細のかたまりの下に「🗑 選んだ明細をまとめて削除」が出ます（<b>チェックは左に固定される列</b>にあるので、横に振っても付いてきます）。<b>位置はバラバラでもOK</b>——1番と50番と98番を同時に選んでも、残りの順番は崩れません。',
       '📊 <b>削除で販売数がズレる件、表示は正しい数に戻します</b>（本人「ズレて更新すれば戻るのか？／最終的に戻ればいい」）。<b>Shopee側は戻りません</b>——販売数を<b>枠(model_id)</b>に持っているので、同期し直しても同じ数字を読み直すだけです。<br>そこで<b>消す瞬間に「その時点の販売数」を明細名で控えておき</b>、表示のときに足し戻します。<code>表示 = 控えた販売数（明細名で引く）＋（いまの枠の販売数 − 控えた時点の枠の販売数）</code>——後半は<b>詰め直した後にその枠で売れた分</b>＝新しい中身の売上なので足すのが正しい数です。何度消しても積み上がります。数字にマウスを乗せると<b>Shopeeの表示との違い</b>が出ます。',
@@ -18521,6 +18522,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!sid) return;
     getItemCached(cc, itemId, sid).catch(() => {});   // 失敗しても黙って捨てる（本番の読込でリトライされる）
   }
+  // ★明細を足した/消した直後に、開いたままの✎カタログ編集を最新の中身で描き直す。
+  //   明細名（並び替え）も 価格・在庫の表も、この画面を組み立て直さないと増減が出ない。
+  function reopenCatalogEditorIfOpen(cc, itemId) {
+    const op = openCatalogEditor._open;
+    if (!op || op.cc !== cc || String(op.itemId) !== String(itemId)) return false;
+    try { const ck2 = cc + '|' + itemId; openCatalogEditor._cache.delete(ck2); openCatalogEditor._infl.delete(ck2); } catch (_) { }
+    const sc = ((op.ov.querySelector('.ed-body') || {}).scrollTop) || 0;   // 見ていた位置は保つ
+    try { op.ov.remove(); } catch (_) { }
+    openCatalogEditor._open = null;
+    openCatalogEditor(cc, op.host, itemId, op.repName);
+    setTimeout(() => { const b3 = document.querySelector('.ed-body'); if (b3) b3.scrollTop = sc; }, 700);
+    return true;
+  }
   function openCatalogEditor(cc, host, itemId, repName) {
     // 読取り・書込とも公式API化済（update_item/price/stock）。公式API設定があればライブ(ブリッジ)不要で開ける。バリエ名・明細SKUだけはブリッジ or Shopee編集ページが必要。
     if (state.mode !== 'live' && !(settings.openapiUrl && settings.writeToken)) { alert('カタログ編集には公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）か🟢ライブPCが必要です'); return; }
@@ -18537,7 +18551,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div class="ed-body" style="padding:16px 18px;max-height:calc(100vh - 150px);overflow:auto"><div class="smd-dim"><span class="smd-spin"></span> Shopeeから現在の内容を取得中…<div style="font-size:11px;margin-top:4px">${esc(repName || '')}</div><div class="ed-wait" style="font-size:10.5px;margin-top:6px;color:#a8650a"></div></div></div>
     </div>`;
     document.body.appendChild(ov);
-    const close = () => ov.remove();
+    // ★開いている編集画面がどのカタログか覚えておく。明細を足す/消した後に、
+    //   開いたままの画面へ即反映するのに使う（閉じて開き直さないと出ない、を作らない）。
+    openCatalogEditor._open = { cc, host, itemId, repName, ov };
+    const close = () => { ov.remove(); if (openCatalogEditor._open && openCatalogEditor._open.ov === ov) openCatalogEditor._open = null; };
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
     ov.querySelector('.ed-close').addEventListener('click', close);
     const body = ov.querySelector('.ed-body');
@@ -20115,6 +20132,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                   JOB_MIRROR['_done' + key2] = 1;
                   try { refreshOneListing(cc, itemId, sidCat); } catch (_) {}
                   try { markStale(); } catch (_) {}
+                  // ★開いたままの編集画面にも即反映（明細名の並び替え・価格/在庫の表は組み立て直しが要る）
+                  try { setTimeout(() => reopenCatalogEditorIfOpen(cc, itemId), 900); } catch (_) {}
                 }
                 if (!ba || !ba.isConnected) return;
                 if (v.status === 'done') { ba.disabled = false; ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100) + ((v.result && v.result.imgAdjust) ? '<span class="smd-dim" style="margin-left:6px">' + esc(v.result.imgAdjust) + '</span>' : ''); markStale(); try { ledgerAddVars(list); } catch (_) {} delete JOB_MIRROR[key2]; return; }
@@ -27655,6 +27674,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         } catch (_) {}
         toast('🗑 ' + targets.length + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）');
         await refreshOneListing(cc, itemId, sid);
+        try { reopenCatalogEditorIfOpen(cc, itemId); } catch (_) { }
       } catch (e) { if (btn) { btn.textContent = org; btn.disabled = false; } alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
     }
     // 行の 🗑（1件）
