@@ -726,6 +726,18 @@ function doGet(e) {
       } catch (err) { beout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(becb + '(' + JSON.stringify(beout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    // ★順番を崩さずに明細を消す（詰め直し方式）。途中の1〜2件を消すのが実務ではほとんど。
+    if (p.action === 'delete_variation_shift') {
+      var dscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var dsout;
+      try {
+        var dswt = P_().getProperty('WRITE_TOKEN');
+        if (!dswt || p.token !== dswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var dsshop = parseInt(p.shop_id, 10); if (!getToken_(dsshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''));
+      } catch (err) { dsout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dscb + '(' + JSON.stringify(dsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'add_variations_bulk') {
       var abcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var about;
@@ -1556,6 +1568,96 @@ function bulkEdit_(kv, jobKey, from) {
   return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), next: null, total: items.length };
 }
 // 明細名と明細画像を1回の update_tier_variation でまとめて反映（対象外の画像・名前はそのまま維持）
+// ★【順番を崩さずに】途中の明細を消す（詰め直し方式）。2026-08-22 本人要望「1個、2個を消すことがほとんど」。
+//   Shopeeの公式APIは【位置が変わる明細を保持できない】ので、**位置は1つも動かさない**。
+//   かわりに「下の明細の中身を1つ上へ書き写して、あまった末尾の枠だけ消す」。
+//     ① 名前・画像・価格・在庫・SKU を1つ上へ（update_tier_variation 1回。tier_index は据え置き）
+//     ② あまった末尾の枠を delete_model（末尾なので安全）
+//     ③ option_list を残り件数に詰める（残る側の位置は 0..k-1 のままで動かない）
+//   ⚠ model_id は枠に残るため、**販売数(sold)は枠についたまま1つずれる**。価格・在庫・SKU・画像は正しく移る。
+function removeVariationShift_(shopId, itemId, midCsv) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  var priceOf = function (m) { var pi = (m.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
+  var stockOf = function (m) { var sv = m.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; };
+  var entryOf = function (m, idx) {
+    var e = { model_id: m.model_id, tier_index: [idx] };
+    var pr = parseFloat(priceOf(m)); if (pr > 0) e.original_price = pr;
+    var st = parseInt(stockOf(m), 10); if (!isNaN(st)) e.seller_stock = [{ stock: st }];
+    if (m.model_sku) e.model_sku = String(m.model_sku);
+    return e;
+  };
+  var read = function () {
+    var jj = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+    var rr = jj.response || {}, tt = rr.tier_variation || [], mm = rr.model || [];
+    if (tt.length !== 1) throw new Error('1層バリエ商品のみ対応です');
+    return { tier: tt[0], opt: tt[0].option_list || [], models: mm };
+  };
+  var r0 = read();
+  // 中身のない枠(ゴースト)が混じっていると「上へ書き写す先」が無い。先に掃除してから始める。
+  if (r0.opt.length !== r0.models.length) { try { cleanVariation_(shopId, itemId); } catch (e0) {} r0 = read(); }
+  var tier = r0.tier, optList = r0.opt, models = r0.models, n = optList.length;
+  var bySlot = {};
+  models.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) bySlot[oi] = m; });
+  for (var c = 0; c < n; c++) if (!bySlot[c]) throw new Error('中身のない明細が残っています。先に「🧹 中身のない明細を掃除する」を実行してください');
+
+  var mids = String(midCsv || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+  if (!mids.length) throw new Error('削除する明細が空です');
+  var del = {}, resolved = [];
+  mids.forEach(function (mid) {
+    var found = null;
+    for (var i = 0; i < n; i++) { if (String(bySlot[i].model_id) === String(mid)) { found = i; break; } }
+    if (found == null) throw new Error('この明細が今のShopee側に見つかりません（画面を開き直してください）: ID ' + mid);
+    if (!del[found]) { del[found] = 1; resolved.push(optList[found].option); }
+  });
+  if (Object.keys(del).length !== mids.length) throw new Error('消す対象の数が合いません（' + Object.keys(del).length + '/' + mids.length + '）。安全のため中止しました');
+
+  var keep = [];
+  for (var i2 = 0; i2 < n; i2++) if (!del[i2]) keep.push(i2);
+  if (!keep.length) throw new Error('全部は削除できません（最低1件は残してください）');
+  var k = keep.length;
+
+  // ① 中身を1つ上へ書き写す（位置は動かさない＝Shopeeが明細を落とさない）
+  var newOpts = [], newModels = [];
+  for (var s = 0; s < n; s++) {
+    if (s < k) {
+      var src = keep[s];
+      newOpts.push(tierOpt_(optList[src]));                 // 名前＋バリエ画像をそのまま移す
+      var e = entryOf(bySlot[src], s);                      // 価格・在庫・SKUは【移す元】の値
+      e.model_id = bySlot[s].model_id;                      // 枠に居座っているモデルIDはそのまま
+      newModels.push(e);
+    } else {
+      newOpts.push({ option: '__del' + s });                // あまり枠は一時名（名前の重複を避けるため）
+      newModels.push(entryOf(bySlot[s], s));
+    }
+  }
+  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], newModels);
+
+  // ② あまった末尾の枠を消す（末尾なので位置が動かない＝安全）
+  for (var s2 = k; s2 < n; s2++) {
+    var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: bySlot[s2].model_id });
+    if (dj && dj.error && dj.error !== '') throw new Error('明細の削除に失敗: ' + dj.error + ' ' + (dj.message || ''));
+  }
+
+  // ③ option_list を残り件数に詰める（Shopeeが既に詰めていれば何もしない）
+  var r3 = read();
+  var used3 = {};
+  r3.models.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) used3[oi] = 1; });
+  var keep3 = [];
+  for (var s3 = 0; s3 < r3.opt.length; s3++) if (used3[s3]) keep3.push(s3);
+  var shifted3 = keep3.some(function (oi, ni) { return oi !== ni; });
+  if (keep3.length !== r3.opt.length && !shifted3) {
+    updateTierVariation_(shopId, itemId,
+      [{ name: r3.tier.name, option_list: keep3.map(function (oi) { return tierOpt_(r3.opt[oi]); }) }],
+      r3.models.map(function (m) { return entryOf(m, (m.tier_index || [])[0]); }));
+  }
+
+  var r4 = read();
+  return {
+    ok: true, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
+    remain: r4.opt.length, models_remain: r4.models.length,
+    note: '順番は崩していません（販売数の表示だけ1つずれます）'
+  };
+}
 function bulkEditTier_(shopId, itemId, opts, imgs) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
