@@ -1714,36 +1714,44 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
   // ② tierに全部まとめて追記
   if (jobKey) jobSet_(jobKey, { pct: 55, step: '明細を追加中' });
   var optObjs = (tier.option_list || []).map(function (o) { return tierOpt_(o); });
-  var baseLen = optObjs.length, newModels = [], skipped = [];
+  var baseLen = optObjs.length, newModels = [], skipped = [], noImgSkipped = [];
+  // ★このカタログが既に画像を持っているか。持っているなら、Shopeeの仕様上
+  //   「画像なしの明細」は足せない（全部あり／全部なし のどちらかしか許されない）。
+  //   以前はここで**他の明細の画像を借りて**埋めていたが、本番に別商品の表紙が出るので廃止した
+  //   （2026-08-22 本人指示「勝手に当てないでくれ」）。画像が無い明細は**足さずに返す**。
+  var catalogHasImg = optObjs.some(function (o) { return o.image && o.image.image_id; });
   items.forEach(function (x, i2) {
     var nm = String(x.option || '').trim(); if (!nm) return;
     if (opts.indexOf(nm) >= 0) { skipped.push(nm); return; }
+    if (catalogHasImg && !imgIds[i2]) { noImgSkipped.push(nm); return; }   // 画像が無い＝足さない
     var oo = { option: nm }; if (imgIds[i2]) oo.image = { image_id: imgIds[i2] };
     optObjs.push(oo); opts.push(nm);
     var m = { tier_index: [optObjs.length - 1], original_price: parseFloat(x.price), seller_stock: [{ stock: parseInt(x.stock, 10) || 0 }] };
     if (x.sku) m.model_sku = String(x.sku);
     newModels.push(m);
   });
-  if (!newModels.length) throw new Error('追加できる明細がありません（同名が既にある等）');
+  if (!newModels.length) {
+    if (noImgSkipped.length) throw new Error('画像が取れなかったので1件も追加していません（' + noImgSkipped.length + '件）。'
+      + 'この商品は既に明細画像が付いているため、Shopeeの仕様で【画像なしの明細】は足せません。'
+      + '仕入元から画像を取り直すか、画像を手で入れてからやり直してください: ' + noImgSkipped.slice(0, 6).join(' / '));
+    throw new Error('追加できる明細がありません（同名が既にある等）');
+  }
   // ★Shopeeの仕様：1階層目のオプションは「全部に画像あり」か「全部なし」のどちらかでなければ
   //   update_tier_variation が product.error_busi で弾かれる（実際に発生）。
   //   混在したら、画像が取れなかった分に代わりの画像（既にある画像の1枚目）を当てて揃える。
   //   1枚も無ければ全部から画像を外して「全部なし」に揃える。
-  var withImg = 0, firstImg = null;
-  optObjs.forEach(function (o) { if (o.image && o.image.image_id) { withImg++; if (!firstImg) firstImg = o.image.image_id; } });
+  var withImg = 0;
+  optObjs.forEach(function (o) { if (o.image && o.image.image_id) withImg++; });
   var imgAdjust = '', imgBorrowed = [];
+  if (noImgSkipped.length) imgAdjust = '画像が取れなかった ' + noImgSkipped.length + '件は追加していません（勝手に他の画像は当てません）: ' + noImgSkipped.slice(0, 8).join(' / ');
   if (withImg > 0 && withImg < optObjs.length) {
-    if (firstImg) {
-      // ★Shopeeは「全部に画像あり」か「全部なし」しか許さないので、取れなかった分は
-      //   既にある画像を借りるしかない。ただし**借りた先は必ず名前で返す**。
-      //   2026-08-22：ここで黙って1枚目（家庭教師ヒットマン）を6件に当てており、
-      //   本番の出品に別ゲームの表紙が付いていた。件数だけの報告では気づけない。
-      optObjs.forEach(function (o) { if (!(o.image && o.image.image_id)) { o.image = { image_id: firstImg }; imgBorrowed.push(o.option); } });
-      imgAdjust = '画像が取れなかった' + imgBorrowed.length + '件に、他の明細の画像を借りて当てました（要差し替え）: ' + imgBorrowed.slice(0, 8).join(' / ');
-    } else {
-      optObjs.forEach(function (o) { delete o.image; });
-      imgAdjust = '画像を全て外しました';
-    }
+    // ★ここに来るのは【元から画像が欠けている明細がある】場合だけ（新しく足す分は上で弾いている）。
+    //   借りて埋めるのは廃止したので、触らずに止めて理由を返す。勝手に直さない。
+    var lack = [];
+    optObjs.forEach(function (o) { if (!(o.image && o.image.image_id)) lack.push(o.option); });
+    throw new Error('この商品は【画像が付いていない明細】が ' + lack.length + '件あるため、明細を足せません。'
+      + 'Shopeeは「全部に画像あり」か「全部なし」しか許しません。先にその明細の画像を入れてください: '
+      + lack.slice(0, 6).join(' / '));
   }
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
@@ -1773,7 +1781,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
       finalModel = ((jv2.response || {}).model || []).length;
     }
   } catch (e4) {}
-  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40),
+  return { ok: true, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
            healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
