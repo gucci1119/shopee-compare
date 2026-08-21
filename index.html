@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🗑 <b>明細を「そこから一番下まで」まとめて削除できるようにしました</b>（本人指摘「どこから消せばええのさ／1件ずつでは全然便利じゃない」）。これまでは<b>一番下の1件しか消せず</b>、31件消すのに31回かかっていました。しかも✎カタログ編集からは「一覧でやって」、一覧では「途中だから無理」と<b>たらい回しになっていました</b>。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ので「途中の1件だけ」は今も消せません。ただし<b>その明細から一番下までをまとめて消すのは、残る側の位置が1つも動かないので安全</b>です。🗑 を押すと<b>消す範囲と件数・残る件数</b>を出して確認します。',
       '📌 <b>明細（バリエ）の画像と明細名も左に固定されるようになりました</b>（本人指摘「じゃないと右側の各列の項目触る時に、どの明細かわからなくなる」）。カタログ行の画像・タイトルと同じ動きです。<br>原因は<b>明細が20件を超えたときだけ付けていた「枠の中でスクロール」</b>でした。CSSは<b>片方の軸に overflow を付けると、もう片方も自動でスクロール箱になります</b>。すると明細行の左固定は<b>その枠</b>に対して効いてしまい、枠ごと横に流れて消えていました。枠内スクロールをやめ、カタログ行と同じ土俵で固定します。<br>あわせて、固定した列の<b>下から裏の価格がはみ出して見えていた</b>のも直しました（グリッドが <code>align-items:start</code> なので固定列が中身の高さぶんしか背景を持たず、背の高い入力欄が透けていました）。',
       '📌 <b>出品一覧の列見出しが画面の上に貼り付くようになりました</b>（本人指摘「まだこれ固定されてないやん」）。これまでは見出しを表の箱の<b>中</b>に貼り付けていましたが、<b>箱の下端が画面より下（実測372px下）にある</b>ため、<b>先に窓の方がスクロールして見出しも一緒に上へ流れて消えて</b>いました（貼り付くのは窓を下まで送りきった後）。見出しを箱の外に出し、<b>画面に対して</b>貼り付けます（横スクロールは表と連動）。長い一覧を下まで見ても<b>価格・在庫・販売がどの列か分かります</b>。',
       '🔎 <b>取り直しが「1件しか取れない」ときに、理由が画面に出ませんでした</b>（本人指摘）。実機で調べたところ、対象32件のうち<b>メルカリShopsの31件すべてが仕入元から消えていました</b>（商品ページを開いても「ページが見つかりませんでした」／公式APIも31/31が404）。取れた1件は通常メルカリで、画像が生きていた分です。<br>これまでは「✓ 完了 1/1件」としか出ず、<b>何が起きたのか分からない</b>状態でした。今後は<b>「仕入元のページが消えている 31件」のように理由を数えて出します</b>。',
@@ -19289,10 +19290,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         // ★2026-08-15：1件消したつもりが【3件】消えた（隣が巻き添え＋1件がゴースト化）。
         //   原因候補（update_tier_variation に価格・在庫を載せていなかった）は直したが、
         //   実機で安全確認が済むまでは止める。消える操作は疑いのまま出さない。
-        alert('明細の削除は【出品一覧の展開行】から行ってください。\n\n'
-          + 'Shopeeの公式APIは位置が変わる明細を保持できず、途中の明細を消すと後ろが消えます（実際に発生）。\n'
-          + '一番下の明細だけが安全に削除できるため、判定できる一覧側に集約しました。\n\n'
-          + '途中の明細はShopeeの編集画面から削除してください。');
+        alert('明細の削除は【出品一覧の展開行】の 🗑 から行ってください。\n\n'
+          + 'Shopeeの公式APIは位置が変わる明細を保持できないため、途中の1件だけは消せません。\n'
+          + 'そのかわり、一覧の 🗑 なら【その明細から一番下まで】をまとめて消せます（残る側の位置が動かないので安全）。');
         return;
         /* eslint-disable no-unreachable */
         if (!needOfficial()) return;
@@ -27526,26 +27526,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★Shopeeの公式APIは【位置が変わるモデルを保持できない】（2026-08-15 実証）。
       //   最後尾の明細だけは安全に消せるが、途中を消すと**後ろの明細がShopee側で消える**。
       //   なので最後尾以外はここで断る（実際に3件失う事故が起きたため）。
+      // ★途中の1件だけは公式APIで安全に消せない（位置が変わる明細をShopeeが保持しない）。
+      //   ただし【そこから一番下まで】をまとめて消すのは、残る側の位置が1つも動かないので安全。
+      //   1件ずつしか消せないと31件で31回＝使い物にならない（2026-08-22 本人指摘）。
+      let mids = String(mid), delN = 1, tailNames = '';
       { const row0 = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(itemId));
         let ms0 = row0 && row0.models; if (!Array.isArray(ms0)) { try { ms0 = JSON.parse(ms0 || '[]'); } catch (_) { ms0 = []; } }
-        const maxTi = Math.max(-1, ...(ms0 || []).map(x => (x && x.ti != null) ? x.ti : -1));
-        const me = (ms0 || []).find(x => String(x.id) === String(mid));
-        if (!me || me.ti == null || me.ti !== maxTi) {
-          alert('この明細は【途中】にあるため、ここからは削除できません。\n\n'
-            + 'Shopeeの公式APIは、位置が変わる明細を保持できず、後ろの明細が消えてしまいます（実際に発生）。\n\n'
-            + '・一番下の明細は、ここから削除できます\n'
-            + '・途中の明細は、Shopeeの編集画面から削除してください');
-          return;
+        const withTi = (ms0 || []).filter(x => x && x.ti != null).sort((a2, b2) => a2.ti - b2.ti);
+        const me = withTi.find(x => String(x.id) === String(mid));
+        if (!me) { alert('この明細が今の一覧に見つかりません。🔄最新に更新してからやり直してください'); return; }
+        const tail = withTi.filter(x => x.ti >= me.ti);
+        if (tail.length > 1) {
+          const namesList = tail.slice(0, 8).map(x => (x.ti + 1) + '番 ' + (x.n || '（無名）')).join('\n');
+          if (!confirm('Shopeeの仕様で【途中の明細だけ】は消せません（後ろの明細まで消えてしまいます）。\n\n'
+            + 'そのかわり、この明細から【一番下まで】をまとめて消せます。\n\n'
+            + '■ 消す: ' + (me.ti + 1) + '番 〜 ' + (withTi[withTi.length - 1].ti + 1) + '番 の ' + tail.length + '件\n'
+            + namesList + (tail.length > 8 ? '\n…ほか' + (tail.length - 8) + '件' : '')
+            + '\n\n残る ' + (withTi.length - tail.length) + '件は位置が変わらないので安全です。\n続けますか？')) return;
+          mids = tail.map(x => x.id).join(',');
+          delN = tail.length;
+          tailNames = (me.ti + 1) + '〜' + (withTi[withTi.length - 1].ti + 1) + '番';
         }
       }
       const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
-      if (!confirm('書込先: ' + gw.summary + '\n\n' + no + '番「' + nm + '」をShopeeから削除します。\n\n元に戻せません。よろしいですか？')) return;
+      if (!confirm('書込先: ' + gw.summary + '\n\n' + (delN > 1 ? (tailNames + ' の ' + delN + '件') : (no + '番「' + nm + '」')) + 'をShopeeから削除します。\n\n元に戻せません。よろしいですか？')) return;
       const org = el.textContent; el.textContent = '⏳';
       try {
-        const r = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: String(mid), names: '', idx: '' }, 90000);
+        const r = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids, names: '', idx: '' }, 300000);
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
-        try { logAct('出品', '明細削除', nm, cc + ' ' + itemId + ' #' + mid); } catch (_) {}
-        toast('🗑 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）' + (r.orphan_cleaned ? ' ・中身のない明細を ' + r.orphan_cleaned + '件 掃除' : ''));
+        try { logAct('出品', '明細削除', nm, cc + ' ' + itemId + ' ' + delN + '件 #' + mids); } catch (_) {}
+        toast('🗑 ' + delN + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）' + (r.orphan_cleaned ? ' ・中身のない明細を ' + r.orphan_cleaned + '件 掃除' : ''));
         await refreshOneListing(cc, itemId, sid);   // ★取り直しで一覧・DBとも最新になる（markStaleは編集画面の中だけの関数なので呼ばない）
       } catch (e) { el.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
     }));
