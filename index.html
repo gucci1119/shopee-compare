@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🔄 <b>消したのに「消えてない」ように見えたのを直しました</b>（本人指摘）。✎カタログ編集は<b>3分キャッシュ</b>を持っているため、削除の直後に開くと<b>消す前の明細一覧</b>が出ていました。実データは正しく消えています（実測：98→94件・ゴースト0・選んだ4件ちょうど／台帳95件と突合して取り違えゼロ）。削除したらそのカタログのキャッシュを必ず捨てるようにしました。',
       '☑️ <b>明細をチェックして、まとめて削除できるようにしました</b>（本人「複数選択して消せたりしない？」）。番号の下のチェックを入れると、明細のかたまりの下に「🗑 選んだ明細をまとめて削除」が出ます（<b>チェックは左に固定される列</b>にあるので、横に振っても付いてきます）。<b>位置はバラバラでもOK</b>——1番と50番と98番を同時に選んでも、残りの順番は崩れません。',
       '📊 <b>削除で販売数がズレる件、表示は正しい数に戻します</b>（本人「ズレて更新すれば戻るのか？／最終的に戻ればいい」）。<b>Shopee側は戻りません</b>——販売数を<b>枠(model_id)</b>に持っているので、同期し直しても同じ数字を読み直すだけです。<br>そこで<b>消す瞬間に「その時点の販売数」を明細名で控えておき</b>、表示のときに足し戻します。<code>表示 = 控えた販売数（明細名で引く）＋（いまの枠の販売数 − 控えた時点の枠の販売数）</code>——後半は<b>詰め直した後にその枠で売れた分</b>＝新しい中身の売上なので足すのが正しい数です。何度消しても積み上がります。数字にマウスを乗せると<b>Shopeeの表示との違い</b>が出ます。',
       '🗑 <b>明細を【順番を崩さずに】1件だけ削除できるようにしました</b>（本人指摘「順番崩さずに消したい／1個・2個を消すことがほとんど」）。<br>Shopeeの公式APIは<b>位置が変わる明細を保持できない</b>ため、これまでは一番下しか消せませんでした。そこで<b>位置を1つも動かさない</b>やり方に変えました——消したい枠を消すのではなく、<b>下の明細の中身（名前・画像・価格・在庫・SKU）を1つずつ上へ書き写し、あまった末尾の枠だけを消します</b>。見た目は「途中の1件が消えて詰まった」ままで、Shopee側では位置が動く明細が1つも無いので巻き添えが出ません。<br>⚠️ この作りのため<b>販売数の表示だけ1つずれます</b>（Shopeeが販売数を枠に持っているため）。価格・在庫・SKU・画像は正しく移ります。',
@@ -26289,6 +26290,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const cur = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(itemId));
       if (cur) {
         Object.assign(cur, row);
+        // ★DBには Shopee が返す生の販売数を入れる（ここまでで upsert 済み）。
+        //   画面に出す分だけ、明細名で控えた数に直す（ensureListings と同じ補正）。
+        try {
+          if (_soldBase && _soldBase.get(soldBaseKey(cc, itemId))) {
+            (cur.models || []).forEach(m => {
+              if (!m || m._soldFixed) return;
+              const fixed = soldShown(cc, itemId, m);
+              if (fixed !== (Number(m.sold) || 0)) { m.soldRaw = Number(m.sold) || 0; m.sold = fixed; }
+              m._soldFixed = 1;
+            });
+          }
+        } catch (_) { }
         // ★バリエ数は行オブジェクト単位でキャッシュしている（WeakMap）。中身を差し替えても
         //   【同じオブジェクトなのでキャッシュが効いたまま】＝明細を足しても「1バリエーション」の
         //   ままに見えていた（2026-08-14）。差し替えたらキャッシュを捨てる。
@@ -27634,6 +27647,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids }, 300000);
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
         try { logAct('出品', '明細削除', targets.map(x => x.n).join(' / ').slice(0, 60), cc + ' ' + itemId + ' ' + targets.length + '件 #' + mids); } catch (_) {}
+        // ★✎カタログ編集は3分キャッシュ。消したのに古い一覧が出て「消えてない」と見える（2026-08-22 本人指摘）。
+        //   消したらその商品のキャッシュを必ず捨てる。開いたままの編集画面も閉じる（中身が古いので）。
+        try { const ck2 = cc + '|' + itemId;
+          if (openCatalogEditor._cache) openCatalogEditor._cache.delete(ck2);
+          if (openCatalogEditor._infl) openCatalogEditor._infl.delete(ck2);
+        } catch (_) {}
         toast('🗑 ' + targets.length + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）');
         await refreshOneListing(cc, itemId, sid);
       } catch (e) { if (btn) { btn.textContent = org; btn.disabled = false; } alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
