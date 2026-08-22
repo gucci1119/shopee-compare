@@ -1535,16 +1535,22 @@
     const left = Math.max(0, cap - used);
     const pct = Math.round(used / cap * 100);
     // 15,000を超える＝背景同期が止まり、残りは手動操作の予約枠。20,000で全部止まる。
-    const col = used >= cap ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
-    const mark = used >= cap ? '⛔' : (used >= stop ? '⚠' : '');
+    // ★実際に断られた直後（30分以内）は、カウンタが何と言おうと⛔にする。
+    const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
+    const blocked = blockedAgo < 30 * 60 * 1000;
+    const col = (blocked || used >= cap) ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
+    const mark = (blocked || used >= cap) ? '⛔' : (used >= stop ? '⚠' : '');
     el.style.color = col; el.style.fontWeight = used >= stop ? '700' : '400';
-    el.style.borderColor = used >= cap ? '#f0c4bd' : (used >= stop ? '#f3d7a8' : '#e3e6ea');
-    el.style.background = used >= cap ? '#fdecea' : (used >= stop ? '#fffaf0' : '#fafbfc');
-    el.textContent = mark + 'Shopee接続枠 残り' + left.toLocaleString() + ' / ' + cap.toLocaleString() + '（' + pct + '%使用）';
+    el.style.borderColor = (blocked || used >= cap) ? '#f0c4bd' : (used >= stop ? '#f3d7a8' : '#e3e6ea');
+    el.style.background = (blocked || used >= cap) ? '#fdecea' : (used >= stop ? '#fffaf0' : '#fafbfc');
+    el.textContent = blocked
+      ? '⛔ Shopee接続枠 いま断られています（' + Math.max(1, Math.round(blockedAgo / 60000)) + '分前）'
+      : (mark + 'Shopee接続枠 残り' + left.toLocaleString() + ' / ' + cap.toLocaleString() + '（' + pct + '%使用）');
     el.title = 'GASからShopeeを叩ける回数は1日20,000回。今日 ' + used.toLocaleString() + '回 使いました。\n'
       + '・' + stop.toLocaleString() + '回を超えると背景の自動同期が止まり、残りは手動操作用に取ってあります\n'
       + '・使い切ると【出品・明細の追加や削除・画像】が止まります\n'
       + '・リセットは毎日 16:00（日本時間）'
+      + (blocked ? '\n\n⛔ たったいまShopee側に断られました（この数字より実態が悪いことがあります）。\n16:00のリセットまで待つか、Tampermonkeyが入ったPCならブラウザ経由で書けます。' : '')
       + (used >= cap ? '\n\n⛔ いまは使い切っています。16:00まで待ってください。' : '');
   }
   async function gasCall(params, timeoutMs) {
@@ -1568,7 +1574,11 @@
         const t = await r.text();
         const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
         if (!m) { lastErr = 'GAS応答エラー HTTP ' + r.status + '（GASは同時に1件しか処理できません。他の重い処理＝統計更新/注文取得などが走っていると詰まります。少し待って再実行してください）'; }
-        else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗'; if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
+        else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗';
+          // ★枠切れは【実際に断られた事実】が唯一の正。カウンタは数え漏れることがある（2026-08-22 実測で12,329回ぶん漏れていた）。
+          //   断られた瞬間を覚えて、上の表示を⛔に落とす。数字だけ見て「まだ余裕」と誤解させない。
+          if (/urlfetch|回数が多すぎ|too many times|invoked too many/i.test(lastErr)) { try { window.__ufBlockedAt = Date.now(); ufQuotaDraw(); } catch (_) {} }
+          if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
       } catch (e) {
         const msg = String((e && e.message) || '');
         // ★GASは302で script.googleusercontent.com に飛ばすことがあり、その先でCORSに弾かれると
@@ -15018,6 +15028,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '⛔ <b>枠の表示は「実際に断られた事実」を優先します</b>。カウンタの数字は<b>数え漏れることがあり</b>（実測で12,329回ぶん漏れていた）、「残り12,000」と出ているのに書き込みが断られる、という食い違いが起きます。そこで<b>Shopee側に断られた瞬間を覚えて、表示を⛔「いま断られています（◯分前）」に落とす</b>ようにしました。数字だけ見て「まだ余裕がある」と誤解しないためです。30分経てば通常表示に戻ります。',
       '🔁 <b>枠が尽きても、この端末のブラウザ経由で書けるようにしました</b>。2026-08-22 に枠を使い切り、<b>出品も明細も価格も全部止まって半日潰れました</b>。でも<b>書く道は他にもあります</b>——Tampermonkey（ブリッジ）は<b>自分のIPで通信するのでGASの枠と無関係</b>です。<br><b>✎カタログ編集の保存</b>と<b>💾価格・在庫を保存</b>が枠切れで失敗したとき、<b>ライブ接続（🟢）なら自動でブラウザ経由に切り替えて書き直します</b>（「Shopee接続枠が尽きたので、この端末のブラウザ経由で保存しました」と表示）。ライブでない場合は<b>「16:00にリセット」まで含めて理由を出します</b>——黙って失敗しません。<br>※各国まとめ編集の価格・在庫は元からブリッジ経路を持っていたので、そちらは以前から止まりません。',
       '🚦 <b>Shopeeを叩ける枠の残りを、いつも上に出すようにしました</b>。GASからShopeeを叩ける回数は<b>1日20,000回</b>で、使い切ると<b>出品・明細の追加や削除・画像がすべて止まります</b>。<b>2026-08-01 と 08-22 の2回、枯れて初めて気づきました</b>（本人「今日出品とかもできないってこと？」）。アカウントバーに<b>「Shopee接続枠 残り◯◯（◯%使用）」</b>を常時表示し、15,000回を超えると⚠、使い切ると⛔になります。残量を読む処理そのものは<b>枠を使わない</b>ので、枯れていても表示できます。リセットは<b>毎日16:00（日本時間）</b>。<br>あわせて<b>枠の数え方の穴</b>も直しました——<code>fetchAll</code> は<b>1回の呼び出しで件数ぶん枠を食う</b>のに数えておらず、画像処理が実消費の1/12しかカウントされていませんでした（実測：カウンタ7,671回に対し、実際は20,000回に到達＝<b>12,329回が未計上</b>）。だから15,000回で背景同期を止める安全弁が効きませんでした。',
       '🔍 <b>重複検知が「続編」を重複と誤警告していたのを直しました</b>。ゲームは<b>無印と2で名前がほとんど同じ</b>なので、文字の似具合だけで見ると 0.97〜0.98 になり重複として警告していました。実測すると<b>1カタログ100明細の中で15組が警告され、そのうち9組が続編違い</b>——<code>Gundam Mobile Suit Gihrens × Gihrens 2</code>、<code>ToHeart2 Portable × Portable 2</code> など。<b>当たらない警告は、警告ごと無視されるようになります</b>。<br>そこで<b>数字・巻数の並び（2 / 3 / II / 2nd …）が違えば、どれだけ字が似ていても別商品</b>と扱うようにしました。同じ100明細で <b>15組 → 6組</b> に減り、消えた9組はすべて続編でした。残った6組には <code>Phantasy Star Portable 2 × Phantasy Star Portable 2 PSP</code>（本当に同じ商品）が含まれています。',
