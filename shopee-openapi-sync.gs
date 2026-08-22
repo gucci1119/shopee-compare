@@ -1273,11 +1273,19 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!items || !items.length) throw new Error('対象が空です');
   // ① 画像を並列でダウンロード
-  var blobs = [];
+  // ★同じ画像URLは上げ直さない（URL→image_id を24時間キャッシュ）。
+  //   7か国に同じ商品を出すと、これまで同じ画像を国の数だけ「取得＋アップロード」していた＝枠の最大の浪費。
+  var blobs = [], cachedIds = [];
   for (var i = 0; i < items.length; i += 25) {
-    var part = items.slice(i, i + 25);
-    var rs = fetchAllRetry_(part.map(function (x) { return { url: x.url, muteHttpExceptions: true, followRedirects: true }; }));
-    rs.forEach(function (r) { blobs.push((r && r.getResponseCode() < 400) ? r.getBlob() : null); });
+    var part = items.slice(i, i + 25), need = [], needIdx = [];
+    part.forEach(function (x, k) {
+      var hit = imgIdCacheGet_(x.url);
+      if (hit) { cachedIds[i + k] = hit; blobs[i + k] = null; return; }
+      need.push({ url: x.url, muteHttpExceptions: true, followRedirects: true }); needIdx.push(i + k);
+    });
+    if (!need.length) continue;
+    var rs = fetchAllRetry_(need);
+    rs.forEach(function (r, k2) { blobs[needIdx[k2]] = (r && r.getResponseCode() < 400) ? r.getBlob() : null; });
   }
   // ② Shopeeのmedia_spaceへ並列アップロード（署名はリクエストごとに作る）
   var ids = [], path = '/api/v2/media_space/upload_image';
@@ -1286,6 +1294,7 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
     if (jobKey) jobSet_(jobKey, { pct: 50 + Math.round(i2 / items.length * 40), step: 'Shopeeへアップロード中 ' + i2 + '/' + items.length });
     var reqs = [], idx = [];
     for (var k = i2; k < Math.min(i2 + 12, items.length); k++) {
+      if (cachedIds[k]) { ids[k] = cachedIds[k]; continue; }     // 既に上げてある＝枠を使わない
       if (!blobs[k]) { ids[k] = null; continue; }
       var ts = now_();
       reqs.push({ url: HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts),
@@ -1300,6 +1309,7 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
         var j2 = JSON.parse(r2.getContentText());
         var info = (j2.response || {}).image_info || (((j2.response || {}).image_info_list || [])[0]) || {};
         ids[idx[k2]] = info.image_id || null;
+        if (ids[idx[k2]]) imgIdCachePut_((items[idx[k2]] || {}).url, ids[idx[k2]]);
       } catch (e) { ids[idx[k2]] = null; }
     });
   }
@@ -1728,7 +1738,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
         var urs = fetchAllRetry_(ureqs);
         urs.forEach(function (r3, k3) {
           if (!r3) return;                                  // このアップだけ失敗＝画像なしで明細は作る
-          try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; } catch (e) {}
+          try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; if (imgIds[uidx[k3]]) imgIdCachePut_((items[uidx[k3]] || {}).image, imgIds[uidx[k3]]); } catch (e) {}
         });
       }
     }
@@ -2133,7 +2143,21 @@ function updateModelSku_(shopId, itemId, list) {
   return { ok: true, n: models.length, response: j.response || null };
 }
 // 画像URL→image_id（media_space/upload_image・public署名・multipart）
+// ★同じ画像URLを何度も上げ直さない。7か国に同じ商品を出すと、これまでは
+//   **同じ画像を国の数だけダウンロード＋アップロード**していた（1枚につき urlfetch 2回 × 7）。
+//   画像は枠(20,000回/日)を最も食う処理なので、URL→image_id を24時間覚えておく。
+//   ※image_id は媒体（media_space）のIDでショップ横断で使えるため、ショップ別に分けない。
+function imgIdCacheGet_(url) {
+  try { return CacheService.getScriptCache().get('img_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(url)))); }
+  catch (e) { return null; }
+}
+function imgIdCachePut_(url, id) {
+  try { CacheService.getScriptCache().put('img_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(url))), String(id), 86400); }
+  catch (e) {}
+}
 function uploadImageUrl_(imageUrl) {
+  var hit = imgIdCacheGet_(imageUrl);
+  if (hit) return hit;                       // 既に上げてある＝枠を使わない
   // ★署名は【画像を取ってきた後】に作る。先に作ると、画像のダウンロードで手間取った分だけ
   //   timestamp が古くなり、Shopee側で署名切れとして弾かれる（リトライで待つほど危なくなる）。
   var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true }).getBlob();
@@ -2143,7 +2167,9 @@ function uploadImageUrl_(imageUrl) {
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
   var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
-  return info.image_id || (info.image_id_list || [])[0];
+  var got = info.image_id || (info.image_id_list || [])[0];
+  if (got) imgIdCachePut_(imageUrl, got);
+  return got;
 }
 // メタ(category/logistic/brand)を解決して返す＝コンポーザーが出品前に確認できる
 function listMeta_(body) {
