@@ -2639,8 +2639,11 @@
     const items = [];
     (lst.byCc[cc] || []).forEach(r => {
       const ms = Array.isArray(r.models) ? r.models : (() => { try { return JSON.parse(r.models || '[]'); } catch (_) { return []; } })();
-      if (ms.length) ms.forEach(m => { if (m.n && !m.ghost) items.push({ t: m.n, item_id: r.item_id, name: r.name, img: m.img || r.image || '', mid: m.id, shop_id: r.shop_id }); });
-      else if (r.name) items.push({ t: r.name, item_id: r.item_id, name: r.name, img: r.image || '', mid: null, shop_id: r.shop_id });
+      // ★名前だけで決めない。**JAN・型番・自社コード・SKU**も索引に入れて、
+      //   一致＝ほぼ確定／違う＝別商品、として使う（本人指示 2026-08-22「トータルで判定して」）。
+      const pidOfRow = (m) => { try { return pidOf(pidKeyModel(r, m)) || {}; } catch (_) { return {}; } };
+      if (ms.length) ms.forEach(m => { if (m.n && !m.ghost) { const pv = pidOfRow(m); items.push({ t: m.n, item_id: r.item_id, name: r.name, img: m.img || r.image || '', mid: m.id, shop_id: r.shop_id, sku: m.sku || '', jan: pv.jan || '', mpn: pv.mpn || '', own: pv.own || '' }); } });
+      else if (r.name) { const pv = pidOfRow(null); items.push({ t: r.name, item_id: r.item_id, name: r.name, img: r.image || '', mid: null, shop_id: r.shop_id, sku: r.parent_sku || '', jan: pv.jan || '', mpn: pv.mpn || '', own: pv.own || '' }); }
     });
     const inv = new Map(), df = new Map(), tinv = new Map();
     items.forEach((x, i) => {
@@ -2671,6 +2674,18 @@
     if (ws.length === 1 && ws[0].length <= 4) return true;                       // 「red」「4gb」など
     if (ws.length <= 3 && ws.every(w => SIM_COLOR.has(w) || SIM_GENERIC.has(w) || /^\d{1,4}(gb|mb|tb)?$/.test(w))) return true;
     return false;
+  }
+  // ★コードでの判定。**一致＝同じ商品／違う＝別商品**。名前や画像より強い。
+  //   JAN（作品そのもの）＞ 型番 ＞ 自社コード ＞ SKU の順に信用する。
+  //   ※空同士は判断材料なし（null を返す）。
+  const simCodeNorm = (v) => String(v || '').trim().toUpperCase().replace(/[\s\-]/g, '');
+  function simCodeVerdict(a, b) {
+    const F = [['jan', 'JAN'], ['mpn', '型番'], ['own', '自社コード'], ['sku', 'SKU']];
+    for (const [k, label] of F) {
+      const x = simCodeNorm(a && a[k]), y = simCodeNorm(b && b[k]);
+      if (x && y) return { same: x === y, by: label };
+    }
+    return null;
   }
   function simFind(cc, text, min, catTitle, selfItemId) {
     const ix = simIndexFor(cc); if (!ix.items.length) return null;
@@ -2709,7 +2724,7 @@
   }
   // ★重複は2つとは限らない（3か所以上に同じ明細を出していることがある。本人指摘 2026-08-22）。
   //   simFind は「いちばん似ている1件」しか返さないので、**しきい値を超えた相手を全部**返す版。
-  function simFindAll(cc, text, min, catTitle, selfItemId, limit) {
+  function simFindAll(cc, text, min, catTitle, selfItemId, limit, selfCodes) {
     const ix = simIndexFor(cc); if (!ix.items.length) return [];
     const cg = catTitle ? simGrams(catTitle) : null, ckq = catTitle ? simTokens(catTitle) : null;
     const g = simGrams(text), k = simTokens(text);
@@ -2732,10 +2747,14 @@
         catSim = Math.max(simDice(cg, it.cg), tk);
         if (catSim < 0.55) return;
       }
+      // ★コードが揃っていれば、名前の似具合より先に決める（本人指示：トータルで判定）
+      const cv = selfCodes ? simCodeVerdict(selfCodes, it) : null;
+      if (cv && !cv.same) return;                               // コードが違う＝別商品（名前が似ていても出さない）
       const d = simDice(g, it.g);
       const c = Math.min(simCover(k, it.k, ix.df, ix.N), simCover(it.k, k, ix.df, ix.N));
-      const sc = Math.max(d, c * 0.97);
-      if (sc >= (min || 0.72)) out.push({ t: it.t, item_id: it.item_id, name: it.name, img: it.img || '', mid: it.mid, shop_id: it.shop_id, score: sc, catSim: Math.round(catSim * 100) });
+      let sc = Math.max(d, c * 0.97);
+      if (cv && cv.same) sc = 1;                                // コード一致＝同じ商品
+      if (sc >= (min || 0.72)) out.push({ t: it.t, item_id: it.item_id, name: it.name, img: it.img || '', mid: it.mid, shop_id: it.shop_id, score: sc, catSim: Math.round(catSim * 100), by: cv ? (cv.by + '一致') : '' });
     });
     // 同じカタログから複数ヒットしたら、そのカタログの中でいちばん似ている1件だけ
     const byItem = new Map();
@@ -15095,6 +15114,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🧩 <b>重複の判定に JAN・型番・自社コード・SKU も使うようにしました</b>（本人「識別とかSKUとか補足情報も入れてくので、カタログタイトルとかも含めてトータルで判定して」）。<br>コードは名前や写真より確かなので、<b>入っていればそれで決めます</b>——<b>一致＝同じ商品（100%・理由を「JAN一致」等と表示）／違う＝別商品（名前が似ていても候補に出さない）</b>。信用する順は <b>JAN ＞ 型番 ＞ 自社コード ＞ SKU</b>。片方でも空なら判断材料にせず、これまでどおり名前と写真で見ます。<br>つまり<b>識別項目を埋めるほど誤検知が消えます</b>。<code>Monster Hunter XX × 4G</code> のような境界のペアも、どちらかにJANか型番が入れば自動で切れます。<br>判定に使っているもの：<b>明細名／カタログ名の近さ／続編の番号／JAN・型番・自社コード・SKU／写真（dHash）</b>。',
       '🖼 <b>重複の見比べでも【画像で判定】するようにしました</b>（本人「当然、画像でも判定してるよね？」）。これまで<b>画像は見比べ用に出しているだけで、点数は名前だけ</b>でした。開くと自動で両側の写真を突き合わせ、<b>🖼88%以上＝ほぼ同じ写真（赤）／60%以上＝似ている（橙）／それ未満＝別物に見える（緑）</b>を出します。<b>45%未満の行は薄く</b>して、目で追わなくていいようにしました。<br>⚠️ 写真の指紋（dHash）は<b>同じ写真しか当たりません</b>。別の人が撮った写真だと<b>同じ商品でも低く出ます</b>——低い＝別商品とは限りません。<b>高ければ強い証拠</b>、という使い方です。画像はShopeeのCDNがブラウザ直取りを弾くのでサーバー経由で取ります（接続枠を少し使うため、80枚を超える時は省略します）。',
       '🔄 <b>重複の見比べを直しました（本人指摘4点）</b>。①<b>相手側の画像が出ていなかった</b>——検索結果に画像を入れ忘れていました。②<b>重複は2つとは限らない</b>——「いちばん似ている1件」しか返しておらず、3か所以上に出していると残りを見落としていました。<b>しきい値を超えた相手を全部</b>出します。③<b>どっちを消すのか分からない</b>——<b>左右どちらでもチェックできる</b>ようにしました（別カタログ側も消せます）。選んだ方が赤くなります。④<b>照合は同じ国の中だけ</b>である旨を画面に明記しました。<br>あわせて<b>誤検知を2つ潰しました</b>。<code>Pokémon X</code> × <code>Pokémon Moon</code> が80%になっていたのは、意味のある語が「pokemon」1つしかなく<b>1語一致で満点</b>になっていたため（両方に2語以上ある時だけ語の重なりを使うようにしました）。同じカタログ内の比較にも<b>続編ガードが効いていませんでした</b>（<code>2005 Crystal Drive DS</code> × <code>同 2</code> 等）。',
       '🎯 <b>重複検知の誤検知を11%減らしました</b>。全6,477カタログを実測したところ、「同じ明細名が別カタログにもある」<b>2,235件</b>のうち<b>247件（11%）が識別力の無い名前</b>でした——<code>blue</code> <code>white blue</code> <code>4gb</code> <code>16gb</code> <code>new</code> など。これらは<b>Joy-Conの色違いや容量違いで、別カタログにあって当たり前</b>＝重複ではありません。<br>色・容量・汎用語だけの明細名（3語以内）は<b>別カタログとの照合から外しました</b>。同じカタログの中での比較は今までどおりです（そこは色違いが並ぶのが正常なので）。外している語の一覧は、見比べ画面の説明文にマウスを乗せると出ます。<br>国別の内訳：BR 638／VN 539／TH 313／SG 293／TW 207／PH 195／MY 50件。<b>実質の重複候補は 1,988件</b>です。',
@@ -18727,6 +18747,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return `<div class="dc-row" data-i="${i}" data-limg="${av(me ? (me.img || '') : '')}" data-rimg="${av(rightIsSelf ? (other ? other.img || '' : '') : (h.img || ''))}" style="display:flex;gap:8px;align-items:center;border-bottom:1px solid #f0f0f0;padding:7px 4px">
         <div style="flex:none;width:62px;text-align:right">
           <div style="color:${col};font-size:12px;font-weight:700">${h.score}%</div>
+          ${h.by ? `<div style="font-size:9.5px;color:#c0392b;font-weight:700" title="コードが一致しています。名前や写真より確かな手がかりです">${esc(h.by)}</div>` : ''}
           <div class="dc-img smd-dim" style="font-size:10px">🖼…</div>
         </div>
         ${meSide}
@@ -19421,7 +19442,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (dsB) dsB.addEventListener('click', () => {
           dsB.disabled = true; if (dsM) { dsM.style.color = ''; dsM.textContent = '調べています…'; }
           setTimeout(() => {
-            const mine = ((tiers[0] && tiers[0].value_list) || []).map((o, i) => ({ no: i + 1, t: o.custom_value || '' })).filter(x => x.t);
+            const mine = ((tiers[0] && tiers[0].value_list) || []).map((o, i) => {
+              const m2 = (models || []).find(y => ((y.tier_index || [])[0]) === i);
+              let pv = {}; try { if (m2) pv = pidOf(pidKeyModel({ item_id: itemId, parent_sku: pi.parent_sku }, { id: m2.id })) || {}; } catch (_) {}
+              return { no: i + 1, t: o.custom_value || '', sku: (m2 && m2.sku) || '', jan: pv.jan || '', mpn: pv.mpn || '', own: pv.own || '' };
+            }).filter(x => x.t);
             mine.forEach(x => { x.g = simGrams(x.t); });
             const hits = [];
             // (1) このカタログの中どうし
@@ -19429,14 +19454,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             //   （2005 Crystal Drive DS × 同 2／Toward Boushi and Magic 365 DS × 同 2 など。2026-08-22 本人の画面で確認）。
             //   simPair は続編ガード（数字・巻数が違えば別商品）が入っているので、そちらを使う。
             for (let i = 0; i < mine.length; i++) for (let k = i + 1; k < mine.length; k++) {
-              const sc = simPair(mine[i].t, mine[k].t);
-              if (sc >= 0.85) hits.push({ kind: 'self', a: mine[i], b: mine[k], score: Math.round(sc * 100) });
+              // ★コードが入っていればそれで決める（一致＝同じ／違う＝別）。名前は補助。
+              const cv = simCodeVerdict(mine[i], mine[k]);
+              if (cv && !cv.same) continue;
+              const sc = cv && cv.same ? 1 : simPair(mine[i].t, mine[k].t);
+              if (sc >= 0.85) hits.push({ kind: 'self', a: mine[i], b: mine[k], score: Math.round(sc * 100), by: cv ? (cv.by + '一致') : '' });
             }
             // (2) 同じ国の別カタログ
             mine.forEach(x => {
               // ★3か所以上に出していることがあるので【全部】拾う（1件だけだと残りを見落とす）
-              simFindAll(cc, x.t, 0.78, pi.name || repName || '', itemId, 6).forEach(f => {
-                hits.push({ kind: 'other', a: x, name: f.t, item_id: f.item_id, cat: f.name, img: f.img, mid: f.mid, shopId: f.shop_id, score: Math.round(f.score * 100), catSim: f.catSim });
+              simFindAll(cc, x.t, 0.78, pi.name || repName || '', itemId, 6, x).forEach(f => {
+                hits.push({ kind: 'other', a: x, name: f.t, item_id: f.item_id, cat: f.name, img: f.img, mid: f.mid, shopId: f.shop_id, score: Math.round(f.score * 100), catSim: f.catSim, by: f.by || '' });
               });
             });
             hits.sort((p1, p2) => p2.score - p1.score);
