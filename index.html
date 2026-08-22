@@ -15028,6 +15028,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🇻🇳 <b>VNの「出品価格の上限」を取り違えていたのを直しました</b>（本人指摘）。VNには<b>別ものの上限が2つ</b>あります——①<b>出品価格の上限＝1,000,000 VND未満</b>（カタログ／明細の価格として100万以上は出せない）②<b>1注文の購入限度額＝5,000,000 VND</b>（2026-08-02に100万から引き上げ。買い手が1回にいくら決済できるかの話）。①に②の値を入れていたため、<b>出せない価格を警告なしで通していました</b>。実際にShopeeが <code>The max price of the product is over max limit</code> でまとめて弾きました（1,039,000 VND）。<br>あわせて、まとめて追加のときに<b>上限を超える明細を自動で外す</b>ようにしました。<b>1件でも混ざると add_model が丸ごと失敗して他の正常な明細まで登録できない</b>ためです。外した明細は名前と価格を出すので、仕入値かROIを下げれば出せます。',
       '⛔ <b>枠の表示は「実際に断られた事実」を優先します</b>。カウンタの数字は<b>数え漏れることがあり</b>（実測で12,329回ぶん漏れていた）、「残り12,000」と出ているのに書き込みが断られる、という食い違いが起きます。そこで<b>Shopee側に断られた瞬間を覚えて、表示を⛔「いま断られています（◯分前）」に落とす</b>ようにしました。数字だけ見て「まだ余裕がある」と誤解しないためです。30分経てば通常表示に戻ります。',
       '🔁 <b>枠が尽きても、この端末のブラウザ経由で書けるようにしました</b>。2026-08-22 に枠を使い切り、<b>出品も明細も価格も全部止まって半日潰れました</b>。でも<b>書く道は他にもあります</b>——Tampermonkey（ブリッジ）は<b>自分のIPで通信するのでGASの枠と無関係</b>です。<br><b>✎カタログ編集の保存</b>と<b>💾価格・在庫を保存</b>が枠切れで失敗したとき、<b>ライブ接続（🟢）なら自動でブラウザ経由に切り替えて書き直します</b>（「Shopee接続枠が尽きたので、この端末のブラウザ経由で保存しました」と表示）。ライブでない場合は<b>「16:00にリセット」まで含めて理由を出します</b>——黙って失敗しません。<br>※各国まとめ編集の価格・在庫は元からブリッジ経路を持っていたので、そちらは以前から止まりません。',
       '🚦 <b>Shopeeを叩ける枠の残りを、いつも上に出すようにしました</b>。GASからShopeeを叩ける回数は<b>1日20,000回</b>で、使い切ると<b>出品・明細の追加や削除・画像がすべて止まります</b>。<b>2026-08-01 と 08-22 の2回、枯れて初めて気づきました</b>（本人「今日出品とかもできないってこと？」）。アカウントバーに<b>「Shopee接続枠 残り◯◯（◯%使用）」</b>を常時表示し、15,000回を超えると⚠、使い切ると⛔になります。残量を読む処理そのものは<b>枠を使わない</b>ので、枯れていても表示できます。リセットは<b>毎日16:00（日本時間）</b>。<br>あわせて<b>枠の数え方の穴</b>も直しました——<code>fetchAll</code> は<b>1回の呼び出しで件数ぶん枠を食う</b>のに数えておらず、画像処理が実消費の1/12しかカウントされていませんでした（実測：カウンタ7,671回に対し、実際は20,000回に到達＝<b>12,329回が未計上</b>）。だから15,000回で背景同期を止める安全弁が効きませんでした。',
@@ -20097,6 +20098,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             }));
             const bad2 = list.filter(x => !x.name || !(parseFloat(x.price) > 0));
             if (bad2.length) { alert('明細名と価格が入っていない行があります（' + bad2.length + '件）'); return; }
+            // ★出品価格の上限を超える行は【送る前に自動で外す】（2026-08-22 本人指示「この時に自動で消して」）。
+            //   実際にShopeeが product.error_busi「The max price of the product is over max limit」で
+            //   まとめて弾いた（VN・1,039,000VND）。1件でも超えると add_model が丸ごと失敗するので、
+            //   ここで落としておかないと**他の正常な明細まで登録できない**。
+            { const ceil = (typeof PRICE_CEIL !== 'undefined') && PRICE_CEIL[cc];
+              if (ceil) {
+                const over = list.filter(x => parseFloat(x.price) > ceil);
+                if (over.length) {
+                  const drop2 = new Set(over.map(x => x.el));
+                  for (let z = list.length - 1; z >= 0; z--) if (drop2.has(list[z].el)) list.splice(z, 1);
+                  over.forEach(x => { const i2 = +x.el.dataset.i; if (rows[i2]) { rows[i2].err = '出品価格が上限超（' + ceil.toLocaleString() + '）'; try { paintRow(i2); } catch (_) {} } });
+                  alert('⚠ ' + cc + ' の【出品価格の上限 ' + ceil.toLocaleString() + '】を超える明細を ' + over.length + '件 外しました。\n\n'
+                    + over.slice(0, 8).map(x => '・' + (x.name || '（無名）') + '  ' + Number(x.price).toLocaleString()).join('\n')
+                    + (over.length > 8 ? '\n…ほか' + (over.length - 8) + '件' : '')
+                    + '\n\nShopeeはこの価格では受け付けません（1件でも混ざると全部が失敗します）。\n'
+                    + '仕入値かROIを下げて価格を上限未満にすれば出せます。\n\n'
+                    + '残り ' + list.length + '件を追加します。');
+                  if (!list.length) { alert('上限を超えない明細が1件もありません。価格を下げてからにしてください'); return; }
+                }
+              }
+            }
             // ★画像が無いまま追加すると【Shopeeの仕様で他の明細の画像が借りられる】＝
             //   本番の出品に別ゲームの表紙が付く（2026-08-22 実際に6件発生：全部 家庭教師ヒットマン の表紙）。
             //   Shopeeは「全部に画像あり」か「全部なし」しか許さないので、こちらで止めるしかない。
@@ -28606,11 +28628,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const DTS_RULE = { BR: { on: 4, off: 3 } };
   const dtsFor = (cc, on) => { const r = DTS_RULE[cc] || { on: 3, off: 2 }; return on ? r.on : r.off; };
   // 価格上限（現地通貨・単品/各バリエ問わず1明細ごと。無ければ上限なし）
-  // ★2026-08-02：VNの購入限度額が 100万VND → **500万VND（約30,000円）** に引き上げられた。
-  //   （さらに旧は909,090VND）。この金額までは分割注文(split order)も不要。
+  // ★★【混同注意】VNには別ものの上限が2つある（2026-08-22 本人指摘で是正）
+  //   ① 出品価格の上限 …… **1,000,000 VND 未満**。カタログ／バリエ明細の価格として
+  //      100万VND以上は【そもそも出せない】。ここで見るのはこちら。
+  //   ② 1注文の購入限度額 … 2026-08-02に 100万 → **500万VND** に引き上げ（さらに旧は909,090）。
+  //      これは**買い手が1回にいくらまで決済できるか**の話で、出品価格の上限ではない。
+  //      分割注文(split order)が不要になったのは②の話。
+  //   ①に②の値(5,000,000)を入れていたため、**出せない価格を警告なしで通していた**。
   //   ※TWも 自宅配送50,000TWD / SPX COD 20,000TWD に引き上げられたが、COD利用時は20,000が実効上限のため
   //     誤って出品を弾かないよう、TWの上限はここでは設けていない。
-  const PRICE_CEIL = { VN: 5000000 };
+  const PRICE_CEIL = { VN: 999999 };
   // ★注意だけ出す上限（弾かない）。TWは自宅配送 50,000TWD まで出せるが、**SPX COD（代引き）は 20,000TWD が上限**。
   //   代引きを使っているので、20,000超は「代引きでは買えない」＝取りこぼしの可能性を知らせる。
   //   ここでブロックすると自宅配送で売れる商品まで出せなくなるため、警告のみ。
@@ -28633,7 +28660,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const sp = priceSpread(ctx.prices);
     if ((ctx.prices || []).filter(x => x > 0).length > 1 && sp > sl) w.push(`バリエ価格差${sp.toFixed(1)}倍（上限${sl}倍）`);
     const ceil = PRICE_CEIL[ctx.cc];
-    if (ceil && (ctx.prices || []).some(p => p > ceil)) { const over = (ctx.prices || []).filter(p => p > ceil).length; w.push(`価格上限${ceil.toLocaleString()}超（単品/バリエ${over}件）→上限内に`); }
+    if (ceil && (ctx.prices || []).some(p => p > ceil)) { const over = (ctx.prices || []).filter(p => p > ceil).length; w.push(`出品価格の上限 ${ceil.toLocaleString()}超（単品/バリエ${over}件）→上限内に`); }
     const pw = PRICE_WARN[ctx.cc];
     if (pw && (ctx.prices || []).some(p => p > pw.limit)) { const n2 = (ctx.prices || []).filter(p => p > pw.limit).length; w.push(`（注意）${pw.why}：${n2}件`); }
     const bl = BRAND_LIMIT[ctx.cc];
