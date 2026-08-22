@@ -1838,7 +1838,11 @@
       std_tier_variation_list: std,
       model_list: models,
       attributes: attrs,
-      category_path: base.category_id ? [base.category_id] : []
+      category_path: base.category_id ? [base.category_id] : [],
+      // ★ブランド（brand_id=0 は NoBrand）。ポータルから編集できるように持ち回る（2026-08-22）
+      brand_id: ((base.brand || {}).brand_id) || 0,
+      brand_name: ((base.brand || {}).original_brand_name) || ((base.brand || {}).brand_name) || '',
+      condition: base.condition || ''      // 'NEW' / 'USED'
     };
   }
   // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
@@ -15028,6 +15032,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
       '🇻🇳 <b>VNの「出品価格の上限」を取り違えていたのを直しました</b>（本人指摘）。VNには<b>別ものの上限が2つ</b>あります——①<b>出品価格の上限＝1,000,000 VND未満</b>（カタログ／明細の価格として100万以上は出せない）②<b>1注文の購入限度額＝5,000,000 VND</b>（2026-08-02に100万から引き上げ。買い手が1回にいくら決済できるかの話）。①に②の値を入れていたため、<b>出せない価格を警告なしで通していました</b>。実際にShopeeが <code>The max price of the product is over max limit</code> でまとめて弾きました（1,039,000 VND）。<br>あわせて、まとめて追加のときに<b>上限を超える明細を自動で外す</b>ようにしました。<b>1件でも混ざると add_model が丸ごと失敗して他の正常な明細まで登録できない</b>ためです。外した明細は名前と価格を出すので、仕入値かROIを下げれば出せます。',
       '⛔ <b>枠の表示は「実際に断られた事実」を優先します</b>。カウンタの数字は<b>数え漏れることがあり</b>（実測で12,329回ぶん漏れていた）、「残り12,000」と出ているのに書き込みが断られる、という食い違いが起きます。そこで<b>Shopee側に断られた瞬間を覚えて、表示を⛔「いま断られています（◯分前）」に落とす</b>ようにしました。数字だけ見て「まだ余裕がある」と誤解しないためです。30分経てば通常表示に戻ります。',
@@ -18810,6 +18815,29 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             <div class="ed-catres" style="margin-top:6px;max-height:210px;overflow:auto;font-size:11.5px"></div>
           </div>
         </div>
+        <div style="margin-top:10px">
+          <label style="color:#555;font-weight:600">状態</label>
+          <span class="smd-dim" style="font-size:10.5px">（Shopeeの商品状態。新品 / 中古の2つだけ）</span>
+          <div style="margin-top:3px">
+            <select class="ed-cond" style="padding:6px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px;min-width:180px">
+              <option value=""${!pi.condition ? ' selected' : ''}>（未設定・変更しない）</option>
+              <option value="NEW"${pi.condition === 'NEW' ? ' selected' : ''}>New（新品）</option>
+              <option value="USED"${pi.condition === 'USED' ? ' selected' : ''}>Used（中古）</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <label style="color:#555;font-weight:600">ブランド</label>
+          <span class="smd-dim" style="font-size:10.5px">（<b>カテゴリごとに選べるブランドが決まります</b>。カテゴリを変えたら選び直しになります／ノーブランドは NoBrand）</span>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:3px;flex-wrap:wrap">
+            <span class="ed-brnow" style="flex:1;min-width:220px;padding:6px 9px;border:1px solid #eee;border-radius:6px;background:#fafafa;font-size:12px;color:#444">${esc(pi.brand_name || (pi.brand_id ? '#' + pi.brand_id : 'NoBrand'))}</span>
+            <button class="ed-bredit smd-btn" style="font-size:11.5px;padding:5px 12px">変更</button>
+          </div>
+          <div class="ed-brpick" style="display:none;margin-top:6px;border:1px solid #cdd7ea;border-radius:8px;padding:8px 10px;background:#fafbff">
+            <input class="ed-brq" placeholder="ブランド名で検索（例: Nintendo, Sony, Capcom）" style="width:100%;padding:6px 9px;border:1px solid #ddd;border-radius:6px;font-size:12px">
+            <div class="ed-brres" style="margin-top:6px;max-height:210px;overflow:auto;font-size:11.5px"></div>
+          </div>
+        </div>
         <div style="display:flex;gap:16px;margin-top:12px;align-items:center;flex-wrap:wrap;border-top:1px solid #eee;padding-top:12px">
           <label style="color:#555;font-weight:600;display:inline-flex;align-items:center;gap:5px"><input type="checkbox" class="ed-preorder"${(pi.pre_order_info && pi.pre_order_info.pre_order) ? ' checked' : ''}> 予約商品（Pre-order）</label>
           <div style="display:flex;align-items:center;gap:5px"><label style="color:#555;font-size:12px">発送日数(days_to_ship)</label><input class="ed-dts" value="${av((pi.pre_order_info && pi.pre_order_info.days_to_ship) || '')}" inputmode="numeric" style="width:64px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;text-align:right"></div>
@@ -18968,7 +18996,67 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // ---- カテゴリ表示・変更（変えたら specifics も新カテゴリのものへ差し替え） ----
       openCatalogEditor._pickedCat = () => null;   // 前に開いたカタログの選択を持ち越さない
       let pickedCat = null;           // 変更後のカテゴリid（未変更ならnull）
+      let pickedBrand = null;         // 変更後のブランド {id,n}（未変更ならnull）
       let pickedTree = null;          // 変更後カテゴリの属性ツリー
+      // ★ブランド。Shopeeのブランドは【カテゴリごと】に候補が変わる（get_brand_list に category_id が要る）。
+      //   これまでポータルからは編集できず、Seller Centerでしか直せなかった（2026-08-22 本人指摘）。
+      { const bnEl = body.querySelector('.ed-brnow'), bBtn = body.querySelector('.ed-bredit'),
+              bPick = body.querySelector('.ed-brpick'), bQ = body.querySelector('.ed-brq'), bRes = body.querySelector('.ed-brres');
+        let brands = null, brandsFor = null;
+        const showBr = () => {
+          if (!bnEl) return;
+          const b2 = pickedBrand;
+          if (b2) { bnEl.innerHTML = esc(b2.n || 'NoBrand') + (b2.id ? ' <span class="smd-dim" style="font-size:10px">#' + b2.id + '</span>' : '') + ' <span style="color:#a8650a;font-size:10px">（変更・未保存）</span>'; bnEl.style.background = '#fff8e1'; }
+          else { bnEl.textContent = pi.brand_name || (pi.brand_id ? '#' + pi.brand_id : 'NoBrand'); bnEl.style.background = '#fafafa'; }
+        };
+        const loadBrands = async () => {
+          const cid = pickedCat || catId;
+          if (!cid) { bRes.textContent = 'カテゴリが分からないのでブランドを出せません（先にカテゴリを決めてください）'; return null; }
+          if (brands && brandsFor === cid) return brands;
+          bRes.textContent = 'ブランド一覧を取得中…（初回だけ時間がかかります）';
+          try {
+            const r = await gasCall({ action: 'get_brand_list', shop_id: sidCat, category_id: cid }, 60000);
+            brands = (r && r.brands) || []; brandsFor = cid;
+            return brands;
+          } catch (e) { bRes.textContent = '取得に失敗: ' + apiErrJa((e && e.message) || e); return null; }
+        };
+        const drawBr = async () => {
+          if (!bRes) return;
+          const q = (bQ.value || '').trim();
+          const cid = pickedCat || catId;
+          let list = brands;
+          if (!list || brandsFor !== cid || q) {
+            // キーワードはGAS側で絞る（カテゴリによっては数千件あるため）
+            try {
+              const r = await gasCall({ action: 'get_brand_list', shop_id: sidCat, category_id: cid, q: q }, 60000);
+              list = (r && r.brands) || []; if (!q) { brands = list; brandsFor = cid; }
+            } catch (e) { bRes.textContent = '取得に失敗: ' + apiErrJa((e && e.message) || e); return; }
+          }
+          const opts = [{ id: 0, n: 'NoBrand（ノーブランド）' }].concat(list || []);
+          bRes.innerHTML = opts.length
+            ? opts.slice(0, 60).map(b2 => `<div class="ed-bropt" data-id="${b2.id}" data-n="${av(b2.n)}" style="padding:4px 6px;border-radius:6px;cursor:pointer;border-bottom:1px solid #f2f2f2">${esc(b2.n)}${b2.id ? ` <span class="smd-dim" style="font-size:10px">#${b2.id}</span>` : ''}</div>`).join('')
+            : '<div class="smd-dim" style="font-size:11px;padding:4px 6px">一致するブランドがありません</div>';
+          bRes.querySelectorAll('.ed-bropt').forEach(d => {
+            d.addEventListener('mouseenter', () => d.style.background = '#eef2ff');
+            d.addEventListener('mouseleave', () => d.style.background = '');
+            d.addEventListener('click', () => {
+              const nid = Number(d.dataset.id), nn = d.dataset.n || '';
+              pickedBrand = (nid === (pi.brand_id || 0) && nn === (pi.brand_name || '')) ? null : { id: nid, n: nn.replace(/（ノーブランド）$/, '') };
+              showBr();
+              bPick.style.display = 'none'; bBtn.textContent = '変更';
+            });
+          });
+        };
+        if (bBtn) bBtn.addEventListener('click', async () => {
+          if (!bPick) return;
+          const open = bPick.style.display === 'none';
+          bPick.style.display = open ? '' : 'none';
+          bBtn.textContent = open ? '閉じる' : '変更';
+          if (!open) return;
+          await loadBrands(); bQ.focus(); drawBr();
+        });
+        if (bQ) wireTypeahead(bQ, () => drawBr(), 400);
+      }
       { const nowEl = body.querySelector('.ed-catnow'), edBtn = body.querySelector('.ed-catedit'),
               pick = body.querySelector('.ed-catpick'), qEl = body.querySelector('.ed-catq'), resEl = body.querySelector('.ed-catres');
         const showNow = (id, map) => {
@@ -20993,6 +21081,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         // カテゴリ変更（変えた時は属性もまとめて送る＝カテゴリ依存のため）
         const newCat = (typeof openCatalogEditor._pickedCat === 'function') ? openCatalogEditor._pickedCat() : null;
         if (newCat && newCat !== catId) { patch.category_id = newCat; summary.push('カテゴリ変更(#' + newCat + ')'); d1('カテゴリ', catNameOf(cc, catId) || ('#' + catId), catNameOf(cc, newCat) || ('#' + newCat)); }
+        // ★状態（新品/中古）とブランド。どちらもこれまでポータルから直せず、Seller Centerに行くしかなかった（2026-08-22 本人指摘）
+        { const cvEl = body.querySelector('.ed-cond'); const cv = cvEl ? (cvEl.value || '') : '';
+          if (cv && cv !== (pi.condition || '')) { patch.condition = cv; summary.push('状態'); d1('状態', pi.condition || '（未設定）', cv); } }
+        if (pickedBrand) {
+          patch.brand_id = pickedBrand.id; patch.brand_name = pickedBrand.n || '';
+          summary.push('ブランド');
+          d1('ブランド', pi.brand_name || (pi.brand_id ? '#' + pi.brand_id : 'NoBrand'), pickedBrand.n || 'NoBrand');
+        }
         // ★attributes：行indexでなく attribute_id で拾う（ツリー全体を出すので行数が元配列と違う）
         {
           const origById = new Map(attrs.map(a => [a.attribute_id, a]));
@@ -21090,6 +21186,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             if (patch.description != null) { itemP.desc = patch.description; itemP.desc_type = pi.description_type || 'normal'; }
             if (patch.images != null) itemP.images = patch.images.join(',');   // GAS側でmedia_spaceへアップ→image_id_listに変換
             if (patch.category_id != null) itemP.category_id = patch.category_id;
+            if (patch.brand_id != null) { itemP.brand_id = patch.brand_id; if (patch.brand_name) itemP.brand_name = patch.brand_name; }
+            if (patch.condition != null && patch.condition !== '') itemP.condition = patch.condition;
             if (Object.keys(itemP).length > 2) { const r = await openapiUpdateItem(itemP); if (!(r && r.ok)) throw new Error('商品情報(update_item): ' + ((r && r.error) || '失敗')); done.push('商品情報'); }
             // 2) 価格・在庫（変更分のみ・既存の公式ヘルパー）
             const priceList = [], stockList = [];
@@ -21347,6 +21445,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           <div style="display:flex;gap:6px;flex-wrap:wrap"><input class="uni-title" value="${av(common)}" style="flex:1;min-width:260px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px"><button class="uni-title-fill smd-btn">↓各国欄に反映（書込まない）</button><button class="uni-title-all smd-btn" style="border-color:#ee4d2d;background:#ee4d2d;color:#fff">全国に書込</button></div>
           <div style="font-weight:700;font-size:12px;margin:10px 0 5px">💰 価格を一括で（今の価格に倍率をかける）</div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">今の価格×<input class="uni-fac" value="1.1" inputmode="decimal" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right">倍<button class="uni-price-all smd-btn">全国の全明細価格に適用</button><span class="smd-dim" style="font-size:11px">例: 1.1＝+10%値上げ／0.9＝10%値下げ。1件ずつは✎詳細で</span></div>
+          <div style="font-weight:700;font-size:12px;margin:10px 0 5px">🏷 状態・ブランドを全国一括で</div>
+          <div style="display:flex;gap:8px;align-items:center;font-size:12px;flex-wrap:wrap">
+            状態<select class="uni-cond" style="padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px"><option value="">変更しない</option><option value="NEW">New（新品）</option><option value="USED">Used（中古）</option></select>
+            <button class="uni-condgo smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">▶ 全国に反映</button>
+            <span class="smd-dim" style="font-size:10.5px">｜</span>
+            ブランド<input class="uni-brq" placeholder="ブランド名で検索（例: Nintendo）" style="width:190px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px">
+            <select class="uni-br" style="padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;min-width:170px"><option value="">（検索してください）</option></select>
+            <button class="uni-brgo smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">▶ 全国に反映</button>
+          </div>
+          <div class="smd-dim" style="font-size:10.5px;margin-top:2px">※ブランドは<b>カテゴリごとに候補が決まります</b>。国によってカテゴリが違うと候補も違うため、<b>1つ目の国のカテゴリで検索</b>し、同じブランド名で各国に当てます（見つからない国はスキップして名前を出します）。</div>
           <div style="font-weight:700;font-size:12px;margin:10px 0 5px">🔢 在庫を全国一括で（公式API・国ごとは下のグリッドで）</div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px;flex-wrap:wrap">在庫<input class="uni-stock" value="" inputmode="numeric" placeholder="例: 5" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;text-align:right"><button class="uni-stock-all smd-btn" style="border-color:#0b5cab;background:#0b5cab;color:#fff">全国の全明細在庫に設定</button><button class="uni-stock-zero smd-btn" style="border-color:#b71c1c;background:#b71c1c;color:#fff;font-weight:700" title="仕入元が売切れた時：全国・全バリエの在庫を0にして二重販売を防ぐ">🚫 全国在庫0（仕入切れ）</button><span class="smd-dim" style="font-size:11px">全バリエ在庫をこの数に。まず「各国のバリエを読み込む」を実行</span></div>
         </div>
@@ -21435,6 +21543,72 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       msg(ok ? lg.cc + ' タイトル書込 成功' : lg.cc + ' 失敗', ok ? '#1a7f37' : '#d93025');
       if (ok) { const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); if (row) row.name = title; }
     }));
+    // ★状態・ブランドを全国一括で（2026-08-22 本人要望「両方で編集できるように」「状態も同じく」）。
+    //   ブランドは【カテゴリごと】に候補が違うので、1つ目の国のカテゴリで検索し、同じ名前で各国に当てる。
+    //   見つからない国はスキップして名前を出す（黙って別ブランドを当てない）。
+    { const condGo = q('.uni-condgo'), condSel = q('.uni-cond');
+      if (condGo) condGo.addEventListener('click', async () => {
+        const cv = condSel ? condSel.value : '';
+        if (!cv) { msg('状態を選んでください', '#d93025'); return; }
+        const gwc = await guardWriteCountries([...new Set(listings.map(x => x.cc))]); if (!gwc.ok) { alert(gwc.msg); return; }
+        if (!confirm('書込先: ' + gwc.summary + '\n\n' + listings.length + '出品の状態を【' + (cv === 'NEW' ? 'New（新品）' : 'Used（中古）') + '】にします。\n\nよろしいですか？')) return;
+        condGo.disabled = true; let ok = 0, ng = [];
+        for (const lg of listings) {
+          msg('状態を反映中… ' + (ok + ng.length + 1) + '/' + listings.length);
+          try {
+            const sid = shopIdOfListing(lg.cc, lg.item_id);
+            const r = await openapiUpdateItem({ shop_id: sid, item_id: lg.item_id, condition: cv });
+            if (r && r.ok) ok++; else ng.push(lg.cc + ': ' + ((r && r.error) || '失敗'));
+          } catch (e) { ng.push(lg.cc + ': ' + apiErrJa((e && e.message) || e)); }
+        }
+        condGo.disabled = false;
+        msg('状態 ' + ok + '/' + listings.length + '件 反映' + (ng.length ? '／失敗: ' + ng.slice(0, 3).join(' / ') : ''), ng.length ? '#a8650a' : '#1a7f37');
+        try { logAct('出品', '状態を全国一括', common, cv + ' ' + ok + '件'); } catch (_) {}
+      });
+    }
+    { const brQ = q('.uni-brq'), brSel = q('.uni-br'), brGo = q('.uni-brgo');
+      const catOfFirst = () => { const lg = listings[0]; const row = (lst.byCc[lg.cc] || []).find(x => x.item_id === lg.item_id); return (row && row.category_id) || null; };
+      const search = async () => {
+        if (!brSel) return;
+        const kw = (brQ.value || '').trim();
+        if (!kw) { brSel.innerHTML = '<option value="">（検索してください）</option>'; return; }
+        const lg = listings[0], sid = shopIdOfListing(lg.cc, lg.item_id);
+        let cid = catOfFirst();
+        if (!cid) {   // 一覧に無ければ商品を読んで拾う
+          try { const d = await openapiGetItemInfo(sid, lg.item_id, 45000); cid = (d && d.category_path && d.category_path[0]) || null; } catch (_) {}
+        }
+        if (!cid) { brSel.innerHTML = '<option value="">カテゴリが分からず候補を出せません</option>'; return; }
+        brSel.innerHTML = '<option value="">検索中…</option>';
+        try {
+          const r = await gasCall({ action: 'get_brand_list', shop_id: sid, category_id: cid, q: kw }, 60000);
+          const bs = (r && r.brands) || [];
+          brSel.innerHTML = '<option value="">（選んでください）</option>'
+            + '<option value="0|NoBrand">NoBrand（ノーブランド）</option>'
+            + bs.slice(0, 60).map(b2 => `<option value="${b2.id}|${av(b2.n)}">${esc(b2.n)}</option>`).join('');
+        } catch (e) { brSel.innerHTML = '<option value="">取得に失敗: ' + esc(apiErrJa((e && e.message) || e)).slice(0, 40) + '</option>'; }
+      };
+      if (brQ) wireTypeahead(brQ, search, 500);
+      if (brGo) brGo.addEventListener('click', async () => {
+        const v = brSel ? brSel.value : '';
+        if (!v) { msg('ブランドを選んでください', '#d93025'); return; }
+        const bid = Number(v.split('|')[0]), bname = v.split('|').slice(1).join('|');
+        const gwb = await guardWriteCountries([...new Set(listings.map(x => x.cc))]); if (!gwb.ok) { alert(gwb.msg); return; }
+        if (!confirm('書込先: ' + gwb.summary + '\n\n' + listings.length + '出品のブランドを【' + bname + '】にします。\n'
+          + '※国によってカテゴリが違う場合、その国に同じブランドが無ければスキップします。\n\nよろしいですか？')) return;
+        brGo.disabled = true; let ok = 0, ng = [];
+        for (const lg of listings) {
+          msg('ブランドを反映中… ' + (ok + ng.length + 1) + '/' + listings.length);
+          try {
+            const sid = shopIdOfListing(lg.cc, lg.item_id);
+            const r = await openapiUpdateItem({ shop_id: sid, item_id: lg.item_id, brand_id: bid, brand_name: bname });
+            if (r && r.ok) ok++; else ng.push(lg.cc + ': ' + ((r && r.error) || '失敗'));
+          } catch (e) { ng.push(lg.cc + ': ' + apiErrJa((e && e.message) || e)); }
+        }
+        brGo.disabled = false;
+        msg('ブランド ' + ok + '/' + listings.length + '件 反映' + (ng.length ? '／失敗: ' + ng.slice(0, 3).join(' / ') : ''), ng.length ? '#a8650a' : '#1a7f37');
+        try { logAct('出品', 'ブランドを全国一括', common, bname + ' ' + ok + '件'); } catch (_) {}
+      });
+    }
     ov.querySelectorAll('.uni-detail').forEach(el => el.addEventListener('click', () => { const lg = listings[+el.dataset.i]; openCatalogEditor(lg.cc, lg.host, lg.item_id, lg.name); }));
     q('.uni-title-all').addEventListener('click', async () => {
       const title = q('.uni-title').value.trim(); if (!title) { alert('統括タイトルを入れてください'); return; }

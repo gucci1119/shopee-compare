@@ -285,7 +285,7 @@ function doGet(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -733,6 +733,16 @@ function doGet(e) {
     }
     // ★順番を崩さずに明細を消す（詰め直し方式）。途中の1〜2件を消すのが実務ではほとんど。
     // ★urlfetch 日次枠の残りを返す（この処理自体は urlfetch を使わないので、枯れていても答えられる）
+    // ★ブランド一覧（カテゴリごと）。Shopeeのブランドは**カテゴリに紐づく**ので category_id が要る。
+    //   件数が多いカテゴリがあるため、GAS側で全ページ取ってキャッシュし、キーワードで絞って返す。
+    //   キャッシュは6時間（ブランドは頻繁に変わらない＝urlfetch枠の節約になる）。
+    if (p.action === 'get_brand_list') {
+      var gbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var gbout;
+      try { gbout = brandList_(parseInt(p.shop_id, 10), parseInt(p.category_id, 10), String(p.q || '')); }
+      catch (err) { gbout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(gbcb + '(' + JSON.stringify(gbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'uf_status') {
       var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ufo;
@@ -2205,12 +2215,50 @@ function addItem_(body) {
   return result;
 }
 // 出品編集（公式API・ブリッジ卒業）：タイトル/親SKU/説明を product/update_item で更新。指定shop_id×item_id。
+// ★カテゴリごとのブランド一覧。get_brand_list は1ページ最大100件・offsetでめくる。
+//   status=1 は「通常のブランド」（審査中などを除く）。ノーブランドは brand_id=0。
+function brandList_(shopId, categoryId, q) {
+  if (!shopId) throw new Error('shop_id 必須');
+  if (!categoryId) throw new Error('category_id 必須（ブランドはカテゴリごとに決まります）');
+  var ck = 'brands_' + shopId + '_' + categoryId;
+  var cache = CacheService.getScriptCache();
+  var all = null;
+  try { var hit = cache.get(ck); if (hit) all = JSON.parse(hit); } catch (e) {}
+  if (!all) {
+    all = [];
+    for (var off = 0; off < 3000; off += 100) {
+      var j = callShop_(shopId, '/api/v2/product/get_brand_list',
+        { category_id: categoryId, offset: off, page_size: 100, status: 1 }, 'get');
+      var r = j.response || {};
+      var list = r.brand_list || [];
+      list.forEach(function (b) { all.push({ id: b.brand_id, n: b.original_brand_name || b.display_brand_name || '' }); });
+      if (!r.has_next_page) break;
+    }
+    try { cache.put(ck, JSON.stringify(all), 21600); } catch (e) {}   // 6時間
+  }
+  var key = String(q || '').trim().toLowerCase();
+  var hits = key ? all.filter(function (b) { return String(b.n).toLowerCase().indexOf(key) >= 0; }) : all;
+  return { ok: true, total: all.length, hits: hits.length, brands: hits.slice(0, 60), cached: !!key || true };
+}
 function updateItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
   var itemId = parseInt(body.item_id, 10); if (!itemId) throw new Error('item_id 必須');
   var payload = { item_id: itemId };
   if (body.item_name != null && String(body.item_name) !== '') payload.item_name = String(body.item_name).slice(0, 120);
   if (body.item_sku != null) payload.item_sku = String(body.item_sku);
+  // ★状態（コンディション）。Shopeeは 'NEW' / 'USED' の2値。
+  //   これまでポータルからは編集できず、一覧で表示するだけだった（2026-08-22 本人指摘で追加）。
+  if (body.condition != null && String(body.condition) !== '') {
+    var cnd = String(body.condition).toUpperCase();
+    if (cnd !== 'NEW' && cnd !== 'USED') throw new Error('状態は NEW / USED のどちらかです: ' + body.condition);
+    payload.condition = cnd;
+  }
+  // ★ブランド。brand_id=0 は「ノーブランド(NoBrand)」。**カテゴリに紐づく**ので、
+  //   カテゴリを変えたら選び直しになる（ポータル側でもそう案内している）。
+  if (body.brand_id != null && String(body.brand_id) !== '') {
+    payload.brand = { brand_id: parseInt(body.brand_id, 10) || 0 };
+    if (body.brand_name) payload.brand.original_brand_name = String(body.brand_name);
+  }
   // 説明文。Shopeeは商品ごとに normal / extended の2形式があり、書き方が違う。
   //   normal   … description に生テキスト
   //   extended … description_info.extended_description.field_list に {field_type:'text', text:...} を並べる
