@@ -14974,6 +14974,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '⏱ <b>🔄（この1件を取り直す）が遅い件、原因を測りました</b>（本人指摘「更新まで長ない？」）。実測は<b>落ち着いた状態で4.2秒</b>（Shopeeへの往復 約3秒＋保存＋描き直し 0.5秒）。ところが<b>画面を開いた直後に押すと19.7秒</b>かかりました。原因は<b>サーバー側（Apps Script）が同じ人のリクエストを1件ずつしか処理しない</b>ことで、開いた直後は他の取得が走っているため<b>その順番待ち</b>になります。明細数は関係ありません（100明細でも単品でも往復は同じ約3秒）。<br>「…」しか出ていなくて固まったように見えたので、<b>経過秒を出し、順番待ちならその旨をツールチップに出す</b>ようにしました。',
       '🚫 <b>画像が取れない明細には、もう勝手に他の画像を当てません</b>（本人指示）。これまでGASは<b>Shopeeの「全部に画像あり／全部なし」制約</b>を満たすために、画像が取れなかった明細へ<b>既にある画像の1枚目を黙って借りて</b>いました。やめます——<b>画像が無い明細は追加しません</b>。<br>追加する前に「画像が無い N件は追加しません。画像のある分だけ足しますか？」と聞き、GAS側でも<b>画像なしの明細は弾いて名前で返します</b>。元から画像が欠けている明細がある商品では、<b>足す前に「先にその明細の画像を入れてください」で止まります</b>（勝手に直しません）。',
       '🖼 <b>別の商品の表紙が付く事故を止めました</b>（#64〜69に <b>家庭教師ヒットマンREBORN！</b> の表紙が付いていた件）。真因はGAS側のこの仕様でした——<b>Shopeeは「全部に画像あり」か「全部なし」しか許さない</b>ため、画像が取れなかった明細には<b>既にある画像の1枚目を借りて</b>当てていました。1枚目が#1だったので、6件すべてに#1の表紙が付きました（今回は仕入元のメルカリShopsが<b>追加直後に売り切れて404</b>になり画像が取れず／6件とも現在404）。<br>直したのは3点。①<b>追加する前に止める</b>——画像が無い明細があると「<b>画像のある分だけ追加する</b>／何もしない」を聞きます ②<b>②ボタンの横に「⚠ 画像なし N件」</b>を常に出す ③借りてしまった時は<b>どの明細に借りたかを名前で赤く出す＋その場で知らせる</b>（これまでは薄いグレーの件数だけで、気づけませんでした）。',
       '🏷 <b>明細のSKUが全部おなじになっていたのを直しました</b>（本人指摘「VARIATION_PSP_PLAYSTATION_PORTABLE_SERIE っておかしいだろ／見分けつかんだろ」）。<b>「親SKU_明細名」で作っていたため、親が長いと40字で切られて親SKUだけが残り</b>、どの明細も同じ文字列になっていました。<br>明細SKUに求められるのは<b>同じ商品の中で一意</b>なことなので、<b>明細名を主にします</b>——<code>TOHEART2_PORTABLE_2</code> / <code>MEGA_MAN_DASH2_EPISODE_2_GREAT</code> のように、見ただけで分かります。明細名が短すぎて分からない場合（「2」など）だけ親SKUを頭に付けます。',
@@ -27761,7 +27762,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (e) { alert('失敗: ' + apiErrJa((e && e.message) || e)); }
       el.textContent = org;
     }));
-    document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => { const b = el; b.disabled = true; b.textContent = '…'; refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id)).finally(() => { b.disabled = false; b.textContent = '🔄'; }); }));
+    // ★押してから終わるまでの間、【何を待っているか】を出す。
+    //   実測（2026-08-22）：落ち着いた状態なら 4.2秒（GASの往復 約3秒＋保存＋描き直し 0.5秒）。
+    //   ところが画面を開いた直後に押すと 19.7秒かかった。理由は
+    //   **Apps Scriptは同じユーザーのリクエストを1件ずつしか処理しない**ため、他の取得の順番待ちになるから。
+    //   「…」だけだと固まったように見えるので、経過秒と「順番待ち」を出す（本人指摘「更新まで長ない？」）。
+    document.querySelectorAll('#lst-list .lst-refresh1').forEach(el => el.addEventListener('click', () => {
+      const b = el; b.disabled = true;
+      const t0 = Date.now();
+      const busy = () => { try { return (typeof JOBS !== 'undefined') && JOBS.list.some(j => j.state === 'run' || j.state === 'wait'); } catch (_) { return false; } };
+      const queued = busy() || (typeof lst !== 'undefined' && lst.syncing);
+      b.style.width = b.offsetWidth + 'px';                       // 秒数で幅が動いて行がガタつかないように
+      const tick = () => {
+        const sec = Math.round((Date.now() - t0) / 1000);
+        b.textContent = sec + 's';
+        b.title = (queued ? '他の取得の順番待ちです（Shopeeのサーバー側は1件ずつしか処理しません）。' : 'Shopeeから取り直しています。')
+          + '\n落ち着いていれば4秒ほどで終わります。';
+      };
+      tick(); const iv = setInterval(tick, 1000);
+      refreshOneListing(b.dataset.cc, b.dataset.id, shopIdOfListing(b.dataset.cc, b.dataset.id))
+        .finally(() => { clearInterval(iv); b.disabled = false; b.textContent = '🔄'; b.style.width = ''; });
+    }));
     // 📝メモ（入力＝再描画せず保存＝フォーカス維持）／⚠️在庫0固定（トグル＝保存して再描画で赤帯反映）
     // ---- 🛠 まとめて編集：この一覧の絞り込み結果からそのまま対象を選ぶ ----
     // ★別タブで似た絞り込みを作り直すより、既にある強力な絞り込み（空き枠・明細数・シリーズ・同名複数…）を
