@@ -1523,6 +1523,8 @@
   //   2026-08-01 と 08-22 の2回、**枯れて初めて気づいた**（出品も明細削除も止まった）。
   //   残量は uf_status で読める＝**この呼び出し自体は枠を使わない**ので、枯れていても答えられる。
   //   押さないと見えない形にはしない（開いていれば勝手に出る）。
+  // GASの枠切れかどうか。Googleの文言は環境で変わるので、日本語・英語の両方を見る。
+  const isGasQuotaErr = (e) => /urlfetch|回数が多すぎ|too many times|invoked too many|service invoked/i.test(String((e && e.message) || e || ''));
   async function ufQuotaDraw() {
     const el = document.getElementById('uf-quota'); if (!el) return;
     if (!settings.openapiUrl) { el.textContent = ''; return; }
@@ -15016,6 +15018,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🔁 <b>枠が尽きても、この端末のブラウザ経由で書けるようにしました</b>。2026-08-22 に枠を使い切り、<b>出品も明細も価格も全部止まって半日潰れました</b>。でも<b>書く道は他にもあります</b>——Tampermonkey（ブリッジ）は<b>自分のIPで通信するのでGASの枠と無関係</b>です。<br><b>✎カタログ編集の保存</b>と<b>💾価格・在庫を保存</b>が枠切れで失敗したとき、<b>ライブ接続（🟢）なら自動でブラウザ経由に切り替えて書き直します</b>（「Shopee接続枠が尽きたので、この端末のブラウザ経由で保存しました」と表示）。ライブでない場合は<b>「16:00にリセット」まで含めて理由を出します</b>——黙って失敗しません。<br>※各国まとめ編集の価格・在庫は元からブリッジ経路を持っていたので、そちらは以前から止まりません。',
       '🚦 <b>Shopeeを叩ける枠の残りを、いつも上に出すようにしました</b>。GASからShopeeを叩ける回数は<b>1日20,000回</b>で、使い切ると<b>出品・明細の追加や削除・画像がすべて止まります</b>。<b>2026-08-01 と 08-22 の2回、枯れて初めて気づきました</b>（本人「今日出品とかもできないってこと？」）。アカウントバーに<b>「Shopee接続枠 残り◯◯（◯%使用）」</b>を常時表示し、15,000回を超えると⚠、使い切ると⛔になります。残量を読む処理そのものは<b>枠を使わない</b>ので、枯れていても表示できます。リセットは<b>毎日16:00（日本時間）</b>。<br>あわせて<b>枠の数え方の穴</b>も直しました——<code>fetchAll</code> は<b>1回の呼び出しで件数ぶん枠を食う</b>のに数えておらず、画像処理が実消費の1/12しかカウントされていませんでした（実測：カウンタ7,671回に対し、実際は20,000回に到達＝<b>12,329回が未計上</b>）。だから15,000回で背景同期を止める安全弁が効きませんでした。',
       '🔍 <b>重複検知が「続編」を重複と誤警告していたのを直しました</b>。ゲームは<b>無印と2で名前がほとんど同じ</b>なので、文字の似具合だけで見ると 0.97〜0.98 になり重複として警告していました。実測すると<b>1カタログ100明細の中で15組が警告され、そのうち9組が続編違い</b>——<code>Gundam Mobile Suit Gihrens × Gihrens 2</code>、<code>ToHeart2 Portable × Portable 2</code> など。<b>当たらない警告は、警告ごと無視されるようになります</b>。<br>そこで<b>数字・巻数の並び（2 / 3 / II / 2nd …）が違えば、どれだけ字が似ていても別商品</b>と扱うようにしました。同じ100明細で <b>15組 → 6組</b> に減り、消えた9組はすべて続編でした。残った6組には <code>Phantasy Star Portable 2 × Phantasy Star Portable 2 PSP</code>（本当に同じ商品）が含まれています。',
       '⏱ <b>🔄（この1件を取り直す）が遅い件、原因を測りました</b>（本人指摘「更新まで長ない？」）。実測は<b>落ち着いた状態で4.2秒</b>（Shopeeへの往復 約3秒＋保存＋描き直し 0.5秒）。ところが<b>画面を開いた直後に押すと19.7秒</b>かかりました。原因は<b>サーバー側（Apps Script）が同じ人のリクエストを1件ずつしか処理しない</b>ことで、開いた直後は他の取得が走っているため<b>その順番待ち</b>になります。明細数は関係ありません（100明細でも単品でも往復は同じ約3秒）。<br>「…」しか出ていなくて固まったように見えたので、<b>経過秒を出し、順番待ちならその旨をツールチップに出す</b>ようにしました。',
@@ -21103,7 +21106,37 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             }
             else { msg.style.color = '#d93025'; msg.textContent = '✗ 失敗: ' + apiErrJa(res.msg) + '（code=' + res.code + '）'; btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
           }
-        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + apiErrJa(e.message); btn.disabled = false; btn.textContent = 'Shopeeに保存'; }
+        } catch (e) {
+          // ★GASの枠（urlfetch 2万回/日）が尽きた時は【この端末のブラウザ経由】で書く。
+          //   2026-08-22、枠切れで出品も明細も価格も全部止まり半日潰れた。書く道は他にもある（productWrite）ので、
+          //   落ちたまま終わらせない。ブリッジは自分のIPなのでGASの枠と無関係。
+          if (isGasQuotaErr(e) && state.mode === 'live' && host) {
+            try {
+              msg.style.color = '#a8650a'; msg.textContent = '⚠ Shopee接続枠が尽きたので、この端末のブラウザ経由で保存し直しています…';
+              const res2 = await productWrite(host, itemId, patch);
+              if (res2.ok) {
+                msg.style.color = '#1a7f37';
+                msg.textContent = '✓ 保存しました（Shopee接続枠が尽きたため、この端末のブラウザ経由で書きました）';
+                btn.textContent = '保存済 ✓';
+                setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Shopeeに保存'; } }, 900);
+                await applyToList();
+                try { openCatalogEditor._cache.delete(ck); } catch (_) {}
+                try { logAct('出品', 'カタログ編集(枠切れ→ブリッジ)', repName || (pi.name || ''), cc + ' ' + (diffs.length ? diffs.join(' / ') : summary.join('/'))); } catch (_) {}
+                markStale();
+                try { ufQuotaDraw(); } catch (_) {}
+                return;
+              }
+              msg.style.color = '#d93025'; msg.textContent = '✗ ブラウザ経由でも失敗: ' + apiErrJa(res2.msg) + '（code=' + res2.code + '）';
+              btn.disabled = false; btn.textContent = 'Shopeeに保存'; return;
+            } catch (e2) {
+              msg.style.color = '#d93025'; msg.textContent = '✗ ブラウザ経由でも失敗: ' + apiErrJa((e2 && e2.message) || e2);
+              btn.disabled = false; btn.textContent = 'Shopeeに保存'; return;
+            }
+          }
+          msg.style.color = '#d93025';
+          msg.textContent = '✗ ' + apiErrJa(e.message) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。16:00にリセット。Tampermonkeyが入ったPCならブラウザ経由で書けます）' : '');
+          btn.disabled = false; btn.textContent = 'Shopeeに保存';
+        }
       });
     }).catch(e => { body.innerHTML = `<div style="color:#d93025;padding:8px">読込エラー: ${esc(e.message)}<br><span class="smd-dim">Shopeeから現在の内容を取得できませんでした。ブリッジ（Tampermonkey）が応答していない可能性があります＝画面上部の赤帯の指示（Tampermonkey OFF→ON／再読込）をお試しください。<br>急ぐ場合は上の「<b>Shopeeで開く↗</b>」からShopeeの編集ページで直接編集できます。</span></div><div style="text-align:right;margin-top:10px"><button class="ed-close2" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:7px 14px;cursor:pointer">閉じる</button></div>`; const b = body.querySelector('.ed-close2'); if (b) b.addEventListener('click', close); });
   }
@@ -21635,6 +21668,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     }
     const dec = (it.cc === 'VN' || it.cc === 'TW') ? 0 : 2;
     const models = (read.pi.model_list || []).map(m => { let p = priceByModelId[m.id]; if (p == null || p === '') p = modelPrice(m); const pn = parseFloat(p); if (!isNaN(pn)) p = pn.toFixed(dec); return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: p, stock_setting_list: [{ sellable_stock: stkModelBridge(m) }] }; });
+    const r = await productWrite(it.host, it.item_id, { model_list: models }); return { ok: r.ok, code: r.code, msg: r.msg };
+  }
+  // 明細在庫を公式API優先で書く。writeModelPricesForItem と対。
+  //   ★枠切れ時にブリッジへ逃がすため【モジュール直下】に置く（各国まとめ編集の中の関数は外から呼べない）。
+  async function writeModelStocksForItem(it, read, stockByModelId) {
+    if (read.src === 'api') {
+      const list = read.models.map(m => ({ model_id: m.model_id, stock: parseInt(stockByModelId[m.model_id], 10) }))
+        .filter(x => Number.isFinite(x.stock) && x.stock >= 0);
+      if (!list.length) return { ok: false };
+      try { const r = await openapiUpdateStockList(read.sid, it.item_id, list); return { ok: !!(r && r.ok), msg: r && r.error }; } catch (e) { return { ok: false, msg: (e && e.message) || String(e) }; }
+    }
+    // ブリッジ：価格は今の値のまま、在庫だけ差し替えて model_list を丸ごと送る
+    const dec = (it.cc === 'VN' || it.cc === 'TW') ? 0 : 2;
+    const models = (read.pi.model_list || []).map(m => {
+      const sn = parseInt(stockByModelId[m.id], 10);
+      const stock = Number.isFinite(sn) && sn >= 0 ? sn : stkModelBridge(m);
+      const pn = parseFloat(modelPrice(m));
+      return { id: m.id, tier_index: m.tier_index || [], sku: m.sku || '', price: isNaN(pn) ? modelPrice(m) : pn.toFixed(dec), stock_setting_list: [{ sellable_stock: stock }] };
+    });
     const r = await productWrite(it.host, it.item_id, { model_list: models }); return { ok: r.ok, code: r.code, msg: r.msg };
   }
   // タイトル/親SKU を公式API優先で書く（画像不要＝安全）。field='name'|'sku'
@@ -28316,7 +28368,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const prices2 = (row.models || []).map(m => Number(m.price)).filter(p => p > 0); if (prices2.length) { row.price_min = Math.min.apply(null, prices2); row.price_max = Math.max.apply(null, prices2); }
           }
           try { logAct('出品', '価格在庫編集(公式)', row.name || '', cc + ' ' + chg + '　' + diffTxt); } catch (_) {}
-        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + (e.message || e); btn.disabled = false; btn.textContent = '💾 価格・在庫を保存'; }
+        } catch (e) {
+          // ★枠切れ（GASのurlfetch 2万回/日）で価格・在庫まで止まると日々の運用が死ぬ。
+          //   この端末のブラウザ経由（自分のIP＝枠と無関係）で書き直す。2026-08-22の枠切れで半日潰れた反省。
+          if (isGasQuotaErr(e) && state.mode === 'live' && rg.host) {
+            try {
+              msg.style.color = '#a8650a'; msg.textContent = '⚠ Shopee接続枠が尽きたので、この端末のブラウザ経由で保存し直しています…';
+              const it2 = { cc: cc, item_id: id, host: rg.host };
+              const rd = await readModelsForItem(it2);
+              let ok2 = true, m2 = '';
+              if (priceList.length) { const pm = {}; priceList.forEach(x => pm[x.model_id] = x.price); const r2 = await writeModelPricesForItem(it2, rd, pm); if (!r2.ok) { ok2 = false; m2 = r2.msg || ''; } }
+              if (ok2 && stockList.length) { const sm = {}; stockList.forEach(x => sm[x.model_id] = x.stock); const r3 = await writeModelStocksForItem(it2, rd, sm); if (!r3.ok) { ok2 = false; m2 = r3.msg || ''; } }
+              if (ok2) {
+                msg.style.color = '#1a7f37'; msg.textContent = '✓ 保存しました（Shopee接続枠が尽きたため、この端末のブラウザ経由で書きました）';
+                btn.textContent = '保存済 ✓';
+                setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = '💾 価格・在庫を保存'; } }, 900);
+                try { logAct('出品', '価格在庫編集(枠切れ→ブリッジ)', row.name || '', cc + ' ' + chg + '　' + diffTxt); } catch (_) {}
+                try { ufQuotaDraw(); } catch (_) {}
+                return;
+              }
+              msg.style.color = '#d93025'; msg.textContent = '✗ ブラウザ経由でも失敗: ' + apiErrJa(m2);
+              btn.disabled = false; btn.textContent = '💾 価格・在庫を保存'; return;
+            } catch (e3) {
+              msg.style.color = '#d93025'; msg.textContent = '✗ ブラウザ経由でも失敗: ' + apiErrJa((e3 && e3.message) || e3);
+              btn.disabled = false; btn.textContent = '💾 価格・在庫を保存'; return;
+            }
+          }
+          msg.style.color = '#d93025';
+          msg.textContent = '✗ ' + (e.message || e) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。16:00にリセット）' : '');
+          btn.disabled = false; btn.textContent = '💾 価格・在庫を保存';
+        }
         return;
       }
       btn.disabled = true; btn.textContent = '読込中…'; msg.textContent = '';
