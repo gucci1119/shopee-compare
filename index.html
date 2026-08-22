@@ -2656,6 +2656,22 @@
   // ★カタログ＝商品の種類（例「たまごっちのゲーム」「たまごっちのチャーム」）、明細＝キャラ、という構造。
   //   別カタログの同名キャラは"別物"なので、カタログ名も似ている時だけ重複候補にする。
   //   selfItemId を渡すと、同じカタログ内は明細名だけで判定（種類は当然同じなので）。
+  // ★【識別力の無い明細名】は、別カタログとの照合に使わない。
+  //   色・容量・汎用語だけの名前（blue / white blue / 4gb / new …）は
+  //   **別カタログにあって当たり前**で、重複ではない（Joy-Conの色違い等）。
+  //   実測（2026-08-22・全6,477カタログ）：別カタログにも同じ名前がある2,235件のうち
+  //   **247件(11%)がこれ**。外すと誤検知がそのぶん減る。
+  //   ※同じカタログの中での比較には使わない（そこは色違いが並ぶのが正常）。
+  const SIM_COLOR = new Set('black white red blue green yellow pink purple orange gray grey silver gold brown clear navy beige violet turquoise neon multi'.split(' '));
+  const SIM_GENERIC = new Set(('new used set lot bundle only body console box manual case cover cartridge software soft game games ver version '
+    + 'japan japanese import limited edition special standard best pack piece pcs random assorted mix').split(' '));
+  function simWeakName(t) {
+    const ws = String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    if (!ws.length) return true;
+    if (ws.length === 1 && ws[0].length <= 4) return true;                       // 「red」「4gb」など
+    if (ws.length <= 3 && ws.every(w => SIM_COLOR.has(w) || SIM_GENERIC.has(w) || /^\d{1,4}(gb|mb|tb)?$/.test(w))) return true;
+    return false;
+  }
   function simFind(cc, text, min, catTitle, selfItemId) {
     const ix = simIndexFor(cc); if (!ix.items.length) return null;
     const cg = catTitle ? simGrams(catTitle) : null, ckq = catTitle ? simTokens(catTitle) : null;
@@ -2668,12 +2684,14 @@
     const cand = [...cnt.entries()].sort((x, y) => y[1] - x[1]).slice(0, 40);
     let best = null;
     const seqSelf = simSeqNums(text);
+    const weakQ = simWeakName(text);
     cand.forEach(([i]) => {
       const it = ix.items[i];
       // ★続編は別商品（無印 と 2）。simPair と同じルールをここにも効かせる。
       //   これが無いと「もう出している分」の判定でも続編を重複として拾ってしまう（2026-08-22）。
       if (simSeqNums(it.t) !== seqSelf) return;
       const isSelf = selfItemId != null && String(it.item_id) === String(selfItemId);
+      if (!isSelf && weakQ) return;              // 色・容量・汎用語だけの名前は別カタログと突き合わせない
       // 別カタログなら「そもそも同じ種類の商品か」を先に見る。ゲームとチャームは別物。
       let catSim = 1;
       if (!isSelf && cg) {
@@ -15038,6 +15056,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🎯 <b>重複検知の誤検知を11%減らしました</b>。全6,477カタログを実測したところ、「同じ明細名が別カタログにもある」<b>2,235件</b>のうち<b>247件（11%）が識別力の無い名前</b>でした——<code>blue</code> <code>white blue</code> <code>4gb</code> <code>16gb</code> <code>new</code> など。これらは<b>Joy-Conの色違いや容量違いで、別カタログにあって当たり前</b>＝重複ではありません。<br>色・容量・汎用語だけの明細名（3語以内）は<b>別カタログとの照合から外しました</b>。同じカタログの中での比較は今までどおりです（そこは色違いが並ぶのが正常なので）。外している語の一覧は、見比べ画面の説明文にマウスを乗せると出ます。<br>国別の内訳：BR 638／VN 539／TH 313／SG 293／TW 207／PH 195／MY 50件。<b>実質の重複候補は 1,988件</b>です。',
       '🏳 <b>絞り込んでいる国から先に更新するようにしました</b>（本人指摘「VNで絞ってるのにPHから更新が始まる」）。全部の国を取るのは同じですが、<b>いま見ている国が最初に新しくなります</b>。<br>あわせて<b>「1国だけ絞っている時はその店だけ取りに行く」短縮が、実は効いていなかった</b>のを直しました（`settings.shopIds` が空だと shop_id を解決できず、黙って全店取得に戻っていました。出品行から解決するようにしています）。',
       '🔍 <b>重複チェックを「画像つきで見比べる別画面」にしました</b>（本人指摘「これ画像ないとわからん」「枠狭いし、横に別の重複検知用の画面を出したほうがいい」）。狭い枠に名前だけ並べても判断できないので、<b>左＝このカタログの明細／右＝似ていると判定された相手</b>を<b>両方とも画像つきで横に並べます</b>（相手が別カタログならカタログ名とitem、同じカタログ内なら番号）。見比べて<b>本当に同じ商品ならチェック → その場でShopeeから削除</b>できます（順番は崩れません）。<b>最初はどれもチェックされていません</b>——消すのは取り返しがつかないので、必ず目で見てから。<br>あわせて<b>「もう出している分」の判定にも続編ガードを効かせました</b>（これまで貼った行どうしの比較にしか効いておらず、無印と2を重複として拾っていました）。',
       '🧹 <b>出品が通ったら、貼り付けたURLの控えも消すようにしました</b>（本人指摘「出品成功したらもう残しておく必要なくね？」）。これまで次に開くと「前回読み込んだ◯件を復元しました」と出て、<b>もう出し終わった分をまた出しかける</b>状態でした。消すのは<b>Shopeeに入ってから</b>です（しごとが失敗した時に貼ったURLまで消えると最初からやり直しになるため）。',
@@ -18676,7 +18695,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <b style="flex:1">🔁 重複の見比べ（${hits.length}件）</b>
         <button class="dc-close smd-btn" style="font-size:11.5px;padding:4px 12px">閉じる</button>
       </div>
-      <div style="padding:10px 18px 0"><div class="smd-dim" style="font-size:11px">左＝<b>このカタログの明細</b>（消すならこちら）／右＝<b>similar と判定された相手</b>。<b>画像を見比べて</b>、本当に同じ商品ならチェックしてください。<br>※<b>最初はどれもチェックされていません</b>（消すのは取り返しがつかないので、必ず目で見てから）。続編（無印と2）は別商品として除いてあります。</div></div>
+      <div style="padding:10px 18px 0"><div class="smd-dim" style="font-size:11px" title="別カタログとの照合から外している名前：色（black/white/red/blue/green/yellow/pink/purple/orange/gray/silver/gold/brown/clear/navy 等）／容量・数字（4gb・16gb・128 等）／汎用語（new/used/set/lot/bundle/only/body/console/box/manual/case/cover/cartridge/software/game/ver/japan/import/limited/edition/special/standard/best/pack/pcs/random/mix）。&#10;3語以内でこれだけなら、別カタログにあって当たり前なので重複と見なしません。">左＝<b>このカタログの明細</b>（消すならこちら）／右＝<b>similar と判定された相手</b>。<b>画像を見比べて</b>、本当に同じ商品ならチェックしてください。<br>※<b>最初はどれもチェックされていません</b>（消すのは取り返しがつかないので、必ず目で見てから）。<br>除いてあるもの：<b>続編</b>（無印と2）／<b>色・容量・汎用語だけの名前</b>（blue・4gb・new など。この行にマウスを乗せると一覧が出ます）。</div></div>
       <div style="padding:6px 18px;max-height:60vh;overflow:auto">${rowsHtml || '<div class="smd-dim" style="padding:12px">候補がありません</div>'}</div>
       <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:12px 18px;border-top:1px solid #eee">
         <span class="dc-msg smd-dim" style="margin-right:auto;font-size:11px"></span>
