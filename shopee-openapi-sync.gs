@@ -19,7 +19,12 @@ function now_() { return Math.floor(Date.now() / 1000); }
 // 背景ループがどれだけ走っても手動操作が枠切れ(get_shipping_parameter失敗)しない。教訓[[shopee_portal_perf_quota]]。
 var UF_STOP = 15000;   // 背景同期の停止ライン（残り約5,000回を手動操作に確保）
 var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop_/sb* が加算）
-function ufBump_() { _ufRun++; }
+// ★件数で数える。**fetchAll は 1呼び出しでも N回ぶん枠を食う**のに、これまで
+//   ufBump_ を1度も呼んでおらず、画像の一括取得・アップロードが【カウントされないまま】
+//   枠を12倍速で消費していた。だから UF_STOP=15000 の予約枠が効かず、2万回を使い切った
+//   （2026-08-22 実際に「1日にサービス urlfetch を実行した回数が多すぎます」で出品が止まった）。
+//   リトライも1回ごとに1回ぶん食う。**実際に投げた回数をそのまま数える**。
+function ufBump_(n) { _ufRun += (n > 0 ? n : 1); }
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
 function ufTotal_() { return ufState_().n + _ufRun; }     // 今日これまで＋この実行分
@@ -727,6 +732,14 @@ function doGet(e) {
       return ContentService.createTextOutput(becb + '(' + JSON.stringify(beout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★順番を崩さずに明細を消す（詰め直し方式）。途中の1〜2件を消すのが実務ではほとんど。
+    // ★urlfetch 日次枠の残りを返す（この処理自体は urlfetch を使わないので、枯れていても答えられる）
+    if (p.action === 'uf_status') {
+      var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var ufo;
+      try { var st = ufState_(); ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP }; }
+      catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'delete_variation_shift') {
       var dscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var dsout;
@@ -2065,7 +2078,7 @@ function fetchRetry_(url, opts, tries) {
   tries = tries || 5;
   var last = null;
   for (var i = 0; i < tries; i++) {
-    try { return UrlFetchApp.fetch(url, opts); }
+    try { ufBump_(1); return UrlFetchApp.fetch(url, opts); }
     catch (e) {
       last = e;
       var msg = String((e && e.message) || e);
@@ -2083,7 +2096,7 @@ function fetchRetry_(url, opts, tries) {
 function fetchAllRetry_(reqs, tries) {
   tries = tries || 3;
   for (var i = 0; i < tries; i++) {
-    try { return UrlFetchApp.fetchAll(reqs); }
+    try { ufBump_((reqs || []).length); return UrlFetchApp.fetchAll(reqs); }
     catch (e) {
       var msg = String((e && e.message) || e);
       if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out|一時的|temporarily|unexpected error|接続できません|reset by peer/i.test(msg)) throw e;
