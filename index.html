@@ -2667,8 +2667,12 @@
     k.forEach(w => { const a = ix.tinv.get(w); if (a) a.forEach(i => cnt.set(i, (cnt.get(i) || 0) + 3)); });
     const cand = [...cnt.entries()].sort((x, y) => y[1] - x[1]).slice(0, 40);
     let best = null;
+    const seqSelf = simSeqNums(text);
     cand.forEach(([i]) => {
       const it = ix.items[i];
+      // ★続編は別商品（無印 と 2）。simPair と同じルールをここにも効かせる。
+      //   これが無いと「もう出している分」の判定でも続編を重複として拾ってしまう（2026-08-22）。
+      if (simSeqNums(it.t) !== seqSelf) return;
       const isSelf = selfItemId != null && String(it.item_id) === String(selfItemId);
       // 別カタログなら「そもそも同じ種類の商品か」を先に見る。ゲームとチャームは別物。
       let catSim = 1;
@@ -2691,14 +2695,16 @@
   //   （2026-08-22 実測：100明細の中で15組が引っかかり、その多くが無印×続編）。
   //   警告が当たらないと人は警告ごと無視するようになるので、ここで確実に分ける。
   //   数字・巻数の並び（2 / 3 / II / III / 2nd …）が違えば、どれだけ字が似ていても別物。
-  const simSeqNums = (t) => {
+  // ★function 宣言にする（巻き上げ）。simFind がこの行より【前】にあるため、
+  //   const だと TDZ で落ちる可能性がある（2026-08-12 に同じ形で全機能が死んでいる）。
+  function simSeqNums(t) {
     const R = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10, xi: 11, xii: 12, xiii: 13 };
     return String(t || '').toLowerCase()
       .replace(/(\d+)(st|nd|rd|th)\b/g, '$1')                     // 2nd → 2
       .split(/[^a-z0-9]+/).filter(Boolean)
       .map(w => (/^\d{1,3}$/.test(w) ? +w : (R[w] != null ? R[w] : null)))
       .filter(n => n != null).join('.');
-  };
+  }
   function simPair(a, b) {
     if (simSeqNums(a) !== simSeqNums(b)) return 0;                // 続編・巻数が違う＝別商品
     const d = simDice(simGrams(a), simGrams(b));
@@ -15032,6 +15038,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🔍 <b>重複チェックを「画像つきで見比べる別画面」にしました</b>（本人指摘「これ画像ないとわからん」「枠狭いし、横に別の重複検知用の画面を出したほうがいい」）。狭い枠に名前だけ並べても判断できないので、<b>左＝このカタログの明細／右＝似ていると判定された相手</b>を<b>両方とも画像つきで横に並べます</b>（相手が別カタログならカタログ名とitem、同じカタログ内なら番号）。見比べて<b>本当に同じ商品ならチェック → その場でShopeeから削除</b>できます（順番は崩れません）。<b>最初はどれもチェックされていません</b>——消すのは取り返しがつかないので、必ず目で見てから。<br>あわせて<b>「もう出している分」の判定にも続編ガードを効かせました</b>（これまで貼った行どうしの比較にしか効いておらず、無印と2を重複として拾っていました）。',
+      '🧹 <b>出品が通ったら、貼り付けたURLの控えも消すようにしました</b>（本人指摘「出品成功したらもう残しておく必要なくね？」）。これまで次に開くと「前回読み込んだ◯件を復元しました」と出て、<b>もう出し終わった分をまた出しかける</b>状態でした。消すのは<b>Shopeeに入ってから</b>です（しごとが失敗した時に貼ったURLまで消えると最初からやり直しになるため）。',
       '🐞 <b>ブランド候補に同じものが何行も出るのを直しました</b>（本人指摘）。Shopeeの <code>get_brand_list</code> の <code>offset</code> は<b>単純な連番ではなく、応答の <code>next_offset</code> を渡すカーソル</b>でした。<code>offset += 100</code> でめくっていたため<b>同じページを何度も取って</b>いました（<code>Nintendo #1146819</code> が8行）。<code>next_offset</code> でめくる／brand_idで重複除去／名前順に並べる、の3点を直し、壊れた古いキャッシュを使わないようキャッシュキーも変えました。実測 682件・「nintendo」で1件。',
       '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
@@ -18605,6 +18613,92 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     setTimeout(() => { const b3 = document.querySelector('.ed-body'); if (b3) b3.scrollTop = sc; }, 700);
     return true;
   }
+  // ★重複チェックの結果を【広い別画面】で、画像つきで見比べる（2026-08-22 本人指摘
+  //   「これ画像ないとわからん」「枠狭いし、横に別の重複検知用の画面を出したほうがいいかもね」）。
+  //   左＝これから足す明細／右＝既に出している明細。どちらも画像を出して、人が最後に判断する。
+  function openDupCompare(opt) {
+    const { cc, itemId, shopId, hits, byNo, onDone } = opt;
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:420;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:20px 12px';
+    const imgTag2 = (src, size) => src
+      ? `<img src="${/^https?:/.test(src) ? esc(src) : IMG_CDN + esc(src)}" referrerpolicy="no-referrer" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:6px;background:#f2f2f2;flex:none" onerror="this.style.opacity=.15">`
+      : `<span style="width:${size}px;height:${size}px;border:1px dashed #ddd;border-radius:6px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:#bbb">画像なし</span>`;
+    const rowsHtml = hits.map((h, i) => {
+      const meNo = h.a ? h.a.no : null;
+      const me = meNo ? byNo(meNo) : null;
+      const rightIsSelf = h.kind === 'self';
+      const other = rightIsSelf ? (h.b ? byNo(h.b.no) : null) : null;
+      const rightImg = rightIsSelf ? (other ? other.img : '') : (h.img || '');
+      const rightName = rightIsSelf ? (h.b ? h.b.t : '') : (h.name || '');
+      const rightSub = rightIsSelf
+        ? 'このカタログの ' + (h.b ? h.b.no : '?') + '番'
+        : '別カタログ「' + esc(String(h.cat || '').slice(0, 40)) + '」／item ' + esc(String(h.item_id || ''));
+      const col = h.score >= 95 ? '#c0392b' : (h.score >= 85 ? '#e8770a' : '#8a8f98');
+      return `<div class="dc-row" data-i="${i}" data-mid="${me && me.mid != null ? me.mid : ''}" data-no="${meNo || ''}" style="display:flex;gap:10px;align-items:center;border-bottom:1px solid #f0f0f0;padding:8px 4px">
+        <label style="display:flex;align-items:center;gap:5px;flex:none;width:92px">
+          <input type="checkbox" class="dc-pick" style="cursor:pointer">
+          <b style="color:${col};font-size:12px">${h.score}%</b>
+        </label>
+        <div style="display:flex;gap:7px;align-items:center;flex:1;min-width:0">
+          ${imgTag2(me ? me.img : '', 46)}
+          <div style="min-width:0">
+            <div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(h.a ? h.a.t : '')}">${esc(h.a ? h.a.t : '')}</div>
+            <div class="smd-dim" style="font-size:10px">このカタログの <b>${meNo || '?'}番</b>（消すのはこちら）</div>
+          </div>
+        </div>
+        <div style="flex:none;color:#c0392b;font-size:16px">⟷</div>
+        <div style="display:flex;gap:7px;align-items:center;flex:1;min-width:0">
+          ${imgTag2(rightImg, 46)}
+          <div style="min-width:0">
+            <div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(rightName)}">${esc(rightName)}</div>
+            <div class="smd-dim" style="font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rightSub}${h.catSim != null ? '（カタログの近さ ' + h.catSim + '%）' : ''}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:1100px;max-width:97vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+      <div style="display:flex;align-items:center;gap:8px;padding:13px 18px;border-bottom:1px solid #eee">
+        <b style="flex:1">🔁 重複の見比べ（${hits.length}件）</b>
+        <button class="dc-close smd-btn" style="font-size:11.5px;padding:4px 12px">閉じる</button>
+      </div>
+      <div style="padding:10px 18px 0"><div class="smd-dim" style="font-size:11px">左＝<b>このカタログの明細</b>（消すならこちら）／右＝<b>similar と判定された相手</b>。<b>画像を見比べて</b>、本当に同じ商品ならチェックしてください。<br>※<b>最初はどれもチェックされていません</b>（消すのは取り返しがつかないので、必ず目で見てから）。続編（無印と2）は別商品として除いてあります。</div></div>
+      <div style="padding:6px 18px;max-height:60vh;overflow:auto">${rowsHtml || '<div class="smd-dim" style="padding:12px">候補がありません</div>'}</div>
+      <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:12px 18px;border-top:1px solid #eee">
+        <span class="dc-msg smd-dim" style="margin-right:auto;font-size:11px"></span>
+        <button class="dc-none smd-btn" style="font-size:11.5px;padding:5px 12px">チェックを全部外す</button>
+        <button class="dc-del smd-btn" style="font-size:11.5px;padding:5px 16px;border-color:#d93025;color:#d93025;font-weight:700">🗑 チェックした明細をShopeeから削除</button>
+      </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    ov.querySelector('.dc-close').addEventListener('click', close);
+    const msg = ov.querySelector('.dc-msg');
+    const cnt = () => { const n = ov.querySelectorAll('.dc-pick:checked').length; if (msg) { msg.style.color = ''; msg.textContent = n ? n + '件を削除します（順番は崩れません）' : '画像を見比べて、同じ商品ならチェック'; } };
+    ov.querySelectorAll('.dc-pick').forEach(c => c.addEventListener('change', cnt));
+    ov.querySelector('.dc-none').addEventListener('click', () => { ov.querySelectorAll('.dc-pick').forEach(c => c.checked = false); cnt(); });
+    cnt();
+    ov.querySelector('.dc-del').addEventListener('click', async () => {
+      const picked = [...ov.querySelectorAll('.dc-row')].filter(r => r.querySelector('.dc-pick').checked);
+      const mids = picked.map(r => r.dataset.mid).filter(Boolean);
+      if (!mids.length) { if (msg) { msg.style.color = '#d93025'; msg.textContent = 'チェックした明細がありません'; } return; }
+      if (mids.length !== picked.length) { alert('中身のない明細が混ざっています（画面を開き直してください）'); return; }
+      const gwd = await guardWriteCountries([cc]); if (!gwd.ok) { alert(gwd.msg); return; }
+      const names = picked.map(r => r.dataset.no + '番').join(' / ');
+      if (!confirm('書込先: ' + gwd.summary + '\n\n' + mids.length + '件（' + names + '）をShopeeから削除します。\n残りの明細の順番は崩れません。\n\n元に戻せません。よろしいですか？')) return;
+      const b2 = ov.querySelector('.dc-del'); b2.disabled = true; b2.textContent = '⏳ 削除中…';
+      try {
+        const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: shopId, item_id: itemId, mids: mids.join(',') }, 300000);
+        if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
+        try { logAct('出品', '重複明細を削除', String(itemId), cc + ' ' + mids.length + '件 ' + names); } catch (_) {}
+        toast('🗑 ' + mids.length + '件 削除しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）');
+        close(); if (onDone) onDone();
+      } catch (e) {
+        b2.disabled = false; b2.textContent = '🗑 チェックした明細をShopeeから削除';
+        if (msg) { msg.style.color = '#d93025'; msg.textContent = '✗ ' + apiErrJa((e && e.message) || e); }
+      }
+    });
+  }
   function openCatalogEditor(cc, host, itemId, repName) {
     // 読取り・書込とも公式API化済（update_item/price/stock）。公式API設定があればライブ(ブリッジ)不要で開ける。バリエ名・明細SKUだけはブリッジ or Shopee編集ページが必要。
     if (state.mode !== 'live' && !(settings.openapiUrl && settings.writeToken)) { alert('カタログ編集には公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）か🟢ライブPCが必要です'); return; }
@@ -19223,10 +19317,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             dsB.disabled = false;
             if (!hits.length) { if (dsM) { dsM.style.color = '#1a7f37'; dsM.textContent = '✓ 重複らしきものは見つかりませんでした'; } dsR.innerHTML = ''; return; }
             if (dsM) { dsM.style.color = '#d93025'; dsM.textContent = hits.length + '件の候補'; }
-            dsR.innerHTML = '<div style="max-height:220px;overflow:auto;font-size:11px">' + hits.slice(0, 60).map(h => h.kind === 'self'
-              ? `<div style="border-top:1px solid #f2e3e1;padding:3px 0"><b style="color:#c0392b">${h.score}%</b>　このカタログ内： <b>${h.a.no}.</b> ${esc(h.a.t)} ／ <b>${h.b.no}.</b> ${esc(h.b.t)}</div>`
-              : `<div style="border-top:1px solid #f2e3e1;padding:3px 0"><b style="color:#e8710a">${h.score}%</b>　<b>${h.a.no}.</b> ${esc(h.a.t)} → 別カタログ<b>「${esc(String(h.cat || '').slice(0, 34))}」</b>の「${esc(h.name)}」<span class="smd-dim">（カタログの近さ ${h.catSim}% / item ${h.item_id}）</span></div>`).join('')
-              + (hits.length > 60 ? '<div class="smd-dim" style="padding:4px 0">…ほか' + (hits.length - 60) + '件</div>' : '') + '</div>';
+            // ★狭い枠に名前だけ並べても【画像が無いと判断できない】（2026-08-22 本人指摘）。
+            //   別画面に出して、追加しようとしている側と既に出している側を【画像つきで並べて】見比べる。
+            dsR.innerHTML = '<button class="ed-dupopen smd-btn" style="font-size:11.5px;padding:5px 14px;border-color:#c0392b;color:#c0392b;font-weight:700">🖼 画像つきで見比べる（' + hits.length + '件）</button>';
+            const dop = dsR.querySelector('.ed-dupopen');
+            if (dop) dop.addEventListener('click', () => openDupCompare({
+              cc, itemId, shopId: sidCat, hits,
+              // 明細番号(1始まり) → その明細の画像と model_id
+              byNo: (no) => { const m = (models || []).find(x => ((x.tier_index || [])[0]) === (no - 1)); return m ? { img: m.img || '', mid: m.id, name: (tiers[0] && (tiers[0].value_list || [])[no - 1] || {}).custom_value || '' } : null; },
+              onDone: () => { try { openCatalogEditor._cache.delete(ck); } catch (_) {} close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 300); }
+            }));
           }, 30);
         }); }
       // ---- 🖼 明細画像の一括DL / 一括アップ（番号で紐付けるのでズレない） ----
@@ -19915,7 +20015,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             else localStorage.removeItem(draftKey);
           } catch (_) {}
         };
-        const draftClear = () => { try { localStorage.removeItem(draftKey); } catch (_) {} };
+        // ★出品が通ったら【貼り付けたURLの控えも消す】。残っていると次に開いた時に
+        //   「前回読み込んだ◯件を復元しました」と出て、もう出し終わった分をまた出しかける
+        //   （2026-08-22 本人指摘「出品成功したらもう残しておく必要なくね？」）。
+        const draftClear = () => {
+          try { localStorage.removeItem(draftKey); } catch (_) {}
+          try { localStorage.removeItem('smdBulkUrls_' + cc + '_' + itemId); } catch (_) {}
+          try { const bt2 = body.querySelector('.ed-bulkurls'); if (bt2) { bt2.value = ''; bt2.dispatchEvent(new Event('input', { bubbles: true })); } } catch (_) {}
+        };
         // ★取得できた行から順に、その1行だけ書き換える（全体を作り直すと重いし入力中の値が飛ぶ）。
         const paintRow = (i) => {
           if (!bx) return;
@@ -20341,7 +20448,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                   ba.innerHTML = '✓ ' + ((v.result && v.result.added) || items2.length) + '/' + items2.length + '件を追加 ' + jobBar(100)
                     + ((v.result && v.result.imgAdjust) ? '<div style="margin-top:5px;border:1px solid #f0c4bd;background:#fdecea;border-radius:6px;padding:6px 9px;color:#b3261e;font-size:11px;font-weight:700">⚠ ' + esc(v.result.imgAdjust) + '<div style="font-weight:400;margin-top:2px">この明細は<b>別の商品の表紙</b>が付いています。🖼 明細画像の入れ替えで差し替えてください。</div></div>' : '');
                   if (bw.length) { try { alert('⚠ 画像が取れなかった ' + bw.length + '件は【追加していません】。\n\n' + bw.slice(0, 12).map(x => '・' + x).join('\n') + (bw.length > 12 ? '\n…ほか' + (bw.length - 12) + '件' : '') + '\n\n他の明細の画像を勝手に当てることはしません。\n仕入元から画像を取り直してから、もう一度追加してください。'); } catch (_) {} }
-                  markStale(); try { ledgerAddVars(list); } catch (_) {} delete JOB_MIRROR[key2]; return; }
+                  markStale(); try { ledgerAddVars(list); } catch (_) {} 
+                  try { draftClear(); rows = []; draw(); } catch (_) {}   // ★Shopeeに入ったので控えも一覧も片付ける
+                  delete JOB_MIRROR[key2]; return; }
                 if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + apiErrJa(v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
                 ba.innerHTML = '② 追加中 ' + jobBar(jobPct(v.pct), (v.step || '') + jobEta(key2, v.pct || 0), '#3b5bdb');
               };
@@ -20351,7 +20460,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               ba.innerHTML = '② 追加中 ' + jobBar(0, 'しごとに積みました（この画面は閉じてOK）', '#3b5bdb');
               try { await srcMapAdd(list.map(x => ({ url: (rows[+x.el.dataset.i] || {}).url, cc, item_id: itemId, opt: x.name })).filter(e => e.url)); } catch (_) {}
               try { logAct('出品', '明細一括追加', repName || (pi.name || ''), cc + ' ' + items2.length + '件 → ' + items2.map(x => x.option + '(' + (rg.cur || '') + x.price + ')').join(' / ')); } catch (_) {}
-              draftClear();
+              // ★控えを消すのは【Shopeeに入ってから】。ここで消すと、しごとが失敗した時に
+              //   貼ったURLも消えて最初からやり直しになる。消すのは done の中で。
               markStale();
             } catch (e) { ba.disabled = false; alert('追加の登録に失敗: ' + e.message); }
           });
