@@ -15114,6 +15114,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🖼 <b>「同じ写真が複数の明細に付いている出品」を横断で出すようにしました</b>（分析・やること）。先日の事故（メルカリShopsの共通画像が31明細に付いた件）は、<b>本人が偶然スクロールして気づくまで分かりませんでした</b>。気づける場所が無かったのが問題なので、全出品を横断して一覧に出します。<br><b>Joy-Conの色違いのように、わざと1枚に揃えている出品を誤爆しない</b>よう、<b>仕入元URLが台帳に残っている明細だけ</b>を数えています。商品名をクリックすると✎カタログ編集がその場で開きます。',
       '🧩 <b>重複の判定に JAN・型番・自社コード・SKU も使うようにしました</b>（本人「識別とかSKUとか補足情報も入れてくので、カタログタイトルとかも含めてトータルで判定して」）。<br>コードは名前や写真より確かなので、<b>入っていればそれで決めます</b>——<b>一致＝同じ商品（100%・理由を「JAN一致」等と表示）／違う＝別商品（名前が似ていても候補に出さない）</b>。信用する順は <b>JAN ＞ 型番 ＞ 自社コード ＞ SKU</b>。片方でも空なら判断材料にせず、これまでどおり名前と写真で見ます。<br>つまり<b>識別項目を埋めるほど誤検知が消えます</b>。<code>Monster Hunter XX × 4G</code> のような境界のペアも、どちらかにJANか型番が入れば自動で切れます。<br>判定に使っているもの：<b>明細名／カタログ名の近さ／続編の番号／JAN・型番・自社コード・SKU／写真（dHash）</b>。',
       '🖼 <b>重複の見比べでも【画像で判定】するようにしました</b>（本人「当然、画像でも判定してるよね？」）。これまで<b>画像は見比べ用に出しているだけで、点数は名前だけ</b>でした。開くと自動で両側の写真を突き合わせ、<b>🖼88%以上＝ほぼ同じ写真（赤）／60%以上＝似ている（橙）／それ未満＝別物に見える（緑）</b>を出します。<b>45%未満の行は薄く</b>して、目で追わなくていいようにしました。<br>⚠️ 写真の指紋（dHash）は<b>同じ写真しか当たりません</b>。別の人が撮った写真だと<b>同じ商品でも低く出ます</b>——低い＝別商品とは限りません。<b>高ければ強い証拠</b>、という使い方です。画像はShopeeのCDNがブラウザ直取りを弾くのでサーバー経由で取ります（接続枠を少し使うため、80枚を超える時は省略します）。',
       '🔄 <b>重複の見比べを直しました（本人指摘4点）</b>。①<b>相手側の画像が出ていなかった</b>——検索結果に画像を入れ忘れていました。②<b>重複は2つとは限らない</b>——「いちばん似ている1件」しか返しておらず、3か所以上に出していると残りを見落としていました。<b>しきい値を超えた相手を全部</b>出します。③<b>どっちを消すのか分からない</b>——<b>左右どちらでもチェックできる</b>ようにしました（別カタログ側も消せます）。選んだ方が赤くなります。④<b>照合は同じ国の中だけ</b>である旨を画面に明記しました。<br>あわせて<b>誤検知を2つ潰しました</b>。<code>Pokémon X</code> × <code>Pokémon Moon</code> が80%になっていたのは、意味のある語が「pokemon」1つしかなく<b>1語一致で満点</b>になっていたため（両方に2語以上ある時だけ語の重なりを使うようにしました）。同じカタログ内の比較にも<b>続編ガードが効いていませんでした</b>（<code>2005 Crystal Drive DS</code> × <code>同 2</code> 等）。',
@@ -26091,12 +26092,48 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   実測（2026-07）: 204件中105件(51%)が¥1,200未満、27件(13%)が赤字。ここが月末の数字を決めている。
     let lowHtml = '';
     try { lowHtml = await lowMarginHtml(); } catch (e) { console.warn('[儲かっていない出品]', e && e.message); }
+    // ★同じ写真が複数の明細に付いている出品を横断で拾う（2026-08-22）。
+    //   メルカリShopsの og:image が全商品共通だったせいで31明細に同じ表紙が付き、
+    //   **本人が偶然スクロールして気づくまで分からなかった**。気づける場所を作る。
+    //   ※Joy-Conの色違いのように「わざと1枚に揃えている」出品を誤爆しないよう、
+    //     **仕入元URLの台帳に載っている明細だけ**を数える（手で揃えた分は台帳に無い）。
+    const badImgHtml = (() => {
+      const map = (typeof _srcMap === 'object' && _srcMap) ? _srcMap : null;
+      const byItem = {};
+      if (map) Object.keys(map).forEach(u => { const d = map[u] || {}; if (d.i) { (byItem[String(d.i)] = byItem[String(d.i)] || {})[String(d.o || '').trim()] = 1; } });
+      const bad = [];
+      Object.keys(lst.byCc || {}).forEach(cc2 => (lst.byCc[cc2] || []).forEach(l => {
+        const ms = (l.models || []).filter(m => m && !m.ghost && m.img);
+        if (ms.length < 3) return;
+        const cnt2 = {};
+        ms.forEach(m => { cnt2[m.img] = (cnt2[m.img] || 0) + 1; });
+        const dupImgs = Object.keys(cnt2).filter(k2 => cnt2[k2] >= 2);
+        if (!dupImgs.length) return;
+        const tracked = byItem[String(l.item_id)] || {};
+        const n = ms.filter(m => dupImgs.indexOf(m.img) >= 0 && tracked[String(m.n || '').trim()]).length;
+        if (n >= 2) bad.push({ cc: cc2, item_id: l.item_id, name: l.name || '', n, total: ms.length, image: l.image });
+      }));
+      bad.sort((x, y) => y.n - x.n);
+      if (!bad.length) return '';
+      return `<div class="tool-card" style="max-width:none;border-color:#f0c4bd">
+        <h3 style="margin-top:0;color:#c0392b">🖼 同じ写真が複数の明細に付いている出品 <span class="smd-dim" style="font-weight:400;font-size:12px">（${bad.length}件）</span></h3>
+        <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">仕入元から<b>商品の写真ではなくサイト共通の画像</b>を拾ってしまうと起きます（メルカリShopsで実際に発生）。<br>
+          <b>わざと1枚に揃えている出品を誤爆しないよう、仕入元URLが分かっている明細だけ</b>を数えています。行の ✎ で開いて差し替えてください。</div>
+        <div class="pf-scroll" style="max-height:38vh"><table class="pf-table" style="width:100%">
+          <tr><th></th><th>国</th><th style="text-align:left">商品</th><th>同じ写真</th><th>明細数</th></tr>
+          ${bad.slice(0, 60).map(b2 => `<tr><td style="width:40px">${b2.image ? `<img src="${IMG_CDN + esc(b2.image)}" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px">` : ''}</td>
+            <td><span class="ord-cc" style="background:${(regionByCc(b2.cc) || {}).color || '#333'}">${b2.cc}</span></td>
+            <td style="text-align:left"><a href="#" class="an-badimg" data-cc="${b2.cc}" data-id="${b2.item_id}" style="color:#1565c0;text-decoration:none">${esc(String(b2.name).slice(0, 60))}</a><div class="smd-dim" style="font-size:10px">item ${b2.item_id}</div></td>
+            <td style="text-align:right;color:#c0392b;font-weight:700">${b2.n}件</td><td style="text-align:right">${b2.total}</td></tr>`).join('')}
+        </table></div>
+      </div>`;
+    })();
     host.innerHTML =
       '<div id="an-playbook"></div>' +
       lowHtml +
       sugHtml +
       leakHtml +
-      dealHtml + (lst._unseenHtml || '') +
+      dealHtml + (lst._unseenHtml || '') + badImgHtml +
       imgClustHtml +
       childSkuHtml +
       `<div class="tool-card" style="max-width:none">
@@ -26213,6 +26250,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     host.querySelectorAll('.sug-task').forEach(el => el.addEventListener('click', async () => { const s = lst.sugData[+el.dataset.i]; if (!s) return; el.disabled = true; if (await addSuggestionTask(s)) { el.textContent = '✓済'; el.style.background = '#e7f4e9'; } else el.disabled = false; }));
     const sugAll = host.querySelector('.sug-all'); if (sugAll) sugAll.addEventListener('click', async () => { if (!confirm('上位10件をタスク化しますか？')) return; sugAll.disabled = true; let ok = 0; for (const s of (lst.sugData || []).slice(0, 10)) { if (await addSuggestionTask(s)) ok++; } sugAll.textContent = `✓ ${ok}件をタスク化`; });
     // 🖼️同一画像クラスタ → 全カタログの親SKUを揃えて連結
+    // 🖼 同じ写真が付いている出品 → その場で ✎カタログ編集を開く
+    host.querySelectorAll('.an-badimg').forEach(el => el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const cc2 = el.dataset.cc, id = el.dataset.id;
+      const rg2 = regionByCc(cc2) || {};
+      const row = (lst.byCc[cc2] || []).find(x => String(x.item_id) === String(id));
+      openCatalogEditor(cc2, rg2.host || '', id, row ? row.name : '');
+    }));
     host.querySelectorAll('.imgc-apply').forEach(el => el.addEventListener('click', async () => {
       const c = lst.imgClustData && lst.imgClustData[el.dataset.img]; if (!c) return;
       const inp = host.querySelector('.imgc-sku[data-img="' + el.dataset.img + '"]');
