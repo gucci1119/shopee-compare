@@ -2220,20 +2220,36 @@ function addItem_(body) {
 function brandList_(shopId, categoryId, q) {
   if (!shopId) throw new Error('shop_id 必須');
   if (!categoryId) throw new Error('category_id 必須（ブランドはカテゴリごとに決まります）');
-  var ck = 'brands_' + shopId + '_' + categoryId;
+  // ★キャッシュキーは v2。v1は下の2つのバグで壊れたデータが入っているので使わない。
+  var ck = 'brands2_' + shopId + '_' + categoryId;
   var cache = CacheService.getScriptCache();
   var all = null;
   try { var hit = cache.get(ck); if (hit) all = JSON.parse(hit); } catch (e) {}
   if (!all) {
     all = [];
-    for (var off = 0; off < 3000; off += 100) {
+    var seen = {};
+    // ★offset は【単純な連番ではなく next_offset を渡すカーソル】。
+    //   off += 100 でめくると同じページを何度も取り、同じブランドが並ぶ
+    //   （2026-08-22 実際に Nintendo #1146819 が何行も出た）。
+    var off = 0;
+    for (var loop = 0; loop < 30; loop++) {
       var j = callShop_(shopId, '/api/v2/product/get_brand_list',
         { category_id: categoryId, offset: off, page_size: 100, status: 1 }, 'get');
       var r = j.response || {};
       var list = r.brand_list || [];
-      list.forEach(function (b) { all.push({ id: b.brand_id, n: b.original_brand_name || b.display_brand_name || '' }); });
+      if (!list.length) break;
+      list.forEach(function (b) {
+        var id = b.brand_id;
+        if (id == null || seen[id]) return;          // ★同じIDは1回だけ（保険）
+        seen[id] = 1;
+        all.push({ id: id, n: b.original_brand_name || b.display_brand_name || '' });
+      });
       if (!r.has_next_page) break;
+      var nx = (r.next_offset != null) ? r.next_offset : null;
+      if (nx == null || nx === off) break;           // カーソルが進まないなら止める（無限ループ防止）
+      off = nx;
     }
+    all.sort(function (a2, b2) { return String(a2.n).localeCompare(String(b2.n)); });
     try { cache.put(ck, JSON.stringify(all), 21600); } catch (e) {}   // 6時間
   }
   var key = String(q || '').trim().toLowerCase();
