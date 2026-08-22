@@ -15038,6 +15038,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-22', items: [
+      '🏳 <b>絞り込んでいる国から先に更新するようにしました</b>（本人指摘「VNで絞ってるのにPHから更新が始まる」）。全部の国を取るのは同じですが、<b>いま見ている国が最初に新しくなります</b>。<br>あわせて<b>「1国だけ絞っている時はその店だけ取りに行く」短縮が、実は効いていなかった</b>のを直しました（`settings.shopIds` が空だと shop_id を解決できず、黙って全店取得に戻っていました。出品行から解決するようにしています）。',
       '🔍 <b>重複チェックを「画像つきで見比べる別画面」にしました</b>（本人指摘「これ画像ないとわからん」「枠狭いし、横に別の重複検知用の画面を出したほうがいい」）。狭い枠に名前だけ並べても判断できないので、<b>左＝このカタログの明細／右＝似ていると判定された相手</b>を<b>両方とも画像つきで横に並べます</b>（相手が別カタログならカタログ名とitem、同じカタログ内なら番号）。見比べて<b>本当に同じ商品ならチェック → その場でShopeeから削除</b>できます（順番は崩れません）。<b>最初はどれもチェックされていません</b>——消すのは取り返しがつかないので、必ず目で見てから。<br>あわせて<b>「もう出している分」の判定にも続編ガードを効かせました</b>（これまで貼った行どうしの比較にしか効いておらず、無印と2を重複として拾っていました）。',
       '🧹 <b>出品が通ったら、貼り付けたURLの控えも消すようにしました</b>（本人指摘「出品成功したらもう残しておく必要なくね？」）。これまで次に開くと「前回読み込んだ◯件を復元しました」と出て、<b>もう出し終わった分をまた出しかける</b>状態でした。消すのは<b>Shopeeに入ってから</b>です（しごとが失敗した時に貼ったURLまで消えると最初からやり直しになるため）。',
       '🐞 <b>ブランド候補に同じものが何行も出るのを直しました</b>（本人指摘）。Shopeeの <code>get_brand_list</code> の <code>offset</code> は<b>単純な連番ではなく、応答の <code>next_offset</code> を渡すカーソル</b>でした。<code>offset += 100</code> でめくっていたため<b>同じページを何度も取って</b>いました（<code>Nintendo #1146819</code> が8行）。<code>next_offset</code> でめくる／brand_idで重複除去／名前順に並べる、の3点を直し、壊れた古いキャッシュを使わないようキャッシュキーも変えました。実測 682件・「nintendo」で1件。',
@@ -18402,7 +18403,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function pullListingsNow() {
     if (!settings.openapiUrl || !settings.writeToken) { await reloadListingsFromDb(); return; }
     const ccs = Array.isArray(lst.ccs) ? lst.ccs : [];
-    const sid = (ccs.length === 1) ? ((settings.shopIds || {})[ccs[0]] || '') : '';
+    // ★1国だけ絞っている時はその店だけ取りに行く＝速い。
+    //   ただし settings.shopIds は空のことがあり（実測で空だった）、その場合この短縮が黙って効いていなかった。
+    //   出品行から shop_id を解決して確実に効かせる（2026-08-22）。
+    const sidOfCc = (cc2) => {
+      const v = (settings.shopIds || {})[cc2]; if (v) return String(v);
+      const r0 = (lst.byCc[cc2] || []).find(x => x.shop_id); return r0 ? String(r0.shop_id) : '';
+    };
+    const sid = (ccs.length === 1) ? sidOfCc(ccs[0]) : '';
     lst.syncing = true;
     lst.note = sid ? `Shopeeから${ccs[0]}の新しい出品を取りに行っています…（30秒〜2分）` : 'Shopeeから新しい出品を取りに行っています…（全店・1〜3分）';
     drawListingStatus();
@@ -18430,7 +18438,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const ok = await detectBridge();
     if (!ok) { alert('ブリッジ未検出。Shopee Compare Bridge が有効か確認してください'); return; }
     if (!state.accounts) await loadAccounts().catch(() => {});
-    const targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等の無い国を自動除外）
+    let targets = accountTargets(); // 対象アカウントが持つ国だけ（gs_japan_select選択時はVN等の無い国を自動除外）
+    // ★いま絞り込んでいる国から先に取る（2026-08-22 本人指摘「VNで絞っているのにPHから更新が始まる」）。
+    //   全部やるのは同じでも、**見ている国が最初に新しくなる**のが実務では大事。
+    { const sel = Array.isArray(lst.ccs) ? lst.ccs.filter(Boolean) : [];
+      if (sel.length && sel.length < targets.length) {
+        const set = new Set(sel);
+        targets = targets.filter(r => set.has(r.cc)).concat(targets.filter(r => !set.has(r.cc)));
+      } }
     lst.syncing = true; drawListingStatus();
     // アクティブなショップ(shop_id)を判定→各行に刻む＋対象アカウントと一致するか確認（別垢のまま同期する事故を防ぐ）
     state.rawRead = true;
