@@ -24,11 +24,26 @@ var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop
 //   枠を12倍速で消費していた。だから UF_STOP=15000 の予約枠が効かず、2万回を使い切った
 //   （2026-08-22 実際に「1日にサービス urlfetch を実行した回数が多すぎます」で出品が止まった）。
 //   リトライも1回ごとに1回ぶん食う。**実際に投げた回数をそのまま数える**。
-function ufBump_(n) { _ufRun += (n > 0 ? n : 1); }
+// ★どこで使ったかの内訳も数える（本人の問い「なぜこんなに消費するの？無駄に消費してる箇所あるんじゃない？」2026-08-23）。
+//   合計しか無いと「何が食っているか」が永久に分からない。API のパスごとに数えて uf_status で返す。
+var _ufTag = {};       // { '/api/v2/product/get_item_base_info': 123, ... }
+function ufBump_(n, tag) {
+  var c = (n > 0 ? n : 1);
+  _ufRun += c;
+  if (tag) { var k = String(tag); _ufTag[k] = (_ufTag[k] || 0) + c; }
+}
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
 function ufTotal_() { return ufState_().n + _ufRun; }     // 今日これまで＋この実行分
-function ufPersist_() { if (!_ufRun) return; var o = ufState_(); o.n += _ufRun; _ufRun = 0; try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {} }
+function ufPersist_() {
+  if (!_ufRun && !Object.keys(_ufTag).length) return;
+  var o = ufState_(); o.n += _ufRun; _ufRun = 0;
+  // 内訳も同じ入れ物に貯める（日が変われば ufState_ が作り直すので自動でリセットされる）
+  o.tag = o.tag || {};
+  Object.keys(_ufTag).forEach(function (k) { o.tag[k] = (o.tag[k] || 0) + _ufTag[k]; });
+  _ufTag = {};
+  try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {}
+}
 function bgAllowed_() { return ufTotal_() < UF_STOP; }     // 背景同期を続けてよいか（手動用の予約枠を侵さない）
 function ufStatus() { var o = ufState_(); Logger.log('urlfetch 今日(' + o.d + ' PT基準): ' + o.n + '回 / 背景停止ライン ' + UF_STOP + '（手動予約 ' + (20000 - UF_STOP) + '／無料枠20000）'); return o; } // エディタから実行して当日消費を確認
 function toHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
@@ -746,7 +761,13 @@ function doGet(e) {
     if (p.action === 'uf_status') {
       var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ufo;
-      try { var st = ufState_(); ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP }; }
+      try {
+        var st = ufState_();
+        // 何が食っているかの内訳（多い順・上位12）。合計しか見えないと原因が永久に分からない。
+        var tg = st.tag || {}, top = Object.keys(tg).map(function (k) { return { k: k, n: tg[k] }; })
+          .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 12);
+        ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP, top: top };
+      }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1003,7 +1024,7 @@ function callShop_(shopId, path, query, method, body) {
   if (query) for (var k in query) url += '&' + k + '=' + encodeURIComponent(query[k]);
   var opt = { method: method || 'get', muteHttpExceptions: true };
   if (body) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(body); }
-  ufBump_(); // urlfetch 日次枠のカウント（1論理コール＝1）
+  ufBump_(1, path); // urlfetch 日次枠のカウント（1論理コール＝1）＋どのAPIかも数える
   // Shopeeゲートウェイは稀に "Address unavailable"/接続失敗を返す（同一ホストでも散発）→ 短い間隔で最大3回リトライ
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
@@ -2098,7 +2119,7 @@ function fetchRetry_(url, opts, tries) {
   tries = tries || 5;
   var last = null;
   for (var i = 0; i < tries; i++) {
-    try { ufBump_(1); return UrlFetchApp.fetch(url, opts); }
+    try { ufBump_(1, (opts && opts.__tag) || 'fetchRetry'); return UrlFetchApp.fetch(url, opts); }
     catch (e) {
       last = e;
       var msg = String((e && e.message) || e);
@@ -2116,7 +2137,7 @@ function fetchRetry_(url, opts, tries) {
 function fetchAllRetry_(reqs, tries) {
   tries = tries || 3;
   for (var i = 0; i < tries; i++) {
-    try { ufBump_((reqs || []).length); return UrlFetchApp.fetchAll(reqs); }
+    try { ufBump_((reqs || []).length, ((reqs || [])[0] || {}).__tag || 'fetchAll(画像など)'); return UrlFetchApp.fetchAll(reqs); }
     catch (e) {
       var msg = String((e && e.message) || e);
       if (!/使用できないアドレス|Address unavailable|DNS|timeout|timed out|一時的|temporarily|unexpected error|接続できません|reset by peer/i.test(msg)) throw e;
@@ -3842,7 +3863,7 @@ function jobSet_(key, patch) {
 function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); return !!(v && v.status === 'cancel'); }
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
-  ufBump_();
+  ufBump_(1, 'Supabase読み(' + table + ')');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   return JSON.parse(res.getContentText());
@@ -3862,14 +3883,14 @@ function sbSelectAll_(table, query) {
 function sbUpsert_(table, rows, onConflict) {
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : ''), key = cfg_('SB_SERVICE_KEY');
   for (var i = 0; i < rows.length; i += 200) {
-    ufBump_();
+    ufBump_(1, 'Supabase書き(' + table + ')');
     var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: JSON.stringify(rows.slice(i, i + 200)) });
     if (res.getResponseCode() >= 300) throw new Error('Supabase upsert ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
 }
 function sbDelete_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
-  ufBump_();
+  ufBump_(1, 'Supabase削除(' + table + ')');
   var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'delete', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' } });
   if (res.getResponseCode() >= 300) throw new Error('Supabase delete ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
 }
