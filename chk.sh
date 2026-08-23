@@ -10,12 +10,21 @@ NG=0
 python3 - << 'PY'
 import io, re, subprocess, sys, glob, os
 def check(name, code):
+    # ★2026-08-23 全面改訂（2回目）。以前は initWithContentsOfFile（エンコーディング指定なし）で読んでおり、
+    #   **3.4MB・日本語混じりの index.html では nil が返る**。すると new Function(undefined) が成功して
+    #   **常に OK になっていた**＝index.html は一度も検査されていなかった。
+    #   （実測：括弧不一致を仕込んでも OK と出た）
+    #   → UTF-8 を明示して読み、**読めなかったら NG にする**。黙って通さない。
     p='/tmp/_chk_%s.js' % re.sub(r'\W','_',name)
     io.open(p,'w',encoding='utf-8').write(code)
-    r=subprocess.run(['osascript','-l','JavaScript','-e',
-      'var a=$.NSString.alloc.initWithContentsOfFile("%s").js; try{ new Function(a); "OK" }catch(e){ "NG "+e }'%p],
-      capture_output=True,text=True)
+    js = ('var e=$(); var a=$.NSString.stringWithContentsOfFileEncodingError("%s", 4, e);'
+          ' var s=ObjC.unwrap(a);'
+          ' if (s === undefined || s === null) { "NG ファイルを読めませんでした（検査していません）" }'
+          ' else if (s.length < 10) { "NG 中身が空です（検査していません）" }'
+          ' else { try { new Function(s); "OK" } catch (er) { "NG " + er } }') % p
+    r=subprocess.run(['osascript','-l','JavaScript','-e',js],capture_output=True,text=True)
     out=(r.stdout or r.stderr).strip()
+    if not out: out='NG 検査そのものが失敗しました'
     print('%-28s %s' % (name, out))
     return out.startswith('OK')
 ok=True
