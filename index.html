@@ -4919,6 +4919,7 @@
     "経過": "Elapsed",
     "✓済": "✓ Done",
     "🗑 削除": "🗑 Delete",
+    "✓ 配達完了の記録が出たので、自動で在庫保管中にしました（3日たつとこの行は消えます）": "✓ The carrier reported delivery, so this was moved to In stock automatically (this row disappears after 3 days)",
     "🗑 チェックした明細を消す": "🗑 Delete the checked variations",
     "消す明細が選ばれていません": "No variation is selected",
     "消す明細にチェックを入れてください": "Tick the variations you want to delete",
@@ -5442,6 +5443,7 @@
     [/^入金がありました：(.+)$/, 'Payment received: $1'], [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
     [/^期限 (.+)$/, 'Due $1'],
     [/^届きました：(.+)$/, 'Arrived: $1'], [/^配達中です：(.+)$/, 'Out for delivery: $1'],
+    [/^受け取り済みにしました：(.+)$/, 'Marked received: $1'],
     [/^届いているかもしれません：(.+)$/, 'May have arrived: $1'],
     [/^(.+)　仕入から (\d+)日（目安 (\d+)日）　追跡情報なし$/, '$1  $2 days since purchase (expected $3)  no tracking information'],
     [/^(\d{4})年(\d{1,2})月$/, (m, y, mo) => ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+mo] + ' ' + y],
@@ -14837,6 +14839,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       rows = await sbGetAll('inventory',
         'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
     } catch (_) { rows = []; }
+    // ★配送業者が「配達完了」を出すと、GAS(shopee-tracking.gs の AUTO_ARRIVE)が
+    //   自動で status を『在庫保管中』に移す。その瞬間に入庫待ちから外れるので、
+    //   **見る前にお知らせから消えていた**（2026-08-23 本人「あれ？何個か消えた？今日表示されてたのに？」）。
+    //   自動で受け取り済みにした分は【3日間はお知らせに残す】。自動化は止めず、見落としだけ潰す。
+    let autoRows = [];
+    try {
+      const since = new Date(Date.now() - 3 * 86400000).toISOString();
+      autoRows = await sbGetAll('inventory',
+        'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no,edited_at&status=eq.'
+        + encodeURIComponent('在庫保管中') + '&edited_at=gte.' + encodeURIComponent(since));
+      autoRows = (autoRows || []).filter(r => stageOf(r.delivery_status, r.delivery_info) === 'delivered');
+      autoRows.forEach(r => { r.__auto = true; });
+      rows = rows.concat(autoRows);
+    } catch (_) {}
     const today = jstDate(Date.now());
     const daysFrom = (d) => { if (!d) return null; const t = Date.parse(String(d).slice(0, 10) + 'T00:00:00+09:00'); return isFinite(t) ? Math.floor((Date.parse(today + 'T00:00:00+09:00') - t) / 86400000) : null; };
     rows.forEach(r => {
@@ -14851,8 +14867,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         //   代用したことが分かるようにする（＝いつ届いたか本当は分からない、を隠さない）。2026-08-13
         const da = deliveredAt(r);
         const at = da || lastScan;
-        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: 'arrived', img: r.image || '', at: notifSortKey(at, pd), day: receivedDay(at),
-          ti: '届きました：' + nm,
+        out.push({ id: 'arr:' + r.item_id, ic: '📦', cat: 'parcel', kind: r.__auto ? 'arrivedAuto' : 'arrived', img: r.image || '', at: notifSortKey(at, pd), day: receivedDay(at),
+          ti: (r.__auto ? '受け取り済みにしました：' : '届きました：') + nm,
           sb: [notifWhen(at, da ? '到着' : '最終記録'), (da ? '' : '（配達完了の記録が無く、最後のスキャン時刻です）'), r.supplier || '', pd ? '仕入 ' + pd : '', addrText(r), r.delivery_status || r.delivery_info || ''].filter(Boolean).join('　'),
           itemId: r.item_id });
       } else if (ph === 'out') {
@@ -14986,7 +15002,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${d.lastSync ? `🚚 <b>追跡の最終取り込み ${notifWhen(jstDateTime(ls), '')}</b>（${mins}分前）。取り込みは<b>1時間ごと</b>なので、届いてから最大1時間はここに出ません。<br>` : '🚚 追跡の取り込み記録がありません（配送追跡GASが動いていない可能性）。<br>'}
       ${(() => {
         // ★「今日届いた荷物は本当に無いのか」をその場で答える。到着日ごとの内訳を出す。
-        const arr = (notif.items || []).filter(x => x.kind === 'arrived');
+        const arr = (notif.items || []).filter(x => x.kind === 'arrived' || x.kind === 'arrivedAuto');   // 自動で受け取り済みにした分も「届いた」に数える
         if (!arr.length) return '';
         const cnt = {};
         arr.forEach(x => { const dd = x.day || '(日付不明)'; cnt[dd] = (cnt[dd] || 0) + 1; });
@@ -15024,6 +15040,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <div class="nf-sb">${esc(x.sb)}</div>
           <div class="nf-ac">
             ${x.kind === 'arrived' || x.kind === 'likely' ? `<button class="ok nf-recv" data-item="${esc(x.itemId)}" title="在庫台帳の状態を「在庫保管中」にします">✅ 受け取った</button>` : ''}
+            ${x.kind === 'arrivedAuto' ? '<span class="smd-dim" style="font-size:10.5px;color:#1a7f37">✓ 配達完了の記録が出たので、自動で在庫保管中にしました（3日たつとこの行は消えます）</span>' : ''}
             ${x.cat === 'parcel' ? '<button class="go nf-go" title="仕入れ管理の入庫待ちを開きます">⏳ 入庫待ちを見る</button>' : ''}
             ${x.cat === 'ship' || x.cat === 'todo' || x.cat === 'order' ? '<button class="go nf-orders" title="注文管理を開きます">📦 注文を見る</button>' : ''}
             ${x.cat === 'money' ? '<button class="go nf-money" title="損益・入出金を開きます">💹 損益を見る</button>' : ''}
@@ -15215,6 +15232,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🐞 <b>ブランド候補に同じものが何行も出るのを直しました</b>（本人指摘）。Shopeeの <code>get_brand_list</code> の <code>offset</code> は<b>単純な連番ではなく、応答の <code>next_offset</code> を渡すカーソル</b>でした。<code>offset += 100</code> でめくっていたため<b>同じページを何度も取って</b>いました（<code>Nintendo #1146819</code> が8行）。<code>next_offset</code> でめくる／brand_idで重複除去／名前順に並べる、の3点を直し、壊れた古いキャッシュを使わないようキャッシュキーも変えました。実測 682件・「nintendo」で1件。',
       '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
+      '📦 <b>「届きました」が見る前に消えていたのを直しました</b>（本人「あれ？何個か消えた？今日表示されてたのに？」）。配送業者が<b>配達完了</b>を記録すると、GASが<b>自動で在庫台帳を「在庫保管中」に移します</b>（`AUTO_ARRIVE`）。お知らせの荷物は「入庫待ち」だけを見ていたので、<b>自動で移った瞬間に一覧から消えて</b>いました。実際 2026-08-23 は<b>36件</b>が 08:12〜12:52 に自動で移っています。<br>自動化は止めず、<b>自動で受け取り済みにした分も3日間はお知らせに残す</b>ようにしました。「<b>受け取り済みにしました：◯◯</b>」と出て、✅ボタンの代わりに<b>自動で移した理由</b>が書かれます。「今日届いた荷物」の数にも入ります。',
+      '🔑 <b>識別項目・コード規則・命名テンプレが保存されていませんでした</b>（本人「入力しても残らない」「バリエ明細閉じるとリセットされた。バグ？」）。保存のときに<b>メモ・在庫0固定だけを書き写す</b>作りになっており、それ以外の項目は<b>0.5秒後に丸ごと捨てられて</b>いました。画面を描き直した瞬間に空へ戻るので、入力しても残りません。<b>「残すものを並べる」方式をやめ、「消してよいもの以外は全部残す」</b>に変えました。今後この場所に項目を足しても、同じ理由で消えることはありません。<br>あわせて<b>🔒ロック</b>（決めた軸をうっかり書き換えないため。値は今までどおり入れられます）と、<b>軸ごとの説明</b>（<b>版＝同じソフトの版違い。通常版／ベスト版／廉価版など</b>）を欄に出しました。',
       '🗑 <b>✎カタログ編集からも明細を消せるようにしました</b>（本人「これ、この間直したくない？」）。2026-08-15の事故（1件消したつもりが3件消えた）以来、この画面の🗑は<b>「出品一覧でやってください」と突き返すだけ</b>でした。＝同じことを2画面でやらせる作りが残っていました。いまは安全な<b>詰め直し方式</b>があるので、<b>行ごとの🗑</b>も<b>☑チェックしてまとめて削除</b>も、この画面から直接できます。残る明細の順番も中身も崩れません。<br><span class="smd-dim">※一括も1件も、画像なしの一括も、すべて同じ1つの処理を通します（削除の道を複数持たない）。</span>',
       '💡 <b>明細のSKUを出品一覧からも自動で作れるようにしました</b>（本人要望）。これまでは✎カタログ編集を開き直す必要がありました。各行の<b>💡</b>で1件、<b>SKUが空の明細がある時だけ出る</b>「💡 空いているSKU ◯件 をまとめて入れる」で一括です。作り方は<b>カタログ編集と同じ（親SKU＋明細名）</b>で、<b>既に入っているSKUは触りません</b>。保存も既存の道をそのまま通します（保存処理を二重に持たない）。',
       '🔍 <b>重複の裏取りが終わる前に②を押したら、そのことを教えるようにしました</b>（本人の問い）。「🔍画像を照合中… 32/44」の最中でも②は押せて、<b>壊れはしません</b>（送る内容は押した瞬間に確定します）。ただし<b>重複の判定が商品名だけになり、写真が同じでも名前が違う重複を見逃します</b>。また同じアカウントのGAS要求は1件ずつしか処理されないので、<b>照合が終わるまで追加の開始が順番待ち</b>になります。<br>止めはせず、<b>何の途中かを出して「かまわず進む／待つ」を選べる</b>ようにしました。',
