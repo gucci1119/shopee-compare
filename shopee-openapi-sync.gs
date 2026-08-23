@@ -1041,11 +1041,13 @@ function callShop_(shopId, path, query, method, body) {
   if (query) for (var k in query) url += '&' + k + '=' + encodeURIComponent(query[k]);
   var opt = { method: method || 'get', muteHttpExceptions: true };
   if (body) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(body); }
-  ufBump_(1, path); // urlfetch 日次枠のカウント（1論理コール＝1）＋どのAPIかも数える
+  // ★枠は【実際に投げた回数】で数える。ここはループの外で1回しか数えておらず、
+  //   リトライ2回ぶんが枠から見えていなかった（Codexのレビューで発覚）。
+  //   同じ間違いを fetchAll でやって2026-08-22に枠を使い切っている。数えるのは投げる直前。
   // Shopeeゲートウェイは稀に "Address unavailable"/接続失敗を返す（同一ホストでも散発）→ 短い間隔で最大3回リトライ
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
-    try { txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
+    try { ufBump_(1, path); txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
     catch (e) { lastErr = e; if (/too many times|quota|rate/i.test(String(e))) break; Utilities.sleep(700 * (a + 1)); } // クォータ枯渇は即諦める（無駄打ち防止）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
@@ -3653,6 +3655,7 @@ function stockOfV2_(sv) { sv = sv || {}; var ss = (sv.seller_stock || [])[0] || 
 
 // 1店舗ぶんを取得して listings に upsert（本体）
 function syncListingsForShop_(tok, sinceSec) {
+  var mdlFailIds = [];   // ★明細を取れなかった商品。保存せず飛ばした分＝呼び出し元に返して見えるようにする
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var shopId = tok.shop_id;
   var ids = listItemIds_(shopId, sinceSec);
@@ -3671,6 +3674,7 @@ function syncListingsForShop_(tok, sinceSec) {
       var imgList = ((it.image || {}).image_id_list || []);
       var img = imgList[0] || '';
       var models = [], price_min = null, price_max = null, stock = null, model_count = 0;
+      var mdlFail = false;   // ★明細の取得に失敗したか（失敗したら保存しない＝既存の行を壊さない）
       if (it.has_model) {
         try {
           var g = getModels_(shopId, it.item_id);
@@ -3688,8 +3692,15 @@ function syncListingsForShop_(tok, sinceSec) {
           var prices = _real.map(function (m) { return m.price; }).filter(function (p) { return p > 0; });
           if (prices.length) { price_min = Math.min.apply(null, prices); price_max = Math.max.apply(null, prices); }
           stock = _real.reduce(function (s, m) { return s + (Number(m.stock) || 0); }, 0);
-        } catch (e) { /* モデル取得失敗時は単品扱いで継続 */ }
+        } catch (e) {
+          // ★以前はここで「単品扱いにして継続」していたため、**一時的な通信エラーが
+          //   バリエ商品を models:[] / model_count:0 で上書き**していた（＝明細が消えたように見える。
+          //   空き枠・原価・ROIも壊れる）。Codexのレビューで発覚。
+          //   取得できなかった商品は**保存しない**。DBの既存行をそのまま残すのが正しい。
+          mdlFail = true;
+        }
       }
+      if (mdlFail) { mdlFailIds.push(it.item_id); return; }   // この商品はスキップ（既存行を保持）
       if (!it.has_model || !models.length) {
         var p = priceOfInfo_((it.price_info || [])[0]);
         price_min = p || null; price_max = p || null; stock = stockOfV2_(it.stock_info_v2); models = []; model_count = 0;
@@ -3749,7 +3760,10 @@ function syncListingsForShop_(tok, sinceSec) {
       if (removed) Logger.log('listings reconcile ' + cc + ': removed ' + removed + ' stale');
     } catch (eRec) { Logger.log('listings reconcile skip ' + cc + ': ' + eRec); }
   }
-  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed, mode: sinceSec ? 'changed' : 'full' };
+  // ★明細を取れずに飛ばした商品は【必ず件数を返す】。黙って減らすと、
+  //   同期は成功に見えるのに一部の商品だけ古いまま、という状態に気づけない。
+  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed, mode: sinceSec ? 'changed' : 'full',
+    mdlFail: mdlFailIds.length || undefined, mdlFailIds: mdlFailIds.length ? mdlFailIds.slice(0, 20) : undefined };
 }
 
 // 全店舗を一気に（初回の全件ロード用。13店ぶんで6分制限に当たる場合は数回実行 or 下のRRトリガーに任せる）
@@ -4019,6 +4033,10 @@ function dailyAdjustmentsCheck() {
 }
 
 function setupTriggers() {
+  // ★ここは【全トリガーを消して作り直す】。作り直す一覧に入れ忘れた同期は、
+  //   実行した瞬間に黙って止まる。実際 syncReturnsAll（返品リクエストの取り込み）が
+  //   一覧に無く、この関数を走らせると返品同期だけ消えていた（Codexのレビューで発覚）。
+  //   **同期を足したら必ずこの一覧にも足すこと。**
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
@@ -4039,6 +4057,7 @@ function setupTriggers() {
   //   20時間ガードで空振りするので実害は小さいが、走らせる意味の無い実行が1日3回起きる。
   ScriptApp.newTrigger('syncListingStats').timeBased().everyDays(1).atHour(4).create();
   // ★SLS+補償が入ったかを毎朝チェックしてメール通知（入るのが数か月遅れるので、毎日見に行かないと気づけない）
+  ScriptApp.newTrigger('syncReturnsAll').timeBased().everyHours(6).create();   // ★入れ忘れると返品の取り込みが止まる
   ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
   Logger.log('✅ トリガー設定'); return 'ok';
 }
