@@ -4035,7 +4035,9 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
   //   👁閲覧/❤️いいね/🛒販売数(listing_stats)の同期だけ復活せず、ずっと0のままになる（実際に発生）。
-  ScriptApp.newTrigger('syncListingStats').timeBased().everyHours(6).create();
+  // ★1日1回。以前ここだけ everyHours(6) で、setupStatsTrigger の everyDays(1) と食い違っていた。
+  //   20時間ガードで空振りするので実害は小さいが、走らせる意味の無い実行が1日3回起きる。
+  ScriptApp.newTrigger('syncListingStats').timeBased().everyDays(1).atHour(4).create();
   // ★SLS+補償が入ったかを毎朝チェックしてメール通知（入るのが数か月遅れるので、毎日見に行かないと気づけない）
   ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
   Logger.log('✅ トリガー設定'); return 'ok';
