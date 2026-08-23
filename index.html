@@ -2992,6 +2992,9 @@
       JOBS.list = JOBS.list.filter(x => x.id !== +b2.dataset.id); jobRender();
     }));
   }
+  // ★「明細をまとめて追加」の走行中ジョブを商品ごとに覚える。表を描き直してもボタンに進行中を戻すため。
+  //   var で宣言する（使う側が前にあるため。const だと TDZ で全体が落ちる）。
+  var ADD_JOB = {};
   // GASを叩く処理の順番待ち（Apps Scriptは同一ユーザーで直列。並列に殴ると404/タイムアウトになる）
   // ★2026-08-22 実測メモ：🔄最新に更新は **アイドル時4.9秒／ページを開いた直後19.7秒**。
   //   GAS自体は明細数に関係なく2.4〜3.7秒、一覧の再描画は約1秒。差の約15秒は**待ち時間**。
@@ -15127,6 +15130,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-23', items: [
+      '⏳ <b>「まとめて追加」の進行中がボタンから消えるのを直しました</b>（本人「これ、進行中は何もでないの？」）。進み具合は<b>右下の「しごと」パネル</b>に出ていましたが、<b>②ボタン自体は表を描き直すと元の表示に戻って</b>いました（画像の照合などで表が再描画されるため）。走っているしごとを商品ごとに覚えておき、<b>描き直しても「② 追加中…」に戻す</b>ようにしました。押せないようにもしてあるので、二重に積むこともありません。',
+      '📦 <b>メルカリの追跡番号が別の取引のものになることがあったのを直しました</b>（本人「たまに間違ってる時がある」）。実物は <code>623526021580</code>／台帳は <code>624181129250</code>、届け先も千葉県が神奈川県になっていました。<br>取り込みは取引ページを<b>隠しウィンドウで開いて2.5秒後に本文を読む</b>作りですが、メルカリの取引画面は<b>画面を切り替えても中身が後から入れ替わる作り</b>なので、<b>読んだページが本当にその取引かを確かめていませんでした</b>。<br>取引画面には必ず「<b>商品ID m…</b>」が出るので、<b>それが出るまで待ってから読む</b>ようにしました（最大14秒・出なければ何も書きません）。さらに<b>確認済みの印</b>を付けて、印の無い行は<b>一度だけ読み直します</b>（これまでは番号が入っていると二度と読み直さず、間違いが永久に直りませんでした）。※<b>Tampermonkeyの入れ替えが必要</b>（v2.3.0）。',
       '🔎 <b>接続枠を「何が食っているか」が分かるようにしました</b>（本人「なぜこんなに消費するの？無駄に消費してる箇所あるんじゃない？」）。これまで<b>合計しか分からず</b>、原因を突き止めようがありませんでした。叩いたAPIごとに回数を数えて、<b>枠の表示にマウスを乗せると「今日の内訳（多い順）」</b>が出ます。<br>例：<code>product/get_item_base_info 1,240回</code> / <code>media_space/upload_image 830回</code> / <code>Supabase書き(listings) 410回</code> のように、<b>どの処理が食っているかが名前で見えます</b>。数字が出れば「これは減らせる」「これは必要」の判断ができます。内訳は日付が変わると自動でリセットされます。',
       '🚧 <b>同期中に「⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です」と出て操作できなくなるのを直しました</b>（本人指摘）。設定は入っているのにこう言われるのは、<b>その出品の shop_id が取れなかった</b>ときです。<br>🔄最新に更新（ライブ取得）は一覧の行を作り直しますが、その行の shop_id は<b>取得中・取得直後は空になることがあり</b>、そのタイミングで✎編集から明細を足そうとすると弾かれていました。<br>①<b>取得した行に shop_id が無ければ、いまメモリにある値を引き継ぐ</b> ②それでも無ければ<b>同じ国の別の行 → 選択中のアカウント → ⚙️設定</b>の順に拾う、の2段構えにしました。同期中でも操作が止まりません。',
       '🆕 <b>🔄で作られた行に「出品中／停止」の状態が入っていませんでした</b>。行の🔄（この1件だけ取り直す）は、<b>まだDBに無いカタログの行を新しく作る</b>ことがあるのですが、そのとき<b>状態(status)を書いていませんでした</b>。状態が空の行は「出品中」「停止/その他」の絞り込みから漏れます（実測：DB全6,475件のうち該当は1件。次の全体同期で自然に埋まるため、埋まるまでの間だけの問題）。🔄でも状態を書くようにしました。',
@@ -20249,7 +20254,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 <span class="smd-dim" style="font-size:10.5px">※出品価格も自動で計算し直します（手で直した価格も上書きされます）</span>
               </div>
               <div style="display:flex;gap:5px;font-size:10px;color:#5a6b8c;font-weight:700;padding:0 0 2px ${BW.no + BW.img + 10}px"><span style="flex:1 1 ${BW.nameMin}px;min-width:${BW.nameMin}px">明細名</span><span style="width:${BW.cost}px;flex:none;text-align:right">仕入¥</span><span style="width:${BW.wg}px;flex:none;text-align:right">重量g</span><span style="width:${BW.price}px;flex:none;text-align:right">出品価格</span><span style="width:${BW.stock}px;flex:none;text-align:right">在庫</span><span style="width:${BW.prof}px;flex:none;text-align:right">取れる利益</span><span style="width:${BW.st}px;flex:none">状態</span><span style="width:${BW.del}px;flex:none"></span></div>`
-              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700">② ${rows.length}件をまとめて追加</button>${(() => { const ni = rows.filter(r2 => !String(r2.image || '').trim()).length; return ni ? `<span style="color:#c0392b;font-weight:700;font-size:11px" title="画像が無いまま追加すると、Shopeeの仕様で他の明細の画像が借りられます（別商品の表紙が付きます）">⚠ 画像なし ${ni}件</span>` : ''; })()}<button class="ed-bulkimgchk smd-btn" style="font-size:11px;padding:6px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700;${rows.some(r => r.near || r.same) ? '' : 'display:none'}">🔍 画像でも確かめる（候補だけ）</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err || !(parseFloat(r.cost) > 0)) ? '' : 'display:none'}" title="読み取りに失敗した行と、仕入が取れなかった行（価格が空）をもう一度取りに行きます">↻ 取れなかった行だけ取り直す（${rows.filter(r => r.err || !(parseFloat(r.cost) > 0)).length}）</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
+              + rows.map(rowHtml).join('') + `<div style="margin-top:7px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button class="ed-bulkadd smd-btn" style="font-size:11.5px;padding:6px 16px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700"${(ADD_JOB[cc + '|' + itemId] ? ' disabled' : '')}>${ADD_JOB[cc + '|' + itemId] ? ('② 追加中… ' + ADD_JOB[cc + '|' + itemId].n + '件（右下の「しごと」で進み具合が見えます）') : ('② ' + rows.length + '件をまとめて追加')}</button>${(() => { const ni = rows.filter(r2 => !String(r2.image || '').trim()).length; return ni ? `<span style="color:#c0392b;font-weight:700;font-size:11px" title="画像が無いまま追加すると、Shopeeの仕様で他の明細の画像が借りられます（別商品の表紙が付きます）">⚠ 画像なし ${ni}件</span>` : ''; })()}<button class="ed-bulkimgchk smd-btn" style="font-size:11px;padding:6px 12px;border-color:#7b52c4;color:#7b52c4;font-weight:700;${rows.some(r => r.near || r.same) ? '' : 'display:none'}">🔍 画像でも確かめる（候補だけ）</button><button class="ed-bulkretry smd-btn" style="font-size:11px;padding:6px 12px;${rows.some(r => r.err || !(parseFloat(r.cost) > 0)) ? '' : 'display:none'}" title="読み取りに失敗した行と、仕入が取れなかった行（価格が空）をもう一度取りに行きます">↻ 取れなかった行だけ取り直す（${rows.filter(r => r.err || !(parseFloat(r.cost) > 0)).length}）</button><button class="ed-bulkstop2 smd-btn" style="font-size:11px;padding:6px 12px;display:none">■ 中断</button><span class="smd-dim" style="font-size:10.5px">※1件ずつ順番にShopeeへ登録します（途中で止めても登録済みの分は残ります）</span></div>`
             : '';
           bx.querySelectorAll('.eb-del').forEach(b4 => b4.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
@@ -20474,6 +20479,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             bx.querySelectorAll('.eb-name,.eb-cost,.eb-wg,.eb-price,.eb-stock').forEach(i9 => i9.addEventListener('input', save)); }
           draftSave();
           const ba = bx.querySelector('.ed-bulkadd');
+          // ★描き直しでボタンが新しくなっても、走っているジョブの進捗が入るように貼り直す
+          { const aj = ADD_JOB[cc + '|' + itemId];
+            if (aj && ba) {
+              JOB_MIRROR[aj.key] = (v) => {
+                const b2 = bx.querySelector('.ed-bulkadd'); if (!b2 || !b2.isConnected) return;
+                if (v.status === 'done' || v.status === 'error' || v.status === 'cancel') { try { delete ADD_JOB[cc + '|' + itemId]; } catch (_) {} b2.disabled = false; return; }
+                b2.innerHTML = '② 追加中 ' + jobBar(jobPct(v.pct), (v.step || ''), '#3b5bdb');
+              };
+              try { jobPollStart(); } catch (_) {}
+            } }
           if (ba) ba.addEventListener('click', async () => {
             if (!needOfficial()) return;
             const list = [...bx.querySelectorAll('.ed-brow')].map(rw => ({
@@ -20631,15 +20646,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                     + ((v.result && v.result.imgAdjust) ? '<div style="margin-top:5px;border:1px solid #f0c4bd;background:#fdecea;border-radius:6px;padding:6px 9px;color:#b3261e;font-size:11px;font-weight:700">⚠ ' + esc(v.result.imgAdjust) + '<div style="font-weight:400;margin-top:2px">この明細は<b>別の商品の表紙</b>が付いています。🖼 明細画像の入れ替えで差し替えてください。</div></div>' : '');
                   if (bw.length) { try { alert('⚠ 画像が取れなかった ' + bw.length + '件は【追加していません】。\n\n' + bw.slice(0, 12).map(x => '・' + x).join('\n') + (bw.length > 12 ? '\n…ほか' + (bw.length - 12) + '件' : '') + '\n\n他の明細の画像を勝手に当てることはしません。\n仕入元から画像を取り直してから、もう一度追加してください。'); } catch (_) {} }
                   markStale(); try { ledgerAddVars(list); } catch (_) {} 
+                  try { delete ADD_JOB[cc + '|' + itemId]; } catch (_) {}
                   try { draftClear(); rows = []; draw(); } catch (_) {}   // ★Shopeeに入ったので控えも一覧も片付ける
                   delete JOB_MIRROR[key2]; return; }
-                if (v.status === 'error' || v.status === 'cancel') { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + apiErrJa(v.error || '失敗')); delete JOB_MIRROR[key2]; return; }
+                if (v.status === 'error' || v.status === 'cancel') { try { delete ADD_JOB[cc + '|' + itemId]; } catch (_) {} if (ba && ba.isConnected) { ba.disabled = false; ba.innerHTML = v.status === 'cancel' ? '⏹ 止めました' : ('⚠ ' + apiErrJa(v.error || '失敗')); } delete JOB_MIRROR[key2]; return; }
                 ba.innerHTML = '② 追加中 ' + jobBar(jobPct(v.pct), (v.step || '') + jobEta(key2, v.pct || 0), '#3b5bdb');
               };
               jobPollStart();
               gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: sidCat, item_id: itemId, kv: kv2, job: key2 }, 600000))
                 .catch(e => jobRemoteFail(key2, e && e.message));
               ba.innerHTML = '② 追加中 ' + jobBar(0, 'しごとに積みました（この画面は閉じてOK）', '#3b5bdb');
+              // ★表が描き直されるとボタンが差し替わって「進行中」が消える（2026-08-23 本人指摘
+              //   「これ、進行中は何もでないの？」）。走っているジョブを商品ごとに覚えておき、
+              //   描き直しのたびにボタンへ復元する。
+              try { ADD_JOB[cc + '|' + itemId] = { key: key2, n: items2.length, at: Date.now() }; } catch (_) {}
               try { await srcMapAdd(list.map(x => ({ url: (rows[+x.el.dataset.i] || {}).url, cc, item_id: itemId, opt: x.name })).filter(e => e.url)); } catch (_) {}
               try { logAct('出品', '明細一括追加', repName || (pi.name || ''), cc + ' ' + items2.length + '件 → ' + items2.map(x => x.option + '(' + (rg.cur || '') + x.price + ')').join(' / ')); } catch (_) {}
               // ★控えを消すのは【Shopeeに入ってから】。ここで消すと、しごとが失敗した時に
