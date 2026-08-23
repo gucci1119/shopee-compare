@@ -1525,6 +1525,17 @@
   //   押さないと見えない形にはしない（開いていれば勝手に出る）。
   // GASの枠切れかどうか。Googleの文言は環境で変わるので、日本語・英語の両方を見る。
   const isGasQuotaErr = (e) => /urlfetch|回数が多すぎ|too many times|invoked too many|service invoked/i.test(String((e && e.message) || e || ''));
+  // 枠のリセットは【米国西海岸の0時】。夏時間なら日本時間16:00、冬時間(11〜3月)は17:00になる。
+  // 決め打ちにすると冬に1時間ずれて「もう戻ったはず」と誤解するので、その時々で計算する。
+  const ufResetJst = () => {
+    try {
+      const now = new Date();
+      const la = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+      const utc = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+      const offH = Math.round((utc - la) / 3600000);          // 夏時間=7 / 冬時間=8
+      return ((offH + 9) % 24) + ':00';                        // 日本時間に直す
+    } catch (_) { return '16:00'; }
+  };
   async function ufQuotaDraw() {
     const el = document.getElementById('uf-quota'); if (!el) return;
     if (!settings.openapiUrl) { el.textContent = ''; return; }
@@ -1553,9 +1564,9 @@
     el.title = 'GASからShopeeを叩ける回数は1日20,000回。今日 ' + used.toLocaleString() + '回 使いました。\n'
       + '・' + stop.toLocaleString() + '回を超えると背景の自動同期が止まり、残りは手動操作用に取ってあります\n'
       + '・使い切ると【出品・明細の追加や削除・画像】が止まります\n'
-      + '・リセットは毎日 16:00（日本時間）'
-      + (blocked ? '\n\n⛔ たったいまShopee側に断られました（この数字より実態が悪いことがあります）。\n16:00のリセットまで待つか、Tampermonkeyが入ったPCならブラウザ経由で書けます。' : '')
-      + (used >= cap ? '\n\n⛔ いまは使い切っています。16:00まで待ってください。' : '')
+      + '・リセットは毎日 ' + ufResetJst() + '（日本時間）'
+      + (blocked ? '\n\n⛔ たったいまShopee側に断られました（この数字より実態が悪いことがあります）。\n' + ufResetJst() + 'のリセットまで待つか、Tampermonkeyが入ったPCならブラウザ経由で書けます。' : '')
+      + (used >= cap ? '\n\n⛔ いまは使い切っています。' + ufResetJst() + 'まで待ってください。' : '')
       + topTxt;
   }
   async function gasCall(params, timeoutMs) {
@@ -15151,6 +15162,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🐞 <b>ブランド候補に同じものが何行も出るのを直しました</b>（本人指摘）。Shopeeの <code>get_brand_list</code> の <code>offset</code> は<b>単純な連番ではなく、応答の <code>next_offset</code> を渡すカーソル</b>でした。<code>offset += 100</code> でめくっていたため<b>同じページを何度も取って</b>いました（<code>Nintendo #1146819</code> が8行）。<code>next_offset</code> でめくる／brand_idで重複除去／名前順に並べる、の3点を直し、壊れた古いキャッシュを使わないようキャッシュキーも変えました。実測 682件・「nintendo」で1件。',
       '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
+      '🧮 <b>枠のカウンタに大穴が空いていたのを塞ぎました</b>。GASから外に出る <code>UrlFetchApp</code> は全部で22箇所ありますが、そのうち<b>16箇所が枠に計上されていませんでした</b>。つまりピルの数字は<b>実態より少なく</b>出ており、15,000回で背景同期を止める安全弁も効きません。特に大きいのは<b>他サイトの取得・画像のまとめ取得（1回あたり最大20枚）</b>と、<b>ニュースページ（開くたびにフィード22本＋タイトル翻訳を最大150回＝合計172回）</b>で、これらは丸ごと数えていませんでした。全箇所に計上を入れ、内訳の吹き出しにも「他サイト取得」「画像まとめ取得」「ニュース(フィード)」「ニュース(タイトル翻訳)」として出るようにしました。<br>あわせて<b>リセット時刻の表示</b>を直しました。枠のリセットは<b>米国西海岸の0時</b>を基準にしているので、日本時間では<b>夏は16:00・冬(11〜3月)は17:00</b>になります。ずっと16:00と決め打ちで出していたため、冬は1時間早く戻ると誤解する表示でした。その時々で計算して出すようにしました。<br><span class="smd-dim">※この2件は<b>Codex（別のAI）にコードレビューさせて見つかったもの</b>です。同じ設計を書いた側は同じ思い込みを持つので、別のAIに読ませると抜けが出てきます。</span>',
       '🇻🇳 <b>VNの「出品価格の上限」を取り違えていたのを直しました</b>（本人指摘）。VNには<b>別ものの上限が2つ</b>あります——①<b>出品価格の上限＝1,000,000 VND未満</b>（カタログ／明細の価格として100万以上は出せない）②<b>1注文の購入限度額＝5,000,000 VND</b>（2026-08-02に100万から引き上げ。買い手が1回にいくら決済できるかの話）。①に②の値を入れていたため、<b>出せない価格を警告なしで通していました</b>。実際にShopeeが <code>The max price of the product is over max limit</code> でまとめて弾きました（1,039,000 VND）。<br>あわせて、まとめて追加のときに<b>上限を超える明細を自動で外す</b>ようにしました。<b>1件でも混ざると add_model が丸ごと失敗して他の正常な明細まで登録できない</b>ためです。外した明細は名前と価格を出すので、仕入値かROIを下げれば出せます。',
       '⛔ <b>枠の表示は「実際に断られた事実」を優先します</b>。カウンタの数字は<b>数え漏れることがあり</b>（実測で12,329回ぶん漏れていた）、「残り12,000」と出ているのに書き込みが断られる、という食い違いが起きます。そこで<b>Shopee側に断られた瞬間を覚えて、表示を⛔「いま断られています（◯分前）」に落とす</b>ようにしました。数字だけ見て「まだ余裕がある」と誤解しないためです。30分経てば通常表示に戻ります。',
       '🔁 <b>枠が尽きても、この端末のブラウザ経由で書けるようにしました</b>。2026-08-22 に枠を使い切り、<b>出品も明細も価格も全部止まって半日潰れました</b>。でも<b>書く道は他にもあります</b>——Tampermonkey（ブリッジ）は<b>自分のIPで通信するのでGASの枠と無関係</b>です。<br><b>✎カタログ編集の保存</b>と<b>💾価格・在庫を保存</b>が枠切れで失敗したとき、<b>ライブ接続（🟢）なら自動でブラウザ経由に切り替えて書き直します</b>（「Shopee接続枠が尽きたので、この端末のブラウザ経由で保存しました」と表示）。ライブでない場合は<b>「16:00にリセット」まで含めて理由を出します</b>——黙って失敗しません。<br>※各国まとめ編集の価格・在庫は元からブリッジ経路を持っていたので、そちらは以前から止まりません。',
@@ -18950,6 +18962,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             return `<span class="ed-tierrow" data-oi="${oi}" style="display:inline-flex;align-items:center;gap:4px;width:calc(33% - 6px);min-width:214px"><span class="ed-tno" style="width:17px;flex:none;text-align:right;font-size:10.5px;color:#8a8f98;font-weight:700">${oi + 1}</span>${th}<input class="ed-tier" maxlength="30" data-ti="${ti}" data-oi="${oi}" value="${av(o.custom_value)}" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px" title="明細名を編集（30字まで）">${mv}</span>`;
           }).join('')}</div>`).join('');
       }
+      // ★画像が付いていない明細があると【明細を1件も足せない】（Shopeeは「全部に画像あり」か「全部なし」しか許さない）。
+      //   これまでは②を押して途中まで進んだ末にGASのエラーで落ちていて、どれが原因の明細か画面から分からなかった。
+      //   開いた時点で名指しして、その場で消せるようにする（2026-08-23 本人「画像なぜ入らない？…これでまた1から作業はありえない」）。
+      const noImgList = (() => {
+        const t0 = tiers[0]; if (!t0 || tiers.length !== 1) return [];
+        return (t0.value_list || []).map((o, oi) => {
+          const m = models.find(x => (x.tier_index || [])[0] === oi);
+          if (!m || String(m.img || '').trim()) return null;
+          return { id: m.id, ti: oi, n: o.custom_value || '（無名）' };
+        }).filter(Boolean);
+      })();
+      const noImgHtml = noImgList.length ? `<div id="ed-noimg" style="margin:10px 0 0;border:1px solid #f0c4bd;background:#fdecea;border-radius:8px;padding:10px 13px">
+        <div style="font-weight:700;color:#b3261e;font-size:13px">🚫 画像が付いていない明細が ${noImgList.length}件あります</div>
+        <div style="font-size:11.5px;color:#5f2120;margin-top:5px;line-height:1.6">Shopeeは「<b>全部に画像あり</b>」か「<b>全部なし</b>」しか許さないため、
+          <b>この${noImgList.length}件があるかぎり、明細を1件も足せません</b>（②が途中で失敗します）。<br>
+          画像を入れるか、この${noImgList.length}件を消せば追加できます。<b>画像がある明細はそのまま残ります。</b></div>
+        <div style="font-size:11.5px;margin-top:7px;display:flex;flex-wrap:wrap;gap:5px">${noImgList.map(x => `<span style="background:#fff;border:1px solid #f0c4bd;border-radius:11px;padding:2px 9px" title="${av(x.n)}">${x.ti + 1}番 ${nm(x.n, '160px')}</span>`).join('')}</div>
+        <button id="ed-noimgdel" class="smd-btn" style="margin-top:9px;font-size:12px;padding:5px 14px;background:#b3261e;border-color:#b3261e;color:#fff;font-weight:700">🗑 この ${noImgList.length}件を消す（順番は崩れません）</button>
+        <span class="smd-dim" style="font-size:10.5px;margin-left:8px">消したあと、もう一度②を押してください</span>
+      </div>` : '';
       // 明細（model）テーブル: 価格・SKU編集
       const optOf = (m) => { const t0 = tiers[0]; const oi = (m.tier_index || [])[0]; return (t0 && t0.value_list && t0.value_list[oi]) ? (t0.value_list[oi].custom_value || '') : ''; };
       // ★明細テーブルは Shopee の表示順（tier_index の並び）にそろえる。
@@ -19126,6 +19158,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           </div>`;
         })()}
         <div class="ed-dupimg"></div>
+        ${noImgHtml}
         ${tierHtml ? `<div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">明細名（バリエーション）<span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">名前は「保存」で反映／並び順は ◀▶ で入れ替えて「並び順を保存」（Shopeeの表示順になります）</span></div>${tierHtml}
           ${tiers.length === 1 ? `<div style="margin-top:6px"><button class="ed-ordersave smd-btn" style="font-size:11.5px;padding:4px 12px;border-color:#3b5bdb;color:#3b5bdb;font-weight:700" disabled>↕ 並び順を保存</button> <span class="ed-ordermsg smd-dim" style="font-size:10.5px"></span></div>` : ''}</div>` : ''}
         <div style="margin-top:14px"><div style="font-weight:700;color:#333;border-top:1px solid #eee;padding-top:12px">価格・在庫・SKU（明細 ${models.length}件）<span class="ed-spread" style="font-weight:400;font-size:11px;margin-left:8px"></span></div>
@@ -19747,6 +19780,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           } catch (e) { cg.disabled = false; cg.textContent = '🧹 中身のない明細を掃除する'; alert('掃除に失敗: ' + e.message); }
         }); }
       // ---- 明細（バリエ）の削除：Shopeeでモデル削除＋番号の詰め直しまで実行 ----
+      // ---- 🚫 画像が付いていない明細をまとめて消す（詰め直し方式・順番は崩れない） ----
+      { const nb = body.querySelector('#ed-noimgdel');
+        if (nb) nb.addEventListener('click', async () => {
+          if (!needOfficial()) return;
+          if (models.length - noImgList.length < 1) { alert('全部は消せません（最低1件は残してください）。先に画像を入れてください'); return; }
+          const gwN = await guardWriteCountries([cc]); if (!gwN.ok) { alert(gwN.msg); return; }
+          if (!confirm('書込先: ' + gwN.summary + '\n\n画像が付いていない明細 ' + noImgList.length + '件をShopeeから削除します。\n'
+            + noImgList.slice(0, 10).map(x => '・' + (x.ti + 1) + '番「' + x.n + '」').join('\n')
+            + (noImgList.length > 10 ? '\n…ほか' + (noImgList.length - 10) + '件' : '')
+            + '\n\n画像がある明細はそのまま残り、順番も崩れません。\n'
+            + '※この作りのため【Shopee側の明細ごとの販売数だけ1つずれます】（ポータルの表示は補正します）。\n'
+            + '\n元に戻せません。よろしいですか？')) return;
+          const org = nb.textContent; nb.disabled = true; nb.textContent = '⏳ 削除中…';
+          try {
+            const allTi = models.map(m => ({ id: m.id, ti: (m.tier_index || [])[0] || 0, n: '' })).sort((x, y) => x.ti - y.ti);
+            try { await soldBaseSnapshot(cc, itemId, allTi, noImgList.map(x => String(x.id))); } catch (_) {}
+            const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: noImgList.map(x => x.id).join(',') }, 300000);
+            if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
+            try { logAct('出品', '明細削除(画像なし)', repName || '', cc + ' ' + itemId + ' ' + noImgList.length + '件'); } catch (_) {}
+            markStale();
+            try { openCatalogEditor._cache.delete(ck); openCatalogEditor._infl.delete(ck); } catch (_) {}
+            toast('🗑 画像が無い ' + noImgList.length + '件を消しました（残り ' + (r.remain != null ? r.remain + '件' : '—') + '）。開き直します');
+            try { await refreshOneListing(cc, itemId, sidCat); } catch (_) {}
+            close(); setTimeout(() => openCatalogEditor(cc, host, itemId, repName), 250);
+          } catch (e) { nb.disabled = false; nb.textContent = org; alert('削除に失敗: ' + apiErrJa((e && e.message) || e)); }
+        }); }
       body.querySelectorAll('.ed-mdel').forEach(btn => btn.addEventListener('click', async () => {
         // ★2026-08-15：1件消したつもりが【3件】消えた（隣が巻き添え＋1件がゴースト化）。
         //   原因候補（update_tier_variation に価格・在庫を載せていなかった）は直したが、
@@ -21586,7 +21645,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             }
           }
           msg.style.color = '#d93025';
-          msg.textContent = '✗ ' + apiErrJa(e.message) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。16:00にリセット。Tampermonkeyが入ったPCならブラウザ経由で書けます）' : '');
+          msg.textContent = '✗ ' + apiErrJa(e.message) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。' + ufResetJst() + 'にリセット。Tampermonkeyが入ったPCならブラウザ経由で書けます）' : '');
           btn.disabled = false; btn.textContent = 'Shopeeに保存';
         }
       });
@@ -29011,7 +29070,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             }
           }
           msg.style.color = '#d93025';
-          msg.textContent = '✗ ' + (e.message || e) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。16:00にリセット）' : '');
+          msg.textContent = '✗ ' + (e.message || e) + (isGasQuotaErr(e) ? '（Shopee接続枠を使い切っています。' + ufResetJst() + 'にリセット）' : '');
           btn.disabled = false; btn.textContent = '💾 価格・在庫を保存';
         }
         return;

@@ -364,6 +364,7 @@ function doGet(e) {
         if (!us2.length) throw new Error('URLが空です');
         if (us2.length > 20) throw new Error('一度に20件までです');
         var UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+        ufBump_(us2.length, 'fetch_metas(他サイト取得)');
         var rs2 = UrlFetchApp.fetchAll(us2.map(function (u) { return { url: u, muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': UA } }; }));
         var arr2 = rs2.map(function (r) {
           try {
@@ -405,6 +406,7 @@ function doGet(e) {
       try {
         var furl = String(p.url || '').trim();
         if (!/^https?:\/\//i.test(furl)) throw new Error('URLが不正です');
+        ufBump_(1, 'fetch_meta(単発)');
         var fr = UrlFetchApp.fetch(furl, { muteHttpExceptions: true, followRedirects: true,
           headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36' } });
         var html = fr.getContentText();
@@ -474,6 +476,7 @@ function doGet(e) {
       try {
         var fiu = String(p.url || '');
         if (!/^https?:\/\//.test(fiu)) throw new Error('URLが不正です');
+        ufBump_(1, 'fetch_image(単発)');
         var fr = UrlFetchApp.fetch(fiu, { muteHttpExceptions: true, followRedirects: true });
         if (fr.getResponseCode() >= 400) throw new Error('HTTP ' + fr.getResponseCode());
         var fb = fr.getBlob();
@@ -493,6 +496,7 @@ function doGet(e) {
         if (!us.length) throw new Error('URLが空です');
         if (us.length > 20) throw new Error('一度に20枚までです');
         var reqs = us.map(function (u) { return { url: u, muteHttpExceptions: true, followRedirects: true }; });
+        ufBump_(reqs.length, 'fetch_images(画像まとめ取得)');
         var rs = UrlFetchApp.fetchAll(reqs);
         var arr = rs.map(function (r) {
           try {
@@ -956,6 +960,7 @@ function exchangeToken_(code, who) {
   var payload = { code: code, partner_id: partnerId_() };
   if (who.shop_id) payload.shop_id = who.shop_id;
   if (who.main_account_id) payload.main_account_id = who.main_account_id;
+  ufBump_(1, 'auth/token(取得)');
   var body = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) }).getContentText();
   var j = JSON.parse(body);
   if (j.error && j.error !== '') throw new Error('token取得失敗: ' + j.error + ' ' + (j.message || '') + ' / ' + body.slice(0, 300));
@@ -987,6 +992,7 @@ function exchangeToken_(code, who) {
 function getShopsByPartner_() {
   var path = '/api/v2/public/get_shops_by_partner', ts = now_();
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts) + '&page_size=100&page_no=1';
+  ufBump_(1, 'auth/get_shops_by_partner');
   var j = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText());
   if (j.error && j.error !== '') throw new Error('get_shops_by_partner: ' + j.error + ' ' + (j.message || ''));
   return (j.authed_shop_list || []).map(function (s) { return { shop_id: s.shop_id, region: s.region }; });
@@ -1013,6 +1019,7 @@ function refreshOne_(refreshToken, who) {
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
   var payload = { refresh_token: refreshToken, partner_id: partnerId_() };
   if (who.merchant_id) payload.merchant_id = who.merchant_id; else payload.shop_id = who.shop_id;
+  ufBump_(1, 'auth/token(更新)');
   var j = JSON.parse(UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(payload) }).getContentText());
   if (j.error && j.error !== '') throw new Error('refresh失敗 ' + JSON.stringify(who) + ': ' + j.error + ' ' + (j.message || ''));
   return { access: j.access_token, refresh: j.refresh_token || refreshToken, expire: now_() + (j.expire_in || 14400) - 300 };
@@ -1238,6 +1245,7 @@ function md5Hex_(bytes) {
 function setItemVideo_(shopId, itemId, url, jobKey) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!url) throw new Error('動画URLが空です');
+  ufBump_(1, 'video(動画取得)');
   var res0 = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
   if (res0.getResponseCode() >= 400) throw new Error('動画を取得できません HTTP ' + res0.getResponseCode());
   var blob = res0.getBlob(), bytes = blob.getBytes(), size = bytes.length;
@@ -1256,6 +1264,7 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
     var pblob = Utilities.newBlob(part, 'application/octet-stream', 'part' + i);
     var ts = now_(), path = '/api/v2/media_space/upload_video_part';
     var purl = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+    ufBump_(1, 'video(アップロード)');
     var pr = UrlFetchApp.fetch(purl, { method: 'post', muteHttpExceptions: true,
       payload: { video_upload_id: vid, part_seq: String(i), content_md5: md5Hex_(part), part_content: pblob } });
     var pj = {}; try { pj = JSON.parse(pr.getContentText()); } catch (e) {}
@@ -1402,6 +1411,7 @@ function zipVariationImages_(shopId, itemId, cc, jobKey, nos) {
   //   GASは元々Supabaseへ書き込んでいる＝UrlFetchAppの権限だけで完結するのでこちらが確実。
   var sbUrl = cfg_('SB_URL'), sbKey = cfg_('SB_SERVICE_KEY');
   var path = 'zips/' + itemId + '_' + Date.now() + '_' + blobs.length + '.zip';
+  ufBump_(1, 'Supabase書き(listing-imgs)');
   var up = UrlFetchApp.fetch(sbUrl + '/storage/v1/object/listing-imgs/' + path, {
     method: 'post', contentType: 'application/zip', payload: zip.getBytes(), muteHttpExceptions: true,
     headers: { apikey: sbKey, Authorization: 'Bearer ' + sbKey, 'x-upsert': 'true' }
@@ -3462,6 +3472,7 @@ function fetchTitles_(hw) {
     + ' }';
   var url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(q);
   // ★User-Agent を入れないと弾かれる。連絡先を入れるのがWikimediaの作法。
+  ufBump_(1, 'Wikidata(母数マスタ)');
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'Accept': 'application/sparql-results+json', 'User-Agent': 'shopee-os/1.0 (gcsonlinestore631@gmail.com)' } });
   if (res.getResponseCode() !== 200) throw new Error('Wikidata HTTP ' + res.getResponseCode() + '（混んでいる時は少し待って再実行）');
   var bind = ((JSON.parse(res.getContentText()).results) || {}).bindings || [];
@@ -3512,6 +3523,7 @@ function fetchTitles_(hw) {
 var _sgDiag = null;   // 直近の1件の様子（なぜ取れないかを画面に返すため）
 function surugaFindId_(kw) {
   var url = 'https://www.suruga-ya.jp/search?search_word=' + encodeURIComponent(String(kw || '').slice(0, 80));
+  ufBump_(1, '駿河屋(母数マスタ)');
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true,
     headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'ja,en;q=0.8' } });
@@ -4077,9 +4089,11 @@ function fetchNews_(force) {
   if (!force) { var hit = cache.get('news_v2'); if (hit) return JSON.parse(hit); }
   var items = [], resps = null;
   var opt = function (u) { return { url: u, muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ShopeeOS/1.0; +news)' } }; };
+  ufBump_(NEWS_FEEDS.length, 'ニュース(フィード)');
   try { resps = UrlFetchApp.fetchAll(NEWS_FEEDS.map(function (f) { return opt(f.u); })); } catch (e) { resps = null; } // 並列取得（速い）。失敗時は逐次へ
   NEWS_FEEDS.forEach(function (f, i) {
     try {
+      if (!resps) ufBump_(1, 'ニュース(フィード単発)');
       var res = resps ? resps[i] : UrlFetchApp.fetch(f.u, opt(f.u));
       if (!res || res.getResponseCode() >= 300) return;
       parseFeed_(res.getContentText(), f).forEach(function (it) { items.push(it); });
@@ -4103,6 +4117,7 @@ function translateToJa_(texts) {
   if (!texts.length) return out;
   try {
     var reqs = texts.map(function (t) { return { url: 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t&q=' + encodeURIComponent(String(t).slice(0, 400)), muteHttpExceptions: true }; });
+    ufBump_(reqs.length, 'ニュース(タイトル翻訳)');
     var resps = UrlFetchApp.fetchAll(reqs);
     resps.forEach(function (res, i) {
       try {
