@@ -2931,15 +2931,18 @@
   //   ★値は上のピル（ufQuotaDraw）が控えたものを読むだけ。ここで uf_status を叩かない
   //     （枠を見るために枠を食うことになる）。
   function jobQuotaChip() {
-    const r = window.__ufLast; if (!r || !r.ok) return '';
     // 走っている最中は5分待たずに取り直す。uf_status は Properties を読むだけで【枠を消費しない】ので安い。
+    // ★間隔は「取れた時刻」ではなく【試した時刻】で測る。取れた時だけ記録すると、
+    //   失敗が続いたときに間隔が効かず叩き続ける。また、まだ一度も取れていない時
+    //   （読み込み直後・前の取得が詰まっていた時）にも取りに行けるよう、控えの有無より先に予約する。
     try {
       if (JOBS && (JOBS.list || []).some(j => j.state === 'run' || j.state === 'wait')
-        && Date.now() - (window.__ufLastAt || 0) > 30000 && !window.__ufBusy) {
-        window.__ufBusy = 1;
+        && Date.now() - (window.__ufTryAt || 0) > 30000 && !window.__ufBusy) {
+        window.__ufBusy = 1; window.__ufTryAt = Date.now();
         Promise.resolve(ufQuotaDraw()).catch(() => {}).then(() => { window.__ufBusy = 0; try { jobRender(); } catch (_) {} });
       }
     } catch (_) {}
+    const r = window.__ufLast; if (!r || !r.ok) return '';
     const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
     const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
@@ -4916,7 +4919,6 @@
     "🗑 削除": "🗑 Delete",
     "✗ このままだとShopeeに弾かれます。": "✗ Shopee will reject this as-is.",
     "すでにこのカタログにある明細が原因です。次のどれかで直ります:": "An existing variation in this catalog is the cause. Either of these fixes it:",
-    "残りの接続枠。使い切ると画像・明細の追加が止まります": "Remaining Shopee API budget. When it runs out, images and variations stop being added",
     "消したあと、もう一度②を押してください": "After deleting, press ② again",
     "全部は消せません（最低1件は残してください）。先に画像を入れてください": "You cannot delete them all (keep at least one). Add an image first",
     "✍️出品作成": "✍️ Create listing",
@@ -5394,6 +5396,9 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    [/^([\u26a0\u26d4]?)枠 ([\d,]+)$/, '$1Budget $2'],
+    [/^残りの接続枠。使い切ると画像・明細の追加が止まります（(.+) 使用）$/,
+      'Remaining Shopee API budget — when it runs out, images and variations stop being added ($1 used)'],
     [/^・【元からある明細】(.+)　← これを消すか値段を直す$/, '・[existing variation] $1  ← delete it or fix its price'],
     [/^・追加する行の値段を (.+) 以上にする$/, '・Make the added rows at least $1'],
     // 🚫画像が無い明細の警告（カタログ編集）
