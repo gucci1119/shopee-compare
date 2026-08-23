@@ -15122,6 +15122,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-23', items: [
+      '🚧 <b>同期中に「⚙️OpenAPI設定（URL＋WRITE_TOKEN）が必要です」と出て操作できなくなるのを直しました</b>（本人指摘）。設定は入っているのにこう言われるのは、<b>その出品の shop_id が取れなかった</b>ときです。<br>🔄最新に更新（ライブ取得）は一覧の行を作り直しますが、その行の shop_id は<b>取得中・取得直後は空になることがあり</b>、そのタイミングで✎編集から明細を足そうとすると弾かれていました。<br>①<b>取得した行に shop_id が無ければ、いまメモリにある値を引き継ぐ</b> ②それでも無ければ<b>同じ国の別の行 → 選択中のアカウント → ⚙️設定</b>の順に拾う、の2段構えにしました。同期中でも操作が止まりません。',
       '🆕 <b>🔄で作られた行に「出品中／停止」の状態が入っていませんでした</b>。行の🔄（この1件だけ取り直す）は、<b>まだDBに無いカタログの行を新しく作る</b>ことがあるのですが、そのとき<b>状態(status)を書いていませんでした</b>。状態が空の行は「出品中」「停止/その他」の絞り込みから漏れます（実測：DB全6,475件のうち該当は1件。次の全体同期で自然に埋まるため、埋まるまでの間だけの問題）。🔄でも状態を書くようにしました。',
       '⏱ <b>「🔄最新に更新が遅い」の原因を突き止めて直しました</b>（本人指摘）。実測はこうでした——<b>アイドル時4.9秒／ページを開いた直後19.7秒</b>。GASの読み取り自体は<b>明細1件でも100件でも2.4〜3.7秒</b>、一覧の再描画は<b>約1秒</b>。<b>差の約15秒は順番待ち</b>でした。<br>犯人は<b>一覧を開いた瞬間に投げていた「7か国ぶんのカテゴリ名取得」</b>です。Apps Scriptは同じ利用者の要求を<b>1件ずつしか処理しない</b>ので、この7本（1本3秒前後）が列を埋め、その後ろで人の操作が待たされていました。<br><b>今見ている国のぶんだけ</b>取りに行くようにしました（国を絞っていれば1本）。あわせて<b>3秒待ってから・1国ずつ順に</b>取るので、間に人の操作が割り込めます。カテゴリ名は「#101087 が何のカテゴリか」を出すためだけのものなので、急ぐ必要がありません。',
       '⛽ <b>同じ画像を何度も上げ直すのをやめました（接続枠の節約）</b>。GASの接続枠を<b>最も食っていたのは画像</b>でした——1枚につき<b>取得1回＋アップロード1回＝2回</b>。7か国に同じ商品を出すと<b>同じ画像を国の数だけ</b>やり直しており、100明細×7か国なら最大1,400回になります。<br><b>URL → image_id を24時間おぼえる</b>ようにしました。2回目以降は<b>接続枠をまったく使いません</b>。効かせたのは3か所（1枚ずつ上げる経路／明細の一括追加／明細画像の一括反映）。<br>教訓：<b>枠を食う処理は「同じことを何度やっているか」をまず数える</b>。速度ではなく回数が枠を決めます。',
@@ -18565,6 +18566,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const noSid = rows.filter(r => !r.shop_id).map(r => { const o = Object.assign({}, r); delete o.shop_id; return o; });
           for (let i = 0; i < withSid.length; i += 500) await sbUpsert('listings', withSid.slice(i, i + 500));
           for (let i = 0; i < noSid.length; i += 500) await sbUpsert('listings', noSid.slice(i, i + 500)); }
+        // ★取得した行に shop_id が無い時は、いまメモリにある値を引き継ぐ。
+        //   引き継がないと、同期の最中・直後に✎編集などが「⚙️OpenAPI設定が必要です」で弾かれる
+        //   （2026-08-23 実機で発生）。DBへの書き込み側は既に同じ配慮をしている。
+        { const prev = new Map((lst.byCc[region.cc] || []).map(x => [String(x.item_id), x.shop_id]));
+          const fallback = (lst.byCc[region.cc] || []).find(x => x.shop_id);
+          rows.forEach(r => { if (!r.shop_id) r.shop_id = prev.get(String(r.item_id)) || (fallback && fallback.shop_id) || activeShopByCc[region.cc] || null; }); }
         lst.byCc[region.cc] = rows; drawListingStatus();
       } catch (e) { lst.note = region.cc + ' 失敗: ' + e.message; drawListingStatus(); }
     }
@@ -22111,10 +22118,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // ===== 一括編集の公式API優先ヘルパー（shop_id判明+writeToken→公式API、無ければブリッジに自動フォールバック） =====
   // ★item_idは【DBは数値・画面のdata属性は文字列】。=== で比べると当たらず「shop_idが分かりません」になる
   //   （2026-08-15 実際に発生。🗑削除・複製などが動かなかった）。必ず String() で揃えて比べる。
+  // ★shop_id が取れないと、公式APIを使う操作が全部「⚙️OpenAPI設定が必要です」で止まる。
+  //   🔄最新に更新（ライブ取得）は行を作り直すが、その行の shop_id は
+  //   `activeShopByCc[cc] || null` なので、**取得中・取得直後は null になることがある**
+  //   （2026-08-23 実機で発生：同期中に✎編集から明細を追加しようとして弾かれた）。
+  //   そうなっても止まらないよう、順に当たって拾う。
   function shopIdOfListing(cc, itemId) {
     const t = String(itemId);
     const row = ((lst.byCc && lst.byCc[cc]) || []).find(x => String(x.item_id) === t);
-    return row && row.shop_id ? row.shop_id : null;
+    if (row && row.shop_id) return row.shop_id;
+    // ① 同じ国の他の行（同じ店なので shop_id は共通）
+    const sib = ((lst.byCc && lst.byCc[cc]) || []).find(x => x.shop_id);
+    if (sib && sib.shop_id) return sib.shop_id;
+    // ② いま選んでいるアカウントの店
+    try { if (activeShopByCc && activeShopByCc[cc]) return activeShopByCc[cc]; } catch (_) { }
+    // ③ ⚙️設定に手で入れてある店
+    try { const v = (settings.shopIds || {})[cc]; if (v) return String(v); } catch (_) { }
+    return null;
   }
   // 1商品だけをライブ最新化（全件取り直さず、公式API get_model_list でその商品の在庫・価格だけ取り直す）
   // ※旧版。同名の関数が2つあり、後から定義した方(下)に上書きされていて【こちらは呼ばれていなかった】。
