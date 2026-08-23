@@ -13969,13 +13969,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     };
     // キャンセルの段階：SLS+半額保証の対象は「日本を出た後」のみ。発送前=損失なし/日本国内=商品戻る(保証外)。
     const STAGES = ['', '発送前', '日本国内', '日本を出た後'];
-    const inferStage = raw => {
+    // ★理由の文だけで推定していたため、【理由が空の888件】が全部「段階不明」で残っていた（実測 2026-08-23）。
+    //   追跡番号は確実な手掛かり：**番号が無い＝発送手配すらしていない＝発送前**（＝損失ゼロ）と言い切れる。
+    //   逆に番号がある場合は、日本国内か出国後かまでは分からないので**推定しない**（本人がボタンで決める）。
+    //   実測：キャンセル1,050件のうち追跡番号ありは210件だけ。残り840件は自動で「発送前」に確定できる。
+    const inferStage = (raw, o) => {
       const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
       if (/Unpaid Order/i.test(t)) return '発送前';       // 未払い自動キャンセル=発送前
       if (/Failed Delivery/i.test(t)) return '日本を出た後'; // 配送失敗=出国後に届かず
+      if (o && !String(o.tracking || '').trim()) return '発送前';   // 追跡番号が無い＝荷物は動いていない
       return '';
     };
-    const effStage = (o, iss) => (iss.stage || inferStage(o.cancel_reason)); // 手動設定優先、無ければ理由から推定
+    const effStage = (o, iss) => (iss.stage || inferStage(o.cancel_reason, o)); // 手動設定優先、無ければ推定
     const slsEligible = (o, iss) => effStage(o, iss) === '日本を出た後';     // 半額保証の対象
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
     const cancelKeys = new Set(cancelled.map(o => o.cc + ':' + o.sn));
@@ -14029,13 +14034,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let cxlHidden = 0;
     // ── 列でしぼり込む（種別／段階／再出品／補償／国／文字）。renderReturns._f に保持
     const F = renderReturns._f || (renderReturns._f = { kind: '', stage: '', restock: '', comp: '', cc: '', q: '' });
-    const stageOfRow = o => (issueMap.get(o.cc + ':' + o.sn) || {}).stage || '';
+    // ★絞り込みも【画面に出ている段階】と同じもので判定する（手動設定＋推定）。
+    //   手動設定だけ見ていたため、推定で「発送前」と出ている行が「段階なし」扱いになっていた。
+    const stageOfRow = o => effStage(o, issueMap.get(o.cc + ':' + o.sn) || {});
     const kindOfRow = o => o._comp ? '補償' : o._return ? '返品' : ((issueMap.get(o.cc + ':' + o.sn) || {}).kind || (o.status === '手動追加' ? '返品' : 'キャンセル'));
     const restockOfRow = o => (issueMap.get(o.cc + ':' + o.sn) || {}).restock || '';
     const textOfRow = o => [o.sn, o.buyer, ((o.items || [])[0] || {}).name, (issueMap.get(o.cc + ':' + o.sn) || {}).reason].join(' ').toLowerCase();
     const applyF = (arr) => arr.filter(o =>
       (!F.kind || kindOfRow(o) === F.kind)
-      && (!F.stage || stageOfRow(o) === F.stage)
+      && (!F.stage || (F.stage === '__todo' ? !stageOfRow(o) : stageOfRow(o) === F.stage))
       && (!F.restock || restockOfRow(o) === F.restock)
       && (!F.comp || (F.comp === 'yes' ? isCompRow(o) : !isCompRow(o)))
       && (!F.cc || o.cc === F.cc)
@@ -14137,6 +14144,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ★2026-08-19 実測で 0.5 → 0.57 に更新。実際に補償が入った41件で、返金額に対する補償の**中央値が57%**だった
     //   （最多は Non-Receipt の "Compensation for non-receipt parcel - Add:KRJP" 21件）
     const COMP_RATE = 0.57, COMP_OLD_DAYS = 120; // 見込み補償≈返金の57%・120日超は特に遅延
+    // ⚖ 段階が決まっていないキャンセルを、開いた瞬間に数で出す。
+    //   段階を決めないと【日本を出た後＝仕入額まるごと損失】が損益に一切乗らないが、
+    //   これまで画面のどこにも「決まっていない件数」が出ていなかった（実測：段階の記録は0件だった）。
+    //   追跡番号が無い分は自動で「発送前（損失ゼロ）」と分かるので、本当に判断が要る数だけを見せる。
+    const stageTodo = (() => {
+      const und = rows.filter(o => {
+        const iss = issueMap.get(o.cc + ':' + o.sn) || {};
+        return !iss.stage && !inferStage(o.cancel_reason, o);
+      });
+      if (!und.length) return '';
+      const auto = rows.filter(o => {
+        const iss = issueMap.get(o.cc + ':' + o.sn) || {};
+        return !iss.stage && inferStage(o.cancel_reason, o) === '発送前';
+      }).length;
+      return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #e8710a;padding:10px 14px;background:#fffaf0">
+        <div style="font-weight:700;font-size:13.5px;color:#a15c00">⚖ 段階が決まっていないキャンセルが ${und.length}件あります</div>
+        <div style="font-size:11.5px;color:#6b4a00;margin-top:5px;line-height:1.65">
+          キャンセルは集計から外れるので、<b>段階を決めるまで損失は「0円」として扱われます</b>。<br>
+          <b>日本を出た後</b>＝荷物は戻らないので<b>仕入額がまるごと損失</b>（SLS+半額保証の対象）。
+          <b>発送前・日本国内</b>＝商品が手元に残るので損失なし。<br>
+          <span class="smd-dim">※追跡番号が無い ${auto}件は「発送前（損失なし）」と分かるので、ここには数えていません。判断が要るのはこの ${und.length}件だけです。</span>
+        </div>
+        <button class="smd-btn" id="rf-stagetodo" style="margin-top:8px;font-size:12px;padding:5px 14px;border-color:#e8710a;color:#a15c00;font-weight:700">この ${und.length}件だけ表示する</button>
+      </div>`;
+    })();
     const compCard = (() => {
       // SLS+補償の対象は「日本を出た後」の返金のみ（発送前=損失なし/日本国内=商品戻るので保証外）
       const anyRefund = rows.map(o => ({ o, iss: issueMap.get(o.cc + ':' + o.sn) || {} })).filter(x => (x.iss.refund_jpy || 0) > 0);
@@ -14301,10 +14333,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (rtab === 'formal'
         ? formalBlock
         : rtab === 'refund'
-          ? (analysisCard + compCard + adjCard + addTool + lostToggle + cxlToggle + filterBar + tableBlock)
+          ? (stageTodo + analysisCard + compCard + adjCard + addTool + lostToggle + cxlToggle + filterBar + tableBlock)
           : (addTool + filterBar + tableBlock));
     { const bind = (id, key) => { const el = document.getElementById(id); if (!el) return;
         el.addEventListener('change', () => { renderReturns._f[key] = el.value; renderReturns._page = 1; renderReturns(); }); };
+      { const tb = document.getElementById('rf-stagetodo');
+        if (tb) tb.addEventListener('click', () => { F.stage = '__todo'; renderReturns(); }); }
       bind('rf-kind', 'kind'); bind('rf-stage', 'stage'); bind('rf-restock', 'restock'); bind('rf-comp', 'comp'); bind('rf-cc', 'cc');
       { const so = document.getElementById('rf-sort'); if (so) so.addEventListener('change', () => { renderReturns._sort = so.value; renderReturns._page = 1; renderReturns(); }); }
       const q = document.getElementById('rf-q');
