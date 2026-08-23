@@ -2733,7 +2733,11 @@ function syncAll() {
   // ★日次集計はDBのorders表から計算＝Shopeeの二重取得を解消（旧: syncDailyStatsForShop_ が毎時Shopeeを再取得していた。
   //   orders表は syncOrdersAll が公式APIで同期済みなので、そこから cc×日 で units/sales/orders を集計するだけ＝Shopee呼び出しゼロ）。
   var since = new Date((now_() - 4 * 86400) * 1000).toISOString().slice(0, 10);
-  var orders = sbSelect_('orders', 'select=cc,total,order_date,items,tab&order_date=gte.' + since + '&limit=10000');
+  // ★PostgRESTは1リクエスト1000件が上限。`limit=10000` と書いても**1000件しか返らない**のに
+  //   その部分集合で daily_stats を作り直して上書きしていた＝注文が増えた日から
+  //   売上・注文数・点数が黙って少なくなる（実測 2026-08-24 時点は直近4日で68件なのでまだ無害）。
+  //   ページングする全件版を使う。Codexのレビューで発覚。
+  var orders = sbSelectAll_('orders', 'select=cc,total,order_date,items,tab&order_date=gte.' + since);
   var byKey = {};
   (orders || []).forEach(function (o) {
     if (o.tab === 600) return; // キャンセル除外
@@ -2788,6 +2792,10 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   //   読めなかった分は trk=null のまま upsert され【既に入っていた追跡番号を消していた】。
   //   注文が最も多いBRで顕著だった（2026-08-11：同期のたびに追跡なしが100→173件へ増加）。
   //   → 番号が入っている行だけを、1000件ずつページングして全部読む。
+  // ★ここが失敗すると haveTrk が空/欠けたままになり、下の upsert が **tracking:null を書いて
+  //   既にある追跡番号を消す**（＝DBの障害が「番号の消去」に化ける。2026-08-11に実際に100→173件へ悪化した現象）。
+  //   読めなかった時は **tracking の列自体を送らない**（trkOk=false）。消すより古いまま残す方が安全。
+  var trkOk = true;
   try {
     for (var _o = 0; _o < 40; _o++) {
       var extr = sbSelect_('orders', 'select=sn,tracking&shop_id=eq.' + encodeURIComponent(String(tok.shop_id))
@@ -2795,8 +2803,9 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
       if (!extr || !extr.length) break;
       extr.forEach(function (r) { if (r.tracking) haveTrk[r.sn] = r.tracking; });
       if (extr.length < 1000) break;
+      if (_o === 39) { trkOk = false; Logger.log('⚠ 追跡番号の既存値が40ページで読み切れなかった＝tracking列は触らない'); }
     }
-  } catch (_) {}
+  } catch (e) { trkOk = false; Logger.log('⚠ 追跡番号の既存値を読めませんでした＝tracking列は触らない: ' + String(e).slice(0, 120)); }
   for (var i = 0; i < sns.length; i += 50) {
     var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
     var _ol = ((jd.response || {}).order_list) || [];
@@ -2838,6 +2847,9 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
   try { saveCustomers_(cc, tok.shop_id, detailsAll); } catch (eCu) { Logger.log('customers skip ' + cc + ': ' + eCu); }
   if (rows.length) {
     // orders表に cancel_reason / packages 列が未追加でも同期が壊れないよう、列エラー時はその項目を外して再試行（列を足していない環境でも安全）
+    // ★既存の追跡番号を読めていない時は、tracking 列を送らない（消さない）。
+    //   送ってしまうと null で上書きして、入っていた番号が消える。
+    if (!trkOk) rows.forEach(function (r) { delete r.tracking; });
     try { sbUpsert_('orders', rows, 'cc,sn'); }
     catch (e) {
       var es = String(e), stripped = false;
@@ -3047,7 +3059,10 @@ function backfillOrderTotals() {
   for (var i = 0; i < sns.length; i += 100) {                       // in句が長くなりすぎないよう100件ずつ
     var q = sns.slice(i, i + 100).map(function (s) { return '"' + s + '"'; }).join(',');
     var rows = [];
-    try { rows = sbSelect_('income', 'select=sn,buyer_paid&buyer_paid=not.is.null&sn=in.(' + q + ')') || []; } catch (e) { }
+    // ★ここを握り潰すと「取得に失敗した」が「入金が無い」と同じ扱いになり、
+    //   埋まるはずの売上が黙って埋まらないまま成功扱いになる（Codexのレビューで発覚）。
+    try { rows = sbSelect_('income', 'select=sn,buyer_paid&buyer_paid=not.is.null&sn=in.(' + q + ')') || []; }
+    catch (e) { Logger.log('⚠ 売上補完：入金の取得に失敗＝この回は補完しない: ' + String(e).slice(0, 120)); return -1; }
     rows.forEach(function (r) { paid[r.sn] = r.buyer_paid; });
   }
   var upd = [];
@@ -3056,11 +3071,17 @@ function backfillOrderTotals() {
     var o = bySn[sn];
     upd.push({ cc: o.cc, sn: sn, order_id: o.order_id || sn, total: parseFloat(paid[sn]) });   // order_id は NOT NULL
   });
+  // ★「書けた件数」だけを数える。以前は upsert が失敗しても upd.length を成功件数として報告しており、
+  //   1件も書けていないのにログは ✅ と出ていた（Codexのレビューで発覚）。
+  var wrote = 0, failed = 0;
   for (var k = 0; k < upd.length; k += 200) {
-    try { sbUpsert_('orders', upd.slice(k, k + 200), 'cc,sn'); } catch (e2) { Logger.log('⚠ 売上補完のupsert失敗: ' + String(e2).slice(0, 120)); }
+    var chunk = upd.slice(k, k + 200);
+    try { sbUpsert_('orders', chunk, 'cc,sn'); wrote += chunk.length; }
+    catch (e2) { failed += chunk.length; Logger.log('⚠ 売上補完のupsert失敗: ' + String(e2).slice(0, 120)); }
   }
-  Logger.log('✅ 売上を補完 ' + upd.length + '件 / 空だった ' + miss.length + '件（残りは入金データ自体が無い＝未払いなど）');
-  return upd.length;
+  Logger.log((failed ? '⚠' : '✅') + ' 売上を補完 ' + wrote + '件' + (failed ? '（失敗 ' + failed + '件）' : '')
+    + ' / 空だった ' + miss.length + '件（残りは入金データ自体が無い＝未払いなど）');
+  return failed ? { wrote: wrote, failed: failed } : wrote;
 }
 
 /**
@@ -3915,14 +3936,17 @@ function sbSelect_(table, query) {
 }
 // 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
 function sbSelectAll_(table, query) {
-  var out = [], from = 0;
+  var out = [], from = 0, capped = true;
   for (var i = 0; i < 20; i++) {
     var part = sbSelect_(table, query + '&limit=1000&offset=' + from);
-    if (!part || !part.length) break;
+    if (!part || !part.length) { capped = false; break; }
     out = out.concat(part);
-    if (part.length < 1000) break;
+    if (part.length < 1000) { capped = false; break; }
     from += 1000;
   }
+  // ★20ページ(=20,000件)で打ち切ったのに正常終了に見えると、
+  //   「全部読んだつもりで一部しか読んでいない」まま集計や上書きをしてしまう。必ず気づけるようにする。
+  if (capped) Logger.log('⚠ sbSelectAll_(' + table + ') が20,000件で打ち切られました＝取りこぼしています: ' + query.slice(0, 120));
   return out;
 }
 function sbUpsert_(table, rows, onConflict) {
