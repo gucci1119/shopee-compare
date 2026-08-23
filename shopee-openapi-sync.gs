@@ -57,7 +57,14 @@ function buildAuthUrl() {
   return HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts) + '&redirect=' + encodeURIComponent(redirectUrl_());
 }
 
+// ★枠のカウントは【必ず】保存する。以前は分岐ごとに ufPersist_() を書いていたため、
+//   画像・他サイト取得・ニュースなど大半の経路が return で抜けて保存されず、
+//   ピルの数字も背景停止の判定も実態より少ないままだった（2026-08-23 Codexのレビューで発覚）。
+//   入口で包んで finally で保存する。ここを消さない。
 function doGet(e) {
+  try { return doGetInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
+}
+function doGetInner_(e) {
   var p = (e && e.parameter) || {};
   try {
     // ★書き込み(在庫/価格)：JSONPで返す。ポータルから ?action=update_stock/update_price&callback&token&shop_id&item_id&model_id&stock/price
@@ -865,6 +872,9 @@ function doGet(e) {
 // ★webchat取り込み：Tampermonkeyから生チャットJSON/正規化メッセージをPOSTで受ける（WRITE_TOKENガード）
 // body: { token, action:'chat_ingest', captures:[{url,cc,body}], messages:[{...chat_messagesの行}] }
 function doPost(e) {
+  try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
+}
+function doPostInner_(e) {
   var out = { ok: false };
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
