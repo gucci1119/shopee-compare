@@ -21,7 +21,15 @@
  */
 var SHEET_ID  = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE';
 var SB_URL    = 'https://khjjjouhryigqunxygyg.supabase.co';
-var SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtoampqb3VocnlpZ3F1bnh5Z3lnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Mjk4MDc3NSwiZXhwIjoyMDk4NTU2Nzc1fQ.1ECb3zcU_Uc30Ul-UBS09V7-PYUEKX5LfiuETfVtLHc';
+// ★秘密はコードに書かない。**このリポジトリは公開**なので、直書きするとキーがそのまま世に出る
+//   （2026-08-10〜08-24 の14日間、service_role キーがこのファイルに入ったまま公開されていた）。
+//   Apps Script の【プロジェクトの設定 → スクリプト プロパティ】に `SB_SERVICE_KEY` を入れて使う。
+//   他のGAS（shopee-openapi-sync 等）は元からこの方式。ここだけ直書きが残っていた。
+var SB_KEY = (function () {
+  var v = PropertiesService.getScriptProperties().getProperty('SB_SERVICE_KEY');
+  if (!v) throw new Error('スクリプト プロパティ SB_SERVICE_KEY が未設定です。プロジェクトの設定から入れてください');
+  return v;
+})();
 var KEEP_WAITING_FROM = new Date(2026, 6, 10);   // 2026-07-10。これ以降に仕入れた入庫待ちは触らない
 
 // IMEのライブ変換はハイフンを —, −, ~ 等に変える。全角も混ざる。照合前に寄せる。

@@ -41,6 +41,41 @@ if i>=0:
     dupe=[k for k,v in d.items() if len(v)>1 and len(set(v))<len(v)]
     if dupe:
         print('⚠ 同名の const が同じ深さで複数あります（二重宣言の疑い）: ' + ', '.join(dupe))
+# ★秘密の直書きを止める。**このリポジトリは公開**なので、キーを書くとそのまま世に出る。
+#   2026-08-10〜08-24 の14日間、Supabaseの service_role キーが inventory-stocktake-apply.gs に
+#   直書きのまま公開されていた（本人の判断で再発行はしないが、これ以上増やさない）。
+import base64
+warn = []
+def secret_scan():
+    ng = []
+    for f in sorted(glob.glob('*.gs') + glob.glob('*.user.js') + glob.glob('*.html')):
+        t = io.open(f, encoding='utf-8', errors='ignore').read()
+        for m in set(re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', t)):
+            try:
+                pl = m.split('.')[1]; pl += '=' * (-len(pl) % 4)
+                role = json.loads(base64.urlsafe_b64decode(pl)).get('role', '?')
+            except Exception:
+                role = '?'
+            ng.append((f, 'Supabaseキー(role=%s)' % role))
+        for _ in set(re.findall(r'AKfycb[A-Za-z0-9_-]{30,}', t)):
+            warn.append((f, 'GASのexec URL'))
+    return ng
+import json
+_ng = secret_scan()
+if _ng:
+    print('')
+    print('🔴 鍵がコードに直書きされています（このリポジトリは公開です）＝push しないこと')
+    for f, k in _ng:
+        print('   %-34s %s' % (f, k))
+    print('   → スクリプト プロパティ／設定画面へ移す。**鍵はデータベース全体を触れるので必ず止める**')
+    ok = False
+if warn:
+    print('')
+    print('⚠ 公開したくないURLが直書きされています（鍵ではないので止めはしません）')
+    for f, k in sorted(set(warn)):
+        print('   %-34s %s' % (f, k))
+    print('   → 書き込みはトークンで守られているが、URLを知られると勝手に叩かれて枠を食う')
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
