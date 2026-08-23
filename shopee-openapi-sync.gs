@@ -3831,6 +3831,15 @@ function syncListingStatsForShop_(tok) {
 }
 function syncListingStats() {
   if (!bgAllowed_()) { Logger.log('syncListingStats skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  // ★販売数・閲覧・いいねは【1日1回で十分】。履歴(listing_stats_history)も日次スナップショットで持っている。
+  //   トリガーが6時間毎になっており（コメントは「1日1回」なのに setupTriggers が everyHours(6)）、
+  //   全7店×約900件を1日4回なめて **約750回/日** 使っていた。20時間あけて1日1回に落とす＝約570回/日の節約。
+  //   トリガー自体は触らない（setupTriggers は全トリガーを消すので危ない）。ここで間引く。
+  try {
+    var last = parseInt(P_().getProperty('statsLast') || '0', 10) || 0;
+    if (now_() - last < 20 * 3600) { Logger.log('syncListingStats skip: 前回から20時間経っていない'); return [{ skipped: 'too_soon' }]; }
+    P_().setProperty('statsLast', String(now_()));
+  } catch (e) {}
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) {
     try { log.push(syncListingStatsForShop_(tok)); }
