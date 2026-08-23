@@ -11234,7 +11234,7 @@
     const EF = {}, EO = {}; // EF=固定費実額(ym) / EO=その他経費(ym)
     expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
     const yms = [...new Set([...Object.keys(M), ...Object.keys(EF), ...Object.keys(EO)])].sort().reverse();
-    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = Math.max(0, refundForYm(issues || [], ym) + retRefundForYm(rets || [], ym) - retCompForYm(rets || [], rmeta, ym)); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
+    const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = Math.max(0, refundForYm(issues || [], ym) + retLossForYm(rets || [], rmeta, ym, issues || [])); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
     const curYm = jstYm();
     const curRow = rows.find(r => r.ym === curYm) || { ym: curYm, n: 0, gn: 0, gmv: 0, dep: 0, cost: 0, exp: 0, gross: 0, net: 0 };
     // 直近3ヶ月（当月除く・実績あり）から 粗利/件・入金/件・平均単価 を推定
@@ -13426,14 +13426,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 返金の当月合計（JST）。返金日(refund_date)基準。無ければcreated_atをJST換算。編集日(updated_at)は使わない＝編集で月がズレない
   // ★正式な返品(returns)の返金も月次に足す。create_timeはUNIX秒で入っているので日付に直して使う。
   //   ここが抜けていたため、月次の「返金」列が全月「—」のままで、実利益が実感より多く出ていた。
+  // ⚠ 使わないこと。**2024年頃の固定レート**で、実勢と1割近くずれる（BR 28.0 に対し実勢30.6）。
+  //   円換算は必ず fxRate(cc, 日付) を使う。残してあるのは、通貨コードの一覧として参照されているため。
   const RET_RATE = { PHP: 2.7, BRL: 28.0, SGD: 115.0, MYR: 35.0, VND: 0.006, THB: 4.3, TWD: 4.8 };
   const RET_CUR = { PH: 'PHP', BR: 'BRL', SG: 'SGD', MY: 'MYR', VN: 'VND', TH: 'THB', TW: 'TWD' };
-  const retYm = (v) => {
+  const retYmd = (v) => {
     if (v == null || v === '') return '';
     const n = Number(v);
-    if (!isNaN(n) && n > 1e8) return jstDate(n < 1e11 ? n * 1000 : n).slice(0, 7);   // UNIX秒/ミリ秒
-    const t = Date.parse(v); return isNaN(t) ? '' : jstDate(t).slice(0, 7);
+    if (!isNaN(n) && n > 1e8) return jstDate(n < 1e11 ? n * 1000 : n).slice(0, 10);   // UNIX秒/ミリ秒
+    const t = Date.parse(v); return isNaN(t) ? '' : jstDate(t).slice(0, 10);
   };
+  const retYm = (v) => retYmd(v).slice(0, 7);
   // ★実際にお金が動いた返品だけを数える。
   //   CANCELLED（取り下げられたリクエスト）は返金ではない。同じ注文に複数の返品記録が付くため、
   //   注文番号で1件に寄せる（2026-08-09 実測：150件中62件がCANCELLED、同一注文の二重計上もあった）。
@@ -13456,13 +13459,37 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     (rets || []).forEach(r => {
       if (!RET_PAID.test(String(r.status || ''))) return;      // 取り下げ・処理中は除く
       if (retYm(r.create_time) !== ym) return;
-      const cur = r.currency || RET_CUR[String(r.cc || '').toUpperCase()] || '';
-      const jpy = (Number(r.refund_amount) || 0) * (RET_RATE[cur] || 0);
+      // ★固定レート(RET_RATE)をやめ、返品日の日次レートで換算する（実勢と1割近くずれていた）。
+      const jpy = (Number(r.refund_amount) || 0) * (fxRate(r.cc, retYmd(r.create_time)) || 0);
       const k = (r.cc || '') + ':' + (r.order_sn || r.return_sn || Math.random());
       if (!bySn.has(k) || bySn.get(k) < jpy) bySn.set(k, jpy);  // 同じ注文は最大額を1回だけ
     });
     let t = 0; bySn.forEach(v => { t += v; }); return t;
   };
+  // 💸 正式返品の損失（円）— **画面ごとに違う式を持たない**。ここ1か所だけを使う。
+  //   これまで【事業計画】と【経費画面・月次損益CSV】で4点も違っていた（Codexのレビュー→実データで確認）:
+  //     ①対象      事業計画=支払済のみ / 経費=CANCEL以外ぜんぶ（処理中も含む）
+  //     ②計上月    事業計画=create_time / 経費=update_time優先
+  //     ③レート    事業計画=**ハードコードの固定値**(BR28.0/MY35.0/SG115.0) / 経費=最新レート
+  //     ④補償      事業計画=差し引く / 経費=差し引かない
+  //   実測 2026-08-23：事業計画 ¥552,125 ／ 経費画面 ¥572,517（**差 ¥20,392**）。
+  //   固定レートの誤差だけで ¥18,317（BRは実勢30.6のところ28.0のまま）。
+  //   → 支払済のみ・注文単位で1回・**返品日の日次レート**・補償を相殺、に統一する。
+  function retLossForYm(rets, meta, ym, issues) {
+    const issueKeys = new Set((issues || []).map(r => (r.cc || '') + ':' + r.sn));
+    const bySn = new Map();
+    (rets || []).forEach(r => {
+      if (!RET_PAID.test(String(r.status || ''))) return;      // 取り下げ・処理中は返金ではない
+      if (retYm(r.create_time) !== ym) return;
+      const sn = r.order_sn || r.return_sn || '';
+      const k = (r.cc || '') + ':' + sn;
+      if (issueKeys.has(k)) return;                            // 手で記録した返金と二重計上しない
+      const jpy = (Number(r.refund_amount) || 0) * (fxRate(r.cc, retYmd(r.create_time)) || 0);
+      if (!bySn.has(k) || bySn.get(k) < jpy) bySn.set(k, jpy);  // 同じ注文は最大額を1回だけ
+    });
+    let t = 0; bySn.forEach(v => { t += v; });
+    return Math.max(0, t - (retCompForYm(rets, meta, ym) || 0));
+  }
   const refundForYm = (issues, ym) => (issues || []).reduce((s, r) => { if (r.refund_jpy == null) return s; const m = r.refund_date ? String(r.refund_date).slice(0, 7) : (r.created_at ? new Date(Date.parse(r.created_at) + 9 * 3600000).toISOString().slice(0, 7) : ''); return m === ym ? s + (r.refund_jpy || 0) : s; }, 0);
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
@@ -13485,14 +13512,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const invAll = (inv || []).filter(r => invPurDate(r));
     const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
     // 返金損失＝order_issues(ｷｬﾝｾﾙ返金) ＋ 正式返品(returns) の当月分。returnsはorder_issuesと重複するcc:snを除外して二重計上を防ぐ（返品ページの損失一覧と定義一致）
-    const issueKeys = new Set((issues || []).map(r => (r.cc || '') + ':' + r.sn));
-    const retExtraLoss = (formalRet || []).reduce((s, r) => {
-      const cc = r.cc || '', sn = r.order_sn; if (!sn || !((Number(r.refund_amount) || 0) > 0) || /cancel/i.test(r.status || '')) return s;
-      if (issueKeys.has(cc + ':' + sn)) return s;
-      const t = Number(r.update_time || r.create_time || 0); const mm = t ? new Date((t < 1e11 ? t * 1000 : t) + 9 * 3600000).toISOString().slice(0, 7) : '';
-      if (mm !== exp.ym) return s;
-      return s + Math.round((Number(r.refund_amount) || 0) * ((regionByCc(cc) || {}).rateJpy || 0));
-    }, 0);
+    // ★正式返品の損失は retLossForYm に一本化（事業計画と同じ式・同じ数字になる）。
+    const retExtraLoss = retLossForYm(formalRet, exp.retMeta || null, exp.ym, issues);
     const refundTotal = refundForYm(issues, exp.ym) + retExtraLoss;
     const byCat = {}; rows.forEach(r => { byCat[r.category] = (byCat[r.category] || 0) + (r.amount || 0); });
     const months = []; for (let i = 0; i < 12; i++) { const d = new Date(y, m - 1 - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
@@ -14672,7 +14693,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ---- 返金（売上のマイナス） ----
     const refund = ['01','02','03','04','05','06','07','08','09','10','11','12']
       .reduce((t, m) => t + Math.max(0, refundForYm(issues || [], Y + '-' + m)
-        + retRefundForYm(rets || [], Y + '-' + m) - retCompForYm(rets || [], rmeta, Y + '-' + m)), 0);   // ★retCompForYmは app_kv の生の配列を受け取る（中で .items を取り出す）
+        + retLossForYm(rets || [], rmeta, Y + '-' + m, issues || [])), 0);   // ★式は retLossForYm に一本化（画面ごとに違う数字を出さない）
 
     // ---- 経費（勘定科目別） ----
     const byAcct = {}; const byCat = {};
@@ -15290,6 +15311,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
       '📦 <b>「届きました」が見る前に消えていたのを直しました</b>（本人「あれ？何個か消えた？今日表示されてたのに？」）。配送業者が<b>配達完了</b>を記録すると、GASが<b>自動で在庫台帳を「在庫保管中」に移します</b>（`AUTO_ARRIVE`）。お知らせの荷物は「入庫待ち」だけを見ていたので、<b>自動で移った瞬間に一覧から消えて</b>いました。実際 2026-08-23 は<b>36件</b>が 08:12〜12:52 に自動で移っています。<br>自動化は止めず、<b>自動で受け取り済みにした分も3日間はお知らせに残す</b>ようにしました。「<b>受け取り済みにしました：◯◯</b>」と出て、✅ボタンの代わりに<b>自動で移した理由</b>が書かれます。「今日届いた荷物」の数にも入ります。',
+      '💸 <b>正式返品の損失が、画面ごとに違う数字になっていました</b>（Codexのレビュー→実データで確認）。<b>事業計画</b>と<b>経費画面・月次損益CSV</b>で、同じ返品の計算が<b>4点</b>も違っていました。<br>①<b>対象</b>＝事業計画は支払済のみ／経費画面は<b>CANCEL以外ぜんぶ（処理中も含む）</b>　②<b>計上月</b>＝create_time／update_time優先　③<b>レート</b>＝<b>ハードコードの固定値</b>（BR 28.0・MY 35.0・SG 115.0）／最新レート　④<b>補償</b>＝差し引く／差し引かない<br><b>実測：事業計画 ¥552,125 に対し経費画面 ¥572,517（差 ¥20,392）</b>。うち<b>固定レートの誤差だけで ¥18,317</b>（BRは実勢30.6のところ<b>28.0のまま</b>＝約1割低く見積もっていました）。<br><b>計算を1か所（<code>retLossForYm</code>）に統合</b>し、<b>支払済のみ・注文単位で1回・返品日の日次レート・補償を相殺</b>に揃えました。固定レート表 <code>RET_RATE</code> の参照は<b>ゼロ</b>になりました。',
       '📗 <b>まとめて追加した明細の「仕入・重量」が、出品台帳に届いていませんでした</b>（Codexのレビュー→実データで確認）。追加の画面には<b>仕入(円)と重量(g)の欄があり、控えにも保存されている</b>のに、<b>Shopeeへ送るときの行データにその2つを入れていなかった</b>ため、台帳には <code>undefined → 0</code> が書かれていました。台帳は<b>出品時の原価を残して、あとで価格を戻すときに使う</b>ためのものなので、これが0だと出品一覧の<b>📗原価とROIが空か誤り</b>になります。<br><b>実測：台帳の明細7,944件のうち7,936件（100%）で仕入額が空</b>でした。<br>あわせて2つ直しました。<b>①台帳に残すのは実際に入った明細だけ</b>（以前は画像が無くて追加されなかった行まで「Shopeeにある」ことになっていました）。<b>②入らなかった行は控えに残す</b>（以前は成功・失敗にかかわらず全消去していたので、失敗分を入力し直す必要がありました）。',
       '🚫 <b>キャンセルの損失が、どこにも計上されていませんでした</b>（Codexのレビュー→実データで確認）。🚫カードには「日本を出た後」の仕入額を損失として出していたのに、その数字は<b>画面に表示するだけ</b>で、<b>純利益にも月次損益CSVにも渡していませんでした</b>。つまり<b>段階を確定しても損益はびた一文動かない</b>状態でした。純利益とCSVに<b>「キャンセル損失」の行</b>を足しました。<br>あわせて<b>段階の判定に追跡番号を使う</b>ようにしました。これまで理由の文だけで推定しており、<b>理由が空の888件は全部「不明」</b>のまま損失0円扱いでした。<b>追跡番号が無い＝発送手配していない＝発送前（損失なし）</b>は確実に言えるので自動で確定します。<br><b>実測：キャンセル1,050件（全注文の26%）／段階の記録は0件</b>。自動判定で<b>判断が要るのは210件だけ</b>になりました（うち仕入が紐付いている64件で ¥200,969）。返品・キャンセルページの先頭に<b>⚖カード</b>を出し、その210件だけを絞り込めるようにしました。<br><span class="smd-dim">※推定だけの段階は損失に計上しません。<b>ボタンで確定したものだけ</b>が損益に乗ります（勝手に損益を動かさないため）。</span>',
       '💱 <b>利益明細と売上推移の円換算が「最新レート」のままでした</b>（Codexのレビュー→実データで確認）。サマリーと純利益は<b>注文日のレート</b>で計算しているのに、<b>明細行の売上・暫定入金・確定入金・粗利</b>と<b>売上推移の棒</b>だけ<b>最新レート</b>で換算していました。同じ注文なのに<b>サマリーと明細で円額が食い違い</b>、さらに<b>為替が更新されるたびに過去の月の数字まで動きます</b>。<br><b>実測：2026年の売上 ¥22,890,498 が ¥22,613,740 と表示されており、差は ¥276,758</b>（BR −¥159,680／PH −¥95,902／MY −¥14,308／VN −¥6,781）。BRの6月の注文は −3.55%、1月の注文なら +6.3% ずれます。<br>日付を持つ金額は<b>すべて注文日(JST)のレート</b>に統一しました。',
