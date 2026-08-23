@@ -15119,6 +15119,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-23', items: [
+      '⏱ <b>「🔄最新に更新が遅い」の原因を突き止めて直しました</b>（本人指摘）。実測はこうでした——<b>アイドル時4.9秒／ページを開いた直後19.7秒</b>。GASの読み取り自体は<b>明細1件でも100件でも2.4〜3.7秒</b>、一覧の再描画は<b>約1秒</b>。<b>差の約15秒は順番待ち</b>でした。<br>犯人は<b>一覧を開いた瞬間に投げていた「7か国ぶんのカテゴリ名取得」</b>です。Apps Scriptは同じ利用者の要求を<b>1件ずつしか処理しない</b>ので、この7本が列を埋め、その後ろで人の操作が待たされていました。<br><b>①3秒待ってから始める ②1国ずつ順にやる</b>ように変えました（間に人の操作が割り込めます）。カテゴリ名は「#101087 が何のカテゴリか」を出すためだけのものなので、急ぐ必要がありません。',
       '⛽ <b>同じ画像を何度も上げ直すのをやめました（接続枠の節約）</b>。GASの接続枠を<b>最も食っていたのは画像</b>でした——1枚につき<b>取得1回＋アップロード1回＝2回</b>。7か国に同じ商品を出すと<b>同じ画像を国の数だけ</b>やり直しており、100明細×7か国なら最大1,400回になります。<br><b>URL → image_id を24時間おぼえる</b>ようにしました。2回目以降は<b>接続枠をまったく使いません</b>。効かせたのは3か所（1枚ずつ上げる経路／明細の一括追加／明細画像の一括反映）。<br>教訓：<b>枠を食う処理は「同じことを何度やっているか」をまず数える</b>。速度ではなく回数が枠を決めます。',
     ] },
     { date: '2026-08-22', items: [
@@ -27705,15 +27706,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!need.length) { lst._catDone = true; }
       else {
         lst._catLoading = true; lst._catDone = true;   // 再入しない（成否によらずこの描画サイクルで打ち止め）
-        Promise.all(need.map(t => {
-          const row = (lst.byCc[t.cc] || []).find(x => x.shop_id);
-          if (!row) { catNameCache[t.cc] = {}; return null; }   // shop_id不明でも印を付ける
-          return loadCatNames(t.cc, row.shop_id);
-        })).then(() => {
+        // ★これまで【7か国ぶんを同時に】投げていた。Apps Scriptは同一ユーザーの要求を1件ずつしか
+        //   処理しないので、開いた直後はこの7本が列を埋め、**人が押した🔄が15秒待たされていた**
+        //   （2026-08-22 実測：アイドル4.9秒／開いた直後19.7秒）。
+        //   ①3秒待ってから始める（最初の描画と、人がすぐ押す操作を邪魔しない）
+        //   ②1国ずつ順にやる（間に人の操作が割り込める）
+        //   カテゴリ名は「#101087 が何のカテゴリか」を出すためだけのものなので、急がなくていい。
+        setTimeout(async () => {
+          for (const t of need) {
+            const row = (lst.byCc[t.cc] || []).find(x => x.shop_id);
+            if (!row) { catNameCache[t.cc] = {}; continue; }     // shop_id不明でも印を付ける
+            try { await loadCatNames(t.cc, row.shop_id); } catch (_) {}
+            await new Promise(r => setTimeout(r, 400));          // 次の国まで少し空ける
+          }
           lst._catLoading = false;
           const got = targets.some(t => catNameCache[t.cc] && Object.keys(catNameCache[t.cc]).length);
           if (got) drawListingStatus();               // 名前が取れた時だけ1回だけ再描画
-        }).catch(() => { lst._catLoading = false; });
+        }, 3000);
       }
     }
     lst._watchIdx = dropWatchIndex(); // 在庫監視の逆引き（cc|item_id → 全体/明細/仕入元状態）
