@@ -1842,7 +1842,10 @@
       // ★ブランド（brand_id=0 は NoBrand）。ポータルから編集できるように持ち回る（2026-08-22）
       brand_id: ((base.brand || {}).brand_id) || 0,
       brand_name: ((base.brand || {}).original_brand_name) || ((base.brand || {}).brand_name) || '',
-      condition: base.condition || ''      // 'NEW' / 'USED'
+      condition: base.condition || '',     // 'NEW' / 'USED'
+      // ★出品状態。これを持ち回らないと、🔄で新しく作られた行が status 無しでDBに入り、
+      //   一覧の絞り込み（出品中／停止）から丸ごと漏れる（2026-08-23 実測：④のカタログが出てこなかった）。
+      item_status: base.item_status || ''
     };
   }
   // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
@@ -15119,6 +15122,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-23', items: [
+      '🆕 <b>🔄で作られた行に「出品中／停止」の状態が入っていませんでした</b>。行の🔄（この1件だけ取り直す）は、<b>まだDBに無いカタログの行を新しく作る</b>ことがあるのですが、そのとき<b>状態(status)を書いていませんでした</b>。状態が空の行は「出品中」「停止/その他」の絞り込みから漏れます（実測：DB全6,475件のうち該当は1件。次の全体同期で自然に埋まるため、埋まるまでの間だけの問題）。🔄でも状態を書くようにしました。',
       '⏱ <b>「🔄最新に更新が遅い」の原因を突き止めて直しました</b>（本人指摘）。実測はこうでした——<b>アイドル時4.9秒／ページを開いた直後19.7秒</b>。GASの読み取り自体は<b>明細1件でも100件でも2.4〜3.7秒</b>、一覧の再描画は<b>約1秒</b>。<b>差の約15秒は順番待ち</b>でした。<br>犯人は<b>一覧を開いた瞬間に投げていた「7か国ぶんのカテゴリ名取得」</b>です。Apps Scriptは同じ利用者の要求を<b>1件ずつしか処理しない</b>ので、この7本（1本3秒前後）が列を埋め、その後ろで人の操作が待たされていました。<br><b>今見ている国のぶんだけ</b>取りに行くようにしました（国を絞っていれば1本）。あわせて<b>3秒待ってから・1国ずつ順に</b>取るので、間に人の操作が割り込めます。カテゴリ名は「#101087 が何のカテゴリか」を出すためだけのものなので、急ぐ必要がありません。',
       '⛽ <b>同じ画像を何度も上げ直すのをやめました（接続枠の節約）</b>。GASの接続枠を<b>最も食っていたのは画像</b>でした——1枚につき<b>取得1回＋アップロード1回＝2回</b>。7か国に同じ商品を出すと<b>同じ画像を国の数だけ</b>やり直しており、100明細×7か国なら最大1,400回になります。<br><b>URL → image_id を24時間おぼえる</b>ようにしました。2回目以降は<b>接続枠をまったく使いません</b>。効かせたのは3か所（1枚ずつ上げる経路／明細の一括追加／明細画像の一括反映）。<br>教訓：<b>枠を食う処理は「同じことを何度やっているか」をまず数える</b>。速度ではなく回数が枠を決めます。',
     ] },
@@ -26960,6 +26964,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   shop_id 無しのまま登録され、✎編集が「この商品のshop_idが未取得」でブリッジ表示に落ちていた。
     //   ここで取れている shopId は**その商品を実際に読めたショップ**なので、いちばん確か。
     const row = { cc, item_id: itemId, shop_id: String(shopId), update_time: Math.floor(Date.now() / 1000), synced_at: new Date().toISOString() };
+    // ★status を書かないと、この🔄で【新しく作られる行】が status 無しになり、
+    //   一覧の絞り込み（出品中／停止／すべて）から漏れて「作ったのに出てこない」になる。
+    //   NORMAL=1 / UNLIST=8 / BANNED=2 は既存の同期(GAS)と同じ対応。
+    { const st = pi.item_status;
+      if (st) row.status = (st === 'NORMAL' ? 1 : st === 'UNLIST' ? 8 : st === 'BANNED' ? 2 : 0); }
     if (pi.name) row.name = pi.name;
     if (imgs.length) { row.image = imgs[0]; row.images = imgs; }
     if (pi.parent_sku != null) row.parent_sku = pi.parent_sku || '';
