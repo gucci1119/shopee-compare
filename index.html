@@ -4919,6 +4919,8 @@
     "経過": "Elapsed",
     "✓済": "✓ Done",
     "🗑 削除": "🗑 Delete",
+    "キャンセル損失": "Cancellation loss",
+    "段階：未確定だけ": "Stage: undecided only",
     "在庫は0以上の数字だけです。次の入力は使えません:": "Stock must be a whole number of 0 or more. These entries are not valid:",
     "左の☑で選びます。順番は崩れません（下の中身を1つ上へ書き写して、あまった末尾の枠だけ消すため）": "Pick them with the checkboxes on the left. The order is preserved (each row below is copied one slot up, then only the leftover slot at the end is removed)",
     "残りの明細は順番も中身も崩れません。": "The remaining variations keep both their order and their contents.",
@@ -5411,6 +5413,10 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    [/^⚖ 段階が決まっていないキャンセルが (\d+)件あります$/, '⚖ $1 cancellation(s) have no stage set'],
+    [/^この (\d+)件だけ表示する$/, 'Show only these $1'],
+    [/^⚖ 段階が未確定のキャンセル (\d+)件（確定するまで損失0円で計算しています）$/,
+      '⚖ $1 cancellation(s) have no stage set (counted as zero loss until you decide)'],
     [/^在庫は0以上の数字だけです。「(.+)」は使えません。$/, 'Stock must be a whole number of 0 or more. "$1" is not valid.'],
     [/^在庫は0以上の数字だけです（(.+) は使えません）$/, 'Stock must be a whole number of 0 or more ($1 is not valid)'],
     [/^・(\d+)番「(.+)」$/, '・#$1 "$2"'],
@@ -13493,13 +13499,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const catList = EXP_CATS.concat(Object.keys(byCat).filter(c => !EXP_CATS.includes(c)));
     // 純利益（利益ページで同じ月を開くと粗利が入る）＝ 粗利 − 経費 − 返金（月次サマリーと一致）
     const grossOk = pf.grossYm === exp.ym && typeof pf.grossTotal === 'number';
-    const net = grossOk ? pf.grossTotal - total - refundTotal : null;
+    // 🚫キャンセル損失（日本を出た後＝荷物が戻らないので仕入額まるごと）も引く。
+    //   これまで🚫カードに数字を出すだけで純利益に渡っておらず、段階を確定しても損益が動かなかった。
+    const cxlLoss = grossOk ? (Number(pf.cxlLoss) || 0) : 0;
+    const net = grossOk ? pf.grossTotal - total - refundTotal - cxlLoss : null;
     const netCard = `<div class="tool-card" style="margin:0 0 12px;max-width:520px;background:#f7fbf8;border:1px solid #d6ecdd">
       <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 当月の確定利益（${exp.ym}）<span class="smd-dim" style="font-weight:400;font-size:11px">＝粗利−経費−返金（人件費など固定費は含まず。固定費込みの実利益は📈事業計画）</span></div>
       ${grossOk
         ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件＝確定${pf.grossFixN || 0}/暫定${pf.grossProvN || 0}）</span>${pf.grossProvN ? `<br><span style="font-size:11px;color:#e8710a">⚠️ 暫定入金 ${pf.grossProvN}件を含む（Shopee確定で変動しうる。確定申告は確定後に再確認）</span>` : ''}<br>
            経費合計 <b style="color:#d93025">− ${fmtJpy(total)}</b><br>
            返金合計 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（キャンセル返金＋正式返品・当月分${retExtraLoss ? `／うち正式返品 ${fmtJpy(retExtraLoss)}` : ''}）</span><br>
+           ${cxlLoss ? `キャンセル損失 <b style="color:#d93025">− ${fmtJpy(cxlLoss)}</b> <span class="smd-dim" style="font-size:11px">（日本を出た後＝荷物が戻らない ${pf.cxlN}件の仕入額）</span><br>` : ''}${pf.cxlUndecided ? `<span class="smd-dim" style="font-size:11px;color:#e8710a">⚖ 段階が未確定のキャンセル ${pf.cxlUndecided}件（確定するまで損失0円で計算しています）</span><br>` : ''}
            <span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${net < 0 ? '▲赤字 ' : ''}${fmtJpy(net)}</b></span></div>`
         : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益明細</b>で同じ月（${exp.ym}）を開くと自動で反映されます。<br>現在の粗利データ: ${pf.grossYm ? esc(pf.grossYm) + '（' + fmtJpy(pf.grossTotal || 0) + '）' : '未計算'}<br>経費合計 <b style="color:#d93025">${fmtJpy(total)}</b> ／ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`}
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px;border-top:1px solid #e5efe8;padding-top:6px">📈 <b>月ごとの推移・固定費込みの実利益</b>は <button class="smd-btn" id="exp-goplan" style="font-size:10px;padding:1px 7px">事業計画</button> に一本化しています（この表は当月の確定利益）。</div>
@@ -13572,7 +13582,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const cb = document.getElementById('csv-ledger-m'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_${exp.ym}.csv`, ledgerRows(invMonth))); }
     { const cb = document.getElementById('csv-ledger-all'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_全期間.csv`, ledgerRows(invAll))); }
     { const cb = document.getElementById('csv-exp2'); if (cb) cb.addEventListener('click', () => downloadCsv(`経費_${exp.ym}.csv`, [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(rows.map(r => [r.ymd || '', r.category || '', r.amount != null ? r.amount : '', r.memo || ''])).concat([['', '経費合計', total, ''], ['', '返金合計', refundTotal, '']]))); }
-    { const cb = document.getElementById('csv-pl'); if (cb) cb.addEventListener('click', () => downloadCsv(`月次損益_${exp.ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', total, rows.length + '件'], ['返金合計', refundTotal, ''], ['純利益', net != null ? net : '', grossOk ? '' : '粗利未計算']])); }
+    { const cb = document.getElementById('csv-pl'); if (cb) cb.addEventListener('click', () => downloadCsv(`月次損益_${exp.ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', total, rows.length + '件'], ['返金合計', refundTotal, ''], ['キャンセル損失', cxlLoss, cxlLoss ? ('日本を出た後 ' + pf.cxlN + '件の仕入額') : ''], ['純利益', net != null ? net : '', grossOk ? (pf.cxlUndecided ? ('段階が未確定のキャンセル ' + pf.cxlUndecided + '件は損失0円で計算') : '') : '粗利未計算']])); }
     // ハンドラ
     document.getElementById('exp-month').addEventListener('change', e => { exp.ym = e.target.value; renderExpenses(); });
     { const gp = document.getElementById('exp-goplan'); if (gp) gp.addEventListener('click', () => showPage('plan')); }
@@ -14320,7 +14330,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const filterBar = rtab === 'formal' ? '' : `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 4px 8px;font-size:11.5px">
       <span class="smd-dim">しぼり込み:</span>
       <select id="rf-kind" style="font-size:11.5px;padding:3px 6px">${opt('', F.kind, '種別：すべて')}${['キャンセル','返品','一部返金','補償','その他'].map(k => opt(k, F.kind, k)).join('')}</select>
-      <select id="rf-stage" style="font-size:11.5px;padding:3px 6px">${opt('', F.stage, '段階：すべて')}${STAGES.filter(Boolean).map(k => opt(k, F.stage, k)).join('')}</select>
+      <select id="rf-stage" style="font-size:11.5px;padding:3px 6px">${opt('', F.stage, '段階：すべて')}${opt('__todo', F.stage, '段階：未確定だけ')}${STAGES.filter(Boolean).map(k => opt(k, F.stage, k)).join('')}</select>
       <select id="rf-restock" style="font-size:11.5px;padding:3px 6px">${opt('', F.restock, '再出品：すべて')}${RET_RESTOCK.filter(Boolean).map(k => opt(k, F.restock, k)).join('')}</select>
       <select id="rf-comp" style="font-size:11.5px;padding:3px 6px">${opt('', F.comp, '補償：すべて')}${opt('yes', F.comp, '補償あり')}${opt('no', F.comp, '補償なし')}</select>
       <select id="rf-cc" style="font-size:11.5px;padding:3px 6px">${opt('', F.cc, '国：すべて')}${ccAll.map(c => opt(c, F.cc, c)).join('')}</select>
@@ -15280,6 +15290,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🏷 <b>状態（New / Used）とブランドを、ポータルから直せるようにしました</b>（本人指摘）。これまで<b>表示と絞り込みだけ</b>で、直すにはSeller Centerへ行くしかありませんでした。<br><b>✎カタログ編集</b>にカテゴリの下へ<b>状態</b>（New / Used）と<b>ブランド</b>（検索して選ぶ）を追加。<b>各国まとめ編集</b>には<b>「▶ 全国に反映」</b>を付けたので、<code>NoBrand</code> のまま並んでいる出品を7か国まとめて直せます。<br>⚠️ <b>ブランドはカテゴリごとに候補が決まります</b>。カテゴリを変えたら選び直しになりますし、各国でカテゴリが違う場合は<b>その国に同じブランドが無ければスキップして国名を出します</b>（黙って別のブランドを当てません）。ブランド一覧はGAS側で6時間キャッシュするので、2回目以降は接続枠をほとんど使いません。',
       '🔎 <b>マイナス検索（-switch）が消えるのを直しました</b>（本人指摘「上書きした時にマイナス検索が消える」）。検索は打ち終わってから600ms待って絞り込みますが、その待っている間に再描画が入ると<b>入力欄が状態から作り直され、後から打った分（＝-switch）が巻き戻って</b>いました。再描画のときに<b>カーソル位置だけでなく「今そこに見えている文字」も覚えて戻す</b>ようにしました。<br>あわせて、まとめて追加の表に <b>「⚠ 出品価格が上限超（N）」でまとめて外すボタン</b>を足しました（自動で外すだけでなく、読み込んだ後に自分で落とせます）。',
       '📦 <b>「届きました」が見る前に消えていたのを直しました</b>（本人「あれ？何個か消えた？今日表示されてたのに？」）。配送業者が<b>配達完了</b>を記録すると、GASが<b>自動で在庫台帳を「在庫保管中」に移します</b>（`AUTO_ARRIVE`）。お知らせの荷物は「入庫待ち」だけを見ていたので、<b>自動で移った瞬間に一覧から消えて</b>いました。実際 2026-08-23 は<b>36件</b>が 08:12〜12:52 に自動で移っています。<br>自動化は止めず、<b>自動で受け取り済みにした分も3日間はお知らせに残す</b>ようにしました。「<b>受け取り済みにしました：◯◯</b>」と出て、✅ボタンの代わりに<b>自動で移した理由</b>が書かれます。「今日届いた荷物」の数にも入ります。',
+      '🚫 <b>キャンセルの損失が、どこにも計上されていませんでした</b>（Codexのレビュー→実データで確認）。🚫カードには「日本を出た後」の仕入額を損失として出していたのに、その数字は<b>画面に表示するだけ</b>で、<b>純利益にも月次損益CSVにも渡していませんでした</b>。つまり<b>段階を確定しても損益はびた一文動かない</b>状態でした。純利益とCSVに<b>「キャンセル損失」の行</b>を足しました。<br>あわせて<b>段階の判定に追跡番号を使う</b>ようにしました。これまで理由の文だけで推定しており、<b>理由が空の888件は全部「不明」</b>のまま損失0円扱いでした。<b>追跡番号が無い＝発送手配していない＝発送前（損失なし）</b>は確実に言えるので自動で確定します。<br><b>実測：キャンセル1,050件（全注文の26%）／段階の記録は0件</b>。自動判定で<b>判断が要るのは210件だけ</b>になりました（うち仕入が紐付いている64件で ¥200,969）。返品・キャンセルページの先頭に<b>⚖カード</b>を出し、その210件だけを絞り込めるようにしました。<br><span class="smd-dim">※推定だけの段階は損失に計上しません。<b>ボタンで確定したものだけ</b>が損益に乗ります（勝手に損益を動かさないため）。</span>',
       '💱 <b>利益明細と売上推移の円換算が「最新レート」のままでした</b>（Codexのレビュー→実データで確認）。サマリーと純利益は<b>注文日のレート</b>で計算しているのに、<b>明細行の売上・暫定入金・確定入金・粗利</b>と<b>売上推移の棒</b>だけ<b>最新レート</b>で換算していました。同じ注文なのに<b>サマリーと明細で円額が食い違い</b>、さらに<b>為替が更新されるたびに過去の月の数字まで動きます</b>。<br><b>実測：2026年の売上 ¥22,890,498 が ¥22,613,740 と表示されており、差は ¥276,758</b>（BR −¥159,680／PH −¥95,902／MY −¥14,308／VN −¥6,781）。BRの6月の注文は −3.55%、1月の注文なら +6.3% ずれます。<br>日付を持つ金額は<b>すべて注文日(JST)のレート</b>に統一しました。',
       '🔢 <b>在庫欄の打ち間違いが、黙って「在庫0」に化けていたのを直しました</b>。在庫の保存は <code>parseInt(値) || 0</code> で通していたため、<b>「abc」と打つと0</b>（＝その明細が売り切れになる）、<b>「1o」と打つと1</b>のように、<b>エラーも警告も出ないまま別の数字としてShopeeへ送られて</b>いました。外注が1文字打ち間違えただけで出品が止まる経路です。<br><b>0以上の数字だけを受け取る</b>ようにし、それ以外は<b>欄を赤くして保存を止め</b>、何が使えないかを名前で出します。出品一覧・✎カタログ編集の<b>両方</b>を同じにしました。',
       '🇧🇷 <b>BRの「明細どうしの値段は4倍まで」を、送信直前の判定が見ていませんでした</b>。国別の制約表には <code>BR: 4倍</code> と入っているのに、まとめて追加する直前の判定だけ<b>5倍の決め打ち</b>でした。そのためBRで<b>4倍超〜5倍以下</b>は判定を素通りし、<b>Shopee側で追加が丸ごと拒否</b>されます（1件混ざると正常な行も入りません）。国別の値を見るようにしました。<br><span class="smd-dim">※この2件は<b>Codexにポータル全体をレビューさせて</b>見つかったものです。</span>',
@@ -32319,6 +32330,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
     return { total: g, n: n, fixN: fixN, provN: provN };
   }
+  // 🚫 キャンセルのうち【日本を出た後】＝荷物が戻らないので仕入額がまるごと損失。
+  //   これまで🚫カードのHTMLに数字を出すだけで、純利益にも月次損益CSVにも渡していなかった
+  //   （Codexのレビューで発覚）。段階を確定しても損益がびた一文動かない状態だった。
+  //   粗利と同じく【絞り込みに関係なく、その月の全注文】で数える。
+  function pfMonthCancelLoss() {
+    let loss = 0, n = 0, undecided = 0;
+    (pf.orders || []).forEach(o => {
+      if (o.tab !== 600) return;                      // キャンセルだけ
+      const its = (pf.invMap && pf.invMap.get(o.sn)) || [];
+      const { stage, guess } = pfStageOf(o, its.length);
+      // ★推定だけの段階は計上しない。損失は本人がボタンで確定させたものだけ（勝手に損益を動かさない）。
+      if (!stage || guess) { if (stage !== '発送前') undecided++; return; }
+      if (stage !== '日本を出た後') return;            // 発送前・日本国内は商品が手元に残る＝損失なし
+      // 仕入額は在庫台帳の紐付け優先→無ければ pfCost（利益表の取込など別経路）
+      const cost = its.length ? its.reduce((t, i) => t + (Number(i.price) || 0), 0) : pfCost(o);
+      if (cost != null && cost > 0) { loss += cost; n++; }
+    });
+    return { total: loss, n: n, undecided: undecided };
+  }
   // 注文のJST日付（レートの基準日）。order_ts優先→無ければローカルorder_date
   const ordYmd = o => (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 10);
   const ordRate = o => fxRate(o.cc, ordYmd(o));   // ★円換算はすべて「注文日のレート」で統一
@@ -32399,6 +32429,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const orders = pfFiltered();
     // 純利益ハンドオフ用の粗利合計は毎回「全注文(絞り込み非依存)」で確定させる（明細/サマリーどちらでも・絞り込みでもズレない）
     { const mg = pfMonthGross(); pf.grossTotal = mg.total; pf.grossN = mg.n; pf.grossYm = pf.ym; pf.grossFixN = mg.fixN; pf.grossProvN = mg.provN; }
+    // 🚫キャンセル損失（日本を出た後・確定分のみ）も同じ形で渡す。これが無いと純利益に乗らない。
+    { const cl = pfMonthCancelLoss(); pf.cxlLoss = cl.total; pf.cxlN = cl.n; pf.cxlUndecided = cl.undecided; }
     document.getElementById('pf-note').textContent = `${orders.length}注文`;
     if (!orders.length) { body.innerHTML = '<div class="smd-dim">該当する注文がありません（未同期の月は💰転記タブでDB同期を実行）</div>'; return; }
     if (pf.view === 'sum') {
