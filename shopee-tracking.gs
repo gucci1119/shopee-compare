@@ -37,10 +37,15 @@ function syncTracking() {
   var autoArrive = P.getProperty('AUTO_ARRIVE') === '1';
 
   // 入庫待ち＋追跡番号ありを取得
-  var q = SB + '/rest/v1/inventory?status=eq.' + encodeURIComponent('入庫待ち') + '&tracking_no=not.is.null&select=item_id,ship_method,tracking_no&limit=2000';
+  // ★`limit=2000` と書いてもPostgRESTは**1000件までしか返さない**。超えた分は黙って落ち、
+  //   しかも最後は必ず ✅ で終わるので気づけない（Codexのレビューで発覚）。
+  //   実測 2026-08-24：対象は44件なのでまだ無害。1000件ちょうどなら取りこぼしとみなして警告する。
+  var q = SB + '/rest/v1/inventory?status=eq.' + encodeURIComponent('入庫待ち') + '&tracking_no=not.is.null&select=item_id,ship_method,tracking_no&order=item_id.asc&limit=1000';
   var res = UrlFetchApp.fetch(q, { muteHttpExceptions: true, headers: { apikey: KEY, Authorization: 'Bearer ' + KEY } });
   if (res.getResponseCode() >= 300) throw new Error('DB読取 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 150));
-  var items = JSON.parse(res.getContentText() || '[]').filter(function (r) { return String(r.tracking_no || '').replace(/\D/g, '').length >= 10; });
+  var raw = JSON.parse(res.getContentText() || '[]');
+  if (raw.length >= 1000) Logger.log('⚠ 対象が1000件に達しました＝取りこぼしています。ページングが必要です');
+  var items = raw.filter(function (r) { return String(r.tracking_no || '').replace(/\D/g, '').length >= 10; });
   if (!items.length) { Logger.log('対象なし（入庫待ち＋追跡番号ありが0件）'); return; }
 
   var updates = [], now = new Date().toISOString(), ok = 0, delivered = 0;

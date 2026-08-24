@@ -107,6 +107,10 @@ function dryRun() {
     + msg.join('\n') + '\n  合計 ' + t + '行を変更 / 変更なし ' + (p.out.length - t) + '行');
 }
 
+// ★★ この関数は【時間トリガーに絶対に登録しない】。
+//   棚卸の記録に無いIDを「販売済み」に一括変更するため、トリガーで回すと
+//   棚卸のあとに増えた在庫まで販売済みにされる（Codexのレビューで指摘・2026-08-24時点でトリガーは0件）。
+//   運用は必ず dryRun() で件数を確認してから apply() を手で1回だけ。
 function apply() {
   var p = plan_(), t = 0;
   var col = p.out.map(function (x) { return [x]; });

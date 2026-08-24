@@ -208,10 +208,20 @@ function whsExisting_(sb, keys) {
   // ★以前は sn=in.(...) を小分けに何十回も投げていた。URLが長すぎて落ちる（URLFetch URL Length）うえ、
   //   回数がかさんで遅い。すでに立っている注文は多くないので【1回でまとめて引いて手元で突き合わせる】。
   var map = {};
-  var url = sb.url + '/rest/v1/costs?select=cc,sn&self_transit_at=not.is.null&limit=100000';
-  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: whsHeaders_(sb) });
-  if (res.getResponseCode() >= 300) throw new Error('既存の照会に失敗 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 160));
-  JSON.parse(res.getContentText() || '[]').forEach(function (r) { map[r.cc + ':' + r.sn] = 1; });
+  // ★`limit=100000` と書いてもPostgRESTは**1000件までしか返さない**。
+  //   ここが頭打ちになると「もう入っている注文」を見落とし、
+  //   **人が付けた self_transit_at を別の日時で上書き**してしまう（Codexのレビューで発覚）。
+  //   実測 2026-08-24：684件。まだ1000件未満なので実害は出ていないが、増えれば必ず踏む。
+  //   1000件ずつ全ページ読む。読み切れなかったら例外にする（黙って一部だけで判断しない）。
+  for (var pg = 0; pg < 50; pg++) {
+    var url = sb.url + '/rest/v1/costs?select=cc,sn&self_transit_at=not.is.null&order=sn.asc&limit=1000&offset=' + (pg * 1000);
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: whsHeaders_(sb) });
+    if (res.getResponseCode() >= 300) throw new Error('既存の照会に失敗 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 160));
+    var part = JSON.parse(res.getContentText() || '[]');
+    part.forEach(function (r) { map[r.cc + ':' + r.sn] = 1; });
+    if (part.length < 1000) break;
+    if (pg === 49) throw new Error('既存の照会が50,000件で打ち切られました＝取りこぼすので中止します');
+  }
   return map;
 }
 

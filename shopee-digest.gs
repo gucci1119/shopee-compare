@@ -38,10 +38,30 @@ function sendDigest() {
     return JSON.parse(res.getContentText() || '[]');
   }
 
-  // 為替（cc→円/現地1単位）
-  var fx = {};
-  try { get('fx_rates', 'select=cc,rate_jpy').forEach(function (r) { fx[r.cc] = Number(r.rate_jpy) || 0; }); } catch (e) {}
-  function jpy(cc, v) { var r = fx[cc]; return (r > 0) ? Math.round(v * r) : null; }
+  // 為替 ── ★現行の正は `app_kv.fx_daily`（日次レート × 国別の実効スプレッド）。
+  //   ここは `fx_rates`（💱ページで手動保存した時だけ入る単一レート）を読んでおり、
+  //   **実測 2026-08-24：fx_rates は空**＝jpy() が全部 null になり、
+  //   朝のダイジェストは**売上が ¥0 のまま届いていた**（Codexのレビューで発覚）。
+  //   さらに単一レートだと「その日のレート」でも「国別スプレッド」でもないので、
+  //   ポータルの数字と一致しない。日付ごとのレートで換算する。
+  var fxDays = {}, fxSpread = {}, fxSpreadDef = 3;
+  try {
+    var kv = get('app_kv', 'select=v&k=eq.fx_daily');
+    var v0 = (kv && kv[0] && kv[0].v) || {};
+    fxDays = v0.days || {}; fxSpread = v0.spreadCc || {}; fxSpreadDef = (v0.spread != null ? v0.spread : 3);
+  } catch (e) {}
+  var fxKeys = Object.keys(fxDays).sort();
+  // その日（無ければ直前の営業日）のレート。スプレッドを引いた「実際に受け取れる円」に寄せる。
+  function rateOn(cc, day) {
+    if (!fxKeys.length) return 0;
+    var k = null;
+    for (var i = fxKeys.length - 1; i >= 0; i--) { if (fxKeys[i] <= day && fxDays[fxKeys[i]] && fxDays[fxKeys[i]][cc] != null) { k = fxKeys[i]; break; } }
+    if (!k) return 0;
+    var raw = Number(fxDays[k][cc]) || 0;
+    var sp = (fxSpread[cc] != null ? fxSpread[cc] : fxSpreadDef);
+    return raw * (1 - sp / 100);
+  }
+  function jpy(cc, v, day) { var r = rateOn(cc, day || fxKeys[fxKeys.length - 1] || ''); return (r > 0) ? Math.round(v * r) : null; }
   function yen(n) { return '¥' + (Number(n) || 0).toLocaleString('en-US'); }
 
   // 直近14日の日次（前日／直近7日／その前7日）
@@ -56,7 +76,7 @@ function sendDigest() {
   var lines = [], ydTotalJpy = 0, ydTotalUnits = 0, uncerted = false;
   CC_ORDER.forEach(function (cc) {
     var s = (byDayCc[yst] || {})[cc]; if (!s || !(s.units || s.sales)) return;
-    var j = jpy(cc, Number(s.sales) || 0);
+    var j = jpy(cc, Number(s.sales) || 0, yst);
     if (j == null) { uncerted = true; }
     else ydTotalJpy += j;
     ydTotalUnits += Number(s.units) || 0;
@@ -69,7 +89,7 @@ function sendDigest() {
     Object.keys(byDayCc).forEach(function (day) {
       if (day > fromExclusive && day <= toInclusive) {
         var ccs = byDayCc[day];
-        Object.keys(ccs).forEach(function (cc) { var j = jpy(cc, Number(ccs[cc].sales) || 0); if (j == null) hadUncert = true; else t += j; });
+        Object.keys(ccs).forEach(function (cc) { var j = jpy(cc, Number(ccs[cc].sales) || 0, day); if (j == null) hadUncert = true; else t += j; });
       }
     });
     return { t: t, hadUncert: hadUncert };
