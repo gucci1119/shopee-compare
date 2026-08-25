@@ -15320,6 +15320,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-25', items: [
+      '📅 <b>出品グラフの日付がまばらだったのを直しました</b>（本人「なぜこれ、日付の表示がまばらなの？」）。目盛りを「<b>日曜 or 月初 or 先頭 or 今日</b>」の<b>4つの条件すべて</b>で出していたため、条件が重なる所で <code>5/31 → 6/1</code>、<code>8/1 → 8/2</code> のように<b>1日違いが並び</b>、逆に他は7日空くという不揃いになっていました（実測：90日表示で間隔が 3,1,6,7,7,7,3,4,7… とバラバラ）。<br><b>等間隔で打つ</b>ように変えました。90日なら11日おきに9本、30日なら8日おきに5本、365日なら41日おきに10本。<b>最後は必ず今日</b>を出し、その直前の目盛りが近すぎる時はそちらを消すので、数字が重なりません。',
       '💰 <b>お知らせの「入金がありました」を「調整金が入りました」に直しました</b>（本人「8/13以降入金ない？」）。この通知は<b>通常の入金ではなく、Shopeeからの調整金</b>（SLS+の未着補償など <code>order_adjustments</code>）だけを見ています。ところが文言が「入金がありました」だったため、<b>通常の入金が止まったように見えて</b>いました。<br>実際は<b>入金は動いています</b>——8/23に27件・8/24に34件・8/25に394件、同期も当日12:14に完了。<b>調整金（金額のあるもの）が8/13以降発生していないだけ</b>で、これは補償が出るような事故が起きていないという意味です。<b>ここは調整金だけを見る</b>のが正しい仕様なので、中身は変えず<b>名前だけ</b>直しました（英語も Adjustment received に）。',
     ] },
     { date: '2026-08-23', items: [
@@ -24778,15 +24779,29 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const sel = logState.day || today;
     const selRows = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
     const ccColor = (cc) => (regionByCc(cc) || {}).color || '#888';
+    // 目盛りを打つ日を先に決める（等間隔・最大9本・最後は必ず今日）。
+    // 隣り合う目盛りが近すぎると数字が重なるので、間隔の半分より近いものは捨てる。
+    const tickSet = (() => {
+      const want = Math.min(9, Math.max(4, Math.round(days.length / 11)));
+      const step = Math.max(1, Math.round(days.length / want));
+      const set = new Set();
+      for (let i = 0; i < days.length; i += step) set.add(days[i]);
+      const last = days[days.length - 1];
+      // 最後の1本（＝今日）は必ず出す。直前の目盛りが近すぎるなら、その目盛りを消す。
+      const arr = [...set];
+      const prev = arr[arr.length - 1];
+      if (prev !== last && days.indexOf(last) - days.indexOf(prev) < Math.ceil(step / 2)) set.delete(prev);
+      set.add(last);
+      return set;
+    })();
     const bars = days.map(d => {
       const n = cnt(d), over = n > maxBar, h = Math.round(Math.min(n, maxBar) / maxBar * 74);
       const isToday = d === today, isSel = d === sel;
       const col = n === 0 ? '#eee' : (n >= goal ? '#1a7f37' : '#f0a35e');
-      // ★横軸に日付が無く、どの棒がいつなのか分からなかった。7日おき＋月初＋今日に目盛りを出す。
-      //   全部の日に出すと90日分で潰れて読めないので間引く。
+      // ★目盛りは等間隔にする。以前は「日曜 or 月初 or 先頭 or 今日」を全部出していたため、
+      //   5/31と6/1、8/1と8/2 のように1日違いが並び、間隔がまばらに見えていた（本人指摘 2026-08-25）。
       const dd = new Date(d + 'T00:00:00+09:00');
-      const tick = (d === today || d === days[0] || dd.getDate() === 1 || dd.getDay() === 0)
-        ? (dd.getDate() === 1 ? (dd.getMonth() + 1) + '/1' : (dd.getMonth() + 1) + '/' + dd.getDate()) : '';
+      const tick = tickSet.has(d) ? (dd.getMonth() + 1) + '/' + dd.getDate() : '';
       return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
         ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}</span>` : ''}
         <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${col};border-radius:4px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span>
