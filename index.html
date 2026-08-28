@@ -1583,7 +1583,12 @@
   //   ★推測ではなく【実際に使ったトークン数】から出す。GASが usage を返すので、それを足していくだけ。
   //   ★どこで使ったかも残す（あとで「何にいくら使ったか」を見られるように）。保存先は app_kv でなく端末（localStorage）。
   //     ＝人によって使う端末が違っても、その端末で自分が使ったぶんが見える。全体はDB化しない（同期の手間に見合わない）。
-  const AI_PRICE = { in: 3, out: 15, search: 10 };     // $/MTok, $/MTok, $/1000回（Sonnet・2026-08時点）
+  // 💴 単価は【用途ごと】に持つ。JAN調べはHaiku、シリーズ調査はSonnetで、桁が違う（2026-08時点）
+  const AI_PRICE = {
+    'JAN・型番調べ': { in: 1, out: 5, search: 10 },      // Haiku 4.5
+    'シリーズ調査':  { in: 3, out: 15, search: 10 },     // Sonnet
+    _default:        { in: 3, out: 15, search: 10 }
+  };
   const AI_USDJPY = 150;
   function aiSpendLoad() {
     try { return JSON.parse(localStorage.getItem('smdAiSpend') || '{}'); } catch (_) { return {}; }
@@ -1598,36 +1603,96 @@
     try { localStorage.setItem('smdAiSpend', JSON.stringify(d)); } catch (_) {}
     aiCostDraw();
   }
-  const aiYen = (t) => Math.round((((t.in || 0) / 1e6 * AI_PRICE.in) + ((t.out || 0) / 1e6 * AI_PRICE.out) + ((t.search || 0) / 1000 * AI_PRICE.search)) * AI_USDJPY);
+  const aiYen = (t, kind) => { const p = AI_PRICE[kind] || AI_PRICE._default;
+    return Math.round((((t.in || 0) / 1e6 * p.in) + ((t.out || 0) / 1e6 * p.out) + ((t.search || 0) / 1000 * p.search)) * AI_USDJPY); };
+  const aiYenOf = (byKind) => Object.keys(byKind || {}).reduce((a, k) => a + aiYen(byKind[k], k), 0);
   function aiCostDraw() {
     const el = document.getElementById('ai-cost'); if (!el) return;
     const d = aiSpendLoad(); const days = d.days || {};
     const keys = Object.keys(days).sort();
-    const sum = (o) => Object.keys(o).reduce((a, k) => { const t = o[k]; a.in += t.in; a.out += t.out; a.search += t.search; a.n += t.n; return a; }, { in: 0, out: 0, search: 0, n: 0 });
     const today = jstDate(Date.now());
-    const tToday = sum(days[today] || {});
-    const tAll = sum(keys.reduce((a, k) => { Object.keys(days[k]).forEach(x => { const p = a[x] = a[x] || { in: 0, out: 0, search: 0, n: 0 }; const t = days[k][x]; p.in += t.in; p.out += t.out; p.search += t.search; p.n += t.n; }); return a; }, {}));
-    const yToday = aiYen(tToday), yAll = aiYen(tAll);
+    const nOf = (o) => Object.keys(o || {}).reduce((a, k) => a + (o[k].n || 0), 0);
+    const allByKind = keys.reduce((a, d) => { Object.keys(days[d]).forEach(x => { const p = a[x] = a[x] || { in: 0, out: 0, search: 0, n: 0 }; const t = days[d][x]; p.in += t.in; p.out += t.out; p.search += t.search; p.n += t.n; }); return a; }, {});
+    const mon = String(today).slice(0, 7);                       // YYYY-MM（JST）
+    const monByKind = keys.filter(k => String(k).slice(0, 7) === mon)
+      .reduce((a, d) => { Object.keys(days[d]).forEach(x => { const p = a[x] = a[x] || { in: 0, out: 0, search: 0, n: 0 }; const t = days[d][x]; p.in += t.in; p.out += t.out; p.search += t.search; p.n += t.n; }); return a; }, {});
+    const yToday = aiYenOf(days[today] || {}), yMonth = aiYenOf(monByKind), yAll = aiYenOf(allByKind);
     el.style.display = '';   // ★0円でも必ず出す（出ていないのが「0円」なのか「壊れている」のか分からなくなる）
-    el.style.color = yToday >= 3000 ? '#b3261e' : (yToday >= 1000 ? '#e8770a' : '#8a8f98');
-    el.style.fontWeight = yToday >= 1000 ? '700' : '400';
-    el.textContent = '💴 AI検索 きょう ¥' + yToday.toLocaleString();
+    el.style.color = yMonth >= 10000 ? '#b3261e' : (yMonth >= 3000 ? '#e8770a' : '#8a8f98');
+    el.style.fontWeight = yMonth >= 3000 ? '700' : '400';
+    el.textContent = '💴 API利用料 今月 ¥' + yMonth.toLocaleString();
     // ★何にいくら使ったかの内訳。合計だけ見せても、どこを削ればいいか分からない
-    const bd = Object.keys(days[today] || {}).map(k => '  ' + k + '  ¥' + aiYen(days[today][k]).toLocaleString() + '（' + days[today][k].n + '回）').join('\n');
-    el.title = 'AIのネット検索（JAN・型番調べ／シリーズ調査）にかかった金額です。\n'
+    el.title = 'ポータルが使ったAPIの利用料です（AIのネット検索＝JAN・型番調べ／シリーズ調査）。\n'
       + '★実際に使ったトークン数から計算しています（見積もりではありません）。\n\n'
-      + '■ きょう（' + today + '）　¥' + yToday.toLocaleString() + '　問い合わせ ' + tToday.n + '回・web検索 ' + tToday.search.toLocaleString() + '回\n'
-      + (bd ? bd + '\n' : '')
-      + '\n■ ぜんぶ（' + (keys[0] || today) + '〜）　¥' + yAll.toLocaleString() + '　問い合わせ ' + tAll.n + '回\n'
-      + '\n単価：入力 $' + AI_PRICE.in + '/100万トークン・出力 $' + AI_PRICE.out + '・web検索 $' + AI_PRICE.search + '/1000回（$1=¥' + AI_USDJPY + '）\n'
-      + 'クリックで、この端末の記録を消せます。';
-    el.onclick = () => {
-      if (!confirm('💴 AI検索の使用記録（この端末ぶん）を消します。\n\n'
-        + 'きょう ¥' + yToday.toLocaleString() + ' ／ ぜんぶ ¥' + yAll.toLocaleString() + '\n\n'
-        + '※Anthropic側の請求は消えません。画面の集計だけを消します。')) return;
+      + '今月（' + mon + '）¥' + yMonth.toLocaleString() + '　／　きょう ¥' + yToday.toLocaleString() + '　／　ぜんぶ ¥' + yAll.toLocaleString() + '\n\n'
+      + 'クリックすると【日ごと・用途ごとの明細】が出ます。';
+    el.onclick = () => aiCostDetail();
+  }
+  // 💴 明細：いつ・何に・いくら使ったか（本人要望 2026-08-28「明細も見れたら」）
+  function aiCostDetail() {
+    const d = aiSpendLoad(); const days = d.days || {};
+    const keys = Object.keys(days).sort().reverse();
+    const kinds = [...new Set(keys.flatMap(k => Object.keys(days[k])))];
+    const rowsHtml = keys.map(day => {
+      const byKind = days[day];
+      const yen = aiYenOf(byKind);
+      const cells = kinds.map(k => { const t = byKind[k];
+        return '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee">' + (t ? '¥' + aiYen(t, k).toLocaleString() + '<span class="smd-dim" style="font-size:9.5px"> /' + t.n + '回</span>' : '<span class="smd-dim">—</span>') + '</td>'; }).join('');
+      const n = Object.keys(byKind).reduce((a, k) => a + byKind[k].n, 0);
+      const sr = Object.keys(byKind).reduce((a, k) => a + (byKind[k].search || 0), 0);
+      return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;white-space:nowrap">' + day + '</td>' + cells
+        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + yen.toLocaleString() + '</td>'
+        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">' + n + '回 / 検索' + sr + '</td></tr>';
+    }).join('');
+    const total = keys.reduce((a, k) => a + aiYenOf(days[k]), 0);
+    // ★月ごとの小計。請求と同じ単位で見たいので、月を先に出す
+    const months = [...new Set(keys.map(k => String(k).slice(0, 7)))].sort().reverse();
+    const monthHtml = months.map(m => {
+      const ds = keys.filter(k => String(k).slice(0, 7) === m);
+      const y = ds.reduce((a, k) => a + aiYenOf(days[k]), 0);
+      const n = ds.reduce((a, k) => a + Object.keys(days[k]).reduce((b, x) => b + days[k][x].n, 0), 0);
+      return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;font-weight:700">' + m + '</td>'
+        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + y.toLocaleString() + '</td>'
+        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">' + n + '回</td></tr>';
+    }).join('');
+    const html = '<div style="font-size:12px">'
+      + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶんです。</div>'
+      + (months.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと</div>'
+        + '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:14px"><thead><tr>'
+        + '<th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
+        + monthHtml + '</tbody></table>') : '')
+      + (keys.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">日ごと・用途ごと</div>'
+        + '<table style="border-collapse:collapse;width:100%;font-size:11.5px"><thead><tr>'
+        + '<th style="text-align:left;padding:3px 8px">日（JST）</th>'
+        + kinds.map(k => '<th style="text-align:right;padding:3px 8px">' + esc(k) + '</th>').join('')
+        + '<th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
+        + rowsHtml + '</tbody></table>'
+        + '<div style="margin-top:8px;font-weight:700">ぜんぶで ¥' + total.toLocaleString() + '</div>')
+        : '<div class="smd-dim">まだ使っていません（¥0）。</div>')
+      + '<div class="smd-dim" style="font-size:10.5px;margin-top:10px;line-height:1.6">単価：'
+      + Object.keys(AI_PRICE).filter(k => k !== '_default').map(k => esc(k) + ' … 入力 $' + AI_PRICE[k].in + ' / 出力 $' + AI_PRICE[k].out + '（100万トークンあたり）').join('<br>')
+      + '<br>web検索 $10 / 1,000回　（$1 = ¥' + AI_USDJPY + '）</div>'
+      + '<div style="margin-top:12px"><button id="ai-cost-clear" class="smd-btn b-danger" style="font-size:11px;padding:3px 11px">🗑 この端末の記録を消す</button>'
+      + '<span class="smd-dim" style="font-size:10.5px;margin-left:8px">※Anthropic側の請求は消えません。画面の集計だけです</span></div>'
+      + '</div>';
+    // ★設定モーダル(#smd-modal)は設定専用なので、ここは自前の軽いオーバーレイにする
+    const prev = document.getElementById('ai-cost-box'); if (prev) prev.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'ai-cost-box';
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:120;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;padding:20px';
+    wrap.innerHTML = '<div style="background:#fff;border-radius:10px;padding:18px 20px;width:660px;max-width:94vw;max-height:88vh;overflow:auto">'
+      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><b style="font-size:14px;color:#ee4d2d">\uD83D\uDCB4 APIの利用料 明細</b>'
+      + '<button id="ai-cost-close" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 11px">閉じる</button></div>' + html + '</div>';
+    document.body.appendChild(wrap);
+    const close = () => wrap.remove();
+    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    const cbtn = wrap.querySelector('#ai-cost-close'); if (cbtn) cbtn.addEventListener('click', close);
+    const clr = wrap.querySelector('#ai-cost-clear');
+    if (clr) clr.addEventListener('click', () => {
+      if (!confirm('この端末に記録したAPI利用料の集計を消します。\n\u203BAnthropic側の請求は消えません。')) return;
       try { localStorage.removeItem('smdAiSpend'); } catch (_) {}
-      aiCostDraw();
-    };
+      aiCostDraw(); close();
+    });
   }
   async function ufQuotaDraw() {
     const el = document.getElementById('uf-quota'); if (!el) return;
@@ -3547,6 +3612,12 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '💴 APIの利用料 明細': '💴 API cost — details', '月ごと': 'By month', '日ごと・用途ごと': 'By day and purpose',
+    'JAN・型番調べ': 'JAN / model no. lookup', 'シリーズ調査': 'Series research',
+    '🗑 この端末の記録を消す': '🗑 Clear this device\u2019s record',
+    '🔎 選んだ明細のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected variations',
+    '🔎 この明細を調べる': '🔎 Look up this variation',
+    '⚠ JANと型番のメーカーが違います': '⚠ JAN and model no. point to different makers',
     '✕ 条件をぜんぶ外す': '✕ Clear every filter',
     '⚠ 同じタイトルの出品だけを出しました（✕で解除）': 'Showing only listings with this exact title (✕ to clear)',
     "📄 複製を作っています…（30秒〜1分）": "📄 Creating the copy… (30s–1min)",
@@ -5538,6 +5609,8 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    // 💴 APIの利用料（ヘッダ）
+    [/^💴 API利用料 今月 ¥([\d,]+)$/, '💴 API cost this month ¥$1'],
     // 🔑 アカウント絞り込み（出品一覧）
     [/^アカウントすべて（([\d,]+)件）$/, 'All accounts ($1)'],
     [/^(.+)（系統ぜんぶ ([\d,]+)件）$/, '$1 (whole family, $2)'],
@@ -27375,6 +27448,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (other.length) parts.push(other.slice(0, 3).map(w => (w.cc ? w.cc + ' ' : '') + (w.name ? String(w.name).slice(0, 14) + ' ' : '') + w.label).join('／') + (other.length > 3 ? ' ほか' + (other.length - 3) : ''));
     return parts.join(' ／ ');
   }
+  // 📇 JANの先頭7桁＝メーカーコード。型番の体系と食い違っていたら【取り違えの疑い】として出す。
+  //   実例（2026-08-28）：New Pokémon Snap に 4521329… が入った。型番は HAC-P-…（任天堂）なのに
+  //   JANのメーカーが任天堂(4902370)でない＝別商品を拾っている。機械で気づけるので出す。
+  const JAN_MAKER = { '4902370': '任天堂', '4976219': 'カプコン', '4988601': 'スクウェア・エニックス',
+                      '4948872': 'コナミ', '4967616': 'バンダイナムコ', '4948872': 'コナミ', '4573173': 'セガ',
+                      '4974365': 'セガ', '4907892': 'コーエーテクモ', '4988602': 'スクウェア・エニックス' };
+  function janMakerWarn(jan, mpn) {
+    const j = String(jan || '').replace(/[^0-9]/g, ''), m = String(mpn || '').trim().toUpperCase();
+    if (j.length !== 13 || !m) return '';
+    // 任天堂の型番体系（HAC/CTR/NTR/DMG/AGB/RVL/WUP/TWL…-P-xxxx）なのに、JANが任天堂でない
+    const nin = /^(HAC|CTR|NTR|DMG|AGB|RVL|WUP|TWL|CGB|SNS|HVC|NUS)-/.test(m);
+    if (nin && j.slice(0, 7) !== '4902370') {
+      return '型番は任天堂（' + m.split('-')[0] + '）なのに、JANのメーカーが' + (JAN_MAKER[j.slice(0, 7)] || '別会社') + 'です。別商品を拾っている疑いがあります';
+    }
+    return '';
+  }
   function pidInputs(pk, pv, ruleHint, dup, itemId) {
     const jan = String(pv.jan || ''), mpn = String(pv.mpn || ''), own = String(pv.own || '');
     const bad = jan && !janOk(jan);
@@ -27392,6 +27481,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           '自分で決めるコード。JANも型番も無い商品（雑貨・ガチャ等）を見分けるため。\n例 BANDAI-PKFP-PIKACHU-2020（メーカー-シリーズ-キャラ-版）。\n付け方は右の「コード規則」に書いておくと、ここにヒントで出ます。',
           bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
+      + (() => { const w = janMakerWarn(jan, mpn); return w ? '<div style="font-size:9px;color:#e8710a;font-weight:700" title="' + av(w) + '">⚠ JANと型番のメーカーが違います</div>' : ''; })()
+      // 🔎 この明細だけを1ポチで調べる（約¥4）。※すでに両方入っていれば出さない
+      + ((jan && mpn) ? '' : `<button class="lst-jan1" data-k="${av(pk)}" title="この明細だけ、AIのネット検索でJAN・型番を調べます（約¥4）。&#10;すでに入っている欄は触りません。確信が持てなければ入れません。" style="border:1px solid #c3d9f2;background:#fff;color:#1565c0;border-radius:5px;padding:0 5px;font-size:9px;font-weight:700;cursor:pointer;align-self:flex-start">🔎 この明細を調べる</button>`)
       // ★ネットから拾ったJANは【どの商品から拾ったか】を必ず出す。数字だけ見せても正しいか判断できない
       + (pv.src ? '<div class="smd-dim" style="font-size:9px;line-height:1.25" title="' + av('🔎ネットから自動で入れた値です。拾った商品：' + pv.src + '\n' + (pv.srcUrl || '') + '\n違っていればJAN欄を消してください') + '">🔎 ' + esc(String(pv.src).slice(0, 40)) + (String(pv.src).length > 40 ? '…' : '') + '</div>' : '')
       + (dup ? (() => { const t = pidDupText(dup, itemId);
@@ -27851,6 +27943,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       })()}${(!isSingle && canOfficialEdit) ? `<div class="lst-pickbar" data-cc="${av(r.cc)}" data-item="${r.item_id}" style="display:none;gap:9px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #f0c4bd;padding-top:6px">
         <b style="color:#c0392b;font-size:11.5px">選択 <span class="lst-pickn">0</span>件</b>
         <button class="lst-pickdel smd-btn b-danger" style="font-size:11.5px;padding:4px 13px;">🗑 選んだ明細をまとめて削除</button>
+        <button class="lst-pickjan smd-btn b-write" style="font-size:11.5px;padding:4px 13px" title="選んだ明細だけ、AIのネット検索でJAN・型番を調べて空いている欄に入れます。&#10;1件あたり約¥4。すでに入っている欄は触りません。">🔎 選んだ明細のJAN・型番を探す</button>
         <button class="lst-pickclr smd-btn" style="font-size:11px;padding:4px 11px">選択を外す</button>
         <span class="smd-dim" style="font-size:10.5px">※残りの順番は崩れません（下の中身を上へ詰めます）</span>
       </div>` : ''}${canEdit ? `<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;border-top:1px dotted #eee;padding-top:6px">${(!isSingle) ? `<a href="${editUrlFor(rg.host, r.item_id)}" target="_blank" style="font-size:10.5px;color:#ee4d2d;text-decoration:none;font-weight:600" title="予約(Pre-order)・属性など詳細は行の ✎（カタログ編集）で公式API編集できます">⚙️ 予約は✎詳細（公式API）／Shopeeで ↗</a>` : ''}<button class="lst-save" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:700">💾 価格・在庫を保存</button><span class="lst-save-msg" style="font-size:11px;color:#888"></span></div>` : ''}</div>`
@@ -29440,6 +29533,78 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // ⚡ 規則から自社コードをまとめて作る。JANも型番も無い商品（雑貨・ガチャ等）を手打ちするのが大変なので。
     //   {…} を明細名に置き換えるだけの単純なもの。すでに入っている欄は触らない。
+    // 🔎 指定した明細だけ、AIのネット検索でJAN・型番を埋める（1明細でも複数でも同じ処理を使う）。
+    //   ★処理は【ここ1か所】。行の「この明細を調べる」も、選択バーの「選んだ明細」も、これを呼ぶ。
+    async function janFillModels(row, models, btn) {
+      productIds = productIds || {};
+      const tgt = models.filter(m => {
+        if (!m || m.ghost) return false;
+        const k = pidKeyModel(row, m); if (!k) return false;
+        const p = productIds[k] || {};
+        return !String(p.jan || '').trim() || !String(p.mpn || '').trim();
+      });
+      if (!tgt.length) { toast('JAN・型番が空いている明細がありません', true); return; }
+      if (!settings.aiResearchUrl) { alert('⚙️設定の「AIシリーズ調査GAS URL」が未設定です。'); return; }
+      const hw = (() => { const f = (pidOf(pidKey(row.parent_sku)) || {}).f || {}; return f['機種'] || ''; })();
+      const old = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; }
+      let hit = 0; const found = [], missed = [];
+      // ★1回8件まで（それ以上は検索が足りず、AIが途中で止まってJSONを返さない・実測）
+      for (let i = 0; i < tgt.length; i += 8) {
+        const chunk = tgt.slice(i, i + 8);
+        if (btn) btn.textContent = '🔎 調べています ' + Math.min(i + 8, tgt.length) + '/' + tgt.length;
+        const names = chunk.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
+        let d = null;
+        try { d = await aiJanJsonp(names, hw); } catch (e) { missed.push('※ ' + ((e && e.message) || e)); break; }
+        if (!d || !d.ok) { missed.push('※ ' + ((d && d.error) || '応答なし')); break; }
+        const byName = new Map((d.items || []).map(x => [String(x.name || '').trim().toLowerCase(), x]));
+        chunk.forEach((m, j) => {
+          const got = byName.get(String(names[j]).trim().toLowerCase()) || (d.items || [])[j];
+          const k = pidKeyModel(row, m), prev = productIds[k] || {};
+          const nj = String(prev.jan || '').trim() || String((got && got.jan) || '').trim();
+          const nm = String(prev.mpn || '').trim() || String((got && got.mpn) || '').trim();
+          if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) { missed.push('・' + (m.n || '(単品)') + ' → 見つからず'); return; }
+          productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
+            src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
+          hit++;
+          const w = janMakerWarn(nj, nm);
+          found.push('・' + (m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ')
+            + '　出典: ' + ((got && got.source) || '?') + (w ? '\n　　⚠ ' + w : ''));
+        });
+        _pidDupCache = null; saveProductIds();
+      }
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+      drawListingStatus();
+      alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。\n\n'
+        + (found.length ? '【入れた分】出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
+        + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
+    }
+    // 🔎 行の「この明細を調べる」（1ポチ）
+    document.querySelectorAll('#lst-list .lst-jan1').forEach(b => b.addEventListener('click', async () => {
+      const card = b.closest('.tool-card'); if (!card) return;
+      const cc = card.dataset.cc || (card.querySelector('.lst-mpick') || {}).dataset?.cc;
+      const idEl = card.querySelector('.lst-janai') || card.querySelector('.lst-idfall');
+      const cc2 = cc || (idEl && idEl.dataset.cc), id = idEl && idEl.dataset.id;
+      const row = ((lst.byCc || {})[cc2] || []).find(x => String(x.item_id) === String(id));
+      if (!row) { toast('この明細の商品が見つかりません', true); return; }
+      const key = b.dataset.k;
+      const m = (row.models || []).find(x => pidKeyModel(row, x) === key);
+      if (!m) { toast('明細が見つかりません', true); return; }
+      await janFillModels(row, [m], b);
+    }));
+    // 🔎 選択バーの「選んだ明細のJAN・型番を探す」（複数選択）
+    document.querySelectorAll('#lst-list .lst-pickjan').forEach(b => b.addEventListener('click', async () => {
+      const bar = b.closest('.lst-pickbar'); if (!bar) return;
+      const cc = bar.dataset.cc, id = bar.dataset.item;
+      const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(id));
+      if (!row) return;
+      const picked = [...document.querySelectorAll('#lst-list .lst-mpick:checked')]
+        .filter(c => c.dataset.cc === cc && String(c.dataset.item) === String(id))
+        .map(c => String(c.dataset.mid || c.dataset.m || ''));
+      const models = (row.models || []).filter(m => picked.indexOf(String(m.id)) >= 0);
+      if (!models.length) { toast('明細が選ばれていません', true); return; }
+      await janFillModels(row, models, b);
+    }));
     // 📇 一括バックフィル：いま絞り込んでいる出品ぜんぶのJAN・型番を埋める。
     //   ★1カタログずつ押していては終わらない（実測：明細14,210件・名前4,078種類）。
     //   ★同じ明細名は1回しか調べない（Splatoon 3 が12件あっても問い合わせは1回）＝費用と時間を1/3以下に。
