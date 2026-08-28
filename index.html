@@ -27481,6 +27481,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if ((10 - sum % 10) % 10 !== d[12]) return 'このJANは検算（チェックデジット）が合いません。存在しない番号なので、拾い間違いか打ち間違いです';
     return '';
   }
+  // 📇 入れた値を【その欄だけ】画面に反映する（一覧を描き直さない＝スクロールも開いた明細もそのまま）
+  function pidPaintOne(pk, v) {
+    const q = (cls) => document.querySelector('#lst-list .' + cls + '[data-k="' + (window.CSS && CSS.escape ? CSS.escape(pk) : pk) + '"]');
+    const ej = q('lst-mjan'), em = q('lst-mmpn');
+    if (ej && v.jan != null) { ej.value = v.jan; ej.style.background = '#fffdf5'; }
+    if (em && v.mpn != null) { em.value = v.mpn; em.style.background = '#fffdf5'; }
+    // 調べ終わった行の「🔎 調べる」は用が済んだので消す（両方入った時だけ）
+    if (v.jan && v.mpn) { const b = q('lst-jan1'); if (b) b.remove(); }
+    // 検算が合わなければその場で出す
+    const box = ej && ej.parentNode;
+    if (box) {
+      const oldw = box.querySelector('.lst-janwarn'); if (oldw) oldw.remove();
+      const w = janMakerWarn(v.jan, v.mpn);
+      if (w) { const d = document.createElement('div');
+        d.className = 'lst-janwarn'; d.title = w; d.style.cssText = 'font-size:9px;color:#e8710a;font-weight:700';
+        d.textContent = '⚠ このJANは検算が合いません'; box.appendChild(d); }
+    }
+  }
   function pidInputs(pk, pv, ruleHint, dup, itemId) {
     const jan = String(pv.jan || ''), mpn = String(pv.mpn || ''), own = String(pv.own || '');
     const bad = jan && !janOk(jan);
@@ -29608,6 +29626,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) { missed.push('・' + (m.n || '(単品)') + ' → 見つからず'); return; }
           productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
             src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
+          try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える
           hit++;
           const w = janMakerWarn(nj, nm);
           found.push('・' + (m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ')
@@ -29616,7 +29635,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         _pidDupCache = null; saveProductIds();
       }
       if (btn) { btn.disabled = false; btn.textContent = old; }
-      drawListingStatus();
+      // ★drawListingStatus() は呼ばない。呼ぶと6,476行を作り直して、スクロール位置と
+      //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
       alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。\n\n'
         + (found.length ? '【入れた分】出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
         + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
@@ -29827,10 +29847,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }
         productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
           src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
+          try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える（一覧を描き直さない）
         hit++;
         found.push((m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ') + '　出典: ' + ((got && got.source) || '?'));
       });
-      if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
+      if (hit) { _pidDupCache = null; saveProductIds(); }   // ★描き直さない＝スクロールと開いた明細がそのまま
       say('🤖 AIのネット検索で ' + hit + '/' + use.length + '件に入れました。'
         + (rest ? '\n※明細が多いので、今回は先頭' + MAXN + '件だけ見ました（残り' + rest + '件。もう一度押すと続きを見ます）' : '')
         + '\n\n' + (found.length ? '【入れた分】拾った出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
@@ -29855,12 +29876,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const code = make(m.n || row.name);
         if (!code) { ng++; return; }
         productIds[key] = { jan: prev.jan || '', mpn: prev.mpn || '', own: code, cond: prev.cond || '', at: Date.now() };
+        // ★その欄だけ書き換える（描き直すとスクロールと開いた明細が飛ぶ）
+        try { const e = document.querySelector('#lst-list .lst-mown[data-k="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+          if (e) { e.value = code; e.style.background = '#fffdf5'; } } catch (_) {}
         n++;
       });
       if (!n) { toast(skip ? 'すべて入力済みでした（' + skip + '件）' : '埋められる明細がありませんでした', true); return; }
       _pidDupCache = null; saveProductIds();
       try { logAct('出品', '自社コードを規則で自動入力', String(id), rule + ' → ' + n + '件'); } catch (_) {}
-      drawListingStatus();
       toast('⚡ 自社コードを ' + n + '件 入れました' + (skip ? '（入力済み ' + skip + '件はそのまま）' : '') + (ng ? '／作れなかった ' + ng + '件' : ''));
     })()));
     // 🔖 明細SKUをその場で保存。①公式API(update_model) → ②だめならライブPCのブリッジ、の順で必ずShopeeへ送る。
@@ -30161,11 +30184,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (jan) {
           const k = pidKeyModel(row, m); const prev = productIds[k] || {};
           productIds[k] = { jan: jan, mpn: prev.mpn || '', own: prev.own || '', cond: prev.cond || '', at: Date.now() };
+          try { pidPaintOne(k, { jan: jan, mpn: prev.mpn || '' }); } catch (_) {}   // ★その欄だけ書き換える（一覧を描き直さない）
           hit++;
         }
       }
       btn.disabled = false; btn.textContent = old;
-      if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
+      if (hit) { _pidDupCache = null; saveProductIds(); }   // ★描き直さない＝スクロールと開いた明細がそのまま
       toast(hit ? ('📷 ' + hit + '/' + targets.length + '件からJANを読み取りました') : ('📷 ' + targets.length + '件見ましたが、バーコードは写っていませんでした（表紙の写真だと入っていないのが普通です）'), !hit);
     })()));
     // 🔎 ヤマダウェブコムから JAN・型番を拾う（空いている欄だけ）
@@ -30205,10 +30229,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (nj === (prev.jan || '') && nm === (prev.mpn || '')) { missed.push('・' + (m.n || '(単品)') + '\n　 ヤマダに新しい情報なし: ' + pr.title); continue; }
         productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
           src: pr.title, srcUrl: pr.url, at: Date.now() };
+          try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える（一覧を描き直さない）
         hit++; found.push((m.n || '(単品)') + ' → ' + pr.title + '（' + [nj !== (prev.jan || '') ? 'JAN' : '', nm !== (prev.mpn || '') ? '型番' : ''].filter(Boolean).join('・') + '）');
       }
       btn.disabled = false; btn.textContent = old;
-      if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
+      if (hit) { _pidDupCache = null; saveProductIds(); }   // ★描き直さない＝スクロールと開いた明細がそのまま
       // ★何を拾ったかを**必ず見せる**。JANだけ出しても正しいか判断できない
       const say = (t) => { if (lst._idfBatch) { (lst._idfMsgs = lst._idfMsgs || []).push(t); } else alert(t); };
       if (_ydBlocked) say('⛔ ヤマダ側にアクセスを制限されました。\n\n'
@@ -30228,7 +30253,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!v && !prev.jan && !prev.mpn) delete productIds[key];
       else productIds[key] = { jan: prev.jan || '', mpn: prev.mpn || '', cond: v, at: Date.now() };
       sel.style.background = v ? '#f3f8ff' : '#fff'; sel.style.color = v ? '#1565c0' : '#8a8f98';
-      _pidDupCache = null; saveProductIds(); drawListingStatus();
+      // ★見た目はこの場で変えているので描き直さない（状態を選ぶたびに先頭へ飛んでいた）
+      _pidDupCache = null; saveProductIds();
     }));
     document.querySelectorAll('#lst-list .lst-keep0').forEach(cb => cb.addEventListener('change', () => { const id = cb.dataset.id; lstMeta = lstMeta || {}; const m = lstMeta[id] || (lstMeta[id] = {}); m.keep0 = cb.checked; m.at = Date.now(); saveListingMeta(); drawListingStatus(); }));
     // 📗原価セル：クリックでその場の原価エディタを開閉／中の仕入入力は利益台帳と同じsaveLedgerCost（保存後reRenderAfterCostで一覧を再描画・costOpenは保持されるので開いたまま）
