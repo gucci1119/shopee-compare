@@ -27508,6 +27508,48 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + a('https://www.yamada-denkiweb.com/search?keyword=' + kw, 'ヤマダで検索（商品名の横に型番が出ます）', '🏬ヤマダ')
       + '</div>';
   }
+  // 📊 走っている処理の進み具合を、画面の下にずっと出す（本人「予定終了時刻とメーターも欲しい」2026-08-28）。
+  //   ★1件あたりの実測時間から【終わる時刻】を出す。％だけだと「あと何分か」が分からない。
+  //   ★止めるボタンも一緒に置く＝進みを見て「やっぱりやめる」がその場でできる。
+  const _mt = { t0: 0, done: 0, total: 0, stop: null, label: '' };
+  function meterShow(label, total, onStop) {
+    _mt.t0 = Date.now(); _mt.done = 0; _mt.total = total || 0; _mt.stop = onStop || null; _mt.label = label || '';
+    let el = document.getElementById('smd-meter');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'smd-meter';
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:130;'
+        + 'background:#fff;border:1px solid #dfe3e8;border-radius:12px;box-shadow:0 4px 18px rgba(17,24,39,.16);'
+        + 'padding:9px 14px;min-width:340px;max-width:min(92vw,560px);font-size:12px';
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
+    meterStep(0);
+  }
+  function meterStep(inc) {
+    const el = document.getElementById('smd-meter'); if (!el) return;
+    _mt.done += (inc || 0);
+    const d = Math.min(_mt.done, _mt.total), t = _mt.total || 1;
+    const pct = Math.max(0, Math.min(100, Math.round(d / t * 100)));
+    const el2 = (Date.now() - _mt.t0) / 1000;
+    const per = d > 0 ? el2 / d : 0;                       // 1件あたりの実測秒
+    const left = per > 0 ? Math.round(per * (t - d)) : 0;  // 残り秒
+    const eta = left > 0 ? new Date(Date.now() + left * 1000) : null;
+    const hhmm = eta ? (String(eta.getHours()).padStart(2, '0') + ':' + String(eta.getMinutes()).padStart(2, '0')) : '—';
+    const mmss = left > 0 ? (left >= 60 ? Math.floor(left / 60) + '分' + (left % 60) + '秒' : left + '秒') : '—';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+      + '<b style="white-space:nowrap">' + esc(_mt.label) + '</b>'
+      + '<span class="smd-dim" style="font-size:11px;white-space:nowrap">' + d.toLocaleString() + ' / ' + _mt.total.toLocaleString() + '（' + pct + '%）</span>'
+      + (_mt.stop ? '<button id="smd-meter-stop" class="smd-btn b-danger" style="margin-left:auto;font-size:11px;padding:2px 10px">■ 止める</button>' : '')
+      + '</div>'
+      + '<div style="height:7px;background:#eef0f3;border-radius:4px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#1a7f37;transition:width .25s"></div></div>'
+      + '<div class="smd-dim" style="font-size:10.5px;margin-top:5px;display:flex;gap:12px;flex-wrap:wrap">'
+      + '<span>のこり <b>' + mmss + '</b></span><span>終わる目安 <b>' + hhmm + '</b></span>'
+      + '<span>1件 ' + (per ? per.toFixed(1) : '—') + '秒</span></div>';
+    const sb = document.getElementById('smd-meter-stop');
+    if (sb && _mt.stop) sb.onclick = () => { try { _mt.stop(); } catch (_) {} sb.textContent = '止めています…'; sb.disabled = true; };
+  }
+  function meterHide() { const el = document.getElementById('smd-meter'); if (el) el.style.display = 'none'; }
   // ♻️ 一度調べた答えを【名前で】使い回す（本人 2026-08-28「意外と結構金かかるね」）。
   //   ★同じ明細名が平均3.7か国に出ているのに、欄は国ごとに別々なので、
   //     何もしないと同じ商品を3〜7回調べて、そのたびにお金がかかる（実測：22,236件 vs 名前6,019種類）。
@@ -29722,11 +29764,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       const old = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; }
+      if (!quiet) meterShow('🔎 JAN・型番を調べています', tgt.length, () => { lst._janStop = true; });
       let hit = 0; const found = [], missed = [];
       const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
       let spread = 0;                      // ♻️ 他の国の同じ明細に配れた数（そのぶん課金を避けられた）
       // ★1回8件まで（それ以上は検索が足りず、AIが途中で止まってJSONを返さない・実測）
       for (let i = 0; i < tgt.length; i += 8) {
+        if (lst._janStop) break;
         const chunk = tgt.slice(i, i + 8);
         if (btn) btn.textContent = '🔎 調べています ' + Math.min(i + 8, tgt.length) + '/' + tgt.length;
         const names = chunk.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
@@ -29774,7 +29818,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             + '　出典: ' + ((got && got.source) || '?') + (w ? '\n　　⚠ ' + w : ''));
         });
         _pidDupCache = null; saveProductIds();
+        if (!quiet) meterStep(chunk.length);
       }
+      if (!quiet) meterHide();
       if (btn) { btn.disabled = false; btn.textContent = old; }
       // 📝 当たった／外れたを残す（本人「成功した失敗したログも残しておいてね／仕組み改善に使うので」2026-08-28）。
       //   ★何を検索語にして、どこから拾って、何が外れたかまで残す。件数だけだと直しようがない。
@@ -29818,11 +29864,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + '途中で止めたいときは、同じボタンをもう一度押してください。')) return;
         lst._janRunning = true; lst._janStop = false;
         const old = bm.textContent;
+        // ★進みは【明細の数】で数える。カタログ数だと、100バリエと1バリエが同じ1歩になって残り時間が狂う。
+        meterShow('🔎 選んだ ' + rows2.length + ' 件のJAN・型番を調べています', n, () => { lst._janStop = true; });
         for (let i = 0; i < rows2.length; i++) {
           if (lst._janStop) break;
           bm.textContent = '■ 止める（' + (i + 1) + '/' + rows2.length + '件目）';
+          const before = _mt.done;
           try { await janFillModels(rows2[i], rows2[i].models || [], null, true); } catch (_) {}
+          // このカタログで進んだぶんを足す（中で数えていないので、対象数から見積もる）
+          const did = (rows2[i].models || []).filter(m => { if (!m || m.ghost) return false;
+            const k = pidKeyModel(rows2[i], m); return k && (productIds[k] || {}).at; }).length;
+          meterStep(Math.max(1, Math.min(n - before, did || 1)));
         }
+        meterHide();
         lst._janRunning = false; bm.textContent = old;
         alert('🔎 選んだ出品の調査が終わりました（' + rows2.length + '件）。' + (lst._janStop ? '\n（途中で止めました）' : ''));
       }); }
