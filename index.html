@@ -27481,6 +27481,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if ((10 - sum % 10) % 10 !== d[12]) return 'このJANは検算（チェックデジット）が合いません。存在しない番号なので、拾い間違いか打ち間違いです';
     return '';
   }
+  // 🔗 手で調べる用の検索リンク（本人「埋まらなかったやつは手動でやるので」2026-08-28）。
+  //   ★リンクは【押さなくても見える】所に置く。JANが載っているのは楽天ブックス（商品名の横にJAN）と
+  //     ヤマダ（商品名の横に型番）なので、その2つ＋Google を並べる。
+  function pidSearchLinks(nm, hw) {
+    const q = String(nm || '').trim(); if (!q) return '';
+    const kw = encodeURIComponent(q + (hw ? ' ' + hw : ''));
+    const a = (u, t, l) => '<a href="' + u + '" target="_blank" rel="noopener" title="' + av(t) + '" style="color:#1565c0;text-decoration:none;font-size:9px;margin-right:6px">' + l + '</a>';
+    return '<div style="line-height:1.5">'
+      + a('https://www.google.com/search?q=' + kw + '+JAN', 'Googleで「' + q + ' JAN」を検索（AIの概要にJANと型番が出ることが多い）', '🔍Google')
+      + a('https://search.books.rakuten.co.jp/bksearch/nm?sitem=' + kw, '楽天ブックスで検索（商品名の横にJANが出ます）', '📕楽天')
+      + a('https://www.yamada-denkiweb.com/search?keyword=' + kw, 'ヤマダで検索（商品名の横に型番が出ます）', '🏬ヤマダ')
+      + '</div>';
+  }
+  // 🚫 「AIで探したが見つからなかった」印。★これが無いと、同じ明細を何度も調べて
+  //   そのたびにお金がかかる（本人 2026-08-28「埋まらなかったやつは、再度AI検索しないように／お金無駄になるので」）。
+  //   印は productIds に持つ（JAN・型番と同じ入れ物＝保存も共有も既にできている）。
+  const pidTried = (k) => { const v = productIds && productIds[k]; return !!(v && v.noJan); };
+  function pidMarkTried(k) {
+    productIds = productIds || {};
+    const p = productIds[k] || {};
+    productIds[k] = Object.assign({}, p, { jan: p.jan || '', mpn: p.mpn || '', own: p.own || '', cond: p.cond || '',
+      noJan: (p.noJan || 0) + 1, noJanAt: Date.now() });
+  }
   // 📇 入れた値を【その欄だけ】画面に反映する（一覧を描き直さない＝スクロールも開いた明細もそのまま）
   function pidPaintOne(pk, v) {
     const q = (cls) => document.querySelector('#lst-list .' + cls + '[data-k="' + (window.CSS && CSS.escape ? CSS.escape(pk) : pk) + '"]');
@@ -27489,6 +27512,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (em && v.mpn != null) { em.value = v.mpn; em.style.background = '#fffdf5'; }
     // 調べ終わった行の「🔎 調べる」は用が済んだので消す（両方入った時だけ）
     if (v.jan && v.mpn) { const b = q('lst-jan1'); if (b) b.remove(); }
+    // 🚫 見つからなかった時は、その場で印を出す（次から飛ばすことが画面で分かるように）
+    if (!v.jan && !v.mpn) {
+      const box0 = ej && ej.parentNode;
+      if (box0 && !box0.querySelector('.lst-jannone')) {
+        const n = ((productIds[pk] || {}).noJan) || 1;
+        const d0 = document.createElement('div');
+        d0.className = 'lst-jannone'; d0.style.cssText = 'font-size:9px;color:#8a8f98';
+        d0.title = 'AIのネット検索で探しましたが見つかりませんでした（' + n + '回）。\n同じ所に何度もお金をかけないよう、次からは飛ばします。\n商品名を直したあとに「🔎 調べる」を押せば、もう一度だけ探します。';
+        d0.textContent = '🚫 探したが見つからず（' + n + '回）';
+        box0.appendChild(d0);
+      }
+    }
     // 検算が合わなければその場で出す
     const box = ej && ej.parentNode;
     if (box) {
@@ -27517,6 +27552,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
       + (() => { const w = janMakerWarn(jan, mpn); return w ? '<div style="font-size:9px;color:#e8710a;font-weight:700" title="' + av(w) + '">⚠ このJANは検算が合いません</div>' : ''; })()
+      + (pv.noJan ? `<div class="lst-jannone" style="font-size:9px;color:#8a8f98;line-height:1.5" title="${av('AIのネット検索で探しましたが見つかりませんでした（' + pv.noJan + '回）。\n同じ所に何度もお金をかけないよう、AIでは次から飛ばします（二重の課金を避けるため）。\n手で入れる用に、右の検索リンクを置いてあります。')}">🚫 AIでは見つからず（${pv.noJan}回）</div>${pidSearchLinks(pv._nm || '', pv._hw || '')}` : '')
       // 🔎 この明細だけを1ポチで調べる（約¥4）。※すでに両方入っていれば出さない
       + ((jan && mpn) ? '' : `<button class="lst-jan1" data-k="${av(pk)}" title="この明細だけ、AIのネット検索でJAN・型番を調べます（約¥4）。&#10;すでに入っている欄は触りません。確信が持てなければ入れません。" style="border:1px solid #c3d9f2;background:#fff;color:#1565c0;border-radius:5px;padding:0 5px;font-size:9px;font-weight:700;cursor:pointer;align-self:flex-start;line-height:1.5">🔎 調べる</button>`)
       // ★ネットから拾ったJANは【どの商品から拾ったか】を必ず出す。数字だけ見せても正しいか判断できない
@@ -27943,7 +27979,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               ? '<span title="Shopeeは販売数を【枠】に持っているため、明細を消して詰めるとズレます。&#10;消した時点の数を明細名で控えてあるので、こちらが正しい数です（Shopeeが返す数: ' + m.soldRaw + '）" style="border-bottom:1px dotted #c9c9c9">' + (m.sold || 0) + '</span>'
               : String(m.sold || 0))
           + cell(17, 'min-width:0', `<span style="display:inline-flex;align-items:center;gap:2px;width:100%"><button class="lst-mskusug" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" title="この明細のSKUを、親SKU＋明細名から自動で作って入れます" style="border:1px solid #e3e6ea;background:#fff;border-radius:5px;cursor:pointer;font-size:10px;padding:1px 3px;flex:none">💡</button><input class="lst-msku" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-mid="${m.id}" value="${av(m.sku || '')}" placeholder="SKU" title="この明細のSKU。入れるとその場でShopeeへ送ります（公式APIが使えないときはライブPCのブリッジ経由）。&#10;Enterか、欄の外をクリックで保存します。" style="width:100%;padding:2px 6px;border:1px solid ${m.sku ? '#e3e6ec' : '#eee'};border-radius:6px;font-size:10px;font-family:monospace;background:${m.sku ? '#fffdf5' : '#fff'}"><span class="lst-mskumsg" style="font-size:9px"></span></span>`)
-          + cell(18, 'min-width:0', pidInputs(pk, pv, metaOf(r.item_id).codeRule, jdup, r.item_id)
+          + cell(18, 'min-width:0', pidInputs(pk, Object.assign({}, pv, { _nm: (m && m.n) || r.name, _hw: ((pidOf(pidKey(r.parent_sku)) || {}).f || {})['機種'] || '' }), metaOf(r.item_id).codeRule, jdup, r.item_id)
               + ((idfNames(r.item_id).indexOf('内容') >= 0 || idfNames(r.item_id).indexOf('種別') >= 0)
                 ? `<input class="lst-bom" data-k="${av(pk)}" value="${av(pv.bom || '')}" placeholder="内訳（中身のコード）" title="このセットに入っている商品のコードを並べます（スペースか / 区切り）。&#10;例) PSP-STEINS-GATE PSP-PERSONA-3 PSP-MHP3&#10;梱包のときに何を詰めるか、あとから何が入っていたかが分かります。&#10;中身が毎回変わる『おまかせ』なら空のままでOK。" style="width:100%;margin-top:2px;padding:2px 6px;border:1px solid #ffd699;border-radius:6px;font-size:10px;font-family:monospace;background:${pv.bom ? '#fffaf0' : '#fff'}">`
                   + (pv.bom ? `<div style="font-size:9px;color:#b26a00;font-weight:700">内訳 ${String(pv.bom).split(/[\s\/,、]+/).filter(Boolean).length}点</div>` : '')
@@ -29597,18 +29633,30 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   ★処理は【ここ1か所】。行の「この明細を調べる」も、選択バーの「選んだ明細」も、これを呼ぶ。
     async function janFillModels(row, models, btn) {
       productIds = productIds || {};
-      const tgt = models.filter(m => {
+      const cand = models.filter(m => {
         if (!m || m.ghost) return false;
         const k = pidKeyModel(row, m); if (!k) return false;
         const p = productIds[k] || {};
         return !String(p.jan || '').trim() || !String(p.mpn || '').trim();
       });
-      if (!tgt.length) { toast('JAN・型番が空いている明細がありません', true); return; }
+      // ★一度「見つからなかった」ものは既定で外す＝同じ所に二度払わない
+      const tried = cand.filter(m => pidTried(pidKeyModel(row, m)));
+      let tgt = cand.filter(m => !pidTried(pidKeyModel(row, m)));
+      if (!cand.length) { toast('JAN・型番が空いている明細がありません', true); return; }
+      if (!tgt.length) {
+        if (!confirm('この中の ' + tried.length + '件は、前に調べて【見つかりませんでした】。\n\n'
+          + 'もう一度お金をかけて調べ直しますか？（1件あたり約¥4）\n'
+          + '※商品名を直したあとなら、見つかることがあります。')) return;
+        tgt = tried;
+      } else if (tried.length) {
+        toast('前に見つからなかった ' + tried.length + '件は飛ばします（二重の課金を避けるため）');
+      }
       if (!settings.aiResearchUrl) { alert('⚙️設定の「AIシリーズ調査GAS URL」が未設定です。'); return; }
       const hw = (() => { const f = (pidOf(pidKey(row.parent_sku)) || {}).f || {}; return f['機種'] || ''; })();
       const old = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; }
       let hit = 0; const found = [], missed = [];
+      const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
       // ★1回8件まで（それ以上は検索が足りず、AIが途中で止まってJSONを返さない・実測）
       for (let i = 0; i < tgt.length; i += 8) {
         const chunk = tgt.slice(i, i + 8);
@@ -29623,10 +29671,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const k = pidKeyModel(row, m), prev = productIds[k] || {};
           const nj = String(prev.jan || '').trim() || String((got && got.jan) || '').trim();
           const nm = String(prev.mpn || '').trim() || String((got && got.mpn) || '').trim();
-          if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) { missed.push('・' + (m.n || '(単品)') + ' → 見つからず'); return; }
+          if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) {
+            pidMarkTried(k);                              // ★次から飛ばす（同じ所に二度払わない）
+            try { pidPaintOne(k, {}); } catch (_) {}
+            ngLog.push({ 検索語: names[j], 明細名: m.n || '(単品)', 返り: got ? '空で返った' : '返りなし' });
+            missed.push('・' + (m.n || '(単品)') + ' → 見つからず');
+            return;
+          }
           productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
             src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
           try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える
+          okLog.push({ 検索語: names[j], JAN: nj, 型番: nm, 出典: (got && got.source) || '', 検算: janMakerWarn(nj, nm) ? 'NG' : 'OK' });
           hit++;
           const w = janMakerWarn(nj, nm);
           found.push('・' + (m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ')
@@ -29635,6 +29690,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         _pidDupCache = null; saveProductIds();
       }
       if (btn) { btn.disabled = false; btn.textContent = old; }
+      // 📝 当たった／外れたを残す（本人「成功した失敗したログも残しておいてね／仕組み改善に使うので」2026-08-28）。
+      //   ★何を検索語にして、どこから拾って、何が外れたかまで残す。件数だけだと直しようがない。
+      try {
+        logAct('出品', 'JAN・型番をAIで調べた', String(row.cc) + '/' + String(row.item_id),
+          JSON.stringify({ 機種: hw || '', 対象: tgt.length, 当たり: hit, 外れ: tgt.length - hit,
+            当たった: okLog.slice(0, 40), 外れた: ngLog.slice(0, 40) }));
+      } catch (_) {}
       // ★drawListingStatus() は呼ばない。呼ぶと6,476行を作り直して、スクロール位置と
       //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
       alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。\n\n'
