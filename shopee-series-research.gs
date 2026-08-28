@@ -34,7 +34,8 @@ function doGet(e) {
         .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 25);
       var hw2 = (e && e.parameter && e.parameter.hw) || '';
       if (!names.length) throw new Error('names が必要です');
-      out = { ok: true, items: researchJan_(names, hw2) };
+      var jr = researchJan_(names, hw2);
+      out = { ok: true, items: jr, usage: jr.__usage || null };
     } else {
       var series = (e && e.parameter && e.parameter.series) || '';
       var hw = (e && e.parameter && e.parameter.hw) || '';
@@ -76,12 +77,15 @@ function researchJan_(names, hw) {
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
     payload: JSON.stringify({
       model: model, max_tokens: 6000,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12 }],
+      // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。上限を下げると素直に安くなる
+      //   （実測見積：上限12で約$53／6で約$29／3で約$18・4,078名前ぶん・2026-08-28）。
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }],
       messages: [{ role: 'user', content: prompt }]
     })
   });
   if (res.getResponseCode() >= 300) throw new Error('Anthropic API ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   var j = JSON.parse(res.getContentText());
+  var u = (j.usage || {});
   var text = (j.content || []).filter(function (c) { return c.type === 'text'; }).map(function (c) { return c.text; }).join('\n');
   var m = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
   if (!m) throw new Error('JAN抽出に失敗（応答: ' + text.slice(0, 120) + '…）');
@@ -98,6 +102,9 @@ function researchJan_(names, hw) {
       url: String(o && o.url || '').trim()
     });
   });
+  // ★実際に使ったトークンを一緒に返す。ポータル側で積み上げて「いくら使ったか」を出す＝
+  //   費用を推測でなく実測で見られるようにする（本人「金額膨れ上がらないよね？」2026-08-28）。
+  out.__usage = { in: (u.input_tokens || 0), out: (u.output_tokens || 0), search: ((u.server_tool_use || {}).web_search_requests || 0) };
   return out;
 }
 
