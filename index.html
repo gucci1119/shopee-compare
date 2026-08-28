@@ -3457,6 +3457,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '⚠ 同じタイトルの出品だけを出しました（✕で解除）': 'Showing only listings with this exact title (✕ to clear)',
     "📄 複製を作っています…（30秒〜1分）": "📄 Creating the copy… (30s–1min)",
     "✅ 複製しました（非公開）。明細を入れて公開してください": "✅ Copied (unlisted). Add variations, then publish",
     "⚠ 保存に失敗 ": "⚠ Save failed ",
@@ -5437,6 +5438,9 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    // ⚠ 同名バッジ（出品一覧）＝同じ国に同じタイトルが複数ある＝重複出品の候補
+    [/^⚠ 同名(\d+)件・出品中(\d+)$/, '⚠ $1 same title · $2 live'],
+    [/^⚠ 同名(\d+)件$/, '⚠ $1 with the same title'],
     [/^両方とも出品中 (\d+)組 ／ 片方だけ (\d+)組 ／ どちらも停止 (\d+)組$/,
       'Both live: $1 · one live: $2 · neither live: $3'],
     [/^⚖ 段階が決まっていないキャンセルが (\d+)件あります$/, '⚖ $1 cancellation(s) have no stage set'],
@@ -15334,6 +15338,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-28', items: [
+      '👥 <b>単品なのに「👥 1/2枚・空き200」と出ていたのを直しました</b>（本人「ここの「2分の1枚」もおかしいし、これバリエーションじゃないし、意味がわからんし。」）。<b>①②に分けたカタログの仲間</b>を示すバッジですが、束ねる鍵が<b>「末尾の番号を落とした商品名」</b>だったため、<b>同じタイトルを2回出しているだけ</b>の行まで仲間にされていました。<br>実データを数えたところ、束ねられていた <b>212組のうち151組（全454件）が①②ではなく、ただの重複出品</b>でした（例：MYの <code>New Minecraft - Switch</code> が2件・どちらも単品）。空き枠も <code>100×2枚＝200</code> と計算されて「空き200」になっていました。<br><b>シリーズと呼ぶ条件を決めました</b>——<b>番号（①②や(2)）が付いた行が2枚以上あり、かつ中身がバリエーションのもの</b>だけ（手で <code>grp</code> を指定したものは従来どおり優先）。これで<b>本物は59組</b>に絞られ、単品からバッジが消えます。<br>代わりに、重複の行には<b>「⚠ 同名2件・出品中2」</b>と<b>正しい名前で</b>出すようにしました。<b>押すとその名前の出品だけが並び</b>、どちらを止めるか決められます（赤＝2件とも出品中で自分同士が競っている／灰＝片方は停止済み）。<br>同じ取り違えは<b>4か所</b>にあったので全部直しました——行の「同シリーズ①②」リンク・<b>📚シリーズのみ</b>の絞り込み・「満杯だが同シリーズに空きがある」・シリーズ順の<b>色帯</b>。',
       '🔎 <b>「いま何で絞り込んでいるか」を画面の上に出しました</b>（本人「switchでフィリピンのヒットがゼロって明らかにおかしい」）。<b>バグではなく、⚠同名が複数 がONのままでした</b>。この絞り込みは<b>設定が保存される</b>ので、前に押したまま次に開いてもONで残ります。<br>これまで「効いているかどうか」を<b>ボタンの枠の色だけ</b>で表しており、赤枠のボタンが並ぶ中で<b>どれが実際に効いているのか見分けられません</b>でした。<br>効いている条件を<b>1本の帯にまとめて上に出す</b>ようにしました（例：<code>⚠同名が複数 / 検索「switch」</code>）。<b>条件ごとの ✕ で1つだけ外せ</b>、<b>「✕ぜんぶ外す」</b>で全部戻せます。<br>※実データ確認：switch を含む出品は <b>MY467 / BR77 / PH63 / TH52 / VN47 / TW44 / SG41件</b> あり、同名が複数の組に限ると44件でした。数字は正しく、見せ方の問題でした。',
     ] },
     { date: '2026-08-25', items: [
@@ -27008,6 +27013,36 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     _grpMap = m; _grpAt = Date.now();
     return m;
   }
+  // ★「群（①②に分けたカタログ）」と「ただの重複出品」を取り違えない（2026-08-28）
+  //   seriesKey は末尾の番号を落として束ねるので、同じタイトルを2回出しただけの行まで同じ束に入っていた。
+  //   実データでは 212組のうち 151組が重複で、バリエーションの無い単品に「👥 1/2枚・空き200」が出ていた。
+  //   群と呼ぶ条件＝手で grp を指定した／(番号(①②)が付いた行が2枚以上 かつ 中身がバリエーションの行がある)。
+  function isRealGrp(r, sib) {
+    if (!Array.isArray(sib) || sib.length < 2) return false;
+    if (String((metaOf(r.item_id) || {}).grp || '').trim()) return true;
+    const numbered = sib.filter(x => grpNo(x.name) > 0).length;
+    return numbered >= 2 && sib.some(x => varCount(x) > 0);
+  }
+  // ⚠ まったく同じタイトルが同じ国に複数ある＝重複出品。①②の群とは別物なので、そう書く。
+  let _dupMap = null, _dupAt = 0;
+  function dupIndex() {
+    if (_dupMap && Date.now() - _dupAt < 4000) return _dupMap;
+    const m = new Map();
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const k = cc + '|' + String(r.name || '').trim().toLowerCase();
+      if (k.length < 6) return;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }));
+    _dupMap = m; _dupAt = Date.now();
+    return m;
+  }
+  function dupBadgeHtml(r) {
+    const d = dupIndex().get(r.cc + '|' + String(r.name || '').trim().toLowerCase()) || [];
+    if (d.length < 2) return '';
+    const live = d.filter(x => x.status === 1).length;
+    return `<span class="lst-dupb" data-nm="${av(r.name || '')}" title="同じ国(${av(r.cc)})に、まったく同じタイトルの出品が${d.length}件あります（うち出品中 ${live}件）。&#10;①②に分けた「カタログ群」ではなく、重複出品の候補です。&#10;出品中が2件以上あると、自分の商品同士で競ってしまいます。&#10;クリックすると、この同名${d.length}件だけを並べます。" style="background:${live >= 2 ? '#fdeaea;color:#c5221f;border:1px solid #f5b5b2' : '#f4f4f5;color:#7a7f87;border:1px solid #e0e2e6'};border-radius:4px;padding:1px 5px;font-size:9.5px;font-weight:700;cursor:pointer;margin-right:3px">⚠ 同名${d.length}件${live >= 2 ? '・出品中' + live : ''}</span>`;
+  }
   // ⚠ 親SKUの「相乗り」を見つける（2026-08-14）
   //   親SKUは JAN・型番・自社コード・識別項目・出品台帳の原価 の鍵。
   //   ★①②③のような【同じ群】が同じ親SKUを使うのは**正しい**（明細ごとの鍵は「親SKU｜明細名」で衝突しない）。
@@ -27732,9 +27767,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             // 👥 ①②③のように分けて出しているカタログを「仲間」として見せる。
             //   分けた理由は上限（1カタログ100明細）とは限らない（状態違い・仕入時期違いなど）ので、理由は書かない。
             //   どの枚に足せるかが分かるよう、群全体の空き枠も出す。
-            const g = grpOf(r); if (!g) return '';
-            const sib = grpIndex().get(r.cc + '|' + g) || [];
-            if (sib.length < 2) return '';
+            const g = grpOf(r);
+            const sib = g ? (grpIndex().get(r.cc + '|' + g) || []) : [];
+            //   ★番号もバリエーションも無いのに束ねてしまった組は「群」ではない＝重複出品として出す
+            if (!isRealGrp(r, sib)) return dupBadgeHtml(r);
             const idx = sib.findIndex(x => String(x.item_id) === String(r.item_id));
             const no = grpNo(r.name) || (idx + 1);
             const free = sib.reduce((a, x) => a + Math.max(0, MODEL_CAP - varCount(x)), 0);
@@ -28151,9 +28187,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return 0;
   }
   let _sibIdx = null;   // シリーズキー → [{cc,item_id,name,cnt,host}]
+  let _serReal = new Set();   // ★本物のシリーズ（①②に割ったカタログ）のキーだけ。ただの同名重複は入れない
   function sibHtml(r) {
     if (!_sibIdx) return '';
-    const arr = _sibIdx.get(r.cc + '|' + seriesKey(r.name)) || [];
+    const _k = r.cc + '|' + seriesKey(r.name);
+    if (!_serReal.has(_k)) return '';   // ただの同名重複には「同シリーズ」を出さない
+    const arr = _sibIdx.get(_k) || [];
     if (arr.length < 2) return '';
     const all2 = arr.filter(x => String(x.item_id) !== String(r.item_id) && (MODEL_CAP - x.cnt) > 0)
       .sort((a, b) => (MODEL_CAP - b.cnt) - (MODEL_CAP - a.cnt));
@@ -28229,7 +28268,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let all = []; targets.forEach(r => (lst.byCc[r.cc] || []).forEach(x => all.push(x)));
     // シリーズ（①②③…）ごとに束ねて、空き枠のあるカタログを行に出せるようにする
     { _sibIdx = new Map();
-      all.forEach(x => { if (!x.name) return; const k = x.cc + '|' + seriesKey(x.name); let a = _sibIdx.get(k); if (!a) _sibIdx.set(k, a = []); a.push({ cc: x.cc, item_id: x.item_id, name: x.name, cnt: varCount(x), host: (regionByCc(x.cc) || {}).host || '' }); }); }
+      all.forEach(x => { if (!x.name) return; const k = x.cc + '|' + seriesKey(x.name); let a = _sibIdx.get(k); if (!a) _sibIdx.set(k, a = []); a.push({ cc: x.cc, item_id: x.item_id, name: x.name, cnt: varCount(x), host: (regionByCc(x.cc) || {}).host || '' }); });
+      // ★seriesKey は末尾の番号を落として束ねるので、同じタイトルを2回出しただけの行まで同じ束に入る。
+      //   「シリーズ」と呼んでよいのは、番号(①②)が付いた行が2枚以上あり、中身がバリエーションのものだけ。
+      //   （2026-08-28：212組のうち151組がただの重複で、単品に「同シリーズ」「1/2枚」が出ていた）
+      _serReal = new Set();
+      _sibIdx.forEach((a, k) => {
+        if (a.length < 2) return;
+        const numbered = a.filter(x => seriesNo(x.name) > 0).length;
+        const manual = a.some(x => String((metaOf(x.item_id) || {}).grp || '').trim());
+        if (manual || (numbered >= 2 && a.some(x => x.cnt > 0))) _serReal.add(k);
+      });
+    }
     { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstDropStatus = {}; }); }
@@ -28344,7 +28394,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 🎬 動画が付いていないものだけ（動画が無いカタログから順に入れていく用）
     if (lst.noVideo) rows = rows.filter(r => r.has_video === false || r.has_video == null);
     // 同じシリーズが2つ以上あるものだけ（①②③で分けたカタログを見比べたい時）
-    if (lst.seriesOnly) rows = rows.filter(r => ((_sibIdx && _sibIdx.get(r.cc + '|' + seriesKey(r.name))) || []).length >= 2);
+    if (lst.seriesOnly) rows = rows.filter(r => _serReal.has(r.cc + '|' + seriesKey(r.name)));
     // 🈳 枠の状態で絞る（単品は対象外）
     if (lst.slot) {
       rows = rows.filter(r => varCount(r) > 0);
@@ -28352,7 +28402,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       else if (lst.slot === 'free') rows = rows.filter(r => MODEL_CAP - varCount(r) > 0);                    // まだ出せる
       else if (lst.slot === 'sibfree') rows = rows.filter(r => {                                            // 満杯だが同シリーズに空きがある
         if (MODEL_CAP - varCount(r) > 0) return false;
-        const arr = (_sibIdx && _sibIdx.get(r.cc + '|' + seriesKey(r.name))) || [];
+        const _k2 = r.cc + '|' + seriesKey(r.name);
+        if (!_serReal.has(_k2)) return false;   // 同名重複は「同シリーズの空き」ではない
+        const arr = (_sibIdx && _sibIdx.get(_k2)) || [];
         return arr.some(x => String(x.item_id) !== String(r.item_id) && MODEL_CAP - x.cnt > 0);
       });
     }
@@ -28489,7 +28541,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span style="font-size:10px;color:#8a8f98;font-weight:700;letter-spacing:.04em">よく使う</span>
         <button class="smd-btn" id="lst-newest" style="${(lst.sort === 'created' && lst.sortDir !== 'asc') ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="出品日が新しい順（＝直近に出した商品が上）">🆕 新規出品順</button>
         <button class="smd-btn" id="lst-updated" style="${(lst.sort === 'updated' && lst.sortDir !== 'asc') ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="Shopee側で直近に変わった順（価格・在庫・画像・タイトルの変更を含む）">🔃 更新順</button>
-        <button class="smd-btn" id="lst-series" style="${lst.sort === 'series' ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="「〜①」「〜②」のように連番で分けたカタログを上下に並べます（本数が多いシリーズが上／⬆⬇で逆順）。もう一度押すと『複数あるシリーズだけ』に絞り、3回目で解除">📚 ${lst.sort === 'series' ? (lst.seriesOnly ? 'シリーズのみ' : 'シリーズ順' + (lst.sortDir === 'asc' ? '(多い順)' : '(少ない順)')) : 'シリーズで並べる'}</button>
+        <button class="smd-btn" id="lst-series" style="${lst.sort === 'series' ? 'background:#3b5bdb;color:#fff;border-color:#3b5bdb;font-weight:700' : 'border-color:#3b5bdb;color:#3b5bdb;font-weight:700'}" title="「〜①」「〜②」のように連番で分けたカタログを上下に並べます（本数が多いシリーズが上／⬆⬇で逆順）。もう一度押すと『複数あるシリーズだけ』に絞り、3回目で解除。&#10;※同じタイトルを2回出しているだけのもの（重複出品）はシリーズに数えません＝そちらは「⚠ 同名が複数」で見ます">📚 ${lst.sort === 'series' ? (lst.seriesOnly ? 'シリーズのみ' : 'シリーズ順' + (lst.sortDir === 'asc' ? '(多い順)' : '(少ない順)')) : 'シリーズで並べる'}</button>
         <button class="smd-btn" id="lst-gridtoggle" style="${lst.grid ? 'background:#ee4d2d;color:#fff;border-color:#ee4d2d;font-weight:700' : 'border-color:#ee4d2d;color:#ee4d2d;font-weight:700'}" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目">🌏 ${lst.grid ? '横並び中' : '国横断で横並び'}</button>
         <span style="width:1px;height:18px;background:#e3e6ec"></span>
         <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">明細あり・単品すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">🧩明細あり（バリエーション）</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
@@ -28604,7 +28656,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       _serMap = new Map(); const cnt = new Map();
       shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); cnt.set(k, (cnt.get(k) || 0) + 1); });
       let ci = 0;
-      shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); if ((cnt.get(k) || 0) >= 2 && !_serMap.has(k)) _serMap.set(k, ci++); });
+      shown.forEach(r => { const k = r.cc + '|' + seriesKey(r.name); if ((cnt.get(k) || 0) >= 2 && _serReal.has(k) && !_serMap.has(k)) _serMap.set(k, ci++); });
     } else _serMap = null;
     lst._mediaRows = rows;   // 🖼画像・動画ビューは「いまの絞り込み結果ぜんぶ」を見る（選択は不要）
     // ★1行でも描画に失敗すると、これまでは一覧が丸ごと真っ白になっていた（原因も画面に出ない）。
@@ -29269,6 +29321,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       lst.sort = 'series'; lst.sortDir = 'desc'; lst.seriesOnly = true; lst.page = 1;   // ①②③を上下に並べる
       drawListingStatus();
       try { toast('👥 ①②③のカタログを上下に並べました（📚を押すと解除）'); } catch (_) {}
+    }));
+    // ⚠ 同名バッジ：押すとその名前だけに絞る（どれを止めるか決めるため）
+    document.querySelectorAll('#lst-list .lst-dupb').forEach(el => el.addEventListener('click', () => {
+      const nm = el.dataset.nm || ''; if (!nm) return;
+      lst.search = '"' + nm + '"'; lst.page = 1;
+      const se = document.getElementById('lst-search'); if (se) se.value = lst.search;
+      drawListingStatus();
+      try { toast('⚠ 同じタイトルの出品だけを出しました（✕で解除）'); } catch (_) {}
     }));
     // 👥 群の親SKUを1枚目に揃える（JAN・識別・原価を共有させるため）
     document.querySelectorAll('#lst-list .lst-grpsku').forEach(el => el.addEventListener('click', async () => {
