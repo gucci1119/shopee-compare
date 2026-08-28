@@ -30,11 +30,17 @@ function doGet(e) {
     var mode = (e && e.parameter && e.parameter.mode) || '';
     if (mode === 'jan') {
       // 📇 JAN・型番をネットから調べる。names は改行区切りの明細名（英語でも日本語でも可）
+      // 🧠 これまでに当たった「英語名 → 日本語名」の対訳。ポータルが貯めて毎回送ってくる。
+      //   ★失敗から学ぶ仕組み：当たった対訳を例として渡すと、似た言い回しの商品が当たるようになる。
+      var learned = String((e && e.parameter && e.parameter.learned) || '');
+      // 🧠 これまでに当たった「英語名 → 日本語名」の対訳。ポータルが貯めて毎回送ってくる。
+      //   ★失敗から学ぶ仕組み：当たった対訳を例として渡すと、似た言い回しの商品が当たるようになる。
+      var learned = String((e && e.parameter && e.parameter.learned) || '');
       var names = String((e && e.parameter && e.parameter.names) || '').split('\n')
         .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 8);   // ★8件まで（25件だと検索6回で調べきれず途中で止まる・2026-08-28実測）
       var hw2 = (e && e.parameter && e.parameter.hw) || '';
       if (!names.length) throw new Error('names が必要です');
-      var jr = researchJan_(names, hw2);
+      var jr = researchJan_(names, hw2, learned);
       out = { ok: true, items: jr, usage: jr.__usage || null };
     } else {
       var series = (e && e.parameter && e.parameter.series) || '';
@@ -53,7 +59,7 @@ function doGet(e) {
  *   ★当てずっぽうを一番避けたいので、**確信が無ければ空で返させる**。出典URLも必ず返させて、
  *     ポータル側で「どこから拾ったか」を残す（違う商品を拾っていればその場で分かる）。
  */
-function researchJan_(names, hw) {
+function researchJan_(names, hw, learned) {
   var P = PropertiesService.getScriptProperties();
   var key = P.getProperty('ANTHROPIC_API_KEY');
   if (!key) throw new Error('ANTHROPIC_API_KEY 未設定');
@@ -70,6 +76,7 @@ function researchJan_(names, hw) {
     '　そのまま英語で検索してください。どちらか迷ったら両方試してください。\n' +
     '　例) Grand Strategy → 大戦略 ／ Super Robot Wars → スーパーロボット大戦 ／ The King of Fighters 96 → ザ・キング・オブ・ファイターズ96\n' +
     '　　  Game de Hakken!! Tamagotchi → ゲームで発見!!たまごっち ／ Star Ocean Blue Sphere → スターオーシャン ブルースフィア\n' +
+    (learned ? '\n★この店で実際に当たった対訳です。言い回しの癖が同じなので、必ず参考にしてください。\n' + learned + '\n' : '') +
     '　検索語は「<日本語タイトル> <ハード> JAN」の形が当たりやすいです（例：大戦略 ゲームボーイ JAN）。\n' +
     '　どうしても特定できないものは、無理に埋めず空で返してください。\n' +
     '\n【商品名】\n' + names.map(function (n, i) { return (i + 1) + '. ' + n; }).join('\n') + '\n' +
@@ -90,7 +97,7 @@ function researchJan_(names, hw) {
       // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。
       //   ただし少なすぎると【調べきれずに途中で止まりJSONを返さない】（25件×6回で実際に起きた）。
       //   8件に対して10回＝1件1回強。これで足りることを実測で確かめている。
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 7 }],   // ★8件に7回＝1件1回弱。多すぎると入力トークンが膨らむ（費用の6割）
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12 }],   // ★8件に12回＝1件1.5回。3段構えで探すぶん増やす（当たらないと払い損なので、ここは削らない）
       messages: [{ role: 'user', content: prompt }]
     })
   });

@@ -29813,14 +29813,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) {
             pidMarkTried(k);                              // ★次から飛ばす（同じ所に二度払わない）
             try { pidPaintOne(k, {}); } catch (_) {}
-            ngLog.push({ 検索語: names[j], 明細名: m.n || '(単品)', 返り: got ? '空で返った' : '返りなし' });
+            ngLog.push({ 検索語: names[j], 明細名: m.n || '(単品)', 日本語名の推定: (got && got.jp) || '（出せず）', 返り: got ? '空で返った' : '返りなし' });
             missed.push('・' + (m.n || '(単品)') + ' → 見つからず');
             return;
           }
           productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
             src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
           try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える
-          okLog.push({ 検索語: names[j], JAN: nj, 型番: nm, 出典: (got && got.source) || '', 検算: janMakerWarn(nj, nm) ? 'NG' : 'OK' });
+          okLog.push({ 検索語: names[j], 日本語名: (got && got.jp) || '', JAN: nj, 型番: nm, 出典: (got && got.source) || '', 検算: janMakerWarn(nj, nm) ? 'NG' : 'OK' });
+          try { janLearnAdd(names[j], got && got.jp); } catch (_) {}   // 🧠 当たった対訳を覚える
           hit++;
           // ♻️ 分かった答えを、他の国の【同じ明細名】にもその場で配る＝次に払わなくて済む
           try {
@@ -31756,6 +31757,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ★ヤマダのスクレイプだけだと「ヤマダに無い商品」は永遠に埋まらない。検索AIなら
   //     ブックオフ・駿河屋・任天堂公式など**どこに載っていても**拾える（本人「意外とこれ正確よ」2026-08-28）。
   //   ★GASの枠は1回押すごとに urlfetch 1回だけ（web_search はAnthropic側で走るのでGASの枠を食わない）。
+  // 🧠 失敗から学ぶ：当たったときの「英語名 → 日本語名」を貯めて、次回のプロンプトに例として渡す。
+  //   ★出品名は日本語を機械的に英訳したものなので、言い回しの癖はこの店で共通。
+  //     当たった対訳を見せるほど、似た商品が当たるようになる（本人「失敗を元に自動学習してほしい」2026-08-28）。
+  //   ★増やしすぎるとプロンプトが長くなって費用が上がるので、直近60件だけ持つ。
+  const JAN_LEARN_MAX = 60;
+  function janLearnLoad() { try { const d = JSON.parse(localStorage.getItem('smdJanLearn') || '{}'); return (d && typeof d === 'object') ? d : {}; } catch (_) { return {}; } }
+  function janLearnAdd(en, jp) {
+    const a = String(en || '').trim(), b = String(jp || '').trim();
+    if (!a || !b || a.toLowerCase() === b.toLowerCase()) return;
+    const d = janLearnLoad();
+    if (d[a]) return;
+    d[a] = b;
+    const ks = Object.keys(d);
+    if (ks.length > JAN_LEARN_MAX) ks.slice(0, ks.length - JAN_LEARN_MAX).forEach(k => delete d[k]);
+    try { localStorage.setItem('smdJanLearn', JSON.stringify(d)); } catch (_) {}
+  }
+  function janLearnText() {
+    const d = janLearnLoad(); const ks = Object.keys(d).slice(-JAN_LEARN_MAX);
+    if (!ks.length) return '';
+    return ks.map(k => '　　  ' + k + ' → ' + d[k]).join('\n');
+  }
   function aiJanJsonp(names, hw) {
     return new Promise((resolve, reject) => {
       if (!settings.aiResearchUrl) { reject(new Error('⚙️設定の「AIシリーズ調査GAS URL」が未設定です')); return; }
@@ -31766,7 +31788,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       window[cb] = (data) => { cleanup(); try { aiSpendAdd('JAN・型番調べ', data && data.usage); } catch (_) {} resolve(data); };
       el.onerror = () => { cleanup(); reject(new Error('GASに接続できません（URL/デプロイを確認）')); };
       el.src = settings.aiResearchUrl + (settings.aiResearchUrl.indexOf('?') >= 0 ? '&' : '?')
-        + 'mode=jan&names=' + encodeURIComponent(names.join('\n')) + '&hw=' + encodeURIComponent(hw || '') + '&callback=' + cb;
+        + 'mode=jan&names=' + encodeURIComponent(names.join('\n')) + '&hw=' + encodeURIComponent(hw || '')
+        + '&learned=' + encodeURIComponent(janLearnText()) + '&callback=' + cb;
       document.body.appendChild(el);
     });
   }
