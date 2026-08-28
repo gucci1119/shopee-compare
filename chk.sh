@@ -76,6 +76,16 @@ if warn:
         print('   %-34s %s' % (f, k))
     print('   → 書き込みはトークンで守られているが、URLを知られると勝手に叩かれて枠を食う')
 
+# ★同じタグに style が2つあると、ブラウザは【先頭だけ】を使い、あとの指定を丸ごと捨てる。
+#   2026-08-28：display:none を足すのに style を並べて書いてしまい、ボタンの見た目が壊れた。
+import re as _re
+_dup = _re.findall(r'<[a-zA-Z][^>]*?\sstyle="[^"]*"[^>]*?\sstyle="', io.open('index.html',encoding='utf-8').read())
+if _dup:
+    print('')
+    print('⛔ 同じタグに style が2つあります（%d件）。先頭だけが効いて、あとの指定は捨てられます' % len(_dup))
+    print('   → 既存の style の【中】に足す。属性を並べて書かない')
+    ok = False
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
