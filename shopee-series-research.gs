@@ -31,7 +31,7 @@ function doGet(e) {
     if (mode === 'jan') {
       // 📇 JAN・型番をネットから調べる。names は改行区切りの明細名（英語でも日本語でも可）
       var names = String((e && e.parameter && e.parameter.names) || '').split('\n')
-        .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 25);
+        .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 8);   // ★8件まで（25件だと検索6回で調べきれず途中で止まる・2026-08-28実測）
       var hw2 = (e && e.parameter && e.parameter.hw) || '';
       if (!names.length) throw new Error('names が必要です');
       var jr = researchJan_(names, hw2);
@@ -57,7 +57,9 @@ function researchJan_(names, hw) {
   var P = PropertiesService.getScriptProperties();
   var key = P.getProperty('ANTHROPIC_API_KEY');
   if (!key) throw new Error('ANTHROPIC_API_KEY 未設定');
-  var model = P.getProperty('MODEL') || 'claude-sonnet-5';
+  // ★この用途（検索して数字を拾うだけ）は高い推論力が要らない。Haikuで十分＝費用が約1/3。
+  //   シリーズ調査（researchSeries_）は判断が要るので Sonnet のまま。
+  var model = P.getProperty('MODEL_JAN') || 'claude-haiku-4-5-20251001';
   var prompt =
     'あなたは日本のレトロゲーム/ホビーに詳しい調査アシスタントです。\n' +
     '次の商品それぞれについて、日本国内で流通したパッケージ版の **JANコード(13桁)** と **メーカー型番** を web_search で調べてください。\n' +
@@ -77,9 +79,10 @@ function researchJan_(names, hw) {
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
     payload: JSON.stringify({
       model: model, max_tokens: 6000,
-      // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。上限を下げると素直に安くなる
-      //   （実測見積：上限12で約$53／6で約$29／3で約$18・4,078名前ぶん・2026-08-28）。
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }],
+      // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。
+      //   ただし少なすぎると【調べきれずに途中で止まりJSONを返さない】（25件×6回で実際に起きた）。
+      //   8件に対して10回＝1件1回強。これで足りることを実測で確かめている。
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }],
       messages: [{ role: 'user', content: prompt }]
     })
   });
