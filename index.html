@@ -29387,8 +29387,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.querySelectorAll('#lst-list .lst-idfall').forEach(btn => btn.addEventListener('click', async () => {
       const card = btn.closest('.tool-card') || document;
       const old = btn.textContent; btn.disabled = true;
+      // ★順番の理由：ヤマダは【新品店】なので、GB/FC/PS1のようなレトロは そもそも載っていない
+      //   （2026-08-28 本人「動いてるけど埋まってない」）。1件2.2秒かけて空振りするだけなので、
+      //   **AIのネット検索を先**に回し、ヤマダは【それでも埋まらなかった分】だけに使う。
       const steps = [['.lst-codefill', '①自社コード'], ['.lst-janscan', '②画像からJAN'],
-                     ['.lst-janweb', '③ヤマダでJAN・型番'], ['.lst-janai', '④AIのネット検索でJAN・型番']];
+                     ['.lst-janai', '③AIのネット検索でJAN・型番'], ['.lst-janweb', '④ヤマダで残りを探す']];
       const done = [];
       lst._idfBatch = true;                       // 途中のダイアログを止める合図
       try {
@@ -29418,19 +29421,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       const say = (t) => { if (lst._idfBatch) { (lst._idfMsgs = lst._idfMsgs || []).push(t); } else alert(t); };
       if (!targets.length) { toast('JAN・型番が空いている明細がありません', true); return; }
-      // ★1回25明細まで。★黙って切らない＝切った分を必ず伝える
-      const CAP = 25;
-      const use = targets.slice(0, CAP);
+      // ★AIには25件ずつ渡す（1回のURLが長くなりすぎないため）。ただし【最後まで回す】＝
+      //   100件なら4回に分けて全部見る。押し直しを人にさせない（本人「1タッチで」）。
+      const CHUNK = 25, MAXN = 300;                 // 一度に見る上限（これ以上は押し直し）
+      const use = targets.slice(0, MAXN);
       const rest = targets.length - use.length;
       const hw = (idfOf(row.item_id).indexOf('機種') >= 0) ? (((pidOf(pidKey(row.parent_sku)) || {}).f || {})['機種'] || '') : '';
       const names = use.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
-      const old = btn.textContent; btn.disabled = true; btn.textContent = '🤖 調べています…（' + use.length + '件）';
-      let data = null;
-      try { data = await aiJanJsonp(names, hw); }
-      catch (e) { btn.disabled = false; btn.textContent = old; say('🤖 AI検索に失敗しました。\n\n' + ((e && e.message) || e)); return; }
+      const old = btn.textContent; btn.disabled = true;
+      const items = [];
+      for (let i = 0; i < names.length; i += CHUNK) {
+        btn.textContent = '🤖 調べています ' + Math.min(i + CHUNK, names.length) + '/' + names.length;
+        let d = null;
+        try { d = await aiJanJsonp(names.slice(i, i + CHUNK), hw); }
+        catch (e) { btn.disabled = false; btn.textContent = old; say('🤖 AI検索に失敗しました（' + i + '件目まで）。\n\n' + ((e && e.message) || e)); break; }
+        if (!d || !d.ok) { btn.disabled = false; btn.textContent = old; say('🤖 AI検索に失敗しました（' + i + '件目まで）。\n\n' + ((d && d.error) || '応答がありません')); break; }
+        (d.items || []).forEach(x => items.push(x));
+      }
       btn.disabled = false; btn.textContent = old;
-      if (!data || !data.ok) { say('🤖 AI検索に失敗しました。\n\n' + ((data && data.error) || '応答がありません')); return; }
-      const byName = new Map((data.items || []).map(x => [String(x.name || '').trim().toLowerCase(), x]));
+      if (!items.length) { say('🤖 AI検索から結果が返りませんでした。'); return; }
+      const data = { ok: true, items: items };
+      const byName = new Map(items.map(x => [String(x.name || '').trim().toLowerCase(), x]));
       let hit = 0; const found = [], missed = [];
       use.forEach((m, i) => {
         const got = byName.get(String(names[i]).trim().toLowerCase()) || (data.items || [])[i];
@@ -29447,7 +29458,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       if (hit) { _pidDupCache = null; saveProductIds(); drawListingStatus(); }
       say('🤖 AIのネット検索で ' + hit + '/' + use.length + '件に入れました。'
-        + (rest ? '\n※明細が多いので、今回は先頭' + CAP + '件だけ見ました（残り' + rest + '件。もう一度押すと続きを見ます）' : '')
+        + (rest ? '\n※明細が多いので、今回は先頭' + MAXN + '件だけ見ました（残り' + rest + '件。もう一度押すと続きを見ます）' : '')
         + '\n\n' + (found.length ? '【入れた分】拾った出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
         + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
     })()));
