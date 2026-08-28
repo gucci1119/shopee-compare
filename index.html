@@ -3485,6 +3485,9 @@
     "✓追加": "✓ Add",
     "✕ だめ": "✕ No",
     "✕ 国すべて": "✕ All countries",
+    "🔎 いま絞り込んでいます": "🔎 Filters are active",
+    "✕ ぜんぶ外す": "✕ Clear all",
+    "この条件だけ外す": "Remove just this condition",
     "✕ 条件クリア": "✕ Clear conditions",
     "✕ 破棄して空にする": "✕ Discard and empty",
     "✕ 絞り込み解除": "✕ Clear filter",
@@ -15330,6 +15333,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-08-28', items: [
+      '🔎 <b>「いま何で絞り込んでいるか」を画面の上に出しました</b>（本人「switchでフィリピンのヒットがゼロって明らかにおかしい」）。<b>バグではなく、⚠同名が複数 がONのままでした</b>。この絞り込みは<b>設定が保存される</b>ので、前に押したまま次に開いてもONで残ります。<br>これまで「効いているかどうか」を<b>ボタンの枠の色だけ</b>で表しており、赤枠のボタンが並ぶ中で<b>どれが実際に効いているのか見分けられません</b>でした。<br>効いている条件を<b>1本の帯にまとめて上に出す</b>ようにしました（例：<code>⚠同名が複数 / 検索「switch」</code>）。<b>条件ごとの ✕ で1つだけ外せ</b>、<b>「✕ぜんぶ外す」</b>で全部戻せます。<br>※実データ確認：switch を含む出品は <b>MY467 / BR77 / PH63 / TH52 / VN47 / TW44 / SG41件</b> あり、同名が複数の組に限ると44件でした。数字は正しく、見せ方の問題でした。',
+    ] },
     { date: '2026-08-25', items: [
       '🔎 <b>「pokemon」で打つと Pokémon の出品が出てこなかったのを直しました</b>（本人「これ、Pokémonはpokemonって打っても引っかからない？」）。出品名には <b>Pokémon</b> や <b>memória</b> のように<b>アクセント記号つきの綴り</b>が混ざります（BRはポルトガル語）。検索は <code>toLowerCase()</code> しかしていなかったので、<b>é と e が別の文字として扱われ</b>、当たりませんでした。<br>検索語と商品名の<b>両方からアクセント記号を落として</b>比べるようにしました（<b>Pokémon→pokemon</b>／<b>memória→memoria</b>）。ついでに<b>全角英数も半角に寄せ</b>ます（Ｐｏｋｅｍｏｎ でも当たります）。<br>直したのは<b>5か所</b>——出品一覧・在庫管理・出品台帳の注文/在庫リンク・棚・入庫待ち。分析側（重複検知・母数の突合）は<b>もともとアクセントを落としていた</b>ので、検索だけが取り残されていました。',
       '📅 <b>出品グラフの日付がまばらだったのを直しました</b>（本人「なぜこれ、日付の表示がまばらなの？」）。目盛りを「<b>日曜 or 月初 or 先頭 or 今日</b>」の<b>4つの条件すべて</b>で出していたため、条件が重なる所で <code>5/31 → 6/1</code>、<code>8/1 → 8/2</code> のように<b>1日違いが並び</b>、逆に他は7日空くという不揃いになっていました（実測：90日表示で間隔が 3,1,6,7,7,7,3,4,7… とバラバラ）。<br><b>等間隔で打つ</b>ように変えました。90日なら11日おきに9本、30日なら8日おきに5本、365日なら41日おきに10本。<b>最後は必ず今日</b>を出し、その直前の目盛りが近すぎる時はそちらを消すので、数字が重なりません。',
@@ -28522,6 +28528,34 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span title="出品データは公式APIで自動同期＝ブラウザを開かなくても最新。ただし1回に1店ずつなので、ある店の全件が回ってくるのは数時間に1回、変更ぶんの取り込みは2時間おきです。&#10;＝作りたての出品はここには出ません。🔄最新に更新を押すと、その場でShopeeへ取りに行きます。" style="cursor:help;text-decoration:underline dotted">🤖自動同期ⓘ</span>
         ${state.mode === 'live' && settings.sbSecret ? `<button class="smd-btn" id="lst-sync2" ${lst.syncing ? 'disabled' : ''} style="margin-left:auto;font-size:10.5px;padding:1px 8px" title="この端末（🟢ライブ）からShopeeへ直接取りに行って即時最新化。通常は公式APIの自動同期で足りるため不要です">🟢即時取得</button>` : ''}
       </div>
+      ${(() => {
+        // ★いま効いている絞り込みを1本の帯にまとめて出す。
+        //   これまでボタンの枠色だけで表していたので、どれがONなのか分からず
+        //   「switchでPHが0件＝バグ？」と見えていた（真因は⚠同名が複数がONのまま。設定は保存される）。2026-08-28
+        const act = [];
+        const S = { live: '出品中だけ', oos: '在庫切れだけ', other: '停止/その他だけ', watched: '在庫監視だけ', unwatched: '監視対象外だけ', srcoos: '仕入元売切れだけ', keep0: '在庫0固定だけ' };
+        if (S[lst.filter]) act.push(['状態', S[lst.filter], 'f']);
+        if (lst.search) act.push(['検索', '「' + esc(lst.search) + '」', 'q']);
+        if (lst.dupOnly) act.push(['⚠ 同名が複数', lst.dupLive ? '両方とも出品中だけ' : '同一国内で重複', 'dup']);
+        if (lst.seriesOnly) act.push(['同シリーズ', '2つ以上あるものだけ', 'ser']);
+        if (lst.noVideo) act.push(['動画', '無しだけ', 'vid']);
+        if (lst.slot) act.push(['明細の空き枠', lst.slot === 'free' ? '空きあり' : (lst.slot === 'full' ? '満杯' : '満杯→同シリーズに空き'), 'slot']);
+        if (lst.varType) act.push(['明細', lst.varType === 'has' ? 'ありだけ' : '単品だけ', 'vt']);
+        if (lst.cond) act.push(['状態', lst.cond, 'cond']);
+        if (lst.brand) act.push(['ブランド', esc(lst.brand), 'brand']);
+        if (lst.mdlMin != null || lst.mdlMax != null) act.push(['明細数', (lst.mdlMin != null ? lst.mdlMin : '') + '〜' + (lst.mdlMax != null ? lst.mdlMax : ''), 'mdl']);
+        if (lst.priceMin != null || lst.priceMax != null) act.push(['価格', (lst.priceMin != null ? lst.priceMin : '') + '〜' + (lst.priceMax != null ? lst.priceMax : ''), 'price']);
+        if (lst.pub) act.push(['公開', lst.pub === 'pub' ? '公開だけ' : '非公開だけ', 'pub']);
+        if ((lst.ccs || []).length) act.push(['国', (lst.ccs || []).join('・') + 'だけ', 'ccs']);
+        if (!act.length) return '';
+        return `<div id="lst-activebar" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;padding:6px 10px;background:#fff6f3;border:1px solid #ffd2c4;border-radius:8px">
+          <span style="font-size:11.5px;font-weight:700;color:#ee4d2d;white-space:nowrap">🔎 いま絞り込んでいます</span>
+          ${act.map(([k, v, id]) => `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;background:#fff;border:1px solid #ffb59d;border-radius:12px;padding:2px 4px 2px 9px;color:#c0392b">
+            <b style="font-weight:700">${k}</b><span style="color:#555">${v}</span>
+            <button class="lst-af-x" data-x="${id}" title="この条件だけ外す" style="border:none;background:none;color:#c0392b;cursor:pointer;font-size:12px;line-height:1;padding:0 3px">✕</button></span>`).join('')}
+          <button id="lst-af-all" class="smd-btn" style="font-size:11px;padding:2px 10px;border-color:#d93025;color:#d93025;font-weight:700;margin-left:auto">✕ ぜんぶ外す</button>
+        </div>`;
+      })()}
       <div class="smd-dim" style="font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">該当 <b>${lst.grid ? gridGroups.length : rows.length}</b>${lst.grid ? '商品（各国束ね）' : '件'}（全${totalAll}件）｜ ${lstPage}/${lstPages}ページ ｜ <span style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center">${per || '国未選択'}</span>${ccSel.length ? `<span style="color:#ee4d2d;font-weight:700">🌏 ${ccSel.join('・')}のみ</span>` : ''}
         <span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center">
           <button id="lst-media" class="smd-btn" style="font-size:11.5px;padding:3px 13px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="いまの絞り込み結果ぜんぶの画像・動画を一覧で見て、その場で差し替えます（選択は不要）">🖼 画像・動画で見る</button>
@@ -28823,6 +28857,30 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (lst.sort !== 'series') { lst.sort = 'series'; lst.sortDir = 'asc'; lst.seriesOnly = false; }
         else if (!lst.seriesOnly) { lst.seriesOnly = true; }
         else { lst.sort = ''; lst.sortDir = 'desc'; lst.seriesOnly = false; }
+        lst.page = 1; drawListingStatus();
+      }); }
+    // 🔎 絞り込みバー：条件ごとに ✕ で外す／ぜんぶ外す
+    { const ab = document.getElementById('lst-activebar');
+      if (ab) ab.addEventListener('click', e => {
+        const x = e.target.closest('.lst-af-x'); const all = e.target.closest('#lst-af-all');
+        if (!x && !all) return;
+        const off = (k) => {
+          if (k === 'f') lst.filter = 'all';
+          else if (k === 'q') { lst.search = ''; const se = document.getElementById('lst-search'); if (se) se.value = ''; }
+          else if (k === 'dup') { lst.dupOnly = false; lst.dupLive = false; }
+          else if (k === 'ser') lst.seriesOnly = false;
+          else if (k === 'vid') lst.noVideo = false;
+          else if (k === 'slot') lst.slot = '';
+          else if (k === 'vt') lst.varType = '';
+          else if (k === 'cond') lst.cond = '';
+          else if (k === 'brand') lst.brand = '';
+          else if (k === 'mdl') { lst.mdlMin = null; lst.mdlMax = null; }
+          else if (k === 'price') { lst.priceMin = null; lst.priceMax = null; }
+          else if (k === 'pub') lst.pub = '';
+          else if (k === 'ccs') { lst.ccs = []; try { localStorage.setItem('smdLstCcs', '[]'); } catch (_) {} }
+        };
+        if (all) ['f', 'q', 'dup', 'ser', 'vid', 'slot', 'vt', 'cond', 'brand', 'mdl', 'price', 'pub', 'ccs'].forEach(off);
+        else off(x.getAttribute('data-x'));
         lst.page = 1; drawListingStatus();
       }); }
     { const sg2 = document.getElementById('lst-slot'); if (sg2) sg2.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.slot = b.dataset.s; lst.page = 1; drawListingStatus(); }); }
