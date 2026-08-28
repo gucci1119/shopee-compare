@@ -27526,9 +27526,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 📊 走っている処理の進み具合を、画面の下にずっと出す（本人「予定終了時刻とメーターも欲しい」2026-08-28）。
   //   ★1件あたりの実測時間から【終わる時刻】を出す。％だけだと「あと何分か」が分からない。
   //   ★止めるボタンも一緒に置く＝進みを見て「やっぱりやめる」がその場でできる。
-  const _mt = { t0: 0, done: 0, total: 0, stop: null, label: '' };
-  function meterShow(label, total, onStop) {
+  const _mt = { t0: 0, done: 0, total: 0, stop: null, label: '', job: null };
+  let _mtDone = null, _mtCtx = null;   // 🗂しごとの「終わったよ」を呼ぶ関数と、進みを流す先
+  function meterShow(label, total, onStop, job) {
     _mt.t0 = Date.now(); _mt.done = 0; _mt.total = total || 0; _mt.stop = onStop || null; _mt.label = label || '';
+    _mt.job = job || null;                 // 🗂しごとにも同じ進みを出す
     let el = document.getElementById('smd-meter');
     if (!el) {
       el = document.createElement('div');
@@ -27563,8 +27565,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + '<span>1件 ' + (per ? per.toFixed(1) : '—') + '秒</span></div>';
     const sb = document.getElementById('smd-meter-stop');
     if (sb && _mt.stop) sb.onclick = () => { try { _mt.stop(); } catch (_) {} sb.textContent = '止めています…'; sb.disabled = true; };
+    // 🗂しごとにも同じ進みを流す（見ている画面が違っても分かるように）
+    if (_mt.job && _mt.job.progress) {
+      try { _mt.job.progress(pct, d.toLocaleString() + '/' + _mt.total.toLocaleString() + '件・のこり ' + mmss + '（目安 ' + hhmm + '）'); } catch (_) {}
+    }
   }
-  function meterHide() { const el = document.getElementById('smd-meter'); if (el) el.style.display = 'none'; }
+  function meterHide() { const el = document.getElementById('smd-meter'); if (el) el.style.display = 'none'; _mt.job = null; }
   // ♻️ 一度調べた答えを【名前で】使い回す（本人 2026-08-28「意外と結構金かかるね」）。
   //   ★同じ明細名が平均3.7か国に出ているのに、欄は国ごとに別々なので、
   //     何もしないと同じ商品を3〜7回調べて、そのたびにお金がかかる（実測：22,236件 vs 名前6,019種類）。
@@ -29728,7 +29734,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   {…} を明細名に置き換えるだけの単純なもの。すでに入っている欄は触らない。
     // 🔎 指定した明細だけ、AIのネット検索でJAN・型番を埋める（1明細でも複数でも同じ処理を使う）。
     //   ★処理は【ここ1か所】。行の「この明細を調べる」も、選択バーの「選んだ明細」も、これを呼ぶ。
-    async function janFillModels(row, models, btn, quiet) {
+    async function janFillModels(row, models, btn, quiet, noMeter) {
       productIds = productIds || {};
       const cand = models.filter(m => {
         if (!m || m.ghost) return false;
@@ -29779,7 +29785,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       const old = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; }
-      if (!quiet) meterShow('🔎 JAN・型番を調べています', tgt.length, () => { lst._janStop = true; });
+      let _job = null;
+      if (!noMeter) {
+        // 🗂しごとに出す。ctx.progress で進みを流し、しごと側の「止める」でも止まる。
+        _job = startJob('🔎 JAN・型番を調べる', row.cc + ' ' + String(row.name || '').slice(0, 28) + '（' + tgt.length + '明細）',
+          (ctx) => new Promise(res => { _mtDone = res; _mtCtx = ctx; }));
+        meterShow('🔎 JAN・型番を調べています', tgt.length, () => { lst._janStop = true; }, _mtCtx);
+      }
       let hit = 0; const found = [], missed = [];
       const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
       let spread = 0;                      // ♻️ 他の国の同じ明細に配れた数（そのぶん課金を避けられた）
@@ -29833,9 +29845,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             + '　出典: ' + ((got && got.source) || '?') + (w ? '\n　　⚠ ' + w : ''));
         });
         _pidDupCache = null; saveProductIds();
-        if (!quiet) meterStep(chunk.length);
+        if (!noMeter) meterStep(chunk.length);
       }
-      if (!quiet) meterHide();
+      if (!noMeter) { meterHide(); try { if (_mtDone) _mtDone({ msg: hit + '/' + tgt.length + '件に入れました' }); } catch (_) {} _mtDone = null; _mtCtx = null; }
       if (btn) { btn.disabled = false; btn.textContent = old; }
       // 📝 当たった／外れたを残す（本人「成功した失敗したログも残しておいてね／仕組み改善に使うので」2026-08-28）。
       //   ★何を検索語にして、どこから拾って、何が外れたかまで残す。件数だけだと直しようがない。
@@ -29885,7 +29897,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (lst._janStop) break;
           bm.textContent = '■ 止める（' + (i + 1) + '/' + rows2.length + '件目）';
           const before = _mt.done;
-          try { await janFillModels(rows2[i], rows2[i].models || [], null, true); } catch (_) {}
+          try { await janFillModels(rows2[i], rows2[i].models || [], null, true, true); } catch (_) {}
           // このカタログで進んだぶんを足す（中で数えていないので、対象数から見積もる）
           const did = (rows2[i].models || []).filter(m => { if (!m || m.ghost) return false;
             const k = pidKeyModel(rows2[i], m); return k && (productIds[k] || {}).at; }).length;
@@ -30057,60 +30069,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       alert('⚡ まとめて入れました\n\n' + done.join('\n') + (msgs.length ? '\n\n' + msgs.join('\n\n') : ''));
     }));
     // 🤖 AIのネット検索で JAN・型番を拾う（空いている欄だけ）
+    // 🤖 AIのネット検索で JAN・型番を拾う（空いている欄だけ）。
+    //   ★中身は janFillModels に統一した（2026-08-28）。以前はここに同じような処理を別に書いていたため、
+    //     こちらだけ「同じ名前の使い回し」「見つからなかった印」「金額の確認」「メーター」「しごと表示」が
+    //     効いていなかった。判定も進捗も1か所に持つ。
     document.querySelectorAll('#lst-list .lst-janai').forEach(btn => btn.addEventListener('click', () => btn._run = (async () => {
       const id = btn.dataset.id, cc = btn.dataset.cc;
       const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(id));
       if (!row) return;
-      productIds = productIds || {};
-      const targets = (row.models || []).filter(m => {
-        if (m.ghost) return false;
-        const k = pidKeyModel(row, m); if (!k) return false;
-        const p = productIds[k] || {};
-        return !String(p.jan || '').trim() || !String(p.mpn || '').trim();
-      });
-      const say = (t) => { if (lst._idfBatch) { (lst._idfMsgs = lst._idfMsgs || []).push(t); } else alert(t); };
-      if (!targets.length) { toast('JAN・型番が空いている明細がありません', true); return; }
-      // ★AIには25件ずつ渡す（1回のURLが長くなりすぎないため）。ただし【最後まで回す】＝
-      //   100件なら4回に分けて全部見る。押し直しを人にさせない（本人「1タッチで」）。
-      const CHUNK = 25, MAXN = 300;                 // 一度に見る上限（これ以上は押し直し）
-      const use = targets.slice(0, MAXN);
-      const rest = targets.length - use.length;
-      const hw = (idfOf(row.item_id).indexOf('機種') >= 0) ? (((pidOf(pidKey(row.parent_sku)) || {}).f || {})['機種'] || '') : '';
-      const names = use.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
-      const old = btn.textContent; btn.disabled = true;
-      const items = [];
-      for (let i = 0; i < names.length; i += CHUNK) {
-        btn.textContent = '🤖 調べています ' + Math.min(i + CHUNK, names.length) + '/' + names.length;
-        let d = null;
-        try { d = await aiJanJsonp(names.slice(i, i + CHUNK), hw); }
-        catch (e) { btn.disabled = false; btn.textContent = old; say('🤖 AI検索に失敗しました（' + i + '件目まで）。\n\n' + ((e && e.message) || e)); break; }
-        if (!d || !d.ok) { btn.disabled = false; btn.textContent = old; say('🤖 AI検索に失敗しました（' + i + '件目まで）。\n\n' + ((d && d.error) || '応答がありません')); break; }
-        (d.items || []).forEach(x => items.push(x));
-      }
-      btn.disabled = false; btn.textContent = old;
-      if (!items.length) { say('🤖 AI検索から結果が返りませんでした。'); return; }
-      const data = { ok: true, items: items };
-      const byName = new Map(items.map(x => [String(x.name || '').trim().toLowerCase(), x]));
-      let hit = 0; const found = [], missed = [];
-      use.forEach((m, i) => {
-        const got = byName.get(String(names[i]).trim().toLowerCase()) || (data.items || [])[i];
-        const k = pidKeyModel(row, m); const prev = productIds[k] || {};
-        const nj = String(prev.jan || '').trim() || String((got && got.jan) || '').trim();
-        const nm = String(prev.mpn || '').trim() || String((got && got.mpn) || '').trim();
-        if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) {
-          missed.push('・' + (m.n || '(単品)') + '　→ 見つからず（AIが確信を持てませんでした）'); return;
-        }
-        productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
-          src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
-          try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える（一覧を描き直さない）
-        hit++;
-        found.push((m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ') + '　出典: ' + ((got && got.source) || '?'));
-      });
-      if (hit) { _pidDupCache = null; saveProductIds(); }   // ★描き直さない＝スクロールと開いた明細がそのまま
-      say('🤖 AIのネット検索で ' + hit + '/' + use.length + '件に入れました。'
-        + (rest ? '\n※明細が多いので、今回は先頭' + MAXN + '件だけ見ました（残り' + rest + '件。もう一度押すと続きを見ます）' : '')
-        + '\n\n' + (found.length ? '【入れた分】拾った出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
-        + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
+      await janFillModels(row, row.models || [], btn, !!lst._idfBatch);
     })()));
     // ★1タッチボタンから【順番に待って】走らせられるよう、各処理の約束(Promise)を btn._run に置く。
     //   処理そのものは1か所のまま＝同じことを二重に書かない。
