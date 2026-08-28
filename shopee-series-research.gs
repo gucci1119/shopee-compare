@@ -90,7 +90,7 @@ function researchJan_(names, hw) {
       // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。
       //   ただし少なすぎると【調べきれずに途中で止まりJSONを返さない】（25件×6回で実際に起きた）。
       //   8件に対して10回＝1件1回強。これで足りることを実測で確かめている。
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 7 }],   // ★8件に7回＝1件1回弱。多すぎると入力トークンが膨らむ（費用の6割）
       messages: [{ role: 'user', content: prompt }]
     })
   });

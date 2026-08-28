@@ -15535,6 +15535,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-28', items: [
+      '♻️ <b>同じ商品を何度も調べて課金していたのをやめました</b>（本人「意外と結構金かかるね」）。同じ明細名は<b>平均3.7か国</b>に出ているのに、JAN欄は国ごとに別なので、<b>同じ商品を3〜7回調べて毎回お金がかかって</b>いました（実測：名前つき明細 <b>22,236件</b>に対し、名前の種類は <b>6,019</b>）。<br>直したこと——①<b>調べる前に</b>、同じ明細名で既に分かっているものを<b>タダで入れる</b>。②<b>調べたあと</b>、その答えを他の国の同じ明細に<b>その場で配る</b>。束ねる鍵は<b>「明細名＋機種」</b>です（機種を入れないと同名でハード違いのソフトを取り違えます）。<br>これで調べる回数は<b>27%</b>になります。全部やった場合の見積もりで <b>¥93,391 → ¥25,279（¥68,000の節約）</b>。あわせてGAS側の検索回数も<b>10→7回</b>に下げました（費用の6割は検索結果が入力トークンに積まれるぶん）。',
       '📌 <b>再読み込みしても、開いていた明細と見ていた位置がそのままになるようにしました</b>（本人「ページ再読み込みした時に、開いてたバリエ閉じたり、スクロール位置最初に戻したりやめてほしい」）。<b>開いた明細</b>（直近40件）と<b>スクロール位置</b>を覚えて、開き直したときに戻します。中身がDBから届くまでは高さが出ないので、<b>0.1秒・0.4秒・0.9秒の3回</b>に分けて位置を合わせ直します（1回だけだと、まだ短いページの上端に貼り付いてしまう）。位置の記憶は<b>6時間</b>で捨てます（翌日に前日の場所へ飛ばされないように）。',
       '🇯🇵 <b>【訂正】「全部日本語で検索」は行き過ぎでした</b>（本人「全部日本語ってわけじゃないけど」）。海外版・輸入版・日本語名が無い商品（雑貨や海外ブランド）もあるので、<b>日本語の正式名が分かるものだけ日本語で</b>探し、それ以外は<b>英語のまま</b>探すようにしました。迷う場合は両方試させます。',
       '📍 <b>調べたあと、見ていた位置に戻るようにしました</b>（本人「調べた後も、この位置のスクロールで止めてほしい」）。値を入れると一覧を描き直すので、毎回いちばん上まで戻っていました。縦（画面）と横（一覧の横スクロール）の両方を覚えて、描いた直後に戻します。',
@@ -27494,6 +27495,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + a('https://www.yamada-denkiweb.com/search?keyword=' + kw, 'ヤマダで検索（商品名の横に型番が出ます）', '🏬ヤマダ')
       + '</div>';
   }
+  // ♻️ 一度調べた答えを【名前で】使い回す（本人 2026-08-28「意外と結構金かかるね」）。
+  //   ★同じ明細名が平均3.7か国に出ているのに、欄は国ごとに別々なので、
+  //     何もしないと同じ商品を3〜7回調べて、そのたびにお金がかかる（実測：22,236件 vs 名前6,019種類）。
+  //     一度どこかで分かれば、他の国の同じ明細には【タダで】入れられる。
+  //   ★束ねる鍵は「明細名＋機種」。機種を入れないと、同名でハード違いのソフトを取り違える。
+  let _pidByName = null, _pidByNameAt = 0;
+  const pidNameKey = (nm, hw) => String(nm || '').trim().toLowerCase().replace(/\s+/g, ' ') + '\u0000' + String(hw || '').trim();
+  function pidNameIndex() {
+    if (_pidByName && Date.now() - _pidByNameAt < 4000) return _pidByName;
+    const m = new Map();
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const hw = ((pidOf(pidKey(r.parent_sku)) || {}).f || {})['機種'] || '';
+      (r.models || []).forEach(x => {
+        if (!x || x.ghost || !x.n) return;
+        const k = pidKeyModel(r, x); const p = productIds[k];
+        if (!p || (!String(p.jan || '').trim() && !String(p.mpn || '').trim())) return;
+        const nk = pidNameKey(x.n, hw);
+        if (!m.has(nk)) m.set(nk, { jan: p.jan || '', mpn: p.mpn || '', src: p.src || '', srcUrl: p.srcUrl || '' });
+      });
+    }));
+    _pidByName = m; _pidByNameAt = Date.now();
+    return m;
+  }
   // 🚫 「AIで探したが見つからなかった」印。★これが無いと、同じ明細を何度も調べて
   //   そのたびにお金がかかる（本人 2026-08-28「埋まらなかったやつは、再度AI検索しないように／お金無駄になるので」）。
   //   印は productIds に持つ（JAN・型番と同じ入れ物＝保存も共有も既にできている）。
@@ -29653,10 +29677,28 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!settings.aiResearchUrl) { alert('⚙️設定の「AIシリーズ調査GAS URL」が未設定です。'); return; }
       const hw = (() => { const f = (pidOf(pidKey(row.parent_sku)) || {}).f || {}; return f['機種'] || ''; })();
+      // ♻️ お金をかける前に、【同じ名前で既に分かっているもの】をタダで入れる
+      {
+        const idx = pidNameIndex(); let reused = 0;
+        tgt = tgt.filter(m => {
+          const got = idx.get(pidNameKey(m.n, hw)); if (!got) return true;
+          const k = pidKeyModel(row, m), prev = productIds[k] || {};
+          const nj = String(prev.jan || '').trim() || got.jan, nm2 = String(prev.mpn || '').trim() || got.mpn;
+          if (nj === String(prev.jan || '') && nm2 === String(prev.mpn || '')) return true;
+          productIds[k] = { jan: nj, mpn: nm2, own: prev.own || '', cond: prev.cond || '',
+            src: (got.src || '') + '（同じ明細名から複製）', srcUrl: got.srcUrl || '', at: Date.now() };
+          try { pidPaintOne(k, { jan: nj, mpn: nm2 }); } catch (_) {}
+          reused++; return false;
+        });
+        if (reused) { _pidDupCache = null; saveProductIds();
+          toast('♻️ ' + reused + '件は、同じ明細名で既に分かっていたので【お金をかけずに】入れました'); }
+        if (!tgt.length) { alert('♻️ ' + reused + '件を、同じ明細名の結果から入れました。\nAIには問い合わせていないので、費用はかかっていません。'); return; }
+      }
       const old = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; }
       let hit = 0; const found = [], missed = [];
       const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
+      let spread = 0;                      // ♻️ 他の国の同じ明細に配れた数（そのぶん課金を避けられた）
       // ★1回8件まで（それ以上は検索が足りず、AIが途中で止まってJSONを返さない・実測）
       for (let i = 0; i < tgt.length; i += 8) {
         const chunk = tgt.slice(i, i + 8);
@@ -29683,6 +29725,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える
           okLog.push({ 検索語: names[j], JAN: nj, 型番: nm, 出典: (got && got.source) || '', 検算: janMakerWarn(nj, nm) ? 'NG' : 'OK' });
           hit++;
+          // ♻️ 分かった答えを、他の国の【同じ明細名】にもその場で配る＝次に払わなくて済む
+          try {
+            const nk = pidNameKey(m.n, hw);
+            Object.keys(lst.byCc || {}).forEach(cc2 => (lst.byCc[cc2] || []).forEach(r2 => {
+              if (String(r2.item_id) === String(row.item_id)) return;
+              const hw2 = ((pidOf(pidKey(r2.parent_sku)) || {}).f || {})['機種'] || '';
+              (r2.models || []).forEach(x2 => {
+                if (!x2 || x2.ghost || !x2.n || pidNameKey(x2.n, hw2) !== nk) return;
+                const k2 = pidKeyModel(r2, x2), p2 = productIds[k2] || {};
+                const j2 = String(p2.jan || '').trim() || nj, m2 = String(p2.mpn || '').trim() || nm;
+                if (j2 === String(p2.jan || '') && m2 === String(p2.mpn || '')) return;
+                productIds[k2] = { jan: j2, mpn: m2, own: p2.own || '', cond: p2.cond || '',
+                  src: ((got && got.source) || 'AIネット検索') + '（同じ明細名から複製）', srcUrl: (got && got.url) || '', at: Date.now() };
+                spread++;
+                try { pidPaintOne(k2, { jan: j2, mpn: m2 }); } catch (_) {}
+              });
+            }));
+          } catch (_) {}
           const w = janMakerWarn(nj, nm);
           found.push('・' + (m.n || '(単品)') + ' → ' + [nj ? 'JAN ' + nj : '', nm ? '型番 ' + nm : ''].filter(Boolean).join(' / ')
             + '　出典: ' + ((got && got.source) || '?') + (w ? '\n　　⚠ ' + w : ''));
@@ -29699,7 +29759,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (_) {}
       // ★drawListingStatus() は呼ばない。呼ぶと6,476行を作り直して、スクロール位置と
       //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
-      alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。\n\n'
+      alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。'
+        + (spread ? '\n♻️ 同じ明細名の他の国にも ' + spread + '件 配りました（そのぶんは課金なし）' : '') + '\n\n'
         + (found.length ? '【入れた分】出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
         + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
     }
