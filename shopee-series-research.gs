@@ -1,5 +1,7 @@
 /**
- * Shopee OS — シリーズ全タイトル AIネット調査（GAS・JSONP）
+ * Shopee OS — AIネット調査（GAS・JSONP）
+ *   ① シリーズ全タイトル調査（?series=...）
+ *   ② JAN・型番調査（?mode=jan&names=...）★2026-08-28 追加
  * ポータルの「💡シリーズ明細サジェスト」の「🔍AIで全タイトル調査」から呼ばれ、
  * Claude API（Web検索ツール）でそのゲームシリーズの日本発売・物理版タイトルを全部調べてJSONで返す。
  * → ポータルが「未出品のタイトル」を判定して提案＝ポータル内で完結。
@@ -25,12 +27,78 @@ function doGet(e) {
   var cb = String((e && e.parameter && e.parameter.callback) || 'callback').replace(/[^A-Za-z0-9_$.]/g, '');
   var out;
   try {
-    var series = (e && e.parameter && e.parameter.series) || '';
-    var hw = (e && e.parameter && e.parameter.hw) || '';
-    if (!series) throw new Error('series が必要です');
-    out = { ok: true, series: series, titles: researchSeries_(series, hw) };
+    var mode = (e && e.parameter && e.parameter.mode) || '';
+    if (mode === 'jan') {
+      // 📇 JAN・型番をネットから調べる。names は改行区切りの明細名（英語でも日本語でも可）
+      var names = String((e && e.parameter && e.parameter.names) || '').split('\n')
+        .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 25);
+      var hw2 = (e && e.parameter && e.parameter.hw) || '';
+      if (!names.length) throw new Error('names が必要です');
+      out = { ok: true, items: researchJan_(names, hw2) };
+    } else {
+      var series = (e && e.parameter && e.parameter.series) || '';
+      var hw = (e && e.parameter && e.parameter.hw) || '';
+      if (!series) throw new Error('series が必要です');
+      out = { ok: true, series: series, titles: researchSeries_(series, hw) };
+    }
   } catch (err) { out = { ok: false, error: String(err && err.message || err) }; }
   return ContentService.createTextOutput(cb + '(' + JSON.stringify(out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+}
+
+/**
+ * 📇 JAN・型番をネットから調べる（web_search）。
+ *   ★ヤマダのスクレイプだけだと「ヤマダに無い商品」は永遠に埋まらない。
+ *     検索AIならブックオフ・駿河屋・任天堂公式など**どこに載っていても**拾える（本人「意外とこれ正確よ」2026-08-28）。
+ *   ★当てずっぽうを一番避けたいので、**確信が無ければ空で返させる**。出典URLも必ず返させて、
+ *     ポータル側で「どこから拾ったか」を残す（違う商品を拾っていればその場で分かる）。
+ */
+function researchJan_(names, hw) {
+  var P = PropertiesService.getScriptProperties();
+  var key = P.getProperty('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('ANTHROPIC_API_KEY 未設定');
+  var model = P.getProperty('MODEL') || 'claude-sonnet-5';
+  var prompt =
+    'あなたは日本のレトロゲーム/ホビーに詳しい調査アシスタントです。\n' +
+    '次の商品それぞれについて、日本国内で流通したパッケージ版の **JANコード(13桁)** と **メーカー型番** を web_search で調べてください。\n' +
+    (hw ? 'ハード（本体の種類）はすべて「' + hw + '」です。ハードが違う同名ソフトを拾わないでください。\n' : '') +
+    '\n【商品名】\n' + names.map(function (n, i) { return (i + 1) + '. ' + n; }).join('\n') + '\n' +
+    '\n【守ること】\n' +
+    '・**確信が持てないものは jan も mpn も空文字にする**。推測で埋めない（間違ったJANが一番困ります）。\n' +
+    '・JANは数字13桁（まれに8桁）。ハイフンや空白は入れない。\n' +
+    '・型番は例: DMG-ECJ / SLPS-01234 / HAC-P-AAAAA のようなメーカー品番。無ければ空。\n' +
+    '・source には根拠にしたページのタイトル、url にはそのURLを入れる。\n' +
+    '・入力の順番と同じ数だけ返す。name は入力の商品名をそのまま返す。\n' +
+    '\n最終出力は ```json のコードブロックで、\n' +
+    '[{"name":"X","jan":"4902370501490","mpn":"DMG-ECJ","source":"ブックオフ公式","url":"https://..."}, ...]\n' +
+    'という配列だけを返してください。';
+  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify({
+      model: model, max_tokens: 6000,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12 }],
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (res.getResponseCode() >= 300) throw new Error('Anthropic API ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+  var j = JSON.parse(res.getContentText());
+  var text = (j.content || []).filter(function (c) { return c.type === 'text'; }).map(function (c) { return c.text; }).join('\n');
+  var m = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+  if (!m) throw new Error('JAN抽出に失敗（応答: ' + text.slice(0, 120) + '…）');
+  var arr = JSON.parse(m[0]);
+  var out = [];
+  arr.forEach(function (o) {
+    var jan = String(o && o.jan || '').replace(/[^0-9]/g, '');
+    if (jan && jan.length !== 13 && jan.length !== 8) jan = '';   // 桁が違うものは捨てる（推測の混入を防ぐ）
+    out.push({
+      name: String(o && o.name || '').trim(),
+      jan: jan,
+      mpn: String(o && o.mpn || '').trim(),
+      source: String(o && o.source || '').trim(),
+      url: String(o && o.url || '').trim()
+    });
+  });
+  return out;
 }
 
 function researchSeries_(series, hw) {
