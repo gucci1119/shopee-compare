@@ -117,6 +117,38 @@ if _bad2:
     print('⛔ HTMLを組み立てた変数を esc() に通しています（%d件）。タグが文字で表示されます' % len(_bad2))
     ok = False
 
+# ★2026-08-30に実際にやらかした型を機械で止める。
+_h = io.open('index.html', encoding='utf-8').read()
+
+# ① JSONP(<script src>)に日本語をURLで載せる … 1文字9バイトで簡単に上限(8〜10KB)を超え【黙って失敗】する
+if 'createElement(\'script\')' in _h or "createElement('script')" in _h:
+    _js = _re.findall(r"\.src\s*=\s*([^;]{0,400});", _h)
+    _risky = [x for x in _js if 'encodeURIComponent' in x and 'length >' not in _h[:0] ]
+    _guard = 'src.length >' in _h or 'el.src.length' in _h
+    if _risky and not _guard:
+        print('')
+        print('⛔ JSONPのURLに変数を載せているのに、長さの検査がありません（%d箇所）' % len(_risky))
+        print('   → 日本語はURLエンコードで1文字9バイト。上限を超えると【黙って失敗】します（2026-08-30に65件が全滅）')
+        ok = False
+
+# ② productIds に項目を足したのに saveProductIds の「残す判定」に入れ忘れ
+#    （2026-08-16に own/f、2026-08-30に noJan で同じ事故）
+_m = _re.search(r'const has = m => !!\(m && \((.{0,400}?)\)\);', _h, _re.S)
+if _m:
+    _keep = _m.group(1)
+    for _fld in ['jan', 'mpn', 'cond', 'own', 'noJan']:
+        if _fld not in _keep:
+            print('')
+            print('⛔ saveProductIds の「残す判定」に %s が入っていません。保存の瞬間に捨てられます' % _fld)
+            ok = False
+
+# ③ 重複の判定で【状態(cond)】を見ていない（箱あり/箱なしは同じJANで正しい）
+#    Codexの指摘・2026-08-30。pidDupMap は JAN＋状態で束ねているのに、掃除側だけ落としていた
+if 'jan || \'\').trim(); if (!j) return;' in _h and 'cond' not in _h[_h.find('const bycat = new Map()'):_h.find('const bycat = new Map()') + 700]:
+    print('')
+    print('⛔ 重複の掃除が【状態(cond)】を見ていません。箱あり/箱なしの正しいJANを消します')
+    ok = False
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
