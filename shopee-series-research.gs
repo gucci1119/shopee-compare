@@ -66,6 +66,11 @@ function janShops_(hw) {
   var h = String(hw || '');
   var retro = /ゲームボーイ|GB|GBA|GBC|ファミコン|スーパーファミコン|FC|SFC|ニンテンドー64|N64|ゲームキューブ|Wii|ニンテンドーDS|3DS|PS1|PlayStation$|PS2|PS3|PSP|PS Vita|セガサターン|ドリームキャスト|ワンダースワン/i.test(h);
   if (retro) return { retro: true, shops: '駿河屋・ブックオフ・メディアワールド・楽天市場・Amazon.co.jp', note: 'ヤマダは新品店なのでレトロは載っていません。探さないでください。' };
+  // ★機種が分からない時に「現行機」とみなしてはいけない。
+  //   ヤマダはレトロを1件も持っていないので、レトロのカタログだと丸ごと空振りする
+  //   （2026-08-30 実測：PSPのカタログが 機種= のまま当たり39/100。他は62〜100%）。
+  //   分からない時は【新品店とレトロ店の両方】を探す。
+  if (!h) return { retro: false, shops: '駿河屋・ブックオフ・メディアワールド・楽天市場・ヤマダウェブコム・Amazon.co.jp', note: 'ハードが分かっていません。新しい機種と古い機種の両方を探してください。' };
   return { retro: false, shops: 'ヤマダウェブコム・楽天ブックス・Amazon.co.jp・ヨドバシ', note: '' };
 }
 
