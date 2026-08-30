@@ -29827,8 +29827,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (btn) btn.textContent = '🔎 調べています ' + Math.min(i + 12, tgt.length) + '/' + tgt.length;
         const names = chunk.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
         let d = null;
-        try { d = await aiJanJsonp(names, hw); } catch (e) { missed.push('※ ' + ((e && e.message) || e)); break; }
-        if (!d || !d.ok) { missed.push('※ ' + ((d && d.error) || '応答なし')); break; }
+        try { d = await aiJanJsonp(names, hw); } catch (e) { d = null; }
+        // ★失敗したら【学習を外して】もう一度だけ試す。URLが長すぎる等で全滅するのを防ぐ
+        //   （2026-08-30：学習が育ってURL上限を超え、65件が丸ごと0件になった）
+        if (!d || !d.ok) {
+          try { d = await aiJanJsonp(names, hw, true); } catch (e2) { d = null; }
+        }
+        if (!d || !d.ok) { missed.push('※ ' + ((d && d.error) || '応答なし（URLが長すぎる可能性）')); break; }
         const byName = new Map((d.items || []).map(x => [String(x.name || '').trim().toLowerCase(), x]));
         chunk.forEach((m, j) => {
           const got = byName.get(String(names[j]).trim().toLowerCase()) || (d.items || [])[j];
@@ -31791,7 +31796,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ★出品名は日本語を機械的に英訳したものなので、言い回しの癖はこの店で共通。
   //     当たった対訳を見せるほど、似た商品が当たるようになる（本人「失敗を元に自動学習してほしい」2026-08-28）。
   //   ★増やしすぎるとプロンプトが長くなって費用が上がるので、直近60件だけ持つ。
-  const JAN_LEARN_MAX = 60;
+  // ★★ URLの長さに注意（2026-08-30に自分で壊した）。JSONPは <script src> なので全部URLに乗る。
+  //    日本語はURLエンコードで【1文字9バイト】になるため、学習60件＝約16,700バイトでURL上限(8〜10KB)を
+  //    超え、最初の問い合わせで即失敗→中断していた（65件で0件・「外れた」の記録すら残らない形）。
+  //    12件までに減らし、さらに送る前にバイト数で頭打ちにする。
+  const JAN_LEARN_MAX = 12;
+  const JAN_LEARN_MAXBYTES = 2500;        // URLに乗せる学習の上限（エンコード後）
   function janLearnLoad() { try { const d = JSON.parse(localStorage.getItem('smdJanLearn') || '{}'); return (d && typeof d === 'object') ? d : {}; } catch (_) { return {}; } }
   function janLearnAdd(en, jp) {
     const a = String(en || '').trim(), b = String(jp || '').trim();
@@ -31806,9 +31816,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function janLearnText() {
     const d = janLearnLoad(); const ks = Object.keys(d).slice(-JAN_LEARN_MAX);
     if (!ks.length) return '';
-    return ks.map(k => '　　  ' + k + ' → ' + d[k]).join('\n');
+    // ★エンコード後のバイト数で必ず頭打ちにする。件数だけで数えると日本語の長さで簡単に溢れる。
+    let out = '';
+    for (const k of ks) {
+      const line = '　　  ' + k + ' → ' + d[k] + '\n';
+      if (encodeURIComponent(out + line).length > JAN_LEARN_MAXBYTES) break;
+      out += line;
+    }
+    return out.trim();
   }
-  function aiJanJsonp(names, hw) {
+  function aiJanJsonp(names, hw, noLearn) {
     return new Promise((resolve, reject) => {
       if (!settings.aiResearchUrl) { reject(new Error('⚙️設定の「AIシリーズ調査GAS URL」が未設定です')); return; }
       const cb = 'smdJan' + Math.abs(Date.now() % 1e9) + Math.floor(Math.random() * 1000);
@@ -31819,7 +31836,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       el.onerror = () => { cleanup(); reject(new Error('GASに接続できません（URL/デプロイを確認）')); };
       el.src = settings.aiResearchUrl + (settings.aiResearchUrl.indexOf('?') >= 0 ? '&' : '?')
         + 'mode=jan&names=' + encodeURIComponent(names.join('\n')) + '&hw=' + encodeURIComponent(hw || '')
-        + '&learned=' + encodeURIComponent(janLearnText()) + '&callback=' + cb;
+        + '&learned=' + encodeURIComponent(noLearn ? '' : janLearnText()) + '&callback=' + cb;
+      // ★送る前にURLの長さを見る。JSONPは <script src> なので長すぎると【黙って失敗】する。
+      //   日本語は1文字9バイトになるので、気づかないうちに簡単に上限を超える（2026-08-30に実際に起きた）。
+      if (el.src.length > 7000) {
+        cleanup();
+        reject(new Error('URLが長すぎます（' + el.src.length + 'バイト）。学習データか件数を減らしてください'));
+        return;
+      }
       document.body.appendChild(el);
     });
   }
