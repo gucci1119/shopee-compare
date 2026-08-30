@@ -5644,8 +5644,9 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
-    [/^JAN 空([\d,]+)$/, 'JAN empty $1'], [/^型番 空([\d,]+)$/, 'MPN empty $1'],
-    [/^（全([\d,]+)件）$/, ' (of $1)'],
+    [/^JAN ([\d,]+)\/([\d,]+)（空([\d,]+)）$/, 'JAN $1/$2 ($3 empty)'],
+    [/^型番 ([\d,]+)\/([\d,]+)（空([\d,]+)）$/, 'MPN $1/$2 ($3 empty)'],
+    [/^型番 ([\d,]+)\/([\d,]+)$/, 'MPN $1/$2'],
     [/^見つからなかった(\d+)件をもう一度探せるようにする$/, 'Allow re-searching the $1 not found'],
     // 🔗 重複の見比べ・🚫見つからず（出品一覧）
     [/^🔗 同じJANの出品が(\d+)つあります$/, '🔗 $1 listings share this JAN'],
@@ -15667,7 +15668,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
-      '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」）。開かないと分からない状態にしないため、<b>出しっぱなし</b>にしています。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
+      '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」「入ってる数/全数(空き数)がいいかも」）。<code>📇 JAN 35/96（空61） ／ 型番 40/96（空56）</code> の形で、<b>JANと型番それぞれ</b>出します。開かないと分からない状態にしないため<b>出しっぱなし</b>です。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
       '📚 <b>タイトルマスタを【英名→日本語】の辞書として無料で使うようにしました</b>（本人「APIもっと安くならんかね？」）。AIに英語のまま投げると、<b>まず日本語タイトルを当てるのに検索を1回使います</b>。こちらが日本語を渡せればその1回が要りません。<br>実測（GB・Switch・PSPの511明細）：<b>完全一致で100件＝19.6%</b>に日本語を添えられます。<b>部分一致は使いません</b>（<code>Zelda</code>が何十本にも当たって別作品を拾うため）。',
       '🎮 <b>機種の自動判定を全6,476出品で検算しました</b>。<b>手で入れてある機種と食い違ったものは0件</b>。5,096件（79%）で機種が付きます。付かなかった1,380件は<b>たまごっち・ポケモンカード・バッグなど、そもそもゲーム機に属さない物</b>が大半で、空のままが正しい状態です。',
       '🎮 <b>【原因を特定】機種（ハード）が空だと、探し先が新品店だけになって当たらなくなっていました</b>（本人「こんなに見つからないかね？」）。<br>実測：<b>PSPのカタログだけ当たり 35/96＝36%</b>。他は Switch 60〜68%・<b>100%が7カタログ</b>。記録を見ると、このカタログのログだけ <code>機種=</code> が<b>空</b>で、他は <code>機種=Switch</code> <code>機種=GB</code> でした。<br>機種が空だとGAS側が<b>「現行機」とみなして ヤマダ・楽天ブックスだけ</b>を探します。<b>ヤマダはレトロを1件も持っていない</b>ので、PSP 100件が丸ごと空振りしていました。外れた61件のうち<b>56件は日本語タイトルを正しく出せていた</b>（<code>モンスターハンター ポータブル 2nd G</code>／<code>遊戯王デュエルモンスターズGX タッグフォース3</code>／<code>侍道2 ポータブル</code>）ので、<b>訳ではなく探し先の問題</b>でした。<br>直し：<b>①機種が空なら【カタログ名から自動で判定】</b>（<code>…PSP Playstation Portable…</code>→PSP）。<b>②お金をかける前の確認に「機種：PSP（カタログ名から自動判定）」を出す</b>。<b>③それでも分からない時は、新品店とレトロ店の両方を探す</b>（ヤマダだけにしない）。',
@@ -27839,16 +27840,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function janFillSummary(row) {
     const c = janFillCount(row);
     if (!c.n) return '';
+    // 入っている数 / 全数（空き数）の形で出す（本人指定 2026-08-30）
     const pill = (lbl, empty) => {
       const filled = c.n - empty;
       const col = empty === 0 ? '#1a7f37' : (filled === 0 ? '#d93025' : '#8a5a00');
-      return `<span style="color:${col};font-weight:700">${lbl} 空${empty.toLocaleString()}</span>`;
+      return `<span style="color:${col};font-weight:700">${lbl} ${filled.toLocaleString()}/${c.n.toLocaleString()}`
+        + (empty ? `（空${empty.toLocaleString()}）` : '') + '</span>';
     };
     return `<div style="margin-top:3px;font-size:9px;line-height:1.5;color:#6b7280" title="${av(
-      'この商品の明細 ' + c.n + '件のうち、まだ入っていない数です。\n'
-      + 'JANが空: ' + c.jan + '件／型番が空: ' + c.mpn + '件\n'
+      'この商品の明細 ' + c.n + '件のうち、入っている数です。\n'
+      + 'JAN: ' + (c.n - c.jan) + '件／' + c.n + '件（空 ' + c.jan + '件）\n'
+      + '型番: ' + (c.n - c.mpn) + '件／' + c.n + '件（空 ' + c.mpn + '件）\n'
       + (c.no ? '🚫 AIで探したが見つからなかった: ' + c.no + '件（次からは飛ばします）\n' : '')
-      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}<span class="smd-dim">（全${c.n.toLocaleString()}件）</span>${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}</div>`;
+      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}</div>`;
   }
   // 🔁 このカタログで「AIでは見つからず」の印が付いている明細の数
   const janNoCount = (row) => (row && row.models || []).reduce((n, m) =>
