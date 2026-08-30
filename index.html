@@ -15668,6 +15668,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🐛 <b>【自分で壊していた】通信に1回失敗すると、残りの明細が丸ごと調べられないまま終わっていました</b>（本人「そもそも最後の方やってなくない？」）。<br>12件ずつ問い合わせる作りで、<b>1かたまりが失敗した時点でループごと止めて</b>いました。残りは<b>調べてもいないのに「見つからず」の印も付かない</b>ので、画面からは区別できません。さらに集計が<b>「外れ＝対象−当たり」</b>だったため、<b>触ってもいない明細まで「外れ」として数えられ</b>、ログ上は <code>対象=95 当たり=51 外れ=44</code>（合計95）と<b>全部やったように見えて</b>いました。<br>実際、このPSPカタログの <code>Konami Gradius Portable</code> <code>Patapon PSP</code> <code>Ys I&amp;II Chronicles 2</code> <code>True Sangoku Musou Multi Rai 2</code> は<b>JANも型番も空・🚫の印も無し＝一度も調べていません</b>。<br>直し：<b>①失敗したかたまりだけ飛ばして最後まで進む</b>（3回続けて失敗したら止める）。<b>②「未実行」を外れと分けて数える</b>。<b>③終わったときに「◯件は通信に失敗して調べられませんでした。もう一度押せば続きから調べます」と必ず知らせる</b>。',
       '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」「入ってる数/全数(空き数)がいいかも」）。<code>📇 JAN 35/96（空61） ／ 型番 40/96（空56）</code> の形で、<b>JANと型番それぞれ</b>出します。開かないと分からない状態にしないため<b>出しっぱなし</b>です。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
       '📚 <b>タイトルマスタを【英名→日本語】の辞書として無料で使うようにしました</b>（本人「APIもっと安くならんかね？」）。AIに英語のまま投げると、<b>まず日本語タイトルを当てるのに検索を1回使います</b>。こちらが日本語を渡せればその1回が要りません。<br>実測（GB・Switch・PSPの511明細）：<b>完全一致で100件＝19.6%</b>に日本語を添えられます。<b>部分一致は使いません</b>（<code>Zelda</code>が何十本にも当たって別作品を拾うため）。',
       '🎮 <b>機種の自動判定を全6,476出品で検算しました</b>。<b>手で入れてある機種と食い違ったものは0件</b>。5,096件（79%）で機種が付きます。付かなかった1,380件は<b>たまごっち・ポケモンカード・バッグなど、そもそもゲーム機に属さない物</b>が大半で、空のままが正しい状態です。',
@@ -30109,6 +30110,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         meterShow('🔎 JAN・型番を調べています', tgt.length, () => { lst._janStop = true; }, _mtCtx);
       }
       let hit = 0; const found = [], missed = [];
+      // ⚠️ 通信に失敗して【調べられなかった】明細。外れ（＝調べたが無かった）と混ぜない。
+      let undoneN = 0, failStreak = 0, failAbort = ''; const undone = [];
       const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
       // ★同じ回の中で使ったJAN/型番。別の明細に同じ値が来たら【取り違え】なので捨てる
       const batchJan = new Set(), batchMpn = new Set(), dupSkip = [];
@@ -30132,7 +30135,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!d || !d.ok) {
           try { d = await aiJanJsonp(names, hw, true); } catch (e2) { d = null; }
         }
-        if (!d || !d.ok) { missed.push('※ ' + ((d && d.error) || '応答なし（URLが長すぎる可能性）')); break; }
+        // ⚠️ ここで break していたため、**通信に1回失敗すると残り全部が未実行のまま終わって**いた。
+        //   しかも下の集計が「外れ＝対象−当たり」なので、**触ってもいない明細が「外れ」として数えられ**、
+        //   画面上は全部やったように見えていた（2026-08-30 本人「そもそも最後の方やってなくない？」）。
+        //   → そのかたまりだけ飛ばして次へ進む。未実行は別に数えて最後に必ず知らせる。
+        //   → ただし続けて3回こけたら、お金と時間の無駄なので止める。
+        if (!d || !d.ok) {
+          const why = (d && d.error) || '応答なし（URLが長すぎる可能性）';
+          missed.push('※ ' + why);
+          undone.push.apply(undone, chunk.map(m => (m && m.n) || '(単品)'));
+          undoneN += chunk.length;
+          if (!noMeter) meterStep(chunk.length);
+          if (++failStreak >= 3) { failAbort = why; break; }
+          continue;
+        }
+        failStreak = 0;
         const byName = new Map((d.items || []).map(x => [String(x.name || '').trim().toLowerCase(), x]));
         chunk.forEach((m, j) => {
           const got = byName.get(String(names[j]).trim().toLowerCase()) || (d.items || [])[j];
@@ -30200,7 +30217,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const line = (x, ok) => ok
           ? ('○ ' + x.検索語 + ' | ' + (x.日本語名 || '') + ' | ' + (x.JAN || '') + ' | ' + (x.型番 || '') + ' | ' + (x.出典 || ''))
           : ('✗ ' + x.検索語 + ' | ' + (x.日本語名の推定 || ''));
-        const head = '機種=' + (hw || '') + ' 対象=' + tgt.length + ' 当たり=' + hit + ' 外れ=' + (tgt.length - hit);
+        // ★「外れ＝対象−当たり」で数えない。通信に失敗して**触っていない分**まで外れに化ける。
+        const head = '機種=' + (hw || '') + ' 対象=' + tgt.length + ' 当たり=' + hit
+          + ' 外れ=' + Math.max(0, tgt.length - hit - undoneN) + ' 未実行=' + undoneN;
         const lines = okLog.map(x => line(x, true)).concat(ngLog.map(x => line(x, false)));
         const CAP = 1100;                     // 1件あたりの上限（logActの1,200より少し内側）
         let buf = head, part = 1;
@@ -30210,8 +30229,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (_) {}
       // ★drawListingStatus() は呼ばない。呼ぶと6,476行を作り直して、スクロール位置と
       //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
+      // ⚠️ 調べられなかった分は【必ず知らせる】。印は付けていないので、もう一度押せば続きから調べる。
+      if (undoneN) {
+        try { toast('⚠ ' + undoneN + '件は通信に失敗して調べられませんでした（印は付けていないので、もう一度押せば続きから調べます）', true); } catch (_) {}
+      }
       if (quiet) return;                         // ★まとめて実行中は1件ごとに出さない（最後にまとめて）
       alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。'
+        + (undoneN ? '\n⚠ ' + undoneN + '件は【通信に失敗して調べられませんでした】'
+            + (failAbort ? '（' + failAbort + '）' : '')
+            + '\n　　見つからなかった印は付けていないので、もう一度押せば続きから調べます'
+            + '\n　　' + undone.slice(0, 8).join(' / ') + (undone.length > 8 ? ' ほか' + (undone.length - 8) + '件' : '') : '')
         + (dupSkip.length ? '\n⚠ ' + dupSkip.length + '件は【他の明細と同じJAN】が返ったので入れませんでした（AIの取り違え）' : '')
         + (spread ? '\n♻️ 同じ明細名の他の国にも ' + spread + '件 配りました（そのぶんは課金なし）' : '') + '\n\n'
         + (found.length ? '【入れた分】出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
