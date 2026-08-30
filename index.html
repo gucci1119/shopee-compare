@@ -27545,9 +27545,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // ★押したら相手のカタログへ飛べる（どれと重複しているかを目で確かめられないと直せない）
         if (!html) return txt;                       // プレーン（title属性などに入れる用）
         return w.itemId
-          ? '<a class="lst-dupgo" data-cc="' + av(w.cc || '') + '" data-id="' + av(w.itemId) + '" data-mine="' + av(mine) + '" data-key="' + av(myKey || '') + '" data-okey="' + av(w.key || '') + '" href="#" title="' + av('押すと【両方のカタログを並べて】出します：' + nm + (w.mn ? '／' + w.mn : '')) + '" style="color:#d93025;text-decoration:underline">' + esc(txt) + '</a>'
+          ? '<a class="lst-dupgo" data-cc="' + av(w.cc || '') + '" data-id="' + av(w.itemId) + '" data-mine="' + av(mine) + '" data-key="' + av(myKey || '') + '" data-all="' + av((dup || []).join(',')) + '" href="#" title="' + av('押すと【両方のカタログを並べて】出します：' + nm + (w.mn ? '／' + w.mn : '')) + '" style="color:#d93025;text-decoration:underline">' + esc(txt) + '</a>'
           : esc(txt);
-      }).join('／') + (other.length > 3 ? ' ほか' + (other.length - 3) : ''));
+      }).join('／') + (other.length > 3 ? ' ほか' + (other.length - 3) + '件（押すと全部並びます）' : ''));
     }
     return parts.join(' ／ ');
   }
@@ -30049,17 +30049,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!id) return;
       // ★一覧を絞るのではなく【左右2画面のポップアップ】で見比べる
       //   （2026-08-30 本人「この画面の上にポップアップで2画面分割したものが並ぶイメージ」）。
-      dupCompareOpen(String(mine || ''), String(id), a2.dataset.cc || '', a2.dataset.key || '', a2.dataset.okey || '');
+      // ★2つとは限らない（本人 2026-08-30「3つ以上とかもあるので」）。その値に紐づく全部を渡す。
+      dupCompareAll(String(a2.dataset.all || '').split(',').filter(Boolean), String(a2.dataset.key || ''));
     }));
     // 🔍 重複の2カタログを【左右に並べて】見比べるポップアップ。
     //   ★どっちを止めるか決めるための画面。数字（販売・在庫・価格・明細数・出品日）を揃えて出し、
     //     Shopeeの編集ページと販売ページへ直接飛べるようにする。判断に要るものを1画面に置く。
-    function dupCompareOpen(idA, idB, cc, keyA, keyB) {
+    // 🔍 同じJAN/型番/自社コードが付いている明細を【全部】左右に並べて見比べる。
+    //   ★2つとは限らない。3つ以上あればそのぶん並べ、横に入りきらなければ横スクロールする。
+    function dupCompareAll(keys, myKey) {
+      const uniq = [...new Set((keys || []).filter(Boolean))];
+      if (!uniq.length) { toast('重複の相手が見つかりません', true); return; }
       const find = (id) => { let r = null;
         Object.keys(lst.byCc || {}).forEach(c2 => (lst.byCc[c2] || []).forEach(x => { if (String(x.item_id) === String(id)) r = x; }));
         return r; };
-      const A = find(idA), B = find(idB);
-      if (!A || !B) { toast('相手のカタログが見つかりません（🔄最新に更新を試してください）', true); return; }
+      // 鍵（id:<item_id>#<model_id>）→ カタログ行
+      const pairs = uniq.map(k => ({ key: k, row: find(String(k).replace(/^id:/, '').split('#')[0]) })).filter(x => x.row);
+      if (pairs.length < 2) { toast('相手のカタログが見つかりません（🔄最新に更新を試してください）', true); return; }
       // ★重複しているのは【カタログ】ではなく【その中の明細】。どの明細かを画像つきで出す。
       //   （2026-08-30 本人「明細名とかJANとか型番とかも欲しい」「画像も」）
       const modelOf = (r, key) => {
@@ -30088,7 +30094,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + '<div style="font-family:monospace;font-size:11px">型番 ' + esc(mo.p.mpn || '—') + '</div>'
           + (mo.p.src ? '<div class="smd-dim" style="font-size:10px">🔎 ' + esc(String(mo.p.src).slice(0, 30)) + '</div>' : '')
           + '</div></div>') : '';
-        return '<div style="flex:1;min-width:0;border:1px solid #e3e6ec;border-radius:10px;padding:12px 14px;background:#fff">'
+        const isMe = String(key) === String(myKey);
+        return '<div style="flex:1 0 300px;min-width:300px;border:' + (isMe ? '2px solid #d93025' : '1px solid #e3e6ec') + ';border-radius:10px;padding:12px 14px;background:#fff">'
+          + (isMe ? '<div style="font-size:10px;color:#d93025;font-weight:700;margin-bottom:4px">いま見ている方</div>' : '')
           + '<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">'
           + '<img src="' + IMG_CDN + av(r.image) + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#eee" onerror="this.style.opacity=.15">'
           + '<div style="min-width:0"><div style="font-size:12px;font-weight:700;line-height:1.35">' + esc(r.name || '') + '</div>'
@@ -30116,11 +30124,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       w.style.cssText = 'position:fixed;inset:0;z-index:140;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px';
       w.innerHTML = '<div style="background:#f7f8fa;border-radius:12px;padding:16px 18px;width:900px;max-width:96vw;max-height:90vh;overflow:auto">'
         + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
-        + '<b style="font-size:14px;color:#d93025">🔗 同じJANの出品が2つあります</b>'
+        + '<b style="font-size:14px;color:#d93025">🔗 同じJANの出品が' + pairs.length + 'つあります</b>'
         + '<button id="dupcmp-close" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 11px">閉じる</button></div>'
         + '<div class="smd-dim" style="font-size:11px;margin-bottom:10px"><b>赤い枠が、同じJANになっている明細</b>です。同じ商品を2か所に出していると、<b>自分の商品同士で競って</b>しまいます。'
         + '販売数・閲覧・出品日を見て、<b>残す方</b>を決めてください（止めるのはShopee側で行います）。</div>'
-        + '<div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap">' + card(A, keyA) + card(B, keyB) + '</div>'
+        + '<div style="display:flex;gap:12px;align-items:stretch;overflow-x:auto;padding-bottom:4px">'
+        + pairs.map(p2 => card(p2.row, p2.key)).join('') + '</div>'
         + '</div>';
       document.body.appendChild(w);
       const close = () => w.remove();
