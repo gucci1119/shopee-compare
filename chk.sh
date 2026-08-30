@@ -86,6 +86,25 @@ if _dup:
     print('   → 既存の style の【中】に足す。属性を並べて書かない')
     ok = False
 
+# ★同じ行が2回続いていないか（貼り替えスクリプトを2回走らせると起きる）。
+#   2026-08-30：shopee-series-research.gs で `var learned = ...` が二重に入っていた。
+#   varは再宣言できてしまうので構文チェックでは見つからない。
+for _f in sorted(glob.glob('*.gs')) + ['index.html']:
+    _ls = io.open(_f, encoding='utf-8').read().split('\n')
+    _hit = []
+    for _i in range(len(_ls) - 1):
+        _t = _ls[_i].strip()
+        if len(_t) < 25 or _t.startswith('//') or _t.startswith('*'):
+            continue
+        if _t == _ls[_i + 1].strip() and ('var ' in _t or 'const ' in _t or 'let ' in _t):
+            _hit.append((_i + 1, _t[:60]))
+    if _hit:
+        print('')
+        print('⛔ %s: 同じ宣言の行が2回続いています（貼り替えの二重適用の疑い）' % _f)
+        for _n, _t in _hit[:5]:
+            print('   %d行目  %s' % (_n, _t))
+        ok = False
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
