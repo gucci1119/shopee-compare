@@ -105,6 +105,15 @@ for _f in sorted(glob.glob('*.gs')) + ['index.html']:
             print('   %d行目  %s' % (_n, _t))
         ok = False
 
+# ★HTMLを返す関数を esc() に通すと、タグがそのまま文字で画面に出る。
+#   2026-08-30：重複警告のリンクが `<a class="lst-dupgo" ...>` と生で表示された。
+_src = io.open('index.html', encoding='utf-8').read()
+_bad2 = _re.findall(r'esc\(\s*(?:rich|html)\w*\s*\)', _src)
+if _bad2:
+    print('')
+    print('⛔ HTMLを組み立てた変数を esc() に通しています（%d件）。タグが文字で表示されます' % len(_bad2))
+    ok = False
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
