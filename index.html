@@ -5644,6 +5644,8 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    [/^JAN 空([\d,]+)$/, 'JAN empty $1'], [/^型番 空([\d,]+)$/, 'MPN empty $1'],
+    [/^（全([\d,]+)件）$/, ' (of $1)'],
     [/^見つからなかった(\d+)件をもう一度探せるようにする$/, 'Allow re-searching the $1 not found'],
     // 🔗 重複の見比べ・🚫見つからず（出品一覧）
     [/^🔗 同じJANの出品が(\d+)つあります$/, '🔗 $1 listings share this JAN'],
@@ -15665,6 +15667,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」）。開かないと分からない状態にしないため、<b>出しっぱなし</b>にしています。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
+      '📚 <b>タイトルマスタを【英名→日本語】の辞書として無料で使うようにしました</b>（本人「APIもっと安くならんかね？」）。AIに英語のまま投げると、<b>まず日本語タイトルを当てるのに検索を1回使います</b>。こちらが日本語を渡せればその1回が要りません。<br>実測（GB・Switch・PSPの511明細）：<b>完全一致で100件＝19.6%</b>に日本語を添えられます。<b>部分一致は使いません</b>（<code>Zelda</code>が何十本にも当たって別作品を拾うため）。',
+      '🎮 <b>機種の自動判定を全6,476出品で検算しました</b>。<b>手で入れてある機種と食い違ったものは0件</b>。5,096件（79%）で機種が付きます。付かなかった1,380件は<b>たまごっち・ポケモンカード・バッグなど、そもそもゲーム機に属さない物</b>が大半で、空のままが正しい状態です。',
       '🎮 <b>【原因を特定】機種（ハード）が空だと、探し先が新品店だけになって当たらなくなっていました</b>（本人「こんなに見つからないかね？」）。<br>実測：<b>PSPのカタログだけ当たり 35/96＝36%</b>。他は Switch 60〜68%・<b>100%が7カタログ</b>。記録を見ると、このカタログのログだけ <code>機種=</code> が<b>空</b>で、他は <code>機種=Switch</code> <code>機種=GB</code> でした。<br>機種が空だとGAS側が<b>「現行機」とみなして ヤマダ・楽天ブックスだけ</b>を探します。<b>ヤマダはレトロを1件も持っていない</b>ので、PSP 100件が丸ごと空振りしていました。外れた61件のうち<b>56件は日本語タイトルを正しく出せていた</b>（<code>モンスターハンター ポータブル 2nd G</code>／<code>遊戯王デュエルモンスターズGX タッグフォース3</code>／<code>侍道2 ポータブル</code>）ので、<b>訳ではなく探し先の問題</b>でした。<br>直し：<b>①機種が空なら【カタログ名から自動で判定】</b>（<code>…PSP Playstation Portable…</code>→PSP）。<b>②お金をかける前の確認に「機種：PSP（カタログ名から自動判定）」を出す</b>。<b>③それでも分からない時は、新品店とレトロ店の両方を探す</b>（ヤマダだけにしない）。',
       '🔁 <b>「🚫 AIでは見つからず」の印を消して、探し直せるようにしました</b>。印が付いた明細は二重の課金を避けるため飛ばしますが、<b>上のように探し方が間違っていた場合はやり直したい</b>ためです。カタログごとに「🔁 見つからなかった◯件をもう一度探せるようにする」。<b>この操作自体にお金はかかりません</b>（消すだけ）。次にAIで探した時にいくらかかるかも出します。',
       '🐛 <b>【自分で壊しました】明細を開くと商品名の列が細く潰れ、📍編集ボタンが左下に落ちていたのを直しました</b>（本人「バリエ明細開いたら何か細くなるのはなぜ？」）。開いている印の「📌 いま開いている商品」を<b>行の先頭に足したため、そこから先の列が全部1つずつズレて</b>いました（商品名が「状態」の46pxの枠に入って潰れ、最後の「操作」があふれて次の行の左端に落ちた）。行のセルは<b>並び順で列に割り当てている</b>ので、飾りを1つ足すだけで全部ズレます。印は取りやめました（右端でIDの文字にも重なっていたため）。開いていることは<b>▼マークと、貼り付いた行の影</b>で分かります。',
@@ -27797,6 +27802,54 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (man) return man;
     try { return invHwAuto((row && row.name) || '') || ''; } catch (_) { return ''; }
   };
+  // 📚 タイトルマスタ（app_kv.titles_<hw>）を【英名→日本語】の辞書として使う。
+  //   ★AIに英語のまま投げると、まず日本語タイトルを当てるところで検索を1回使う。
+  //     こちらが日本語を渡せれば、その1回が要らない＝安くなるうえ、訳の取り違えも減る。
+  //   ★完全一致だけ。部分一致は別作品を拾う（Zelda が何十本にも当たる）ので使わない。
+  //   実測（2026-08-30・GB/Switch/PSPの511明細）：完全一致 100件＝19.6%。
+  const JAN_MASTER_KEY = { PSVita: 'vita', Switch2: 'switch', GBC: 'gb', GBA: 'gba' };
+  const _janMaster = {};                                    // hw → Map(正規化した英名 → 日本語)
+  const janMasterNorm = (t) => String(t || '').normalize('NFKC').toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  async function janMasterLoad(hw) {
+    const key = (JAN_MASTER_KEY[hw] || String(hw || '')).toLowerCase();
+    if (!key) return null;
+    if (_janMaster[key]) return _janMaster[key];
+    const m = new Map();
+    try {
+      (await loadTitleRows(key)).forEach(x => {
+        if (!x || !x.en || !x.ja) return;
+        const k = janMasterNorm(x.en); if (k && !m.has(k)) m.set(k, String(x.ja));
+      });
+    } catch (_) {}
+    _janMaster[key] = m;
+    return m;
+  }
+  // 📇 このカタログの明細で【JANが空・型番が空】が何件あるか。
+  //   ★開かないと分からない状態にしない（本人方針）。カタログの行に出しっぱなしにする。
+  const janFillCount = (row) => {
+    const ms = (row && row.models || []).filter(m => m && !m.ghost && m.n);
+    let jan = 0, mpn = 0, no = 0;
+    ms.forEach(m => { const v = productIds[pidKeyModel(row, m)] || {};
+      if (!String(v.jan || '').trim()) jan++;
+      if (!String(v.mpn || '').trim()) mpn++;
+      if (v.noJan) no++; });
+    return { n: ms.length, jan: jan, mpn: mpn, no: no };
+  };
+  function janFillSummary(row) {
+    const c = janFillCount(row);
+    if (!c.n) return '';
+    const pill = (lbl, empty) => {
+      const filled = c.n - empty;
+      const col = empty === 0 ? '#1a7f37' : (filled === 0 ? '#d93025' : '#8a5a00');
+      return `<span style="color:${col};font-weight:700">${lbl} 空${empty.toLocaleString()}</span>`;
+    };
+    return `<div style="margin-top:3px;font-size:9px;line-height:1.5;color:#6b7280" title="${av(
+      'この商品の明細 ' + c.n + '件のうち、まだ入っていない数です。\n'
+      + 'JANが空: ' + c.jan + '件／型番が空: ' + c.mpn + '件\n'
+      + (c.no ? '🚫 AIで探したが見つからなかった: ' + c.no + '件（次からは飛ばします）\n' : '')
+      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}<span class="smd-dim">（全${c.n.toLocaleString()}件）</span>${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}</div>`;
+  }
   // 🔁 このカタログで「AIでは見つからず」の印が付いている明細の数
   const janNoCount = (row) => (row && row.models || []).reduce((n, m) =>
     n + ((m && !m.ghost && m.n && (productIds[pidKeyModel(row, m)] || {}).noJan) ? 1 : 0), 0);
@@ -28477,7 +28530,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const val = [pv.jan || '', pv.mpn || '', pv.own || ''].filter(Boolean).join(' ');
           const dup = val ? pidDupOf(pv, pk) : null;
           return pidInputs(pk, pv, meta.codeRule, dup, r.item_id);
-})()}<div style="margin-top:3px;border-top:1px dotted #e3e6ec;padding-top:3px"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}"><div style="display:flex;gap:2px;flex-wrap:wrap;margin-top:2px">${[['game', 'ゲーム'], ['medal', 'メダル'], ['card', 'カード'], ['set', 'セット']].map(([k, n]) => `<button class="lst-idfpre" data-id="${r.item_id}" data-p="${k}" title="この商品の識別項目と自社コードの規則を、${n}向けの形にします。&#10;ゲーム＝機種/作品/版　メダル＝弾/キャラ/仕様　カード＝弾/番号/キャラ/レア度&#10;決めると、下の明細に入力欄が出ます" style="border:1px solid #cdd7ea;background:#f7fbff;color:#1565c0;border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">${n}</button>`).join('')}<button class="lst-cparts" data-id="${r.item_id}" title="ゲームのように「箱・説明書・本体」の有無で値段が変わるものはON。&#10;状態欄がチェック式になり、組み合わせから完品／説明書なし／ソフトのみが自動で決まります。" style="border:1px solid ${cpartsOf(r.item_id).length ? '#1a7f37' : '#dfe3e8'};background:${cpartsOf(r.item_id).length ? '#eafaef' : '#fff'};color:${cpartsOf(r.item_id).length ? '#1a7f37' : '#8a8f98'};border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">箱/説/本</button>${idfNames(r.item_id).length ? `<span class="smd-dim" style="font-size:9px;width:100%">${esc(idfNames(r.item_id).join(' / '))}</span>` : ''}</div>${(meta.codeRule || '') ? `<button class="lst-codefill lst-idfsubitem" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="display:none;margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}<button class="lst-idfall" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="下の3つを【この画面のまま・上から順に】まとめて実行します。&#10;　①コード規則で自社コードを埋める（規則を決めているときだけ）&#10;　②明細の画像に写っているバーコードからJANを読む&#10;　③それでも空いている欄を、ヤマダウェブコムで名前から探してJAN・型番を入れる&#10;※すでに入っている欄は触りません。見つからなければ何も入れません（当てずっぽうで入れません）。&#10;※③は他サイトを見に行くのでライブPC（ブリッジ）が要ります。1件2.2秒ずつ・見つけ次第止めます。" style="margin-top:3px;width:100%;border:1px solid #1a7f37;background:#e8f6ec;color:#14682c;border-radius:6px;padding:2px 4px;font-size:9.5px;font-weight:700;cursor:pointer">⚡ JAN・型番を自動で入れる</button><button class="lst-idfmore" title="ひとつずつ実行したいときに開きます（ふだんは上の1つで足ります）" style="width:100%;border:none;background:none;color:#8a8f98;font-size:9px;cursor:pointer;padding:1px 0;text-align:left">▾ ひとつずつ実行する</button><span class="lst-idfsub" style="display:none"><button class="lst-janscan" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細の画像にバーコードが写っていれば、そこからJANを読み取って空いている欄に入れます。&#10;※表紙だけの写真にはたいてい写っていません（バーコードは裏面）。写っている物だけ拾えます。&#10;すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">📷 画像からJANを読む</button><button class="lst-janai" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細名を【AIのネット検索】に投げて、JANと型番を空いている欄に入れます。&#10;ヤマダに載っていない商品でも、ブックオフ・駿河屋・メーカー公式など【どこかに載っていれば】拾えます。&#10;※確信が持てないものは入れません（当てずっぽうで埋めません）。拾った出典も残します。&#10;※1回につき最大25明細まで。⚙️設定の「AIシリーズ調査GAS URL」が要ります。" style="margin-top:2px;width:100%;border:1px solid #1565c0;background:#e9f1fb;color:#11529c;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🤖 AIのネット検索でJAN・型番を探す</button>${janNoCount(r) ? `<button class="lst-janreset" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="「🚫 AIでは見つからず」の印を消して、もう一度AIで探せる状態に戻します。&#10;※印が付いている明細は、二重の課金を避けるためAIが飛ばします。&#10;※機種（ハード）が空のまま探すと探し先が新品店だけになり、レトロは当たりません。&#10;　機種が入った後で使ってください。&#10;※この操作自体にお金はかかりません（次にAIで探した時にかかります）" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#14682c;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔁 見つからなかった${janNoCount(r)}件をもう一度探せるようにする</button>` : ''}<button class="lst-janweb" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細名から【ヤマダウェブコム】を検索して、JANと型番を空いている欄に入れます。&#10;拾った商品名とURLも一緒に残すので、違う商品を拾っていればその場で分かります。&#10;※すでに入っている欄は触りません。見つからなければ何も入れません（当てずっぽうで入れません）" style="margin-top:2px;width:100%;border:1px solid #1565c0;background:#f2f8ff;color:#1565c0;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔎 ネットからJANを探す</button>${(() => {
+})()}${janFillSummary(r)}<div style="margin-top:3px;border-top:1px dotted #e3e6ec;padding-top:3px"><input class="lst-coderule" data-id="${r.item_id}" value="${av(meta.codeRule || '')}" placeholder="コード規則（任意）" title="JANが無い商品の自社コードの付け方を、この商品用にメモしておく欄。&#10;例: BANDAI-PKFP-{キャラ}-2020（メーカー-シリーズ-キャラ-版）&#10;ここに書いておくと、下のバリエ明細のJAN欄に薄く表示されるので、毎回思い出さなくて済みます。" style="width:100%;padding:2px 6px;border:1px dashed #d8dce3;border-radius:6px;font-size:9.5px;font-family:monospace;background:${(meta.codeRule || '') ? '#fbfaff' : 'transparent'}"><div style="display:flex;gap:2px;flex-wrap:wrap;margin-top:2px">${[['game', 'ゲーム'], ['medal', 'メダル'], ['card', 'カード'], ['set', 'セット']].map(([k, n]) => `<button class="lst-idfpre" data-id="${r.item_id}" data-p="${k}" title="この商品の識別項目と自社コードの規則を、${n}向けの形にします。&#10;ゲーム＝機種/作品/版　メダル＝弾/キャラ/仕様　カード＝弾/番号/キャラ/レア度&#10;決めると、下の明細に入力欄が出ます" style="border:1px solid #cdd7ea;background:#f7fbff;color:#1565c0;border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">${n}</button>`).join('')}<button class="lst-cparts" data-id="${r.item_id}" title="ゲームのように「箱・説明書・本体」の有無で値段が変わるものはON。&#10;状態欄がチェック式になり、組み合わせから完品／説明書なし／ソフトのみが自動で決まります。" style="border:1px solid ${cpartsOf(r.item_id).length ? '#1a7f37' : '#dfe3e8'};background:${cpartsOf(r.item_id).length ? '#eafaef' : '#fff'};color:${cpartsOf(r.item_id).length ? '#1a7f37' : '#8a8f98'};border-radius:10px;padding:0 6px;font-size:9px;cursor:pointer">箱/説/本</button>${idfNames(r.item_id).length ? `<span class="smd-dim" style="font-size:9px;width:100%">${esc(idfNames(r.item_id).join(' / '))}</span>` : ''}</div>${(meta.codeRule || '') ? `<button class="lst-codefill lst-idfsubitem" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="この規則で、まだ空いている【自社コード】をまとめて埋めます。&#10;{ } のところに明細名が入ります（大文字・記号はハイフンに）。&#10;例) BANDAI-PKFP-{キャラ}-2020 ＋ 明細名 Pikachu → BANDAI-PKFP-PIKACHU-2020&#10;※すでに入っている欄は触りません" style="display:none;margin-top:2px;width:100%;border:1px solid #7b52c4;background:#faf8ff;color:#7b52c4;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">⚡ この規則で自動で埋める</button>` : ''}<button class="lst-idfall" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="下の3つを【この画面のまま・上から順に】まとめて実行します。&#10;　①コード規則で自社コードを埋める（規則を決めているときだけ）&#10;　②明細の画像に写っているバーコードからJANを読む&#10;　③それでも空いている欄を、ヤマダウェブコムで名前から探してJAN・型番を入れる&#10;※すでに入っている欄は触りません。見つからなければ何も入れません（当てずっぽうで入れません）。&#10;※③は他サイトを見に行くのでライブPC（ブリッジ）が要ります。1件2.2秒ずつ・見つけ次第止めます。" style="margin-top:3px;width:100%;border:1px solid #1a7f37;background:#e8f6ec;color:#14682c;border-radius:6px;padding:2px 4px;font-size:9.5px;font-weight:700;cursor:pointer">⚡ JAN・型番を自動で入れる</button><button class="lst-idfmore" title="ひとつずつ実行したいときに開きます（ふだんは上の1つで足ります）" style="width:100%;border:none;background:none;color:#8a8f98;font-size:9px;cursor:pointer;padding:1px 0;text-align:left">▾ ひとつずつ実行する</button><span class="lst-idfsub" style="display:none"><button class="lst-janscan" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細の画像にバーコードが写っていれば、そこからJANを読み取って空いている欄に入れます。&#10;※表紙だけの写真にはたいてい写っていません（バーコードは裏面）。写っている物だけ拾えます。&#10;すでに入っている欄は触りません" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">📷 画像からJANを読む</button><button class="lst-janai" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細名を【AIのネット検索】に投げて、JANと型番を空いている欄に入れます。&#10;ヤマダに載っていない商品でも、ブックオフ・駿河屋・メーカー公式など【どこかに載っていれば】拾えます。&#10;※確信が持てないものは入れません（当てずっぽうで埋めません）。拾った出典も残します。&#10;※1回につき最大25明細まで。⚙️設定の「AIシリーズ調査GAS URL」が要ります。" style="margin-top:2px;width:100%;border:1px solid #1565c0;background:#e9f1fb;color:#11529c;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🤖 AIのネット検索でJAN・型番を探す</button>${janNoCount(r) ? `<button class="lst-janreset" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="「🚫 AIでは見つからず」の印を消して、もう一度AIで探せる状態に戻します。&#10;※印が付いている明細は、二重の課金を避けるためAIが飛ばします。&#10;※機種（ハード）が空のまま探すと探し先が新品店だけになり、レトロは当たりません。&#10;　機種が入った後で使ってください。&#10;※この操作自体にお金はかかりません（次にAIで探した時にかかります）" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#14682c;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔁 見つからなかった${janNoCount(r)}件をもう一度探せるようにする</button>` : ''}<button class="lst-janweb" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="明細名から【ヤマダウェブコム】を検索して、JANと型番を空いている欄に入れます。&#10;拾った商品名とURLも一緒に残すので、違う商品を拾っていればその場で分かります。&#10;※すでに入っている欄は触りません。見つからなければ何も入れません（当てずっぽうで入れません）" style="margin-top:2px;width:100%;border:1px solid #1565c0;background:#f2f8ff;color:#1565c0;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔎 ネットからJANを探す</button>${(() => {
                   const n = (r.models || []).filter(m => { const k = pidKeyModel(r, m); return k && String((pidOf(k).own || '')).trim() && String((pidOf(k).own || '')).trim() !== String(m.sku || '').trim(); }).length;
                   if (!n) return '';
                   return `<button class="lst-skuwrite" data-cc="${av(r.cc)}" data-id="${r.item_id}" title="自社コードを、そのままShopeeの明細SKUとして書き込みます（${n}件）。&#10;明細名を直してもSKUは変わらないので、注文明細から棚の商品を引けるようになります。&#10;※すでに同じ値が入っている明細は飛ばします" style="display:none;margin-top:2px;width:100%;border:1px solid #b26a00;background:#fffaf0;color:#b26a00;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">🔖 自社コードを明細SKUに書く（${n}）</button>`;
@@ -30061,7 +30114,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (lst._janStop) break;
         const chunk = tgt.slice(i, i + 12);
         if (btn) btn.textContent = '🔎 調べています ' + Math.min(i + 12, tgt.length) + '/' + tgt.length;
-        const names = chunk.map(m => { const q = janKeyword(row, m); return (q && q.kw) || String(m.n || '').trim(); });
+        const _mst = await janMasterLoad(hw);
+        const names = chunk.map(m => {
+          const q = janKeyword(row, m); const en = (q && q.kw) || String(m.n || '').trim();
+          // 📚 タイトルマスタに日本語があれば併記する（英語だけだと日本語を当てるのに検索を1回使う）
+          const ja = _mst && _mst.get(janMasterNorm(en));
+          return ja && ja !== en ? (en + ' ／ ' + ja) : en;
+        });
         let d = null;
         try { d = await aiJanJsonp(names, hw); } catch (e) { d = null; }
         // ★失敗したら【学習を外して】もう一度だけ試す。URLが長すぎる等で全滅するのを防ぐ
