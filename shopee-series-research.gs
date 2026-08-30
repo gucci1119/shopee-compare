@@ -65,12 +65,7 @@ function doGet(e) {
 function janShops_(hw) {
   var h = String(hw || '');
   var retro = /ゲームボーイ|GB|GBA|GBC|ファミコン|スーパーファミコン|FC|SFC|ニンテンドー64|N64|ゲームキューブ|Wii|ニンテンドーDS|3DS|PS1|PlayStation$|PS2|PS3|PSP|PS Vita|セガサターン|ドリームキャスト|ワンダースワン/i.test(h);
-  // ★実測（2026-08-30・当たり38件の出典を集計）：JANまで取れたのは
-  //   **メディアワールド 28件（そのサイトからの当たりは100%JANあり）** が圧倒的。
-  //   カイトリワールド3・Yahoo!ショッピング2 と続く。
-  //   駿河屋・ブックオフは検索には出るが【JANまで届かない】（当たり0件）。名指しの順番を実態に合わせる。
-  //   Yahoo!オークション・Amazon・Wikipedia は商品名は出るがJANが無い（当たっても0件）。
-  if (retro) return { retro: true, shops: 'メディアワールド（mediaworld.co.jp）・カイトリワールド・Yahoo!ショッピング・楽天市場・駿河屋', note: 'ヤマダは新品店なのでレトロは載っていません。探さないでください。Yahoo!オークションとWikipediaはJANが載っていないので、そこで止まらないでください。' };
+  if (retro) return { retro: true, shops: '駿河屋・ブックオフ・メディアワールド・楽天市場・Amazon.co.jp', note: 'ヤマダは新品店なのでレトロは載っていません。探さないでください。' };
   return { retro: false, shops: 'ヤマダウェブコム・楽天ブックス・Amazon.co.jp・ヨドバシ', note: '' };
 }
 
@@ -99,9 +94,8 @@ function researchJan_(names, hw, learned) {
     (learned ? '\n★この店で実際に当たった対訳です。言い回しの癖が同じなので、必ず参考にしてください。\n' + learned + '\n' : '') +
     '\n【探し方】この順で試してください。1つ当たれば次の商品へ。\n' +
     '　① 「<日本語タイトル> ' + (hw || 'ゲーム') + ' JAN」\n' +
-    '　② 「<日本語タイトル> ' + shops.shops.split('・')[0] + ' JAN」★ここが一番当たります（実測でJANの74%がここ）\n' +
-    '　③ それでも出なければ 「<日本語タイトル> ' + (shops.shops.split('・')[1] || '') + '」\n' +
-    '　④ 「<日本語タイトル> 型番」（DMG- / CGB- / AGB- / SLPS- / HAC-P- のような品番が出ます）\n' +
+    '　② 「<日本語タイトル> ' + shops.shops.split('・')[0] + '」（この商品は ' + shops.shops + ' に載っています）\n' +
+    '　③ 「<日本語タイトル> 型番」（DMG- / CGB- / AGB- / SLPS- / HAC-P- のような品番が出ます）\n' +
     '　★このハードでJANが載っているのは【' + shops.shops + '】です。' + (shops.note ? shops.note : '') + '\n' +
     '　サブタイトルが複数ある作品（大地の章／大空の章 など）は、どれか特定できないなら空で返してください。\n' +
     '\n【守ること】\n' +
