@@ -3619,6 +3619,18 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '🧹 おかしなJANを掃除': '🧹 Clean up bad JANs',
+    '🔗 同じJANの出品が': '🔗 Listings sharing this JAN:',
+    'いま見ている方': 'The one you are on',
+    '状態': 'Status', '明細数': 'Variations', '在庫': 'Stock', '価格': 'Price', '出品日': 'Listed on',
+    '✎ Shopeeで編集': '✎ Edit on Shopee', '一覧で開く': 'Open in the list',
+    '💱 レートの推移（直近14日）': '💱 FX rate history (last 14 days)',
+    '日（JST）': 'Day (JST)', '合計': 'Total', '回数': 'Times',
+    '🔎 調べる': '🔎 Look up', '⚡ JAN・型番を自動で入れる': '⚡ Fill JAN / model no. automatically',
+    '▾ ひとつずつ実行する': '▾ Run them one by one', '▴ 閉じる': '▴ Close',
+    '⚠ このJANは検算が合いません': '⚠ This JAN fails its check digit',
+    '同じ商品を2か所に出していると、': 'Listing the same item twice means ',
+    '残す方を決めてください': 'decide which one to keep',
     '🔗 重複の2つ': '🔗 The duplicate pair', '並べて表示中': 'shown side by side',
     '☑ BR・VN以外を全選択': '☑ Select all except BR and VN',
     '🔎 選んだ出品のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected listings',
@@ -5621,6 +5633,10 @@
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
   const I18N_PAT = [
+    // 🔗 重複の見比べ・🚫見つからず（出品一覧）
+    [/^🔗 同じJANの出品が(\d+)つあります$/, '🔗 $1 listings share this JAN'],
+    [/^🚫 AIでは見つからず（(\d+)回）$/, '🚫 Not found by AI ($1 tries)'],
+    [/^(\d+)番　(.+)$/, '#$1  $2'],
     [/^🔎 選んだ (\d+) 件のJAN・型番を探す$/, '🔎 Look up JAN / model no. for $1 selected'],
     [/^🚫 AIでは見つからず（(\d+)回）$/, '🚫 Not found by AI ($1 tries)'],
     // 💴 APIの利用料（ヘッダ）
@@ -29995,10 +30011,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           //   検算(チェックデジット)は通ってしまうので、これで弾かないと気づけない。
           let cj = String((got && got.jan) || '').trim();
           let cm = String((got && got.mpn) || '').trim();
-          if (cj && batchJan.has(cj)) { dupSkip.push((m.n || '') + '（JAN ' + cj + ' が同じ回の他の明細と重複）'); cj = ''; }
-          if (cm && batchMpn.has(cm)) { cm = ''; }
-          if (cj) batchJan.add(cj);
-          if (cm) batchMpn.add(cm);
+          // ★状態が違えば同じJANでよい（箱あり/箱なし など）。状態込みで見る。
+          const cdk = '\u0001' + String(prev.cond || '').trim();
+          if (cj && batchJan.has(cj + cdk)) { dupSkip.push((m.n || '') + '（JAN ' + cj + ' が同じ回の他の明細と重複）'); cj = ''; }
+          if (cm && batchMpn.has(cm + cdk)) { cm = ''; }
+          if (cj) batchJan.add(cj + cdk);
+          if (cm) batchMpn.add(cm + cdk);
           const nj = String(prev.jan || '').trim() || cj;
           const nm = String(prev.mpn || '').trim() || cm;
           if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) {
@@ -30172,7 +30190,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //     Shopeeの編集ページと販売ページへ直接飛べるようにする。判断に要るものを1画面に置く。
     // 🔍 同じJAN/型番/自社コードが付いている明細を【全部】左右に並べて見比べる。
     //   ★2つとは限らない。3つ以上あればそのぶん並べ、横に入りきらなければ横スクロールする。
-    function dupCompareAll(keys, myKey) {
+    // 🖼 画像URL。image_id が取れなかった明細は【絶対URL】が入っているので、
+  //   そこに IMG_CDN を前置すると "https://cdn/https://…" になって出なくなる（Codexの指摘・2026-08-30）。
+  const janImgUrl = (v) => { const t = String(v || ''); return /^https?:/i.test(t) ? av(t) : (IMG_CDN + av(t)); };
+  function dupCompareAll(keys, myKey) {
       const uniq = [...new Set((keys || []).filter(Boolean))];
       if (!uniq.length) { toast('重複の相手が見つかりません', true); return; }
       const find = (id) => { let r = null;
@@ -30202,7 +30223,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const mo = modelOf(r, key);
         // 重複している【明細】のブロック（画像・番号・名前・JAN・型番）
         const mBox = mo.m ? ('<div style="display:flex;gap:8px;align-items:flex-start;border:1px solid #f5b5b2;background:#fdeceb;border-radius:8px;padding:8px 10px;margin-bottom:8px">'
-          + '<img src="' + IMG_CDN + av(mo.m.img || r.image) + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:#eee" onerror="this.style.opacity=.15">'
+          + '<img src="' + janImgUrl(mo.m.img || r.image) + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;background:#eee" onerror="this.style.opacity=.15">'
           + '<div style="min-width:0;font-size:11.5px;line-height:1.5">'
           + '<div style="font-weight:700;color:#b3271e">' + (mo.no ? mo.no + '番　' : '') + esc(mo.m.n || '(名前なし)') + '</div>'
           + '<div style="font-family:monospace;font-size:11px">JAN ' + esc(mo.p.jan || '—') + '</div>'
@@ -30213,7 +30234,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         return '<div style="flex:1 0 300px;min-width:300px;border:' + (isMe ? '2px solid #d93025' : '1px solid #e3e6ec') + ';border-radius:10px;padding:12px 14px;background:#fff">'
           + (isMe ? '<div style="font-size:10px;color:#d93025;font-weight:700;margin-bottom:4px">いま見ている方</div>' : '')
           + '<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">'
-          + '<img src="' + IMG_CDN + av(r.image) + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#eee" onerror="this.style.opacity=.15">'
+          + '<img src="' + janImgUrl(r.image) + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#eee" onerror="this.style.opacity=.15">'
           + '<div style="min-width:0"><div style="font-size:12px;font-weight:700;line-height:1.35">' + esc(r.name || '') + '</div>'
           + '<div class="smd-dim" style="font-size:10.5px;margin-top:2px">' + esc(r.cc) + '　🆔' + esc(String(r.item_id)) + '</div></div></div>'
           + mBox
@@ -30262,17 +30283,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const cb2 = document.getElementById('lst-jandupclean');
       if (cb2) cb2.addEventListener('click', () => {
         productIds = productIds || {};
+        // ★状態(箱あり/箱なし/本体のみ 等)が違えば、同じJANでも【正しい】。
+        //   既存の pidDupMap() は JAN＋状態 で束ねているのに、ここだけ状態を見ずに
+        //   「取り違え」と決めつけていた（Codexの指摘・2026-08-30）。同じ鍵の作り方に揃える。
         const bycat = new Map();
         Object.keys(productIds).forEach(k => {
-          const j = String((productIds[k] || {}).jan || '').trim(); if (!j) return;
+          const p0 = productIds[k] || {};
+          const j = String(p0.jan || '').trim(); if (!j) return;
+          const jk = j + '\u0001' + String(p0.cond || '').trim();     // JAN＋状態
           const cat = String(k).split('#')[0];
           if (!bycat.has(cat)) bycat.set(cat, new Map());
           const mm = bycat.get(cat);
-          if (!mm.has(j)) mm.set(j, []);
-          mm.get(j).push(k);
+          if (!mm.has(jk)) mm.set(jk, []);
+          mm.get(jk).push(k);
         });
         const bad = [];
-        bycat.forEach(mm => mm.forEach((ks, j) => { if (ks.length > 1) bad.push({ jan: j, keys: ks, why: '同じカタログの別明細と同じJAN' }); }));
+        bycat.forEach(mm => mm.forEach((ks, jk) => { if (ks.length > 1) bad.push({ jan: String(jk).split('\u0001')[0], keys: ks, why: '同じカタログの別明細と同じJAN（状態も同じ）' }); }));
         // ★検算(チェックデジット)が合わないJANも一緒に消す。
         //   13桁目は前12桁から計算で決まるので、合わない＝【世の中に存在しない番号】＝拾い間違い。
         //   （2026-08-30 実測：4902370547466／4902370548970 の2種類・のべ10件）
