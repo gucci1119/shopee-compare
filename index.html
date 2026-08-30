@@ -15689,6 +15689,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🎮 <b>【原因その2】1カタログにDSと3DSが混ざっていると、正しいJANを蹴っていました</b>。AIには「ハードはすべて◯◯です。<b>ハードが違う同名ソフトを拾わないでください</b>」と伝えているので、<b>いちばん先に当たったハード1つだけ</b>を渡すと、それ以外のソフトが全部弾かれます。<br>実際、<code>Nintendo DS 3DS NDS</code> のカタログが「3DS」と判定され、<b>ポケットモンスター ホワイト（DS）・リズム天国ゴールド（DS）・タッチ！カービィ（DS）</b> などが「日本語名は正しく出たのにJANに届かない」で外れていました（当たり 34/100）。<br>実測：<b>本当に複数ハードが混ざったカタログは652件・5,470明細</b>（<code>3DS / DS</code> だけで903明細）。<code>Game Boy Advance</code> の中の <code>Game Boy</code> のような<b>入れ子は数えていません</b>（位置が含まれていたら捨てる）。<br>→ AIには<b>カタログ名に入っているハードを全部</b>渡します（<code>機種：DS / 3DS</code>）。索引の鍵は1つのままなので、無料コピーの突合には影響しません。',
       '🛑 <b>【最優先で修正】作業中に勝手に再読み込みされるのを止めました</b>（本人「途中までやってるのに勝手に再読み込みされてうざいんやけど」）。新しい版を出すと自動で読み直す仕組みがあり、<b>今日は50回デプロイしたので、その都度</b>走っていました。「入力中は待つ」判定はありましたが<b>フォーカスが外れた一瞬で「作業していない」と判定</b>されるため、JANを打ち終えて次の欄へ移る瞬間に再読み込みが走っていました。→ <b>最後に触ってから5分静かになるまで読み直さない</b>ようにしました。急ぐときは緑の帯の「今すぐ更新」。',
       '📍 <b>再読み込みで一覧の縦位置が先頭に戻っていたのを直しました</b>（本人「再読み込みしたら最初の方に戻る」）。行は <code>#lst-scroll</code> という<b>箱の中</b>をスクロールするので、<b>window の scroll では動かず、縦位置がそもそも保存されていませんでした</b>（横位置だけ保存していた）。scroll は上に伝わらないので capture で拾い、箱の <code>scrollTop</code> も保存・復元します。',
       '⏱ <b>問い合わせ中の経過時間を毎秒出すようにしました</b>（本人「1分くらいこの状態」）。1回の問い合わせに<b>最大5分</b>かかるので、その間ずっと表示が変わらないと<b>生きているのか固まっているのか分かりません</b>。<code>1〜6件目を問い合わせ中… 1分12秒経過（1回で最大5分・6件ぶん）</code> のように、🗂しごと・下のメーター・ボタンの3か所で秒が進みます。',
@@ -27933,6 +27934,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const v = productIds[pidKeyModel(row, m)] || {};
     return n + ((v.noJan && !v.reJan) ? 1 : 0);
   }, 0);
+  // 🎮 カタログ名に入っているハードを【全部】拾う。
+  //   ★1カタログに DS と 3DS が混ざっていることがある（実測 652カタログ・5,470明細）。
+  //     いちばん先に当たった1つだけをAIに渡すと「ハードが違う同名ソフトは拾うな」が効いてしまい、
+  //     正しいJANを蹴る。3DS扱いのカタログで **ポケットモンスター ホワイト（DS）** が外れていた。
+  //   ★「Game Boy Advance」の中の「Game Boy」のような入れ子は落とす（位置が含まれていたら捨てる）。
+  const janHwAll = (row) => {
+    const t = String((row && row.name) || '');
+    const found = [];
+    for (const [k, re] of HW_RULES) { const m = re.exec(t); if (m) found.push([k, m.index, m.index + m[0].length]); }
+    const out = [];
+    found.forEach(([k, a, b]) => {
+      if (found.some(([k2, a2, b2]) => k2 !== k && a2 <= a && b <= b2)) return;
+      if (out.indexOf(k) < 0) out.push(k);
+    });
+    return out;
+  };
+  // AIに渡すハード。手で指定してあればそれが正。無ければカタログ名から拾った【全部】を渡す。
+  const janHwHint = (row) => {
+    const man = String(((pidOf(pidKey(row && row.parent_sku)) || {}).f || {})['機種'] || '').trim();
+    if (man) return man;
+    const a = janHwAll(row);
+    return a.length ? a.join(' / ') : '';
+  };
   const janHwAuto = (row) => !String(((pidOf(pidKey(row && row.parent_sku)) || {}).f || {})['機種'] || '').trim() && !!janHwOf(row);
   let _pidByName = null, _pidByNameAt = 0;
   const pidNameKey = (nm, hw) => String(nm || '').trim().toLowerCase().replace(/\s+/g, ' ') + '\u0000' + String(hw || '').trim();
@@ -30167,6 +30191,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!settings.aiResearchUrl) { alert('⚙️設定の「AIシリーズ調査GAS URL」が未設定です。'); return; }
       const hw = janHwOf(row);
+      // ★AIに渡すのは【カタログ名に入っているハード全部】。索引の鍵(hw)は1つのまま。
+      const hwHint = janHwHint(row) || hw;
       // ♻️ お金をかける前に、【同じ名前で既に分かっているもの】をタダで入れる
       {
         const idx = pidNameIndex(); let reused = 0;
@@ -30190,7 +30216,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!confirm('🔎 AIのネット検索で調べます。\n\n'
           // 🎮 機種は【探し先の店が変わる】ので、お金をかける前に必ず見せる。
           //   空のままだと「現行機」とみなされ、レトロを1件も持っていないヤマダを探しに行く。
-          + '機種：' + (hw ? hw + (janHwAuto(row) ? '（カタログ名から自動判定）' : '') : '⚠ わかりません（探し先を絞れないので当たりが落ちます）') + '\n'
+          + '機種：' + (hwHint ? hwHint + (janHwAuto(row) ? '（カタログ名から自動判定）' : '') : '⚠ わかりません（探し先を絞れないので当たりが落ちます）') + '\n'
           + '調べる明細：' + tgt.length.toLocaleString() + '件（1件あたり約¥4）\n'
           + '　概算：約 ¥' + (tgt.length * 4).toLocaleString() + '\n'
           + '　※タダで入る分（同じ明細名が既に分かっているもの）・色名や状態表記・前に見つからなかった分は\n'
@@ -30251,13 +30277,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           return (ja && ja !== en && ja.length <= 32) ? (en + ' ／ ' + ja) : en;
         });
         let d = null, _err = '';
-        try { d = await aiJanJsonp(names, hw); } catch (e) { d = null; _err = String((e && e.message) || e); }
+        try { d = await aiJanJsonp(names, hwHint); } catch (e) { d = null; _err = String((e && e.message) || e); }
         // ★失敗したら【学習を外して】もう一度だけ試す。URLが長すぎる等で全滅するのを防ぐ
         //   （2026-08-30：学習が育ってURL上限を超え、65件が丸ごと0件になった）
         //   ★ただし【時間切れ】の時はやり直さない。学習は原因でないうえ、もう5分待つことになる。
         //     そういう時は下で【半分に割って】試す方が速いし通る。
         if ((!d || !d.ok) && _err.indexOf('タイムアウト') < 0) {
-          try { d = await aiJanJsonp(names, hw, true); } catch (e2) { d = null; _err = String((e2 && e2.message) || e2); }
+          try { d = await aiJanJsonp(names, hwHint, true); } catch (e2) { d = null; _err = String((e2 && e2.message) || e2); }
         }
         clearInterval(_tick);
         try { _mt.label = '🔎 JAN・型番を調べています'; } catch (_) {}
@@ -30359,7 +30385,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ? ('○ ' + x.検索語 + ' | ' + (x.日本語名 || '') + ' | ' + (x.JAN || '') + ' | ' + (x.型番 || '') + ' | ' + (x.出典 || ''))
           : ('✗ ' + x.検索語 + ' | ' + (x.日本語名の推定 || ''));
         // ★「外れ＝対象−当たり」で数えない。通信に失敗して**触っていない分**まで外れに化ける。
-        const head = '機種=' + (hw || '') + ' 対象=' + tgt.length + ' 当たり=' + hit
+        const head = '機種=' + (hwHint || '') + ' 対象=' + tgt.length + ' 当たり=' + hit
           + ' 外れ=' + Math.max(0, tgt.length - hit - undoneN) + ' 未実行=' + undoneN
           + (undoneN ? '（理由: ' + String(missed.filter(x => x.indexOf('※ ') === 0)[0] || '不明').replace('※ ', '').slice(0, 80) + '）' : '');
         const lines = okLog.map(x => line(x, true)).concat(ngLog.map(x => line(x, false)));
