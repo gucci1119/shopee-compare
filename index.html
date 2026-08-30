@@ -29106,7 +29106,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
              もともと名前で照合できているので新しい情報が増えない。
              JANが効くのは「名前が違うのに同じ商品」＝🔁似た出品を探す で候補になったものだけ。
              押し間違いで数万円かかる事故を防ぐため、ボタン自体を置かない。 -->
-        <button class="smd-btn b-danger" id="lst-jandupclean" title="同じカタログの中で【別の明細に同じJAN】が入っているものを探して消します。&#10;AIがまとめて答えるとき、前の商品の答えを次の商品にも書いてしまう取り違えが起きます&#10;（例：Bomberman GB2 と Mickey Mouse IV が同じJAN・同じ型番）。&#10;チェックデジットは通ってしまうので、これで見つけるしかありません。&#10;消す前に一覧を出して確認します。型番は残します。">🧹 取り違えJANを掃除</button>
+        <button class="smd-btn b-danger" id="lst-jandupclean" title="おかしなJANを探して消します（型番は残します）。&#10;①同じカタログの中で【別の明細に同じJAN】＝AIの取り違え&#10;②【検算が合わない】＝13桁目は前12桁から計算で決まるので、合わなければ世の中に存在しない番号&#10;消す前に一覧を出して確認します。&#10;AIがまとめて答えるとき、前の商品の答えを次の商品にも書いてしまう取り違えが起きます&#10;（例：Bomberman GB2 と Mickey Mouse IV が同じJAN・同じ型番）。&#10;チェックデジットは通ってしまうので、これで見つけるしかありません。&#10;消す前に一覧を出して確認します。型番は残します。">🧹 おかしなJANを掃除</button>
         <button class="smd-btn b-write" style="display:none" id="lst-janbulk" title="いま絞り込んでいる出品ぜんぶを対象に、JAN・型番が空いている明細を【まとめて】AIのネット検索で埋めます。&#10;・同じ明細名は1回しか調べません（例：Splatoon 3 が12件あっても1回）&#10;・25件ずつ問い合わせ、区切りごとに保存するので、途中で止めてもそこまでは残ります&#10;・すでに入っている欄は触りません。確信が持てないものは入れません&#10;※⚙️設定の「AIシリーズ調査GAS URL」が要ります">📇 JAN・型番を一括で埋める</button>
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
@@ -30223,12 +30223,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           mm.get(j).push(k);
         });
         const bad = [];
-        bycat.forEach(mm => mm.forEach((ks, j) => { if (ks.length > 1) bad.push({ jan: j, keys: ks }); }));
-        if (!bad.length) { alert('🧹 取り違えは見つかりませんでした。'); return; }
+        bycat.forEach(mm => mm.forEach((ks, j) => { if (ks.length > 1) bad.push({ jan: j, keys: ks, why: '同じカタログの別明細と同じJAN' }); }));
+        // ★検算(チェックデジット)が合わないJANも一緒に消す。
+        //   13桁目は前12桁から計算で決まるので、合わない＝【世の中に存在しない番号】＝拾い間違い。
+        //   （2026-08-30 実測：4902370547466／4902370548970 の2種類・のべ10件）
+        { const byJan = new Map();
+          Object.keys(productIds).forEach(k => {
+            const j = String((productIds[k] || {}).jan || '').trim(); if (!j) return;
+            if (janMakerWarn(j, '')) { if (!byJan.has(j)) byJan.set(j, []); byJan.get(j).push(k); }
+          });
+          byJan.forEach((ks, j) => bad.push({ jan: j, keys: ks, why: '検算が合わない（存在しない番号）' }));
+        }
+        if (!bad.length) { alert('🧹 おかしなJANは見つかりませんでした。'); return; }
         const nameOf = (k) => { const w = pidKeyWhere(k) || {}; return (w.no ? w.no + '番 ' : '') + (w.mn || w.name || k); };
         const n = bad.reduce((a2, b2) => a2 + b2.keys.length, 0);
-        const list = bad.slice(0, 10).map(b2 => '・JAN ' + b2.jan + '\n' + b2.keys.map(k => '　　' + nameOf(k)).join('\n')).join('\n');
-        if (!confirm('🧹 同じカタログの中で【別の明細に同じJAN】が入っているものが ' + bad.length + '組・' + n + '件 見つかりました。\n\n'
+        const list = bad.slice(0, 10).map(b2 => '・JAN ' + b2.jan + '（' + b2.why + '）\n' + b2.keys.slice(0, 4).map(k => '　　' + nameOf(k)).join('\n') + (b2.keys.length > 4 ? '\n　　…ほか' + (b2.keys.length - 4) + '件' : '')).join('\n');
+        if (!confirm('🧹 おかしなJANが ' + bad.length + '組・' + n + '件 見つかりました。\n'
+          + '　①同じカタログの別明細と同じJAN（AIの取り違え）\n'
+          + '　②検算が合わない（世の中に存在しない番号）\n\n'
           + list + (bad.length > 10 ? '\n…ほか' + (bad.length - 10) + '組' : '')
           + '\n\nどちらが正しいか決められないので、この ' + n + '件のJANを消します（型番は残します）。\n'
           + 'そのあと「🔎 調べる」でやり直せます。よろしいですか？')) return;
