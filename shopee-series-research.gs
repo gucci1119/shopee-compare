@@ -37,7 +37,7 @@ function doGet(e) {
       //   ★失敗から学ぶ仕組み：当たった対訳を例として渡すと、似た言い回しの商品が当たるようになる。
       var learned = String((e && e.parameter && e.parameter.learned) || '');
       var names = String((e && e.parameter && e.parameter.names) || '').split('\n')
-        .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 8);   // ★8件まで（25件だと検索6回で調べきれず途中で止まる・2026-08-28実測）
+        .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 12);  // ★12件まで。プロンプトの固定分が薄まり1明細¥5.6→¥3.7（33%減）。25件は検索が足りず失敗した実績あり
       var hw2 = (e && e.parameter && e.parameter.hw) || '';
       if (!names.length) throw new Error('names が必要です');
       var jr = researchJan_(names, hw2, learned);
@@ -105,7 +105,7 @@ function researchJan_(names, hw, learned) {
       // ★費用のほとんどは「web検索の結果が入力トークンに積まれる」ぶん。
       //   ただし少なすぎると【調べきれずに途中で止まりJSONを返さない】（25件×6回で実際に起きた）。
       //   8件に対して10回＝1件1回強。これで足りることを実測で確かめている。
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12 }],   // ★8件に12回＝1件1.5回。3段構えで探すぶん増やす（当たらないと払い損なので、ここは削らない）
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 18 }],   // ★12件に18回＝1件1.5回（比率は据え置き）。当たらないと払い損なので、1件あたりの検索は削らない
       messages: [{ role: 'user', content: prompt }]
     })
   });
