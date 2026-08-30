@@ -5812,8 +5812,17 @@
       return r.headers.get('etag') || r.headers.get('last-modified') || null;
     } catch (_) { return null; }
   }
+  // ★「手が動いていたら更新しない」。入力欄からフォーカスが外れた瞬間に再読み込みが走り、
+  //   打ちかけのJANも見ていた位置も飛んでいた（2026-08-31 本人「途中までやってるのに勝手に再読み込みされてうざい」）。
+  //   activeElement だけ見ても、打ち終わって次の欄へ移る一瞬に外れるので足りない。
+  //   最後に触った時刻を持って、5分静かになるまで待つ。
+  let _appAct = Date.now();
+  try { ['keydown', 'input', 'click', 'pointerdown', 'wheel'].forEach(ev =>
+    document.addEventListener(ev, () => { _appAct = Date.now(); }, true)); } catch (_) {}
+  const APP_IDLE_MS = 5 * 60 * 1000;
   function appBusy() {
     try {
+      if (Date.now() - _appAct < APP_IDLE_MS) return true;                          // ★手が動いている
       const ae = document.activeElement;
       if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;          // 入力中
       const m = document.getElementById('smd-modal');
@@ -5851,7 +5860,7 @@
     if (!appBusy()) { appReloadFresh(); return; }
     // 作業中は待つ（勝手に消すと入力が飛ぶ）。理由も出しておく
     const n = document.getElementById('smd-appup-note');
-    if (n) n.textContent = '作業が終わったら自動で更新します';
+    if (n) n.textContent = '手が5分止まったら自動で更新します（急ぐときは左のボタン）';
     clearTimeout(_appTimer);
     _appTimer = setTimeout(appUpdateApply, 15000);
   }
@@ -6658,16 +6667,23 @@
   try { aiCostDraw(); } catch (_) {}   // 💴 AI検索の使用額（保存済みの記録を起動時に出す）
   // 📍 見ていた場所を控える（再読み込みで戻すため）。書きすぎないよう300msに1回だけ。
   { let t = 0;
-    window.addEventListener('scroll', () => {
+    // ★行は【#lst-scroll という箱の中】をスクロールする。window の scroll では動かないので、
+    //   縦位置がまったく保存されておらず、再読み込みのたびに先頭へ戻っていた
+    //   （2026-08-31 本人「再読み込みしたら最初の方に戻る」）。
+    //   scroll は上に伝わらないので、capture で拾って箱の scrollTop も一緒に残す。
+    const _saveScroll = () => {
       if (t) return;
       t = setTimeout(() => { t = 0;
         try {
           if (lst.tab !== 'status' || !document.getElementById('lst-list')) return;
           const e = document.getElementById('lst-scroll');
-          localStorage.setItem('smdListScroll', JSON.stringify({ y: window.scrollY || 0, x: e ? e.scrollLeft : 0, at: Date.now() }));
+          localStorage.setItem('smdListScroll', JSON.stringify({
+            y: window.scrollY || 0, x: e ? e.scrollLeft : 0, sy: e ? e.scrollTop : 0, at: Date.now() }));
         } catch (_) {}
       }, 300);
-    }, { passive: true });
+    };
+    window.addEventListener('scroll', _saveScroll, { passive: true });
+    document.addEventListener('scroll', _saveScroll, { capture: true, passive: true });
   }
   { const rg = document.getElementById('rank-goedit'); if (rg) rg.addEventListener('click', () => { try { lst.tab = 'analysis'; lst.anaSub = 'coverage'; localStorage.setItem('smdListTab', 'analysis'); } catch (_) {} showPage('list'); }); }
   document.querySelectorAll('.rank-go').forEach(b => b.addEventListener('click', () => {
@@ -15673,6 +15689,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🛑 <b>【最優先で修正】作業中に勝手に再読み込みされるのを止めました</b>（本人「途中までやってるのに勝手に再読み込みされてうざいんやけど」）。新しい版を出すと自動で読み直す仕組みがあり、<b>今日は50回デプロイしたので、その都度</b>走っていました。「入力中は待つ」判定はありましたが<b>フォーカスが外れた一瞬で「作業していない」と判定</b>されるため、JANを打ち終えて次の欄へ移る瞬間に再読み込みが走っていました。→ <b>最後に触ってから5分静かになるまで読み直さない</b>ようにしました。急ぐときは緑の帯の「今すぐ更新」。',
+      '📍 <b>再読み込みで一覧の縦位置が先頭に戻っていたのを直しました</b>（本人「再読み込みしたら最初の方に戻る」）。行は <code>#lst-scroll</code> という<b>箱の中</b>をスクロールするので、<b>window の scroll では動かず、縦位置がそもそも保存されていませんでした</b>（横位置だけ保存していた）。scroll は上に伝わらないので capture で拾い、箱の <code>scrollTop</code> も保存・復元します。',
       '⏱ <b>問い合わせ中の経過時間を毎秒出すようにしました</b>（本人「1分くらいこの状態」）。1回の問い合わせに<b>最大5分</b>かかるので、その間ずっと表示が変わらないと<b>生きているのか固まっているのか分かりません</b>。<code>1〜6件目を問い合わせ中… 1分12秒経過（1回で最大5分・6件ぶん）</code> のように、🗂しごと・下のメーター・ボタンの3か所で秒が進みます。',
       '♻️ <b>お金をかけずに埋まる分を、まとめて入れるボタンを作りました</b>（実測で<b>299件</b>が¥0で埋まります）。機種がカタログ名から自動で分かるようになったので、<b>同じ明細名＋同じ機種</b>の突合が効くようになりました。すでに分かっている答えを、空いている欄にコピーするだけなので<b>AIには一切問い合わせません（¥0）</b>。<br>⚠️ <b>同じ値が2つ以上の違う明細名に付いているものは配りません</b>。実測で<b>39件</b>ありました（<code>DMG-AKXJ</code> が <code>Kirby&#39;s Block Ball</code> と <code>Kirby Pinball</code> の両方に、<code>ECJS-00024</code> が <code>PS5 The Last of us PartⅡ</code> と <code>PS4 The Last of us Best</code> に付いていた）。AIの取り違えを全国に広げないためです。見送った件数も出します。',
       '⏱ <b>【原因】残った難しい明細が、毎回そろって時間切れになっていました</b>（本人「後ろのあたり、走ってなくない？」）。記録を見ると <code>対象=25 当たり=0 外れ=0 未実行=25</code> が<b>2回連続</b>。その前の回は <code>対象=46 当たり=22 外れ=2 未実行=22</code> で、<b>やさしい22件だけ入って、残りは一度も調べられていません</b>でした。<br>珍しいタイトルほど検索回数が増えるので、12件まとめると<b>120秒では返ってこない</b>のが原因です。後ろに残るのは難しい物ばかりなので、何度やっても同じ所で落ちます。<br>直し：<b>①待ち時間を120秒→300秒</b>。<b>②時間切れになったかたまりは半分に割ってやり直す</b>（12→6→3。件数が減れば検索も減って通ります）。<b>③時間切れの時は「学習を外してやり直す」をしない</b>（原因ではないのに、もう5分待つことになるため）。',
@@ -29308,7 +29326,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (first) {
           lst._scRestored = 1;
           try { const sv = JSON.parse(localStorage.getItem('smdListScroll') || 'null');
-            if (sv && Date.now() - (sv.at || 0) < 6 * 3600 * 1000) { y = sv.y || 0; if (sv.x) { const e0 = document.getElementById('lst-scroll'); if (e0) e0.scrollLeft = sv.x; } }
+            if (sv && Date.now() - (sv.at || 0) < 6 * 3600 * 1000) { y = sv.y || 0;
+              const e0 = document.getElementById('lst-scroll');
+              if (e0) { if (sv.x) e0.scrollLeft = sv.x; if (sv.sy) e0.scrollTop = sv.sy; }   // ★縦も戻す
+            }
           } catch (_) {}
           if (y) [120, 400, 900].forEach(ms => setTimeout(() => { try { if (Math.abs((window.scrollY || 0) - y) > 40) window.scrollTo(0, y); } catch (_) {} }, ms));
         }
