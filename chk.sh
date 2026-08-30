@@ -79,7 +79,10 @@ if warn:
 # ★同じタグに style が2つあると、ブラウザは【先頭だけ】を使い、あとの指定を丸ごと捨てる。
 #   2026-08-28：display:none を足すのに style を並べて書いてしまい、ボタンの見た目が壊れた。
 import re as _re
-_dup = _re.findall(r'<[a-zA-Z][^>]*?\sstyle="[^"]*"[^>]*?\sstyle="', io.open('index.html',encoding='utf-8').read())
+# ★三項演算子で「どちらか一方だけ出る」書き方は誤検知なので除く（2026-08-30）
+#   例: <tr${A ? ' style="..."' : (B ? ' style="..."' : '')} ...>
+_html = io.open('index.html', encoding='utf-8').read()
+_dup = [m for m in _re.findall(r'<[a-zA-Z][^>]*?\sstyle="[^"]*"[^>]*?\sstyle="', _html) if ' ? ' not in m]
 if _dup:
     print('')
     print('⛔ 同じタグに style が2つあります（%d件）。先頭だけが効いて、あとの指定は捨てられます' % len(_dup))
