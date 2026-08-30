@@ -56,6 +56,19 @@ function doGet(e) {
  *   ★当てずっぽうを一番避けたいので、**確信が無ければ空で返させる**。出典URLも必ず返させて、
  *     ポータル側で「どこから拾ったか」を残す（違う商品を拾っていればその場で分かる）。
  */
+// 🏪 ハードによって【JANが載っている店】が違う（2026-08-30 実測）。
+//   ・ヤマダ＝新品の家電店。Switch/PS5のような現行機は型番つきで載るが、
+//     GB/FC/PS1のようなレトロは【商品ページが1件も無い】。探しに行くだけムダ。
+//   ・駿河屋＝レトロが大量にある（GBソフト 大戦略／ランパート／ブロディア…）。
+//     ただしCloudflareで直接取得は403。AIのWeb検索経由なら拾える。
+//   → ハードで探し先を切り替える。ムダな検索を1つ減らすぶん、当たりに回せる。
+function janShops_(hw) {
+  var h = String(hw || '');
+  var retro = /ゲームボーイ|GB|GBA|GBC|ファミコン|スーパーファミコン|FC|SFC|ニンテンドー64|N64|ゲームキューブ|Wii|ニンテンドーDS|3DS|PS1|PlayStation$|PS2|PS3|PSP|PS Vita|セガサターン|ドリームキャスト|ワンダースワン/i.test(h);
+  if (retro) return { retro: true, shops: '駿河屋・ブックオフ・メディアワールド・楽天市場・Amazon.co.jp', note: 'ヤマダは新品店なのでレトロは載っていません。探さないでください。' };
+  return { retro: false, shops: 'ヤマダウェブコム・楽天ブックス・Amazon.co.jp・ヨドバシ', note: '' };
+}
+
 function researchJan_(names, hw, learned) {
   var P = PropertiesService.getScriptProperties();
   var key = P.getProperty('ANTHROPIC_API_KEY');
@@ -63,6 +76,7 @@ function researchJan_(names, hw, learned) {
   // ★この用途（検索して数字を拾うだけ）は高い推論力が要らない。Haikuで十分＝費用が約1/3。
   //   シリーズ調査（researchSeries_）は判断が要るので Sonnet のまま。
   var model = P.getProperty('MODEL_JAN') || 'claude-haiku-4-5-20251001';
+  var shops = janShops_(hw);
   var prompt =
     'あなたは日本のレトロゲーム/ホビーに詳しい調査アシスタントです。\n' +
     '次の商品それぞれについて、日本国内で流通したパッケージ版の **JANコード(13桁)** と **メーカー型番** を web_search で調べてください。\n' +
@@ -80,9 +94,9 @@ function researchJan_(names, hw, learned) {
     (learned ? '\n★この店で実際に当たった対訳です。言い回しの癖が同じなので、必ず参考にしてください。\n' + learned + '\n' : '') +
     '\n【探し方】この順で試してください。1つ当たれば次の商品へ。\n' +
     '　① 「<日本語タイトル> ' + (hw || 'ゲーム') + ' JAN」\n' +
-    '　② 「<日本語タイトル> 駿河屋」または「<日本語タイトル> ブックオフ JAN」\n' +
+    '　② 「<日本語タイトル> ' + shops.shops.split('・')[0] + '」（この商品は ' + shops.shops + ' に載っています）\n' +
     '　③ 「<日本語タイトル> 型番」（DMG- / CGB- / AGB- / SLPS- / HAC-P- のような品番が出ます）\n' +
-    '　JANが載っているのは 楽天ブックス・駿河屋・ブックオフ・メディアワールド・価格比較サイト です。\n' +
+    '　★このハードでJANが載っているのは【' + shops.shops + '】です。' + (shops.note ? shops.note : '') + '\n' +
     '　サブタイトルが複数ある作品（大地の章／大空の章 など）は、どれか特定できないなら空で返してください。\n' +
     '\n【守ること】\n' +
     '・**確信が持てないものは jan も mpn も空文字にする**。推測で埋めない（間違ったJANが一番困ります）。\n' +
