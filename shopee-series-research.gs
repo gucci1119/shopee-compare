@@ -64,7 +64,10 @@ function doGet(e) {
 //   → ハードで探し先を切り替える。ムダな検索を1つ減らすぶん、当たりに回せる。
 function janShops_(hw) {
   var h = String(hw || '');
-  var retro = /ゲームボーイ|GB|GBA|GBC|ファミコン|スーパーファミコン|FC|SFC|ニンテンドー64|N64|ゲームキューブ|Wii|ニンテンドーDS|3DS|PS1|PlayStation$|PS2|PS3|PSP|PS Vita|セガサターン|ドリームキャスト|ワンダースワン/i.test(h);
+  // ★羅列で「レトロか」を判定すると、一覧から漏れた機種（GC/SS/DC/MD/PCE 等）が
+  //   新品店扱いになってしまう。少ない方＝現行機を数えて、漏れたらレトロ側に倒す。
+  var current = ['Switch2', 'Switch', 'PS5', 'PS4', 'XboxSX', 'XboxOne', 'Xbox'];
+  var retro = !!h && current.indexOf(h.trim()) < 0;
   if (retro) return { retro: true, shops: '駿河屋・ブックオフ・メディアワールド・楽天市場・Amazon.co.jp', note: 'ヤマダは新品店なのでレトロは載っていません。探さないでください。' };
   // ★機種が分からない時に「現行機」とみなしてはいけない。
   //   ヤマダはレトロを1件も持っていないので、レトロのカタログだと丸ごと空振りする
