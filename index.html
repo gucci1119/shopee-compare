@@ -5648,6 +5648,8 @@
     [/^型番 ([\d,]+)\/([\d,]+)（空([\d,]+)）$/, 'MPN $1/$2 ($3 empty)'],
     [/^型番 ([\d,]+)\/([\d,]+)$/, 'MPN $1/$2'],
     [/^見つからなかった(\d+)件をもう一度探せるようにする$/, 'Allow re-searching the $1 not found'],
+    [/^見つからず（(\d+)回）・次は飛ばします$/, 'not found ($1x) - will skip next time'],
+    [/^見つからず（(\d+)回）・次に探します$/, 'not found ($1x) - will search next time'],
     // 🔗 重複の見比べ・🚫見つからず（出品一覧）
     [/^🔗 同じJANの出品が(\d+)つあります$/, '🔗 $1 listings share this JAN'],
     [/^🚫 AIでは見つからず（(\d+)回）$/, '🚫 Not found by AI ($1 tries)'],
@@ -15668,6 +15670,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🔁 <b>「見つからなかった」記録は残したまま、飛ばす扱いだけを外すようにしました</b>（本人「これは残しておいていいんじゃないの？」）。記録を消してしまうと<b>何回外したかが分からなくなる</b>ので、消すのは<b>AIで飛ばす扱いだけ</b>にしました。<br>明細の表示は <code>🚫 見つからず（1回）・次は飛ばします</code> ／ <code>🔁 見つからず（1回）・次に探します</code> と書き分け、カタログ行の件数も <code>🚫32 🔁8</code> のように分けて出します。もう一度探して外れたら、自動で🚫に戻ります。',
       '🔄 <b>件数を、入れ終わるたびにその場で更新するようにしました</b>（本人「件数も入れ終わったらリアルタイムで更新して」）。12件のかたまりを1つ終えるごと・無料コピーで入ったとき・<b>手で打ったとき</b>にも数え直します。<b>一覧の作り直しはしません</b>（6,476行を作り直すとスクロール位置と開いていた明細が飛ぶため）。この1行だけ差し替えます。「🔁もう一度探せるように」も同じく作り直さず、🚫の印をその場で消します。',
       '🐛 <b>【自分で壊していた】通信に1回失敗すると、残りの明細が丸ごと調べられないまま終わっていました</b>（本人「そもそも最後の方やってなくない？」）。<br>12件ずつ問い合わせる作りで、<b>1かたまりが失敗した時点でループごと止めて</b>いました。残りは<b>調べてもいないのに「見つからず」の印も付かない</b>ので、画面からは区別できません。さらに集計が<b>「外れ＝対象−当たり」</b>だったため、<b>触ってもいない明細まで「外れ」として数えられ</b>、ログ上は <code>対象=95 当たり=51 外れ=44</code>（合計95）と<b>全部やったように見えて</b>いました。<br>実際、このPSPカタログの <code>Konami Gradius Portable</code> <code>Patapon PSP</code> <code>Ys I&amp;II Chronicles 2</code> <code>True Sangoku Musou Multi Rai 2</code> は<b>JANも型番も空・🚫の印も無し＝一度も調べていません</b>。<br>直し：<b>①失敗したかたまりだけ飛ばして最後まで進む</b>（3回続けて失敗したら止める）。<b>②「未実行」を外れと分けて数える</b>。<b>③終わったときに「◯件は通信に失敗して調べられませんでした。もう一度押せば続きから調べます」と必ず知らせる</b>。',
       '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」「入ってる数/全数(空き数)がいいかも」）。<code>📇 JAN 35/96（空61） ／ 型番 40/96（空56）</code> の形で、<b>JANと型番それぞれ</b>出します。開かないと分からない状態にしないため<b>出しっぱなし</b>です。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
@@ -27296,7 +27299,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   （2026-08-16に own と f で同じ事故を起こした場所。残す項目を足すときは必ずここも直す）
       const has = m => !!(m && (String(m.jan || '').trim() || String(m.mpn || '').trim() || String(m.cond || '').trim()
         || String(m.own || '').trim() || m.noJan || (m.f && Object.keys(m.f).some(x => String(m.f[x] || '').trim()))));
-      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), noJan: (m.noJan || undefined), noJanAt: (m.noJanAt || undefined), at: m.at || Date.now() }; });
+      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), noJan: (m.noJan || undefined), noJanAt: (m.noJanAt || undefined), reJan: (m.reJan || undefined), at: m.at || Date.now() }; });
       productIds = items;
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'product_ids', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] product_ids保存失敗', e));
     }, 500);
@@ -27833,11 +27836,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const janFillCount = (row) => {
     const ms = (row && row.models || []).filter(m => m && !m.ghost && m.n);
     let jan = 0, mpn = 0, no = 0;
+    let re = 0;
     ms.forEach(m => { const v = productIds[pidKeyModel(row, m)] || {};
       if (!String(v.jan || '').trim()) jan++;
       if (!String(v.mpn || '').trim()) mpn++;
-      if (v.noJan) no++; });
-    return { n: ms.length, jan: jan, mpn: mpn, no: no };
+      if (v.noJan && v.reJan) re++; else if (v.noJan) no++; });
+    return { n: ms.length, jan: jan, mpn: mpn, no: no, re: re };
   };
   // 🔄 入れ終わった件数を【その場で】更新する（本人「件数も入れ終わったらリアルタイムで更新して」）。
   //   ★drawListingStatus() は呼ばない。6,476行を作り直すとスクロール位置と開いた明細が飛ぶ。
@@ -27868,12 +27872,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       'この商品の明細 ' + c.n + '件のうち、入っている数です。\n'
       + 'JAN: ' + (c.n - c.jan) + '件／' + c.n + '件（空 ' + c.jan + '件）\n'
       + '型番: ' + (c.n - c.mpn) + '件／' + c.n + '件（空 ' + c.mpn + '件）\n'
-      + (c.no ? '🚫 AIで探したが見つからなかった: ' + c.no + '件（次からは飛ばします）\n' : '')
-      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}</div>`;
+      + (c.no ? '🚫 AIで探したが見つからなかった: ' + c.no + '件（次は飛ばします）\n' : '')
+      + (c.re ? '🔁 見つからなかったが、もう一度探す設定にしてある: ' + c.re + '件\n' : '')
+      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}${c.re ? `<span style="color:#8a5a00"> 🔁${c.re}</span>` : ''}</div>`;
   }
   // 🔁 このカタログで「AIでは見つからず」の印が付いている明細の数
-  const janNoCount = (row) => (row && row.models || []).reduce((n, m) =>
-    n + ((m && !m.ghost && m.n && (productIds[pidKeyModel(row, m)] || {}).noJan) ? 1 : 0), 0);
+  //   ★「もう一度探す」に戻したもの(reJan)は数えない＝ボタンの件数と実際に戻す件数を必ず一致させる
+  const janNoCount = (row) => (row && row.models || []).reduce((n, m) => {
+    if (!m || m.ghost || !m.n) return n;
+    const v = productIds[pidKeyModel(row, m)] || {};
+    return n + ((v.noJan && !v.reJan) ? 1 : 0);
+  }, 0);
   const janHwAuto = (row) => !String(((pidOf(pidKey(row && row.parent_sku)) || {}).f || {})['機種'] || '').trim() && !!janHwOf(row);
   let _pidByName = null, _pidByNameAt = 0;
   const pidNameKey = (nm, hw) => String(nm || '').trim().toLowerCase().replace(/\s+/g, ' ') + '\u0000' + String(hw || '').trim();
@@ -27896,12 +27905,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🚫 「AIで探したが見つからなかった」印。★これが無いと、同じ明細を何度も調べて
   //   そのたびにお金がかかる（本人 2026-08-28「埋まらなかったやつは、再度AI検索しないように／お金無駄になるので」）。
   //   印は productIds に持つ（JAN・型番と同じ入れ物＝保存も共有も既にできている）。
-  const pidTried = (k) => { const v = productIds && productIds[k]; return !!(v && v.noJan); };
+  // ★「探したが無かった」記録(noJan)は**消さない**（本人 2026-08-30「これは残しておいていいんじゃないの？」）。
+  //   消すのは【AIで飛ばす扱い】だけ＝ reJan（もう一度探してよい印）で上書きする。
+  const pidTried = (k) => { const v = productIds && productIds[k]; return !!(v && v.noJan && !v.reJan); };
   function pidMarkTried(k) {
     productIds = productIds || {};
     const p = productIds[k] || {};
     productIds[k] = Object.assign({}, p, { jan: p.jan || '', mpn: p.mpn || '', own: p.own || '', cond: p.cond || '',
-      noJan: (p.noJan || 0) + 1, noJanAt: Date.now() });
+      noJan: (p.noJan || 0) + 1, noJanAt: Date.now(), reJan: undefined });   // 探し直して外れた＝また飛ばす
   }
   // 📇 入れた値を【その欄だけ】画面に反映する（一覧を描き直さない＝スクロールも開いた明細もそのまま）
   function pidPaintOne(pk, v) {
@@ -27951,7 +27962,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           bd0, bg0(own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
       + (() => { const w = janMakerWarn(jan, mpn); return w ? '<div style="font-size:9px;color:#e8710a;font-weight:700" title="' + av(w) + '">⚠ このJANは検算が合いません</div>' : ''; })()
-      + (pv.noJan ? `<div class="lst-jannone" style="font-size:9px;color:#8a8f98;line-height:1.5" title="${av('AIのネット検索で探しましたが見つかりませんでした（' + pv.noJan + '回）。\n同じ所に何度もお金をかけないよう、AIでは次から飛ばします（二重の課金を避けるため）。\n手で入れる用に、右の検索リンクを置いてあります。')}">🚫 AIでは見つからず（${pv.noJan}回）</div>${pidSearchLinks(pv._nm || '', pv._hw || '')}` : '')
+      + (pv.noJan ? `<div class="lst-jannone" style="font-size:9px;color:${pv.reJan ? '#8a5a00' : '#8a8f98'};line-height:1.5" title="${av(pv.reJan
+          ? 'AIのネット検索で探しましたが見つかりませんでした（' + pv.noJan + '回）。\nいまは「もう一度探す」に戻してあるので、次にAIで探すときは対象に入ります。\n手で入れる用に、右の検索リンクを置いてあります。'
+          : 'AIのネット検索で探しましたが見つかりませんでした（' + pv.noJan + '回）。\n同じ所に何度もお金をかけないよう、AIでは次から飛ばします（二重の課金を避けるため）。\n手で入れる用に、右の検索リンクを置いてあります。')}">${pv.reJan ? '🔁' : '🚫'} 見つからず（${pv.noJan}回）${pv.reJan ? '・次に探します' : '・次は飛ばします'}</div>${pidSearchLinks(pv._nm || '', pv._hw || '')}` : '')
       // 🔎 この明細だけを1ポチで調べる（約¥4）。※すでに両方入っていれば出さない
       + ((jan && mpn) ? '' : `<button class="lst-jan1" data-k="${av(pk)}" title="この明細だけ、AIのネット検索でJAN・型番を調べます（約¥4）。&#10;すでに入っている欄は触りません。確信が持てなければ入れません。" style="border:1px solid #c3d9f2;background:#fff;color:#1565c0;border-radius:5px;padding:0 5px;font-size:9px;font-weight:700;cursor:pointer;align-self:flex-start;line-height:1.5">🔎 調べる</button>`)
       // ★ネットから拾ったJANは【どの商品から拾ったか】を必ず出す。数字だけ見せても正しいか判断できない
@@ -30659,20 +30672,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(id));
       if (!row) return;
       const ks = (row.models || []).filter(m => m && !m.ghost && m.n)
-        .map(m => pidKeyModel(row, m)).filter(k => (productIds[k] || {}).noJan);
+        .map(m => pidKeyModel(row, m)).filter(k => { const v = productIds[k] || {}; return v.noJan && !v.reJan; });
       if (!ks.length) { toast('印の付いた明細はありません'); return; }
       const hw = janHwOf(row);
-      if (!confirm('🔁 「🚫 AIでは見つからず」の印を ' + ks.length + '件ぶん消します。\n\n'
+      if (!confirm('🔁 ' + ks.length + '件を「もう一度探す」に戻します。\n'
+        + '※「見つからなかった」記録は残したまま、飛ばす扱いだけを外します。\n\n'
         + '機種：' + (hw ? hw + (janHwAuto(row) ? '（カタログ名から自動判定）' : '') : '⚠ わかりません（このまま探しても当たりません）') + '\n'
         + 'この操作自体にお金はかかりません。\n'
         + '次に 🤖 AIのネット検索で探すと、約¥' + (ks.length * 4).toLocaleString() + ' かかります。\n\n続けますか？')) return;
-      ks.forEach(k => { const v = productIds[k]; if (v) { delete v.noJan; delete v.noJanAt; } });
+      ks.forEach(k => { const v = productIds[k]; if (v) v.reJan = 1; });   // ★記録(noJan)は消さない
       saveProductIds();
-      toast('🔁 ' + ks.length + '件の印を消しました。🤖 AIのネット検索で探し直せます');
-      // ★drawListingStatus() は呼ばない（スクロール位置と開いた明細が飛ぶ）。その場で消す。
+      toast('🔁 ' + ks.length + '件を「もう一度探す」に戻しました（記録は残しています）');
+      // ★drawListingStatus() は呼ばない（スクロール位置と開いた明細が飛ぶ）。その場で書き換える。
       try {
         const card = btn.closest('.tool-card');
-        if (card) { card.querySelectorAll('.lst-jannone').forEach(e => e.remove()); }
+        if (card) card.querySelectorAll('.lst-jannone').forEach(e => {
+          e.style.color = '#8a5a00';
+          e.textContent = e.textContent.replace('🚫', '🔁').replace('・次は飛ばします', '・次に探します');
+        });
         janStatPaint(row);
         btn.remove();
       } catch (_) {}
