@@ -27280,6 +27280,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   同じ商品を7か国に出すのが普通の運用なので、JANは当然かぶる。困るのは【同じ国の中で】かぶる時だけ。
     //   ※以前は「キーの親（｜より前）が2種類以上」で見ていたが、鍵は今 `id:<item_id>#<model_id>` なので
     //     ｜が無く、キー全体が親になっていた＝別の国でも必ず重複と出ていた。
+    // ★機種（ハード）が違えば別商品。同じJANが付いていてもそれはAIの取り違えであって
+    //   「重複出品」ではない（2026-08-30 実測：PS1版とPSP版の Star Ocean に同じJANが入った）。
+    //   カタログ名からハードを拾って、違うもの同士は重複と言わない。
+    const hwOfItem = (id) => {
+      let nm = '';
+      Object.keys(lst.byCc || {}).forEach(c2 => (lst.byCc[c2] || []).forEach(r => { if (String(r.item_id) === String(id)) nm = r.name || ''; }));
+      const t = String(nm);
+      const pats = [['Switch 2', 'SW2'], ['Switch', 'SW'], ['PS Vita', 'PSV'], ['PSVita', 'PSV'], ['PSP', 'PSP'],
+        ['PS5', 'PS5'], ['PS4', 'PS4'], ['PS3', 'PS3'], ['PS2', 'PS2'], ['PS1', 'PS1'], ['Playstation 1', 'PS1'],
+        ['Game Boy Advance', 'GBA'], ['Gameboy Advance', 'GBA'], ['GBA', 'GBA'],
+        ['Game Boy Color', 'GBC'], ['Gameboy Color', 'GBC'],
+        ['Game Boy', 'GB'], ['Gameboy', 'GB'], ['3DS', '3DS'], ['Nintendo DS', 'NDS'],
+        ['Wii U', 'WIIU'], ['WiiU', 'WIIU'], ['Wii', 'WII'], ['GameCube', 'GC'],
+        ['Nintendo 64', 'N64'], ['N64', 'N64'], ['Super Famicom', 'SFC'], ['Famicom', 'FC'],
+        ['Saturn', 'SS'], ['Dreamcast', 'DC'], ['WonderSwan', 'WS']];
+      for (const [k2, v2] of pats) { if (new RegExp('\\b' + k2.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(t)) return v2; }
+      return '';
+    };
     const ccOfKey = (k) => {
       const m = /^id:(\d+)/.exec(String(k)); if (!m) return '';
       const id = m[1];
@@ -27292,7 +27310,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       byVal[t].forEach(k => { const c = ccOfKey(k); (byCc[c] = byCc[c] || []).push(k); });
       // 同じ国の中で2つ以上に付いていたら本当の重複（同じカタログの別明細も含む）
       const hits = [];
-      Object.keys(byCc).forEach(c => { if ((byCc[c] || []).length > 1) hits.push(...byCc[c]); });
+      Object.keys(byCc).forEach(c => {
+        const ks = byCc[c] || []; if (ks.length < 2) return;
+        // ★同じ国の中でも【機種が違えば別商品】。同じ機種同士でだけ重複と言う。
+        const byHw = {};
+        ks.forEach(k => { const id = (/^id:(\d+)/.exec(String(k)) || [])[1] || ''; const h = hwOfItem(id); (byHw[h] = byHw[h] || []).push(k); });
+        Object.keys(byHw).forEach(h => { if ((byHw[h] || []).length > 1) hits.push(...byHw[h]); });
+      });
       if (hits.length) dup[t] = hits;
     });
     _pidDupCache = dup; _pidDupAt = Date.now();
