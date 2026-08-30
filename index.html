@@ -28891,11 +28891,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       else rows = rows.filter(r => String(r.shop_id || '') === lst.acct);
       T('acct', 'アカウント ' + acctFilterLabel(lst.acct));
     }
-    // 🔗 重複の2カタログだけを並べる（赤い警告のリンクから）
-    if (Array.isArray(lst.dupPair) && lst.dupPair.length) {
-      rows = rows.filter(r => lst.dupPair.indexOf(String(r.item_id)) >= 0);
-      T('duppair', '重複している2カタログだけ');
-    }
     // ⚠ 同名バッジから来た絞り込み＝この国のこのタイトルだけ（部分一致にしない）
     if (lst.dupKey) { rows = rows.filter(r => (r.cc + '|' + String(r.name || '').trim().toLowerCase()) === lst.dupKey); T('dupkey', '同名のこの1タイトルだけ'); }
     // 🎬 動画が付いていないものだけ（動画が無いカタログから順に入れていく用）
@@ -29162,7 +29157,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (lst.search) act.push(['検索', '「' + esc(lst.search) + '」', 'q']);
         if (lst.dupOnly) act.push(['⚠ 同名が複数', lst.dupLive ? '両方とも出品中だけ' : '同一国内で重複', 'dup']);
         if (lst.acct) act.push(['🔑 アカウント', esc(acctFilterLabel(lst.acct)) + 'だけ', 'acct']);
-        if (Array.isArray(lst.dupPair) && lst.dupPair.length) act.push(['🔗 重複の2つ', '並べて表示中', 'duppair']);
         if (lst.dupKey) act.push(['⚠ 同名', String(lst.dupKey).split('|')[0] + 'の「' + esc(String(lst.dupKey).split('|').slice(1).join('|').slice(0, 30)) + '」だけ', 'dupkey']);
         if (lst.seriesOnly) act.push(['同シリーズ', '2つ以上あるものだけ', 'ser']);
         if (lst.noVideo) act.push(['動画', '無しだけ', 'vid']);
@@ -30053,18 +30047,71 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       e.preventDefault();
       const id = a2.dataset.id, mine = a2.dataset.mine;
       if (!id) return;
-      lst.dupPair = [String(mine || ''), String(id)].filter(Boolean);   // この2カタログだけを出す
-      // ★明細を開いた状態にする。閉じたままだと並べても中身が見比べられない
-      try {
-        Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r2 => {
-          if (lst.dupPair.indexOf(String(r2.item_id)) >= 0) lst.open.add(r2.cc + ':' + r2.item_id);   // ★鍵は cc:item_id（コロン）
-        }));
-        localStorage.setItem('smdListOpen', JSON.stringify([...lst.open].slice(-40)));
-      } catch (_) {}
-      lst.page = 1;
-      drawListingStatus();
-      try { toast('🔗 重複している2つのカタログを並べました（帯の ✕ で解除）'); } catch (_) {}
+      // ★一覧を絞るのではなく【左右2画面のポップアップ】で見比べる
+      //   （2026-08-30 本人「この画面の上にポップアップで2画面分割したものが並ぶイメージ」）。
+      dupCompareOpen(String(mine || ''), String(id), a2.dataset.cc || '');
     }));
+    // 🔍 重複の2カタログを【左右に並べて】見比べるポップアップ。
+    //   ★どっちを止めるか決めるための画面。数字（販売・在庫・価格・明細数・出品日）を揃えて出し、
+    //     Shopeeの編集ページと販売ページへ直接飛べるようにする。判断に要るものを1画面に置く。
+    function dupCompareOpen(idA, idB, cc) {
+      const find = (id) => { let r = null;
+        Object.keys(lst.byCc || {}).forEach(c2 => (lst.byCc[c2] || []).forEach(x => { if (String(x.item_id) === String(id)) r = x; }));
+        return r; };
+      const A = find(idA), B = find(idB);
+      if (!A || !B) { toast('相手のカタログが見つかりません（🔄最新に更新を試してください）', true); return; }
+      const card = (r) => {
+        const rg = regionByCc(r.cc) || {};
+        const st = statOfP(r.item_id) || {};
+        const nv = varCount(r);
+        const ct = Number(r.create_time || 0);
+        const day = ct ? jstDate(ct * 1000) : '—';
+        const buy = buyerUrlFor(r.cc, r.item_id) || '';
+        const ed = rg.host ? editUrlFor(rg.host, r.item_id) : '';
+        const row = (k, v) => '<tr><td style="padding:2px 8px;color:#8a8f98;white-space:nowrap">' + k + '</td><td style="padding:2px 8px;font-weight:700">' + v + '</td></tr>';
+        return '<div style="flex:1;min-width:0;border:1px solid #e3e6ec;border-radius:10px;padding:12px 14px;background:#fff">'
+          + '<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">'
+          + '<img src="' + IMG_CDN + av(r.image) + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#eee" onerror="this.style.opacity=.15">'
+          + '<div style="min-width:0"><div style="font-size:12px;font-weight:700;line-height:1.35">' + esc(r.name || '') + '</div>'
+          + '<div class="smd-dim" style="font-size:10.5px;margin-top:2px">' + esc(r.cc) + '　🆔' + esc(String(r.item_id)) + '</div></div></div>'
+          + '<table style="width:100%;border-collapse:collapse;font-size:11.5px">'
+          + row('状態', r.status === 1 ? '<span style="color:#1a7f37">出品中</span>' : '<span style="color:#8a8f98">停止/その他</span>')
+          + row('🛒 販売', st.sale != null ? Number(st.sale).toLocaleString() : '—')
+          + row('👁 閲覧', st.views != null ? Number(st.views).toLocaleString() : '—')
+          + row('❤️ いいね', st.likes != null ? Number(st.likes).toLocaleString() : '—')
+          + row('明細数', nv ? nv + '件' : '単品')
+          + row('在庫', r.stock != null ? Number(r.stock).toLocaleString() : '—')
+          + row('価格', r.price_min != null ? Number(r.price_min).toLocaleString() : '—')
+          + row('出品日', day)
+          + '</table>'
+          + '<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">'
+          + (ed ? '<a class="smd-btn b-open" href="' + av(ed) + '" target="_blank" rel="noopener" style="font-size:11px;padding:3px 10px;text-decoration:none">✎ Shopeeで編集</a>' : '')
+          + (buy ? '<a class="smd-btn b-open" href="' + av(buy) + '" target="_blank" rel="noopener" style="font-size:11px;padding:3px 10px;text-decoration:none">🛍️ 販売ページ</a>' : '')
+          + '<button class="dupcmp-go smd-btn" data-id="' + av(String(r.item_id)) + '" style="font-size:11px;padding:3px 10px">一覧で開く</button>'
+          + '</div></div>';
+      };
+      const old = document.getElementById('dupcmp'); if (old) old.remove();
+      const w = document.createElement('div');
+      w.id = 'dupcmp';
+      w.style.cssText = 'position:fixed;inset:0;z-index:140;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+      w.innerHTML = '<div style="background:#f7f8fa;border-radius:12px;padding:16px 18px;width:900px;max-width:96vw;max-height:90vh;overflow:auto">'
+        + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+        + '<b style="font-size:14px;color:#d93025">🔗 同じJANの出品が2つあります</b>'
+        + '<button id="dupcmp-close" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 11px">閉じる</button></div>'
+        + '<div class="smd-dim" style="font-size:11px;margin-bottom:10px">同じ商品を2か所に出していると、<b>自分の商品同士で競って</b>しまいます。'
+        + '販売数・閲覧・出品日を見て、<b>残す方</b>を決めてください（止めるのはShopee側で行います）。</div>'
+        + '<div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap">' + card(A) + card(B) + '</div>'
+        + '</div>';
+      document.body.appendChild(w);
+      const close = () => w.remove();
+      w.addEventListener('click', e => { if (e.target === w) close(); });
+      const cb3 = w.querySelector('#dupcmp-close'); if (cb3) cb3.addEventListener('click', close);
+      w.querySelectorAll('.dupcmp-go').forEach(b3 => b3.addEventListener('click', () => {
+        lst.search = String(b3.dataset.id); lst.page = 1;
+        const se = document.getElementById('lst-search'); if (se) se.value = lst.search;
+        close(); drawListingStatus();
+      }));
+    }
     // 🧹 取り違えJANの掃除（2026-08-30）。同じカタログの中で別の明細に同じJANが入っていたら、
     //   AIが前の商品の答えを引きずったもの。どちらが正しいか決められないので【両方消す】。
     //   ★勝手に消さない。必ず一覧を見せてから。
