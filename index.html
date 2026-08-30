@@ -15673,6 +15673,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '⏱ <b>問い合わせ中の経過時間を毎秒出すようにしました</b>（本人「1分くらいこの状態」）。1回の問い合わせに<b>最大5分</b>かかるので、その間ずっと表示が変わらないと<b>生きているのか固まっているのか分かりません</b>。<code>1〜6件目を問い合わせ中… 1分12秒経過（1回で最大5分・6件ぶん）</code> のように、🗂しごと・下のメーター・ボタンの3か所で秒が進みます。',
       '♻️ <b>お金をかけずに埋まる分を、まとめて入れるボタンを作りました</b>（実測で<b>299件</b>が¥0で埋まります）。機種がカタログ名から自動で分かるようになったので、<b>同じ明細名＋同じ機種</b>の突合が効くようになりました。すでに分かっている答えを、空いている欄にコピーするだけなので<b>AIには一切問い合わせません（¥0）</b>。<br>⚠️ <b>同じ値が2つ以上の違う明細名に付いているものは配りません</b>。実測で<b>39件</b>ありました（<code>DMG-AKXJ</code> が <code>Kirby&#39;s Block Ball</code> と <code>Kirby Pinball</code> の両方に、<code>ECJS-00024</code> が <code>PS5 The Last of us PartⅡ</code> と <code>PS4 The Last of us Best</code> に付いていた）。AIの取り違えを全国に広げないためです。見送った件数も出します。',
       '⏱ <b>【原因】残った難しい明細が、毎回そろって時間切れになっていました</b>（本人「後ろのあたり、走ってなくない？」）。記録を見ると <code>対象=25 当たり=0 外れ=0 未実行=25</code> が<b>2回連続</b>。その前の回は <code>対象=46 当たり=22 外れ=2 未実行=22</code> で、<b>やさしい22件だけ入って、残りは一度も調べられていません</b>でした。<br>珍しいタイトルほど検索回数が増えるので、12件まとめると<b>120秒では返ってこない</b>のが原因です。後ろに残るのは難しい物ばかりなので、何度やっても同じ所で落ちます。<br>直し：<b>①待ち時間を120秒→300秒</b>。<b>②時間切れになったかたまりは半分に割ってやり直す</b>（12→6→3。件数が減れば検索も減って通ります）。<b>③時間切れの時は「学習を外してやり直す」をしない</b>（原因ではないのに、もう5分待つことになるため）。',
       '📣 <b>⚡1タッチでも「調べられなかった分」の注意書きが出るようにしました</b>（本人「取得できなたったやつの注意書きは？」）。これまで⚡でまとめて実行すると、<b>途中の知らせが全部抑えられて</b>「①AIのネット検索でJAN・型番：終わり」としか出ず、<b>通信に失敗して調べていない分が画面のどこにも出ませんでした</b>。<br>各段の結果を <code>①AIのネット検索：22/46件に入れました　⚠ 22件は通信に失敗して未実行</code> の形にし、対象の名前も添えます。記録にも <code>未実行=22（理由: タイムアウト（300秒））</code> と理由を残します。',
@@ -30206,8 +30207,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // ★進みは【12件のかたまりが返ってきた時】にしか動かない。1かたまり数分かかるので、
         //   何も出さないと「止まっている」ように見える（2026-08-31 本人「止まってる？動いてる？」）。
         //   いま何件目を問い合わせ中かを、しごと側にも出しておく。
-        try { if (_mtCtx && _mtCtx.progress) _mtCtx.progress(Math.round(i / tgt.length * 100),
-          (i + 1) + '〜' + Math.min(i + chunk.length, tgt.length) + '件目を問い合わせ中…（' + chunk.length + '件ぶん・返事まで数分）'); } catch (_) {}
+        // ★問い合わせ1回に最大5分かかる。その間ずっと表示が変わらないと、生きているのか
+        //   固まっているのか分からない（2026-08-31 本人「1分くらいこの状態」）。
+        //   経過秒を毎秒書き換えて、動いていることが目で分かるようにする。
+        const _t0 = Date.now();
+        const _secTxt = () => { const v = Math.round((Date.now() - _t0) / 1000);
+          return v >= 60 ? (Math.floor(v / 60) + '分' + String(v % 60).padStart(2, '0') + '秒') : (v + '秒'); };
+        const _head = (i + 1) + '〜' + Math.min(i + chunk.length, tgt.length) + '件目を問い合わせ中';
+        const _tick = setInterval(() => {
+          try { if (_mtCtx && _mtCtx.progress) _mtCtx.progress(Math.round(i / tgt.length * 100),
+            _head + '… ' + _secTxt() + '経過（1回で最大5分・' + chunk.length + '件ぶん）'); } catch (_) {}
+          try { _mt.label = '🔎 JAN・型番を調べています（' + chunk.length + '件を問い合わせ中 ' + _secTxt() + '）'; meterStep(0); } catch (_) {}
+          if (btn) btn.textContent = '🔎 問い合わせ中 ' + _secTxt();
+        }, 1000);
         const _mst = await janMasterLoad(hw);
         const names = chunk.map(m => {
           const q = janKeyword(row, m); const en = (q && q.kw) || String(m.n || '').trim();
@@ -30226,6 +30238,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if ((!d || !d.ok) && _err.indexOf('タイムアウト') < 0) {
           try { d = await aiJanJsonp(names, hw, true); } catch (e2) { d = null; _err = String((e2 && e2.message) || e2); }
         }
+        clearInterval(_tick);
+        try { _mt.label = '🔎 JAN・型番を調べています'; } catch (_) {}
         // ⚠️ ここで break していたため、**通信に1回失敗すると残り全部が未実行のまま終わって**いた。
         //   しかも下の集計が「外れ＝対象−当たり」なので、**触ってもいない明細が「外れ」として数えられ**、
         //   画面上は全部やったように見えていた（2026-08-30 本人「そもそも最後の方やってなくない？」）。
