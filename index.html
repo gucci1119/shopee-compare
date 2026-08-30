@@ -15668,6 +15668,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🔄 <b>件数を、入れ終わるたびにその場で更新するようにしました</b>（本人「件数も入れ終わったらリアルタイムで更新して」）。12件のかたまりを1つ終えるごと・無料コピーで入ったとき・<b>手で打ったとき</b>にも数え直します。<b>一覧の作り直しはしません</b>（6,476行を作り直すとスクロール位置と開いていた明細が飛ぶため）。この1行だけ差し替えます。「🔁もう一度探せるように」も同じく作り直さず、🚫の印をその場で消します。',
       '🐛 <b>【自分で壊していた】通信に1回失敗すると、残りの明細が丸ごと調べられないまま終わっていました</b>（本人「そもそも最後の方やってなくない？」）。<br>12件ずつ問い合わせる作りで、<b>1かたまりが失敗した時点でループごと止めて</b>いました。残りは<b>調べてもいないのに「見つからず」の印も付かない</b>ので、画面からは区別できません。さらに集計が<b>「外れ＝対象−当たり」</b>だったため、<b>触ってもいない明細まで「外れ」として数えられ</b>、ログ上は <code>対象=95 当たり=51 外れ=44</code>（合計95）と<b>全部やったように見えて</b>いました。<br>実際、このPSPカタログの <code>Konami Gradius Portable</code> <code>Patapon PSP</code> <code>Ys I&amp;II Chronicles 2</code> <code>True Sangoku Musou Multi Rai 2</code> は<b>JANも型番も空・🚫の印も無し＝一度も調べていません</b>。<br>直し：<b>①失敗したかたまりだけ飛ばして最後まで進む</b>（3回続けて失敗したら止める）。<b>②「未実行」を外れと分けて数える</b>。<b>③終わったときに「◯件は通信に失敗して調べられませんでした。もう一度押せば続きから調べます」と必ず知らせる</b>。',
       '📇 <b>カタログの行に「JANが空◯件／型番が空◯件」を出しました</b>（本人「JAN/型番それぞれ入ってない数表示させて」「入ってる数/全数(空き数)がいいかも」）。<code>📇 JAN 35/96（空61） ／ 型番 40/96（空56）</code> の形で、<b>JANと型番それぞれ</b>出します。開かないと分からない状態にしないため<b>出しっぱなし</b>です。全部埋まっていれば緑、ひとつも入っていなければ赤。<b>🚫</b>の数は「AIで探したが見つからなかった」件数です。',
       '📚 <b>タイトルマスタを【英名→日本語】の辞書として無料で使うようにしました</b>（本人「APIもっと安くならんかね？」）。AIに英語のまま投げると、<b>まず日本語タイトルを当てるのに検索を1回使います</b>。こちらが日本語を渡せればその1回が要りません。<br>実測（GB・Switch・PSPの511明細）：<b>完全一致で100件＝19.6%</b>に日本語を添えられます。<b>部分一致は使いません</b>（<code>Zelda</code>が何十本にも当たって別作品を拾うため）。',
@@ -27838,6 +27839,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (v.noJan) no++; });
     return { n: ms.length, jan: jan, mpn: mpn, no: no };
   };
+  // 🔄 入れ終わった件数を【その場で】更新する（本人「件数も入れ終わったらリアルタイムで更新して」）。
+  //   ★drawListingStatus() は呼ばない。6,476行を作り直すとスクロール位置と開いた明細が飛ぶ。
+  function janStatPaint(row) {
+    try {
+      const k = row.cc + '|' + row.item_id;
+      document.querySelectorAll('#lst-list .lst-janstat').forEach(el => {
+        if (el.dataset.k !== k) return;
+        const tmp = document.createElement('div');
+        tmp.innerHTML = janFillSummary(row);
+        const nw = tmp.firstElementChild; if (!nw) return;
+        el.replaceWith(nw);
+        try { applyI18n(nw); } catch (_) {}
+      });
+    } catch (_) {}
+  }
   function janFillSummary(row) {
     const c = janFillCount(row);
     if (!c.n) return '';
@@ -27848,7 +27864,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       return `<span style="color:${col};font-weight:700">${lbl} ${filled.toLocaleString()}/${c.n.toLocaleString()}`
         + (empty ? `（空${empty.toLocaleString()}）` : '') + '</span>';
     };
-    return `<div style="margin-top:3px;font-size:9px;line-height:1.5;color:#6b7280" title="${av(
+    return `<div class="lst-janstat" data-k="${av(row.cc + '|' + row.item_id)}" style="margin-top:3px;font-size:9px;line-height:1.5;color:#6b7280" title="${av(
       'この商品の明細 ' + c.n + '件のうち、入っている数です。\n'
       + 'JAN: ' + (c.n - c.jan) + '件／' + c.n + '件（空 ' + c.jan + '件）\n'
       + '型番: ' + (c.n - c.mpn) + '件／' + c.n + '件（空 ' + c.mpn + '件）\n'
@@ -30017,6 +30033,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const cls = which === 'jan' ? '.lst-mjan' : (which === 'mpn' ? '.lst-mmpn' : '.lst-mown');
       document.querySelectorAll('#lst-list ' + cls).forEach(o => { if (o !== el && o.dataset.k === key) o.value = v; });
       el.style.background = v ? '#fffdf5' : '#fff';
+      // 🔄 手で打った時も件数をその場で更新する
+      try {
+        const iid = String(key).replace(/^id:/, '').split('#')[0];
+        Object.keys(lst.byCc || {}).forEach(cc2 => (lst.byCc[cc2] || []).forEach(r2 => {
+          if (String(r2.item_id) === iid) janStatPaint(r2);
+        }));
+      } catch (_) {}
     };
     document.querySelectorAll('#lst-list .lst-mjan').forEach(el => el.addEventListener('change', () => pidSaveFrom(el, 'jan')));
     document.querySelectorAll('#lst-list .lst-mmpn').forEach(el => el.addEventListener('change', () => pidSaveFrom(el, 'mpn')));
@@ -30084,7 +30107,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           try { pidPaintOne(k, { jan: nj, mpn: nm2 }); } catch (_) {}
           reused++; return false;
         });
-        if (reused) { _pidDupCache = null; saveProductIds();
+        if (reused) { _pidDupCache = null; saveProductIds(); janStatPaint(row);
           toast('♻️ ' + reused + '件は、同じ明細名で既に分かっていたので【お金をかけずに】入れました'); }
         if (!tgt.length) { alert('♻️ ' + reused + '件を、同じ明細名の結果から入れました。\nAIには問い合わせていないので、費用はかかっていません。'); return; }
       }
@@ -30206,6 +30229,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             + '　出典: ' + ((got && got.source) || '?') + (w ? '\n　　⚠ ' + w : ''));
         });
         _pidDupCache = null; saveProductIds();
+        janStatPaint(row);                       // 🔄 件数をその場で更新（1かたまり終わるごと）
         if (!noMeter) meterStep(chunk.length);
       }
       if (!noMeter) { meterHide(); try { if (_mtDone) _mtDone({ msg: hit + '/' + tgt.length + '件に入れました' }); } catch (_) {} _mtDone = null; _mtCtx = null; }
@@ -30645,7 +30669,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ks.forEach(k => { const v = productIds[k]; if (v) { delete v.noJan; delete v.noJanAt; } });
       saveProductIds();
       toast('🔁 ' + ks.length + '件の印を消しました。🤖 AIのネット検索で探し直せます');
-      drawListingStatus();
+      // ★drawListingStatus() は呼ばない（スクロール位置と開いた明細が飛ぶ）。その場で消す。
+      try {
+        const card = btn.closest('.tool-card');
+        if (card) { card.querySelectorAll('.lst-jannone').forEach(e => e.remove()); }
+        janStatPaint(row);
+        btn.remove();
+      } catch (_) {}
     }));
     // ★1タッチボタンから【順番に待って】走らせられるよう、各処理の約束(Promise)を btn._run に置く。
     //   処理そのものは1か所のまま＝同じことを二重に書かない。
