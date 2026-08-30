@@ -33,9 +33,6 @@ function doGet(e) {
       // 🧠 これまでに当たった「英語名 → 日本語名」の対訳。ポータルが貯めて毎回送ってくる。
       //   ★失敗から学ぶ仕組み：当たった対訳を例として渡すと、似た言い回しの商品が当たるようになる。
       var learned = String((e && e.parameter && e.parameter.learned) || '');
-      // 🧠 これまでに当たった「英語名 → 日本語名」の対訳。ポータルが貯めて毎回送ってくる。
-      //   ★失敗から学ぶ仕組み：当たった対訳を例として渡すと、似た言い回しの商品が当たるようになる。
-      var learned = String((e && e.parameter && e.parameter.learned) || '');
       var names = String((e && e.parameter && e.parameter.names) || '').split('\n')
         .map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 12);  // ★12件まで。プロンプトの固定分が薄まり1明細¥5.6→¥3.7（33%減）。25件は検索が足りず失敗した実績あり
       var hw2 = (e && e.parameter && e.parameter.hw) || '';
