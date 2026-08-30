@@ -29882,10 +29882,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (btn) { btn.disabled = false; btn.textContent = old; }
       // 📝 当たった／外れたを残す（本人「成功した失敗したログも残しておいてね／仕組み改善に使うので」2026-08-28）。
       //   ★何を検索語にして、どこから拾って、何が外れたかまで残す。件数だけだと直しようがない。
+      // ★logAct は detail を1,200文字で切る。日本語で40件も入れると必ず途中で切れて
+      //   JSONとして読めなくなる（2026-08-30に実際に壊れた）。1行1件の短い形にして、
+      //   長ければ複数回に分けて残す＝あとから機械で読める。
       try {
-        logAct('出品', 'JAN・型番をAIで調べた', String(row.cc) + '/' + String(row.item_id),
-          JSON.stringify({ 機種: hw || '', 対象: tgt.length, 当たり: hit, 外れ: tgt.length - hit,
-            当たった: okLog.slice(0, 40), 外れた: ngLog.slice(0, 40) }));
+        const line = (x, ok) => ok
+          ? ('○ ' + x.検索語 + ' | ' + (x.日本語名 || '') + ' | ' + (x.JAN || '') + ' | ' + (x.型番 || '') + ' | ' + (x.出典 || ''))
+          : ('✗ ' + x.検索語 + ' | ' + (x.日本語名の推定 || ''));
+        const head = '機種=' + (hw || '') + ' 対象=' + tgt.length + ' 当たり=' + hit + ' 外れ=' + (tgt.length - hit);
+        const lines = okLog.map(x => line(x, true)).concat(ngLog.map(x => line(x, false)));
+        const CAP = 1100;                     // 1件あたりの上限（logActの1,200より少し内側）
+        let buf = head, part = 1;
+        const flush = () => { logAct('出品', 'JAN・型番をAIで調べた', String(row.cc) + '/' + String(row.item_id) + '#' + part, buf); part++; buf = head + '（続き' + part + '）'; };
+        lines.forEach(t => { if ((buf + '\n' + t).length > CAP) flush(); buf += '\n' + t; });
+        flush();
       } catch (_) {}
       // ★drawListingStatus() は呼ばない。呼ぶと6,476行を作り直して、スクロール位置と
       //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
