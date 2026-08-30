@@ -15689,6 +15689,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🔎 <b>重複の「◯番」から、その明細まで飛べるようにしました</b>（本人「JANとか型番からの明細すぐわかるように」「見つけるの難しい」）。<code>⚠ 4番・6番・28番と重複</code> は番号だけで、100件の中から目で探すのは無理でした。→ <b>明細名を添えて</b> <code>4番「Bomberman GB2」</code> とし、<b>押すとその行まで移動して黄色く光ります</b>。',
+      '🈳 <b>「空だけ」ボタンを付けました</b>（本人「空の明細」）。カタログ行の件数の隣です。押すと<b>JANも型番も入っていない明細だけ</b>を残します。もう一度押すと全部出ます。一覧は作り直さないので、スクロール位置も開いた明細もそのままです。',
+      '🎯 <b>重複の赤枠を、本当にかぶっている欄だけに絞りました</b>（本人「JAN、型番のどれが重複なのかわからんくない？」）。これまでは<b>JAN・型番・自社コードの3つとも赤枠</b>にしていたので、どれが原因か分かりませんでした。→ <b>かぶっている欄だけ赤</b>にし、文言も <code>⚠ JAN 4988607005191 が 4番「Bomberman GB2」…と重複</code> と<b>欄の名前と値を明記</b>します。',
       '🏪 <b>複数ハードをまとめたカタログでも、ヤマダを叩かないようにしました</b>。<code>Switch / WiiU / 3DS</code> のようなカタログを<b>先頭の Switch だけ見て「現行機」</b>と判断し、WiiU・3DSしか無い中身に対して1件2.2秒ずつヤマダを探していました。→ <b>全部が現行機のときだけ</b>ヤマダを使います（1つでも古い機種が混ざればレトロ店へ）。',
       '🎮 <b>【原因その2】1カタログにDSと3DSが混ざっていると、正しいJANを蹴っていました</b>。AIには「ハードはすべて◯◯です。<b>ハードが違う同名ソフトを拾わないでください</b>」と伝えているので、<b>いちばん先に当たったハード1つだけ</b>を渡すと、それ以外のソフトが全部弾かれます。<br>実際、<code>Nintendo DS 3DS NDS</code> のカタログが「3DS」と判定され、<b>ポケットモンスター ホワイト（DS）・リズム天国ゴールド（DS）・タッチ！カービィ（DS）</b> などが「日本語名は正しく出たのにJANに届かない」で外れていました（当たり 34/100）。<br>実測：<b>本当に複数ハードが混ざったカタログは652件・5,470明細</b>（<code>3DS / DS</code> だけで903明細）。<code>Game Boy Advance</code> の中の <code>Game Boy</code> のような<b>入れ子は数えていません</b>（位置が含まれていたら捨てる）。<br>→ AIには<b>カタログ名に入っているハードを全部</b>渡します（<code>機種：DS / 3DS</code>）。索引の鍵は1つのままなので、無料コピーの突合には影響しません。',
       '🛑 <b>【最優先で修正】作業中に勝手に再読み込みされるのを止めました</b>（本人「途中までやってるのに勝手に再読み込みされてうざいんやけど」）。新しい版を出すと自動で読み直す仕組みがあり、<b>今日は50回デプロイしたので、その都度</b>走っていました。「入力中は待つ」判定はありましたが<b>フォーカスが外れた一瞬で「作業していない」と判定</b>されるため、JANを打ち終えて次の欄へ移る瞬間に再読み込みが走っていました。→ <b>最後に触ってから5分静かになるまで読み直さない</b>ようにしました。急ぐときは緑の帯の「今すぐ更新」。',
@@ -27402,9 +27405,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return dup;
   }
   // ★引くときも【自分の国】の群だけを見る（国またぎは重複ではない）
-  const pidDupOf = (pv, myKey) => {
+  // ★どの欄（JAN／型番／自社コード）が重複しているのかまで返す。
+  //   3つまとめて赤くして「どれが重複か分からない」状態だった（2026-08-31 本人指摘）。
+  const pidDupInfo = (pv, myKey) => {
+    const r = pidDupOf(pv, myKey, true);
+    return r && r._f ? { f: r._f, v: r._v, list: r } : null;
+  };
+  const PID_FLD = { jan: 'JAN', mpn: '型番', own: '自社コード' };
+  const pidDupOf = (pv, myKey, _want) => {
     const d = pidDupMap(), cond = String((pv && pv.cond) || '').trim();
-    const vals0 = () => [pv.jan, pv.mpn, pv.own].map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
+    const FS = ['jan', 'mpn', 'own'];
+    const vals0 = () => FS.map(f => String(pv[f] || '').trim().toLowerCase()).filter(Boolean);
+    const fieldOf = (t) => FS.find(f => String(pv[f] || '').trim().toLowerCase() === t) || '';
+    const tag = (arr, t) => { try { arr._f = fieldOf(t); arr._v = t; } catch (_) {} return arr; };
     // ★鍵が id:<item_id>#<model_id> でない（親SKU）ときは cc が引けないので、
     //   その場合は国で絞らない（従来どおり全部返す）。誤って何も出さないより安全側。
     const w = (myKey && /^id:\d+/.test(String(myKey))) ? pidKeyWhere(myKey) : null;
@@ -27413,13 +27426,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const t0 = vals0().find(t => Object.keys(d).some(x => x.indexOf(t + '\u0001' + cond + '\u0002') === 0));
       if (!t0) return null;
       const ks = Object.keys(d).filter(x => x.indexOf(t0 + '\u0001' + cond + '\u0002') === 0);
-      return ks.length ? [].concat(...ks.map(x => d[x])) : null;
+      return ks.length ? tag([].concat(...ks.map(x => d[x])), t0) : null;
     }
     const vals = vals0();
     for (const t of vals) {
       const base = t + '\u0001' + cond + '\u0002' + myCc + '\u0002';
       const k = Object.keys(d).find(x => x.indexOf(base) === 0);
-      if (k) return d[k];
+      if (k) return tag(d[k].slice(), t);
     }
     return null;
   };
@@ -27713,12 +27726,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const here = [], other = [];
     dup.forEach(k => {
       const w = pidKeyWhere(k);
-      if (String(w.itemId || '') === mine) { if (w.no) here.push(w.no); }
+      if (String(w.itemId || '') === mine) { if (w.no) here.push(w); }
       else other.push(w);
     });
-    here.sort((a, b) => a - b);
+    here.sort((a, b) => a.no - b.no);
     const parts = [];
-    if (here.length) parts.push(here.map(n => n + '番').join('・'));
+    // ★番号だけだと100件の中から探せない（2026-08-31 本人「見つけるの難しい」）。
+    //   明細名を添えて、押したらその行まで飛ぶようにする。
+    if (here.length) parts.push(here.map(w => {
+      const nm2 = String(w.mn || '');
+      const txt = w.no + '番' + (nm2 ? '「' + nm2.slice(0, 22) + '」' : '');
+      if (!html) return txt;
+      return '<a class="lst-dupjump" data-id="' + av(mine) + '" data-no="' + av(w.no) + '" href="#" '
+        + 'title="' + av('押すとその明細まで移動します：' + nm2) + '" style="color:#d93025;text-decoration:underline">' + esc(txt) + '</a>';
+    }).join('・'));
     // ★カタログ名を14文字で切ると「PH [Used] Variati 54番と重複」になり、【どのカタログか分からない】
     //   （2026-08-30 本人指摘）。同じ書き出しのカタログが並ぶので、頭を切るのではなく
     //   【見分けが付く所】＝末尾の①②③や連番、そして明細名を出す。全文はマウスを乗せれば出る。
@@ -27926,7 +27947,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + '型番: ' + (c.n - c.mpn) + '件／' + c.n + '件（空 ' + c.mpn + '件）\n'
       + (c.no ? '🚫 AIで探したが見つからなかった: ' + c.no + '件（次は飛ばします）\n' : '')
       + (c.re ? '🔁 見つからなかったが、もう一度探す設定にしてある: ' + c.re + '件\n' : '')
-      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}${c.re ? `<span style="color:#8a5a00"> 🔁${c.re}</span>` : ''}</div>`;
+      + '※重複出品を見つける手がかりなので、JANが優先です')}">📇 ${pill('JAN', c.jan)} ／ ${pill('型番', c.mpn)}${c.jan ? ` <button class="lst-emptyonly b-fil" data-k="${av(row.cc + '|' + row.item_id)}" title="JANも型番も入っていない明細だけを残します（もう一度押すと全部出ます）。100件の中から空を探すのが大変なため。" style="font-size:9px;padding:0 6px;border-radius:9px;border:1px solid #dcdfe4;background:#fff;cursor:pointer;margin-left:4px">🈳 空だけ</button>` : ''}${c.no ? `<span style="color:#8a8f98"> 🚫${c.no}</span>` : ''}${c.re ? `<span style="color:#8a5a00"> 🔁${c.re}</span>` : ''}</div>`;
   }
   // 🔁 このカタログで「AIでは見つからず」の印が付いている明細の数
   //   ★「もう一度探す」に戻したもの(reJan)は数えない＝ボタンの件数と実際に戻す件数を必ず一致させる
@@ -28030,17 +28051,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const bad = jan && !janOk(jan);
     const box = (cls, val, ph, ttl, bd, bg) =>
       `<input class="${cls}"${cls === 'lst-mjan' ? ' inputmode="numeric"' : ''} data-k="${av(pk)}" value="${av(val)}" placeholder="${av(ph)}" title="${av(ttl)}" style="width:100%;padding:2px 6px;border:1px solid ${bd};border-radius:6px;font-size:10px;font-family:monospace;background:${bg}">`;
-    const bd0 = dup ? '#d93025' : '#e3e6ec', bg0 = v => dup ? '#fdecea' : (v ? '#fffdf5' : '#fff');
+    // ★赤くするのは【本当に重複している欄だけ】。3つとも赤いと、どれが重複か分からない。
+    const dupF = (dup && dup._f) || '';
+    const bdF = f => (dupF === f ? '#d93025' : '#e3e6ec');
+    const bgF = (f, v) => (dupF === f ? '#fdecea' : (v ? '#fffdf5' : '#fff'));
     return '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">'
       + box('lst-mjan', jan, 'JAN（数字13桁）',
           'JANコード＝パッケージのバーコードの数字（8桁か13桁）。無ければ空でOK。\n親SKU＋明細名で各国に共有されます。',
-          bad ? '#e8710a' : bd0, bad ? '#fff8ef' : bg0(jan))
+          bad ? '#e8710a' : bdF('jan'), bad ? '#fff8ef' : bgF('jan', jan))
       + box('lst-mmpn', mpn, '型番（メーカー品番）',
           'メーカーが付けている品番。例 SLPS-01234 / HAC-P-AAAAA。\nJANが無くても、これが同じなら同じモノです。',
-          bd0, bg0(mpn))
+          bdF('mpn'), bgF('mpn', mpn))
       + box('lst-mown', own, (ruleHint || '自社コード'),
           '自分で決めるコード。JANも型番も無い商品（雑貨・ガチャ等）を見分けるため。\n例 BANDAI-PKFP-PIKACHU-2020（メーカー-シリーズ-キャラ-版）。\n付け方は右の「コード規則」に書いておくと、ここにヒントで出ます。',
-          bd0, bg0(own))
+          bdF('own'), bgF('own', own))
       + (bad ? '<div style="font-size:9px;color:#e8710a;font-weight:700">JANは8桁か13桁です</div>' : '')
       + (() => { const w = janMakerWarn(jan, mpn); return w ? '<div style="font-size:9px;color:#e8710a;font-weight:700" title="' + av(w) + '">⚠ このJANは検算が合いません</div>' : ''; })()
       + (pv.noJan ? `<div class="lst-jannone" style="font-size:9px;color:${pv.reJan ? '#8a5a00' : '#8a8f98'};line-height:1.5" title="${av(pv.reJan
@@ -28053,7 +28077,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + (dup ? (() => {
           const plain = pidDupText(dup, itemId, false);      // 説明（title）はプレーン
           const rich = pidDupText(dup, itemId, true, pk);    // 本文はリンク付きHTML（pk＝この明細の鍵）
-          return '<div style="font-size:9px;color:#d93025;font-weight:700;line-height:1.5" title="' + av('同じJAN／型番／自社コードが他の明細にも入っています（状態が同じもの同士だけを比べています）。\n' + (plain || '')) + '">⚠ ' + (rich ? rich + 'と重複' : '重複') + '</div>'; })() : '')
+          // ★どの欄の、どの値がかぶっているのかを必ず書く（2026-08-31 本人「どれが重複なのかわからんくない？」）
+          const fLbl = PID_FLD[dup._f] || '';
+          const head2 = fLbl ? (fLbl + ' ' + String(dup._v || '').toUpperCase() + ' が ') : '';
+          return '<div style="font-size:9px;color:#d93025;font-weight:700;line-height:1.5" title="' + av((fLbl ? ('この明細の【' + fLbl + '】' + String(dup._v || '').toUpperCase() + ' が、他の明細にも入っています。') : '同じJAN／型番／自社コードが他の明細にも入っています。') + '\n（状態が同じもの同士だけを比べています）\n' + (plain || '')) + '">⚠ ' + head2 + (rich ? rich + 'と重複' : '重複') + '</div>'; })() : '')
       + '</div>';
   }
   // 🔖 明細（バリエ）ごとのJAN/型番キー。
@@ -28448,7 +28475,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 + 'title="この明細は枠だけあって中身（価格・在庫）がありません。Shopee側では価格・重量が空の行になり、この商品はどの保存も通りません。✎カタログ編集の🧹で掃除できます">⚠ 中身なし</span>')
             + `</div>`;
         }
-        return `<div style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
+        // ★行に目印を付ける。100件あると「4番」と言われても探せないので、
+        //   番号で飛べるように・空だけ残せるようにする（2026-08-31 本人「見つけるの難しい」「空の明細」）
+        const _emptyRow = !String(pv.jan || '').trim() && !String(pv.mpn || '').trim() ? '1' : '0';
+        return `<div class="lst-vrow" data-id="${r.item_id}" data-no="${_no}" data-empty="${_emptyRow}" style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
           + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;align-self:stretch;' + LSTKL[0], isSingle ? '↳'
               : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'
                  // ★まとめて消すための選択。番号のところ＝左に固定される列なので、横に振っても付いてくる
@@ -30683,6 +30713,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         alert('♻️ ' + jobs.length.toLocaleString() + '件に入れました（費用¥0）。\n'
           + (skipBad ? '※ ' + skipBad + '件は取り違えの疑いがあるので配っていません。' : ''));
       }); }
+    // 🔎「4番と重複」を押したら、その明細まで飛んで光らせる（100件から目で探すのは無理）
+    { const jump = (iid, no) => {
+        const el = document.querySelector('#lst-list .lst-vrow[data-id="' + iid + '"][data-no="' + no + '"]');
+        if (!el) { toast('その明細が画面に出ていません（明細を開いてから押してください）', true); return; }
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) { el.scrollIntoView(); }
+        el.style.transition = 'background .25s';
+        const bg = el.style.background;
+        el.style.background = '#fff3cd';
+        setTimeout(() => { el.style.background = bg || ''; }, 2200);
+      };
+      document.querySelectorAll('#lst-list .lst-dupjump').forEach(a => a.addEventListener('click', e => {
+        e.preventDefault(); jump(a.dataset.id, a.dataset.no);
+      }));
+    }
+    // 🈳 空だけ残す（もう一度押すと全部出す）。一覧は作り直さない＝スクロール位置も開いた明細もそのまま
+    document.querySelectorAll('#lst-list .lst-emptyonly').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.k, iid = String(k || '').split('|')[1] || '';
+      const on = b.classList.toggle('on');
+      b.textContent = on ? '🈳 空だけ（解除）' : '🈳 空だけ';
+      document.querySelectorAll('#lst-list .lst-vrow[data-id="' + iid + '"]').forEach(row2 => {
+        row2.style.display = (on && row2.dataset.empty !== '1') ? 'none' : '';
+      });
+    }));
     { const cb2 = document.getElementById('lst-jandupclean');
       if (cb2) cb2.addEventListener('click', () => {
         productIds = productIds || {};
