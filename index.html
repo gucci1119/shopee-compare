@@ -29831,6 +29831,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       let hit = 0; const found = [], missed = [];
       const okLog = [], ngLog = [];        // 📝 仕組み改善のための記録（検索語・出典・外れた理由）
+      // ★同じ回の中で使ったJAN/型番。別の明細に同じ値が来たら【取り違え】なので捨てる
+      const batchJan = new Set(), batchMpn = new Set(), dupSkip = [];
       let spread = 0;                      // ♻️ 他の国の同じ明細に配れた数（そのぶん課金を避けられた）
       // ★1回12件まで。プロンプトの固定分が薄まって1明細¥5.6→¥3.7（33%減）。25件は検索が足りず失敗した実績あり
       for (let i = 0; i < tgt.length; i += 12) {
@@ -29850,8 +29852,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         chunk.forEach((m, j) => {
           const got = byName.get(String(names[j]).trim().toLowerCase()) || (d.items || [])[j];
           const k = pidKeyModel(row, m), prev = productIds[k] || {};
-          const nj = String(prev.jan || '').trim() || String((got && got.jan) || '').trim();
-          const nm = String(prev.mpn || '').trim() || String((got && got.mpn) || '').trim();
+          // ★★ 同じ問い合わせの中で【他の明細に付けたJANと同じ】なら捨てる（2026-08-30）。
+          //   12件まとめて投げるとAIが商品間で答えを取り違え、別ゲームに同じJANを入れる事故が起きた
+          //   （Bomberman GB2 と Mickey Mouse IV が同じ／ゼルダ と 風来のシレン が同じ、など4組9件）。
+          //   検算(チェックデジット)は通ってしまうので、これで弾かないと気づけない。
+          let cj = String((got && got.jan) || '').trim();
+          let cm = String((got && got.mpn) || '').trim();
+          if (cj && batchJan.has(cj)) { dupSkip.push((m.n || '') + '（JAN ' + cj + ' が同じ回の他の明細と重複）'); cj = ''; }
+          if (cm && batchMpn.has(cm)) { cm = ''; }
+          if (cj) batchJan.add(cj);
+          if (cm) batchMpn.add(cm);
+          const nj = String(prev.jan || '').trim() || cj;
+          const nm = String(prev.mpn || '').trim() || cm;
           if (nj === String(prev.jan || '') && nm === String(prev.mpn || '')) {
             pidMarkTried(k);                              // ★次から飛ばす（同じ所に二度払わない）
             try { pidPaintOne(k, {}); } catch (_) {}
@@ -29913,6 +29925,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   開いていた明細が飛ぶ（本人「作業途中だとキレそうになる」2026-08-28）。
       if (quiet) return;                         // ★まとめて実行中は1件ごとに出さない（最後にまとめて）
       alert('🔎 ' + hit + '/' + tgt.length + '件に入れました。'
+        + (dupSkip.length ? '\n⚠ ' + dupSkip.length + '件は【他の明細と同じJAN】が返ったので入れませんでした（AIの取り違え）' : '')
         + (spread ? '\n♻️ 同じ明細名の他の国にも ' + spread + '件 配りました（そのぶんは課金なし）' : '') + '\n\n'
         + (found.length ? '【入れた分】出典を確認してください（違っていれば欄を消してください）\n' + found.join('\n') + '\n\n' : '')
         + (missed.length ? '【入らなかった分】\n' + missed.join('\n') : ''));
