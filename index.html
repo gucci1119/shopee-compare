@@ -924,6 +924,7 @@
       <button class="smd-btn" id="ord-bulkprint" title="表示中の未発送注文のSLS伝票（Shopee指定配送の送り状）をまとめて印刷（国ごとに印刷タブを開く／Waybill Printer連携）">🖨️ 一括印刷</button>
       <button class="smd-btn" id="ord-csv" title="表示中（絞り込み後）の注文をピッキングリストとしてCSVで書き出し">⬇ CSV</button>
       <button class="smd-btn" id="ord-copytrack" title="表示中（絞り込み後）の追跡番号をまとめてコピー（配送業者一括照会用）">📋 追跡番号</button>
+      <button class="smd-btn b-fil" id="ord-selauto" title="表示中の未手配のうち、BR・VN 以外（PH・SG・MY・TH・TW）だけを選びます。&#10;BRは越境で手配が遅く6日を過ぎてから手配する運用、VNは先に分割(split_order)が要るため、この2か国は選びません。&#10;選んだあと『🎯 選択を一括発送手配』を押すと、確認のうえまとめて手配します。">☑ BR・VN以外を全選択</button>
       <button class="smd-btn" id="ord-selall" title="表示中の未手配注文（📦発送手配ボタンがある行）をすべて選択／解除">☑ 未手配を全選択</button>
       <button class="smd-btn" id="ord-worksheet" title="外注さん・スタッフに渡すA4 1枚の作業指示を印刷します（今日の日付と本日の発送件数入り）">🖨 きょうの作業指示</button><button class="smd-btn b-write" id="ord-bulkship" title="下でチェックした未手配の注文をまとめてShopeeへ発送手配（公式API・1回の確認あり）。各国Seller Centerに行かず一括手配" >🎯 選択を一括発送手配<span id="ord-selcount"></span></button>
       <span class="smd-seg" id="ord-filter">
@@ -3618,6 +3619,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '☑ BR・VN以外を全選択': '☑ Select all except BR and VN',
     '🔎 選んだ出品のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected listings',
     '⚡ JAN・型番を自動で入れる': '⚡ Fill JAN / model no. automatically',
     '▾ ひとつずつ実行する': '▾ Run them one by one', '▴ 閉じる': '▴ Close',
@@ -7879,6 +7881,26 @@
   // 🎯 選択を一括発送手配 ／ ☑未手配を全選択 ／ 選択件数の表示（.ord-selchk は行再描画で作られるため委譲で件数更新）
   { const bs = document.getElementById('ord-bulkship'); if (bs) bs.addEventListener('click', () => bulkArrangeShip()); }
   const updSelCount = () => { const n = document.querySelectorAll('.ord-selchk:checked').length; const el = document.getElementById('ord-selcount'); if (el) el.textContent = n ? '（' + n + '）' : ''; };
+  // ☑ BR・VN以外を全選択（本人 2026-08-28「BRとVN以外は自動でarrange shipment押して欲しい」）。
+  //   ★arrange shipment は Shopee への【取り消せない】操作なので、押すのは人のまま。
+  //     選ぶところだけ自動にして、実行は既存の『🎯 選択を一括発送手配』の確認を通す＝2クリックで済む。
+  //   ★BR・VN を外す理由：BRは越境で手配が遅く6日を過ぎてから手配する運用／VNは先に分割(split_order)が要る。
+  const AUTOSHIP_SKIP_CC = ['BR', 'VN'];
+  { const sb = document.getElementById('ord-selauto');
+    if (sb) sb.addEventListener('click', () => {
+      const boxes = [...document.querySelectorAll('.ord-selchk')];
+      if (!boxes.length) { alert('未手配の注文が表示されていません。「①📦未手配」で絞ってから押してください。'); return; }
+      let on = 0; const skipped = {};
+      boxes.forEach(b2 => {
+        const cc = String(b2.dataset.cc || '').toUpperCase();
+        if (AUTOSHIP_SKIP_CC.indexOf(cc) >= 0) { b2.checked = false; skipped[cc] = (skipped[cc] || 0) + 1; return; }
+        b2.checked = true; on++;
+      });
+      updSelCount();
+      const sk = Object.keys(skipped).map(k => k + ' ' + skipped[k] + '件').join('・');
+      toast('☑ ' + on + '件を選びました' + (sk ? '（' + sk + 'は選んでいません）' : '') + '。『🎯 選択を一括発送手配』で手配します');
+    });
+  }
   { const sa = document.getElementById('ord-selall'); if (sa) sa.addEventListener('click', () => { const boxes = [...document.querySelectorAll('.ord-selchk')]; if (!boxes.length) { alert('未手配の注文がありません（📦発送手配ボタンのある行が対象）。「📦未手配」フィルタで絞ると選びやすいです。'); return; } const allOn = boxes.every(b => b.checked); boxes.forEach(b => b.checked = !allOn); updSelCount(); }); }
   document.getElementById('ord-list').addEventListener('change', e => { if (e.target && e.target.classList && e.target.classList.contains('ord-selchk')) updSelCount(); });
   // 🖨️ 一括印刷：表示中の未発送(tab300)のSLS伝票を国ごとにまとめて印刷（各注文=1タブ。Waybill Printer userscriptが自動印刷）
@@ -15546,6 +15568,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-28', items: [
+      '☑ <b>「BR・VN以外を全選択」を足しました</b>（本人「BRとVN以外は自動でarrange shipment押して欲しい」）。注文管理の上の <b>☑ BR・VN以外を全選択</b> を押すと、表示中の未手配のうち <b>PH・SG・MY・TH・TW だけ</b>にチェックが入り、そのまま <b>🎯 選択を一括発送手配</b> で手配できます（<b>2クリック</b>）。<br>BR・VNを外す理由：<b>BRは越境で手配が遅く、6日を過ぎてから手配する運用</b>／<b>VNは先に分割(split_order)が要る</b>ためです。<br>⚠️ <b>完全自動（押さずに手配）にはしていません</b>。arrange shipment は Shopee への<b>取り消せない</b>操作なので、選ぶところまでを自動にして、<b>実行は人が確認して押す</b>形にしています。完全自動にするかはご判断ください。',
       '🌏 <b>国をまたいだ同じJANを「重複」と言わなくしました</b>（本人「国またぎ重複はOKなんだけど」）。同じ商品を7か国に出すのが普通の運用なのでJANは当然かぶります。困るのは<b>同じ国の中でかぶる時だけ</b>です。<br>原因：重複の判定が<b>キーの「｜」より前を親と見なす</b>作りのままでしたが、いまの鍵は <code>id:&lt;item_id&gt;#&lt;model_id&gt;</code> で<b>「｜」が無く</b>、キー全体が親になっていました。結果、<b>別の国でも必ず重複と出て</b>いました。<b>国ごとに数えて</b>、同じ国の中で2つ以上に付いている時だけ出します（同じカタログの別明細も対象）。',
       '📊 <b>進捗メーターと終わる目安の時刻を出すようにしました</b>（本人「予定終了時刻とメーターも欲しい」）。<b>画面のいちばん下・中央</b>に固定で出ます（しごとパネルではありません）。中身は <b>進捗バー／◯件中◯件（◯%）／のこり時間／終わる目安の時刻／1件あたりの実測秒／■止める</b>。<br>まとめて実行のときは<b>明細の数</b>で数えます（カタログ数だと、100バリエと1バリエが同じ1歩になって残り時間が狂うため）。あわせて<b>1カタログ実行にも金額の確認</b>を足しました（4件以上のとき）。まとめて実行だけ聞いていて、こちらが素通りでした。',
       '📚 <b>カタログをまとめて調べられるようにしました</b>（本人「バリエのカタログはまとめていけるの？」）。出品一覧で出品にチェックを入れると <b>🔎 選んだ◯件のJAN・型番を探す</b> が出ます。<b>同じ明細名は1回しか調べない</b>ので、<b>カタログを増やすほど1件あたりは安くなります</b>（2つ目以降は、1つ目で分かった答えがタダで入ることが多い）。<br>押す前に<b>「調べる明細は最大◯件・1件あたり約¥4」</b>を出して確認します。<b>前に見つからなかった明細は自動で飛ばし</b>、まとめて実行中は<b>1件ごとにダイアログを出しません</b>（同じボタンをもう一度押すと止まります）。',
