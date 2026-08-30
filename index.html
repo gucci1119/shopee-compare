@@ -29019,6 +29019,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
              もともと名前で照合できているので新しい情報が増えない。
              JANが効くのは「名前が違うのに同じ商品」＝🔁似た出品を探す で候補になったものだけ。
              押し間違いで数万円かかる事故を防ぐため、ボタン自体を置かない。 -->
+        <button class="smd-btn b-danger" id="lst-jandupclean" title="同じカタログの中で【別の明細に同じJAN】が入っているものを探して消します。&#10;AIがまとめて答えるとき、前の商品の答えを次の商品にも書いてしまう取り違えが起きます&#10;（例：Bomberman GB2 と Mickey Mouse IV が同じJAN・同じ型番）。&#10;チェックデジットは通ってしまうので、これで見つけるしかありません。&#10;消す前に一覧を出して確認します。型番は残します。">🧹 取り違えJANを掃除</button>
         <button class="smd-btn b-write" style="display:none" id="lst-janbulk" title="いま絞り込んでいる出品ぜんぶを対象に、JAN・型番が空いている明細を【まとめて】AIのネット検索で埋めます。&#10;・同じ明細名は1回しか調べません（例：Splatoon 3 が12件あっても1回）&#10;・25件ずつ問い合わせ、区切りごとに保存するので、途中で止めてもそこまでは残ります&#10;・すでに入っている欄は触りません。確信が持てないものは入れません&#10;※⚙️設定の「AIシリーズ調査GAS URL」が要ります">📇 JAN・型番を一括で埋める</button>
         <span class="smd-dim" id="lst-note">${lst.note ? esc((lst.syncing ? '🔄 ' : '') + lst.note) : (totalAll ? 'DB' + totalAll + '件' : '未取得：🔄更新でShopeeから取得')}</span>
       </div>
@@ -30018,6 +30019,42 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   ★1カタログずつ押していては終わらない（実測：明細14,210件・名前4,078種類）。
     //   ★同じ明細名は1回しか調べない（Splatoon 3 が12件あっても問い合わせは1回）＝費用と時間を1/3以下に。
     //   ★区切りごとに保存する＝途中で止めても、そこまでは残る。
+    // 🧹 取り違えJANの掃除（2026-08-30）。同じカタログの中で別の明細に同じJANが入っていたら、
+    //   AIが前の商品の答えを引きずったもの。どちらが正しいか決められないので【両方消す】。
+    //   ★勝手に消さない。必ず一覧を見せてから。
+    { const cb2 = document.getElementById('lst-jandupclean');
+      if (cb2) cb2.addEventListener('click', () => {
+        productIds = productIds || {};
+        const bycat = new Map();
+        Object.keys(productIds).forEach(k => {
+          const j = String((productIds[k] || {}).jan || '').trim(); if (!j) return;
+          const cat = String(k).split('#')[0];
+          if (!bycat.has(cat)) bycat.set(cat, new Map());
+          const mm = bycat.get(cat);
+          if (!mm.has(j)) mm.set(j, []);
+          mm.get(j).push(k);
+        });
+        const bad = [];
+        bycat.forEach(mm => mm.forEach((ks, j) => { if (ks.length > 1) bad.push({ jan: j, keys: ks }); }));
+        if (!bad.length) { alert('🧹 取り違えは見つかりませんでした。'); return; }
+        const nameOf = (k) => { const w = pidKeyWhere(k) || {}; return (w.no ? w.no + '番 ' : '') + (w.mn || w.name || k); };
+        const n = bad.reduce((a2, b2) => a2 + b2.keys.length, 0);
+        const list = bad.slice(0, 10).map(b2 => '・JAN ' + b2.jan + '\n' + b2.keys.map(k => '　　' + nameOf(k)).join('\n')).join('\n');
+        if (!confirm('🧹 同じカタログの中で【別の明細に同じJAN】が入っているものが ' + bad.length + '組・' + n + '件 見つかりました。\n\n'
+          + list + (bad.length > 10 ? '\n…ほか' + (bad.length - 10) + '組' : '')
+          + '\n\nどちらが正しいか決められないので、この ' + n + '件のJANを消します（型番は残します）。\n'
+          + 'そのあと「🔎 調べる」でやり直せます。よろしいですか？')) return;
+        let del = 0;
+        bad.forEach(b2 => b2.keys.forEach(k => {
+          const p = productIds[k] || {};
+          productIds[k] = Object.assign({}, p, { jan: '' });
+          try { pidPaintOne(k, { jan: '', mpn: p.mpn || '' }); } catch (_) {}
+          del++;
+        }));
+        _pidDupCache = null; saveProductIds();
+        try { logAct('出品', '取り違えJANを掃除', '', bad.length + '組 ' + del + '件のJANを消した'); } catch (_) {}
+        alert('🧹 ' + del + '件のJANを消しました。');
+      }); }
     { const bb = document.getElementById('lst-janbulk');
       if (bb) bb.addEventListener('click', async () => {
         if (lst._janRunning) { lst._janStop = true; return; }        // 走っている間の2回目＝止める
