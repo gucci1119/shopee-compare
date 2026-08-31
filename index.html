@@ -8546,7 +8546,71 @@
         // 今週の確定リリースの国別内訳（払出実績＝国別が確実に出る）
         const wk0cc = wkCc[0] || {};
         const confCcLine = Object.keys(wk0cc).length ? `<div class="smd-dim" style="font-size:10.5px;margin:3px 0 0 82px">今週の国別: ${Object.keys(wk0cc).sort((a, b) => wk0cc[b].usd - wk0cc[a].usd).map(cc => `<b style="color:#0f9d58">${cc}</b> ${usd(wk0cc[cc].usd)}`).join(' ／ ')}</div>` : '';
-        // 📅 来週以降の入金見込み（推定＝直近ペース。Shopeeは各注文の正確なリリース日を非公開のため概算）
+        // 📅 来週以降の入金見込み。
+        //   ★以前は【直近4週の平均を3週ぶん平置き】していた。リリースのリードタイムを一切見ておらず、
+        //     5週連続で減っている局面でも平均を出すので **先週実績より25%高い数字** が出ていた
+        //     （2026-08-31 本人「これ正確なのか？」「shopeeの入金リードタイムロジックとかも鑑みて？」）。
+        //   → いま持っている【預かり金】を、国別の実測リードタイムで**リリース予定週に割り振る**。
+        //     これは「もう売れた分がいつ銀行に届くか」なので、平均より根拠がある。
+        //     ※これから入る注文は含まない（捏造しない）。
+        // 注文の索引。recentOrders は order_ts と tab を持っている（orders は order_ts が無い）
+        const ordIdx = {};
+        (recentOrders || []).forEach(o3 => { if (o3 && o3.sn) ordIdx[o3.cc + ':' + o3.sn] = o3; });
+        (orders || []).forEach(o3 => { if (o3 && o3.sn && !ordIdx[o3.cc + ':' + o3.sn]) ordIdx[o3.cc + ':' + o3.sn] = o3; });
+        // ① 国別リードタイム＝「注文 → 次にその国でリリースされた時刻」の中央値（実測）。
+        //   ★入金の確定時刻は使えない（pending行の時刻は最後に観測した時刻であって確定時刻ではない）。
+        const lagOf = (() => {
+          const byCc = {};
+          (payouts || []).forEach(p2 => { if (!p2.payout_time) return; (byCc[p2.cc] = byCc[p2.cc] || []).push(p2.payout_time * 1000); });
+          Object.keys(byCc).forEach(cc => byCc[cc].sort((a, b) => a - b));
+          const lags = {}; const all = [];
+          (income || []).forEach(i2 => {
+            if (i2.pending === true) return;                      // まだリリース前のものは測れない
+            const o4 = ordIdx[i2.cc + ':' + i2.sn]; const t = o4 && o4.order_ts ? o4.order_ts * 1000 : 0; if (!t) return;
+            const arr = byCc[i2.cc]; if (!arr) return;
+            const nxt = arr.find(x => x > t); if (!nxt) return;
+            const d = (nxt - t) / 86400000;
+            if (d < 0 || d > 90) return;
+            (lags[i2.cc] = lags[i2.cc] || []).push(d); all.push(d);
+          });
+          const med = a => { if (!a || !a.length) return null; const b = a.slice().sort((x, y) => x - y); const h = b.length >> 1; return b.length % 2 ? b[h] : (b[h - 1] + b[h]) / 2; };
+          const out = { _all: med(all), _n: {} };
+          Object.keys(lags).forEach(cc => { out[cc] = med(lags[cc]); out._n[cc] = lags[cc].length; });
+          return out;
+        })();
+        // ② ★ここで「預かり金をリリース予定週に割り振る」ことは【できない】。
+        //   実データで検算したら **$9,442 が丸ごと今週** に寄った（2026-08-31）。理由は2つ。
+        //   ・pending行の amount_at は「確定した時刻」ではなく最後に観測した時刻＝リードタイムの起点に使えない
+        //   ・注文日を起点にすると、預かり金の 3分の1 が既に15〜30日経過していて、全部「もう過ぎた」になる
+        //     （速い注文は先にリリース済み＝残っているのは遅いものばかり、という生存バイアス）
+        //   実績も週$1,200〜1,800なのに預かり金は$9,442＝**6週ぶんの滞留**がある。
+        //   → 週に割るのはやめ、**事実（状態・滞留日数・実測リードタイム）だけ**を出す。捏造しない。
+        const pendAge = { d7: 0, d14: 0, d30: 0, d60: 0, old: 0 }, pendTab = {};
+        (income || []).forEach(i => {
+          if (i.pending !== true) return;
+          const r = rateOf(i.cc); const loc = +i.amount || 0; if (!loc || r == null) return;
+          const u = loc * r;
+          const o2 = ordIdx[i.cc + ':' + i.sn] || null;
+          const ots = o2 && o2.order_ts ? o2.order_ts * 1000 : null;
+          const d = ots ? Math.floor((Date.now() - ots) / 86400000) : null;
+          if (d == null) pendAge.old += u;
+          else if (d <= 7) pendAge.d7 += u; else if (d <= 14) pendAge.d14 += u;
+          else if (d <= 30) pendAge.d30 += u; else if (d <= 60) pendAge.d60 += u; else pendAge.old += u;
+          const tb = o2 ? (o2.tab === 300 ? '未発送' : o2.tab === 400 ? '発送済み・配送中' : o2.tab === 500 ? '完了' : 'その他') : '不明';
+          pendTab[tb] = (pendTab[tb] || 0) + u;
+        });
+        const pendTot2 = Object.keys(pendTab).reduce((a, k) => a + pendTab[k], 0) || 1;
+        const ageHtml = [['〜7日', pendAge.d7], ['8〜14日', pendAge.d14], ['15〜30日', pendAge.d30], ['31〜60日', pendAge.d60], ['61日〜/不明', pendAge.old]]
+          .filter(x => x[1] > 0)
+          .map(x => `<span style="white-space:nowrap;margin-right:12px">${x[0]} <b>${usd(x[1])}</b></span>`).join('');
+        const tabHtml = Object.keys(pendTab).sort((a, b) => pendTab[b] - pendTab[a])
+          .map(k => `<span style="white-space:nowrap;margin-right:12px">${k} <b>${usd(pendTab[k])}</b> <span class="smd-dim">(${Math.round(pendTab[k] / pendTot2 * 100)}%)</span></span>`).join('');
+        const lagLine = '注文→リリースの実測（中央値）: ' + Object.keys(lagOf).filter(c => c !== '_all' && c !== '_n')
+          .sort().map(c => c + ' ' + (Math.round(lagOf[c] * 10) / 10) + '日').join(' ／ ');
+        // 先週実績と平均の乖離＝下り坂かどうか
+        const lastWk = wkUsd[-1] || 0;
+        const trendNote = (runUsd > 0 && lastWk > 0 && runUsd > lastWk * 1.1)
+          ? `<span style="color:#b3261e;font-weight:700">⚠ 実績は下り坂です（先週 ${usd(lastWk)} ＜ 4週平均 ${usd(runUsd)}）。平均は高めに出ます。</span>` : '';
         const futHtml = runUsd > 0 ? [1, 2, 3].map(k => {
           const lab = k === 1 ? '来週' : k === 2 ? '再来週' : '3週後';
           const w = Math.round((runUsd / Math.max(barMax, runUsd)) * 100);
@@ -8559,7 +8623,12 @@
           `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します。これが「今後の入金予定」の総額です">💰入金予定（リリース前の預かり金・総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(pipeJpy)}</span></div></div>` +
           `</div>` +
           `<div style="font-weight:700;font-size:12px;margin:8px 0 2px">確定リリース（週別・Payoneer着金USD）</div>${confHtml}${confCcLine}` +
-          (runUsd > 0 ? `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📅 来週以降の入金見込み（推定・直近${rrKeys.length}週の平均ペース）</div>${futHtml}` : '') +
+          `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📦 リリース前の預かり金の中身（いつ届くかの手がかり）</div>` +
+          `<div style="font-size:11.5px;margin:2px 0 0 6px">状態別: ${tabHtml || '<span class="smd-dim">なし</span>'}</div>` +
+          `<div style="font-size:11.5px;margin:3px 0 0 6px">注文からの経過: ${ageHtml || '<span class="smd-dim">なし</span>'}</div>` +
+          `<div class="smd-dim" style="font-size:10.5px;margin:4px 0 0 6px">${esc(lagLine)}</div>` +
+          (runUsd > 0 ? `<div style="font-size:11px;margin:6px 0 0 6px">参考：直近${rrKeys.length}週の平均ペース <b>${usd(runUsd)}/週</b>　${trendNote}</div>` : '') +
+          `<div class="smd-dim" style="font-size:10px;margin:3px 0 0 6px">※週ごとの見込み額は出しません。預かり金の3分の1が15日以上滞留しており、注文日や確定時刻からリリース日を当てられないためです（実測で検算し、全額が今週に寄って使い物にならないことを確認）。</div>` +
           `<div style="font-weight:700;font-size:12px;margin:11px 0 2px">見込み内訳（リリース前の預かり金 → USD/円換算・国別）</div><div style="line-height:1.9">${pipeHtml}</div>` +
           `<div style="font-weight:700;font-size:12px;margin:12px 0 3px">🏦 銀行口座への着金見込み（3段階）</div>` +
           `<div style="font-size:11.5px;line-height:1.75;color:#444">` +
