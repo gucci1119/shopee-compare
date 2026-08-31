@@ -15885,6 +15885,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🧩 <b>表と内訳で「出している」の数が食い違っていたのを直しました</b>（本人「なんか出しているの数違うくない？」表106・内訳284）。<b>同じことを2か所で別々に組み立てていた</b>のが原因です。→ 突合に使う索引を<b>1か所にまとめ、両方がそれを使う</b>ようにしました。<br>あわせて、<b>AIが調べた日本語タイトル(jp)</b> も突合に入れます。母数のマスタは日本語なので、これが無いと英語の明細名は一生当たりません。<b>過去のJAN調べのログから2,295件ぶんを復元して書き戻し済み</b>です。',
       '📏 <b>【本題】「出している」の数が少なすぎたのを直しました</b>（本人「絶対に106明細以上出してるし、おかしい」）。<br>判定が<b>完全一致と「丸ごと含む」だけ</b>だったので、<b>機械翻訳で語順が入れ替わった出品名を1件も拾えていませんでした</b>（<code>Splatoon 3 - Switch</code>／<code>Mario Rabbits Kingdom Battle</code>／<code>Donkey Kong Returns HD Switch</code>）。<br>→ <b>語の重なり</b>も見るようにしました。ルールは重複判定と同じで、<b>2語以上の一致・続編の番号が同じ・重なり50%以上</b>。<br>実測（Switch・明細名811種類）：<b>完全一致72件 → 243件</b>。総当たりにならないよう<b>語の索引</b>を作って引いています。',
       '🌉 <b>JAN調べで得た【日本語タイトル】を保存し、母数の突合に使うようにしました</b>（本人「JANコードの入力を進めているので、それで紐付けはできませんか？」）。<br>母数のマスタは<b>日本語（駿河屋）</b>、こちらの明細名は<b>英語</b>なので、突き合わせる手段がありませんでした。これが「Switchで出しているのが106件」と出ていた理由です（実際の明細名は<b>811種類</b>）。<br>実測：Wikidataの英名で日本語に変換できたのは<b>811件中68件だけ</b>。橋になりません。一方で<b>AIはJANを調べるたびに日本語タイトルを返しています</b>——それをログと学習にしか使わず<b>捨てていました</b>。→ 明細ごとに保存し、突合に使います。<b>JANを埋めるほど母数の精度が上がります</b>。<br>★保存する項目への追加も忘れずに入れています（ここを忘れて消える事故を過去3回やっているため）。',
       '🗂 <b>母数の内訳を、表の下ではなく画面にかぶせて出すようにしました</b>（本人「三角を押して下に出すより、この上にポップアップで出した方が早い」）。下に開くと、表を下までスクロールしてから見に行くことになって遅いためです。<b>✕・背景クリック・Escape</b> のどれでも閉じられます。',
@@ -23673,6 +23674,24 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 📚 マスタと自社の明細を突き合わせて「本当に何本出しているか」を数える。
   //   ★ハードごとに順番に。全ハードの全行（3.5万件）を一度に読むと表示が壊れる（前に実際に壊れた）。
   //   一度計算したら覚える。マスタを取り直した時だけやり直す。
+  // 🧩 「自分が出しているもの」を突合に使える形にする。★表と内訳で必ず同じものを使う。
+  //   別々に作っていたため、表は106・内訳は284と食い違っていた（2026-08-31 本人指摘）。
+  //   ・名前（英語の明細名）に加えて、**AIが調べた日本語タイトル(jp)** も入れる。
+  //     母数のマスタは日本語なので、これが無いと英語の明細名は一生当たらない。
+  function tmMineIndex(names, link) {
+    const set = new Set([...(names || [])].map(n => link[tmKey(n)] || tmKey(n)));
+    try {
+      Object.keys(productIds || {}).forEach(k => {
+        const jp = String((productIds[k] || {}).jp || '').trim();
+        if (jp) set.add(link[tmKey(jp)] || tmKey(jp));
+      });
+    } catch (_) {}
+    const arr = [...set].filter(Boolean);
+    const toks = arr.map(k => k.split(' ').filter(w => w.length >= 2));
+    const tok = new Map();
+    toks.forEach((ws, i) => ws.forEach(w => { let a = tok.get(w); if (!a) { a = []; tok.set(w, a); } if (a[a.length - 1] !== i) a.push(i); }));
+    return { set: set, blob: '\n' + arr.join('\n') + '\n', idx: { tok: tok, toks: toks, keys: arr } };
+  }
   let _tmMatching = false;
   async function tmMatchAll(master, own) {
     if (_tmMatching) return;
@@ -23687,10 +23706,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     for (const h of todo) {
       const rows = await loadTitleRows(h);
       const lk = await loadTitleLink();
-      const mine = new Set([...((own.names || {})[h] || [])].map(n => lk[tmKey(n)] || tmKey(n)));
+      const mi = tmMineIndex((own.names || {})[h] || [], lk);
       let hit = 0;
-      const arr = [...mine];
-      rows.forEach(r => { if (tmHas(r, mine, arr)) hit++; });
+      rows.forEach(r => { if (tmHas(r, mi.set, mi.blob, mi.idx)) hit++; });
       lst.tmMatch[h] = hit;
       if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster();   // 出たそばから表を更新
       await new Promise(r => setTimeout(r, 30));
@@ -24297,28 +24315,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const mine = (own && own.names && own.names[hw]) || new Set();
     const link = await loadTitleLink();
     // 手で決めた対応があればそちらを使う（略称のような機械では当たらない分）
-    const mineN = new Set([...mine].map(n => link[tmKey(n)] || tmKey(n)));
+    const _mi = tmMineIndex(mine, link);
+    const mineN = _mi.set;
     // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
     const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
     // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
-    // ★英語の明細名は日本語マスタ（駿河屋）に当たらない。AIが決めた日本語タイトル(jp)を橋にする。
-    //   実測 2026-08-31：Switchの明細名811種類のうち、Wikidataの英名で日本語に変換できたのは68件だけ。
-    //   JAN調べで得た jp を使えば、調べたぶんだけ確実につながる。
-    try {
-      Object.keys(productIds || {}).forEach(k2 => {
-        const jp = String((productIds[k2] || {}).jp || '').trim();
-        if (jp) mineN.add(link[tmKey(jp)] || tmKey(jp));
-      });
-    } catch (_) {}
-    const mineArr = [...mineN];
-    const mineBlob = '\n' + mineArr.join('\n') + '\n';   // ★総なめをやめるための1本の文字列
-    // ★語の重なりで見るための索引（語 → 自分の何番目の名前か）。総当たりにしないため。
-    const mineIdx = (() => {
-      const toks = mineArr.map(k => k.split(' ').filter(w => w.length >= 2));
-      const tok = new Map();
-      toks.forEach((ws, i) => ws.forEach(w => { let a = tok.get(w); if (!a) { a = []; tok.set(w, a); } if (a[a.length - 1] !== i) a.push(i); }));
-      return { tok: tok, toks: toks, keys: mineArr };
-    })();
+    const mineArr = _mi.idx.keys;
+    const mineBlob = _mi.blob, mineIdx = _mi.idx;
     let list = rows.map(r => Object.assign({}, r, {
       has: tmHas(r, mineN, mineBlob, mineIdx),
       q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
