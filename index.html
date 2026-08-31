@@ -15885,6 +15885,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '📏 <b>【本題】「出している」の数が少なすぎたのを直しました</b>（本人「絶対に106明細以上出してるし、おかしい」）。<br>判定が<b>完全一致と「丸ごと含む」だけ</b>だったので、<b>機械翻訳で語順が入れ替わった出品名を1件も拾えていませんでした</b>（<code>Splatoon 3 - Switch</code>／<code>Mario Rabbits Kingdom Battle</code>／<code>Donkey Kong Returns HD Switch</code>）。<br>→ <b>語の重なり</b>も見るようにしました。ルールは重複判定と同じで、<b>2語以上の一致・続編の番号が同じ・重なり50%以上</b>。<br>実測（Switch・明細名811種類）：<b>完全一致72件 → 243件</b>。総当たりにならないよう<b>語の索引</b>を作って引いています。',
       '🌉 <b>JAN調べで得た【日本語タイトル】を保存し、母数の突合に使うようにしました</b>（本人「JANコードの入力を進めているので、それで紐付けはできませんか？」）。<br>母数のマスタは<b>日本語（駿河屋）</b>、こちらの明細名は<b>英語</b>なので、突き合わせる手段がありませんでした。これが「Switchで出しているのが106件」と出ていた理由です（実際の明細名は<b>811種類</b>）。<br>実測：Wikidataの英名で日本語に変換できたのは<b>811件中68件だけ</b>。橋になりません。一方で<b>AIはJANを調べるたびに日本語タイトルを返しています</b>——それをログと学習にしか使わず<b>捨てていました</b>。→ 明細ごとに保存し、突合に使います。<b>JANを埋めるほど母数の精度が上がります</b>。<br>★保存する項目への追加も忘れずに入れています（ここを忘れて消える事故を過去3回やっているため）。',
       '🗂 <b>母数の内訳を、表の下ではなく画面にかぶせて出すようにしました</b>（本人「三角を押して下に出すより、この上にポップアップで出した方が早い」）。下に開くと、表を下までスクロールしてから見に行くことになって遅いためです。<b>✕・背景クリック・Escape</b> のどれでも閉じられます。',
       '🐛 <b>母数の内訳が出なかった本当の原因は <code>num is not defined</code> でした</b>。件数を桁区切りにする <code>num()</code> を、<b>定義していない関数の中で呼んで</b>いました（別の関数のローカル変数）。<b>元からあったバグ</b>ですが、失敗を握りつぶしていたので「読み込み中…」のまま止まって見えていました。エラーを画面に出すようにしたことで、すぐ場所が分かりました。',
@@ -23596,12 +23597,33 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   内訳が何十秒も出てこない（2026-08-31 本人「これずっと動かない」）。
   //   → 明細名を改行でつないだ【1本の文字列】にして、1回の includes で見る。
   //     区切りが改行なので、境目をまたいで誤って一致することはない（キーに改行は入らない）。
-  function tmHas(r, exactSet, ownBlob) {
+  function tmHas(r, exactSet, ownBlob, idx) {
     const kj = r._kj || (r._kj = tmKey(r.ja)), ke = r._ke || (r._ke = tmKey(r.en));
     if ((kj && exactSet.has(kj)) || (ke && exactSet.has(ke))) return true;
-    if (!ownBlob) return false;
-    if (kj && kj.length >= 8 && ownBlob.indexOf(kj) >= 0) return true;
-    if (ke && ke.length >= 8 && ownBlob.indexOf(ke) >= 0) return true;
+    if (ownBlob) {
+      if (kj && kj.length >= 8 && ownBlob.indexOf(kj) >= 0) return true;
+      if (ke && ke.length >= 8 && ownBlob.indexOf(ke) >= 0) return true;
+    }
+    // ★出品名は機械翻訳なので【語順が入れ替わる】。完全一致と「丸ごと含む」だけでは拾えない。
+    //   例）Splatoon 3 - Switch ／ Mario Rabbits Kingdom Battle ／ Donkey Kong Returns HD Switch
+    //   実測（2026-08-31・Switch 811種類）：完全一致72件 → 語の重なりも見ると243件。
+    //   ルールは重複判定と同じ：**2語以上の一致**・**続編の番号が同じ**・重なり50%以上。
+    if (!idx) return false;
+    for (const mk of [ke, kj]) {
+      if (!mk) continue;
+      const b = mk.split(' ').filter(w => w.length >= 2);
+      if (b.length < 2) continue;
+      const cnt = new Map();
+      b.forEach(w => { const a = idx.tok.get(w); if (a) a.forEach(i => cnt.set(i, (cnt.get(i) || 0) + 1)); });
+      for (const [i, hit] of cnt) {
+        if (hit < 2) continue;
+        const a2 = idx.toks[i];
+        const sc = hit / (a2.length + b.length - hit);
+        if (sc < 0.5) continue;
+        if (simSeqNums(idx.keys[i]) !== simSeqNums(mk)) continue;   // 続編は別商品
+        return true;
+      }
+    }
     return false;
   }
 
@@ -24290,8 +24312,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     } catch (_) {}
     const mineArr = [...mineN];
     const mineBlob = '\n' + mineArr.join('\n') + '\n';   // ★総なめをやめるための1本の文字列
+    // ★語の重なりで見るための索引（語 → 自分の何番目の名前か）。総当たりにしないため。
+    const mineIdx = (() => {
+      const toks = mineArr.map(k => k.split(' ').filter(w => w.length >= 2));
+      const tok = new Map();
+      toks.forEach((ws, i) => ws.forEach(w => { let a = tok.get(w); if (!a) { a = []; tok.set(w, a); } if (a[a.length - 1] !== i) a.push(i); }));
+      return { tok: tok, toks: toks, keys: mineArr };
+    })();
     let list = rows.map(r => Object.assign({}, r, {
-      has: tmHas(r, mineN, mineBlob),
+      has: tmHas(r, mineN, mineBlob, mineIdx),
       q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
     })).map(x => { const g = ((lst._sgIdx || {})[hw] || {}); const hit = g[tmKey(x.ja)] || g[tmKey(x.en)]; return Object.assign(x, { sg: !!hit, sgp: hit ? hit.p : 0, sgt: hit ? hit.t : '' }); });
     // ★駿河屋にしか無い物理ソフトを母数に足す（2026-08-18）。
