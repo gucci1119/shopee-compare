@@ -15876,6 +15876,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '📚 <b>日本語タイトルの【候補】をAIに渡すようにしました（外れを減らすため）</b>（本人「外れるのが多すぎる」「翻訳とか検索のセンスがちょっと悪いのかも」）。<br>AIの弱点は<b>英語の出品名から日本語タイトルを当てるところ</b>です。こちらは<b>ハード別の実在タイトル表</b>を持っているので、<b>似ているものを1〜2件、候補として添えます</b>。当てる問題から<b>選ぶ問題</b>に変わるぶん当たりやすくなります。<br>実測（外れた9件で確認）：<code>Ring Fit Adventure Switch→リングフィット アドベンチャー</code>／<code>Samurai Warriors 5 Switch→戦国無双5</code>／<code>Xenoblade Switch Cross 2→ゼノブレイド2</code>／<code>Hello Kitty Island Adventure</code>は<b>完全一致していたのに外していました</b>。<b>6/9</b>で正解が候補に出ます。<br>★<b>言い切らせません</b>（「候補・違えば無視」と伝える）。断定させると別作品を掴みます。比べるときは<b>ハード名を落とします</b>（<code>… Switch</code> が付いていると一致しなくなるため）。',
       '🎨 <b>空いている欄の色を、黄色からオレンジの枠に変えました</b>（本人「もっと目立つ色にしてほしい。黄色とかじゃわかりにくい」）。欄をオレンジの枠でくくり、左に太線を入れます。<b>赤は【重複】の警告で使っている</b>ので、そこと混ざらない色にしています。<br>その前の版では位置（19番目の子）で色を当てていたため<b>1つも当たらず色が全部消えて</b>いました。セルの並びは列の出し入れで変わるので、<b>位置で当ててはいけません</b>。欄そのものに印を付ける形に直しています。',
       '🎨 <b>色を付けるのを【JAN/型番の欄だけ】にしました</b>（本人「型番のとこだけでいいんやけど、色変えるのは」）。行ごと塗ると表が横に広いぶん、色の面積が大きすぎて逆に見づらくなっていました。欄だけを黄色くして左に太線を付けます。<b>どの行が空かは変わらず全部分かります。</b>',
       '🐛 <b>JANを入れても行の黄色が消えなかったのを直しました</b>（本人「入力したのに直らんけど」）。空の印は<b>描画したときの状態</b>で決まっていたので、打っただけでは変わりませんでした。→ <b>打った瞬間に印を付け替えます</b>。AIやコピーで入った時も同じです。「🚫 見つからず」の札も、値が入った時点でその場で消します。',
@@ -28102,6 +28103,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ★漏れたら【レトロ側】に倒れるように、少ない方（現行機）を数える。
   const JAN_CURRENT = new Set(['Switch', 'Switch2', 'PS5', 'PS4', 'Xbox', 'XboxSX', 'XboxOne']);
   const janIsCurrent = (hw) => JAN_CURRENT.has(String(hw || '').trim());
+  // 📚 似ている日本語タイトルを1〜2件だけ返す。英語どうしで比べる（マスタの en と出品名）。
+  //   ★URLは日本語1文字9バイト。候補を盛るとすぐ上限に当たるので、短いものを最大2件まで。
+  const JAN_HW_WORD = new Set('switch switch2 ps ps1 ps2 ps3 ps4 ps5 psp vita wii wiiu gc gb gba gbc ds 3ds nds fc sfc snes nes n64 xbox nintendo sony playstation game software cartridge used'.split(' '));
+  const janTok = (t) => janMasterNorm(t).split(' ').filter(w => w && !JAN_HW_WORD.has(w));
+  function janMasterNear(mst, en) {
+    if (!mst || !mst.size) return [];
+    const a = janTok(en); if (a.length < 2) return [];
+    const A = new Set(a);
+    const out = [];
+    mst.forEach((ja, key) => {
+      if (ja.length > 26) return;
+      const b = janTok(key); if (!b.length) return;
+      let hit = 0; b.forEach(w => { if (A.has(w)) hit++; });
+      if (!hit) return;
+      const sc = hit / (A.size + b.length - hit);      // 共通語の割合
+      if (sc >= 0.45) out.push([sc, ja]);
+    });
+    out.sort((x, y) => y[0] - x[0]);
+    return out.slice(0, 2).map(x => x[1]);
+  }
   const janResetBtnHtml = (r) => {
     const n = janNoCount(r); if (!n) return '';
     return `<button class="lst-janreset" data-id="${r.item_id}" data-cc="${av(r.cc)}" title="「\u{1F6AB} AIでは見つからず」の印は残したまま、もう一度AIで探せる状態に戻します。&#10;※印が付いている明細は、二重の課金を避けるためAIが飛ばします。&#10;※機種（ハード）が空のまま探すと探し先が新品店だけになり、レトロは当たりません。&#10;\u3000機種が入った後で使ってください。&#10;※この操作自体にお金はかかりません（次にAIで探した時にかかります）" style="margin-top:2px;width:100%;border:1px solid #1a7f37;background:#eafaef;color:#14682c;border-radius:6px;padding:1px 4px;font-size:9px;font-weight:700;cursor:pointer">\u{1F501} 見つからなかった${n}件をもう一度探せるようにする</button>`;
@@ -30538,7 +30559,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           //   ★ただし日本語は【URLで1文字9バイト】。長いものを12件ぶん足すと上限に近づくので、
           //     32文字までに限る（2026-08-30にURL長で65件が丸ごと失敗した前科がある）。
           const ja = _mst && _mst.get(janMasterNorm(en));
-          return (ja && ja !== en && ja.length <= 32) ? (en + ' ／ ' + ja) : en;
+          if (ja && ja !== en && ja.length <= 32) return en + ' ／ ' + ja;
+          // ★完全一致しなくても【似ている日本語タイトルを候補として渡す】。
+          //   AIの弱点は「英語の出品名から日本語タイトルを当てる」ところ。
+          //   実測（2026-08-31）：外れた9件のうち6件は、この候補で正解が出せていた
+          //   （Ring Fit Adventure Switch→リングフィット アドベンチャー／Samurai Warriors 5 Switch→戦国無双5 など）。
+          //   ★言い切らない。「候補・違えば無視」と伝える。断定させると別作品を掴む。
+          const cs = janMasterNear(_mst, en);
+          return cs.length ? (en + ' ／ 候補:' + cs.join('|')) : en;
         });
         let d = null, _err = '';
         try { d = await aiJanJsonp(names, hwHint); } catch (e) { d = null; _err = String((e && e.message) || e); }
