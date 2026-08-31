@@ -15876,6 +15876,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🔁 <b>【重複の原因】未出品タイトルの明細追加で、重複を見る範囲が「追加先のカタログだけ」でした</b>（本人「すでに出品している明細との重複が多いなと感じています」）。<br>カタログを複製して足していくと、<b>同じ国の別カタログ（①②③）に既に有るものが素通り</b>します。→ <b>同じ国の全カタログを見て外す</b>ようにし、<b>どのカタログの何番に有るか</b>まで確認画面に出します。<br><code>✅ 12件は【PHの別のカタログに既に出ている】ので外しました：</code><br><code>　Xenoblade 2 → …Cartridge Software ②（37番）</code>',
       '🔁 <b>「もう一度探す」を、カタログの行から直接押せるようにしました</b>（本人「JANの再検索はどこでやるんでしょうか？」）。これまでは <b>▾ひとつずつ実行する</b> を開かないと出てこない場所にありました。→ 件数の隣の <code>🚫13 もう一度探す</code> を押せば戻せます。記録（何回外したか）は残したまま、飛ばす扱いだけを外します。',
       '🚀 <b>描き直しが重くなっていたのを直しました</b>（本人「更新の時間めっちゃ長くなってない？」）。重複の判定が<b>明細1件ごとに、重複マップのキーを総なめ</b>していました。JANが<b>27件→2,235件</b>に増えた日なので、走査するキーもそのぶん増えて一気に効いてきました（6,476行×数千キー）。<b>索引を1回だけ作って引く</b>形に変えました。<br>※Shopeeの接続枠は原因ではありません（実測 2,990/20,000＝15%・背景同期も動作中）。',
       '🎯 <b>候補の出し方を締めました（誤った候補を渡すと逆効果なので）</b>。全20,005件の空きに対して機械で当ててみた結果、最初の版は<b>誤った候補が混ざって</b>いました。<br><b>①アクセントを落とす</b>…<code>Pokémon</code> が <code>pok</code>＋<code>mon</code> に割れて、<code>Pokémon White → ポケモンバンク</code> のような誤りが出ていました（記録済みの落とし穴を踏んでいました）。<br><b>②2語以上の一致を必須</b>…<code>ドラゴン</code>のようなシリーズ名1語で当たらないように。<br><b>③番号が食い違う候補は出さない</b>…<code>ジョーカー2 → ジョーカー3</code> を出していました。続編は別商品です。<br>結果、候補が付くのは<b>3,038件</b>（空きの15%）。<code>ルイージマンション</code>／<code>ワンピース 海賊無双2</code>／<code>機動戦士ガンダム エクストリームバーサス</code> など、確かなものだけが残ります。',
@@ -24058,13 +24059,28 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     }
     if (!(price > 0)) { alert('価格が決められません。価格欄に数字を入れてください。'); return; }
     const gw = await guardWriteCountries([cc]); if (!gw.ok) { alert(gw.msg); return; }
-    const dup = new Set((row.models || []).map(m => tmKey(m.n)));
-    const fit = names.filter(n => !dup.has(tmKey(n))).map(n => Object.assign({ src: n }, tmFitName(n, 30)));
+    // ★重複を見る範囲は【追加先のカタログだけ】では足りない。
+    //   同じ国の別カタログ（①②③や複製したもの）に既に有るものを、そのまま足してしまう
+    //   （2026-08-31 本人「すでに出品している明細との重複が多いなと感じています」）。
+    //   → 同じ国の【全カタログ】を見て、どこに有るかまで出す。
+    const dupWhere = new Map();
+    ((lst.byCc || {})[cc] || []).forEach(r2 => (r2.models || []).forEach(m => {
+      if (!m || m.ghost || !m.n) return;
+      const k2 = tmKey(m.n); if (!k2) return;
+      if (!dupWhere.has(k2)) dupWhere.set(k2, String(r2.name || '').slice(-22) + '（' + (m.ti != null ? m.ti + 1 : '?') + '番）');
+    }));
+    const already = names.filter(n => dupWhere.has(tmKey(n)));
+    const fit = names.filter(n => !dupWhere.has(tmKey(n))).map(n => Object.assign({ src: n }, tmFitName(n, 30)));
     const cutList = fit.filter(x => x.cut);
     const items = fit.map(x => ({ option: x.name, price: price, stock: 0, sku: '', image: '' }));
-    if (!items.length) { alert('選んだものは、すべてこのカタログに既にあります'); return; }
+    if (!items.length) { alert('選んだ' + names.length + '件は、すべて ' + cc + ' の別のカタログに既に出ています。\n\n'
+      + already.slice(0, 10).map(n => '・' + n + ' → ' + dupWhere.get(tmKey(n))).join('\n')
+      + (already.length > 10 ? '\n…ほか' + (already.length - 10) + '件' : '')); return; }
     if (!confirm('書込先: ' + gw.summary + '\n\n' + cc + ' 「' + String(row.name || '').slice(0, 30) + '」に\n'
       + items.length + '件を【在庫0・価格' + price + '】で明細として追加します。\n\n'
+      + (already.length ? '\u2705 ' + already.length + '件は【' + cc + 'の別のカタログに既に出ている】ので外しました：\n'
+          + already.slice(0, 6).map(n => '　' + n + ' → ' + dupWhere.get(tmKey(n))).join('\n')
+          + (already.length > 6 ? '\n　ほか' + (already.length - 6) + '件' : '') + '\n\n' : '')
       + (cutList.length ? '⚠ 30字に収まらず【名前が切れる】ものが ' + cutList.length + '件あります：\n'
           + cutList.slice(0, 6).map(x => '　' + x.src + '\n　　→ ' + x.name).join('\n')
           + (cutList.length > 6 ? '\n　ほか' + (cutList.length - 6) + '件' : '')
