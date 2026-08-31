@@ -15876,6 +15876,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🚀 <b>母数の内訳が出てこなかったのを直しました</b>（本人「これずっと動かない」）。「出しているか」の判定が<b>マスタ1行ごとに、自分の明細名を全部なめる</b>作りでした。Switchは <b>マスタ約9,400行 × 明細約2,000件 × 2キー＝約3,700万回</b>の照合になり、何十秒も返ってきません。<b>明細名を改行でつないだ1本の文字列にして、1回で見る</b>形に変えました。<br>あわせて、途中で失敗しても「読み込み中…」のまま黙って止まらないよう、<b>赤い枠で理由を出す</b>ようにしています。',
+      '🐛 <b>母数の内訳が「読み込み中…」のまま止まることがあったのを、原因が見えるようにしました</b>（本人「これずっと動かない」）。中で例外が出ても<b>黙って止まるだけ</b>で、エラーがどこにも出ない作りでした。→ 失敗したら<b>赤い枠で理由を出します</b>。コンソールにも <code>[母数] 内訳の描画に失敗</code> と出します。',
       '🔁 <b>【重複の原因】未出品タイトルの明細追加で、重複を見る範囲が「追加先のカタログだけ」でした</b>（本人「すでに出品している明細との重複が多いなと感じています」）。<br>カタログを複製して足していくと、<b>同じ国の別カタログ（①②③）に既に有るものが素通り</b>します。→ <b>同じ国の全カタログを見て外す</b>ようにし、<b>どのカタログの何番に有るか</b>まで確認画面に出します。<br><code>✅ 12件は【PHの別のカタログに既に出ている】ので外しました：</code><br><code>　Xenoblade 2 → …Cartridge Software ②（37番）</code>',
       '🔁 <b>「もう一度探す」を、カタログの行から直接押せるようにしました</b>（本人「JANの再検索はどこでやるんでしょうか？」）。これまでは <b>▾ひとつずつ実行する</b> を開かないと出てこない場所にありました。→ 件数の隣の <code>🚫13 もう一度探す</code> を押せば戻せます。記録（何回外したか）は残したまま、飛ばす扱いだけを外します。',
       '🚀 <b>描き直しが重くなっていたのを直しました</b>（本人「更新の時間めっちゃ長くなってない？」）。重複の判定が<b>明細1件ごとに、重複マップのキーを総なめ</b>していました。JANが<b>27件→2,235件</b>に増えた日なので、走査するキーもそのぶん増えて一気に効いてきました（6,476行×数千キー）。<b>索引を1回だけ作って引く</b>形に変えました。<br>※Shopeeの接続枠は原因ではありません（実測 2,990/20,000＝15%・背景同期も動作中）。',
@@ -23577,13 +23579,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   ★単品の出品はタイトルが宣伝文込み（"Used Enemy Zero for Sega Saturn - Japan Region Title"）なので
   //     完全一致では当たらない。マスタ名がその中に**丸ごと入っていれば**同じ作品とみなす。
   //     短い名前（"Sonic R"）で誤って当たらないよう、**8文字以上**のマスタ名だけに使う。
-  function tmHas(r, exactSet, ownKeys) {
+  // ★以前は「マスタ1行ごとに、自分の明細名を全部なめる」作りだった。
+  //   Switchは マスタ約9,400行 × 明細約2,000件 × 2キー ＝ **約3,700万回**の照合になり、
+  //   内訳が何十秒も出てこない（2026-08-31 本人「これずっと動かない」）。
+  //   → 明細名を改行でつないだ【1本の文字列】にして、1回の includes で見る。
+  //     区切りが改行なので、境目をまたいで誤って一致することはない（キーに改行は入らない）。
+  function tmHas(r, exactSet, ownBlob) {
     const kj = r._kj || (r._kj = tmKey(r.ja)), ke = r._ke || (r._ke = tmKey(r.en));
     if ((kj && exactSet.has(kj)) || (ke && exactSet.has(ke))) return true;
-    for (const mk of [kj, ke]) {
-      if (!mk || mk.length < 8) continue;
-      for (let i = 0; i < ownKeys.length; i++) if (ownKeys[i].length > mk.length && ownKeys[i].includes(mk)) return true;
-    }
+    if (!ownBlob) return false;
+    if (kj && kj.length >= 8 && ownBlob.indexOf(kj) >= 0) return true;
+    if (ke && ke.length >= 8 && ownBlob.indexOf(ke) >= 0) return true;
     return false;
   }
 
@@ -24205,7 +24211,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       ${list.length > CAP ? `<div class="smd-dim" style="font-size:10.5px;margin-top:6px">表示は先頭${CAP}件（該当${list.length}件）— 絞り込んでください</div>` : ''}`;
   }
 
+  // ★中で例外が出ると「読み込み中…」のまま黙って止まる（2026-08-31 本人「これずっと動かない」）。
+  //   何が起きたのかを必ず画面に出す。原因が見えないと直しようがない。
   async function renderTitleDetail(hw, own) {
+    try { return await renderTitleDetailInner(hw, own); }
+    catch (e) {
+      const b = document.getElementById('tm-detail');
+      if (b) b.innerHTML = '<div class="tool-card" style="margin:0;max-width:none;border:1px solid #f5c2c2;background:#fdecea">'
+        + '<b style="color:#b5341a">内訳を出せませんでした</b>'
+        + '<div style="font-size:12px;margin-top:4px">' + esc(String((e && e.message) || e)).slice(0, 300) + '</div>'
+        + '<div class="smd-dim" style="font-size:11px;margin-top:4px">ハード: ' + esc(String(hw)) + '</div></div>';
+      console.error('[母数] 内訳の描画に失敗', hw, e);
+      return;
+    }
+  }
+  async function renderTitleDetailInner(hw, own) {
     const box = document.getElementById('tm-detail'); if (!box) return;
     box.innerHTML = '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
     const rows = await loadTitleRows(hw);
@@ -24219,8 +24239,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
     // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
     const mineArr = [...mineN];
+    const mineBlob = '\n' + mineArr.join('\n') + '\n';   // ★総なめをやめるための1本の文字列
     let list = rows.map(r => Object.assign({}, r, {
-      has: tmHas(r, mineN, mineArr),
+      has: tmHas(r, mineN, mineBlob),
       q: ((r.ja || r.en || '') + (hwWord ? ' ' + hwWord : '')).trim()
     })).map(x => { const g = ((lst._sgIdx || {})[hw] || {}); const hit = g[tmKey(x.ja)] || g[tmKey(x.en)]; return Object.assign(x, { sg: !!hit, sgp: hit ? hit.p : 0, sgt: hit ? hit.t : '' }); });
     // ★駿河屋にしか無い物理ソフトを母数に足す（2026-08-18）。
