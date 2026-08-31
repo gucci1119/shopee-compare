@@ -15885,6 +15885,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🌉 <b>JAN調べで得た【日本語タイトル】を保存し、母数の突合に使うようにしました</b>（本人「JANコードの入力を進めているので、それで紐付けはできませんか？」）。<br>母数のマスタは<b>日本語（駿河屋）</b>、こちらの明細名は<b>英語</b>なので、突き合わせる手段がありませんでした。これが「Switchで出しているのが106件」と出ていた理由です（実際の明細名は<b>811種類</b>）。<br>実測：Wikidataの英名で日本語に変換できたのは<b>811件中68件だけ</b>。橋になりません。一方で<b>AIはJANを調べるたびに日本語タイトルを返しています</b>——それをログと学習にしか使わず<b>捨てていました</b>。→ 明細ごとに保存し、突合に使います。<b>JANを埋めるほど母数の精度が上がります</b>。<br>★保存する項目への追加も忘れずに入れています（ここを忘れて消える事故を過去3回やっているため）。',
       '🗂 <b>母数の内訳を、表の下ではなく画面にかぶせて出すようにしました</b>（本人「三角を押して下に出すより、この上にポップアップで出した方が早い」）。下に開くと、表を下までスクロールしてから見に行くことになって遅いためです。<b>✕・背景クリック・Escape</b> のどれでも閉じられます。',
       '🐛 <b>母数の内訳が出なかった本当の原因は <code>num is not defined</code> でした</b>。件数を桁区切りにする <code>num()</code> を、<b>定義していない関数の中で呼んで</b>いました（別の関数のローカル変数）。<b>元からあったバグ</b>ですが、失敗を握りつぶしていたので「読み込み中…」のまま止まって見えていました。エラーを画面に出すようにしたことで、すぐ場所が分かりました。',
       '🚀 <b>母数の内訳が出てこなかったのを直しました</b>（本人「これずっと動かない」）。「出しているか」の判定が<b>マスタ1行ごとに、自分の明細名を全部なめる</b>作りでした。Switchは <b>マスタ約9,400行 × 明細約2,000件 × 2キー＝約3,700万回</b>の照合になり、何十秒も返ってきません。<b>明細名を改行でつないだ1本の文字列にして、1回で見る</b>形に変えました。<br>あわせて、途中で失敗しても「読み込み中…」のまま黙って止まらないよう、<b>赤い枠で理由を出す</b>ようにしています。',
@@ -24278,6 +24279,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // 出しているか＝英語名か日本語名のどちらかが一致すれば「出している」とみなす（完璧は狙わない）
     const hwWord = { psp: 'PSP', ps1: 'PS', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト' }[hw] || '';
     // ★駿河屋の検索語＝日本語名＋機種（英語名だと日本の中古商品に当たらない）
+    // ★英語の明細名は日本語マスタ（駿河屋）に当たらない。AIが決めた日本語タイトル(jp)を橋にする。
+    //   実測 2026-08-31：Switchの明細名811種類のうち、Wikidataの英名で日本語に変換できたのは68件だけ。
+    //   JAN調べで得た jp を使えば、調べたぶんだけ確実につながる。
+    try {
+      Object.keys(productIds || {}).forEach(k2 => {
+        const jp = String((productIds[k2] || {}).jp || '').trim();
+        if (jp) mineN.add(link[tmKey(jp)] || tmKey(jp));
+      });
+    } catch (_) {}
     const mineArr = [...mineN];
     const mineBlob = '\n' + mineArr.join('\n') + '\n';   // ★総なめをやめるための1本の文字列
     let list = rows.map(r => Object.assign({}, r, {
@@ -27610,8 +27620,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   38件マークしても保存の瞬間に捨てられ、次回また同じ所に課金していた。
       //   （2026-08-16に own と f で同じ事故を起こした場所。残す項目を足すときは必ずここも直す）
       const has = m => !!(m && (String(m.jan || '').trim() || String(m.mpn || '').trim() || String(m.cond || '').trim()
-        || String(m.own || '').trim() || m.noJan || (m.f && Object.keys(m.f).some(x => String(m.f[x] || '').trim()))));
-      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), noJan: (m.noJan || undefined), noJanAt: (m.noJanAt || undefined), reJan: (m.reJan || undefined), at: m.at || Date.now() }; });
+        || String(m.own || '').trim() || m.noJan || String(m.jp || '').trim() || (m.f && Object.keys(m.f).some(x => String(m.f[x] || '').trim()))));
+      const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), noJan: (m.noJan || undefined), noJanAt: (m.noJanAt || undefined), reJan: (m.reJan || undefined), jp: (m.jp || undefined), at: m.at || Date.now() }; });
       productIds = items;
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'product_ids', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] product_ids保存失敗', e));
     }, 500);
@@ -30725,7 +30735,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             missed.push('・' + (m.n || '(単品)') + ' → 見つからず');
             return;
           }
+          // ★AIが決めた【日本語タイトル】を残す。これが英語の明細名と日本語マスタ（駿河屋）を
+          //   つなぐ唯一の橋になる。これまでログと学習にしか使っておらず、捨てていた
+          //   （2026-08-31 本人「JANコードの入力を進めているので、それで紐付けはできませんか？」）。
           productIds[k] = { jan: nj, mpn: nm, own: prev.own || '', cond: prev.cond || '',
+            jp: (got && got.jp) || prev.jp || '',
             src: (got && got.source) || 'AIネット検索', srcUrl: (got && got.url) || '', at: Date.now() };
           try { pidPaintOne(k, { jan: nj, mpn: nm }); } catch (_) {}   // ★その欄だけ書き換える
           okLog.push({ 検索語: names[j], 日本語名: (got && got.jp) || '', JAN: nj, 型番: nm, 出典: (got && got.source) || '', 検算: janMakerWarn(nj, nm) ? 'NG' : 'OK' });
