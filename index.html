@@ -8596,7 +8596,15 @@
           if (d == null) pendAge.old += u;
           else if (d <= 7) pendAge.d7 += u; else if (d <= 14) pendAge.d14 += u;
           else if (d <= 30) pendAge.d30 += u; else if (d <= 60) pendAge.d60 += u; else pendAge.old += u;
-          const tb = o2 ? (o2.tab === 300 ? '未発送' : o2.tab === 400 ? '発送済み・配送中' : o2.tab === 500 ? '完了' : 'その他') : '不明';
+          // ★リリースの起点は【到着（配達完了）】。発送しただけでは払い出されない
+          //   （2026-08-31 本人「到着しないと、売上金はリリースされないよ」）。
+          //   なので「発送したか」ではなく「着いたか」で分ける。
+          const st2 = String((o2 && o2.status) || '');
+          const tb = !o2 ? '不明'
+            : /Delivered|To Receive|Order Received|Completed/i.test(st2) ? '① 到着済み（もうすぐ入る）'
+            : /Shipping|Shipped/i.test(st2) ? '② 配送中（到着待ち）'
+            : /To Ship/i.test(st2) ? '③ 未発送（発送→到着待ち）'
+            : 'その他（' + st2 + '）';
           pendTab[tb] = (pendTab[tb] || 0) + u;
         });
         const pendTot2 = Object.keys(pendTab).reduce((a, k) => a + pendTab[k], 0) || 1;
@@ -8623,12 +8631,13 @@
           `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します。これが「今後の入金予定」の総額です">💰入金予定（リリース前の預かり金・総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(pipeJpy)}</span></div></div>` +
           `</div>` +
           `<div style="font-weight:700;font-size:12px;margin:8px 0 2px">確定リリース（週別・Payoneer着金USD）</div>${confHtml}${confCcLine}` +
-          `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📦 リリース前の預かり金の中身（いつ届くかの手がかり）</div>` +
-          `<div style="font-size:11.5px;margin:2px 0 0 6px">状態別: ${tabHtml || '<span class="smd-dim">なし</span>'}</div>` +
+          `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📦 リリース前の預かり金は、いまどこにいるか</div>` +
+          `<div style="font-size:11.5px;margin:2px 0 0 6px">${tabHtml || '<span class="smd-dim">なし</span>'}</div>` +
+          `<div class="smd-dim" style="font-size:10.5px;margin:2px 0 0 6px">リリースの起点は<b>到着（配達完了）</b>です。発送しただけでは払い出されません。</div>` +
           `<div style="font-size:11.5px;margin:3px 0 0 6px">注文からの経過: ${ageHtml || '<span class="smd-dim">なし</span>'}</div>` +
           `<div class="smd-dim" style="font-size:10.5px;margin:4px 0 0 6px">${esc(lagLine)}</div>` +
           (runUsd > 0 ? `<div style="font-size:11px;margin:6px 0 0 6px">参考：直近${rrKeys.length}週の平均ペース <b>${usd(runUsd)}/週</b>　${trendNote}</div>` : '') +
-          `<div class="smd-dim" style="font-size:10px;margin:3px 0 0 6px">※週ごとの見込み額は出しません。預かり金の3分の1が15日以上滞留しており、注文日や確定時刻からリリース日を当てられないためです（実測で検算し、全額が今週に寄って使い物にならないことを確認）。</div>` +
+          `<div class="smd-dim" style="font-size:10px;margin:3px 0 0 6px">※週ごとの見込み額は出しません。<b>到着日が分からない</b>以上、リリース日は割り振れないためです（注文日＋リードタイムで割り振る実装を作って検算したところ、全額が今週に寄って使い物になりませんでした）。近いうちに入るのは<b>①到着済み</b>のぶんだけです。</div>` +
           `<div style="font-weight:700;font-size:12px;margin:11px 0 2px">見込み内訳（リリース前の預かり金 → USD/円換算・国別）</div><div style="line-height:1.9">${pipeHtml}</div>` +
           `<div style="font-weight:700;font-size:12px;margin:12px 0 3px">🏦 銀行口座への着金見込み（3段階）</div>` +
           `<div style="font-size:11.5px;line-height:1.75;color:#444">` +
@@ -15758,6 +15767,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '💸 <b>【本人指摘で是正】入金見込みを「4週平均の平置き」から「預かり金がいまどこにいるか」に変えました</b>（本人「これ正確なのか？」「到着しないと、売上金はリリースされないよ」）。<br><b>①</b> 見込みは<b>直近4週の平均を3週ぶん並べていただけ</b>で、リードタイムを一切見ていませんでした。しかも実績は5週連続で下がっており（$2,968→$1,794→$1,651→$1,489→$1,232）、<b>平均$1,541は先週実績より25%高い</b>＝高めに出ていました。<br><b>②</b> 「注文日＋実測リードタイムでリリース週に割り振る」を作って検算したら、<b>$9,442が丸ごと今週に寄って</b>使い物になりませんでした（速い注文から先に出るので、残るのは遅いものばかり）。<b>週割りは出しません。</b><br><b>③</b> <b>リリースの起点は「到着」</b>です（発送では払い出されません）。そこで預かり金を <b>①到着済み（もうすぐ入る）／②配送中（到着待ち）／③未発送</b> に分けて出します。実測では<b>到着済みは$1,076だけ</b>で、残り$8,300は到着待ちでした。週の実績が$1,200〜1,800なのはこれで説明が付きます。',
       '🔎 <b>重複の「◯番」から、その明細まで飛べるようにしました</b>（本人「JANとか型番からの明細すぐわかるように」「見つけるの難しい」）。<code>⚠ 4番・6番・28番と重複</code> は番号だけで、100件の中から目で探すのは無理でした。→ <b>明細名を添えて</b> <code>4番「Bomberman GB2」</code> とし、<b>押すとその行まで移動して黄色く光ります</b>。',
       '🈳 <b>「空だけ」ボタンを付けました</b>（本人「空の明細」）。カタログ行の件数の隣です。押すと<b>JANも型番も入っていない明細だけ</b>を残します。もう一度押すと全部出ます。一覧は作り直さないので、スクロール位置も開いた明細もそのままです。',
       '🎯 <b>重複の赤枠を、本当にかぶっている欄だけに絞りました</b>（本人「JAN、型番のどれが重複なのかわからんくない？」）。これまでは<b>JAN・型番・自社コードの3つとも赤枠</b>にしていたので、どれが原因か分かりませんでした。→ <b>かぶっている欄だけ赤</b>にし、文言も <code>⚠ JAN 4988607005191 が 4番「Bomberman GB2」…と重複</code> と<b>欄の名前と値を明記</b>します。',
