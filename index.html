@@ -15876,6 +15876,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '🎯 <b>候補の出し方を締めました（誤った候補を渡すと逆効果なので）</b>。全20,005件の空きに対して機械で当ててみた結果、最初の版は<b>誤った候補が混ざって</b>いました。<br><b>①アクセントを落とす</b>…<code>Pokémon</code> が <code>pok</code>＋<code>mon</code> に割れて、<code>Pokémon White → ポケモンバンク</code> のような誤りが出ていました（記録済みの落とし穴を踏んでいました）。<br><b>②2語以上の一致を必須</b>…<code>ドラゴン</code>のようなシリーズ名1語で当たらないように。<br><b>③番号が食い違う候補は出さない</b>…<code>ジョーカー2 → ジョーカー3</code> を出していました。続編は別商品です。<br>結果、候補が付くのは<b>3,038件</b>（空きの15%）。<code>ルイージマンション</code>／<code>ワンピース 海賊無双2</code>／<code>機動戦士ガンダム エクストリームバーサス</code> など、確かなものだけが残ります。',
       '📚 <b>日本語タイトルの【候補】をAIに渡すようにしました（外れを減らすため）</b>（本人「外れるのが多すぎる」「翻訳とか検索のセンスがちょっと悪いのかも」）。<br>AIの弱点は<b>英語の出品名から日本語タイトルを当てるところ</b>です。こちらは<b>ハード別の実在タイトル表</b>を持っているので、<b>似ているものを1〜2件、候補として添えます</b>。当てる問題から<b>選ぶ問題</b>に変わるぶん当たりやすくなります。<br>実測（外れた9件で確認）：<code>Ring Fit Adventure Switch→リングフィット アドベンチャー</code>／<code>Samurai Warriors 5 Switch→戦国無双5</code>／<code>Xenoblade Switch Cross 2→ゼノブレイド2</code>／<code>Hello Kitty Island Adventure</code>は<b>完全一致していたのに外していました</b>。<b>6/9</b>で正解が候補に出ます。<br>★<b>言い切らせません</b>（「候補・違えば無視」と伝える）。断定させると別作品を掴みます。比べるときは<b>ハード名を落とします</b>（<code>… Switch</code> が付いていると一致しなくなるため）。',
       '🎨 <b>空いている欄の色を、黄色からオレンジの枠に変えました</b>（本人「もっと目立つ色にしてほしい。黄色とかじゃわかりにくい」）。欄をオレンジの枠でくくり、左に太線を入れます。<b>赤は【重複】の警告で使っている</b>ので、そこと混ざらない色にしています。<br>その前の版では位置（19番目の子）で色を当てていたため<b>1つも当たらず色が全部消えて</b>いました。セルの並びは列の出し入れで変わるので、<b>位置で当ててはいけません</b>。欄そのものに印を付ける形に直しています。',
       '🎨 <b>色を付けるのを【JAN/型番の欄だけ】にしました</b>（本人「型番のとこだけでいいんやけど、色変えるのは」）。行ごと塗ると表が横に広いぶん、色の面積が大きすぎて逆に見づらくなっていました。欄だけを黄色くして左に太線を付けます。<b>どの行が空かは変わらず全部分かります。</b>',
@@ -28065,7 +28066,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   実測（2026-08-30・GB/Switch/PSPの511明細）：完全一致 100件＝19.6%。
   const JAN_MASTER_KEY = { PSVita: 'vita', Switch2: 'switch', GBC: 'gb', GBA: 'gba' };
   const _janMaster = {};                                    // hw → Map(正規化した英名 → 日本語)
+  // ★アクセントを落とす。落とさないと Pokemon が「pok」＋「mon」に割れ、
+  //   別作品と2語一致して誤爆する（実測：Pokémon White → ポケモンバンク）。記録済みの落とし穴。
   const janMasterNorm = (t) => String(t || '').normalize('NFKC').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   async function janMasterLoad(hw) {
     const key = (JAN_MASTER_KEY[hw] || String(hw || '')).toLowerCase();
@@ -28114,11 +28118,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const out = [];
     mst.forEach((ja, key) => {
       if (ja.length > 26) return;
-      const b = janTok(key); if (!b.length) return;
+      const b = janTok(key);
+      if (b.length < 2) return;                               // ★両方に2語以上ある時だけ比べる（記録済みの決まり）
       let hit = 0; b.forEach(w => { if (A.has(w)) hit++; });
-      if (!hit) return;
-      const sc = hit / (A.size + b.length - hit);      // 共通語の割合
-      if (sc >= 0.45) out.push([sc, ja]);
+      if (hit < 2) return;                                    // ★1語だけの一致は誤爆（Pokémon X × Pokémon Moon が80%になっていた）
+      if (simSeqNums(en) !== simSeqNums(key)) return;         // ★続編は別商品。既存の判定をそのまま使う（二重に持たない）
+      const sc = hit / (A.size + b.length - hit);
+      if (sc >= 0.5) out.push([sc, ja]);
     });
     out.sort((x, y) => y[0] - x[0]);
     return out.slice(0, 2).map(x => x[1]);
