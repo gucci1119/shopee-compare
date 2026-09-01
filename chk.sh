@@ -35,10 +35,23 @@ if i>=0:
     body=s[s.find('>',i)+1:j]
     ok &= check('index.html(js)', body)
     # 同じ名前を const で2回宣言していないか（スコープ違いは許すので、行頭インデントが同じものだけ見る）
+    # ★インデントだけで見ると、**別の関数の中の同名**まで拾って毎回警告が出る（CCS/CAP）。
+    #   毎回出る警告は読まれなくなり、本物の二重宣言を見逃す。**同じ関数の中**の時だけ言う。
+    lines=body.split('\n')
+    fn=[]; cur='(top)'
+    for ln in lines:
+        m2=re.match(r'^  (?:async\s+)?function\s+([A-Za-z0-9_$]+)', ln)
+        if m2: cur=m2.group(1)
+        fn.append(cur)
     d={}
+    off=0; idx=[]
+    for ln in lines:
+        idx.append(off); off+=len(ln)+1
+    import bisect
     for m in re.finditer(r'^(\s*)const\s+([A-Z][A-Z0-9_]{2,})\s*=', body, re.M):
-        d.setdefault(m.group(2), []).append(m.group(1))
-    dupe=[k for k,v in d.items() if len(v)>1 and len(set(v))<len(v)]
+        li=bisect.bisect_right(idx, m.start())-1
+        d.setdefault(m.group(2), []).append((m.group(1), fn[li]))
+    dupe=[k for k,v in d.items() if len(v)>1 and len(v)!=len(set(v))]
     if dupe:
         print('⚠ 同名の const が同じ深さで複数あります（二重宣言の疑い）: ' + ', '.join(dupe))
 # ★秘密の直書きを止める。**このリポジトリは公開**なので、キーを書くとそのまま世に出る。
