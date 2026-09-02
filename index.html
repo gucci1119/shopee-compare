@@ -15886,6 +15886,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-02', items: [
+      '🐞 <b>【不具合】「選んだ◯件のJAN・型番を探す」が押しても何も起きない状態でした</b>。見積り件数を数えるところで<b>どこにも無い変数を見ていた</b>ため、押した瞬間にエラーで止まっていました（確認の画面が出る前に止まるので、お金はかかっていません）。直しました。',
+      '📇 <b>まとめて調べる前に、母数からタダで拾う段を通すようにしました</b>。「選んだ◯件のJAN・型番を探す」を押すと、<b>先に楽天のJAN付き母数と突き合わせて</b>、埋まった分は<b>AIに投げません</b>（1件あたり約¥4が浮きます）。',
       '📇 <b>「母数からJANを拾う（無料）」を足しました</b>（各カタログの「▾ ひとつずつ実行する」の中／⚡の一番先にも入ります）。取り込んである<b>楽天ブックスのJAN付き母数</b>から、<b>AIにもネットにも聞かずに</b>JANを埋めます。<br><b>実測（空いている明細に対して）：Wii 24.5%／Switch 5.9%／DS 4.7%／PS2 2.8%／PS4・PS5 0.3%</b>。埋まらない分の8〜9割は<b>日本語名が分からない</b>ためで、Wikidataの英名辞書が小さいのが理由です（PS5は717件しかありません）。<b>主役はAI検索のままで、その前にタダで拾える分だけ拾う</b>位置づけです。<br>※同じ日本語名で違うJANが2つ以上ある物（通常版と廉価版など）は入れません＝当てずっぽうで埋めない。',
       '💰 <b>利益管理表を9月のスプシに切り替えました</b>。切り替える場所は<b>2か所ではなく3か所</b>ありました（①ポータル設定 ②GASのPROFIT_SHEET_ID ③<b>入金WebAppの var SID</b>）。③を忘れると、My Incomeの「利益管理表ツール」が<b>未マッチ53件で「動いたのに空」</b>になります（ポータル経由はsheetIdを渡すので効きますが、userscriptは渡さないため）。',
       '⚠️ <b>「母数からJANを入れる」は取り下げました（作り直します）</b>。出品一覧に足したところ<b>画面が固まった</b>ため、いったん元に戻しています。やりたいこと自体（楽天のJAN付き母数を、AIに聞かずタダで明細のJANに当てる）は変えません。',
@@ -31135,7 +31137,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           // ★飛ばす判定は pidTried と同じにする。ここだけ noJan を直に見ていたため、
           //   「もう一度探す」に戻した分が0件扱いになり、見積り件数も実際より少なく出ていた（Codex指摘 2026-08-30）
           if (pidTried(k)) return;
-          if (!String(p.jan || '').trim() || !String(p.mpn || '').trim()) n++;
+          // ★p が【どのスコープにも無く】、押すと必ず ReferenceError で落ちていた（2026-09-02 発見）。
+          const pv = (productIds || {})[k] || {};
+          if (!String(pv.jan || '').trim() || !String(pv.mpn || '').trim()) n++;
         }));
         if (!n) { alert('選んだ ' + rows2.length + ' 件の中に、調べる明細はありません。\n（すでに入っているか、前に見つからなかったものです）'); return; }
         if (!confirm('🔎 選んだ ' + rows2.length + ' 件の出品を調べます。\n\n'
@@ -31145,6 +31149,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + '途中で止めたいときは、同じボタンをもう一度押してください。')) return;
         lst._janRunning = true; lst._janStop = false;
         const old = bm.textContent;
+        // 📇 まず【お金のかからない】母数照合を通す。ここで埋まった分はAIに投げなくて済む。
+        //   ★カタログ1つずつ・5件ごとに息継ぎする（まとめて回すと画面が固まる）。
+        { let free = 0;
+          for (let i = 0; i < rows2.length; i++) {
+            if (lst._janStop) break;
+            bm.textContent = '\u{1F4C7} 母数から探しています（' + (i + 1) + '/' + rows2.length + '）';
+            try { const r0 = await janFromMaster(rows2[i], rows2[i].models || []); free += (r0 && r0.hit) || 0; } catch (_) {}
+            if (i % 5 === 4) await new Promise(res => setTimeout(res, 0));
+          }
+          if (free) toast('\u{1F4C7} 母数から ' + free + '件 入れました（ここはお金がかかっていません）');
+        }
         // ★進みは【明細の数】で数える。カタログ数だと、100バリエと1バリエが同じ1歩になって残り時間が狂う。
         meterShow('🔎 選んだ ' + rows2.length + ' 件のJAN・型番を調べています', n, () => { lst._janStop = true; });
         for (let i = 0; i < rows2.length; i++) {
