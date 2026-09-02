@@ -26704,7 +26704,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (c2 === cc) return;
       (lst.byCc[c2] || []).forEach(r => {
         if (NA_NOISE.test(String(r.name || ''))) return;   // 「メッセージください」系は商品ではない
-        let sale = 0; try { sale = Number((statOf(r.item_id) || {}).sale) || 0; } catch (_) {}
+        const sale = Number(((lst._naStat || {})[String(r.item_id)] || {}).sale) || 0;
         (r.models || []).forEach(m => {
           if (!m || m.ghost || !m.n) return;
           const nm = String(m.n).trim();
@@ -26737,8 +26737,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (lst._naBusy) return;                       // ★二重起動しない（描画→描画のループを作らない）
       lst._naBusy = true;
       box.innerHTML = '<div class="smd-dim" style="padding:20px"><span class="smd-spin"></span> 数えています…（全出品の明細を突き合わせます）</div>';
-      setTimeout(() => { try { lst._na = naBuild(cc); } catch (e) { box.innerHTML = '<div style="color:#d93025">失敗：' + esc(String(e.message || e)) + '</div>'; lst._naBusy = false; return; }
-        lst._naBusy = false; renderNewAcct(); }, 10);
+      setTimeout(async () => {
+        // ★販売数(app_kv listing_stats_*)を1回だけ読む。無いと並びが効かないのに
+        //   「販売数順」と書いてしまう＝画面が嘘をつく。
+        if (!lst._naStat) {
+          const m = {};
+          try {
+            const srows = await sbGetAll('app_kv', 'select=v&k=like.listing_stats_*');
+            (srows || []).forEach(r2 => { const it = (r2.v && r2.v.items) || {};
+              Object.keys(it).forEach(id => { m[String(id)] = it[id]; }); });
+          } catch (_) {}
+          lst._naStat = m;
+        }
+        try { lst._na = naBuild(cc); }
+        catch (e) { box.innerHTML = '<div style="color:#d93025">失敗：' + esc(String(e.message || e)) + '</div>'; lst._naBusy = false; return; }
+        lst._naBusy = false; renderNewAcct();
+      }, 10);
       return;
     }
     const d = lst._na, gs = d.groups;
@@ -26759,7 +26773,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="pagehelp" style="margin:0 0 10px">この画面：<b>その国にまだ1つも出していない明細</b>を、他の国の出品から探して並べます。
         <br>※<b>出品枠を食うのはカタログ（親）だけ</b>で、明細をいくつ足しても枠は減りません（1カタログ100明細）。だから<b>カタログ案の単位</b>で並べています。
         <br>※同じ国にすでにある明細は<b>名前の完全一致で除いて</b>います。表記が違う同じ物は残ることがあります。
-        <br>※並びは<b>販売数の多い順</b>（他の国で売れている＝その国でも見込みがある）。</div>
+        <br>※並びは<b>販売数の多い順</b>（他の国で売れている＝その国でも見込みがある）。${Object.keys(lst._naStat || {}).length ? '' : '<br><b style="color:#d93025">※販売数がまだ取れていないので、いまは明細数の多い順です。</b>'}</div>
       <div class="tool-card" style="margin:0;max-width:none">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
           <b style="font-size:15px">🆕 ${esc(cc)} にまだ無い商品</b>
