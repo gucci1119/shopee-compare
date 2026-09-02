@@ -28700,22 +28700,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     const hits = []; let noJa = 0, noHit = 0, seen = 0;
     const perHw = {};
-    rowsAll.forEach(r => {
-      const h = janHwOf(r); if (!h) return;
-      const mp = idx[h], dc = dic[h]; if (!mp || !mp.size) return;
+    // ★ここで pidKeyModel は呼ばない。あれは「旧キーからの引っ越し」を毎回探すので、
+    //   全明細（数万）に回すと総当たりになって画面が固まる（2026-09-02 実際に固めた）。
+    //   数えるだけならキーは素直な形で引けばよく、書くときだけ pidKeyModel を通す。
+    const cheapKey = (r, m) => (!m || m.id === 0) ? ('id:' + r.item_id) : ('id:' + r.item_id + '#' + m.id);
+    for (let i = 0; i < rowsAll.length; i++) {
+      // ★200件ごとに息継ぎする。まとめて回すと入力もスクロールも効かなくなる。
+      if (i % 200 === 199) await new Promise(res => setTimeout(res, 0));
+      const r = rowsAll[i];
+      const h = janHwOf(r); if (!h) continue;
+      const mp = idx[h], dc = dic[h]; if (!mp || !mp.size) continue;
       (r.models || []).forEach(m => {
         if (!m || m.ghost || !m.n) return;
-        const k = pidKeyModel(r, m); const v = (productIds || {})[k] || {};
+        const v = (productIds || {})[cheapKey(r, m)] || {};
         if (String(v.jan || '').trim()) return;
         seen++;
         const ja = String(v.jp || '').trim() || (dc ? (dc.get(janMasterNorm(m.n)) || '') : '');
         if (!ja) { noJa++; return; }
         const jan = mp.get(tmKey(ja));
         if (!jan) { noHit++; return; }
-        hits.push({ k: k, jan: jan, ja: ja });
+        hits.push({ r: r, m: m, jan: jan, ja: ja });
         perHw[h] = (perHw[h] || 0) + 1;
       });
-    });
+    }
     return { hits: hits, noJa: noJa, noHit: noHit, seen: seen, perHw: perHw };
   }
   // 実際に書く。★すでに入っている欄は触らない。
@@ -28725,9 +28732,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     productIds = productIds || {};
     let n = 0;
     pl.hits.forEach(h => {
-      const v = productIds[h.k] || {};
-      if (String(v.jan || '').trim()) return;
-      productIds[h.k] = Object.assign({}, v, { jan: h.jan, jp: v.jp || h.ja, at: Date.now(), janSrc: '楽天ブックス母数' });
+      const k = pidKeyModel(h.r, h.m);           // ここで初めて正式なキーに揃える
+      const v = productIds[k] || {};
+      if (String(v.jan || '').trim()) return;     // 旧キーから引っ越してきて既に入っていた分は触らない
+      productIds[k] = Object.assign({}, v, { jan: h.jan, jp: v.jp || h.ja, at: Date.now(), janSrc: '楽天ブックス母数' });
       n++;
     });
     try { _pidDupCache = null; } catch (_) {}
