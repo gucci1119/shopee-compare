@@ -15885,6 +15885,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-08-30', items: [
+      '📇 <b>母数の表に「どのハードから埋めると効くか」を出しました</b>。各ハードの「出している」の下に、<b>こちらが持っているJANの数</b>を出します。<b>母数側にJANがあるのに、こちらが1件も埋めていないハードは オレンジで「JAN未着手（母数◯件）」</b>と出ます。<br>実測では <b>PS4 2,796／PS5 1,295／DS 982／PS2 563／Wii 344</b>（合計5,980件）が未着手です。ここを⚡で埋めると、そのぶんがそのまま「出している」に変わります。',
       '🧩 <b>レトロは日本語タイトルで繋がっていました（JAN母数は不要）</b>。楽天ブックスにレトロのジャンルは無く（最古がPS2/DS/Wii）JAN母数は作れませんが、<b>実測でGBの明細934件のうち249件に日本語タイトルがあり、その170件（68%）が駿河屋の母数に直接一致</b>しました。<code>Kirby 2 Game Boy → 星のカービィ2</code>／<code>Dragon Quest Wonderland of → ドラゴンクエストモンスターズ テリーのワンダーランド</code>。<b>現行機はJANで、レトロは日本語タイトルで</b>——この2本立てで棚卸しが成立します。',
       '🏁 <b>【完了】JAN付きの母数 19,743件を取り込みました（12ハード）</b>。Switch 4,886／PS4 2,796／3DS 2,265／PSP 2,139／PS Vita 1,694／PS3 1,670／PS5 1,295／Switch2 701／PS2 563／WiiU 408／Wii 344／DS 982。<br><b>こちらのJANとの一致（＝タイトルに頼らず「出している」と確定できた数）</b>：<b>3DS 36/36（100%）／WiiU 12/12（100%）／Switch 172/215（80%）／Switch2 3/4（75%）／PSP 74/123（60%）</b>。ハードが判別できた390件のうち<b>302件</b>が確定します。<br>PS4・PS5・DS・Wii・PS2が0なのは、<b>そのハードのJANをまだ1件も埋めていない</b>ためです（母数側は入っているので、埋めれば即座に反映されます）。',
       '📊 <b>JAN付きの母数が実際に効きました（実測）</b>。<b>Switch：こちらのJAN 215件のうち172件（80%）</b>、<b>PSP：123件のうち74件（60%）</b>が<b>JAN一致で「出している」と確定</b>できるようになりました。<br><code>Star Wars Jedi Knight → スター・ウォーズ ジェダイナイト コレクション</code>／<code>Switch Final Fantasy X 2 HD → FINAL FANTASY X/X-2 HD Remaster</code> のように、<b>語順が入れ替わった機械翻訳名でもJANなら一発</b>です。<br>取り込み済み：Switch 4,886／PSP 2,139／PS2 563／Wii 344。3DS・Switch2ほかは収穫中。あわせて<b>同じJANの行は二重に数えない</b>ようにしました（タイトルが違うだけの同じ商品を2本に数えないため）。',
@@ -23552,6 +23553,36 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     } catch (_) { lst.tmRef = {}; }
     return titleMaster;
   }
+  // 📇 どのハードにJAN付き母数が何件あるか（1行だけの索引）。表に出して
+  //   「まだJANを埋めていないのに母数はある」＝**次に埋めると効くハード**を分かるようにする。
+  async function loadJanIndex() {
+    if (lst._janIdx) return lst._janIdx;
+    let per = {};
+    try {
+      const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_master_index');
+      per = ((g && g[0] && g[0].v) || {}).per || {};
+    } catch (_) {}
+    lst._janIdx = per;
+    return per;
+  }
+  // 自分がそのハードで持っているJANの数（カタログ名から機種を判定して数える）
+  function myJanCountByHw() {
+    if (lst._myJanHw && Date.now() - (lst._myJanHwAt || 0) < 60000) return lst._myJanHw;
+    const out = {};
+    try {
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+        const h = (hwOf(r.name || '') || '').toLowerCase(); if (!h) return;
+        (r.models || []).forEach(m => {
+          if (!m || m.ghost || !m.n) return;
+          const j = String((productIds[pidKeyModel(r, m)] || {}).jan || '').trim();
+          if (j.length === 13) { (out[h] = out[h] || new Set()).add(j); }
+        });
+      }));
+    } catch (_) {}
+    const n = {}; Object.keys(out).forEach(h => n[h] = out[h].size);
+    lst._myJanHw = n; lst._myJanHwAt = Date.now();
+    return n;
+  }
   // 📇 JAN付きの母数（楽天ブックスのパッケージ版から収穫）。app_kv.jan_master_<hw>
   //   ★母数は「いろんなサイトの総力戦」（本人 2026-08-31）。駿河屋・Wikidataには**JANが無い**ので、
   //     JANを持つ一次情報としてここを足す。JANがあれば重複は1本にまとめられる。
@@ -23911,7 +23942,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       return `<tr class="tm-row" data-hw="${h}" style="cursor:pointer" title="クリックすると、このハードの内訳（出している／まだ出していない）を画像付きで開きます">
         <td style="font-weight:700;white-space:nowrap">${(lst.tmOpen === h) ? '▼' : '▶'} ${esc(TITLE_HW_JA[h])}</td>
         <td style="text-align:right">${num(n)}${(wdN && (mm.dlOnly || 0)) ? `<br><span class="smd-dim" style="font-size:9.5px;font-weight:400" title="作品マスタ(Wikidata)の収録 ${num(wdN)}件のうち、ダウンロード版の印しかない ${num(mm.dlOnly)}件は母数から外しています">DL除外 ${num(mm.dlOnly)}</span>` : ''}${(!sgN) ? `<br><span style="font-size:9.5px;font-weight:400;color:#c30d23" title="駿河屋を未取込。作品マスタ(Wikidata)からDL専売を引いた暫定値です">駿河屋 未取込</span>` : ''}</td>
-        <td style="text-align:right;font-weight:700;color:${mt != null ? '#1565c0' : '#9aa4b0'}" title="${mt != null ? 'マスタと突き合わせた実数' : '突合の計算中（いまは明細の数をそのまま出しています＝綴り違いで多めに出ます）'}">${num(o)}${mt == null && n ? ' <span style="font-size:9px">…</span>' : ''}</td>
+        <td style="text-align:right;font-weight:700;color:${mt != null ? '#1565c0' : '#9aa4b0'}" title="${mt != null ? 'マスタと突き合わせた実数' : '突合の計算中（いまは明細の数をそのまま出しています＝綴り違いで多めに出ます）'}">${num(o)}${mt == null && n ? ' <span style="font-size:9px">…</span>' : ''}${(() => {
+          const ji = (lst._janIdx || {})[h] || 0; if (!ji) return '';
+          const mj = (myJanCountByHw() || {})[h] || 0;
+          if (mj) return `<span class="smd-dim" style="display:block;font-size:9px;font-weight:400">\u{1F4C7}JAN ${mj}件</span>`;
+          // ★母数側にJANがあるのに、こちらは1件も埋めていない＝ここを埋めると一番効く
+          return `<span style="display:block;font-size:9px;font-weight:700;color:#e65100" title="${av('このハードは母数側にJAN付きが' + ji.toLocaleString() + '件あります。\n⚡でJANを埋めると、そのぶんが「出している」として確定します。\nいまは1件も埋まっていないので、ここが一番伸びます。')}">\u{1F4C7}JAN未着手（母数${ji.toLocaleString()}）</span>`;
+        })()}</td>
         <td style="text-align:right;font-weight:700;color:${gap ? '#c0392b' : '#1a7f37'}">${num(gap)}</td>
         <td style="text-align:right">${rate == null ? '—' : rate + '%'}</td>
         <td style="min-width:120px">${n ? `<div style="background:#eceff3;border-radius:6px;height:10px;overflow:hidden"><div style="width:${Math.min(100, rate)}%;height:100%;background:#1565c0"></div></div>` : ''}</td>
@@ -23966,6 +24003,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       renderTitleMaster();
     }));
     if (lst.tmOpen) renderTitleDetail(lst.tmOpen, own);
+    loadJanIndex().then(() => { if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster(); });
     tmMatchAll(m, own);
     { const sg = document.getElementById('tm-sg');
       if (sg) sg.addEventListener('click', async () => {
