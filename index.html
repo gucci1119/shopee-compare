@@ -5856,9 +5856,16 @@
     let last = null, pend = false;
     const isField = (el) => !!el && /^(INPUT|TEXTAREA)$/.test(el.tagName)
       && !/^(checkbox|radio|button|submit|file|range|color)$/i.test(el.type || '');
+    // ★日本語の変換中（かな→漢字の途中）に描き直すと、入力欄が消えて変換が壊れる。
+    //   33か所ある「入力→再描画」を個別に直すのは無理なので、ここで【変換中の input を後続に流さない】。
+    //   値は要素に入っているので、確定した時に1回だけ流せばよい（確定後にブラウザが input を出す）。
+    let imeEl = null;
+    document.addEventListener('compositionstart', (e) => { imeEl = e.target; }, true);
+    document.addEventListener('compositionend', (e) => { imeEl = null; }, true);
     document.addEventListener('input', (e) => {
-      const t = e.target; if (!isField(t) || !t.id) return;
-      last = { id: t.id, s: t.selectionStart, e: t.selectionEnd, at: Date.now() };
+      const t = e.target;
+      if (isField(t) && t.id) last = { id: t.id, s: t.selectionStart, e: t.selectionEnd, at: Date.now() };
+      if (imeEl && imeEl === t) e.stopImmediatePropagation();   // 変換中は待つ
     }, true);
     document.addEventListener('pointerdown', () => { last = null; }, true);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' || e.key === 'Tab') last = null; }, true);
@@ -16966,7 +16973,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div style="font-size:11.5px;font-weight:700">${esc(t.name || '')} <span class="smd-dim" style="font-weight:400">${esc(t.category || '')}${t.usageCount ? ' ・' + t.usageCount + '回' : ''}</span></div>
         <div class="smd-dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((t.noteJa || t.text || '').replace(/\s+/g, ' ').slice(0, 70))}</div></div>`).join('') || '<div class="smd-dim" style="padding:8px;font-size:11.5px">該当なし</div>'}</div></div>`;
     bx.querySelectorAll('.tpl-it').forEach(el => el.addEventListener('click', () => { const t = (msg.tpls || [])[+el.dataset.i]; if (t) tplInsert(t); }));
-    { const qi = document.getElementById('tpl-q'); if (qi) qi.addEventListener('input', () => { msg.tplQ = qi.value; drawTplBox(); const n = document.getElementById('tpl-q'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }
+    { const qi = document.getElementById('tpl-q');
+      // ★1文字ごとに一覧を作り直すと欄が消える（母数の内訳で実測。2026-09-03）。少し待ってから描く。
+      if (qi) { let t = null; qi.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => {
+        const cur = document.getElementById('tpl-q'); const pos = cur ? cur.selectionStart : null;
+        msg.tplQ = cur ? cur.value : qi.value; drawTplBox();
+        const n = document.getElementById('tpl-q');
+        if (n) { n.focus(); if (pos != null && n.setSelectionRange) n.setSelectionRange(pos, pos); }
+      }, 400); }); } }
     { const cs = document.getElementById('tpl-cat'); if (cs) cs.addEventListener('change', () => { msg.tplCat = cs.value; drawTplBox(); }); }
     { const cl = document.getElementById('tpl-close'); if (cl) cl.addEventListener('click', () => { bx.style.display = 'none'; }); }
   }
