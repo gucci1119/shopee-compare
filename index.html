@@ -15937,6 +15937,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-02', items: [
+      '🏪 <b>母数（ソフトの本数）が最新にならなかったのを直しました</b>。駿河屋から<b>区分名（「Xbox Oneソフト」「Xbox Oneハード」など）を取っていなかった</b>ため、ソフトが1本も数えられない状態でした。区分名を保存し、<b>取り込むたびに母数を数え直します</b>。<br>※区分名には<b>全角スペース</b>が入るので、詰めてから判定しています。<br>※区分名が取れなかった時は<b>母数を上書きしません</b>（0で潰さないため）。',
       '🏪 <b>【重要】駿河屋を取り込んでも母数が増えなかったのを直しました</b>。母数と取込日は <code>sg_index</code> という索引を見ていますが、<b>その索引を更新する処理がどこにも無く</b>、何度取り込んでも画面の数字が変わらない状態でした（取込日が2026-08-17のまま止まっていたのはこれが理由です）。<br><b>1ハード取り込むごとに索引も更新</b>するようにしました。',
       '✍️ <b>「この国にまだ無い商品」から、そのまま出品を作れるようにしました</b>。各カタログ案の左にある <b>✍️作る</b> を押すと、<b>明細を入れた状態で「✍️出品を作る」画面が開きます</b>。<br>他の国に出しているカタログをもとにするので、<b>明細名と画像はそのまま入ります</b>（仕入れ値は空なので価格は画面で入れてください）。<br><b>明細名が30字を超えるもの・100明細を超える場合は、押す前に警告</b>します。',
       '⌨️ <b>【完了】検索窓の件、日本語入力で通しで確認しました</b>。直したのは3つです。<br>① <b>変換中は画面を描き直さない</b>（かな→漢字の途中で入力欄が消えるのを止める）＝<b>全画面に効きます</b>。<br>② <b>待ち時間を取る</b>（母数の内訳 0ミリ秒→550／テンプレ検索 なし→400）。<br>③ 描き直しで飛んだフォーカスを<b>最大4秒かけて戻す</b>（画面によっては描き直しに1秒以上かかるため）。<br>実測：「マリオ」と打って<b>変換中に欄が消えず・確定後も値とカーソルが残り・絞り込みも効く</b>ことを確認。',
@@ -23952,7 +23953,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!t) continue;
         const pm = String(m[3] || '').replace(/<[^>]+>/g, ' ').match(/[￥¥]\s*([\d,]+)|([\d,]{3,7})\s*円/);
         seen.add(id);
-        rows.push({ t: t.slice(0, 120), id: id, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 });
+        // ★区分名（「Xbox Oneソフト」「Xbox Oneハード」等）も拾う。これが無いと
+        //   ソフトの本数（＝母数）が数えられない（2026-09-03まで保存していなかった）。
+        //   ⚠️ 区分名には【全角スペース】が入る（「Xbox　Oneソフト」）ので詰めてから使う。
+        const km = /background-kishu[^>]*>\s*([^<]{1,40}?)\s*</.exec(m[3]);
+        const kind = km ? km[1].replace(/[\u3000\s]+/g, '') : '';
+        rows.push({ t: t.slice(0, 120), id: id, k: kind, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 });
       }
       if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
       if (onProg) onProg(page, rows.length);
@@ -24182,8 +24188,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             //   区分名を拾えるようにするまでは、件数と取込日だけ更新して soft は既存値を残す。
             lst.sgHave = lst.sgHave || {};
             const prev = lst.sgHave[hw] || {};
-            lst.sgHave[hw] = Object.assign({}, prev, { n: rows.length, at: new Date().toISOString(),
-              name: prev.name || TITLE_HW_JA[hw] || hw });
+            const upd = { n: rows.length, at: new Date().toISOString(), name: prev.name || TITLE_HW_JA[hw] || hw };
+            // ★soft は【区分名が取れている時だけ】数え直す。取れていないのに0で上書きすると
+            //   母数が消える（2026-09-03にXbox Oneで 90→0 にしてしまった）。
+            if (rows.some(r2 => r2 && r2.k)) {
+              const kc = {};
+              rows.forEach(r2 => { const k2 = sgKindOf(r2); kc[k2] = (kc[k2] || 0) + 1; });
+              upd.soft = kc.soft || 0; upd.kinds = kc;
+            }
+            lst.sgHave[hw] = Object.assign({}, prev, upd);
             if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'sg_index', v: lst.sgHave, updated_at: new Date().toISOString() }]);
           } catch (e2) { console.warn('[駿河屋] sg_index の更新に失敗:', e2); }
           _ng = 0;
