@@ -5847,6 +5847,37 @@
   let _appAct = Date.now();
   try { ['keydown', 'input', 'click', 'pointerdown', 'wheel'].forEach(ev =>
     document.addEventListener(ev, () => { _appAct = Date.now(); }, true)); } catch (_) {}
+  // ⌨️ 入力の途中で画面を描き直すと、入力欄が作り直されて【フォーカスと入力位置が飛ぶ】。
+  //   検索窓に打っている最中に閉じてしまうように見えるのはこれ（本人 2026-09-02「入力終わるまでに閉まる」）。
+  //   ★入力のたびに描き直す作りが【34か所】ある。1つずつ直すと必ず抜けるので、
+  //     「描き直したら、さっきまで打っていた欄へ戻す」を1か所で受け持つ。
+  //   ★意図した移動は邪魔しない：どこかをクリックした時点で戻す対象を捨てる。
+  (() => {
+    let last = null, pend = false;
+    const isField = (el) => !!el && /^(INPUT|TEXTAREA)$/.test(el.tagName)
+      && !/^(checkbox|radio|button|submit|file|range|color)$/i.test(el.type || '');
+    document.addEventListener('input', (e) => {
+      const t = e.target; if (!isField(t) || !t.id) return;
+      last = { id: t.id, s: t.selectionStart, e: t.selectionEnd, at: Date.now() };
+    }, true);
+    document.addEventListener('pointerdown', () => { last = null; }, true);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' || e.key === 'Tab') last = null; }, true);
+    const restore = () => {
+      pend = false;
+      if (!last || Date.now() - last.at > 4000) return;      // 打ち終わって時間が経っていたら触らない
+      if (isField(document.activeElement)) return;            // まだどこかの欄にいるなら何もしない
+      const el = document.getElementById(last.id);
+      if (!isField(el)) return;
+      try {
+        el.focus({ preventScroll: true });
+        if (last.s != null && el.setSelectionRange) el.setSelectionRange(last.s, last.e);
+      } catch (_) {}
+    };
+    try {
+      new MutationObserver(() => { if (pend || !last) return; pend = true; requestAnimationFrame(restore); })
+        .observe(document.body, { childList: true, subtree: true });
+    } catch (_) {}
+  })();
   const APP_IDLE_MS = 5 * 60 * 1000;
   function appBusy() {
     try {
@@ -15889,6 +15920,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-02', items: [
+      '⌨️ <b>検索窓が入力の途中で閉じてしまうのを直しました</b>（本人「入力終わるまでに閉まる」）。真因は<b>1文字打つたびに画面を描き直していて、入力欄そのものが作り直されていた</b>ことです（その作りが<b>34か所</b>ありました）。<br>1つずつ直すと必ず抜けるので、<b>描き直したら さっきまで打っていた欄へ戻す</b>仕組みを1か所に入れました。カーソルの位置も戻ります。<b>別の欄をクリックした時やTab・Escを押した時は戻しません</b>（意図した移動は邪魔しない）。',
       '🆕 <b>「この国にまだ無い商品」を追加</b>（出品管理 ＞ 📊分析・やること ＞ 🆕）。<b>その国に1つも出していない明細</b>を、他の国の出品から探して並べます。<b>2アカウント目・新しい国に何を出すか</b>を決めるための画面です。<br><b>出品枠を食うのはカタログ（親）だけ・明細は枠を食わない</b>（1カタログ100明細）ので、<b>カタログ案の単位</b>で並べ、そこに入れる明細を並べて出します。並びは<b>他の国での販売数の多い順</b>。国のボタンで切り替えられます。<br>実測（PH）：<b>カタログ案253件・明細1,367件</b>。PHの枠1,000に対して十分あります。<br>※同じ国にすでにある明細は<b>名前の完全一致</b>で除いています。表記が違う同じ物は残ることがあります。※「メッセージください」系の受付ページや、明細に買い手名が入っている物は除いています。',
       '🏪 <b>駿河屋の取り込みが「1回押せば全ハード」になりました</b>（本人「なぜハード指定しないといけないの？」「勝手にやってくれない？」）。<br>そのまま押すと<b>取込日が古いハードから順に28ハード全部</b>を回します（1〜2時間・押したら放っておけます）。<b>1ハード終わるごとに保存</b>するので途中で止めても残り、もう一度押せば止まります。1つ失敗しても全体は止めず、最後にまとめて結果を出します。<br>ハードの行を開いてから押せば、これまで通りそのハードだけです。<br>※<b>取込日が2026-08-17で止まっていました</b>。自動で更新される仕組みは無く、押したときだけ入ります。',
       '🐞 <b>【不具合】「選んだ◯件のJAN・型番を探す」が押しても何も起きない状態でした</b>。見積り件数を数えるところで<b>どこにも無い変数を見ていた</b>ため、押した瞬間にエラーで止まっていました（確認の画面が出る前に止まるので、お金はかかっていません）。直しました。',
