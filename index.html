@@ -15937,6 +15937,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-02', items: [
+      '✍️ <b>「この国にまだ無い商品」から、そのまま出品を作れるようにしました</b>。各カタログ案の左にある <b>✍️作る</b> を押すと、<b>明細を入れた状態で「✍️出品を作る」画面が開きます</b>。<br>他の国に出しているカタログをもとにするので、<b>明細名と画像はそのまま入ります</b>（仕入れ値は空なので価格は画面で入れてください）。<br><b>明細名が30字を超えるもの・100明細を超える場合は、押す前に警告</b>します。',
       '⌨️ <b>【完了】検索窓の件、日本語入力で通しで確認しました</b>。直したのは3つです。<br>① <b>変換中は画面を描き直さない</b>（かな→漢字の途中で入力欄が消えるのを止める）＝<b>全画面に効きます</b>。<br>② <b>待ち時間を取る</b>（母数の内訳 0ミリ秒→550／テンプレ検索 なし→400）。<br>③ 描き直しで飛んだフォーカスを<b>最大4秒かけて戻す</b>（画面によっては描き直しに1秒以上かかるため）。<br>実測：「マリオ」と打って<b>変換中に欄が消えず・確定後も値とカーソルが残り・絞り込みも効く</b>ことを確認。',
       '⌨️ <b>【追記】検索窓が閉じる件、真因は「待ち時間ゼロ」でした</b>。母数の内訳の絞り込みが <b>1文字打つごとに即座に数千件を作り直す</b>作りで（待ち時間が0ミリ秒）、<b>入力欄そのものが一瞬消えてフォーカスが飛んでいました</b>。実測で「マリオ」が「マオ」になりました。<br><b>550ミリ秒待ってから描き直す</b>＋<b>日本語の変換中は描き直さない</b>ようにしました。あわせて、描き直しでフォーカスが飛んだ時の戻し処理に<b>やり直し</b>を入れています（欄が一瞬いなくなる間に諦めていました）。',
       '💾 <b>駿河屋の取り込みが、途中で止まっても続きから再開するようにしました</b>（本人「定期的に保存すればいいんじゃないの？」）。<br>これまでも<b>1ハード終わるごと</b>には保存していましたが、<b>1ハードの途中</b>（Switchは約170ページ・十数分）で止まるとそのハードだけ丸ごとやり直しでした。<b>50ページごとに途中経過を保存</b>し、次に押した時はその続きから始めます。<br>引き継ぐのは<b>同じ日の途中経過だけ</b>（日をまたいだ分は中身が古いので取り直します）。あわせて<b>同じデータを二重に保存していたのをやめました</b>（Supabaseの帯域を無駄に食っていました）。',
@@ -26910,7 +26911,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             <th style="padding:6px 8px;text-align:left">入れる明細</th>
           </tr></thead><tbody>
           ${gs.slice(0, 300).map((c, i) => `<tr style="border-top:1px solid #eef0f3">
-            <td style="padding:5px 8px;color:#8a8f98">${i + 1}</td>
+            <td style="padding:5px 8px;color:#8a8f98">${i + 1}<br><button class="na-make smd-btn b-write" data-i="${i}" style="font-size:9.5px;padding:1px 6px;margin-top:3px;white-space:nowrap" title="${av('このカタログをもとに、' + cc + ' 向けの出品を作ります。\n明細を入れた状態で「出品を作る」画面が開きます。\n※仕入れ値は空なので、価格は画面で入れてください。')}">✍️作る</button></td>
             <td style="padding:5px 0">${c.img ? `<img src="${IMG_CDN}${esc(c.img)}" referrerpolicy="no-referrer" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px" onerror="this.style.visibility='hidden'">` : ''}</td>
             <td style="padding:5px 8px;max-width:320px">${nm(c.cat)}</td>
             <td style="padding:5px 8px;text-align:right;font-weight:700">${c.ms.length}</td>
@@ -26923,6 +26924,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${gs.length > 300 ? `<div class="smd-dim" style="font-size:11.5px;margin-top:6px">上位300件を表示しています（全${gs.length.toLocaleString()}件）</div>` : ''}
       </div>`;
     box.querySelectorAll('.na-cc').forEach(b => b.addEventListener('click', () => { lst.naCc = b.dataset.c; lst._na = null; renderNewAcct(); }));
+    // ✍️ そのカタログ案をもとに出品を作る（明細を入れた状態でコンポーザーを開く）
+    box.querySelectorAll('.na-make').forEach(b => b.addEventListener('click', () => {
+      const c = ((lst._na && lst._na.groups) || [])[+b.dataset.i]; if (!c) return;
+      const over = c.ms.filter(m => String(m.n).length > 30).length;   // 明細名は30字まで（Shopeeの上限）
+      const many = c.ms.length > 100;                                   // 1カタログ100明細まで
+      if (!confirm('「' + String(c.cat).slice(0, 44) + '」をもとに ' + cc + ' 向けの出品を作ります。\n\n'
+        + '明細 ' + c.ms.length + '件を入れた状態で「✍️出品を作る」画面を開きます。\n'
+        + (over ? '⚠️ ' + over + '件は名前が30字を超えています（そのままだと入りません）。\n' : '')
+        + (many ? '⚠️ 100明細を超えています。入るのは先頭100件までです。\n' : '')
+        + '※仕入れ値は空なので、価格は画面で入れてください。\n'
+        + '※いま入力中の内容があれば消えます。')) return;
+      try {
+        listApplyState({
+          name: String(c.cat || '').slice(0, 120),
+          variations: c.ms.slice(0, 100).map(m => ({ opt: String(m.n || ''), cost: 0, stock: 1,
+            img: m.img ? (/^https?:/.test(m.img) ? m.img : (IMG_CDN + m.img)) : '' }))
+        });
+        lst.tab = 'compose';
+        try { localStorage.setItem('smdListTab', 'compose'); } catch (_) {}
+        renderListPage();
+        toast('✍️ ' + c.ms.length + '件の明細を入れました。価格と画像を確認して出してください');
+      } catch (e) { alert('❌ 出品画面に渡せませんでした：' + ((e && e.message) || e)); }
+    }));
   }
   async function renderCoverage() {
     const host = document.getElementById('list-coverage');
