@@ -15925,6 +15925,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-02', items: [
+      '💾 <b>駿河屋の取り込みが、途中で止まっても続きから再開するようにしました</b>（本人「定期的に保存すればいいんじゃないの？」）。<br>これまでも<b>1ハード終わるごと</b>には保存していましたが、<b>1ハードの途中</b>（Switchは約170ページ・十数分）で止まるとそのハードだけ丸ごとやり直しでした。<b>50ページごとに途中経過を保存</b>し、次に押した時はその続きから始めます。<br>引き継ぐのは<b>同じ日の途中経過だけ</b>（日をまたいだ分は中身が古いので取り直します）。あわせて<b>同じデータを二重に保存していたのをやめました</b>（Supabaseの帯域を無駄に食っていました）。',
       '🛡 <b>時間のかかる取り込みの最中に、勝手に画面が更新されないようにしました</b>（本人「これでも勝手に再読み込みされて止まったりしない？」）。新しい版が出ると<b>手が5分止まった時点で自動更新</b>する作りでしたが、<b>駿河屋の取り込みは全30ハードで1〜2時間</b>かかるため、途中で読み直すとそこで止まっていました。<b>取り込み中・候補の集計中・JAN調査中は自動更新を待たせます</b>。',
       '⌨️ <b>検索窓が入力の途中で閉じてしまうのを直しました</b>（本人「入力終わるまでに閉まる」）。真因は<b>1文字打つたびに画面を描き直していて、入力欄そのものが作り直されていた</b>ことです（その作りが<b>34か所</b>ありました）。<br>1つずつ直すと必ず抜けるので、<b>描き直したら さっきまで打っていた欄へ戻す</b>仕組みを1か所に入れました。カーソルの位置も戻ります。<b>別の欄をクリックした時やTab・Escを押した時は戻しません</b>（意図した移動は邪魔しない）。',
       '🆕 <b>「この国にまだ無い商品」を追加</b>（出品管理 ＞ 📊分析・やること ＞ 🆕）。<b>その国に1つも出していない明細</b>を、他の国の出品から探して並べます。<b>2アカウント目・新しい国に何を出すか</b>を決めるための画面です。<br><b>出品枠を食うのはカタログ（親）だけ・明細は枠を食わない</b>（1カタログ100明細）ので、<b>カタログ案の単位</b>で並べ、そこに入れる明細を並べて出します。並びは<b>他の国での販売数の多い順</b>。国のボタンで切り替えられます。<br>実測（PH）：<b>カタログ案253件・明細1,367件</b>。PHの枠1,000に対して十分あります。<br>※同じ国にすでにある明細は<b>名前の完全一致</b>で除いています。表記が違う同じ物は残ることがあります。※「メッセージください」系の受付ページや、明細に買い手名が入っている物は除いています。',
@@ -23869,10 +23870,33 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   ③中古の相場が付いてくる＝仕入れ判断にそのまま使える
   // ★経路はブリッジ（本人のブラウザ）。GAS（GoogleのIP）だと駿河屋は中身を返さない（実測）。
   // 置き場：app_kv sg_<hw> = { at, n, rows:[{t:商品名, id:商品ID, p:価格}] }
+  // 🏪 駿河屋の一覧を最初から最後までたどる。
+  //   ★1ハードで170ページ・十数分かかる。途中で止まると丸ごとやり直しになるので、
+  //     【50ページごとに途中経過を保存】し、次に押した時はその続きから始める（本人 2026-09-02
+  //     「定期的に保存すればいいんじゃないの？」＝止まらないようにするより、止まっても困らない方が正しい）。
+  //   ★引き継ぐのは「同じ日」の途中経過だけ。日をまたいだら中身が古いので最初から取り直す。
+  const SG_SAVE_EVERY = 50;
   async function surugaCrawl(hw, onProg) {
     const cat = SURUGA_CAT[hw]; if (!cat) throw new Error('この機種は駿河屋のカテゴリが未設定です');
     const rows = [], seen = new Set();
     let page = 1, empty = 0;
+    // 途中経過があれば引き継ぐ
+    try {
+      const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
+      const v = (g && g[0] && g[0].v) || {};
+      const sameDay = String(v.at || '').slice(0, 10) === new Date().toISOString().slice(0, 10);
+      if (sameDay && v.partial && Number(v.page) > 1 && Array.isArray(v.rows)) {
+        v.rows.forEach(r => { if (r && r.id && !seen.has(r.id)) { seen.add(r.id); rows.push(r); } });
+        page = Number(v.page);
+      }
+    } catch (_) {}
+    const save = async (pg, done) => {
+      if (!settings.sbSecret) return;
+      try {
+        await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: { at: new Date().toISOString(), hw: hw, n: rows.length, rows: rows, page: pg, partial: !done },
+          updated_at: new Date().toISOString() }]);
+      } catch (_) {}
+    };
     while (page <= 400) {
       // ★restrict=0 を付けると 404 になる（実測）。素の category と page だけにする
       const url = 'https://www.suruga-ya.jp/search?category=' + cat + '&page=' + page;
@@ -23898,8 +23922,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
       if (onProg) onProg(page, rows.length);
       page++;
+      if (page % SG_SAVE_EVERY === 0) await save(page, false);   // 途中経過（次はここから）
       await new Promise(r => setTimeout(r, 900));          // 叩きすぎない
     }
+    await save(page, true);                                 // 最後まで終わった印
     return rows;
   }
 
@@ -24105,7 +24131,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const pre = cand.length > 1 ? ('(' + (ci + 1) + '/' + cand.length + ') ' + TITLE_HW_JA[hw] + ' ') : '';
         try {
           const rows = await surugaCrawl(hw, (pg, n) => { sg.textContent = '🏪 ' + pre + pg + 'ページ目 / ' + n + '件'; });
-          if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: { at: new Date().toISOString(), hw, n: rows.length, rows }, updated_at: new Date().toISOString() }], 'k');
+          // ★保存は surugaCrawl の中で行う（50ページごとの途中経過＋完了時）。ここで書くと同じ物を二重に送る。
+          //   Supabaseは2026-08-01に帯域上限で全機能停止しかけているので、大きいデータを重ねて送らない。
           lst.sgRows = lst.sgRows || {}; lst.sgRows[hw] = rows;
           done.push(TITLE_HW_JA[hw] + ' ' + rows.length.toLocaleString() + '件');
           // ★1ハードごとにダイアログを出さない（28回出たら押しっぱなしになる）。最後にまとめて出す。
