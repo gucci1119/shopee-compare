@@ -23912,12 +23912,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         page = Number(v.page);
       }
     } catch (_) {}
+    // ★保存の失敗を握りつぶすと、取れていないのに「取り込めた」と表示される（Codexの指摘・2026-09-03）。
+    //   完了時の保存が失敗したら、そのハードは失敗として扱う。
     const save = async (pg, done) => {
-      if (!settings.sbSecret) return;
+      if (!settings.sbSecret) { if (done) throw new Error('書き込みキー(sbSecret)が未設定なので保存できません'); return; }
       try {
         await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: { at: new Date().toISOString(), hw: hw, n: rows.length, rows: rows, page: pg, partial: !done },
           updated_at: new Date().toISOString() }]);
-      } catch (_) {}
+      } catch (e) {
+        console.warn('[駿河屋] ' + hw + ' の保存に失敗(' + (done ? '完了時' : pg + 'ページ目') + '):', e);
+        if (done) throw new Error('保存できませんでした: ' + ((e && e.message) || e));   // 途中経過の失敗は次の機会に回す
+      }
     };
     while (page <= 400) {
       // ★restrict=0 を付けると 404 になる（実測）。素の category と page だけにする
@@ -24140,8 +24145,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const one = lst.tmOpen;
         if (state.mode !== 'live') { alert('この取り込みはブラウザ拡張（ブリッジ）を使います。Shopeeにログインした状態で開いてください。'); return; }
         // 取り込む対象を決める。行が開いていればその1つ、開いていなければ【古い順に全部】。
+        // ★取込日は sg_index（lst.sgHave）にある。tmRef は「日本の発売本数」で取込日を持たない。
+        //   ここを間違えていたため、実際には取込日順になっていなかった（Codexの指摘→実データで確認・2026-09-03）。
         const cand = one ? [one] : Object.keys(SURUGA_CAT).filter(h => TITLE_HW_JA[h])
-          .map(h => ({ h: h, at: ((lst.tmRef || {})[h] || {}).at || '' }))
+          .map(h => ({ h: h, at: ((lst.sgHave || {})[h] || {}).at || '' }))
           .sort((a, b) => String(a.at).localeCompare(String(b.at)))   // 取込日が古い／無いものから
           .map(x => x.h);
         if (!cand.length) { alert('取り込めるハードがありません'); return; }
@@ -26842,7 +26849,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           let v = cand.get(k);
           if (!v) { v = { n: nm, cat: String(r.name || ''), ccs: new Set(), sale: 0, img: '' }; cand.set(k, v); }
           v.ccs.add(c2); if (sale > v.sale) v.sale = sale;
-          if (!v.img) v.img = m.image || r.image || '';
+          // ★明細の画像は listingToRow で m.img に正規化されている。m.image は常に undefined で、
+          //   全部カタログ画像に落ちていた（Codexの指摘→実データで確認・2026-09-03）。
+          if (!v.img) v.img = m.img || r.image || '';
         });
       });
     });
