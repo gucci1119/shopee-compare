@@ -3677,6 +3677,13 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     '🧹 おかしなJANを掃除': '🧹 Clean up bad JANs',
+    '📇 続きから再開します…': '📇 Resuming where it left off…',
+    'いま数え直しています。': 'A recount is already running.',
+    'いま入れています。': 'Already filling.',
+    '母数のJAN索引を読めませんでした': 'Could not read the JAN index for the totals',
+    '⚙️設定の書き込みキー(sbSecret)が未設定です。このまま集めても保存できないので始めません': 'No write key (sbSecret) is set. Nothing could be saved, so this will not start.',
+    '駿河屋から続けて取れなくなりました': 'Suruga-ya stopped responding repeatedly',
+    '駿河屋に断られているようです': 'Suruga-ya appears to be refusing requests',
     '📥 母数のJANを明細に入れる': '📥 Fill JANs into my variations',
     '🧮 母数を数え直す': '🧮 Recount the totals',
     'いま駿河屋の取り込みが動いています。終わってから押してください。': 'A Suruga-ya import is running. Please wait until it finishes.',
@@ -23900,6 +23907,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         (((g && g[0] && g[0].v) || {}).rows || []).forEach(r => { if (r && r.j && r.t) pairs.push([r.t, r.j]); });
       } catch (_) {}
     }
+    // ★楽天のJAN索引は別の場所で【非同期に】読まれるので、押すのが早いと空のままになる。
+    //   そのまま進むと楽天ぶんが丸ごと抜けたまま「入れました」と出る（Codexの指摘・2026-09-04）。
+    try { await loadJanIndex(); } catch (e) { throw new Error('母数のJAN索引を読めませんでした：' + ((e && e.message) || e)); }
     const jhws = Object.keys(lst._janIdx || {});
     for (const hw of jhws) {
       try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) pairs.push([r.t, r.jan]); }); } catch (_) {}
@@ -23935,6 +23945,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     });
     if (hit) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
     return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit };
+  }
+  // 🌏 国で絞ったJANの一覧。国別で見ているときに、他の国のJANで「出している」と
+  //   誤判定しないため（PHにしか無い物がBRの画面で消えてしまう）。
+  //   cc が空＝すべての国 のときは、これまでどおり全部を返す。
+  function myJanSetOf(cc) {
+    if (!cc) return myJanSet();
+    const s2 = new Set();
+    try {
+      const ids = new Set(((lst.byCc || {})[cc] || []).map(r => String(r.item_id)));
+      Object.keys(productIds || {}).forEach(k => {
+        const m = /^id:(\d+)#/.exec(k); if (!m || !ids.has(m[1])) return;
+        const j = String((productIds[k] || {}).jan || '').trim();
+        if (j.length === 13) s2.add(j);
+      });
+    } catch (_) { return myJanSet(); }
+    return s2;
   }
   // 自分が持っているJANの一覧（JANは世界で一意なので、ハードで分けなくてよい）
   function myJanSet() {
@@ -24244,6 +24270,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (onProg) onProg(done, todo.length, hit);
     }
     await save();
+    // ★画面が持っている駿河屋データも入れ替える。ここを忘れると、内訳を見ても
+    //   JANが付いていない古いデータのままで、せっかく集めた結果が見えない
+    //   （フルリロードするまで反映されない。Codexの指摘・2026-09-04）。
+    try { lst.sgRows = lst.sgRows || {}; lst.sgRows[hw] = rows; } catch (_) {}
+    // 内訳の組み立て結果も作り直させる（JANが付いた状態で組み直す）
+    try { if (lst._tmDetail) delete lst._tmDetail[hw]; } catch (_) {}
     // JANが入ったので、母数の足し合わせも数え直す
     try { await rebuildBoshuUnion(hw, rows); } catch (_) {}
     return { tgt: todo.length, done: done, hit: hit, miss: miss };
@@ -24573,6 +24605,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             if (rows) await rebuildBoshuUnion(hw, rows);
             await new Promise(r => setTimeout(r, 30));
           }
+          // ★「出している」の突合結果は6時間おぼえている。ここで捨てないと、
+          //   数え直しても【古い数字が出たまま】になる（Codexの指摘・2026-09-04）。
+          try { lst.tmMatch = {}; localStorage.removeItem(TM_CACHE_KEY); } catch (_) {}
           alert('🧮 母数を数え直しました（' + (cand.length - _skip.length) + 'ハード）。'
             + (_skip.length ? '\n\n⚠️ 読めなかったので飛ばしたハード：' + _skip.join('・') + '\n（この分は前の数字のままです）' : ''));
         } catch (e) {
@@ -24656,6 +24691,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try { localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '', tries: _tries })); } catch (_) {}
         const old = sj.textContent;
         let allHit = 0, allDone = 0, _err = false;
+        const _ngHw = [];   // 途中で飛ばした機種（最後に必ず知らせる）
         try {
           for (let ci = 0; ci < cand.length; ci++) {
             if (lst._sgStop) break;
@@ -24683,10 +24719,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               const msg = String((e && e.message) || e);
               if (/続けて取れなくなりました/.test(msg)) throw e;      // 弾かれている＝全体を止める
               console.warn('[駿河屋JAN] ' + hw + ' は飛ばします:', msg);
+              _ngHw.push((TITLE_HW_JA[hw] || hw) + '（' + msg.slice(0, 40) + '）');
               continue;                                              // それ以外は次の機種へ
             }
           }
-          const _msg = '📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。';
+          const _msg = '📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。'
+            + (_ngHw.length ? '\n\n⚠️ 途中で飛ばしたハード（保存できていません）：\n・' + _ngHw.join('\n・') : '');
           if (lst._janAuto) { toast(_msg); } else { alert(_msg); }
         } catch (e) {
           _err = true;
@@ -25253,7 +25291,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const byT = {};
         sgAll.forEach(r2 => { if (r2 && r2.j && janReal(r2.j)) { const k3 = boshuKey(r2.t); if (k3 && !byT[k3]) byT[k3] = r2.j; } });
         if (Object.keys(byT).length) {
-          const myJ3 = myJanSet();
+          // ★国で絞って見ているときは、その国に出しているJANだけで判定する。
+          //   全部の国のJANで見ると、PHにしか出していない物がBRの画面でも「出している」に
+          //   なってしまい、【まだ出していない】から消えて出品できなくなる（Codexの指摘・2026-09-04）。
+          const myJ3 = myJanSetOf(lst.tmCc);
           list.forEach(x => {
             if (x.jan) return;
             const j = byT[boshuKey(x.ja)] || byT[boshuKey(x.en)];
