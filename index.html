@@ -24149,8 +24149,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // ★保存できない状態で走らせない。1件1.2秒で何千件も取ったあとに全部捨てることになる
     //   （成功と表示したのに、リロードすると何も残っていない）。Codexの指摘・2026-09-04。
     if (!settings.sbSecret) throw new Error('⚙️設定の書き込みキー(sbSecret)が未設定です。このまま集めても保存できないので始めません');
-    let hit = 0, miss = 0, ng = 0, done = 0;
+    let hit = 0, miss = 0, ng = 0, done = 0, lastSave = Date.now();
+    // ★保存は【送る量】に気をつける。rows まるごとを毎回送るので、50件ごとだと
+    //   PS1(5,516件)で110回×数MB＝数百MBを送ることになる。Supabaseは帯域上限で
+    //   全機能が止まりかけた前例がある（2026-08-01）。200件、または60秒に1回までにする。
     const save = async () => {
+      lastSave = Date.now();
       await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: Object.assign({}, v, { rows: rows, janAt: new Date().toISOString() }), updated_at: new Date().toISOString() }]);
     };
     for (const r of todo) {
@@ -24159,8 +24163,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       let html = '';
       try { html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/product/detail/' + encodeURIComponent(r.id), null, { timeout: 20000 })); ng = 0; }
       catch (e) {
-        // ★失敗が続くのは【弾かれている】サイン。回し続けるとIPごと止められる（ヤマダの前例）。
-        if (++ng >= 5) throw new Error('駿河屋から続けて取れなくなりました（' + ng + '回）。時間を置いてください');
+        ng++;
+        // ★止まらないための待ち方（本人指定 2026-09-04「落ちないように」）。
+        //   16時間走らせるので、ネットワークが数十秒切れただけで終わってしまうと困る。
+        //   失敗するほど長く待ってから続ける（5秒→10秒→20秒→40秒→最大2分）。
+        //   ただし【15回続けて失敗】したら本当に弾かれているとみて止める（IPごと制限される前に）。
+        if (ng >= 15) throw new Error('駿河屋から続けて取れなくなりました（' + ng + '回）。時間を置いてください');
+        const wait = Math.min(120000, 5000 * Math.pow(2, Math.min(ng - 1, 5)));
+        try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = '📇 つながらないので ' + Math.round(wait / 1000) + '秒待ちます（' + ng + '回目）'; } catch (_) {}
+        // 待っている間も、取れた分は落とさないように保存しておく
+        if (hit && Date.now() - lastSave > 60000) { try { await save(); } catch (_) {} }
+        await new Promise(z => setTimeout(z, wait));
         continue;
       }
       const m = /"gtin13"\s*:\s*"(\d{13})"/.exec(html);
@@ -24176,7 +24189,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       // 型番も載っていれば拾っておく（JANが無い物の照合に使える）
       const mp = /型番[^0-9A-Za-z]{0,12}([A-Z0-9][A-Z0-9\-]{4,24})/.exec(html);
       if (mp && !r.mpn) r.mpn = mp[1];
-      if (++done % 50 === 0) { await save(); }
+      done++;
+      // 200件ごと、または前の保存から60秒たったら保存（送る量を抑えつつ、取りこぼしも作らない）
+      if (done % 200 === 0 || Date.now() - lastSave > 60000) {
+        try { await save(); } catch (e) { console.warn('[駿河屋JAN] 途中保存に失敗（続けます）:', e); }
+      }
       if (onProg) onProg(done, todo.length, hit);
     }
     await save();
@@ -24578,7 +24595,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   ページを開き直したときに、この印があれば【続きから自動で再開】する。
         try { localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '' })); } catch (_) {}
         const old = sj.textContent;
-        let allHit = 0, allDone = 0;
+        let allHit = 0, allDone = 0, _err = false;
+        let _tries = 0;
+        try { _tries = Number((JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {}).tries) || 0; } catch (_) {}
         try {
           for (let ci = 0; ci < cand.length; ci++) {
             if (lst._sgStop) break;
@@ -24587,22 +24606,40 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             // ★進捗の表示先は【その都度さがす】。別のページに移ると、このボタンはDOMから消えるので、
             //   掴んだままの参照に書こうとすると例外で【取り込みごと止まる】（本人指定 2026-09-04
             //   「別作業とかが入っても止まらないように」）。見つからなければ黙って飛ばす。
-            const r = await surugaJanFill(hw, (d, t, h) => {
-              const el = document.getElementById('tm-sgjan');
-              if (el) el.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
-              try { localStorage.setItem('smdJanFill', JSON.stringify({ hw: hw, d: d, t: t, at: Date.now() })); } catch (_) {}
-            });
-            allHit += r.hit; allDone += r.done;
+            // ★1つの機種で失敗しても、そこで全部を止めない（本人指定「落ちないように」）。
+            //   ただし【駿河屋に弾かれている】ときだけは、続けるとIPごと制限されるので本当に止める。
+            try {
+              const r = await surugaJanFill(hw, (d, t, h) => {
+                const el = document.getElementById('tm-sgjan');
+                if (el) el.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
+                try { localStorage.setItem('smdJanFill', JSON.stringify({ hw: hw, d: d, t: t, at: Date.now(), one: one || '' })); } catch (_) {}
+              });
+              allHit += r.hit; allDone += r.done;
+            } catch (e) {
+              const msg = String((e && e.message) || e);
+              if (/続けて取れなくなりました/.test(msg)) throw e;      // 弾かれている＝全体を止める
+              console.warn('[駿河屋JAN] ' + hw + ' は飛ばします:', msg);
+              continue;                                              // それ以外は次の機種へ
+            }
           }
           const _msg = '📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。';
           if (lst._janAuto) { toast(_msg); } else { alert(_msg); }
         } catch (e) {
+          _err = true;
           const _em = '❌ 途中で止まりました：' + ((e && e.message) || e) + '\n\nそこまでの分は保存されています。時間を置いてもう一度押してください。';
           if (lst._janAuto) { console.warn('[駿河屋JAN]', _em); toast('❌ JANの取り込みが止まりました（あとで再開できます）'); }
           else alert(_em);
         } finally {
           lst._sgRunning = false; lst._janAuto = false;
-          try { localStorage.removeItem('smdJanFill'); } catch (_) {}
+          // ★エラーで止まったときは印を残す＝ページを開き直したときに続きから再開する。
+          //   ただし何度も同じ所で転ぶと堂々巡りになるので、3回までにする。
+          try {
+            if (_err && _tries < 3) {
+              localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '', tries: _tries + 1, err: 1 }));
+            } else {
+              localStorage.removeItem('smdJanFill');
+            }
+          } catch (_) {}
           try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = old; } catch (_) {}
           try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
         }
