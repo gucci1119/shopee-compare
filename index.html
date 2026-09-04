@@ -1745,8 +1745,21 @@
     if (!r || !r.ok) { el.textContent = ''; return; }
     // ★取った結果は控えておき、🗂しごとパネルなど他の場所は【これを読むだけ】にする。
     //   場所ごとに uf_status を叩くと、枠を見るために枠を食うことになる。
+    // ★接続枠(2万回/日)は【Googleアカウント単位】なので、別のGASプロジェクトの消費も足す（2026-09-04）。
+    //   仕入れメール取込(mercari-purchase-sync)は5分毎に走っていて、その分がここに入っていなかった＝
+    //   残りが【実際より多く見えていた】。安全弁が効かず2回使い切っている（08-01・08-22）。
+    //   ※向こうは100回たまるごとに app_kv へ知らせるので、多少遅れる（＝少なめに出ることはあっても多くは出ない）。
+    let ext = 0;
+    try {
+      const g = await sbGetAll('app_kv', 'select=v&k=eq.uf_ext_mercari');
+      const v = (g && g[0] && g[0].v) || null;
+      // 太平洋時間の日付が今日と同じ時だけ足す（日をまたいだ古い数字を持ち越さない）
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+      if (v && v.d === today) ext = Number(v.n) || 0;
+    } catch (_) {}
+    r.ext = ext;
     window.__ufLast = r; window.__ufLastAt = Date.now();
-    const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
+    const used = (Number(r.used) || 0) + ext, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
     const pct = Math.round(used / cap * 100);
     // 15,000を超える＝背景同期が止まり、残りは手動操作の予約枠。20,000で全部止まる。
@@ -1768,6 +1781,7 @@
       ? '\n\n■ 今日の内訳（多い順）\n' + r.top.map(t => '  ' + String(t.k).replace('/api/v2/', '') + '  ' + Number(t.n).toLocaleString() + '回').join('\n')
       : '';
     el.title = 'GASからShopeeを叩ける回数は1日20,000回。今日 ' + used.toLocaleString() + '回 使いました。\n'
+      + (ext ? '　（うち ' + ext.toLocaleString() + '回は仕入れメールの取込など、Shopee以外のGASの分です。枠は同じGoogleアカウントで共有です）\n' : '')
       + '・' + stop.toLocaleString() + '回を超えると背景の自動同期が止まり、残りは手動操作用に取ってあります\n'
       + '・使い切ると【出品・明細の追加や削除・画像】が止まります\n'
       + '・リセットは毎日 ' + ufResetJst() + '（日本時間）'
