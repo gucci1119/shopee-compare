@@ -23807,6 +23807,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //      取り込みの直後に必ず呼ぶこと。1ハードなら軽い（数千件の集合演算1回）。
   async function rebuildBoshuUnion(hw, sgRows) {
     try {
+      // ★boshu_union は【1行に全機種ぶん】入っているので、丸ごと書くと
+      //   同時に走っている他の処理の結果を消してしまう（Codexの指摘・2026-09-04）。
+      //   書く直前に最新を読み直して混ぜる。順番待ちもさせる。
+      while (lst._buWriting) { await new Promise(r => setTimeout(r, 300)); }
       // ★突き合わせは【JANが一致 → だめなら商品名】の順（2026-09-04）。
       //   JANは世界で一意なので、名前が違っても同じ商品だと確実に分かる。
       //   駿河屋のJANは「📇 駿河屋のJANを埋める」で入る（入るまでは名前だけの照合になる）。
@@ -23865,7 +23869,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       lst.boshuU = lst.boshuU || {};
       lst.boshuU[hw] = rec;
       if (settings.sbSecret) {
-        await sbUpsert('app_kv', [{ k: 'boshu_union', v: { at: new Date().toISOString(), src: ['駿河屋', '楽天(JAN付き)'], per: lst.boshuU }, updated_at: new Date().toISOString() }]);
+        lst._buWriting = true;
+        try {
+          // いま入っているものを読み直してから、この機種ぶんだけ差し替える
+          let cur = {};
+          try {
+            const g2 = await sbGetAll('app_kv', 'select=v&k=eq.boshu_union');
+            cur = (((g2 && g2[0] && g2[0].v) || {}).per) || {};
+          } catch (_) { cur = {}; }
+          const per = Object.assign({}, cur, lst.boshuU, { [hw]: rec });
+          lst.boshuU = per;
+          await sbUpsert('app_kv', [{ k: 'boshu_union', v: { at: new Date().toISOString(), src: ['駿河屋', '楽天(JAN付き)'], per: per }, updated_at: new Date().toISOString() }]);
+        } finally { lst._buWriting = false; }
       }
       return rec;
     } catch (e) { console.warn('[母数] 足し合わせの更新に失敗:', e); return null; }
@@ -24159,23 +24174,49 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       lastSave = Date.now();
       await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: Object.assign({}, v, { rows: rows, janAt: new Date().toISOString() }), updated_at: new Date().toISOString() }]);
     };
+    // 🚦 【最重要】駿河屋にアクセス制限をかけられないための決まり（本人指定 2026-09-04
+    //    「アクセス制限かからないようにしてね」）。
+    //    ⚠️ 駿河屋は【実際に遮断してくる】。2026-09-03に一覧の取り込み（1機種190ページ）で遮断された。
+    //       商品ページはその何十倍の回数を叩くので、遮断される前提で組む。
+    //       制限されると【普通の仕入れもできなくなる】＝事業が止まる。時間より安全を優先する。
+    //    ・1件ごとに 2.5秒 ±0.7秒（**ゆらぎを付ける**。等間隔はいかにも機械で、いちばん目立つ）
+    //    ・150件ごとに 60秒 休む（人が続けて見る量を超えないように）
+    //    ・遮断のサイン（短すぎる応答・「アクセスが集中」等の文言）を見つけたら【10分休んでから続ける】
+    //    ・8回続けて失敗したら、その日はやめる（弾かれてから叩き続けない）
+    const SLEEP = () => 2500 + Math.floor(Math.random() * 1400) - 700;
+    const REST_EVERY = 150, REST_MS = 60000;
+    let blocked = 0, seen = 0;
     for (const r of todo) {
       if (lst._sgStop) break;
-      await new Promise(z => setTimeout(z, 1200));
+      await new Promise(z => setTimeout(z, SLEEP()));
+      // 一定数ごとにまとまった休憩
+      if (++seen % REST_EVERY === 0) {
+        try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = '📇 ' + REST_MS / 1000 + '秒 休みます（叩きすぎないため）'; } catch (_) {}
+        try { await save(); } catch (_) {}
+        await new Promise(z => setTimeout(z, REST_MS));
+      }
       let html = '';
       try { html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/product/detail/' + encodeURIComponent(r.id), null, { timeout: 20000 })); ng = 0; }
       catch (e) {
         ng++;
-        // ★止まらないための待ち方（本人指定 2026-09-04「落ちないように」）。
-        //   16時間走らせるので、ネットワークが数十秒切れただけで終わってしまうと困る。
-        //   失敗するほど長く待ってから続ける（5秒→10秒→20秒→40秒→最大2分）。
-        //   ただし【15回続けて失敗】したら本当に弾かれているとみて止める（IPごと制限される前に）。
-        if (ng >= 15) throw new Error('駿河屋から続けて取れなくなりました（' + ng + '回）。時間を置いてください');
-        const wait = Math.min(120000, 5000 * Math.pow(2, Math.min(ng - 1, 5)));
+        // ★止まらないための待ち方（本人指定「落ちないように」）。
+        //   ネットワークが数十秒切れただけで終わってしまうと困るので、待って続ける。
+        //   ただし【8回続けて失敗】したら弾かれているとみて止める（叩き続けると本当に制限される）。
+        if (ng >= 8) throw new Error('駿河屋から続けて取れなくなりました（' + ng + '回）。時間を置いてください');
+        const wait = Math.min(180000, 10000 * Math.pow(2, Math.min(ng - 1, 5)));
         try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = '📇 つながらないので ' + Math.round(wait / 1000) + '秒待ちます（' + ng + '回目）'; } catch (_) {}
-        // 待っている間も、取れた分は落とさないように保存しておく
-        if (hit && Date.now() - lastSave > 60000) { try { await save(); } catch (_) {} }
+        if (hit && Date.now() - lastSave > 300000) { try { await save(); } catch (_) {} }
         await new Promise(z => setTimeout(z, wait));
+        continue;
+      }
+      // 🚦 遮断のサインを見つけたら、止めずに【長く休んでから】続ける。
+      //    ページが返っていても中身が空・エラー文言のことがある（HTTP 200で遮断されるため気づきにくい）。
+      if (html.length < 3000 || /アクセスが集中|しばらく時間をおいて|ご利用いただけません|Too Many Requests|Access Denied/i.test(html)) {
+        blocked++;
+        if (blocked >= 3) throw new Error('駿河屋に断られているようです（' + blocked + '回）。時間を置いてください');
+        try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = '📇 断られたので10分休みます（' + blocked + '回目）'; } catch (_) {}
+        try { await save(); } catch (_) {}
+        await new Promise(z => setTimeout(z, 600000));
         continue;
       }
       const m = /"gtin13"\s*:\s*"(\d{13})"/.exec(html);
@@ -24193,8 +24234,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       //   JANが98%取れていて用は足りているので、動かないコードは残さない。
       //   （型番が要るときは、実物のHTMLを見てから書き直すこと）
       done++;
-      // 200件ごと、または前の保存から60秒たったら保存（送る量を抑えつつ、取りこぼしも作らない）
-      if (done % 200 === 0 || Date.now() - lastSave > 60000) {
+      // ★保存は【データ全部を送り直す】ので、頻繁にやると通信量が跳ね上がる。
+      //   ⚠️ 以前ここを「200件ごと **または** 60秒ごと」にしたが、1件2.5秒かかるので
+      //      200件＝500秒。**60秒の条件が先に来てしまい、まったく減っていなかった**
+      //      （Codexの指摘・2026-09-04）。時間の条件は件数より長くする。
+      if (done % 200 === 0 || Date.now() - lastSave > 900000) {
         try { await save(); } catch (e) { console.warn('[駿河屋JAN] 途中保存に失敗（続けます）:', e); }
       }
       if (onProg) onProg(done, todo.length, hit);
@@ -24456,7 +24500,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         + `</span>`;
     })()}
           <span style="font-size:13px">マスタ合計 <b>${num(tot)}</b> ／ 出している <b style="color:#1565c0">${num(totOwn)}</b> ／ <b style="color:#c0392b">空白 ${num(Math.max(0, tot - totOwn))}</b></span>
-          <button class="smd-btn b-write" id="tm-sg" style="margin-left:auto;font-size:11px;" title="駿河屋のカテゴリ一覧を最初から最後までたどって、商品名・画像・商品IDを取り込みます。版違い（廉価版・Best版）も入ります。&#10;&#10;そのまま押すと【全ハードを取込日の古い順に】回します（1〜2時間・押したら放っておけます）。&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1ハード終わるごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※ブリッジ（ライブPC）が要ります">🏪 駿河屋を最新にする</button><button class="smd-btn b-write" id="tm-sgjan" style="font-size:11px;" title="駿河屋の商品ページから【JAN】を拾って、母数にJANを付けます。&#10;&#10;JANが付くと、母数の突き合わせが【商品名】から【JAN】になります。&#10;＝綴りが違うだけで別物として数えてしまう分（いまの上振れ）が消え、&#10;　こちらの明細のJANとも確実に突き合わせられます。&#10;&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1件ずつ商品ページを開くので時間がかかります（1件1.2秒・2,000件で約40分）。&#10;50件ごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※一度見た商品は二度と取りに行きません。&#10;※ブリッジ（ライブPC）が要ります">📇 駿河屋のJANを埋める</button><button class="smd-btn b-write" id="tm-recount" style="font-size:11px;" title="母数（駿河屋＋楽天の足し合わせ）を、いまのデータで数え直します。&#10;&#10;他のサイトを見に行かないので【すぐ終わります・お金も接続枠もかかりません】。&#10;・ソフトでない商品の除き方を直したとき&#10;・JANを埋めたあと&#10;・こちらの出品が増えたあと&#10;に押すと、母数と「出している」が最新になります。">🧮 母数を数え直す</button><button class="smd-btn b-write" id="tm-janfill" style="font-size:11px;" title="母数として持っているJANを、こちらの明細の【空いているJAN欄】にまとめて入れます。&#10;&#10;他のサイトを見に行かないので【無料・接続枠ゼロ・すぐ終わります】。&#10;AIのネット検索（1件およそ¥4）を使う前に、まずここで拾えるだけ拾ってください。&#10;&#10;※同じ商品名で違うJANが2つ以上ある物（通常版と廉価版など）は入れません＝当てずっぽうで埋めません。&#10;※すでに入っている欄は触りません。&#10;※「📇 駿河屋のJANを埋める」を回すほど、ここで当たる数が増えます。">📥 母数のJANを明細に入れる</button>
+          <button class="smd-btn b-write" id="tm-sg" style="margin-left:auto;font-size:11px;" title="駿河屋のカテゴリ一覧を最初から最後までたどって、商品名・画像・商品IDを取り込みます。版違い（廉価版・Best版）も入ります。&#10;&#10;そのまま押すと【全ハードを取込日の古い順に】回します（1〜2時間・押したら放っておけます）。&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1ハード終わるごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※ブリッジ（ライブPC）が要ります">🏪 駿河屋を最新にする</button><button class="smd-btn b-write" id="tm-sgjan" style="font-size:11px;" title="駿河屋の商品ページから【JAN】を拾って、母数にJANを付けます。&#10;&#10;JANが付くと、母数の突き合わせが【商品名】から【JAN】になります。&#10;＝綴りが違うだけで別物として数えてしまう分（いまの上振れ）が消え、&#10;　こちらの明細のJANとも確実に突き合わせられます。&#10;&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1件ずつ商品ページを開くので時間がかかります。&#10;駿河屋にアクセス制限をかけられないよう、わざとゆっくり回します&#10;（1件およそ2.5秒・150件ごとに1分・機種ごとに3分休みます）。&#10;※制限されると普通の仕入れもできなくなるため、時間より安全を優先しています。&#10;50件ごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※一度見た商品は二度と取りに行きません。&#10;※ブリッジ（ライブPC）が要ります">📇 駿河屋のJANを埋める</button><button class="smd-btn b-write" id="tm-recount" style="font-size:11px;" title="母数（駿河屋＋楽天の足し合わせ）を、いまのデータで数え直します。&#10;&#10;他のサイトを見に行かないので【すぐ終わります・お金も接続枠もかかりません】。&#10;・ソフトでない商品の除き方を直したとき&#10;・JANを埋めたあと&#10;・こちらの出品が増えたあと&#10;に押すと、母数と「出している」が最新になります。">🧮 母数を数え直す</button><button class="smd-btn b-write" id="tm-janfill" style="font-size:11px;" title="母数として持っているJANを、こちらの明細の【空いているJAN欄】にまとめて入れます。&#10;&#10;他のサイトを見に行かないので【無料・接続枠ゼロ・すぐ終わります】。&#10;AIのネット検索（1件およそ¥4）を使う前に、まずここで拾えるだけ拾ってください。&#10;&#10;※同じ商品名で違うJANが2つ以上ある物（通常版と廉価版など）は入れません＝当てずっぽうで埋めません。&#10;※すでに入っている欄は触りません。&#10;※「📇 駿河屋のJANを埋める」を回すほど、ここで当たる数が増えます。">📥 母数のJANを明細に入れる</button>
           <button class="smd-btn" id="tm-imgclear" style="font-size:11px" title="「画像なし」と覚えてしまった分を忘れて、もう一度探し直します（取得に失敗した分が焼き付いた時に使います）">🧹 画像の記憶を消す</button>
           <button class="smd-btn" id="tm-fetch" style="font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
         </div>
@@ -24514,19 +24558,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!cand.length) { alert('先に駿河屋の一覧を取り込んでください'); return; }
         const old = rc.textContent; rc.disabled = true;
         lst._reCounting = true;
+        const _skip = [];
         try {
           for (let i = 0; i < cand.length; i++) {
             const hw = cand[i];
             { const el = document.getElementById('tm-recount'); if (el) el.textContent = '🧮 ' + (i + 1) + '/' + cand.length + ' ' + (TITLE_HW_JA[hw] || hw); }
-            let rows = [];
+            // ★読めなかった機種を「0件」として数え直すと、駿河屋のぶんが丸ごと消える
+            //   （そのうえ「数え直しました」と出る）。読めなければ**その機種は飛ばす**。
+            let rows = null;
             try {
               const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
               rows = ((g && g[0] && g[0].v) || {}).rows || [];
-            } catch (_) {}
-            await rebuildBoshuUnion(hw, rows);
+            } catch (e) { console.warn('[母数] ' + hw + ' を読めなかったので飛ばします:', e); _skip.push(hw); }
+            if (rows) await rebuildBoshuUnion(hw, rows);
             await new Promise(r => setTimeout(r, 30));
           }
-          alert('🧮 母数を数え直しました（' + cand.length + 'ハード）。');
+          alert('🧮 母数を数え直しました（' + (cand.length - _skip.length) + 'ハード）。'
+            + (_skip.length ? '\n\n⚠️ 読めなかったので飛ばしたハード：' + _skip.join('・') + '\n（この分は前の数字のままです）' : ''));
         } catch (e) {
           alert('❌ 数え直せませんでした：' + ((e && e.message) || e));
         } finally {
@@ -24584,23 +24632,30 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           } catch (_) {}
         }
         if (!tgt) { alert('📇 見に行く商品がありません（すでに全部見ています）'); try { localStorage.removeItem('smdJanFill'); } catch (_) {} return; }
-        const mins = Math.ceil(tgt * 1.3 / 60);
+        // 1件2.5秒＋150件ごとに60秒＋機種ごとに3分。実態に近い見込みを出す（少なく言わない）
+        const mins = Math.ceil((tgt * 2.5 + Math.floor(tgt / 150) * 60 + cand.length * 180) / 60);
         // ★続きから自動で再開したときは、確認を出さない（出すと押されるまで止まってしまう）
         if (!lst._janAuto && !confirm('📇 駿河屋の商品ページからJANを拾います。\n\n'
           + '対象：' + cand.length + 'ハード ' + tgt.toLocaleString() + '件\n'
-          + 'かかる時間：およそ' + (mins >= 60 ? Math.round(mins / 60) + '時間' : mins + '分') + '（1件1.2秒あけます）\n\n'
+          + 'かかる時間：およそ' + (mins >= 60 ? Math.round(mins / 60) + '時間' : mins + '分') + '\n'
+          + '　※駿河屋にアクセス制限をかけられないよう、わざとゆっくり回します\n'
+          + '　（1件ごとに約2.5秒あけ、150件ごとに1分・機種ごとに3分休みます）\n'
+          + '　※制限されると普通の仕入れもできなくなるので、時間より安全を優先しています\n\n'
           + 'JANが付くと、母数の突き合わせが商品名からJANになり、綴り違いによる上振れが消えます。\n'
           + '50件ごとに保存するので、途中で止めてもそこまでは残ります。\n'
           + '止めたいときは同じボタンをもう一度押してください。\n\n'
           + '※駿河屋を続けて叩くのでブラウザは開いたままにしてください。')) return;
         lst._sgRunning = true; lst._sgStop = false;
-        // ★リロードや別作業で画面が作り直されても続けられるように、走っている印を残す。
-        //   ページを開き直したときに、この印があれば【続きから自動で再開】する。
-        try { localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '' })); } catch (_) {}
-        const old = sj.textContent;
-        let allHit = 0, allDone = 0, _err = false;
+        // ★何回目の再挑戦かを【印を書き直す前に】読む。順番を間違えると回数が消え、
+        //   「3回でやめる」が効かなくなる＝弾かれたまま永久に再開を繰り返し、
+        //   まさにアクセス制限を招く（Codexの指摘・2026-09-04）。
         let _tries = 0;
         try { _tries = Number((JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {}).tries) || 0; } catch (_) {}
+        // ★リロードや別作業で画面が作り直されても続けられるように、走っている印を残す。
+        //   ページを開き直したときに、この印があれば【続きから自動で再開】する。
+        try { localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '', tries: _tries })); } catch (_) {}
+        const old = sj.textContent;
+        let allHit = 0, allDone = 0, _err = false;
         try {
           for (let ci = 0; ci < cand.length; ci++) {
             if (lst._sgStop) break;
@@ -24618,6 +24673,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 try { localStorage.setItem('smdJanFill', JSON.stringify({ hw: hw, d: d, t: t, at: Date.now(), one: one || '' })); } catch (_) {}
               });
               allHit += r.hit; allDone += r.done;
+              // 🚦 機種の切り替わりでも3分休む（続けざまに何千件も叩かないため）
+              if (ci < cand.length - 1 && !lst._sgStop) {
+                const el2 = document.getElementById('tm-sgjan');
+                if (el2) el2.textContent = '📇 3分休みます（叩きすぎないため）';
+                await new Promise(z => setTimeout(z, 180000));
+              }
             } catch (e) {
               const msg = String((e && e.message) || e);
               if (/続けて取れなくなりました/.test(msg)) throw e;      // 弾かれている＝全体を止める
