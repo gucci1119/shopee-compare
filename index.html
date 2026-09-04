@@ -23748,13 +23748,33 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //      取り込みの直後に必ず呼ぶこと。1ハードなら軽い（数千件の集合演算1回）。
   async function rebuildBoshuUnion(hw, sgRows) {
     try {
-      const S = new Set();
-      (sgRows || []).forEach(r => { const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return; const k = boshuKey(t); if (k) S.add(k); });
-      const R = new Set();
-      (await loadJanMaster(hw)).forEach(r => { const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return; const k = boshuKey(t); if (k) R.add(k); });
+      // ★突き合わせは【JANが一致 → だめなら商品名】の順（2026-09-04）。
+      //   JANは世界で一意なので、名前が違っても同じ商品だと確実に分かる。
+      //   駿河屋のJANは「📇 駿河屋のJANを埋める」で入る（入るまでは名前だけの照合になる）。
+      const S = new Map();            // 商品名の鍵 → その商品のJAN一式
+      const sgJan = new Set();        // 駿河屋が持っているJAN全部
+      (sgRows || []).forEach(r => {
+        const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return;
+        const k = boshuKey(t); if (!k) return;
+        if (!S.has(k)) S.set(k, new Set());
+        if (r.j) { S.get(k).add(r.j); sgJan.add(r.j); }
+      });
+      const R = new Map();
+      (await loadJanMaster(hw)).forEach(r => {
+        const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return;
+        const k = boshuKey(t); if (!k) return;
+        if (!R.has(k)) R.set(k, new Set());
+        if (r.jan) R.get(k).add(r.jan);
+      });
       if (!S.size && !R.size) return null;
-      let only = 0; R.forEach(k => { if (!S.has(k)) only++; });
-      const rec = { sg: S.size, rk: R.size, both: R.size - only, n: S.size + only };
+      let only = 0;
+      R.forEach((jans, k) => {
+        if (S.has(k)) return;                                   // 商品名で一致
+        let byJan = false; jans.forEach(j => { if (sgJan.has(j)) byJan = true; });
+        if (byJan) return;                                      // JANで一致（名前が違っても同じ商品）
+        only++;
+      });
+      const rec = { sg: S.size, rk: R.size, both: R.size - only, n: S.size + only, sgJan: sgJan.size };
       lst.boshuU = lst.boshuU || {};
       lst.boshuU[hw] = rec;
       if (settings.sbSecret) {
@@ -23977,6 +23997,47 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //     「定期的に保存すればいいんじゃないの？」＝止まらないようにするより、止まっても困らない方が正しい）。
   //   ★引き継ぐのは「同じ日」の途中経過だけ。日をまたいだら中身が古いので最初から取り直す。
   const SG_SAVE_EVERY = 20;   // ★50だと1ハードで1回も保存されないことがある（2026-09-03 実測）
+  // 🏪📇 駿河屋の商品ページから【JAN】を拾う（2026-09-04）。
+  //   駿河屋は商品ページの JSON-LD に "gtin13" としてJANを載せている（実測で確認）。
+  //   これが埋まると、母数の突き合わせが【タイトル】から【JAN】になり、綴り違いによる
+  //   上振れが消える。こちらの明細JAN（2,500件超）とも確実に突き合わせられる。
+  //   ⚠️ 1件1リクエストなので、連続で叩くとIPごと制限される（ヤマダで実際にやられている）。
+  //      直列・1.2秒あけ・失敗が続いたら中止・取れた分は50件ごとに保存、を必ず守る。
+  async function surugaJanFill(hw, onProg) {
+    const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
+    const v = (g && g[0] && g[0].v) || {};
+    const rows = Array.isArray(v.rows) ? v.rows : [];
+    if (!rows.length) throw new Error('先に駿河屋の一覧を取り込んでください');
+    // まだJANを見ていない行だけ（j＝JAN／jx＝見に行ったが無かった印。二度と取りに行かない）
+    const todo = rows.filter(r => r && r.id && !r.j && !r.jx);
+    let hit = 0, miss = 0, ng = 0, done = 0;
+    const save = async () => {
+      if (!settings.sbSecret) return;
+      await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: Object.assign({}, v, { rows: rows, janAt: new Date().toISOString() }), updated_at: new Date().toISOString() }]);
+    };
+    for (const r of todo) {
+      if (lst._sgStop) break;
+      await new Promise(z => setTimeout(z, 1200));
+      let html = '';
+      try { html = String(await bridgeRequest('GET', 'https://www.suruga-ya.jp/product/detail/' + encodeURIComponent(r.id), null, { timeout: 20000 })); ng = 0; }
+      catch (e) {
+        // ★失敗が続くのは【弾かれている】サイン。回し続けるとIPごと止められる（ヤマダの前例）。
+        if (++ng >= 5) throw new Error('駿河屋から続けて取れなくなりました（' + ng + '回）。時間を置いてください');
+        continue;
+      }
+      const m = /"gtin13"\s*:\s*"(\d{13})"/.exec(html);
+      if (m) { r.j = m[1]; hit++; } else { r.jx = 1; miss++; }
+      // 型番も載っていれば拾っておく（JANが無い物の照合に使える）
+      const mp = /型番[^0-9A-Za-z]{0,12}([A-Z0-9][A-Z0-9\-]{4,24})/.exec(html);
+      if (mp && !r.mpn) r.mpn = mp[1];
+      if (++done % 50 === 0) { await save(); }
+      if (onProg) onProg(done, todo.length, hit);
+    }
+    await save();
+    // JANが入ったので、母数の足し合わせも数え直す
+    try { await rebuildBoshuUnion(hw, rows); } catch (_) {}
+    return { tgt: todo.length, done: done, hit: hit, miss: miss };
+  }
   async function surugaCrawl(hw, onProg) {
     const cat = SURUGA_CAT[hw]; if (!cat) throw new Error('この機種は駿河屋のカテゴリが未設定です');
     const rows = [], seen = new Set();
@@ -24205,7 +24266,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         + `</span>`;
     })()}
           <span style="font-size:13px">マスタ合計 <b>${num(tot)}</b> ／ 出している <b style="color:#1565c0">${num(totOwn)}</b> ／ <b style="color:#c0392b">空白 ${num(Math.max(0, tot - totOwn))}</b></span>
-          <button class="smd-btn b-write" id="tm-sg" style="margin-left:auto;font-size:11px;" title="駿河屋のカテゴリ一覧を最初から最後までたどって、商品名・画像・商品IDを取り込みます。版違い（廉価版・Best版）も入ります。&#10;&#10;そのまま押すと【全ハードを取込日の古い順に】回します（1〜2時間・押したら放っておけます）。&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1ハード終わるごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※ブリッジ（ライブPC）が要ります">🏪 駿河屋を最新にする</button>
+          <button class="smd-btn b-write" id="tm-sg" style="margin-left:auto;font-size:11px;" title="駿河屋のカテゴリ一覧を最初から最後までたどって、商品名・画像・商品IDを取り込みます。版違い（廉価版・Best版）も入ります。&#10;&#10;そのまま押すと【全ハードを取込日の古い順に】回します（1〜2時間・押したら放っておけます）。&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1ハード終わるごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※ブリッジ（ライブPC）が要ります">🏪 駿河屋を最新にする</button><button class="smd-btn b-write" id="tm-sgjan" style="font-size:11px;" title="駿河屋の商品ページから【JAN】を拾って、母数にJANを付けます。&#10;&#10;JANが付くと、母数の突き合わせが【商品名】から【JAN】になります。&#10;＝綴りが違うだけで別物として数えてしまう分（いまの上振れ）が消え、&#10;　こちらの明細のJANとも確実に突き合わせられます。&#10;&#10;ハードの行を開いてから押すと、そのハードだけになります。&#10;1件ずつ商品ページを開くので時間がかかります（1件1.2秒・2,000件で約40分）。&#10;50件ごとに保存するので、途中で止めてもそこまでは残ります（もう一度押すと止まります）。&#10;※一度見た商品は二度と取りに行きません。&#10;※ブリッジ（ライブPC）が要ります">📇 駿河屋のJANを埋める</button>
           <button class="smd-btn" id="tm-imgclear" style="font-size:11px" title="「画像なし」と覚えてしまった分を忘れて、もう一度探し直します（取得に失敗した分が焼き付いた時に使います）">🧹 画像の記憶を消す</button>
           <button class="smd-btn" id="tm-fetch" style="font-size:11px" title="Wikidataから各ハードの全ソフト一覧を取り込みます（GAS経由・数分かかります）">⬇ マスタを取り込む</button>
         </div>
@@ -24231,6 +24292,54 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!lst._janIdxOnce) { lst._janIdxOnce = true;
       loadJanIndex().then(() => { if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster(); }); }
     tmMatchAll(m, own);
+    // 📇 駿河屋のJANを埋める（母数の突き合わせをJANにするため）
+    { const sj = document.getElementById('tm-sgjan');
+      if (sj) sj.addEventListener('click', async () => {
+        if (lst._sgRunning) { lst._sgStop = true; sj.textContent = '■ 止めています…'; return; }
+        if (state.mode !== 'live') { alert('この取り込みはブラウザ拡張（ブリッジ）を使います。Shopeeにログインした状態で開いてください。'); return; }
+        const one = lst.tmOpen;
+        const cand = one ? [one] : Object.keys(SURUGA_CAT).filter(h => ((lst.sgHave || {})[h] || {}).n);
+        if (!cand.length) { alert('先に駿河屋の一覧を取り込んでください'); return; }
+        // ★何件見に行くのかを【押す前に】出す。1件1.2秒なので、件数がそのまま所要時間になる。
+        let tgt = 0;
+        for (const h of cand) {
+          try {
+            const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(h));
+            const rr = ((g && g[0] && g[0].v) || {}).rows || [];
+            tgt += rr.filter(r => r && r.id && !r.j && !r.jx).length;
+          } catch (_) {}
+        }
+        if (!tgt) { alert('📇 見に行く商品がありません（すでに全部見ています）'); return; }
+        const mins = Math.ceil(tgt * 1.3 / 60);
+        if (!confirm('📇 駿河屋の商品ページからJANを拾います。\n\n'
+          + '対象：' + cand.length + 'ハード ' + tgt.toLocaleString() + '件\n'
+          + 'かかる時間：およそ' + (mins >= 60 ? Math.round(mins / 60) + '時間' : mins + '分') + '（1件1.2秒あけます）\n\n'
+          + 'JANが付くと、母数の突き合わせが商品名からJANになり、綴り違いによる上振れが消えます。\n'
+          + '50件ごとに保存するので、途中で止めてもそこまでは残ります。\n'
+          + '止めたいときは同じボタンをもう一度押してください。\n\n'
+          + '※駿河屋を続けて叩くのでブラウザは開いたままにしてください。')) return;
+        lst._sgRunning = true; lst._sgStop = false;
+        const old = sj.textContent;
+        let allHit = 0, allDone = 0;
+        try {
+          for (let ci = 0; ci < cand.length; ci++) {
+            if (lst._sgStop) break;
+            const hw = cand[ci];
+            const pre = cand.length > 1 ? ('(' + (ci + 1) + '/' + cand.length + ') ' + TITLE_HW_JA[hw] + ' ') : '';
+            const r = await surugaJanFill(hw, (d, t, h) => {
+              sj.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
+            });
+            allHit += r.hit; allDone += r.done;
+          }
+          alert('📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。');
+        } catch (e) {
+          alert('❌ 途中で止まりました：' + ((e && e.message) || e) + '\n\nそこまでの分は保存されています。時間を置いてもう一度押してください。');
+        } finally {
+          lst._sgRunning = false; sj.textContent = old;
+          try { renderTitleMaster(); } catch (_) {}
+        }
+      });
+    }
     { const sg = document.getElementById('tm-sg');
       if (sg) sg.addEventListener('click', async () => {
         // ★以前は「先にハードの行を開いてください」と突き返していた（本人 2026-09-02
