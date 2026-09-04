@@ -24465,7 +24465,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // 📥 母数のJANをこちらの明細に入れる（無料・接続枠ゼロ）
     { const jf = document.getElementById('tm-janfill');
       if (jf) jf.addEventListener('click', async () => {
-        if (lst._sgRunning) { alert('いま駿河屋の取り込みが動いています。終わってから押してください。'); return; }
+        // ★JANの取り込みが動いていても押してよい（読むだけ）。
+        if (lst._janFilling) { alert('いま入れています。'); return; }
+        lst._janFilling = true;
         const old = jf.textContent; jf.disabled = true;
         try {
           const r = await janFillFromBoshuAll((t) => { jf.textContent = '📥 ' + t; });
@@ -24476,21 +24478,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             + '「📇 駿河屋のJANを埋める」を回すほど、ここで入る数が増えます。');
         } catch (e) {
           alert('❌ 入れられませんでした：' + ((e && e.message) || e));
-        } finally { jf.disabled = false; jf.textContent = old; }
+        } finally {
+          lst._janFilling = false;
+          try { const el = document.getElementById('tm-janfill'); if (el) { el.disabled = false; el.textContent = old; } } catch (_) {}
+        }
       });
     }
     // 🧮 母数を数え直す（他のサイトは見に行かない＝すぐ終わる・タダ）
     { const rc = document.getElementById('tm-recount');
       if (rc) rc.addEventListener('click', async () => {
-        if (lst._sgRunning) { alert('いま駿河屋の取り込みが動いています。終わってから押してください。'); return; }
+        // ★JANの取り込みが動いていても、数え直しは走ってよい（読むだけなので邪魔しない）。
+        //   同じフラグを使うとお互いを止めてしまう（本人指定「別作業とかが入っても止まらないように」）。
+        if (lst._reCounting) { alert('いま数え直しています。'); return; }
         const cand = Object.keys(SURUGA_CAT).filter(h => ((lst.sgHave || {})[h] || {}).n);
         if (!cand.length) { alert('先に駿河屋の一覧を取り込んでください'); return; }
         const old = rc.textContent; rc.disabled = true;
-        lst._sgRunning = true; lst._sgStop = false;
+        lst._reCounting = true;
         try {
           for (let i = 0; i < cand.length; i++) {
             const hw = cand[i];
-            rc.textContent = '🧮 ' + (i + 1) + '/' + cand.length + ' ' + (TITLE_HW_JA[hw] || hw);
+            { const el = document.getElementById('tm-recount'); if (el) el.textContent = '🧮 ' + (i + 1) + '/' + cand.length + ' ' + (TITLE_HW_JA[hw] || hw); }
             let rows = [];
             try {
               const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
@@ -24503,15 +24510,41 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         } catch (e) {
           alert('❌ 数え直せませんでした：' + ((e && e.message) || e));
         } finally {
-          lst._sgRunning = false; rc.disabled = false; rc.textContent = old;
-          try { renderTitleMaster(); } catch (_) {}
+          lst._reCounting = false;
+          try { const el = document.getElementById('tm-recount'); if (el) { el.disabled = false; el.textContent = old; } } catch (_) {}
+          try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
         }
       });
     }
+    // ▶ 途中で切れていたら【自動で続きから】再開する（本人指定 2026-09-04
+    //   「別作業とかが入っても止まらないように」）。ページを開き直しただけで止まっては困るため。
+    //   ※自分で停止した時は印を消しているので再開しない。
+    (() => {
+      try {
+        if (lst._sgRunning || lst._janResumed) return;
+        const raw = localStorage.getItem('smdJanFill'); if (!raw) return;
+        const st = JSON.parse(raw) || {};
+        if (!st.at || Date.now() - st.at > 24 * 3600e3) { localStorage.removeItem('smdJanFill'); return; }
+        if (state.mode !== 'live') return;                 // ブリッジが無い時はそのまま置いておく
+        lst._janResumed = true;
+        const sj2 = document.getElementById('tm-sgjan');
+        if (sj2) sj2.textContent = '📇 続きから再開します…';
+        // ★どのハードを回していたかも戻す（1つだけ選んで回していた場合に、勝手に全機種へ広がらないように）
+        if (st.one) lst.tmOpen = st.one;
+        setTimeout(() => {
+          const b = document.getElementById('tm-sgjan');
+          if (b && !lst._sgRunning) { lst._janAuto = true; b.click(); }   // 合図は finally で下ろす
+        }, 1500);
+      } catch (_) {}
+    })();
     // 📇 駿河屋のJANを埋める（母数の突き合わせをJANにするため）
     { const sj = document.getElementById('tm-sgjan');
       if (sj) sj.addEventListener('click', async () => {
-        if (lst._sgRunning) { lst._sgStop = true; sj.textContent = '■ 止めています…'; return; }
+        if (lst._sgRunning) {
+          lst._sgStop = true; sj.textContent = '■ 止めています…';
+          try { localStorage.removeItem('smdJanFill'); } catch (_) {}   // 自分で止めた＝再開しない
+          return;
+        }
         if (state.mode !== 'live') { alert('この取り込みはブラウザ拡張（ブリッジ）を使います。Shopeeにログインした状態で開いてください。'); return; }
         const one = lst.tmOpen;
         // ★全機種を回すときは【こちらが出している数が多い機種から】。全部で16時間かかるので、
@@ -24530,9 +24563,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             tgt += rr.filter(r => r && r.id && !r.j && !r.jx).length;
           } catch (_) {}
         }
-        if (!tgt) { alert('📇 見に行く商品がありません（すでに全部見ています）'); return; }
+        if (!tgt) { alert('📇 見に行く商品がありません（すでに全部見ています）'); try { localStorage.removeItem('smdJanFill'); } catch (_) {} return; }
         const mins = Math.ceil(tgt * 1.3 / 60);
-        if (!confirm('📇 駿河屋の商品ページからJANを拾います。\n\n'
+        // ★続きから自動で再開したときは、確認を出さない（出すと押されるまで止まってしまう）
+        if (!lst._janAuto && !confirm('📇 駿河屋の商品ページからJANを拾います。\n\n'
           + '対象：' + cand.length + 'ハード ' + tgt.toLocaleString() + '件\n'
           + 'かかる時間：およそ' + (mins >= 60 ? Math.round(mins / 60) + '時間' : mins + '分') + '（1件1.2秒あけます）\n\n'
           + 'JANが付くと、母数の突き合わせが商品名からJANになり、綴り違いによる上振れが消えます。\n'
@@ -24540,6 +24574,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           + '止めたいときは同じボタンをもう一度押してください。\n\n'
           + '※駿河屋を続けて叩くのでブラウザは開いたままにしてください。')) return;
         lst._sgRunning = true; lst._sgStop = false;
+        // ★リロードや別作業で画面が作り直されても続けられるように、走っている印を残す。
+        //   ページを開き直したときに、この印があれば【続きから自動で再開】する。
+        try { localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '' })); } catch (_) {}
         const old = sj.textContent;
         let allHit = 0, allDone = 0;
         try {
@@ -24547,17 +24584,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             if (lst._sgStop) break;
             const hw = cand[ci];
             const pre = cand.length > 1 ? ('(' + (ci + 1) + '/' + cand.length + ') ' + TITLE_HW_JA[hw] + ' ') : '';
+            // ★進捗の表示先は【その都度さがす】。別のページに移ると、このボタンはDOMから消えるので、
+            //   掴んだままの参照に書こうとすると例外で【取り込みごと止まる】（本人指定 2026-09-04
+            //   「別作業とかが入っても止まらないように」）。見つからなければ黙って飛ばす。
             const r = await surugaJanFill(hw, (d, t, h) => {
-              sj.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
+              const el = document.getElementById('tm-sgjan');
+              if (el) el.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
+              try { localStorage.setItem('smdJanFill', JSON.stringify({ hw: hw, d: d, t: t, at: Date.now() })); } catch (_) {}
             });
             allHit += r.hit; allDone += r.done;
           }
-          alert('📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。');
+          const _msg = '📇 駿河屋のJANを ' + allHit.toLocaleString() + '件 拾いました（見に行った ' + allDone.toLocaleString() + '件）。';
+          if (lst._janAuto) { toast(_msg); } else { alert(_msg); }
         } catch (e) {
-          alert('❌ 途中で止まりました：' + ((e && e.message) || e) + '\n\nそこまでの分は保存されています。時間を置いてもう一度押してください。');
+          const _em = '❌ 途中で止まりました：' + ((e && e.message) || e) + '\n\nそこまでの分は保存されています。時間を置いてもう一度押してください。';
+          if (lst._janAuto) { console.warn('[駿河屋JAN]', _em); toast('❌ JANの取り込みが止まりました（あとで再開できます）'); }
+          else alert(_em);
         } finally {
-          lst._sgRunning = false; sj.textContent = old;
-          try { renderTitleMaster(); } catch (_) {}
+          lst._sgRunning = false; lst._janAuto = false;
+          try { localStorage.removeItem('smdJanFill'); } catch (_) {}
+          try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = old; } catch (_) {}
+          try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
         }
       });
     }
