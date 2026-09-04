@@ -24287,7 +24287,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // ★画面が持っている駿河屋データも入れ替える。ここを忘れると、内訳を見ても
     //   JANが付いていない古いデータのままで、せっかく集めた結果が見えない
     //   （フルリロードするまで反映されない。Codexの指摘・2026-09-04）。
-    try { lst.sgRows = lst.sgRows || {}; lst.sgRows[hw] = rows; } catch (_) {}
+    try {
+      lst.sgRows = lst.sgRows || {}; lst.sgRows[hw] = rows;
+      // ★画像を引くための索引も作り直す。これを忘れると、せっかく集めたJANで写真が出るのは
+      //   ページを開き直したあとになる（Codexの指摘・2026-09-05）。
+      // ⚠️ ensureSgRows を呼び直すと、いま手元にある rows をまた読み直すことになる（重い）。
+      //    索引だけ その場で作り直す。
+      lst._sgIdx = lst._sgIdx || {}; lst._sgIdByJan = lst._sgIdByJan || {};
+      const _ix = {}, _bj = {};
+      rows.forEach(r2 => {
+        if (r2 && r2.j && r2.id && !_bj[r2.j]) _bj[r2.j] = r2.id;
+        const k2 = tmKey(r2.t); if (!k2) return;
+        const cur = _ix[k2];
+        if (!cur || (r2.p && (!cur.p || r2.p < cur.p))) _ix[k2] = { id: r2.id, p: r2.p || 0, d: r2.d || '', t: r2.t };
+      });
+      lst._sgIdx[hw] = _ix; lst._sgIdByJan[hw] = _bj;
+    } catch (_) {}
     // 内訳の組み立て結果も作り直させる（JANが付いた状態で組み直す）
     try { if (lst._tmDetail) delete lst._tmDetail[hw]; } catch (_) {}
     // JANが入ったので、母数の足し合わせも数え直す
@@ -27539,8 +27554,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   二重に出品することになる。JANは世界で一意なので、名前が違っても確実に同じ物と分かる。
     const have = new Set();
     const haveJan = new Set();
+    // ★JANだけで除くと【状態違い】まで消える。完品とソフトのみは別の商品として出すので、
+    //   重複判定と同じく「JAN＋状態」で見る（`pidDupMap` と揃える。Codexの指摘・2026-09-05）。
     const janOfModel = (r, m) => {
-      try { const v = productIds[pidKeyModel(r, m)]; const j = String((v || {}).jan || '').trim(); return j.length === 13 ? j : ''; } catch (_) { return ''; }
+      try {
+        const v = productIds[pidKeyModel(r, m)] || {};
+        const j = String(v.jan || '').trim();
+        if (j.length !== 13) return '';
+        return j + '|' + String(v.cond || '').trim();
+      } catch (_) { return ''; }
     };
     ((lst.byCc || {})[cc] || []).forEach(r => (r.models || []).forEach(m => {
       if (!m || m.ghost || !m.n) return;
@@ -27600,6 +27622,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               Object.keys(it).forEach(id => { m[String(id)] = it[id]; }); });
           } catch (_) {}
           lst._naStat = m;
+        }
+        // ★JANで判定するには productIds が要る。ここは出品しか読んでいないので、
+        //   分析ページから直接来ると null のまま＝JANが全部空になり、名前だけの判定に落ちる。
+        //   しかも結果を lst._na に覚えるので、あとで読み込まれても直らない（Codexの指摘・2026-09-05）。
+        if (productIds === null) {
+          try {
+            const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : [];
+            productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
+          } catch (_) { productIds = {}; }
         }
         try { lst._na = naBuild(cc); }
         catch (e) { box.innerHTML = '<div style="color:#d93025">失敗：' + esc(String(e.message || e)) + '</div>'; lst._naBusy = false; return; }
