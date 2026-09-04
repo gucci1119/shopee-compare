@@ -23701,6 +23701,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     x = x.replace(/\s*(Nintendo Switch2?|Switch2?|スイッチ|ニンテンドースイッチ|PS[2345]|PSP|PS ?Vita|Vita|Wii ?U|Wii|3DS|DS)版?\s*/gi, ' ');
     return tmKey(x.replace(/\s+/g, ' ').trim());
   }
+  // ✅ JANとして使ってよい番号か。
+  //   ⚠️ 2で始まる13桁は【店内だけで使う番号】（インストアマーキング）。世界で一意ではないので、
+  //      これをJANとして持つと別の店の別商品と衝突する。楽天ブックスの母数にも混ざっていた（実測）。
+  //   ⚠️ 最後の1桁はチェックディジット。合わないものは読み取り違い。
+  function janReal(v) {
+    const j = String(v || '').trim();
+    if (!/^\d{13}$/.test(j) || /^2/.test(j)) return false;
+    let x = 0; for (let i = 0; i < 12; i++) x += (+j[i]) * (i % 2 ? 3 : 1);
+    return ((10 - x % 10) % 10) === (+j[12]);
+  }
 
   let titleMaster = null;         // { hw: {n, ja, en, at} } ＝件数だけの索引
   // ★表に要るのは「何本あるか」だけ。全ハードの全行(2万件超)を読むと重すぎて
@@ -23784,7 +23794,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try {
       const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_master_' + encodeURIComponent(hw));
       const v = (g && g[0] && g[0].v) || {};
-      rows = Object.keys(v.items || {}).map(j => ({ jan: j, t: v.items[j] }));
+      // ★店内専用の番号・チェックディジットが合わないものは母数のJANとして使わない
+      rows = Object.keys(v.items || {}).filter(janReal).map(j => ({ jan: j, t: v.items[j] }));
     } catch (_) {}
     lst._janMst[hw] = rows;
     return rows;
@@ -25081,6 +25092,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         let janHit = 0;
         list.forEach(x => { if (x.jan && myJ.has(x.jan)) { if (!x.has) janHit++; x.has = true; } });
         lst._janMstInfo = { n: jm.length, withJan: list.filter(x => x.jan).length, hit: janHit };
+      } }
+    // 🏪📇 駿河屋から拾ったJANを、内訳の【すべての行】に当てる（2026-09-04）。
+    //   これをしないと、駿河屋にしか無い行だけJANが出て、他は空欄のままになる。
+    { const sgAll = (lst.sgRows && lst.sgRows[hw]) || [];
+      if (sgAll.length) {
+        const byT = {};
+        sgAll.forEach(r2 => { if (r2 && r2.j && janReal(r2.j)) { const k3 = boshuKey(r2.t); if (k3 && !byT[k3]) byT[k3] = r2.j; } });
+        if (Object.keys(byT).length) {
+          const myJ3 = myJanSet();
+          list.forEach(x => {
+            if (x.jan) return;
+            const j = byT[boshuKey(x.ja)] || byT[boshuKey(x.en)];
+            if (!j) return;
+            x.jan = j;
+            if (!x.has && myJ3.has(j)) x.has = true;   // JANが一致＝確実に同じ商品
+          });
+        }
       } }
     { const sgAdd = (lst.sgRows && lst.sgRows[hw]) || [];
       if (sgAdd.length) {
