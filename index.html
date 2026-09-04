@@ -23818,7 +23818,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (byJan) return;                                      // JANで一致（名前が違っても同じ商品）
         only++;
       });
-      const rec = { sg: S.size, rk: R.size, both: R.size - only, n: S.size + only, sgJan: sgJan.size };
+      // 📇 この母数のうち【自分が出しているもの】をJANで数える（2026-09-04）。
+      //   ⚠️ これまで「出している」は商品名だけで突き合わせていたので、
+      //      JANを埋めても数字が動かなかった（Codexの指摘）。JANは世界で一意なので、
+      //      名前が英語でも日本語でも、綴りが違っても、一致すれば確実に同じ商品。
+      //   ※JANが無いものは従来どおり名前で数える（別の場所）。ここはJANで確定できた分だけ。
+      let ownJan = 0;
+      try {
+        const my = myJanSet();
+        if (my.size) {
+          const seen = new Set();
+          const check = (jans) => { let ok = false; jans.forEach(j => { if (my.has(j)) ok = true; }); return ok; };
+          S.forEach((jans, k) => { if (jans.size && check(jans) && !seen.has(k)) { seen.add(k); ownJan++; } });
+          R.forEach((jans, k) => { if (!seen.has(k) && jans.size && check(jans)) { seen.add(k); ownJan++; } });
+        }
+      } catch (_) {}
+      const rec = { sg: S.size, rk: R.size, both: R.size - only, n: S.size + only, sgJan: sgJan.size, ownJan: ownJan };
       lst.boshuU = lst.boshuU || {};
       lst.boshuU[hw] = rec;
       if (settings.sbSecret) {
@@ -24286,7 +24301,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           + '\n\n※周辺機器（amiibo・Joy-Con・SDカード等）と、特典違いで別JANになっているだけの同じソフトは除いています。'
           + '\n※突き合わせの鍵はタイトルです（駿河屋がJANを持っていないため）。綴り違いは分けて数えるので、やや多めに出ます。')}">駿${(bu.sg || 0).toLocaleString()}＋楽${(bu.rk || 0).toLocaleString()}−重${(bu.both || 0).toLocaleString()}</span>` : ''}${(!sgN) ? `<br><span style="font-size:9.5px;font-weight:400;color:#c30d23" title="駿河屋をまだ取り込んでいません">駿河屋 未取込</span>` : ''}</td>
         <td style="text-align:right;font-weight:700;color:${mt != null ? '#1565c0' : '#9aa4b0'}" title="${mt != null ? 'マスタと突き合わせた実数' : '突合の計算中（いまは明細の数をそのまま出しています＝綴り違いで多めに出ます）'}">${num(o)}${mt == null && n ? ' <span style="font-size:9px">…</span>' : ''}${(() => {
-          const ji = (lst._janIdx || {})[h] || 0; if (!ji) return '';
+          // 📇 JANで確定できた数を出す（商品名の一致とちがって【確実】な分）。
+          //   駿河屋のJANを埋めるほどここが増える＝作業の効果がそのまま見える。
+          const oj = (bu && bu.ownJan) || 0;
+          const sj = (bu && bu.sgJan) || 0;
+          const ji = (lst._janIdx || {})[h] || 0;
+          if (oj || sj) {
+            return `<span class="smd-dim" style="display:block;font-size:9px;font-weight:400" title="${av('JANが一致したもの＝【確実に同じ商品】です（商品名の一致とちがって、綴りや言語の違いに左右されません）。'
+              + '\n　母数のうちJANが分かっているもの ' + sj.toLocaleString() + ' 件（駿河屋から拾った分）'
+              + '\n　そのうち、こちらが出しているもの ' + oj.toLocaleString() + ' 件'
+              + '\n\n「📇 駿河屋のJANを埋める」を回すほど、ここが増えて確実になります。')}">\u{1F4C7}JANで確定 ${oj.toLocaleString()}${sj ? '／母数のJAN ' + sj.toLocaleString() : ''}</span>`;
+          }
+          if (!ji) return '';
           // ★ここでは【確かめられていること】だけを出す。
           //   以前は「こちらが持っているJANの数」も出そうとしたが、機種の振り分けが合わず
           //   全ハードに『JAN未着手』と嘘を表示していた（2026-09-02）。数え方が固まるまで出さない。
@@ -24940,13 +24966,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (sgAdd.length) {
         const have = new Set();
         list.forEach(x => { if (x.ja) have.add(tmKey(x.ja)); if (x.en) have.add(tmKey(x.en)); });
+        // 📇 駿河屋から拾ったJAN(r2.j)を持たせる（2026-09-04）。
+        //   これが無いと、JANを埋めても内訳の「出している／まだ」が変わらない（Codexの指摘）。
+        //   JANが一致すれば【確実に同じ商品】なので、商品名の一致より強い。
+        const myJ2 = myJanSet();
         sgAdd.forEach(r2 => {
           if (!/ソフト/.test(String(r2.k || ''))) return;          // 本体・周辺機器・amiiboは別枠で見る
           const k2 = tmKey(r2.t); if (!k2 || have.has(k2)) return;
           have.add(k2);
+          const byJan = !!(r2.j && myJ2.has(r2.j));
           list.push({ ja: r2.t, en: '', y: String(r2.d || '').slice(0, 4), img: '', dl: 0,
-            sgOnly: true, sg: true, sgp: r2.p || 0, sgt: r2.t,
-            has: tmHas({ ja: r2.t, en: '' }, mineN, mineArr),
+            sgOnly: true, sg: true, sgp: r2.p || 0, sgt: r2.t, jan: r2.j || '',
+            has: byJan || tmHas({ ja: r2.t, en: '' }, mineN, mineArr),
             q: (r2.t + (hwWord ? ' ' + hwWord : '')).trim() });
         });
       } }
