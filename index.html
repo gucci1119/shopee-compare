@@ -1749,17 +1749,23 @@
     //   仕入れメール取込(mercari-purchase-sync)は5分毎に走っていて、その分がここに入っていなかった＝
     //   残りが【実際より多く見えていた】。安全弁が効かず2回使い切っている（08-01・08-22）。
     //   ※向こうは100回たまるごとに app_kv へ知らせるので、多少遅れる（＝少なめに出ることはあっても多くは出ない）。
-    let ext = 0;
+    // ★読めなかった時に【0とみなさない】。0にすると「まだ余っている」と嘘をつくことになり、
+    //   枠切れの方向に間違える（＝いちばん危ない側の誤り）。前回読めた値を持ち越す。
+    let ext = Number(window.__ufExtLast) || 0, extKnown = (window.__ufExtLast != null);
     try {
       const g = await sbGetAll('app_kv', 'select=v&k=eq.uf_ext_mercari');
       const v = (g && g[0] && g[0].v) || null;
       // 太平洋時間の日付が今日と同じ時だけ足す（日をまたいだ古い数字を持ち越さない）
       const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
-      if (v && v.d === today) ext = Number(v.n) || 0;
+      ext = (v && v.d === today) ? (Number(v.n) || 0) : 0;
+      extKnown = true; window.__ufExtLast = ext;
     } catch (_) {}
-    r.ext = ext;
+    // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
+    //   ここで足しておかないと、そちらだけ残りが多く見えてしまう（Codexの指摘・2026-09-04）。
+    r.ext = ext; r.extKnown = extKnown; r.usedRaw = Number(r.used) || 0;
+    r.used = (Number(r.used) || 0) + ext;
     window.__ufLast = r; window.__ufLastAt = Date.now();
-    const used = (Number(r.used) || 0) + ext, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
+    const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
     const pct = Math.round(used / cap * 100);
     // 15,000を超える＝背景同期が止まり、残りは手動操作の予約枠。20,000で全部止まる。
@@ -1782,6 +1788,7 @@
       : '';
     el.title = 'GASからShopeeを叩ける回数は1日20,000回。今日 ' + used.toLocaleString() + '回 使いました。\n'
       + (ext ? '　（うち ' + ext.toLocaleString() + '回は仕入れメールの取込など、Shopee以外のGASの分です。枠は同じGoogleアカウントで共有です）\n' : '')
+      + (extKnown ? '' : '　⚠️ Shopee以外のGASの消費が読めていません。実際はこれより使っています。\n')
       + '・' + stop.toLocaleString() + '回を超えると背景の自動同期が止まり、残りは手動操作用に取ってあります\n'
       + '・使い切ると【出品・明細の追加や削除・画像】が止まります\n'
       + '・リセットは毎日 ' + ufResetJst() + '（日本時間）'
@@ -3670,6 +3677,12 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     '🧹 おかしなJANを掃除': '🧹 Clean up bad JANs',
+    // 📇 駿河屋からJANを拾う（母数ページ）
+    '📇 駿河屋のJANを埋める': '📇 Fill in JANs from Suruga-ya',
+    '📇 見に行く商品がありません（すでに全部見ています）': '📇 Nothing left to look up (all products already checked)',
+    '先に駿河屋の一覧を取り込んでください': 'Import the Suruga-ya listing first',
+    '取り込めるハードがありません': 'No consoles available to import',
+    '駿河屋 未取込': 'Suruga-ya not imported',
     // 📚 母数（ハード別の網羅）ページ。<b>で区切られる断片ごとに訳が要る（完全一致の辞書なので）
     'この画面：': 'This page: ',
     'ハードごとに「世の中に何本あって、自分は何本出しているか」': 'how many titles exist per console, and how many of them you list',
@@ -23654,7 +23667,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
   // 🧹 母数に入れないもの（ソフトでない商品）。楽天ブックスは周辺機器も同じ棚に並ぶため、
   //   これを外さないと母数が倍近くに膨らむ（Switch 4,886件のうち約半分がソフトでなかった・2026-09-04実測）。
-  const BOSHU_NG = /amiibo|アミーボ|フィギュア|ぬいぐるみ|キーホルダー|アクリル|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|マイク|コントローラ|ジョイコン|Joy-?Con|プロコン|ハンドル|ジョイスティック|本体|ドック|ケース|カバー|ポーチ|バッグ|収納|フィルム|保護|ガラス|ケーブル|充電|バッテリ|スタンド|ホルダー|グリップ|プロテクト|アダプタ|SDカード|microSD|メモリーカード|マスキングテープ|ステッカー|シール|クリアファイル|タオル|マグカップ|ストラップ|缶バッジ|ポスター|下敷き|クッション|攻略本|ファンブック|設定資料|サントラ|サウンドトラック|Blu-?ray|DVD|カレンダー|Tシャツ|パーカー|トートバッグ|クリーナー|クリーニング|クロス|延長|ハブ|変換|冷却|セット商品|Switch Lite|有機ELモデル|きせかえ|Narrative pack|ウェポンパック|シーズンパス|追加コンテンツ|DLC|画集/i;
+  // 🧹 母数に入れないもの（ソフトでない商品）。楽天ブックスも駿河屋も周辺機器を同じ棚に並べるため、
+  //   これを外さないと母数が膨らむ（Switch 4,886件のうち約半分がソフトでなかった・2026-09-04実測）。
+  //   ⚠️ 【単語だけで判定しない】。部分一致なので、ふつうの語を入れると実在するソフトが消える。
+  //      実際に「シール」で <b>ポケットモンスター シールド</b>、「クロス」で ゼノブレイドクロス・
+  //      ソニックレーシング クロスワールド、「マイク」で ヒプノシスマイク、「画集」で 天穂のサクナヒメ
+  //      彩色画集付限定版 が母数から消えていた（Codexの指摘 → 実データで確認・2026-09-04）。
+  //      → 周辺機器だと確実に分かる【複合語】だけを並べる。ノイズが少し残る方が、実在ソフトを消すよりよい。
+  const BOSHU_NG = /amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)/i;
   // 🔑 母数を突き合わせるときの鍵。tmKey の前に【特典・版の表記】を落とす。
   //   ⚠️ 括弧は入れ子になっている（「【楽天ブックス限定特典+特典】名前(オリジナルタンブラー+【早期購入特典】…」）。
   //      内側の【…】を先に消すと外側の ( が閉じなくなり、特典名が本文として残る（実際にそうなっていた）。
@@ -23770,7 +23790,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const S = new Map();            // 商品名の鍵 → その商品のJAN一式
       const sgJan = new Set();        // 駿河屋が持っているJAN全部
       (sgRows || []).forEach(r => {
-        const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return;
+        const t = String((r && r.t) || ''); if (!t) return;
+        // ★駿河屋が区分名（「Nintendo Switchソフト」等）を持っている行は、それで判定する。
+        //   名前だけの判定より確実。区分が無い古いデータだけ、名前の判定に落とす（Codexの指摘・2026-09-04）。
+        if (r.k) { if (sgKindOf(r) !== 'soft') return; }
+        else if (BOSHU_NG.test(t)) return;
         const k = boshuKey(t); if (!k) return;
         if (!S.has(k)) S.set(k, new Set());
         if (r.j) { S.get(k).add(r.j); sgJan.add(r.j); }
@@ -24026,9 +24050,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!rows.length) throw new Error('先に駿河屋の一覧を取り込んでください');
     // まだJANを見ていない行だけ（j＝JAN／jx＝見に行ったが無かった印。二度と取りに行かない）
     const todo = rows.filter(r => r && r.id && !r.j && !r.jx);
+    // ★保存できない状態で走らせない。1件1.2秒で何千件も取ったあとに全部捨てることになる
+    //   （成功と表示したのに、リロードすると何も残っていない）。Codexの指摘・2026-09-04。
+    if (!settings.sbSecret) throw new Error('⚙️設定の書き込みキー(sbSecret)が未設定です。このまま集めても保存できないので始めません');
     let hit = 0, miss = 0, ng = 0, done = 0;
     const save = async () => {
-      if (!settings.sbSecret) return;
       await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: Object.assign({}, v, { rows: rows, janAt: new Date().toISOString() }), updated_at: new Date().toISOString() }]);
     };
     for (const r of todo) {
@@ -24057,6 +24083,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   async function surugaCrawl(hw, onProg) {
     const cat = SURUGA_CAT[hw]; if (!cat) throw new Error('この機種は駿河屋のカテゴリが未設定です');
     const rows = [], seen = new Set();
+    // 🏪📇 前に拾ったJAN（j／jx／型番）を商品IDで引けるようにしておく。
+    //   ⚠️ 取り込みは行を作り直すので、そのままだと【1件ずつ1時間かけて集めたJANが全部消える】。
+    //      消えたことにも気づけず、次に埋めるとき全部を取り直すことになる（Codexの指摘・2026-09-04）。
+    const keepJan = {};
+    try {
+      const g0 = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
+      (((g0 && g0[0] && g0[0].v) || {}).rows || []).forEach(r => {
+        if (r && r.id && (r.j || r.jx || r.mpn)) keepJan[r.id] = { j: r.j, jx: r.jx, mpn: r.mpn };
+      });
+    } catch (_) {}
     let page = 1, empty = 0, _since = 0;   // _since＝前回保存してから何ページ進んだか
     // 途中経過があれば引き継ぐ
     try {
@@ -24112,7 +24148,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   ⚠️ 区分名には【全角スペース】が入る（「Xbox　Oneソフト」）ので詰めてから使う。
         const km = /background-kishu[^>]*>\s*([^<]{1,40}?)\s*</.exec(m[3]);
         const kind = km ? km[1].replace(/[\u3000\s]+/g, '') : '';
-        rows.push({ t: t.slice(0, 120), id: id, k: kind, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 });
+        const _row = { t: t.slice(0, 120), id: id, k: kind, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 };
+        const _kj = keepJan[id];   // 前に拾ったJANは引き継ぐ（取り直しにならないように）
+        if (_kj) { if (_kj.j) _row.j = _kj.j; if (_kj.jx) _row.jx = _kj.jx; if (_kj.mpn) _row.mpn = _kj.mpn; }
+        rows.push(_row);
       }
       if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
       if (onProg) onProg(page, rows.length);
