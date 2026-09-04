@@ -24945,7 +24945,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (sid === undefined) { const hit = idx[tmKey(el.dataset.t || q)]; if (hit) sid = hit.id; }
       if (sid === undefined || el.querySelector('img')) return;
       if (!sid) { el.textContent = '画像なし'; el.style.color = '#c9c9c9'; el.style.fontSize = '10px'; return; }
-      el.innerHTML = '<img src="https://www.suruga-ya.jp/database/photo.php?shinaban=' + esc(sid) + '&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display=\'none\';this.parentElement.textContent=\'画像なし\';this.parentElement.style.color=\'#c9c9c9\';this.parentElement.style.fontSize=\'10px\'">';
+      el.innerHTML = '<img src="https://cdn.suruga-ya.jp/database/pics/game/' + esc(sid) + '.jpg" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display=\'none\';this.parentElement.textContent=\'画像なし\';this.parentElement.style.color=\'#c9c9c9\';this.parentElement.style.fontSize=\'10px\'">';
     });
   }
 
@@ -25154,7 +25154,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">${list.slice(0, CAP).map(r => {
         const has = mine.has(tmKey(r.t));
         return `<div style="border:1px solid ${has ? '#cfe6d6' : '#e6e6e6'};background:${has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px">
-          <div style="height:92px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden"><img src="https://www.suruga-ya.jp/database/photo.php?shinaban=${esc(r.id)}&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:92px;object-fit:contain" onerror="this.style.display='none'"></div>
+          <div style="height:92px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden"><img src="https://cdn.suruga-ya.jp/database/pics/game/${esc(r.id)}.jpg" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:92px;object-fit:contain" onerror="this.style.display='none'"></div>
           <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(String(r.t).slice(0, 46))}</div>
           <div class="smd-dim" style="font-size:9.5px">${esc(SG_KIND_JA[sgKindOf(r)] || '')}${r.d ? ' ・' + esc(r.d) : ''}</div>
           <div style="display:flex;align-items:center;gap:5px;margin-top:auto;flex-wrap:wrap;row-gap:3px">
@@ -25292,7 +25292,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     { const sgAll = (lst.sgRows && lst.sgRows[hw]) || [];
       if (sgAll.length) {
         const byT = {};
-        sgAll.forEach(r2 => { if (r2 && r2.j && janReal(r2.j)) { const k3 = boshuKey(r2.t); if (k3 && !byT[k3]) byT[k3] = r2.j; } });
+        // 🖼 JAN → 駿河屋の商品ID も作る。楽天だけの行でも、JANが一致すれば駿河屋の写真が出せる。
+        lst._sgIdByJan = lst._sgIdByJan || {};
+        const byJ = lst._sgIdByJan[hw] = {};
+        sgAll.forEach(r2 => {
+          if (!r2 || !r2.j || !janReal(r2.j)) return;
+          const k3 = boshuKey(r2.t); if (k3 && !byT[k3]) byT[k3] = r2.j;
+          if (r2.id && !byJ[r2.j]) byJ[r2.j] = r2.id;
+        });
         if (Object.keys(byT).length) {
           // ★国で絞って見ているときは、その国に出しているJANだけで判定する。
           //   全部の国のJANで見ると、PHにしか出していない物がBRの画面でも「出している」に
@@ -25372,11 +25379,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const card = x => `<div style="border:1px solid ${x.has ? '#cfe6d6' : '#e6e6e6'};background:${x.has ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;position:relative">
       ${x.has ? '' : `<label style="position:absolute;top:4px;left:4px;z-index:2;background:rgba(255,255,255,.9);border-radius:4px;padding:0 3px;cursor:pointer"><input type="checkbox" class="tm-pick" data-en="${av(x.en || '')}" data-ja="${av(x.ja || '')}"${(lst.tmPick || new Set()).has(x.en || x.ja) ? ' checked' : ''}></label>`}
       <div class="tm-img" data-q="${av(x.q)}" data-t="${av(x.ja || x.en || '')}" style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">
-        ${(() => { const sid = (lst.tmImg || {})[x.q]; // ★JANがあれば楽天の商品写真を組み立てられる（cabinet/末尾4桁/JAN.jpg）。
-          //   駿河屋の写真が無い行でも画像が出るので、画像の抜けが大きく減る（2026-08-31）。
+        ${(() => {
+          // 🖼 画像の出し方（2026-09-04 実測で組み直し）。上から順に試す。
+          //   ① 駿河屋の商品ID → 画像は【IDから組み立てられる】ので取りに行かなくてよい。
+          //      ⚠️ これまでの photo.php は 138x192 の小さい版だった。実測で
+          //      `cdn.suruga-ya.jp/database/pics/game/<ID>.jpg` は 734x1024 で出る。
+          //   ② JANが一致する駿河屋の商品があれば、そのIDを使う（楽天だけの行にも写真が出る）。
+          //   ③ それも無ければJANから楽天の写真。⚠️ tshop の下4桁は 130x210 の小さい版。
+          //      `thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/…` なら 620x1004 で出る（実測）。
+          let sid = (lst.tmImg || {})[x.q];
+          if (!sid && x.jan) { const byJ = (lst._sgIdByJan || {})[hw]; if (byJ && byJ[x.jan]) sid = byJ[x.jan]; }
           const rkImg = x.jan && String(x.jan).length === 13
-            ? ('https://tshop.r10s.jp/book/cabinet/' + String(x.jan).slice(-4) + '/' + x.jan + '.jpg?downsize=130:*') : '';
-          const u = sid ? ('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m') : (x.img || rkImg);
+            ? ('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + String(x.jan).slice(-4) + '/' + x.jan + '.jpg?_ex=200x200') : '';
+          const u = sid ? ('https://cdn.suruga-ya.jp/database/pics/game/' + sid + '.jpg') : (x.img || rkImg);
           return u ? `<img src="${esc(u)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">`
             : (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>'); })()}
       </div>
