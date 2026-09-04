@@ -23612,6 +23612,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     t = t.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));      // カタカナ→ひらがな
     return t.replace(/\s+/g, ' ').trim();
   }
+  // 🧹 母数に入れないもの（ソフトでない商品）。楽天ブックスは周辺機器も同じ棚に並ぶため、
+  //   これを外さないと母数が倍近くに膨らむ（Switch 4,886件のうち約半分がソフトでなかった・2026-09-04実測）。
+  const BOSHU_NG = /amiibo|アミーボ|フィギュア|ぬいぐるみ|キーホルダー|アクリル|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|マイク|コントローラ|ジョイコン|Joy-?Con|プロコン|ハンドル|ジョイスティック|本体|ドック|ケース|カバー|ポーチ|バッグ|収納|フィルム|保護|ガラス|ケーブル|充電|バッテリ|スタンド|ホルダー|グリップ|プロテクト|アダプタ|SDカード|microSD|メモリーカード|マスキングテープ|ステッカー|シール|クリアファイル|タオル|マグカップ|ストラップ|缶バッジ|ポスター|下敷き|クッション|攻略本|ファンブック|設定資料|サントラ|サウンドトラック|Blu-?ray|DVD|カレンダー|Tシャツ|パーカー|トートバッグ|クリーナー|クリーニング|クロス|延長|ハブ|変換|冷却|セット商品|Switch Lite|有機ELモデル|きせかえ|Narrative pack|ウェポンパック|シーズンパス|追加コンテンツ|DLC|画集/i;
+  // 🔑 母数を突き合わせるときの鍵。tmKey の前に【特典・版の表記】を落とす。
+  //   ⚠️ 括弧は入れ子になっている（「【楽天ブックス限定特典+特典】名前(オリジナルタンブラー+【早期購入特典】…」）。
+  //      内側の【…】を先に消すと外側の ( が閉じなくなり、特典名が本文として残る（実際にそうなっていた）。
+  //      なので【閉じた「【…】」を消す → 残った開き括弧より後ろは丸ごと捨てる】の順にする。
+  //      楽天のタイトルは120字で切られるので、括弧が閉じないものが常にある。
+  function boshuKey(v) {
+    let x = String(v || '');
+    x = x.replace(/【[^】]{0,80}】/g, ' ');
+    x = x.replace(/[（(\[［【].*$/, ' ');
+    x = x.replace(/[+＋].*$/, ' ');
+    x = x.replace(/(特典|早期購入|初回封入)\s*[:：].*$/, ' ');
+    x = x.replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|数量限定|未開封|エディション|Edition|Deluxe|デラックス|コンプリート|COMPLETE|アルティメット|Ultimate|GOTY)/gi, ' ');
+    x = x.replace(/(おそ松|カラ松|チョロ松|一松|十四松|トド松)セット/g, ' ');
+    x = x.replace(/\s*(Nintendo Switch2?|Switch2?|スイッチ|ニンテンドースイッチ|PS[2345]|PSP|PS ?Vita|Vita|Wii ?U|Wii|3DS|DS)版?\s*/gi, ' ');
+    return tmKey(x.replace(/\s+/g, ' ').trim());
+  }
 
   let titleMaster = null;         // { hw: {n, ja, en, at} } ＝件数だけの索引
   // ★表に要るのは「何本あるか」だけ。全ハードの全行(2万件超)を読むと重すぎて
@@ -23699,6 +23718,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     } catch (_) {}
     lst._janMst[hw] = rows;
     return rows;
+  }
+  // 🧮 母数の足し合わせ（駿河屋＋楽天）を【1ハードぶんだけ】計算し直して保存する。
+  //   ⚠️ これを呼ばないと、駿河屋を取り込み直しても母数が古いままになる（Codex指摘 2026-09-04）。
+  //      取り込みの直後に必ず呼ぶこと。1ハードなら軽い（数千件の集合演算1回）。
+  async function rebuildBoshuUnion(hw, sgRows) {
+    try {
+      const S = new Set();
+      (sgRows || []).forEach(r => { const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return; const k = boshuKey(t); if (k) S.add(k); });
+      const R = new Set();
+      (await loadJanMaster(hw)).forEach(r => { const t = String((r && r.t) || ''); if (!t || BOSHU_NG.test(t)) return; const k = boshuKey(t); if (k) R.add(k); });
+      if (!S.size && !R.size) return null;
+      let only = 0; R.forEach(k => { if (!S.has(k)) only++; });
+      const rec = { sg: S.size, rk: R.size, both: R.size - only, n: S.size + only };
+      lst.boshuU = lst.boshuU || {};
+      lst.boshuU[hw] = rec;
+      if (settings.sbSecret) {
+        await sbUpsert('app_kv', [{ k: 'boshu_union', v: { at: new Date().toISOString(), src: ['駿河屋', '楽天(JAN付き)'], per: lst.boshuU }, updated_at: new Date().toISOString() }]);
+      }
+      return rec;
+    } catch (e) { console.warn('[母数] 足し合わせの更新に失敗:', e); return null; }
   }
   // 自分が持っているJANの一覧（JANは世界で一意なので、ハードで分けなくてよい）
   function myJanSet() {
@@ -24225,6 +24264,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             lst.sgHave[hw] = Object.assign({}, prev, upd);
             if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'sg_index', v: lst.sgHave, updated_at: new Date().toISOString() }]);
           } catch (e2) { console.warn('[駿河屋] sg_index の更新に失敗:', e2); }
+          // ★母数の足し合わせ（駿河屋＋楽天）も、その場で計算し直す。
+          //   ここを忘れると取り込んでも母数が古いままになる（取り込んでも増えなかった過去と同じ穴）。
+          await rebuildBoshuUnion(hw, rows);
           _ng = 0;
           // ★1ハードごとにダイアログを出さない（28回出たら押しっぱなしになる）。最後にまとめて出す。
           if (cand.length === 1) alert('\u{1F3EA} ' + TITLE_HW_JA[hw] + '：' + rows.length + '件を取り込みました（版違い込み）。');
@@ -24674,18 +24716,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // 📇 JAN付きマスタ（楽天）を足す。タイトルが未収録のものだけ追加し、JANは必ず持たせる。
     { const jm = await loadJanMaster(hw);
       if (jm.length) {
+        // ★母数の表と【同じ物差し】で数える（2026-09-04）。ここを揃えないと、
+        //   表では除いたはずの周辺機器・特典違いが、内訳には並んで「出品を作る」対象になってしまう。
+        //   ・BOSHU_NG … 周辺機器（amiibo・Joy-Con・SDカード等）を落とす
+        //   ・boshuKey … 特典・版の表記を落としてから鍵にする（「〜(オリジナルタンブラー)」と「〜」を1つに）
         const have = new Set();
-        list.forEach(x => { if (x.ja) have.add(tmKey(x.ja)); if (x.en) have.add(tmKey(x.en)); });
+        list.forEach(x => { if (x.ja) have.add(boshuKey(x.ja)); if (x.en) have.add(boshuKey(x.en)); });
         const myJ = myJanSet();
         // 既にある行にもJANを付けられる分は付ける（表示と突合に使う）
         const byKey = {};
-        jm.forEach(r2 => { const k2 = tmKey(r2.t); if (k2 && !byKey[k2]) byKey[k2] = r2.jan; });
-        list.forEach(x => { if (!x.jan) { const j = byKey[tmKey(x.ja)] || byKey[tmKey(x.en)]; if (j) x.jan = j; } });
+        jm.forEach(r2 => { const k2 = boshuKey(r2.t); if (k2 && !byKey[k2]) byKey[k2] = r2.jan; });
+        list.forEach(x => { if (!x.jan) { const j = byKey[boshuKey(x.ja)] || byKey[boshuKey(x.en)]; if (j) x.jan = j; } });
         // ★既にある行に付いたJANは「もう数えた」ものなので、同じJANの行は足さない＝二重計上を防ぐ
         //   （タイトルが違うだけの同じ商品を2本に数えてしまうため。本人「JANがあれば1個に判定できる」）
         const seenJan = new Set(); list.forEach(x => { if (x.jan) seenJan.add(x.jan); });
         jm.forEach(r2 => {
-          const k2 = tmKey(r2.t); if (!k2 || have.has(k2)) return;
+          if (BOSHU_NG.test(String(r2.t || ''))) return;
+          const k2 = boshuKey(r2.t); if (!k2 || have.has(k2)) return;
           if (seenJan.has(r2.jan)) return;
           have.add(k2); seenJan.add(r2.jan);
           list.push({ ja: r2.t, en: '', y: '', img: '', dl: 0, jan: r2.jan,
