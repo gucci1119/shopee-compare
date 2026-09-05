@@ -25308,9 +25308,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         list.forEach(x => { if (x.ja) have.add(boshuKey(x.ja)); if (x.en) have.add(boshuKey(x.en)); });
         const myJ = myJanSet();
         // 既にある行にもJANを付けられる分は付ける（表示と突合に使う）
-        const byKey = {};
-        jm.forEach(r2 => { const k2 = boshuKey(r2.t); if (k2 && !byKey[k2]) byKey[k2] = r2.jan; });
-        list.forEach(x => { if (!x.jan) { const j = byKey[boshuKey(x.ja)] || byKey[boshuKey(x.en)]; if (j) x.jan = j; } });
+        // ★鍵を【2通り】作って当てる。boshuKey は版・特典の表記まで落とすので当たりやすいが、
+        //   落としすぎて別物が同じ鍵になることもある。tmKey（落とし方が控えめ）でも引いて、
+        //   当たる数を増やす（JANが付けば写真も出るので、画像の抜けも減る・2026-09-05）。
+        const byKey = {}, byKey2 = {};
+        jm.forEach(r2 => {
+          const k2 = boshuKey(r2.t); if (k2 && !byKey[k2]) byKey[k2] = r2.jan;
+          const k3 = tmKey(r2.t); if (k3 && !byKey2[k3]) byKey2[k3] = r2.jan;
+        });
+        list.forEach(x => { if (!x.jan) {
+          const j = byKey[boshuKey(x.ja)] || byKey[boshuKey(x.en)] || byKey2[tmKey(x.ja)] || byKey2[tmKey(x.en)];
+          if (j) x.jan = j;
+        } });
         // ★既にある行に付いたJANは「もう数えた」ものなので、同じJANの行は足さない＝二重計上を防ぐ
         //   （タイトルが違うだけの同じ商品を2本に数えてしまうため。本人「JANがあれば1個に判定できる」）
         const seenJan = new Set(); list.forEach(x => { if (x.jan) seenJan.add(x.jan); });
@@ -25437,9 +25446,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             ? ('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + String(x.jan).slice(-4) + '/' + x.jan + '.jpg?_ex=128x128') : '';
           // 🔢 商品IDが分かっていれば、そこからJANも埋める（写真が出ている行にはJANも出る）
           if (!x.jan && sid) { const jb = (lst._sgJanById || {})[hw]; if (jb && jb[sid]) x.jan = jb[sid]; }
-          const u = sid ? ('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m') : (x.img || rkImg);
-          return u ? `<img src="${esc(u)}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">`
-            : (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>'); })()}
+          // 🖼 候補を【順に試す】。1つ目がダメでも次を試す（2026-09-05）。
+          //   ⚠️ 以前は1つ選んで、それが無ければ即「画像なし」だった。駿河屋に写真が無い商品でも
+          //      楽天にはあることが多いので、順に試すだけで写真がだいぶ増える。
+          const cands = [];
+          if (sid) cands.push('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m');
+          if (x.img) cands.push(x.img);
+          if (x.jan && String(x.jan).length === 13) {
+            const j4 = String(x.jan).slice(-4);
+            cands.push('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + j4 + '/' + x.jan + '.jpg?_ex=128x128');
+            cands.push('https://tshop.r10s.jp/book/cabinet/' + j4 + '/' + x.jan + '.jpg?downsize=130:*');
+            cands.push('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + j4 + '/' + x.jan + '_1.jpg?_ex=128x128');
+          }
+          if (!cands.length) return (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>');
+          // ダメだったら次のURLへ。全部ダメなら「画像なし」
+          const onerr = "var l=JSON.parse(this.dataset.l||'[]');if(l.length){this.src=l.shift();this.dataset.l=JSON.stringify(l);}else{this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px';}";
+          return `<img src="${esc(cands[0])}" data-l="${av(JSON.stringify(cands.slice(1)))}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="${av(onerr)}">`;
+        })()}
       </div>
       <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.ja || x.en || '')}</div>
       ${(() => { if (x.has) return ''; const f = tmFitName(x.en || x.ja || '', 30); return f.cut ? `<div title="${av('明細名は30字までです。このまま入れると「' + f.name + '」になります')}" style="font-size:9.5px;color:#b26a00;font-weight:700">✂ 30字超（${esc(f.name)}）</div>` : ''; })()}
