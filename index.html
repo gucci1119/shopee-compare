@@ -8589,8 +8589,12 @@
       const inTransitN = orders.filter(o => o.tab === 300 && !held(o)).length;                                    // ③倉庫へ発送済（手を離れた）
       // 期限の緊急度も同じ母集団（toShipは既に未手配のみ）
       const unarr = toShip;
-      const overdueShip = unarr.filter(o => o.ship_by && (o.ship_by - nowSec()) < 0);           // 未手配で既に期限切れ（最優先）
-      const due24 = unarr.filter(o => o.ship_by && (o.ship_by - nowSec()) >= 0 && (o.ship_by - nowSec()) < 86400); // 未手配でこれから24h以内
+      // ★ship_by は【起点】であって期限そのものではない。家から出す期限は ordShipDeadline（＋1日）。
+      //   生の ship_by で数えていたので、注文管理のカードが「あと2日」と出ている同じ注文を
+      //   ここでは「期限切れ」と数えていた（同じ画面の中で食い違っていた・2026-09-06）。
+      const _dl = o => ordShipDeadline({ shipBy: o.ship_by });
+      const overdueShip = unarr.filter(o => o.ship_by && (_dl(o) - nowSec()) < 0);           // 未手配で既に期限切れ（最優先）
+      const due24 = unarr.filter(o => o.ship_by && (_dl(o) - nowSec()) >= 0 && (_dl(o) - nowSec()) < 86400); // 未手配でこれから24h以内
       let pendJpy = 0, pendN = 0;
       income.forEach(i => { if (i.pending !== true) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
       // ---- 運用KPI（在庫由来の要対応・横断） ----
@@ -13962,7 +13966,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
     const toship = orders.filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
     const shipRows = toship.map(o => {
-      const secLeft = o.ship_by ? (o.ship_by - nowSec) : null;
+      const secLeft = o.ship_by ? (ordShipDeadline({ shipBy: o.ship_by }) - nowSec) : null;   // ★ship_byは起点。期限は＋1日
       const level = secLeft == null ? 0 : (secLeft < 0 ? 2 : (secLeft < 86400 ? 1 : 0));
       const due = o.ship_by ? new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16) : '—';
       const label = secLeft == null ? '' : (secLeft < 0 ? '超過' : (secLeft < 86400 ? '24h以内' : ''));
@@ -14782,8 +14786,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   → 32件の回収見込みは **約¥134,000**。赤字の最大の穴なので、その場で絞り込める＋CSVで出せるようにする。
     //   ※ 補償率 COMP_RATE は下の「実質損失」ブロックで宣言しているものを使う（二重に const すると
     //     同じ関数スコープなので **SyntaxError でポータル全体が起動しなくなる**。2026-08-19に実際に発生）
-    const isLostRow = o => /NOT_RECEIPT|ITEM_MISSING|未着|中身/i.test(String(o.retReason || o.reason || ''));
-    const lostAll = rowsAll.filter(o => isLostRow(o) && !isCompRow(o));
+    // 🚨 補償の取りこぼし（未着・中身抜き）。
+    //   ⚠️ ここは【ずっと0件】だった。理由は2つ：
+    //     ①見ていた項目 `retReason` / `reason` を、どの行も持っていない
+    //       （キャンセル行は `cancel_reason`、正式な返品は `ret_reason`、追加分は `order_issues.reason`）
+    //     ②正式な返品(returnExtra)は rowsAll に入っていない
+    //   そのため「🚨 補償の取りこぼし」のバナーも申請用CSVも**一度も画面に出ていなかった**（2026-09-06に発覚）。
+    //   ついでに語も間違っていた（実データは NON_RECEIPT。NOT_RECEIPT では当たらない）。
+    const lostReasonOf = o => String(o.ret_reason || o.retReason || o.cancel_reason
+      || ((issueMap.get(o.cc + ':' + o.sn) || {}).reason || '') || '');
+    const isLostRow = o => /NON_?RECEIPT|ITEM_MISSING|未着|中身/i.test(lostReasonOf(o));
+    const lostBase = refundRows.concat(returnExtra);
+    const lostAll = lostBase.filter(o => isLostRow(o) && !isCompRow(o));
     if (renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
@@ -15715,7 +15729,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (orders || []).forEach(o => {
         if (!/to ?ship/i.test(o.status || '') || o.tracking) return;      // 手配済み(追跡あり)は対象外
         if (!o.ship_by) return;
-        const left = o.ship_by - nowSec;
+        const left = ordShipDeadline({ shipBy: o.ship_by }) - nowSec;   // ★ship_byは起点。期限は＋1日
         if (left > 86400) return;                                          // 24時間より先はまだ急がない
         const it = (o.items || [])[0] || {};
         const due = new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16).replace('-', '/');
