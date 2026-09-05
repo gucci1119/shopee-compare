@@ -23969,8 +23969,43 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       productIds[k] = Object.assign({}, v, { jan: j, at: Date.now(), src: '母数(駿河屋・楽天)から自動', noJan: undefined, noJanAt: undefined, reJan: undefined });
       hit++;
     });
-    if (hit) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
-    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit };
+    // ③ 日本語名が無い明細を、作品マスタ(Wikidata)の【英名→日本語】辞書で救う。
+    //   ここまでの②は「こちらに日本語名(jp)がある明細」しか見ていない。
+    //   実測（2026-09-05）空き523件のうち419件に日本語名が無く、名前で橋が架からなかった。
+    //   ★お金も接続枠も使わない（すでに持っている辞書を引くだけ）。
+    let noJp = 0, gotJa = 0, hit2 = 0;
+    try {
+      const dicOf = {};
+      const rowsAll = [];
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rowsAll.push(r)));
+      for (let i = 0; i < rowsAll.length; i++) {
+        const r = rowsAll[i];
+        const ms = (r && r.models) || []; if (!ms.length) continue;
+        // 機種の取り方は1つに決めない（識別項目→カタログ名の順）。名前だけで見ると取りこぼす。
+        let hw = ''; try { hw = String(janHwOf(r) || '').toLowerCase(); } catch (_) {}
+        if (!hw) { try { hw = String(hwOf((r && r.name) || '') || '').toLowerCase(); } catch (_) {} }
+        if (!hw) continue;
+        let d = dicOf[hw];
+        if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
+        if (!d) continue;
+        for (const m of ms) {
+          if (!m || m.ghost || !m.n) continue;
+          const k = pidKeyModel(r, m); const v = productIds[k] || {};
+          if (String(v.jan || '').trim().length === 13) continue;
+          if (String(v.jp || '').trim()) continue;      // ②で見た分
+          noJp++;
+          const ja = d.lookup(m.n); if (!ja) continue;
+          gotJa++;
+          // ★日本語名は【JANが引けなくても残す】。次にAIで探すとき、日本語で投げられる分だけ安くなる。
+          const j2 = dic.get(tmKey(ja));
+          productIds[k] = Object.assign({}, v, { jp: ja },
+            j2 ? { jan: j2, at: Date.now(), src: '母数(駿河屋・楽天)から自動', noJan: undefined, noJanAt: undefined, reJan: undefined } : {});
+          if (j2) { hit2++; hit++; }
+        }
+      }
+    } catch (e) { console.warn('[SMD] 英名→日本語の穴埋めで止まりました', e); }
+    if (hit || gotJa) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
+    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2 };
   }
   // 🌏 国で絞ったJANの一覧。国別で見ているときに、他の国のJANで「出している」と
   //   誤判定しないため（PHにしか無い物がBRの画面で消えてしまう）。
@@ -24666,9 +24701,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try {
           const r = await janFillFromBoshuAll((t) => { jf.textContent = '📥 ' + t; });
           alert('📥 ' + r.hit.toLocaleString() + '件のJANを入れました。\n\n'
-            + '　空いていた明細（日本語名があるもの）　' + r.tgt.toLocaleString() + '件\n'
+            + '【日本語名があった明細】\n'
+            + '　空いていたもの　　　　　　　　　　　 ' + r.tgt.toLocaleString() + '件\n'
+            + '　うちJANが入ったもの　　　　　　　　 ' + (r.hit - r.hit2).toLocaleString() + '件\n\n'
+            + '【日本語名が無かった明細】※作品マスタの英名→日本語で照合\n'
+            + '　空いていたもの　　　　　　　　　　　 ' + (r.noJp || 0).toLocaleString() + '件\n'
+            + '　日本語名が分かったもの　　　　　　　 ' + (r.gotJa || 0).toLocaleString() + '件\n'
+            + '　うちJANまで入ったもの　　　　　　　 ' + (r.hit2 || 0).toLocaleString() + '件\n\n'
             + '　母数側で名前からJANを引けたもの　　　 ' + r.dic.toLocaleString() + '件\n'
             + '　同じ名前で違うJANがあり見送ったもの　 ' + r.drop.toLocaleString() + '件\n\n'
+            + '日本語名はJANが引けなくても残します（次にAIで探すとき日本語で投げられる＝安くなります）。\n'
             + '「📇 駿河屋のJANを埋める」を回すほど、ここで入る数が増えます。');
         } catch (e) {
           alert('❌ 入れられませんでした：' + ((e && e.message) || e));
