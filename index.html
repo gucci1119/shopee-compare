@@ -16000,6 +16000,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-06', items: [
+      '💰 <b>利益ページの売上が、注文の金額が空の分だけ落ちていました</b>。点検したところ<b>BR 5件・合計 BRL 1,072.07</b>が空のままでした（入金側には買い手支払額が入っています）。ダッシュボードと推移チャートは<b>すでに入金側を優先</b>していましたが、<b>利益ページだけ生の注文金額を見ていた</b>ため、そこだけ抜けていました。<br>空のときは入金側の買い手支払額を使うようにしました。※以前<b>344件・¥2,528,426</b>が同じ理由で落ちていた前科があります。',
       '📈 <b>数え直したら「出している」が大きく増えました</b>（JANを埋めた効果がそのまま出ました）。<br><b>Switch 388→421／PS4 268→338／DS 175→199／PSP 200→223／PS2 251→269</b>。<b>「JANで確定」も PS4 3→23・DS 1→35・PS2 2→29</b>になりました。網羅率もPS4が11%→14%です。<br>JANは世界で一意なので、<b>明細名が英語でもマスタが日本語でも、綴りが違っても確実に一致</b>します。名前だけでは当たらなかった分が拾えた形です。',
       '🔢 <b>「📇JANで確定」は、押して数え直すまで古い数字のままでした</b>。PS4が<b>3件</b>と出ていたので調べたところ、実体は<b>19件</b>（うち17件は駿河屋の母数にもあり）でした。この数字は<b>「🧮 母数を数え直す」を押したときに保存された値</b>で、JANが増えても勝手には更新されません。<b>いつ数えた数字なのかを画面に出す</b>ようにしました。JANを埋めたあとは数え直してください（無料・すぐ終わります）。',
       '🎮 <b>機種ごとのJANの数え方も、明細名の機種を正にしました</b>。カタログ名から機種を1つ決めていたので、機種が混ざったカタログ（実測 1,412中457＝32%）の中身が<b>カタログ名で最初に当たった機種に寄って</b>いました。',
@@ -36381,6 +36382,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
   }
 
+  // 💰 売上（買い手が払った額）。**orders.total は空のことがある**。
+  //   過去に344件・¥2,528,426が売上から落ちていた前科があり、2026-09-06の点検でも
+  //   BR 5件・合計 BRL 1,072.07 が空のままだった（入金側には buyer_paid が入っている）。
+  //   ダッシュボードと推移チャートは既に入金側を優先していたが、利益ページだけ生の total を見ていた。
+  const pfSales = o => {
+    const t = Number((o && o.total) || 0);
+    if (t > 0) return t;
+    try { const inc = pf.incMap.get(o.cc + ':' + o.sn); const v = Number((inc && inc.buyer_paid) || 0); if (v > 0) return v; } catch (_) {}
+    return 0;
+  };
   // 入金額: {amt, fixed} — fixed=true は「Shopeeが更新した後の確定値」（F/G方式と同じ判定）
   const pfDepInfo = o => {
     const key = o.cc + ':' + o.sn;
@@ -36665,7 +36676,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         case 'qty': return (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
         case 'order': return o.sn || '';
         case 'buyer': return (o.buyer || '').toLowerCase();
-        case 'sales': return (o.total || 0) * rgRate(o);
+        case 'sales': return pfSales(o) * rgRate(o);
         case 'dep_prov': { const d = pfDepInfo(o); const v = d ? (d.init != null ? d.init : (!d.fixed ? d.amt : null)) : null; return v == null ? -1e15 : v * rgRate(o); }
         case 'dep_fix': { const d = pfDepInfo(o); return (d && d.fixed) ? d.amt * rgRate(o) : -1e15; }
         case 'cost': { const c = pfCost(o); return c == null ? -1e15 : c; }
@@ -36796,7 +36807,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const invs = pfInv(o);           // 紐付いた在庫
       const invSum = invs.filter(v => v.price != null).reduce((s, v) => s + v.price, 0);
       const _fr = ordRate(o);
-      tSales += (o.total || 0) * _fr;
+      tSales += pfSales(o) * _fr;
       if (dep != null) tDep += dep * _fr;
       if (depProv != null) tProv += depProv * _fr;
       if (depFix != null) tFix += depFix * _fr;
@@ -36846,7 +36857,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           rate: () => first ? `<td${rs}>${rate != null ? `<span style="color:${rate < 0 ? '#d93025' : '#1a7f37'};font-weight:700">${rate}%</span>` : ''}</td>` : '',
           tracking: () => first ? `<td${rs} style="font-size:10px;word-break:break-all" class="smd-dim">${o.tracking ? cpy(o.tracking) : ''}</td>` : '',
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${cpy(v.sku)}</div>` : '').join('')}</td>`,
-          sales: () => first ? `<td${rs}>${fmtLocal(rg, o.total)}<br><span class="smd-jpy">≈${fmtJpy((o.total || 0) * _fr)}</span></td>` : '',
+          sales: () => first ? `<td${rs}>${fmtLocal(rg, pfSales(o))}<br><span class="smd-jpy">≈${fmtJpy(pfSales(o) * _fr)}</span></td>` : '',
           dep_prov: () => first ? `<td${rs}>${depProv != null
             ? `<span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * _fr)}</span>${depInfo && depInfo.provAt ? `<br><span class="smd-dim" style="font-size:9px" title="暫定額の記載日時（日本時間）">日本時間 ${jstDT(depInfo.provAt)}</span>` : ''}`
             : '<span class="smd-dim">未取得</span>'}</td>` : '',
@@ -37336,7 +37347,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   「Cannot access '_fr' before initialization」で国別サマリーが丸ごと描画できなかった（2026-08-16）。
       const _fr = ordRate(o);                    // 注文日(JST)の実効レート
       p.units += (o.items || []).reduce((s, it) => s + (it.qty || 0), 0);
-      p.sales += o.total || 0; p.salesJpy += (o.total || 0) * _fr;
+      p.sales += pfSales(o); p.salesJpy += pfSales(o) * _fr;
       const sk = ordStatusKey(o.status);        // 配送状態の内訳（＝入金が確定する根拠）
       p.st[sk] = (p.st[sk] || 0) + 1;
       if (ordScanned(o)) p.scanN++;              // 倉庫スキャン済み＝入金額が確定しているはず
