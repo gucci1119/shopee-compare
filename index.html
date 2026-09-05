@@ -13169,6 +13169,17 @@
     // 開いた時点で自動的に候補を集める（同時2件・6時間キャッシュ）。⚙のトグルでOFFにできる。
     const srcSkip = (i) => { const x = disp[i]; return !!(x && isDone(x)); };   // 仕入れ済＝もう探さない
     async function autoSuggest() {
+      // ⚠️ 再描画（ページ送り・並べ替え・サイトのチェック等）から何度も呼ばれる。
+      //   前の周回を止めずに始めると【古い周回が生き残ったまま】重なって走り、
+      //   仕入元サイトへのリクエストが倍・三倍になる（遮断されると仕入れ自体が止まる・2026-09-06）。
+      //   → 走っていたら必ず止めて、終わるのを待ってから始める。
+      if (autoSuggest._running) {
+        renderSourcing._stop = true;
+        for (let w = 0; w < 60 && autoSuggest._running; w++) await new Promise(r => setTimeout(r, 100));
+      }
+      renderSourcing._stop = false;
+      autoSuggest._running = true;
+      try {
       const all = [...host.querySelectorAll('.src-sugg')];
       all.filter(b => srcSkip(+b.dataset.i)).forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">✓ 仕入れ済のため検索しません</span>'; });
       const AUTO_MAX = 12;   // 開いた瞬間に何十行も走らせると画面が固まる。続きは「🔄全行を再取得」で
@@ -13184,11 +13195,14 @@
           const i = q.shift();
           try { drawSugg(i, await srcDealsFor(i)); } catch (e) { drawSugg(i, null, e.message || e); }
           done++; if (msg) msg.textContent = `自動検索 ${done}/${boxes.length}`;
-          await new Promise(r => setTimeout(r, 120));   // 描画とスクロールを止めないための間
+          // ★1行で最大8サイトを同時に叩く。120msだと1分で数百リクエストになるので、
+          //   1秒前後＋ゆらぎにする（叩きすぎて遮断されると仕入れができなくなる）。
+          await new Promise(r => setTimeout(r, 900 + Math.floor(Math.random() * 500)));
         }
       };
       await worker();   // 1行ずつ。1行の中で最大8サイトを同時に叩くため、行を並列にするとブリッジ(6枠)が詰まる
       if (msg) msg.textContent = renderSourcing._stop ? '停止しました' : `自動検索 完了（${boxes.length}件）`;
+      } finally { autoSuggest._running = false; }
     }
     { const ab = document.getElementById('src-deals-all'); if (ab) ab.addEventListener('click', async () => {
       ab.disabled = true; const orig = ab.textContent; ab.textContent = '🔍 再取得中…';
@@ -22086,6 +22100,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           };
           for (let i3 = 0; i3 < urls.length; i3 += 12) {
             if (bAbort) break;
+            // ★1かたまり12件を仕入元サイトへ【同時に】投げる。待ちが無いと、
+            //   200行貼っただけで短時間に数百リクエストになり遮断される（2026-09-06）。
+            if (i3 > 0) await new Promise(r => setTimeout(r, 1200 + Math.floor(Math.random() * 800)));
             const chunk = urls.slice(i3, i3 + 12);
             const useGas = !(gasBad && bridgeOk);
             if (bm) bm.textContent = '取り込み中… ' + fin + '/' + urls.length + (useGas ? '（まとめて取得中）' : '（この端末のブラウザで取得中）');
