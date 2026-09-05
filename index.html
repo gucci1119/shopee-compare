@@ -11662,7 +11662,7 @@
     const txt = [
       '【' + ym.replace('-', '年') + '月 進捗】' + ym.slice(5) + '/1〜' + ym.slice(5) + '/' + dayNow + '（' + dayNow + '日経過 / ' + dim + '日）',
       '※ 経過日数から日割りで月末を予測',
-      tline('売上（入金ベース）', m.dep, t.sales, fmtM),
+      tline('売上（入金ベース）', (m.depAll != null ? m.depAll : m.dep), t.sales, fmtM),
       tline('粗利', gross, t.gross, fmtM),
       tline('注文数', m.n, t.orders, fmtN),
       ...((pl && pl.fix >= 0 && dim > 0 && dayNow > 0)
@@ -11727,8 +11727,11 @@
       body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費・返金を集計）</span>';
       try {
         [orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv] = await Promise.all([
-          sbGetAll('orders', 'select=cc,sn,total,order_date,tab&order=order_date.desc'),
-          sbGetAll('income', 'select=cc,sn,amount'),
+          // ★order_ts を取らないと、下の JST 判定が必ず else（各国ローカル日）に落ちる。
+          //   月境界と、注文日レートの基準日がずれる（2026-09-06に発覚）。
+          sbGetAll('orders', 'select=cc,sn,total,order_date,order_ts,tab&order=order_date.desc'),
+          // ★buyer_paid も取る。orders.total は空のことがあり、売上が黙って落ちる。
+          sbGetAll('income', 'select=cc,sn,amount,buyer_paid'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
           sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
           sbGetAll('expenses', 'select=ymd,amount,category'),
@@ -11762,15 +11765,22 @@
       const ymd = (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || ''));
       const ym = ymd.slice(0, 7); if (!ym) return;
       const rg = regionByCc(o.cc), rate = fxRate(o.cc, ymd) || (rg ? rg.rateJpy : 0);   // ★注文日のレートで円換算
-      const m = M[ym] = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 };
+      const m = M[ym] = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0, depAll: 0, depN: 0 };
       const cc2 = (M2[ym] = M2[ym] || {})[o.cc] = (M2[ym][o.cc]) || { n: 0, dep: 0, cost: 0, gn: 0 };
-      m.n++; m.gmv += (Number(o.total) || 0) * rate; cc2.n++;
-      if (o.tab === 200) return; // 未払いは粗利対象外（利益エンジンと同じ）
       const key = o.cc + ':' + o.sn, inc = incBySn[key], cm = costBySn[key];
+      // ★orders.total は空のことがある。空なら入金側の買い手支払額を使う
+      //   （ダッシュボードと推移チャートは前から入金側を優先していた。ここだけ生の total だった）。
+      const gmv1 = Number(o.total) > 0 ? Number(o.total) : Number((inc && inc.buyer_paid) || 0);
+      m.n++; m.gmv += gmv1 * rate; cc2.n++;
+      if (o.tab === 200) return; // 未払いは粗利対象外（利益エンジンと同じ）
       const dep = (inc && inc.amount != null) ? Number(inc.amount) : (cm && cm.deposit != null ? Number(cm.deposit) : null);
       // ★仕入は「在庫台帳（実際に紐付けた在庫の仕入額）」を正とする。スプシ取込は在庫が未紐付けのときの控えに降格。
       //   逆にしていたため、🔎在庫候補で紐付けても数字が変わらず、スプシを切り離せない状態だった（2026-08-09）。
       const cost = (invBySn[o.sn] != null) ? invBySn[o.sn] : ((cm && cm.cost != null) ? Number(cm.cost) : null);
+      // ★入金は【仕入が分からなくても】足す。両方そろった分だけで数えていたため、
+      //   「入金は分かっているが仕入が未紐付け」の注文は入金までまるごと0になり、
+      //   週次報告の「売上（入金ベース）」が月初ほど過少に出ていた（2026-09-06に発覚）。
+      if (dep != null) { m.depAll = (m.depAll || 0) + dep * rate + pplOf(o); m.depN = (m.depN || 0) + 1; }
       if (dep != null && cost != null) { const dj = dep * rate + pplOf(o); m.dep += dj; m.cost += cost; m.gn++; cc2.dep += dj; cc2.cost += cost; cc2.gn++; }
     });
     // 国×月 純マージン(粗利率=粗利/入金)ヒートマップHTML（直近6か月・データのある国のみ・信頼度低いセルは薄く）
@@ -11854,7 +11864,13 @@
     const monthlyCost = Math.round(needOrders * costPerPlan);   // 目標達成に要る月の仕入
     const workingCapital = Math.round(monthlyCost * cashCycle); // 運転資金の目安（常に回し続ける現金）
     const monthCash = takeHome;                                 // 毎月増えるキャッシュ（手取り・還付は別枠で年数回）
-    const curOp = opProfitOf(curRow) || 0;
+    // ★突合が足りない月は opProfitOf が null を返す（＝まだ言えない）。
+    //   これを 0 に潰していたので、履歴表では「—」なのに進捗パネルと週次報告では
+    //   「実利益 0円」と断言していた（同じ画面で違うことを言っていた・2026-09-06）。
+    const curOpRaw = opProfitOf(curRow);
+    const curOpKnown = curOpRaw != null;
+    const curOp = curOpRaw || 0;
+    const curReliPct = curRow && curRow.n ? Math.round((curRow.gn || 0) / curRow.n * 100) : 0;
     // 今月ペース
     const now = new Date(Date.now() + 9 * 3600000);
     const dom = now.getUTCDate(), dim = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
@@ -11876,7 +11892,14 @@
         <div style="height:72px;display:flex;align-items:flex-end;width:100%;justify-content:center"><div style="width:70%;height:${Math.max(2, h)}px;background:${pos ? '#1a7f37' : '#d93025'};border-radius:4px 3px 0 0"></div></div>
         <div style="font-size:9px;color:#888;transform:rotate(-40deg);white-space:nowrap;transform-origin:center">${r.ym.slice(2)}</div></div>`;
     }).join('');
-    const tot = rows.reduce((s, r) => ({ n: s.n + r.n, gmv: s.gmv + r.gmv, dep: s.dep + r.dep, cost: s.cost + r.cost, fix: s.fix + (reli(r) ? effFixedOf(r) : 0), vari: s.vari + (reli(r) ? varOf(r) : 0), other: s.other + r.other, refund: s.refund + (r.refund || 0), gross: s.gross + r.gross, op: s.op + (opProfitOf(r) || 0) }), { n: 0, gmv: 0, dep: 0, cost: 0, fix: 0, vari: 0, other: 0, refund: 0, gross: 0, op: 0 });
+    // ★合計は【同じ母集団】で足す。列ごとに条件が違うと、行では「—」の月の粗利が合計には入り、
+    //   その月の実利益だけ0で入るので「粗利−固定費−経費」と「実利益」が合わない（2026-09-06）。
+    //   件数とGMVは全月（そこは判明率に関係なく数えられる）、お金の列は判明した月だけ。
+    const totRows = rows.filter(reli);
+    const tot = totRows.reduce((s, r) => ({ n: s.n + r.n, gmv: s.gmv + r.gmv, dep: s.dep + r.dep, cost: s.cost + r.cost, fix: s.fix + effFixedOf(r), vari: s.vari + varOf(r), other: s.other + r.other, refund: s.refund + (r.refund || 0), gross: s.gross + r.gross, op: s.op + (opProfitOf(r) || 0) }), { n: 0, gmv: 0, dep: 0, cost: 0, fix: 0, vari: 0, other: 0, refund: 0, gross: 0, op: 0 });
+    tot.nAll = rows.reduce((a, r) => a + r.n, 0);
+    tot.gmvAll = rows.reduce((a, r) => a + r.gmv, 0);
+    tot.months = totRows.length; tot.monthsAll = rows.length;
     const money = (v, col) => `<b style="color:${col || (v < 0 ? '#d93025' : '#222')}">${fmtJpy(v)}</b>`;
     // ★「これから決めること（シミュレーション）」と「過去の振り返り（実績）」が1画面に混ざって
     //   分かりにくかったので、はっきり2つに分ける。どちらを見ていたかは端末に記憶する。
@@ -12000,7 +12023,7 @@
             <div style="font-size:11px;margin-top:4px">${paceTxt}</div>
           </div>
           <div style="flex:1;min-width:220px">
-            <div style="font-size:12px;display:flex;justify-content:space-between"><span>実利益${fixEstimated(curRow) ? '（固定費は見込み）' : ''}</span><span>${money(curOp, curOp < 0 ? '#d93025' : '#1a7f37')} / ${fmtJpy(targetNet)}${taxPct > 0 ? ` <span class="smd-dim" style="font-size:10px">(税引後 ${fmtJpy(afterTax(curOp))})</span>` : ''}</span></div>
+            <div style="font-size:12px;display:flex;justify-content:space-between"><span>実利益${fixEstimated(curRow) ? '（固定費は見込み）' : ''}</span><span>${curOpKnown ? money(curOp, curOp < 0 ? '#d93025' : '#1a7f37') : `<span class="smd-dim" title="入金と仕入の両方が分かった注文が少ないので、まだ実利益を出せません">集計中（判明 ${curReliPct}%）</span>`} / ${fmtJpy(targetNet)}${taxPct > 0 ? ` <span class="smd-dim" style="font-size:10px">(税引後 ${fmtJpy(afterTax(curOp))})</span>` : ''}</span></div>
             ${bar(curOp, targetNet, '#1a7f37')}
             <div class="smd-dim" style="font-size:10px;margin-top:4px">入金 ${fmtJpy(curRow.dep)} − 仕入 ${fmtJpy(curRow.cost)} − 固定費 ${fmtJpy(effFixedOf(curRow))}${fixEstimated(curRow) ? '(見込)' : ''} − その他経費 ${fmtJpy(curRow.other)}</div>
           </div>
@@ -12028,7 +12051,7 @@
                   : `<b style="color:${col(dp)}">${dp}%</b><span class="smd-dim" style="font-size:9px"> ${r.gn || 0}/${r.n}</span>`)
                 + '</td>';
             })()}<td style="white-space:nowrap;color:#1a73e8">${tgt ? fmtJpy(tgt) : dash}</td><td style="white-space:nowrap;font-weight:700;color:${achv == null ? '#888' : (achv >= 100 ? '#1a7f37' : '#e8710a')}">${achv == null ? dash : achv + '%'}</td><td style="white-space:nowrap;color:#7b52c4">${has && taxPct > 0 ? money(afterTax(op)) : dash}</td><td style="white-space:nowrap">${has ? fmtJpy(Math.round(r.gross / r.gn)) : dash}</td></tr>`; }).join('')}
-          <tr style="border-top:2px solid #ccc;font-weight:700"><td>合計</td><td>${tot.n}</td><td>${fmtJpy(tot.gmv)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td class="smd-dim">—</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
+          <tr style="border-top:2px solid #ccc;font-weight:700" title="${av('件数とGMVは全' + tot.monthsAll + 'か月ぶん。\nお金の列（入金・仕入・粗利・固定費・経費・実利益）は、入金と仕入がそろって計算できた ' + tot.months + 'か月ぶんだけを足しています。\n（列ごとに母集団が違うと、粗利−固定費−経費 と 実利益 が合いません）')}"><td>合計</td><td>${tot.nAll}</td><td>${fmtJpy(tot.gmvAll)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td class="smd-dim">—</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopeeの預かり金（escrow）を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入額を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
       </div>`);
