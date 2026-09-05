@@ -23949,20 +23949,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const pairsHw = {};
     const addPair = (hw, t, j) => { if (!t || !j) return; pairs.push([t, j]);
       (pairsHw[hw] = pairsHw[hw] || []).push([t, j]); };
+    // ★読めなかった機種は控えておく。**読めなかった**のと**本当にJANが無い**のを
+    //   同じ顔にすると、通信が一度こけただけでその機種のJANを消してしまう。
+    const sgFail = new Set();
     const hws = Object.keys(lst.sgHave || {});
     for (let i = 0; i < hws.length; i++) {
       if (onProg) onProg('辞書を作っています ' + (i + 1) + '/' + hws.length);
       try {
         const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hws[i]));
         (((g && g[0] && g[0].v) || {}).rows || []).forEach(r => { if (r && r.j && r.t) addPair(hws[i], r.t, r.j); });
-      } catch (_) {}
+      } catch (_) { sgFail.add(hws[i]); }
     }
     // ★楽天のJAN索引は別の場所で【非同期に】読まれるので、押すのが早いと空のままになる。
     //   そのまま進むと楽天ぶんが丸ごと抜けたまま「入れました」と出る（Codexの指摘・2026-09-04）。
     try { await loadJanIndex(); } catch (e) { throw new Error('母数のJAN索引を読めませんでした：' + ((e && e.message) || e)); }
     const jhws = Object.keys(lst._janIdx || {});
     for (const hw of jhws) {
-      try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) addPair(hw, r.t, r.jan); }); } catch (_) {}
+      try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) addPair(hw, r.t, r.jan); }); } catch (_) { sgFail.add(hw); }
     }
     const mkDic = (list) => {
       const m = new Map(), bd = new Set();
@@ -24049,11 +24052,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const mixed = hset.size > 1;
         for (const m of ms) {
           if (!m || m.ghost || !m.n) continue;
+          const k0 = pidKeyModel(r, m); const v0 = productIds[k0] || {};
+          const wasEn0 = SRC_EN.test(String(v0.src || ''));
+          // 🧹 この経路で入れたのに【いまのやり方では当てられない】ものは外す。
+          //   物差しを変えたとき、前の物差しで入った分が“検算の届かない所”に残ると、
+          //   間違ったJANがずっと生き残る（実測：GBAのファイナルファイトにSFCのJANが残っていた）。
+          const clearEn = () => { productIds[k0] = Object.assign({}, v0, { jan: '', jp: undefined, src: '' }); undo++; };
           let hw = ''; try { hw = String(hwOf(m.n) || '').toLowerCase(); } catch (_) {}
           // ★機種が混ざるカタログで、明細名からも分からないなら【当てない】。
           //   親の機種を当てはめると、DSと3DSで同じ題名のものに片方のJANが入る。
           if (!hw) hw = mixed ? '' : phw;
-          if (!hw) continue;
+          if (!hw) { if (wasEn0) clearEn(); continue; }
           let d = dicOf[hw];
           if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
           // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
@@ -24064,12 +24073,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
           //   ★ここで取り直さない。①で全機種ぶん読んでいるので、二度目は丸ごと無駄になる。
           const jidx = dicHw[hw] || dicHw[JAN_MST_ALIAS[hw] || ''] || null;
-          if (!jidx || !jidx.size) continue;
-          const k = pidKeyModel(r, m); const v = productIds[k] || {};
+          if (!jidx || !jidx.size) {
+            // ★この機種のJANを【ちゃんと読んだうえで】1件も無いなら、
+            //   この経路のJANが入っているのはおかしい＝外す。読めていない機種は触らない。
+            if (wasEn0 && !sgFail.has(hw) && !sgFail.has(JAN_MST_ALIAS[hw] || hw)) clearEn();
+            continue;
+          }
+          const k = k0, v = v0;
           // ★ここで入れた分は【毎回そのまま検算する】。物差しを厳しくしたときに、
           //   前に入れた間違いが残り続けないようにするため（時刻で狙い撃ちにする後始末を
           //   毎回書き足さなくて済む）。
-          const wasEn = SRC_EN.test(String(v.src || ''));
+          const wasEn = wasEn0;
           if (!wasEn) {
             if (String(v.jan || '').trim()) continue;   // ★8桁のJANもある。埋まっていたら触らない
             if (String(v.jp || '').trim()) continue;      // ②で見た分
