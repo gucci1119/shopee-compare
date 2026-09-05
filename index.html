@@ -23994,12 +23994,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           if (String(v.jan || '').trim().length === 13) continue;
           if (String(v.jp || '').trim()) continue;      // ②で見た分
           noJp++;
-          const ja = d.lookup(m.n); if (!ja) continue;
+          const ja = d.lookup(m.n, 0.9); if (!ja) continue;   // ★JANを入れるので厳しく当てる
           gotJa++;
           // ★日本語名は【JANが引けなくても残す】。次にAIで探すとき、日本語で投げられる分だけ安くなる。
           const j2 = dic.get(tmKey(ja));
           productIds[k] = Object.assign({}, v, { jp: ja },
-            j2 ? { jan: j2, at: Date.now(), src: '母数(駿河屋・楽天)から自動', noJan: undefined, noJanAt: undefined, reJan: undefined } : {});
+            j2 ? { jan: j2, at: Date.now(), src: '母数(駿河屋・楽天)から自動／英名で照合', noJan: undefined, noJanAt: undefined, reJan: undefined } : {});
           if (j2) { hit2++; hit++; }
         }
       }
@@ -30062,14 +30062,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const ws = k.split(' ').filter(w => w.length >= 2); toks.push(ws);
       ws.forEach(w => { let a = tok.get(w); if (!a) { a = []; tok.set(w, a); } if (a[a.length - 1] !== i) a.push(i); });
       if (!exact.has(k)) exact.set(k, i); });
-    const o = { n: keys.length, lookup: (name) => {
+    // ★min＝どれくらい似ていれば当てるか。**JANを入れる用途では 0.9 を渡すこと**。
+    //   0.5 のままJANを入れると、Yoshi's Woolly World →「ヨッシークラフトワールド」、
+    //   Inazuma Eleven GO Shine →「イナズマイレブンGO ストライカーズ 2013」のように
+    //   **別作品のJAN**が入る（2026-09-05に15件中2件で実際に発生）。
+    //   JANは重複判定でいちばん強い鍵なので、間違ったJANは別商品を同じ物として繋いでしまう。
+    const o = { n: keys.length, lookup: (name, min) => {
+      const lim = (typeof min === 'number') ? min : 0.5;
       const mk = tmKey(name); if (!mk) return '';
       if (exact.has(mk)) return jas[exact.get(mk)];
+      if (lim > 0.99) return '';                      // 完全一致だけ
       const b = mk.split(' ').filter(w => w.length >= 2); if (b.length < 2) return '';
       const cnt = new Map(); b.forEach(w => { const a = tok.get(w); if (a) a.forEach(i => cnt.set(i, (cnt.get(i) || 0) + 1)); });
       let best = null, bs = 0;
       for (const [i, h] of cnt) { if (h < 2) continue; const a2 = toks[i];
-        const sc = h / (a2.length + b.length - h); if (sc < 0.5) continue;
+        const sc = h / (a2.length + b.length - h); if (sc < lim) continue;
         if (simSeqNums(keys[i]) !== simSeqNums(mk)) continue;   // 続編ちがいを弾く
         if (sc > bs) { bs = sc; best = i; } }
       return best == null ? '' : jas[best]; } };
