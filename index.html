@@ -16000,6 +16000,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-05', items: [
+      '🌏 <b>「この国にまだ無い商品」で、JANがどれだけ効いているかを画面に出しました</b>。実地で数えたところ、<b>JANのおかげで除けたのは PH 0件／BR 22件／TH 24件／MY 0件</b>でした。JANで除けるのは<b>両側にJANがあり、かつ名前が違う</b>時だけで、名前が同じものは先に名前で除かれるため出番が残りません（PHは787種類のJANを持っていて0件）。<br>明細のJANは<b>3,267 / 18,728明細＝17.4%</b>。<b>両側に要るので、率が上がるほど効き目は掛け算で伸びます</b>。いまは「JANを入れれば二重出品が防げる」とはまだ言えないので、その数字を画面に出しっぱなしにしました。',
       '🛡 <b>【重要】JAN埋めが台帳を丸ごと消しうる作りでした</b>（別のAIのレビューで発覚）。保存は<b>台帳まるごとの上書き</b>なので、読み込みが一度でも失敗した状態で1件でも書き込むと、<b>手で入れたJAN・型番・状態が全部消えます</b>。読めなかったら何もせず止めるようにしました。<br>同じ理由で、作品マスタが読めなかっただけで<b>その機種のJANを全部外してしまう</b>穴も塞ぎました（読めないのと「無い」のは違います）。',
       '🎮 <b>JANを機種をまたいで引かないようにしました</b>。突合キーは機種名を落とすので、全機種をまぜた辞書から引くと<b>別の機種のパッケージのJAN</b>が入りえます。機種ごとの辞書に分けました（実測で50件ほどが外れました）。あわせて<b>8桁のJAN</b>が入っている明細を上書きしないようにし、件数の出し方も<b>新しく入った分と入れ直した分</b>に分けました（入れ直しを足すと「入れました」が実際より多く出ます）。',
       '⚡ <b>JAN埋めが「終わらない」状態だったのを直しました</b>。画面が固まらないよう200件ごとに手を離すようにしたのですが、<b>裏タブでは setTimeout が1秒に1回まで絞られる</b>ため、手を離すたびに1秒待つことになり何分たっても終わりませんでした。絞られない方法（MessageChannel）に変えて<b>35秒で終わる</b>ようになりました。<br>ボタンに<b>描き直すたびイベントを足していた</b>のも直しました（1回押すと何本も走り、後から走った方が先に「終わった」表示に戻すため、動いているのに終わったように見えていました）。',
@@ -27922,6 +27923,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const j = janOfModel(r, m); if (j) haveJan.add(j);
     }));
     const cand = new Map();
+    const cutJan = new Set();   // 名前では当たらず、JANのおかげで除けたもの＝JANの効き目
     Object.keys(lst.byCc || {}).forEach(c2 => {
       if (c2 === cc) return;
       (lst.byCc[c2] || []).forEach(r => {
@@ -27933,7 +27935,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (nm.length < 3 || /^[a-z0-9._]{6,}$/.test(nm)) return;   // 買い手名などが明細に入っている物を除く
           const k = tmKey(nm); if (!k || have.has(k)) return;
           const jn = janOfModel(r, m);
-          if (jn && haveJan.has(jn)) return;              // JANが一致＝もうこの国に出している
+          if (jn && haveJan.has(jn)) { cutJan.add(k); return; }   // JANが一致＝もうこの国に出している
           let v = cand.get(k);
           if (!v) { v = { n: nm, cat: String(r.name || ''), ccs: new Set(), sale: 0, img: '' }; cand.set(k, v); }
           v.ccs.add(c2); if (sale > v.sale) v.sale = sale;
@@ -27954,7 +27956,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const hwOfText = (t) => { try { return hwOf(t) || ''; } catch (_) { return ''; } };
     const groups = [...g.values()].map(c => Object.assign(c, { hw: hwOfText(c.cat + ' ' + c.ms.map(x => x.n).join(' ')) }))
       .sort((a, b) => (b.sale - a.sale) || (b.ms.length - a.ms.length));
-    return { cc: cc, groups: groups, total: cand.size };
+    return { cc: cc, groups: groups, total: cand.size, cutJan: cutJan.size, myJan: haveJan.size };
   }
   function renderNewAcct() {
     const box = document.getElementById('list-newacct'); if (!box) return;
@@ -28013,6 +28015,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="pagehelp" style="margin:0 0 10px">この画面：<b>その国にまだ1つも出していない明細</b>を、他の国の出品から探して並べます。
         <br>※<b>出品枠を食うのはカタログ（親）だけ</b>で、明細をいくつ足しても枠は減りません（1カタログ100明細）。だから<b>カタログ案の単位</b>で並べています。
         <br>※同じ国にすでにある明細は<b>名前の完全一致で除いて</b>います。表記が違う同じ物は残ることがあります。
+        <br>※JANが両側にあるものは<b>名前が違ってもJANで除いて</b>います。いまこの国では<b>JAN ${(d.myJan || 0).toLocaleString()}種類</b>を持っていて、<b>JANのおかげで除けたのは ${(d.cutJan || 0).toLocaleString()}件</b>です${(d.cutJan || 0) < 30 ? '（<b>まだほとんど効いていません</b>。JANで除けるのは「両側にJANがあり、かつ名前が違う」時だけなので、明細のJANが増えるまでは名前の突合が主役です）' : ''}。
         <br>※並びは<b>販売数の多い順</b>（他の国で売れている＝その国でも見込みがある）。${Object.keys(lst._naStat || {}).length ? '' : '<br><b style="color:#d93025">※販売数がまだ取れていないので、いまは明細数の多い順です。</b>'}</div>
       <div class="tool-card" style="margin:0;max-width:none">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
