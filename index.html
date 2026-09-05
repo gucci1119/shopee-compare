@@ -24065,25 +24065,46 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           //   物差しを変えたとき、前の物差しで入った分が“検算の届かない所”に残ると、
           //   間違ったJANがずっと生き残る（実測：GBAのファイナルファイトにSFCのJANが残っていた）。
           const clearEn = () => { productIds[k0] = Object.assign({}, v0, { jan: '', jp: undefined, src: '' }); undo++; };
-          let hw = ''; try { hw = String(hwOf(m.n) || '').toLowerCase(); } catch (_) {}
-          // ★機種が混ざるカタログで、明細名からも分からないなら【当てない】。
-          //   親の機種を当てはめると、DSと3DSで同じ題名のものに片方のJANが入る。
-          if (!hw) hw = mixed ? '' : phw;
-          if (!hw) { if (wasEn0) clearEn(); continue; }
-          let d = dicOf[hw];
-          if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
-          // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
-          //   空のまま検算すると「当たらない」＝全部外す になり、通信が一度こけただけで
-          //   その機種のJANが消える（Codex指摘）。中身が無い辞書では触らない。
-          if (!d || !d.n) continue;
-          // 🏪 JANはこの機種の辞書から引く（①で作ったもの）。全機種をまぜた辞書から引くと、
-          //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
-          //   ★ここで取り直さない。①で全機種ぶん読んでいるので、二度目は丸ごと無駄になる。
-          const jidx = dicHw[hw] || dicHw[JAN_MST_ALIAS[hw] || ''] || null;
-          if (!jidx || !jidx.size) {
-            // ★この機種のJANを【ちゃんと読んだうえで】1件も無いなら、
-            //   この経路のJANが入っているのはおかしい＝外す。読めていない機種は触らない。
-            if (wasEn0 && !sgFail.has(hw) && !sgFail.has(JAN_MST_ALIAS[hw] || hw)) clearEn();
+          // 🎯 試す機種を決める。
+          //   ①明細名の頭に機種がある → それだけ
+          //   ②カタログの機種が1つ → それ
+          //   ③混ざっている → **カタログ名に出てくる機種を全部試す**。
+          //     実測：機種が分からない明細が18,728中5,739件あり、いちばん大きなつまずきだった。
+          //     ★ただし【1つの機種でしか当たらない時だけ】採る。2つ以上の機種で違うJANに
+          //       当たったら“どっちか分からない”ので入れない（当てずっぽうにしない）。
+          let ownHw = ''; try { ownHw = String(hwOf(m.n) || '').toLowerCase(); } catch (_) {}
+          let cands = [];
+          if (ownHw) cands = [ownHw];
+          else if (!mixed && phw) cands = [phw];
+          else { try { cands = (janHwAll(r) || []).map(x => String(x).toLowerCase()); } catch (_) { cands = []; }
+            if (!cands.length && phw) cands = [phw]; }
+          if (!cands.length) { if (wasEn0) clearEn(); continue; }
+          // 候補ごとに「日本語名」と「JAN」を引く
+          let ready = 0, jaHit = '', janHit = '', hw = '';
+          const janSet = new Set(), jaSet = new Set();
+          for (const c of cands) {
+            let dd = dicOf[c];
+            if (dd === undefined) { try { dd = await janEnJa(c); } catch (_) { dd = null; } dicOf[c] = dd || null; }
+            // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
+            //   中身が無い辞書では「当たらなかった」と判断しない。
+            if (!dd || !dd.n) continue;
+            const jj = dicHw[c] || dicHw[JAN_MST_ALIAS[c] || ''] || null;
+            const dataOk = !!(jj && jj.size) && !sgFail.has(c) && !sgFail.has(JAN_MST_ALIAS[c] || c);
+            if (dataOk) ready++;
+            const a = dd.lookup(m.n, 1); if (!a) continue;
+            jaSet.add(a); if (!jaHit) { jaHit = a; }
+            if (!jj || !jj.size) continue;
+            const jx = jj.get(tmKey(a));
+            if (jx) { janSet.add(jx); if (!janHit) { janHit = jx; jaHit = a; hw = c; } }
+          }
+          // ★2つ以上の機種で違うJANに当たったら【入れない】。どちらの機種か決められない。
+          //   ★日本語名が機種によって違う時も入れない。どの機種の作品か決められないため
+          //     （例：SFCの「ファイナルファイト」とGBAの「ファイナルファイトONE」）。
+          if (janSet.size > 1 || jaSet.size > 1) { if (wasEn0) clearEn(); continue; }
+          if (!ready) continue;                 // 判断できる材料が無い＝触らない
+          if (!janSet.size && !jaSet.size) {
+            // どの機種でも当たらなかった。この経路で入れた分なら外す
+            if (wasEn0) clearEn();
             continue;
           }
           const k = k0, v = v0;
@@ -24100,11 +24121,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           //   0.5＝15件中2件、0.9でも「Super Mario Galaxy + Galaxy 2」→「スーパーマリオギャラクシー2」
           //   のように**別商品（詰め合わせ）**を当てた（2026-09-05 実測）。
           //   JANは重複判定でいちばん強い鍵なので、【入らない方がマシ】。
-          const ja = d.lookup(m.n, 1);
-          if (!ja) { if (wasEn) { productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; } continue; }
+          const ja = jaHit;
+          if (!ja) { if (wasEn) clearEn(); continue; }
           gotJa++;
           // ★日本語名は【JANが引けなくても残す】。次にAIで探すときに日本語で投げられる（janKeywordが読む）。
-          const j2 = jidx.get(tmKey(ja));
+          const j2 = janHit || '';
           // ★【入れ直しは"入れた"に数えない】。2回目からは検算で同じJANを入れ直すので、
           //   そのまま数えると「◯件入れました」が実際の増分より大きく出る（Codex指摘）。
           //   ★「空だったところに入った」だけを"入れた"に数える。
