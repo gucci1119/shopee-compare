@@ -23922,6 +23922,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   他のサイトを見に行かないので【無料・接続枠ゼロ・すぐ終わる】。AI検索(1件約¥4)の前にここで拾う。
   //   ⚠️ 同じ商品名で違うJANが2つ以上あるもの（通常版と廉価版など）は入れない＝当てずっぽうで埋めない。
   //   ※駿河屋のJANが増えるほど辞書が大きくなり、当たる数が増える。
+  // 🏷 英名→日本語で当てて入れた印。**この印が付いたものは毎回入れ直す**（検算のため）。
+  const SRC_EN_LABEL = '母数(駿河屋・楽天)から自動／英名で照合';
+  const SRC_EN = /英名で照合/;
   async function janFillFromBoshuAll(onProg) {
     // ① 母数側のJAN辞書を作る（駿河屋＋楽天／全機種）
     const pairs = [];
@@ -24007,15 +24010,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         for (const m of ms) {
           if (!m || m.ghost || !m.n) continue;
           const k = pidKeyModel(r, m); const v = productIds[k] || {};
-          if (String(v.jan || '').trim().length === 13) continue;
-          if (String(v.jp || '').trim()) continue;      // ②で見た分
-          noJp++;
-          const ja = d.lookup(m.n, 0.9); if (!ja) continue;   // ★JANを入れるので厳しく当てる
+          // ★ここで入れた分は【毎回そのまま検算する】。物差しを厳しくしたときに、
+          //   前に入れた間違いが残り続けないようにするため（時刻で狙い撃ちにする後始末を
+          //   毎回書き足さなくて済む）。
+          const wasEn = SRC_EN.test(String(v.src || ''));
+          if (!wasEn) {
+            if (String(v.jan || '').trim().length === 13) continue;
+            if (String(v.jp || '').trim()) continue;      // ②で見た分
+            noJp++;
+          }
+          // ★【完全一致だけ】。語の重なりで当てると別作品のJANが入る。
+          //   0.5＝15件中2件、0.9でも「Super Mario Galaxy + Galaxy 2」→「スーパーマリオギャラクシー2」
+          //   のように**別商品（詰め合わせ）**を当てた（2026-09-05 実測）。
+          //   JANは重複判定でいちばん強い鍵なので、【入らない方がマシ】。
+          const ja = d.lookup(m.n, 1);
+          if (!ja) { if (wasEn) { productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; } continue; }
           gotJa++;
           // ★日本語名は【JANが引けなくても残す】。次にAIで探すとき、日本語で投げられる分だけ安くなる。
           const j2 = dic.get(tmKey(ja));
           productIds[k] = Object.assign({}, v, { jp: ja },
-            j2 ? { jan: j2, at: Date.now(), src: '母数(駿河屋・楽天)から自動／英名で照合', noJan: undefined, noJanAt: undefined, reJan: undefined } : {});
+            j2 ? { jan: j2, at: Date.now(), src: SRC_EN_LABEL, noJan: undefined, noJanAt: undefined, reJan: undefined } : { src: SRC_EN_LABEL });
           if (j2) { hit2++; hit++; }
         }
       }
