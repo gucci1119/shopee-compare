@@ -23710,6 +23710,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 駿河屋のハード別カテゴリ（版違い＝廉価版/Best版も別商品として持っている。総数の目安）
   // 駿河屋のハード別カテゴリ。★版違い（廉価版・Best版）を別商品として持っているのが強み。
   //   1ページ21件・画像と価格つきで並ぶので、1件ずつ検索するより20倍速い。
+  // 🚦 駿河屋に断られたかどうかの見分け方。**HTTP 200 のまま中身で返ってくる**ので本文を見る。
+  //   一覧クロールとJAN取得で【同じ物差し】を使う（別々に持つと片方だけ抜ける・2026-09-06）。
+  const sgBlocked = (html) => {
+    const h = String(html || '');
+    return h.length < 3000 || /アクセスが集中|しばらく時間をおいて|ご利用いただけません|Too Many Requests|Access Denied/i.test(h);
+  };
   const SURUGA_CAT = {
     // ★ニンテンドースイッチ2は 20041（2026-09-05 実測。商品ページのパンくずから特定）。
     //   検索一覧の左メニューには出てこないので、カテゴリ一覧を眺めても見つからない。
@@ -24480,7 +24486,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       }
       // 🚦 遮断のサインを見つけたら、止めずに【長く休んでから】続ける。
       //    ページが返っていても中身が空・エラー文言のことがある（HTTP 200で遮断されるため気づきにくい）。
-      if (html.length < 3000 || /アクセスが集中|しばらく時間をおいて|ご利用いただけません|Too Many Requests|Access Denied/i.test(html)) {
+      if (sgBlocked(html)) {
         blocked++;
         if (blocked >= 3) throw new Error('駿河屋に断られているようです（' + blocked + '回）。時間を置いてください');
         try { const el = document.getElementById('tm-sgjan'); if (el) el.textContent = '📇 断られたので10分休みます（' + blocked + '回目）'; } catch (_) {}
@@ -24577,6 +24583,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (done) throw new Error('保存できませんでした: ' + ((e && e.message) || e));   // 途中経過の失敗は次の機会に回す
       }
     };
+    let _emptyStop = false;   // 商品が拾えないページが続いて止まった＝【完走ではない】
     while (page <= 400) {
       // ★restrict=0 を付けると 404 になる（実測）。素の category と page だけにする
       const url = 'https://www.suruga-ya.jp/search?category=' + cat + '&page=' + page;
@@ -24591,6 +24598,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         throw new Error('駿河屋を取得できません: ' + _m);
       }
       if (!/suruga-ya/i.test(html)) throw new Error('駿河屋のページが返ってきません（少し時間を置いてください）');
+      // 🚦 遮断は【HTTP 200 のまま中身で返ってくる】。JAN側と同じ見分け方をここでも使う。
+      //   これが無かったため、遮断されると「商品0件のページ」が2回続いて
+      //   **完走したことにして保存**していた（母数が黙って途中で切られる・2026-09-06に発覚）。
+      if (sgBlocked(html)) throw new Error('駿河屋に断られているようです。時間を置いてください');
       // 1商品 = 「detail/ID」のリンク → 少し後ろに <h3 class="product-name">商品名</h3>、さらに後ろに 中古：￥価格
       //   （画像だけのリンクが先に来るので、商品名は h3 から拾う）
       const before = rows.length;
@@ -24614,13 +24625,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (_kj) { if (_kj.j) _row.j = _kj.j; if (_kj.jx) _row.jx = _kj.jx; if (_kj.mpn) _row.mpn = _kj.mpn; }
         rows.push(_row);
       }
-      if (rows.length === before) { empty++; if (empty >= 2) break; } else empty = 0;
+      // ★商品が拾えないページが続いた時は【未完のまま】止める。完走の印は 404（＝終端）だけ。
+      if (rows.length === before) { empty++; if (empty >= 2) { _emptyStop = true; break; } } else empty = 0;
       if (onProg) onProg(page, rows.length);
       page++;
       if (++_since >= SG_SAVE_EVERY) { _since = 0; await save(page, false); }   // 途中経過（次はここから）
       await new Promise(r => setTimeout(r, 2200));         // ★叩きすぎない。0.9秒で500ページ叩いたら弾かれた（2026-09-03）
     }
-    await save(page, true);                                 // 最後まで終わった印
+    // ★完走の印は「404で終端に当たった」時だけ。商品が拾えなくなって止まった時に完走扱いにすると、
+    //   遮断されて途中で切られた母数が「取り切った」ことになり、次回も1ページ目から取り直しになる。
+    await save(page, !_emptyStop);
     return rows;
   }
 
@@ -25137,7 +25151,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               }
             } catch (e) {
               const msg = String((e && e.message) || e);
-              if (/続けて取れなくなりました/.test(msg)) throw e;      // 弾かれている＝全体を止める
+              // ⚠️【最重要】遮断されたら【全体を止める】。
+              //   ここが「続けて取れなくなりました」しか見ていなかったため、
+              //   **「駿河屋に断られているようです」だけ素通りして次の機種を叩き続けて**いた。
+              //   全機種まわし（16時間コース）だと、遮断されたまま半日叩き続けることになる。
+              //   しかも最後に「◯件 拾いました」と成功の顔で終わる（2026-09-06に発覚）。
+              if (/続けて取れなくなりました|断られているようです/.test(msg)) throw e;
               console.warn('[駿河屋JAN] ' + hw + ' は飛ばします:', msg);
               _ngHw.push((TITLE_HW_JA[hw] || hw) + '（' + msg.slice(0, 40) + '）');
               continue;                                              // それ以外は次の機種へ
