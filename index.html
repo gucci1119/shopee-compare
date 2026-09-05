@@ -24022,7 +24022,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (sc && sc !== '母数(駿河屋・楽天)から自動') return;   // 別の経路で入れた分は触らない
         if (!String(v.jp || '').trim()) return;                  // この回の目印＝日本語名が入っている
         productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; }); }
-    let noJp = 0, gotJa = 0, hit2 = 0, again = 0;
+    let noJp = 0, gotJa = 0, hit2 = 0, again = 0, fixed = 0;
     try {
       const dicOf = {};
       const rowsAll = [];
@@ -24037,22 +24037,34 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const r = rowsAll[i];
         const ms = (r && r.models) || []; if (!ms.length) continue;
         // 機種の取り方は1つに決めない（識別項目→カタログ名の順）。名前だけで見ると取りこぼす。
-        let hw = ''; try { hw = String(janHwOf(r) || '').toLowerCase(); } catch (_) {}
-        if (!hw) { try { hw = String(hwOf((r && r.name) || '') || '').toLowerCase(); } catch (_) {} }
-        if (!hw) continue;
-        let d = dicOf[hw];
-        if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
-        // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
-        //   空のまま検算すると「当たらない」＝全部外す になり、通信が一度こけただけで
-        //   その機種のJANが消える（Codex指摘）。中身が無い辞書では触らない。
-        if (!d || !d.n) continue;
-        // 🏪 JANはこの機種の辞書から引く（①で作ったもの）。全機種をまぜた辞書から引くと、
-        //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
-        //   ★ここで取り直さない。①で全機種ぶん読んでいるので、二度目は丸ごと無駄になる。
-        const jidx = dicHw[hw] || dicHw[JAN_MST_ALIAS[hw] || ''] || null;
-        if (!jidx || !jidx.size) continue;
+        let phw = ''; try { phw = String(janHwOf(r) || '').toLowerCase(); } catch (_) {}
+        if (!phw) { try { phw = String(hwOf((r && r.name) || '') || '').toLowerCase(); } catch (_) {} }
+        // 🎮 機種は【明細ごと】に決める。明細名の頭に「Switch:」「PS4:」が付いている
+        //   （実測 18,728明細のうち4,803件）。**カタログには機種が混ざる**ので、
+        //   親から1つ決めて全明細に使うと別の機種のJANが入る（実測 1,412カタログ中457＝32%が混在）。
+        const hset = new Set();
+        ms.forEach(m2 => { if (!m2 || m2.ghost || !m2.n) return;
+          let h2 = ''; try { h2 = String(hwOf(m2.n) || '').toLowerCase(); } catch (_) {}
+          if (h2) hset.add(h2); });
+        const mixed = hset.size > 1;
         for (const m of ms) {
           if (!m || m.ghost || !m.n) continue;
+          let hw = ''; try { hw = String(hwOf(m.n) || '').toLowerCase(); } catch (_) {}
+          // ★機種が混ざるカタログで、明細名からも分からないなら【当てない】。
+          //   親の機種を当てはめると、DSと3DSで同じ題名のものに片方のJANが入る。
+          if (!hw) hw = mixed ? '' : phw;
+          if (!hw) continue;
+          let d = dicOf[hw];
+          if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
+          // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
+          //   空のまま検算すると「当たらない」＝全部外す になり、通信が一度こけただけで
+          //   その機種のJANが消える（Codex指摘）。中身が無い辞書では触らない。
+          if (!d || !d.n) continue;
+          // 🏪 JANはこの機種の辞書から引く（①で作ったもの）。全機種をまぜた辞書から引くと、
+          //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
+          //   ★ここで取り直さない。①で全機種ぶん読んでいるので、二度目は丸ごと無駄になる。
+          const jidx = dicHw[hw] || dicHw[JAN_MST_ALIAS[hw] || ''] || null;
+          if (!jidx || !jidx.size) continue;
           const k = pidKeyModel(r, m); const v = productIds[k] || {};
           // ★ここで入れた分は【毎回そのまま検算する】。物差しを厳しくしたときに、
           //   前に入れた間違いが残り続けないようにするため（時刻で狙い撃ちにする後始末を
@@ -24074,16 +24086,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const j2 = jidx.get(tmKey(ja));
           // ★【入れ直しは"入れた"に数えない】。2回目からは検算で同じJANを入れ直すので、
           //   そのまま数えると「◯件入れました」が実際の増分より大きく出る（Codex指摘）。
-          const same = (String(v.jan || '').trim() === String(j2 || '')) && (String(v.jp || '') === ja);
+          //   ★「空だったところに入った」だけを"入れた"に数える。
+          //     前に入っていたものを別のJANに直したのは【直した】として分けて出す（Codex指摘）。
+          const had = String(v.jan || '').trim();
+          const same = (had === String(j2 || '')) && (String(v.jp || '') === ja);
           productIds[k] = Object.assign({}, v, { jp: ja },
             j2 ? { jan: j2, at: v.at || Date.now(), src: SRC_EN_LABEL, noJan: undefined, noJanAt: undefined, reJan: undefined } : { src: SRC_EN_LABEL });
-          if (j2 && !same) { hit2++; hit++; }
+          if (j2 && !had) { hit2++; hit++; }
+          else if (j2 && !same) fixed++;
           else if (j2) again++;
         }
       }
     } catch (e) { console.warn('[SMD] 英名→日本語の穴埋めで止まりました', e); }
     if (hit || gotJa || undo) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
-    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2, undo: undo, again: again };
+    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2, undo: undo, again: again, fixed: fixed };
   }
   // 🌏 国で絞ったJANの一覧。国別で見ているときに、他の国のJANで「出している」と
   //   誤判定しないため（PHにしか無い物がBRの画面で消えてしまう）。
@@ -24790,7 +24806,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             + '　空いていたもの　　　　　　　　　　　 ' + (r.noJp || 0).toLocaleString() + '件\n'
             + '　日本語名が分かったもの　　　　　　　 ' + (r.gotJa || 0).toLocaleString() + '件\n'
             + '　うちJANまで入ったもの　　　　　　　 ' + (r.hit2 || 0).toLocaleString() + '件\n'
-            + '　（前に入れた分の入れ直し　　　　　　 ' + (r.again || 0).toLocaleString() + '件）\n\n'
+            + '　（前に入れた分の入れ直し　　　　　　 ' + (r.again || 0).toLocaleString() + '件）\n'
+            + '　（機種ちがい等を直したもの　　　　　 ' + (r.fixed || 0).toLocaleString() + '件）\n\n'
             + '　母数側で名前からJANを引けたもの　　　 ' + r.dic.toLocaleString() + '件\n'
             + '　同じ名前で違うJANがあり見送ったもの　 ' + r.drop.toLocaleString() + '件\n\n'
             + (r.undo ? ('　※緩い一致で入っていた ' + r.undo.toLocaleString() + '件のJANは外しました（別作品が混ざるため）\n\n') : '')
@@ -27908,6 +27925,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   二重に出品することになる。JANは世界で一意なので、名前が違っても確実に同じ物と分かる。
     const have = new Set();
     const haveJan = new Set();
+    // ★画面に出す「JANの種類」は【状態こみの組】でなく素のJANで数える。
+    //   同じJANが「完品」と「ソフトのみ」で2つあると、種類が倍に見える（Codex指摘）。
+    const haveJanOnly = new Set();
     // ★JANだけで除くと【状態違い】まで消える。完品とソフトのみは別の商品として出すので、
     //   重複判定と同じく「JAN＋状態」で見る（`pidDupMap` と揃える。Codexの指摘・2026-09-05）。
     const janOfModel = (r, m) => {
@@ -27921,7 +27941,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     ((lst.byCc || {})[cc] || []).forEach(r => (r.models || []).forEach(m => {
       if (!m || m.ghost || !m.n) return;
       const k = tmKey(m.n); if (k) have.add(k);
-      const j = janOfModel(r, m); if (j) haveJan.add(j);
+      const j = janOfModel(r, m); if (j) { haveJan.add(j); haveJanOnly.add(j.split('|')[0]); }
     }));
     const cand = new Map();
     const cutJan = new Set();   // 名前では当たらず、JANのおかげで除けたもの＝JANの効き目
@@ -27957,7 +27977,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const hwOfText = (t) => { try { return hwOf(t) || ''; } catch (_) { return ''; } };
     const groups = [...g.values()].map(c => Object.assign(c, { hw: hwOfText(c.cat + ' ' + c.ms.map(x => x.n).join(' ')) }))
       .sort((a, b) => (b.sale - a.sale) || (b.ms.length - a.ms.length));
-    return { cc: cc, groups: groups, total: cand.size, cutJan: cutJan.size, myJan: haveJan.size };
+    return { cc: cc, groups: groups, total: cand.size, cutJan: cutJan.size, myJan: haveJanOnly.size };
   }
   function renderNewAcct() {
     const box = document.getElementById('list-newacct'); if (!box) return;
@@ -34692,16 +34712,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ここでは「機種の頭（PS4:）を後ろに回す」「記号を整える」だけにして、語は落とさない。
   function janKeyword(row, m) {
     { const ja = sourcingKeywordFromDict(m && m.n); if (ja) return { kw: ja, machine: '' }; }   // 実際に仕入れた日本語名があれば最優先
-    // 📚 母数の作品マスタから当てた日本語名(jp)も使う。**英語のまま投げると、まず日本語名を
-    //    当てるところで検索を1回使う**ので、こちらが日本語を渡せればその1回が要らない＝安くなる。
-    //    （これを読んでいなかったので「安くなります」が口だけになっていた・Codex指摘 2026-09-05）
-    try { const pv = (productIds || {})[pidKeyModel(row, m)] || {};
-      const jp = String(pv.jp || '').trim(); if (jp) return { kw: jp, machine: '' }; } catch (_) {}
     let v = String((m && m.n) || '').trim();
     if (!v) return null;
     let machine = '';
     const mm = v.match(/^\s*([A-Za-z0-9]{1,8})\s*[:：]\s*(.+)$/);
     if (mm && MACHINE_TOK.test(mm[1])) { machine = mm[1]; v = mm[2]; }
+    // 📚 母数の作品マスタから当てた日本語名(jp)も使う。**英語のまま投げると、まず日本語名を
+    //    当てるところで検索を1回使う**ので、こちらが日本語を渡せればその1回が要らない＝安くなる。
+    //    （これを読んでいなかったので「安くなります」が口だけになっていた・Codex指摘 2026-09-05）
+    //    ⚠️ 機種は【必ず一緒に渡す】。日本語名は機種名を落とした形なので、機種を空で渡すと
+    //       ヤマダ側の機種チェックが効かず、**別の機種のJAN**を掴む（Codex指摘）。
+    try { const pv = (productIds || {})[pidKeyModel(row, m)] || {};
+      const jp = String(pv.jp || '').trim();
+      if (jp) return { kw: machine ? (jp + ' ' + machine) : jp, machine: machine }; } catch (_) {}
     v = v.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')
       .replace(/([A-Za-z])([Ⅰ-Ⅹ])/g, '$1 $2')                                   // PartⅡ → Part Ⅱ（詰まっていると検索が0件になる）
       .replace(/[Ⅰ-Ⅹ]/g, c => ['I','II','III','IV','V','VI','VII','VIII','IX','X'][c.charCodeAt(0) - 0x2160])
