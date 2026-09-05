@@ -24435,6 +24435,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return _dupSold = m;
   }
   const dupSoldMap = () => _dupSold || new Map();
+  // 🔑 この画面を見分けるためのID（2026-09-05）。JANの取り込みは1つの画面でしか
+  //   走らせない＝「いま誰が持っているか」を印に書く。IDが無いと、唯一の画面を
+  //   開き直したときに【自分の直前の心拍を他人と勘違い】して再開できなくなる（Codexの指摘）。
+  const JAN_OWNER = Math.random().toString(36).slice(2) + Date.now().toString(36);
   function tmDupList(hw) {
     const per = {};
     const soldMap = dupSoldMap();
@@ -24694,9 +24698,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   走っている間は数十秒おきに印の時刻を更新しているので、**2分以内に更新されていれば
         //   誰かが走っている**とみなす。ここを見ないと、ポータルを2枚開いただけで
         //   駿河屋を2倍叩くことになり、アクセス制限を招く（実際にやりかけた）。
-        if (Date.now() - st.at < 120000) {
+        if (st.own !== JAN_OWNER && Date.now() - st.at < 120000) {
           const el0 = document.getElementById('tm-sgjan');
           if (el0) el0.textContent = '📇 別の画面で取り込み中です';
+          // ★【重要】ここで終わりにすると、唯一の画面を開き直した時に
+          //   自分の直前の心拍を見て「他が走っている」と誤解し、二度と再開しない。
+          //   期限が切れる頃にもう一度見る（Codexの指摘・2026-09-05）。
+          if (!lst._janRecheck) {
+            lst._janRecheck = setTimeout(() => {
+              lst._janRecheck = null; lst._janResumed = false;
+              try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
+            }, 125000);
+          }
           return;
         }
         if (state.mode !== 'live') return;                 // ブリッジが無い時はそのまま置いておく
@@ -24725,10 +24738,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const st0 = JSON.parse(localStorage.getItem('smdJanFill') || 'null');
           // ⚠️ hw を条件にしない。始まった直後の印には hw がまだ無く、そこを通り抜けて
           //    二重に走り出せてしまう（Codexの指摘・2026-09-05）。
-          if (st0 && st0.at && Date.now() - st0.at < 120000) {
-            alert('📇 別の画面で取り込みが動いています' + (st0.hw ? '（' + (TITLE_HW_JA[st0.hw] || st0.hw) + ' ' + (st0.d || 0) + '/' + (st0.t || 0) + '件）' : '') + '。\n\n'
-              + '同時に走らせると駿河屋を2倍の回数で叩くことになり、アクセス制限を受けます。\n'
-              + 'そちらが終わってから押してください（止めたい時は、動いている方の画面で同じボタンを押します）。');
+          if (st0 && st0.at && st0.own !== JAN_OWNER && Date.now() - st0.at < 120000) {
+            const _hw = st0.hw ? ((TITLE_HW_JA[st0.hw] || st0.hw) + ' ' + (st0.d || 0) + '/' + (st0.t || 0)) : '';
+            const _en = (() => { try { return i18nOn(); } catch (_) { return false; } })();
+            alert(_en
+              ? ('Another window is already running the import' + (_hw ? ' (' + _hw + ')' : '') + '.\n\n'
+                + 'Running two at once doubles the requests to Suruga-ya and gets us rate-limited.\n'
+                + 'Please wait until it finishes (to stop it, press the same button in the window that is running).')
+              : ('別の画面で取り込みが動いています' + (_hw ? '（' + _hw + '件）' : '') + '。\n\n'
+                + '同時に走らせると駿河屋を2倍の回数で叩くことになり、アクセス制限を受けます。\n'
+                + 'そちらが終わってから押してください（止めたい時は、動いている方の画面で同じボタンを押します）。'));
             return;
           }
         } catch (_) {}
@@ -24771,7 +24790,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           + '200件ごとに保存するので、途中で止めてもそこまでは残ります。\n'
           + '止めたいときは同じボタンをもう一度押してください。\n\n'
           + '※駿河屋を続けて叩くのでブラウザは開いたままにしてください。')) return;
+        // ★押したその場で「私が持ちます」と書く。確認ダイアログやDBの読み込みで
+        //   数秒かかるので、その隙に二度押し・自動再開が入ると2本走る（Codexの指摘・2026-09-05）。
         lst._sgRunning = true; lst._sgStop = false;
+        try {
+          const _p0 = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
+          _p0.at = Date.now(); _p0.own = JAN_OWNER;
+          localStorage.setItem('smdJanFill', JSON.stringify(_p0));
+        } catch (_) {}
         // ★「動いています」の合図は【時計で出す】。進んだ時だけ出すと、
         //   10分休憩や待ち時間の間に合図が途切れ、その隙に他の画面が再開してしまう
         //   ＝駿河屋を2倍叩く（Codexの指摘・2026-09-05）。20秒ごとに出し続ける。
@@ -24779,7 +24805,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         lst._janHB = setInterval(() => {
           try {
             const _p = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
-            _p.at = Date.now(); localStorage.setItem('smdJanFill', JSON.stringify(_p));
+            _p.at = Date.now(); _p.own = JAN_OWNER; localStorage.setItem('smdJanFill', JSON.stringify(_p));
           } catch (_) {}
         }, 20000);
         // ★何回目の再挑戦かを【印を書き直す前に】読む。順番を間違えると回数が消え、
@@ -25522,7 +25548,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const rkImg = x.jan && String(x.jan).length === 13
             ? ('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + String(x.jan).slice(-4) + '/' + x.jan + '.jpg?_ex=128x128') : '';
           // 🔢 商品IDが分かっていれば、そこからJANも埋める（写真が出ている行にはJANも出る）
-          if (!x.jan && sid) { const jb = (lst._sgJanById || {})[hw]; if (jb && jb[sid]) x.jan = jb[sid]; }
+          //   ⚠️ ただし【画像検索で拾っただけのID】からは引かない。検索結果の1件目を
+          //      そのまま使っているので、版違いや似た名前だと**別商品のJANを表示してしまう**
+          //      （Codexの指摘・2026-09-05）。名前やJANで確かに結びついたIDだけ使う。
+          if (!x.jan && sid && !((lst.tmImg || {})[x.q] === sid)) {
+            const jb = (lst._sgJanById || {})[hw]; if (jb && jb[sid]) x.jan = jb[sid];
+          }
           // 🖼 候補を【順に試す】。1つ目がダメでも次を試す（2026-09-05）。
           //   ⚠️ 以前は1つ選んで、それが無ければ即「画像なし」だった。駿河屋に写真が無い商品でも
           //      楽天にはあることが多いので、順に試すだけで写真がだいぶ増える。
