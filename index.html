@@ -23953,12 +23953,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     });
     bad.forEach(k => dic.delete(k));   // 同じ名前で違うJAN＝版違い。入れない
     // ② こちらの明細の空いているところへ
+    // ⚠️【最重要】読めなかったときに空っぽで進んではいけない。
+    //   この先で1件でも書き込むと、保存が**台帳まるごとの上書き**なので、
+    //   手で入れたJAN・型番・状態が全部消える。読めなければ何もせず止める（Codex指摘）。
     if (productIds === null) {
-      productIds = {};
-      try {
-        const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : [];
-        productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
-      } catch (_) { productIds = {}; }
+      let pr = null;
+      try { pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : []; }
+      catch (e) { throw new Error('こちらのJAN台帳(product_ids)を読めませんでした。書き換えると消えるので中止します：' + ((e && e.message) || e)); }
+      productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
     }
     let tgt = 0, hit = 0;
     Object.keys(productIds).forEach(k => {
@@ -23998,9 +24000,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (sc && sc !== '母数(駿河屋・楽天)から自動') return;   // 別の経路で入れた分は触らない
         if (!String(v.jp || '').trim()) return;                  // この回の目印＝日本語名が入っている
         productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; }); }
-    let noJp = 0, gotJa = 0, hit2 = 0;
+    let noJp = 0, gotJa = 0, hit2 = 0, again = 0;
     try {
-      const dicOf = {};
+      const dicOf = {}, jidxOf = {};
       const rowsAll = [];
       Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rowsAll.push(r)));
       for (let i = 0; i < rowsAll.length; i++) {
@@ -24018,7 +24020,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!hw) continue;
         let d = dicOf[hw];
         if (d === undefined) { try { d = await janEnJa(hw); } catch (_) { d = null; } dicOf[hw] = d || null; }
-        if (!d) continue;
+        // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
+        //   空のまま検算すると「当たらない」＝全部外す になり、通信が一度こけただけで
+        //   その機種のJANが消える（Codex指摘）。中身が無い辞書では触らない。
+        if (!d || !d.n) continue;
+        // 🏪 JANはこの機種の辞書から引く。全機種をまぜた辞書から引くと、
+        //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
+        let jidx = jidxOf[hw];
+        if (jidx === undefined) { try { jidx = await janMstIdx(hw); } catch (_) { jidx = null; } jidxOf[hw] = jidx || null; }
+        if (!jidx || !jidx.size) continue;
         for (const m of ms) {
           if (!m || m.ghost || !m.n) continue;
           const k = pidKeyModel(r, m); const v = productIds[k] || {};
@@ -24027,7 +24037,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           //   毎回書き足さなくて済む）。
           const wasEn = SRC_EN.test(String(v.src || ''));
           if (!wasEn) {
-            if (String(v.jan || '').trim().length === 13) continue;
+            if (String(v.jan || '').trim()) continue;   // ★8桁のJANもある。埋まっていたら触らない
             if (String(v.jp || '').trim()) continue;      // ②で見た分
             noJp++;
           }
@@ -24038,16 +24048,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const ja = d.lookup(m.n, 1);
           if (!ja) { if (wasEn) { productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; } continue; }
           gotJa++;
-          // ★日本語名は【JANが引けなくても残す】。次にAIで探すとき、日本語で投げられる分だけ安くなる。
-          const j2 = dic.get(tmKey(ja));
+          // ★日本語名は【JANが引けなくても残す】。次にAIで探すときに日本語で投げられる（janKeywordが読む）。
+          const j2 = jidx.get(tmKey(ja));
+          // ★【入れ直しは"入れた"に数えない】。2回目からは検算で同じJANを入れ直すので、
+          //   そのまま数えると「◯件入れました」が実際の増分より大きく出る（Codex指摘）。
+          const same = (String(v.jan || '').trim() === String(j2 || '')) && (String(v.jp || '') === ja);
           productIds[k] = Object.assign({}, v, { jp: ja },
-            j2 ? { jan: j2, at: Date.now(), src: SRC_EN_LABEL, noJan: undefined, noJanAt: undefined, reJan: undefined } : { src: SRC_EN_LABEL });
-          if (j2) { hit2++; hit++; }
+            j2 ? { jan: j2, at: v.at || Date.now(), src: SRC_EN_LABEL, noJan: undefined, noJanAt: undefined, reJan: undefined } : { src: SRC_EN_LABEL });
+          if (j2 && !same) { hit2++; hit++; }
+          else if (j2) again++;
         }
       }
     } catch (e) { console.warn('[SMD] 英名→日本語の穴埋めで止まりました', e); }
     if (hit || gotJa || undo) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
-    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2, undo: undo };
+    return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2, undo: undo, again: again };
   }
   // 🌏 国で絞ったJANの一覧。国別で見ているときに、他の国のJANで「出している」と
   //   誤判定しないため（PHにしか無い物がBRの画面で消えてしまう）。
@@ -24749,7 +24763,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             + '【日本語名が無かった明細】※作品マスタの英名→日本語で照合\n'
             + '　空いていたもの　　　　　　　　　　　 ' + (r.noJp || 0).toLocaleString() + '件\n'
             + '　日本語名が分かったもの　　　　　　　 ' + (r.gotJa || 0).toLocaleString() + '件\n'
-            + '　うちJANまで入ったもの　　　　　　　 ' + (r.hit2 || 0).toLocaleString() + '件\n\n'
+            + '　うちJANまで入ったもの　　　　　　　 ' + (r.hit2 || 0).toLocaleString() + '件\n'
+            + '　（前に入れた分の入れ直し　　　　　　 ' + (r.again || 0).toLocaleString() + '件）\n\n'
             + '　母数側で名前からJANを引けたもの　　　 ' + r.dic.toLocaleString() + '件\n'
             + '　同じ名前で違うJANがあり見送ったもの　 ' + r.drop.toLocaleString() + '件\n\n'
             + (r.undo ? ('　※緩い一致で入っていた ' + r.undo.toLocaleString() + '件のJANは外しました（別作品が混ざるため）\n\n') : '')
@@ -34649,6 +34664,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ここでは「機種の頭（PS4:）を後ろに回す」「記号を整える」だけにして、語は落とさない。
   function janKeyword(row, m) {
     { const ja = sourcingKeywordFromDict(m && m.n); if (ja) return { kw: ja, machine: '' }; }   // 実際に仕入れた日本語名があれば最優先
+    // 📚 母数の作品マスタから当てた日本語名(jp)も使う。**英語のまま投げると、まず日本語名を
+    //    当てるところで検索を1回使う**ので、こちらが日本語を渡せればその1回が要らない＝安くなる。
+    //    （これを読んでいなかったので「安くなります」が口だけになっていた・Codex指摘 2026-09-05）
+    try { const pv = (productIds || {})[pidKeyModel(row, m)] || {};
+      const jp = String(pv.jp || '').trim(); if (jp) return { kw: jp, machine: '' }; } catch (_) {}
     let v = String((m && m.n) || '').trim();
     if (!v) return null;
     let machine = '';
