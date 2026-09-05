@@ -3677,6 +3677,8 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     '🧹 おかしなJANを掃除': '🧹 Clean up bad JANs',
+    '📇 別の画面で取り込み中です': '📇 Another window is importing',
+    '別の画面で取り込みが動いています': 'Another window is running the import',
     '📇 続きから再開します…': '📇 Resuming where it left off…',
     'いま数え直しています。': 'A recount is already running.',
     'いま入れています。': 'Already filling.',
@@ -24283,12 +24285,6 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       //   JANが98%取れていて用は足りているので、動かないコードは残さない。
       //   （型番が要るときは、実物のHTMLを見てから書き直すこと）
       done++;
-      // ★「走っています」の合図を絶えず出す。これが古くなると、他の画面が
-      //   「誰も走っていない」と判断して二重に走り出し、駿河屋を2倍叩くことになる。
-      try {
-        const _p = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
-        _p.at = Date.now(); localStorage.setItem('smdJanFill', JSON.stringify(_p));
-      } catch (_) {}
       // ★保存は【データ全部を送り直す】ので、頻繁にやると通信量が跳ね上がる。
       //   ⚠️ 以前ここを「200件ごと **または** 60秒ごと」にしたが、1件2.5秒かかるので
       //      200件＝500秒。**60秒の条件が先に来てしまい、まったく減っていなかった**
@@ -24713,8 +24709,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         // ★他の画面で走っている最中に押されたら断る（駿河屋を2倍叩かないため）
         try {
           const st0 = JSON.parse(localStorage.getItem('smdJanFill') || 'null');
-          if (st0 && st0.at && Date.now() - st0.at < 120000 && st0.hw) {
-            alert('📇 別の画面で取り込みが動いています（' + (TITLE_HW_JA[st0.hw] || st0.hw) + ' ' + (st0.d || 0) + '/' + (st0.t || 0) + '件）。\n\n'
+          // ⚠️ hw を条件にしない。始まった直後の印には hw がまだ無く、そこを通り抜けて
+          //    二重に走り出せてしまう（Codexの指摘・2026-09-05）。
+          if (st0 && st0.at && Date.now() - st0.at < 120000) {
+            alert('📇 別の画面で取り込みが動いています' + (st0.hw ? '（' + (TITLE_HW_JA[st0.hw] || st0.hw) + ' ' + (st0.d || 0) + '/' + (st0.t || 0) + '件）' : '') + '。\n\n'
               + '同時に走らせると駿河屋を2倍の回数で叩くことになり、アクセス制限を受けます。\n'
               + 'そちらが終わってから押してください（止めたい時は、動いている方の画面で同じボタンを押します）。');
             return;
@@ -24752,6 +24750,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           + '止めたいときは同じボタンをもう一度押してください。\n\n'
           + '※駿河屋を続けて叩くのでブラウザは開いたままにしてください。')) return;
         lst._sgRunning = true; lst._sgStop = false;
+        // ★「動いています」の合図は【時計で出す】。進んだ時だけ出すと、
+        //   10分休憩や待ち時間の間に合図が途切れ、その隙に他の画面が再開してしまう
+        //   ＝駿河屋を2倍叩く（Codexの指摘・2026-09-05）。20秒ごとに出し続ける。
+        try { if (lst._janHB) clearInterval(lst._janHB); } catch (_) {}
+        lst._janHB = setInterval(() => {
+          try {
+            const _p = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
+            _p.at = Date.now(); localStorage.setItem('smdJanFill', JSON.stringify(_p));
+          } catch (_) {}
+        }, 20000);
         // ★何回目の再挑戦かを【印を書き直す前に】読む。順番を間違えると回数が消え、
         //   「3回でやめる」が効かなくなる＝弾かれたまま永久に再開を繰り返し、
         //   まさにアクセス制限を招く（Codexの指摘・2026-09-04）。
@@ -24804,6 +24812,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           else alert(_em);
         } finally {
           lst._sgRunning = false; lst._janAuto = false;
+          try { if (lst._janHB) { clearInterval(lst._janHB); lst._janHB = null; } } catch (_) {}
           // ★エラーで止まったときは印を残す＝ページを開き直したときに続きから再開する。
           //   ただし何度も同じ所で転ぶと堂々巡りになるので、3回までにする。
           try {
@@ -25477,19 +25486,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           //   ⚠️ 以前は1つ選んで、それが無ければ即「画像なし」だった。駿河屋に写真が無い商品でも
           //      楽天にはあることが多いので、順に試すだけで写真がだいぶ増える。
           const j13 = (x.jan && String(x.jan).length === 13) ? String(x.jan) : '';
-          const first = sid ? ('https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m')
-            : (x.img || (j13 ? ('https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + j13.slice(-4) + '/' + j13 + '.jpg?_ex=128x128') : ''));
+          // 🖼 候補は【0=駿河屋 → 1=作品マスタの写真 → 2,3,4=楽天（3通りの形）】。
+          //   ⚠️ どこから始まったかを覚えておかないと、続きの候補を飛ばしてしまう
+          //      （JANしか無い行は最初から楽天なのに、失敗して「同じURLだから終わり」になる。Codexの指摘）。
+          let st0 = -1, first = '';
+          if (sid) { st0 = 0; first = 'https://www.suruga-ya.jp/database/photo.php?shinaban=' + sid + '&size=m'; }
+          else if (x.img) { st0 = 1; first = x.img; }
+          else if (j13) { st0 = 2; first = 'https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/' + j13.slice(-4) + '/' + j13 + '.jpg?_ex=128x128'; }
           if (!first) return (sid === '' ? '<span style="color:#c9c9c9;font-size:10px">画像なし</span>' : '<span style="color:#c9c9c9;font-size:10px">…</span>');
-          // ★ダメだったら次を試す。⚠️ URLを全部HTMLに書くとカード300件で重くなるので、
-          //   【JANだけ持たせて、失敗した時にURLを組み立てる】。段階は data-s に持つ。
-          const onerr = "var s=+(this.dataset.s||0),j=this.dataset.j||'';var u='';"
-            + "if(j){if(s===0)u='https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/'+j.slice(-4)+'/'+j+'.jpg?_ex=128x128';"
-            + "else if(s===1)u='https://tshop.r10s.jp/book/cabinet/'+j.slice(-4)+'/'+j+'.jpg?downsize=130:*';"
-            + "else if(s===2)u='https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/'+j.slice(-4)+'/'+j+'_1.jpg?_ex=128x128';}"
-            + "this.dataset.s=s+1;"
-            + "if(u&&u!==this.src){this.src=u;}"
+          // ★URLを全部HTMLに書くとカード300件で重くなるので、【JANと段階だけ持たせて、失敗した時に組み立てる】
+          const onerr = "var s=+(this.dataset.s||0)+1,j=this.dataset.j||'',w=this.dataset.w||'';var u='';"
+            + "while(s<=4&&!u){"
+            + "if(s===1)u=w;"
+            + "else if(s===2&&j)u='https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/'+j.slice(-4)+'/'+j+'.jpg?_ex=128x128';"
+            + "else if(s===3&&j)u='https://tshop.r10s.jp/book/cabinet/'+j.slice(-4)+'/'+j+'.jpg?downsize=130:*';"
+            + "else if(s===4&&j)u='https://thumbnail.image.rakuten.co.jp/@0_mall/book/cabinet/'+j.slice(-4)+'/'+j+'_1.jpg?_ex=128x128';"
+            + "if(!u)s++;}"
+            + "this.dataset.s=s;"
+            + "if(u){this.src=u;}"
             + "else{this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px';}";
-          return `<img src="${esc(first)}" data-j="${av(j13)}" data-s="0" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="${av(onerr)}">`;
+          return `<img src="${esc(first)}" data-j="${av(j13)}" data-w="${av(x.img || '')}" data-s="${st0}" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="${av(onerr)}">`;
         })()}
       </div>
       <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.ja || x.en || '')}</div>
@@ -27693,7 +27709,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           try {
             const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : [];
             productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
-          } catch (_) { productIds = {}; }
+          } catch (e) {
+            // ★読めなかった時に空で覚えない。空にすると【この画面を開いている間ずっと】
+            //   JANでの判定が効かなくなり、もう出している物が候補に出続ける（Codexの指摘・2026-09-05）。
+            //   null のままにしておけば、次に開いた時にもう一度読みに行く。
+            console.warn('[この国にまだ無い商品] こちらのJANを読めませんでした（名前だけで判定します）:', e);
+          }
         }
         try { lst._na = naBuild(cc); }
         catch (e) { box.innerHTML = '<div style="color:#d93025">失敗：' + esc(String(e.message || e)) + '</div>'; lst._naBusy = false; return; }
