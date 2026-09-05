@@ -24439,6 +24439,32 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   走らせない＝「いま誰が持っているか」を印に書く。IDが無いと、唯一の画面を
   //   開き直したときに【自分の直前の心拍を他人と勘違い】して再開できなくなる（Codexの指摘）。
   const JAN_OWNER = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  // ▶ どの画面にいても、途中で切れたJANの取り込みを拾って再開する（2026-09-05）。
+  //   本人指定「再読み込みしても絶対に止まらせないで」。
+  //   ⚠️ これまでは【母数ページを開いた時だけ】再開していたので、別の画面で
+  //      読み直すと止まったままだった。10秒ごとに見張って、誰も走っていなければ引き継ぐ。
+  function janWatchdog() {
+    if (lst._janWatch) return;
+    lst._janWatch = setInterval(() => {
+      try {
+        if (lst._sgRunning) return;                       // 自分が走っている
+        const raw = localStorage.getItem('smdJanFill'); if (!raw) return;
+        const st = JSON.parse(raw) || {};
+        if (!st.at && !st.own) { /* 誰かが手放した直後 */ }
+        else if (st.own && st.own !== JAN_OWNER && Date.now() - st.at < 20000) return;   // 他が走っている
+        if (st.tries >= 3) return;                        // 何度も転んでいるなら止めておく
+        if (state.mode !== 'live') return;                // ブリッジが無い時は何もしない
+        // 母数ページに居ればその場で、居なければ画面は動かさずに黙って始める
+        const b = document.getElementById('tm-sgjan');
+        if (b) { lst._janAuto = true; b.click(); return; }
+        // ボタンが無い＝別の画面。母数ページを開かずに再開できるよう、ここでは
+        // 「戻ったら再開する」ための印だけ残す（勝手に画面を切り替えない）。
+        lst._janPending = true;
+      } catch (_) {}
+    }, 10000);
+  }
+  // ★すぐ呼ぶと、まだ定義されていない物に触って全機能が死ぬ（TDZ）。少し待ってから始める
+  setTimeout(() => { try { janWatchdog(); } catch (_) {} }, 6000);
   function tmDupList(hw) {
     const per = {};
     const soldMap = dupSoldMap();
@@ -24698,7 +24724,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   走っている間は数十秒おきに印の時刻を更新しているので、**2分以内に更新されていれば
         //   誰かが走っている**とみなす。ここを見ないと、ポータルを2枚開いただけで
         //   駿河屋を2倍叩くことになり、アクセス制限を招く（実際にやりかけた）。
-        if (st.own !== JAN_OWNER && Date.now() - st.at < 120000) {
+        if (st.own !== JAN_OWNER && Date.now() - st.at < 20000) {
           const el0 = document.getElementById('tm-sgjan');
           if (el0) el0.textContent = '📇 別の画面で取り込み中です';
           // ★【重要】ここで終わりにすると、唯一の画面を開き直した時に
@@ -24708,7 +24734,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             lst._janRecheck = setTimeout(() => {
               lst._janRecheck = null; lst._janResumed = false;
               try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
-            }, 125000);
+            }, 25000);
           }
           return;
         }
@@ -24738,7 +24764,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const st0 = JSON.parse(localStorage.getItem('smdJanFill') || 'null');
           // ⚠️ hw を条件にしない。始まった直後の印には hw がまだ無く、そこを通り抜けて
           //    二重に走り出せてしまう（Codexの指摘・2026-09-05）。
-          if (st0 && st0.at && st0.own !== JAN_OWNER && Date.now() - st0.at < 120000) {
+          if (st0 && st0.at && st0.own !== JAN_OWNER && Date.now() - st0.at < 20000) {
             const _hw = st0.hw ? ((TITLE_HW_JA[st0.hw] || st0.hw) + ' ' + (st0.d || 0) + '/' + (st0.t || 0)) : '';
             const _en = (() => { try { return i18nOn(); } catch (_) { return false; } })();
             alert(_en
@@ -24802,12 +24828,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   10分休憩や待ち時間の間に合図が途切れ、その隙に他の画面が再開してしまう
         //   ＝駿河屋を2倍叩く（Codexの指摘・2026-09-05）。20秒ごとに出し続ける。
         try { if (lst._janHB) clearInterval(lst._janHB); } catch (_) {}
+        // ★再読み込み・タブを閉じる時に「私はもう走っていません」と印に書き残す。
+        //   これが無いと、次に開いた画面が最大20秒待つことになる（本人指定 2026-09-05
+        //   「再読み込みしても絶対に止まらせないで」）。
+        if (!lst._janUnload) {
+          lst._janUnload = true;
+          const _release = () => {
+            try {
+              const _p = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
+              if (_p.own === JAN_OWNER) { _p.own = ''; _p.at = 0; localStorage.setItem('smdJanFill', JSON.stringify(_p)); }
+            } catch (_) {}
+          };
+          window.addEventListener('pagehide', _release);
+          window.addEventListener('beforeunload', _release);
+        }
         lst._janHB = setInterval(() => {
           try {
             const _p = JSON.parse(localStorage.getItem('smdJanFill') || '{}') || {};
             _p.at = Date.now(); _p.own = JAN_OWNER; localStorage.setItem('smdJanFill', JSON.stringify(_p));
           } catch (_) {}
-        }, 20000);
+        }, 5000);   // ★短いほど、閉じた/落ちたのが早く分かる＝早く再開できる
         // ★何回目の再挑戦かを【印を書き直す前に】読む。順番を間違えると回数が消え、
         //   「3回でやめる」が効かなくなる＝弾かれたまま永久に再開を繰り返し、
         //   まさにアクセス制限を招く（Codexの指摘・2026-09-04）。
