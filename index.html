@@ -7391,7 +7391,7 @@
   function renderOrdersSummary() {
     const el = document.getElementById('ord-summary');
     const parts = [];
-    let total = 0, late = 0, riskN = 0;
+    let total = 0, late = 0, riskN = 0, unpaidAll = 0;
     // 発送フロー4段階の件数（①未手配 ②伝票発行済 ③倉庫スキャン待ち ④発送済）
     let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
     const isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
@@ -7399,7 +7399,11 @@
       const oc = state.orders.perCountry.get(region.cc);
       if (!oc) return;
       const n = (oc.rows && oc.rows.length) || 0;
-      total += n;
+      // ★見出しは「未発送＋発送済」。未払い(tab=200)まで足すと、下の4段階の合計と合わない
+      //   （差がどこへ行ったのか画面に出ない・2026-09-06）。
+      total += (oc.rows || []).filter(r => r.tab === 300 || r.tab === 400).length;
+      const nUnpaid = (oc.rows || []).filter(r => r.tab === 200).length;
+      unpaidAll += nUnpaid;
       (oc.rows || []).forEach(r => {
         const rk = ordRisk(r); if (rk === 2) late++; else if (rk === 1) riskN++;
         if (r.tab === 400) s4++;
@@ -7423,7 +7427,7 @@
       `<span class="smd-dim" style="font-size:10.5px">①Shopeeで発送手配をまだ押していない → ②押すと伝票が出る → ③伝票を貼って倉庫へ送る → ④倉庫でスキャンされたら発送済</span></div>`;
     const ccClear = state.orders.ccFilter ? `<span class="ord-ccall" style="cursor:pointer;color:#1565c0;font-weight:700" title="国の絞り込みを解除して全国表示に戻す">🌏全国に戻す</span>` : '';
     // ★区切りの「｜」は中身がある物どうしの間にだけ入れる（空だと ｜ だけが浮いて残っていた）
-    const head = [`取扱中の注文 <b>${total}</b>件（未発送＋発送済）`, riskTag, ccClear, parts.join(' ｜ ')]
+    const head = [`取扱中の注文 <b>${total}</b>件（未発送＋発送済）${unpaidAll ? `<span class="smd-dim" style="font-size:11px" title="買い手がまだ払っていない注文。発送の4段階には入りません"> ＋未払い ${unpaidAll}件</span>` : ''}`, riskTag, ccClear, parts.join(' ｜ ')]
       .map(x => String(x || '').trim()).filter(Boolean).join(' ｜ ');
     el.innerHTML = head + stageLine;
     const setFilter = (k) => { state.orders.filter = k; state.orders.page = 1; state.orders.calOfs = 0; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === k)); renderOrders(); };
@@ -7618,7 +7622,12 @@
       const oc = state.orders.perCountry.get(rg.cc);
       (oc && oc.rows || []).forEach(r => {
         if (!r.shipBy) return;
-        const d = new Date((r.shipBy - 86400) * 1000 + 9 * 3600 * 1000);
+        if (r.tab !== 300) return;   // ★未払い(200)や発送済(400)を混ぜない
+        // ★ここだけ ship_by−1日（＝2日早い旧式）のままだった。上の発送スケジュールは
+        //   ordShipDeadline（＝ship_by＋1日）なので、同じ注文が2日ずれた曜日に立っていた。
+        //   この棒グラフから休業日の候補を出しているので、判断材料そのものがずれる（2026-09-06）。
+        const dl = ordShipDeadline(r); if (!dl) return;
+        const d = new Date(dl * 1000 + 9 * 3600 * 1000);
         c[d.getUTCDay()]++; tot++;
       });
     });
@@ -14639,7 +14648,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const retCancN = retAllRaw.filter(r => /cancel/i.test(String(r.status || ''))).length;
     if (renderReturns._showCanc !== true) formalReturns = retAllRaw.filter(r => !/cancel/i.test(String(r.status || '')));
     // payout明細の調整（補償/関税）：order_snごとに円換算で集計。補償は自動記入、関税はコスト把握に。
-    const adjRate = cc => ((regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ（||1だと現地通貨をそのまま円扱いし過大化）
+    // ★円換算は【その日の日次レート】。ここだけ最新レートを使っていたため、
+    //   同じ返品の損失額が毎日じわじわ動き、経費ページ（返品日のレート）と一致しなかった。
+    //   補償は入金が1年以上遅れることがあるので、古いものほど差が開く（2026-09-06）。
+    //   ymd が無い時だけ従来どおり最新レートに落ちる。
+    const adjRate = (cc, ymd) => (fxRate(cc, ymd) || (regionByCc(cc) || {}).rateJpy || 0); // 未マップccは0でスキップ
     // ★同一調整の重複を除去（cc:sn:種別:金額:シナリオ が同じ＝二重取込。注文SN重複の原因）
     const _adjSeen = new Set();
     const adjustmentsU = (adjustments || []).filter(a => { const k = [a.cc, a.order_sn, a.kind, Math.round(Number(a.amount) || 0), (a.module || a.scenario || '')].join('|'); if (_adjSeen.has(k)) return false; _adjSeen.add(k); return true; });
@@ -14650,7 +14663,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const adjCompPay = new Map(); // cc:sn → 補償の入金日(payout_time・最新)
     const adjByCc = {};           // cc → { comp, duty }（円）
     adjustmentsU.forEach(a => {
-      const rate = adjRate(a.cc); if (!rate) return; // レート不明の国は集計に入れない
+      const _ay = a.payout_time ? new Date(Number(a.payout_time) * (Number(a.payout_time) < 1e11 ? 1000 : 1)).toISOString().slice(0, 10) : '';
+      const rate = adjRate(a.cc, _ay); if (!rate) return; // レート不明の国は集計に入れない
       const loc = Number(a.amount) || 0, jpy = Math.round(loc * rate);
       if (a.kind === 'compensation' && a.order_sn) { const key = a.cc + ':' + a.order_sn; adjComp.set(key, (adjComp.get(key) || 0) + jpy); adjCompLoc.set(key, (adjCompLoc.get(key) || 0) + loc); if (!adjCompScen.has(key)) adjCompScen.set(key, scenJa(a.module || a.scenario || '')); if (a.payout_time) { const cur = adjCompPay.get(key) || 0; if (Number(a.payout_time) > cur) adjCompPay.set(key, Number(a.payout_time)); } }
       const b = adjByCc[a.cc] = adjByCc[a.cc] || { comp: 0, duty: 0 };
@@ -14719,7 +14733,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const rsns = [...new Set(formalReturns.map(r => r.order_sn).filter(Boolean))];
       if (rsns.length) { try { const ro = await sbGetAll('orders', 'select=cc,sn,buyer,items&sn=in.(' + rsns.map(s => '"' + s + '"').join(',') + ')'); (ro || []).forEach(o => retOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {} }
     }
-    const retRefundJpy = r => { const rate = adjRate(r.cc); return rate ? Math.round((Number(r.refund_amount) || 0) * rate) : 0; };
+    const retRefundJpy = r => {
+      const t = Number(r.create_time || r.update_time || 0);
+      const ymd = t ? new Date(t * (t < 1e11 ? 1000 : 1)).toISOString().slice(0, 10) : '';
+      const rate = adjRate(r.cc, ymd); return rate ? Math.round((Number(r.refund_amount) || 0) * rate) : 0; };
     // 返品リクエスト(returns)を注文SNで逆引き→返金・補償タブに「申請日/承認(更新)日/状態」を出す。cc:sn 一致（複数あれば最新update_time）
     const retByOrderSn = new Map();
     formalReturns.forEach(r => { if (!r.order_sn) return; const key = (r.cc || '') + ':' + r.order_sn; const ut = Number(r.update_time || r.create_time || 0); const prev = retByOrderSn.get(key); if (!prev || ut > (prev._ut || 0)) retByOrderSn.set(key, { status: r.status, create_time: r.create_time, update_time: r.update_time, _ut: ut }); });
