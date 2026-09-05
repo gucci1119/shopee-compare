@@ -14648,11 +14648,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [cancelled, issues, adjustments, formalReturns] = await Promise.all([
           sbGetAll('orders', 'select=cc,sn,buyer,status,items,order_date,order_ts,tracking,cancel_reason&tab=eq.600&order=order_ts.desc.nullslast,sn.desc'),
           sbGetAll('order_issues', 'select=*'),
-          sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').then(dedupeAdjustments).catch(() => []),
-          sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => []),  // Shopee公式 返品/返金リクエスト
+          // ★読めなかったのと「まだ無い」のは違う。空で進むと下で
+          //   「まだ補償データがありません」「まだ取り込まれていません」と**嘘を断言**する（2026-09-06）。
+          sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,remark,kind,payout_time').then(dedupeAdjustments).catch(() => { renderReturns._failAdj = true; return []; }),
+          sbGetAll('returns', 'select=*&order=create_time.desc.nullslast').catch(() => { renderReturns._failRet = true; return []; }),  // Shopee公式 返品/返金リクエスト
           retMetaLoad(),
         ]);
         renderReturns._cache = { cancelled, issues, adjustments, formalReturns, at: Date.now() };
+        renderReturns._cache.failAdj = !!renderReturns._failAdj;
+        renderReturns._cache.failRet = !!renderReturns._failRet;
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
     formalReturns = formalReturns || [];
@@ -14976,6 +14980,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     // 🧾 payout明細の調整（補償・関税）＝自動取得サマリー（order_adjustments）
     const adjCard = (() => {
+      if (!adjustmentsU.length && (renderReturns._failAdj || (renderReturns._cache && renderReturns._cache.failAdj))) return '<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025"><b>⚠️ 補償データを読み込めませんでした</b><br><span class="smd-dim" style="font-size:12px">「無い」のではなく<b>読めていません</b>。通信が戻ってから画面を更新してください。</span></div>';
       if (!adjustmentsU.length) return `<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #6a5acd;padding:11px 14px"><b style="font-size:14px">🧾 補償が入った注文</b><div class="smd-dim" style="font-size:11.5px;margin-top:6px">まだ補償データがありません。補償はShopee入金明細(payout)から自動取得します（GASのpayout同期＋過去分は <code>backfillAdjustments</code> を1回実行）。補償が入るとここに「どの注文にいくら着いたか」が出ます。<br>※order_adjustments テーブル未作成の場合は返品メモリの要SQLを実行してください。</div></div>`;
       const ccs = Object.keys(adjByCc).sort((a, b) => (adjByCc[b].comp + Math.abs(adjByCc[b].duty)) - (adjByCc[a].comp + Math.abs(adjByCc[a].duty)));
       const chip = (cc, b) => `<span style="display:inline-flex;gap:6px;align-items:center;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${cc}</b>${b.comp ? `<span style="color:#188038">補償+${fmtJpy(b.comp)}</span>` : ''}${b.duty ? `<span style="color:#d93025">関税${fmtJpy(b.duty)}</span>` : ''}</span>`;
@@ -14992,6 +14997,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     })();
     // ↩️ 返品リクエスト一覧（国別サマリー＋テーブル）
     const formalBlock = (() => {
+      if (!formalReturns.length && (renderReturns._failRet || (renderReturns._cache && renderReturns._cache.failRet))) return '<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025"><b>⚠️ 返品リクエストを読み込めませんでした</b><br><span class="smd-dim" style="font-size:12px">「まだ取り込まれていない」のではなく<b>読めていません</b>。通信が戻ってから画面を更新してください。</span></div>';
       if (!formalReturns.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px;font-size:11.5px">Shopeeの正式な返品/返金リクエストはまだ取り込まれていません。6時間ごとに自動同期（<code>syncReturnsAll</code>）します。過去分が必要なら <code>backfillReturns</code> を1回実行してください。</div>`;
       const byCc = {}; formalReturns.forEach(r => { const b = byCc[r.cc] = byCc[r.cc] || { n: 0, jpy: 0 }; b.n++; b.jpy += retRefundJpy(r); });
       const ccChips = Object.entries(byCc).sort((a, b) => b[1].n - a[1].n).map(([cc, b]) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${(regionByCc(cc) || {}).color || '#e0d0d0'};border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${esc(cc)}</b> ${b.n}件${b.jpy ? ` <span style="color:#d93025">${fmtJpy(b.jpy)}</span>` : ''}</span>`).join('');
@@ -36447,7 +36453,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           sbGetAll('inventory', 'select=item_id,sku,shopee_sn,price,supplier,supplier_url,status,bin,proof,name,name_supplier&shopee_sn=not.is.null&order=item_id'),
           sbGetAll('products', 'select=cc,item_id,name&order=item_id'),
           sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),  // 📗利益計算表(月次スプシ)の取り込み値：仕入額/仕入元/URL/在庫No/PayPal差分
-          sbGetAll('order_issues', 'select=cc,sn,stage,reason').catch(() => []),   // キャンセルの段階（発送前/日本国内/日本を出た後）＝↩️返品・キャンセル管理と共有する唯一の正
+          // ★読めなかった時に空で進むと、確定済みの段階が全部消えて
+          //   キャンセル損失が0円になり「未判定 N件」と出る（＝読めていないのに“未判定”と断言する）。
+          sbGetAll('order_issues', 'select=cc,sn,stage,reason').catch(() => { pf._failIssues = true; return []; }),// キャンセルの段階（発送前/日本国内/日本を出た後）＝↩️返品・キャンセル管理と共有する唯一の正
           sbGetAll('returns', 'select=cc,order_sn,status,refund_amount').catch(() => []),  // 返品/返金リクエスト：Shopeeが「完了」のまま返金された注文を可視化（粗利計算は変えない＝返品ページで別途損失計上）
         ]);
         if (_pfSeq !== pf._loadSeq) return; // より新しい月切替の読込に追い越された→この結果は捨てる（別月データを別月ラベルで描画しない）
@@ -37076,7 +37084,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     html += '</table></div>' +
       '<div style="text-align:center;margin:10px 0 2px">' + pageNav(orders.length, PER_PF, pf.page) + '</div>' +
       `<div class="smd-dim" style="font-size:11px;margin:8px 4px">${pf.strictCost ? `<b style="color:#1565c0">🔒到着済(在庫No)のみ表示中</b>（在庫Noが付いた＝到着し在庫台帳に載った注文だけで粗利計算）。${strictSkipN ? `<b style="color:#c5760a">到着待ち ${strictSkipN}件を粗利から除外中</b>（在庫No未＝実物未着）。` : ''}` : ''}粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算・合算（合計は${pairN}件分）。<b>仕入額の優先＝①手入力 ＞ ②📗利益計算表(スプシ)の取込 ＞ ③在庫連携🏷</b>。<b>粗利＝(Shopee入金＋PayPal差分)−仕入</b>（PayPal差分は主にBR・大半0）。仕入額が全く無い注文は空欄。キャンセルはグレー表示。列幅はヘッダー境界をドラッグ、表示/非表示は「🗂 列」。</div></div>`;
-    body.innerHTML = fxStaleBanner() + html;   // ★日次レートが読めていない時は必ず知らせる
+    // ★読めていない時は「無い」と断言しない。キャンセル段階が読めないと損失が0円になる。
+    const _issueWarn = pf._failIssues ? '<div style="background:#fff3f0;border:1px solid #ffc4b3;color:#b5341a;border-radius:8px;padding:8px 12px;margin:0 0 10px;font-size:12.5px">⚠️ <b>キャンセルの段階（order_issues）を読み込めませんでした。</b>確定済みの段階が反映されていないため、キャンセル損失が実際より少なく出ます。画面を更新してください。</div>' : '';
+    body.innerHTML = fxStaleBanner() + _issueWarn + html;   // ★日次レートが読めていない時は必ず知らせる
     fitScroll('profit');
     wirePageNav(body, p => { pf.page = p; const sc = body.querySelector('.pf-scroll'); if (sc) sc.scrollTop = 0; pfRender(); }); // ★ページ送り（同じ絞り込みなのでsig一致＝1ページ目に戻らずそのページを描画）
     // 🔎 在庫候補：カーソルを合わせるだけで、充てられそうな在庫を画像つきで一覧表示して紐付ける
