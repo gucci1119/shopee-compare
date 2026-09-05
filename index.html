@@ -23930,12 +23930,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   async function janFillFromBoshuAll(onProg) {
     // ① 母数側のJAN辞書を作る（駿河屋＋楽天／全機種）
     const pairs = [];
+    // 🎮 機種ごとの分も一緒に作る。**JANを機種をまたいで引くと別の機種のパッケージが入る**
+    //   （tmKeyが機種名を落とすため・Codex指摘）。ここで作っておけば、あとで取り直さずに済む。
+    const pairsHw = {};
+    const addPair = (hw, t, j) => { if (!t || !j) return; pairs.push([t, j]);
+      (pairsHw[hw] = pairsHw[hw] || []).push([t, j]); };
     const hws = Object.keys(lst.sgHave || {});
     for (let i = 0; i < hws.length; i++) {
       if (onProg) onProg('辞書を作っています ' + (i + 1) + '/' + hws.length);
       try {
         const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hws[i]));
-        (((g && g[0] && g[0].v) || {}).rows || []).forEach(r => { if (r && r.j && r.t) pairs.push([r.t, r.j]); });
+        (((g && g[0] && g[0].v) || {}).rows || []).forEach(r => { if (r && r.j && r.t) addPair(hws[i], r.t, r.j); });
       } catch (_) {}
     }
     // ★楽天のJAN索引は別の場所で【非同期に】読まれるので、押すのが早いと空のままになる。
@@ -23943,15 +23948,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try { await loadJanIndex(); } catch (e) { throw new Error('母数のJAN索引を読めませんでした：' + ((e && e.message) || e)); }
     const jhws = Object.keys(lst._janIdx || {});
     for (const hw of jhws) {
-      try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) pairs.push([r.t, r.jan]); }); } catch (_) {}
+      try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) addPair(hw, r.t, r.jan); }); } catch (_) {}
     }
-    const dic = new Map(), bad = new Set();
-    pairs.forEach(([t, j]) => {
-      const k = tmKey(t); if (!k) return;
-      if (dic.has(k)) { if (dic.get(k) !== j) bad.add(k); return; }
-      dic.set(k, j);
-    });
-    bad.forEach(k => dic.delete(k));   // 同じ名前で違うJAN＝版違い。入れない
+    const mkDic = (list) => {
+      const m = new Map(), bd = new Set();
+      list.forEach(([t, j]) => { const k = tmKey(t); if (!k) return;
+        if (m.has(k)) { if (m.get(k) !== j) bd.add(k); return; } m.set(k, j); });
+      bd.forEach(k => m.delete(k));   // 同じ名前で違うJAN＝版違い。入れない
+      return { m: m, bad: bd };
+    };
+    const g0 = mkDic(pairs), dic = g0.m, bad = g0.bad;
+    const dicHw = {};
+    Object.keys(pairsHw).forEach(h => { dicHw[h] = mkDic(pairsHw[h]).m; });
     // ② こちらの明細の空いているところへ
     // ⚠️【最重要】読めなかったときに空っぽで進んではいけない。
     //   この先で1件でも書き込むと、保存が**台帳まるごとの上書き**なので、
@@ -24002,7 +24010,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         productIds[k] = Object.assign({}, v, { jan: '', jp: undefined, src: '' }); undo++; }); }
     let noJp = 0, gotJa = 0, hit2 = 0, again = 0;
     try {
-      const dicOf = {}, jidxOf = {};
+      const dicOf = {};
       const rowsAll = [];
       Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rowsAll.push(r)));
       for (let i = 0; i < rowsAll.length; i++) {
@@ -24024,10 +24032,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   空のまま検算すると「当たらない」＝全部外す になり、通信が一度こけただけで
         //   その機種のJANが消える（Codex指摘）。中身が無い辞書では触らない。
         if (!d || !d.n) continue;
-        // 🏪 JANはこの機種の辞書から引く。全機種をまぜた辞書から引くと、
+        // 🏪 JANはこの機種の辞書から引く（①で作ったもの）。全機種をまぜた辞書から引くと、
         //   tmKeyが機種名を落とすせいで**別の機種のパッケージのJAN**が入りうる（Codex指摘）。
-        let jidx = jidxOf[hw];
-        if (jidx === undefined) { try { jidx = await janMstIdx(hw); } catch (_) { jidx = null; } jidxOf[hw] = jidx || null; }
+        //   ★ここで取り直さない。①で全機種ぶん読んでいるので、二度目は丸ごと無駄になる。
+        const jidx = dicHw[hw] || dicHw[JAN_MST_ALIAS[hw] || ''] || null;
         if (!jidx || !jidx.size) continue;
         for (const m of ms) {
           if (!m || m.ghost || !m.n) continue;
@@ -24749,10 +24757,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     tmMatchAll(m, own);
     // 📥 母数のJANをこちらの明細に入れる（無料・接続枠ゼロ）
     { const jf = document.getElementById('tm-janfill');
-      if (jf) jf.addEventListener('click', async () => {
+      // ★1つのボタンに何度も付けない。描き直すたびに足すと【1回押しただけで何本も走り】、
+      //   後から走った方の finally がボタンを元に戻すので「終わったように見えて実は動いている」
+      //   になる（2026-09-05に実際に起きた）。
+      if (jf && !jf._bound) { jf._bound = 1; jf.addEventListener('click', async () => {
         // ★JANの取り込みが動いていても押してよい（読むだけ）。
-        if (lst._janFilling) { alert('いま入れています。'); return; }
-        lst._janFilling = true;
+        //   ただし**途中で落ちて印が残ったまま**だと二度と押せなくなるので、時間で解く。
+        if (lst._janFilling && Date.now() - (lst._janFillAt || 0) < 600000) { alert('いま入れています。'); return; }
+        lst._janFilling = true; lst._janFillAt = Date.now();
         const old = jf.textContent; jf.disabled = true;
         try {
           const r = await janFillFromBoshuAll((t) => { jf.textContent = '📥 ' + t; });
@@ -24776,7 +24788,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           lst._janFilling = false;
           try { const el = document.getElementById('tm-janfill'); if (el) { el.disabled = false; el.textContent = old; } } catch (_) {}
         }
-      });
+      }); }
     }
     // 🧮 母数を数え直す（他のサイトは見に行かない＝すぐ終わる・タダ）
     { const rc = document.getElementById('tm-recount');
