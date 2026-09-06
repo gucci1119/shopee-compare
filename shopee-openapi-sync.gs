@@ -3703,6 +3703,24 @@ function syncListingsForShop_(tok, sinceSec) {
   //   （2026-08-08 実測：listingsは6,481件なのにspecsは6,495件＝新規35件が欠け・消えた14件が残留）。
   //   毎回の同期でここから作り直す＝放っておいても自己修復する。
   var specs = {};
+  // ♻️ 全件同期のとき、**更新されていない商品の明細を取り直さない**。
+  //   get_model_list は【1商品につき1回】なので、ここが接続枠の最大の食い手だった
+  //   （2026-09-06 実測：1日8,606回のうち 4,957回＝58% がこのAPI）。
+  //   Shopeeの update_time が前回と同じなら中身は変わっていないので、保存済みの明細を使い回す。
+  //   ⚠️ 取れなかった時・保存が無い時は**従来どおり取りに行く**（安全側に倒す）。
+  var prevById = {};
+  if (!sinceSec) {
+    try {
+      for (var _o = 0; _o < 20; _o++) {
+        var _pv = sbSelect_('listings', 'select=item_id,update_time,models,model_count,price_min,price_max,stock&shop_id=eq.'
+          + encodeURIComponent(String(shopId)) + '&limit=1000&offset=' + (_o * 1000));
+        if (!_pv || !_pv.length) break;
+        _pv.forEach(function (r) { prevById[String(r.item_id)] = r; });
+        if (_pv.length < 1000) break;
+      }
+    } catch (ePv) { prevById = {}; Logger.log('前回分の読み込みに失敗（全部取り直します）: ' + ePv); }
+  }
+  var reused = 0;
   for (var i = 0; i < ids.length; i += 50) {
     var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: batch.join(',') }, 'get');
@@ -3711,7 +3729,20 @@ function syncListingsForShop_(tok, sinceSec) {
       var img = imgList[0] || '';
       var models = [], price_min = null, price_max = null, stock = null, model_count = 0;
       var mdlFail = false;   // ★明細の取得に失敗したか（失敗したら保存しない＝既存の行を壊さない）
-      if (it.has_model) {
+      var _prev = prevById[String(it.item_id)];
+      var _sameTime = !!(_prev && it.update_time && _prev.update_time
+        && Number(_prev.update_time) === Number(it.update_time)
+        && Array.isArray(_prev.models) && _prev.models.length);
+      if (it.has_model && _sameTime) {
+        // ★前回と同じ更新時刻＝中身は変わっていない。保存済みの明細をそのまま使う（APIを叩かない）
+        models = _prev.models;
+        var _r0 = models.filter(function (m) { return !m.ghost; });
+        model_count = _r0.length;
+        var _p0 = _r0.map(function (m) { return m.price; }).filter(function (x) { return x > 0; });
+        if (_p0.length) { price_min = Math.min.apply(null, _p0); price_max = Math.max.apply(null, _p0); }
+        stock = _r0.reduce(function (a, m) { return a + (Number(m.stock) || 0); }, 0);
+        reused++;
+      } else if (it.has_model) {
         try {
           var g = getModels_(shopId, it.item_id);
           models = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0, ti: (m.tier_index || [])[0] }; });
@@ -3766,6 +3797,7 @@ function syncListingsForShop_(tok, sinceSec) {
       });
     });
   }
+  if (reused) Logger.log('明細を取り直さずに済んだ商品: ' + reused + '件（接続枠の節約）');
   if (rows.length) sbUpsert_('listings', rows);   // on_conflict はポータルと同じくPK(item_id)に委ねる
   // コンディション等を app_kv へ。増分同期(changed)のときは既存に上書きマージ、全件(full)のときは作り直す
   if (rows.length) {
@@ -3798,7 +3830,7 @@ function syncListingsForShop_(tok, sinceSec) {
   }
   // ★明細を取れずに飛ばした商品は【必ず件数を返す】。黙って減らすと、
   //   同期は成功に見えるのに一部の商品だけ古いまま、という状態に気づけない。
-  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed, mode: sinceSec ? 'changed' : 'full',
+  return { cc: cc, shop_id: shopId, listings: rows.length, removed: removed, reusedModels: reused, mode: sinceSec ? 'changed' : 'full',
     mdlFail: mdlFailIds.length || undefined, mdlFailIds: mdlFailIds.length ? mdlFailIds.slice(0, 20) : undefined };
 }
 
