@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.43.0
+// @version      3.44.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -442,7 +442,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.43.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1139,6 +1139,9 @@
     gs.forEach(g => { const r = g.getBoundingClientRect(); if (r.left < min && r.width < 500) { min = r.left; el = g; } });
     return el;
   }
+  // ⏹ 走っている巡回を止める合図。**設定をOFFにしても、すでに走っているループは止まらない**ので、
+  //   「止めたはずなのに止まらない」が起きていた（2026-09-06 本人指摘）。タブのリロード以外に止める手が無かった。
+  let crawlStop = false;
   let cycling = false, cycleInfo = '', cycleTarget = null; // cycleTarget＝巡回中に開いている会話の{buyer,cc}（一覧の行から取る＝信頼できる）
   const lastSig = {}; // 会話ごとの「最終プレビュー署名」。変化＝新着があった会話だけ開く（過去の読み直しを省く）
   // 一覧の行からバイヤー名と国を取る（ヘッダ再検出より信頼できる）
@@ -1382,6 +1385,7 @@
       while (stagnant < 5 && count < 800) {
         // ★途中で「🙋手動用」に切り替えられたら即やめる（役割変更が効かず巡回が続いてしまう不具合の修正）。
         //   巡回役の権利を他タブに奪われた場合も同様にここで降りる。
+        if (crawlStop) { cycleInfo = ''; toast('⏹ 巡回を止めました'); break; }   // ★手で止めた
         if (!isWorker()) { cycleInfo = ''; break; }
         // ★走っている最中に「履歴の取り込みを終了」されたら、その場で止める（次の起動を待たせない）
         if (mode === 'full' && !manual && backfillOff()) { cycleInfo = ''; break; }
@@ -1452,7 +1456,14 @@
       if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm((row.innerText || '').split('\n')[0]) === norm(startConv)) { reactOpen(row); break; } } } }
     } catch (_) {} finally { cycling = false; cycleInfo = ''; _crawlRepAt = 0; reportCrawl(mode, false, ''); updateChip(); }
   }
-  GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => slowCrawl('full', true));
+  GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => { crawlStop = false; slowCrawl('full', true); });
+  // ⏹ いま走っている巡回を止める。あわせて自動起動もOFFにする（同じことを2回聞かれないように）。
+  GM_registerMenuCommand('⏹ 巡回を今すぐ止める（自動起動もOFF）', () => {
+    crawlStop = true;
+    try { GM_setValue('autoCrawl', false); } catch (_) {}
+    cycleInfo = ''; updateChip();
+    toast(cycling ? '⏹ 止めています…（いまの会話を閉じたら止まります）' : '⏹ 自動起動をOFFにしました');
+  });
   GM_registerMenuCommand('自動巡回(新着起因): ON/OFF 切替（既定OFF）', () => { const v = GM_getValue('autoCrawl', false) === true; GM_setValue('autoCrawl', !v); toast('自動巡回を ' + (v ? 'OFF' : 'ON') + ' にしました'); });
   // 起動時：12秒後に一度だけフル巡回（ゆっくり）→以後は150秒ごとに新着(署名変化)会話だけ軽く巡回。全てidle優先。
   {
@@ -3110,6 +3121,8 @@
         updateChip();
       }
     });
+    // ★巡回中にチップを押したら【まず止める】。設定を開くのは止まっている時だけ。
+    chip.addEventListener('click', (ev) => { if (cycling) { ev.stopImmediatePropagation(); crawlStop = true; cycleInfo = ''; updateChip(); toast('⏹ 止めています…'); } }, true);
     document.body.appendChild(chip); updateChip();
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
     if (!getTok() && !window.__chatAsked) { window.__chatAsked = 1; setTimeout(() => { if (!getTok()) askToken(); }, 1200); }
