@@ -15432,7 +15432,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),
         sbGetAll('payouts', 'select=cc,payout_amount,from_amount,payout_time').catch(() => []),
-        sbGetAll('app_kv', 'select=v&k=eq.profit_amounts').catch(() => []),   // 📗利益管理表から拾った現地通貨の入金額（公式API以前の売上を埋める控え）
+        sbGetAll('app_kv', 'select=v,updated_at&k=eq.profit_amounts').catch(() => []),   // 📗利益管理表から拾った現地通貨の入金額（公式API以前の売上を埋める控え）
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
     tax.cfg = (kv && kv[0] && kv[0].v) || { map: {}, open: {}, close: {}, usdJpy: {} };
@@ -15451,6 +15451,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   **現地通貨**の入金額で埋める。円換算は必ず【注文日の日次レート】でやり直す
     //   （スプシの円換算はレートが2024年末のまま古いので、そのまま使うと過小になる）。
     const amtMap = (amtKv && amtKv[0] && amtKv[0].v && amtKv[0].v.items) || {};
+    // ★この控えを【書く処理はどこにも無い】（リポジトリ内をgrepして確認・2026-09-06）。
+    //   つまり手で入れた時点の値のまま固まる。**いつの値かを画面に出す**（申告に使う数字なので）。
+    const amtAt = (amtKv && amtKv[0] && amtKv[0].updated_at) || '';
+    const amtOld = amtAt ? (Date.now() - Date.parse(amtAt) > 35 * 86400000) : false;
     let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, nOrd = 0, nDep = 0, nFromSheet = 0;
     orders.forEach(o => {
       const d = ymdOf(o);
@@ -15548,7 +15552,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       `<div class="tool-card" style="margin:0 0 12px;max-width:760px">
         <div style="font-weight:800;font-size:15px;margin-bottom:6px">📊 ${Y}年 損益計算書</div>
         <table class="pf-table">
-          <tr><td style="width:230px">売上高 <span class="smd-dim" style="font-size:10.5px">（Shopee入金＋PayPal差分）</span></td><td style="text-align:right">${money(sales)}</td><td style="font-size:10.5px;color:${RELIABLE ? '#8a8f98' : '#b3261e'};font-weight:${RELIABLE ? '400' : '700'}">${nDep}/${nOrd}件が入金判明（${Math.round(cover * 100)}%）${nFromSheet ? `<br><span class="smd-dim" style="font-weight:400">うち ${nFromSheet}件は📗利益管理表から補完</span>` : ''}</td></tr>
+          <tr><td style="width:230px">売上高 <span class="smd-dim" style="font-size:10.5px">（Shopee入金＋PayPal差分）</span></td><td style="text-align:right">${money(sales)}</td><td style="font-size:10.5px;color:${RELIABLE ? '#8a8f98' : '#b3261e'};font-weight:${RELIABLE ? '400' : '700'}">${nDep}/${nOrd}件が入金判明（${Math.round(cover * 100)}%）${nFromSheet ? `<br><span class="smd-dim" style="font-weight:400">うち ${nFromSheet}件は📗利益管理表から補完${amtAt ? `（<b style="color:${amtOld ? '#b3261e' : '#8a8f98'}">${String(amtAt).slice(0, 10)} 時点</b>${amtOld ? '・自動では更新されません' : ''}）` : ''}</span>` : ''}</td></tr>
           <tr><td style="padding-left:18px" class="smd-dim">返品・返金</td><td style="text-align:right">${money(-refund)}</td><td></td></tr>
           <tr><td><b>純売上高</b></td><td style="text-align:right">${money(sales - refund)}</td><td></td></tr>
           <tr><td colspan="3" style="padding-top:10px;font-weight:700">売上原価</td></tr>
@@ -16092,6 +16096,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-06', items: [
+      '📗 <b>「利益管理表から補完」が、いつの値なのか出るようにしました</b>。この控え（app_kv.profit_amounts）を<b>書く処理はどこにもありません</b>（リポジトリ内を確認済み）。手で入れた時点の値のまま固まるのに、画面には件数しか出ていませんでした。<b>実測：最終更新は 2026-08-09</b>＝約1か月前のまま。<b>「◯月◯日 時点」</b>を併記し、35日以上たっていたら赤字で<b>「自動では更新されません」</b>と出します。',
       '🧾 <b>確定申告の USD/JPY が未入力のとき、そうと分かるようにしました</b>。未入力だと<b>コードに書いてある162</b>で計算しますが、画面には数字だけが出ていて既定値だと気づけませんでした。申告に使う数字なので<b>「⚠️ 未入力（既定 162 で計算中）」</b>と出します。',
       '🏷 <b>入庫待ちのバッジのラベルが間違っていました</b>。「1日」と出すべきところが<b>「上限」</b>になっていて、隣の「2日」「3日以上」と並んで意味が通らなくなっていました。',
       '↩️ <b>返品の補償を、返金と同じ物差しで数えるようにしました</b>。返金は<b>取り下げ・処理中を除いて</b>数えているのに、補償だけ除いていませんでした。取り下げた返品に補償額が入っていると<b>その分が他の返品の損失から引かれ、損失が実際より小さく出ます</b>。※いまは補償の手入力が0件なので実害はありません（将来のための修正です）。',
