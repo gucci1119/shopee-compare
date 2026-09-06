@@ -48,12 +48,26 @@ function syncTracking() {
   var items = raw.filter(function (r) { return String(r.tracking_no || '').replace(/\D/g, '').length >= 10; });
   if (!items.length) { Logger.log('対象なし（入庫待ち＋追跡番号ありが0件）'); return; }
 
-  var updates = [], now = new Date().toISOString(), ok = 0, delivered = 0;
+  var updates = [], now = new Date().toISOString(), ok = 0, delivered = 0, ngRun = 0;
   for (var i = 0; i < items.length; i += CHUNK) {
     var batch = items.slice(i, i + CHUNK);
     var reqs = batch.map(function (r) { return trackRequest_(r); });
     var resp;
-    try { resp = UrlFetchApp.fetchAll(reqs); } catch (e) { Logger.log('fetchAll失敗(スキップ): ' + e); continue; }
+    // ★枠は「実際に投げた回数」で数える。fetchAll は1呼び出しで reqs.length 回ぶん食う。
+    //   このプロジェクトには数える仕組みが無く、1時間ごと×44件で日に1,000回超が
+    //   どこにも載っていなかった（2026-09-06）。同じ口座の枠なので予約枠が過少申告になる。
+    ufCount_(reqs.length);
+    try { resp = UrlFetchApp.fetchAll(reqs); }
+    catch (e) {
+      // ★ここで continue すると下の Utilities.sleep を飛ばして【間隔ゼロで連射】する。
+      //   相手が詰まり始めた瞬間に一番強く叩くことになる。失敗した時ほど長く待つ。
+      Logger.log('fetchAll失敗(スキップ): ' + e);
+      ngRun++;
+      if (ngRun >= 3) { Logger.log('続けて失敗したのでこの回は打ち切ります'); break; }
+      Utilities.sleep(CHUNK_WAIT * Math.pow(3, ngRun));
+      continue;
+    }
+    ngRun = 0;
     resp.forEach(function (rp, k) {
       var r = batch[k];
       var html; try { html = rp.getContentText(); } catch (e) { return; }
@@ -77,6 +91,19 @@ function syncTracking() {
   }
   Logger.log('✅ 追跡取込: 対象' + items.length + '件 / 取得' + ok + '件 / 書込' + updates.length + '件' + (delivered ? ' / 自動入荷' + delivered + '件' : ''));
   return { target: items.length, got: ok, wrote: updates.length, delivered: delivered };
+}
+
+// 📊 この日に何回投げたかを控える（GASのurlfetch枠は2万回/日・リセットJST16:00）。
+//   別プロジェクトの ufBump_ とは口座が同じなので、こちらでも数えて残しておく。
+function ufCount_(n) {
+  try {
+    var sp = PropertiesService.getScriptProperties();
+    var d = Utilities.formatDate(new Date(Date.now() - 16 * 3600 * 1000), 'Asia/Tokyo', 'yyyy-MM-dd'); // JST16時で日が変わる
+    var k = 'UF_' + d;
+    var v = Number(sp.getProperty(k) || 0) + Number(n || 0);
+    sp.setProperty(k, String(v));
+    if (v % 500 < Number(n || 0)) Logger.log('urlfetch 本日の累計(このプロジェクト): ' + v);
+  } catch (e) { Logger.log('ufCount_失敗: ' + e); }
 }
 
 function isYamato_(m) { return /らくらく|ヤマト|宅急便|クロネコ/.test(String(m || '')); }

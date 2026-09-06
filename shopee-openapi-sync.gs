@@ -3221,6 +3221,11 @@ function syncPayoutsAll() {
 // backfillAdjustments(1095, 40)    … 3年・打ち切り40窓(600日)緩め ＝ 深い再走査
 // backfillAdjustmentsDeep()        … 上記のショートカット
 function backfillAdjustments(days, maxEmpty, ccList) {
+  // ★枠のゲートと保存が無かった（2026-09-06）。
+  //   `_ufRun` は実行ごとのグローバルで、ufPersist_() を呼ばないと Properties に残らない＝
+  //   **投げた分が0回として記録される**。doGet/doPost は finally で必ず保存しているが、
+  //   トリガー経由とエディタ実行はその外。Deep版は上限1万回超になりうる。
+  if (!bgAllowed_()) { Logger.log('backfillAdjustments: urlfetch枠の予約線を超えているので実行しません'); return 0; }
   var DAYS = days || 730;                 // 既定2年
   var MAXEMPTY = maxEmpty || 12;          // payoutゼロが連続この窓数で打ち切り（既定180日）
   var WINDOWS = Math.ceil(DAYS / 15);
@@ -3249,9 +3254,11 @@ function backfillAdjustments(days, maxEmpty, ccList) {
       }
     } catch (e) { log.push(cc + ' ' + tok.shop_id + ' err: ' + String(e).slice(0, 120)); }
     total += got;
+    try { ufPersist_(); } catch (e) {}   // ★ショップごとに保存。6分上限で殺されても記録が残る
     log.push(cc + ' ' + tok.shop_id + ': ' + got + '件' + (oldest ? ('（最古payout ' + new Date(oldest * 1000).toISOString().slice(0, 10) + '頃まで／' + stop + '）') : '（payoutなし）'));
   });
   log.push('=== 合計 ' + total + '件 取込（走査 ' + DAYS + '日分・打切' + MAXEMPTY + '窓）===');
+  try { ufPersist_(); } catch (e) {}   // ★投げた回数を必ず残す（トリガー経由は finally の外）
   Logger.log(log.join('\n')); return total;
 }
 // 深い再走査：3年分・打ち切りを大幅に緩めてTH/VN等の古い分も取り切る（※全ショップだとGAS6分上限に達しやすい）
@@ -3562,10 +3569,15 @@ function surugaFindId_(kw) {
       'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'ja,en;q=0.8' } });
   var code = res.getResponseCode();
   var h = code === 200 ? res.getContentText() : '';
-  var m = h ? h.match(/\/product\/detail\/(\d+)/) : null;
+  // 🚦 遮断は【HTTP 200 のまま中身で返ってくる】ことがある。中身が短い・お決まりの文言なら断られた扱い。
+  var blocked = (code !== 200) || h.length < 3000 || /アクセスが集中|しばらく時間をおいて|ご利用いただけません|Too Many Requests|Access Denied/i.test(h);
+  var m = (h && !blocked) ? h.match(/\/product\/detail\/(\d+)/) : null;
   // ★取れない時に「叩けていないのか／検索が0件なのか」を切り分けられるようにする
   if (!_sgDiag) _sgDiag = { kw: kw, code: code, len: h.length, title: (h.match(/<title>([\s\S]{0,90}?)<\/title>/) || ['', ''])[1].replace(/\s+/g, ' ').trim(), hit: !!m,
     hits: ((h.match(/([0-9,]{1,9})\s*件/) || ['', ''])[1]) };
+  // ★断られた時は【空文字でなく null】を返す。呼び出し側が「写真なし」として
+  //   恒久キャッシュしてしまい、遮断中に舐めた語が以後ずっと写真なしになっていた（2026-09-06）。
+  if (blocked) return null;
   return m ? m[1] : '';
 }
 function titleImgs_(hw, words) {
@@ -3578,8 +3590,11 @@ function titleImgs_(hw, words) {
     if (cache[w] !== undefined) { out[w] = cache[w]; continue; }
     if (got > 0) Utilities.sleep(800);                    // 間隔を空ける
     var id = '';
-    try { id = surugaFindId_(w); } catch (e2) { id = ''; }
-    cache[w] = id; out[w] = id; got++;
+    try { id = surugaFindId_(w); } catch (e2) { id = null; }
+    got++;
+    // ★断られた（null）時は覚えない＝次回また探せる状態にする。そこで残りも打ち切る。
+    if (id === null) { Logger.log('駿河屋に断られたようなので、この回はここで止めます: ' + w); break; }
+    cache[w] = id; out[w] = id;
   }
   if (got) { try { sbUpsert_('app_kv', [{ k: key, v: cache, updated_at: new Date().toISOString() }], 'k'); } catch (e3) {} }
   return { map: out, fetched: got, diag: _sgDiag };
@@ -4017,6 +4032,7 @@ function addListingsTrigger() {
 // payout同期に相乗りしているだけだと取りこぼすため、直近30日を毎日引き直す（重複はadj_idで弾かれる）。
 var ADJ_MAIL_TO = 'gcsonlinestore631@gmail.com';
 function dailyAdjustmentsCheck() {
+  if (!bgAllowed_()) { Logger.log('dailyAdjustmentsCheck: urlfetch枠の予約線を超えているので実行しません'); return; }
   // 取り込み前に「今ある補償のキー」を控える → 差分＝今日入った分
   var before = {};
   try {
