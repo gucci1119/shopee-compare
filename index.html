@@ -13756,8 +13756,14 @@
     // 📥 今日の入庫＝受け取り済みにして入庫待ちから外れたもの。
     //   ★受け取った瞬間に入庫待ちから消えるので、**今日何件さばいたかがどこにも残らなかった**
     //     （2026-08-31 本人「ちょうど今、受け取り済みにしたのかな？」＝実際8件あったが画面に無い）。
+    // ⚠️ ここは `edited_at`（最後に触った時刻）しか見ていないので、
+    //   **受け取り以外の編集も全部「今日の入庫」に数えていた**（仕入額の訂正・注文SNの紐付け・
+    //   状態変更でも `edited_at` は今の時刻で書かれる／2026-09-06に発覚）。
+    //   受け取り専用の印は列が無いので足せない（新しい列を足すと既存DBで upsert が丸ごと失敗する）。
+    //   → **荷物として動いた形跡があるもの**に絞る（追跡番号か配送状態がある＝入庫待ちから来た）。
     const todayIn = (stock.rows || []).filter(r => {
       if (String(r.status || '') === '入庫待ち') return false;
+      if (!String(r.tracking_no || '').trim() && !String(r.delivery_status || '').trim()) return false;
       const t = Date.parse(r.edited_at || ''); if (!t) return false;
       const d = new Date(t);
       return d.getFullYear() === new Date().getFullYear() && d.getMonth() === new Date().getMonth() && d.getDate() === new Date().getDate();
@@ -14713,13 +14719,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   追跡番号は確実な手掛かり：**番号が無い＝発送手配すらしていない＝発送前**（＝損失ゼロ）と言い切れる。
     //   逆に番号がある場合は、日本国内か出国後かまでは分からないので**推定しない**（本人がボタンで決める）。
     //   実測：キャンセル1,050件のうち追跡番号ありは210件だけ。残り840件は自動で「発送前」に確定できる。
-    const inferStage = (raw, o) => {
-      const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
-      if (/Unpaid Order/i.test(t)) return '発送前';       // 未払い自動キャンセル=発送前
-      if (/Failed Delivery/i.test(t)) return '日本を出た後'; // 配送失敗=出国後に届かず
-      if (o && !String(o.tracking || '').trim()) return '発送前';   // 追跡番号が無い＝荷物は動いていない
-      return '';
-    };
+    const inferStage = (raw, o) => stageGuess_(raw, o).stage;
     const effStage = (o, iss) => (iss.stage || inferStage(o.cancel_reason, o)); // 手動設定優先、無ければ推定
     const slsEligible = (o, iss) => effStage(o, iss) === '日本を出た後';     // 半額保証の対象
     const issueMap = new Map(issues.map(r => [r.cc + ':' + r.sn, r]));
@@ -24264,6 +24264,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (hit || gotJa || undo) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
     return { dic: dic.size, drop: bad.size, tgt: tgt, hit: hit, noJp: noJp, gotJa: gotJa, hit2: hit2, undo: undo, again: again, fixed: fixed };
   }
+  // 🧭 キャンセルの段階（発送前／日本国内／日本を出た後）の【推定は1か所だけ】。
+  //   ⚠️ 返品ページと利益ページで別々に持っていて、判定が食い違っていた（2026-09-06）。
+  //     ・返品ページ：`3PL pickup Fail` を見ない／追跡番号が無ければ即「発送前」
+  //     ・利益ページ：`3PL pickup Fail` は日本を出た後／在庫紐付けがあれば発送前にしない
+  //     → 同じ注文が、返品ページで「発送前（推）」・利益ページで「未判定」と出ていた。
+  //   ★確定は本人がボタンで押した `order_issues.stage` が唯一の正。ここは推定だけ。
+  //   invCnt: 紐付いた在庫の件数。**分からない時は undefined を渡す**（0と区別する）。
+  const stageGuess_ = (raw, o, invCnt) => {
+    const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
+    if (/Unpaid Order/i.test(t)) return { stage: '発送前', guess: false };        // 未払い自動キャンセル
+    if (/Failed Delivery|3PL pickup Fail/i.test(t)) return { stage: '日本を出た後', guess: true };
+    const noTrack = o && !String(o.tracking || '').trim();
+    if (noTrack && invCnt === 0) return { stage: '発送前', guess: false };         // 伝票も在庫紐付けも無い＝事実
+    if (noTrack && invCnt === undefined) return { stage: '発送前', guess: true };  // 在庫が分からない＝推定どまり
+    return { stage: '', guess: false };
+  };
   // 🌏 国で絞ったJANの一覧。国別で見ているときに、他の国のJANで「出している」と
   //   誤判定しないため（PHにしか無い物がBRの画面で消えてしまう）。
   //   cc が空＝すべての国 のときは、これまでどおり全部を返す。
@@ -37362,19 +37378,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const PF_STAGES = ['発送前', '日本国内', '日本を出た後'];
   const PF_STAGE_COLOR = { '発送前': '#6b7280', '日本国内': '#1a73e8', '日本を出た後': '#d93025' };
   // 理由からの推定（返品ページの inferStage と同じルール。手動設定があればそちらが優先）
-  const pfInferStage = raw => {
-    const t = ((String(raw || '').match(/^(.*?)(?:\s*\[\w+\])?$/) || [])[1] || '').trim();
-    if (/Unpaid Order/i.test(t)) return '発送前';
-    if (/Failed Delivery|3PL pickup Fail/i.test(t)) return '日本を出た後';
-    return '';
-  };
-  // 段階が未設定でも、仕入紐付けも伝票も無いなら「発送前」で確定してよい（推定ではなく事実）
+  // ★推定は stageGuess_ に1本化した（返品ページと式が違って食い違っていた・2026-09-06）
   const pfStageOf = (o, invCnt) => {
     const iss = (pf.issueMap && pf.issueMap.get(o.cc + ':' + o.sn)) || null;
     if (iss && iss.stage) return { stage: iss.stage, guess: false };
-    if (!invCnt && !o.tracking) return { stage: '発送前', guess: false };
-    const g = pfInferStage(o.cancel_reason);
-    return { stage: g || '', guess: !!g };
+    return stageGuess_(o.cancel_reason, o, Number(invCnt) || 0);
   };
 
   async function pfSetStage(cc, sn, stage) {
