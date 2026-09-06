@@ -67,6 +67,18 @@ function syncTracking() {
       Utilities.sleep(CHUNK_WAIT * Math.pow(3, ngRun));
       continue;
     }
+    // ★`muteHttpExceptions:true` なので、429/503 で断られても fetchAll は**普通に返る**。
+    //   ここで無条件に0へ戻すと、いちばん多い「断られ方」では待ち時間も打ち切りも一生効かない
+    //   （2026-09-07 Codexの指摘）。中身の応答コードを見てから判断する。
+    var bad = 0;
+    resp.forEach(function (rp) { try { if (rp.getResponseCode() >= 400) bad++; } catch (e) { bad++; } });
+    if (bad >= Math.ceil(resp.length / 2)) {
+      Logger.log('断られました(' + bad + '/' + resp.length + ')。待って続けます');
+      ngRun++;
+      if (ngRun >= 3) { Logger.log('続けて断られたのでこの回は打ち切ります'); break; }
+      Utilities.sleep(CHUNK_WAIT * Math.pow(3, ngRun));
+      continue;
+    }
     ngRun = 0;
     resp.forEach(function (rp, k) {
       var r = batch[k];
@@ -93,17 +105,46 @@ function syncTracking() {
   return { target: items.length, got: ok, wrote: updates.length, delivered: delivered };
 }
 
-// 📊 この日に何回投げたかを控える（GASのurlfetch枠は2万回/日・リセットJST16:00）。
-//   別プロジェクトの ufBump_ とは口座が同じなので、こちらでも数えて残しておく。
+// 📊 この日に何回投げたかを控える（GASのurlfetch枠は2万回/日・Googleアカウント単位で共有）。
+//   ★数えるだけでは意味が無い。**誰も読まない所に置いた数字は無いのと同じ**だった
+//     （2026-09-07 Codexの指摘）。ポータルの接続枠パネルは `app_kv.uf_ext_*` を読むので、
+//     そこへ知らせるところまでやる。100回たまるごとに1回だけ書く（書き込み自体も枠を食うため）。
+//   ★日の境目は【太平洋時間】で決める。JSTから16時間引くやり方だと、冬時間(11〜3月)は
+//     本当のリセットが17:00JSTなので、16:00〜17:00の1時間ぶんが翌日の鍵に入って過少申告になる。
+// ※このファイルは「メルカリ購入→在庫Supabase同期」プロジェクトに同居しているので、
+//   関数名がぶつからないよう trk 付きの専用名にする。
+function ufTrkDay_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufCount_(n) {
   try {
     var sp = PropertiesService.getScriptProperties();
-    var d = Utilities.formatDate(new Date(Date.now() - 16 * 3600 * 1000), 'Asia/Tokyo', 'yyyy-MM-dd'); // JST16時で日が変わる
+    var d = ufTrkDay_();
     var k = 'UF_' + d;
     var v = Number(sp.getProperty(k) || 0) + Number(n || 0);
     sp.setProperty(k, String(v));
     if (v % 500 < Number(n || 0)) Logger.log('urlfetch 本日の累計(このプロジェクト): ' + v);
+    // 100回ごとにポータルへ知らせる（前回知らせた数との差が100以上のときだけ）
+    var last = Number(sp.getProperty('UF_PUB_' + d) || 0);
+    if (v - last >= 100) {
+      v += 1;                                   // 知らせる1回ぶんも枠を食う
+      sp.setProperty(k, String(v));
+      if (ufTrkPublish_(d, v)) sp.setProperty('UF_PUB_' + d, String(v));
+    }
   } catch (e) { Logger.log('ufCount_失敗: ' + e); }
+}
+// app_kv.uf_ext_tracking = { d:'YYYY-MM-DD'(太平洋時間), n:回数 } を上書きする。
+// ポータル側は uf_ext_ で始まる鍵を全部足すので、他のプロジェクトの分と混ざらない。
+function ufTrkPublish_(d, n) {
+  try {
+    var P = PropertiesService.getScriptProperties();
+    var SB = P.getProperty('SB_URL'), KEY = P.getProperty('SB_SERVICE_KEY');
+    if (!SB || !KEY) return false;
+    var res = UrlFetchApp.fetch(SB + '/rest/v1/app_kv?on_conflict=k', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { apikey: KEY, Authorization: 'Bearer ' + KEY, Prefer: 'resolution=merge-duplicates,return=minimal' },
+      payload: JSON.stringify([{ k: 'uf_ext_tracking', v: { d: d, n: n } }])
+    });
+    return res.getResponseCode() < 300;
+  } catch (e) { Logger.log('ufTrkPublish_失敗: ' + e); return false; }
 }
 
 function isYamato_(m) { return /らくらく|ヤマト|宅急便|クロネコ/.test(String(m || '')); }

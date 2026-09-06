@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.44.0
+// @version      3.44.1
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -1376,6 +1376,11 @@
     if (cycling) { if (manual) toast('巡回中です…'); return; }
     if (!manual && GM_getValue('autoCrawl', false) !== true) return;   // 自動起動の巡回は既定OFF（手動指示のみ）
     if (mode === 'full' && !manual && backfillOff()) return; // 履歴の遡りは打ち切り済み（新着はこの下の new 巡回が拾う）
+    // ★「止める」は【いま走っている巡回だけ】に効く合図。ここで必ず戻しておかないと、
+    //   一度止めたあと自動巡回をONに戻しても・crawl_now を送っても、入った瞬間に止まって
+    //   【リロードするまで二度と取り込めない】（2026-09-07 Codexの指摘）。
+    //   止めた時は自動起動もOFFになるので、これで勝手に走り出すことはない。
+    crawlStop = false;
     cycling = true; let count = 0, stagnant = 0, upToDate = 0;
     _runStart = Date.now(); _runStartDone = crawlDone.size; reportCrawl(mode, true, ''); // 進捗の起点（ETA計算用）
     const startConv = (domHeaderInfo() || {}).buyer || '';
@@ -1456,7 +1461,7 @@
       if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm((row.innerText || '').split('\n')[0]) === norm(startConv)) { reactOpen(row); break; } } } }
     } catch (_) {} finally { cycling = false; cycleInfo = ''; _crawlRepAt = 0; reportCrawl(mode, false, ''); updateChip(); }
   }
-  GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => { crawlStop = false; slowCrawl('full', true); });
+  GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => { slowCrawl('full', true); });
   // ⏹ いま走っている巡回を止める。あわせて自動起動もOFFにする（同じことを2回聞かれないように）。
   GM_registerMenuCommand('⏹ 巡回を今すぐ止める（自動起動もOFF）', () => {
     crawlStop = true;

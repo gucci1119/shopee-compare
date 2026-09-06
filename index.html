@@ -1753,11 +1753,12 @@
     //   枠切れの方向に間違える（＝いちばん危ない側の誤り）。前回読めた値を持ち越す。
     let ext = Number(window.__ufExtLast) || 0, extKnown = (window.__ufExtLast != null);
     try {
-      const g = await sbGetAll('app_kv', 'select=v&k=eq.uf_ext_mercari');
-      const v = (g && g[0] && g[0].v) || null;
+      // ★1つの鍵だけ見ていると、あとから足したGASの分が【永久に入らない】（2026-09-07 Codexの指摘）。
+      //   uf_ext_ で始まる鍵を全部足す（仕入れメール取込・配送追跡…）。
+      const g = await sbGetAll('app_kv', 'select=k,v&k=like.uf_ext_*');
       // 太平洋時間の日付が今日と同じ時だけ足す（日をまたいだ古い数字を持ち越さない）
       const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
-      ext = (v && v.d === today) ? (Number(v.n) || 0) : 0;
+      ext = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today) ? (Number(v.n) || 0) : 0); }, 0);
       extKnown = true; window.__ufExtLast = ext;
     } catch (_) {}
     // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
@@ -2404,7 +2405,11 @@
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
-    return gasCall({ action: 'rename_models', token: settings.writeToken, shop_id: shopId, item_id: itemId, before: before, after: (after == null ? '' : after) }, 60000);
+    const r = await gasCall({ action: 'rename_models', token: settings.writeToken, shop_id: shopId, item_id: itemId, before: before, after: (after == null ? '' : after) }, 60000);
+    // ★販売数の控えは【明細名】が鍵。名前を変えると控えに届かなくなり、
+    //   消した分を足し戻す補正が黙って消える（2026-09-07 Codexの指摘）。名前を変えたら控えも付け替える。
+    if (r && r.ok !== false) { try { await soldBaseRename(itemId, before, after); } catch (_) {} }
+    return r;
   }
   // 公式APIで既存出品にバリエ(明細)を1つ追加（tierにオプション追記→add_model）
   // 明細（バリエーション）の並び替え。order=新しい順の明細名。区切りは \u0001（名前にカンマが入り得るため）
@@ -5734,6 +5739,11 @@
   //   日英が混ざった読めない文になる（2026-08-12に実害）。辞書に無い文はまるごと日本語のまま残す方が読める。
   // ★数字を含む文言は「日本語＋数字」が1つの文字列になるので完全一致では拾えない。
   //   形が決まっているものだけ、アンカー付きのパターンで置き換える（部分置換ではないので混ざらない）。
+  Object.assign(I18N, {
+    // 📚 母数（作品マスタ）の内訳。2026-09-07に「読めなかった」を足したので、対の文も一緒に登録する
+    'まだマスタを取り込んでいません（右上の「⬇ マスタを取り込む」）。': 'The master list has not been imported yet (use "\u2B07 Import master" at the top right).',
+    'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
+  });
   const I18N_PAT = [
     [/^♻️ 無料で埋まる分を入れる$/, '♻️ Fill in what is free'],
     [/^JAN ([\d,]+)\/([\d,]+)（空([\d,]+)）$/, 'JAN $1/$2 ($3 empty)'],
@@ -5820,6 +5830,10 @@
     [/^届いているかもしれません：(.+)$/, 'May have arrived: $1'],
     [/^(.+)　仕入から (\d+)日（目安 (\d+)日）　追跡情報なし$/, '$1  $2 days since purchase (expected $3)  no tracking information'],
     [/^(\d{4})年(\d{1,2})月$/, (m, y, mo) => ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+mo] + ' ' + y],
+    // 2026-09-07 に足した札（英語版の抜け・Codex指摘）
+    [/^⚠️ 未入力（既定 162 で計算中）$/, '\u26A0\uFE0F Not entered (using default 162)'],
+    [/^1日 (\d+)$/, '1 day $1'],
+    [/^※古$/, '(stale)'],
     [/^(\d{4})年$/, '$1'], [/^(\d{1,2})月$/, (m, mo) => ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][+mo]],
   ];
   const i18nMiss = new Set();   // 英語モードで訳が見つからなかった文字（🌐の隣に件数を出す）
@@ -13763,7 +13777,13 @@
     //   → **荷物として動いた形跡があるもの**に絞る（追跡番号か配送状態がある＝入庫待ちから来た）。
     const todayIn = (stock.rows || []).filter(r => {
       if (String(r.status || '') === '入庫待ち') return false;
-      if (!String(r.tracking_no || '').trim() && !String(r.delivery_status || '').trim()) return false;
+      //   ★追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、
+      //     メルカリ側の `delivery_info` にしか形跡が残らない。ここを見ていなかったので、
+      //     その行を受け取り済みにしても今日の入庫から消えていた（2026-09-07 Codexの指摘）。
+      //     ただし `delivery_info` は「届予定 7/15」のような**まだ動いていない**値も入るので、
+      //     荷物が動いた言葉のときだけ形跡とみなす。
+      if (!String(r.tracking_no || '').trim() && !String(r.delivery_status || '').trim()
+        && !/^(配達済|配達中|到着|引受|発送)/.test(String(r.delivery_info || '').trim())) return false;
       const t = Date.parse(r.edited_at || ''); if (!t) return false;
       const d = new Date(t);
       return d.getFullYear() === new Date().getFullYear() && d.getMonth() === new Date().getMonth() && d.getDate() === new Date().getDate();
@@ -16095,6 +16115,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-07', items: [
+      '\u26FD <b>接続枠の安全弁の穴を塞ぎました</b>。補償の一括取込（深い走査）は<b>入口で1回だけ</b>枠を見ていたので、始めた時点で余っていれば、そのあと<b>1万回以上</b>投げても止まりませんでした。<b>15日の窓ごとに枠を見て・窓ごとに記録を残す</b>ようにしています（GASの6分制限で殺されても、投げた回数が消えません）。',
+      '\u{1F4CA} <b>配送追跡が使った接続枠が、どこにも出ていませんでした</b>。数えてはいたのですが<b>誰も読まない場所</b>に置いていたため、画面の「のこり◯回」に入らず<b>残りが実際より多く見えて</b>いました。ポータルに知らせるようにし、画面は<b>他のGASの分も全部足して</b>表示します。日の変わり目も<b>太平洋時間</b>で数えます（冬時間は17時に変わるので、16時固定だと1時間ぶん抜けていました）。',
+      '\u{1F69A} <b>配送業者に断られた時に、待たずに叩き続けていました</b>。429/503は例外にならないので「成功」と同じ扱いになり、<b>待ち時間も打ち切りも一生効きません</b>でした。応答の中身を見て、半分以上が断られていたら待って、3回続いたらその回は打ち切ります。',
+      '\u23F9 <b>チャットの巡回を止めたあと、二度と再開できませんでした</b>。止めた印が残りっぱなしで、自動巡回をONに戻しても「今すぐ取り込む」を送っても、入った瞬間に止まっていました（<b>ページを読み込み直すまで取り込みゼロ</b>）。止める合図は<b>いま走っている巡回だけ</b>に効くようにしました（v3.44.1）。',
+      '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
+      '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
+      '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F310} 英語表示の抜けを補充（確定申告の「未入力（既定162で計算中）」・未発送の「1日◯」・母数の「※古」）。',
+    ] },
     { date: '2026-09-06', items: [
       '📗 <b>「利益管理表から補完」が、いつの値なのか出るようにしました</b>。この控え（app_kv.profit_amounts）を<b>書く処理はどこにもありません</b>（リポジトリ内を確認済み）。手で入れた時点の値のまま固まるのに、画面には件数しか出ていませんでした。<b>実測：最終更新は 2026-08-09</b>＝約1か月前のまま。<b>「◯月◯日 時点」</b>を併記し、35日以上たっていたら赤字で<b>「自動では更新されません」</b>と出します。',
       '🧾 <b>確定申告の USD/JPY が未入力のとき、そうと分かるようにしました</b>。未入力だと<b>コードに書いてある162</b>で計算しますが、画面には数字だけが出ていて既定値だと気づけませんでした。申告に使う数字なので<b>「⚠️ 未入力（既定 162 で計算中）」</b>と出します。',
@@ -24224,9 +24254,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const janSet = new Set(), jaSet = new Set();
           for (const c of cands) {
             let dd = dicOf[c];
-            if (dd === undefined) { try { dd = await janEnJa(c); } catch (_) { dd = null; } dicOf[c] = dd || null; }
-            // ⚠️ 作品マスタが**読めなかった時も空の辞書が返る**（loadTitleRowsが例外を握りつぶす）。
-            //   中身が無い辞書では「当たらなかった」と判断しない。
+            if (dd == null) { try { dd = await janEnJa(c); } catch (_) { dd = null; } if (dd) dicOf[c] = dd; }
+            // ⚠️ 作品マスタが**読めなかった時は null**（2026-09-07に、空の辞書と分けた）。
+            //   中身が無い辞書でも「当たらなかった」と判断しない。
             if (!dd || !dd.n) continue;
             const jj = dicHw[c] || dicHw[JAN_MST_ALIAS[c] || ''] || null;
             const dataOk = !!(jj && jj.size) && !sgFail.has(c) && !sgFail.has(JAN_MST_ALIAS[c] || c);
@@ -24327,9 +24357,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return s2;
   }
   // 1ハード分の全タイトル（突合するときだけ読む）
+  //   ⚠️ **読めなかった(null)** と **本当に空([])** を分ける。混ぜると、通信が一度こけただけで
+  //      「0件」が控えに焼き付き、母数表の「出している」がずっと0のまま戻らなくなる
+  //      （[[catch-empty-is-not-absence]] / [[dont-report-zero-when-unknown]]）。
   async function loadTitleRows(hw) {
     try { const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw)); return ((r && r[0] && r[0].v) || {}).rows || []; }
-    catch (_) { return []; }
+    catch (_) { return null; }
   }
   // 🏪 駿河屋の一覧（＝物理で流通しているものの一次情報）。画像も母数もここに依存するので、
   //    描画の前に必ず揃える。以前は画像処理の中でだけ読んでいたため、初回描画では物理判定ができなかった。
@@ -24513,6 +24546,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     _tmMatching = true;
     for (const h of todo) {
       const rows = await loadTitleRows(h);
+      if (!rows) continue;                    // 読めなかった＝0を控えない（次の描画でやり直す）
       const lk = await loadTitleLink();
       const mi = tmMineIndex((own.names || {})[h] || [], lk);
       let hit = 0;
@@ -25775,6 +25809,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     box.innerHTML = tmCloseBar + '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">' + esc(TITLE_HW_JA[hw] || hw) + ' の内訳を読み込み中…</span></div>';
     const rows = await loadTitleRows(hw);
     await ensureSgRows(hw);          // ★物理判定と画像は駿河屋の一覧が要る。描画前に揃える
+    if (!rows) { box.innerHTML = tmCloseBar + '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。</span></div>'; return; }
     if (!rows.length) { box.innerHTML = tmCloseBar + '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">まだマスタを取り込んでいません（右上の「⬇ マスタを取り込む」）。</span></div>'; return; }
     const mine = (own && own.names && own.names[hw]) || new Set();
     const link = await loadTitleLink();
@@ -30079,12 +30114,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!key) return null;
     if (_janMaster[key]) return _janMaster[key];
     const m = new Map();
-    try {
-      (await loadTitleRows(key)).forEach(x => {
-        if (!x || !x.en || !x.ja) return;
-        const k = janMasterNorm(x.en); if (k && !m.has(k)) m.set(k, String(x.ja));
-      });
-    } catch (_) {}
+    let rows = null; try { rows = await loadTitleRows(key); } catch (_) {}
+    if (!rows) return m;              // 読めなかった：空の辞書を控えに残さない（次でやり直す）
+    rows.forEach(x => {
+      if (!x || !x.en || !x.ja) return;
+      const k = janMasterNorm(x.en); if (k && !m.has(k)) m.set(k, String(x.ja));
+    });
     _janMaster[key] = m;
     return m;
   }
@@ -30402,7 +30437,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const key = JAN_MST_ALIAS[hw] || hw; if (!key) return null;
     lst._enJa = lst._enJa || {};
     if (lst._enJa[key]) return lst._enJa[key];
-    let rows = []; try { rows = await loadTitleRows(key); } catch (_) {}
+    let rows = null; try { rows = await loadTitleRows(key); } catch (_) {}
+    if (!rows) return null;           // 読めなかった：辞書を作らない・控えない（呼び側は !dd で見送る）
     const keys = [], jas = [], toks = [], tok = new Map(), exact = new Map();
     rows.forEach(x => { if (!x || !x.en || !x.ja) return; const k = tmKey(x.en); if (!k) return;
       const i = keys.length; keys.push(k); jas.push(String(x.ja));
@@ -31402,6 +31438,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       await sbUpsert('app_kv', [{ k, v, updated_at: new Date().toISOString() }]);
       if (_soldBase) _soldBase.set(k, v);
     } catch (_) { }
+  }
+  // 🔤 明細名を変えたときに、販売数の控えの鍵も付け替える。
+  //   控えは soldbase_<国>_<item_id> なので、その出品ぶんだけを見る（国は分からなくてよい）。
+  async function soldBaseRename(itemId, before, after) {
+    const bn = soldNameKey(String(before || '')), an = soldNameKey(String(after || ''));
+    if (!itemId || !bn || !an || bn === an) return;
+    await ensureSoldBase();
+    if (!_soldBase) return;
+    const tail = '_' + String(itemId);
+    const puts = [];
+    _soldBase.forEach((v, k) => {
+      if (k.indexOf('soldbase_') !== 0 || k.slice(-tail.length) !== tail) return;
+      const names = (v && v.names) || null; if (!names || names[bn] == null) return;
+      names[an] = names[bn]; delete names[bn];
+      puts.push({ k, v, updated_at: new Date().toISOString() });
+    });
+    if (puts.length) await sbUpsert('app_kv', puts);
   }
 
   // 🔑 shop_id → 系統。★判定は二重に持たない＝既にある famOfLabel(7986行) と acctLabel(6901行) を使う。

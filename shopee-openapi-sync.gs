@@ -3235,9 +3235,14 @@ function backfillAdjustments(days, maxEmpty, ccList) {
     var cc = tok.cc || '?', got = 0, emptyStreak = 0, oldest = 0, stop = '全期間走査';
     try {
       for (var wk = 0; wk < WINDOWS; wk++) {
+        // ★入口で1回見るだけでは足りない。深い走査は窓×ページで1万回を超えうるので、
+        //   【窓ごとに枠を見て・窓ごとに記録を残す】（6分で殺されても投げた分が消えない）。
+        try { ufPersist_(); } catch (e) {}
+        if (!bgAllowed_()) { stop = '枠の予約線に達したので中断'; break; }
         var to = nowS - wk * 15 * 86400, from = to - 15 * 86400;
         var payoutsInWin = 0, pageNo = 0, apiErr = false;
         for (var g = 0; g < 30; g++) { // 1窓内をページ送りで完走
+          if (!bgAllowed_()) { apiErr = false; stop = '枠の予約線に達したので中断'; break; }
           var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: from, payout_time_to: to, page_size: 40, page_no: pageNo }, 'get');
           if (j && j.error) { apiErr = true; break; } // この窓でAPIエラー（遡り上限など）
           var resp = j.response || {};
