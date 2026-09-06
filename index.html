@@ -29531,10 +29531,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ★機種（ハード）が違えば別商品。同じJANが付いていてもそれはAIの取り違えであって
     //   「重複出品」ではない（2026-08-30 実測：PS1版とPSP版の Star Ocean に同じJANが入った）。
     //   カタログ名からハードを拾って、違うもの同士は重複と言わない。
+    // ⚡ item_id → {cc, name} の索引を【1回だけ】作る。
+    //   これが無いと hwOfItem / ccOfKey が呼ばれるたびに全国の全出品行を舐めていた
+    //   （productIdsの件数 × 全出品行）。JANを埋めるほど作り直しが重くなっていた（2026-09-06）。
+    const _itemIdx = new Map();
+    Object.keys(lst.byCc || {}).forEach(c2 => (lst.byCc[c2] || []).forEach(r => {
+      const k2 = String(r.item_id); if (!_itemIdx.has(k2)) _itemIdx.set(k2, { cc: c2, name: r.name || '' });
+    }));
     const hwOfItem = (id) => {
-      let nm = '';
-      Object.keys(lst.byCc || {}).forEach(c2 => (lst.byCc[c2] || []).forEach(r => { if (String(r.item_id) === String(id)) nm = r.name || ''; }));
-      const t = String(nm);
+      const t = String((_itemIdx.get(String(id)) || {}).name || '');
       const pats = [['Switch 2', 'SW2'], ['Switch', 'SW'], ['PS Vita', 'PSV'], ['PSVita', 'PSV'], ['PSP', 'PSP'],
         ['PS5', 'PS5'], ['PS4', 'PS4'], ['PS3', 'PS3'], ['PS2', 'PS2'], ['PS1', 'PS1'], ['Playstation 1', 'PS1'],
         ['Game Boy Advance', 'GBA'], ['Gameboy Advance', 'GBA'], ['GBA', 'GBA'],
@@ -29548,9 +29553,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     };
     const ccOfKey = (k) => {
       const m = /^id:(\d+)/.exec(String(k)); if (!m) return '';
-      const id = m[1];
-      const cc = Object.keys(lst.byCc || {}).find(c => (lst.byCc[c] || []).some(r => String(r.item_id) === id));
-      return cc || '';
+      return (_itemIdx.get(m[1]) || {}).cc || '';
     };
     const dup = {};
     Object.keys(byVal).forEach(t => {
@@ -31351,11 +31354,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return _soldBaseLoading;
   }
   // 表示用の販売数（補正が無ければそのまま）
+  // 🔑 販売数の控えの鍵は【生の明細名】。tmKey は complete / boxed / cib / used / new を落とすので、
+  //   同じカタログの「Mario Kart DS Boxed」と「Mario Kart DS CIB」が同じ鍵になり、
+  //   **後の明細が前の明細の控えを黙って上書き**して販売数が入れ替わる（2026-09-06）。
+  //   ※古い控えは tmKey の鍵で入っているので、そちらも見る（両引きで移行）。
+  const soldNameKey = (n) => String(n || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
   function soldShown(cc, itemId, m) {
     const raw = Number((m && m.soldRaw != null) ? m.soldRaw : (m && m.sold)) || 0;   // 二重に足さない
     const rec = _soldBase && _soldBase.get(soldBaseKey(cc, itemId));
     if (!rec || !rec.names || m.ti == null) return raw;
-    const base = rec.names[tmKey(String(m.n || ''))];
+    const nm = String(m.n || '');
+    const base = (rec.names[soldNameKey(nm)] != null) ? rec.names[soldNameKey(nm)] : rec.names[tmKey(nm)];
     if (base == null) return raw;
     const slotBase = Number((rec.slots || {})[String(m.ti)] || 0);
     return Number(base) + Math.max(0, raw - slotBase);
@@ -31370,7 +31379,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!x || x.ti == null) return;
         slots[String(x.ti)] = Number(x.soldRaw != null ? x.soldRaw : x.sold) || 0;   // Shopeeが返す生の数
         if (delSet.has(String(x.id))) return;                     // 消す明細は控えない
-        names[tmKey(String(x.n || ''))] = soldShown(cc, itemId, x);
+        names[soldNameKey(String(x.n || ''))] = soldShown(cc, itemId, x);   // ★生の明細名で控える
       });
       const k = soldBaseKey(cc, itemId);
       const v = { names, slots, ts: Date.now() };
