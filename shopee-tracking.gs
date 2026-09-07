@@ -71,16 +71,13 @@ function syncTracking() {
     //   ここで無条件に0へ戻すと、いちばん多い「断られ方」では待ち時間も打ち切りも一生効かない
     //   （2026-09-07 Codexの指摘）。中身の応答コードを見てから判断する。
     var bad = 0;
-    resp.forEach(function (rp) { try { if (rp.getResponseCode() >= 400) bad++; } catch (e) { bad++; } });
-    if (bad >= Math.ceil(resp.length / 2)) {
-      Logger.log('断られました(' + bad + '/' + resp.length + ')。待って続けます');
-      ngRun++;
-      if (ngRun >= 3) { Logger.log('続けて断られたのでこの回は打ち切ります'); break; }
-      Utilities.sleep(CHUNK_WAIT * Math.pow(3, ngRun));
-      continue;
-    }
-    ngRun = 0;
+    // ★【先に成功分を拾う】。断られた数を数えてすぐ次のかたまりへ行くと、
+    //   同じかたまりに入っていた**取れているぶんまで捨てる**（6件中3件が429なら
+    //   残り3件の配達完了が書かれない・2026-09-07 Codexの指摘）。
+    //   断られたかどうかは【1件ずつ】見て、成功したものは必ず反映する。
     resp.forEach(function (rp, k) {
+      var code = 0; try { code = rp.getResponseCode(); } catch (e) { code = 0; }
+      if (!code || code >= 400) { bad++; return; }        // この1件は断られた
       var r = batch[k];
       var html; try { html = rp.getContentText(); } catch (e) { return; }
       var info = isYamato_(r.ship_method) ? parseYamato_(html) : parseJapanPost_(html);
@@ -90,6 +87,15 @@ function syncTracking() {
       if (autoArrive && isDelivered_(info.status)) { patch.status = '在庫保管中'; patch.edited_at = now; delivered++; }
       updates.push(patch);
     });
+    // 断られが多いかたまりだったら、次へ行く前に長めに待つ（相手が詰まっている時ほど強く叩かない）
+    if (bad >= Math.ceil(resp.length / 2)) {
+      Logger.log('断られました(' + bad + '/' + resp.length + ')。取れた分は反映して、待って続けます');
+      ngRun++;
+      if (ngRun >= 3) { Logger.log('続けて断られたのでこの回は打ち切ります'); break; }
+      Utilities.sleep(CHUNK_WAIT * Math.pow(3, ngRun));
+      continue;
+    }
+    ngRun = 0;
     Utilities.sleep(CHUNK_WAIT);
   }
 

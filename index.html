@@ -1403,7 +1403,10 @@
   //    ★描画の中から描画を呼ばない。ここはメッセージ受信なので描画中ではないが、
   //      何度も走らないよう1回だけにする（[[portal-no-render-loop]]）。
   function bridgeBack_() {
-    if (typeof state === 'undefined' || state.mode === 'live' || state.mode === 'boot') return;
+    // ★'boot'（GASのURL未設定）でも戻す。ここで boot を弾いていたため、
+    //   その環境では**返事が来ても捨て続けて二度とライブに戻らなかった**（Codex指摘 2026-09-07）。
+    //   起動時も「ブリッジがあれば live」なので、boot→live にしてよい。
+    if (typeof state === 'undefined' || state.mode === 'live') return;
     if (Date.now() - _bridgeBackOnce < 30000) return;
     _bridgeBackOnce = Date.now();
     state.mode = 'live';
@@ -16168,6 +16171,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
       '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
       '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F50D} <b>別のAI（Codex）の指摘4件を直しました</b>。①<b>つなぎ役が戻っても復帰しない環境がありました</b>（GASのURLが未設定だと、返事が来ても捨て続けて二度とライブに戻らない）。②自動再開が<b>途中で抜けた時に「再開済み」の印を残し</b>、以後の再開が全部はじかれていました。③配送追跡で、<b>断られた荷物が混ざっていると、同じまとまりの取れている分まで捨てて</b>いました（6件中3件が断られると、残り3件の配達完了が書かれない）。④明細名の置換は<b>名前の一部にも効く</b>のに、販売数の控えは「まるごと一致」しか見ておらず、部分置換だと補正が消えたままでした。',
       '\u{1F6AA} <b>タブを読み込み直すと、取り込みの「続きから再開」が効かなくなっていました</b>。閉じるときに<b>「もう走っていません」の合図として時刻を0にしていた</b>のですが、次に開いた時にそれが<b>「期限切れ」と同じに見えて、印ごと消して</b>いました。手放したことは別の印で伝えるようにしました。※この穴は、直前に直した別の不具合（持ち主の印が消える件）のせいで<b>これまで表に出ていなかった</b>ものです。',
       '\u23F1 <b>取り込みを再開すると、最初の1時間ほど何もしていませんでした</b>。機種を切り替えるたびに3分休む作りですが、<b>すでに終わっている機種でも休んで</b>いました。30機種のうち20機種が完了済みなので<b>20×3分＝約1時間</b>を、1件も取らずに寝ていたことになります（実測：再開から37分ずっと「3分休みます」）。休憩は「叩きすぎない」ためのものなので、<b>1件も叩いていない機種では休まない</b>ようにしました。あわせて、通り過ぎている間も<b>いま何機種目を見ているか</b>を出します。',
       '\u{1F504} <b>駿河屋のJAN取り込みが、どのページで開き直しても続きから再開するようになりました</b>。これまでは<b>母数のページを開いた時にしか</b>再開の確認をしておらず、別のページで開き直すと<b>止まったまま</b>でした（本体がボタンのクリック処理の中に入っていたためです）。本体を独立させ、<b>ページを開いた時・つなぎ役が戻った時・母数ページを開いた時</b>のどこからでも再開します。取り込み済みの機種一覧も、その場で読み直すようにしました。',
@@ -24676,6 +24680,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (el0) el0.textContent = '📇 待機中（Shopeeのタブを開くと続きから再開します）';
         return;
       }
+      // ⚠️ この印は「もう再開の手配をした」の意味。**途中で抜けるなら必ず下ろす**。
+      //   下ろさないと、以後の再開判定が入口(`_janResumed`)で全部はじかれて
+      //   リロードするまで二度と再開しない（[[stop-flag-must-not-latch]] と同じ形・Codex指摘）。
       lst._janResumed = true;
       const sj2 = document.getElementById('tm-sgjan');
       if (sj2) sj2.textContent = '📇 続きから再開します…';
@@ -24696,13 +24703,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const sj = document.getElementById('tm-sgjan') || { textContent: '' };
       // ★同じボタンが「開始」と「停止」を兼ねている。**自動再開が停止に化けないように**分ける。
       if (lst._sgRunning) {
-        if (auto) return;                                             // 自動は触らない
+        if (auto) { lst._janResumed = false; return; }                 // 自動は触らない（印は残さない）
         lst._sgStop = true; sj.textContent = '■ 止めています…';
         try { localStorage.removeItem('smdJanFill'); } catch (_) {}   // 自分で止めた＝再開しない
         return;
       }
       if (state.mode !== 'live') {
-        if (auto) return;                                             // 自動は黙って見送る（呼び側が理由を出す）
+        if (auto) { lst._janResumed = false; return; }                // 自動は黙って見送る（次の機会にやり直す）
         alert('この取り込みはブラウザ拡張（ブリッジ）を使います。Shopeeにログインした状態で開いてください。'); return;
       }
       // ★他の画面で走っている最中に押されたら断る（駿河屋を2倍叩かないため）
@@ -24740,7 +24747,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try {
           const _gi = await sbGetAll('app_kv', 'select=k,v&k=eq.sg_index');
           lst.sgHave = (_gi && _gi[0] && _gi[0].v) || {};
-        } catch (_) { if (auto) return; }
+        } catch (_) { if (auto) { lst._janResumed = false; return; } }
       }
       const _own = ownTitleCounts();
       const _cnt = (h) => { const m = (lst.tmMatch || {})[h]; return (m != null) ? m : ((_own.per || {})[h] || 0); };
@@ -24749,7 +24756,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const cand = one ? [one] : Object.keys(SURUGA_CAT)
         .filter(h => ((lst.sgHave || {})[h] || {}).n)
         .sort((a, b) => _cnt(b) - _cnt(a));
-      if (!cand.length) { if (auto) return; alert('先に駿河屋の一覧を取り込んでください'); return; }
+      if (!cand.length) { if (auto) { lst._janResumed = false; return; } alert('先に駿河屋の一覧を取り込んでください'); return; }
       // ★何件見に行くのかを【押す前に】出す。1件1.2秒なので、件数がそのまま所要時間になる。
       // ⚠️ ここで30ハードぶん（4.5万件）を読み直すと、開始のたびに数十秒かかり、
       //    その間タブが重くなる（自動再開のたびに毎回起きる・2026-09-05）。
@@ -31569,18 +31576,31 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 🔤 明細名を変えたときに、販売数の控えの鍵も付け替える。
   //   控えは soldbase_<国>_<item_id> なので、その出品ぶんだけを見る（国は分からなくてよい）。
+  //   ⚠️ 置換は【名前の一部】に効く。GAS側は `v.split(before).join(after)` で
+  //      **明細名の中に出てくる before を全部** after に置き換える（after='' なら削除）。
+  //      ここを「名前まるごと一致」だけで見ていたため、
+  //      「[Used] Mario」から「[Used] 」を消すような**部分置換で控えに届かず**、
+  //      販売数の補正が消えたままだった（Codex指摘 2026-09-07）。同じ物差しで置き換える。
   async function soldBaseRename(itemId, before, after) {
-    const bn = soldNameKey(String(before || '')), an = soldNameKey(String(after || ''));
-    if (!itemId || !bn || !an || bn === an) return;
+    const bn = soldNameKey(String(before || ''));
+    const an = soldNameKey(String(after == null ? '' : after));
+    if (!itemId || !bn || bn === an) return;
     await ensureSoldBase();
     if (!_soldBase) return;
     const tail = '_' + String(itemId);
     const puts = [];
     _soldBase.forEach((v, k) => {
       if (k.indexOf('soldbase_') !== 0 || k.slice(-tail.length) !== tail) return;
-      const names = (v && v.names) || null; if (!names || names[bn] == null) return;
-      names[an] = names[bn]; delete names[bn];
-      puts.push({ k, v, updated_at: new Date().toISOString() });
+      const names = (v && v.names) || null; if (!names) return;
+      let hit = 0;
+      Object.keys(names).forEach(key => {
+        if (key.indexOf(bn) < 0) return;                       // その名前に含まれていない
+        const nk = soldNameKey(key.split(bn).join(an));
+        if (!nk || nk === key) return;                         // 空になる／変わらないなら触らない
+        if (names[nk] != null) { delete names[key]; hit++; return; }  // 移った先が既にある＝上書きしない
+        names[nk] = names[key]; delete names[key]; hit++;
+      });
+      if (hit) puts.push({ k, v, updated_at: new Date().toISOString() });
     });
     if (puts.length) await sbUpsert('app_kv', puts);
   }
