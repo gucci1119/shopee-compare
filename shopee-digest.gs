@@ -44,12 +44,12 @@ function sendDigest() {
   //   朝のダイジェストは**売上が ¥0 のまま届いていた**（Codexのレビューで発覚）。
   //   さらに単一レートだと「その日のレート」でも「国別スプレッド」でもないので、
   //   ポータルの数字と一致しない。日付ごとのレートで換算する。
-  var fxDays = {}, fxSpread = {}, fxSpreadDef = 3;
+  var fxDays = {}, fxSpread = {}, fxSpreadDef = 3, fxErr = '';
   try {
     var kv = get('app_kv', 'select=v&k=eq.fx_daily');
     var v0 = (kv && kv[0] && kv[0].v) || {};
     fxDays = v0.days || {}; fxSpread = v0.spreadCc || {}; fxSpreadDef = (v0.spread != null ? v0.spread : 3);
-  } catch (e) {}
+  } catch (e) { fxErr = String((e && e.message) || e).slice(0, 120); }
   var fxKeys = Object.keys(fxDays).sort();
   // その日（無ければ直前の営業日）のレート。スプレッドを引いた「実際に受け取れる円」に寄せる。
   function rateOn(cc, day) {
@@ -65,8 +65,11 @@ function sendDigest() {
   function yen(n) { return '¥' + (Number(n) || 0).toLocaleString('en-US'); }
 
   // 直近14日の日次（前日／直近7日／その前7日）
-  var stats = [];
-  try { stats = get('daily_stats', 'select=cc,day,units,sales,orders&day=gte.' + d14 + '&order=day.desc'); } catch (e) { stats = []; }
+  // ⚠️ 読めなかったときに 0 として送らない。**「売上0」と「数字を読めなかった」は別物**で、
+  //   混ぜると毎朝これを見て判断している本人に嘘の0を出すことになる（[[dont-report-zero-when-unknown]]）。
+  var stats = [], statsErr = '';
+  try { stats = get('daily_stats', 'select=cc,day,units,sales,orders&day=gte.' + d14 + '&order=day.desc'); }
+  catch (e) { stats = []; statsErr = String((e && e.message) || e).slice(0, 120); }
   var yst = Utilities.formatDate(new Date(Date.now() - 86400000), tz, 'yyyy-MM-dd');
 
   var byDayCc = {}; // day -> cc -> {units,sales,orders}
@@ -129,6 +132,14 @@ function sendDigest() {
   var body = '';
   body += '📊 Shopee OS 朝のダイジェスト  ' + md + '\n';
   body += '─────────────────────\n\n';
+  if (statsErr) {
+    body += '⚠️ 売上の数字を読み込めませんでした（' + statsErr + '）。\n';
+    body += '　　下の売上は【0ではなく「不明」】です。ポータルで確認してください。\n\n';
+  }
+  if (fxErr || !fxKeys.length) {
+    body += '⚠️ 為替（日次レート）を読めていません' + (fxErr ? '（' + fxErr + '）' : '（app_kv.fx_daily が空）') + '。\n';
+    body += '　　円の金額は出せません。【0ではなく「不明」】です。\n\n';
+  }
   body += '■ 前日(' + yst + ')の売上  合計 ' + yen(ydTotalJpy) + (uncerted ? ' + 未換算あり' : '') + ' / ' + ydTotalUnits + '点\n';
   body += (lines.length ? lines.join('\n') : '  （前日の記録なし。同期が止まっている可能性）') + '\n\n';
   body += '■ 直近7日  ' + yen(cur7.t) + (cur7.hadUncert ? '(一部未換算)' : '') +
@@ -139,7 +150,11 @@ function sendDigest() {
   body += 'ポータル: https://gucci1119.github.io/shopee-compare/\n';
   body += '※ 数値は daily_stats（注文total_amountベース）を fx_rates で円換算。詳細はポータルのダッシュボードで。';
 
-  var subject = '【Shopee OS】朝のダイジェスト ' + md + '  前日 ' + yen(ydTotalJpy) + (wow == null ? '' : ' / 週比' + (wow >= 0 ? '+' : '') + wow + '%');
+  // ★件名にも【0ではなく不明】を出す。スマホでは件名しか見ないことが多く、
+  //   ここが「前日 ¥0」だと**売れていないと誤解する**（2026-08-24に実際に届いている）。
+  var subject = (statsErr || fxErr || (uncerted && !ydTotalJpy))
+    ? ('【Shopee OS】朝のダイジェスト ' + md + '  ⚠️ 金額を出せませんでした（0ではありません）')
+    : ('【Shopee OS】朝のダイジェスト ' + md + '  前日 ' + yen(ydTotalJpy) + (wow == null ? '' : ' / 週比' + (wow >= 0 ? '+' : '') + wow + '%'));
   MailApp.sendEmail({ to: to, subject: subject, body: body });
   Logger.log('✅ ダイジェスト送信: ' + to + '\n' + body);
   return body;
