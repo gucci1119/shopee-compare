@@ -8994,8 +8994,21 @@
   //   ★以前は読みに行く前に loaded=true にしていたので、**失敗しても「読んだ」ことになり**
   //     二度とやり直さないうえ、そのまま保存すると全消しだった（上の注記の趣旨と実装が逆だった）。
   async function takSave() {
-    if (!tak.ok) { await takLoad(); }
-    if (!tak.ok) { toast('❌ いまの棚卸の記録を読めていないので保存しません（数えた分が消えるため）。通信を確かめてもう一度どうぞ', true); return; }
+    // ⚠️ 読み直しで**いま数えたぶんを上書きしない**。読んだ結果をそのまま採用すると、
+    //   直前に付けた✓が消えたまま保存され、**本人は保存できたと思う**（2026-09-08 Codex指摘）。
+    //   → サーバの内容を土台に、**手元の変更を上に重ねる**（手元が勝つ）。
+    if (!tak.ok) {
+      const mi = tak.items, mu = tak.unknown, ms = tak.seq, md = tak.dup, mr = tak.round;
+      await takLoad();
+      if (tak.ok) {
+        tak.items = Object.assign({}, tak.items, mi);
+        tak.unknown = Object.assign({}, tak.unknown, mu);
+        tak.seq = Object.assign({}, tak.seq, ms);
+        tak.dup = Object.assign({}, tak.dup, md);
+        if (mr) tak.round = mr;
+      }
+    }
+    if (!tak.ok) { toast(i18nOn() ? 'Could not read the current stocktake, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの棚卸の記録を読めていないので保存しません（数えた分が消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
     catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
   }
@@ -9071,8 +9084,13 @@
     } catch (_) { invCls.ok = false; }   // 読めなかった＝次でやり直す・保存もさせない
   }
   async function invClsSave() {
-    if (!invCls.ok) { await invClsLoad(); }                     // 読めていないなら、まず読む
-    if (!invCls.ok) { toast('❌ いまの設定を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
+    // ⚠️ 読み直しで**いまの手直しを上書きしない**（手元を上に重ねる）
+    if (!invCls.ok) {
+      const mine = invCls.items;
+      await invClsLoad();
+      if (invCls.ok) invCls.items = Object.assign({}, invCls.items, mine);
+    }
+    if (!invCls.ok) { toast(i18nOn() ? 'Could not read the current settings, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの設定を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     try { await sbUpsert('app_kv', [{ k: 'inv_class', v: { items: invCls.items }, updated_at: new Date().toISOString() }]); }
     catch (e) { toast('❌ 保存できませんでした: ' + e.message); }
   }
@@ -14730,8 +14748,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function retMetaSave() {
     if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
-    if (!retMetaOk) { await retMetaLoad(); }
-    if (!retMetaOk) { alert('いまの控えを読めていないので保存しません（消えてしまうため）。\n通信を確かめて、もう一度お試しください。'); return false; }
+    // ⚠️ 読み直しで**いま決めた内容を上書きしない**（手元を上に重ねる）。ここを間違えると
+    //   「保存しました」と返しながら**返品の判断が記録されない**（2026-09-08 Codex指摘）。
+    if (!retMetaOk) {
+      var mine = retMeta;
+      await retMetaLoad();
+      if (retMetaOk) retMeta = Object.assign({}, retMeta, mine);
+    }
+    if (!retMetaOk) {
+      alert(i18nOn()
+        ? 'Could not read the current return records, so nothing was saved (it would be erased).\nCheck your connection and try again.'
+        : 'いまの控えを読めていないので保存しません（消えてしまうため）。\n通信を確かめて、もう一度お試しください。');
+      return false;
+    }
     await sbUpsert('app_kv', [{ k: 'return_meta', v: { items: retMeta }, updated_at: new Date().toISOString() }]);
     return true;
   }
@@ -15785,7 +15814,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return notif.read;
   }
   async function notifReadSave() {
-    if (!notif.readOk) { await notifReadLoad(); }
+    // ⚠️ 読み直しで**いま付けた既読を上書きしない**（手元を上に重ねる）
+    if (!notif.readOk) {
+      const mine = notif.read || {};
+      await notifReadLoad();
+      if (notif.readOk) notif.read = Object.assign({}, notif.read || {}, mine);
+    }
     if (!notif.readOk) return;                       // 読めていない＝消してしまうので保存しない
     try { await sbUpsert('app_kv', [{ k: 'notif_read', v: notif.read || {}, updated_at: new Date().toISOString() }]); } catch (_) {}
   }
@@ -16207,6 +16241,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
       '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
       '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F501} <b>その安全装置が、今度は「いまの操作」を捨てていました</b>（別のAIの指摘・P1）。読めていない時に保存前へ読み直しを入れたのですが、<b>読み直した内容でいまの操作を上書き</b>していました。棚卸で✓を1つ付けた直後に保存すると<b>その✓が消えたまま保存され、本人は保存できたと思う</b>状態です。返品の控えに至っては<b>「保存しました」と返しながら判断が記録されない</b>ところでした。読み直した内容を土台に、<b>いまの操作を上に重ねてから</b>保存します。',
+      '\u23F3 <b>取り込みが失敗した直後に、すぐ叩き直す可能性がありました</b>（同・P1）。失敗時の印を「もう走っていないので引き継いでよい」にしていたため、画面が描き直されるとその場で再開し、<b>弾かれている時ほど連打</b>することになります。失敗したときは<b>10分待ってから</b>再開し、待っている理由も画面に出します。',
+      '\u2709\uFE0F <b>ダイジェストは、読めなかった時に金額そのものを出しません</b>。「⚠️不明」と書いた直後に ¥0 と並べたら結局その0が目に入るので、<b>（不明）</b>と書きます。',
       '\u{1F9FE} <b>棚卸でも、数えた記録が全部消える可能性がありました</b>。記録が読めていないまま✓を1つ付けると、<b>それまで数えたぶんが丸ごと消えて、現物を数え直す</b>ことになります。コードには「読み取れなかった＝無かったことにしない」と書いてあったのに、<b>実装は逆</b>でした（読みに行く前に「読んだ」と記録していました）。読めていない時は保存しません。',
       '\u2709\uFE0F <b>朝のダイジェストが、数字を読めなかった時に「売上 ¥0」とメールしていました</b>。件名は<b>スマホで最初に目に入る所</b>なので、ここが¥0だと<b>売れていないと誤解します</b>（2026-08-24に実際に届いています）。売上・為替のどちらかが読めなかった時は、件名を<b>「⚠️ 金額を出せませんでした（0ではありません）」</b>に変え、本文にも理由を出します。',
       '\u{1F4E1} <b>ポータルを開くたびに、各国の取得が2回走っていました</b>（直前に私が入れた不具合）。つなぎ役が戻った時の読み込みを足したところ、<b>起動時の接続確認への返事もそこを通る</b>ので、そのあと起動側がもう一度読み、7か国ぶんが丸ごと2回出ていました。古い方の結果は捨てられますが通信は本当に2回です。起動が終わってからだけ読むようにしました。',
@@ -24514,8 +24551,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return titleLink;
   }
   async function saveTitleLink(fromKey, toKey) {
-    if (!titleLinkOk) { await loadTitleLink(); }
-    if (!titleLinkOk) { toast('いまの対応表を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
+    // ⚠️ 読み直しで**手元の対応を上書きしない**（手元を上に重ねる）
+    if (!titleLinkOk) {
+      const mine = titleLink || {};
+      await loadTitleLink();
+      if (titleLinkOk) titleLink = Object.assign({}, titleLink || {}, mine);
+    }
+    if (!titleLinkOk) { toast(i18nOn() ? 'Could not read the current mapping, so nothing was saved (it would be erased). Check your connection and try again.' : 'いまの対応表を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     titleLink = titleLink || {};
     if (toKey) titleLink[fromKey] = toKey; else delete titleLink[fromKey];
     try { await sbUpsert('app_kv', [{ k: 'title_link', v: titleLink, updated_at: new Date().toISOString() }], 'k'); }
@@ -24699,6 +24741,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const raw = localStorage.getItem('smdJanFill'); if (!raw) return;
       const st = JSON.parse(raw) || {};
       if (!st.at || Date.now() - st.at > 24 * 3600e3) { localStorage.removeItem('smdJanFill'); return; }
+      // ★前回が失敗で終わった時は、決めた時刻まで再開しない（弾かれている時ほど連打しない）
+      if (st.retryAt && Date.now() < st.retryAt) {
+        const el9 = document.getElementById('tm-sgjan');
+        if (el9) el9.textContent = '\u{1F4C7} 前回うまくいかなかったので ' + Math.ceil((st.retryAt - Date.now()) / 60000) + '分 待ちます';
+        if (!lst._janRecheck) {
+          lst._janRecheck = setTimeout(() => { lst._janRecheck = null; lst._janResumed = false; janResumeCheck(); },
+            Math.min(Math.max(st.retryAt - Date.now() + 1000, 5000), 600000));
+        }
+        return;
+      }
       // ★【重要】他の画面でもう走っているなら再開しない（2026-09-05）。
       //   走っている間は数十秒おきに印の時刻を更新しているので、**2分以内に更新されていれば
       //   誰かが走っている**とみなす。ここを見ないと、ポータルを2枚開いただけで
@@ -24987,9 +25039,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   ただし何度も同じ所で転ぶと堂々巡りになるので、3回までにする。
         try {
           if (_err && _tries < 3) {
-            // ★`free: 1` を必ず付ける。付けないと「持ち主不明で時刻だけ新しい」記録になり、
-            //   誰も走っていないのに他の画面が2分間「別の画面で取り込み中です」で待つ。
-            localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '', tries: _tries + 1, err: 1, free: 1, own: '' }));
+            // ⚠️【重要】失敗した時に `free: 1` を付けてはいけない。
+            //   `free` は「もう走っていないので待たずに引き継いでよい」の意味なので、
+            //   **失敗直後に描き直しが入ると、その場でまた取り込みが始まって駿河屋を叩き直す**
+            //   （弾かれている時ほど連打する・[[dont-get-ip-blocked]]／2026-09-08 Codex指摘）。
+            //   → 手放したことは own を空にして伝え、**10分は再開しない**印を付ける。
+            localStorage.setItem('smdJanFill', JSON.stringify({ at: Date.now(), one: one || '', tries: _tries + 1, err: 1, own: '', retryAt: Date.now() + 10 * 60 * 1000 }));
           } else {
             localStorage.removeItem('smdJanFill');
           }

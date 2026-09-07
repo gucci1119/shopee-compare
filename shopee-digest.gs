@@ -140,10 +140,13 @@ function sendDigest() {
     body += '⚠️ 為替（日次レート）を読めていません' + (fxErr ? '（' + fxErr + '）' : '（app_kv.fx_daily が空）') + '。\n';
     body += '　　円の金額は出せません。【0ではなく「不明」】です。\n\n';
   }
-  body += '■ 前日(' + yst + ')の売上  合計 ' + yen(ydTotalJpy) + (uncerted ? ' + 未換算あり' : '') + ' / ' + ydTotalUnits + '点\n';
-  body += (lines.length ? lines.join('\n') : '  （前日の記録なし。同期が止まっている可能性）') + '\n\n';
-  body += '■ 直近7日  ' + yen(cur7.t) + (cur7.hadUncert ? '(一部未換算)' : '') +
-    (wow == null ? '' : '   前週比 ' + (wow >= 0 ? '+' : '') + wow + '%') + '\n\n';
+  // ★読めていない時は**金額を書かない**。「⚠️不明です」と書いた直後に ¥0 と並べたら、
+  //   結局その ¥0 が目に入る（2026-09-08 Codexの指摘）。数字そのものを出さない。
+  var noMoney = !!(statsErr || fxErr || !fxKeys.length);
+  body += '■ 前日(' + yst + ')の売上  合計 ' + (noMoney ? '（不明）' : yen(ydTotalJpy) + (uncerted ? ' + 未換算あり' : '')) + ' / ' + (statsErr ? '（不明）' : ydTotalUnits + '点') + '\n';
+  body += (statsErr ? '  （売上の記録を読めませんでした）' : (lines.length ? lines.join('\n') : '  （前日の記録なし。同期が止まっている可能性）')) + '\n\n';
+  body += '■ 直近7日  ' + (noMoney ? '（不明）' : (yen(cur7.t) + (cur7.hadUncert ? '(一部未換算)' : '') +
+    (wow == null ? '' : '   前週比 ' + (wow >= 0 ? '+' : '') + wow + '%'))) + '\n\n';
   body += '■ タスク  ' + tasksLine + '\n\n';
   body += '■ 在庫アラート  ' + invLine + '\n\n';
   body += '─────────────────────\n';
