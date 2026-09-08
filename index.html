@@ -8401,6 +8401,23 @@
     }
     return rows.length;
   }
+  // 🔀 読み直したサーバの内容に【手元でいじった分だけ】を重ねる。
+  //   ⚠️ 単純な Object.assign だと2つ壊れる（2026-09-08 Codex指摘）：
+  //     ①中身が入れ子の記録（{返品SN:{種別,補償額}}）で、手元が {補償額} だけだと
+  //       サーバにあった {種別} ごと置き換わって**消える**
+  //     ②触っていない項目まで手元の古い値で上書きし、**他のPCの変更を巻き戻す**
+  //   → 前回ちゃんと読めた内容(base)と比べて【違う項目だけ】を、中身も項目ごとに重ねる。
+  //     base が無い（一度も読めていない）＝手元にあるものは全部いじった分なので全部重ねる。
+  function mergeMine_(server, mine, base) {
+    const out = Object.assign({}, server || {});
+    const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    Object.keys(mine || {}).forEach(k => {
+      const b = base ? base[k] : undefined;
+      if (base && JSON.stringify(mine[k]) === JSON.stringify(b)) return;   // 触っていない
+      out[k] = (isObj(out[k]) && isObj(mine[k])) ? Object.assign({}, out[k], mine[k]) : mine[k];
+    });
+    return out;
+  }
   async function sbDelete(table, qs) {
     demoWriteGuard('delete', table, qs);
     const key = settings.sbSecret;
@@ -8987,7 +9004,7 @@
   //   round＝棚卸の回。回を始め直すと前回の✓は消える（毎回ゼロから数えるのが棚卸なので）。
   //   unknown … 現物はあったのに台帳に無かったItemID。スプシとItemIDが食い違っている分がここに落ちる。
   //   「読み取れなかった＝無かったこと」にすると棚卸の意味がないので、必ず残す。
-  const tak = { round: '', items: {}, unknown: {}, seq: {}, dup: {}, at: '', loaded: false, ok: false };
+  const tak = { round: '', items: {}, unknown: {}, seq: {}, dup: {}, at: '', loaded: false, ok: false, base: null };
   const takOf = id => tak.items[String(id)] || '';
   // ⚠️ 保存は【棚卸の記録まるごとの上書き】。読めていないまま1件✓を付けると、
   //   **数え終わったぶんが全部消えて、現物を数え直すことになる**。
@@ -8998,14 +9015,14 @@
     //   直前に付けた✓が消えたまま保存され、**本人は保存できたと思う**（2026-09-08 Codex指摘）。
     //   → サーバの内容を土台に、**手元の変更を上に重ねる**（手元が勝つ）。
     if (!tak.ok) {
-      const mi = tak.items, mu = tak.unknown, ms = tak.seq, md = tak.dup, mr = tak.round;
+      const mi = tak.items, mu = tak.unknown, ms = tak.seq, md = tak.dup, mr = tak.round, bs = tak.base;
       await takLoad();
       if (tak.ok) {
-        tak.items = Object.assign({}, tak.items, mi);
-        tak.unknown = Object.assign({}, tak.unknown, mu);
-        tak.seq = Object.assign({}, tak.seq, ms);
-        tak.dup = Object.assign({}, tak.dup, md);
-        if (mr) tak.round = mr;
+        tak.items = mergeMine_(tak.items, mi, bs && bs.items);
+        tak.unknown = mergeMine_(tak.unknown, mu, bs && bs.unknown);
+        tak.seq = mergeMine_(tak.seq, ms, bs && bs.seq);
+        tak.dup = mergeMine_(tak.dup, md, bs && bs.dup);
+        if (mr && (!bs || mr !== bs.round)) tak.round = mr;   // 回を変えたのが手元なら手元が勝つ
       }
     }
     if (!tak.ok) { toast(i18nOn() ? 'Could not read the current stocktake, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの棚卸の記録を読めていないので保存しません（数えた分が消えるため）。通信を確かめてもう一度どうぞ', true); return; }
@@ -9018,6 +9035,7 @@
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.stocktake');
       const v = kv && kv[0] && kv[0].v;
       if (v) { tak.round = v.round || ''; tak.items = v.items || {}; tak.unknown = v.unknown || {}; tak.seq = v.seq || {}; tak.dup = v.dup || {}; tak.at = v.at || ''; }
+      try { tak.base = JSON.parse(JSON.stringify({ items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, round: tak.round })); } catch (_) { tak.base = null; }
       tak.ok = true; tak.loaded = true;
     } catch (_) { tak.ok = false; }   // 読めなかった＝次でやり直す・保存もさせない
   }
@@ -9070,7 +9088,7 @@
   };
   const HW_LIST = HW_RULES.map(x => x[0]);
   const CAT_LIST = ['ソフト', 'ハード', '周辺機器', 'その他'];
-  const invCls = { items: {}, loaded: false, ok: false };   // 手直し {item_id:{hw,cat}}
+  const invCls = { items: {}, loaded: false, ok: false, base: null };   // 手直し {item_id:{hw,cat}}
   // ⚠️ 保存は【この項目まるごとの上書き】。読めていないまま1件保存すると、
   //   **手で決めた機種・カテゴリが全部消える**（[[catch-empty-is-not-absence]]）。
   //   ★以前は読みに行く前に loaded=true にしていたので、**失敗しても「読んだ」ことになり**
@@ -9080,15 +9098,16 @@
     try {
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.inv_class');
       invCls.items = (kv && kv[0] && kv[0].v && kv[0].v.items) || {};
+      try { invCls.base = JSON.parse(JSON.stringify(invCls.items)); } catch (_) { invCls.base = null; }
       invCls.ok = true; invCls.loaded = true;
     } catch (_) { invCls.ok = false; }   // 読めなかった＝次でやり直す・保存もさせない
   }
   async function invClsSave() {
     // ⚠️ 読み直しで**いまの手直しを上書きしない**（手元を上に重ねる）
     if (!invCls.ok) {
-      const mine = invCls.items;
+      const mine = invCls.items, base = invCls.base;
       await invClsLoad();
-      if (invCls.ok) invCls.items = Object.assign({}, invCls.items, mine);
+      if (invCls.ok) invCls.items = mergeMine_(invCls.items, mine, base);
     }
     if (!invCls.ok) { toast(i18nOn() ? 'Could not read the current settings, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの設定を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     try { await sbUpsert('app_kv', [{ k: 'inv_class', v: { items: invCls.items }, updated_at: new Date().toISOString() }]); }
@@ -14736,13 +14755,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ★返品は3通り：①戻ってきた（再在庫→原価を在庫台帳へ返す）②戻らない（紛失/破損→原価は損失のまま・
   //   SLS+補償が入る）③一部返金。実際に荷物を受け取ったかはAPIでは分からないので画面で選ぶ。
   //   保存先は app_kv の return_meta（新テーブル不要）: { 'cc:order_sn': {kind:'back|lost|part', comp:補償円} }
-  var retMeta = {}, retMetaOk = false;
+  var retMeta = {}, retMetaOk = false, retMetaBase = null;
   // ⚠️ 保存は【まるごとの上書き】。読めていないまま保存すると、
   //   **手で入れた返品の控えが全部消える**（[[catch-empty-is-not-absence]]）。
   async function retMetaLoad() {
     try {
       var kv = await sbGetAll('app_kv', 'select=v&k=eq.return_meta');
       retMeta = (kv && kv[0] && kv[0].v && kv[0].v.items) || {};
+      try { retMetaBase = JSON.parse(JSON.stringify(retMeta)); } catch (e2) { retMetaBase = null; }
       retMetaOk = true;
     } catch (e) { retMetaOk = false; }   // ★空にしない。読めなかっただけ
   }
@@ -14751,9 +14771,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ⚠️ 読み直しで**いま決めた内容を上書きしない**（手元を上に重ねる）。ここを間違えると
     //   「保存しました」と返しながら**返品の判断が記録されない**（2026-09-08 Codex指摘）。
     if (!retMetaOk) {
-      var mine = retMeta;
+      var mine = retMeta, base = retMetaBase;
       await retMetaLoad();
-      if (retMetaOk) retMeta = Object.assign({}, retMeta, mine);
+      if (retMetaOk) retMeta = mergeMine_(retMeta, mine, base);
     }
     if (!retMetaOk) {
       alert(i18nOn()
@@ -15809,16 +15829,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (notif.readOk && notif.read) return notif.read;
     try {
       const rows = await sbGetAll('app_kv', 'select=v&k=eq.notif_read');
-      notif.read = (rows && rows[0] && rows[0].v) || {}; notif.readOk = true;
+      notif.read = (rows && rows[0] && rows[0].v) || {};
+      try { notif.readBase = JSON.parse(JSON.stringify(notif.read)); } catch (_) { notif.readBase = null; }
+      notif.readOk = true;
     } catch (_) { notif.read = notif.read || {}; notif.readOk = false; }
     return notif.read;
   }
   async function notifReadSave() {
     // ⚠️ 読み直しで**いま付けた既読を上書きしない**（手元を上に重ねる）
     if (!notif.readOk) {
-      const mine = notif.read || {};
+      const mine = notif.read || {}, base = notif.readBase;
       await notifReadLoad();
-      if (notif.readOk) notif.read = Object.assign({}, notif.read || {}, mine);
+      if (notif.readOk) notif.read = mergeMine_(notif.read || {}, mine, base);
     }
     if (!notif.readOk) return;                       // 読めていない＝消してしまうので保存しない
     try { await sbUpsert('app_kv', [{ k: 'notif_read', v: notif.read || {}, updated_at: new Date().toISOString() }]); } catch (_) {}
@@ -16241,6 +16263,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
       '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
       '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F9E9} <b>その「重ね方」も粗く、別の項目を消していました</b>（さらに指摘・P1）。返品の控えのように<b>1件の中に種別と補償額が入っている</b>記録では、手元に補償額だけがある状態で重ねると<b>サーバにあった種別ごと置き換わって消え</b>ます。触っていない項目まで手元の古い値で上書きして<b>他のPCの変更を巻き戻す</b>問題もありました。前回ちゃんと読めた内容と比べて<b>変えた項目だけ</b>を、<b>中身も項目ごとに</b>重ねるようにしました（5か所で同じ物差し）。',
+      '\u{1F513} <b>取り込みが失敗すると、10分の待ちすら設定されないまま止まっていました</b>（同・P1）。「再開の手配をした」という印を終了時に下ろしていなかったため、次の判定が<b>入口ではじかれて</b>待ち時間の設定にも進めず、<b>リロードするまで動かない</b>状態でした。この形（印が残る）は<b>今日これで4回目</b>なので、終了処理でまとめて下ろすようにしました。',
       '\u{1F501} <b>その安全装置が、今度は「いまの操作」を捨てていました</b>（別のAIの指摘・P1）。読めていない時に保存前へ読み直しを入れたのですが、<b>読み直した内容でいまの操作を上書き</b>していました。棚卸で✓を1つ付けた直後に保存すると<b>その✓が消えたまま保存され、本人は保存できたと思う</b>状態です。返品の控えに至っては<b>「保存しました」と返しながら判断が記録されない</b>ところでした。読み直した内容を土台に、<b>いまの操作を上に重ねてから</b>保存します。',
       '\u23F3 <b>取り込みが失敗した直後に、すぐ叩き直す可能性がありました</b>（同・P1）。失敗時の印を「もう走っていないので引き継いでよい」にしていたため、画面が描き直されるとその場で再開し、<b>弾かれている時ほど連打</b>することになります。失敗したときは<b>10分待ってから</b>再開し、待っている理由も画面に出します。',
       '\u2709\uFE0F <b>ダイジェストは、読めなかった時に金額そのものを出しません</b>。「⚠️不明」と書いた直後に ¥0 と並べたら結局その0が目に入るので、<b>（不明）</b>と書きます。',
@@ -24539,23 +24563,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 📚 明細名 ↔ マスタの手動対応表。app_kv.title_link = { "<正規化した明細名>": "<マスタの正規化キー>" }
   //   ★機械に確定させない。略称（P4G→ペルソナ4 ザ・ゴールデン）は候補までを出して、押すのは本人。
   //     勝手に紐づけると**違う作品を数えて母数の数字が嘘になる**ため。一度決めたら全ハード・全国で効く。
-  let titleLink = null, titleLinkOk = false;
+  let titleLink = null, titleLinkOk = false, titleLinkBase = null;
   // ⚠️ 保存は【対応表まるごとの上書き】。読めていないまま1件足すと、
   //   **手で決めた対応が全部消える**（[[catch-empty-is-not-absence]]）。
   async function loadTitleLink() {
     if (titleLinkOk && titleLink) return titleLink;
     try {
       const r = await sbGetAll('app_kv', 'select=v&k=eq.title_link');
-      titleLink = (r && r[0] && r[0].v) || {}; titleLinkOk = true;
+      titleLink = (r && r[0] && r[0].v) || {};
+      try { titleLinkBase = JSON.parse(JSON.stringify(titleLink)); } catch (_) { titleLinkBase = null; }
+      titleLinkOk = true;
     } catch (_) { titleLink = titleLink || {}; titleLinkOk = false; }
     return titleLink;
   }
   async function saveTitleLink(fromKey, toKey) {
     // ⚠️ 読み直しで**手元の対応を上書きしない**（手元を上に重ねる）
     if (!titleLinkOk) {
-      const mine = titleLink || {};
+      const mine = titleLink || {}, base = titleLinkBase;
       await loadTitleLink();
-      if (titleLinkOk) titleLink = Object.assign({}, titleLink || {}, mine);
+      if (titleLinkOk) titleLink = mergeMine_(titleLink || {}, mine, base);
     }
     if (!titleLinkOk) { toast(i18nOn() ? 'Could not read the current mapping, so nothing was saved (it would be erased). Check your connection and try again.' : 'いまの対応表を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     titleLink = titleLink || {};
@@ -25033,7 +25059,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (lst._janAuto) { console.warn('[駿河屋JAN]', _em); toast('❌ JANの取り込みが止まりました（あとで再開できます）'); }
         else alert(_em);
       } finally {
-        lst._sgRunning = false; lst._janAuto = false;
+        // ★`_janResumed`（再開の手配をした印）も必ず下ろす。ここで残すと、次の再開判定が
+        //   **入口ではじかれて冷却の設定にも進めず**、リロードするまで動かない
+        //   （[[stop-flag-must-not-latch]] と同じ形・今日これで4回目／2026-09-08 Codex指摘）。
+        lst._sgRunning = false; lst._janAuto = false; lst._janResumed = false;
         try { if (lst._janHB) { clearInterval(lst._janHB); lst._janHB = null; } } catch (_) {}
         // ★エラーで止まったときは印を残す＝ページを開き直したときに続きから再開する。
         //   ただし何度も同じ所で転ぶと堂々巡りになるので、3回までにする。
