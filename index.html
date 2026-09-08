@@ -8401,6 +8401,10 @@
     }
     return rows.length;
   }
+  // 📌 保存に成功したら「前回ちゃんと読めた内容(base)」を今の内容に進める。
+  //   ⚠️ 進めないと、**すでに保存済みの値が「手元の変更」のまま残る**ので、
+  //     あとで読み直しに失敗した時に、他のPCの新しい変更をもう一度塗り戻す（2026-09-08 Codex指摘）。
+  function snapBase_(v) { try { return JSON.parse(JSON.stringify(v)); } catch (_) { return null; } }
   // 🔀 読み直したサーバの内容に【手元でいじった分だけ】を重ねる。
   //   ⚠️ 単純な Object.assign だと2つ壊れる（2026-09-08 Codex指摘）：
   //     ①中身が入れ子の記録（{返品SN:{種別,補償額}}）で、手元が {補償額} だけだと
@@ -8426,11 +8430,22 @@
         }
       });
     }
-    // ② 手元で【変えた／足した】ものを重ねる（中身も項目ごとに）
+    // ② 手元で【変えた／足した】ものを重ねる。
+    //    ⚠️ 記録まるごとで「変わったか」を見てはいけない。1件の中の別の項目を他のPCが変えていると、
+    //       こちらが触っていない項目まで手元の古い値で塗り戻す（返品の「種別」を巻き戻す・
+    //       2026-09-08 Codex指摘）。**項目ごとに base と比べて、違う項目だけ**を乗せる。
     Object.keys(M).forEach(k => {
       const b = B ? B[k] : undefined;
-      if (B && JSON.stringify(M[k]) === JSON.stringify(b)) return;   // 触っていない＝サーバ（他PC）が勝つ
-      out[k] = (isObj(out[k]) && isObj(M[k])) ? Object.assign({}, out[k], M[k]) : M[k];
+      if (B && JSON.stringify(M[k]) === JSON.stringify(b)) return;   // 何も触っていない＝サーバが勝つ
+      if (isObj(out[k]) && isObj(M[k])) {
+        const merged = Object.assign({}, out[k]);
+        Object.keys(M[k]).forEach(f => {
+          const bf = (B && isObj(b)) ? b[f] : undefined;
+          const touched = !B || !isObj(b) || JSON.stringify(M[k][f]) !== JSON.stringify(bf);
+          if (touched) merged[f] = M[k][f];                          // 触った項目だけ乗せる
+        });
+        out[k] = merged;
+      } else out[k] = M[k];
     });
     return out;
   }
@@ -9042,7 +9057,10 @@
       }
     }
     if (!tak.ok) { toast(i18nOn() ? 'Could not read the current stocktake, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの棚卸の記録を読めていないので保存しません（数えた分が消えるため）。通信を確かめてもう一度どうぞ', true); return; }
-    try { await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]); }
+    try {
+      await sbUpsert('app_kv', [{ k: 'stocktake', v: { round: tak.round, items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+      tak.base = snapBase_({ items: tak.items, unknown: tak.unknown, seq: tak.seq, dup: tak.dup, round: tak.round });   // 保存できた＝新しい土台
+    }
     catch (e) { toast('❌ 棚卸の記録を保存できませんでした: ' + e.message); }
   }
   async function takLoad() {
@@ -9126,7 +9144,10 @@
       if (invCls.ok) invCls.items = mergeMine_(invCls.items, mine, base);
     }
     if (!invCls.ok) { toast(i18nOn() ? 'Could not read the current settings, so nothing was saved (it would be erased). Check your connection and try again.' : '❌ いまの設定を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
-    try { await sbUpsert('app_kv', [{ k: 'inv_class', v: { items: invCls.items }, updated_at: new Date().toISOString() }]); }
+    try {
+      await sbUpsert('app_kv', [{ k: 'inv_class', v: { items: invCls.items }, updated_at: new Date().toISOString() }]);
+      invCls.base = snapBase_(invCls.items);   // 保存できた＝ここが新しい土台
+    }
     catch (e) { toast('❌ 保存できませんでした: ' + e.message); }
   }
   const invName = r => String(r.name_supplier || r.name || '');
@@ -14798,6 +14819,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return false;
     }
     await sbUpsert('app_kv', [{ k: 'return_meta', v: { items: retMeta }, updated_at: new Date().toISOString() }]);
+    retMetaBase = snapBase_(retMeta);          // 保存できた＝ここが新しい土台
     return true;
   }
   function retMetaKey(r) { return (r.cc || '') + ':' + (r.order_sn || ''); }
@@ -15859,7 +15881,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (notif.readOk) notif.read = mergeMine_(notif.read || {}, mine, base);
     }
     if (!notif.readOk) return;                       // 読めていない＝消してしまうので保存しない
-    try { await sbUpsert('app_kv', [{ k: 'notif_read', v: notif.read || {}, updated_at: new Date().toISOString() }]); } catch (_) {}
+    try {
+      await sbUpsert('app_kv', [{ k: 'notif_read', v: notif.read || {}, updated_at: new Date().toISOString() }]);
+      notif.readBase = snapBase_(notif.read || {});   // 保存できた＝ここが新しい土台
+    } catch (_) {}
   }
   // 届いた荷物を拾う。全在庫を読むと重いので「入庫待ち」だけ・必要な列だけ取る。
   // ★Shopeeのタイムスタンプは【秒】。ミリ秒として扱うと1970年になる（実際に入金日が全部「1/22 01:14」になっていた）。
@@ -16279,6 +16304,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
       '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
       '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F465} <b>複数のPCで使ったとき、他のPCの変更を巻き戻す可能性がありました</b>（さらに指摘・P1×2）。①1件の記録の中で<b>他のPCが「種別」を変え、こちらが「補償額」だけ足した</b>場合、記録まるごとを新しいとみなして<b>種別まで古い値に塗り戻して</b>いました→<b>項目ごとに</b>見比べます。②保存できたあとも<b>「前回読めた内容」を更新していなかった</b>ので、あとで読み直しに失敗すると<b>保存済みの値をもう一度塗り直す</b>ところでした→保存できたらその場で土台を進めます。③終わった機種を読み飛ばす控えが<b>この端末だけのもの</b>だったので、他のPCが一覧を入れ替えても気づかず読み飛ばし続けます→<b>サーバ側の取り込み時刻</b>と一致する時だけ使います。他PCとの競合を含む7通りで動作を確認しました。',
       '\u{1F4E6} <b>取り込みを再開するたび、終わった機種のデータを丸ごと読み直していました</b>。30機種・45,000行ぶんで<b>数十MB</b>あり、再開のたびに数分を何もせず使っていました（Supabaseは通信量で全体が止まりかけた前例があります）。機種ごとの<b>「まだ見ていない件数」を控えて、0件と分かっている機種は読みに行かない</b>ようにしました。控えは12時間で切れ、一覧を取り込み直した機種はその場で捨てます。',
       '\u{1F5D1} <b>重ね方の続き：手元で「消した」ものが復活していました</b>。棚卸の✓を外す・機種の手直しを消す・返品の種別を空にする、といった操作は<b>消す</b>形で書かれているのに、重ねる側が「有るものを足す」だけだったので<b>サーバから戻ってきて</b>いました。前回読めた内容と見比べて<b>消えた項目は消したまま</b>にします（中身の項目単位でも）。7通りの場合分けで動作を確認済みです。',
       '\u{1F9E9} <b>その「重ね方」も粗く、別の項目を消していました</b>（さらに指摘・P1）。返品の控えのように<b>1件の中に種別と補償額が入っている</b>記録では、手元に補償額だけがある状態で重ねると<b>サーバにあった種別ごと置き換わって消え</b>ます。触っていない項目まで手元の古い値で上書きして<b>他のPCの変更を巻き戻す</b>問題もありました。前回ちゃんと読めた内容と比べて<b>変えた項目だけ</b>を、<b>中身も項目ごとに</b>重ねるようにしました（5か所で同じ物差し）。',
@@ -24604,7 +24630,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!titleLinkOk) { toast(i18nOn() ? 'Could not read the current mapping, so nothing was saved (it would be erased). Check your connection and try again.' : 'いまの対応表を読めていないので保存しません（消えるため）。通信を確かめてもう一度どうぞ', true); return; }
     titleLink = titleLink || {};
     if (toKey) titleLink[fromKey] = toKey; else delete titleLink[fromKey];
-    try { await sbUpsert('app_kv', [{ k: 'title_link', v: titleLink, updated_at: new Date().toISOString() }], 'k'); }
+    try {
+      await sbUpsert('app_kv', [{ k: 'title_link', v: titleLink, updated_at: new Date().toISOString() }], 'k');
+      titleLinkBase = snapBase_(titleLink);    // 保存できた＝ここが新しい土台
+    }
     catch (e) { toast('対応表を保存できませんでした: ' + ((e && e.message) || e), true); }
   }
   // 明細名 → 候補のマスタ行。完全一致が無い時だけ使う。語の重なりで並べる
@@ -25113,14 +25142,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   ・一覧を取り込み直した機種は、その場で控えを捨てる
   const SG_LEFT_KEY = 'smdSgLeft';
   function sgLeftLoad_() { try { return JSON.parse(localStorage.getItem(SG_LEFT_KEY) || '{}') || {}; } catch (_) { return {}; } }
+  // ★控えは【この端末だけ】のもの。**他のPCが一覧を取り込み直しても、この端末は知らない**ので、
+  //   時間だけで期限を切ると「もう無い」と思って読み飛ばし続ける（2026-09-08 Codex指摘）。
+  //   → サーバ側の版（`sg_index[hw].at` ＝一覧を取り込んだ時刻）を一緒に控え、**違ったら無効**にする。
+  const sgVer_ = (hw) => String(((lst.sgHave || {})[hw] || {}).at || '');
   function sgLeftGet_(hw) {
     const m = sgLeftLoad_()[hw];
     if (!m || typeof m.left !== 'number' || !m.at) return null;      // 分からない＝読みに行く
-    if (Date.now() - m.at > 12 * 3600e3) return null;
+    if (m.ver !== sgVer_(hw)) return null;                           // 一覧が入れ替わった＝読みに行く
+    if (Date.now() - m.at > 12 * 3600e3) return null;                // 念のための時間切れ
     return m.left;
   }
   function sgLeftSet_(hw, left) {
-    try { const m = sgLeftLoad_(); m[hw] = { left: left, at: Date.now() }; localStorage.setItem(SG_LEFT_KEY, JSON.stringify(m)); } catch (_) {}
+    try { const m = sgLeftLoad_(); m[hw] = { left: left, at: Date.now(), ver: sgVer_(hw) }; localStorage.setItem(SG_LEFT_KEY, JSON.stringify(m)); } catch (_) {}
   }
   function sgLeftClear_(hw) {
     try { const m = sgLeftLoad_(); delete m[hw]; localStorage.setItem(SG_LEFT_KEY, JSON.stringify(m)); } catch (_) {}
