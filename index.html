@@ -16279,6 +16279,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4E5} <b>「今日の入庫」から一部の仕入が消えていました</b>。追跡番号も業者の状態も無い仕入（メルカリ便で番号が同期されていないもの）は、メルカリ側の配送状況にしか形跡が残らないのに、そこを見ていませんでした。<b>「配達済/配達中/到着/引受/発送」</b>が入っていれば数えます。',
       '\u{1F520} <b>明細名を変えると、販売数の補正が消えていました</b>。控えの鍵が明細名なので、名前を変えた瞬間に控えへ届かなくなり、<b>消した分を足し戻す補正が黙って無効</b>になっていました。名前を変えたら控えの鍵も付け替えます。',
       '\u{1F4DA} <b>作品マスタが読めなかっただけで「0件」と控えていました</b>。母数表の「出している」が、通信が一度こけただけで<b>0のまま戻らなくなる</b>作りでした（控えるので次も0のまま）。<b>読めなかった</b>と<b>本当に空</b>を分け、読めなかった時は控えず・触らず・次でやり直します。',
+      '\u{1F4E6} <b>取り込みを再開するたび、終わった機種のデータを丸ごと読み直していました</b>。30機種・45,000行ぶんで<b>数十MB</b>あり、再開のたびに数分を何もせず使っていました（Supabaseは通信量で全体が止まりかけた前例があります）。機種ごとの<b>「まだ見ていない件数」を控えて、0件と分かっている機種は読みに行かない</b>ようにしました。控えは12時間で切れ、一覧を取り込み直した機種はその場で捨てます。',
       '\u{1F5D1} <b>重ね方の続き：手元で「消した」ものが復活していました</b>。棚卸の✓を外す・機種の手直しを消す・返品の種別を空にする、といった操作は<b>消す</b>形で書かれているのに、重ねる側が「有るものを足す」だけだったので<b>サーバから戻ってきて</b>いました。前回読めた内容と見比べて<b>消えた項目は消したまま</b>にします（中身の項目単位でも）。7通りの場合分けで動作を確認済みです。',
       '\u{1F9E9} <b>その「重ね方」も粗く、別の項目を消していました</b>（さらに指摘・P1）。返品の控えのように<b>1件の中に種別と補償額が入っている</b>記録では、手元に補償額だけがある状態で重ねると<b>サーバにあった種別ごと置き換わって消え</b>ます。触っていない項目まで手元の古い値で上書きして<b>他のPCの変更を巻き戻す</b>問題もありました。前回ちゃんと読めた内容と比べて<b>変えた項目だけ</b>を、<b>中身も項目ごとに</b>重ねるようにしました（5か所で同じ物差し）。',
       '\u{1F513} <b>取り込みが失敗すると、10分の待ちすら設定されないまま止まっていました</b>（同・P1）。「再開の手配をした」という印を終了時に下ろしていなかったため、次の判定が<b>入口ではじかれて</b>待ち時間の設定にも進めず、<b>リロードするまで動かない</b>状態でした。この形（印が残る）は<b>今日これで4回目</b>なので、終了処理でまとめて下ろすようにしました。',
@@ -25028,6 +25029,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           // ★1つの機種で失敗しても、そこで全部を止めない（本人指定「落ちないように」）。
           //   ただし【駿河屋に弾かれている】ときだけは、続けるとIPごと制限されるので本当に止める。
           try {
+            // ★もう見るものが無いと分かっている機種は、**一覧を読みに行かない**（通信量と時間の節約）
+            if (sgLeftGet_(hw) === 0) { continue; }
             const r = await surugaJanFill(hw, (d, t, h) => {
               const el = document.getElementById('tm-sgjan');
               if (el) el.textContent = '📇 ' + pre + d + '/' + t + '件（JAN ' + h + '）';
@@ -25043,6 +25046,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
               } catch (_) {}
             });
             allHit += r.hit; allDone += r.done;
+            // ★この機種で「まだ見ていない件数」を控える（次の再開で読まずに飛ばせる）
+            try { sgLeftSet_(hw, Math.max(0, (r.tgt || 0) - (r.done || 0))); } catch (_) {}
             // 🚦 機種の切り替わりでも3分休む（続けざまに何千件も叩かないため）。
             //   ⚠️ ただし**その機種で1件も叩いていないなら休まない**。
             //     終わった機種は `todo` が空なので即座に返るのに、そこでも3分寝ていた。
@@ -25099,6 +25104,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try { if (lst.tab === 'titles') renderTitleMaster(); } catch (_) {}
       }
   }
+  // 📊 機種ごとの「まだ見ていない件数」の控え。
+  //   ⚠️ これが無いと、再開のたびに**完了済みの機種ぶんの一覧を丸ごとダウンロードし直す**。
+  //     30機種＝45,000行ぶんで数十MB。今日は再開が何度も起きて、そのたびに数分を空費していた。
+  //     Supabaseは帯域で全体が止まりかけた前例があるので、通信量そのものを減らす（2026-09-08）。
+  //   ・0件と分かっている機種は【読まずに飛ばす】
+  //   ・12時間で期限切れ（駿河屋の一覧が増えていても、その日のうちに拾い直せる）
+  //   ・一覧を取り込み直した機種は、その場で控えを捨てる
+  const SG_LEFT_KEY = 'smdSgLeft';
+  function sgLeftLoad_() { try { return JSON.parse(localStorage.getItem(SG_LEFT_KEY) || '{}') || {}; } catch (_) { return {}; } }
+  function sgLeftGet_(hw) {
+    const m = sgLeftLoad_()[hw];
+    if (!m || typeof m.left !== 'number' || !m.at) return null;      // 分からない＝読みに行く
+    if (Date.now() - m.at > 12 * 3600e3) return null;
+    return m.left;
+  }
+  function sgLeftSet_(hw, left) {
+    try { const m = sgLeftLoad_(); m[hw] = { left: left, at: Date.now() }; localStorage.setItem(SG_LEFT_KEY, JSON.stringify(m)); } catch (_) {}
+  }
+  function sgLeftClear_(hw) {
+    try { const m = sgLeftLoad_(); delete m[hw]; localStorage.setItem(SG_LEFT_KEY, JSON.stringify(m)); } catch (_) {}
+  }
   // 💓 「私がまだ走っています」の合図。**タイマーに頼らず、処理の中からも呼ぶ**
   //    （裏タブではタイマーが1分に1回まで絞られるため・2026-09-07 実測）。
   function janBeat_() {
@@ -25124,6 +25150,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const save = async () => {
       lastSave = Date.now();
       await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: Object.assign({}, v, { rows: rows, janAt: new Date().toISOString() }), updated_at: new Date().toISOString() }]);
+      try { sgLeftClear_(hw); } catch (_) {}   // 中身が変わったので控えは捨てる
     };
     // 🚦 【最重要】駿河屋にアクセス制限をかけられないための決まり（本人指定 2026-09-04
     //    「アクセス制限かからないようにしてね」）。
@@ -25253,6 +25280,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const save = async (pg, done) => {
       if (!settings.sbSecret) { if (done) throw new Error('書き込みキー(sbSecret)が未設定なので保存できません'); return; }
       try {
+        try { sgLeftClear_(hw); } catch (_) {}   // 一覧を取り込み直した＝控えは捨てる
         await sbUpsert('app_kv', [{ k: 'sg_' + hw, v: { at: new Date().toISOString(), hw: hw, n: rows.length, rows: rows, page: pg, partial: !done },
           updated_at: new Date().toISOString() }]);
       } catch (e) {
