@@ -1034,7 +1034,8 @@
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:2px 0 8px">
         各国のセラーセンターで<b>明細をエクスポート</b>して、そのまま <b>{国}_row の3行目から</b>入れ替えます。
         <b>1行目と2行目は触りません</b>。列名の行は貼りません。<br>
-        まずは<b>下見（書き込まない）</b>で、何行取れて何行入るかだけ出します。
+        まずは<b>下見（書き込まない）</b>で、何行取れて何行入るかだけ出します。<br>
+        <b>レポートID</b>＝セラーセンターでエクスポートを作ると割り当てられる番号です（Export History の行に対応）。
       </div>
       <div class="tool-row">
         国
@@ -1042,6 +1043,7 @@
           <option value="ph">PH</option><option value="br">BR</option><option value="sg">SG</option>
           <option value="my">MY</option><option value="vn">VN</option><option value="th">TH</option><option value="tw">TW</option>
         </select>
+        <input id="row-rid" type="text" placeholder="レポートID（例 26573282）" style="width:200px;padding:5px 8px;font-size:13px;border:1.5px solid #cdd7ea;border-radius:6px">
         <button class="smd-btn b-open" id="row-dry">🔍 下見（書き込まない）</button>
         <button class="smd-btn b-write" id="row-run">▶ 入れ替える</button>
       </div>
@@ -39287,18 +39289,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   住所・重量・クーポンの列が埋まらず、丸ごと上書きすると消えるため（2026-09-10）。
   const ROW_HOSTS = { ph: 'seller.shopee.ph', sg: 'seller.shopee.sg', my: 'seller.shopee.com.my',
     br: 'seller.shopee.com.br', vn: 'banhang.shopee.vn', th: 'seller.shopee.co.th', tw: 'seller.shopee.tw' };
-  // Export History の一覧（report_id を取る）
-  async function rowFetchReports(cc) {
-    const host = ROW_HOSTS[cc];
-    const url = 'https://' + host + '/api/v3/settings/get_report_list/?SPC_CDS_VER=2&page_number=1&page_size=20&report_type=1';
+  // ★実測で分かった流れ（2026-09-10）
+  //   ① エクスポートを作る → 応答に report_id
+  //   ② get_report で status を見る（2＝出来上がり）
+  //   ③ download_report で中身（xlsx）を落とす
+  //   一覧(get_report_list)は使わない。パラメータが不明で、画面の読み込み時にしか飛ばないため。
+  async function rowGetReport(cc, reportId) {
+    const url = 'https://' + ROW_HOSTS[cc] + '/api/v3/settings/get_report/?SPC_CDS_VER=2&report_id=' + encodeURIComponent(reportId);
     const txt = await bridgeRequest('GET', url, undefined, { timeout: 30000 });
     let j = null;
-    try { j = JSON.parse(txt); } catch (_) { throw new Error('エクスポート履歴を読めませんでした（応答がJSONではありません）'); }
-    return j;
+    try { j = JSON.parse(txt); } catch (_) { throw new Error('get_report の応答がJSONではありません'); }
+    return (j && j.data) || null;
   }
   async function rowDownload(cc, reportId) {
-    const host = ROW_HOSTS[cc];
-    const url = 'https://' + host + '/api/v3/settings/download_report/?SPC_CDS_VER=2&report_id=' + encodeURIComponent(reportId);
+    const url = 'https://' + ROW_HOSTS[cc] + '/api/v3/settings/download_report/?SPC_CDS_VER=2&report_id=' + encodeURIComponent(reportId);
     return bridgeRequest('GET', url, undefined, { timeout: 120000, noRetry: true, binary: true });
   }
   async function rowPasteRun(cc, dryRun, st) {
@@ -39308,14 +39312,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (demoOn()) { say('🎭 デモ表示モードのままです。中止しました'); return; }
     const plan = activeSheetPlan();
     if (plan.missingCur) { say('❌ 今月（' + plan.cur + '）のシートIDが未登録です。⚙️設定に追加してください'); return; }
-    say('📥 エクスポート履歴を取得中…');
-    const list = await rowFetchReports(cc);
-    const arr = (list && (list.data && (list.data.list || list.data.reports) || list.list)) || [];
-    if (!arr.length) { say('❌ エクスポート履歴が空です。セラーセンターで一度エクスポートしてください'); return; }
-    const top = arr[0];
-    const rid = top.report_id || top.id || top.reportId;
-    if (!rid) { say('❌ 履歴から report_id を取れませんでした'); return; }
-    say('📥 ' + (top.file_name || top.name || '明細') + ' を取得中…');
+    const rid = (document.getElementById('row-rid') || {}).value;
+    if (!rid) { say('❌ レポートIDが空です。セラーセンターでエクスポートを作り、その report_id を入れてください'); return; }
+    say('📥 レポート ' + rid + ' の状態を確認中…');
+    const info = await rowGetReport(cc, rid);
+    if (!info) { say('❌ レポートの状態を取れませんでした'); return; }
+    if (Number(info.status) !== 2) { say('⏳ まだ出来上がっていません（status=' + info.status + '）。少し待ってからやり直してください'); return; }
+    say('📥 ' + (info.report_file_name || '明細') + '（' + (info.record_numbers != null ? info.record_numbers : '?') + '件）を取得中…');
     const b64 = await rowDownload(cc, rid);
     if (!b64 || b64.length < 100) { say('❌ ファイルの中身が取れませんでした'); return; }
     say('📤 GASへ送信中…（' + Math.round(b64.length / 1024) + 'KB）');
