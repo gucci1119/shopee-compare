@@ -1459,13 +1459,14 @@
       if (d.ok) resolve(d.body); else reject(new Error(d.error || ('HTTP ' + d.status)));
     }
   });
-  function rawBridgeRequest(method, url, data, timeoutMs, headers) {
+  function rawBridgeRequest(method, url, data, timeoutMs, headers, binary) {
     const to = timeoutMs || 14000;
     return new Promise((resolve, reject) => {
       const id = ++reqSeq;
       const timer = setTimeout(() => { pendingReq.delete(id); reject(new Error('timeout')); }, to);
       pendingReq.set(id, { resolve, reject, timer });
-      window.postMessage({ __smd: 'req', id, method, url, data, timeout: to, headers: headers || undefined }, '*');
+      // binary:true のときブリッジ(v1.7.2以降)は base64 で返す。xlsx等を運ぶ用。
+      window.postMessage({ __smd: 'req', id, method, url, data, timeout: to, headers: headers || undefined, binary: !!binary }, '*');
     });
   }
   // GM_xhrの詰まり対策: 同時実行を絞る（ハングしたリクエストが接続プールを食い潰すのを防ぐ）。
@@ -1481,9 +1482,9 @@
     if (reqActive >= REQ_MAX) await new Promise(r => reqWaiters.push(r));
     reqActive++;
     try {
-      try { const r = await rawBridgeRequest(method, url, data, to, opt.headers); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+      try { const r = await rawBridgeRequest(method, url, data, to, opt.headers, opt.binary); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
       catch (e) {
-        if (!noRetry && /timeout/.test(e.message)) { const r = await rawBridgeRequest(method, url, data, to, opt.headers); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
+        if (!noRetry && /timeout/.test(e.message)) { const r = await rawBridgeRequest(method, url, data, to, opt.headers, opt.binary); bridgeTimeoutStreak = 0; hideBridgeStuckBanner(); return r; }
         throw e;
       }
     } catch (e) {
@@ -17039,6 +17040,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F9F1} <b>利益管理表の `_row` を自動更新する下ごしらえ</b>（本人指定：セラーセンターの明細を3時間おきに丸ごと入れ替えたい）。<b>ブラウザ拡張がxlsxのようなバイナリも運べる</b>ようにしました（v1.7.2・自動更新なので貼り替え不要）。セラーセンターの明細は <code>/api/v3/settings/download_report/</code> から落ちてくることを実測で突き止めています。<b>Driveは経由しません</b>（同期が切れていて、旧いやり方はもう動きません）。次はGAS側で受けて貼るところを作ります。',
       '\u{1F4B8} <b>💴入出金・経費が、読み込みに失敗しても「返金¥0」として表示していました</b>。<b>0円なのか読めなかったのか区別が付かないまま</b>、その数字で月次損益CSVを落とせる状態でした。読めなかったときは<b>赤い帯で「0円ではなく不明です」</b>と先に出します（返品ページは対応済みで、ここだけ取り残していました）。',
       '\u21A9 <b>返品の「戻ってきた」を選んだ瞬間、確認なしで在庫が書き換わっていました</b>。プルダウンを選ぶだけで<b>注文との紐付けが外れて原価が動く</b>のに、確認も取り消しもありませんでした。<b>何件・どの商品を戻すのかを出して確認</b>するようにし、キャンセルすれば区分だけ保存します。',
       '\u{1F9FE} <b>補償の申請CSVで、金額が空のまま出ていた行があります</b>。返金額を1か所からしか見ておらず、<b>キャンセルや手動で記録した分は件数に入るのに金額が0</b>で出ていました（申請に使う書類なので致命的）。同じ画面にある正しい取り方に揃えました。',
