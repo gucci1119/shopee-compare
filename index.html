@@ -10922,7 +10922,11 @@
     tana.loading = true; drawTana();
     try {
       tana.rows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,supplier_url,status,purchase_date,shopee_sn,bin&order=purchase_date.asc.nullsfirst');
-    } catch (e) { tana.rows = []; }
+    } catch (e) {
+      // ★「読めなかった」を「0件」と同じ顔にしない。現物を数える画面で「在庫あり0点」と
+      //   断言したまま『まとめて販売済みにする』へ進めてしまう（2026-09-10 是正）。
+      tana.rows = null; tana.err = (e && e.message) || String(e);
+    }
     // ★仕入元メールから拾った「届いた／キャンセルされた」の候補（GASの scanPurchaseMails が貯める）
     try {
       var kv = await sbGetAll('app_kv', 'select=v&k=eq.stock_mail_hints');
@@ -10968,6 +10972,17 @@
   function drawTana() {
     var host = document.getElementById('stock-tana'); if (!host) return;
     if (tana.loading) { host.innerHTML = '<div class="smd-dim" style="padding:20px">読み込み中…</div>'; return; }
+    // ★読めなかった時は件数を出さない。0件と見分けが付かないまま操作させない。
+    if (tana.rows == null) {
+      host.innerHTML = '<div style="padding:18px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:8px">'
+        + '<b style="color:#c0392b">在庫を読み込めませんでした。</b>'
+        + '<div class="smd-dim" style="font-size:12px;margin-top:6px">件数は0ではなく<b>不明</b>です。この状態で仕分けると取り違えるので、通信を確かめてから読み直してください。</div>'
+        + (tana.err ? '<div class="smd-dim" style="font-size:11px;margin-top:6px">' + esc(String(tana.err)) + '</div>' : '')
+        + '<div style="margin-top:10px"><button class="smd-btn b-open" id="tana-retry">🔄 もう一度読み込む</button></div></div>';
+      var rb = document.getElementById('tana-retry');
+      if (rb) rb.addEventListener('click', function () { tana.err = null; tanaLoad(true).then(drawTana); });
+      return;
+    }
     var all = tana.rows || [];
     var cnt = { keep: 0, sold: 0, wait: 0, cancel: 0, gone: 0 };
     all.forEach(function (v) {
@@ -16952,6 +16967,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F9F9} <b>【危ない表示を止めました】棚卸し画面が、在庫を読み込めなかったときに「在庫あり 0点」と出していました</b>。現物を数えるための画面で0と断言し、そのまま『まとめて販売済みにする』へ進める状態でした。<b>読めなかった時は件数を出さず</b>「0ではなく<b>不明</b>です」と出して、読み直しボタンだけを置きます。',
       '\u{1F4C5} <b>発送スケジュールの日付も現地時間に合わせました</b>。上のチップが「🚨遅延中 9件」なのに、カレンダーの赤バッジは「期限を過ぎた分 2件」のままで食い違っていました（カレンダー側だけ日本時間で丸めていたため）。同じ基準に揃えています。',
       '\u{1F50E} <b>出品一覧の「JANが空」だけ、絞り込みから外れませんでした</b>。「🔎いま絞り込んでいます」の帯にも出ず、「✕ ぜんぶ外す」でも外れないため、<b>0件と出たときに原因が分からない</b>状態でした（同じ取りこぼしを2026-08-28にもやっています）。両方に足しました。',
       '\u{1F6A8} <b>【重要・実害あり】発送期日が1日甘く出ていました</b>（本人指摘）。Shopeeの <code>ship_by</code> は<b>その国の現地時間</b>の期日なのに、<b>日本時間で日付に丸めていた</b>ため、現地では前日だった期日が1日後ろにズレていました。<b>未発送77件のうち34件（BR 51件中27件）が該当</b>し、ズレは<b>常に「まだ間に合う」と見える側</b>＝<b>遅延（LSR）を見落とす向き</b>でした。期日は<b>現地の日付</b>、「今日」は<b>日本時間</b>（荷物を出すのは日本から）で数えるように直しました。検算＝本人の運用ルール（月→金スキャン/木に手離れ・火→土/金・水→土/金・木→水/火・金土日→木/水）と実データ1,999件で一致を確認。例：9/5(土)注文のMY注文は <code>ship_by</code> 現地9/8(火)→スキャン期限9/10(木)→手を離れる9/9(水)で、<b>「今日中」ではなく「遅延」</b>が正しい表示です。',
