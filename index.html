@@ -15127,7 +15127,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   固定レートの誤差だけで ¥18,317（BRは実勢30.6のところ28.0のまま）。
   //   → 支払済のみ・注文単位で1回・**返品日の日次レート**・補償を相殺、に統一する。
   function retLossForYm(rets, meta, ym, issues) {
-    const issueKeys = new Set((issues || []).map(r => (r.cc || '') + ':' + r.sn));
+    // ★返金額(refund_jpy)が入っている記録だけを「手で記録した返金」として除外する（Codex全体レビュー 2026-09-10）。
+    //   前は order_issues に段階やメモがあるだけで正式返品を除外していたので、返金が数字から落ちていた。
+    const issueKeys = new Set((issues || []).filter(r => r && r.refund_jpy != null).map(r => (r.cc || '') + ':' + r.sn));
     const bySn = new Map();
     (rets || []).forEach(r => {
       if (!RET_PAID.test(String(r.status || ''))) return;      // 取り下げ・処理中は返金ではない
@@ -17167,6 +17169,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4B4} <b>【Codex全体レビュー・金額に関わる2件】</b>①<b>入金の「確定済み」判定が広すぎました</b>。DB同期で、今回の入金予定に無い行を<b>全国・全行</b>「確定済み」にしていたので、<b>取得に失敗した国</b>や<b>対象外の国</b>の暫定入金まで確定済みに倒れていました（Pending合計と確定/暫定の区別が狂う）。<b>取れた国の・まだ暫定の行だけ</b>にしました。②<b>正式返品の返金が数字から落ちることがありました</b>。手で記録した返金との二重計上を防ぐ除外が「同じ注文にメモや段階があるだけ」で効いていたため。<b>返金額が入っている記録だけ</b>を除外に使います（💹損益・📈事業計画・🧾確定申告が同じ式）。',
       '\u{1F4C4} <b>注文明細→{国}_row のカードを「▶ 実行」だけにしました</b>（本人指定：検証が済んだので下見・テスト先・1か国用の欄は不要）。他の2つのカードと同じ形です。確認ダイアログも出しません（3時間おきの自動実行と同じ動き）。',
       '\u267E\uFE0F <b>♾️無在庫の監視リストが「1件だけ」に化ける原因を潰しました</b>。共有の監視リスト（app_kv）は<b>丸ごと上書き</b>の台帳なのに、①♾️無在庫を開くとき共有側を<b>読めなくても</b>この端末の分で上書きしていた ②出品を作るときの自動紐付けが<b>この端末のlocalStorageだけ</b>を読んで上書きしていた（♾️無在庫を一度も開いていないPCで出品を作ると、共有リストがその1件に化ける）。①は<b>読めた時だけ共有側に書く</b>（読めなければ赤い帯で「0件ではなく不明」と出し、この端末にだけ保存）、②は<b>共有側を読んでから足す</b>（同じURLは1件に束ねる・読めなければ共有側に書かない）に直しました。',
       '\u{1F310} <b>英語表示の抜けをまとめて埋めました</b>：🔁自動実行カードの説明・📄注文明細カードの説明・実行記録の各行（明細PH／明細7か国／入金F/G／画像／自動）・「次回 …」・再送3回失敗の文言（Codex指摘）。あわせて<b>🖼️商品画像の転記も実行記録に残す</b>ようにしました（自動実行の3つのうち画像だけ記録が無く、動いたかどうかが記録から分かりませんでした）。',
@@ -39121,12 +39124,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
 
       // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
       say('💵 入金予定額を取得中...');
-      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at&order=sn'))
+      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,pending&order=sn'))
         .map(i => [i.cc + ':' + i.sn, i]));
       const incomeRows = [];
+      const okCc = new Set();   // 今回ちゃんと取れた国だけ「確定済み」判定の対象にする
       for (const region of targets) {
         try {
           const map = await fetchPendingCountry(region);
+          okCc.add(region.cc);
           Object.entries(map).forEach(([sn, amount]) => {
             const ex = exIncome.get(region.cc + ':' + sn);
             const now = new Date().toISOString();
@@ -39141,7 +39146,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       await sbUpsert('income', incomeRows);
       // 以前Pendingだったが今回のPendingに無い＝入金確定済み → pending=false に更新（利益計算用の金額は残す）。ダッシュボードのPending合計が水増しされないように
       const curKeys = new Set(incomeRows.map(r => r.cc + ':' + r.sn));
-      const settledRows = []; exIncome.forEach((v, key) => { if (!curKeys.has(key)) { const p = key.indexOf(':'); settledRows.push({ cc: key.slice(0, p), sn: key.slice(p + 1), pending: false }); } });
+      // ★「取れた国」の「まだ暫定(pending=true)」の行だけを確定済みにする（Codex全体レビュー 2026-09-10）。
+      //   前は全国・全行を対象にしていたので、①取得に失敗した国 ②今回の対象外の国 の暫定行まで
+      //   「確定済み」に倒れ、ダッシュボードのPending合計と利益の確定/暫定の区別が狂っていた。
+      const settledRows = []; exIncome.forEach((v, key) => {
+        if (curKeys.has(key)) return;
+        if (v.pending !== true) return;
+        const p = key.indexOf(':'); const cc = key.slice(0, p);
+        if (!okCc.has(cc)) return;
+        settledRows.push({ cc: cc, sn: key.slice(p + 1), pending: false });
+      });
       if (settledRows.length) await sbUpsert('income', settledRows);
       say(`💵 入金 ${incomeRows.length}件 保存 ✅${settledRows.length ? `（確定済 ${settledRows.length}件を除外）` : ''}`);
 
