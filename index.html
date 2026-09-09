@@ -15962,7 +15962,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       pageNav(rowsView.length, retPer, retPage);
     const lostToggle = lostAll.length ? `<div style="margin:0 4px 8px;padding:6px 10px;background:#fff6f5;border:1px solid #f3d6d3;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <b style="font-size:12px;color:#b3261e">🚨 補償の取りこぼし ${lostAll.length}件</b>
-      ${(() => { const g = lostAll.reduce((s2, o) => s2 + (Number(o.refund_jpy || o._refundJpy || 0) || 0), 0);
+      ${(() => { const g = lostAll.reduce((s2, o) => s2 + (Number(o.refund_jpy || o._refundJpy || (typeof refundOf === 'function' ? refundOf(o) : 0) || 0) || 0), 0);
         return g ? `<b style="font-size:12px;color:#b3261e">返金額 ${fmtJpy(g)} ／ 回収見込み <span style="color:#188038">${fmtJpy(Math.round(g * COMP_RATE))}</span></b>` : ''; })()}
       <span class="smd-dim" style="font-size:11px">荷物未着・中身なしなのに<b>補償が入っていない</b>ものです。実際に補償が入った41件では<b>返金額の中央値57%</b>が戻っています（Non-Receiptが最多）。Shopeeへ申請すれば取り戻せる可能性があります。</span>
       <button class="smd-btn b-write" id="ret-lostcsv" style="font-size:11px;padding:2px 9px;" title="申請用に、注文番号・返品番号・追跡番号・金額を並べたCSVを書き出します">⬇ 申請用CSV</button>
@@ -16014,11 +16014,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         if (v !== 'back') return;
         var sn = k.split(':')[1];
         try {
-          var hit = await sbGetAll('inventory', 'select=item_id&shopee_sn=eq.' + encodeURIComponent(sn));
+          var hit = await sbGetAll('inventory', 'select=item_id,name_supplier&shopee_sn=eq.' + encodeURIComponent(sn));
           if (hit && hit.length) {
+            // ★プルダウンを選んだ一発で在庫を書き換えていた（取り消しも確認も無し）。
+            //   原価がこの注文から外れるので損益が動く。同じページの他の破壊的操作には確認がある（2026-09-10 是正）。
+            var nm = hit.map(function (x) { return x.name_supplier || x.item_id; }).slice(0, 5).join('\n・');
+            var okBack = confirm('この注文の在庫 ' + hit.length + '件を在庫台帳へ戻します。\n'
+              + '・' + nm + (hit.length > 5 ? '\n…ほか' + (hit.length - 5) + '件' : '') + '\n\n'
+              + '状態を「在庫保管中」に戻し、注文との紐付けを外します。\n'
+              + '＝この注文から原価が外れて損益が変わります。よろしいですか？');
+            if (!okBack) { toast('在庫は戻していません（返品の区分だけ保存しました）'); return; }
             // 返品で戻ってきた分は在庫台帳へ戻す＝状態も「在庫保管中」に戻す
             await sbUpsert('inventory', hit.map(function (x) { return { item_id: x.item_id, shopee_sn: null, status: '在庫保管中' }; }));
             toast('\uD83D\uDCE6 在庫 ' + hit.length + '件を在庫台帳に戻しました（原価はこの注文から外れます）');
+            try { logAct('返品', '在庫を戻す', sn, hit.length + '件'); } catch (_) {}
           }
         } catch (e) { }
       });
@@ -16040,11 +16049,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ⬇ 申請用CSV：Shopeeへ補償を申請するのに要る項目だけを、金額の大きい順に並べて出す。
     //   （実測で補償は返金額の中央値57%。見込み額も入れて、どれから出すか決められるようにする）
     { const lc = body.querySelector('#ret-lostcsv'); if (lc) lc.addEventListener('click', () => {
-        const rs = lostAll.slice().sort((a2, b2) => (Number(b2.refund_jpy || 0) || 0) - (Number(a2.refund_jpy || 0) || 0));
+        // ★`refund_jpy` しか見ていなかったため、キャンセル・手動記録由来の行（orders由来の
+        //   オブジェクトでそのプロパティを持たない）は**件数は数えるのに金額が空**で出ていた。
+        //   同じ画面にある refundOf / _refundJpy も見る（2026-09-10 是正）。
+        const lostAmt = (o) => Number(o.refund_jpy || o._refundJpy || (typeof refundOf === 'function' ? refundOf(o) : 0) || 0) || 0;
+        const rs = lostAll.slice().sort((a2, b2) => lostAmt(b2) - lostAmt(a2));
         const head = ['国', '注文番号', '返品番号', '注文日', '追跡番号', '理由', '返金額(現地)', '通貨', '返金額(円)', '回収見込み(円)', '商品名', '購入者'];
         const out = [head].concat(rs.map(o => {
           const it = (o.items || [])[0] || {};
-          const j = Number(o.refund_jpy || 0) || 0;
+          const j = lostAmt(o);
           return [o.cc, o.sn, o.ret_sn || o.return_sn || '', o.order_date || snToDate(o.sn) || '', o.tracking || '',
             retReasonJa(o.ret_reason) || o.ret_reason || '', o.refund_amount != null ? o.refund_amount : '', o.currency || '',
             j || '', j ? Math.round(j * COMP_RATE) : '', it.name || '', o.buyer || ''];
@@ -17016,6 +17029,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u21A9 <b>返品の「戻ってきた」を選んだ瞬間、確認なしで在庫が書き換わっていました</b>。プルダウンを選ぶだけで<b>注文との紐付けが外れて原価が動く</b>のに、確認も取り消しもありませんでした。<b>何件・どの商品を戻すのかを出して確認</b>するようにし、キャンセルすれば区分だけ保存します。',
+      '\u{1F9FE} <b>補償の申請CSVで、金額が空のまま出ていた行があります</b>。返金額を1か所からしか見ておらず、<b>キャンセルや手動で記録した分は件数に入るのに金額が0</b>で出ていました（申請に使う書類なので致命的）。同じ画面にある正しい取り方に揃えました。',
       '\u{1F501} <b>転記を3時間おきに自動実行できるようにしました</b>（本人指定）。<b>チェックは2つのカードの外に独立して置いています</b>（F/Gのカードの中に入れていたため「入金予定額だけにかかっている」ように見えていました）。「💰利益管理表へ転記」ページの上にチェックを置いています。ONにすると<b>💵入金予定額→F/G列 のあとに 🖼️商品画像→AC列</b>を<b>順番に</b>走らせます（同時に投げるとブリッジの枠を取り合って失敗するため）。<b>ライブでない／鍵が無い／デモ表示／今月のシートIDが無い</b>ときは走らせず、<b>「見送り：理由」を記録して30分後にもう一度みます</b>（黙って失敗しません）。★<b>この端末だけ</b>で有効です。別のPCでもONにすると二重に書き込むので、1台だけでONにしてください。タブを開いている間だけ動きます。あわせて実行記録の時刻が<b>UTCのまま</b>出ていたのを日本時間にしました。',
       '\u{1F4B4} <b>【金額が実際に間違っていた2件を修正】</b>'
         + '<br>① <b>💴入出金・経費の画面だけ、補償金が0円として計算されていました</b>。補償の一覧をそもそも読んでおらず（`exp.retMeta` に何も入っていなかった）、<b>返金が過大・純利益が過少</b>に出ていました。'
