@@ -16968,6 +16968,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F5BC} <b>まとめ買いのとき画像が入らないことがある</b>のを手当てしました（本人指摘）。原因は2つで、①<b>画像を持っていない明細まで送っていた</b>ため <code>壊れたURL</code> をそのままAC列に書いていた（送らないようにしました）、②<b>同じ商品名・同じバリエ名の明細が2つ以上ある</b>と、どの行に入れるかGAS側で決められない（同じ商品を2点買った時など）。②は仕組み上どうにもならないので、<b>該当する注文番号を実行後に名指しで出します</b>。あわせて「画像を持っていない明細◯件は送っていません」も出すようにしました。これまでは<b>入らなかった理由が画面に一切出ず</b>「たまに入らない」としか分かりませんでした。',
       '\u{1F4B0} <b>「💰 利益管理表へ転記」をサイドバーに出しました</b>（本人「これしばらく使うんで表に出してほしい」）。これまで<b>⚙️設定の中のボタンからしか行けず</b>、本人も「どこからやるんだっけ」と迷う場所にありました。<b>売上・分析</b>の中、💹損益・入出金のすぐ下に置いています。',
       '\u23F3 <b>転記と同期を同時に走らせられないようにしました</b>（本人の画面で実際に発生）。ブリッジの枠は<b>6つしかない</b>のに、🖼️画像転記が<b>150秒</b>の要求を握ったまま☁️DB同期と💵F/Gも投げていたため、<b>枠を取り合って PH が timeout</b>していました。どれか1つが動いている間は、他を押しても<b>「いま◯◯が動いています。終わってから実行してください」</b>と出して止めます。',
       '\u{1F9F9} <b>【危ない表示を止めました】棚卸し画面が、在庫を読み込めなかったときに「在庫あり 0点」と出していました</b>。現物を数えるための画面で0と断言し、そのまま『まとめて販売済みにする』へ進める状態でした。<b>読めなかった時は件数を出さず</b>「0ではなく<b>不明</b>です」と出して、読み直しボタンだけを置きます。',
@@ -39162,7 +39163,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       await waitOrdersLoaded(st);
       const opt = document.getElementById('img-range').value;
       const data = {};
-      let orderCount = 0;
+      let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0;
+      const imgAmbig = [];
       REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
         const oc = state.orders.perCountry.get(region.cc);
         // status==='error'(ライブ取得失敗=△DB)でもDBの行は保持されているので使う。loading中と空だけ除外
@@ -39181,7 +39183,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         oc.rows.forEach(r => {
           if (targetSet && !targetSet.has(r.sn.slice(0, 6))) return;
           if (!data[cc]) data[cc] = {};
-          data[cc][r.sn] = r.items.map(it => ({ name: it.name, variation: it.variation, img: IMG_CDN + it.image }));
+          // ★まとめ買い（1注文に明細が複数）で画像が入らないことがある、の対策（2026-09-10 本人指摘）。
+          //   ① 画像が無い明細まで送ると `IMG_CDN + undefined` の【壊れたURL】をシートに書いてしまう → 送らない
+          //   ② 同じ「商品名＋バリエ名」が2つ以上あると、GAS側はどの行に入れるか決められない
+          //      （同じ商品を2点買った時など）→ 送るが、あとで件数を出して目で直せるようにする
+          const items = (r.items || []);
+          const use = items.filter(it => it && it.image);
+          imgNoPic += items.length - use.length;
+          const seen = {};
+          use.forEach(it => { const k = String(it.name || '') + '|' + String(it.variation || ''); seen[k] = (seen[k] || 0) + 1; });
+          const dupKeys = Object.keys(seen).filter(k => seen[k] > 1);
+          if (dupKeys.length) imgAmbig.push(r.cc + ' ' + r.sn + '（同じ明細が' + dupKeys.map(k => seen[k] + '点').join('・') + '）');
+          if (!use.length) { imgSkipOrd++; return; }
+          data[cc][r.sn] = use.map(it => ({ name: it.name, variation: it.variation, img: IMG_CDN + it.image }));
           orderCount++;
         });
       });
@@ -39197,6 +39211,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sidsImg.length}シート）\n` + Object.keys(aggImg).map(cc =>
         `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
+      // ★入らなかった理由を必ず出す。出さないと「たまに入らない」としか分からない（2026-09-10）。
+      if (imgNoPic) st.textContent += `\n⚠ 画像を持っていない明細 ${imgNoPic}件は送っていません（壊れたURLを書かないため）`;
+      if (imgSkipOrd) st.textContent += `\n⚠ 明細の画像が1枚も無い注文 ${imgSkipOrd}件は丸ごと送っていません`;
+      if (imgAmbig.length) st.textContent += `\n⚠ まとめ買いで同じ明細が複数ある注文 ${imgAmbig.length}件は、どの行に入れるか決められません（手で確認してください）\n　 ${imgAmbig.slice(0, 8).join('\n　 ')}${imgAmbig.length > 8 ? '\n　 …ほか' + (imgAmbig.length - 8) + '件' : ''}`;
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
     }
