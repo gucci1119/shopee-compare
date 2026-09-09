@@ -1035,7 +1035,13 @@
         7か国のセラーセンターで<b>月初〜今日</b>の明細をエクスポートして、各国 <b>{国}_row の3行目から</b>丸ごと入れ替えます（<b>1行目と2行目は触りません</b>・更新日も動きます）。
       </div>
       <div class="tool-row">
-        <button class="smd-btn b-write" id="rowall-run">▶ 実行</button>
+        対象
+        <select id="rowall-cc">
+          <option value="">7か国まとめて</option>
+          <option value="ph">PH</option><option value="br">BR</option><option value="sg">SG</option>
+          <option value="my">MY</option><option value="vn">VN</option><option value="th">TH</option><option value="tw">TW</option>
+        </select>
+        <button class="smd-btn primary" id="rowall-run">▶ 実行</button>
       </div>
       <div class="tool-status" id="rowall-status"></div>
       <div id="rowall-list" style="font-size:12px;line-height:1.9;margin-top:6px"></div>
@@ -3802,6 +3808,7 @@
     "🔍 下見（書き込まない）": "🔍 Preview (writes nothing)",
     "▶ 7か国まとめて入れ替える": "▶ Replace all 7 countries",
     "▶ 実行": "▶ Run",
+    "対象": "Target",
     "▶ 入れ替える": "▶ Replace",
     "レポートID（空なら自動で作る）": "Report ID (leave blank to create one)",
     "テスト先シートID（空なら本番）": "Test sheet ID (blank = live sheet)",
@@ -6271,8 +6278,8 @@
     [/^7か国ぶんの \{国\}_row の3行目以降を、セラーセンターの明細で丸ごと入れ替えます。$/, 'This replaces everything from row 3 down in all seven {country}_row sheets with the Seller Centre export.'],
     [/^(.+)_row の3行目以降を、セラーセンターの明細で丸ごと入れ替えます。$/, 'This replaces everything from row 3 down in $1_row with the Seller Centre export.'],
     [/^1行目と2行目は触りません。よろしいですか？$/, 'Rows 1 and 2 are left untouched. Proceed?'],
-    [/^🔍 下見：7か国ぶんのエクスポートを作成しています…（(.+) 〜 (.+)・書き込み先 (.+)）$/, '🔍 Preview: creating exports for all 7 countries… ($1 - $2, writing to $3)'],
-    [/^▶ 入れ替え：7か国ぶんのエクスポートを作成しています…（(.+) 〜 (.+)・書き込み先 (.+)）$/, '▶ Replace: creating exports for all 7 countries… ($1 - $2, writing to $3)'],
+    [/^🔍 下見：(\d+)か国ぶんのエクスポートを作成しています…（(.+) 〜 (.+)・書き込み先 (.+)）$/, '🔍 Preview: creating exports for $1 countries… ($2 - $3, writing to $4)'],
+    [/^▶ 入れ替え：(\d+)か国ぶんのエクスポートを作成しています…（(.+) 〜 (.+)・書き込み先 (.+)）$/, '▶ Replace: creating exports for $1 countries… ($2 - $3, writing to $4)'],
     [/^🔍 下見おわり：成功 (\d+)か国 \/ 失敗 (\d+)か国　（書き込み先 (.+)）$/, '🔍 Preview finished: $1 countries OK / $2 failed (wrote to $3)'],
     [/^▶ 入れ替えおわり：成功 (\d+)か国 \/ 失敗 (\d+)か国　（書き込み先 (.+)）$/, '▶ Replace finished: $1 countries OK / $2 failed (wrote to $3)'],
     [/^下見OK：(\d+)行 \/ (\d+)列（1行も書いていません）$/, 'Preview OK: $1 rows / $2 columns (nothing was written)'],
@@ -39643,17 +39650,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★エクスポートの作成は7か国いっぺんに投げる（制限は同じ国の中だけ・本人指定 2026-09-10）。
   //   そのあとの「取得→GASへ書き込み」は1国ずつ順番にやる。GAS側が LockService で
   //   1本ずつしか動かないので、同時に投げても待たされるだけで得がないため。
-  async function rowRunAll(dryRun, st, listEl) {
+  async function rowRunAll(dryRun, st, listEl, ccListIn) {
     const pre = rowPreflight();
     if (pre) { st.textContent = pre; return { done: 0, fail: 0, failed: [], skipped: pre }; }
     const testSid = String(((document.getElementById('rowall-test-sid') || {}).value) || '').trim();
     const tg = rowTarget(testSid);
     if (tg.err) { st.textContent = tg.err; return { done: 0, fail: 0, failed: [], skipped: tg.err }; }
     const mr = rowMonthRange();
+    const CCS = (Array.isArray(ccListIn) && ccListIn.length) ? ccListIn : ROW_COUNTRIES;
     const rows = {};
-    ROW_COUNTRIES.forEach(cc => { rows[cc] = { cc: cc, msg: '待機中…', ok: null }; });
+    CCS.forEach(cc => { rows[cc] = { cc: cc, msg: '待機中…', ok: null }; });
     const draw = () => {
-      listEl.innerHTML = ROW_COUNTRIES.map(cc => {
+      listEl.innerHTML = CCS.map(cc => {
         const r = rows[cc];
         const mark = r.ok === true ? '✅' : (r.ok === false ? '❌' : '⏳');
         const col = r.ok === true ? '#1a7f37' : (r.ok === false ? '#c0392b' : '#666');
@@ -39663,10 +39671,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }).join('');
     };
     draw();
-    st.textContent = (dryRun ? '🔍 下見' : '▶ 入れ替え') + '：7か国ぶんのエクスポートを作成しています…（' + mr.from + ' 〜 ' + mr.to + '・書き込み先 ' + tg.label + '）';
-    // ① 7か国ぶんのエクスポートをいっぺんに作る
+    st.textContent = (dryRun ? '🔍 下見' : '▶ 入れ替え') + '：' + CCS.length + 'か国ぶんのエクスポートを作成しています…（' + mr.from + ' 〜 ' + mr.to + '・書き込み先 ' + tg.label + '）';
+    // ① 対象の国ぶんのエクスポートをいっぺんに作る
     const rids = {};
-    await Promise.all(ROW_COUNTRIES.map(async cc => {
+    await Promise.all(CCS.map(async cc => {
       rows[cc].msg = 'エクスポートを作成中…'; draw();
       try { rids[cc] = await rowCreateReport(cc, mr); rows[cc].msg = '作成しました（' + rids[cc] + '）。順番待ち…'; }
       catch (e) { rows[cc].ok = false; rows[cc].msg = '作成に失敗: ' + ((e && e.message) || e); }
@@ -39675,7 +39683,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ② 1国ずつ、出来上がりを待って取得し、GASへ書く
     let done = 0, fail = 0;
     const failed = [];
-    for (const cc of ROW_COUNTRIES) {
+    for (const cc of CCS) {
       if (!rids[cc]) {
         if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, 'エクスポートを作れませんでした')); } catch (_) {} }
         failed.push(cc.toUpperCase()); fail++; continue;
@@ -39743,7 +39751,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (ad) ad.disabled = true;
     if (ar) ar.disabled = true;
     let out = { done: 0, fail: 0, failed: [] };
-    try { out = (await rowRunAll(dry, ast, alist)) || out; }
+    const selCc = auto ? '' : String(((document.getElementById('rowall-cc') || {}).value) || '');
+    try { out = (await rowRunAll(dry, ast, alist, selCc ? [selCc] : null)) || out; }
     catch (e) { ast.textContent = '❌ ' + ((e && e.message) || e); out = { done: 0, fail: 0, failed: [], skipped: String((e && e.message) || e) }; }
     toolBusy = null;
     if (ad) ad.disabled = false;
