@@ -1028,6 +1028,7 @@
         <button class="smd-btn primary" id="dep-run">▶ 実行</button>
       </div>
       <div class="tool-status" id="dep-status"></div>
+      <div id="dep-runs" class="smd-dim" style="font-size:11px;margin-top:6px;line-height:1.7"></div>
     </div>
     <div class="tool-card">
       <h3>🖼️ 商品画像 → AC列（バリエーション画像つき）</h3>
@@ -7362,6 +7363,7 @@
       stock: renderStock, list: renderListPage, profit: renderProfit,
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, tax: renderTax, suppliers: renderSuppliers,
+      tools: () => { try { renderDepRuns(); } catch (_) {} },   // 転記ページ：開いた瞬間に直近の実行を出す
       log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
       expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
       account: renderAccounts,
@@ -15034,6 +15036,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const prevYm = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
   // 転記/ミラー対象シートID（今月＋先月・重複と空を除く）＝入金確定の月ズレに対応
   const activeSheetIds = () => [...new Set([sheetIdForMonth(jstYm()), sheetIdForMonth(prevYm(jstYm()))])].filter(Boolean);
+  // ★どの月のシートに書くのかを、月つきで返す（2026-09-10）。
+  //   月替わり直後は今月のIDが未登録で、旧・単一ID(settings.sheetId＝前回保存時の月)へ落ちる。
+  //   そうすると今月ぶんと先月ぶんが同じIDになり、new Set で1本に潰れたまま
+  //   「✅完了（対象シート1枚）」と出て、**先月のシートに書いたことが画面に一切出なかった**。
+  //   ここでは旧・単一IDへのフォールバックを使わず、登録されている月だけを返す。
+  const activeSheetPlan = () => {
+    const cur = jstYm(), prev = prevYm(cur);
+    const at = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || '';
+    const out = [];
+    if (at(cur)) out.push({ ym: cur, id: at(cur) });
+    if (at(prev) && at(prev) !== at(cur)) out.push({ ym: prev, id: at(prev) });
+    return { cur: cur, prev: prev, list: out, missingCur: !at(cur) };
+  };
+  const sheetPlanLabel = (pl) => pl.list.length
+    ? pl.list.map(x => x.ym + ' のシート').join(' ＋ ')
+    : '（書き込み先がありません）';
   async function renderExpenses() {
     const body = document.getElementById('exp-body');
     if (!exp.ym) exp.ym = jstYm();
@@ -16983,6 +17001,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4C4} <b>転記の「どこに書くのか」「どうなったのか」が見えるようにしました</b>。①<b>送信前に「2026-09 のシート ＋ 2026-08 のシート」と月つきで表示</b>し、<b>今月のIDが未登録なら実行せずに止めます</b>（これまでは月替わり直後に<b>黙って先月のシートへ書き、しかも「完了」と出ていました</b>）。②<b>タイムアウトは「失敗」ではありません</b>。こちらが待つのをやめただけで<b>GAS側はまだ書いている可能性</b>があるため、文言を変えて<b>5分間は押せない</b>ようにしました（すぐ押し直すと二重に書かれます）。③<b>実行の記録を残します</b>。転記ページを開くと<b>直近の実行（いつ・どの月・結果）</b>が出ます。',
       '\u{1F41B} <b>【Codexのレビューで見つかった、今日の私の不具合を2件直しました】</b>'
         + '<br>① <b>確定申告と事業計画の入力欄が、1文字打つと消えていました</b>。打鍵ごとに画面を描き直す作りにしてしまい、確定申告側は<b>再取得まで走って入力欄が消え、2文字目が打てない</b>状態でした。<b>手が止まってから（0.7秒）保存して描き直す</b>ようにし、入力欄から離れた時はすぐ確定します。'
         + '<br>② <b>注文カードの期日バッジだけ日本時間のままで、一覧やカレンダーと1日食い違っていました</b>。「一覧では今日ぶんなのに、バッジは明日」が起きます。バッジも<b>その国の現地日付</b>に揃えました。',
@@ -38753,6 +38772,38 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   let toolBusy = null;   // null | 'sync' | 'dep' | 'img'
   const TOOL_LABEL = { sync: '☁️ DB同期', dep: '💵 入金予定額→F/G列', img: '🖼️ 商品画像→AC列' };
   function toolBusyMsg() { return '⏳ いま「' + (TOOL_LABEL[toolBusy] || toolBusy) + '」が動いています。ブリッジの枠を取り合って両方とも失敗するので、終わってから実行してください。'; }
+  // ★タイムアウトは【失敗】ではない。こちらが待つのをやめただけで、GAS側は最大6分走り続ける。
+  //   「❌ timeout」とだけ出していたので、本人がすぐ押し直して二重に書き込む恐れがあった（2026-09-10）。
+  const DEP_COOLDOWN_MS = 5 * 60 * 1000;
+  const isTimeoutErr = (e) => /timeout/i.test(String((e && e.message) || e));
+  const depTimeoutMsg = () =>
+    '\n⏳ こちらの待ち時間（150秒）を過ぎました。**失敗とは限りません**。\n'
+    + '　 向こう（GAS）はまだ書いている可能性があります。\n'
+    + '　 5分ほど待ってからスプレッドシートを開いて、入っているか目で見てください。\n'
+    + '　 入っていなければ、そのあとでもう一度実行してください（すぐ押し直すと二重に書かれます）。';
+  // 実行の記録（いつ・どこへ・どうなったか）。activity_log は Supabase へ直接書くので GASの枠は使わない。
+  function depRecordRow(kind, plan, note) {
+    return { at: new Date().toISOString(), kind: kind, sheets: (plan && plan.list || []).map(x => x.ym).join('＋'), note: String(note || '').slice(0, 300) };
+  }
+  function renderDepRuns() {
+    const el = document.getElementById('dep-runs'); if (!el) return;
+    let arr = null;
+    try { arr = JSON.parse(localStorage.getItem('smdDepRuns') || '[]'); } catch (_) { arr = null; }
+    if (!Array.isArray(arr)) { el.innerHTML = '<span style="color:#c0392b">実行の記録を読めませんでした（0件ではありません）</span>'; return; }
+    if (!arr.length) { el.textContent = 'この端末での実行はまだありません。'; return; }
+    el.innerHTML = '<b>この端末での直近の実行</b><br>' + arr.slice(0, 6).map(r =>
+      esc(String(r.at || '').replace('T', ' ').slice(5, 16)) + '　' + esc(r.kind || '') + '　' + esc(r.sheets || '') + '　' + esc(r.note || '')).join('<br>');
+  }
+  function depRunsSave(row) {
+    try {
+      const k = 'smdDepRuns';
+      let arr = null;
+      try { arr = JSON.parse(localStorage.getItem(k) || '[]'); } catch (_) { arr = null; }
+      if (!Array.isArray(arr)) arr = [];        // 読めなかった時に「まだ実行していない」に化けさせない
+      arr.unshift(row); localStorage.setItem(k, JSON.stringify(arr.slice(0, 20)));
+    } catch (_) {}
+    try { logAct('転記', row.kind, row.sheets, row.note); } catch (_) {}
+  }
   let syncRunning = false; toolBusy = null;
   async function syncAll(st, interactive) {
     if (syncRunning) return;
@@ -39126,8 +39177,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!Object.keys(data).length) throw new Error('取得できた国がありません');
       // 今月＋先月のシートに書く（6月末注文の入金確定が7月にズレても6月シートが更新される）。GASは1回=1シートなのでシートごとにPOST
-      const sids = activeSheetIds();
+      const plan = activeSheetPlan();
+      if (plan.missingCur) throw new Error('今月（' + plan.cur + '）のシートIDが未登録です。⚙️設定の「YYYY-MM: ID」に追加してください。\n※このまま実行すると先月のシートに書いてしまうので止めました。');
+      const sids = plan.list.map(x => x.id);
       if (!sids.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
+      st.textContent += '\n📄 書き込み先: ' + sheetPlanLabel(plan);
       const agg = {};
       for (const sid of sids) {
         st.textContent += `\nGASへ送信中... (${mode} / シート${sids.indexOf(sid) + 1}/${sids.length})`;
@@ -39148,9 +39202,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const okCc = targets.filter(r => data[r.cc.toLowerCase()]).map(r => r.cc);
       st.textContent += failed.length
         ? `\n⚠ 一部だけ書きました：成功=${okCc.join('/') || 'なし'} ／ 取得できず=${failed.join('/')}\n　→ 取得できなかった国は、ブリッジとShopeeのログインを確かめてもう一度実行してください（書けた国は二重にはなりません）`
-        : `\n✅ 完了（対象シート ${sids.length}枚）`;
+        : `\n✅ 完了（${sheetPlanLabel(plan)}）`;
+      depRunsSave(depRecordRow('入金F/G', plan, failed.length ? ('一部だけ 成功=' + okCc.join('/') + ' 失敗=' + failed.join('/')) : '完了'));
     } catch (e) {
+      if (isTimeoutErr(e)) {
+        st.textContent += depTimeoutMsg();
+        depRunsSave(depRecordRow('入金F/G', typeof plan !== 'undefined' ? plan : null, '待ち時間切れ（結果は未確認）'));
+        toolBusy = null;
+        setTimeout(() => { const b2 = document.getElementById('dep-run'); if (b2) b2.disabled = false; }, DEP_COOLDOWN_MS);
+        return;   // ★ここでボタンを戻さない（5分は押せない）
+      }
       st.textContent += `\n❌ ${e.message}`;
+      depRunsSave(depRecordRow('入金F/G', typeof plan !== 'undefined' ? plan : null, '失敗: ' + ((e && e.message) || e)));
     }
     btn.disabled = false; toolBusy = null;
   });
@@ -39218,8 +39281,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         });
       });
       if (!orderCount) throw new Error('対象0件（選んだ日付に注文がありません）');
-      const sidsImg = activeSheetIds();
+      const planImg = activeSheetPlan();
+      if (planImg.missingCur) throw new Error('今月（' + planImg.cur + '）のシートIDが未登録です。⚙️設定の「YYYY-MM: ID」に追加してください。\n※このまま実行すると先月のシートに書いてしまうので止めました。');
+      const sidsImg = planImg.list.map(x => x.id);
       if (!sidsImg.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
+      st.textContent += '\n📄 書き込み先: ' + sheetPlanLabel(planImg);
       const aggImg = {};
       for (const sid of sidsImg) {
         st.textContent = `画像: ${orderCount}注文 → GASへ送信中... (シート${sidsImg.indexOf(sid) + 1}/${sidsImg.length})`;
@@ -39227,7 +39293,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
         Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); });
       }
-      st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sidsImg.length}シート）\n` + Object.keys(aggImg).map(cc =>
+      st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sheetPlanLabel(planImg)}）\n` + Object.keys(aggImg).map(cc =>
         `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
       // ★入らなかった理由を必ず出す。出さないと「たまに入らない」としか分からない（2026-09-10）。
       if (imgNoPic) st.textContent += `\n⚠ 画像を持っていない明細 ${imgNoPic}件は送っていません（壊れたURLを書かないため）`;
