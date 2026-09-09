@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.44.1
+// @version      3.44.2
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -3132,11 +3132,30 @@
     // 初回：トークン未設定なら自動で入力を促す（＝これだけで設定完了）
     if (!getTok() && !window.__chatAsked) { window.__chatAsked = 1; setTimeout(() => { if (!getTok()) askToken(); }, 1200); }
   }
+  // ★普段は【極小の点】にして画面の邪魔をしない（本人指摘 2026-09-09「邪魔」）。
+  //   ⚠️ ただし【完全には消さない】。2026-08-01に取り込みが2時間止まっていたのに
+  //      誰も気づけなかった事故があり、「壊れたら気づける表示を必ず作る」が記録に残っている。
+  //   → 言うことがある時（未設定・エラー・巡回中・送信待ち）だけ、いつもの帯に戻る。
+  //      点にマウスを乗せれば中身が読め、クリックの設定メニューも点のまま開く。
+  //   （伝票印刷 SLS Waybill Printer v6.0.1 で同じ形にした前例あり）
+  function chipQuiet(on) {
+    if (!chip) return;
+    if (on) {
+      chip.style.width = '10px'; chip.style.height = '10px'; chip.style.padding = '0';
+      chip.style.borderRadius = '50%'; chip.style.overflow = 'hidden';
+      chip.style.fontSize = '0'; chip.style.opacity = '0.35'; chip.style.boxShadow = 'none';
+    } else {
+      chip.style.width = ''; chip.style.height = ''; chip.style.padding = '';
+      chip.style.borderRadius = ''; chip.style.overflow = '';
+      chip.style.fontSize = ''; chip.style.opacity = ''; chip.style.boxShadow = '';
+    }
+  }
   function updateChip() {
     if (!chip) return;
     if (!isWebchat()) { // 注文一覧などのページでは何もしない＝誤解を招かないよう「待機中」と出すだけ
       chip.textContent = '💤 チャット取り込み（この画面では待機中）';
-      chip.style.background = '#555'; chip.title = 'Shopeeチャット(webchat)の画面でだけ動きます'; return;
+      chip.style.background = '#555'; chip.title = 'Shopeeチャット(webchat)の画面でだけ動きます';
+      chipQuiet(true); return;
     }
     const warn = (!getUrl() || !getTok());
     const role = (tabRole() === 'manual') ? '🙋' : (leaseHeld() ? '🤖' : '⏸');
@@ -3145,6 +3164,8 @@
       : leaseHeld() ? '🤖巡回役タブ（自動で会話を開いて取り込み＋返信送信）'
         : '⏸待機タブ（他のタブが巡回役。そのタブを閉じると自動で引き継ぎます）') + ' — クリックで設定';
     chip.style.background = cycleInfo ? '#1a5' : (warn ? '#8a6d00' : (lastErr ? '#7a1f1f' : '#111'));
+    // 言うことが無い時だけ点にする（未設定・エラー・巡回中・送信待ちは今までどおり出す）
+    chipQuiet(!(warn || lastErr || cycleInfo || msgBuffer.length));
   }
   function toast(msg) {
     try {

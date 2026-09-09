@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.7.0
+// @version      1.7.1
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -160,6 +160,11 @@
   // ── ⇄ ショップ切替パネル（Shopeeセラーページのみ・全ショップをワンクリック切替） ──
   // 切替は get_sig?target_shop_id=X → 応答 {url:"…?sig=…"} へ遷移。get_sigはShopee同一オリジンからのみ通るのでここ(セラーページ)で実行する。
   (function shopSwitcher() {
+    // ★2026-09-09 本人「使ってない・邪魔」→ 既定で出さない。機能は消していない。
+    //   戻したい時は Shopeeのページのコンソールで
+    //     localStorage.setItem('smd_sw_show','1')
+    //   を実行してリロードすれば、また出る（消す時は removeItem）。
+    try { if (localStorage.getItem('smd_sw_show') !== '1') return; } catch (_) { return; }
     const SELLER = ['seller.shopee.ph', 'seller.shopee.sg', 'seller.shopee.com.my', 'seller.shopee.com.br', 'seller.shopee.vn', 'banhang.shopee.vn', 'seller.shopee.co.th', 'seller.shopee.tw'];
     if (SELLER.indexOf(location.host) < 0) return;
     const CC = { ph: 'PH', sg: 'SG', my: 'MY', br: 'BR', vn: 'VN', th: 'TH', tw: 'TW' };
