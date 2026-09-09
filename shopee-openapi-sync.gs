@@ -2952,8 +2952,11 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   }
   var rows = [], now2 = new Date().toISOString(), errs = 0, skip = 0, partial = false;
   // ★初回取得値(amount_initial=暫定)を保持するため既存incomeを読む。上書きすると常に暫定=確定になる不具合の修正
-  var prev = {};
-  try { var ex = sbSelect_('income', 'select=cc,sn,amount,amount_initial,amount_initial_at&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (ex || []).forEach(function (r) { prev[r.cc + ':' + r.sn] = r; }); } catch (_) {}
+  var prev = {}, prevOk = false, prevFull = false;
+  // ★既存の income が【読めなかった／上限で切れた】ときは、初回値(amount_initial)を書かない（Codex全体レビュー 2026-09-10）。
+  //   読めないまま今の額を初回値として上書きすると「暫定＝確定」に化けて、確定/暫定の区別（利益の信頼度）が壊れる。
+  //   書かなければ upsert は既存の初回値を残す（列を省いた行は merge で触らない）。新規行は fillIncomeInitial_ が後で埋める。
+  try { var ex = sbSelect_('income', 'select=cc,sn,amount,amount_at,amount_initial,amount_initial_at&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (ex || []).forEach(function (r) { prev[r.cc + ':' + r.sn] = r; }); prevOk = true; prevFull = (ex || []).length < 10000; } catch (e0) { prevOk = false; }
   for (var oi = 0; oi < orders.length; oi++) {
     if (deadline && now_() > deadline) { partial = true; break; }
     var o = orders[oi];
@@ -2970,14 +2973,32 @@ function syncEscrowForShop_(tok, deadline, finalized) {
       final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
     // 初回取得値(暫定)は保持。amount_at は「額が実際に変わった時刻」＝前回と同額なら前回のまま、変われば今
     var pv = prev[cc + ':' + o.sn];
-    var initAmt = (pv && pv.amount_initial != null) ? pv.amount_initial : amt;
-    var initAt = (pv && pv.amount_initial_at) ? pv.amount_initial_at : now2;
-    var amtAt = (pv && pv.amount != null && parseFloat(pv.amount) === amt && pv.amount_at) ? pv.amount_at : now2;
-    rows.push({ cc: cc, sn: o.sn, amount: amt, amount_at: amtAt, amount_initial: initAmt, amount_initial_at: initAt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2 });
+    var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2  };
+    if (pv) {
+      row.amount_initial = (pv.amount_initial != null) ? pv.amount_initial : parseFloat(pv.amount);
+      row.amount_initial_at = pv.amount_initial_at || now2;
+      row.amount_at = (pv.amount != null && parseFloat(pv.amount) === amt && pv.amount_at) ? pv.amount_at : now2;
+    } else if (prevOk && prevFull) {
+      row.amount_initial = amt; row.amount_initial_at = now2; row.amount_at = now2;   // 本当に新規
+    } else {
+      row.amount_at = now2;   // 既存が読めていない／上限で切れた → 初回値は書かない（既存を残す）
+    }
+    rows.push(row);
   }
   if (rows.length) sbUpsert_('income', rows, 'cc,sn');
   var out = { cc: cc, shop_id: tok.shop_id, income: rows.length, skipped: skip, errs: errs };
   if (partial) out.partial = true; return out;
+}
+// ★初回値(amount_initial)が空の行を埋める（既存を読めなかった回に初回値を書かなかった分の後始末）。
+//   amount_initial=amount, amount_initial_at=amount_at として埋める。トリガーは syncEscrowAll の最後で呼ぶ。
+function fillIncomeInitial_() {
+  var rows = [];
+  try { rows = sbSelect_('income', 'select=cc,sn,amount,amount_at&amount_initial=is.null&limit=5000') || []; } catch (e) { return 0; }
+  var up = rows.filter(function (r) { return r.amount != null; }).map(function (r) {
+    return { cc: r.cc, sn: r.sn, amount_initial: parseFloat(r.amount), amount_initial_at: r.amount_at || new Date().toISOString() };
+  });
+  if (up.length) sbUpsert_('income', up, 'cc,sn');
+  return up.length;
 }
 // ★入金額が暫定のまま固まっている注文を、名指しで取り直す。
 //   syncEscrowForShop_ は「直近15日に更新のあった注文」しか見ないため、
@@ -3034,6 +3055,8 @@ function syncEscrowAll() {
   try { log.push({ 売上補完: backfillOrderTotals() }); } catch (e) { log.push({ 売上補完: 'error ' + String(e).slice(0, 100) }); }
   // 在庫↔注文の紐付けも一緒に直す（放っておくと原価の実績がその月だけ空になる）
   try { log.push({ 在庫紐付け: relinkInventoryFromProfitSheet() }); } catch (e) { log.push({ 在庫紐付け: 'error ' + String(e).slice(0, 100) }); }
+  // 初回値が空のまま残った行を埋める（既存を読めなかった回に初回値を書かなかった分）
+  try { log.push({ 初回値補完: fillIncomeInitial_() }); } catch (e) { log.push({ 初回値補完: 'error ' + String(e).slice(0, 100) }); }
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
