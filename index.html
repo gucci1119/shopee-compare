@@ -8211,8 +8211,15 @@
   //   以前は ship_by をそのままスキャン期限として扱っていたため、**期日が2日早く出ていた**
   //   （月曜の注文が火曜発送になり、本人の実務（木曜発送）と食い違っていた）。
   //   ※1 スキャン期限が日曜に当たる分は、日曜はスキャンされないので【土曜へ繰り上げ】。
-  const sunBack_ = (sec) => (sec && jstDow_(sec) === 0) ? sec - 86400 : sec;   // 日曜→土曜へ繰り上げ
-  const ordLsrScan = (r) => (r && r.shipBy) ? sunBack_(r.shipBy + LSR_ADD_DAYS * 86400) : 0;    // ③遅延の線
+  // ★2026-09-10 是正：期日は【その国の現地時間の日付】で数える。
+  //   Shopeeの ship_by は現地時間の期日なのに、日本時間で日付に丸めていた。
+  //   例）MYの ship_by 1788881400 は JST 9/9(水)00:30 だが、現地(UTC+8)では 9/8(火)23:30。
+  //   1日ズレて「まだ間に合う」と出ていた。未発送77件のうち34件（BR 51件中27件）が該当。
+  //   ズレは常に【1日甘い】側なので、遅延（LSR）を見落とす向きだった。
+  const ccTz_ = (cc) => { const r = REGIONS.filter(x => x.cc === cc)[0]; return r && typeof r.tz === 'number' ? r.tz : 9; };
+  const locDow_ = (sec, cc) => new Date((sec + ccTz_(cc) * 3600) * 1000).getUTCDay();
+  const sunBack_ = (sec, cc) => (sec && locDow_(sec, cc) === 0) ? sec - 86400 : sec;   // 日曜→土曜へ繰り上げ（現地の曜日で見る）
+  const ordLsrScan = (r) => (r && r.shipBy) ? sunBack_(r.shipBy + LSR_ADD_DAYS * 86400, r.cc) : 0;    // ③遅延の線
   const ordNfrScan = (r) => (r && r.shipBy) ? r.shipBy + NFR_ADD_DAYS * 86400 : 0;              // ④自動キャンセルの線
   // ★pre-order の判別は現状できない。
   //   orders.pre_order は全件 false（取り込みが壊れている）。
@@ -8227,10 +8234,14 @@
     return scan ? scan - SCAN_LEAD_DAYS * 86400 : 0;
   };
   const jstDay_ = (ms) => { const t = new Date(ms + 9 * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };
-  const dueBucketOf_ = (sec) => {                 // over/d0/d1/d2/later/none
+  const tzDay_ = (ms, tz) => { const t = new Date(ms + tz * 3600 * 1000); return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()); };
+  // ★期日は【その国の現地日付】、「今日」は【日本時間】で数える。
+  //   荷物を出すのは日本からなので、判断する側の「今日」は日本時間が正しい。
+  //   期日側を日本時間に丸めると、現地では前日だった期日が1日後ろにズレる（2026-09-10 是正）。
+  const dueBucketOf_ = (sec, cc) => {             // over/d0/d1/d2/later/none
     if (!sec) return 'none';
     const now = Date.now();
-    const diff = Math.round((jstDay_(sec * 1000) - jstDay_(now)) / 86400000);
+    const diff = Math.round((tzDay_(sec * 1000, ccTz_(cc)) - jstDay_(now)) / 86400000);
     if (diff < 0) return 'over';                  // 日付で見る（時刻ぴったりで急に超過にしない）
     if (diff === 0) return 'd0';
     if (diff === 1) return 'd1';
@@ -8238,9 +8249,9 @@
     return 'later';
   };
   // 既定は発送基準（自分の行動が決まるのはこちら）
-  const ordDueBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordShipDeadline(r));
+  const ordDueBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordShipDeadline(r), r.cc);
   // 倉庫スキャンの期限＝自動キャンセルの基準
-  const ordScanBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordLsrScan(r));
+  const ordScanBucket = (r) => (r.tab !== 300 || !r.shipBy) ? 'none' : dueBucketOf_(ordLsrScan(r), r.cc);
   // 期限を大きく過ぎたものはShopee側で自動キャンセルされる恐れがある（国により猶予は違うが、超過48hを警戒線に）
   const ordAutoCancelRisk = (r) => r.tab === 300 && !ordDone(r) && r.shipBy && nowSec() > ordNfrScan(r);   // ④NFRを過ぎた＝自動キャンセルの対象
   // 📆 これから2週間、どの日に何件出す必要があるか。
@@ -16939,6 +16950,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F6A8} <b>【重要・実害あり】発送期日が1日甘く出ていました</b>（本人指摘）。Shopeeの <code>ship_by</code> は<b>その国の現地時間</b>の期日なのに、<b>日本時間で日付に丸めていた</b>ため、現地では前日だった期日が1日後ろにズレていました。<b>未発送77件のうち34件（BR 51件中27件）が該当</b>し、ズレは<b>常に「まだ間に合う」と見える側</b>＝<b>遅延（LSR）を見落とす向き</b>でした。期日は<b>現地の日付</b>、「今日」は<b>日本時間</b>（荷物を出すのは日本から）で数えるように直しました。検算＝本人の運用ルール（月→金スキャン/木に手離れ・火→土/金・水→土/金・木→水/火・金土日→木/水）と実データ1,999件で一致を確認。例：9/5(土)注文のMY注文は <code>ship_by</code> 現地9/8(火)→スキャン期限9/10(木)→手を離れる9/9(水)で、<b>「今日中」ではなく「遅延」</b>が正しい表示です。',
       '\u2328 <b>打ち込んだ数字が、その場で反映されるようにしました</b>。<b>事業計画の「🎯目標＆逆算」7欄</b>と<b>確定申告の「期首/期末の棚卸高・平均USD/JPY」</b>は、<b>入力欄から離れるまで計算が古いまま</b>でした（同じページの「👥外注の単価」は元から打鍵連動で、作りが割れていました）。棚卸高は売上原価＝期首＋当期仕入−期末に直接効くので、打ち替えても数字が動かないのは危ない状態でした。',
       '\u{1F504} <b>在庫の「シリーズ別 回転速度」が、件数が多いほど閉じていた</b>のを直しました（13件以上で畳まれる分岐が逆向き）。表は40行＋スクロール枠に収まっているので、常に開いた状態にします。',
       '\u{1F6A8} <b>【事故になる経路を塞ぎました】🎭デモ表示のまま「💵入金予定額→F/G列」「🖼️商品画像→AC列」を実行すると、<b>ダミーの商品名が本番の利益管理表に焼き付いていました</b>。デモの番人はSupabaseへの保存にしか入っておらず、<b>転記GASへの送信は素通り</b>だったためです。両方の入口で止めるようにしました。',
