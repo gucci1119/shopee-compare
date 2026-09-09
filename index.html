@@ -39295,6 +39295,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   ② get_report で status を見る（2＝出来上がり）
   //   ③ download_report で中身（xlsx）を落とす
   //   一覧(get_report_list)は使わない。パラメータが不明で、画面の読み込み時にしか飛ばないため。
+  // ★セラーセンターの画面でエクスポートを作る（期間＝その月の1日〜今日）。
+  //   このタブがセラーセンターを開いている必要があるので、ポータルからは直接は押せない。
+  //   ここでは「押す手順」を文字で返すだけにして、実際に押すのは Shopee のタブ側で行う。
+  //   ★日付は固定しない。実行した時点の【月初〜今日】を毎回その場で計算する
+  //     （10月になれば 10/1〜今日、11月なら 11/1〜今日。本人指定 2026-09-10）。
+  function rowMonthRange() {
+    const now = new Date(Date.now() + 9 * 3600 * 1000);
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth() + 1;
+    const d = now.getUTCDate();
+    const p2 = (n) => String(n).padStart(2, '0');
+    return { from: y + '/' + p2(m) + '/01', to: y + '/' + p2(m) + '/' + p2(d), fromDay: 1, toDay: d, ym: y + p2(m) };
+  }
   async function rowGetReport(cc, reportId) {
     const url = 'https://' + ROW_HOSTS[cc] + '/api/v3/settings/get_report/?SPC_CDS_VER=2&report_id=' + encodeURIComponent(reportId);
     const txt = await bridgeRequest('GET', url, undefined, { timeout: 30000 });
@@ -39319,10 +39332,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const targetLabel = testSid ? '🧪 テスト用シート' : (plan.list[0].ym + ' のシート');
     const rid = (document.getElementById('row-rid') || {}).value;
     if (!rid) { say('❌ レポートIDが空です。セラーセンターでエクスポートを作り、その report_id を入れてください'); return; }
-    say('📥 レポート ' + rid + ' の状態を確認中…');
+    const mr = rowMonthRange();
+    say('📥 レポート ' + rid + ' の状態を確認中…（今月ぶん ' + mr.from + ' 〜 ' + mr.to + ' を想定）');
     const info = await rowGetReport(cc, rid);
     if (!info) { say('❌ レポートの状態を取れませんでした'); return; }
     if (Number(info.status) !== 2) { say('⏳ まだ出来上がっていません（status=' + info.status + '）。少し待ってからやり直してください'); return; }
+    const fname = String(info.report_file_name || '');
+    const wantFrom = mr.ym + '01';
+    if (fname && fname.indexOf(wantFrom) < 0) {
+      say('⚠ このレポートは今月の1日から始まっていません（' + fname + '）。\n'
+        + '　セラーセンターで期間を ' + mr.from + ' 〜 ' + mr.to + ' にしてから作り直してください。\n'
+        + '　このまま入れると、その月のぶんが欠けます。');
+      return;
+    }
     say('📥 ' + (info.report_file_name || '明細') + '（' + (info.record_numbers != null ? info.record_numbers : '?') + '件）を取得中…');
     const b64 = await rowDownload(cc, rid);
     if (!b64 || b64.length < 100) { say('❌ ファイルの中身が取れませんでした'); return; }
