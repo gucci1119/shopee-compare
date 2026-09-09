@@ -12586,7 +12586,7 @@
           sbGetAll('expenses', 'select=ymd,amount,category'),
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
-          sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
+          sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
           sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
           sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),   // 正式な返品リクエストの返金
           sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),  // 📗利益計算表：PayPal差分（主にBR・買主から別途徴収した分）
@@ -15058,10 +15058,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     const [y, m] = exp.ym.split('-').map(Number);
     const nextYm = m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0');
-    let rows, issues = [], inv = [], formalRet = [];
-    try { [rows, issues, inv, formalRet] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []), ensureInv().catch(() => []), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(() => [])]); }
+    let rows, issues = [], inv = [], formalRet = [], retMetaKv = [];
+    try { [rows, issues, inv, formalRet, retMetaKv] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []), ensureInv().catch(() => []), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(() => []), sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => [])]); }
     catch (e) { body.innerHTML = errBox(e); return; }
     exp.rows = rows;
+    // ★これまで exp.retMeta はどこにも代入されておらず、下の retLossForYm に常に null が渡っていた＝
+    //   この画面だけ【補償が0円扱い】で返金が過大・純利益が過少に出ていた（2026-09-10 是正）。
+    exp.retMeta = (retMetaKv && retMetaKv[0] && retMetaKv[0].v && retMetaKv[0].v.items) || null;
     // ★粗利は💹利益明細を【先に開いた時だけ】入る作りだった。直接この画面を開くと
     //   「利益明細を開いてください」と出て、月次損益CSVも粗利・純利益が空のまま落とせてしまう
     //   （外注が2画面を決まった順に往復する必要があった／未計算に気づかず資料に使える）。
@@ -16309,7 +16312,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         sbGetAll('inventory', 'select=item_id,price,status,shopee_sn,purchase_date,purchase_ts'),
         sbGetAll('expenses', 'select=ymd,amount,category,memo'),
         sbGetAll('app_kv', 'select=v&k=eq.tax_cfg').catch(() => []),
-        sbGetAll('order_issues', 'select=refund_jpy,refund_date,created_at').catch(() => []),
+        sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
         sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
         sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),
@@ -17001,6 +17004,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4B4} <b>【金額が実際に間違っていた2件を修正】</b>'
+        + '<br>① <b>💴入出金・経費の画面だけ、補償金が0円として計算されていました</b>。補償の一覧をそもそも読んでおらず（`exp.retMeta` に何も入っていなかった）、<b>返金が過大・純利益が過少</b>に出ていました。'
+        + '<br>② <b>事業計画と確定申告で、返金の二重計上を防ぐ仕組みが働いていませんでした</b>。突き合わせに国と注文番号を使うのに、その2つを読み込んでいなかったため判定が常に不成立で、<b>手動で記録した返金と正式な返品の返金を、両方とも引いていました</b>。',
       '\u{1F4C4} <b>転記の「どこに書くのか」「どうなったのか」が見えるようにしました</b>。①<b>送信前に「2026-09 のシート ＋ 2026-08 のシート」と月つきで表示</b>し、<b>今月のIDが未登録なら実行せずに止めます</b>（これまでは月替わり直後に<b>黙って先月のシートへ書き、しかも「完了」と出ていました</b>）。②<b>タイムアウトは「失敗」ではありません</b>。こちらが待つのをやめただけで<b>GAS側はまだ書いている可能性</b>があるため、文言を変えて<b>5分間は押せない</b>ようにしました（すぐ押し直すと二重に書かれます）。③<b>実行の記録を残します</b>。転記ページを開くと<b>直近の実行（いつ・どの月・結果）</b>が出ます。',
       '\u{1F41B} <b>【Codexのレビューで見つかった、今日の私の不具合を2件直しました】</b>'
         + '<br>① <b>確定申告と事業計画の入力欄が、1文字打つと消えていました</b>。打鍵ごとに画面を描き直す作りにしてしまい、確定申告側は<b>再取得まで走って入力欄が消え、2文字目が打てない</b>状態でした。<b>手が止まってから（0.7秒）保存して描き直す</b>ようにし、入力欄から離れた時はすぐ確定します。'
