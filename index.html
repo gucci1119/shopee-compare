@@ -17072,6 +17072,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4B4} <b>【価格が日によって変わる原因を潰しました】💴価格計算が、「出品を作る」に残っている下書きのROIを拾っていました</b>。画面には「目標ROIは空欄でOK・⚙️の重量帯から自動」と書いてあるのに、<b>下書きのROIが優先</b>されていて、下書きはリロードでも消えないため<b>同じ仕入額でも日によって7か国の出品価格が変わる</b>状態でした。同じ式を使う<b>🩸マージン漏れの一括修正</b>と<b>👀値下げの床価格</b>は<b>本番のShopeeへ価格を書き込む</b>ので実害があります。この3つは下書きを見ないようにしました（出品コンポーザー自身の挙動は変えていません）。',
       '\u23F1 <b>明細の取得は、同じ国は1分空けます</b>（本人指定）。連続で叩くと弾かれるので、残り秒数を出しながら待ってから取りに行きます。★<b>制限は同じ国の中だけ</b>なので、<b>7か国は同時に走らせて構いません</b>。'
         + '<br>あわせて<b>レポートの状態の意味が分かりました</b>。<code>2</code>＝出来上がり、<code>3</code>＝<b>もうダウンロード済み</b>で、<b>一度落としたレポートは取り直せません</b>。3のときは「作り直してください」と出すようにしました。',
       '\u{1F4C4} <b>注文明細を {国}_row に丸ごと入れ替えるボタンを付けました</b>（本人指定：セラーセンターを1国ずつ回るのをやめたい）。「💰利益管理表へ転記」ページで<b>国を選んで🔍下見</b>すると、<b>1行も書かずに</b>何行取れて何行入るかだけ出します。納得できたら「▶入れ替える」。<b>3行目から</b>入れ替え、<b>1行目と2行目は触りません</b>（列名の行は貼りません）。セラーセンターの<b>本物のエクスポートをそのまま</b>運ぶので、住所・重量・クーポンの列も欠けません。',
@@ -30224,7 +30225,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const pr = priceProfitFor(l.cc, cm.cost, price, { weightG: cm.weightG });
           if (pr.profit < 0 || pr.roi < targetRoi) {
             const rg = regionByCc(l.cc) || {};
-            const newPrice = roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG }), rg.priceUnit || 1); // 目標ROIに乗せる現地価格
+            const newPrice = roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG, ignoreDraftRoi: true }), rg.priceUnit || 1); // 目標ROIに乗せる現地価格
             const newRoi = Math.round(priceProfitFor(l.cc, cm.cost, newPrice, { weightG: cm.weightG }).roi);
             const shopId = l.shop_id || (typeof shopIdOfListing === 'function' ? shopIdOfListing(l.cc, l.item_id) : null);
             leaks.push({ cc: l.cc, name: m.n || l.name, item_id: l.item_id, model_id: (m.id != null ? m.id : 0), shop_id: shopId, weightG: cm.weightG, host: rg.host, cur: rg.cur || '', price, newPrice, newRoi, cost: cm.cost, profit: pr.profit, roi: Math.round(pr.roi), sold: m.sold || 0, loss: pr.profit < 0 });
@@ -30337,7 +30338,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const cm = (l.parent_sku && cBySku[String(l.parent_sku).toLowerCase().trim()]) || (l.name && cByName[String(l.name).toLowerCase().trim()]);
         const cur = Number(l.price_min) || 0;
         const isSingle = !(l.models && l.models.length > 1);
-        const floor = cm ? roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG }), rg.priceUnit || 1) : null;
+        const floor = cm ? roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG, ignoreDraftRoi: true }), rg.priceUnit || 1) : null;
         return { x, l, rg, cm, cur, isSingle, floor };
       });
       // 一括値下げ対象＝単品・原価判明・床<現価格・shop_id判明（バリエ品は明細ごと事情が違うため対象外）
@@ -35321,14 +35322,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const vol = (dW && dH && dD) ? (dW * dH * dD / 6) : 0; // 容積重量(g)=W×H×D(cm)÷6000×1000＝÷6。weightG(g)と同単位で比較
     const chargeG = Math.max(weightG, vol);
     // ROI優先順位：opt明示 → listState(コンポーザーのROI欄) → 仕入額帯別ROI(ON時・課金重量で帯選択) → 単一roiPct
+    // ★`listState.roiPct` は「出品を作る」の下書きに残っているROI。コンポーザー以外がこれを拾うと、
+    //   同じ仕入額でも【前に何を書きかけたか】で価格が変わる（💴価格計算は「空欄でOK・重量帯から自動」と
+    //   案内しているのに下書きが優先されていた）。本番へ一括で価格を書く経路も同じ式を使うので実害がある。
+    //   → `opt.ignoreDraftRoi` を渡した呼び出しでは下書きを見ない（2026-09-10）。
+    const draftRoi = (!opt.ignoreDraftRoi && listState.roiPct != null) ? listState.roiPct : null;
     const roi = (opt.roiPct != null ? opt.roiPct
-      : (listState.roiPct != null ? listState.roiPct
+      : (draftRoi != null ? draftRoi
         : (settings.roiBracketOn ? roiForCost(costJpy, chargeG, cc) : settings.roiPct))) / 100;
     const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
     // 帯ROIを使う（＝ROIを手で指定していない）ときだけ、帯の上限仕入で計算する＝スプシと同じ挙動。
-    const useBand = (opt.roiPct == null && listState.roiPct == null && settings.roiBracketOn && !settings.priceBandCeilOff);
+    const useBand = (opt.roiPct == null && draftRoi == null && settings.roiBracketOn && !settings.priceBandCeilOff);
     const baseCost = useBand ? bandCostJpy(costJpy) : (Number(costJpy) || 0);
     const kJpy = (baseCost * (1 + roi) / (1 - fxM) + slsJpy) / feeMult / (1 - pb);
     return kJpy / rg.rateJpy; // 現地通貨（丸め前）
@@ -36705,7 +36711,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const img = imgs[0] || '';
     const hasVar = listState.variations.length > 0;
     const title = ((listState.overrides[cc] || {}).title || '').trim() || listTitle();
-    const roundP = (costJpy) => { try { return roundLocal(priceLocalFor(cc, costJpy || 0), rg.priceUnit || 1); } catch (e) { return 0; } };
+    const roundP = (costJpy) => { try { return roundLocal(priceLocalFor(cc, costJpy || 0, { ignoreDraftRoi: true }), rg.priceUnit || 1); } catch (e) { return 0; } };
     let priceHtml;
     if (hasVar) { const ps = listState.variations.map(v => roundP(v.cost)).filter(p => p > 0); if (ps.length) { const mn = Math.min(...ps), mx = Math.max(...ps); priceHtml = mn === mx ? fmtLocal(rg, mn) : `${fmtLocal(rg, mn)} 〜 ${fmtLocal(rg, mx)}`; } else priceHtml = '<span style="color:#6b7280;font-size:14px">仕入額を入力</span>'; }
     else { const p = roundP(listState.costJpy); priceHtml = p > 0 ? fmtLocal(rg, p) : '<span style="color:#6b7280;font-size:14px">仕入額を入力</span>'; }
