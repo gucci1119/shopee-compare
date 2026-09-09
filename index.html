@@ -17169,6 +17169,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F501} <b>3時間おきの自動実行が、ページを開き直すたびに先送りされていました</b>。読み込みのたびに「3時間後」に予約し直していたので（実測：次回 06:15 → 07:49 に伸びた）、タブを開き直したり自動更新で再読込されると<b>いつまでも走らない</b>ことがありました。前回の実行時刻を覚えて<b>「3時間−経過ぶん」</b>で予約するようにしました（最短1分）。',
       '\u{1F4CA} <b>編集履歴の「売れ行き 前→後」で、BRの支払済注文（請求書待ち＝INVOICE_PENDING）を未払い扱いで落としていました</b>。ほかの集計（需要・値下げ検討）と同じ除外条件に揃えました。未払い注文の扱いが画面ごとに違っていた件の1つ。',
       '\u{1F4B4} <b>【Codex全体レビュー・金額に関わる2件】</b>①<b>入金の「確定済み」判定が広すぎました</b>。DB同期で、今回の入金予定に無い行を<b>全国・全行</b>「確定済み」にしていたので、<b>取得に失敗した国</b>や<b>対象外の国</b>の暫定入金まで確定済みに倒れていました（Pending合計と確定/暫定の区別が狂う）。<b>取れた国の・まだ暫定の行だけ</b>にしました。②<b>正式返品の返金が数字から落ちることがありました</b>。手で記録した返金との二重計上を防ぐ除外が「同じ注文にメモや段階があるだけ」で効いていたため。<b>返金額が入っている記録だけ</b>を除外に使います（💹損益・📈事業計画・🧾確定申告が同じ式）。',
       '\u{1F4C4} <b>注文明細→{国}_row のカードを「▶ 実行」だけにしました</b>（本人指定：検証が済んだので下見・テスト先・1か国用の欄は不要）。他の2つのカードと同じ形です。確認ダイアログも出しません（3時間おきの自動実行と同じ動き）。',
@@ -39081,7 +39082,23 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     await clickAndWait('dep-run', 'dep-status');
     await clickAndWait('img-run', 'img-status');
     try { renderDepRuns(); } catch (_) {}
+    try { localStorage.setItem('smdDepAutoLast', String(Date.now())); } catch (_) {}
     depAutoArm(DEP_AUTO_MS);
+  }
+  // ★前回いつ走ったかを覚えておき、読み込み直後は「3時間−経過ぶん」で予約する（2026-09-10）。
+  //   前は読み込みのたびに「3時間後」に予約し直していたので、タブを開き直す・自動更新で再読込されるたびに
+  //   次回が先送りされ、いつまでも走らないことがあった（実測：次回 06:15 → 07:49 に伸びていた）。
+  function depAutoInitialWait() {
+    let last = 0;
+    try { last = Number(localStorage.getItem('smdDepAutoLast') || 0); } catch (_) {}
+    if (!last) {
+      try {
+        const arr = JSON.parse(localStorage.getItem('smdDepRuns') || '[]');
+        (Array.isArray(arr) ? arr : []).forEach(r => { const t = Date.parse(r && r.at); if (t && /^(明細|入金F\/G|画像)/.test(String(r.kind || '')) && t > last) last = t; });
+      } catch (_) {}
+    }
+    if (!last) return DEP_AUTO_MS;
+    return Math.max(60 * 1000, DEP_AUTO_MS - (Date.now() - last));
   }
   function depRunsSave(row) {
     try {
@@ -39787,7 +39804,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (ca.checked) { toast('🔁 3時間おきの自動実行をONにしました（この端末だけ）'); depAutoArm(DEP_AUTO_MS); }
         else { toast('🔁 自動実行をOFFにしました'); depAutoStop(); }
       });
-      if (depAutoOn()) depAutoArm(DEP_AUTO_MS);   // 読み込み直後は3時間後から（開いた瞬間に走らせない）
+      if (depAutoOn()) depAutoArm(depAutoInitialWait());   // 読み込み直後は「3時間−前回からの経過」（最短1分）
     } }
   document.getElementById('dep-run').addEventListener('click', async () => {
     const btn = document.getElementById('dep-run');
