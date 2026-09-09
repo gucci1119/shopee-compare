@@ -15360,6 +15360,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ♾️ 無在庫・在庫監視：設定＋監視カタログ（実在庫データ接続）。監視の自動巡回/取り下げはブリッジ・公式APIでこれから（ロードマップ参照）。
   let dropshipLoaded = false; // dropship_status(app_kv)の取得は初回のみ。🔄でリセット
   let dropshipKvLoaded = false; // app_kvからの登録リスト取り込みは初回のみ
+  // ★共有の監視リスト(app_kv.dropship_cfg)は【丸ごと上書き】の台帳。読めていないのに書くと、
+  //   他PCで登録した監視リストが全部消える（Codex P1指摘 2026-09-05／点検 2026-09-10「登録1件」の正体の候補）。
+  //   読めなかったら印を立てて、この端末のlocalStorageにだけ保存し、共有側には書かない。
+  let dropshipKvFailed = false;
   let dropshipAuto = {};     // GAS監視(monitorDropshipStock)の結果 app_kv.dropship_status = {updatedAt, items:{item_id:{st,sig,at}}}
   let dropshipListings = null; // Shopee出品(listings status=1)。監視商品への紐付け検索用
   let dropshipLinkTarget = null; // 「Shopee出品を紐付け中」の監視item_id
@@ -15372,16 +15376,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!cfg.watchLinks || typeof cfg.watchLinks !== 'object') cfg.watchLinks = {};
     // クロスデバイス同期(app_kv)：初回のみ他PCの監視リスト/状態を取り込む（settingsはグローバルのキー保持オブジェクト）
     if (!dropshipKvLoaded && (settings.sbKey || settings.sbSecret)) {
-      dropshipKvLoaded = true;
       try {
         const kv = await sbGetAll('app_kv', 'select=v&k=eq.dropship_cfg');
         if (kv && kv[0] && kv[0].v) { cfg = Object.assign({}, DEF, cfg, kv[0].v); localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); }
-      } catch (_) {}
+        dropshipKvLoaded = true;     // ★読めた時だけ。sbGetAllは失敗すると例外を投げる（[]は「まだ無い」で正常）
+        dropshipKvFailed = false;
+      } catch (_) { dropshipKvFailed = true; }
       if (!Array.isArray(cfg.items)) cfg.items = [];
       if (!cfg.watchStatus || typeof cfg.watchStatus !== 'object') cfg.watchStatus = {};
       if (!cfg.watchLinks || typeof cfg.watchLinks !== 'object') cfg.watchLinks = {};
     }
-    const save = () => { try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {} if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'dropship_cfg', v: cfg, updated_at: new Date().toISOString() }]).catch(() => {}); };
+    // ★共有側へは「読めている時だけ」書く。読めていない状態で書くと他PCの監視リストを消す
+    const save = () => {
+      try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {}
+      if (!settings.sbSecret) return;
+      if (dropshipKvFailed || !dropshipKvLoaded) {
+        try { toast('⚠ 共有の監視リストを読めていないので、この端末にだけ保存しました（ほかのPCの登録を消さないため）。再読み込みしてやり直してください'); } catch (_) {}
+        try { logAct('無在庫', '共有保存を見送り', '', '共有の監視リストを読めていない状態での上書きを止めた'); } catch (_) {}
+        return;
+      }
+      sbUpsert('app_kv', [{ k: 'dropship_cfg', v: cfg, updated_at: new Date().toISOString() }]).catch(() => {});
+    };
+    const kvFailBand = dropshipKvFailed
+      ? `<div style="background:#fdecea;color:#c0392b;border:1px solid #f3b7b0;border-radius:8px;padding:8px 12px;font-size:12.5px;margin:0 0 12px"><b>⚠ 共有の監視リストを読めませんでした。</b>ここに出ているのは<b>この端末に残っていた分だけ</b>です（0件ではなく不明）。この画面で変更しても<b>共有側には保存しません</b>（ほかのPCの登録を消さないため）。再読み込みしてください。</div>`
+      : '';
     const SUPS = (typeof SUPPLIERS !== 'undefined' && SUPPLIERS.length ? SUPPLIERS : ['メルカリ', 'Yahoo!フリマ', 'ヤフオク', '駿河屋', '楽天', 'セカスト', 'Amazon']);
     const CCS = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
     const toggleChip = (label, on) => `<span class="ds-chip" data-v="${esc(label)}" style="display:inline-flex;align-items:center;gap:3px;border:1.5px solid ${on ? '#c2185b' : '#d8dee6'};background:${on ? '#fdeef4' : '#fff'};color:${on ? '#c2185b' : '#667'};border-radius:12px;padding:3px 12px;font-size:12px;cursor:pointer;margin:0 6px 6px 0;font-weight:${on ? '700' : '400'};user-select:none">${on ? '✓ ' : ''}${esc(label)}</span>`;
@@ -15411,7 +15429,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
        </ol>
        <div class="smd-dim" style="font-size:11px;margin-top:8px">👉 全工程が実データで稼働：在庫から監視→自動巡回→売切れ検知→出品作成/紐付け→取り下げ（各国・一括）まで一通り。</div></div>`;
 
-    body.innerHTML = settingsCard + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
+    body.innerHTML = kvFailBand + settingsCard + `<div id="ds-catalog"><div class="tool-card" style="margin:0 0 14px;max-width:none;border-left:4px solid #c2185b;padding:12px 15px"><div style="font-weight:700;font-size:14px">📦 監視カタログ</div><div class="smd-dim" style="padding:12px 0;font-size:12px"><span class="smd-spin"></span> 在庫データを読み込み中…</div></div></div>` + roadmap;
 
     // 設定のインタラクション（即保存）
     body.querySelectorAll('#ds-sups .ds-chip').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; const i = cfg.suppliers.indexOf(v); if (i >= 0) cfg.suppliers.splice(i, 1); else cfg.suppliers.push(v); save(); renderDropship(); }));
@@ -17162,6 +17180,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u267E\uFE0F <b>♾️無在庫の監視リストが「1件だけ」に化ける原因を潰しました</b>。共有の監視リスト（app_kv）は<b>丸ごと上書き</b>の台帳なのに、①♾️無在庫を開くとき共有側を<b>読めなくても</b>この端末の分で上書きしていた ②出品を作るときの自動紐付けが<b>この端末のlocalStorageだけ</b>を読んで上書きしていた（♾️無在庫を一度も開いていないPCで出品を作ると、共有リストがその1件に化ける）。①は<b>読めた時だけ共有側に書く</b>（読めなければ赤い帯で「0件ではなく不明」と出し、この端末にだけ保存）、②は<b>共有側を読んでから足す</b>（同じURLは1件に束ねる・読めなければ共有側に書かない）に直しました。',
       '\u{1F310} <b>英語表示の抜けをまとめて埋めました</b>：🔁自動実行カードの説明・📄注文明細カードの説明・実行記録の各行（明細PH／明細7か国／入金F/G／画像／自動）・「次回 …」・再送3回失敗の文言（Codex指摘）。あわせて<b>🖼️商品画像の転記も実行記録に残す</b>ようにしました（自動実行の3つのうち画像だけ記録が無く、動いたかどうかが記録から分かりませんでした）。',
       '\u{1F6A8} <b>【「転記が不安定」の正体の一つ】GASが「生きてます」と返しただけなのに、✅成功と表示していました</b>。転記GASの <code>/exec</code> は<b>POSTが稀にGETに化けて</b> <code>doGet</code> に落ち、<code>{ok:true, msg:\'alive\'}</code> が返ってきます。ポータルは <code>ok:true</code> だけを見ていたので、<b>💵F/G列は「✅ F記入=0 / G更新=0」、🖼️画像は「✅ 記入=0」、📄明細は「✅ 書いた行: ?行」</b>と、<b>何も書けていないのに成功扱い</b>でした（7か国下見のPHで「?行 / ?列」が出て発覚）。3経路とも<b>返事が本当に転記の結果かを形で確かめ</b>、違えば同じ中身を<b>最大3回まで送り直す</b>ようにしました（GAS本体は走っていないので二重書きにはなりません）。3回ダメなら❌で理由を出します。操作ログにも「結果ではなかったので再送」と残ります。',
       '\u{1F41B} <b>【Codex指摘】7か国のうち失敗した国が、記録に残らないまま流れていました</b>。画面に赤で出すだけで、<b>実行記録には成功した国しか残らない</b>ので、自動実行（誰も見ていない）で落ちた国が<b>無かったことになる</b>状態でした。失敗した国も<b>1件ずつ記録に残し</b>、まとめの行にも<b>「入らなかった国: BR TH」</b>のように国名を出すようにしました。<br>なお<b>途中で止まってもシートが壊れることはありません</b>（GAS側は<b>先に行を確保→3行目から上書き→余った古い行だけ消す</b>順で、消してから書くことがないため）。次の3時間後の回で<b>毎回エクスポートを作り直す</b>ので、失敗した国は自然に追いつきます。',
@@ -31849,7 +31868,38 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   // 無在庫cfgの読み書き（renderDropshipの外＝出品作成の自動リンクからも使う）
   function dropCfgLoad() { try { return JSON.parse(localStorage.getItem('smdDropCfg') || '{}'); } catch (_) { return {}; } }
-  function dropCfgSave(cfg) { try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {} try { if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'dropship_cfg', v: cfg, updated_at: new Date().toISOString() }]).catch(() => {}); } catch (_) {} }
+  function dropCfgSave(cfg) {
+    try { localStorage.setItem('smdDropCfg', JSON.stringify(cfg)); } catch (_) {}
+    // ★共有側は【読んでから足す】。この端末のlocalStorageだけで上書きすると、
+    //   ♾️無在庫を一度も開いていないPCで出品を作った瞬間に、共有の監視リストが1件に化ける（2026-09-10）。
+    try { if (settings.sbSecret) dropCfgRemoteAdd(cfg).catch(() => {}); } catch (_) {}
+  }
+  async function dropCfgRemoteAdd(localCfg) {
+    let remote = null;
+    try { const kv = await sbGetAll('app_kv', 'select=v&k=eq.dropship_cfg'); remote = (kv && kv[0] && kv[0].v) || null; }
+    catch (e) { try { logAct('無在庫', '共有保存を見送り', '', '共有の監視リストを読めなかったので書かない: ' + ((e && e.message) || e)); } catch (_) {} return; }
+    const base = Object.assign({}, remote || {});
+    base.items = Array.isArray(base.items) ? base.items.slice() : [];
+    base.watchLinks = Object.assign({}, (base.watchLinks && typeof base.watchLinks === 'object') ? base.watchLinks : {});
+    base.watchStatus = Object.assign({}, (localCfg.watchStatus || {}), (base.watchStatus || {}));
+    ['suppliers', 'freq', 'outOfStock', 'countries', 'crossDelist'].forEach(k => { if (base[k] === undefined && localCfg[k] !== undefined) base[k] = localCfg[k]; });
+    // 監視URLは url で同一視。共有側にあれば共有側の id を使う（同じURLが2件にならないように）
+    const idMap = {};
+    (localCfg.items || []).forEach(it => {
+      const hit = base.items.find(x => x && x.url === it.url);
+      if (hit) { idMap[it.id] = hit.id; return; }
+      base.items.push(it); idMap[it.id] = it.id;
+    });
+    Object.keys(localCfg.watchLinks || {}).forEach(lid => {
+      const rid = idMap[lid] || lid;
+      base.watchLinks[rid] = Array.isArray(base.watchLinks[rid]) ? base.watchLinks[rid].slice() : [];
+      (localCfg.watchLinks[lid] || []).forEach(l => {
+        if (!base.watchLinks[rid].some(b => b.cc === l.cc && String(b.li) === String(l.li) && String(b.model_id || '') === String(l.model_id || ''))) base.watchLinks[rid].push(l);
+      });
+    });
+    await sbUpsert('app_kv', [{ k: 'dropship_cfg', v: base, updated_at: new Date().toISOString() }]);
+    try { localStorage.setItem('smdDropCfg', JSON.stringify(base)); } catch (_) {}
+  }
   // 出品作成時：監視ソースURLを無在庫リストに登録＋作成した出品(cc,item_id)を自動紐付け（商品全体）
   function dropAutoLink(url, cc, itemId, name) {
     if (!url || !/^https?:\/\//.test(url) || !cc || !itemId) return false;
