@@ -16967,6 +16967,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u23F3 <b>転記と同期を同時に走らせられないようにしました</b>（本人の画面で実際に発生）。ブリッジの枠は<b>6つしかない</b>のに、🖼️画像転記が<b>150秒</b>の要求を握ったまま☁️DB同期と💵F/Gも投げていたため、<b>枠を取り合って PH が timeout</b>していました。どれか1つが動いている間は、他を押しても<b>「いま◯◯が動いています。終わってから実行してください」</b>と出して止めます。',
       '\u{1F9F9} <b>【危ない表示を止めました】棚卸し画面が、在庫を読み込めなかったときに「在庫あり 0点」と出していました</b>。現物を数えるための画面で0と断言し、そのまま『まとめて販売済みにする』へ進める状態でした。<b>読めなかった時は件数を出さず</b>「0ではなく<b>不明</b>です」と出して、読み直しボタンだけを置きます。',
       '\u{1F4C5} <b>発送スケジュールの日付も現地時間に合わせました</b>。上のチップが「🚨遅延中 9件」なのに、カレンダーの赤バッジは「期限を過ぎた分 2件」のままで食い違っていました（カレンダー側だけ日本時間で丸めていたため）。同じ基準に揃えています。',
       '\u{1F50E} <b>出品一覧の「JANが空」だけ、絞り込みから外れませんでした</b>。「🔎いま絞り込んでいます」の帯にも出ず、「✕ ぜんぶ外す」でも外れないため、<b>0件と出たときに原因が分からない</b>状態でした（同じ取りこぼしを2026-08-28にもやっています）。両方に足しました。',
@@ -38725,12 +38726,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<div class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7">粗利 = 入金額と仕入額（手入力/確定 または 在庫連携🏷の自動算出）の両方が判明している注文だけを合算（片方しか無い注文は含めない）。入金はShopee手数料控除後・仕入額は円建て（手入力＞在庫連携🏷）。キャンセル・未払いは既定で除外（上部「キャンセル・未払いも表示」で切替）。</div></div>` + pfCancelCardHtml();
   }
 
-  let syncRunning = false;
+  // ★ブリッジの枠は6つしかない。転記と同期を同時に走らせると枠を取り合って `timeout` になる
+  //   （2026-09-10 実機で発生：画像転記が150秒の要求を握ったまま、DB同期とF/Gも投げてPHがtimeout）。
+  //   どれか1つが走っている間は、他を始めさせない。
+  let toolBusy = null;   // null | 'sync' | 'dep' | 'img'
+  const TOOL_LABEL = { sync: '☁️ DB同期', dep: '💵 入金予定額→F/G列', img: '🖼️ 商品画像→AC列' };
+  function toolBusyMsg() { return '⏳ いま「' + (TOOL_LABEL[toolBusy] || toolBusy) + '」が動いています。ブリッジの枠を取り合って両方とも失敗するので、終わってから実行してください。'; }
+  let syncRunning = false; toolBusy = null;
   async function syncAll(st, interactive) {
     if (syncRunning) return;
+    if (toolBusy && toolBusy !== 'sync') { st(toolBusyMsg()); return; }
     if (state.mode !== 'live') { st('❌ ライブモード（ブリッジ入りPC）でのみ同期できます'); return; }
     if (!settings.sbSecret) { st('❌ ⚙️設定でSupabase secretキーを入力してください'); return; }
-    syncRunning = true;
+    syncRunning = true; toolBusy = 'sync';
     const log = [];
     const say = m => { log.push(m); st(log.join('\n')); };
     if (!state.accounts) await loadAccounts().catch(() => {});
@@ -38741,7 +38749,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const { live, check } = await detectActiveAndCheck(targets);
     say('🔑 対象アカウント: ' + (targets.map(r => r.cc + '=' + (live[r.cc] ? (live[r.cc].name || live[r.cc].shop_id) : '?')).join(' / ')));
     // 手動同期(interactive)で対象アカウントと実アクティブ垢がズレていたら中止（自動同期は今アクティブな垢をそのまま同期＝ガードしない）
-    if (interactive && !check.ok) { state.rawRead = false; activeShopByCc = {}; syncRunning = false; st('【同期を中止】\n' + check.msg); alert('【同期を中止】\n' + check.msg); return; }
+    if (interactive && !check.ok) { state.rawRead = false; activeShopByCc = {}; syncRunning = false; toolBusy = null; st('【同期を中止】\n' + check.msg); alert('【同期を中止】\n' + check.msg); return; }
     try {
       // 1) 注文（未発送・発送中）— 同期は必ずライブで最新取得
       say('📦 注文データを取得中...');
@@ -38996,7 +39004,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       say(`❌ ${e.message}`);
     }
     state.rawRead = false; activeShopByCc = {};
-    syncRunning = false;
+    syncRunning = false; toolBusy = null;
   }
 
   // DB最終同期時刻をパネルに常時表示（経過時間つき）
@@ -39077,9 +39085,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const st = document.getElementById('dep-status');
     if (btn.disabled) return;
     if (demoOn()) { st.textContent = '🎭 デモ表示モードのままです。転記を中止しました（ダミーの値が利益管理表に書き込まれるため）。🎭を戻してからやり直してください'; return; }
+    if (toolBusy) { st.textContent = toolBusyMsg(); return; }
     if (state.mode !== 'live') { st.textContent = '❌ ライブモード（ブリッジ入りPC）でのみ実行できます'; return; }
     if (!settings.depUrl || !settings.depToken) { st.textContent = '❌ ⚙️設定で転記GASのURLとトークンを入力してください'; return; }
-    btn.disabled = true;
+    btn.disabled = true; toolBusy = 'dep';
     const mode = document.getElementById('dep-mode').value;
     const targets = REGIONS.filter(r => state.enabled.has(r.cc));
     const data = {};
@@ -39122,7 +39131,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     } catch (e) {
       st.textContent += `\n❌ ${e.message}`;
     }
-    btn.disabled = false;
+    btn.disabled = false; toolBusy = null;
   });
 
   // ---------------- 転記: 商品画像（注文データ → AC列） ----------------
@@ -39142,10 +39151,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const btn = document.getElementById('img-run');
     const st = document.getElementById('img-status');
     if (demoOn()) { st.textContent = '🎭 デモ表示モードのままです。転記を中止しました（ダミーの商品名がAC列に焼き付くため）。🎭を戻してからやり直してください'; return; }
+    if (toolBusy) { st.textContent = toolBusyMsg(); return; }
     if (btn.disabled) return;
     if (state.mode !== 'live') { st.textContent = '❌ ライブモード（ブリッジ入りPC）でのみ実行できます'; return; }
     if (!settings.depUrl || !settings.depToken) { st.textContent = '❌ ⚙️設定で転記GASのURLとトークンを入力してください'; return; }
-    btn.disabled = true;
+    btn.disabled = true; toolBusy = 'img';
     try {
       await waitOrdersLoaded(st);
       const opt = document.getElementById('img-range').value;
@@ -39188,7 +39198,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
     }
-    btn.disabled = false;
+    btn.disabled = false; toolBusy = null;
   });
 
   // ---------------- 売れ行き: コントロール ----------------
