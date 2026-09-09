@@ -2415,6 +2415,8 @@
     const chks = [...document.querySelectorAll('.ord-selchk:checked')];
     if (!chks.length) { alert('発送手配する注文を選択してください（各注文の「☑選択」／上の「☑未手配を全選択」）。'); return; }
     if (!(settings.openapiUrl && settings.writeToken)) { alert('公式API設定（⚙️OpenAPI URL＋WRITE_TOKEN）が必要です'); return; }
+    // ★対象は【いま画面に出ている行のうちチェックされているもの】だけ。
+    //   選択は state に覚えているが、見えていない注文まで手配すると取り消せない事故になる。
     const items = chks.map(c => ({ cc: c.dataset.cc, sn: c.dataset.sn, shop: c.dataset.shop }));
     const gw = await guardWriteCountries([...new Set(items.map(x => x.cc))]);
     if (!gw.ok) { alert(gw.msg); return; }
@@ -2441,6 +2443,7 @@
     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
     alert(`🎯 一括発送手配 完了\n\n✅ 成功: ${ok}件\n⏭ スキップ: ${skip}件\n❌ 失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 12).join('\n') + (errs.length > 12 ? `\n…他${errs.length - 12}件` : '') : ''}\n\n成功分は🖨️で伝票を印刷→荷物に貼って倉庫へ発送してください。`);
     mp.remove();
+    try { items.forEach(x => ordSelSet().delete(ordSelKey(x.cc, x.sn))); } catch (_) {}   // 手配した分は選択から外す
     renderOrders();
   }
   // 公式APIで価格/在庫を複数モデルまとめて更新。list=[{model_id,price}] / [{model_id,stock}]
@@ -8059,7 +8062,7 @@
         : '';
       // 一括発送手配用チェックボックス（未手配のみ）
       const selChk = canArrange
-        ? `<label style="display:block;margin-top:3px;font-size:9px;color:#ee4d2d;cursor:pointer;white-space:nowrap" title="一括発送手配に選択"><input type="checkbox" class="ord-selchk" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" style="vertical-align:middle;margin:0 3px 0 0">選択</label>`
+        ? `<label style="display:block;margin-top:3px;font-size:9px;color:#ee4d2d;cursor:pointer;white-space:nowrap" title="一括発送手配に選択"><input type="checkbox" class="ord-selchk" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}"${ordSelSet().has(ordSelKey(r.cc, r.sn)) ? ' checked' : ''} style="vertical-align:middle;margin:0 3px 0 0">選択</label>`
         : '';
       const row = document.createElement('div');
       row.className = 'ord-row';
@@ -8151,6 +8154,16 @@
       setTimeout(() => { sb.innerHTML = orig; sb.disabled = false; }, 2500);
     } catch (e) { alert('今すぐ取得に失敗: ' + (e.message || e)); sb.innerHTML = orig; sb.disabled = false; }
   }); }
+  // ★選択は【stateに持つ】。行(.ord-selchk)は再描画で作り直されるので、DOMだけに置くと消える。
+  //   注文ページは「登録簿の読み込み完了」「倉庫フラグの読み込み完了」「DB分の表示」「各国のライブ取得完了(7か国)」の
+  //   たびに renderOrders() する＝選んでいる最中に何度も作り直される。本人報告 2026-09-09
+  //   「複数選択して5秒くらいしたらチェックが外れる」の正体がこれ。
+  //   → 選んだ注文キー(cc:sn)を Set に覚えておき、描くたびに checked を戻す。
+  function ordSelSet() {
+    if (!state.orders.sel) state.orders.sel = new Set();
+    return state.orders.sel;
+  }
+  function ordSelKey(cc, sn) { return String(cc) + ':' + String(sn); }
   // 🎯 選択を一括発送手配 ／ ☑未手配を全選択 ／ 選択件数の表示（.ord-selchk は行再描画で作られるため委譲で件数更新）
   { const bs = document.getElementById('ord-bulkship'); if (bs) bs.addEventListener('click', () => bulkArrangeShip()); }
   const updSelCount = () => { const n = document.querySelectorAll('.ord-selchk:checked').length; const el = document.getElementById('ord-selcount'); if (el) el.textContent = n ? '（' + n + '）' : ''; };
@@ -8168,16 +8181,23 @@
       let on = 0; const skipped = {};
       boxes.forEach(b2 => {
         const cc = String(b2.dataset.cc || '').toUpperCase();
-        if (AUTOSHIP_SKIP_CC.indexOf(cc) >= 0) { b2.checked = false; skipped[cc] = (skipped[cc] || 0) + 1; return; }
-        b2.checked = true; on++;
+        const k2 = ordSelKey(b2.dataset.cc, b2.dataset.sn);
+        if (AUTOSHIP_SKIP_CC.indexOf(cc) >= 0) { b2.checked = false; ordSelSet().delete(k2); skipped[cc] = (skipped[cc] || 0) + 1; return; }
+        b2.checked = true; ordSelSet().add(k2); on++;
       });
       updSelCount();
       const sk = Object.keys(skipped).map(k => k + ' ' + skipped[k] + '件').join('・');
       toast('☑ ' + on + '件を選びました' + (sk ? '（' + sk + 'は選んでいません）' : '') + '。『🎯 選択を一括発送手配』で手配します');
     });
   }
-  { const sa = document.getElementById('ord-selall'); if (sa) sa.addEventListener('click', () => { const boxes = [...document.querySelectorAll('.ord-selchk')]; if (!boxes.length) { alert('未手配の注文がありません（📦発送手配ボタンのある行が対象）。「📦未手配」フィルタで絞ると選びやすいです。'); return; } const allOn = boxes.every(b => b.checked); boxes.forEach(b => b.checked = !allOn); updSelCount(); }); }
-  document.getElementById('ord-list').addEventListener('change', e => { if (e.target && e.target.classList && e.target.classList.contains('ord-selchk')) updSelCount(); });
+  { const sa = document.getElementById('ord-selall'); if (sa) sa.addEventListener('click', () => { const boxes = [...document.querySelectorAll('.ord-selchk')]; if (!boxes.length) { alert('未手配の注文がありません（📦発送手配ボタンのある行が対象）。「📦未手配」フィルタで絞ると選びやすいです。'); return; } const allOn = boxes.every(b => b.checked); boxes.forEach(b => { b.checked = !allOn; const k = ordSelKey(b.dataset.cc, b.dataset.sn); if (b.checked) ordSelSet().add(k); else ordSelSet().delete(k); }); updSelCount(); }); }
+  document.getElementById('ord-list').addEventListener('change', e => {
+    const t = e.target;
+    if (!(t && t.classList && t.classList.contains('ord-selchk'))) return;
+    const k = ordSelKey(t.dataset.cc, t.dataset.sn);
+    if (t.checked) ordSelSet().add(k); else ordSelSet().delete(k);
+    updSelCount();
+  });
   // 🖨️ 一括印刷：表示中の未発送(tab300)のSLS伝票を国ごとにまとめて印刷（各注文=1タブ。Waybill Printer userscriptが自動印刷）
   document.getElementById('ord-bulkprint').addEventListener('click', () => {
     const targets = (state.orders.shown || []).filter(r => r.tab === 300 && r.sn);
@@ -16296,6 +16316,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-09', items: [
+      '\u2611 <b>注文管理で、複数選んだチェックが数秒で外れていました</b>（本人報告）。選択を<b>画面の中にしか持っていなかった</b>のが原因です。注文ページは「アカウント登録簿を読み終えた時」「倉庫フラグを読み終えた時」「DB分を出した時」「各国のライブ取得が終わった時（7か国ぶん）」に<b>そのつど行を作り直す</b>ので、選んでいる最中に何度も作り直され、そのたびにチェックが消えていました。→ 選んだ注文を<b>覚えておいて、描き直すたびに戻す</b>ようにしました。「☑未手配を全選択」「☑BR・VN以外を全選択」も同じく残ります。<b>一括発送手配の対象は、いま画面に出ている行だけ</b>のまま変えていません（見えていない注文を手配してしまわないため）。手配できた分は選択から外します。',
+    ] },
     { date: '2026-09-07', items: [
       '\u26FD <b>接続枠の安全弁の穴を塞ぎました</b>。補償の一括取込（深い走査）は<b>入口で1回だけ</b>枠を見ていたので、始めた時点で余っていれば、そのあと<b>1万回以上</b>投げても止まりませんでした。<b>15日の窓ごとに枠を見て・窓ごとに記録を残す</b>ようにしています（GASの6分制限で殺されても、投げた回数が消えません）。',
       '\u{1F4CA} <b>配送追跡が使った接続枠が、どこにも出ていませんでした</b>。数えてはいたのですが<b>誰も読まない場所</b>に置いていたため、画面の「のこり◯回」に入らず<b>残りが実際より多く見えて</b>いました。ポータルに知らせるようにし、画面は<b>他のGASの分も全部足して</b>表示します。日の変わり目も<b>太平洋時間</b>で数えます（冬時間は17時に変わるので、16時固定だと1時間ぶん抜けていました）。',
