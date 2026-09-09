@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.7.1
+// @version      1.7.2
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
@@ -119,22 +119,42 @@
     }
 
     // 実際の中継。urlはSPC_CDS付与後（または元のまま）を渡す
+    // ★2026-09-10: xlsx等の【バイナリ】も運べるようにした（利益管理表の _row 自動更新用）。
+    //   セラーセンターの明細ダウンロードは
+    //   GET /api/v3/settings/download_report/?SPC_CDS=…&SPC_CDS_VER=2&report_id=…
+    //   で xlsx が返る。responseText で受けると壊れるので、binary:true の時だけ
+    //   arraybuffer で受けて base64 にして返す（ポータル側でデコードする）。
     const send = (url) => {
       GM_xmlhttpRequest({
         method: d.method || 'GET',
         url: url,
         data: d.data,
+        responseType: d.binary ? 'arraybuffer' : undefined,
         // POSTは既定でJSON。ポータルから渡された任意ヘッダ（メルカリ検索のDPoP/X-Platform等）を合成
         headers: Object.assign(d.method === 'POST' ? { 'Content-Type': 'application/json' } : {}, d.headers || {}),
         // ※ fetch:true は Tampermonkey 5.5系でクロスオリジン時に onload/ontimeout を返さずハングする事があるため撤去。
         //    通常のXHR経路＋確実に効くtimeoutに戻す（ハング接続はtimeoutでabortされプールも解放される）。
         timeout: (typeof d.timeout === 'number' && d.timeout > 0) ? d.timeout + 5000 : 30000, // 重いGAS転記はポータル指定のtimeout+5秒（ポータル側が先に切れるように）
 
-        onload: r => window.postMessage({
-          __smd: 'res', id: d.id, ok: r.status >= 200 && r.status < 300,
-          status: r.status, body: r.responseText,
-          error: r.status >= 200 && r.status < 300 ? undefined : ('HTTP ' + r.status),
-        }, '*'),
+        onload: r => {
+          let body = r.responseText, b64 = false;
+          if (d.binary) {
+            try {
+              const u8 = new Uint8Array(r.response);
+              let bin = '';
+              for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+              body = btoa(bin); b64 = true;
+            } catch (ex) {
+              window.postMessage({ __smd: 'res', id: d.id, ok: false, error: 'バイナリの変換に失敗: ' + ex.message }, '*');
+              return;
+            }
+          }
+          window.postMessage({
+            __smd: 'res', id: d.id, ok: r.status >= 200 && r.status < 300,
+            status: r.status, body: body, b64: b64,
+            error: r.status >= 200 && r.status < 300 ? undefined : ('HTTP ' + r.status),
+          }, '*');
+        },
         onerror: () => window.postMessage({ __smd: 'res', id: d.id, ok: false, error: 'network error' }, '*'),
         ontimeout: () => window.postMessage({ __smd: 'res', id: d.id, ok: false, error: 'timeout' }, '*'),
       });
