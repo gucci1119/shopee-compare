@@ -8367,7 +8367,9 @@
     const list = (undone || []).filter(r => r.shipBy);
     if (!list.length) return '';
     const W = ['日', '月', '火', '水', '木', '金', '土'];
-    const key = (sec) => { const d = new Date(sec * 1000 + 9 * 3600 * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); };
+    // ★2026-09-10：期日は【その国の現地日付】で数える（上のチップと同じ基準にする）。
+    //   ここだけ日本時間で丸めていたため、チップが「遅延9件」でもカレンダーは「期限を過ぎた分2件」と食い違っていた。
+    const key = (sec, cc) => { const d = new Date(sec * 1000 + ccTz_(cc) * 3600 * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); };
     // ★日付は2つある。混ぜない。
     //   send = 自分の手から離れないといけない日（家を出る日）
     //   scan = Shopee Japan倉庫でスキャンされないといけない日（＝Shopeeのship_by_date）
@@ -8401,17 +8403,17 @@
       //   ② 注文を消さない最終ライン ＝ 🛑自動キャンセルの前日（①を過ぎたら、次はここ）
       const sendSec = ordShipDeadline(r);                     // ①
       const lastSec = ordNfrScan(r) - 86400;                  // ②
-      const late = key(sendSec) < today0;                     // ①をもう過ぎている
-      const ks = key(sendSec); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
+      const late = key(sendSec, r.cc) < today0;                     // ①をもう過ぎている
+      const ks = key(sendSec, r.cc); cnt[ks] = (cnt[ks] || 0) + 1; push(ordOf, ks, odOf(r));
       (itemsOf[ks] = itemsOf[ks] || []).push(r);          // ホバーで中身を見せる用
       if (ordIsPre(r)) preCnt[ks] = (preCnt[ks] || 0) + 1;      // 予約(pre-order)分
       // ★②も①と同じ全件を数える。同じ注文が「遅延の線」と「自動キャンセルの線」に1回ずつ出るので、
       //   2つのレーンの合計は必ず一致する（片方だけ寄せ直すと数が合わなくなる）。
-      const kl = key(lastSec);
+      const kl = key(lastSec, r.cc);
       lastCnt[kl] = (lastCnt[kl] || 0) + 1;
       if (late) { lateCnt[ks] = (lateCnt[ks] || 0) + 1; }     // ①を過ぎた分（過去の日に赤で残す）
-      const kc = key(ordLsrScan(r)); scanCnt[kc] = (scanCnt[kc] || 0) + 1; push(ordScanOf, kc, odOf(r));
-      const kn = key(ordNfrScan(r)); nfrCnt[kn] = (nfrCnt[kn] || 0) + 1;
+      const kc = key(ordLsrScan(r), r.cc); scanCnt[kc] = (scanCnt[kc] || 0) + 1; push(ordScanOf, kc, odOf(r));
+      const kn = key(ordNfrScan(r), r.cc); nfrCnt[kn] = (nfrCnt[kn] || 0) + 1;
     });
     // 「その日に出す分は、いつの注文か」。多い順に上位3つ＋残り
     const srcLabel = (m, k) => {
@@ -16950,6 +16952,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4C5} <b>発送スケジュールの日付も現地時間に合わせました</b>。上のチップが「🚨遅延中 9件」なのに、カレンダーの赤バッジは「期限を過ぎた分 2件」のままで食い違っていました（カレンダー側だけ日本時間で丸めていたため）。同じ基準に揃えています。',
+      '\u{1F50E} <b>出品一覧の「JANが空」だけ、絞り込みから外れませんでした</b>。「🔎いま絞り込んでいます」の帯にも出ず、「✕ ぜんぶ外す」でも外れないため、<b>0件と出たときに原因が分からない</b>状態でした（同じ取りこぼしを2026-08-28にもやっています）。両方に足しました。',
       '\u{1F6A8} <b>【重要・実害あり】発送期日が1日甘く出ていました</b>（本人指摘）。Shopeeの <code>ship_by</code> は<b>その国の現地時間</b>の期日なのに、<b>日本時間で日付に丸めていた</b>ため、現地では前日だった期日が1日後ろにズレていました。<b>未発送77件のうち34件（BR 51件中27件）が該当</b>し、ズレは<b>常に「まだ間に合う」と見える側</b>＝<b>遅延（LSR）を見落とす向き</b>でした。期日は<b>現地の日付</b>、「今日」は<b>日本時間</b>（荷物を出すのは日本から）で数えるように直しました。検算＝本人の運用ルール（月→金スキャン/木に手離れ・火→土/金・水→土/金・木→水/火・金土日→木/水）と実データ1,999件で一致を確認。例：9/5(土)注文のMY注文は <code>ship_by</code> 現地9/8(火)→スキャン期限9/10(木)→手を離れる9/9(水)で、<b>「今日中」ではなく「遅延」</b>が正しい表示です。',
       '\u2328 <b>打ち込んだ数字が、その場で反映されるようにしました</b>。<b>事業計画の「🎯目標＆逆算」7欄</b>と<b>確定申告の「期首/期末の棚卸高・平均USD/JPY」</b>は、<b>入力欄から離れるまで計算が古いまま</b>でした（同じページの「👥外注の単価」は元から打鍵連動で、作りが割れていました）。棚卸高は売上原価＝期首＋当期仕入−期末に直接効くので、打ち替えても数字が動かないのは危ない状態でした。',
       '\u{1F504} <b>在庫の「シリーズ別 回転速度」が、件数が多いほど閉じていた</b>のを直しました（13件以上で畳まれる分岐が逆向き）。表は40行＋スクロール枠に収まっているので、常に開いた状態にします。',
@@ -32548,7 +32552,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return acctLabel(v) || v;
   };
   // 🔎 絞り込みを1つ外す。★絞り込みバーの✕と、0件表示の「この条件を外す」が同じものを使う
-  const LST_FILTER_KEYS = ['f', 'q', 'dup', 'dupkey', 'duppair', 'ser', 'vid', 'slot', 'vt', 'cond', 'brand', 'mdl', 'price', 'pub', 'ccs', 'acct'];
+  // ★'janEmpty' が抜けていたため「✕ ぜんぶ外す」で外れず、絞り込み帯にも出なかった（2026-09-10 是正）。
+  //   同じ取りこぼしを2026-08-28にもやっている（どれがONか分からず「0件＝バグ？」に見える）。
+  const LST_FILTER_KEYS = ['f', 'q', 'dup', 'dupkey', 'duppair', 'ser', 'vid', 'slot', 'vt', 'cond', 'brand', 'mdl', 'price', 'pub', 'ccs', 'acct', 'janEmpty'];
   function lstFilterOff(k) {
     if (k === 'f') lst.filter = 'all';
     else if (k === 'q') { lst.search = ''; const se = document.getElementById('lst-search'); if (se) se.value = ''; }
@@ -33021,6 +33027,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (lst.priceMin != null || lst.priceMax != null) act.push(['価格', (lst.priceMin != null ? lst.priceMin : '') + '〜' + (lst.priceMax != null ? lst.priceMax : ''), 'price']);
         if (lst.pub) act.push(['公開', lst.pub === 'pub' ? '公開だけ' : '非公開だけ', 'pub']);
         if ((lst.ccs || []).length) act.push(['国', (lst.ccs || []).join('・') + 'だけ', 'ccs']);
+        if (lst.janEmpty) act.push(['JAN', '空だけ', 'janEmpty']);
         if (!act.length) return '';
         return `<div id="lst-activebar" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;padding:6px 10px;background:#fff6f3;border:1px solid #ffd2c4;border-radius:8px">
           <span style="font-size:11.5px;font-weight:700;color:#ee4d2d;white-space:nowrap">🔎 いま絞り込んでいます</span>
