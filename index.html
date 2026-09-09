@@ -15071,9 +15071,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const [y, m] = exp.ym.split('-').map(Number);
     const nextYm = m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0');
     let rows, issues = [], inv = [], formalRet = [], retMetaKv = [];
-    try { [rows, issues, inv, formalRet, retMetaKv] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []), ensureInv().catch(() => []), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(() => []), sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => [])]); }
+    const expLoadFail = [];   // ★読めなかったものを控える。0件と同じ顔にしない（2026-09-10）
+    try { [rows, issues, inv, formalRet, retMetaKv] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), ensureInv().catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; })]); }
     catch (e) { body.innerHTML = errBox(e); return; }
     exp.rows = rows;
+    exp.loadFail = expLoadFail;
     // ★これまで exp.retMeta はどこにも代入されておらず、下の retLossForYm に常に null が渡っていた＝
     //   この画面だけ【補償が0円扱い】で返金が過大・純利益が過少に出ていた（2026-09-10 是正）。
     exp.retMeta = (retMetaKv && retMetaKv[0] && retMetaKv[0].v && retMetaKv[0].v.items) || null;
@@ -15184,7 +15186,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <tr style="border-top:2px solid #e6e9ef;font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff;color:#1565c0">固定費 計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px;color:#1565c0">${yen0(Object.keys(histMap[y]).filter(isFix).reduce((a2, c) => a2 + histMap[y][c], 0))}</td>`).join('')}</tr>
         <tr style="font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff">経費 合計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px">${yen0(Object.values(histMap[y]).reduce((a2, v) => a2 + v, 0))}</td>`).join('')}</tr>
         </tbody></table></div></div>` : '';
-    body.innerHTML = `<div style="display:grid;grid-template-columns:minmax(340px,480px) minmax(420px,1fr);gap:14px;align-items:start">
+    // ★読めなかったものがあるなら、数字より先に言う。0円と見分けが付かないまま
+    //   月次損益CSVを落とせてしまうため（2026-09-10 是正・返品ページは対応済みでここだけ残っていた）。
+    const expFailBanner = (exp.loadFail && exp.loadFail.length)
+      ? `<div style="margin:0 0 10px;padding:8px 12px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:8px;font-size:12px;color:#c0392b">
+           <b>⚠ 一部を読み込めませんでした（${exp.loadFail.length}件）。</b>
+           <span class="smd-dim">返金・補償が<b>0円ではなく不明</b>の状態です。この画面の純利益とCSVは当てにしないでください。通信を確かめて開き直してください。</span>
+         </div>`
+      : '';
+    body.innerHTML = expFailBanner + `<div style="display:grid;grid-template-columns:minmax(340px,480px) minmax(420px,1fr);gap:14px;align-items:start">
         <div>${netCard}${catCards}${exportCard}</div>
         <div>${form}${histCard}${table}</div>
       </div>`;
@@ -17029,6 +17039,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4B8} <b>💴入出金・経費が、読み込みに失敗しても「返金¥0」として表示していました</b>。<b>0円なのか読めなかったのか区別が付かないまま</b>、その数字で月次損益CSVを落とせる状態でした。読めなかったときは<b>赤い帯で「0円ではなく不明です」</b>と先に出します（返品ページは対応済みで、ここだけ取り残していました）。',
       '\u21A9 <b>返品の「戻ってきた」を選んだ瞬間、確認なしで在庫が書き換わっていました</b>。プルダウンを選ぶだけで<b>注文との紐付けが外れて原価が動く</b>のに、確認も取り消しもありませんでした。<b>何件・どの商品を戻すのかを出して確認</b>するようにし、キャンセルすれば区分だけ保存します。',
       '\u{1F9FE} <b>補償の申請CSVで、金額が空のまま出ていた行があります</b>。返金額を1か所からしか見ておらず、<b>キャンセルや手動で記録した分は件数に入るのに金額が0</b>で出ていました（申請に使う書類なので致命的）。同じ画面にある正しい取り方に揃えました。',
       '\u{1F501} <b>転記を3時間おきに自動実行できるようにしました</b>（本人指定）。<b>チェックは2つのカードの外に独立して置いています</b>（F/Gのカードの中に入れていたため「入金予定額だけにかかっている」ように見えていました）。「💰利益管理表へ転記」ページの上にチェックを置いています。ONにすると<b>💵入金予定額→F/G列 のあとに 🖼️商品画像→AC列</b>を<b>順番に</b>走らせます（同時に投げるとブリッジの枠を取り合って失敗するため）。<b>ライブでない／鍵が無い／デモ表示／今月のシートIDが無い</b>ときは走らせず、<b>「見送り：理由」を記録して30分後にもう一度みます</b>（黙って失敗しません）。★<b>この端末だけ</b>で有効です。別のPCでもONにすると二重に書き込むので、1台だけでONにしてください。タブを開いている間だけ動きます。あわせて実行記録の時刻が<b>UTCのまま</b>出ていたのを日本時間にしました。',
