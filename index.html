@@ -1018,6 +1018,10 @@
     </div>
     <div class="tool-card">
       <h3>💵 入金予定額 → F/G列（My Income Pending）</h3>
+      <div class="tool-row" style="border-bottom:1px dashed #e6e8ee;padding-bottom:8px;margin-bottom:8px">
+        <label style="font-size:13px" title="この端末で、3時間おきに「入金予定額→F/G列」と「商品画像→AC列」を順番に自動実行します。タブを開いている間だけ動きます。別のPCでもONにすると二重に書き込むので、1台だけでONにしてください"><input type="checkbox" id="dep-auto"> 🔁 3時間おきに自動実行（この端末・タブを開いている間）</label>
+        <span id="dep-auto-next" class="smd-dim" style="font-size:11.5px;margin-left:auto"></span>
+      </div>
       <div class="tool-row">
         モード
         <select id="dep-mode">
@@ -7363,7 +7367,7 @@
       stock: renderStock, list: renderListPage, profit: renderProfit,
       orders: () => { if (!state.orders.started) loadOrders(false); }, // 開いた瞬間はDB即表示（ライブは重いので更新ボタン時のみ）
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, tax: renderTax, suppliers: renderSuppliers,
-      tools: () => { try { renderDepRuns(); } catch (_) {} },   // 転記ページ：開いた瞬間に直近の実行を出す
+      tools: () => { try { renderDepRuns(); const c = document.getElementById('dep-auto'); if (c) c.checked = depAutoOn(); depAutoNextLabel(DEP_AUTO_MS); } catch (_) {} },   // 転記ページ：開いた瞬間に直近の実行と自動実行の状態を出す
       log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
       expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
       account: renderAccounts,
@@ -17004,6 +17008,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F501} <b>転記を3時間おきに自動実行できるようにしました</b>（本人指定）。「💰利益管理表へ転記」ページの上にチェックを置いています。ONにすると<b>💵入金予定額→F/G列 のあとに 🖼️商品画像→AC列</b>を<b>順番に</b>走らせます（同時に投げるとブリッジの枠を取り合って失敗するため）。<b>ライブでない／鍵が無い／デモ表示／今月のシートIDが無い</b>ときは走らせず、<b>「見送り：理由」を記録して30分後にもう一度みます</b>（黙って失敗しません）。★<b>この端末だけ</b>で有効です。別のPCでもONにすると二重に書き込むので、1台だけでONにしてください。タブを開いている間だけ動きます。あわせて実行記録の時刻が<b>UTCのまま</b>出ていたのを日本時間にしました。',
       '\u{1F4B4} <b>【金額が実際に間違っていた2件を修正】</b>'
         + '<br>① <b>💴入出金・経費の画面だけ、補償金が0円として計算されていました</b>。補償の一覧をそもそも読んでおらず（`exp.retMeta` に何も入っていなかった）、<b>返金が過大・純利益が過少</b>に出ていました。'
         + '<br>② <b>事業計画と確定申告で、返金の二重計上を防ぐ仕組みが働いていませんでした</b>。突き合わせに国と注文番号を使うのに、その2つを読み込んでいなかったため判定が常に不成立で、<b>手動で記録した返金と正式な返品の返金を、両方とも引いていました</b>。',
@@ -38791,6 +38796,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function depRecordRow(kind, plan, note) {
     return { at: new Date().toISOString(), kind: kind, sheets: (plan && plan.list || []).map(x => x.ym).join('＋'), note: String(note || '').slice(0, 300) };
   }
+  // 記録はISO(UTC)で持つ。表示は日本時間にする（UTCのまま出していて1時間前に見えていた）
+  const jstStamp_ = (iso) => { const d = new Date(iso); if (isNaN(d)) return String(iso || ''); const t = new Date(d.getTime() + 9 * 3600 * 1000); return (t.getUTCMonth() + 1) + '/' + String(t.getUTCDate()).padStart(2, '0') + ' ' + String(t.getUTCHours()).padStart(2, '0') + ':' + String(t.getUTCMinutes()).padStart(2, '0'); };
   function renderDepRuns() {
     const el = document.getElementById('dep-runs'); if (!el) return;
     let arr = null;
@@ -38798,7 +38805,57 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!Array.isArray(arr)) { el.innerHTML = '<span style="color:#c0392b">実行の記録を読めませんでした（0件ではありません）</span>'; return; }
     if (!arr.length) { el.textContent = 'この端末での実行はまだありません。'; return; }
     el.innerHTML = '<b>この端末での直近の実行</b><br>' + arr.slice(0, 6).map(r =>
-      esc(String(r.at || '').replace('T', ' ').slice(5, 16)) + '　' + esc(r.kind || '') + '　' + esc(r.sheets || '') + '　' + esc(r.note || '')).join('<br>');
+      esc(jstStamp_(r.at)) + '　' + esc(r.kind || '') + '　' + esc(r.sheets || '') + '　' + esc(r.note || '')).join('<br>');
+  }
+  // ★3時間おきの自動実行（本人指定 2026-09-10）。
+  //   ・ブリッジ経由なのでGASのurlfetch枠は使わない
+  //   ・**必ず順番に**走らせる（同時に投げるとブリッジの6枠を取り合って timeout する）
+  //   ・この端末だけ（localStorage）。別PCでもONにすると二重に書き込む
+  //   ・ライブでない／鍵が無い／今月のシートIDが無い ときは走らせない（黙って失敗しない）
+  const DEP_AUTO_MS = 3 * 60 * 60 * 1000;
+  let depAutoT = null;
+  const depAutoOn = () => { try { return localStorage.getItem('smdDepAuto') === '1'; } catch (_) { return false; } };
+  function depAutoNextLabel(ms) {
+    const el = document.getElementById('dep-auto-next'); if (!el) return;
+    el.textContent = depAutoOn() ? ('次回 ' + jstStamp_(new Date(Date.now() + ms).toISOString())) : '';
+  }
+  function depAutoStop() { if (depAutoT) { clearTimeout(depAutoT); depAutoT = null; } depAutoNextLabel(0); }
+  function depAutoArm(ms) {
+    depAutoStop();
+    if (!depAutoOn()) return;
+    const wait = ms == null ? DEP_AUTO_MS : ms;
+    depAutoT = setTimeout(depAutoRun, wait);
+    depAutoNextLabel(wait);
+  }
+  async function depAutoRun() {
+    if (!depAutoOn()) return;
+    // 走らせない条件は先に全部見る（走らせてから失敗させない）
+    const why = state.mode !== 'live' ? 'ライブモードではありません'
+      : (!settings.depUrl || !settings.depToken) ? '転記GASのURL/トークンが未設定です'
+      : demoOn() ? 'デモ表示モードです'
+      : activeSheetPlan().missingCur ? ('今月（' + jstYm() + '）のシートIDが未登録です')
+      : toolBusy ? ('「' + (TOOL_LABEL[toolBusy] || toolBusy) + '」が実行中です')
+      : '';
+    if (why) {
+      depRunsSave(depRecordRow('自動', null, '見送り: ' + why));
+      try { renderDepRuns(); } catch (_) {}
+      depAutoArm(30 * 60 * 1000);   // 30分後にもう一度みる
+      return;
+    }
+    // ★順番に。F/G が終わってから画像。
+    const clickAndWait = (btnId, statusId) => new Promise(resolve => {
+      const b = document.getElementById(btnId); if (!b) return resolve();
+      b.click();
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        const busy = document.getElementById(btnId) && document.getElementById(btnId).disabled;
+        if (!busy || Date.now() - t0 > 20 * 60 * 1000) { clearInterval(iv); resolve(); }
+      }, 3000);
+    });
+    await clickAndWait('dep-run', 'dep-status');
+    await clickAndWait('img-run', 'img-status');
+    try { renderDepRuns(); } catch (_) {}
+    depAutoArm(DEP_AUTO_MS);
   }
   function depRunsSave(row) {
     try {
@@ -39158,6 +39215,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return map;
   }
 
+  { const ca = document.getElementById('dep-auto');
+    if (ca) { ca.checked = depAutoOn();
+      ca.addEventListener('change', () => {
+        try { localStorage.setItem('smdDepAuto', ca.checked ? '1' : '0'); } catch (_) {}
+        if (ca.checked) { toast('🔁 3時間おきの自動実行をONにしました（この端末だけ）'); depAutoArm(DEP_AUTO_MS); }
+        else { toast('🔁 自動実行をOFFにしました'); depAutoStop(); }
+      });
+      if (depAutoOn()) depAutoArm(DEP_AUTO_MS);   // 読み込み直後は3時間後から（開いた瞬間に走らせない）
+    } }
   document.getElementById('dep-run').addEventListener('click', async () => {
     const btn = document.getElementById('dep-run');
     const st = document.getElementById('dep-status');
