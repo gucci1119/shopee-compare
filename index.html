@@ -1030,6 +1030,24 @@
       <div id="dep-runs" class="smd-dim" style="font-size:11px;margin-top:8px;line-height:1.7"></div>
     </div>
     <div class="tool-card">
+      <h3>📄 注文明細 → {国}_row（セラーセンターのエクスポートを丸ごと入れ替え）</h3>
+      <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:2px 0 8px">
+        各国のセラーセンターで<b>明細をエクスポート</b>して、そのまま <b>{国}_row の3行目から</b>入れ替えます。
+        <b>1行目と2行目は触りません</b>。列名の行は貼りません。<br>
+        まずは<b>下見（書き込まない）</b>で、何行取れて何行入るかだけ出します。
+      </div>
+      <div class="tool-row">
+        国
+        <select id="row-cc">
+          <option value="ph">PH</option><option value="br">BR</option><option value="sg">SG</option>
+          <option value="my">MY</option><option value="vn">VN</option><option value="th">TH</option><option value="tw">TW</option>
+        </select>
+        <button class="smd-btn b-open" id="row-dry">🔍 下見（書き込まない）</button>
+        <button class="smd-btn b-write" id="row-run">▶ 入れ替える</button>
+      </div>
+      <div class="tool-status" id="row-status"></div>
+    </div>
+    <div class="tool-card">
       <h3>💵 入金予定額 → F/G列（My Income Pending）</h3>
       <div class="tool-row">
         モード
@@ -17051,6 +17069,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4C4} <b>注文明細を {国}_row に丸ごと入れ替えるボタンを付けました</b>（本人指定：セラーセンターを1国ずつ回るのをやめたい）。「💰利益管理表へ転記」ページで<b>国を選んで🔍下見</b>すると、<b>1行も書かずに</b>何行取れて何行入るかだけ出します。納得できたら「▶入れ替える」。<b>3行目から</b>入れ替え、<b>1行目と2行目は触りません</b>（列名の行は貼りません）。セラーセンターの<b>本物のエクスポートをそのまま</b>運ぶので、住所・重量・クーポンの列も欠けません。',
       '\u2696 <b>キャンセルの「段階」が、返品ページと利益明細で食い違っていました</b>。返品ページだけ<b>在庫の紐付け数を渡しておらず</b>、「追跡番号なし＋在庫あり」を<b>『発送前（推）＝損失ゼロ』と言い切って</b>いました（利益明細では『未判定』）。段階は<b>日本を出た後だけが補償の対象</b>なので、損失額に直接効きます。同じ数え方に揃えました。在庫が読めていないときは<b>0件と混同せず「分からない」</b>として扱います。',
       '\u{1F9F1} <b>利益管理表の `_row` を自動更新する下ごしらえ</b>（本人指定：セラーセンターの明細を3時間おきに丸ごと入れ替えたい）。<b>ブラウザ拡張がxlsxのようなバイナリも運べる</b>ようにしました（v1.7.2・自動更新なので貼り替え不要）。セラーセンターの明細は <code>/api/v3/settings/download_report/</code> から落ちてくることを実測で突き止めています。<b>Driveは経由しません</b>（同期が切れていて、旧いやり方はもう動きません）。次はGAS側で受けて貼るところを作ります。',
       '\u{1F4B8} <b>💴入出金・経費が、読み込みに失敗しても「返金¥0」として表示していました</b>。<b>0円なのか読めなかったのか区別が付かないまま</b>、その数字で月次損益CSVを落とせる状態でした。読めなかったときは<b>赤い帯で「0円ではなく不明です」</b>と先に出します（返品ページは対応済みで、ここだけ取り残していました）。',
@@ -38829,7 +38848,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   （2026-09-10 実機で発生：画像転記が150秒の要求を握ったまま、DB同期とF/Gも投げてPHがtimeout）。
   //   どれか1つが走っている間は、他を始めさせない。
   let toolBusy = null;   // null | 'sync' | 'dep' | 'img'
-  const TOOL_LABEL = { sync: '☁️ DB同期', dep: '💵 入金予定額→F/G列', img: '🖼️ 商品画像→AC列' };
+  const TOOL_LABEL = { sync: '☁️ DB同期', dep: '💵 入金予定額→F/G列', img: '🖼️ 商品画像→AC列', row: '📄 注文明細→{国}_row' };
   function toolBusyMsg() { return '⏳ いま「' + (TOOL_LABEL[toolBusy] || toolBusy) + '」が動いています。ブリッジの枠を取り合って両方とも失敗するので、終わってから実行してください。'; }
   // ★タイムアウトは【失敗】ではない。こちらが待つのをやめただけで、GAS側は最大6分走り続ける。
   //   「❌ timeout」とだけ出していたので、本人がすぐ押し直して二重に書き込む恐れがあった（2026-09-10）。
@@ -39263,6 +39282,83 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return map;
   }
 
+  // ---------------- 📄 注文明細 → {国}_row（そのまま貼り替え） ----------------
+  // ★セラーセンターのエクスポートを本物のまま運ぶ。APIで作り直すと
+  //   住所・重量・クーポンの列が埋まらず、丸ごと上書きすると消えるため（2026-09-10）。
+  const ROW_HOSTS = { ph: 'seller.shopee.ph', sg: 'seller.shopee.sg', my: 'seller.shopee.com.my',
+    br: 'seller.shopee.com.br', vn: 'banhang.shopee.vn', th: 'seller.shopee.co.th', tw: 'seller.shopee.tw' };
+  // Export History の一覧（report_id を取る）
+  async function rowFetchReports(cc) {
+    const host = ROW_HOSTS[cc];
+    const url = 'https://' + host + '/api/v3/settings/get_report_list/?SPC_CDS_VER=2&page_number=1&page_size=20&report_type=1';
+    const txt = await bridgeRequest('GET', url, undefined, { timeout: 30000 });
+    let j = null;
+    try { j = JSON.parse(txt); } catch (_) { throw new Error('エクスポート履歴を読めませんでした（応答がJSONではありません）'); }
+    return j;
+  }
+  async function rowDownload(cc, reportId) {
+    const host = ROW_HOSTS[cc];
+    const url = 'https://' + host + '/api/v3/settings/download_report/?SPC_CDS_VER=2&report_id=' + encodeURIComponent(reportId);
+    return bridgeRequest('GET', url, undefined, { timeout: 120000, noRetry: true, binary: true });
+  }
+  async function rowPasteRun(cc, dryRun, st) {
+    const say = m => { st.textContent = m; };
+    if (state.mode !== 'live') { say('❌ ライブモード（ブリッジ入りPC）でのみ実行できます'); return; }
+    if (!settings.depUrl || !settings.depToken) { say('❌ ⚙️設定で転記GASのURLとトークンを入力してください'); return; }
+    if (demoOn()) { say('🎭 デモ表示モードのままです。中止しました'); return; }
+    const plan = activeSheetPlan();
+    if (plan.missingCur) { say('❌ 今月（' + plan.cur + '）のシートIDが未登録です。⚙️設定に追加してください'); return; }
+    say('📥 エクスポート履歴を取得中…');
+    const list = await rowFetchReports(cc);
+    const arr = (list && (list.data && (list.data.list || list.data.reports) || list.list)) || [];
+    if (!arr.length) { say('❌ エクスポート履歴が空です。セラーセンターで一度エクスポートしてください'); return; }
+    const top = arr[0];
+    const rid = top.report_id || top.id || top.reportId;
+    if (!rid) { say('❌ 履歴から report_id を取れませんでした'); return; }
+    say('📥 ' + (top.file_name || top.name || '明細') + ' を取得中…');
+    const b64 = await rowDownload(cc, rid);
+    if (!b64 || b64.length < 100) { say('❌ ファイルの中身が取れませんでした'); return; }
+    say('📤 GASへ送信中…（' + Math.round(b64.length / 1024) + 'KB）');
+    const resp = await bridgePostJson(settings.depUrl, {
+      token: settings.depToken, action: 'row_paste', sheetId: plan.list[0].id,
+      cc: cc, fileB64: b64, dryRun: !!dryRun,
+    }, { timeout: 150000, noRetry: true });
+    if (!resp || !resp.ok) { say('❌ ' + ((resp && resp.error) || 'GAS応答エラー')); return; }
+    const r = resp;
+    if (dryRun) {
+      say('🔍 下見の結果（1行も書いていません）\n'
+        + '　シート: ' + (r.sheet || (cc + '_row')) + '\n'
+        + '　取り込むデータ行: ' + (r.exportRows != null ? r.exportRows : '?') + '行 / ' + (r.exportCols != null ? r.exportCols : '?') + '列\n'
+        + '　書き込み先: ' + plan.list[0].ym + ' のシート\n'
+        + (r.note ? '　' + r.note : ''));
+    } else {
+      say('✅ 入れ替えました\n'
+        + '　書いた行: ' + (r.rowsWritten != null ? r.rowsWritten : '?') + '行\n'
+        + '　消した古い行: ' + (r.cleared != null ? r.cleared : 0) + '行\n'
+        + (r.note ? '　' + r.note : ''));
+      depRunsSave(depRecordRow('明細' + cc.toUpperCase(), plan, (r.rowsWritten || 0) + '行'));
+      try { renderDepRuns(); } catch (_) {}
+    }
+  }
+  { const rd = document.getElementById('row-dry');
+    const rr = document.getElementById('row-run');
+    const rst = document.getElementById('row-status');
+    const go = async (dry) => {
+      if (toolBusy) { rst.textContent = toolBusyMsg(); return; }
+      const cc = document.getElementById('row-cc').value;
+      if (!dry && !confirm(cc.toUpperCase() + '_row の3行目以降を、セラーセンターの明細で丸ごと入れ替えます。\n1行目と2行目は触りません。よろしいですか？')) return;
+      toolBusy = 'row';
+      if (rd) rd.disabled = true;
+      if (rr) rr.disabled = true;
+      try { await rowPasteRun(cc, dry, rst); }
+      catch (e) { rst.textContent = '❌ ' + ((e && e.message) || e); }
+      toolBusy = null;
+      if (rd) rd.disabled = false;
+      if (rr) rr.disabled = false;
+    };
+    if (rd) rd.addEventListener('click', () => go(true));
+    if (rr) rr.addEventListener('click', () => go(false));
+  }
   { const ca = document.getElementById('dep-auto');
     if (ca) { ca.checked = depAutoOn();
       ca.addEventListener('change', () => {
