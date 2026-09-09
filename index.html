@@ -17110,6 +17110,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F41B} <b>【Codex指摘】7か国のうち失敗した国が、記録に残らないまま流れていました</b>。画面に赤で出すだけで、<b>実行記録には成功した国しか残らない</b>ので、自動実行（誰も見ていない）で落ちた国が<b>無かったことになる</b>状態でした。失敗した国も<b>1件ずつ記録に残し</b>、まとめの行にも<b>「入らなかった国: BR TH」</b>のように国名を出すようにしました。<br>なお<b>途中で止まってもシートが壊れることはありません</b>（GAS側は<b>先に行を確保→3行目から上書き→余った古い行だけ消す</b>順で、消してから書くことがないため）。次の3時間後の回で<b>毎回エクスポートを作り直す</b>ので、失敗した国は自然に追いつきます。',
       '\u{1F501} <b>3時間おきの自動実行に、注文明細（7か国）を先頭で足しました</b>。<b>📄注文明細→{国}_row（7か国まとめて）→ 💵入金予定額→F/G列 → 🖼️商品画像→AC列</b> の順です（土台のデータを先に入れ替える）。自動のときだけ<b>確認ダイアログを出しません</b>（誰も見ていないので、出すとそこで止まってしまうため）。',
       '\u{1F41B} <b>【Codex指摘】7か国を回している最中に日付が変わると、途中で止まる状態でした</b>。国ごとに<b>その都度</b>「今月」を計算し直していたので、<b>月末の23時台に自動実行が走って日をまたぐ</b>と、残りの国が正しいレポートを「今月の1日から始まっていない」と弾き、<b>一部の国だけ入れ替わった状態</b>になります。書き込み先のシートは開始時に決めているので、期間だけ後から動くと組み合わせも食い違います。<b>期間はバッチの開始時に1回だけ決めて、最後まで同じものを使う</b>ようにしました。',
       '\u{1F310} <b>【Codex指摘】7か国まとめての確認ダイアログと結果表示が、英語表示でも日本語のままでした</b>。<b>消す操作の警告文が読めない</b>状態だったので、確認文と、国ごとの進捗・結果（「下見OK：23行 / 56列」など）の英語を足しました。',
@@ -38974,7 +38975,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
     // ★まず明細（{国}_row）を7か国まとめて。土台のデータなので先に入れ替える。
     //   ボタンを押すのではなく直接呼ぶ（ボタン経由だと確認ダイアログで止まってしまうため）。
-    try { await rowAllGo(false, true); } catch (e) { depRunsSave(depRecordRow('明細7か国', null, '失敗: ' + ((e && e.message) || e))); }
+    try {
+      const ro = await rowAllGo(false, true);
+      if (ro && ro.skipped) depRunsSave(depRecordRow('明細7か国', null, '見送り: ' + ro.skipped));
+      else if (ro) depRunsSave(depRecordRow('明細7か国', null, '成功 ' + ro.done + 'か国 / 失敗 ' + ro.fail + 'か国'
+        + (ro.failed && ro.failed.length ? '（入らなかった国: ' + ro.failed.join(' ') + '）' : '')));
+    } catch (e) { depRunsSave(depRecordRow('明細7か国', null, '失敗: ' + ((e && e.message) || e))); }
     await clickAndWait('dep-run', 'dep-status');
     await clickAndWait('img-run', 'img-status');
     try { renderDepRuns(); } catch (_) {}
@@ -39534,10 +39540,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   1本ずつしか動かないので、同時に投げても待たされるだけで得がないため。
   async function rowRunAll(dryRun, st, listEl) {
     const pre = rowPreflight();
-    if (pre) { st.textContent = pre; return; }
+    if (pre) { st.textContent = pre; return { done: 0, fail: 0, failed: [], skipped: pre }; }
     const testSid = String(((document.getElementById('rowall-test-sid') || {}).value) || '').trim();
     const tg = rowTarget(testSid);
-    if (tg.err) { st.textContent = tg.err; return; }
+    if (tg.err) { st.textContent = tg.err; return { done: 0, fail: 0, failed: [], skipped: tg.err }; }
     const mr = rowMonthRange();
     const rows = {};
     ROW_COUNTRIES.forEach(cc => { rows[cc] = { cc: cc, msg: '待機中…', ok: null }; });
@@ -39561,8 +39567,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // ② 1国ずつ、出来上がりを待って取得し、GASへ書く
     let done = 0, fail = 0;
+    const failed = [];
     for (const cc of ROW_COUNTRIES) {
-      if (!rids[cc]) { fail++; continue; }
+      if (!rids[cc]) {
+        if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, 'エクスポートを作れませんでした')); } catch (_) {} }
+        failed.push(cc.toUpperCase()); fail++; continue;
+      }
       const say = m => { rows[cc].msg = m; draw(); };
       try {
         await rowWaitReady(cc, rids[cc], say);
@@ -39576,12 +39586,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (e) {
         rows[cc].ok = false;
         rows[cc].msg = '❌ ' + ((e && e.message) || e);
+        // ★失敗した国も必ず記録に残す。画面に赤で出すだけだと、
+        //   自動実行（誰も見ていない）で落ちた国が無かったことになる（Codex指摘 2026-09-10）。
+        if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, '失敗: ' + ((e && e.message) || e))); } catch (_) {} }
+        failed.push(cc.toUpperCase());
         fail++;
       }
       draw();
     }
     if (!dryRun) { try { renderDepRuns(); } catch (_) {} }
-    st.textContent = (dryRun ? '🔍 下見おわり' : '▶ 入れ替えおわり') + '：成功 ' + done + 'か国 / 失敗 ' + fail + 'か国　（書き込み先 ' + tg.label + '）';
+    st.textContent = (dryRun ? '🔍 下見おわり' : '▶ 入れ替えおわり') + '：成功 ' + done + 'か国 / 失敗 ' + fail + 'か国'
+      + (failed.length ? '（入らなかった国: ' + failed.join(' ') + '）' : '') + '　（書き込み先 ' + tg.label + '）';
+    return { done: done, fail: fail, failed: failed };
   }
   { const rd = document.getElementById('row-dry');
     const rr = document.getElementById('row-run');
@@ -39612,19 +39628,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const ar = document.getElementById('rowall-run');
     const ast = document.getElementById('rowall-status');
     const alist = document.getElementById('rowall-list');
-    if (!ast || !alist) return;
-    if (toolBusy) { ast.textContent = toolBusyMsg(); return; }
+    if (!ast || !alist) return { done: 0, fail: 0, failed: [], skipped: '画面の部品が見つかりません' };
+    if (toolBusy) { ast.textContent = toolBusyMsg(); return { done: 0, fail: 0, failed: [], skipped: toolBusyMsg() }; }
     // テスト先を指定しているときは確認を出さない（本番のシートには向いていないため）。
     const tsidNow = String(((document.getElementById('rowall-test-sid') || {}).value) || '').trim();
-    if (!dry && !auto && !tsidNow && !confirm('7か国ぶんの {国}_row の3行目以降を、セラーセンターの明細で丸ごと入れ替えます。\n1行目と2行目は触りません。よろしいですか？')) return;
+    if (!dry && !auto && !tsidNow && !confirm('7か国ぶんの {国}_row の3行目以降を、セラーセンターの明細で丸ごと入れ替えます。\n1行目と2行目は触りません。よろしいですか？')) return { done: 0, fail: 0, failed: [], skipped: '確認でキャンセルしました' };
     toolBusy = 'row';
     if (ad) ad.disabled = true;
     if (ar) ar.disabled = true;
-    try { await rowRunAll(dry, ast, alist); }
-    catch (e) { ast.textContent = '❌ ' + ((e && e.message) || e); }
+    let out = { done: 0, fail: 0, failed: [] };
+    try { out = (await rowRunAll(dry, ast, alist)) || out; }
+    catch (e) { ast.textContent = '❌ ' + ((e && e.message) || e); out = { done: 0, fail: 0, failed: [], skipped: String((e && e.message) || e) }; }
     toolBusy = null;
     if (ad) ad.disabled = false;
     if (ar) ar.disabled = false;
+    return out;
   }
   { const ad = document.getElementById('rowall-dry');
     const ar = document.getElementById('rowall-run');
