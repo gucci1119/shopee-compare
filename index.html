@@ -17169,6 +17169,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F5BC} <b>商品画像の転記が、新しい注文に入らないことがありました</b>（本人指摘：BRの9/10注文に画像が無い）。転記は<b>ポータル起動時に読んだ注文一覧</b>を使っていたので、その後にDBへ同期された注文（10:54同期）が「当日」の対象に入っていませんでした。<b>転記の直前にDBから読み直す</b>ようにし、結果に<b>「既に画像あり」の件数</b>も出すようにしました（GASはこれまで数えていたのに画面に出していなかった）。',
       '\u{1F501} <b>自動実行が「DB同期が実行中」で見送りになる件</b>：30分後に回すのではなく、同期が終わるのを待ってから走る（最長40分・30秒おきに確認）ようにしました。裏タブの同期は長引くので、30分後だとまた同期にぶつかることがありました（09:25 に実際に見送り）。',
       '\u{1F550} <b>「次回 …」の表示が、転記ページを開くたびに「今から3時間後」と描かれていました</b>（実際の予約とは別の値で描いていた）。予約時刻を1か所で持って、それを表示するようにしました。',
       '\u{1F501} <b>3時間おきの自動実行が、ページを開き直すたびに先送りされていました</b>。読み込みのたびに「3時間後」に予約し直していたので（実測：次回 06:15 → 07:49 に伸びた）、タブを開き直したり自動更新で再読込されると<b>いつまでも走らない</b>ことがありました。前回の実行時刻を覚えて<b>「3時間−経過ぶん」</b>で予約するようにしました（最短1分）。',
@@ -39912,6 +39913,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try {
       await waitOrdersLoaded(st);
       const opt = document.getElementById('img-range').value;
+      // ★転記の前に注文をDBから読み直す（2026-09-10）。前は起動時に読んだ一覧のまま使っていたので、
+      //   その後に同期された注文（例：10:54同期のBR 9/10分）が「当日」に入らず、画像が入らなかった。
+      st.textContent = '注文をDBから読み直し中…';
+      try {
+        const byCc = await ordersFromDb();
+        REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
+        try { updateOrdNote(false); } catch (_) {}
+      } catch (e) { st.textContent = '⚠ 注文の読み直しに失敗したので、いま持っている一覧で続けます: ' + (e && e.message); }
       const data = {};
       let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0;
       const imgAmbig = [];
@@ -39960,10 +39969,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         st.textContent = `画像: ${orderCount}注文 → GASへ送信中... (シート${sidsImg.indexOf(sid) + 1}/${sidsImg.length})`;
         const resp = await depPostChecked({ token: settings.depToken, action: 'images', data, sheetId: sid }, r => r.action === 'images' && r.result != null, '画像');
         if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
-        Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); });
+        Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0, skip: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); a.skip += (resp.result[cc].skip || 0); });
       }
       st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sheetPlanLabel(planImg)}）\n` + Object.keys(aggImg).map(cc =>
-        `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
+        `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 既に画像あり=${aggImg[cc].skip || 0} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
       // 実行記録にも残す（自動実行の3つのうち画像だけ記録が無かった・2026-09-10）
       { const wrote = Object.keys(aggImg).reduce((n, cc) => n + (aggImg[cc].wrote || 0), 0);
         try { depRunsSave(depRecordRow('画像', planImg, '記入 ' + wrote + '件')); renderDepRuns(); } catch (_) {} }
