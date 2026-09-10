@@ -17216,6 +17216,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-11', items: [
+      '\u{1F501} <b>📄転記の「3時間おきの自動実行」が、裏タブに置いたまま止まっていました</b>（9/10 15:56 が最後で、予約の 18:56 を過ぎても12時間動かず）。3時間後に1回だけ鳴るタイマーに頼っていたので、Chromeが裏タブのタイマーを止めると二度と走りませんでした。<b>30秒おきに時刻を見る＋タブに戻った瞬間にも見る</b>方式に変え、予約時刻も端末に残すようにしました。過ぎていれば戻った瞬間に走ります。',
+    ] },
     { date: '2026-09-10', items: [
       '\u{1F4B8} <b>📈事業計画と🧾確定申告でも、読み込みに失敗したものが「0円」に化けていました</b>（💴入出金・経費は今朝直しましたが、この2つが残っていました）。<b>返金・補償・Payoneerの着金</b>が読めなかっただけなのに0として計算され、<b>純利益や所得が実際より多く見える</b>状態でした。読めなかったものは<b>名前を挙げて赤い帯で先に出し</b>、「0円ではなく分からない」と明記します。',
       '\u267E\uFE0F <b>♾️無在庫の設定が「効いているように見えて、何もしていない」状態でした</b>。<b>監視先（仕入先）・監視頻度・売れたら他国取り下げ</b>の3つは<b>保存されるだけ</b>で、実際の巡回（GASが12時間ごとに全件）にも取り下げにも反映されていません。とくにロードマップに<b>「✅ 売れたら他国取り下げ：有効」</b>と出ていたのは嘘なので、<b>「まだ効きません」</b>と正直に出すようにしました。配線するか設定ごと消すかは決めていただく必要があります（⚠️帯にもそう書いています）。',
@@ -39171,18 +39174,34 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★実際の予約時刻を1か所で持つ。表示だけ別の値で描くと「次回」が嘘になる（2026-09-10：転記ページを開くたび+3時間と表示していた）
   let depAutoNextAt = 0;
   function depAutoNextLabel(ms) {
-    const el = document.getElementById('dep-auto-next'); if (!el) return;
+    const el = document.getElementById('dep-auto-next');
     if (ms != null) depAutoNextAt = ms > 0 ? Date.now() + ms : 0;
+    if (!el) return;
     el.textContent = (depAutoOn() && depAutoNextAt) ? ('次回 ' + jstStamp_(new Date(depAutoNextAt).toISOString())) : '';
   }
-  function depAutoStop() { if (depAutoT) { clearTimeout(depAutoT); depAutoT = null; } depAutoNextLabel(0); }
+  // ★3時間の setTimeout 1本に頼らない（2026-09-11）。裏タブに置いたまま12時間、予約時刻（9/10 18:56）を過ぎても
+  //   一度も発火しなかった（Chromeが裏タブの長いタイマーを止める／タブを凍結する）。
+  //   30秒おきの見張り＋タブに戻った瞬間の見張りで「時刻を過ぎていたら走る」に変え、予約時刻は localStorage にも残す。
+  let depAutoRunning = false;
+  function depAutoStop() { if (depAutoT) { clearInterval(depAutoT); depAutoT = null; } depAutoNextLabel(0); try { localStorage.removeItem('smdDepAutoNext'); } catch (_) {} }
   function depAutoArm(ms) {
     depAutoStop();
     if (!depAutoOn()) return;
     const wait = ms == null ? DEP_AUTO_MS : ms;
-    depAutoT = setTimeout(depAutoRun, wait);
     depAutoNextLabel(wait);
+    try { localStorage.setItem('smdDepAutoNext', String(depAutoNextAt)); } catch (_) {}
+    depAutoT = setInterval(depAutoCheck, 30 * 1000);
   }
+  function depAutoCheck() {
+    if (!depAutoOn() || depAutoRunning || !depAutoNextAt) return;
+    if (Date.now() < depAutoNextAt) return;
+    depAutoRunning = true;
+    if (depAutoT) { clearInterval(depAutoT); depAutoT = null; }
+    Promise.resolve().then(depAutoRun).catch(e => { try { depRunsSave(depRecordRow('自動', null, '失敗: ' + ((e && e.message) || e))); } catch (_) {} })
+      .then(() => { depAutoRunning = false; if (depAutoOn() && !depAutoT) depAutoArm(DEP_AUTO_MS); });
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) depAutoCheck(); });
+  window.addEventListener('focus', depAutoCheck);
   async function depAutoRun() {
     if (!depAutoOn()) return;
     // ★ほかの処理（DB同期など）が動いているだけなら、30分後に回さず終わるのを待つ（最長40分・30秒おき）。
