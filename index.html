@@ -1886,6 +1886,10 @@
   //   1つ目の削除が終わる前に**更新前の画面**から2つ目を流すと、model_id には別の明細の中身が移っており、
   //   そのIDを消して**選んでいない明細が消える**（2026-08-15に3明細を失ったのと同じ結末）。
   //   ボタンごとの disabled では、別の画面・別のタブから流す経路を防げないのでここで持つ。
+  // ★同じ在庫の分割を同時に2つ流さない（2026-09-10 Codex全体レビュー）。
+  //   3分割を流したまま2分割を始めると、どちらの「枝番が既にあるか」の確認も『無い』で通り、
+  //   あとから来た方が同じ枝番を上書きして **仕入額の合計が増える**（600円→800円）。
+  const _invSplitBusy = new Set();
   const _varDelBusy = new Map();   // 'shopId:itemId' → 開始時刻
   function varDelLock(shopId, itemId) {
     const k = String(shopId) + ':' + String(itemId);
@@ -17186,6 +17190,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4E6} <b>【Codex全体レビュー】在庫の分割を重ねると、仕入額の合計が増える状態でした</b>。3分割を流したまま2分割を始めると、どちらの「枝番がもう有るか」の確認も『無い』で通り、あとから来た方が同じ枝番を上書きします（600円の在庫が 300+300+200＝800円 になる）。<b>同じ在庫の分割は同時に1つだけ</b>にしました。',
       '\u{1F5D1} <b>【Codex全体レビュー・最重要】明細の削除を重ねると、選んでいない明細が消える状態でした</b>（2026-08-15に3明細を失ったのと同じ結末）。削除は<b>「下の中身を1つ上へ書き写して、あまった末尾の枠を消す」</b>詰め直し方式なので、1つ目の削除が終わる前に<b>更新前の画面</b>から2つ目を流すと、その明細IDには<b>すでに別の明細の中身が移っている</b>ため、別のものを消します。押したボタンを止めるだけでは<b>別の画面・別のタブから流す経路</b>を防げないので、<b>商品ごとに鍵をかけて</b>（同じ商品の削除は同時に1つだけ）、重ねようとしたら「終わってから一覧を開き直してください」と断るようにしました。削除の入口4か所すべてに入っています。',
       '\u{1F3AD} <b>【Codex全体レビュー・最重要】デモ表示モードのまま、Shopeeの本番出品に書き込めてしまう状態でした</b>。デモの防波堤（<code>demoWriteGuard</code>）は<b>Supabaseへの保存にしか入っておらず</b>、<b>Shopeeへの価格・在庫・出品の書き込みは素通り</b>でした。つまり🎭を切り忘れたまま統括編集で保存すると、<b>0.73倍のダミー価格が本番の出品に焼き付きます</b>（過去にBR 9件で実際に起きています）。Shopeeへの書き込みを<b>1か所の関門（shopeeWriteGuard）に通し</b>、公式API・ブリッジ・GAS の3経路すべてで止めるようにしました。',
       '\u{1F4B4} <b>【Codex全体レビュー】在庫を保存すると、直前に変えた価格が元に戻ることがありました</b>。ブリッジ経由の保存は<b>価格と在庫をまとめて送る</b>作りなのに、送る中身が<b>編集画面を開いた時のまま</b>でした。価格を保存→（再読込せず）在庫を保存 の順で、<b>古い価格を送り返してしまいます</b>。<b>送る直前に読み直す</b>ようにしました（価格側も同じ理由で読み直します。読めなければ書かずに中止）。',
@@ -20659,6 +20664,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const total = r.price || 0;
     // ★在庫の `name` は【ほぼ空】。実体は `name_supplier`（記録済みの地雷）。
     //   ここだけ name_supplier を見ておらず、**商品名でなく ITM-… のIDを見せて**いた。
+    if (_invSplitBusy.has(id)) { alert('⏳ この在庫の分割がまだ実行中です。終わってから、一覧を開き直してやり直してください（重ねると仕入額が二重になります）'); return; }
     const ans = prompt(`「${(invName(r) || id).slice(0, 30)}」を何個に分割しますか？\nItemIDに枝番(-1,-2…)を付け、仕入額 ¥${total.toLocaleString()} を均等割りします（余りは-1に寄せます）。`, '2');
     if (ans == null) return;
     const n = parseInt(ans, 10);
@@ -20676,6 +20682,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     const branchIds = newRows.map(x => x.item_id);
     const inList = branchIds.map(x => encodeURIComponent('"' + x + '"')).join(',');
+    _invSplitBusy.add(id);
     try {
       // 衝突チェック：枝番IDが既存だと merge-duplicates で黙って上書きされるので事前に止める
       const existing = await sbGet('inventory', `select=item_id&item_id=in.(${inList})`);
@@ -20691,7 +20698,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       stock.rows = stock.rows.filter(x => x.item_id !== id).concat(newRows);
       logAct('在庫管理', 'まとめ分割', id, newRows.length + '枝番に分割');
       stockRender();
-    } catch (e) { alert('分割失敗: ' + e.message); }
+    } catch (e) { alert('分割失敗: ' + e.message); } finally { _invSplitBusy.delete(id); }
   }
   // 在庫ラベル（29×42mm）: ItemID / SKU / 商品名 / QR / OrderID / 価格
   const LABEL_W = 42, LABEL_H = 29; // mm（画像は横長。向きが逆なら数値を入替）
