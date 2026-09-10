@@ -17236,6 +17236,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-11', items: [
+      '\u{1F5BC} <b>母数ポップアップの画像が出ていなかったのと、「出しているカタログ一覧」が重かったのを直しました</b>（本人指摘）。画像は出品側がShopeeの画像IDで持っているのにURL扱いしていました。一覧は作品ごとに全出品×全明細を照合し直していたので、索引を1回だけ作って使い回すように。',
       '\u{1F422} <b>📚母数の内訳が重かったのを軽くしました</b>（本人「このページ、なんか重い」）。チップ・並べ替え・区分を押すたびに、その機種のマスタ（Switchで数MB）を<b>毎回ネットから取り直していました</b>（実測：開くのに8.2秒・「出している」に切り替えて4.0秒）。10分は控えを使うようにし、「🧮 母数を数え直す」「📥 JANを明細に入れる」の後だけ取り直します。',
       '\u{1F5BC} <b>📸 画像の自動挿入が、あとから同期された前日の注文に入っていませんでした</b>（本人指摘「画像を撮れてないところある」。9/10のBR 4件が 00:52 に同期され、04:16 の自動実行は「当日(最新日)＝9/11」しか見ていなかった）。<b>自動実行のときは「直近7日」で回す</b>ようにしました。書き済みの行はGAS側で飛ばすので二重には入りません。手動のときは選んだ範囲のままです。',
       '\u{1F5C2} <b>📚母数の内訳で、「出している」を押すと実体が見えるようになりました</b>。カードの「出している ▸」を押すと、<b>その作品がどのカタログ（出品）のどの明細に紐づいているか</b>を画像つきで出します（バリエーションがある出品は明細を全部並べ、該当行に✔）。上の「🗂 出しているカタログ一覧」で、いま出していると判定した作品を<b>カタログごとにまとめて</b>一覧できます（国で絞っている時はその国だけ）。紐づけの根拠（JAN／日本語タイトル／名前）も表示。<br>【本人指摘で直し】<b>内訳の上に重ねるポップアップ</b>で出し（Esc／外側クリックで閉じる）、明細は<b>その作品に当たった行だけ</b>を出します（カタログの全明細は「全明細を見る」で開く）。一覧の方は、いま画面で絞っている区分・国・検索をそのまま使います。<br>【さらに直し】「出している」のボタンが2つあったので1つに。<b>青いチップ「出している」を押すとポップアップが開き</b>、閉じると「出している」の絞り込みが残ります。',
@@ -27227,40 +27228,59 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 🗂 「出している」の実体＝この作品が、どのカタログ（出品）のどの明細に紐づいているか（本人依頼 2026-09-11）。
   //   判定は既存の「出している」と同じ材料：①JAN一致（productIds の jan）②AIの日本語タイトル(jp)③明細名/出品名のキー一致。
   //   ③は完全一致で当たらない時だけ「含む」でも拾う（表示は判定を上書きしない＝見つからなければ見つからないと言う）。
-  function tmListedRows(x, link, ccOnly) {
+  // ★索引は1回だけ作って使い回す（2026-09-11 本人「このページ重い」）。前は作品ごとに全出品×全明細へ tmKey を掛け直していた
+  //   （作品201件×出品数千×明細≦100 ＝ 数百万回の tmKey）。出品（lst.byCc）と対応表（link）と productIds が同じ物なら索引は同じ。
+  function tmListedIndex(link) {
+    const c = lst._tmLIdx;
+    if (c && c.byCc === lst.byCc && c.link === link && c.pids === productIds) return c;
     const norm = k => (link && link[k]) || k;
     const nk = n => norm(tmKey(String(n || '').toLowerCase().replace(/^[a-z0-9]{1,8}\s*[:：]\s*/i, '').replace(/\s+/g, ' ').trim()));
-    const keys = new Set([x.ja, x.en].map(t => t ? norm(tmKey(t)) : '').filter(Boolean));
-    const jan = (x.jan && String(x.jan).length === 13) ? String(x.jan) : '';
-    const byItem = new Map();   // item_id -> { models:Set(model.id), why }
+    const rows = [];
+    Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+      const ms = (r.models || []).filter(m => m && !m.ghost);
+      rows.push({ cc, r, ms, nameKey: nk(r.name), modelKeys: ms.map(m => nk(m.n)) });
+    }));
+    // productIds（id:<item_id>#<model.id>）→ JAN／日本語タイトル(jp) の索引
+    const byJan = new Map(), byJp = new Map();
     try {
       Object.keys(productIds || {}).forEach(k => {
         const m = /^id:(\d+)(?:#(\d+))?$/.exec(k); if (!m) return;
         const pi = productIds[k] || {};
         const j = String(pi.jan || '').trim(), jp = String(pi.jp || '').trim();
-        const why = (jan && j === jan) ? 'JAN' : (jp && keys.has(norm(tmKey(jp))) ? '日本語タイトル' : '');
-        if (!why) return;
-        const e = byItem.get(m[1]) || { models: new Set(), why };
-        if (m[2]) e.models.add(String(m[2]));
-        if (why === 'JAN') e.why = 'JAN';
-        byItem.set(m[1], e);
+        const add = (map, key) => { if (!key) return; let e = map.get(key); if (!e) { e = new Map(); map.set(key, e); } let it = e.get(m[1]); if (!it) { it = new Set(); e.set(m[1], it); } if (m[2]) it.add(String(m[2])); };
+        if (j.length === 13) add(byJan, j);
+        if (jp) add(byJp, norm(tmKey(jp)));
       });
     } catch (_) {}
+    const idx = { byCc: lst.byCc, link, pids: productIds, rows, byJan, byJp, nk };
+    lst._tmLIdx = idx;
+    return idx;
+  }
+  // 🗂 「出している」の実体＝この作品が、どのカタログ（出品）のどの明細に紐づいているか（本人依頼 2026-09-11）。
+  //   判定は既存の「出している」と同じ材料：①JAN一致（productIds の jan）②AIの日本語タイトル(jp)③明細名/出品名のキー一致。
+  //   ③は完全一致で当たらない時だけ「含む」でも拾う（表示は判定を上書きしない＝見つからなければ見つからないと言う）。
+  function tmListedRows(x, link, ccOnly) {
+    const I = tmListedIndex(link);
+    const norm = k => (link && link[k]) || k;
+    const keys = new Set([x.ja, x.en].map(t => t ? norm(tmKey(t)) : '').filter(Boolean));
+    const jan = (x.jan && String(x.jan).length === 13) ? String(x.jan) : '';
+    // item_id -> { models:Set, why }
+    const byItem = new Map();
+    const take = (m, why) => { if (!m) return; m.forEach((set, item) => { const e = byItem.get(item) || { models: new Set(), why }; set.forEach(v => e.models.add(v)); if (why === 'JAN') e.why = 'JAN'; byItem.set(item, e); }); };
+    if (jan) take(I.byJan.get(jan), 'JAN');
+    keys.forEach(k => take(I.byJp.get(k), '日本語タイトル'));
     const out = [];
-    const pass = loose => Object.keys(lst.byCc || {}).forEach(cc => {
-      if (ccOnly && cc !== ccOnly) return;
-      (lst.byCc[cc] || []).forEach(r => {
-        if (out.some(o => o.cc === cc && String(o.r.item_id) === String(r.item_id))) return;
-        const ms = (r.models || []).filter(m => m && !m.ghost);
-        const bi = byItem.get(String(r.item_id));
-        // ★部分一致は両方が6文字以上の時だけ（空や短いキーは何にでも当たってしまう。初回は184件出た）
-        const eq = k => loose ? (k.length >= 6 && [...keys].some(kk => kk.length >= 6 && (k.includes(kk) || kk.includes(k)))) : (!!k && keys.has(k));
-        const nameHit = eq(nk(r.name));
-        const hitIdx = [];
-        ms.forEach((m, i) => { if (eq(nk(m.n)) || (bi && bi.models.has(String(m.id != null ? m.id : m.model_id)))) hitIdx.push(i); });
-        if (!nameHit && !hitIdx.length && !bi) return;
-        out.push({ cc, r, ms, hitIdx, why: bi ? bi.why : (loose ? '名前（部分一致）' : '名前') });
-      });
+    const pass = loose => I.rows.forEach(row => {
+      if (ccOnly && row.cc !== ccOnly) return;
+      if (out.some(o => o.cc === row.cc && String(o.r.item_id) === String(row.r.item_id))) return;
+      const bi = byItem.get(String(row.r.item_id));
+      // ★部分一致は両方が6文字以上の時だけ（空や短いキーは何にでも当たってしまう。初回は184件出た）
+      const eq = k => loose ? (k.length >= 6 && [...keys].some(kk => kk.length >= 6 && (k.includes(kk) || kk.includes(k)))) : (!!k && keys.has(k));
+      const nameHit = eq(row.nameKey);
+      const hitIdx = [];
+      row.ms.forEach((m, i) => { if (eq(row.modelKeys[i]) || (bi && bi.models.has(String(m.id != null ? m.id : m.model_id)))) hitIdx.push(i); });
+      if (!nameHit && !hitIdx.length && !bi) return;
+      out.push({ cc: row.cc, r: row.r, ms: row.ms, hitIdx, why: bi ? bi.why : (loose ? '名前（部分一致）' : '名前') });
     });
     pass(false);
     if (!out.length) pass(true);
@@ -27268,16 +27288,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!out.length) {
       const near = [];
       const toks = [...keys].map(k => k.split(' ').filter(w => w.length >= 3));
-      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
-        const cand = [{ n: r.name, m: null }].concat((r.models || []).filter(m => m && !m.ghost).map(m => ({ n: m.n, m })));
-        cand.forEach(c => { const k = nk(c.n); if (!k) return; const ws = new Set(k.split(' '));
+      I.rows.forEach(row => {
+        const cand = [{ n: row.r.name, k: row.nameKey }].concat(row.ms.map((m, i) => ({ n: m.n, k: row.modelKeys[i] })));
+        cand.forEach(c => { if (!c.k) return; const ws = new Set(c.k.split(' '));
           const sc = Math.max(0, ...toks.map(t => t.filter(w => ws.has(w)).length));
-          if (sc >= 2) near.push({ cc, item_id: r.item_id, name: c.n, sc }); });
-      }));
+          if (sc >= 2) near.push({ cc: row.cc, item_id: row.r.item_id, name: c.n, sc }); });
+      });
       near.sort((a, b) => b.sc - a.sc);
       out._near = near.slice(0, 12);
     }
-    out._why = { keys: [...keys], jan, janInMine: !!(jan && myJanSet().has(jan)), byItem: byItem.size };
+    out._why = { keys: [...keys], jan, janInMine: !!(jan && I.byJan.has(jan)), byItem: byItem.size };
     return out;
   }
   function tmListedHtml(hits) {
@@ -27295,7 +27315,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     }
     return hits.map(h => {
       const r = h.r, host = hostOf(h.cc);
-      const img = r.image || r.img || (h.ms.find(m => m.img || m.image) || {}).img || '';
+      const abs = u => u ? (/^https?:/.test(u) ? u : IMG_CDN + u) : '';   // ★出品の画像はShopeeの画像ID（URLではない）
+      const hitM = h.hitIdx.length ? h.ms[h.hitIdx[0]] : null;
+      const img = abs((hitM && (hitM.img || hitM.image)) || r.image || r.img || (h.ms.find(m => m.img || m.image) || {}).img || '');
       const url = host ? editUrlFor(host, r.item_id) : '';
       const hitSet = new Set(h.hitIdx);
       // ★該当する明細だけを出す（本人 2026-09-11「このジャンルのやつだけ」）。カタログの全明細は「全明細を見る」で開く
@@ -27305,7 +27327,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const vt = h.ms.length ? `<table style="font-size:10.5px;border-collapse:collapse;margin-top:5px;width:100%">${th}${hitRows || `<tr><td colspan="5" class="smd-dim" style="padding:2px 4px">（このカタログの中で当たった明細はありません＝出品名で紐づいています）</td></tr>`}</table>
         ${h.ms.length > h.hitIdx.length ? `<details style="margin-top:3px"><summary class="smd-dim" style="cursor:pointer;font-size:10.5px">全明細を見る（${h.ms.length}件）</summary><table style="font-size:10.5px;border-collapse:collapse;margin-top:3px;width:100%">${th}${h.ms.map(rowHtml).join('')}</table></details>` : ''}` : '';
       return `<div style="border:1px solid #e6e6e6;border-radius:10px;padding:8px;display:flex;gap:10px;align-items:flex-start;background:#fff">
-        <div style="width:72px;height:72px;flex:none;background:#f6f7f9;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center">${img ? `<img src="${av(img)}" loading="lazy" style="max-width:100%;max-height:100%">` : ''}</div>
+        <div style="width:72px;height:72px;flex:none;background:#f6f7f9;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center">${img ? `<img src="${av(img)}" loading="lazy" style="max-width:100%;max-height:100%" onerror="this.style.display='none'">` : ''}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:700;line-height:1.35">${nm(r.name || '', 'wrap')}</div>
           <div class="smd-dim" style="font-size:10.5px;margin-top:2px">${esc(String(h.cc).toUpperCase())}・ID ${esc(String(r.item_id))}${r.price != null && !h.ms.length ? '・' + esc(String(r.price)) : ''}${r.stock != null && !h.ms.length ? '・在庫 ' + esc(String(r.stock)) : ''}・明細 ${h.ms.length}件・紐づけ＝${esc(h.why)}${url ? ` <a href="${av(url)}" target="_blank" rel="noopener" style="font-weight:700">Seller Centerで開く</a>` : ''}</div>
