@@ -17169,6 +17169,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F6A8} <b>【Codex全体レビュー・データが消える経路】JANの台帳と出品メモが、読み込みに失敗しただけで全部消える状態でした</b>。どちらも<b>全端末で1本の共有台帳</b>を<b>丸ごと上書き</b>して保存します。読み込みに失敗したとき「1件も無い」と同じ扱いになっていたので、そのあと<b>メモを1つ書く／JANを1つ入れる</b>だけで、<b>他の全件（JAN 3,911件・全メモ・在庫0固定・識別項目）が消えます</b>。読めたかどうかを別に持ち、<b>読めていないときは保存しない</b>（黄色い帯で知らせる）ようにしました。♾️無在庫の監視リストで今朝直したのと同じ型です。',
       '\u{1F5BC} <b>商品画像の転記が、新しい注文に入らないことがありました</b>（本人指摘：BRの9/10注文に画像が無い）。転記は<b>ポータル起動時に読んだ注文一覧</b>を使っていたので、その後にDBへ同期された注文（10:54同期）が「当日」の対象に入っていませんでした。<b>転記の直前にDBから読み直す</b>ようにし、結果に<b>「既に画像あり」の件数</b>も出すようにしました（GASはこれまで数えていたのに画面に出していなかった）。',
       '\u{1F501} <b>自動実行が「DB同期が実行中」で見送りになる件</b>：30分後に回すのではなく、同期が終わるのを待ってから走る（最長40分・30秒おきに確認）ようにしました。裏タブの同期は長引くので、30分後だとまた同期にぶつかることがありました（09:25 に実際に見送り）。',
       '\u{1F550} <b>「次回 …」の表示が、転記ページを開くたびに「今から3時間後」と描かれていました</b>（実際の予約とは別の値で描いていた）。予約時刻を1か所で持って、それを表示するようにしました。',
@@ -29673,7 +29674,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const host = document.getElementById('list-coverage');
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     try { await ensureListings(); } catch (e) { host.innerHTML = errBox(e); return; }
-    if (productIds === null) { productIds = {}; try { const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : []; productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {}; } catch (_) { productIds = {}; } }
+    if (productIds === null) { productIds = {}; try { const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : []; productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {}; if (settings.sbKey) kvOk.product_ids = true; } catch (_) { productIds = {}; } }
     try { renderCoverageInner(host); } catch (e) { host.innerHTML = '<div style="color:#d93025;padding:12px">カバレッジ描画エラー: ' + esc(e.message) + '<br><span class="smd-dim">🔄Shopeeから更新でデータを取り直すと直る場合があります。</span></div>'; console.error('renderCoverage', e); }
   }
   // 国別 出品数リミット パネル。Shopeeの出品枠は「Live(公開中)」だけを数える。
@@ -30816,6 +30817,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 📝出品ごとのメモ＋⚠️在庫0固定フラグ。app_kv の k='listing_meta' に { items:{ <item_id>:{note,keep0,at} } } で保存（新テーブル不要・注記した出品だけ持つ疎マップ）
   let lstMeta = null;       // { <item_id>: {note, keep0, at} }
   let _metaSaveT = null;
+  // ★共有の台帳（app_kv・全端末で1本）は【丸ごと上書き】で保存する。読めていないのに書くと全部消える。
+  //   `catch { x = {} }` は「読めなかった」と「まだ1件も無い」を同じ顔にするので、読めたかを別に持つ
+  //   （[[catch-empty-is-not-absence]]・2026-09-10 Codex全体レビュー）。
+  const kvOk = { listing_meta: false, product_ids: false, dropship_status: false };
+  function kvGuard(key, label) {
+    if (kvOk[key]) return true;
+    try { toast('⚠ ' + label + 'を読めていないので保存しませんでした（ほかの端末の分まで消えるため）。ページを再読み込みしてやり直してください', 6000); } catch (_) {}
+    try { logAct('出品', '保存を見送り', label, '共有の台帳を読めていない状態での丸ごと上書きを止めた'); } catch (_) {}
+    return false;
+  }
   function saveListingMeta() {
     if (_metaSaveT) clearTimeout(_metaSaveT);
     _metaSaveT = setTimeout(() => {
@@ -30844,6 +30855,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         items[k] = o;
       });
       lstMeta = items;
+      if (!kvGuard('listing_meta', '出品メモ・在庫0固定')) return;
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'listing_meta', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] listing_meta保存失敗', e));
     }, 500);
   }
@@ -30870,6 +30882,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   ここで落とさないと 🚫見つからず が付いたまま残る。
       const items = {}; Object.keys(productIds || {}).forEach(k => { const m = productIds[k]; if (has(m)) items[k] = { cond: (m.cond || ''), jan: (m.jan || '').slice(0, 64), mpn: (m.mpn || '').slice(0, 64), own: (m.own || '').slice(0, 64), f: (m.f || undefined), src: (m.src || '').slice(0, 120), srcUrl: (m.srcUrl || '').slice(0, 200), noJan: (String(m.jan || '').trim() ? undefined : (m.noJan || undefined)), noJanAt: (String(m.jan || '').trim() ? undefined : (m.noJanAt || undefined)), reJan: (String(m.jan || '').trim() ? undefined : (m.reJan || undefined)), jp: (m.jp || undefined), at: m.at || Date.now() }; });
       productIds = items;
+      if (!kvGuard('product_ids', 'JAN・型番の台帳')) return;
       if (settings.sbSecret) sbUpsert('app_kv', [{ k: 'product_ids', v: { items }, updated_at: new Date().toISOString() }]).catch(e => console.warn('[SMD] product_ids保存失敗', e));
     }, 500);
   }
@@ -32884,8 +32897,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstDropStatus = {}; }); }
-    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
-    if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
+    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
+    if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; drawListingStatus(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; drawListingStatus(); }).catch(() => { lstSpecs = {}; }); }
     if (lstStats === null) { lstStats = {}; sbGetAll('app_kv', 'select=v&k=like.listing_stats_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstStats = m; drawListingStatus(); }).catch(() => { lstStats = {}; }); } // 👁閲覧/❤️いいね/🛒販売（GASのlisting_stats）
     // 📗 利益台帳(listing_catalog)を出品一覧でも使えるよう遅延ロード＋商品名索引（原価インライン編集用・利益台帳とキャッシュ共用）
