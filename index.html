@@ -4531,6 +4531,9 @@
     "✕ 閉じる": "✕ Close",
     "（このカタログの中で当たった明細はありません＝出品名で紐づいています）": "(no matching variation inside this catalog — linked by the listing name)",
     "紐づく出品が見つかりませんでした（判定はタイトルの近さで「出している」になっている可能性があります）": "No linked listing found (it may have been judged 'listed' by title similarity)",
+    "紐づく出品（カタログ）は見つかりませんでした。": "No linked listing (catalog) was found.",
+    "この作品にJANはありません": "This title has no JAN",
+    "近い名前の出品（紐づいてはいません）": "Listings with similar names (not linked)",
     "紐づく出品が見つかりませんでした": "No linked listing found",
     "予約(pre-order)：発送までの猶予が長い商品です": "Pre-order — this product has a longer time before shipping",
     "今のカテゴリを候補に登録": "Save the current category as a preset",
@@ -27261,11 +27264,35 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     });
     pass(false);
     if (!out.length) pass(true);
+    // 何も無い時：なぜ「出している」になったかを見せる材料（本人 2026-09-11「JANで紐づけているのは出てくるはず」）
+    if (!out.length) {
+      const near = [];
+      const toks = [...keys].map(k => k.split(' ').filter(w => w.length >= 3));
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+        const cand = [{ n: r.name, m: null }].concat((r.models || []).filter(m => m && !m.ghost).map(m => ({ n: m.n, m })));
+        cand.forEach(c => { const k = nk(c.n); if (!k) return; const ws = new Set(k.split(' '));
+          const sc = Math.max(0, ...toks.map(t => t.filter(w => ws.has(w)).length));
+          if (sc >= 2) near.push({ cc, item_id: r.item_id, name: c.n, sc }); });
+      }));
+      near.sort((a, b) => b.sc - a.sc);
+      out._near = near.slice(0, 12);
+    }
+    out._why = { keys: [...keys], jan, janInMine: !!(jan && myJanSet().has(jan)), byItem: byItem.size };
     return out;
   }
   function tmListedHtml(hits) {
     const hostOf = cc => (REGIONS.find(r => r.cc === cc) || {}).host || '';
-    if (!hits.length) return `<div class="smd-dim" style="font-size:12px">紐づく出品が見つかりませんでした（判定はタイトルの近さで「出している」になっている可能性があります）</div>`;
+    if (!hits.length) {
+      const w = hits._why || {};
+      const near = hits._near || [];
+      return `<div style="font-size:12px;line-height:1.6">
+        <div><b>紐づく出品（カタログ）は見つかりませんでした。</b></div>
+        <div class="smd-dim">・JAN：${w.jan ? `<span style="font-family:monospace">${esc(w.jan)}</span>（母数側のJAN）→ 自分の出品の明細JANには <b>${w.janInMine ? 'あります' : 'ありません'}</b>` : 'この作品にJANはありません'}</div>
+        <div class="smd-dim">・探した名前の鍵：${(w.keys || []).map(k => `<code>${esc(k)}</code>`).join(' / ') || '（無し）'}</div>
+        <div class="smd-dim">→ この「出している」は<b>タイトルの近さ</b>で付いています（完全一致でもJAN一致でもありません）。</div>
+        ${near.length ? `<div style="margin-top:6px"><b>近い名前の出品（紐づいてはいません）</b><table style="font-size:10.5px;border-collapse:collapse;margin-top:3px">${near.map(n => `<tr><td style="padding:1px 6px 1px 0;white-space:nowrap">${esc(String(n.cc).toUpperCase())} ${esc(String(n.item_id))}</td><td style="padding:1px 4px">${esc(n.name || '')}</td><td class="smd-dim" style="padding:1px 4px;white-space:nowrap">語の一致 ${n.sc}</td></tr>`).join('')}</table></div>` : ''}
+      </div>`;
+    }
     return hits.map(h => {
       const r = h.r, host = hostOf(h.cc);
       const img = r.image || r.img || (h.ms.find(m => m.img || m.image) || {}).img || '';
