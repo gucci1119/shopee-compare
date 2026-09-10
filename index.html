@@ -17235,6 +17235,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-11', items: [
+      '\u{1F422} <b>📚母数の内訳が重かったのを軽くしました</b>（本人「このページ、なんか重い」）。チップ・並べ替え・区分を押すたびに、その機種のマスタ（Switchで数MB）を<b>毎回ネットから取り直していました</b>（実測：開くのに8.2秒・「出している」に切り替えて4.0秒）。10分は控えを使うようにし、「🧮 母数を数え直す」「📥 JANを明細に入れる」の後だけ取り直します。',
       '\u{1F5BC} <b>📸 画像の自動挿入が、あとから同期された前日の注文に入っていませんでした</b>（本人指摘「画像を撮れてないところある」。9/10のBR 4件が 00:52 に同期され、04:16 の自動実行は「当日(最新日)＝9/11」しか見ていなかった）。<b>自動実行のときは「直近7日」で回す</b>ようにしました。書き済みの行はGAS側で飛ばすので二重には入りません。手動のときは選んだ範囲のままです。',
       '\u{1F5C2} <b>📚母数の内訳で、「出している」を押すと実体が見えるようになりました</b>。カードの「出している ▸」を押すと、<b>その作品がどのカタログ（出品）のどの明細に紐づいているか</b>を画像つきで出します（バリエーションがある出品は明細を全部並べ、該当行に✔）。上の「🗂 出しているカタログ一覧」で、いま出していると判定した作品を<b>カタログごとにまとめて</b>一覧できます（国で絞っている時はその国だけ）。紐づけの根拠（JAN／日本語タイトル／名前）も表示。<br>【本人指摘で直し】<b>内訳の上に重ねるポップアップ</b>で出し（Esc／外側クリックで閉じる）、明細は<b>その作品に当たった行だけ</b>を出します（カタログの全明細は「全明細を見る」で開く）。一覧の方は、いま画面で絞っている区分・国・検索をそのまま使います。',
       '\u{1F501} <b>📄転記の「3時間おきの自動実行」が、裏タブに置いたまま止まっていました</b>（9/10 15:56 が最後で、予約の 18:56 を過ぎても12時間動かず）。3時間後に1回だけ鳴るタイマーに頼っていたので、Chromeが裏タブのタイマーを止めると二度と走りませんでした。<b>30秒おきに時刻を見る＋タブに戻った瞬間にも見る</b>方式に変え、予約時刻も端末に残すようにしました。過ぎていれば戻った瞬間に走ります。',
@@ -25636,9 +25637,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   ⚠️ **読めなかった(null)** と **本当に空([])** を分ける。混ぜると、通信が一度こけただけで
   //      「0件」が控えに焼き付き、母数表の「出している」がずっと0のまま戻らなくなる
   //      （[[catch-empty-is-not-absence]] / [[dont-report-zero-when-unknown]]）。
+  // ★控え（2026-09-11 本人「このページ、なんか重い」）。内訳のチップ／並べ替え／区分を押すたびに
+  //   titles_<hw>（Switchで数MB）をネットから取り直していた＝描き直し1回に約4秒。マスタはGASが書く読み取り専用なので
+  //   10分は控えを使う。「🧮 母数を数え直す」「📥 JANを明細に入れる」の後は tmRowsCacheClear() で捨てる。
+  const _tmRowsCache = {};
+  const TM_ROWS_TTL = 10 * 60 * 1000;
+  function tmRowsCacheClear() { Object.keys(_tmRowsCache).forEach(k => delete _tmRowsCache[k]); }
   async function loadTitleRows(hw) {
-    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw)); return ((r && r[0] && r[0].v) || {}).rows || []; }
-    catch (_) { return null; }
+    const c = _tmRowsCache[hw];
+    if (c && Date.now() - c.at < TM_ROWS_TTL) return c.rows;
+    try {
+      const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw));
+      const rows = ((r && r[0] && r[0].v) || {}).rows || [];
+      _tmRowsCache[hw] = { at: Date.now(), rows };
+      return rows;
+    }
+    catch (_) { return null; }   // 読めなかった＝控えない（次で取り直す）
   }
   // 🏪 駿河屋の一覧（＝物理で流通しているものの一次情報）。画像も母数もここに依存するので、
   //    描画の前に必ず揃える。以前は画像処理の中でだけ読んでいたため、初回描画では物理判定ができなかった。
@@ -26731,6 +26745,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           alert('❌ 入れられませんでした：' + ((e && e.message) || e));
         } finally {
           lst._janFilling = false;
+          tmRowsCacheClear();   // マスタ側にJAN/日本語名が入ったので控えを捨てる
           try { const el = document.getElementById('tm-janfill'); if (el) { el.disabled = false; el.textContent = old; } } catch (_) {}
         }
       }); }
@@ -26745,6 +26760,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!cand.length) { alert('先に駿河屋の一覧を取り込んでください'); return; }
         const old = rc.textContent; rc.disabled = true;
         lst._reCounting = true;
+        tmRowsCacheClear();   // 数え直しは最新のマスタで
         const _skip = [];
         try {
           for (let i = 0; i < cand.length; i++) {
