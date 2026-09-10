@@ -9157,6 +9157,20 @@
   //   経路を潰すのではなく【入口で止める】。読取(sbGet/sbGetAll)でマスクしている以上、
   //   読んだものを書き戻す経路がひとつでもあれば必ず同じ事故が起きる。
   const DEMO_MASK_RE = /サンプル商品 [A-Z]-\d{3}|購入者\d{3}|仕入先[A-Z]\b|ブランド[A-Z]\b|ユーザー\d{3}|（デモ非表示）/;
+  // ★お金の集計で使う読み込みは「読めなかった」を必ず覚えておく（2026-09-10）。
+  //   `.catch(() => [])` は **読めなかった** と **1件も無い** を同じ顔にするので、
+  //   返金や補償が読めていないだけなのに「返金0円」として純利益が過大に出る。
+  //   使い方： loadSoft(sbGetAll(...), '返金の記録', fails)
+  function loadSoft(pr, label, sink) {
+    return pr.catch(e => { try { (sink || []).push(label + '（' + ((e && e.message) || e) + '）'); } catch (_) {} return []; });
+  }
+  function loadFailBanner(fails, what) {
+    if (!fails || !fails.length) return '';
+    return '<div style="margin:0 0 10px;padding:8px 12px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:8px;font-size:12px;color:#c0392b">'
+      + '<b>⚠ 読み込めなかったものがあります（' + fails.length + '件）。下の' + (what || '数字') + 'は正しくありません。</b><br>'
+      + fails.map(x => '・' + esc(x)).join('<br>')
+      + '<br><span style="color:#8a3a2f">※ <b>0円ではなく「分からない」</b>です。ページを再読み込みしてから見てください。</span></div>';
+  }
   function demoWriteGuard(op, table, payload) {
     if (demoOn()) {
       const e = new Error(`🎭 デモ表示モードのままです。「${table}」への保存を中止しました（ダミーの商品名や0.73倍の金額が本番データに書き込まれるため）。🎭を戻してからやり直してください`);
@@ -12702,6 +12716,7 @@
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
     let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv;
+    const planFails = [];
     const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝8テーブル毎回取得を解消
     if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv } = pc.data); }
     else {
@@ -12718,14 +12733,15 @@
           sbGetAll('expenses', 'select=ymd,amount,category'),
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
-          sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
-          sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
-          sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),   // 正式な返品リクエストの返金
-          sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),  // 📗利益計算表：PayPal差分（主にBR・買主から別途徴収した分）
+          loadSoft(sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at'), '手で記録した返金', planFails),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
+          loadSoft(sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status'), '正式な返品リクエスト', planFails),
+          loadSoft(sbGetAll('app_kv', 'select=v&k=eq.return_meta'), '補償金の記録', planFails),   // 正式な返品リクエストの返金
+          loadSoft(sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'), '利益管理表の取り込み値', planFails),  // 📗利益計算表：PayPal差分（主にBR・買主から別途徴収した分）
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
-      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv }, at: Date.now() };
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv }, at: Date.now(), fails: planFails.slice() };
     }
+    plan._fails = (plan._cache && plan._cache.fails) || planFails;
     if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
     if (plan.cfg.opexPct == null) plan.cfg.opexPct = 6;
@@ -12895,7 +12911,7 @@
       + `<div class="smd-dim" style="font-size:10.5px;margin-top:2px">${sub}</div></button>`;
     // ★📋 週次報告用：月初〜今日までの結果と着地予測。Discordの報告にそのまま貼れる形にする
     const repHtml = planReportHtml(M, M2, cfg, { fix: effFixedOf(curRow), other: curRow.other || 0, refund: curRow.refund || 0, now: curOp, targetNet: targetNet });
-    body.innerHTML = fxStaleBanner() + repHtml +
+    body.innerHTML = loadFailBanner(plan._fails, '返金・補償を含む数字') + fxStaleBanner() + repHtml +
       `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:0 0 12px">`
       + secBtn('sim', '🎯 これからの計画（シミュレーション）', '目標を決めて、必要な注文数・固定費・達成ペースを逆算する')
       + secBtn('hist', '📊 これまでの実績（履歴）', '月ごとの売上・入金・仕入・経費・実利益を振り返る')
@@ -16501,6 +16517,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = document.getElementById('tax-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv;
+    const taxFails = [];
     try {
       [orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,tab,order_date,order_ts'),
@@ -16508,11 +16525,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         sbGetAll('inventory', 'select=item_id,price,status,shopee_sn,purchase_date,purchase_ts'),
         sbGetAll('expenses', 'select=ymd,amount,category,memo'),
         sbGetAll('app_kv', 'select=v&k=eq.tax_cfg').catch(() => []),
-        sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => []),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
-        sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status').catch(() => []),
-        sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(() => []),
-        sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => []),
-        sbGetAll('payouts', 'select=cc,payout_amount,from_amount,payout_time').catch(() => []),
+        loadSoft(sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at'), '手で記録した返金', taxFails),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
+        loadSoft(sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status'), '正式な返品リクエスト', taxFails),
+        loadSoft(sbGetAll('app_kv', 'select=v&k=eq.return_meta'), '補償金の記録', taxFails),
+        loadSoft(sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'), '利益管理表の取り込み値', taxFails),
+        loadSoft(sbGetAll('payouts', 'select=cc,payout_amount,from_amount,payout_time'), 'Payoneerの着金（為替差損益の計算に使う）', taxFails),
         sbGetAll('app_kv', 'select=v,updated_at&k=eq.profit_amounts').catch(() => []),   // 📗利益管理表から拾った現地通貨の入金額（公式API以前の売上を埋める控え）
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
@@ -16624,7 +16641,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          それまでこの年の数字は<b>売上原価と経費の下ごしらえとしてだけ</b>使ってください。</span></div>`;
     const yrSel = `<select id="tax-year">${years.map(y => `<option value="${y}"${y === Y ? ' selected' : ''}>${y}年</option>`).join('')}</select>`;
 
-    body.innerHTML =
+    body.innerHTML = loadFailBanner(taxFails, '売上原価・返金・為替差損益を含む数字') +
       `<div class="smd-toolbar" style="margin:0 0 10px">📅 対象年 ${yrSel}
         <button class="smd-btn" id="tax-csv" style="margin-left:8px">⬇ CSV（税理士へ渡す用）</button>
         <span class="smd-dim" style="font-size:11.5px;margin-left:8px">円換算は<b>注文日のレート</b>（💱為替の日次レート）</span></div>` +
@@ -17200,6 +17217,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F4B8} <b>📈事業計画と🧾確定申告でも、読み込みに失敗したものが「0円」に化けていました</b>（💴入出金・経費は今朝直しましたが、この2つが残っていました）。<b>返金・補償・Payoneerの着金</b>が読めなかっただけなのに0として計算され、<b>純利益や所得が実際より多く見える</b>状態でした。読めなかったものは<b>名前を挙げて赤い帯で先に出し</b>、「0円ではなく分からない」と明記します。',
       '\u267E\uFE0F <b>♾️無在庫の設定が「効いているように見えて、何もしていない」状態でした</b>。<b>監視先（仕入先）・監視頻度・売れたら他国取り下げ</b>の3つは<b>保存されるだけ</b>で、実際の巡回（GASが12時間ごとに全件）にも取り下げにも反映されていません。とくにロードマップに<b>「✅ 売れたら他国取り下げ：有効」</b>と出ていたのは嘘なので、<b>「まだ効きません」</b>と正直に出すようにしました。配線するか設定ごと消すかは決めていただく必要があります（⚠️帯にもそう書いています）。',
       '\u{1F527} <b>【自分の修正の取りこぼし】今朝直した「💴入出金・経費で補償金が0円扱い」が、実は効いていませんでした</b>。渡し方が画面ごとに違う（app_kvの行の配列／中身そのもの）のに、<b>中身を1段はがしすぎて渡していた</b>ため、補償は相変わらず0のままでした。どちらの形でも受け取れるようにして、実際に効くようにしました。<b>返金額から補償を引いた損失</b>が、事業計画・確定申告と同じ数字になります。',
       '\u{1F680} <b>【Codex全体レビュー】一括出品の途中に個別出品すると、同じ国に二重に出品されることがありました</b>。一括は「いま処理している国」しか押さえていなかったので、PHを作っている間にSGを個別で作って完了させると、あとから一括がSGに到達して<b>もう1つ作ります</b>。一括の開始時に<b>対象国をぜんぶ先に予約する</b>ようにしました（個別ボタンはその国を断ります）。',
