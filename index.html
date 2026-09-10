@@ -1881,6 +1881,21 @@
       + (used >= cap ? '\n\n⛔ いまは使い切っています。' + ufResetJst() + 'まで待ってください。' : '')
       + topTxt;
   }
+  // ★明細（バリエ）の削除は【同じ商品に同時に2つ流さない】（2026-09-10 Codex全体レビュー）。
+  //   詰め直し方式は「下の中身を1つ上へ書き写して、あまった末尾の枠を消す」ので、
+  //   1つ目の削除が終わる前に**更新前の画面**から2つ目を流すと、model_id には別の明細の中身が移っており、
+  //   そのIDを消して**選んでいない明細が消える**（2026-08-15に3明細を失ったのと同じ結末）。
+  //   ボタンごとの disabled では、別の画面・別のタブから流す経路を防げないのでここで持つ。
+  const _varDelBusy = new Map();   // 'shopId:itemId' → 開始時刻
+  function varDelLock(shopId, itemId) {
+    const k = String(shopId) + ':' + String(itemId);
+    const at = _varDelBusy.get(k);
+    if (at && Date.now() - at < 10 * 60 * 1000) {
+      throw new Error('⏳ この商品の明細削除がまだ実行中です（' + Math.round((Date.now() - at) / 1000) + '秒経過）。\n終わって一覧を開き直してから、もう一度選び直してください。\n※途中で重ねると、選んでいない明細が消えます。');
+    }
+    _varDelBusy.set(k, Date.now());
+    return () => { _varDelBusy.delete(k); };
+  }
   async function gasCall(params, timeoutMs) {
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     const q = Object.assign({}, params, { callback: 'cb' });
@@ -17171,6 +17186,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F5D1} <b>【Codex全体レビュー・最重要】明細の削除を重ねると、選んでいない明細が消える状態でした</b>（2026-08-15に3明細を失ったのと同じ結末）。削除は<b>「下の中身を1つ上へ書き写して、あまった末尾の枠を消す」</b>詰め直し方式なので、1つ目の削除が終わる前に<b>更新前の画面</b>から2つ目を流すと、その明細IDには<b>すでに別の明細の中身が移っている</b>ため、別のものを消します。押したボタンを止めるだけでは<b>別の画面・別のタブから流す経路</b>を防げないので、<b>商品ごとに鍵をかけて</b>（同じ商品の削除は同時に1つだけ）、重ねようとしたら「終わってから一覧を開き直してください」と断るようにしました。削除の入口4か所すべてに入っています。',
       '\u{1F3AD} <b>【Codex全体レビュー・最重要】デモ表示モードのまま、Shopeeの本番出品に書き込めてしまう状態でした</b>。デモの防波堤（<code>demoWriteGuard</code>）は<b>Supabaseへの保存にしか入っておらず</b>、<b>Shopeeへの価格・在庫・出品の書き込みは素通り</b>でした。つまり🎭を切り忘れたまま統括編集で保存すると、<b>0.73倍のダミー価格が本番の出品に焼き付きます</b>（過去にBR 9件で実際に起きています）。Shopeeへの書き込みを<b>1か所の関門（shopeeWriteGuard）に通し</b>、公式API・ブリッジ・GAS の3経路すべてで止めるようにしました。',
       '\u{1F4B4} <b>【Codex全体レビュー】在庫を保存すると、直前に変えた価格が元に戻ることがありました</b>。ブリッジ経由の保存は<b>価格と在庫をまとめて送る</b>作りなのに、送る中身が<b>編集画面を開いた時のまま</b>でした。価格を保存→（再読込せず）在庫を保存 の順で、<b>古い価格を送り返してしまいます</b>。<b>送る直前に読み直す</b>ようにしました（価格側も同じ理由で読み直します。読めなければ書かずに中止）。',
       '\u{1F501} <b>【Codex全体レビュー】統括編集の一括書き込みが、実行中にもう一度押せました</b>。価格の×係数は「いまの価格に掛ける」ので、走っている最中に押すと<b>100→90→81</b>と重ね掛けになります。実行中は<b>ボタンを押せなくし、押しても断る</b>ようにしました。',
@@ -22182,7 +22198,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           } else if (!confirm('この出品の販売数がまだ読み込まれていないため、控えが取れません。\n\n'
             + 'このまま消すと【Shopee側の明細ごとの販売数】がずれたまま戻せなくなります。\n'
             + '📦出品一覧でこの商品を一度開いてから消すのが確実です。\n\nそれでも進みますか？')) { if (btn) { btn.disabled = false; btn.textContent = org; } return false; }
-          const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: targets.map(x => x.id).join(',') }, 300000);
+          const _unlockVD = varDelLock(sidCat, itemId);
+          let r;
+          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: targets.map(x => x.id).join(',') }, 300000); }
+          finally { _unlockVD(); }
           if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
           try { logAct('出品', '明細削除', repName || '', cc + ' ' + itemId + ' ' + targets.length + '件'); } catch (_) {}
           markStale();
@@ -22209,7 +22228,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           try {
             const allTi = models.map(m => ({ id: m.id, ti: (m.tier_index || [])[0] || 0, n: '' })).sort((x, y) => x.ti - y.ti);
             try { await soldBaseSnapshot(cc, itemId, allTi, noImgList.map(x => String(x.id))); } catch (_) {}
-            const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: noImgList.map(x => x.id).join(',') }, 300000);
+            const _unlockVD = varDelLock(sidCat, itemId);
+          let r;
+          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: noImgList.map(x => x.id).join(',') }, 300000); }
+          finally { _unlockVD(); }
             if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
             try { logAct('出品', '明細削除(画像なし)', repName || '', cc + ' ' + itemId + ' ' + noImgList.length + '件'); } catch (_) {}
             markStale();
@@ -33836,7 +33858,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try {
         // ★消す前に販売数を控える（Shopeeの販売数は枠に残るので、これが無いと二度と正しい数に戻らない）
         await soldBaseSnapshot(cc, itemId, withTi, targets.map(x => String(x.id)));
-        const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids }, 300000);
+        const _unlockVD = varDelLock(sid, itemId);
+          let r;
+          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids }, 300000); }
+          finally { _unlockVD(); }
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
         try { logAct('出品', '明細削除', targets.map(x => x.n).join(' / ').slice(0, 60), cc + ' ' + itemId + ' ' + targets.length + '件 #' + mids); } catch (_) {}
         // ★✎カタログ編集は3分キャッシュ。消したのに古い一覧が出て「消えてない」と見える（2026-08-22 本人指摘）。
