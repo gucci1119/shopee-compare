@@ -17190,6 +17190,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-10', items: [
+      '\u{1F680} <b>【Codex全体レビュー】一括出品の途中に個別出品すると、同じ国に二重に出品されることがありました</b>。一括は「いま処理している国」しか押さえていなかったので、PHを作っている間にSGを個別で作って完了させると、あとから一括がSGに到達して<b>もう1つ作ります</b>。一括の開始時に<b>対象国をぜんぶ先に予約する</b>ようにしました（個別ボタンはその国を断ります）。',
       '\u{1F4E6} <b>【Codex全体レビュー】在庫の分割を重ねると、仕入額の合計が増える状態でした</b>。3分割を流したまま2分割を始めると、どちらの「枝番がもう有るか」の確認も『無い』で通り、あとから来た方が同じ枝番を上書きします（600円の在庫が 300+300+200＝800円 になる）。<b>同じ在庫の分割は同時に1つだけ</b>にしました。',
       '\u{1F5D1} <b>【Codex全体レビュー・最重要】明細の削除を重ねると、選んでいない明細が消える状態でした</b>（2026-08-15に3明細を失ったのと同じ結末）。削除は<b>「下の中身を1つ上へ書き写して、あまった末尾の枠を消す」</b>詰め直し方式なので、1つ目の削除が終わる前に<b>更新前の画面</b>から2つ目を流すと、その明細IDには<b>すでに別の明細の中身が移っている</b>ため、別のものを消します。押したボタンを止めるだけでは<b>別の画面・別のタブから流す経路</b>を防げないので、<b>商品ごとに鍵をかけて</b>（同じ商品の削除は同時に1つだけ）、重ねようとしたら「終わってから一覧を開き直してください」と断るようにしました。削除の入口4か所すべてに入っています。',
       '\u{1F3AD} <b>【Codex全体レビュー・最重要】デモ表示モードのまま、Shopeeの本番出品に書き込めてしまう状態でした</b>。デモの防波堤（<code>demoWriteGuard</code>）は<b>Supabaseへの保存にしか入っておらず</b>、<b>Shopeeへの価格・在庫・出品の書き込みは素通り</b>でした。つまり🎭を切り忘れたまま統括編集で保存すると、<b>0.73倍のダミー価格が本番の出品に焼き付きます</b>（過去にBR 9件で実際に起きています）。Shopeeへの書き込みを<b>1か所の関門（shopeeWriteGuard）に通し</b>、公式API・ブリッジ・GAS の3経路すべてで止めるようにしました。',
@@ -37370,7 +37371,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { recordListing(true); } catch (_) {}
       apiBulkBtn.disabled = true; const bo = apiBulkBtn.textContent;
       let ok = 0, ng = 0;
-      for (const cc of ccs) { apiBulkBtn.textContent = `⏳ 出品中 ${ok + ng + 1}/${ccs.length}（${cc}）`; const r = await apiCreateOne(cc); if (r.ok) ok++; else ng++; }
+      // ★一括の開始時に【全対象国を先に予約】する（2026-09-10 Codex全体レビュー）。
+      //   前は「いま処理している国」しか押さえていなかったので、PHを処理している間にSGを個別出品して
+      //   完了させると、あとから一括がSGに到達して **同じ国に2回出品** していた。
+      //   予約済みの国を個別ボタンが弾けるよう apiBusy に入れておき、その国の番が来たら外して処理する。
+      ccs.forEach(c => apiBusy.add(c));
+      try {
+        for (const cc of ccs) { apiBulkBtn.textContent = `⏳ 出品中 ${ok + ng + 1}/${ccs.length}（${cc}）`; apiBusy.delete(cc); const r = await apiCreateOne(cc); if (r.ok) ok++; else ng++; }
+      } finally { ccs.forEach(c => apiBusy.delete(c)); }
       apiBulkBtn.textContent = bo; apiBulkBtn.disabled = false;
       toast(`🚀 一括出品 完了：成功 ${ok}/${ccs.length}${ng ? ' ・失敗' + ng + '（各国の表示を確認）' : ''}`, ng > 0);
     });
