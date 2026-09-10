@@ -4524,6 +4524,14 @@
     "一括発送手配に選択": "Select for bulk shipping arrangement",
     "下の「固定費の内訳」から自動計算（内訳が空なら手入力）": "Calculated from the fixed-cost breakdown below (enter manually if empty)",
     "丸め単位(現地通貨)": "Rounding unit (local currency)",
+    "🗂 出しているカタログ一覧": "🗂 Listed catalogs",
+    "いま「出している」と判定した作品が、どのカタログ（出品）に載っているかを、画像とバリエーションの明細つきで一覧します": "Lists which catalogs (listings) the titles judged as 'listed' appear in, with images and variation details",
+    "どのカタログ（出品）のどの明細に紐づいているかを、画像とバリエーションの明細つきで出します": "Shows which catalog (listing) and which variation this title is linked to, with images and variation details",
+    "出している ▸": "Listed ▸",
+    "明細（バリエーション）": "Variation",
+    "Seller Centerで開く": "Open in Seller Center",
+    "紐づく出品が見つかりませんでした（判定はタイトルの近さで「出している」になっている可能性があります）": "No linked listing found (it may have been judged 'listed' by title similarity)",
+    "紐づく出品が見つかりませんでした": "No linked listing found",
     "予約(pre-order)：発送までの猶予が長い商品です": "Pre-order — this product has a longer time before shipping",
     "今のカテゴリを候補に登録": "Save the current category as a preset",
     "今のタイトルを名前を付けてお気に入り登録": "Save the current title as a named favourite",
@@ -6278,6 +6286,13 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
+    // 🗂 母数「出している」の実体（2026-09-11）
+    [/^🗂 「(.+)」を出しているカタログ（(\d+)件(.*)）$/, '🗂 Catalogs listing "$1" ($2$3)'],
+    [/^🗂 出しているカタログ一覧（(\d+)件のカタログ・作品 (\d+)件(.*)）$/, '🗂 Listed catalogs ($1 catalogs, $2 titles$3)'],
+    [/^・([A-Z]{2})だけ$/, ', $1 only'],
+    [/^作品：(.*)$/, 'Titles: $1'],
+    [/^(.*)・明細 (\d+)件・紐づけ＝(.*)$/, '$1 · $2 variations · linked by $3'],
+    [/^表示は先頭(\d+)件（該当(\d+)件）— 国で絞ってください$/, 'Showing first $1 of $2 — narrow by country'],
     // 📄 注文明細 → {国}_row（2026-09-10・Codex指摘で追加）
     [/^(❌ )?GASの返事が転記の結果ではありません（(.*)）。3回送っても同じでした。少し待ってからやり直してください$/, '$1The script replied, but not with a transfer result ($2). Same after 3 tries. Wait a moment and try again'],
     [/^次回 (.+)$/, 'Next $1'],
@@ -17217,6 +17232,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-11', items: [
+      '\u{1F5C2} <b>📚母数の内訳で、「出している」を押すと実体が見えるようになりました</b>。カードの「出している ▸」を押すと、<b>その作品がどのカタログ（出品）のどの明細に紐づいているか</b>を画像つきで出します（バリエーションがある出品は明細を全部並べ、該当行に✔）。上の「🗂 出しているカタログ一覧」で、いま出していると判定した作品を<b>カタログごとにまとめて</b>一覧できます（国で絞っている時はその国だけ）。紐づけの根拠（JAN／日本語タイトル／名前）も表示。',
       '\u{1F501} <b>📄転記の「3時間おきの自動実行」が、裏タブに置いたまま止まっていました</b>（9/10 15:56 が最後で、予約の 18:56 を過ぎても12時間動かず）。3時間後に1回だけ鳴るタイマーに頼っていたので、Chromeが裏タブのタイマーを止めると二度と走りませんでした。<b>30秒おきに時刻を見る＋タブに戻った瞬間にも見る</b>方式に変え、予約時刻も端末に残すようにしました。過ぎていれば戻った瞬間に走ります。',
     ] },
     { date: '2026-09-10', items: [
@@ -27187,6 +27203,68 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       ${list.length > CAP ? `<div class="smd-dim" style="font-size:10.5px;margin-top:6px">表示は先頭${CAP}件（該当${list.length}件）— 絞り込んでください</div>` : ''}`;
   }
 
+  // 🗂 「出している」の実体＝この作品が、どのカタログ（出品）のどの明細に紐づいているか（本人依頼 2026-09-11）。
+  //   判定は既存の「出している」と同じ材料：①JAN一致（productIds の jan）②AIの日本語タイトル(jp)③明細名/出品名のキー一致。
+  //   ③は完全一致で当たらない時だけ「含む」でも拾う（表示は判定を上書きしない＝見つからなければ見つからないと言う）。
+  function tmListedRows(x, link, ccOnly) {
+    const norm = k => (link && link[k]) || k;
+    const nk = n => norm(tmKey(String(n || '').toLowerCase().replace(/^[a-z0-9]{1,8}\s*[:：]\s*/i, '').replace(/\s+/g, ' ').trim()));
+    const keys = new Set([x.ja, x.en].map(t => t ? norm(tmKey(t)) : '').filter(Boolean));
+    const jan = (x.jan && String(x.jan).length === 13) ? String(x.jan) : '';
+    const byItem = new Map();   // item_id -> { models:Set(model.id), why }
+    try {
+      Object.keys(productIds || {}).forEach(k => {
+        const m = /^id:(\d+)(?:#(\d+))?$/.exec(k); if (!m) return;
+        const pi = productIds[k] || {};
+        const j = String(pi.jan || '').trim(), jp = String(pi.jp || '').trim();
+        const why = (jan && j === jan) ? 'JAN' : (jp && keys.has(norm(tmKey(jp))) ? '日本語タイトル' : '');
+        if (!why) return;
+        const e = byItem.get(m[1]) || { models: new Set(), why };
+        if (m[2]) e.models.add(String(m[2]));
+        if (why === 'JAN') e.why = 'JAN';
+        byItem.set(m[1], e);
+      });
+    } catch (_) {}
+    const out = [];
+    const pass = loose => Object.keys(lst.byCc || {}).forEach(cc => {
+      if (ccOnly && cc !== ccOnly) return;
+      (lst.byCc[cc] || []).forEach(r => {
+        if (out.some(o => o.cc === cc && String(o.r.item_id) === String(r.item_id))) return;
+        const ms = (r.models || []).filter(m => m && !m.ghost);
+        const bi = byItem.get(String(r.item_id));
+        const eq = k => loose ? [...keys].some(kk => kk.length >= 6 && (k.includes(kk) || kk.includes(k))) : keys.has(k);
+        const nameHit = eq(nk(r.name));
+        const hitIdx = [];
+        ms.forEach((m, i) => { if (eq(nk(m.n)) || (bi && bi.models.has(String(m.id != null ? m.id : m.model_id)))) hitIdx.push(i); });
+        if (!nameHit && !hitIdx.length && !bi) return;
+        out.push({ cc, r, ms, hitIdx, why: bi ? bi.why : (loose ? '名前（部分一致）' : '名前') });
+      });
+    });
+    pass(false);
+    if (!out.length) pass(true);
+    return out;
+  }
+  function tmListedHtml(hits) {
+    const hostOf = cc => (REGIONS.find(r => r.cc === cc) || {}).host || '';
+    if (!hits.length) return `<div class="smd-dim" style="font-size:12px">紐づく出品が見つかりませんでした（判定はタイトルの近さで「出している」になっている可能性があります）</div>`;
+    return hits.map(h => {
+      const r = h.r, host = hostOf(h.cc);
+      const img = r.image || r.img || (h.ms.find(m => m.img || m.image) || {}).img || '';
+      const url = host ? editUrlFor(host, r.item_id) : '';
+      const hitSet = new Set(h.hitIdx);
+      const vt = h.ms.length ? `<table style="font-size:10.5px;border-collapse:collapse;margin-top:5px;width:100%">
+        <tr class="smd-dim"><th style="text-align:left;padding:2px 4px;border-bottom:1px solid #eee">#</th><th style="text-align:left;padding:2px 4px;border-bottom:1px solid #eee">明細（バリエーション）</th><th style="text-align:right;padding:2px 4px;border-bottom:1px solid #eee">価格</th><th style="text-align:right;padding:2px 4px;border-bottom:1px solid #eee">在庫</th><th style="text-align:right;padding:2px 4px;border-bottom:1px solid #eee">販売</th></tr>
+        ${h.ms.map((m, i) => `<tr style="${hitSet.has(i) ? 'background:#f4fbf6;font-weight:700' : ''}"><td style="padding:2px 4px">${i + 1}${hitSet.has(i) ? ' ✔' : ''}</td><td style="padding:2px 4px;word-break:break-word">${esc(m.n || '')}${m.sku ? ` <span class="smd-dim" style="font-family:monospace">${esc(m.sku)}</span>` : ''}</td><td style="padding:2px 4px;text-align:right;white-space:nowrap">${m.price != null ? esc(String(m.price)) : ''}</td><td style="padding:2px 4px;text-align:right">${m.stock != null ? esc(String(m.stock)) : ''}</td><td style="padding:2px 4px;text-align:right">${m.sold != null ? esc(String(m.sold)) : ''}</td></tr>`).join('')}
+      </table>` : '';
+      return `<div style="border:1px solid #e6e6e6;border-radius:10px;padding:8px;display:flex;gap:10px;align-items:flex-start;background:#fff">
+        <div style="width:72px;height:72px;flex:none;background:#f6f7f9;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center">${img ? `<img src="${av(img)}" loading="lazy" style="max-width:100%;max-height:100%">` : ''}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700;line-height:1.35">${nm(r.name || '', 'wrap')}</div>
+          <div class="smd-dim" style="font-size:10.5px;margin-top:2px">${esc(String(h.cc).toUpperCase())}・ID ${esc(String(r.item_id))}${r.price != null && !h.ms.length ? '・' + esc(String(r.price)) : ''}${r.stock != null && !h.ms.length ? '・在庫 ' + esc(String(r.stock)) : ''}・明細 ${h.ms.length}件・紐づけ＝${esc(h.why)}${url ? ` <a href="${av(url)}" target="_blank" rel="noopener" style="font-weight:700">Seller Centerで開く</a>` : ''}</div>
+          ${vt}
+        </div></div>`;
+    }).join('');
+  }
   // ★中で例外が出ると「読み込み中…」のまま黙って止まる（2026-08-31 本人「これずっと動かない」）。
   //   何が起きたのかを必ず画面に出す。原因が見えないと直しようがない。
   // 📚 内訳を閉じる（かぶせを外して中身も捨てる）
@@ -27481,7 +27559,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       ${(() => { if (x.has) return ''; const f = tmFitName(x.en || x.ja || '', 30); return f.cut ? `<div title="${av('明細名は30字までです。このまま入れると「' + f.name + '」になります')}" style="font-size:9.5px;color:#b26a00;font-weight:700">✂ 30字超（${esc(f.name)}）</div>` : ''; })()}
       ${x.ja && x.en ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.en)}</div>` : ''}
       <div style="display:flex;align-items:center;gap:5px;margin-top:auto;flex-wrap:wrap;row-gap:3px">
-        <span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;white-space:nowrap;background:${x.has ? '#1a7f37' : '#fdecea'};color:${x.has ? '#fff' : '#b3261e'}">${x.has ? '出している' : 'まだ'}</span>
+        ${x.has ? `<button class="tm-listed" data-i="${shown2.indexOf(x)}" title="どのカタログ（出品）のどの明細に紐づいているかを、画像とバリエーションの明細つきで出します" style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;white-space:nowrap;background:#1a7f37;color:#fff;border:0;cursor:pointer">出している ▸</button>` : `<span style="font-size:9.5px;font-weight:700;border-radius:8px;padding:1px 6px;white-space:nowrap;background:#fdecea;color:#b3261e">まだ</span>`}
         ${x.jan ? `<span class="smd-dim" style="font-size:9px;font-family:monospace;white-space:nowrap" title="${av('JAN ' + x.jan + '\n※JANが一致したものは「出している」と判定しています（タイトルより確かなため）')}">${esc(x.jan)}</span>` : ''}
         ${(() => { const mp = x.jan ? (lst._mpnByJan || {})[x.jan] : ''; return mp ? `<span class="smd-dim" style="font-size:9px;font-family:monospace;white-space:nowrap" title="型番（自分の明細に入っている値）">${esc(mp)}</span>` : ''; })()}
         ${x.sgp ? (() => {
@@ -27554,7 +27632,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     box.innerHTML = tmCloseBar + `<div class="tool-card" style="margin:0;max-width:none">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)} の内訳</b>
-        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)} ${seg('dup', '🔁 二重出品', dupN)}
+        ${seg('no', 'まだ出していない', list.length - hasN)} ${seg('yes', '出している', hasN)} <button class="smd-btn b-open" id="tm-listed-all" style="font-size:11px" title="いま「出している」と判定した作品が、どのカタログ（出品）に載っているかを、画像とバリエーションの明細つきで一覧します">🗂 出しているカタログ一覧</button> ${seg('all', 'すべて', list.length)} ${seg('link', '🔗 対応させる', unlinked.length)} ${seg('dup', '🔁 二重出品', dupN)}
         ${sgOn ? `<label style="font-size:11px;display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="駿河屋に商品があるもの＝中古で流通している物理ソフト。ダウンロード専売やパッケージが出ていないものを外せます"><input type="checkbox" id="tm-physonly"${lst.tmPhys ? ' checked' : ''}> 🏪 駿河屋にあるものだけ</label>` : '<span class="smd-dim" style="font-size:10.5px">🏪 駿河屋の一覧を取り込むと「物理ソフトだけ」に絞れます</span>'}
         ${sgOn ? `<span class="smd-seg" id="tm-kind" style="font-size:11px" title="本体・コントローラも扱うので、区分で切り替えられます">${(() => { const kc = {}; ((lst.sgRows || {})[hw] || []).forEach(r => { const k = sgKindOf(r); kc[k] = (kc[k] || 0) + 1; });
           const hwN = Object.keys(kc).filter(k => k !== 'soft').reduce((a, k) => a + kc[k], 0);
@@ -27581,6 +27659,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           + ` <span class="smd-dim">※国ごとに出している物が違うので、合計とは一致しません</span></div>`; })()}
       ${(() => { const i2 = lst._janMstInfo; return i2 && i2.n ? `<div style="font-size:10.5px;margin-bottom:4px;color:#14682c">📇 JAN付きの母数（楽天ブックス）<b>${i2.n.toLocaleString()}件</b>を合流／このハードでJANが付いた行 <b>${i2.withJan.toLocaleString()}</b>／<b>JANが一致したもの ${(i2.match||0).toLocaleString()}件</b>（うち<b>名前では当たらずJANで救えた ${i2.hit.toLocaleString()}件</b>）</div>` : ''; })()}
       <div class="smd-dim" style="font-size:10.5px;margin-bottom:8px">「出している」の判定は<b>タイトルの一致</b>です（記号・大文字小文字は無視）。綴りが違うと「まだ」に出ます。<b style="color:#1a7f37">✅ ダウンロード版は対象外です</b>（このハードで<b>${num(dlCut)}件</b>を除外。「DL版の印しかない」かつ「駿河屋に商品が無い」もの＝中古で扱えないものです。駿河屋に商品があればDL印が付いていても残します＝パッケージが出ているため）。<b>Switchの7,131件のうち5,715件は「DL版の印しかない」もので、日本語名があるのは2,393件だけ</b>です。<b>中古で実際に扱える物理ソフトは駿河屋にある2,292件</b>で、<b>「🏪 駿河屋にあるものだけ」を既定でONにしました</b>（本人方針「物理ソフトだけにしてね」）。<b>駿河屋にしか無い版違い（廉価版・Best版など）も母数に足しています</b>＝Wikidataと厳密一致したのは423件だけなので、足さないと物理の母数が1/5に落ちます。<b>画像が少ないのも同じ理由</b>で、駿河屋に無い6,708件は<b>商品写真がそもそも存在しません</b>（駿河屋と一致した分は実測423/423件で画像あり）。画像は駿河屋の商品写真を<b>画面に見えているカードの分だけ</b>取りに行きます（20件ずつ・一度引いたら覚えます）。Wikidataの画像は実測2%しか無いため補助です。${shown2.length > CAP ? `<b style="color:#b26a00">　表示は先頭${CAP}件（該当${shown2.length}件）— 絞り込んでください</b>` : ''}</div>
+      <div id="tm-listed-panel" style="display:none"></div>
       ${(lst.tmKind && lst.tmKind !== 'soft') ? tmHardwarePanel(hw, lst.tmKind) : (lst.tmFil === 'dup' ? dupPanel() : lst.tmFil === 'link' ? linkPanel() : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px">${shown2.slice(0, CAP).map(card).join('') || '<span class="smd-dim" style="font-size:12px">該当なし</span>'}</div>`)}
       ${(lst.tmFil === 'link' || lst.tmFil === 'dup') ? '' : `<div id="tm-pickbar" style="position:sticky;bottom:0;margin-top:8px;padding:7px 10px;background:#f2f8ff;border:1px solid #cfe0f7;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;${(lst.tmPick && lst.tmPick.size) ? '' : 'display:none'}">
         <b style="font-size:12px">選んだ <span id="tm-pickn">${(lst.tmPick || new Set()).size}</span> 件</b>
@@ -27600,6 +27679,40 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try { if (lst._sgRunning) { const sgb = document.getElementById('tm-sg');
       if (sgb) sgb.textContent = '■ 取り込み中（押すと止まります）'; } } catch (_) {}
     box.querySelectorAll('.tm-fil').forEach(b2 => b2.addEventListener('click', () => { lst.tmFil = b2.dataset.f; renderTitleDetail(hw, own); }));
+    // 🗂 出しているカタログ（1作品／全部）
+    {
+      const pn = document.getElementById('tm-listed-panel');
+      const showPanel = (title, inner) => {
+        if (!pn) return;
+        pn.style.display = '';
+        pn.innerHTML = `<div class="tool-card" style="margin:0 0 8px;max-width:none"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><b style="font-size:12.5px">${title}</b><button class="smd-btn" id="tm-listed-close" style="margin-left:auto;font-size:11px">閉じる</button></div><div style="display:grid;gap:8px">${inner}</div></div>`;
+        const cb = document.getElementById('tm-listed-close'); if (cb) cb.addEventListener('click', () => { pn.style.display = 'none'; pn.innerHTML = ''; });
+        try { pn.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+      };
+      box.querySelectorAll('.tm-listed').forEach(b3 => b3.addEventListener('click', ev => {
+        ev.stopPropagation();
+        const x = shown2[+b3.dataset.i]; if (!x) return;
+        const hits = tmListedRows(x, link, lst.tmCc);
+        showPanel(`🗂 「${esc(x.ja || x.en || '')}」を出しているカタログ（${hits.length}件${lst.tmCc ? '・' + esc(String(lst.tmCc).toUpperCase()) + 'だけ' : ''}）`, tmListedHtml(hits));
+      }));
+      const ba = document.getElementById('tm-listed-all');
+      if (ba) ba.addEventListener('click', () => {
+        // 作品→出品 の対応を「出品」でまとめ直す（同じカタログに複数作品が載っているのが普通）
+        const groups = new Map();
+        list.filter(x => x.has).forEach(x => tmListedRows(x, link, lst.tmCc).forEach(h => {
+          const k = h.cc + '|' + h.r.item_id;
+          const g = groups.get(k) || { h: Object.assign({}, h, { hitIdx: [] }), titles: [] };
+          h.hitIdx.forEach(i => { if (!g.h.hitIdx.includes(i)) g.h.hitIdx.push(i); });
+          g.titles.push(x.ja || x.en || '');
+          groups.set(k, g);
+        }));
+        const CAPG = 200;
+        const arr = [...groups.values()];
+        const inner = arr.slice(0, CAPG).map(g => `<div><div class="smd-dim" style="font-size:10.5px;margin:0 0 2px 2px">作品：${esc(g.titles.slice(0, 6).join(' ／ '))}${g.titles.length > 6 ? ' ほか' + (g.titles.length - 6) + '件' : ''}</div>${tmListedHtml([g.h])}</div>`).join('')
+          + (arr.length > CAPG ? `<div class="smd-dim" style="font-size:10.5px">表示は先頭${CAPG}件（該当${arr.length}件）— 国で絞ってください</div>` : '');
+        showPanel(`🗂 出しているカタログ一覧（${arr.length}件のカタログ・作品 ${list.filter(x => x.has).length}件${lst.tmCc ? '・' + esc(String(lst.tmCc).toUpperCase()) + 'だけ' : ''}）`, inner || '<span class="smd-dim" style="font-size:12px">紐づく出品が見つかりませんでした</span>');
+      });
+    }
     { const ss = document.getElementById('tm-sort'); if (ss) ss.addEventListener('change', () => { lst.tmSort = ss.value; renderTitleDetail(hw, own); }); }
     { const po = document.getElementById('tm-physonly'); if (po) po.addEventListener('change', () => { lst.tmPhys = po.checked; renderTitleDetail(hw, own); }); }
     { const kk = document.getElementById('tm-kind'); if (kk) kk.addEventListener('click', e => { const b4 = e.target.closest('button'); if (!b4) return; lst.tmKind = b4.dataset.k; renderTitleDetail(hw, own); }); }
