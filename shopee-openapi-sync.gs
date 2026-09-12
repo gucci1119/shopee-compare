@@ -1713,7 +1713,7 @@ function removeVariationShift_(shopId, itemId, midCsv) {
       e.model_id = bySlot[s].model_id;                      // 枠に居座っているモデルIDはそのまま
       newModels.push(e);
     } else {
-      newOpts.push({ option: '__del' + s });                // あまり枠は一時名（名前の重複を避けるため）
+      newOpts.push(tierOpt_(optList[s], '__del' + s));      // あまり枠は一時名（名前の重複を避けるため）。★画像は残す＝「全部あり／全部なし」の制約で弾かれる（2026-09-13 実測）
       newModels.push(entryOf(bySlot[s], s));
     }
   }
