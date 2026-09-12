@@ -4813,15 +4813,16 @@ function boshuAutoTick(manual) {
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
     var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
     var ccs = (cfg.ccs || []).slice();
-    if (!hws.length || !ccs.length) { st.lastMsg = '機種か国が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
+    if (!hws.length) { st.lastMsg = '機種が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
     var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [];
     var perTick = Math.max(1, Math.min(20, Number(cfg.perTick) || 8));
-    var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null;
+    var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null, ccsHw = ccs;
     while (tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
       fam = cfg.family[hw];
-      var ctx = baLoadCtx_(cfg, hw, ccs); famRows = ctx.famRows; listedByCc = ctx.listedByCc; allRows = ctx.allRows; ledger = ctx.ledger;
+      ccsHw = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : ccs;   // 機種ごとの「出す国」（無ければ既定）
+      var ctx = baLoadCtx_(cfg, hw, ccsHw); famRows = ctx.famRows; listedByCc = ctx.listedByCc; allRows = ctx.allRows; ledger = ctx.ledger;
       cand = ctx.cand;
       if (cand.length) break;
       baLog_(st, hw + '：空白の候補なし（全部出しているか、日本語名が無い）');
@@ -4839,7 +4840,7 @@ function boshuAutoTick(manual) {
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
       var en = baEnName_(c); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
-      if (!en) { baMark_(ledger, c.key, ccs, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
+      if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
@@ -4849,7 +4850,7 @@ function boshuAutoTick(manual) {
       var img = null, srcId = '';
       for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
       var cost = baCostEst_(hits.map(function (h) { return h.price; }));
-      if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + (c.ja || c.en)); Utilities.sleep(1500); continue; }
+      if (!img) { baMark_(ledger, c.key, ccsHw, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -4862,7 +4863,7 @@ function boshuAutoTick(manual) {
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
     var touchedShops = {};
-    ccs.forEach(function (cc) {
+    ccsHw.forEach(function (cc) {
       if (Date.now() - t0 > DEADLINE) return;
       var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st);
       out.ccs[cc] = r; out.added += r.added || 0;
@@ -4925,8 +4926,9 @@ function baLoadCtx_(cfg, hw, ccs) {
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
 function boshuAutoPreview_(hw, limit) {
-  var cfg = baKv_(BA_CFG) || {}; var ccs = (cfg.ccs || []).slice();
+  var cfg = baKv_(BA_CFG) || {};
   if (!hw || !cfg.family || !cfg.family[hw] || !(cfg.family[hw].sku || cfg.family[hw].nameKey)) return { ok: false, error: 'その機種の足す先（カタログ群）が設定されていません' };
+  var ccs = (cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs.slice() : (cfg.ccs || []).slice();
   if (!ccs.length) return { ok: false, error: '国が選ばれていません' };
   var t0 = Date.now();
   var ctx = baLoadCtx_(cfg, hw, ccs);
@@ -4988,7 +4990,7 @@ function boshuAutoPreview_(hw, limit) {
 // ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
 function boshuAutoExclude_(hw, key, undo) {
   if (!hw || !key) return { ok: false, error: 'hw/key が必要です' };
-  var ledger = baKv_('boshu_auto_done_' + hw) || {}; var cfg = baKv_(BA_CFG) || {}; var ccs = (cfg.ccs || []);
+  var ledger = baKv_('boshu_auto_done_' + hw) || {}; var cfg = baKv_(BA_CFG) || {}; var ccs = ((cfg.family || {})[hw] && cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs : (cfg.ccs || []);
   if (undo) { if (ledger[key]) { Object.keys(ledger[key]).forEach(function (cc) { if (ledger[key][cc] === 'skip:manual') delete ledger[key][cc]; }); if (!Object.keys(ledger[key]).length) delete ledger[key]; } }
   else { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = 'skip:manual'; }); }
   baKvSet_('boshu_auto_done_' + hw, ledger); ufPersist_();
