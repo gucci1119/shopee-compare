@@ -4617,6 +4617,34 @@ function baHwsOf_(txt) { var t = String(txt || ''), out = []; BA_HW_PAT.forEach(
 var BA_NG = /amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ/i;
 // ヤフオクの検索結果で「ソフト本体の写真ではない」出品を落とす（攻略本・箱のみ・まとめ売り・周辺機器）
 var BA_YNG = /攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール/;
+var BA_SERIES_JA = [[/ポケットモンスター|ポケモン/g, 'Pokemon'], [/星のカービィ|カービィ/g, 'Kirby'], [/マリオカート/g, 'Mario Kart'], [/マリオパーティ/g, 'Mario Party'], [/スーパーマリオ|マリオ/g, 'Mario'], [/ヨッシー/g, 'Yoshi'], [/ルイージ/g, 'Luigi'], [/ワリオ/g, 'Wario'], [/ドンキーコング/g, 'Donkey Kong'], [/ピクミン/g, 'Pikmin'], [/ゼルダの伝説|ゼルダ/g, 'Zelda'], [/スプラトゥーン/g, 'Splatoon'], [/どうぶつの森/g, 'Animal Crossing'], [/大乱闘スマッシュブラザーズ|スマッシュブラザーズ|スマブラ/g, 'Smash Bros'], [/メトロイド/g, 'Metroid'], [/ファイアーエムブレム/g, 'Fire Emblem'], [/ゼノブレイド/g, 'Xenoblade'], [/スターフォックス/g, 'Star Fox'], [/エフゼロ|F-?ZERO/gi, 'F-Zero'], [/ドラゴンクエスト|ドラクエ/g, 'Dragon Quest'], [/ファイナルファンタジー/g, 'Final Fantasy'], [/キングダムハーツ/g, 'Kingdom Hearts'], [/モンスターハンター|モンハン/g, 'Monster Hunter'], [/クロノトリガー/g, 'Chrono Trigger'], [/ロマンシングサガ|サガ/g, 'SaGa'], [/テイルズ/g, 'Tales of'], [/ペルソナ/g, 'Persona'], [/女神転生/g, 'Megami Tensei'], [/逆転裁判/g, 'Ace Attorney'], [/レイトン教授/g, 'Layton'], [/リズム天国/g, 'Rhythm Heaven'], [/マザー|MOTHER/g, 'Mother'], [/ロックマン/g, 'Mega Man'], [/悪魔城/g, 'Castlevania'], [/バイオハザード/g, 'Resident Evil'], [/ストリートファイター|スト2|スト。?II/g, 'Street Fighter'], [/鉄拳/g, 'Tekken'], [/ソニック/g, 'Sonic'], [/たまごっち/g, 'Tamagotchi'], [/妖怪ウォッチ/g, 'Yokai Watch'], [/デジモン/g, 'Digimon'], [/遊戯王/g, 'Yu-Gi-Oh'], [/ベイブレード/g, 'Beyblade'], [/ドラゴンボール/g, 'Dragon Ball'], [/ワンピース|ONE PIECE/gi, 'One Piece'], [/ナルト|NARUTO/gi, 'Naruto'], [/ブリーチ|BLEACH/g, 'Bleach'], [/ハンターハンター|HUNTER×HUNTER/gi, 'Hunter x Hunter'], [/鬼滅の刃/g, 'Demon Slayer'], [/呪術廻戦/g, 'Jujutsu Kaisen'], [/進撃の巨人/g, 'Attack on Titan'], [/僕のヒーローアカデミア|ヒロアカ/g, 'My Hero Academia'], [/チェンソーマン/g, 'Chainsaw Man'], [/スパイファミリー|SPY×FAMILY/gi, 'Spy x Family'], [/ハイキュー/g, 'Haikyu'], [/スラムダンク/g, 'Slam Dunk'], [/名探偵コナン/g, 'Detective Conan'], [/犬夜叉/g, 'Inuyasha'], [/ジョジョの奇妙な冒険|ジョジョ/g, 'JoJo'], [/ガンダム/g, 'Gundam'], [/エヴァンゲリオン|エヴァ/g, 'Evangelion'], [/セーラームーン/g, 'Sailor Moon'], [/プリキュア/g, 'Precure'], [/仮面ライダー/g, 'Kamen Rider'], [/ウルトラマン/g, 'Ultraman'], [/戦隊/g, 'Sentai'], [/アンパンマン/g, 'Anpanman'], [/ドラえもん/g, 'Doraemon'], [/クレヨンしんちゃん/g, 'Crayon Shin-chan'], [/となりのトトロ|トトロ/g, 'Totoro'], [/ジブリ/g, 'Ghibli'], [/初音ミク|ボーカロイド|ボカロ/g, 'Hatsune Miku'], [/ラブライブ/g, 'Love Live'], [/アイドルマスター|アイマス/g, 'Idolmaster'], [/東方project|東方/g, 'Touhou'], [/ダンガンロンパ/g, 'Danganronpa'], [/シュタインズゲート|シュタゲ/g, 'Steins Gate'], [/フェイト|Fate/g, 'Fate'], [/ハローキティ|キティ/g, 'Hello Kitty'], [/サンリオ/g, 'Sanrio'], [/シナモロール/g, 'Cinnamoroll'], [/マイメロディ|マイメロ/g, 'My Melody'], [/クロミ/g, 'Kuromi'], [/ポムポムプリン/g, 'Pompompurin'], [/ぐでたま/g, 'Gudetama'], [/リラックマ/g, 'Rilakkuma'], [/すみっコぐらし|すみっこぐらし/g, 'Sumikko Gurashi'], [/ちいかわ/g, 'Chiikawa'], [/スヌーピー/g, 'Snoopy'], [/ディズニー/g, 'Disney'], [/ミッキー/g, 'Mickey'], [/ダッフィー/g, 'Duffy'], [/くまのプーさん|プーさん/g, 'Winnie the Pooh'], [/トイストーリー/g, 'Toy Story'], [/ユニバーサルスタジオジャパン|ユニバ|USJ/g, 'USJ']];
+// 関連するバリエカタログ（例：Final Fantasy Series）へ入れるための「シリーズ鍵」。カタログ名から機種・汎用語を落とした残り
+var BA_SKEY_DROP = /\b(used|new|variation|game|games|software|disc|cartridge|series|japan|japanese|ver|version|jp|for|and|the|of|with|nintendo|sony|microsoft|sega|playstation|bandai|namco|capcom|konami|square|enix|koei|tecmo|atlus|hudson|taito|snk|falcom|only|edition|collection|set)\b/g;
+function baSeriesKey_(name) { var t = baTmKey_(String(name || '').replace(/[①-⑳]/g, ' ').replace(/\[[^\]]*\]/g, ' ')); t = t.replace(BA_SKEY_DROP, ' ').replace(/\s+/g, ' ').trim(); if (!t || /(console|controller|memory|card|cable|adapter|charger|case|amiibo|sticker|figure|plush|dock|stand|joy con)/.test(t)) return ''; return t; }
+function baJaSeriesEn_(ja) { var out = []; var t = String(ja || ''); BA_SERIES_JA.forEach(function (p) { if (p[0].test(t)) out.push(p[1]); p[0].lastIndex = 0; }); return out.join(' '); }
+// その作品に合う「関連カタログ」＝シリーズ鍵の語が作品名（英名／日本語名の辞書訳）に全部含まれるもの。機種が書いてあれば一致するものだけ
+function baSeriesRowsFor_(p, rowsCc, hw) {
+  var text = ' ' + baTmKey_(String(p.en || '')) + ' ' + baTmKey_(baJaSeriesEn_(p.ja)) + ' ';
+  if (text.trim().length < 3) return [];
+  // 別名（英題と和題のローマ字が混ざるカタログ名に対応）
+  [['resident evil', 'biohazard'], ['biohazard', 'resident evil'], ['rockman', 'megaman'], ['megaman', 'rockman'], ['dragon warrior', 'dragon quest'], ['yu gi oh', 'yugioh'], ['smash bros', 'super smash bros']].forEach(function (a) { if (text.indexOf(' ' + a[0] + ' ') >= 0 && text.indexOf(' ' + a[1] + ' ') < 0) text += a[1] + ' '; });
+  var GEN = /^(main|rpg|nds|wi|color|type|language|battery|vintage|retro|digital|virtual|pet|original|sound|track|rare|christmas|tag|choose|playable|not|or|vs|i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|\d+)$/;
+  var hit = [];
+  (rowsCc || []).forEach(function (r) {
+    if (!r.skey || r.inFam) return;
+    if (r.hws && r.hws.length && r.hws.indexOf(hw) < 0) return;
+    var toks = r.skey.split(' ').filter(function (x) { return x.length >= 2 && !GEN.test(x); });
+    if (!toks.length) return;
+    // ★先頭の3語（作品名の核）で当てる。「Super Mario」だけだと Sunshine が Strikers のカタログに入る。4語目以降は説明語（機種・版・年）
+    var core = toks.slice(0, 3);
+    var has = core.filter(function (t) { return text.indexOf(' ' + t + ' ') >= 0; }).length;
+    if (has < core.length) return;
+    var extra = toks.slice(3).filter(function (t) { return text.indexOf(' ' + t + ' ') >= 0; }).length;
+    hit.push({ r: r, score: has * 10 + extra });
+  });
+  hit.sort(function (a, b) { return (b.score - a.score) || ((a.r.status === 1 ? 0 : 1) - (b.r.status === 1 ? 0 : 1)) || (baSeriesNo_(a.r.name) - baSeriesNo_(b.r.name)); });
+  return hit.map(function (h) { return h.r; });
+}
 function baTmKey_(v) {
   var t = String(v || '');
   try { t = t.normalize('NFKD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
@@ -4739,12 +4767,12 @@ function boshuAutoTick(manual) {
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
     var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [];
     var perTick = Math.max(1, Math.min(20, Number(cfg.perTick) || 8));
-    var ledger = null, listedByCc = null, fam = null, famRows = null;
+    var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null;
     while (tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
       fam = cfg.family[hw];
       // 出している（国別）＝listings の明細名とJAN
-      famRows = {}; listedByCc = {};
+      famRows = {}; listedByCc = {}; allRows = {};
       var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
       var itemCc = {};
       rows.forEach(function (r) {
@@ -4761,6 +4789,7 @@ function boshuAutoTick(manual) {
           var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) set[k1] = 1; if (k2) set[k2] = 1;
         });
         if (inFam) (famRows[r.cc] = famRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [] }));
+        if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
       });
       var janByCc = {};
       try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
@@ -4804,7 +4833,7 @@ function boshuAutoTick(manual) {
     var touchedShops = {};
     ccs.forEach(function (cc) {
       if (Date.now() - t0 > DEADLINE) return;
-      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st);
+      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st);
       out.ccs[cc] = r; out.added += r.added || 0;
       if (r.shop_id) touchedShops[r.shop_id] = 1;
     });
@@ -4865,7 +4894,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
   return out;
 }
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
-function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
+function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st) {
   var res = { added: 0, skipped: 0, note: '' };
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
@@ -4874,8 +4903,16 @@ function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
     return true;
   });
   if (!todo.length) { res.note = '対象なし'; return res; }
+  // ★関連するバリエカタログ（Final Fantasy Series 等）があればそちらへ、無ければ機種のカタログ群へ（本人 2026-09-13「関連するバリエーションのカタログに追加していって欲しい」）
+  var groups = {}, order = [];
+  todo.forEach(function (p) { var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+  order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
+  return res;
+}
+function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series) {
+  var res = { added: 0, skipped: 0, note: '' };
   rows = rows.slice().sort(function (a, b) { return ((a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1)) || (baSeriesNo_(a.name) - baSeriesNo_(b.name)) || (a.item_id - b.item_id); });
-  if (!rows.length) { res.note = '家族カタログなし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); }); return res; }
+  if (!rows.length) { res.note = 'カタログ群なし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); baSkipRec_(st, hw, cc, p, 'nofam'); }); return res; }
   var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
   var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
   var wG = Math.round((Number(rows[0].weight) || 0) * 1000) || Number(fam.weightG) || 150;
@@ -4943,7 +4980,7 @@ function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
       var mid = okNames[String(x.option).toLowerCase()];
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), series: series || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
