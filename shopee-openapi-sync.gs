@@ -328,13 +328,13 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup') {
+    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : boshuAutoTick(true);
+        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10)) : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1') : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -4771,30 +4771,8 @@ function boshuAutoTick(manual) {
     while (tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
       fam = cfg.family[hw];
-      // 出している（国別）＝listings の明細名とJAN
-      famRows = {}; listedByCc = {}; allRows = {};
-      var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
-      var itemCc = {};
-      rows.forEach(function (r) {
-        itemCc[String(r.item_id)] = r.cc;
-        var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
-        var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
-        // ★「出している」は【この機種のぶん】だけ数える。カタログ名/明細名に別の機種しか書いていないものは除く
-        //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
-        var inFam = String(r.parent_sku || '').trim() === fam.sku;
-        var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
-        (ms || []).forEach(function (m) {
-          if (!m || m.ghost || !m.n) return;
-          if (!inFam) { var mh = baHwsOf_(m.n); var hs = mh.length ? mh : catHws; if (hs.length && hs.indexOf(hw) < 0) return; }
-          var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) set[k1] = 1; if (k2) set[k2] = 1;
-        });
-        if (inFam) (famRows[r.cc] = famRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [] }));
-        if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
-      });
-      var janByCc = {};
-      try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
-      ledger = baKv_('boshu_auto_done_' + hw) || {};
-      cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows);
+      var ctx = baLoadCtx_(cfg, hw, ccs); famRows = ctx.famRows; listedByCc = ctx.listedByCc; allRows = ctx.allRows; ledger = ctx.ledger;
+      cand = ctx.cand;
       if (cand.length) break;
       baLog_(st, hw + '：空白の候補なし（全部出しているか、日本語名が無い）');
       hw = null;
@@ -4861,6 +4839,55 @@ function boshuAutoTick(manual) {
   }
 }
 function baSkipRec_(st, hw, cc, p, why, hits) { try { st.skipped.unshift({ at: new Date().toISOString(), hw: hw, cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
+// 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
+function baLoadCtx_(cfg, hw, ccs) {
+  // 出している（国別）＝listings の明細名とJAN
+  var fam = cfg.family[hw]; var famRows = {}, listedByCc = {}, allRows = {};
+  var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
+  var itemCc = {};
+  rows.forEach(function (r) {
+    itemCc[String(r.item_id)] = r.cc;
+    var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
+    var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
+    // ★「出している」は【この機種のぶん】だけ数える。カタログ名/明細名に別の機種しか書いていないものは除く
+    //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
+    var inFam = String(r.parent_sku || '').trim() === fam.sku;
+    var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
+    (ms || []).forEach(function (m) {
+      if (!m || m.ghost || !m.n) return;
+      if (!inFam) { var mh = baHwsOf_(m.n); var hs = mh.length ? mh : catHws; if (hs.length && hs.indexOf(hw) < 0) return; }
+      var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) set[k1] = 1; if (k2) set[k2] = 1;
+    });
+    if (inFam) (famRows[r.cc] = famRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [] }));
+    if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
+  });
+  var janByCc = {};
+  try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
+  var ledger = baKv_('boshu_auto_done_' + hw) || {};
+  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows);
+  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand };
+}
+// 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
+function boshuAutoPreview_(hw, limit) {
+  var cfg = baKv_(BA_CFG) || {}; var ccs = (cfg.ccs || []).slice();
+  if (!hw || !cfg.family || !cfg.family[hw] || !cfg.family[hw].sku) return { ok: false, error: 'その機種の足す先（親SKU）が設定されていません' };
+  if (!ccs.length) return { ok: false, error: '国が選ばれていません' };
+  var ctx = baLoadCtx_(cfg, hw, ccs);
+  var n = Math.max(1, Math.min(200, Number(limit) || 50));
+  var rows = ctx.cand.slice(0, n).map(function (c) { var sr = {}; ccs.forEach(function (cc) { var s2 = baSeriesRowsFor_(c, ctx.allRows[cc] || [], hw); if (s2.length) sr[cc] = String(s2[0].name || '').slice(0, 60); }); return { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: sr }; });
+  var st = baKv_(BA_ST) || {}; st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows }; try { baKvSet_(BA_ST, st); } catch (e) {}
+  ufPersist_();
+  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows };
+}
+// ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
+function boshuAutoExclude_(hw, key, undo) {
+  if (!hw || !key) return { ok: false, error: 'hw/key が必要です' };
+  var ledger = baKv_('boshu_auto_done_' + hw) || {}; var cfg = baKv_(BA_CFG) || {}; var ccs = (cfg.ccs || []);
+  if (undo) { if (ledger[key]) { Object.keys(ledger[key]).forEach(function (cc) { if (ledger[key][cc] === 'skip:manual') delete ledger[key][cc]; }); if (!Object.keys(ledger[key]).length) delete ledger[key]; } }
+  else { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = 'skip:manual'; }); }
+  baKvSet_('boshu_auto_done_' + hw, ledger); ufPersist_();
+  return { ok: true, key: key, undo: !!undo };
+}
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
 function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
@@ -4880,7 +4907,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
     var k1 = baTmKey_(r.ja), k2 = r.en ? baTmKey_(r.en) : '', k3 = r.key, k4 = r.en ? baKey_(r.en) : '';
     var need = ccs.filter(function (cc) {
       var d = (ledger[r.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;   // 済み
-      if (d && /^skip:(noimg|noname|dup|nofam)/.test(String(d))) return false;                           // 前に見送った理由が変わらないもの
+      if (d && /^skip:(noimg|noname|dup|nofam|manual)/.test(String(d))) return false;                           // 前に見送った理由が変わらないもの
       if (!(famRows[cc] || []).length) return false;                                                     // その国に家族カタログが無い
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
