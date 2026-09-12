@@ -4605,6 +4605,7 @@ function ensureAdjTrigger_() {
 //     ④ 価格＝ポータルが書いた価格表（仕入帯→現地価格）。無ければそのカタログの平均。5倍/4倍の価格差とVN上限は事前に守る
 //   守るもの：urlfetch 予約枠(bgAllowed_)／1日の上限(dailyMax)／ヤフオクに弾かれたら6時間止める／6分制限の前に必ず抜ける
 // =====================================================================================
+var BA_JAN_Q = [];   // この実行で入った明細のJAN（最後にまとめて product_ids へ）
 var BA_CFG = 'boshu_auto_cfg', BA_ST = 'boshu_auto_status', BA_LOG = 'boshu_auto_log', BA_IMGS = 'boshu_auto_imgs';
 var BA_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 var BA_HW_WORD = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };
@@ -4803,6 +4804,7 @@ function boshuAutoTick(manual) {
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
     st.lastAt = new Date().toISOString();
+    try { baSoldSync_(st); } catch (eS) { baLog_(st, '売れた作品の見直しに失敗: ' + String(eS).slice(0, 80)); }   // 在庫1で出した作品がどこかの国で売れたら、他の国の在庫を0に（一点物の二重販売を防ぐ）。OFFでも動く
     if (!cfg.on && manual !== true) { st.lastMsg = 'OFF'; return finish_('OFF'); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     if (st.blockedUntil && Date.now() < st.blockedUntil) { st.lastMsg = 'ヤフオクに弾かれたので ' + new Date(st.blockedUntil).toLocaleString('ja-JP') + ' まで休み'; return finish_(st.lastMsg); }
@@ -4865,6 +4867,8 @@ function boshuAutoTick(manual) {
       out.ccs[cc] = r; out.added += r.added || 0;
       if (r.shop_id) touchedShops[r.shop_id] = 1;
     });
+    // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
+    try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 80)); }
     // 済み台帳・使った写真・当日カウント
     baKvSet_('boshu_auto_done_' + hw, ledger);
     baKvSet_(BA_IMGS, used);
@@ -5057,7 +5061,8 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var mid = okNames[String(x.option).toLowerCase()];
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
@@ -5073,3 +5078,49 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   return res;
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
+var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
+// 入った明細のJANを product_ids（app_kv・{items:{'id:<item>#<model>': {...}}}）へ。既にJANが入っている鍵は触らない
+function baWriteJan_(q) {
+  if (!q || !q.length) return 0;
+  var pid = baKv_('product_ids') || {}; pid.items = pid.items || {}; var n = 0;
+  q.forEach(function (e) {
+    var k = 'id:' + e.item_id + '#' + e.model_id; var cur = pid.items[k];
+    if (cur && String(cur.jan || '').trim()) return;
+    pid.items[k] = Object.assign({}, cur || {}, { at: Date.now(), jp: e.ja || (cur && cur.jp) || '', jan: e.jan, mpn: (cur && cur.mpn) || '', own: (cur && cur.own) || '', src: '自動出品（母数の空白）', cond: (cur && cur.cond) || '', srcUrl: e.src || '', f: Object.assign({}, (cur && cur.f) || {}, { '機種': BA_HW_LABEL[e.hw] || String(e.hw || '').toUpperCase() }) });
+    n++;
+  });
+  if (n) baKvSet_('product_ids', pid);
+  q.length = 0;
+  return n;
+}
+// 🛒 在庫1で出した作品がどこかの国で売れたら、同じ作品の他の国の在庫を0にする（一点物＝二重販売を防ぐ）。
+//   注文（orders.items の カタログ名＋明細名）と記録（st.added の cat＋en）を突き合わせる。直近3日ぶん・1回1読み
+function baSoldSync_(st) {
+  var added = st.added || []; if (!added.length) return;
+  var live = added.filter(function (a) { return a && a.stock === 1 && a.model_id; }); if (!live.length) return;
+  var since = Math.floor(Date.now() / 1000) - 3 * 86400;
+  var ords = sbSelectAll_('orders', 'select=cc,sn,items,order_ts,status&order_ts=gte.' + since + '&status=not.in.(CANCELLED,Cancelled,UNPAID)');
+  var soldKeys = {};   // key(作品) → 売れた国
+  ords.forEach(function (o) {
+    var items = o.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (e) { items = []; } }
+    (items || []).forEach(function (it) {
+      var nm = String((it && it.name) || '').trim(), vr = String((it && it.variation) || '').trim().toLowerCase(); if (!nm || !vr) return;
+      added.forEach(function (a) {
+        if (!a || a.cc !== o.cc || !a.key) return;
+        if (String(a.en || '').trim().toLowerCase() !== vr) return;
+        if (nm.indexOf(String(a.cat || '').slice(0, 40)) !== 0 && String(a.cat || '').indexOf(nm.slice(0, 40)) !== 0) return;
+        soldKeys[a.key] = soldKeys[a.key] || o.cc; if (!a.sold) { a.sold = true; a.soldAt = new Date().toISOString(); }
+      });
+    });
+  });
+  var keys = Object.keys(soldKeys); if (!keys.length) return;
+  var zeroed = 0;
+  live.forEach(function (a) {
+    if (!soldKeys[a.key] || a.sold) return;   // 売れた国そのものは Shopee が在庫を減らしている
+    var sid = a.shop_id; if (!sid) { try { var r = sbSelect_('listings', 'select=shop_id&item_id=eq.' + a.item_id + '&limit=1'); sid = r && r[0] && r[0].shop_id; } catch (e) {} }
+    if (!sid) return;
+    try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); a.zeroedWhy = 'sold:' + soldKeys[a.key]; zeroed++; }
+    catch (e) { baLog_(st, '在庫0にできず（' + a.cc + ' ' + a.en + '）: ' + String(e).slice(0, 60)); }
+  });
+  if (zeroed) baLog_(st, '🛒 売れた作品の他国在庫を0に ' + zeroed + '件（' + keys.map(function (k) { return soldKeys[k]; }).join('・') + ' で売れた）');
+}
