@@ -4745,7 +4745,7 @@ function boshuAutoTick(manual) {
       fam = cfg.family[hw];
       // 出している（国別）＝listings の明細名とJAN
       famRows = {}; listedByCc = {};
-      var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.map(function (c) { return '"' + c + '"'; }).join(',') + ')');
+      var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
       var itemCc = {};
       rows.forEach(function (r) {
         itemCc[String(r.item_id)] = r.cc;
