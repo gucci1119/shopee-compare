@@ -4793,8 +4793,8 @@ function boshuAutoTick(manual) {
       var y = baYahoo_(q);
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
       var hits = baMatch_(y.items, c.ja);
-      var img = null;
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
+      var img = null, srcId = '';
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
       var cost = baMedian_(hits.map(function (h) { return h.price; }));
       if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + c.ja); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
@@ -4802,7 +4802,7 @@ function boshuAutoTick(manual) {
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
       if (!imageId) { out.skipped++; Utilities.sleep(1500); continue; }
       used[img] = c.key;
-      picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need });
+      picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : '', q: 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2' });
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
@@ -5007,7 +5007,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var mid = okNames[String(x.option).toLowerCase()];
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), series: series || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
