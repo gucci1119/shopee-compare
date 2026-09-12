@@ -4743,6 +4743,7 @@ function baPriceFromTbl_(cfg, cc, weightG, costJpy) {
   return Number(bands[String(c)]) || 0;
 }
 function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Math.round(v / unit) * unit; var d = Math.round(1 / unit); return Math.round(v * d) / d; }
+function baNameKey_(n) { return String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
 function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'; var m = String(name || '').match(/[①-⑳]/); return m ? (CIRC.indexOf(m[0]) + 1) : 1; }
 // 時間トリガーの登録（無ければ足す）。setupTriggers() からも呼ぶ＝全部消して作り直す時に落ちないように
 function setupBoshuAutoTrigger() {
@@ -4810,7 +4811,7 @@ function boshuAutoTick(manual) {
     if (st.blockedUntil && Date.now() < st.blockedUntil) { st.lastMsg = 'ヤフオクに弾かれたので ' + new Date(st.blockedUntil).toLocaleString('ja-JP') + ' まで休み'; return finish_(st.lastMsg); }
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
-    var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && cfg.family[h].sku; });
+    var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
     var ccs = (cfg.ccs || []).slice();
     if (!hws.length || !ccs.length) { st.lastMsg = '機種か国が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
@@ -4897,6 +4898,7 @@ function baSkipRec_(st, hw, cc, p, why, hits) { try { st.skipped.unshift({ at: n
 function baLoadCtx_(cfg, hw, ccs) {
   // 出している（国別）＝listings の明細名とJAN
   var fam = cfg.family[hw]; var famRows = {}, listedByCc = {}, allRows = {};
+  var famSku = String(fam.sku || '').trim(), famNk = String(fam.nameKey || '').trim();   // 親SKUが無い群はカタログ名（①②を除く）で束ねる（ポータル baNameKey と同じ）
   var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {};
   rows.forEach(function (r) {
@@ -4905,7 +4907,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
     // ★「出している」は【この機種のぶん】だけ数える。カタログ名/明細名に別の機種しか書いていないものは除く
     //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
-    var inFam = String(r.parent_sku || '').trim() === fam.sku;
+    var inFam = (famSku && String(r.parent_sku || '').trim() === famSku) || (!famSku && famNk && baNameKey_(r.name) === famNk);
     var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
     (ms || []).forEach(function (m) {
       if (!m || m.ghost || !m.n) return;
@@ -4924,14 +4926,64 @@ function baLoadCtx_(cfg, hw, ccs) {
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
 function boshuAutoPreview_(hw, limit) {
   var cfg = baKv_(BA_CFG) || {}; var ccs = (cfg.ccs || []).slice();
-  if (!hw || !cfg.family || !cfg.family[hw] || !cfg.family[hw].sku) return { ok: false, error: 'その機種の足す先（親SKU）が設定されていません' };
+  if (!hw || !cfg.family || !cfg.family[hw] || !(cfg.family[hw].sku || cfg.family[hw].nameKey)) return { ok: false, error: 'その機種の足す先（カタログ群）が設定されていません' };
   if (!ccs.length) return { ok: false, error: '国が選ばれていません' };
+  var t0 = Date.now();
   var ctx = baLoadCtx_(cfg, hw, ccs);
-  var n = Math.max(1, Math.min(200, Number(limit) || 50));
-  var rows = ctx.cand.slice(0, n).map(function (c) { var sr = {}; ccs.forEach(function (cc) { var s2 = baSeriesRowsFor_(c, ctx.allRows[cc] || [], hw); if (s2.length) sr[cc] = String(s2[0].name || '').slice(0, 60); }); return { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: sr }; });
-  var st = baKv_(BA_ST) || {}; st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows }; try { baKvSet_(BA_ST, st); } catch (e) {}
+  var n = Math.max(1, Math.min(20, Number(limit) || 20));
+  // ★写真・仕入れ目安・出品予定額まで出す（本人「画像や仕入れ額もいるだろ」「出品予定額はミスがないかチェックしたい」）＝実行時と同じ手順でヤフオクを引く（1件≈2秒）
+  var used = baKv_(BA_IMGS) || {}, hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
+  var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
+  var blocked = false, rows = [];
+  ctx.cand.slice(0, n).forEach(function (c) {
+    var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {} };
+    try { var en2 = baEnName_(c); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; } catch (e) {}
+    if (!blocked && Date.now() - t0 < 200000) {
+      var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || ''); var q = (qBase + ' ' + hwWord).trim();
+      var y = baYahoo_(q);
+      if (y.blocked) { blocked = true; row.note = 'ヤフオクに弾かれた'; }
+      else {
+        var hits = baMatch_(y.items, c.ja || c.en, hw);
+        var img = '', srcId = '';
+        for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }
+        row.hits = hits.length; row.cost = baCostEst_(hits.map(function (h) { return h.price; })); row.img = img; row.src = srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''; row.q = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3';
+        row.stock = (hits.length >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
+        if (!img) row.note = '中古の写真が見つからない（このままだと飛ばされる）';
+      }
+      Utilities.sleep(900 + Math.floor(Math.random() * 900));
+    }
+    // 国ごとの入る先と出品予定額（実行時と同じ規則：価格表→無ければカタログ平均、価格差5倍/BR4倍、VN上限）
+    (c.need || []).forEach(function (cc) {
+      var sr = baSeriesRowsFor_(c, ctx.allRows[cc] || [], hw);
+      var trs = (sr.length ? sr : (ctx.famRows[cc] || [])).slice().sort(function (x1, x2) { return ((x1.status === 1 ? 0 : 1) - (x2.status === 1 ? 0 : 1)) || (baSeriesNo_(x1.name) - baSeriesNo_(x2.name)); });
+      if (sr.length) row.series[cc] = String(sr[0].name || '').slice(0, 60);
+      var tgt = null; for (var r = 0; r < trs.length; r++) { if (100 - (trs[r].models || []).length > 0) { tgt = trs[r]; break; } }
+      var full = !tgt; if (!tgt) tgt = trs[0];
+      if (!tgt) { row.plan[cc] = { note: 'カタログ群なし' }; return; }
+      var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
+      var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
+      var wG = Math.round((Number(tgt.weight) || 0) * 1000) || Number(cfg.family[hw].weightG) || 150;
+      var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
+      var avg = ps.length ? ps.reduce(function (p1, p2) { return p1 + p2; }, 0) / ps.length : 0;
+      var lo = ps.length ? Math.min.apply(null, ps) : 0, hi = ps.length ? Math.max.apply(null, ps) : 0;
+      var ceilA = ceil ? Math.floor(ceil / unit) * unit : 0;
+      var price = (row.cost > 0) ? baPriceFromTbl_(cfg, cc, wG, row.cost) : 0, how = price > 0 ? '相場→価格表' : '';
+      if (!(price > 0)) { price = avg; how = 'カタログ平均'; }
+      var note = full ? '満杯→複製して入れる' : '';
+      if (!(price > 0)) { row.plan[cc] = { cat: String(tgt.name || '').slice(0, 50), note: '価格が決められない' }; return; }
+      var minP = hi ? hi / ratio : 0, maxP = lo ? lo * ratio : Infinity; if (ceilA) maxP = Math.min(maxP, ceilA);
+      if (price < minP || price > maxP) {
+        if (row.stock) note = (note ? note + '・' : '') + '価格差の枠（' + baRound_(minP, unit) + '〜' + (maxP === Infinity ? '' : baRound_(maxP, unit)) + '）に入らない→見送り';
+        else { price = Math.min(Math.max(price, minP), maxP === Infinity ? price : maxP); note = (note ? note + '・' : '') + '在庫0なので枠内に寄せた'; }
+      }
+      price = baRound_(price, unit); if (ceilA && price > ceilA) price = ceilA;
+      row.plan[cc] = { price: price, how: how, cat: String(tgt.name || '').slice(0, 50), wG: wG, note: note, range: (lo && hi) ? (baRound_(lo, unit) + '〜' + baRound_(hi, unit)) : '' };
+    });
+    rows.push(row);
+  });
+  var st = baKv_(BA_ST) || {}; st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, blocked: blocked }; try { baKvSet_(BA_ST, st); } catch (e) {}
   ufPersist_();
-  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows };
+  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, blocked: blocked };
 }
 // ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
 function boshuAutoExclude_(hw, key, undo) {
