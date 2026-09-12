@@ -1193,7 +1193,7 @@
     <div id="manual-body" style="padding:12px 20px"></div>
     <div id="rules-body" style="padding:12px 20px;display:none"></div>
     <div id="pack-body" style="padding:12px 20px;display:none"></div>
-    <div id="msg-body" style="padding:12px 20px;display:none"></div>
+    <div id="man-msg-body" style="padding:12px 20px;display:none"></div>
   </div>
   <!-- 業界ニュース -->
   <div id="page-news" style="display:none">
@@ -6304,7 +6304,9 @@
   });
   const I18N_PAT = [
     // 🗂 母数「出している」の実体（2026-09-11）
-    [/^🗂 「(.+)」を出しているカタログ（(\d+)件(.*)）$/, '🗂 Catalogs listing "$1" ($2$3)'],
+    [/^出している (\d+) ▸$/, 'Listed $1 ▸'],
+    [/^↔ 出しているカタログ (\d+)件$/, '↔ Listed catalogs: $1'],
+    [/^・([A-Z]{2})だけ$/, '· $1 only'],
     [/^🗂 出しているカタログ一覧（(\d+)件のカタログ・作品 (\d+)件(.*)）$/, '🗂 Listed catalogs ($1 catalogs, $2 titles$3)'],
     [/^・([A-Z]{2})だけ$/, ', $1 only'],
     [/^作品：(.*)$/, 'Titles: $1'],
@@ -17249,6 +17251,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-12', items: [
+      '\u{1F4AC} <b>💬メッセージ画面が空のままだったのを直しました</b>（ポータル全体レビューで発見）。マニュアルの「お客様メッセージ」欄と同じ <code>id</code>（msg-body）を持っていたため、受信箱が<b>隠れたマニュアル側に描かれて</b>本体は空でした。マニュアル側の id を変えました。',
+      '\u{1F501} <b>転記の自動実行が、同じPCで2タブ開いていても1回だけ走るようにしました</b>。両方のタブが同じ予約時刻を持つと二重に転記していました。先に取り札（localStorage）を取った方だけ走ります。',
+      '\u{1F522} <b>母数のJAN台帳を読み込んでいる最中に2回目の描画が来ると「JAN 0件」で描かれていたのを直しました</b>（Codexレビュー指摘・裏取り済）。読み込み中は同じ約束を待ちます。',
+      '\u{1F5C2} <b>母数のマスタ行キャッシュに、クリア前に出した古い応答が控えられ10分残る穴を塞ぎました</b>。一覧の遅延描画も、描き直し後の古い処理が新しい欄へ書かないようにしました。',
+      '\u{1F310} <b>英語版：母数の「出している N ▸」「↔ 出しているカタログ N件」「・PHだけ」が英語になっていなかったのを直しました</b>（辞書のキーが表示形と合っていなかった）。',
+    ]},
     { date: '2026-09-11', items: [
       '\u{1F30F} <b>母数「出している N」に国ごとの内訳を添えました</b>（本人「国ごとで良い」）。カードには「PH 1・BR 2…」、ポップアップは国順に並び、見出しにも内訳。国のチップで絞っている時はその国だけ。',
       '\u{1F4CF} <b>母数のカードの下段を左寄せの3行にしました</b>（本人「JAN・型番が見にくい」）。1行目＝出している数とJAN、2行目＝型番と発売年と仕入値、3行目＝駿河屋・メルカリのリンク。',
@@ -20001,7 +20010,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderRules() { await rulesLoad(false); drawRules(); }
   function manualTabs() {
-    const panes = { use: 'manual-body', rules: 'rules-body', pack: 'pack-body', msg: 'msg-body' };
+    const panes = { use: 'manual-body', rules: 'rules-body', pack: 'pack-body', msg: 'man-msg-body' };   // ★id重複の修正：メッセージ画面の #msg-body と同名で、受信箱が隠れたマニュアル側に描かれていた（2026-09-12）
     document.querySelectorAll('.man-tab').forEach(b => b.addEventListener('click', async () => {
       document.querySelectorAll('.man-tab').forEach(x => x.classList.toggle('on', x === b));
       const m = b.dataset.m || 'use';
@@ -20293,7 +20302,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ===== 💬 お客様メッセージのしかた（スタッフ・外注むけ。施設むけではない） =====
   function renderMsgManual() {
-    const host = document.getElementById('msg-body'); if (!host || host.dataset.done) return;
+    const host = document.getElementById('man-msg-body'); if (!host || host.dataset.done) return;
     host.dataset.done = '1';
     const B = PM.box, S = PM.step, W = PM.warn, T = PM.tip, A = PM.ask;
 
@@ -25667,23 +25676,31 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   const TM_ROWS_TTL = 10 * 60 * 1000;
   // ★JAN台帳(product_ids)は他のページを開いた時にしか読まれず、読み直し直後の母数では「JANが一致 0件」になっていた
   //   （2026-09-11 本人「JANで紐づけているのに出てこない」。画面の見出しも 204件→0件に化けていた）。母数を描く前に必ず読む。
+  let _pidsLoading = null;
   async function ensureProductIds() {
     if (productIds !== null && productIds !== undefined) return productIds;
-    productIds = {};
-    try {
-      const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : [];
-      productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
-    } catch (_) { productIds = null; }   // 読めなかった＝空を焼き付けない（次で取り直す）
-    return productIds || {};
+    // ★読み込み中に2回目が来たら同じ約束を待つ（先に {} を返すと「JAN 0件」で描かれる・2026-09-12 レビュー）
+    if (_pidsLoading) return _pidsLoading;
+    _pidsLoading = (async () => {
+      try {
+        const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v&k=eq.product_ids') : [];
+        productIds = (pr && pr[0] && pr[0].v && pr[0].v.items) || {};
+      } catch (_) { productIds = null; }   // 読めなかった＝空を焼き付けない（次で取り直す）
+      finally { _pidsLoading = null; }
+      return productIds || {};
+    })();
+    return _pidsLoading;
   }
-  function tmRowsCacheClear() { Object.keys(_tmRowsCache).forEach(k => delete _tmRowsCache[k]); }
+  let _tmRowsGen = 0;   // ★クリアの世代。クリア前に出した取得の応答は控えない（古い行が10分残る・2026-09-12 レビュー）
+  function tmRowsCacheClear() { _tmRowsGen++; Object.keys(_tmRowsCache).forEach(k => delete _tmRowsCache[k]); }
   async function loadTitleRows(hw) {
     const c = _tmRowsCache[hw];
     if (c && Date.now() - c.at < TM_ROWS_TTL) return c.rows;
+    const gen = _tmRowsGen;
     try {
       const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw));
       const rows = ((r && r[0] && r[0].v) || {}).rows || [];
-      _tmRowsCache[hw] = { at: Date.now(), rows };
+      if (gen === _tmRowsGen) _tmRowsCache[hw] = { at: Date.now(), rows };
       return rows;
     }
     catch (_) { return null; }   // 読めなかった＝控えない（次で取り直す）
@@ -27865,7 +27882,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (host) host.innerHTML = `<div style="font-size:12px;font-weight:700;margin:0 0 6px">🗂 出しているカタログ一覧（${arr.length}件のカタログ・作品 ${shown.filter(x => x.has).length}件${lst.tmCc ? '・' + esc(String(lst.tmCc).toUpperCase()) + 'だけ' : ''}）<span class="smd-dim" style="font-weight:400">　各カタログの✔＝その作品の明細。作品名は上に</span></div><div style="display:grid;gap:8px">${inner || '<span class="smd-dim" style="font-size:12px">紐づく出品が見つかりませんでした</span>'}</div>`;
       };
       // ★一覧は「カード／🗂 カタログ一覧」の切り替えで、その場に出す（本人 2026-09-11「一覧は一覧であっていい。切り替えられるように」）
-      if (lst.tmFil === 'yes' && lst.tmView === 'catalogs') { setTimeout(() => { try { openAll(); } catch (e) { const h = document.getElementById('tm-listed-inline'); if (h) h.textContent = '❌ ' + ((e && e.message) || e); } }, 30); }
+      const _tdGen = (renderTitleDetailInner._gen = (renderTitleDetailInner._gen || 0) + 1);   // ★描画の世代（古い遅延処理が新しい欄へ書かない）
+      if (lst.tmFil === 'yes' && lst.tmView === 'catalogs') { setTimeout(() => { if (_tdGen !== renderTitleDetailInner._gen) return; try { openAll(); } catch (e) { const h = document.getElementById('tm-listed-inline'); if (h) h.textContent = '❌ ' + ((e && e.message) || e); } }, 30); }
       { const tv = document.getElementById('tm-view'); if (tv) tv.addEventListener('click', e => { const b4 = e.target.closest('button'); if (!b4) return; lst.tmView = b4.dataset.v; renderTitleDetail(hw, own); }); }
     }
     { const ss = document.getElementById('tm-sort'); if (ss) ss.addEventListener('change', () => { lst.tmSort = ss.value; renderTitleDetail(hw, own); }); }
@@ -39460,9 +39478,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try { localStorage.setItem('smdDepAutoNext', String(depAutoNextAt)); } catch (_) {}
     depAutoT = setInterval(depAutoCheck, 30 * 1000);
   }
+  // ★同じPCでポータルを2タブ開いていると両方が同時刻に走る（レビュー 2026-09-12 で発覚）。localStorage の取り札で先に取った方だけ走る
+  function depAutoClaim_() {
+    try {
+      const now = Date.now(), c = parseInt(localStorage.getItem('smdDepAutoClaim') || '0', 10);
+      if (c && now - c < 20 * 60 * 1000) return false;
+      localStorage.setItem('smdDepAutoClaim', String(now)); return true;
+    } catch (_) { return true; }
+  }
   function depAutoCheck() {
     if (!depAutoOn() || depAutoRunning || !depAutoNextAt) return;
     if (Date.now() < depAutoNextAt) return;
+    if (!depAutoClaim_()) { depAutoArm(DEP_AUTO_MS); return; }   // 別タブが直前に走らせた＝こちらは次回へ
     depAutoRunning = true;
     if (depAutoT) { clearInterval(depAutoT); depAutoT = null; }
     Promise.resolve().then(depAutoRun).catch(e => { try { depRunsSave(depRecordRow('自動', null, '失敗: ' + ((e && e.message) || e))); } catch (_) {} })
