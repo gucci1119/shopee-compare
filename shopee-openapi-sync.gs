@@ -4721,7 +4721,7 @@ function boshuAutoTick(manual) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 270000;   // 4.5分で必ず抜ける（6分制限）
-  var st = baKv_(BA_ST) || {}; st.log = st.log || [];
+  var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
     var cfg = baKv_(BA_CFG) || {};
@@ -4781,7 +4781,7 @@ function boshuAutoTick(manual) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
-      var en = baEnName_(c); if (!en) { baMark_(ledger, c.key, ccs, 'skip:noname'); out.skipped++; continue; }
+      var en = baEnName_(c); if (!en) { baMark_(ledger, c.key, ccs, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       var q = (baCleanJa_(c.ja) + ' ' + hwWord).trim();
       var y = baYahoo_(q);
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
@@ -4789,7 +4789,7 @@ function boshuAutoTick(manual) {
       var img = null;
       for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
       var cost = baMedian_(hits.map(function (h) { return h.price; }));
-      if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baLog_(st, '写真なし: ' + c.ja); Utilities.sleep(1500); continue; }
+      if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + c.ja); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -4823,6 +4823,7 @@ function boshuAutoTick(manual) {
     return finish_(st.lastMsg);
   }
   function finish_(msg) {
+    try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
     try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
     try { ufPersist_(); } catch (e3) {}
     try { lock.releaseLock(); } catch (e4) {}
@@ -4830,6 +4831,7 @@ function boshuAutoTick(manual) {
     return out;
   }
 }
+function baSkipRec_(st, hw, cc, p, why, hits) { try { st.skipped.unshift({ at: new Date().toISOString(), hw: hw, cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
 function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
@@ -4868,7 +4870,7 @@ function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
     var d = (ledger[p.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;
-    var k = baTmKey_(p.en); if (listedSet[k] || listedSet[baKey_(p.en)] || listedSet[baTmKey_(p.ja)] || listedSet[p.key]) { baSet_(ledger, p.key, cc, 'skip:dup'); return false; }
+    var k = baTmKey_(p.en); if (listedSet[k] || listedSet[baKey_(p.en)] || listedSet[baTmKey_(p.ja)] || listedSet[p.key]) { baSet_(ledger, p.key, cc, 'skip:dup'); baSkipRec_(st, hw, cc, p, 'dup'); return false; }
     return true;
   });
   if (!todo.length) { res.note = '対象なし'; return res; }
@@ -4910,17 +4912,17 @@ function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
     batch.forEach(function (p) {
       var price = p.cost > 0 ? baPriceFromTbl_(cfg, cc, wG, p.cost) : 0;
       if (!(price > 0)) price = avg;
-      if (!(price > 0)) { baSet_(ledger, p.key, cc, 'skip:noprice'); res.skipped++; return; }
+      if (!(price > 0)) { baSet_(ledger, p.key, cc, 'skip:noprice'); res.skipped++; baSkipRec_(st, hw, cc, p, 'noprice'); return; }
       // ★価格差の枠は【既存＋今回入れる分】の最高/最安で見る（20と500を別々に通すと25倍になって丸ごと弾かれる）
       var minP = hi ? hi / ratio : 0, maxP = lo ? lo * ratio : Infinity;
       if (ceilA) maxP = Math.min(maxP, ceilA);
       if (price < minP || price > maxP) {
-        if (p.stock) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; return; }   // 売れる明細は値付けを崩さない＝見送り
+        if (p.stock) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; baSkipRec_(st, hw, cc, p, 'ratio'); return; }   // 売れる明細は値付けを崩さない＝見送り
         price = Math.min(Math.max(price, minP), maxP === Infinity ? price : maxP);           // 在庫0は枠内に寄せて置くだけ
       }
       price = baRound_(price, unit); if (!(price > 0)) { res.skipped++; return; }
       if (ceilA && price > ceilA) price = ceilA;
-      if ((hi && price < hi / ratio) || (lo && price > lo * ratio)) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; return; }   // 丸めで枠から出たら見送り
+      if ((hi && price < hi / ratio) || (lo && price > lo * ratio)) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; baSkipRec_(st, hw, cc, p, 'ratio'); return; }   // 丸めで枠から出たら見送り
       lo = lo ? Math.min(lo, price) : price; hi = hi ? Math.max(hi, price) : price;
       items.push({ option: p.en, price: price, stock: p.stock, sku: '', image_id: p.imageId, _p: p });
     });
@@ -4932,15 +4934,18 @@ function baAddToCc_(cfg, cc, hw, fam, rows, picks, listedSet, ledger, st) {
       baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：追加失敗 ' + em);
       // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
       if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
-      items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); });
+      items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); baSkipRec_(st, hw, cc, x._p, 'err:' + em.slice(0, 60)); });
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
       i += batch.length; continue;
     }
     var okNames = {}; (r2.models || []).forEach(function (m) { okNames[String(m.option).toLowerCase()] = m.model_id; });
     items.forEach(function (x) {
       var mid = okNames[String(x.option).toLowerCase()];
-      if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) { baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price }); }
-      else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; }
+      if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
+        baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, cat: String(tgt.name || '').slice(0, 70), en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+      }
+      else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
     res.shop_id = tgt.shop_id;
     // 複製したカタログ：test を消し、設定に応じて公開
