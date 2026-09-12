@@ -4614,7 +4614,7 @@ var BA_MACHINE = /\b(ps[1-5]|psp|ps\s*vita|vita|switch\s*2|switch|nintendo\s*ds|
 // 機種の判定（ポータル HW_PAT と同じ）。カタログ名・明細名に出てくる機種を【全部】拾う
 var BA_HW_PAT = [['switch', /switch\s*2|nintendo\s*switch|スイッチ/i], ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i], ['ps3', /\bps3\b|playstation\s*3/i], ['ps2', /\bps2\b|playstation\s*2/i], ['psp', /\bpsp\b|playstation\s*portable/i], ['vita', /\bvita\b/i], ['3ds', /\b3ds\b/i], ['ds', /\bds\b|nintendo\s*ds/i], ['wiiu', /wii\s*u/i], ['wii', /\bwii\b/i], ['gc', /gamecube|ゲームキューブ|\bgc\b/i], ['n64', /nintendo\s*64|\bn64\b/i], ['sfc', /super\s*(famicom|nintendo)|\bsfc\b|\bsnes\b/i], ['fc', /famicom|\bfc\b|\bnes\b/i], ['gba', /game\s*boy\s*advance|\bgba\b/i], ['gb', /game\s*boy|\bgbc?\b/i], ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['xbsx', /xbox\s*series/i], ['xboxone', /xbox\s*one/i], ['xbox360', /xbox\s*360/i], ['xbox', /\bxbox\b/i], ['pce', /pc\s*engine|turbografx|pcエンジン/i], ['ws', /wonder\s*swan|ワンダースワン/i], ['gg', /game\s*gear|ゲームギア/i], ['ngcd', /neo\s*geo\s*cd/i], ['3do', /\b3do\b/i], ['pcfx', /pc-?fx/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]];
 function baHwsOf_(txt) { var t = String(txt || ''), out = []; BA_HW_PAT.forEach(function (p) { if (p[1].test(t)) out.push(p[0]); }); return out; }
-var BA_NG = /amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ|memory card|memorycard|controller|cable|adapter|adaptor|charger|charging|stand|carrying|cover|film|protector|joy-?con|headset|earphone|battery|converter|vga box|component|s-video|link cable|wavebird|box only|manual only|console|dock|skin|sticker|strap|pouch/i;
+var BA_NG = /amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ|memory ?card|\bcontroller\b|\bcable\b|\badapt[eo]r\b|\bcharger\b|charging stand|carrying case|screen protector|protective film|silicone cover|joy-?con|\bheadset\b|\bearphones?\b|battery pack|\bconverter\b|vga box|component cable|s-video|link cable|wavebird|box only|manual only|console only|console set|skin sticker|wrist strap|\bpouch\b/i;
 // ヤフオクの検索結果で「ソフト本体の写真ではない」出品を落とす（攻略本・箱のみ・まとめ売り・周辺機器）
 var BA_YNG = /攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール/;
 var BA_SERIES_JA = [[/ポケットモンスター|ポケモン/g, 'Pokemon'], [/星のカービィ|カービィ/g, 'Kirby'], [/マリオカート/g, 'Mario Kart'], [/マリオパーティ/g, 'Mario Party'], [/スーパーマリオ|マリオ/g, 'Mario'], [/ヨッシー/g, 'Yoshi'], [/ルイージ/g, 'Luigi'], [/ワリオ/g, 'Wario'], [/ドンキーコング/g, 'Donkey Kong'], [/ピクミン/g, 'Pikmin'], [/ゼルダの伝説|ゼルダ/g, 'Zelda'], [/スプラトゥーン/g, 'Splatoon'], [/どうぶつの森/g, 'Animal Crossing'], [/大乱闘スマッシュブラザーズ|スマッシュブラザーズ|スマブラ/g, 'Smash Bros'], [/メトロイド/g, 'Metroid'], [/ファイアーエムブレム/g, 'Fire Emblem'], [/ゼノブレイド/g, 'Xenoblade'], [/スターフォックス/g, 'Star Fox'], [/エフゼロ|F-?ZERO/gi, 'F-Zero'], [/ドラゴンクエスト|ドラクエ/g, 'Dragon Quest'], [/ファイナルファンタジー/g, 'Final Fantasy'], [/キングダムハーツ/g, 'Kingdom Hearts'], [/モンスターハンター|モンハン/g, 'Monster Hunter'], [/クロノトリガー/g, 'Chrono Trigger'], [/ロマンシングサガ|サガ/g, 'SaGa'], [/テイルズ/g, 'Tales of'], [/ペルソナ/g, 'Persona'], [/女神転生/g, 'Megami Tensei'], [/逆転裁判/g, 'Ace Attorney'], [/レイトン教授/g, 'Layton'], [/リズム天国/g, 'Rhythm Heaven'], [/マザー|MOTHER/g, 'Mother'], [/ロックマン/g, 'Mega Man'], [/悪魔城/g, 'Castlevania'], [/バイオハザード/g, 'Resident Evil'], [/ストリートファイター|スト2|スト。?II/g, 'Street Fighter'], [/鉄拳/g, 'Tekken'], [/ソニック/g, 'Sonic'], [/たまごっち/g, 'Tamagotchi'], [/妖怪ウォッチ/g, 'Yokai Watch'], [/デジモン/g, 'Digimon'], [/遊戯王/g, 'Yu-Gi-Oh'], [/ベイブレード/g, 'Beyblade'], [/ドラゴンボール/g, 'Dragon Ball'], [/ワンピース|ONE PIECE/gi, 'One Piece'], [/ナルト|NARUTO/gi, 'Naruto'], [/ブリーチ|BLEACH/g, 'Bleach'], [/ハンターハンター|HUNTER×HUNTER/gi, 'Hunter x Hunter'], [/鬼滅の刃/g, 'Demon Slayer'], [/呪術廻戦/g, 'Jujutsu Kaisen'], [/進撃の巨人/g, 'Attack on Titan'], [/僕のヒーローアカデミア|ヒロアカ/g, 'My Hero Academia'], [/チェンソーマン/g, 'Chainsaw Man'], [/スパイファミリー|SPY×FAMILY/gi, 'Spy x Family'], [/ハイキュー/g, 'Haikyu'], [/スラムダンク/g, 'Slam Dunk'], [/名探偵コナン/g, 'Detective Conan'], [/犬夜叉/g, 'Inuyasha'], [/ジョジョの奇妙な冒険|ジョジョ/g, 'JoJo'], [/ガンダム/g, 'Gundam'], [/エヴァンゲリオン|エヴァ/g, 'Evangelion'], [/セーラームーン/g, 'Sailor Moon'], [/プリキュア/g, 'Precure'], [/仮面ライダー/g, 'Kamen Rider'], [/ウルトラマン/g, 'Ultraman'], [/戦隊/g, 'Sentai'], [/アンパンマン/g, 'Anpanman'], [/ドラえもん/g, 'Doraemon'], [/クレヨンしんちゃん/g, 'Crayon Shin-chan'], [/となりのトトロ|トトロ/g, 'Totoro'], [/ジブリ/g, 'Ghibli'], [/初音ミク|ボーカロイド|ボカロ/g, 'Hatsune Miku'], [/ラブライブ/g, 'Love Live'], [/アイドルマスター|アイマス/g, 'Idolmaster'], [/東方project|東方/g, 'Touhou'], [/ダンガンロンパ/g, 'Danganronpa'], [/シュタインズゲート|シュタゲ/g, 'Steins Gate'], [/フェイト|Fate/g, 'Fate'], [/ハローキティ|キティ/g, 'Hello Kitty'], [/サンリオ/g, 'Sanrio'], [/シナモロール/g, 'Cinnamoroll'], [/マイメロディ|マイメロ/g, 'My Melody'], [/クロミ/g, 'Kuromi'], [/ポムポムプリン/g, 'Pompompurin'], [/ぐでたま/g, 'Gudetama'], [/リラックマ/g, 'Rilakkuma'], [/すみっコぐらし|すみっこぐらし/g, 'Sumikko Gurashi'], [/ちいかわ/g, 'Chiikawa'], [/スヌーピー/g, 'Snoopy'], [/ディズニー/g, 'Disney'], [/ミッキー/g, 'Mickey'], [/ダッフィー/g, 'Duffy'], [/くまのプーさん|プーさん/g, 'Winnie the Pooh'], [/トイストーリー/g, 'Toy Story'], [/ユニバーサルスタジオジャパン|ユニバ|USJ/g, 'USJ']];
@@ -4690,7 +4690,8 @@ function baCleanJa_(t) {
 }
 // ヤフオク検索（中古だけ）。返す {items:[{id,t,img,price}], blocked}
 function baYahoo_(q) {
-  var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&n=50';
+  // ★fixed=3＝定額（即決）だけ。入札中の現在価格を相場に混ぜると仕入れを安く見積もって赤字になる（ポータルの仕入れ検索と同じ判断）
+  var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3&n=50';
   ufBump_(1, 'boshu_auto(ヤフオク検索)');
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': BA_UA } });
   var code = res.getResponseCode(), html = res.getContentText() || '';
@@ -4712,7 +4713,7 @@ function baYahoo_(q) {
 }
 // 検索結果から「その作品のソフト本体」らしい出品だけを残す。
 //   ★作品名の主要な語（3文字以上の塊）がタイトルに含まれていること。含まれないと別作品（続編・関連本）を掴む
-function baMatch_(items, ja) {
+function baMatch_(items, ja, hw) {
   var base = String(ja || '').normalize('NFKC').toLowerCase().replace(/[【】\[\]（）()「」『』]/g, ' ');
   var toks = base.split(/[\s\/／・:：\-–—~〜!！?？,、。]+/).map(function (s) { return s.trim(); }).filter(function (s) { return s.length >= 2; });
   toks.sort(function (a, b) { return b.length - a.length; });
@@ -4722,10 +4723,14 @@ function baMatch_(items, ja) {
   return items.filter(function (it) {
     var t = String(it.t || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '');
     if (BA_YNG.test(it.t)) return false;
+    // ★別の機種の出品（例：PS2版）の写真・価格を掴まない。機種が書いてあって、その中に狙いの機種が無ければ落とす
+    if (hw) { var hs = baHwsOf_(it.t); if (hs.length && hs.indexOf(hw) < 0 && !(hw === 'ps1' && hs.indexOf('ps1') >= 0)) return false; }
     return core.every(function (c) { return t.indexOf(c) >= 0; });
   });
 }
 function baMedian_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; return a[Math.floor(a.length / 2)]; }
+// 仕入れ目安＝相場の上側（75パーセンタイル）。中央値だと実際に買える玉が無いことがある（安い順に売れていく）
+function baCostEst_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; return a[Math.min(a.length - 1, Math.floor(a.length * 0.75))]; }
 // 価格表（ポータルが書いたもの）から現地価格。無ければ 0
 function baPriceFromTbl_(cfg, cc, weightG, costJpy) {
   var tb = (((cfg.priceTbl || {}).byCc || {})[cc]) || null; if (!tb || !tb.w) return 0;
@@ -4742,7 +4747,49 @@ function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬
 function setupBoshuAutoTrigger() {
   var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
   if (!has) ScriptApp.newTrigger('boshuAutoTick').timeBased().everyMinutes(30).create();
-  return { ok: true, had: has };
+  var has2 = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuAutoRecheck'; });
+  if (!has2) ScriptApp.newTrigger('boshuAutoRecheck').timeBased().everyDays(1).atHour(4).create();
+  return { ok: true, had: has, had2: has2 };
+}
+// 🔁 在庫1で出した明細は【無在庫】＝仕入れ元（ヤフオクの定額出品）が無くなったら売れても買えない。
+//   毎日、古い順に最大40件を見直し、定額の出品が minHits 未満になっていたら在庫0にする（戻す時は人が見て入れる）。1件＝ヤフオク1回＋在庫更新1回
+function boshuAutoRecheck() {
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, error: 'busy' };
+  var st = baKv_(BA_ST) || {}; st.log = st.log || []; var cfg = baKv_(BA_CFG) || {};
+  var out = { ok: true, checked: 0, zeroed: 0 };
+  try {
+    if (!bgAllowed_()) return out;
+    if (st.blockedUntil && Date.now() < st.blockedUntil) return out;
+    var minHits = Math.max(1, Number(cfg.minHits) || 3), t0 = Date.now();
+    var list = (st.added || []).filter(function (a) { return a && a.stock === 1 && a.model_id && a.item_id; });
+    list.sort(function (a, b) { return (a.lastChk || 0) - (b.lastChk || 0); });
+    var shopByItem = {};
+    try { var ids = list.slice(0, 40).map(function (a) { return a.item_id; }); if (ids.length) sbSelect_('listings', 'select=item_id,shop_id&item_id=in.(' + ids.join(',') + ')').forEach(function (r) { shopByItem[String(r.item_id)] = r.shop_id; }); } catch (e) {}
+    var byTitle = {};
+    for (var i = 0; i < list.length && out.checked < 40; i++) {
+      if (Date.now() - t0 > 240000) break;
+      var a = list[i]; if (a.lastChk && Date.now() - a.lastChk < 6 * 86400000) continue;   // 週1回でよい
+      var tk = (a.ja || a.en) + '|' + a.hw; var hits;
+      if (byTitle[tk] != null) hits = byTitle[tk];
+      else {
+        var y = baYahoo_(((a.ja ? baCleanJa_(a.ja) : a.en) + ' ' + (BA_HW_WORD[a.hw] || '')).trim());
+        if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 見直し中にヤフオクに弾かれた→6時間休む'); break; }
+        hits = baMatch_(y.items, a.ja || a.en, a.hw).length; byTitle[tk] = hits; Utilities.sleep(1200 + Math.floor(Math.random() * 1200));
+      }
+      a.lastChk = Date.now(); a.lastHits = hits; out.checked++;
+      if (hits < minHits) {
+        var sid = shopByItem[String(a.item_id)]; if (!sid) continue;
+        try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); out.zeroed++; baLog_(st, '在庫0に: ' + a.cc + ' ' + a.en + '（ヤフオクの定額出品が ' + hits + '件に減った）'); }
+        catch (e) { baLog_(st, '在庫0にできず: ' + a.cc + ' ' + a.en + ' ' + String(e).slice(0, 80)); }
+      }
+    }
+    st.lastRecheck = { at: new Date().toISOString(), checked: out.checked, zeroed: out.zeroed };
+    if (out.checked) baLog_(st, '🔁 在庫1の見直し ' + out.checked + '件（在庫0にしたもの ' + out.zeroed + '件）');
+  } catch (e) { baLog_(st, '❌ 見直し失敗: ' + String((e && e.message) || e).slice(0, 120)); out.ok = false; }
+  try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
+  try { ufPersist_(); } catch (e3) {}
+  try { lock.releaseLock(); } catch (e4) {}
+  return out;
 }
 // ★本体。manual=true はポータルの「▶ 今すぐ1回まわす」から（結果を返す）
 function boshuAutoTick(manual) {
@@ -4788,15 +4835,18 @@ function boshuAutoTick(manual) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
-      var en = baEnName_(c); if (!en) { baMark_(ledger, c.key, ccs, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
-      var q = (baCleanJa_(c.ja) + ' ' + hwWord).trim();
+      var en = baEnName_(c); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
+      if (!en) { baMark_(ledger, c.key, ccs, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
+      // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
+      var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
+      var q = (qBase + ' ' + hwWord).trim();
       var y = baYahoo_(q);
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
-      var hits = baMatch_(y.items, c.ja);
+      var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '';
       for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
-      var cost = baMedian_(hits.map(function (h) { return h.price; }));
-      if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + c.ja); Utilities.sleep(1500); continue; }
+      var cost = baCostEst_(hits.map(function (h) { return h.price; }));
+      if (!img) { baMark_(ledger, c.key, ccs, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -4901,7 +4951,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
   (Array.isArray(jmi) ? jmi.map(function (p) { return [p && p[0], p && p[1]]; }) : Object.keys(jmi).map(function (j) { return [j, jmi[j]]; })).forEach(function (p) { var t = p[1], j = p[0]; if (!t || BA_NG.test(String(t))) return; var k = baKey_(t); if (!k) return; add({ ja: String(t), en: '', dl: 0, jan: baJanReal_(j) ? j : '', sg: 0 }, k); });
   var out = [];
   list.forEach(function (r) {
-    if (!r.ja) return;                                   // 日本語名が無いと中古の写真を探せない
+    if (!r.ja && !r.en) return;
     if (r.dl && !r.sg) return;                           // DL専売（駿河屋に無い）
     if (BA_NG.test(r.ja)) return;
     var k1 = baTmKey_(r.ja), k2 = r.en ? baTmKey_(r.en) : '', k3 = r.key, k4 = r.en ? baKey_(r.en) : '';
