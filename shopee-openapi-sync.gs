@@ -4690,6 +4690,29 @@ function baCleanJa_(t) {
   return String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects|ハッピープライスセレクション|ベストコレクション)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 // ヤフオク検索（中古だけ）。返す {items:[{id,t,img,price}], blocked}
+/* ★写真のAI判定は【出す直前に使う1枚だけ】（本人「無駄にお金使いたくない／効率的に効果がある使い方」）。
+   鍵はスクリプト プロパティ CLAUDE_KEY（コードや Supabase には置かない）。結果は boshu_auto_judged に溜めて同じ写真は二度見ない。
+   鍵が無ければ判定なしで進む（ログに1回だけ警告）。鍵があるのに判定できなければ通さない。1日の判定回数は上限（dailyMax×3）で頭打ち */
+var BA_JUDGED = 'boshu_auto_judged';
+function baJudge_(imgUrl, st, cache, capN) {
+  var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
+  if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
+  var u = String(imgUrl || '').replace(/\?.*$/, '');
+  if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
+  if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
+  var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
+    { type: 'image', source: { type: 'url', url: String(imgUrl) } },
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
+  ufBump_(1, 'boshu_auto(写真AI判定)');
+  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
+  var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
+  if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
+  if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
+  var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
+  var ok = !!o.product_photo, kind = String(o.kind || '');
+  if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
+  return { ok: ok, judged: true, kind: kind };
+}
 function baYahoo_(q) {
   // ★fixed=3＝定額（即決）だけ。入札中の現在価格を相場に混ぜると仕入れを安く見積もって赤字になる（ポータルの仕入れ検索と同じ判断）
   var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3&n=50';
@@ -4847,6 +4870,8 @@ function boshuAutoTick(manual) {
     var hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
+    var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
+    var judgeCap = dailyMax * 3;
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
     var picks = [];
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
@@ -4863,6 +4888,13 @@ function boshuAutoTick(manual) {
       /* 判定できなかった写真（ブラウザ側のCORS失敗など）は「実物の写真」の保証が無いので使わない（本人「実物の写真じゃないのに通るのはおかしい」） */
       if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
+        /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
+        var okM = /^AI判定OK/.test(String(pm.judge || ''));
+        if (!okM) { var jdM = baJudge_(pm.thumb || pm.img, st, judged, judgeCap); okM = jdM.ok; if (jdM.judged) pm.judge = (okM ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）'; }
+        if (!okM) { var altsM = pm.alts || []; for (var ai = 0; ai < altsM.length && ai < 2 && !okM; ai++) { var al = altsM[ai]; if (!al || !al.img || (used[al.img] && used[al.img] !== c.key)) continue; var jdA = baJudge_(al.thumb || al.img, st, judged, judgeCap); if (jdA.ok) { pm = Object.assign({}, pm, al, { judge: jdA.judged ? 'AI判定OK（' + jdA.kind + '）' : '' }); okM = true; } } }
+        if (!okM) { baLog_(st, '📷 実物の写真でない（メルカリ）→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
+      }
+      if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
           var costM = Number(pm.cost || pm.price) || 0, hitsM = Number(pm.hits) || 1;
@@ -4876,10 +4908,10 @@ function boshuAutoTick(manual) {
       var y = baYahoo_(q);
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
-      var img = null, srcId = '';
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }   // 別の作品が使った写真は使わない（自分のやり直しは可）
+      var img = null, srcId = '', triedY = 0;
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var jy = baJudge_(u, st, judged, judgeCap); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
-      if (!img) { baMark_(ledger, c.key, ccsHw, 'skip:noimg'); out.skipped++; baSkipRec_(st, hw, '', c, 'noimg', hits.length); baLog_(st, '写真なし: ' + (c.ja || c.en)); Utilities.sleep(1500); continue; }
+      if (!img) { var whyY = triedY ? 'noimg_ai' : 'noimg'; baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : '写真なし: ') + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -4889,6 +4921,7 @@ function boshuAutoTick(manual) {
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
+    try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {}
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
     var touchedShops = {};
@@ -4953,8 +4986,18 @@ function baLoadCtx_(cfg, hw, ccs) {
   var janByCc = {};
   try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
-  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows);
-  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand };
+  /* ★売れる見込みの材料：直近90日に売れた明細名（英名）。他国で売れた作品を、まだ出していない国へ先に出す（本人「効率的に、効果がある使い方」） */
+  var soldVar = {};
+  try {
+    var since90 = Math.floor(Date.now() / 1000) - 90 * 86400;
+    sbSelectAll_('orders', 'select=items&order_ts=gte.' + since90 + '&status=not.in.(CANCELLED,Cancelled,UNPAID)').forEach(function (o) {
+      var items = o.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (e) { items = []; } }
+      (items || []).forEach(function (it) { var k = baKey_(String((it && it.variation) || '')); if (k) soldVar[k] = (soldVar[k] || 0) + 1; });
+    });
+  } catch (e) {}
+  var pre0 = baKv_('boshu_auto_pre') || {};
+  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0);
+  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0 };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
 function boshuAutoPreview_(hw, limit) {
@@ -4971,7 +5014,7 @@ function boshuAutoPreview_(hw, limit) {
   var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
   var blocked = false, rows = [];
   ctx.cand.slice(0, n).forEach(function (c) {
-    var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {} };
+    var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {}, sold: c.sold || 0 };
     try { var en2 = baEnName_(c); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; } catch (e) {}
     var pm = pre[c.key];
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
@@ -5038,7 +5081,8 @@ function boshuAutoExclude_(hw, key, undo) {
 }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
-function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
+function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre) {
+  soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
   var byKey = {}, list = [];
   var add = function (row, key) { if (!key) return; if (byKey[key]) { var o = byKey[key]; if (!o.ja && row.ja) o.ja = row.ja; if (!o.en && row.en) o.en = row.en; if (!o.jan && row.jan) o.jan = row.jan; if (row.sg) o.sg = 1; return; } row.key = key; byKey[key] = row; list.push(row); };
@@ -5062,10 +5106,13 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows) {
       return true;
     });
     if (!need.length) return;
-    r.need = need; out.push(r);
+    r.need = need;
+    r.sold = (r.en ? soldVar[baKey_(r.en)] : 0) || soldVar[r.key] || 0;               // 他国で売れた回数（90日）
+    r.hasPre = (pre[r.key] && pre[r.key].img) ? 1 : 0;                                 // メルカリの写真が先に集まっている（ヤフオクを叩かずに済む）
+    out.push(r);
   });
-  // 駿河屋にある（物理で流通が確か）→ JANあり → その他、の順。同じ群の中は名前順で安定させる
-  out.sort(function (a, b) { return (b.sg - a.sg) || ((b.jan ? 1 : 0) - (a.jan ? 1 : 0)) || String(a.ja).localeCompare(String(b.ja), 'ja'); });
+  // ★他国で売れた作品 → メルカリ写真あり → 駿河屋にある（物理で流通が確か）→ JANあり → 名前順（同じ群の中は安定）
+  out.sort(function (a, b) { return (b.sold - a.sold) || (b.hasPre - a.hasPre) || (b.sg - a.sg) || ((b.jan ? 1 : 0) - (a.jan ? 1 : 0)) || String(a.ja).localeCompare(String(b.ja), 'ja'); });
   return out;
 }
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
