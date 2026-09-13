@@ -4860,6 +4860,8 @@ function boshuAutoTick(manual) {
       var q = (qBase + ' ' + hwWord).trim();
       // ★メルカリの写真が先に集めてあれば、それを優先（本人「画像はメルカリとかヤフオクとかの中古の画像に」）。取れなければヤフオクへ
       var pm = pre[c.key];
+      /* 判定できなかった写真（ブラウザ側のCORS失敗など）は「実物の写真」の保証が無いので使わない（本人「実物の写真じゃないのに通るのはおかしい」） */
+      if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
@@ -4972,6 +4974,7 @@ function boshuAutoPreview_(hw, limit) {
     var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {} };
     try { var en2 = baEnName_(c); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; } catch (e) {}
     var pm = pre[c.key];
+    if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
       row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = Number(pm.cost || pm.price) || 0; row.hits = Number(pm.hits) || 1; row.from = 'mercari';
       row.stock = (row.hits >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
@@ -4983,8 +4986,9 @@ function boshuAutoPreview_(hw, limit) {
       else {
         var hits = baMatch_(y.items, c.ja || c.en, hw);
         var img = '', srcId = '';
-        for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); break; }
-        row.hits = hits.length; row.cost = baCostOfHits_(hits); row.img = img; row.src = srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''; row.q = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3';
+        var srcTitle = '', srcPrice = 0;
+        for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); srcTitle = String(hits[k].t || '').slice(0, 80); srcPrice = Number(hits[k].price) || 0; break; }
+        row.hits = hits.length; row.cost = baCostOfHits_(hits); row.img = img; row.src = srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''; row.srcTitle = srcTitle; row.srcPrice = srcPrice; row.q = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3';
         row.stock = (hits.length >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
         if (!img) row.note = '中古の写真が見つからない（このままだと飛ばされる）';
       }
