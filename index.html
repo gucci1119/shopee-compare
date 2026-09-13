@@ -3843,7 +3843,7 @@
     "足す先のカタログ群（カタログ名で選ぶ・①②…は同じ群）": "Target catalog family (by catalog name; ①②… are one family)",
     "出す国（この機種）": "Countries (this console)",
     "足す先の群（既定）": "Target family (default)",
-    "出す国と、その国で入れるカタログ（①②…は同じ群・空き付き）": "Countries, and the catalog in each country (①②… = one family, with free slots)",
+    "出す国と、その国で入れるカタログ（写真・①②…は同じ群・空き付き）": "Countries, and the catalog in each country (photo; ①②… = one family; free slots)",
     "国（既定＝新しく選ぶ機種に使う）": "Countries (default for newly selected consoles)",
     "ONにすれば": "if ON:",
     "入る先": "Target catalog",
@@ -17334,6 +17334,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-13', items: [
+      '\u{1F5BC} <b>🤖の足す先：全国まとめの欄をやめ、チェックした国のカタログだけ＋そのカタログの写真</b>（本人「ブラジル選んでたらブラジルのしか表示しなくていい」「カタログ画像は？」）。国ごとの選択欄の横にカタログ画像を出し、選び替えると写真も替わります。',
       '\u{1F9D0} <b>メルカリの写真を「商品そのものを撮った写真か」AIで確かめてから採用</b>（本人「新品と勘違いして購入されるのを避けたい。テレビ画面の写真はやめて、商品の写真で。箱とは限らない」）。⚙️設定に Claude APIキーを入れると、候補の写真（最大4枚）を Claude に見せて、テレビ/モニター画面・公式のカタログ画像・商品が写っていないものを外し、実物（箱・ケース・カートリッジ・ディスク）を撮った写真だけ使います。鍵が無ければ従来どおり先頭の写真（その旨を表示）。',
       '\u{1F5FA} <b>🤖：国ごとに「その国にあるカタログ」を選べるように</b>（本人「その国のカタログを出せば良くない？」）。機種の行で国にチェックを入れると、その国に実際にあるこの機種のカタログ群が「① 44/100・② 2/100・空き54」のように空き付きで並び、国ごとに入れ先を決められます。既定は上の群がその国にあればそれ、無ければその国の総称カタログ。',
       '\u{1F5BC} <b>🤖に「メルカリの写真を先に集める」を追加</b>（本人「画像は必ず新品の画像じゃなくて、メルカリとかヤフオクとかから取ってきた中古の画像に」）。GASはメルカリを読めないので、🔜の一覧の候補をこのブラウザ（ブリッジ）でメルカリ検索し、中古（未使用に近い〜やや傷汚れ）の写真と価格を先に集めて保存。GASは実行時に<b>メルカリの写真・価格を優先</b>し、無い作品だけヤフオク（定額）を引きます。写真が気に入らなければ行の「🔁 別の写真」で次の候補に差し替え。',
@@ -27099,8 +27100,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const txt = (r.name || '') + ' ' + (r.parent_sku || ''); if (!HW_PAT.some(([k, re]) => re.test(txt) && k === hw)) return;
       const sku = String(r.parent_sku || '').trim(), nk = baNameKey(r.name); if (!sku && !nk) return;
       const key = sku ? ('sku:' + sku) : ('name:' + nk);
-      const f = fam[key] = fam[key] || { key, sku, nameKey: sku ? '' : nk, n: 0, models: 0, cats: [], names: {} };
+      const f = fam[key] = fam[key] || { key, sku, nameKey: sku ? '' : nk, n: 0, models: 0, cats: [], names: {}, img: '', weightG: 0 };
       const used = (r.models || []).length; f.n++; f.models += used;
+      if (!f.img && r.image) f.img = String(r.image); if (!f.weightG && Number(r.weight) > 0) f.weightG = Math.round(Number(r.weight) * 1000);
       const no = (String(r.name || '').match(/[①-⑳]/) || [''])[0];
       f.cats.push({ item_id: r.item_id, no, used, status: r.status });
       const nm = String(r.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim(); f.names[nm] = (f.names[nm] || 0) + used;
@@ -27198,23 +27200,24 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (s.lastMsg) parts.push('直近: ' + s.lastMsg);
       return parts.length ? parts.join('　／　') : 'まだ動いていません（保存してONにすると30分ごとに動きます）';
     })();
+    const CFH = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
     const hwRows = hws.map(h => {
-      const f = cfg.family[h] || {}, opts = famOpts[h] || [];
-      const on = (cfg.hws || []).includes(h);
-      const sel = opts.length
-        ? `<select class="ba-fam" data-hw="${h}" style="font-size:11px;padding:2px 4px;border:1px solid #cfe0f7;border-radius:6px;max-width:560px" title="${av('カタログ名で選びます（①②…は同じ群）。SKU: ' + opts.map(o => o.sku || '（親SKUなし）').join(' / '))}">${opts.map(o => `<option value="${esc(o.sku ? ('sku:' + o.sku) : ('name:' + o.nameKey))}" data-sku="${esc(o.sku)}" data-nk="${esc(o.nameKey)}" data-name="${esc(o.name)}" data-w="${o.weightG || 0}"${((f.sku && f.sku === o.sku) || (!f.sku && f.nameKey && f.nameKey === o.nameKey) || (!f.sku && !f.nameKey && opts[0] === o)) ? ' selected' : ''}>${o.generic ? '' : '［シリーズ］'}${esc(o.name)}　（${o.n}カタログ・${num(o.models)}明細・${Object.keys(o.ccs).join('/')}${o.weightG ? '・' + o.weightG + 'g' : ''}${o.sku ? '' : '・親SKUなし'}）</option>`).join('')}</select>`
-        : '<span class="smd-dim" style="font-size:11px">この機種の「Variation」カタログが無い（先に1つ作る）</span>';
-      const rowCcs = (f.ccs && f.ccs.length) ? f.ccs : (cfg.ccs || []);
+      const f = cfg.family[h] || {};
       const byCc = f.byCc || {};
-      const ccCell = opts.length ? BA_CCS.map(cc => {
-        const on2 = rowCcs.includes(cc); const cf = baCcFamilies(h, cc);
-        // 既定＝上で選んだ群がその国にあればそれ、無ければその国の総称カタログで明細が一番多いもの
+      const ccFams = {}; BA_CCS.forEach(cc => { ccFams[cc] = baCcFamilies(h, cc); });
+      const anyCat = BA_CCS.some(cc => ccFams[cc].length);
+      const on = (cfg.hws || []).includes(h);
+      const rowCcs = (f.ccs && f.ccs.length) ? f.ccs : (cfg.ccs || []);
+      // ★国にチェック → その国に実際にあるこの機種のカタログだけを選ぶ（本人「ブラジル選んでたらブラジルのしか表示しなくていい」）。選んだカタログの写真も横に出す
+      const ccCell = anyCat ? BA_CCS.map(cc => {
+        const on2 = rowCcs.includes(cc); const cf = ccFams[cc];
         const sel0 = byCc[cc] ? cf.find(o => (o.sku && o.sku === byCc[cc].sku) || (!o.sku && o.nameKey === byCc[cc].nameKey)) : null;
         const selF = sel0 || cf.find(o => (f.sku && o.sku === f.sku) || (!f.sku && f.nameKey && o.nameKey === f.nameKey)) || cf[0];
-        const optHtml = cf.length ? cf.map(o => `<option value="${esc(o.key)}" data-sku="${esc(o.sku)}" data-nk="${esc(o.nameKey)}" data-name="${esc(o.name)}"${o === selF ? ' selected' : ''}>${o.generic ? '' : '［シリーズ］'}${esc(o.name)}　（${o.cats.map(c2 => (c2.no || '①') + ' ' + c2.used + '/100').join('・')}${o.free ? '・空き' + o.free : '・満杯'}）</option>`).join('') : '';
-        return `<div style="display:flex;gap:4px;align-items:center;margin:1px 0"><label style="cursor:pointer;white-space:nowrap;font-size:11px;min-width:44px"><input type="checkbox" class="ba-hwcc" data-hw="${h}" data-cc="${cc}"${on2 ? ' checked' : ''}> ${cc}</label>${cf.length ? `<select class="ba-ccfam" data-hw="${h}" data-cc="${cc}" style="font-size:10.5px;padding:1px 3px;border:1px solid #e3ebf6;border-radius:5px;max-width:520px"${on2 ? '' : ' disabled'}>${optHtml}</select>` : `<span class="smd-dim" style="font-size:10.5px">${cc} にはこの機種のカタログが無い（満杯なら複製、無ければ作ってから）</span>`}</div>`;
-      }).join('') : '';
-      return `<tr><td style="white-space:nowrap"><label style="cursor:pointer"><input type="checkbox" class="ba-hw" data-hw="${h}"${on ? ' checked' : ''}${opts.length ? '' : ' disabled'}> ${esc(TITLE_HW_JA[h] || h)}</label></td><td>${sel}</td><td style="white-space:nowrap">${ccCell}</td></tr>`;
+        const optHtml = cf.length ? cf.map(o => `<option value="${esc(o.key)}" data-sku="${esc(o.sku)}" data-nk="${esc(o.nameKey)}" data-name="${esc(o.name)}" data-w="${o.weightG || 0}" data-img="${esc(o.img || '')}"${o === selF ? ' selected' : ''}>${o.generic ? '' : '［シリーズ］'}${esc(o.name)}　（${o.cats.map(c2 => (c2.no || '①') + ' ' + c2.used + '/100').join('・')}${o.free ? '・空き' + o.free : '・満杯'}${o.weightG ? '・' + o.weightG + 'g' : ''}）</option>`).join('') : '';
+        const img0 = selF && selF.img ? 'https://' + CFH[cc] + '/file/' + esc(selF.img) : '';
+        return `<div style="display:flex;gap:6px;align-items:center;margin:2px 0"><label style="cursor:pointer;white-space:nowrap;font-size:11px;min-width:44px"><input type="checkbox" class="ba-hwcc" data-hw="${h}" data-cc="${cc}"${on2 ? ' checked' : ''}> ${cc}</label>${cf.length ? `<img class="ba-ccimg" data-hw="${h}" data-cc="${cc}" src="${img0}" referrerpolicy="no-referrer" style="width:34px;height:34px;object-fit:cover;border-radius:5px;border:1px solid #e3ebf6;background:#f3f5f8;${img0 ? '' : 'visibility:hidden'}"><select class="ba-ccfam" data-hw="${h}" data-cc="${cc}" style="font-size:10.5px;padding:1px 3px;border:1px solid #e3ebf6;border-radius:5px;max-width:560px"${on2 ? '' : ' disabled'}>${optHtml}</select>` : `<span class="smd-dim" style="font-size:10.5px">${cc} にはこの機種のカタログが無い（満杯なら複製、無ければ作ってから）</span>`}</div>`;
+      }).join('') : '<span class="smd-dim" style="font-size:11px">この機種の「Variation」カタログが無い（先に1つ作る）</span>';
+      return `<tr><td style="white-space:nowrap;vertical-align:top;padding-top:6px"><label style="cursor:pointer"><input type="checkbox" class="ba-hw" data-hw="${h}"${on ? ' checked' : ''}${anyCat ? '' : ' disabled'}> ${esc(TITLE_HW_JA[h] || h)}</label></td><td>${ccCell}</td></tr>`;
     }).join('');
     const ccChips = BA_CCS.map(cc => `<label style="cursor:pointer;margin-right:8px;white-space:nowrap"><input type="checkbox" class="ba-cc" data-cc="${cc}"${(cfg.ccs || []).includes(cc) ? ' checked' : ''}> ${cc}</label>`).join('');
     const pubChips = BA_CCS.map(cc => `<label style="cursor:pointer;margin-right:8px;white-space:nowrap"><input type="checkbox" class="ba-pub" data-cc="${cc}"${(cfg.autoPublish || {})[cc] ? ' checked' : ''}> ${cc}</label>`).join('');
@@ -27296,7 +27299,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         その機種の<b>バリエカタログ群（親SKUが同じ①②③…）</b>の空きに足し、満杯なら複製して続ける（複製は非公開。下の「自動で公開」の国だけ公開）。
         <b>同じ写真は2件に使わない・写真が無い作品は足さない</b>（勝手に他の画像は当てない）。明細で足すので<b>出品枠は消費しません</b>。
       </div>
-      <table class="smd-table" style="font-size:12px;width:auto"><tr><th>機種</th><th>足す先の群（既定）</th><th>出す国と、その国で入れるカタログ（①②…は同じ群・空き付き）</th></tr>${hwRows}</table>
+      <table class="smd-table" style="font-size:12px;width:auto"><tr><th>機種</th><th>出す国と、その国で入れるカタログ（写真・①②…は同じ群・空き付き）</th></tr>${hwRows}</table>
       <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px">
         <span><b>国（既定＝新しく選ぶ機種に使う）</b>：${ccChips}</span>
         <span><b>新しいカタログを自動で公開</b>（枠がある国だけ）：${pubChips}</span>
@@ -27328,7 +27331,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       c.maxCostJpy = Math.max(500, parseInt(document.getElementById('ba-cost').value, 10) || 15000);
       c.autoClone = !!document.getElementById('ba-clone').checked;
       c.family = Object.assign({}, cfg.family || {});
-      box.querySelectorAll('.ba-fam').forEach(sel => { const o = sel.options[sel.selectedIndex]; if (o) c.family[sel.dataset.hw] = { sku: o.dataset.sku || '', nameKey: o.dataset.nk || '', name: o.dataset.name || '', weightG: Number(o.dataset.w) || 0, ccs: [...box.querySelectorAll('.ba-hwcc[data-hw="' + sel.dataset.hw + '"]:checked')].map(e => e.dataset.cc), byCc: (() => { const m = {}; box.querySelectorAll('.ba-ccfam[data-hw="' + sel.dataset.hw + '"]').forEach(s2 => { const o2 = s2.options[s2.selectedIndex]; if (o2 && !s2.disabled) m[s2.dataset.cc] = { sku: o2.dataset.sku || '', nameKey: o2.dataset.nk || '', name: o2.dataset.name || '' }; }); return m; })() }; });
+      Object.keys(TITLE_HW_JA).forEach(h => {
+        const ccsH = [...box.querySelectorAll('.ba-hwcc[data-hw="' + h + '"]:checked')].map(e => e.dataset.cc);
+        const byCc = {}; box.querySelectorAll('.ba-ccfam[data-hw="' + h + '"]').forEach(s2 => { const o2 = s2.options[s2.selectedIndex]; if (o2 && !s2.disabled) byCc[s2.dataset.cc] = { sku: o2.dataset.sku || '', nameKey: o2.dataset.nk || '', name: o2.dataset.name || '', weightG: Number(o2.dataset.w) || 0 }; });
+        const base = byCc[ccsH[0]] || Object.values(byCc)[0] || null;
+        if (base || c.family[h]) c.family[h] = Object.assign({}, c.family[h] || {}, base ? { sku: base.sku, nameKey: base.nameKey, name: base.name, weightG: base.weightG || (c.family[h] || {}).weightG || 0 } : {}, { ccs: ccsH, byCc });
+      });
       c.priceTbl = baPriceTbl(c);
       c.savedAt = new Date().toISOString();
       return c;
@@ -27351,6 +27359,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     box.querySelector('#ba-save').addEventListener('click', async () => { const b = box.querySelector('#ba-save'); b.disabled = true; try { if (await save()) renderBoshuAuto(); } catch (e) { alert('保存に失敗: ' + ((e && e.message) || e)); } b.disabled = false; });
     box.querySelector('#ba-reload').addEventListener('click', () => renderBoshuAuto());
     box.querySelectorAll('.ba-hwcc').forEach(cb => cb.addEventListener('change', () => { const s2 = box.querySelector('.ba-ccfam[data-hw="' + cb.dataset.hw + '"][data-cc="' + cb.dataset.cc + '"]'); if (s2) s2.disabled = !cb.checked; }));
+    box.querySelectorAll('.ba-ccfam').forEach(s2 => s2.addEventListener('change', () => { const o2 = s2.options[s2.selectedIndex]; const im = box.querySelector('.ba-ccimg[data-hw="' + s2.dataset.hw + '"][data-cc="' + s2.dataset.cc + '"]'); if (!im) return; const id = o2 && o2.dataset.img; if (id) { im.src = 'https://' + CFH[s2.dataset.cc] + '/file/' + id; im.style.visibility = ''; } else { im.style.visibility = 'hidden'; } }));
     { const mb = box.querySelector('#ba-more'); if (mb) mb.addEventListener('click', () => { lst._baShowAll = !lst._baShowAll; renderBoshuAuto(); }); }
     { const sel = box.querySelector('#ba-pv-hw'); if (sel) sel.addEventListener('change', () => { lst._baPvHw = sel.value; renderBoshuAuto(); });
       const go = box.querySelector('#ba-pv-go'); if (go) go.addEventListener('click', async () => {
