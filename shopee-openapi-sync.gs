@@ -4833,6 +4833,7 @@ function boshuAutoTick(manual) {
     out.hw = hw;
     var hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
     var used = baKv_(BA_IMGS) || {};
+    var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
     var picks = [];
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
@@ -4844,6 +4845,19 @@ function boshuAutoTick(manual) {
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
+      // ★メルカリの写真が先に集めてあれば、それを優先（本人「画像はメルカリとかヤフオクとかの中古の画像に」）。取れなければヤフオクへ
+      var pm = pre[c.key];
+      if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
+        var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
+        if (imageIdM) {
+          var costM = Number(pm.cost || pm.price) || 0, hitsM = Number(pm.hits) || 1;
+          var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
+          used[pm.img] = c.key;
+          picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
+          continue;
+        }
+        baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
+      }
       var y = baYahoo_(q);
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
@@ -4935,12 +4949,18 @@ function boshuAutoPreview_(hw, limit) {
   var n = Math.max(1, Math.min(20, Number(limit) || 20));
   // ★写真・仕入れ目安・出品予定額まで出す（本人「画像や仕入れ額もいるだろ」「出品予定額はミスがないかチェックしたい」）＝実行時と同じ手順でヤフオクを引く（1件≈2秒）
   var used = baKv_(BA_IMGS) || {}, hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
+  var pre = baKv_('boshu_auto_pre') || {};
   var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
   var blocked = false, rows = [];
   ctx.cand.slice(0, n).forEach(function (c) {
     var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {} };
     try { var en2 = baEnName_(c); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; } catch (e) {}
-    if (!blocked && Date.now() - t0 < 200000) {
+    var pm = pre[c.key];
+    if (pm && pm.img) {
+      row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = Number(pm.cost || pm.price) || 0; row.hits = Number(pm.hits) || 1; row.from = 'mercari';
+      row.stock = (row.hits >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
+    }
+    else if (!blocked && Date.now() - t0 < 200000) {
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || ''); var q = (qBase + ' ' + hwWord).trim();
       var y = baYahoo_(q);
       if (y.blocked) { blocked = true; row.note = 'ヤフオクに弾かれた'; }
@@ -5116,7 +5136,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
