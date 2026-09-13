@@ -3839,6 +3839,8 @@
     "🖼 メルカリの写真を先に集める": "🖼 Pre-collect Mercari photos",
     "足す先のカタログ群（カタログ名で選ぶ・①②…は同じ群）": "Target catalog family (by catalog name; ①②… are one family)",
     "出す国（この機種）": "Countries (this console)",
+    "足す先の群（既定）": "Target family (default)",
+    "出す国と、その国で入れるカタログ（①②…は同じ群・空き付き）": "Countries, and the catalog in each country (①②… = one family, with free slots)",
     "国（既定＝新しく選ぶ機種に使う）": "Countries (default for newly selected consoles)",
     "ONにすれば": "if ON:",
     "入る先": "Target catalog",
@@ -17329,6 +17331,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-13', items: [
+      '\u{1F5FA} <b>🤖：国ごとに「その国にあるカタログ」を選べるように</b>（本人「その国のカタログを出せば良くない？」）。機種の行で国にチェックを入れると、その国に実際にあるこの機種のカタログ群が「① 44/100・② 2/100・空き54」のように空き付きで並び、国ごとに入れ先を決められます。既定は上の群がその国にあればそれ、無ければその国の総称カタログ。',
       '\u{1F5BC} <b>🤖に「メルカリの写真を先に集める」を追加</b>（本人「画像は必ず新品の画像じゃなくて、メルカリとかヤフオクとかから取ってきた中古の画像に」）。GASはメルカリを読めないので、🔜の一覧の候補をこのブラウザ（ブリッジ）でメルカリ検索し、中古（未使用に近い〜やや傷汚れ）の写真と価格を先に集めて保存。GASは実行時に<b>メルカリの写真・価格を優先</b>し、無い作品だけヤフオク（定額）を引きます。',
       '\u{1F30F} <b>🤖の機種ごとに「出す国」を指定できるように</b>（本人「どこの国に出すかもここで指定できれば」）。足す先の一覧で、総称カタログ（Region Free/Official/Working 等）が［シリーズ］になっていたのと、「DS 3DS」併記の群がDS側に出なかったのも直しました。',
       '\u{1F50D} <b>「🔜 次に出す予定」に写真・仕入れ目安・在庫・国ごとの出品予定額を追加</b>（本人「画像や仕入れ額もいるだろ」「出品予定額はミスがないかチェックしたい」）。実行時と同じ手順でヤフオク（定額）を引き、価格表→カタログ平均、価格差の枠、VN上限まで同じ規則で出すので、実際に入る値をそのまま確認できます。上位20件・1分弱。<b>出す予定の日時（見込み）</b>も各行に（本人「出品予定日と時間も」）：30分ごと・機種の順番・1回の件数から逆算。',
@@ -27084,6 +27087,24 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   （本人 2026-09-13「SKUだとわからん。カタログ名で認知してる。ほとんどは ハード名〜Game Series」）
   const BA_GENERIC_WORDS = /\b(used|new|variation|game|games|disc|disk|software|cartridge|cassette|card|cards|series|japan|japanese|ver|version|jp|for|and|the|of|with|only|edition|collection|set|umd|cd|rom|portable|color|colour|advance|super|nintendo|sony|sega|microsoft|playstation|famicom|nes|snes|sfc|fc|gb|gbc|gba|gc|gamecube|n64|ds|3ds|nds|psp|vita|ps|ps1|ps2|ps3|ps4|ps5|wii|wiiu|u|switch|xbox|360|one|x|s|mega|drive|genesis|md|saturn|ss|dreamcast|dc|wonder|swan|ws|pc|engine|pce|tg16|neo|geo|title|titles|choose|select|lot|bulk|assorted|various|random|region|free|official|working|tested|japanese|import|retro|classic|original|genuine|authentic|complete|boxed|loose|handheld|home|console|system|video|videogame|videogames|soft|softs|cart|carts|discs|disks|selection|picks|pick|item|items|product|products|from|in|by|all|type|types|kind|kinds|variety|assort|mix|mixed|list|listing|listings|us|eu|jpn|jap|ntsc|pal)\b/g;
   const baIsGeneric = (name) => { let t = String(name || '').toLowerCase().replace(/[①-⑳\[\]（）()]/g, ' ').replace(/[^a-z0-9\s]/g, ' '); t = t.replace(BA_GENERIC_WORDS, ' ').replace(/\s+/g, ' ').trim(); return t.length < 3; };
+  // その国にある、この機種の Variation カタログを群（親SKU or 名前）ごとに。①②…の空きも出す（本人「その国のカタログを出せば良くない？」）
+  function baCcFamilies(hw, cc) {
+    const fam = {};
+    ((lst.byCc || {})[cc] || []).forEach(r => {
+      if (!/variation/i.test(r.name || '')) return;
+      const txt = (r.name || '') + ' ' + (r.parent_sku || ''); if (!HW_PAT.some(([k, re]) => re.test(txt) && k === hw)) return;
+      const sku = String(r.parent_sku || '').trim(), nk = baNameKey(r.name); if (!sku && !nk) return;
+      const key = sku ? ('sku:' + sku) : ('name:' + nk);
+      const f = fam[key] = fam[key] || { key, sku, nameKey: sku ? '' : nk, n: 0, models: 0, cats: [], names: {} };
+      const used = (r.models || []).length; f.n++; f.models += used;
+      const no = (String(r.name || '').match(/[①-⑳]/) || [''])[0];
+      f.cats.push({ item_id: r.item_id, no, used, status: r.status });
+      const nm = String(r.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim(); f.names[nm] = (f.names[nm] || 0) + used;
+    });
+    const out = Object.values(fam).map(f => { const nm = Object.keys(f.names).sort((a, b) => f.names[b] - f.names[a])[0] || f.sku; f.cats.sort((a, b) => (a.no || '').localeCompare(b.no || '')); return Object.assign(f, { name: nm, generic: baIsGeneric(nm), free: f.cats.reduce((a, c) => a + Math.max(0, 100 - c.used), 0) }); });
+    out.sort((a, b) => ((b.generic ? 1 : 0) - (a.generic ? 1 : 0)) || (b.models - a.models));
+    return out;
+  }
   function baFamilies(hw) {
     const fam = {};
     Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
@@ -27158,7 +27179,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         ? `<select class="ba-fam" data-hw="${h}" style="font-size:11px;padding:2px 4px;border:1px solid #cfe0f7;border-radius:6px;max-width:560px" title="${av('カタログ名で選びます（①②…は同じ群）。SKU: ' + opts.map(o => o.sku || '（親SKUなし）').join(' / '))}">${opts.map(o => `<option value="${esc(o.sku ? ('sku:' + o.sku) : ('name:' + o.nameKey))}" data-sku="${esc(o.sku)}" data-nk="${esc(o.nameKey)}" data-name="${esc(o.name)}" data-w="${o.weightG || 0}"${((f.sku && f.sku === o.sku) || (!f.sku && f.nameKey && f.nameKey === o.nameKey) || (!f.sku && !f.nameKey && opts[0] === o)) ? ' selected' : ''}>${o.generic ? '' : '［シリーズ］'}${esc(o.name)}　（${o.n}カタログ・${num(o.models)}明細・${Object.keys(o.ccs).join('/')}${o.weightG ? '・' + o.weightG + 'g' : ''}${o.sku ? '' : '・親SKUなし'}）</option>`).join('')}</select>`
         : '<span class="smd-dim" style="font-size:11px">この機種の「Variation」カタログが無い（先に1つ作る）</span>';
       const rowCcs = (f.ccs && f.ccs.length) ? f.ccs : (cfg.ccs || []);
-      const ccCell = opts.length ? BA_CCS.map(cc => `<label style="cursor:pointer;margin-right:5px;white-space:nowrap;font-size:11px"><input type="checkbox" class="ba-hwcc" data-hw="${h}" data-cc="${cc}"${rowCcs.includes(cc) ? ' checked' : ''}> ${cc}</label>`).join('') : '';
+      const byCc = f.byCc || {};
+      const ccCell = opts.length ? BA_CCS.map(cc => {
+        const on2 = rowCcs.includes(cc); const cf = baCcFamilies(h, cc);
+        // 既定＝上で選んだ群がその国にあればそれ、無ければその国の総称カタログで明細が一番多いもの
+        const sel0 = byCc[cc] ? cf.find(o => (o.sku && o.sku === byCc[cc].sku) || (!o.sku && o.nameKey === byCc[cc].nameKey)) : null;
+        const selF = sel0 || cf.find(o => (f.sku && o.sku === f.sku) || (!f.sku && f.nameKey && o.nameKey === f.nameKey)) || cf[0];
+        const optHtml = cf.length ? cf.map(o => `<option value="${esc(o.key)}" data-sku="${esc(o.sku)}" data-nk="${esc(o.nameKey)}" data-name="${esc(o.name)}"${o === selF ? ' selected' : ''}>${o.generic ? '' : '［シリーズ］'}${esc(o.name)}　（${o.cats.map(c2 => (c2.no || '①') + ' ' + c2.used + '/100').join('・')}${o.free ? '・空き' + o.free : '・満杯'}）</option>`).join('') : '';
+        return `<div style="display:flex;gap:4px;align-items:center;margin:1px 0"><label style="cursor:pointer;white-space:nowrap;font-size:11px;min-width:44px"><input type="checkbox" class="ba-hwcc" data-hw="${h}" data-cc="${cc}"${on2 ? ' checked' : ''}> ${cc}</label>${cf.length ? `<select class="ba-ccfam" data-hw="${h}" data-cc="${cc}" style="font-size:10.5px;padding:1px 3px;border:1px solid #e3ebf6;border-radius:5px;max-width:520px"${on2 ? '' : ' disabled'}>${optHtml}</select>` : `<span class="smd-dim" style="font-size:10.5px">${cc} にはこの機種のカタログが無い（満杯なら複製、無ければ作ってから）</span>`}</div>`;
+      }).join('') : '';
       return `<tr><td style="white-space:nowrap"><label style="cursor:pointer"><input type="checkbox" class="ba-hw" data-hw="${h}"${on ? ' checked' : ''}${opts.length ? '' : ' disabled'}> ${esc(TITLE_HW_JA[h] || h)}</label></td><td>${sel}</td><td style="white-space:nowrap">${ccCell}</td></tr>`;
     }).join('');
     const ccChips = BA_CCS.map(cc => `<label style="cursor:pointer;margin-right:8px;white-space:nowrap"><input type="checkbox" class="ba-cc" data-cc="${cc}"${(cfg.ccs || []).includes(cc) ? ' checked' : ''}> ${cc}</label>`).join('');
@@ -27241,7 +27270,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         その機種の<b>バリエカタログ群（親SKUが同じ①②③…）</b>の空きに足し、満杯なら複製して続ける（複製は非公開。下の「自動で公開」の国だけ公開）。
         <b>同じ写真は2件に使わない・写真が無い作品は足さない</b>（勝手に他の画像は当てない）。明細で足すので<b>出品枠は消費しません</b>。
       </div>
-      <table class="smd-table" style="font-size:12px;width:auto"><tr><th>機種</th><th>足す先のカタログ群（カタログ名で選ぶ・①②…は同じ群）</th><th>出す国（この機種）</th></tr>${hwRows}</table>
+      <table class="smd-table" style="font-size:12px;width:auto"><tr><th>機種</th><th>足す先の群（既定）</th><th>出す国と、その国で入れるカタログ（①②…は同じ群・空き付き）</th></tr>${hwRows}</table>
       <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px">
         <span><b>国（既定＝新しく選ぶ機種に使う）</b>：${ccChips}</span>
         <span><b>新しいカタログを自動で公開</b>（枠がある国だけ）：${pubChips}</span>
@@ -27273,7 +27302,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       c.maxCostJpy = Math.max(500, parseInt(document.getElementById('ba-cost').value, 10) || 15000);
       c.autoClone = !!document.getElementById('ba-clone').checked;
       c.family = Object.assign({}, cfg.family || {});
-      box.querySelectorAll('.ba-fam').forEach(sel => { const o = sel.options[sel.selectedIndex]; if (o) c.family[sel.dataset.hw] = { sku: o.dataset.sku || '', nameKey: o.dataset.nk || '', name: o.dataset.name || '', weightG: Number(o.dataset.w) || 0, ccs: [...box.querySelectorAll('.ba-hwcc[data-hw="' + sel.dataset.hw + '"]:checked')].map(e => e.dataset.cc) }; });
+      box.querySelectorAll('.ba-fam').forEach(sel => { const o = sel.options[sel.selectedIndex]; if (o) c.family[sel.dataset.hw] = { sku: o.dataset.sku || '', nameKey: o.dataset.nk || '', name: o.dataset.name || '', weightG: Number(o.dataset.w) || 0, ccs: [...box.querySelectorAll('.ba-hwcc[data-hw="' + sel.dataset.hw + '"]:checked')].map(e => e.dataset.cc), byCc: (() => { const m = {}; box.querySelectorAll('.ba-ccfam[data-hw="' + sel.dataset.hw + '"]').forEach(s2 => { const o2 = s2.options[s2.selectedIndex]; if (o2 && !s2.disabled) m[s2.dataset.cc] = { sku: o2.dataset.sku || '', nameKey: o2.dataset.nk || '', name: o2.dataset.name || '' }; }); return m; })() }; });
       c.priceTbl = baPriceTbl(c);
       c.savedAt = new Date().toISOString();
       return c;
@@ -27295,6 +27324,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     };
     box.querySelector('#ba-save').addEventListener('click', async () => { const b = box.querySelector('#ba-save'); b.disabled = true; try { if (await save()) renderBoshuAuto(); } catch (e) { alert('保存に失敗: ' + ((e && e.message) || e)); } b.disabled = false; });
     box.querySelector('#ba-reload').addEventListener('click', () => renderBoshuAuto());
+    box.querySelectorAll('.ba-hwcc').forEach(cb => cb.addEventListener('change', () => { const s2 = box.querySelector('.ba-ccfam[data-hw="' + cb.dataset.hw + '"][data-cc="' + cb.dataset.cc + '"]'); if (s2) s2.disabled = !cb.checked; }));
     { const mb = box.querySelector('#ba-more'); if (mb) mb.addEventListener('click', () => { lst._baShowAll = !lst._baShowAll; renderBoshuAuto(); }); }
     { const sel = box.querySelector('#ba-pv-hw'); if (sel) sel.addEventListener('change', () => { lst._baPvHw = sel.value; renderBoshuAuto(); });
       const go = box.querySelector('#ba-pv-go'); if (go) go.addEventListener('click', async () => {
@@ -27314,9 +27344,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (typeof mercariSearch !== 'function' || typeof bridgeRequest !== 'function') { alert('メルカリ検索の経路（ブリッジ）がこのブラウザにありません'); return; }
         if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
         const HWJA = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };
-        const NG = /攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール/;
+        const NG = /新品|未開封|未使用|体験版|非売品|サンプル版|攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール/;
         const coreOf = (ja) => { const base = String(ja || '').normalize('NFKC').toLowerCase().replace(/[【】\[\]（）()「」『』]/g, ' '); const toks = base.split(/[\s\/／・:：\-–—~〜!！?？,、。]+/).map(x => x.trim()).filter(x => x.length >= 2); toks.sort((a, b) => b.length - a.length); return toks.slice(0, 2).map(x => x.replace(/\s+/g, '')); };
-        const matchOk = (name, core) => { const t = String(name || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ''); if (NG.test(name)) return false; return core.length && core.every(c => t.includes(c)); };
+        // 数字・ローマ数字（V3・2・II…）は作品の違いそのもの。作品名に無い数字を持つ出品は続編＝別作品（GAS baMatch_ と同じ規則）
+        const numsOf = (t) => { const o = {}; (String(t).match(/(?:^|[^a-z0-9])(v?\d{1,3}|ii|iii|iv|vi|vii|viii|ix|xi|xii)(?=[^a-z0-9]|$)/g) || []).forEach(m => { o[m.replace(/^[^a-z0-9]+/, '')] = 1; }); return o; };
+        const matchOk = (name, core, ja) => { const raw = String(name || '').normalize('NFKC').toLowerCase(); const t = raw.replace(/\s+/g, ''); if (NG.test(name)) return false; if (!(core.length && core.every(c => t.includes(c)))) return false; const qn = numsOf(String(ja || '').normalize('NFKC').toLowerCase()); const ln = numsOf(raw); return !Object.keys(ln).some(k => !qn[k] && (/^v\d/.test(k) || !/^(1|2|3|4|64|100|200[0-8])$/.test(k))); };
         const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
         mb2.disabled = true; const old2 = mb2.textContent; let got = 0, miss = 0;
         const pre = Object.assign({}, (await baKvGet('boshu_auto_pre')) || {});
@@ -27328,10 +27360,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             const kw = ((r.ja ? cleanJa(r.ja) : (r.en || '')) + ' ' + (HWJA[pvHw] || '')).trim();
             let items = []; try { items = await mercariSearch(kw); } catch (e) { miss++; continue; }
             const core = coreOf(r.ja || r.en);
-            const hits = (items || []).filter(x => x && x.img && [2, 3, 4].includes(Number(x.cid)) && matchOk(x.name, core));
+            const qLen = String(r.ja || r.en || '').normalize('NFKC').replace(/\s+/g, '').length;
+            const hits = (items || []).filter(x => x && x.img && [2, 3, 4].includes(Number(x.cid)) && matchOk(x.name, core, r.ja || r.en)).sort((a, b) => (String(a.name).length - qLen) - (String(b.name).length - qLen));
             const pick = hits.find(x => !usedImg.has(x.img));
             if (!pick) { miss++; await new Promise(rs => setTimeout(rs, 1200)); continue; }
-            const prices = hits.map(x => Number(x.price) || 0).filter(x => x > 0).sort((a, b) => a - b);
+            const prices = hits.slice(0, Math.max(3, Math.ceil(hits.length / 2))).map(x => Number(x.price) || 0).filter(x => x > 0).sort((a, b) => a - b);   // 作品名に近い方の半分で相場を見る
             const cost = prices.length ? prices[Math.min(prices.length - 1, Math.floor(prices.length * 0.75))] : 0;
             // 画像は元サイズ（メルカリの通常出品は orig のURLが組み立てられる。Shopsはサムネのまま）
             const mid = String(pick.url || '').match(/\/item\/(m\d+)/); const img = mid ? ('https://static.mercdn.net/item/detail/orig/photos/' + mid[1] + '_1.jpg') : pick.img;
