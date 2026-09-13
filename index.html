@@ -1252,6 +1252,8 @@
     <input type="text" id="set-openapi" placeholder="https://script.google.com/macros/s/xxxx/exec">
     <label>WRITE_TOKEN（GASのスクリプトプロパティと同じ値・書き込み保護用）</label>
     <input type="text" id="set-writetoken" placeholder="GASのスクリプトプロパティ WRITE_TOKEN と同じ値">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">Claude APIキー（任意・🤖自動出品で「メルカリの写真が商品そのものを撮ったものか」をAIで判定する。無ければ判定なしで先頭の写真を使う）</label>
+    <input type="password" id="set-claudekey" placeholder="sk-ant-…（このPCのブラウザにだけ保存されます）">
     <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px;font-weight:700">🖨 きょうの作業指示（外注さんに渡す紙）</label>
     <div class="smd-dim" style="font-size:11.5px;line-height:1.6;margin:2px 0 6px">📖マニュアル＞📦梱包・発送 と 📦注文管理 の「🖨 きょうの作業指示」で印刷する紙の中身です。日付と件数は自動で入ります。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -17332,6 +17334,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-13', items: [
+      '\u{1F9D0} <b>メルカリの写真を「商品そのものを撮った写真か」AIで確かめてから採用</b>（本人「新品と勘違いして購入されるのを避けたい。テレビ画面の写真はやめて、商品の写真で。箱とは限らない」）。⚙️設定に Claude APIキーを入れると、候補の写真（最大4枚）を Claude に見せて、テレビ/モニター画面・公式のカタログ画像・商品が写っていないものを外し、実物（箱・ケース・カートリッジ・ディスク）を撮った写真だけ使います。鍵が無ければ従来どおり先頭の写真（その旨を表示）。',
       '\u{1F5FA} <b>🤖：国ごとに「その国にあるカタログ」を選べるように</b>（本人「その国のカタログを出せば良くない？」）。機種の行で国にチェックを入れると、その国に実際にあるこの機種のカタログ群が「① 44/100・② 2/100・空き54」のように空き付きで並び、国ごとに入れ先を決められます。既定は上の群がその国にあればそれ、無ければその国の総称カタログ。',
       '\u{1F5BC} <b>🤖に「メルカリの写真を先に集める」を追加</b>（本人「画像は必ず新品の画像じゃなくて、メルカリとかヤフオクとかから取ってきた中古の画像に」）。GASはメルカリを読めないので、🔜の一覧の候補をこのブラウザ（ブリッジ）でメルカリ検索し、中古（未使用に近い〜やや傷汚れ）の写真と価格を先に集めて保存。GASは実行時に<b>メルカリの写真・価格を優先</b>し、無い作品だけヤフオク（定額）を引きます。写真が気に入らなければ行の「🔁 別の写真」で次の候補に差し替え。',
       '\u{1F30F} <b>🤖の機種ごとに「出す国」を指定できるように</b>（本人「どこの国に出すかもここで指定できれば」）。足す先の一覧で、総称カタログ（Region Free/Official/Working 等）が［シリーズ］になっていたのと、「DS 3DS」併記の群がDS側に出なかったのも直しました。',
@@ -27148,6 +27151,28 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     });
     return { at: new Date().toISOString(), byCc };
   }
+  // 🖼 写真の判定（本人 2026-09-13「新品と勘違いして購入されるのを避けたい。テレビ画面の写真はやめて、商品の写真で（箱とは限らない）」）
+  //   出品者が【商品そのもの】（箱・ケース・カートリッジ・ディスク…）を撮った写真＝OK。テレビ/モニター画面、公式のカタログ画像（白背景の宣材）、商品が写っていない、複数のまとめ写真＝NG。
+  //   画像の中身は文字では分からないので Claude（haiku）に見せる。鍵が無ければ判定せず先頭の写真を使う（その旨を出す）。
+  async function baJudgePhoto(imgUrl) {
+    if (!settings.claudeKey) return { ok: true, kind: 'unjudged' };
+    let b64 = '', mime = 'image/jpeg';
+    try {
+      const r = await fetch(imgUrl, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob(); mime = blob.type || 'image/jpeg';
+      b64 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = rej; fr.readAsDataURL(blob); });
+    } catch (e) { return { ok: true, kind: 'unfetched', note: String((e && e.message) || e) }; }
+    if (!b64) return { ok: true, kind: 'unfetched' };
+    try {
+      const body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: /png|webp|gif/.test(mime) ? mime : 'image/jpeg', data: b64 } },
+        { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
+      const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
+      const j = await r2.json(); if (!r2.ok) throw new Error((j && j.error && j.error.message) || ('HTTP ' + r2.status));
+      const txt = ((j.content || []).map(c => c.text || '').join('') || '').trim(); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {};
+      return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
+    } catch (e) { return { ok: true, kind: 'error', note: String((e && e.message) || e) }; }
+  }
   async function baKvGet(k) { try { const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (_) { return null; } }
   async function renderBoshuAuto() {
     const box = document.getElementById('tm-auto-box'); if (!box) return;
@@ -27238,7 +27263,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const catHtml = ccsP.length ? ccsP.map(cc => `<div class="smd-dim" style="font-size:10.5px;white-space:nowrap">${cc}：${esc((plan[cc] || {}).cat || '')}${r.series && r.series[cc] ? ' <span style="color:#1565c0">［関連］</span>' : ''}</div>`).join('') : (Object.keys(r.series || {}).length ? Object.keys(r.series).map(cc => cc + '：' + esc(r.series[cc])).join('<br>') : '<span class="smd-dim">機種のカタログ群</span>');
           return `<tr><td class="smd-dim">${i + 1}</td>
             <td style="white-space:nowrap;font-size:11px">${cfg.on ? esc(fmtEta(pvEta(i))) : '<span class="smd-dim">ONにすれば</span> ' + esc(fmtEta(pvEta(i)))}</td>
-            <td>${(() => { const pm = _baPre[r.key]; if (pm && pm.img) return `<a href="${esc(pm.src || '#')}" target="_blank" rel="noopener" title="${av('メルカリの出品（先に集めた写真・価格）: ' + (pm.name || '') + (pm.cond ? '／' + pm.cond : ''))}"><img src="${esc(pm.thumb || pm.img)}" loading="lazy" referrerpolicy="no-referrer" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:2px solid #ff0211"></a><div style="font-size:9.5px;color:#ff0211;font-weight:700">メルカリ ¥${Number(pm.cost || pm.price || 0).toLocaleString()}${pm.hits ? '・' + pm.hits + '件' : ''}</div>${(pm.alts && pm.alts.length) ? `<button class="smd-btn ba-pv-alt" data-key="${esc(r.key)}" style="font-size:9.5px;padding:0 5px" title="この写真が良くなければ、次の候補（${pm.alts.length}件）に差し替えます">🔁 別の写真</button>` : ''}`; return r.img ? `<a href="${esc(r.src || r.q || '#')}" target="_blank" rel="noopener" title="画像と相場を取ったヤフオクの出品ページ"><img src="${esc(r.img)}" loading="lazy" referrerpolicy="no-referrer" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #eee"></a>` : (r.hits != null ? '<span style="font-size:10px;color:#c0392b;font-weight:700">写真なし</span>' : '<span class="smd-dim">—</span>'); })()}</td>
+            <td>${(() => { const pm = _baPre[r.key]; if (pm && pm.img) return `<a href="${esc(pm.src || '#')}" target="_blank" rel="noopener" title="${av('メルカリの出品（先に集めた写真・価格）: ' + (pm.name || '') + (pm.cond ? '／' + pm.cond : ''))}"><img src="${esc(pm.thumb || pm.img)}" loading="lazy" referrerpolicy="no-referrer" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:2px solid #ff0211"></a><div style="font-size:9.5px;color:#ff0211;font-weight:700">メルカリ ¥${Number(pm.cost || pm.price || 0).toLocaleString()}${pm.hits ? '・' + pm.hits + '件' : ''}</div>${pm.judge ? `<div class="smd-dim" style="font-size:9px">${esc(pm.judge)}</div>` : ''}${(pm.alts && pm.alts.length) ? `<button class="smd-btn ba-pv-alt" data-key="${esc(r.key)}" style="font-size:9.5px;padding:0 5px" title="この写真が良くなければ、次の候補（${pm.alts.length}件）に差し替えます">🔁 別の写真</button>` : ''}`; return r.img ? `<a href="${esc(r.src || r.q || '#')}" target="_blank" rel="noopener" title="画像と相場を取ったヤフオクの出品ページ"><img src="${esc(r.img)}" loading="lazy" referrerpolicy="no-referrer" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #eee"></a>` : (r.hits != null ? '<span style="font-size:10px;color:#c0392b;font-weight:700">写真なし</span>' : '<span class="smd-dim">—</span>'); })()}</td>
             <td style="min-width:260px">${esc(r.ja)}<div style="font-size:10.5px;${r.en ? 'color:#333' : 'color:#c0392b;font-weight:700'}">${r.en ? esc(r.en) : '英語名が作れない'}</div>${r.note ? `<div style="font-size:10px;color:#c0392b">${esc(r.note)}</div>` : ''}${r.q ? `<a href="${esc(r.q)}" target="_blank" rel="noopener" style="font-size:10px">🔎 ヤフオク検索</a>` : ''}</td>
             <td style="font-family:monospace;font-size:10.5px">${esc(r.jan || '')}${r.sg ? ' 🏪' : ''}</td>
             <td style="white-space:nowrap">${r.hits != null ? (r.cost ? '¥' + Number(r.cost).toLocaleString() + ' <span class="smd-dim">（' + r.hits + '件）</span>' : '<span class="smd-dim">相場なし（' + r.hits + '件）</span>') : '<span class="smd-dim">—</span>'}</td>
@@ -27351,7 +27376,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const numsOf = (t) => { const o = {}; (String(t).match(/(?:^|[^a-z0-9])(v?\d{1,3}|ii|iii|iv|vi|vii|viii|ix|xi|xii)(?=[^a-z0-9]|$)/g) || []).forEach(m => { o[m.replace(/^[^a-z0-9]+/, '')] = 1; }); return o; };
         const matchOk = (name, core, ja) => { const raw = String(name || '').normalize('NFKC').toLowerCase(); const t = raw.replace(/\s+/g, ''); if (NG.test(name)) return false; if (!(core.length && core.every(c => t.includes(c)))) return false; const qn = numsOf(String(ja || '').normalize('NFKC').toLowerCase()); const ln = numsOf(raw); return !Object.keys(ln).some(k => !qn[k] && (/^v\d/.test(k) || !/^(1|2|3|4|64|100|200[0-8])$/.test(k))); };
         const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
-        mb2.disabled = true; const old2 = mb2.textContent; let got = 0, miss = 0;
+        mb2.disabled = true; const old2 = mb2.textContent; let got = 0, miss = 0, rejected = 0;
         const pre = Object.assign({}, (await baKvGet('boshu_auto_pre')) || {});
         const usedImg = new Set(Object.values(pre).map(v => v && v.img).filter(Boolean));
         try {
@@ -27363,19 +27388,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             const core = coreOf(r.ja || r.en);
             const qLen = String(r.ja || r.en || '').normalize('NFKC').replace(/\s+/g, '').length;
             const hits = (items || []).filter(x => x && x.img && [2, 3, 4].includes(Number(x.cid)) && matchOk(x.name, core, r.ja || r.en)).sort((a, b) => (String(a.name).length - qLen) - (String(b.name).length - qLen));
-            const pick = hits.find(x => !usedImg.has(x.img));
+            // 商品そのものを撮った写真かをAIで見る（最大4候補）。通ったものが無ければ、この作品は写真なし扱い（勝手に他の写真を当てない）
+            const cands = hits.filter(x => !usedImg.has(x.img)).slice(0, 4); let pick = null, judgeNote = '';
+            for (const x of cands) { const jd = await baJudgePhoto(x.img); if (jd.ok) { pick = x; judgeNote = jd.judged ? ('AI判定OK（' + jd.kind + '）') : (jd.kind === 'unjudged' ? '判定なし（Claude APIキー未設定）' : '判定できず（' + (jd.note || jd.kind) + '）'); break; } else { rejected++; } }
             if (!pick) { miss++; await new Promise(rs => setTimeout(rs, 1200)); continue; }
             const prices = hits.slice(0, Math.max(3, Math.ceil(hits.length / 2))).map(x => Number(x.price) || 0).filter(x => x > 0).sort((a, b) => a - b);   // 作品名に近い方の半分で相場を見る
             const cost = prices.length ? prices[Math.min(prices.length - 1, Math.floor(prices.length * 0.75))] : 0;
             // 画像は元サイズ（メルカリの通常出品は orig のURLが組み立てられる。Shopsはサムネのまま）
             const mid = String(pick.url || '').match(/\/item\/(m\d+)/); const img = mid ? ('https://static.mercdn.net/item/detail/orig/photos/' + mid[1] + '_1.jpg') : pick.img;
             const toRec = (x) => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img, thumb: x.img, src: x.url, price: Number(x.price) || 0, name: String(x.name || '').slice(0, 80), cond: x.cond || '' }; };
-            pre[r.key] = Object.assign(toRec(pick), { cost, hits: hits.length, at: new Date().toISOString(), from: 'mercari', alts: hits.filter(x => x !== pick && !usedImg.has(x.img)).slice(0, 6).map(toRec) });
+            pre[r.key] = Object.assign(toRec(pick), { cost, hits: hits.length, at: new Date().toISOString(), from: 'mercari', judge: judgeNote, alts: hits.filter(x => x !== pick && !usedImg.has(x.img)).slice(0, 6).map(toRec) });
             usedImg.add(pick.img); got++;
             await new Promise(rs => setTimeout(rs, 1200 + Math.random() * 800));
           }
           await sbUpsert('app_kv', [{ k: 'boshu_auto_pre', v: pre, updated_at: new Date().toISOString() }]);
-          toast('🖼 メルカリの写真を ' + got + '件 集めました' + (miss ? '（見つからず ' + miss + '件）' : '') + '。GASはこれを優先して使います');
+          toast('🖼 メルカリの写真を ' + got + '件 集めました' + (miss ? '（見つからず ' + miss + '件）' : '') + (rejected ? '（AIが「商品の写真でない」と外した候補 ' + rejected + '件）' : '') + (settings.claudeKey ? '' : '。⚙️設定に Claude APIキーを入れると「商品そのものの写真か」をAIで確かめてから採用します') + '。GASはこれを優先して使います');
         } catch (e) { alert('集められませんでした: ' + ((e && e.message) || e)); }
         mb2.disabled = false; mb2.textContent = old2; renderBoshuAuto();
       });
@@ -40990,6 +41017,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('set-sbkey').value = settings.sbKey;
     document.getElementById('set-sbsecret').value = settings.sbSecret;
     document.getElementById('set-airesearch').value = settings.aiResearchUrl || '';
+    { const ck = document.getElementById('set-claudekey'); if (ck) ck.value = settings.claudeKey || ''; }
     { const a = document.getElementById('set-openapi'); if (a) a.value = settings.openapiUrl || ''; const b = document.getElementById('set-writetoken'); if (b) b.value = settings.writeToken || ''; }
     { const w = settings.workSheet || {};
       const g = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
@@ -41075,6 +41103,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     settings.sbKey = document.getElementById('set-sbkey').value.trim();
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
     settings.aiResearchUrl = document.getElementById('set-airesearch').value.trim().replace(/\/$/, '');
+    { const ck = document.getElementById('set-claudekey'); if (ck) settings.claudeKey = ck.value.trim(); }
     { const a = document.getElementById('set-openapi'); if (a) settings.openapiUrl = a.value.trim().replace(/\/$/, ''); const b = document.getElementById('set-writetoken'); if (b) settings.writeToken = b.value.trim(); }
     { const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
       settings.workSheet = { boxIn: g('set-ws-boxin'), boxOut: g('set-ws-boxout'), pickup: g('set-ws-pickup'), tel: g('set-ws-tel') }; }
