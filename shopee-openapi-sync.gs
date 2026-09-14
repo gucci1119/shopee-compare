@@ -2855,7 +2855,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
       // ★pre_order は今まで一切保存しておらず、DBの既定値 false のままだった（全3,843件 false）。
       //   ship_by_date と同じく Shopee が返す一次情報なので、そのまま入れる。
       //   days_to_ship（DTS）も本来ほしいが列が無いので、当面は pre_order だけ。
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, pay_ts: o.pay_time || null, /* ★支払い確定時刻（発送期限DTSの起点・2026-09-14 本人）。orders.pay_ts 列が要る */ shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
     });
   }
   // ★購入者情報（受取人名・電話・住所）は時間が経つとAPIで取れなくなる。
