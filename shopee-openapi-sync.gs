@@ -2824,7 +2824,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
     }
   } catch (e) { trkOk = false; Logger.log('⚠ 追跡番号の既存値を読めませんでした＝tracking列は触らない: ' + String(e).slice(0, 120)); }
   for (var i = 0; i < sns.length; i += 50) {
-    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,pay_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,pay_time,payment_method,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
     var _ol = ((jd.response || {}).order_list) || [];
     // ★customers を埋めるのはこの呼び出し。recipient_address は上の response_optional_fields に
     //   入れておかないと空で返る（別の get_order_detail 呼び出しに足しても意味が無い＝実際に
@@ -2855,7 +2855,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
       // ★pre_order は今まで一切保存しておらず、DBの既定値 false のままだった（全3,843件 false）。
       //   ship_by_date と同じく Shopee が返す一次情報なので、そのまま入れる。
       //   days_to_ship（DTS）も本来ほしいが列が無いので、当面は pre_order だけ。
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, pay_ts: o.pay_time || null, /* ★支払い確定時刻（発送期限DTSの起点・2026-09-14 本人）。orders.pay_ts 列が要る */ shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, pay_ts: o.pay_time || null, pay_method: o.payment_method || null, /* ★支払い確定時刻＋支払い方法（代引きは pay_time が無い）。orders.pay_ts / pay_method 列が要る（2026-09-14） */ shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
     });
   }
   // ★購入者情報（受取人名・電話・住所）は時間が経つとAPIで取れなくなる。
