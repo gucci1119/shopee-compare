@@ -17353,6 +17353,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-14', items: [
+      '\u{23F1} <b>「まとめて更新」が数分かかっていたのを短縮</b>（本人「めっちゃ時間かかってる」）。旧ブリッジ経路の「完了注文(差分)」「注文時刻の補完」「未払い・キャンセル」は、公式API同期（毎時）が同じデータを保存済みなのに、注文番号の突き合わせが合わず<b>毎回全件を取り直していた</b>（BRだけで267件）。公式APIが設定済みならこの3段階を飛ばします。',
       '\u{1F4B3} <b>📦注文管理：代引き（Cash on Delivery）の注文は「💳 代引き」と表示</b>（本人「支払い日時が入っていない行があるのはなぜ」→ PH/VN の代引きは支払い確定時刻が存在しないため。Supabase `orders.pay_method` 列＋GAS v179 で支払い方法も取り込み）。',
       '\u{1F4B3} <b>📦注文管理：注文日時と💳支払いのレイアウトを整理</b>（本人「見切れてる・右の時刻とどう対応させるか」）。「時刻」列をやめて注文日の横に時刻を置き、その下に💳支払い確定の日時（月日＋時刻）。注文と支払いが10分以内なら「💳同時」と薄く表示し、遅れた時だけ緑で日時が出ます。',
       '\u{1F4B3} <b>📦注文管理：注文日の下に「💳支払い確定」の日時を表示</b>（本人「注文日と支払い日の情報も欲しい」）。Shopeeの発送期限（DTS）は支払い確定から数えるので、注文と支払いがずれると期限もずれる、が画面で分かります。Supabase `orders.pay_ts` 列（要SQL）＋GAS v176 で取り込み。',
@@ -40280,9 +40281,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       say(`📈 日次売上 ${dayRows.length}行 保存 ✅`);
 
       // 5) 完了注文の差分同期（新規分だけカード取得）
-      say('🗂 完了注文(差分)を取得中...');
+      // ★2026-09-14：公式API（GAS）が完了注文も tab=500 で保存している（order_id＝注文番号）。この旧経路は
+      //   ブリッジの一覧（数値の order_id）と突き合わせるので【全件が毎回「新規」扱い】＝BRだけで267件×カード取得を
+      //   毎回やり直し（本人「めっちゃ時間かかってる」）、しかも API の行を上書きしていた。公式APIが設定済みなら飛ばす。
       let doneNew = 0;
-      for (const region of targets) {
+      const legacyDone = !settings.openapiUrl;
+      if (!legacyDone) { say('🗂 完了注文・注文時刻は公式API同期（毎時）が担当＝ここでは飛ばします'); }
+      else say('🗂 完了注文(差分)を取得中...');
+      for (const region of (legacyDone ? targets : [])) {
         try {
           const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.500&order=order_id`))
             .map(o => String(o.order_id)));
@@ -40312,10 +40318,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           doneNew += rows.length;
         } catch (e) { say(`　${region.cc} 完了: ⚠ ${String(e.message).slice(0, 40)}`); }
       }
-      log[log.length - 1] = `🗂 完了注文 新規${doneNew}件 保存 ✅`; st(log.join('\n'));
+      if (legacyDone) { log[log.length - 1] = `🗂 完了注文 新規${doneNew}件 保存 ✅`; st(log.join('\n')); }
 
       // 5.5) 注文時刻の補完（get_one_orderは1件ずつしか取れないため、未取得分のみ・1回200件まで）
-      try {
+      if (legacyDone) try {
         say('🕒 注文時刻を補完中...');
         const tsCutoff = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
         const noTs = (await sbGetAll('orders', `select=cc,sn,order_id&order_ts=is.null&order_date=gte.${tsCutoff}&order=order_date.desc`))
@@ -40338,9 +40344,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (e) { say(`🕒 注文時刻: ⚠ ${String(e.message).slice(0, 40)}`); }
 
       // 5.6) 未払い(200)・キャンセル/返品(600) も取り込む（利益ページのフィルタ表示用。セラーセンターの全注文を網羅）
-      say('🚫 未払い・キャンセル注文を取得中...');
+      //   ★公式API（GAS）が UNPAID/CANCELLED も tab 200/600 で保存済み。旧経路は同じ「全件が毎回新規」問題を持つので、公式API設定済みなら飛ばす（2026-09-14）
       let extraNew = 0;
-      for (const region of targets) {
+      if (legacyDone) say('🚫 未払い・キャンセル注文を取得中...');
+      for (const region of (legacyDone ? targets : [])) {
         for (const tab of [200, 600]) {
           try {
             const known = new Set((await sbGetAll('orders', `select=order_id&cc=eq.${region.cc}&tab=eq.${tab}&order=order_id`))
