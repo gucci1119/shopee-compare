@@ -2824,7 +2824,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
     }
   } catch (e) { trkOk = false; Logger.log('⚠ 追跡番号の既存値を読めませんでした＝tracking列は触らない: ' + String(e).slice(0, 120)); }
   for (var i = 0; i < sns.length; i += 50) {
-    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
+    var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: sns.slice(i, i + 50).join(','), response_optional_fields: 'buyer_username,item_list,total_amount,order_status,ship_by_date,create_time,pay_time,cancel_reason,cancel_by,buyer_cancel_reason,package_list,recipient_address,pre_order,days_to_ship' }, 'get');
     var _ol = ((jd.response || {}).order_list) || [];
     // ★customers を埋めるのはこの呼び出し。recipient_address は上の response_optional_fields に
     //   入れておかないと空で返る（別の get_order_detail 呼び出しに足しても意味が無い＝実際に
