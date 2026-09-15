@@ -15123,14 +15123,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let inv, orders;
     const ach = renderAlerts._cache; // ★タブ切替の度の全件再取得を解消（TTL120秒／更新ボタン・まとめて更新でforce）。invはensureInvが元々キャッシュ済
-    if (!force && ach && Date.now() - ach.at < 120000) { orders = ach.orders; inv = await ensureInv(); }
+    let rowsync = null;
+    if (!force && ach && Date.now() - ach.at < 120000) { orders = ach.orders; rowsync = ach.rowsync || null; inv = await ensureInv(); }
     else {
       try {
-        [inv, orders] = await Promise.all([
+        let rs = [];
+        [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
+          sbGetAll('app_kv', 'select=v&k=eq.rowsync_last').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）
         ]);
-        renderAlerts._cache = { orders, at: Date.now() };
+        renderAlerts._cache = { orders, at: Date.now(), rowsync: (rs && rs[0] && rs[0].v) || null };
+        rowsync = renderAlerts._cache.rowsync;
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
     const nowSec = Date.now() / 1000;
@@ -15163,6 +15167,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 7) 到着済なのに入庫待ちのまま：配送追跡が「配達完了/お届け済み」なのに status=入庫待ち＝✓入荷し忘れ（在庫に反映されず利益計算にも出ない）
     const arrivedNotRecv = inv.filter(r => r.status === '入庫待ち' && deliveredAt(r))
       .sort((a, b) => String(deliveredAt(b) || '').localeCompare(String(deliveredAt(a) || '')));
+    // 8) 📄利益管理表への転記（SCタブ側 userscript・3時間おき）が止まっている国：最後の成功から4時間超／最後が失敗／記録なし。
+    //    ★2026-09-16 PH のタブが7時間眠って転記が止まっていたのに、画面のどこにも出なかった（本人「画像とMy incomeも更新されないの？」）。生存記録は GAS rowsync_ping → app_kv.rowsync_last
+    const rowsyncRows = (() => {
+      if (!settings.depUrl && !settings.openapiUrl) return [];   // 転記を使っていない環境では出さない
+      const ccs = ['ph', 'br', 'vn', 'my', 'th', 'sg', 'tw']; const out = [];
+      // 生存記録そのものが動き始めて4時間未満なら「記録なし」の国は責めない（v1.3.4 を入れた直後に7か国が赤くなるのを防ぐ）
+      const newest = Math.max(0, ...ccs.map(c => { const r = (rowsync || {})[c]; const t = r && r.at ? Date.parse(r.at) : NaN; return isNaN(t) ? 0 : t; }));
+      const warming = !newest || (Date.now() - newest) < 4 * 3600000;
+      ccs.forEach(cc => {
+        const r = (rowsync || {})[cc];
+        const okAt = r && r.okAt ? Date.parse(r.okAt) : NaN, at = r && r.at ? Date.parse(r.at) : NaN;
+        const hrs = isNaN(okAt) ? Infinity : (Date.now() - okAt) / 3600000;
+        let why = '';
+        if (!r) { if (warming) return; why = '記録なし（4時間以上、1回も届いていない）'; }
+        else if (hrs > 4) why = '最後の成功から ' + (isFinite(hrs) ? Math.floor(hrs) + '時間' : '不明') + '（3時間おきのはず）';
+        else if (r.ok === false) why = '最後の実行が失敗';
+        if (!why) return;
+        const rg = regionByCc(cc.toUpperCase());
+        out.push({ cc: cc.toUpperCase(), why, lastOk: isNaN(okAt) ? '—' : new Date(okAt).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16), lastMsg: r ? esc(String(r.msg || '').slice(0, 90)) : '', host: rg ? rg.host : '' });
+      });
+      return out;
+    })();
     // 6) データ不整合の疑い：発送済(tab400)なのに追跡番号が無い＝DBが古い/同期漏れの可能性。
     //    ※未入金(tab<300)は「買い手がまだ払っていない」通常状態なので不整合ではない（Shopeeが期限切れで自動キャンセル）→ここでは除外し偽アラートを出さない。
     //    ※tab400にはキャンセル/返品/完了も含まれ、それらは追跡が無くて当然＝偽アラートになるので実ステータスで除外する。
@@ -15211,12 +15237,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ['画像', '商品名', '仕入元', '仕入額', '仕入から'],
         dead.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap"><b>${Math.floor(holdDays(r))}日</b></td></tr>`).join(''),
         `在庫保管中のまま仕入から90日以上＝<b style="color:#c0392b">資金が寝ている</b>状態。滞留している仕入額の合計 <b>${fmtJpy(deadVal)}</b>。値下げ・損切り・再出品を検討 → <button class="al-godead smd-btn" style="font-size:10.5px;padding:1px 8px">🏚 在庫の死に筋一覧で対処</button>`, 'al-dead') +
+      card('📄', '利益管理表への転記が止まっている国', '#b71c1c', rowsyncRows.length,
+        ['国', '理由', '最後の成功', '最後の記録', '開く'],
+        rowsyncRows.map(r => `<tr style="background:#fff5f5"><td style="font-size:11px;font-weight:700">${r.cc}</td><td style="font-size:11px">${esc(r.why)}</td><td style="font-size:11px;white-space:nowrap">${r.lastOk}</td><td style="font-size:11px">${r.lastMsg}</td><td>${r.host ? `<a href="https://${r.host}/portal/sale/order?type=toship" target="_blank" style="font-size:11px">SCタブ↗</a>` : ''}</td></tr>`).join(''),
+        '各国の Seller Center タブで動く転記（明細→_row・入金→F/G・画像→AC列）が3時間おきに届いていません。そのタブが閉じている／眠っている／ログイン切れが主な原因。タブを開いて左下の「▶ 今すぐ」を押すと再開します。Chrome設定→パフォーマンス→「常にアクティブにするサイト」に seller.shopee.* と banhang.shopee.vn を入れると眠りません。', 'al-rowsync') +
       card('🧾', 'データ不整合の疑い', '#c2185b', dataIssues.length,
         ['国', '注文SN', '商品', '注文日', '内容', '確認'],
         dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。', 'al-data');
 
-    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length;
+    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length;
     updateAlertBadge(total);
     // 内訳チップバー（443の中身を一目で＋クリックでその項目へジャンプ）
     const cats = [
@@ -15225,6 +15255,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['📦 相手未発送', stuckShip.length, '#e8710a', 'al-stuck'],
       ['⏳ 入庫待ち長期', stuckArrive.length, '#e8710a', 'al-arrive'],
       ['📸 確証未取得', noProof.length, '#7b52c4', 'al-proof'],
+      ['📄 転記停止', rowsyncRows.length, '#b71c1c', 'al-rowsync'],
       ['🧾 データ不整合', dataIssues.length, '#c2185b', 'al-data'],
       ['🏬 滞留在庫', dead.length, '#666', 'al-dead'],
     ];
@@ -17359,6 +17390,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-16', items: [
+      '\u{1F4C4} <b>🔔お知らせに「利益管理表への転記が止まっている国」を追加</b>（本人「結局同じタイミングで画像とマイインカムも更新されないの？」→ PH のタブが7時間眠って転記が止まっていたのに、どこにも出ていなかった）。各国の SC タブの転記スクリプト（v1.3.4）が毎回の結果を GAS 経由で Supabase（app_kv.rowsync_last）に残し、最後の成功から4時間超／最後が失敗／記録なしの国を赤で出します。',
+      '\u{1F512} <b>読み取りキーで Supabase に書けてしまう穴を塞ぐ準備</b>（実測：公開ページに載る publishable キーで app_kv に INSERT できた）。ポータル・GAS・userscript の書き込みは全部 service_role なので、anon の INSERT/UPDATE/DELETE を外しても動作は変わりません。SQL は `_gas_private/sql/2026-09-16_revoke_anon_writes.sql`（本人が Supabase にログインした状態で実行）。',
       '\u{23F1} <b>「まとめて更新」が「出品状況をShopeeから取得中…」のまま5分以上終わらない件</b>（本人「永遠に終わらんけど普通？」）。公式API設定済みのPCでも、ライブモードだとブリッジ経由で7か国の出品を全件取りに行っていました。今後は公式API（毎時の同期と同じ経路）に背景で任せ、ブリッジ経路は公式APIが無いPCだけに残します。📋出品一覧の🔄は従来どおりです。',
     ] },
     { date: '2026-09-15', items: [
