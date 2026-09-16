@@ -39,6 +39,47 @@ function aiSpendBump_(kind, u) {
   Object.keys(o.days).forEach(function (k) { if (k < cut) delete o.days[k]; });
   try { P_().setProperty('aiSpend', JSON.stringify(o)); } catch (e) {}
 }
+// 🧾 Anthropic の実績（Admin API usage_report）。ANTHROPIC_ADMIN_KEY（スクリプト プロパティ）が要る。
+//   62日ぶんを日×モデル×キーで {in,out,cacheWrite,cacheRead} に圧縮して控え、6時間は控えを返す（urlfetch は取り直しの時だけ・1〜3回）。
+function aiUsageReport_(force) {
+  var adminKey = ''; try { adminKey = P_().getProperty('ANTHROPIC_ADMIN_KEY') || ''; } catch (e) {}
+  if (!adminKey) return { ok: false, error: 'ANTHROPIC_ADMIN_KEY 未設定（GAS のスクリプト プロパティ）' };
+  var cached = null; try { var cs = P_().getProperty('aiUsageReport'); cached = cs ? JSON.parse(cs) : null; } catch (e) {}
+  if (cached && cached.at && !force && (Date.now() - Date.parse(cached.at)) < 6 * 3600 * 1000) return cached;
+  var from = new Date(Date.now() - 62 * 86400000); from.setUTCHours(0, 0, 0, 0);
+  var base = 'https://api.anthropic.com/v1/organizations/usage_report/messages?bucket_width=1d&limit=31&group_by[]=model&group_by[]=api_key_id&starting_at=' + encodeURIComponent(from.toISOString());
+  var days = {}, page = '', guard = 0;
+  while (guard++ < 4) {
+    ufBump_(1, 'anthropic(usage_report)');
+    var res = UrlFetchApp.fetch(base + (page ? '&page=' + encodeURIComponent(page) : ''), { method: 'get', headers: { 'x-api-key': adminKey, 'anthropic-version': '2023-06-01' }, muteHttpExceptions: true });
+    var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
+    if (code >= 400) return { ok: false, error: 'Anthropic HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 160) };
+    (j.data || []).forEach(function (b) {
+      var d = String(b.starting_at || '').slice(0, 10); if (!d) return;
+      (b.results || []).forEach(function (r) {
+        var k = String(r.model || '?') + '|' + String(r.api_key_id || '');
+        var t = (days[d] = days[d] || {})[k] || [0, 0, 0, 0];
+        var cw = 0; if (r.cache_creation && typeof r.cache_creation === 'object') Object.keys(r.cache_creation).forEach(function (x) { cw += Number(r.cache_creation[x]) || 0; }); else cw = Number(r.cache_creation_input_tokens) || 0;
+        t[0] += Number(r.uncached_input_tokens) || 0; t[1] += Number(r.output_tokens) || 0; t[2] += cw; t[3] += Number(r.cache_read_input_tokens) || 0;
+        days[d][k] = t;
+      });
+    });
+    if (!j.has_more || !j.next_page) break; page = j.next_page;
+  }
+  // キーの名前（api_key_id → name）。取れなくても id のまま出す
+  var names = {};
+  try {
+    var ids = {}; Object.keys(days).forEach(function (d) { Object.keys(days[d]).forEach(function (k) { var id = k.split('|')[1]; if (id) ids[id] = 1; }); });
+    Object.keys(ids).slice(0, 8).forEach(function (id) {
+      ufBump_(1, 'anthropic(api_keys)');
+      var r2 = UrlFetchApp.fetch('https://api.anthropic.com/v1/organizations/api_keys/' + encodeURIComponent(id), { method: 'get', headers: { 'x-api-key': adminKey, 'anthropic-version': '2023-06-01' }, muteHttpExceptions: true });
+      if (r2.getResponseCode() < 400) { var kj = {}; try { kj = JSON.parse(r2.getContentText() || '{}'); } catch (e) {} if (kj.name) names[id] = String(kj.name).slice(0, 40); }
+    });
+  } catch (e) {}
+  var out = { ok: true, at: new Date().toISOString(), from: Utilities.formatDate(from, 'Asia/Tokyo', 'yyyy-MM-dd'), days: days, keys: names };
+  try { P_().setProperty('aiUsageReport', JSON.stringify(out)); } catch (e) {}
+  return out;
+}
 function ufBump_(n, tag) {
   var c = (n > 0 ? n : 1);
   _ufRun += c;
@@ -791,6 +832,14 @@ function doGetInner_(e) {
       try { gbout = brandList_(parseInt(p.shop_id, 10), parseInt(p.category_id, 10), String(p.q || '')); }
       catch (err) { gbout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gbcb + '(' + JSON.stringify(gbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'ai_usage_report') {   // 🧾 Anthropic の実績（Admin API）・WRITE_TOKEN 必須（誰でも叩けると Anthropic を無駄に呼ばれる）・2026-09-16
+      var arcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var arout;
+      try { var arwt = P_().getProperty('WRITE_TOKEN'); if (!arwt || p.token !== arwt) throw new Error('WRITE_TOKEN不正'); arout = aiUsageReport_(String(p.force || '') === '1'); }
+      catch (err) { arout = { ok: false, error: String((err && err.message) || err) }; }
+      ufPersist_();
+      return ContentService.createTextOutput(arcb + '(' + JSON.stringify(arout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'uf_status') {
       var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');

@@ -1774,6 +1774,37 @@
     el.onclick = () => aiCostDetail();
   }
   // 💴 明細：いつ・何に・いくら使ったか（本人要望 2026-08-28「明細も見れたら」）
+  // 🧾 Anthropic 側の実績（Admin API の usage_report）。GAS のスクリプト プロパティ ANTHROPIC_ADMIN_KEY が要る。
+  //   ポータルが数え始める前（〜2026-09-16）の分も、Smart Reply の分も、キー別に全部ここに出る（本人「今までのも直して」）。
+  const AI_MODEL_PRICE = [ [/haiku/i, { in: 1, out: 5 }], [/sonnet/i, { in: 3, out: 15 }], [/opus/i, { in: 15, out: 75 }] ];
+  function aiModelYen(model, t) {
+    const p = (AI_MODEL_PRICE.find(x => x[0].test(model || '')) || [null, { in: 3, out: 15 }])[1];
+    return ((t[0] || 0) / 1e6 * p.in + (t[1] || 0) / 1e6 * p.out + (t[2] || 0) / 1e6 * p.in * 1.25 + (t[3] || 0) / 1e6 * p.in * 0.1) * AI_USDJPY;
+  }
+  function aiReportLoad() { try { return JSON.parse(localStorage.getItem('smdAiUsageReport') || 'null'); } catch (_) { return null; } }
+  async function aiReportFetch(force) {
+    const r = await gasCall({ action: 'ai_usage_report', token: settings.writeToken, force: force ? '1' : '' }, 90000);
+    if (!r || !r.ok) throw new Error((r && r.error) || '応答なし');
+    try { localStorage.setItem('smdAiUsageReport', JSON.stringify(r)); } catch (_) {}
+    return r;
+  }
+  function aiReportHtml(r) {
+    if (!r || !r.days) return '';
+    const days = r.days; const keys = Object.keys(days).sort().reverse();
+    const yenOfDay = (d) => Object.keys(days[d]).reduce((a, k) => a + aiModelYen(k.split('|')[0], days[d][k]), 0);
+    const months = [...new Set(keys.map(k => k.slice(0, 7)))].sort().reverse();
+    const byKey = {}; keys.forEach(d => Object.keys(days[d]).forEach(k => { const id = k.split('|')[1] || '?'; byKey[id] = (byKey[id] || 0) + aiModelYen(k.split('|')[0], days[d][k]); }));
+    const keyNames = r.keys || {};
+    const mrows = months.map(m => { const ds = keys.filter(k => k.slice(0, 7) === m); const y = ds.reduce((a, d) => a + yenOfDay(d), 0);
+      return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;font-weight:700">' + m + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + Math.round(y).toLocaleString() + '</td></tr>'; }).join('');
+    const krows = Object.keys(byKey).sort((a, b) => byKey[b] - byKey[a]).map(id => '<tr><td style="padding:3px 8px;border-top:1px solid #eee">' + esc(keyNames[id] || id) + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee">¥' + Math.round(byKey[id]).toLocaleString() + '</td></tr>').join('');
+    const drows = keys.slice(0, 45).map(d => { const parts = Object.keys(days[d]).map(k => { const [model, id] = k.split('|'); const t = days[d][k]; return esc((model || '').replace(/^claude-/, '')) + (id && Object.keys(byKey).length > 1 ? '<span class="smd-dim">/' + esc(keyNames[id] || id) + '</span>' : '') + ' ¥' + Math.round(aiModelYen(model, t)).toLocaleString() + '<span class="smd-dim" style="font-size:9.5px">（入' + ((t[0] || 0) + (t[2] || 0) + (t[3] || 0)).toLocaleString() + '・出' + (t[1] || 0).toLocaleString() + '）</span>'; });
+      return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;white-space:nowrap">' + d + '</td><td style="padding:3px 8px;border-top:1px solid #eee">' + parts.join('　') + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + Math.round(yenOfDay(d)).toLocaleString() + '</td></tr>'; }).join('');
+    return '<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと（Anthropic の実績・全キー）</div><table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:10px"><tbody>' + mrows + '</tbody></table>'
+      + (krows ? '<div style="font-weight:700;font-size:12px;margin:2px 0 4px">キーごと（' + r.from + '〜）</div><table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:10px"><tbody>' + krows + '</tbody></table>' : '')
+      + '<div style="font-weight:700;font-size:12px;margin:2px 0 4px">日ごと・モデルごと</div><table style="border-collapse:collapse;width:100%;font-size:11.5px"><tbody>' + drows + '</tbody></table>'
+      + '<div class="smd-dim" style="font-size:10.5px;margin-top:6px">取得 ' + esc(String(r.at || '').replace('T', ' ').slice(0, 16)) + '（UTC）・トークン数は Anthropic が集計した実数。円は入力/出力の単価から計算（キャッシュ書込1.25倍・読出0.1倍・$1=¥' + AI_USDJPY + '）。同じキーを Smart Reply でも使っていれば、その分もここに入ります。</div>';
+  }
   function aiCostDetail() {
     const days = aiSpendDays();
     const keys = Object.keys(days).sort().reverse();
@@ -1802,6 +1833,7 @@
     }).join('');
     const html = '<div style="font-size:12px">'
       + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶん＋GAS側（母数🤖の自動出品の写真判定）のぶんです。webchat の Smart Reply（自動返信）の分は含みません（あちらのドックの💰に出ます）。</div>'
+      + '<div id="ai-report-box" style="border:1px solid #cfd8e3;background:#f6f9fc;border-radius:8px;padding:10px;margin-bottom:14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:12.5px">🧾 Anthropic の実績（請求のもと・全期間・全キー）</b><button id="ai-report-btn" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 10px">🔄 取り直す</button></div><div id="ai-report-body" class="smd-dim" style="font-size:11px">読み込み中…</div></div>'
       + (months.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと</div>'
         + '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:14px"><thead><tr>'
         + '<th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
@@ -1832,6 +1864,20 @@
     const close = () => wrap.remove();
     wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
     const cbtn = wrap.querySelector('#ai-cost-close'); if (cbtn) cbtn.addEventListener('click', close);
+    // 🧾 Anthropic の実績：控えがあれば即出し、無ければ取りに行く（6時間は GAS 側の控えを返す＝Anthropic を叩かない）
+    const rbody = wrap.querySelector('#ai-report-body'), rbtn = wrap.querySelector('#ai-report-btn');
+    const setupNote = '<div>ポータルが数え始める前（〜2026-09-16）の分や Smart Reply の分まで含めた<b>本当の数字</b>は Anthropic 側にしかありません。取るには Admin API キーが要ります：'
+      + '<ol style="margin:4px 0 0 18px;padding:0;line-height:1.7"><li>console.anthropic.com → Settings → <b>Admin keys</b> で発行（組織の管理者だけ）</li><li>GAS「Shopee OpenAPI Sync」→ プロジェクトの設定 → スクリプト プロパティに <b>ANTHROPIC_ADMIN_KEY</b> として貼る（コードや Supabase には置かない）</li><li>ここで「🔄 取り直す」</li></ol></div>';
+    const paintReport = async (force) => {
+      if (!rbody) return;
+      const cached = aiReportLoad();
+      if (cached && cached.days && !force) { rbody.innerHTML = aiReportHtml(cached); rbody.classList.remove('smd-dim'); return; }
+      rbody.textContent = '取得中…（最大90秒）';
+      try { const r = await aiReportFetch(force); rbody.innerHTML = aiReportHtml(r); rbody.classList.remove('smd-dim'); }
+      catch (e) { const msg = String((e && e.message) || e); rbody.innerHTML = (/ANTHROPIC_ADMIN_KEY/.test(msg) ? '' : '<div style="color:#b3261e;margin-bottom:6px">取れませんでした：' + esc(msg) + '</div>') + setupNote; }
+    };
+    if (rbtn) rbtn.addEventListener('click', () => paintReport(true));
+    paintReport(false);
     const clr = wrap.querySelector('#ai-cost-clear');
     if (clr) clr.addEventListener('click', () => {
       if (!confirm('この端末に記録したAPI利用料の集計を消します。\n\u203BAnthropic側の請求は消えません。')) return;
@@ -17402,6 +17448,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-16', items: [
+      '\u{1F9FE} <b>💴の明細に「Anthropic の実績」を追加</b>（本人「今までのも直して」）。ポータルが数え始める前の分と Smart Reply の分は手元に記録が無く復元できないので、Anthropic の Admin API（usage_report）から日ごと・モデルごと・キーごとの実トークン数を取って出す。GAS のスクリプト プロパティ <b>ANTHROPIC_ADMIN_KEY</b> を入れると動く（手順は明細の中）。GAS 側で6時間は控えを返す＝Anthropic を叩き過ぎない。',
       '\u{1F4B4} <b>「💴 API利用料」が¥0のままだった穴を塞いだ</b>（本人「ポータルで使ったAPIがどれだけかをここで知りたい」）。JAN・型番調べしか数えておらず、<b>シリーズ調査・出品コンポーザーの写真判定・母数🤖の自動出品がGASで30分毎に走らせる写真判定</b>の3つが1円も載っていなかった。3つとも実際のトークン数で記録し、GAS側の分は uf_status のついでに受け取って合算する。webchat の Smart Reply の分は別（あちらのドックの💰）。',
       '\u{1F4C4} <b>🔔お知らせに「利益管理表への転記が止まっている国」を追加</b>（本人「結局同じタイミングで画像とマイインカムも更新されないの？」→ PH のタブが7時間眠って転記が止まっていたのに、どこにも出ていなかった）。各国の SC タブの転記スクリプト（v1.3.4）が毎回の結果を GAS 経由で Supabase（app_kv.rowsync_last）に残し、最後の成功から4時間超／最後が失敗／記録なしの国を赤で出します。',
       '\u{1F512} <b>読み取りキーで Supabase に書けてしまう穴を塞ぐ準備</b>（実測：公開ページに載る publishable キーで app_kv に INSERT できた）。ポータル・GAS・userscript の書き込みは全部 service_role なので、anon の INSERT/UPDATE/DELETE を外しても動作は変わりません。SQL は `_gas_private/sql/2026-09-16_revoke_anon_writes.sql`（本人が Supabase にログインした状態で実行）。',
