@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @namespace    gucci-shopee-chat
-// @version      3.44.3
+// @version      3.44.4
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -433,6 +433,7 @@
     seenMsg.add(id);
     msgBuffer.push({ id: id, source: 'shopee', cc: cc, buyer: buyer, conversation_id: cc + ':' + buyer,
       direction: fromMe ? 'out' : 'in', msg_type: msgType, text: text, msg_time: mt });
+    if (fromMe) _noteReal(cc + ':' + buyer, msgType, text, mt);   // ★3.44.4
     wsGot++;
     try { toast('📡 通信から取り込み: ' + buyer); } catch (_) {}
     try { flushSb(true); } catch (_) {}
@@ -442,7 +443,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.3';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.4';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -470,6 +471,48 @@
   const msgBuffer = [];         // 正規化メッセージ（DOM抽出）
   const seen = new Set();       // 生JSONの重複抑制
   const seenMsg = new Set();    // メッセージの重複抑制
+  // ★3.44.4 二重取り込みの解消：自分が送った直後の吹き出しは React 側の message.id が **クライアント側の uuid（暫定）** で、
+  //   数秒後に通信（WS）から **Shopee の数字ID（本物）** が来る。両方を書くと「送信1回＝2行」になっていた（実測：暫定248行のうち235行に本物の対があった）。
+  //   ①本物を書いた後、同じ会話・同じ向き(out)・±5分・同じ本文（画像は型だけ）の暫定行を消す（本物1行につき暫定1行まで）
+  //   ②本物を先に見ていたら、後から来る暫定行は最初から書かない
+  const PROV_ID_RE = /^sp\|[0-9a-f]{8}-[0-9a-f]{4}-/i;
+  const REAL_ID_RE = /^sp\|\d+$/;
+  const PROV_WIN_MS = 5 * 60000;
+  const _normTxt = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+  const _recentReal = [];   // {conv, type, text, t}（直近10分）
+  function _noteReal(conv, type, text, mt) {
+    try { const t = Date.parse(mt) || Date.now(); _recentReal.push({ conv, type, text: type === 'text' ? _normTxt(text) : '', t }); const cut = Date.now() - 10 * 60000; while (_recentReal.length && _recentReal[0].t < cut) _recentReal.shift(); if (_recentReal.length > 300) _recentReal.splice(0, _recentReal.length - 300); } catch (_) {}
+  }
+  function _hasRecentReal(conv, type, text, mt) {
+    try { const t = Date.parse(mt) || Date.now(); const nt = type === 'text' ? _normTxt(text) : ''; return _recentReal.some(r => r.conv === conv && r.type === type && Math.abs(r.t - t) <= PROV_WIN_MS && (type !== 'text' || r.text === nt)); } catch (_) { return false; }
+  }
+  let provDeleted = 0;
+  async function reconcileProvisional_(batch) {
+    try {
+      const reals = batch.filter(m => m && m.direction === 'out' && REAL_ID_RE.test(String(m.id || '')));
+      if (!reals.length) return;
+      const byConv = {}; reals.forEach(m => { (byConv[m.conversation_id] = byConv[m.conversation_id] || []).push(m); });
+      const convs = Object.keys(byConv).slice(0, 5);
+      for (const conv of convs) {
+        const ms = byConv[conv]; const ts = ms.map(m => Date.parse(m.msg_time) || Date.now());
+        const a = new Date(Math.min.apply(null, ts) - PROV_WIN_MS).toISOString(), b = new Date(Math.max.apply(null, ts) + PROV_WIN_MS).toISOString();
+        const q = 'chat_messages?select=id,msg_type,text,msg_time&conversation_id=eq.' + encodeURIComponent(conv) + '&direction=eq.out&id=like.' + encodeURIComponent('sp|*-*-*') + '&msg_time=gte.' + encodeURIComponent(a) + '&msg_time=lte.' + encodeURIComponent(b) + '&limit=50';
+        const r = await sbReq('GET', q);
+        const prov = (r && r.json && Array.isArray(r.json)) ? r.json.filter(p => PROV_ID_RE.test(String(p.id || ''))) : [];
+        if (!prov.length) continue;
+        const used = new Set(); const del = [];
+        ms.forEach(m => {
+          const t = Date.parse(m.msg_time) || 0; const nt = _normTxt(m.text);
+          const c = prov.filter(p => !used.has(p.id) && p.msg_type === m.msg_type && Math.abs((Date.parse(p.msg_time) || 0) - t) <= PROV_WIN_MS && (m.msg_type !== 'text' || _normTxt(p.text) === nt))
+            .sort((x, y) => Math.abs((Date.parse(x.msg_time) || 0) - t) - Math.abs((Date.parse(y.msg_time) || 0) - t))[0];
+          if (c) { used.add(c.id); del.push(c.id); }
+        });
+        if (!del.length) continue;
+        const d = await sbReq('DELETE', 'chat_messages?id=in.(' + del.map(x => encodeURIComponent('"' + x.replace(/"/g, '') + '"')).join(',') + ')', null, 'return=minimal');
+        if (d && d.status >= 200 && d.status < 300) { provDeleted += del.length; try { updateChip(); } catch (_) {} }
+      }
+    } catch (_) {}
+  }
   let captured = 0, sent = 0, lastErr = '';
   let skipNoDate = 0, keptDated = 0;   // 日付が確定できず捨てた行／確定できた行（効果を数字で確認するため）
 
@@ -995,6 +1038,8 @@
       const id = isFaq ? ('faq|' + h.cc + '|' + h.buyer + '|' + ymd + '|' + (useTm || '00:00'))
                : (_meta && _meta.mid) ? ('sp|' + _meta.mid)
                : ('dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body));
+      if (dir === 'out' && PROV_ID_RE.test(id) && _hasRecentReal(conv, msgType, body, mt)) return;   // ★3.44.4 本物を先に見ていたら暫定は書かない
+      if (dir === 'out' && REAL_ID_RE.test(id)) _noteReal(conv, msgType, body, mt);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
     });
     // ※以前はここで「読み終わりにIDが変わっていたらバッチごと捨てる」ようにしていたが、
@@ -1618,7 +1663,7 @@
     buffer.length = 0; // 生キャプチャは送らない＝溜めずに破棄（GASゼロ）
     try {
       const r = await sbReq('POST', 'chat_messages?on_conflict=id', mbatch, 'resolution=merge-duplicates,return=minimal');
-      if (r && r.status >= 200 && r.status < 300) { sent += mbatch.length; lastErr = ''; }
+      if (r && r.status >= 200 && r.status < 300) { sent += mbatch.length; lastErr = ''; reconcileProvisional_(mbatch); }   // ★3.44.4 本物を書けたら対になる暫定行を消す
       else { lastErr = 'SB ' + ((r && r.status) || '?') + ((r && r.json && r.json.message) ? (' ' + String(r.json.message).slice(0, 60)) : ''); msgBuffer.unshift.apply(msgBuffer, mbatch); }
     } catch (e) { lastErr = 'SB通信: ' + String((e && e.message) || e).slice(0, 40); msgBuffer.unshift.apply(msgBuffer, mbatch); }
     finally { flushing = false; updateChip(); } // ★何があっても必ず解除（ここが立ちっぱなしだと以降の書き込みが全部止まる）
