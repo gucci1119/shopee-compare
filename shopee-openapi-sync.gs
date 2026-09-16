@@ -27,6 +27,18 @@ var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop
 // ★どこで使ったかの内訳も数える（本人の問い「なぜこんなに消費するの？無駄に消費してる箇所あるんじゃない？」2026-08-23）。
 //   合計しか無いと「何が食っているか」が永久に分からない。API のパスごとに数えて uf_status で返す。
 var _ufTag = {};       // { '/api/v2/product/get_item_base_info': 123, ... }
+// 💴 Claude の利用料（トークン数）をスクリプト プロパティに貯め、uf_status のついでにポータルへ返す（urlfetch は増えない）。
+//   日付は JST・70日で捨てる。ポータル側は smdAiSpendGas に控えて、端末の記録と合算して「💴 API利用料」に出す。
+function aiSpendLoad_() { var o = null; try { var s = P_().getProperty('aiSpend'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || !o.days) o = { days: {} }; return o; }
+function aiSpendBump_(kind, u) {
+  if (!u) return;
+  var o = aiSpendLoad_(); var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var d = o.days[day] = o.days[day] || {}; var t = d[kind] = d[kind] || { in: 0, out: 0, search: 0, n: 0 };
+  t.in += (u.input_tokens || 0); t.out += (u.output_tokens || 0); t.search += ((u.server_tool_use || {}).web_search_requests || 0); t.n += 1;
+  var cut = Utilities.formatDate(new Date(Date.now() - 70 * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
+  Object.keys(o.days).forEach(function (k) { if (k < cut) delete o.days[k]; });
+  try { P_().setProperty('aiSpend', JSON.stringify(o)); } catch (e) {}
+}
 function ufBump_(n, tag) {
   var c = (n > 0 ? n : 1);
   _ufRun += c;
@@ -788,7 +800,7 @@ function doGetInner_(e) {
         // 何が食っているかの内訳（多い順・上位12）。合計しか見えないと原因が永久に分からない。
         var tg = st.tag || {}, top = Object.keys(tg).map(function (k) { return { k: k, n: tg[k] }; })
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 12);
-        ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP, top: top };
+        ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP, top: top, aiSpend: aiSpendLoad_() };   // 💴 Claude 利用料も同乗（2026-09-16）
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -4707,6 +4719,7 @@ function baJudge_(imgUrl, st, cache, capN) {
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
+  try { aiSpendBump_('写真の判定(自動出品)', j.usage); } catch (e) {}   // 💴 ポータルの「API利用料」に載せる（2026-09-16 まで1円も載っていなかった）
   if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');

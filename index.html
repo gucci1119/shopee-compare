@@ -1721,11 +1721,22 @@
   const AI_PRICE = {
     'JAN・型番調べ': { in: 1, out: 5, search: 10 },      // Haiku 4.5
     'シリーズ調査':  { in: 3, out: 15, search: 10 },     // Sonnet
+    '写真の判定': { in: 1, out: 5, search: 10 },            // Haiku（出品コンポーザー・母数🤖の写真判定）
+    '写真の判定(自動出品)': { in: 1, out: 5, search: 10 },   // Haiku（GAS boshuAutoTick の写真判定・30分毎に自動で走る）
     _default:        { in: 3, out: 15, search: 10 }
   };
   const AI_USDJPY = 150;
   function aiSpendLoad() {
     try { return JSON.parse(localStorage.getItem('smdAiSpend') || '{}'); } catch (_) { return {}; }
+  }
+  // ★GAS 側（母数🤖の自動出品が30分毎に走らせる写真判定）の利用料は GAS のスクリプト プロパティに貯まり、uf_status のついでに届く。
+  //   ポータルの記録（この端末）と合算して出す。GAS 側は【上書き】（サーバーの控えが正）
+  function aiSpendGasLoad() { try { return JSON.parse(localStorage.getItem('smdAiSpendGas') || '{}'); } catch (_) { return {}; } }
+  function aiSpendDays() {
+    const out = {};
+    const add = (days) => Object.keys(days || {}).forEach(day => { const o = out[day] = out[day] || {}; Object.keys(days[day]).forEach(k => { const t = days[day][k]; const p = o[k] = o[k] || { in: 0, out: 0, search: 0, n: 0 }; p.in += (t.in || 0); p.out += (t.out || 0); p.search += (t.search || 0); p.n += (t.n || 0); }); });
+    add((aiSpendLoad() || {}).days); add((aiSpendGasLoad() || {}).days);
+    return out;
   }
   function aiSpendAdd(kind, usage) {
     if (!usage) return;
@@ -1742,7 +1753,7 @@
   const aiYenOf = (byKind) => Object.keys(byKind || {}).reduce((a, k) => a + aiYen(byKind[k], k), 0);
   function aiCostDraw() {
     const el = document.getElementById('ai-cost'); if (!el) return;
-    const d = aiSpendLoad(); const days = d.days || {};
+    const days = aiSpendDays();
     const keys = Object.keys(days).sort();
     const today = jstDate(Date.now());
     const nOf = (o) => Object.keys(o || {}).reduce((a, k) => a + (o[k].n || 0), 0);
@@ -1756,7 +1767,7 @@
     el.style.fontWeight = yMonth >= 3000 ? '700' : '400';
     el.textContent = '💴 API利用料 今月 ¥' + yMonth.toLocaleString();
     // ★何にいくら使ったかの内訳。合計だけ見せても、どこを削ればいいか分からない
-    el.title = 'ポータルが使ったAPIの利用料です（AIのネット検索＝JAN・型番調べ／シリーズ調査）。\n'
+    el.title = 'ポータルが使ったAPIの利用料です（JAN・型番調べ／シリーズ調査／写真の判定／母数🤖の自動出品の写真判定＝GAS側）。\n'
       + '★実際に使ったトークン数から計算しています（見積もりではありません）。\n\n'
       + '今月（' + mon + '）¥' + yMonth.toLocaleString() + '　／　きょう ¥' + yToday.toLocaleString() + '　／　ぜんぶ ¥' + yAll.toLocaleString() + '\n\n'
       + 'クリックすると【日ごと・用途ごとの明細】が出ます。';
@@ -1764,7 +1775,7 @@
   }
   // 💴 明細：いつ・何に・いくら使ったか（本人要望 2026-08-28「明細も見れたら」）
   function aiCostDetail() {
-    const d = aiSpendLoad(); const days = d.days || {};
+    const days = aiSpendDays();
     const keys = Object.keys(days).sort().reverse();
     const kinds = [...new Set(keys.flatMap(k => Object.keys(days[k])))];
     const rowsHtml = keys.map(day => {
@@ -1790,7 +1801,7 @@
         + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">' + n + '回</td></tr>';
     }).join('');
     const html = '<div style="font-size:12px">'
-      + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶんです。</div>'
+      + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶん＋GAS側（母数🤖の自動出品の写真判定）のぶんです。webchat の Smart Reply（自動返信）の分は含みません（あちらのドックの💰に出ます）。</div>'
       + (months.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと</div>'
         + '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:14px"><thead><tr>'
         + '<th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
@@ -1854,6 +1865,7 @@
     } catch (_) {}
     // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
     //   ここで足しておかないと、そちらだけ残りが多く見えてしまう（Codexの指摘・2026-09-04）。
+    try { if (r.aiSpend && r.aiSpend.days) { localStorage.setItem('smdAiSpendGas', JSON.stringify(r.aiSpend)); aiCostDraw(); } } catch (_) {}   // 💴 GAS側の写真判定の利用料（2026-09-16）
     r.ext = ext; r.extKnown = extKnown; r.usedRaw = Number(r.used) || 0;
     r.used = (Number(r.used) || 0) + ext;
     window.__ufLast = r; window.__ufLastAt = Date.now();
@@ -3989,7 +4001,7 @@
     '⚡ JAN・型番を自動で入れる': '⚡ Fill JAN / model no. automatically',
     '▾ ひとつずつ実行する': '▾ Run them one by one', '▴ 閉じる': '▴ Close',
     '💴 APIの利用料 明細': '💴 API cost — details', '月ごと': 'By month', '日ごと・用途ごと': 'By day and purpose',
-    'JAN・型番調べ': 'JAN / model no. lookup', 'シリーズ調査': 'Series research',
+    'JAN・型番調べ': 'JAN / model no. lookup', 'シリーズ調査': 'Series research', '写真の判定': 'Photo check', '写真の判定(自動出品)': 'Photo check (auto-listing, GAS)',
     '🗑 この端末の記録を消す': '🗑 Clear this device\u2019s record',
     '🔎 選んだ明細のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected variations',
     '🔎 この明細を調べる': '🔎 Look up this variation',
@@ -17390,6 +17402,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-16', items: [
+      '\u{1F4B4} <b>「💴 API利用料」が¥0のままだった穴を塞いだ</b>（本人「ポータルで使ったAPIがどれだけかをここで知りたい」）。JAN・型番調べしか数えておらず、<b>シリーズ調査・出品コンポーザーの写真判定・母数🤖の自動出品がGASで30分毎に走らせる写真判定</b>の3つが1円も載っていなかった。3つとも実際のトークン数で記録し、GAS側の分は uf_status のついでに受け取って合算する。webchat の Smart Reply の分は別（あちらのドックの💰）。',
       '\u{1F4C4} <b>🔔お知らせに「利益管理表への転記が止まっている国」を追加</b>（本人「結局同じタイミングで画像とマイインカムも更新されないの？」→ PH のタブが7時間眠って転記が止まっていたのに、どこにも出ていなかった）。各国の SC タブの転記スクリプト（v1.3.4）が毎回の結果を GAS 経由で Supabase（app_kv.rowsync_last）に残し、最後の成功から4時間超／最後が失敗／記録なしの国を赤で出します。',
       '\u{1F512} <b>読み取りキーで Supabase に書けてしまう穴を塞ぐ準備</b>（実測：公開ページに載る publishable キーで app_kv に INSERT できた）。ポータル・GAS・userscript の書き込みは全部 service_role なので、anon の INSERT/UPDATE/DELETE を外しても動作は変わりません。SQL は `_gas_private/sql/2026-09-16_revoke_anon_writes.sql`（本人が Supabase にログインした状態で実行）。',
       '\u{23F1} <b>「まとめて更新」が「出品状況をShopeeから取得中…」のまま5分以上終わらない件</b>（本人「永遠に終わらんけど普通？」）。公式API設定済みのPCでも、ライブモードだとブリッジ経由で7か国の出品を全件取りに行っていました。今後は公式API（毎時の同期と同じ経路）に背景で任せ、ブリッジ経路は公式APIが無いPCだけに残します。📋出品一覧の🔄は従来どおりです。',
@@ -27250,6 +27263,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
       const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
       const j = await r2.json(); if (!r2.ok) throw new Error((j && j.error && j.error.message) || ('HTTP ' + r2.status));
+      try { if (j.usage) aiSpendAdd('写真の判定', { in: j.usage.input_tokens || 0, out: j.usage.output_tokens || 0 }); } catch (_) {}   // 💴 利用料に載せる（2026-09-16 まで載っていなかった）
       const txt = ((j.content || []).map(c => c.text || '').join('') || '').trim(); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {};
       return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
@@ -37515,7 +37529,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const s = document.createElement('script');
       const to = setTimeout(() => { cleanup(); reject(new Error('タイムアウト（60秒）')); }, 60000);
       function cleanup() { clearTimeout(to); try { delete window[cb]; } catch (_) {} if (s.parentNode) s.remove(); }
-      window[cb] = (data) => { cleanup(); resolve(data); };
+      window[cb] = (data) => { cleanup(); try { aiSpendAdd('シリーズ調査', data && data.usage); } catch (_) {} resolve(data); };   // 💴 利用料に載せる（2026-09-16 まで載っていなかった）
       s.onerror = () => { cleanup(); reject(new Error('GASに接続できません（URL/デプロイを確認）')); };
       s.src = settings.aiResearchUrl + (settings.aiResearchUrl.indexOf('?') >= 0 ? '&' : '?') + 'series=' + encodeURIComponent(series) + '&hw=' + encodeURIComponent(hw) + '&callback=' + cb;
       document.body.appendChild(s);
