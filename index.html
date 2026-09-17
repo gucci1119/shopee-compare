@@ -4373,7 +4373,7 @@
     "商品名・仕入元・セラー・追跡番号で検索": "Search by product name, supplier, seller or tracking number",
     "商品名・在庫Noで探す": "Search by product name or stock number",
     "商品名・在庫Noで検索（例: デュアルショック）": "Search by product name or stock number (e.g. DualShock)",
-    "商品名・明細名・item_id（日本語でもOK）": "Product name, variation name or item_id (Japanese is fine)",
+    "商品名・明細名・Product ID（日本語でもOK）": "Product name, variation name or Product ID (Japanese is fine)",
     "商品名・注文番号・バイヤー・理由": "Product name, order number, buyer or reason",
     "商品名（編集可）": "Product name (editable)",
     "国で絞り込み": "Filter by country",
@@ -17461,6 +17461,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-18', items: [
+      '\u{1F50D} <b>出品一覧の検索を Product ID で</b>（本人「Product IDでも検索できるように」）。数字の ID（item_id）に加えて<b>明細ID（model_id）</b>でも当たり、「ID52200648598」や <b>Shopee の商品URL・セラーセンターのURLを貼っても</b> ID だけ取り出して探します。',
+    ]},
     { date: '2026-09-17', items: [
       '\u{1F5BC} <b>🤖自動出品：写真をこのブラウザで自動で集める</b>（本人「自動で回す」）。母数ページを開いている間、30分ごとに次の候補（40件・ヤフオクは叩かない）の中古写真と相場をメルカリで集めて保存します。見つからなかった作品は3日は引き直しません。②どう出す のチェックでOFFにでき、③の「🖼 いま集める」で手動でも回せます。GASの実行は写真が揃った作品から出すので、ヤフオクがGoogleのIPを弾いていても止まりません。',
       '\u{1F524} <b>🤖自動出品：明細の英名を Claude に聞く</b>（本人「精度も上げたい」）。作品マスタに英名が無い作品は、Google翻訳→30字で機械的に切っていたので「Incredibles: Rise of」のような途中切れの名前が出ていました。作品マスタ→AI（正式な英題と、続編と区別できる30字の短縮形）→翻訳の順にし、聞いた結果は控えて二度聞きません（1作品 約¥0.1）。',
@@ -34154,11 +34157,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (q) {
       const terms = (q.match(/"[^"]*"|\S+/g) || []).map(t => t.replace(/^"|"$/g, '')).filter(Boolean);
       const inc = [], exc = [];
-      terms.forEach(t => { if (/^[-−!]/.test(t) && t.length > 1) exc.push(t.slice(1)); else inc.push(t); });
+      // ★ID で探しやすく（本人「Product IDでも検索できるように」2026-09-18）：「ID52200648598」や Shopee の商品URL（…-i.<shop>.<item>／product/<shop>/<item>／product_id=…）を貼っても数字の ID として当てる
+      const idOf = (t) => { let m = t.match(/^id[:：]?\s*(\d{6,})$/i); if (m) return m[1]; m = t.match(/-i\.(\d+)\.(\d{6,})/) || t.match(/\/product\/\d+\/(\d{6,})/) || t.match(/product_id=(\d{6,})/) || t.match(/[?&]item_id=(\d{6,})/); return m ? m[m.length - 1] : t; };
+      terms.forEach(t => { if (/^[-−!]/.test(t) && t.length > 1) exc.push(idOf(t.slice(1))); else inc.push(idOf(t)); });
       const hay = (r) => {
         const p = pidOf(pidKey(r.parent_sku));
         const raw = [(r.name || ''), String(r.item_id), (r.parent_sku || ''), (p.jan || ''), (p.mpn || ''),
           ((r.models || []).map(m => m.n || '').join(' ')),
+          ((r.models || []).map(m => (m.id != null ? String(m.id) : '')).filter(Boolean).join(' ')),   // 明細ID（model_id）でも当たる
           ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ');   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
         return kwNorm(raw);   // ★アクセントを落として比べる（Pokémon→pokemon）
       };
@@ -34383,7 +34389,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div class="lst-zone zone-fil">
         <span class="zlbl">🔎 絞り込む<br><span style="font-weight:400;color:#b08070;font-size:9.5px">件数が変わる</span></span>
         <span style="position:relative;display:inline-flex;align-items:center">
-          <input type="text" id="lst-search" placeholder="商品名・明細名・item_id（日本語でもOK）" value="${esc(lst.search || '')}" title="スペース区切りで全部を含む商品を出します（AND）。&#10;先頭に - を付けた語は【除外】します。例）pokemon -card&#10;スペースを含めて1語にしたいときは &quot;…&quot; で囲みます。&#10;商品名・明細名・親SKU・JAN/型番・item_id が対象です。&#10;日本語で打っても英語の出品に当たります（ポケモン→Pokemon）" style="padding:4px 22px 4px 8px;font-size:11.5px;border:1px solid #ffc9ba;border-radius:6px;width:300px;min-width:220px">
+          <input type="text" id="lst-search" placeholder="商品名・明細名・Product ID（日本語でもOK）" value="${esc(lst.search || '')}" title="スペース区切りで全部を含む商品を出します（AND）。&#10;先頭に - を付けた語は【除外】します。例）pokemon -card&#10;スペースを含めて1語にしたいときは &quot;…&quot; で囲みます。&#10;商品名・明細名・親SKU・JAN/型番・Product ID（item_id・明細ID）が対象です。「ID52200648598」や Shopee の商品URLを貼っても ID で当たります。&#10;日本語で打っても英語の出品に当たります（ポケモン→Pokemon）" style="padding:4px 22px 4px 8px;font-size:11.5px;border:1px solid #ffc9ba;border-radius:6px;width:300px;min-width:220px">
           <button id="lst-searchclr" title="検索を消す" style="position:absolute;right:4px;border:none;background:none;color:#aaa;font-size:14px;line-height:1;cursor:pointer;${(lst.search || '') ? '' : 'display:none'}">✕</button>
         </span>
         <span class="smd-dim" style="font-size:9.5px;color:#a98a7e;line-height:1.35">スペース＝すべて含む／<b>-語</b>＝除く<br>日本語で打っても英語の出品に当たります</span>
