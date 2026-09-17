@@ -17462,7 +17462,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-18', items: [
-      '\u{1F50D} <b>出品一覧の検索を Product ID で</b>（本人「Product IDでも検索できるように」）。数字の ID（item_id）に加えて<b>明細ID（model_id）</b>でも当たり、「ID52200648598」や <b>Shopee の商品URL・セラーセンターのURLを貼っても</b> ID だけ取り出して探します。',
+      '\u{1F50D} <b>出品一覧の検索を Product ID で</b>（本人「Product IDでも検索できるように」）。数字の ID（item_id）に加えて<b>明細ID（model_id）</b>でも当たり、「ID52200648598」や <b>Shopee の商品URL・セラーセンターのURLを貼っても</b> ID だけ取り出して探します。ID で探している時は、国や「バリエーションだけ」などの絞り込みで 0件なら<b>絞り込みを無視して全件から</b>当てます（SC の Product ID を貼って 0件になっていた原因はこれ）。',
     ]},
     { date: '2026-09-17', items: [
       '\u{1F5BC} <b>🤖自動出品：写真をこのブラウザで自動で集める</b>（本人「自動で回す」）。母数ページを開いている間、30分ごとに次の候補（40件・ヤフオクは叩かない）の中古写真と相場をメルカリで集めて保存します。見つからなかった作品は3日は引き直しません。②どう出す のチェックでOFFにでき、③の「🖼 いま集める」で手動でも回せます。GASの実行は写真が揃った作品から出すので、ヤフオクがGoogleのIPを弾いていても止まりません。',
@@ -34135,7 +34135,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const specsReady = lstSpecs && Object.keys(lstSpecs).length > 0; // GASのlisting_specsがまだ無ければコンディション/ブランドUIは出さない
     const brands = specsReady ? [...new Set(all.map(r => specOf(r.item_id).brand).filter(Boolean))].sort() : [];
     const q = kwNorm(lst.search).trim();
-    let rows = all;
+    let rows = all; lst._idSearch = null;
     // 🔎 どの条件で何件まで減ったかを控える。0件になった時に【どれを外せば見えるか】を
     //   その場で出すため（本人「PHのヒットがゼロって明らかにおかしい」→実は条件が3つ効いていた）。
     //   ★判定は二重に持たない。ここは絞り込んだ【あと】の件数を控えるだけ。
@@ -34172,6 +34172,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const incV = inc.map(kwExpand), excV = exc.map(kwExpand);
       rows = rows.filter(r => { const h = hay(r);
         return incV.every(vs => vs.some(t => h.includes(t))) && !excV.some(vs => vs.some(t => h.includes(t))); });
+      // ★ID だけで探している時の逃げ道（下で使う）：他の絞り込み（国・明細/単品・状態…）で 0件になったら、全件から ID で当て直す
+      lst._idSearch = (inc.length && !exc.length && inc.every(t => /^\d{6,}$/.test(t))) ? (r => incV.every(vs => vs.some(t => hay(r).includes(t)))) : null;
       T('q', '検索「' + lst.search + '」');
     }
     // 公開/非公開（status 1=公開・それ以外=非公開）
@@ -34305,6 +34307,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       return `<button class="lst-cc" data-cc="${r.cc}" title="${r.cc}だけに絞る（クリックで追加／もう一度で解除・複数選べます）｜この国の全出品 ${(lst.byCc[r.cc] || []).length}件" style="font:inherit;font-weight:700;cursor:pointer;border:1px solid ${on ? r.color : '#ddd'};background:${on ? r.color : '#fff'};color:${on ? '#fff' : r.color};border-radius:10px;padding:1px 9px">${r.cc}<span style="font-weight:400;opacity:.85;margin-left:2px">${n}</span></button>`;
     }).join(' ') + (ccSel.length ? ` <button class="lst-cc" data-cc="" title="国の絞り込みを解除" style="font:inherit;cursor:pointer;border:1px solid #bbb;background:#fff;color:#666;border-radius:10px;padding:1px 9px">✕ 国すべて</button>` : '');
     if (ccSel.length) { rows = rows.filter(r => ccSel.indexOf(r.cc) >= 0); T('ccs', '国 ' + ccSel.join('・') + 'だけ'); }
+    // ★Product ID で探している時は他の絞り込みで消さない（本人が SC の Product ID を貼って 0件＝実は「PHだけ」「バリエーションだけ」が効いていた 2026-09-18）
+    if (lst._idSearch && !rows.length) { rows = all.filter(lst._idSearch); trace.length = 0; trace.push({ id: 'q', label: 'IDで検索（国・明細/単品・状態などの絞り込みは無視）', n: rows.length, prev: all.length }); }
     lst._trace = trace;
     // 🌏横並び（国横断）：同じタイトルで各国を束ねる
     let gridGroups = null;
