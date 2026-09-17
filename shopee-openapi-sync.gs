@@ -387,7 +387,7 @@ function doGetInner_(e) {
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10)) : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1') : boshuAutoTick(true)));
+        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1') : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -4733,7 +4733,75 @@ function baLog_(st, line) {
   st.log = st.log || []; st.log.unshift({ at: new Date().toISOString(), m: String(line).slice(0, 300) }); if (st.log.length > 120) st.log.length = 120;
 }
 // 英語の明細名（30字）。作品マスタの英名があればそれ、無ければ日本語をGoogle翻訳（LanguageApp）。
-function baEnName_(row) {
+// ★v182 文章だけの Claude（Haiku）呼び出し（英題・同一作品判定）。鍵は CLAUDE_KEY（写真判定と同じ）。
+//   返り：{nokey:true}（鍵なし）／null（失敗・上限）／JSON オブジェクト。1日の回数は st.aiTextCap（既定 dailyMax×4）で頭打ち＝暴走しても数十円
+function baClaudeJson_(prompt, st, tag, maxTokens) {
+  var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
+  if (!key) return { nokey: true };
+  var cap = Number((st && st.aiTextCap) || 0) || 400;
+  if (st && st.today) {
+    if ((st.today.aiText || 0) >= cap) { if (!st.today.capT) { st.today.capT = 1; baLog_(st, '⚠ 今日の文章AI（英題・同一作品）が上限 ' + cap + ' 回→これ以上は聞かない'); } return null; }
+    st.today.aiText = (st.today.aiText || 0) + 1;
+  }
+  var body = { model: 'claude-haiku-4-5-20251001', max_tokens: maxTokens || 200, messages: [{ role: 'user', content: prompt }] };
+  ufBump_(1, 'boshu_auto(' + tag + ')');
+  var res; try { res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true }); }
+  catch (e) { if (st) baLog_(st, '⚠ AI(' + tag + ') 通信失敗 ' + String(e).slice(0, 60)); return null; }
+  var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
+  try { aiSpendBump_(tag + '(自動出品)', j.usage); } catch (e) {}
+  if (code >= 400) { if (st) baLog_(st, '⚠ AI(' + tag + ') HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return null; }
+  var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/);
+  try { return m ? JSON.parse(m[0]) : null; } catch (e) { return null; }
+}
+var BA_EN = 'boshu_auto_en';       // 作品鍵 → {en, short, src}（AIに聞いた英題の控え。同じ作品は二度聞かない）
+var BA_SAME = 'boshu_auto_same';   // md5(作品|出品題名) → 'ok:理由' / 'ng:理由'
+// ★v182 同一作品判定：仕入元の出品題名が「同じ作品・同じ機種のソフト本体」か。続編・別機種・周辺機器・まとめ売り・攻略本を落とす（規則の漏れをAIで拾う）
+//   鍵が無ければ判定なしで通す（写真判定と同じ方針）。鍵があるのに判定できなければ通さない
+function baSameTitle_(c, hw, listingTitle, st, cache) {
+  var t = String(listingTitle || '').replace(/\s+/g, ' ').trim(); if (!t) return { same: true, judged: false, why: 'notitle' };
+  var k = '';
+  try { k = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(hw || '') + '|' + String(c.key || c.ja || c.en) + '|' + t, Utilities.Charset.UTF_8)).slice(0, 22); } catch (e) { k = String(hw || '') + '|' + String(c.key || '') + '|' + t.slice(0, 60); }   // 機種込み（同じ作品鍵がPS2/GCで共有される・Codex指摘）
+  if (cache && cache[k] != null) { var v = String(cache[k]); return { same: v.indexOf('ok:') === 0, judged: true, why: v.slice(3), cached: true }; }
+  var o = baClaudeJson_('Target game: Japanese title "' + String(c.ja || '') + '"' + (c.en ? ' / English title "' + String(c.en) + '"' : '') + ' (platform: ' + (BA_HW_LABEL[hw] || hw) + ').\n' +
+    'Marketplace listing title (Japanese): "' + t.slice(0, 140) + '"\n' +
+    'Is this listing the SAME game software for the SAME platform? Answer false if it is a sequel/prequel/spin-off/different numbered entry, a different game in the series, a version for another platform, a peripheral/accessory/console, a bundle of several games, a guide book/soundtrack/figure, or an empty box/manual only. A different edition of the same game (Best/廉価版/limited) is still the same game.\n' +
+    'Reply JSON only: {"same": true|false, "why": "<short reason in Japanese>"}', st, '同一作品判定', 120);
+  if (o && o.nokey) return { same: true, judged: false, why: 'nokey' };
+  if (!o) return { same: false, judged: false, why: 'unjudged' };
+  var same = !!o.same, why = String(o.why || '').slice(0, 60);
+  if (cache) cache[k] = (same ? 'ok:' : 'ng:') + why;
+  return { same: same, judged: true, why: why };
+}
+function baEnTidy_(en) {
+  en = String(en || '').replace(/[""''"]/g, '').replace(/\s*[-–—:：]\s*(special|limited|deluxe|premium|collector'?s|anniversary|complete|definitive|remaster(ed)?|hd)\s+edition\b/ig, '')
+         .replace(/\s{2,}/g, ' ').replace(/[,\.]+$/g, '').trim();
+  en = en.replace(/\b[a-z]/g, function (c) { return c.toUpperCase(); });
+  return en.split(' ').map(function (w, i) { return (i > 0 && /^(The|A|An|Of|For|With|And|In|On|To|By|From)$/.test(w)) ? w.toLowerCase() : w; }).join(' ');
+}
+// 英名：①作品マスタの英名 ②控え（前にAIに聞いた） ③Claude に正式な英題（＋30字の短縮形）を聞く ④Google翻訳（最後の手段）
+//   ★v182 まで Google翻訳→30字で機械的に切っていたので「Incredibles: Rise of」のような途中切れの明細名が出ていた（買い手が検索する名前＝一番効く所）
+function baEnName_(row, st, enCache, hw) {
+  var en = String(row.en || '').trim(), ja = String(row.ja || '').trim();
+  var key = row.key || baKey_(ja) || baKey_(en);
+  var cached = (enCache && key) ? enCache[key] : null;
+  var aiShort = (cached && cached.short) ? String(cached.short) : '';
+  if (!en && cached && cached.en && cached.src === 'ai') en = String(cached.en);   // 控えはAIの分だけ（翻訳の結果は控えない＝AIが使えるようになったら聞き直す・Codex指摘）
+  if (!en && ja && st) {
+    var o = baClaudeJson_('Japanese video game title: "' + baCleanJa_(ja) + '" (platform: ' + (BA_HW_LABEL[hw || ''] || hw || 'unknown') + ').\n' +
+      'Reply JSON only: {"en": "<official English / Western release title; if it was never released in English, the commonly used romanized title>", "short": "<the same title in at most 30 characters (letters, digits, spaces, basic punctuation only), keeping the numbers and subtitle words that distinguish it from other games in the series; drop a leading The; no trailing cut-off words>", "known": true|false}', st, '英題', 200);
+    if (o && !o.nokey && o.en && !/[ぁ-んァ-ヶ一-龠]/.test(String(o.en))) { en = String(o.en); aiShort = String(o.short || ''); if (enCache && key) enCache[key] = { en: en, short: aiShort, known: !!o.known, src: 'ai', at: Date.now() }; }
+  }
+  if (!en && ja) { try { en = String(LanguageApp.translate(baCleanJa_(ja), 'ja', 'en') || '').trim(); } catch (e) { en = ''; } }
+  if (!en) return '';
+  en = baEnTidy_(en);
+  if (en.length <= 30) return en;
+  if (aiShort) { var s2 = baEnTidy_(aiShort); if (s2 && s2.length <= 30 && !/[ぁ-んァ-ヶ一-龠]/.test(s2)) return s2; }
+  var shr = [[/\b(the|a|an)\s+/ig, ''], [/\s*\((?!.*\d).*?\)\s*/g, ' '], [/\bvolume\b/ig, 'Vol'], [/\bversion\b/ig, 'Ver'], [/\bspecial\b/ig, 'SP'], [/\bcollection\b/ig, 'Coll'], [/\badventures?\b/ig, 'Adv'], [/\bchronicles?\b/ig, 'Chron'], [/\s+/g, ' ']];
+  for (var i = 0; i < shr.length; i++) { en = en.replace(shr[i][0], shr[i][1]).trim(); if (en.length <= 30) return en; }
+  var cut = en.slice(0, 31), sp = cut.lastIndexOf(' ');
+  return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim();
+}
+function baEnNameOld_(row) {
   var en = String(row.en || '').trim();
   if (!en && row.ja) { try { en = String(LanguageApp.translate(baCleanJa_(row.ja), 'ja', 'en') || '').trim(); } catch (e) { en = ''; } }
   if (!en) return '';
@@ -4934,13 +5002,15 @@ function boshuAutoTick(manual) {
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
     var judgeCap = dailyMax * 3;
+    var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
+    st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
     var picks = [];
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
-      var en = baEnName_(c); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
+      var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
@@ -4951,10 +5021,17 @@ function boshuAutoTick(manual) {
       if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
-        var okM = /^AI判定OK/.test(String(pm.judge || ''));
-        if (!okM) { var jdM = baJudge_(pm.thumb || pm.img, st, judged, judgeCap); okM = jdM.ok; if (jdM.judged) pm.judge = (okM ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）'; }
-        if (!okM) { var altsM = pm.alts || []; for (var ai = 0; ai < altsM.length && ai < 2 && !okM; ai++) { var al = altsM[ai]; if (!al || !al.img || (used[al.img] && used[al.img] !== c.key)) continue; var jdA = baJudge_(al.thumb || al.img, st, judged, judgeCap); if (jdA.ok) { pm = Object.assign({}, pm, al, { judge: jdA.judged ? 'AI判定OK（' + jdA.kind + '）' : '' }); okM = true; } } }
-        if (!okM) { baLog_(st, '📷 実物の写真でない（メルカリ）→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
+        /* ★v182 先に「同じ作品の出品か」（題名・文章AI）、通ったら「実物の写真か」（画像AI）。どちらかで落ちたら次の候補（最大2枚）、それも駄目ならヤフオクへ */
+        var okM = false, sameNgM = 0, sameUnj = 0, candsM = [pm].concat((pm.alts || []).slice(0, 2));
+        for (var ci = 0; ci < candsM.length && !okM; ci++) {
+          var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
+          var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
+          if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
+          var okP = (ci === 0) && /^AI判定OK/.test(String(pm.judge || ''));
+          if (!okP) { var jdM = baJudge_(cm.thumb || cm.img, st, judged, judgeCap); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
+          if (okP) { pm = (ci === 0) ? Object.assign({}, pm, cm) : Object.assign({}, pm, cm, { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
+        }
+        if (!okM) { baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
       }
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
@@ -4971,9 +5048,10 @@ function boshuAutoTick(manual) {
       if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', triedY = 0;
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var jy = baJudge_(u, st, judged, judgeCap); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
+      var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
-      if (!img) { var whyY = triedY ? 'noimg_ai' : 'noimg'; baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : '写真なし: ') + (c.ja || c.en)); Utilities.sleep(1500); continue; }
+      if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -4984,6 +5062,7 @@ function boshuAutoTick(manual) {
     }
     out.titles = picks.length;
     try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {}
+    try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
     var touchedShops = {};
@@ -5062,29 +5141,45 @@ function baLoadCtx_(cfg, hw, ccs) {
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0 };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
-function boshuAutoPreview_(hw, limit) {
+function boshuAutoPreview_(hw, limit, noYahoo, needPhoto) {
+  var lockP = LockService.getScriptLock();
+  if (!lockP.tryLock(20000)) return { ok: false, error: 'いま自動出品（30分毎の実行）が走っています。数分後にもう一度' };   // ★tick と同じロック＝AI回数・控えの読み書きを競合させない（Codex指摘）
+  try { return boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto); } finally { try { lockP.releaseLock(); } catch (eL) {} }
+}
+function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
+  if (noYahoo && !bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };   // ★自動（写真集め）の呼び出しは背景扱い＝枠を侵さない（Codex指摘）
   var cfg = baKv_(BA_CFG) || {};
   if (!hw || !cfg.family || !cfg.family[hw] || !(cfg.family[hw].sku || cfg.family[hw].nameKey)) return { ok: false, error: 'その機種の足す先（カタログ群）が設定されていません' };
   var ccs = (cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs.slice() : (cfg.ccs || []).slice();
   if (!ccs.length) return { ok: false, error: '国が選ばれていません' };
   var t0 = Date.now();
   var ctx = baLoadCtx_(cfg, hw, ccs);
-  var n = Math.max(1, Math.min(20, Number(limit) || 20));
+  var n = Math.max(1, Math.min(noYahoo ? 60 : 20, Number(limit) || 20));   // ★v182 noYahoo（写真集めの候補出し）は60件まで
   // ★写真・仕入れ目安・出品予定額まで出す（本人「画像や仕入れ額もいるだろ」「出品予定額はミスがないかチェックしたい」）＝実行時と同じ手順でヤフオクを引く（1件≈2秒）
   var used = baKv_(BA_IMGS) || {}, hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
   var pre = baKv_('boshu_auto_pre') || {};
   var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
   var blocked = false, rows = [];
-  ctx.cand.slice(0, n).forEach(function (c) {
+  var stP = baKv_(BA_ST) || {}; var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  if (!stP.today || stP.today.d !== todayJ) stP.today = { d: todayJ, n: 0, added: 0 };   // ★tick と同じ日付で数える（Codex指摘）
+  stP.aiTextCap = (Number(cfg.dailyMax) || 100) * 4;   // tick と同じ上限（プレビューだけ多く使わない・Codex指摘）
+  var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}, pvJudged = 0;   // ★v182
+  try { stP.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
+  var candList = ctx.cand;
+  if (needPhoto) candList = candList.filter(function (c) { var p0 = pre[c.key]; return !(p0 && (p0.img || (p0.missAt && Date.now() - Date.parse(p0.missAt) < 3 * 86400000))); });   // ★写真集め用：写真がある／3日以内に探して無かった作品は最初から外す（先頭40件で詰まらない・Codex指摘）
+  candList.slice(0, n).forEach(function (c) {
     var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {}, sold: c.sold || 0 };
-    try { var en2 = baEnName_(c); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; } catch (e) {}
+    /* ★写真集め用（needPhoto）は英名を作らない＝AIの予算を出品の判定に残す（検索は日本語名で足りる・Codex指摘） */
+    if (!needPhoto) { try { var en2 = baEnName_(c, stP, enCache, hw); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; var ce = enCache[c.key]; row.enSrc = c.en ? 'master' : (ce ? ce.src : ''); } catch (e) {} }
     var pm = pre[c.key];
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
       row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = Number(pm.cost || pm.price) || 0; row.hits = Number(pm.hits) || 1; row.from = 'mercari';
       row.stock = (row.hits >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
+      /* ★v182 集めてある出品が「同じ作品」かを文章AIで確かめる（控えがあれば無料）。違えば注意書き＝人が🔁別の写真で差し替えるか、GASが実行時に次の候補を試す */
+      if (pm.name && pvJudged < 40) { var smP = baSameTitle_(c, hw, pm.name, stP, sameCache); if (smP.judged && !smP.cached) pvJudged++; if (!smP.same) row.note = '⚠ AI：集めた出品は別の作品らしい（' + (smP.why || '') + '）→ 実行時は次の候補を試す'; else if (smP.judged) row.sameOk = 1; }
     }
-    else if (!blocked && Date.now() - t0 < 200000) {
+    else if (!blocked && !noYahoo && Date.now() - t0 < 200000) {
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || ''); var q = (qBase + ' ' + hwWord).trim();
       var y = baYahoo_(q);
       if (y.blocked) { blocked = true; row.note = 'ヤフオクに弾かれた'; }
@@ -5128,9 +5223,12 @@ function boshuAutoPreview_(hw, limit) {
     });
     rows.push(row);
   });
-  var st = baKv_(BA_ST) || {}; st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, blocked: blocked }; try { baKvSet_(BA_ST, st); } catch (e) {}
+  var st = baKv_(BA_ST) || {}; if (!needPhoto) st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, blocked: blocked, noYahoo: !!noYahoo }; st.aiKey = stP.aiKey;
+  /* 写真集め用（needPhoto）の一覧は🔜の表示を上書きしない */
+  st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today; try { baKvSet_(BA_ST, st); } catch (e) {}
+  try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
   ufPersist_();
-  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, blocked: blocked };
+  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, blocked: blocked, aiKey: !!stP.aiKey };
 }
 // ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
 function boshuAutoExclude_(hw, key, undo) {
@@ -5161,7 +5259,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     var k1 = baTmKey_(r.ja), k2 = r.en ? baTmKey_(r.en) : '', k3 = r.key, k4 = r.en ? baKey_(r.en) : '';
     var need = ccs.filter(function (cc) {
       var d = (ledger[r.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;   // 済み
-      if (d && /^skip:(noimg|noname|dup|nofam|manual)/.test(String(d))) return false;                           // 前に見送った理由が変わらないもの
+      if (d && /^skip:(noimg|noname|dup|nofam|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
       if (!(famRows[cc] || []).length) return false;                                                     // その国に家族カタログが無い
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
