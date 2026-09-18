@@ -387,7 +387,7 @@ function doGetInner_(e) {
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1') : boshuAutoTick(true)));
+        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -5162,7 +5162,7 @@ function boshuAutoTick(manual) {
     return out;
   }
 }
-function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
+function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
 function baLoadCtx_(cfg, hw, ccs) {
   // 出している（国別）＝listings の明細名とJAN
@@ -5308,13 +5308,18 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, blocked: blocked, aiKey: !!stP.aiKey };
 }
 // ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
-function boshuAutoExclude_(hw, key, undo) {
+function boshuAutoExclude_(hw, key, undo, any, ja) {
+  /* ★v191 見送った作品から戻す（本人 2026-09-18「見送った作品から復旧させることもできるようにして」）：any=1 なら skip:manual に限らず、その作品の見送りの印（skip:*）を全部消す＝次の実行でまた候補になる。出品済みの印（item_id#model_id）は消さない。古い記録には key が無いので日本語名から作る */
+  if (!key && ja) key = baKey_(ja);
   if (!hw || !key) return { ok: false, error: 'hw/key が必要です' };
   var ledger = baKv_('boshu_auto_done_' + hw) || {}; var cfg = baKv_(BA_CFG) || {}; var ccs = ((cfg.family || {})[hw] && cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs : (cfg.ccs || []);
-  if (undo) { if (ledger[key]) { Object.keys(ledger[key]).forEach(function (cc) { if (ledger[key][cc] === 'skip:manual') delete ledger[key][cc]; }); if (!Object.keys(ledger[key]).length) delete ledger[key]; } }
+  var cleared = 0;
+  if (undo) { if (ledger[key]) { Object.keys(ledger[key]).forEach(function (cc) { var vv = String(ledger[key][cc]); if (vv === 'skip:manual' || (any && vv.indexOf('skip:') === 0)) { delete ledger[key][cc]; cleared++; } }); if (!Object.keys(ledger[key]).length) delete ledger[key]; } }
   else { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = 'skip:manual'; }); }
-  baKvSet_('boshu_auto_done_' + hw, ledger); ufPersist_();
-  return { ok: true, key: key, undo: !!undo };
+  baKvSet_('boshu_auto_done_' + hw, ledger);
+  if (undo && any) { try { var stX = baKv_(BA_ST) || {}; if (Array.isArray(stX.skipped)) { var n0 = stX.skipped.length; stX.skipped = stX.skipped.filter(function (x) { return !(x && x.hw === hw && ((x.key && x.key === key) || (!x.key && baKey_(String(x.ja || '')) === key))); }); if (stX.skipped.length !== n0) baKvSet_(BA_ST, stX); } } catch (eX) {} }
+  ufPersist_();
+  return { ok: true, key: key, undo: !!undo, cleared: cleared };
 }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
