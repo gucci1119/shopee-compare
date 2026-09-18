@@ -4823,15 +4823,15 @@ function baCleanJa_(t) {
    鍵はスクリプト プロパティ CLAUDE_KEY（コードや Supabase には置かない）。結果は boshu_auto_judged に溜めて同じ写真は二度見ない。
    鍵が無ければ判定なしで進む（ログに1回だけ警告）。鍵があるのに判定できなければ通さない。1日の判定回数は上限（dailyMax×3）で頭打ち */
 var BA_JUDGED = 'boshu_auto_judged';
-function baJudge_(imgUrl, st, cache, capN) {
+function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '');
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、明らかに別の作品・続編・別機種・海外版なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。' : '') + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"' + (expect ? ',"title_match":"yes|no|unreadable"' : '') + '}' } ] }] };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -4840,6 +4840,7 @@ function baJudge_(imgUrl, st, cache, capN) {
   if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');
+  if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
 }
@@ -4976,6 +4977,16 @@ function boshuAutoTick(manual) {
     if (!cfg.on && manual !== true) { st.lastMsg = 'OFF'; return finish_('OFF'); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     if (st.blockedUntil && Date.now() < st.blockedUntil) { st.lastMsg = 'ヤフオクに弾かれたので ' + new Date(st.blockedUntil).toLocaleString('ja-JP') + ' まで休み'; return finish_(st.lastMsg); }
+    /* ★v184 不在でも質を落とさない（本人 2026-09-18「私がいない間に質の高い出品を」）
+       ①AIの鍵が無ければ出さない（前は「判定なしで通す」＝周辺機器や別作品が入る）。設定 requireAi=false で外せる
+       ②自動ブレーキ：失敗が3回続いた／入れた明細が続けて消されている → 止まって本人の「再開」を待つ（brakeAckAt） */
+    var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK0) {} st.aiKey = hasKey;
+    if (cfg.requireAi !== false && !hasKey) { st.lastMsg = '🔒 AI判定の鍵（GASのスクリプト プロパティ CLAUDE_KEY）が無いので出しません（判定なしでは周辺機器・別作品が混ざるため）'; return finish_(st.lastMsg); }
+    var ackAt = Date.parse(cfg.brakeAckAt || '') || 0;
+    if (ackAt && ackAt >= (Date.parse(st.errAt || '') || 0)) st.errStreak = 0;
+    /* かかったブレーキは「▶ 再開」（brakeAckAt）まで外れない。機種を回す前に見る（別の機種の番で勝手に解けない・Codex指摘） */
+    if (st.brake) { if (ackAt >= (Date.parse(st.brake.at || '') || 0)) st.brake = null; else if (cfg.autoBrake !== false && manual !== true) { st.lastMsg = '🛑 自動ブレーキ中：' + String(st.brake.why || '') + '（🤖の「▶ 再開」を押すまで止まります）'; return finish_(st.lastMsg); } }
+    if (cfg.autoBrake !== false && manual !== true && (st.errStreak || 0) >= 3) { st.brake = { at: st.errAt || new Date().toISOString(), kind: 'err', why: 'エラーが ' + st.errStreak + ' 回続いた: ' + String(st.lastErr || '').slice(0, 120) }; st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '（🤖の「▶ 再開」を押すまで止まります）'; return finish_(st.lastMsg); }
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
     var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
@@ -4998,6 +5009,16 @@ function boshuAutoTick(manual) {
     st.cursor = cur;
     if (!hw) { st.lastMsg = '出せる空白がありません'; return finish_(st.lastMsg); }
     out.hw = hw;
+    /* ★v184 自動ブレーキ（消されている）：再開より後・入れて3時間以上たった直近10件のうち、3件以上が Shopee にもう無い＝本人が消した＝質が落ちている */
+    try {
+      var mn = ctx.modelNames || {}, nowB = Date.now();
+      var recentB = (st.added || []).filter(function (a) { var t = Date.parse((a && a.at) || ''); return a && t > ackAt && nowB - t > 3 * 3600 * 1000 && mn[String(a.item_id)] && mn[String(a.item_id)].length; }).slice(0, 10);
+      var goneB = recentB.filter(function (a) { return mn[String(a.item_id)].indexOf(String(a.en || '').toLowerCase().trim()) < 0; });
+      if (cfg.autoBrake !== false && manual !== true && recentB.length >= 4 && goneB.length >= 3) {
+        st.brake = { at: new Date().toISOString(), kind: 'gone', why: '直近 ' + recentB.length + '件のうち ' + goneB.length + '件が消されています（例: ' + goneB.slice(0, 3).map(function (a) { return a.en; }).join(' / ') + '）' };
+        st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '。原因を直してから🤖の「▶ 再開」を押してください'; baLog_(st, st.lastMsg); return finish_(st.lastMsg);
+      }
+    } catch (eB) {}
     var hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
@@ -5028,8 +5049,8 @@ function boshuAutoTick(manual) {
           var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
           if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
-          var okP = (ci === 0) && /^AI判定OK/.test(String(pm.judge || ''));
-          if (!okP) { var jdM = baJudge_(cm.thumb || cm.img, st, judged, judgeCap); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
+          var okP = false;   /* ★v184 前の「AI判定OK」は実物かどうかしか見ていない＝題名・機種の突き合わせは必ずやり直す（Codex指摘） */
+          if (!okP) { var exM = { key: c.key, ja: c.ja, en: en, hw: hwWord }; var jdM = baJudge_(cm.img || cm.thumb, st, judged, judgeCap, exM); if (!jdM.judged && jdM.kind === 'error' && cm.thumb && cm.thumb !== cm.img) jdM = baJudge_(cm.thumb, st, judged, judgeCap, exM); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
           if (okP) { pm = (ci === 0) ? Object.assign({}, pm, cm) : Object.assign({}, pm, cm, { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
         }
         if (!okM) { baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
@@ -5050,7 +5071,7 @@ function boshuAutoTick(manual) {
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
@@ -5079,13 +5100,15 @@ function boshuAutoTick(manual) {
     baKvSet_('boshu_auto_done_' + hw, ledger);
     baKvSet_(BA_IMGS, used);
     st.today.n += picks.length; st.today.added += out.added;
+    /* ★v184 失敗の数え方：候補があったのに1件も入らなかった回を「失敗」に数える（baAddBatch_ は例外を握って note で返すので外の catch に来ない・Codex指摘）。1件でも入れば0に戻す */
+    if (out.added > 0) st.errStreak = 0; else { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ').slice(0, 160) + '）'; }
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
     // 触った店の出品行を取り直す（次回の「出している」判定と、ポータルの一覧のため）
     try { var toks = listTokens_(); toks.forEach(function (tk) { if (touchedShops[String(tk.shop_id)] && Date.now() - t0 < DEADLINE + 40000) { try { syncListingsForShop_(tk, now_() - 3 * 3600); } catch (e) {} } }); } catch (e) {}
     return finish_(null);
   } catch (e) {
-    st.lastErr = String((e && e.message) || e).slice(0, 300); st.lastMsg = '❌ ' + st.lastErr; baLog_(st, st.lastMsg);
+    st.lastErr = String((e && e.message) || e).slice(0, 300); st.lastMsg = '❌ ' + st.lastErr; baLog_(st, st.lastMsg); st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString();
     out.ok = false; out.error = st.lastErr;
     return finish_(st.lastMsg);
   }
@@ -5107,13 +5130,14 @@ function baLoadCtx_(cfg, hw, ccs) {
   var byCc = fam.byCc || {};   // 国ごとの上書き（本人「その国のカタログを出せば良くない？」）
   var famOf = function (cc) { var o = byCc[cc]; if (o && (o.sku || o.nameKey)) return { sku: String(o.sku || '').trim(), nk: String(o.nameKey || '').trim() }; return { sku: famSku, nk: famNk }; };
   var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
-  var itemCc = {};
+  var itemCc = {}, modelNames = {};
   rows.forEach(function (r) {
     itemCc[String(r.item_id)] = r.cc;
     var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
     var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
     // ★「出している」は【この機種のぶん】だけ数える。カタログ名/明細名に別の機種しか書いていないものは除く
     //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
+    modelNames[String(r.item_id)] = (ms || []).filter(function (m) { return m && !m.ghost && m.n; }).map(function (m) { return String(m.n).toLowerCase().trim(); });   // ★v184 自動ブレーキ用（入れた明細がまだあるか）
     var fo = famOf(r.cc);
     var inFam = (fo.sku && String(r.parent_sku || '').trim() === fo.sku) || (!fo.sku && fo.nk && baNameKey_(r.name) === fo.nk);
     var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
@@ -5139,7 +5163,7 @@ function baLoadCtx_(cfg, hw, ccs) {
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
   var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0);
-  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0 };
+  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
 function boshuAutoPreview_(hw, limit, noYahoo, needPhoto) {
