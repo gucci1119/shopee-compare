@@ -4989,7 +4989,8 @@ function boshuAutoTick(manual) {
     try { baSoldSync_(st); } catch (eS) { baLog_(st, '売れた作品の見直しに失敗: ' + String(eS).slice(0, 80)); }   // 在庫1で出した作品がどこかの国で売れたら、他の国の在庫を0に（一点物の二重販売を防ぐ）。OFFでも動く
     if (!cfg.on && manual !== true) { st.lastMsg = 'OFF'; return finish_('OFF'); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
-    if (st.blockedUntil && Date.now() < st.blockedUntil) { st.lastMsg = 'ヤフオクに弾かれたので ' + new Date(st.blockedUntil).toLocaleString('ja-JP') + ' まで休み'; return finish_(st.lastMsg); }
+    /* ★v187 ヤフオクに弾かれても全体は止めない（2026-09-18 実測：ON の2回目で HTTP 500→6時間まるごと休み。メルカリの写真は187件集まっているのに1件も出なくなった）。休むのはヤフオクの検索だけ＝その間はメルカリの写真がある作品だけを進める */
+    var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
     /* ★v184 不在でも質を落とさない（本人 2026-09-18「私がいない間に質の高い出品を」）
        ①AIの鍵が無ければ出さない（前は「判定なしで通す」＝周辺機器や別作品が入る）。設定 requireAi=false で外せる
        ②自動ブレーキ：失敗が3回続いた／入れた明細が続けて消されている → 止まって本人の「再開」を待つ（brakeAckAt） */
@@ -5045,6 +5046,7 @@ function boshuAutoTick(manual) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
+      if (!yahooOk && !((pre[c.key] || {}).img)) continue;   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
@@ -5079,8 +5081,9 @@ function boshuAutoTick(manual) {
         }
         baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
       }
+      if (!yahooOk) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* メルカリの写真が通らなかった＋ヤフオク休み中＝台帳には入れず、ヤフオクが戻ったら試す */
       var y = baYahoo_(q);
-      if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→6時間休む'); break; }
+      if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = Date.now() + restH * 3600 * 1000; yahooOk = false; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→ヤフオクの検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
@@ -5134,7 +5137,7 @@ function boshuAutoTick(manual) {
     return out;
   }
 }
-function baSkipRec_(st, hw, cc, p, why, hits) { try { st.skipped.unshift({ at: new Date().toISOString(), hw: hw, cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
+function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
 function baLoadCtx_(cfg, hw, ccs) {
   // 出している（国別）＝listings の明細名とJAN
