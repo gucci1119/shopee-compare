@@ -381,13 +381,13 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude') {
+    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -5049,7 +5049,7 @@ function boshuAutoTick(manual) {
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
-    var judgeCap = dailyMax * 3;
+    var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
     st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
@@ -5116,18 +5116,7 @@ function boshuAutoTick(manual) {
     out.titles = picks.length;
     /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
-    try {
-      var pjN = 0;
-      for (var pi = 0; pi < cand.length && pjN < 8 && Date.now() - t0 < DEADLINE * 0.68; pi++) {
-        var pc = cand[pi], pp = pre[pc.key]; if (!pp || !pp.img) continue;
-        if (baCostFromPre_(pp) > maxCost) continue;
-        var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, nextJ = null;
-        for (var oj = 0; oj < ordJ.length; oj++) { var vK = String(judged[String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v6|' + hwWord + '|' + pc.key] || ''); if (vK.indexOf('ok:') === 0) { hasOk = true; break; } if (vK || nextJ) continue; var smJ = baSameTitle_(pc, hw, ordJ[oj].name, st, sameCache); if (smJ.same) nextJ = ordJ[oj]; /* 本番と同じ門：題名で別作品と出た出品の写真は判定しない＝本番で使われない判定にお金を使わない（Codex指摘）。題名の判定の控えは本番でも使う */ }
-        if (hasOk || !nextJ) continue;
-        var jP = baJudge_(nextJ.img || nextJ.thumb, st, judged, judgeCap, { key: pc.key, ja: pc.ja, en: pc.en || '', hw: hwWord, hwKey: hw }); if (jP.judged && !jP.cached) pjN++; else if (!jP.judged) break;
-      }
-      if (pjN) baLog_(st, '🔍 先回りの写真判定 ' + pjN + '枚');
-    } catch (ePJ) {}
+    try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
     try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {}
     try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
@@ -5165,6 +5154,48 @@ function boshuAutoTick(manual) {
     if (msg) out.msg = msg;
     return out;
   }
+}
+/* 🔍 先回りの写真判定（本番と同じ門・同じ控えの鍵）。作品ごとに「OK が1枚出るまで」試す順番どおりに判定する。maxN 枚か時間切れで止まる */
+function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, maxN, t0, limitMs) {
+  var n = 0, okN = 0, ngN = 0, left = 0;
+  for (var pi = 0; pi < cand.length; pi++) {
+    var pc = cand[pi], pp = pre[pc.key]; if (!pp || !pp.img) continue;
+    if (baCostFromPre_(pp) > maxCost) continue;
+    var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
+    for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
+      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v6|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
+      if (vK.indexOf('ok:') === 0) { hasOk = true; break; }
+      if (vK) continue;
+      if (n >= maxN || Date.now() - t0 > limitMs) { stop = true; break; }
+      var smJ = baSameTitle_(pc, hw, ordJ[oj].name, st, sameCache); if (!smJ.same) continue;   /* 本番と同じ門：題名で別作品と出た出品の写真は判定しない */
+      var jP = baJudge_(ordJ[oj].img || ordJ[oj].thumb, st, judged, judgeCap, { key: pc.key, ja: pc.ja, en: pc.en || '', hw: hwWord, hwKey: hw });
+      if (!jP.judged) { stop = true; break; }
+      n++; if (jP.ok) { okN++; hasOk = true; } else ngN++;
+    }
+    if (stop) { left++; if (n >= maxN || Date.now() - t0 > limitMs) { for (var pr = pi + 1; pr < cand.length; pr++) { var p2 = pre[cand[pr].key]; if (p2 && p2.img) left++; } break; } }
+  }
+  return { n: n, ok: okN, ng: ngN, left: left };
+}
+/* 🔍 まとめて先に判定する（ポータルのボタン／手動）。出品はしない。1回 最大 maxN 枚・4分まで */
+function boshuAutoPrejudge_(hw, maxN) {
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, error: 'いま走っています（30分ごとの実行か候補出し）。1分ほど待ってからもう一度' };
+  try {
+    var t0 = Date.now(); var cfg = baKv_(BA_CFG) || {}; if (!hw) hw = (cfg.hws || [])[0] || '';
+    if (!hw || !cfg.family || !cfg.family[hw]) return { ok: false, error: '機種が選ばれていません' };
+    if (!bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };
+    var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (e) {} if (!hasKey) return { ok: false, error: 'GAS に CLAUDE_KEY がありません' };
+    var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
+    var ctx = baLoadCtx_(cfg, hw, ccs); var st = baKv_(BA_ST) || {}; st.log = st.log || [];
+    var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
+    var dailyMax = Number(cfg.dailyMax) || 100; st.aiTextCap = dailyMax * 4;
+    var judged = baKv_(BA_JUDGED) || {}, sameCache = baKv_(BA_SAME) || {}, pre = baKv_('boshu_auto_pre') || {};
+    var r = baPrejudgePass_(ctx.cand, pre, judged, sameCache, st, hw, BA_HW_WORD[hw] || hw.toUpperCase(), Number(cfg.maxCostJpy) || 15000, dailyMax * 6, Math.max(1, Math.min(80, Number(maxN) || 40)), t0, 235000);
+    baKvSet_(BA_JUDGED, judged); baKvSet_(BA_SAME, sameCache);
+    baLog_(st, '🔍 写真をまとめて先に判定 ' + r.n + '枚（OK ' + r.ok + '・NG ' + r.ng + '・残り ' + r.left + '作品）'); st.updated = new Date().toISOString(); baKvSet_(BA_ST, st);
+    try { ufPersist_(); } catch (e3) {}
+    return { ok: true, hw: hw, judged: r.n, okN: r.ok, ngN: r.ng, left: r.left };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+  finally { try { lock.releaseLock(); } catch (e4) {} }
 }
 function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
