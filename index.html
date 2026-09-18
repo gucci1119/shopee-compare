@@ -3926,6 +3926,15 @@
     "（上から順に対象になります。ヤフオクで中古の写真が見つからないものは飛ばされます）": "(processed top-down; titles without a used photo on Yahoo Auctions are skipped)",
     "（上から順に対象になります。順番＝他国で売れた作品→メルカリ写真あり→駿河屋にある→JANあり。写真が実物かのAI判定は出す直前に使う1枚だけ（GASのスクリプト プロパティ CLAUDE_KEY。無ければ判定なし）。実物の写真が見つからないものは出しません）": "(processed top-down. Order = sold in another country → Mercari photo collected → in stock at Suruga-ya → has JAN. The AI check that the photo shows the real item runs only on the one photo used, right before listing (GAS script property CLAUDE_KEY; skipped if absent). Titles without a real-item photo are not listed)",
     "⚪ 止まっています（OFF）": "⚪ Stopped (OFF)",
+    "🔋 電池あり": "🔋 Has battery",
+    "電池ありだけ": "battery items only",
+    "ELI（リチウム電池貨物）の情報提出": "ELI (lithium battery cargo) information request",
+    "🔋 ELI提出": "🔋 ELI request",
+    "✓ 済み": "✓ Done",
+    "📝 開く": "📝 Open",
+    "機種を判定できず（申告書は手で）": "Device not identified (fill the declaration by hand)",
+    "（出品データを読むと名前が出ます）": "(name appears once listing data is loaded)",
+    "Shopee Japan CS から「ELI該当の可能性がある貨物に関する情報提出のお願い」が来ています。荷物は集荷拠点で保留中。期限内にフォームを出さないと注文キャンセル＋着払い返送。フォームは「UN3481/PI967/section II」を選び、SDS 欄には Desktop/shopee/ELI申告書 の申告書（無ければ同じ形で作る）。ファイル名は【UNタイプ／Shop ID／マーケット／Product ID】。": "Shopee Japan CS asked for ELI (lithium battery cargo) information. The parcel is on hold at the pickup hub; miss the deadline and the order is cancelled and returned COD. Choose UN3481/PI967/section II in the form and upload the declaration PDF (Desktop/shopee/ELI申告書, or make one in the same format). File name: [UN type/Shop ID/market/Product ID].",
     "🤖自動出品：写真をこのブラウザで自動で集める": "🤖 Auto-listing: photos are now collected automatically in this browser",
     "🤖自動出品：明細の英名を Claude に聞く": "🤖 Auto-listing: English variation names from Claude",
     "🤖自動出品：仕入元の出品が「同じ作品か」をAIで確かめてから採用": "🤖 Auto-listing: AI confirms the source listing is the same title before use",
@@ -9010,7 +9019,7 @@
       const itemThumb = (im) => `<img class="zimg" loading="lazy" src="${IMG_CDN}${im || ''}" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:44px;height:44px;border-radius:6px;object-fit:cover;background:#eee;flex:none;cursor:zoom-in">`;
       const itemsHtml = (r.items.length ? r.items : [first]).map(it =>
         `<div style="display:flex;align-items:center;gap:8px;min-width:0">${itemThumb(it.image)}<div style="min-width:0;flex:1">` +
-        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''}</div>` +
+        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''} ${battBadge(batteryOf((it.name || '') + ' ' + (it.variation || '')))}</div>` +
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '') +
         `</div></div>`
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:4px 0"></div>') +
@@ -15203,12 +15212,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=v&k=eq.rowsync_last').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
         ]);
-        renderAlerts._cache = { orders, at: Date.now(), rowsync: (rs && rs[0] && rs[0].v) || null };
+        renderAlerts._cache = { orders, at: Date.now(), rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null };
         rowsync = renderAlerts._cache.rowsync;
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
+    const eliCases = (renderAlerts._cache && renderAlerts._cache.eli && renderAlerts._cache.eli.cases) || {};
+    if (Object.keys(eliCases).some(k => eliCases[k] && !eliCases[k].done)) { try { await ensureListings(); } catch (_) {} }   // 商品名・電池情報は出品データから（お知らせを先に開いても出るように・Codex指摘）
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
@@ -15241,6 +15252,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .sort((a, b) => String(deliveredAt(b) || '').localeCompare(String(deliveredAt(a) || '')));
     // 8) 📄利益管理表への転記（SCタブ側 userscript・3時間おき）が止まっている国：最後の成功から4時間超／最後が失敗／記録なし。
     //    ★2026-09-16 PH のタブが7時間眠って転記が止まっていたのに、画面のどこにも出なかった（本人「画像とMy incomeも更新されないの？」）。生存記録は GAS rowsync_ping → app_kv.rowsync_last
+    // 9) 🔋 ELI（リチウム電池貨物）の情報提出：Shopee Japan CS のメールを GAS（5分毎の Gmail 取り込み・30分に1回）が読んで app_kv.eli_cases に残す。
+    //    2026-09-08 のメール（期限 9/15）を誰も見ず、期限切れになった（本人 2026-09-18）。期限まで／超過を日数で出し、フォームと申告書の材料をここに揃える。
+    const eliRows = Object.keys(eliCases).map(k => eliCases[k]).filter(c => c && !c.done).map(c => {
+      const dl = c.deadline ? Date.parse(c.deadline + 'T23:59:59+09:00') : NaN;
+      const days = isNaN(dl) ? null : Math.floor((dl - Date.now()) / 86400000);
+      const row = ((lst.byCc || {})[c.cc] || []).find(x => String(x.item_id) === String(c.product)) || null;
+      const name = row ? row.name : '';
+      const b = row ? batteryOfRow(row) : null;
+      return { c, days, name, b, level: days == null ? 1 : (days < 0 ? 2 : (days <= 2 ? 2 : 1)) };
+    }).sort((a, b) => (a.days == null ? 999 : a.days) - (b.days == null ? 999 : b.days));
     const rowsyncRows = (() => {
       if (!settings.depUrl && !settings.openapiUrl) return [];   // 転記を使っていない環境では出さない
       const ccs = ['ph', 'br', 'vn', 'my', 'th', 'sg', 'tw']; const out = [];
@@ -15309,6 +15330,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ['画像', '商品名', '仕入元', '仕入額', '仕入から'],
         dead.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap"><b>${Math.floor(holdDays(r))}日</b></td></tr>`).join(''),
         `在庫保管中のまま仕入から90日以上＝<b style="color:#c0392b">資金が寝ている</b>状態。滞留している仕入額の合計 <b>${fmtJpy(deadVal)}</b>。値下げ・損切り・再出品を検討 → <button class="al-godead smd-btn" style="font-size:10.5px;padding:1px 8px">🏚 在庫の死に筋一覧で対処</button>`, 'al-dead') +
+      card('🔋', 'ELI（リチウム電池貨物）の情報提出', '#7b52c4', eliRows.length,
+        ['期限', '国', 'Product ID', '商品', '電池', 'Case', 'フォーム', '済み'],
+        eliRows.map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}><td style="font-size:11px;white-space:nowrap"><b style="color:${r.level === 2 ? '#d93025' : '#e8710a'}">${esc(r.c.deadline || '—')}</b><br>${r.days == null ? '' : (r.days < 0 ? '<b style="color:#d93025">' + (-r.days) + '日 超過</b>' : 'あと ' + r.days + '日')}</td><td style="font-size:11px">${esc(r.c.cc || '')}</td><td style="font-size:11px;white-space:nowrap">${esc(r.c.product || '')}</td><td style="font-size:11px">${r.name ? nm(r.name, '260px') : '<span class="smd-dim">（出品データを読むと名前が出ます）</span>'}</td><td style="font-size:10.5px">${r.b && r.b.wh ? `<b>${esc(r.b.batt)}</b> ${r.b.v}V・${r.b.mah}mAh・約${r.b.wh}Wh・${r.b.cells}セル<br>UN3481 / PI967 Section II` : (r.b ? '<span class="smd-dim">🔋 電池内蔵らしいが機種未特定（型番・Whは手で確認）</span>' : '<span class="smd-dim">機種を判定できず（申告書は手で）</span>')}</td><td style="font-size:10.5px;white-space:nowrap">${esc(r.c.case || '')}<br><span class="smd-dim">${esc(String(r.c.mailAt || '').slice(0, 10))} 着</span></td><td style="font-size:11px;white-space:nowrap">${r.c.form ? `<a href="${esc(r.c.form)}" target="_blank" rel="noopener">📝 開く</a>` : ''}</td><td><button class="smd-btn eli-done" data-k="${av(r.c.case || '')}" style="font-size:10.5px;padding:1px 6px">✓ 済み</button></td></tr>`).join(''),
+        'Shopee Japan CS から「ELI該当の可能性がある貨物に関する情報提出のお願い」が来ています。荷物は集荷拠点で保留中。期限内にフォームを出さないと注文キャンセル＋着払い返送。フォームは「UN3481/PI967/section II」を選び、SDS 欄には Desktop/shopee/ELI申告書 の申告書（無ければ同じ形で作る）。ファイル名は【UNタイプ／Shop ID／マーケット／Product ID】。', 'al-eli') +
       card('📄', '利益管理表への転記が止まっている国', '#b71c1c', rowsyncRows.length,
         ['国', '理由', '最後の成功', '最後の記録', '開く'],
         rowsyncRows.map(r => `<tr style="background:#fff5f5"><td style="font-size:11px;font-weight:700">${r.cc}</td><td style="font-size:11px">${esc(r.why)}</td><td style="font-size:11px;white-space:nowrap">${r.lastOk}</td><td style="font-size:11px">${r.lastMsg}</td><td>${r.host ? `<a href="https://${r.host}/portal/sale/order?type=toship" target="_blank" style="font-size:11px">SCタブ↗</a>` : ''}</td></tr>`).join(''),
@@ -15318,7 +15343,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。', 'al-data');
 
-    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length;
+    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length + eliRows.length;
     updateAlertBadge(total);
     // 内訳チップバー（443の中身を一目で＋クリックでその項目へジャンプ）
     const cats = [
@@ -15327,6 +15352,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['📦 相手未発送', stuckShip.length, '#e8710a', 'al-stuck'],
       ['⏳ 入庫待ち長期', stuckArrive.length, '#e8710a', 'al-arrive'],
       ['📸 確証未取得', noProof.length, '#7b52c4', 'al-proof'],
+      ['🔋 ELI提出', eliRows.length, '#7b52c4', 'al-eli'],
       ['📄 転記停止', rowsyncRows.length, '#b71c1c', 'al-rowsync'],
       ['🧾 データ不整合', dataIssues.length, '#c2185b', 'al-data'],
       ['🏬 滞留在庫', dead.length, '#666', 'al-dead'],
@@ -15337,6 +15363,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       : chipBar + html;
     body.querySelectorAll('.al-chip').forEach(b => b.addEventListener('click', () => { const t = document.getElementById(b.dataset.go); if (t) { t.open = true; t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }));
     { const gd = body.querySelector('.al-godead'); if (gd) gd.addEventListener('click', () => { try { stock.dead = true; stock.st = ''; stock.q = ''; } catch (_) {} showPage('stock'); }); }
+    // 🔋 ELI を「済み」に（app_kv.eli_cases[case].done = true）。書き込みキーが要る
+    body.querySelectorAll('.eli-done').forEach(b => b.addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const k = b.dataset.k; if (!k || !confirm('この ELI 案件を「対応済み」にしますか？（お知らせから消えます）\n' + k)) return;
+      b.disabled = true;
+      try {
+        const rr = await sbGetAll('app_kv', 'select=v&k=eq.eli_cases'); const cur = rr && rr[0] && rr[0].v;   // ★読めなかったら書かない（空で上書きすると全案件が消える・Codex指摘）
+        if (!cur || !cur.cases || !cur.cases[k]) throw new Error('案件の記録を読めませんでした（少し待ってからもう一度）');
+        cur.cases[k].done = true; cur.cases[k].doneAt = new Date().toISOString();
+        await sbUpsert('app_kv', [{ k: 'eli_cases', v: cur, updated_at: new Date().toISOString() }]);
+        try { logAct('注文', 'ELI 情報提出を済みに', k, ''); } catch (_) {}
+        renderAlerts._cache = null; renderAlerts();
+      } catch (e) { alert('保存できませんでした: ' + ((e && e.message) || e)); b.disabled = false; }
+    }));
   }
   // ---------------- 💴 入出金・経費（純利益） ----------------
   // 大分類ごとに実際の内訳を並べる。既存データのカテゴリ名は残したまま（互換）、選べる幅だけ増やす。
@@ -17462,6 +17502,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-18', items: [
+      '\u{1F50B} <b>リチウムイオン電池内蔵の商品に 🔋 バッジ</b>（本人「これから色々な商品で出てくる。対策できる？」＝Shopee の ELI（リチウム電池貨物）で荷物が止まり、SDS の提出を求められた）。出品名・明細名から Switch本体・Joy-Con・Proコン・3DS/DS/Vita/PSP本体・PS4/PS5コントローラーなどを判定し、出品一覧と注文管理に <b>🔋1.9Wh</b> のように出します。バッジにマウスを乗せると電池の型番・定格（フォームにそのまま書ける内容）。出品一覧に「🔋 電池あり」の絞り込みも追加。ストラップ・ケース・ケーブル・ソフトなど電池の無い物は当てません。',
+      '\u{1F514} <b>🔔お知らせに「ELI（リチウム電池貨物）の情報提出」</b>。Shopee Japan CS のメールを GAS（5分毎の Gmail 取り込み・30分に1回）が読み取り、Product ID・Case ID・期限・フォームのリンクをここに出します（期限まで／超過を日数で・電池情報つき・「✓ 済み」で消える）。9/8 に届いたメールを誰も見ず 9/15 の期限を過ぎた事故の再発防止。',
       '\u{1F50D} <b>出品一覧の検索を Product ID で</b>（本人「Product IDでも検索できるように」）。数字の ID（item_id）に加えて<b>明細ID（model_id）</b>でも当たり、「ID52200648598」や <b>Shopee の商品URL・セラーセンターのURLを貼っても</b> ID だけ取り出して探します。ID で探している時は、国や「バリエーションだけ」などの絞り込みで 0件なら<b>絞り込みを無視して全件から</b>当てます（SC の Product ID を貼って 0件になっていた原因はこれ）。',
     ]},
     { date: '2026-09-17', items: [
@@ -33011,6 +33053,73 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🏷コンディション/カテゴリ/ブランド：GASが app_kv の listing_specs_<shop_id> に {items:{<item_id>:{cond,cat,brand}}} で保存。全店マージして表示・フィルタ
   let lstSpecs = null; // { <item_id>: {cond, cat, brand} }
   const specOf = (id) => (lstSpecs && lstSpecs[id]) || {};
+  // 🔋 リチウムイオン電池内蔵の判定（Shopee ELI 対策・2026-09-18）。出品名／明細名から機種を当て、電池の型番・定格を返す。
+  //   ★ソフト・周辺の電池なし品（ストラップ・グリップ・ケース・ケーブル・ドック・ACアダプタ）は当てない。機器本体・コントローラーだけ。
+  //   数値は製品・電池本体の表示（公開仕様）。ELI のフォーム／申告書にそのまま使う。
+  const BATTERY_DB = {
+    joycon:   { dev: 'Nintendo Switch Joy-Con', model: 'HAC-015 (L) / HAC-016 (R)', batt: 'HAC-006', v: 3.7, mah: 525,  wh: 1.9,  cells: 1 },
+    procon:   { dev: 'Nintendo Switch Pro Controller', model: 'HAC-013', batt: 'CTR-003', v: 3.7, mah: 1300, wh: 4.8, cells: 1 },
+    switch:   { dev: 'Nintendo Switch 本体', model: 'HAC-001 / HEG-001 (OLED)', batt: 'HAC-003', v: 3.7, mah: 4310, wh: 16,   cells: 1 },
+    switchlite:{ dev: 'Nintendo Switch Lite 本体', model: 'HDH-001', batt: 'HDH-003', v: 3.7, mah: 3570, wh: 13.6, cells: 1 },
+    n3dsll:   { dev: 'New 3DS LL / 3DS LL 本体', model: 'RED-001 / SPR-001', batt: 'SPR-003', v: 3.7, mah: 1750, wh: 6.5, cells: 1 },
+    new3ds:   { dev: 'New 3DS 本体', model: 'KTR-001', batt: 'KTR-003', v: 3.7, mah: 1400, wh: 5.2, cells: 1 },
+    n3ds:     { dev: '3DS / 2DS 本体', model: 'CTR-001 / FTR-001', batt: 'CTR-003', v: 3.7, mah: 1300, wh: 4.8, cells: 1 },
+    n2dsll:   { dev: 'New 2DS LL 本体', model: 'JAN-001', batt: 'SPR-003', v: 3.7, mah: 1750, wh: 6.5, cells: 1 },
+    dslite:   { dev: 'Nintendo DS Lite 本体', model: 'USG-001', batt: 'USG-003', v: 3.7, mah: 1000, wh: 3.7, cells: 1 },
+    dsill:    { dev: 'Nintendo DSi LL 本体', model: 'UTL-001', batt: 'UTL-003', v: 3.7, mah: 1050, wh: 3.9, cells: 1 },
+    dsi:      { dev: 'Nintendo DSi 本体', model: 'TWL-001', batt: 'TWL-003', v: 3.7, mah: 840,  wh: 3.1, cells: 1 },
+    ds:       { dev: 'Nintendo DS 本体（初代）', model: 'NTR-001', batt: 'NTR-003', v: 3.7, mah: 850,  wh: 3.1, cells: 1 },
+    gbasp:    { dev: 'Game Boy Advance SP 本体', model: 'AGS-001', batt: 'AGS-003', v: 3.7, mah: 600,  wh: 2.2, cells: 1 },
+    gbmicro:  { dev: 'Game Boy micro 本体', model: 'OXY-001', batt: 'OXY-003', v: 3.8, mah: 460,  wh: 1.7, cells: 1 },
+    wiiugp:   { dev: 'Wii U GamePad', model: 'WUP-010', batt: 'WUP-012', v: 3.7, mah: 1500, wh: 5.6, cells: 1 },
+    vita:     { dev: 'PS Vita 本体', model: 'PCH-1000 / PCH-2000', batt: 'SP65M / SP86R', v: 3.7, mah: 2210, wh: 8.2, cells: 1 },
+    psp1000:  { dev: 'PSP-1000 本体', model: 'PSP-1000', batt: 'PSP-110', v: 3.6, mah: 1800, wh: 6.7, cells: 1 },
+    psp:      { dev: 'PSP-2000 / 3000 本体', model: 'PSP-2000 / PSP-3000', batt: 'PSP-S110', v: 3.6, mah: 1200, wh: 4.4, cells: 1 },
+    ds4:      { dev: 'DUALSHOCK 4 (PS4 コントローラー)', model: 'CUH-ZCT1 / CUH-ZCT2', batt: 'LIP1522', v: 3.65, mah: 1000, wh: 3.7, cells: 1 },
+    ds3:      { dev: 'DUALSHOCK 3 (PS3 コントローラー)', model: 'CECHZC2', batt: 'LIP1359', v: 3.7, mah: 570,  wh: 2.1, cells: 1 },
+    dualsense:{ dev: 'DualSense (PS5 コントローラー)', model: 'CFI-ZCT1', batt: 'LIP1708', v: 3.65, mah: 1560, wh: 5.7, cells: 1 },
+    generic:  { dev: 'リチウムイオン電池内蔵の機器（機種未特定）', model: '', batt: '', v: 0, mah: 0, wh: 0, cells: 0 },
+  };
+  // 電池が無い周辺・ソフト（これらの語が入っていれば当てない）
+  const BATT_NG = /\b(strap|grip|case|cover|skin|pouch|bag|sticker|decal|stand|dock|charging (dock|stand|station|cable|grip)|cable|adapter|adaptor|charger|screen protector|film|thumb ?grip|cap|shell|housing|faceplate|replacement (shell|housing|button|stick|joystick)|battery only|battery pack|memory card|sd card|game card|cartridge|software|disc|disk|manual only|box only|empty box|carrying|carry|holder|mount|lanyard)\b|ソフト|カセット|ケース|カバー|ストラップ|グリップ|ドック|ケーブル|アダプタ|充電器|保護|フィルム|外装|殻|箱のみ|説明書のみ|メモリーカード|ゲームカード/i;
+  // 「本体」の証拠。ソフト名に機種名が入るだけ（例：PS Vita のゲーム）では当てない。周辺の語（ケース・ドック…）が混ざっていても本体の証拠があればセット品として当てる
+  const HW_EV = /console|body|main unit|system|unit only|handheld|本体/i;   // 「本体」の証拠がある時だけ、周辺語（ケース・ドック…）が混ざっていても当てる（本体セット）。「Pro Controller Case」「Joy-Con Case with Strap」は証拠なし＝当てない（Codex指摘）
+  const BATT_RULES = [
+    // ★本体を先に見る（本体＋Joy-Con のセットは本体（16Wh）で申告する・Codex指摘）
+    [/switch\s*lite|スイッチ ?ライト/i, 'switchlite'],
+    [/switch\b.*(console|body|main unit|system|unit only|本体|oled|有機)|(console|body|本体|oled).*switch\b/i, 'switch'],
+    [/joy-?con|ジョイコン/i, 'joycon'],
+    [/pro ?controller|プロコン/i, 'procon'],
+    [/new\s*(nintendo\s*)?2ds\s*(ll|xl)/i, 'n2dsll'],
+    [/(new\s*)?3ds\s*(ll|xl)|3dsll/i, 'n3dsll'],
+    [/new\s*(nintendo\s*)?3ds\b(?!\s*(ll|xl)).*(console|body|main unit|system|本体|handheld)|(console|body|本体).*new\s*(nintendo\s*)?3ds\b(?!\s*(ll|xl))/i, 'new3ds'],
+    [/(\b3ds\b|\b2ds\b).*(console|body|main unit|system|本体|handheld)|(console|body|本体).*(\b3ds\b|\b2ds\b)/i, 'n3ds'],
+    [/ds\s*lite|dslite/i, 'dslite'],
+    [/dsi\s*(ll|xl)/i, 'dsill'],
+    [/\bdsi\b.*(console|body|main unit|system|本体|handheld)|(console|body|本体).*\bdsi\b/i, 'dsi'],
+    [/nintendo\s*ds\b.*(console|body|main unit|system|本体|handheld)|(console|body|本体).*nintendo\s*ds\b/i, 'ds'],
+    [/(gba|game\s*boy\s*advance)\s*sp\b|アドバンス\s*sp/i, 'gbasp'],
+    [/game\s*boy\s*micro|gb\s*micro|ゲームボーイミクロ/i, 'gbmicro'],
+    [/wii\s*u.*gamepad|gamepad.*wii\s*u/i, 'wiiugp'],
+    [/(ps\s*vita|psvita|playstation\s*vita).*(console|body|main unit|system|本体|handheld|pch-?[12]000)|(console|body|本体).*(ps\s*vita|psvita)/i, 'vita'],
+    [/psp-?1000/i, 'psp1000'],
+    [/\bpsp\b.*(console|body|main unit|system|本体|handheld|-?[23]000)|(console|body|本体).*\bpsp\b/i, 'psp'],
+    [/dualshock\s*4|\bds4\b|ps4\s*(wireless\s*)?controller|cuh-zct/i, 'ds4'],
+    [/dualshock\s*3|sixaxis|ps3\s*(wireless\s*)?controller|cechzc/i, 'ds3'],
+    [/dualsense|ps5\s*(wireless\s*)?controller|cfi-zct/i, 'dualsense'],
+    [/wireless\s*controller.*(rechargeable|built-?in battery|lithium)|(rechargeable|lithium).*controller/i, 'generic'],
+  ];
+  const _battCache = new Map();
+  function batteryOf(name) {
+    const t = String(name || '').replace(/\s+/g, ' ').trim(); if (!t) return null;
+    if (_battCache.has(t)) return _battCache.get(t);
+    let out = null;
+    if (!BATT_NG.test(t) || HW_EV.test(t)) { for (const [re, k] of BATT_RULES) { if (re.test(t)) { out = Object.assign({ key: k }, BATTERY_DB[k]); break; } } }   // 周辺語があっても本体の証拠があればセット品として当てる（Codex指摘）
+    _battCache.set(t, out); return out;
+  }
+  const batteryOfRow = (r) => { if (!r) return null; let b = batteryOf(r.name); if (b) return b; for (const m of (r.models || [])) { b = batteryOf(m && m.n); if (b) return b; } return null; };
+  const battTip = (b) => b ? `🔋 リチウムイオン電池内蔵（Shopee ELI の対象になりうる）/ Built-in Li-ion battery (may be screened as ELI)\n${b.dev}${b.model ? '（' + b.model + '）' : ''}\n電池 / Battery: ${b.batt || '要確認 / to be confirmed'}・${b.v ? b.v + 'V' : 'V 要確認'}・${b.mah ? b.mah + 'mAh・' : ''}${b.wh ? '約' + b.wh + 'Wh' : 'Wh 要確認 / unknown'}・${b.cells ? b.cells + 'セル' : 'セル数 要確認'}・機器内蔵 / installed in equipment\nUN3481 / IATA PI967 Section II（20Wh未満・機器に組み込み / <20Wh, contained in equipment）` : '';
+  const battBadge = (b, extra) => b ? `<span class="lst-batt" title="${av(battTip(b))}" style="display:inline-block;background:#fff3e0;color:#b45309;border:1px solid #fcd9a6;border-radius:4px;padding:0 5px;font-size:9.5px;font-weight:700;white-space:nowrap;${extra || ''}">🔋${b.wh ? b.wh + 'Wh' : '電池'}</span>` : '';
   let lstStats = null; // { <item_id>: {sale, views, likes, cmt} } ＝GASが get_item_extra_info で書く app_kv listing_stats_*（累計値）
   const statOf = (id) => (lstStats && lstStats[id]) || {};
   // 📈期間フィルタ：lst.statsPeriod(0=全期間/7/30/90日) の間の伸び。listing_stats_history のスナップショット差分をSupabase RPC(listing_stats_delta)で取得。
@@ -33532,7 +33641,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               `style="cursor:help;background:#fdecea;color:#b3261e;border:1px solid #f5c2c2;border-radius:9px;padding:1px 7px;font-size:10.5px;font-weight:700;white-space:nowrap">⚠ 親SKUが別シリーズと重複（${cl.length}）</span></div>`;
           })()}
         </div>
-        <div style="font-size:10px;min-width:0" title="コンディション（新品／中古）">${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:4px;padding:1px 4px;white-space:nowrap">${condLabel(sp.cond)}</span>` : `<span class="smd-dim" style="font-size:9px;border:1px dashed #dfe3e8;border-radius:4px;padding:0 3px;white-space:nowrap" title="この商品のコンディションをまだ取得できていません（設定が無いのではなく、未取得です）。上の「🔄 最新に更新」で埋まります">未取得</span>`}</div>
+        <div style="font-size:10px;min-width:0" title="コンディション（新品／中古）">${battBadge(batteryOfRow(r), 'margin-right:4px')}${sp.cond ? `<span style="background:${sp.cond === 'NEW' ? '#e8f5e9' : '#fff4e5'};color:${sp.cond === 'NEW' ? '#1a7f37' : '#a8650a'};border-radius:4px;padding:1px 4px;white-space:nowrap">${condLabel(sp.cond)}</span>` : `<span class="smd-dim" style="font-size:9px;border:1px dashed #dfe3e8;border-radius:4px;padding:0 3px;white-space:nowrap" title="この商品のコンディションをまだ取得できていません（設定が無いのではなく、未取得です）。上の「🔄 最新に更新」で埋まります">未取得</span>`}</div>
         <div style="min-width:0;font-size:9.5px" title="箱・説明書・本体の有無。明細ごとに持つので、ここでは商品全体の目安だけ出します">${(() => {
           const ps = cpartsOf(r.item_id);
           if (!ps.length) return '<span class="smd-dim">—</span>';
@@ -34035,12 +34144,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🔎 絞り込みを1つ外す。★絞り込みバーの✕と、0件表示の「この条件を外す」が同じものを使う
   // ★'janEmpty' が抜けていたため「✕ ぜんぶ外す」で外れず、絞り込み帯にも出なかった（2026-09-10 是正）。
   //   同じ取りこぼしを2026-08-28にもやっている（どれがONか分からず「0件＝バグ？」に見える）。
-  const LST_FILTER_KEYS = ['f', 'q', 'dup', 'dupkey', 'duppair', 'ser', 'vid', 'slot', 'vt', 'cond', 'brand', 'mdl', 'price', 'pub', 'ccs', 'acct', 'janEmpty'];
+  const LST_FILTER_KEYS = ['f', 'q', 'dup', 'dupkey', 'duppair', 'ser', 'vid', 'slot', 'vt', 'cond', 'brand', 'mdl', 'price', 'pub', 'ccs', 'acct', 'janEmpty', 'batt'];
   function lstFilterOff(k) {
     if (k === 'f') lst.filter = 'all';
     else if (k === 'q') { lst.search = ''; const se = document.getElementById('lst-search'); if (se) se.value = ''; }
     else if (k === 'dup') { lst.dupOnly = false; lst.dupLive = false; }
     else if (k === 'janEmpty') { lst.janEmpty = false; }
+    else if (k === 'batt') { lst.battOnly = false; }
     else if (k === 'dupkey') lst.dupKey = '';
     else if (k === 'duppair') lst.dupPair = [];
     else if (k === 'ser') lst.seriesOnly = false;
@@ -34209,6 +34319,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       lst._janEmptyN = emptyN;
     }
     T('janEmpty', 'JANが空');
+    if (lst.battOnly) { rows = rows.filter(r => !!batteryOfRow(r)); T('batt', '🔋電池あり'); }
     // ⚠ まったく同じタイトルのカタログが複数ある＝ほぼ確実に重複出品
     if (lst.dupOnly) {
       // ★同名を出すだけでは【どれを消せばいいか】が分からない。
@@ -34431,6 +34542,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <button data-k="unwatched" class="${lst.filter === 'unwatched' ? 'on' : ''}" title="仕入元連携なしの出品">監視対象外</button>
         </span>
         <span class="smd-seg" id="lst-vartype" title="バリエーション有り／単品で絞り込み"><button data-v="" class="${!lst.varType ? 'on' : ''}">明細すべて</button><button data-v="multi" class="${lst.varType === 'multi' ? 'on' : ''}">バリエーション</button><button data-v="single" class="${lst.varType === 'single' ? 'on' : ''}">単品</button></span>
+        <button class="smd-btn b-fil ${lst.battOnly ? 'on' : ''}" id="lst-batt" title="リチウムイオン電池を内蔵する機器（Switch本体・Joy-Con・Proコン・3DS/DS/Vita/PSP本体・PS4/PS5コントローラーなど）だけを表示します。&#10;SLS で ELI（リチウム電池貨物）として止められ、SDS/申告書の提出を求められる可能性がある商品です。バッジにマウスを乗せると電池の型番・定格が出ます。">🔋 電池あり</button>
         <button class="smd-btn b-fil ${lst.janEmpty ? 'on' : ''}" id="lst-janempty" title="JANが入っていない明細がある出品だけを表示します。&#10;明細を開くと、空いている行は黄色い帯で目立つようにしてあります。&#10;「🈳 空だけ」を押すと、その行だけを残せます。">📇 JANが空</button>
         <button class="smd-btn b-fil ${lst.dupOnly ? 'on' : ''}" id="lst-dup" title="同じ国の中で、まったく同じタイトルのカタログが2つ以上あるものだけを表示＝重複出品の候補。国をまたいだ同名（PHとBRに同じ商品）は正常なので対象外です。押すと自動で名前順に並び、隣同士になります">同名が複数<span style="font-weight:400;font-size:9.5px">(同一国内)</span></button>
         ${lst.dupOnly ? (() => {
@@ -34502,6 +34614,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const S = { live: '出品中だけ', oos: '在庫切れだけ', other: '停止/その他だけ', watched: '在庫監視だけ', unwatched: '監視対象外だけ', srcoos: '仕入元売切れだけ', keep0: '在庫0固定だけ' };
         if (S[lst.filter]) act.push(['状態', S[lst.filter], 'f']);
         if (lst.search) act.push(['検索', '「' + esc(lst.search) + '」', 'q']);
+        if (lst.battOnly) act.push(['🔋', '電池ありだけ', 'batt']);
         if (lst.dupOnly) act.push(['⚠ 同名が複数', lst.dupLive ? '両方とも出品中だけ' : '同一国内で重複', 'dup']);
         if (lst.acct) act.push(['🔑 アカウント', esc(acctFilterLabel(lst.acct)) + 'だけ', 'acct']);
         if (lst.dupKey) act.push(['⚠ 同名', String(lst.dupKey).split('|')[0] + 'の「' + esc(String(lst.dupKey).split('|').slice(1).join('|').slice(0, 30)) + '」だけ', 'dupkey']);
@@ -34838,6 +34951,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 📇 JANが空だけ。★並べ替えはしない（バリエーションの順番が崩れると、どこまで見たか分からなくなる）
     { const jb = document.getElementById('lst-janempty');
       if (jb) jb.addEventListener('click', () => { lst.janEmpty = !lst.janEmpty; lst.page = 1; drawListingStatus(); }); }
+    { const bb = document.getElementById('lst-batt');
+      if (bb) bb.addEventListener('click', () => { lst.battOnly = !lst.battOnly; lst.page = 1; drawListingStatus(); }); }
     { const db = document.getElementById('lst-dup');
       { const dl = document.getElementById('lst-duplive');
         if (dl) dl.addEventListener('click', () => { lst.dupLive = !lst.dupLive; lst.page = 1; drawListingStatus(); }); }
