@@ -4795,11 +4795,16 @@ function baEnName_(row, st, enCache, hw) {
   if (!en) return '';
   en = baEnTidy_(en);
   if (en.length <= 30) return en;
+  /* ★v185 作品マスタに英名があっても30字を超えるなら、短縮形だけAIに聞く（前は英名が無い時しか聞かず「Incredibles: Rise of」のような途中切れが残った・2026-09-18 実測）。控えは short だけ（src:'short'） */
+  if (!aiShort && st) {
+    var o2 = baClaudeJson_('Video game title: "' + en + '" (platform: ' + (BA_HW_LABEL[hw || ''] || hw || 'unknown') + ').\nReply JSON only: {"short": "<this title in at most 30 characters (letters, digits, spaces, basic punctuation only), keeping the numbers and subtitle words that distinguish it from other games in the series; drop a leading The; never end on a cut-off word such as of / the / and>"}', st, '英題', 120);
+    if (o2 && !o2.nokey && o2.short) { aiShort = String(o2.short); if (enCache && key) enCache[key] = Object.assign({}, cached || {}, { short: aiShort, src: (cached && cached.src) || 'short', at: Date.now() }); }
+  }
   if (aiShort) { var s2 = baEnTidy_(aiShort); if (s2 && s2.length <= 30 && !/[ぁ-んァ-ヶ一-龠]/.test(s2)) return s2; }
   var shr = [[/\b(the|a|an)\s+/ig, ''], [/\s*\((?!.*\d).*?\)\s*/g, ' '], [/\bvolume\b/ig, 'Vol'], [/\bversion\b/ig, 'Ver'], [/\bspecial\b/ig, 'SP'], [/\bcollection\b/ig, 'Coll'], [/\badventures?\b/ig, 'Adv'], [/\bchronicles?\b/ig, 'Chron'], [/\s+/g, ' ']];
   for (var i = 0; i < shr.length; i++) { en = en.replace(shr[i][0], shr[i][1]).trim(); if (en.length <= 30) return en; }
   var cut = en.slice(0, 31), sp = cut.lastIndexOf(' ');
-  return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim();
+  return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim().replace(/(\s+(of|the|and|a|an|to|in|for|with|vs\.?)|[\s:\-–&,]+)+$/i, '').trim();   /* 切った末尾が of / the / コロンで終わらないように */
 }
 function baEnNameOld_(row) {
   var en = String(row.en || '').trim();
