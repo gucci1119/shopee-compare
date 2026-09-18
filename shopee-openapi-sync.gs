@@ -5216,6 +5216,16 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
       row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = Number(pm.cost || pm.price) || 0; row.hits = Number(pm.hits) || 1; row.from = 'mercari';
+      /* ★v189 実行時に試す順番（baPhotoOrder_）で並べ、AIが判定済みの写真は結果を添える＝一覧で「どの写真が使われるか／なぜ落ちたか」が分かる（本人「判断しやすく」）。ここではAIを呼ばない（控えを読むだけ・無料） */
+      try {
+        if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
+        var jcP = boshuAutoPreviewBody_._jc;
+        var ordP = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 4);
+        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v4|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
+        var pickP = null; for (var tp = 0; tp < triedP.length; tp++) { if (triedP[tp].v.indexOf('ng:') !== 0) { pickP = triedP[tp]; break; } }
+        row.tried = triedP.map(function (x) { return { img: x.img, v: x.v, shop: x.shop, cond: x.cond }; });
+        if (pickP) row.pick = pickP; else if (triedP.length) row.note = '⚠ 写真 ' + triedP.length + '枚ともAI判定NG（' + triedP.map(function (x) { return x.v.slice(3); }).join('・') + '）→ 実行時はヤフオクで探す';
+      } catch (eP) {}
       row.stock = (row.hits >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
       /* ★v182 集めてある出品が「同じ作品」かを文章AIで確かめる（控えがあれば無料）。違えば注意書き＝人が🔁別の写真で差し替えるか、GASが実行時に次の候補を試す */
       if (pm.name && pvJudged < 40) { var smP = baSameTitle_(c, hw, pm.name, stP, sameCache); if (smP.judged && !smP.cached) pvJudged++; if (!smP.same) row.note = '⚠ AI：集めた出品は別の作品らしい（' + (smP.why || '') + '）→ 実行時は次の候補を試す'; else if (smP.judged) row.sameOk = 1; }
