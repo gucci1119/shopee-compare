@@ -4798,6 +4798,7 @@ function baEnName_(row, st, enCache, hw) {
   /* ★v185 作品マスタに英名があっても30字を超えるなら、短縮形だけAIに聞く（前は英名が無い時しか聞かず「Incredibles: Rise of」のような途中切れが残った・2026-09-18 実測）。控えは short だけ（src:'short'） */
   if (!aiShort && st) {
     var o2 = baClaudeJson_('Video game title: "' + en + '" (platform: ' + (BA_HW_LABEL[hw || ''] || hw || 'unknown') + ').\nReply JSON only: {"short": "<this title in at most 30 characters (letters, digits, spaces, basic punctuation only), keeping the numbers and subtitle words that distinguish it from other games in the series; drop a leading The; never end on a cut-off word such as of / the / and>"}', st, '英題', 120);
+    if (o2 && !o2.nokey && o2.short && baEnTidy_(String(o2.short)).length > 30) { var o3 = baClaudeJson_('Your shortened title "' + String(o2.short) + '" is ' + baEnTidy_(String(o2.short)).length + ' characters, over the limit. Shorten "' + en + '" to AT MOST 28 characters, still a natural title that ends on a complete word and keeps the distinguishing subtitle. Reply JSON only: {"short": "..."}', st, '英題', 80); if (o3 && o3.short) o2 = o3; }   /* 実測："Incredibles: Rise of Underminer"＝31字で捨てられ、機械切りの "Incredibles: Rise" になっていた */
     if (o2 && !o2.nokey && o2.short) { aiShort = String(o2.short); if (enCache && key) enCache[key] = Object.assign({}, cached || {}, { short: aiShort, src: (cached && cached.src) || 'short', at: Date.now() }); }
   }
   if (aiShort) { var s2 = baEnTidy_(aiShort); if (s2 && s2.length <= 30 && !/[ぁ-んァ-ヶ一-龠]/.test(s2)) return s2; }
@@ -4838,12 +4839,12 @@ function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { ret
 function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v4|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v5|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
-  var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
+  var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 220, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・値札の跡があるのは問題ありません。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、明らかに別の作品・続編・別機種なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"' + (expect ? ',"title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・値札の跡があるのは問題ありません。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -4852,6 +4853,8 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');
+  /* ★v190 機種の合否はAIに聞かずコードで照合する（2026-09-18 実測：PS2版「Mr.インクレディブル」の写真に、GC用として OK を出した。yes/no で聞くと版によって答えがぶれる→見えたロゴを書き写させて BA_HW_PAT で当てる） */
+  if (ok && expect && expect.hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); /* 重なる名前（Wii U は wii にも、SUPER FAMICOM は fc にも当たる）は表の並び順で先＝狭い方に決める（Codex指摘） */ if (seenHw.length && seenHw[0] !== String(expect.hwKey)) { ok = false; kind = 'wrongplatform'; } }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
@@ -4910,7 +4913,12 @@ function baMatch_(items, ja, hw) {
 }
 function baMedian_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; return a[Math.floor(a.length / 2)]; }
 // 仕入れ目安＝相場の上側（75パーセンタイル）。中央値だと実際に買える玉が無いことがある（安い順に売れていく）
-function baCostEst_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; return a[Math.min(a.length - 1, Math.floor(a.length * 0.75))]; }
+/* ★v190 外れ値を除いてから上側75%（本人 2026-09-18「2,000・2,500・2,700・2,800・3,000 の中に 1万円があったら外れ値」）。3件以上なら中央値の2倍超・0.4倍未満を捨てる。2件で倍以上開いていたら安い方（高い方は外れ値の可能性・どのみち件数不足で在庫0） */
+function baCostEst_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; if (a.length >= 3) { var med = a[Math.floor(a.length / 2)]; var b = a.filter(function (x) { return x <= med * 2 && x >= med * 0.4; }); if (b.length) a = b; } else if (a.length === 2 && a[1] > a[0] * 2) return a[0]; return a[Math.min(a.length - 1, Math.floor(a.length * 0.75))]; }
+/* 集めてあるメルカリの出品（本命＋控え）から仕入の目安を出し直す。新品・未使用に近いは数えない（本人「新品の金額を取ってこないように。基本的には中古の金額」）。3件に満たなければ集めた時の値を使う */
+/* 一覧に出す金額帯（中古だけ・外れ値を除いた後の 最安〜最高 と件数、除いた外れ値の件数）。本人「金額帯のレンジの表示もあった方がいい」 */
+function baPriceRange_(pm) { if (!pm) return null; var ps = [pm].concat(pm.alts || []).filter(function (a) { return a && baCondRank_(a, 'gc') >= 0; }).map(function (a) { return Number(a.price) || 0; }).filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!ps.length) return null; var all = ps.length, out = 0; if (ps.length >= 3) { var med = ps[Math.floor(ps.length / 2)]; var b = ps.filter(function (x) { return x <= med * 2 && x >= med * 0.4; }); if (b.length) { out = ps.length - b.length; ps = b; } } return { lo: ps[0], hi: ps[ps.length - 1], n: all, out: out }; }
+function baCostFromPre_(pm) { if (!pm) return 0; var ps = [pm].concat(pm.alts || []).filter(function (a) { return a && baCondRank_(a, 'gc') >= 0; }).map(function (a) { return Number(a.price) || 0; }).filter(function (x) { return x > 0; }); var base = Number(pm.cost || pm.price) || 0; if (ps.length >= 3) return baCostEst_(ps); if (ps.length && base > Math.max.apply(null, ps) * 2) return baCostEst_(ps); return base; }
 // hits は baMatch_ が「作品名に近い順」に並べている。近い方の半分（最低3件）だけで相場を見る＝副題違いの続編に引きずられない
 function baCostOfHits_(hits) { var n = Math.max(3, Math.ceil(hits.length / 2)); return baCostEst_(hits.slice(0, n).map(function (h) { return h.price; })); }
 // 価格表（ポータルが書いたもの）から現地価格。無ければ 0
@@ -5046,7 +5054,9 @@ function boshuAutoTick(manual) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
-      if (!yahooOk && !((pre[c.key] || {}).img)) continue;   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
+      if (!yahooOk && !((pre[c.key] || {}).img)) continue;
+      /* ★v190 仕入の目安が上限を超える作品は出さない（本人 2026-09-18「金額が高すぎるゲームはリスクなので、あんま出したくない」。前は在庫0で出していた）。AIを呼ぶ前に外す＝費用ゼロ。台帳には入れない（上限を変えたらまた候補になる） */
+      var costChk = 0; { var pmC = pre[c.key]; if (pmC && pmC.img) costChk = baCostFromPre_(pmC); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; } }   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
@@ -5065,7 +5075,7 @@ function boshuAutoTick(manual) {
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
           if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
           var okP = false;   /* ★v184 前の「AI判定OK」は実物かどうかしか見ていない＝題名・機種の突き合わせは必ずやり直す（Codex指摘） */
-          if (!okP) { var exM = { key: c.key, ja: c.ja, en: en, hw: hwWord }; var jdM = baJudge_(cm.img || cm.thumb, st, judged, judgeCap, exM); if (!jdM.judged && jdM.kind === 'error' && cm.thumb && cm.thumb !== cm.img) jdM = baJudge_(cm.thumb, st, judged, judgeCap, exM); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
+          if (!okP) { var exM = { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }; var jdM = baJudge_(cm.img || cm.thumb, st, judged, judgeCap, exM); if (!jdM.judged && jdM.kind === 'error' && cm.thumb && cm.thumb !== cm.img) jdM = baJudge_(cm.thumb, st, judged, judgeCap, exM); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
           if (okP) { pm = Object.assign({}, pm, cm, (cm.img === pm.img) ? {} : { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
         }
         if (!okM) { baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
@@ -5073,7 +5083,7 @@ function boshuAutoTick(manual) {
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
-          var costM = Number(pm.cost || pm.price) || 0, hitsM = Number(pm.hits) || 1;
+          var costM = costChk || baCostFromPre_(pm), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
           used[pm.img] = c.key;
           picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
@@ -5087,9 +5097,10 @@ function boshuAutoTick(manual) {
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
+      if (cost > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', hits.length); continue; }
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
@@ -5099,6 +5110,20 @@ function boshuAutoTick(manual) {
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
+    /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
+       🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
+    try {
+      var pjN = 0;
+      for (var pi = 0; pi < cand.length && pjN < 8 && Date.now() - t0 < DEADLINE * 0.68; pi++) {
+        var pc = cand[pi], pp = pre[pc.key]; if (!pp || !pp.img) continue;
+        if (baCostFromPre_(pp) > maxCost) continue;
+        var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, nextJ = null;
+        for (var oj = 0; oj < ordJ.length; oj++) { var vK = String(judged[String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v5|' + hwWord + '|' + pc.key] || ''); if (vK.indexOf('ok:') === 0) { hasOk = true; break; } if (vK || nextJ) continue; var smJ = baSameTitle_(pc, hw, ordJ[oj].name, st, sameCache); if (smJ.same) nextJ = ordJ[oj]; /* 本番と同じ門：題名で別作品と出た出品の写真は判定しない＝本番で使われない判定にお金を使わない（Codex指摘）。題名の判定の控えは本番でも使う */ }
+        if (hasOk || !nextJ) continue;
+        var jP = baJudge_(nextJ.img || nextJ.thumb, st, judged, judgeCap, { key: pc.key, ja: pc.ja, en: pc.en || '', hw: hwWord, hwKey: hw }); if (jP.judged && !jP.cached) pjN++; else if (!jP.judged) break;
+      }
+      if (pjN) baLog_(st, '🔍 先回りの写真判定 ' + pjN + '枚');
+    } catch (ePJ) {}
     try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {}
     try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
@@ -5215,18 +5240,19 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
     var pm = pre[c.key];
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
-      row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = Number(pm.cost || pm.price) || 0; row.hits = Number(pm.hits) || 1; row.from = 'mercari';
+      row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = baCostFromPre_(pm); row.pr = baPriceRange_(pm); row.hits = Number(pm.hits) || 1; row.from = 'mercari';
       /* ★v189 実行時に試す順番（baPhotoOrder_）で並べ、AIが判定済みの写真は結果を添える＝一覧で「どの写真が使われるか／なぜ落ちたか」が分かる（本人「判断しやすく」）。ここではAIを呼ばない（控えを読むだけ・無料） */
       try {
         if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
         var jcP = boshuAutoPreviewBody_._jc;
         var ordP = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 4);
-        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v4|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
+        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v5|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
         var pickP = null; for (var tp = 0; tp < triedP.length; tp++) { if (triedP[tp].v.indexOf('ng:') !== 0) { pickP = triedP[tp]; break; } }
         row.tried = triedP.map(function (x) { return { img: x.img, v: x.v, shop: x.shop, cond: x.cond }; });
         if (pickP) row.pick = pickP; else if (triedP.length) row.note = '⚠ 写真 ' + triedP.length + '枚ともAI判定NG（' + triedP.map(function (x) { return x.v.slice(3); }).join('・') + '）→ 実行時はヤフオクで探す';
       } catch (eP) {}
       row.stock = (row.hits >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
+      if (row.cost > maxCost) { row.costHigh = 1; row.note = '仕入の目安 ¥' + row.cost + ' が上限 ¥' + maxCost + ' を超える→出さない'; }
       /* ★v182 集めてある出品が「同じ作品」かを文章AIで確かめる（控えがあれば無料）。違えば注意書き＝人が🔁別の写真で差し替えるか、GASが実行時に次の候補を試す */
       if (pm.name && pvJudged < 40) { var smP = baSameTitle_(c, hw, pm.name, stP, sameCache); if (smP.judged && !smP.cached) pvJudged++; if (!smP.same) row.note = '⚠ AI：集めた出品は別の作品らしい（' + (smP.why || '') + '）→ 実行時は次の候補を試す'; else if (smP.judged) row.sameOk = 1; }
     }
