@@ -5260,7 +5260,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   var used = baKv_(BA_IMGS) || {}, hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
   var pre = baKv_('boshu_auto_pre') || {};
   var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
-  var blocked = false, rows = [];
+  var blocked = false, rows = [], held = [];
   var stP = baKv_(BA_ST) || {}; var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   if (!stP.today || stP.today.d !== todayJ) stP.today = { d: todayJ, n: 0, added: 0 };   // ★tick と同じ日付で数える（Codex指摘）
   stP.aiTextCap = (Number(cfg.dailyMax) || 100) * 4;   // tick と同じ上限（プレビューだけ多く使わない・Codex指摘）
@@ -5268,7 +5268,9 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   try { stP.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
   var candList = ctx.cand;
   if (needPhoto) candList = candList.filter(function (c) { var p0 = pre[c.key]; return !(p0 && (p0.img || (p0.missAt && Date.now() - Date.parse(p0.missAt) < 3 * 86400000))); });   // ★写真集め用：写真がある／3日以内に探して無かった作品は最初から外す（先頭40件で詰まらない・Codex指摘）
-  candList.slice(0, n).forEach(function (c) {
+  /* ★v194 「次に出す予定」には【実際に出る見込みの作品】だけを並べる（本人 2026-09-18）。高額で出さない／全部の国で価格差の枠に入らず見送り／使える写真が無い、は held（出さない見込み・理由つき）へ回し、その分だけ先の候補を見る（最大 n×3 件まで） */
+  candList.slice(0, needPhoto ? n : n * 3).forEach(function (c) {
+    if (!needPhoto && rows.length >= n) return;
     var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {}, sold: c.sold || 0 };
     /* ★写真集め用（needPhoto）は英名を作らない＝AIの予算を出品の判定に残す（検索は日本語名で足りる・Codex指摘） */
     if (!needPhoto) { try { var en2 = baEnName_(c, stP, enCache, hw); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; var ce = enCache[c.key]; row.enSrc = c.en ? 'master' : (ce ? ce.src : ''); } catch (e) {} }
@@ -5333,14 +5335,22 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
       price = baRound_(price, unit); if (ceilA && price > ceilA) price = ceilA;
       row.plan[cc] = { price: price, how: how, cat: String(tgt.name || '').slice(0, 50), wG: wG, note: note, range: (lo && hi) ? (baRound_(lo, unit) + '〜' + baRound_(hi, unit)) : '' };
     });
+    if (!needPhoto) {
+      var whyH = '';
+      var planCcs = Object.keys(row.plan || {});
+      if (row.costHigh) whyH = '高額（仕入の目安 ¥' + row.cost + '）';
+      else if (row.tried && !row.pick && (noYahoo || blocked)) whyH = row.tried.length ? '集めた写真が全部AI判定NG' : '使える写真が無い（カタログ画像の出品元だけ）';
+      else if (planCcs.length && planCcs.every(function (cc) { return /見送り|決められない|カタログ群なし/.test(String((row.plan[cc] || {}).note || '')); })) whyH = String((row.plan[planCcs[0]] || {}).note || '見送り');
+      if (whyH) { if (held.length < 40) held.push({ key: row.key, ja: row.ja, en: row.en, why: whyH, cost: row.cost || 0 }); return; }
+    }
     rows.push(row);
   });
-  var st = baKv_(BA_ST) || {}; if (!needPhoto) st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, blocked: blocked, noYahoo: !!noYahoo }; st.aiKey = stP.aiKey;
+  var st = baKv_(BA_ST) || {}; if (!needPhoto) st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, held: held, blocked: blocked, noYahoo: !!noYahoo }; st.aiKey = stP.aiKey;
   /* 写真集め用（needPhoto）の一覧は🔜の表示を上書きしない */
   st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today; try { baKvSet_(BA_ST, st); } catch (e) {}
   try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
   ufPersist_();
-  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, blocked: blocked, aiKey: !!stP.aiKey };
+  return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, held: held, blocked: blocked, aiKey: !!stP.aiKey };
 }
 // ✕ 出さない：作品の鍵を済み台帳に skip:manual で入れる（全国）
 function boshuAutoExclude_(hw, key, undo, any, ja) {
