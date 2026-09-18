@@ -4828,15 +4828,17 @@ function baCleanJa_(t) {
    鍵はスクリプト プロパティ CLAUDE_KEY（コードや Supabase には置かない）。結果は boshu_auto_judged に溜めて同じ写真は二度見ない。
    鍵が無ければ判定なしで進む（ログに1回だけ警告）。鍵があるのに判定できなければ通さない。1日の判定回数は上限（dailyMax×3）で頭打ち */
 var BA_JUDGED = 'boshu_auto_judged';
+/* ★v186 メルカリShops（業者）の出品はカタログ画像が多い（2026-09-18 実測：集めた187件中87件が Shops）。本人「メルカリショップスからでもいい。実際の写真じゃないやつはやめてほしい。新品と間違われるのが嫌」＝Shops を外すのではなく、個人の出品を先に試し、実物かどうかは写真のAI判定で決める */
+function baIsShop_(x) { return !!x && (/\/shops\/product\//.test(String(x.src || '')) || /mercari-shops-static/.test(String(x.img || '') + ' ' + String(x.thumb || ''))); }
 function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v3|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、明らかに別の作品・続編・別機種・海外版なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。' : '') + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"' + (expect ? ',"title_match":"yes|no|unreadable"' : '') + '}' } ] }] };
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、明らかに別の作品・続編・別機種なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"' + (expect ? ',"title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -4845,7 +4847,8 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');
-  if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }   // ★v184 写っているのが別の作品
+  if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
+  if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
 }
@@ -5049,14 +5052,14 @@ function boshuAutoTick(manual) {
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
         /* ★v182 先に「同じ作品の出品か」（題名・文章AI）、通ったら「実物の写真か」（画像AI）。どちらかで落ちたら次の候補（最大2枚）、それも駄目ならヤフオクへ */
-        var okM = false, sameNgM = 0, sameUnj = 0, candsM = [pm].concat((pm.alts || []).slice(0, 2));
+        var okM = false, sameNgM = 0, sameUnj = 0, candsM = [pm].concat(pm.alts || []); candsM = candsM.filter(function (a) { return !baIsShop_(a); }).concat(candsM.filter(baIsShop_)).slice(0, 4);   /* 個人の出品を先に・Shops は後ろ。最大4枚まで判定 */
         for (var ci = 0; ci < candsM.length && !okM; ci++) {
           var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
           if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
           var okP = false;   /* ★v184 前の「AI判定OK」は実物かどうかしか見ていない＝題名・機種の突き合わせは必ずやり直す（Codex指摘） */
           if (!okP) { var exM = { key: c.key, ja: c.ja, en: en, hw: hwWord }; var jdM = baJudge_(cm.img || cm.thumb, st, judged, judgeCap, exM); if (!jdM.judged && jdM.kind === 'error' && cm.thumb && cm.thumb !== cm.img) jdM = baJudge_(cm.thumb, st, judged, judgeCap, exM); okP = jdM.ok; if (jdM.judged) cm = Object.assign({}, cm, { judge: (okP ? 'AI判定OK（' : 'AI判定NG（') + jdM.kind + '）' }); }
-          if (okP) { pm = (ci === 0) ? Object.assign({}, pm, cm) : Object.assign({}, pm, cm, { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
+          if (okP) { pm = Object.assign({}, pm, cm, (cm.img === pm.img) ? {} : { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
         }
         if (!okM) { baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en)); pm = null; }
       }
