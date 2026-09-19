@@ -4944,11 +4944,12 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
    - 差し替えは setVariationImagesBulk_（明細の位置・名前・価格・在庫は触らない。画像だけ）
    - 代わりの写真は boshu_auto_pre の控え（ポータルが集めたメルカリの写真）から。通る写真が無ければ nophoto＝そのまま残して🤖の画面に出す（勝手に消さない）
    - cfg.rephoto === false で止められる */
-function baRephoto_(st, cfg, judged, pre, used, t0) {
+function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (cfg && cfg.rephoto === false) return;
   var cap = (cfg && Number(cfg.judgeCap)) || 300;
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
-  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-19T19:30' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && (!rp.items[a.item_id + '#' + a.en] || (BA_CASE_REQUIRED_HW[String(a.hw || '')] && rp.items[a.item_id + '#' + a.en].s === 'keep' && rp.items[a.item_id + '#' + a.en].v !== 10)); });
+  /* ★2026-09-20 この回で明細を足す機種のカタログは触らない：画像の差し替え（update_tier_variation）の直後に add_model すると、Shopee 側の明細の並びがまだ古く「Model tier_index error」で1件も入らない（3:31 の GC で実測） */
+  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.hw || '') !== String(skipHw || '') && String(a.at || '') < '2026-09-19T19:30' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && (!rp.items[a.item_id + '#' + a.en] || (BA_CASE_REQUIRED_HW[String(a.hw || '')] && rp.items[a.item_id + '#' + a.en].s === 'keep' && rp.items[a.item_id + '#' + a.en].v !== 10)); });
   if (!todo.length) return;
   /* 本人「何でアドバンスで箱説明書付きのを出してんの？」＝古い基準で出た分。カセットの機種（箱NG）と DS（ソフトだけNG）を先に見直す・1回8件まで */
   todo.sort(function (p, q) { var w = function (x) { var h = String(x.hw || ''); return (BA_CART_ONLY_HW[h] || BA_CASE_REQUIRED_HW[h]) ? 0 : 1; }; return w(p) - w(q); });
@@ -5171,7 +5172,7 @@ function boshuAutoTick(manual) {
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
     try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
-    try { baRephoto_(st, cfg, judged, pre, used, t0); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
+    try { baRephoto_(st, cfg, judged, pre, used, t0, hw); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
     st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
