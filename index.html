@@ -10072,13 +10072,22 @@
           // 払い出しは国ごとに週1回（BR は水曜の夜など）。候補の日が「もう過ぎている／次の払い出しより前」なら、次の払い出し日に寄せる（今週ぶんがもう出たあとに今週へ積まない）
           const lastPt = {}; (payouts || []).forEach(p6 => { if (p6.payout_time && p6.payout_time <= nowS && (!lastPt[p6.cc] || p6.payout_time > lastPt[p6.cc])) lastPt[p6.cc] = p6.payout_time; });
           const snap = (cc, t) => { const lp = lastPt[cc]; const t2 = Math.max(t, nowS); if (!lp) return t2; const k = Math.max(1, Math.ceil((t2 - lp) / 604800)); return lp + k * 604800; };
+          // ★対象は「まだどの払い出しにも入っていない注文」。income.pending は【金額が未確定か】の印であって【未払いか】ではない：
+          //   実測（2026-09-19）で、pending=false なのに未払いの COMPLETED が69件・約$2,200 あった（注文から中央値23日）＝ちょうど次の払い出しに入る分。
+          //   pending=true だけで数えると、直近の週が大きく少なく出る（来週 $789 と出たが、直近の実績は週 $2,000 前後）。
           (income || []).forEach(i => {
-            if (i.pending !== true) return;
+            if (poMap[i.sn]) return;                                   // もう払い出された
             const r = rateOf(i.cc); const loc = +i.amount || 0; if (!loc || r == null) return;
             const u = loc * r; const rg5 = regionByCc(i.cc); const j = (rg5 && rg5.rateJpy) ? loc * rg5.rateJpy : 0;
             const o5 = oi[i.sn];
-            if (!o5 || !o5.order_ts || /cancel/i.test(String(o5.status || ''))) { unknown += u; return; }
+            if (!o5 || !o5.order_ts) { if (i.pending === true) unknown += u; return; }
+            if (/cancel/i.test(String(o5.status || ''))) return;
             const e = (nowS - o5.order_ts) / 86400;
+            if (e > 75) { if (i.pending === true) unknown += u; return; }   // 75日より前で未払い＝払い出しの記録が取れていない古い分か、払われない注文。予定には入れない
+            if (/^COMPLETED$/i.test(String(o5.status || ''))) {          // 完了済みで未払い＝次の払い出しに入る
+              const wC = Math.min(WK - 1, Math.max(0, Math.floor((snap(i.cc, nowS) - monS) / 604800)));
+              wk[wC].usd += u; wk[wC].jpy += j; wk[wC].cc[i.cc] = (wk[wC].cc[i.cc] || 0) + u; wk[wC].done = (wk[wC].done || 0) + u; n++; return;
+            }
             const ls = (lagsCc[i.cc] && lagsCc[i.cc].length >= 15) ? lagsCc[i.cc] : lagsAll;
             const cands = ls.filter(L => L > e);
             if (!cands.length) { unknown += u; return; }               // 実績のどれよりも長く待っている＝時期が読めない
@@ -10102,13 +10111,13 @@
               `<span class="smd-dim" style="width:72px;flex:none;font-size:11px">${wkRange(k)}</span>` +
               `<span style="flex:1;background:#eef3fb;border-radius:4px;height:16px;position:relative;min-width:40px"><span style="position:absolute;left:0;top:0;bottom:0;width:${Math.round(w.usd / mx * 100)}%;background:${k === 0 ? '#34a853' : '#5b8def'};border-radius:4px"></span></span>` +
               `<b style="width:150px;flex:none;text-align:right;font-size:13px">約${usd(w.usd)}<span class="smd-dim" style="font-weight:400;font-size:10.5px;display:block">${yen(w.jpy)}${got ? '　＋着金済み ' + usd(got) : ''}</span></b></div>` +
-              (ccs ? `<div class="smd-dim" style="font-size:10px;margin:0 0 3px 132px">${ccs}</div>` : '');
+              (ccs ? `<div class="smd-dim" style="font-size:10px;margin:0 0 3px 132px">${ccs}${w.done ? '　<span style="color:#0f9d58">うち完了済み（ほぼ確実）' + usd(w.done) + '</span>' : ''}</div>` : '');
           }).join('');
           const tot = sched.wk.reduce((a, w) => a + w.usd, 0);
           const medLine = Object.keys(sched.meds).sort().map(c => c + ' ' + sched.meds[c].toFixed(0) + '日').join('／');
           return `<div style="font-weight:800;font-size:13px;margin:2px 0 4px;color:#1565c0">📅 これから受け取る予定（週ごと・Payoneer着金USD）</div>` + rows +
             `<div style="font-size:11.5px;margin:4px 0 0 6px">6週の合計 <b>約${usd(tot)}</b>` + (sched.later >= 1 ? `　／　7週目以降 約${usd(sched.later)}` : '') + (sched.unknown >= 1 ? `　／　<span style="color:#b26a00">時期が読めない ${usd(sched.unknown)}</span>` : '') + `</div>` +
-            `<div class="smd-dim" style="font-size:10.5px;margin:3px 0 10px 6px;line-height:1.6">いま預かり金になっている注文だけを、国ごとの「注文→払い出し」の実績日数（${medLine}・${sched.samples.toLocaleString()}件）で週に割った見込みです。<b>これから入る注文は含みません</b>。過去4時点で検算：3〜5週の合計は実績と±3%・単週は±2割ほど、Shopee が払い出しを翌週に回した週は大きくずれます。銀行への着金は、引き出し指示の翌営業日。</div>`;
+            `<div class="smd-dim" style="font-size:10.5px;margin:3px 0 10px 6px;line-height:1.6">まだ払い出されていない注文（完了済みで未払いの分を含む）を、国ごとの「注文→払い出し」の実績日数（${medLine}・${sched.samples.toLocaleString()}件）で週に割った見込みです。<b>これから入る注文は含みません</b>。過去4時点で検算：3〜5週の合計は実績と±3%・単週は±2割ほど、Shopee が払い出しを翌週に回した週は大きくずれます。銀行への着金は、引き出し指示の翌営業日。</div>`;
         })();
         const lagLine = sched ? '注文→払い出しの実測（中央値）: ' + Object.keys(sched.meds).sort().map(c => c + ' ' + sched.meds[c].toFixed(1) + '日').join(' ／ ') : '';
         // 先週実績と平均の乖離＝下り坂かどうか
@@ -10128,8 +10137,7 @@
           `</div>` +
           schedHtml +
           `<details style="margin:6px 0"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#5f6368">これまでの着金（週別・実績）を見る</summary>${confHtml}${confCcLine}</details>` +
-          `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">💰 今日以降いくら入るか（キャッシュフロー用）</div>` + cashHtml +
-          (trend && trend.avg > trend.last * 1.1 ? `<div class="smd-dim" style="font-size:10px;margin:3px 0 0 6px">※4週の単純平均は ${usd(trend.avg)} ですが、実績が下り坂なので<b>上振れします</b>。傾きを当てた上の数字を使ってください（傾き ${trend.slope >= 0 ? '+' : ''}${usd(trend.slope)}/週）。</div>` : '') +
+          // （2026-09-19）「直近5週の傾きで来週を出す」欄は外した。上の週ごとの予定と別の数字が並んで混乱するため（傾きは過去の着金の延長で、いま未払いの注文を見ていない）
           `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📦 その預かり金は、いまどこにいるか</div>` +
           `<div style="font-size:11.5px;margin:2px 0 0 6px">${tabHtml || '<span class="smd-dim">なし</span>'}</div>` +
           `<div class="smd-dim" style="font-size:10.5px;margin:2px 0 0 6px">リリースの起点は<b>到着（配達完了）</b>です。発送しただけでは払い出されません。</div>` +
