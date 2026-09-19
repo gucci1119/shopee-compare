@@ -4897,7 +4897,11 @@ function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使�
 /* ★v192 全件がカタログ画像だと分かっている出品元（メルカリShops の「【中古】NGCソフト …」型＝中古チェーンの通販。2026-09-18 実測：くるりんスカッシュ・PC原人・ZOIDS・WWE がこれで、Haiku は絵柄だけの画像に OK（箱）を付けた）。Shops 全体は外さない（本人「ショップスからでもいい」） */
 function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12}ソフト/.test(String((a && a.name) || '')); }
 function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0; }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
+var BA_MANUAL = null;   /* 手動の判定（app_kv.boshu_auto_judged_manual）。1回の実行で1度だけ読む */
+function baManualOf_(imgUrl, expect) { if (!expect || !expect.key) return ''; if (BA_MANUAL === null) { BA_MANUAL = baKv_('boshu_auto_judged_manual') || {}; } return String(BA_MANUAL[String(imgUrl || '').replace(/\?.*$/, '') + '|' + String(expect.hwKey || '') + '|' + expect.key] || ''); }
 function baJudge_(imgUrl, st, cache, capN, expect) {
+  /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
+  var mv = baManualOf_(imgUrl, expect); if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v10|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
