@@ -3034,7 +3034,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
   // ★既存の income が【読めなかった／上限で切れた】ときは、初回値(amount_initial)を書かない（Codex全体レビュー 2026-09-10）。
   //   読めないまま今の額を初回値として上書きすると「暫定＝確定」に化けて、確定/暫定の区別（利益の信頼度）が壊れる。
   //   書かなければ upsert は既存の初回値を残す（列を省いた行は merge で触らない）。新規行は fillIncomeInitial_ が後で埋める。
-  try { var ex = sbSelect_('income', 'select=cc,sn,amount,amount_at,amount_initial,amount_initial_at&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&limit=10000'); (ex || []).forEach(function (r) { prev[r.cc + ':' + r.sn] = r; }); prevOk = true; prevFull = (ex || []).length < 10000; } catch (e0) { prevOk = false; }
+  try { var ex = sbSelectAll_('income', 'select=cc,sn,amount,amount_at,amount_initial,amount_initial_at&shop_id=eq.' + encodeURIComponent(String(tok.shop_id)) + '&order=sn.asc'); (ex || []).forEach(function (r) { prev[r.cc + ':' + r.sn] = r; }); prevOk = true; prevFull = (ex || []).length < 20000; } catch (e0) { prevOk = false; }
   for (var oi = 0; oi < orders.length; oi++) {
     if (deadline && now_() > deadline) { partial = true; break; }
     var o = orders[oi];
@@ -3071,7 +3071,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
 //   amount_initial=amount, amount_initial_at=amount_at として埋める。トリガーは syncEscrowAll の最後で呼ぶ。
 function fillIncomeInitial_() {
   var rows = [];
-  try { rows = sbSelect_('income', 'select=cc,sn,amount,amount_at&amount_initial=is.null&limit=5000') || []; } catch (e) { return 0; }
+  try { rows = sbSelectAll_('income', 'select=cc,sn,amount,amount_at&amount_initial=is.null&order=sn.asc') || []; } catch (e) { return 0; }
   var up = rows.filter(function (r) { return r.amount != null; }).map(function (r) {
     return { cc: r.cc, sn: r.sn, amount_initial: parseFloat(r.amount), amount_initial_at: r.amount_at || new Date().toISOString() };
   });
@@ -3092,7 +3092,7 @@ function backfillEscrowUnchanged(limitN) {
   //   以前は pending=false（完了済み）だけを対象にしていたため、**配送中(pending=true)の注文が
   //   永久に取り直されず暫定額のまま固まっていた**（2026-08-09 実測：同額のまま未確定 113件）。
   //   完了・未完了どちらも、暫定額のまま動いていない注文を対象にする。
-  var rows = sbSelect_('income', 'select=cc,sn,amount,amount_initial,shop_id&limit=8000');
+  var rows = sbSelectAll_('income', 'select=cc,sn,amount,amount_initial,shop_id&order=sn.asc');
   var targets = (rows || []).filter(function (r) {
     return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id;
   }).slice(0, lim);
@@ -3236,7 +3236,7 @@ function finalizedSns_(cc) {
   //   倉庫スキャン後に金額が動いても二度と読み直さず、暫定額のまま固まっていた
   //   （incomeの完了行 559件のうち 492件が amount==amount_initial ＝ 実際には動くはずなのに動いていない）。
   //   「金額が動いたのを実際に観測できた行」だけをスキップする。まだ暫定と同額の行は読み直す。
-  var rows = sbSelect_('income', 'select=sn,amount,amount_initial&cc=eq.' + cc + '&pending=is.false&fee_total=not.is.null&limit=5000');
+  var rows = sbSelectAll_('income', 'select=sn,amount,amount_initial&cc=eq.' + cc + '&pending=is.false&fee_total=not.is.null&order=sn.asc');
   var s = {};
   rows.forEach(function (r) {
     var moved = (r.amount_initial != null && parseFloat(r.amount) !== parseFloat(r.amount_initial));
@@ -3972,7 +3972,7 @@ function syncListingsForShop_(tok, sinceSec) {
   if (!sinceSec) { // 照合削除は「全件取得(full)」の時だけ。増分(changed)は一部しか取らないので削除照合してはいけない
     try {
       var live = {}; ids.forEach(function (x) { live[String(x.item_id)] = 1; });
-      var ex = sbSelect_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&limit=50000');
+      var ex = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&order=item_id.asc');
       var stale = (ex || []).map(function (r) { return String(r.item_id); }).filter(function (id) { return id && !live[id]; });
       for (var s = 0; s < stale.length; s += 100) {
         sbDelete_('listings', 'shop_id=eq.' + encodeURIComponent(String(shopId)) + '&item_id=in.(' + stale.slice(s, s + 100).join(',') + ')');
@@ -4135,6 +4135,9 @@ function sbSelect_(table, query) {
   return JSON.parse(res.getContentText());
 }
 // 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
+// ★バージョン200（2026-09-20）：sbSelect_ に limit=5000〜50000 と書いていた7か所を全部こちらへ。sbSelect_ は1000行で黙って切れる。
+//   実害：入金の同期で BR の入金 1,076行が1000で切れているのに「全部読めた」(prevFull) と判定→ 残り76行を新規扱いして amount_initial（暫定の入金額）を今の額で上書きしていた。
+//   ほか：暫定額のまま固まった行の取り直しが 1,465行中 1,000行しか見ていない／出品の掃除が BR 1,619件中 1,000件しか見ていない。ページ送りは並びが要るので必ず order= を付ける。
 function sbSelectAll_(table, query) {
   var out = [], from = 0, capped = true;
   for (var i = 0; i < 20; i++) {
@@ -4647,13 +4650,13 @@ function recheckEscrowForReturns(limitN) {
   var lim = limitN || 300, done = 0, moved = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
-  var rets = sbSelect_('returns', 'select=cc,order_sn&limit=5000') || [];
+  var rets = sbSelectAll_('returns', 'select=cc,order_sn&order=order_sn.asc') || [];
   var seen = {}, targets = [];
   rets.forEach(function (r) {
     var k = (r.cc || '') + ':' + (r.order_sn || '');
     if (!r.order_sn || seen[k]) return; seen[k] = 1; targets.push(r);
   });
-  var incs = sbSelect_('income', 'select=cc,sn,amount,shop_id&limit=8000') || [];
+  var incs = sbSelectAll_('income', 'select=cc,sn,amount,shop_id&order=sn.asc') || [];
   var im = {};
   incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
   var deadline = now_() + 150, out = [], now2 = new Date().toISOString();   // 2分半で切り上げ（日次の実行時間枠を守る）

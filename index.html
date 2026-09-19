@@ -17850,6 +17850,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F6E1}\uFE0F <b>先回りの点検で見つけた不具合を修正</b>：①<b>入金の同期（GAS バージョン200）</b>：データベースの読みは1回1,000行までなのに、5,000〜50,000行と書いて読んでいた所が7か所ありました。BR の入金が1,076行になった時点から、1,000行を超えた分の「暫定の入金額（初回の値）」が今の額で上書きされていました。全部ページ送りで読むように直しました（出品の掃除・返品の突き合わせ・暫定額の取り直しも同じ型）②<b>出品ログの自動反映</b>：📅出品ログは画面を開いた時しか更新されず、グラフが実態より少なく出ていました。担当のPCで1日1回、自動で反映します ③重量は追加で486件（単品→0.2kg・セット→0.4kg）を直しました。',
       '\u2696\uFE0F <b>ソフト単品の登録重量 1kg → 0.2kg（215件）</b>：本人の指示で、1kg ちょうどで登録されていたソフト単品（TH 106・BR 66・PH 36・TW 5・SG 2）を公式APIで 0.2kg に直しました。SLS送料は登録重量で課金されるためです。利益台帳の「⚖️ 重い商品の重量をそろえる」は、登録を下げた商品を 500g に戻す方向にも追従するようになりました（自動で入れた重量には「重量:自動」の印）。',
       '\u{1F50D} <b>別のAI（Codex）のレビューで見つかった5件を修正</b>：⚖️重量をそろえる時の利益は「送料が増えた分だけ引く」（記録時の固定控除・入金為替の手数料を消さない）／為替は台帳に記録した時のレート／出品一覧の期間集計は鍵のやり直しつき・続けて押した時は最後の期間だけ採る／同時保存の確認の英語表示。',
       '\u{1F4CA} <b>ページを開いた回数を数え始めました</b>（🧾操作ログの上）：使っていない機能を、推測でなく数字で選んで消すためです。このPCの中だけで数え、通信はしません。',
@@ -30183,6 +30184,15 @@ alter table listing_log enable row level security;
 drop policy if exists "listing_log all" on listing_log;
 create policy "listing_log all" on listing_log for all using (true) with check (true);`;
   const logState = { rows: null, day: null, days: 90, goal: null, loading: false, missing: false, liveOnly: false };
+  // ★2026-09-20 出品ログ（listing_log）は📅出品ログの画面を開いた時にしか増えず、グラフも分析も実態より少なく出ていた（🤖自動出品が1日約49明細を足しているのに「新規出品ほぼ0」と誤診した）。
+  //   担当のPCだけ・1日1回・起動の6分後に自動で反映する（Supabase の読み書きだけ＝GAS の接続枠は使わない）。
+  setTimeout(() => { try {
+    if (!pcIsOwner() || demoOn()) return;
+    const d = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    if (localStorage.getItem('smdListLogAutoDay') === d) return;
+    localStorage.setItem('smdListLogAutoDay', d);
+    syncListingLog().catch(() => { try { localStorage.removeItem('smdListLogAutoDay'); } catch (_) {} });
+  } catch (_) {} }, 6 * 60 * 1000);
   async function syncListingLog() {
     if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定で登録してください）');
     const [live, known] = await Promise.all([
