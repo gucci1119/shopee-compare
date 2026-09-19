@@ -1,5 +1,6 @@
 // ==UserScript==
 // @name         Shopee Add-Variation (Mercari)
+// @name:ja      【Shopee出品】➕ 明細（バリエーション）を足す
 // @namespace    https://github.com/kawaguchiryoya
 // @version      0.3.0
 // @description  ポータルから渡されたジョブ(URLハッシュ #smdjob=)を受け取り、Shopee商品編集ページでメルカリ画像をアップロード→バリエ追加をUI自動操作する。まずは診断＋半自動（最後の保存は人が押す）。

@@ -1,5 +1,6 @@
 // ==UserScript==
 // @name         Shopee Compare Bridge
+// @name:ja      【Shopee】🌉 ポータルとの橋渡し（ブリッジ）
 // @namespace    https://github.com/kawaguchiryoya
 // @version      1.7.2
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
