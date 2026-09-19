@@ -17850,6 +17850,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F4C5} <b>出品ログ：🤖自動出品の分が見分けられるように</b>：🤖が足した明細に 🤖 の印を付け、その日の件数と直近7日・30日の件数に「🤖自動 N・手動 M」を出します。あわせて日付の不具合を修正：出品ログは「出品した日」でなく「ログが気づいた日」で記録していて、🤖が 9/12〜9/20 に足した明細が全部 9/20 の出品になっていました。🤖の記録に残っている実際の日時で記録します。',
       '\u{1F4F7} <b>🤖の写真の質を実測して順番を変更</b>：AIが見た写真 294枚のうち通過は 222枚（76%）。個人の出品は 79%、業者（メルカリShops）は 50% で、落ちる理由の1位はカタログ画像でした。業者の写真は、個人の写真を全部試した後に回します（GAS バージョン201）。機種別の通過率は GC 81%・FC 80%・DS 74%・GBA 62%。「入った明細」は Shopee に出品済みの意味だと分かるように見出しを直しました。',
       '\u{1F916} <b>母数🤖：先に機種を選ぶ形に</b>：対象の機種をタブで1つ選ぶと、その機種の国（PH〜TW）だけが出ます。全部の機種を縦に並べるのをやめました。機種を足すチップは「＋ 対象の機種を足す」にたたみました。',
       '\u{1F916} <b>母数🤖 自動出品の画面</b>：①<b>出す国とカタログを「機種×国」の表に</b>（国は PH SG MY BR VN TH TW の横の列で固定・1機種＝1行）。同じカタログ名を国の数だけ縦に並べるのをやめ、セルは 写真＋埋まり具合（①73・空き…）だけにしました ②<b>「次に出す予定」</b>：古い控え（6時間以上前）には警告を出します。いまの規則では出さない見込みの作品（高額の上限・価格差の枠）は下にまとめ、出す予定の時刻は付けません。業者の出品のカタログ画像には「使わない」と表示します（実行時は別の実物の写真を探します）。',
@@ -30219,10 +30220,23 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   setTimeout(listLogAutoTick, 6 * 60 * 1000); setInterval(listLogAutoTick, 30 * 60 * 1000);
   async function syncListingLog() {
     if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定で登録してください）');
-    const [live, known] = await Promise.all([
+    const [live, known, baKv] = await Promise.all([
       sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models'),
       sbGetAll('listing_log', 'select=cc,item_id,model_id'),
+      sbGet('app_kv', 'select=v&k=eq.boshu_auto_status').catch(() => []),
     ]);
+    // ★2026-09-20 出品ログの日付は「出品した日」でなく「このログが気づいた日」だった：🤖が 9/12〜9/20 に足した 83明細のうち 78件が、全部 9/20 の出品として入っていた。
+    //   🤖の記録（boshu_auto_status.added）には実際に足した日時が残っているので、その明細はその日付で記録する
+    const baWhen = new Map();
+    try { ((((baKv || [])[0] || {}).v || {}).added || []).forEach(a => { if (a && a.at && a.item_id && a.en) baWhen.set(a.cc + '|' + a.item_id + '|' + String(a.en).toLowerCase().trim(), jstDate(new Date(a.at).getTime())); }); } catch (_) {}
+    // 🤖が出した明細の控え（app_kv.listlog_auto = {map:{'cc|item_id|明細名': 出した日}}）。🤖側の記録は新しい分しか残らないので、見るたびに足して貯める。出品ログで「🤖自動／手動」を見分ける元になる
+    try {
+      const cur = await sbGet('app_kv', 'select=v&k=eq.listlog_auto').catch(() => []);
+      const mp = Object.assign({}, (((cur || [])[0] || {}).v || {}).map || {}); let grew = false;
+      baWhen.forEach((d, k2) => { if (!mp[k2]) { mp[k2] = d; grew = true; } });
+      Object.keys(mp).forEach(k2 => { if (!baWhen.has(k2)) baWhen.set(k2, mp[k2]); });
+      if (grew) await sbUpsert('app_kv', [{ k: 'listlog_auto', v: { map: mp, n: Object.keys(mp).length }, updated_at: new Date().toISOString() }], 'k');
+    } catch (_) {}
     const kset = new Set(known.map(k => k.cc + '|' + k.item_id + '|' + (k.model_id || 0)));
     const knownItems = new Set(known.map(k => k.cc + '|' + k.item_id));
     // ★誤検知対策：models がまだ取れていないカタログは model_id=0 の仮行で記録される。
@@ -30252,6 +30266,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         if (kset.has(key)) return;
         kset.add(key);
         let ymd = itemYmd;
+        { const bw = baWhen.get(r.cc + '|' + r.item_id + '|' + String(m.n || '').toLowerCase().trim()); if (bw) ymd = bw; }
         if (m.id && !String(m.n || '').trim() && zeroYmd.has(ik)) { ymd = zeroYmd.get(ik); zeroDone.push(r.cc + '\u0000' + r.item_id); }
         add.push({ cc: r.cc, item_id: r.item_id, model_id: m.id || 0, ymd,
           name: String(r.name || '').slice(0, 200), model_name: String(m.n || '').slice(0, 120),
@@ -30287,10 +30302,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     try {
       const [rows, kv] = await Promise.all([
         sbGetAll('listing_log', 'select=*&order=ymd.desc'),
-        sbGetAll('app_kv', 'select=k,v&k=eq.listlog_goal').catch(() => []),
+        sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto)').catch(() => []),
       ]);
       logState.rows = rows;
-      const g = kv && kv[0] && kv[0].v;
+      { const au = (kv || []).find(x => x.k === 'listlog_auto'); logState.autoMap = (au && au.v && au.v.map) || {}; }
+      const g = ((kv || []).find(x => x.k === 'listlog_goal') || {}).v;   // 2つ読むようになったので kv[0] と決め打ちしない
       logState.goal = (g && Number(g.perDay)) || Number(localStorage.getItem('smdListLogGoal')) || 10;
     } catch (e) {
       logState.rows = [];
@@ -30317,12 +30333,17 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     // ★「その日に記録された」行＝記録日と出品日が一致（＝運用開始後にリアルタイムで拾った分）。
     //   初回取り込みで過去に振り分けた分は日付が推定なので、切り替えで外せるようにする。
     const allRows = logState.rows || [];
-    const isLive = (r) => jstDate(r.created_at) === String(r.ymd || '').slice(0, 10);
+    // ★2026-09-20 本人「自動出品した商品と見分けがつくように。数字も」：🤖が出した明細は控え（listlog_auto）と突き合わせて印を付け、件数も 🤖自動／手動 に分けて出す
+    const autoMap = logState.autoMap || {};
+    const isAuto = (r) => !!autoMap[r.cc + '|' + r.item_id + '|' + String(r.model_name || '').toLowerCase().trim()];
+    const isLive = (r) => isAuto(r) || jstDate(r.created_at) === String(r.ymd || '').slice(0, 10);   // 🤖の分は実際に出した日に直して記録するので「後から取り込んだ分」に数えない
     const backfillN = allRows.filter(r => !isLive(r)).length;
     const rows = logState.liveOnly ? allRows.filter(isLive) : allRows;
     const byDay = new Map();
     rows.forEach(r => { const d = String(r.ymd || '').slice(0, 10); if (!d) return; if (!byDay.has(d)) byDay.set(d, []); byDay.get(d).push(r); });
     const cnt = (d) => (byDay.get(d) || []).length;
+    const cntA = (arr) => arr.reduce((a, d) => a + (byDay.get(d) || []).filter(isAuto).length, 0);
+    const split = (arr) => { const a = cntA(arr), t = arr.reduce((x, d) => x + cnt(d), 0); return a ? `🤖自動 ${a}・手動 ${t - a}` : ''; };
     // 直近N日の並び（出品0の日も出す＝サボった日が見える）
     const days = [];
     for (let i = logState.days - 1; i >= 0; i--) days.push(jstDate(Date.now() - i * 86400000));
@@ -30391,8 +30412,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         </div>
         ${kpi('連続出品', streak + '日', streak >= 3 ? '🔥 続いてます' : '毎日1件でも積む', streak > 0 ? '#e8710a' : '#8a8f98')}
         ${kpi('今月', monthN + '件', monthPrefix, '#3b5bdb')}
-        ${kpi('直近7日', sum(last7) + '件', '1日平均 ' + (sum(last7) / 7).toFixed(1) + '件')}
-        ${kpi('直近30日', sum(last30) + '件', '1日平均 ' + (sum(last30) / 30).toFixed(1) + '件')}
+        ${kpi('直近7日', sum(last7) + '件', (split(last7) ? split(last7) + '／' : '') + '1日平均 ' + (sum(last7) / 7).toFixed(1) + '件')}
+        ${kpi('直近30日', sum(last30) + '件', (split(last30) ? split(last30) + '／' : '') + '1日平均 ' + (sum(last30) / 30).toFixed(1) + '件')}
         ${kpi('自己ベスト', best + '件', '1日の最高', '#7b52c4')}
         ${kpi('累計', rows.length + '件', 'これまでに出した明細数')}
       </div>
@@ -30410,14 +30431,14 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
       </div>
       <div style="margin-top:12px">
-        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>
+        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
           <span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">バリエの明細1件＝1商品</span></div>
         ${selRows.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:7px">
           ${selRows.map(r => `<div style="border:1px solid #ececec;border-radius:8px;padding:7px;display:flex;gap:7px;background:#fff">
             <span style="width:44px;height:44px;flex:none;border-radius:6px;background:#f4f4f4;overflow:hidden;display:inline-flex;align-items:center;justify-content:center">${r.image ? `<img class="zimg" src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(r.image) : r.image)}" referrerpolicy="no-referrer" loading="lazy" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:8px;color:#bbb">なし</span>'}</span>
             <span style="min-width:0;flex:1">
               <span style="display:block;font-size:9.5px;font-weight:800;color:${ccColor(r.cc)}">${esc(r.cc)}${r.seeded ? ' <span class="smd-dim" style="font-weight:400" title="初回の取り込み時にShopeeの出品日から埋めた分（明細ごとの正確な日付ではありません）">≈</span>' : ''}</span>
-              <span style="display:block;font-size:11px;font-weight:600;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name || '')}">${esc(r.model_name || r.name || '')}</span>
+              <span style="display:block;font-size:11px;font-weight:600;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name || '')}">${isAuto(r) ? '<span title="🤖 母数の自動出品が足した明細" style="color:#5e35b1">🤖 </span>' : ''}${esc(r.model_name || r.name || '')}</span>
               <span style="display:block;font-size:9.5px;color:#8a8f98;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name || '')}">${esc(r.model_name ? (r.name || '') : '')}</span>
             </span></div>`).join('')}</div>`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
