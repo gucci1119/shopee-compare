@@ -4935,7 +4935,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0) {
   if (cfg && cfg.rephoto === false) return;
   var cap = (cfg && Number(cfg.judgeCap)) || 300;
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
-  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-20T09:00' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && !rp.items[a.item_id + '#' + a.en]; });
+  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-19T17:00' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && !rp.items[a.item_id + '#' + a.en]; });
   if (!todo.length) return;
   var n = 0, tStart = Date.now(), changed = false;
   for (var i = 0; i < todo.length && n < 3; i++) {
