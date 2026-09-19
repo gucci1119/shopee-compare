@@ -381,13 +381,13 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup') {
+    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3275,6 +3275,51 @@ function payoutAdjRows_(list, cc, shopId, nowIso) {
   });
   return out;
 }
+// ★v199 どの注文がどの払い出しに入っていたか（本人 2026-09-19「未来に受け取る金額のスケジュールが欲しい」）。
+//   get_payout_detail の escrow_list に注文番号が入っているのに、今までは件数しか残していなかった＝「注文してから実際に払い出されるまでの日数」が測れず、
+//   先の見込みを週に割れなかった（注文の次の払い出し日で代用すると必ず7日以内になり、実態と合わない）。
+//   → app_kv `payout_orders` に { 注文番号: 払い出し時刻 } を残す（150日ぶん）。読めなかった時は書かない（空で上書きしない）。
+function payoutOrderPairs_(list) {
+  var out = {};
+  (list || []).forEach(function (p) { var pt = (p.payout_info || {}).payout_time || 0; if (!pt) return; (p.escrow_list || []).forEach(function (e) { var sn = e && (e.order_sn || e.ordersn); if (sn) out[String(sn)] = pt; }); });
+  return out;
+}
+function payoutOrdersMerge_(pairs) {
+  var n = Object.keys(pairs || {}).length; if (!n) return { added: 0 };
+  var r = sbSelect_('app_kv', 'select=v&k=eq.payout_orders');
+  if (!Array.isArray(r)) return { added: 0, error: 'app_kv を読めなかったので書きません' };
+  var cur = (r[0] && r[0].v && r[0].v.map) || {};
+  var cut = now_() - 150 * 86400, added = 0;
+  Object.keys(pairs).forEach(function (sn) { if (cur[sn] !== pairs[sn]) { cur[sn] = pairs[sn]; added++; } });
+  Object.keys(cur).forEach(function (sn) { if (cur[sn] < cut) delete cur[sn]; });
+  if (added) baKvSet_('payout_orders', { at: new Date().toISOString(), n: Object.keys(cur).length, map: cur });
+  return { added: added, total: Object.keys(cur).length };
+}
+function payoutOrdersBackfill_(days, ccOnly) {
+  if (!bgAllowed_()) return { ok: false, error: 'urlfetch の予約線を超えているので実行しません' };
+  var WIN = Math.ceil(Math.min(150, Math.max(15, days || 90)) / 15), nowS = now_(), pairs = {}, log = [];
+  listTokens_().forEach(function (tok) {
+    if (ccOnly && tok.cc !== ccOnly) return;
+    var got = 0;
+    try {
+      for (var wk = 0; wk < WIN; wk++) {
+        if (!bgAllowed_()) break;
+        var to = nowS - wk * 15 * 86400, from = to - 15 * 86400, pageNo = 0;
+        for (var g = 0; g < 30; g++) {
+          var j = callShop_(tok.shop_id, '/api/v2/payment/get_payout_detail', { payout_time_from: from, payout_time_to: to, page_size: 40, page_no: pageNo }, 'get');
+          if (j && j.error) break;
+          var resp = j.response || {}; var pr = payoutOrderPairs_(resp.payout_list || []);
+          Object.keys(pr).forEach(function (sn) { pairs[sn] = pr[sn]; got++; });
+          if (!resp.more) break; pageNo++;
+        }
+      }
+    } catch (e) { log.push((tok.cc || '?') + ' err ' + String(e).slice(0, 80)); }
+    log.push((tok.cc || '?') + ' ' + got);
+  });
+  var m = payoutOrdersMerge_(pairs);
+  try { ufPersist_(); } catch (e2) {}
+  return { ok: true, found: Object.keys(pairs).length, merged: m, log: log };
+}
 function syncPayoutsForShop_(tok) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   // 窓上限15日。過去15日(確定payout)＋未来15日(予約済/見込みpayout=今週来週リリース見込み)の2窓
@@ -3283,7 +3328,7 @@ function syncPayoutsForShop_(tok) {
     { from: nowS - 15 * 86400, to: nowS },       // 過去（確定）
     { from: nowS, to: nowS + 15 * 86400 }        // 未来（見込み）
   ];
-  var rows = [], adjRows = [], future = 0;
+  var rows = [], adjRows = [], future = 0, poPairs = {};
   windows.forEach(function (w) {
     var pageNo = 0;
     for (var g = 0; g < 30; g++) {
@@ -3301,10 +3346,12 @@ function syncPayoutsForShop_(tok) {
         });
       });
       adjRows = adjRows.concat(payoutAdjRows_(resp.payout_list || [], cc, tok.shop_id, nowIso));
+      try { var pp = payoutOrderPairs_(resp.payout_list || []); Object.keys(pp).forEach(function (sn) { poPairs[sn] = pp[sn]; }); } catch (ePP) {}
       if (!resp.more) break; pageNo++;
     }
   });
   if (rows.length) sbUpsert_('payouts', rows, 'payout_id');
+  try { payoutOrdersMerge_(poPairs); } catch (ePO) {}   /* v199：注文→払い出し時刻（読めなければ何もしない） */
   // order_adjustments列が未作成でも壊れないよう、失敗時はスキップ
   if (adjRows.length) { try { sbUpsert_('order_adjustments', adjRows, 'adj_id'); } catch (e) { if (!/order_adjustments|relation|does not exist/i.test(String(e))) throw e; } }
   return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
