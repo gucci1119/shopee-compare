@@ -4989,8 +4989,10 @@ function boshuAutoRecheck() {
 // ★本体。manual=true はポータルの「▶ 今すぐ1回まわす」から（結果を返す）
 function boshuAutoTick(manual) {
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return { ok: false, error: 'いま走っています' };
-  var t0 = Date.now(), DEADLINE = 270000;   // 4.5分で必ず抜ける（6分制限）
+  /* ★v198：30分ごとの実行は鍵を90秒まで待つ。📸写真の索引（condIndexTick）と同じ鍵を使っているので、5秒で諦めると索引が走っている間🤖が1回も回らない
+     （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
+  if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
+  var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
@@ -5229,7 +5231,8 @@ function condIndexTick(manual) {
     if (!todo.length) { todo = Object.keys(idx.items).filter(function (u) { var r = idx.items[u]; return r && r.ok && r.kd === undefined && (idx.fail[u] || 0) < 3; }).slice(0, 20).map(function (u) { var r = idx.items[u]; return { u: u, g: r.g, cc: r.cc, at: r.at, req: r.req, rq: r.rq }; }); }
     if (!todo.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 6 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, total: Object.keys(idx.items).length }; }   /* 全部済み＝6時間休む（一覧は1日1回しか増えない） */
     var n = 0, usable = 0;
-    for (var i = 0; i < todo.length && Date.now() - t0 < 240000; i++) {
+    var COND_BUDGET = manual === true ? 150000 : 75000;   /* v198：🤖自動出品と鍵を共有しているので長く握らない（🤖は90秒まで待つ） */
+    for (var i = 0; i < todo.length && Date.now() - t0 < COND_BUDGET; i++) {
       var x = todo[i];
       var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 320, messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'url', url: String(x.u) } },
@@ -5301,9 +5304,10 @@ function condQueueBuild_(done) {
   return out;
 }
 function setupCondIndexTrigger() {
-  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'condIndexTick'; });
-  if (!has) ScriptApp.newTrigger('condIndexTick').timeBased().everyMinutes(30).create();
-  return { ok: true, had: has };
+  /* v198：1回を75秒に縮めた分、10分ごとに回す（古い30分のトリガーは消して作り直す） */
+  var had = 0; ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'condIndexTick') { had++; ScriptApp.deleteTrigger(t); } });
+  ScriptApp.newTrigger('condIndexTick').timeBased().everyMinutes(10).create();
+  return { ok: true, had: had, every: 10 };
 }
 function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
