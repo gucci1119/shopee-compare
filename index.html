@@ -4368,6 +4368,7 @@
     "📊 これまでの実績：曜日別の発送件数": "📊 Past record: parcels shipped by day of week",
     "🔬 診断（各国の注文API 1回・並列）": "🔬 Diagnose (one order-API call per country, in parallel)",
     "💰入金予定（リリース前の預かり金・総額）": "💰 Payout due (held before release, total)",
+    "💰これから受け取る合計（まだ払い出されていない分）": "💰 Total still to be paid out",
     "🏦 銀行口座への着金見込み（3段階）": "🏦 Expected arrival in your bank account (3 stages)",
     "確定リリース履歴なし（payouts未同期）": "No confirmed release history (payouts not synced)",
     "売れ続けている＝先に仕入れておく価値がある": "Keeps selling — worth buying in advance",
@@ -10099,7 +10100,7 @@
           if (lagsAll.length < 50) return null;                       // 材料が少なすぎる時は出さない（当てずっぽうを出さない）
           const medOf = a => { const b = a.slice().sort((x, y) => x - y); return b[b.length >> 1]; };
           const WK = 6, wk = Array.from({ length: WK }, () => ({ usd: 0, jpy: 0, cc: {} }));
-          let later = 0, unknown = 0, n = 0;
+          let later = 0, unknown = 0, n = 0, totU = 0, totJ = 0;
           const nowS = Date.now() / 1000, monS = thisMon.getTime() / 1000;
           // 払い出しは国ごとに週1回（BR は水曜の夜など）。候補の日が「もう過ぎている／次の払い出しより前」なら、次の払い出し日に寄せる（今週ぶんがもう出たあとに今週へ積まない）
           const lastPt = {}; (payouts || []).forEach(p6 => { if (p6.payout_time && p6.payout_time <= nowS && (!lastPt[p6.cc] || p6.payout_time > lastPt[p6.cc])) lastPt[p6.cc] = p6.payout_time; });
@@ -10112,10 +10113,11 @@
             const r = rateOf(i.cc); const loc = +i.amount || 0; if (!loc || r == null) return;
             const u = loc * r; const rg5 = regionByCc(i.cc); const j = (rg5 && rg5.rateJpy) ? loc * rg5.rateJpy : 0;
             const o5 = oi[i.sn];
-            if (!o5 || !o5.order_ts) { if (i.pending === true) unknown += u; return; }
+            if (!o5 || !o5.order_ts) { if (i.pending === true) { unknown += u; totU += u; totJ += j; } return; }
             if (/cancel/i.test(String(o5.status || ''))) return;
             const e = (nowS - o5.order_ts) / 86400;
-            if (e > 75) { if (i.pending === true) unknown += u; return; }   // 75日より前で未払い＝払い出しの記録が取れていない古い分か、払われない注文。予定には入れない
+            if (e > 75) { if (i.pending === true) { unknown += u; totU += u; totJ += j; } return; }   // 75日より前で未払い＝払い出しの記録が取れていない古い分か、払われない注文。予定には入れない
+            totU += u; totJ += j;                                       // ここまで来た＝まだ払い出されていない注文
             if (/^COMPLETED$/i.test(String(o5.status || ''))) {          // 完了済みで未払い＝次の払い出しに入る
               const wC = Math.min(WK - 1, Math.max(0, Math.floor((snap(i.cc, nowS) - monS) / 604800)));
               wk[wC].usd += u; wk[wC].jpy += j; wk[wC].cc[i.cc] = (wk[wC].cc[i.cc] || 0) + u; wk[wC].done = (wk[wC].done || 0) + u; n++; return;
@@ -10130,7 +10132,7 @@
               else later += u * sh; });
           });
           const meds = {}; Object.keys(lagsCc).forEach(c => { if (lagsCc[c].length >= 5) meds[c] = medOf(lagsCc[c]); });
-          return { wk, later, unknown, n, meds, samples: lagsAll.length };
+          return { wk, later, unknown, n, meds, samples: lagsAll.length, totU, totJ };
         })();
         const schedHtml = (() => {
           if (!sched) return `<div class="smd-dim" style="font-size:11.5px;margin:4px 0 10px">📅 これから受け取る予定：材料（注文ごとの払い出し日）をまだ読めていません。🔄 更新のあとにもう一度開いてください。</div>`;
@@ -10168,11 +10170,12 @@
         poEl.innerHTML =
           `<div style="display:flex;flex-wrap:wrap;gap:20px;margin-bottom:6px">` +
           `<div><div class="smd-dim" style="font-size:11px">今週リリース確定（実績）</div><div style="font-size:20px;font-weight:800;color:#0f9d58">${usd(wkUsd[0] || 0)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(wkJpy[0] || 0)}</span></div></div>` +
-          `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します。これが「今後の入金予定」の総額です">💰入金予定（リリース前の預かり金・総額）</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(pipeUsd)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(pipeJpy)}</span></div></div>` +
+          `<div><div class="smd-dim" style="font-size:11px" title="Shopeeがまだ支払っていない（リリース前の）売上金＝escrow。完了・入金されるとPayoneerに着金します。これが「今後の入金予定」の総額です">${sched ? '💰これから受け取る合計（まだ払い出されていない分）' : '💰入金予定（リリース前の預かり金・総額）'}</div><div style="font-size:20px;font-weight:800;color:#1565c0">${usd(sched ? sched.totU : pipeUsd)} <span class="smd-dim" style="font-size:13px;font-weight:700">${yen(sched ? sched.totJ : pipeJpy)}</span></div></div>` +
           `</div>` +
           schedHtml +
           `<details style="margin:6px 0"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#5f6368">これまでの着金（週別・実績）を見る</summary>${confHtml}${confCcLine}</details>` +
           // （2026-09-19）「直近5週の傾きで来週を出す」欄は外した。上の週ごとの予定と別の数字が並んで混乱するため（傾きは過去の着金の延長で、いま未払いの注文を見ていない）
+          `<details style="margin:4px 0"><summary style="cursor:pointer;font-weight:700;font-size:12px;color:#5f6368">内訳と説明を見る（いまどこにいるか・国別・銀行への着金の流れ）</summary>` +
           `<div style="font-weight:700;font-size:12px;margin:11px 0 2px;color:#b26a00">📦 その預かり金は、いまどこにいるか</div>` +
           `<div style="font-size:11.5px;margin:2px 0 0 6px">${tabHtml || '<span class="smd-dim">なし</span>'}</div>` +
           `<div class="smd-dim" style="font-size:10.5px;margin:2px 0 0 6px">リリースの起点は<b>到着（配達完了）</b>です。発送しただけでは払い出されません。</div>` +
@@ -10186,7 +10189,7 @@
           `<div>② <b>Payoneer → 銀行</b>：引き出し指示の<b>翌営業日</b>に着金（土日祝除く。例 月→火／金→月）。</div>` +
           `<div style="margin-top:5px;padding:6px 10px;background:#eef6ff;border:1px solid #cfe0ff;border-radius:6px">💡 <b>最短：今日 ${fmtD(new Date())} に引き出し指示 → 銀行着金 ${fmtD(nextBiz(new Date()))}</b>（Payoneerにある確定分）。預かり金は①でリリース後、引き出し指示の翌営業日。</div>` +
           `</div>` +
-          `<div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6">・確定＝get_payout_detailの実績（Payoneer着金USD）。今週は着金済みの合計。<br>・見込み＝まだリリースされていない預かり金（pending・escrow）を、payoutsの実効レートでUSD換算した総額（国別内訳あり）。<br>・リリースの目安：注文完了（配達から約3日／購入者の受取確認で24h以内）にescrowが放出→ほぼ同時にPayoneer着金。${noRate.length ? `<br>・${noRate.join('/')}はレート未確定（payout実績待ち）で見込み除外。` : ''}</div>`;
+          `<div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6">・確定＝get_payout_detailの実績（Payoneer着金USD）。今週は着金済みの合計。<br>・見込み＝まだリリースされていない預かり金（pending・escrow）を、payoutsの実効レートでUSD換算した総額（国別内訳あり）。<br>・リリースの目安：注文完了（配達から約3日／購入者の受取確認で24h以内）にescrowが放出→ほぼ同時にPayoneer着金。${noRate.length ? `<br>・${noRate.join('/')}はレート未確定（payout実績待ち）で見込み除外。` : ''}</div></details>`;
       }
       // ---- 📊 自動分析（傾向を文章化。利益は仕入未入力が多いため当面除外） ----
       const anaEl = document.getElementById('dash-analysis');
@@ -17745,6 +17748,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F4B0} <b>Payoneer のカードをさらに簡略化</b>：先頭の合計を「これから受け取る合計（まだ払い出されていない分）」に直しました。以前の「預かり金・総額」は、金額が未確定の注文だけを足していて、完了済みでまだ払い出されていない注文（69件・約$2,200）が抜けていました。預かり金がいまどこにいるか・国別の内訳・銀行への着金の流れは「内訳と説明を見る」にたたみました。',
       '\u{1F3A8} <b>デザインの見直し 2回目</b>：①<b>「やること」の赤い数字は急ぎだけ</b>に（発送期日・ELIの提出期限・転記が止まっている国・🤖自動ブレーキ）。片付けもの（入庫待ち長期・確証未取得など）まで足した 471 が赤く出ていて、警告として働いていませんでした。急ぎが0なら残りの件数を灰色で出します（内訳はカーソルを乗せると出ます）。②<b>注文管理の上のボタン</b>：ふだん使わない「診断・CSV・追跡番号のコピー」を「⋯ その他」にまとめ、更新・取得・印刷・発送手配を目立たせました。③<b>在庫管理</b>：行の中の ✂・🔎・まだ押していない ✓あり／✗なし を、ふだんは薄く、その行にカーソルを乗せた時だけはっきり出します（1画面にボタンが465個ありました。場所は動かしていません）。',
       '\u{1F4E6} <b>注文管理：発送スケジュールの下の説明を1行にたたみました</b>（デザインの見直し）。期日の数え方などの説明が約250px ぶん常に開いていて、毎日見る注文の一覧が下に押されていました。1行の要約を残し、押すと今まで通り全文が出ます（開いた／閉じたは覚えます）。説明の中身・期日の計算は変えていません。',
       '\u{1F50E} <b>文字の大きさと濃さに下限を入れました（デザインの見直し）</b>。数えたところ、11px より小さい文字がダッシュボードで38%・注文管理で33%・在庫管理で46%ありました（9〜10.5px の注記が900か所以上）。読むための文字は 11px 以上に引き上げ、白地で読みにくい薄い灰色（#aaa など）は濃い灰色に変えました。グラフの棒の上の小さい数字はそのままです。Payoneer のカードに残っていた古い注記（平均ペースで先の3週を概算）も消しました。',
