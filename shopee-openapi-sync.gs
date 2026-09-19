@@ -4925,6 +4925,46 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
 }
+/* ★2026-09-20 出品済みの🤖明細の写真を、いまの基準（実物・表面だけ・中古だと分かる・カセットの機種はカセット単体）で見直して、落ちるものだけ差し替える。
+   本人「これとかもやめて 新品っぽい画像が多すぎる」「紙のパッケージのやつは箱はいつも販売してないから、ソフトだけ」。
+   - 1回の実行で最大3明細・60秒まで。結果は app_kv.boshu_auto_rephoto {items:{'<item_id>#<明細名>': {s:'keep|replaced|nophoto', ...}}}（同じ明細は二度見ない）
+   - 差し替えは setVariationImagesBulk_（明細の位置・名前・価格・在庫は触らない。画像だけ）
+   - 代わりの写真は boshu_auto_pre の控え（ポータルが集めたメルカリの写真）から。通る写真が無ければ nophoto＝そのまま残して🤖の画面に出す（勝手に消さない）
+   - cfg.rephoto === false で止められる */
+function baRephoto_(st, cfg, judged, pre, used, t0) {
+  if (cfg && cfg.rephoto === false) return;
+  var cap = (cfg && Number(cfg.judgeCap)) || 300;
+  var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
+  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-20T09:00' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && !rp.items[a.item_id + '#' + a.en]; });
+  if (!todo.length) return;
+  var n = 0, tStart = Date.now(), changed = false;
+  for (var i = 0; i < todo.length && n < 3; i++) {
+    if (Date.now() - tStart > 60000 || Date.now() - t0 > 150000) break;
+    var a = todo[i], id = a.item_id + '#' + a.en, hw = String(a.hw || '');
+    var ex = { key: a.key, ja: a.ja || '', en: a.en || '', hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
+    var curUrl = /^https?:/.test(String(a.img)) ? String(a.img) : 'https://down-cvs-sg.img.susercontent.com/' + a.img;
+    var j0 = baJudge_(curUrl, st, judged, cap, ex);
+    if (!j0.judged) break;   /* 鍵なし・上限・障害＝今日はここまで（印は付けない＝次回また見る） */
+    n++; changed = true;
+    if (j0.ok) { rp.items[id] = { s: 'keep', at: new Date().toISOString() }; continue; }
+    var pm = pre[a.key], cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 5) : [];
+    var done = false, lastKind = j0.kind;
+    for (var k = 0; k < cands.length && !done; k++) {
+      var cu = String(cands[k].img || cands[k].thumb || ''); if (!cu) continue;
+      var cuKey = cu.replace(/\?.*$/, ''); if (used[cuKey] && used[cuKey] !== a.key) continue;
+      if (String(a.src || '') && String(cands[k].src || '') === String(a.src || '')) continue;   /* いま載せているのと同じ出品の写真 */
+      var jc = baJudge_(cu, st, judged, cap, ex);
+      if (!jc.judged) break;
+      if (!jc.ok) continue;
+      try {
+        var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu }]);
+        if (r && r.applied) { used[cuKey] = a.key; try { baKvSet_(BA_IMGS, used); } catch (eU) {} rp.items[id] = { s: 'replaced', at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
+      } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 80)); rp.items[id] = { s: 'error', at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
+    }
+    if (!done) { rp.items[id] = { s: 'nophoto', at: new Date().toISOString(), was: lastKind, cc: a.cc, item_id: a.item_id, shop_id: a.shop_id, en: a.en, hw: hw }; baLog_(st, '📷 写真が基準外（' + lastKind + '）だが代わりが無い: ' + a.cc + ' ' + a.en); }
+  }
+  if (changed) { try { baKvSet_('boshu_auto_rephoto', rp); } catch (eR) {} try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {} }
+}
 function baYahoo_(q) {
   // ★fixed=3＝定額（即決）だけ。入札中の現在価格を相場に混ぜると仕入れを安く見積もって赤字になる（ポータルの仕入れ検索と同じ判断）
   var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3&n=50';
@@ -5112,6 +5152,7 @@ function boshuAutoTick(manual) {
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
+    try { baRephoto_(st, cfg, judged, pre, used, t0); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
     st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
