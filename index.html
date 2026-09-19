@@ -10742,7 +10742,8 @@
             const N = v => (v == null ? '' : String(v));
             const clash = sv ? ks.filter(k => N(sv[k]) !== N(before[k]) && N(sv[k]) !== N(patch[k])) : [];
             if (clash.length) {
-              const msg = 'もう1台のPC（または別の画面）が、この行の同じ項目を先に変えています。\n\n' + clash.map(k => '・' + k + '：むこう「' + N(sv[k]) + '」／こちら「' + N(patch[k]) + '」').join('\n') + '\n\nOK＝こちらの値で上書き　／　キャンセル＝むこうの値を残す';
+              const en = i18nOn();
+              const msg = (en ? 'Another PC (or another screen) has already changed the same field of this row.\n\n' : 'もう1台のPC（または別の画面）が、この行の同じ項目を先に変えています。\n\n') + clash.map(k => '・' + k + (en ? ': theirs "' + N(sv[k]) + '" / yours "' + N(patch[k]) + '"' : '：むこう「' + N(sv[k]) + '」／こちら「' + N(patch[k]) + '」')).join('\n') + (en ? '\n\nOK = overwrite with your value   /   Cancel = keep their value' : '\n\nOK＝こちらの値で上書き　／　キャンセル＝むこうの値を残す');
               if (!confirm(msg)) { clash.forEach(k => { before[k] = sv[k]; }); toast('むこうの値を残しました。画面を更新します'); try { renderStock(); } catch (_) {} return false; }
             }
           }
@@ -17849,6 +17850,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F50D} <b>別のAI（Codex）のレビューで見つかった5件を修正</b>：⚖️重量をそろえる時の利益は「送料が増えた分だけ引く」（記録時の固定控除・入金為替の手数料を消さない）／為替は台帳に記録した時のレート／出品一覧の期間集計は鍵のやり直しつき・続けて押した時は最後の期間だけ採る／同時保存の確認の英語表示。',
       '\u{1F4CA} <b>ページを開いた回数を数え始めました</b>（🧾操作ログの上）：使っていない機能を、推測でなく数字で選んで消すためです。このPCの中だけで数え、通信はしません。',
       '\u{1F5BC}\uFE0F <b>見やすさの手入れ</b>：①<b>ダッシュボードを広い画面で2列に</b>（左＝これから受け取る予定／右＝発送期限が近い注文・今日の国別売上・自動分析）。右半分が空いたまま縦に長かったのをやめ、急ぎの「発送期限」を上へ。上の数字カードは横いっぱいに ②<b>自動分析の数字を上のカードとそろえた</b>：「未発送 1件」は未手配だけの数でした→「未発送 17件（未手配 1・伝票発行済 16）」の形に。期限超過の数え方も上のカードと同じ（家から出す期限）に。入金予定は「これから受け取る合計」と同じ数字に ③<b>利益明細の表を低く</b>：入金額（暫定・確定）の「日本時間 ◯/◯ ◯:◯◯」を吹き出しへ移し、1行5段→2段に（1画面に入る注文が増えます。金額にカーソルを乗せると日時が出ます）④<b>利益台帳が軽くなりました</b>：1,906件ぶんの明細の表を畳んだまま全部作っていて、画面が32MB・開くたびに数十秒固まっていました。明細は開いた時に作ります。',
       '\u2696\uFE0F <b>利益台帳：重い商品の重量をそろえる</b>（7月からの持ち越し）：台帳の重量は1,906件中1,904件が仮の500gのままでした。Shopee に登録してある重量（公式APIで取得済み）が<b>500gを超える商品だけ</b>、国ごとの最大値に直して SLS送料・利益を計算し直します（💰利益台帳の「⚖️ 重い商品の重量をそろえる」）。500g以下の登録は今まで通り500gのまま（軽く見積もって送料を安く出さないため）。手で入れた重量は触りません。スプレッドシートには触りません。',
@@ -30938,11 +30940,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         nr.weight_g = w;
         (nr.variations || []).forEach(v => { if (v.weightG == null || Number(v.weightG) === 500 || Number(v.weightG) === 0) v.weightG = w; });
         Object.keys(nr.econ || {}).forEach(cc => { const rg = regionByCc(cc); if (!rg) return;
-          const slsJ = Math.round(slsLocal(cc, w) * rg.rateJpy);
+          // ★Codex指摘（2026-09-19）：①為替は【台帳に記録した時のレート】(econ[cc].rate) を使う＝売値・手数料と同じ日のレートにそろえる
+          //   ②利益は作り直さず【送料が増えた分だけ引く】＝記録時に入っていた固定控除・入金為替の手数料を消さない
+          const rate = Number((nr.econ[cc] || {}).rate) || rg.rateJpy;
+          const slsJ = Math.round(slsLocal(cc, w) * rate);
           ((nr.econ[cc] || {}).vars || []).forEach(v => {
             if (!(v.weightG == null || Number(v.weightG) === 500 || Number(v.weightG) === 0)) return;
+            const oldSls = Number(v.slsJpy) || 0;
             v.weightG = w; v.slsJpy = slsJ;
-            if (v.cost != null) { const seller = v.sellerJpy != null ? v.sellerJpy : ((v.buyerJpy || 0) - (v.feeJpy || 0)); v.profit = Math.round(seller - Number(v.cost) - slsJ); v.roi = Number(v.cost) > 0 ? Math.round(v.profit / Number(v.cost) * 100) : 0; }
+            if (v.cost != null && v.profit != null) { v.profit = Math.round(Number(v.profit) - (slsJ - oldSls)); v.roi = Number(v.cost) > 0 ? Math.round(v.profit / Number(v.cost) * 100) : 0; }
           }); });
         nr.updated_at = new Date().toISOString();
         changed.push(nr);
@@ -33732,18 +33738,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const p = (lst && lst.statsPeriod) || 0;
     if (!p) { lstStatsDelta = null; drawListingStatus(); return; }
     lstStatsDelta = lstStatsDelta || {};
+    const gen = (loadStatsDelta._gen = (loadStatsDelta._gen || 0) + 1);   // ★Codex指摘：7日→30日と続けて押すと、遅れて返った7日の結果が30日の表示を上書きする→最後に押した分だけ採る
     (async () => {   // ★RPC も1回1000行で切れる（出品は数千件）。1000件を超える分は「蓄積中」と誤表示されていた→ offset で全部読む
       const all = []; const key = settings.sbKey || settings.sbSecret;
       for (let off = 0; off < 60000; off += 1000) {
-        const r = await fetch(`${SB_URL}/rest/v1/rpc/listing_stats_delta?limit=1000&offset=${off}&order=item_id.asc`, { method: 'POST', headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify({ days: p }) });
+        const hit = k => fetch(`${SB_URL}/rest/v1/rpc/listing_stats_delta?limit=1000&offset=${off}&order=item_id.asc`, { method: 'POST', headers: { apikey: k, Authorization: 'Bearer ' + k, 'Content-Type': 'application/json' }, body: JSON.stringify({ days: p }) });
+        let r = await hit(key);
+        if (!r.ok && (r.status === 401 || r.status === 403) && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret);   // sbRpc と同じやり直し
         if (!r.ok) throw new Error('RPC listing_stats_delta HTTP ' + r.status);
         const part = await r.json(); all.push(...part); if (part.length < 1000) break;
       }
       return all;
     })().then(rows => {
+      if (gen !== loadStatsDelta._gen) return;
       const m = {}; (rows || []).forEach(r => { if (r.d_sale != null || r.d_views != null || r.d_likes != null) m[r.item_id] = { sale: r.d_sale, views: r.d_views, likes: r.d_likes }; });
       lstStatsDelta = m; drawListingStatus();
-    }).catch(e => { lstStatsDelta = {}; drawListingStatus(); /* テーブル/RPC未作成なら空＝全件蓄積中表示 */ });
+    }).catch(e => { if (gen !== loadStatsDelta._gen) return; lstStatsDelta = {}; drawListingStatus(); /* テーブル/RPC未作成なら空＝全件蓄積中表示 */ });
   }
   const condLabel = (c) => c === 'NEW' ? '🆕新品' : (c === 'USED' ? '♻️中古' : (c || ''));
   // 無在庫(在庫監視)の紐付けを cc|item_id で逆引き。{whole:全体監視, models:Set(監視中のmodel_id), srcSt:仕入元状態}
