@@ -7856,6 +7856,26 @@
     try { localStorage.setItem('smdStkColsHidden', JSON.stringify(h)); } catch (_) {} stkColsApply(); });
   document.addEventListener('click', e => { const t = e.target; if (!t || !t.classList || !t.classList.contains('stk-colall')) return;
     try { localStorage.setItem('smdStkColsHidden', '[]'); } catch (_) {} document.querySelectorAll('.stk-colchk').forEach(c => { c.checked = true; }); stkColsApply(); });
+  // 📊 ページを開いた回数（このPC・日ごと・60日ぶん）。本人 2026-09-19「昔作った機能を引きずっていて、今使っていないやつがあったら消してほしい」。
+  //   操作ログ（activity_log）は書き込みしか残らず、見るだけのページが使われているかが分からなかった。推測で消さないために数える。通信はしない（このPCの中だけ）。
+  function pageViewBump(p) {
+    const d = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    let v = {}; try { v = JSON.parse(localStorage.getItem('smdPageViews') || '{}') || {}; } catch (_) { v = {}; }
+    (v[d] = v[d] || {})[p] = ((v[d] || {})[p] || 0) + 1;
+    const keep = Object.keys(v).sort().slice(-60); const o = {}; keep.forEach(k => { o[k] = v[k]; });
+    try { localStorage.setItem('smdPageViews', JSON.stringify(o)); } catch (_) {}
+  }
+  function pageViewTableHtml() {
+    let v = {}; try { v = JSON.parse(localStorage.getItem('smdPageViews') || '{}') || {}; } catch (_) { v = {}; }
+    const days = Object.keys(v).sort(); if (!days.length) return '';
+    const tot = {}, last = {}; days.forEach(d => Object.keys(v[d]).forEach(p => { tot[p] = (tot[p] || 0) + v[d][p]; last[p] = d; }));
+    const label = p => { const b = document.querySelector('#smd-nav button[data-p="' + p + '"]'); return b ? b.textContent.replace(/\s+\d+$/, '').trim() : p; };
+    const navPages = [...document.querySelectorAll('#smd-nav button[data-p]')].map(b => b.dataset.p);
+    const all = [...new Set(navPages.concat(Object.keys(tot)))].sort((a, b) => (tot[b] || 0) - (tot[a] || 0));
+    return `<div class="tool-card" style="margin:0 0 12px;max-width:900px"><h3 style="margin-bottom:4px">📊 ページを開いた回数 <span class="smd-dim" style="font-weight:400;font-size:12px">（このPC・${esc(days[0])} から ${days.length}日ぶん）</span></h3>` +
+      `<div class="smd-dim" style="font-size:12px;margin-bottom:6px">0回が続くページは、消す・畳む候補です。数え始めは 2026-09-19。</div>` +
+      `<div style="display:flex;flex-wrap:wrap;gap:6px">` + all.map(p => `<span style="border:1px solid ${tot[p] ? '#d6e4ff' : '#f0c4bd'};background:${tot[p] ? '#f4f8ff' : '#fff4f2'};border-radius:8px;padding:3px 9px;font-size:12px;white-space:nowrap">${esc(label(p))} <b>${tot[p] || 0}</b>${last[p] ? `<span class="smd-dim" style="font-size:11px"> 最後 ${esc(last[p].slice(5))}</span>` : ''}</span>`).join('') + `</div></div>`;
+  }
   // 補足の折りたたみ（<details data-fold="キー">）の開閉をこのPCで覚える。畳んでよいのは補足だけ＝一次データには使わない
   function foldOpen(k) { try { return localStorage.getItem('smdFold_' + k) === '1' ? 'open' : ''; } catch (_) { return ''; } }
   document.addEventListener('toggle', e => { const t = e.target; if (t && t.dataset && t.dataset.fold) { try { localStorage.setItem('smdFold_' + t.dataset.fold, t.open ? '1' : '0'); } catch (_) {} } }, true);
@@ -7867,6 +7887,7 @@
     state.page = p;
     { const b = document.getElementById('sticky-hscroll'); if (b && p !== 'list') b.style.display = 'none'; } // ページ切替で下端の横スクロールバーを即座に隠す（listページ以外）
     setTimeout(() => { try { if (setStickyHScroll._refresh) setStickyHScroll._refresh(); } catch (_) {} }, 60); // DOM更新後に再判定
+    try { pageViewBump(p); } catch (_) {}   // どのページが使われているかを数える（使っていない機能を数字で選んで消すため・2026-09-19）
     lsSet('smdPage', p); // 再読み込みで同じページに戻すため保存（満杯なら知らせる＝黙って忘れない）
     // 損益グループのページでは「損益・入出金」ナビをハイライト
     document.querySelectorAll('#smd-nav button').forEach(b => b.classList.toggle('on', b.dataset.p === p || (b.dataset.p === 'finance' && FIN_GROUP.includes(p))));
@@ -17818,8 +17839,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const body = document.getElementById('log-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let logs; try { logs = await sbGetAll('activity_log', 'select=*&order=ts.desc&limit=500'); } catch (e) { body.innerHTML = errBox(e); return; }
-    if (!logs.length) { body.innerHTML = '<span class="smd-dim">まだ操作ログはありません。在庫などを編集すると記録されます。</span>'; return; }
-    body.innerHTML = `<div class="tool-card" style="margin:0;max-width:900px"><div class="pf-scroll"><table class="pf-table"><tr><th>日時</th><th>画面</th><th>操作</th><th>対象</th><th>内容</th></tr>` +
+    if (!logs.length) { body.innerHTML = pageViewTableHtml() + '<span class="smd-dim">まだ操作ログはありません。在庫などを編集すると記録されます。</span>'; return; }
+    body.innerHTML = pageViewTableHtml() + `<div class="tool-card" style="margin:0;max-width:900px"><div class="pf-scroll"><table class="pf-table"><tr><th>日時</th><th>画面</th><th>操作</th><th>対象</th><th>内容</th></tr>` +
       logs.map(l => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(l.ts))}</td><td style="font-size:11px">${esc(l.page || '')}</td><td style="font-size:11px">${esc(l.action || '')}</td><td style="font-size:11px;color:#7a6ba7;word-break:break-all">${esc(l.target || '')}</td><td style="font-size:11px">${esc(l.detail || '')}</td></tr>`).join('') +
       `</table></div></div>`;
     fitScroll('log');
@@ -17827,6 +17848,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F4CA} <b>ページを開いた回数を数え始めました</b>（🧾操作ログの上）：使っていない機能を、推測でなく数字で選んで消すためです。このPCの中だけで数え、通信はしません。',
       '\u{1F5BC}\uFE0F <b>見やすさの手入れ</b>：①<b>ダッシュボードを広い画面で2列に</b>（左＝これから受け取る予定／右＝発送期限が近い注文・今日の国別売上・自動分析）。右半分が空いたまま縦に長かったのをやめ、急ぎの「発送期限」を上へ。上の数字カードは横いっぱいに ②<b>自動分析の数字を上のカードとそろえた</b>：「未発送 1件」は未手配だけの数でした→「未発送 17件（未手配 1・伝票発行済 16）」の形に。期限超過の数え方も上のカードと同じ（家から出す期限）に。入金予定は「これから受け取る合計」と同じ数字に ③<b>利益明細の表を低く</b>：入金額（暫定・確定）の「日本時間 ◯/◯ ◯:◯◯」を吹き出しへ移し、1行5段→2段に（1画面に入る注文が増えます。金額にカーソルを乗せると日時が出ます）④<b>利益台帳が軽くなりました</b>：1,906件ぶんの明細の表を畳んだまま全部作っていて、画面が32MB・開くたびに数十秒固まっていました。明細は開いた時に作ります。',
       '\u2696\uFE0F <b>利益台帳：重い商品の重量をそろえる</b>（7月からの持ち越し）：台帳の重量は1,906件中1,904件が仮の500gのままでした。Shopee に登録してある重量（公式APIで取得済み）が<b>500gを超える商品だけ</b>、国ごとの最大値に直して SLS送料・利益を計算し直します（💰利益台帳の「⚖️ 重い商品の重量をそろえる」）。500g以下の登録は今まで通り500gのまま（軽く見積もって送料を安く出さないため）。手で入れた重量は触りません。スプレッドシートには触りません。',
       '\u{1F41B} <b>出品一覧の「直近7日／30日／90日」が押しても切り替わっていなかったのを修正</b>：ボタンと押した時の処理で目印の名前が食い違っていて、いつも「全期間」のままでした。',
