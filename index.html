@@ -14510,6 +14510,25 @@
   }
 
   // 🔎 仕入れ検索：Shopee未発送(=売れた)注文を各サイトで最安検索
+  // 📦 まとめ売り（Lot N）の注文を、仕入れ検索で【N行】に分ける（本人 2026-09-20「こういうまとめカタログは、3つ出せたりする？カービィが3つなので」「キングダムハーツ2つでしょ？」「これは7こ」）。
+  //   題名（Lot 3 … Kirby 1 2 3 Super Star Ultra / Squeak Squad / Canvas）を機械的に切るのは無理なので、Claude に「中身の作品を日本語の検索語で N 個」出させる。
+  //   結果は app_kv.src_lot_split {'<題名>': ['星のカービィ ウルトラスーパーデラックス DS', …]} に控える（2台で共有・同じ題名は二度聞かない）。鍵が無い／失敗＝今までどおり1行
+  const lotNOf = (name) => { const m = String(name || '').match(/\b(?:lot|set|conjunto|bundle)\s*(?:of\s*)?(\d{1,2})\b/i); const n = m ? parseInt(m[1], 10) : 0; return (n >= 2 && n <= 12) ? n : 0; };
+  let _lotSplit = null, _lotBusy = {};
+  async function lotSplitLoad() { if (_lotSplit) return _lotSplit; try { const r = await sbGet('app_kv', 'select=v&k=eq.src_lot_split'); _lotSplit = (((r || [])[0] || {}).v) || {}; } catch (_) { _lotSplit = {}; } return _lotSplit; }
+  async function lotSplitAsk(name, n) {
+    const key = String(name || '').slice(0, 200); if (!settings.claudeKey || _lotBusy[key]) return null; _lotBusy[key] = 1;
+    try {
+      const body = { model: 'claude-haiku-4-5-20251001', max_tokens: 500, messages: [{ role: 'user', content: 'これは日本の中古ゲームソフトのまとめ売り（' + n + '本セット）の出品名です: "' + key + '"\n中身の作品を ' + n + ' 本に分けて、それぞれ日本のフリマ（メルカリ）で探す時の日本語の検索語にしてください。検索語は「日本での正式な題名＋機種の略称（DS / 3DS / PS2 など）」。題名に数字や副題が並んでいる時は、そのシリーズの実在の作品に当てはめてください（例: Kingdom Hearts 358/2 Days と Re:coded）。分からない作品は英語の題名のままで構いません。JSONだけで答えて: {"items":["…","…"]}（ちょうど ' + n + ' 個）' }] };
+      const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
+      const j = await r2.json(); try { if (j.usage) aiSpendAdd('まとめ売りの分割(仕入れ検索)', { in: j.usage.input_tokens || 0, out: j.usage.output_tokens || 0 }); } catch (_) {}
+      const txt = ((j.content || []).map(c => c.text || '').join('') || ''); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {}; const arr = (o.items || []).map(x => String(x || '').trim()).filter(Boolean);
+      if (arr.length !== n) return null;
+      _lotSplit = _lotSplit || {}; _lotSplit[key] = arr;
+      if (settings.sbSecret && !demoOn()) { try { const cur = await sbGet('app_kv', 'select=v&k=eq.src_lot_split'); const v = Object.assign({}, (((cur || [])[0] || {}).v) || {}, { [key]: arr }); await sbUpsert('app_kv', [{ k: 'src_lot_split', v, updated_at: new Date().toISOString() }]); } catch (_) {} }
+      return arr;
+    } catch (_) { return null; } finally { delete _lotBusy[key]; }
+  }
   async function renderSourcing(host) {
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     try { await loadSrcDict(); } catch (_) {}   // 🔎過去の仕入れタイトル辞書（検索語の精度）
@@ -14549,6 +14568,12 @@
     if (renderSourcing._showShipped == null && SRCUI.showShipped != null) renderSourcing._showShipped = !!SRCUI.showShipped;
     const sortMode = renderSourcing._sort || 'new';   // new=新しい順 / deadline=発送期限が近い順
     let disp = items.slice();
+    // 📦 まとめ売りは中身ごとの行に分ける（控えがある題名だけ。無ければ裏でAIに聞いて、答えが来たら1回だけ描き直す）
+    { const ls = await lotSplitLoad(); const out = []; let asked = 0;
+      disp.forEach(x => { const n = lotNOf(x.it.name); const parts = n ? ls[String(x.it.name || '').slice(0, 200)] : null;
+        if (n && Array.isArray(parts) && parts.length === n) parts.forEach((kwp, k) => out.push({ o: x.o, ix: x.ix + '.' + (k + 1), it: Object.assign({}, x.it, { variation: ((x.it.variation ? x.it.variation + ' ' : '') + '〔' + (k + 1) + '/' + n + '〕 ' + kwp), _lot: { k: k + 1, n, kw: kwp } }) }));
+        else { out.push(x); if (n && settings.claudeKey && asked < 3 && !renderSourcing._lotAsked?.[x.it.name]) { asked++; (renderSourcing._lotAsked = renderSourcing._lotAsked || {})[x.it.name] = 1; lotSplitAsk(x.it.name, n).then(a => { if (a && state.page === 'buy') { try { renderSourcing(host); } catch (_) {} } }); } } });
+      disp = out; }
     if (sortMode === 'deadline') disp.sort((a, b) => (a.o.ship_by || 9e15) - (b.o.ship_by || 9e15) || tsOf(b.o) - tsOf(a.o));
     else disp.sort((a, b) => tsOf(b.o) - tsOf(a.o));
     const shippedN = items.filter(x => srcDoneReason(x.o)).length;
@@ -14577,7 +14602,7 @@
         const img = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
         const _kk = kwStoreKey(it.name, it.variation);
         const saved = (kwFix && kwFix[_kk]) || localStorage.getItem(_kk);   // 共有 → この端末 の順
-        const kw = saved != null ? saved : sourcingKeyword(it.name, it.variation);
+        const kw = saved != null ? saved : (it._lot ? it._lot.kw : sourcingKeyword(it.name, it.variation));
         const done = isDone({ o, ix });
         const pick = (() => { try { return JSON.parse(localStorage.getItem('srcPick:' + doneKey({ o, ix })) || 'null'); } catch (_) { return null; } })();
         const dueH = o.ship_by ? Math.floor((o.ship_by - (Date.now() / 1000)) / 3600) : null; // 発送期限まで残り時間
@@ -14662,7 +14687,7 @@
     }
     // ── 🎯 行内の仕入れ提案：メルカリ/Yahoo!フリマ等を自動で検索し、上限仕入額つきで上位3件を出す
     //    ＝各サイトを開いて検索し直す手間をなくすのが目的。購入・決済は自動化しない（リンクを開くだけ）。
-    const ceilOf = (i) => { const x = disp[i]; return x ? srcCeilingFor(x.o, x.it) : null; };
+    const ceilOf = (i) => { const x = disp[i]; const c = x ? srcCeilingFor(x.o, x.it) : null; /* まとめ売りの1本ぶん＝上限を本数で割る */ return (c && x.it._lot) ? Object.assign({}, c, { ceil: Math.floor(c.ceil / x.it._lot.n), lotN: x.it._lot.n }) : c; };
     async function srcDealsFor(i, force) {
       const kw = kwOf(i); if (!kw) throw new Error('キーワードが空です');
       if (!force) { const c = dealCacheGet(kw); if (c) return { deals: c.deals, broadKw: c.broadKw, siteStat: c.siteStat, cached: true }; }
@@ -17883,6 +17908,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F4E6} <b>仕入れ検索：まとめ売り（Lot N）の注文を、中身の本数ぶんの行に分けて探す</b>（本人「カービィが3つなので」「キングダムハーツ2つでしょ？」「これは7こ」）。題名から中身の作品をAIが日本語の検索語に分け（1回だけ・結果は2台で共有）、1本ずつ検索・仕入れ済みの印・選んだ候補を持てます。仕入れの上限は本数で割った額。検索語はいつもどおり手で直せます。',
       '\u{1F3F7} <b>出品一覧の「💡 空いているSKUをまとめて入れる」も新しい規則に</b>：機種_作品名（7か国共通）。機種が決まらないカタログ（たまごっち・amiibo など）だけ、今までどおり 親SKU＋明細名。',
       '\u{1F44D} <b>🤖「次に出す予定」：写真を手動でOK／NGにできる・メルカリの検索結果へ飛べる</b>（本人「AI判定前だけど、手動でOK出せるようにもしておいて」「検索結果画面に行けるようにもして欲しい」）。各行の 👍 OK ／ 👎 NG で、AIの判定を待たずに決められます（もう一度押すと取り消し）。🤖は出す時に手動の判定を先に見ます。🔎 検索結果 で、その作品のメルカリの検索画面（件数・相場の元）が開きます。',
       '\u{1F41E} <b>🤖「次に出す予定」：機種のタブを替えると一覧が空になる不具合を修正</b>（本人「表示バグってる？」）。予定の控えが最後に出した1機種ぶんしか無かったためです。機種ごとに控えを持ち、まだ出していない機種には「🔜 この機種の予定を出す」ボタンを出します。',
