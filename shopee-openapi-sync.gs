@@ -3998,6 +3998,8 @@ function syncListingsAll() {
 
 // ★定例トリガー用：カーソルで数店ずつ回す（6分制限を超えないための本命）。30分ごと×3店 → 全店 約2時間で一巡
 function syncListingsRoundRobin() {
+  /* ★2026-09-20 1回だけ：🤖のトリガー3本を Head で作り直す（この関数は Head のトリガーで動いている＝ここで作ったトリガーも Head になる）。印は BA_REBIND_DONE */
+  try { if (!P_().getProperty('BA_REBIND_DONE')) { P_().setProperty('BA_REBIND_DONE', new Date().toISOString()); rebindBoshuTriggersToHead(); } } catch (eRb) { Logger.log('rebind失敗: ' + eRb); }
   if (!bgAllowed_()) { Logger.log('syncListingsRoundRobin skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   var toks = listTokens_(); if (!toks.length) return [];
   toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
