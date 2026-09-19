@@ -381,13 +381,13 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge') {
+    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -5196,6 +5196,62 @@ function boshuAutoPrejudge_(hw, maxN) {
     return { ok: true, hw: hw, judged: r.n, okN: r.ok, ngN: r.ng, left: r.left };
   } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
   finally { try { lock.releaseLock(); } catch (e4) {} }
+}
+/* ═══ 📸 状態写真の索引（本人 2026-09-19「コンディションの画像も自動で追加していけないか。過去に送っている画像から持ってきてもいい」「将来は画像リクエストに自動で返したい。説明書付き・チラシ付きの指定は見極めて」）═══
+   材料＝webchat で過去に送った画像（chat_messages の out:image・120日で約2,700枚）。ただし約1,000枚は注文後メッセージのバナー、発送伝票（住所入り）が写った写真も混じる。
+   → ポータルが候補の一覧（注文後メッセージと隣り合わない画像）を app_kv.cond_photo_queue に置き、ここで1枚ずつ AI に【見えたものを書き写させる】（合否はコード＝ai-extract-then-decide）。
+   索引 app_kv.cond_photo_index.items[url] = { ty 種別, pi 個人情報, it 物, ti 題名, pf 機種, parts 写っている付属品, vw 向き, cc, at, req 写真依頼の直後か, rq 依頼文 }
+   伝票・個人情報あり・バナーは索引に「使わない」印で残す（二度見ない）。1回 最大20枚・枠は1回あたり約25回 */
+var COND_Q = 'cond_photo_queue', COND_IDX = 'cond_photo_index';
+function condIndexTick(manual) {
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(3000)) return { ok: false, error: 'いま走っています' };
+  try {
+    var t0 = Date.now();
+    /* やることが無い時は枠を1回も使わずに休む（30分ごとのトリガーが毎回 Supabase を読むのを避ける・Codex指摘）。休みの印はスクリプト プロパティ＝時限つきなので勝手に戻る */
+    var idleUntil = 0; try { idleUntil = Number(P_().getProperty('COND_IDLE_UNTIL') || 0); } catch (e0) {}
+    if (manual !== true && idleUntil && Date.now() < idleUntil) return { ok: true, skipped: 'idle' };
+    if (!bgAllowed_() && manual !== true) return { ok: true, skipped: 'urlfetch 予約枠' };
+    var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return { ok: false, error: 'CLAUDE_KEY がありません' };
+    /* ★読めなかった時は進めない（baKv_ は失敗を null で返す＝空の索引で上書きすると今までの判定が全部消える・Codex指摘／[[catch-empty-is-not-absence]]） */
+    var rq = sbSelect_('app_kv', 'select=k,v&k=in.(' + COND_Q + ',' + COND_IDX + ')');
+    if (!Array.isArray(rq)) return { ok: false, error: '索引を読めませんでした' };
+    var q = {}, idx = null; rq.forEach(function (r) { if (r.k === COND_Q) q = r.v || {}; if (r.k === COND_IDX) idx = r.v || {}; });
+    var items = Array.isArray(q.items) ? q.items : [];
+    if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補の一覧がまだありません（ポータルが作ります）' }; }
+    if (!idx) idx = {}; idx.items = idx.items || {}; idx.fail = idx.fail || {};
+    var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
+    if (!todo.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 6 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, total: Object.keys(idx.items).length }; }   /* 全部済み＝6時間休む（一覧は1日1回しか増えない） */
+    var n = 0, usable = 0;
+    for (var i = 0; i < todo.length && Date.now() - t0 < 240000; i++) {
+      var x = todo[i];
+      var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 320, messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'url', url: String(x.u) } },
+        { type: 'text', text: 'ネットショップがお客さんに送った画像です。判断はせず、見えているものをそのまま書き出してください。JSONだけで答えて（この順番で）: {"type":"product_photo|banner|shipping_label|screenshot|document|other"（product_photo＝手元の商品を撮った写真／banner＝文字やイラストで作った案内画像／shipping_label＝送り状・伝票が主役）,"personal_info":true|false（宛名・住所・電話番号・送り状・バーコード付きの伝票が少しでも写っていれば true）,"item":"写っている物を一言で（例: game software / game console / controller / toy / trading card / book）","title_seen":"パッケージやラベルに書いてある題名をそのまま（読めなければ空）","platform_seen":"機種のロゴ・表記をそのまま（例: NINTENDO GAMECUBE / PlayStation 2。無ければ空）","parts":["写っている物を次の語から全部: box, case, disc, cartridge, manual, flyer, obi, registration_card, cable, charger, controller, console, dock, stand, strap, card, figure, other"],"view":"front|back|inside|spine|label|accessories|whole_set|close_up"}' } ] }] };
+      ufBump_(1, 'cond_index(写真の索引)');
+      var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
+      var code = res.getResponseCode(), j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e2) {}
+      try { aiSpendBump_('状態写真の索引', j.usage); } catch (e3) {}
+      if (code === 429 || code >= 500 || code === 401 || code === 403 || code === 402) break;   /* 混雑・障害・鍵や残高の問題は【画像のせいではない】＝印も失敗回数も付けずに次回へ（Codex指摘） */
+      if (code === 400 && /credit|billing|balance/i.test(String((j.error && j.error.message) || ''))) break;
+      var o = null; if (code < 400) { var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); try { o = m ? JSON.parse(m[0]) : null; } catch (e4) { o = null; } }
+      /* 判定できなかった（HTTPエラー・JSONが壊れている）画像は印を付けずに次回もう一度。3回だめなら諦める（Codex指摘） */
+      if (!o || !o.type) { idx.fail[x.u] = (idx.fail[x.u] || 0) + 1; continue; }
+      var ty = String(o.type);
+      var pi = !(o.personal_info === false) || ty === 'shipping_label';   /* 個人情報は「無い」と明示された時だけ無い扱い（Codex指摘） */
+      var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
+      idx.items[x.u] = rec; n++; if (rec.ok) usable++;
+    }
+    idx.updatedAt = new Date().toISOString();
+    baKvSet_(COND_IDX, idx);
+    var left = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).length;
+    return { ok: true, judged: n, usable: usable, left: left, total: Object.keys(idx.items).length };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+  finally { try { ufPersist_(); } catch (e5) {} try { lock.releaseLock(); } catch (e6) {} }
+}
+function setupCondIndexTrigger() {
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'condIndexTick'; });
+  if (!has) ScriptApp.newTrigger('condIndexTick').timeBased().everyMinutes(30).create();
+  return { ok: true, had: has };
 }
 function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む

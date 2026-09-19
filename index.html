@@ -17538,6 +17538,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-19', items: [
+      '\u{1F4F8} <b>状態写真（コンディション画像）の索引づくりを始めました</b>（本人「コンディションの画像も自動で追加していけないか。過去に送っている画像から持ってきてもいい」）。webchat で過去120日に送った画像は約2,700枚。そのうち約1,000枚は注文後メッセージの案内バナー、発送伝票（住所入り）が写った写真も混じっていました。ポータルが1日1回、バナーを除いた候補の一覧を作り、GASが30分ごとに20枚ずつAIに見せて「商品・機種・写っている付属品（箱・説明書・チラシ…）・個人情報の有無」を書き出します。<b>伝票や個人情報が写った写真は使わない印</b>を付けます。写真の依頼の直後に送った画像を先に処理します。GAS v195。',
+    ]},
     { date: '2026-09-18', items: [
       '\u{1F51C} <b>🤖「🔜 次に出す予定」には、実際に出る見込みの作品だけを並べるようにしました</b>（本人「出してるやつはここに出さないで」＝出品済みは元から除いていますが、<b>出さないと分かっている作品</b>が上位に居座っていました：高額のPC原人・価格差の枠に入らないPSO・使える写真が無いくるりんスカッシュ）。これらは一覧から外して、下の「🚫 出さない見込み N件（理由つき）」にまとめ、その分だけ先の候補を繰り上げます。GAS v194。',
       '\u{1F41E} <b>【不具合・修正】母数でハードの行を開くと、巨大な紫のチェックが画面を覆って戻れなくなっていました</b>（本人「なんかバグってない？」「戻れなくなりました」）。原因は私のミス：表の上に足したチェックボックスに、既存の「内訳を開く箱」と同じ ID（tm-detail）を付けたため、箱用の大きさ指定がチェックボックスに当たっていました。ID を分けて解消。今日足した ID を全部点検し、ほかに重複が無いことを確認しました。',
@@ -27516,6 +27519,47 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   //   条件：設定 autoCollect（既定ON）・ブリッジあり・書き込みキーあり・手動収集中でない。GAS呼び出しは1回≈10回の枠（Supabase読み）＝1日50回弱
   const BA_COLLECT_EVERY_MS = 30 * 60000;
   try { setTimeout(() => { try { baAutoCollectArm(); } catch (_) {} }, 45000); } catch (_) {}   // ポータルを開いて45秒後に仕掛ける（母数ページを開かなくても動く）
+  // 📸 状態写真の索引の【候補の一覧】を1日1回つくる（本人 2026-09-19「コンディションの画像も自動で追加していけないか。過去に送っている画像から持ってきてもいい」）。
+  //   webchat で過去に送った画像（chat_messages の out:image・120日）から、注文後メッセージの前後5分に送ったもの（＝案内バナー・約1,000枚）を除き、
+  //   写真の依頼（photo / picture / foto …）の48時間以内に送った画像を先頭にして app_kv.cond_photo_queue へ。
+  //   AI で中身を見る（商品・機種・付属品・個人情報の有無）のは GAS condIndexTick（30分ごと・1回20枚）。ここは読むだけ＝GAS の枠を使わない。
+  async function condQueueBuild(force) {
+    try {
+      if (!settings.sbSecret) return null;
+      if (!force) { const cur = await baKvGet('cond_photo_queue'); if (cur && cur.at && Date.now() - Date.parse(cur.at) < 20 * 3600000) return { skipped: true, n: (cur.items || []).length }; }
+      const since = new Date(Date.now() - 120 * 86400000).toISOString();
+      const rows = await sbGetAll('chat_messages', 'select=cc,conversation_id,direction,msg_type,text,msg_time&direction=in.(in,out)&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc');
+      if (!Array.isArray(rows) || rows.length < 100) return null;   // 読めていない時に空の一覧で上書きしない
+      const by = {}; rows.forEach(m => { (by[m.conversation_id] = by[m.conversation_id] || []).push(m); });
+      const ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
+      const PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
+      const seen = new Set(), items = [];
+      Object.keys(by).forEach(c => {
+        const ms = by[c];
+        for (let i = 0; i < ms.length; i++) {
+          const m = ms[i]; if (m.direction !== 'out' || m.msg_type !== 'image') continue;
+          const u = String(m.text || '').split('@')[0].trim(); if (!/^https?:\/\//.test(u) || seen.has(u)) continue;
+          const t = Date.parse(m.msg_time);
+          let banner = false;
+          for (let j = Math.max(0, i - 10); j < Math.min(ms.length, i + 11) && !banner; j++) { const x = ms[j]; if (x.direction === 'out' && x.msg_type === 'text' && Math.abs(Date.parse(x.msg_time) - t) <= 5 * 60000 && ORDER_TXT.test(x.text || '')) banner = true; }
+          if (banner) continue;
+          let rq = '';
+          for (let k = i - 1; k >= 0 && k >= i - 14; k--) { const x = ms[k]; if (x.direction === 'in' && x.msg_type === 'text' && t - Date.parse(x.msg_time) <= 48 * 3600000 && PHOTO.test(x.text || '')) { rq = String(x.text || '').replace(/\s+/g, ' ').slice(0, 140); break; } }
+          seen.add(u); items.push({ u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq });
+        }
+      });
+      items.sort((a, b) => (b.req - a.req) || (Date.parse(b.at) - Date.parse(a.at)));
+      // 索引に入った（＝AIが見終わった）写真は一覧から外してから上限で切る。古い未処理が、処理済みの新しい写真に押し出されて永久に回ってこないのを防ぐ（Codex指摘）
+      let done = {}; try { const ix = await baKvGet('cond_photo_index'); done = (ix && ix.items) || {}; } catch (_) {}
+      const pending = items.filter(x => !done[x.u]);
+      const out = { at: new Date().toISOString(), total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500) };
+      await sbUpsert('app_kv', [{ k: 'cond_photo_queue', v: out, updated_at: out.at }]);
+      return { n: out.items.length, req: out.items.filter(x => x.req).length };
+    } catch (e) { try { console.warn('[cond] 候補の一覧を作れませんでした', e); } catch (_) {} return null; }
+  }
+  try { setTimeout(() => { condQueueBuild(false).then(r => { if (r && !r.skipped) { try { console.log('[cond] 状態写真の候補', r.n, '枚（写真依頼の直後', r.req, '枚）'); } catch (_) {} } }); }, 90000); } catch (_) {}
+  try { setInterval(() => { condQueueBuild(false).catch(() => {}); }, 6 * 3600000); } catch (_) {}   // 開きっぱなしのタブでも6時間ごとに見直す（中で「20時間以内に作っていれば何もしない」・Codex指摘）
+  try { window.__condQueueBuild = condQueueBuild; } catch (_) {}
   function baAutoCollectArm() {
     if (lst._baCollectTimer) return;
     lst._baCollectTimer = setInterval(() => { baAutoCollectTick().catch(() => {}); }, 60000);
