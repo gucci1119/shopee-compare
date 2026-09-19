@@ -4969,7 +4969,9 @@ function baYahoo_(q) {
   // ★fixed=3＝定額（即決）だけ。入札中の現在価格を相場に混ぜると仕入れを安く見積もって赤字になる（ポータルの仕入れ検索と同じ判断）
   var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3&n=50';
   ufBump_(1, 'boshu_auto(ヤフオク検索)');
-  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': BA_UA } });
+  /* ★2026-09-20 検索語に ( ) などが入ると UrlFetchApp が「使用できないアドレス」の例外を投げ、その回の🤖がまるごと止まっていた（DSの周辺機器名で実測）→ 記号を%で包み、例外でも1作品の見送りで済ませる */
+  url = url.replace(/[()'!*]/g, function (ch) { return '%' + ch.charCodeAt(0).toString(16).toUpperCase(); });
+  var res; try { res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': BA_UA } }); } catch (eF) { return { items: [], blocked: false, code: 0, err: String(eF).slice(0, 80) }; }
   var code = res.getResponseCode(), html = res.getContentText() || '';
   var out = { items: [], blocked: false, code: code };
   if (code >= 400) { out.blocked = code === 403 || code === 429 || code >= 500; return out; }
@@ -5152,6 +5154,7 @@ function boshuAutoTick(manual) {
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
+    try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
     try { baRephoto_(st, cfg, judged, pre, used, t0); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
@@ -5698,13 +5701,13 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
       i += batch.length; continue;
     }
-    var okNames = {}; (r2.models || []).forEach(function (m) { okNames[String(m.option).toLowerCase()] = m.model_id; });
+    var okNm_ = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); }; var okNames = {}; (r2.models || []).forEach(function (m) { okNames[okNm_(m.option)] = m.model_id; });
     items.forEach(function (x) {
-      var mid = okNames[String(x.option).toLowerCase()];
+      var mid = okNames[okNm_(x.option)];
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
@@ -5722,6 +5725,33 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
 // 入った明細のJANを product_ids（app_kv・{items:{'id:<item>#<model>': {...}}}）へ。既にJANが入っている鍵は触らない
+/* ★2026-09-20 本人「出してない商品を出すんでしょ？なぜ JAN 情報がないとかいうことが起こる？」
+   実測：🤖の 83明細のうち JAN なし 40件、そのうち 38件は model_id が空＝add_model の返事から明細IDを拾えず、JAN を書く鍵（id:<item>#<model>）が作れなかった（マスタに JAN はあった）。
+   → model_id が空／JAN 未記入の明細を、カタログごとに get_model_list 1回で引き直し、JAN はマスタ（sg_<hw>・jan_master_<hw>）から作品の鍵で引いて product_ids に書く。1回の実行でカタログ2つまで。済んだ明細は jw=1 */
+function baJanBackfill_(st, t0) {
+  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && !a.jw; });
+  if (!todo.length) return;
+  var byItem = {}, order = []; todo.forEach(function (a) { var k = String(a.item_id); if (!byItem[k]) { byItem[k] = []; order.push(k); } byItem[k].push(a); });
+  var nm = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  var janMaps = {}, janOf = function (hw, key, ja) {
+    if (!janMaps[hw]) { var m = {}; try { var sv = baKv_('sg_' + hw) || {}; (sv.rows || []).forEach(function (r) { if (r && r.t && baJanReal_(r.j)) { var k = baKey_(r.t); if (k && !m[k]) m[k] = r.j; } }); var jv = baKv_('jan_master_' + hw) || {}, jmi = jv.items || {}; (Array.isArray(jmi) ? jmi : Object.keys(jmi).map(function (j) { return [j, jmi[j]]; })).forEach(function (p) { if (p && p[1] && baJanReal_(p[0])) { var k2 = baKey_(p[1]); if (k2 && !m[k2]) m[k2] = p[0]; } }); } catch (e) {} janMaps[hw] = m; }
+    return janMaps[hw][key] || janMaps[hw][baKey_(ja)] || '';
+  };
+  var q = [], done = 0;
+  for (var i = 0; i < order.length && done < 2; i++) {
+    if (Date.now() - t0 > 120000) break;
+    var rows = byItem[order[i]], a0 = rows[0], models = [];
+    try { var j = callShop_(a0.shop_id, '/api/v2/product/get_model_list', { item_id: parseInt(a0.item_id, 10) }, 'get'); var resp = j.response || {}; var opts = ((resp.tier_variation || [])[0] || {}).option_list || []; (resp.model || []).forEach(function (m) { var ti = (m.tier_index || [])[0]; var o = opts[ti]; if (o) models.push({ n: nm(o.option), id: m.model_id }); }); } catch (eG) { continue; }
+    done++;
+    rows.forEach(function (a) {
+      if (!a.model_id) { var hit = models.filter(function (m) { return m.n === nm(a.en); })[0]; if (hit) a.model_id = hit.id; }
+      if (!a.model_id) { a.jw = 1; return; }   /* 明細が消されている＝書く先が無い */
+      var jan = a.jan || janOf(String(a.hw || ''), a.key, a.ja); a.jw = 1;
+      if (jan) { a.jan = jan; q.push({ item_id: a.item_id, model_id: a.model_id, jan: jan, hw: a.hw, ja: a.ja || '', src: a.src || '' }); }
+    });
+  }
+  if (q.length) { var w = baWriteJan_(q); if (w) baLog_(st, 'JANを後から台帳に ' + w + '件'); }
+}
 function baWriteJan_(q) {
   if (!q || !q.length) return 0;
   var pid = baKv_('product_ids') || {}; pid.items = pid.items || {}; var n = 0;
