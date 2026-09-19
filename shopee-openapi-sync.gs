@@ -5219,7 +5219,9 @@ function condIndexTick(manual) {
     if (!idx) idx = {}; idx.items = idx.items || {}; idx.fail = idx.fail || {};
     /* 候補の一覧が無い・24時間より古い時は、ここで作り直す（ポータルが開いていなくても回るように＝本人「私がいない間に」。1日1回・Supabase 読み 約11回） */
     var qAge = q.at ? (Date.now() - Date.parse(q.at)) : Infinity;
-    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000) { var built = condQueueBuild_(idx.items); if (built) q = built; }
+    var noGroup = Array.isArray(q.items) && q.items.length && !q.items[0].g;
+    if (noGroup) { var keysOld = Object.keys(idx.items); if (keysOld.length <= 60 && keysOld.every(function (k) { return !idx.items[k].g; })) idx.items = {}; }   /* v196：セット番号を入れる前に見た最初の数十枚は、指示文も古いので見直す */
+    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup) { var built = condQueueBuild_(idx.items); if (built) q = built; }
     var items = Array.isArray(q.items) ? q.items : [];
     if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
@@ -5229,7 +5231,7 @@ function condIndexTick(manual) {
       var x = todo[i];
       var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 320, messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'url', url: String(x.u) } },
-        { type: 'text', text: 'ネットショップがお客さんに送った画像です。判断はせず、見えているものをそのまま書き出してください。JSONだけで答えて（この順番で）: {"type":"product_photo|banner|shipping_label|screenshot|document|other"（product_photo＝手元の商品を撮った写真／banner＝文字やイラストで作った案内画像／shipping_label＝送り状・伝票が主役）,"personal_info":true|false（宛名・住所・電話番号・送り状・バーコード付きの伝票が少しでも写っていれば true）,"item":"写っている物を一言で（例: game software / game console / controller / toy / trading card / book）","title_seen":"パッケージやラベルに書いてある題名をそのまま（読めなければ空）","platform_seen":"機種のロゴ・表記をそのまま（例: NINTENDO GAMECUBE / PlayStation 2。無ければ空）","parts":["写っている物を次の語から全部: box, case, disc, cartridge, manual, flyer, obi, registration_card, cable, charger, controller, console, dock, stand, strap, card, figure, other"],"view":"front|back|inside|spine|label|accessories|whole_set|close_up"}' } ] }] };
+        { type: 'text', text: 'ネットショップがお客さんに送った画像です。判断はせず、見えているものをそのまま書き出してください。JSONだけで答えて（この順番で）: {"type":"product_photo|banner|shipping_label|screenshot|document|other"（product_photo＝手元の商品を撮った写真／banner＝文字やイラストで作った案内画像／shipping_label＝送り状・伝票が主役）,"personal_info":true|false（人の名前・住所・電話番号が書かれた宛名ラベルや送り状・配送伝票が少しでも写っていれば true。商品のパッケージに印刷されたバーコード・JANコード・型番・メーカーの住所は個人情報ではないので false）,"item":"写っている物を一言で（例: game software / game console / controller / toy / trading card / book）","title_seen":"パッケージの表・背・ディスクやカートリッジのラベルに書いてある作品の題名をそのまま（読めなければ空。ELITE や HD REMASTER のような付随の語だけを題名にしない）","platform_seen":"その商品の機種を示すロゴ・表記をそのまま（例: NINTENDO GAMECUBE / PS3 / PlayStation 2）。確実に読める時だけ書く。PlayStation Network などサービス名のロゴは機種ではない。読めなければ空","parts":["写っている物を次の語から全部: box, case, disc, cartridge, manual, flyer, obi, registration_card, cable, charger, controller, console, dock, stand, strap, card, figure, other"],"view":"front|back|inside|spine|label|accessories|whole_set|close_up"}' } ] }] };
       ufBump_(1, 'cond_index(写真の索引)');
       var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
       var code = res.getResponseCode(), j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e2) {}
@@ -5241,9 +5243,21 @@ function condIndexTick(manual) {
       if (!o || !o.type) { idx.fail[x.u] = (idx.fail[x.u] || 0) + 1; continue; }
       var ty = String(o.type);
       var pi = !(o.personal_info === false) || ty === 'shipping_label';   /* 個人情報は「無い」と明示された時だけ無い扱い（Codex指摘） */
-      var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
+      var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), g: String(x.g || ''), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
       idx.items[x.u] = rec; n++; if (rec.ok) usable++;
     }
+    /* ★v196 セットの題名・機種を決める：裏面や中身の写真は1枚では機種を読み違える（実測：PS3 の裏面を Vita、ディスクを PS4 と答えた）。
+       同じセットの中で【表の写真（view=front）から読めた値】を優先し、無ければ一番多い値。セット全員に gti / ghw として持たせる（1枚ごとの読みは ti / hw に残す） */
+    try {
+      var groups = {}; Object.keys(idx.items).forEach(function (u) { var r = idx.items[u]; if (r && r.g) (groups[r.g] = groups[r.g] || []).push(r); });
+      Object.keys(groups).forEach(function (g) {
+        var rs = groups[g].filter(function (r) { return r.ty === 'product_photo'; }); if (!rs.length) return;
+        var pickOf = function (field) { var fr = rs.filter(function (r) { return r.vw === 'front' && r[field]; }); var src = fr.length ? fr : rs.filter(function (r) { return r[field]; }); var cnt = {}; src.forEach(function (r) { cnt[r[field]] = (cnt[r[field]] || 0) + 1; }); var best = ''; Object.keys(cnt).forEach(function (k) { if (!best || cnt[k] > cnt[best]) best = k; }); return best; };
+        var gti = pickOf('ti'), ghw = pickOf('hw'), gpf = pickOf('pf');
+        var allParts = {}; rs.forEach(function (r) { (r.parts || []).forEach(function (p2) { allParts[p2] = 1; }); });
+        groups[g].forEach(function (r) { r.gti = gti; r.ghw = ghw; r.gpf = gpf; r.gparts = Object.keys(allParts); r.gn = rs.length; });
+      });
+    } catch (eG) {}
     idx.updatedAt = new Date().toISOString();
     baKvSet_(COND_IDX, idx);
     var left = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).length;
@@ -5260,20 +5274,25 @@ function condQueueBuild_(done) {
   var ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
   var PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
   var seen = {}, items = [];
+  /* セット＝同じ会話で、前の画像から4分以内に続けて送った写真（1つの商品の表・裏・中身をまとめて送っている）。番号は会話名そのものでなくハッシュ（索引にお客さんの名前を残さない） */
+  var hashG = function (str) { var h = 5381; for (var q2 = 0; q2 < str.length; q2++) h = ((h << 5) + h + str.charCodeAt(q2)) | 0; return (h >>> 0).toString(36); };
   Object.keys(by).forEach(function (c) {
-    var ms = by[c];
+    var ms = by[c], gCur = '', gLast = 0;
     for (var i = 0; i < ms.length; i++) {
       var m = ms[i]; if (m.direction !== 'out' || m.msg_type !== 'image') continue;
+      { var tG = Date.parse(m.msg_time); if (!gCur || tG - gLast > 4 * 60000) gCur = hashG(String(c) + '|' + String(m.msg_time)); gLast = tG; }
       var u = String(m.text || '').split('@')[0].trim(); if (!/^https?:\/\//.test(u) || seen[u]) continue;
       var t = Date.parse(m.msg_time), banner = false;
       for (var j = Math.max(0, i - 10); j < Math.min(ms.length, i + 11) && !banner; j++) { var x = ms[j]; if (x.direction === 'out' && x.msg_type === 'text' && Math.abs(Date.parse(x.msg_time) - t) <= 5 * 60000 && ORDER_TXT.test(x.text || '')) banner = true; }
       if (banner) continue;
       var rq = '';
       for (var k = i - 1; k >= 0 && k >= i - 14; k--) { var y = ms[k]; if (y.direction === 'in' && y.msg_type === 'text' && t - Date.parse(y.msg_time) <= 48 * 3600000 && PHOTO.test(y.text || '')) { rq = String(y.text || '').replace(/\s+/g, ' ').slice(0, 140); break; } }
-      seen[u] = 1; items.push({ u: u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq: rq });
+      seen[u] = 1; items.push({ u: u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq: rq, g: gCur });
     }
   });
-  items.sort(function (a, b) { return (b.req - a.req) || (Date.parse(b.at) - Date.parse(a.at)); });
+  /* セット単位で並べる：依頼の直後のセットが先・新しいセットが先・セットの中は送った順（セットが途中で切れて半分だけ判定、を減らす） */
+  var gInfo = {}; items.forEach(function (x) { var gi = gInfo[x.g] = gInfo[x.g] || { req: 0, at: 0 }; if (x.req) gi.req = 1; gi.at = Math.max(gi.at, Date.parse(x.at) || 0); });
+  items.sort(function (a, b) { var A = gInfo[a.g], B = gInfo[b.g]; return (B.req - A.req) || (B.at - A.at) || (a.g < b.g ? -1 : a.g > b.g ? 1 : 0) || (Date.parse(a.at) - Date.parse(b.at)); });
   var pending = items.filter(function (x) { return !(done || {})[x.u]; });
   var out = { at: new Date().toISOString(), total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas' };
   baKvSet_(COND_Q, out);

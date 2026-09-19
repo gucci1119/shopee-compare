@@ -27534,10 +27534,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
       const PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
       const seen = new Set(), items = [];
+      // セット番号（同じ会話で4分以内に続けて送った写真＝1つの商品の表・裏・中身）。GAS condQueueBuild_ と同じ規則・同じハッシュ
+      const hashG = (str) => { let h = 5381; for (let q2 = 0; q2 < str.length; q2++) h = ((h << 5) + h + str.charCodeAt(q2)) | 0; return (h >>> 0).toString(36); };
       Object.keys(by).forEach(c => {
-        const ms = by[c];
+        const ms = by[c]; let gCur = '', gLast = 0;
         for (let i = 0; i < ms.length; i++) {
           const m = ms[i]; if (m.direction !== 'out' || m.msg_type !== 'image') continue;
+          { const tG = Date.parse(m.msg_time); if (!gCur || tG - gLast > 4 * 60000) gCur = hashG(String(c) + '|' + String(m.msg_time)); gLast = tG; }
           const u = String(m.text || '').split('@')[0].trim(); if (!/^https?:\/\//.test(u) || seen.has(u)) continue;
           const t = Date.parse(m.msg_time);
           let banner = false;
@@ -27545,10 +27548,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           if (banner) continue;
           let rq = '';
           for (let k = i - 1; k >= 0 && k >= i - 14; k--) { const x = ms[k]; if (x.direction === 'in' && x.msg_type === 'text' && t - Date.parse(x.msg_time) <= 48 * 3600000 && PHOTO.test(x.text || '')) { rq = String(x.text || '').replace(/\s+/g, ' ').slice(0, 140); break; } }
-          seen.add(u); items.push({ u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq });
+          seen.add(u); items.push({ u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq, g: gCur });
         }
       });
-      items.sort((a, b) => (b.req - a.req) || (Date.parse(b.at) - Date.parse(a.at)));
+      { const gInfo = {}; items.forEach(x => { const gi = gInfo[x.g] = gInfo[x.g] || { req: 0, at: 0 }; if (x.req) gi.req = 1; gi.at = Math.max(gi.at, Date.parse(x.at) || 0); }); items.sort((a, b) => { const A = gInfo[a.g], B = gInfo[b.g]; return (B.req - A.req) || (B.at - A.at) || (a.g < b.g ? -1 : a.g > b.g ? 1 : 0) || (Date.parse(a.at) - Date.parse(b.at)); }); }
       // 索引に入った（＝AIが見終わった）写真は一覧から外してから上限で切る。古い未処理が、処理済みの新しい写真に押し出されて永久に回ってこないのを防ぐ（Codex指摘）
       let done = {}; try { const ix = await baKvGet('cond_photo_index'); done = (ix && ix.items) || {}; } catch (_) {}
       const pending = items.filter(x => !done[x.u]);
