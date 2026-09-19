@@ -5409,6 +5409,19 @@ function condQueueBuild_(done) {
   baKvSet_(COND_Q, out);
   return out;
 }
+/* ★2026-09-20 🤖の3本のトリガーが「バージョン 200」に固定されていて、保存した変更が1つも効いていなかった（/exec の中から作ったトリガーはその時のデプロイ版で動く）。
+   この関数を【エディタの ▶実行】から走らせると、3本を消して Head（保存した最新）で作り直す。以後は保存だけで効く。/exec から呼ばないこと（呼ぶとまたデプロイ版に固定される） */
+function rebindBoshuTriggersToHead() {
+  var names = { boshuAutoTick: 1, condIndexTick: 1, boshuAutoRecheck: 1 }, had = [];
+  ScriptApp.getProjectTriggers().forEach(function (t) { var f = t.getHandlerFunction(); if (names[f]) { had.push(f); ScriptApp.deleteTrigger(t); } });
+  ScriptApp.newTrigger('boshuAutoTick').timeBased().everyMinutes(30).create();
+  ScriptApp.newTrigger('condIndexTick').timeBased().everyMinutes(10).create();
+  ScriptApp.newTrigger('boshuAutoRecheck').timeBased().everyDays(1).atHour(4).create();
+  var out = { ok: true, had: had, at: new Date().toISOString() };
+  try { baKvSet_('ba_trigger_rebind', out); } catch (e) {}
+  Logger.log(JSON.stringify(out));
+  return out;
+}
 function setupCondIndexTrigger() {
   /* v198：1回を75秒に縮めた分、10分ごとに回す（古い30分のトリガーは消して作り直す） */
   var had = 0; ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'condIndexTick') { had++; ScriptApp.deleteTrigger(t); } });
