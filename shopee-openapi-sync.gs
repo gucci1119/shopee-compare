@@ -5154,6 +5154,7 @@ function boshuAutoTick(manual) {
     var used = baKv_(BA_IMGS) || {};
     var pre = baKv_('boshu_auto_pre') || {};   // ポータルがブラウザ経由で先に集めたメルカリの写真・価格（GASはメルカリを読めない）
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
+    try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
     try { baRephoto_(st, cfg, judged, pre, used, t0); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
@@ -5687,7 +5688,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (ceilA && price > ceilA) price = ceilA;
       if ((hi && price < hi / ratio) || (lo && price > lo * ratio)) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; baSkipRec_(st, hw, cc, p, 'ratio'); return; }   // 丸めで枠から出たら見送り
       lo = lo ? Math.min(lo, price) : price; hi = hi ? Math.max(hi, price) : price;
-      items.push({ option: p.en, price: price, stock: p.stock, sku: '', image_id: p.imageId, _p: p });
+      items.push({ option: p.en, price: price, stock: p.stock, sku: baSkuOf_(hw, p.en), image_id: p.imageId, _p: p });   /* ★2026-09-20 明細SKU＝機種_作品名（7か国共通・本人OK） */
     });
     if (!items.length) { i += batch.length; continue; }
     var r2;
@@ -5751,6 +5752,29 @@ function baJanBackfill_(st, t0) {
     });
   }
   if (q.length) { var w = baWriteJan_(q); if (w) baLog_(st, 'JANを後から台帳に ' + w + '件'); }
+}
+/* ★2026-09-20 明細SKU（本人「出品している商品、明細に全てSKU付けられますか？」→ 形は 機種_作品名・7か国共通・既にあるSKUは触らない）
+   baSkuOf_＝🤖が新しく足す明細のSKU。baSkuPlanTick_＝ポータル側で作った計画（app_kv.sku_plan {items:[{s:shop_id,i:item_id,m:[[model_id,sku],...]}]}）を
+   30分ごとに 20カタログずつ update_model で書く。進み具合は app_kv.sku_plan_state {pos,ok,fail:[...]}。1カタログ＝明細50件ごとに1回。cfg は見ない（🤖がOFFの時は回らない） */
+function baSkuSlug_(t) { var x = String(t || ''); try { x = x.normalize('NFKD'); } catch (e) {} return x.replace(/[\u0300-\u036f]/g, '').replace(/['\u2019`]/g, '').replace(/&/g, ' AND ').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, ''); }
+function baSkuOf_(hw, en) { var b = baSkuSlug_(en); if (!b) return ''; var h = String(BA_HW_LABEL[String(hw || '')] || hw || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + '_' + b).slice(0, 100).replace(/_+$/, ''); }
+function baSkuPlanTick_(st, t0) {
+  var ps = baKv_('sku_plan_state') || {}; if (!ps.on) return;
+  var plan = baKv_('sku_plan') || {}, items = plan.items || []; ps.pos = ps.pos || 0; ps.ok = ps.ok || 0; ps.fail = ps.fail || [];
+  if (ps.pos >= items.length) { ps.on = false; ps.doneAt = new Date().toISOString(); baKvSet_('sku_plan_state', ps); baLog_(st, '🏷 SKUの一括付与が完了（' + ps.ok + '明細・失敗 ' + ps.fail.length + 'カタログ）'); return; }
+  var n = 0, okN = 0, tS = Date.now();
+  while (ps.pos < items.length && n < 20 && Date.now() - tS < 70000 && Date.now() - t0 < 130000) {
+    var it = items[ps.pos], ms = it.m || [], bad = '';
+    for (var k = 0; k < ms.length && !bad; k += 50) {
+      try { updateModelSku_(it.s, it.i, ms.slice(k, k + 50).map(function (x) { return { model_id: x[0], sku: x[1] }; })); okN += Math.min(50, ms.length - k); }
+      catch (e) { bad = String((e && e.message) || e).slice(0, 80); }
+    }
+    if (bad) { if (ps.fail.length < 200) ps.fail.push({ i: it.i, e: bad }); }
+    ps.pos++; n++;
+  }
+  ps.ok += okN; ps.at = new Date().toISOString(); ps.total = items.length;
+  baKvSet_('sku_plan_state', ps);
+  baLog_(st, '🏷 SKU：' + n + 'カタログ・' + okN + '明細に付けた（' + ps.pos + '/' + items.length + '）');
 }
 function baWriteJan_(q) {
   if (!q || !q.length) return 0;
