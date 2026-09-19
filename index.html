@@ -17850,6 +17850,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u{1F4F8} <b>🤖の写真の基準を引き上げ：実物で、しかも表面だけ</b>（本人「実写真じゃない画像まじでやめて」「説明書とか載ってる写真もやめて。表面だけ」）。AIには何が写っているかを書かせ、表面1点だけ以外（説明書・中身・裏面・複数点）はコードで落とします。以前の「OK」は全部判定し直します。出品ログは、日ごとの棒を 🤖自動（紫）と手動の積み上げに、購入側の商品ページへの 🛒 リンクを追加。',
+      '\u{1F4C5} <b>出品ログ：期間に 7日・15日を追加</b>（本人「半月、1週間もほしい」）。',
       '\u{1F517} <b>出品ログ：商品ページに飛べるように</b>：その日に出した商品のカードで、明細名を押すと Shopee の商品ページ（お客さんが見る画面）、✏️ でセラーセンターの編集ページが開きます。名前は「…」で切らず2行まで出します。',
       '\u{1F4C5} <b>出品ログ：🤖自動出品の分が見分けられるように</b>：🤖が足した明細に 🤖 の印を付け、その日の件数と直近7日・30日の件数に「🤖自動 N・手動 M」を出します。あわせて日付の不具合を修正：出品ログは「出品した日」でなく「ログが気づいた日」で記録していて、🤖が 9/12〜9/20 に足した明細が全部 9/20 の出品になっていました。🤖の記録に残っている実際の日時で記録します。',
       '\u{1F4F7} <b>🤖の写真の質を実測して順番を変更</b>：AIが見た写真 294枚のうち通過は 222枚（76%）。個人の出品は 79%、業者（メルカリShops）は 50% で、落ちる理由の1位はカタログ画像でした。業者の写真は、個人の写真を全部試した後に回します（GAS バージョン201）。機種別の通過率は GC 81%・FC 80%・DS 74%・GBA 62%。「入った明細」は Shopee に出品済みの意味だと分かるように見出しを直しました。',
@@ -27775,11 +27777,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try {
       const body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'url', url: imgUrl } },
-        { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
+        { type: 'text', text: 'まず shown を決めてください：front＝商品1点を表面（おもて面）だけから撮った写真（閉じた箱・ケースの表、カセットのラベル面）／back＝裏面／open＝ケースや箱を開けている、ディスク・カセットをケースと並べている／manual＝説明書・チラシなどの紙が一緒に写っている／multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像。JSON には "shown" も入れてください。中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|other"}' } ] }] };
       const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
       const j = await r2.json(); if (!r2.ok) throw new Error((j && j.error && j.error.message) || ('HTTP ' + r2.status));
       try { if (j.usage) aiSpendAdd('写真の判定', { in: j.usage.input_tokens || 0, out: j.usage.output_tokens || 0 }); } catch (_) {}   // 💴 利用料に載せる（2026-09-16 まで載っていなかった）
       const txt = ((j.content || []).map(c => c.text || '').join('') || '').trim(); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {};
+      // ★2026-09-20 本人「説明書とか載ってる写真もやめてほしい。表面だけ」→ 表面1点だけ（shown=front）以外は落とす（GAS baJudge_ と同じ規則）
+      if (o.product_photo && String(o.shown || '') !== 'front') return { ok: false, kind: 'notfront', judged: true };
       return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
   }
@@ -28057,7 +28061,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         ${pvRows.map((r, i) => { const plan = r.plan || {}; const ccsP = Object.keys(plan); const pm0 = _baPre[r.key];
           // ★GASが返す「実行時に最初に試す写真」（r.pick）を見せる。集めた時の1枚目と、実行時の順番（紙箱＝使用感のある出品から等）は違うことがある
           const pm = (r.pick && pm0 && pm0.img) ? Object.assign({}, pm0, { img: r.pick.img, thumb: r.pick.img, src: r.pick.src || pm0.src, name: r.pick.name || pm0.name, cond: r.pick.cond, price: r.pick.price || pm0.price }) : pm0;
-          const JV = { wrongplatform: '別の機種の写真', box: '箱', case: 'ケース', cartridge: 'カセット', disc: 'ディスク', catalog: 'カタログ画像', screen: 'テレビ画面', sealed: '未開封に見える', overseas: '海外版', wrongtitle: '別の作品の写真', other: '実物でない' };
+          const JV = { notfront: '表面だけの写真でない（説明書・中身・裏面・複数点）', wrongplatform: '別の機種の写真', box: '箱', case: 'ケース', cartridge: 'カセット', disc: 'ディスク', catalog: 'カタログ画像', screen: 'テレビ画面', sealed: '未開封に見える', overseas: '海外版', wrongtitle: '別の作品の写真', other: '実物でない' };
           const jvLabel = (v) => { v = String(v || ''); if (!v) return ''; const ok = v.indexOf('ok:') === 0, k = v.slice(3); return `<span style="font-weight:700;color:${ok ? '#1b7f3b' : '#c0392b'}">${ok ? '✓ AI OK' : '✗ AI NG'}${JV[k] ? '（' + JV[k] + '）' : ''}</span>`; };
           const ngBefore = (r.tried || []).filter(x => String(x.v || '').indexOf('ng:') === 0);
           const judgeHtml = (r.pick ? (jvLabel(r.pick.v) || '<span title="まだAIが見ていない写真（薄く表示）。実物でなければ出す前に落ちます。「🔍 写真を先に判定」でまとめて判定できます">未判定＝出す前にAIが見る</span>') : '<span title="まだAIが見ていない写真（薄く表示）。実物でなければ出す前に落ちます">未判定＝出す前にAIが見る</span>') + (ngBefore.length ? ` <span style="color:#c0392b" title="${av('先に試して落ちた写真：' + ngBefore.map(x => JV[String(x.v).slice(3)] || String(x.v).slice(3)).join('・'))}">（落ちた写真 ${ngBefore.length}枚）</span>` : '') + ((r.pick && r.pick.shop) ? ' <span title="メルカリShops（業者）の出品">🏬</span>' : '');
@@ -30307,6 +30311,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       ]);
       logState.rows = rows;
       { const au = (kv || []).find(x => x.k === 'listlog_auto'); logState.autoMap = (au && au.v && au.v.map) || {}; }
+      // 購入側の商品ページのURLにはショップIDが要る（⚙️設定の shopIds が空の国ではリンクが作れず、✏️しか出ていなかった）→ 出品データから引く
+      try { const li = await sbGetAll('listings', 'select=cc,item_id,shop_id'); const sm = {}; (li || []).forEach(l => { if (l.shop_id) sm[l.cc + '|' + l.item_id] = String(l.shop_id); }); logState.shopMap = sm; } catch (_) { logState.shopMap = logState.shopMap || {}; }
       const g = ((kv || []).find(x => x.k === 'listlog_goal') || {}).v;   // 2つ読むようになったので kv[0] と決め打ちしない
       logState.goal = (g && Number(g.perDay)) || Number(localStorage.getItem('smdListLogGoal')) || 10;
     } catch (e) {
@@ -30354,7 +30360,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     let streak = 0;
     for (let i = (todayN > 0 ? 0 : 1); i < 400; i++) { const d = jstDate(Date.now() - i * 86400000); if (cnt(d) > 0) streak++; else break; }
     const sum = (arr) => arr.reduce((a, d) => a + cnt(d), 0);
-    const last7 = days.slice(-7), last30 = days.slice(-30);
+    const mkDays = (n) => { const o = []; for (let i = n - 1; i >= 0; i--) o.push(jstDate(Date.now() - i * 86400000)); return o; };
+    const last7 = mkDays(7), last30 = mkDays(30);   // ★表示の期間（7日・15日も選べるようにした）に引きずられないよう、集計用の日付は別に作る
     const monthPrefix = today.slice(0, 7);
     const monthN = rows.filter(r => String(r.ymd || '').startsWith(monthPrefix)).length;
     const best = days.reduce((mx, d) => Math.max(mx, cnt(d)), 0);
@@ -30393,9 +30400,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       //   5/31と6/1、8/1と8/2 のように1日違いが並び、間隔がまばらに見えていた（本人指摘 2026-08-25）。
       const dd = new Date(d + 'T00:00:00+09:00');
       const tick = tickSet.has(d) ? (dd.getMonth() + 1) + '/' + dd.getDate() : '';
-      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
-        ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}</span>` : ''}
-        <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${col};border-radius:4px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span>
+      // ★2026-09-20 本人「ここでも自動出品でいくつ、手動でいくつかは見れるようにしたい」→ 棒を 🤖自動（紫）と手動（緑/橙）の積み上げに。数字は「合計（🤖N）」
+      const nA = (byDay.get(d) || []).filter(isAuto).length; const hA = n ? Math.round(Math.max(2, h) * nA / n) : 0;
+      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件（🤖自動 ${nA}・手動 ${n - nA}）${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
+        ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}${nA ? `<span style="color:#5e35b1;font-weight:700">(🤖${nA})</span>` : ''}</span>` : ''}
+        <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${nA ? `linear-gradient(to top, ${col} 0 ${Math.max(2, h) - hA}px, #7e57c2 ${Math.max(2, h) - hA}px 100%)` : col};border-radius:4px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span>
         <span style="display:block;height:11px;font-size:8px;line-height:11px;color:${isToday ? '#ee4d2d' : '#b0b4bb'};font-weight:${isToday ? '700' : '400'};white-space:nowrap">${tick}</span>
       </div>`;
     }).join('');
@@ -30422,14 +30431,14 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <button class="smd-btn b-open" id="llog-jobs" style="font-size:11.5px;">🗂 しごとの履歴</button>
         <button class="smd-btn b-danger" id="llog-deleted" style="font-size:11.5px;">🗑 削除した商品の記録</button>
         <button class="smd-btn b-write" id="llog-sync" >🔄 いま反映（新しく出した分を取り込む）</button>
-        <span class="smd-seg">${[30, 90, 180, 365].map(d => `<button class="llog-range${logState.days === d ? ' on' : ''}" data-d="${d}" style="${logState.days === d ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${d}日</button>`).join('')}</span>
+        <span class="smd-seg">${[7, 15, 30, 90, 180, 365].map(d => `<button class="llog-range${logState.days === d ? ' on' : ''}" data-d="${d}" style="${logState.days === d ? 'background:#fff3ef;color:#ee4d2d;border-color:#ee4d2d;font-weight:700' : ''}">${d}日</button>`).join('')}</span>
         <button class="smd-btn" id="llog-csv" style="font-size:11.5px">⬇️ CSV</button>
         ${backfillN ? `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#5a6b8c" title="初回取り込みでShopeeの出品日から振り分けた分（明細ごとの正確な日付ではありません）を集計から外します"><input type="checkbox" id="llog-live"${logState.liveOnly ? ' checked' : ''}> 初回取り込み分（${backfillN.toLocaleString()}件・≈推定日）を除く</label>` : ''}
         <span class="smd-dim" id="llog-msg" style="font-size:11px"></span>
       </div>
       <div style="border:1px solid #ececec;border-radius:8px;padding:9px 10px 5px;background:#fff">
         <div style="display:flex;gap:1px;align-items:flex-end">${bars}</div>
-        <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件 / <span style="color:#5e35b1;font-weight:700">紫=🤖自動出品の分</span>　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
       </div>
       <div style="margin-top:12px">
         <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
@@ -30440,10 +30449,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             <span style="min-width:0;flex:1">
               <span style="display:block;font-size:9.5px;font-weight:800;color:${ccColor(r.cc)}">${esc(r.cc)}${r.seeded ? ' <span class="smd-dim" style="font-weight:400" title="初回の取り込み時にShopeeの出品日から埋めた分（明細ごとの正確な日付ではありません）">≈</span>' : ''}</span>
               ${(() => { // ★2026-09-20 本人「ここから商品ページに飛べる？」→ 明細名＝お客さんが見る商品ページ／✏️＝セラーセンターの編集ページ。名前は「…」で切らず2行まで出す
-                const bu = (typeof buyerUrlFor === 'function' ? buyerUrlFor(r.cc, r.item_id) : '') || ''; const eu = (typeof editUrlForCc === 'function' ? editUrlForCc(r.cc, r.item_id) : '') || '';
+                const rgB = REGIONS.find(x => x.cc === r.cc) || {}; const sidB = (logState.shopMap || {})[r.cc + '|' + r.item_id];
+                const bu = (typeof buyerUrlFor === 'function' ? buyerUrlFor(r.cc, r.item_id) : '') || ((rgB.buyer && sidB) ? `https://${rgB.buyer}/product/${sidB}/${r.item_id}` : ''); const eu = (typeof editUrlForCc === 'function' ? editUrlForCc(r.cc, r.item_id) : '') || '';
                 const nmTxt = esc(r.model_name || r.name || ''); const bot = isAuto(r) ? '<span title="🤖 母数の自動出品が足した明細" style="color:#5e35b1">🤖 </span>' : '';
                 const nmHtml = bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" style="color:#1a3d7c;text-decoration:none" title="${av((r.name || '') + '｜押すとShopeeの商品ページを開きます')}">${nmTxt}</a>` : nmTxt;
-                return `<span style="display:flex;gap:4px;align-items:flex-start"><span style="flex:1;min-width:0;font-size:11px;font-weight:600;color:#333;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word">${bot}${nmHtml}</span>${eu ? `<a href="${esc(eu)}" target="_blank" rel="noopener" title="セラーセンターの編集ページを開く" style="flex:none;font-size:11px;text-decoration:none">✏️</a>` : ''}</span>`; })()}
+                return `<span style="display:flex;gap:4px;align-items:flex-start"><span style="flex:1;min-width:0;font-size:11px;font-weight:600;color:#333;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word">${bot}${nmHtml}</span>${bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" title="Shopee の商品ページ（お客さんが見る画面）を開く" style="flex:none;font-size:11px;text-decoration:none">🛒</a>` : ''}${eu ? `<a href="${esc(eu)}" target="_blank" rel="noopener" title="セラーセンターの編集ページを開く" style="flex:none;font-size:11px;text-decoration:none">✏️</a>` : ''}</span>`; })()}
               <span style="display:block;font-size:9.5px;color:#8a8f98;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name || '')}">${esc(r.model_name ? (r.name || '') : '')}</span>
             </span></div>`).join('')}</div>`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
