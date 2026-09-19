@@ -4884,19 +4884,23 @@ function baIsShop_(x) { return !!x && (/\/shops\/product\//.test(String(x.src ||
 /* ★v186 写真を試す順番：使用感のある出品から（本人「新品と間違われるのが嫌」「箱なので少々汚いぐらいの画像で載せといた方がいい」）。メルカリの商品の状態＝傷汚れあり/状態が悪い→やや傷汚れ→傷汚れなし→不明。未使用に近い・新品は写真に使わない（-1）。同じ状態なら個人の出品が先・Shops が後 */
 /* 機種で順番を変える（本人 2026-09-18）：パッケージが紙箱の機種は「少々汚いぐらいの写真」を先に（実際には綺麗なものを仕入れて送る方が間違いがない）。プラスチックケースの機種（Wii・DS・Switch・PS系など）は綺麗な写真を先に */
 var BA_PAPER_HW = { gc: 1, fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1 };
+/* ★2026-09-20 本人「アドバンス、ゲームボーイ、ファミコン、スーパーファミコンなど紙のパッケージのやつは、箱はいつも販売してないから、ソフトだけ」「ゲームキューブは箱付きでも販売してる。でも汚くていい」
+   ＝カセットの機種は【カセット単体の写真だけ】使う（箱の写真を載せると箱付きだと思って買われる）。GC はディスク＋箱で売るので対象外 */
+var BA_CART_ONLY_HW = { fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1 };
+function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
 function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使用|新品/.test(c)) return -1; var worn = /状態が悪い|傷や?汚れあり/.test(c) && !/やや/.test(c), some = /やや/.test(c), clean = /なし/.test(c); if (BA_PAPER_HW[String(hw || '')]) return worn ? 0 : (some ? 1 : (clean ? 2 : 3)); return clean ? 0 : (some ? 1 : (worn ? 2 : 3)); }
 /* ★v192 全件がカタログ画像だと分かっている出品元（メルカリShops の「【中古】NGCソフト …」型＝中古チェーンの通販。2026-09-18 実測：くるりんスカッシュ・PC原人・ZOIDS・WWE がこれで、Haiku は絵柄だけの画像に OK（箱）を付けた）。Shops 全体は外さない（本人「ショップスからでもいい」） */
 function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12}ソフト/.test(String((a && a.name) || '')); }
-function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0; }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
+function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0; }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v7|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v9|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・値札の跡があるのは問題ありません。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。JSONだけで答えて（この順番で）: {"scene":"...","edges":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|other"' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。JSONだけで答えて（この順番で）: {"scene":"...","edges":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|other"' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -4907,10 +4911,15 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var ok = !!o.product_photo, kind = String(o.kind || '');
   /* ★v192 「実物か」をAIの一言に任せない：周りに何も写っていない（scene=none）か、縁も影も見えない（edges=false）なら、AIが true と言ってもカタログ画像として落とす */
   if (ok && (/^\s*(none|なし|無し|何も)?\s*$/i.test(String(o.scene == null ? 'x' : o.scene)) || o.edges === false)) { ok = false; kind = 'catalog'; }
+  /* ★2026-09-20 本人「新品っぽい画像が多すぎる」「中古ってわかるような画像じゃないと」：3Dの箱の宣材画像（8BIT MUSIC POWER ENCORE）が、影と縁があるので通っていた。
+     周りに写っているもの(scene)が 白・無地・単色・透明・グラデーション・スタジオ の背景だけなら、商品だけが浮いた宣材／通販の画像として落とす。机・床・布・畳・手・棚など実際の生活環境が写っている写真だけ通す */
+  if (ok && /白|white|無地|単色|plain|透明|transparent|グラデ|gradient|スタジオ|studio|背景なし|切り抜き/i.test(String(o.scene || '')) && !/机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|table|floor|desk|hand|carpet|wood|fabric/i.test(String(o.scene || ''))) { ok = false; kind = 'catalog'; }
   /* ★v190 機種の合否はAIに聞かずコードで照合する（2026-09-18 実測：PS2版「Mr.インクレディブル」の写真に、GC用として OK を出した。yes/no で聞くと版によって答えがぶれる→見えたロゴを書き写させて BA_HW_PAT で当てる） */
   if (ok && expect && expect.hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); /* 重なる名前（Wii U は wii にも、SUPER FAMICOM は fc にも当たる）は表の並び順で先＝狭い方に決める（Codex指摘） */ if (seenHw.length && seenHw[0] !== String(expect.hwKey)) { ok = false; kind = 'wrongplatform'; } }
   /* ★バージョン201（2026-09-20）本人「説明書とか載ってる写真もやめてほしい。表面だけ」。手動の出品の明細画像は前から表面だけ。AIには何が写っているか（shown）を書かせ、表面1点だけ（front）以外はコードで落とす＝ng:notfront。shown が無い古い形の答えは通さない */
   if (ok && String(o.shown || '') !== 'front') { ok = false; kind = 'notfront'; }
+  /* カセットの機種（BA_CART_ONLY_HW）は、写っている物が cartridge の時だけ通す（箱・ケースの写真＝ng:boxed） */
+  if (ok && expect && BA_CART_ONLY_HW[String(expect.hwKey || '')] && String(o.kind || '') !== 'cartridge') { ok = false; kind = 'boxed'; }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
@@ -5217,7 +5226,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
     if (baCostFromPre_(pp) > maxCost) continue;
     var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
     for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
-      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v7|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
+      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v9|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
       if (vK.indexOf('ok:') === 0) { hasOk = true; break; }
       if (vK) continue;
       if (n >= maxN || Date.now() - t0 > limitMs) { stop = true; break; }
@@ -5447,7 +5456,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
         if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
         var jcP = boshuAutoPreviewBody_._jc;
         var ordP = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 4);
-        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v7|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
+        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v9|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
         var pickP = null; for (var tp = 0; tp < triedP.length; tp++) { if (triedP[tp].v.indexOf('ng:') !== 0) { pickP = triedP[tp]; break; } }
         row.tried = triedP.map(function (x) { return { img: x.img, v: x.v, shop: x.shop, cond: x.cond }; });
         if (pickP) row.pick = pickP; else if (triedP.length) row.note = '⚠ 写真 ' + triedP.length + '枚ともAI判定NG（' + triedP.map(function (x) { return x.v.slice(3); }).join('・') + '）→ 実行時はヤフオクで探す';
