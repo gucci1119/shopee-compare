@@ -4889,15 +4889,18 @@ var BA_PAPER_HW = { gc: 1, fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, 
 /* ★2026-09-20 本人「アドバンス、ゲームボーイ、ファミコン、スーパーファミコンなど紙のパッケージのやつは、箱はいつも販売してないから、ソフトだけ」「ゲームキューブは箱付きでも販売してる。でも汚くていい」
    ＝カセットの機種は【カセット単体の写真だけ】使う（箱の写真を載せると箱付きだと思って買われる）。GC はディスク＋箱で売るので対象外 */
 var BA_CART_ONLY_HW = { fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1 };
+/* ★2026-09-20 本人「DSは今はソフトのみのは出さないで」＝DS・3DS はケース付きで売る。カートリッジだけの写真は使わない（ng:cartonly）。題名に「ソフトのみ」とある出品は後回し */
+var BA_CASE_REQUIRED_HW = { ds: 1, '3ds': 1 };
+function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し)|ケース(なし|無し)/.test(String((a && a.name) || '')); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
 function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使用|新品/.test(c)) return -1; var worn = /状態が悪い|傷や?汚れあり/.test(c) && !/やや/.test(c), some = /やや/.test(c), clean = /なし/.test(c); if (BA_PAPER_HW[String(hw || '')]) return worn ? 0 : (some ? 1 : (clean ? 2 : 3)); return clean ? 0 : (some ? 1 : (worn ? 2 : 3)); }
 /* ★v192 全件がカタログ画像だと分かっている出品元（メルカリShops の「【中古】NGCソフト …」型＝中古チェーンの通販。2026-09-18 実測：くるりんスカッシュ・PC原人・ZOIDS・WWE がこれで、Haiku は絵柄だけの画像に OK（箱）を付けた）。Shops 全体は外さない（本人「ショップスからでもいい」） */
 function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12}ソフト/.test(String((a && a.name) || '')); }
-function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0; }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
+function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0; }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v9|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v10|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
@@ -4922,6 +4925,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (ok && String(o.shown || '') !== 'front') { ok = false; kind = 'notfront'; }
   /* カセットの機種（BA_CART_ONLY_HW）は、写っている物が cartridge の時だけ通す（箱・ケースの写真＝ng:boxed） */
   if (ok && expect && BA_CART_ONLY_HW[String(expect.hwKey || '')] && String(o.kind || '') !== 'cartridge') { ok = false; kind = 'boxed'; }
+  if (ok && expect && BA_CASE_REQUIRED_HW[String(expect.hwKey || '')] && String(o.kind || '') === 'cartridge') { ok = false; kind = 'cartonly'; }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
@@ -4937,18 +4941,20 @@ function baRephoto_(st, cfg, judged, pre, used, t0) {
   if (cfg && cfg.rephoto === false) return;
   var cap = (cfg && Number(cfg.judgeCap)) || 300;
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
-  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-19T17:00' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && !rp.items[a.item_id + '#' + a.en]; });
+  var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && a.img && String(a.at || '') < '2026-09-19T19:30' /* これ以降に入った明細は、入る時に同じ基準で見ている＝二度見ない */ && (!rp.items[a.item_id + '#' + a.en] || (BA_CASE_REQUIRED_HW[String(a.hw || '')] && rp.items[a.item_id + '#' + a.en].s === 'keep' && rp.items[a.item_id + '#' + a.en].v !== 10)); });
   if (!todo.length) return;
+  /* 本人「何でアドバンスで箱説明書付きのを出してんの？」＝古い基準で出た分。カセットの機種（箱NG）と DS（ソフトだけNG）を先に見直す・1回8件まで */
+  todo.sort(function (p, q) { var w = function (x) { var h = String(x.hw || ''); return (BA_CART_ONLY_HW[h] || BA_CASE_REQUIRED_HW[h]) ? 0 : 1; }; return w(p) - w(q); });
   var n = 0, tStart = Date.now(), changed = false;
-  for (var i = 0; i < todo.length && n < 3; i++) {
-    if (Date.now() - tStart > 60000 || Date.now() - t0 > 150000) break;
+  for (var i = 0; i < todo.length && n < 8; i++) {
+    if (Date.now() - tStart > 90000 || Date.now() - t0 > 170000) break;
     var a = todo[i], id = a.item_id + '#' + a.en, hw = String(a.hw || '');
     var ex = { key: a.key, ja: a.ja || '', en: a.en || '', hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
     var curUrl = /^https?:/.test(String(a.img)) ? String(a.img) : 'https://down-cvs-sg.img.susercontent.com/' + a.img;
     var j0 = baJudge_(curUrl, st, judged, cap, ex);
     if (!j0.judged) break;   /* 鍵なし・上限・障害＝今日はここまで（印は付けない＝次回また見る） */
     n++; changed = true;
-    if (j0.ok) { rp.items[id] = { s: 'keep', at: new Date().toISOString() }; continue; }
+    if (j0.ok) { rp.items[id] = { s: 'keep', v: 10, at: new Date().toISOString() }; continue; }
     var pm = pre[a.key], cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 5) : [];
     var done = false, lastKind = j0.kind;
     for (var k = 0; k < cands.length && !done; k++) {
@@ -5273,7 +5279,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
     if (baCostFromPre_(pp) > maxCost) continue;
     var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
     for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
-      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v9|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
+      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v10|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
       if (vK.indexOf('ok:') === 0) { hasOk = true; break; }
       if (vK) continue;
       if (n >= maxN || Date.now() - t0 > limitMs) { stop = true; break; }
@@ -5516,7 +5522,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
         if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
         var jcP = boshuAutoPreviewBody_._jc;
         var ordP = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 4);
-        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v9|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
+        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v10|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
         var pickP = null; for (var tp = 0; tp < triedP.length; tp++) { if (triedP[tp].v.indexOf('ng:') !== 0) { pickP = triedP[tp]; break; } }
         row.tried = triedP.map(function (x) { return { img: x.img, v: x.v, shop: x.shop, cond: x.cond }; });
         if (pickP) row.pick = pickP; else if (triedP.length) row.note = '⚠ 写真 ' + triedP.length + '枚ともAI判定NG（' + triedP.map(function (x) { return x.v.slice(3); }).join('・') + '）→ 実行時はヤフオクで探す';
