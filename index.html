@@ -17850,6 +17850,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-19', items: [
+      '\u2696\uFE0F <b>ソフト単品の登録重量 1kg → 0.2kg（215件）</b>：本人の指示で、1kg ちょうどで登録されていたソフト単品（TH 106・BR 66・PH 36・TW 5・SG 2）を公式APIで 0.2kg に直しました。SLS送料は登録重量で課金されるためです。利益台帳の「⚖️ 重い商品の重量をそろえる」は、登録を下げた商品を 500g に戻す方向にも追従するようになりました（自動で入れた重量には「重量:自動」の印）。',
       '\u{1F50D} <b>別のAI（Codex）のレビューで見つかった5件を修正</b>：⚖️重量をそろえる時の利益は「送料が増えた分だけ引く」（記録時の固定控除・入金為替の手数料を消さない）／為替は台帳に記録した時のレート／出品一覧の期間集計は鍵のやり直しつき・続けて押した時は最後の期間だけ採る／同時保存の確認の英語表示。',
       '\u{1F4CA} <b>ページを開いた回数を数え始めました</b>（🧾操作ログの上）：使っていない機能を、推測でなく数字で選んで消すためです。このPCの中だけで数え、通信はしません。',
       '\u{1F5BC}\uFE0F <b>見やすさの手入れ</b>：①<b>ダッシュボードを広い画面で2列に</b>（左＝これから受け取る予定／右＝発送期限が近い注文・今日の国別売上・自動分析）。右半分が空いたまま縦に長かったのをやめ、急ぎの「発送期限」を上へ。上の数字カードは横いっぱいに ②<b>自動分析の数字を上のカードとそろえた</b>：「未発送 1件」は未手配だけの数でした→「未発送 17件（未手配 1・伝票発行済 16）」の形に。期限超過の数え方も上のカードと同じ（家から出す期限）に。入金予定は「これから受け取る合計」と同じ数字に ③<b>利益明細の表を低く</b>：入金額（暫定・確定）の「日本時間 ◯/◯ ◯:◯◯」を吹き出しへ移し、1行5段→2段に（1画面に入る注文が増えます。金額にカーソルを乗せると日時が出ます）④<b>利益台帳が軽くなりました</b>：1,906件ぶんの明細の表を畳んだまま全部作っていて、画面が32MB・開くたびに数十秒固まっていました。明細は開いた時に作ります。',
@@ -30931,21 +30932,32 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const changed = []; let noMatch = 0, light = 0, manual = 0;
       (cat || []).forEach(r => {
         const cur = Number(r.weight_g) || 0;
-        if (cur !== 0 && cur !== 500) { manual++; return; }
         const g = Math.max(bySku[(r.parent_sku || '').trim()] || 0, byName[norm(r.name)] || 0, byName[norm(r.title)] || 0);
-        if (!g) { noMatch++; return; }
-        if (g <= 500) { light++; return; }
-        const w = Math.ceil(g / 50) * 50;
+        // ★2026-09-19 登録重量を下げた出品（1kg→0.2kg の 215件）に追従：台帳が 500g 超なのに、いまの登録が 500g 以下なら 500g に戻す。
+        //   台帳の重量と今の登録（50g 刻みに切り上げ）が同じなら何もしない。どちらでもない 500g 超は手で入れた値とみなして守る。
+        const wantW = g > 500 ? Math.ceil(g / 50) * 50 : 500;
+        if (cur !== 0 && cur !== 500) {
+          if (!g) { manual++; return; }
+          if (cur === wantW) { manual++; return; }
+          // 印を付ける前（2026-09-19 の初回）に自動で入れた 772件は、その日の更新日で見分ける（その時点で手入力の重量は 0件だったのを確認済み）
+          if (!(r.note || '').includes('重量:自動') && String(r.updated_at || '').slice(0, 10) !== '2026-09-19') { manual++; return; }
+        } else {
+          if (!g) { noMatch++; return; }
+          if (g <= 500) { light++; return; }
+        }
+        const w = wantW;
         const nr = JSON.parse(JSON.stringify(r));
         nr.weight_g = w;
-        (nr.variations || []).forEach(v => { if (v.weightG == null || Number(v.weightG) === 500 || Number(v.weightG) === 0) v.weightG = w; });
+        if (!(nr.note || '').includes('重量:自動')) nr.note = ((nr.note || '') + ' 重量:自動').trim();   // 自動で入れた印（次に登録重量が変わった時、手入力と見分けて追従するため）
+        const isAuto = v => v.weightG == null || Number(v.weightG) === 500 || Number(v.weightG) === 0 || Number(v.weightG) === cur;
+        (nr.variations || []).forEach(v => { if (isAuto(v)) v.weightG = w; });
         Object.keys(nr.econ || {}).forEach(cc => { const rg = regionByCc(cc); if (!rg) return;
           // ★Codex指摘（2026-09-19）：①為替は【台帳に記録した時のレート】(econ[cc].rate) を使う＝売値・手数料と同じ日のレートにそろえる
           //   ②利益は作り直さず【送料が増えた分だけ引く】＝記録時に入っていた固定控除・入金為替の手数料を消さない
           const rate = Number((nr.econ[cc] || {}).rate) || rg.rateJpy;
           const slsJ = Math.round(slsLocal(cc, w) * rate);
           ((nr.econ[cc] || {}).vars || []).forEach(v => {
-            if (!(v.weightG == null || Number(v.weightG) === 500 || Number(v.weightG) === 0)) return;
+            if (!isAuto(v)) return;
             const oldSls = Number(v.slsJpy) || 0;
             v.weightG = w; v.slsJpy = slsJ;
             if (v.cost != null && v.profit != null) { v.profit = Math.round(Number(v.profit) - (slsJ - oldSls)); v.roi = Number(v.cost) > 0 ? Math.round(v.profit / Number(v.cost) * 100) : 0; }
@@ -30955,7 +30967,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       if (!changed.length) { toast('直す商品はありません（500g超の登録が無いか、もう入っています）。手入力済み ' + manual + '件・500g以下 ' + light + '件・出品と結び付かない ' + noMatch + '件'); return; }
       const top = changed.slice().sort((x, y) => y.weight_g - x.weight_g).slice(0, 8).map(x => '・' + x.weight_g + 'g　' + (x.name || x.title || '')).join('\n');
-      if (!confirm('台帳 ' + (cat || []).length + '件のうち ' + changed.length + '件の重量を、Shopee の登録重量（500g超）に直します。\nSLS送料と、仕入が入っている明細の利益・ROI を計算し直します。\n\n重い順の例：\n' + top + '\n\n触らないもの：手で重量を入れた ' + manual + '件／登録が500g以下 ' + light + '件（500gのまま）／出品と結び付かない ' + noMatch + '件\n\nよろしいですか？')) return;
+      if (!confirm('台帳 ' + (cat || []).length + '件のうち ' + changed.length + '件の重量を、Shopee の登録重量に合わせます（500g超はその重さ・登録を500g以下に下げた物は500gへ戻す）。\nSLS送料と、仕入が入っている明細の利益・ROI を計算し直します。\n\n重い順の例：\n' + top + '\n\n触らないもの：手で重量を入れた ' + manual + '件／登録が500g以下 ' + light + '件（500gのまま）／出品と結び付かない ' + noMatch + '件\n\nよろしいですか？')) return;
       for (let i = 0; i < changed.length; i += 100) { await sbUpsert('listing_catalog', changed.slice(i, i + 100)); toast('⚖️ 保存中… ' + Math.min(i + 100, changed.length) + '/' + changed.length); }
       logAct('出品台帳', '重量をそろえる', changed.length + '件', '500g超だけ・登録重量の最大値');
       lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null;
