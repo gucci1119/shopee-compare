@@ -5225,13 +5225,15 @@ function condIndexTick(manual) {
     var items = Array.isArray(q.items) ? q.items : [];
     if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
+    /* v197：新しい候補が無くなったら、種類・型番・色（kd/md/cl）を持たない古い判定を20枚ずつ見直す（本人「吸い上げたら整理してね」。本体・コントローラーは題名が無く、型番と色でしか引けない） */
+    if (!todo.length) { todo = Object.keys(idx.items).filter(function (u) { var r = idx.items[u]; return r && r.ok && r.kd === undefined && (idx.fail[u] || 0) < 3; }).slice(0, 20).map(function (u) { var r = idx.items[u]; return { u: u, g: r.g, cc: r.cc, at: r.at, req: r.req, rq: r.rq }; }); }
     if (!todo.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 6 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, total: Object.keys(idx.items).length }; }   /* 全部済み＝6時間休む（一覧は1日1回しか増えない） */
     var n = 0, usable = 0;
     for (var i = 0; i < todo.length && Date.now() - t0 < 240000; i++) {
       var x = todo[i];
       var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 320, messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'url', url: String(x.u) } },
-        { type: 'text', text: 'ネットショップがお客さんに送った画像です。判断はせず、見えているものをそのまま書き出してください。JSONだけで答えて（この順番で）: {"type":"product_photo|banner|shipping_label|screenshot|document|other"（product_photo＝手元の商品を撮った写真／banner＝文字やイラストで作った案内画像／shipping_label＝送り状・伝票が主役）,"personal_info":true|false（人の名前・住所・電話番号が書かれた宛名ラベルや送り状・配送伝票が少しでも写っていれば true。商品のパッケージに印刷されたバーコード・JANコード・型番・メーカーの住所は個人情報ではないので false）,"item":"写っている物を一言で（例: game software / game console / controller / toy / trading card / book）","title_seen":"パッケージの表・背・ディスクやカートリッジのラベルに書いてある作品の題名をそのまま（読めなければ空。ELITE や HD REMASTER のような付随の語だけを題名にしない）","platform_seen":"その商品の機種を示すロゴ・表記をそのまま（例: NINTENDO GAMECUBE / PS3 / PlayStation 2）。確実に読める時だけ書く。PlayStation Network などサービス名のロゴは機種ではない。読めなければ空","parts":["写っている物を次の語から全部: box, case, disc, cartridge, manual, flyer, obi, registration_card, cable, charger, controller, console, dock, stand, strap, card, figure, other"],"view":"front|back|inside|spine|label|accessories|whole_set|close_up"}' } ] }] };
+        { type: 'text', text: 'ネットショップがお客さんに送った画像です。判断はせず、見えているものをそのまま書き出してください。JSONだけで答えて（この順番で）: {"type":"product_photo|banner|shipping_label|screenshot|document|other"（product_photo＝手元の商品を撮った写真／banner＝文字やイラストで作った案内画像／shipping_label＝送り状・伝票が主役）,"personal_info":true|false（人の名前・住所・電話番号が書かれた宛名ラベルや送り状・配送伝票が少しでも写っていれば true。商品のパッケージに印刷されたバーコード・JANコード・型番・メーカーの住所は個人情報ではないので false）,"item":"写っている物を一言で（例: game software / game console / controller / toy / trading card / book）","kind":"software|console|controller|accessory|toy|card|book|other（主役の物の種類を1つ。ソフト＝ゲームのディスクやカートリッジとその箱。console＝ゲーム機本体・携帯ゲーム機。accessory＝ケーブル・充電器・メモリーカード・ドックなど）","model":"本体や周辺機器に印刷・刻印された型番や製品名をそのまま（例: PSP-3000 / HAC-015 / SCPH-7000 / Joy-Con / DUALSHOCK 3 / Tamagotchi Connection）。ソフトや、読めない時は空","color":"主役の物の色を英語で1〜2語（例: black / white / neon blue+neon red / clear purple）。ソフトは空","title_seen":"パッケージの表・背・ディスクやカートリッジのラベルに書いてある作品の題名をそのまま（読めなければ空。ELITE や HD REMASTER のような付随の語だけを題名にしない）","platform_seen":"その商品の機種を示すロゴ・表記をそのまま（例: NINTENDO GAMECUBE / PS3 / PlayStation 2）。確実に読める時だけ書く。PlayStation Network などサービス名のロゴは機種ではない。読めなければ空","parts":["写っている物を次の語から全部: box, case, disc, cartridge, manual, flyer, obi, registration_card, cable, charger, controller, console, dock, stand, strap, card, figure, other"],"view":"front|back|inside|spine|label|accessories|whole_set|close_up"}' } ] }] };
       ufBump_(1, 'cond_index(写真の索引)');
       var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
       var code = res.getResponseCode(), j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e2) {}
@@ -5243,7 +5245,7 @@ function condIndexTick(manual) {
       if (!o || !o.type) { idx.fail[x.u] = (idx.fail[x.u] || 0) + 1; continue; }
       var ty = String(o.type);
       var pi = !(o.personal_info === false) || ty === 'shipping_label';   /* 個人情報は「無い」と明示された時だけ無い扱い（Codex指摘） */
-      var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), g: String(x.g || ''), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
+      var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), kd: (/^(software|console|controller|accessory|toy|card|book|other)$/.test(String(o.kind || '')) ? String(o.kind) : ''), md: String(o.model || '').slice(0, 40), cl: String(o.color || '').toLowerCase().slice(0, 30), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), g: String(x.g || ''), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
       idx.items[x.u] = rec; n++; if (rec.ok) usable++;
     }
     /* ★v196 セットの題名・機種を決める：裏面や中身の写真は1枚では機種を読み違える（実測：PS3 の裏面を Vita、ディスクを PS4 と答えた）。
@@ -5253,9 +5255,9 @@ function condIndexTick(manual) {
       Object.keys(groups).forEach(function (g) {
         var rs = groups[g].filter(function (r) { return r.ty === 'product_photo'; }); if (!rs.length) return;
         var pickOf = function (field) { var fr = rs.filter(function (r) { return r.vw === 'front' && r[field]; }); var src = fr.length ? fr : rs.filter(function (r) { return r[field]; }); var cnt = {}; src.forEach(function (r) { cnt[r[field]] = (cnt[r[field]] || 0) + 1; }); var best = ''; Object.keys(cnt).forEach(function (k) { if (!best || cnt[k] > cnt[best]) best = k; }); return best; };
-        var gti = pickOf('ti'), ghw = pickOf('hw'), gpf = pickOf('pf');
+        var gti = pickOf('ti'), ghw = pickOf('hw'), gpf = pickOf('pf'), gkd = pickOf('kd'), gmd = pickOf('md'), gcl = pickOf('cl');   /* v197：種類・型番・色（本体やコントローラーは題名が無いので、これで引く） */
         var allParts = {}; rs.forEach(function (r) { (r.parts || []).forEach(function (p2) { allParts[p2] = 1; }); });
-        groups[g].forEach(function (r) { r.gti = gti; r.ghw = ghw; r.gpf = gpf; r.gparts = Object.keys(allParts); r.gn = rs.length; });
+        groups[g].forEach(function (r) { r.gti = gti; r.ghw = ghw; r.gpf = gpf; r.gparts = Object.keys(allParts); r.gn = rs.length; r.gkd = gkd; r.gmd = gmd; r.gcl = gcl; });
       });
     } catch (eG) {}
     idx.updatedAt = new Date().toISOString();
