@@ -2696,8 +2696,27 @@
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     return gasCall({ action: 'reorder_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId, order: orderNames.join('\u0001') }, 90000);
   }
+  // 🏷 SKUの自動付与（本人 2026-09-20「これから自動出品した時とかも必ずSKU入れてくれ」「手動の時も」）。形は 機種_作品名・7か国共通（GAS baSkuOf_ と同じ規則）。
+  //   機種は ①明細名の頭の「PS2:」など ②カタログ名に機種が1つだけ の順。機種が決まらない時は 明細名だけ（空にはしない）。手で入れたSKUは触らない
+  const SKU_HW = [['SWITCH2', /switch ?2\b/i], ['SWITCH', /\bswitch\b/i], ['3DS', /\b3ds\b/i], ['DS', /\b(nds|ds|dsi)\b/i], ['WIIU', /\bwii ?u\b/i], ['WII', /\bwii\b/i], ['GC', /game ?cube|\bgc\b|\bngc\b/i], ['N64', /\bn64\b|nintendo 64/i], ['SFC', /super famicom|\bsfc\b|\bsnes\b/i], ['FC', /famicom|\bfc\b|\bnes\b/i], ['GBA', /game ?boy advance|\bgba\b/i], ['GB', /game ?boy|\bgbc?\b/i], ['VITA', /\bvita\b/i], ['PSP', /\bpsp\b|playstation portable/i], ['PS5', /\bps5\b|playstation ?5/i], ['PS4', /\bps4\b|playstation ?4/i], ['PS3', /\bps3\b|playstation ?3/i], ['PS2', /\bps2\b|playstation ?2/i], ['PS1', /\bps1\b|\bpsx\b|playstation ?1\b|playstation one/i], ['SS', /sega saturn/i], ['DC', /dreamcast/i], ['MD', /mega ?drive|genesis/i], ['XBOX360', /xbox ?360/i], ['XBOX', /\bxbox\b/i]];
+  function skuHwsOf(t) { const o = []; let x = ' ' + String(t || '') + ' '; SKU_HW.forEach(([k, re]) => { if (re.test(x)) { o.push(k); x = x.replace(new RegExp(re.source, 'gi'), ' '); } }); return o; }
+  function skuSlug(t) { return String(t || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/['’`]/g, '').replace(/&/g, ' AND ').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, ''); }
+  function autoSku(catName, optName) {
+    let n = String(optName || catName || ''), pre = '';
+    const pm = n.match(/^\s*([A-Za-z0-9 ]{2,12})\s*[:：]\s*(.+)$/); if (pm) { const h = skuHwsOf(pm[1]); if (h.length === 1) { pre = h[0]; n = pm[2]; } }
+    if (!pre) { const ch = skuHwsOf(catName); if (ch.length === 1) pre = ch[0]; else if (ch.length && ch.every(x => x === 'DS' || x === '3DS')) pre = 'DS'; }
+    /* 単品（カタログ名なし）は、題名から機種の語と飾りの語を落とす：Used Tokyo Jungle PS3 Playstation 3 Japanese version → PS3_TOKYO_JUNGLE */
+    if (!optName || !catName) { if (!pre) { const sh = skuHwsOf(n); if (sh.length === 1) pre = sh[0]; } SKU_HW.forEach(([k, re]) => { n = n.replace(new RegExp(re.source, 'gi'), ' '); }); n = n.replace(/\b(used|new|japan(ese)?|version|ver|sony|nintendo|sega|playstation|official|game|software|import|ntsc-?j)\b/gi, ' '); }
+    let body = skuSlug(n); if (!body) return '';
+    /* シリーズのカタログ（… Final Fantasy Series …）は作品の系列名を間に入れる：PS4:XV → PS4_FINAL_FANTASY_XV */
+    const sm = String(catName || '').match(/Variation\s+(.+?)\s+(?:Game\s+)?Series\b/i);
+    if (sm && optName) { const sk = skuSlug(sm[1]).split('_').filter(w => w && !SKU_HW.some(([k, re]) => re.test(w)) && !/^(NINTENDO|SONY|SEGA|MAIN|RPG)$/.test(w)).slice(0, 3).join('_'); if (sk && body.indexOf(sk.split('_')[0]) < 0) body = sk + '_' + body; }
+    return ((pre ? pre + '_' : '') + body).slice(0, 100).replace(/_+$/, '');
+  }
+  async function skuCatName(itemId) { try { const r = await sbGetAll('listings', 'select=name&item_id=eq.' + encodeURIComponent(itemId)); return (r && r[0] && r[0].name) || ''; } catch (_) { return ''; } }
   async function openapiAddVariation(shopId, itemId, opts) {
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
+    if (opts && !String(opts.sku || '').trim() && opts.option) { const as = autoSku(await skuCatName(itemId), opts.option); if (as) opts = Object.assign({}, opts, { sku: as }); }
     return gasCall(Object.assign({ action: 'add_variation', token: settings.writeToken, shop_id: shopId, item_id: itemId }, opts), 90000);
   }
   // ※アカウント健全性(account_health)はこのCB越境垢では権限なし(error_not_found/shop invalid)で断念。実装は撤去済。
@@ -17864,6 +17883,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F3F7} <b>SKUを必ず入れる</b>（本人「これから自動出品した時とかも必ずSKU入れてくれ」「手動の時も」）。形は <b>機種_作品名</b>（例 GC_LUIGIS_MANSION）で7か国共通。🤖自動出品・明細をまとめて足す・1件足す・出品を作る（バリエ／単品）のどれでも、SKUが空なら自動で入ります。手で入れたSKUはそのまま。すでに出ている明細（ソフト系 13,246件）には30分ごとに20カタログずつ順に付けていきます。',
       '\u{1F4C5} <b>出品ログ：最初に出る期間を7日に</b>（本人「最初に表示されるの7日にして」。前は90日）。',
       '\u{1F4F7} <b>🤖の写真：中古だと分かる実物の写真だけ</b>（本人「新品っぽい画像が多すぎる」「中古ってわかるような画像じゃないと」）。白・無地の背景に商品だけが浮いた宣材／通販の画像は、影や縁があっても使いません。<b>カセットの機種（FC・SFC・N64・GB・GBA など）はカセット単体の写真だけ</b>（本人「箱はいつも販売してないから、ソフトだけ」。箱の写真＝「箱の写真」で見送り・題名に「箱付き」とある出品は後回し）。ゲームキューブは箱付きのまま・汚れていてよい。GAS は保存だけで効きます（判定の控えは作り直し）。',
       '\u{1F41E} <b>📉売れ行き・値下げ：画像が画面いっぱいに巨大化する不具合／上のタブが消える不具合を修正</b>（本人「バグってるのか？」「上のメニュー消えてるし」）。DB版の一覧が付けた表示設定が残ったままライブのカードを描いていました。出品管理のタブの帯はこの画面にも出るようにし、他のタブへそのまま移れます。',
@@ -23965,7 +23985,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
                 try { if (document.getElementById('lst-list')) drawListingStatus(); } catch (_) {}
               } catch (_) {}
             };
-            const items2 = list.map(x => ({ option: x.name, price: x.price, stock: x.stock, sku: '', image: x.image || '' }));
+            const _cn2 = await skuCatName(itemId);
+            const items2 = list.map(x => ({ option: x.name, price: x.price, stock: x.stock, sku: autoSku(_cn2, x.name), image: x.image || '' }));
             const kv2 = 'addvar_' + cc + '_' + itemId + '_' + Date.now().toString(36);
             try {
               await sbUpsert('app_kv', [{ k: kv2, v: { items: items2 }, updated_at: new Date().toISOString() }]);
@@ -28542,7 +28563,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const already = names.filter(n => dupWhere.has(tmKey(n)));
     const fit = names.filter(n => !dupWhere.has(tmKey(n))).map(n => Object.assign({ src: n }, tmFitName(n, 30)));
     const cutList = fit.filter(x => x.cut);
-    const items = fit.map(x => ({ option: x.name, price: price, stock: 0, sku: '', image: '' }));
+    const _cnB = await skuCatName(itemId);
+    const items = fit.map(x => ({ option: x.name, price: price, stock: 0, sku: autoSku(_cnB, x.name), image: '' }));
     if (!items.length) { alert('選んだ' + names.length + '件は、すべて ' + cc + ' の別のカタログに既に出ています。\n\n'
       + already.slice(0, 10).map(n => '・' + n + ' → ' + dupWhere.get(tmKey(n))).join('\n')
       + (already.length > 10 ? '\n…ほか' + (already.length - 10) + '件' : '')); return; }
@@ -39270,7 +39292,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!imgUrls.length) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ 画像がありません</span>'; toast(`${cc}: 画像がありません`, true); if (b) { b.disabled = false; b.textContent = orig; } return { cc, error: '画像なし' }; }
         // バリエ画像も同様にhttp化
         let vars = jb.variations;
-        if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im })); } vars = rv; }
+        if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im, sku: String(v.sku || '').trim() || autoSku(jb.name, v.name) })); } vars = rv; }
         if (resEl) resEl.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span>作成中…（画像アップロード＋登録${doVar ? '＋バリエ設定' : ''}。通常30〜60秒・最大2分）</span>`;
         const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined, tier_name: doVar ? ((listState.varTier || '').trim() || undefined) : undefined });
         const rg2 = REGIONS.find(x => x.cc === cc) || {};
@@ -39282,6 +39304,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const editUrl = r.item_id ? `https://${host}/portal/product/${r.item_id}?pageEntry=product_list` : `https://${host}/portal/product/list`;
         if (resEl) resEl.innerHTML = `<span style="color:#1a7f37;font-weight:700">✅ 作成(${stText}) item_id=${r.item_id}</span>${vinfo}<br>${buyUrl ? `<a href="${buyUrl}" target="_blank" style="font-weight:600">🛍️ 販売ページを開く↗</a> ・ ` : ''}<a href="${editUrl}" target="_blank">✏️ Shopeeで編集↗</a>${varFailed ? '<br><span class="smd-dim" style="font-size:10.5px">※バリエ名が重複/長すぎた可能性。名前を短く一意にして作り直すか、Shopeeの編集画面でバリエを追加してください。</span>' : ''}`;
         toast(`✅ ${cc} 出品成功（${stText}）item_id=${r.item_id}`);
+        /* 単品はSKUを出品直後に入れる（add_item は単品のSKUを受け取らない。GASのバージョン上限のため既存の update_item を使う） */
+        try { if (!doVar && r.item_id) { const ps = String(listState.parentSku || '').trim() || autoSku('', jb.name); if (ps) await gasCall({ action: 'update_item', token: settings.writeToken, shop_id: jb.shop_id, item_id: r.item_id, sku: ps }, 60000); } } catch (_) {}
         try { logAct('出品', '公式API出品', cc, jb.name + ' item_id=' + r.item_id + ' ' + stText); } catch (_) {}
         // ♾️ 無在庫：監視ソースURLが入っていれば、この出品を自動で在庫監視に紐付け
         try { if ((listState.watchSrcUrl || '').trim() && r.item_id) { if (dropAutoLink(listState.watchSrcUrl.trim(), cc, r.item_id, jb.name)) toast(`♾️ ${cc} を在庫監視に自動紐付けしました`); } } catch (_) {}
