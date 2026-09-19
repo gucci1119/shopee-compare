@@ -5216,9 +5216,12 @@ function condIndexTick(manual) {
     var rq = sbSelect_('app_kv', 'select=k,v&k=in.(' + COND_Q + ',' + COND_IDX + ')');
     if (!Array.isArray(rq)) return { ok: false, error: '索引を読めませんでした' };
     var q = {}, idx = null; rq.forEach(function (r) { if (r.k === COND_Q) q = r.v || {}; if (r.k === COND_IDX) idx = r.v || {}; });
-    var items = Array.isArray(q.items) ? q.items : [];
-    if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補の一覧がまだありません（ポータルが作ります）' }; }
     if (!idx) idx = {}; idx.items = idx.items || {}; idx.fail = idx.fail || {};
+    /* 候補の一覧が無い・24時間より古い時は、ここで作り直す（ポータルが開いていなくても回るように＝本人「私がいない間に」。1日1回・Supabase 読み 約11回） */
+    var qAge = q.at ? (Date.now() - Date.parse(q.at)) : Infinity;
+    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000) { var built = condQueueBuild_(idx.items); if (built) q = built; }
+    var items = Array.isArray(q.items) ? q.items : [];
+    if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
     if (!todo.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 6 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, total: Object.keys(idx.items).length }; }   /* 全部済み＝6時間休む（一覧は1日1回しか増えない） */
     var n = 0, usable = 0;
@@ -5247,6 +5250,34 @@ function condIndexTick(manual) {
     return { ok: true, judged: n, usable: usable, left: left, total: Object.keys(idx.items).length };
   } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
   finally { try { ufPersist_(); } catch (e5) {} try { lock.releaseLock(); } catch (e6) {} }
+}
+/* 候補の一覧を作る（ポータルの condQueueBuild と同じ規則）：過去120日に送った画像のうち、注文後メッセージの前後5分に送ったもの（案内バナー）を除く。写真の依頼の48時間以内に送った画像を先頭に。索引済みは外してから1,500件で切る */
+function condQueueBuild_(done) {
+  var since = new Date(Date.now() - 120 * 86400000).toISOString();
+  var rows = sbSelectAll_('chat_messages', 'select=cc,conversation_id,direction,msg_type,text,msg_time&direction=in.(in,out)&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc');
+  if (!Array.isArray(rows) || rows.length < 100) return null;   /* 読めていない時に空の一覧で上書きしない */
+  var by = {}; rows.forEach(function (m) { (by[m.conversation_id] = by[m.conversation_id] || []).push(m); });
+  var ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
+  var PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
+  var seen = {}, items = [];
+  Object.keys(by).forEach(function (c) {
+    var ms = by[c];
+    for (var i = 0; i < ms.length; i++) {
+      var m = ms[i]; if (m.direction !== 'out' || m.msg_type !== 'image') continue;
+      var u = String(m.text || '').split('@')[0].trim(); if (!/^https?:\/\//.test(u) || seen[u]) continue;
+      var t = Date.parse(m.msg_time), banner = false;
+      for (var j = Math.max(0, i - 10); j < Math.min(ms.length, i + 11) && !banner; j++) { var x = ms[j]; if (x.direction === 'out' && x.msg_type === 'text' && Math.abs(Date.parse(x.msg_time) - t) <= 5 * 60000 && ORDER_TXT.test(x.text || '')) banner = true; }
+      if (banner) continue;
+      var rq = '';
+      for (var k = i - 1; k >= 0 && k >= i - 14; k--) { var y = ms[k]; if (y.direction === 'in' && y.msg_type === 'text' && t - Date.parse(y.msg_time) <= 48 * 3600000 && PHOTO.test(y.text || '')) { rq = String(y.text || '').replace(/\s+/g, ' ').slice(0, 140); break; } }
+      seen[u] = 1; items.push({ u: u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq: rq });
+    }
+  });
+  items.sort(function (a, b) { return (b.req - a.req) || (Date.parse(b.at) - Date.parse(a.at)); });
+  var pending = items.filter(function (x) { return !(done || {})[x.u]; });
+  var out = { at: new Date().toISOString(), total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas' };
+  baKvSet_(COND_Q, out);
+  return out;
 }
 function setupCondIndexTrigger() {
   var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'condIndexTick'; });
