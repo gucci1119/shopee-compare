@@ -162,6 +162,31 @@ if 'jan || \'\').trim(); if (!j) return;' in _h and 'cond' not in _h[_h.find('co
     print('⛔ 重複の掃除が【状態(cond)】を見ていません。箱あり/箱なしの正しいJANを消します')
     ok = False
 
+# ④ 1000行で黙って切れる読み（過去3回＋2026-09-20 に7か所）。PostgREST は limit=5000 と書いても1000行しか返さない。
+#    ページ送りしない読み（sbSelect_ / sbGet( ）に 1001 以上の limit を書いていたら止める。全件は sbSelectAll_ / sbGetAll を使う
+import re as _re
+for _f in ['index.html'] + sorted(glob.glob('*.gs')):
+    _t = io.open(_f, encoding='utf-8').read()
+    for _i, _l in enumerate(_t.split('\n'), 1):
+        if _l.lstrip().startswith('//') or _l.lstrip().startswith('*'): continue
+        for _m in _re.finditer(r"\b(sbSelect_|sbGet)\(([^;]{0,400}?)limit=(\d{4,})", _l):
+            if int(_m.group(3)) > 1000 and 'offset=' not in _l:
+                print('')
+                print('⛔ %s:%d  %s に limit=%s ＝1000行で黙って切れます。sbSelectAll_ / sbGetAll を使ってください' % (_f, _i, _m.group(1), _m.group(3)))
+                ok = False
+
+# ⑤ 属性名の食い違い（2026-09-19：ボタンは data-p・処理は dataset.sp を読んでいて、出品一覧の期間ボタンが効いていなかった）
+#    dataset.xxx を読んでいるのに、data-xxx を書いている所がどこにも無ければ止める
+_reads = set(_re.findall(r'\.dataset\.([A-Za-z0-9_]+)', _h))
+def _kebab(c): return _re.sub(r'([A-Z])', lambda m: '-' + m.group(1).lower(), c)
+_allow = {'noZoom'}
+for _r in sorted(_reads - _allow):
+    _k = 'data-' + _kebab(_r)
+    if (_k + '=' not in _h) and (_k + '"' not in _h) and ('dataset.' + _r + ' =' not in _h) and ('dataset.' + _r + '=' not in _h) and ("setAttribute('" + _k not in _h):
+        print('')
+        print('⛔ dataset.%s を読んでいますが、%s を書いている所がありません（属性名の食い違い）' % (_r, _k))
+        ok = False
+
 for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
