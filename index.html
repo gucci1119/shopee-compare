@@ -13858,10 +13858,11 @@
   const MERC_COND = { 1: '新品', 2: '未使用に近い', 3: '傷汚れなし', 4: 'やや傷汚れ', 5: '傷汚れあり', 6: '状態が悪い' };
   const srcStrictOn = () => { try { return localStorage.getItem('srcStrict') !== '0'; } catch (_) { return true; } };
   const srcCondIds = () => srcStrictOn() ? [1, 2, 3, 4] : [];   // 空＝すべて
-  async function mercariSearch(keyword) {
+  /* opts.soldOnly=true で【売り切れの出品だけ】を取る。売り切れは写真にだけ使い、相場・件数・在庫の判断には入れない（相場は販売中から＝本人「新品の金額を取ってこないように」） */
+  async function mercariSearch(keyword, opts) {
     const url = 'https://api.mercari.jp/v2/entities:search';
     const dpop = await mercariDpop(url, 'POST');
-    const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ['STATUS_ON_SALE'], sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: srcCondIds(), shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
+    const body = { userId: '', pageSize: 30, pageToken: '', searchSessionId: crypto.randomUUID(), indexRouting: 'INDEX_ROUTING_UNSPECIFIED', thumbnailTypes: [], searchCondition: { keyword: keyword, excludeKeyword: '', sort: 'SORT_PRICE', order: 'ORDER_ASC', status: ((opts && opts.soldOnly) ? ['STATUS_SOLD_OUT', 'STATUS_TRADING'] : ['STATUS_ON_SALE']), sizeId: [], categoryId: [], brandId: [], sellerId: [], priceMin: 0, priceMax: 0, itemConditionId: srcCondIds(), shippingPayerId: [], shippingFromArea: [], shippingMethod: [], colorId: [], hasCoupon: false, attributes: [], itemTypes: [], skuIds: [], shopIds: [], excludeShippingMethodIds: [] }, defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'], serviceFrom: 'suruga' };
     const txt = await bridgeRequest('POST', url, JSON.stringify(body), { headers: { 'DPoP': dpop, 'X-Platform': 'web' } });
     let j = {}; try { j = JSON.parse(txt); } catch (_) {}
     return (j.items || []).filter(x => x && x.id && x.price != null).map(x => ({ name: String(x.name || ''), price: parseInt(x.price, 10) || 0, url: (x.itemType === 'ITEM_TYPE_BEYOND' || x.shop) ? ('https://jp.mercari.com/shops/product/' + x.id) : ('https://jp.mercari.com/item/' + x.id), cond: MERC_COND[Number(x.itemConditionId)] || '', img: (x.thumbnails || [])[0] || '', catId: String(x.categoryId || ''), cid: Number(x.itemConditionId), smid: Number(x.shippingMethodId), spid: Number(x.shippingPayerId) }));
@@ -17910,6 +17911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F50D} <b>🤖の写真集め：売り切れの出品からも写真をもらう</b>（本人「これもっと詰めたい」）。写真が見つからない424作品の最大の原因は<b>「販売中」しか見ていなかったこと</b>でした。古い作品ほど販売中は0件でも、売り切れには中古の実写真があります。<b>写真だけ</b>もらい、相場・件数・在庫の判断には入れません（売り切れしか無い作品は今までどおり在庫0で出します）。叩くのは「写真なし」で捨てていた作品だけ・1作品の検索は最大3回です。',
       '\u{1F50E} <b>🤖の写真集め：当たらなかったら短い題名でもう一度だけ探す</b>。写真の控え741作品のうち<b>424作品が「写真が見つからない」</b>で、これが🤖が出せない一番の理由でした。題名が長い（副題・～以降・記号）と検索に当たらないので、1回目で0件のときだけ、4語までに短くした題名で探し直します（叩く回数は1作品2回まで）。',
       '\u{1F4C8} <b>🤖：対象を15機種・76か所に／写真の通過率を上げる</b>（本人「もっとあるやろ」「もっとこの機能もアップデートして」）。PS2・PS3・PS4・PSP・3DS・GB も対象に（PS系は汎用カタログの名前に Series が入っていて、まとめてチェックの条件で落ちていました）。新基準の写真の通過率が41%だったので、集める時に出品名で振り分けます：カセットの機種は「ソフトのみ」を先・「箱付き」を後ろ、DS・3DSは逆。控えの写真も6→10枚。互換機・周辺機器（RFスイッチ・ゲームポーチ等）は候補から外しました。',
       '\u{1F680} <b>🤖：出せる機種×国をまとめてチェック</b>（本人「もっとあるでしょ」）。その機種の<b>汎用のソフトカタログ</b>（シリーズ物・コントローラー等でないもの）があって空きがある機種×国に、まとめてチェックを入れます。入れ先はそのカタログ。保存はまだしないので、表で確かめてから 💾保存。既に選んである入れ先は変えません。',
@@ -27907,16 +27909,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const kw = ((r.ja ? cleanJa(r.ja) : (r.en || '')) + ' ' + (HWJA[hwKey] || '')).trim();
         let items = []; try { items = await mercariSearch(kw); } catch (e) { miss++; await new Promise(rs => setTimeout(rs, 2500)); continue; }
         /* ★2026-09-20 写真が見つからない作品が 741 作品中 424 件あった（＝🤖が出せない一番の理由）。題名が長いと検索に当たらないので、
-           当たらなかった時だけ【短くした題名】でもう一度だけ探す（～以降・副題・記号・末尾の!?・語数を4語までに）。叩く回数は1作品あたり最大2回のまま（間に2.5秒） */
-        if (!items.length) {
-          const shortJa = String(r.ja || r.en || '').normalize('NFKC')
+           当たらなかった時だけ【短くした題名】でもう一度だけ探す（～以降・副題・記号・末尾の!?・語数を4語までに） */
+        const shortKw = (() => { const sj = String(r.ja || r.en || '').normalize('NFKC')
             .replace(/[【〔\[（(].*?[】〕\]）)]/g, ' ').replace(/[～~].*$/, ' ').replace(/[:：].*$/, ' ')
             .replace(/[!！?？・]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 4).join(' ').trim();
-          const kw2 = (shortJa + ' ' + (HWJA[hwKey] || '')).trim();
-          if (shortJa && kw2 !== kw) {
-            await new Promise(rs => setTimeout(rs, 2500));
-            try { items = await mercariSearch(kw2); } catch (_) { items = []; }
-          }
+          const k2 = (sj + ' ' + (HWJA[hwKey] || '')).trim(); return (sj && k2 !== kw) ? k2 : ''; })();
+        if (!items.length && shortKw) {
+          await new Promise(rs => setTimeout(rs, 2500));
+          try { items = await mercariSearch(shortKw); } catch (_) { items = []; }
         }
         const core = coreOf(r.ja || r.en);
         const qLen = String(r.ja || r.en || '').normalize('NFKC').replace(/\s+/g, '').length;
@@ -27933,9 +27933,24 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const nameFit = (x) => { const n = String((x && x.name) || ''); const soft = /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し|無)|ケース(なし|無し)/.test(n), boxed = /箱(付|あり|有)|箱説|完品|外箱|説明書(付|あり)/.test(n) && !soft; if (CART_ONLY[hwKey]) return soft ? -20 : (boxed ? 40 : 0); if (CASE_REQ[hwKey]) return soft ? 40 : 0; return 0; };
         const photoHits = hits.map((x, i) => ({ x, i, r: condRank(x) })).filter(o => o.r >= 0 && !knownCatalog(o.x)).sort((p, q) => (((isShop(p.x) ? 100 : 0) + nameFit(p.x) + p.r) - ((isShop(q.x) ? 100 : 0) + nameFit(q.x) + q.r)) || (p.i - q.i)).map(o => o.x);   // ★2026-09-20 実測：AI判定の通過率は 個人79%・業者50% → 業者の写真は個人を全部試した後（GAS baPhotoOrder_ と同じ規則）
         let pick = photoHits.find(x => !usedImg.has(x.img)) || null;
+        let fromSite = 'mercari', photoPool = photoHits;
+        /* ★2026-09-20 本人「これもっと詰めたい」：販売中で写真が見つからない時は【売り切れの出品】から写真だけもらう。
+           古い作品ほど販売中は0件でも、売り切れには中古の実写真がある。相場・件数・在庫の判断には入れない（cost は販売中のまま＝売り切れしか無ければ cost 0＝在庫0で出す）。
+           叩くのはここまで来た作品だけ（＝今まで「写真なし」で捨てていた分）。1作品の検索は最大3回・間に2.5秒 */
+        let soldPhoto = 0;
+        if (!pick) {
+          for (const skw of [kw, shortKw]) {
+            if (!skw) continue;
+            await new Promise(rs => setTimeout(rs, 2500));
+            let sItems = []; try { sItems = await mercariSearch(skw, { soldOnly: true }); } catch (_) { sItems = []; }
+            const sHits = (sItems || []).filter(x => x && x.img && [2, 3, 4].includes(Number(x.cid)) && matchOk(x.name, core, r.ja || r.en));
+            const sPhotos = sHits.map((x, i) => ({ x, i, r: condRank(x) })).filter(o => o.r >= 0 && !knownCatalog(o.x)).sort((p2, q2) => (((isShop(p2.x) ? 100 : 0) + nameFit(p2.x) + p2.r) - ((isShop(q2.x) ? 100 : 0) + nameFit(q2.x) + q2.r)) || (p2.i - q2.i)).map(o => o.x);
+            const sPick = sPhotos.find(x => !usedImg.has(x.img)) || null;
+            if (sPick) { pick = sPick; photoPool = sPhotos; soldPhoto = sHits.length; break; }
+          }
+        }
         // ★メルカリに無ければ Yahoo!フリマ → ヤフオク（定額・即決）でも探す（2026-09-18：メルカリだけだと 315作品中125作品が写真なし。ヤフオクは GAS のIPからは弾かれるので、このブラウザのブリッジ経由で。仕入れ検索と同じ検索関数を使う）
         //   叩きすぎない：メルカリで見つからなかった作品だけ・1サイト1回・間に2.5秒。1回の収集は最大20作品
-        let fromSite = 'mercari', photoPool = photoHits;
         if (!pick && opts.others !== false) {
           for (const k of ['paypay', 'yahuoku']) {
             const site = (typeof DEAL_SITES !== 'undefined' ? DEAL_SITES : []).find(x => x.k === k); if (!site || !site.custom) continue;
@@ -27952,7 +27967,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         let prices = usedHits.slice(0, Math.max(3, Math.ceil(usedHits.length / 2))).map(x => Number(x.price) || 0).filter(x => x > 0).sort((a, b) => a - b);
         if (prices.length >= 3) { const med = prices[Math.floor(prices.length / 2)]; const b2 = prices.filter(x => x <= med * 2 && x >= med * 0.4); if (b2.length) prices = b2; }
         const cost = !prices.length ? 0 : ((prices.length === 2 && prices[1] > prices[0] * 2) ? prices[0] : prices[Math.min(prices.length - 1, Math.floor(prices.length * 0.75))]);
-        pre[r.key] = Object.assign(toRec(pick), { cost, hits: hits.length, at: new Date().toISOString(), from: fromSite, judge: '', alts: photoPool.filter(x => x !== pick && !usedImg.has(x.img)).slice(0, 10).map(toRec) });
+        pre[r.key] = Object.assign(toRec(pick), { cost, hits: hits.length, sold: soldPhoto || 0, at: new Date().toISOString(), from: fromSite, judge: '', alts: photoPool.filter(x => x !== pick && !usedImg.has(x.img)).slice(0, 10).map(toRec) });
         changed[r.key] = 1; usedImg.add(pick.img); got++;
         await new Promise(rs => setTimeout(rs, 1200 + Math.random() * 800));
       }
