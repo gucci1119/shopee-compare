@@ -17911,6 +17911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{2696} <b>🤖の写真集め：全機種を順に回す</b>（本人「全機種満遍なく出せない？」）。機種の順番をこのPCに覚えさせ（前はタブを開き直すたびに先頭へ戻り、同じ機種ばかり集めていました）、1回で2機種ぶん集めます。機種が4→15に増えて、1機種ずつだと一巡に7時間半かかっていました。',
       '\u{1F50D} <b>🤖の写真集め：売り切れの出品からも写真をもらう</b>（本人「これもっと詰めたい」）。写真が見つからない424作品の最大の原因は<b>「販売中」しか見ていなかったこと</b>でした。古い作品ほど販売中は0件でも、売り切れには中古の実写真があります。<b>写真だけ</b>もらい、相場・件数・在庫の判断には入れません（売り切れしか無い作品は今までどおり在庫0で出します）。叩くのは「写真なし」で捨てていた作品だけ・1作品の検索は最大3回です。',
       '\u{1F50E} <b>🤖の写真集め：当たらなかったら短い題名でもう一度だけ探す</b>。写真の控え741作品のうち<b>424作品が「写真が見つからない」</b>で、これが🤖が出せない一番の理由でした。題名が長い（副題・～以降・記号）と検索に当たらないので、1回目で0件のときだけ、4語までに短くした題名で探し直します（叩く回数は1作品2回まで）。',
       '\u{1F4C8} <b>🤖：対象を15機種・76か所に／写真の通過率を上げる</b>（本人「もっとあるやろ」「もっとこの機能もアップデートして」）。PS2・PS3・PS4・PSP・3DS・GB も対象に（PS系は汎用カタログの名前に Series が入っていて、まとめてチェックの条件で落ちていました）。新基準の写真の通過率が41%だったので、集める時に出品名で振り分けます：カセットの機種は「ソフトのみ」を先・「箱付き」を後ろ、DS・3DSは逆。控えの写真も6→10枚。互換機・周辺機器（RFスイッチ・ゲームポーチ等）は候補から外しました。',
@@ -28046,19 +28047,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!hws.length) return;
     lst._baCollectBusy = true; lst._baCollectAt = Date.now(); try { localStorage.setItem('smdBaCollectAt', String(Date.now())); } catch (_) {}
     try {
-      const hw = hws[(lst._baCollectIdx = ((lst._baCollectIdx || 0) + 1)) % hws.length];
-      const r = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 40, noYahoo: '1', needPhoto: '1' }, 240000);
-      if (!r || !r.ok || !Array.isArray(r.rows)) { lst._baCollectMsg = '候補の取得に失敗（' + ((r && r.error) || '応答なし') + '）'; return; }
-      const pre = (await baKvGet('boshu_auto_pre')) || {};
-      // 見つからなかった作品は 3日は引き直さない（メルカリを無駄に叩かない）
-      const rows = r.rows.filter(x => x && x.key && !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000))));
-      lst._baCollectMsg = '';
-      if (!rows.length) { lst._baCollectMsg = (TITLE_HW_JA[hw] || hw) + '：候補 ' + r.rows.length + '件は全部写真あり（または3日以内に探して無かった）'; }
-      else {
+      /* ★2026-09-20 本人「全機種満遍なく出せない？」：機種の順番を【このPCに覚えさせる】（前はタブを開き直すたびに0に戻って、先頭の機種ばかり集めていた）。
+         さらに1回で2機種ぶん集める（機種が4→15に増えたので、1機種ずつだと一巡に7時間半かかる）。叩く間隔は今までどおり1件2.5秒 */
+      let ci = 0; try { ci = Number(localStorage.getItem('smdBaCollectIdx') || 0) || 0; } catch (_) { ci = lst._baCollectIdx || 0; }
+      const msgs = [];
+      for (let t = 0; t < 2; t++) {
+        const hw = hws[(ci++) % hws.length];
+        try { localStorage.setItem('smdBaCollectIdx', String(ci)); } catch (_) {}
+        lst._baCollectIdx = ci;
+        const r = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 40, noYahoo: '1', needPhoto: '1' }, 240000);
+        if (!r || !r.ok || !Array.isArray(r.rows)) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗'); continue; }
+        const pre = (await baKvGet('boshu_auto_pre')) || {};
+        // 見つからなかった作品は 3日は引き直さない（メルカリを無駄に叩かない）
+        const rows = r.rows.filter(x => x && x.key && !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000))));
+        if (!rows.length) { msgs.push((TITLE_HW_JA[hw] || hw) + '：全部写真あり'); continue; }
         const c = await baCollectMercari(rows, hw, { max: 20 });
-        lst._baCollectMsg = (TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件 集めた' + (c.miss ? '・見つからず ' + c.miss + '件' : '');
-        try { logAct('出品', '自動出品の写真を自動収集', (TITLE_HW_JA[hw] || hw), c.got + '件（見つからず ' + c.miss + '）'); } catch (_) {}
+        msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : ''));
       }
+      lst._baCollectMsg = msgs.join(' ／ ');
+      try { logAct('出品', '自動出品の写真を自動収集', '', lst._baCollectMsg.slice(0, 80)); } catch (_) {}
       lst._baHead = null;   // バッジの数字を取り直す
       // ★描き直さない（入力中の設定が消える・Codex指摘）。状況の1行とバッジだけ差し替える
       try { const m = document.getElementById('ba-collect-msg'); if (m) m.textContent = lst._baCollectMsg ? '🖼 ' + lst._baCollectMsg : ''; baHeadBadge(); } catch (_) {}
