@@ -5732,8 +5732,15 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
-      var cl;
-      try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); } catch (e) { res.note = '複製失敗: ' + String((e && e.message) || e).slice(0, 80); baLog_(st, cc + ' ' + res.note); break; }
+      /* ★2026-09-20 VN PS2 で「This product duplicates an existing product」。①②の番号は【家族のカタログ】だけを見て決めていたが、
+         同じ名前で親SKUが空のカタログ（＝家族に入らない）が既に ② を使っていた。重複と言われたら番号を送って最大5回試す */
+      var cl = null, dupErr = '';
+      for (var tryNo = 0; tryNo < 5 && !cl; tryNo++) {
+        if (tryNo) { var m2 = CIRC[nextNo - 1 + tryNo] || ('(' + (nextNo + tryNo) + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }
+        try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); }
+        catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
+      }
+      if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 80); baLog_(st, cc + ' ' + res.note); break; }
       if (!cl || !cl.item_id) { res.note = '複製失敗'; break; }
       tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
       rows.push(tgt); newItem = true;
