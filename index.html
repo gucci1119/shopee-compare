@@ -17919,6 +17919,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F4C5} <b>出品ログの数字が1日じゅう動かなかったのを直しました</b>（本人「なんでここ増えないんだよ？」）。取り込みが<b>1日1回</b>だったので、今日は<b>02:17に走った17件のまま</b>止まっていました。その時点で🤖は今日すでに<b>104作品・174明細</b>を足しています。→ <b>1時間ごと</b>に取り込むようにしました（Supabaseの読み書きだけで、Shopeeの接続枠は使いません）。いますぐ最新にしたい時は今までどおり<b>「いま反映」</b>を押してください。',
+      '\u{1F916} <b>「手動」と出ていた1件について</b>：PHの Switch2「Resident Evil Village」は手で出したものではなく、<b>🤖の記録（listlog_auto）に入っていなかった</b>ので手動に見えていたものです。🤖側の記録は直近ぶんしか残らず、取り込みが1日1回だと取りこぼしていました。上の変更で拾える回数が増えます。',
       '\u{1F3C3} <b>🤖の写真集めを30分ごと→10分ごとに</b>。出品が増えない一番の理由は<b>写真が見つかっていない作品</b>（842作品中466件）で、母数の多さではありません。1作品あたりの間隔（2.5秒）は変えていないので、仕入元サイトへの当たり方の速さは同じです。',
       '\u{26A1} <b>出品を作る：画像の送信を速くしました</b>（前からの宿題「20秒かかる、3秒にしたい」）。メイン画像も明細画像も<b>1枚ずつ順番</b>に送っていました（9枚で約20秒）。<b>5枚ずつ同時</b>に送ります。並びは元のまま、1枚失敗しても他は止まりません。',
       '\u{1F524} <b>言葉を「明細」にそろえました</b>（前からの宿題）。同じ画面に「48バリエーション」と「明細 48件」が混ざっていて、外注の方が別のものと勘違いしかねない状態でした。画面に出る呼び方を<b>カタログ＝商品／明細＝その中の1本</b>にそろえています（絞り込み・ボタン・見出し）。コード内の説明文は触っていません。',
@@ -30481,14 +30483,18 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   // ★2026-09-20 出品ログ（listing_log）は📅出品ログの画面を開いた時にしか増えず、グラフも分析も実態より少なく出ていた（🤖自動出品が1日約49明細を足しているのに「新規出品ほぼ0」と誤診した）。
   //   担当のPCだけ・1日1回・起動の6分後に自動で反映する（Supabase の読み書きだけ＝GAS の接続枠は使わない）。
   // ★Codex指摘（2026-09-20）：起動6分後の1回きりだと、開きっぱなしで日付が変わった時・あとから担当PCになった時に動かない→ 30分ごとに「今日まだか」を見る
+  // ★2026-09-20（2回目の指摘）本人「なんでここ増えないんだよ？」：1日1回だと、朝2時に走ったあとは
+  //   その日いくら🤖が出しても数字が動かない（実測：今日の listing_log は全部 02:17 JST に書かれた17件だけ。
+  //   その時点で🤖は今日104作品・174明細を足していた）。→【1時間ごと】に変える。Supabase の読み書きだけで GAS の接続枠は使わない。
+  const LISTLOG_EVERY_MS = 60 * 60 * 1000;
   const listLogAutoTick = () => { try {
     if (!pcIsOwner() || demoOn()) return;   // ポータルは裏のタブに居ることが多いので、裏でも動かす（Supabase の読み書きだけ）
-    const d = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
-    if (localStorage.getItem('smdListLogAutoDay') === d) return;
-    localStorage.setItem('smdListLogAutoDay', d);
-    syncListingLog().catch(() => { try { localStorage.removeItem('smdListLogAutoDay'); } catch (_) {} });
+    const last = Number(localStorage.getItem('smdListLogAutoAt') || 0);
+    if (Date.now() - last < LISTLOG_EVERY_MS) return;
+    localStorage.setItem('smdListLogAutoAt', String(Date.now()));
+    syncListingLog().catch(() => { try { localStorage.removeItem('smdListLogAutoAt'); } catch (_) {} });
   } catch (_) {} };
-  setTimeout(listLogAutoTick, 6 * 60 * 1000); setInterval(listLogAutoTick, 30 * 60 * 1000);
+  setTimeout(listLogAutoTick, 3 * 60 * 1000); setInterval(listLogAutoTick, 10 * 60 * 1000);   // 3分後に1回・以後10分ごとに「1時間たったか」を見る
   // 📅 明細ごとの「更新日」（本人 2026-09-20「いつ出品したかといつ更新したかを明細ごとに表示できる？列追加して」）。
   //   Shopee は明細ごとの更新日を返さない → 明細の 名前・価格・在庫・画像 の控えを国ごとに app_kv.model_changes_<cc> に持ち、変わった日を自前で記録する。
   //   {m:{'<item_id>#<model_id>':[控え, '変わった日(JST)']}}。最初の1回は基準を作るだけ（日付なし＝「記録前」）。SKUは一括付与の最中なので控えに入れない
