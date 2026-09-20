@@ -2711,14 +2711,26 @@
   function skuSlug(t) { return String(t || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/['’`]/g, '').replace(/&/g, ' AND ').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, ''); }
   function autoSku(catName, optName) {
     let n = String(optName || catName || ''), pre = '';
-    const pm = n.match(/^\s*([A-Za-z0-9 ]{2,12})\s*[:：]\s*(.+)$/); if (pm) { const h = skuHwsOf(pm[1]); if (h.length === 1) { pre = h[0]; n = pm[2]; } }
+    /* ★2026-09-20 「GBA / Ruby」のように【機種 / 作品名】で書かれた明細がある（コロンではなくスラッシュ）。
+       これを拾えないと機種が二重に入り、作品名も消える（GBA_GBA_RUBY）。区切りにスラッシュも入れる。 */
+    const pm = n.match(/^\s*([A-Za-z0-9 ]{2,12})\s*[:：\/]\s*(.+)$/); if (pm) { const h = skuHwsOf(pm[1]); if (h.length === 1) { pre = h[0]; n = pm[2]; } }
     if (!pre) { const ch = skuHwsOf(catName); if (ch.length === 1) pre = ch[0]; else if (ch.length && ch.every(x => x === 'DS' || x === '3DS')) pre = 'DS'; }
     /* 単品（カタログ名なし）は、題名から機種の語と飾りの語を落とす：Used Tokyo Jungle PS3 Playstation 3 Japanese version → PS3_TOKYO_JUNGLE */
     if (!optName || !catName) { if (!pre) { const sh = skuHwsOf(n); if (sh.length === 1) pre = sh[0]; } SKU_HW.forEach(([k, re]) => { n = n.replace(new RegExp(re.source, 'gi'), ' '); }); n = n.replace(/\b(used|new|japan(ese)?|version|ver|sony|nintendo|sega|playstation|official|game|software|import|ntsc-?j)\b/gi, ' '); }
     let body = skuSlug(n); if (!body) return '';
     /* シリーズのカタログ（… Final Fantasy Series …）は作品の系列名を間に入れる：PS4:XV → PS4_FINAL_FANTASY_XV */
-    const sm = String(catName || '').match(/Variation\s+(.+?)\s+(?:Game\s+)?Series\b/i);
-    if (sm && optName) { const sk = skuSlug(sm[1]).split('_').filter(w => w && !SKU_HW.some(([k, re]) => re.test(w)) && !/^(NINTENDO|SONY|SEGA|MAIN|RPG)$/.test(w)).slice(0, 3).join('_'); if (sk && body.indexOf(sk.split('_')[0]) < 0) body = sk + '_' + body; }
+    let sm = String(catName || '').match(/Variation\s+(.+?)\s+(?:Game\s+)?Series\b/i);
+    let seriesRaw = sm ? sm[1] : '';
+    /* ★2026-09-20 「Series」と書いていないシリーズのカタログがある
+       （例 [Used] Variation Pokemon Gameboy Advance 6 Type Cartridge Only Japanese）。
+       Variation の次から【最初の機種の語】までを系列名とみなす → GBA_POKEMON_RUBY */
+    if (!seriesRaw) {
+      const vm = String(catName || '').match(/Variation\s+(.+)$/i);
+      if (vm) { let t = vm[1], cut = t.length;
+        SKU_HW.forEach(([k, re]) => { const m2 = t.match(new RegExp(re.source, 'i')); if (m2 && m2.index >= 0 && m2.index < cut) cut = m2.index; });
+        seriesRaw = t.slice(0, cut).trim(); }
+    }
+    if (seriesRaw && optName) { const sk = skuSlug(seriesRaw).split('_').filter(w => w && !SKU_HW.some(([k, re]) => re.test(w)) && !/^(NINTENDO|SONY|SEGA|MAIN|RPG|USED|NEW|JAPAN|JAPANESE|VARIATION)$/.test(w)).slice(0, 3).join('_'); if (sk && body.indexOf(sk.split('_')[0]) < 0) body = sk + '_' + body; }
     return ((pre ? pre + '_' : '') + body).slice(0, 100).replace(/_+$/, '');
   }
   async function skuCatName(itemId) { try { const r = await sbGetAll('listings', 'select=name&item_id=eq.' + encodeURIComponent(itemId)); return (r && r[0] && r[0].name) || ''; } catch (_) { return ''; } }
@@ -17919,6 +17931,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F3F7} <b>明細SKUの付け方を2つ直しました</b>（振り直しの前に下見で見つけました）。①明細名が <b>「GBA / Ruby」</b>のように<b>スラッシュ</b>で機種が書かれていると拾えず、<b>GBA_GBA_RUBY</b>（機種が二重・作品名が消える）になっていました。②カタログ名に「Series」の語が無いシリーズ（<b>Variation Pokemon Gameboy Advance …</b>）から系列名を拾えていませんでした。→ どちらも直して <b>GBA_POKEMON_RUBY</b> になります。規則に合わないSKUは1,731件あります。',
       '\u{1F4C5} <b>出品ログの数字が1日じゅう動かなかったのを直しました</b>（本人「なんでここ増えないんだよ？」）。取り込みが<b>1日1回</b>だったので、今日は<b>02:17に走った17件のまま</b>止まっていました。その時点で🤖は今日すでに<b>104作品・174明細</b>を足しています。→ <b>1時間ごと</b>に取り込むようにしました（Supabaseの読み書きだけで、Shopeeの接続枠は使いません）。いますぐ最新にしたい時は今までどおり<b>「いま反映」</b>を押してください。',
       '\u{1F916} <b>「手動」と出ていた1件について</b>：PHの Switch2「Resident Evil Village」は手で出したものではなく、<b>🤖の記録（listlog_auto）に入っていなかった</b>ので手動に見えていたものです。🤖側の記録は直近ぶんしか残らず、取り込みが1日1回だと取りこぼしていました。上の変更で拾える回数が増えます。',
       '\u{1F3C3} <b>🤖の写真集めを30分ごと→10分ごとに</b>。出品が増えない一番の理由は<b>写真が見つかっていない作品</b>（842作品中466件）で、母数の多さではありません。1作品あたりの間隔（2.5秒）は変えていないので、仕入元サイトへの当たり方の速さは同じです。',
