@@ -2247,14 +2247,22 @@
     return SB_URL + '/storage/v1/object/public/listing-imgs/' + path;
   }
   // 混在した画像URL配列を「すべてhttp(s)」に解決（httpはそのまま／data:はStorageへ上げてURL化）
+  /* ★2026-09-20 本人「20秒かかる、3秒にしたい」：画像を【1枚ずつ順番に】上げていた（9枚で約20秒）。
+     5枚ずつ同時に上げる。並びは元のまま（枠に入れてから詰める）。1枚失敗しても他は止めない */
   async function resolveImgsForApi(imgs) {
-    const out = [];
-    for (let i = 0; i < (imgs || []).length; i++) {
-      const u = String(imgs[i] || '');
-      if (/^https?:/.test(u)) out.push(u);
-      else if (/^data:/.test(u)) { const pu = await uploadImgToStorage(u, i); if (pu) out.push(pu); }
-    }
-    return out;
+    const list = (imgs || []).map(x => String(x || ''));
+    const slot = new Array(list.length).fill(null);
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length) {
+        const i = next++; const u = list[i];
+        if (/^https?:/.test(u)) { slot[i] = u; continue; }
+        if (!/^data:/.test(u)) continue;
+        try { slot[i] = await uploadImgToStorage(u, i); } catch (_) { slot[i] = null; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(5, list.length || 1) }, worker));
+    return slot.filter(Boolean);
   }
   // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
   async function openapiGetModels(shopId, itemId) {
@@ -17911,6 +17919,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{26A1} <b>出品を作る：画像の送信を速くしました</b>（前からの宿題「20秒かかる、3秒にしたい」）。メイン画像も明細画像も<b>1枚ずつ順番</b>に送っていました（9枚で約20秒）。<b>5枚ずつ同時</b>に送ります。並びは元のまま、1枚失敗しても他は止まりません。',
       '\u{1F524} <b>言葉を「明細」にそろえました</b>（前からの宿題）。同じ画面に「48バリエーション」と「明細 48件」が混ざっていて、外注の方が別のものと勘違いしかねない状態でした。画面に出る呼び方を<b>カタログ＝商品／明細＝その中の1本</b>にそろえています（絞り込み・ボタン・見出し）。コード内の説明文は触っていません。',
       '\u{1F4F7} <b>🤖：写真の見直しの進み具合を画面に出しました</b>（本人「ずっと終わってないけど、できたの？」＝裏で動いているのに見えなかった）。「残り◯件（見た◯／そのまま◯・差し替え◯・代わり無し◯）」。1回の件数も 8→40件に増やしました（Shopee枠が少ない時は自動で休みます）。',
       '\u{1F501} <b>重複出品の検知</b>（前からの宿題）。SKUが全明細に入ったので、<b>同じ国・同じシリーズ（①②…）の中に同じ作品が2つ以上ある</b>のを数えられるようになりました。出品管理＞分析・やること の先頭に一覧を出します（実測 <b>558組・1,125明細</b>＝VN 360・TW 122・PH 66）。別テーマのカタログ同士・単品とバリエが同じ作品を持つのは重複に数えません。<b>ここでは消しません</b>（明細を途中で消すと後ろがずれるため）。片方の在庫を0にするか、Shopeeの編集画面で末尾から消してください。',
@@ -39590,7 +39599,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!imgUrls.length) { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ 画像がありません</span>'; toast(`${cc}: 画像がありません`, true); if (b) { b.disabled = false; b.textContent = orig; } return { cc, error: '画像なし' }; }
         // バリエ画像も同様にhttp化
         let vars = jb.variations;
-        if (doVar) { const rv = []; for (const v of jb.variations) { let im = v.image || ''; if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v') || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = ''; rv.push(Object.assign({}, v, { image: im, sku: String(v.sku || '').trim() || autoSku(jb.name, v.name) })); } vars = rv; }
+        /* ★2026-09-20 明細の画像も1枚ずつ順番だった→5枚ずつ同時に（並びは元のまま） */
+        if (doVar) { const src = jb.variations || []; const imgs = new Array(src.length).fill(''); let nx = 0;
+          const w = async () => { while (nx < src.length) { const i = nx++; let im = src[i].image || '';
+            if (/^data:/.test(im)) { try { im = await uploadImgToStorage(im, 'v' + i) || ''; } catch (_) { im = ''; } } else if (!/^https?:/.test(im)) im = '';
+            imgs[i] = im; } };
+          await Promise.all(Array.from({ length: Math.min(5, src.length || 1) }, w));
+          vars = src.map((v, i) => Object.assign({}, v, { image: imgs[i], sku: String(v.sku || '').trim() || autoSku(jb.name, v.name) })); }
         if (resEl) resEl.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span>作成中…（画像アップロード＋登録${doVar ? '＋バリエ設定' : ''}。通常30〜60秒・最大2分）</span>`;
         const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined, tier_name: doVar ? ((listState.varTier || '').trim() || undefined) : undefined });
         const rg2 = REGIONS.find(x => x.cc === cc) || {};
