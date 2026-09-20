@@ -17911,6 +17911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F501} <b>重複出品の検知</b>（前からの宿題）。SKUが全明細に入ったので、<b>同じ国・同じシリーズ（①②…）の中に同じ作品が2つ以上ある</b>のを数えられるようになりました。出品管理＞分析・やること の先頭に一覧を出します（実測 <b>558組・1,125明細</b>＝VN 360・TW 122・PH 66）。別テーマのカタログ同士・単品とバリエが同じ作品を持つのは重複に数えません。<b>ここでは消しません</b>（明細を途中で消すと後ろがずれるため）。片方の在庫を0にするか、Shopeeの編集画面で末尾から消してください。',
       '\u{1F504} <b>出品一覧：明細の「何がいくつから、いくつに変わったか」</b>（前からの宿題「₱1,560 → ₱1,980 も欲しい」）。更新日の下に、前回の記録から変わった所だけ出します（価 1560→1980 ／ 庫 2→0 ／ 画像）。記録は 2026-09-20 からなので、それ以前の変化は出ません。',
       '\u{1F4F8} <b>🤖の写真集め：1回で3機種・25作品ずつに</b>（本人「要領よく」）。出品が増えない一番の理由は<b>写真が見つかっていない作品</b>（805作品のうち453件）で、母数の多さではありません。集める量を増やしました。',
       '\u{1F4BE} <b>出品一覧：価格・在庫は書き換えただけで保存されます</b>（本人「ここで書き換えただけで、即時反映されるようにしてほしい」）。欄から離れた時（またはEnter）にその行の💾保存が自動で走ります。打つたびではなく入力が終わった時に1回だけなので、Shopeeを余計に叩きません。💾保存を手で押しても今までどおり動きます。',
@@ -32710,8 +32711,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </table></div>
       </div>`;
     })();
+    /* ★2026-09-20 重複出品の検知（前からの宿題）。SKUが全明細に入ったので【同じ国・同じシリーズ（親SKUかカタログ名が同じ）・同じSKU】で数えられるようになった。
+       本人ルール：別テーマのバリエ同士・単品×バリエは同じソフトが入ってよい → 同じシリーズの①②に同じ作品がある時だけ重複とする。消さない（明細の削除は位置が動く）＝一覧で見せて本人が決める */
+    const dupHtml = (() => {
+      const nk2 = n => String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const by = {};
+      all.forEach(r => (r.models || []).forEach(x => { if (!x || x.ghost || !x.n) return; const sk = String(x.sku || '').trim();
+        if (!sk || /^https?:/.test(sk) || /^asin=/i.test(sk)) return;
+        const fam = String(r.parent_sku || '').trim() || nk2(r.name);
+        (by[r.cc + '\u0001' + fam + '\u0001' + sk] = by[r.cc + '\u0001' + fam + '\u0001' + sk] || []).push({ r, m: x }); }));
+      const dup = Object.entries(by).filter(([k, v]) => v.length > 1 && new Set(v.map(o => String(o.r.item_id))).size > 1);
+      if (!dup.length) return '';
+      const byCc = {}; dup.forEach(([k, v]) => { const c = k.split('\u0001')[0]; byCc[c] = (byCc[c] || 0) + 1; });
+      const rows = dup.sort((a, b) => b[1].length - a[1].length).slice(0, 200).map(([k, v]) => {
+        const p2 = k.split('\u0001'), cc = p2[0], rg2 = regionByCc(cc) || {};
+        return `<tr><td style="white-space:nowrap"><span class="ord-cc" style="background:${rg2.color || '#888'}">${esc(cc)}</span></td>`
+          + `<td style="font-size:11px"><b>${esc(v[0].m.n || '')}</b><div class="smd-dim">${esc(p2[2])}</div></td>`
+          + `<td style="font-size:11px">${v.map(o => `<div><a href="${esc(editUrlFor(rg2.host, o.r.item_id))}" target="_blank" rel="noopener">${esc(String(o.r.name).replace('[Used] Variation ', '').slice(0, 34))}</a> <span class="smd-dim">在庫${o.m.stock != null ? o.m.stock : '-'}</span></div>`).join('')}</td></tr>`;
+      }).join('');
+      return `<details class="tool-card" style="max-width:none;margin:0 0 10px"><summary style="cursor:pointer;font-weight:700">🔁 同じ作品が同じシリーズに2つ以上（${num(dup.length)}組）`
+        + ` <span class="smd-dim" style="font-weight:400;font-size:11.5px">${Object.entries(byCc).sort((a, b) => b[1] - a[1]).map(x => x[0] + ' ' + x[1]).join(' ／ ')}</span></summary>`
+        + `<div class="smd-dim" style="font-size:11.5px;margin:6px 0">同じ国・同じシリーズ（①②…）の中に、<b>同じSKUの明細が2つ以上</b>あります＝出品枠の無駄です。`
+        + `別テーマのカタログ同士・単品とバリエが同じ作品を持つのは重複に数えていません。<b>ここでは消しません</b>（明細を途中で消すと後ろがずれるため）。`
+        + `片方の在庫を0にするか、Shopeeの編集画面で末尾から消してください。上位200組まで表示。</div>`
+        + `<div style="overflow:auto;max-height:520px"><table class="smd-table" style="font-size:11.5px"><tr><th>国</th><th>作品・SKU</th><th>入っているカタログ</th></tr>${rows}</table></div></details>`;
+    })();
     host.innerHTML =
-      '<div id="an-playbook"></div>' +
+      '<div id="an-playbook"></div>' + dupHtml +
       lowHtml +
       sugHtml +
       leakHtml +
