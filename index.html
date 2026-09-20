@@ -17911,6 +17911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F504} <b>🤖：基準外のまま残っている写真を探し直して差し替える</b>（本人「画像、おかしいの差し替えて変えてくれないかな？」）。見直しで「基準外だが代わりが無い」になった明細は、控えに代わりが無かっただけなので、写真を探し直して控えに入れ直します（売り切れの出品からも探します）。次の見直しの回で差し替わります。1回6件まで。',
       '\u{2696} <b>🤖の写真集め：全機種を順に回す</b>（本人「全機種満遍なく出せない？」）。機種の順番をこのPCに覚えさせ（前はタブを開き直すたびに先頭へ戻り、同じ機種ばかり集めていました）、1回で2機種ぶん集めます。機種が4→15に増えて、1機種ずつだと一巡に7時間半かかっていました。',
       '\u{1F50D} <b>🤖の写真集め：売り切れの出品からも写真をもらう</b>（本人「これもっと詰めたい」）。写真が見つからない424作品の最大の原因は<b>「販売中」しか見ていなかったこと</b>でした。古い作品ほど販売中は0件でも、売り切れには中古の実写真があります。<b>写真だけ</b>もらい、相場・件数・在庫の判断には入れません（売り切れしか無い作品は今までどおり在庫0で出します）。叩くのは「写真なし」で捨てていた作品だけ・1作品の検索は最大3回です。',
       '\u{1F50E} <b>🤖の写真集め：当たらなかったら短い題名でもう一度だけ探す</b>。写真の控え741作品のうち<b>424作品が「写真が見つからない」</b>で、これが🤖が出せない一番の理由でした。題名が長い（副題・～以降・記号）と検索に当たらないので、1回目で0件のときだけ、4語までに短くした題名で探し直します（叩く回数は1作品2回まで）。',
@@ -28064,6 +28065,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const c = await baCollectMercari(rows, hw, { max: 20 });
         msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : ''));
       }
+      /* ★2026-09-20 本人「画像、おかしいの差し替えて変えてくれないかな？」：GAS の見直しで「基準外だが代わりが無い」(nophoto) になった明細は、
+         控えに代わりの写真が無いだけ。ここで【探し直して】控えに入れ、GAS の見直しの印を消す＝次の回に差し替わる。1回6件まで */
+      try {
+        const [rpv, stv] = await Promise.all([baKvGet('boshu_auto_rephoto'), baKvGet('boshu_auto_status')]);
+        const items = (rpv && rpv.items) || {}; const added = (stv && stv.added) || [];
+        const todo = Object.keys(items).filter(k => items[k] && items[k].s === 'nophoto').slice(0, 6)
+          .map(k => { const p2 = k.split('#'); const a = added.find(x => String(x.item_id) === p2[0] && String(x.en) === p2.slice(1).join('#')); return a ? { k, a } : null; }).filter(Boolean);
+        if (todo.length) {
+          const pre2 = Object.assign({}, (await baKvGet('boshu_auto_pre')) || {});
+          todo.forEach(x => { delete pre2[x.a.key]; });   // 控えを消して探し直す（前の写真は基準外なので残さない）
+          await sbUpsert('app_kv', [{ k: 'boshu_auto_pre', v: pre2, updated_at: new Date().toISOString() }]);
+          const byHw = {}; todo.forEach(x => { (byHw[x.a.hw] = byHw[x.a.hw] || []).push({ key: x.a.key, ja: x.a.ja || '', en: x.a.en || '' }); });
+          let got2 = 0;
+          for (const hw2 of Object.keys(byHw)) { const c2 = await baCollectMercari(byHw[hw2], hw2, { max: 6 }); got2 += c2.got || 0; }
+          const pre3 = (await baKvGet('boshu_auto_pre')) || {};
+          const rp2 = Object.assign({}, rpv); rp2.items = Object.assign({}, items);
+          let clr = 0; todo.forEach(x => { if (pre3[x.a.key] && pre3[x.a.key].img) { delete rp2.items[x.k]; clr++; } });
+          if (clr) await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: rp2, updated_at: new Date().toISOString() }]);
+          if (todo.length) msgs.push('🖼 差し替え待ち ' + todo.length + '件を探し直し（写真 ' + got2 + '件）');
+        }
+      } catch (_) {}
       lst._baCollectMsg = msgs.join(' ／ ');
       try { logAct('出品', '自動出品の写真を自動収集', '', lst._baCollectMsg.slice(0, 80)); } catch (_) {}
       lst._baHead = null;   // バッジの数字を取り直す
