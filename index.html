@@ -17931,6 +17931,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F3AE} <b>出品ログを機種ごとに分けられるようにしました</b>（本人「ハードごとにタブを分ける」「間違ったハードで出している商品などに気づけるので」）。日付の下に <b>すべて／SWITCH／PS4／GBA…</b> と件数つきで並びます。機種は<b>明細SKUの頭</b>（機種_作品名）で見て、無い時はカタログ名から拾います。<br>さらに、<b>SKUの機種とカタログ名の機種が食い違う明細</b>には <b>🎮</b> を付けます（カーソルで「SKU: GBA ／ カタログ名: GB」のように出ます）＝<b>間違った機種で出している疑い</b>です。',
+      '\u{26A0}\u{FE0F} <b>おかしいものをこちらで選べるようにしました</b>（本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」）。<b>⚠️ おかしいものだけ選ぶ</b>を押すと、<b>AIを使わず（無料で）</b>次の4つを選びます：①いまの基準から外れている印が付いているもの ②写真が無いもの ③<b>同じ写真が別の作品にも使われているもの</b>（実測107件・例：ゼルダの Minish Cap と A Link to the Past が同じ写真） ④機種の食い違い。<br>写真の中身そのもの（カタログ画像・テレビ画面・説明書・箱・海外版…）は <b>🔍 選んだ写真を見直す</b> でAIに見てもらいます。<b>🔍のあとは、基準外になったものが自動で選ばれた状態</b>になるので、そのまま 🔁 で代わりをさがせます。',
       '\u{2611}\u{FE0F} <b>出品ログで写真を「まとめて」直せるようにしました</b>（本人「1枚ずつってより一括でやりたい」）。各カードの左上にチェックが付き、上の<b>まとめて直す</b>バーから2つの操作ができます。<br>① <b>🔍 選んだ写真を見直す</b>…選んだぶんを<b>いまの基準でAIがまとめて見ます</b>（1枚 約¥0.3・押す前に枚数と目安の金額を出します）。基準外のものに <b>⚠️</b> が付くだけで、<b>出品は変わりません</b>。<br>② <b>🔁 選んだ分の代わりをさがす</b>…「代わり無し」の印を消して、🤖が次に写真を集める時に<b>もう一度さがして自動で差し替え</b>ます。<br><b>☑ 全部えらぶ</b>でその日のぶんを一度に選べます。1枚だけ直したい時は今まで通り写真右上の 📷 から。',
       '\u{1F4F8} <b>出品ログのカードから、その場で写真を差し替えられるようにしました</b>（本人「出品ログの方でそういう操作ができた方が楽」「一覧で見れるし、パッとパッと」）。写真の右上の <b>📷</b> を押すと、画像URL（メルカリの商品URLも可）を入れるか、空欄のままEnterで<b>PCのファイル</b>を選べます。押した瞬間にShopeeへ書き込まれ、カードの写真もその場で入れ替わります。<br>あわせて、いまの基準から外れている明細には <b>⚠️</b>（カーソルで理由）、差し替え済みには <b>📷</b> の印を出します。写真も少し大きくしました。<br>🍱母数の<b>📷写真を直す</b>タブの写真も、判断できる大きさ（104px・押すと拡大）にしました。',
       '\u{1F4BF} <b>Vita など「ケースで売る機種」を写真の基準に足しました</b>（本人「Vitaはケース付きでOK／ケースの表の写真」）。これまでケース必須は <b>DS・3DS だけ</b>で、Vita は<b>カードだけの写真でも通っていました</b>（実測：BlazBlue Chrono Phantasma が PH/TH/SG/BR で、カードがケースの上に乗った＝表ジャケットが見えない写真で出ていました）。→ <b>Vita・PSP・PS1〜PS5・Switch・Switch2・Wii・WiiU・GC・Xbox・DC・SS</b> をケース必須に。紙箱のカセット機種（FC/SFC/N64/GB/GBA…）は今まで通り<b>カセット単体だけ</b>です。GASとポータルの<b>両方</b>を同じ並びにしました。',
@@ -30802,7 +30804,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const maxBar = Math.max(p90, goal, 1);
     const pct = Math.min(100, Math.round(todayN / Math.max(1, goal) * 100));
     const sel = logState.day || today;
-    const selRows = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
+    /* ★2026-09-21 機種で分ける（本人「ハードごとにタブを分ける」「間違ったハードで出している商品などに気づける」）
+       機種は【明細SKUの頭】が正（機種_作品名）。SKUが無ければカタログ名から拾う。
+       両方が取れて食い違う時は _hwMix＝間違った機種で出している疑い。 */
+    const LL_HW = [['SWITCH2', /switch\s*2/i], ['SWITCH', /\bswitch\b/i], ['3DS', /\b3ds\b/i], ['DS', /\b(nds|ds|dsi)\b/i], ['WIIU', /wii\s*u/i], ['WII', /\bwii\b/i], ['GC', /game\s*cube|\bgc\b|\bngc\b/i], ['N64', /\bn64\b|nintendo\s*64/i], ['SFC', /super\s*famicom|\bsfc\b|\bsnes\b/i], ['FC', /famicom|\bfc\b|\bnes\b/i], ['GBA', /game\s*boy\s*advance|\bgba\b/i], ['GB', /game\s*boy|\bgbc?\b/i], ['VITA', /\bvita\b/i], ['PSP', /\bpsp\b|playstation\s*portable/i], ['PS5', /\bps5\b|playstation\s*5/i], ['PS4', /\bps4\b|playstation\s*4/i], ['PS3', /\bps3\b|playstation\s*3/i], ['PS2', /\bps2\b|playstation\s*2/i], ['PS1', /\bps1\b|\bpsx\b|playstation\s*1\b|playstation\s*one/i], ['XBOX360', /xbox\s*360/i], ['XBOX', /\bxbox\b/i], ['DC', /dreamcast/i], ['SS', /sega\s*saturn/i], ['MD', /mega\s*drive|genesis/i]];
+    const llHwOfName = (t) => { const x = ' ' + String(t || '') + ' '; for (const [k, re] of LL_HW) { if (re.test(x)) return k; } return ''; };
+    const llSkuOf = (r) => { try { const row = ((lst.byCc || {})[r.cc] || []).find(x => String(x.item_id) === String(r.item_id)); if (!row) return ''; const m = (row.models || []).find(x => String(x.id) === String(r.model_id)); return String((m && m.sku) || '').trim(); } catch (_) { return ''; } };
+    const selAll = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
+    selAll.forEach(r => {
+      const sku = llSkuOf(r); const mSku = sku.match(/^([A-Z0-9]+)_/);
+      const hwSku = mSku ? mSku[1] : '';
+      const hwCat = llHwOfName(r.name) || llHwOfName(r.model_name);
+      r._hw = hwSku || hwCat || '—';
+      r._hwMix = !!(hwSku && hwCat && hwSku !== hwCat && !(hwSku === 'GB' && hwCat === 'GBC') && !(hwSku === 'DS' && hwCat === '3DS'));
+      r._hwCat = hwCat; r._hwSku = hwSku;
+    });
+    const selRows = (logState.hw ? selAll.filter(r => (r._hw || '—') === logState.hw) : selAll);
     const ccColor = (cc) => (regionByCc(cc) || {}).color || '#888';
     // 目盛りを打つ日を先に決める（等間隔・最後は必ず今日）。
     // 隣り合う目盛りが近すぎると数字が重なるので、間隔の半分より近いものは捨てる。
@@ -30871,11 +30888,21 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件 / <span style="color:#5e35b1;font-weight:700">紫=🤖自動出品の分</span>　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
       </div>
       <div style="margin-top:12px">
-        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
+        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>${logState.hw ? `<span class="smd-dim" style="font-weight:400;font-size:11px">（${esc(logState.hw)}でしぼり込み／全${selAll.length}件）</span>` : ''}${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
           <span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">バリエの明細1件＝1商品</span></div>
+        ${(() => { /* ★2026-09-21 本人「ハードごとにタブを分けるとかもできますかね？もちろん、すべて含めて表示も」
+             機種は【明細SKUの頭】（機種_作品名）で見る。無ければカタログ名から拾う。 */
+          const cnt = {}; (selAll || []).forEach(r => { cnt[r._hw || '—'] = (cnt[r._hw || '—'] || 0) + 1; });
+          const order = ['SWITCH2','SWITCH','WIIU','WII','GC','N64','SFC','FC','GBA','GBC','GB','3DS','DS','PS5','PS4','PS3','PS2','PS1','PSP','VITA','XBOX360','XBOX','DC','SS','MD','—'];
+          const ks = order.filter(k => cnt[k]).concat(Object.keys(cnt).filter(k => order.indexOf(k) < 0));
+          if (ks.length <= 1) return '';
+          const btn = (k, label, n) => `<button class="llog-hw" data-hw="${av(k)}" style="font-size:11.5px;padding:3px 9px;border-radius:14px;border:1px solid ${(logState.hw || '') === k ? '#1565c0' : '#ddd'};background:${(logState.hw || '') === k ? '#1565c0' : '#fff'};color:${(logState.hw || '') === k ? '#fff' : '#444'};font-weight:${(logState.hw || '') === k ? '700' : '400'};cursor:pointer">${esc(label)}${n != null ? ` <span style="opacity:.8;font-weight:400">${n}</span>` : ''}</button>`;
+          return `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">${btn('', 'すべて', (selAll || []).length)}${ks.map(k => btn(k, k === '—' ? '機種不明' : k, cnt[k])).join('')}</div>`;
+        })()}
         ${selRows.length ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:7px;padding:6px 8px;border:1px solid #e3e6ea;border-radius:8px;background:#fafbfc">
           <b style="font-size:12px">まとめて直す</b>
           <button class="smd-btn" id="llog-ckall" style="font-size:11.5px">☑ 全部えらぶ</button>
+          <button class="smd-btn" id="llog-ckbad" style="font-size:11.5px;border-color:#b26a00;color:#b26a00;font-weight:700" title="いまの基準から外れているもの・写真が無いもの・同じ写真が別の作品にも使われているものを選びます（AIは使いません＝無料）">⚠️ おかしいものだけ選ぶ</button>
           <button class="smd-btn" id="llog-judge" style="font-size:11.5px" title="選んだ写真を、いまの基準でAIにまとめて見てもらいます（1枚 約¥0.3）。基準外のものに ⚠️ が付きます。出品は変わりません">🔍 選んだ写真を見直す</button>
           <button class="smd-btn" id="llog-research" style="font-size:11.5px" title="選んだ明細の「代わり無し」の印を消します。次に写真を集める時に、🤖がもう一度さがして自動で差し替えます">🔁 選んだ分の代わりをさがす</button>
           <span class="smd-dim" id="llog-bulkmsg" style="font-size:11px"></span>
@@ -30902,6 +30929,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               try { const rp2 = (_baRp || {})[String(r.item_id) + '#' + String(r.model_name || '').trim()];
                 if (rp2 && rp2.s === 'nophoto') warn = `<span title="いまの基準から外れています（${esc(rp2.was || '')}）。代わりの写真が見つかっていません" style="position:absolute;left:-2px;top:-2px;font-size:10px;background:#fff;border-radius:4px;line-height:1">⚠️</span>`;
               } catch (_) {}
+              /* ★機種の食い違い（SKUの機種とカタログ名の機種が違う）＝間違った機種で出している疑い */
+              if (r._hwMix) warn += `<span title="機種が食い違っています（SKU: ${esc(r._hwSku)} ／ カタログ名: ${esc(r._hwCat)}）" style="position:absolute;left:-2px;bottom:-2px;font-size:10px;background:#fff;border-radius:4px;line-height:1">🎮</span>`;
               return `<span style="position:relative;width:56px;height:56px;flex:none;border-radius:6px;background:#f4f4f4;overflow:hidden;display:inline-flex;align-items:center;justify-content:center">${src ? `<img class="zimg" src="${esc(typeof resolveImgUrl === 'function' ? resolveImgUrl(src) : src)}" referrerpolicy="no-referrer" loading="lazy" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" onerror="this.style.opacity=.15">` : '<span style="font-size:8px;color:#bbb">なし</span>'}${mark}${warn}<button class="llog-fix" data-cc="${av(r.cc)}" data-item="${av(r.item_id)}" data-opt="${av(r.model_name || '')}" title="この明細の写真を差し替える（画像URL・メルカリの商品URL・PCのファイル）" style="position:absolute;right:0;top:0;border:none;background:rgba(255,255,255,.88);border-radius:0 6px 0 6px;font-size:10px;line-height:1;padding:2px 3px;cursor:pointer">📷</button></span>`;
             })()}
             <span style="min-width:0;flex:1">
@@ -30929,7 +30958,33 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const bmsg = (t) => { const e = host.querySelector('#llog-bulkmsg'); if (e) e.textContent = t || ''; };
       const picked = () => [...host.querySelectorAll('.llog-ck:checked')].map(c => ({ cc: c.dataset.cc, item: c.dataset.item, opt: c.dataset.opt || '' })).filter(x => x.opt);
       const curImgOfCard = (cc, item, opt) => { try { const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(item)); if (!row) return ''; const m = (row.models || []).find(x => String(x.n || '').trim() === opt); return (m && m.img) || ''; } catch (_) { return ''; } };
+      if (lst._llogAutoPickBad) { lst._llogAutoPickBad = false; setTimeout(() => { const b2 = host.querySelector('#llog-ckbad'); if (b2) b2.click(); }, 60); }
       { const a = host.querySelector('#llog-ckall'); if (a) a.addEventListener('click', () => { const cks = host.querySelectorAll('.llog-ck'); const on = ![...cks].every(c => c.checked); cks.forEach(c => { c.checked = on; }); bmsg(on ? cks.length + '件えらびました' : ''); }); }
+      /* ★2026-09-21 本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」「選出基準は今まで私が何回も言ってる基準で」
+         AIを使わずに分かる分（＝無料）をここで選ぶ：
+           ①いまの基準から外れている印が付いている（⚠️）
+           ②写真が無い
+           ③同じ写真が【別の作品】にも使われている（実測107件。例：ゼルダの Minish Cap と A Link to the Past が同じ写真）
+         写真の中身そのもの（カタログ画像・テレビ画面・説明書・箱・海外版…）は 🔍 でAIに見てもらう。 */
+      { const a = host.querySelector('#llog-ckbad'); if (a) a.addEventListener('click', () => {
+          const byImg = {};
+          (selRows || []).forEach(r => { const im = (() => { try { const row = ((lst.byCc || {})[r.cc] || []).find(x => String(x.item_id) === String(r.item_id)); if (!row) return ''; const m = (row.models || []).find(x => String(x.id) === String(r.model_id)); return (m && m.img) || ''; } catch (_) { return ''; } })();
+            if (!im) return; const nm = String(r.model_name || '').trim().toLowerCase(); (byImg[im] = byImg[im] || new Set()).add(nm); });
+          let n = 0;
+          host.querySelectorAll('.llog-ck').forEach(c => {
+            const item = c.dataset.item, opt = c.dataset.opt || '', cc = c.dataset.cc;
+            let img = ''; try { const row = ((lst.byCc || {})[cc] || []).find(x => String(x.item_id) === String(item)); if (row) { const m = (row.models || []).find(x => String(x.n || '').trim() === opt); img = (m && m.img) || ''; } } catch (_) {}
+            const rp = (_baRp || {})[String(item) + '#' + opt];
+            const flagged = !!(rp && rp.s === 'nophoto');
+            const noImg = !img;
+            const shared = !!(img && byImg[img] && byImg[img].size > 1);
+            const rowR = (selRows || []).find(x => String(x.item_id) === String(item) && String(x.model_name || '').trim() === opt);
+            const hwMix = !!(rowR && rowR._hwMix);
+            const bad = flagged || noImg || shared || hwMix;
+            c.checked = bad; if (bad) n++;
+          });
+          bmsg(n ? n + '件えらびました（基準外・写真なし・同じ写真の使い回し・機種の食い違い）' : 'この日はどれも当てはまりませんでした。写真の中身を見るには 🔍 を押してください');
+        }); }
       { const a = host.querySelector('#llog-judge'); if (a) a.addEventListener('click', async () => {
           const ps = picked(); if (!ps.length) { alert('見直す写真を選んでください（☑ 全部えらぶ でもOK）'); return; }
           if (!settings.claudeKey) { alert('⚙️設定に Claude のキーが要ります（写真の判定に使います）'); return; }
@@ -30952,7 +31007,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             }
             toast('🔍 ' + (ok + ng) + '枚を見ました（そのまま ' + ok + '・基準外 ' + ng + (skip ? '・見られず ' + skip : '') + '）');
             try { logAct('出品', '写真の見直し(出品ログ)', '', (ok + ng) + '枚 OK' + ok + '/NG' + ng); } catch (_) {}
-            bmsg('基準外 ' + ng + '件に ⚠️ を付けました'); renderListingLog();
+            bmsg('基準外 ' + ng + '件に ⚠️ を付けました。もう一度この画面が出たら「⚠️ おかしいものだけ選ぶ」で拾えます');
+            lst._llogAutoPickBad = true;   /* 描き直したあと、おかしいものを選んだ状態にする */
+            renderListingLog();
           } catch (e) { alert('見直しに失敗: ' + ((e && e.message) || e)); }
           a.disabled = false; a.textContent = old;
         }); }
@@ -30998,7 +31055,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       inp.onchange = () => { const f = inp.files && inp.files[0]; if (!f) return; const fr = new FileReader(); fr.onload = () => run(String(fr.result || '')); fr.readAsDataURL(f); };
       inp.click();
     }));
-    host.querySelectorAll('.llog-bar').forEach(b => b.addEventListener('click', () => { logState.day = b.dataset.d; renderListingLog(); }));
+    host.querySelectorAll('.llog-hw').forEach(b => b.addEventListener('click', () => { logState.hw = b.dataset.hw || ''; renderListingLog(); }));
+    host.querySelectorAll('.llog-bar').forEach(b => b.addEventListener('click', () => { logState.day = b.dataset.d; logState.hw = ''; renderListingLog(); }));
     host.querySelectorAll('.llog-range').forEach(b => b.addEventListener('click', () => { logState.days = +b.dataset.d; renderListingLog(); }));
     { const lv = host.querySelector('#llog-live'); if (lv) lv.addEventListener('change', () => { logState.liveOnly = lv.checked; renderListingLog(); }); }
     { const g = host.querySelector('#llog-goal');
