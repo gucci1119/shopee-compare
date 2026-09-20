@@ -1203,7 +1203,10 @@ function refreshOne_(refreshToken, who) {
 }
 
 function callShop_(shopId, path, query, method, body) {
-  var tok = ensureToken_(shopId), ts = now_();
+  /* ★2026-09-21 実機で確かめたら、枠切れの印が付かなかった。真因＝**ensureToken_ は try の外**にあり、
+     ここが枠切れで投げると下の catch（ufNoteErr_）に届かない。トークン更新も urlfetch を使う。 */
+  var tok; try { tok = ensureToken_(shopId); } catch (e0) { ufNoteErr_(e0); throw e0; }
+  var ts = now_();
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&access_token=' + tok.access_token + '&shop_id=' + shopId + '&sign=' + signShop_(path, ts, tok.access_token, shopId);
   if (query) for (var k in query) url += '&' + k + '=' + encodeURIComponent(query[k]);
   var opt = { method: method || 'get', muteHttpExceptions: true };

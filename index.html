@@ -1972,6 +1972,13 @@
       aiCostDraw(); close();
     });
   }
+  /* ★2026-09-21 「1日の枠切れ」を太平洋時間の日付つきで覚えておく（リロードしても⛔のまま）。
+     GAS の /exec は版が固定されていて新しい印（blocked）を返せないので、**画面側でも覚える**。 */
+  const ufPtDay = () => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date()); } catch (_) { return ''; } };
+  function ufDayBlocked() {
+    try { const o = JSON.parse(localStorage.getItem('smdUfBlocked') || 'null'); if (o && o.d && o.d === ufPtDay()) return o; } catch (_) {}
+    return null;
+  }
   async function ufQuotaDraw() {
     const el = document.getElementById('uf-quota'); if (!el) return;
     if (!settings.openapiUrl) { el.textContent = ''; return; }
@@ -2018,10 +2025,11 @@
     // 15,000を超える＝背景同期が止まり、残りは手動操作の予約枠。20,000で全部止まる。
     // ★実際に断られた直後（30分以内）は、カウンタが何と言おうと⛔にする。
     const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
+    const dayBlk = ufDayBlocked();
     /* ★2026-09-21 本人「でも枠は残り75%出てますよ」「なぜあの枠のブロッカーが働いていないんですか？」
        数えた回数は当てにならない（同時に走る実行どうしで上書きし合って消える）。
        GASが実際にGoogleに断られたら r.blocked が立つので、**数がいくつに見えても使い切り扱い**にする。 */
-    const gasBlocked = !!(r && r.blocked);
+    const gasBlocked = !!(r && r.blocked) || !!dayBlk;
     const blocked = gasBlocked || blockedAgo < 30 * 60 * 1000;
     const col = (blocked || used >= cap) ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
     const mark = (blocked || used >= cap) ? '⛔' : (used >= stop ? '⚠' : '');
@@ -2095,7 +2103,12 @@
         else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗';
           // ★枠切れは【実際に断られた事実】が唯一の正。カウンタは数え漏れることがある（2026-08-22 実測で12,329回ぶん漏れていた）。
           //   断られた瞬間を覚えて、上の表示を⛔に落とす。数字だけ見て「まだ余裕」と誤解させない。
-          if (/urlfetch|回数が多すぎ|too many times|invoked too many/i.test(lastErr)) { try { window.__ufBlockedAt = Date.now(); ufQuotaDraw(); } catch (_) {} }
+          if (/urlfetch|回数が多すぎ|too many times|invoked too many/i.test(lastErr)) { try { window.__ufBlockedAt = Date.now();
+            /* ★2026-09-21 実機で確かめたら、リロードすると⛔が消えて「残り◯%」に戻っていた（覚えていたのが画面の中だけ・30分で失効）。
+               **1日の枠切れ**（「1 日に」「for one day」）は翌日のリセットまで直らないので、太平洋時間の日付つきで残しておく。
+               短時間の連打（「短時間に」）は少し待てば直るので今まで通り30分だけ。 */
+            if (/1\s*日に|for one day/i.test(lastErr)) localStorage.setItem('smdUfBlocked', JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(lastErr).slice(0, 160) }));
+            ufQuotaDraw(); } catch (_) {} }
           if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
       } catch (e) {
         const msg = String((e && e.message) || '');
@@ -3506,10 +3519,11 @@
     const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
     const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
+    const dayBlk = ufDayBlocked();
     /* ★2026-09-21 本人「でも枠は残り75%出てますよ」「なぜあの枠のブロッカーが働いていないんですか？」
        数えた回数は当てにならない（同時に走る実行どうしで上書きし合って消える）。
        GASが実際にGoogleに断られたら r.blocked が立つので、**数がいくつに見えても使い切り扱い**にする。 */
-    const gasBlocked = !!(r && r.blocked);
+    const gasBlocked = !!(r && r.blocked) || !!dayBlk;
     const blocked = gasBlocked || blockedAgo < 30 * 60 * 1000;
     const col = (blocked || used >= cap) ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
     const mark = (blocked || used >= cap) ? '⛔' : (used >= stop ? '⚠' : '');
