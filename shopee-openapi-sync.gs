@@ -5206,7 +5206,17 @@ function boshuAutoTick(manual) {
     if (!hws.length) { st.lastMsg = '機種が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
     var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [];
+    /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して。毎日絶対に、あの機能が止まるぐらい使わないで」
+       出すペースを上げた（perTick 10→20）ので、**枠の減り方に応じて自分で絞る**。
+       UF_STOP(15,000) を分母にして、使った割合で1回の作品数を落とす。止まる前に細くなるので、
+       「気づいたら停止線」という事故が構造的に起きない。bgAllowed_ は最後の砦として残す。 */
     var perTick = Math.max(1, Math.min(20, Number(cfg.perTick) || 8));
+    var _ufNow = ufTotal_(), _ufPct = _ufNow / UF_STOP;
+    var _slow = '';
+    if (_ufPct >= 0.85) { perTick = 1; _slow = '85%'; }
+    else if (_ufPct >= 0.70) { perTick = Math.max(1, Math.round(perTick * 0.25)); _slow = '70%'; }
+    else if (_ufPct >= 0.50) { perTick = Math.max(1, Math.round(perTick * 0.5)); _slow = '50%'; }
+    if (_slow) baLog_(st, '🐢 接続枠を' + _slow + '超え使ったので、1回の作品数を ' + perTick + ' に落としました（' + _ufNow + '/' + UF_STOP + '）');
     var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null, ccsHw = ccs;
     while (tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
