@@ -17988,6 +17988,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F50E} <b>📷の「候補の写真」が1枚も出ていなかったのを直しました</b>（画面で動かして分かりました）。集めた写真の入れ物は<b>日本語の作品名</b>で整理されているのに、明細名は<b>英語</b>なので引けていませんでした。→ 英題→作品の対応表で<b>逆引き</b>するようにしました。<br>それでも無い作品のために <b>🔎 メルカリで探す</b> を付けました。押した時だけ1回探して、<b>その場で候補の写真を並べます</b>（押すとその写真に差し替わります）。',
       '\u{1F9F9} <b>グッズ除外の誤爆を止めました＋当たっていた写真を探し直します</b>。除外語を足したあと<b>実データで何が落ちたかを数えた</b>ところ、写真あり558件のうち<b>42件</b>が該当。うち<b>8件は「いま選ばれている1枚目」</b>でした（Switch Sports に<b>GO VACATION の空容器</b>／ピクミン4 に<b>ぬいぐるみ</b>／スカーレットに<b>カードなし台紙のみ</b>／スプラトゥーン3 に<b>イカのパスケース</b> など）。→ その8件は写真を外して<b>探し直し</b>、候補側の34件も消しました。<br>同時に<b>誤爆を2件</b>見つけました：<b>GBASP用 MiniポーチSP</b> と <b>GAMEBOY MICRO専用 ゲームポーチM</b> は<b>商品そのものがポーチ</b>なのに「ポーチ」で除外されていました（2026-09-04 に記録した「除外語は実在する商品を消す」と同じ型の3回目）。→ <b>除外語が探している商品の題名にも入っている時は除外しない</b>ようにしました。GASとポータルの両方です。',
       '\u{1F6A6} <b>接続枠の「止める仕組み」を作り直しました</b>（本人「なぜあの枠のブロッカーが働いていないんですか？もう何回もこれ言っている」）。<b>原因は構造でした</b>：止める判断が「Googleの実際の回数」ではなく<b>私たちが数えた推定値</b>を見ていたので、数え漏れが1つあるたびに素通りしていました（過去の枯渇も全部これの変種です）。今回さらに<b>数えた分が消える仕組み上の穴</b>も見つかりました＝回数を貯める処理が<b>鍵なしで「読んで→足して→書く」</b>をしており、ポータルからの呼び出しとトリガーが同時に走ると<b>書き込みが上書きし合って回数が黙って消えます</b>。「残り75%」と出ていたのに実際は使い切っていたのはこれです。<br>→ ①<b>実際にGoogleに断られたら、その事実を記録して当日の自動処理を全部止めます</b>（数がいくつに見えても止まる。翌日のリセットで自動で解けます）②回数は<b>鍵を取って</b>書き、取れない時も<b>捨てずに控えへ逃がします</b> ③<b>もう一方のGAS（仕入れメール取込など）の分を合算</b>します ④画面も<b>⛔使い切り</b>と出し、「数えた回数より実態が多い」ことをそのまま書きます。',
       '\u{23F0} <b>🤖が止まっている時に「次は◯◯ごろ」と出し続けるのをやめました</b>（本人「もう9月20日の21時1分って、もう過ぎてるんですけど」）。あの時刻は<b>最後に動いた時刻＋30分</b>の見込みなので、止まると<b>過去の時刻を出したまま動いているように見えます</b>。→ 予定を過ぎたら <b>🔴 ◯時間◯分 動いていません</b> と赤で出します。',
@@ -31352,12 +31353,18 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const sold = Number(me.sold) || 0;
       const isTail = mi >= 0 && mi === models.length - 1;
       /* 🤖が集めた候補（その作品の写真）。pre[鍵] = {img, alts:[…]} */
+      /* ★2026-09-21 実機で確かめたら候補が0件だった。真因＝`boshu_auto_pre` の鍵は【日本語題】から作られていて、
+         明細名（英題）からは引けない。→ `boshu_auto_en`（作品の鍵→英題）を**逆引き**して鍵を得る。
+         それでも見つからない時のために「🔎 メルカリで探す」を置く（押した時だけ1回・自動では叩かない）。 */
       let cands = [];
       try {
         const pre = (await baKvGet('boshu_auto_pre')) || {};
-        const k = baPreKeyOf(opt);
-        let hit = pre[k];
-        if (!hit && k) { const kk = Object.keys(pre).find(x => x === k || (x.length > 3 && k.length > 3 && (x === k))); hit = kk ? pre[kk] : null; }
+        const enMap = (await baKvGet('boshu_auto_en')) || {};
+        const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, ' ').trim();
+        let hit = null;
+        const want = norm(opt);
+        for (const kk of Object.keys(enMap)) { const e = enMap[kk]; const en = (typeof e === 'string') ? e : ((e && (e.en || e.t)) || ''); if (en && norm(en) === want) { hit = pre[kk]; break; } }
+        if (!hit) hit = pre[baPreKeyOf(opt)];
         if (hit) { if (hit.img) cands.push({ img: hit.img, thumb: hit.thumb || hit.img, src: hit.src || '', name: hit.name || '', cond: hit.cond || '', top: true }); (hit.alts || []).forEach(a => { if (a && a.img) cands.push(a); }); }
         cands = cands.filter(x => String(x.img).replace(/\?.*$/, '') !== String(curImg).replace(/\?.*$/, '')).slice(0, 12);
       } catch (_) { cands = []; }
@@ -31382,7 +31389,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             ${cands.length ? `<div style="display:flex;flex-wrap:wrap;gap:7px">${cands.map((c, i) => `
               <button class="lf-cand" data-i="${i}" title="${av((c.name || '') + (c.cond ? '／' + c.cond : ''))}" style="border:2px solid ${c.top ? '#1b7f3b' : '#ddd'};background:#fff;border-radius:8px;padding:0;width:86px;height:86px;overflow:hidden;cursor:pointer">
                 <img src="${rz(c.thumb || c.img)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;display:block"></button>`).join('')}</div>`
-              : `<div class="smd-dim" style="font-size:11.5px;background:#f6f6f6;border-radius:8px;padding:8px 10px">この作品の候補はまだ集まっていません（🍱母数 → 🤖 で集めます）。下のURLかPCのファイルで差し替えてください。</div>`}
+              : `<div class="smd-dim" style="font-size:11.5px;background:#f6f6f6;border-radius:8px;padding:8px 10px">この作品の候補はまだ集まっていません。<b>🔎 メルカリで探す</b>を押すと、いまの出品から候補を出します（押した時だけ1回だけ探します）。</div>`}
+            <div style="margin-top:8px"><button class="smd-btn" id="lf-search" style="font-size:12px">🔎 メルカリで探す</button> <span class="smd-dim" style="font-size:10.5px">「${esc(opt)}」で探します</span></div>
+            <div id="lf-found" style="display:flex;flex-wrap:wrap;gap:7px;margin-top:7px"></div>
             <div style="margin-top:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
               <input id="lf-url" placeholder="画像URL（メルカリの商品URLも可）" style="flex:1;min-width:220px;padding:6px 9px;border:1px solid #ccc;border-radius:7px;font-size:12px">
               <button class="smd-btn" id="lf-url-go" style="font-size:12px">この URL にする</button>
@@ -31423,6 +31432,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         } catch (e) { msg('<span style="color:#c0392b">差し替えに失敗: ' + esc((e && e.message) || String(e)) + '</span>'); }
       };
       ov.querySelectorAll('.lf-cand').forEach(b => b.addEventListener('click', () => apply(cands[+b.dataset.i].img)));
+      { const sb = ov.querySelector('#lf-search'); if (sb) sb.addEventListener('click', async () => {
+          if (typeof mercariSearch !== 'function') { msg('メルカリ検索はブリッジ（Tampermonkey）が要ります'); return; }
+          sb.disabled = true; sb.textContent = '🔎 探しています…'; msg('');
+          try {
+            const items = await mercariSearch(String(opt).replace(/[:：].*$/, '').trim());
+            const list = (items || []).filter(x => x && x.img).slice(0, 12);
+            const host2 = ov.querySelector('#lf-found');
+            host2.innerHTML = list.length ? list.map((x, i) => {
+              const m2 = String(x.url || '').match(/\/item\/(m\d+)/);
+              const full = m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img;
+              return `<button class="lf-found-b" data-u="${av(full)}" title="${av((x.name || '') + ' ¥' + (x.price || ''))}" style="border:2px solid #ddd;background:#fff;border-radius:8px;padding:0;width:86px;height:86px;overflow:hidden;cursor:pointer"><img src="${esc(x.img)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;display:block"></button>`;
+            }).join('') : '<span class="smd-dim" style="font-size:11.5px">見つかりませんでした</span>';
+            host2.querySelectorAll('.lf-found-b').forEach(b2 => b2.addEventListener('click', () => apply(b2.dataset.u)));
+          } catch (e) { msg('<span style="color:#c0392b">探せませんでした: ' + esc((e && e.message) || String(e)) + '</span>'); }
+          sb.disabled = false; sb.textContent = '🔎 メルカリで探す';
+        }); }
       ov.querySelector('#lf-url-go').addEventListener('click', () => apply(ov.querySelector('#lf-url').value));
       ov.querySelector('#lf-url').addEventListener('keydown', e => { if (e.key === 'Enter') apply(e.target.value); });
       ov.querySelector('#lf-file').addEventListener('click', () => {
