@@ -5197,7 +5197,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-20 本人「高額品で在庫少ないのは出さないでね」「高額品ソフトは海賊版も多いので気をつけて」「ファミコンとか特に注意で」
        高い × 出品が少ない＝仕入れられない・海賊版をつかむ。ファミコン系（紙箱の機種）は基準を半分にしてもっと慎重に。設定 highCostJpy で変えられる */
     var highCost = Number(cfg.highCostJpy) || 5000;
-    if (BA_CART_ONLY_HW[hw] || hw === 'fc' || hw === 'sfc') highCost = Math.round(highCost / 2);
+    if (BA_CART_ONLY_HW[hw] || hw === 'fc' || hw === 'sfc') highCost = Math.round(highCost * 0.8);   /* 本人 2026-09-20「ファミコンは3,500円か4,000円くらいまででいい」＝5,000×0.8＝4,000円 */
     var highNeed = minHits + 3;   /* 高額品は「出品が minHits+3 件以上ある」時だけ出す */
     var picks = [];
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
