@@ -5782,7 +5782,10 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var minP = hi ? hi / ratio : 0, maxP = lo ? lo * ratio : Infinity;
       if (ceilA) maxP = Math.min(maxP, ceilA);
       if (price < minP || price > maxP) {
-        if (p.stock) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; baSkipRec_(st, hw, cc, p, 'ratio'); return; }   // 売れる明細は値付けを崩さない＝見送り
+        /* ★2026-09-20 ここで丸ごと見送っていたため 51件（gc 23・vita 21…）が1件も出ていなかった。
+           本人の方針「少々荒くても出す」に合わせ、**在庫0にして枠内の価格で出す**（値付けは崩さない・後から在庫を戻せる）。
+           出さないのは、枠に寄せても上限(ceilA)を超える時だけ */
+        p = Object.assign({}, p, { stock: 0 });
         price = Math.min(Math.max(price, minP), maxP === Infinity ? price : maxP);           // 在庫0は枠内に寄せて置くだけ
       }
       price = baRound_(price, unit); if (!(price > 0)) { res.skipped++; return; }
