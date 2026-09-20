@@ -17911,6 +17911,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F504} <b>出品一覧：明細の「何がいくつから、いくつに変わったか」</b>（前からの宿題「₱1,560 → ₱1,980 も欲しい」）。更新日の下に、前回の記録から変わった所だけ出します（価 1560→1980 ／ 庫 2→0 ／ 画像）。記録は 2026-09-20 からなので、それ以前の変化は出ません。',
       '\u{1F4F8} <b>🤖の写真集め：1回で3機種・25作品ずつに</b>（本人「要領よく」）。出品が増えない一番の理由は<b>写真が見つかっていない作品</b>（805作品のうち453件）で、母数の多さではありません。集める量を増やしました。',
       '\u{1F4BE} <b>出品一覧：価格・在庫は書き換えただけで保存されます</b>（本人「ここで書き換えただけで、即時反映されるようにしてほしい」）。欄から離れた時（またはEnter）にその行の💾保存が自動で走ります。打つたびではなく入力が終わった時に1回だけなので、Shopeeを余計に叩きません。💾保存を手で押しても今までどおり動きます。',
       '\u{1F50B} <b>GAS枠の節約：🤖が app_kv を十数回に分けて読んでいたのをまとめて1回に</b>（本人「枠の減り早すぎる」）。実測で app_kv の読みが1日1,018回＝枠の1位でした。1回の実行で必要な11個の控えをまとめて読みます。',
@@ -30477,7 +30478,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     for (const cc of Object.keys(byCc)) {
       const cur = await sbGet('app_kv', 'select=v&k=eq.model_changes_' + cc).catch(() => null); if (cur === null) continue;   /* 読めなかった時は書かない（空で上書きしない） */
       const old = (((cur || [])[0] || {}).v || {}).m || {}; const first = !Object.keys(old).length; const nx = {}; let ch = 0;
-      Object.keys(byCc[cc]).forEach(k => { const h = byCc[cc][k], o = old[k]; if (!o) { nx[k] = [h, first ? '' : today]; ch++; } else if (o[0] !== h) { nx[k] = [h, today]; ch++; } else nx[k] = o; });
+      /* ★2026-09-20 「価格変更の before→after を残す」（Obsidian の宿題・本人「₱1,560 → ₱1,980 も欲しい」）＝3つ目に【前の値】を持つ */
+      Object.keys(byCc[cc]).forEach(k => { const h = byCc[cc][k], o = old[k]; if (!o) { nx[k] = [h, first ? '' : today]; ch++; } else if (o[0] !== h) { nx[k] = [h, today, o[0]]; ch++; } else nx[k] = o; });
       if (ch || Object.keys(old).length !== Object.keys(nx).length) await sbUpsert('app_kv', [{ k: 'model_changes_' + cc, v: { at: new Date().toISOString(), m: nx }, updated_at: new Date().toISOString() }]);
     }
     lst._mDates = null; lst._mDatesReq = 0;
@@ -34476,7 +34478,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const lg = md.log[String(m.id)], cg = md.chg[r.item_id + '#' + m.id]; const sh = d => d ? (Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + (d.slice(0, 4) !== String(new Date().getFullYear()) ? ' (' + d.slice(0, 4) + ')' : '')) : '';
               const a = lg ? (lg.seeded ? '<span class="smd-dim" title="出品ログを取り始める前からあった明細です（正確な日は分かりません）。カタログの作成日以降です">出品 記録前</span>' : '<span title="この明細が出品された日（出品ログ）"><b>出品</b> ' + sh(lg.ymd) + '</span>') : '<span class="smd-dim" title="まだ出品ログに入っていません（1日1回の取り込み後に出ます）">出品 —</span>';
               const b = cg ? (cg[1] ? '<span title="名前・価格・在庫・画像のどれかが最後に変わった日（ポータルが自前で記録・2026-09-20 から）" style="color:#1565c0"><b>更新</b> ' + sh(cg[1]) + '</span>' : '<span class="smd-dim" title="2026-09-20 に記録を始めてから、まだ変わっていません">更新 なし</span>') : '<span class="smd-dim" title="更新日の記録は 2026-09-20 から。次の取り込みの後に出ます">更新 —</span>';
-              return a + '<br>' + b; })())
+              /* 前の値（名前|価格|在庫|画像）と今を比べて、変わった所だけ before→after で出す */
+              let d2 = '';
+              if (cg && cg[2]) { const pv = String(cg[2]).split('|'), nw = String(cg[0]).split('|'); const lbl = ['名', '価', '庫', '画']; const ch2 = [];
+                for (let i2 = 0; i2 < 4; i2++) { if (pv[i2] !== nw[i2]) ch2.push(i2 === 3 ? '画像' : (lbl[i2] + ' ' + (pv[i2] || '—') + '→' + (nw[i2] || '—'))); }
+                if (ch2.length) d2 = '<div class="smd-dim" style="font-size:9.5px" title="前回の記録からの変化">' + esc(ch2.join(' / ').slice(0, 40)) + '</div>'; }
+              return a + '<br>' + b + d2; })())
           + cell(6, 'text-align:right;white-space:nowrap', canEdit
               ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:70px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? fmtJpy(Math.round(m.price * rg.rateJpy)) : ''}</div>`
               : `<b>${cur}${lfmt(m.price)}</b>`)
