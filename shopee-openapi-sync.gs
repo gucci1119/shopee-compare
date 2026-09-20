@@ -4993,8 +4993,11 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   /* 本人「何でアドバンスで箱説明書付きのを出してんの？」＝古い基準で出た分。カセットの機種（箱NG）と DS（ソフトだけNG）を先に見直す・1回8件まで */
   todo.sort(function (p, q) { var w = function (x) { var h = String(x.hw || ''); return (BA_CART_ONLY_HW[h] || BA_CASE_REQUIRED_HW[h]) ? 0 : 1; }; return w(p) - w(q); });
   var n = 0, tStart = Date.now(), changed = false;
-  for (var i = 0; i < todo.length && n < 8; i++) {
-    if (Date.now() - tStart > 90000 || Date.now() - t0 > 170000) break;
+  /* ★2026-09-20 本人「これはなんかずっと終わってないけど」＝1回8件だと153件で9時間かかる。1回の上限を設定で変えられるように（既定40）。
+     枠が少ない時は上の `ufTotal_() > UF_STOP - 2500` で丸ごと見送るので、増やしても枠は守られる */
+  var rpMax = Math.max(1, Math.min(80, Number(cfg && cfg.rephotoPerTick) || 40));
+  for (var i = 0; i < todo.length && n < rpMax; i++) {
+    if (Date.now() - tStart > 150000 || Date.now() - t0 > 200000) break;
     var a = todo[i], id = a.item_id + '#' + a.en, hw = String(a.hw || '');
     var ex = { key: a.key, ja: a.ja || '', en: a.en || '', hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
     var curUrl = /^https?:/.test(String(a.img)) ? String(a.img) : 'https://down-cvs-sg.img.susercontent.com/' + a.img;
