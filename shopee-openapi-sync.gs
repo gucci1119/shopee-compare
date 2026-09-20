@@ -87,7 +87,36 @@ function ufBump_(n, tag) {
 }
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
-function ufTotal_() { return ufState_().n + _ufRun; }     // 今日これまで＋この実行分
+/* ★2026-09-21 🔴 安全弁が【自分のプロジェクトの分しか数えていなかった】。
+   urlfetch の2万回/日は **Googleアカウント単位**で、取込GAS（メルカリ取込・チャット・写真の索引…）と共有している。
+   実測 2026-09-20：こちらの数え 4,909 に対して **実際は2万に到達**し、在庫更新が「1日にサービス urlfetch を実行した回数が多すぎます」で失敗した。
+   ＝「残り75%」と出しながら発送手配も止まる状態。もう一方の分（app_kv.uf_ext_*）を足して数える。
+   読みは15分キャッシュ（1日あたり最大96回）。読めない時は【前の値を持ち越す】＝0にしない（0は「まだ余っている」という一番危ない側の嘘）。 */
+var _ufExt = null;
+function ufExt_() {
+  if (_ufExt !== null) return _ufExt;
+  _ufExt = 0;   /* 再入よけ：この読みの最中に ufTotal_ が呼ばれても 0 で答える（無限ループにしない） */
+  var d = ufToday_(), cached = null;
+  try { cached = JSON.parse(P_().getProperty('ufExtCache') || 'null'); } catch (e) { cached = null; }
+  if (cached && cached.d === d && (Date.now() - (Number(cached.at) || 0) < 15 * 60 * 1000)) { _ufExt = Number(cached.n) || 0; return _ufExt; }
+  try {
+    var rows = sbSelect_('app_kv', 'select=k,v&k=like.uf_ext_*');
+    var n = 0, stale = [];
+    (rows || []).forEach(function (r) {
+      var v = r && r.v; if (!v) return;
+      if (v.d === d) n += Number(v.n) || 0; else stale.push(String(r.k) + '(' + String(v.d) + ')');
+    });
+    _ufExt = n;
+    P_().setProperty('ufExtCache', JSON.stringify({ d: d, n: n, at: Date.now(), stale: stale.join(',') }));
+    if (stale.length) Logger.log('⚠ 他プロジェクトの接続枠が今日の分になっていません（数えられていない）: ' + stale.join(', '));
+  } catch (e) {
+    /* 読めなかった＝分からない。前に読めた値を持ち越す（日が同じ時だけ） */
+    if (cached && cached.d === d) _ufExt = Number(cached.n) || 0;
+  }
+  return _ufExt;
+}
+function ufTotal_() { return ufState_().n + _ufRun + ufExt_(); }     // 今日これまで＋この実行分＋他プロジェクトの分
+function ufSelf_() { return ufState_().n + _ufRun; }                 // このプロジェクトだけ（内訳の表示用）
 function ufPersist_() {
   if (!_ufRun && !Object.keys(_ufTag).length) return;
   var o = ufState_(); o.n += _ufRun; _ufRun = 0;
@@ -4939,6 +4968,12 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
   var mv = baManualOf_(imgUrl, expect); if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
+  /* ★2026-09-21 📚 本人が「📚学んだこと」で足した追加の指示を判定に足す（app_kv.photo_learn.rules.extra）。
+     本人「見直したやつをしっかり学習して、どんどん賢くなっていってほしい」「また基準をちょっと精緻化していく」
+     ＝ポータルの 🔍 と 🤖 が【同じ基準】で見るようにする。読めない時は足さないだけ（判定は止めない）。 */
+  var _extraRule = '';
+  try { var _lr = ((baKv_('photo_learn') || {}).rules || {}).extra || [];
+    if (_lr.length) _extraRule = ' 次の点も必ず守ってください：' + _lr.map(function (x) { return String(x && x.text || ''); }).filter(String).join(' '); } catch (e) {}
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v11|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
@@ -4946,7 +4981,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'ファミコン・スーパーファミコンのカセットは、正規品なら ラベルが印刷で鮮明・端がまっすぐ・任天堂やメーカーの表記や型番がある。次のどれかが見えたら repro=true：ラベルが紙を貼っただけ／手書き／色がにじんでいる・カセットの色や形が見慣れない（透明・蛍光色）・英語だけのラベルなのに日本のゲーム・1本に何本ものゲーム（\u300c100 in 1\u300d等）。判断できなければ repro=false。' + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。JSONだけで答えて（この順番で）: {"scene":"...","edges":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|other","repro":true|false' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' } ] }] };
+    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'ファミコン・スーパーファミコンのカセットは、正規品なら ラベルが印刷で鮮明・端がまっすぐ・任天堂やメーカーの表記や型番がある。次のどれかが見えたら repro=true：ラベルが紙を貼っただけ／手書き／色がにじんでいる・カセットの色や形が見慣れない（透明・蛍光色）・英語だけのラベルなのに日本のゲーム・1本に何本ものゲーム（\u300c100 in 1\u300d等）。判断できなければ repro=false。' + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。JSONだけで答えて（この順番で）: {"scene":"...","edges":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|other","repro":true|false' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' + _extraRule } ] }] };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -5172,7 +5207,7 @@ function boshuAutoTick(manual) {
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
-  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'sku_plan_state', 'product_ids']);
+  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids']);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
