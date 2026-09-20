@@ -5956,6 +5956,18 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
     res.shop_id = tgt.shop_id;
+    /* ★2026-09-21 本人「テストとかで出てたやつがあるけど、あれは消し忘れですかね？」
+       実測：全6,483出品に **test 明細が12件**（11件は位置0・在庫1＝**買えてしまう**）。
+       出どころはここ＝複製したカタログの仮の明細。**res.added が0だと下の削除まで来ない**ので残る
+       （VN の PS2②・DS③ は明細がそれ1つだけ・写真なしだった）。
+       → 1件も入らなかった時は、せめて**在庫を0にして売れないようにする**。消さない（位置が動く）。 */
+    if (newItem && !res.added) {
+      try {
+        var tms = getModels_(tgt.shop_id, tgt.item_id) || [];
+        var tm = tms.filter(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String(m.model_name || m.option || m.n || '')); })[0];
+        if (tm && (Number(tm.stock) || 0) > 0) { updateStock_(tgt.shop_id, tgt.item_id, tm.model_id, 0); baLog_(st, cc + '：1件も入らなかったので test の在庫を0にしました（' + tgt.item_id + '）'); }
+      } catch (e) { baLog_(st, cc + '：test の在庫を0にできませんでした ' + String(e).slice(0, 70)); }
+    }
     // 複製したカタログ：test を消し、設定に応じて公開
     if (newItem && res.added) {
       try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); tgt.models = tgt.models.filter(function (m) { return m.n !== 'test'; }); } catch (e) { baLog_(st, cc + '：test の削除に失敗 ' + String(e).slice(0, 80)); }
