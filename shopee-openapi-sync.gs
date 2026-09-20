@@ -115,18 +115,82 @@ function ufExt_() {
   }
   return _ufExt;
 }
-function ufTotal_() { return ufState_().n + _ufRun + ufExt_(); }     // 今日これまで＋この実行分＋他プロジェクトの分
-function ufSelf_() { return ufState_().n + _ufRun; }                 // このプロジェクトだけ（内訳の表示用）
+function ufTotal_() { return ufState_().n + ufSpillTotal_() + _ufRun + ufExt_(); }     // 今日これまで＋控え＋この実行分＋他プロジェクトの分
+function ufSelf_() { return ufState_().n + ufSpillTotal_() + _ufRun; }   // このプロジェクトだけ（控えも足す）
+/* ★2026-09-21 🔴 ここに【原理的な穴】があった。本人「なぜあの枠のブロッカーが働いていないんですか？もう何回もこれ言っている」
+   ufPersist_ は「読んで→足して→書く」を**鍵なし**でやっていた。/exec（ポータルからの呼び出し）とトリガーは同時に走るので、
+   書き込みが互いを上書きして**数えた分が黙って消える**。＝数え漏れを1つ塞いでも、次の数え漏れでまた同じ事故が起きる。
+   実測 2026-09-20：こちらの数え 4,909 に対して**実際は2万に到達**（ポータルの表示は「残り75%」）。
+   → ①鍵を取って書く。取れなければ**捨てずに控え（ufSpill_）へ逃がす** ②読む時は控えも足す。 */
+function ufSpillTotal_() {
+  /* ★Codex指摘（2026-09-21・P2）：**控えの合計を覚えておいてはいけない**。
+     別の実行が控えを ufCount に取り込んで消した後も古い合計を足し続け、二重に数えて早く止まる。
+     逆に、覚えた後に増えた控えは見えない。Properties の読みは urlfetch を使わないので毎回読む。 */
+  var n = 0;
+  try {
+    var ps = P_().getProperties(), d = ufToday_();
+    Object.keys(ps).forEach(function (k) {
+      if (k.indexOf('ufSpill_') !== 0) return;
+      try { var o = JSON.parse(ps[k]); if (o && o.d === d) n += Number(o.n) || 0; } catch (e) {}
+    });
+  } catch (e) {}
+  return n;
+}
 function ufPersist_() {
   if (!_ufRun && !Object.keys(_ufTag).length) return;
-  var o = ufState_(); o.n += _ufRun; _ufRun = 0;
-  // 内訳も同じ入れ物に貯める（日が変われば ufState_ が作り直すので自動でリセットされる）
-  o.tag = o.tag || {};
-  Object.keys(_ufTag).forEach(function (k) { o.tag[k] = (o.tag[k] || 0) + _ufTag[k]; });
-  _ufTag = {};
-  try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {}
+  var lock = null, got = false;
+  try { lock = LockService.getScriptLock(); got = lock.tryLock(2000); } catch (e) { got = false; }
+  if (!got) {
+    /* 鍵が取れない＝他の実行が書いている。**捨てない**（捨てるとブロッカーが効かなくなる）。控えに逃がして次の実行に足してもらう */
+    try { P_().setProperty('ufSpill_' + Utilities.getUuid().slice(0, 8), JSON.stringify({ d: ufToday_(), n: _ufRun, tag: _ufTag, at: new Date().toISOString() })); _ufRun = 0; _ufTag = {}; _ufSpill = null; } catch (e) {}
+    return;
+  }
+  try {
+    var o = ufState_(); o.n += _ufRun; _ufRun = 0;
+    // 内訳も同じ入れ物に貯める（日が変われば ufState_ が作り直すので自動でリセットされる）
+    o.tag = o.tag || {};
+    Object.keys(_ufTag).forEach(function (k) { o.tag[k] = (o.tag[k] || 0) + _ufTag[k]; });
+    _ufTag = {};
+    /* 他の実行が逃がした控えをここでまとめて取り込む。
+       ★Codex指摘（2026-09-21・P2）：**先に消してから本体を書くと、その一瞬だけ「無かったこと」になる**。
+       読み手（bgAllowed_）がそこを見ると、使った分が消えて見えて予約枠を食い破る。
+       → ①本体を書く ②そのあとで控えを消す。この順なら、読み手には最悪**二重に見える**（＝多めに見積もる）だけで、
+       少なく見えることは無い。安全弁は「多め」に間違える側へ倒す。 */
+    var _took = [];
+    try {
+      var ps = P_().getProperties(), d = ufToday_();
+      Object.keys(ps).forEach(function (k) {
+        if (k.indexOf('ufSpill_') !== 0) return;
+        try { var sp = JSON.parse(ps[k]); if (sp && sp.d === d) { o.n += Number(sp.n) || 0; Object.keys(sp.tag || {}).forEach(function (t) { o.tag[t] = (o.tag[t] || 0) + sp.tag[t]; }); } } catch (e2) {}
+        _took.push(k);
+      });
+    } catch (e) {}
+    try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {}
+    _took.forEach(function (k) { try { P_().deleteProperty(k); } catch (e2) {} });
+  } catch (e) {} finally { try { lock.releaseLock(); } catch (e) {} }
 }
-function bgAllowed_() { return ufTotal_() < UF_STOP; }     // 背景同期を続けてよいか（手動用の予約枠を侵さない）
+/* ★実測で止める（推定値に頼らない）。Google に実際に断られたら、その事実を残して**その日の背景処理を全部やめる**。
+   数え方の間違いが何個あっても、これは必ず効く。翌日（太平洋時間の日替わり）に自動で解ける。 */
+function ufIsBlocked_() {
+  try { var s = P_().getProperty('ufBlocked'); if (!s) return false; var o = JSON.parse(s); return !!(o && o.d === ufToday_()); } catch (e) { return false; }
+}
+function ufBlockedInfo_() { try { var s = P_().getProperty('ufBlocked'); var o = s ? JSON.parse(s) : null; return (o && o.d === ufToday_()) ? o : null; } catch (e) { return null; } }
+function ufNoteErr_(e) {
+  var m = String((e && e.message) || e || '');
+  /* ★Codex指摘（2026-09-21・P1）：Google には2種類ある。
+       ・1日の枠切れ … 「Service invoked too many times for one day」「1 日にサービス〜回数が多すぎます」→ その日はもう無理
+       ・短時間の連打 … 「too many times in a short time」「短時間に〜」→ 少し待てば直る
+     分けずに止めると、一瞬の連打で**その日の背景処理を全部殺す**。日単位の方だけ記録する。 */
+  var isQuota = /too many times|回数が多すぎます/i.test(m);
+  var isDaily = /for one day/i.test(m) || /1\s*日に/.test(m);
+  if (!(isQuota && isDaily)) return;
+  try { P_().setProperty('ufBlocked', JSON.stringify({ d: ufToday_(), at: new Date().toISOString(), msg: m.slice(0, 140) })); } catch (e2) {}
+  Logger.log('⛔ urlfetch を断られました＝今日の背景処理は止めます: ' + m.slice(0, 120));
+}
+function bgAllowed_() {
+  if (ufIsBlocked_()) return false;   // ★実際に断られた日は、数がいくつに見えていても背景処理をしない
+  return ufTotal_() < UF_STOP;
+}
 function ufStatus() { var o = ufState_(); Logger.log('urlfetch 今日(' + o.d + ' PT基準): ' + o.n + '回 / 背景停止ライン ' + UF_STOP + '（手動予約 ' + (20000 - UF_STOP) + '／無料枠20000）'); return o; } // エディタから実行して当日消費を確認
 function toHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
 function hmac_(base) { return toHex_(Utilities.computeHmacSha256Signature(base, cfg_('PARTNER_KEY'))); }
@@ -878,7 +942,9 @@ function doGetInner_(e) {
         // 何が食っているかの内訳（多い順・上位12）。合計しか見えないと原因が永久に分からない。
         var tg = st.tag || {}, top = Object.keys(tg).map(function (k) { return { k: k, n: tg[k] }; })
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 12);
-        ufo = { ok: true, day: st.d, used: st.n, stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - st.n), bgAllowed: st.n < UF_STOP, top: top, aiSpend: aiSpendLoad_() };   // 💴 Claude 利用料も同乗（2026-09-16）
+        var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
+        /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
+        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - _tot), bgAllowed: !_blk && _tot < UF_STOP, top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -1149,7 +1215,7 @@ function callShop_(shopId, path, query, method, body) {
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
     try { ufBump_(1, path); txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
-    catch (e) { lastErr = e; if (/too many times|quota|rate/i.test(String(e))) break; Utilities.sleep(700 * (a + 1)); } // クォータ枯渇は即諦める（無駄打ち防止）
+    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; Utilities.sleep(700 * (a + 1)); } // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
@@ -4172,7 +4238,7 @@ function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); retu
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_(1, 'Supabase読み(' + table + ')');
-  var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
+  var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } }); } catch (e) { ufNoteErr_(e); throw e; }
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   return JSON.parse(res.getContentText());
 }

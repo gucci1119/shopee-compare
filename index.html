@@ -1999,8 +1999,18 @@
     // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
     //   ここで足しておかないと、そちらだけ残りが多く見えてしまう（Codexの指摘・2026-09-04）。
     try { if (r.aiSpend && r.aiSpend.days) { localStorage.setItem('smdAiSpendGas', JSON.stringify(r.aiSpend)); aiCostDraw(); } } catch (_) {}   // 💴 GAS側の写真判定の利用料（2026-09-16）
-    r.ext = ext; r.extKnown = extKnown; r.usedRaw = Number(r.used) || 0;
-    r.used = (Number(r.used) || 0) + ext;
+    /* ★Codex指摘（2026-09-21・P1）：GAS が usedExt を返すようになった版では、**GAS側で既に足してある**。
+       ここでもう一度足すと二重になり、写真集めのブレーキが早く掛かる／残量が実際より少なく見える。
+       古い版のGAS（usedExt を返さない）が入っている間だけ、これまで通りここで足す。 */
+    const gasHasExt = (r.usedExt !== undefined && r.usedExt !== null);
+    const extGas = gasHasExt ? (Number(r.usedExt) || 0) : 0;
+    /* ★Codex指摘（2026-09-21・P2）：GAS側の「もう一方のGASの分」は15分キャッシュなので**古いことがある**。
+       ここで読んだ Supabase の値の方が新しい。どちらかを捨てるのではなく**大きい方を採る**＝少なく見積もらない。 */
+    const extUse = extKnown ? Math.max(ext, extGas) : extGas;
+    r.usedRaw = gasHasExt ? (Number(r.usedSelf) || 0) : (Number(r.used) || 0);
+    r.ext = extUse;
+    r.extKnown = extKnown || gasHasExt;
+    r.used = r.usedRaw + extUse;
     window.__ufLast = r; window.__ufLastAt = Date.now();
     const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
@@ -2008,13 +2018,19 @@
     // 15,000を超える＝背景同期が止まり、残りは手動操作の予約枠。20,000で全部止まる。
     // ★実際に断られた直後（30分以内）は、カウンタが何と言おうと⛔にする。
     const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
-    const blocked = blockedAgo < 30 * 60 * 1000;
+    /* ★2026-09-21 本人「でも枠は残り75%出てますよ」「なぜあの枠のブロッカーが働いていないんですか？」
+       数えた回数は当てにならない（同時に走る実行どうしで上書きし合って消える）。
+       GASが実際にGoogleに断られたら r.blocked が立つので、**数がいくつに見えても使い切り扱い**にする。 */
+    const gasBlocked = !!(r && r.blocked);
+    const blocked = gasBlocked || blockedAgo < 30 * 60 * 1000;
     const col = (blocked || used >= cap) ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
     const mark = (blocked || used >= cap) ? '⛔' : (used >= stop ? '⚠' : '');
     el.style.color = col; el.style.fontWeight = used >= stop ? '700' : '400';
     el.style.borderColor = (blocked || used >= cap) ? '#f0c4bd' : (used >= stop ? '#f3d7a8' : '#e3e6ea');
     el.style.background = (blocked || used >= cap) ? '#fdecea' : (used >= stop ? '#fffaf0' : '#fafbfc');
-    el.textContent = blocked
+    el.textContent = gasBlocked
+      ? '⛔ Shopee枠 使い切り（' + ufResetJst() + 'まで）'
+      : blocked
       ? '⛔ Shopee枠 断られ中（' + Math.max(1, Math.round(blockedAgo / 60000)) + '分前）'
       // ★『残り15,710 / 20,000』は【15,710使った】に読める（本人指摘 2026-08-23「XX / XX使っているように見える」）。
       //   分数に見える書き方をやめ、残りの数だけを大きく出す。合計と内訳は吹き出しに置く。
@@ -2023,14 +2039,16 @@
     const topTxt = (r.top || []).length
       ? '\n\n■ 今日の内訳（多い順）\n' + r.top.map(t => '  ' + String(t.k).replace('/api/v2/', '') + '  ' + Number(t.n).toLocaleString() + '回').join('\n')
       : '';
+    const extN = Number(r.ext) || 0, extOk = !!r.extKnown;
     el.title = 'GASからShopeeを叩ける回数は1日20,000回。今日 ' + used.toLocaleString() + '回 使いました。\n'
-      + (ext ? '　（うち ' + ext.toLocaleString() + '回は仕入れメールの取込など、Shopee以外のGASの分です。枠は同じGoogleアカウントで共有です）\n' : '')
-      + (extKnown ? '' : '　⚠️ Shopee以外のGASの消費が読めていません。実際はこれより使っています。\n')
+      + (extN ? '　（うち ' + extN.toLocaleString() + '回は仕入れメールの取込など、Shopee以外のGASの分です。枠は同じGoogleアカウントで共有です）\n' : '')
+      + (extOk ? '' : '　⚠️ Shopee以外のGASの消費が読めていません。実際はこれより使っています。\n')
       + '・' + stop.toLocaleString() + '回を超えると背景の自動同期が止まり、残りは手動操作用に取ってあります\n'
       + '・使い切ると【出品・明細の追加や削除・画像】が止まります\n'
       + '・リセットは毎日 ' + ufResetJst() + '（日本時間）'
       + (blocked ? '\n\n⛔ たったいまShopee側に断られました（この数字より実態が悪いことがあります）。\n' + ufResetJst() + 'のリセットまで待つか、Tampermonkeyが入ったPCならブラウザ経由で書けます。' : '')
       + (used >= cap ? '\n\n⛔ いまは使い切っています。' + ufResetJst() + 'まで待ってください。' : '')
+      + (gasBlocked ? '\n\n⛔ 【実測】Googleに「1日のurlfetchが多すぎます」と断られました' + (r.blockedAt ? '（' + new Date(r.blockedAt).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + '）' : '') + '。\n数えた回数（' + used.toLocaleString() + '回）より実態が多いということです＝この数字は当てになりません。\n' + ufResetJst() + 'のリセットまで、背景の自動処理は全部止めています。' : '')
       + topTxt;
   }
   // ★明細（バリエ）の削除は【同じ商品に同時に2つ流さない】（2026-09-10 Codex全体レビュー）。
@@ -3488,7 +3506,11 @@
     const used = Number(r.used) || 0, cap = Number(r.cap) || 20000, stop = Number(r.stopLine) || 15000;
     const left = Math.max(0, cap - used);
     const blockedAgo = window.__ufBlockedAt ? (Date.now() - window.__ufBlockedAt) : Infinity;
-    const blocked = blockedAgo < 30 * 60 * 1000;
+    /* ★2026-09-21 本人「でも枠は残り75%出てますよ」「なぜあの枠のブロッカーが働いていないんですか？」
+       数えた回数は当てにならない（同時に走る実行どうしで上書きし合って消える）。
+       GASが実際にGoogleに断られたら r.blocked が立つので、**数がいくつに見えても使い切り扱い**にする。 */
+    const gasBlocked = !!(r && r.blocked);
+    const blocked = gasBlocked || blockedAgo < 30 * 60 * 1000;
     const col = (blocked || used >= cap) ? '#b3261e' : (used >= stop ? '#e8770a' : '#8a8f98');
     const mark = (blocked || used >= cap) ? '⛔' : (used >= stop ? '⚠' : '');
     const tip = '残りの接続枠。使い切ると画像・明細の追加が止まります（' + used.toLocaleString() + ' / ' + cap.toLocaleString() + ' 使用）';
@@ -6660,6 +6682,27 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
+    // 🚦 接続枠と🤖の停止（2026-09-21・Codex指摘P2で追加。失敗の状態が日本語のままだと外注さんが読めない）
+    [/^⛔ Shopee枠 使い切り（(.*)まで）$/, '⛔ Shopee quota used up (until $1)'],
+    [/^⛔ Shopee枠 断られ中（(\d+)分前）$/, '⛔ Shopee quota refused ($1 min ago)'],
+    [/^🔴 (\d+)時間(\d+)分 動いていません$/, '🔴 Not running for $1h $2m'],
+    [/^🔴 (\d+)分 動いていません$/, '🔴 Not running for $1 min'],
+    [/^（本来は30分ごと・最後は (.*)）$/, ' (should run every 30 min · last run $1)'],
+    // 📚 写真の学習（2026-09-21）
+    [/^📚 学んだこと・基準を直す$/, '📚 What it learned / edit the rules'],
+    [/^📚 学んだこと$/, '📚 What it learned'],
+    [/^覚えている判断 (\d+)件（記録ぜんぶで (\d+)件）$/, '$1 remembered decisions (of $2 records)'],
+    [/^直した理由の内訳$/, 'Why photos were replaced'],
+    [/^いまAIに渡している追加の指示（(\d+)件）$/, 'Extra rules sent to the AI ($1)'],
+    [/^✅ 基準に足す$/, '✅ Add to the rules'],
+    [/^✕ 基準から外す$/, '✕ Remove from the rules'],
+    [/^この写真のどこが基準外でしたか？$/, 'What was wrong with this photo?'],
+    [/^理由は選ばない$/, 'Skip'],
+    [/^🗑 この明細を消す$/, '🗑 Delete this variation'],
+    [/^📁 PCのファイルを選ぶ$/, '📁 Choose a file'],
+    [/^この URL にする$/, 'Use this URL'],
+    [/^いまの写真$/, 'Current photo'],
+    [/^🤖が集めた候補（押すとその写真に差し替わります）$/, 'Candidates found by 🤖 (click to replace)'],
     // 🗂 母数「出している」の実体（2026-09-11）
     [/^出している (\d+) ▸$/, 'Listed $1 ▸'],
     [/^↔ 出しているカタログ (\d+)件$/, '↔ Listed catalogs: $1'],
@@ -17931,6 +17974,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F6A6} <b>接続枠の「止める仕組み」を作り直しました</b>（本人「なぜあの枠のブロッカーが働いていないんですか？もう何回もこれ言っている」）。<b>原因は構造でした</b>：止める判断が「Googleの実際の回数」ではなく<b>私たちが数えた推定値</b>を見ていたので、数え漏れが1つあるたびに素通りしていました（過去の枯渇も全部これの変種です）。今回さらに<b>数えた分が消える仕組み上の穴</b>も見つかりました＝回数を貯める処理が<b>鍵なしで「読んで→足して→書く」</b>をしており、ポータルからの呼び出しとトリガーが同時に走ると<b>書き込みが上書きし合って回数が黙って消えます</b>。「残り75%」と出ていたのに実際は使い切っていたのはこれです。<br>→ ①<b>実際にGoogleに断られたら、その事実を記録して当日の自動処理を全部止めます</b>（数がいくつに見えても止まる。翌日のリセットで自動で解けます）②回数は<b>鍵を取って</b>書き、取れない時も<b>捨てずに控えへ逃がします</b> ③<b>もう一方のGAS（仕入れメール取込など）の分を合算</b>します ④画面も<b>⛔使い切り</b>と出し、「数えた回数より実態が多い」ことをそのまま書きます。',
+      '\u{23F0} <b>🤖が止まっている時に「次は◯◯ごろ」と出し続けるのをやめました</b>（本人「もう9月20日の21時1分って、もう過ぎてるんですけど」）。あの時刻は<b>最後に動いた時刻＋30分</b>の見込みなので、止まると<b>過去の時刻を出したまま動いているように見えます</b>。→ 予定を過ぎたら <b>🔴 ◯時間◯分 動いていません</b> と赤で出します。',
       '\u{1F6AB} <b>ポケモンカードやグッズの写真が選ばれないようにしました</b>（本人「ポケモンカードとかが画像で選ばれてるけど、ちょっと危ういんじゃない？」「ゲームでも何でもないやんこれ」）。実例：<b>Pokémon LEGENDS アルセウス</b> に<b>アルセウスVのカード</b>（早期購入特典）、<b>スプラトゥーン3</b> に<b>キャラマグネッツ</b>、<b>スカーレット</b> に<b>カードなし台紙のみ</b>、<b>Switch Sports</b> に<b>GO VACATION の空容器</b>。<br>→ ①<b>名前で弾く語</b>に足しました（早期購入特典・プロモ・トレカ・ポケモンカード・台紙・空容器・空ケース・マグネット・パスケース・ぬいぐるみ・アクリルスタンド・缶バッジ・クリアファイル・マスコット・グッズ・食玩・雑貨・タオル ほか）②<b>AIの基準</b>にも「写っているのがカード・グッズ・台紙・空ケースだけなら不合格（kind=goods）」を足しました。<b>GASとポータルの両方</b>に入れています。',
       '\u{1F50D} <b>「シール」で【ポケットモンスター シールド】が消えていたのを直しました</b>。除外語の<b>部分一致</b>で、シールド の写真がまとめて集められなくなっていました（2026-09-04 に同じ型を記録していたのに、この一覧は直っていませんでした）。<b>シールの後ろに「ド」が来る時は弾かない</b>ようにしました。',
       '\u{1F3AE} <b>機種タブに同じ機種がいくつも並んでいたのを直しました</b>（本人「なぜ同じのがいくつもあるの？」）。設定に入っていた機種の一覧が <b>39個（中身は17種）</b>になっていて、Nintendo Switch など11機種が<b>3つずつ</b>ありました。画面のチェックを読んで書き戻す作りなので、<b>一度重複すると保存のたびに増え続けます</b>。→ 読む時と保存する時の両方で1つにまとめ、いまの設定も <b>39→17</b> に直しました。',
@@ -28485,12 +28530,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // ★選択中のタブをはっきり（本人 2026-09-18「今どれを選択中かわからない」）：選択中＝青の塗り＋白文字＋下線、他＝白地
     const tabBtn = (k, label, n) => `<button class="smd-btn ba-tab" data-tab="${k}" aria-pressed="${tab === k}" style="font-size:12px;padding:5px 12px;${tab === k ? 'background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;box-shadow:0 2px 0 #0d47a1' : 'background:#fff;color:#444'}">${tab === k ? '● ' : ''}${label}${n != null ? ` <span style="opacity:.85;font-weight:400">${num(n)}</span>` : ''}</button>`;
     const fmtS = v => v ? new Date(v).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
-    const s2 = _baSt || {}; const nextAt = (cfg.on && s2.lastAt) ? fmtS(new Date(s2.lastAt).getTime() + 30 * 60000) : '';
+    /* ★2026-09-21 本人「もう9月20日の21時1分って、もう過ぎてるんですけど」
+       「次は◯◯ごろ」は【最後に動いた時刻＋30分】の見込みなので、**止まっていると過去の時刻を出し続ける**（動いているように見えてしまう）。
+       → 予定を過ぎていたら、見込みではなく「◯時間◯分 動いていません」を赤で出す。 */
+    const s2 = _baSt || {};
+    const nextMs = (cfg.on && s2.lastAt) ? new Date(s2.lastAt).getTime() + 30 * 60000 : 0;
+    const overdueMin = nextMs ? Math.floor((Date.now() - nextMs) / 60000) : 0;
+    const baStale = overdueMin > 5;   /* 5分の余裕（実行の揺らぎ） */
+    const baStaleTxt = baStale ? (overdueMin >= 60 ? Math.floor(overdueMin / 60) + '時間' + (overdueMin % 60) + '分' : overdueMin + '分') : '';
+    const nextAt = (nextMs && !baStale) ? fmtS(nextMs) : '';
     box.innerHTML = `<style id="ba-css">.ba-step{background:#fff;border:1px solid #e3ebf6;border-radius:10px;padding:10px 14px;margin:8px 0}.ba-step-h{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;margin-bottom:6px}.ba-num{display:inline-flex;width:22px;height:22px;border-radius:50%;background:#1565c0;color:#fff;font-size:12px;align-items:center;justify-content:center}.ba-field{display:flex;flex-direction:column;gap:2px;font-size:11px;color:#555}.ba-field input[type=number]{width:74px;font-size:12px;padding:3px 6px;border:1px solid #cfe0f7;border-radius:6px}.ba-on{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-weight:700;cursor:pointer;border:2px solid ${cfg.on ? '#1b7f3b' : '#bbb'};background:${cfg.on ? '#e8f5e9' : '#f3f3f3'};color:${cfg.on ? '#1b7f3b' : '#666'}}</style>
     <div class="tool-card" style="max-width:none;margin:0 0 10px;border:1px solid #cfe0f7;background:#f7faff">
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <b style="font-size:15px">🤖 空白を自動で出す</b>
-        <label class="ba-on"><input type="checkbox" id="ba-on"${cfg.on ? ' checked' : ''} style="width:16px;height:16px"> ${cfg.on ? '🟢 動いています' + (nextAt ? '（次は ' + esc(nextAt) + ' ごろ）' : '') : '⚪ 止まっています — ONにすると30分ごとに動く'}</label>
+        <label class="ba-on"><input type="checkbox" id="ba-on"${cfg.on ? ' checked' : ''} style="width:16px;height:16px"> ${cfg.on ? (baStale ? '<span style="color:#b3261e;font-weight:700">🔴 ' + esc(baStaleTxt) + ' 動いていません</span>（本来は30分ごと・最後は ' + esc(fmtS(new Date(s2.lastAt).getTime())) + '）' : '🟢 動いています' + (nextAt ? '（次は ' + esc(nextAt) + ' ごろ）' : '')) : '⚪ 止まっています — ONにすると30分ごとに動く'}</label>
         <span class="smd-dim" style="font-size:11.5px">${(s2.today && s2.today.d === new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })) ? '今日 ' + num(s2.today.n) + '作品 → 明細 ' + num(s2.today.added) + '件（上限 ' + num(cfg.dailyMax) + '）' + (s2.today.judged ? '・写真AI判定 ' + num(s2.today.judged) + '回（約¥' + Math.round(Number(s2.today.judged) * 0.3) + '）' : '') + (s2.today.aiText ? '・文章AI ' + num(s2.today.aiText) + '回（約¥' + Math.round(Number(s2.today.aiText) * 0.1) + '）' : '') : '今日 0作品（上限 ' + num(cfg.dailyMax) + '）'}${s2.aiKey === false ? (cfg.requireAi !== false ? '　<b style="color:#c0392b">🔒 GASに CLAUDE_KEY が無い＝ONにしても1件も出ません（GASエディタ→⚙プロジェクトの設定→スクリプト プロパティに CLAUDE_KEY を追加）</b>' : '　<b style="color:#b26a00">⚠ GASに CLAUDE_KEY が無い＝英題・同一作品・写真のAI判定なし</b>') : ''}${s2.brake ? '　<b style="color:#c0392b">🛑 自動ブレーキ中：' + esc(String(s2.brake.why || '').slice(0, 140)) + '</b> <button class="smd-btn" id="ba-resume" style="font-size:11px;padding:1px 9px">▶ 再開</button>' : ''}${s2.lastMsg ? '　直近: ' + esc(String(s2.lastMsg).slice(0, 80)) : ''}${(s2.blockedUntil && Date.now() < s2.blockedUntil) ? '　<b style="color:#b26a00">⏸ ヤフオクの検索だけ ' + esc(fmtS(s2.blockedUntil)) + ' まで休み（メルカリの写真がある作品は続けます）</b>' : ''}</span>
         <details style="margin-left:auto"><summary class="smd-dim" style="cursor:pointer;font-size:11.5px">❓ しくみ</summary><div class="smd-dim" style="font-size:11.5px;line-height:1.7;max-width:720px;margin-top:4px">1回に数件ずつ：空白の作品を<b>メルカリ（先に集めた写真）→ヤフオク（定額だけ）</b>で探し、<b>出品者が撮った商品そのものの写真</b>を明細画像に／出品件数が少ない作品は<b>在庫0</b>／価格は<b>相場→仕入帯→各国価格表</b>（相場が無ければカタログ平均）／その国で選んだカタログ（関連シリーズのカタログがあればそちら）に足し、満杯なら複製。<b>同じ写真は2件に使わない・写真が無い作品は足さない</b>。明細で足すので<b>出品枠は消費しません</b>。</div></details>
       </div>
