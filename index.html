@@ -17931,6 +17931,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F4C8} <b>出品一覧の「蓄積中」が何なのか分かるようにしました</b>（本人「これはもう取れなくなったのか？バグ？」）。<b>バグではありません</b>：記録は <b>2026-07-30 開始</b>で52日ぶんしかないので、<b>直近90日</b>を選ぶと起点が無く全件「蓄積中」になります（実測：7日・30日は6,500件すべて出る／60日・90日は0件）。→ 1件も出せない時に<b>「記録は◯◯開始＝いま◯日ぶん。◯日以内の期間を選んでください」</b>と赤で出します。取得に失敗した時もその理由を出します（今までは黙って全件「蓄積中」でした）。',
       '\u{1F522} <b>出品ログの商品カードにJANを出しました</b>（本人「ここにJANコード情報は出ないのか？」）。JANは <b>押すとコピー</b>できます。型番が分かっていれば一緒に出ます。無い時は<b>「JAN —」</b>と出します（空欄だと「読めていない」のか「本当に無い」のか分からないため）。JAN台帳はこの画面では読まれていなかったので、<b>開いた時に1回だけ読む</b>ようにしました（読まずに引くと必ず0件になる・過去に2回やっています）。',
       '\u{1F3F7} <b>明細SKUの付け方を2つ直しました</b>（振り直しの前に下見で見つけました）。①明細名が <b>「GBA / Ruby」</b>のように<b>スラッシュ</b>で機種が書かれていると拾えず、<b>GBA_GBA_RUBY</b>（機種が二重・作品名が消える）になっていました。②カタログ名に「Series」の語が無いシリーズ（<b>Variation Pokemon Gameboy Advance …</b>）から系列名を拾えていませんでした。→ どちらも直して <b>GBA_POKEMON_RUBY</b> になります。規則に合わないSKUは1,731件あります。',
       '\u{1F4C5} <b>出品ログの数字が1日じゅう動かなかったのを直しました</b>（本人「なんでここ増えないんだよ？」）。取り込みが<b>1日1回</b>だったので、今日は<b>02:17に走った17件のまま</b>止まっていました。その時点で🤖は今日すでに<b>104作品・174明細</b>を足しています。→ <b>1時間ごと</b>に取り込むようにしました（Supabaseの読み書きだけで、Shopeeの接続枠は使いません）。いますぐ最新にしたい時は今までどおり<b>「いま反映」</b>を押してください。',
@@ -34165,6 +34166,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const statOf = (id) => (lstStats && lstStats[id]) || {};
   // 📈期間フィルタ：lst.statsPeriod(0=全期間/7/30/90日) の間の伸び。listing_stats_history のスナップショット差分をSupabase RPC(listing_stats_delta)で取得。
   let lstStatsDelta = null; // { <item_id>: {sale, views, likes} } ＝現在−N日前（historyが足りない出品はキー無し＝蓄積中）
+  let lstStatsNote = '';     // 1件も取れなかった時の理由（履歴の開始日など）。画面に出して「壊れた？」と思わせない
   // 表示・並替に使う「期間反映済み」スタッツ。全期間なら累計、期間指定なら差分（差分未取得/蓄積不足は period フラグで印）。
   const statOfP = (id) => {
     const p = (lst && lst.statsPeriod) || 0;
@@ -34190,11 +34192,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const part = await r.json(); all.push(...part); if (part.length < 1000) break;
       }
       return all;
-    })().then(rows => {
+    })().then(async rows => {
       if (gen !== loadStatsDelta._gen) return;
       const m = {}; (rows || []).forEach(r => { if (r.d_sale != null || r.d_views != null || r.d_likes != null) m[r.item_id] = { sale: r.d_sale, views: r.d_views, likes: r.d_likes }; });
-      lstStatsDelta = m; drawListingStatus();
-    }).catch(e => { if (gen !== loadStatsDelta._gen) return; lstStatsDelta = {}; drawListingStatus(); /* テーブル/RPC未作成なら空＝全件蓄積中表示 */ });
+      lstStatsDelta = m;
+      // ★2026-09-20 本人「これはもう取れなくなったのか？バグ？」：1件も取れない時に「蓄積中」としか出ず、
+      //   壊れたのか履歴が足りないのか分からなかった。**履歴の開始日と、何日ぶん貯まっているか**を出す。
+      lstStatsNote = '';
+      if (!Object.keys(m).length) {
+        try {
+          const kk = settings.sbKey || settings.sbSecret;
+          const rr = await fetch(`${SB_URL}/rest/v1/listing_stats_history?select=snap_date&order=snap_date.asc&limit=1`, { headers: { apikey: kk, Authorization: 'Bearer ' + kk } });
+          const jj = await rr.json(); const first = (jj && jj[0] && jj[0].snap_date) || '';
+          if (first) { const have = Math.floor((Date.now() - Date.parse(first)) / 86400000);
+            lstStatsNote = `この期間の数字はまだ出せません（記録は ${first} 開始＝いま ${have}日ぶん）。${have}日以内の期間を選んでください`; }
+          else lstStatsNote = 'この期間の数字はまだ出せません（記録が読めませんでした）';
+        } catch (_) { lstStatsNote = 'この期間の数字はまだ出せません'; }
+      }
+      drawListingStatus();
+    }).catch(e => { if (gen !== loadStatsDelta._gen) return; lstStatsDelta = {}; lstStatsNote = '期間の数字を取れませんでした：' + ((e && e.message) || e); drawListingStatus(); });
   }
   const condLabel = (c) => c === 'NEW' ? '🆕新品' : (c === 'USED' ? '♻️中古' : (c || ''));
   // 無在庫(在庫監視)の紐付けを cc|item_id で逆引き。{whole:全体監視, models:Set(監視中のmodel_id), srcSt:仕入元状態}
@@ -35647,7 +35663,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <button class="smd-btn b-sort ${lst.sort === 'series' ? 'on' : ''}" id="lst-series" title="「〜①」「〜②」のように連番で分けたカタログを上下に並べます（本数が多いシリーズが上／⬆⬇で逆順）。もう一度押すと『複数あるシリーズだけ』に絞り、3回目で解除。&#10;※同じタイトルを2回出しているだけのもの（重複出品）はシリーズに数えません＝そちらは「同名が複数」で見ます">${lst.sort === 'series' ? (lst.seriesOnly ? 'シリーズのみ' : 'シリーズ順' + (lst.sortDir === 'asc' ? '(多い順)' : '(少ない順)')) : 'シリーズで並べる'}</button>
         <span style="width:1px;height:16px;background:#e3e6ec"></span>
         <button class="smd-btn b-sort ${lst.grid ? 'on' : ''}" id="lst-gridtoggle" title="同じ商品の各国版を横に並べて表示＝どの国に出ているか一目">${lst.grid ? '横並び中' : '国横断で横並び'}</button>
-        <span class="smd-seg seg-sort" id="lst-statsperiod" title="🛒販売・❤️いいねを『全期間の累計』か『直近N日の伸び』かで表示。👁閲覧は累計ではないので、いつも今の値（期間指定の時は始めの値との上下を▲▼で添えます）">${[['', '全期間'], ['7', '直近7日'], ['30', '直近30日'], ['90', '直近90日']].map(([v, l]) => `<button data-p="${v}" class="${String(lst.statsPeriod || '') === v ? 'on' : ''}">${l}</button>`).join('')}</span>
+        <span class="smd-seg seg-sort" id="lst-statsperiod" title="🛒販売・❤️いいねを『全期間の累計』か『直近N日の伸び』かで表示。👁閲覧は累計ではないので、いつも今の値（期間指定の時は始めの値との上下を▲▼で添えます）">${[['', '全期間'], ['7', '直近7日'], ['30', '直近30日'], ['90', '直近90日']].map(([v, l]) => `<button data-p="${v}" class="${String(lst.statsPeriod || '') === v ? 'on' : ''}">${l}</button>`).join('')}</span>${lstStatsNote ? `<span style="font-size:11px;color:#a02020;background:#fdecea;border:1px solid #f0c4bd;border-radius:6px;padding:2px 8px;margin-left:6px">⚠️ ${esc(lstStatsNote)}</span>` : ''}
         <button class="smd-btn b-sort" id="lst-simdup" style="margin-left:auto" title="いま表示している出品の中から、タイトルが似ているカタログ（＝同じ商品を二重に出している候補）を探します。国をまたいだ同名は対象外です">🔁 似た出品を探す</button>
       </div>
       <div id="lst-morebox" class="lst-zone zone-fil" style="${lst.moreFil ? '' : 'display:none;'}">
