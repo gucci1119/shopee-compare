@@ -5187,6 +5187,13 @@ function boshuAutoTick(manual) {
       var costChk = 0; { var pmC = pre[c.key]; if (pmC && pmC.img) costChk = baCostFromPre_(pmC); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; } }   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
+      /* ★2026-09-20 「出していない作品」の判定は【日本語名の鍵】で見ていたが、Shopee に載っている明細名は【英名】。英名はここで初めて作るので、
+         同じ作品が英名で既に載っていても候補として残り、写真もAI判定も使った末に add_model が「同名が既にある」で丸ごと失敗していた
+         （実測：9/20 の62件中23件＝37%が無駄）。英名を作った直後に、その国で既に載っているかをもう一度見る。 */
+      { var enK1 = baTmKey_(en), enK2 = baKey_(en);
+        var stillNeed = (c.need || []).filter(function (cc2) { var s2 = listedByCc[cc2] || {}; return !((enK1 && s2[enK1]) || (enK2 && s2[enK2])); });
+        if (!stillNeed.length) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_en'); continue; }
+        c.need = stillNeed; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
