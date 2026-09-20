@@ -32711,28 +32711,37 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         </table></div>
       </div>`;
     })();
-    /* ★2026-09-20 重複出品の検知（前からの宿題）。SKUが全明細に入ったので【同じ国・同じシリーズ（親SKUかカタログ名が同じ）・同じSKU】で数えられるようになった。
-       本人ルール：別テーマのバリエ同士・単品×バリエは同じソフトが入ってよい → 同じシリーズの①②に同じ作品がある時だけ重複とする。消さない（明細の削除は位置が動く）＝一覧で見せて本人が決める */
+    /* ★2026-09-20 重複出品の検知（前からの宿題）。記録にある定義（20_Shopeeナレッジ）に合わせる：
+       ①同じ国の中だけ（国またぎは重複でない）②機種が違えば別商品③続編（数字の違い）は別商品
+       ④別テーマのカタログ同士・単品×バリエは重複でない＝同じシリーズ（親SKU／カタログ名が同じ）の中だけ
+       ⑤見分けの優先順は JAN ＞ 型番 ＞ 自社コード ＞ SKU（SKUは機械で付けた値なので最後）
+       消さない（明細を途中で消すと後ろがずれる）＝一覧で見せて本人が決める */
+    try { await ensureProductIds(); } catch (_) {}
     const dupHtml = (() => {
       const nk2 = n => String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
       const by = {};
-      all.forEach(r => (r.models || []).forEach(x => { if (!x || x.ghost || !x.n) return; const sk = String(x.sku || '').trim();
-        if (!sk || /^https?:/.test(sk) || /^asin=/i.test(sk)) return;
+      all.forEach(r => (r.models || []).forEach(x => { if (!x || x.ghost || !x.n) return;
+        /* 見分ける値：JAN → 型番 → 自社コード → SKU の順（記録の決め） */
+        let pv = {}; try { pv = pidOf(pidKeyModel(r, x)) || {}; } catch (_) {}
+        const jan = String(pv.jan || '').trim(), mpn = String(pv.mpn || '').trim(), own = String(pv.own || '').trim();
+        const sk = String(x.sku || '').trim();
+        const key = jan ? ('J:' + jan) : (mpn ? ('M:' + mpn) : (own ? ('O:' + own) : ((!sk || /^https?:/.test(sk) || /^asin=/i.test(sk)) ? '' : ('S:' + sk))));
+        if (!key) return;
         const fam = String(r.parent_sku || '').trim() || nk2(r.name);
-        (by[r.cc + '\u0001' + fam + '\u0001' + sk] = by[r.cc + '\u0001' + fam + '\u0001' + sk] || []).push({ r, m: x }); }));
+        (by[r.cc + '\u0001' + fam + '\u0001' + key] = by[r.cc + '\u0001' + fam + '\u0001' + key] || []).push({ r, m: x, key }); }));
       const dup = Object.entries(by).filter(([k, v]) => v.length > 1 && new Set(v.map(o => String(o.r.item_id))).size > 1);
       if (!dup.length) return '';
       const byCc = {}; dup.forEach(([k, v]) => { const c = k.split('\u0001')[0]; byCc[c] = (byCc[c] || 0) + 1; });
       const rows = dup.sort((a, b) => b[1].length - a[1].length).slice(0, 200).map(([k, v]) => {
         const p2 = k.split('\u0001'), cc = p2[0], rg2 = regionByCc(cc) || {};
         return `<tr><td style="white-space:nowrap"><span class="ord-cc" style="background:${rg2.color || '#888'}">${esc(cc)}</span></td>`
-          + `<td style="font-size:11px"><b>${esc(v[0].m.n || '')}</b><div class="smd-dim">${esc(p2[2])}</div></td>`
+          + `<td style="font-size:11px"><b>${esc(v[0].m.n || '')}</b><div class="smd-dim">${({ J: '📇JAN ', M: '型番 ', O: '自社 ', S: 'SKU ' })[p2[2].slice(0, 1)] || ''}${esc(p2[2].slice(2))}</div></td>`
           + `<td style="font-size:11px">${v.map(o => `<div><a href="${esc(editUrlFor(rg2.host, o.r.item_id))}" target="_blank" rel="noopener">${esc(String(o.r.name).replace('[Used] Variation ', '').slice(0, 34))}</a> <span class="smd-dim">在庫${o.m.stock != null ? o.m.stock : '-'}</span></div>`).join('')}</td></tr>`;
       }).join('');
-      return `<details class="tool-card" style="max-width:none;margin:0 0 10px"><summary style="cursor:pointer;font-weight:700">🔁 同じ作品が同じシリーズに2つ以上（${num(dup.length)}組）`
+      return `<details class="tool-card" style="max-width:none;margin:0 0 10px"><summary style="cursor:pointer;font-weight:700">🔁 同じ作品が同じシリーズに2つ以上（${dup.length.toLocaleString()}組）`
         + ` <span class="smd-dim" style="font-weight:400;font-size:11.5px">${Object.entries(byCc).sort((a, b) => b[1] - a[1]).map(x => x[0] + ' ' + x[1]).join(' ／ ')}</span></summary>`
-        + `<div class="smd-dim" style="font-size:11.5px;margin:6px 0">同じ国・同じシリーズ（①②…）の中に、<b>同じSKUの明細が2つ以上</b>あります＝出品枠の無駄です。`
-        + `別テーマのカタログ同士・単品とバリエが同じ作品を持つのは重複に数えていません。<b>ここでは消しません</b>（明細を途中で消すと後ろがずれるため）。`
+        + `<div class="smd-dim" style="font-size:11.5px;margin:6px 0">同じ国・同じシリーズ（①②…）の中に、<b>同じ作品の明細が2つ以上</b>あります＝出品枠の無駄です。`
+        + `見分けは <b>JAN ＞ 型番 ＞ 自社コード ＞ SKU</b> の順。<b>国またぎ・機種違い・続編は重複に数えません</b>。別テーマのカタログ同士・単品とバリエも数えません。<b>ここでは消しません</b>（明細を途中で消すと後ろがずれるため）。`
         + `片方の在庫を0にするか、Shopeeの編集画面で末尾から消してください。上位200組まで表示。</div>`
         + `<div style="overflow:auto;max-height:520px"><table class="smd-table" style="font-size:11.5px"><tr><th>国</th><th>作品・SKU</th><th>入っているカタログ</th></tr>${rows}</table></div></details>`;
     })();
