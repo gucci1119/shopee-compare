@@ -4779,8 +4779,21 @@ function baKey_(v) {
   return baTmKey_(x.replace(/\s+/g, ' ').trim());
 }
 function baJanReal_(v) { var j = String(v || '').trim(); if (!/^\d{13}$/.test(j) || /^2/.test(j)) return false; var x = 0; for (var i = 0; i < 12; i++) x += (+j[i]) * (i % 2 ? 3 : 1); return ((10 - x % 10) % 10) === (+j[12]); }
-function baKv_(k) { try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (e) { return null; } }
-function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); }
+/* ★2026-09-20 本人「枠の減り早すぎる」：1回の実行で app_kv を十数回バラバラに読んでいた（実測：1日 1,018回＝枠の1位）。
+   実行の頭で【まとめて1回】読み、以後はその控えを使う。書いた時は控えも更新する（読み直さない） */
+var BA_KV_CACHE = null;
+function baKvPrefetch_(keys) {
+  try {
+    var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')');
+    BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
+    (r || []).forEach(function (x) { BA_KV_CACHE[x.k] = x.v; });
+  } catch (e) { BA_KV_CACHE = null; }
+}
+function baKv_(k) {
+  if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
+  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { return null; }
+}
+function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
 function baLog_(st, line) {
   st.log = st.log || []; st.log.unshift({ at: new Date().toISOString(), m: String(line).slice(0, 300) }); if (st.log.length > 120) st.log.length = 120;
 }
@@ -5129,6 +5142,7 @@ function boshuAutoTick(manual) {
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
+  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'sku_plan_state', 'product_ids']);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {

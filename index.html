@@ -17911,6 +17911,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-20', items: [
+      '\u{1F4BE} <b>出品一覧：価格・在庫は書き換えただけで保存されます</b>（本人「ここで書き換えただけで、即時反映されるようにしてほしい」）。欄から離れた時（またはEnter）にその行の💾保存が自動で走ります。打つたびではなく入力が終わった時に1回だけなので、Shopeeを余計に叩きません。💾保存を手で押しても今までどおり動きます。',
+      '\u{1F50B} <b>GAS枠の節約：🤖が app_kv を十数回に分けて読んでいたのをまとめて1回に</b>（本人「枠の減り早すぎる」）。実測で app_kv の読みが1日1,018回＝枠の1位でした。1回の実行で必要な11個の控えをまとめて読みます。',
       '\u{1F4C8} <b>📚母数：網羅率の伸びを出しました</b>（本人「網羅率の伸び率も計測してほしい」）。機種ごとに<b>7日前と比べた「出している」の増減</b>を新しい列に出します（緑＝増、赤＝減）。下の薄字は網羅率のポイント差です。<b>母数と「出している」がまだ動くので、率より件数で見てください</b>（本人「母数がまだ完全ではない」「出しているの数もまだ不安定」）。この画面を開いた日から1日1回ためるので、7日ぶんたまるまで「—」です。',
       '\u{1F553} <b>🤖：出品済みの写真を定期的に見直します</b>（本人「自動出品したものを定期的に画像を見直す機能が必要」）。写真の基準に版を付け、<b>基準を変えた時</b>と<b>前に見てから30日たった時</b>に、出した明細の写真をもう一度見て、基準外なら差し替えます。',
       '\u{1F6AB} <b>🤖：高いのに出品が少ない作品は出しません</b>（本人「高額品で在庫少ないのは出さないでね」「高額品ソフトは海賊版も多い」「ファミコンとか特に注意で」）。仕入れ目安が高い（既定5,000円・<b>ファミコン系は2,500円</b>）作品は、出品が6件以上ある時だけ出します。海賊版・リプロ品は題名（リプロ／bootleg／100 in 1 等）と<b>写真のAI判定</b>（ラベルが紙貼り・手書き・見慣れない色・英語だけ）で外します。',
@@ -37541,6 +37543,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // 価格・在庫はDB(GAS同期)から表示済み＆保存は公式API。この読取りは予約状態のためだけ＝ブリッジ未応答でも詰まらないよう12秒でタイムアウト
       try { const pi = await Promise.race([productRead(host, id), new Promise((_, rej) => setTimeout(() => rej(new Error('タイムアウト')), 12000))]); lst.poCache[id] = pi; apply(pi); }
       catch (e) { if (poState) poState.textContent = '（予約状態の取得失敗: ' + String(e.message).slice(0, 22) + '｜価格・在庫は編集可）'; }
+    });
+    /* ★2026-09-20 本人「ここで書き換えただけで、即時反映されるようにしてほしい」：価格・在庫を直して欄から離れた（またはEnter）時点で、
+       その行の 💾保存 を自動で押す。打つたびではなく【入力が終わった時に1回】なので、Shopeeを余計に叩かない */
+    document.querySelectorAll('#lst-list .lst-stk, #lst-list .lst-prc').forEach(inp => {
+      if (inp._autoSaveWired) return; inp._autoSaveWired = 1;
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+      inp.addEventListener('change', () => {
+        const panel = inp.closest('.lst-inline'); const btn = panel && panel.querySelector('.lst-save');
+        if (!btn || btn.disabled) return;
+        clearTimeout(panel._autoSaveT);
+        panel._autoSaveT = setTimeout(() => { try { btn.click(); } catch (_) {} }, 250);   /* 価格と在庫を続けて直した時に1回にまとめる */
+      });
     });
     document.querySelectorAll('#lst-list .lst-save').forEach(btn => btn.addEventListener('click', async () => {
       const panel = btn.closest('.lst-inline'); const host = panel.dataset.host, id = Number(panel.dataset.id), cc = panel.dataset.cc;
