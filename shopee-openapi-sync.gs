@@ -4001,6 +4001,17 @@ function syncListingsRoundRobin() {
   /* ★2026-09-20 1回だけ：🤖のトリガー3本を Head で作り直す（この関数は Head のトリガーで動いている＝ここで作ったトリガーも Head になる）。印は BA_REBIND_DONE */
   try { if (!P_().getProperty('BA_REBIND_DONE')) { P_().setProperty('BA_REBIND_DONE', new Date().toISOString()); rebindBoshuTriggersToHead(); } } catch (eRb) { Logger.log('rebind失敗: ' + eRb); }
   if (!bgAllowed_()) { Logger.log('syncListingsRoundRobin skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  /* ★2026-09-20 本人「60分で」：出品同期が接続枠のいちばん太い口だった
+     （get_item_list 291＋get_model_list 228＋get_item_base_info 206＋get_item_extra_info ＝1日725回以上。
+      入金明細604回より多い）。トリガーは30分ごとのままにして、**ここで1時間に1回に間引く**
+      （トリガーを作り直すと版の固定でハマるため・[[gas-version-limit-200]]）。
+      手で動かす時（ポータルの「まとめて更新」など）は素通しする＝間引くのは時間トリガーの回だけ。 */
+  var LIST_RR_EVERY_MS = 55 * 60 * 1000;
+  try {
+    var _lastRR = parseInt(P_().getProperty('listRR_at') || '0', 10) || 0;
+    if (Date.now() - _lastRR < LIST_RR_EVERY_MS) { Logger.log('syncListingsRoundRobin skip: 前回から1時間たっていない'); return [{ skipped: 'too_soon' }]; }
+    P_().setProperty('listRR_at', String(Date.now()));
+  } catch (eRR) {}
   var toks = listTokens_(); if (!toks.length) return [];
   toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
   var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
