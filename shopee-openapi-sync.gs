@@ -4965,7 +4965,8 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
    - cfg.rephoto === false で止められる */
 function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (cfg && cfg.rephoto === false) return;
-  var cap = (cfg && Number(cfg.judgeCap)) || 300;
+  /* ★2026-09-20 ここを 300 固定にしていたため、写真の見直しが【1日300回】で頭打ちになり、見直し対象145件に対して0件しか見ずに止まっていた。本番の出品と同じ枠にそろえる */
+  var cap = (cfg && Number(cfg.judgeCap)) || (Math.max(1, Number(cfg.dailyMax) || 100) * 6);
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
   /* ★2026-09-20 この回で明細を足す機種のカタログは触らない：画像の差し替え（update_tier_variation）の直後に add_model すると、Shopee 側の明細の並びがまだ古く「Model tier_index error」で1件も入らない（3:31 の GC で実測） */
   var nowMs = Date.now();
