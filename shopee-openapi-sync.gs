@@ -4919,7 +4919,9 @@ function baPlatOk_(a, hw) { var n = String((a && a.name) || ''); if (!n) return 
 function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 var BA_MANUAL = null;   /* 手動の判定（app_kv.boshu_auto_judged_manual）。1回の実行で1度だけ読む */
 function baManualOf_(imgUrl, expect) { if (!expect || !expect.key) return ''; if (BA_MANUAL === null) { BA_MANUAL = baKv_('boshu_auto_judged_manual') || {}; } return String(BA_MANUAL[String(imgUrl || '').replace(/\?.*$/, '') + '|' + String(expect.hwKey || '') + '|' + expect.key] || ''); }
+var BA_AI_DOWN = '';   /* AIが使えない理由（残高切れ等）。立ったらこの実行では AI を呼ばない＝Shopee枠を守る */
 function baJudge_(imgUrl, st, cache, capN, expect) {
+  if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
   var mv = baManualOf_(imgUrl, expect); if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
@@ -4935,7 +4937,15 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
   try { aiSpendBump_('写真の判定(自動出品)', j.usage); } catch (e) {}   // 💴 ポータルの「API利用料」に載せる（2026-09-16 まで1円も載っていなかった）
-  if (code >= 400) { if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return { ok: false, judged: false, kind: 'error' }; }
+  if (code >= 400) {
+    var em = String((j.error && j.error.message) || '');
+    /* ★2026-09-20 本人「止まらないようにしてね」「絶対に」：Anthropic の残高切れ（credit balance）や鍵不正の時、
+       1件ずつ試し続けると **出品は1件も増えないのに Shopee枠だけ減る**（実測：11:31〜の回で枠が一気に減った）。
+       この実行の残りは AI を呼ばない＝枠を守る。次の実行でまた1回だけ試す */
+    if (/credit balance|insufficient|invalid x-api-key|authentication_error/i.test(em) || code === 401 || code === 403) { BA_AI_DOWN = em.slice(0, 60) || ('HTTP ' + code); }
+    if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + em.slice(0, 80) + (BA_AI_DOWN ? '（この回はAIを止めます）' : ''));
+    return { ok: false, judged: false, kind: 'error' };
+  }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');
   /* ★v192 「実物か」をAIの一言に任せない：周りに何も写っていない（scene=none）か、縁も影も見えない（edges=false）なら、AIが true と言ってもカタログ画像として落とす */
@@ -4965,6 +4975,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
    - cfg.rephoto === false で止められる */
 function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (cfg && cfg.rephoto === false) return;
+  if (BA_AI_DOWN || ufTotal_() > UF_STOP - 2500) return;   /* AIが使えない／枠が少ない時は見直しをしない */
   /* ★2026-09-20 ここを 300 固定にしていたため、写真の見直しが【1日300回】で頭打ちになり、見直し対象145件に対して0件しか見ずに止まっていた。本番の出品と同じ枠にそろえる */
   var cap = (cfg && Number(cfg.judgeCap)) || (Math.max(1, Number(cfg.dailyMax) || 100) * 6);
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
@@ -5153,6 +5164,10 @@ function boshuAutoTick(manual) {
     st.lastAt = new Date().toISOString();
     try { baSoldSync_(st); } catch (eS) { baLog_(st, '売れた作品の見直しに失敗: ' + String(eS).slice(0, 80)); }   // 在庫1で出した作品がどこかの国で売れたら、他の国の在庫を0に（一点物の二重販売を防ぐ）。OFFでも動く
     if (!cfg.on && manual !== true) { st.lastMsg = 'OFF'; return finish_('OFF'); }
+    /* ★2026-09-20「絶対に止まらないように」：停止線(15,000)の【手前 2,000】で🤖は自分から降りる。
+       🤖は1回で数十回使うので、ぎりぎりまで回すと注文・入金・発送の枠を食う */
+    var ufNow = ufTotal_();
+    if (ufNow > UF_STOP - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + UF_STOP + '）。16:00(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     /* ★v187 ヤフオクに弾かれても全体は止めない（2026-09-18 実測：ON の2回目で HTTP 500→6時間まるごと休み。メルカリの写真は187件集まっているのに1件も出なくなった）。休むのはヤフオクの検索だけ＝その間はメルカリの写真がある作品だけを進める */
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
@@ -5843,6 +5858,7 @@ function baSkuSlug_(t) { var x = String(t || ''); try { x = x.normalize('NFKD');
 function baSkuOf_(hw, en) { var b = baSkuSlug_(en); if (!b) return ''; var h = String(BA_HW_LABEL[String(hw || '')] || hw || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + '_' + b).slice(0, 100).replace(/_+$/, ''); }
 function baSkuPlanTick_(st, t0) {
   var ps = baKv_('sku_plan_state') || {}; if (!ps.on) return;
+  if (ufTotal_() > UF_STOP - 3000) return;   /* 一括付与は後回しでよい＝枠が少ない時はやらない */
   var plan = baKv_('sku_plan') || {}, items = plan.items || []; ps.pos = ps.pos || 0; ps.ok = ps.ok || 0; ps.fail = ps.fail || [];
   if (ps.pos >= items.length) { ps.on = false; ps.doneAt = new Date().toISOString(); baKvSet_('sku_plan_state', ps); baLog_(st, '🏷 SKUの一括付与が完了（' + ps.ok + '明細・失敗 ' + ps.fail.length + 'カタログ）'); return; }
   var n = 0, okN = 0, tS = Date.now();
