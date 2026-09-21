@@ -2325,7 +2325,7 @@ function uploadImageData_(body) {
   var blob = Utilities.newBlob(bytes, mime, 'upload.' + (mime.indexOf('png') >= 0 ? 'png' : 'jpg'));
   var ts = now_(), path = '/api/v2/media_space/upload_image';
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob }, __tag: '画像のアップロード' });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
   var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
@@ -2342,7 +2342,12 @@ function fetchRetry_(url, opts, tries) {
   tries = tries || 5;
   var last = null;
   for (var i = 0; i < tries; i++) {
-    try { ufBump_(1, (opts && opts.__tag) || 'fetchRetry'); return UrlFetchApp.fetch(url, opts); }
+    /* ★2026-09-21 本人「無駄なコストはないか？」の点検で分かったこと：
+       これまで**タグの無い通信を全部 `fetchRetry` にまとめて**いたため、内訳を見ると
+       「再試行が68回＝失敗が多い＝無駄」に読めた（実際は画像の送受信で、失敗ではない）。
+       私自身がそう誤読しかけた。→ **1回目は本来の名前で、2回目以降だけ「再試行:」を付けて数える**。
+       これで「何にどれだけ使ったか」と「どれが失敗して余計に食ったか」が分かれる。 */
+    try { ufBump_(1, i === 0 ? ((opts && opts.__tag) || 'その他の通信') : ('再試行:' + ((opts && opts.__tag) || 'その他の通信'))); return UrlFetchApp.fetch(url, opts); }
     catch (e) {
       last = e;
       var msg = String((e && e.message) || e);
@@ -2404,10 +2409,10 @@ function uploadImageUrl_(imageUrl) {
   if (hit) return hit;                       // 既に上げてある＝枠を使わない
   // ★署名は【画像を取ってきた後】に作る。先に作ると、画像のダウンロードで手間取った分だけ
   //   timestamp が古くなり、Shopee側で署名切れとして弾かれる（リトライで待つほど危なくなる）。
-  var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true }).getBlob();
+  var blob = fetchRetry_(imageUrl, { muteHttpExceptions: true, __tag: '画像の取り寄せ' }).getBlob();
   var ts = now_(), path = '/api/v2/media_space/upload_image';
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
-  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob } });
+  var res = fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob }, __tag: '画像のアップロード' });
   var j = JSON.parse(res.getContentText());
   if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
   var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
