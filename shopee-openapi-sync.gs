@@ -99,9 +99,10 @@ function ufExt_() {
   var d = ufToday_(), cached = null;
   try { cached = JSON.parse(P_().getProperty('ufExtCache') || 'null'); } catch (e) { cached = null; }
   if (cached && cached.d === d && (Date.now() - (Number(cached.at) || 0) < 30 * 60 * 1000)) { _ufExt = Number(cached.n) || 0; return _ufExt; }
-  /* ★2026-09-21 自分で足した読みも無駄にしない。**自分の消費が停止線の4割にも届いていない日は、合算しても結論は変わらない**ので読まない。
-     （もう一方のGASは実測で1日2,500回程度＝4割+2,500 でも停止線には遠い）。前の値があればそれを使う。 */
-  try { if ((ufState_().n + _ufRun) < UF_STOP * 0.4) { _ufExt = (cached && cached.d === d) ? (Number(cached.n) || 0) : 0; return _ufExt; } } catch (e) {}
+  /* ★Codex指摘（2026-09-21・P1）で撤回：「自分の消費が少ない日は他プロジェクト分を読まない」は**安全弁を弱める**。
+     もう一方のGASの消費は**こちらの数字とは無関係に増える**（例：こちら5,000・向こう11,000＝合計16,000でも、
+     こちらが少なければ読まずに5,000と答えてしまい、停止線を越えて背景処理を続ける）。
+     **今日まさにその形で使い切った**ので、96回/日の節約と引き換えにしてよいものではない。30分キャッシュだけ残す。 */
   try {
     var rows = sbSelect_('app_kv', 'select=k,v&k=like.uf_ext_*');
     var n = 0, stale = [];
@@ -270,7 +271,7 @@ function doGetInner_(e) {
       try {
         var iwt = P_().getProperty('WRITE_TOKEN');
         if (!iwt || p.token !== iwt) throw new Error('WRITE_TOKEN不正');
-        var ilog = syncEscrowAll();
+        var ilog = syncEscrowAll(true);   /* ⚡今すぐ取得は12時間の間引きを素通し（Codex指摘 2026-09-21） */
         iout = { ok: true, action: 'run_income', shops: (ilog || []).length };
       } catch (ierr) { iout = { ok: false, error: String((ierr && ierr.message) || ierr) }; }
       return ContentService.createTextOutput(icb + '(' + JSON.stringify(iout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -3225,7 +3226,7 @@ function backfillEscrowUnchanged(limitN) {
   Logger.log('backfillEscrow: 照会' + done + '件 / 金額が動いた ' + moved + '件 / エラー ' + errs + '件（残り対象 ' + Math.max(0, targets.length - done) + '件）');
   return { done: done, moved: moved, errs: errs };
 }
-function syncEscrowAll() {
+function syncEscrowAll(force) {
   if (!bgAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   /* ★2026-09-21 本人「無駄遣いで減らせるところは減らしてほしい」
      入金明細は接続枠でいちばん太い（実測 656回/日 = 6時間ごと×約164件）。
@@ -3233,9 +3234,13 @@ function syncEscrowAll() {
      補償・関税は payout 側から入るので、再照会を減らしても取りこぼさない（2026-08-24 に検証済み）。
      → **12時間ごと**に間引く（トリガーは作り直さない＝この関数はHeadで動くので保存だけで効く）。約330回/日 減る。
      手動実行（⚡今すぐ取得）は素通し。 */
+  /* ★Codex指摘（2026-09-21・P2）：`run_income`（⚡今すぐ取得）もこの関数を呼ぶので、
+     force を渡さないと**手動の取得が黙って飛ばされる**（しかも ok:true が返る）。「手動は今まで通り」が嘘になる。 */
   var ESC_EVERY_MS = 11.5 * 60 * 60 * 1000;
-  var _escLast = parseInt(P_().getProperty('escrowAll_at') || '0', 10) || 0;
-  if (Date.now() - _escLast < ESC_EVERY_MS) { Logger.log('syncEscrowAll skip: 前回から12時間たっていない（入金の確定は数日後なので6時間ごとに見る意味がない）'); return [{ skipped: 'too_soon' }]; }
+  if (!force) {
+    var _escLast = parseInt(P_().getProperty('escrowAll_at') || '0', 10) || 0;
+    if (Date.now() - _escLast < ESC_EVERY_MS) { Logger.log('syncEscrowAll skip: 前回から12時間たっていない（入金の確定は数日後なので6時間ごとに見る意味がない）'); return [{ skipped: 'too_soon' }]; }
+  }
   P_().setProperty('escrowAll_at', String(Date.now()));
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
