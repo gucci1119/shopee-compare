@@ -5507,6 +5507,17 @@ function boshuAutoRecheck() {
   /* ★2台目で動かすと、AIの利用料は**2台目のスクリプト プロパティ**に貯まる。
      ポータルは本体の uf_status しか見ていないので、そのままだと**料金が画面から消える**（Codex指摘P2）。
      状態と一緒に載せて、ポータル側で足し合わせる。app_kv への書き込みは元から1回なので urlfetch は増えない。 */
+  /* この回に入った明細の印を、出したその場で貯める（画面を開かなくても🤖の分と分かるように） */
+  try {
+    var _ymd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    /* ★この回に足した分だけを対象にする。tick は30分ごとなので【直近1時間】で十分に届き、
+       重なっても `if (!mp[k])` で二度は書かない。※手で出した明細は st.added に入らないので**紫にならない**
+       （本人「手動で出す時もあるので」＝区別が要る）。 */
+    var _cut = Date.now() - 3600000;
+    var _mk = (st.added || []).filter(function (a) { return !!(a && a.at && a.en && a.cc && a.item_id && Date.parse(a.at) >= _cut); })
+      .map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymd }; });
+    baLogAutoMark_(_mk);
+  } catch (eM) {}
   try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
   try { ufPersist_(); } catch (e3) {}
@@ -5520,7 +5531,7 @@ function boshuAutoTick(manual) {
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
-  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids']);
+  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto']);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
@@ -5749,6 +5760,17 @@ function boshuAutoTick(manual) {
   /* ★2台目で動かすと、AIの利用料は**2台目のスクリプト プロパティ**に貯まる。
      ポータルは本体の uf_status しか見ていないので、そのままだと**料金が画面から消える**（Codex指摘P2）。
      状態と一緒に載せて、ポータル側で足し合わせる。app_kv への書き込みは元から1回なので urlfetch は増えない。 */
+  /* この回に入った明細の印を、出したその場で貯める（画面を開かなくても🤖の分と分かるように） */
+  try {
+    var _ymd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    /* ★この回に足した分だけを対象にする。tick は30分ごとなので【直近1時間】で十分に届き、
+       重なっても `if (!mp[k])` で二度は書かない。※手で出した明細は st.added に入らないので**紫にならない**
+       （本人「手動で出す時もあるので」＝区別が要る）。 */
+    var _cut = Date.now() - 3600000;
+    var _mk = (st.added || []).filter(function (a) { return !!(a && a.at && a.en && a.cc && a.item_id && Date.parse(a.at) >= _cut); })
+      .map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymd }; });
+    baLogAutoMark_(_mk);
+  } catch (eM) {}
   try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
     try { ufPersist_(); } catch (e3) {}
@@ -6430,6 +6452,29 @@ function seedShopCatalog_(p) {
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
   if (!r || !r.item_id) return { ok: false, error: '作れましたが item_id が返りませんでした' };
   return { ok: true, item_id: r.item_id, shop_id: dst, name: body.item_name, images: urls.length, tier: tierName || null };
+}
+/* 🤖が出した明細の印を【出したその場で】貯める。
+   本人 2026-09-21「最初から紫色の表示にしてほしい」。
+   これまでは**出品ログの画面を開いた時**にポータルが `boshu_auto_status.added`（直近400件）から
+   `app_kv.listlog_auto` へ写していた。つまり**画面を開かない日があると、400件から溢れた分は
+   永久に「手動」扱い**になる。いまのペース（1日393件）だと**1日開かないだけで溢れる**。
+   → 出した本人（この関数）が毎回書く。読みは先読みに相乗りしているので、増える通信は**書き込み1回だけ**。
+   ★鍵はポータルと同じ `cc|item_id|明細名（小文字・前後の空白なし）`、値は出した日（JST）。
+   ★増え続けるので**60日より古い印は捨てる**（グラフは最大365日なので、そこは画面側の写しが残す）。 */
+function baLogAutoMark_(rows) {
+  try {
+    if (!rows || !rows.length) return;
+    var cur = baKv_('listlog_auto') || {}; var mp = cur.map || {}; var grew = 0;
+    rows.forEach(function (r) {
+      if (!r || !r.cc || !r.item_id || !r.en) return;
+      var k = r.cc + '|' + r.item_id + '|' + String(r.en).toLowerCase().trim();
+      if (!mp[k]) { mp[k] = r.ymd; grew++; }
+    });
+    if (!grew) return;
+    var cut = Utilities.formatDate(new Date(Date.now() - 60 * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
+    Object.keys(mp).forEach(function (k) { if (String(mp[k] || '') < cut) delete mp[k]; });
+    baKvSet_('listlog_auto', { map: mp, n: Object.keys(mp).length, at: new Date().toISOString() });
+  } catch (e) {}
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
