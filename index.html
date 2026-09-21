@@ -2953,6 +2953,14 @@
   }
   async function openapiSetVariationImage(shopId, itemId, option, imageUrl) {
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
+    /* ★2026-09-21 同じ型を全部で塞ぐ（本人の決まり：1件直したら同じ型を全体で洗う）。
+       GAS 側は「http で始まらない値＝すでにShopeeにある画像の番号」とみなすので、
+       PCのファイル（data:…）をそのまま渡すと**黙って何も起きない**（長いと通信の上限も超える）。
+       呼び出し側を1つずつ直すより、**入口で必ずアップロードしてURLにする**。 */
+    if (/^data:/i.test(String(imageUrl || ''))) {
+      try { imageUrl = await openapiUploadImage(String(imageUrl)); }
+      catch (e) { throw new Error('画像のアップロードに失敗しました: ' + ((e && e.message) || e)); }
+    }
     return gasCall({ action: 'set_variation_image', token: settings.writeToken, shop_id: shopId, item_id: itemId, option: option, image: imageUrl }, 90000);
   }
 
@@ -17995,6 +18003,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F6E1}\u{FE0F} <b>同じ型の不具合を全体で洗って、再発よけを点検に入れました</b>。今日見つかった3つの型を、他に無いか機械で探しました。<br>①<b>PCのファイルを画像APIへそのまま渡す</b>…呼び出し側を1つずつ直すのではなく、<b>入口（openapiSetVariationImage）で必ずアップロードしてから渡す</b>ようにしました（今後どこから呼んでも安全）。<br>②<b>記録の丸ごと上書き</b>…<b>他に2箇所</b>見つけて直しました（🔍で写真を見直した時の記録。同じく判定の版が消えて、手で直した写真が戻る恐れ）。<br>③<b>検索結果を題名を見ずに使う</b>…🔎メルカリで探すに<b>題名の照合とグッズ除外</b>を入れ、1つも当たらない時は「<b>別の商品かもしれません</b>」と赤で出します。<br>この3つは<b>締めの点検（chk）で自動的に見張ります</b>。',
       '\u{1F50E} <b>【不具合】🔎メルカリで探すが、副題を捨てて検索していました</b>（Codexの指摘）。<b>Zelda: Twilight Princess</b> が <b>Zelda</b> だけで検索され、<b>別のゲームや周辺機器の写真</b>が並ぶところでした（メルカリ検索は安い順で、題名を見ずに先頭から採るため）。→ 落とすのは<b>頭の機種の印（GBA: PS4: など）だけ</b>にして、副題は残します。<br>あわせて、<b>長い題名の明細が自分の写真に辿り着けない</b>のも直しました（長い題名は縮めた名前で明細を作っているのに、逆引きが元の名前しか見ていませんでした）。',
       '\u{1F4C1} <b>【不具合】PCのファイルで写真が差し替わっていませんでした</b>（別のAI・Codexのレビューで発覚）。📁でファイルを選んでも、<b>画像をアップロードせずにそのまま渡していた</b>ため、Shopee側は「すでにある画像の番号」とみなして<b>何も起きていませんでした</b>（大きいファイルだと通信が長すぎて失敗）。→ <b>先にアップロードしてから</b>差し替えるようにしました。出品ログの📷と、🍱母数の📷写真を直す、<b>両方</b>直しています。',
       '\u{1F504} <b>【不具合】手で直した写真が、あとで勝手に戻ることがありました</b>（同じくCodexの指摘）。差し替えた記録を<b>丸ごと書き換えていた</b>ため<b>判定の版が消え</b>、🤖が「古い記録だ」と判断して<b>もう一度見直しに掛け、元の写真で上書きする</b>可能性がありました。→ 元の記録に<b>混ぜて</b>書くようにしました。',
@@ -31283,8 +31292,10 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               let r2 = null; try { r2 = await baJudgePhoto(u, q.opt); } catch (_) { r2 = null; }   /* 明細名を渡す＝別の作品の写真が付いていないかも見る */
               if (!r2 || r2.kind === 'error' || r2.kind === 'unjudged') { skip++; continue; }
               const k2 = String(q.item) + '#' + q.opt;
-              if (r2.ok) { cur.items[k2] = { s: 'keep', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }; ok++; }
-              else { cur.items[k2] = { s: 'nophoto', was: r2.kind || '', seen: r2.seen || '', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }; ng++; }
+              /* ★2026-09-21 同じ型（Codex指摘の②）がここにもあった：丸ごと置き換えると判定の版（v）が消え、
+                 🤖が「古い記録」と見て**すぐまた見直しに掛ける**。元の中身に混ぜて書く。 */
+              if (r2.ok) { cur.items[k2] = Object.assign({}, cur.items[k2] || {}, { s: 'keep', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }); ok++; }
+              else { cur.items[k2] = Object.assign({}, cur.items[k2] || {}, { s: 'nophoto', was: r2.kind || '', seen: r2.seen || '', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }); ng++; }
               /* 📚 AIの答えも原簿に残す。あとで【人の判断とのズレ】を数えて基準を精緻化するため（AIだけ・人だけでは基準が育たない） */
               try { const rw = (selRows || []).find(x => String(x.item_id) === String(q.item) && String(x.model_name || '').trim() === q.opt) || {};
                 learnAi.push({ img: img, hw: rw._hw || '', title: q.opt, cc: q.cc, item: q.item, opt: q.opt, ai: r2.ok ? 'ok' : ('ng:' + (r2.kind || '')) }); } catch (_) {}
@@ -31569,13 +31580,24 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                落としてよいのは **頭の機種の印**（`GBA:` `PS4:` など短い1語）だけ。副題は残す。 */
             const kw = String(opt).replace(/^[A-Za-z0-9]{1,8}\s*[:：\-]\s*/, '').trim() || String(opt).trim();
             const items = await mercariSearch(kw);
-            const list = (items || []).filter(x => x && x.img).slice(0, 12);
+            /* ★Codex指摘（2026-09-21）：検索結果を**題名を見ずに先頭から採っていた**（メルカリは安い順なので、
+               別のゲームや周辺機器・グッズが先に来る）。→ ①題名の核が入っているものを先に出す ②グッズ・トレカは外す
+               ③1つも当たらない時は「当たらなかった」と分かるように全部出す（黙って別物を並べない）。 */
+            const NGW = /新品|未開封|未使用|体験版|非売品|攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|ソフトなし|まとめ|セット|同梱|ジャンク|サントラ|フィギュア|ポスター|キーホルダー|カードのみ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|早期購入特典|プロモ|トレカ|ポケモンカード|台紙|空容器|マグネット|パスケース|ぬいぐるみ|缶バッジ|クリアファイル|グッズ|食玩|雑貨|北米版|海外版|輸入版/;
+            const nzz = (t) => String(t || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, '');
+            const coreW = String(kw).normalize('NFKC').toLowerCase().split(/[\s:：\-・]+/).map(x => x.replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, '')).filter(x => x.length >= 3).sort((a2, b2) => b2.length - a2.length).slice(0, 2);
+            const okName = (nm) => { if (NGW.test(String(nm || ''))) return false; if (!coreW.length) return true; const t2 = nzz(nm); return coreW.every(c => t2.indexOf(c) >= 0); };
+            const withImg = (items || []).filter(x => x && x.img);
+            const good = withImg.filter(x => okName(x.name));
+            const list = (good.length ? good : withImg).slice(0, 12);
+            const loose = !good.length && withImg.length > 0;
             const host2 = ov.querySelector('#lf-found');
             host2.innerHTML = list.length ? list.map((x, i) => {
               const m2 = String(x.url || '').match(/\/item\/(m\d+)/);
               const full = m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img;
               return `<button class="lf-found-b" data-u="${av(full)}" title="${av((x.name || '') + ' ¥' + (x.price || ''))}" style="border:2px solid #ddd;background:#fff;border-radius:8px;padding:0;width:86px;height:86px;overflow:hidden;cursor:pointer"><img src="${esc(x.img)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;display:block"></button>`;
-            }).join('') : '<span class="smd-dim" style="font-size:11.5px">見つかりませんでした</span>';
+            }).join('') + (loose ? '<div style="width:100%;font-size:11px;color:#a02020;margin-top:4px">⚠ 題名が合うものが1つもありませんでした。下は<b>別の商品かもしれません</b>。よく見てから選んでください。</div>' : '')
+              : '<span class="smd-dim" style="font-size:11.5px">見つかりませんでした</span>';
             host2.querySelectorAll('.lf-found-b').forEach(b2 => b2.addEventListener('click', () => apply(b2.dataset.u)));
           } catch (e) { msg('<span style="color:#c0392b">探せませんでした: ' + esc((e && e.message) || String(e)) + '</span>'); }
           sb.disabled = false; sb.textContent = '🔎 メルカリで探す';
