@@ -14221,26 +14221,44 @@
     { k: 'yahuoku', label: 'ヤフオク', bg: '#ff0033',
       custom: async (kwRaw) => {
         const enc = encodeURIComponent(kwRaw);
+        /* ★2026-09-21 【ここは1件も取れていなかった】。🤖の写真の控え(boshu_auto_pre)で
+           写真ありの693件の内訳が メルカリ656・PayPayフリマ37・**ヤフオク0** だったので実物を叩いて調べた。
+           真因は2つ、どちらも「ヤフオク側のHTMLが変わった」：
+           ① 1件を `<li class="Product…{0,6000}?</li>` で切っていたが、いまは1件 **6,010〜8,524字**
+              （実測・中央値7,243）に育っていて **50件中50件が窓からあふれ**、正規表現が1件も拾えない。
+              → 文字数で区切らず【次の商品の始まりまで】を1件にする＝相手が太っても壊れない。
+           ② リンクが `page.auctions.yahoo.co.jp` から **`auctions.yahoo.co.jp`** に変わっていて、
+              古いホスト名を必須にしていたため全部落ちていた。
+              → 題名・画像・IDは `data-auction-*` 属性に揃っているので**そちらを正とする**（表示側のHTMLより安定）。
+           この0件は「無かった」ではなく「読めなかった」。`catch { its = [] }` が黙らせていた
+           （[[catch-empty-is-not-absence]]）。修正後は同じ検索で **50件中50件が画像つきで取れる**ことを実画面で確認。
+           影響：🤖が自前でヤフオクを叩いてGoogleのIPで弾かれ、見送りの54%（162/300）が「yahoowait」になっていた。 */
         const one = async (q, mode) => {
           const html = String(await bridgeRequest('GET', `https://auctions.yahoo.co.jp/search/search?p=${enc}&${q}`));
-          const blocks = html.match(/<li class="Product[\s\S]{0,6000}?<\/li>/g) || [];
+          const MARK = '<li class="Product';
+          const blocks = [];
+          for (let i = html.indexOf(MARK); i >= 0;) {
+            const nx = html.indexOf(MARK, i + 1);
+            blocks.push(html.slice(i, nx < 0 ? Math.min(html.length, i + 20000) : nx));
+            i = nx;
+          }
           const out = [];
           blocks.forEach(b2 => {
-            const hm = b2.match(/href="(https:\/\/page\.auctions\.yahoo\.co\.jp\/jp\/auction\/[^"?]+)/); if (!hm) return;
+            const id = (b2.match(/data-auction-id="([^"]+)"/) || [])[1]; if (!id) return;
             const flat = b2.replace(/<[^>]+>/g, ' ').replace(/[\s,]/g, '');
             let price = 0, cond = '';
             if (mode === 'fixed') {
-              if (/現在/.test(flat)) return;                                   // 定額のはずが入札形式なら捨てる
-              const pm = b2.match(/Product__priceValue[^>]*>([^<]*)/); price = dealYen(pm ? pm[1] : ''); cond = '定額';
+              if (/現在[0-9]/.test(flat)) return;                              // 定額のはずが入札形式なら捨てる（「現在」の後に金額が続く時だけ）
+              const pm = b2.match(/Product__priceValue[^>]*>([\s\S]{0,40}?)</); price = dealYen(pm ? pm[1] : ''); cond = '定額';
             } else {
               const m = flat.match(/即決([0-9]{2,7})円/); if (!m) return;       // 即決が無い＝入札のみ＝今すぐ買えない
               price = +m[1]; cond = '即決';
             }
             if (!price) return;
-            const tm = b2.match(/Product__titleLink[^>]*>\s*([^<]{3,90})/);
-            const im = b2.match(/<img[^>]+src="([^"]+)"/);
+            const name = String((b2.match(/data-auction-title="([^"]*)"/) || [])[1] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
+            const img = String((b2.match(/data-auction-img="([^"]*)"/) || [])[1] || '');
             const sm = flat.match(/[＋+]送料([0-9]{2,5})円/);
-            out.push({ name: (tm ? tm[1] : '').trim(), price, url: hm[1], cond, addFee: sm ? +sm[1] : 0, img: im ? im[1] : '' });
+            out.push({ name, price, url: 'https://page.auctions.yahoo.co.jp/jp/auction/' + id, cond, addFee: sm ? +sm[1] : 0, img });
           });
           return out.filter(x => x.name);
         };
@@ -18277,6 +18295,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🔴 <b>ヤフオクの検索が1件も取れていませんでした（仕入れ検索・🤖の写真集めの両方）</b>。🤖の写真の控えで、写真あり693件の内訳が <b>メルカリ656・PayPayフリマ37・ヤフオク0</b> だったので実物を叩いて調べました。原因は2つ、どちらもヤフオク側のHTMLが変わったためです。①1件を6,000字の窓で切り出していたが、いまは1件<b>6,010〜8,524字</b>（実測・中央値7,243）に育っていて<b>50件中50件が窓からあふれ</b>ていた。②リンクが <code>page.auctions.yahoo.co.jp</code> から <code>auctions.yahoo.co.jp</code> に変わり、古いホスト名を必須にしていたので全部落ちていた。→ <b>文字数で切らず「次の商品の始まりまで」を1件にし、題名・画像・IDは data-auction-* 属性から取る</b>ように直しました。同じ検索で<b>50件中50件が画像つきで取れる</b>ことを実画面で確認しています。<b>この0件は「無かった」ではなく「読めなかった」</b>で、失敗を握りつぶしていたため気づけませんでした。',
+      '📷 <b>これが🤖の出品が伸びない最大の原因でした</b>。ヤフオクの写真が取れないぶんを🤖が自分で取りに行き、GoogleのIPなので弾かれて休み、<b>見送り300件のうち162件（54%）が「ヤフオク待ち」</b>になっていました。（残りの highfew 78・costhigh 32・ratio 24 は<b>意図した安全弁</b>なので、これは正しい見送りです）',
       '🏦 <b>🤖自動出品を「2台目のGoogleアカウント」で動かせるようにしました＝接続枠がもう2万回/日</b>（本人「出品は毎日ガンガンしたいんです」「やってくれ」）。接続枠の2万回/日は<b>Googleアカウント単位</b>で、いま本体と「メルカリ取込」が1つの枠を分け合っています。🤖はGoogleアカウント固有のもの（Gmail等）を使っていないので移せます（メルカリ取込はGmailを読むので移せません）。<b>⚙️設定に「2台目の自動出品GAS URL」</b>、<b>🤖の設定に「動かす場所」</b>が増えました。切り替えると、ポータルは🤖の操作だけそちらへ送ります。壊れやすい所は先に潰してあります：①<b>2台目はShopeeのトークンを持たない</b>（本体からもらう）。両方が更新すると使い捨ての refresh_token を取り合って<b>7か国の認証が丸ごと壊れる</b>ため。②<b>担当は1つだけ</b>＝担当でない側は「手で押しても」動きません（同じ作品を二重に出さないため）。③<b>設定が読めない時は動かない</b>（読めない＝担当が分からない。既定の本体で勝手に動くと、2台目が保存した記録を古い写しで上書きします）。④<b>枠を混ぜない</b>（別アカウント＝別枠。混ぜると使っていないのにブレーキを踏みます）。⑤<b>AIの利用料も合算</b>（2台目に移した分が💴の画面から静かに消えないように）。',
       '🚀 <b>出品同期の接続枠の無駄を2つ取りました（1日あたり約4,200回・全体の21%）</b>（本人「出品は毎日ガンガンしたいんです」）。実測すると<b>枠のいちばん太い口は🤖自動出品ではなく出品同期</b>でした（3.2時間で get_model_list 613＋get_item_list 168＋get_item_extra_info 134＝915回＝32%／🤖本体は308回）。①<b>全件同期を1店7時間ごと→1日1回に</b>：1回1店なので55分ごとだと各店を1日3.4回まるごと読み直していました。変更の取り込みは2時間ごとの増分が別にやっているので、全件の役目は「Shopeeで消えた出品の照合」だけ＝1日1回で足ります（消えた出品の表示が最大1日遅れます）。②<b>増分同期の窓の重なりを解消</b>：3時間ぶんを2時間ごとに取っていて1.5回ぶん二重取りでした。実際に空いた時間＋30分だけ取ります。<b>浮いた枠はそのまま出品に回ります。</b>',
       '✍️ <b>出品コンポーザーの「価格設定シート」を既定で閉じました</b>（見やすさの見直し）。手数料・SLS送料と、仕入額帯70段×重量帯×国のROI表は<b>手数料改定のときだけ触る設定</b>なのに、毎回の出品で使う「1.商品 → 2.価格 → 3.バリエ」の<b>途中に開きっぱなし</b>で、実測で<b>1,159px</b>ぶん間に挟まっていました。見出しに「手数料改定のときだけ開く」と添えてあるので、何が入っているかは閉じたままでも分かります。価格分析から「価格設定シートを開く↗」で飛んできた時は<b>自動で開いてから</b>スクロールします（閉じたままだと押しても何も無いように見えるため）。',
