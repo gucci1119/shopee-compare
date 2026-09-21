@@ -17,7 +17,20 @@ function now_() { return Math.floor(Date.now() / 1000); }
 // ===== urlfetch 日次枠の自衛（無料枠 20,000回/日を全機能で共有・PT日付境界でリセット）=====
 // 背景の定期同期は UF_STOP で止め、残り(2万−UF_STOP)を「発送手配・⚡今すぐ取得」など手動操作に予約する＝
 // 背景ループがどれだけ走っても手動操作が枠切れ(get_shipping_parameter失敗)しない。教訓[[shopee_portal_perf_quota]]。
-var UF_STOP = 15000;   // 背景同期の停止ライン（残り約5,000回を手動操作に確保）
+/* ★2026-09-21 停止ラインを実態に合わせて下げた。ここが「ブレーキが効かない」最後の原因だった。
+   枠2万は【Googleアカウント単位】で、同じアカウントに Shopeeコミュニティの自動Bumpツール（プロジェクト `tool`）が
+   同居している。実行ログの実測：boost は毎回「UrlFetchApp.fetch を呼び出す権限がありません」で失敗＝枠は食わないが、
+   **token_refresh が35秒走って「完了」**＝この中で大量に fetch している。こちらからは数えられない（外部ライブラリ FT2）。
+   引き算での実測：Google が上限と言った 2026-09-21 09:43 JST 時点で【こちらの計測 8,481／実際は20,000】
+   ＝**数え漏れ 1万1,500回以上（枠の約6割）**。2日連続でほぼ同じ量（出品数に連動しない＝時間トリガーの形）。
+   → **こちらが実際に使えるのは約8,500回/日**。15,000 は到達不能な線で、そこに達する前に必ずGoogleに止められていた。
+   本人「そのツールはいじらなくていい」（2026-09-21）＝こちら側を実態に合わせる。
+   ※ もしツールを別アカウントへ移す・止めることになったら、この値を 15000 に戻すこと。 */
+var UF_STOP = 6000;   // 背景同期の停止ライン。実際に使えるのは約8,500回/日なので、残り約2,500回を手動操作に確保
+/* こちらが実際に使い切れる上限。Googleの枠は20,000だが、同じアカウントの同居ツールが約11,500回/日を持っていく。
+   画面の「残り○%」を20,000で割ると【使い切っているのに残り75%】と出てしまい、9日間それで騙された。
+   同居ツールを別アカウントへ移す・止める場合は 20000 に戻す。 */
+var UF_CAP_EFF = 8500;
 var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop_/sb* が加算）
 // ★件数で数える。**fetchAll は 1呼び出しでも N回ぶん枠を食う**のに、これまで
 //   ufBump_ を1度も呼んでおらず、画像の一括取得・アップロードが【カウントされないまま】
@@ -948,7 +961,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 12);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: UF_STOP, cap: 20000, leftForManual: Math.max(0, 20000 - _tot), bgAllowed: !_blk && _tot < UF_STOP, top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: UF_STOP, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < UF_STOP, top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
