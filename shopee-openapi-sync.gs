@@ -1005,6 +1005,17 @@ function doGetInner_(e) {
        ★refresh_token は絶対に返さない。子機が更新できてしまうと、使い捨ての refresh_token を
          本体と取り合って全店の認証が壊れる。更新は本体だけの仕事。
        期限が近いものはここで本体が更新してから渡す（更新のurlfetchも本体の枠で消費する＝正しい側）。 */
+    /* 🏪 2店舗目に種のカタログを1つ作る（非公開）。1回1つ＝押した分しか作らない。 */
+    if (p.action === 'seed_shop') {
+      var sscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var ssout;
+      try {
+        var sswt = P_().getProperty('WRITE_TOKEN');
+        if (!sswt || p.token !== sswt) throw new Error('WRITE_TOKEN不正');
+        ssout = seedShopCatalog_(p);
+      } catch (err) { ssout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(sscb + '(' + JSON.stringify(ssout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'shop_tokens') {
       var stcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var stout;
@@ -6375,6 +6386,50 @@ function baReuseTestSlot_(shopId, itemId, it, st, cc) {
     /* 名前まで変わっていたら「枠は使った」＝呼び出し側は add し直さない */
     return renamed ? { ok: true, model_id: tm.model_id, partial: true, stock: 0 } : null;
   }
+}
+/* 🏪 2店舗目（同じ国のサブ垢）へ、いまのカタログを**種として1つ作る**。
+   本人 2026-09-21「同じ国での2店舗目ってことで、サブアカがあるんじゃない？」「2個目のアカウントに出していい」。
+   なぜ要るか：**出品枠は公開中の数で決まり、店ごと**。実測（2026-09-21）で
+   TH 1店舗目は 500/500 で**枠0＝もう1件も公開できない**。一方 2店舗目は6か国にあり、PH の6件以外は**出品ゼロ**。
+   🤖は「既にあるカタログの空き明細」に足す作りなので、**2店舗目にはまず入れ物（カタログ）が要る**。
+
+   ★やること＝1店舗目のカタログを読んで、2店舗目に同じ中身で作る（**非公開**で作る）。
+     画像は image_id が店をまたげないので**URLから入れ直す**（addItem_ が中でやる）。
+   ★公開はしない。公開のタイミングは本人が決める（[[listing-publish-timing-is-users-call]]）。
+   ★1回に作るのは1つだけ（画像9枚＝取得+送信で18回など、1つでも20回前後使う）。
+   返り：{ ok, item_id, name } ／ 失敗は { ok:false, error } */
+function seedShopCatalog_(p) {
+  var src = parseInt(p.src_shop_id, 10), dst = parseInt(p.dst_shop_id, 10), itemId = parseInt(p.item_id, 10);
+  if (!src || !dst || !itemId) return { ok: false, error: 'src_shop_id / dst_shop_id / item_id 必須' };
+  if (src === dst) return { ok: false, error: '同じ店舗です' };
+  var full = null;
+  try { full = getItemFull_(src, itemId); } catch (e) { return { ok: false, error: '元のカタログを読めません: ' + String((e && e.message) || e).slice(0, 120) }; }
+  var base = (full && full.base) || {};
+  if (!base.item_name) return { ok: false, error: '元のカタログに名前がありません' };
+  /* 画像は URL で渡す（image_id は店ごとなので使い回せない）。base の image_url_list を使う。 */
+  var urls = ((base.image || {}).image_url_list || []).slice(0, 9);
+  if (!urls.length) return { ok: false, error: '元のカタログに画像がありません' };
+  var tierName = '';
+  try { var tv = ((full.model || {}).tier_variation || [])[0]; tierName = (tv && tv.name) || ''; } catch (e2) {}
+  var body = {
+    shop_id: dst,
+    item_name: String(base.item_name || '').slice(0, 120),
+    description: String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || ''),
+    images: urls,
+    weight: (base.weight != null ? base.weight : 0.5),
+    condition: base.condition || 'USED',
+    price: Number(p.price) || 300,
+    stock: 0,                       /* 種なので在庫0。売れるものは🤖が明細で入れる */
+    publish: false,                 /* ★必ず非公開で作る */
+    brand_id: ((base.brand || {}).brand_id != null ? base.brand.brand_id : 0)
+  };
+  if (base.dimension) body.dimension = base.dimension;
+  /* バリエの軸だけ作っておく（🤖はここへ明細を足す）。中身は仮の1つ＝既存の複製と同じ形。 */
+  if (tierName) body.variations = [{ tier_name: String(tierName).slice(0, 20), options: [{ option: 'test', price: Number(p.price) || 300, stock: 0 }] }];
+  var r = null;
+  try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
+  if (!r || !r.item_id) return { ok: false, error: '作れましたが item_id が返りませんでした' };
+  return { ok: true, item_id: r.item_id, shop_id: dst, name: body.item_name, images: urls.length, tier: tierName || null };
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
