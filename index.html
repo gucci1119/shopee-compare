@@ -18319,6 +18319,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🔌 <b>2台目のGAS（別のGoogleアカウント）への切り替えを、画面だけで完結するようにしました</b>（本人「スムーズに切り替えられるように、仕組みを作っておいて」）。🤖の設定に <b>「🔌 2台目をためす」</b> ボタンを置きました。押すと ①URL ②WRITE_TOKEN ③届くか ④<b>子機として認識されているか</b> ⑤その口座の枠の残り（あと約◯件ぶん）を一度に確かめます。④は <code>BROKER_URL</code> の入れ忘れで<b>届くのに枠が増えない</b>という一番起きやすい取りこぼしなので、わざと別メッセージにしています。切り替える時は<b>押す前に</b>「6分は両方止まる・戻せる」を出し、<b>2台目のURLが空のまま切り替えようとしたら止めます</b>（送り先が無いと出品が丸ごと止まるため）。',
       '🚦 <b>出品のペースを上げました（1日 約600件 → 約1,000件）</b>（本人「1日2,000品とか3,000品とか急ピッチで出していきたい」）。🤖が止まる線を <b>9,000 → 14,000</b>、注文・入金が止まる線を <b>15,000 → 17,000</b> に上げました。上げられたのは<b>この日に数え漏れを潰したから</b>です（同じGoogleアカウントの別ツールが1日1万1,500回以上を黙って持っていっていたのを止め、アカウント全体を調べて「いま枠を使うのは2つだけ」＝表示が実態と合っていることを確認しました）。',
       '🔢 <b>上のバーに「あと約◯件出せます」が出るようになりました</b>（本人「やる気がある日はぶわーって出しちゃったりとかする」）。「残り74%」だけでは<b>あと何件出せるか分からない</b>＝一気に出す前の判断ができませんでした。実測（<b>1明細あたり3.7回</b>・95作品→295明細の日に2通りの数え方で一致）で件数に翻訳しています。基準は<b>注文・入金が止まる線まで</b>＝ここまでなら出しても発送作業は止まりません。なお<b>手で出す操作にはブレーキを一切掛けていません</b>（本人の操作が勝つべきなので）。止める代わりに見せる、という考え方です。',
       '🐢 <b>出品ログ（日別）が重くなっていた原因を数えました</b>（本人「なんかずっと読み込み中だけど、重くなってますかね？」）。実測：この画面を開くとSupabaseへの通信が<b>153本</b>走り、うち<b>出品ログだけで55本・合計246秒</b>（1本あたり最長25.7秒）。理由は <code>listing_log</code> が<b>28,301行</b>あり、<b>全行×全列</b>を1,000行ずつ読む＝29往復。しかも読み終わるまで印が付かないので、描き直しが2回来ると<b>同じ全件読みが2本同時に走って</b>いました。→ <b>走っている読みを使い回す</b>ようにして往復を半分にしました。<b>行数は🤖が出すぶんだけ毎日増えるので、放っておくと必ず重くなります</b>（残りの手＝重い列は「選んだ日」の分だけ取る。未着手）。',
@@ -29012,7 +29013,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           <label class="ba-field">動かす場所（接続枠はGoogleアカウントごとに2万回/日）<select id="ba-runner">
             <option value="main"${String(cfg.runner || 'main') !== 'child' ? ' selected' : ''}>本体のGAS（いつもの Shopee OpenAPI Sync）</option>
             <option value="child"${String(cfg.runner || 'main') === 'child' ? ' selected' : ''}>2台目のGAS（別のGoogleアカウント・枠がもう2万）</option>
-          </select></label>
+          </select>
+          <span class="smd-dim" style="font-size:10.5px;display:block;margin-top:2px">${settings.boshuUrl ? '2台目のURLは登録済み。右の「🔌 2台目をためす」で届くか確かめられます' : '2台目はまだ未設定（⚙️設定の「2台目の自動出品GAS URL」）。いまは本体だけで動いています'}</span></label>
+          <span style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <button class="smd-btn" id="ba-childtest" style="font-size:11.5px;padding:3px 10px">🔌 2台目をためす</button>
+            <span id="ba-childmsg" class="smd-dim" style="font-size:11px"></span>
+          </span>
           <label class="ba-field">1回に出す件数（30分ごと）<input id="ba-per" type="number" min="1" max="20" value="${Number(cfg.perTick) || 8}"></label>
           <label class="ba-field">1日の上限（作品数）<input id="ba-daily" type="number" min="1" max="2000" value="${Number(cfg.dailyMax) || 100}"></label>
           <label class="ba-field">在庫1にする最低の出品件数<input id="ba-hits" type="number" min="1" max="50" value="${Number(cfg.minHits) || 3}"></label>
@@ -29071,7 +29077,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
            新しい担当がすぐ動き出すと**重なる**（別プロジェクト同士は鍵で待ち合わせできない）。
            → 切り替えた時刻を残し、GAS側は【切り替えから6分は両方とも動かない】。
              1回の最長は 鍵待ち90秒＋4分10秒＝約5分40秒なので、6分あれば必ず流し切れる。 */
-      { const rn = document.getElementById('ba-runner'); if (rn) { const _nr = (rn.value === 'child' ? 'child' : 'main'); if (_nr !== String(cfg.runner || 'main')) c.runnerAt = new Date().toISOString(); c.runner = _nr; settings.boshuRunner = _nr; saveSettings(); } }
+      { const rn = document.getElementById('ba-runner'); if (rn) {
+          const _nr = (rn.value === 'child' ? 'child' : 'main');
+          if (_nr !== String(cfg.runner || 'main') && !light) {
+            /* ★確認を出すのは【保存の時だけ】。readCfg は再描画(light=true)からも呼ばれるので、
+               ここを分けないと画面を描き直すたびにダイアログが出る。 */
+            /* ★切り替えは【押す前に何が起きるか】を伝える。黙って6分止まると「壊れた」に見える。
+               2台目に移す時にURLが無ければ、出品が丸ごと止まるので先に止める。 */
+            if (_nr === 'child' && !settings.boshuUrl) { alert('2台目のGAS URL が未設定です（⚙️設定の「2台目の自動出品GAS URL」）。\n\nこのまま切り替えると、🤖の操作の送り先が無くなって出品が止まります。'); return null; }
+            if (!confirm('🤖を動かす場所を「' + (_nr === 'child' ? '2台目のGAS（別のGoogleアカウント）' : '本体のGAS') + '」に切り替えます。\n\n・いま走っている回を流し切るため、切り替えてから6分は両方とも動きません（二重に出さないため）\n・そのあと自動で新しい方が動き出します\n・戻すのはいつでもここから\n\nよろしいですか？')) return null;
+            c.runnerAt = new Date().toISOString();
+          }
+          if (light) c.runner = String(cfg.runner || 'main');
+          else { c.runner = _nr; settings.boshuRunner = _nr; saveSettings(); }
+        } }
       c.perTick = Math.max(1, Math.min(20, parseInt(document.getElementById('ba-per').value, 10) || 8));
       c.dailyMax = Math.max(1, parseInt(document.getElementById('ba-daily').value, 10) || 100);
       c.minHits = Math.max(1, parseInt(document.getElementById('ba-hits').value, 10) || 3);
@@ -29145,10 +29164,32 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           } catch (e) { alert('やり直しの印を消せませんでした: ' + ((e && e.message) || e)); }
         }); }
     }
+    /* 🔌 2台目のGASが【本当に使える状態か】をその場で確かめる。
+       切り替えてから「動いていない」に気づくのが一番きついので、押す前に分かるようにする。
+       見るのは4つ：①URLが入っているか ②届くか ③**子機として認識されているか**（BROKER_URL が入っていないと
+       本体と同じ振る舞いになり、枠が増えない）④その口座の枠の残り。 */
+    { const bt = box.querySelector('#ba-childtest'); if (bt) bt.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const msg = box.querySelector('#ba-childmsg'); const say = (t, c) => { if (msg) { msg.textContent = t; msg.style.color = c || '#666'; } };
+        if (!settings.boshuUrl) { say('⚙️設定の「2台目の自動出品GAS URL」がまだ空です', '#b26a00'); return; }
+        if (!settings.writeToken) { say('⚙️設定の WRITE_TOKEN が空です（2台目にも同じ値を入れておく必要があります）', '#b26a00'); return; }
+        say('確かめています…');
+        try {
+          const u = settings.boshuUrl + (settings.boshuUrl.includes('?') ? '&' : '?') + 'action=uf_status&token=' + encodeURIComponent(settings.writeToken) + '&callback=cb';
+          const r = await jsonp(u, 20000, true);
+          if (!r || !r.ok) { say('✕ 届きましたが断られました：' + String((r && r.error) || '不明') + '（WRITE_TOKEN が本体と同じか確認）', '#d93025'); return; }
+          if (!r.child) { say('⚠ 届きましたが【子機として認識されていません】。2台目のスクリプト プロパティに BROKER_URL（本体の /exec）を入れてください。このままだと枠は増えません', '#b26a00'); return; }
+          const left = Math.max(0, (Number(r.stopLineCore) || 0) - (Number(r.used) || 0));
+          const per = Number(r.perListing) || 3.7;
+          say('✓ 使えます：2台目の枠 今日 ' + num(r.used) + ' 回／止まる線 ' + num(r.stopLine) + '（あと約 ' + num(Math.floor(left / per)) + ' 件ぶん）', '#1a7f37');
+        } catch (err) { say('✕ 届きませんでした：' + apiErrJa((err && err.message) || err) + '（URLが /exec で終わっているか・アクセスが「全員」か）', '#d93025'); }
+      }); }
     box.querySelectorAll('.ba-hw').forEach(cb => cb.addEventListener('change', redraw));
     const save = async (quiet) => {
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return null; }
       const c = readCfg();
+      /* ★readCfg は「動かす場所」の切り替えを取り消した時に null を返す＝そのまま触ると落ちる。 */
+      if (!c) return null;
       if (c.on && !c.hws.length) { alert('自動で出すには、機種を1つ以上選んでください'); return null; }
       if (c.on && c.hws.some(h => !((c.family[h] || {}).ccs || []).length)) { alert('選んだ機種に「出す国」が1つも無いものがあります: ' + c.hws.filter(h => !((c.family[h] || {}).ccs || []).length).map(h => TITLE_HW_JA[h] || h).join('・')); return null; }
       await sbUpsert('app_kv', [{ k: 'boshu_auto_cfg', v: c, updated_at: new Date().toISOString() }]);
