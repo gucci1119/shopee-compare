@@ -985,9 +985,12 @@ function doGetInner_(e) {
       var ufo;
       try {
         var st = ufState_();
-        // 何が食っているかの内訳（多い順・上位12）。合計しか見えないと原因が永久に分からない。
+        /* 何が食っているかの内訳（多い順）。合計しか見えないと原因が永久に分からない。
+           ★2026-09-21 上位12件で切っていたため、self 2,844 のうち 516回（18%）が
+           「どれに入るか分からない」まま残り、【出品に回せる枠の上限】を数字で言えなかった。
+           種類はたかだか数十なので全部返す（上限40）。 */
         var tg = st.tag || {}, top = Object.keys(tg).map(function (k) { return { k: k, n: tg[k] }; })
-          .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 12);
+          .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
         ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: UF_STOP, stopLineCore: UF_STOP_CORE, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < UF_STOP, top: top, aiSpend: aiSpendLoad_() };
