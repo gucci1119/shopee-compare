@@ -18295,6 +18295,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🐢 <b>出品ログ（日別）が重くなっていた原因を数えました</b>（本人「なんかずっと読み込み中だけど、重くなってますかね？」）。実測：この画面を開くとSupabaseへの通信が<b>153本</b>走り、うち<b>出品ログだけで55本・合計246秒</b>（1本あたり最長25.7秒）。理由は <code>listing_log</code> が<b>28,301行</b>あり、<b>全行×全列</b>を1,000行ずつ読む＝29往復。しかも読み終わるまで印が付かないので、描き直しが2回来ると<b>同じ全件読みが2本同時に走って</b>いました。→ <b>走っている読みを使い回す</b>ようにして往復を半分にしました。<b>行数は🤖が出すぶんだけ毎日増えるので、放っておくと必ず重くなります</b>（残りの手＝重い列は「選んだ日」の分だけ取る。未着手）。',
       '🔴 <b>ヤフオクの検索が1件も取れていませんでした（仕入れ検索・🤖の写真集めの両方）</b>。🤖の写真の控えで、写真あり693件の内訳が <b>メルカリ656・PayPayフリマ37・ヤフオク0</b> だったので実物を叩いて調べました。原因は2つ、どちらもヤフオク側のHTMLが変わったためです。①1件を6,000字の窓で切り出していたが、いまは1件<b>6,010〜8,524字</b>（実測・中央値7,243）に育っていて<b>50件中50件が窓からあふれ</b>ていた。②リンクが <code>page.auctions.yahoo.co.jp</code> から <code>auctions.yahoo.co.jp</code> に変わり、古いホスト名を必須にしていたので全部落ちていた。→ <b>文字数で切らず「次の商品の始まりまで」を1件にし、題名・画像・IDは data-auction-* 属性から取る</b>ように直しました。同じ検索で<b>50件中50件が画像つきで取れる</b>ことを実画面で確認しています。<b>この0件は「無かった」ではなく「読めなかった」</b>で、失敗を握りつぶしていたため気づけませんでした。',
       '📷 <b>これが🤖の出品が伸びない最大の原因でした</b>。ヤフオクの写真が取れないぶんを🤖が自分で取りに行き、GoogleのIPなので弾かれて休み、<b>見送り300件のうち162件（54%）が「ヤフオク待ち」</b>になっていました。（残りの highfew 78・costhigh 32・ratio 24 は<b>意図した安全弁</b>なので、これは正しい見送りです）',
       '🏦 <b>🤖自動出品を「2台目のGoogleアカウント」で動かせるようにしました＝接続枠がもう2万回/日</b>（本人「出品は毎日ガンガンしたいんです」「やってくれ」）。接続枠の2万回/日は<b>Googleアカウント単位</b>で、いま本体と「メルカリ取込」が1つの枠を分け合っています。🤖はGoogleアカウント固有のもの（Gmail等）を使っていないので移せます（メルカリ取込はGmailを読むので移せません）。<b>⚙️設定に「2台目の自動出品GAS URL」</b>、<b>🤖の設定に「動かす場所」</b>が増えました。切り替えると、ポータルは🤖の操作だけそちらへ送ります。壊れやすい所は先に潰してあります：①<b>2台目はShopeeのトークンを持たない</b>（本体からもらう）。両方が更新すると使い捨ての refresh_token を取り合って<b>7か国の認証が丸ごと壊れる</b>ため。②<b>担当は1つだけ</b>＝担当でない側は「手で押しても」動きません（同じ作品を二重に出さないため）。③<b>設定が読めない時は動かない</b>（読めない＝担当が分からない。既定の本体で勝手に動くと、2台目が保存した記録を古い写しで上書きします）。④<b>枠を混ぜない</b>（別アカウント＝別枠。混ぜると使っていないのにブレーキを踏みます）。⑤<b>AIの利用料も合算</b>（2台目に移した分が💴の画面から静かに消えないように）。',
@@ -31277,6 +31278,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     return { added: add.length, total: kset.size, cleaned };
   }
   async function loadListingLog() {
+    /* ★2026-09-21 本人「なんかずっと読み込み中だけど、重くなってますかね？」→ 実測でその通りだった。
+       `listing_log` は **28,301行**あり、ここで **全行×全列**を1,000行ずつページ送りで読む＝29往復。
+       しかも `logState.rows` は【読み終わってから】入るので、描き直しが2回来ると**同じ全件読みが2本同時に走る**。
+       実測：Supabaseへの通信 153本のうち **listing_log だけで55本・合計246秒**（1本あたり最長25.7秒）。
+       → 走っている読みがあれば**その約束を使い回す**（2本目を起こさない）。これで往復が半分になる。
+       ※行数は🤖が出すぶんだけ毎日増えるので、**放っておくと必ず重くなる**。
+         次の手＝重い列（name/model_name/image/price）は「選んだ日」の分だけ取る（未着手・更新ログに記録）。 */
+    if (logState._inflight) return logState._inflight;
+    logState._inflight = (async () => {
     logState.loading = true; logState.missing = false;
     try {
       const [rows, kv] = await Promise.all([
@@ -31293,6 +31303,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       logState.rows = [];
       if (/40[14]|does not exist|relation/i.test(String(e.message))) logState.missing = true; else throw e;
     } finally { logState.loading = false; }
+    })();
+    try { return await logState._inflight; } finally { logState._inflight = null; }
   }
   function renderListingLog() {
     const host = document.getElementById('list-log'); if (!host) return;
