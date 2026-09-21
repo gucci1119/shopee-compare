@@ -4159,6 +4159,21 @@ function syncListingsForShop_(tok, sinceSec) {
         if (_pv.length < 1000) break;
       }
     } catch (ePv) { prevById = {}; Logger.log('前回分の読み込みに失敗（全部取り直します）: ' + ePv); }
+  } else {
+    /* ★2026-09-22 増分同期でも前回分を読む。
+       これまで prevById を読むのは【全件同期のときだけ】で、30分ごとの増分では毎回 null＝
+       「変更あり」で上がった商品の明細を必ず get_model_list で取り直していた。
+       増分の窓は「空いた時間＋30分」で重なるので、中身が変わっていない商品まで何度も取り直していた。
+       実測 2026-09-22：get_model_list が1日1,970回＝接続枠の23%で断トツ1位。
+       上がってきた item_id だけを 200件ずつ読む（Supabase読みは1〜2回）。update_time が同じなら明細を使い回す。 */
+    try {
+      var _idsInc = ids.map(function (x) { return x.item_id; });
+      for (var _k = 0; _k < _idsInc.length; _k += 200) {
+        var _pv2 = sbSelect_('listings', 'select=item_id,update_time,models,model_count,price_min,price_max,stock&shop_id=eq.'
+          + encodeURIComponent(String(shopId)) + '&item_id=in.(' + _idsInc.slice(_k, _k + 200).join(',') + ')&limit=1000');
+        (_pv2 || []).forEach(function (r) { prevById[String(r.item_id)] = r; });
+      }
+    } catch (ePv2) { prevById = {}; Logger.log('増分ぶんの前回分が読めませんでした（従来どおり取り直します）: ' + ePv2); }
   }
   var reused = 0;
   for (var i = 0; i < ids.length; i += 50) {
