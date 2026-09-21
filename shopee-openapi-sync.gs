@@ -6063,7 +6063,16 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
       var tgt = null; for (var r = 0; r < trs.length; r++) { if (100 - (trs[r].models || []).length > 0) { tgt = trs[r]; break; } }
       var full = !tgt; if (!tgt) tgt = trs[0];
       if (!tgt) { row.plan[cc] = { note: 'カタログ群なし' }; return; }
-      var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
+      /* ★2026-09-22【確定・本人】バリエ価格差の上限は **BRだけ4倍・それ以外の国は全部5倍**。
+     ★ただし自分を縛る値は **9割（BR 3.6／他 4.5）**にする。理由は2つ、どちらも実測：
+       ①Shopeeは **セール価格も含めて** 判定する（エラー文 "exceeds 5 (including promotion price)"）。
+         こちらが見ているのは `original_price` だけなので、セール中の明細があると**計算上は通るのに弾かれる**。
+       ②実測（2026-09-21 SG）で既存カタログの比が **ちょうど5.00**（21.93〜109.5）だった。
+         境界ちょうどだと、丸め（baRound_）で1円動くだけでアウトになる。
+     弾かれると**その作品がだまって落ちる**（2026-08-06 に整理済みの型・[[20_Shopeeナレッジ]]）ので、
+     手前で止めて枠内に寄せる方が出品数は増える。 */
+  var RATIO_HARD = cc === 'BR' ? 4 : 5;
+  var ratio = RATIO_HARD * 0.9, ceil = cc === 'VN' ? 999999 : 0;
       var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
       var wG = Math.round((Number(tgt.weight) || 0) * 1000) || Number(cfg.family[hw].weightG) || 150;
       var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
@@ -6169,7 +6178,16 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   var res = { added: 0, skipped: 0, note: '' };
   rows = rows.slice().sort(function (a, b) { return ((a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1)) || (baSeriesNo_(a.name) - baSeriesNo_(b.name)) || (a.item_id - b.item_id); });
   if (!rows.length) { res.note = 'カタログ群なし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); baSkipRec_(st, hw, cc, p, 'nofam'); }); return res; }
-  var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
+  /* ★2026-09-22【確定・本人】バリエ価格差の上限は **BRだけ4倍・それ以外の国は全部5倍**。
+     ★ただし自分を縛る値は **9割（BR 3.6／他 4.5）**にする。理由は2つ、どちらも実測：
+       ①Shopeeは **セール価格も含めて** 判定する（エラー文 "exceeds 5 (including promotion price)"）。
+         こちらが見ているのは `original_price` だけなので、セール中の明細があると**計算上は通るのに弾かれる**。
+       ②実測（2026-09-21 SG）で既存カタログの比が **ちょうど5.00**（21.93〜109.5）だった。
+         境界ちょうどだと、丸め（baRound_）で1円動くだけでアウトになる。
+     弾かれると**その作品がだまって落ちる**（2026-08-06 に整理済みの型・[[20_Shopeeナレッジ]]）ので、
+     手前で止めて枠内に寄せる方が出品数は増える。 */
+  var RATIO_HARD = cc === 'BR' ? 4 : 5;
+  var ratio = RATIO_HARD * 0.9, ceil = cc === 'VN' ? 999999 : 0;
   var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
   var wG = Math.round((Number(rows[0].weight) || 0) * 1000) || Number(fam.weightG) || 150;
   var seen = {}; todo.forEach(function (p) { seen[baTmKey_(p.en)] = 1; });
