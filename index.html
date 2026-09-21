@@ -6696,6 +6696,13 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
+    [/^🔎 メルカリで探す$/, '🔎 Search Mercari'],
+    [/^🔎 探しています…$/, '🔎 Searching…'],
+    [/^「(.*)」で探します$/, 'Searching for "$1"'],
+    [/^見つかりませんでした$/, 'Nothing found'],
+    [/^メルカリ検索はブリッジ（Tampermonkey）が要ります$/, 'Mercari search needs the Tampermonkey bridge'],
+    [/^🖼 同じ写真が付いている明細$/, '🖼 Variations sharing one photo'],
+    [/^🎮 機種の食い違いを全部見る$/, '🎮 Show all hardware mismatches'],
     // 🚦 接続枠と🤖の停止（2026-09-21・Codex指摘P2で追加。失敗の状態が日本語のままだと外注さんが読めない）
     [/^⛔ Shopee枠 使い切り（(.*)まで）$/, '⛔ Shopee quota used up (until $1)'],
     [/^⛔ Shopee枠 断られ中（(\d+)分前）$/, '⛔ Shopee quota refused ($1 min ago)'],
@@ -17988,6 +17995,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F50E} <b>【不具合】🔎メルカリで探すが、副題を捨てて検索していました</b>（Codexの指摘）。<b>Zelda: Twilight Princess</b> が <b>Zelda</b> だけで検索され、<b>別のゲームや周辺機器の写真</b>が並ぶところでした（メルカリ検索は安い順で、題名を見ずに先頭から採るため）。→ 落とすのは<b>頭の機種の印（GBA: PS4: など）だけ</b>にして、副題は残します。<br>あわせて、<b>長い題名の明細が自分の写真に辿り着けない</b>のも直しました（長い題名は縮めた名前で明細を作っているのに、逆引きが元の名前しか見ていませんでした）。',
       '\u{1F4C1} <b>【不具合】PCのファイルで写真が差し替わっていませんでした</b>（別のAI・Codexのレビューで発覚）。📁でファイルを選んでも、<b>画像をアップロードせずにそのまま渡していた</b>ため、Shopee側は「すでにある画像の番号」とみなして<b>何も起きていませんでした</b>（大きいファイルだと通信が長すぎて失敗）。→ <b>先にアップロードしてから</b>差し替えるようにしました。出品ログの📷と、🍱母数の📷写真を直す、<b>両方</b>直しています。',
       '\u{1F504} <b>【不具合】手で直した写真が、あとで勝手に戻ることがありました</b>（同じくCodexの指摘）。差し替えた記録を<b>丸ごと書き換えていた</b>ため<b>判定の版が消え</b>、🤖が「古い記録だ」と判断して<b>もう一度見直しに掛け、元の写真で上書きする</b>可能性がありました。→ 元の記録に<b>混ぜて</b>書くようにしました。',
       '\u{1F5BC}\u{FE0F} <b>同じ写真が付いている明細を一覧で出せるようにしました</b>。出品ログの上の <b>🖼 同じ写真が付いている明細</b>（<b>Shopeeは叩きません</b>）。写真つきで<b>2種類に分けて</b>出します。<br>① <b>同じ作品を二重に出している（12組）</b>…<b>ハイフンとコロンの違いだけ</b>で同じ作品が2つ出ていました（例：<b>3DS-The Last Wings of Humanity</b> と <b>3DS:The Last Wings of Humanity</b>／TH の GBA-Red Rescue Team は3つ）。<b>消さずに</b>片方の在庫を0にするか名前を直します。<br>② <b>別の作品に同じ写真（51組）</b>…写真の取り違えです（例：<b>PS4:Yakuza 6 と Yakuza 7</b>／<b>FINAL FANTASY IX と VIII</b>／GBA:The Past &amp; Four Swords と The Minish Cap）。その場の <b>📷 直す</b> から差し替えられます。<br>※ 2階層のバリエ（色×サイズ）と単品は<b>写真が付かないのが正常</b>なので混ぜていません。本体の色違いが同じ写真なのも正しいので外しています。',
@@ -31471,7 +31479,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, ' ').trim();
         let hit = null;
         const want = norm(opt);
-        for (const kk of Object.keys(enMap)) { const e = enMap[kk]; const en = (typeof e === 'string') ? e : ((e && (e.en || e.t)) || ''); if (en && norm(en) === want) { hit = pre[kk]; break; } }
+        /* ★Codex指摘（2026-09-21・P2）：長い題名は `short`（縮めた名前）で明細を作っているので、
+           en/t だけ見ると**その明細は自分の写真に辿り着けない**。short も突き合わせる。 */
+        for (const kk of Object.keys(enMap)) { const e = enMap[kk];
+          const cand = (typeof e === 'string') ? [e] : [e && e.en, e && e.t, e && e.short].filter(Boolean);
+          if (cand.some(x => norm(x) === want)) { hit = pre[kk]; break; } }
         if (!hit) hit = pre[baPreKeyOf(opt)];
         if (hit) { if (hit.img) cands.push({ img: hit.img, thumb: hit.thumb || hit.img, src: hit.src || '', name: hit.name || '', cond: hit.cond || '', top: true }); (hit.alts || []).forEach(a => { if (a && a.img) cands.push(a); }); }
         cands = cands.filter(x => String(x.img).replace(/\?.*$/, '') !== String(curImg).replace(/\?.*$/, '')).slice(0, 12);
@@ -31498,7 +31510,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               <button class="lf-cand" data-i="${i}" title="${av((c.name || '') + (c.cond ? '／' + c.cond : ''))}" style="border:2px solid ${c.top ? '#1b7f3b' : '#ddd'};background:#fff;border-radius:8px;padding:0;width:86px;height:86px;overflow:hidden;cursor:pointer">
                 <img src="${rz(c.thumb || c.img)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;display:block"></button>`).join('')}</div>`
               : `<div class="smd-dim" style="font-size:11.5px;background:#f6f6f6;border-radius:8px;padding:8px 10px">この作品の候補はまだ集まっていません。<b>🔎 メルカリで探す</b>を押すと、いまの出品から候補を出します（押した時だけ1回だけ探します）。</div>`}
-            <div style="margin-top:8px"><button class="smd-btn" id="lf-search" style="font-size:12px">🔎 メルカリで探す</button> <span class="smd-dim" style="font-size:10.5px">「${esc(opt)}」で探します</span></div>
+            <div style="margin-top:8px"><button class="smd-btn" id="lf-search" style="font-size:12px">🔎 メルカリで探す</button> <span class="smd-dim" style="font-size:10.5px">「${esc(String(opt).replace(/^[A-Za-z0-9]{1,8}\s*[:：\-]\s*/, '').trim() || opt)}」で探します</span></div>
             <div id="lf-found" style="display:flex;flex-wrap:wrap;gap:7px;margin-top:7px"></div>
             <div style="margin-top:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
               <input id="lf-url" placeholder="画像URL（メルカリの商品URLも可）" style="flex:1;min-width:220px;padding:6px 9px;border:1px solid #ccc;border-radius:7px;font-size:12px">
@@ -31552,7 +31564,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           if (typeof mercariSearch !== 'function') { msg('メルカリ検索はブリッジ（Tampermonkey）が要ります'); return; }
           sb.disabled = true; sb.textContent = '🔎 探しています…'; msg('');
           try {
-            const items = await mercariSearch(String(opt).replace(/[:：].*$/, '').trim());
+            /* ★Codex指摘（2026-09-21・P2）：コロンから後ろを全部捨てると `Zelda: Twilight Princess` が `Zelda` になり、
+               **別のゲームや周辺機器の写真**が並ぶ（メルカリ検索は安い順・題名を見ずに先頭から採る）。
+               落としてよいのは **頭の機種の印**（`GBA:` `PS4:` など短い1語）だけ。副題は残す。 */
+            const kw = String(opt).replace(/^[A-Za-z0-9]{1,8}\s*[:：\-]\s*/, '').trim() || String(opt).trim();
+            const items = await mercariSearch(kw);
             const list = (items || []).filter(x => x && x.img).slice(0, 12);
             const host2 = ov.querySelector('#lf-found');
             host2.innerHTML = list.length ? list.map((x, i) => {
