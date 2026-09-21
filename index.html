@@ -17988,6 +17988,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '\u{1F4C1} <b>【不具合】PCのファイルで写真が差し替わっていませんでした</b>（別のAI・Codexのレビューで発覚）。📁でファイルを選んでも、<b>画像をアップロードせずにそのまま渡していた</b>ため、Shopee側は「すでにある画像の番号」とみなして<b>何も起きていませんでした</b>（大きいファイルだと通信が長すぎて失敗）。→ <b>先にアップロードしてから</b>差し替えるようにしました。出品ログの📷と、🍱母数の📷写真を直す、<b>両方</b>直しています。',
+      '\u{1F504} <b>【不具合】手で直した写真が、あとで勝手に戻ることがありました</b>（同じくCodexの指摘）。差し替えた記録を<b>丸ごと書き換えていた</b>ため<b>判定の版が消え</b>、🤖が「古い記録だ」と判断して<b>もう一度見直しに掛け、元の写真で上書きする</b>可能性がありました。→ 元の記録に<b>混ぜて</b>書くようにしました。',
       '\u{1F5BC}\u{FE0F} <b>同じ写真が付いている明細を一覧で出せるようにしました</b>。出品ログの上の <b>🖼 同じ写真が付いている明細</b>（<b>Shopeeは叩きません</b>）。写真つきで<b>2種類に分けて</b>出します。<br>① <b>同じ作品を二重に出している（12組）</b>…<b>ハイフンとコロンの違いだけ</b>で同じ作品が2つ出ていました（例：<b>3DS-The Last Wings of Humanity</b> と <b>3DS:The Last Wings of Humanity</b>／TH の GBA-Red Rescue Team は3つ）。<b>消さずに</b>片方の在庫を0にするか名前を直します。<br>② <b>別の作品に同じ写真（51組）</b>…写真の取り違えです（例：<b>PS4:Yakuza 6 と Yakuza 7</b>／<b>FINAL FANTASY IX と VIII</b>／GBA:The Past &amp; Four Swords と The Minish Cap）。その場の <b>📷 直す</b> から差し替えられます。<br>※ 2階層のバリエ（色×サイズ）と単品は<b>写真が付かないのが正常</b>なので混ぜていません。本体の色違いが同じ写真なのも正しいので外しています。',
       '\u{1F3F7} <b>同じ国でSKUがかぶっている分の直し方を決めて、計画を作りました</b>（本人「売れている方を優先」）。規則は「<b>SKUは同じ国では同じものが存在しない／国が違えばOK</b>」。実測で <b>1,419組・2,999明細</b>がかぶっていました（BR 461・VN 415・PH 158・SG 146・TW 124・TH 89・MY 26）。ほぼ全部（1,417組）が<b>同じ作品を同じ国で別々のカタログに2つ出している</b>状態です。<br><b>残す方の決め方</b>：①<b>売れている方</b>（2組）→②<b>在庫が多い方</b>（375組）→③<b>古い方＝先に出した方</b>（1,041組）。もう一方には <b>_2</b> を付けます（<b>1,580明細・263カタログ</b>）。<b>カタログも明細も1つも消しません</b>（SKUの文字を変えるだけ）。元のSKUは全部控えてあるので戻せます。接続枠が戻り次第、🤖の処理に載って自動で流れます。',
       '\u{1F3AE} <b>機種の食い違いを【全出品】から出せるようにしました</b>（本人「間違ったハードで出している商品などに気づけるので」）。これまでは<b>記録した日の分</b>しか見られませんでした。出品ログの上の <b>🎮 機種の食い違いを全部見る</b> で、<b>明細SKUの機種がカタログ名の機種に含まれていない明細</b>を種類ごとにまとめて出します。<b>Shopeeは1回も叩きません</b>（手元の出品データだけ）。<br><b>実測：照合できた 11,646明細のうち 258件（2.2%）</b>。多い順に <b>GBA→GB 29件</b>／VITA 15／3DS 15／<b>GB→GC 11件</b>／PS1→3DS・DS・GBA・GB 10 …。例：<b>GBA:Super Mario Bros.</b> が <b>GB/GBC のカタログ</b>に、<b>GC:Friendship Tag Battle</b> が <b>GBAのカタログ</b>に入っていました。<br>※ いろいろな機種をまとめたカタログは、名前に書ききれていないだけのこともあるので、<b>写真と明細名を見て判断</b>してください。',
@@ -28028,23 +28030,35 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 🖼 写真の判定（本人 2026-09-13「新品と勘違いして購入されるのを避けたい。テレビ画面の写真はやめて、商品の写真で（箱とは限らない）」）
   //   出品者が【商品そのもの】（箱・ケース・カートリッジ・ディスク…）を撮った写真＝OK。テレビ/モニター画面、公式のカタログ画像（白背景の宣材）、商品が写っていない、複数のまとめ写真＝NG。
   //   画像の中身は文字では分からないので Claude（haiku）に見せる。鍵が無ければ判定せず先頭の写真を使う（その旨を出す）。
-  async function baJudgePhoto(imgUrl) {
+  async function baJudgePhoto(imgUrl, wantTitle) {
     if (!settings.claudeKey) return { ok: true, kind: 'unjudged' };
     /* 📚 2026-09-21 本人が「📚学んだこと」で足した追加の指示を、判定のたびに足す＝基準が育つ */
     let _extraRule = '';
     try { const lr = (_baLearn && _baLearn.rules && _baLearn.rules.extra) || []; if (lr.length) _extraRule = ' 次の点も必ず守ってください：' + lr.map(x => x.text).join(' '); } catch (_) {}
+    /* ★2026-09-21 同じ写真が別の作品にも付いている51組を調べようとして分かったこと：
+       ここの判定は「実物の写真か」しか見ておらず、**どの作品かを読んでいなかった**（GAS 側は読んでいる）。
+       → 明細名を渡して、パッケージに印刷されている題名を**そのまま書き写させ**、合否はコードで決める
+       （[[ai-extract-then-decide-in-code]]：yes/no で聞くとぶれる）。 */
+    let _titleRule = '';
+    if (wantTitle) _titleRule = ' この写真は「' + String(wantTitle).replace(/"/g, ' ') + '」のはずです。パッケージやラベルに印刷されている題名を、見えたとおり title_seen に書き写してください（読めなければ ""）。JSON に "title_seen" も入れてください。';
     // ★画像は URL のまま Claude に渡す（ブラウザから画像を fetch すると CORS で「Failed to fetch」になり、判定できないまま通していた＝本人「実物の写真じゃないのに通るのはおかしい」）。
     //   鍵があるのに判定できなかった時は【通さない】（ok:false）。通ったものが無ければ、その作品は写真なし扱いで飛ばす
     try {
       const body = { model: 'claude-haiku-4-5-20251001', max_tokens: 120, messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'url', url: imgUrl } },
-        { type: 'text', text: '白・無地・単色・透明の背景に商品だけが浮いている画像、3Dの箱の宣材画像、通販サイトの商品画像は、影や縁があっても product_photo=false です（机・床・布・手など実際の生活環境が写っている写真だけ true。中古だと分かる写真だけを使います）。まず shown を決めてください：front＝商品1点を表面（おもて面）だけから撮った写真（閉じた箱・ケースの表、カセットのラベル面）／back＝裏面／open＝ケースや箱を開けている、ディスク・カセットをケースと並べている／manual＝説明書・チラシなどの紙が一緒に写っている／multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像。JSON には "shown" も入れてください。中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。' + '★写っているものが【ゲームソフトそのもの】でなければ product_photo=false・kind="goods" です：トレーディングカード（ポケモンカード等）、グッズ（マグネット・ぬいぐるみ・パスケース・アクリルスタンド・缶バッジ・タオル・キーホルダー等）、特典の台紙や紙だけ、中身の入っていない空のケース・空容器だけ。カセット・ディスク・ケース入りのソフト本体が写っている写真だけ true にしてください。' + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|goods|other"}' + _extraRule } ] }] };
+        { type: 'text', text: '白・無地・単色・透明の背景に商品だけが浮いている画像、3Dの箱の宣材画像、通販サイトの商品画像は、影や縁があっても product_photo=false です（机・床・布・手など実際の生活環境が写っている写真だけ true。中古だと分かる写真だけを使います）。まず shown を決めてください：front＝商品1点を表面（おもて面）だけから撮った写真（閉じた箱・ケースの表、カセットのラベル面）／back＝裏面／open＝ケースや箱を開けている、ディスク・カセットをケースと並べている／manual＝説明書・チラシなどの紙が一緒に写っている／multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像。JSON には "shown" も入れてください。中古ゲームソフトの出品写真です。出品者が商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）を撮った写真なら product_photo=true。テレビやモニターの画面を撮った写真、公式の商品画像（白背景のカタログ画像・宣材）、商品が写っていない写真、複数タイトルのまとめ写真は false。' + '★写っているものが【ゲームソフトそのもの】でなければ product_photo=false・kind="goods" です：トレーディングカード（ポケモンカード等）、グッズ（マグネット・ぬいぐるみ・パスケース・アクリルスタンド・缶バッジ・タオル・キーホルダー等）、特典の台紙や紙だけ、中身の入っていない空のケース・空容器だけ。カセット・ディスク・ケース入りのソフト本体が写っている写真だけ true にしてください。' + 'JSONだけで答えて: {"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|goods|other"}' + _titleRule + _extraRule } ] }] };
       const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
       const j = await r2.json(); if (!r2.ok) throw new Error((j && j.error && j.error.message) || ('HTTP ' + r2.status));
       try { if (j.usage) aiSpendAdd('写真の判定', { in: j.usage.input_tokens || 0, out: j.usage.output_tokens || 0 }); } catch (_) {}   // 💴 利用料に載せる（2026-09-16 まで載っていなかった）
       const txt = ((j.content || []).map(c => c.text || '').join('') || '').trim(); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {};
       // ★2026-09-20 本人「説明書とか載ってる写真もやめてほしい。表面だけ」→ 表面1点だけ（shown=front）以外は落とす（GAS baJudge_ と同じ規則）
       if (o.product_photo && String(o.shown || '') !== 'front') return { ok: false, kind: 'notfront', judged: true };
+      /* 題名の照合はコード側で。読めなかった（""）時は【落とさない】＝読めないことを間違いにしない */
+      if (o.product_photo && wantTitle && String(o.title_seen || '').trim()) {
+        const nz = (t) => String(t || '').toLowerCase().replace(/^[a-z0-9]{1,8}\s*[-:：\/]\s*/, '').replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, '');
+        const a2 = nz(wantTitle), b2 = nz(o.title_seen);
+        if (a2 && b2 && a2.indexOf(b2) < 0 && b2.indexOf(a2) < 0) return { ok: false, kind: 'wrongtitle', judged: true, seen: String(o.title_seen).slice(0, 60) };
+      }
       return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
   }
@@ -28673,6 +28687,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         let u = String(url || '').trim(); if (!u) return;
         if (typeof mercariImg === 'function' && mercariImg(u)) u = mercariImg(u);
         else if (typeof isPageUrl === 'function' && isPageUrl(u) && typeof fetchImageFromUrl === 'function') { const g = await fetchImageFromUrl(u); if (g) u = g; }
+        /* ★Codex指摘（2026-09-21・P2）：PCのファイルは data: のままでは差し替わらない（GASが「既にある画像のID」とみなす）。先にアップロードする */
+        if (/^data:/i.test(u)) { toast('📷 画像をアップロードしています…'); try { u = await openapiUploadImage(u); } catch (e) { alert('画像のアップロードに失敗: ' + ((e && e.message) || e)); return; } }
         toast('📷 差し替えています…');
         try {
           await openapiSetVariationImage(sid, r.itemId, r.opt, u);
@@ -31256,11 +31272,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               const img = curImgOfCard(q.cc, q.item, q.opt);
               if (!img) { skip++; continue; }
               const u = (typeof resolveImgUrl === 'function') ? resolveImgUrl(img) : img;
-              let r2 = null; try { r2 = await baJudgePhoto(u); } catch (_) { r2 = null; }
+              let r2 = null; try { r2 = await baJudgePhoto(u, q.opt); } catch (_) { r2 = null; }   /* 明細名を渡す＝別の作品の写真が付いていないかも見る */
               if (!r2 || r2.kind === 'error' || r2.kind === 'unjudged') { skip++; continue; }
               const k2 = String(q.item) + '#' + q.opt;
               if (r2.ok) { cur.items[k2] = { s: 'keep', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }; ok++; }
-              else { cur.items[k2] = { s: 'nophoto', was: r2.kind || '', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }; ng++; }
+              else { cur.items[k2] = { s: 'nophoto', was: r2.kind || '', seen: r2.seen || '', at: new Date().toISOString(), cc: q.cc, by: 'manual-check' }; ng++; }
               /* 📚 AIの答えも原簿に残す。あとで【人の判断とのズレ】を数えて基準を精緻化するため（AIだけ・人だけでは基準が育たない） */
               try { const rw = (selRows || []).find(x => String(x.item_id) === String(q.item) && String(x.model_name || '').trim() === q.opt) || {};
                 learnAi.push({ img: img, hw: rw._hw || '', title: q.opt, cc: q.cc, item: q.item, opt: q.opt, ai: r2.ok ? 'ok' : ('ng:' + (r2.kind || '')) }); } catch (_) {}
@@ -31507,11 +31523,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         let v = String(url || '').trim(); if (!v) return;
         if (typeof mercariImg === 'function' && mercariImg(v)) v = mercariImg(v);
         else if (typeof isPageUrl === 'function' && isPageUrl(v) && typeof fetchImageFromUrl === 'function') { const g = await fetchImageFromUrl(v); if (g) v = g; }
+        /* ★Codex指摘（2026-09-21・P2）：**PCのファイルが差し替わっていなかった**。
+           data: のまま渡すと GAS 側は「HTTPでない＝既にShopeeにある画像のID」とみなすので、何も起きない（長いとURL長超過）。
+           出品編集の画面と同じように、**先に画像をアップロードして URL にしてから**渡す。 */
+        if (/^data:/i.test(v)) { msg('画像をアップロードしています…'); try { v = await openapiUploadImage(v); } catch (e) { msg('<span style="color:#c0392b">画像のアップロードに失敗: ' + esc((e && e.message) || String(e)) + '</span>'); return; } }
         msg('差し替えています…');
         try {
           await openapiSetVariationImage(sid, item, opt, v);
           const cur = (await baKvGet('boshu_auto_rephoto')) || { items: {} }; cur.items = cur.items || {};
-          cur.items[String(item) + '#' + opt] = { s: 'replaced', at: new Date().toISOString(), src: v, by: 'manual', cc: cc };
+          /* ★Codex指摘（2026-09-21・P2）：丸ごと置き換えると判定の版（v）が消え、GAS の baRephoto_ が「古い」とみなして
+             **すぐにまた見直し**に掛ける。しかも見るのは🤖が最初に付けた画像なので、手で直した写真が上書きされることがある。
+             → 元の中身に**混ぜて**書く（v を残す）。 */
+          const _kNow = String(item) + '#' + opt;
+          cur.items[_kNow] = Object.assign({}, cur.items[_kNow] || {}, { s: 'replaced', at: new Date().toISOString(), src: v, by: 'manual', cc: cc });
           await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]);
           _baRp = cur.items;
           try { if (mi >= 0) models[mi].img = v; } catch (_) {}
