@@ -6482,17 +6482,19 @@ var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2'
 /* ★2026-09-20 本人「出してない商品を出すんでしょ？なぜ JAN 情報がないとかいうことが起こる？」
    実測：🤖の 83明細のうち JAN なし 40件、そのうち 38件は model_id が空＝add_model の返事から明細IDを拾えず、JAN を書く鍵（id:<item>#<model>）が作れなかった（マスタに JAN はあった）。
    → model_id が空／JAN 未記入の明細を、カタログごとに get_model_list 1回で引き直し、JAN はマスタ（sg_<hw>・jan_master_<hw>）から作品の鍵で引いて product_ids に書く。1回の実行でカタログ2つまで。済んだ明細は jw=1 */
+var BA_JAN_PER_RUN = 12;   /* 1回の実行で引き直すカタログ数。get_model_list 1回/カタログ＝枠12回。2だと多い日（393件/日）に400件の打ち切りへ追いつかない */
 function baJanBackfill_(st, t0) {
   var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && !a.jw; });
   if (!todo.length) return;
   var byItem = {}, order = []; todo.forEach(function (a) { var k = String(a.item_id); if (!byItem[k]) { byItem[k] = []; order.push(k); } byItem[k].push(a); });
+  order.reverse();   /* ★st.added は新しい順で400件で打ち切られる＝古い行から消える。消えそうな古い方から先に拾う */
   var nm = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
   var janMaps = {}, janOf = function (hw, key, ja) {
     if (!janMaps[hw]) { var m = {}; try { var sv = baKv_('sg_' + hw) || {}; (sv.rows || []).forEach(function (r) { if (r && r.t && baJanReal_(r.j)) { var k = baKey_(r.t); if (k && !m[k]) m[k] = r.j; } }); var jv = baKv_('jan_master_' + hw) || {}, jmi = jv.items || {}; (Array.isArray(jmi) ? jmi : Object.keys(jmi).map(function (j) { return [j, jmi[j]]; })).forEach(function (p) { if (p && p[1] && baJanReal_(p[0])) { var k2 = baKey_(p[1]); if (k2 && !m[k2]) m[k2] = p[0]; } }); } catch (e) {} janMaps[hw] = m; }
     return janMaps[hw][key] || janMaps[hw][baKey_(ja)] || '';
   };
   var q = [], done = 0;
-  for (var i = 0; i < order.length && done < 2; i++) {
+  for (var i = 0; i < order.length && done < BA_JAN_PER_RUN; i++) {
     if (Date.now() - t0 > 120000) break;
     var rows = byItem[order[i]], a0 = rows[0], models = [];
     try { var j = callShop_(a0.shop_id, '/api/v2/product/get_model_list', { item_id: parseInt(a0.item_id, 10) }, 'get'); var resp = j.response || {}; var opts = ((resp.tier_variation || [])[0] || {}).option_list || []; (resp.model || []).forEach(function (m) { var ti = (m.tier_index || [])[0]; var o = opts[ti]; if (o) models.push({ n: nm(o.option), id: m.model_id }); }); } catch (eG) { continue; }
