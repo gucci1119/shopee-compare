@@ -2258,7 +2258,10 @@
             /* ★2026-09-21 実機で確かめたら、リロードすると⛔が消えて「残り◯%」に戻っていた（覚えていたのが画面の中だけ・30分で失効）。
                **1日の枠切れ**（「1 日に」「for one day」）は翌日のリセットまで直らないので、太平洋時間の日付つきで残しておく。
                短時間の連打（「短時間に」）は少し待てば直るので今まで通り30分だけ。 */
-            if (/1\s*日に|for one day/i.test(lastErr)) localStorage.setItem('smdUfBlocked', JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(lastErr).slice(0, 160) }));
+            /* ★2026-09-21 「枠を使い切った」の印は【どちらのGASで起きたか】を分けて付ける（Codex指摘・裏取り済み）。
+               2台目（別Googleアカウント）は**別の枠**なので、そちらの枠切れを本体の印にすると
+               上のバーが「⛔ 使い切り」と嘘をつき、しかも翌16:00まで消えない。 */
+            if (/1\s*日に|for one day/i.test(lastErr) && base === settings.openapiUrl) localStorage.setItem('smdUfBlocked', JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(lastErr).slice(0, 160) }));
             ufQuotaDraw(); } catch (_) {} }
           if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
       } catch (e) {
@@ -4177,9 +4180,6 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
-    // 🔢 あと何件出せるか（2026-09-21）
-    "・あと約": " · approx. ",
-    "件": " listings left",
     // 🏦 🤖を2台目のGoogleアカウントで動かす（2026-09-21）
     "動かす場所（接続枠はGoogleアカウントごとに2万回/日）": "Where it runs (the 20,000 calls/day quota is per Google account)",
     "本体のGAS（いつもの Shopee OpenAPI Sync）": "Main GAS (the usual Shopee OpenAPI Sync)",
@@ -7026,6 +7026,11 @@
     [/^💡 (\d+)件のSKUを入れました$/, '💡 Filled $1 SKUs'],
     [/^🔍 いま【(.+)】の途中です。$/, '🔍 [$1] is still running.'],
     [/^([\u26a0\u26d4]?)枠のこり ([\d,]+)$/, '$1Budget left $2'],
+    /* ★2026-09-21 「・あと約◯件」を足したら、終端を `$` で固定しているこの型が外れて
+       **英語モードでピルが丸ごと日本語のまま**になった（Codex指摘・裏取り済み）。
+       辞書は文字列まるごとの一致なので、「・あと約」「件」を別々に入れても効かない。
+       → 末尾つきの型を【先に】置く。数字は $3 でそのまま運ぶ。 */
+    [/^([\u26a0\u26d4]?)Shopee枠 残り(\d+)%・あと約([\d,]+)件$/, '$1Shopee quota $2% left \u00b7 approx. $3 listings left'],
     [/^([\u26a0\u26d4]?)Shopee枠 残り(\d+)%$/, '$1Shopee quota $2% left'],
     [/^残りの接続枠。使い切ると画像・明細の追加が止まります（(.+) 使用）$/,
       'Remaining Shopee API budget — when it runs out, images and variations stop being added ($1 used)'],
@@ -28663,7 +28668,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して」：写真集めも枠を見て間隔をのばす。
        1回で 5機種×40枚に太くしたぶん、枠が減ってきたら自動で間隔を空ける（止まる前に細くする）。 */
     let _cevery = BA_COLLECT_EVERY_MS;
-    try { const uf = window.__ufLast || {}; const pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || 15000);
+    /* ★2026-09-21 見張る枠は【いま🤖を動かしている側】のもの（Codex指摘・裏取り済み）。
+       2台目に移したのに本体の枠で止めると、2台目に余裕があるのに写真集めだけ止まり、
+       せっかく分けた意味が無くなる（写真が来なければ出品も止まる）。
+       2台目の数字は🤖の状態に同乗してくるので、下のブロックで拾って覚えておく。 */
+    try { const uf = ((settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : (window.__ufLast || {})); const pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || uf.stop || 15000);
       if (pct >= 0.85) { lst._baCollectMsg = '接続枠の85%を使ったので、写真集めを止めています'; return; }
       else if (pct >= 0.70) _cevery = BA_COLLECT_EVERY_MS * 4;
       else if (pct >= 0.50) _cevery = BA_COLLECT_EVERY_MS * 2;
@@ -28673,6 +28682,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // 同じブラウザでポータルを2枚開いていても、集めるのは1枚だけ（25分以内に他のタブが集めていたら譲る）
     try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0); if (!force && o && Date.now() - o < 25 * 60000) { lst._baCollectAt = o; return; } } catch (_) {}
     if (lst._baCollecting || lst._baCollectBusy) return;
+    /* ★2026-09-21 【🤖の画面を開いていなくても担当先を確かめる】（Codex指摘・裏取り済み）。
+       担当（本体 / 2台目）の写しは 🤖の画面を描いた時にしか更新していなかったので、
+       もう1台のPCで2台目に切り替えても、この裏の収集は**古い写しのまま本体へ送り続ける**。
+       送り先を間違えると、担当でない側に状態・AIの控えを書かせることになる。
+       app_kv を読むのは Supabase 直（GASの接続枠は1回も使わない）。読めなかった時は触らない。 */
+    try {
+      const _c = await baKvGet('boshu_auto_cfg');
+      if (_c) {
+        const _r = (_c.runner === 'child' ? 'child' : 'main');
+        if (settings.boshuRunner !== _r) { settings.boshuRunner = _r; saveSettings(); }
+      }
+      /* 2台目のAI利用料は🤖の状態に同乗してくる。ここでも拾って💴に足す
+         （🤖の画面を開かないと料金が画面から消える、を防ぐ） */
+      const _st = await baKvGet('boshu_auto_status');
+      if (_st && _st.uf && _st.uf.child && _st.uf.aiSpend && _st.uf.aiSpend.days) {
+        localStorage.setItem('smdAiSpendGasChild', JSON.stringify(_st.uf.aiSpend)); try { aiCostDraw(); } catch (_) {}
+      }
+      if (_st && _st.uf && _st.uf.child) window.__ufChild = { used: _st.uf.used, stopLine: _st.uf.stop, at: _st.uf.at };
+    } catch (_) {}
     if (typeof mercariSearch !== 'function' || typeof bridgeRequest !== 'function') return;
     if (!settings.sbSecret || !settings.openapiUrl || !settings.writeToken) return;
     if (!bridgeAvailable) { try { await detectBridge(); } catch (_) {} if (!bridgeAvailable) { lst._baCollectMsg = 'ブリッジ（Tampermonkey）が応答しないので集められない'; return; } }   // ★ブリッジ無しで GAS・AI を無駄に呼ばない（Codex指摘）
@@ -29038,7 +29066,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       c.autoPublish = {}; box.querySelectorAll('.ba-pub:checked').forEach(e => { c.autoPublish[e.dataset.cc] = true; });
       /* 🤖を動かす場所。**担当は1つだけ**＝両方で動かすと同じ作品を二重に出す（GAS側も担当でなければ動かない作り）。
          ポータルは🤖の操作をここで選んだ側のGASへ送る（settings.boshuRunner を見ている）。 */
-      { const rn = document.getElementById('ba-runner'); if (rn) { c.runner = (rn.value === 'child' ? 'child' : 'main'); settings.boshuRunner = c.runner; saveSettings(); } }
+      /* 動かす場所。**担当は1つだけ**＝両方で動かすと同じ作品を二重に出す（GAS側も担当でなければ動かない作り）。
+         ★2026-09-21 切り替えた瞬間が危ない（Codex指摘・裏取り済み）：いま走っている回は**もう判定を通り過ぎている**ので、
+           新しい担当がすぐ動き出すと**重なる**（別プロジェクト同士は鍵で待ち合わせできない）。
+           → 切り替えた時刻を残し、GAS側は【切り替えから6分は両方とも動かない】。
+             1回の最長は 鍵待ち90秒＋4分10秒＝約5分40秒なので、6分あれば必ず流し切れる。 */
+      { const rn = document.getElementById('ba-runner'); if (rn) { const _nr = (rn.value === 'child' ? 'child' : 'main'); if (_nr !== String(cfg.runner || 'main')) c.runnerAt = new Date().toISOString(); c.runner = _nr; settings.boshuRunner = _nr; saveSettings(); } }
       c.perTick = Math.max(1, Math.min(20, parseInt(document.getElementById('ba-per').value, 10) || 8));
       c.dailyMax = Math.max(1, parseInt(document.getElementById('ba-daily').value, 10) || 100);
       c.minHits = Math.max(1, parseInt(document.getElementById('ba-hits').value, 10) || 3);

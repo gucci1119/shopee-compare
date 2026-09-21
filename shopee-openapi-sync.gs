@@ -4289,21 +4289,31 @@ function syncListingsRoundRobin() {
      → 205分ごと＝7店で約24時間＝各店1日1回。get_model_list が約7割減る見込み。
      ⚠️ 戻すときはこの値だけ 55 に戻せばよい（他は触っていない）。 */
   var LIST_RR_EVERY_MS = 205 * 60 * 1000;
+  /* ★2026-09-21 夜【自分で入れた回帰を修正】（Codex指摘・裏取り済み）。
+     ここで `return` してしまうと、**下の増分同期（2時間ごと）まで一緒に止まって**いた。
+     間引いてよいのは「全件の読み直し（＝消えた出品の照合）」だけで、
+     在庫・価格・画像の反映を担う増分まで止めると、反映が2時間→3.5時間に遅れる。
+     → 間引きは**全件のかたまりだけ**に掛け、増分は必ず下まで進む。 */
+  var log = [], _fullNow = false;
   try {
     var _lastRR = parseInt(P_().getProperty('listRR_at') || '0', 10) || 0;
-    if (Date.now() - _lastRR < LIST_RR_EVERY_MS) { Logger.log('syncListingsRoundRobin skip: 前回の全件同期から ' + Math.round(LIST_RR_EVERY_MS / 60000) + ' 分たっていない'); return [{ skipped: 'too_soon' }]; }
-    P_().setProperty('listRR_at', String(Date.now()));
+    if (Date.now() - _lastRR >= LIST_RR_EVERY_MS) { P_().setProperty('listRR_at', String(Date.now())); _fullNow = true; }
+    else Logger.log('全件同期は見送り: 前回から ' + Math.round(LIST_RR_EVERY_MS / 60000) + ' 分たっていない（増分は下で続ける）');
   } catch (eRR) {}
-  var toks = listTokens_(); if (!toks.length) return [];
-  toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
-  var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
-  if (start >= toks.length) start = 0;
-  P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length)); // 先に進める=1店がタイムアウトしても次回は次店へ(詰まり防止)
-  var log = [];
-  for (var i = 0; i < LIST_RR_BATCH && i < toks.length; i++) {
-    var tok = toks[(start + i) % toks.length];
-    try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
-  }
+  if (_fullNow) {
+    var toks = listTokens_();
+    if (!toks.length) { log.push({ skipped: 'no_token' }); }
+    else {
+      toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
+      var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
+      if (start >= toks.length) start = 0;
+      P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length)); // 先に進める=1店がタイムアウトしても次回は次店へ(詰まり防止)
+      for (var i = 0; i < LIST_RR_BATCH && i < toks.length; i++) {
+        var tok = toks[(start + i) % toks.length];
+        try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
+      }
+    }
+  } else log.push({ fullSkipped: 'too_soon' });
   // 「変更のあった出品だけ」の全店増分同期は毎回(30分毎)ではなく最短2時間おき＝urlfetch枠の節約（教訓：食うポーリングを毎回走らせない）。
   // 2h窓ぶんを一度に拾うので取りこぼしなし（画像/タイトル/在庫/価格/バリエ変更は最長2時間で反映）。
   try {
@@ -5518,6 +5528,16 @@ function boshuAutoTick(manual) {
       return { ok: false, skipped: 'cfg_unreadable' };
     }
     var _runner = String(cfg.runner || 'main') === 'child' ? 'child' : 'main';
+    /* ★切り替えた直後は【担当になった側も】動かない（Codex指摘・裏取り済み）。
+       切り替えの瞬間、前の担当は**もう上の判定を通り過ぎて走っている**ので、
+       新しい担当がすぐ始めると二重に動く。別プロジェクト同士は鍵で待ち合わせできないため、
+       時間で確実に流し切る。1回の最長は 鍵待ち90秒＋4分10秒＝約5分40秒。 */
+    var _rAt = Date.parse(cfg.runnerAt || '') || 0;
+    if (_rAt && Date.now() - _rAt < 6 * 60000 && manual !== true) {
+      ufPersist_();
+      Logger.log('🤖 担当を切り替えた直後なので、前の回が終わるまで待ちます（6分）');
+      return { ok: true, skipped: 'runner_switch_cooldown' };
+    }
     if ((_runner === 'child') !== isChild_()) {
       /* ★手で押した時も素通しにしない（Codex指摘P1・裏取り済み）。
          ポータルの「▶ 今すぐ」は本体の /exec を叩くので、担当が2台目の時に素通しにすると
