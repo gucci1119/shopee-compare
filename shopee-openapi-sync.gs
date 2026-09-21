@@ -36,7 +36,14 @@ function now_() { return Math.floor(Date.now() / 1000); }
    9,000なら **着地 約11,000／余り 約9,000（枠の45%が手つかず）** で、🤖は朝4:30まで回って **約790明細**。
    目標の「1日500〜1000」を満たしたまま、いちばん余裕が残る線としてここに置く。
    ※取込GAS（仕入れメール）は UF_STOP で止まらない（約174回/時・16:00まで動く）のを織り込んだ数字。 */
-var UF_STOP = 9000;   // 【止めてよいもの】の停止ライン（🤖自動出品・索引・統計・写真集めなど）
+/* ★2026-09-21 夜 9,000 → 14,000（本人「1日2,000品とか3,000品とか急ピッチで出していきたい」→「やって良いで」）。
+   上げられる根拠は**この日に数え漏れを潰したから**：同じGoogleアカウントの `tool`（→外部ライブラリFT2）が
+   1日1万1,500回以上を黙って持っていっていたのを止め、アカウント全体のトリガーを全部見て
+   **いま枠を使うのは本体とメルカリ取込の2つだけ＝表示が実態と合っている**ことを確認した。
+   固定費の実測は約10,000回/日、出品は**1明細あたり3.7回**。14,000なら🤖が1日約1,000明細出せる。
+   ⚠️ 上げたぶん、手で一気に出す日の取り分は減る。手動には一切ブレーキを掛けていないので
+      （ここは意図的・本人の操作が勝つべき）、**画面に「あと約◯件出せます」を出して見えるようにする**のが対。 */
+var UF_STOP = 14000;   // 【止めてよいもの】の停止ライン（🤖自動出品・索引・統計・写真集めなど）
 /* ★2026-09-21 本人「ブレーキかけて業務回るかも考えてね」＝**一番大事な指摘**。
    ここまで停止ラインは1本だけで、超えると **注文の同期まで止まって**いた。
    注文が入ってこなければ画面に新しい注文が出ず、**発送作業そのものができない**＝
@@ -46,7 +53,9 @@ var UF_STOP = 9000;   // 【止めてよいもの】の停止ライン（🤖自
      ・UF_STOP_CORE（15,000）… **業務の血流**（注文・入金・返品・入金予定）。ここまでは止めない
      ・15,000〜20,000       … 手動操作（発送手配・出品・価格）のための最後の取り分
    ※どちらも「Googleに実際に断られた」時は問答無用で止まる（ufIsBlocked_）。 */
-var UF_STOP_CORE = 15000;   // 注文・入金・返品など、止まると業務が止まるものの停止ライン
+/* ★2026-09-21 夜 15,000 → 17,000。上の線を14,000に上げたので、**血流の線がその上に来ていないと意味が無い**
+   （同じ線だと🤖が止まった瞬間に注文同期も止まる）。coreの実測は1日約3,300回なので17,000でも十分守れる。 */
+var UF_STOP_CORE = 17000;   // 注文・入金・返品など、止まると業務が止まるものの停止ライン
 /* こちらが実際に使い切れる上限。Googleの枠は20,000だが、同じアカウントの同居ツールが約11,500回/日を持っていく。
    画面の「残り○%」を20,000で割ると【使い切っているのに残り75%】と出てしまい、9日間それで騙された。
    同居ツールを別アカウントへ移す・止める場合は 20000 に戻す。 */
@@ -238,6 +247,11 @@ function coreAllowed_() {
 }
 /* 背景処理を止める線。子機は注文・入金を持たない＝守るべき core が無いので、
    ほぼ全部を🤖に使える。それでも手で押す操作のぶんは残す（本体と同じ考え方）。 */
+/* 出品1明細あたりに使う接続回数（2026-09-21 実測）。95作品→295明細の日に、🤖のAI判定542回＋
+   書き込み・画像・明細の読み直しを足して **1明細あたり約3.7回**。2通りの数え方で同じ値になった。
+   画面はこれで「残り枠 → あと何件出せるか」に翻訳する（枠の%だけでは判断できないため）。
+   ★出し方を変えたら数え直す（画像の枚数やAIの呼び方を変えると動く）。 */
+var UF_PER_LISTING = 3.7;
 var UF_STOP_CHILD = 17000;
 function ufStopLine_() { return isChild_() ? UF_STOP_CHILD : UF_STOP; }
 function bgAllowed_() {
@@ -1023,7 +1037,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
