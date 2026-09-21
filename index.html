@@ -31382,10 +31382,18 @@ create policy "listing_log all" on listing_log for all using (true) with check (
          次の手＝重い列（name/model_name/image/price）は「選んだ日」の分だけ取る（未着手・更新ログに記録）。 */
     if (logState._inflight) return logState._inflight;
     logState._inflight = (async () => {
+    /* 読み直すと rows が【重い3列の無い行】に置き換わるので、
+       「その日の名前はもう取った」という印を消す（消さないと名前が空のままになる）。 */
+    logState._detailDay = null;
     logState.loading = true; logState.missing = false;
     try {
       const [rows, kv] = await Promise.all([
-        sbGetAll('listing_log', 'select=*&order=ymd.desc'),
+        /* ★2026-09-21 【重い3列を全件から外した】（本人「なんかずっと読み込み中だけど、重くなってますかね？」）。
+           `listing_log` は 28,301行あり、`select=*` だと 商品名・明細名・画像URL が全行ぶん流れてくる。
+           この3つは**選んだ日のカードにしか使わない**（`selAll = byDay.get(sel)` の中だけ）ので、
+           一覧・グラフ・集計に要る軽い列だけを読み、3列は下で【選んだ日のぶんだけ】取りに行く。
+           ⚠️ 7日ぶんの機種別（baRecentByHw）は別のクエリで name を取っているので影響しない。 */
+        sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&order=ymd.desc'),
         sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto)').catch(() => []),
       ]);
       logState.rows = rows;
@@ -31475,6 +31483,21 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const LL_HW = [['SWITCH2', /switch\s*2/i], ['SWITCH', /\bswitch\b/i], ['3DS', /\b3ds\b/i], ['DS', /\b(nds|ds|dsi)\b/i], ['WIIU', /wii\s*u/i], ['WII', /\bwii\b/i], ['GC', /game\s*cube|\bgc\b|\bngc\b/i], ['N64', /\bn64\b|nintendo\s*64/i], ['SFC', /super\s*famicom|\bsfc\b|\bsnes\b/i], ['FC', /famicom|\bfc\b|\bnes\b/i], ['GBA', /game\s*boy\s*advance|\bgba\b/i], ['GB', /game\s*boy|\bgbc?\b/i], ['VITA', /\bvita\b/i], ['PSP', /\bpsp\b|playstation\s*portable/i], ['PS5', /\bps5\b|playstation\s*5/i], ['PS4', /\bps4\b|playstation\s*4/i], ['PS3', /\bps3\b|playstation\s*3/i], ['PS2', /\bps2\b|playstation\s*2/i], ['PS1', /\bps1\b|\bpsx\b|playstation\s*1\b|playstation\s*one/i], ['XBOX360', /xbox\s*360/i], ['XBOX', /\bxbox\b/i], ['DC', /dreamcast/i], ['SS', /sega\s*saturn/i], ['MD', /mega\s*drive|genesis/i]];
     const llHwOfName = (t) => { const x = ' ' + String(t || '') + ' '; for (const [k, re] of LL_HW) { if (re.test(x)) return k; } return ''; };
     const llSkuOf = (r) => { try { const row = ((lst.byCc || {})[r.cc] || []).find(x => String(x.item_id) === String(r.item_id)); if (!row) return ''; const m = (row.models || []).find(x => String(x.id) === String(r.model_id)); return String((m && m.sku) || '').trim(); } catch (_) { return ''; } };
+    /* 選んだ日の【商品名・明細名・画像】を、その日のぶんだけ取って混ぜる（1回の通信・数百行）。
+       ★描き直しの予約は【その日について1回だけ】（[[portal-no-render-loop]]：描画の中から無条件に再描画を予約すると無限ループ）。
+       取れなくても画面は出る（名前が空になるだけ）＝止まらない方に倒す。 */
+    if (logState._detailDay !== sel && !logState._detailBusy) {
+      logState._detailBusy = true;
+      (async () => {
+        try {
+          const ds = await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image&ymd=eq.' + encodeURIComponent(sel));
+          const m = {}; (ds || []).forEach(x => { m[x.cc + '|' + x.item_id + '|' + x.model_id] = x; });
+          (logState.rows || []).forEach(r => { const d = m[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } });
+        } catch (_) { }
+        logState._detailDay = sel; logState._detailBusy = false;
+        try { renderListingLog(); } catch (_) { }
+      })();
+    }
     const selAll = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
     selAll.forEach(r => {
       const sku = llSkuOf(r); const mSku = sku.match(/^([A-Z0-9]+)_/);
