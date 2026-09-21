@@ -98,7 +98,10 @@ function ufExt_() {
   _ufExt = 0;   /* 再入よけ：この読みの最中に ufTotal_ が呼ばれても 0 で答える（無限ループにしない） */
   var d = ufToday_(), cached = null;
   try { cached = JSON.parse(P_().getProperty('ufExtCache') || 'null'); } catch (e) { cached = null; }
-  if (cached && cached.d === d && (Date.now() - (Number(cached.at) || 0) < 15 * 60 * 1000)) { _ufExt = Number(cached.n) || 0; return _ufExt; }
+  if (cached && cached.d === d && (Date.now() - (Number(cached.at) || 0) < 30 * 60 * 1000)) { _ufExt = Number(cached.n) || 0; return _ufExt; }
+  /* ★2026-09-21 自分で足した読みも無駄にしない。**自分の消費が停止線の4割にも届いていない日は、合算しても結論は変わらない**ので読まない。
+     （もう一方のGASは実測で1日2,500回程度＝4割+2,500 でも停止線には遠い）。前の値があればそれを使う。 */
+  try { if ((ufState_().n + _ufRun) < UF_STOP * 0.4) { _ufExt = (cached && cached.d === d) ? (Number(cached.n) || 0) : 0; return _ufExt; } } catch (e) {}
   try {
     var rows = sbSelect_('app_kv', 'select=k,v&k=like.uf_ext_*');
     var n = 0, stale = [];
@@ -3224,6 +3227,16 @@ function backfillEscrowUnchanged(limitN) {
 }
 function syncEscrowAll() {
   if (!bgAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  /* ★2026-09-21 本人「無駄遣いで減らせるところは減らしてほしい」
+     入金明細は接続枠でいちばん太い（実測 656回/日 = 6時間ごと×約164件）。
+     **入金の確定は倉庫スキャンの数日後**（[[escrow-confirm-timing]]）なので、6時間ごとに見直す意味がない。
+     補償・関税は payout 側から入るので、再照会を減らしても取りこぼさない（2026-08-24 に検証済み）。
+     → **12時間ごと**に間引く（トリガーは作り直さない＝この関数はHeadで動くので保存だけで効く）。約330回/日 減る。
+     手動実行（⚡今すぐ取得）は素通し。 */
+  var ESC_EVERY_MS = 11.5 * 60 * 60 * 1000;
+  var _escLast = parseInt(P_().getProperty('escrowAll_at') || '0', 10) || 0;
+  if (Date.now() - _escLast < ESC_EVERY_MS) { Logger.log('syncEscrowAll skip: 前回から12時間たっていない（入金の確定は数日後なので6時間ごとに見る意味がない）'); return [{ skipped: 'too_soon' }]; }
+  P_().setProperty('escrowAll_at', String(Date.now()));
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
   toks.forEach(function (tok) { try { log.push(syncEscrowForShop_(tok, deadline, finByCc[tok.cc])); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
