@@ -130,6 +130,9 @@ function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o
    読みは15分キャッシュ（1日あたり最大96回）。読めない時は【前の値を持ち越す】＝0にしない（0は「まだ余っている」という一番危ない側の嘘）。 */
 var _ufExt = null;
 function ufExt_() {
+  /* ★子機（別Googleアカウント）は【別の枠】。本体側の消費（メルカリ取込など）を足してはいけない。
+     足すと、自分はまだ使っていないのに他人の消費でブレーキを踏んで🤖が止まる。 */
+  if (isChild_()) return 0;
   if (_ufExt !== null) return _ufExt;
   _ufExt = 0;   /* 再入よけ：この読みの最中に ufTotal_ が呼ばれても 0 で答える（無限ループにしない） */
   var d = ufToday_(), cached = null;
@@ -233,9 +236,13 @@ function coreAllowed_() {
   if (ufIsBlocked_()) return false;
   return ufTotal_() < UF_STOP_CORE;
 }
+/* 背景処理を止める線。子機は注文・入金を持たない＝守るべき core が無いので、
+   ほぼ全部を🤖に使える。それでも手で押す操作のぶんは残す（本体と同じ考え方）。 */
+var UF_STOP_CHILD = 17000;
+function ufStopLine_() { return isChild_() ? UF_STOP_CHILD : UF_STOP; }
 function bgAllowed_() {
   if (ufIsBlocked_()) return false;   // ★実際に断られた日は、数がいくつに見えていても背景処理をしない
-  return ufTotal_() < UF_STOP;
+  return ufTotal_() < ufStopLine_();
 }
 function ufStatus() { var o = ufState_(); Logger.log('urlfetch 今日(' + o.d + ' PT基準): ' + o.n + '回 / 背景停止ライン ' + UF_STOP + '（手動予約 ' + (20000 - UF_STOP) + '／無料枠20000）'); return o; } // エディタから実行して当日消費を確認
 function toHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
@@ -980,6 +987,29 @@ function doGetInner_(e) {
       ufPersist_();
       return ContentService.createTextOutput(arcb + '(' + JSON.stringify(arout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    /* 🔑 子機（別Googleアカウントの🤖）へ【アクセストークンだけ】渡す。
+       ★refresh_token は絶対に返さない。子機が更新できてしまうと、使い捨ての refresh_token を
+         本体と取り合って全店の認証が壊れる。更新は本体だけの仕事。
+       期限が近いものはここで本体が更新してから渡す（更新のurlfetchも本体の枠で消費する＝正しい側）。 */
+    if (p.action === 'shop_tokens') {
+      var stcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var stout;
+      try {
+        var stwt = P_().getProperty('WRITE_TOKEN');
+        if (!stwt || p.token !== stwt) throw new Error('WRITE_TOKEN不正');
+        var stlist = [], stmin = 0;
+        listTokens_().forEach(function (t0) {
+          var t1 = null;
+          try { t1 = ensureToken_(t0.shop_id); } catch (e0) { return; }
+          if (!t1 || !t1.access_token) return;
+          stlist.push({ shop_id: t1.shop_id, cc: t1.cc || '', access_token: t1.access_token, expire_at: t1.expire_at, merchant_id: t1.merchant_id || null });
+          if (!stmin || t1.expire_at < stmin) stmin = t1.expire_at;
+        });
+        if (!stlist.length) throw new Error('渡せるトークンがありません');
+        stout = { ok: true, list: stlist, exp: stmin, at: new Date().toISOString() };
+      } catch (err) { stout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(stcb + '(' + JSON.stringify(stout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'uf_status') {
       var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ufo;
@@ -993,7 +1023,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: UF_STOP, stopLineCore: UF_STOP_CORE, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < UF_STOP, top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -1224,15 +1254,74 @@ function getShopsByPartner_() {
   return (j.authed_shop_list || []).map(function (s) { return { shop_id: s.shop_id, region: s.region }; });
 }
 
+/* ================= 2台目（子機）＝ 別Googleアカウントで🤖自動出品だけを動かす =================
+   urlfetch の 2万回/日は【Googleアカウント単位】。🤖は Googleアカウント固有のもの（Gmail等）を
+   使っていないので、別アカウントの新プロジェクトへ移すと枠がもう2万増える。
+   ★ソースは1本のまま。スクリプトプロパティ BROKER_URL が入っていれば「子機」として振る舞う。
+     （断片ファイルを作らない・丸ごと貼り替える、という決まりを崩さないため）
+
+   子機で必ず守ること（どれも壊すと実害が出る）
+   ① Shopeeのトークンを【持たない・更新しない】。refresh_token は使い捨てなので、
+      本体と子機の両方が更新すると取り合って**全店の認証が壊れる**。子機は本体の /exec からもらうだけ。
+   ② 枠を本体と混ぜない。ufExt_ は 0 を返す（本体側の消費を足すと、使っていないのにブレーキを踏む）。
+      逆に子機の消費は `uf_ext_*` という名前で置かない（本体が like.uf_ext_* で拾って二重に数えるため）。
+   ③ トリガーは🤖だけ作る（注文・入金の同期は本体の担当。両方で動かすと二重書き込みになる）。 */
+var _BROKER = null;
+function brokerUrl_() { if (_BROKER === null) { try { _BROKER = P_().getProperty('BROKER_URL') || ''; } catch (e) { _BROKER = ''; } } return _BROKER; }
+function isChild_() { return !!brokerUrl_(); }
+var _CHILD_TOK = null;
+/* 本体から「全店のアクセストークン」をもらう。refresh_token は受け取らない（持てば事故のもと）。
+   有効なうちは自分のプロパティに貯めて使い回す＝1回の取得で約4時間もつ。 */
+function childTokens_() {
+  if (_CHILD_TOK) return _CHILD_TOK;
+  var o = null;
+  try { var s0 = P_().getProperty('childTok'); o = s0 ? JSON.parse(s0) : null; } catch (e) { o = null; }
+  if (o && o.list && o.list.length && Number(o.exp) > now_() + 300) { _CHILD_TOK = o.list; return _CHILD_TOK; }
+  var u = brokerUrl_();
+  u += (u.indexOf('?') >= 0 ? '&' : '?') + 'action=shop_tokens&token=' + encodeURIComponent(P_().getProperty('WRITE_TOKEN') || '');
+  ufBump_(1, '本体からトークンを受け取る');
+  var txt = '';
+  try { txt = UrlFetchApp.fetch(u, { muteHttpExceptions: true }).getContentText(); } catch (e2) { txt = 'fetch失敗: ' + e2; }
+  var j = null;
+  try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e3) { j = null; }
+  if (!j || !j.ok || !j.list || !j.list.length) {
+    /* ★取れなかった時に【期限切れを使い続けない】。期限切れで叩くと全部失敗して失敗の山だけ残る。
+       まだ生きている控えがあればそれを使い、無ければ素直に止める（[[catch-empty-is-not-absence]]）。 */
+    if (o && o.list && o.list.length && Number(o.exp) > now_()) { _CHILD_TOK = o.list; return _CHILD_TOK; }
+    throw new Error('本体からトークンを受け取れませんでした: ' + String(txt).slice(0, 160));
+  }
+  try { P_().setProperty('childTok', JSON.stringify({ list: j.list, exp: Number(j.exp) || (now_() + 3000) })); } catch (e4) {}
+  _CHILD_TOK = j.list; return _CHILD_TOK;
+}
+function childTokReset_() { _CHILD_TOK = null; try { P_().deleteProperty('childTok'); } catch (e) {} }
+
 function tokKey_(shopId) { return 'tok_' + shopId; }
 function saveToken_(tok) { P_().setProperty(tokKey_(tok.shop_id), JSON.stringify(tok)); }
-function getToken_(shopId) { var s = P_().getProperty(tokKey_(shopId)); return s ? JSON.parse(s) : null; }
+function getToken_(shopId) {
+  if (isChild_()) {
+    var a = childTokens_();
+    for (var i = 0; i < a.length; i++) if (String(a[i].shop_id) === String(shopId)) return a[i];
+    return null;
+  }
+  var s = P_().getProperty(tokKey_(shopId)); return s ? JSON.parse(s) : null;
+}
 function listTokens_() {
+  if (isChild_()) return childTokens_();
   var all = P_().getProperties(), out = [];
   for (var k in all) if (k.indexOf('tok_') === 0) { try { out.push(JSON.parse(all[k])); } catch (_) {} }
   return out;
 }
 function ensureToken_(shopId) {
+  if (isChild_()) {
+    /* 子機は【絶対に refresh しない】。期限が来たら控えを捨てて本体から取り直してもらう。 */
+    var t1 = getToken_(shopId);
+    if (t1 && t1.expire_at > now_()) return t1;
+    childTokReset_();
+    var t2 = getToken_(shopId);
+    if (!t2) throw new Error('未認可 shop_id=' + shopId);
+    if (t2.expire_at <= now_()) throw new Error('本体のトークンが期限切れです shop_id=' + shopId);
+    return t2;
+  }
   var tok = getToken_(shopId);
   if (!tok) throw new Error('未認可 shop_id=' + shopId);
   if (tok.expire_at > now_()) return tok;
@@ -1241,6 +1330,8 @@ function ensureToken_(shopId) {
   return tok;
 }
 function refreshOne_(refreshToken, who) {
+  /* ★子機では絶対に通さない。refresh_token は使い捨てなので、本体と取り合うと全店の認証が壊れる。 */
+  if (isChild_()) throw new Error('子機ではトークンを更新しません（更新は本体だけ）');
   var path = '/api/v2/auth/access_token/get', ts = now_();
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
   var payload = { refresh_token: refreshToken, partner_id: partnerId_() };
@@ -4466,6 +4557,9 @@ function setupTriggers() {
   //   一覧に無く、この関数を走らせると返品同期だけ消えていた（Codexのレビューで発覚）。
   //   **同期を足したら必ずこの一覧にも足すこと。**
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
+  /* ★子機（別Googleアカウント）は🤖自動出品だけの担当。注文・入金・出品同期は本体がやる。
+     両方で動かすと同じ行に二重に書き込むうえ、枠も二重に食う。 */
+  if (isChild_()) { setupBoshuAutoTrigger(); Logger.log('✅ 子機：🤖のトリガーだけ作りました'); return 'ok(child)'; }
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
@@ -4990,16 +5084,22 @@ function baJanReal_(v) { var j = String(v || '').trim(); if (!/^\d{13}$/.test(j)
 /* ★2026-09-20 本人「枠の減り早すぎる」：1回の実行で app_kv を十数回バラバラに読んでいた（実測：1日 1,018回＝枠の1位）。
    実行の頭で【まとめて1回】読み、以後はその控えを使う。書いた時は控えも更新する（読み直さない） */
 var BA_KV_CACHE = null;
+/* ★2026-09-21 設定が【読めなかった】のと【読めたが未設定】を区別する（Codex指摘P1・裏取り済み）。
+   区別しないと、担当が2台目なのに本体側の読みが失敗しただけで cfg={} になり、
+   既定の 'main' と読めて**本体が勝手に動き、2台目が保存した状態を上書きして消す**。
+   [[catch-empty-is-not-absence]]：読めなかったは「無い」ではない。 */
+var BA_KV_ERR = false;
 function baKvPrefetch_(keys) {
   try {
     var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')');
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     (r || []).forEach(function (x) { BA_KV_CACHE[x.k] = x.v; });
-  } catch (e) { BA_KV_CACHE = null; }
+    BA_KV_ERR = false;
+  } catch (e) { BA_KV_CACHE = null; BA_KV_ERR = true; }
 }
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
-  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { return null; }
+  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { BA_KV_ERR = true; return null; }
 }
 function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
 function baLog_(st, line) {
@@ -5193,7 +5293,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
    - cfg.rephoto === false で止められる */
 function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (cfg && cfg.rephoto === false) return;
-  if (BA_AI_DOWN || ufTotal_() > UF_STOP - 2500) return;   /* AIが使えない／枠が少ない時は見直しをしない */
+  if (BA_AI_DOWN || ufTotal_() > ufStopLine_() - 2500) return;   /* AIが使えない／枠が少ない時は見直しをしない。★線は【そのアカウントの線】（子機は別枠） */
   /* ★2026-09-20 ここを 300 固定にしていたため、写真の見直しが【1日300回】で頭打ちになり、見直し対象145件に対して0件しか見ずに止まっていた。本番の出品と同じ枠にそろえる */
   var cap = (cfg && Number(cfg.judgeCap)) || (Math.max(1, Number(cfg.dailyMax) || 100) * 6);
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
@@ -5212,7 +5312,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   todo.sort(function (p, q) { var w = function (x) { var h = String(x.hw || ''); return (BA_CART_ONLY_HW[h] || BA_CASE_REQUIRED_HW[h]) ? 0 : 1; }; return w(p) - w(q); });
   var n = 0, tStart = Date.now(), changed = false;
   /* ★2026-09-20 本人「これはなんかずっと終わってないけど」＝1回8件だと153件で9時間かかる。1回の上限を設定で変えられるように（既定40）。
-     枠が少ない時は上の `ufTotal_() > UF_STOP - 2500` で丸ごと見送るので、増やしても枠は守られる */
+     枠が少ない時は上の `ufTotal_() > ufStopLine_() - 2500` で丸ごと見送るので、増やしても枠は守られる */
   var rpMax = Math.max(1, Math.min(80, Number(cfg && cfg.rephotoPerTick) || 40));
   for (var i = 0; i < todo.length && n < rpMax; i++) {
     if (Date.now() - tStart > 150000 || Date.now() - t0 > 200000) break;
@@ -5333,6 +5433,9 @@ function setupBoshuAutoTrigger() {
 function boshuAutoRecheck() {
   var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, error: 'busy' };
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; var cfg = baKv_(BA_CFG) || {};
+  /* ★担当でない側はここも動かさない（Codex指摘・裏取り済み）。
+     動かすと**同じ仕入れ元を2台で叩き**、同じ在庫を二重に0にし、boshu_auto_status を取り合う。 */
+  if (BA_KV_ERR || (String(cfg.runner || 'main') === 'child') !== isChild_()) { ufPersist_(); try { lock.releaseLock(); } catch (eL) {} return { ok: false, skipped: BA_KV_ERR ? 'cfg_unreadable' : 'not_runner' }; }
   var out = { ok: true, checked: 0, zeroed: 0 };
   try {
     if (!bgAllowed_()) return out;
@@ -5363,6 +5466,13 @@ function boshuAutoRecheck() {
     st.lastRecheck = { at: new Date().toISOString(), checked: out.checked, zeroed: out.zeroed };
     if (out.checked) baLog_(st, '🔁 在庫1の見直し ' + out.checked + '件（在庫0にしたもの ' + out.zeroed + '件）');
   } catch (e) { baLog_(st, '❌ 見直し失敗: ' + String((e && e.message) || e).slice(0, 120)); out.ok = false; }
+  /* ★2026-09-21 どちらのGoogleアカウントで動いたか・その枠をいくつ使ったかを一緒に残す。
+     子機は別アカウント＝別の2万回なので、ポータルで**本体とは別の数字**として見せる必要がある。
+     ここは元から app_kv に書いているので、urlfetch は1回も増えない。 */
+  /* ★2台目で動かすと、AIの利用料は**2台目のスクリプト プロパティ**に貯まる。
+     ポータルは本体の uf_status しか見ていないので、そのままだと**料金が画面から消える**（Codex指摘P2）。
+     状態と一緒に載せて、ポータル側で足し合わせる。app_kv への書き込みは元から1回なので urlfetch は増えない。 */
+  try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
   try { ufPersist_(); } catch (e3) {}
   try { lock.releaseLock(); } catch (e4) {}
@@ -5380,6 +5490,29 @@ function boshuAutoTick(manual) {
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
     var cfg = baKv_(BA_CFG) || {};
+    /* ★2026-09-21 🤖の担当は【1つだけ】。本体と2台目（別Googleアカウント）の両方で動くと
+       **同じ作品を二重に出す**。担当は app_kv.boshu_auto_cfg.runner（既定 'main'＝本体）。
+       ★ここは関数の【いちばん先】に置く（Codex指摘・裏取り済み）。
+         別のGASプロジェクト同士は LockService で待ち合わせできないので、担当でない実行が
+         baSoldSync_（Shopeeを叩く）や finish_（boshu_auto_status を丸ごと書く）まで進むと、
+         **担当側が今さっき保存した added を、古い写しで上書きして消す**。だから何も触る前に降りる。
+       ⚠️ 手で押した時（manual）は素通し＝どちらからでも試せるようにしておく。 */
+    if (BA_KV_ERR) {
+      /* 設定が読めていない＝担当がどちらか分からない。**分からない時は動かない**（Codex指摘P1）。 */
+      ufPersist_();
+      Logger.log('🤖 設定を読めなかったのでこの実行は何もしません（担当が分からない状態では動かさない）');
+      return { ok: false, skipped: 'cfg_unreadable' };
+    }
+    var _runner = String(cfg.runner || 'main') === 'child' ? 'child' : 'main';
+    if ((_runner === 'child') !== isChild_()) {
+      /* ★手で押した時も素通しにしない（Codex指摘P1・裏取り済み）。
+         ポータルの「▶ 今すぐ」は本体の /exec を叩くので、担当が2台目の時に素通しにすると
+         **2台目のタイマーと本体の手動が同時に走る**（別プロジェクト同士は鍵で待ち合わせできない）。
+         ポータル側は担当の /exec へ振り分ける（設定「2台目の自動出品GAS URL」）。 */
+      ufPersist_();
+      Logger.log('🤖 担当は「' + (_runner === 'child' ? '2台目' : '本体') + '」なのでこの実行は何もしません');
+      return { ok: false, skipped: 'not_runner', runner: _runner, child: isChild_(), note: '🤖の担当は「' + (_runner === 'child' ? '2台目（別Googleアカウント）' : '本体') + '」です。担当側のGASへ送ってください' };
+    }
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
     st.lastAt = new Date().toISOString();
@@ -5388,7 +5521,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-20「絶対に止まらないように」：停止線(15,000)の【手前 2,000】で🤖は自分から降りる。
        🤖は1回で数十回使うので、ぎりぎりまで回すと注文・入金・発送の枠を食う */
     var ufNow = ufTotal_();
-    if (ufNow > UF_STOP - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + UF_STOP + '）。16:00(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
+    if (ufNow > ufStopLine_() - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + ufStopLine_() + '）。16:00(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     /* ★v187 ヤフオクに弾かれても全体は止めない（2026-09-18 実測：ON の2回目で HTTP 500→6時間まるごと休み。メルカリの写真は187件集まっているのに1件も出なくなった）。休むのはヤフオクの検索だけ＝その間はメルカリの写真がある作品だけを進める */
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
@@ -5414,12 +5547,12 @@ function boshuAutoTick(manual) {
        UF_STOP(15,000) を分母にして、使った割合で1回の作品数を落とす。止まる前に細くなるので、
        「気づいたら停止線」という事故が構造的に起きない。bgAllowed_ は最後の砦として残す。 */
     var perTick = Math.max(1, Math.min(20, Number(cfg.perTick) || 8));
-    var _ufNow = ufTotal_(), _ufPct = _ufNow / UF_STOP;
+    var _ufNow = ufTotal_(), _ufPct = _ufNow / ufStopLine_();
     var _slow = '';
     if (_ufPct >= 0.85) { perTick = 1; _slow = '85%'; }
     else if (_ufPct >= 0.70) { perTick = Math.max(1, Math.round(perTick * 0.25)); _slow = '70%'; }
     else if (_ufPct >= 0.50) { perTick = Math.max(1, Math.round(perTick * 0.5)); _slow = '50%'; }
-    if (_slow) baLog_(st, '🐢 接続枠を' + _slow + '超え使ったので、1回の作品数を ' + perTick + ' に落としました（' + _ufNow + '/' + UF_STOP + '）');
+    if (_slow) baLog_(st, '🐢 接続枠を' + _slow + '超え使ったので、1回の作品数を ' + perTick + ' に落としました（' + _ufNow + '/' + ufStopLine_() + '）');
     var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null, ccsHw = ccs;
     while (tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
@@ -5565,7 +5698,14 @@ function boshuAutoTick(manual) {
   }
   function finish_(msg) {
     try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
-    try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
+    /* ★2026-09-21 どちらのGoogleアカウントで動いたか・その枠をいくつ使ったかを一緒に残す。
+     子機は別アカウント＝別の2万回なので、ポータルで**本体とは別の数字**として見せる必要がある。
+     ここは元から app_kv に書いているので、urlfetch は1回も増えない。 */
+  /* ★2台目で動かすと、AIの利用料は**2台目のスクリプト プロパティ**に貯まる。
+     ポータルは本体の uf_status しか見ていないので、そのままだと**料金が画面から消える**（Codex指摘P2）。
+     状態と一緒に載せて、ポータル側で足し合わせる。app_kv への書き込みは元から1回なので urlfetch は増えない。 */
+  try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
+  try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
     try { ufPersist_(); } catch (e3) {}
     try { lock.releaseLock(); } catch (e4) {}
     if (msg) out.msg = msg;
@@ -6104,7 +6244,7 @@ function baSkuSlug_(t) { var x = String(t || ''); try { x = x.normalize('NFKD');
 function baSkuOf_(hw, en) { var b = baSkuSlug_(en); if (!b) return ''; var h = String(BA_HW_LABEL[String(hw || '')] || hw || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + '_' + b).slice(0, 100).replace(/_+$/, ''); }
 function baSkuPlanTick_(st, t0) {
   var ps = baKv_('sku_plan_state') || {}; if (!ps.on) return;
-  if (ufTotal_() > UF_STOP - 3000) return;   /* 一括付与は後回しでよい＝枠が少ない時はやらない */
+  if (ufTotal_() > ufStopLine_() - 3000) return;   /* 一括付与は後回しでよい＝枠が少ない時はやらない */
   var plan = baKv_('sku_plan') || {}, items = plan.items || []; ps.pos = ps.pos || 0; ps.ok = ps.ok || 0; ps.fail = ps.fail || [];
   if (ps.pos >= items.length) { ps.on = false; ps.doneAt = new Date().toISOString(); baKvSet_('sku_plan_state', ps); baLog_(st, '🏷 SKUの一括付与が完了（' + ps.ok + '明細・失敗 ' + ps.fail.length + 'カタログ）'); return; }
   var n = 0, okN = 0, tS = Date.now();

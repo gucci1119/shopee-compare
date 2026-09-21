@@ -1333,6 +1333,9 @@
     <input type="text" id="set-openapi" placeholder="https://script.google.com/macros/s/xxxx/exec">
     <label>WRITE_TOKEN（GASのスクリプトプロパティと同じ値・書き込み保護用）</label>
     <input type="text" id="set-writetoken" placeholder="GASのスクリプトプロパティ WRITE_TOKEN と同じ値">
+    <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">2台目の自動出品GAS URL（任意・<b>別のGoogleアカウント</b>に置いた🤖専用GASの /exec）</label>
+    <input type="text" id="set-boshuurl" placeholder="https://script.google.com/macros/s/xxxx/exec（空なら本体で動かす）">
+    <div class="smd-dim" style="font-size:11px;margin-top:-2px">接続枠の2万回/日は<b>Googleアカウントごと</b>。🤖だけ別アカウントに移すと枠がもう2万増えます。担当の切り替えは <b>🆕出品管理 ▸ 🤖自動出品</b> の「動かす場所」で。</div>
     <label style="margin-top:14px;border-top:1px solid #eee;padding-top:10px">Claude APIキー（任意・🤖自動出品で「メルカリの写真が商品そのものを撮ったものか」をAIで判定する。無ければ判定なしで先頭の写真を使う）</label>
     <input type="password" id="set-claudekey" placeholder="sk-ant-…（このPCのブラウザにだけ保存されます）">
     </div>
@@ -1458,7 +1461,7 @@
   //   仕入額は「〜まで」の上限表記（¥500=〜500 / ¥1,000=501〜1,000）。¥35,000超は最上段を流用。
   const ROI_CURVE_PH = [295, 150, 105, 80, 65, 55, 49, 43, 39, 36, 33, 31, 29, 28, 28, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25];
   const settings = Object.assign({
-    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '', openapiUrl: '', writeToken: '',
+    gasUrl: '', token: '', auto: true, depUrl: '', depToken: '', sbKey: '', sbSecret: '', syncAuto: false, sheetId: '', sheetIds: {}, shopIds: {}, aiResearchUrl: '', openapiUrl: '', writeToken: '', boshuUrl: '', boshuRunner: 'main',
     independentMode: false, // 🔗独立運用モード：ONでスプレッドシート連携UI（💰転記/📗スプシ取込/シートID等）を隠しSupabaseのみで完結。今は既定OFF（並行稼働）
     // 🏖 バケーションモード（休暇/出品停止中。ON中は売上0・失速を「想定内」として警告抑制＋全ポータルに表示）
     vacationMode: false, vacationSince: '', vacationNote: '',
@@ -1854,10 +1857,14 @@
   // ★GAS 側（母数🤖の自動出品が30分毎に走らせる写真判定）の利用料は GAS のスクリプト プロパティに貯まり、uf_status のついでに届く。
   //   ポータルの記録（この端末）と合算して出す。GAS 側は【上書き】（サーバーの控えが正）
   function aiSpendGasLoad() { try { return JSON.parse(localStorage.getItem('smdAiSpendGas') || '{}'); } catch (_) { return {}; } }
+  /* 🤖を2台目のGAS（別Googleアカウント）で動かすと、AIの利用料は**そちらのプロパティ**に貯まる。
+     uf_status は本体しか見ていないので、足さないと**画面から料金が静かに消える**（[[portal-api-cost-sources]]）。
+     2台目は🤖の状態（boshu_auto_status.uf.aiSpend）に載せてくるので、ここで合算する。 */
+  function aiSpendChildLoad() { try { return JSON.parse(localStorage.getItem('smdAiSpendGasChild') || '{}'); } catch (_) { return {}; } }
   function aiSpendDays() {
     const out = {};
     const add = (days) => Object.keys(days || {}).forEach(day => { const o = out[day] = out[day] || {}; Object.keys(days[day]).forEach(k => { const t = days[day][k]; const p = o[k] = o[k] || { in: 0, out: 0, search: 0, n: 0 }; p.in += (t.in || 0); p.out += (t.out || 0); p.search += (t.search || 0); p.n += (t.n || 0); }); });
-    add((aiSpendLoad() || {}).days); add((aiSpendGasLoad() || {}).days);
+    add((aiSpendLoad() || {}).days); add((aiSpendGasLoad() || {}).days); add((aiSpendChildLoad() || {}).days);
     return out;
   }
   function aiSpendAdd(kind, usage) {
@@ -2198,11 +2205,19 @@
     _varDelBusy.set(k, Date.now());
     return () => { _varDelBusy.delete(k); };
   }
+  /* 🤖自動出品の担当が「2台目（別Googleアカウント）」の時は、🤖の操作だけそちらのGASへ送る。
+     ★本体へ送っても断られる（担当でない側は動かない＝同じ作品を二重に出さないための作り）。
+     URLが未設定なら本体のまま＝いつもどおり動く。 */
+  const gasUrlFor = (action) => {
+    if (settings.boshuRunner === 'child' && settings.boshuUrl && /^boshu_auto/.test(String(action || ''))) return settings.boshuUrl;
+    return settings.openapiUrl;
+  };
   async function gasCall(params, timeoutMs) {
-    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    const base = gasUrlFor(params && params.action);
+    if (!base) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     const q = Object.assign({}, params, { callback: 'cb' });
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
+    const url = base + (base.includes('?') ? '&' : '?') + qs;
     // ★Apps Scriptは同一ユーザーのリクエストを直列に処理する。統計更新や注文取得のような
     //   長い処理が走っていると、その裏で投げた呼び出しが404/タイムアウトで落ちる。
     //   1回だけの再試行だと取りこぼすので3回・間隔を伸ばして粘る。
@@ -4146,6 +4161,14 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    // 🏦 🤖を2台目のGoogleアカウントで動かす（2026-09-21）
+    "動かす場所（接続枠はGoogleアカウントごとに2万回/日）": "Where it runs (the 20,000 calls/day quota is per Google account)",
+    "本体のGAS（いつもの Shopee OpenAPI Sync）": "Main GAS (the usual Shopee OpenAPI Sync)",
+    "2台目のGAS（別のGoogleアカウント・枠がもう2万）": "Second GAS (another Google account — another 20,000 calls)",
+    "2台目の自動出品GAS URL（任意・別のGoogleアカウントに置いた🤖専用GASの /exec）": "Second auto-listing GAS URL (optional — the /exec of a 🤖-only GAS on another Google account)",
+    "接続枠の2万回/日はGoogleアカウントごと。🤖だけ別アカウントに移すと枠がもう2万増えます。担当の切り替えは 🆕出品管理 ▸ 🤖自動出品 の「動かす場所」で。": "The 20,000 calls/day quota is per Google account. Moving only 🤖 to another account adds another 20,000. Switch the owner under 🆕 Listings ▸ 🤖 Auto-listing, \"Where it runs\".",
+    "2台目のGAS": "Second GAS",
+    "本体のGAS": "Main GAS",
     // 💹 価格設定シートを既定で閉じた（2026-09-21・見出しは前から英語が無かったのでここで足す）
     "💹 価格設定シート（各国別：手数料・SLS送料・バッファ・目標ROI）": "💹 Pricing sheet (per country: fees, SLS shipping, buffer, target ROI)",
     "手数料は国ごとに年数回変わるので、改定時はここを更新。ROIは仕入額帯×重量帯×国で設定。": "Shopee changes its fees a few times a year per country — update here when they do. ROI is set by cost band x weight band x country.",
@@ -18254,6 +18277,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🏦 <b>🤖自動出品を「2台目のGoogleアカウント」で動かせるようにしました＝接続枠がもう2万回/日</b>（本人「出品は毎日ガンガンしたいんです」「やってくれ」）。接続枠の2万回/日は<b>Googleアカウント単位</b>で、いま本体と「メルカリ取込」が1つの枠を分け合っています。🤖はGoogleアカウント固有のもの（Gmail等）を使っていないので移せます（メルカリ取込はGmailを読むので移せません）。<b>⚙️設定に「2台目の自動出品GAS URL」</b>、<b>🤖の設定に「動かす場所」</b>が増えました。切り替えると、ポータルは🤖の操作だけそちらへ送ります。壊れやすい所は先に潰してあります：①<b>2台目はShopeeのトークンを持たない</b>（本体からもらう）。両方が更新すると使い捨ての refresh_token を取り合って<b>7か国の認証が丸ごと壊れる</b>ため。②<b>担当は1つだけ</b>＝担当でない側は「手で押しても」動きません（同じ作品を二重に出さないため）。③<b>設定が読めない時は動かない</b>（読めない＝担当が分からない。既定の本体で勝手に動くと、2台目が保存した記録を古い写しで上書きします）。④<b>枠を混ぜない</b>（別アカウント＝別枠。混ぜると使っていないのにブレーキを踏みます）。⑤<b>AIの利用料も合算</b>（2台目に移した分が💴の画面から静かに消えないように）。',
       '🚀 <b>出品同期の接続枠の無駄を2つ取りました（1日あたり約4,200回・全体の21%）</b>（本人「出品は毎日ガンガンしたいんです」）。実測すると<b>枠のいちばん太い口は🤖自動出品ではなく出品同期</b>でした（3.2時間で get_model_list 613＋get_item_list 168＋get_item_extra_info 134＝915回＝32%／🤖本体は308回）。①<b>全件同期を1店7時間ごと→1日1回に</b>：1回1店なので55分ごとだと各店を1日3.4回まるごと読み直していました。変更の取り込みは2時間ごとの増分が別にやっているので、全件の役目は「Shopeeで消えた出品の照合」だけ＝1日1回で足ります（消えた出品の表示が最大1日遅れます）。②<b>増分同期の窓の重なりを解消</b>：3時間ぶんを2時間ごとに取っていて1.5回ぶん二重取りでした。実際に空いた時間＋30分だけ取ります。<b>浮いた枠はそのまま出品に回ります。</b>',
       '✍️ <b>出品コンポーザーの「価格設定シート」を既定で閉じました</b>（見やすさの見直し）。手数料・SLS送料と、仕入額帯70段×重量帯×国のROI表は<b>手数料改定のときだけ触る設定</b>なのに、毎回の出品で使う「1.商品 → 2.価格 → 3.バリエ」の<b>途中に開きっぱなし</b>で、実測で<b>1,159px</b>ぶん間に挟まっていました。見出しに「手数料改定のときだけ開く」と添えてあるので、何が入っているかは閉じたままでも分かります。価格分析から「価格設定シートを開く↗」で飛んできた時は<b>自動で開いてから</b>スクロールします（閉じたままだと押しても何も無いように見えるため）。',
       '🩸 <b>ブレーキを2段にしました（これが無いと、枠を守った代わりに業務が止まります）</b>（本人「ブレーキかけて業務回るかも考えてね」）。これまで停止ラインは<b>1本だけ</b>で、超えると<b>注文の同期まで止まって</b>いました＝<b>新しい注文が画面に出ず、発送作業そのものができない</b>。「余裕を持った着地」ではなく業務停止です。→ 段を分けました。<br><b>① 9,000回</b>＝止めても今日の商売が回るもの（🤖自動出品・索引・統計・写真集め）<br><b>② 15,000回</b>＝<b>業務の血流</b>（注文・入金・返品・入金予定）。<b>①で止まっても新しい注文は入り続けるので、発送作業は止まりません</b><br><b>③ 残り5,000回</b>＝手動操作（発送手配・出品・価格）のための取り分<br>枠の内訳パネルにも<b>2本の線</b>を出して、いま何が止まっていて何が動いているか分かるようにしました。',
@@ -28674,6 +28698,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!keepH) box.innerHTML = '<div class="tool-card" style="max-width:none;margin:0 0 10px"><span class="smd-dim" style="font-size:12px">🤖 設定を読み込み中…</span></div>';
     try { await ensureListings(); } catch (_) {}
     const [cfg0, st, pre0, judged0, manual0] = await Promise.all([baKvGet('boshu_auto_cfg'), baKvGet('boshu_auto_status'), baKvGet('boshu_auto_pre'), baKvGet('boshu_auto_judged'), baKvGet('boshu_auto_judged_manual')]);
+    /* ★🤖の担当（本体 / 2台目）は app_kv が正。**読めた時だけ**ブラウザ側の振り分けに写す。
+       写しておかないと、別のPC・別のブラウザで開いた時に本体へ送ってしまい「担当ではない」と断られる。
+       ⚠️ 読めなかった（cfg0 が null）時は触らない＝古い振り分けのまま（勝手に本体へ戻さない）。 */
+    try { if (cfg0 && settings.boshuRunner !== (cfg0.runner === 'child' ? 'child' : 'main')) { settings.boshuRunner = (cfg0.runner === 'child' ? 'child' : 'main'); saveSettings(); } } catch (_) {}
+    /* 2台目で動いた時の【その口座の接続枠】と【AIの利用料】を受け取る（🤖の状態に同乗＝通信は増えない） */
+    try { if (st && st.uf && st.uf.child && st.uf.aiSpend && st.uf.aiSpend.days) { localStorage.setItem('smdAiSpendGasChild', JSON.stringify(st.uf.aiSpend)); aiCostDraw(); } } catch (_) {}
     const _baPre = pre0 || {};
     /* ★2026-09-20 本人「これやめて。何が悪いか分かる？」（中身を開けてディスクを並べた写真に ✓ AI OK）。一覧を作る GAS の /exec は古いバージョンのままで、古い基準の控えを「AI OK」と返していた
        （実際に出す時の判定は保存済みの最新の基準＝通らない）。→ 画面の判定は、いまの基準の控え（鍵に BA_JUDGE_VER が入ったもの）だけを見る。GAS baJudge_ の '|v9|' を上げたらここも上げる */
@@ -28898,7 +28928,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <b style="font-size:15px">🤖 空白を自動で出す</b>
         <label class="ba-on"><input type="checkbox" id="ba-on"${cfg.on ? ' checked' : ''} style="width:16px;height:16px"> ${cfg.on ? (baStale ? '<span style="color:#b3261e;font-weight:700">🔴 ' + esc(baStaleTxt) + ' 動いていません</span>（本来は30分ごと・最後は ' + esc(fmtS(new Date(s2.lastAt).getTime())) + '）' : '🟢 動いています' + (nextAt ? '（次は ' + esc(nextAt) + ' ごろ）' : '')) : '⚪ 止まっています — ONにすると30分ごとに動く'}</label>
-        <span class="smd-dim" style="font-size:11.5px">${(s2.today && s2.today.d === new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })) ? '今日 ' + num(s2.today.n) + '作品 → 明細 ' + num(s2.today.added) + '件（上限 ' + num(cfg.dailyMax) + '）' + (s2.today.judged ? '・写真AI判定 ' + num(s2.today.judged) + '回（約¥' + Math.round(Number(s2.today.judged) * 0.3) + '）' : '') + (s2.today.aiText ? '・文章AI ' + num(s2.today.aiText) + '回（約¥' + Math.round(Number(s2.today.aiText) * 0.1) + '）' : '') : '今日 0作品（上限 ' + num(cfg.dailyMax) + '）'}${s2.aiKey === false ? (cfg.requireAi !== false ? '　<b style="color:#c0392b">🔒 GASに CLAUDE_KEY が無い＝ONにしても1件も出ません（GASエディタ→⚙プロジェクトの設定→スクリプト プロパティに CLAUDE_KEY を追加）</b>' : '　<b style="color:#b26a00">⚠ GASに CLAUDE_KEY が無い＝英題・同一作品・写真のAI判定なし</b>') : ''}${s2.brake ? '　<b style="color:#c0392b">🛑 自動ブレーキ中：' + esc(String(s2.brake.why || '').slice(0, 140)) + '</b> <button class="smd-btn" id="ba-resume" style="font-size:11px;padding:1px 9px">▶ 再開</button>' : ''}${s2.lastMsg ? '　直近: ' + esc(String(s2.lastMsg).slice(0, 80)) : ''}${(s2.blockedUntil && Date.now() < s2.blockedUntil) ? '　<b style="color:#b26a00">⏸ ヤフオクの検索だけ ' + esc(fmtS(s2.blockedUntil)) + ' まで休み（メルカリの写真がある作品は続けます）</b>' : ''}</span>${baTestHtml}
+        <span class="smd-dim" style="font-size:11.5px">${(s2.today && s2.today.d === new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })) ? '今日 ' + num(s2.today.n) + '作品 → 明細 ' + num(s2.today.added) + '件（上限 ' + num(cfg.dailyMax) + '）' + (s2.today.judged ? '・写真AI判定 ' + num(s2.today.judged) + '回（約¥' + Math.round(Number(s2.today.judged) * 0.3) + '）' : '') + (s2.today.aiText ? '・文章AI ' + num(s2.today.aiText) + '回（約¥' + Math.round(Number(s2.today.aiText) * 0.1) + '）' : '') : '今日 0作品（上限 ' + num(cfg.dailyMax) + '）'}${s2.aiKey === false ? (cfg.requireAi !== false ? '　<b style="color:#c0392b">🔒 GASに CLAUDE_KEY が無い＝ONにしても1件も出ません（GASエディタ→⚙プロジェクトの設定→スクリプト プロパティに CLAUDE_KEY を追加）</b>' : '　<b style="color:#b26a00">⚠ GASに CLAUDE_KEY が無い＝英題・同一作品・写真のAI判定なし</b>') : ''}${s2.brake ? '　<b style="color:#c0392b">🛑 自動ブレーキ中：' + esc(String(s2.brake.why || '').slice(0, 140)) + '</b> <button class="smd-btn" id="ba-resume" style="font-size:11px;padding:1px 9px">▶ 再開</button>' : ''}${s2.uf ? '　<b>' + (s2.uf.child ? '2台目のGAS' : '本体のGAS') + 'で実行：接続枠 ' + num(s2.uf.used) + ' / ' + num(s2.uf.stop) + '（2万まで）</b>' : ''}${s2.lastMsg ? '　直近: ' + esc(String(s2.lastMsg).slice(0, 80)) : ''}${(s2.blockedUntil && Date.now() < s2.blockedUntil) ? '　<b style="color:#b26a00">⏸ ヤフオクの検索だけ ' + esc(fmtS(s2.blockedUntil)) + ' まで休み（メルカリの写真がある作品は続けます）</b>' : ''}</span>${baTestHtml}
         <details style="margin-left:auto"><summary class="smd-dim" style="cursor:pointer;font-size:11.5px">❓ しくみ</summary><div class="smd-dim" style="font-size:11.5px;line-height:1.7;max-width:720px;margin-top:4px">1回に数件ずつ：空白の作品を<b>メルカリ（先に集めた写真）→ヤフオク（定額だけ）</b>で探し、<b>出品者が撮った商品そのものの写真</b>を明細画像に／出品件数が少ない作品は<b>在庫0</b>／価格は<b>相場→仕入帯→各国価格表</b>（相場が無ければカタログ平均）／その国で選んだカタログ（関連シリーズのカタログがあればそちら）に足し、満杯なら複製。<b>同じ写真は2件に使わない・写真が無い作品は足さない</b>。明細で足すので<b>出品枠は消費しません</b>。</div></details>
       </div>
 
@@ -28909,6 +28939,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
 
       <div class="ba-step"><div class="ba-step-h"><span class="ba-num">2</span> どう出す <span class="smd-dim" style="font-weight:400;font-size:11px">ふつうは既定のままでOK</span></div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
+          <label class="ba-field">動かす場所（接続枠はGoogleアカウントごとに2万回/日）<select id="ba-runner">
+            <option value="main"${String(cfg.runner || 'main') !== 'child' ? ' selected' : ''}>本体のGAS（いつもの Shopee OpenAPI Sync）</option>
+            <option value="child"${String(cfg.runner || 'main') === 'child' ? ' selected' : ''}>2台目のGAS（別のGoogleアカウント・枠がもう2万）</option>
+          </select></label>
           <label class="ba-field">1回に出す件数（30分ごと）<input id="ba-per" type="number" min="1" max="20" value="${Number(cfg.perTick) || 8}"></label>
           <label class="ba-field">1日の上限（作品数）<input id="ba-daily" type="number" min="1" max="2000" value="${Number(cfg.dailyMax) || 100}"></label>
           <label class="ba-field">在庫1にする最低の出品件数<input id="ba-hits" type="number" min="1" max="50" value="${Number(cfg.minHits) || 3}"></label>
@@ -28960,6 +28994,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       c.hws = [...new Set([...box.querySelectorAll('.ba-hw:checked')].map(e => e.dataset.hw))];   /* 重複を保存しない（同じ機種のタブが増えていく元） */
       c.ccs = [...box.querySelectorAll('.ba-cc:checked')].map(e => e.dataset.cc);
       c.autoPublish = {}; box.querySelectorAll('.ba-pub:checked').forEach(e => { c.autoPublish[e.dataset.cc] = true; });
+      /* 🤖を動かす場所。**担当は1つだけ**＝両方で動かすと同じ作品を二重に出す（GAS側も担当でなければ動かない作り）。
+         ポータルは🤖の操作をここで選んだ側のGASへ送る（settings.boshuRunner を見ている）。 */
+      { const rn = document.getElementById('ba-runner'); if (rn) { c.runner = (rn.value === 'child' ? 'child' : 'main'); settings.boshuRunner = c.runner; saveSettings(); } }
       c.perTick = Math.max(1, Math.min(20, parseInt(document.getElementById('ba-per').value, 10) || 8));
       c.dailyMax = Math.max(1, parseInt(document.getElementById('ba-daily').value, 10) || 100);
       c.minHits = Math.max(1, parseInt(document.getElementById('ba-hits').value, 10) || 3);
@@ -43739,7 +43776,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('set-sbsecret').value = settings.sbSecret;
     document.getElementById('set-airesearch').value = settings.aiResearchUrl || '';
     { const ck = document.getElementById('set-claudekey'); if (ck) ck.value = settings.claudeKey || ''; }
-    { const a = document.getElementById('set-openapi'); if (a) a.value = settings.openapiUrl || ''; const b = document.getElementById('set-writetoken'); if (b) b.value = settings.writeToken || ''; }
+    { const a = document.getElementById('set-openapi'); if (a) a.value = settings.openapiUrl || ''; const b = document.getElementById('set-writetoken'); if (b) b.value = settings.writeToken || ''; const c = document.getElementById('set-boshuurl'); if (c) c.value = settings.boshuUrl || ''; }
     { const w = settings.workSheet || {};
       const g = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
       g('set-ws-boxin', w.boxIn); g('set-ws-boxout', w.boxOut); g('set-ws-pickup', w.pickup); g('set-ws-tel', w.tel); }
@@ -43858,7 +43895,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     settings.sbSecret = document.getElementById('set-sbsecret').value.trim();
     settings.aiResearchUrl = document.getElementById('set-airesearch').value.trim().replace(/\/$/, '');
     { const ck = document.getElementById('set-claudekey'); if (ck) settings.claudeKey = ck.value.trim(); }
-    { const a = document.getElementById('set-openapi'); if (a) settings.openapiUrl = a.value.trim().replace(/\/$/, ''); const b = document.getElementById('set-writetoken'); if (b) settings.writeToken = b.value.trim(); }
+    { const a = document.getElementById('set-openapi'); if (a) settings.openapiUrl = a.value.trim().replace(/\/$/, ''); const b = document.getElementById('set-writetoken'); if (b) settings.writeToken = b.value.trim(); const c = document.getElementById('set-boshuurl'); if (c) settings.boshuUrl = c.value.trim().replace(/\/$/, ''); }
     { const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
       settings.workSheet = { boxIn: g('set-ws-boxin'), boxOut: g('set-ws-boxout'), pickup: g('set-ws-pickup'), tel: g('set-ws-tel') }; }
     { const v = document.getElementById('set-vac'); if (v) settings.vacationMode = v.checked; const s = document.getElementById('set-vac-since'); if (s) settings.vacationSince = s.value.trim(); const n = document.getElementById('set-vac-note'); if (n) settings.vacationNote = n.value.trim(); if (settings.vacationMode && !settings.vacationSince) settings.vacationSince = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); }
