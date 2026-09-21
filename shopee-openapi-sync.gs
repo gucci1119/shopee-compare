@@ -4174,10 +4174,16 @@ function syncListingsRoundRobin() {
       入金明細604回より多い）。トリガーは30分ごとのままにして、**ここで1時間に1回に間引く**
       （トリガーを作り直すと版の固定でハマるため・[[gas-version-limit-200]]）。
       手で動かす時（ポータルの「まとめて更新」など）は素通しする＝間引くのは時間トリガーの回だけ。 */
-  var LIST_RR_EVERY_MS = 55 * 60 * 1000;
+  /* ★2026-09-21 実測で【接続枠のいちばん太い口はここ】と確定した（3.2時間で get_model_list 613回＝全体の22%）。
+     LIST_RR_BATCH は 1（1回1店）なので、55分ごとだと **各店を約7時間ごと＝1日3.4回** 全件読み直していた。
+     全件同期がやることは ①変更の取り込み ②Shopee側で消えた出品の照合削除 の2つで、
+     ①は下の「増分同期（2時間ごと）」が別にやっている。残る②は**1日1回で足りる**（消えた出品の表示が最大1日遅れるだけ）。
+     → 205分ごと＝7店で約24時間＝各店1日1回。get_model_list が約7割減る見込み。
+     ⚠️ 戻すときはこの値だけ 55 に戻せばよい（他は触っていない）。 */
+  var LIST_RR_EVERY_MS = 205 * 60 * 1000;
   try {
     var _lastRR = parseInt(P_().getProperty('listRR_at') || '0', 10) || 0;
-    if (Date.now() - _lastRR < LIST_RR_EVERY_MS) { Logger.log('syncListingsRoundRobin skip: 前回から1時間たっていない'); return [{ skipped: 'too_soon' }]; }
+    if (Date.now() - _lastRR < LIST_RR_EVERY_MS) { Logger.log('syncListingsRoundRobin skip: 前回の全件同期から ' + Math.round(LIST_RR_EVERY_MS / 60000) + ' 分たっていない'); return [{ skipped: 'too_soon' }]; }
     P_().setProperty('listRR_at', String(Date.now()));
   } catch (eRR) {}
   var toks = listTokens_(); if (!toks.length) return [];
@@ -4194,7 +4200,17 @@ function syncListingsRoundRobin() {
   // 2h窓ぶんを一度に拾うので取りこぼしなし（画像/タイトル/在庫/価格/バリエ変更は最長2時間で反映）。
   try {
     var lc = parseInt(P_().getProperty('listChangedLast') || '0', 10) || 0;
-    if (now_() - lc >= 2 * 3600) { P_().setProperty('listChangedLast', String(now_())); log.push({ changed: syncListingsChangedAll(3) }); }
+    if (now_() - lc >= 2 * 3600) {
+      /* ★2026-09-21 枠の節約：ここは【3時間ぶん】を【2時間ごと】に取っていたので、
+         毎回1時間ぶんを二重に取り直していた（窓が1.5回ぶん重なる）。
+         実際に空いた時間＋30分だけ取る＝取りこぼしを増やさずに、重なりだけ無くす。
+         ⚠️ 記録が無い初回は従来どおり3時間（0にすると since が現在時刻になり、取りこぼす）。 */
+      var _gapH = lc ? ((now_() - lc) / 3600 + 0.5) : 3;
+      if (_gapH < 1) _gapH = 1;
+      if (_gapH > 12) _gapH = 12;
+      P_().setProperty('listChangedLast', String(now_()));
+      log.push({ changed: syncListingsChangedAll(_gapH), windowH: Math.round(_gapH * 10) / 10 });
+    }
     else log.push({ changedSkipped: true });
   } catch (eC) { log.push({ changedError: String(eC).slice(0, 140) }); }
   ufPersist_();
