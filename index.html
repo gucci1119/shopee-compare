@@ -5796,6 +5796,12 @@
     "想定内": "Expected",
     "✅タスク化": "✅ Make a task",
     "📮 番号を貼る": "📮 Paste a tracking number",
+    "📭 追跡なし": "📭 No tracking",
+    "📦 注文ページ ↗": "📦 Order page ↗",
+    "仕入元の【注文詳細ページ】を開きます。Amazon・楽天・メルカリShopsはここで配送状況（発送済/お届け予定/追跡）も見られます": "Opens the supplier's order-detail page. For Amazon, Rakuten and Mercari Shops you can also see the delivery status there (shipped / expected / tracking)",
+    "仕入元の商品ページ（注文ページのURLが取れていない行。参照用）": "Supplier's product page (rows where no order-page URL was captured; for reference)",
+    "仕入元の発送メールに『追跡番号はございません』と書かれている発送方法です（ゆうメール・普通郵便など）": "The supplier's shipping email says this method has no tracking number (Yu-Mail, ordinary post and so on)",
+    "仕入元の発送メールに『追跡番号はございません』と書かれている発送方法です（ゆうメール・普通郵便など）。番号の取り込み漏れではありません": "The supplier's shipping email says this method has no tracking number (Yu-Mail, ordinary post and so on). Nothing failed to import",
     "割り当て": "Allocate",
     "確認": "Check",
     "仕入れを探す": "Find supply",
@@ -10681,7 +10687,9 @@
     if (txn) parts.push(isFleaMarket(r.supplier)
       ? `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の取引画面を直接開く（発送済/輸送中/配達中/配達済のライブ配送状況。番号未取得でもここで確認できます）" style="color:#00695c;text-decoration:none;font-weight:600">🔎 取引ページ ↗</a>`
       : `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の商品/注文ページ（EC系は取引ページ・受取評価が無く『届くだけ』＝配達状況はここでは確認できません。参照用）" style="color:#8a8f98;text-decoration:none;font-size:10.5px">🔗 商品ページ</a>`);
-    if (!r.tracking_no) parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
+    if (!r.tracking_no) parts.push(hasNoTracking(r)
+      ? `<span title="仕入元の発送メールに『追跡番号はございません』と書かれている発送方法です（ゆうメール・普通郵便など）" style="color:#8a8f98;font-size:10px">📭 追跡なし</span>`
+      : `<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
     return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
   }
   // ★仕入元（メルカリ等）都合でキャンセルされ、そもそも届かなかった仕入。
@@ -14944,6 +14952,19 @@
   }
   const WAIT_PHASE = { delivered: { t: '✅ 到着済', bg: '#e8f5e9', c: '#2e7d32' }, likely: { t: '🟡 到着済見込み', bg: '#fff8e1', c: '#b26a00' }, out: { t: '🚚 配達中(お近く)', bg: '#fff3e0', c: '#e65100' }, arrived: { t: '🏣 配達店到着', bg: '#e0f2f1', c: '#00695c' }, eta: { t: '📅 到着予定', bg: '#e3f2fd', c: '#1565c0' }, linehaul: { t: '🚛 輸送中', bg: '#ede7f6', c: '#4527a0' }, shipped: { t: '📮 発送済', bg: '#e8eaf6', c: '#283593' }, transit: { t: '📦 追跡中', bg: '#eef2ff', c: '#3949ab' }, none: { t: '❔ 手配待ち', bg: '#f3f4f6', c: '#6b7280' } };
   // 配送業者の最新ステータス文言(ds)＋メルカリ由来(di)→配送段階に分類。発送直後/輸送中/配達店到着/配達中を区別（追跡中を細かく）
+  // 📭 追跡番号が【そもそも存在しない】発送方法。番号が抜けているのではないので「貼る」を出さない。
+  //   きっかけ（2026-09-21 本人「これ追跡までは出ないんですか？」）：楽天 買取ヒーローズ1号店の発送メールに
+  //   「追跡No：ゆうメールで発送の為、追跡番号はございません」と明記されていた＝取り込み漏れではない。
+  //   ※判定は ship_method（取込GASが発送メールから入れる）と delivery_info を見る。
+  const NO_TRACK_RE = /追跡なし|追跡番号(は)?(ございません|ありません)|ゆうメール|普通郵便|定形外|スマートレター|ミニレター/;
+  const hasNoTracking = r => NO_TRACK_RE.test(String((r && r.ship_method) || '') + ' ' + String((r && r.delivery_info) || ''));
+  // 📦 EC系の supplier_url が【注文詳細ページ】かどうか。実測（2026-09-21・入庫待ち248件は全件URLあり）：
+  //   Amazon www.amazon.co.jp/your-orders/order-details?orderID=… ／ メルカリShops mercari-shops.com/orders/… ／
+  //   楽天 order.my.rakuten.co.jp/?page=myorder&act=detail_view&… ＝どれも注文詳細で【配送状況もそこで見られる】。
+  //   それを「🔗 商品ページ（配達状況はここでは確認できません）」と呼んでいたのでラベルを実態に合わせる。
+  //   本人「ここから仕入元URLにはたどれないのか？」（2026-09-21）＝たどれるのに、たどれないように見えていた。
+  const ORDER_URL_RE = /\/your-orders|order[-_]?details?|\/orders?\/|myorder|detail_view|purchaseHistory|\/my\/purchase/i;
+  const isOrderUrl = u => ORDER_URL_RE.test(String(u || ''));
   const stageOf = (ds, di) => {
     const s = String(ds || ''), d = String(di || '');
     // ★「持ち戻り／ご不在／保管」は届いていない。先に弾かないと「お届け.*済」等に巻き込まれる
@@ -15344,9 +15365,13 @@
       const txn = stkTxnUrl(r) || r.supplier_url;
       if (txn) parts.push(isFleaMarket(r.supplier)
         ? `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の取引画面を直接開く（発送済/輸送中/配達中/配達済のライブ配送状況。番号未取得でもここで確認できます）" style="color:#00695c;text-decoration:none;font-weight:600;font-size:10.5px">🔎 取引ページ ↗</a>`
-        : `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の商品/注文ページ（EC系は取引ページ・受取評価が無く『届くだけ』＝配達状況はここでは確認できません。参照用）" style="color:#8a8f98;text-decoration:none;font-size:10.5px">🔗 商品ページ</a>`);
+        : (isOrderUrl(txn)
+          ? `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の【注文詳細ページ】を開きます。Amazon・楽天・メルカリShopsはここで配送状況（発送済/お届け予定/追跡）も見られます" style="color:#00695c;text-decoration:none;font-weight:600;font-size:10.5px">📦 注文ページ ↗</a>`
+          : `<a href="${esc(txn)}" target="_blank" rel="noopener" title="仕入元の商品ページ（注文ページのURLが取れていない行。参照用）" style="color:#8a8f98;text-decoration:none;font-size:10.5px">🔗 商品ページ</a>`));
       // 追跡番号が取り込めていない行は手貼りも（貼ればアプリ内で追跡・現在地表示）
-      if (!r.tracking_no) parts.push(`<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡・現在地表示）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
+      if (!r.tracking_no) parts.push(hasNoTracking(r)
+        ? `<span title="仕入元の発送メールに『追跡番号はございません』と書かれている発送方法です（ゆうメール・普通郵便など）。番号の取り込み漏れではありません" style="color:#8a8f98;font-size:10px">📭 追跡なし（${esc(String(r.ship_method || '').replace(/\(追跡なし\)/, '') || '普通郵便')}）</span>`
+        : `<a href="#" class="stk-addtrack" data-id="${esc(r.item_id)}" data-m="${esc(r.ship_method || '')}" title="追跡番号を手入力して保存（次回以降このアプリで追跡・現在地表示）" style="color:#8a8f98;text-decoration:none;font-size:10px">📮 番号を貼る</a>`);
       return parts.length ? parts.join('<br>') : '<span class="smd-dim">—</span>';
     };
     // 🧹 長期滞留の点検：入庫待ちのうち「想定日数を超えて残っている＝もう配達済のはず」の候補（配達中/まもなく配達は除く＝これから届く物）
@@ -18003,6 +18028,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '📦 <b>入庫待ちの「🔗 商品ページ」は、実は【注文詳細ページ】でした</b>（本人「ここから仕入元URLにはたどれないのか？」）。実測：入庫待ち248件は<b>全件に仕入元URLが入っている</b>。中身は <b>Amazon</b> <code>/your-orders/order-details</code>／<b>メルカリShops</b> <code>/orders/…</code>／<b>楽天</b> <code>order.my.rakuten.co.jp …detail_view</code> ＝どれも注文詳細で、<b>そこで配送状況も見られます</b>。それを「商品ページ（配達状況はここでは確認できません）」と呼んでいたので、<b>📦 注文ページ ↗</b> に直し、説明も実態に合わせました。',
+      '📭 <b>「追跡番号が無い」と「追跡番号が存在しない」を分けました</b>。楽天 買取ヒーローズ1号店の発送メールに <b>「追跡No：ゆうメールで発送の為、追跡番号はございません」</b> と明記されていた＝<b>取り込み漏れではありません</b>。これまで一律に「📮 番号を貼る」と出ていたため、毎回「抜けているのでは」と見えていました。→ <b>📭 追跡なし（ゆうメール）</b> と表示。取込GASも発送メールからこの明言を拾って記録します（番号が取れた時は上書きしません）。',
+      '🧰 <b>入庫待ちに梱包資材・事務所の備品が混ざっていました</b>（実測 2026-09-21）。<b>Amazonの入庫待ち75件・¥346,400 のうち、本当の商品は4件（約¥9,000）だけ</b>。残りはプチプチ・ダンボール・インク・ラベル（42件 ¥126,494）とウッドカーペット・カーテン・収納・Wi-Fiルーター・宅配ボックス等の備品。入荷処理をしないので<b>永久に入庫待ちに残り、仕入額を膨らませます</b>。<b>分け方は本人の判断待ち</b>（日用品もSGでは商品になるため機械的に除外しません）。',
       '\u{1F4B8} <b>接続枠の無駄を切りました</b>（本人「無駄遣いで減らせるところは減らしてほしい」「効率化しつつ節約」）。<b>機能は1つも落としていません</b>。<br>① <b>入金明細を6時間ごと→12時間ごと</b>に（<b>1日およそ330回ぶん</b>）。入金の確定は<b>倉庫スキャンの数日後</b>なので6時間ごとに見直す意味がなく、補償・関税は入金予定（payout）側から入るので<b>取りこぼしません</b>（2026-08-24 に検証済み）。<b>⚡今すぐ取得は今まで通り</b>すぐ取りに行きます。<br>② 枠の合算の読みを<b>30分キャッシュ＋自分の消費が停止線の4割未満なら読まない</b>に（合算しても結論が変わらない日は読まない）。',
       '\u{1F6E1}\u{FE0F} <b>同じ型の不具合を全体で洗って、再発よけを点検に入れました</b>。今日見つかった3つの型を、他に無いか機械で探しました。<br>①<b>PCのファイルを画像APIへそのまま渡す</b>…呼び出し側を1つずつ直すのではなく、<b>入口（openapiSetVariationImage）で必ずアップロードしてから渡す</b>ようにしました（今後どこから呼んでも安全）。<br>②<b>記録の丸ごと上書き</b>…<b>他に2箇所</b>見つけて直しました（🔍で写真を見直した時の記録。同じく判定の版が消えて、手で直した写真が戻る恐れ）。<br>③<b>検索結果を題名を見ずに使う</b>…🔎メルカリで探すに<b>題名の照合とグッズ除外</b>を入れ、1つも当たらない時は「<b>別の商品かもしれません</b>」と赤で出します。<br>この3つは<b>締めの点検（chk）で自動的に見張ります</b>。',
       '\u{1F50E} <b>【不具合】🔎メルカリで探すが、副題を捨てて検索していました</b>（Codexの指摘）。<b>Zelda: Twilight Princess</b> が <b>Zelda</b> だけで検索され、<b>別のゲームや周辺機器の写真</b>が並ぶところでした（メルカリ検索は安い順で、題名を見ずに先頭から採るため）。→ 落とすのは<b>頭の機種の印（GBA: PS4: など）だけ</b>にして、副題は残します。<br>あわせて、<b>長い題名の明細が自分の写真に辿り着けない</b>のも直しました（長い題名は縮めた名前で明細を作っているのに、逆引きが元の名前しか見ていませんでした）。',
