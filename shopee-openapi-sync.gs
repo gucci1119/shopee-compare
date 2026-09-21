@@ -280,6 +280,21 @@ function doGet(e) {
 function doGetInner_(e) {
   var p = (e && e.parameter) || {};
   try {
+    /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
+       エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
+       WRITE_TOKEN 必須。子機なら🤖のトリガーだけ作られる（setupTriggers 側で分岐）。 */
+    if (p.action === 'setup_triggers') {
+      var _scb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var _so;
+      try {
+        var _wt0 = P_().getProperty('WRITE_TOKEN');
+        if (!_wt0 || p.token !== _wt0) throw new Error('WRITE_TOKEN不正');
+        var _r0 = setupTriggers();
+        var _tg = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+        _so = { ok: true, child: isChild_(), triggers: _tg, n: _tg.length, ret: _r0 || null };
+      } catch (_se) { _so = { ok: false, error: String((_se && _se.message) || _se) }; }
+      return ContentService.createTextOutput(_scb + '(' + JSON.stringify(_so) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     // ★書き込み(在庫/価格)：JSONPで返す。ポータルから ?action=update_stock/update_price&callback&token&shop_id&item_id&model_id&stock/price
     if (p.action === 'update_stock' || p.action === 'update_price') {
       var cb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
