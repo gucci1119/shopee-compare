@@ -15514,7 +15514,8 @@
       </span>` +
       ((state.buyWaitQ || '').trim() ? `<span class="smd-dim" style="margin-left:6px;font-size:11.5px">🔎 <b style="color:#1565c0">${shown.length}</b>件（全${shownAll.length}件中）</span>` : '') +
       `<button class="smd-btn" id="wait-csv" style="margin-left:6px" title="いま表示している分をCSVで書き出し">⬇ CSV(${shown.length})</button>` +
-      ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みを一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
+      (cnt('delivered') ? `<button class="smd-btn" id="wait-bulkdeliv" style="margin-left:6px;background:#2e7d32;border-color:#2e7d32;color:#fff;font-weight:700" title="配送業者が『配達完了／お届け済み』と言っている分【だけ】をまとめて在庫保管中にします。推定は混ざりません（見込みは右の薄いボタン）">✓ 配達完了だけ入荷（${cnt('delivered')}）</button>` : '') +
+      ((cnt('delivered') + cnt('likely')) ? `<button class="smd-btn" id="wait-bulkarrive" style="margin-left:6px;border-color:#2e7d32;color:#2e7d32" title="到着済＋到着済見込みをまとめて在庫保管中にする（届いていない物が混ざる可能性があるため確認あり）">✓ 見込みも含めて一括入荷（${cnt('delivered') + cnt('likely')}）</button>` : '') +
       (cleanupN ? `<button class="smd-btn" id="wait-cleanup" style="margin-left:6px;border-color:#7b52c4;color:#7b52c4;font-weight:700" title="仕入れたのに『入庫待ち』のまま長期滞留している分を、滞留日数で層別して一括受取／取引ページで確認できる点検モード。古い＝もう配達済のはず、楽天/Yahoo・最近の分は要確認。">🧹 長期滞留の点検（${cleanupN}）</button>` : '') +
       ((fwdHidden || state.buyWaitShowForwarded) ? `<button class="smd-btn" id="wait-showfwd" style="margin-left:6px;${state.buyWaitShowForwarded ? 'background:#eef2ff;border-color:#3949ab;color:#3949ab;font-weight:700' : ''}" title="紐づくShopee注文が『倉庫スキャン待ち(自社倉庫→Shopee倉庫へ発送済)』以降の仕入れは、本日発送すべき物量ではないため既定で非表示。ここで表示/非表示を切替。">${state.buyWaitShowForwarded ? '🚚 倉庫発送済も表示中（クリックで隠す）' : ('🚚 倉庫発送済を表示（' + fwdHidden + '件を非表示中）')}</button>` : '') + `</div>` +
       addrPanel(beforeAddr) +
@@ -15569,6 +15570,25 @@
       if (!confirm('この商品を「在庫保管中」に移します（入荷完了）。よろしいですか？')) return;
       if (await stockSave(id, { status: '在庫保管中' })) { toast('✅ 入荷: 在庫保管中に移動しました'); renderWaiting(host); }
     }));
+    /* ★2026-09-21 追跡の調査中に見つけた入荷漏れ。実測：配送業者が「配達完了／お届け済み」と言っているのに
+       入庫待ちのままが【50件】・最古は 2026-08-09（43日前）。既存の一括入荷は【見込み162件】が混ざるので
+       押しづらく、結果として1か月以上たまっていた。→ 推定ゼロの「配達完了だけ」を別ボタンにする。 */
+    { const bd = document.getElementById('wait-bulkdeliv'); if (bd) bd.addEventListener('click', async () => {
+      if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
+      const targets = list.filter(x => x.phase === 'delivered');
+      if (!targets.length) return;
+      const old = targets.filter(x => x.r && x.r.purchase_date && (Date.now() - Date.parse(x.r.purchase_date)) > 30 * 86400000).length;
+      if (!confirm(`配送業者が「配達完了／お届け済み」と言っている ${targets.length}件 を「在庫保管中」にします。\n（推定は含みません。うち仕入から30日以上たっているもの ${old}件）\n\n後で🏷在庫管理から個別に戻せます。実行しますか？`)) return;
+      bd.disabled = true; bd.textContent = '処理中…';
+      try {
+        const now = new Date().toISOString();
+        await sbUpsert('inventory', targets.map(x => ({ item_id: x.r.item_id, status: '在庫保管中', edited_at: now })));
+        targets.forEach(x => { const row = stock.rows.find(r => r.item_id === x.r.item_id); if (row) row.status = '在庫保管中'; });
+        logAct('仕入れ管理', '配達完了だけ一括入荷', `${targets.length}件`, '');
+        toast(`✅ ${targets.length}件を在庫保管中に移動しました`);
+        renderWaiting(host);
+      } catch (e) { alert('一括入荷に失敗: ' + e.message); bd.disabled = false; bd.textContent = '✓ 配達完了だけ入荷'; }
+    }); }
     { const ba = document.getElementById('wait-bulkarrive'); if (ba) ba.addEventListener('click', async () => {
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
       const targets = list.filter(x => x.phase === 'delivered' || x.phase === 'likely'); // 表示フィルタに関わらず全「到着済+見込み」を対象
@@ -15582,7 +15602,7 @@
         logAct('仕入れ管理', '到着済見込みを一括入荷', `${targets.length}件`, '');
         toast(`✅ ${targets.length}件を在庫保管中に移動しました`);
         renderWaiting(host);
-      } catch (e) { alert('一括入荷に失敗: ' + e.message); ba.disabled = false; ba.textContent = '✓ 見込みを一括入荷'; }
+      } catch (e) { alert('一括入荷に失敗: ' + e.message); ba.disabled = false; ba.textContent = '✓ 見込みも含めて一括入荷'; }
     }); }
     setupColumns('buy', host);
     fitScroll('buy');
@@ -18028,6 +18048,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '✅ <b>「配達完了だけ入荷」ボタンを足しました</b>。実測（2026-09-21）：<b>配送業者が「配達完了／お届け済み」と言っているのに入庫待ちのままが50件・最古は8/09（43日前）</b>。これまでの一括入荷は<b>「到着済見込み」162件が混ざる</b>ため押しづらく、結果として1か月以上たまっていました。→ <b>推定ゼロの「配達完了」だけ</b>を緑の実ボタンで分離（確認ダイアログに「うち仕入から30日以上たっているもの N件」も表示）。従来のボタンは「✓ 見込みも含めて一括入荷」に改名。',
       '📦 <b>入庫待ちの「🔗 商品ページ」は、実は【注文詳細ページ】でした</b>（本人「ここから仕入元URLにはたどれないのか？」）。実測：入庫待ち248件は<b>全件に仕入元URLが入っている</b>。中身は <b>Amazon</b> <code>/your-orders/order-details</code>／<b>メルカリShops</b> <code>/orders/…</code>／<b>楽天</b> <code>order.my.rakuten.co.jp …detail_view</code> ＝どれも注文詳細で、<b>そこで配送状況も見られます</b>。それを「商品ページ（配達状況はここでは確認できません）」と呼んでいたので、<b>📦 注文ページ ↗</b> に直し、説明も実態に合わせました。',
       '📭 <b>「追跡番号が無い」と「追跡番号が存在しない」を分けました</b>。楽天 買取ヒーローズ1号店の発送メールに <b>「追跡No：ゆうメールで発送の為、追跡番号はございません」</b> と明記されていた＝<b>取り込み漏れではありません</b>。これまで一律に「📮 番号を貼る」と出ていたため、毎回「抜けているのでは」と見えていました。→ <b>📭 追跡なし（ゆうメール）</b> と表示。取込GASも発送メールからこの明言を拾って記録します（番号が取れた時は上書きしません）。',
       '🧰 <b>入庫待ちに梱包資材・事務所の備品が混ざっていました</b>（実測 2026-09-21）。<b>Amazonの入庫待ち75件・¥346,400 のうち、本当の商品は4件（約¥9,000）だけ</b>。残りはプチプチ・ダンボール・インク・ラベル（42件 ¥126,494）とウッドカーペット・カーテン・収納・Wi-Fiルーター・宅配ボックス等の備品。入荷処理をしないので<b>永久に入庫待ちに残り、仕入額を膨らませます</b>。<b>分け方は本人の判断待ち</b>（日用品もSGでは商品になるため機械的に除外しません）。',
