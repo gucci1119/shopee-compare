@@ -2941,6 +2941,11 @@ function syncDailyStatsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, days: rows.length, orders: details.length };
 }
 function syncAll() {
+  /* ★2026-09-21 本人「着地を理論上だけじゃなくて、可能にしてな」＝**穴が無いことを確かめる**。
+     定期処理13個のうち、ここだけ `bgAllowed_()` を見ていなかった（Shopeeは叩かず Supabase の集計だけなので
+     1回2コール・1日48回＝全体の0.2%と小さいが、**「停止ラインを超えたら背景処理は全部止まる」という決まりに穴が空く**）。
+     数字の大小ではなく、**例外を作らない**ために閉じる。 */
+  if (!bgAllowed_()) { Logger.log('syncAll skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   // ★日次集計はDBのorders表から計算＝Shopeeの二重取得を解消（旧: syncDailyStatsForShop_ が毎時Shopeeを再取得していた。
   //   orders表は syncOrdersAll が公式APIで同期済みなので、そこから cc×日 で units/sales/orders を集計するだけ＝Shopee呼び出しゼロ）。
   var since = new Date((now_() - 4 * 86400) * 1000).toISOString().slice(0, 10);
