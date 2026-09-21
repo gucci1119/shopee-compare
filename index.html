@@ -2014,14 +2014,20 @@
     // ★読めなかった時に【0とみなさない】。0にすると「まだ余っている」と嘘をつくことになり、
     //   枠切れの方向に間違える（＝いちばん危ない側の誤り）。前回読めた値を持ち越す。
     let ext = Number(window.__ufExtLast) || 0, extKnown = (window.__ufExtLast != null);
+    let reserve = Number(window.__ufReserveLast) || 0;   // 意図的に空けている分（使用量ではない）
     try {
       // ★1つの鍵だけ見ていると、あとから足したGASの分が【永久に入らない】（2026-09-07 Codexの指摘）。
       //   uf_ext_ で始まる鍵を全部足す（仕入れメール取込・配送追跡…）。
       const g = await sbGetAll('app_kv', 'select=k,v&k=like.uf_ext_*');
       // 太平洋時間の日付が今日と同じ時だけ足す（日をまたいだ古い数字を持ち越さない）
       const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
-      ext = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today) ? (Number(v.n) || 0) : 0); }, 0);
-      extKnown = true; window.__ufExtLast = ext;
+      /* ★2026-09-21 `uf_ext_reserve` は【使った分ではなく、意図的に空けている分】。
+         GAS側のブレーキ（ufTotal_）にはわざと足しているが（デプロイ版の UF_STOP=15000 を実質 11000 にするため。
+         再デプロイがバージョン上限200でできないので、データ側でブレーキを手前に寄せている）、
+         **画面では「使った」に混ぜない**。混ぜると今日の午前とまったく同じ「数字が嘘をつく」状態に戻る。 */
+      ext = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today && String(r.k) !== 'uf_ext_reserve') ? (Number(v.n) || 0) : 0); }, 0);
+      reserve = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today && String(r.k) === 'uf_ext_reserve') ? (Number(v.n) || 0) : 0); }, 0);
+      extKnown = true; window.__ufExtLast = ext; window.__ufReserveLast = reserve;
     } catch (_) {}
     // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
     //   ここで足しておかないと、そちらだけ残りが多く見えてしまう（Codexの指摘・2026-09-04）。
@@ -2030,7 +2036,8 @@
        ここでもう一度足すと二重になり、写真集めのブレーキが早く掛かる／残量が実際より少なく見える。
        古い版のGAS（usedExt を返さない）が入っている間だけ、これまで通りここで足す。 */
     const gasHasExt = (r.usedExt !== undefined && r.usedExt !== null);
-    const extGas = gasHasExt ? (Number(r.usedExt) || 0) : 0;
+    /* GASの usedExt には uf_ext_reserve（予約）も混ざっているので、画面に出す前に引く */
+    const extGas = gasHasExt ? Math.max(0, (Number(r.usedExt) || 0) - reserve) : 0;
     /* ★Codex指摘（2026-09-21・P2）：GAS側の「もう一方のGASの分」は15分キャッシュなので**古いことがある**。
        ここで読んだ Supabase の値の方が新しい。どちらかを捨てるのではなく**大きい方を採る**＝少なく見積もらない。 */
     const extUse = extKnown ? Math.max(ext, extGas) : extGas;
@@ -18100,6 +18107,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🛡 <b>16:00のリセット後、手動操作用の枠を「必ず」空けるようにしました</b>（本人「出費枠は絶対に残してくださいね。無駄な使い方しないでくださいね」）。<br>問題：停止ラインを 15,000→<b>6,000</b> に下げたのに、<b>🤖自動出品には効いていませんでした</b>。🤖のトリガーは <code>/exec</code> から作られており <b>デプロイ版に固定</b>されるためで、いまバージョン上限200で再デプロイできません（保存だけで効くのは Head のトリガーだけ）。実際 <code>uf_status</code> は <code>stopLine:15000 / cap:20000</code> と古い値を返していました。<br>対処：<b>再デプロイ無しで効く手</b>として、<code>app_kv</code> に <b><code>uf_ext_reserve</code>（今日ぶん 4,000）</b> を置きました。デプロイ版の <code>ufExt_()</code> がこれを合計に足すので、<b>背景処理は実質 11,000 で止まります＝約9,000を手動用に確保</b>。<br>⚠️ ただし<b>画面では「使った分」に混ぜません</b>（混ぜたら今朝と同じ「数字が嘘をつく」状態に戻るため）。予約分は使用量から除いて表示します。<b>再デプロイできたらこのキーは削除</b>し、`UF_STOP=6000` 本来の形に戻します。',
       '📊 <b>在庫管理：棚卸しの内訳が「数字の壁」だったのを直しました</b>。「📦在庫あり」の下の<b>カテゴリ／ハード／仕入元</b>の内訳は、<b>名前・件数・金額の3つ組が30個ほど区切りなしで折り返す</b>ため、<code>507 ¥775,171　周辺機器 306</code> のように隣とつながって読めませんでした。→ <b>1つも隠さずに</b>、①各粒に枠線を付けて分ける ②見出し（カテゴリ／ハード／仕入元）の幅を揃えて3行を縦にそろえる ③<b>件数は濃く・金額は薄く小さく</b>（役割で見た目を変える）。',
       '📦 <b>注文管理：同じ数字を2か所に出すのをやめました</b>。4段階（①未手配・②伝票発行済・③倉庫スキャン待ち・④発送済）の件数が<b>タブの下の「発送フロー」行</b>にあり、<b>押す場所であるタブには件数が無い</b>という逆転でした。→ <b>件数をタブに載せ</b>、重複していた行を削除（表の上のかたまりが1行ぶん短くなり、注文が早く見えます）。<b>📥要対応・💳未支払い・🚨遅延/リスク</b>にも件数を付けました。段階の意味は各タブにカーソルを乗せれば出ます（元から入っています）。',
       '🎨 <b>見やすさの手入れ（つづき）</b>：仕入れ検索の上にある <b>「検索先」のフィルタ</b>も、チェックボックスで入/切が分かるのに<b>さらに原色で塗って</b>いました（色が二重）。下の仕入先チップと同じ見た目に揃え、<b>切ってあるサイトは薄く</b>しました。',
