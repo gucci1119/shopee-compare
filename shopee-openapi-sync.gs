@@ -6484,6 +6484,8 @@ var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2'
    → model_id が空／JAN 未記入の明細を、カタログごとに get_model_list 1回で引き直し、JAN はマスタ（sg_<hw>・jan_master_<hw>）から作品の鍵で引いて product_ids に書く。1回の実行でカタログ2つまで。済んだ明細は jw=1 */
 var BA_JAN_PER_RUN = 12;   /* 1回の実行で引き直すカタログ数。get_model_list 1回/カタログ＝枠12回。2だと多い日（393件/日）に400件の打ち切りへ追いつかない */
 function baJanBackfill_(st, t0) {
+  /* 旧ルールで「JANが無いまま済み」にされた行を1度だけ拾い直す（jt が無い＝新ルールを通っていない印） */
+  (st.added || []).forEach(function (a) { if (a && a.jw && !String(a.jan || '').trim() && a.jt == null) { a.jw = 0; a.jt = 1; } });
   var todo = (st.added || []).filter(function (a) { return a && a.item_id && a.shop_id && a.en && !a.jw; });
   if (!todo.length) return;
   var byItem = {}, order = []; todo.forEach(function (a) { var k = String(a.item_id); if (!byItem[k]) { byItem[k] = []; order.push(k); } byItem[k].push(a); });
@@ -6493,17 +6495,25 @@ function baJanBackfill_(st, t0) {
     if (!janMaps[hw]) { var m = {}; try { var sv = baKv_('sg_' + hw) || {}; (sv.rows || []).forEach(function (r) { if (r && r.t && baJanReal_(r.j)) { var k = baKey_(r.t); if (k && !m[k]) m[k] = r.j; } }); var jv = baKv_('jan_master_' + hw) || {}, jmi = jv.items || {}; (Array.isArray(jmi) ? jmi : Object.keys(jmi).map(function (j) { return [j, jmi[j]]; })).forEach(function (p) { if (p && p[1] && baJanReal_(p[0])) { var k2 = baKey_(p[1]); if (k2 && !m[k2]) m[k2] = p[0]; } }); } catch (e) {} janMaps[hw] = m; }
     return janMaps[hw][key] || janMaps[hw][baKey_(ja)] || '';
   };
+  /* ★2026-09-22 ②：済みの印（jw=1）は【書けた時だけ】立てる。前は JAN が見つからなくても・明細IDが拾えなくても立てていたので、
+     あとでマスタに JAN が入っても【二度と埋まらなかった】（実測：jw=1 なのに JAN 空が8件）。取れなければ試行回数 a.jt を増やし、
+     上限に達した時だけ諦める。明細IDが揃っている行は get_model_list を呼ばない＝枠も減る。 */
+  var JT_MAX_JAN = 5, JT_MAX_MID = 3;
   var q = [], done = 0;
   for (var i = 0; i < order.length && done < BA_JAN_PER_RUN; i++) {
     if (Date.now() - t0 > 120000) break;
-    var rows = byItem[order[i]], a0 = rows[0], models = [];
-    try { var j = callShop_(a0.shop_id, '/api/v2/product/get_model_list', { item_id: parseInt(a0.item_id, 10) }, 'get'); var resp = j.response || {}; var opts = ((resp.tier_variation || [])[0] || {}).option_list || []; (resp.model || []).forEach(function (m) { var ti = (m.tier_index || [])[0]; var o = opts[ti]; if (o) models.push({ n: nm(o.option), id: m.model_id }); }); } catch (eG) { continue; }
-    done++;
+    var rows = byItem[order[i]], a0 = rows[0], models = [], asked = false;
+    if (rows.some(function (a) { return !a.model_id; })) {   /* 明細IDが足りない時だけ1回引く */
+      try { var j = callShop_(a0.shop_id, '/api/v2/product/get_model_list', { item_id: parseInt(a0.item_id, 10) }, 'get'); var resp = j.response || {}; var opts = ((resp.tier_variation || [])[0] || {}).option_list || []; (resp.model || []).forEach(function (m) { var ti = (m.tier_index || [])[0]; var o = opts[ti]; if (o) models.push({ n: nm(o.option), id: m.model_id }); }); asked = true; } catch (eG) { continue; }
+      done++;
+    }
     rows.forEach(function (a) {
       if (!a.model_id) { var hit = models.filter(function (m) { return m.n === nm(a.en); })[0]; if (hit) a.model_id = hit.id; }
-      if (!a.model_id) { a.jw = 1; return; }   /* 明細が消されている＝書く先が無い */
-      var jan = a.jan || janOf(String(a.hw || ''), a.key, a.ja); a.jw = 1;
-      if (jan) { a.jan = jan; q.push({ item_id: a.item_id, model_id: a.model_id, jan: jan, hw: a.hw, ja: a.ja || '', src: a.src || '' }); }
+      if (!a.model_id) { a.jt = (a.jt || 0) + 1; if (asked && a.jt >= JT_MAX_MID) a.jw = 1; return; }   /* 何度引いても出ない＝明細が消されている */
+      var jan = a.jan || janOf(String(a.hw || ''), a.key, a.ja);
+      if (!jan) { a.jt = (a.jt || 0) + 1; if (a.jt >= JT_MAX_JAN) a.jw = 1; return; }   /* マスタにまだ無いだけかもしれない＝すぐ諦めない */
+      a.jan = jan; a.jw = 1;
+      q.push({ item_id: a.item_id, model_id: a.model_id, jan: jan, hw: a.hw, ja: a.ja || '', src: a.src || '' });
     });
   }
   if (q.length) { var w = baWriteJan_(q); if (w) baLog_(st, 'JANを後から台帳に ' + w + '件'); }
