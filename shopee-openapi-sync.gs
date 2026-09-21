@@ -6197,7 +6197,46 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       items.push({ option: p.en, price: price, stock: p.stock, sku: baSkuOf_(hw, p.en), image_id: p.imageId, _p: p });   /* ★2026-09-20 明細SKU＝機種_作品名（7か国共通・本人OK） */
     });
     if (!items.length) { i += batch.length; continue; }
-    var r2;
+    /* ♻️ 複製したカタログに【仮の明細(test)】が残っていたら、まず1件ぶんをそこへ上書きして枠を取り戻す。
+       消さずに上書き＝位置が1つも動かない（[[shopee_variation_delete_tail_only]]）。
+       ★手元の `tgt.models` に test がある時だけ見に行く＝普通のカタログでは通信を1回も増やさない。
+       ★**上書きが成功したら、このカタログはこの回はここで終わりにする**（Codex指摘・裏取り済み）。理由は2つ：
+         ①画像を差し替えた直後に同じ実行で `add_model` すると `Model tier_index error` になる
+           （`baRephoto_` が同じ理由でわざと分けている＝**過去に踏んだ失敗**）
+         ②「100件まで」の作り直しはこの回を `i` を進めずにやり直すので、
+           上書きで入った1件が `todo` に残ったまま次のカタログにも入り、**同じ作品が二重に出る**
+       残りの候補は次の回（30分後）に回る。 */
+    var _hasDummy = false;
+    try { _hasDummy = (tgt.models || []).some(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && (m.n || m.name)) || '')); }); } catch (eH) {}
+    if (_hasDummy) {
+      var _ru = null;
+      try { _ru = baReuseTestSlot_(tgt.shop_id, tgt.item_id, items[0], st, cc); } catch (eRu) { _ru = null; }
+      if (_ru && _ru.ok) {
+        var _x0 = items[0];
+        baSet_(ledger, _x0._p.key, cc, String(tgt.item_id) + '#' + _ru.model_id); res.added++;
+        listedSet[baTmKey_(_x0.option)] = 1;
+        tgt.models = (tgt.models || []).map(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && (m.n || m.name)) || '')) ? { n: _x0.option, price: _x0.price } : m; });
+        if (_x0._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan, hw: hw, ja: _x0._p.ja || '', src: _x0._p.src || '' });
+        /* 記録は【普通に足した時と丸ごと同じ形】。形が違うと売れた時の他国在庫0・写真の見直し・
+           出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
+        try {
+          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
+            shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
+            en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
+            img: _x0._p.imageId || '', cost: _x0._p.cost || 0, hits: _x0._p.hits || 0, reused: 1, partial: _ru.partial ? 1 : 0 });
+          if (st.added.length > 400) st.added.length = 400;
+        } catch (eA) {}
+        res.shop_id = tgt.shop_id;
+        baFinishClone_(cfg, cc, tgt, newItem, 1, st);
+        /* ★このカタログは**この実行ではもう触らない**（Codex指摘・裏取り済み）。
+           `i` を進めるだけだと、まだ空きがある時に次の回で同じカタログが選ばれ、
+           **画像を差し替えた直後に add_model** する＝`Model tier_index error` の形に戻る。
+           既存の言い回しどおり「満杯扱い」にして、次の候補は別のカタログ（か次回）へ送る。 */
+        tgt.models = new Array(100);
+        i += batch.length; continue;
+      }
+    }
+    var r2 = null;
     try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); }
     catch (e) {
       var em = String((e && e.message) || e).slice(0, 160);
@@ -6206,13 +6245,17 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
       items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); baSkipRec_(st, hw, cc, x._p, 'err:' + em.slice(0, 60)); });
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
+      /* ★上書きで1件だけ入っている場合がある。ここで締めないとカタログが非公開のまま公開待ちにも載らない（Codex指摘） */
+      res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st);
       i += batch.length; continue;
     }
+    /* ★このカタログに実際に入った数。`res.added` は実行ぜんぶの累計なので締めの判断に使えない。 */
+    var _addedHere = 0;
     var okNm_ = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); }; var okNames = {}; (r2.models || []).forEach(function (m) { okNames[okNm_(m.option)] = m.model_id; });
     items.forEach(function (x) {
       var mid = okNames[okNm_(x.option)];
       if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
-        baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
+        baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
         try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
@@ -6224,22 +6267,114 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
        出どころはここ＝複製したカタログの仮の明細。**res.added が0だと下の削除まで来ない**ので残る
        （VN の PS2②・DS③ は明細がそれ1つだけ・写真なしだった）。
        → 1件も入らなかった時は、せめて**在庫を0にして売れないようにする**。消さない（位置が動く）。 */
-    if (newItem && !res.added) {
-      try {
-        var tms = getModels_(tgt.shop_id, tgt.item_id) || [];
-        var tm = tms.filter(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String(m.model_name || m.option || m.n || '')); })[0];
-        if (tm && (Number(tm.stock) || 0) > 0) { updateStock_(tgt.shop_id, tgt.item_id, tm.model_id, 0); baLog_(st, cc + '：1件も入らなかったので test の在庫を0にしました（' + tgt.item_id + '）'); }
-      } catch (e) { baLog_(st, cc + '：test の在庫を0にできませんでした ' + String(e).slice(0, 70)); }
-    }
-    // 複製したカタログ：test を消し、設定に応じて公開
-    if (newItem && res.added) {
-      try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); tgt.models = tgt.models.filter(function (m) { return m.n !== 'test'; }); } catch (e) { baLog_(st, cc + '：test の削除に失敗 ' + String(e).slice(0, 80)); }
-      if ((cfg.autoPublish || {})[cc]) { try { unlistItem_(tgt.shop_id, tgt.item_id, false); baLog_(st, cc + '：' + tgt.name + ' を公開'); } catch (e) { baLog_(st, cc + '：公開に失敗 ' + String(e).slice(0, 80)); } }
-      else { st.pendingPublish = st.pendingPublish || []; st.pendingPublish.push({ cc: cc, item_id: tgt.item_id, shop_id: tgt.shop_id, name: tgt.name, at: new Date().toISOString() }); }
-    }
+    baFinishClone_(cfg, cc, tgt, newItem, _addedHere, st);
     i += batch.length;
   }
   return res;
+}
+/* ♻️ カタログ複製の時にできる【仮の明細（test）】を、新しい作品で**上書きして再利用**する。
+   本人 2026-09-21「テストの明細って、他の新規の明細に塗り替える設定になったんだっけ？」＝
+   この日に「枠が戻ってから入れる」と保留していた恒久策。枠の数え漏れを潰した同じ日に解禁した。
+
+   ★消さずに上書きする理由：test はほぼ**位置0（先頭）**にある。素朴に消すと後ろの明細が全部消える
+     （過去に3件喪失・[[shopee_variation_delete_tail_only]]）。上書きなら位置が1つも動かない。
+
+   ★順番がいちばん大事（2026-09-13 の実測が根拠）：
+     `update_tier_variation` の model 側に価格を載せても**価格は移らない**。枠に残っていた値のままになる。
+     test の価格は 0 なので、素朴に名前だけ変えると **0円で買える明細**ができる。
+     → ①先に在庫を0にする（この時点で誰も買えない）②価格を入れる ③名前を変える ④画像
+       ⑤**読み直して価格が入っていることを確かめてから**在庫を戻す。
+       途中で失敗したら在庫0のまま残す＝**間違った値で売れることは無い**方に倒す。
+
+   返り：入れ替えられたら {ok:true, model_id}／枠が無い・失敗なら null（呼び出し側は普通に add する） */
+/* 複製したカタログの締め。①1件も入らなかったら仮の明細(test)の在庫を0にする ②入ったら test を消して公開判断。
+   ★2026-09-21 夜【今日入れた①が一度も動いていなかった】：`getModels_` は**配列ではなくオブジェクト**を返すので
+     `.filter` で必ず例外になり、catch が「在庫を0にできませんでした」と書くだけだった（画面の「15件は買えてしまいます」と一致）。
+   ★呼び出しは2か所（普通に追加した後／上書きで全部入って追加が要らなかった時）。
+     後者で呼ばないと、カタログが非公開のまま公開待ちにも載らない（Codex指摘）。 */
+/* ★第5引数は【そのカタログに入った数】。`res.added` は実行ぜんぶの累計なので、
+   それで判断すると「前のカタログで入った」だけで**中身が空の複製を公開**してしまう（Codex指摘・裏取り済み）。 */
+function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
+  if (!newItem) return;
+  if (!addedHere) {
+    try {
+      var g = getModels_(tgt.shop_id, tgt.item_id) || {}; var ms = g.models || [], tm = null;
+      for (var i = 0; i < ms.length; i++) { if (/^\s*(test|dummy|sample)\d*\s*$/i.test(String(ms[i].name || ''))) { tm = ms[i]; break; } }
+      if (tm && tm.model_id && (Number(tm.stock) || 0) > 0) { updateStock_(tgt.shop_id, tgt.item_id, tm.model_id, 0); baLog_(st, cc + '：1件も入らなかったので test の在庫を0にしました'); }
+    } catch (e) { baLog_(st, cc + '：test の在庫を0にできませんでした ' + String(e).slice(0, 70)); }
+    return;
+  }
+  try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); tgt.models = (tgt.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '') !== 'test'; }); }
+  catch (e) { baLog_(st, cc + '：test の削除に失敗 ' + String(e).slice(0, 70)); }
+  if ((cfg.autoPublish || {})[cc]) { try { unlistItem_(tgt.shop_id, tgt.item_id, false); baLog_(st, cc + '：' + tgt.name + ' を公開'); } catch (e2) { baLog_(st, cc + '：公開に失敗 ' + String(e2).slice(0, 70)); } }
+  else { st.pendingPublish = st.pendingPublish || []; st.pendingPublish.push({ cc: cc, item_id: tgt.item_id, shop_id: tgt.shop_id, name: tgt.name, at: new Date().toISOString() }); }
+}
+/* 在庫更新が【明細まで通ったか】。Shopee は明細ごとの失敗を response.failure_list で返し、例外にはしない。 */
+function baStockOk_(resp) {
+  try { var r = (resp && resp.response) || resp || {}; var f = r.failure_list || r.failure || []; return !(f && f.length); } catch (e) { return false; }
+}
+function baReuseTestSlot_(shopId, itemId, it, st, cc) {
+  /* ★Codex指摘（裏取り済み）で全面的に直した。`getModels_` は **配列ではなく
+     `{item_id, tier_variation, models:[{model_id,tier_index,name,sku,price,stock,img}]}`** を返す。
+     名前は `name`（`model_name`/`option`/`n` は無い）。`sold` も返らない。
+     tier_variation もここに入っているので `getItemFull_` は要らない＝通信が1回減る。 */
+  var g = null;
+  try { g = getModels_(shopId, itemId); } catch (e) { return null; }
+  var ms = (g && g.models) || [], tiers = (g && g.tier_variation) || [];
+  if (!ms.length || !tiers.length || !tiers[0] || !tiers[0].option_list) return null;
+  var tm = null;
+  for (var i = 0; i < ms.length; i++) {
+    if (ms[i].model_id && /^\s*(test|dummy|sample)\d*\s*$/i.test(String(ms[i].name || ''))) { tm = ms[i]; break; }
+  }
+  if (!tm) return null;
+  var ti = (tm.tier_index || [])[0];
+  if (ti == null || !tiers[0].option_list[ti]) return null;
+  var renamed = false;
+  try {
+    /* ① まず売れなくする。★`updateStock_` は **明細ごとの失敗（response.failure_list）では例外にならない**ので、
+          「0にしたつもり」で先に進むと**元の在庫のまま名前と価格だけ変わる**＝一番まずい形（Codex指摘・裏取り済み）。
+          通ったことを確かめてから次へ進む。 */
+    if (!baStockOk_(updateStock_(shopId, itemId, tm.model_id, 0))) { baLog_(st, cc + '：仮の明細の在庫を0にできなかったので上書きしません'); return null; }
+    updatePrice_(shopId, itemId, tm.model_id, it.price);             /* ② 価格（名前の付け替えでは移らないので必ず単独で） */
+    /* ③ 名前・画像・SKU を**1回の update_tier_variation でまとめて**差し替える。
+          ★画像を別呼び出しにすると、そこだけ失敗した時に**前の作品の写真のまま在庫が戻る**（Codex指摘）。
+            写真違いは出してはいけない側の間違いなので、名前と一緒に原子的に入れる。
+          ★model には **model_id を必ず載せる**。位置とSKUだけでは Shopee がどの明細か特定できず更新が弾かれる（Codex指摘）。
+          ★option_list は【今の並びのまま】作り直す＝位置が動かない。 */
+    var opts = tiers[0].option_list.map(function (o, k) { return tierOpt_(o, (k === ti ? it.option : null), (k === ti ? (it.image_id || null) : null)); });
+    var mdl = ms.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+    updateTierVariation_(shopId, itemId, [{ name: tiers[0].name, option_list: opts }], mdl);
+    renamed = true;
+    /* ★SKU は `update_tier_variation` では入らない。既存の明細のSKUは `update_model` 経由でしか変えられない
+       （`updateModelSku_` が用意されている・Codex指摘）。入れ忘れると**仮の明細の空SKUのまま**新商品になる。 */
+    if (it.sku) { try { updateModelSku_(shopId, itemId, [{ model_id: tm.model_id, sku: it.sku }]); } catch (eS) {} }
+    /* ④ 読み直して【名前・価格・画像】が入っていることを確かめてから在庫を戻す。
+          1つでも欠けたら在庫0のまま残す＝**間違った値・違う写真では絶対に売れない**方に倒す。 */
+    var g2 = getModels_(shopId, itemId) || {}; var now = null, a2 = g2.models || [];
+    for (var j = 0; j < a2.length; j++) { if (String(a2[j].model_id) === String(tm.model_id)) { now = a2[j]; break; } }
+    var okName = now && String(now.name || '').trim() === String(it.option).trim();
+    var okPrice = now && Math.abs((Number(now.price) || 0) - Number(it.price)) < Math.max(1, Number(it.price) * 0.02);
+    var okImg = !it.image_id || (now && String(now.img || '') === String(it.image_id));
+    var okSku = !it.sku || (now && String(now.sku || '') === String(it.sku));
+    if (!okName || !okPrice || !okImg || !okSku) {
+      baLog_(st, cc + '：仮の明細の上書きが途中までで止まったので在庫0のままにしました（' + String(it.option).slice(0, 26) + '／'
+        + (okName ? '' : '名前×') + (okPrice ? '' : '価格×') + (okImg ? '' : '写真×') + (okSku ? '' : 'SKU×') + '）');
+      /* ★名前はもう変わっているので、呼び出し側が同じ作品をもう一度 add すると
+         「同じ名前」で弾かれるか二重になる。**枠は使った**と伝えて、台帳にも残してもらう（Codex指摘）。 */
+      return { ok: true, model_id: tm.model_id, partial: true, stock: 0 };
+    }
+    if (!baStockOk_(updateStock_(shopId, itemId, tm.model_id, it.stock))) {
+      baLog_(st, cc + '：上書きはできましたが在庫を戻せませんでした（在庫0のまま・' + String(it.option).slice(0, 26) + '）');
+      return { ok: true, model_id: tm.model_id, partial: true, stock: 0 };
+    }
+    baLog_(st, cc + '：♻️ 仮の明細(test)を「' + String(it.option).slice(0, 26) + '」で上書きしました（枠を1つ取り戻した）');
+    return { ok: true, model_id: tm.model_id, stock: it.stock };
+  } catch (e4) {
+    try { updateStock_(shopId, itemId, tm.model_id, 0); } catch (e5) {}
+    baLog_(st, cc + '：仮の明細の上書きに失敗（在庫0にして残しました）' + String(e4).slice(0, 70));
+    /* 名前まで変わっていたら「枠は使った」＝呼び出し側は add し直さない */
+    return renamed ? { ok: true, model_id: tm.model_id, partial: true, stock: 0 } : null;
+  }
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
