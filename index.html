@@ -2014,7 +2014,11 @@
     // ★読めなかった時に【0とみなさない】。0にすると「まだ余っている」と嘘をつくことになり、
     //   枠切れの方向に間違える（＝いちばん危ない側の誤り）。前回読めた値を持ち越す。
     let ext = Number(window.__ufExtLast) || 0, extKnown = (window.__ufExtLast != null);
-    let reserve = Number(window.__ufReserveLast) || 0;   // 意図的に空けている分（使用量ではない）
+    /* ★Codex指摘（2026-09-21・P2）：予約額を【日付なしで】持ち越していた。読めなかった日に前日の予約が残ると、
+       今日の使用量から前日ぶんを引いてしまい **実際より少なく見える＝いちばん危ない向き** に外す。日付を付けて持つ。 */
+    const _ptToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+    let reserve = (window.__ufReserveLast && window.__ufReserveLast.d === _ptToday) ? (Number(window.__ufReserveLast.n) || 0) : 0;
+    let reserveKnown = !!(window.__ufReserveLast && window.__ufReserveLast.d === _ptToday);   // 意図的に空けている分（使用量ではない）
     try {
       // ★1つの鍵だけ見ていると、あとから足したGASの分が【永久に入らない】（2026-09-07 Codexの指摘）。
       //   uf_ext_ で始まる鍵を全部足す（仕入れメール取込・配送追跡…）。
@@ -2027,7 +2031,7 @@
          **画面では「使った」に混ぜない**。混ぜると今日の午前とまったく同じ「数字が嘘をつく」状態に戻る。 */
       ext = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today && String(r.k) !== 'uf_ext_reserve') ? (Number(v.n) || 0) : 0); }, 0);
       reserve = (g || []).reduce((a, r) => { const v = r && r.v; return a + ((v && v.d === today && String(r.k) === 'uf_ext_reserve') ? (Number(v.n) || 0) : 0); }, 0);
-      extKnown = true; window.__ufExtLast = ext; window.__ufReserveLast = reserve;
+      extKnown = true; reserveKnown = true; window.__ufExtLast = ext; window.__ufReserveLast = { d: today, n: reserve };
     } catch (_) {}
     // ★足した後の数を r.used 自体に入れる。他の場所（🗂しごとパネル等）は r.used を見るので、
     //   ここで足しておかないと、そちらだけ残りが多く見えてしまう（Codexの指摘・2026-09-04）。
@@ -2036,8 +2040,12 @@
        ここでもう一度足すと二重になり、写真集めのブレーキが早く掛かる／残量が実際より少なく見える。
        古い版のGAS（usedExt を返さない）が入っている間だけ、これまで通りここで足す。 */
     const gasHasExt = (r.usedExt !== undefined && r.usedExt !== null);
-    /* GASの usedExt には uf_ext_reserve（予約）も混ざっているので、画面に出す前に引く */
-    const extGas = gasHasExt ? Math.max(0, (Number(r.usedExt) || 0) - reserve) : 0;
+    /* GASの usedExt には uf_ext_reserve（予約）も混ざっているので、画面に出す前に引く。
+       ★Codex指摘（2026-09-21）：予約額が【今日のものと確かめられた時だけ】引く。
+         分からないまま引くと使用量を少なく見せてしまう（危ない向き）。引かなければ多めに出るだけ＝安全な向き。
+       ※予約を減らす/やめる時は【キーを消さずに n:0 にする】。消すと GAS の30分キャッシュに予約が残っている間、
+         その分が「使った」に混ざって見える（安全な向きだが数字が合わない）。 */
+    const extGas = gasHasExt ? ((reserveKnown && reserve) ? Math.max(0, (Number(r.usedExt) || 0) - reserve) : (Number(r.usedExt) || 0)) : 0;
     /* ★Codex指摘（2026-09-21・P2）：GAS側の「もう一方のGASの分」は15分キャッシュなので**古いことがある**。
        ここで読んだ Supabase の値の方が新しい。どちらかを捨てるのではなく**大きい方を採る**＝少なく見積もらない。 */
     const extUse = extKnown ? Math.max(ext, extGas) : extGas;
@@ -18107,6 +18115,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-21', items: [
+      '🔎 <b>上の予約枠の作りをCodexに読ませて2点直しました</b>。①<b>予約額を日付なしで持ち越していた</b>＝読めなかった日に前日の予約が残ると、今日の使用量から前日ぶんを引いてしまい<b>実際より少なく見える（いちばん危ない向き）</b>→ 日付を付けて持ち、今日のものと確認できた時だけ引く ②<b>予約を減らす/やめる時はキーを消さず <code>n:0</code> にする</b>（消すとGAS側の30分キャッシュに予約が残っている間、その分が「使った」に混ざって見えるため）。分からない時は<b>引かない＝多めに出る（安全な向き）</b>に倒しました。',
       '🛡 <b>16:00のリセット後、手動操作用の枠を「必ず」空けるようにしました</b>（本人「出費枠は絶対に残してくださいね。無駄な使い方しないでくださいね」）。<br>問題：停止ラインを 15,000→<b>6,000</b> に下げたのに、<b>🤖自動出品には効いていませんでした</b>。🤖のトリガーは <code>/exec</code> から作られており <b>デプロイ版に固定</b>されるためで、いまバージョン上限200で再デプロイできません（保存だけで効くのは Head のトリガーだけ）。実際 <code>uf_status</code> は <code>stopLine:15000 / cap:20000</code> と古い値を返していました。<br>対処：<b>再デプロイ無しで効く手</b>として、<code>app_kv</code> に <b><code>uf_ext_reserve</code>（今日ぶん 4,000）</b> を置きました。デプロイ版の <code>ufExt_()</code> がこれを合計に足すので、<b>背景処理は実質 11,000 で止まります＝約9,000を手動用に確保</b>。<br>⚠️ ただし<b>画面では「使った分」に混ぜません</b>（混ぜたら今朝と同じ「数字が嘘をつく」状態に戻るため）。予約分は使用量から除いて表示します。<b>再デプロイできたらこのキーは削除</b>し、`UF_STOP=6000` 本来の形に戻します。',
       '📊 <b>在庫管理：棚卸しの内訳が「数字の壁」だったのを直しました</b>。「📦在庫あり」の下の<b>カテゴリ／ハード／仕入元</b>の内訳は、<b>名前・件数・金額の3つ組が30個ほど区切りなしで折り返す</b>ため、<code>507 ¥775,171　周辺機器 306</code> のように隣とつながって読めませんでした。→ <b>1つも隠さずに</b>、①各粒に枠線を付けて分ける ②見出し（カテゴリ／ハード／仕入元）の幅を揃えて3行を縦にそろえる ③<b>件数は濃く・金額は薄く小さく</b>（役割で見た目を変える）。',
       '📦 <b>注文管理：同じ数字を2か所に出すのをやめました</b>。4段階（①未手配・②伝票発行済・③倉庫スキャン待ち・④発送済）の件数が<b>タブの下の「発送フロー」行</b>にあり、<b>押す場所であるタブには件数が無い</b>という逆転でした。→ <b>件数をタブに載せ</b>、重複していた行を削除（表の上のかたまりが1行ぶん短くなり、注文が早く見えます）。<b>📥要対応・💳未支払い・🚨遅延/リスク</b>にも件数を付けました。段階の意味は各タブにカーソルを乗せれば出ます（元から入っています）。',
