@@ -5284,7 +5284,12 @@ function ensureAdjTrigger_() {
 //   守るもの：urlfetch 予約枠(bgAllowed_)／1日の上限(dailyMax)／ヤフオクに弾かれたら6時間止める／6分制限の前に必ず抜ける
 // =====================================================================================
 var BA_JAN_Q = [];   // この実行で入った明細のJAN（最後にまとめて product_ids へ）
-var BA_CFG = 'boshu_auto_cfg', BA_ST = 'boshu_auto_status', BA_LOG = 'boshu_auto_log', BA_IMGS = 'boshu_auto_imgs';
+/* ★2026-09-23 本人「3台目で」＝🤖を2か所（2台目・3台目）で同時に回す。
+   スクリプトプロパティ RUNNER_ID（'child2' など）で自分がどの担当かを名乗る。無ければ 本体＝'main'／子機＝'child'。
+   🤖の状態（今日の件数・ログ・入れた明細）は丸ごと上書きする作りなので、2か所で同じキーに書くと【お互いの記録を消し合う】。
+   → 'child' 以外の担当は boshu_auto_status_<担当> に書く（ポータルが合算して見せる）。 */
+function baRunnerId_() { if (!isChild_()) return 'main'; var r = ''; try { r = P_().getProperty('RUNNER_ID') || ''; } catch (e) {} return r || 'child'; }
+var BA_CFG = 'boshu_auto_cfg', BA_ST = (function () { try { var P = PropertiesService.getScriptProperties(); var r = P.getProperty('RUNNER_ID') || ''; return (P.getProperty('BROKER_URL') && r && r !== 'child') ? 'boshu_auto_status_' + r : 'boshu_auto_status'; } catch (e) { return 'boshu_auto_status'; } })(), BA_LOG = 'boshu_auto_log', BA_IMGS = 'boshu_auto_imgs';
 var BA_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 var BA_HW_WORD = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };
 // ★ポータルの tmKey / boshuKey / BOSHU_NG と同じ物差し（ここが違うと「出している」の判定が食い違い、二重に出す）
@@ -5797,6 +5802,17 @@ function boshuAutoTick(manual) {
       Logger.log('🤖 設定を読めなかったのでこの実行は何もしません（担当が分からない状態では動かさない）');
       return { ok: false, skipped: 'cfg_unreadable' };
     }
+    /* ★2026-09-23 担当を機種で分ける（cfg.runners＝{ child: ['gc',…], child2: ['ds',…] }）。
+       あれば「自分の担当に機種が割り当てられているか」で決める（同じ機種を2か所に割り当てない＝同じ作品を二重に出さない。
+       機種ごとの台帳 boshu_auto_done_<機種> も担当側しか書かない）。無ければ今までどおり cfg.runner の二択。 */
+    var _rid = baRunnerId_(), _myHws = null;
+    if (cfg.runners && typeof cfg.runners === 'object' && Object.keys(cfg.runners).length) {
+      if (!(cfg.runners[_rid] && cfg.runners[_rid].length)) {
+        ufPersist_(); Logger.log('🤖 この担当（' + _rid + '）には機種が割り当てられていないので何もしません');
+        return { ok: false, skipped: 'not_runner', runner: _rid, note: 'この担当（' + _rid + '）には機種が割り当てられていません' };
+      }
+      _myHws = cfg.runners[_rid].map(function (h) { return String(h); });
+    }
     var _runner = String(cfg.runner || 'main') === 'child' ? 'child' : 'main';
     /* ★切り替えた直後は【担当になった側も】動かない（Codex指摘・裏取り済み）。
        切り替えの瞬間、前の担当は**もう上の判定を通り過ぎて走っている**ので、
@@ -5808,7 +5824,7 @@ function boshuAutoTick(manual) {
       Logger.log('🤖 担当を切り替えた直後なので、前の回が終わるまで待ちます（6分）');
       return { ok: true, skipped: 'runner_switch_cooldown' };
     }
-    if ((_runner === 'child') !== isChild_()) {
+    if (!_myHws && (_runner === 'child') !== isChild_()) {
       /* ★手で押した時も素通しにしない（Codex指摘P1・裏取り済み）。
          ポータルの「▶ 今すぐ」は本体の /exec を叩くので、担当が2台目の時に素通しにすると
          **2台目のタイマーと本体の手動が同時に走る**（別プロジェクト同士は鍵で待ち合わせできない）。
@@ -5841,7 +5857,7 @@ function boshuAutoTick(manual) {
     if (cfg.autoBrake !== false && manual !== true && (st.errStreak || 0) >= 3) { st.brake = { at: st.errAt || new Date().toISOString(), kind: 'err', why: 'エラーが ' + st.errStreak + ' 回続いた: ' + String(st.lastErr || '').slice(0, 120) }; st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '（🤖の「▶ 再開」を押すまで止まります）'; return finish_(st.lastMsg); }
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
-    var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
+    var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey) && (!_myHws || _myHws.indexOf(String(h)) >= 0); });
     var ccs = (cfg.ccs || []).slice();
     if (!hws.length) { st.lastMsg = '機種が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
@@ -5888,7 +5904,7 @@ function boshuAutoTick(manual) {
        前は pre に写真が残ったまま＝ポータルは「写真あり」と見なして二度と探さず、GASはヤフオク（弾かれて休み）待ちのまま止まっていた */
     var preRej = baKv_('boshu_auto_prerej') || {}, preRejChanged = false;
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
-    try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
+    if (baRunnerId_() === 'child' || baRunnerId_() === 'main') try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
     try { baRephoto_(st, cfg, judged, pre, used, t0, hw); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */

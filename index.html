@@ -18518,6 +18518,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🚚 <b>「倉庫へ発送済」が画面に出ない注文があった不具合を直しました</b>（本人「発送済みにしたのに更新されない」）。印の付いた注文が <b>1,034件</b> になり、1回で読める1,000件を超えて <b>34件が反映されていませんでした</b>。全件を読むようにしました',
       '🔑 <b>16時に本体の枠が戻った後も、Shopeeの認証が切れないようにしました</b>。本体の枠が切れている間は2台目がトークンを更新するので、本体の手元には<b>もう使えない古いもの</b>が残ります。前は手元を優先して使う作りで、古い方で更新して失敗する形がありました。<b>新しい方から試し、断られたらもう一方も試す</b>ようにしました',
       '📷 <b>🤖で写真が全部NGだった作品を、写真集めが<u>別の写真で</u>集め直すようにしました</b>。前は写真が「ある」扱いのまま残るので二度と探しに行かず、🤖はヤフオク（弾かれて休み中）待ちで止まっていました（今日の見送りの最多＝ヤフオク待ち）。NGになった写真は二度と選びません。集め直しは1作品3回まで、その後3日は休みます',
+      '🧩 <b>🤖自動出品を2か所（2台目・3台目のGoogleアカウント）で同時に回す準備</b>（本人「3台目で」）。担当は<b>機種で分けます</b>（同じ機種を2か所に割り当てない＝同じ作品を二重に出さない）。3台目の記録は別の控えに書き、画面では2か所ぶんを合算して見せます。3台目のGASができるまでは今までどおり2台目だけで動きます',
       '🔎 <b>今日入れた分を見直して直しました</b>（本人「再度、おかしくないかレビューして」）。①2台目が業務を代わるまでの待ちが長すぎた（1日1回の調整確認は44時間待ち＝本体が朝に止まった日は誰もやらない）→ 長くても「前回＋2.5時間」で代わる ②BRの再送で、枠を入れ直した回に送り直していなかった ③写真の集め直しが、見つからなかった作品を10分ごとに探し続けていた（同じNGを毎回記録し直していたのが原因）→ 3日休む ④Bumpで出品の無い店を2時間ごとに見に行っていた → 1日1回',
       '🗂 <b>出品ログを「国ごとの列」で見られるようにしました</b>（本人「縦列で国ごとに分けて、その下に並べるような感じで」「国ごとに何品出品したとかも見れるようにしたい」）。列の頭に <b>国名と件数</b>、上に <b>国ごとの件数の一覧</b>。右上のボタンで前の「まとめて並べる」にも戻せます（端末ごとに覚えます）',
       '⬆️ <b>Bump（上位表示）を公式APIで自動にしました</b>（本人「作って」）。外部ツール <code>tool</code> は10分ごとに見に行って1日 約1万1,500回を使っていましたが、Bumpは1店4時間に5商品までなので、<b>空きが出る時刻までは通信しない</b>作りにしました（1日 約150回）。押し上げるのは<b>公開中・在庫ありの商品を、売れた数→いいね→閲覧の順</b>に。同じ商品は12時間あけて順番に回します。7/18は「権限なし」でしたが、今日13店とも使えることを確かめました',
@@ -28651,7 +28652,34 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
   }
-  async function baKvGet(k) { try { const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (_) { return null; } }
+  async function baKvGetRaw(k) { try { const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (_) { return null; } }
+  /* ★2026-09-23 🤖を2か所（2台目・3台目）で回すため、3台目以降は boshu_auto_status_<担当> に書く（GAS BA_ST）。
+     表示用の読み込みだけ【合算】する。★書き戻す所では使わない（合算した中身を 'boshu_auto_status' に書くと3台目の記録が二重になる）→ baKvGetRaw */
+  function baStMerge(list) {
+    const xs = (list || []).filter(Boolean); if (xs.length <= 1) return xs[0] || null;
+    const base = Object.assign({}, xs[0]);
+    const byAt = (a, b) => String(b && b.at || '').localeCompare(String(a && a.at || ''));
+    base.added = [].concat(...xs.map(x => x.added || [])).sort(byAt).slice(0, 800);
+    base.log = [].concat(...xs.map(x => x.log || [])).sort(byAt).slice(0, 240);
+    base.skipped = [].concat(...xs.map(x => x.skipped || [])).sort(byAt).slice(0, 600);
+    base.pendingPublish = [].concat(...xs.map(x => x.pendingPublish || []));
+    const d0 = (xs[0].today || {}).d; const t = { d: d0, n: 0, added: 0, aiText: 0, judged: 0 };
+    xs.forEach(x => { const q = x.today || {}; if (q.d === d0) ['n', 'added', 'aiText', 'judged'].forEach(f => { t[f] += Number(q[f]) || 0; }); });
+    base.today = t;
+    base.brake = xs.map(x => x.brake).find(Boolean) || null;
+    const latest = xs.slice().sort((a, b) => String(b.lastAt || '').localeCompare(String(a.lastAt || '')))[0];
+    base.lastAt = latest.lastAt; base.lastMsg = latest.lastMsg;
+    base.runners = xs.map(x => ({ lastAt: x.lastAt, lastMsg: x.lastMsg, today: x.today, uf: x.uf }));
+    return base;
+  }
+  async function baStKeys() { try { const r = await sbGetAll('app_kv', 'select=k&k=like.boshu_auto_status*'); return (r || []).map(x => x.k).filter(k => k === 'boshu_auto_status' || /^boshu_auto_status_[a-z0-9]+$/.test(k)); } catch (_) { return ['boshu_auto_status']; } }
+  async function baKvGet(k) {
+    if (k !== 'boshu_auto_status') return baKvGetRaw(k);
+    const keys = await baStKeys();
+    if (keys.length <= 1) return baKvGetRaw('boshu_auto_status');
+    const vs = await Promise.all(keys.sort().map(baKvGetRaw));
+    return baStMerge(vs);
+  }
 
   /* ════ 📚 写真の学習（本人 2026-09-21「見直したやつをしっかり学習して、どんどん賢くなっていってほしい」「また基準をちょっと精緻化していく」）
      ためる場所 app_kv.photo_learn = { items:{ '<写真URL>|<機種>|<作品の鍵>': {v,why,cc,item,opt,hw,title,img,ai,at,by} }, rules:{ extra:[{text,why,at}] } }
@@ -29468,7 +29496,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const cur = await baKvGet('boshu_auto_cfg'); if (!cur) throw new Error('設定を読めませんでした（少し待ってからもう一度）');   // 読めなかったら書かない
           cur.brakeAckAt = new Date().toISOString();
           await sbUpsert('app_kv', [{ k: 'boshu_auto_cfg', v: cur, updated_at: new Date().toISOString() }]);
-          const stc = await baKvGet('boshu_auto_status'); if (stc) { stc.brake = null; await sbUpsert('app_kv', [{ k: 'boshu_auto_status', v: stc, updated_at: new Date().toISOString() }]); }
+          for (const kk of await baStKeys()) { const stc = await baKvGetRaw(kk); if (stc && stc.brake) { stc.brake = null; await sbUpsert('app_kv', [{ k: kk, v: stc, updated_at: new Date().toISOString() }]); } }   /* 担当ごとの控えを1つずつ（合算した中身は書き戻さない） */
           try { logAct('出品', '自動出品のブレーキを解除', '', String((_baSt.brake || {}).why || '').slice(0, 80)); } catch (_) {}
           renderBoshuAuto();
         } catch (e) { alert('再開できませんでした: ' + ((e && e.message) || e)); rs.disabled = false; }
@@ -29595,9 +29623,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       btn.disabled = true;
       try {
         await openapiUnlistItem(p.shop_id, p.item_id, false);
-        const s2 = (await baKvGet('boshu_auto_status')) || {};
-        s2.pendingPublish = (s2.pendingPublish || []).filter(x => String(x.item_id) !== String(p.item_id));
-        await sbUpsert('app_kv', [{ k: 'boshu_auto_status', v: s2, updated_at: new Date().toISOString() }]);
+        for (const kk of await baStKeys()) {   /* 担当ごとの控えを1つずつ（合算した中身は書き戻さない） */
+          const s2 = await baKvGetRaw(kk); if (!s2 || !(s2.pendingPublish || []).some(x => String(x.item_id) === String(p.item_id))) continue;
+          s2.pendingPublish = (s2.pendingPublish || []).filter(x => String(x.item_id) !== String(p.item_id));
+          await sbUpsert('app_kv', [{ k: kk, v: s2, updated_at: new Date().toISOString() }]);
+        }
         toast('✅ 公開しました: ' + p.name);
         try { refreshOneListing(p.cc, String(p.item_id), p.shop_id); } catch (_) {}
       } catch (e) { alert('公開に失敗: ' + apiErrJa((e && e.message) || e)); }
@@ -31517,7 +31547,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const [live, known, baKv] = await Promise.all([
       sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models'),
       sbGetAll('listing_log', 'select=cc,item_id,model_id'),
-      sbGet('app_kv', 'select=v&k=eq.boshu_auto_status').catch(() => []),
+      baKvGet('boshu_auto_status').then(v => (v ? [{ v }] : [])).catch(() => []),   /* 担当が2か所でも合算して読む */
     ]);
     // ★2026-09-20 出品ログの日付は「出品した日」でなく「このログが気づいた日」だった：🤖が 9/12〜9/20 に足した 83明細のうち 78件が、全部 9/20 の出品として入っていた。
     //   🤖の記録（boshu_auto_status.added）には実際に足した日時が残っているので、その明細はその日付で記録する
