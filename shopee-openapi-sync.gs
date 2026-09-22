@@ -5600,6 +5600,7 @@ function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬
    トリガーは間隔を読み出せないので、BA_TICK_MIN の印が違えば作り直す（同じ関数のトリガーを2本にしない）。
    Haikuで1日 約$1→$2〜3・接続枠は2台目の中で収まる（1作品 約7回）。ヤフオクは1回あたりの叩き方は同じ・遮断時は既存の6時間休みが効く */
 var BA_TICK_MIN = 15;
+var BA_YAHOO_PER_HOUR = 6;   /* ヤフオク検索は1時間6回まで（30分ごとだった頃の実測 約5回/時に合わせる） */
 function setupBoshuAutoTrigger() {
   var tr = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
   var has = tr.length > 0, mark = '';
@@ -5848,6 +5849,13 @@ function boshuAutoTick(manual) {
         baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
       }
       if (!yahooOk) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* メルカリの写真が通らなかった＋ヤフオク休み中＝台帳には入れず、ヤフオクが戻ったら試す */
+      /* ★2026-09-22 🤖を15分ごとにしたので、ヤフオクを叩く量は【1時間あたり】で抑える（回数が倍になっても叩き方は変えない）。
+         実測：本体は 9/21 16:00〜9/22 05:00 に68回（1時間 約5回）で 403/429 → 6時間休み。GoogleのIPは少ない回数でも弾かれる。
+         上限に達したら「ヤフオク待ち」に回すだけ（台帳には入れない＝次の時間にまた候補になる）。[[dont-get-ip-blocked]] */
+      var _yhH = new Date().toISOString().slice(0, 13);
+      if (!st.yh || st.yh.h !== _yhH) st.yh = { h: _yhH, n: 0 };
+      if (st.yh.n >= BA_YAHOO_PER_HOUR) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
+      st.yh.n++;
       var y = baYahoo_(q);
       if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = Date.now() + restH * 3600 * 1000; yahooOk = false; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→ヤフオクの検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
