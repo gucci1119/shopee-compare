@@ -1042,7 +1042,13 @@ function doGetInner_(e) {
           var t1 = null;
           try { t1 = ensureToken_(t0.shop_id); } catch (e0) { return; }
           if (!t1 || !t1.access_token) return;
-          stlist.push({ shop_id: t1.shop_id, cc: t1.cc || '', access_token: t1.access_token, expire_at: t1.expire_at, merchant_id: t1.merchant_id || null });
+          /* ★2026-09-22 本体の枠が尽きている時だけ refresh_token も渡す。
+             本体は urlfetch が通らない＝自分で更新できないので、更新する力（枠）がある子機に託すしかない。
+             本体が生きている間は今までどおり access_token だけ（refresh_token の取り合いで7か国の認証が壊れるため）。
+             子機は必ず app_kv の取り札（tokClaim_）を取ってから更新する。 */
+          var _row = { shop_id: t1.shop_id, cc: t1.cc || '', access_token: t1.access_token, expire_at: t1.expire_at, merchant_id: t1.merchant_id || null };
+          if (p.with_refresh === '1' && ufDead_() && t1.refresh_token) { _row.refresh_token = t1.refresh_token; _row.handed = true; }
+          stlist.push(_row);
           if (!stmin || t1.expire_at < stmin) stmin = t1.expire_at;
         });
         if (!stlist.length) throw new Error('渡せるトークンがありません');
@@ -1318,7 +1324,8 @@ function childTokens_() {
   try { var s0 = P_().getProperty('childTok'); o = s0 ? JSON.parse(s0) : null; } catch (e) { o = null; }
   if (o && o.list && o.list.length && Number(o.exp) > now_() + 300) { _CHILD_TOK = o.list; return _CHILD_TOK; }
   var u = brokerUrl_();
-  u += (u.indexOf('?') >= 0 ? '&' : '?') + 'action=shop_tokens&token=' + encodeURIComponent(P_().getProperty('WRITE_TOKEN') || '');
+  /* ★2026-09-22 本体が枯れている時は refresh_token も一緒にもらう（子機が代わりに更新するため） */
+  u += (u.indexOf('?') >= 0 ? '&' : '?') + 'action=shop_tokens&with_refresh=1&token=' + encodeURIComponent(P_().getProperty('WRITE_TOKEN') || '');
   ufBump_(1, '本体からトークンを受け取る');
   var txt = '';
   try { txt = UrlFetchApp.fetch(u, { muteHttpExceptions: true }).getContentText(); } catch (e2) { txt = 'fetch失敗: ' + e2; }
