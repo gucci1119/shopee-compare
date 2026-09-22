@@ -1351,27 +1351,99 @@ function listTokens_() {
   for (var k in all) if (k.indexOf('tok_') === 0) { try { out.push(JSON.parse(all[k])); } catch (_) {} }
   return out;
 }
+/* ★2026-09-22 本人「私が操作したときに止まらなければいい」「1日で出品と業務を足して詰まらなければいい」。
+   2026-09-22 09:02 に本体の枠が尽き、業務（注文・入金・発送）が16:00まで止まった。
+   原因は【トークンを持っているのが本体だけ】で、本体が枯れると更新できず、子機も道連れになること。
+   → トークン一式を Supabase（app_kv.shopee_tokens）で両方から見える所に置き、
+     **枠が生きている方が更新する**。refresh_token は使い捨てなので、更新は必ず取り札で1つに絞る。 */
+var TOK_KV = 'shopee_tokens';
+function tokShare_(list) {   /* 全店ぶんを共有の場所へ写す（更新した側が書く） */
+  try { baKvSet_(TOK_KV, { at: now_(), list: list }); } catch (e) {}
+}
+function tokSharedLoad_() {
+  try { var o = baKv_(TOK_KV); return (o && o.list && o.list.length) ? o.list : null; } catch (e) { return null; }
+}
+/* 更新の取り札。両方から見える app_kv に置く（LockService はプロジェクトごとなので効かない）。
+   90秒で失効＝取ったまま落ちても止まらない。 */
+function tokClaim_(shopId) {
+  var k = 'tok_claim_' + shopId, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
+  try {
+    var cur = baKv_(k);
+    if (cur && cur.at && now_() - cur.at < 90) return false;
+    baKvSet_(k, { at: now_(), by: me });
+    Utilities.sleep(700);
+    var chk = baKv_(k);
+    return !!(chk && chk.by === me);
+  } catch (e) { return false; }
+}
+/* 自分の枠がもう断られているか（断られた事実だけで判断する） */
+function ufDead_() { return !!ufBlockedInfo_(); }
+/* ★2026-09-22 定期処理の入口。両方のアカウントが同じトリガーを持つので、
+   ①自分の枠が死んでいたら降りる（相方が拾う）②取り札で二重実行を防ぐ。
+   取り札の有効時間はその処理の間隔より短くする（長いと相方がずっと入れない）。 */
+function syncGate_(name, holdSec) {
+  if (ufDead_()) { Logger.log(name + '：自分の接続枠が尽きているので、もう一方に任せます'); return false; }
+  var k = 'sync_claim_' + name, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
+  try {
+    var cur = baKv_(k);
+    if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
+    baKvSet_(k, { at: now_(), by: me });
+    Utilities.sleep(800);
+    var chk = baKv_(k);
+    if (!chk || chk.by !== me) { Logger.log(name + '：取り札を取り合って負けたので見送り'); return false; }
+  } catch (e) { return true; }   /* 取り札が読めない時は従来どおり動く（止めない） */
+  return true;
+}
+
 function ensureToken_(shopId) {
-  if (isChild_()) {
-    /* 子機は【絶対に refresh しない】。期限が来たら控えを捨てて本体から取り直してもらう。 */
-    var t1 = getToken_(shopId);
-    if (t1 && t1.expire_at > now_()) return t1;
-    childTokReset_();
-    var t2 = getToken_(shopId);
-    if (!t2) throw new Error('未認可 shop_id=' + shopId);
-    if (t2.expire_at <= now_()) throw new Error('本体のトークンが期限切れです shop_id=' + shopId);
-    return t2;
-  }
   var tok = getToken_(shopId);
-  if (!tok) throw new Error('未認可 shop_id=' + shopId);
-  if (tok.expire_at > now_()) return tok;
-  var r = refreshOne_(tok.refresh_token, { shop_id: shopId });
-  tok.access_token = r.access; tok.refresh_token = r.refresh; tok.expire_at = r.expire; saveToken_(tok);
-  return tok;
+  /* ① 手持ちが生きていればそれ */
+  if (tok && tok.expire_at > now_()) return tok;
+  /* ② 子機は、まず本体から取り直す（本体が生きていれば一番安全） */
+  if (isChild_() && !ufDead_()) {
+    try { childTokReset_(); } catch (e) {}
+    var t2 = getToken_(shopId);
+    if (t2 && t2.expire_at > now_()) return t2;
+  }
+  /* ③ 共有の場所に、相方が更新した新しいものが無いか見る */
+  var sh = tokSharedLoad_();
+  if (sh) {
+    for (var i = 0; i < sh.length; i++) {
+      if (String(sh[i].shop_id) === String(shopId) && sh[i].expire_at > now_() + 60) {
+        if (!isChild_()) { try { saveToken_(sh[i]); } catch (e) {} }
+        else { _CHILD_TOK = sh; }
+        return sh[i];
+      }
+    }
+  }
+  /* ④ 誰も更新していない＝自分が更新する。自分の枠が死んでいたらやらない（相方に任せる） */
+  if (ufDead_()) throw new Error('接続枠が尽きているので更新できません shop_id=' + shopId + '（もう一方のアカウントが更新します）');
+  var rt = (tok && tok.refresh_token) || null;
+  if (!rt && sh) { for (var j = 0; j < sh.length; j++) if (String(sh[j].shop_id) === String(shopId)) rt = sh[j].refresh_token; }
+  if (!rt) throw new Error('未認可 shop_id=' + shopId);
+  if (!tokClaim_(shopId)) {   /* 相方が更新中＝少し待って共有を読み直す */
+    Utilities.sleep(4000);
+    var sh2 = tokSharedLoad_() || [];
+    for (var k2 = 0; k2 < sh2.length; k2++) if (String(sh2[k2].shop_id) === String(shopId) && sh2[k2].expire_at > now_()) return sh2[k2];
+    throw new Error('トークン更新の取り札が取れませんでした shop_id=' + shopId);
+  }
+  var r = refreshOne_(rt, { shop_id: shopId, merchant_id: (tok && tok.merchant_id) || null });
+  var nt = tok || { shop_id: shopId };
+  nt.access_token = r.access; nt.refresh_token = r.refresh; nt.expire_at = r.expire;
+  if (!isChild_()) saveToken_(nt);
+  /* 共有の場所も更新（相方がすぐ使える） */
+  var all = tokSharedLoad_() || (isChild_() ? (childTokens_() || []) : listTokens_());
+  var found = false;
+  for (var m = 0; m < all.length; m++) if (String(all[m].shop_id) === String(shopId)) { all[m] = nt; found = true; }
+  if (!found) all.push(nt);
+  tokShare_(all);
+  if (isChild_()) _CHILD_TOK = all;
+  return nt;
 }
 function refreshOne_(refreshToken, who) {
-  /* ★子機では絶対に通さない。refresh_token は使い捨てなので、本体と取り合うと全店の認証が壊れる。 */
-  if (isChild_()) throw new Error('子機ではトークンを更新しません（更新は本体だけ）');
+  /* ★2026-09-22 子機も更新できるようにした（本体が枯れると誰も更新できず業務が止まったため）。
+     refresh_token は使い捨てなので、**必ず app_kv の取り札（tokClaim_）を取ってから**呼ぶこと。
+     取り札なしで呼ぶと本体と取り合って全店の認証が壊れる。呼び出しは ensureToken_ だけに限る。 */
   var path = '/api/v2/auth/access_token/get', ts = now_();
   var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
   var payload = { refresh_token: refreshToken, partner_id: partnerId_() };
@@ -3091,6 +3163,7 @@ function syncDailyStatsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, days: rows.length, orders: details.length };
 }
 function syncAll() {
+  if (!syncGate_('syncAll', 2400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   /* ★2026-09-21 本人「着地を理論上だけじゃなくて、可能にしてな」＝**穴が無いことを確かめる**。
      定期処理13個のうち、ここだけ `bgAllowed_()` を見ていなかった（Shopeeは叩かず Supabase の集計だけなので
      1回2コール・1日48回＝全体の0.2%と小さいが、**「停止ラインを超えたら背景処理は全部止まる」という決まりに穴が空く**）。
@@ -3253,6 +3326,7 @@ function saveCustomers_(cc, shopId, details) {
   return rows.length;
 }
 function syncOrdersAll(daysWindow, trkMode) {
+  if (!syncGate_('syncOrdersAll', 2400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
   if (!force && !coreAllowed_()) { Logger.log('syncOrdersAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★注文は業務の血流＝UF_STOP_CORE まで止めない */
   // 追跡番号の取得は毎時ではなく最短6時間おき（force=手動は毎回）。空振りの毎時リトライで枠を溶かさない。
@@ -3372,6 +3446,7 @@ function fillIncomeInitial_() {
 //   income表から amount==amount_initial の完了行を拾って get_escrow_detail を直接叩く。
 //   1回で最大300件。実行時間6分に当たらないよう区切って、何度か実行すれば全部埋まる。
 function backfillEscrowUnchanged(limitN) {
+  if (!syncGate_('backfillEscrowUnchanged', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('backfillEscrowUnchanged skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   var lim = limitN || 300, done = 0, moved = 0, errs = 0;
   var toks = listTokens_(), byShop = {};
@@ -3413,6 +3488,7 @@ function backfillEscrowUnchanged(limitN) {
   return { done: done, moved: moved, errs: errs };
 }
 function syncEscrowAll(force) {
+  if (!syncGate_('syncEscrowAll', 14400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!coreAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★入金は業務の血流 */
   /* ★2026-09-21 本人「無駄遣いで減らせるところは減らしてほしい」
      入金明細は接続枠でいちばん太い（実測 656回/日 = 6時間ごと×約164件）。
@@ -3659,6 +3735,7 @@ function syncPayoutsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
 }
 function syncPayoutsAll() {
+  if (!syncGate_('syncPayoutsAll', 14400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   ensureAdjTrigger_();   // 補償チェックの毎朝トリガーを自動で用意する
   if (!coreAllowed_()) { Logger.log('syncPayoutsAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★入金予定は業務の血流 */
   var toks = listTokens_(), log = [];
@@ -4315,6 +4392,7 @@ function syncListingsAll() {
 
 // ★定例トリガー用：カーソルで数店ずつ回す（6分制限を超えないための本命）。30分ごと×3店 → 全店 約2時間で一巡
 function syncListingsRoundRobin() {
+  if (!syncGate_('syncListingsRoundRobin', 1200)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   /* ★2026-09-20 1回だけ：🤖のトリガー3本を Head で作り直す（この関数は Head のトリガーで動いている＝ここで作ったトリガーも Head になる）。印は BA_REBIND_DONE */
   try { if (!P_().getProperty('BA_REBIND_DONE')) { P_().setProperty('BA_REBIND_DONE', new Date().toISOString()); rebindBoshuTriggersToHead(); } } catch (eRb) { Logger.log('rebind失敗: ' + eRb); }
   if (!bgAllowed_()) { Logger.log('syncListingsRoundRobin skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
@@ -4443,6 +4521,7 @@ function syncListingStatsForShop_(tok) {
   return { cc: cc, shop_id: shopId, stats: n };
 }
 function syncListingStats() {
+  if (!syncGate_('syncListingStats', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('syncListingStats skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
   // ★販売数・閲覧・いいねは【1日1回で十分】。履歴(listing_stats_history)も日次スナップショットで持っている。
   //   トリガーが6時間毎になっており（コメントは「1日1回」なのに setupTriggers が everyHours(6)）、
@@ -4622,9 +4701,12 @@ function setupTriggers() {
   //   一覧に無く、この関数を走らせると返品同期だけ消えていた（Codexのレビューで発覚）。
   //   **同期を足したら必ずこの一覧にも足すこと。**
   ScriptApp.getProjectTriggers().forEach(function (tr) { ScriptApp.deleteTrigger(tr); });
-  /* ★子機（別Googleアカウント）は🤖自動出品だけの担当。注文・入金・出品同期は本体がやる。
-     両方で動かすと同じ行に二重に書き込むうえ、枠も二重に食う。 */
-  if (isChild_()) { setupBoshuAutoTrigger(); Logger.log('✅ 子機：🤖のトリガーだけ作りました'); return 'ok(child)'; }
+  /* ★2026-09-22 変更：子機にも【業務の定期処理】を持たせる。
+     本人「1日で出品と業務を足して詰まらなければいい」「私が操作したときに止まらなければいい」。
+     2026-09-22 09:02 に本体が枯れ、注文・入金・発送が16:00まで止まった。片方だけに持たせると道連れになる。
+     → 両方が同じ一覧を持ち、各処理の先頭で **自分の枠が死んでいたら降りる**（syncGate_）。
+       二重実行は app_kv の取り札（90秒〜）で防ぐ。生きている方が自然に拾う。
+     ※🤖自動出品だけは今までどおり cfg.runner で担当を決める（出品は片方でよい・重複出品は事故になる）。 */
   ScriptApp.newTrigger('syncAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncOrdersAll').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('syncEscrowAll').timeBased().everyHours(6).create();
@@ -5005,6 +5087,7 @@ function testImportOne() {
 //   ・TW/TH は関税が数か月後に引かれるという話がある（未検証）
 //   → 返品のあった注文を名指しで読み直す。確定済みでも対象にする。
 function recheckEscrowForReturns(limitN) {
+  if (!syncGate_('recheckEscrowForReturns', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('recheckEscrowForReturns skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   var lim = limitN || 300, done = 0, moved = 0;
   var toks = listTokens_(), byShop = {};
@@ -5858,6 +5941,7 @@ function boshuAutoPrejudge_(hw, maxN) {
    伝票・個人情報あり・バナーは索引に「使わない」印で残す（二度見ない）。1回 最大20枚・枠は1回あたり約25回 */
 var COND_Q = 'cond_photo_queue', COND_IDX = 'cond_photo_index';
 function condIndexTick(manual) {
+  if (!syncGate_('condIndexTick', 420)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   var lock = LockService.getScriptLock(); if (!lock.tryLock(3000)) return { ok: false, error: 'いま走っています' };
   try {
     var t0 = Date.now();

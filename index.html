@@ -2174,10 +2174,21 @@
     el.style.color = col; el.style.fontWeight = used >= stop ? '700' : '400';
     el.style.borderColor = (blocked || used >= cap) ? '#f0c4bd' : (used >= stop ? '#f3d7a8' : '#e3e6ea');
     el.style.background = (blocked || used >= cap) ? '#fdecea' : (used >= stop ? '#fffaf0' : '#fafbfc');
+    /* ★2026-09-22 本人「2個目のGoogleアカウントでやったから、どう表示すればいいんでしょうか？」
+       2台目（子機）で🤖を動かすようにしたので、**枠は2つある**。1つのピルに混ぜると
+       「本体が使い切り＝出品も止まった」と読めてしまう（実際は子機で出品は動いている）。
+       → 子機が担当の時は【出品の枠（2台目）】を主に出し、本体は【注文・入金・発送の枠】として併記する。 */
+    var _kid = (settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : null;
+    var _kidLeft = _kid ? Math.max(0, (Number(_kid.stopLine) || 17000) - (Number(_kid.used) || 0)) : null;
+    var _kidTxt = _kid ? ('🤖出品 残り約' + Math.floor(_kidLeft / (r.perListing || 3.7)).toLocaleString() + '件（2台目）') : '';
     el.textContent = gasBlocked
-      ? '⛔ Shopee枠 使い切り（' + ufResetJst() + 'まで）'
+      ? (_kid ? _kidTxt + '｜⛔ 本体の枠 使い切り（' + ufResetJst() + 'まで・注文/入金/発送）'
+              : '⛔ Shopee枠 使い切り（' + ufResetJst() + 'まで）')
       : blocked
-      ? '⛔ Shopee枠 断られ中（' + Math.max(1, Math.round(blockedAgo / 60000)) + '分前）'
+      ? (_kid ? _kidTxt + '｜⛔ 本体の枠 断られ中'
+              : '⛔ Shopee枠 断られ中（' + Math.max(1, Math.round(blockedAgo / 60000)) + '分前）')
+      : _kid
+      ? (_kidTxt + '｜' + (mark || '') + '本体 残り' + (100 - pct) + '%')
       // ★『残り15,710 / 20,000』は【15,710使った】に読める（本人指摘 2026-08-23「XX / XX使っているように見える」）。
       //   分数に見える書き方をやめ、残りの数だけを大きく出す。合計と内訳は吹き出しに置く。
       : (mark + 'Shopee枠 残り' + (100 - pct) + '%' + (ufLeftListings(r) == null ? '' : '・あと約' + ufLeftListings(r).toLocaleString() + '件'));
@@ -2228,9 +2239,30 @@
     if (settings.boshuRunner === 'child' && settings.boshuUrl && /^boshu_auto/.test(String(action || ''))) return settings.boshuUrl;
     return settings.openapiUrl;
   };
+  /* ★2026-09-22 本人「私が操作したときに止まらなければいい」「1日で出品と業務を足して詰まらなければいい」。
+     Googleアカウントが2つ＝枠も2つ（各2万回）。片方が枯れても、もう片方が生きていれば操作は通るはず。
+     → GASを呼んで「1日の枠切れ」が返ったら、その側を今日は避ける印を付けて**もう一方へ自動で投げ直す**。
+     本体が枯れた日（2026-09-22 09:02）に、出品は2台目で動いていたのに業務だけ止まった＝この配線が無かったため。 */
+  const ufBlockKey = (u) => 'smdUfBlocked_' + String(u || '').slice(-18);
+  function ufUrlBlocked(u) {
+    if (!u) return false;
+    try { const o = JSON.parse(localStorage.getItem(ufBlockKey(u)) || 'null'); return !!(o && o.d && o.d === ufPtDay()); } catch (_) { return false; }
+  }
+  function ufMarkBlocked(u, msg) {
+    try { localStorage.setItem(ufBlockKey(u), JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(msg || '').slice(0, 160) })); } catch (_) {}
+    try { if (u === settings.openapiUrl) localStorage.setItem('smdUfBlocked', JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(msg || '').slice(0, 160) })); } catch (_) {}
+  }
+  /* 相方のURL（本体↔2台目）。どちらも同じソースなので、どちらでも同じ処理ができる。 */
+  function gasPeerUrl(u) {
+    const a = settings.openapiUrl || '', b = settings.boshuUrl || '', m = settings.openapiUrlMain || '';
+    const all = [a, b, m].filter(x => x && x !== u);
+    return all[0] || '';
+  }
   async function gasCall(params, timeoutMs) {
-    const base = gasUrlFor(params && params.action);
+    let base = gasUrlFor(params && params.action);
     if (!base) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+    /* 今日すでに枯れている側は最初から避ける（1回むだに叩かない） */
+    if (ufUrlBlocked(base)) { const alt0 = gasPeerUrl(base); if (alt0 && !ufUrlBlocked(alt0)) base = alt0; }
     const q = Object.assign({}, params, { callback: 'cb' });
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const url = base + (base.includes('?') ? '&' : '?') + qs;
@@ -2261,7 +2293,23 @@
             /* ★2026-09-21 「枠を使い切った」の印は【どちらのGASで起きたか】を分けて付ける（Codex指摘・裏取り済み）。
                2台目（別Googleアカウント）は**別の枠**なので、そちらの枠切れを本体の印にすると
                上のバーが「⛔ 使い切り」と嘘をつき、しかも翌16:00まで消えない。 */
-            if (/1\s*日に|for one day/i.test(lastErr) && base === settings.openapiUrl) localStorage.setItem('smdUfBlocked', JSON.stringify({ d: ufPtDay(), at: Date.now(), msg: String(lastErr).slice(0, 160) }));
+            if (/1\s*日に|for one day/i.test(lastErr)) {
+              ufMarkBlocked(base, lastErr);
+              /* ★相方が生きていれば、そちらへ自動で投げ直す（本人の操作を止めない）。
+                 書き込み系も投げ直してよい：枠切れ＝Shopeeには1回も届いていないので二重実行にならない。 */
+              const alt = gasPeerUrl(base);
+              if (alt && !ufUrlBlocked(alt)) {
+                try { toast('⛔ こちらの接続枠が尽きたので、もう1つのGoogleアカウントでやり直します', 4000); } catch (_) {}
+                const q2 = Object.assign({}, params, { callback: 'cb' });
+                const qs2 = Object.keys(q2).filter(k => q2[k] != null && q2[k] !== '').map(k => k + '=' + encodeURIComponent(q2[k])).join('&');
+                const u2 = alt + (alt.includes('?') ? '&' : '?') + qs2;
+                const r2 = await fetch(u2, { credentials: 'omit' });
+                const t2 = await r2.text();
+                const m2 = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t2);
+                if (m2) { const res2 = JSON.parse(m2[1]); if (res2 && res2.ok) { ufQuotaDraw(); return res2; }
+                  if (res2 && /1\s*日に|for one day/i.test(String(res2.error || ''))) ufMarkBlocked(alt, res2.error); }
+              }
+            }
             ufQuotaDraw(); } catch (_) {} }
           if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
       } catch (e) {
@@ -7016,6 +7064,10 @@
     [/^この (\d+)件だけ表示する$/, 'Show only these $1'],
     [/^⚖ 段階が未確定のキャンセル (\d+)件（確定するまで損失0円で計算しています）$/,
       '⚖ $1 cancellation(s) have no stage set (counted as zero loss until you decide)'],
+    /* ★2026-09-22 2台目のGoogleアカウントで🤖を動かすようにしたので、枠の表示が2つになった */
+    [/^🤖出品 残り約([\d,]+)件（2台目）｜⛔ 本体の枠 使い切り（(.+)まで・注文\/入金\/発送）$/, '🤖 listing: approx. $1 left (2nd account) | ⛔ main quota used up (until $2 \u00b7 orders/payouts/shipping)'],
+    [/^🤖出品 残り約([\d,]+)件（2台目）｜⛔ 本体の枠 断られ中$/, '🤖 listing: approx. $1 left (2nd account) | ⛔ main quota refused'],
+    [/^🤖出品 残り約([\d,]+)件（2台目）｜([\u26a0\u26d4]?)本体 残り(\d+)%$/, '🤖 listing: approx. $1 left (2nd account) | $2main $3% left'],
     [/^在庫は0以上の数字だけです。「(.+)」は使えません。$/, 'Stock must be a whole number of 0 or more. "$1" is not valid.'],
     [/^在庫は0以上の数字だけです（(.+) は使えません）$/, 'Stock must be a whole number of 0 or more ($1 is not valid)'],
     [/^・(\d+)番「(.+)」$/, '・#$1 "$2"'],
@@ -18375,6 +18427,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4F7} <b>写真の差し替えを1つの小窓にまとめました</b>（本人「直接アップロードもできるようにファイル選んで」「どの写真に差し替わるかっていうのも示してほしい」）。📷 を押すと<b>いまの写真</b>と、<b>🤖が集めた候補の写真が並んで出ます</b>。押すとその写真に差し替わる＝<b>何に変わるか見てから決められます</b>。あわせて <b>画像URL</b> と <b>📁 PCのファイルを選ぶ</b> も同じ小窓に置きました（前は先にURLの入力枠が出て、空欄にしないとファイルを選べませんでした）。',
       '\u{1F5D1} <b>出品ログから明細を消せるようにしました</b>（本人「ここから明細削除もできるようにしてください」）。📷 の小窓の下にあります。<b>守り</b>を3つ付けています：①<b>販売実績のある明細は消しません</b>（売れ行きの記録が切れるため）②<b>一番下かどうかを必ず表示</b>します③一番下でない時は「後ろが1つずつ繰り上がる／<b>2026-09-13 の実測で繰り上げた明細の価格が移らない不具合が残っている</b>」と赤字で出し、消した後にも確認をうながします。<b>カタログ（商品）そのものはこの画面からは消せません</b>（soldといいねが積み上がった資産のため）。',
       '\u{26A0}\u{FE0F} <b>「どれも当てはまりませんでした」の意味をはっきり書きました</b>（本人「まだおかしいのが残っていたりすることってあるんでしょうか？」）。<b>あります。</b> ⚠️ の選別は<b>写真の中身を見ていません</b>（無料で照合できる4つだけ）。カタログ画像・箱付き・別の機種などは <b>🔍</b> を押してAIが見ないと分かりません。その旨を画面にそのまま出すようにしました。',
+      '\u{1F50C} <b>接続枠の表示を「出品の枠」と「業務の枠」に分けました</b>（本人「2個目のGoogleアカウントでやったから、どう表示すればいいんでしょうか？」）。2台目のGoogleアカウントで🤖を動かすようにしたので、<b>枠は2つあります</b>。1つにまとめると「本体が使い切り＝出品も止まった」と読めてしまい、実際とちがいます（今日 9:02 に本体は使い切りましたが、<b>🤖の出品は2台目で動き続けました</b>）。→ 担当が2台目の時は <b>「🤖出品 残り約◯件（2台目）｜本体 残り◯%」</b>、本体が使い切りなら <b>「｜⛔ 本体の枠 使い切り（16:00まで・注文/入金/発送）」</b> と併記します。',
       '\u{1F422} <b>接続枠に自動ブレーキを入れました</b>（本人「Shopee枠は必ず余裕を残して。毎日絶対に、あの機能が止まるぐらい使わないで」）。出すペースを上げたので、<b>枠の減り方に応じて自分で細くなる</b>ようにしました。停止線（15,000回）に対して<b>50%で半分・70%で4分の1・85%で最小</b>まで、①🤖の1回の作品数 ②写真集めの間隔 の両方を自動で絞ります（85%で写真集めは<b>いったん止まります</b>）。今までは「上げたペースが枠を食い潰す」のを人が気づくしかありませんでした。絞った時は🤖の記録に <b>🐢</b> で残ります。',
       '\u{1F4CF} <b>出品ログのカードを、切らずに最後まで出すようにしました</b>（本人「どのカタログに出したかパッと見わからない」「カタログ名が長い時もその最後まで」「明細も最後まで」）。明細名は2行で切っていたのを<b>全文</b>に、カタログ名は1行で「…」にしていたのを<b>折り返して全文</b>にしました。',
       '\u{1F4B4} <b>金額を出しました（現地通貨＋日本円）</b>（本人「金額も出してほしい、最後まで日本円でも出してほしい」）。例：<b>R$ 29.90 ≒ ¥1,234</b>。円換算は注文と同じ規則（<b>出品日の日次レート×国別スプレッド</b>）を使います。レートが取れない日は<b>現地通貨だけ</b>出します（当てずっぽうの概算は出しません）。',
