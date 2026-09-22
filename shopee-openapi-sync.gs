@@ -927,6 +927,13 @@ function doGetInner_(e) {
     }
     /* ★2026-09-22 Bump（boost_item）を公式APIで作る前の権限確認。2026-07-18 の実測では「権限なし（noperm）」だった。
        読むだけの get_boosted_list を各店1回ずつ（最大13回）。書き込みはしない。WRITE_TOKEN 必須 */
+    if (p.action === 'boost_now') {   /* ⬆️ Bump を今すぐ1回（空き時刻を待たずに全店を見る）・WRITE_TOKEN 必須 */
+      var bncb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var bnout;
+      try { var bnwt = P_().getProperty('WRITE_TOKEN'); if (!bnwt || p.token !== bnwt) throw new Error('WRITE_TOKEN不正'); bnout = boostTick(true); }
+      catch (err) { bnout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(bncb + '(' + JSON.stringify(bnout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'boost_probe') {
       var bpcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var bpout;
@@ -1423,6 +1430,62 @@ function syncGate_(name, holdSec) {
     if (!chk || chk.by !== me) { Logger.log(name + '：取り札を取り合って負けたので見送り'); return false; }
   } catch (e) { return true; }   /* 取り札が読めない時は従来どおり動く（止めない） */
   return true;
+}
+
+/* ⬆️ Bump（上位表示）＝公式API boost_item（2026-09-22 本人「作って」）
+   前は外部ツール `tool`（FT2）が10分ごとに見に行き、1日 約1万1,500回を使っていた。Bump は1店につき【4時間に5商品まで】なので、
+   空きが出る時刻を覚えておけば、その時刻まで1回も通信しなくてよい。見に行くのは「空きが出るはず」の時だけ＝1日 約150回。
+   2026-07-18 の実測では権限なし(noperm)だったが、2026-09-22 に get_boosted_list が13店とも通ることを確かめた（boost_probe）。
+   選び方（あとで変えられる）：公開中・在庫あり → 売れた数 → いいね → 閲覧 の順（1日1回の集計 listing_stats_<店>）→ 同じ商品は12時間あけて順番に回す。
+   業務と同じく本体が担当（syncGate_）。本体が枯れたら2台目が代わる。 */
+var BOOST_KV = 'boost_state', BOOST_GAP_SEC = 12 * 3600;
+function boostTick(manual) {
+  if (manual !== true && !syncGate_('boostTick', 1500)) return { ok: false, skipped: 'gate' };
+  if (!bgAllowed_()) return { ok: false, skipped: 'uf' };
+  var st = baKv_(BOOST_KV) || {}; st.shops = st.shops || {}; st.items = st.items || {};
+  var now = now_(), out = [];
+  Object.keys(st.items).forEach(function (k) { if (now - st.items[k] > 3 * 86400) delete st.items[k]; });
+  listTokens_().forEach(function (t) {
+    var sid = String(t.shop_id), ss = st.shops[sid] || {};
+    if (manual !== true && ss.nextAt && now < ss.nextAt) return;
+    try {
+      var jb = callShop_(t.shop_id, '/api/v2/product/get_boosted_list', null, 'get');
+      var cur = ((jb.response || {}).item_list) || [];
+      var cds = cur.map(function (x) { return Number(x.cool_down_second) || 0; });
+      var free = 5 - cur.length, added = 0, fail = 0, why = '';
+      if (free > 0) {
+        var picks = boostPick_(t.shop_id, free, cur, st.items, now);
+        if (picks.length) {
+          var jr = callShop_(t.shop_id, '/api/v2/product/boost_item', null, 'post', { item_id_list: picks });
+          var fl = ((jr.response || {}).failure_list) || [];
+          fail = fl.length; added = picks.length - fail;
+          picks.forEach(function (id) { st.items[String(id)] = now; });
+          if (fail) why = String((fl[0] || {}).failed_reason || '').slice(0, 80);
+          for (var i = 0; i < added; i++) cds.push(4 * 3600);
+        } else { why = '押し上げる候補なし（在庫あり・公開中が足りない）'; }
+      }
+      /* 次に空きが出る時刻＝いちばん早く終わる枠。候補が無かった店は2時間後にもう一度だけ見る */
+      var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : (why ? 2 * 3600 : 300);
+      ss.nextAt = now + Math.max(300, nextIn); ss.at = now; ss.lastAdded = added; ss.lastFail = fail; ss.why = why; ss.cc = t.cc || ss.cc || '';
+      st.shops[sid] = ss;
+      out.push({ shop_id: sid, cc: t.cc || '', boosted: cur.length, added: added, fail: fail, why: why });
+    } catch (e) { ss.err = String((e && e.message) || e).slice(0, 120); ss.nextAt = now + 3600; st.shops[sid] = ss; out.push({ shop_id: sid, cc: t.cc || '', error: ss.err }); }
+  });
+  st.at = now; try { baKvSet_(BOOST_KV, st); } catch (eS) {}
+  return { ok: true, shops: out };
+}
+function boostPick_(shopId, n, cur, hist, now) {
+  var busy = {}; (cur || []).forEach(function (x) { busy[String(x.item_id)] = 1; });
+  /* 押し上げてよいのは【公開中・在庫あり】だけ（在庫0を上げても売れない）。列は item_id だけ読む＝明細データ（重い）は読まない */
+  var rows = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + encodeURIComponent(String(shopId)) + '&status=eq.1&stock=gt.0');
+  /* 並べ方は1日1回の集計（app_kv listing_stats_<店>：sale/likes/views）。売れた数 → いいね → 閲覧 */
+  var stats = {}; try { stats = ((baKv_('listing_stats_' + shopId) || {}).items) || {}; } catch (e) { stats = {}; }
+  var cand = (rows || []).filter(function (r) { var id = String(r.item_id); return !busy[id] && !(hist[id] && now - hist[id] < BOOST_GAP_SEC); }).map(function (r) {
+    var x = stats[String(r.item_id)] || {};
+    return { id: Number(r.item_id), sale: Number(x.sale) || 0, likes: Number(x.likes) || 0, views: Number(x.views) || 0 };
+  });
+  cand.sort(function (a, b) { return (b.sale - a.sale) || (b.likes - a.likes) || (b.views - a.views); });
+  return cand.slice(0, n).map(function (c) { return c.id; });
 }
 
 function ensureToken_(shopId) {
@@ -4780,6 +4843,7 @@ function setupTriggers() {
   ScriptApp.newTrigger('backfillEscrowUnchanged').timeBased().everyDays(1).atHour(5).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
+  ScriptApp.newTrigger('boostTick').timeBased().everyMinutes(30).create();   // ⬆️ Bump（公式 boost_item・各店5商品/4時間）2026-09-22
   try { setupBoshuAutoTrigger(); } catch (eBA) {}   // 🤖 母数の空白の自動出品（30分毎・設定OFFなら何もしない）
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
   //   👁閲覧/❤️いいね/🛒販売数(listing_stats)の同期だけ復活せず、ずっと0のままになる（実際に発生）。
