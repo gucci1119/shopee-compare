@@ -925,6 +925,22 @@ function doGetInner_(e) {
       } catch (err) { odout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(odcb + '(' + JSON.stringify(odout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    /* ★2026-09-22 Bump（boost_item）を公式APIで作る前の権限確認。2026-07-18 の実測では「権限なし（noperm）」だった。
+       読むだけの get_boosted_list を各店1回ずつ（最大13回）。書き込みはしない。WRITE_TOKEN 必須 */
+    if (p.action === 'boost_probe') {
+      var bpcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var bpout;
+      try {
+        var bpwt = P_().getProperty('WRITE_TOKEN'); if (!bpwt || p.token !== bpwt) throw new Error('WRITE_TOKEN不正');
+        var bpres = [];
+        listTokens_().forEach(function (t0) {
+          try { var jb = callShop_(t0.shop_id, '/api/v2/product/get_boosted_list', null, 'get'); bpres.push({ shop_id: t0.shop_id, cc: t0.cc || '', ok: true, n: (((jb.response || {}).item_list) || []).length, raw: JSON.stringify(jb.response || {}).slice(0, 200) }); }
+          catch (eB) { bpres.push({ shop_id: t0.shop_id, cc: t0.cc || '', ok: false, error: String((eB && eB.message) || eB).slice(0, 160) }); }
+        });
+        bpout = { ok: true, shops: bpres };
+      } catch (err) { bpout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(bpcb + '(' + JSON.stringify(bpout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'account_health') {
       var hcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var hout;
