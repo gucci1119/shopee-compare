@@ -5594,9 +5594,18 @@ function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Mat
 function baNameKey_(n) { return String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
 function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'; var m = String(name || '').match(/[①-⑳]/); return m ? (CIRC.indexOf(m[0]) + 1) : 1; }
 // 時間トリガーの登録（無ければ足す）。setupTriggers() からも呼ぶ＝全部消して作り直す時に落ちないように
+/* ★2026-09-22 本人「1日1,000とか出品していきたい」「ガンガン出品していきたい」。30分→15分。
+   実測：1回は約4分で時間切れ（候補の審査に使えるのは DEADLINE の55%＝約2分17秒）＝候補が尽きているのではない。
+   30分×最大20作品＝960/日で1,000に届かない器だった。回数を倍にすると審査できる候補も倍になる。
+   トリガーは間隔を読み出せないので、BA_TICK_MIN の印が違えば作り直す（同じ関数のトリガーを2本にしない）。
+   Haikuで1日 約$1→$2〜3・接続枠は2台目の中で収まる（1作品 約7回）。ヤフオクは1回あたりの叩き方は同じ・遮断時は既存の6時間休みが効く */
+var BA_TICK_MIN = 15;
 function setupBoshuAutoTrigger() {
-  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
-  if (!has) ScriptApp.newTrigger('boshuAutoTick').timeBased().everyMinutes(30).create();
+  var tr = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
+  var has = tr.length > 0, mark = '';
+  try { mark = P_().getProperty('baTickMin') || ''; } catch (eM) {}
+  if (has && (mark !== String(BA_TICK_MIN) || tr.length > 1)) { tr.forEach(function (t) { ScriptApp.deleteTrigger(t); }); has = false; }
+  if (!has) { ScriptApp.newTrigger('boshuAutoTick').timeBased().everyMinutes(BA_TICK_MIN).create(); try { P_().setProperty('baTickMin', String(BA_TICK_MIN)); } catch (eM2) {} }
   var has2 = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuAutoRecheck'; });
   if (!has2) ScriptApp.newTrigger('boshuAutoRecheck').timeBased().everyDays(1).atHour(4).create();
   return { ok: true, had: has, had2: has2 };
