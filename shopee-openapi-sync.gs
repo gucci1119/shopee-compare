@@ -4845,6 +4845,7 @@ function setupTriggers() {
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
   ScriptApp.newTrigger('boostTick').timeBased().everyMinutes(30).create();   // ⬆️ Bump（公式 boost_item・各店5商品/4時間）2026-09-22
   try { setupBoshuAutoTrigger(); } catch (eBA) {}   // 🤖 母数の空白の自動出品（30分毎・設定OFFなら何もしない）
+  try { setupCondIndexTrigger(); } catch (eCI) {}   // 📸 状態写真の索引（10分毎）★2026-09-22 ここに無く、作り直すたびに消えていた（Bump追加の時に両方から消えたのを実測）
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
   //   👁閲覧/❤️いいね/🛒販売数(listing_stats)の同期だけ復活せず、ずっと0のままになる（実際に発生）。
   // ★1日1回。以前ここだけ everyHours(6) で、setupStatsTrigger の everyDays(1) と食い違っていた。
