@@ -1409,6 +1409,13 @@ function syncGate_(name, holdSec) {
   var k = 'sync_claim_' + name, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
   try {
     var cur = baKv_(k);
+    /* ★2026-09-22 本人「分担分けなどもちゃんと設計して」「設計ミスとかがないか見直して」。
+       前は「先に手を挙げた方がやる」だけ＝業務（注文・入金・返品）を2台目がかなり取っていて、2台目の枠（＝出品に回す分）が先に減っていた。
+       → 【業務は本体】。2台目は、本体の最後の実行が取り札の2.2倍より古い（＝本体が枯れて手を挙げられない）時だけ代わりにやる。
+         本体は枯れると手を挙げない（上の ufDead_）ので、取り札が古くなる＝2台目が引き継ぐ。本体が戻れば、次の回から本体に戻る。 */
+    if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < (holdSec || 240) * 2.2) {   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）でちょうど60分＝境目で2台目も動く。2.2倍＝本体が約1回半止まったら引き継ぐ */
+      Logger.log(name + '：本体が担当中（' + Math.round((now_() - cur.at) / 60) + '分前に実行）なので2台目は見送り'); return false;
+    }
     if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
     baKvSet_(k, { at: now_(), by: me });
     Utilities.sleep(800);
@@ -3912,7 +3919,7 @@ function syncReturnsRange_(days, ccList) {
   log.push('=== 合計 ' + total + '件 取込（走査' + DAYS + '日）===');
   Logger.log(log.join('\n')); return total;
 }
-function syncReturnsAll() { if (!coreAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; }   /* ★返品は業務の血流 */ var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
+function syncReturnsAll() { if (!syncGate_('syncReturnsAll', 18000)) return 0; /* ★2026-09-22 本体と2台目で二重に動いていた */ if (!coreAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; }   /* ★返品は業務の血流 */ var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
 
@@ -4707,6 +4714,7 @@ function addListingsTrigger() {
 // payout同期に相乗りしているだけだと取りこぼすため、直近30日を毎日引き直す（重複はadj_idで弾かれる）。
 var ADJ_MAIL_TO = 'gcsonlinestore631@gmail.com';
 function dailyAdjustmentsCheck() {
+  if (!syncGate_('dailyAdjustmentsCheck', 72000)) return;   /* ★2026-09-22 本体と2台目で二重に動いていた（毎朝7時に両方） */
   if (!bgAllowed_()) { Logger.log('dailyAdjustmentsCheck: urlfetch枠の予約線を超えているので実行しません'); return; }
   // 取り込み前に「今ある補償のキー」を控える → 差分＝今日入った分
   var before = {};
