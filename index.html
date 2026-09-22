@@ -18456,6 +18456,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-22', items: [
+      '📷 <b>🤖で写真が全部NGだった作品を、写真集めが<u>別の写真で</u>集め直すようにしました</b>。前は写真が「ある」扱いのまま残るので二度と探しに行かず、🤖はヤフオク（弾かれて休み中）待ちで止まっていました（今日の見送りの最多＝ヤフオク待ち）。NGになった写真は二度と選びません。集め直しは1作品3回まで、その後3日は休みます',
       '🛡 <b>ヤフオクの検索は1時間6回までにしました</b>（🤖を15分ごとにしたため）。本体は昨夜 約13時間で68回（1時間 約5回）叩いただけで弾かれて6時間止まっていました。GoogleのIPからは少ない回数でも弾かれるので、回数を倍にしても<b>ヤフオクを叩く量は増やしません</b>。出品を増やす主役はメルカリの写真（ポータルが集めている分）です',
       '⏱ <b>🤖自動出品を30分ごと→15分ごとにしました</b>（本人「1日1,000とか出品していきたい」「ガンガン出品していきたい」）。1回は約4分で時間切れになっていて、候補が尽きていたのではありません。30分×最大20作品では1日960件が上限で、1,000に届かない作りでした。回数を倍にすると審査できる候補も倍になります。1日の上限は1,000件のまま。AI代は1日 約$1→$2〜3、接続枠は2台目の中で収まります',
       '🇧🇷 <b>🤖自動出品でBRだけ明細が入らない失敗を直しました</b>（本人「エラー治った？」）。直近の失敗21件は<b>全部BR</b>で、同じ「Model tier_index error」（他の国は0件）。明細の枠を足した直後にまだBR側へ反映されておらず、すぐ価格・在庫を送って弾かれていた形です。<b>3秒・6秒待って読み直し、枠が入っているのを確かめてから送り直す</b>ようにしました（失敗した時だけ通信が増えます）。結果はログに残ります',
@@ -28674,7 +28675,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const pre = Object.assign({}, (await baKvGet('boshu_auto_pre')) || {});
     const changed = {};   // この回で触った鍵だけ保存する（🔁別の写真 など他の書き手の分を消さない・Codex指摘）
     const usedImg = new Set(Object.values(pre).map(v => v && v.img).filter(Boolean));
-    const todo = (rows || []).filter(r => r && r.key && !(pre[r.key] && pre[r.key].img));
+    /* ★2026-09-22 🤖が全部NGにした写真（GAS が boshu_auto_prerej に記録）。今の写真がNGの作品は集め直し、NGの写真は二度と選ばない。
+       前は「写真あり」のまま＝二度と探さず、🤖はヤフオク（弾かれて休み）待ちで止まっていた */
+    let preRej = {}; try { preRej = (await baKvGet('boshu_auto_prerej')) || {}; } catch (_) { preRej = {}; }
+    const stripQ = u => String(u || '').replace(/\?.*$/, '');
+    Object.values(preRej).forEach(v => (v && v.imgs || []).forEach(u => usedImg.add(u)));
+    const isRejNow = (k) => { const rj = preRej[k], p0 = pre[k]; return !!(rj && p0 && p0.img && stripQ(p0.img) === String(rj.img || '')); };
+    const todo = (rows || []).filter(r => r && r.key && (!(pre[r.key] && pre[r.key].img) || isRejNow(r.key)));
     skipped = (rows || []).length - todo.length;
     try {
       for (let i = 0; i < todo.length && tried < max; i++) {
@@ -28708,7 +28715,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const CART_ONLY = { fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1 }, CASE_REQ = { ds: 1, '3ds': 1, vita: 1, psp: 1, ps1: 1, ps2: 1, ps3: 1, ps4: 1, ps5: 1, switch: 1, switch2: 1, wii: 1, wiiu: 1, gc: 1, xbox: 1, xbox360: 1, dc: 1, ss: 1 };
         const nameFit = (x) => { const n = String((x && x.name) || ''); const soft = /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し|無)|ケース(なし|無し)/.test(n), boxed = /箱(付|あり|有)|箱説|完品|外箱|説明書(付|あり)/.test(n) && !soft; if (CART_ONLY[hwKey]) return soft ? -20 : (boxed ? 40 : 0); if (CASE_REQ[hwKey]) return soft ? 40 : 0; return 0; };
         const photoHits = hits.map((x, i) => ({ x, i, r: condRank(x) })).filter(o => o.r >= 0 && !knownCatalog(o.x)).sort((p, q) => (((isShop(p.x) ? 100 : 0) + nameFit(p.x) + p.r) - ((isShop(q.x) ? 100 : 0) + nameFit(q.x) + q.r)) || (p.i - q.i)).map(o => o.x);   // ★2026-09-20 実測：AI判定の通過率は 個人79%・業者50% → 業者の写真は個人を全部試した後（GAS baPhotoOrder_ と同じ規則）
-        let pick = photoHits.find(x => !usedImg.has(x.img)) || null;
+        let pick = photoHits.find(x => !usedImg.has(x.img) && !usedImg.has(stripQ(x.img)) && !usedImg.has(stripQ(toRec(x).img))) || null;
         let fromSite = 'mercari', photoPool = photoHits;
         /* ★2026-09-20 本人「これもっと詰めたい」：販売中で写真が見つからない時は【売り切れの出品】から写真だけもらう。
            古い作品ほど販売中は0件でも、売り切れには中古の実写真がある。相場・件数・在庫の判断には入れない（cost は販売中のまま＝売り切れしか無ければ cost 0＝在庫0で出す）。
@@ -28721,7 +28728,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             let sItems = []; try { sItems = await mercariSearch(skw, { soldOnly: true }); } catch (_) { sItems = []; }
             const sHits = (sItems || []).filter(x => x && x.img && [2, 3, 4].includes(Number(x.cid)) && matchOk(x.name, core, r.ja, r.en));
             const sPhotos = sHits.map((x, i) => ({ x, i, r: condRank(x) })).filter(o => o.r >= 0 && !knownCatalog(o.x)).sort((p2, q2) => (((isShop(p2.x) ? 100 : 0) + nameFit(p2.x) + p2.r) - ((isShop(q2.x) ? 100 : 0) + nameFit(q2.x) + q2.r)) || (p2.i - q2.i)).map(o => o.x);
-            const sPick = sPhotos.find(x => !usedImg.has(x.img)) || null;
+            const sPick = sPhotos.find(x => !usedImg.has(x.img) && !usedImg.has(stripQ(toRec(x).img))) || null;
             if (sPick) { pick = sPick; photoPool = sPhotos; soldPhoto = sHits.length; break; }
           }
         }
@@ -28733,7 +28740,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             await new Promise(rs => setTimeout(rs, 2500 + Math.random() * 1000));
             let its = []; try { its = (await site.custom(kw)) || []; } catch (_) { its = []; }
             const h2 = its.filter(x => x && x.img && x.url && matchOk(x.name, core, r.ja, r.en)).sort((a, b) => (String(a.name).length - qLen) - (String(b.name).length - qLen));
-            const p2 = h2.find(x => !usedImg.has(x.img)) || null;
+            const p2 = h2.find(x => !usedImg.has(x.img) && !usedImg.has(stripQ(x.img))) || null;
             if (p2) { hits = h2; photoPool = h2; pick = p2; fromSite = k; break; }
           }
         }
