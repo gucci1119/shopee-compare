@@ -1420,7 +1420,7 @@ function syncGate_(name, holdSec) {
        前は「先に手を挙げた方がやる」だけ＝業務（注文・入金・返品）を2台目がかなり取っていて、2台目の枠（＝出品に回す分）が先に減っていた。
        → 【業務は本体】。2台目は、本体の最後の実行が取り札の2.2倍より古い（＝本体が枯れて手を挙げられない）時だけ代わりにやる。
          本体は枯れると手を挙げない（上の ufDead_）ので、取り札が古くなる＝2台目が引き継ぐ。本体が戻れば、次の回から本体に戻る。 */
-    if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < (holdSec || 240) * 2.2) {   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）でちょうど60分＝境目で2台目も動く。2.2倍＝本体が約1回半止まったら引き継ぐ */
+    if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < Math.min((holdSec || 240) * 2.2, (holdSec || 240) + 9000)) {   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）で境目。2.2倍だけだと1日1回の処理（hold 72000）は44時間待つ＝本体が朝に枯れた日は誰もやらない（2026-09-22 見直しで発見）→ 取り札＋2.5時間 を上限に */
       Logger.log(name + '：本体が担当中（' + Math.round((now_() - cur.at) / 60) + '分前に実行）なので2台目は見送り'); return false;
     }
     if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
@@ -1465,7 +1465,7 @@ function boostTick(manual) {
         } else { why = '押し上げる候補なし（在庫あり・公開中が足りない）'; }
       }
       /* 次に空きが出る時刻＝いちばん早く終わる枠。候補が無かった店は2時間後にもう一度だけ見る */
-      var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : (why ? 2 * 3600 : 300);
+      var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : (why ? (cur.length ? 2 * 3600 : 24 * 3600) : 300);   /* 出品が1件も無い店（2店舗目の空の店）は1日1回だけ見る */
       ss.nextAt = now + Math.max(300, nextIn); ss.at = now; ss.lastAdded = added; ss.lastFail = fail; ss.why = why; ss.cc = t.cc || ss.cc || '';
       st.shops[sid] = ss;
       out.push({ shop_id: sid, cc: t.cc || '', boosted: cur.length, added: added, fail: fail, why: why });
@@ -2373,7 +2373,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
         var seen = -1;
         try { var jr = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get'); seen = ((((jr.response || {}).tier_variation || [])[0] || {}).option_list || []).length; } catch (eR) {}
         tierRetry += (tierRetry ? ' / ' : '') + rt + '回目 待ち' + (3 * rt) + '秒 枠' + seen + '/' + optObjs.length;
-        if (seen >= 0 && seen < optObjs.length) { try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap); tierRetry += ' 枠を入れ直し'; } catch (eU) { tierRetry += ' 入れ直し失敗'; } continue; }
+        if (seen >= 0 && seen < optObjs.length) { try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap); tierRetry += ' 枠を入れ直し'; Utilities.sleep(2500); } catch (eU) { tierRetry += ' 入れ直し失敗'; continue; } }   /* 入れ直した回も、そのまま送り直す（前は送らずに次の回へ進んでいた） */
         try { addModel_(shopId, itemId, newModels); okRetry = true; tierRetry += ' →成功'; } catch (eAdd2) { eMsg = String((eAdd2 && eAdd2.message) || eAdd2); tierRetry += ' →失敗'; }
       }
     }
@@ -5940,7 +5940,8 @@ function boshuAutoTick(manual) {
         if (!okM) {
           baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en));
           /* 判定し切った時だけ記録（AIの鍵・予算切れで「判定できず」が混ざった時は記録しない＝NGと決めつけない） */
-          if (!sameUnj) {
+          var _pmImg = String(pm.img || '').replace(/\?.*$/, '');
+          if (!sameUnj && !(preRej[c.key] && preRej[c.key].img === _pmImg)) {   /* 同じ写真のNGは記録し直さない（毎回 at を更新すると「探して無かった」印より新しくなり、集め直しが止まらない） */
             var rj = preRej[c.key] || { n: 0, imgs: [] }, seenR = {};
             (rj.imgs || []).forEach(function (u0) { seenR[u0] = 1; });
             candsM.forEach(function (x) { var u1 = x && String(x.img || '').replace(/\?.*$/, ''); if (u1 && !seenR[u1]) { rj.imgs.push(u1); seenR[u1] = 1; } });
@@ -6288,7 +6289,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   var candList = ctx.cand;
   var preRejP = baKv_('boshu_auto_prerej') || {};
   /* ★2026-09-22 いまの写真が🤖で全部NGだった作品も集め直しに戻す（3回まで・その後は3日休み） */
-  var rejNow_ = function (c, p0) { var rj = preRejP[c.key]; if (!rj || !p0 || !p0.img) return false; if (String(p0.img).replace(/\?.*$/, '') !== String(rj.img || '')) return false; if ((Number(rj.n) || 0) >= 3 && Date.now() - Date.parse(rj.at || 0) < 3 * 86400000) return false; return true; };
+  var rejNow_ = function (c, p0) { var rj = preRejP[c.key]; if (!rj || !p0 || !p0.img) return false; if (String(p0.img).replace(/\?.*$/, '') !== String(rj.img || '')) return false; if (p0.missAt && Date.parse(p0.missAt) > Date.parse(rj.at || 0) && Date.now() - Date.parse(p0.missAt) < 3 * 86400000) return false;   /* NGの後に探して見つからなかった＝3日休む（前は10分ごとに探し続けていた） */ if ((Number(rj.n) || 0) >= 3 && Date.now() - Date.parse(rj.at || 0) < 3 * 86400000) return false; return true; };
   if (needPhoto) candList = candList.filter(function (c) { var p0 = pre[c.key]; if (rejNow_(c, p0)) return true; return !(p0 && (p0.img || (p0.missAt && Date.now() - Date.parse(p0.missAt) < 3 * 86400000))); });   // ★写真集め用：写真がある／3日以内に探して無かった作品は最初から外す（先頭40件で詰まらない・Codex指摘）
   /* ★v194 「次に出す予定」には【実際に出る見込みの作品】だけを並べる（本人 2026-09-18）。高額で出さない／全部の国で価格差の枠に入らず見送り／使える写真が無い、は held（出さない見込み・理由つき）へ回し、その分だけ先の候補を見る（最大 n×3 件まで） */
   candList.slice(0, needPhoto ? n : n * 3).forEach(function (c) {
