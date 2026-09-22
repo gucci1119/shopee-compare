@@ -9005,8 +9005,35 @@
       });
     } catch (_) {}
   }, 60000);
+  /* ★2026-09-22 本人「自動出品したやつが売れた時は、何か分かるようにしてほしい。注文管理のところに何か出るように、フラグでもいい」。
+     🤖の台帳（app_kv boshu_auto_done_<機種>：作品鍵→国→item#model）と英題の控え（boshu_auto_en：en／short）から
+     「国｜明細名」の集合を作り、注文の明細名と一致したら 🤖 の印を出す。
+     ★注文データには item_id が入っていない（実測：直近の注文は items[].item_id が空）ので、🤖自身の「売れた」判定と同じく明細名で突き合わせる。
+     読み込みは30分に1回だけ（app_kv 十数行＋控え1行）。 */
+  let _ordAuto = null, _ordAutoAt = 0;
+  function ordAutoLoad() {
+    if (_ordAutoAt && Date.now() - _ordAutoAt < 30 * 60000) return Promise.resolve(null);   /* 読み込み済み＝描き直さない（描画の中から再描画を予約しない [[portal-no-render-loop]]） */
+    _ordAutoAt = Date.now();
+    return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en')]).then(([rows, en]) => {
+      const set = new Map(); en = en || {};
+      (rows || []).forEach(r => {
+        const hw = String(r.k || '').replace('boshu_auto_done_', ''), v = r.v || {};
+        Object.keys(v).forEach(key => {
+          const names = [en[key] && en[key].en, en[key] && en[key].short].filter(Boolean);
+          Object.keys(v[key] || {}).forEach(cc => { if (/^\d/.test(String(v[key][cc] || ''))) names.forEach(n => set.set(cc + '|' + String(n).toLowerCase().trim(), hw)); });
+        });
+      });
+      _ordAuto = set; return set;
+    }).catch(() => { _ordAutoAt = 0; return _ordAuto; });
+  }
+  function ordAutoBadge(cc, variation) {
+    if (!_ordAuto || !variation) return '';
+    const hw = _ordAuto.get(String(cc || '') + '|' + String(variation).toLowerCase().trim());
+    return hw ? ` <span title="🤖自動出品で入れた明細です（機種: ${esc(String(hw).toUpperCase())}）" style="display:inline-block;background:#ede7f6;color:#5e35b1;border:1px solid #b39ddb;border-radius:8px;padding:0 6px;font-size:10.5px;font-weight:700;white-space:nowrap">🤖自動出品</span>` : '';
+  }
   // withLive=false: DBのみ即表示（開いた瞬間は速い）。withLive=true（更新ボタン/同期時）: ライブで上書き
   function loadOrders(withLive) {
+    ordAutoLoad().then(set => { if (set && set.size) renderOrders(); });
     state.orders.started = true;
     if (!state.accounts) loadAccounts().then(() => renderOrders()).catch(() => {}); // 🏪ショップ名表示のため登録簿を確保→ロード後に再描画
     loadSelfTransit().then(() => renderOrders()); // 倉庫輸送中フラグを読み込んで反映
@@ -9722,7 +9749,7 @@
       const itemThumb = (im) => `<img class="zimg" loading="lazy" src="${IMG_CDN}${im || ''}" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:44px;height:44px;border-radius:6px;object-fit:cover;background:#eee;flex:none;cursor:zoom-in">`;
       const itemsHtml = (r.items.length ? r.items : [first]).map(it =>
         `<div style="display:flex;align-items:center;gap:8px;min-width:0">${itemThumb(it.image)}<div style="min-width:0;flex:1">` +
-        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''} ${battBadge(batteryOf((it.name || '') + ' ' + (it.variation || '')))}</div>` +
+        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''} ${battBadge(batteryOf((it.name || '') + ' ' + (it.variation || '')))}${ordAutoBadge(r.cc, it.variation)}</div>` +
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '') +
         `</div></div>`
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:4px 0"></div>') +
@@ -18487,6 +18514,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🚚 <b>「倉庫へ発送済」が画面に出ない注文があった不具合を直しました</b>（本人「発送済みにしたのに更新されない」）。印の付いた注文が <b>1,034件</b> になり、1回で読める1,000件を超えて <b>34件が反映されていませんでした</b>。全件を読むようにしました',
       '🔑 <b>16時に本体の枠が戻った後も、Shopeeの認証が切れないようにしました</b>。本体の枠が切れている間は2台目がトークンを更新するので、本体の手元には<b>もう使えない古いもの</b>が残ります。前は手元を優先して使う作りで、古い方で更新して失敗する形がありました。<b>新しい方から試し、断られたらもう一方も試す</b>ようにしました',
       '📷 <b>🤖で写真が全部NGだった作品を、写真集めが<u>別の写真で</u>集め直すようにしました</b>。前は写真が「ある」扱いのまま残るので二度と探しに行かず、🤖はヤフオク（弾かれて休み中）待ちで止まっていました（今日の見送りの最多＝ヤフオク待ち）。NGになった写真は二度と選びません。集め直しは1作品3回まで、その後3日は休みます',
+      '🤖 <b>注文管理で「🤖自動出品」で出した商品が売れたら印が出るようにしました</b>（本人「自動出品したやつが売れた時は、何か分かるようにしてほしい」）。明細名の横に紫の <b>🤖自動出品</b> が付きます。なお9/22時点で、直近30日の注文432件のうち🤖の明細は0件でした（本格的に出し始めて4〜5日）',
       '🔀 <b>本体と2台目の分担を直しました</b>（本人「1台目と2台目で同じ作業を無駄にやってたりしてない？」「分担分けなどもちゃんと設計して」「設計ミスとかがないか見直して」）。見直して見つけたのは2つ：①<b>返品の同期と毎朝の調整確認が、本体と2台目の両方で動いていた</b>（二重）②分担が「先に手を挙げた方がやる」だけで、<b>2台目が注文・入金などの業務をかなり取っていた</b>＝出品に回す2台目の枠が先に減っていた。→ <b>業務は本体・出品は2台目</b>。本体が枠切れで止まった時だけ2台目が業務を代わり、本体が戻れば本体へ戻ります',
       '💴 <b>上のバーの「今月のAI代」が少なく出ていたのを直しました</b>（本人「748円ってほんまに正しい？元々は1,000円いくらあった」＝<b>本人が正しかった</b>）。今朝つなぎ先を2台目に切り替えた時に、本体の分（9月 約$7.7）が2台目の分で上書きされて消え、2台目の分は二重に数えていました。どちらのアカウントの分かを見て別々に保存するようにしました',
       '🛡 <b>ヤフオクの検索は1時間6回までにしました</b>（🤖を15分ごとにしたため）。本体は昨夜 約13時間で68回（1時間 約5回）叩いただけで弾かれて6時間止まっていました。GoogleのIPからは少ない回数でも弾かれるので、回数を倍にしても<b>ヤフオクを叩く量は増やしません</b>。出品を増やす主役はメルカリの写真（ポータルが集めている分）です',
