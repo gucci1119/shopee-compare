@@ -1941,7 +1941,41 @@
      内訳（何が枠を食ったか）は**吹き出しの中にだけ**あった＝[[portal-no-click-to-see]]の典型。
      💴のAPI利用料はクリックで明細が出るのに、こちらは cursor:default で押せなかった。
      `uf_status` の `top` は既に届いているので、押したら見える形にするだけ。 */
-  function ufQuotaDetail() {
+  /* ★2026-09-22 本人「Googleアカウントを2個使ってて、どっちが埋まっててどっちが空いているか、
+     どのくらいのパーセンテージを使っているか（残りがどのくらいか）が分かるようにしておいた方がいい」。
+     枠はアカウントごとに2万回。**2つ並べて、合計も出す**（本人の判断軸は「1日で足して詰まらなければいい」）。
+     片方の数字だけを出すと、ほかのGAS（メルカリ取込）の分まで混ざって見えて誤解する。 */
+  async function ufFetchOne(url) {
+    if (!url) return null;
+    try {
+      const u = url + (url.includes('?') ? '&' : '?') + 'action=uf_status&callback=cb&cb=' + Date.now();
+      const t = await (await fetch(u, { credentials: 'omit' })).text();
+      const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
+      if (!m) return null;
+      const o = JSON.parse(m[1]);
+      return (o && o.ok) ? o : null;
+    } catch (_) { return null; }
+  }
+  function ufAcctCard(name, o, isRunner) {
+    if (!o) return '<div style="flex:1;min-width:210px;border:1px solid #e3e6ea;border-radius:10px;padding:10px 12px;background:#fafbfc">'
+      + '<div style="font-weight:700;font-size:12px">' + esc(name) + '</div><div class="smd-dim" style="font-size:11px;margin-top:6px">状態を取れませんでした</div></div>';
+    const used = Number(o.used) || 0, cap = Number(o.capHard) || Number(o.cap) || 20000;
+    const pct = Math.min(100, Math.round(used / cap * 100));
+    const blk = !!o.blocked;
+    const col = blk ? '#b3261e' : (pct >= 85 ? '#e8770a' : '#1a7f37');
+    const bg = blk ? '#fdecea' : (pct >= 85 ? '#fffaf0' : '#f2f9f4');
+    return '<div style="flex:1;min-width:210px;border:1px solid ' + (blk ? '#f0c4bd' : '#e3e6ea') + ';border-radius:10px;padding:10px 12px;background:' + bg + '">'
+      + '<div style="display:flex;align-items:center;gap:6px"><b style="font-size:12px">' + esc(name) + '</b>'
+      + (isRunner ? '<span style="font-size:10px;background:#e8eefc;color:#2b4a8b;border-radius:4px;padding:1px 5px">🤖出品の担当</span>' : '')
+      + (blk ? '<span style="font-size:10px;background:#fdecea;color:#b3261e;border-radius:4px;padding:1px 5px">⛔ 使い切り</span>' : '') + '</div>'
+      + '<div style="margin-top:6px;font-size:22px;font-weight:700;color:' + col + ';font-variant-numeric:tabular-nums">残り ' + Math.max(0, cap - used).toLocaleString() + '<span style="font-size:12px;font-weight:400">回</span></div>'
+      + '<div style="height:8px;border-radius:4px;background:#e9edf2;overflow:hidden;margin:6px 0 4px"><span style="display:block;height:100%;width:' + pct + '%;background:' + col + '"></span></div>'
+      + '<div class="smd-dim" style="font-size:10.5px">つかった ' + used.toLocaleString() + ' / ' + cap.toLocaleString() + '（' + pct + '%）'
+      + (Number(o.usedExt) ? '　うち ほかのGAS ' + Number(o.usedExt).toLocaleString() : '') + '</div>'
+      + (blk ? '<div style="font-size:10.5px;color:#b3261e;margin-top:3px">' + ufResetJst() + ' まで戻りません</div>' : '')
+      + '</div>';
+  }
+  async function ufQuotaDetail() {
     const r = window.__ufLast;
     if (!r) { alert('まだ枠の状態を取れていません。上の🔄更新を押してから、もう一度開いてください。'); return; }
     const used = Number(r.used) || 0;
@@ -1964,7 +1998,22 @@
         + '<td style="padding:4px 8px;border-top:1px solid #eee;text-align:right;font-variant-numeric:tabular-nums;font-weight:700">' + n.toLocaleString() + '</td>'
         + '<td style="padding:4px 8px;border-top:1px solid #eee;width:46%"><span style="display:inline-block;height:9px;border-radius:5px;background:#5b7cc4;width:' + Math.max(2, Math.round(n / maxN * 100)) + '%"></span></td></tr>';
     }).join('');
+    /* ★2台ぶんを実測で取る（uf_status は枠を1回も使わない）。取れなければその欄だけ「取れませんでした」 */
+    const urlMain = settings.openapiUrlMain || settings.openapiUrl || '';
+    const urlKid = settings.boshuUrl || '';
+    const [oMain, oKid] = await Promise.all([ufFetchOne(urlMain), (urlKid && urlKid !== urlMain) ? ufFetchOne(urlKid) : Promise.resolve(null)]);
+    const sumCap = (oMain ? (Number(oMain.capHard) || 20000) : 0) + (oKid ? (Number(oKid.capHard) || 20000) : 0);
+    const sumUsed = (oMain ? Number(oMain.used) || 0 : 0) + (oKid ? Number(oKid.used) || 0 : 0);
+    const acctHtml = (oMain || oKid)
+      ? '<div style="font-weight:700;font-size:12.5px;margin:2px 0 6px">Googleアカウントごとの残り</div>'
+        + '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+        + ufAcctCard('本体（gcsonlinestore）', oMain, settings.boshuRunner !== 'child')
+        + (oKid ? ufAcctCard('2台目（lumiscends）', oKid, settings.boshuRunner === 'child') : '')
+        + '</div>'
+        + (sumCap ? '<div class="smd-dim" style="font-size:11px;margin-bottom:12px">合計：残り <b style="color:#1a7f37;font-size:13px">' + Math.max(0, sumCap - sumUsed).toLocaleString() + '回</b> / ' + sumCap.toLocaleString() + '（つかった ' + sumUsed.toLocaleString() + '・' + Math.round(sumUsed / sumCap * 100) + '%）　片方が使い切っても、もう片方が生きていれば操作は通ります。</div>' : '')
+      : '';
     const html = '<div style="font-size:12px">'
+      + acctHtml
       + '<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;margin-bottom:12px">'
       + kpi('今日つかった', used.toLocaleString() + '回', '自分 ' + self.toLocaleString() + '・ほかのGAS ' + ext.toLocaleString(), used >= stop ? '#e8770a' : '#2b3440')
       + kpi('残り', Math.max(0, capE - used).toLocaleString() + '回', 'Googleの上限 ' + capH.toLocaleString(), '#1a7f37')
@@ -2180,15 +2229,18 @@
        → 子機が担当の時は【出品の枠（2台目）】を主に出し、本体は【注文・入金・発送の枠】として併記する。 */
     var _kid = (settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : null;
     var _kidLeft = _kid ? Math.max(0, (Number(_kid.stopLine) || 17000) - (Number(_kid.used) || 0)) : null;
-    var _kidTxt = _kid ? ('🤖出品 残り約' + Math.floor(_kidLeft / (r.perListing || 3.7)).toLocaleString() + '件（2台目）') : '';
+    /* ★2026-09-22 本人「どっちが埋まっててどっちが空いているか、パーセンテージが分かるように」。
+       上のバーは狭いので「本体◯% ・ 2台目◯%」の2つだけ出し、細かい数字と棒グラフは押した時の内訳に置く。 */
+    var _kidPct = _kid ? Math.min(100, Math.round((Number(_kid.used) || 0) / 20000 * 100)) : null;
+    var _kidTxt = _kid ? ('本体 ' + (100 - pct) + '%・2台目 ' + (100 - _kidPct) + '% 残り') : '';
     el.textContent = gasBlocked
-      ? (_kid ? _kidTxt + '｜⛔ 本体の枠 使い切り（' + ufResetJst() + 'まで・注文/入金/発送）'
+      ? (_kid ? '⛔ 本体は使い切り・2台目 残り' + (100 - _kidPct) + '%（' + ufResetJst() + 'に戻ります）'
               : '⛔ Shopee枠 使い切り（' + ufResetJst() + 'まで）')
       : blocked
-      ? (_kid ? _kidTxt + '｜⛔ 本体の枠 断られ中'
+      ? (_kid ? '⛔ 本体は断られ中・2台目 残り' + (100 - _kidPct) + '%'
               : '⛔ Shopee枠 断られ中（' + Math.max(1, Math.round(blockedAgo / 60000)) + '分前）')
       : _kid
-      ? (_kidTxt + '｜' + (mark || '') + '本体 残り' + (100 - pct) + '%')
+      ? ((mark || '') + 'Shopee枠 ' + _kidTxt)
       // ★『残り15,710 / 20,000』は【15,710使った】に読める（本人指摘 2026-08-23「XX / XX使っているように見える」）。
       //   分数に見える書き方をやめ、残りの数だけを大きく出す。合計と内訳は吹き出しに置く。
       : (mark + 'Shopee枠 残り' + (100 - pct) + '%' + (ufLeftListings(r) == null ? '' : '・あと約' + ufLeftListings(r).toLocaleString() + '件'));
@@ -7064,10 +7116,14 @@
     [/^この (\d+)件だけ表示する$/, 'Show only these $1'],
     [/^⚖ 段階が未確定のキャンセル (\d+)件（確定するまで損失0円で計算しています）$/,
       '⚖ $1 cancellation(s) have no stage set (counted as zero loss until you decide)'],
-    /* ★2026-09-22 2台目のGoogleアカウントで🤖を動かすようにしたので、枠の表示が2つになった */
-    [/^🤖出品 残り約([\d,]+)件（2台目）｜⛔ 本体の枠 使い切り（(.+)まで・注文\/入金\/発送）$/, '🤖 listing: approx. $1 left (2nd account) | ⛔ main quota used up (until $2 \u00b7 orders/payouts/shipping)'],
-    [/^🤖出品 残り約([\d,]+)件（2台目）｜⛔ 本体の枠 断られ中$/, '🤖 listing: approx. $1 left (2nd account) | ⛔ main quota refused'],
-    [/^🤖出品 残り約([\d,]+)件（2台目）｜([\u26a0\u26d4]?)本体 残り(\d+)%$/, '🤖 listing: approx. $1 left (2nd account) | $2main $3% left'],
+    /* ★2026-09-22 Googleアカウントが2つ＝枠も2つ。どちらがどれだけ残っているかを出す */
+    [/^⛔ 本体は使い切り・2台目 残り(\d+)%（(.+)に戻ります）$/, '⛔ main used up \u00b7 2nd account $1% left (back at $2)'],
+    [/^⛔ 本体は断られ中・2台目 残り(\d+)%$/, '⛔ main refused \u00b7 2nd account $1% left'],
+    [/^([\u26a0\u26d4]?)Shopee枠 本体 (\d+)%・2台目 (\d+)% 残り$/, '$1Shopee quota \u00b7 main $2% \u00b7 2nd $3% left'],
+    ['Googleアカウントごとの残り', 'Left on each Google account'],
+    ['🤖出品の担当', 'runs 🤖 listing'],
+    ['⛔ 使い切り', '⛔ used up'],
+    ['状態を取れませんでした', 'Could not read status'],
     [/^在庫は0以上の数字だけです。「(.+)」は使えません。$/, 'Stock must be a whole number of 0 or more. "$1" is not valid.'],
     [/^在庫は0以上の数字だけです（(.+) は使えません）$/, 'Stock must be a whole number of 0 or more ($1 is not valid)'],
     [/^・(\d+)番「(.+)」$/, '・#$1 "$2"'],
@@ -18427,6 +18483,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F4F7} <b>写真の差し替えを1つの小窓にまとめました</b>（本人「直接アップロードもできるようにファイル選んで」「どの写真に差し替わるかっていうのも示してほしい」）。📷 を押すと<b>いまの写真</b>と、<b>🤖が集めた候補の写真が並んで出ます</b>。押すとその写真に差し替わる＝<b>何に変わるか見てから決められます</b>。あわせて <b>画像URL</b> と <b>📁 PCのファイルを選ぶ</b> も同じ小窓に置きました（前は先にURLの入力枠が出て、空欄にしないとファイルを選べませんでした）。',
       '\u{1F5D1} <b>出品ログから明細を消せるようにしました</b>（本人「ここから明細削除もできるようにしてください」）。📷 の小窓の下にあります。<b>守り</b>を3つ付けています：①<b>販売実績のある明細は消しません</b>（売れ行きの記録が切れるため）②<b>一番下かどうかを必ず表示</b>します③一番下でない時は「後ろが1つずつ繰り上がる／<b>2026-09-13 の実測で繰り上げた明細の価格が移らない不具合が残っている</b>」と赤字で出し、消した後にも確認をうながします。<b>カタログ（商品）そのものはこの画面からは消せません</b>（soldといいねが積み上がった資産のため）。',
       '\u{26A0}\u{FE0F} <b>「どれも当てはまりませんでした」の意味をはっきり書きました</b>（本人「まだおかしいのが残っていたりすることってあるんでしょうか？」）。<b>あります。</b> ⚠️ の選別は<b>写真の中身を見ていません</b>（無料で照合できる4つだけ）。カタログ画像・箱付き・別の機種などは <b>🔍</b> を押してAIが見ないと分かりません。その旨を画面にそのまま出すようにしました。',
+      '\u{1F4CA} <b>接続枠を「Googleアカウントごと」に見えるようにしました</b>（本人「どっちが埋まっててどっちが空いているか、どのくらい残っているかが分かるように」）。枠は<b>アカウントごとに2万回</b>あるので、1つの数字にまとめると、ほかのGAS（メルカリ取込）の分まで混ざって誤解します。→ 上のバーは <b>「本体◯%・2台目◯% 残り」</b>、押すと出る内訳に <b>アカウントごとのカード</b>（残り回数・使用%・棒グラフ・⛔使い切り・🤖出品の担当）と <b>合計の残り</b>を出します。片方が使い切っても、もう片方が生きていれば操作は通ります。',
       '\u{1F50C} <b>接続枠の表示を「出品の枠」と「業務の枠」に分けました</b>（本人「2個目のGoogleアカウントでやったから、どう表示すればいいんでしょうか？」）。2台目のGoogleアカウントで🤖を動かすようにしたので、<b>枠は2つあります</b>。1つにまとめると「本体が使い切り＝出品も止まった」と読めてしまい、実際とちがいます（今日 9:02 に本体は使い切りましたが、<b>🤖の出品は2台目で動き続けました</b>）。→ 担当が2台目の時は <b>「🤖出品 残り約◯件（2台目）｜本体 残り◯%」</b>、本体が使い切りなら <b>「｜⛔ 本体の枠 使い切り（16:00まで・注文/入金/発送）」</b> と併記します。',
       '\u{1F422} <b>接続枠に自動ブレーキを入れました</b>（本人「Shopee枠は必ず余裕を残して。毎日絶対に、あの機能が止まるぐらい使わないで」）。出すペースを上げたので、<b>枠の減り方に応じて自分で細くなる</b>ようにしました。停止線（15,000回）に対して<b>50%で半分・70%で4分の1・85%で最小</b>まで、①🤖の1回の作品数 ②写真集めの間隔 の両方を自動で絞ります（85%で写真集めは<b>いったん止まります</b>）。今までは「上げたペースが枠を食い潰す」のを人が気づくしかありませんでした。絞った時は🤖の記録に <b>🐢</b> で残ります。',
       '\u{1F4CF} <b>出品ログのカードを、切らずに最後まで出すようにしました</b>（本人「どのカタログに出したかパッと見わからない」「カタログ名が長い時もその最後まで」「明細も最後まで」）。明細名は2行で切っていたのを<b>全文</b>に、カタログ名は1行で「…」にしていたのを<b>折り返して全文</b>にしました。',
