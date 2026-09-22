@@ -1425,16 +1425,27 @@ function ensureToken_(shopId) {
   }
   /* ④ 誰も更新していない＝自分が更新する。自分の枠が死んでいたらやらない（相方に任せる） */
   if (ufDead_()) throw new Error('接続枠が尽きているので更新できません shop_id=' + shopId + '（もう一方のアカウントが更新します）');
-  var rt = (tok && tok.refresh_token) || null;
-  if (!rt && sh) { for (var j = 0; j < sh.length; j++) if (String(sh[j].shop_id) === String(shopId)) rt = sh[j].refresh_token; }
-  if (!rt) throw new Error('未認可 shop_id=' + shopId);
+  /* ★2026-09-22 refresh_token は【新しい方】から試す。本体の枠が切れている間に子機が更新すると、
+     本体の手元には古い（もう無効な）refresh_token が残る。前は手元を優先していたので、16時に本体が生き返って
+     共有の場所を通らないまま期限を迎えると、無効な方で更新して失敗していた。
+     新しさは expire_at で比べる（更新すると必ず先へ進む）。1本目が断られたらもう1本も試す。 */
+  var rts = [];
+  if (tok && tok.refresh_token) rts.push({ rt: tok.refresh_token, exp: Number(tok.expire_at) || 0, from: '手元' });
+  if (sh) { for (var j = 0; j < sh.length; j++) if (String(sh[j].shop_id) === String(shopId) && sh[j].refresh_token && !(tok && sh[j].refresh_token === tok.refresh_token)) rts.push({ rt: sh[j].refresh_token, exp: Number(sh[j].expire_at) || 0, from: '共有' }); }
+  rts.sort(function (a, b) { return b.exp - a.exp; });
+  if (!rts.length) throw new Error('未認可 shop_id=' + shopId);
   if (!tokClaim_(shopId)) {   /* 相方が更新中＝少し待って共有を読み直す */
     Utilities.sleep(4000);
     var sh2 = tokSharedLoad_() || [];
     for (var k2 = 0; k2 < sh2.length; k2++) if (String(sh2[k2].shop_id) === String(shopId) && sh2[k2].expire_at > now_()) return sh2[k2];
     throw new Error('トークン更新の取り札が取れませんでした shop_id=' + shopId);
   }
-  var r = refreshOne_(rt, { shop_id: shopId, merchant_id: (tok && tok.merchant_id) || null });
+  var r = null, rErr = null;
+  for (var ri = 0; ri < rts.length && !r; ri++) {
+    try { r = refreshOne_(rts[ri].rt, { shop_id: shopId, merchant_id: (tok && tok.merchant_id) || null }); }
+    catch (eRf) { rErr = eRf; Logger.log('refresh_token（' + rts[ri].from + '）で更新できず shop_id=' + shopId + ': ' + String(eRf).slice(0, 120)); }
+  }
+  if (!r) throw rErr || new Error('トークン更新に失敗 shop_id=' + shopId);
   var nt = tok || { shop_id: shopId };
   nt.access_token = r.access; nt.refresh_token = r.refresh; nt.expire_at = r.expire;
   if (!isChild_()) saveToken_(nt);
