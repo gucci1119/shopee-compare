@@ -2262,11 +2262,29 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
   // ③ 価格・在庫をまとめて登録。失敗したら足したオプションを巻き戻す（空の明細を残さない）
   if (jobKey) jobSet_(jobKey, { pct: 80, step: '価格・在庫を登録中 ' + newModels.length + '件' });
+  /* ★2026-09-22 BRだけ add_model が「Model tier_index error」で落ちる（21件・全部BR・他の国は0件）。
+     オプションを足した直後はまだ反映されていない形。すぐ巻き戻さず、待って読み直し→反映を確かめてから送り直す。
+     失敗した時だけ通信が増える（成功時は今までどおり）。結果は tierRetry に残してログで裏を取る。 */
+  var tierRetry = '';
   try {
     addModel_(shopId, itemId, newModels);
   } catch (eAdd) {
-    try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
-    throw eAdd;
+    var eMsg = String((eAdd && eAdd.message) || eAdd), okRetry = false;
+    if (/tier_index/i.test(eMsg)) {
+      for (var rt = 1; rt <= 2 && !okRetry; rt++) {
+        Utilities.sleep(3000 * rt);
+        var seen = -1;
+        try { var jr = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get'); seen = ((((jr.response || {}).tier_variation || [])[0] || {}).option_list || []).length; } catch (eR) {}
+        tierRetry += (tierRetry ? ' / ' : '') + rt + '回目 待ち' + (3 * rt) + '秒 枠' + seen + '/' + optObjs.length;
+        if (seen >= 0 && seen < optObjs.length) { try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap); tierRetry += ' 枠を入れ直し'; } catch (eU) { tierRetry += ' 入れ直し失敗'; } continue; }
+        try { addModel_(shopId, itemId, newModels); okRetry = true; tierRetry += ' →成功'; } catch (eAdd2) { eMsg = String((eAdd2 && eAdd2.message) || eAdd2); tierRetry += ' →失敗'; }
+      }
+    }
+    if (!okRetry) {
+      try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
+      throw new Error(eMsg + (tierRetry ? '（再送: ' + tierRetry + '）' : ''));
+    }
+    Logger.log('add_model 再送で成功: ' + tierRetry);
   }
   // ④ ★仕上げに必ず突き合わせる：明細の枠（option）と中身（model）の数が合っているか。
   //   合っていない＝「枠だけの明細」ができている状態で、Shopee側では価格・重量が空の行になり
