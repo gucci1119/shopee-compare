@@ -4401,6 +4401,10 @@
     "（上から順に対象になります。ヤフオクで中古の写真が見つからないものは飛ばされます）": "(processed top-down; titles without a used photo on Yahoo Auctions are skipped)",
     "（上から順に対象になります。順番＝他国で売れた作品→メルカリ写真あり→駿河屋にある→JANあり。出す直前にAIが「同じ作品か／実物の写真か／題名・機種が合うか／海外版でないか」を見て、通ったものだけ出します（最大4枚まで試す）。実物の写真が見つからないものは出しません）": "(processed top-down. Order = sold in another country → Mercari photo collected → in stock at Suruga-ya → has JAN. The AI check that the photo shows the real item runs only on the one photo used, right before listing (GAS script property CLAUDE_KEY; skipped if absent). Titles without a real-item photo are not listed)",
     "⚪ 止まっています（OFF）": "⚪ Stopped (OFF)",
+    "国ごとの件数": "Count by country",
+    "国ごとの列": "Columns by country",
+    "まとめて並べる": "All in one grid",
+    "🤖自動出品": "🤖 Auto-listed",
     "🔋 電池あり": "🔋 Has battery",
     "電池ありだけ": "battery items only",
     "ELI（リチウム電池貨物）の情報提出": "ELI (lithium battery cargo) information request",
@@ -18514,6 +18518,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🚚 <b>「倉庫へ発送済」が画面に出ない注文があった不具合を直しました</b>（本人「発送済みにしたのに更新されない」）。印の付いた注文が <b>1,034件</b> になり、1回で読める1,000件を超えて <b>34件が反映されていませんでした</b>。全件を読むようにしました',
       '🔑 <b>16時に本体の枠が戻った後も、Shopeeの認証が切れないようにしました</b>。本体の枠が切れている間は2台目がトークンを更新するので、本体の手元には<b>もう使えない古いもの</b>が残ります。前は手元を優先して使う作りで、古い方で更新して失敗する形がありました。<b>新しい方から試し、断られたらもう一方も試す</b>ようにしました',
       '📷 <b>🤖で写真が全部NGだった作品を、写真集めが<u>別の写真で</u>集め直すようにしました</b>。前は写真が「ある」扱いのまま残るので二度と探しに行かず、🤖はヤフオク（弾かれて休み中）待ちで止まっていました（今日の見送りの最多＝ヤフオク待ち）。NGになった写真は二度と選びません。集め直しは1作品3回まで、その後3日は休みます',
+      '🗂 <b>出品ログを「国ごとの列」で見られるようにしました</b>（本人「縦列で国ごとに分けて、その下に並べるような感じで」「国ごとに何品出品したとかも見れるようにしたい」）。列の頭に <b>国名と件数</b>、上に <b>国ごとの件数の一覧</b>。右上のボタンで前の「まとめて並べる」にも戻せます（端末ごとに覚えます）',
       '⬆️ <b>Bump（上位表示）を公式APIで自動にしました</b>（本人「作って」）。外部ツール <code>tool</code> は10分ごとに見に行って1日 約1万1,500回を使っていましたが、Bumpは1店4時間に5商品までなので、<b>空きが出る時刻までは通信しない</b>作りにしました（1日 約150回）。押し上げるのは<b>公開中・在庫ありの商品を、売れた数→いいね→閲覧の順</b>に。同じ商品は12時間あけて順番に回します。7/18は「権限なし」でしたが、今日13店とも使えることを確かめました',
       '🤖 <b>注文管理で「🤖自動出品」で出した商品が売れたら印が出るようにしました</b>（本人「自動出品したやつが売れた時は、何か分かるようにしてほしい」）。明細名の横に紫の <b>🤖自動出品</b> が付きます。なお9/22時点で、直近30日の注文432件のうち🤖の明細は0件でした（本格的に出し始めて4〜5日）',
       '🔀 <b>本体と2台目の分担を直しました</b>（本人「1台目と2台目で同じ作業を無駄にやってたりしてない？」「分担分けなどもちゃんと設計して」「設計ミスとかがないか見直して」）。見直して見つけたのは2つ：①<b>返品の同期と毎朝の調整確認が、本体と2台目の両方で動いていた</b>（二重）②分担が「先に手を挙げた方がやる」だけで、<b>2台目が注文・入金などの業務をかなり取っていた</b>＝出品に回す2台目の枠が先に減っていた。→ <b>業務は本体・出品は2台目</b>。本体が枠切れで止まった時だけ2台目が業務を代わり、本体が戻れば本体へ戻ります',
@@ -31723,6 +31728,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     });
     const selRows = (logState.hw ? selAll.filter(r => (r._hw || '—') === logState.hw) : selAll);
     const ccColor = (cc) => (regionByCc(cc) || {}).color || '#888';
+    /* ★2026-09-22 本人「縦列で国ごとに分けて、その下に並べるような感じで表示できたりしますかね？」「国ごとに何品出品したとかも見れるようにしたい」
+       既定は【国ごとの列】（列の頭に件数）。前の「まとめて並べる」にも切り替えられる（端末に覚える）。
+       2つの軸（国×明細）は最初から表で＝[[portal-matrix-not-vertical-list]]。国の並びは REGIONS の順で固定。 */
+    if (!logState.layout) { try { logState.layout = localStorage.getItem('llogLayout') || 'cc'; } catch (_) { logState.layout = 'cc'; } }
+    const llogByCc = (pairs) => {
+      const cnt = {}; pairs.forEach(p => { cnt[p[0]] = (cnt[p[0]] || 0) + 1; });
+      const order = REGIONS.map(x => x.cc).filter(cc => cnt[cc]).concat(Object.keys(cnt).filter(cc => !REGIONS.some(x => x.cc === cc)));
+      const on = (l) => logState.layout === l ? 'background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700' : '';
+      const head = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:7px"><b style="font-size:12px">国ごとの件数</b>`
+        + order.map(cc => `<span style="font-size:11.5px;border:1px solid #e3e6ea;border-radius:12px;padding:2px 9px;background:#fff"><b style="color:${ccColor(cc)}">${esc(cc)}</b> ${pairs.length ? cnt[cc] : 0}件</span>`).join('')
+        + `<span style="margin-left:auto;display:inline-flex;gap:4px"><button class="smd-btn llog-layout" data-l="cc" style="font-size:11px;${on('cc')}">国ごとの列</button><button class="smd-btn llog-layout" data-l="grid" style="font-size:11px;${on('grid')}">まとめて並べる</button></span></div>`;
+      if (logState.layout === 'grid' || order.length <= 1) return head + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:7px">${pairs.map(p => p[1]).join('')}</div>`;
+      return head + `<div style="display:grid;grid-template-columns:repeat(${order.length},minmax(210px,1fr));gap:8px;margin-top:7px;overflow-x:auto;align-items:start">`
+        + order.map(cc => `<div style="display:flex;flex-direction:column;gap:8px;min-width:210px"><div style="position:sticky;top:0;z-index:3;background:#fff;border-bottom:3px solid ${ccColor(cc)};padding:4px 6px;font-weight:800;color:${ccColor(cc)};font-size:13px">${esc(cc)} <span style="color:#333;font-weight:700">${cnt[cc]}件</span></div>${pairs.filter(p => p[0] === cc).map(p => p[1]).join('')}</div>`).join('')
+        + `</div>`;
+    };
     // 目盛りを打つ日を先に決める（等間隔・最後は必ず今日）。
     // 隣り合う目盛りが近すぎると数字が重なるので、間隔の半分より近いものは捨てる。
     // ★本数は画面の幅で決める（1本あたり約34px）。以前は最大9本の決め打ちで、広い画面の30日表示でも 8/21・8/29・9/6… しか出ず
@@ -31813,8 +31834,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           <button class="smd-btn" id="llog-imgdup" style="font-size:11.5px;border-color:#a0522d;color:#a0522d" title="同じ写真が2つ以上の明細に付いているものを【全出品】から出します（Shopeeは叩きません）">🖼 同じ写真が付いている明細</button>
           <span class="smd-dim" id="llog-bulkmsg" style="font-size:11px"></span>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:7px">
-          ${selRows.map(r => `<div style="position:relative;border:1px solid #ececec;border-radius:8px;padding:7px;display:flex;gap:7px;background:#fff">
+        ${llogByCc(selRows.map(r => [r.cc, `<div style="position:relative;border:1px solid #ececec;border-radius:8px;padding:7px;display:flex;gap:7px;background:#fff">
             <input type="checkbox" class="llog-ck" data-cc="${av(r.cc)}" data-item="${av(r.item_id)}" data-opt="${av(r.model_name || '')}" title="まとめて見直す対象に入れる" style="position:absolute;left:3px;top:3px;z-index:2;cursor:pointer">
             ${(() => { /* ★2026-09-21 本人「差し替えた後の画像も見れれば」：listing_log の image は【記録した時の画像】なので、
                  写真を差し替えても古いまま出ていた。いまの出品データ（listings.models[].img）があればそちらを出す。
@@ -31866,7 +31886,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 if (!jan) return `<span style="display:block;font-size:9.5px;color:#bbb">JAN —${mpn ? ' ／ 型番 ' + esc(mpn) : ''}</span>`;
                 return `<span style="display:block;font-size:9.5px;color:#1e8e3e;font-weight:700"><span class="llog-jan" data-j="${av(jan)}" title="押すとコピーします" style="cursor:pointer;text-decoration:underline dotted">JAN ${esc(jan)}</span>${mpn ? ` <span style="color:#8a8f98;font-weight:400">／ 型番 ${esc(mpn)}</span>` : ''}</span>`;
               })()}
-            </span></div>`).join('')}</div>`
+            </span></div>`]))}`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
       </div>`;
     host.querySelectorAll('.llog-jan').forEach(e => e.addEventListener('click', () => { try { navigator.clipboard.writeText(e.dataset.j); toast('JAN ' + e.dataset.j + ' をコピーしました'); } catch (_) {} }));
@@ -31933,6 +31953,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         });
       };
       { const a = host.querySelector('#llog-see'); if (a) a.addEventListener('click', llogSeeOpen); }
+      host.querySelectorAll('.llog-layout').forEach(b => b.addEventListener('click', () => { logState.layout = b.dataset.l; try { localStorage.setItem('llogLayout', b.dataset.l); } catch (_) {} renderListingLog(); }));
       { const a = host.querySelector('#llog-ckall'); if (a) a.addEventListener('click', () => { const cks = host.querySelectorAll('.llog-ck'); const on = ![...cks].every(c => c.checked); cks.forEach(c => { c.checked = on; }); bmsg(on ? cks.length + '件えらびました' : ''); }); }
       /* ★2026-09-21 本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」「選出基準は今まで私が何回も言ってる基準で」
          AIを使わずに分かる分（＝無料）をここで選ぶ：
