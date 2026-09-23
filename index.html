@@ -1869,13 +1869,17 @@
      → 返事の child フラグで保存先を分ける（本体＝smdAiSpendGas／2台目＝smdAiSpendGasChild）。 */
   function aiSpendSaveFrom(o) {
     if (!o || !o.aiSpend || !o.aiSpend.days) return;
-    localStorage.setItem(o.child ? 'smdAiSpendGasChild' : 'smdAiSpendGas', JSON.stringify(o.aiSpend));
+    /* ★2026-09-23 Codex指摘：2台目と3台目はどちらも child=true なので、保存先が1つだと後から返った方だけが残っていた。担当ID（runner）ごとに分けて保存し、表示は全部足す */
+    const rid = String(o.runner || (o.child ? 'child' : 'main'));
+    localStorage.setItem('smdAiSpendGas_' + rid, JSON.stringify(o.aiSpend));
+    try { localStorage.removeItem(o.child ? 'smdAiSpendGasChild' : 'smdAiSpendGas'); } catch (_) {}   /* 旧キーは同じ分の二重計上になるので消す */
     try { aiCostDraw(); } catch (_) {}
   }
+  function aiSpendRunnerDays() { const out = []; try { Object.keys(localStorage).forEach(k => { if (k.indexOf('smdAiSpendGas_') === 0) { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); if (v && v.days) out.push(v.days); } catch (_) {} } }); } catch (_) {} return out; }
   function aiSpendDays() {
     const out = {};
     const add = (days) => Object.keys(days || {}).forEach(day => { const o = out[day] = out[day] || {}; Object.keys(days[day]).forEach(k => { const t = days[day][k]; const p = o[k] = o[k] || { in: 0, out: 0, search: 0, n: 0 }; p.in += (t.in || 0); p.out += (t.out || 0); p.search += (t.search || 0); p.n += (t.n || 0); }); });
-    add((aiSpendLoad() || {}).days); add((aiSpendGasLoad() || {}).days); add((aiSpendChildLoad() || {}).days);
+    add((aiSpendLoad() || {}).days); add((aiSpendGasLoad() || {}).days); add((aiSpendChildLoad() || {}).days); aiSpendRunnerDays().forEach(add);   /* ★担当IDごとの分も足す（2026-09-23） */
     return out;
   }
   function aiSpendAdd(kind, usage) {
@@ -2427,8 +2431,10 @@
               ufMarkBlocked(base, lastErr);
               /* ★相方が生きていれば、そちらへ自動で投げ直す（本人の操作を止めない）。
                  書き込み系も投げ直してよい：枠切れ＝Shopeeには1回も届いていないので二重実行にならない。 */
-              const alt = gasPeerUrl(base);
-              if (alt && !ufUrlBlocked(alt)) {
+              /* ★2026-09-23 Codex指摘：2台目も枯れていた時に3台目へ回さず終わっていた → 枯れていない相方がある限り順に試す（最大3つ） */
+              for (let hop = 0; hop < 3; hop++) {
+                const alt = gasPeerUrl(base);
+                if (!alt || ufUrlBlocked(alt)) break;
                 try { toast('⛔ こちらの接続枠が尽きたので、もう1つのGoogleアカウントでやり直します', 4000); } catch (_) {}
                 const q2 = Object.assign({}, params, { callback: 'cb' });
                 const qs2 = Object.keys(q2).filter(k => q2[k] != null && q2[k] !== '').map(k => k + '=' + encodeURIComponent(q2[k])).join('&');
@@ -2436,8 +2442,10 @@
                 const r2 = await fetch(u2, { credentials: 'omit' });
                 const t2 = await r2.text();
                 const m2 = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t2);
-                if (m2) { const res2 = JSON.parse(m2[1]); if (res2 && res2.ok) { ufQuotaDraw(); return res2; }
-                  if (res2 && /1\s*日に|for one day/i.test(String(res2.error || ''))) ufMarkBlocked(alt, res2.error); }
+                if (!m2) break;
+                const res2 = JSON.parse(m2[1]); if (res2 && res2.ok) { ufQuotaDraw(); return res2; }
+                if (res2 && /1\s*日に|for one day/i.test(String(res2.error || ''))) { ufMarkBlocked(alt, res2.error); continue; }
+                break;
               }
             }
             ufQuotaDraw(); } catch (_) {} }
@@ -6290,6 +6298,7 @@
     "✍️出品を作る": "✍️ Create a listing",
     "1日の目標": "Daily target",
     "店 読み込み中…": "Shop loading…",
+    "理由を<br>読めませんでした": "Could not load<br>the reason",
     "店 —": "Shop —",
     "先頭に足す": "Add to the front",
     "末尾に足す": "Add to the end",
@@ -18559,6 +18568,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🔍 <b>Codexレビュー（3日分の差分）で見つかった穴を直しました</b>（本人「最後に Codex にもレビューさせてほしい」）。ポータル側：①学習・手動NG・写真の見直しの記録を<b>読めなかった時に空で上書きしない</b>（読めなかったら保存しない）②2台のPCで同時に学習を保存しても片方が消えないよう、書く直前に読み直して重ねる③写真NGの集め直しが呼び出し元で先に落とされて一度も動いていなかったのを直す④写真集めの85%ブレーキが翌日のリセット後も止まったままだったのを直す⑤2台目・3台目のAI利用料が上書きし合っていたのを担当ごとに保存⑥🤖の今日の件数の基準日を「今日」に⑦空きマスの理由を読めなかった時に「まだ出していません」と言わない⑧明細名の取得失敗を読み込み済みにしない（3回読み直す）⑨一括判定の末尾が読めない時も直前までの結果を保存⑩日本語パッケージを英語の明細名と比べて別作品にしない⑪日本語題の無い作品の数字照合⑫本体と2台目が枯れた時に3台目まで順に試す。GAS側は別途（取り札の一意制約化・店ごとのトークン共有・枠カウンタの保存失敗時の控え・Bumpの通信計上ほか）',
       '🏪 <b>出品ログのカードに「どの店（アカウント）に出したか」を出しました</b>（本人「これどのアカウントに出したかもわかれば嬉しい」）。1店舗目の枠が埋まると🤖は2店舗目に出すので、カードごとに店名（注文画面の 🏪 と同じ・gcsonlinestore 系は青／もう一方は紫）が出ます',
       '🎮 <b>Switchの写真を優先して集めるようにしました</b>（本人「switchの割合を増やして」）。🤖は写真が揃った作品からしか出せず、写真集めは17機種を順番に回していた＝Switch は17回に1回しか写真が増えませんでした。<b>毎回の先頭の1枠を Switch に使い</b>、残り4枠で他の機種を回します（Switch に探す作品が無ければ普段の順番に戻す）。あわせてGAS側で、<b>作れない国は6時間外す</b>（同じ20作品の空回り止め）・<b>台湾の必須項目「成人向けか」を埋めて作り直す</b>を入れました',
       '📈 <b>【不具合】売上・注文数の推移で、棒の上の数字（売上／オーダー数／商品数）が出なくなっていたのを戻しました</b>（本人「売上、オーダー数、商品数が表示されなくなった」）。9/21の「情報量を減らす」対応で、本数が多いとき（日足30本など）<b>最大の日と最新だけ</b>にしていたのが行きすぎでした。<b>値は全部出す</b>に戻し、9/21の狙い（灰色の「0」が並ぶ・数字が数字を邪魔する）は<b>0の日は出さない＋最大の日と最新だけ濃い字</b>にすることで両立させています',
@@ -28723,12 +28733,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (o.product_photo && wantTitle && String(o.title_seen || '').trim()) {
         const nz = (t) => String(t || '').toLowerCase().replace(/^[a-z0-9]{1,8}\s*[-:：\/]\s*/, '').replace(/[^a-z0-9ぁ-んァ-ヶ一-龠ー]+/g, '');
         const a2 = nz(wantTitle), b2 = nz(o.title_seen);
-        if (a2 && b2 && a2.indexOf(b2) < 0 && b2.indexOf(a2) < 0) return { ok: false, kind: 'wrongtitle', judged: true, seen: String(o.title_seen).slice(0, 60) };
+        const _cjk = (t) => /[ぁ-んァ-ヶ一-龠]/.test(t);   /* ★2026-09-23 Codex指摘：日本語のパッケージを英語の明細名と比べて「別作品」にしていた。文字の種類が違う時は照合しない（読めない扱い） */
+        if (a2 && b2 && _cjk(a2) === _cjk(b2) && a2.indexOf(b2) < 0 && b2.indexOf(a2) < 0) return { ok: false, kind: 'wrongtitle', judged: true, seen: String(o.title_seen).slice(0, 60) };
       }
       return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
   }
-  async function baKvGetRaw(k) { try { const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (_) { return null; } }
+  /* ★2026-09-23 Codex指摘：読めなかった（通信失敗）と、鍵が無い（null）を分ける。読めなかった時に {} として書き戻すと、
+     photo_learn・手動NG・写真の見直しの記録が【今回の分だけ】に上書きされて消える。失敗＝undefined を返し、書き手は書かない。 */
+  async function baKvGetRaw(k) { try { const r = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); return (r && r[0] && r[0].v) || null; } catch (_) { return undefined; } }
+  /* 読んで→足して→書く所で使う。読めなかった時は【書かずに止める】（例外で抜ける・画面には知らせる） */
+  const baKvMust = (v, what) => { if (v === undefined) { try { toast('⚠️ ' + (what || '記録') + 'を読めなかったので、今回は保存していません（通信を確かめてもう一度）'); } catch (_) {} throw new Error('app_kv read failed: ' + (what || '')); } return v; };
   /* ★2026-09-23 🤖を2か所（2台目・3台目）で回すため、3台目以降は boshu_auto_status_<担当> に書く（GAS BA_ST）。
      表示用の読み込みだけ【合算】する。★書き戻す所では使わない（合算した中身を 'boshu_auto_status' に書くと3台目の記録が二重になる）→ baKvGetRaw */
   function baStMerge(list) {
@@ -28739,7 +28754,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     base.log = [].concat(...xs.map(x => x.log || [])).sort(byAt).slice(0, 240);
     base.skipped = [].concat(...xs.map(x => x.skipped || [])).sort(byAt).slice(0, 600);
     base.pendingPublish = [].concat(...xs.map(x => x.pendingPublish || []));
-    const d0 = (xs[0].today || {}).d; const t = { d: d0, n: 0, added: 0, aiText: 0, judged: 0 };
+    const d0 = jstDate(Date.now()); const t = { d: d0, n: 0, added: 0, aiText: 0, judged: 0 };   /* ★2026-09-23 Codex指摘：先頭の担当が昨日のままだと今日の実績が消えていた → 基準日は今日（JST） */
     xs.forEach(x => { const q = x.today || {}; if (q.d === d0) ['n', 'added', 'aiText', 'judged'].forEach(f => { t[f] += Number(q[f]) || 0; }); });
     base.today = t;
     base.brake = xs.map(x => x.brake).find(Boolean) || null;
@@ -28774,8 +28789,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
   async function learnPut(recs) {
     /* 足すだけ（他の書き手の分を消さない）。人のNGは 🤖 の手動判定にも写す */
-    const cur = (await baKvGet('photo_learn')) || {}; cur.items = cur.items || {}; cur.rules = cur.rules || { extra: [] }; cur.rules.extra = cur.rules.extra || [];
-    const man = Object.assign({}, (await baKvGet('boshu_auto_judged_manual')) || {});
+    const cur = baKvMust(await baKvGet('photo_learn'), '学習の記録') || {}; cur.items = cur.items || {}; cur.rules = cur.rules || { extra: [] }; cur.rules.extra = cur.rules.extra || [];
+    const man = Object.assign({}, baKvMust(await baKvGet('boshu_auto_judged_manual'), '手動の判定') || {});
     let manChanged = false;
     (recs || []).forEach(r => {
       if (!r || !r.img) return;
@@ -28783,8 +28798,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       cur.items[k] = Object.assign({ at: new Date().toISOString(), by: 'human' }, cur.items[k] || {}, r, { at: new Date().toISOString() });
       if (r.v === 'ng' && r.hw && r.title) { const mk = learnKeyOf(r.img, r.hw, r.title); if (man[mk] !== 'ng:manual') { man[mk] = 'ng:manual'; manChanged = true; } }
     });
+    /* ★2026-09-23 Codex指摘：2台のPCが同じ古い値を読んで丸ごと書くと、片方の記録が消える。書く直前に読み直して【新しい値に自分の分を重ねる】 */
+    try { const fr = await baKvGetRaw('photo_learn'); if (fr && fr.items) { const mine = cur.items; cur.items = Object.assign({}, fr.items, mine); if (fr.rules && fr.rules.extra && fr.rules.extra.length > (cur.rules.extra || []).length) cur.rules.extra = fr.rules.extra; } } catch (_) {}
+    let manOut = man;
+    try { if (manChanged) { const fm = await baKvGetRaw('boshu_auto_judged_manual'); if (fm) manOut = Object.assign({}, fm, man); } } catch (_) {}
     const rows = [{ k: 'photo_learn', v: cur, updated_at: new Date().toISOString() }];
-    if (manChanged) rows.push({ k: 'boshu_auto_judged_manual', v: man, updated_at: new Date().toISOString() });
+    if (manChanged) rows.push({ k: 'boshu_auto_judged_manual', v: manOut, updated_at: new Date().toISOString() });
     await sbUpsert('app_kv', rows);
     _baLearn = cur; return cur;
   }
@@ -28836,7 +28855,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const ngOk = (name, ja, en) => { const hit = String(name || '').match(NG_G); if (!hit) return true;
       const want = (String(ja || '') + ' ' + String(en || '')).normalize('NFKC').toLowerCase();
       return hit.every(w => want.indexOf(String(w).normalize('NFKC').toLowerCase()) >= 0); };
-    const matchOk = (name, core, ja, en) => { const raw = String(name || '').normalize('NFKC').toLowerCase(); const t = raw.replace(/\s+/g, ''); if (!ngOk(name, ja, en)) return false; if (!platOk(raw)) return false; if (!(core.length && core.every(c => hasCore(t, c)))) return false; const qn = numsOf(String(ja || '').normalize('NFKC').toLowerCase()); const ln = numsOf(raw); return !Object.keys(ln).some(k => !qn[k] && (/^v\d/.test(k) || !/^(1|2|3|4|64|100|200[0-8])$/.test(k))); };
+    const matchOk = (name, core, ja, en) => { const raw = String(name || '').normalize('NFKC').toLowerCase(); const t = raw.replace(/\s+/g, ''); if (!ngOk(name, ja, en)) return false; if (!platOk(raw)) return false; if (!(core.length && core.every(c => hasCore(t, c)))) return false; const qn = numsOf(String(ja || en || '').normalize('NFKC').toLowerCase());   /* ★2026-09-23 Codex指摘：日本語題が無い作品は英題の数字で照合（前は空＝英題の 7 等が余計な数字扱いで落ちていた） */ const ln = numsOf(raw); return !Object.keys(ln).some(k => !qn[k] && (/^v\d/.test(k) || !/^(1|2|3|4|64|100|200[0-8])$/.test(k))); };
     const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
     const toRec = (x) => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img, thumb: x.img, src: x.url, price: Number(x.price) || 0, name: String(x.name || '').slice(0, 80), cond: x.cond || '' }; };
     const max = Math.max(1, Number(opts.max) || 20);
@@ -28995,7 +29014,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
        2台目に移したのに本体の枠で止めると、2台目に余裕があるのに写真集めだけ止まり、
        せっかく分けた意味が無くなる（写真が来なければ出品も止まる）。
        2台目の数字は🤖の状態に同乗してくるので、下のブロックで拾って覚えておく。 */
-    try { const uf = ((settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : (window.__ufLast || {})); const pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || uf.stop || 15000);
+    try { let uf = ((settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : (window.__ufLast || {})); let pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || uf.stop || 15000);
+      /* ★2026-09-23 Codex指摘：85%で止めた後、この関数はここで戻るので写しが更新されず、翌日16時のリセット後も止まったままになる。写しが10分より古ければ読み直してから判断する */
+      if (pct >= 0.85 && (!uf.at || Date.now() - Date.parse(uf.at) > 10 * 60000)) {
+        try { const _s0 = await baKvGet('boshu_auto_status'); if (_s0 && _s0.uf && _s0.uf.child) { window.__ufChild = { used: _s0.uf.used, stopLine: _s0.uf.stop, at: _s0.uf.at }; if (settings.boshuRunner === 'child') { uf = window.__ufChild; pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || 15000); } } } catch (_) {}
+      }
       if (pct >= 0.85) { lst._baCollectMsg = '接続枠の85%を使ったので、写真集めを止めています'; return; }
       else if (pct >= 0.70) _cevery = BA_COLLECT_EVERY_MS * 4;
       else if (pct >= 0.50) _cevery = BA_COLLECT_EVERY_MS * 2;
@@ -29019,7 +29042,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* 2台目のAI利用料は🤖の状態に同乗してくる。ここでも拾って💴に足す
          （🤖の画面を開かないと料金が画面から消える、を防ぐ） */
       const _st = await baKvGet('boshu_auto_status');
-      if (_st && _st.uf && _st.uf.child && _st.uf.aiSpend && _st.uf.aiSpend.days) {
+      /* ★2026-09-23 合算した状態は先頭の担当の uf しか持たないので、担当ごと（runners）の分を全部保存する */
+      try { ((_st && _st.runners && _st.runners.length) ? _st.runners.map(r => r && r.uf) : [_st && _st.uf]).forEach(uf => { if (uf && uf.child && uf.aiSpend && uf.aiSpend.days && uf.runner) aiSpendSaveFrom({ child: true, runner: uf.runner, aiSpend: uf.aiSpend }); }); } catch (_) {}
+      if (_st && _st.uf && _st.uf.child && _st.uf.aiSpend && _st.uf.aiSpend.days && !_st.uf.runner) {
         localStorage.setItem('smdAiSpendGasChild', JSON.stringify(_st.uf.aiSpend)); try { aiCostDraw(); } catch (_) {}
       }
       if (_st && _st.uf && _st.uf.child) window.__ufChild = { used: _st.uf.used, stopLine: _st.uf.stop, at: _st.uf.at };
@@ -29060,7 +29085,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!r || !r.ok || !Array.isArray(r.rows)) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗'); continue; }
         const pre = (await baKvGet('boshu_auto_pre')) || {};
         // 見つからなかった作品は 3日は引き直さない（メルカリを無駄に叩かない）
-        const rows = r.rows.filter(x => x && x.key && !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000))));
+        /* ★2026-09-23 Codex指摘：写真があっても🤖で全部NGだった作品（prerej）は集め直しの対象なのに、ここで「写真あり」として先に落としていた＝集め直しが一度も動かない */
+        let _rj = {}; try { _rj = (await baKvGet('boshu_auto_prerej')) || {}; } catch (_) { _rj = {}; }
+        const _rejNow = (k) => { const rj = _rj[k], p0 = pre[k]; if (!(rj && p0 && p0.img && String(p0.img).replace(/\?.*$/, '') === String(rj.img || ''))) return false; if (p0.missAt && Date.parse(p0.missAt) > Date.parse(rj.at || 0) && Date.now() - Date.parse(p0.missAt) < 3 * 86400000) return false; if ((Number(rj.n) || 0) >= 3 && Date.now() - Date.parse(rj.at || 0) < 3 * 86400000) return false; return true; };
+        const rows = r.rows.filter(x => x && x.key && (_rejNow(x.key) || !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000)))));
         if (!rows.length) { msgs.push((TITLE_HW_JA[hw] || hw) + '：全部写真あり'); if (_isPrio) t--; continue; }   /* 優先の枠が空振りなら、その枠を普段の順番に回す */
         const c = await baCollectMercari(rows, hw, { max: 40 });
         msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : ''));
@@ -29108,7 +29136,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
        ⚠️ 読めなかった（cfg0 が null）時は触らない＝古い振り分けのまま（勝手に本体へ戻さない）。 */
     try { if (cfg0 && settings.boshuRunner !== (cfg0.runner === 'child' ? 'child' : 'main')) { settings.boshuRunner = (cfg0.runner === 'child' ? 'child' : 'main'); saveSettings(); } } catch (_) {}
     /* 2台目で動いた時の【その口座の接続枠】と【AIの利用料】を受け取る（🤖の状態に同乗＝通信は増えない） */
-    try { if (st && st.uf && st.uf.child && st.uf.aiSpend && st.uf.aiSpend.days) { localStorage.setItem('smdAiSpendGasChild', JSON.stringify(st.uf.aiSpend)); aiCostDraw(); } } catch (_) {}
+    try { ((st && st.runners && st.runners.length) ? st.runners.map(r => r && r.uf) : [st && st.uf]).forEach(uf => { if (uf && uf.child && uf.aiSpend && uf.aiSpend.days) aiSpendSaveFrom({ child: true, runner: uf.runner, aiSpend: uf.aiSpend }); }); } catch (_) {}   /* ★2026-09-23 担当ごとに保存（2台目と3台目が上書きし合っていた・Codex指摘） */
     const _baPre = pre0 || {};
     /* ★2026-09-20 本人「これやめて。何が悪いか分かる？」（中身を開けてディスクを並べた写真に ✓ AI OK）。一覧を作る GAS の /exec は古いバージョンのままで、古い基準の控えを「AI OK」と返していた
        （実際に出す時の判定は保存済みの最新の基準＝通らない）。→ 画面の判定は、いまの基準の控え（鍵に BA_JUDGE_VER が入ったもの）だけを見る。GAS baJudge_ の '|v9|' を上げたらここも上げる */
@@ -29491,7 +29519,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           if (!ks.length) { alert('直す明細を選んでください'); return; }
           if (!confirm(ks.length + '件の「代わり無し」の印を消します。次に写真を集める時に、もう一度さがしにいきます。よろしいですか？')) return;
           try {
-            const cur = (await baKvGet('boshu_auto_rephoto')) || { items: {} }; cur.items = cur.items || {};
+            const cur = baKvMust(await baKvGet('boshu_auto_rephoto'), '写真の見直しの記録') || { items: {} }; cur.items = cur.items || {};
             ks.forEach(k => { if (cur.items[k]) delete cur.items[k]; });
             await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]);
             _baRp = cur.items; toast('🔁 ' + ks.length + '件をさがし直します'); redraw();
@@ -31789,7 +31817,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       });
       _llogWhy = { mark: mark, fam: fam, cfg: cfg };
       return _llogWhy;
-    }).catch(() => { _llogWhy = { mark: new Map(), fam: {} }; return _llogWhy; });
+    }).catch(() => { _llogWhy = { mark: new Map(), fam: {}, err: true }; logState._whyTried = false; return _llogWhy; });   /* ★2026-09-23 Codex指摘：読めなかったのを「まだ出していません」と言わない。次の描き直しで読み直す */
   }
   function renderListingLog() {
     const host = document.getElementById('list-log'); if (!host) return;
@@ -31898,8 +31926,14 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             }
             logState.skuMap = sku; logState.stockMap = stk;
           } catch (_) { logState.skuMap = logState.skuMap || {}; logState.stockMap = logState.stockMap || {}; }
-        } catch (_) { }
-        logState._detailDay = sel; logState._detailBusy = false;
+          logState._detailDay = sel; logState._detailFail = 0;
+        } catch (_) {
+          /* ★2026-09-23 Codex指摘：名前の取得に失敗しても「読み込み済み」にしていたので、その日は二度と読み直さなかった → 3回まで5秒あけて読み直す */
+          logState._detailFail = (logState._detailFail || 0) + 1;
+          if (logState._detailFail < 3) { logState._detailDay = null; setTimeout(() => { try { renderListingLog(); } catch (_) {} }, 5000); }
+          else { logState._detailDay = sel; try { toast('⚠️ この日の明細名を読めませんでした（通信を確かめて「🔄いま反映」）'); } catch (_) {} }
+        }
+        logState._detailBusy = false;
         try { renderListingLog(); } catch (_) { }
       })();
     }
@@ -31967,7 +32001,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
          行＝作品（明細名）・列＝国。同じ作品が同じ行に並ぶので、どの国に出ていて どの国に無いかが一目で分かる。
          出していない国は点線の空きマスにする（詰めると横並びが崩れる）。 */
       const byWork = new Map(), hwOf = new Map();
-      pairs.forEach(p => { const k = p[2] || p[1]; if (!byWork.has(k)) byWork.set(k, {}); byWork.get(k)[p[0]] = p[1]; if (p[3] && !hwOf.get(k)) hwOf.set(k, p[3]); });
+      pairs.forEach(p => { const k = (p[2] || p[1]) + '|' + String(p[3] || '');   /* ★2026-09-23 Codex指摘：同名でも機種が違えば別の行（同じ国の同名を上書きしない） */
+        if (!byWork.has(k)) byWork.set(k, {}); byWork.get(k)[p[0]] = p[1]; if (p[3] && !hwOf.get(k)) hwOf.set(k, p[3]); });
       /* ★2026-09-23 本人「縦幅がずれる」「何か表示されてない部分がある。バグ？」→ 空きマスは不具合ではなく【その日はこの国に出していない】。
          ★2026-09-23 本人「なぜ出していないかも欲しい」→ 空きマスに理由を出す（別の日に出している／🤖が見送った理由／対象外／まだ）。
          行の高さは stretch でそろえる（カードも height:100%） */
@@ -31990,6 +32025,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         } else if (hw && _llogWhy && _llogWhy.fam[hw] && _llogWhy.fam[hw].indexOf(cc) < 0) {
           icon = '🚫'; txt = 'この国は🤖の対象外'; col = '#8a8f98'; bg = '#f7f8fa';
           tip = '設定（boshu_auto_cfg.family.' + hw + '.ccs）にこの国が入っていません';
+        } else if (_llogWhy && _llogWhy.err) {
+          icon = '⚠'; txt = '理由を<br>読めませんでした'; col = '#c0392b'; tip = '台帳を読めませんでした（通信の失敗）。次の描き直しで読み直します';
         } else if (_llogWhy) {
           icon = '…'; txt = 'この国にはまだ<br>出していません'; col = '#a7adb6';
           tip = '🤖の台帳にも出品ログにも、この国のこの商品の記録がありません（手動で出した商品はここに出ます）';
@@ -32317,7 +32354,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           let ng = 0, ok = 0, skip = 0; const learnAi = [];
           try {
             await learnLoad();
-            const cur = (await baKvGet('boshu_auto_rephoto')) || { items: {} }; cur.items = cur.items || {};
+            const cur = baKvMust(await baKvGet('boshu_auto_rephoto'), '写真の見直しの記録') || { items: {} }; cur.items = cur.items || {}; let _dirty = false;
             for (let i2 = 0; i2 < ps.length; i2++) {
               const q = ps[i2]; a.textContent = '🔍 ' + (i2 + 1) + '/' + ps.length;
               const img = curImgOfCard(q.cc, q.item, q.opt);
@@ -32333,8 +32370,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               /* 📚 AIの答えも原簿に残す。あとで【人の判断とのズレ】を数えて基準を精緻化するため（AIだけ・人だけでは基準が育たない） */
               try { const rw = (selRows || []).find(x => String(x.item_id) === String(q.item) && String(x.model_name || '').trim() === q.opt) || {};
                 learnAi.push({ img: img, hw: rw._hw || '', title: q.opt, cc: q.cc, item: q.item, opt: q.opt, ai: r2.ok ? 'ok' : ('ng:' + (r2.kind || '')) }); } catch (_) {}
-              if ((i2 + 1) % 10 === 0 || i2 === ps.length - 1) { await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]); _baRp = cur.items; }
+              _dirty = true;
+              if ((i2 + 1) % 10 === 0) { await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]); _baRp = cur.items; _dirty = false; }
             }
+            /* ★2026-09-23 Codex指摘：末尾の1枚が判定できず continue すると、直前までの結果が保存されずに終わっていた → 残りをここで必ず書く */
+            if (_dirty) { try { await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]); _baRp = cur.items; } catch (_) {} }
             try { if (learnAi.length) await learnPut(learnAi.map(x => Object.assign({ by: 'ai' }, x))); } catch (_) {}
             toast('🔍 ' + (ok + ng) + '枚を見ました（そのまま ' + ok + '・基準外 ' + ng + (skip ? '・見られず ' + skip : '') + '）');
             try { logAct('出品', '写真の見直し(出品ログ)', '', (ok + ng) + '枚 OK' + ok + '/NG' + ng); } catch (_) {}
@@ -32348,7 +32388,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           const ps = picked(); if (!ps.length) { alert('対象を選んでください'); return; }
           if (!confirm(ps.length + '件の「代わり無し」の印を消します。\n次に写真を集める時に、🤖がもう一度さがして自動で差し替えます。\nよろしいですか？')) return;
           try {
-            const cur = (await baKvGet('boshu_auto_rephoto')) || { items: {} }; cur.items = cur.items || {};
+            const cur = baKvMust(await baKvGet('boshu_auto_rephoto'), '写真の見直しの記録') || { items: {} }; cur.items = cur.items || {};
             let n = 0; ps.forEach(q => { const k2 = String(q.item) + '#' + q.opt; if (cur.items[k2]) { delete cur.items[k2]; n++; } });
             await sbUpsert('app_kv', [{ k: 'boshu_auto_rephoto', v: cur, updated_at: new Date().toISOString() }]);
             _baRp = cur.items; toast('🔁 ' + n + '件をさがし直します'); bmsg(n + '件をさがし直します'); renderListingLog();
@@ -32587,7 +32627,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         msg('差し替えています…');
         try {
           await openapiSetVariationImage(sid, item, opt, v);
-          const cur = (await baKvGet('boshu_auto_rephoto')) || { items: {} }; cur.items = cur.items || {};
+          const cur = baKvMust(await baKvGet('boshu_auto_rephoto'), '写真の見直しの記録') || { items: {} }; cur.items = cur.items || {};
           /* ★Codex指摘（2026-09-21・P2）：丸ごと置き換えると判定の版（v）が消え、GAS の baRephoto_ が「古い」とみなして
              **すぐにまた見直し**に掛ける。しかも見るのは🤖が最初に付けた画像なので、手で直した写真が上書きされることがある。
              → 元の中身に**混ぜて**書く（v を残す）。 */

@@ -167,8 +167,16 @@ function ufExt_() {
   }
   return _ufExt;
 }
-function ufTotal_() { return ufState_().n + ufSpillTotal_() + _ufRun + ufExt_(); }     // 今日これまで＋控え＋この実行分＋他プロジェクトの分
-function ufSelf_() { return ufState_().n + ufSpillTotal_() + _ufRun; }   // このプロジェクトだけ（控えも足す）
+/* ★2026-09-23 Codex指摘（P2）：本体と控えを別々に読むと、間に別の実行が「控え→本体」へ取り込んだ時に取り込み分が抜ける。
+   1回の getProperties() の写しから両方を数える（Properties の読みは urlfetch を使わない）。 */
+function ufSelf_() {
+  var ps = {}; try { ps = P_().getProperties() || {}; } catch (e) { ps = {}; }
+  var d = ufToday_(), n = 0;
+  try { var o = ps.ufCount ? JSON.parse(ps.ufCount) : null; if (o && o.d === d) n += Number(o.n) || 0; } catch (e1) {}
+  Object.keys(ps).forEach(function (k) { if (k.indexOf('ufSpill_') !== 0) return; try { var sp = JSON.parse(ps[k]); if (sp && sp.d === d) n += Number(sp.n) || 0; } catch (e2) {} });
+  return n + _ufRun;
+}
+function ufTotal_() { return ufSelf_() + ufExt_(); }     // 今日これまで＋控え＋この実行分＋他プロジェクトの分
 /* ★2026-09-21 🔴 ここに【原理的な穴】があった。本人「なぜあの枠のブロッカーが働いていないんですか？もう何回もこれ言っている」
    ufPersist_ は「読んで→足して→書く」を**鍵なし**でやっていた。/exec（ポータルからの呼び出し）とトリガーは同時に走るので、
    書き込みが互いを上書きして**数えた分が黙って消える**。＝数え漏れを1つ塞いでも、次の数え漏れでまた同じ事故が起きる。
@@ -198,11 +206,11 @@ function ufPersist_() {
     return;
   }
   try {
-    var o = ufState_(); o.n += _ufRun; _ufRun = 0;
+    var o = ufState_(); var _addRun = _ufRun, _addTag = _ufTag;   /* ★2026-09-23 Codex指摘（P1）：本体の保存が通るまでメモリを消さない */
+    o.n += _addRun;
     // 内訳も同じ入れ物に貯める（日が変われば ufState_ が作り直すので自動でリセットされる）
     o.tag = o.tag || {};
-    Object.keys(_ufTag).forEach(function (k) { o.tag[k] = (o.tag[k] || 0) + _ufTag[k]; });
-    _ufTag = {};
+    Object.keys(_addTag).forEach(function (k) { o.tag[k] = (o.tag[k] || 0) + _addTag[k]; });
     /* 他の実行が逃がした控えをここでまとめて取り込む。
        ★Codex指摘（2026-09-21・P2）：**先に消してから本体を書くと、その一瞬だけ「無かったこと」になる**。
        読み手（bgAllowed_）がそこを見ると、使った分が消えて見えて予約枠を食い破る。
@@ -217,7 +225,13 @@ function ufPersist_() {
         _took.push(k);
       });
     } catch (e) {}
-    try { P_().setProperty('ufCount', JSON.stringify(o)); } catch (e) {}
+    var _saved = false; try { P_().setProperty('ufCount', JSON.stringify(o)); _saved = true; } catch (e) {}
+    if (!_saved) {
+      /* 本体を書けなかった＝この実行分は控えへ逃がし、取り込もうとした控えは消さない（消すと数えた分が永久に失われる） */
+      try { P_().setProperty('ufSpill_' + Utilities.getUuid().slice(0, 8), JSON.stringify({ d: ufToday_(), n: _addRun, tag: _addTag, at: new Date().toISOString() })); _ufRun = 0; _ufTag = {}; } catch (e3) {}
+      return;
+    }
+    _ufRun = 0; _ufTag = {};
     _took.forEach(function (k) { try { P_().deleteProperty(k); } catch (e2) {} });
   } catch (e) {} finally { try { lock.releaseLock(); } catch (e) {} }
 }
@@ -350,7 +364,8 @@ function doGetInner_(e) {
         var iwt = P_().getProperty('WRITE_TOKEN');
         if (!iwt || p.token !== iwt) throw new Error('WRITE_TOKEN不正');
         var ilog = syncEscrowAll(true);   /* ⚡今すぐ取得は12時間の間引きを素通し（Codex指摘 2026-09-21） */
-        iout = { ok: true, action: 'run_income', shops: (ilog || []).length };
+        var _allSk = !!((ilog || []).length && (ilog || []).every(function (x) { return x && x.skipped; }));
+        iout = { ok: !_allSk, action: 'run_income', shops: (ilog || []).length, skipped: _allSk ? String(ilog[0].skipped) : '' };   /* ★2026-09-23 取っていないのに ok:true を返さない（Codex指摘） */
       } catch (ierr) { iout = { ok: false, error: String((ierr && ierr.message) || ierr) }; }
       return ContentService.createTextOutput(icb + '(' + JSON.stringify(iout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1165,7 +1180,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -1442,9 +1457,14 @@ function tokKey_(shopId) { return 'tok_' + shopId; }
 function saveToken_(tok) { P_().setProperty(tokKey_(tok.shop_id), JSON.stringify(tok)); }
 function getToken_(shopId) {
   if (isChild_()) {
-    var a = childTokens_();
-    for (var i = 0; i < a.length; i++) if (String(a[i].shop_id) === String(shopId)) return a[i];
-    return null;
+    /* ★2026-09-23 Codex指摘（P1）：本体から受け取れない時に例外で止まり、共有の場所にある生きたトークンまで読めなかった → 例外は握って先へ */
+    var a = null; try { a = childTokens_(); } catch (eT) { a = null; }
+    var hit = null;
+    if (a) for (var i = 0; i < a.length; i++) if (String(a[i].shop_id) === String(shopId)) { hit = a[i]; break; }
+    /* 子機が自分で更新して共有に書けなかった時の控え（手元のプロパティ）。新しい方を使う */
+    var loc = null; try { var s0 = P_().getProperty(tokKey_(shopId)); loc = s0 ? JSON.parse(s0) : null; } catch (eL) { loc = null; }
+    if (loc && (!hit || Number(loc.expire_at) > Number(hit.expire_at))) hit = loc;
+    return hit;
   }
   var s = P_().getProperty(tokKey_(shopId)); return s ? JSON.parse(s) : null;
 }
@@ -1460,24 +1480,48 @@ function listTokens_() {
    → トークン一式を Supabase（app_kv.shopee_tokens）で両方から見える所に置き、
      **枠が生きている方が更新する**。refresh_token は使い捨てなので、更新は必ず取り札で1つに絞る。 */
 var TOK_KV = 'shopee_tokens';
-function tokShare_(list) {   /* 全店ぶんを共有の場所へ写す（更新した側が書く） */
-  try { baKvSet_(TOK_KV, { at: now_(), list: list }); } catch (e) {}
+/* ★2026-09-23 Codex指摘（P1）：全店を1行のリストで持つと、A が店X・B が店Y を同時に更新した時に後から書いた方が前の分を消す
+   （使い捨ての refresh_token が消える＝その店の認証が壊れる）。→ 店ごとに1行（shopee_tok_<店>）。書くのは自分が更新した店だけ。 */
+function tokKvKey_(shopId) { return 'shopee_tok_' + String(shopId); }
+function tokShareOne_(nt) {
+  if (!nt || !nt.shop_id) return false;
+  for (var i = 0; i < 3; i++) { try { baKvSet_(tokKvKey_(nt.shop_id), Object.assign({ at: now_() }, nt)); return true; } catch (e) { Utilities.sleep(700 * (i + 1)); } }
+  return false;
 }
+function tokShare_(list) { (list || []).forEach(function (t) { tokShareOne_(t); }); }
 function tokSharedLoad_() {
-  try { var o = baKv_(TOK_KV); return (o && o.list && o.list.length) ? o.list : null; } catch (e) { return null; }
+  try {
+    var rows = sbSelect_('app_kv', 'select=k,v&k=like.shopee_tok_*'), out = [];
+    (rows || []).forEach(function (r) { if (r && r.v && r.v.shop_id) out.push(r.v); });
+    if (out.length) return out;
+    var o = baKv_(TOK_KV); return (o && o.list && o.list.length) ? o.list : null;   /* 旧形式（1行）が残っていれば読む */
+  } catch (e) { return null; }
 }
 /* 更新の取り札。両方から見える app_kv に置く（LockService はプロジェクトごとなので効かない）。
    90秒で失効＝取ったまま落ちても止まらない。 */
-function tokClaim_(shopId) {
-  var k = 'tok_claim_' + shopId, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
+/* ★2026-09-23 Codex指摘（P1）：「読む→書く→読み直す」は2人が同時に「札なし」を読むと両方通る。
+   DBの一意制約で【1人だけ入れる】形にする：①期限切れの札だけ消す ②無ければ入れる（あれば何もしない＝ignore-duplicates）
+   ③入った行が返ってきた側だけが取れた。読めない・書けない時は null＝「分からない」（取れたことにしない）。 */
+function baClaimAtomic_(k, holdSec, me) {
   try {
-    var cur = baKvFresh_(k);   /* ★控えを飛ばして読む（2026-09-23 レビュー） */
-    if (cur && cur.at && now_() - cur.at < 90) return false;
-    baKvSet_(k, { at: now_(), by: me });
-    Utilities.sleep(700);
-    var chk = baKvFresh_(k);
-    return !!(chk && chk.by === me);
-  } catch (e) { return false; }
+    var key = cfg_('SB_SERVICE_KEY'), base = cfg_('SB_URL') + '/rest/v1/app_kv';
+    var H = { apikey: key, Authorization: 'Bearer ' + key };
+    var cut = new Date(Date.now() - (Number(holdSec) || 240) * 1000).toISOString();
+    ufBump_(1, '取り札(掃除)');
+    UrlFetchApp.fetch(base + '?k=eq.' + encodeURIComponent(k) + '&updated_at=lt.' + encodeURIComponent(cut), { method: 'delete', muteHttpExceptions: true, headers: H });
+    ufBump_(1, '取り札(取得)');
+    var r = UrlFetchApp.fetch(base + '?on_conflict=k', { method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=ignore-duplicates,return=representation' },
+      payload: JSON.stringify([{ k: k, v: { at: now_(), by: me }, updated_at: new Date().toISOString() }]) });
+    if (r.getResponseCode() >= 300) return null;
+    var rows = JSON.parse(r.getContentText() || '[]');
+    if (BA_KV_CACHE) { try { delete BA_KV_CACHE[k]; } catch (e0) {} }
+    return !!(rows && rows.length);
+  } catch (e) { return null; }
+}
+function tokClaim_(shopId) {
+  var k = 'tok_claim_' + shopId, me = baRunnerId_() + ':' + Utilities.getUuid().slice(0, 8);
+  return baClaimAtomic_(k, 90, me) === true;   /* 分からない時は更新しない（refresh_token の取り合いを起こさない側に倒す） */
 }
 /* 自分の枠がもう断られているか（断られた事実だけで判断する） */
 function ufDead_() { return !!ufBlockedInfo_(); }
@@ -1497,11 +1541,9 @@ function syncGate_(name, holdSec) {
       Logger.log(name + '：本体が担当中（' + Math.round((now_() - cur.at) / 60) + '分前に実行）なので2台目は見送り'); return false;
     }
     if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
-    baKvSet_(k, { at: now_(), by: me });
-    Utilities.sleep(800);
-    var chk = baKvFresh_(k);
-    if (!chk || chk.by !== me) { Logger.log(name + '：取り札を取り合って負けたので見送り'); return false; }
-  } catch (e) { return true; }   /* 取り札が読めない時は従来どおり動く（止めない） */
+    var got = baClaimAtomic_(k, holdSec || 240, me);   /* ★2026-09-23 DBの一意制約で1人だけ通す（Codex指摘P1） */
+    if (got !== true) { Logger.log(name + '：取り札を' + (got === null ? '読めなかった' : '取り合って負けた') + 'ので見送り'); return false; }
+  } catch (e) { Logger.log(name + '：取り札の処理に失敗したので見送り ' + String(e).slice(0, 80)); return false; }
   return true;
 }
 
@@ -1513,8 +1555,8 @@ function syncGate_(name, holdSec) {
    業務と同じく本体が担当（syncGate_）。本体が枯れたら2台目が代わる。 */
 var BOOST_KV = 'boost_state', BOOST_GAP_SEC = 12 * 3600;
 function boostTick(manual) {
-  if (manual !== true && !syncGate_('boostTick', 1500)) return { ok: false, skipped: 'gate' };
   if (!bgAllowed_()) return { ok: false, skipped: 'uf' };
+  if (manual !== true && !syncGate_('boostTick', 1500)) return { ok: false, skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
   var st = baKv_(BOOST_KV) || {}; st.shops = st.shops || {}; st.items = st.items || {};
   var now = now_(), out = [];
   Object.keys(st.items).forEach(function (k) { if (now - st.items[k] > 3 * 86400) delete st.items[k]; });
@@ -1545,6 +1587,7 @@ function boostTick(manual) {
     } catch (e) { ss.err = String((e && e.message) || e).slice(0, 120); ss.nextAt = now + 3600; st.shops[sid] = ss; out.push({ shop_id: sid, cc: t.cc || '', error: ss.err }); }
   });
   st.at = now; try { baKvSet_(BOOST_KV, st); } catch (eS) {}
+  try { ufPersist_(); } catch (eP) {}   /* ★2026-09-23 レビュー：Bump の通信（1日 約150回）が一度も数えられていなかった */
   return { ok: true, shops: out };
 }
 function boostPick_(shopId, n, cur, hist, now) {
@@ -1607,14 +1650,12 @@ function ensureToken_(shopId) {
   if (!r) throw rErr || new Error('トークン更新に失敗 shop_id=' + shopId);
   var nt = tok || { shop_id: shopId };
   nt.access_token = r.access; nt.refresh_token = r.refresh; nt.expire_at = r.expire;
-  if (!isChild_()) saveToken_(nt);
-  /* 共有の場所も更新（相方がすぐ使える） */
-  var all = tokSharedLoad_() || (isChild_() ? (childTokens_() || []) : listTokens_());
-  var found = false;
-  for (var m = 0; m < all.length; m++) if (String(all[m].shop_id) === String(shopId)) { all[m] = nt; found = true; }
-  if (!found) all.push(nt);
-  tokShare_(all);
-  if (isChild_()) _CHILD_TOK = all;
+  /* ★2026-09-23 Codex指摘（P1）：新しい refresh_token を【必ずどこかに残す】。共有に書けなければ手元のプロパティに控える（子機も）。
+     古い refresh_token はもう使えないので、ここで失うとその店の認証が壊れる。 */
+  saveToken_(nt);
+  var shared = tokShareOne_(nt);
+  if (!shared) Logger.log('⚠ トークンの共有保存に失敗（手元に控えた） shop_id=' + shopId);
+  if (isChild_()) { var lst = (_CHILD_TOK || []).slice(), f = false; for (var m = 0; m < lst.length; m++) if (String(lst[m].shop_id) === String(shopId)) { lst[m] = nt; f = true; } if (!f) lst.push(nt); _CHILD_TOK = lst; }
   return nt;
 }
 function refreshOne_(refreshToken, who) {
@@ -3387,12 +3428,12 @@ function syncDailyStatsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, days: rows.length, orders: details.length };
 }
 function syncAll() {
-  if (!syncGate_('syncAll', 2400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   /* ★2026-09-21 本人「着地を理論上だけじゃなくて、可能にしてな」＝**穴が無いことを確かめる**。
      定期処理13個のうち、ここだけ `bgAllowed_()` を見ていなかった（Shopeeは叩かず Supabase の集計だけなので
      1回2コール・1日48回＝全体の0.2%と小さいが、**「停止ラインを超えたら背景処理は全部止まる」という決まりに穴が空く**）。
      数字の大小ではなく、**例外を作らない**ために閉じる。 */
   if (!bgAllowed_()) { Logger.log('syncAll skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
+  if (!syncGate_('syncAll', 2400)) return;   /* ★2026-09-23 Codex指摘（P1）：札は【動ける時だけ】取る。停止線で見送る側が札を取り続けると相方が引き継げない */
   // ★日次集計はDBのorders表から計算＝Shopeeの二重取得を解消（旧: syncDailyStatsForShop_ が毎時Shopeeを再取得していた。
   //   orders表は syncOrdersAll が公式APIで同期済みなので、そこから cc×日 で units/sales/orders を集計するだけ＝Shopee呼び出しゼロ）。
   var since = new Date((now_() - 4 * 86400) * 1000).toISOString().slice(0, 10);
@@ -3550,9 +3591,9 @@ function saveCustomers_(cc, shopId, details) {
   return rows.length;
 }
 function syncOrdersAll(daysWindow, trkMode) {
-  if (!syncGate_('syncOrdersAll', 2400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
   if (!force && !coreAllowed_()) { Logger.log('syncOrdersAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★注文は業務の血流＝UF_STOP_CORE まで止めない */
+  if (!force && !syncGate_('syncOrdersAll', 2400)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ・手動（⚡今すぐ）は札を通さない（Codex指摘） */
   // 追跡番号の取得は毎時ではなく最短6時間おき（force=手動は毎回）。空振りの毎時リトライで枠を溶かさない。
   var doTrk = force;
   if (!force) { var tl = parseInt(P_().getProperty('trkLast') || '0', 10) || 0; if (now_() - tl >= 6 * 3600) { doTrk = true; P_().setProperty('trkLast', String(now_())); } }
@@ -3670,8 +3711,8 @@ function fillIncomeInitial_() {
 //   income表から amount==amount_initial の完了行を拾って get_escrow_detail を直接叩く。
 //   1回で最大300件。実行時間6分に当たらないよう区切って、何度か実行すれば全部埋まる。
 function backfillEscrowUnchanged(limitN) {
-  if (!syncGate_('backfillEscrowUnchanged', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('backfillEscrowUnchanged skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
+  if (!syncGate_('backfillEscrowUnchanged', 3600)) return { skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
   var lim = limitN || 300, done = 0, moved = 0, errs = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
@@ -3712,7 +3753,6 @@ function backfillEscrowUnchanged(limitN) {
   return { done: done, moved: moved, errs: errs };
 }
 function syncEscrowAll(force) {
-  if (!syncGate_('syncEscrowAll', 14400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!coreAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★入金は業務の血流 */
   /* ★2026-09-21 本人「無駄遣いで減らせるところは減らしてほしい」
      入金明細は接続枠でいちばん太い（実測 656回/日 = 6時間ごと×約164件）。
@@ -3727,6 +3767,7 @@ function syncEscrowAll(force) {
     var _escLast = parseInt(P_().getProperty('escrowAll_at') || '0', 10) || 0;
     if (Date.now() - _escLast < ESC_EVERY_MS) { Logger.log('syncEscrowAll skip: 前回から12時間たっていない（入金の確定は数日後なので6時間ごとに見る意味がない）'); return [{ skipped: 'too_soon' }]; }
   }
+  if (!force && !syncGate_('syncEscrowAll', 14400)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ・手動は札を通さない（Codex指摘） */
   P_().setProperty('escrowAll_at', String(Date.now()));
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
@@ -3959,9 +4000,9 @@ function syncPayoutsForShop_(tok) {
   return { cc: cc, shop_id: tok.shop_id, payouts: rows.length, adjustments: adjRows.length, future: future };
 }
 function syncPayoutsAll() {
-  if (!syncGate_('syncPayoutsAll', 14400)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   ensureAdjTrigger_();   // 補償チェックの毎朝トリガーを自動で用意する
   if (!coreAllowed_()) { Logger.log('syncPayoutsAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★入金予定は業務の血流 */
+  if (!syncGate_('syncPayoutsAll', 14400)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ */
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncPayoutsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   ufPersist_();
@@ -4084,7 +4125,7 @@ function syncReturnsRange_(days, ccList) {
   log.push('=== 合計 ' + total + '件 取込（走査' + DAYS + '日）===');
   Logger.log(log.join('\n')); return total;
 }
-function syncReturnsAll() { if (!syncGate_('syncReturnsAll', 18000)) return 0; /* ★2026-09-22 本体と2台目で二重に動いていた */ if (!coreAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; }   /* ★返品は業務の血流 */ var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
+function syncReturnsAll() { if (!coreAllowed_()) { Logger.log('syncReturnsAll skip: urlfetch予約枠(手動用)を確保'); return 0; }   /* ★返品は業務の血流 */ if (!syncGate_('syncReturnsAll', 18000)) return 0; /* ★2026-09-22 本体と2台目で二重に動いていた／2026-09-23 札は動ける時だけ */ var r = syncReturnsRange_(45); ufPersist_(); return r; }      // 定例（直近45日）
 function backfillReturns() { return syncReturnsRange_(730); }    // 初回バックフィル（2年）
 
 
@@ -4620,10 +4661,10 @@ function syncListingsAll() {
 
 // ★定例トリガー用：カーソルで数店ずつ回す（6分制限を超えないための本命）。30分ごと×3店 → 全店 約2時間で一巡
 function syncListingsRoundRobin() {
-  if (!syncGate_('syncListingsRoundRobin', 1200)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   /* ★2026-09-20 1回だけ：🤖のトリガー3本を Head で作り直す（この関数は Head のトリガーで動いている＝ここで作ったトリガーも Head になる）。印は BA_REBIND_DONE */
   try { if (!P_().getProperty('BA_REBIND_DONE')) { P_().setProperty('BA_REBIND_DONE', new Date().toISOString()); rebindBoshuTriggersToHead(); } } catch (eRb) { Logger.log('rebind失敗: ' + eRb); }
   if (!bgAllowed_()) { Logger.log('syncListingsRoundRobin skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  if (!syncGate_('syncListingsRoundRobin', 1200)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ */
   /* ★2026-09-20 本人「60分で」：出品同期が接続枠のいちばん太い口だった
      （get_item_list 291＋get_model_list 228＋get_item_base_info 206＋get_item_extra_info ＝1日725回以上。
       入金明細604回より多い）。トリガーは30分ごとのままにして、**ここで1時間に1回に間引く**
@@ -4749,8 +4790,8 @@ function syncListingStatsForShop_(tok) {
   return { cc: cc, shop_id: shopId, stats: n };
 }
 function syncListingStats() {
-  if (!syncGate_('syncListingStats', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('syncListingStats skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }
+  if (!syncGate_('syncListingStats', 3600)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ */
   // ★販売数・閲覧・いいねは【1日1回で十分】。履歴(listing_stats_history)も日次スナップショットで持っている。
   //   トリガーが6時間毎になっており（コメントは「1日1回」なのに setupTriggers が everyHours(6)）、
   //   全7店×約900件を1日4回なめて **約750回/日** 使っていた。20時間あけて1日1回に落とす＝約570回/日の節約。
@@ -4883,8 +4924,8 @@ function addListingsTrigger() {
 // payout同期に相乗りしているだけだと取りこぼすため、直近30日を毎日引き直す（重複はadj_idで弾かれる）。
 var ADJ_MAIL_TO = 'gcsonlinestore631@gmail.com';
 function dailyAdjustmentsCheck() {
-  if (!syncGate_('dailyAdjustmentsCheck', 72000)) return;   /* ★2026-09-22 本体と2台目で二重に動いていた（毎朝7時に両方） */
   if (!bgAllowed_()) { Logger.log('dailyAdjustmentsCheck: urlfetch枠の予約線を超えているので実行しません'); return; }
+  if (!syncGate_('dailyAdjustmentsCheck', 72000)) return;   /* ★2026-09-22 本体と2台目で二重に動いていた（毎朝7時に両方）／2026-09-23 札は動ける時だけ */
   // 取り込み前に「今ある補償のキー」を控える → 差分＝今日入った分
   var before = {};
   try {
@@ -5318,8 +5359,8 @@ function testImportOne() {
 //   ・TW/TH は関税が数か月後に引かれるという話がある（未検証）
 //   → 返品のあった注文を名指しで読み直す。確定済みでも対象にする。
 function recheckEscrowForReturns(limitN) {
-  if (!syncGate_('recheckEscrowForReturns', 3600)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
   if (!bgAllowed_()) { Logger.log('recheckEscrowForReturns skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
+  if (!syncGate_('recheckEscrowForReturns', 3600)) return { skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
   var lim = limitN || 300, done = 0, moved = 0;
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
@@ -5468,6 +5509,7 @@ function baJanReal_(v) { var j = String(v || '').trim(); if (!/^\d{13}$/.test(j)
 /* ★2026-09-20 本人「枠の減り早すぎる」：1回の実行で app_kv を十数回バラバラに読んでいた（実測：1日 1,018回＝枠の1位）。
    実行の頭で【まとめて1回】読み、以後はその控えを使う。書いた時は控えも更新する（読み直さない） */
 var BA_KV_CACHE = null;
+var BA_FAM_TICK = 0;   /* ★2026-09-23 この実行で作った新しいカタログの数（1回の巡回で1件まで・全部の作成経路で数える） */
 /* ★2026-09-21 設定が【読めなかった】のと【読めたが未設定】を区別する（Codex指摘P1・裏取り済み）。
    区別しないと、担当が2台目なのに本体側の読みが失敗しただけで cfg={} になり、
    既定の 'main' と読めて**本体が勝手に動き、2台目が保存した状態を上書きして消す**。
@@ -5634,7 +5676,17 @@ var BA_PLAT_JA = [['xbox', /xbox/i], ['ps5', /ps5|プレステ\s*5/i], ['ps4', /
 function baPlatOk_(a, hw) { var n = String((a && a.name) || ''); if (!n) return true; var ps = []; BA_PLAT_JA.forEach(function (p) { if (p[1].test(n)) ps.push(p[0]); }); if (!ps.length) return true; var h = String(hw || ''); if (h === 'xbox360' || h === 'xboxone') h = 'xbox'; if (h === 'switch2') h = 'switch'; return ps.indexOf(h) >= 0; }
 function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 var BA_MANUAL = null;   /* 手動の判定（app_kv.boshu_auto_judged_manual）。1回の実行で1度だけ読む */
-function baManualOf_(imgUrl, expect) { if (!expect || !expect.key) return ''; if (BA_MANUAL === null) { BA_MANUAL = baKv_('boshu_auto_judged_manual') || {}; } return String(BA_MANUAL[String(imgUrl || '').replace(/\?.*$/, '') + '|' + String(expect.hwKey || '') + '|' + expect.key] || ''); }
+var BA_MANUAL_IMG = null;
+function baManualOf_(imgUrl, expect) {
+  if (!expect || !expect.key) return '';
+  if (BA_MANUAL === null) { BA_MANUAL = baKv_('boshu_auto_judged_manual') || {}; BA_MANUAL_IMG = {}; Object.keys(BA_MANUAL).forEach(function (k) { if (String(BA_MANUAL[k]).indexOf('ng:') === 0) BA_MANUAL_IMG[k.split('|')[0]] = 1; }); }
+  var u = String(imgUrl || '').replace(/\?.*$/, '');
+  var v = String(BA_MANUAL[u + '|' + String(expect.hwKey || '') + '|' + expect.key] || '');
+  if (v) return v;
+  /* ★2026-09-23 Codex指摘：ポータルの 👎 は鍵が「写真|SWITCH|明細名」で、ここは「写真|switch|作品の鍵」＝一致せず、人がNGにした写真をまた使えていた。
+     人が【この写真はNG】と言ったのなら、機種や作品の鍵に関わらず二度と使わない（OKの方は文脈が要るので完全一致だけ） */
+  return (BA_MANUAL_IMG && BA_MANUAL_IMG[u]) ? 'ng:manual' : '';
+}
 var BA_AI_DOWN = '';   /* AIが使えない理由（残高切れ等）。立ったらこの実行では AI を呼ばない＝Shopee枠を守る */
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
@@ -5852,7 +5904,11 @@ function boshuAutoRecheck() {
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; var cfg = baKv_(BA_CFG) || {};
   /* ★担当でない側はここも動かさない（Codex指摘・裏取り済み）。
      動かすと**同じ仕入れ元を2台で叩き**、同じ在庫を二重に0にし、boshu_auto_status を取り合う。 */
-  if (BA_KV_ERR || (String(cfg.runner || 'main') === 'child') !== isChild_()) { ufPersist_(); try { lock.releaseLock(); } catch (eL) {} return { ok: false, skipped: BA_KV_ERR ? 'cfg_unreadable' : 'not_runner' }; }
+  /* ★2026-09-23 Codex指摘：tick は cfg.runners（機種で担当分け）を見るのに、ここだけ旧 cfg.runner だった＝2台目・3台目の見直しが止まり、本体が動く形 */
+  var _okRun0;
+  if (cfg.runners && typeof cfg.runners === 'object' && Object.keys(cfg.runners).length) { var _rid0 = baRunnerId_(); _okRun0 = !!(cfg.runners[_rid0] && cfg.runners[_rid0].length); }
+  else _okRun0 = ((String(cfg.runner || 'main') === 'child') === isChild_());
+  if (BA_KV_ERR || !_okRun0) { ufPersist_(); try { lock.releaseLock(); } catch (eL) {} return { ok: false, skipped: BA_KV_ERR ? 'cfg_unreadable' : 'not_runner' }; }
   var out = { ok: true, checked: 0, zeroed: 0 };
   try {
     if (!bgAllowed_()) return out;
@@ -5900,7 +5956,7 @@ function boshuAutoRecheck() {
       .map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymd }; });
     baLogAutoMark_(_mk);
   } catch (eM) {}
-  try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
+  try { st.uf = { child: isChild_(), runner: baRunnerId_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
   try { ufPersist_(); } catch (e3) {}
   try { lock.releaseLock(); } catch (e4) {}
@@ -5913,6 +5969,7 @@ function boshuAutoTick(manual) {
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
+  BA_FAM_TICK = 0;
   baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto']);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
@@ -5948,7 +6005,7 @@ function boshuAutoTick(manual) {
        新しい担当がすぐ始めると二重に動く。別プロジェクト同士は鍵で待ち合わせできないため、
        時間で確実に流し切る。1回の最長は 鍵待ち90秒＋4分10秒＝約5分40秒。 */
     var _rAt = Date.parse(cfg.runnerAt || '') || 0;
-    if (_rAt && Date.now() - _rAt < 6 * 60000 && manual !== true) {
+    if (_rAt && Date.now() - _rAt < 6 * 60000) {   /* ★2026-09-23 Codex指摘（P1）：手動も待つ（前の担当がまだ走っている間に「今すぐ」を押すと二重に出る） */
       ufPersist_();
       Logger.log('🤖 担当を切り替えた直後なので、前の回が終わるまで待ちます（6分）');
       return { ok: true, skipped: 'runner_switch_cooldown' };
@@ -6054,6 +6111,7 @@ function boshuAutoTick(manual) {
     var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
     if (baRunnerId_() === 'child' || baRunnerId_() === 'main') try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
+    try { baPartialRepair_(st); } catch (ePa) { baLog_(st, '途中止まりの明細の直しに失敗: ' + String(ePa).slice(0, 100)); }
     try { baRephoto_(st, cfg, judged, pre, used, t0, hw); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
@@ -6216,7 +6274,7 @@ function boshuAutoTick(manual) {
       .map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymd }; });
     baLogAutoMark_(_mk);
   } catch (eM) {}
-  try { st.uf = { child: isChild_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
+  try { st.uf = { child: isChild_(), runner: baRunnerId_(), used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
     try { ufPersist_(); } catch (e3) {}
     try { lock.releaseLock(); } catch (e4) {}
@@ -6273,7 +6331,8 @@ function boshuAutoPrejudge_(hw, maxN) {
    伝票・個人情報あり・バナーは索引に「使わない」印で残す（二度見ない）。1回 最大20枚・枠は1回あたり約25回 */
 var COND_Q = 'cond_photo_queue', COND_IDX = 'cond_photo_index';
 function condIndexTick(manual) {
-  if (!syncGate_('condIndexTick', 420)) return;   /* ★2026-09-22 2台で分担：枠が死んでいる側は降りる／二重実行は取り札で防ぐ */
+  if (manual !== true && !bgAllowed_()) return { ok: true, skipped: 'urlfetch 予約枠' };   /* ★2026-09-23 札より先に「動けるか」を見る（Codex指摘P1） */
+  if (manual !== true && !syncGate_('condIndexTick', 420)) return { ok: true, skipped: 'gate' };
   var lock = LockService.getScriptLock(); if (!lock.tryLock(3000)) return { ok: false, error: 'いま走っています' };
   try {
     var t0 = Date.now();
@@ -6412,9 +6471,9 @@ function baLoadCtx_(cfg, hw, ccs) {
   var _capOf = {}; try { ((baKv_('shop_item_limit') || {}).shops || []).forEach(function (x) { if (x && x.shop_id && Number(x.cap) > 0) _capOf[String(x.shop_id)] = Number(x.cap); }); } catch (eCap) {}
   var _liveOf = {}; rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
-  var _buried = 0;
+  var _buried = 0, _buriedItems = {};
   rows.forEach(function (r) {
-    if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; return; }   // 満杯の店の非公開カタログは無かったことにする
+    if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
     itemCc[String(r.item_id)] = r.cc;
     var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
     var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
@@ -6445,7 +6504,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     });
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
-  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false);
+  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems);
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
@@ -6578,7 +6637,8 @@ function boshuAutoExclude_(hw, key, undo, any, ja) {
 }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
-function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto) {
+function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto, buried) {
+  buried = buried || {};
   var ccFail = {}; try { ccFail = baKv_('boshu_cc_fail') || {}; } catch (eCf) {}
   soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
@@ -6596,7 +6656,9 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     if (BA_NG.test(r.ja)) return;
     var k1 = baTmKey_(r.ja), k2 = r.en ? baTmKey_(r.en) : '', k3 = r.key, k4 = r.en ? baKey_(r.en) : '';
     var need = ccs.filter(function (cc) {
-      var d = (ledger[r.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;   // 済み
+      var d = (ledger[r.key] || {})[cc];
+      /* ★2026-09-23 Codex指摘：満杯の店の非公開カタログに入った明細は「出している」に数えないのに、台帳の済みだけが残って2店舗目へ出し直されなかった → その明細が埋もれている時は済みと見ない */
+      if (d && String(d).indexOf('skip:') !== 0 && !buried[String(d).split('#')[0]]) return false;   // 済み
       if (d && /^skip:(noimg|noname|dup|nofam|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
       if (!(famRows[cc] || []).length && !famAuto) return false;                                          // その国に家族カタログが無い（★2026-09-23 自動作成が有効なら候補に残す＝入れる時に1つ作る）
       { var cfx = ccFail[hw + '|' + cc]; if (cfx && Date.now() - Date.parse(cfx.at) < 6 * 3600 * 1000) return false; }   /* ★2026-09-23 作れない国は6時間外す（同じ作品の空回り止め） */
@@ -6780,11 +6842,11 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   var _fmDay = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
   if (!st.famMade || st.famMade.d !== _fmDay) st.famMade = { d: _fmDay, n: 0 };
   var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6));
-  if (!famRows.length && cfg.autoFamily !== false && st.famMade.n >= _fmCap) {
-    baLog_(st, cc + '：' + hw + ' のカタログは今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）');
+  if (!famRows.length && cfg.autoFamily !== false && (st.famMade.n >= _fmCap || BA_FAM_TICK >= 1)) {
+    baLog_(st, cc + '：' + hw + ' のカタログは' + (BA_FAM_TICK >= 1 ? 'この回はもう作りません（1回1件）' : '今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）'));
   } else if (!famRows.length && cfg.autoFamily !== false) {
     var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st, allRowsAll);
-    if (made) st.famMade.n++;
+    if (made) { st.famMade.n++; BA_FAM_TICK++; }
     if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
   }
   order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
@@ -6815,16 +6877,19 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       /* ★2026-09-23 1店舗目の出品枠が満杯なら、複製せずに【2店舗目】へ作る（本人「2アカウント目に出せばいいんじゃないんですか？」）。
          満杯かどうかは「公開が枠で弾かれた」事実で覚える（推定で止めない＝[[quota-guard-must-be-fact-based]]）。 */
       if (baShopFull_(cc, base.shop_id)) {
+        if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
         var sub1 = baCloneToSub_(cc, base, nm0, st);
         if (sub1) {
+          BA_FAM_TICK++;
           tgt = sub1; rows.push(tgt); newItem = true;
           try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
         }
       }
       var cl = null, dupErr = '';
+      if (!tgt && BA_FAM_TICK >= 1) { res.note = '複製はこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 満杯→複製の経路にも同じ上限 */
       for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
         if (tryNo) { var m2 = CIRC[nextNo - 1 + tryNo] || ('(' + (nextNo + tryNo) + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }
-        try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); }
+        try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); if (cl && cl.item_id) BA_FAM_TICK++; }
         catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
@@ -6882,6 +6947,8 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       try { _ru = baReuseTestSlot_(tgt.shop_id, tgt.item_id, items[0], st, cc); } catch (eRu) { _ru = null; }
       if (_ru && _ru.ok) {
         var _x0 = items[0];
+        /* ★2026-09-23 Codex指摘：上書きが途中で止まった（在庫0のまま）明細を、台帳の済みだけで終わらせない。直す一覧に残して次の回に在庫を戻す */
+        if (_ru.partial) { st.partials = st.partials || []; st.partials.unshift({ at: new Date().toISOString(), cc: cc, shop_id: tgt.shop_id, item_id: tgt.item_id, model_id: _ru.model_id, en: _x0.option, price: _x0.price, stock: _x0.stock, img: _x0.image_id || '', sku: _x0.sku || '' }); if (st.partials.length > 60) st.partials.length = 60; }
         baSet_(ledger, _x0._p.key, cc, String(tgt.item_id) + '#' + _ru.model_id); res.added++;
         listedSet[baTmKey_(_x0.option)] = 1;
         tgt.models = (tgt.models || []).map(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && (m.n || m.name)) || '')) ? { n: _x0.option, price: _x0.price } : m; });
@@ -6989,6 +7056,33 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
   else { st.pendingPublish = st.pendingPublish || []; st.pendingPublish.push({ cc: cc, item_id: tgt.item_id, shop_id: tgt.shop_id, name: tgt.name, at: new Date().toISOString() }); }
 }
 /* 在庫更新が【明細まで通ったか】。Shopee は明細ごとの失敗を response.failure_list で返し、例外にはしない。 */
+/* ♻️ 上書きが途中で止まった明細（在庫0のまま）を直す。1回3件まで。名前・価格・写真がそろっていれば在庫を戻し、そろっていなければ足りない物を入れ直す。 */
+function baPartialRepair_(st) {
+  var ps = st.partials || []; if (!ps.length) return;
+  var done = 0, keep = [];
+  for (var i = 0; i < ps.length; i++) {
+    var p = ps[i];
+    if (done >= 3) { keep.push(p); continue; }
+    done++;
+    try {
+      var g = getModels_(p.shop_id, p.item_id) || {}, ms = g.models || [], cur = null;
+      for (var j = 0; j < ms.length; j++) if (String(ms[j].model_id) === String(p.model_id)) { cur = ms[j]; break; }
+      if (!cur) continue;   /* 明細が無い＝消えた。直す物が無い */
+      var okName = String(cur.name || '').trim() === String(p.en).trim();
+      var okPrice = Math.abs((Number(cur.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
+      if (!okPrice) { updatePrice_(p.shop_id, p.item_id, p.model_id, p.price); }
+      if (p.sku && String(cur.sku || '') !== String(p.sku)) { try { updateModelSku_(p.shop_id, p.item_id, [{ model_id: p.model_id, sku: p.sku }]); } catch (eS) {} }
+      if (okName && (okPrice || true)) {
+        var g2 = getModels_(p.shop_id, p.item_id) || {}, c2 = null; (g2.models || []).forEach(function (m) { if (String(m.model_id) === String(p.model_id)) c2 = m; });
+        var okP2 = c2 && Math.abs((Number(c2.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
+        if (okP2 && (Number(p.stock) || 0) > 0 && baStockOk_(updateStock_(p.shop_id, p.item_id, p.model_id, p.stock))) { baLog_(st, p.cc + '：♻️ 途中止まりだった「' + String(p.en).slice(0, 26) + '」の在庫を戻しました'); continue; }
+        if (okP2 && !(Number(p.stock) || 0)) continue;   /* 在庫0で出す作品＝価格が入っていれば直った */
+      }
+      keep.push(p);
+    } catch (e) { keep.push(p); }
+  }
+  st.partials = keep;
+}
 function baStockOk_(resp) {
   try { var r = (resp && resp.response) || resp || {}; var f = r.failure_list || r.failure || []; return !(f && f.length); } catch (e) { return false; }
 }
@@ -7172,11 +7266,11 @@ function baJanBackfill_(st, t0) {
       if (!a.model_id) { a.jt = (a.jt || 0) + 1; if (asked && a.jt >= JT_MAX_MID) a.jw = 1; return; }   /* 何度引いても出ない＝明細が消されている */
       var jan = a.jan || janOf(String(a.hw || ''), a.key, a.ja);
       if (!jan) { a.jt = (a.jt || 0) + 1; if (a.jt >= JT_MAX_JAN) a.jw = 1; return; }   /* マスタにまだ無いだけかもしれない＝すぐ諦めない */
-      a.jan = jan; a.jw = 1;
-      q.push({ item_id: a.item_id, model_id: a.model_id, jan: jan, hw: a.hw, ja: a.ja || '', src: a.src || '' });
+      a.jan = jan;   /* ★2026-09-23 Codex指摘：済みの印は【書けてから】（前は書く前に jw=1＝失敗すると二度と書かない） */
+      q.push({ item_id: a.item_id, model_id: a.model_id, jan: jan, hw: a.hw, ja: a.ja || '', src: a.src || '', _a: a });
     });
   }
-  if (q.length) { var w = baWriteJan_(q); if (w) baLog_(st, 'JANを後から台帳に ' + w + '件'); }
+  if (q.length) { var w = baWriteJan_(q); if (w) { q.forEach(function (x) { if (x._a) x._a.jw = 1; }); baLog_(st, 'JANを後から台帳に ' + w + '件'); } }
 }
 /* ★2026-09-20 明細SKU（本人「出品している商品、明細に全てSKU付けられますか？」→ 形は 機種_作品名・7か国共通・既にあるSKUは触らない）
    baSkuOf_＝🤖が新しく足す明細のSKU。baSkuPlanTick_＝ポータル側で作った計画（app_kv.sku_plan {items:[{s:shop_id,i:item_id,m:[[model_id,sku],...]}]}）を
