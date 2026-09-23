@@ -6289,6 +6289,8 @@
     "在庫書込": "Write stock",
     "✍️出品を作る": "✍️ Create a listing",
     "1日の目標": "Daily target",
+    "店 読み込み中…": "Shop loading…",
+    "店 —": "Shop —",
     "先頭に足す": "Add to the front",
     "末尾に足す": "Add to the end",
     "⚖️ 重量": "⚖️ Weight",
@@ -18557,6 +18559,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🏪 <b>出品ログのカードに「どの店（アカウント）に出したか」を出しました</b>（本人「これどのアカウントに出したかもわかれば嬉しい」）。1店舗目の枠が埋まると🤖は2店舗目に出すので、カードごとに店名（注文画面の 🏪 と同じ・gcsonlinestore 系は青／もう一方は紫）が出ます',
+      '🎮 <b>Switchの写真を優先して集めるようにしました</b>（本人「switchの割合を増やして」）。🤖は写真が揃った作品からしか出せず、写真集めは17機種を順番に回していた＝Switch は17回に1回しか写真が増えませんでした。<b>毎回の先頭の1枠を Switch に使い</b>、残り4枠で他の機種を回します（Switch に探す作品が無ければ普段の順番に戻す）。あわせてGAS側で、<b>作れない国は6時間外す</b>（同じ20作品の空回り止め）・<b>台湾の必須項目「成人向けか」を埋めて作り直す</b>を入れました',
       '📈 <b>【不具合】売上・注文数の推移で、棒の上の数字（売上／オーダー数／商品数）が出なくなっていたのを戻しました</b>（本人「売上、オーダー数、商品数が表示されなくなった」）。9/21の「情報量を減らす」対応で、本数が多いとき（日足30本など）<b>最大の日と最新だけ</b>にしていたのが行きすぎでした。<b>値は全部出す</b>に戻し、9/21の狙い（灰色の「0」が並ぶ・数字が数字を邪魔する）は<b>0の日は出さない＋最大の日と最新だけ濃い字</b>にすることで両立させています',
       '📐 <b>出品枠（Listing Limit）は公式APIで取れると分かり、全13店を実測しました</b>（本人「何故取れない？」）。`get_item_limit` の <b>item_count_limit</b> がそれです。これまでは手入力の数字を使っていました（BRは10,000と入れていましたが実際は<b>5,000</b>）。実測：<b>MY・SG・TH は2店舗目の枠が1,000＝1店舗目（500）の2倍</b>、PH・THは1店舗目が満杯、VNは残り197で2店舗目なし。合計の残りは約8,670件',
       '🎯 <b>枠が満杯かを「公開が弾かれてから」ではなく、枠の数字で先回りして判定するようにしました</b>（残り5件以下で2店舗目へ）。枠は24時間キャッシュ、件数は同じ巡回で数え直さないので接続枠は増えません',
@@ -29038,16 +29042,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* ★2026-09-21 本人「1日500とか1000とか出していきたい」→ 詰まりを数えたら写真だった
          （集めた1,182作品のうち 写真あり558・見つからず195・**まだ探していない429**／AI判定は51%が不合格でカタログ画像245が最大）。
          1回3機種→5機種、1機種25枚→40枚に太くする。 */
+      /* ★2026-09-23 本人「switchの割合を増やして」。出品は【写真が揃った作品】からしか出せず（Switch の見送りの77%が写真待ち）、
+         写真集めは17機種を順番に回していた＝Switch は17回に1回しか写真が増えなかった。
+         → 毎回の【先頭の1枠】を優先の機種（cfg.hwPriority・既定 switch2→switch）に使い、残り4枠で順番を回す。
+         優先の機種に探す作品が残っていなければ、その枠は普段の順番に戻す（空振りで枠を捨てない）。 */
+      const _prio = (Array.isArray(cfg.hwPriority) && cfg.hwPriority.length ? cfg.hwPriority : ['switch2', 'switch']).filter(h => hws.includes(h));
+      let _prioUsed = false;
       for (let t = 0; t < 5; t++) {
-        const hw = hws[(ci++) % hws.length];
-        try { localStorage.setItem('smdBaCollectIdx', String(ci)); } catch (_) {}
-        lst._baCollectIdx = ci;
+        let hw = null, _isPrio = false;
+        if (!_prioUsed && _prio.length) { _prioUsed = true; _isPrio = true; hw = _prio[(Number(lst._baPrioIdx) || 0) % _prio.length]; lst._baPrioIdx = (Number(lst._baPrioIdx) || 0) + 1; }
+        if (!hw) {
+          hw = hws[(ci++) % hws.length];
+          try { localStorage.setItem('smdBaCollectIdx', String(ci)); } catch (_) {}
+          lst._baCollectIdx = ci;
+        }
         const r = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 40, noYahoo: '1', needPhoto: '1' }, 240000);
         if (!r || !r.ok || !Array.isArray(r.rows)) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗'); continue; }
         const pre = (await baKvGet('boshu_auto_pre')) || {};
         // 見つからなかった作品は 3日は引き直さない（メルカリを無駄に叩かない）
         const rows = r.rows.filter(x => x && x.key && !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000))));
-        if (!rows.length) { msgs.push((TITLE_HW_JA[hw] || hw) + '：全部写真あり'); continue; }
+        if (!rows.length) { msgs.push((TITLE_HW_JA[hw] || hw) + '：全部写真あり'); if (_isPrio) t--; continue; }   /* 優先の枠が空振りなら、その枠を普段の順番に回す */
         const c = await baCollectMercari(rows, hw, { max: 40 });
         msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : ''));
       }
@@ -32147,6 +32161,16 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 const nmHtml = bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" style="color:#1a3d7c;text-decoration:none" title="${av((r.name || '') + '｜押すとShopeeの商品ページを開きます')}">${nmTxt}</a>` : nmTxt;
                 return `<span style="display:flex;gap:4px;align-items:flex-start"><span style="flex:1;min-width:0;font-size:11px;font-weight:600;color:#333;line-height:1.35;word-break:break-word">${bot}${nmHtml}</span>${bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" title="Shopee の商品ページ（お客さんが見る画面）を開く" style="flex:none;font-size:11px;text-decoration:none">🛒</a>` : ''}${eu ? `<a href="${esc(eu)}" target="_blank" rel="noopener" title="セラーセンターの編集ページを開く" style="flex:none;font-size:11px;text-decoration:none">✏️</a>` : ''}</span>`; })()}
               <span style="display:block;font-size:9.5px;color:#8a8f98;line-height:1.3;word-break:break-word" title="${esc(r.name || '')}">${esc(r.model_name ? (r.name || '') : '')}</span>
+              ${(() => { /* ★2026-09-23 本人「これどのアカウントに出したかもわかれば嬉しい」。1店舗目の枠が埋まると🤖は2店舗目に出すので、
+                   カードごとに【出した店】を出す（shop_id → 登録簿の店名・注文画面の 🏪 と同じ部品）。読めていない時は「読み込み中」＝空欄にしない */
+                const sm = logState.shopMap;
+                if (!sm) return '<span style="display:block;font-size:9.5px;color:#c0392b">店 読み込み中…</span>';
+                const sid = sm[r.cc + '|' + r.item_id];
+                if (!sid) return '<span style="display:block;font-size:9.5px;color:#bbb" title="いまの出品データにこのカタログが見つかりません">店 —</span>';
+                const lb = acctLabel(sid);
+                if (!lb) return `<span style="display:block;font-size:9.5px;color:#8a8f98" title="登録簿にまだ無い店です（shop_id ${esc(sid)}）">🏪 店 ${esc(sid)}</span>`;
+                return `<span style="display:block;font-size:9.5px;font-weight:700;color:${famOfLabel(lb) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};word-break:break-all" title="${av('この明細を出した店（アカウント）：' + lb)}">🏪 ${esc(lb)}</span>`;
+              })()}
               ${(() => { /* ★2026-09-21 本人「金額も出してほしい、最後まで日本円でも出してほしい」
                    listing_log.price は【その国の通貨】。円換算は注文日と同じ規則（fxRate＝日次レート×国別スプレッド）を使う。
                    レートが取れない時は現地通貨だけ出す（勝手な概算を出さない）。 */
