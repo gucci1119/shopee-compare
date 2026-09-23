@@ -5861,6 +5861,8 @@ function boshuAutoTick(manual) {
     var ccs = (cfg.ccs || []).slice();
     if (!hws.length) { st.lastMsg = '機種が選ばれていません（🤖の設定）'; return finish_(st.lastMsg); }
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
+    /* ★2026-09-23 本人「Switch2、Switchから出してってほしい」。機種は順ぐりに回しているので、17機種だと Switch は17回に1回しか来ない。
+       cfg.hwPriority（既定 switch2・switch）を【1回おき】に先に回す＝倍のペースで当たる。候補が無ければ普段どおりの順ぐりに落ちる。 */
     var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [];
     /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して。毎日絶対に、あの機能が止まるぐらい使わないで」
        出すペースを上げた（perTick 10→20）ので、**枠の減り方に応じて自分で絞る**。
@@ -5874,7 +5876,19 @@ function boshuAutoTick(manual) {
     else if (_ufPct >= 0.50) { perTick = Math.max(1, Math.round(perTick * 0.5)); _slow = '50%'; }
     if (_slow) baLog_(st, '🐢 接続枠を' + _slow + '超え使ったので、1回の作品数を ' + perTick + ' に落としました（' + _ufNow + '/' + ufStopLine_() + '）');
     var ledger = null, listedByCc = null, fam = null, famRows = null, allRows = null, ccsHw = ccs;
-    while (tried < hws.length) {
+    var _prio = (cfg.hwPriority && cfg.hwPriority.length) ? cfg.hwPriority.slice() : ['switch2', 'switch'];
+    st.pTick = (Number(st.pTick) || 0) + 1;
+    if (st.pTick % 2 === 1) {
+      var _pc = Number(st.pCursor) || 0;
+      for (var _pi = 0; _pi < _prio.length && !hw; _pi++) {
+        var _h = String(_prio[(_pc + _pi) % _prio.length]);
+        if (hws.indexOf(_h) < 0) continue;
+        var _ctxP = baLoadCtx_(cfg, _h, (cfg.family[_h].ccs && cfg.family[_h].ccs.length) ? cfg.family[_h].ccs.slice() : ccs);
+        if (_ctxP.cand && _ctxP.cand.length) { hw = _h; fam = cfg.family[_h]; ccsHw = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : ccs; famRows = _ctxP.famRows; listedByCc = _ctxP.listedByCc; allRows = _ctxP.allRows; ledger = _ctxP.ledger; cand = _ctxP.cand; ctx = _ctxP; st.pCursor = _pc + _pi + 1; }
+      }
+      if (hw) baLog_(st, '⭐ 優先の機種から回します: ' + hw);
+    }
+    while (!hw && tried < hws.length) {
       hw = hws[cur % hws.length]; cur++; tried++;
       fam = cfg.family[hw];
       ccsHw = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : ccs;   // 機種ごとの「出す国」（無ければ既定）
@@ -6015,10 +6029,13 @@ function boshuAutoTick(manual) {
     if (preRejChanged) { try { var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 80)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
+    /* ★2026-09-23 家族カタログの名前（①②の印は外す）。その国にまだ無い時は、この名前で1つ作る（baEnsureFam_） */
+    var _famName = '';
+    Object.keys(famRows).forEach(function (c2) { if (_famName) return; var r0 = (famRows[c2] || [])[0]; if (r0 && r0.name) _famName = String(r0.name); });
     var touchedShops = {};
     ccsHw.forEach(function (cc) {
       if (Date.now() - t0 > DEADLINE) return;
-      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st);
+      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st, _famName);
       out.ccs[cc] = r; out.added += r.added || 0;
       if (r.shop_id) touchedShops[r.shop_id] = 1;
     });
@@ -6274,7 +6291,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     });
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
-  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0);
+  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false);
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
@@ -6407,7 +6424,7 @@ function boshuAutoExclude_(hw, key, undo, any, ja) {
 }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
-function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre) {
+function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto) {
   soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
   var byKey = {}, list = [];
@@ -6426,7 +6443,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     var need = ccs.filter(function (cc) {
       var d = (ledger[r.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;   // 済み
       if (d && /^skip:(noimg|noname|dup|nofam|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
-      if (!(famRows[cc] || []).length) return false;                                                     // その国に家族カタログが無い
+      if (!(famRows[cc] || []).length && !famAuto) return false;                                          // その国に家族カタログが無い（★2026-09-23 自動作成が有効なら候補に残す＝入れる時に1つ作る）
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
       return true;
@@ -6441,8 +6458,34 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
   out.sort(function (a, b) { return (b.sold - a.sold) || (b.hasPre - a.hasPre) || (b.sg - a.sg) || ((b.jan ? 1 : 0) - (a.jan ? 1 : 0)) || String(a.ja).localeCompare(String(b.ja), 'ja'); });
   return out;
 }
+/* 🆕 その国に【機種ごとの汎用カタログ】が1つも無い時、同じ店の同じ機種のカタログを元に1つ作る（2026-09-23 本人「明細を足す先がない場合、勝手に作れたりしないですか？」→「よろしく」）
+   これが無くて MY・TW だけ 🤖 の対象から外れていた（9/20）。作り方は「満杯→複製」と同じ道具（cloneItem_）＝
+   説明文・画像・カテゴリ・状態・ブランド・重量・動画は元のカタログから引き継ぎ、明細は test 1件だけの空で作られる。
+   ★名前と親SKUは【他の国の家族カタログ】に合わせる（①②の印は外す）＝作った瞬間から家族として拾われる。
+   ★非公開で作る（publish=false）。公開は本人のタイミング（[[listing-publish-timing-is-users-call]]）。
+   ★元にできるカタログが無い国では作らない（勝手に変な物を作らない）。 */
+function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
+  var fam = (cfg.family || {})[hw] || {};
+  var byCc = fam.byCc || {}, o = byCc[cc] || {};
+  var wantSku = String(o.sku || fam.sku || '').trim();
+  /* 名前は【他の国の家族カタログ】から借りる（無ければ作らない） */
+  var srcName = String(famName || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
+  if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（他の国にも家族カタログがありません）'); return null; }
+  /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
+  var pool = allRowsCc || [];
+  var src = pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0] || pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0; })[0];
+  if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（元にできる同じ機種のカタログがこの国にありません）'); return null; }
+  var cl = null;
+  try { cl = cloneItem_(src.shop_id, src.item_id, srcName, false); }
+  catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 100)); return null; }
+  if (!cl || !cl.item_id) return null;
+  /* 親SKUを家族のものに揃える（cloneItem_ は元のカタログの親SKUを引き継ぐので必ず上書きする） */
+  if (wantSku) { try { callShop_(src.shop_id, '/api/v2/product/update_item', null, 'post', { item_id: cl.item_id, item_sku: wantSku }); } catch (eS) { baLog_(st, cc + '：親SKUを付けられませんでした（' + String(eS).slice(0, 60) + '）'); } }
+  baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）');
+  return { cc: cc, item_id: cl.item_id, name: srcName, shop_id: src.shop_id, weight: src.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
+}
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
-function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st) {
+function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st, famName) {
   var res = { added: 0, skipped: 0, note: '' };
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
@@ -6454,6 +6497,11 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   // ★関連するバリエカタログ（Final Fantasy Series 等）があればそちらへ、無ければ機種のカタログ群へ（本人 2026-09-13「関連するバリエーションのカタログに追加していって欲しい」）
   var groups = {}, order = [];
   todo.forEach(function (p) { var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+  /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
+  if (!famRows.length && cfg.autoFamily !== false) {
+    var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st);
+    if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
+  }
   order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
   return res;
 }
