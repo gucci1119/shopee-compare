@@ -18522,6 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '📦 <b>出品ログのカードに在庫数を出すようにしました</b>（本人「在庫数も出してほしい」）。いまの出品データの在庫で、<b>0 は赤で「（買えません）」</b>と出ます（読み込み中は「読み込み中…」＝在庫なしと読み違えないように）',
       '🔽 <b>出品ログの並びを「新しい順」にし、並べ替えを足しました</b>（本人「基本的には出した順番に並べてほしい。上に行くほど最新」「他の並べ方もできるようにフィルターも構えておいて」）。既定は<b>新しい順</b>（出した時刻）で、<b>古い順／高い順／安い順／名前順／機種順</b>に切り替えられます（選んだ並びは端末に覚えます。国ごとの列では行の並びが変わり、同じ作品は横一列のままです）',
       '🌏 <b>その国に同じ機種のカタログが1つも無い時は、別機種のカタログを元に作るようにしました</b>（MY には GameCube の汎用カタログが0件だったため「作れません」で止まっていました）。引き継ぐのは説明文・状態写真・カテゴリ・重さ（機種が違っても同じ定型）で、名前と親SKUは作ったあと家族のものに直します。この場合は記録に <b>⚠️ どの機種を元にしたか</b>が残るので、写真と属性は後から直せます',
       '🏷 <b>出品ログのカードに SKU を出すようにしました</b>（本人「SKUも出してほしいです」）。明細のSKU（無ければカタログの<b>親SKU</b>＝「（親）」付き）で、押すとコピーできます。SKUは出品ログには入っていないので、その日に出したカタログのぶんだけ出品データから引いています',
@@ -31812,16 +31813,21 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           /* ★2026-09-23 本人「SKUも出してほしいです」。SKUは listing_log に無い（列は id/cc/item_id/model_id/ymd/name/model_name/image/price/seeded/created_at）ので
              出品データ listings.models[].sku から引く。全件は重いので【その日に出したカタログの分だけ】100件ずつ取る。 */
           try {
-            const ids = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))], sku = {};
+            const ids = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))], sku = {}, stk = {};
             for (let i = 0; i < ids.length; i += 100) {
               const part = await sbGetAll('listings', 'select=cc,item_id,parent_sku,models&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')');
               (part || []).forEach(l => {
                 sku[l.cc + '|' + l.item_id] = String(l.parent_sku || '').trim();
-                (l.models || []).forEach(mm => { if (mm && mm.sku) sku[l.cc + '|' + l.item_id + '#' + mm.id] = String(mm.sku).trim(); });
+                (l.models || []).forEach(mm => {
+                  if (!mm) return;
+                  if (mm.sku) sku[l.cc + '|' + l.item_id + '#' + mm.id] = String(mm.sku).trim();
+                  /* ★2026-09-23 本人「在庫数も出してほしい」。在庫は出品データ側の値（listing_log には無い） */
+                  if (mm.stock != null) stk[l.cc + '|' + l.item_id + '#' + mm.id] = Number(mm.stock);
+                });
               });
             }
-            logState.skuMap = sku;
-          } catch (_) { logState.skuMap = logState.skuMap || {}; }
+            logState.skuMap = sku; logState.stockMap = stk;
+          } catch (_) { logState.skuMap = logState.skuMap || {}; logState.stockMap = logState.stockMap || {}; }
         } catch (_) { }
         logState._detailDay = sel; logState._detailBusy = false;
         try { renderListingLog(); } catch (_) { }
@@ -32078,6 +32084,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 if (!s && !p) return '<span style="display:block;font-size:9.5px;color:#bbb">SKU —</span>';
                 const v = s || p;
                 return `<span style="display:block;font-size:9.5px;color:#5a4b8c;font-weight:700"><span class="llog-sku" data-s="${av(v)}" title="${av(s ? 'この明細のSKU（押すとコピーします）' : 'この明細にはSKUが無いので、カタログの親SKUを出しています（押すとコピーします）')}" style="cursor:pointer;text-decoration:underline dotted">SKU ${esc(v)}</span>${s ? '' : ' <span style="color:#8a8f98;font-weight:400">（親）</span>'}</span>`;
+              })()}
+              ${(() => { /* ★2026-09-23 本人「在庫数も出してほしい」。いまの出品データの在庫（listing_log には入っていない）。
+                   0 は赤（＝買えない状態）・読めていない時は「読み込み中」＝「在庫なし」と誤読させない */
+                const km = logState.stockMap;
+                if (!km) return '<span style="display:block;font-size:9.5px;color:#c0392b">在庫 読み込み中…</span>';
+                const n = km[r.cc + '|' + r.item_id + '#' + r.model_id];
+                if (n == null) return '<span style="display:block;font-size:9.5px;color:#bbb" title="いまの出品データにこの明細が見つかりません（消した・入れ替えた明細かもしれません）">在庫 —</span>';
+                const zero = Number(n) <= 0;
+                return `<span style="display:block;font-size:9.5px;font-weight:700;color:${zero ? '#c0392b' : '#1e8e3e'}" title="${av(zero ? 'この明細は在庫0です（買えません）' : 'いまの在庫数')}">在庫 ${esc(String(n))}${zero ? ' <span style="font-weight:400">（買えません）</span>' : ''}</span>`;
               })()}
             </span></div>`, llogNm(r.model_name || r.name || ''), (r._hw || '')]))}`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
