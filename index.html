@@ -7041,6 +7041,7 @@
     "🧹 おかしなJANは見つかりませんでした。": "🧹 No suspicious JAN was found.",
     /* ★2026-09-23 全体レビュー：英語版の抜け（無作為40本のうち14本）＋今回足した警告文 */
     /* ★2026-09-23 月次損益・固定費の自動登録・ヤマト運賃の取込 */
+    '　暫定→確定の動き': '  Provisional → confirmed',
     '🏗 初期投資の回収': '🏗 Payback of initial investment', '（別枠）初期投資': '(Separate) Initial investment', '初期投資': 'Initial investment', '案件': 'Project', '投資額': 'Invested', 'その後の営業利益 累計': 'Operating profit since', '回収': 'Recovered', '見込み': 'Outlook', '回収済': 'Recovered',
     '🔁 毎月かかる経費（人件費・家賃・ツールなど）': '🔁 Recurring costs (labor, rent, tools…)', '月が変わったら自動で入れる': 'Post automatically when the month changes', 'いつもの額': 'Usual amount', '入れ方': 'How', '毎月同じ額を自動で': 'Same amount every month (auto)', '月ごとに手で入れる': 'Enter each month by hand', '1件単価×出荷数': 'Unit price × shipments', '✔ 入っています': '✔ Posted', '入れる': 'Post', 'まだ': 'Not yet', '＋ 足す': '+ Add',
     '今月の実額': 'This month\'s actual', '✔ 登録済': '✔ Posted',
@@ -16562,16 +16563,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function plCtx(ym, expRows, extras) {
     const ok = pf.grossYm === ym && typeof pf.grossTotal === 'number';
     const c = { ym, ok, gross: ok ? pf.grossTotal : null, grossN: pf.grossN || 0, fixN: pf.grossFixN || 0, provN: pf.grossProvN || 0, cxl: ok ? (Number(pf.cxlLoss) || 0) : 0, cxlN: pf.cxlN || 0 };
-    let sales = 0, depFix = 0, depProv = 0, depInit = 0, cost = 0, pp = 0, n = 0, noCost = 0, noDep = 0;
+    let sales = 0, depFix = 0, depProv = 0, depInit = 0, cost = 0, pp = 0, n = 0, noCost = 0, noDep = 0, mvN = 0, mvJpy = 0, mvBase = 0, lateN = 0, flatN = 0;
     if (ok) (pf.orders || []).forEach(o => {
       if (o.tab === 200 || o.tab === 600 || !regionByCc(o.cc)) return;
       n++; const r = ordRate(o); sales += pfSales(o) * r;
       const di = pfDepInfo(o); if (di && di.amt != null) { if (di.fixed) depFix += di.amt * r; else depProv += di.amt * r; } else noDep++;
-      const inc = pf.incMap && pf.incMap.get(o.cc + ':' + o.sn); if (inc && inc.amount_initial != null) depInit += Number(inc.amount_initial) * r;
+      const inc = pf.incMap && pf.incMap.get(o.cc + ':' + o.sn); if (inc && inc.amount_initial != null) { depInit += Number(inc.amount_initial) * r;
+        /* ★2026-09-24 本人「暫定と確定がまた一緒になってない？どれだけずれてるかが分かれば」→ 暫定（初回観測）→確定の動きを数える。
+           初回観測が確定後（初回値と確定値が同じ分に書かれた）＝比べられない。同額でも初回観測が先なら「動かなかった」 */
+        const a0 = Number(inc.amount_initial), a1 = Number(inc.amount); const sameMin = inc.amount_initial_at && inc.amount_at && String(inc.amount_initial_at).slice(0, 16) === String(inc.amount_at).slice(0, 16);
+        if (a1 !== a0) { mvN++; mvJpy += (a1 - a0) * r; mvBase += a0 * r; } else if (sameMin) lateN++; else flatN++; }
       const co = pfCost(o); if (co == null) noCost++; else cost += co;
       pp += pfPaypal(o);
     });
-    Object.assign(c, { n, sales, depFix, depProv, depInit, cost, pp, noCost, noDep });
+    Object.assign(c, { n, sales, depFix, depProv, depInit, cost, pp, noCost, noDep, mvN, mvJpy, mvBase, lateN, flatN });
     const rows = Array.isArray(expRows) ? expRows : [];
     const g = { ship: 0, pack: 0, labor: 0, place: 0, tool: 0, sell: 0, other: 0, invest: 0 };
     rows.forEach(r => { g[plGroupOf(r.category)] += Number(r.amount) || 0; });
@@ -16597,6 +16602,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <table style="border-collapse:collapse;font-size:12.5px;width:100%;max-width:760px">
         ${line('売上（買い手が払った額・参考）', y(c.sales), { sub: c.n + '件（キャンセル・未払いを除く）' })}
         ${line('入金（確定）', y(c.depFix), { sub: `確定${c.fixN}件` + (c.depProv ? `／暫定 ${y(c.depProv)}（まだ更新前）` : '') + (c.depInit ? `／更新前の暫定合計 ${y(c.depInit)}` : '') })}
+        ${(c.mvN || c.lateN || c.flatN) ? line('　暫定→確定の動き', (c.mvJpy < 0 ? '− ' : '+ ') + y(Math.abs(c.mvJpy)), { col: '#6b7280', sub: `動いた ${c.mvN}件（暫定比 ${pct(Math.abs(c.mvJpy), c.mvBase)}）／動かなかった ${c.flatN}件／暫定を見られなかった ${c.lateN}件（初回の取得が確定後＝枠切れ等で同期が止まっていた分）` }) : ''}
         ${line('− 仕入', '− ' + y(c.cost), { col: '#a15', sub: c.noCost ? `未入力 ${c.noCost}件` : '' })}
         ${c.pp ? line('＋ PayPal差分（別途受取）', '+ ' + y(c.pp), { col: '#0f9d58' }) : ''}
         ${line('＝ 粗利', y(c.gross), { strong: true, col: c.gross < 0 ? '#d93025' : '#1a7f37', sub: `粗利率 ${pct(c.gross, c.depFix + c.depProv)}（入金比）／${c.grossN}件` })}
