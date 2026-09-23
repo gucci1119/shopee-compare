@@ -6035,7 +6035,7 @@ function boshuAutoTick(manual) {
     var touchedShops = {};
     ccsHw.forEach(function (cc) {
       if (Date.now() - t0 > DEADLINE) return;
-      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st, _famName);
+      var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st, _famName, allRows);
       out.ccs[cc] = r; out.added += r.added || 0;
       if (r.shop_id) touchedShops[r.shop_id] = 1;
     });
@@ -6482,6 +6482,14 @@ function baShopFull_(cc, shopId, set) {
   var t = Number(m[k] || 0);
   return !!(t && now_() - t < 24 * 3600);
 }
+/* その国の1店舗目（本垢）の shop_id。登録簿 accounts の status が 'main' の行。無ければ 0 */
+function baMainShop_(cc) {
+  try {
+    var rows = sbSelectAll_('accounts', 'select=cc,shop_id,status&cc=eq.' + encodeURIComponent(cc));
+    var m = (rows || []).filter(function (r) { return String(r.status || '') === 'main' && r.shop_id; })[0];
+    return m ? parseInt(m.shop_id, 10) : 0;
+  } catch (e) { return 0; }
+}
 /* その国の2店舗目（サブ垢）の shop_id。登録簿 accounts の status が 'sub' の行。無ければ 0 */
 function baSubShop_(cc, mainShopId) {
   try {
@@ -6502,7 +6510,7 @@ function baCloneToSub_(cc, base, newName, st) {
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
-function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
+function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   var fam = (cfg.family || {})[hw] || {};
   var byCc = fam.byCc || {}, o = byCc[cc] || {};
   var wantSku = String(o.sku || fam.sku || '').trim();
@@ -6518,12 +6526,31 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
      その時は【同じ国の別機種の Variation カタログ】を元にする。引き継ぐのは説明文・状態写真・カテゴリ・重さで、
      これらは機種が違っても同じ定型なので実害は小さい。名前と親SKUはこのあと家族のものに書き換える。
      ただし属性（Platform 等）は元のまま残るので、⚠️ を記録して後から直せるようにする。 */
-  var crossHw = '';
-  if (!src) {
-    var alt = pool.filter(function (r) { return r.status === 1; })[0] || pool[0];
-    if (alt) { src = alt; crossHw = ((alt.hws || [])[0] || '?'); }
+  /* ★2026-09-23【訂正】同じ国に同じ機種が無い時に「別機種のカタログを複製する」のは誤りだった。
+     複製は写真も引き継ぐので、PS3/PS2/PS1/Vita/PSP のカタログに**ゲームボーイのカセット写真**が付いた（本人「これ、画像おかしくない？ マレーシア」）。
+     → 別機種は使わず、【他の国の同じ機種のカタログ】から写真URLで作る（seedShopCatalog_ は店をまたげる＝画像をURLで入れ直す）。
+     それも無ければ作らない（間違った写真を出すくらいなら出さない＝[[source_site_og_image_not_product]] と同じ考え方）。 */
+  if (!src && allRowsAll) {
+    var other = null;
+    Object.keys(allRowsAll).forEach(function (c2) {
+      if (c2 === cc || other) return;
+      var r2 = (allRowsAll[c2] || []).filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0];
+      if (r2) other = r2;
+    });
+    if (other) {
+      var dst = 0;
+      try { dst = pool.length ? parseInt(pool[0].shop_id, 10) : baMainShop_(cc); } catch (eD) { dst = 0; }
+      if (!dst) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
+      var pr0 = 0;
+      try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
+      var sd = seedShopCatalog_({ src_shop_id: other.shop_id, dst_shop_id: dst, item_id: other.item_id, price: pr0 });
+      if (!sd || !sd.ok || !sd.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（他の国から: ' + String((sd && sd.error) || '').slice(0, 70) + '）'); return null; }
+      try { callShop_(dst, '/api/v2/product/update_item', null, 'post', { item_id: sd.item_id, item_name: srcName.slice(0, 120), item_sku: wantSku || undefined }); } catch (eU) {}
+      baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + sd.item_id + '／写真は他の国の同じ機種から）');
+      return { cc: cc, item_id: sd.item_id, name: srcName, shop_id: dst, weight: other.weight, parent_sku: wantSku, models: [{ n: 'test', price: pr0 || 0 }], status: 0, isNew: true };
+    }
   }
-  if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（元にできるカタログがこの国に1つもありません）'); return null; }
+  if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（どの国にも ' + hw + ' のカタログがありません）'); return null; }
   var cl = null;
   try { cl = cloneItem_(src.shop_id, src.item_id, srcName, false); }
   catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 100)); return null; }
@@ -6531,11 +6558,11 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
   /* 親SKUを家族のものに揃える（cloneItem_ は元のカタログの親SKUを引き継ぐので必ず上書きする） */
   if (wantSku) { try { callShop_(src.shop_id, '/api/v2/product/update_item', null, 'post', { item_id: cl.item_id, item_sku: wantSku }); } catch (eS) { baLog_(st, cc + '：親SKUを付けられませんでした（' + String(eS).slice(0, 60) + '）'); } }
   baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）'
-    + (crossHw ? ' ⚠️ この国に ' + hw + ' のカタログが無いので【' + crossHw + '】のカタログを元にしました（写真・属性は後で見直してください）' : ''));
+    );
   return { cc: cc, item_id: cl.item_id, name: srcName, shop_id: src.shop_id, weight: src.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
 }
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
-function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st, famName) {
+function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st, famName, allRowsAll) {
   var res = { added: 0, skipped: 0, note: '' };
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
@@ -6549,7 +6576,7 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   todo.forEach(function (p) { var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
   /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
   if (!famRows.length && cfg.autoFamily !== false) {
-    var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st);
+    var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st, allRowsAll);
     if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
   }
   order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
