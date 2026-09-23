@@ -18522,6 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🔽 <b>出品ログの並びを「新しい順」にし、並べ替えを足しました</b>（本人「基本的には出した順番に並べてほしい。上に行くほど最新」「他の並べ方もできるようにフィルターも構えておいて」）。既定は<b>新しい順</b>（出した時刻）で、<b>古い順／高い順／安い順／名前順／機種順</b>に切り替えられます（選んだ並びは端末に覚えます。国ごとの列では行の並びが変わり、同じ作品は横一列のままです）',
       '🌏 <b>その国に同じ機種のカタログが1つも無い時は、別機種のカタログを元に作るようにしました</b>（MY には GameCube の汎用カタログが0件だったため「作れません」で止まっていました）。引き継ぐのは説明文・状態写真・カテゴリ・重さ（機種が違っても同じ定型）で、名前と親SKUは作ったあと家族のものに直します。この場合は記録に <b>⚠️ どの機種を元にしたか</b>が残るので、写真と属性は後から直せます',
       '🏷 <b>出品ログのカードに SKU を出すようにしました</b>（本人「SKUも出してほしいです」）。明細のSKU（無ければカタログの<b>親SKU</b>＝「（親）」付き）で、押すとコピーできます。SKUは出品ログには入っていないので、その日に出したカタログのぶんだけ出品データから引いています',
       '❓ <b>空きマスに「なぜ出していないか」を出すようにしました</b>（本人「なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど」）。✅<b>別の日に出しています（日付つき）</b>／📷写真がまだ無い・基準外／🔁すでに同じ作品を出している／🗂この国にカタログが無い／⚖️他の国と値段が離れすぎ／🚫この国は🤖の対象外／…まだ出していません、のように出ます（出所＝🤖の台帳＋出品ログ＋設定。カーソルを当てると出した日や商品IDが出ます）',
@@ -31835,7 +31836,25 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       r._hwMix = !!(hwSku && hwCat && hwSku !== hwCat && !(hwSku === 'GB' && hwCat === 'GBC') && !(hwSku === 'DS' && hwCat === '3DS'));
       r._hwCat = hwCat; r._hwSku = hwSku;
     });
-    const selRows = (logState.hw ? selAll.filter(r => (r._hw || '—') === logState.hw) : selAll);
+    const selRows = (logState.hw ? selAll.filter(r => (r._hw || '—') === logState.hw) : selAll.slice());   /* ★並べ替えで元の配列を壊さない（selAll は日別の集計に使い回している） */
+    /* ★2026-09-23 本人「ここは基本的には出した順番に並べてほしい。上に行くほど最新」「他の並べ方もできるようにフィルターも構えておいて」
+       既定＝新しい順（出した時刻 created_at の降順／同じならIDの降順）。選んだ並びは端末に覚える。
+       国ごとの列では【行の並び】がこの順になる（同じ作品は横一列のまま）。 */
+    if (!logState.sort) { try { logState.sort = localStorage.getItem('llogSort') || 'new'; } catch (_) { logState.sort = 'new'; } }
+    {
+      const ts = (r) => Date.parse(r.created_at || '') || 0, id = (r) => Number(r.id) || 0;
+      const nm = (r) => String(r.model_name || r.name || '');
+      const jpy = (r) => { const v = Number(r.price); if (!(v > 0)) return -1; try { const rt = fxRate(r.cc, r.ymd); return rt > 0 ? v * rt : -1; } catch (_) { return -1; } };
+      const cmp = {
+        new: (a, b) => (ts(b) - ts(a)) || (id(b) - id(a)),
+        old: (a, b) => (ts(a) - ts(b)) || (id(a) - id(b)),
+        price_hi: (a, b) => jpy(b) - jpy(a),
+        price_lo: (a, b) => { const x = jpy(a), y = jpy(b); if (x < 0) return 1; if (y < 0) return -1; return x - y; },
+        name: (a, b) => nm(a).localeCompare(nm(b), 'ja'),
+        hw: (a, b) => String(a._hw || 'zz').localeCompare(String(b._hw || 'zz')) || nm(a).localeCompare(nm(b), 'ja')
+      }[logState.sort] || null;
+      if (cmp) selRows.sort(cmp);
+    }
     const ccColor = (cc) => (regionByCc(cc) || {}).color || '#888';
     /* ★2026-09-22 本人「縦列で国ごとに分けて、その下に並べるような感じで表示できたりしますかね？」「国ごとに何品出品したとかも見れるようにしたい」
        既定は【国ごとの列】（列の頭に件数）。前の「まとめて並べる」にも切り替えられる（端末に覚える）。
@@ -31862,6 +31881,10 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const on = (l) => logState.layout === l ? 'background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700' : '';
       const head = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:7px"><b style="font-size:12px">国ごとの件数</b>`
         + order.map(cc => `<span style="font-size:11.5px;border:1px solid #e3e6ea;border-radius:12px;padding:2px 9px;background:#fff"><b style="color:${ccColor(cc)}">${esc(cc)}</b> ${pairs.length ? cnt[cc] : 0}件</span>`).join('')
+        + `<span style="display:inline-flex;gap:4px;align-items:center;margin-left:10px"><b style="font-size:12px">並び</b>`
+        + [['new', '新しい順'], ['old', '古い順'], ['price_hi', '高い順'], ['price_lo', '安い順'], ['name', '名前順'], ['hw', '機種順']]
+          .map(([k, label]) => `<button class="smd-btn llog-sort" data-s="${k}" title="${k === 'new' ? '出した時刻が新しいものを上に（既定）' : (k === 'old' ? '出した時刻が古いものを上に' : (k === 'price_hi' ? '円に直した売価が高い順' : (k === 'price_lo' ? '円に直した売価が安い順' : (k === 'name' ? '明細名の五十音・アルファベット順' : '機種ごとにまとめる'))))}" style="font-size:11px;${logState.sort === k ? 'background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700' : ''}">${label}</button>`).join('')
+        + `</span>`
         + `<span style="margin-left:auto;display:inline-flex;gap:4px"><button class="smd-btn llog-layout" data-l="cc" style="font-size:11px;${on('cc')}">国ごとの列</button><button class="smd-btn llog-layout" data-l="grid" style="font-size:11px;${on('grid')}">まとめて並べる</button></span></div>`;
       if (logState.layout === 'grid' || order.length <= 1) return head + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:7px">${pairs.map(p => p[1]).join('')}</div>`;
       /* ★2026-09-23 本人「同じ商品の場合は、同じ商品を横並びにしてほしい」：
@@ -32125,6 +32148,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       };
       { const a = host.querySelector('#llog-see'); if (a) a.addEventListener('click', llogSeeOpen); }
       host.querySelectorAll('.llog-layout').forEach(b => b.addEventListener('click', () => { logState.layout = b.dataset.l; try { localStorage.setItem('llogLayout', b.dataset.l); } catch (_) {} renderListingLog(); }));
+      host.querySelectorAll('.llog-sort').forEach(b => b.addEventListener('click', () => { logState.sort = b.dataset.s; try { localStorage.setItem('llogSort', b.dataset.s); } catch (_) {} renderListingLog(); }));
       { const a = host.querySelector('#llog-ckall'); if (a) a.addEventListener('click', () => { const cks = host.querySelectorAll('.llog-ck'); const on = ![...cks].every(c => c.checked); cks.forEach(c => { c.checked = on; }); bmsg(on ? cks.length + '件えらびました' : ''); }); }
       /* ★2026-09-21 本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」「選出基準は今まで私が何回も言ってる基準で」
          AIを使わずに分かる分（＝無料）をここで選ぶ：
