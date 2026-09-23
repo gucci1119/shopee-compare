@@ -6575,8 +6575,16 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   var groups = {}, order = [];
   todo.forEach(function (p) { var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
   /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
-  if (!famRows.length && cfg.autoFamily !== false) {
+  /* ★2026-09-23 作りすぎない安全弁。今日は1日で14件（うち7件は公開まで）作ってしまい、写真の取り違えが広がった。
+     1回の巡回で作るのは1件・1日 famPerDay（既定6）件まで。数は st に日付つきで持つ（推定ではなく実績で止める）。 */
+  var _fmDay = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
+  if (!st.famMade || st.famMade.d !== _fmDay) st.famMade = { d: _fmDay, n: 0 };
+  var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6));
+  if (!famRows.length && cfg.autoFamily !== false && st.famMade.n >= _fmCap) {
+    baLog_(st, cc + '：' + hw + ' のカタログは今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）');
+  } else if (!famRows.length && cfg.autoFamily !== false) {
     var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st, allRowsAll);
+    if (made) st.famMade.n++;
     if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
   }
   order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
