@@ -1065,6 +1065,23 @@ function doGetInner_(e) {
       } catch (err) { siout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(sicb + '(' + JSON.stringify(siout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    /* ★2026-09-23 「出品枠（Listing Limit）はAPIで取れないのか？」を実際に叩いて確かめるための口（本人「何故取れない？」）。
+       **GETだけ・パスは /api/v2/ 限定**＝読み取り専用。書き込みはできない。1回の呼び出しで urlfetch 1回。 */
+    if (p.action === 'api_probe') {
+      var apcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var apout;
+      try {
+        var apwt = P_().getProperty('WRITE_TOKEN');
+        if (!apwt || p.token !== apwt) throw new Error('WRITE_TOKEN不正');
+        var apPath = String(p.path || '');
+        if (apPath.indexOf('/api/v2/') !== 0) throw new Error('path は /api/v2/ で始めてください');
+        var apShop = parseInt(p.shop_id, 10); if (!apShop) throw new Error('shop_id 必須');
+        var apQ = {};
+        try { if (p.q) apQ = JSON.parse(p.q); } catch (eq) {}
+        apout = { ok: true, path: apPath, data: callShop_(apShop, apPath, apQ, 'get') };
+      } catch (err) { apout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(apcb + '(' + JSON.stringify(apout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'seed_shop') {
       var sscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ssout;
