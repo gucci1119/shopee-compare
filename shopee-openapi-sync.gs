@@ -827,6 +827,41 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(rvcb + '(' + JSON.stringify(rvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★カタログの削除（delete_item）。元に戻せないのでWRITE_TOKEN必須＋ポータル側で二重確認する。
+    /* 🔧 明細の枠（バリエ）が無い空カタログを直して使えるようにする（2026-09-23 本人「1店舗目にないカタログなら出してしまえば？」）。
+       2店舗目に作ったカタログが【バリエ無し・親SKU無し】で残っていた（seedShopCatalog_ の不具合・直し済み）。消さずに
+       ①軸 Title＋仮の明細 test（写真＝カタログの1枚目・在庫0）を作る ②親SKUを家族のもの（SWITCH 等）にする
+       → 次の🤖が家族カタログとして見つけ、明細を入れて公開する。明細が既にあるカタログには何もしない（既存を壊さない）。 */
+    if (p.action === 'repair_empty_catalog') {
+      var rpcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var rpout;
+      try {
+        var rpwt = P_().getProperty('WRITE_TOKEN');
+        if (!rpwt || p.token !== rpwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var rpshop = parseInt(p.shop_id, 10); if (!getToken_(rpshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var rpid = parseInt(p.item_id, 10); var rpsku = String(p.sku || '').trim();
+        if (!rpid || !rpsku) throw new Error('item_id と sku が必要です');
+        var rb = callShop_(rpshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rpid) }, 'get');
+        var rit = (((rb.response || {}).item_list) || [])[0];
+        if (!rit) throw new Error('カタログが見つかりません');
+        rpout = { ok: true, item_id: rpid, did: [] };
+        if (!rit.has_model) {
+          var rimg = ((rit.image || {}).image_id_list || [])[0];
+          var rpr = parseFloat(((rit.price_info || [])[0] || {}).original_price) || 0;
+          if (!rimg || !rpr) throw new Error('写真か価格が読めません');
+          var rj = callShop_(rpshop, '/api/v2/product/init_tier_variation', null, 'post', {
+            item_id: rpid, tier_variation: [{ name: 'Title', option_list: [{ option: 'test', image: { image_id: rimg } }] }],
+            model: [{ tier_index: [0], original_price: rpr, seller_stock: [{ stock: 0 }], model_sku: '' }] });
+          if (rj.error && rj.error !== '') throw new Error('軸を作れません: ' + rj.error + ' ' + (rj.message || ''));
+          rpout.did.push('軸と仮の明細を作成');
+        } else rpout.did.push('明細は既にあるので軸はそのまま');
+        if (String(rit.item_sku || '') !== rpsku) {
+          var ru = callShop_(rpshop, '/api/v2/product/update_item', null, 'post', { item_id: rpid, item_sku: rpsku });
+          if (ru.error && ru.error !== '') throw new Error('親SKUを付けられません: ' + ru.error + ' ' + (ru.message || ''));
+          rpout.did.push('親SKU=' + rpsku);
+        }
+      } catch (err) { rpout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(rpcb + '(' + JSON.stringify(rpout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'delete_item') {
       var dicb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var diout;
@@ -6633,6 +6668,10 @@ function baCloneToSub_(cc, base, newName, st) {
     baLog_(st, cc + '：2店舗目に同じ名前のカタログがある→番号を送ります');
   }
   if (!r || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + lastErr.slice(0, 80)); return null; }
+  /* ★2026-09-23 親SKUを家族のもの（SWITCH 等）にそろえる。付けないと次の回の🤖がこのカタログを家族と見分けられず、
+     毎回あたらしい空カタログを作り直していた（実測：TH の2店舗目に親SKU空のカタログが5つ）。 */
+  var wantSku2 = String(base.parent_sku || '').trim();
+  if (wantSku2) { try { callShop_(sub, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(r.item_id, 10), item_sku: wantSku2 }); } catch (eSk2) { baLog_(st, cc + '：2店舗目のカタログに親SKUを付けられませんでした（' + String(eSk2).slice(0, 60) + '）'); } }
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
