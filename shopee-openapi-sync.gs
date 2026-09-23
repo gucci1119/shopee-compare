@@ -1044,6 +1044,27 @@ function doGetInner_(e) {
          本体と取り合って全店の認証が壊れる。更新は本体だけの仕事。
        期限が近いものはここで本体が更新してから渡す（更新のurlfetchも本体の枠で消費する＝正しい側）。 */
     /* 🏪 2店舗目に種のカタログを1つ作る（非公開）。1回1つ＝押した分しか作らない。 */
+    /* ★2026-09-23 カタログのメイン写真を、指定したURL（他の国の同じ機種のカタログの写真）に差し替える。
+       用途＝機種違いの写真が付いてしまったカタログの手当て。**明細もカタログも消さない**（本人指定：soldやいいねが付いたものは絶対に消さない）。
+       URLは呼ぶ側が渡す＝勝手に代替画像を探さない（[[source_site_og_image_not_product]]）。 */
+    if (p.action === 'set_item_images') {
+      var sicb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var siout;
+      try {
+        var siwt = P_().getProperty('WRITE_TOKEN');
+        if (!siwt || p.token !== siwt) throw new Error('WRITE_TOKEN不正');
+        var siShop = parseInt(p.shop_id, 10), siItem = parseInt(p.item_id, 10);
+        if (!siShop || !siItem) throw new Error('shop_id / item_id 必須');
+        var siUrls = String(p.urls || '').split('|').map(function (x) { return String(x || '').trim(); }).filter(Boolean).slice(0, 9);
+        if (!siUrls.length) throw new Error('urls 必須（| 区切り）');
+        var siIds = [];
+        siUrls.forEach(function (u) { var id = uploadImageUrl_(u); if (id) siIds.push(id); });
+        if (!siIds.length) throw new Error('画像を1枚も上げられませんでした');
+        callShop_(siShop, '/api/v2/product/update_item', null, 'post', { item_id: siItem, image: { image_id_list: siIds } });
+        siout = { ok: true, item_id: siItem, images: siIds.length };
+      } catch (err) { siout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(sicb + '(' + JSON.stringify(siout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'seed_shop') {
       var sscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var ssout;
