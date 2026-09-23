@@ -18522,6 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '⏭ <b>出品ログの上に「次回の出品時刻・サイクル・このあとの見込み件数」を出しました</b>（本人「次回出品時間も、出品ログのところには何か表示してほしい。あと、出品のサイクルと」「あと出品予定の数」）。サイクル＝<b>15分ごと・1回あたり最大20作品×担当台数</b>、次回＝担当ごとの最終実行＋15分（止まっていそうなら⚠️）、見込み＝<b>直近1時間の実績×今日の残り時間</b>（予定表ではなく見積もりなので根拠も一緒に出します）',
       '🏪 <b>1店舗目の出品枠が満杯なら、2店舗目にカタログを作って出すようにしました</b>（本人「2アカウント目に出せばいいんじゃないんですか？」）。満杯かどうかは<b>「公開が枠で弾かれた」事実</b>で覚えます（推定では止めません）。実測でTHは1店舗目が500/500＝公開できない状態でした。2店舗目が登録簿に無い国（VN）は今までどおり1店舗目で続けます',
       '🌐 <b>🤖の出す国に MY・TW を全機種で追加しました</b>（本人「マレーシアも出してくださいね」）。入っていたのは GameCube と PS4 だけで、ほかの15機種は PH/SG/BR/VN/TH の5か国だけでした',
       '📣 <b>🤖が作ったカタログを7か国すべてで自動公開するようにしました</b>（本人「公開しないと売れないし意味ない」）。これまでONはBRだけで、ほかの国は公開待ちのまま溜まっていました',
@@ -31707,6 +31708,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     noname: ['🈚', '英語の名前が作れなかった']
   };
   function llogWhyLoad() {
+    /* 🤖の稼働状況（担当ごと）も一緒に読む＝出品ログの上に「次回いつ出すか」を出すため */
+    sbGet('app_kv', 'select=k,v&k=like.boshu_auto_status*').then(rs => {
+      const m = {}; (rs || []).forEach(r => { const id = String(r.k).replace('boshu_auto_status', '').replace(/^_/, '') || 'child'; m[id] = { at: (r.v || {}).lastAt || '', msg: (r.v || {}).lastMsg || '' }; });
+      logState.runners = m; renderListingLog();
+    }).catch(() => { logState.runners = logState.runners || {}; });
     return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en'), baKvGet('boshu_auto_cfg')]).then(([rows, en, cfg]) => {
       const mark = new Map(), fam = {};
       en = en || {}; cfg = cfg || {};
@@ -31721,7 +31727,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           });
         });
       });
-      _llogWhy = { mark: mark, fam: fam };
+      _llogWhy = { mark: mark, fam: fam, cfg: cfg };
       return _llogWhy;
     }).catch(() => { _llogWhy = { mark: new Map(), fam: {} }; return _llogWhy; });
   }
@@ -32003,8 +32009,34 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <div style="display:flex;gap:1px;align-items:flex-end">${bars}</div>
         <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#aaa;margin-top:3px"><span>${days[0]}</span><span>緑=目標達成 / 橙=未達 / 灰=0件 / <span style="color:#5e35b1;font-weight:700">紫=🤖自動出品の分</span>　クリックでその日の商品${nz.length && best > maxBar ? '　（▲=目盛り' + maxBar + '件を振り切った日）' : ''}</span><span>${days[days.length - 1]}</span></div>
       </div>
+      ${(() => { /* ★2026-09-23 本人「次回出品時間も、出品ログのところには何か表示してほしい。あと、出品のサイクルと」「あと出品予定の数」
+           出所：🤖の稼働記録 app_kv.boshu_auto_status（担当ごと・最終実行）＋設定（1回あたりの作品数）＋今日の実績（直近1時間）。
+           次回＝最終実行＋15分（トリガーの間隔）。予定数は【推定】なので、根拠（直近1時間の実績）を必ず一緒に出す。 */
+        const rn = logState.runners;
+        if (!rn) return '<div class="smd-dim" style="margin-top:8px;font-size:11.5px">🤖 自動出品の稼働状況を読み込み中…</div>';
+        const cfg = (_llogWhy && _llogWhy.cfg) || {}, per = Math.max(1, Number(cfg.perTick) || 20), every = 15;
+        const NAME = { child: '2台目', child2: '3台目', main: '本体' };
+        const now = Date.now();
+        const nexts = Object.keys(rn).map(id => {
+          const t = Date.parse(rn[id].at || ''); if (!t) return null;
+          let n = t + every * 60000; while (n < now - 60000) n += every * 60000;   // 止まっていた時は「次の回」に繰り上げる
+          return { id: id, next: n, late: now - t > every * 2.2 * 60000 };
+        }).filter(Boolean).sort((a, b) => a.next - b.next);
+        const hhmm = (ms) => new Date(ms + 9 * 3600000).toISOString().slice(11, 16);
+        /* 今日このあと何件出そうか＝直近1時間の実績（件/時）×残り時間。実績が無ければ出さない（推し量りで数字を作らない） */
+        const t1 = now - 3600000;
+        const lastH = (byDay.get(today) || []).filter(r => (Date.parse(r.created_at || '') || 0) >= t1).length;
+        const restH = Math.max(0, (24 - (Number(new Date(now + 9 * 3600000).toISOString().slice(11, 13)) + Number(new Date(now + 9 * 3600000).toISOString().slice(14, 16)) / 60)));
+        const eta = lastH ? Math.round(lastH * restH) : 0;
+        return `<div style="margin-top:10px;border:1px solid #e3d9f5;background:#faf7ff;border-radius:8px;padding:7px 11px;font-size:12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+          <b style="color:#5e35b1">🤖 自動出品</b>
+          <span title="トリガーの間隔と、1回あたりに扱う作品の数（枠の減り方で自動的に絞ります）">サイクル <b>${every}分ごと</b>・1回あたり最大 <b>${per}作品</b>×担当${nexts.length || 1}台</span>
+          ${nexts.length ? `<span>次回 ${nexts.map(x => `<b>${hhmm(x.next)}</b>ごろ<span class="smd-dim">（${esc(NAME[x.id] || x.id)}${x.late ? '・⚠️止まっているかも' : ''}）</span>`).join('　')}</span>` : '<span class="smd-dim">次回の時刻が分かりません（稼働記録がありません）</span>'}
+          <span title="${av(lastH ? ('直近1時間の実績 ' + lastH + '件から、今日の残り ' + restH.toFixed(1) + '時間ぶんを見積もった数です（予定表ではありません）') : '直近1時間に出た明細がないため、見込みは出していません')}">今日このあと <b>${lastH ? '約' + eta.toLocaleString() + '件' : '—'}</b> <span class="smd-dim">（直近1時間 ${lastH}件から）</span></span>
+        </div>`;
+      })()}
       <div style="margin-top:12px">
-        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品　<span style="color:#ee4d2d">${selRows.length}件</span>${logState.hw ? `<span class="smd-dim" style="font-weight:400;font-size:11px">（${esc(logState.hw)}でしぼり込み／全${selAll.length}件）</span>` : ''}${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
+        <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品<span style="color:#ee4d2d">${selRows.length}件</span>${logState.hw ? `<span class="smd-dim" style="font-weight:400;font-size:11px">（${esc(logState.hw)}でしぼり込み／全${selAll.length}件）</span>` : ''}${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
           <span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">バリエの明細1件＝1商品</span></div>
         ${(() => { /* ★2026-09-21 本人「ハードごとにタブを分けるとかもできますかね？もちろん、すべて含めて表示も」
              機種は【明細SKUの頭】（機種_作品名）で見る。無ければカタログ名から拾う。 */
