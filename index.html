@@ -2044,22 +2044,36 @@
        `acctTable is not defined` で落ち、押しても何も出ない状態になっていた（本人「押しても内訳が出なくなった」）。
        本人の要望「どっちのアカウントでどれが動いたか分かるように」を、各アカウントの uf_status の内訳（top）から表にする。 */
     const acctTable = (() => {
-      const cols = [['本体', oMain], ['2台目', oKid], ['3台目', oKid2]].filter(c => c[1]);
+      /* ★2026-09-23 本人「アカウント別で横棒積み上げで見れるようにできないかね？ ロスの部分や無駄な部分といった差分が見えると思う」
+         処理ごとに1本の横棒。本体＝青・2台目＝紫・3台目＝緑で積み上げ、右に台ごとの数。上位40件（内訳は全部返ってくる）。
+         想定（業務＝本体・🤖＝2台目以降）と逆の側で動いた分は ⚠️ で指す＝ロスや設計ミスが行で分かる。本体が枯れて2台目が代行した時は正常なので、⚠️の文言にそう書く。 */
+      const cols = [['本体', oMain, '#2b6cb0'], ['2台目', oKid, '#7b52c4'], ['3台目', oKid2, '#1e8e3e']].filter(c => c[1]);
       if (cols.length < 2) return '';
       const sum = new Map();
       cols.forEach(([, o]) => (o.top || []).forEach(t => { const k = String(t.k).replace('/api/v2/', ''); sum.set(k, (sum.get(k) || 0) + (Number(t.n) || 0)); }));
-      const order = [...sum.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+      const order = [...sum.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40);
       if (!order.length) return '';
+      const maxT = order[0][1] || 1;
       const cell = (o, k) => { const t = (o.top || []).find(x => String(x.k).replace('/api/v2/', '') === k); return Number(t && t.n) || 0; };
-      return '<div style="font-weight:700;font-size:12.5px;margin:2px 0 6px">どの処理が、どのアカウントで動いたか（今日）</div>'
-        + '<div style="overflow:auto;margin-bottom:12px"><table style="border-collapse:collapse;font-size:11.5px;min-width:340px">'
-        + '<tr><th style="text-align:left;padding:3px 8px;border-bottom:1px solid #ddd">処理</th>'
-        + cols.map(c => '<th style="text-align:right;padding:3px 8px;border-bottom:1px solid #ddd">' + esc(c[0]) + '</th>').join('') + '</tr>'
-        + order.map(([k]) => '<tr><td style="padding:3px 8px;border-top:1px solid #f0f0f0">' + esc(k) + '</td>'
-            + cols.map(c => { const n = cell(c[1], k);
-                return '<td style="padding:3px 8px;border-top:1px solid #f0f0f0;text-align:right;font-variant-numeric:tabular-nums;color:' + (n ? '#2b3440' : '#c8ccd2') + ';font-weight:' + (n ? '700' : '400') + '">' + (n ? n.toLocaleString() : '—') + '</td>'; }).join('')
-            + '</tr>').join('')
-        + '</table></div>';
+      const isBiz = (k) => /^(payment|order|returns|logistics|auth)\//.test(k) || /^Supabase(読み|書き)\((orders|income|customers|returns|payouts|order_adjustments|daily_stats|inventory)\)/.test(k);
+      const isBot = (k) => /^boshu_auto/.test(k);
+      const totalAll = cols.reduce((a, c) => a + (Number(c[1].usedSelf != null ? c[1].usedSelf : c[1].used) || 0), 0);
+      const legend = cols.map(c => '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px"><span style="width:10px;height:10px;border-radius:3px;background:' + c[2] + ';display:inline-block"></span>' + esc(c[0]) + '</span>').join('');
+      const rowsH = order.map(([k, tot]) => {
+        const parts = cols.map(c => [c[0], cell(c[1], k), c[2]]);
+        const segs = parts.filter(p => p[1] > 0).map(p => '<span title="' + esc(p[0] + ' ' + p[1].toLocaleString() + '回') + '" style="display:inline-block;height:11px;background:' + p[2] + ';width:' + (p[1] / tot * 100) + '%"></span>').join('');
+        const nums = parts.map(p => '<span style="display:inline-block;min-width:52px;text-align:right;color:' + (p[1] ? p[2] : '#c8ccd2') + ';font-weight:' + (p[1] ? 700 : 400) + '">' + (p[1] ? p[1].toLocaleString() : '—') + '</span>').join('');
+        let warn = '';
+        if (isBiz(k) && parts.slice(1).some(p => p[1] > 0)) warn = '<span title="業務の処理は本体の担当。2台目・3台目で動いた分がある（本体が枠切れで代行した時は正常）" style="color:#e8770a;font-size:11px;margin-left:4px">⚠️</span>';
+        if (isBot(k) && parts[0] && parts[0][1] > 0) warn = '<span title="🤖の処理は2台目以降の担当。本体で動いた分がある" style="color:#e8770a;font-size:11px;margin-left:4px">⚠️</span>';
+        return '<tr><td style="padding:3px 6px 3px 0;border-top:1px solid #f0f0f0;font-size:11.5px;white-space:nowrap">' + esc(k) + warn + '</td>'
+          + '<td style="padding:3px 6px;border-top:1px solid #f0f0f0;text-align:right;font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap">' + tot.toLocaleString() + '</td>'
+          + '<td style="padding:3px 6px;border-top:1px solid #f0f0f0;width:40%"><span style="display:inline-flex;width:' + Math.max(2, Math.round(tot / maxT * 100)) + '%;height:11px;border-radius:5px;overflow:hidden;background:#f0f2f5;vertical-align:middle">' + segs + '</span></td>'
+          + '<td style="padding:3px 0 3px 6px;border-top:1px solid #f0f0f0;font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap">' + nums + '</td></tr>';
+      }).join('');
+      return '<div style="font-weight:700;font-size:12.5px;margin:2px 0 4px">どの処理が、どのアカウントで動いたか（今日）<span class="smd-dim" style="font-weight:400;font-size:11px">　3台の合計 ' + totalAll.toLocaleString() + '回・多い順</span></div>'
+        + '<div style="margin-bottom:5px">' + legend + '<span class="smd-dim" style="font-size:10.5px">⚠️＝想定（業務は本体・🤖は2台目以降）と逆の側で動いた分</span></div>'
+        + '<div style="overflow:auto;margin-bottom:12px"><table style="border-collapse:collapse;width:100%;min-width:520px"><tbody>' + rowsH + '</tbody></table></div>';
     })();
     const html = '<div style="font-size:12px">'
       + acctHtml
@@ -2073,8 +2087,8 @@
       + kpi('リセット', ufResetJst(), '太平洋時間の日付が変わる時刻', '#8a8f98')
       + '</div>'
       + (r.blocked ? '<div style="background:#fdecea;border:1px solid #f0c4bd;color:#b3261e;border-radius:8px;padding:8px 11px;margin-bottom:12px;font-size:12px">⛔ <b>Googleに断られています</b>（' + esc(String(r.blockedMsg || '')).slice(0, 80) + '）。' + ufResetJst() + 'まで戻りません。</div>' : '')
-      + '<div style="font-weight:700;font-size:12.5px;margin:2px 0 5px">今日いちばん枠を食っているもの<span class="smd-dim" style="font-weight:400;font-size:11px">（' + (r.child ? '2台目' : '本体') + 'のぶん・つかった ' + used.toLocaleString() + '回のうち）</span></div>'
-      + (top.length
+      + (acctTable ? '' : '<div style="font-weight:700;font-size:12.5px;margin:2px 0 5px">今日いちばん枠を食っているもの<span class="smd-dim" style="font-weight:400;font-size:11px">（' + (r.child ? '2台目' : '本体') + 'のぶん・つかった ' + used.toLocaleString() + '回のうち）</span></div>')
+      + (acctTable ? '' : top.length
         ? '<table style="border-collapse:collapse;width:100%"><tbody>' + rows + '</tbody></table>'
           + '<div class="smd-dim" style="font-size:10.5px;margin-top:6px">上位' + top.length + '件で ' + topSum.toLocaleString() + '回（自分の分 ' + self.toLocaleString() + '回のうち）。'
           + 'これは<b>このプロジェクトの分だけ</b>で、仕入れメール取込など他のGASの' + ext.toLocaleString() + '回は内訳が分かれていません。</div>'
@@ -6164,6 +6178,8 @@
     "これを超えると背景処理だけ止まる": "Above this, only the background jobs stop",
     "太平洋時間の日付が変わる時刻": "When the Pacific-time date rolls over",
     "今日いちばん枠を食っているもの": "What used the most quota today",
+    "どの処理が、どのアカウントで動いたか（今日）": "Which process ran on which account (today)",
+    "⚠️＝想定（業務は本体・🤖は2台目以降）と逆の側で動いた分": "⚠️ = ran on the unexpected side (ops = main, 🤖 = child accounts)",
     "まだ内訳がありません（今日はほとんど使っていません）。": "No breakdown yet (hardly any usage today).",
     "まだ枠の状態を取れていません。上の🔄更新を押してから、もう一度開いてください。": "The quota status has not been fetched yet. Press 🔄 Refresh above and open this again.",
     "✎ 仕入を入れる": "✎ Enter the cost",
@@ -18568,6 +18584,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '📊 <b>接続枠の内訳を、処理ごとの横棒の積み上げ（本体＝青・2台目＝紫・3台目＝緑）にしました</b>（本人「アカウント別で横棒積み上げで見れるようにできないかね？」）。3台の合計の多い順に並び、右に台ごとの回数。想定（業務は本体・🤖は2台目以降）と逆の側で動いた分に⚠️が付くので、ロスや設計ミスが行で分かります。1台だけの時は今までの一覧のままです',
       '🔍 <b>Codexレビュー（3日分の差分）で見つかった穴を直しました</b>（本人「最後に Codex にもレビューさせてほしい」）。ポータル側：①学習・手動NG・写真の見直しの記録を<b>読めなかった時に空で上書きしない</b>（読めなかったら保存しない）②2台のPCで同時に学習を保存しても片方が消えないよう、書く直前に読み直して重ねる③写真NGの集め直しが呼び出し元で先に落とされて一度も動いていなかったのを直す④写真集めの85%ブレーキが翌日のリセット後も止まったままだったのを直す⑤2台目・3台目のAI利用料が上書きし合っていたのを担当ごとに保存⑥🤖の今日の件数の基準日を「今日」に⑦空きマスの理由を読めなかった時に「まだ出していません」と言わない⑧明細名の取得失敗を読み込み済みにしない（3回読み直す）⑨一括判定の末尾が読めない時も直前までの結果を保存⑩日本語パッケージを英語の明細名と比べて別作品にしない⑪日本語題の無い作品の数字照合⑫本体と2台目が枯れた時に3台目まで順に試す。GAS側は別途（取り札の一意制約化・店ごとのトークン共有・枠カウンタの保存失敗時の控え・Bumpの通信計上ほか）',
       '🏪 <b>出品ログのカードに「どの店（アカウント）に出したか」を出しました</b>（本人「これどのアカウントに出したかもわかれば嬉しい」）。1店舗目の枠が埋まると🤖は2店舗目に出すので、カードごとに店名（注文画面の 🏪 と同じ・gcsonlinestore 系は青／もう一方は紫）が出ます',
       '🎮 <b>Switchの写真を優先して集めるようにしました</b>（本人「switchの割合を増やして」）。🤖は写真が揃った作品からしか出せず、写真集めは17機種を順番に回していた＝Switch は17回に1回しか写真が増えませんでした。<b>毎回の先頭の1枠を Switch に使い</b>、残り4枠で他の機種を回します（Switch に探す作品が無ければ普段の順番に戻す）。あわせてGAS側で、<b>作れない国は6時間外す</b>（同じ20作品の空回り止め）・<b>台湾の必須項目「成人向けか」を埋めて作り直す</b>を入れました',
