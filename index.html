@@ -18522,6 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '❓ <b>空きマスに「なぜ出していないか」を出すようにしました</b>（本人「なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど」）。✅<b>別の日に出しています（日付つき）</b>／📷写真がまだ無い・基準外／🔁すでに同じ作品を出している／🗂この国にカタログが無い／⚖️他の国と値段が離れすぎ／🚫この国は🤖の対象外／…まだ出していません、のように出ます（出所＝出品ログ＋🤖の台帳＋設定。カーソルを当てると詳しい理由が出ます）',
       '🆕 <b>明細を足す先が無い国では、🤖が汎用カタログを自分で1つ作るようにしました</b>（本人「明細を足す先がない場合、勝手に作れたりしないですか？」→「よろしく」）。同じ店の同じ機種のカタログを元に、<b>非公開</b>で作ります（説明文・画像・カテゴリ・重量は元から引き継ぎ、明細は空）。名前と親SKUは他の国の同じカタログに合わせます。これで <b>MY・TW</b> にも出せるようになります',
       '⭐ <b>Switch 2 と Switch を優先して回すようにしました</b>（本人「Switch2、Switchから出してってほしい」）。17機種を順ぐりに回すと Switch は17回に1回でしたが、<b>1回おきに優先の機種を先に見る</b>ので約2倍のペースになります（候補が無い時は普段どおりの順番に戻ります）',
       '📏 <b>国ごとの列で、行の高さをそろえ、空きマスに「この日は出していない」と出すようにしました</b>（本人「縦幅がずれるのが気になる」「何か表示されてない部分がある。バグですかね？」）。空白は不具合ではなく<b>その日にその国へ出していない</b>という意味です（別の日に出している場合もあります）',
@@ -31675,6 +31676,47 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     })();
     try { return await logState._inflight; } finally { logState._inflight = null; }
   }
+  /* ★2026-09-23 本人「これ、なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど、いろいろ理由があると思うので」
+     国ごとの列の【空きマス】に、その国に出していない理由を出す。出所は3つだけ：
+       ① 出品ログ全部 … 別の日に出していれば その日付（＝すでに出している）
+       ② 🤖の台帳 app_kv.boshu_auto_done_<機種> … 国ごとに「item#model（出した）」か「skip:理由」。英題の控え boshu_auto_en で 鍵→英題 に直して明細名と突き合わせる
+       ③ 設定 boshu_auto_cfg.family[機種].ccs … そもそもその国に出す設定になっていない
+     読むのは app_kv 十数行だけ（Shopeeは叩かない）。分からない時は「分かりません」と出す＝[[dont-report-zero-when-unknown]] */
+  let _llogWhy = null;
+  const llogNm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const LLOG_WHY_TXT = {
+    noimg: ['📷', '写真がまだ無い（さがし中）'],
+    noimg_ai: ['📷', '写真が基準から外れていた'],
+    nosame: ['🔎', '同じ作品の出品が見つからない'],
+    aiwait: ['⏳', 'AIの判定待ち'],
+    dup: ['🔁', 'すでに同じ作品を出している'],
+    nofam: ['🗂', 'この国にカタログが無い'],
+    noprice: ['💴', '売値が決められなかった'],
+    ratio: ['⚖️', '他の国と値段が離れすぎ'],
+    notadded: ['⚠️', 'Shopeeが受け付けなかった'],
+    err: ['⚠️', 'エラーで止まった'],
+    manual: ['✕', '見送りにした（手動）'],
+    noname: ['🈚', '英語の名前が作れなかった']
+  };
+  function llogWhyLoad() {
+    return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en'), baKvGet('boshu_auto_cfg')]).then(([rows, en, cfg]) => {
+      const mark = new Map(), fam = {};
+      en = en || {}; cfg = cfg || {};
+      Object.keys(cfg.family || {}).forEach(hw => { const cs = (cfg.family[hw] || {}).ccs; if (cs && cs.length) fam[hw] = cs.slice(); });
+      (rows || []).forEach(r => {
+        const hw = String(r.k || '').replace('boshu_auto_done_', ''), v = r.v || {};
+        Object.keys(v).forEach(key => {
+          const names = [key, en[key] && en[key].en, en[key] && en[key].short].filter(Boolean).map(llogNm).filter(Boolean);
+          Object.keys(v[key] || {}).forEach(cc => {
+            const code = String(v[key][cc] || '');
+            names.forEach(n => mark.set(cc + '|' + n, { code: code, hw: hw }));
+          });
+        });
+      });
+      _llogWhy = { mark: mark, fam: fam };
+      return _llogWhy;
+    }).catch(() => { _llogWhy = { mark: new Map(), fam: {} }; return _llogWhy; });
+  }
   function renderListingLog() {
     const host = document.getElementById('list-log'); if (!host) return;
     // ★2026-09-20 本人「ここにJANコード情報は出ないのか？」：JAN台帳(product_ids)は他のページでしか読まれていないので、
@@ -31685,6 +31727,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       try { baKvGet('boshu_auto_rephoto').then(v => { _baRp = (v && v.items) || {}; renderListingLog(); }).catch(() => { _baRp = {}; }); } catch (_) { _baRp = {}; }
     }
     /* 📚 学習の原簿も、この画面を開いた時に1回だけ読む（読まずに引くと必ず0件になる＝過去に3回やっている） */
+    /* 空きマスの理由（🤖の台帳・設定）も、この画面を開いた時に1回だけ読む */
+    if (_llogWhy === null && !logState._whyTried) {
+      logState._whyTried = true;
+      try { llogWhyLoad().then(() => renderListingLog()).catch(() => {}); } catch (_) { _llogWhy = { mark: new Map(), fam: {} }; }
+    }
     if (_baLearn === null && !logState._learnTried) {
       logState._learnTried = true;
       try { learnLoad().then(() => renderListingLog()).catch(() => {}); } catch (_) {}
@@ -31779,6 +31826,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
        既定は【国ごとの列】（列の頭に件数）。前の「まとめて並べる」にも切り替えられる（端末に覚える）。
        2つの軸（国×明細）は最初から表で＝[[portal-matrix-not-vertical-list]]。国の並びは REGIONS の順で固定。 */
     if (!logState.layout) { try { logState.layout = localStorage.getItem('llogLayout') || 'cc'; } catch (_) { logState.layout = 'cc'; } }
+    /* 「別の日に出しています」を言うための索引（国｜明細名 → 出した日の一覧）。出品ログ全部から1回だけ作る（行数が変わるまで使い回す） */
+    const llogElse = (() => {
+      if (logState._elseN === allRows.length && logState._else) return logState._else;
+      const m = new Map();
+      allRows.forEach(r => {
+        const nm = llogNm(r.model_name || r.name || ''); if (!nm || !r.ymd) return;
+        const k = r.cc + '|' + nm, a = m.get(k);
+        if (a) { if (a.indexOf(r.ymd) < 0) a.push(r.ymd); } else m.set(k, [r.ymd]);
+      });
+      m.forEach(a => a.sort());
+      logState._else = m; logState._elseN = allRows.length;
+      return m;
+    })();
     const llogByCc = (pairs) => {
       const cnt = {}; pairs.forEach(p => { cnt[p[0]] = (cnt[p[0]] || 0) + 1; });
       const order = REGIONS.map(x => x.cc).filter(cc => cnt[cc]).concat(Object.keys(cnt).filter(cc => !REGIONS.some(x => x.cc === cc)));
@@ -31790,12 +31850,39 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       /* ★2026-09-23 本人「同じ商品の場合は、同じ商品を横並びにしてほしい」：
          行＝作品（明細名）・列＝国。同じ作品が同じ行に並ぶので、どの国に出ていて どの国に無いかが一目で分かる。
          出していない国は点線の空きマスにする（詰めると横並びが崩れる）。 */
-      const byWork = new Map();
-      pairs.forEach(p => { const k = p[2] || p[1]; if (!byWork.has(k)) byWork.set(k, {}); byWork.get(k)[p[0]] = p[1]; });
+      const byWork = new Map(), hwOf = new Map();
+      pairs.forEach(p => { const k = p[2] || p[1]; if (!byWork.has(k)) byWork.set(k, {}); byWork.get(k)[p[0]] = p[1]; if (p[3] && !hwOf.get(k)) hwOf.set(k, p[3]); });
       /* ★2026-09-23 本人「縦幅がずれる」「何か表示されてない部分がある。バグ？」→ 空きマスは不具合ではなく【その日はこの国に出していない】。
-         見て分かるように文字を入れ、行の高さは stretch でそろえる（カードも height:100%） */
-      const gap = `<div style="border:1px dashed #e0e3e7;border-radius:8px;min-height:60px;height:100%;background:#fbfbfc;display:flex;align-items:center;justify-content:center;color:#b6bcc4;font-size:10.5px" title="この日は、この国にはこの商品を出していません（別の日に出している場合もあります）">この日は出していない</div>`;
-      const cells = [...byWork.values()].map(m => order.map(cc => m[cc] || gap).join('')).join('');
+         ★2026-09-23 本人「なぜ出していないかも欲しい」→ 空きマスに理由を出す（別の日に出している／🤖が見送った理由／対象外／まだ）。
+         行の高さは stretch でそろえる（カードも height:100%） */
+      const gapFor = (k, cc) => {
+        let icon = '？', txt = '分かりません', col = '#b6bcc4', bg = '#fbfbfc', bd = '#e0e3e7', tip = 'この日は、この国にはこの商品を出していません';
+        const days = llogElse.get(cc + '|' + k) || [], other = days.filter(d => d !== sel);
+        const w = _llogWhy && _llogWhy.mark.get(cc + '|' + k);
+        const hw = hwOf.get(k) || (w && w.hw) || '';
+        if (other.length) {
+          const d = other[other.length - 1];
+          icon = '✅'; txt = '別の日に出しています<br>' + esc(d.slice(5).replace('-', '/')); col = '#1a7f37'; bg = '#f3fbf5'; bd = '#cfe9d6';
+          tip = 'この国には ' + other.slice(-8).join(' / ') + ' に出しています（出品ログの記録）';
+        } else if (w && /^\d/.test(w.code)) {
+          icon = '🤖'; txt = '🤖が出した記録あり'; col = '#5e35b1'; bg = '#f7f4fc'; bd = '#d9cdf0';
+          tip = '🤖の台帳では出したことになっています（出品ログにその日の記録がありません）';
+        } else if (w && w.code.indexOf('skip:') === 0) {
+          const t = LLOG_WHY_TXT[w.code.slice(5)] || ['—', w.code.slice(5)];
+          icon = t[0]; txt = t[1]; col = '#8a6d3b'; bg = '#fffcf3'; bd = '#eadfc4';
+          tip = '🤖がこの国には出さないと判断しました（台帳: ' + w.code + '）';
+        } else if (hw && _llogWhy && _llogWhy.fam[hw] && _llogWhy.fam[hw].indexOf(cc) < 0) {
+          icon = '🚫'; txt = 'この国は🤖の対象外'; col = '#8a8f98'; bg = '#f7f8fa';
+          tip = '設定（boshu_auto_cfg.family.' + hw + '.ccs）にこの国が入っていません';
+        } else if (_llogWhy) {
+          icon = '…'; txt = 'この国にはまだ<br>出していません'; col = '#a7adb6';
+          tip = '🤖の台帳にも出品ログにも、この国のこの商品の記録がありません（手動で出した商品はここに出ます）';
+        } else {
+          icon = '⏳'; txt = '理由を読み込み中…';
+        }
+        return `<div style="border:1px dashed ${bd};border-radius:8px;min-height:60px;height:100%;background:${bg};display:flex;flex-direction:column;gap:2px;align-items:center;justify-content:center;text-align:center;padding:4px;color:${col};font-size:10px;line-height:1.3" title="${av(tip)}"><span style="font-size:13px;line-height:1">${icon}</span><span>${txt}</span></div>`;
+      };
+      const cells = [...byWork.entries()].map(([k, m]) => order.map(cc => m[cc] || gapFor(k, cc)).join('')).join('');
       return head + `<div style="display:grid;grid-template-columns:repeat(${order.length},minmax(210px,1fr));gap:8px;margin-top:7px;overflow-x:auto;align-items:stretch">`
         + order.map(cc => `<div style="position:sticky;top:0;z-index:3;background:#fff;border-bottom:3px solid ${ccColor(cc)};padding:4px 6px;font-weight:800;color:${ccColor(cc)};font-size:13px">${esc(cc)} <span style="color:#333;font-weight:700">${cnt[cc]}件</span></div>`).join('')
         + cells + `</div>`;
@@ -31942,7 +32029,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 if (!jan) return `<span style="display:block;font-size:9.5px;color:#bbb">JAN —${mpn ? ' ／ 型番 ' + esc(mpn) : ''}</span>`;
                 return `<span style="display:block;font-size:9.5px;color:#1e8e3e;font-weight:700"><span class="llog-jan" data-j="${av(jan)}" title="押すとコピーします" style="cursor:pointer;text-decoration:underline dotted">JAN ${esc(jan)}</span>${mpn ? ` <span style="color:#8a8f98;font-weight:400">／ 型番 ${esc(mpn)}</span>` : ''}</span>`;
               })()}
-            </span></div>`, String(r.model_name || r.name || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()]))}`
+            </span></div>`, llogNm(r.model_name || r.name || ''), (r._hw || '')]))}`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
       </div>`;
     host.querySelectorAll('.llog-jan').forEach(e => e.addEventListener('click', () => { try { navigator.clipboard.writeText(e.dataset.j); toast('JAN ' + e.dataset.j + ' をコピーしました'); } catch (_) {} }));
