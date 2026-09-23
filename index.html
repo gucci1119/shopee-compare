@@ -16568,11 +16568,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (o.tab === 200 || o.tab === 600 || !regionByCc(o.cc)) return;
       n++; const r = ordRate(o); sales += pfSales(o) * r;
       const di = pfDepInfo(o); if (di && di.amt != null) { if (di.fixed) depFix += di.amt * r; else depProv += di.amt * r; } else noDep++;
-      const inc = pf.incMap && pf.incMap.get(o.cc + ':' + o.sn); if (inc && inc.amount_initial != null) { depInit += Number(inc.amount_initial) * r;
-        /* ★2026-09-24 本人「暫定と確定がまた一緒になってない？どれだけずれてるかが分かれば」→ 暫定（初回観測）→確定の動きを数える。
-           初回観測が確定後（初回値と確定値が同じ分に書かれた）＝比べられない。同額でも初回観測が先なら「動かなかった」 */
-        const a0 = Number(inc.amount_initial), a1 = Number(inc.amount); const sameMin = inc.amount_initial_at && inc.amount_at && String(inc.amount_initial_at).slice(0, 16) === String(inc.amount_at).slice(0, 16);
-        if (a1 !== a0) { mvN++; mvJpy += (a1 - a0) * r; mvBase += a0 * r; } else if (sameMin) lateN++; else flatN++; }
+      /* ★2026-09-24 暫定（初回観測・無ければ利益管理表F列）→確定の動きを数える。暫定を見られなかった＝初回観測が確定後でF列も無い */
+      if (di && di.init != null && di.amt != null) { const a0 = Number(di.init), a1 = Number(di.amt); depInit += a0 * r;
+        if (a1 !== a0) { mvN++; mvJpy += (a1 - a0) * r; mvBase += a0 * r; } else if (di.initLate) lateN++; else flatN++; }
       const co = pfCost(o); if (co == null) noCost++; else cost += co;
       pp += pfPaypal(o);
     });
@@ -16602,7 +16600,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <table style="border-collapse:collapse;font-size:12.5px;width:100%;max-width:760px">
         ${line('売上（買い手が払った額・参考）', y(c.sales), { sub: c.n + '件（キャンセル・未払いを除く）' })}
         ${line('入金（確定）', y(c.depFix), { sub: `確定${c.fixN}件` + (c.depProv ? `／暫定 ${y(c.depProv)}（まだ更新前）` : '') + (c.depInit ? `／更新前の暫定合計 ${y(c.depInit)}` : '') })}
-        ${(c.mvN || c.lateN || c.flatN) ? line('　暫定→確定の動き', (c.mvJpy < 0 ? '− ' : '+ ') + y(Math.abs(c.mvJpy)), { col: '#6b7280', sub: `動いた ${c.mvN}件（暫定比 ${pct(Math.abs(c.mvJpy), c.mvBase)}）／動かなかった ${c.flatN}件／暫定を見られなかった ${c.lateN}件（初回の取得が確定後＝枠切れ等で同期が止まっていた分）` }) : ''}
+        ${(c.mvN || c.lateN || c.flatN) ? line('　暫定→確定の動き', (c.mvJpy < 0 ? '− ' : '+ ') + y(Math.abs(c.mvJpy)), { col: '#6b7280', sub: `動いた ${c.mvN}件（暫定比 ${pct(Math.abs(c.mvJpy), c.mvBase)}）／動かなかった ${c.flatN}件／暫定を見られなかった ${c.lateN}件（APIの初回取得が確定後で、利益管理表F列にも無い分）` }) : ''}
         ${line('− 仕入', '− ' + y(c.cost), { col: '#a15', sub: c.noCost ? `未入力 ${c.noCost}件` : '' })}
         ${c.pp ? line('＋ PayPal差分（別途受取）', '+ ' + y(c.pp), { col: '#0f9d58' }) : ''}
         ${line('＝ 粗利', y(c.gross), { strong: true, col: c.gross < 0 ? '#d93025' : '#1a7f37', sub: `粗利率 ${pct(c.gross, c.depFix + c.depProv)}（入金比）／${c.grossN}件` })}
@@ -42837,11 +42835,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // → 未発送(To Ship)より先のステータス＝スキャン済みなので、値の変化が観測できていなくても確定扱い
     const scanned = ordScanned(o);
     if (inc && inc.amount != null) {
-      const apiFixed = inc.amount_initial != null && inc.amount !== inc.amount_initial;
-      const init = inc.amount_initial != null ? inc.amount_initial : (cm && cm.deposit_init != null ? cm.deposit_init : null);
+      /* ★2026-09-24 本人「暫定は最悪合ってなくてもいいが、どれだけずれてるかが分かれば」→ 枠切れで入金同期が止まっていた 9/12〜9/21 の注文は
+         初回観測が確定後（初回値＝確定値が同じ分に書かれた）＝暫定を取り損ねている。その分は 利益管理表F列（入金予定額GASが先に取っていた値）＝ costs.deposit_init を暫定に使う
+         （実測 2026-09 BR：188件中187件にF列あり・166件が確定と違う＝本当の暫定） */
+      const lateInit = inc.amount_initial != null && inc.amount === inc.amount_initial && !!(inc.amount_initial_at && inc.amount_at && String(inc.amount_initial_at).slice(0, 16) === String(inc.amount_at).slice(0, 16));
+      let init = inc.amount_initial != null ? inc.amount_initial : (cm && cm.deposit_init != null ? cm.deposit_init : null), initSrc = 'api';
+      if (lateInit && cm && cm.deposit_init != null) { init = cm.deposit_init; initSrc = 'sheet'; }
+      const apiFixed = init != null && inc.amount !== init;
       // ★observed=「実際に金額が動いたのを観測した」。倉庫スキャン済みだけを根拠にした確定は“見込”であって観測ではない。
       //   ここを同じ顔で出すと、暫定と確定が同額のときに「バグで同じ数字が入っている」ようにしか見えない。
-      return { amt: inc.amount, init, fixed: apiFixed || sheetFixed || scanned,
+      return { amt: inc.amount, init, initSrc, initLate: lateInit && initSrc !== 'sheet', fixed: apiFixed || sheetFixed || scanned,
         observed: apiFixed || sheetFixed, same: (init != null && inc.amount === init),
         provAt: inc.amount_initial_at || null, fixAt: inc.amount_at || null };
     }
@@ -43293,7 +43296,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           sku: () => `<td style="font-size:10.5px;color:#555;word-break:break-all">${rowInvs.map(v => v.sku ? `<div>${cpy(v.sku)}</div>` : '').join('')}</td>`,
           sales: () => first ? `<td${rs}>${fmtLocal(rg, pfSales(o))}<br><span class="smd-jpy">≈${fmtJpy(pfSales(o) * _fr)}</span></td>` : '',
           dep_prov: () => first ? `<td${rs}>${depProv != null
-            ? `<span title="${depInfo && depInfo.provAt ? '暫定額の記載日時（日本時間） ' + jstDT(depInfo.provAt) : ''}"><span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * _fr)}</span></span>`
+            ? `<span title="${(depInfo && depInfo.initSrc === 'sheet') ? '暫定＝利益管理表F列（入金予定額GASが先に取っていた値）。APIの初回取得は確定後だったため' : (depInfo && depInfo.provAt ? '暫定額の記載日時（日本時間） ' + jstDT(depInfo.provAt) : '')}"><span style="color:#8a6d1a">${fmtLocal(rg, depProv)}</span><br><span class="smd-jpy">≈${fmtJpy(depProv * _fr)}</span></span>`
             : '<span class="smd-dim">未取得</span>'}</td>` : '',
           dep_fix: () => first ? `<td${rs}>${depFix != null
             ? `<b style="color:#1a7f37">${fmtLocal(rg, depFix)}</b>${(depInfo && depInfo.same) ? `<span style="font-size:9px;color:#8a8f98;margin-left:4px;white-space:nowrap" title="暫定額から金額が動きませんでした（同じ数字が2列に出ているのは不具合ではありません）">変動なし</span>` : ''}${(depInfo && !depInfo.observed) ? `<span style="font-size:9px;color:#e8710a;margin-left:4px;border:1px solid #f3d3ac;border-radius:4px;padding:0 3px;white-space:nowrap" title="まだ倉庫スキャン前です。スキャンの数日後に実際の送料が反映されて確定します（確定後は変わりません）">確定前</span>` : ''}<br><span class="smd-jpy" title="${depInfo && depInfo.fixAt ? '確定額の記載日時（日本時間） ' + jstDT(depInfo.fixAt) : ''}">≈${fmtJpy(depFix * _fr)}</span>`
