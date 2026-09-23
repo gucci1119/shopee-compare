@@ -7038,6 +7038,7 @@
     "🧹 おかしなJANは見つかりませんでした。": "🧹 No suspicious JAN was found.",
     /* ★2026-09-23 全体レビュー：英語版の抜け（無作為40本のうち14本）＋今回足した警告文 */
     /* ★2026-09-23 月次損益・固定費の自動登録・ヤマト運賃の取込 */
+    '金額・頻度': 'Amount / frequency', 'の状態': ' status', '✔ 登録済': '✔ Posted', '手入力あり': 'Entered manually', '未登録': 'Not posted', '＋ 追加': '+ Add', '毎月': 'Monthly', '年額': 'Yearly', '一回': 'One-off', '分類（名前から自動）': 'Category (auto from name)',
     '🧮 月次の損益': '🧮 Monthly P&L', '売上（買い手が払った額・参考）': 'Sales (what buyers paid, reference)', '入金（確定）': 'Payout (confirmed)', '− 仕入': '− Purchases',
     '＋ PayPal差分（別途受取）': '+ PayPal difference (received separately)', '＝ 粗利': '= Gross profit', '− 国内送料（ヤマト等）': '− Domestic shipping (Yamato etc.)', '− 梱包資材・備品': '− Packaging & supplies',
     '− 人件費・外注': '− Labor & outsourcing', '− 家賃・倉庫・光熱': '− Rent, warehouse & utilities', '− ツール・通信': '− Tools & telecom', '− その他の経費': '− Other expenses', '− 返金・補償': '− Refunds & compensation',
@@ -16459,7 +16460,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const memo = key + (mode === 'perOrder' ? `（${shipped}件×¥${Number(x.unit) || 0}）` : (x.freq === 'yearly' ? '（年額÷12）' : ''));
       if (!(amount > 0)) continue;
       out.total += amount;
-      if (cur) { if (Number(cur.amount) !== amount || cur.memo !== memo || cur.category !== ecat) { await sbPatch('expenses', 'id=eq.' + cur.id, { amount, memo, category: ecat }); out.updated++; } }
+      // ★経費は毎月違う（本人）。自動で入れた行を表で直したら、自動が勝手に戻さない＝上書きは「今すぐ登録／更新」を押した時（force）だけ
+      if (cur) { if (opts.force && (Number(cur.amount) !== amount || cur.memo !== memo || cur.category !== ecat)) { await sbPatch('expenses', 'id=eq.' + cur.id, { amount, memo, category: ecat }); out.updated++; } }
       else ins.push({ ymd: ym + '-01', category: ecat, amount, memo });
     }
     if (ins.length) { await sbUpsert('expenses', ins); out.added += ins.length; }
@@ -16582,14 +16584,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div class="smd-dim" style="font-size:11px;margin-top:6px">📗 スプシの利益管理表は「更新前の暫定入金 × 月の固定レート」を売上にしているので、ここより数%大きく出ます（2026-08の実測：BRの売上はスプシ¥1,592,207／ここは更新前¥1,586,980→確定¥1,514,313）。仕入は同じ元データ。経費はスプシの「経費一覧」と同じ区分でここに登録します。</div>
     </div>`;
   }
-  function plAutoCardHtml(ym, cfg) {
+  function plAutoCardHtml(ym, cfg, expRows) {
     const items = (cfg && Array.isArray(cfg.fixBreak)) ? cfg.fixBreak : [];
     const on = !!(cfg && cfg.fixAuto);
-    const rowsH = items.length ? items.map(x => { const mode = plModeOf(x); const amt = mode === 'perOrder' ? `¥${Number(x.unit) || 0}×出荷件数` : fmtJpy(plMonthlyOf(x)); return `<tr><td style="padding:2px 6px">${esc(x.name)}</td><td class="smd-dim" style="padding:2px 6px;font-size:11px">${esc(x.ecat || plEcatOf(x.name))}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${amt}</td><td style="padding:2px 6px;font-size:11px;color:${mode === 'remind' ? '#8a4b00' : '#1a7f37'}">${PL_MODE_LABEL[mode]}</td></tr>`; }).join('')
-      : `<tr><td colspan="4" class="smd-dim" style="padding:6px">未設定。<b>📈事業計画 → 固定費の内訳</b> に人件費・家賃・ツール等を入れると、ここに毎月自動で経費として入ります。</td></tr>`;
-    return `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🔁 毎月の固定費（人件費・家賃・ツール）の自動登録</span><label style="font-size:12px"><input type="checkbox" id="pl-auto-on" ${on ? 'checked' : ''}> 毎月自動で登録する</label><button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px">この月（${esc(ym)}）を今すぐ登録／更新</button><button class="smd-btn b-open" id="pl-auto-edit" style="font-size:12px">内訳を編集（📈事業計画）</button></div>
-      <table style="border-collapse:collapse;font-size:12px;margin-top:6px;width:100%"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 6px">項目</th><th style="text-align:left;padding:2px 6px">経費の分類</th><th style="text-align:right;padding:2px 6px">月額</th><th style="text-align:left;padding:2px 6px">扱い</th></tr>${rowsH}</table>
-      <div class="smd-dim" style="font-size:11px;margin-top:4px">自動登録した行はメモが「${PL_AUTO_TAG} 項目名」で始まります（同じ月に二重には入りません・内訳の金額を変えると更新されます）。件数連動＝外注の1件単価×その月の出荷件数。</div></div>`;
+    const rows = Array.isArray(expRows) ? expRows : [];
+    const ist = 'font-size:12px;padding:3px 5px;border:1px solid #d9dfe8;border-radius:6px;background:#fff';
+    const catOpts = sel => EXP_CATS.map(c => `<option${sel === c ? ' selected' : ''}>${esc(c)}</option>`).join('');
+    const stateOf = x => {   // その月にどう入っているか
+      const key = PL_AUTO_TAG + ' ' + String(x.name || '').trim(); const ec = x.ecat || plEcatOf(x.name);
+      const auto = rows.find(r => String(r.memo || '').indexOf(key) === 0);
+      if (auto) return `<span style="color:#1a7f37">✔ 登録済 ${fmtJpy(auto.amount)}</span>`;
+      const man = rows.filter(r => plGroupOf(r.category) === plGroupOf(ec) && String(r.memo || '').indexOf(PL_AUTO_TAG) !== 0);
+      if (man.length) return `<span style="color:#1565c0">手入力あり ${fmtJpy(man.reduce((t, r) => t + (Number(r.amount) || 0), 0))}</span>`;
+      return `<span style="color:#b5341a">未登録</span>`;
+    };
+    const rowsH = items.length ? items.map((x, i) => { const mode = plModeOf(x); return `<tr class="pl-fb-row" data-i="${i}">
+        <td style="padding:2px 4px"><input class="pl-fb-name" data-i="${i}" value="${esc(x.name || '')}" placeholder="項目（例：梱包スタッフ）" style="${ist};width:150px"></td>
+        <td style="padding:2px 4px"><select class="pl-fb-ecat" data-i="${i}" style="${ist};width:150px">${catOpts(x.ecat || plEcatOf(x.name))}</select></td>
+        <td style="padding:2px 4px;white-space:nowrap">¥<input class="pl-fb-amt" data-i="${i}" value="${Number(x.amount) || ''}" inputmode="numeric" style="${ist};width:84px;text-align:right"${mode === 'perOrder' ? ' disabled title="件数連動は右の1件単価×出荷件数"' : ''}>
+          <select class="pl-fb-freq" data-i="${i}" style="${ist}">${[['monthly', '毎月'], ['yearly', '年額'], ['once', '一回']].map(f => `<option value="${f[0]}"${(x.freq || 'monthly') === f[0] ? ' selected' : ''}>${f[1]}</option>`).join('')}</select></td>
+        <td style="padding:2px 4px;white-space:nowrap"><select class="pl-fb-mode" data-i="${i}" style="${ist}">${[['auto', '毎月自動'], ['perOrder', '件数連動'], ['remind', '手入力']].map(m => `<option value="${m[0]}"${mode === m[0] ? ' selected' : ''}>${m[1]}</option>`).join('')}</select>
+          ${mode === 'perOrder' ? ` 1件¥<input class="pl-fb-unit" data-i="${i}" value="${Number(x.unit) || ''}" inputmode="numeric" style="${ist};width:64px;text-align:right">` : ''}</td>
+        <td style="padding:2px 4px;font-size:11px;white-space:nowrap">${stateOf(x)}</td>
+        <td style="padding:2px 4px"><button class="pl-fb-del" data-i="${i}" title="この項目を消す（登録済みの経費は消えません）" style="border:none;background:none;cursor:pointer;color:#d93025">✕</button></td></tr>`; }).join('')
+      : `<tr><td colspan="6" class="smd-dim" style="padding:6px">未設定。下の行から人件費・家賃・ツール等を足すと、毎月自動で経費として入ります。</td></tr>`;
+    return `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🔁 毎月の固定費（人件費・家賃・ツール）の自動登録</span><label style="font-size:12px"><input type="checkbox" id="pl-auto-on" ${on ? 'checked' : ''}> 毎月自動で登録する</label><button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px">この月（${esc(ym)}）を今すぐ登録／更新</button><span id="pl-fb-stat" class="smd-dim" style="font-size:11px"></span></div>
+      <table style="border-collapse:collapse;font-size:12px;margin-top:6px"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 4px">項目</th><th style="text-align:left;padding:2px 4px">経費の分類</th><th style="text-align:left;padding:2px 4px">金額・頻度</th><th style="text-align:left;padding:2px 4px">扱い</th><th style="text-align:left;padding:2px 4px">${esc(ym)} の状態</th><th></th></tr>${rowsH}
+      <tr><td style="padding:4px"><input id="pl-fb-nname" placeholder="項目を追加（例：顧客対応スタッフ）" style="${ist};width:150px"></td><td style="padding:4px"><select id="pl-fb-necat" style="${ist};width:150px"><option value="">分類（名前から自動）</option>${catOpts('')}</select></td><td style="padding:4px;white-space:nowrap">¥<input id="pl-fb-namt" placeholder="金額" inputmode="numeric" style="${ist};width:84px;text-align:right"> <select id="pl-fb-nfreq" style="${ist}"><option value="monthly">毎月</option><option value="yearly">年額</option><option value="once">一回</option></select></td><td style="padding:4px"><select id="pl-fb-nmode" style="${ist}"><option value="auto">毎月自動</option><option value="perOrder">件数連動</option><option value="remind">手入力</option></select></td><td colspan="2" style="padding:4px"><button class="smd-btn b-write" id="pl-fb-add" style="font-size:12px">＋ 追加</button></td></tr></table>
+      <div class="smd-dim" style="font-size:11px;margin-top:4px">その場で直すと全PCに保存されます（📈事業計画の「固定費の内訳」と同じもの）。自動登録した行はメモが「${PL_AUTO_TAG} 項目名」（同じ月に二重には入りません・金額を変えると更新）。件数連動＝1件単価×その月の出荷件数。手入力＝実額を自分で入れる（未登録なら🧮に⚠）。</div></div>`;
   }
   function plYamatoCardHtml(ym, kvInfo) {
     return `<div class="tool-card" id="pl-ymt-card" style="margin:0 0 12px;max-width:none;border:1px dashed #b7c9e2"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">📦 国内送料（ヤマト運輸）の取り込み</span><input type="file" id="pl-ymt-file" accept=".csv,text/csv,.txt" multiple style="font-size:12px"><span class="smd-dim" style="font-size:11px">ヤマトビジネスメンバーズ「Web請求書」の請求明細CSV／B2クラウドの発行済みデータCSV（Shift_JIS可）。このカードにドラッグしても可</span></div>
@@ -16598,7 +16620,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function plWire(host, ym) {
     const on = host.querySelector('#pl-auto-on'); if (on) on.addEventListener('change', async () => { const cfg = await plCfg(); if (!cfg) { alert('固定費の内訳がまだ無いので、先に📈事業計画で入れてください'); on.checked = false; return; } cfg.fixAuto = on.checked; plan.cfg = cfg; await planSave(); toast(on.checked ? '毎月自動で登録します（月が変わって最初に開いた時）' : '自動登録を止めました'); });
     const run = host.querySelector('#pl-auto-run'); if (run) run.addEventListener('click', async () => { run.disabled = true; try { const r = await expAutoPost(ym, { force: true }); toast(r.skipped ? '⚠ ' + r.skipped : `固定費：追加${r.added}件・更新${r.updated}件（計 ${fmtJpy(r.total)}）` + (r.remind.length ? `／手入力待ち ${r.remind.length}件` : '') + ((r.manual || []).length ? `／手入力済みの区分は飛ばしました（${r.manual.join('・')}）` : ''), !!r.skipped); if (r.changed) renderExpenses(); } catch (e) { alert('登録に失敗: ' + ((e && e.message) || e)); } run.disabled = false; });
-    const ed = host.querySelector('#pl-auto-edit'); if (ed) ed.addEventListener('click', () => showPage('plan'));
+    // 内訳のその場編集（本人 2026-09-23「もっと細かく編集できた方がいい」）
+    const fbSave = async (mut) => { const cfg = (await plCfg()) || planCfgDefault(); if (!Array.isArray(cfg.fixBreak)) cfg.fixBreak = []; mut(cfg); plan.cfg = cfg; pl.tpl = cfg; const st = host.querySelector('#pl-fb-stat'); if (st) st.textContent = '保存中…'; try { await planSave(); plan._cache = null; renderExpenses(); } catch (e) { if (st) st.textContent = '保存できませんでした: ' + ((e && e.message) || e); } };
+    const onChange = (cls, fn) => host.querySelectorAll('.' + cls).forEach(el => el.addEventListener('change', () => { const i = +el.dataset.i; fbSave(cfg => { const x = cfg.fixBreak[i]; if (x) fn(x, el.value.trim()); }); }));
+    onChange('pl-fb-name', (x, v) => { if (v) x.name = v; });
+    onChange('pl-fb-ecat', (x, v) => { x.ecat = v || undefined; });
+    onChange('pl-fb-amt', (x, v) => { x.amount = Math.round(Number(v.replace(/[^0-9.\-]/g, '')) || 0); });
+    onChange('pl-fb-freq', (x, v) => { x.freq = v || 'monthly'; });
+    onChange('pl-fb-mode', (x, v) => { x.mode = v || 'auto'; });
+    onChange('pl-fb-unit', (x, v) => { x.unit = Math.round(Number(v.replace(/[^0-9.]/g, '')) || 0); });
+    host.querySelectorAll('.pl-fb-del').forEach(el => el.addEventListener('click', () => { const i = +el.dataset.i; if (!confirm('この項目を内訳から消しますか？（登録済みの経費は消えません）')) return; fbSave(cfg => { cfg.fixBreak.splice(i, 1); }); }));
+    const addBtn = host.querySelector('#pl-fb-add'); if (addBtn) addBtn.addEventListener('click', () => { const g = id => (host.querySelector('#' + id) || {}).value || ''; const name = g('pl-fb-nname').trim(); const amt = Math.round(Number(String(g('pl-fb-namt')).replace(/[^0-9.]/g, '')) || 0); const mode = g('pl-fb-nmode') || 'auto'; if (!name) { alert('項目名を入れてください'); return; } if (mode !== 'perOrder' && !(amt > 0)) { alert('金額を入れてください'); return; } fbSave(cfg => { cfg.fixBreak.push({ name, amount: amt, freq: g('pl-fb-nfreq') || 'monthly', ecat: g('pl-fb-necat') || plEcatOf(name), mode, unit: mode === 'perOrder' ? amt : undefined }); }); });
     const f = host.querySelector('#pl-ymt-file'); const card = host.querySelector('#pl-ymt-card'); const prev = host.querySelector('#pl-ymt-prev');
     const handle = async files => {
       if (!files || !files.length) return;
@@ -16766,7 +16798,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { plCfgV = await plCfg(); if (plCfgV && Array.isArray(plCfgV.fixBreak)) plCfgV.fixBreak.forEach(x => { const ec = x.ecat || plEcatOf(x.name); if (plModeOf(x) === 'remind' && !rows.some(r => r.category === ec)) plRemind.push({ name: x.name, ecat: ec, amount: plMonthlyOf(x) }); }); } catch (_) {}
     try { const kvy = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + exp.ym)); plYmt = (kvy && kvy[0] && kvy[0].v) || null; } catch (_) {}
     const plCard = plCardHtml(plCtx(exp.ym, rows, { refund: refundTotal, remind: plRemind }));
-    const autoCard = plAutoCardHtml(exp.ym, plCfgV);
+    const autoCard = plAutoCardHtml(exp.ym, plCfgV, rows);
     const ymtCard = plYamatoCardHtml(exp.ym, plYmt);
     const netCard = `<div class="tool-card" style="margin:0 0 12px;max-width:520px;background:#f7fbf8;border:1px solid #d6ecdd">
       <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 当月の確定利益（${exp.ym}）<span class="smd-dim" style="font-weight:400;font-size:11px">＝粗利−経費−返金（人件費など固定費は含まず。固定費込みの実利益は📈事業計画）</span></div>
