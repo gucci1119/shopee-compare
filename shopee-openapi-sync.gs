@@ -6464,6 +6464,35 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
    ★名前と親SKUは【他の国の家族カタログ】に合わせる（①②の印は外す）＝作った瞬間から家族として拾われる。
    ★非公開で作る（publish=false）。公開は本人のタイミング（[[listing-publish-timing-is-users-call]]）。
    ★元にできるカタログが無い国では作らない（勝手に変な物を作らない）。 */
+/* 🏪 出品枠が満杯の店を覚える（app_kv `boshu_shop_full`：{ "CC|shop_id": 時刻 }）。24時間で自動で忘れる＝枠が空けば元に戻る。
+   set=true で記録、省略で「満杯か？」を返す。 */
+function baShopFull_(cc, shopId, set) {
+  var k = String(cc) + '|' + String(shopId);
+  var m = baKv_('boshu_shop_full') || {};
+  if (set) { m[k] = now_(); try { baKvSet_('boshu_shop_full', m); } catch (e) {} return true; }
+  var t = Number(m[k] || 0);
+  return !!(t && now_() - t < 24 * 3600);
+}
+/* その国の2店舗目（サブ垢）の shop_id。登録簿 accounts の status が 'sub' の行。無ければ 0 */
+function baSubShop_(cc, mainShopId) {
+  try {
+    var rows = sbSelectAll_('accounts', 'select=cc,shop_id,status&cc=eq.' + encodeURIComponent(cc));
+    var sub = (rows || []).filter(function (r) { return String(r.status || '') === 'sub' && r.shop_id && String(r.shop_id) !== String(mainShopId); })[0];
+    return sub ? parseInt(sub.shop_id, 10) : 0;
+  } catch (e) { return 0; }
+}
+/* 満杯の店の代わりに、2店舗目へ同じ中身のカタログを作る（非公開で作られる→明細を入れてから公開）。
+   作れなければ null（＝今までどおり1店舗目で続ける） */
+function baCloneToSub_(cc, base, newName, st) {
+  var sub = baSubShop_(cc, base.shop_id);
+  if (!sub) { baLog_(st, cc + '：2店舗目が登録簿にありません（1店舗目のまま続けます）'); return null; }
+  var pr = 0;
+  try { pr = (base.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (e) {}
+  var r = seedShopCatalog_({ src_shop_id: base.shop_id, dst_shop_id: sub, item_id: base.item_id, price: pr });
+  if (!r || !r.ok || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + String((r && r.error) || '').slice(0, 80)); return null; }
+  baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
+  return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
+}
 function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
   var fam = (cfg.family || {})[hw] || {};
   var byCc = fam.byCc || {}, o = byCc[cc] || {};
@@ -6537,19 +6566,30 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
       /* ★2026-09-20 VN PS2 で「This product duplicates an existing product」。①②の番号は【家族のカタログ】だけを見て決めていたが、
          同じ名前で親SKUが空のカタログ（＝家族に入らない）が既に ② を使っていた。重複と言われたら番号を送って最大5回試す */
+      /* ★2026-09-23 1店舗目の出品枠が満杯なら、複製せずに【2店舗目】へ作る（本人「2アカウント目に出せばいいんじゃないんですか？」）。
+         満杯かどうかは「公開が枠で弾かれた」事実で覚える（推定で止めない＝[[quota-guard-must-be-fact-based]]）。 */
+      if (baShopFull_(cc, base.shop_id)) {
+        var sub1 = baCloneToSub_(cc, base, nm0, st);
+        if (sub1) {
+          tgt = sub1; rows.push(tgt); newItem = true;
+          try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
+        }
+      }
       var cl = null, dupErr = '';
-      for (var tryNo = 0; tryNo < 5 && !cl; tryNo++) {
+      for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
         if (tryNo) { var m2 = CIRC[nextNo - 1 + tryNo] || ('(' + (nextNo + tryNo) + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }
         try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); }
         catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
-      if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 80); baLog_(st, cc + ' ' + res.note); break; }
-      if (!cl || !cl.item_id) { res.note = '複製失敗'; break; }
-      tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
-      rows.push(tgt); newItem = true;
-      // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
-      try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
-      baLog_(st, cc + '：満杯なので複製 → ' + newName + '（非公開・' + cl.item_id + '）');
+      if (!tgt) {
+        if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 80); baLog_(st, cc + ' ' + res.note); break; }
+        if (!cl.item_id) { res.note = '複製失敗'; break; }
+        tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
+        rows.push(tgt); newItem = true;
+        // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
+        try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
+        baLog_(st, cc + '：満杯なので複製 → ' + newName + '（非公開・' + cl.item_id + '）');
+      }
     }
     var free2 = 100 - (tgt.models || []).length;
     var batch = todo.slice(i, i + free2);
@@ -6689,7 +6729,17 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
   }
   try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); tgt.models = (tgt.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '') !== 'test'; }); }
   catch (e) { baLog_(st, cc + '：test の削除に失敗 ' + String(e).slice(0, 70)); }
-  if ((cfg.autoPublish || {})[cc]) { try { unlistItem_(tgt.shop_id, tgt.item_id, false); baLog_(st, cc + '：' + tgt.name + ' を公開'); } catch (e2) { baLog_(st, cc + '：公開に失敗 ' + String(e2).slice(0, 70)); } }
+  if ((cfg.autoPublish || {})[cc]) {
+    try { unlistItem_(tgt.shop_id, tgt.item_id, false); baLog_(st, cc + '：' + tgt.name + ' を公開'); }
+    catch (e2) {
+      var em2 = String((e2 && e2.message) || e2);
+      /* ★2026-09-23 本人「1店舗目の枠がないなら2店舗目に出せばいい」。
+         出品枠が満杯だと公開だけが弾かれる（実測 TH：`error_unlist_item_all_failed`・1店舗目は500/500）。
+         ここで【この店は満杯】と覚えて、次に新しいカタログを作る時は2店舗目に作る。 */
+      if (/unlist_item_all_failed|item_limit|limit/i.test(em2)) { baShopFull_(cc, tgt.shop_id, true); baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
+      baLog_(st, cc + '：公開に失敗 ' + em2.slice(0, 70));
+    }
+  }
   else { st.pendingPublish = st.pendingPublish || []; st.pendingPublish.push({ cc: cc, item_id: tgt.item_id, shop_id: tgt.shop_id, name: tgt.name, at: new Date().toISOString() }); }
 }
 /* 在庫更新が【明細まで通ったか】。Shopee は明細ごとの失敗を response.failure_list で返し、例外にはしない。 */
