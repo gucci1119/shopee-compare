@@ -2814,6 +2814,19 @@ function listMeta_(body) {
 }
 // 出品作成（単一バリエ・E2E実証形）。spec: { shop_id, item_name, description, price, stock, weight(kg), images:[url...], category|category_id, logistic_id, brand_id, publish(bool) }
 // ※バリエーション商品は add_item 後に init_tier_variation が必要＝次段で対応。まずは単品/1明細で実証。
+// 必須属性のうち「No／否」で埋められるもの（成人向けか？ 等）を足す。埋めた数を返す（0なら何もしていない）
+function mandatoryAttrFill_(shopId, catId, list) {
+  list = (list || []).slice(); var have = {}; list.forEach(function (a) { have[a.attribute_id] = 1; });
+  var tree = []; try { tree = getAttributeTree_(shopId, catId, 'en') || []; } catch (e) {}
+  var added = 0, names = [];
+  tree.forEach(function (a) {
+    if (!a.mandatory || have[a.attribute_id]) return;
+    var o = (a.options || []).filter(function (x) { return /^(no|none|否|不是|非成人|not adult|non[- ]?adult)(\b|$)/i.test(String((x && x.name) || '').trim()); })[0];
+    if (!o || !o.id) return;
+    list.push({ attribute_id: a.attribute_id, attribute_value_list: [{ value_id: o.id }] }); added++; names.push(a.name + '=' + o.name);
+  });
+  return { list: list, added: added, names: names };
+}
 function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
   var categoryId = body.category_id ? parseInt(body.category_id, 10) : resolveCategoryId_(shopId, body.category || 'Games');
@@ -2840,7 +2853,21 @@ function addItem_(body) {
     logistic_info: logisticInfo
   };
   if (body.dimension) payload.dimension = body.dimension;
-  var j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+  if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
+  /* ★2026-09-23 本人「switchが少ない原因は何？」。TW の Switch カタログの複製が毎回
+     `Attribute "Adult products" is ...`（必須の属性が無い）で落ちていた。属性は作った【あと】に写す作り（copyAttrs_）なので、
+     作る時点で必須のものがあると入口で弾かれる。→ 属性で弾かれた時だけ、そのカテゴリの必須属性のうち
+     「No／否」系の選択肢があるもの（成人向けか？等）を埋めて1回だけ作り直す。平常時は呼ばない＝接続枠は増えない。 */
+  var j;
+  try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
+  catch (eAdd) {
+    var msgA = String((eAdd && eAdd.message) || eAdd);
+    if (!/attribute/i.test(msgA)) throw eAdd;
+    var fillA = mandatoryAttrFill_(shopId, categoryId, payload.attribute_list || body.src_attrs || []);
+    if (!fillA.added) throw eAdd;
+    payload.attribute_list = fillA.list;
+    j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+  }
   var resp = j.response || j;
   var itemId = (resp.item_id || (resp.item || {}).item_id || null);
   var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_ids: logisticInfo.map(function (x) { return x.logistic_id; }), image_ids: imgIds };
@@ -4062,6 +4089,10 @@ function cloneItem_(shopId, itemId, newName, publish) {
   //   3辺すべてが正のときだけ引き継ぐ。
   var dim = base.dimension || {};
   if ((dim.package_length > 0) && (dim.package_width > 0) && (dim.package_height > 0)) body.dimension = dim;
+  /* 同じ店・同じカテゴリなので元の属性の value_id はそのまま使える。必須属性で弾かれた時だけ addItem_ がこれを土台に埋め直す */
+  body.src_attrs = (base.attribute_list || []).map(function (a) {
+    return { attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).filter(function (v) { return v && v.value_id; }).map(function (v) { return v.value_unit ? { value_id: v.value_id, value_unit: v.value_unit } : { value_id: v.value_id }; }) };
+  }).filter(function (a) { return a.attribute_value_list.length; });
   var out = addItem_(body);
   // ★バリエーションの【軸名】（例: Title）と**置き場**を作る。明細（オプション）は引き継がず
   //   「test」1件だけ入れておく＝本人のいつもの手順（1明細で作って、あとからまとめて追加）に合わせる。
@@ -6076,6 +6107,10 @@ function boshuAutoTick(manual) {
       var r = baAddToCc_(cfg, cc, hw, fam, famRows[cc] || [], allRows[cc] || [], picks, listedByCc[cc] || {}, ledger, st, _famName, allRows);
       out.ccs[cc] = r; out.added += r.added || 0;
       if (r.shop_id) touchedShops[r.shop_id] = 1;
+      /* ★2026-09-23 本人「switchが少ない原因は何？」。TW の Switch カタログの複製が毎回「Adult products」で失敗していたのに何も覚えず、
+         その国だけが空いている同じ20作品（他国で売れた順の先頭＝Among Us / Aria Chronicle…）を15分ごとに選び直していた＝Switch の枠が丸ごと空回り。
+         カタログを作れない・複製できない国は【6時間その機種×国を候補から外す】→ 次の作品に回る。6時間たてば自動で再挑戦（直っていれば通る）。 */
+      if (/失敗|作れ|カタログ群なし/.test(String(r.note || ''))) { try { var cf = baKv_('boshu_cc_fail') || {}; cf[hw + '|' + cc] = { at: new Date().toISOString(), why: String(r.note).slice(0, 120) }; baKvSet_('boshu_cc_fail', cf); baLog_(st, '⏸ ' + cc + '：' + hw + ' は6時間この国を外します（' + String(r.note).slice(0, 60) + '）'); } catch (eCf) {} }
     });
     // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
     try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 80)); }
@@ -6472,6 +6507,7 @@ function boshuAutoExclude_(hw, key, undo, any, ja) {
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
 function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto) {
+  var ccFail = {}; try { ccFail = baKv_('boshu_cc_fail') || {}; } catch (eCf) {}
   soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
   var byKey = {}, list = [];
@@ -6491,6 +6527,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
       var d = (ledger[r.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;   // 済み
       if (d && /^skip:(noimg|noname|dup|nofam|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
       if (!(famRows[cc] || []).length && !famAuto) return false;                                          // その国に家族カタログが無い（★2026-09-23 自動作成が有効なら候補に残す＝入れる時に1つ作る）
+      { var cfx = ccFail[hw + '|' + cc]; if (cfx && Date.now() - Date.parse(cfx.at) < 6 * 3600 * 1000) return false; }   /* ★2026-09-23 作れない国は6時間外す（同じ作品の空回り止め） */
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
       return true;
