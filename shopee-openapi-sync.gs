@@ -6498,8 +6498,10 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
   var byCc = fam.byCc || {}, o = byCc[cc] || {};
   var wantSku = String(o.sku || fam.sku || '').trim();
   /* 名前は【他の国の家族カタログ】から借りる（無ければ作らない） */
-  var srcName = String(famName || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
-  if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（他の国にも家族カタログがありません）'); return null; }
+  /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
+     これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
+  var srcName = String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
+  if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（名前が決まっていません＝設定の name が空）'); return null; }
   /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
   var pool = allRowsCc || [];
   var src = pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0] || pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0; })[0];
