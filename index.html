@@ -74,6 +74,12 @@
   .pf-table tbody tr:hover td, .pf-table tr:hover td { background: #fafbfd; }
   .smd-dim { color: #7a8394; }
   .pf-scroll { max-height: calc(100vh - 165px); overflow: auto; }
+  /* 💴入出金・経費の配置（2026-09-24） */
+  .exp-grid { display: grid; grid-template-columns: minmax(560px, 680px) minmax(520px, 1fr); gap: 14px; align-items: start; }
+  .exp-grid > .exp-full { grid-column: 1 / -1; }
+  .exp-grid > div > .tool-card:last-child { margin-bottom: 0 !important; }
+  .exp-grid > div > .tool-card { max-width: none !important; }
+  @media (max-width: 1240px) { .exp-grid { grid-template-columns: 1fr; } }
   /* 表の上に出す横スクロールバー（中身は高さ1pxのダミー。バーだけを見せる） */
   .pf-topscroll { overflow-x: auto; overflow-y: hidden; }
   .pf-topscroll > div { height: 1px; }
@@ -16661,7 +16667,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     c.remind.forEach(r => warn.push(`「${esc(r.name)}」（${esc(r.ecat)}）が未登録${r.amount ? '・見込み ' + y(r.amount) : ''}`));
     const gm = c.g;
     return `<div class="tool-card" style="margin:0 0 12px;max-width:none;padding:12px 14px">${head}
-      <table style="border-collapse:collapse;font-size:12.5px;width:100%;max-width:760px">
+      <table style="border-collapse:collapse;font-size:12.5px;width:100%;max-width:820px">
         ${line('売上（買い手が払った額・参考）', y(c.sales), { sub: c.n + '件（キャンセル・未払いを除く）' })}
         ${line('入金（確定）', y(c.depFix), { sub: `確定${c.fixN}件` + (c.depProv ? `／暫定 ${y(c.depProv)}（まだ更新前）` : '') + (c.depInit ? `／更新前の暫定合計 ${y(c.depInit)}` : '') })}
         ${(c.mvN || c.lateN || c.flatN) ? line('　暫定→確定の動き', (c.mvJpy < 0 ? '− ' : '+ ') + y(Math.abs(c.mvJpy)), { col: '#6b7280', sub: `動いた ${c.mvN}件（暫定比 ${pct(Math.abs(c.mvJpy), c.mvBase)}）／動かなかった ${c.flatN}件／暫定を見られなかった ${c.lateN}件（APIの初回取得が確定後で、利益管理表F列にも無い分）` }) : ''}
@@ -17159,7 +17165,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { plCfgV = await plCfg(); if (plCfgV && Array.isArray(plCfgV.fixBreak)) plCfgV.fixBreak.forEach(x => { const ec = x.ecat || plEcatOf(x.name); if (plModeOf(x) === 'remind' && !rows.some(r => r.category === ec)) plRemind.push({ name: x.name, ecat: ec, amount: plMonthlyOf(x) }); }); } catch (_) {}
     try { const kvy = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + exp.ym)); plYmt = (kvy && kvy[0] && kvy[0].v) || null; } catch (_) {}
     const plCtxV = plCtx(exp.ym, rows, { refund: refundTotal, remind: plRemind });
-    const plCard = plCardHtml(plCtxV) + plReviewHtml(plCtxV, await plPrevCount(exp.ym), formalRet, issues);
+    const plCard = plCardHtml(plCtxV);
+    const plReview = plReviewHtml(plCtxV, await plPrevCount(exp.ym), formalRet, issues);
     const autoCard = plAutoCardHtml(exp.ym, plCfgV, rows);
     let amzData = { rows: [], cls: {}, clsOk: false }, amzCard = '';
     try {
@@ -17169,17 +17176,6 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       amzCard = amzCardHtml(exp.ym, amzData, rows, amzOn);
     } catch (e) { amzCard = `<div class="tool-card" style="margin:0 0 12px;max-width:none"><b>🛒 Amazonで買ったもの</b><div style="font-size:12px;color:#b5341a;margin-top:4px">⚠ 在庫台帳を読めませんでした（${esc((e && e.message) || e)}）</div></div>`; }
     const ymtCard = plYamatoCardHtml(exp.ym, plYmt);
-    const netCard = `<div class="tool-card" style="margin:0 0 12px;max-width:520px;background:#f7fbf8;border:1px solid #d6ecdd">
-      <div style="font-weight:700;font-size:14px;margin-bottom:6px">🧮 当月の確定利益（${exp.ym}）<span class="smd-dim" style="font-weight:400;font-size:11px">＝粗利−経費−返金（人件費など固定費は含まず。固定費込みの実利益は📈事業計画）</span></div>
-      ${grossOk
-        ? `<div style="font-size:13px;line-height:1.9">粗利合計 <b style="color:#1a7f37">${fmtJpy(pf.grossTotal)}</b> <span class="smd-dim">（${pf.grossN}件＝確定${pf.grossFixN || 0}/暫定${pf.grossProvN || 0}）</span>${pf.grossProvN ? `<br><span style="font-size:11px;color:#e8710a">⚠️ 暫定入金 ${pf.grossProvN}件を含む（Shopee確定で変動しうる。確定申告は確定後に再確認）</span>` : ''}<br>
-           経費合計 <b style="color:#d93025">− ${fmtJpy(total)}</b><br>
-           手で記録した返金 <b style="color:#d93025">− ${fmtJpy(refundTotal)}</b> <span class="smd-dim" style="font-size:11px">（PayPal返金など、Shopeeの入金に出ない分。正式返品は注文月の入金に織り込み済みなので引きません）</span><br>
-           ${cxlLoss ? `キャンセル損失 <b style="color:#d93025">− ${fmtJpy(cxlLoss)}</b> <span class="smd-dim" style="font-size:11px">（日本を出た後＝荷物が戻らない ${pf.cxlN}件の仕入額）</span><br>` : ''}${pf.cxlUndecided ? `<span class="smd-dim" style="font-size:11px;color:#e8710a">⚖ 段階が未確定のキャンセル ${pf.cxlUndecided}件（確定するまで損失0円で計算しています）</span><br>` : ''}
-           <span style="border-top:1px solid #cde3d4;display:inline-block;padding-top:4px;margin-top:2px">純利益 <b style="font-size:16px;color:${net < 0 ? '#d93025' : '#1a7f37'}">${net < 0 ? '▲赤字 ' : ''}${fmtJpy(net)}</b></span></div>`
-        : `<div class="smd-dim" style="font-size:12px">粗利合計は<b>💹利益明細</b>で同じ月（${exp.ym}）を開くと自動で反映されます。<br>現在の粗利データ: ${pf.grossYm ? esc(pf.grossYm) + '（' + fmtJpy(pf.grossTotal || 0) + '）' : '未計算'}<br>経費合計 <b style="color:#d93025">${fmtJpy(total)}</b> ／ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`}
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px;border-top:1px solid #e5efe8;padding-top:6px">📈 <b>月ごとの推移・固定費込みの実利益</b>は <button class="smd-btn" id="exp-goplan" style="font-size:10px;padding:1px 7px">事業計画</button> に一本化しています（この表は当月の確定利益）。</div>
-    </div>`;
     // 入力フォーム
     // 既存データにしか無いカテゴリも末尾に残す（過去分が選べなくなると編集できない）
     const known = new Set(EXP_CATS);
@@ -17248,9 +17244,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
            <span class="smd-dim">返金・補償が<b>0円ではなく不明</b>の状態です。この画面の純利益とCSVは当てにしないでください。通信を確かめて開き直してください。</span>
          </div>`
       : '';
-    body.innerHTML = expFailBanner + `<div style="display:grid;grid-template-columns:minmax(340px,480px) minmax(420px,1fr);gap:14px;align-items:start">
-        <div>${plCard}${catCards}${exportCard}</div>
-        <div>${autoCard}${amzCard}${ymtCard}${form}${histCard}${table}</div>
+    /* ★2026-09-24 本人「このページ、見にくい。配置とか幅（横幅・縦幅）とか最適化して」
+       前：左340〜480pxの細い列に損益カード（注釈が縦に伸びる）＋ふりかえり（3列が480pxに押し込まれる）、右に残り全部。
+       後：上段＝損益カード（読める幅）｜ふりかえり（残り全部）／全幅＝毎月の経費・Amazon（横長の表）／
+           下段＝ヤマト取込＋入力フォーム｜内訳・明細・CSV／最下段＝月ごとの経費（横長）。1240px未満は1列。 */
+    body.innerHTML = expFailBanner + `<div class="exp-grid">
+        <div>${plCard}</div>
+        <div>${plReview}</div>
+        <div class="exp-full">${autoCard}</div>
+        <div class="exp-full">${amzCard}</div>
+        <div>${ymtCard}${form}</div>
+        <div>${catCards}${table}${exportCard}</div>
+        <div class="exp-full">${histCard}</div>
       </div>`;
     try { plWire(body, exp.ym); } catch (_) {}
     try { amzWire(body, exp.ym, amzData, rows); } catch (_) {}
@@ -19159,6 +19164,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-09-24', items: [
       '🔁 <b>正式返品を営業利益から引くのをやめました（二重計上でした）</b>（本人「返金・補償 −¥71,127 これって入れるべきなの？」「どのタイミングで入れるか難しいな」→「返金・補償されたタイミングで直すんじゃない？」「おけ」）。粗利はShopeeの入金額（escrow）で計算していて、返品が受理されると<b>注文月の入金が減る形でもう反映されています</b>。9月分の実測：受理された返品15件のうち10件は入金がマイナスまで減っていて ¥50,160 が二重、4件はまだ減っていませんでした。これからは<b>手で記録した返金（PayPal返金など、入金に出ない分）だけ</b>を引き、返品で減った額・件数は「織り込み済」として月次カードに出します。📈事業計画・🧾確定申告も同じ式にしました。注文月の数字は返品の受理期限（最長40日ほど）が過ぎるまで動きます。',
       '🔴 <b>営業利益（純利益）の行を大きく・赤字か黒字かを一目で</b>（本人「これもっと強調しないと」）。',
+      '🧱 <b>💴入出金・経費の配置を組み直しました</b>（本人「このページ、見にくい。配置とか幅（横幅・縦幅）とか最適化して」）。上段＝月次の損益（読める幅）｜月次のふりかえり（残り全部・3列）、全幅＝毎月かかる経費・Amazon、下段＝ヤマト取込＋入力｜内訳・明細・CSV、最下段＝月ごとの経費。これまでは左の細い列（340〜480px）に損益カードとふりかえりが押し込まれ、注釈が縦に伸びていました。1240px未満は1列に。使われていなかった旧「当月の確定利益」カードのコードも削除。',
       '🧭 <b>ふりかえりに「改善の方向性（効く順）」を付けました</b>（本人「改善の方向性みたいなのもセットで欲しい」）。返品を半分に／貢献利益+¥300／目標までの件数／家賃の判定／仕入未入力／📈の1件利益の更新を、円の見込みが大きい順に。3列は狭い画面（💴の列）では縦に折り返します。',
       '🔍 <b>「月次のふりかえり（甘口・中辛・辛口）」を💹利益明細と💴入出金・経費の月次カードの下に追加</b>（本人「毎月、振り返りたい」「月の途中でも」「甘口、中辛、辛口評価で3部まとめて」「私に媚び売らずに、フラットに見てよ」）。注文数・粗利/件・変動費/件（送料＋資材＝件数に比例）・貢献利益/件・固定費・損益分岐・前月比を出し、月の途中は経過日数から月末を見込みます。3つの評価は決め打ちの文ではなく、その月の数字から組みます（甘口＝できていること／中辛＝数字そのまま／辛口＝オーナー人件費・分岐点の余裕・2人分に必要な件数・家賃の判定期限・返品）。',
       '🖼 <b>🛒Amazonで買ったものに商品画像を出しました</b>（本人「画像も欲しいね」）。在庫台帳に入っている Amazon の主画像（27件中27件にあり）をそのまま表示。',
