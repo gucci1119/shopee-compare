@@ -16682,10 +16682,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const btn = (id, lab, cls) => `<button class="smd-btn ${cls} amz-act" data-id="${esc(id)}" data-cat="${esc(lab)}" style="font-size:10.5px;padding:1px 6px">${lab}</button>`;
     const tr = it => { const s = st(it); return `<tr style="${s.done ? 'opacity:.7' : ''}"><td style="padding:2px 6px;white-space:nowrap;font-size:11px">${esc(String(it.purchase_date || '').slice(5, 10))}</td><td style="padding:2px 6px;font-size:11.5px">${nm(it.name_supplier || it.name || '', 'wrap')}<div class="smd-dim" style="font-size:10.5px">${esc(it.item_id)}${it.supplier_order ? ' / ' + esc(it.supplier_order) : ''}</div></td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${fmtJpy(it.price)}</td><td style="padding:2px 6px;font-size:11px;color:${s.col};white-space:nowrap">${s.lab}</td><td style="padding:2px 6px;white-space:nowrap">${btn(it.item_id, '梱包資材', 'b-write')} ${btn(it.item_id, '備品費', 'b-write')} ${btn(it.item_id, 'ツール代（その他）', 'b-write')} ${btn(it.item_id, '仕入れ品', 'b-open')} ${s.done ? btn(it.item_id, '取消', 'b-danger') : ''}</td></tr>`; };
     const sum = rows.reduce((t, it) => t + (Number(it.price) || 0), 0);
-    return `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🛒 Amazonで買ったもの（備品・資材の取り込み）</span><span class="smd-dim" style="font-size:11px">${esc(ym)}：${rows.length}件・${fmtJpy(sum)}（Gmailの注文メールから在庫台帳に入った分）${pending.length ? `　<b style="color:#b5341a">分類待ち ${pending.length}件</b>` : ''}</span><label style="font-size:12px"><input type="checkbox" id="amz-auto-on" ${autoOn ? 'checked' : ''}> 明らかな資材（プチプチ・ダンボール・インク等）は自動で経費に</label></div>
+    return `<div class="tool-card" id="amz-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🛒 Amazonで買ったもの（備品・資材の取り込み）</span><span class="smd-dim" style="font-size:11px">${esc(ym)}：${rows.length}件・${fmtJpy(sum)}（Gmailの注文メールから在庫台帳に入った分）${pending.length ? `　<b style="color:#b5341a">分類待ち ${pending.length}件</b>` : ''}</span><label style="font-size:12px"><input type="checkbox" id="amz-auto-on" ${autoOn ? 'checked' : ''}> 明らかな資材（プチプチ・ダンボール・インク等）は自動で経費に</label></div>
       ${data.clsOk ? '' : '<div style="font-size:11px;color:#b5341a;margin-top:4px">⚠ 分類の記録を読めていません（ボタンは押せません）</div>'}
       ${rows.length ? `<div style="overflow:auto;max-height:340px;margin-top:6px"><table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 6px">日付</th><th style="text-align:left;padding:2px 6px">商品</th><th style="text-align:right;padding:2px 6px">金額</th><th style="text-align:left;padding:2px 6px">いまの扱い</th><th style="text-align:left;padding:2px 6px">これにする</th></tr>${rows.map(tr).join('')}</table></div>` : '<div class="smd-dim" style="font-size:12px;margin-top:6px">この月はAmazonの購入がありません。</div>'}
       <div class="smd-dim" style="font-size:11px;margin-top:4px">「仕入れ品」＝売る商品（経費にしない・在庫台帳のまま）。経費にした行はメモが「[Amazon] 在庫No 商品名」。注文に紐付いた在庫は自動で仕入れ品。判断は全PCで共有されます。</div></div>`;
+  }
+  async function amzRefresh(host, ym) {   // 🛒カードだけ読み直して差し替える（全画面の描き直しは数秒かかる）
+    const card = host.querySelector('#amz-card'); if (!card) return;
+    const cfg = await plCfg();
+    const [data, rows] = await Promise.all([amzLoad(ym), sbGetAll('expenses', `select=id,ymd,category,amount,memo&ymd=gte.${ym}-01&ymd=lt.${plNextYm(ym)}-01`)]);
+    const tmp = document.createElement('div'); tmp.innerHTML = amzCardHtml(ym, data, rows, !(cfg && cfg.amzAuto === false));
+    const fresh = tmp.firstElementChild; card.replaceWith(fresh); amzWire(host, ym, data, rows);
+    try { exp._allRows = null; } catch (_) {}
   }
   function amzWire(host, ym, data, expRows) {
     const on = host.querySelector('#amz-auto-on'); if (on) on.addEventListener('change', async () => { const cfg = (await plCfg()) || planCfgDefault(); cfg.amzAuto = on.checked; plan.cfg = cfg; pl.tpl = cfg; await planSave(); });
@@ -16693,11 +16701,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!settings.sbSecret) { alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
       if (!data.clsOk) { alert('分類の記録を読めていないので、いまは変えられません'); return; }
       const it = data.rows.find(x => x.item_id === b.dataset.id); if (!it) return; const cat = b.dataset.cat; b.disabled = true;
+      try { const cell = b.closest('tr').children[3]; if (cell) cell.innerHTML = '<span class="smd-spin"></span>保存中…'; } catch (_) {}
       try {
         if (cat === '仕入れ品') { await amzRemoveExpense(it, expRows); await amzSetClass(it.item_id, 'goods', ''); }
         else if (cat === '取消') { await amzRemoveExpense(it, expRows); const kv = await sbGetAll('app_kv', 'select=v&k=eq.amz_class').catch(() => undefined); const cur = baKvMust(kv === undefined ? undefined : ((kv && kv[0] && kv[0].v) || {}), 'Amazonの分類'); delete cur[it.item_id]; await sbUpsert('app_kv', [{ k: 'amz_class', v: cur, updated_at: new Date().toISOString() }], 'k'); }
         else { await amzPostExpense(it, cat, expRows); await amzSetClass(it.item_id, 'supply', cat); }
-        renderExpenses();
+        try { toast(cat === '取消' ? '取り消しました' : (cat === '仕入れ品' ? '仕入れ品にしました（経費から外しました）' : `経費「${cat}」に入れました`)); } catch (_) {}
+        await amzRefresh(host, ym);
       } catch (e) { alert('保存できませんでした: ' + ((e && e.message) || e)); b.disabled = false; }
     }));
   }
