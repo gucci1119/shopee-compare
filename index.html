@@ -7041,6 +7041,7 @@
     "🧹 おかしなJANは見つかりませんでした。": "🧹 No suspicious JAN was found.",
     /* ★2026-09-23 全体レビュー：英語版の抜け（無作為40本のうち14本）＋今回足した警告文 */
     /* ★2026-09-23 月次損益・固定費の自動登録・ヤマト運賃の取込 */
+    '🏗 初期投資の回収': '🏗 Payback of initial investment', '（別枠）初期投資': '(Separate) Initial investment', '初期投資': 'Initial investment', '案件': 'Project', '投資額': 'Invested', 'その後の営業利益 累計': 'Operating profit since', '回収': 'Recovered', '見込み': 'Outlook', '回収済': 'Recovered',
     '🔁 毎月かかる経費（人件費・家賃・ツールなど）': '🔁 Recurring costs (labor, rent, tools…)', '月が変わったら自動で入れる': 'Post automatically when the month changes', 'いつもの額': 'Usual amount', '入れ方': 'How', '毎月同じ額を自動で': 'Same amount every month (auto)', '月ごとに手で入れる': 'Enter each month by hand', '1件単価×出荷数': 'Unit price × shipments', '✔ 入っています': '✔ Posted', '入れる': 'Post', 'まだ': 'Not yet', '＋ 足す': '+ Add',
     '今月の実額': 'This month\'s actual', '✔ 登録済': '✔ Posted',
     '🤖が出しました': '🤖 listed it', '（反映待ち）': '(awaiting sync)',
@@ -13842,7 +13843,7 @@
           sbGetAll('income', 'select=cc,sn,amount,buyer_paid'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
           sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
-          sbGetAll('expenses', 'select=ymd,amount,category'),
+          sbGetAll('expenses', 'select=ymd,amount,category,memo'),
           sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
           sbGetAll('tasks', 'select=done').catch(() => []),
           loadSoft(sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at'), '手で記録した返金', planFails),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
@@ -13914,7 +13915,8 @@
       'ツール', 'ツール代', 'サブスク', '固定費', '通信費', '通信', '外注費', '外注', 'オフィス'];
     const isFixCat = c => FIX_CATS.indexOf(String(c || '').trim()) >= 0;
     const EF = {}, EO = {}; // EF=固定費実額(ym) / EO=その他経費(ym)
-    expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
+    const EI = {};   // 初期投資（別枠）：固定費にもその他経費にも入れない
+    expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (plIsInvest(x.category)) { EI[ym] = (EI[ym] || 0) + amt; return; } if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
     const yms = [...new Set([...Object.keys(M), ...Object.keys(EF), ...Object.keys(EO)])].sort().reverse();
     const rows = yms.map(ym => { const m = M[ym] || { n: 0, gmv: 0, dep: 0, cost: 0, gn: 0 }; const fixReg = EF[ym] || 0; const other = EO[ym] || 0; const refund = Math.max(0, refundForYm(issues || [], ym) + retLossForYm(rets || [], rmeta, ym, issues || [])); const gross = m.dep - m.cost; return { ym, n: m.n, gn: m.gn, gmv: m.gmv, dep: m.dep, cost: m.cost, fixReg, other, refund, exp: fixReg + other, gross }; });
     const curYm = jstYm();
@@ -14022,6 +14024,24 @@
       + `<div style="font-weight:700;font-size:13px;color:${planSec === k ? '#1a73e8' : '#333'}">${label}</div>`
       + `<div class="smd-dim" style="font-size:10.5px;margin-top:2px">${sub}</div></button>`;
     // ★📋 週次報告用：月初〜今日までの結果と着地予測。Discordの報告にそのまま貼れる形にする
+    // 🏗 初期投資の回収（本人 2026-09-24）：案件（メモの【…】か、無ければ月）ごとに、投資額と、その月以降の営業利益の累計を並べる
+    const investHtml = (() => {
+      const inv = expenses.filter(x => plIsInvest(x.category) && (x.ymd || '').slice(0, 7));
+      if (!inv.length) return `<div class="tool-card" style="margin:12px 0 0;max-width:none"><div style="font-weight:700;font-size:14px">🏗 初期投資の回収</div><div class="smd-dim" style="font-size:12px;margin-top:4px">まだありません。💴入出金・経費で分類を「初期投資：…」にして登録すると（メモに【事務所】のように案件名を付けると案件ごとに）、ここで回収の進み具合が出ます。営業利益には含めません。</div></div>`;
+      const proj = {};
+      inv.forEach(x => { const m = String(x.memo || '').match(/【([^】]+)】/); const key = m ? m[1] : ((x.ymd || '').slice(0, 7) + ' の投資'); const pr = (proj[key] = proj[key] || { key, total: 0, start: '9999-99', items: [] }); pr.total += Number(x.amount) || 0; const ym = (x.ymd || '').slice(0, 7); if (ym < pr.start) pr.start = ym; pr.items.push(x); });
+      const reliRows = rows.filter(r => reli(r)).sort((a, b) => a.ym.localeCompare(b.ym));
+      const last3 = reliRows.filter(r => r.ym !== curYm).slice(-3); const avgOp = last3.length ? Math.round(last3.reduce((t, r) => t + (opProfitOf(r) || 0), 0) / last3.length) : 0;
+      const trs = Object.values(proj).sort((a, b) => a.start.localeCompare(b.start)).map(pr => {
+        const after = reliRows.filter(r => r.ym >= pr.start); const cum = after.reduce((t, r) => t + (opProfitOf(r) || 0), 0);
+        const rate = pr.total > 0 ? Math.round(cum / pr.total * 100) : 0; const remain = Math.max(0, pr.total - cum);
+        const eta = remain <= 0 ? '回収済' : (avgOp > 0 ? `あと約 ${Math.ceil(remain / avgOp)}か月（直近${last3.length}か月の平均 ${fmtJpy(avgOp)}/月）` : '営業利益が黒字になってから');
+        const bar = `<div style="height:8px;background:#e9edf3;border-radius:4px;overflow:hidden;width:180px"><div style="height:8px;width:${Math.min(100, Math.max(0, rate))}%;background:${rate >= 100 ? '#1a7f37' : '#7b52c4'}"></div></div>`;
+        return `<tr><td style="padding:4px 8px"><b>${esc(pr.key)}</b><div class="smd-dim" style="font-size:10.5px">${esc(pr.start)}〜・${pr.items.length}件</div></td><td style="padding:4px 8px;text-align:right;white-space:nowrap">${fmtJpy(pr.total)}</td><td style="padding:4px 8px;text-align:right;white-space:nowrap;color:${cum < 0 ? '#d93025' : '#1a7f37'}">${fmtJpy(cum)}<div class="smd-dim" style="font-size:10.5px">${after.length}か月分</div></td><td style="padding:4px 8px;white-space:nowrap">${bar}<div style="font-size:11px;margin-top:2px"><b>${rate}%</b>${remain > 0 ? `　残り ${fmtJpy(remain)}` : ''}</div></td><td style="padding:4px 8px;font-size:11.5px">${esc(eta)}</td></tr>`; }).join('');
+      return `<div class="tool-card" style="margin:12px 0 0;max-width:none"><div style="font-weight:700;font-size:14px;margin-bottom:4px">🏗 初期投資の回収 <span class="smd-dim" style="font-weight:400;font-size:11px">投資した月から今までの営業利益（毎月の経費を引いた後）の累計で、どこまで戻ったか。営業利益には投資を含めません</span></div>
+        <table style="border-collapse:collapse;font-size:12.5px"><tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:4px 8px">案件</th><th style="text-align:right;padding:4px 8px">投資額</th><th style="text-align:right;padding:4px 8px">その後の営業利益 累計</th><th style="text-align:left;padding:4px 8px">回収</th><th style="text-align:left;padding:4px 8px">見込み</th></tr>${trs}</table>
+        <div class="smd-dim" style="font-size:11px;margin-top:6px">案件の分け方＝💴で登録する時にメモの先頭に【事務所】のように付ける（無ければ月ごと）。当月は途中の数字です。</div></div>`;
+    })();
     const repHtml = planReportHtml(M, M2, cfg, { fix: effFixedOf(curRow), other: curRow.other || 0, refund: curRow.refund || 0, now: curOp, targetNet: targetNet });
     body.innerHTML = loadFailBanner(plan._fails, '返金・補償を含む数字') + fxStaleBanner() + repHtml +
       `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:0 0 12px">`
@@ -14168,7 +14188,7 @@
           <tr style="border-top:2px solid #ccc;font-weight:700" title="${av('件数とGMVは全' + tot.monthsAll + 'か月ぶん。\nお金の列（入金・仕入・粗利・固定費・経費・実利益）は、入金と仕入がそろって計算できた ' + tot.months + 'か月ぶんだけを足しています。\n（列ごとに母集団が違うと、粗利−固定費−経費 と 実利益 が合いません）')}"><td>合計</td><td>${tot.nAll}</td><td>${fmtJpy(tot.gmvAll)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td class="smd-dim">—</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopeeの預かり金（escrow）を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入額を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
-      </div>`);
+      </div>${investHtml}`);
     // 📋 報告用：コピー＆目標の保存
     { const cb = body.querySelector('#plan-rep-copy'); if (cb) cb.addEventListener('click', () => {
         const ta = body.querySelector('#plan-rep-txt'); if (!ta) return;
@@ -16391,6 +16411,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ['物流', ['送料', '仕入送料', '梱包資材', '関税・輸入諸費用']],
     ['販売', ['Shopee手数料', '決済手数料', '広告費', '返金・補償の自己負担']],
     ['その他', ['交通費', '会議費', '新聞図書費', '支払手数料', '税理士・専門家報酬', 'その他']],
+    /* ★2026-09-24 本人「その月だけしか発生しない経費（敷金・スマートロック・防犯カメラ・スチールラック）は毎月の経費とは別枠にして、回収できたかを測りたい」 */
+    ['初期投資（別枠・回収を測る）', ['初期投資：設備・什器', '初期投資：契約費用（敷金・礼金・仲介）', '初期投資：工事・引越', '初期投資：その他']],
   ];
   const EXP_CATS = EXP_CAT_GROUPS.reduce((a2, g) => a2.concat(g[1]), []).concat(['ツール', '外注費']).filter((v, i, a3) => a3.indexOf(v) === i);
   const exp = { ym: null, rows: null };
@@ -16426,7 +16448,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const plModeOf = x => x.mode || (x.freq === 'once' ? 'remind' : (/送料|運賃|ヤマト|備品|資材/.test(String(x.name || '')) ? 'remind' : 'auto'));
   const PL_MODE_LABEL = { auto: '毎月 自動登録', perOrder: '件数連動で自動', remind: '手入力（未登録なら知らせる）' };
   // 経費の分類→損益の区分（人件費／ツール代 など言い方が違っても同じ区分に寄せる）
-  function plGroupOf(cat) { const c = String(cat || ''); if (/送料|運賃/.test(c)) return 'ship'; if (/梱包|資材|備品|什器/.test(c)) return 'pack'; if (/人件|外注|給料|スタッフ/.test(c)) return 'labor'; if (/家賃|倉庫|保管|光熱|オフィス/.test(c)) return 'place'; if (/ツール|通信|サブスク/.test(c)) return 'tool'; if (/Shopee手数料|決済手数料|広告|返金|補償|関税/.test(c)) return 'sell'; return 'other'; }
+  const plIsInvest = cat => /^初期投資|^投資[:：]/.test(String(cat || ''));
+  function plGroupOf(cat) { const c = String(cat || ''); if (plIsInvest(c)) return 'invest'; if (/送料|運賃/.test(c)) return 'ship'; if (/梱包|資材|備品|什器/.test(c)) return 'pack'; if (/人件|外注|給料|スタッフ/.test(c)) return 'labor'; if (/家賃|倉庫|保管|光熱|オフィス/.test(c)) return 'place'; if (/ツール|通信|サブスク/.test(c)) return 'tool'; if (/Shopee手数料|決済手数料|広告|返金|補償|関税/.test(c)) return 'sell'; return 'other'; }
   async function plCfg() {   // plan_cfg（固定費の内訳・自動登録の設定）。📈事業計画を開いていなくても読む
     if (plan.cfg) return plan.cfg;
     if (pl.tpl && Date.now() - pl.tplAt < 60000) return pl.tpl;
@@ -16550,9 +16573,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     Object.assign(c, { n, sales, depFix, depProv, depInit, cost, pp, noCost, noDep });
     const rows = Array.isArray(expRows) ? expRows : [];
-    const g = { ship: 0, pack: 0, labor: 0, place: 0, tool: 0, sell: 0, other: 0 };
+    const g = { ship: 0, pack: 0, labor: 0, place: 0, tool: 0, sell: 0, other: 0, invest: 0 };
     rows.forEach(r => { g[plGroupOf(r.category)] += Number(r.amount) || 0; });
-    c.g = g; c.expTotal = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0); c.expOk = Array.isArray(expRows);
+    c.g = g; c.expTotal = rows.reduce((s, r) => s + (plIsInvest(r.category) ? 0 : (Number(r.amount) || 0)), 0); c.expOk = Array.isArray(expRows);   /* 初期投資は営業利益に含めない（別枠） */
     c.refund = (extras && extras.refund != null) ? extras.refund : null;
     c.remind = (extras && extras.remind) || [];
     c.net = c.ok ? c.gross - c.expTotal - (c.refund || 0) - c.cxl : null;
@@ -16586,6 +16609,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${line('− 返金・補償', '− ' + y(c.refund || 0), { indent: true, col: '#a15', sub: c.refund == null ? '（この画面では未集計＝💴入出金・経費で出ます）' : '' })}
         ${c.cxl ? line('− キャンセル損失（日本を出た後）', '− ' + y(c.cxl), { indent: true, col: '#a15', sub: c.cxlN + '件' }) : ''}
         ${line('＝ 営業利益（純利益）', (c.net < 0 ? '▲ ' : '') + y(Math.abs(c.net)), { strong: true, bg: '#f7fbf8', col: c.net < 0 ? '#d93025' : '#1a7f37', sub: `売上比 ${pct(c.net, c.sales)}／経費計 ${y(c.expTotal)}` })}
+        ${gm.invest ? line('（別枠）初期投資', y(gm.invest), { col: '#7b52c4', sub: '営業利益には含めません。回収の進み具合は📈事業計画「🏗 初期投資の回収」で' }) : ''}
       </table>
       ${warn.length ? `<div style="margin-top:8px;padding:7px 10px;border:1px solid #ffd9b3;background:#fff8ef;border-radius:8px;font-size:12px;color:#8a4b00">⚠ ${warn.join('　／　')}</div>` : ''}
       <div class="smd-dim" style="font-size:11px;margin-top:6px">📗 スプシの利益管理表は「更新前の暫定入金 × 月の固定レート」を売上にしているので、ここより数%大きく出ます（2026-08の実測：BRの売上はスプシ¥1,592,207／ここは更新前¥1,586,980→確定¥1,514,313）。仕入は同じ元データ。経費はスプシの「経費一覧」と同じ区分でここに登録します。</div>
@@ -16692,7 +16716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       return { lab: '分類待ち', col: '#b5341a', done: false }; };
     const pending = rows.filter(it => !st(it).done);
     const btn = (id, lab, cls) => `<button class="smd-btn ${cls} amz-act" data-id="${esc(id)}" data-cat="${esc(lab)}" style="font-size:10.5px;padding:1px 6px">${lab}</button>`;
-    const tr = it => { const s = st(it); return `<tr style="${s.done ? 'opacity:.7' : ''}"><td style="padding:2px 6px;white-space:nowrap;font-size:11px">${esc(String(it.purchase_date || '').slice(5, 10))}</td><td style="padding:2px 6px;font-size:11.5px">${nm(it.name_supplier || it.name || '', 'wrap')}<div class="smd-dim" style="font-size:10.5px">${esc(it.item_id)}${it.supplier_order ? ' / ' + esc(it.supplier_order) : ''}</div></td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${fmtJpy(it.price)}</td><td style="padding:2px 6px;font-size:11px;color:${s.col};white-space:nowrap">${s.lab}</td><td style="padding:2px 6px;white-space:nowrap">${btn(it.item_id, '梱包資材', 'b-write')} ${btn(it.item_id, '備品費', 'b-write')} ${btn(it.item_id, 'ツール代（その他）', 'b-write')} ${btn(it.item_id, '仕入れ品', 'b-open')} ${s.done ? btn(it.item_id, '取消', 'b-danger') : ''}</td></tr>`; };
+    const tr = it => { const s = st(it); return `<tr style="${s.done ? 'opacity:.7' : ''}"><td style="padding:2px 6px;white-space:nowrap;font-size:11px">${esc(String(it.purchase_date || '').slice(5, 10))}</td><td style="padding:2px 6px;font-size:11.5px">${nm(it.name_supplier || it.name || '', 'wrap')}<div class="smd-dim" style="font-size:10.5px">${esc(it.item_id)}${it.supplier_order ? ' / ' + esc(it.supplier_order) : ''}</div></td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${fmtJpy(it.price)}</td><td style="padding:2px 6px;font-size:11px;color:${s.col};white-space:nowrap">${s.lab}</td><td style="padding:2px 6px;white-space:nowrap">${btn(it.item_id, '梱包資材', 'b-write')} ${btn(it.item_id, '備品費', 'b-write')} ${btn(it.item_id, 'ツール代（その他）', 'b-write')} ${btn(it.item_id, '初期投資：設備・什器', 'b-sort')} ${btn(it.item_id, '仕入れ品', 'b-open')} ${s.done ? btn(it.item_id, '取消', 'b-danger') : ''}</td></tr>`; };
     const sum = rows.reduce((t, it) => t + (Number(it.price) || 0), 0);
     return `<div class="tool-card" id="amz-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🛒 Amazonで買ったもの（備品・資材の取り込み）</span><span class="smd-dim" style="font-size:11px">${esc(ym)}：${rows.length}件・${fmtJpy(sum)}（Gmailの注文メールから在庫台帳に入った分）${pending.length ? `　<b style="color:#b5341a">分類待ち ${pending.length}件</b>` : ''}</span><label style="font-size:12px"><input type="checkbox" id="amz-auto-on" ${autoOn ? 'checked' : ''}> 明らかな資材（プチプチ・ダンボール・インク等）は自動で経費に</label></div>
       ${data.clsOk ? '' : '<div style="font-size:11px;color:#b5341a;margin-top:4px">⚠ 分類の記録を読めていません（ボタンは押せません）</div>'}
@@ -18959,6 +18983,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🏗 <b>初期投資を毎月の経費と別枠にして、回収を測れるようにしました</b>（本人「その月だけしか発生しない経費（敷金・スマートロック・防犯カメラ・スチールラック）は別枠で、初期投資が回収できたかを測りたい」）。経費の分類に「初期投資：設備・什器／契約費用／工事・引越／その他」を追加。🧮月次損益では営業利益に含めず「（別枠）初期投資」の行に、📈事業計画（実績）に<b>🏗 初期投資の回収</b>カード＝案件（メモの【事務所】など）ごとの投資額・その後の営業利益の累計・回収率・回収見込み月。🛒Amazonの分類ボタンにも「初期投資」を追加。',
       '🚚 <b>ヤマトの運賃を毎日ポータルへ拾うようにしました</b>（本人「月1回だとタイムリーに見えないから、拾いに行ってほしい」「ここで拾える（Web請求書＞運賃情報参照）」）。userscript「【ヤマト】🚚 運賃情報をポータルへ送る」が、ヤマトビジネスメンバーズにログインしている間に直近31日の運賃情報を裏で取り、GAS経由で経費「送料」に<b>速報</b>として入れます（3時間に1回・メニューから即時も可）。月初に請求明細CSVを入れた月は<b>確定</b>で上書きし、速報は触りません。実測：9月 16件・¥23,070。<b>🔁毎月かかる経費の表を2列の考え方に</b>（左＝いつもの額／右＝この月に入る額。今月だけ違う時は右だけ直す・「入れる」ボタン）。',
       '🛒 <b>Amazonで買った備品・資材を経費に取り込めるようにしました</b>（本人「大体の備品はアマゾンで買ってるから、それも取り込まれるように」「仕入れ品とは混ざらないように注意」）。Gmailの注文メールから在庫台帳に入っているAmazonの購入を💴に月ごとに並べ、名前で明らかな資材（プチプチ・ダンボール・インク等）は自動で「梱包資材／備品費」に、それ以外は<b>分類待ち</b>として1クリックで 梱包資材／備品費／ツール／仕入れ品 を選びます（注文に紐付いた在庫は自動で仕入れ品）。🔁固定費の内訳は💴の中でその場編集（項目・分類・金額・頻度・扱い・1件単価・追加・削除・その月の登録状態）。⏳<b>読み込み中の待ち時間に、荷物が走るアニメと運用のヒントを出すようにしました</b>（本人「モンハンでよくあるような」「ポータルの全部のところで」＝「読み込み中／集計中／取得中」の文字だけの箱にも付きます）。📈<b>事業計画は独立したページに戻しました</b>（本人「やっぱり、損益・入出金と事業計画は別」。固定費の内訳は💴からもその場で編集できるので二重管理にはなりません）。',
       '🩹 <b>📈事業計画の「🎯これからの計画」が開けなくなっていたのを直しました</b>（外注の採算パネルが renderPlan の外から numFmt を呼んでいて ReferenceError＝9/12の外注パネル追加以降、sim を選ぶと描画が止まっていた。今日の実機確認で発覚）。あわせて、英語表示のたびに落ちていた I18N_PAT の文字列4件（Googleアカウントごとの残り／🤖出品の担当／⛔ 使い切り／状態を取れませんでした）を正規表現に。',
