@@ -1471,11 +1471,11 @@ function tokSharedLoad_() {
 function tokClaim_(shopId) {
   var k = 'tok_claim_' + shopId, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
   try {
-    var cur = baKv_(k);
+    var cur = baKvFresh_(k);   /* ★控えを飛ばして読む（2026-09-23 レビュー） */
     if (cur && cur.at && now_() - cur.at < 90) return false;
     baKvSet_(k, { at: now_(), by: me });
     Utilities.sleep(700);
-    var chk = baKv_(k);
+    var chk = baKvFresh_(k);
     return !!(chk && chk.by === me);
   } catch (e) { return false; }
 }
@@ -1488,7 +1488,7 @@ function syncGate_(name, holdSec) {
   if (ufDead_()) { Logger.log(name + '：自分の接続枠が尽きているので、もう一方に任せます'); return false; }
   var k = 'sync_claim_' + name, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
   try {
-    var cur = baKv_(k);
+    var cur = baKvFresh_(k);   /* ★控えを飛ばして読む（2026-09-23 レビュー） */
     /* ★2026-09-22 本人「分担分けなどもちゃんと設計して」「設計ミスとかがないか見直して」。
        前は「先に手を挙げた方がやる」だけ＝業務（注文・入金・返品）を2台目がかなり取っていて、2台目の枠（＝出品に回す分）が先に減っていた。
        → 【業務は本体】。2台目は、本体の最後の実行が取り札の2.2倍より古い（＝本体が枯れて手を挙げられない）時だけ代わりにやる。
@@ -1499,7 +1499,7 @@ function syncGate_(name, holdSec) {
     if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
     baKvSet_(k, { at: now_(), by: me });
     Utilities.sleep(800);
-    var chk = baKv_(k);
+    var chk = baKvFresh_(k);
     if (!chk || chk.by !== me) { Logger.log(name + '：取り札を取り合って負けたので見送り'); return false; }
   } catch (e) { return true; }   /* 取り札が読めない時は従来どおり動く（止めない） */
   return true;
@@ -5486,6 +5486,25 @@ function baKv_(k) {
   try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { BA_KV_ERR = true; return null; }
 }
 function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
+/* ★2026-09-23 レビューで見つけた穴。🤖の実行中は app_kv を先読みした控え（BA_KV_CACHE）で答えるので、
+   【取り札】の「書いた直後に読み直して自分の札か確かめる」が控えに当たり、必ず「取れた」になっていた（2台目と3台目が同時に
+   同じ店のトークンを更新すると refresh_token の取り合いで全店の認証が壊れる）。取り札は必ず控えを飛ばして読む。 */
+function baKvFresh_(k) { if (BA_KV_CACHE) { try { delete BA_KV_CACHE[k]; } catch (e) {} } return baKv_(k); }
+/* 何本かの鍵を【1回の通信で】新しく読む（控えは使わない）。読めなければ null＝「分からない」（空の {} にしない） */
+function baKvFreshMany_(keys) {
+  try { var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')'); var o = {}; (r || []).forEach(function (x) { o[x.k] = x.v; }); return o; } catch (e) { return null; }
+}
+/* ★2026-09-23 2台目と3台目は【同じ控え】（使った写真・AI判定・英題・写真NG・紫印）を「読んで→足して→丸ごと書く」ので、
+   同時に終わった回の片方の追記が消えていた（使った写真が消えると、同じ写真が別の作品に付く）。
+   → 書く直前に新しい値を読み、【自分が触った分を上に重ねて】から書く。fresh が読めなかった時は自分の分だけ書く（今までどおり）。
+   上限を超えたら自分が触った鍵だけ残す（両方の分を足し続けて肥大化させない）。 */
+function baKvMerge_(k, mine, fresh, cap) {
+  var base = (fresh && fresh[k] && typeof fresh[k] === 'object' && !Array.isArray(fresh[k])) ? fresh[k] : null;
+  if (!base) return mine;
+  var out = {}; Object.keys(base).forEach(function (x) { out[x] = base[x]; }); Object.keys(mine || {}).forEach(function (x) { out[x] = mine[x]; });
+  if (cap && Object.keys(out).length > cap) return mine;
+  return out;
+}
 function baLog_(st, line) {
   st.log = st.log || []; st.log.unshift({ at: new Date().toISOString(), m: String(line).slice(0, 300) }); if (st.log.length > 120) st.log.length = 120;
 }
@@ -6139,9 +6158,11 @@ function boshuAutoTick(manual) {
     /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
-    try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {}
-    try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
-    if (preRejChanged) { try { var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 80)); } }
+    /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
+    var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
+    try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 3500)); } catch (eJ) {}
+    try { baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 4500)); } catch (eC) {}   // ★v182
+    if (preRejChanged) { try { preRej = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 80)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
     /* ★2026-09-23 家族カタログの名前（①②の印は外す）。その国にまだ無い時は、この名前で1つ作る（baEnsureFam_） */
@@ -6156,13 +6177,13 @@ function boshuAutoTick(manual) {
       /* ★2026-09-23 本人「switchが少ない原因は何？」。TW の Switch カタログの複製が毎回「Adult products」で失敗していたのに何も覚えず、
          その国だけが空いている同じ20作品（他国で売れた順の先頭＝Among Us / Aria Chronicle…）を15分ごとに選び直していた＝Switch の枠が丸ごと空回り。
          カタログを作れない・複製できない国は【6時間その機種×国を候補から外す】→ 次の作品に回る。6時間たてば自動で再挑戦（直っていれば通る）。 */
-      if (/失敗|作れ|カタログ群なし/.test(String(r.note || ''))) { try { var cf = baKv_('boshu_cc_fail') || {}; cf[hw + '|' + cc] = { at: new Date().toISOString(), why: String(r.note).slice(0, 120) }; baKvSet_('boshu_cc_fail', cf); baLog_(st, '⏸ ' + cc + '：' + hw + ' は6時間この国を外します（' + String(r.note).slice(0, 60) + '）'); } catch (eCf) {} }
+      if (/失敗|作れ|カタログ群なし/.test(String(r.note || ''))) { try { var cf = baKvFresh_('boshu_cc_fail') || {}; cf[hw + '|' + cc] = { at: new Date().toISOString(), why: String(r.note).slice(0, 120) }; baKvSet_('boshu_cc_fail', cf); baLog_(st, '⏸ ' + cc + '：' + hw + ' は6時間この国を外します（' + String(r.note).slice(0, 60) + '）'); } catch (eCf) {} }
     });
     // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
     try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 80)); }
     // 済み台帳・使った写真・当日カウント
     baKvSet_('boshu_auto_done_' + hw, ledger);
-    baKvSet_(BA_IMGS, used);
+    baKvSet_(BA_IMGS, baKvMerge_(BA_IMGS, used, _fr, 0));   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
     st.today.n += picks.length; st.today.added += out.added;
     /* ★v184 失敗の数え方：候補があったのに1件も入らなかった回を「失敗」に数える（baAddBatch_ は例外を握って note で返すので外の catch に来ない・Codex指摘）。1件でも入れば0に戻す */
     if (out.added > 0) st.errStreak = 0; else { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ').slice(0, 160) + '）'; }
@@ -6604,7 +6625,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
 function baShopFull_(cc, shopId, set) {
   var k = String(cc) + '|' + String(shopId);
   var m = baKv_('boshu_shop_full') || {};
-  if (set) { m[k] = now_(); try { baKvSet_('boshu_shop_full', m); } catch (e) {} return true; }
+  if (set) { m = baKvFresh_('boshu_shop_full') || {}; m[k] = now_(); try { baKvSet_('boshu_shop_full', m); } catch (e) {} return true; }   /* ★書く時は新しい値に足す（相方の印を消さない） */
   var t = Number(m[k] || 0);
   if (t && now_() - t < 24 * 3600) return true;
   /* ★2026-09-23 本人「何故取れない？」→ 出品枠は `get_item_limit` の item_count_limit.max_limit で取れると分かった。
@@ -7103,7 +7124,7 @@ function seedShopCatalog_(p) {
 function baLogAutoMark_(rows) {
   try {
     if (!rows || !rows.length) return;
-    var cur = baKv_('listlog_auto') || {}; var mp = cur.map || {}; var grew = 0;
+    var cur = baKvFresh_('listlog_auto') || {}; var mp = cur.map || {}; var grew = 0;   /* ★2026-09-23 相方が直前に書いた分を消さない（控えでなく新しい値に足す） */
     rows.forEach(function (r) {
       if (!r || !r.cc || !r.item_id || !r.en) return;
       var k = r.cc + '|' + r.item_id + '|' + String(r.en).toLowerCase().trim();
