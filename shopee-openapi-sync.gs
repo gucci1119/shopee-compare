@@ -1117,6 +1117,18 @@ function doGetInner_(e) {
     }
     /* ★2026-09-23 「出品枠（Listing Limit）はAPIで取れないのか？」を実際に叩いて確かめるための口（本人「何故取れない？」）。
        **GETだけ・パスは /api/v2/ 限定**＝読み取り専用。書き込みはできない。1回の呼び出しで urlfetch 1回。 */
+    /* 🔍 Yahoo!フリマを GAS の IP から読めるかの確認口（読むだけ・WRITE_TOKEN 必須・1回 urlfetch 1回） */
+    if (p.action === 'probe_paypay') {
+      var ppcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var ppout;
+      try {
+        var ppwt = P_().getProperty('WRITE_TOKEN'); if (!ppwt || p.token !== ppwt) throw new Error('WRITE_TOKEN不正');
+        var ppr = baPaypay_(String(p.q || 'ゼルダの伝説 Switch'));
+        ppout = { ok: true, code: ppr.code, blocked: ppr.blocked, n: ppr.items.length, err: ppr.err || '', sample: ppr.items.slice(0, 3) };
+        ufPersist_();
+      } catch (err) { ppout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ppcb + '(' + JSON.stringify(ppout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'api_probe') {
       var apcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var apout;
@@ -5803,6 +5815,41 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     st.rephoto = cnt; } catch (eC) {}
   if (changed) { try { baKvSet_('boshu_auto_rephoto', rp); } catch (eR) {} try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {} }
 }
+/* 🛍 Yahoo!フリマ（paypayfleamarket.yahoo.co.jp）を GAS から探す（2026-09-23 本人「ヤフオクではなく、Yahoo!フリマでは無理か？」）。
+   ヤフオク（auctions.yahoo.co.jp）は Google の IP を弾き続けるが、フリマ側は別のサイト。ページの __NEXT_DATA__ に商品が入っているので
+   ポータルのブラウザ側と同じ読み方をする。弾かれ方はヤフオクと同じ扱い（403/429/5xx・中身が無い＝blocked）。 */
+function baPaypay_(q) {
+  var url = 'https://paypayfleamarket.yahoo.co.jp/search/' + encodeURIComponent(q) + '?open=1&sort=price&order=asc';
+  ufBump_(1, 'boshu_auto(Yahoo!フリマ検索)');
+  var res; try { res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': BA_UA, 'Accept-Language': 'ja' } }); } catch (eF) { return { items: [], blocked: false, code: 0, err: String(eF).slice(0, 80), src: 'paypay', url: url }; }
+  var code = res.getResponseCode(), html = res.getContentText() || '';
+  var out = { items: [], blocked: false, code: code, src: 'paypay', url: url };
+  if (code >= 400) { out.blocked = code === 403 || code === 429 || code >= 500; return out; }
+  var m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) { out.blocked = true; return out; }
+  var j = null; try { j = JSON.parse(m[1]); } catch (e) { out.blocked = true; return out; }
+  var seen = {};
+  var walk = function (o, depth) {
+    if (!o || typeof o !== 'object' || depth > 12 || out.items.length > 120) return;
+    var id = o.id;
+    if (id && /^[a-z0-9]{8,}$/i.test(String(id)) && o.price != null && (o.name || o.title) && !seen[id]) {
+      seen[id] = 1;
+      if (o.itemStatus == null || o.itemStatus === 'OPEN') {
+        var im = o.imageUrl || (o.images && o.images[0] && (o.images[0].url || o.images[0].imageUrl || (typeof o.images[0] === 'string' ? o.images[0] : ''))) || o.thumbnailImageUrl || '';
+        if (im) out.items.push({ id: String(id), t: String(o.name || o.title), img: String(im).replace(/&amp;/g, '&'), price: Number(o.price) || 0, url: 'https://paypayfleamarket.yahoo.co.jp/item/' + id });
+      }
+    }
+    var vs = Array.isArray(o) ? o : Object.keys(o).map(function (k) { return o[k]; });
+    for (var i = 0; i < vs.length; i++) walk(vs[i], depth + 1);
+  };
+  walk(j, 0);
+  return out;
+}
+/* 🤖がメルカリの写真で通らなかった時に探す先。既定は Yahoo!フリマ。ヤフオクは cfg.gasYahoo === true の時だけ（GoogleのIPから弾かれ続けるため既定は使わない・2026-09-23 本人指定） */
+function baPhotoSrc_(q, cfg) {
+  if (cfg && cfg.gasYahoo === true) { var y0 = baYahoo_(q); y0.src = 'yahoo'; y0.url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2'; (y0.items || []).forEach(function (it) { if (!it.url) it.url = 'https://auctions.yahoo.co.jp/jp/auction/' + it.id; }); return y0; }
+  return baPaypay_(q);
+}
 function baYahoo_(q) {
   // ★fixed=3＝定額（即決）だけ。入札中の現在価格を相場に混ぜると仕入れを安く見積もって赤字になる（ポータルの仕入れ検索と同じ判断）
   var url = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3&n=50';
@@ -6150,7 +6197,7 @@ function boshuAutoTick(manual) {
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
         /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
         /* ★v182 先に「同じ作品の出品か」（題名・文章AI）、通ったら「実物の写真か」（画像AI）。どちらかで落ちたら次の候補（最大2枚）、それも駄目ならヤフオクへ */
-        var okM = false, sameNgM = 0, sameUnj = 0, candsM = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 6);   /* 2026-09-20 新基準で通過率が41%に下がった→試す枚数を4→6（1枚 約¥0.3） */   /* 紙箱の機種は使用感のある出品から・プラケースの機種は綺麗な出品から。同じ状態なら個人→Shops。最大4枚まで判定 */
+        var okM = false, sameNgM = 0, sameUnj = 0, candsM = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, (BA_CART_ONLY_HW[hw] ? 10 : 8));   /* ★2026-09-23 出品の2〜4枚目も候補に入るようになったので、カセット機種は10枚・他は8枚まで試す（1枚 約¥0.3） */   /* 2026-09-20 新基準で通過率が41%に下がった→試す枚数を4→6（1枚 約¥0.3） */   /* 紙箱の機種は使用感のある出品から・プラケースの機種は綺麗な出品から。同じ状態なら個人→Shops。最大4枚まで判定 */
         for (var ci = 0; ci < candsM.length && !okM; ci++) {
           var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
@@ -6194,12 +6241,13 @@ function boshuAutoTick(manual) {
       if (!st.yh || st.yh.h !== _yhH) st.yh = { h: _yhH, n: 0 };
       if (st.yh.n >= BA_YAHOO_PER_HOUR) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       st.yh.n++;
-      var y = baYahoo_(q);
-      if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = Date.now() + restH * 3600 * 1000; yahooOk = false; baLog_(st, '🛑 ヤフオクに弾かれた（HTTP ' + y.code + '）→ヤフオクの検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
+      var y = baPhotoSrc_(q, cfg);   /* ★2026-09-23 既定は Yahoo!フリマ（ヤフオクは Google の IP から弾かれ続けて2時間休みの繰り返しだった） */
+      var _srcNm = (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ';
+      if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = Date.now() + restH * 3600 * 1000; yahooOk = false; baLog_(st, '🛑 ' + _srcNm + 'に弾かれた（HTTP ' + y.code + '）→' + _srcNm + 'の検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
-      var img = null, srcId = '', triedY = 0;
+      var img = null, srcId = '', srcUrl = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); break; } if (triedY >= 3) break; }
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); srcUrl = String(hits[k].url || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       if (cost > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', hits.length); continue; }
@@ -6209,7 +6257,7 @@ function boshuAutoTick(manual) {
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 80)); }
       if (!imageId) { out.skipped++; Utilities.sleep(1500); continue; }
       used[img] = c.key;
-      picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : '', q: 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2' });
+      picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
