@@ -7041,6 +7041,8 @@
     "🧹 おかしなJANは見つかりませんでした。": "🧹 No suspicious JAN was found.",
     /* ★2026-09-23 全体レビュー：英語版の抜け（無作為40本のうち14本）＋今回足した警告文 */
     /* ★2026-09-23 月次損益・固定費の自動登録・ヤマト運賃の取込 */
+    '🔁 毎月かかる経費（人件費・家賃・ツールなど）': '🔁 Recurring costs (labor, rent, tools…)', '月が変わったら自動で入れる': 'Post automatically when the month changes', 'いつもの額': 'Usual amount', '入れ方': 'How', '毎月同じ額を自動で': 'Same amount every month (auto)', '月ごとに手で入れる': 'Enter each month by hand', '1件単価×出荷数': 'Unit price × shipments', '✔ 入っています': '✔ Posted', '入れる': 'Post', 'まだ': 'Not yet', '＋ 足す': '+ Add',
+    '今月の実額': 'This month\'s actual', '✔ 登録済': '✔ Posted',
     '🤖が出しました': '🤖 listed it', '（反映待ち）': '(awaiting sync)',
     '🛒 Amazonで買ったもの（備品・資材の取り込み）': '🛒 Amazon purchases (supplies & packaging)', '分類待ち': 'Unclassified', 'いまの扱い': 'Current', 'これにする': 'Set to', '仕入れ品': 'Stock for sale', '取消': 'Undo', '明らかな資材（プチプチ・ダンボール・インク等）は自動で経費に': 'Auto-post obvious supplies (bubble wrap, boxes, ink…)',
     '金額・頻度': 'Amount / frequency', 'の状態': ' status', '✔ 登録済': '✔ Posted', '手入力あり': 'Entered manually', '未登録': 'Not posted', '＋ 追加': '+ Add', '毎月': 'Monthly', '年額': 'Yearly', '一回': 'One-off', '分類（名前から自動）': 'Category (auto from name)',
@@ -16590,33 +16592,41 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     </div>`;
   }
   function plAutoCardHtml(ym, cfg, expRows) {
+    /* ★2026-09-24 本人「UIがわかりにくい」→ 2列だけの考え方に：左＝いつもの額（毎月の基準）／右＝この月に実際に入る額。
+       行ごとの「扱い」は言葉で（毎月同じ額を自動で／月ごとに手で入れる／1件単価×出荷数）。状態は「✔ 入っています」か「まだ →［入れる］」 */
     const items = (cfg && Array.isArray(cfg.fixBreak)) ? cfg.fixBreak : [];
     const on = !!(cfg && cfg.fixAuto);
     const rows = Array.isArray(expRows) ? expRows : [];
-    const ist = 'font-size:12px;padding:3px 5px;border:1px solid #d9dfe8;border-radius:6px;background:#fff';
+    const ist = 'font-size:12px;padding:4px 6px;border:1px solid #d9dfe8;border-radius:6px;background:#fff';
     const catOpts = sel => EXP_CATS.map(c => `<option${sel === c ? ' selected' : ''}>${esc(c)}</option>`).join('');
-    const stateOf = x => {   // その月にどう入っているか
+    const MODES = [['auto', '毎月同じ額を自動で'], ['remind', '月ごとに手で入れる'], ['perOrder', '1件単価×出荷数']];
+    const monthOf = (x, i) => {   // 右の列：この月に入っている額
       const key = PL_AUTO_TAG + ' ' + String(x.name || '').trim(); const ec = x.ecat || plEcatOf(x.name);
       const auto = rows.find(r => String(r.memo || '').indexOf(key) === 0);
-      if (auto) return `<span style="color:#1a7f37">✔ 登録済 ${fmtJpy(auto.amount)}</span>`;
       const man = rows.filter(r => plGroupOf(r.category) === plGroupOf(ec) && String(r.memo || '').indexOf(PL_AUTO_TAG) !== 0);
-      if (man.length) return `<span style="color:#1565c0">手入力あり ${fmtJpy(man.reduce((t, r) => t + (Number(r.amount) || 0), 0))}</span>`;
-      return `<span style="color:#b5341a">未登録</span>`;
+      const inp = (v, id) => `<span style="white-space:nowrap">¥<input class="pl-fb-cur" data-i="${i}" data-id="${id || ''}" value="${v == null ? '' : Number(v)}" inputmode="numeric" placeholder="${Number(plMonthlyOf(x)) || ''}" title="この月に経費として入れる額。いつもの額と違う月は、ここだけ直します（Enterで保存）" style="${ist};width:96px;text-align:right;font-weight:700"></span>`;
+      if (auto) return `${inp(auto.amount, auto.id)} <span style="font-size:11px;color:#1a7f37;white-space:nowrap">✔ 入っています</span>`;
+      if (man.length) return `<span style="font-size:11px;color:#1565c0;white-space:nowrap" title="この区分は手で入れた行が既にあります（経費の表を見てください）">✔ 手で入っています ${fmtJpy(man.reduce((t, r) => t + (Number(r.amount) || 0), 0))}</span>`;
+      return `${inp(null, '')} <button class="smd-btn b-write pl-fb-put" data-i="${i}" style="font-size:11px;padding:2px 8px" title="いつもの額（または左の欄に入れた額）でこの月の経費に入れます">入れる</button> <span style="font-size:11px;color:#b5341a">まだ</span>`;
     };
-    const rowsH = items.length ? items.map((x, i) => { const mode = plModeOf(x); return `<tr class="pl-fb-row" data-i="${i}">
-        <td style="padding:2px 4px"><input class="pl-fb-name" data-i="${i}" value="${esc(x.name || '')}" placeholder="項目（例：梱包スタッフ）" style="${ist};width:150px"></td>
-        <td style="padding:2px 4px"><select class="pl-fb-ecat" data-i="${i}" style="${ist};width:150px">${catOpts(x.ecat || plEcatOf(x.name))}</select></td>
-        <td style="padding:2px 4px;white-space:nowrap">¥<input class="pl-fb-amt" data-i="${i}" value="${Number(x.amount) || ''}" inputmode="numeric" style="${ist};width:84px;text-align:right"${mode === 'perOrder' ? ' disabled title="件数連動は右の1件単価×出荷件数"' : ''}>
-          <select class="pl-fb-freq" data-i="${i}" style="${ist}">${[['monthly', '毎月'], ['yearly', '年額'], ['once', '一回']].map(f => `<option value="${f[0]}"${(x.freq || 'monthly') === f[0] ? ' selected' : ''}>${f[1]}</option>`).join('')}</select></td>
-        <td style="padding:2px 4px;white-space:nowrap"><select class="pl-fb-mode" data-i="${i}" style="${ist}">${[['auto', '毎月自動'], ['perOrder', '件数連動'], ['remind', '手入力']].map(m => `<option value="${m[0]}"${mode === m[0] ? ' selected' : ''}>${m[1]}</option>`).join('')}</select>
-          ${mode === 'perOrder' ? ` 1件¥<input class="pl-fb-unit" data-i="${i}" value="${Number(x.unit) || ''}" inputmode="numeric" style="${ist};width:64px;text-align:right">` : ''}</td>
-        <td style="padding:2px 4px;font-size:11px;white-space:nowrap">${stateOf(x)}</td>
-        <td style="padding:2px 4px"><button class="pl-fb-del" data-i="${i}" title="この項目を消す（登録済みの経費は消えません）" style="border:none;background:none;cursor:pointer;color:#d93025">✕</button></td></tr>`; }).join('')
-      : `<tr><td colspan="6" class="smd-dim" style="padding:6px">未設定。下の行から人件費・家賃・ツール等を足すと、毎月自動で経費として入ります。</td></tr>`;
-    return `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🔁 毎月の固定費（人件費・家賃・ツール）の自動登録</span><label style="font-size:12px"><input type="checkbox" id="pl-auto-on" ${on ? 'checked' : ''}> 毎月自動で登録する</label><button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px">この月（${esc(ym)}）を今すぐ登録／更新</button><span id="pl-fb-stat" class="smd-dim" style="font-size:11px"></span></div>
-      <table style="border-collapse:collapse;font-size:12px;margin-top:6px"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 4px">項目</th><th style="text-align:left;padding:2px 4px">経費の分類</th><th style="text-align:left;padding:2px 4px">金額・頻度</th><th style="text-align:left;padding:2px 4px">扱い</th><th style="text-align:left;padding:2px 4px">${esc(ym)} の状態</th><th></th></tr>${rowsH}
-      <tr><td style="padding:4px"><input id="pl-fb-nname" placeholder="項目を追加（例：顧客対応スタッフ）" style="${ist};width:150px"></td><td style="padding:4px"><select id="pl-fb-necat" style="${ist};width:150px"><option value="">分類（名前から自動）</option>${catOpts('')}</select></td><td style="padding:4px;white-space:nowrap">¥<input id="pl-fb-namt" placeholder="金額" inputmode="numeric" style="${ist};width:84px;text-align:right"> <select id="pl-fb-nfreq" style="${ist}"><option value="monthly">毎月</option><option value="yearly">年額</option><option value="once">一回</option></select></td><td style="padding:4px"><select id="pl-fb-nmode" style="${ist}"><option value="auto">毎月自動</option><option value="perOrder">件数連動</option><option value="remind">手入力</option></select></td><td colspan="2" style="padding:4px"><button class="smd-btn b-write" id="pl-fb-add" style="font-size:12px">＋ 追加</button></td></tr></table>
-      <div class="smd-dim" style="font-size:11px;margin-top:4px">その場で直すと全PCに保存されます（📈事業計画の「固定費の内訳」と同じもの）。自動登録した行はメモが「${PL_AUTO_TAG} 項目名」（同じ月に二重には入りません・金額を変えると更新）。件数連動＝1件単価×その月の出荷件数。手入力＝実額を自分で入れる（未登録なら🧮に⚠）。</div></div>`;
+    const rowsH = items.length ? items.map((x, i) => { const mode = plModeOf(x); return `<tr class="pl-fb-row" data-i="${i}" style="border-top:1px solid #eef1f5">
+        <td style="padding:4px 4px"><input class="pl-fb-name" data-i="${i}" value="${esc(x.name || '')}" placeholder="項目名" style="${ist};width:140px"></td>
+        <td style="padding:4px 4px"><select class="pl-fb-ecat" data-i="${i}" title="経費の分類（損益の区分に使います）" style="${ist};width:150px">${catOpts(x.ecat || plEcatOf(x.name))}</select></td>
+        <td style="padding:4px 4px;white-space:nowrap">${mode === 'perOrder' ? `1件 ¥<input class="pl-fb-unit" data-i="${i}" value="${Number(x.unit) || ''}" inputmode="numeric" style="${ist};width:64px;text-align:right">` : `¥<input class="pl-fb-amt" data-i="${i}" value="${Number(x.amount) || ''}" inputmode="numeric" style="${ist};width:88px;text-align:right">`}
+          <select class="pl-fb-freq" data-i="${i}" title="毎月／年額（÷12で月に）／一回" style="${ist}">${[['monthly', '毎月'], ['yearly', '年額'], ['once', '一回']].map(f => `<option value="${f[0]}"${(x.freq || 'monthly') === f[0] ? ' selected' : ''}>${f[1]}</option>`).join('')}</select></td>
+        <td style="padding:4px 4px"><select class="pl-fb-mode" data-i="${i}" style="${ist}">${MODES.map(m => `<option value="${m[0]}"${mode === m[0] ? ' selected' : ''}>${m[1]}</option>`).join('')}</select></td>
+        <td style="padding:4px 4px;background:#f7fbf8">${monthOf(x, i)}</td>
+        <td style="padding:4px 4px"><button class="pl-fb-del" data-i="${i}" title="この項目を一覧から消す（入れた経費は消えません）" style="border:none;background:none;cursor:pointer;color:#c0392b;font-size:12px">✕</button></td></tr>`; }).join('')
+      : `<tr><td colspan="6" class="smd-dim" style="padding:8px">まだ項目がありません。下の行で「人件費 100000」のように足してください。</td></tr>`;
+    return `<div class="tool-card" style="margin:0 0 12px;max-width:none">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🔁 毎月かかる経費（人件費・家賃・ツールなど）</span>
+        <label style="font-size:12px" title="ONにすると、月が変わって最初にこの画面を開いた時に「毎月同じ額を自動で」の項目をいつもの額で入れます"><input type="checkbox" id="pl-auto-on" ${on ? 'checked' : ''}> 月が変わったら自動で入れる</label>
+        <button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px" title="「まだ」の項目を、いつもの額でまとめてこの月に入れます（入っている行は上書きします）">${esc(ym)} にまとめて入れる</button>
+        <span id="pl-fb-stat" class="smd-dim" style="font-size:11px"></span></div>
+      <div class="smd-dim" style="font-size:11.5px;margin:6px 0 4px">左＝<b>いつもの額</b>（毎月の基準・全PC共通）。右＝<b>${esc(ym)} に実際に入る額</b>。<b>今月だけ違う時は右の額だけ直してください</b>（左は変えなくてよい）。</div>
+      <table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:4px">項目</th><th style="text-align:left;padding:4px">経費の分類</th><th style="text-align:left;padding:4px">いつもの額</th><th style="text-align:left;padding:4px">入れ方</th><th style="text-align:left;padding:4px;background:#e9f5ec">${esc(ym)} に入る額</th><th></th></tr>${rowsH}
+      <tr style="border-top:2px solid #e3e8ef"><td style="padding:6px 4px"><input id="pl-fb-nname" placeholder="項目を足す（例：顧客対応スタッフ）" style="${ist};width:140px"></td><td style="padding:6px 4px"><select id="pl-fb-necat" style="${ist};width:150px"><option value="">分類（名前から自動）</option>${catOpts('')}</select></td><td style="padding:6px 4px;white-space:nowrap">¥<input id="pl-fb-namt" placeholder="金額" inputmode="numeric" style="${ist};width:88px;text-align:right"> <select id="pl-fb-nfreq" style="${ist}"><option value="monthly">毎月</option><option value="yearly">年額</option><option value="once">一回</option></select></td><td style="padding:6px 4px"><select id="pl-fb-nmode" style="${ist}">${MODES.map(m => `<option value="${m[0]}">${m[1]}</option>`).join('')}</select></td><td colspan="2" style="padding:6px 4px"><button class="smd-btn b-write" id="pl-fb-add" style="font-size:12px">＋ 足す</button></td></tr></table>
+      <div class="smd-dim" style="font-size:11px;margin-top:6px">「1件単価×出荷数」＝外注（梱包など）の単価×その月の出荷件数で自動計算。入れた行は経費の表にメモ「${PL_AUTO_TAG} 項目名」で入ります（同じ月に二重には入りません）。</div></div>`;
   }
   // ---- 🛒 Amazon で買ったもの → 備品・梱包資材の経費に（本人 2026-09-23「大体の備品とかはアマゾンで買ってるから、それも取り込まれるように」「仕入れ品とは混ざらないように注意」） ----
   //   取込GAS（Gmail「注文済み」）が Amazon の注文を在庫台帳（inventory・supplier='Amazon'）に入れている＝ここが元データ。
@@ -16764,7 +16774,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function plWire(host, ym) {
     const on = host.querySelector('#pl-auto-on'); if (on) on.addEventListener('change', async () => { const cfg = await plCfg(); if (!cfg) { alert('固定費の内訳がまだ無いので、先に📈事業計画で入れてください'); on.checked = false; return; } cfg.fixAuto = on.checked; plan.cfg = cfg; await planSave(); toast(on.checked ? '毎月自動で登録します（月が変わって最初に開いた時）' : '自動登録を止めました'); });
-    const run = host.querySelector('#pl-auto-run'); if (run) run.addEventListener('click', async () => { run.disabled = true; try { const r = await expAutoPost(ym, { force: true }); toast(r.skipped ? '⚠ ' + r.skipped : `固定費：追加${r.added}件・更新${r.updated}件（計 ${fmtJpy(r.total)}）` + (r.remind.length ? `／手入力待ち ${r.remind.length}件` : '') + ((r.manual || []).length ? `／手入力済みの区分は飛ばしました（${r.manual.join('・')}）` : ''), !!r.skipped); if (r.changed) renderExpenses(); } catch (e) { alert('登録に失敗: ' + ((e && e.message) || e)); } run.disabled = false; });
+    const run = host.querySelector('#pl-auto-run'); if (run) run.addEventListener('click', async () => { run.disabled = true; try { const r = await expAutoPost(ym, { force: true }); toast(r.skipped ? '⚠ ' + r.skipped : `入れました：追加${r.added}件・更新${r.updated}件（計 ${fmtJpy(r.total)}）` + (r.remind.length ? `／手入力待ち ${r.remind.length}件` : '') + ((r.manual || []).length ? `／手入力済みの区分は飛ばしました（${r.manual.join('・')}）` : ''), !!r.skipped); if (r.changed) renderExpenses(); } catch (e) { alert('登録に失敗: ' + ((e && e.message) || e)); } run.disabled = false; });
     // 内訳のその場編集（本人 2026-09-23「もっと細かく編集できた方がいい」）
     const fbSave = async (mut) => { const cfg = (await plCfg()) || planCfgDefault(); if (!Array.isArray(cfg.fixBreak)) cfg.fixBreak = []; mut(cfg); plan.cfg = cfg; pl.tpl = cfg; const st = host.querySelector('#pl-fb-stat'); if (st) st.textContent = '保存中…'; try { await planSave(); plan._cache = null; renderExpenses(); } catch (e) { if (st) st.textContent = '保存できませんでした: ' + ((e && e.message) || e); } };
     const onChange = (cls, fn) => host.querySelectorAll('.' + cls).forEach(el => el.addEventListener('change', () => { const i = +el.dataset.i; fbSave(cfg => { const x = cfg.fixBreak[i]; if (x) fn(x, el.value.trim()); }); }));
@@ -16774,6 +16784,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     onChange('pl-fb-freq', (x, v) => { x.freq = v || 'monthly'; });
     onChange('pl-fb-mode', (x, v) => { x.mode = v || 'auto'; });
     onChange('pl-fb-unit', (x, v) => { x.unit = Math.round(Number(v.replace(/[^0-9.]/g, '')) || 0); });
+    // ★その月だけの実額：内訳の金額（毎月の基準）は変えず、その月の経費行だけを作る／直す（メモ「[自動] 項目名」＝自動起票と同じ鍵なので二重にならない）
+    host.querySelectorAll('.pl-fb-cur').forEach(el => { const save = async () => { const v = Math.round(Number(String(el.value).replace(/[^0-9.]/g, '')) || 0); const cfg = await plCfg(); const x = cfg && cfg.fixBreak && cfg.fixBreak[+el.dataset.i]; if (!x) return; if (!settings.sbSecret) { alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
+        const key = PL_AUTO_TAG + ' ' + String(x.name || '').trim(); const ecat = x.ecat || plEcatOf(x.name);
+        try { if (el.dataset.id) { if (v > 0) await sbPatch('expenses', 'id=eq.' + el.dataset.id, { amount: v, memo: key + '（この月の実額）' }); else { await sbDelete('expenses', 'id=eq.' + el.dataset.id); } }
+          else if (v > 0) await sbUpsert('expenses', [{ ymd: ym + '-01', category: ecat, amount: v, memo: key + '（この月の実額）' }]);
+          else return;
+          try { logAct('入出金・経費', '固定費 その月の実額', ym + ' ' + x.name, v + '円'); } catch (_) {} exp._allRows = null; toast(`${ym} の「${x.name}」を ${fmtJpy(v)} にしました`); renderExpenses(); } catch (e) { alert('保存できませんでした: ' + ((e && e.message) || e)); } };
+      el.addEventListener('change', save); el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } }); });
+    host.querySelectorAll('.pl-fb-put').forEach(b => b.addEventListener('click', () => { const inp = host.querySelector('.pl-fb-cur[data-i="' + b.dataset.i + '"]'); if (inp) { if (!String(inp.value).trim()) inp.value = inp.placeholder || ''; inp.dispatchEvent(new Event('change')); } }));
     host.querySelectorAll('.pl-fb-del').forEach(el => el.addEventListener('click', () => { const i = +el.dataset.i; if (!confirm('この項目を内訳から消しますか？（登録済みの経費は消えません）')) return; fbSave(cfg => { cfg.fixBreak.splice(i, 1); }); }));
     const addBtn = host.querySelector('#pl-fb-add'); if (addBtn) addBtn.addEventListener('click', () => { const g = id => (host.querySelector('#' + id) || {}).value || ''; const name = g('pl-fb-nname').trim(); const amt = Math.round(Number(String(g('pl-fb-namt')).replace(/[^0-9.]/g, '')) || 0); const mode = g('pl-fb-nmode') || 'auto'; if (!name) { alert('項目名を入れてください'); return; } if (mode !== 'perOrder' && !(amt > 0)) { alert('金額を入れてください'); return; } fbSave(cfg => { cfg.fixBreak.push({ name, amount: amt, freq: g('pl-fb-nfreq') || 'monthly', ecat: g('pl-fb-necat') || plEcatOf(name), mode, unit: mode === 'perOrder' ? amt : undefined }); }); });
     const f = host.querySelector('#pl-ymt-file'); const card = host.querySelector('#pl-ymt-card'); const prev = host.querySelector('#pl-ymt-prev');
