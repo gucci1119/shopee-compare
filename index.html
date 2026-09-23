@@ -19212,6 +19212,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-09-24', items: [
       '🔁 <b>正式返品を営業利益から引くのをやめました（二重計上でした）</b>（本人「返金・補償 −¥71,127 これって入れるべきなの？」「どのタイミングで入れるか難しいな」→「返金・補償されたタイミングで直すんじゃない？」「おけ」）。粗利はShopeeの入金額（escrow）で計算していて、返品が受理されると<b>注文月の入金が減る形でもう反映されています</b>。9月分の実測：受理された返品15件のうち10件は入金がマイナスまで減っていて ¥50,160 が二重、4件はまだ減っていませんでした。これからは<b>手で記録した返金（PayPal返金など、入金に出ない分）だけ</b>を引き、返品で減った額・件数は「織り込み済」として月次カードに出します。📈事業計画・🧾確定申告も同じ式にしました。注文月の数字は返品の受理期限（最長40日ほど）が過ぎるまで動きます。',
       '🔴 <b>営業利益（純利益）の行を大きく・赤字か黒字かを一目で</b>（本人「これもっと強調しないと」）。',
+      '📈 <b>推移の着地見込みが深夜に暴れるのを直しました</b>（本人「見込みおかしくない？どういうロジックやっけ？」＝深夜2時に4点→46点）。これまでは「今日のペース×24時間」の単純按分で、経過2時間なら12倍していました。経過30%未満のうちは残りを直近7本の平均ペースで埋め、30%を過ぎたら今のペースで按分します。',
       '👤 <b>ふりかえりの「オーナー2人」を直しました</b>（本人「オーナーは私で、人件費はもう一人に払ってる」）。辛口は「あなたの取り分 ¥20万を載せると…」「目標 ¥T には月 N件」に、判定は目標／1人分（¥30万）を基準にしました。',
       '🏢 <b>ふりかえりから「事務所の判定」を外しました</b>（本人「事務所はずっと続けるのよ」）。家賃は固定費として損益分岐に入っているだけで、辛口にも改善の方向性にも出しません。',
       '📐 <b>💴入出金・経費：段ごとに左右の高さを揃えて隙間を消しました</b>（本人「隙間とかは無駄なスクロールになるんで、なるべく無くしてほしい」→「逆にこういうスペースもいらない。中間ぐらいでうまいこと」）。カードを引き伸ばして空にするのはやめ、高さの近いカード同士を組にしました：損益｜ふりかえり＋ヤマト取込、入力＋CSV｜内訳＋明細（表だけは列の高さに合わせてスクロール）、毎月かかる経費｜月ごとの経費。損益カードの脚注は1行に。',
@@ -42737,7 +42738,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // 📈 着地見込み：進行中の期間（今月など）を「今のペースがこのまま続いたら」で按分推計する
       const lastKey = keys[keys.length - 1];
       const prog = rr ? null : trendProgress(lastKey, effPeriod);   // 範囲指定は過去区間なので出さない
-      const projected = (prog && prog.done > 0 && val(lastKey) > 0) ? (val(lastKey) / prog.done * prog.total) : null;
+      /* ★2026-09-24 本人「見込みおかしくない？」＝深夜2時に4点→46点。経過が浅いうちは「今日のペース×24」は当てにならない
+         （メモ rate-needs-long-window：短い窓で測ると山谷でぶれる）。経過30%未満は【残りを直近7本の平均ペース】で埋め、
+         30%以上は従来どおり今のペースで按分する。 */
+      const _ratio = prog ? prog.done / prog.total : 0;
+      const _prevVals = prog ? keys.slice(Math.max(0, keys.length - 8), keys.length - 1).map(val).filter(v => v > 0) : [];
+      const _prevAvg = _prevVals.length ? _prevVals.reduce((a, b) => a + b, 0) / _prevVals.length : 0;
+      const projEarly = !!(prog && _ratio < 0.3 && _prevAvg > 0);
+      const projected = (prog && prog.done > 0 && (val(lastKey) > 0 || projEarly))
+        ? (projEarly ? val(lastKey) + _prevAvg * (1 - _ratio) : (val(lastKey) / prog.done * prog.total)) : null;
       const max = Math.max(...keys.map(val), projected || 0, 1);   // 見込みの点線が枠外に出ないよう最大値に含める
       /* ★2026-09-21 本人「情報量が多すぎるところ」。日足30本だと【全部のバーに金額ラベル】が乗り、
          さらに売れていない日には灰色の「0」まで並んでいた＝数字が数字を邪魔して、山も谷も見えない。
@@ -42784,7 +42793,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (last && projected) vLabel += `<span style="color:#ee4d2d;font-weight:700"> →見込 ${fmtV(Math.round(projected))}</span>`;
           return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:${isMobile ? 10 : 36}px" title="${tip}">` +
             `<div style="font-size:${isMobile ? 8 : (manyX ? 8.5 : 9)}px;color:${v > 0 ? (emph ? '#111' : (manyX ? '#9aa0a6' : '#666')) : '#c4c8ce'};white-space:nowrap;margin-bottom:2px;font-weight:${emph ? 700 : 400}">${vLabel}</div>` +
-            (last && projected ? `<div title="このペースで進んだ場合の着地見込み ${fmtFull(Math.round(projected))}（${prog.done}/${prog.total}${prog.unit || '日'}経過）" style="width:100%;height:${Math.max(0, Math.round(projected / max * barMax) - h)}px;border:1px dashed #ee4d2d;border-bottom:none;border-radius:4px 3px 0 0;box-sizing:border-box;background:repeating-linear-gradient(45deg,rgba(238,77,45,.06),rgba(238,77,45,.06) 4px,transparent 4px,transparent 8px)"></div>` : '') +
+            (last && projected ? `<div title="${projEarly ? '着地見込み（残りは直近' + _prevVals.length + '本の平均ペースで埋めた） ' : 'このペースで進んだ場合の着地見込み '}${fmtFull(Math.round(projected))}（${prog.done}/${prog.total}${prog.unit || '日'}経過）" style="width:100%;height:${Math.max(0, Math.round(projected / max * barMax) - h)}px;border:1px dashed #ee4d2d;border-bottom:none;border-radius:4px 3px 0 0;box-sizing:border-box;background:repeating-linear-gradient(45deg,rgba(238,77,45,.06),rgba(238,77,45,.06) 4px,transparent 4px,transparent 8px)"></div>` : '') +
             `<div style="width:100%;height:${h}px;border-radius:${last && projected ? '0' : '3px 3px 0 0'};overflow:hidden;display:flex;flex-direction:column-reverse${last ? ';outline:2px solid #111;outline-offset:-1px' : ''}">${segs}</div>` +
             `<div style="font-size:${isMobile ? 7.5 : 9}px;color:#6b7280;margin-top:${denseX ? 8 : 3}px;white-space:nowrap;height:${denseX ? 0 : 'auto'};transform:${denseX ? 'rotate(-50deg)' : 'none'};transform-origin:center top">${trendLabel(k, effPeriod)}</div></div>`;
         }).join('') + '</div></div>';
@@ -42817,7 +42826,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const ratio = prog.done / prog.total;
           const warn = ratio < 0.2 ? `<span style="color:#e8710a;font-weight:700"> ⚠ まだ${Math.round(ratio * 100)}%しか経過していないためブレます</span>` : '';
           return `<br><b style="color:#ee4d2d">📈 ${nowName}の着地見込み ${fmtFull(Math.round(projected))}</b>` +
-            `<span class="smd-dim">（${prog.done}/${prog.total}${u}経過・現在 ${fmtFull(val(lastKey))}・1${u}あたり ${fmtFull(Math.round(val(lastKey) / prog.done * 10) / 10)}ペース）。<b>このままのペースが続いた場合</b>の単純按分です。</span>${warn}`;
+            (projEarly
+              ? `<span class="smd-dim">（${prog.done}/${prog.total}${u}経過・現在 ${fmtFull(val(lastKey))}）。まだ経過が浅いので、<b>残りは直近${_prevVals.length}本の平均 ${fmtFull(Math.round(_prevAvg * 10) / 10)}／本のペース</b>で埋めています。</span>`
+              : `<span class="smd-dim">（${prog.done}/${prog.total}${u}経過・現在 ${fmtFull(val(lastKey))}・1${u}あたり ${fmtFull(Math.round(val(lastKey) / prog.done * 10) / 10)}ペース）。<b>このままのペースが続いた場合</b>の単純按分です。</span>${warn}`);
         })() : '');
     } catch (e) { el.textContent = 'エラー: ' + e.message; }
   }
