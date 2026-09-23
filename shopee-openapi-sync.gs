@@ -2873,7 +2873,9 @@ function addItem_(body) {
   var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_ids: logisticInfo.map(function (x) { return x.logistic_id; }), image_ids: imgIds };
   // ★バリエーション：add_item後に init_tier_variation で機種等のバリエを設定（2明細以上のとき）
   var vars = body.variations || [];
-  if (itemId && vars.length >= 2) {
+  /* ★2026-09-23 2店舗目に作ったカタログが【バリエ無しの単品】になり、明細を入れる所で「バリエ無し商品です」で全部失敗していた（PH/SG/TH）。
+     ここは2明細以上の時しか軸を作らない作りで、seedShopCatalog_ は仮の test 1つで渡すため素通りしていた。forceTier の時は1つでも軸を作る */
+  if (itemId && (vars.length >= 2 || (body.forceTier && vars.length >= 1))) {
     // ★tier option名は「一意・30字以内」が必須。重複すると init_tier_variation が product.error_busi
     //   「tier option name is duplicated」で失敗し、バリエが付かず単品のまま作られてしまう。
     //   30字以内ならそのまま（Ⅰ/Ⅱの1字違いでもOK）。30字超のみ先頭+末尾を残して中間を…で圧縮→なお重複したら連番。
@@ -7026,10 +7028,15 @@ function seedShopCatalog_(p) {
   var _dm = base.dimension || {};
   if ((_dm.package_length > 0) && (_dm.package_width > 0) && (_dm.package_height > 0)) body.dimension = _dm;
   /* バリエの軸だけ作っておく（🤖はここへ明細を足す）。中身は仮の1つ＝既存の複製と同じ形。 */
-  if (tierName) body.variations = [{ tier_name: String(tierName).slice(0, 20), options: [{ option: 'test', price: Number(p.price) || 300, stock: 0 }] }];
+  /* ★2026-09-23 形が addItem_ の読み方と違っていた（tier_name/options を1要素の配列で渡していた＝addItem_ は明細1つと見て軸を作らなかった）。
+     addItem_ の形（明細の配列＋body.tier_name）で渡し、forceTier で1つでも軸を作らせる。軸名が読めなければ Title */
+  body.tier_name = String(tierName || 'Title').slice(0, 20);
+  body.variations = [{ name: 'test', price: Number(p.price) || 300, stock: 0 }];
+  body.forceTier = true;
   var r = null;
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
   if (!r || !r.item_id) return { ok: false, error: '作れましたが item_id が返りませんでした' };
+  if (!r.tier_init || r.tier_init !== 'ok') return { ok: false, item_id: r.item_id, error: '作れましたが明細の枠（バリエ）を作れませんでした: ' + String(r.tier_init || '未実行').slice(0, 120) };   /* ★2026-09-23 枠の無いカタログを「作れた」と返すと、明細を入れる所で全部失敗する */
   return { ok: true, item_id: r.item_id, shop_id: dst, name: body.item_name, images: urls.length, tier: tierName || null };
 }
 /* 🤖が出した明細の印を【出したその場で】貯める。
