@@ -5459,7 +5459,7 @@ var BA_MACHINE = /\b(ps[1-5]|psp|ps\s*vita|vita|switch\s*2|switch|nintendo\s*ds|
 // 機種の判定（ポータル HW_PAT と同じ）。カタログ名・明細名に出てくる機種を【全部】拾う
 var BA_HW_PAT = [['switch2', /switch\s*2|スイッチ\s*2|\bns2\b/i], ['switch', /switch(?!\s*2)|スイッチ(?!\s*2)/i],   /* ★v188 Switch 2 は初代と別の機種（前は初代に分類＝Switch 2 の「出している」が0） */ ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i], ['ps3', /\bps3\b|playstation\s*3/i], ['ps2', /\bps2\b|playstation\s*2/i], ['psp', /\bpsp\b|playstation\s*portable/i], ['vita', /\bvita\b/i], ['3ds', /\b3ds\b/i], ['ds', /\bds\b|nintendo\s*ds/i], ['wiiu', /wii\s*u/i], ['wii', /\bwii\b/i], ['gc', /gamecube|ゲームキューブ|\bgc\b/i], ['n64', /nintendo\s*64|\bn64\b/i], ['sfc', /super\s*(famicom|nintendo)|\bsfc\b|\bsnes\b/i], ['fc', /famicom|\bfc\b|\bnes\b/i], ['gba', /game\s*boy\s*advance|\bgba\b/i], ['gb', /game\s*boy|\bgbc?\b/i], ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['xbsx', /xbox\s*series/i], ['xboxone', /xbox\s*one/i], ['xbox360', /xbox\s*360/i], ['xbox', /\bxbox\b/i], ['pce', /pc\s*engine|turbografx|pcエンジン/i], ['ws', /wonder\s*swan|ワンダースワン/i], ['gg', /game\s*gear|ゲームギア/i], ['ngcd', /neo\s*geo\s*cd/i], ['3do', /\b3do\b/i], ['pcfx', /pc-?fx/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]];
 function baHwsOf_(txt) { var t = String(txt || ''), out = []; BA_HW_PAT.forEach(function (p) { if (p[1].test(t)) out.push(p[0]); }); return out; }
-var BA_NG = /海賊版|非正規|コピー品|リプロ(ダクション)?|repro(duction)?|bootleg|\d{2,3}\s*in\s*1|互換|ゲームコンピューター|GAME ?COMPUTER|モジュレータ|スイッチBOX|スイッチブースター|Movie Player|ゲームポーチ|Fast Charging|FC-MOBILE|PokeFami|ポケファミ|レトロフリーク|RETRO ?FREAK|タッチペン|スタイラス|プロテクションフィルム|液晶フィルム|ストラップ|ポーチ|amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ|メモリーキング|マッハメモリー|メモリーカード|(NGC|GC|PS[1-5]|PSP|PSV|Vita|DS|3DS|Wii|WiiU|Switch|SFC|FC|N64|GBA?|GB|MD|SS|DC)用|memory ?card|\bcontroller\b|\bcable\b|\badapt[eo]r\b|\bcharger\b|charging stand|carrying case|screen protector|protective film|silicone cover|joy-?con|\bheadset\b|\bearphones?\b|battery pack|\bconverter\b|vga box|component cable|s-video|link cable|wavebird|box only|manual only|console only|console set|skin sticker|wrist strap|\bpouch\b/i;
+var BA_NG = /ACTIVE BODY|\((ピンク|ブルー|レッド|ブラック|ホワイト|イエロー|グリーン|パープル|オレンジ|グレー|ネイビー|クリア)\)|\[[A-Z]{2,4}-\d{3}|海賊版|非正規|コピー品|リプロ(ダクション)?|repro(duction)?|bootleg|\d{2,3}\s*in\s*1|互換|ゲームコンピューター|GAME ?COMPUTER|モジュレータ|スイッチBOX|スイッチブースター|Movie Player|ゲームポーチ|Fast Charging|FC-MOBILE|PokeFami|ポケファミ|レトロフリーク|RETRO ?FREAK|タッチペン|スタイラス|プロテクションフィルム|液晶フィルム|ストラップ|ポーチ|amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ|メモリーキング|マッハメモリー|メモリーカード|(NGC|GC|PS[1-5]|PSP|PSV|Vita|DS|3DS|Wii|WiiU|Switch|SFC|FC|N64|GBA?|GB|MD|SS|DC)用|memory ?card|\bcontroller\b|\bcable\b|\badapt[eo]r\b|\bcharger\b|charging stand|carrying case|screen protector|protective film|silicone cover|joy-?con|\bheadset\b|\bearphones?\b|battery pack|\bconverter\b|vga box|component cable|s-video|link cable|wavebird|box only|manual only|console only|console set|skin sticker|wrist strap|\bpouch\b/i;
 // ヤフオクの検索結果で「ソフト本体の写真ではない」出品を落とす（攻略本・箱のみ・まとめ売り・周辺機器）
 var BA_YNG = /新品|未開封|未使用|体験版|非売品|サンプル版|攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール(?!ド)|早期購入特典|購入特典|特典のみ|プロモ|トレカ|トレーディングカード|カードゲーム|カードダス|ポケモンカード|ポケカ|台紙|空容器|空ケース|マグネット|マグネッツ|パスケース|ぬいぐるみ|アクリルスタンド|アクスタ|缶バッジ|クリアファイル|マスコット|下敷き|グッズ|食玩|雑貨|タオル|マグカップ|弁当箱|ランチボックス|エコバッグ|うちわ|ポーチ|北米版|海外版|欧州版|アジア版|韓国版|中国版|輸入版|US版|EU版|NTSC-?U|PAL版/;
 /* ★2026-09-21 除外語の誤爆よけ。**商品そのものがポーチ・ぬいぐるみ等**のカタログがあるので、
@@ -5679,7 +5679,8 @@ var BA_CASE_REQUIRED_HW = { ds: 1, '3ds': 1, vita: 1, psp: 1, ps1: 1, ps2: 1, ps
    ①基準を変えた（版が上がった）②前に見てから30日たった のどちらかで、出品済みの写真をもう一度見る。
    写真の基準を変えたら必ずこの数字を1つ上げる（baJudge_ の控えの鍵 |v12| も一緒に上げる）。
    ★2026-09-23 例外：基準を【ゆるめた】時（白背景でも影・傾きがあれば実物）は控えの鍵だけ v12 に上げ、BA_RULE_VER は上げない＝出品済みの見直し（baRephoto_）を全件やり直さない（前にOKだった物はゆるめた基準でもOK） */
-var BA_RULE_VER = 11, BA_RECHECK_DAYS = 30;
+var BA_RULE_VER = 12, BA_RECHECK_DAYS = 30;   /* 12＝2026-09-23 21:00 白背景の緩めを取り消し */
+var BA_RULE_RECHECK_SINCE = '2026-09-23T11:05:00Z';   /* v11 で出した明細のうち、この時刻より前の分は厳しい基準で通っているので見直さない（緩めていた 20:10〜21:00 の分だけ見直す） */
 function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し)|ケース(なし|無し)/.test(String((a && a.name) || '')); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
 function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使用|新品/.test(c)) return -1; var worn = /状態が悪い|傷や?汚れあり/.test(c) && !/やや/.test(c), some = /やや/.test(c), clean = /なし/.test(c); if (BA_PAPER_HW[String(hw || '')]) return worn ? 0 : (some ? 1 : (clean ? 2 : 3)); return clean ? 0 : (some ? 1 : (worn ? 2 : 3)); }
@@ -5714,7 +5715,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     if (_lr.length) _extraRule = ' 次の点も必ず守ってください：' + _lr.map(function (x) { return String(x && x.text || ''); }).filter(String).join(' '); } catch (e) {}
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
-  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v12|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
@@ -5743,7 +5744,11 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-09-23 本人「後これどうにかならんですか？」（写真が詰まり）。Switch の AI判定を数えたら NG 97枚のうち 58枚が「catalog」で、
      落とした写真を8枚落として目で見たら、白い机に置いた実物のケース（ARK・CLOSED NIGHTMARE）＝【本物の写真】が「白い背景」だけで落ちていた。
      背景が白・無地でも、影や反射（shadow）か傾き・遠近（tilt）が見えていれば実物。両方無い時だけカタログ画像として落とす（AIに見えたものを書かせ、合否はコードで決める）。 */
-  if (ok && /白|white|無地|単色|plain|透明|transparent|グラデ|gradient|スタジオ|studio|背景なし|切り抜き/i.test(String(o.scene || '')) && !/机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|table|floor|desk|hand|carpet|wood|fabric/i.test(String(o.scene || '')) && !(o.shadow === true || o.tilt === true)) { ok = false; kind = 'catalog'; }
+  /* ★2026-09-23 21:00【取り消し】20:10に「白背景でも影か傾きがあれば実物」と緩めたら、1時間で カタログ画像（LEGO City・A.C.E. R）と
+     バッグの宣材（ACTIVE BODY）が通って出品まで行った（本人「こういうのはパッと見新品になるでしょう」「イメージ画像を使ってしまっている」）。
+     間違った写真を出すより出さない方がずっとマシ＝元の厳しさに戻す。shadow/tilt は【落とす側にだけ】使う（両方無ければ背景に関係なくカタログ） */
+  if (ok && /白|white|無地|単色|plain|透明|transparent|グラデ|gradient|スタジオ|studio|背景なし|切り抜き/i.test(String(o.scene || '')) && !/机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|table|floor|desk|hand|carpet|wood|fabric/i.test(String(o.scene || ''))) { ok = false; kind = 'catalog'; }
+  if (ok && o.shadow === false && o.tilt === false) { ok = false; kind = 'catalog'; }
   /* ★v190 機種の合否はAIに聞かずコードで照合する（2026-09-18 実測：PS2版「Mr.インクレディブル」の写真に、GC用として OK を出した。yes/no で聞くと版によって答えがぶれる→見えたロゴを書き写させて BA_HW_PAT で当てる） */
   if (ok && expect && expect.hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); /* 重なる名前（Wii U は wii にも、SUPER FAMICOM は fc にも当たる）は表の並び順で先＝狭い方に決める（Codex指摘） */ if (seenHw.length && seenHw[0] !== String(expect.hwKey)) { ok = false; kind = 'wrongplatform'; } }
   /* ★バージョン201（2026-09-20）本人「説明書とか載ってる写真もやめてほしい。表面だけ」。手動の出品の明細画像は前から表面だけ。AIには何が写っているか（shown）を書かせ、表面1点だけ（front）以外はコードで落とす＝ng:notfront。shown が無い古い形の答えは通さない */
@@ -5776,7 +5781,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     if (!a || !a.item_id || !a.shop_id || !a.en || !a.img) return false;
     if (String(a.hw || '') === String(skipHw || '')) return false;   /* この回に明細を足す機種は触らない（差し替え直後の add_model が弾かれる） */
     var m = rp.items[a.item_id + '#' + a.en];
-    if (!m) return Number(a.jv || 0) !== BA_RULE_VER;                /* 入れた時の基準が今と同じなら、その時の判定でよい */
+    if (!m) { if (Number(a.jv || 0) === 11 && String(a.at || '') < BA_RULE_RECHECK_SINCE) return false; return Number(a.jv || 0) !== BA_RULE_VER; }   /* 入れた時の基準が今と同じなら、その時の判定でよい。v11 でも緩める前の分は見直さない */
     if (Number(m.v || 0) !== BA_RULE_VER) return true;               /* 基準が変わった＝見直す */
     return (nowMs - (Date.parse(m.at || '') || 0)) > BA_RECHECK_DAYS * 86400000;   /* 30日たった＝もう一度見る */
   });
@@ -6340,7 +6345,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
     if (baCostFromPre_(pp) > maxCost) continue;
     var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
     for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
-      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v12|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
+      var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v13|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
       if (vK.indexOf('ok:') === 0) { hasOk = true; break; }
       if (vK) continue;
       if (n >= maxN || Date.now() - t0 > limitMs) { stop = true; break; }
@@ -6602,7 +6607,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
         if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
         var jcP = boshuAutoPreviewBody_._jc;
         var ordP = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 4);
-        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v12|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
+        var triedP = ordP.map(function (a) { var v = String(jcP[String(a.img || '').replace(/\?.*$/, '') + '|v13|' + String(hwWord || '') + '|' + c.key] || ''); return { img: a.thumb || a.img, src: a.src || '', name: String(a.name || '').slice(0, 80), cond: a.cond || '', price: Number(a.price) || 0, shop: baIsShop_(a) ? 1 : 0, v: v }; });
         var pickP = null; for (var tp = 0; tp < triedP.length; tp++) { if (triedP[tp].v.indexOf('ng:') !== 0) { pickP = triedP[tp]; break; } }
         row.tried = triedP.map(function (x) { return { img: x.img, v: x.v, shop: x.shop, cond: x.cond }; });
         if (pickP) row.pick = pickP; else if (triedP.length) row.note = '⚠ 写真 ' + triedP.length + '枚ともAI判定NG（' + triedP.map(function (x) { return x.v.slice(3); }).join('・') + '）→ 実行時はヤフオクで探す';
