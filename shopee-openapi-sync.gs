@@ -6474,14 +6474,24 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st) {
   /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
   var pool = allRowsCc || [];
   var src = pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0] || pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0; })[0];
-  if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（元にできる同じ機種のカタログがこの国にありません）'); return null; }
+  /* ★2026-09-23 同じ機種が1つも無い国がある（実測：MY は gc の Variation カタログが0・TW は3）。
+     その時は【同じ国の別機種の Variation カタログ】を元にする。引き継ぐのは説明文・状態写真・カテゴリ・重さで、
+     これらは機種が違っても同じ定型なので実害は小さい。名前と親SKUはこのあと家族のものに書き換える。
+     ただし属性（Platform 等）は元のまま残るので、⚠️ を記録して後から直せるようにする。 */
+  var crossHw = '';
+  if (!src) {
+    var alt = pool.filter(function (r) { return r.status === 1; })[0] || pool[0];
+    if (alt) { src = alt; crossHw = ((alt.hws || [])[0] || '?'); }
+  }
+  if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（元にできるカタログがこの国に1つもありません）'); return null; }
   var cl = null;
   try { cl = cloneItem_(src.shop_id, src.item_id, srcName, false); }
   catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   if (!cl || !cl.item_id) return null;
   /* 親SKUを家族のものに揃える（cloneItem_ は元のカタログの親SKUを引き継ぐので必ず上書きする） */
   if (wantSku) { try { callShop_(src.shop_id, '/api/v2/product/update_item', null, 'post', { item_id: cl.item_id, item_sku: wantSku }); } catch (eS) { baLog_(st, cc + '：親SKUを付けられませんでした（' + String(eS).slice(0, 60) + '）'); } }
-  baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）');
+  baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）'
+    + (crossHw ? ' ⚠️ この国に ' + hw + ' のカタログが無いので【' + crossHw + '】のカタログを元にしました（写真・属性は後で見直してください）' : ''));
   return { cc: cc, item_id: cl.item_id, name: srcName, shop_id: src.shop_id, weight: src.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
 }
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
