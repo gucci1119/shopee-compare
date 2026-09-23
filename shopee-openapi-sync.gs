@@ -6260,7 +6260,16 @@ function baLoadCtx_(cfg, hw, ccs) {
   var famOf = function (cc) { var o = byCc[cc]; if (o && (o.sku || o.nameKey)) return { sku: String(o.sku || '').trim(), nk: String(o.nameKey || '').trim() }; return { sku: famSku, nk: famNk }; };
   var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
+  /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
+     出品枠が満杯の店の【非公開カタログ】は、そこに明細があっても**買えない**し、枠が無いので公開もできない。
+     → その明細は「出している」に数えず、カタログも入れ先に使わない＝2店舗目へ出し直される。
+     枠に余りがある店（満杯の印が無い店）は今までどおり＝1店舗目に出し続ける。
+     実測 2026-09-23：TH 1店舗目は 500/500 で、非公開87カタログ＝明細1,240件が埋もれていた。 */
+  var _fullMap = {}; try { _fullMap = baKv_('boshu_shop_full') || {}; } catch (eF) {}
+  var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); return !!(t && now_() - t < 24 * 3600); };
+  var _buried = 0;
   rows.forEach(function (r) {
+    if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; return; }   // 満杯の店の非公開カタログは無かったことにする
     itemCc[String(r.item_id)] = r.cc;
     var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
     var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
