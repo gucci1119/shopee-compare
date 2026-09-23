@@ -18522,7 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
-      '❓ <b>空きマスに「なぜ出していないか」を出すようにしました</b>（本人「なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど」）。✅<b>別の日に出しています（日付つき）</b>／📷写真がまだ無い・基準外／🔁すでに同じ作品を出している／🗂この国にカタログが無い／⚖️他の国と値段が離れすぎ／🚫この国は🤖の対象外／…まだ出していません、のように出ます（出所＝出品ログ＋🤖の台帳＋設定。カーソルを当てると詳しい理由が出ます）',
+      '❓ <b>空きマスに「なぜ出していないか」を出すようにしました</b>（本人「なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど」）。✅<b>別の日に出しています（日付つき）</b>／📷写真がまだ無い・基準外／🔁すでに同じ作品を出している／🗂この国にカタログが無い／⚖️他の国と値段が離れすぎ／🚫この国は🤖の対象外／…まだ出していません、のように出ます（出所＝🤖の台帳＋出品ログ＋設定。カーソルを当てると出した日や商品IDが出ます）',
       '🆕 <b>明細を足す先が無い国では、🤖が汎用カタログを自分で1つ作るようにしました</b>（本人「明細を足す先がない場合、勝手に作れたりしないですか？」→「よろしく」）。同じ店の同じ機種のカタログを元に、<b>非公開</b>で作ります（説明文・画像・カテゴリ・重量は元から引き継ぎ、明細は空）。名前と親SKUは他の国の同じカタログに合わせます。これで <b>MY・TW</b> にも出せるようになります',
       '⭐ <b>Switch 2 と Switch を優先して回すようにしました</b>（本人「Switch2、Switchから出してってほしい」）。17機種を順ぐりに回すと Switch は17回に1回でしたが、<b>1回おきに優先の機種を先に見る</b>ので約2倍のペースになります（候補が無い時は普段どおりの順番に戻ります）',
       '📏 <b>国ごとの列で、行の高さをそろえ、空きマスに「この日は出していない」と出すようにしました</b>（本人「縦幅がずれるのが気になる」「何か表示されてない部分がある。バグですかね？」）。空白は不具合ではなく<b>その日にその国へ出していない</b>という意味です（別の日に出している場合もあります）',
@@ -31826,17 +31826,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
        既定は【国ごとの列】（列の頭に件数）。前の「まとめて並べる」にも切り替えられる（端末に覚える）。
        2つの軸（国×明細）は最初から表で＝[[portal-matrix-not-vertical-list]]。国の並びは REGIONS の順で固定。 */
     if (!logState.layout) { try { logState.layout = localStorage.getItem('llogLayout') || 'cc'; } catch (_) { logState.layout = 'cc'; } }
-    /* 「別の日に出しています」を言うための索引（国｜明細名 → 出した日の一覧）。出品ログ全部から1回だけ作る（行数が変わるまで使い回す） */
-    const llogElse = (() => {
-      if (logState._elseN === allRows.length && logState._else) return logState._else;
+    /* 「別の日に出しています（日付）」を言うための索引。
+       ⚠️ 名前で引いてはいけない：全件読みからは【重い3列（name/model_name/image）を外している】ので、
+          選んだ日いがいの行は名前が空＝名前で突き合わせると必ず空振りする（2026-09-23 実際に空振りした）。
+       → 🤖の台帳が持っている「item_id#model_id」で引く。出品ログは全期間ぶん item_id/model_id と日付を持っている。 */
+    const llogById = (() => {
+      if (logState._byIdN === allRows.length && logState._byId) return logState._byId;
       const m = new Map();
       allRows.forEach(r => {
-        const nm = llogNm(r.model_name || r.name || ''); if (!nm || !r.ymd) return;
-        const k = r.cc + '|' + nm, a = m.get(k);
-        if (a) { if (a.indexOf(r.ymd) < 0) a.push(r.ymd); } else m.set(k, [r.ymd]);
+        if (!r.ymd || !r.item_id) return;
+        const k = r.cc + '|' + r.item_id + (r.model_id ? '#' + r.model_id : ''), p = m.get(k);
+        if (!p || p < r.ymd) m.set(k, r.ymd);
       });
-      m.forEach(a => a.sort());
-      logState._else = m; logState._elseN = allRows.length;
+      logState._byId = m; logState._byIdN = allRows.length;
       return m;
     })();
     const llogByCc = (pairs) => {
@@ -31857,16 +31859,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
          行の高さは stretch でそろえる（カードも height:100%） */
       const gapFor = (k, cc) => {
         let icon = '？', txt = '分かりません', col = '#b6bcc4', bg = '#fbfbfc', bd = '#e0e3e7', tip = 'この日は、この国にはこの商品を出していません';
-        const days = llogElse.get(cc + '|' + k) || [], other = days.filter(d => d !== sel);
         const w = _llogWhy && _llogWhy.mark.get(cc + '|' + k);
         const hw = hwOf.get(k) || (w && w.hw) || '';
-        if (other.length) {
-          const d = other[other.length - 1];
-          icon = '✅'; txt = '別の日に出しています<br>' + esc(d.slice(5).replace('-', '/')); col = '#1a7f37'; bg = '#f3fbf5'; bd = '#cfe9d6';
-          tip = 'この国には ' + other.slice(-8).join(' / ') + ' に出しています（出品ログの記録）';
-        } else if (w && /^\d/.test(w.code)) {
-          icon = '🤖'; txt = '🤖が出した記録あり'; col = '#5e35b1'; bg = '#f7f4fc'; bd = '#d9cdf0';
-          tip = '🤖の台帳では出したことになっています（出品ログにその日の記録がありません）';
+        const day = (w && /^\d/.test(w.code)) ? llogById.get(cc + '|' + w.code) : '';
+        if (w && /^\d/.test(w.code)) {
+          icon = '✅'; col = '#1a7f37'; bg = '#f3fbf5'; bd = '#cfe9d6';
+          txt = 'すでに出しています' + (day && day !== sel ? '<br>' + esc(day.slice(5).replace('-', '/')) : '');
+          tip = 'この国にはもう出しています（' + (day ? day + ' に出しました／' : '') + '商品ID ' + w.code + '）';
         } else if (w && w.code.indexOf('skip:') === 0) {
           const t = LLOG_WHY_TXT[w.code.slice(5)] || ['—', w.code.slice(5)];
           icon = t[0]; txt = t[1]; col = '#8a6d3b'; bg = '#fffcf3'; bd = '#eadfc4';
