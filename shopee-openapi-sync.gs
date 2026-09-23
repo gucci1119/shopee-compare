@@ -6883,7 +6883,11 @@ function seedShopCatalog_(p) {
     publish: false,                 /* ★必ず非公開で作る */
     brand_id: ((base.brand || {}).brand_id != null ? base.brand.brand_id : 0)
   };
-  if (base.dimension) body.dimension = base.dimension;
+  /* ★2026-09-23 寸法は0が入っていることがあり、そのまま送ると add_item が
+     「Dimension.PackageLength: value must be greater than 0」で落ちる（cloneItem_ には入れてあった同じ守りが、ここには無かった）。
+     3辺すべてが正のときだけ引き継ぐ＝同じ型は全部の入口で塞ぐ（[[audit-by-failure-type]]）。 */
+  var _dm = base.dimension || {};
+  if ((_dm.package_length > 0) && (_dm.package_width > 0) && (_dm.package_height > 0)) body.dimension = _dm;
   /* バリエの軸だけ作っておく（🤖はここへ明細を足す）。中身は仮の1つ＝既存の複製と同じ形。 */
   if (tierName) body.variations = [{ tier_name: String(tierName).slice(0, 20), options: [{ option: 'test', price: Number(p.price) || 300, stock: 0 }] }];
   var r = null;
