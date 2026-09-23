@@ -7041,6 +7041,7 @@
     "🧹 おかしなJANは見つかりませんでした。": "🧹 No suspicious JAN was found.",
     /* ★2026-09-23 全体レビュー：英語版の抜け（無作為40本のうち14本）＋今回足した警告文 */
     /* ★2026-09-23 月次損益・固定費の自動登録・ヤマト運賃の取込 */
+    '🤖が出しました': '🤖 listed it', '（反映待ち）': '(awaiting sync)',
     '🛒 Amazonで買ったもの（備品・資材の取り込み）': '🛒 Amazon purchases (supplies & packaging)', '分類待ち': 'Unclassified', 'いまの扱い': 'Current', 'これにする': 'Set to', '仕入れ品': 'Stock for sale', '取消': 'Undo', '明らかな資材（プチプチ・ダンボール・インク等）は自動で経費に': 'Auto-post obvious supplies (bubble wrap, boxes, ink…)',
     '金額・頻度': 'Amount / frequency', 'の状態': ' status', '✔ 登録済': '✔ Posted', '手入力あり': 'Entered manually', '未登録': 'Not posted', '＋ 追加': '+ Add', '毎月': 'Monthly', '年額': 'Yearly', '一回': 'One-off', '分類（名前から自動）': 'Category (auto from name)',
     '🧮 月次の損益': '🧮 Monthly P&L', '売上（買い手が払った額・参考）': 'Sales (what buyers paid, reference)', '入金（確定）': 'Payout (confirmed)', '− 仕入': '− Purchases',
@@ -32163,8 +32164,12 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   function llogWhyLoad() {
     /* 🤖の稼働状況（担当ごと）も一緒に読む＝出品ログの上に「次回いつ出すか」を出すため */
     sbGet('app_kv', 'select=k,v&k=like.boshu_auto_status*').then(rs => {
-      const m = {}; (rs || []).forEach(r => { const id = String(r.k).replace('boshu_auto_status', '').replace(/^_/, '') || 'child'; m[id] = { at: (r.v || {}).lastAt || '', msg: (r.v || {}).lastMsg || '' }; });
-      logState.runners = m; renderListingLog();
+      const m = {}; const aa = new Map();
+      (rs || []).forEach(r => { const id = String(r.k).replace('boshu_auto_status', '').replace(/^_/, '') || 'child'; m[id] = { at: (r.v || {}).lastAt || '', msg: (r.v || {}).lastMsg || '' };
+        /* ★2026-09-24 本人「なぜこの辺りは出ない？」＝🤖が出した直後は出品ログ（1時間ごと／🔄で更新）にまだ無く、空きマスが「まだ出していません」と言っていた。
+           🤖の台帳（added）を先に見て「出しました・反映待ち」と出す */
+        ((r.v || {}).added || []).forEach(a => { if (a && a.cc && a.en) { const key = a.cc + '|' + String(a.en).toLowerCase().trim(); if (!aa.has(key)) aa.set(key, a.at || ''); } }); });
+      logState.runners = m; logState.autoAdded = aa; renderListingLog();
     }).catch(() => { logState.runners = logState.runners || {}; });
     return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en'), baKvGet('boshu_auto_cfg')]).then(([rows, en, cfg]) => {
       const mark = new Map(), fam = {};
@@ -32392,6 +32397,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           tip = '設定（boshu_auto_cfg.family.' + hw + '.ccs）にこの国が入っていません';
         } else if (_llogWhy && _llogWhy.err) {
           icon = '⚠'; txt = '理由を<br>読めませんでした'; col = '#c0392b'; tip = '台帳を読めませんでした（通信の失敗）。次の描き直しで読み直します';
+        } else if (logState.autoAdded && logState.autoAdded.has(cc + '|' + String(k.split('|')[0] || '').toLowerCase().trim())) {
+          const at = logState.autoAdded.get(cc + '|' + String(k.split('|')[0] || '').toLowerCase().trim());
+          let hhmm = ''; try { hhmm = new Date(at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' }); } catch (_) {}
+          icon = '🤖'; txt = '🤖が出しました' + (hhmm ? '<br>' + esc(hhmm) : '') + '<br>（反映待ち）'; col = '#2b6cb0'; bg = '#eef4ff'; bd = '#c7d7ee';
+          tip = '🤖がこの国に出しました（' + (at ? String(at).slice(0, 16).replace('T', ' ') + 'Z' : '') + '）。出品ログには1時間ごと、または🔄いま反映で入ります';
         } else if (_llogWhy) {
           icon = '…'; txt = 'この国にはまだ<br>出していません'; col = '#a7adb6';
           tip = '🤖の台帳にも出品ログにも、この国のこの商品の記録がありません（手動で出した商品はここに出ます）';
