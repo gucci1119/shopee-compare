@@ -18585,6 +18585,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🧹 <b>出品ログから仮の明細「test」を外しました</b>（本人「testってなんです？ここに出さなくていいでしょ」）。作ったばかり／直したばかりのカタログに入る仮の明細（test・在庫0）は出品ではないので、出品ログの一覧・機種別の数・日ごとのカードから外し、これからは記録にも入れません（既に入っていた52行は見えなくなります）。',
       '📷 <b>写真の供給を3つ広げました</b>（本人「効く順に、打てる手」→「これもよろしく」）。①<b>同じ出品の2〜4枚目も候補に</b>（カセット機種は箱が1枚目でカセットは後ろにあることが多い。枚数は検索結果から分かるので無い番号は作らない）。🤖が試す枚数もカセット機種10枚・他8枚に。②<b>メルカリの写真が全部NGだった作品も Yahoo!フリマ・ヤフオクを探す</b>（前は1枚も無かった時だけ。写真がある時は候補に足す）。③🤖側の代わりの探し先を<b>ヤフオク→Yahoo!フリマ</b>に（ヤフオクは Google のIPから弾かれ続けて2時間休みの繰り返しだった。ヤフオクに戻すなら設定 gasYahoo=true）',
       '📊 <b>接続枠の内訳を、処理ごとの横棒の積み上げ（本体＝青・2台目＝紫・3台目＝緑）にしました</b>（本人「アカウント別で横棒積み上げで見れるようにできないかね？」）。3台の合計の多い順に並び、右に台ごとの回数。想定（業務は本体・🤖は2台目以降）と逆の側で動いた分に⚠️が付くので、ロスや設計ミスが行で分かります。1台だけの時は今までの一覧のままです',
       '🔍 <b>Codexレビュー（3日分の差分）で見つかった穴を直しました</b>（本人「最後に Codex にもレビューさせてほしい」）。ポータル側：①学習・手動NG・写真の見直しの記録を<b>読めなかった時に空で上書きしない</b>（読めなかったら保存しない）②2台のPCで同時に学習を保存しても片方が消えないよう、書く直前に読み直して重ねる③写真NGの集め直しが呼び出し元で先に落とされて一度も動いていなかったのを直す④写真集めの85%ブレーキが翌日のリセット後も止まったままだったのを直す⑤2台目・3台目のAI利用料が上書きし合っていたのを担当ごとに保存⑥🤖の今日の件数の基準日を「今日」に⑦空きマスの理由を読めなかった時に「まだ出していません」と言わない⑧明細名の取得失敗を読み込み済みにしない（3回読み直す）⑨一括判定の末尾が読めない時も直前までの結果を保存⑩日本語パッケージを英語の明細名と比べて別作品にしない⑪日本語題の無い作品の数字照合⑫本体と2台目が枯れた時に3台目まで順に試す。GAS側は別途（取り札の一意制約化・店ごとのトークン共有・枠カウンタの保存失敗時の控え・Bumpの通信計上ほか）',
@@ -28639,7 +28640,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     _tmRecent = {};
     try {
       const from = jstDate(Date.now() - 7 * 86400000);
-      const rows = await sbGetAll('listing_log', 'select=name,model_name,ymd,seeded&ymd=gte.' + from);
+      const rows = await sbGetAll('listing_log', 'select=name,model_name,ymd,seeded&ymd=gte.' + from + llogNoTest());
       (rows || []).forEach(r => { if (r.seeded) return;
         /* DS と 3DS は1つのカタログ（Nintendo DS 3DS NDS …）に同居している。カタログ名だけで当てると hwOf が先に 3DS を返して
            DS が全部 3DS に数えられる（2026-09-20 実測：DS 0件・3DS 18件）。明細名に 3DS と書いてある時だけ 3DS、それ以外は DS */
@@ -31645,6 +31646,10 @@ create index if not exists listing_log_ymd_idx on listing_log (ymd);
 alter table listing_log enable row level security;
 drop policy if exists "listing_log all" on listing_log;
 create policy "listing_log all" on listing_log for all using (true) with check (true);`;
+  /* ★2026-09-23 本人「testってなんです？ここに出さなくていいでしょ」。作ったばかり／直したばかりのカタログに入る仮の明細（test・在庫0）は出品ではない。
+     読む側3か所で PostgREST の imatch で外し、書く側（listing_log の upsert）でも落とす。既に入っていた52行は読む側で見えなくなる */
+  function llogNoTest() { return '&model_name=not.imatch.' + encodeURIComponent('^\\s*(test|dummy|sample)\\d*\\s*$'); }
+  function llogIsTest(n) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String(n || '')); }
   const logState = { rows: null, day: null, days: 7 /* 本人 2026-09-20「最初に表示されるの7日にして」 */, goal: null, loading: false, missing: false, liveOnly: false };
   // ★2026-09-20 出品ログ（listing_log）は📅出品ログの画面を開いた時にしか増えず、グラフも分析も実態より少なく出ていた（🤖自動出品が1日約49明細を足しているのに「新規出品ほぼ0」と誤診した）。
   //   担当のPCだけ・1日1回・起動の6分後に自動で反映する（Supabase の読み書きだけ＝GAS の接続枠は使わない）。
@@ -31741,7 +31746,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           seeded: isNewItem && !!ct });
       });
     });
-    if (add.length) await sbUpsert('listing_log', add);
+    { const keep = add.filter(a => !llogIsTest(a.model_name)); if (keep.length) await sbUpsert('listing_log', keep); }
     try { await modelChangeTrack(live); } catch (_) {}
     // 実体化できた仮行(model_id=0)は二重計上になるので消す
     const zdone = Array.from(new Set(zeroDone));
@@ -31786,7 +31791,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
            この3つは**選んだ日のカードにしか使わない**（`selAll = byDay.get(sel)` の中だけ）ので、
            一覧・グラフ・集計に要る軽い列だけを読み、3列は下で【選んだ日のぶんだけ】取りに行く。
            ⚠️ 7日ぶんの機種別（baRecentByHw）は別のクエリで name を取っているので影響しない。 */
-        sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&order=ymd.desc'),
+        sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&order=ymd.desc' + llogNoTest()),
         sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto)').catch(() => []),
       ]);
       logState.rows = rows;
