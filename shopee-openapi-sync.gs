@@ -1293,6 +1293,9 @@ function doPostInner_(e) {
   var out = { ok: false };
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    /* ★2026-09-24 ヤマトの運賃情報（userscript・鍵なし）。書けるのは app_kv dom_ship_* と経費「送料」だけ。
+       Script Property YAMATO_CSTMR（お客様コード）が設定されていれば一致した時だけ通す */
+    if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
     if (body.action === 'chat_ingest') out = chatIngest_(body);
@@ -4877,6 +4880,50 @@ function sbUpsert_(table, rows, onConflict) {
     var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: JSON.stringify(rows.slice(i, i + 200)) });
     if (res.getResponseCode() >= 300) throw new Error('Supabase upsert ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
+}
+function sbPatch_(table, query, obj) {
+  var key = cfg_('SB_SERVICE_KEY');
+  ufBump_(1, 'Supabase更新(' + table + ')');
+  var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'patch', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' }, payload: JSON.stringify(obj) });
+  if (res.getResponseCode() >= 300) throw new Error('Supabase patch ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+}
+/* 🚚 ヤマト「Web請求書提供サービス＞運賃情報参照」の明細（userscript が拾う・日次の速報）
+   lines: [{no:'3909-7150-0706', d:'2026-09-02', kind:'宅急便発払', size:'120', n:1, jpy:1530, sub:0, ins:0, total:1530}]
+   月ごとに app_kv dom_ship_<ym> へ原票Noで混ぜる（請求明細CSVで入れた行 src:'invoice' は上書きしない）。
+   経費「送料」は「[自動:ヤマト] 請求明細…」（確定）が無い月だけ、速報の合計で作る／更新する。 */
+function yamatoShip_(body) {
+  var lines = Array.isArray(body.lines) ? body.lines : [];
+  if (!lines.length) return { ok: true, n: 0, months: {} };
+  var byYm = {};
+  lines.forEach(function (l) {
+    var no = String(l.no || '').replace(/[^0-9A-Za-z-]/g, ''); var d = String(l.d || '').slice(0, 10);
+    if (!no || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
+    var ym = d.slice(0, 7);
+    (byYm[ym] = byYm[ym] || []).push({ no: no, d: d, kind: String(l.kind || '').slice(0, 20), size: String(l.size || '').slice(0, 8), n: Number(l.n) || 1, jpy: Math.round(Number(l.total != null ? l.total : l.jpy) || 0), src: 'fare' });
+  });
+  var out = { ok: true, n: lines.length, months: {} };
+  Object.keys(byYm).forEach(function (ym) {
+    var kvRows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + ym));
+    var cur = (kvRows && kvRows[0] && kvRows[0].v) || { n: 0, total: 0, lines: [] };
+    var map = {}; (cur.lines || []).forEach(function (x) { if (x && x.no) map[x.no] = x; });
+    byYm[ym].forEach(function (x) { var old = map[x.no]; if (old && old.src === 'invoice') return; map[x.no] = x; });
+    var all = Object.keys(map).map(function (k) { return map[k]; }).sort(function (a, b) { return String(a.d).localeCompare(String(b.d)); });
+    var total = all.reduce(function (t, x) { return t + (Number(x.jpy) || 0); }, 0);
+    var hasInvoice = all.some(function (x) { return x.src === 'invoice'; }) || !!cur.invoiceAt;
+    var v = { n: all.length, total: total, at: new Date().toISOString(), fareAt: new Date().toISOString(), invoiceAt: cur.invoiceAt || null, cols: cur.cols || null, lines: all.slice(0, 3000) };
+    sbUpsert_('app_kv', [{ k: 'dom_ship_' + ym, v: v, updated_at: new Date().toISOString() }], 'k');
+    var next = (function () { var y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7)); return m === 12 ? (y + 1) + '-01' : y + '-' + ('0' + (m + 1)).slice(-2); })();
+    var ex = sbSelect_('expenses', 'select=id,memo,amount&ymd=gte.' + ym + '-01&ymd=lt.' + next + '-01&category=eq.' + encodeURIComponent('送料'));
+    var inv = (ex || []).filter(function (r) { return /^\[自動:ヤマト\] 請求明細/.test(String(r.memo || '')); });
+    var fare = (ex || []).filter(function (r) { return /^\[自動:ヤマト\] 運賃情報/.test(String(r.memo || '')); });
+    var memo = '[自動:ヤマト] 運賃情報 ' + all.length + '件（' + ym + '）速報';
+    if (!inv.length && !hasInvoice) {
+      if (fare.length) { if (Number(fare[0].amount) !== total || fare[0].memo !== memo) sbPatch_('expenses', 'id=eq.' + fare[0].id, { amount: total, memo: memo }); }
+      else sbUpsert_('expenses', [{ ymd: ym + '-01', category: '送料', amount: total, memo: memo }]);
+    }
+    out.months[ym] = { n: all.length, total: total, invoice: !!(inv.length || hasInvoice) };
+  });
+  return out;
 }
 function sbDelete_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
