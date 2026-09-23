@@ -2952,7 +2952,9 @@ function addItem_(body) {
     var msgA = String((eAdd && eAdd.message) || eAdd);
     if (!/attribute/i.test(msgA)) throw eAdd;
     var fillA = mandatoryAttrFill_(shopId, categoryId, payload.attribute_list || body.src_attrs || []);
-    if (!fillA.added) throw eAdd;
+    /* ★2026-09-23 本人「twはなぜでない？」＝TW の Switch は元のカタログに「成人向け=No」が【既に入っている】ので
+       「足す物が無い」と諦めていた。最初の送信では属性を1つも送っていないのだから、元の属性があればそれを付けて送り直す */
+    if (!fillA.added && !(fillA.list && fillA.list.length)) throw eAdd;
     payload.attribute_list = fillA.list;
     j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
   }
