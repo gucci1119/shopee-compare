@@ -6518,7 +6518,45 @@ function baShopFull_(cc, shopId, set) {
   var m = baKv_('boshu_shop_full') || {};
   if (set) { m[k] = now_(); try { baKvSet_('boshu_shop_full', m); } catch (e) {} return true; }
   var t = Number(m[k] || 0);
-  return !!(t && now_() - t < 24 * 3600);
+  if (t && now_() - t < 24 * 3600) return true;
+  /* ★2026-09-23 本人「何故取れない？」→ 出品枠は `get_item_limit` の item_count_limit.max_limit で取れると分かった。
+     公開が弾かれるのを待たず、**枠の数字と公開中の数**で先回りして満杯を判定する（残り5件以下なら満杯扱い）。
+     枠は app_kv `shop_item_limit`（実測を保存したもの）、公開中は listings から数える。どちらも無ければ false（＝今までどおり）。 */
+  try {
+    var lim = baKv_('shop_item_limit') || {};
+    var row = (lim.shops || []).filter(function (x) { return String(x.shop_id) === String(shopId); })[0];
+    var cap = Number(row && row.cap) || 0;
+    if (!cap) return false;
+    var live = sbCount_('listings', 'shop_id=eq.' + encodeURIComponent(shopId) + '&status=eq.1');
+    if (live == null) return false;
+    return (cap - live) <= 5;
+  } catch (e) { return false; }
+}
+/* 店ごとのタイトル上限（get_item_limit）。★枠を食わないよう24時間キャッシュ＝カタログを作るたびに叩かない */
+function shopNameLimit_(shopId) {
+  var ck = 'nmlim_' + String(shopId);
+  try { var hit = CacheService.getScriptCache().get(ck); if (hit) return Number(hit) || 0; } catch (e) {}
+  var mx = 0;
+  try { var lim = callShop_(shopId, '/api/v2/product/get_item_limit', {}, 'get'); mx = Number((((lim.response || {}).item_name_length_limit) || {}).max_limit) || 0; } catch (e2) { mx = 0; }
+  try { if (mx) CacheService.getScriptCache().put(ck, String(mx), 86400); } catch (e3) {}
+  return mx;
+}
+/* 件数だけ数える（Prefer: count=exact・1行も持ってこない）。読めなければ null＝「分からない」。
+   ★同じ実行の中では数え直さない（満杯判定は1tickに何度も呼ばれる） */
+var _SB_CNT = {};
+function sbCount_(table, query) {
+  var ck = table + '?' + query;
+  if (_SB_CNT[ck] != null) return _SB_CNT[ck];
+  try {
+    var key = cfg_('SB_SERVICE_KEY');
+    ufBump_(1, 'Supabase件数(' + table + ')');
+    var r = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?select=item_id&' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'count=exact', Range: '0-0' } });
+    if (r.getResponseCode() >= 300) return null;
+    var cr = r.getHeaders()['content-range'] || r.getHeaders()['Content-Range'] || '';
+    var n = Number(String(cr).split('/')[1]);
+    if (isFinite(n)) { _SB_CNT[ck] = n; return n; }
+    return null;
+  } catch (e) { return null; }
 }
 /* その国の1店舗目（本垢）の shop_id。登録簿 accounts の status が 'main' の行。無ければ 0 */
 function baMainShop_(cc) {
@@ -6543,8 +6581,19 @@ function baCloneToSub_(cc, base, newName, st) {
   if (!sub) { baLog_(st, cc + '：2店舗目が登録簿にありません（1店舗目のまま続けます）'); return null; }
   var pr = 0;
   try { pr = (base.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (e) {}
-  var r = seedShopCatalog_({ src_shop_id: base.shop_id, dst_shop_id: sub, item_id: base.item_id, price: pr });
-  if (!r || !r.ok || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + String((r && r.error) || '').slice(0, 80)); return null; }
+  /* ★2026-09-23 2店舗目に同じ名前のカタログが既にあると `product duplicates an existing product` で弾かれる（実測 TH）。
+     1店舗目の複製と同じく、①②③…の番号を送って5回まで試す。 */
+  var CIRC2 = '①②③④⑤⑥⑦⑧⑨⑩', r = null, lastErr = '';
+  for (var tn = 0; tn < 5 && !r; tn++) {
+    var nm2 = String(newName || '');
+    if (tn) { var cur = CIRC2.split('').filter(function (c) { return nm2.indexOf(c) >= 0; })[0]; var nxt = CIRC2[tn] || ('(' + (tn + 1) + ')'); nm2 = cur ? nm2.replace(cur, nxt) : (nm2.trim() + ' ' + nxt); }
+    var rr = seedShopCatalog_({ src_shop_id: base.shop_id, dst_shop_id: sub, item_id: base.item_id, price: pr, name: nm2 });
+    if (rr && rr.ok && rr.item_id) { r = rr; newName = nm2; break; }
+    lastErr = String((rr && rr.error) || '');
+    if (!/duplicat/i.test(lastErr)) break;
+    baLog_(st, cc + '：2店舗目に同じ名前のカタログがある→番号を送ります');
+  }
+  if (!r || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + lastErr.slice(0, 80)); return null; }
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
@@ -6919,7 +6968,12 @@ function seedShopCatalog_(p) {
   try { var tv = ((full.model || {}).tier_variation || [])[0]; tierName = (tv && tv.name) || ''; } catch (e2) {}
   var body = {
     shop_id: dst,
-    item_name: String(base.item_name || '').slice(0, 120),
+    /* ★2026-09-23 台湾はタイトルが短い（60字）。他の国の長い名前をそのまま送ると
+       `product.error_title_len_no_pa` で弾かれる（実測：TW の ps3/psp が作れなかった）。
+       店ごとの上限は get_item_limit の item_name_length_limit で取れるので、それに合わせて切る。 */
+    item_name: String(p.name || base.item_name || '').slice(0, (function () {
+      try { var mx = shopNameLimit_(dst); return (mx > 0 ? Math.min(mx, 120) : 120); } catch (e) { return 60; }
+    })()),
     description: String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || ''),
     images: urls,
     weight: (base.weight != null ? base.weight : 0.5),
