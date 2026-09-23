@@ -18522,6 +18522,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-23', items: [
+      '🏷 <b>出品ログのカードに SKU を出すようにしました</b>（本人「SKUも出してほしいです」）。明細のSKU（無ければカタログの<b>親SKU</b>＝「（親）」付き）で、押すとコピーできます。SKUは出品ログには入っていないので、その日に出したカタログのぶんだけ出品データから引いています',
       '❓ <b>空きマスに「なぜ出していないか」を出すようにしました</b>（本人「なぜ出していないかも欲しい。もうすでに出しているのか、それとも枠がなかったのかなど」）。✅<b>別の日に出しています（日付つき）</b>／📷写真がまだ無い・基準外／🔁すでに同じ作品を出している／🗂この国にカタログが無い／⚖️他の国と値段が離れすぎ／🚫この国は🤖の対象外／…まだ出していません、のように出ます（出所＝🤖の台帳＋出品ログ＋設定。カーソルを当てると出した日や商品IDが出ます）',
       '🆕 <b>明細を足す先が無い国では、🤖が汎用カタログを自分で1つ作るようにしました</b>（本人「明細を足す先がない場合、勝手に作れたりしないですか？」→「よろしく」）。同じ店の同じ機種のカタログを元に、<b>非公開</b>で作ります（説明文・画像・カテゴリ・重量は元から引き継ぎ、明細は空）。名前と親SKUは他の国の同じカタログに合わせます。これで <b>MY・TW</b> にも出せるようになります',
       '⭐ <b>Switch 2 と Switch を優先して回すようにしました</b>（本人「Switch2、Switchから出してってほしい」）。17機種を順ぐりに回すと Switch は17回に1回でしたが、<b>1回おきに優先の機種を先に見る</b>ので約2倍のペースになります（候補が無い時は普段どおりの順番に戻ります）',
@@ -31806,6 +31807,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           const ds = await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image&ymd=eq.' + encodeURIComponent(sel));
           const m = {}; (ds || []).forEach(x => { m[x.cc + '|' + x.item_id + '|' + x.model_id] = x; });
           (logState.rows || []).forEach(r => { const d = m[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } });
+          /* ★2026-09-23 本人「SKUも出してほしいです」。SKUは listing_log に無い（列は id/cc/item_id/model_id/ymd/name/model_name/image/price/seeded/created_at）ので
+             出品データ listings.models[].sku から引く。全件は重いので【その日に出したカタログの分だけ】100件ずつ取る。 */
+          try {
+            const ids = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))], sku = {};
+            for (let i = 0; i < ids.length; i += 100) {
+              const part = await sbGetAll('listings', 'select=cc,item_id,parent_sku,models&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')');
+              (part || []).forEach(l => {
+                sku[l.cc + '|' + l.item_id] = String(l.parent_sku || '').trim();
+                (l.models || []).forEach(mm => { if (mm && mm.sku) sku[l.cc + '|' + l.item_id + '#' + mm.id] = String(mm.sku).trim(); });
+              });
+            }
+            logState.skuMap = sku;
+          } catch (_) { logState.skuMap = logState.skuMap || {}; }
         } catch (_) { }
         logState._detailDay = sel; logState._detailBusy = false;
         try { renderListingLog(); } catch (_) { }
@@ -32029,12 +32043,23 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 const jan = String(pv.jan || '').trim(); const mpn = String(pv.mpn || '').trim();
                 if (typeof productIds !== 'undefined' && productIds === null) return '<span style="display:block;font-size:9.5px;color:#c0392b">JAN 読み込み中…</span>';
                 if (!jan) return `<span style="display:block;font-size:9.5px;color:#bbb">JAN —${mpn ? ' ／ 型番 ' + esc(mpn) : ''}</span>`;
+
                 return `<span style="display:block;font-size:9.5px;color:#1e8e3e;font-weight:700"><span class="llog-jan" data-j="${av(jan)}" title="押すとコピーします" style="cursor:pointer;text-decoration:underline dotted">JAN ${esc(jan)}</span>${mpn ? ` <span style="color:#8a8f98;font-weight:400">／ 型番 ${esc(mpn)}</span>` : ''}</span>`;
+              })()}
+              ${(() => { /* ★2026-09-23 本人「SKUも出してほしいです」。明細のSKU（無ければカタログの親SKU）。まだ読めていない時は「読み込み中」＝空欄にして「無い」と思わせない */
+                const sm = logState.skuMap;
+                if (!sm) return '<span style="display:block;font-size:9.5px;color:#c0392b">SKU 読み込み中…</span>';
+                const s = sm[r.cc + '|' + r.item_id + '#' + r.model_id] || '';
+                const p = sm[r.cc + '|' + r.item_id] || '';
+                if (!s && !p) return '<span style="display:block;font-size:9.5px;color:#bbb">SKU —</span>';
+                const v = s || p;
+                return `<span style="display:block;font-size:9.5px;color:#5a4b8c;font-weight:700"><span class="llog-sku" data-s="${av(v)}" title="${av(s ? 'この明細のSKU（押すとコピーします）' : 'この明細にはSKUが無いので、カタログの親SKUを出しています（押すとコピーします）')}" style="cursor:pointer;text-decoration:underline dotted">SKU ${esc(v)}</span>${s ? '' : ' <span style="color:#8a8f98;font-weight:400">（親）</span>'}</span>`;
               })()}
             </span></div>`, llogNm(r.model_name || r.name || ''), (r._hw || '')]))}`
           : '<div class="smd-dim" style="font-size:12px;margin-top:7px">この日は記録がありません。</div>'}
       </div>`;
     host.querySelectorAll('.llog-jan').forEach(e => e.addEventListener('click', () => { try { navigator.clipboard.writeText(e.dataset.j); toast('JAN ' + e.dataset.j + ' をコピーしました'); } catch (_) {} }));
+    host.querySelectorAll('.llog-sku').forEach(e => e.addEventListener('click', () => { try { navigator.clipboard.writeText(e.dataset.s); toast('SKU ' + e.dataset.s + ' をコピーしました'); } catch (_) {} }));
     /* ★2026-09-21 本人「1枚ずつってより一括でやりたい」：選んだ分をまとめて見直す／まとめて代わりをさがす */
     {
       const bmsg = (t) => { const e = host.querySelector('#llog-bulkmsg'); if (e) e.textContent = t || ''; };
