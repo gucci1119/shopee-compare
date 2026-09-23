@@ -191,3 +191,8 @@ for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
 PY
+
+# ⑥ I18N_PAT（正規表現の対）に文字列の対が混ざっていないか（2026-09-23：4件混ざって英語表示のたびに re.test で落ちていた）
+echo "===== I18N_PAT の型 ====="
+BADPAT=$(awk '/const I18N_PAT = \[/{f=1;next} f&&/^\s*\];/{f=0} f&&/^\s*\[\x27/{print NR": "substr($0,1,80)}' index.html)
+if [ -n "$BADPAT" ]; then echo "NG  I18N_PAT に正規表現でない対がある（[/^…$/, …] の形にする）"; echo "$BADPAT"; NG=1; else echo "OK  I18N_PAT はすべて正規表現の対"; fi
