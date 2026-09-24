@@ -1287,6 +1287,26 @@ function doGetInner_(e) {
 
 // ★webchat取り込み：Tampermonkeyから生チャットJSON/正規化メッセージをPOSTで受ける（WRITE_TOKENガード）
 // body: { token, action:'chat_ingest', captures:[{url,cc,body}], messages:[{...chat_messagesの行}] }
+/* 国×日のアクセス（Business Insights の Traffic Overview）。app_kv traffic_daily = { cc: { 'YYYY-MM-DD': {pv,uv,nv,ev,nf,stay,bounce,at} }, upd: {cc: iso} } */
+function trafficIngest_(body) {
+  var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
+  var rows = body.rows; if (!rows || !rows.length) throw new Error('rows 空');
+  if (rows.length > 400) rows = rows.slice(-400);
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var kv = baKv_('traffic_daily') || {}; kv[cc] = kv[cc] || {}; var n = 0;
+    rows.forEach(function (r) {
+      var d = String(r.d || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
+      var num = function (v) { var x = Number(v); return isFinite(x) ? Math.round(x * 1000) / 1000 : null; };
+      kv[cc][d] = { pv: num(r.pv), uv: num(r.uv), nv: num(r.nv), ev: num(r.ev), nf: num(r.nf), stay: num(r.stay), bounce: num(r.bounce), at: new Date().toISOString() }; n++;
+    });
+    /* 400日より古い分は落とす（app_kv を太らせない） */
+    var keys = Object.keys(kv[cc]).sort(); while (keys.length > 400) { delete kv[cc][keys.shift()]; }
+    kv.upd = kv.upd || {}; kv.upd[cc] = new Date().toISOString();
+    baKvSet_('traffic_daily', kv);
+    return { ok: true, cc: cc, n: n, days: Object.keys(kv[cc]).length };
+  } finally { try { lock.releaseLock(); } catch (e) {} }
+}
 function doPost(e) {
   try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
 }
@@ -1296,6 +1316,11 @@ function doPostInner_(e) {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     /* ★2026-09-24 ヤマトの運賃情報（userscript・鍵なし）。書けるのは app_kv dom_ship_* と経費「送料」だけ。
        Script Property YAMATO_CSTMR（お客様コード）が設定されていれば一致した時だけ通す */
+    /* ★2026-09-25 本人「各国のアクセスデータ（ビュー数・訪問者）の変遷をポータルで深夜でも見たい」。
+       Business Insights の内部API（traffic/dashboard/trend）は anti-bot の署名付きヘッダが要るので外からは叩けない。
+       Seller Center の datacenter ページで動く userscript（shopee-insights.user.js）がページ自身の応答を横取りして送ってくる。
+       鍵なし（yamato_ship と同じ型）。書けるのは app_kv `traffic_daily` だけ。数値だけを国×日で上書き保存 */
+    if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
