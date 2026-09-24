@@ -2789,8 +2789,8 @@ function resolveLogisticInfo_(shopId) {
      `Product category is prohibited for the channel` で弾かれていた。受取系の判定が英語名しか見ていなかった。
      中国語（店到店・超商取貨・門市・自取）とタイ語/ベトナム語の受取系も外す。 */
   /* ★2026-09-24 夜【訂正】TW の「蝦皮日本 - 蝦皮店到店」は受取系ではなく【日本からの SLS そのもの】（本人「蝦皮日本-蝦皮店到店しかダメなんじゃないの？SLS使いたいし」）。
-     昼に 店到店 を除外したのは誤り。落ちていた真因はカテゴリ（下の resolveCategoryId_ を参照）。代わりに「海運」（船便・既存カタログは全部オフ）を外す。 */
-  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point|超商|門市|取貨|自取|便利商店|7-?11|全家|萊爾富|OK\s*mart|nhận tại|điểm lấy|รับเอง|จุดรับ|海運|sea\s*freight/i.test(c.logistics_channel_name || ''); };
+     昼に 店到店 を除外したのは誤り。落ちていた真因はカテゴリ（下の resolveCategoryId_ を参照）。「海運」（船便）は本人の指示で残す（両方オン）。 */
+  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point|超商|門市|取貨|自取|便利商店|7-?11|全家|萊爾富|OK\s*mart|nhận tại|điểm lấy|รับเอง|จุดรับ/i.test(c.logistics_channel_name || ''); };   /* ★2026-09-24 深夜 本人「海運もONにしておけばいいんじゃないの？」→ 海運（船便）も外さない＝TW は 蝦皮日本＋海運 の両方オン */
   var usable = enabled.filter(function (c) { return !isLocker(c); });
   var pref = function (c) { var n = (c.logistics_channel_name || '').toLowerCase(); return (/standard/.test(n) ? 3 : 0) + (/international|cross.?border/.test(n) ? 2 : 0) + (/sls|shopee/.test(n) ? 1 : 0); };
   usable.sort(function (a, b) { return pref(b) - pref(a); });
