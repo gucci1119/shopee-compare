@@ -4892,6 +4892,11 @@
     "内訳（中身のコード）": "Contents (codes of the items inside)",
     "出品価格（現地通貨）": "Listing price (local currency)",
     "出品日が新しい順（＝直近に出した商品が上）": "Newest listings first",
+    "🤖 これまでに自動で出した明細（機種×国）": "🤖 Auto-listed variations so far (console × country)",
+    "1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）": "1 cell = 1 variation, counted from the bot ledger (boshu_auto_done), today included",
+    "空きが多い国＝その機種のカタログがまだ無い国（TW・MY が多い）。🤖は1回の巡回で1つ・1日6つまでカタログを作ってから埋めていきます。": "Countries with many blanks have no catalog for that console yet (mostly TW and MY). The bot creates one catalog per run, up to six a day, then fills them.",
+    "作品数": "Titles",
+    "機種": "Console",
     "出品者/店舗名": "Seller / shop name",
     "分類(例:恒常)": "Type (e.g. recurring)",
     "別タブで開く": "Open in a new tab",
@@ -19363,6 +19368,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-24', items: [
+      '🤖 <b>出品ログに「これまでに自動で出した明細（機種×国）」の表を足しました</b>（本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」）。🤖の台帳（boshu_auto_done_機種）を数えます＝1マス1明細・右端に作品数・下に国ごとの合計。空きが多い国はその機種のカタログがまだ無い国です。',
+      '🔧 <b>出品ログの空きマスの理由が全部「まだ出していません」になっていたのを直しました</b>（本人「なんで出される国と出されない国があるんですか？すでに出してるとかじゃないですよね？」→ 実際は別の日にすでに出していました）。9/23 に「同名でも機種が違えば別の行」にした時、台帳と突き合わせる鍵だけ「名前|機種」のままで一致しなくなっていました。「すでに出しています 9/21」のように日付が出ます。',
       '🔁 <b>正式返品を営業利益から引くのをやめました（二重計上でした）</b>（本人「返金・補償 −¥71,127 これって入れるべきなの？」「どのタイミングで入れるか難しいな」→「返金・補償されたタイミングで直すんじゃない？」「おけ」）。粗利はShopeeの入金額（escrow）で計算していて、返品が受理されると<b>注文月の入金が減る形でもう反映されています</b>。9月分の実測：受理された返品15件のうち10件は入金がマイナスまで減っていて ¥50,160 が二重、4件はまだ減っていませんでした。これからは<b>手で記録した返金（PayPal返金など、入金に出ない分）だけ</b>を引き、返品で減った額・件数は「織り込み済」として月次カードに出します。📈事業計画・🧾確定申告も同じ式にしました。注文月の数字は返品の受理期限（最長40日ほど）が過ぎるまで動きます。',
       '🔴 <b>営業利益（純利益）の行を大きく・赤字か黒字かを一目で</b>（本人「これもっと強調しないと」）。',
       '💰 <b>🎯有在庫化候補に「粗利/件」「粗利/月」を足しました</b>（本人「データやコンテクストが溜まってきたのでアップデートしよう」）。粗利＝入金（escrow・注文日のレート）−仕入（costs、無ければ在庫台帳）。単品注文だけで数え、期間内の中央値。粗利/月＝予想月販×粗利/件＝在庫を持つ価値。列見出しで並び替えできます。読めない時は「—」（0円と混同しない）。',
@@ -32617,6 +32624,24 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     manual: ['✕', '見送りにした（手動）'],
     noname: ['🈚', '英語の名前が作れなかった']
   };
+  /* ★2026-09-24 本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」→ 機種×国の表（2軸は最初から表＝[[portal-matrix-not-vertical-list]]） */
+  function llogTotMatrix() {
+    const tot = _llogWhy && _llogWhy.tot; if (!tot) return _llogWhy && _llogWhy.err ? '' : '';
+    const ccs = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
+    const ccCol = (cc) => (regionByCc(cc) || {}).color || '#888';
+    const hws = Object.keys(tot.hw).sort((a, b) => (tot.hw[b].n - tot.hw[a].n) || a.localeCompare(b));
+    if (!hws.length) return '';
+    const cell = (n, strong) => `<td style="text-align:right;padding:3px 7px;${n ? '' : 'color:#c5c9d0'}${strong ? ';font-weight:700' : ''}">${n ? n.toLocaleString() : '—'}</td>`;
+    const rows = hws.map(hw => { const r = tot.hw[hw]; return `<tr><td style="padding:3px 7px;white-space:nowrap"><b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${esc(hw)}</span></td>${ccs.map(cc => cell(r[cc] || 0)).join('')}${cell(r.n, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1">${r.t.toLocaleString()}</td></tr>`; }).join('');
+    const foot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 7px"><b>合計</b></td>${ccs.map(cc => cell(tot.cc[cc] || 0, true)).join('')}${cell(tot.all, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1;font-weight:700">${tot.titles.toLocaleString()}</td></tr>`;
+    return `<details data-fold="llogTot" ${(() => { try { return localStorage.getItem('smdFold_llogTot') === '0' ? '' : 'open'; } catch (_) { return 'open'; } })()} style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px">
+      <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×国） <span style="color:#ee4d2d">${tot.all.toLocaleString()}件</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">／ 作品 ${tot.titles.toLocaleString()}件 ・ 1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）</span></summary>
+      <div style="overflow-x:auto;margin-top:6px"><table style="border-collapse:collapse;font-size:11.5px;min-width:560px">
+        <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 7px">機種</th>${ccs.map(cc => `<th style="text-align:right;padding:3px 7px;color:${ccCol(cc)}">${esc(cc)}</th>`).join('')}<th style="text-align:right;padding:3px 7px">合計</th><th style="text-align:right;padding:3px 7px;color:#5e35b1" title="1つでも国に出ている作品の数（台帳の鍵の数）">作品数</th></tr></thead>
+        <tbody>${rows}${foot}</tbody></table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:4px">空きが多い国＝その機種のカタログがまだ無い国（TW・MY が多い）。🤖は1回の巡回で1つ・1日6つまでカタログを作ってから埋めていきます。</div>
+    </details>`;
+  }
   function llogWhyLoad() {
     /* 🤖の稼働状況（担当ごと）も一緒に読む＝出品ログの上に「次回いつ出すか」を出すため */
     sbGet('app_kv', 'select=k,v&k=like.boshu_auto_status*').then(rs => {
@@ -32630,18 +32655,23 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en'), baKvGet('boshu_auto_cfg')]).then(([rows, en, cfg]) => {
       const mark = new Map(), fam = {};
       en = en || {}; cfg = cfg || {};
+      /* ★2026-09-24 本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」＝台帳（国ごとに item#model か skip:理由）を数える。1マス＝1明細 */
+      const tot = { hw: {}, cc: {}, all: 0, titles: 0 };
       Object.keys(cfg.family || {}).forEach(hw => { const cs = (cfg.family[hw] || {}).ccs; if (cs && cs.length) fam[hw] = cs.slice(); });
       (rows || []).forEach(r => {
         const hw = String(r.k || '').replace('boshu_auto_done_', ''), v = r.v || {};
         Object.keys(v).forEach(key => {
           const names = [key, en[key] && en[key].en, en[key] && en[key].short].filter(Boolean).map(llogNm).filter(Boolean);
+          let any = false;
           Object.keys(v[key] || {}).forEach(cc => {
             const code = String(v[key][cc] || '');
             names.forEach(n => mark.set(cc + '|' + n, { code: code, hw: hw }));
+            if (code && code.indexOf('skip:') !== 0) { const th = tot.hw[hw] = tot.hw[hw] || { n: 0, t: 0 }; th[cc] = (th[cc] || 0) + 1; th.n++; tot.cc[cc] = (tot.cc[cc] || 0) + 1; tot.all++; any = true; }
           });
+          if (any) { tot.hw[hw].t++; tot.titles++; }
         });
       });
-      _llogWhy = { mark: mark, fam: fam, cfg: cfg };
+      _llogWhy = { mark: mark, fam: fam, cfg: cfg, tot: tot };
       return _llogWhy;
     }).catch(() => { _llogWhy = { mark: new Map(), fam: {}, err: true }; logState._whyTried = false; return _llogWhy; });   /* ★2026-09-23 Codex指摘：読めなかったのを「まだ出していません」と言わない。次の描き直しで読み直す */
   }
@@ -32842,7 +32872,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         /* ★明細名は【選んだ日のぶんだけ】あとから取りに行く（全件読みには入っていない）。
            名前が入る前に理由を出すと、鍵が空振りして全部「まだ出していません」になる（2026-09-23 実際にそう出た）。 */
         if (logState._detailDay !== sel) return `<div style="border:1px dashed #e0e3e7;border-radius:8px;min-height:60px;height:100%;background:#fbfbfc;display:flex;align-items:center;justify-content:center;color:#b6bcc4;font-size:10px" title="明細名を読み込んでから理由を出します">⏳ 読み込み中…</div>`;
-        const w = _llogWhy && _llogWhy.mark.get(cc + '|' + k);
+        /* ★2026-09-24 本人「なんで出される国と出されない国があるんですか？すでに出してるとかじゃないですよね？」＝実際は【別の日にすでに出している】のに
+           「まだ出していません」と出ていた。9/23 の「同名でも機種が違えば別の行」で k が「名前|機種」になったのに、台帳の鍵（国|名前）と突き合わせる所だけ古いままだった。 */
+        const w = _llogWhy && _llogWhy.mark.get(cc + '|' + String(k.split('|')[0] || ''));
         const hw = hwOf.get(k) || (w && w.hw) || '';
         const day = (w && /^\d/.test(w.code)) ? llogById.get(cc + '|' + w.code) : '';
         if (w && /^\d/.test(w.code)) {
@@ -32973,6 +33005,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           <span title="${av(lastH ? ('直近1時間の実績 ' + lastH + '件から、今日の残り ' + restH.toFixed(1) + '時間ぶんを見積もった数です（予定表ではありません）') : '直近1時間に出た明細がないため、見込みは出していません')}">今日このあと <b>${lastH ? '約' + eta.toLocaleString() + '件' : '—'}</b> <span class="smd-dim">（直近1時間 ${lastH}件から）</span></span>
         </div>`;
       })()}
+      ${llogTotMatrix()}
       <div style="margin-top:12px">
         <div style="font-weight:700;color:#333;font-size:13px">${sel} に出した商品<span style="color:#ee4d2d">${selRows.length}件</span>${logState.hw ? `<span class="smd-dim" style="font-weight:400;font-size:11px">（${esc(logState.hw)}でしぼり込み／全${selAll.length}件）</span>` : ''}${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
           <span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">バリエの明細1件＝1商品</span></div>
