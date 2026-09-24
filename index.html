@@ -19377,6 +19377,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '🤖 <b>自動出品の巡回を、担当PCのポータルから15分ごとに起動するようにしました</b>（本人「アカウントは増やせない」「いい感じにやって」）。Apps Script の時間トリガーには1日の実行時間の枠（gmail 90分・Workspace 6時間）があり、2台目は上限すれすれ・3台目は昼過ぎに止まる計算でした。web アプリの呼び出しはこの枠を使いません。時間トリガーは保険として60分ごとに残します。',
       '🇻🇳 <b>VN の価格上限（1,000,000 VND 未満）を超える作品は出品しないようにしました</b>（本人「100万ベトナムドンを超えるやつは、そもそも出品すらしないでほしい」）。これまでは 999,000 VND・在庫0 で置いていました。空きマスの理由に「VNの上限を超える値段」が出ます。',
       '🔔 <b>お知らせの分類タブが右端で見切れるのを直しました</b>（本人「お金のところが見切れている」）。1行固定で横にはみ出していたのを折り返しにしました。',
       '🏷 <b>接続枠のカードに 3台目のアカウント名（kawaguchi1119@gmail）を出しました</b>（本人「3台目のアカウント名がないです。書いといて」）。本体＝gcsonlinestore・2台目＝lumiscends・3台目＝kawaguchi1119@gmail。',
@@ -29849,6 +29850,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   function baAutoCollectArm() {
     if (lst._baCollectTimer) return;
     lst._baCollectTimer = setInterval(() => { baAutoCollectTick().catch(() => {}); }, 60000);
+    /* ★2026-09-25 本人「アカウントは増やせない」「いい感じにやって」＝🤖の巡回を【ポータルから】起動する。
+       Apps Script は時間トリガーの1日の実行時間に枠がある（gmail 90分・Workspace 6時間）。web アプリの呼び出しはこの枠を使わないので、
+       担当PCが 15分ごとに 2台目・3台目の /exec を叩く（トリガーは保険で60分に）。同時に叩かず 2台目は :00/:15/:30/:45、3台目は +5分。返事は待つだけ（最大6分） */
+    if (!lst._baWebTickTimer) lst._baWebTickTimer = setInterval(() => { baWebTick().catch(() => {}); }, 60000);
     setTimeout(() => { baAutoCollectTick().catch(() => {}); }, 8000);
   }
   async function baAutoCollectTick(force) {
@@ -29967,6 +29972,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       try { const m = document.getElementById('ba-collect-msg'); if (m) m.textContent = lst._baCollectMsg ? '🖼 ' + lst._baCollectMsg : ''; baHeadBadge(); } catch (_) {}
     } catch (e) { lst._baCollectMsg = '自動収集に失敗: ' + String((e && e.message) || e).slice(0, 80); }
     finally { lst._baCollectBusy = false; }
+  }
+  async function baWebTick() {
+    if (typeof pcIsOwner !== 'function' || !pcIsOwner()) return;
+    const now = new Date(); const m = now.getMinutes();
+    const slots = [{ key: 'boshuUrl', at: [0, 15, 30, 45], name: '2台目' }, { key: 'boshuUrl2', at: [5, 20, 35, 50], name: '3台目' }];
+    for (const sl of slots) {
+      const url = settings[sl.key]; if (!url || !settings.writeToken) continue;
+      if (sl.at.indexOf(m) < 0) continue;
+      const stamp = 'smdBaWebTick_' + sl.key; const last = Number(localStorage.getItem(stamp) || 0); if (Date.now() - last < 10 * 60000) continue;
+      try { localStorage.setItem(stamp, String(Date.now())); } catch (_) {}
+      try {
+        const r = await fetch(url + '?action=boshu_auto_tick_bg&token=' + encodeURIComponent(settings.writeToken) + '&callback=cb&cb=' + Date.now());
+        const txt = await r.text(); const ok = /"ok":true/.test(txt);
+        try { logAct('出品', '🤖巡回（ポータルから）', sl.name, (ok ? 'OK ' : 'NG ') + txt.replace(/^cb\(/, '').slice(0, 80)); } catch (_) {}
+      } catch (e) { try { logAct('出品', '🤖巡回（ポータルから）', sl.name, '失敗 ' + String(e).slice(0, 80)); } catch (_) {} }
+    }
   }
   async function renderBoshuAuto(draft) {
     const box = document.getElementById('tm-auto-box'); if (!box) return;

@@ -571,13 +571,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        baout = p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
+        baout = p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -2581,6 +2582,25 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined };
 }
 // ★明細名(バリエ名)を置換：tierのoption名に含まれる before→after を書き換え（既存model据え置き）。1層/2層どちらもOK。
+/* ★2026-09-25 本人「在庫ゼロのもの（VNの100万ドン超え）は明細の題名の最初に印」＝指定した明細名の頭に印を付ける。1カタログ＝読み1回＋書き1回。既に印があるものは触らない */
+function markModels_(shopId, itemId, names, prefix) {
+  if (!shopId || !itemId) throw new Error('shop_id / item_id 必須');
+  var want = {}; (names || []).forEach(function (n) { want[String(n || '').toLowerCase().trim()] = 1; });
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  if (!tiers.length) throw new Error('バリエ無し商品です');
+  var changed = 0;
+  var newTiers = tiers.map(function (t, ti) {
+    return { name: t.name, option_list: (t.option_list || []).map(function (o) {
+      var v = o.option; if (ti === 0 && v && want[String(v).toLowerCase().trim()] && v.indexOf(prefix) !== 0) { v = prefix + v; changed++; }
+      return tierOpt_(o, v);
+    }) };
+  });
+  if (!changed) return { ok: true, changed: 0 };
+  var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  updateTierVariation_(shopId, itemId, newTiers, remap);
+  return { ok: true, changed: changed };
+}
 function renameModels_(shopId, itemId, before, after) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   before = String(before || ''); after = String(after == null ? '' : after);
@@ -6038,7 +6058,7 @@ function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬
    30分×最大20作品＝960/日で1,000に届かない器だった。回数を倍にすると審査できる候補も倍になる。
    トリガーは間隔を読み出せないので、BA_TICK_MIN の印が違えば作り直す（同じ関数のトリガーを2本にしない）。
    Haikuで1日 約$1→$2〜3・接続枠は2台目の中で収まる（1作品 約7回）。ヤフオクは1回あたりの叩き方は同じ・遮断時は既存の6時間休みが効く */
-var BA_TICK_MIN = 15;
+var BA_TICK_MIN = 60;   /* ★2026-09-25 主はポータルからの巡回（15分ごと・枠を使わない）。時間トリガーは保険で60分（gmail の3台目は90分/日の枠しか無い） */
 var BA_YAHOO_PER_HOUR = 6;   /* ヤフオク検索は1時間6回まで（30分ごとだった頃の実測 約5回/時に合わせる） */
 function setupBoshuAutoTrigger() {
   var tr = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
