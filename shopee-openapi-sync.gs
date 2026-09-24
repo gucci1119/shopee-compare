@@ -6461,7 +6461,16 @@ function boshuAutoTick(manual) {
     baKvSet_(BA_IMGS, baKvMerge_(BA_IMGS, used, _fr, 0));   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
     st.today.n += picks.length; st.today.added += out.added;
     /* ★v184 失敗の数え方：候補があったのに1件も入らなかった回を「失敗」に数える（baAddBatch_ は例外を握って note で返すので外の catch に来ない・Codex指摘）。1件でも入れば0に戻す */
-    if (out.added > 0) st.errStreak = 0; else { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ').slice(0, 160) + '）'; }
+    /* ★2026-09-25 本人「出品巻き返して」＝2台とも「候補が1件も入らなかった」が3回続いてブレーキ（実測：全部「対象なし」＝その作品はどの国にも
+       既に出ている／VN上限で見送り。失敗ではない）。**本当の失敗（追加失敗・複製失敗・作れませんでした・error）を含む時だけ**エラーに数える。
+       「対象なし」だけの空振りは errStreak を増やさない（候補が枯れているだけなので次の機種へ回る） */
+    if (out.added > 0) st.errStreak = 0;
+    else {
+      var _notes = Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ');
+      var _realFail = /失敗|エラー|error|作れません|複製/.test(_notes);
+      if (_realFail) { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + _notes.slice(0, 160) + '）'; }
+      else { st.lastErr = ''; baLog_(st, hw + '：候補 ' + picks.length + '件は全部「対象なし」（既に出ている／見送り）＝エラーには数えない'); }
+    }
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
     // 触った店の出品行を取り直す（次回の「出している」判定と、ポータルの一覧のため）
