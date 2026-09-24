@@ -7089,6 +7089,9 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var price = p.cost > 0 ? baPriceFromTbl_(cfg, cc, wG, p.cost) : 0;
       if (!(price > 0)) price = avg;
       if (!(price > 0)) { baSet_(ledger, p.key, cc, 'skip:noprice'); res.skipped++; baSkipRec_(st, hw, cc, p, 'noprice'); return; }
+      /* ★2026-09-25 本人「100万ベトナムドンを超えるやつは、そもそも出品すらしないでほしい」＝VN の上限（1,000,000 VND 未満）を超える値付けは
+         上限に寄せて在庫0で置く（9/20）のをやめ、見送りにする。台帳 skip:vncap（値付けが変われば戻せる） */
+      if (ceilA && price > ceilA) { baSet_(ledger, p.key, cc, 'skip:vncap'); res.skipped++; baSkipRec_(st, hw, cc, p, 'vncap'); return; }
       // ★価格差の枠は【既存＋今回入れる分】の最高/最安で見る（20と500を別々に通すと25倍になって丸ごと弾かれる）
       var minP = hi ? hi / ratio : 0, maxP = lo ? lo * ratio : Infinity;
       if (ceilA) maxP = Math.min(maxP, ceilA);
