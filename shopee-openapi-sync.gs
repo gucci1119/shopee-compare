@@ -550,7 +550,7 @@ function doGetInner_(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id, logistic_info: (function () { try { return p.logistic_info ? JSON.parse(p.logistic_info) : null; } catch (e) { return null; } })() });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -2759,10 +2759,15 @@ function resolveCategoryId_(shopId, keyword) {
   list.forEach(function (c) {
     if (c.has_children) return; // leafのみ出品可
     var nm = String(c.display_category_name || c.original_category_name || c.category_name || '').toLowerCase();
-    if (nm.indexOf(kw) < 0) return;
     var chain = nm, p = c, d = 0;
     while (p && p.parent_category_id && byId[p.parent_category_id] && d < 10) { p = byId[p.parent_category_id]; chain += ' < ' + String(p.display_category_name || p.category_name || '').toLowerCase(); d++; }
-    var score = (chain.indexOf('video game') >= 0 ? 10 : 0) + (nm === kw ? 4 : 0) + (nm === 'games' ? 3 : 0);
+    /* ★2026-09-24 TW の木は「Gaming & Consoles > Video Games > Playstation / Switch / …」で、葉の名前に "Games" が無い。
+       名前だけで探すと「Sports & Outdoors > … > Shooting & Survival Games」(101287) に当たり、
+       蝦皮日本 チャネルで「Product category is prohibited for the channel」になっていた（実測）。
+       親の階層が Video Games なら葉の名前に語が無くても候補にする（名前一致より弱い点で）。 */
+    var inVg = chain.indexOf('video game') >= 0;
+    if (nm.indexOf(kw) < 0 && !inVg) return;
+    var score = (inVg ? 10 : 0) + (nm.indexOf(kw) >= 0 ? 2 : 0) + (nm === kw ? 4 : 0) + (nm === 'games' ? 3 : 0) + (/^others?$/.test(nm) ? 1 : 0);
     parents.forEach(function (seg) { if (seg && chain.indexOf(seg) >= 0) score += 5; }); // 親パスが階層に含まれれば加点
     if (!best || score > best.score) best = { id: c.category_id, score: score };
   });
@@ -2783,7 +2788,9 @@ function resolveLogisticInfo_(shopId) {
      TW の配送チャネル「蝦皮日本 - 蝦皮店到店」（店舗受取）を add_item に含めていて、
      `Product category is prohibited for the channel` で弾かれていた。受取系の判定が英語名しか見ていなかった。
      中国語（店到店・超商取貨・門市・自取）とタイ語/ベトナム語の受取系も外す。 */
-  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point|店到店|超商|門市|取貨|自取|便利商店|7-?11|全家|萊爾富|OK\s*mart|nhận tại|điểm lấy|รับเอง|จุดรับ/i.test(c.logistics_channel_name || ''); };
+  /* ★2026-09-24 夜【訂正】TW の「蝦皮日本 - 蝦皮店到店」は受取系ではなく【日本からの SLS そのもの】（本人「蝦皮日本-蝦皮店到店しかダメなんじゃないの？SLS使いたいし」）。
+     昼に 店到店 を除外したのは誤り。落ちていた真因はカテゴリ（下の resolveCategoryId_ を参照）。代わりに「海運」（船便・既存カタログは全部オフ）を外す。 */
+  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point|超商|門市|取貨|自取|便利商店|7-?11|全家|萊爾富|OK\s*mart|nhận tại|điểm lấy|รับเอง|จุดรับ|海運|sea\s*freight/i.test(c.logistics_channel_name || ''); };
   var usable = enabled.filter(function (c) { return !isLocker(c); });
   var pref = function (c) { var n = (c.logistics_channel_name || '').toLowerCase(); return (/standard/.test(n) ? 3 : 0) + (/international|cross.?border/.test(n) ? 2 : 0) + (/sls|shopee/.test(n) ? 1 : 0); };
   usable.sort(function (a, b) { return pref(b) - pref(a); });
@@ -3102,6 +3109,8 @@ function updateItem_(body) {
   // カテゴリ変更：category_id を渡すと Shopee 側でカテゴリが移る。属性はカテゴリ依存なので
   // 変更時は新カテゴリの attribute_list を同時に渡すこと（渡さないと必須属性欠落で弾かれる）。
   if (body.category_id != null && String(body.category_id) !== '' && !isNaN(parseInt(body.category_id, 10))) payload.category_id = parseInt(body.category_id, 10);
+  /* ★2026-09-24 配送チャネルの付け替え（TW：蝦皮日本 をオン・海運 をオフ 等）。[{logistic_id, enabled}] */
+  if (body.logistic_info && body.logistic_info.length) payload.logistic_info = body.logistic_info.map(function (x) { return { logistic_id: parseInt(x.logistic_id, 10), enabled: !!x.enabled }; });
   // ★画像：URL配列 → media_space/upload_image で image_id に変換 → image.image_id_list を丸ごと差し替え。
   //   Shopeeは部分更新ではなく「渡した並びがそのまま新しい画像一覧」になるので、順番＝表示順。最大9枚。
   //   既にShopee上にある画像は URL からの再アップになるが、image_id が変わるだけで見た目は同じ。
@@ -3115,7 +3124,7 @@ function updateItem_(body) {
     if (!_ids.length) throw new Error('画像のアップロードに失敗しました（URLを確認してください）');
     payload.image = { image_id_list: _ids };
   }
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image/category_id のいずれか）');
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image/category_id/logistic_info のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err };
@@ -6958,7 +6967,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       if (!dst) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var pr0 = 0;
       try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
-      var sd = seedShopCatalog_({ src_shop_id: other.shop_id, dst_shop_id: dst, item_id: other.item_id, price: pr0 });
+      var sd = seedShopCatalog_({ src_shop_id: other.shop_id, dst_shop_id: dst, item_id: other.item_id, price: pr0, category_id: baCatForCc_(hw, cc) || undefined });
       if (!sd || !sd.ok || !sd.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（他の国から: ' + String((sd && sd.error) || '').slice(0, 70) + '）'); return null; }
       try { callShop_(dst, '/api/v2/product/update_item', null, 'post', { item_id: sd.item_id, item_name: srcName.slice(0, 120), item_sku: wantSku || undefined }); } catch (eU) {}
       baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + sd.item_id + '／写真は他の国の同じ機種から）');
@@ -7313,6 +7322,30 @@ function baReuseTestSlot_(shopId, itemId, it, st, cc) {
    ★公開はしない。公開のタイミングは本人が決める（[[listing-publish-timing-is-users-call]]）。
    ★1回に作るのは1つだけ（画像9枚＝取得+送信で18回など、1つでも20回前後使う）。
    返り：{ ok, item_id, name } ／ 失敗は { ok:false, error } */
+/* ★2026-09-24 本人「タイトル雑すぎやろ」（TW「[Used] Variation Cartridge ③」）。上限（TW=60字）に入れる時は
+   途中でぶつ切りにせず（"Softwa"）、飾り語を後ろから落として、それでも長ければ単語の切れ目で切る。"Variation" は残す（ポータルが家族カタログを名前の Variation で見分ける） */
+function baFitName_(name, limit) {
+  var n = String(name || '').replace(/\s+/g, ' ').trim(); limit = Number(limit) || 120;
+  if (n.length <= limit) return n;
+  var fillers = ['Japanese Region Free', 'Region Free', 'Sony Official', 'Working', 'Japanese Ver', 'Japan Ver', 'Japanese', 'Bandai', 'Official', 'Series', 'Software', 'Game'];
+  for (var i = 0; i < fillers.length && n.length > limit; i++) { var re = new RegExp('\\s*\\b' + fillers[i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'); n = n.replace(re, '').replace(/\s+/g, ' ').trim(); }
+  if (n.length > limit) { var cut = n.slice(0, limit); var sp = cut.lastIndexOf(' '); n = (sp > limit * 0.6 ? cut.slice(0, sp) : cut).trim(); }
+  return n;
+}
+/* ★2026-09-24 国×機種のカテゴリ。TW は「Gaming & Consoles > Video Games > 機種」に葉が分かれている（get_category 実測）。他国は 0＝従来の keyword 解決 */
+function baCatForCc_(hw, cc) {
+  if (String(cc).toUpperCase() !== 'TW') return 0;
+  var h = String(hw || '').toLowerCase();
+  if (/^switch/.test(h)) return 101087;
+  if (/^ps[12345]$/.test(h)) return 101082;
+  if (h === 'vita') return 101088;
+  if (h === 'psp') return 101089;
+  if (/^wii/.test(h)) return 101084;
+  if (/^(ds|3ds)$/.test(h)) return 101085;
+  if (/^gb/.test(h)) return 101086;
+  if (/^xbox/.test(h)) return 101083;
+  return 101091;   /* GC・N64・SFC・FC・MD・SS など＝Others */
+}
 function seedShopCatalog_(p) {
   var src = parseInt(p.src_shop_id, 10), dst = parseInt(p.dst_shop_id, 10), itemId = parseInt(p.item_id, 10);
   if (!src || !dst || !itemId) return { ok: false, error: 'src_shop_id / dst_shop_id / item_id 必須' };
@@ -7331,7 +7364,7 @@ function seedShopCatalog_(p) {
     /* ★2026-09-23 台湾はタイトルが短い（60字）。他の国の長い名前をそのまま送ると
        `product.error_title_len_no_pa` で弾かれる（実測：TW の ps3/psp が作れなかった）。
        店ごとの上限は get_item_limit の item_name_length_limit で取れるので、それに合わせて切る。 */
-    item_name: String(p.name || base.item_name || '').slice(0, (function () {
+    item_name: baFitName_(String(p.name || base.item_name || ''), (function () {
       try { var mx = shopNameLimit_(dst); return (mx > 0 ? Math.min(mx, 120) : 120); } catch (e) { return 60; }
     })()),
     description: String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || ''),
@@ -7354,6 +7387,8 @@ function seedShopCatalog_(p) {
   body.tier_name = String(tierName || 'Title').slice(0, 20);
   body.variations = [{ name: 'test', price: Number(p.price) || 300, stock: 0 }];
   body.forceTier = true;
+  /* ★2026-09-24 作る先の国のカテゴリを機種で指定できる（TW は機種ごとに葉が分かれている）。無ければ addItem_ の keyword 解決 */
+  if (p.category_id && !isNaN(parseInt(p.category_id, 10))) body.category_id = parseInt(p.category_id, 10);
   var r = null;
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
   if (!r || !r.item_id) return { ok: false, error: '作れましたが item_id が返りませんでした' };
