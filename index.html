@@ -4896,6 +4896,11 @@
     "1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）": "1 cell = 1 variation, counted from the bot ledger (boshu_auto_done), today included",
     "空きが多い国＝その機種のカタログがまだ無い国（TW・MY が多い）。🤖は1回の巡回で1つ・1日6つまでカタログを作ってから埋めていきます。": "Countries with many blanks have no catalog for that console yet (mostly TW and MY). The bot creates one catalog per run, up to six a day, then fills them.",
     "作品数": "Titles",
+    "国ごと": "By country",
+    "アカウントごと": "By account",
+    "🤖 これまでに自動で出した明細（機種×アカウント）": "🤖 Auto-listed variations so far (console × account)",
+    "アカウント＝その明細のカタログを持っている店（出品データの shop_id → 🔑登録簿の店名）": "Account = the shop that owns the variation's catalog (shop_id in listing data → name in the 🔑 registry)",
+    "不明": "Unknown",
     "機種": "Console",
     "出品者/店舗名": "Seller / shop name",
     "分類(例:恒常)": "Type (e.g. recurring)",
@@ -19368,6 +19373,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-24', items: [
+      '🏪 <b>上の表に「アカウントごと」の列を足しました</b>（本人「どのアカウントに出したかも欲しいですね」）。列＝店（出品データの shop_id → 🔑登録簿の店名）。いまの出品データにカタログが無い明細は「不明」の列です。',
       '🤖 <b>出品ログに「これまでに自動で出した明細（機種×国）」の表を足しました</b>（本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」）。🤖の台帳（boshu_auto_done_機種）を数えます＝1マス1明細・右端に作品数・下に国ごとの合計。空きが多い国はその機種のカタログがまだ無い国です。',
       '🔧 <b>出品ログの空きマスの理由が全部「まだ出していません」になっていたのを直しました</b>（本人「なんで出される国と出されない国があるんですか？すでに出してるとかじゃないですよね？」→ 実際は別の日にすでに出していました）。9/23 に「同名でも機種が違えば別の行」にした時、台帳と突き合わせる鍵だけ「名前|機種」のままで一致しなくなっていました。「すでに出しています 9/21」のように日付が出ます。',
       '🔁 <b>正式返品を営業利益から引くのをやめました（二重計上でした）</b>（本人「返金・補償 −¥71,127 これって入れるべきなの？」「どのタイミングで入れるか難しいな」→「返金・補償されたタイミングで直すんじゃない？」「おけ」）。粗利はShopeeの入金額（escrow）で計算していて、返品が受理されると<b>注文月の入金が減る形でもう反映されています</b>。9月分の実測：受理された返品15件のうち10件は入金がマイナスまで減っていて ¥50,160 が二重、4件はまだ減っていませんでした。これからは<b>手で記録した返金（PayPal返金など、入金に出ない分）だけ</b>を引き、返品で減った額・件数は「織り込み済」として月次カードに出します。📈事業計画・🧾確定申告も同じ式にしました。注文月の数字は返品の受理期限（最長40日ほど）が過ぎるまで動きます。',
@@ -32632,10 +32638,34 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const hws = Object.keys(tot.hw).sort((a, b) => (tot.hw[b].n - tot.hw[a].n) || a.localeCompare(b));
     if (!hws.length) return '';
     const cell = (n, strong) => `<td style="text-align:right;padding:3px 7px;${n ? '' : 'color:#c5c9d0'}${strong ? ';font-weight:700' : ''}">${n ? n.toLocaleString() : '—'}</td>`;
+    const view = logState.totView || 'cc';
+    const tabs = `<div style="display:flex;gap:4px;align-items:center;margin-top:6px;font-size:11px"><b style="color:#5e35b1">列</b>${[['cc', '国ごと'], ['acct', 'アカウントごと']].map(([k, l]) => `<button class="smd-btn llog-totview" data-v="${k}" style="font-size:11px;${view === k ? 'background:#5e35b1;color:#fff;border-color:#5e35b1;font-weight:700' : ''}">${l}</button>`).join('')}<span class="smd-dim" style="margin-left:6px">アカウント＝その明細のカタログを持っている店（出品データの shop_id → 🔑登録簿の店名）</span></div>`;
+    if (view === 'acct') {
+      /* ★2026-09-24 本人「どのアカウントに出したかも欲しい」。列＝店（国の順・同じ国に複数あれば並べる）。出品データに無いカタログ（消した等）は「不明」の列 */
+      const sm = logState.shopMap;
+      if (!sm) return `<details data-fold="llogTot" open style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px"><summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×アカウント）</summary>${tabs}<div style="font-size:11px;color:#c0392b;margin-top:6px">店の情報を読み込み中…（出品データが要ります）</div></details>`;
+      const byAcct = {}, colInfo = {};
+      (tot.items || []).forEach(it => {
+        const sid = sm[it.cc + '|' + it.item]; const lb = sid ? (acctLabel(sid) || ('店 ' + sid)) : '不明';
+        const col = it.cc + '|' + lb; if (!colInfo[col]) colInfo[col] = { cc: it.cc, lb: lb, n: 0 }; colInfo[col].n++;
+        const r = byAcct[it.hw] = byAcct[it.hw] || { n: 0 }; r[col] = (r[col] || 0) + 1; r.n++;
+      });
+      const cols = Object.keys(colInfo).sort((a, b) => (ccs.indexOf(colInfo[a].cc) - ccs.indexOf(colInfo[b].cc)) || (colInfo[a].lb === '不明' ? 1 : 0) - (colInfo[b].lb === '不明' ? 1 : 0) || colInfo[a].lb.localeCompare(colInfo[b].lb));
+      const arows = hws.map(hw => { const r = byAcct[hw] || { n: 0 }; return `<tr><td style="padding:3px 7px;white-space:nowrap"><b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${esc(hw)}</span></td>${cols.map(c => cell(r[c] || 0)).join('')}${cell(r.n, true)}</tr>`; }).join('');
+      const afoot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 7px"><b>合計</b></td>${cols.map(c => cell(colInfo[c].n, true)).join('')}${cell(tot.all, true)}</tr>`;
+      return `<details data-fold="llogTot" ${(() => { try { return localStorage.getItem('smdFold_llogTot') === '0' ? '' : 'open'; } catch (_) { return 'open'; } })()} style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px">
+      <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×アカウント） <span style="color:#ee4d2d">${tot.all.toLocaleString()}件</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">／ 作品 ${tot.titles.toLocaleString()}件 ・ 1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）</span></summary>
+      ${tabs}
+      <div style="overflow-x:auto;margin-top:6px"><table style="border-collapse:collapse;font-size:11.5px;min-width:560px">
+        <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 7px">機種</th>${cols.map(c => `<th style="text-align:right;padding:3px 7px;white-space:nowrap;color:${colInfo[c].lb === '不明' ? '#8a8f98' : (famOfLabel(colInfo[c].lb) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4')}" title="${av(colInfo[c].lb === '不明' ? 'いまの出品データにカタログが見つからない明細（消した・別の店に移した等）' : ('🏪 ' + colInfo[c].lb))}"><span style="color:${ccCol(colInfo[c].cc)}">${esc(colInfo[c].cc)}</span> ${esc(colInfo[c].lb)}</th>`).join('')}<th style="text-align:right;padding:3px 7px">合計</th></tr></thead>
+        <tbody>${arows}${afoot}</tbody></table></div>
+    </details>`;
+    }
     const rows = hws.map(hw => { const r = tot.hw[hw]; return `<tr><td style="padding:3px 7px;white-space:nowrap"><b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${esc(hw)}</span></td>${ccs.map(cc => cell(r[cc] || 0)).join('')}${cell(r.n, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1">${r.t.toLocaleString()}</td></tr>`; }).join('');
     const foot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 7px"><b>合計</b></td>${ccs.map(cc => cell(tot.cc[cc] || 0, true)).join('')}${cell(tot.all, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1;font-weight:700">${tot.titles.toLocaleString()}</td></tr>`;
     return `<details data-fold="llogTot" ${(() => { try { return localStorage.getItem('smdFold_llogTot') === '0' ? '' : 'open'; } catch (_) { return 'open'; } })()} style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px">
       <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×国） <span style="color:#ee4d2d">${tot.all.toLocaleString()}件</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">／ 作品 ${tot.titles.toLocaleString()}件 ・ 1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）</span></summary>
+      ${tabs}
       <div style="overflow-x:auto;margin-top:6px"><table style="border-collapse:collapse;font-size:11.5px;min-width:560px">
         <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 7px">機種</th>${ccs.map(cc => `<th style="text-align:right;padding:3px 7px;color:${ccCol(cc)}">${esc(cc)}</th>`).join('')}<th style="text-align:right;padding:3px 7px">合計</th><th style="text-align:right;padding:3px 7px;color:#5e35b1" title="1つでも国に出ている作品の数（台帳の鍵の数）">作品数</th></tr></thead>
         <tbody>${rows}${foot}</tbody></table></div>
@@ -32656,7 +32686,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const mark = new Map(), fam = {};
       en = en || {}; cfg = cfg || {};
       /* ★2026-09-24 本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」＝台帳（国ごとに item#model か skip:理由）を数える。1マス＝1明細 */
-      const tot = { hw: {}, cc: {}, all: 0, titles: 0 };
+      const tot = { hw: {}, cc: {}, all: 0, titles: 0, items: [] };   /* items＝{hw,cc,item}。★2026-09-24 本人「どのアカウントに出したかも欲しい」→ 描く時に listings の shop_id → 登録簿の店名に直す */
       Object.keys(cfg.family || {}).forEach(hw => { const cs = (cfg.family[hw] || {}).ccs; if (cs && cs.length) fam[hw] = cs.slice(); });
       (rows || []).forEach(r => {
         const hw = String(r.k || '').replace('boshu_auto_done_', ''), v = r.v || {};
@@ -32666,7 +32696,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           Object.keys(v[key] || {}).forEach(cc => {
             const code = String(v[key][cc] || '');
             names.forEach(n => mark.set(cc + '|' + n, { code: code, hw: hw }));
-            if (code && code.indexOf('skip:') !== 0) { const th = tot.hw[hw] = tot.hw[hw] || { n: 0, t: 0 }; th[cc] = (th[cc] || 0) + 1; th.n++; tot.cc[cc] = (tot.cc[cc] || 0) + 1; tot.all++; any = true; }
+            if (code && code.indexOf('skip:') !== 0) { const th = tot.hw[hw] = tot.hw[hw] || { n: 0, t: 0 }; th[cc] = (th[cc] || 0) + 1; th.n++; tot.cc[cc] = (tot.cc[cc] || 0) + 1; tot.all++; any = true; tot.items.push({ hw: hw, cc: cc, item: code.split('#')[0] }); }
           });
           if (any) { tot.hw[hw].t++; tot.titles++; }
         });
@@ -33188,6 +33218,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       };
       { const a = host.querySelector('#llog-see'); if (a) a.addEventListener('click', llogSeeOpen); }
       host.querySelectorAll('.llog-layout').forEach(b => b.addEventListener('click', () => { logState.layout = b.dataset.l; try { localStorage.setItem('llogLayout', b.dataset.l); } catch (_) {} renderListingLog(); }));
+      host.querySelectorAll('.llog-totview').forEach(b => b.addEventListener('click', () => { logState.totView = b.dataset.v; renderListingLog(); }));
       host.querySelectorAll('.llog-sort').forEach(b => b.addEventListener('click', () => { logState.sort = b.dataset.s; try { localStorage.setItem('llogSort', b.dataset.s); } catch (_) {} renderListingLog(); }));
       { const a = host.querySelector('#llog-ckall'); if (a) a.addEventListener('click', () => { const cks = host.querySelectorAll('.llog-ck'); const on = ![...cks].every(c => c.checked); cks.forEach(c => { c.checked = on; }); bmsg(on ? cks.length + '件えらびました' : ''); }); }
       /* ★2026-09-21 本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」「選出基準は今まで私が何回も言ってる基準で」
