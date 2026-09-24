@@ -10500,6 +10500,8 @@
   }
   const regionByCc = cc => REGIONS.find(r => r.cc === cc);
   // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
+  /* ★2026-09-24 本人「xx%みたいな表示も欲しい」＝ページ送りの進み具合を知らせる口。呼ぶ側が _sbProgress に関数を置く（table, 読めた行, 全行） */
+  let _sbProgress = null;
   async function sbGetAll(table, qs) {
     qs = acctQs(table, qs);
     const key = settings.sbKey || settings.sbSecret;
@@ -10514,6 +10516,7 @@
     const totalStr = ((first.headers.get('content-range') || '').split('/')[1] || '').trim();
     const total = Number(totalStr);
     if (Number.isFinite(total) && total > 0) {
+      let _done = out.length; try { if (_sbProgress) _sbProgress(table, _done, total); } catch (_) {}
       const offs = [];
       for (let off = 1000; off < total; off += 1000) offs.push(off);
       /* ★2026-09-24 32ページを一斉に投げると一瞬の 429/5xx で1本落ち→全体が失敗（出品ログが0件に見えた）。
@@ -10528,7 +10531,7 @@
         }
       };
       const chunks = new Array(offs.length); let idx = 0;
-      const worker = async () => { while (idx < offs.length) { const i = idx++; chunks[i] = await one(offs[i]); } };
+      const worker = async () => { while (idx < offs.length) { const i = idx++; chunks[i] = await one(offs[i]); _done += chunks[i].length; try { if (_sbProgress) _sbProgress(table, _done, total); } catch (_) {} } };
       await Promise.all(Array.from({ length: Math.min(8, offs.length) }, worker));
       chunks.forEach(c => out.push(...c));
       return maskDemo(table, out);
@@ -19373,6 +19376,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-24', items: [
+      '📊 <b>「出品ログを読み込み中…」に 読めた行／全行 と % のバーを出すようにしました</b>（本人「xx%みたいな表示も欲しい」）。3万行超をページ送りで読む間の進み具合が分かります。',
       '📜 <b>母数の表を見ている最中に先頭へ飛ぶのを直しました</b>（本人「下にスクロールしても絶対なんか上に上がってくるのはなぜ？」）。描き直しのたびに表を「読み込み中…」に置き換えていたので、ページの高さが一瞬ゼロになりブラウザがスクロール位置を先頭へ丸めていました。この表は機種ごとの突合が進むたび・ブリッジの戻りのたびに描き直されるので何度も飛んでいました。既に表が出ている時は差し替えず、高さを保って裏で作り、描き終えたら元の位置へ戻します。',
       '🏪 <b>上の表に「アカウントごと」の列を足しました</b>（本人「どのアカウントに出したかも欲しいですね」）。列＝店（出品データの shop_id → 🔑登録簿の店名）。見出しは2段で、上段が国・下段がその国の店（本人「PH の上に、店名を覆うように列があるイメージ」）。🔑登録簿にある店は0件でも列を出します（本人「台湾とブラジルとマレーシアの2つ目のアカウントが出てない。表示させて」）。いまの出品データにカタログが無い明細は「不明」の列です。',
       '🤖 <b>出品ログに「これまでに自動で出した明細（機種×国）」の表を足しました</b>（本人「今までに自動出品で出した総数とかもハードごとに欲しい。国ごとにも」）。🤖の台帳（boshu_auto_done_機種）を数えます＝1マス1明細・右端に作品数・下に国ごとの合計。空きが多い国はその機種のカタログがまだ無い国です。',
@@ -32751,8 +32755,10 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         const rb = host.querySelector('#llog-reload'); if (rb) rb.addEventListener('click', () => { logState.loadErr = ''; logState.loadErrAt = 0; renderListingLog(); });
         return;
       }
-      host.innerHTML = '<div class="smd-dim" style="padding:20px">出品ログを読み込み中…</div>';
-      loadListingLog().then(renderListingLog).catch(() => renderListingLog());
+      host.innerHTML = '<div class="smd-dim" style="padding:20px"><div id="llog-prog-txt">出品ログを読み込み中…</div><div style="margin-top:8px;height:6px;border-radius:3px;background:#e9ecef;max-width:420px;overflow:hidden"><div id="llog-prog-bar" style="height:100%;width:0;background:#5e35b1;transition:width .3s"></div></div></div>';
+      /* ★2026-09-24 本人「xx%みたいな表示も欲しい」：listing_log は3万行超をページ送りで読むので、読めた行／全行と % を出す */
+      _sbProgress = (table, done, total) => { if (table !== 'listing_log') return; const t = document.getElementById('llog-prog-txt'), b = document.getElementById('llog-prog-bar'); if (!t) return; const pct = Math.min(100, Math.round(done / total * 100)); t.textContent = `出品ログを読み込み中… ${done.toLocaleString()} / ${total.toLocaleString()} 行（${pct}%）`; if (b) b.style.width = pct + '%'; };
+      loadListingLog().then(renderListingLog).catch(() => renderListingLog()).finally(() => { _sbProgress = null; });
       return;
     }
     if (logState.missing) {
