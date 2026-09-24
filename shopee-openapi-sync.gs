@@ -6781,7 +6781,10 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
       var d = (ledger[r.key] || {})[cc];
       /* ★2026-09-23 Codex指摘：満杯の店の非公開カタログに入った明細は「出している」に数えないのに、台帳の済みだけが残って2店舗目へ出し直されなかった → その明細が埋もれている時は済みと見ない */
       if (d && String(d).indexOf('skip:') !== 0 && !buried[String(d).split('#')[0]]) return false;   // 済み
-      if (d && /^skip:(noimg|noname|dup|nofam|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
+      if (d && /^skip:(noimg|noname|dup|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
+      /* ★2026-09-24 本人「なぜ台湾には出ていない？」：nofam（その国に家族カタログが無かった）は【永久の見送り】にしない。
+         2026-09-23 に家族カタログの自動作成を入れたのに、それ以前に nofam で見送った作品は TW/TH で二度と候補に戻らなかった。
+         家族が出来れば次の巡回で出す。家族がまだ無ければ baAddBatch_ が rows 無しで即戻る＝接続枠は使わない。 */
       if (!(famRows[cc] || []).length && !famAuto) return false;                                          // その国に家族カタログが無い（★2026-09-23 自動作成が有効なら候補に残す＝入れる時に1つ作る）
       { var cfx = ccFail[hw + '|' + cc]; if (cfx && Date.now() - Date.parse(cfx.at) < 6 * 3600 * 1000) return false; }   /* ★2026-09-23 作れない国は6時間外す（同じ作品の空回り止め） */
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
