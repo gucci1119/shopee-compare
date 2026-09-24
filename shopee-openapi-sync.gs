@@ -6250,6 +6250,18 @@ function boshuAutoTick(manual) {
       var mn = ctx.modelNames || {}, nowB = Date.now();
       var recentB = (st.added || []).filter(function (a) { var t = Date.parse((a && a.at) || ''); return a && t > ackAt && nowB - t > 3 * 3600 * 1000 && mn[String(a.item_id)] && mn[String(a.item_id)].length; }).slice(0, 10);
       var goneB = recentB.filter(function (a) { return mn[String(a.item_id)].indexOf(String(a.en || '').toLowerCase().trim()) < 0; });
+      /* ★2026-09-25 止める前に【Shopee を読み直して】本当に無いかを見る（控えの listings が古いだけで止めない）。読むのは該当カタログだけ（多くて数回） */
+      if (goneB.length >= 3) {
+        var _seenLive = {};
+        goneB = goneB.filter(function (a) {
+          try {
+            if (!a.shop_id) return true;   /* 店が分からない古い記録は従来どおり */
+            var kI = String(a.shop_id) + '|' + String(a.item_id);
+            if (!_seenLive[kI]) { var g = getModels_(a.shop_id, a.item_id) || {}; _seenLive[kI] = ((g.models) || g || []).map(function (m) { return String((m && m.name) || '').toLowerCase().trim(); }); }
+            return _seenLive[kI].indexOf(String(a.en || '').toLowerCase().trim()) < 0;
+          } catch (eG) { return false; }   /* 読めなかったら「消えた」と決めない */
+        });
+      }
       if (cfg.autoBrake !== false && manual !== true && recentB.length >= 4 && goneB.length >= 3) {
         st.brake = { at: new Date().toISOString(), kind: 'gone', why: '直近 ' + recentB.length + '件のうち ' + goneB.length + '件が消されています（例: ' + goneB.slice(0, 3).map(function (a) { return a.en; }).join(' / ') + '）' };
         st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '。原因を直してから🤖の「▶ 再開」を押してください'; baLog_(st, st.lastMsg); return finish_(st.lastMsg);
@@ -6942,6 +6954,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
      これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
   var srcName = String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
+  if (srcName) srcName = srcName + ' ①';   /* ★2026-09-25 本人「①つけといて。どうせ②も出すから」 */
   if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（名前が決まっていません＝設定の name が空）'); return null; }
   /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
   var pool = allRowsCc || [];
@@ -7150,9 +7163,15 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     /* ★このカタログに実際に入った数。`res.added` は実行ぜんぶの累計なので締めの判断に使えない。 */
     var _addedHere = 0;
     var okNm_ = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); }; var okNames = {}; (r2.models || []).forEach(function (m) { okNames[okNm_(m.option)] = m.model_id; });
+    /* ★2026-09-25 本人「今後同じ失敗しないように」＝返事に model_id が無いのに「added>0」だけで済みにしていた（TW DS② の6件が入っていないのに済み扱い→3時間後に自動ブレーキ）。
+       返事に明細が無い時は【Shopee を読み直して】名前が本当に入っているものだけ済みにする。1カタログ1回の読みで済む（毎回ではなく、この珍しい時だけ） */
+    if (!(r2.models || []).length && (r2.added || 0) > 0) {
+      try { var _live = getModels_(tgt.shop_id, tgt.item_id) || {}; ((_live.models) || _live || []).forEach(function (m) { if (m && m.name && m.model_id) okNames[okNm_(m.name)] = m.model_id; }); baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：返事に明細が無かったので読み直して確認（' + Object.keys(okNames).length + '件）'); }
+      catch (eV) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：読み直しに失敗＝この回は済みにしない ' + String(eV).slice(0, 60)); }
+    }
     items.forEach(function (x) {
       var mid = okNames[okNm_(x.option)];
-      if (mid || (!(r2.models || []).length && (r2.added || 0) > 0)) {
+      if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
         try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
