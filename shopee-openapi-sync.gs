@@ -6065,7 +6065,8 @@ function setupBoshuAutoTrigger() {
   var has = tr.length > 0, mark = '';
   try { mark = P_().getProperty('baTickMin') || ''; } catch (eM) {}
   if (has && (mark !== String(BA_TICK_MIN) || tr.length > 1)) { tr.forEach(function (t) { ScriptApp.deleteTrigger(t); }); has = false; }
-  if (!has) { ScriptApp.newTrigger('boshuAutoTick').timeBased().everyMinutes(BA_TICK_MIN).create(); try { P_().setProperty('baTickMin', String(BA_TICK_MIN)); } catch (eM2) {} }
+  /* ★2026-09-25 everyMinutes は 1/5/10/15/30 しか受け付けない（60 を渡して落ち、削除だけが先に走ってトリガーが消えた・実測）。60分以上は everyHours */
+  if (!has) { var _tb = ScriptApp.newTrigger('boshuAutoTick').timeBased(); if (BA_TICK_MIN >= 60) _tb.everyHours(Math.max(1, Math.round(BA_TICK_MIN / 60))).create(); else _tb.everyMinutes(BA_TICK_MIN).create(); try { P_().setProperty('baTickMin', String(BA_TICK_MIN)); } catch (eM2) {} }
   var has2 = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuAutoRecheck'; });
   if (!has2) ScriptApp.newTrigger('boshuAutoRecheck').timeBased().everyDays(1).atHour(4).create();
   return { ok: true, had: has, had2: has2 };
