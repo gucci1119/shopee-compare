@@ -2779,7 +2779,11 @@ function resolveLogisticInfo_(shopId) {
   var j = callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get');
   var list = ((j.response || {}).logistics_channel_list) || [];
   var enabled = list.filter(function (c) { return c.enabled; });
-  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point/i.test(c.logistics_channel_name || ''); };
+  /* ★2026-09-24 本人「twの出品はうまくいってる?」→ TW の GBA/PS3/PSP の汎用カタログが作れなかった真因：
+     TW の配送チャネル「蝦皮日本 - 蝦皮店到店」（店舗受取）を add_item に含めていて、
+     `Product category is prohibited for the channel` で弾かれていた。受取系の判定が英語名しか見ていなかった。
+     中国語（店到店・超商取貨・門市・自取）とタイ語/ベトナム語の受取系も外す。 */
+  var isLocker = function (c) { return /locker|pick.?up|self.?collect|drop.?off|station|parcel\s*shop|collection\s*point|店到店|超商|門市|取貨|自取|便利商店|7-?11|全家|萊爾富|OK\s*mart|nhận tại|điểm lấy|รับเอง|จุดรับ/i.test(c.logistics_channel_name || ''); };
   var usable = enabled.filter(function (c) { return !isLocker(c); });
   var pref = function (c) { var n = (c.logistics_channel_name || '').toLowerCase(); return (/standard/.test(n) ? 3 : 0) + (/international|cross.?border/.test(n) ? 2 : 0) + (/sls|shopee/.test(n) ? 1 : 0); };
   usable.sort(function (a, b) { return pref(b) - pref(a); });
@@ -2953,6 +2957,21 @@ function addItem_(body) {
   try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
   catch (eAdd) {
     var msgA = String((eAdd && eAdd.message) || eAdd);
+    /* ★2026-09-24 「Product category is prohibited for the channel. Channel detail: <名前>」＝そのチャネルだけ外して1回作り直す。
+       外したチャネルは控え（logi2_<shop>）からも消して、次からは最初から送らない。 */
+    var mCh = /prohibited for the channel[^:]*:\s*(.+)$/i.exec(msgA);
+    if (mCh) {
+      var badName = String(mCh[1] || '').trim().toLowerCase();
+      var chl = [];
+      try { chl = (((callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get') || {}).response || {}).logistics_channel_list) || []; } catch (eL) { chl = []; }
+      var badIds = {};
+      chl.forEach(function (c) { var nm = String(c.logistics_channel_name || '').toLowerCase(); if (nm && (badName.indexOf(nm) >= 0 || nm.indexOf(badName) >= 0)) badIds[c.logistics_channel_id] = 1; });
+      var keep = (payload.logistic_info || []).filter(function (x) { return !badIds[x.logistic_id]; });
+      if (!keep.length || keep.length === (payload.logistic_info || []).length) throw eAdd;
+      payload.logistic_info = keep;
+      try { P_().setProperty('logi2_' + shopId, JSON.stringify(keep)); } catch (eP) {}
+      j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+    } else {
     if (!/attribute/i.test(msgA)) throw eAdd;
     var fillA = mandatoryAttrFill_(shopId, categoryId, payload.attribute_list || body.src_attrs || []);
     /* ★2026-09-23 本人「twはなぜでない？」＝TW の Switch は元のカタログに「成人向け=No」が【既に入っている】ので
@@ -2960,6 +2979,7 @@ function addItem_(body) {
     if (!fillA.added && !(fillA.list && fillA.list.length)) throw eAdd;
     payload.attribute_list = fillA.list;
     j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+    }
   }
   var resp = j.response || j;
   var itemId = (resp.item_id || (resp.item || {}).item_id || null);
