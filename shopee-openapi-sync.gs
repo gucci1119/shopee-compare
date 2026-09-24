@@ -7193,7 +7193,22 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
 /* ★第5引数は【そのカタログに入った数】。`res.added` は実行ぜんぶの累計なので、
    それで判断すると「前のカタログで入った」だけで**中身が空の複製を公開**してしまう（Codex指摘・裏取り済み）。 */
 function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
-  if (!newItem) return;
+  /* ★2026-09-25 本人「なぜ gs_japan_select.th のいくつかは公開されてない？非公開にする意味ないので」＝バグだった。
+     公開は【この回に作った】カタログにしかしていなかった。作った回に1件も入らず（return）、次の回以降で明細が入ると
+     newItem=false で公開されないまま残る（実測：TH 2店舗目 Switch① 53明細・MY PS2 15明細・PH DS 15明細 など）。
+     → 既存の非公開カタログでも、この回に明細が入ったなら公開する（満杯の店は従来どおり弾かれて印が付く）。 */
+  if (!newItem) {
+    if (addedHere > 0 && tgt && tgt.status !== 1 && tgt.status !== 'NORMAL' && (cfg.autoPublish || {})[cc]) {
+      try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); } catch (eT) {}
+      try { unlistItem_(tgt.shop_id, tgt.item_id, false); tgt.status = 1; baLog_(st, cc + '：' + tgt.name + ' を公開（非公開のまま明細が入っていた）'); }
+      catch (e3) {
+        var em3 = String((e3 && e3.message) || e3);
+        if (/unlist_item_all_failed|item_limit|limit/i.test(em3)) { baShopFull_(cc, tgt.shop_id, true); baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
+        else baLog_(st, cc + '：公開に失敗 ' + em3.slice(0, 70));
+      }
+    }
+    return;
+  }
   if (!addedHere) {
     try {
       var g = getModels_(tgt.shop_id, tgt.item_id) || {}; var ms = g.models || [], tm = null;
