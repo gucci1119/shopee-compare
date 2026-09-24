@@ -5656,6 +5656,29 @@ var BA_EN = 'boshu_auto_en';       // 作品鍵 → {en, short, src}（AIに聞�
 var BA_SAME = 'boshu_auto_same';   // md5(作品|出品題名) → 'ok:理由' / 'ng:理由'
 // ★v182 同一作品判定：仕入元の出品題名が「同じ作品・同じ機種のソフト本体」か。続編・別機種・周辺機器・まとめ売り・攻略本を落とす（規則の漏れをAIで拾う）
 //   鍵が無ければ判定なしで通す（写真判定と同じ方針）。鍵があるのに判定できなければ通さない
+function baSameKey_(c, hw, t) {
+  try { return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(hw || '') + '|' + String(c.key || c.ja || c.en) + '|' + t, Utilities.Charset.UTF_8)).slice(0, 22); } catch (e) { return ''; }
+}
+/* ★2026-09-24 同一作品判定を【作品1つ＝1回】にまとめる（本人「めっちゃコスト無駄になってたってことやん」）。
+   これまでは候補の出品題名ごとに1回ずつ聞いていた（作品1つに16〜38回・1日4,000回の上限に当たって出品が止まった）。
+   控えに無い題名だけを最大20件ならべて1回で聞き、結果を控えに入れる。以後の baSameTitle_ は控えに当たる＝無料。
+   失敗した時は何も入れない＝従来どおり1件ずつに戻るだけ（判定の基準は同じ文面） */
+function baSameTitleBatch_(c, hw, titles, st, cache) {
+  if (!cache || !titles || !titles.length) return 0;
+  var todo = [], seen = {};
+  titles.forEach(function (raw) { var t = String(raw || '').replace(/\s+/g, ' ').trim(); if (!t) return; var k = baSameKey_(c, hw, t); if (!k || seen[k] || cache[k] != null) return; seen[k] = 1; todo.push({ k: k, t: t }); });
+  if (todo.length < 2) return 0;   /* 1件なら従来の1回と同じ＝まとめる意味が無い */
+  todo = todo.slice(0, 20);
+  var lines = todo.map(function (x, i) { return (i + 1) + '. "' + x.t.slice(0, 140) + '"'; }).join('\n');
+  var o = baClaudeJson_('Target game: Japanese title "' + String(c.ja || '') + '"' + (c.en ? ' / English title "' + String(c.en) + '"' : '') + ' (platform: ' + (BA_HW_LABEL[hw] || hw) + ').\n' +
+    'Below are marketplace listing titles (Japanese), numbered.\n' + lines + '\n' +
+    'For EACH number, is that listing the SAME game software for the SAME platform? Answer false if it is a sequel/prequel/spin-off/different numbered entry, a different game in the series, a version for another platform, a peripheral/console/accessory, a strategy guide, a soundtrack, or a bundle of multiple games.\n' +
+    'Reply JSON only: {"r":[{"i":1,"same":true,"why":"<short reason in Japanese>"}, ...]} with one entry per number.', st, '同一作品判定', 60 + todo.length * 40);
+  if (!o || o.nokey || !Array.isArray(o.r)) return 0;
+  var n = 0;
+  o.r.forEach(function (e) { var i = Number(e && e.i) - 1; if (!(i >= 0 && i < todo.length)) return; if (cache[todo[i].k] != null) return; cache[todo[i].k] = (e.same ? 'ok:' : 'ng:') + String(e.why || '').slice(0, 60); n++; });
+  return n;
+}
 function baSameTitle_(c, hw, listingTitle, st, cache) {
   var t = String(listingTitle || '').replace(/\s+/g, ' ').trim(); if (!t) return { same: true, judged: false, why: 'notitle' };
   var k = '';
@@ -6235,7 +6258,10 @@ function boshuAutoTick(manual) {
     try { baPartialRepair_(st); } catch (ePa) { baLog_(st, '途中止まりの明細の直しに失敗: ' + String(ePa).slice(0, 100)); }
     try { baRephoto_(st, cfg, judged, pre, used, t0, hw); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
-    var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}; if (Object.keys(sameCache).length > 4000) sameCache = {};   // ★v182
+    var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {};
+    /* ★2026-09-24 本人「めっちゃコスト無駄になってた」：控えが4,000件を超えると {} に捨てていた（実測 4,156件）＝以後は毎回ゼロから
+       同一作品判定を聞き直し、作品1つに16〜38回。捨てずに【古い方から】削って 8,000 件まで持つ（挿入順＝古い順） */
+    { var _sk = Object.keys(sameCache); if (_sk.length > 8000) { var _trim = {}; _sk.slice(_sk.length - 6000).forEach(function (x) { _trim[x] = sameCache[x]; }); sameCache = _trim; } }   // ★v182→2026-09-24
     st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
     /* ★2026-09-20 本人「高額品で在庫少ないのは出さないでね」「高額品ソフトは海賊版も多いので気をつけて」「ファミコンとか特に注意で」
@@ -6272,6 +6298,7 @@ function boshuAutoTick(manual) {
         /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
         /* ★v182 先に「同じ作品の出品か」（題名・文章AI）、通ったら「実物の写真か」（画像AI）。どちらかで落ちたら次の候補（最大2枚）、それも駄目ならヤフオクへ */
         var okM = false, sameNgM = 0, sameUnj = 0, candsM = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, (BA_CART_ONLY_HW[hw] ? 10 : 8));   /* ★2026-09-23 出品の2〜4枚目も候補に入るようになったので、カセット機種は10枚・他は8枚まで試す（1枚 約¥0.3） */   /* 2026-09-20 新基準で通過率が41%に下がった→試す枚数を4→6（1枚 約¥0.3） */   /* 紙箱の機種は使用感のある出品から・プラケースの機種は綺麗な出品から。同じ状態なら個人→Shops。最大4枚まで判定 */
+        try { baSameTitleBatch_(c, hw, candsM.map(function (x) { return x && x.name; }), st, sameCache); } catch (eSb2) {}   /* ★2026-09-24 まとめて1回 */
         for (var ci = 0; ci < candsM.length && !okM; ci++) {
           var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
@@ -6321,6 +6348,7 @@ function boshuAutoTick(manual) {
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', srcUrl = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
+      try { baSameTitleBatch_(c, hw, hits.map(function (h) { return h.t; }), st, sameCache); } catch (eSb) {}   /* ★2026-09-24 候補題名をまとめて1回で判定 */
       for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); srcUrl = String(hits[k].url || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
@@ -6341,7 +6369,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
     var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
     try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 3500)); } catch (eJ) {}
-    try { baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 4500)); } catch (eC) {}   // ★v182
+    try { baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 12000)); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
     if (preRejChanged) { try { preRej = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 80)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
