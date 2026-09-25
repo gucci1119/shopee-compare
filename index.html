@@ -2412,8 +2412,23 @@
   /* 🤖自動出品の担当が「2台目（別Googleアカウント）」の時は、🤖の操作だけそちらのGASへ送る。
      ★本体へ送っても断られる（担当でない側は動かない＝同じ作品を二重に出さないための作り）。
      URLが未設定なら本体のまま＝いつもどおり動く。 */
-  const gasUrlFor = (action) => {
-    if (settings.boshuRunner === 'child' && settings.boshuUrl && /^boshu_auto/.test(String(action || ''))) return settings.boshuUrl;
+  /* ★2026-09-25 本人「それでよろしく」（候補の供給を太くする）。🤖まわりの呼び出しは全部2台目へ行っていた＝写真集めの候補出し・AI判定まで
+     2台目（いちばん使っている台）に乗り、3台目に余裕があっても2台目の枠で写真集めが絞られていた（実測 09/25 11:16：2台目 12,550・3台目 7,121）。
+     機種（params.hw）の担当が3台目（cfg.runners.child2）なら3台目へ送る。担当表は cfg を読んだ時に localStorage に写す（読めない時も前回の表で判断できる） */
+  const baRunnerOfHw = (hw) => {
+    if (!hw) return '';
+    let rn = (_baCfg && _baCfg.runners) || null;
+    if (!rn) { try { rn = JSON.parse(localStorage.getItem('smdBaRunners') || 'null'); } catch (_) { rn = null; } }
+    if (!rn) return '';
+    if (Array.isArray(rn.child2) && rn.child2.indexOf(String(hw)) >= 0) return 'child2';
+    if (Array.isArray(rn.child) && rn.child.indexOf(String(hw)) >= 0) return 'child';
+    return '';
+  };
+  const gasUrlFor = (action, params) => {
+    if (settings.boshuRunner === 'child' && settings.boshuUrl && /^boshu_auto/.test(String(action || ''))) {
+      if (params && params.hw && settings.boshuUrl2 && baRunnerOfHw(params.hw) === 'child2') return settings.boshuUrl2;
+      return settings.boshuUrl;
+    }
     return settings.openapiUrl;
   };
   /* ★2026-09-22 本人「私が操作したときに止まらなければいい」「1日で出品と業務を足して詰まらなければいい」。
@@ -2436,7 +2451,7 @@
     return all[0] || '';
   }
   async function gasCall(params, timeoutMs) {
-    let base = gasUrlFor(params && params.action);
+    let base = gasUrlFor(params && params.action, params);
     if (!base) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     /* 今日すでに枯れている側は最初から避ける（1回むだに叩かない） */
     if (ufUrlBlocked(base)) { const alt0 = gasPeerUrl(base); if (alt0 && !ufUrlBlocked(alt0)) base = alt0; }
@@ -7307,6 +7322,7 @@
     [/^⛔ 本体は断られ中・2台目 残り(\d+)%$/, '⛔ main refused \u00b7 2nd account $1% left'],
     [/^([\u26a0\u26d4]?)Shopee枠 本体 (\d+)%・2台目 (\d+)% 残り$/, '$1Shopee quota \u00b7 main $2% \u00b7 2nd $3% left'],
     [/^Googleアカウントごとの残り$/, 'Left on each Google account'],
+    [/^(.+)：担当の台の接続枠が85%超なので今回は集めない$/, '$1: its runner is over 85% of the quota, skipped this time'],
     [/^🧩 GAS の版: (.*)$/, '🧩 GAS source version: $1'],
     [/^⚠️ GAS の版がそろっていません（古い台に貼り替え→保存→再デプロイ）: (.*)$/, '⚠️ GAS versions differ (paste, save and redeploy the old one): $1'],
     [/^🤖出品の担当$/, 'runs 🤖 listing'],
@@ -19434,6 +19450,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '🖼 <b>写真集め（候補の供給）を3台に分けました</b>（本人「候補の供給を太くする」「それでよろしく」）。🤖まわりの呼び出しは機種に関係なく2台目へ送っていたため、写真集めの候補出しやAI判定まで2台目の枠に乗り、3台目に余裕があっても2台目の枠で写真集めが絞られていました。機種の担当が3台目なら3台目へ送り、集める間隔は余裕のある台に合わせ、担当の台が85%を超えた機種だけ飛ばします。裏で動かない時の理由も外から読めるようにしました。',
       '🛡 <b>同じ型のエラーが二度と出ないように、入口ごと塞ぎました</b>（本人「徹底的に同じようなエラーが出ないように」「これから出てくるであろうエラーを事前に潰して」）。①題名の上限は add_item／update_item／複製のすべてで店に合わせる（台湾60字）②作ったカタログは家族・他国からの種・2店舗目・満杯の複製・手動のすべてで控え、出品同期を待たずに次の巡回が見つける③満杯の複製にも1日の上限（既定12）④失敗の記録を160字まで残す⑤接続枠カードに「🧩 GAS の版」を出し、3台がそろっていなければ赤で警告⑥公開前チェック（chk.sh）に6つの再発よけ。あわせて家族カタログ191件の親SKUと名前を突き合わせ、ズレは台湾のPS3だけ（直し済み）でした。自分のレビューと Codex のレビューで4件を追加で直しました（「複製はこの回はもう作りません」を失敗に数える誤ブレーキ／シリーズのカタログの複製を家族に数える誤り／複製の1日上限が2店舗目の経路をすり抜ける／版が無い古い台を「そろっている」と見なす）。',
       '🇹🇼 <b>台湾のカタログ作成が空回りしていたのを直しました</b>。候補が「台湾だけ空白」の作品ばかりになり、台湾は①題名が60字を超えて複製が落ちる②作ったカタログに親SKUが付かず次の回も「カタログ群なし」→もう1つ作ろうとして重複で落ちる③タイが「1回1件」の枠を使うと台湾が6時間除外される、の3つで毎回0件でした。題名を店の上限に合わせる・作ったカタログを控えて家族に数える・1回1件の見送りは除外に入れない、に直しました（GAS 本体v232・2台目v34・3台目v21）。あわせて台湾の PS3 カタログの親SKU（Vita のものが付いていて Vita の作品が混ざっていました）と SFC・PSP のカタログを整えました。',
       '🤖 <b>自動出品の止まり方を直し、3台目の巡回を1時間8回にしました</b>（本人「Chrome落ちてたので、出品巻き返して」）。朝にChromeが落ちていて、その間に2台目・3台目とも「候補が全部出品済み（対象なし）」だけの0件回をエラーに数えて自動ブレーキが掛かっていました。0件でも本当の失敗（失敗/エラー/作れません/複製）が無ければエラーに数えないようにしました（GAS 本体v231・2台目v33・3台目v20）。3台目は接続枠に余裕があるので約7.5分おきに、2台目は15分おきのままです。あわせて、巡回の起動を「分が一致したら」から「前回から○分たったら」に変えました（ポータルのタブが裏にあると時計が1分単位にまとめて進み、09:15・09:17 の回が丸ごと抜けていました）。',
@@ -29918,6 +29935,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     setTimeout(() => { baAutoCollectTick().catch(() => {}); }, 8000);
   }
   async function baAutoCollectTick(force) {
+    const _why = (w) => { try { window.__baCollectWhy = { at: new Date().toISOString(), why: String(w || '') }; } catch (_) {} };
     // ★2026-09-18 本人「私がいない間に質の高い出品を」＝母数ページを開いていなくても、ポータルがどこかで開いていれば集める（前は母数ページ表示中だけ＝席を外すと写真の供給が止まる）
     /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して」：写真集めも枠を見て間隔をのばす。
        1回で 5機種×40枚に太くしたぶん、枠が減ってきたら自動で間隔を空ける（止まる前に細くする）。 */
@@ -29926,20 +29944,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
        2台目に移したのに本体の枠で止めると、2台目に余裕があるのに写真集めだけ止まり、
        せっかく分けた意味が無くなる（写真が来なければ出品も止まる）。
        2台目の数字は🤖の状態に同乗してくるので、下のブロックで拾って覚えておく。 */
-    try { let uf = ((settings.boshuRunner === 'child' && window.__ufChild) ? window.__ufChild : (window.__ufLast || {})); let pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || uf.stop || 15000);
-      /* ★2026-09-23 Codex指摘：85%で止めた後、この関数はここで戻るので写しが更新されず、翌日16時のリセット後も止まったままになる。写しが10分より古ければ読み直してから判断する */
-      if (pct >= 0.85 && (!uf.at || Date.now() - Date.parse(uf.at) > 10 * 60000)) {
-        try { const _s0 = await baKvGet('boshu_auto_status'); if (_s0 && _s0.uf && _s0.uf.child) { window.__ufChild = { used: _s0.uf.used, stopLine: _s0.uf.stop, at: _s0.uf.at }; if (settings.boshuRunner === 'child') { uf = window.__ufChild; pct = (Number(uf.used) || 0) / (Number(uf.stopLine) || 15000); } } } catch (_) {}
-      }
-      if (pct >= 0.85) { lst._baCollectMsg = '接続枠の85%を使ったので、写真集めを止めています'; return; }
+    /* ★2026-09-25 2台目と3台目の枠を【別々に】読む（Supabase 直＝接続枠は使わない）。集める間隔は余裕のある方に合わせ、
+       機種ごとに「その機種の担当の台が85%超」なら、その機種だけ今回は集めない（2台目が詰まっていても3台目の機種は集まる） */
+    const _pctBy = { child: 0, child2: 0 };
+    try {
+      const [_s2, _s3] = await Promise.all([baKvGet('boshu_auto_status'), baKvGet('boshu_auto_status_child2')]);
+      const _pc = (o) => { const uf = (o && o.uf) || null; if (!uf) return 0; return (Number(uf.used) || 0) / (Number(uf.stop) || Number(uf.stopLine) || 17000); };
+      _pctBy.child = _pc(_s2); _pctBy.child2 = _pc(_s3);
+      if (_s2 && _s2.uf && _s2.uf.child) window.__ufChild = { used: _s2.uf.used, stopLine: _s2.uf.stop, at: _s2.uf.at };
+      try { window.__baCollectUf = { at: new Date().toISOString(), child: _pctBy.child, child2: _pctBy.child2 }; } catch (_) {}
+      const pct = Math.min(_pctBy.child || 1, _pctBy.child2 || 1);   /* 片方しか読めなければその値 */
+      if (pct >= 0.85) { lst._baCollectMsg = '接続枠の85%を使ったので、写真集めを止めています'; _why('85%'); return; }
       else if (pct >= 0.70) _cevery = BA_COLLECT_EVERY_MS * 4;
       else if (pct >= 0.50) _cevery = BA_COLLECT_EVERY_MS * 2;
     } catch (_) {}
-    if (!force && Date.now() - (lst._baCollectAt || 0) < _cevery) return;
-    if (!force && !pcIsOwner()) { lst._baCollectMsg = '自動収集は担当のPC（' + ((PC.owner && PC.owner.label) || 'もう1台') + '）で動いています'; return; }   // 🖥 2台で同じサイトを同時に叩かない
+    if (!force && Date.now() - (lst._baCollectAt || 0) < _cevery) { _why('interval ' + Math.round((_cevery - (Date.now() - (lst._baCollectAt || 0))) / 60000) + 'min'); return; }
+    if (!force && !pcIsOwner()) { lst._baCollectMsg = '自動収集は担当のPC（' + ((PC.owner && PC.owner.label) || 'もう1台') + '）で動いています'; _why('not-owner'); return; }   // 🖥 2台で同じサイトを同時に叩かない
     // 同じブラウザでポータルを2枚開いていても、集めるのは1枚だけ（25分以内に他のタブが集めていたら譲る）
-    try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0); if (!force && o && Date.now() - o < 25 * 60000) { lst._baCollectAt = o; return; } } catch (_) {}
-    if (lst._baCollecting || lst._baCollectBusy) return;
+    try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0); if (!force && o && Date.now() - o < 25 * 60000) { lst._baCollectAt = o; _why('other-tab 25min'); return; } } catch (_) {}
+    if (lst._baCollecting || lst._baCollectBusy) { _why('busy'); return; }
     /* ★2026-09-21 【🤖の画面を開いていなくても担当先を確かめる】（Codex指摘・裏取り済み）。
        担当（本体 / 2台目）の写しは 🤖の画面を描いた時にしか更新していなかったので、
        もう1台のPCで2台目に切り替えても、この裏の収集は**古い写しのまま本体へ送り続ける**。
@@ -29963,11 +29986,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* ★実際に最後に🤖を動かしたのはどちらか（表示の「🤖出品の担当」はこれを見る） */
       if (_st && _st.uf && _st.uf.child != null) window.__baRunnerIsChild = !!_st.uf.child;
     } catch (_) {}
-    if (typeof mercariSearch !== 'function' || typeof bridgeRequest !== 'function') return;
+    if (typeof mercariSearch !== 'function' || typeof bridgeRequest !== 'function') { _why('no-mercari-fn'); return; }
     if (!settings.sbSecret || !settings.openapiUrl || !settings.writeToken) return;
-    if (!bridgeAvailable) { try { await detectBridge(); } catch (_) {} if (!bridgeAvailable) { lst._baCollectMsg = 'ブリッジ（Tampermonkey）が応答しないので集められない'; return; } }   // ★ブリッジ無しで GAS・AI を無駄に呼ばない（Codex指摘）
+    if (!bridgeAvailable) { try { await detectBridge(); } catch (_) {} if (!bridgeAvailable) { lst._baCollectMsg = 'ブリッジ（Tampermonkey）が応答しないので集められない'; _why('no-bridge'); return; } }   // ★ブリッジ無しで GAS・AI を無駄に呼ばない（Codex指摘）
     const cfg = _baCfg || (await baKvGet('boshu_auto_cfg')) || {};
-    if (!force && cfg.autoCollect === false) return;   // 手動「🖼 いま集める」は自動OFFでも動く（Codex指摘）
+    if (!force && cfg.autoCollect === false) { _why('autoCollect off'); return; }   // 手動「🖼 いま集める」は自動OFFでも動く（Codex指摘）
     const hws = (cfg.hws || []).filter(h => cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey));
     if (!hws.length) return;
     lst._baCollectBusy = true; lst._baCollectAt = Date.now(); try { localStorage.setItem('smdBaCollectAt', String(Date.now())); } catch (_) {}
@@ -29993,6 +30016,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           try { localStorage.setItem('smdBaCollectIdx', String(ci)); } catch (_) {}
           lst._baCollectIdx = ci;
         }
+        { const _rn = baRunnerOfHw(hw) || 'child'; if ((_pctBy[_rn] || 0) >= 0.85) { msgs.push((TITLE_HW_JA[hw] || hw) + '：担当の台の接続枠が85%超なので今回は集めない'); continue; } }
         const r = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 60, noYahoo: '1', needPhoto: '1' }, 240000);
         if (!r || !r.ok || !Array.isArray(r.rows)) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗'); continue; }
         const pre = (await baKvGet('boshu_auto_pre')) || {};
@@ -30027,11 +30051,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         }
       } catch (_) {}
       lst._baCollectMsg = msgs.join(' ／ ');
+      _why('ran: ' + lst._baCollectMsg.slice(0, 120));
       try { logAct('出品', '自動出品の写真を自動収集', '', lst._baCollectMsg.slice(0, 80)); } catch (_) {}
       lst._baHead = null;   // バッジの数字を取り直す
       // ★描き直さない（入力中の設定が消える・Codex指摘）。状況の1行とバッジだけ差し替える
       try { const m = document.getElementById('ba-collect-msg'); if (m) m.textContent = lst._baCollectMsg ? '🖼 ' + lst._baCollectMsg : ''; baHeadBadge(); } catch (_) {}
-    } catch (e) { lst._baCollectMsg = '自動収集に失敗: ' + String((e && e.message) || e).slice(0, 80); }
+    } catch (e) { lst._baCollectMsg = '自動収集に失敗: ' + String((e && e.message) || e).slice(0, 80); _why('error: ' + String((e && e.message) || e).slice(0, 120)); try { logAct('出品', '自動出品の写真を自動収集', '', lst._baCollectMsg.slice(0, 80)); } catch (_) {} }
     finally { lst._baCollectBusy = false; }
   }
   async function baWebTick() {
@@ -30079,6 +30104,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const _baManual = manual0 || {}; const baManualKey = (img, hw, key) => String(img || '').replace(/\?.*$/, '') + '|' + String(hw || '') + '|' + key;
     const baJudgeNow = (img, hw, key) => _baManual[baManualKey(img, hw, key)] || _baJudged[String(img || '').replace(/\?.*$/, '') + '|' + BA_JUDGE_VER + '|' + (BA_HW_WORD_P[hw] || String(hw || '').toUpperCase()) + '|' + key] || '';
     const cfg = _baCfg = Object.assign({ on: false, hws: [], ccs: ['BR', 'PH', 'SG', 'MY', 'VN', 'TH', 'TW'], perTick: 8, dailyMax: 100, minHits: 3, maxCostJpy: 15000, autoClone: true, autoPublish: { BR: true }, family: {} }, cfg0 || {}, draft || {});
+    try { if (cfg.runners) localStorage.setItem('smdBaRunners', JSON.stringify(cfg.runners)); } catch (_) {}   /* ★担当表の写し（gasUrlFor の機種ごとの送り先） */
     /* ★2026-09-21 本人「なぜ同じのがいくつもあるの？」＝機種タブに Nintendo Switch などが3つ並んでいた。
        実測：app_kv.boshu_auto_cfg.hws が **39個・中身は17種**（switch/ps4/ps3/ps1/psp/3ds/n64/sfc/gb/wii/wiiu が各3つ）。
        重複したまま保存し直すと増え続ける（画面のチェックを読んで書き戻すため）ので、**読む時と保存する時の両方で1つにまとめる**。 */
@@ -30488,7 +30514,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (c.on && !c.hws.length) { alert('自動で出すには、機種を1つ以上選んでください'); return null; }
       if (c.on && c.hws.some(h => !((c.family[h] || {}).ccs || []).length)) { alert('選んだ機種に「出す国」が1つも無いものがあります: ' + c.hws.filter(h => !((c.family[h] || {}).ccs || []).length).map(h => TITLE_HW_JA[h] || h).join('・')); return null; }
       await sbUpsert('app_kv', [{ k: 'boshu_auto_cfg', v: c, updated_at: new Date().toISOString() }]);
-      _baCfg = c;
+      _baCfg = c; try { if (c && c.runners) localStorage.setItem('smdBaRunners', JSON.stringify(c.runners)); } catch (_) {}
       if (c.on && settings.openapiUrl && settings.writeToken) {
         try { const r = await gasCall({ action: 'boshu_auto_setup', token: settings.writeToken }, 60000); if (!r || !r.ok) throw new Error((r && r.error) || '登録に失敗'); }
         catch (e) { alert('30分毎の時間トリガーを登録できませんでした: ' + apiErrJa((e && e.message) || e) + '\n\n（GASの最新版がデプロイされているか確認してください）'); }
