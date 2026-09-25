@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-1105';
+var SRC_VER = '20260925-1125';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6084,8 +6084,8 @@ function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Mat
    親SKU/名前の書き換えが失敗しても家族と見分けられる（baLoadCtx_ の _madeIds）。
    あわせて listings に仮の行を入れる＝出品同期（各店を数時間ごと）を待たずに次の巡回が見つける。
    実測 2026-09-25：同期待ちの間に「カタログ群なし」→もう1つ作る→ duplicates で落ちる、をくり返していた */
-function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price) {
-  try { var m = baKvFresh_('boshu_fam_made') || {}; m[hw + '|' + cc + '|' + itemId] = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || '') }; baKvSet_('boshu_fam_made', m); } catch (e1) {}
+function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price, role) {
+  try { var m = baKvFresh_('boshu_fam_made') || {}; m[hw + '|' + cc + '|' + itemId] = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || ''), role: String(role || 'fam') }; baKvSet_('boshu_fam_made', m); } catch (e1) {}
   try { sbUpsert_('listings', [{ cc: cc, item_id: itemId, name: String(name || ''), parent_sku: String(sku || ''), status: 0, shop_id: String(shopId || ''), model_count: 1, models: [{ n: 'test', price: Number(price) || 0 }], weight: (weight != null ? weight : null), synced_at: new Date().toISOString() }]); } catch (e2) {}
 }
 function baCcOfShop_(shopId) { try { var t = getToken_(parseInt(shopId, 10)); if (t && t.cc) return String(t.cc).toUpperCase(); } catch (e0) {} try { var r = sbSelectAll_('listings', 'select=cc&shop_id=eq.' + parseInt(shopId, 10) + '&limit=1'); if (r && r[0] && r[0].cc) return String(r[0].cc); } catch (e1) {} return ''; }
@@ -6714,7 +6714,7 @@ function baLoadCtx_(cfg, hw, ccs) {
   var _liveOf = {}; rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
   var _buried = 0, _buriedItems = {};
-  var _madeIds = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id) _madeIds[String(_fm[kk].item_id)] = 1; }); } catch (eFm) {}
+  var _madeIds = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') _madeIds[String(_fm[kk].item_id)] = 1; }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
   rows.forEach(function (r) {
     if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
     itemCc[String(r.item_id)] = r.cc;
@@ -6996,7 +6996,7 @@ function baSubShop_(cc, mainShopId) {
 }
 /* 満杯の店の代わりに、2店舗目へ同じ中身のカタログを作る（非公開で作られる→明細を入れてから公開）。
    作れなければ null（＝今までどおり1店舗目で続ける） */
-function baCloneToSub_(cc, base, newName, st, hw) {
+function baCloneToSub_(cc, base, newName, st, hw, role) {
   var sub = baSubShop_(cc, base.shop_id);
   if (!sub) { baLog_(st, cc + '：2店舗目が登録簿にありません（1店舗目のまま続けます）'); return null; }
   var pr = 0;
@@ -7018,7 +7018,7 @@ function baCloneToSub_(cc, base, newName, st, hw) {
      毎回あたらしい空カタログを作り直していた（実測：TH の2店舗目に親SKU空のカタログが5つ）。 */
   var wantSku2 = String(base.parent_sku || '').trim();
   if (wantSku2) { try { callShop_(sub, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(r.item_id, 10), item_sku: wantSku2 }); } catch (eSk2) { baLog_(st, cc + '：2店舗目のカタログに親SKUを付けられませんでした（' + String(eSk2).slice(0, 160) + '）'); } }
-  try { baCatalogMadeRec_(String(hw || base.hw || baHwsOf_(String(base.name || '') + ' ' + wantSku2)[0] || ''), cc, parseInt(r.item_id, 10), newName, sub, wantSku2, base.weight, pr); } catch (eRc) {}
+  try { baCatalogMadeRec_(String(hw || base.hw || baHwsOf_(String(base.name || '') + ' ' + wantSku2)[0] || ''), cc, parseInt(r.item_id, 10), newName, sub, wantSku2, base.weight, pr, role); } catch (eRc) {}
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
@@ -7137,22 +7137,24 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
          同じ名前で親SKUが空のカタログ（＝家族に入らない）が既に ② を使っていた。重複と言われたら番号を送って最大5回試す */
       /* ★2026-09-23 1店舗目の出品枠が満杯なら、複製せずに【2店舗目】へ作る（本人「2アカウント目に出せばいいんじゃないんですか？」）。
          満杯かどうかは「公開が枠で弾かれた」事実で覚える（推定で止めない＝[[quota-guard-must-be-fact-based]]）。 */
+      /* ★2026-09-25 複製にも1日の上限（既定12・cfg.clonePerDay）。親SKUが付かない等で家族と見分けられないと ②③④… と作り続けるので、数で止める。
+         Codex指摘：2店舗目の経路が上限の手前にあり、すり抜けて数えもしなかった → 両方の経路の【前】で見て、両方で数える */
+      var _cdDay = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
+      if (!st.cloneMade || st.cloneMade.d !== _cdDay) st.cloneMade = { d: _cdDay, n: 0 };
+      var _cdCap = Math.max(1, Number(cfg.clonePerDay) || 12);
+      if (st.cloneMade.n >= _cdCap) { res.note = '複製は今日はもう作りません（今日 ' + st.cloneMade.n + '/' + _cdCap + '件）'; baLog_(st, cc + '：' + res.note); break; }
+      var _role = series ? 'series' : 'fam';   /* ★Codex指摘：シリーズのカタログの複製を家族に数えると、次の回から無関係の作品がそこへ入る */
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
-        var sub1 = baCloneToSub_(cc, base, nm0, st, hw);
+        var sub1 = baCloneToSub_(cc, base, nm0, st, hw, _role);
         if (sub1) {
-          BA_FAM_TICK++;
+          BA_FAM_TICK++; st.cloneMade.n++;
           tgt = sub1; rows.push(tgt); newItem = true;
           try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
         }
       }
       var cl = null, dupErr = '';
       if (!tgt && BA_FAM_TICK >= 1) { res.note = '複製はこの回はもう作りません（1回1件）'; break; }
-      /* ★2026-09-25 複製にも1日の上限（既定12・cfg.clonePerDay）。親SKUが付かない等で家族と見分けられないと ②③④… と作り続けるので、数で止める */
-      var _cdDay = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
-      if (!st.cloneMade || st.cloneMade.d !== _cdDay) st.cloneMade = { d: _cdDay, n: 0 };
-      var _cdCap = Math.max(1, Number(cfg.clonePerDay) || 12);
-      if (!tgt && st.cloneMade.n >= _cdCap) { res.note = '複製は今日はもう作りません（今日 ' + st.cloneMade.n + '/' + _cdCap + '件）'; baLog_(st, cc + '：' + res.note); break; }   /* ★2026-09-23 満杯→複製の経路にも同じ上限 */
       for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
         if (tryNo) { var m2 = CIRC[nextNo - 1 + tryNo] || ('(' + (nextNo + tryNo) + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }
         try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); if (cl && cl.item_id) { BA_FAM_TICK++; st.cloneMade.n++; } }
@@ -7166,7 +7168,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
         try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
         baLog_(st, cc + '：満杯なので複製 → ' + newName + '（非公開・' + cl.item_id + '）');
-        try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0); st.cloneMade = st.cloneMade || {}; } catch (eRc2) {}
+        try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc2) {}
       }
     }
     var free2 = 100 - (tgt.models || []).length;
