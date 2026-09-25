@@ -7323,6 +7323,7 @@
     [/^⛔ 本体は断られ中・2台目 残り(\d+)%$/, '⛔ main refused \u00b7 2nd account $1% left'],
     [/^([\u26a0\u26d4]?)Shopee枠 本体 (\d+)%・2台目 (\d+)% 残り$/, '$1Shopee quota \u00b7 main $2% \u00b7 2nd $3% left'],
     [/^Googleアカウントごとの残り$/, 'Left on each Google account'],
+    [/^(.+)：写真 (\d+)件(.*)・⚠保存に失敗（(.*)）$/, '$1: $2 photos$3 · ⚠ save failed ($4)'],
     [/^(.+)：担当の台の接続枠が85%超なので今回は集めない$/, '$1: its runner is over 85% of the quota, skipped this time'],
     [/^🧩 GAS の版: (.*)$/, '🧩 GAS source version: $1'],
     [/^⚠️ GAS の版がそろっていません（古い台に貼り替え→保存→再デプロイ）: (.*)$/, '⚠️ GAS versions differ (paste, save and redeploy the old one): $1'],
@@ -19452,6 +19453,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '💾 <b>写真の控えが大きくなりすぎて保存が失敗していたのを直しました</b>。控え（5.9MB）を丸ごと書き直していたため、Supabase の時間切れで写真集めの半分が「保存に失敗」で終わり、30分ぶんの成果が消えていました。8つに分けて、変わった分だけ書くようにし、保存の時に代わりの写真を詰めます（10枚まで）。1機種の保存に失敗しても残りの機種は続けます。GASも分けた控えを読めるようにしました（本体v236・2台目v38・3台目v25）。',
       '🖼 <b>写真集めが4日で12回しか動いていなかった真因を直しました</b>（設計は10分ごと）。「同じブラウザの別タブが25分以内に集めていたら譲る」守りが、途中で消えた回（新しい版の自動読み直し）にも効いて次の25分を止めていました。集めている間は心拍を打ち、譲るのは心拍が3分以内の時だけに。あわせて写真集めの最中は自動読み直しを待つようにしました。',
       '🖼 <b>写真集め（候補の供給）を3台に分けました</b>（本人「候補の供給を太くする」「それでよろしく」）。🤖まわりの呼び出しは機種に関係なく2台目へ送っていたため、写真集めの候補出しやAI判定まで2台目の枠に乗り、3台目に余裕があっても2台目の枠で写真集めが絞られていました。機種の担当が3台目なら3台目へ送り、集める間隔は余裕のある台に合わせ、担当の台が85%を超えた機種だけ飛ばします。裏で動かない時の理由も外から読めるようにしました。',
       '🛡 <b>同じ型のエラーが二度と出ないように、入口ごと塞ぎました</b>（本人「徹底的に同じようなエラーが出ないように」「これから出てくるであろうエラーを事前に潰して」）。①題名の上限は add_item／update_item／複製のすべてで店に合わせる（台湾60字）②作ったカタログは家族・他国からの種・2店舗目・満杯の複製・手動のすべてで控え、出品同期を待たずに次の巡回が見つける③満杯の複製にも1日の上限（既定12）④失敗の記録を160字まで残す⑤接続枠カードに「🧩 GAS の版」を出し、3台がそろっていなければ赤で警告⑥公開前チェック（chk.sh）に6つの再発よけ。あわせて家族カタログ191件の親SKUと名前を突き合わせ、ズレは台湾のPS3だけ（直し済み）でした。自分のレビューと Codex のレビューで4件を追加で直しました（「複製はこの回はもう作りません」を失敗に数える誤ブレーキ／シリーズのカタログの複製を家族に数える誤り／複製の1日上限が2店舗目の経路をすり抜ける／版が無い古い台を「そろっている」と見なす）。',
@@ -29682,7 +29684,44 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return base;
   }
   async function baStKeys() { try { const r = await sbGetAll('app_kv', 'select=k&k=like.boshu_auto_status*'); return (r || []).map(x => x.k).filter(k => k === 'boshu_auto_status' || /^boshu_auto_status_[a-z0-9]+$/.test(k)); } catch (_) { return ['boshu_auto_status']; } }
+  /* ★2026-09-25 写真の控え（boshu_auto_pre）は 5.9MB まで育ち、丸ごと書き直す保存が Supabase の時間切れ（57014）で半分落ちていた
+     （写真集め1回30分ぶんの成果がまるごと消える）。→ 鍵のハッシュで8つ（boshu_auto_pre_s0〜s7）に分け、変わった鍵の入っている塊だけ書く。
+     読む側（ここと GAS の baKv_）は【8つ全部そろっていれば】合わせて読み、そろっていなければ今までの1本を読む＝移行の途中でも壊れない。
+     あわせて保存の時に代わりの写真（alts）を詰める：10枚まで（21日より古い作品は6枚）・thumb が img と同じなら空・名前40字 */
+  const BA_PRE_SHARDS = 8;
+  const baPreShardKeys = () => Array.from({ length: BA_PRE_SHARDS }, (_, i) => 'boshu_auto_pre_s' + i);
+  const baPreShardOf = (k) => { let h = 0; const t = String(k); for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0; return 'boshu_auto_pre_s' + (h % BA_PRE_SHARDS); };
+  let _baPreSharded = null;
+  async function baPreRead() {
+    try {
+      const r = await sbGetAll('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys()).join(',') + ')');
+      const by = {}; (r || []).forEach(x => { by[x.k] = x.v; });
+      if (baPreShardKeys().every(k => by[k] != null)) { _baPreSharded = true; const out = {}; baPreShardKeys().forEach(k => Object.assign(out, by[k] || {})); return out; }
+      _baPreSharded = false; return by['boshu_auto_pre'] || null;
+    } catch (_) { return undefined; }
+  }
+  function baPreCompact(o) {
+    if (!o || !Array.isArray(o.alts)) return o;
+    const old = o.at && (Date.now() - Date.parse(o.at) > 21 * 86400000);
+    const y = Object.assign({}, o);
+    y.alts = o.alts.slice(0, old ? 6 : 10).map(a => { if (!a) return a; const b = Object.assign({}, a); if (b.thumb && b.thumb === b.img) b.thumb = ''; if (b.name) b.name = String(b.name).slice(0, 40); if (!b.cond) delete b.cond; return b; });
+    return y;
+  }
+  /* full＝読み直した直後の控え全体（変えた所を足したもの）。changed＝変えた鍵。まだ分割していなければ8つ全部を書く（移行） */
+  async function baPreSave(full, changed) {
+    const sh = {}; baPreShardKeys().forEach(k => { sh[k] = {}; });
+    Object.keys(full || {}).forEach(k => { sh[baPreShardOf(k)][k] = baPreCompact(full[k]); });
+    let targets = baPreShardKeys();
+    if (_baPreSharded === true && Array.isArray(changed) && changed.length) { const want = new Set(changed.map(baPreShardOf)); targets = targets.filter(k => want.has(k)); }
+    for (const k of targets) {
+      let ok = false, err = null;
+      for (let t = 0; t < 2 && !ok; t++) { try { await sbUpsert('app_kv', [{ k, v: sh[k], updated_at: new Date().toISOString() }]); ok = true; } catch (e) { err = e; await new Promise(rs => setTimeout(rs, 3000)); } }
+      if (!ok) throw err;
+    }
+    if (targets.length === BA_PRE_SHARDS) _baPreSharded = true;
+  }
   async function baKvGet(k) {
+    if (k === 'boshu_auto_pre') return baPreRead();
     if (k !== 'boshu_auto_status') return baKvGetRaw(k);
     const keys = await baStKeys();
     if (keys.length <= 1) return baKvGetRaw('boshu_auto_status');
@@ -29777,7 +29816,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
     const toRec = (x) => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img, thumb: x.img, src: x.url, price: Number(x.price) || 0, name: String(x.name || '').slice(0, 80), cond: x.cond || '' }; };
     const max = Math.max(1, Number(opts.max) || 20);
-    let got = 0, miss = 0, skipped = 0, tried = 0;
+    let got = 0, miss = 0, skipped = 0, tried = 0, saveErr = '';
     if (lst._baCollecting) throw new Error('いま別の収集（手動か自動）が動いています。終わってからもう一度');   // ★同時に2つ走ると後から保存した方が前の分を消す（Codex指摘）
     lst._baCollecting = true;
     const pre = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {});
@@ -29873,9 +29912,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try { localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}   /* 心拍（別タブに「いま集めている」と伝える） */
         await new Promise(rs => setTimeout(rs, 1200 + Math.random() * 800));
       }
-      if (Object.keys(changed).length) { const cur = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {}); Object.keys(changed).forEach(k => { if (!(cur[k] && cur[k].img && !(pre[k] && pre[k].img))) cur[k] = pre[k]; }); await sbUpsert('app_kv', [{ k: 'boshu_auto_pre', v: cur, updated_at: new Date().toISOString() }]); }
+      if (Object.keys(changed).length) { const cur = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {}); Object.keys(changed).forEach(k => { if (!(cur[k] && cur[k].img && !(pre[k] && pre[k].img))) cur[k] = pre[k]; }); try { await baPreSave(cur, Object.keys(changed)); } catch (eSv) { saveErr = String((eSv && eSv.message) || eSv).slice(0, 120); } }
     } finally { lst._baCollecting = false; }
-    return { got, miss, skipped, tried };
+    return { got, miss, skipped, tried, saveErr };
   }
   // 🔁 写真の自動収集（本人 2026-09-17「自動で回す」）：母数ページを開いている間、30分ごとに GAS へ「次の候補（ヤフオクは叩かない）」を聞き、
   //   写真がまだ無い作品をこのブラウザでメルカリ検索して保存する。GASの実行（30分毎）は写真が揃った作品から出す。
@@ -30055,7 +30094,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const rows = r.rows.filter(x => x && x.key && (_rejNow(x.key) || !(pre[x.key] && (pre[x.key].img || (pre[x.key].missAt && Date.now() - Date.parse(pre[x.key].missAt) < 3 * 86400000)))));
         if (!rows.length) { msgs.push((TITLE_HW_JA[hw] || hw) + '：全部写真あり'); if (_isPrio) t--; continue; }   /* 優先の枠が空振りなら、その枠を普段の順番に回す */
         const c = await baCollectMercari(rows, hw, { max: 40 });
-        msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : ''));
+        msgs.push((TITLE_HW_JA[hw] || hw) + '：写真 ' + c.got + '件' + (c.miss ? '・見つからず ' + c.miss : '') + (c.saveErr ? '・⚠保存に失敗（' + c.saveErr.slice(0, 40) + '）' : ''));   /* 保存の失敗は1機種ぶんで止め、残りの機種は続ける */
       }
       /* ★2026-09-20 本人「画像、おかしいの差し替えて変えてくれないかな？」：GAS の見直しで「基準外だが代わりが無い」(nophoto) になった明細は、
          控えに代わりの写真が無いだけ。ここで【探し直して】控えに入れ、GAS の見直しの印を消す＝次の回に差し替わる。1回6件まで */
@@ -30067,7 +30106,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (todo.length) {
           const pre2 = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {});
           todo.forEach(x => { delete pre2[x.a.key]; });   // 控えを消して探し直す（前の写真は基準外なので残さない）
-          await sbUpsert('app_kv', [{ k: 'boshu_auto_pre', v: pre2, updated_at: new Date().toISOString() }]);
+          await baPreSave(pre2, todo.map(x => x.a.key));
           const byHw = {}; todo.forEach(x => { (byHw[x.a.hw] = byHw[x.a.hw] || []).push({ key: x.a.key, ja: x.a.ja || '', en: x.a.en || '' }); });
           let got2 = 0;
           for (const hw2 of Object.keys(byHw)) { const c2 = await baCollectMercari(byHw[hw2], hw2, { max: 6 }); got2 += c2.got || 0; }
@@ -30682,7 +30721,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           const pre = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {}); const cur = pre[key]; if (!cur || !cur.alts || !cur.alts.length) { alert('次の候補がありません'); return; }
           const next = cur.alts.shift(); const rest = cur.alts;
           pre[key] = Object.assign({}, cur, next, { alts: rest.concat([{ img: cur.img, thumb: cur.thumb, src: cur.src, price: cur.price, name: cur.name, cond: cur.cond }]), at: new Date().toISOString() });
-          await sbUpsert('app_kv', [{ k: 'boshu_auto_pre', v: pre, updated_at: new Date().toISOString() }]);
+          await baPreSave(pre, [key]);
           renderBoshuAuto();
         } catch (e) { alert('差し替えできませんでした: ' + ((e && e.message) || e)); btn.disabled = false; }
       }));
