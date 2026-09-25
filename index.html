@@ -1982,7 +1982,7 @@
       const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
       if (!m) return null;
       const o = JSON.parse(m[1]);
-      if (o && o.ok) { try { aiSpendSaveFrom(o); } catch (_) {} }
+      if (o && o.ok) { try { aiSpendSaveFrom(o); } catch (_) {} try { (window.__ufFull = window.__ufFull || {})[url] = { o: o, at: Date.now() }; } catch (_) {} }
       return (o && o.ok) ? o : null;
     } catch (_) { return null; }
   }
@@ -2048,7 +2048,9 @@
     const urlKid = settings.boshuUrl || '', urlKid2 = settings.boshuUrl2 || '';
     /* ★2026-09-23 本人「押しても内訳が出なくなった」＝3台目を足したら、そこへの問い合わせが失敗したときに
        Promise.all ごと落ちて【パネルが何も出ない】状態になっていた。1台でもコケた時に全部を巻き込まない（取れない欄だけ空にする）。 */
-    const _one = (u) => u ? Promise.resolve().then(() => ufFetchOne(u)).catch(() => null) : Promise.resolve(null);
+    /* ★2026-09-26 本人「ここも押してからの内訳表示遅いんだよな」＝押すたびに3台の GAS へ問い合わせ、全部返るまで何も出さなかった（1台2〜6秒）。
+       上のバーが数分ごとに取っている結果（window.__ufFull）が3分以内ならそれを使い、すぐ出す */
+    const _one = (u) => { if (!u) return Promise.resolve(null); const c = (window.__ufFull || {})[u]; if (c && Date.now() - c.at < 360000) return Promise.resolve(c.o); return Promise.resolve().then(() => ufFetchOne(u)).catch(() => null); };
     const [oMain, oKid, oKid2] = await Promise.all([_one(urlMain), (urlKid && urlKid !== urlMain) ? _one(urlKid) : Promise.resolve(null), (urlKid2 && urlKid2 !== urlMain && urlKid2 !== urlKid) ? _one(urlKid2) : Promise.resolve(null)]);
     const sumCap = [oMain, oKid, oKid2].reduce((a, o) => a + (o ? (Number(o.capHard) || 20000) : 0), 0);
     const sumUsed = [oMain, oKid, oKid2].reduce((a, o) => a + (o ? (Number(o.used) || 0) : 0), 0);
@@ -8042,10 +8044,14 @@
     return String(v).slice(0, 10);
   };
   // タイムスタンプ(UTC ISO) → JST日付 YYYY-MM-DD。created_at(追加日)表示用
-  const jstDate = v => { if (!v) return ''; try { return new Date(v).toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); } catch (_) { return String(v).slice(0, 10); } };
-  const jstDateTime = v => { if (!v) return ''; try { const d = new Date(v); return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }) + ' ' + d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' }); } catch (_) { return String(v).slice(0, 16); } };
+  /* ★2026-09-26 書式を毎回作り直すと遅い（2.8万回で約2秒・出品ログのボタンを押すたびに固まっていた）。書式は1回だけ作って使い回す */
+  const _JST_D = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const _JST_T = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
+  const _JST_DT = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const jstDate = v => { if (!v) return ''; try { return _JST_D.format(new Date(v)); } catch (_) { return String(v).slice(0, 10); } };
+  const jstDateTime = v => { if (!v) return ''; try { const d = new Date(v); return _JST_D.format(d) + ' ' + _JST_T.format(d); } catch (_) { return String(v).slice(0, 16); } };
   // タイムスタンプ(UTC ISO) → JST日時 MM/DD HH:mm。入金額の記載日時表示用
-  const jstDT = v => { if (!v) return ''; try { return new Date(v).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
+  const jstDT = v => { if (!v) return ''; try { return _JST_DT.format(new Date(v)); } catch (_) { return ''; } };
 
   function setModeBadge() {
     const el = document.getElementById('smd-mode');
@@ -10378,6 +10384,7 @@
   }
   async function sbUpsert(table, rows, onConflict) {
     if (!rows.length) return 0;
+    if (table === 'app_kv') { try { if (typeof lst !== 'undefined') lst._baView = null; } catch (_) {} }
     demoWriteGuard('upsert', table, rows);
     // ★同じ束の中に同じキーの行が2つあると Postgres が落ちる（同じ行は1回しか更新できない）。
     //   注文は「未発送」と「発送済み」の両方に出てくることがあり、実際に重複していた。後の方を採用する。
@@ -19522,6 +19529,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '⚡ <b>遠回りな処理をまとめて直しました</b>（本人「本来必要でない処理の仕方を遠回りでやっているような箇所があれば直して」）。①日付を日本時間に直す処理が毎回書式を作り直していて、出品ログのボタンを押すたびに約2秒固まっていた → 書式を使い回す ②🤖パネルのタブ・チェックを押すたびに写真の控え（約6MB）ごと読み直していた → 表示用は30秒使い回す ③母数の表で行を開くたびに全出品の全明細を数え直していた → 出品データが同じなら前回の結果 ④出品一覧を開くと付随データが届くたびに最大9回描き直していた → 1回にまとめる ⑤実売の集計が失敗すると描き直しのたびに全注文を読み直していた → 60秒は読み直さない ⑥「Shopee枠」の内訳が3台へ問い合わせ終わるまで出なかった → 数分以内に取った結果ですぐ出す。',
       '🧾 <b>出品ログに🤖の出品がすぐ出るようにしました</b>（本人「いつになったらこれ改善されるの？」）。前は1時間ごとの取り込みでしか増えず、22:58のまま止まって見えていました。🤖が明細を足したその場で出品ログに書き、画面を開いている間は3分ごとに新しい行だけを読み足します。',
       '⚡ <b>「国ごと／アカウントごと」の切り替えを速くしました</b>（本人「ここ押した時の切り替わりが遅い」）。出品ログ全体（カード数千枚）を描き直していたのを、表の部分だけ差し替えるようにしました。',
       '🧩 <b>出品ログで同じ作品が国ごとに別の行に割れることがあったのを直しました</b>（本人「さっきTW以外も表示されていたぞ？どゆこと？」）。画面を読み直した直後は出品データが届く前で、台湾のように名前に機種が入っていないカタログの明細だけ機種が分からず別の行になり、他の国のマスに「すでに出しています」と出ていました。その日のぶんのSKUからも機種を引くようにしました。',
@@ -28422,7 +28430,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return scored.slice(0, limit || 5).map(x => x[1]);
   }
 
+  /* ★2026-09-26 洗い出し：母数の表は行を開くたび・突き合わせが機種ごとに進むたび（最大約30回）に、全出品の全明細へ機種の判定（正規表現数十個）をかけ直していた。
+     出品データ（lst.byCc）が同じで行数・明細数も変わっていなければ、前回の結果を返す */
+  let _otcMemo = null;
   function ownTitleCounts() {
+    let sig = 0; try { Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => { sig += 1 + ((r.models && r.models.length) || 0); })); } catch (_) { sig = -1; }
+    if (_otcMemo && _otcMemo.ref === lst.byCc && _otcMemo.sig === sig && sig >= 0) return _otcMemo.v;
+    const v = ownTitleCountsCalc();
+    _otcMemo = { ref: lst.byCc, sig: sig, v: v };
+    return v;
+  }
+  function ownTitleCountsCalc() {
     // ★これまで【全部の国を合わせて1本】で数えていた（本人 2026-08-31「国ごとで数が違うよな」）。
     //   出品は国ごとに違うので、棚卸しは国別で見ないと「次にどの国へ何を出すか」が決められない。
     const per = {}, names = {}, byCc = {};
@@ -30258,7 +30276,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const restore = () => { try { window.scrollTo(0, keepY); } catch (_) {} box.style.minHeight = ''; };
     if (!keepH) box.innerHTML = '<div class="tool-card" style="max-width:none;margin:0 0 10px"><span class="smd-dim" style="font-size:12px">🤖 設定を読み込み中…</span></div>';
     try { await ensureListings(); } catch (_) {}
-    const [cfg0, st, pre0, judged0, manual0] = await Promise.all([baKvGet('boshu_auto_cfg'), baKvGet('boshu_auto_status'), baKvGet('boshu_auto_pre'), baKvGet('boshu_auto_judged'), baKvGet('boshu_auto_judged_manual')]);
+    /* ★2026-09-26 本人「本来必要でない処理を遠回りでやっている箇所は直して」＝🤖パネルのタブ・機種のチェック・「もっと見る」を押すたびに
+       写真の控え（約6MB・8分割）を含む5つを丸ごと読み直していた。表示のための読みは30秒使い回す（app_kv に書いたら捨てる＝sbUpsert）。
+       書く前の読み直し（控えに混ぜて保存する所）はこれを使わない＝古い控えで上書きしない */
+    if (!lst._baView || Date.now() - lst._baView.at > 30000) { const _p = Promise.all([baKvGet('boshu_auto_cfg'), baKvGet('boshu_auto_status'), baKvGet('boshu_auto_pre'), baKvGet('boshu_auto_judged'), baKvGet('boshu_auto_judged_manual')]); lst._baView = { at: Date.now(), p: _p }; _p.catch(() => { lst._baView = null; }); }
+    const [cfg0, st, _pre0v, judged0, manual0] = await lst._baView.p;
+    const pre0 = _pre0v ? Object.assign({}, _pre0v) : _pre0v;
     /* ★🤖の担当（本体 / 2台目）は app_kv が正。**読めた時だけ**ブラウザ側の振り分けに写す。
        写しておかないと、別のPC・別のブラウザで開いた時に本体へ送ってしまい「担当ではない」と断られる。
        ⚠️ 読めなかった（cfg0 が null）時は触らない＝古い振り分けのまま（勝手に本体へ戻さない）。 */
@@ -34149,13 +34172,21 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
   // key=商品名(lowercase trim)。cost=直近の仕入(円)、profit=[{入金円−仕入円, ts}] の配列。
   async function ensureLedgerMaps() {
     if (lst._ledgerCostMap !== undefined) return;
+    /* ★2026-09-26 洗い出し：読めなかった時に印を付けずに返すので、描き直しのたびに全注文（明細込み）・全入金・利益表を読み直していた
+       （失敗が続く限り止まらない＝Supabase のメモリ不足で全停止した時と同じ型）。読み込み中は同じ約束を使い回し、失敗したら60秒は読み直さない */
+    if (lst._ledgerMapsBusy) return lst._ledgerMapsBusy;
+    if (lst._ledgerMapsFailAt && Date.now() - lst._ledgerMapsFailAt < 60000) return;
+    lst._ledgerMapsBusy = (async () => { try { await ensureLedgerMapsInner(); } finally { lst._ledgerMapsBusy = null; } })();
+    return lst._ledgerMapsBusy;
+  }
+  async function ensureLedgerMapsInner() {
     try {
       const [pk, ords, inc] = await Promise.all([
         settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => null) : [],
         settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => null) : [],
         settings.sbKey ? sbGetAll('income', 'select=cc,sn,amount').catch(() => null) : [],
       ]);
-      if (pk === null || ords === null || inc === null) return;   /* ★2026-09-23 読めなかった空を「構築済み」として固定しない（次の描画で読み直す） */
+      if (pk === null || ords === null || inc === null) { lst._ledgerMapsFailAt = Date.now(); return; }   /* ★2026-09-23 読めなかった空を「構築済み」として固定しない（60秒後の描画で読み直す） */
       const sheet = (pk && pk[0] && pk[0].v && pk[0].v.items) || {};
       const incMap = {}; (inc || []).forEach(x => { incMap[x.cc + ':' + x.sn] = Number(x.amount) || 0; });
       const cm = {}, pm = {}, om = {};
@@ -38438,9 +38469,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (k === 'ccs') { lst.ccs = []; try { localStorage.setItem('smdLstCcs', '[]'); } catch (_) {} }
     else if (k === 'acct') lst.acct = '';
   }
+  /* ★2026-09-26 洗い出し：出品一覧を開くと、付随データ（販売数の補正・無在庫・メモ・JAN・スペック・閲覧数・台帳・実売）が届くたびに
+     一覧全体（約6,500件の束ね直し・並べ替え）を描き直し、最大9回連続していた。届いた分は1回の描き直しにまとめる */
+  let _lstRedrawT = 0;
+  function lstRedrawSoon() { if (_lstRedrawT) return; _lstRedrawT = setTimeout(() => { _lstRedrawT = 0; try { drawListingStatus(); } catch (_) {} }, 80); }
   function drawListingStatus() {
     // 販売数の付け替え台帳を一度だけ読む（普段は空。詰め直し削除をした商品だけ入る）
-    if (!_soldBase && !_soldBaseLoading) ensureSoldBase().then(m => { if (m && m.size) drawListingStatus(); });
+    if (!_soldBase && !_soldBaseLoading) ensureSoldBase().then(m => { if (m && m.size) lstRedrawSoon(); });
     const host = document.getElementById('list-status'); if (!host) return;
     lstLoadState();      // リロード直後は保存した絞り込みを復元
     lstSaveState();      // 以後は描画のたびに現在の条件を保存
@@ -38462,16 +38497,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
-    if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; drawListingStatus(); }).catch(() => { lstDropStatus = {}; }); }
-    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; drawListingStatus(); }).catch(() => { lstMeta = {}; }); }
-    if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; drawListingStatus(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
-    if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; drawListingStatus(); }).catch(() => { lstSpecs = {}; }); }
-    if (lstStats === null) { lstStats = {}; sbGetAll('app_kv', 'select=v&k=like.listing_stats_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstStats = m; drawListingStatus(); }).catch(() => { lstStats = {}; }); } // 👁閲覧/❤️いいね/🛒販売（GASのlisting_stats）
+    if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; lstRedrawSoon(); }).catch(() => { lstDropStatus = {}; }); }
+    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; lstRedrawSoon(); }).catch(() => { lstMeta = {}; }); }
+    if (productIds === null) { productIds = {}; sbGetAll('app_kv', 'select=v&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; lstRedrawSoon(); }).catch(() => { productIds = {}; }); } // 🔖JAN/型番（出品一覧・各国そろえる共通）
+    if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; lstRedrawSoon(); }).catch(() => { lstSpecs = {}; }); }
+    if (lstStats === null) { lstStats = {}; sbGetAll('app_kv', 'select=v&k=like.listing_stats_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstStats = m; lstRedrawSoon(); }).catch(() => { lstStats = {}; }); } // 👁閲覧/❤️いいね/🛒販売（GASのlisting_stats）
     // 📗 利益台帳(listing_catalog)を出品一覧でも使えるよう遅延ロード＋商品名索引（原価インライン編集用・利益台帳とキャッシュ共用）
-    if (lst._ledgerRows === undefined) { lst._ledgerRows = null; sbGetAll('listing_catalog', 'select=*').then(rows => { lst._ledgerRows = rows || []; drawListingStatus(); }).catch(() => { lst._ledgerRows = []; }); }
+    if (lst._ledgerRows === undefined) { lst._ledgerRows = null; sbGetAll('listing_catalog', 'select=*').then(rows => { lst._ledgerRows = rows || []; lstRedrawSoon(); }).catch(() => { lst._ledgerRows = []; }); }
     if (Array.isArray(lst._ledgerRows)) { const cm = {}, cs = {}; lst._ledgerRows.forEach(r => { const k = ((r.name || r.title || '')).toLowerCase().trim(); if (k && !cm[k]) cm[k] = r; const sk = (r.parent_sku || '').trim(); if (sk && !cs[sk]) cs[sk] = r; }); lst._catalogByName = cm; lst._catalogBySku = cs; }
     // 💰 実売利益マップ（台帳と共用）を1回だけ裏で取得→完了後に再描画。読み込み前は💰チップ非表示（ledgerProfitStatsByNameがnullを返す）
-    if (lst._ledgerCostMap === undefined && !lst._ledgerMapsLoading) { lst._ledgerMapsLoading = true; ensureLedgerMaps().then(() => { lst._ledgerMapsLoading = false; drawListingStatus(); }).catch(() => { lst._ledgerMapsLoading = false; }); }
+    if (lst._ledgerCostMap === undefined && !lst._ledgerMapsLoading) { lst._ledgerMapsLoading = true; ensureLedgerMaps().then(() => { lst._ledgerMapsLoading = false; if (lst._ledgerCostMap !== undefined) lstRedrawSoon(); }).catch(() => { lst._ledgerMapsLoading = false; }); }
     // 🌏 各商品が何か国に出ているか（商品名で束ねる）＝カード/グリッドの◯/7国列に使う。軽いので毎描画で構築
     { const m = {}; Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(x => { const k = (x.name || '').toLowerCase().trim(); if (!k) return; (m[k] = m[k] || new Set()).add(cc); })); const cnt = {}; Object.keys(m).forEach(k => cnt[k] = m[k].size); lst._nameCcCount = cnt; lst._nameCcSet = m; }
     // 📁カテゴリ名：国ごとに1回だけ取得（#101087 のままだと何のカテゴリか分からないため）
