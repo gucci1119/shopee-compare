@@ -191,8 +191,40 @@ for f in sorted(glob.glob('*.gs')):
     ok &= check(f, io.open(f,encoding='utf-8').read())
 sys.exit(0 if ok else 1)
 PY
+[ $? -ne 0 ] && NG=1
 
 # ⑥ I18N_PAT（正規表現の対）に文字列の対が混ざっていないか（2026-09-23：4件混ざって英語表示のたびに re.test で落ちていた）
 echo "===== I18N_PAT の型 ====="
 BADPAT=$(awk '/const I18N_PAT = \[/{f=1;next} f&&/^\s*\];/{f=0} f&&/^\s*\[\x27/{print NR": "substr($0,1,80)}' index.html)
 if [ -n "$BADPAT" ]; then echo "NG  I18N_PAT に正規表現でない対がある（[/^…$/, …] の形にする）"; echo "$BADPAT"; NG=1; else echo "OK  I18N_PAT はすべて正規表現の対"; fi
+
+# ⑦ 再発よけ（2026-09-25 Chrome落ち後の巻き返しで見つけた型・[[audit-by-failure-type]]）
+echo "===== 再発よけ（2026-09-25） ====="
+G=shopee-openapi-sync.gs
+# 7-1 題名を slice(0,120) で切る入口を作らない（台湾は60字＝ error_title_len_no_pass）。shopNameFit_ を通す
+B1=$(grep -nE "item_name: String\([^;]*slice\(0, 120\)|payload\.item_name = String\([^;]*slice\(0, 120\)" $G)
+if [ -n "$B1" ]; then echo "NG  題名を120字固定で切っている（店の上限に合わせる shopNameFit_ を使う）"; echo "$B1"; NG=1; else echo "OK  題名は全部 shopNameFit_ 経由"; fi
+# 7-2 GAS を変えたら SRC_VER を上げる（3台の版ズレ検知の印。上げ忘れるとポータルが「そろっている」と誤認する）
+if ! git diff --quiet HEAD -- $G 2>/dev/null; then
+  OLDV=$(git show HEAD:$G 2>/dev/null | grep -m1 "^var SRC_VER" | sed "s/.*'\(.*\)'.*/\1/")
+  NEWV=$(grep -m1 "^var SRC_VER" $G | sed "s/.*'\(.*\)'.*/\1/")
+  if [ "$OLDV" = "$NEWV" ]; then echo "NG  $G を変えたのに SRC_VER が $NEWV のまま（上げる）"; NG=1; else echo "OK  SRC_VER $OLDV → $NEWV"; fi
+else echo "OK  $G は HEAD と同じ（SRC_VER 据え置き）"; fi
+# 7-3 「分が一致したら起動」を書かない（裏タブでは setInterval が1分単位にまとまり、分を跳ばす）
+B3=$(grep -nE "\.at\.indexOf\(m\)|getMinutes\(\)[^;]*indexOf\(" index.html)
+if [ -n "$B3" ]; then echo "NG  分の一致で起動する書き方がある（前回からの経過時間で決める）"; echo "$B3"; NG=1; else echo "OK  分の一致で起動する所は無い"; fi
+# 7-4 Shopee への書き込み直後の空 catch（失敗が消えて次の回で二重に作る）
+B4=$(grep -nE "callShop_\([^;]*'post'[^;]*\); \} catch \([A-Za-z0-9_]*\) \{\}" $G)
+if [ -n "$B4" ]; then echo "NG  Shopee 書き込みの失敗を握りつぶしている（baLog_ に残す）"; echo "$B4"; NG=1; else echo "OK  Shopee 書き込みの空 catch は無い"; fi
+# 7-5 失敗ログを100字未満で切らない（「This produ」で真因が読めなかった）
+B5=$(grep -nE "baLog_\([^;]*(失敗|できません|作れません)[^;]*slice\(0, [0-9]{2}\)" $G)
+if [ -n "$B5" ]; then echo "NG  失敗ログを100字未満で切っている（160字に）"; echo "$B5"; NG=1; else echo "OK  失敗ログは100字以上残す"; fi
+# 7-6 カタログを作る経路（cloneItem_ / seedShopCatalog_ の呼び出し）は12行以内に控え（baCatalogMadeRec_/baFamMadeRec_）が要る
+B6=$(awk -v G=$G '
+  /^function (cloneItem_|seedShopCatalog_|baCatalogMadeRec_|baFamMadeRec_)\(/ {skip=1}
+  /^function / && !/^function (cloneItem_|seedShopCatalog_|baCatalogMadeRec_|baFamMadeRec_)\(/ {skip=0}
+  { line[NR]=$0 }
+  !skip && /(cloneItem_|seedShopCatalog_)\(/ && !/^\s*\/\// && !/^function / { calls[NR]=1 }
+  END { for (n in calls) { ok=0; for (i=n; i<=n+12; i++) if (line[i] ~ /baCatalogMadeRec_|baFamMadeRec_/) ok=1; if (!ok) print n": "substr(line[n],1,100) } }' $G)
+if [ -n "$B6" ]; then echo "NG  カタログを作った後に控え（baCatalogMadeRec_）が無い"; echo "$B6"; NG=1; else echo "OK  カタログ作成は全経路で控えている"; fi
+exit $NG
