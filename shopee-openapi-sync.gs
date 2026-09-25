@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-0900';
+var SRC_VER = '20260926-0945';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6022,6 +6022,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     var m = rp.items[a.item_id + '#' + a.en];
     if (!m) { if (Number(a.jv || 0) === 11 && String(a.at || '') < BA_RULE_RECHECK_SINCE) return false; return Number(a.jv || 0) !== BA_RULE_VER; }   /* 入れた時の基準が今と同じなら、その時の判定でよい。v11 でも緩める前の分は見直さない */
     if (Number(m.v || 0) !== BA_RULE_VER) return true;               /* 基準が変わった＝見直す */
+    if (m.s === 'error' && (nowMs - (Date.parse(m.at || '') || 0)) > 6 * 3600000) return true;   /* ★2026-09-26 差し替えに失敗した明細（宣材と分かっているのに残る）を30日待たせない＝6時間後にもう一度 */
     return (nowMs - (Date.parse(m.at || '') || 0)) > BA_RECHECK_DAYS * 86400000;   /* 30日たった＝もう一度見る */
   });
   if (!todo.length) return;
