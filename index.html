@@ -7323,6 +7323,8 @@
     [/^⛔ 本体は断られ中・2台目 残り(\d+)%$/, '⛔ main refused \u00b7 2nd account $1% left'],
     [/^([\u26a0\u26d4]?)Shopee枠 本体 (\d+)%・2台目 (\d+)% 残り$/, '$1Shopee quota \u00b7 main $2% \u00b7 2nd $3% left'],
     [/^Googleアカウントごとの残り$/, 'Left on each Google account'],
+    [/^📡 ネットに繋がっていません（(.+)〜）。繋がると自動で読み込み直します$/, '📡 No internet connection (since $1). It will reload automatically when back'],
+    [/^⚠️ データベース（Supabase）が応答していません（(.+)〜）。回復すると自動で読み込み直します$/, '⚠️ The database (Supabase) is not responding (since $1). It will reload automatically when it recovers'],
     [/^(.+)：写真 (\d+)件(.*)・⚠保存に失敗（(.*)）$/, '$1: $2 photos$3 · ⚠ save failed ($4)'],
     [/^(.+)：担当の台の接続枠が85%超なので今回は集めない$/, '$1: its runner is over 85% of the quota, skipped this time'],
     [/^🧩 GAS の版: (.*)$/, '🧩 GAS source version: $1'],
@@ -10240,6 +10242,38 @@
      GASと同じ値をここにも置いて、届かない間はこちらで補う。**同居ツールを外したら両方 20000 に戻す。** */
   const UF_CAP_EFF_FALLBACK = 20000;   // ★2026-09-21 17時 自動Bump停止後は本来の2万に戻した（GAS側と同じ値）
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
+  /* ★2026-09-25 本人「バグったか？」（ダッシュボードが『読み込み中…』のまま）。真因は Supabase のデータベースが応答しなかったこと（DatabaseTimeout）と
+     家の Wi-Fi 断が重なったもの。画面が黙っていると壊れたように見えるので、Supabase への通信が【失敗 / 5xx】になったら上部に理由を出し、成功したら消す。
+     ネット自体が切れている時（navigator.onLine=false）とデータベース側の不調を分けて書く。対象は Supabase 宛ての通信だけ（他の fetch は素通し） */
+  const _smdRawFetch = window.fetch.bind(window);
+  let _sbDownSince = 0;
+  function sbDownShow(kind) {
+    if (!_sbDownSince) _sbDownSince = Date.now();
+    let b = document.getElementById('smd-sbdown');
+    if (!b) { b = document.createElement('div'); b.id = 'smd-sbdown'; b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:44px;z-index:9998;background:#b3261e;color:#fff;border-radius:18px;padding:6px 14px;font-size:12.5px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.22);max-width:92vw'; (document.body || document.documentElement).appendChild(b); }
+    const hm = new Date(_sbDownSince).toTimeString().slice(0, 5);
+    b.textContent = (kind === 'offline' || navigator.onLine === false)
+      ? '📡 ネットに繋がっていません（' + hm + '〜）。繋がると自動で読み込み直します'
+      : '⚠️ データベース（Supabase）が応答していません（' + hm + '〜）。回復すると自動で読み込み直します';
+  }
+  function sbDownClear() {
+    if (!_sbDownSince) return; const was = Date.now() - _sbDownSince; _sbDownSince = 0; const b = document.getElementById('smd-sbdown'); if (b) b.remove();
+    /* 30秒以上止まっていたら、止まっている間に「読み込み中…」のまま残ったカードを描き直すため1回読み直す（作業中は読み直さない） */
+    try { if (was > 30000 && !(typeof appBusy === 'function' && appBusy())) setTimeout(() => location.reload(), 1500); } catch (_) {}
+  }
+  window.fetch = async function (u, o) {
+    const url = (typeof u === 'string') ? u : ((u && u.url) || '');
+    if (url.indexOf(SB_URL) !== 0) return _smdRawFetch(u, o);
+    try {
+      const r = await _smdRawFetch(u, o);
+      if (r.status >= 500) sbDownShow('server'); else sbDownClear();
+      return r;
+    } catch (e) {
+      if (!(e && e.name === 'AbortError')) sbDownShow(navigator.onLine === false ? 'offline' : 'server');
+      throw e;
+    }
+  };
+  window.addEventListener('online', () => { try { if (_sbDownSince) location.reload(); } catch (_) {} });
   const INV_SHEET_ID = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE'; // InventoryItem（QR在庫管理）
   // ★書き込みの失敗を【黙って捨てない】ための番人（2026-08-15 新設）
   //   きっかけ：存在しない列に書こうとして upsert がまるごと失敗していたのに、呼び出し側が
@@ -19453,6 +19487,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '📡 <b>データベースに繋がらない時は、画面の上に理由を出すようにしました</b>（本人「バグったか？」＝ダッシュボードが「読み込み中…」のまま）。ネット自体が切れている時と、データベース（Supabase）側が応えない時を分けて出し、繋がったら消えます。ネットが戻った時は自動で読み込み直します。',
       '🛑 <b>データベース（Supabase）が応えない間は、🤖の巡回と写真集めを休ませるようにしました</b>。20時ごろからデータベースが応答しなくなり（小さな読み込みも20秒で失敗）、叩き続けると回復の邪魔になるためです。巡回の前に小さな読み込みが8秒で返るかを見て、返らなければ20分休みます。当面、3台目の巡回も15分おきに戻しました。',
       '💾 <b>写真の控えが大きくなりすぎて保存が失敗していたのを直しました</b>。控え（5.9MB）を丸ごと書き直していたため、Supabase の時間切れで写真集めの半分が「保存に失敗」で終わり、30分ぶんの成果が消えていました。8つに分けて、変わった分だけ書くようにし、保存の時に代わりの写真を詰めます（10枚まで）。1機種の保存に失敗しても残りの機種は続けます。GASも分けた控えを読めるようにしました（本体v236・2台目v38・3台目v25）。',
       '🖼 <b>写真集めが4日で12回しか動いていなかった真因を直しました</b>（設計は10分ごと）。「同じブラウザの別タブが25分以内に集めていたら譲る」守りが、途中で消えた回（新しい版の自動読み直し）にも効いて次の25分を止めていました。集めている間は心拍を打ち、譲るのは心拍が3分以内の時だけに。あわせて写真集めの最中は自動読み直しを待つようにしました。',
