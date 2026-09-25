@@ -19755,6 +19755,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🌏 <b>母数の表を国ごとに見られるようにしました</b>（本人「これも国ごとで見られる必要がありますね」）。表の上の「出している国」で国を選ぶと、出している・空白・網羅率をその国の出品だけで数えます（すべて＝どこか1か国にでも出していれば「出している」）。あわせて「🏪中古」の列を外しました（本人「わざわざ中古って入れる必要ある？うちで出してる商品ほとんど中古だし」＝中身は母数の内訳の駿河屋の件数と同じでした）。',
       '↕️ <b>アクセスの商品の表を、見出しを押して並べ替え（もう一度押すと逆順）・絞り込みはボタンで選ぶ形にしました</b>（本人「昇順・降順で見れるように、プルダウンじゃなくて、その選択で選べるように」）。アカウントごとの表示に第二アカウント（gs_japan_select）も出します（アクセスはこのChromeでログインしていないので無く、注文・売上だけ）。',
       '👣 <b>アクセスのページに分析を足しました</b>（本人「グラフで見たい、色々フィルターも」「円・積み上げ・横棒・折れ線に切り替え」「7日・半月・1か月・3か月・半年・1年」「一般的な分析のカットも」「アカウントごとにも」）。期間・国／アカウント・指標（訪問者・PV・新規・既存・フォロワー増・注文・売上・注文率・1訪問あたりのページ数・客単価・滞在・直帰率）・グラフの種類・日／週／月を切り替えられます。前の同じ長さの期間との比較（▲▼%）と点線の重ね書き、7日移動平均、国ごと／アカウントごとの比較表、曜日ごとの平均、新規と既存の訪問者、商品ごとの閲覧・いいね・販売（アカウント・国・機種・商品名で絞り込み、👀見られているのに売れていない）を出します。アクセスはアカウント（店）ごとにも取り込むようにしました（取り込み userscript v1.1.0）。メニューのアイコンは事業計画と重なっていたので👣に変えました。',
       '📚 <b>母数を「版違い込み」で数えるようにしました</b>（本人「版違い（Best版・限定版・同梱版）も別に数える」）。駿河屋が別商品にしている【状態違い】（美品・箱説欠け・ケース欠など）は1つにまとめ、海外版・ダウンロード版・オンラインコードは外します。まず楽天のデータが無い古い機種から切り替え（ゲームキューブ 726→413、PS1 5,110→4,312 の見込み）。楽天が多い機種（Switch・3DS・PS4 など）は、楽天と駿河屋の突き合わせを直してから切り替えます。',
@@ -28760,7 +28761,38 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try { localStorage.setItem(TM_CACHE_KEY, JSON.stringify({ at: Date.now(), m: m })); } catch (_) {}
   }
   let _tmMatching = false;
-  async function tmMatchAll(master, own) {
+  /* ★2026-09-26 本人「これも国ごとで見られる必要がありますね」＝「出している」は国ごとに違う（PHに有ってBRに無い）。
+     国を選んだら、その国の明細だけで母数と突き合わせる。結果は国ごとに控える（lst.tmMatchCc[cc]・localStorage にも国ごと） */
+  function tmCurCc() { try { return lst.tmCc != null ? lst.tmCc : (localStorage.getItem('smdTmCc') || ''); } catch (_) { return ''; } }
+  function tmMatchOf(cc) {
+    if (!cc) return lst.tmMatch || {};
+    lst.tmMatchCc = lst.tmMatchCc || {};
+    if (!lst.tmMatchCc[cc]) { try { const j = JSON.parse(localStorage.getItem(TM_CACHE_KEY + '_' + cc) || 'null'); if (j && j.at && Date.now() - j.at < TM_CACHE_MS && j.m) lst.tmMatchCc[cc] = j.m; } catch (_) {} }
+    return lst.tmMatchCc[cc] || {};
+  }
+  async function tmMatchAll(master, own, cc) {
+    if (cc) {
+      if (_tmMatching) return;
+      const names = ((own.byCc || {})[cc]) || {};
+      if (!Object.keys(names).length) return;
+      const M = tmMatchOf(cc); lst.tmMatchCc[cc] = M;
+      const todo = Object.keys(master || {}).filter(h => M[h] == null);
+      if (!todo.length) return;
+      _tmMatching = true;
+      try {
+        for (const h of todo) {
+          const rows = await loadTitleRows(h); if (!rows) continue;
+          const lk = await loadTitleLink();
+          const mi = tmMineIndex(names[h] || [], lk);
+          let hit = 0; rows.forEach(r => { if (tmHas(r, mi.set, mi.blob, mi.idx)) hit++; });
+          M[h] = hit;
+          try { localStorage.setItem(TM_CACHE_KEY + '_' + cc, JSON.stringify({ at: Date.now(), m: M })); } catch (_) {}
+          if (lst.tab === 'titles' && document.getElementById('list-titles') && tmCurCc() === cc) renderTitleMaster();
+          await new Promise(r => setTimeout(r, 30));
+        }
+      } finally { _tmMatching = false; }
+      return;
+    }
     if (_tmMatching) return;
     // ★出品データが揃う前に計算すると全部0になり、その0を覚えてしまう（実際に起きた）。
     //   1件も無い時は計算しない＝次の描画でやり直す。
@@ -29546,8 +29578,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         : (kc[kd] || 0);
       // ★「出している」は**マスタと突き合わせた実数**を出す（綴り違いで二重に数えないため）。
       //   突合はハードごとに順に計算する（全部を一度に読むと重い）。計算前は生の数を薄字で出す。
-      const mt = (lst.tmMatch || {})[h];
-      const o = (kd === 'soft') ? ((mt != null) ? mt : (own.per[h] || 0)) : ownKindCount(h, kd);
+      const _tcc = tmCurCc();
+      const mt = tmMatchOf(_tcc)[h];
+      const o = (kd === 'soft') ? ((mt != null) ? mt : (_tcc ? ((((own.byCc || {})[_tcc] || {})[h] || new Set()).size) : (own.per[h] || 0))) : ownKindCount(h, kd);
       if (n) { tot += n; totOwn += Math.min(o, n); }
       const rate = n ? Math.round(o / n * 100) : null;
       const gap = n ? Math.max(0, n - o) : null;
@@ -29597,10 +29630,6 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         <td style="text-align:right;font-weight:700;width:44px">${rate == null ? '—' : rate + '%'}</td>
         <td style="width:190px;padding-left:0">${n ? `<div style="background:#eceff3;border-radius:6px;height:9px;overflow:hidden;width:180px"><div style="width:${Math.min(100, rate)}%;height:100%;background:${rate >= 50 ? '#1b7f3b' : (rate >= 20 ? '#1565c0' : '#90a4c4')}"></div></div>` : ''}</td>
          <td style="text-align:right;white-space:nowrap">${grow}</td>
-        <td class="tm-xcol" style="text-align:right;font-size:11px;white-space:nowrap">${(() => { const g = (lst.sgHave || {})[h];
-          return g && g.n ? `<span style="color:#c30d23;font-weight:700" title="${av('駿河屋で中古が流通している数（版違い込み）'
-              + (g.soft != null ? '\nソフト ' + g.soft + '／ソフト以外（本体・コントローラ・ケース等） ' + ((g.n || 0) - (g.soft || 0)) : ''))}">${Number(g.soft || g.n).toLocaleString()}${(g.soft != null && g.n > g.soft) ? `<span class="smd-dim" style="font-weight:400;font-size:9.5px"><br>＋ハード ${(g.n - g.soft).toLocaleString()}</span>` : ''}</span>`
-            : (SURUGA_CAT[h] ? `<a href="https://www.suruga-ya.jp/search?category=${SURUGA_CAT[h]}" target="_blank" rel="noopener" class="smd-dim" style="color:#c30d23;text-decoration:none">未取込</a>` : ''); })()}</td>
         <td class="tm-xcol" style="text-align:right;font-size:11px;white-space:nowrap">${(() => { const r2 = (lst.tmRef || {})[h];
           return r2 ? `<a href="${av(r2.src)}" target="_blank" rel="noopener" style="color:#1565c0;font-weight:700;text-decoration:none" title="${av(String(r2.note || '') + '\n出典: ' + r2.src)}">${Number(r2.n).toLocaleString()}</a>` : '<span class="smd-dim">—</span>'; })()}</td>
         <td class="smd-dim tm-xcol" style="font-size:10.5px;white-space:nowrap">${mm && mm.at ? String(mm.at).slice(0, 10) : '<span style="color:#c0392b">未取込</span>'}</td>
@@ -29643,8 +29672,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         <div id="tm-auto-box"></div>
         <style>.tm-tbl{border-collapse:collapse;font-size:13px}.tm-tbl th{font-size:11.5px;color:#5a6b8c;font-weight:700;padding:6px 14px;border-bottom:2px solid #e3ebf6;white-space:nowrap}.tm-tbl td{padding:7px 14px;border-bottom:1px solid #f0f3f8;vertical-align:middle;font-variant-numeric:tabular-nums}.tm-tbl tr.tm-row:hover td{background:#f7faff}.tm-tbl.tm-compact .tm-sub,.tm-tbl.tm-compact .tm-xcol{display:none}.tm-tbl .tm-sub{display:block;font-size:9.5px;font-weight:400;line-height:1.4}</style>
         <div style="margin:10px 0 4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="font-size:11.5px;color:#5a6b8c;cursor:pointer;user-select:none" title="母数の内訳（駿河屋＋楽天−重複）・JANで確定した数・駿河屋の中古の数・日本の発売本数・取込日。ふだんの判断には要らない補足なので既定では隠しています"><input type="checkbox" id="tm-xcols"${lst.tmDetail ? ' checked' : ''}> 内訳・補足の数字も出す</label><span class="smd-dim" style="font-size:11px">母数＝パッケージ版だけ（ダウンロード専用は数えていません）／行を押すと、出している・まだの作品が画像つきで開きます</span></div>
+        <div id="tm-ccbar" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin:6px 0 4px"><b style="font-size:11.5px;color:#5a6b8c;margin-right:4px" title="「出している」「空白」「網羅率」をどの国の出品で数えるか。すべて＝どこか1か国にでも出していれば出している">出している国</b>${[['', 'すべて（どこかに出している）']].concat((typeof REGIONS !== 'undefined' ? REGIONS : []).map(r => [r.cc, r.cc])).map(([c, l]) => `<button class="smd-btn tm-ccchip" data-cc="${c}" style="font-size:11px;padding:2px 9px;${tmCurCc() === c ? 'background:' + (c ? ((regionByCc(c) || {}).color || '#5b3fd6') : '#5b3fd6') + ';color:#fff;border-color:transparent' : ''}">${l}</button>`).join('')}</div>
         <div style="overflow-x:auto"><table class="smd-table tm-tbl${lst.tmDetail ? '' : ' tm-compact'}" style="font-size:13px">
-          <tr><th>ハード</th><th style="text-align:right" title="${(lst.tmTop || 'soft') === 'soft' ? 'ダウンロード版を除いた【物理ソフト】の数。駿河屋と楽天を足した数（重複は除く）と、日本の発売本数の、多い方を採っています' : '駿河屋で中古が流通しているこの区分の商品数。本体・周辺機器は作品マスタに載らないので、駿河屋が唯一の母数です'}">母数<span class="tm-sub" style="font-size:9px;font-weight:400;color:#c30d23">${(lst.tmTop || 'soft') === 'soft' ? '物理のみ' : esc(String((SG_KIND_JA[lst.tmTop] || '').replace(/^[^ぁ-ヶ一-鿿A-Za-z]/, '')))}</span></th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:left;min-width:230px" colspan="2">網羅率</th><th style="text-align:right" title="上＝直近7日に出した明細の数（出品ログ）。下＝7日前と比べた「出している」の増減と網羅率のポイント差（控えが7日ぶんたまってから）">📈7日の伸び</th><th class="tm-xcol" style="text-align:right;color:#c30d23" title="駿河屋で中古が流通している数。上段＝ソフト（版違い込み）／下段＝本体・コントローラ・ケース等">🏪中古</th><th class="tm-xcol" style="text-align:right;color:#1565c0" title="日本で発売されたパッケージ版の本数（外部の一次情報）。Wikipedia日本語版・任天堂IRの公表値。廉価版・版違いは含まないので、駿河屋の取扱数より少なく出ます">📖 発売本数<span style="font-size:9px;font-weight:400"><br>（出典あり）</span></th><th class="tm-xcol">取込日</th></tr>
+          <tr><th>ハード</th><th style="text-align:right" title="${(lst.tmTop || 'soft') === 'soft' ? 'ダウンロード版を除いた【物理ソフト】の数。駿河屋と楽天を足した数（重複は除く）と、日本の発売本数の、多い方を採っています' : '駿河屋で中古が流通しているこの区分の商品数。本体・周辺機器は作品マスタに載らないので、駿河屋が唯一の母数です'}">母数<span class="tm-sub" style="font-size:9px;font-weight:400;color:#c30d23">${(lst.tmTop || 'soft') === 'soft' ? '物理のみ' : esc(String((SG_KIND_JA[lst.tmTop] || '').replace(/^[^ぁ-ヶ一-鿿A-Za-z]/, '')))}</span></th><th style="text-align:right">出している</th><th style="text-align:right">空白</th><th style="text-align:left;min-width:230px" colspan="2">網羅率</th><th style="text-align:right" title="上＝直近7日に出した明細の数（出品ログ）。下＝7日前と比べた「出している」の増減と網羅率のポイント差（控えが7日ぶんたまってから）">📈7日の伸び</th><th class="tm-xcol" style="text-align:right;color:#1565c0" title="日本で発売されたパッケージ版の本数（外部の一次情報）。Wikipedia日本語版・任天堂IRの公表値。廉価版・版違いは含まないので、駿河屋の取扱数より少なく出ます">📖 発売本数<span style="font-size:9px;font-weight:400"><br>（出典あり）</span></th><th class="tm-xcol">取込日</th></tr>
           ${rows}
         </table></div>
       </div>
@@ -29666,7 +29696,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     //   タブが固まって遷移もできなくなる（2026-09-02 実際に発生）。
     if (!lst._janIdxOnce) { lst._janIdxOnce = true;
       loadJanIndex().then(() => { if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster(); }); }
-    tmMatchAll(m, own);
+    tmMatchAll(m, own, tmCurCc());
+    document.querySelectorAll('#tm-ccbar .tm-ccchip').forEach(b => b.addEventListener('click', () => { lst.tmCc = b.dataset.cc; try { localStorage.setItem('smdTmCc', lst.tmCc); } catch (_) {} renderTitleMaster(); }));
     // 📥 母数のJANをこちらの明細に入れる（無料・接続枠ゼロ）
     { const jf = document.getElementById('tm-janfill');
       // ★1つのボタンに何度も付けない。描き直すたびに足すと【1回押しただけで何本も走り】、
@@ -29738,7 +29769,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           }
           // ★「出している」の突合結果は6時間おぼえている。ここで捨てないと、
           //   数え直しても【古い数字が出たまま】になる（Codexの指摘・2026-09-04）。
-          try { lst.tmMatch = {}; localStorage.removeItem(TM_CACHE_KEY); } catch (_) {}
+          try { lst.tmMatch = {}; lst.tmMatchCc = {}; localStorage.removeItem(TM_CACHE_KEY); Object.keys(localStorage).filter(k2 => k2.indexOf(TM_CACHE_KEY + '_') === 0).forEach(k2 => localStorage.removeItem(k2)); } catch (_) {}
           alert('🧮 母数を数え直しました（' + (cand.length - _skip.length) + 'ハード）。'
             + (_skip.length ? '\n\n⚠️ 読めなかったので飛ばしたハード：' + _skip.join('・') + '\n（この分は前の数字のままです）' : ''));
         } catch (e) {
@@ -29857,7 +29888,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const r = await gasCall({ action: 'fetch_titles', token: settings.writeToken }, 600000);
         if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
         alert('📚 取り込みました\n\n' + (r.got || []).map(g => g.error ? ('・' + g.hw + ' … ✗ ' + g.error) : ('・' + (g.name || g.hw) + ' … ' + g.n + '件（日本語' + g.ja + '／英語' + g.en + '）')).join('\n'));
-        titleMaster = null; lst.tmMatch = {}; try { localStorage.removeItem(TM_CACHE_KEY); } catch (_) {} renderTitleMaster();   // マスタが入れ替わったら突合もやり直す
+        titleMaster = null; lst.tmMatch = {}; lst.tmMatchCc = {}; try { localStorage.removeItem(TM_CACHE_KEY); Object.keys(localStorage).filter(k2 => k2.indexOf(TM_CACHE_KEY + '_') === 0).forEach(k2 => localStorage.removeItem(k2)); } catch (_) {} renderTitleMaster();   // マスタが入れ替わったら突合もやり直す
       } catch (e) { alert('取り込みに失敗: ' + apiErrJa((e && e.message) || e)); }
       b.disabled = false; b.textContent = '⬇ マスタを取り込む';
     });
@@ -32128,7 +32159,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     box.querySelectorAll('.tm-link').forEach(b3 => b3.addEventListener('click', async () => {
       b3.disabled = true; b3.textContent = '…';
       await saveTitleLink(b3.dataset.from, b3.dataset.to);
-      lst.tmMatch = {}; try { localStorage.removeItem(TM_CACHE_KEY); } catch (_) {}   // 数え直す
+      lst.tmMatch = {}; lst.tmMatchCc = {}; try { localStorage.removeItem(TM_CACHE_KEY); Object.keys(localStorage).filter(k2 => k2.indexOf(TM_CACHE_KEY + '_') === 0).forEach(k2 => localStorage.removeItem(k2)); } catch (_) {}   // 数え直す
       toast('🔗 対応させました（全ハード・全国で効きます）');
       renderTitleDetail(hw, own); renderTitleMaster();
     }));
