@@ -19418,7 +19418,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
-      '🤖 <b>自動出品の止まり方を直し、3台目の巡回を1時間8回にしました</b>（本人「Chrome落ちてたので、出品巻き返して」）。朝にChromeが落ちていて、その間に2台目・3台目とも「候補が全部出品済み（対象なし）」だけの0件回をエラーに数えて自動ブレーキが掛かっていました。0件でも本当の失敗（失敗/エラー/作れません/複製）が無ければエラーに数えないようにしました（GAS 本体v231・2台目v33・3台目v20）。3台目は接続枠に余裕があるので約7.5分おきに、2台目は15分おきのままです。',
+      '🤖 <b>自動出品の止まり方を直し、3台目の巡回を1時間8回にしました</b>（本人「Chrome落ちてたので、出品巻き返して」）。朝にChromeが落ちていて、その間に2台目・3台目とも「候補が全部出品済み（対象なし）」だけの0件回をエラーに数えて自動ブレーキが掛かっていました。0件でも本当の失敗（失敗/エラー/作れません/複製）が無ければエラーに数えないようにしました（GAS 本体v231・2台目v33・3台目v20）。3台目は接続枠に余裕があるので約7.5分おきに、2台目は15分おきのままです。あわせて、巡回の起動を「分が一致したら」から「前回から○分たったら」に変えました（ポータルのタブが裏にあると時計が1分単位にまとめて進み、09:15・09:17 の回が丸ごと抜けていました）。',
       '📈 <b>「アクセス（各国）」のページを足しました</b>（本人「各国のアクセスデータの変遷を見れるように。Shopee は深夜12時を回ると次の日の10時まで見れなくなる」）。各国の Seller Center で Business Insights → Traffic を開いたままにしておくと、userscript が日別の訪問者・ページビュー・新規/既存・フォロワー・滞在・直帰率を毎日ここへ送ります（30日ぶんを上書き）。国×日の表で、深夜でも前日までを見られます。',
       '🤖 <b>自動出品の巡回を、担当PCのポータルから15分ごとに起動するようにしました</b>（本人「アカウントは増やせない」「いい感じにやって」）。Apps Script の時間トリガーには1日の実行時間の枠（gmail 90分・Workspace 6時間）があり、2台目は上限すれすれ・3台目は昼過ぎに止まる計算でした。web アプリの呼び出しはこの枠を使いません。時間トリガーは保険として60分ごとに残します。',
       '🇻🇳 <b>VN の価格上限（1,000,000 VND 未満）を超える作品は出品しないようにしました</b>（本人「100万ベトナムドンを超えるやつは、そもそも出品すらしないでほしい」）。これまでは 999,000 VND・在庫0 で置いていました。空きマスの理由に「VNの上限を超える値段」が出ます。',
@@ -30018,20 +30018,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
   async function baWebTick() {
     if (typeof pcIsOwner !== 'function' || !pcIsOwner()) return;
-    const now = new Date(); const m = now.getMinutes();
-    /* ★2026-09-25 本人「出品巻き返して」（Chrome落ちで両方止まっていた）。3台目は接続枠に余裕がある（09:06 JST で 4,919/20,000）ので 1時間8回（約7.5分おき）に。
-       2台目は枠が 67% で GAS 側が自分で1回の作品数を絞るので 15分おきのまま。連続起動の間隔（guard）は枠ごとに持つ（1回の巡回は約4分・6分制限の前に必ず抜ける） */
-    const slots = [{ key: 'boshuUrl', at: [0, 15, 30, 45], name: '2台目', guard: 10 }, { key: 'boshuUrl2', at: [2, 10, 17, 25, 32, 40, 47, 55], name: '3台目', guard: 6 }];
+    /* ★2026-09-25 本人「出品巻き返して」。3台目は接続枠に余裕がある（09:06 JST で 4,919/20,000）ので約7.5分おき、2台目は15分おき（枠67%で GAS 側が1回の作品数を自分で絞る）。
+       ★「分が一致したら起動」はやめた：裏タブでは setInterval が1分単位にまとめて鳴るので分を跳ばし、09:15/09:17 の回が丸ごと抜けた（実測）。
+       前回の起動からの経過時間で決める（裏タブで遅れても次に鳴った時に必ず起動する）。2台目と3台目は同時に叩かない（相手が90秒以内に起動していたら1分待つ） */
+    const slots = [{ key: 'boshuUrl', every: 15, name: '2台目' }, { key: 'boshuUrl2', every: 7.5, name: '3台目' }];
+    const nowMs = Date.now();
     for (const sl of slots) {
       const url = settings[sl.key]; if (!url || !settings.writeToken) continue;
-      if (sl.at.indexOf(m) < 0) continue;
-      const stamp = 'smdBaWebTick_' + sl.key; const last = Number(localStorage.getItem(stamp) || 0); if (Date.now() - last < (sl.guard || 10) * 60000) continue;
+      const stamp = 'smdBaWebTick_' + sl.key; const last = Number(localStorage.getItem(stamp) || 0);
+      if (nowMs - last < sl.every * 60000 - 20000) continue;
+      const other = slots.find(o => o !== sl); const ol = Number(localStorage.getItem('smdBaWebTick_' + other.key) || 0); if (nowMs - ol < 90000) continue;
       try { localStorage.setItem(stamp, String(Date.now())); } catch (_) {}
       try {
         const r = await fetch(url + '?action=boshu_auto_tick_bg&token=' + encodeURIComponent(settings.writeToken) + '&callback=cb&cb=' + Date.now());
         const txt = await r.text(); const ok = /"ok":true/.test(txt);
         try { logAct('出品', '🤖巡回（ポータルから）', sl.name, (ok ? 'OK ' : 'NG ') + txt.replace(/^cb\(/, '').slice(0, 80)); } catch (_) {}
       } catch (e) { try { logAct('出品', '🤖巡回（ポータルから）', sl.name, '失敗 ' + String(e).slice(0, 80)); } catch (_) {} }
+      break;   /* 1回の目覚めで叩くのは1台だけ（同時に走らせない） */
     }
   }
   async function renderBoshuAuto(draft) {
