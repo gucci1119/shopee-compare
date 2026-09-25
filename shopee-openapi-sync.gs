@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-2025';
+var SRC_VER = '20260925-2120';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5659,7 +5659,9 @@ var BA_KV_ERR = false;
    → ポータルは鍵のハッシュで8つ（boshu_auto_pre_s0〜s7）に分けて、変わった分だけ書く。
    GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
 var BA_PRE_SHARDS = 8;
-var BA_CTX_ROWS = null, BA_CTX_SOLD = null;   /* ★2026-09-25 baLoadCtx_ の全件読みを1実行1回にする控え（GASは実行ごとに初期化される） */
+var BA_CTX_ROWS = null, BA_CTX_SOLD = null;
+/* ★2026-09-25 大きな控え（数百KB）を【変わった時だけ】書くための署名。長さや件数だけだと同じ長さの書き換えを見落とすので中身の MD5 */
+function baSig_(v) { try { return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(v || {}), Utilities.Charset.UTF_8)); } catch (e) { return String(Math.random()); } }   /* ★2026-09-25 baLoadCtx_ の全件読みを1実行1回にする控え（GASは実行ごとに初期化される） */
 function baPreShardKeys_() { var a = []; for (var i = 0; i < BA_PRE_SHARDS; i++) a.push('boshu_auto_pre_s' + i); return a; }
 function baPreMerge_(byKey) {
   var sk = baPreShardKeys_(), have = sk.filter(function (k) { return byKey[k] != null; });
@@ -6358,6 +6360,8 @@ function boshuAutoTick(manual) {
     try { baRephoto_(st, cfg, judged, pre, used, t0, hw); } catch (eRp) { baLog_(st, '写真の見直しに失敗: ' + String(eRp).slice(0, 100)); }
     var judgeCap = dailyMax * 6;   /* v193：先回りの判定ぶんも同じ数え方に入るので広げる（×3 のままだと、まとめて判定した日は本番が「今日は上限」で止まる） */
     var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {};
+    /* ★2026-09-25 Disk IO：判定・英題・同一作品・使った写真（計約1.25MB）を毎回書き直していた。読んだ直後の署名を控え、変わった時だけ書く */
+    var _tkSig0 = { J: baSig_(baKv_(BA_JUDGED)), E: baSig_(enCache), S: baSig_(sameCache), I: baSig_(used), L: baSig_(ledger) };
     /* ★2026-09-24 本人「めっちゃコスト無駄になってた」：控えが4,000件を超えると {} に捨てていた（実測 4,156件）＝以後は毎回ゼロから
        同一作品判定を聞き直し、作品1つに16〜38回。捨てずに【古い方から】削って 8,000 件まで持つ（挿入順＝古い順） */
     { var _sk = Object.keys(sameCache); if (_sk.length > 8000) { var _trim = {}; _sk.slice(_sk.length - 6000).forEach(function (x) { _trim[x] = sameCache[x]; }); sameCache = _trim; } }   // ★v182→2026-09-24
@@ -6467,8 +6471,8 @@ function boshuAutoTick(manual) {
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
     /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
     var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
-    try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 3500)); } catch (eJ) {}
-    try { baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 12000)); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
+    try { if (baSig_(judged) !== _tkSig0.J) baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 3500)); } catch (eJ) {}
+    try { if (baSig_(enCache) !== _tkSig0.E) baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); if (baSig_(sameCache) !== _tkSig0.S) baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 12000)); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
     if (preRejChanged) { try { preRej = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 160)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
@@ -6489,8 +6493,8 @@ function boshuAutoTick(manual) {
     // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
     try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 160)); }
     // 済み台帳・使った写真・当日カウント
-    baKvSet_('boshu_auto_done_' + hw, ledger);
-    baKvSet_(BA_IMGS, baKvMerge_(BA_IMGS, used, _fr, 0));   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
+    if (baSig_(ledger) !== _tkSig0.L) baKvSet_('boshu_auto_done_' + hw, ledger);
+    if (baSig_(used) !== _tkSig0.I) baKvSet_(BA_IMGS, baKvMerge_(BA_IMGS, used, _fr, 0));   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
     st.today.n += picks.length; st.today.added += out.added;
     /* ★v184 失敗の数え方：候補があったのに1件も入らなかった回を「失敗」に数える（baAddBatch_ は例外を握って note で返すので外の catch に来ない・Codex指摘）。1件でも入れば0に戻す */
     /* ★2026-09-25 本人「出品巻き返して」＝2台とも「候補が1件も入らなかった」が3回続いてブレーキ（実測：全部「対象なし」＝その作品はどの国にも
@@ -6799,7 +6803,10 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   var stP = baKv_(BA_ST) || {}; var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   if (!stP.today || stP.today.d !== todayJ) stP.today = { d: todayJ, n: 0, added: 0 };   // ★tick と同じ日付で数える（Codex指摘）
   stP.aiTextCap = (Number(cfg.dailyMax) || 100) * 4;   // tick と同じ上限（プレビューだけ多く使わない・Codex指摘）
-  var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}, pvJudged = 0;   // ★v182
+  var enCache = baKv_(BA_EN) || {}, sameCache = baKv_(BA_SAME) || {}, pvJudged = 0;
+  /* ★2026-09-25 Supabase の Disk IO 警告。候補出しは写真集めが1回に8機種呼ぶのに、終わるたびに状態（約400KB）・英題（約230KB）・同一作品判定（約540KB）を
+     変化が無くても書き直していた＝写真集め1回で約10MB。始めの形を控えて【変わった時だけ】書く */
+  var _pvSig0 = { en: baSig_(enCache), same: baSig_(sameCache), ai: (stP.today && stP.today.aiText) || 0 };   // ★v182
   try { stP.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
   var candList = ctx.cand;
   var preRejP = baKv_('boshu_auto_prerej') || {};
@@ -6885,8 +6892,10 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   });
   var st = baKv_(BA_ST) || {}; if (!needPhoto) st.preview = { hw: hw, at: new Date().toISOString(), total: ctx.cand.length, rows: rows, held: held, blocked: blocked, noYahoo: !!noYahoo }; st.aiKey = stP.aiKey;
   /* 写真集め用（needPhoto）の一覧は🔜の表示を上書きしない */
-  st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today; try { baKvSet_(BA_ST, st); } catch (e) {}
-  try { baKvSet_(BA_EN, enCache); baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
+  st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today;
+  var _pvStDirty = !needPhoto || ((stP.today && stP.today.aiText) || 0) !== _pvSig0.ai;   /* 🔜の表示を更新する時・AIを使った時だけ */
+  if (_pvStDirty) { try { baKvSet_(BA_ST, st); } catch (e) {} }
+  try { if (baSig_(enCache) !== _pvSig0.en) baKvSet_(BA_EN, enCache); if (baSig_(sameCache) !== _pvSig0.same) baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
   ufPersist_();
   return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, held: held, blocked: blocked, aiKey: !!stP.aiKey };
 }
