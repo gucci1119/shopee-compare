@@ -10286,13 +10286,27 @@
     if (url.indexOf(SB_URL) !== 0) return _smdRawFetch(u, o);
     try {
       const r = await _smdRawFetch(u, o);
-      if (r.status >= 500) sbDownShow('server'); else sbDownClear();
+      if (r.status >= 500) sbFailNote(url, r); else sbFailOk();
       return r;
     } catch (e) {
-      if (!(e && e.name === 'AbortError')) sbDownShow(navigator.onLine === false ? 'offline' : 'server');
+      if (!(e && e.name === 'AbortError')) sbFailNote(url, null, e);
       throw e;
     }
   };
+  /* ★2026-09-25 22:50 本人「おい、対策したんじゃないの？」＝赤い帯が出たが、データベースはその前後（22:48・22:52）も書き込みを受け付けていた。
+     1回の失敗（重い1本の時間切れ・一瞬の 5xx）で「応答していません」と出していたのが言い過ぎ。
+     → 失敗してから15秒のあいだに1本も成功しなかった時だけ帯を出す。何が失敗したか（どの表・状態・エラーコード）を smdSbFail に20件残す＝次は原因をすぐ言える */
+  let _sbFailPend = 0, _sbOkAt = 0;
+  function sbFailNote(url, r, e) {
+    const at = Date.now();
+    const rec = { at: new Date(at).toISOString(), path: String(url).replace(SB_URL, '').split('?')[0].slice(0, 60), st: r ? r.status : 0, err: e ? String(e.message || e).slice(0, 80) : '', online: navigator.onLine !== false };
+    const save = () => { try { const a = JSON.parse(localStorage.getItem('smdSbFail') || '[]'); a.unshift(rec); localStorage.setItem('smdSbFail', JSON.stringify(a.slice(0, 20))); } catch (_) {} };
+    if (r) { try { r.clone().text().then(t => { rec.code = (String(t).match(/"code"\s*:\s*"([^"]+)"/) || [])[1] || String(t).slice(0, 60); save(); }).catch(save); } catch (_) { save(); } } else save();
+    if (navigator.onLine === false) { sbDownShow('offline'); return; }
+    if (_sbFailPend) return;
+    _sbFailPend = setTimeout(() => { _sbFailPend = 0; if (_sbOkAt < at) sbDownShow('server'); }, 15000);
+  }
+  function sbFailOk() { _sbOkAt = Date.now(); if (_sbFailPend) { clearTimeout(_sbFailPend); _sbFailPend = 0; } sbDownClear(); }
   /* ネットが戻った時も、写真集めなどの作業中は読み直さない（Wi-Fi が一瞬切れただけで30分の写真集めを止めていた・2026-09-25 21:28） */
   window.addEventListener('online', () => { try { if (_sbDownSince && !(typeof appBusy === 'function' && appBusy())) location.reload(); } catch (_) {} });
   const INV_SHEET_ID = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE'; // InventoryItem（QR在庫管理）
@@ -19508,6 +19522,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '🖼 <b>出品一覧で手で差し替えた明細の写真を、自動の写真の見直しが上書きしないようにしました</b>（本人「自動出品中に白抜きに差し替えて保存すると、そっちが優先される？」）。見直しは足した時に記録した写真を見ていて、今載っている写真を見ていませんでした。差し替える直前に今の写真を確かめ、記録と違えば「人が差し替えた」として触りません。',
+      '⚠️ <b>「データベースが応答していません」の帯を、1回の失敗では出さないようにしました</b>（22:50 に出たが、その前後もデータベースは書き込みを受け付けていた）。失敗してから15秒間1本も成功しなかった時だけ出します。どの通信が失敗したかは端末に20件残し、次は原因をすぐ特定できるようにしました。',
       '🖼 <b>イメージ画像のような写真を落とすようにしました</b>（本人「イメージ画像になっている」SPY×FAMILY おでけけエディション）。限定版の外箱を周りを切り落として画面いっぱいに撮った写真が「実物の箱」として判定を通っていました。写真のうち背景（机・床・布・手）が写っている割合をAIに答えさせ、5%未満なら宣材扱いで落とします（GASとポータルの両方）。該当の6か国の明細は、机の上で撮った実物の写真に差し替え済みです。',
       '🖼 <b>写真集めが途中で止まる残りの穴を塞ぎました</b>。「ネットが戻ったら読み直す」と「ブリッジが応えない時に裏で読み直す」の2つが、作業中かどうかを見ずに画面を読み直していて、Wi-Fi が一瞬切れただけで30分の写真集めが途中で終わっていました（21:28）。どちらも作業中は待つようにしました。',
       '🤖 <b>3台目の巡回を7.5分おきに戻しました</b>。データベースが止まった間は15分おきに落としていましたが、性能の段階を上げ、書き込みの無駄も止めたので元のペースに戻します。データベースが応えない時に20分休む仕組みはそのまま残します。',

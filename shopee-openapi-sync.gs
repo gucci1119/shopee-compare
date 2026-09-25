@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-2230';
+var SRC_VER = '20260925-2310';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2045,17 +2045,25 @@ function setVariationImagesBulk_(shopId, itemId, items, jobKey) {
   var j3 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j3.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
-  var tier = tiers[0], map = {}, miss = [];
-  items.forEach(function (x, i3) { if (ids[i3]) map[x.option] = ids[i3]; else miss.push(x.option); });
+  var tier = tiers[0], map = {}, miss = [], expect = {}, changed = [];
+  items.forEach(function (x, i3) { if (ids[i3]) map[x.option] = ids[i3]; else miss.push(x.option); if (x.expect) expect[x.option] = String(x.expect); });
   var okN = 0;
+  /* ★2026-09-25 本人「自動出品中に、出品一覧から画像の白抜き差し替えをして保存すると、そっちが優先される？」
+     自動の写真の見直し（baRephoto_）は【足した時に記録した画像】を判定していて、いま載っている画像を見ていなかった＝人が差し替えた画像を上から戻せた。
+     expect（差し替え前にあるはずの image_id）が渡されたら、いまの画像がそれと違う明細は【人が変えた】とみなして触らない */
   var optObjs = (tier.option_list || []).map(function (o) {
-    if (map[o.option]) { okN++; return tierOpt_(o, null, map[o.option]); }
+    if (map[o.option]) {
+      var curId = o.image && (o.image.image_id || (o.image.image_id_list || [])[0]);
+      if (expect[o.option] && String(curId || '') !== expect[o.option]) { changed.push(o.option); return tierOpt_(o); }
+      okN++; return tierOpt_(o, null, map[o.option]);
+    }
     return tierOpt_(o);
   });
+  if (!okN && changed.length) return { ok: true, applied: 0, total: items.length, failed: 0, changed: changed.slice(0, 10), miss: miss.slice(0, 10) };
   if (!okN) throw new Error('差し替えられる画像がありませんでした（明細名が一致しないか、画像の取得に失敗）');
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
-  return { ok: true, applied: okN, total: items.length, failed: items.length - okN, miss: miss.slice(0, 10) };
+  return { ok: true, applied: okN, total: items.length, failed: items.length - okN - changed.length, changed: changed.slice(0, 10), miss: miss.slice(0, 10) };
 }
 // ★明細画像をまとめてZIP化→Driveに置いて公開URLを返す（ポータルの「⬇️一括ダウンロード」用）
 //   ファイル名は 001__明細名.jpg（番号＝Shopeeの明細表示順）。戻すときにこの番号で紐付ける。
@@ -5982,7 +5990,8 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
       if (!jc.judged) break;
       if (!jc.ok) continue;
       try {
-        var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu }]);
+        var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu, expect: a.img }]);
+        if (r && !r.applied && r.changed && r.changed.length) { rp.items[id] = { s: 'manual', v: BA_RULE_VER, at: new Date().toISOString(), cc: a.cc }; baLog_(st, '📷 人が差し替えた写真なので触らない: ' + a.en); done = true; break; }
         if (r && r.applied) { used[cuKey] = a.key; try { baKvSet_(BA_IMGS, used); } catch (eU) {} rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
       } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 160)); rp.items[id] = { s: 'error', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
     }
