@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-1140';
+var SRC_VER = '20260925-1830';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5655,16 +5655,32 @@ var BA_FAM_TICK = 0;   /* ★2026-09-23 この実行で作った新しいカタ�
    既定の 'main' と読めて**本体が勝手に動き、2台目が保存した状態を上書きして消す**。
    [[catch-empty-is-not-absence]]：読めなかったは「無い」ではない。 */
 var BA_KV_ERR = false;
+/* ★2026-09-25 写真の控え（boshu_auto_pre）は 5.9MB まで育ち、ポータルの保存が Supabase の時間切れ（57014）で半分落ちていた。
+   → ポータルは鍵のハッシュで8つ（boshu_auto_pre_s0〜s7）に分けて、変わった分だけ書く。
+   GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
+var BA_PRE_SHARDS = 8;
+function baPreShardKeys_() { var a = []; for (var i = 0; i < BA_PRE_SHARDS; i++) a.push('boshu_auto_pre_s' + i); return a; }
+function baPreMerge_(byKey) {
+  var sk = baPreShardKeys_(), have = sk.filter(function (k) { return byKey[k] != null; });
+  if (have.length < BA_PRE_SHARDS) return byKey['boshu_auto_pre'] || null;
+  var out = {}; sk.forEach(function (k) { var v = byKey[k] || {}; Object.keys(v).forEach(function (x) { out[x] = v[x]; }); });
+  return out;
+}
 function baKvPrefetch_(keys) {
   try {
-    var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')');
+    var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0; if (wantPre) q = q.concat(baPreShardKeys_());
+    var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')');
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
-    (r || []).forEach(function (x) { BA_KV_CACHE[x.k] = x.v; });
+    var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
+    if (wantPre) BA_KV_CACHE['boshu_auto_pre'] = baPreMerge_(byKey);
     BA_KV_ERR = false;
   } catch (e) { BA_KV_CACHE = null; BA_KV_ERR = true; }
 }
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
+  if (k === 'boshu_auto_pre') {
+    try { var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; return vp; } catch (eP) { BA_KV_ERR = true; return null; }
+  }
   try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { BA_KV_ERR = true; return null; }
 }
 function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
