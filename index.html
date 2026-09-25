@@ -14114,10 +14114,11 @@
     ]);
     const paid = new Map(); (inc || []).forEach(x => paid.set(x.cc + ':' + x.sn, Number(x.buyer_paid) || 0));
     const O = {};   // O[cc][ymd] = {ord, gmv}／O['S:'+shop_id][ymd] も同じ形（アカウントごと）
+    const shopCc = {};
     (ords || []).forEach(o => { if (o.tab === 600 || !o.order_date) return; const y = String(o.order_date).slice(0, 10); const rg = regionByCc(o.cc); const rate = (typeof fxRate === 'function' ? fxRate(o.cc, y) : 0) || (rg ? rg.rateJpy : 0);
       const amt = Number(o.total) > 0 ? Number(o.total) : (paid.get(o.cc + ':' + o.sn) || 0); const c = (O[o.cc] = O[o.cc] || {}); const d = (c[y] = c[y] || { ord: 0, gmv: 0 }); d.ord++; d.gmv += amt * rate;
-      if (o.shop_id) { const cs = (O['S:' + o.shop_id] = O['S:' + o.shop_id] || {}); const ds = (cs[y] = cs[y] || { ord: 0, gmv: 0 }); ds.ord++; ds.gmv += amt * rate; } });
-    TA._d = { kv, O, ordOk: ords !== null };
+      if (o.shop_id) { shopCc[String(o.shop_id)] = o.cc; const cs = (O['S:' + o.shop_id] = O['S:' + o.shop_id] || {}); const ds = (cs[y] = cs[y] || { ord: 0, gmv: 0 }); ds.ord++; ds.gmv += amt * rate; } });
+    TA._d = { kv, O, shopCc, ordOk: ords !== null };
   }
   // 国×日の生の値 → 期間・粒度でまとめる。比率の指標は分子・分母を足してから割る
   function taAgg(cc, days, gran) {
@@ -14151,10 +14152,12 @@
     if (!TA.ccs || !TA.ccs.length) TA.ccs = allCc.slice();
     /* ★2026-09-26 本人「アカウントごとに見れるようにもしておいて」。アカウント＝店（shop_id）。アクセスは取り込みが店を送るようになった日から（shopee-insights v1.1.0） */
     const byShop = (kv && kv.byShop) || {};
-    const shopIds = Object.keys(byShop).sort((a, b) => (allCc.indexOf(byShop[a].cc) - allCc.indexOf(byShop[b].cc)) || String(byShop[a].name).localeCompare(String(byShop[b].name)));
-    const shopLabel = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return (byShop[id] && byShop[id].cc ? byShop[id].cc + ' ' : '') + (lb || (byShop[id] && byShop[id].name) || ('店 ' + id)); };
+    /* 店の一覧は【アクセスが届いている店】＋【注文がある店】（第二アカウント gs_japan_select はこの Chrome でログインしていないのでアクセスは無いが、注文・売上は出せる） */
+    const shopCcOf = {}; Object.keys(byShop).forEach(id => { shopCcOf[id] = byShop[id].cc; }); Object.keys((TA._d && TA._d.shopCc) || {}).forEach(id => { if (!shopCcOf[id]) shopCcOf[id] = TA._d.shopCc[id]; });
+    const shopIds = Object.keys(shopCcOf).sort((a, b) => (allCc.indexOf(shopCcOf[a]) - allCc.indexOf(shopCcOf[b])) || String((byShop[a] || {}).name || a).localeCompare(String((byShop[b] || {}).name || b)));
+    const shopLabel = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return (shopCcOf[id] ? shopCcOf[id] + ' ' : '') + (lb || (byShop[id] && byShop[id].name) || ('店 ' + id)) + (byShop[id] ? '' : '（注文のみ）'); };
     if (!TA.shops || !TA.shops.length) TA.shops = shopIds.slice();
-    const ents = TA.dim === 'acct' ? TA.shops.filter(id => byShop[id]).map(id => 'S:' + id) : TA.ccs.slice();
+    const ents = TA.dim === 'acct' ? TA.shops.filter(id => shopCcOf[id]).map(id => 'S:' + id) : TA.ccs.slice();
     const entLabel = (e) => String(e).indexOf('S:') === 0 ? shopLabel(e.slice(2)) : e;
     const shopCols = ['#2b6cb0', '#7b52c4', '#1e8e3e', '#e8770a', '#c0392b', '#0891b2', '#b45309', '#db2777', '#4d7c0f', '#6b7280', '#0f766e', '#9333ea', '#be123c', '#1d4ed8'];
     const entCol = (e) => String(e).indexOf('S:') === 0 ? shopCols[Math.max(0, shopIds.indexOf(e.slice(2))) % shopCols.length] : ccCol(e);
@@ -14175,7 +14178,7 @@
           <span style="width:12px"></span><b style="font-size:12px">まとめ</b>${[['day', '日'], ['week', '週'], ['month', '月']].map(([g, l]) => chip('gran', g, l, TA.gran === g)).join('')}</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">単位</b>${chip('dim', 'cc', '🌏 国ごと', TA.dim !== 'acct')}${chip('dim', 'acct', '🏪 アカウントごと', TA.dim === 'acct', 'アカウント（店）ごと。アクセスは取り込みが店を送るようになった日から')}</div>
         ${TA.dim === 'acct'
-          ? `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">店</b>${shopIds.length ? chip('shopall', '', 'すべて', TA.shops.length === shopIds.length) + shopIds.map(id => `<button class="smd-btn ta-chip" data-g="shop" data-v="${esc(id)}" style="font-size:11px;padding:3px 9px;${TA.shops.indexOf(id) >= 0 ? 'background:' + entCol('S:' + id) + ';color:#fff;border-color:' + entCol('S:' + id) : ''}">${esc(shopLabel(id))}</button>`).join('') : '<span class="smd-dim" style="font-size:11.5px">まだ店ごとのアクセスが届いていません（取り込みの userscript を v1.1.0 にすると、翌日から店ごとに入ります）</span>'}</div>`
+          ? `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">店</b>${shopIds.length ? chip('shopall', '', 'すべて', TA.shops.length === shopIds.length) + shopIds.map(id => `<button class="smd-btn ta-chip" data-g="shop" data-v="${esc(id)}" style="font-size:11px;padding:3px 9px;${TA.shops.indexOf(id) >= 0 ? 'background:' + entCol('S:' + id) + ';color:#fff;border-color:' + entCol('S:' + id) : ''}">${esc(shopLabel(id))}</button>`).join('') : '<span class="smd-dim" style="font-size:11.5px">店がまだありません</span>'}</div>`
           : `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">国</b>${chip('ccall', '', 'すべて', TA.ccs.length === allCc.length)}${allCc.map(cc => `<button class="smd-btn ta-chip" data-g="cc" data-v="${cc}" style="font-size:11px;padding:3px 9px;${TA.ccs.indexOf(cc) >= 0 ? 'background:' + ccCol(cc) + ';color:#fff;border-color:' + ccCol(cc) : ''}">${cc}</button>`).join('')}</div>`}
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">指標</b>${TA_METRICS.map(([m, l]) => chip('metric', m, l, TA.metric === m)).join('')}</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">グラフ</b>${[['line', '📈 折れ線'], ['stack', '📊 積み上げ棒'], ['area', '⛰ 積み上げ面'], ['hbar', '▭ 横棒（国の合計）'], ['pie', '◔ 円（国の構成）']].map(([c, l]) => chip('chart', c, l, TA.chart === c)).join('')}
@@ -14263,27 +14266,39 @@
     const q = (TA.pQ || '').toLowerCase();
     let L = TA._prod.filter(p => (!TA.pCc || p.cc === TA.pCc) && (!TA.pShop || p.shop === TA.pShop) && (!TA.pHw || p.hw === TA.pHw) && (!q || p.name.toLowerCase().indexOf(q) >= 0));
     if (TA.pZero) L = L.filter(p => (p.views || 0) >= 20 && !(p.dSale > 0));
-    const key = { views: p => p.views || 0, dLikes: p => p.dLikes || 0, dSale: p => p.dSale || 0, likes: p => p.likes || 0, sale: p => p.sale || 0, rate: p => (p.views ? (p.dSale || 0) / p.views : 0) }[TA.pSort] || (p => p.views || 0);
-    L.sort((a, b) => key(b) - key(a));
-    const sel = (id, opts, val) => `<select id="${id}" style="font-size:11.5px;padding:2px 4px">${opts.map(([v, l]) => `<option value="${esc(v)}"${String(val) === String(v) ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-    host.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
-      ${sel('ta-pcc', [['', '国：すべて']].concat((REGIONS || []).map(r => [r.cc, r.cc])), TA.pCc)}
-      ${sel('ta-pshop', [['', 'アカウント：すべて']].concat([...new Set(TA._prod.map(p => p.shop).filter(Boolean))].map(id => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return [id, lb || ('店 ' + id)]; })), TA.pShop || '')}
-      ${sel('ta-phw', [['', '機種：すべて']].concat(hws.map(h => [h, (typeof TITLE_HW_JA !== 'undefined' && TITLE_HW_JA[h]) || h])), TA.pHw)}
-      ${sel('ta-psort', [['views', '閲覧が多い順'], ['dLikes', 'いいねの増えが多い順'], ['dSale', '販売の増えが多い順'], ['likes', 'いいね（累計）'], ['sale', '販売（累計）'], ['rate', '閲覧あたりの販売が多い順']], TA.pSort)}
-      <input id="ta-pq" placeholder="商品名で絞り込み" value="${esc(TA.pQ || '')}" style="font-size:11.5px;padding:2px 6px;width:180px">
-      <label style="font-size:11.5px;cursor:pointer"><input type="checkbox" id="ta-pzero" ${TA.pZero ? 'checked' : ''}> 👀見られているのに売れていない（閲覧20以上・この期間の販売0）</label>
-      <span class="smd-dim" style="font-size:11px">${L.length.toLocaleString()}件</span></div>
-      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${['', '国', '商品', '機種', '閲覧', 'いいね(+期間)', '販売(+期間)', '閲覧→販売'].map(h => `<th style="text-align:${h === '商品' || !h ? 'left' : 'right'};padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap">${h}</th>`).join('')}</tr>
-      ${L.slice(0, 100).map(p => `<tr><td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(p.hw)}</td><td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.likes == null ? '—' : p.likes.toLocaleString()} <span style="color:#1a7f37">${p.dLikes ? '+' + p.dLikes : ''}</span></td><td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.sale == null ? '—' : p.sale.toLocaleString()} <span style="color:#1a7f37">${p.dSale ? '+' + p.dSale : ''}</span></td><td style="text-align:right;padding:2px 6px">${p.views ? ((p.dSale || 0) / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:4px">上位100件。クリック数（商品の表示→クリック）は Business Insights の商品ページにしか無く、まだ取り込んでいません。</div>`;
-    const on = (id, ev, fn) => { const el = host.querySelector(id); if (el) el.addEventListener(ev, fn); };
-    on('#ta-pcc', 'change', e => { TA.pCc = e.target.value; taSave(); renderTrafficProd(); });
-    on('#ta-pshop', 'change', e => { TA.pShop = e.target.value; taSave(); renderTrafficProd(); });
-    on('#ta-phw', 'change', e => { TA.pHw = e.target.value; taSave(); renderTrafficProd(); });
-    on('#ta-psort', 'change', e => { TA.pSort = e.target.value; taSave(); renderTrafficProd(); });
-    on('#ta-pzero', 'change', e => { TA.pZero = e.target.checked; taSave(); renderTrafficProd(); });
-    let _qt = 0; on('#ta-pq', 'input', e => { clearTimeout(_qt); const v = e.target.value; _qt = setTimeout(() => { TA.pQ = v; taSave(); renderTrafficProd(); const i2 = document.getElementById('ta-pq'); if (i2) { i2.focus(); i2.setSelectionRange(v.length, v.length); } }, 350); });
+    /* ★2026-09-26 本人「昇順・降順で見れるように、プルダウンじゃなくて、その選択で選べるように」＝見出しを押すと並べ替え（もう一度押すと逆順）。絞り込みはボタン */
+    const KEYS = { cc: p => p.cc, name: p => p.name.toLowerCase(), hw: p => p.hw, views: p => p.views == null ? -1 : p.views, likes: p => p.likes == null ? -1 : p.likes, dLikes: p => p.dLikes || 0, sale: p => p.sale == null ? -1 : p.sale, dSale: p => p.dSale || 0, rate: p => (p.views ? (p.dSale || 0) / p.views : -1) };
+    if (!KEYS[TA.pSort]) TA.pSort = 'views';
+    const dir = TA.pDir === 'asc' ? 1 : -1, kf = KEYS[TA.pSort];
+    L.sort((a, b) => { const x = kf(a), y = kf(b); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+    const pchip = (grp, v, label, on) => `<button class="smd-btn ta-pchip" data-g="${grp}" data-v="${esc(v)}" style="font-size:11px;padding:2px 8px;${on ? 'background:#5b3fd6;color:#fff;border-color:#5b3fd6' : ''}">${esc(label)}</button>`;
+    const shopIdsP = [...new Set(TA._prod.map(p => p.shop).filter(Boolean))];
+    const shopLb = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return lb || ('店 ' + id); };
+    const hwJa = (h) => (typeof TITLE_HW_JA !== 'undefined' && TITLE_HW_JA[h]) || h;
+    const row = (title, html) => `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:11.5px;min-width:64px">${title}</b>${html}</div>`;
+    const th = (k, label, align) => { const on = TA.pSort === k; return `<th class="ta-sort" data-k="${k}" title="押すと並べ替え（もう一度押すと逆順）" style="cursor:pointer;user-select:none;text-align:${align || 'right'};padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap;${on ? 'color:#5b3fd6' : ''}">${label}${on ? (TA.pDir === 'asc' ? ' ▲' : ' ▼') : ' <span style="color:#c5c9d0">⇅</span>'}</th>`; };
+    host.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px">
+      ${row('国', pchip('pCc', '', 'すべて', !TA.pCc) + (REGIONS || []).map(r => pchip('pCc', r.cc, r.cc, TA.pCc === r.cc)).join(''))}
+      ${row('アカウント', pchip('pShop', '', 'すべて', !TA.pShop) + shopIdsP.map(id => pchip('pShop', id, shopLb(id), TA.pShop === id)).join(''))}
+      ${row('機種', pchip('pHw', '', 'すべて', !TA.pHw) + hws.map(h => pchip('pHw', h, hwJa(h), TA.pHw === h)).join(''))}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b style="font-size:11.5px;min-width:64px">絞り込み</b><input id="ta-pq" placeholder="商品名で絞り込み" value="${esc(TA.pQ || '')}" style="font-size:11.5px;padding:2px 6px;width:200px">
+        ${pchip('pZero', '1', '👀 見られているのに売れていない（閲覧20以上・この期間の販売0）', TA.pZero)}
+        <span class="smd-dim" style="font-size:11px">${L.length.toLocaleString()}件</span></div></div>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr><th style="border-bottom:1px solid #e3e6ea"></th>${th('cc', '国', 'left')}${th('name', '商品', 'left')}${th('hw', '機種')}${th('views', '閲覧')}${th('likes', 'いいね')}${th('dLikes', '＋期間')}${th('sale', '販売')}${th('dSale', '＋期間')}${th('rate', '閲覧→販売')}</tr>
+      ${L.slice(0, 100).map(p => `<tr><td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(hwJa(p.hw))}</td><td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px">${p.likes == null ? '—' : p.likes.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dLikes ? '+' + p.dLikes : ''}</td><td style="text-align:right;padding:2px 6px">${p.sale == null ? '—' : p.sale.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dSale ? '+' + p.dSale : ''}</td><td style="text-align:right;padding:2px 6px">${p.views ? ((p.dSale || 0) / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:4px">上位100件。見出しを押すと並べ替え（もう一度押すと逆順）。クリック数（商品の表示→クリック）は Business Insights の商品ページにしか無く、まだ取り込んでいません。</div>`;
+    host.querySelectorAll('.ta-pchip').forEach(b => b.addEventListener('click', () => {
+      const g = b.dataset.g, v = b.dataset.v;
+      if (g === 'pZero') TA.pZero = !TA.pZero; else TA[g] = v;
+      taSave(); renderTrafficProd();
+    }));
+    host.querySelectorAll('.ta-sort').forEach(h => h.addEventListener('click', () => {
+      const k = h.dataset.k;
+      if (TA.pSort === k) TA.pDir = TA.pDir === 'asc' ? 'desc' : 'asc';
+      else { TA.pSort = k; TA.pDir = (k === 'cc' || k === 'name' || k === 'hw') ? 'asc' : 'desc'; }
+      taSave(); renderTrafficProd();
+    }));
+    let _qt = 0; const qi = host.querySelector('#ta-pq'); if (qi) qi.addEventListener('input', e => { clearTimeout(_qt); const v = e.target.value; _qt = setTimeout(() => { TA.pQ = v; taSave(); renderTrafficProd(); const i2 = document.getElementById('ta-pq'); if (i2) { i2.focus(); i2.setSelectionRange(v.length, v.length); } }, 350); });
   }
   async function renderTraffic() {
     const host = document.getElementById('traffic-body'); if (!host) return;
@@ -19740,6 +19755,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '↕️ <b>アクセスの商品の表を、見出しを押して並べ替え（もう一度押すと逆順）・絞り込みはボタンで選ぶ形にしました</b>（本人「昇順・降順で見れるように、プルダウンじゃなくて、その選択で選べるように」）。アカウントごとの表示に第二アカウント（gs_japan_select）も出します（アクセスはこのChromeでログインしていないので無く、注文・売上だけ）。',
       '👣 <b>アクセスのページに分析を足しました</b>（本人「グラフで見たい、色々フィルターも」「円・積み上げ・横棒・折れ線に切り替え」「7日・半月・1か月・3か月・半年・1年」「一般的な分析のカットも」「アカウントごとにも」）。期間・国／アカウント・指標（訪問者・PV・新規・既存・フォロワー増・注文・売上・注文率・1訪問あたりのページ数・客単価・滞在・直帰率）・グラフの種類・日／週／月を切り替えられます。前の同じ長さの期間との比較（▲▼%）と点線の重ね書き、7日移動平均、国ごと／アカウントごとの比較表、曜日ごとの平均、新規と既存の訪問者、商品ごとの閲覧・いいね・販売（アカウント・国・機種・商品名で絞り込み、👀見られているのに売れていない）を出します。アクセスはアカウント（店）ごとにも取り込むようにしました（取り込み userscript v1.1.0）。メニューのアイコンは事業計画と重なっていたので👣に変えました。',
       '📚 <b>母数を「版違い込み」で数えるようにしました</b>（本人「版違い（Best版・限定版・同梱版）も別に数える」）。駿河屋が別商品にしている【状態違い】（美品・箱説欠け・ケース欠など）は1つにまとめ、海外版・ダウンロード版・オンラインコードは外します。まず楽天のデータが無い古い機種から切り替え（ゲームキューブ 726→413、PS1 5,110→4,312 の見込み）。楽天が多い機種（Switch・3DS・PS4 など）は、楽天と駿河屋の突き合わせを直してから切り替えます。',
       '🏪 <b>駿河屋の一覧の取りこぼしを直しました</b>。商品リンクには /product/detail/ と /product/other/（他の出品者の扱い）の2種類があり、後者を拾っていなかったため、1ページ24件のうち6件（SILENT HILL 2・3 など主要な作品も）が母数から抜けていました。全機種を順に取り直します。',
