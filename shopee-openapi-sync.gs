@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-1125';
+var SRC_VER = '20260925-1140';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6757,7 +6757,10 @@ function boshuAutoPreview_(hw, limit, noYahoo, needPhoto) {
   try { return boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto); } finally { try { lockP.releaseLock(); } catch (eL) {} }
 }
 function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
-  if (noYahoo && !bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };   // ★自動（写真集め）の呼び出しは背景扱い＝枠を侵さない（Codex指摘）
+  if (noYahoo && !bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };
+  /* ★2026-09-25 候補出し（写真集めが1回8機種呼ぶ）は app_kv を1つずつ読んでいた＝1回あたり約25回・1日で2台目の Supabase 読み 2,173回の主因。
+     巡回（boshuAutoTick）と同じく最初に1回でまとめて読む（接続枠は1回）。同じ実行の中の baKv_ は全部この控えから返る */
+  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', 'product_ids', 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit', 'boshu_fam_made', 'boshu_auto_done_' + hw, 'titles_' + hw, 'sg_' + hw, 'jan_master_' + hw]);   // ★自動（写真集め）の呼び出しは背景扱い＝枠を侵さない（Codex指摘）
   var cfg = baKv_(BA_CFG) || {};
   if (!hw || !cfg.family || !cfg.family[hw] || !(cfg.family[hw].sku || cfg.family[hw].nameKey)) return { ok: false, error: 'その機種の足す先（カタログ群）が設定されていません' };
   var ccs = (cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs.slice() : (cfg.ccs || []).slice();
