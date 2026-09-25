@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-1830';
+var SRC_VER = '20260925-2025';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5659,6 +5659,7 @@ var BA_KV_ERR = false;
    → ポータルは鍵のハッシュで8つ（boshu_auto_pre_s0〜s7）に分けて、変わった分だけ書く。
    GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
 var BA_PRE_SHARDS = 8;
+var BA_CTX_ROWS = null, BA_CTX_SOLD = null;   /* ★2026-09-25 baLoadCtx_ の全件読みを1実行1回にする控え（GASは実行ごとに初期化される） */
 function baPreShardKeys_() { var a = []; for (var i = 0; i < BA_PRE_SHARDS; i++) a.push('boshu_auto_pre_s' + i); return a; }
 function baPreMerge_(byKey) {
   var sk = baPreShardKeys_(), have = sk.filter(function (k) { return byKey[k] != null; });
@@ -6199,7 +6200,7 @@ function boshuAutoTick(manual) {
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
-  BA_FAM_TICK = 0;
+  BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
   baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto']);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
@@ -6715,7 +6716,12 @@ function baLoadCtx_(cfg, hw, ccs) {
   var famSku = String(fam.sku || '').trim(), famNk = String(fam.nameKey || '').trim();   // 親SKUが無い群はカタログ名（①②を除く）で束ねる（ポータル baNameKey と同じ）
   var byCc = fam.byCc || {};   // 国ごとの上書き（本人「その国のカタログを出せば良くない？」）
   var famOf = function (cc) { var o = byCc[cc]; if (o && (o.sku || o.nameKey)) return { sku: String(o.sku || '').trim(), nk: String(o.nameKey || '').trim() }; return { sku: famSku, nk: famNk }; };
-  var rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
+  /* ★2026-09-25 20時 Supabase が応答しなくなった（負荷）。巡回は【候補のある機種が見つかるまで機種を順に試す】ので、試すたびにここで全出品（明細つき）と
+     90日分の注文を丸ごと読み直していた＝候補切れの機種が多い日は1回の巡回で最大12回分の全件読み。同じ実行の中では1回だけ読む（国の組み合わせごと） */
+  var _rowsKey = ccs.slice().sort().join(',');
+  BA_CTX_ROWS = BA_CTX_ROWS || {};
+  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');
+  var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
   /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
      出品枠が満杯の店の【非公開カタログ】は、そこに明細があっても**買えない**し、枠が無いので公開もできない。
@@ -6754,13 +6760,14 @@ function baLoadCtx_(cfg, hw, ccs) {
   try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   /* ★売れる見込みの材料：直近90日に売れた明細名（英名）。他国で売れた作品を、まだ出していない国へ先に出す（本人「効率的に、効果がある使い方」） */
-  var soldVar = {};
-  try {
+  var soldVar = BA_CTX_SOLD || {};
+  if (!BA_CTX_SOLD) try {
     var since90 = Math.floor(Date.now() / 1000) - 90 * 86400;
     sbSelectAll_('orders', 'select=items&order_ts=gte.' + since90 + '&status=not.in.(CANCELLED,Cancelled,UNPAID)').forEach(function (o) {
       var items = o.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (e) { items = []; } }
       (items || []).forEach(function (it) { var k = baKey_(String((it && it.variation) || '')); if (k) soldVar[k] = (soldVar[k] || 0) + 1; });
     });
+    BA_CTX_SOLD = soldVar;   /* 読めた時だけ控える（読めなかった時は次の機種でもう一度試す） */
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
   var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems);
