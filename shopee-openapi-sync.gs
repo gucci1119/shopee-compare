@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-0015';
+var SRC_VER = '20260926-0230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1300,16 +1300,33 @@ function trafficIngest_(body) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var kv = baKv_('traffic_daily') || {}; kv[cc] = kv[cc] || {}; var n = 0;
+    var num = function (v) { var x = Number(v); return isFinite(x) ? Math.round(x * 1000) / 1000 : null; };
+    /* ★2026-09-26 本人「アカウントごとに見れるようにもしておいて」。userscript v1.1.0 から shop_id / shop_name が来る。
+       店ごとに kv.byShop[shop_id] = { cc, name, d: { 'YYYY-MM-DD': {...} } } に入れ、国の数字（kv[cc]）はその国の店の【合計】に作り直す
+       （滞在・直帰は訪問者で重みをつけた平均）。店が来ない古い版はこれまでどおり国にそのまま入れる */
+    var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15), sname = String(body.shop_name || '').slice(0, 60);
+    var touched = {};
+    if (shop) { kv.byShop = kv.byShop || {}; var S = kv.byShop[shop] = kv.byShop[shop] || { cc: cc, name: sname, d: {} }; S.cc = cc; if (sname) S.name = sname; S.at = new Date().toISOString(); }
     rows.forEach(function (r) {
       var d = String(r.d || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
-      var num = function (v) { var x = Number(v); return isFinite(x) ? Math.round(x * 1000) / 1000 : null; };
-      kv[cc][d] = { pv: num(r.pv), uv: num(r.uv), nv: num(r.nv), ev: num(r.ev), nf: num(r.nf), stay: num(r.stay), bounce: num(r.bounce), at: new Date().toISOString() }; n++;
+      var o = { pv: num(r.pv), uv: num(r.uv), nv: num(r.nv), ev: num(r.ev), nf: num(r.nf), stay: num(r.stay), bounce: num(r.bounce), at: new Date().toISOString() };
+      if (shop) { kv.byShop[shop].d[d] = o; touched[d] = 1; } else kv[cc][d] = o;
+      n++;
     });
+    if (shop) {
+      var sk = Object.keys(kv.byShop[shop].d).sort(); while (sk.length > 400) { delete kv.byShop[shop].d[sk.shift()]; }
+      Object.keys(touched).forEach(function (d) {
+        var a = { pv: 0, uv: 0, nv: 0, ev: 0, nf: 0, st: 0, bo: 0, k: 0 };
+        Object.keys(kv.byShop).forEach(function (id) { var s2 = kv.byShop[id]; if (!s2 || s2.cc !== cc) return; var x = (s2.d || {})[d]; if (!x) return;
+          a.pv += x.pv || 0; a.uv += x.uv || 0; a.nv += x.nv || 0; a.ev += x.ev || 0; a.nf += x.nf || 0; a.st += (x.stay || 0) * (x.uv || 0); a.bo += (x.bounce || 0) * (x.uv || 0); a.k++; });
+        if (a.k) kv[cc][d] = { pv: a.pv, uv: a.uv, nv: a.nv, ev: a.ev, nf: a.nf, stay: a.uv ? Math.round(a.st / a.uv * 10) / 10 : null, bounce: a.uv ? Math.round(a.bo / a.uv * 1000) / 1000 : null, shops: a.k, at: new Date().toISOString() };
+      });
+    }
     /* 400日より古い分は落とす（app_kv を太らせない） */
     var keys = Object.keys(kv[cc]).sort(); while (keys.length > 400) { delete kv[cc][keys.shift()]; }
     kv.upd = kv.upd || {}; kv.upd[cc] = new Date().toISOString();
     baKvSet_('traffic_daily', kv);
-    return { ok: true, cc: cc, n: n, days: Object.keys(kv[cc]).length };
+    return { ok: true, cc: cc, shop: shop || null, n: n, days: Object.keys(kv[cc]).length };
   } finally { try { lock.releaseLock(); } catch (e) {} }
 }
 function doPost(e) {
