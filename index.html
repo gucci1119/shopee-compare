@@ -2451,7 +2451,8 @@
     return all[0] || '';
   }
   async function gasCall(params, timeoutMs) {
-    let base = gasUrlFor(params && params.action, params);
+    let base = (params && params._url) || gasUrlFor(params && params.action, params);
+    if (params && params._url) { params = Object.assign({}, params); delete params._url; }   /* ★2026-09-25 写真集めの候補出しは、担当の台が巡回中（鍵待ち）なら相方の台で読む */
     if (!base) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     /* 今日すでに枯れている側は最初から避ける（1回むだに叩かない） */
     if (ufUrlBlocked(base)) { const alt0 = gasPeerUrl(base); if (alt0 && !ufUrlBlocked(alt0)) base = alt0; }
@@ -29967,8 +29968,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!force && !pcIsOwner()) { lst._baCollectMsg = '自動収集は担当のPC（' + ((PC.owner && PC.owner.label) || 'もう1台') + '）で動いています'; _why('not-owner'); return; }   // 🖥 2台で同じサイトを同時に叩かない
     // 同じブラウザでポータルを2枚開いていても、集めるのは1枚だけ（25分以内に他のタブが集めていたら譲る）
     /* ★2026-09-25 真因：別タブに譲る守りが「25分以内に始まった」だけを見ていたので、途中で消えた回（push のたびの自動リロード）にも効き、次の25分を丸ごと止めていた
-       （実測 4日で12回・今日は1回）。集めている間は心拍（smdBaCollectHb）を打ち、譲るのは【心拍が3分以内＝本当にいま集めている】時だけ */
-    try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0), hb = Number(localStorage.getItem('smdBaCollectHb') || 0); if (!force && o && Date.now() - o < 25 * 60000 && hb && Date.now() - hb < 3 * 60000) { lst._baCollectAt = o; _why('other-tab (hb ' + Math.round((Date.now() - hb) / 1000) + 's)'); return; } } catch (_) {}
+       （実測 4日で12回・今日は1回）。集めている間は心拍（smdBaCollectHb）を打ち、譲るのは【心拍が10分以内＝本当にいま集めている】時だけ（候補出しの1回は GAS の順番待ちで最大6分かかるので、3分では途中で横取りする） */
+    try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0), hb = Number(localStorage.getItem('smdBaCollectHb') || 0); if (!force && o && Date.now() - o < 25 * 60000 && hb && Date.now() - hb < 10 * 60000) { lst._baCollectAt = o; _why('other-tab (hb ' + Math.round((Date.now() - hb) / 1000) + 's)'); return; } } catch (_) {}
     if (lst._baCollecting || lst._baCollectBusy) { _why('busy'); return; }
     /* ★2026-09-21 【🤖の画面を開いていなくても担当先を確かめる】（Codex指摘・裏取り済み）。
        担当（本体 / 2台目）の写しは 🤖の画面を描いた時にしか更新していなかったので、
@@ -30026,8 +30027,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         }
         try { localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}
         { const _rn = baRunnerOfHw(hw) || 'child'; if ((_pctBy[_rn] || 0) >= 0.85) { msgs.push((TITLE_HW_JA[hw] || hw) + '：担当の台の接続枠が85%超なので今回は集めない'); continue; } }
-        const r = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 60, noYahoo: '1', needPhoto: '1' }, 240000);
-        if (!r || !r.ok || !Array.isArray(r.rows)) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗'); continue; }
+        /* ★2026-09-25 真因その2：候補出し（preview）は巡回（boshuAutoTick）と同じ鍵を使い、巡回中は「いま自動出品が走っています」で落ちる。
+           これまでは1機種の失敗で【集め全体】が例外で止まり（activity_log「自動収集に失敗: いま自動出品…」）、10分の間隔だけ消費していた。
+           → 落ちたら相方の台（読むだけなので担当でなくてよい・本体は業務用なので使わない）→ 40秒待って担当をもう一度 → それでも駄目ならその機種だけ飛ばす */
+        let r = null, _lastErr = '';
+        {
+          const _prim = gasUrlFor('boshu_auto_preview', { hw });
+          const _alts = [settings.boshuUrl2, settings.boshuUrl].filter(u => u && u !== _prim && !ufUrlBlocked(u));
+          const _tryUrls = [_prim].concat(_alts);
+          for (let _a = 0; _a < _tryUrls.length + 1 && !r; _a++) {
+            const _u = _a < _tryUrls.length ? _tryUrls[_a] : _prim;
+            if (_a === _tryUrls.length) await new Promise(rs => setTimeout(rs, 40000));
+            try { localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}
+            try {
+              const _r0 = await gasCall({ action: 'boshu_auto_preview', token: settings.writeToken, hw, limit: 60, noYahoo: '1', needPhoto: '1', _url: _u }, 240000);
+              if (_r0 && _r0.ok && Array.isArray(_r0.rows)) r = _r0; else _lastErr = String((_r0 && _r0.error) || '取得に失敗');
+            } catch (e) { _lastErr = String((e && e.message) || e); }
+            if (!r && !/走っています|いま自動出品|もう一度/.test(_lastErr)) break;   /* 鍵待ち以外の失敗は別の台で試さない */
+          }
+        }
+        if (!r) { msgs.push((TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗（' + _lastErr.slice(0, 40) + '）'); continue; }
         const pre = (await baKvGet('boshu_auto_pre')) || {};
         // 見つからなかった作品は 3日は引き直さない（メルカリを無駄に叩かない）
         /* ★2026-09-23 Codex指摘：写真があっても🤖で全部NGだった作品（prerej）は集め直しの対象なのに、ここで「写真あり」として先に落としていた＝集め直しが一度も動かない */
