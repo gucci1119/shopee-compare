@@ -227,4 +227,7 @@ B6=$(awk -v G=$G '
   !skip && /(cloneItem_|seedShopCatalog_)\(/ && !/^\s*\/\// && !/^function / { calls[NR]=1 }
   END { for (n in calls) { ok=0; for (i=n; i<=n+12; i++) if (line[i] ~ /baCatalogMadeRec_|baFamMadeRec_/) ok=1; if (!ok) print n": "substr(line[n],1,100) } }' $G)
 if [ -n "$B6" ]; then echo "NG  カタログを作った後に控え（baCatalogMadeRec_）が無い"; echo "$B6"; NG=1; else echo "OK  カタログ作成は全経路で控えている"; fi
+# 7-7 自動の読み直し（setTimeout / online）は作業中（appBusy）を見る。見ないと写真集めや取り込みが途中で消える（2026-09-25 21:28）
+B7=$(awk '{ l[NR]=$0 } END { for (i=1;i<=NR;i++) if (l[i] ~ /setTimeout\(\(\) => location\.reload|addEventListener\(.online.[^;]*location\.reload/) { ok=0; for (j=i-4;j<=i;j++) if (l[j] ~ /appBusy/) ok=1; if (!ok) print i": "substr(l[i],1,100) } }' index.html)
+if [ -n "$B7" ]; then echo "NG  自動の読み直しが作業中（appBusy）を見ていない"; echo "$B7"; NG=1; else echo "OK  自動の読み直しは作業中を待つ"; fi
 exit $NG
