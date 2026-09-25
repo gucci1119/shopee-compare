@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-2310';
+var SRC_VER = '20260925-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6952,7 +6952,10 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
       var d = (ledger[r.key] || {})[cc];
       /* ★2026-09-23 Codex指摘：満杯の店の非公開カタログに入った明細は「出している」に数えないのに、台帳の済みだけが残って2店舗目へ出し直されなかった → その明細が埋もれている時は済みと見ない */
       if (d && String(d).indexOf('skip:') !== 0 && !buried[String(d).split('#')[0]]) return false;   // 済み
-      if (d && /^skip:(noimg|noname|dup|manual|nosame)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
+      /* ★2026-09-25 23:45 本人「22:58が最終でそこから動いていない？」＝Switch の巡回が3回続けて同じ20作品（Madison・OZMAFIA!!・Potion Permit…）を選び0件。
+         6か国は出品済みで、VN だけ skip:vncap（100万ドン上限）。vncap/ratio は値付けが同じなら何度やっても同じ結果なのに見送りの対象外で、
+         「VN が未処理」として毎回上位に選ばれ、他の作品に順番が回らなかった（台帳の vncap 106件・ratio 16件）。値付けを変えた時は台帳を消して戻す */
+      if (d && /^skip:(noimg|noname|dup|manual|nosame|vncap|ratio)/.test(String(d))) return false;                    // 前に見送った理由が変わらないもの（nosame＝同じ作品の出品が無かった・Codex指摘。戻す時は台帳を消す）
       /* ★2026-09-24 本人「なぜ台湾には出ていない？」：nofam（その国に家族カタログが無かった）は【永久の見送り】にしない。
          2026-09-23 に家族カタログの自動作成を入れたのに、それ以前に nofam で見送った作品は TW/TH で二度と候補に戻らなかった。
          家族が出来れば次の巡回で出す。家族がまだ無ければ baAddBatch_ が rows 無しで即戻る＝接続枠は使わない。 */
