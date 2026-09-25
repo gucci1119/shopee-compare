@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-2350';
+var SRC_VER = '20260926-0015';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6504,6 +6504,9 @@ function boshuAutoTick(manual) {
     });
     // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
     try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 160)); }
+    // ★2026-09-26 本人「いつになったらこれ改善されるの？」＝出品ログ（listing_log）はポータルが1時間ごとに取り込むだけで、🤖が足した明細が最大1時間出なかった（22:58 のまま）。
+    //   この回に足した明細を【その場で】出品ログへ書く（cc+item_id+model_id が一意＝ポータルの取り込みと二重にならない）。失敗しても出品は止めない
+    try { var _ll = baListLogWrite_(st, t0); if (_ll) baLog_(st, '出品ログに ' + _ll + '件 記録'); } catch (eLl) { baLog_(st, '出品ログへの記録に失敗（ポータルの取り込みで後から入ります）: ' + String(eLl).slice(0, 160)); }
     // 済み台帳・使った写真・当日カウント
     if (baSig_(ledger) !== _tkSig0.L) baKvSet_('boshu_auto_done_' + hw, ledger);
     if (baSig_(used) !== _tkSig0.I) baKvSet_(BA_IMGS, baKvMerge_(BA_IMGS, used, _fr, 0));   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
@@ -7431,6 +7434,22 @@ function baPartialRepair_(st) {
 }
 function baStockOk_(resp) {
   try { var r = (resp && resp.response) || resp || {}; var f = r.failure_list || r.failure || []; return !(f && f.length); } catch (e) { return false; }
+}
+/* 🧾 この回に🤖が足した明細を出品ログ（listing_log）へ書く。行の形はポータルの syncListingLog と同じ（image は imageId・ymd は日本時間の日付） */
+function baListLogWrite_(st, t0) {
+  var since = new Date((Number(t0) || Date.now()) - 2000).toISOString();
+  var rows = [], seen = {};
+  (st.added || []).forEach(function (a) {
+    if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc) return;
+    var k = a.cc + '|' + a.item_id + '|' + a.model_id; if (seen[k]) return; seen[k] = 1;
+    rows.push({ cc: String(a.cc), item_id: Number(a.item_id), model_id: Number(a.model_id),
+      ymd: Utilities.formatDate(new Date(a.at), 'Asia/Tokyo', 'yyyy-MM-dd'),
+      name: String(a.cat || '').slice(0, 200), model_name: String(a.en || '').slice(0, 120),
+      image: String(a.img || ''), price: (a.price != null && a.price !== '') ? Number(a.price) : null, seeded: false });
+  });
+  if (!rows.length) return 0;
+  sbUpsert_('listing_log', rows, 'cc,item_id,model_id');
+  return rows.length;
 }
 function baReuseTestSlot_(shopId, itemId, it, st, cc) {
   /* ★Codex指摘（裏取り済み）で全面的に直した。`getModels_` は **配列ではなく

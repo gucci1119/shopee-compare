@@ -19522,6 +19522,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🧾 <b>出品ログに🤖の出品がすぐ出るようにしました</b>（本人「いつになったらこれ改善されるの？」）。前は1時間ごとの取り込みでしか増えず、22:58のまま止まって見えていました。🤖が明細を足したその場で出品ログに書き、画面を開いている間は3分ごとに新しい行だけを読み足します。',
+      '⚡ <b>「国ごと／アカウントごと」の切り替えを速くしました</b>（本人「ここ押した時の切り替わりが遅い」）。出品ログ全体（カード数千枚）を描き直していたのを、表の部分だけ差し替えるようにしました。',
       '🧩 <b>出品ログで同じ作品が国ごとに別の行に割れることがあったのを直しました</b>（本人「さっきTW以外も表示されていたぞ？どゆこと？」）。画面を読み直した直後は出品データが届く前で、台湾のように名前に機種が入っていないカタログの明細だけ機種が分からず別の行になり、他の国のマスに「すでに出しています」と出ていました。その日のぶんのSKUからも機種を引くようにしました。',
     ] },
     { date: '2026-09-25', items: [
@@ -32748,6 +32750,31 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   function llogNoTest() { return '&model_name=not.imatch.' + encodeURIComponent('^\\s*(test|dummy|sample)\\d*\\s*$'); }
   function llogIsTest(n) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String(n || '')); }
   const logState = { rows: null, day: null, days: 7 /* 本人 2026-09-20「最初に表示されるの7日にして」 */, goal: null, loading: false, missing: false, liveOnly: false };
+  /* ★2026-09-26 本人「いつになったらこれ改善されるの？」＝出品ログは画面を開いた時・1時間ごとの取り込みでしか増えず、🤖が出していても22:58のまま見えた。
+     🤖は足した瞬間に listing_log へ書くようにした（GAS）。こちらは画面を開いている間、3分ごとに【新しい行だけ】読み足す（3万行を読み直さない）。
+     🤖の印は各担当の boshu_auto_status*.added（足した明細の控え）でも付ける。 */
+  async function llogPollNew() {
+    try {
+      const host = document.getElementById('list-log');
+      if (!host || !host.offsetParent || document.hidden || !Array.isArray(logState.rows) || logState.loading || logState._pollBusy) return;
+      logState._pollBusy = true;
+      const maxAt = logState.rows.reduce((m, r) => (r.created_at && r.created_at > m) ? r.created_at : m, '');
+      if (!maxAt) return;
+      const nr = await sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&created_at=gt.' + encodeURIComponent(maxAt) + '&order=created_at.asc' + llogNoTest());
+      if (!nr || !nr.length) return;
+      const have = new Set(logState.rows.map(r => r.id));
+      const fresh = nr.filter(r => !have.has(r.id)); if (!fresh.length) return;
+      try {
+        const st = await sbGetAll('app_kv', 'select=v&k=like.boshu_auto_status*');
+        const am = logState.autoMap = logState.autoMap || {};
+        (st || []).forEach(x => (((x && x.v) || {}).added || []).forEach(a => { if (a && a.cc && a.item_id && a.en) am[a.cc + '|' + a.item_id + '|' + String(a.en).toLowerCase().trim()] = jstDate(new Date(a.at).getTime()); }));
+      } catch (_) {}
+      logState.rows = fresh.concat(logState.rows);
+      if (fresh.some(r => String(r.ymd || '').slice(0, 10) === (logState.day || jstDate(Date.now())))) logState._detailDay = null;   // 選んでいる日の名前・写真を取り直す
+      renderListingLog();
+    } catch (_) {} finally { logState._pollBusy = false; }
+  }
+  try { setInterval(() => { llogPollNew(); }, 180000); } catch (_) {}
   // ★2026-09-20 出品ログ（listing_log）は📅出品ログの画面を開いた時にしか増えず、グラフも分析も実態より少なく出ていた（🤖自動出品が1日約49明細を足しているのに「新規出品ほぼ0」と誤診した）。
   //   担当のPCだけ・1日1回・起動の6分後に自動で反映する（Supabase の読み書きだけ＝GAS の接続枠は使わない）。
   // ★Codex指摘（2026-09-20）：起動6分後の1回きりだと、開きっぱなしで日付が変わった時・あとから担当PCになった時に動かない→ 30分ごとに「今日まだか」を見る
@@ -33534,7 +33561,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       };
       { const a = host.querySelector('#llog-see'); if (a) a.addEventListener('click', llogSeeOpen); }
       host.querySelectorAll('.llog-layout').forEach(b => b.addEventListener('click', () => { logState.layout = b.dataset.l; try { localStorage.setItem('llogLayout', b.dataset.l); } catch (_) {} renderListingLog(); }));
-      host.querySelectorAll('.llog-totview').forEach(b => b.addEventListener('click', () => { logState.totView = b.dataset.v; renderListingLog(); }));
+      /* ★2026-09-26 本人「ここ押した時の切り替わりが遅い」＝国ごと／アカウントごとの切り替えで出品ログ全体（カード数千枚）を描き直していた → 表の部分だけ差し替える */
+      const _bindTotView = () => host.querySelectorAll('.llog-totview').forEach(b => b.addEventListener('click', () => {
+        logState.totView = b.dataset.v;
+        try { const d = host.querySelector('details[data-fold="llogTot"]'); const w = document.createElement('div'); w.innerHTML = llogTotMatrix(); const nd = w.firstElementChild; if (d && nd) { d.replaceWith(nd); _bindTotView(); return; } } catch (_) {}
+        renderListingLog();
+      }));
+      _bindTotView();
       host.querySelectorAll('.llog-sort').forEach(b => b.addEventListener('click', () => { logState.sort = b.dataset.s; try { localStorage.setItem('llogSort', b.dataset.s); } catch (_) {} renderListingLog(); }));
       { const a = host.querySelector('#llog-ckall'); if (a) a.addEventListener('click', () => { const cks = host.querySelectorAll('.llog-ck'); const on = ![...cks].every(c => c.checked); cks.forEach(c => { c.checked = on; }); bmsg(on ? cks.length + '件えらびました' : ''); }); }
       /* ★2026-09-21 本人「Claude的におかしいやつをピックアップして選ぶっていうのはできないですかね？」「選出基準は今まで私が何回も言ってる基準で」
