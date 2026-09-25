@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-0230';
+var SRC_VER = '20260926-0900';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5872,7 +5872,7 @@ var BA_CASE_REQUIRED_HW = { ds: 1, '3ds': 1, vita: 1, psp: 1, ps1: 1, ps2: 1, ps
    ①基準を変えた（版が上がった）②前に見てから30日たった のどちらかで、出品済みの写真をもう一度見る。
    写真の基準を変えたら必ずこの数字を1つ上げる（baJudge_ の控えの鍵 |v12| も一緒に上げる）。
    ★2026-09-23 例外：基準を【ゆるめた】時（白背景でも影・傾きがあれば実物）は控えの鍵だけ v12 に上げ、BA_RULE_VER は上げない＝出品済みの見直し（baRephoto_）を全件やり直さない（前にOKだった物はゆるめた基準でもOK） */
-var BA_RULE_VER = 12, BA_RECHECK_DAYS = 30;   /* 12＝2026-09-23 21:00 白背景の緩めを取り消し */
+var BA_RULE_VER = 13, BA_RECHECK_DAYS = 30;   /* 12＝2026-09-23 21:00 白背景の緩めを取り消し／13＝2026-09-26 四隅の確認（Sonnet）を足した＝出品済みも見直す */
 var BA_RULE_RECHECK_SINCE = '2026-09-23T11:05:00Z';   /* v11 で出した明細のうち、この時刻より前の分は厳しい基準で通っているので見直さない（緩めていた 20:10〜21:00 の分だけ見直す） */
 function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し)|ケース(なし|無し)/.test(String((a && a.name) || '')); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
@@ -5896,6 +5896,36 @@ function baManualOf_(imgUrl, expect) {
   return (BA_MANUAL_IMG && BA_MANUAL_IMG[u]) ? 'ng:manual' : '';
 }
 var BA_AI_DOWN = '';   /* AIが使えない理由（残高切れ等）。立ったらこの実行では AI を呼ばない＝Shopee枠を守る */
+/* ★2026-09-26 本人「この辺もイメージ画像になってる」（Football Manager 26・Kippers English・LEGO Star Wars 3DS …）。
+   Haiku は「背景・縁・影」を聞いても平らなジャケット画像に ok:box を付けていた。Haiku で通っていた写真を目で見たら 6枚中4枚が出してはいけない写真だった。
+   → Haiku が通した写真だけ、上位モデルに【画像の四隅に何が写っているか】だけを聞き、3隅以上が絵柄なら宣材としてコードで落とす（[[ai-extract-then-decide-in-code]]）。
+   実測 26枚（本物22・宣材3・判断済み1）：Sonnet 5 は全部正解、Haiku は本物の写真3枚（木の机・布・ぼかし背景）を「四隅とも絵柄」と誤答。
+   控えは Haiku の控えと別の鍵（…|c1）＝過去の判定1,165枚を捨てない。boshu_auto_cfg.confirmModel=false で止められる（料金：1枚 約$0.005） */
+var BA_CONFIRM = null;
+function baCornersArt_(imgUrl, key, st) {
+  if (BA_CONFIRM === null) { var c0 = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (c0.confirmModel === false) ? '' : String(c0.confirmModel || 'claude-sonnet-5'); }
+  if (!BA_CONFIRM) return -1;
+  var body = { model: BA_CONFIRM, max_tokens: 300, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: [
+    { type: 'image', source: { type: 'url', url: String(imgUrl) } },
+    { type: 'text', text: '商品写真の判定の下準備です。見えたものだけを書いてください。corners＝画像の四隅（左上・右上・左下・右下の端のすぐ内側）に写っているものを、それぞれ "art"（パッケージ・ラベル・カセットの印刷された絵柄や文字）か "other"（机・床・布・手・壁・余白・背景・ケースの外側など、印刷面の外のもの）で答える。JSONだけ: {"corners":["art|other","art|other","art|other","art|other"]}' }] }] };
+  ufBump_(1, 'boshu_auto(写真の四隅の確認)');
+  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
+  var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
+  if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
+  try { aiSpendBump_('写真の四隅の確認(自動出品)', j.usage); } catch (e) {}
+  if (code >= 400) { var em = String((j.error && j.error.message) || ''); if (st) baLog_(st, '⚠ 四隅の確認ができず HTTP ' + code + ' ' + em.slice(0, 80)); if (/credit balance|insufficient|invalid x-api-key|authentication_error/i.test(em) || code === 401 || code === 403) BA_AI_DOWN = em.slice(0, 60) || ('HTTP ' + code); return null; }
+  var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
+  if (!Array.isArray(o.corners) || o.corners.length !== 4) return null;
+  return o.corners.filter(function (x) { return String(x) === 'art'; }).length;
+}
+/* Haiku で ok になった写真に四隅の確認をかける。結果は cache[u+'|c1'] に控える（'art:N'）。確認できなかった時は null＝通さない・控えない（次の回にもう一度） */
+function baConfirmCorners_(imgUrl, u, st, cache) {
+  var ck = u + '|c1', cv = cache ? String(cache[ck] || '') : '';
+  var n;
+  if (cv.indexOf('art:') === 0) n = Number(cv.slice(4));
+  else { var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return -1; n = baCornersArt_(imgUrl, key, st); if (n === null) return null; if (n >= 0 && cache) cache[ck] = 'art:' + n; }
+  return n;
+}
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
@@ -5909,7 +5939,15 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
-  if (cache && cache[u]) { var c0 = String(cache[u]); return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true }; }
+  if (cache && cache[u]) {
+    var c0 = String(cache[u]);
+    if (c0.indexOf('ok:') === 0) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
+      var n0 = baConfirmCorners_(imgUrl, u, st, cache);
+      if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
+      if (n0 >= 3) { cache[u] = 'ng:catalog4'; return { ok: false, judged: true, kind: 'catalog4', cached: true }; }
+    }
+    return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
+  }
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
@@ -5955,7 +5993,12 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-09-20 本人「高額品ソフトは海賊版も多いので気をつけて」「ファミコンとか特に注意で」＝見た目が海賊版・リプロなら使わない */
   if (ok && o.repro === true) { ok = false; kind = 'repro'; }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
-  if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
+  if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
+  if (ok) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像 */
+    var n1 = baConfirmCorners_(imgUrl, u, st, cache);
+    if (n1 === null) return { ok: false, judged: false, kind: 'unconfirmed' };   /* 確認できなかった＝通さない・控えない */
+    if (n1 >= 3) { ok = false; kind = 'catalog4'; }
+  }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
 }

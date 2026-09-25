@@ -19923,6 +19923,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🖼 <b>🤖の写真判定に「四隅の確認」を足しました</b>（本人「この辺もイメージ画像になってる」＝Football Manager 26・Kippers English 等）。Haiku は平らなジャケット画像にも「実物の箱」を付けていて、通っていた写真を目で見たら6枚中4枚が出してはいけない写真でした。Haiku が通した写真だけ、上位モデル（Sonnet 5）に<b>画像の四隅に何が写っているか</b>を聞き、3隅以上が絵柄なら宣材として落とします（実測26枚すべて正解・1枚 約0.7円）。基準の版を上げたので<b>出品済みの🤖明細の写真も順に見直され</b>、宣材なら差し替え（代わりが無ければ「写真を直す」に並ぶ）。ポータルの 🔍 も同じ判定です。「⚠️おかしいものだけ選ぶ」に &lt;b&gt; がそのまま出ていたのも直しました。',
       '🧭 <b>左メニューのいちばん上に「やりたいこと」を置きました</b>（本人「多機能になりすぎて、どこに何があるか分からない」「必要な機能ではあるから、表示が難しい」）。機能は消さずに、<b>やりたいことの言葉で引ける一覧</b>（毎日の注文・発送／出品する／値付け／仕入れ・在庫／お金／分析／設定の7つ・約45件）から、押すとその画面・タブへ直接飛びます。検索窓に「値下げ」「赤字」「伝票」「在庫」などと打つと絞れます。<b>⌘K でも同じ一覧</b>を引けるようにしました（今までの⌘Kはページ名しか分かりませんでした）。',
       '🧮 <b>値付けの見直し：仕入とPayPalを💹利益明細と同じ取り方にそろえ、リクエスト用ページを対象から外しました</b>。仕入は ①手入力 → ②在庫台帳（その注文に紐付いた在庫の合計）→ ③利益計算表、PayPalで受け取った分は利益に足す。「Solicitar Página（R$100の仮の値段）」のようなリクエスト用ページは値段が依頼ごとなので赤字に数えない（実物を見て発覚）。',
       '🏷 <b>出品管理の「売れ行き・値下げ」を「値付けの見直し」に作り直しました</b>（本人「オーダー後の利益で、赤字・利益が薄い／よく売れるけど上げすぎ を視覚的に把握→判断して調整。半自動で」）。売れた注文の<b>実際の利益</b>（💹利益明細と同じ計算・明細ごと）から 🔴赤字／🟠利益が薄い／🟡上げすぎて売れなくなった／🔵値上げの余地 に分け、<b>提案価格と理由</b>を出します。散布図（利益/個×月の販売数）・国と区分のチップ・並び替え・提案価格はその場で直せる。☑して「書き込む」で<b>明細の価格だけ</b>を書きます（本人「必ずカタログ壊さないように」＝明細の追加・削除・並び・名前・画像には触らない／書く直前に最新の出品を読み直し、明細が無い・価格が変わっている行は外す）。変更前→後は「見直しの記録」に残り、その後の売れ行きと利益を比べられます。売れた時の価格は入金の original_price（VNは税込み＝÷1.1で出品価格と一致・実測）。旧ランキングは中の切替に残しました。💹利益明細は損益・入出金から動かしていません（本人指定）。',
@@ -30231,7 +30232,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const _cjk = (t) => /[ぁ-んァ-ヶ一-龠]/.test(t);   /* ★2026-09-23 Codex指摘：日本語のパッケージを英語の明細名と比べて「別作品」にしていた。文字の種類が違う時は照合しない（読めない扱い） */
         if (a2 && b2 && _cjk(a2) === _cjk(b2) && a2.indexOf(b2) < 0 && b2.indexOf(a2) < 0) return { ok: false, kind: 'wrongtitle', judged: true, seen: String(o.title_seen).slice(0, 60) };
       }
-      return { ok: !!o.product_photo, kind: String(o.kind || ''), judged: true };
+      if (!o.product_photo) return { ok: false, kind: String(o.kind || ''), judged: true };
+      /* ★2026-09-26 GAS baJudge_ と同じ：Haiku が通した写真だけ、上位モデルに【四隅に何が写っているか】を聞き、3隅以上が絵柄なら宣材（本人「イメージ画像になってる」）。
+         Haiku は平らなジャケット画像に ok を付け、逆に木の机・布の上の本物を「四隅とも絵柄」と誤答した（実測26枚）。確認できなかった時は通さない */
+      const bc = { model: 'claude-sonnet-5', max_tokens: 300, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'url', url: imgUrl } },
+        { type: 'text', text: '商品写真の判定の下準備です。見えたものだけを書いてください。corners＝画像の四隅（左上・右上・左下・右下の端のすぐ内側）に写っているものを、それぞれ "art"（パッケージ・ラベル・カセットの印刷された絵柄や文字）か "other"（机・床・布・手・壁・余白・背景・ケースの外側など、印刷面の外のもの）で答える。JSONだけ: {"corners":["art|other","art|other","art|other","art|other"]}' }] }] };
+      const r3 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(bc) });
+      const j3 = await r3.json(); if (!r3.ok) return { ok: false, kind: 'error', note: '四隅の確認: ' + ((j3 && j3.error && j3.error.message) || ('HTTP ' + r3.status)) };
+      try { if (j3.usage) aiSpendAdd('写真の四隅の確認', { in: j3.usage.input_tokens || 0, out: j3.usage.output_tokens || 0 }); } catch (_) {}
+      const t3 = ((j3.content || []).map(c => c.text || '').join('') || ''); const m3 = t3.match(/\{[\s\S]*\}/); const o3 = m3 ? JSON.parse(m3[0]) : {};
+      if (!Array.isArray(o3.corners) || o3.corners.length !== 4) return { ok: false, kind: 'error', note: '四隅の確認が読めない' };
+      if (o3.corners.filter(x => x === 'art').length >= 3) return { ok: false, kind: 'catalog', judged: true };
+      return { ok: true, kind: String(o.kind || ''), judged: true };
     } catch (e) { return { ok: false, kind: 'error', note: String((e && e.message) || e) }; }
   }
   /* ★2026-09-23 Codex指摘：読めなかった（通信失敗）と、鍵が無い（null）を分ける。読めなかった時に {} として書き戻すと、
@@ -34121,7 +34134,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           });
           const nLearn = Object.keys((_baLearn && _baLearn.items) || {}).length;
           bmsg(n ? n + '件えらびました（基準外・写真なし・同じ写真の使い回し・機種の食い違い・前に直したのと同じ写真）'
-                 : 'この日はどれも当てはまりませんでした。<b>ここでは写真の中身は見ていません</b>（カタログ画像・箱付き・別の機種などは 🔍 でAIが見ます）' + (nLearn ? '　／ 覚えている判断 ' + nLearn + '件' : ''));
+                 : 'この日はどれも当てはまりませんでした。★このボタンは写真の中身（宣材画像かどうか）は見ていません。🤖の見直しで基準外と分かった分・写真なし・使い回し・機種違いだけを選びます。中身は 🔍 でAIが見ます（2026-09-26 から四隅の確認つき）' + (nLearn ? '　／ 覚えている判断 ' + nLearn + '件' : ''));
         }); }
       { const a = host.querySelector('#llog-judge'); if (a) a.addEventListener('click', async () => {
           const ps = picked(); if (!ps.length) { alert('見直す写真を選んでください（☑ 全部えらぶ でもOK）'); return; }
