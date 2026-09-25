@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-1030';
+var SRC_VER = '20260925-1105';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6482,7 +6482,7 @@ function boshuAutoTick(manual) {
     if (out.added > 0) st.errStreak = 0;
     else {
       var _notes = Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ');
-      var _realFail = /失敗|エラー|error|作れません|複製/.test(_notes);
+      var _realFail = /失敗|エラー|error|作れません/.test(_notes);   /* ★「複製はこの回はもう作りません」「満杯（複製OFF）」は失敗ではない（自分のレビューで発見・2026-09-25） */
       if (_realFail) { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + _notes.slice(0, 160) + '）'; }
       else { st.lastErr = ''; baLog_(st, hw + '：候補 ' + picks.length + '件は全部「対象なし」（既に出ている／見送り）＝エラーには数えない'); }
     }
@@ -6996,7 +6996,7 @@ function baSubShop_(cc, mainShopId) {
 }
 /* 満杯の店の代わりに、2店舗目へ同じ中身のカタログを作る（非公開で作られる→明細を入れてから公開）。
    作れなければ null（＝今までどおり1店舗目で続ける） */
-function baCloneToSub_(cc, base, newName, st) {
+function baCloneToSub_(cc, base, newName, st, hw) {
   var sub = baSubShop_(cc, base.shop_id);
   if (!sub) { baLog_(st, cc + '：2店舗目が登録簿にありません（1店舗目のまま続けます）'); return null; }
   var pr = 0;
@@ -7018,7 +7018,7 @@ function baCloneToSub_(cc, base, newName, st) {
      毎回あたらしい空カタログを作り直していた（実測：TH の2店舗目に親SKU空のカタログが5つ）。 */
   var wantSku2 = String(base.parent_sku || '').trim();
   if (wantSku2) { try { callShop_(sub, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(r.item_id, 10), item_sku: wantSku2 }); } catch (eSk2) { baLog_(st, cc + '：2店舗目のカタログに親SKUを付けられませんでした（' + String(eSk2).slice(0, 160) + '）'); } }
-  try { baCatalogMadeRec_(String(base.hw || baHwsOf_(String(base.name || '') + ' ' + wantSku2)[0] || ''), cc, parseInt(r.item_id, 10), newName, sub, wantSku2, base.weight, pr); } catch (eRc) {}
+  try { baCatalogMadeRec_(String(hw || base.hw || baHwsOf_(String(base.name || '') + ' ' + wantSku2)[0] || ''), cc, parseInt(r.item_id, 10), newName, sub, wantSku2, base.weight, pr); } catch (eRc) {}
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
@@ -7139,7 +7139,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
          満杯かどうかは「公開が枠で弾かれた」事実で覚える（推定で止めない＝[[quota-guard-must-be-fact-based]]）。 */
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
-        var sub1 = baCloneToSub_(cc, base, nm0, st);
+        var sub1 = baCloneToSub_(cc, base, nm0, st, hw);
         if (sub1) {
           BA_FAM_TICK++;
           tgt = sub1; rows.push(tgt); newItem = true;
