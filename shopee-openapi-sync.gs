@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260925-2120';
+var SRC_VER = '20260925-2130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6774,7 +6774,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     BA_CTX_SOLD = soldVar;   /* 読めた時だけ控える（読めなかった時は次の機種でもう一度試す） */
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
-  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems);
+  var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems, baKv_(BA_EN) || {});
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
@@ -6915,8 +6915,8 @@ function boshuAutoExclude_(hw, key, undo, any, ja) {
 }
 function baMark_(ledger, key, ccs, val) { var o = ledger[key] = ledger[key] || {}; ccs.forEach(function (cc) { if (!o[cc] || String(o[cc]).indexOf('skip:') === 0) o[cc] = val; }); }
 // 空白の候補（日本語名があるものだけ＝ヤフオクで探せる）。出している／済み台帳／DL専売／周辺機器を除く
-function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto, buried) {
-  buried = buried || {};
+function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre, famAuto, buried, enC) {
+  buried = buried || {}; enC = enC || {};
   var ccFail = {}; try { ccFail = baKv_('boshu_cc_fail') || {}; } catch (eCf) {}
   soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
@@ -6933,6 +6933,9 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     if (r.dl && !r.sg) return;                           // DL専売（駿河屋に無い）
     if (BA_NG.test(r.ja)) return;
     var k1 = baTmKey_(r.ja), k2 = r.en ? baTmKey_(r.en) : '', k3 = r.key, k4 = r.en ? baKey_(r.en) : '';
+    /* ★2026-09-25 実測：Switch の巡回23回のうち13回が「全部の国に出品済み（対象なし）」で空振り。候補を選ぶ時は日本語名でしか照合せず、
+       英題に訳した後で『もう出している』と分かって捨てていた（写真の判定・翻訳の手間も無駄）。英題の控え（boshu_auto_en）にある英題でも照合する */
+    var _ec = enC[r.key] && enC[r.key].en ? String(enC[r.key].en) : '', k5 = _ec ? baTmKey_(_ec) : '', k6 = _ec ? baKey_(_ec) : '';
     var need = ccs.filter(function (cc) {
       var d = (ledger[r.key] || {})[cc];
       /* ★2026-09-23 Codex指摘：満杯の店の非公開カタログに入った明細は「出している」に数えないのに、台帳の済みだけが残って2店舗目へ出し直されなかった → その明細が埋もれている時は済みと見ない */
@@ -6943,7 +6946,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
          家族が出来れば次の巡回で出す。家族がまだ無ければ baAddBatch_ が rows 無しで即戻る＝接続枠は使わない。 */
       if (!(famRows[cc] || []).length && !famAuto) return false;                                          // その国に家族カタログが無い（★2026-09-23 自動作成が有効なら候補に残す＝入れる時に1つ作る）
       { var cfx = ccFail[hw + '|' + cc]; if (cfx && Date.now() - Date.parse(cfx.at) < 6 * 3600 * 1000) return false; }   /* ★2026-09-23 作れない国は6時間外す（同じ作品の空回り止め） */
-      var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4])) return false;
+      var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4]) || (k5 && s[k5]) || (k6 && s[k6])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
       return true;
     });
