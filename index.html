@@ -2240,12 +2240,29 @@
     if (!line || !isFinite(used)) return null;
     return Math.max(0, Math.floor((line - used) / per));
   };
+  /* ★2026-09-25 本人「ここだけなぜかいつも表示が遅い」「たまに表示されないこともある」。
+     ①開いて2.5秒後に GAS（3台）へ問い合わせてから描くので、返事（数秒〜10秒）を待つ間は空だった
+     ②問い合わせが失敗すると【前に出ていた値まで消して空】にし、次に試すのは5分後だった
+     → 前回の表示（文字・色・時刻）を localStorage に控え、開いた瞬間にそれを出す。失敗しても消さず「時刻（前回）」を添え、1分後にやり直す */
+  function ufPillRestore(el) {
+    try { const o = JSON.parse(localStorage.getItem('smdUfPill') || 'null'); if (!o || !o.t) return false;
+      el.textContent = o.t; el.style.color = o.c || ''; el.style.borderColor = o.b || ''; el.style.background = o.bg || ''; el.style.fontWeight = o.w || '';
+      el.title = '前回（' + new Date(o.at).toTimeString().slice(0, 5) + '）の値です。いま最新を取りに行っています'; el.style.opacity = '0.7'; return true; } catch (_) { return false; }
+  }
+  function ufPillSave(el) { try { localStorage.setItem('smdUfPill', JSON.stringify({ t: el.textContent, c: el.style.color, b: el.style.borderColor, bg: el.style.background, w: el.style.fontWeight, at: Date.now() })); el.style.opacity = ''; } catch (_) {} }
   async function ufQuotaDraw() {
     const el = document.getElementById('uf-quota'); if (!el) return;
     if (!settings.openapiUrl) { el.textContent = ''; return; }
+    if (!el.textContent) { if (!ufPillRestore(el)) el.textContent = '🔌 接続枠 …'; }
     let r = null;
     try { r = await gasCall({ action: 'uf_status' }, 15000); } catch (_) { }
-    if (!r || !r.ok) { el.textContent = ''; return; }
+    if (!r || !r.ok) {
+      /* 消さない。前の値のまま薄くして、1分後にもう一度 */
+      if (!el.textContent || el.textContent === '🔌 接続枠 …') ufPillRestore(el);
+      el.style.opacity = '0.7'; el.title = '最新の残りを取れませんでした（通信・GASの混雑）。表示は前回の値です。1分後にもう一度取りに行きます';
+      clearTimeout(window.__ufRetryT); window.__ufRetryT = setTimeout(() => { try { ufQuotaDraw(); } catch (_) {} }, 60000);
+      return;
+    }
     // ★取った結果は控えておき、🗂しごとパネルなど他の場所は【これを読むだけ】にする。
     //   場所ごとに uf_status を叩くと、枠を見るために枠を食うことになる。
     // ★接続枠(2万回/日)は【Googleアカウント単位】なので、別のGASプロジェクトの消費も足す（2026-09-04）。
@@ -2389,6 +2406,7 @@
       + (used >= cap ? '\n\n⛔ いまは使い切っています。' + ufResetJst() + 'まで待ってください。' : '')
       + (gasBlocked ? '\n\n⛔ 【実測】Googleに「1日のurlfetchが多すぎます」と断られました' + (r.blockedAt ? '（' + new Date(r.blockedAt).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + '）' : '') + '。\n数えた回数（' + used.toLocaleString() + '回）より実態が多いということです＝この数字は当てになりません。\n' + ufResetJst() + 'のリセットまで、背景の自動処理は全部止めています。' : '')
       + topTxt;
+    ufPillSave(el);   /* 次に開いた瞬間に出す控え */
   }
   // ★明細（バリエ）の削除は【同じ商品に同時に2つ流さない】（2026-09-10 Codex全体レビュー）。
   //   詰め直し方式は「下の中身を1つ上へ書き写して、あまった末尾の枠を消す」ので、
@@ -7323,6 +7341,7 @@
     [/^⛔ 本体は断られ中・2台目 残り(\d+)%$/, '⛔ main refused \u00b7 2nd account $1% left'],
     [/^([\u26a0\u26d4]?)Shopee枠 本体 (\d+)%・2台目 (\d+)% 残り$/, '$1Shopee quota \u00b7 main $2% \u00b7 2nd $3% left'],
     [/^Googleアカウントごとの残り$/, 'Left on each Google account'],
+    [/^🔌 接続枠 …$/, '🔌 Quota …'],
     [/^📡 ネットに繋がっていません（(.+)〜）。繋がると自動で読み込み直します$/, '📡 No internet connection (since $1). It will reload automatically when back'],
     [/^⚠️ データベース（Supabase）が応答していません（(.+)〜）。回復すると自動で読み込み直します$/, '⚠️ The database (Supabase) is not responding (since $1). It will reload automatically when it recovers'],
     [/^(.+)：写真 (\d+)件(.*)・⚠保存に失敗（(.*)）$/, '$1: $2 photos$3 · ⚠ save failed ($4)'],
@@ -8688,7 +8707,8 @@
       el.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(pcT); priceCalcRun(); } });
     }); }
   // 枠の残りは開いた時に出し、あとは5分ごとに静かに更新する（この呼び出しは枠を使わない）
-  try { setTimeout(() => { ufQuotaDraw(); setInterval(ufQuotaDraw, 300000); }, 2500); } catch (_) {}
+  try { const _e0 = document.getElementById('uf-quota'); if (_e0 && !_e0.textContent) ufPillRestore(_e0); } catch (_) {}   /* ★開いた瞬間に前回の値 */
+  try { setTimeout(() => { ufQuotaDraw(); setInterval(ufQuotaDraw, 300000); }, 800); } catch (_) {}
   try { aiCostDraw(); } catch (_) {}   // 💴 AI検索の使用額（保存済みの記録を起動時に出す）
   // 📍 見ていた場所を控える（再読み込みで戻すため）。書きすぎないよう300msに1回だけ。
   { let t = 0;
@@ -19487,6 +19507,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '🔌 <b>上のバーの接続枠の表示が遅い・たまに消えるのを直しました</b>（本人「ここだけなぜかいつも表示が遅い」「たまに表示されないこともある」）。開いてからGAS 3台に問い合わせて描いていたので数秒〜10秒空になり、問い合わせに失敗すると前の値まで消して5分後まで空のままでした。開いた瞬間に前回の値を薄く出し、最新が取れたら入れ替えます。失敗しても消さずに1分後にやり直します。',
       '📡 <b>データベースに繋がらない時は、画面の上に理由を出すようにしました</b>（本人「バグったか？」＝ダッシュボードが「読み込み中…」のまま）。ネット自体が切れている時と、データベース（Supabase）側が応えない時を分けて出し、繋がったら消えます。ネットが戻った時は自動で読み込み直します。',
       '🛑 <b>データベース（Supabase）が応えない間は、🤖の巡回と写真集めを休ませるようにしました</b>。20時ごろからデータベースが応答しなくなり（小さな読み込みも20秒で失敗）、叩き続けると回復の邪魔になるためです。巡回の前に小さな読み込みが8秒で返るかを見て、返らなければ20分休みます。当面、3台目の巡回も15分おきに戻しました。',
       '💾 <b>写真の控えが大きくなりすぎて保存が失敗していたのを直しました</b>。控え（5.9MB）を丸ごと書き直していたため、Supabase の時間切れで写真集めの半分が「保存に失敗」で終わり、30分ぶんの成果が消えていました。8つに分けて、変わった分だけ書くようにし、保存の時に代わりの写真を詰めます（10枚まで）。1機種の保存に失敗しても残りの機種は続けます。GASも分けた控えを読めるようにしました（本体v236・2台目v38・3台目v25）。',
