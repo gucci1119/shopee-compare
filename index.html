@@ -19801,6 +19801,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🧮 <b>値付けの見直し：仕入とPayPalを💹利益明細と同じ取り方にそろえ、リクエスト用ページを対象から外しました</b>。仕入は ①手入力 → ②在庫台帳（その注文に紐付いた在庫の合計）→ ③利益計算表、PayPalで受け取った分は利益に足す。「Solicitar Página（R$100の仮の値段）」のようなリクエスト用ページは値段が依頼ごとなので赤字に数えない（実物を見て発覚）。',
       '🏷 <b>出品管理の「売れ行き・値下げ」を「値付けの見直し」に作り直しました</b>（本人「オーダー後の利益で、赤字・利益が薄い／よく売れるけど上げすぎ を視覚的に把握→判断して調整。半自動で」）。売れた注文の<b>実際の利益</b>（💹利益明細と同じ計算・明細ごと）から 🔴赤字／🟠利益が薄い／🟡上げすぎて売れなくなった／🔵値上げの余地 に分け、<b>提案価格と理由</b>を出します。散布図（利益/個×月の販売数）・国と区分のチップ・並び替え・提案価格はその場で直せる。☑して「書き込む」で<b>明細の価格だけ</b>を書きます（本人「必ずカタログ壊さないように」＝明細の追加・削除・並び・名前・画像には触らない／書く直前に最新の出品を読み直し、明細が無い・価格が変わっている行は外す）。変更前→後は「見直しの記録」に残り、その後の売れ行きと利益を比べられます。売れた時の価格は入金の original_price（VNは税込み＝÷1.1で出品価格と一致・実測）。旧ランキングは中の切替に残しました。💹利益明細は損益・入出金から動かしていません（本人指定）。',
       '📦 <b>分析・やることの「🩸マージン漏れ」「👀見られてるのに売れない」と一括の値上げ・値下げを、🏷値付けの見直しへ移しました</b>（2か所に置かない）。分析・やることには移動先へのボタンだけ残しています。',
       '🔢 <b>出品ログの「これまでに自動で出した明細」の表を並び替えられるようにしました</b>（本人「昇順、降順、とあとシリーズ順で」）。見出し（機種・各国・各店・合計・作品数）を押すと多い順⇄少ない順、ボタンで 多い順／少ない順／シリーズ順（任天堂→ソニー→セガ…）。',
@@ -35913,6 +35914,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 売れた時の出品価格＝income.fees.original_price（VNは税込みで入っている＝÷1.1で出品価格と一致。2026-09-26 実測）。
   // 提案価格での利益は【その明細の実測の手取り率】（入金÷売れた時の価格）で見積もる＝手数料の式を推測しない。
   const PA_TAX = { VN: 1.1 };
+  const PA_REQ_RE = /solicitar p[aá]gina|envie-me uma mensagem|request page|send us a message|can'?t find what|リクエスト|様 ?専用|まとめ商品/i;
   const PA_CATS = [
     ['loss', '🔴 赤字', '#d93025', '値上げ'], ['thin', '🟠 利益が薄い', '#e8770a', '値上げ'],
     ['over', '🟡 上げすぎて売れなくなった', '#c9a400', '少し値下げ'], ['room', '🔵 よく売れて値上げの余地', '#1a73e8', '少し値上げ'],
@@ -35935,17 +35937,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { if (!FXD.days) await applyFxRates(); } catch (_) {}
       const since = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
       // ★読めなかった表を空として進めると「赤字0件」と言ってしまう＝どれか1つでも読めなければ止める（数えられない時に0件と言わない）
-      const [orders, inc, costs, inv, lis, logKv] = await Promise.all([
+      const [orders, inc, costs, inv, lis, logKv, sheetKv] = await Promise.all([
         sbGetAll('orders', `select=cc,sn,status,items,order_date,order_ts,shop_id&order_date=gte.${since}`),
         sbGetAll('income', 'select=cc,sn,amount,fees'),
         sbGetAll('costs', 'select=cc,sn,cost'),
         sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
         sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image'),
         sbGetAll('app_kv', 'select=v&k=eq.price_adj_log').catch(() => null),
+        sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'),   // 📗利益計算表（仕入の3番目の控え・PayPal分）＝利益明細と同じ材料
       ]);
+      const sheet = (sheetKv && sheetKv[0] && sheetKv[0].v && sheetKv[0].v.items) || {};
       const incM = new Map((inc || []).map(r => [r.cc + '|' + r.sn, r]));
       const costM = new Map((costs || []).filter(r => r.cost != null).map(r => [r.cc + '|' + r.sn, Number(r.cost)]));
-      const invM = new Map(); (inv || []).forEach(r => { const k = String(r.shopee_sn || '').trim(); if (k && r.price != null && !invM.has(k)) invM.set(k, Number(r.price)); });
+      // 仕入の優先順位は💹利益明細（pfCost）と同じ：①手入力(costs) → ②在庫台帳（その注文に紐付いた在庫の合計）→ ③利益計算表
+      const invM = new Map(); (inv || []).forEach(r => { const k = String(r.shopee_sn || '').trim(); if (k && r.price != null) invM.set(k, (invM.get(k) || 0) + Number(r.price)); });
       const nameIdx = new Map(); (lis || []).forEach(l => { const k = l.cc + '|' + paNorm(l.name); (nameIdx.get(k) || nameIdx.set(k, []).get(k)).push(l); });
       const skip = /CANCEL|UNPAID|INVALID|RETURN/i, DAY = 86400000, now = Date.now();
       const ordMs = o => { const t = Number(o.order_ts) || 0; if (t) return t < 1e11 ? t * 1000 : t; const d = Date.parse(String(o.order_date || '').slice(0, 10) + 'T12:00:00Z'); return isFinite(d) ? d : 0; };
@@ -35964,11 +35969,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (!e) { e = { key, cc: o.cc, item_id: L.item_id, model_id: m ? m.id : 0, shop_id: L.shop_id || null, name: L.name, vari: m ? m.n : '', img: (m && m.img) || L.image || '', status: L.status, stock: m ? m.stock : L.stock, price: Number(m ? m.price : L.price_min) || 0, weightG: L.weight ? Math.round(Number(L.weight) * 1000) : null, sales: [], prof: [] }; g.set(key, e); }
           const q = Number(it.qty) || 1; e.sales.push({ t, q });
           if (items.length !== 1) return;
-          const ic = incM.get(o.cc + '|' + o.sn); let c = costM.get(o.cc + '|' + o.sn); if (c == null) c = invM.get(String(o.sn || '').trim());
+          const ic = incM.get(o.cc + '|' + o.sn), sh = sheet[o.cc + ':' + o.sn] || null;
+          let c = costM.get(o.cc + '|' + o.sn); if (c == null) c = invM.get(String(o.sn || '').trim()); if (c == null && sh && Number(sh.cost) > 0) c = Number(sh.cost);
+          const pp = (sh && Number(sh.paypal_yen)) || 0;   // PayPal分（Shopeeの外で受け取った円）＝利益明細と同じく足す
           const op = ic && ic.fees && Number(ic.fees.original_price) > 0 ? Number(ic.fees.original_price) / (PA_TAX[o.cc] || 1) / q : null;   // 売れた時の出品価格（1個あたり）
           const r = fxRate(o.cc, String(o.order_date || '').slice(0, 10)) || 0;
-          const rec = { t, q, sold: op, k: (ic && op) ? Number(ic.amount) / (op * q) : null };
-          if (ic && c != null && r) rec.p = (Number(ic.amount) * r - Number(c)) / q, rec.c = Number(c) / q;
+          const rec = { t, q, sold: pp ? null : op, k: (ic && op && !pp) ? Number(ic.amount) / (op * q) : null, pp: !!pp };   // PayPal併用は Shopee の値段が一部だけ＝売れた時の価格・手取り率に使わない
+          if (ic && c != null && r) rec.p = (Number(ic.amount) * r + pp - Number(c)) / q, rec.c = Number(c) / q;
           e.prof.push(rec);
         });
       });
@@ -35997,8 +36004,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // 区分
         let cat = 'ok', sug = null, why = '';
         const live = e.status === 1, hasStock = !(e.stock != null && Number(e.stock) <= 0);
+        const isReq = PA_REQ_RE.test(e.name);   // リクエスト用のページ＝値段は依頼ごと（仮の値段で出している）
         const pBase = e.pNow != null ? e.pNow : e.pMed;   // 今の価格で見た利益（無ければ実績）
-        if (!live || e.cost == null || !e.k || !e.price) { cat = 'nodata'; why = !live ? '出品中ではない' : (e.cost == null ? '仕入が分からない（利益表・在庫台帳に無い）' : (!e.k ? '入金がまだ無い' : '今の価格が分からない')); }
+        if (isReq) { cat = 'nodata'; why = 'リクエスト用のページ（値段は依頼ごとに決めるので、見直しの対象外）'; }
+        else if (e.prof.some(p => p.pp) && e.prof.filter(p => p.p != null).every(p => p.pp)) { cat = 'nodata'; why = 'PayPal併用の注文だけ（Shopeeの値段は一部）＝値段で判断できない'; }
+        else if (!live || e.cost == null || !e.k || !e.price) { cat = 'nodata'; why = !live ? '出品中ではない' : (e.cost == null ? '仕入が分からない（利益表・在庫台帳に無い）' : (!e.k ? '入金がまだ無い' : '今の価格が分からない')); }
         else if (pBase < 0) { cat = 'loss'; sug = e.tPrice; why = `今の価格だと1個 ${paYen(pBase)}（実績の中央 ${paYen(e.pMed)}・${e.nP}件）。目標 ${paYen(e.target)}（仕入 ${paYen(e.cost)}×${e.roiT}%）に届く価格へ`; }
         else if (e.target != null && pBase < e.target * 0.7) { cat = 'thin'; sug = e.tPrice; why = `今の価格だと1個 ${paYen(pBase)}＝目標 ${paYen(e.target)} の${Math.round(pBase / e.target * 100)}%。目標に届く価格へ`; }
         else if (hasStock && e.soldBefore && e.price >= e.soldBefore * 1.1 && e.uPrev >= 1 && e.u30 < e.uPrev * 0.5) {
