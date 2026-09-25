@@ -19453,6 +19453,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-25', items: [
+      '🛑 <b>データベース（Supabase）が応えない間は、🤖の巡回と写真集めを休ませるようにしました</b>。20時ごろからデータベースが応答しなくなり（小さな読み込みも20秒で失敗）、叩き続けると回復の邪魔になるためです。巡回の前に小さな読み込みが8秒で返るかを見て、返らなければ20分休みます。当面、3台目の巡回も15分おきに戻しました。',
       '💾 <b>写真の控えが大きくなりすぎて保存が失敗していたのを直しました</b>。控え（5.9MB）を丸ごと書き直していたため、Supabase の時間切れで写真集めの半分が「保存に失敗」で終わり、30分ぶんの成果が消えていました。8つに分けて、変わった分だけ書くようにし、保存の時に代わりの写真を詰めます（10枚まで）。1機種の保存に失敗しても残りの機種は続けます。GASも分けた控えを読めるようにしました（本体v236・2台目v38・3台目v25）。',
       '🖼 <b>写真集めが4日で12回しか動いていなかった真因を直しました</b>（設計は10分ごと）。「同じブラウザの別タブが25分以内に集めていたら譲る」守りが、途中で消えた回（新しい版の自動読み直し）にも効いて次の25分を止めていました。集めている間は心拍を打ち、譲るのは心拍が3分以内の時だけに。あわせて写真集めの最中は自動読み直しを待つようにしました。',
       '🖼 <b>写真集め（候補の供給）を3台に分けました</b>（本人「候補の供給を太くする」「それでよろしく」）。🤖まわりの呼び出しは機種に関係なく2台目へ送っていたため、写真集めの候補出しやAI判定まで2台目の枠に乗り、3台目に余裕があっても2台目の枠で写真集めが絞られていました。機種の担当が3台目なら3台目へ送り、集める間隔は余裕のある台に合わせ、担当の台が85%を超えた機種だけ飛ばします。裏で動かない時の理由も外から読めるようにしました。',
@@ -30038,7 +30039,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!bridgeAvailable) { try { await detectBridge(); } catch (_) {} if (!bridgeAvailable) { lst._baCollectMsg = 'ブリッジ（Tampermonkey）が応答しないので集められない'; _why('no-bridge'); return; } }   // ★ブリッジ無しで GAS・AI を無駄に呼ばない（Codex指摘）
     const cfg = _baCfg || (await baKvGet('boshu_auto_cfg')) || {};
     try { if (cfg.runners) localStorage.setItem('smdBaRunners', JSON.stringify(cfg.runners)); } catch (_) {}   /* ★担当表の写し＝🤖の画面を開いていなくても機種ごとの送り先が決まる */
-    if (!force && cfg.autoCollect === false) { _why('autoCollect off'); return; }   // 手動「🖼 いま集める」は自動OFFでも動く（Codex指摘）
+    if (!force && cfg.autoCollect === false) { _why('autoCollect off'); return; }
+    if (!(await sbHealthy())) { _why('supabase down (20min)'); return; }   // 手動「🖼 いま集める」は自動OFFでも動く（Codex指摘）
     const hws = (cfg.hws || []).filter(h => cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey));
     if (!hws.length) return;
     lst._baCollectBusy = true; lst._baCollectAt = Date.now(); try { localStorage.setItem('smdBaCollectAt', String(Date.now())); } catch (_) {}
@@ -30126,12 +30128,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     } catch (e) { lst._baCollectMsg = '自動収集に失敗: ' + String((e && e.message) || e).slice(0, 80); _why('error: ' + String((e && e.message) || e).slice(0, 120)); try { logAct('出品', '自動出品の写真を自動収集', '', lst._baCollectMsg.slice(0, 80)); } catch (_) {} }
     finally { lst._baCollectBusy = false; }
   }
+  /* ★2026-09-25 20時 Supabase のデータベースが応答しなくなった（小さな読み込みも20秒で失敗・保存庫は 544）。午後から保存の時間切れ（57014）が出ていた＝
+     今日増やした読み込み（巡回7.5分おき・写真集め8機種・6MBの控えを毎回読む）が効いた可能性が高い。止まっている間に叩き続けると回復を邪魔するので、
+     🤖の巡回と写真集めの前に【小さな読み込みが8秒で返るか】を見て、返らなければ20分休む（休みの印は smdSbDownUntil） */
+  async function sbHealthy() {
+    try { const u = Number(localStorage.getItem('smdSbDownUntil') || 0); if (u && Date.now() < u) return false; } catch (_) {}
+    try {
+      const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), 8000);
+      const r = await fetch(SB_URL + '/rest/v1/app_kv?k=eq.boshu_auto_cfg&select=k', { headers: { apikey: settings.sbKey, Authorization: 'Bearer ' + settings.sbKey }, signal: ac.signal });
+      clearTimeout(tm);
+      if (r.ok) return true;
+    } catch (_) {}
+    try { localStorage.setItem('smdSbDownUntil', String(Date.now() + 20 * 60000)); } catch (_) {}
+    return false;
+  }
   async function baWebTick() {
     if (typeof pcIsOwner !== 'function' || !pcIsOwner()) return;
+    if (!(await sbHealthy())) return;   /* データベースが応えない間は🤖を起こさない */
     /* ★2026-09-25 本人「出品巻き返して」。3台目は接続枠に余裕がある（09:06 JST で 4,919/20,000）ので約7.5分おき、2台目は15分おき（枠67%で GAS 側が1回の作品数を自分で絞る）。
        ★「分が一致したら起動」はやめた：裏タブでは setInterval が1分単位にまとめて鳴るので分を跳ばし、09:15/09:17 の回が丸ごと抜けた（実測）。
        前回の起動からの経過時間で決める（裏タブで遅れても次に鳴った時に必ず起動する）。2台目と3台目は同時に叩かない（相手が90秒以内に起動していたら1分待つ） */
-    const slots = [{ key: 'boshuUrl', every: 15, name: '2台目' }, { key: 'boshuUrl2', every: 7.5, name: '3台目' }];
+    const slots = [{ key: 'boshuUrl', every: 15, name: '2台目' }, { key: 'boshuUrl2', every: 15, name: '3台目' }];
     const nowMs = Date.now();
     for (const sl of slots) {
       const url = settings[sl.key]; if (!url || !settings.writeToken) continue;
