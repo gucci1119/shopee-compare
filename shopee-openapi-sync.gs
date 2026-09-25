@@ -6075,6 +6075,7 @@ function baPriceFromTbl_(cfg, cc, weightG, costJpy) {
   return Number(bands[String(c)]) || 0;
 }
 function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Math.round(v / unit) * unit; var d = Math.round(1 / unit); return Math.round(v * d) / d; }
+function baFamMadeRec_(hw, cc, itemId, name) { var m = baKvFresh_('boshu_fam_made') || {}; m[hw + '|' + cc] = { item_id: itemId, name: String(name || ''), at: new Date().toISOString() }; baKvSet_('boshu_fam_made', m); }
 function baNameKey_(n) { return String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
 function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'; var m = String(name || '').match(/[①-⑳]/); return m ? (CIRC.indexOf(m[0]) + 1) : 1; }
 // 時間トリガーの登録（無ければ足す）。setupTriggers() からも呼ぶ＝全部消して作り直す時に落ちないように
@@ -6698,6 +6699,7 @@ function baLoadCtx_(cfg, hw, ccs) {
   var _liveOf = {}; rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
   var _buried = 0, _buriedItems = {};
+  var _madeIds = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id) _madeIds[String(_fm[kk].item_id)] = 1; }); } catch (eFm) {}
   rows.forEach(function (r) {
     if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
     itemCc[String(r.item_id)] = r.cc;
@@ -6707,7 +6709,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
     modelNames[String(r.item_id)] = (ms || []).filter(function (m) { return m && !m.ghost && m.n; }).map(function (m) { return String(m.n).toLowerCase().trim(); });   // ★v184 自動ブレーキ用（入れた明細がまだあるか）
     var fo = famOf(r.cc);
-    var inFam = (fo.sku && String(r.parent_sku || '').trim() === fo.sku) || (!fo.sku && fo.nk && baNameKey_(r.name) === fo.nk);
+    var inFam = (fo.sku && String(r.parent_sku || '').trim() === fo.sku) || (!fo.sku && fo.nk && baNameKey_(r.name) === fo.nk) || !!_madeIds[String(r.item_id)];   /* ★2026-09-25 自分で作ったカタログは親SKUが付かなくても家族 */
     var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
     (ms || []).forEach(function (m) {
       if (!m || m.ghost || !m.n) return;
@@ -7037,21 +7039,29 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
       var sd = seedShopCatalog_({ src_shop_id: other.shop_id, dst_shop_id: dst, item_id: other.item_id, price: pr0, category_id: baCatForCc_(hw, cc) || undefined });
       if (!sd || !sd.ok || !sd.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（他の国から: ' + String((sd && sd.error) || '').slice(0, 70) + '）'); return null; }
-      try { callShop_(dst, '/api/v2/product/update_item', null, 'post', { item_id: sd.item_id, item_name: srcName.slice(0, 120), item_sku: wantSku || undefined }); } catch (eU) {}
+      var _nmLim2 = 120; try { var _mx2 = shopNameLimit_(dst); if (_mx2 > 0) _nmLim2 = Math.min(_mx2, 120); } catch (eNl2) {}
+      var _fitName2 = baFitName_(srcName, _nmLim2);
+      /* ★2026-09-25 ここが黙って失敗すると、親SKUも名前も付かない＝次の巡回で「カタログ群なし」→もう1つ作ろうとして duplicates で落ちる（実測 TW sfc 45218399069）。失敗はログに残し、作ったカタログは app_kv に控える */
+      try { callShop_(dst, '/api/v2/product/update_item', null, 'post', { item_id: sd.item_id, item_name: _fitName2, item_sku: wantSku || undefined }); } catch (eU) { baLog_(st, cc + '：作ったカタログ ' + sd.item_id + ' に名前/親SKUを付けられませんでした（' + String((eU && eU.message) || eU).slice(0, 80) + '）'); }
+      try { baFamMadeRec_(hw, cc, sd.item_id, _fitName2); } catch (eR2) {}
       baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + sd.item_id + '／写真は他の国の同じ機種から）');
-      return { cc: cc, item_id: sd.item_id, name: srcName, shop_id: dst, weight: other.weight, parent_sku: wantSku, models: [{ n: 'test', price: pr0 || 0 }], status: 0, isNew: true };
+      return { cc: cc, item_id: sd.item_id, name: _fitName2, shop_id: dst, weight: other.weight, parent_sku: wantSku, models: [{ n: 'test', price: pr0 || 0 }], status: 0, isNew: true };
     }
   }
   if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（どの国にも ' + hw + ' のカタログがありません）'); return null; }
   var cl = null;
-  try { cl = cloneItem_(src.shop_id, src.item_id, srcName, false); }
+  /* ★2026-09-25 台湾はタイトル60字。他の国の長い家族名のまま複製すると add_item が error_title_len_no_pass で落ちる（実測 09/25 TW ps1・ps3）。店の上限に合わせて切る（seedShopCatalog_ と同じ） */
+  var _nmLim = 120; try { var _mx = shopNameLimit_(src.shop_id); if (_mx > 0) _nmLim = Math.min(_mx, 120); } catch (eNl) {}
+  var _fitName = baFitName_(srcName, _nmLim);
+  try { cl = cloneItem_(src.shop_id, src.item_id, _fitName, false); }
   catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   if (!cl || !cl.item_id) return null;
   /* 親SKUを家族のものに揃える（cloneItem_ は元のカタログの親SKUを引き継ぐので必ず上書きする） */
   if (wantSku) { try { callShop_(src.shop_id, '/api/v2/product/update_item', null, 'post', { item_id: cl.item_id, item_sku: wantSku }); } catch (eS) { baLog_(st, cc + '：親SKUを付けられませんでした（' + String(eS).slice(0, 60) + '）'); } }
   baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）'
     );
-  return { cc: cc, item_id: cl.item_id, name: srcName, shop_id: src.shop_id, weight: src.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
+  try { baFamMadeRec_(hw, cc, cl.item_id, _fitName); } catch (eR) {}
+  return { cc: cc, item_id: cl.item_id, name: _fitName, shop_id: src.shop_id, weight: src.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
 }
 // 1国ぶん：家族カタログの空きに入れる。満杯なら複製して続ける
 function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st, famName, allRowsAll) {
@@ -7074,12 +7084,14 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6));
   if (!famRows.length && cfg.autoFamily !== false && (st.famMade.n >= _fmCap || BA_FAM_TICK >= 1)) {
     baLog_(st, cc + '：' + hw + ' のカタログは' + (BA_FAM_TICK >= 1 ? 'この回はもう作りません（1回1件）' : '今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）'));
+    res.famDeferred = true;   /* ★2026-09-25 作らなかっただけ＝「作れない」ではない。6時間の除外（boshu_cc_fail）に入れない（実測：TH が1回1件の枠を使うと TW が毎回6時間外れていた） */
   } else if (!famRows.length && cfg.autoFamily !== false) {
     var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st, allRowsAll);
     if (made) { st.famMade.n++; BA_FAM_TICK++; }
     if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
   }
   order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
+  if (res.famDeferred && res.note) res.note = res.note.replace(/カタログ群なし/g, 'カタログ待ち（この回は作らない）');
   return res;
 }
 function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series) {
