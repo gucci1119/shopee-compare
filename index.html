@@ -2491,9 +2491,10 @@
     if (!base) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     /* 今日すでに枯れている側は最初から避ける（1回むだに叩かない） */
     if (ufUrlBlocked(base)) { const alt0 = gasPeerUrl(base); if (alt0 && !ufUrlBlocked(alt0)) base = alt0; }
-    const q = Object.assign({}, params, { callback: 'cb' });
+    const q = Object.assign({}, params, { callback: 'cb' }); delete q.__onHop;
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const url = base + (base.includes('?') ? '&' : '?') + qs;
+    try { if (base !== gasUrlFor(params && params.action, params) && typeof params.__onHop === 'function') params.__onHop(base); } catch (_) {}
     // ★Apps Scriptは同一ユーザーのリクエストを直列に処理する。統計更新や注文取得のような
     //   長い処理が走っていると、その裏で投げた呼び出しが404/タイムアウトで落ちる。
     //   1回だけの再試行だと取りこぼすので3回・間隔を伸ばして粘る。
@@ -2533,11 +2534,17 @@
                 const alt = gasPeerUrl(base);
                 if (!alt || ufUrlBlocked(alt)) break;
                 try { toast('⛔ こちらの接続枠が尽きたので、もう1つのGoogleアカウントでやり直します', 4000); } catch (_) {}
-                const q2 = Object.assign({}, params, { callback: 'cb' });
+                try { if (typeof params.__onHop === 'function') params.__onHop(alt); } catch (_) {}
+                const q2 = Object.assign({}, params, { callback: 'cb' }); delete q2.__onHop;
                 const qs2 = Object.keys(q2).filter(k => q2[k] != null && q2[k] !== '').map(k => k + '=' + encodeURIComponent(q2[k])).join('&');
                 const u2 = alt + (alt.includes('?') ? '&' : '?') + qs2;
-                const r2 = await fetch(u2, { credentials: 'omit' });
-                const t2 = await r2.text();
+                /* ★2026-09-27 本人「いつ完了するのかわからない」「ずっとこの状態」＝やり直しの fetch に時間切れが無く、相方の台が混んでいると永遠に待っていた。
+                   本体と同じ時間で打ち切る。書き込みは時間切れ＝「届いたか分からない」（二重に投げない・失敗とも言わない） */
+                const ac2 = new AbortController(); const tm2 = setTimeout(() => ac2.abort(), timeoutMs || 60000);
+                let r2, t2;
+                try { r2 = await fetch(u2, { credentials: 'omit', signal: ac2.signal }); t2 = await r2.text(); }
+                catch (e2) { lastErr = isWrite ? '__DISCONNECTED__もう1つのGoogleアカウントからの返事が時間内に来ませんでした。Shopeeで処理が済んでいる可能性があります' : ('もう1つのGoogleアカウントに繋がりません（' + String((e2 && e2.message) || e2) + '）'); break; }   /* この外側は catch(_) で握られるので throw でなく lastErr に入れて抜ける */
+                finally { clearTimeout(tm2); }
                 const m2 = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t2);
                 if (!m2) break;
                 const res2 = JSON.parse(m2[1]); if (res2 && res2.ok) { ufQuotaDraw(); return res2; }
@@ -2620,13 +2627,14 @@
   }
   // 公式APIで公開/非公開を切替（unlist_item）。unlist=false=公開(NORMAL) / true=非公開(UNLIST)
   // ★カタログの削除（元に戻せない）。ポータル側で二重確認してから呼ぶこと。
-  async function openapiDeleteItem(shopId, itemId) {
+  async function openapiDeleteItem(shopId, itemId, onHop) {
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
-    return gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: shopId, item_id: itemId }, 90000);
+    return gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: shopId, item_id: itemId, __onHop: onHop }, 90000);
   }
   /* ★カタログを1件消す（本人が押して・確認2回・元に戻せない）。出品一覧の国メニューの🗑と、🧹カタログの質の🟰（2026-09-27 本人「つけてくれ」）で共用。
      extra＝確認文に足す行（🟰は「この組に残る出品」など）。消せたら true。自動では呼ばない＝ループの中から呼ばない（[[shopee-never-delete-catalogs]]） */
-  async function deleteCatalogConfirmed(cc, id, name, extra) {
+  async function deleteCatalogConfirmed(cc, id, name, extra, onStep) {
+    const step = t => { try { if (onStep) onStep(t); } catch (_) {} };
     const nm = String(name || '');
     if (!confirm('⚠ ' + cc + ' の商品(item ' + id + ')をShopeeから【削除】します。\n\n' + nm + '\n' + (extra ? '\n' + extra + '\n' : '') + '\n削除すると元に戻せません。売上・注文履歴は残りますが、この出品ページは消えます。\n\n本当に削除しますか？')) return false;
     // ★入力欄にIDを入れておく（手打ち不要・選択してコピーもできる）。消して空にすれば中止できる
@@ -2634,7 +2642,21 @@
     if (String(t || '').trim() !== String(id)) { if (t != null) alert('item IDが一致しないので中止しました'); return false; }
     try {
       const sid2 = shopIdOfListing(cc, +id);
-      const r = await openapiDeleteItem(sid2, id);
+      step('send');
+      let r;
+      try { r = await openapiDeleteItem(sid2, id, () => step('hop')); }
+      catch (e0) {
+        if (!/__DISCONNECTED__/.test(String((e0 && e0.message) || ''))) throw e0;
+        /* 返事が来なかった＝消えたか分からない。GAS は消せたら listings の行も消すので、それを最大5分見て確かめる（Shopee へは投げ直さない） */
+        step('verify');
+        let gone = false;
+        for (let i = 0; i < 20 && !gone; i++) {
+          await new Promise(res => setTimeout(res, 15000));
+          try { const rows = await sbGet('listings', 'select=item_id&item_id=eq.' + encodeURIComponent(id)); gone = Array.isArray(rows) && rows.length === 0; } catch (_) {}
+        }
+        if (!gone) { alert('削除の結果を確認できませんでした（item ' + id + '）。\nShopee 側で済んでいる可能性があります。Seller Center で消えているか見てから、残っていればもう一度押してください。'); return false; }
+        r = { ok: true };
+      }
       if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
       // ★消した商品の記録を残す：操作ログ＋専用の台帳（app_kv deleted_listings・最新500件）
       const snap = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(id)) || {};
@@ -20163,6 +20185,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '⏳ <b>🗑消すを押したあと、いま何をしているかをボタンに出すようにしました</b>（本人「いつ完了するのかわからない」「ずっとこの状態」）。「削除中 ◯秒」→（本体の枠切れなら）「2台目でやり直し中」→ 返事が来ない時は「結果を確認中（最大5分）」。もう1つのアカウントへのやり直しに時間切れが無く、相手が混んでいると永遠に待っていたのを直しました（時間切れ＝消えたか分からない扱いで、DB から行が消えたかを見て確かめる・Shopee へは投げ直さない）。',
       '🔁 <b>🗑消すなどの書き込みが「接続枠が尽きているので更新できません（もう一方のアカウントが更新します）」で止まるのを直しました</b>（本人「これ結局削除できるってこと？」）。本体の枠が尽きた日に、店のトークンの更新を本体が断っていた（Shopee には届いていない）。この断りも Google の枠切れと同じ扱いにして、2台目・3台目へ自動でやり直します。',
       '🐛 <b>🧹カタログの質が全部0になることがあったのを直しました</b>（本人「なぜか表示されなくなりました。バグ？」）。ポータルを読み込み直した直後に出品の読み込みが2本重なると、追い越された方が待たずに戻り、空の出品で表を作っていました。追い越されたら新しい方の読み込みを待つように（出品を読む全画面に効く）。読めていない時は0ではなく「読み込めていません＋🔄」を出します。',
       '🕒 <b>🟰の「出品日」を「カタログ作成日時」に</b>（本人「いつ新規作成されたカタログか分かるように」）。日付だけだったのを 日本時間の日時＋◯日前 にし、組の中で一番新しく作られた出品に「この組で一番新しい」を付けました（📋コピーも日時に）。明細を足しても変わらない＝カタログを作った時点です。',
@@ -31303,9 +31326,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const extra = 'この出品：販売 ' + Math.max(sold(l), Number(s0.sale) || 0) + '・いいね ' + (s0.likes == null ? '?' : s0.likes) + '・閲覧 ' + (s0.views == null ? '?' : s0.views) + '・' + (Number(l.status) === 8 ? '非公開' : '公開') + '\n'
         + (items[0] === l ? '⚠ これは「残す目安」の出品です（組の中で販売・いいね・閲覧が一番）。\n' : '')
         + 'この組に残る出品：' + rest.map(x => '#' + x.item_id + '（販売 ' + Math.max(sold(x), Number(st(x).sale) || 0) + '）').join('、');
-      b.disabled = true;
-      const ok = await deleteCatalogConfirmed(cc, id, l.name, extra);
-      if (!ok) { b.disabled = false; return; }
+      /* 押したあと何が起きているかを出し続ける（本人「いつ完了するのかわからない」「ずっとこの状態」） */
+      const t0 = Date.now(); let stage = '削除中'; b.disabled = true;
+      const tick = () => { b.textContent = '⏳ ' + stage + ' ' + Math.round((Date.now() - t0) / 1000) + '秒'; };
+      const tmr = setInterval(tick, 1000);
+      const ok = await deleteCatalogConfirmed(cc, id, l.name, extra, st2 => { stage = st2 === 'hop' ? '2台目でやり直し中' : st2 === 'verify' ? '結果を確認中（最大5分）' : '削除中'; tick(); });
+      clearInterval(tmr);
+      if (!ok) { b.disabled = false; b.textContent = '🗑 消す'; return; }
       cqBuild(); cqDraw();
     }));
     box.querySelector('#cq-dup-copy').addEventListener('click', () => {
