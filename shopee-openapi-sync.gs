@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1730';
+var SRC_VER = '20260926-1740';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2272,8 +2272,10 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
    BR の返金の44%が「届いていない」・22%が「気が変わった」で、申請は注文から中央値21日（届くのは約45日後）＝遅さが理由。
    説明文の【一番上】に到着目安（ポルトガル語＋英語）を足す。印（DNOTE_MARK）が既にあれば何もしない。書く直前に読み直す・
    拡張形式（extended）の説明文は触らない（形が違う）・文字数の上限を超えるなら足さない。 */
-var DNOTE_MARK = 'PRAZO DE ENTREGA';
-var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva em média 30 a 45 dias (cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 30–45 days (about 1.5 months) after shipping.\n\n' };
+var DNOTE_MARK = '⏰ Delivery time:';   /* BR（英語の行）も他国も同じ印＝既に足してあれば二重にしない */
+var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva em média 30 a 45 dias (cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 30–45 days (about 1.5 months) after shipping.\n\n',
+  /* ★本人「他国にも一応必要。ブラジル版とブラジル以外版に分けましょう」「約2〜3週間」：英語のみ */
+  PH: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', SG: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', MY: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', VN: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TH: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TW: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n' };
 var DNOTE_MAXLEN = 2900;
 function dnoteTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dnoteTick') ScriptApp.deleteTrigger(t); }); }
 function dnoteApply_(shopId, cc, itemIds, dry) {
