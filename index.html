@@ -2973,7 +2973,17 @@
   async function apiShipOneSilent(cc, sn, shopId) {
     let param;
     try { param = await openapiShipParam(shopId, sn); }
-    catch (e) { return { ok: false, error: '発送情報取得失敗: ' + (e.message || e) }; }
+    catch (e) {
+      const em = String(e.message || e);
+      /* ★2026-09-26 本人「なぜ失敗するのか？」「なんかすでに処理されてるっぽい」：10:58 に11件とも手配済み→Chrome が落ちて読み直した後、
+         ポータルに手配済みがまだ入っておらず、同じ11件にもう一度押して全部「失敗」と出た。1件ずつの 📦発送手配（apiShipFlow）と同じく、
+         「not eligible for rescheduling」＝もう Shopee 上で手配済み として数え、表示も手配済みに直す（失敗にしない） */
+      if (/not eligible for rescheduling|already|has been (arranged|shipped)/i.test(em)) {
+        try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
+        return { ok: false, already: true };
+      }
+      return { ok: false, error: '発送情報取得失敗: ' + em };
+    }
     const info = (param && param.info_needed) || {};
     const has = k => info && Object.prototype.hasOwnProperty.call(info, k);
     const hasPickup = has('pickup'), hasDropoff = has('dropoff'), hasNonInteg = has('non_integrated');
@@ -3068,14 +3078,14 @@
     const ccSummary = Object.keys(byCcN).map(cc => cc + ' ' + byCcN[cc] + '件').join('・');
     if (!confirm(`🎯 選択した ${items.length}件（${ccSummary}）をShopeeへ一括発送手配（arrange shipment）します。\n\n書込先: ${gw.summary}\n\n⚠️ 実際にSLS伝票が発行される操作です。越境SLSで方式が合わない/非統合の注文は自動でスキップ・失敗表示します。実行しますか？`)) return;
     const btn = document.getElementById('ord-bulkship'); const orig = btn ? btn.innerHTML : ''; if (btn) btn.disabled = true;
-    let ok = 0, skip = 0, fail = 0; const errs = [];
+    let ok = 0, skip = 0, fail = 0, already = 0; const errs = [];
     const mp = makeProgressMeter('📮 一括発送手配中…', items.length, '#ee4d2d');
     const stat = () => '<span style="color:#1a7f37">✅' + ok + '</span> <span style="color:#a8650a">⏭' + skip + '</span> <span style="color:#d93025">❌' + fail + '</span>';
     // ★並列プール（同時3件・レート制限に配慮した安全上限）。各注文は get_shipping_parameter→ship_order の2API＝1件約10秒なので、並列で全体を大幅短縮
     const CONC = 3; let done = 0, idx = 0;
     const runOne = async (it) => {
       const r = await apiShipOneSilent(it.cc, it.sn, it.shop);
-      if (r.ok) ok++; else if (r.skipped) { skip++; errs.push('⏭ ' + it.cc + ' ' + it.sn + ': ' + r.reason); } else { fail++; errs.push('❌ ' + it.cc + ' ' + it.sn + ': ' + (r.error || '失敗')); }
+      if (r.ok) ok++; else if (r.already) { already++; } else if (r.skipped) { skip++; errs.push('⏭ ' + it.cc + ' ' + it.sn + ': ' + r.reason); } else { fail++; errs.push('❌ ' + it.cc + ' ' + it.sn + ': ' + (r.error || '失敗')); }
       done++; mp.set(done, it.cc + ' ' + it.sn, stat());
       if (btn) btn.textContent = `📮 手配中… ${done}/${items.length}`;
     };
@@ -3083,9 +3093,9 @@
       while (idx < items.length) { const my = idx++; await runOne(items[my]); }
     }));
     mp.set(items.length, '✅ 完了', stat());
-    try { logAct('注文', 'API一括発送手配', '', `成功${ok}/スキップ${skip}/失敗${fail}（計${items.length}）`); } catch (_) {}
+    try { logAct('注文', 'API一括発送手配', '', `成功${ok}/手配済みだった${already}/スキップ${skip}/失敗${fail}（計${items.length}）`); } catch (_) {}
     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
-    alert(`🎯 一括発送手配 完了\n\n✅ 成功: ${ok}件\n⏭ スキップ: ${skip}件\n❌ 失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 12).join('\n') + (errs.length > 12 ? `\n…他${errs.length - 12}件` : '') : ''}\n\n成功分は🖨️で伝票を印刷→荷物に貼って倉庫へ発送してください。`);
+    alert(`🎯 一括発送手配 完了\n\n✅ 成功: ${ok}件\n☑️ もう手配済みだった: ${already}件（表示を直しました）\n⏭ スキップ: ${skip}件\n❌ 失敗: ${fail}件${errs.length ? '\n\n' + errs.slice(0, 12).join('\n') + (errs.length > 12 ? `\n…他${errs.length - 12}件` : '') : ''}\n\n成功分は🖨️で伝票を印刷→荷物に貼って倉庫へ発送してください。`);
     mp.remove();
     try { items.forEach(x => ordSelSet().delete(ordSelKey(x.cc, x.sn))); } catch (_) {}   // 手配した分は選択から外す
     renderOrders();
@@ -6117,6 +6127,7 @@
     "🌏 国横断で横並び": "🌏 Compare across countries",
     "価格をまとめて書き換え": "Rewrite prices in bulk",
     "🆕 各国まとめ編集": "🆕 Bulk edit all countries",
+    "☑️ もう手配済みだった": "☑️ Already arranged",
     "🤖 自動出品": "🤖 Auto-listing",
     "📚 母数を開く": "📚 Open coverage",
     "⌘K でも同じように探せます": "You can search the same list with ⌘K",
@@ -19927,6 +19938,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '📦 <b>一括発送手配で「もう手配済み」を失敗と数えていたのを直しました</b>（本人「なぜ失敗するのか？」）。10:58 に11件とも手配済み→Chrome が落ちて読み直した後、ポータルに手配済みがまだ入っておらず、同じ11件をもう一度押して「失敗 11件（not eligible for rescheduling）」と出ていました。Shopee 側は1回だけ正しく手配されています。1件ずつの📦発送手配と同じく「☑️ もう手配済みだった」として数え、表示も手配済みに直します。',
+      '🧭 <b>出品管理の「🤖 自動出品」タブ</b>・<b>🧭やりたいこと</b>を追加済み（上の項目参照）。',
       '🤖 <b>出品管理に「🤖 自動出品」タブを作りました</b>（本人「空白を自動で出す は母数の中だと分かりにくい。もっと上のレイヤーに。ここからアクセスできるのは残した上で」）。中身は母数の画面の「🤖 空白を自動で出す」と同じ（設定・進み具合・公開待ち・写真を直す）で、母数からも今までどおり開けます。🧭やりたいこと・⌘K の「まだ出していない作品を自動で出す」もこのタブへ飛ぶようにしました。',
       '🔁 <b>写真の見直しで「宣材と分かったのに差し替えに失敗した」明細を放置しないようにしました</b>。これまでは失敗すると30日間見直さず、「⚠️おかしいものだけ選ぶ」にも出ませんでした（実例：仮面ライダー BRW II Premium の6か国）。→ 6時間後にもう一度見直し、それまでは「おかしいものだけ選ぶ」で拾えます。',
       '🖼 <b>🤖の写真判定に「四隅の確認」を足しました</b>（本人「この辺もイメージ画像になってる」＝Football Manager 26・Kippers English 等）。Haiku は平らなジャケット画像にも「実物の箱」を付けていて、通っていた写真を目で見たら6枚中4枚が出してはいけない写真でした。Haiku が通した写真だけ、上位モデル（Sonnet 5）に<b>画像の四隅に何が写っているか</b>を聞き、3隅以上が絵柄なら宣材として落とします（実測26枚すべて正解・1枚 約0.7円）。基準の版を上げたので<b>出品済みの🤖明細の写真も順に見直され</b>、宣材なら差し替え（代わりが無ければ「写真を直す」に並ぶ）。ポータルの 🔍 も同じ判定です。「⚠️おかしいものだけ選ぶ」に &lt;b&gt; がそのまま出ていたのも直しました。',
