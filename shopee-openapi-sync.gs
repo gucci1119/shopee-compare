@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1030';
+var SRC_VER = '20260926-1150';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2063,6 +2063,7 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
   var bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean);
   if (bids.length !== PROMO_IMGS.length) { A = promoSetup_(); bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean); }
+  var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; });
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
   var v = (dry || noVideo) ? '' : promoVideoFor_(shopId, cc, A, false);
@@ -2071,15 +2072,19 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   var list = ((b.response || {}).item_list) || [], out = [], found = {};
   list.forEach(function (it) {
     found[it.item_id] = 1;
-    var cur = ((it.image || {}).image_id_list || []).slice(), have = {};
-    cur.forEach(function (x) { have[x] = 1; });
-    var cand = bids.filter(function (x) { return !have[x]; });
-    for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* ランダム */
-    var add = cand.slice(0, Math.max(0, 9 - cur.length));
-    var rec = { item_id: it.item_id, status: it.item_status, cur: cur.length, add: add.length, hadVideo: !!((it.video_info || []).length) };
+    var cur0 = ((it.image || {}).image_id_list || []).slice();
+    /* ★本人「古い版を手で入れた出品がある。見分けて工夫して」：多くの出品に共通して入っていた【お店の画像】（古い版＋同じ絵柄の別の番号）は
+       promo_assets.strip に控えてある（2026-09-26 目で見て51種類を仕分け）。それと今回の6枚を外し、残った商品の写真だけを元の順で前に詰める */
+    var cur = cur0.filter(function (x) { return !strip[x] && bids.indexOf(x) < 0; });
+    var cand = bids.slice();
+    for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* 空きが足りない時は6枚からランダムに */
+    var add = cand.slice(0, Math.max(0, 9 - cur.length)).sort(function (a, b2) { return bids.indexOf(a) - bids.indexOf(b2); });   /* 入れる分は決まった順（p1→p6）で後ろへ */
+    var next = cur.concat(add), same = next.length === cur0.length && next.every(function (x, k) { return x === cur0[k]; });
+    var rec = { item_id: it.item_id, status: it.item_status, before: cur0.length, keep: cur.length, removed: cur0.length - cur.length - cur0.filter(function (x) { return bids.indexOf(x) >= 0; }).length, add: add.length, hadVideo: !!((it.video_info || []).length) };
     if (dry) { rec.dry = 1; out.push(rec); return; }
     var body = { item_id: it.item_id };
-    if (add.length) body.image = { image_id_list: cur.concat(add) };
+    if (!same && next.length) body.image = { image_id_list: next };
+    rec.from = cur0; rec.to = body.image ? next : cur0;   /* 戻せるように前後を返す（ポータルが控える） */
     if (v) body.video_upload_id = [v];
     if (!body.image && !body.video_upload_id) { rec.ok = true; rec.skip = 'nothing'; out.push(rec); return; }
     var r = callShop_(shopId, '/api/v2/product/update_item', null, 'post', body);
