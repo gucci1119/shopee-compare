@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1815';
+var SRC_VER = '20260926-1835';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2273,7 +2273,7 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
    説明文の【一番上】に到着目安（ポルトガル語＋英語）を足す。印（DNOTE_MARK）が既にあれば何もしない。書く直前に読み直す・
    拡張形式（extended）の説明文は触らない（形が違う）・文字数の上限を超えるなら足さない。 */
 var DNOTE_MARK = '⏰ Delivery time:';   /* BR（英語の行）も他国も同じ印＝既に足してあれば二重にしない */
-var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva em média 30 a 45 dias (cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 30–45 days (about 1.5 months) after shipping.\n\n',
+var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva de 14 a 45 dias (de 2 semanas a cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 14–45 days (2 weeks to 1.5 months) after shipping.\n\n'   /* ★本人「BRは早い時もあるので、2週間〜1.5ヶ月の方がいい」「1週間で着くことはなさそう」 */,
   /* ★本人「他国にも一応必要。ブラジル版とブラジル以外版に分けましょう」「約2〜3週間」：英語のみ */
   PH: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', SG: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', MY: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', /* ★本人「その通り」（TH/VN/TW は現地語＋英語） */ VN: '⏰ THỜI GIAN GIAO HÀNG: hàng được gửi từ Nhật Bản, mất khoảng 14–21 ngày (2–3 tuần) sau khi gửi. Vui lòng theo dõi đơn hàng bằng mã vận đơn. Cảm ơn bạn đã kiên nhẫn chờ đợi! 🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TH: '⏰ ระยะเวลาจัดส่ง: สินค้าส่งจากญี่ปุ่น ใช้เวลาประมาณ 14–21 วัน (2–3 สัปดาห์) หลังจากจัดส่ง สามารถติดตามพัสดุได้ด้วยเลขพัสดุ ขอบคุณสำหรับความอดทนรอ 🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TW: '⏰ 到貨時間：商品從日本寄出，寄出後約 14–21 天（2–3 週）送達。請使用物流追蹤碼查詢包裹。感謝您的耐心等候！🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n' };
 var DNOTE_MAXLEN = 2900;
@@ -6438,7 +6438,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (BA_AI_DOWN || ufTotal_() > ufStopLine_() - 7000) return;   /* AIが使えない／枠が少ない時は見直しをしない。★線は【そのアカウントの線】（子機は別枠）。★2026-09-26 2500→7000：見直し（出品済み写真の再判定）が枠を食い、13:35〜16:00 新しい出品が0件になった（本人「13:30から止まっている？」「1日15点を下回りたくない」）＝新しい出品の分を7000残す */
   /* ★2026-09-20 ここを 300 固定にしていたため、写真の見直しが【1日300回】で頭打ちになり、見直し対象145件に対して0件しか見ずに止まっていた。本番の出品と同じ枠にそろえる */
   var cap = (cfg && Number(cfg.judgeCap)) || (Math.max(1, Number(cfg.dailyMax) || 100) * 6);
-  var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
+  var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {}; var _rp0 = {}; Object.keys(rp.items).forEach(function (k) { _rp0[k] = rp.items[k]; });   /* 書く時に「この回に変えた明細だけ」を新しい値へ重ねる */
   /* ★2026-09-20 この回で明細を足す機種のカタログは触らない：画像の差し替え（update_tier_variation）の直後に add_model すると、Shopee 側の明細の並びがまだ古く「Model tier_index error」で1件も入らない（3:31 の GC で実測） */
   var nowMs = Date.now();
   var todo = (st.added || []).filter(function (a) {
@@ -6458,7 +6458,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
      枠が少ない時は上の `ufTotal_() > ufStopLine_() - 2500` で丸ごと見送るので、増やしても枠は守られる */
   var rpMax = Math.max(1, Math.min(80, Number(cfg && cfg.rephotoPerTick) || 40));
   for (var i = 0; i < todo.length && n < rpMax; i++) {
-    if (Date.now() - tStart > 150000 || Date.now() - t0 > 200000) break;
+    if (Date.now() - tStart > 45000 || Date.now() - t0 > 100000) break;   /* ★2026-09-26 見直しが回の時間（新規は t0+137秒で打ち切り）を食い、新規が2件しか入らなかった（07:20Z 実測 90秒）。1回45秒・開始100秒まで */
     var a = todo[i], id = a.item_id + '#' + a.en, hw = String(a.hw || '');
     var ex = { key: a.key, ja: a.ja || '', en: a.en || '', hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
     var curUrl = /^https?:/.test(String(a.img)) ? String(a.img) : 'https://down-cvs-sg.img.susercontent.com/' + a.img;
@@ -6486,7 +6486,11 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   try { var cnt = { ok: 0, ng: 0, wait: 0, ver: BA_RULE_VER, todo: todo.length, at: new Date().toISOString() };
     Object.keys(rp.items).forEach(function (k) { var m2 = rp.items[k]; if (!m2 || Number(m2.v || 0) !== BA_RULE_VER) return; if (m2.s === 'keep') cnt.ok++; else if (m2.s === 'replaced') cnt.ng++; else if (m2.s === 'nophoto') cnt.wait++; });
     st.rephoto = cnt; } catch (eC) {}
-  if (changed) { try { baKvSet_('boshu_auto_rephoto', rp); } catch (eR) {} try { baKvSet_(BA_JUDGED, judged); } catch (eJ) {} }
+  if (changed) {
+    /* ★2026-09-26 2台（child/child2）とポータルが丸ごと書いて相手の結果を消していた（H.A.W.X. 2 を 07:04Z と 07:11Z に2回見直し）。変えた明細だけ新しい値に重ねる */
+    try { var _rpF = baKvFresh_('boshu_auto_rephoto') || {}; _rpF.items = _rpF.items || {}; Object.keys(rp.items).forEach(function (k) { if (rp.items[k] !== _rp0[k]) _rpF.items[k] = rp.items[k]; }); baKvSet_('boshu_auto_rephoto', _rpF); } catch (eR) {}
+    try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, baKvFreshMany_([BA_JUDGED]), 6000)); } catch (eJ) {}
+  }
 }
 /* 🛍 Yahoo!フリマ（paypayfleamarket.yahoo.co.jp）を GAS から探す（2026-09-23 本人「ヤフオクではなく、Yahoo!フリマでは無理か？」）。
    ヤフオク（auctions.yahoo.co.jp）は Google の IP を弾き続けるが、フリマ側は別のサイト。ページの __NEXT_DATA__ に商品が入っているので
@@ -6780,7 +6784,7 @@ function boshuAutoTick(manual) {
     // 機種は順番に回す（1回1機種）。全部「もう無い」なら終わり
     /* ★2026-09-23 本人「Switch2、Switchから出してってほしい」。機種は順ぐりに回しているので、17機種だと Switch は17回に1回しか来ない。
        cfg.hwPriority（既定 switch2・switch）を【1回おき】に先に回す＝倍のペースで当たる。候補が無ければ普段どおりの順ぐりに落ちる。 */
-    var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [];
+    var cur = Number(st.cursor) || 0, hw = null, tried = 0, cand = [], _fb = null;
     /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して。毎日絶対に、あの機能が止まるぐらい使わないで」
        出すペースを上げた（perTick 10→20）ので、**枠の減り方に応じて自分で絞る**。
        UF_STOP(15,000) を分母にして、使った割合で1回の作品数を落とす。止まる前に細くなるので、
@@ -6816,10 +6820,14 @@ function boshuAutoTick(manual) {
       ccsHw = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : ccs;   // 機種ごとの「出す国」（無ければ既定）
       var ctx = baLoadCtx_(cfg, hw, ccsHw); famRows = ctx.famRows; listedByCc = ctx.listedByCc; allRows = ctx.allRows; ledger = ctx.ledger;
       cand = ctx.cand;
-      if (cand.length) break;
+      /* ★2026-09-26 写真の揃った候補が無く、ヤフオク（GAS）も休み／1時間の上限の機種は後回し（例：psp は yahoowait 156件で空振り）。4機種まで探して無ければ最初の候補ありの機種に戻る */
+      var _yhCap = !!(st.yh && st.yh.h === new Date().toISOString().slice(0, 13) && st.yh.n >= BA_YAHOO_PER_HOUR);
+      if (cand.length && ((yahooOk && !_yhCap) || tried >= 4 || cand.some(_readyP))) break;
+      if (cand.length) { if (!_fb) _fb = { hw: hw, fam: fam, ccsHw: ccsHw, ctx: ctx }; hw = null; continue; }
       baLog_(st, hw + '：空白の候補なし（全部出しているか、日本語名が無い）');
       hw = null;
     }
+    if (!hw && _fb) { hw = _fb.hw; fam = _fb.fam; ccsHw = _fb.ccsHw; ctx = _fb.ctx; famRows = ctx.famRows; listedByCc = ctx.listedByCc; allRows = ctx.allRows; ledger = ctx.ledger; cand = ctx.cand; }
     st.cursor = cur;
     if (!hw) { st.lastMsg = '出せる空白がありません'; return finish_(st.lastMsg); }
     out.hw = hw;
@@ -6851,7 +6859,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-22 写真が全部NGだった作品の記録（GASだけが書く）。ポータルの写真集めはこれを見て【NGの写真を除いて】集め直す。
        前は pre に写真が残ったまま＝ポータルは「写真あり」と見なして二度と探さず、GASはヤフオク（弾かれて休み）待ちのまま止まっていた */
     var preRej = baKv_('boshu_auto_prerej') || {}, preRejChanged = false;
-    var judged = baKv_(BA_JUDGED) || {}; if (Object.keys(judged).length > 3000) judged = {};
+    var judged = baKv_(BA_JUDGED) || {}; { var _jk = Object.keys(judged); if (_jk.length > 6000) { var _jt = {}; _jk.slice(_jk.length - 5000).forEach(function (x) { _jt[x] = judged[x]; }); judged = _jt; } }   /* ★2026-09-26 3,000件で {} に捨てていた＝判定をやり直し続けていた（今日 3,234回判定・控え 1,737件）。捨てずに削る */
     if (baRunnerId_() === 'child' || baRunnerId_() === 'main') try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
     try { baPartialRepair_(st); } catch (ePa) { baLog_(st, '途中止まりの明細の直しに失敗: ' + String(ePa).slice(0, 100)); }
@@ -6871,6 +6879,9 @@ function boshuAutoTick(manual) {
     if (BA_CART_ONLY_HW[hw] || hw === 'fc' || hw === 'sfc') highCost = Math.round(highCost * 0.8);   /* 本人 2026-09-20「ファミコンは3,500円か4,000円くらいまででいい」＝5,000×0.8＝4,000円 */
     var highNeed = minHits + 3;   /* 高額品は「出品が minHits+3 件以上ある」時だけ出す */
     var picks = [];
+    /* ★2026-09-26 写真の揃った作品から試す（段の中は今までの順＝他国で売れた順）。0＝控えの写真にこの機種・この作品のAI OK／1＝控えの写真あり・NG記録なし／2＝写真なし・全部NG（ヤフオク待ち） */
+    { var _tierOf = function (c0) { var p0 = pre[c0.key]; if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return 2; var rj0 = preRej[c0.key]; if (rj0 && String(p0.img).replace(/\?.*$/, '') === String(rj0.img || '')) return 2; return baPhotoOrder_([p0].concat(p0.alts || []), hw).slice(0, 10).some(function (a) { return String(judged[String(a.img || '').replace(/\?.*$/, '') + '|v13|' + hwWord + '|' + c0.key] || '').indexOf('ok:') === 0; }) ? 0 : 1; };
+      cand = cand.map(function (c0, ix) { return { c: c0, ix: ix, t: _tierOf(c0) }; }).sort(function (a, b) { return (a.t - b.t) || (a.ix - b.ix); }).map(function (o) { return o.c; }); }
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
@@ -6969,7 +6980,7 @@ function boshuAutoTick(manual) {
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
     /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
     var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
-    try { if (baSig_(judged) !== _tkSig0.J) baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 3500)); } catch (eJ) {}
+    try { if (baSig_(judged) !== _tkSig0.J) baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 6000)); } catch (eJ) {}
     try { if (baSig_(enCache) !== _tkSig0.E) baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); if (baSig_(sameCache) !== _tkSig0.S) baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 12000)); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
     if (preRejChanged) { try { preRej = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 160)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
@@ -7629,7 +7640,7 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   var res = { added: 0, skipped: 0, note: '' };
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
-    var d = (ledger[p.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0) return false;
+    var d = (ledger[p.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0 && !(p.need && p.need.indexOf(cc) >= 0)) return false;   /* ★2026-09-26 候補づくり（baCandidates_）は満杯の店の非公開カタログに埋もれた明細を「未出品」と見て need に入れるのに、ここで台帳の済みで捨てていた＝ds/3ds の18作品が毎回7か国「対象なし」 */
     var k = baTmKey_(p.en); if (listedSet[k] || listedSet[baKey_(p.en)] || listedSet[baTmKey_(p.ja)] || listedSet[p.key]) { baSet_(ledger, p.key, cc, 'skip:dup'); baSkipRec_(st, hw, cc, p, 'dup'); return false; }
     return true;
   });
