@@ -10942,8 +10942,22 @@
   // 1000行制限を超えて全件読む。まず1ページ＋総件数を取り、残りは並列取得（逐次より大幅に速い）
   /* ★2026-09-24 本人「xx%みたいな表示も欲しい」＝ページ送りの進み具合を知らせる口。呼ぶ側が _sbProgress に関数を置く（table, 読めた行, 全行） */
   let _sbProgress = null;
+  /* ★2026-09-27 本人「あぶねー、これ片方消したらもう一個も消えるんちゃう？」「Item ID同じやし」＝🟰に同じ出品が2行並んだ。
+     真因＝1000件ずつのページ読みで、並び順（order=create_time など）が同じ値の行どうしの順番が毎回変わる。
+     ページの境目で同じ行が2回入り、別の行が抜ける（実測：listings を create_time だけで並べると 6,477行・ユニーク 6,476＝1件重複・1件欠落／item_id を足すと 6,476行ぴったり）。
+     → 何ページも読む時は、並び順の最後に【その表の主キー】を必ず足す（並びの意味は変わらない・同じ値の中の順番が決まるだけ）。主キーは PostgREST の定義から取った実物 */
+  const SB_PK = { accounts: ['id'], activity_log: ['id'], app_kv: ['k'], chat_messages: ['id'], chat_outbox: ['id'], chat_raw: ['id'], costs: ['cc', 'sn'], customer_notes: ['buyer'], customers: ['cc', 'sn'], daily_stats: ['cc', 'day'], expenses: ['id'], fx_rates: ['cc'], income: ['cc', 'sn'], inventory: ['item_id'], listing_catalog: ['id'], listing_jobs: ['id'], listing_log: ['id'], listing_stats_history: ['item_id', 'snap_date'], listings: ['cc', 'item_id'], order_adjustments: ['adj_id'], order_issues: ['cc', 'sn'], orders: ['cc', 'order_id'], payouts: ['payout_id'], products: ['cc', 'item_id'], returns: ['return_sn'], tasks: ['id'] };
+  function sbStableOrder(table, qs) {
+    const pk = SB_PK[table]; if (!pk) return qs;
+    const m = /(^|&)order=([^&]*)/.exec(qs || '');
+    if (!m) return (qs ? qs + '&' : '') + 'order=' + pk.map(c => c + '.asc').join(',');
+    const cols = m[2].split(',').map(x => x.split('.')[0]);
+    const add = pk.filter(c => cols.indexOf(c) < 0);
+    if (!add.length) return qs;
+    return qs.replace(m[0], m[1] + 'order=' + m[2] + ',' + add.map(c => c + '.asc').join(','));
+  }
   async function sbGetAll(table, qs) {
-    qs = acctQs(table, qs);
+    qs = sbStableOrder(table, acctQs(table, qs));
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
     const hdr = (extra) => ({ apikey: key, Authorization: 'Bearer ' + key, ...extra });
@@ -20188,6 +20202,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '🧷 <b>1000件を超える表の読み込みで、同じ行が2回入り別の行が抜けることがあったのを直しました</b>（本人「片方消したらもう一個も消えるんちゃう？」「Item ID同じやし」）。🟰に同じ Item ID の出品が2行並んでいました。ページごとに読む時、並べ替えの値が同じ行（例：同じ作成時刻の一括出品）の順番が毎回変わるのが原因（実測：出品 6,476件を読むと1件重複・1件欠落）。何ページも読む時は並びの最後に表の主キーを足すように、全部の表で直しました（注文・入金・在庫なども同じ読み方）。🟰は同じ Item ID を組にしないようにもしました。',
       '🩹 <b>🗑消すが「削除に失敗: signal is aborted without reason」と出るのを直しました</b>（本人「エラー？」）。90秒で待つのをやめただけで、実際は Shopee で消えていました（TH 47361319678）。書き込みの時間切れは「失敗」ではなく「結果を確認中」にして、DB から消えたかを見て確かめます。',
       '⏳ <b>🗑消すを押したあと、いま何をしているかをボタンに出すようにしました</b>（本人「いつ完了するのかわからない」「ずっとこの状態」）。「削除中 ◯秒」→（本体の枠切れなら）「2台目でやり直し中」→ 返事が来ない時は「結果を確認中（最大5分）」。もう1つのアカウントへのやり直しに時間切れが無く、相手が混んでいると永遠に待っていたのを直しました（時間切れ＝消えたか分からない扱いで、DB から行が消えたかを見て確かめる・Shopee へは投げ直さない）。',
       '🔁 <b>🗑消すなどの書き込みが「接続枠が尽きているので更新できません（もう一方のアカウントが更新します）」で止まるのを直しました</b>（本人「これ結局削除できるってこと？」）。本体の枠が尽きた日に、店のトークンの更新を本体が断っていた（Shopee には届いていない）。この断りも Google の枠切れと同じ扱いにして、2台目・3台目へ自動でやり直します。',
@@ -31102,7 +31117,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     };
     const groups = [], byId = new Map();
     CQ_CCS.forEach(cc => {
-      const ls = (lst.byCc[cc] || []).filter(l => { const st = Number(l.status); return st === 1 || st === 8; });
+      const _seen = new Set();   /* 同じ item_id の行は1つだけ（読み込みの重複で「同じ出品同士」を組にしない＝片方を消すと両方消える） */
+      const ls = (lst.byCc[cc] || []).filter(l => { const st = Number(l.status); if (st !== 1 && st !== 8) return false; const k = String(l.item_id); if (_seen.has(k)) return false; _seen.add(k); return true; });
       const par = new Map(); const f = x => { while (par.get(x) !== x) { par.set(x, par.get(par.get(x))); x = par.get(x); } return x; };
       ls.forEach(l => par.set(String(l.item_id), String(l.item_id)));
       const u = (a, b) => { par.set(f(String(a.item_id)), f(String(b.item_id))); };
