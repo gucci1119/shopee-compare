@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-0945';
+var SRC_VER = '20260926-1030';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -817,6 +817,20 @@ function doGetInner_(e) {
     }
     // ★商品動画の差し替え／削除。url= 動画の公開URL（ポータルがSupabase Storageに上げたもの）。
     //   Shopeeは 4MB分割アップロード→完了→トランスコード待ち→update_item という多段。job= で進捗を書き戻す。
+    if (p.action === 'promo_setup' || p.action === 'promo_apply') {
+      var prcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var prout;
+      try {
+        var prwt = P_().getProperty('WRITE_TOKEN');
+        if (!prwt || p.token !== prwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'promo_setup') { var As = promoSetup_(); prout = { ok: true, imgs: As.imgs, vid: As.vid || {} }; }
+        else {
+          var prshop = parseInt(p.shop_id, 10); if (!getToken_(prshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+          prout = promoApply_(prshop, String(p.cc || '').toUpperCase(), String(p.items || '').split(','), p.dry === '1', p.novideo === '1');
+        }
+      } catch (err) { prout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(prcb + '(' + JSON.stringify(prout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'set_item_video') {
       var vicb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var viout;
@@ -1964,9 +1978,22 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
   var res0 = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
   if (res0.getResponseCode() >= 400) throw new Error('動画を取得できません HTTP ' + res0.getResponseCode());
   var blob = res0.getBlob(), bytes = blob.getBytes(), size = bytes.length;
+  if (jobKey) jobSet_(jobKey, { pct: 10, step: 'GASが受け取りました（' + Math.round(size / 1048576 * 10) / 10 + 'MB）' });
+  var up = uploadVideoBytes_(shopId, bytes, jobKey), vid = up.vid, n = up.parts, t0 = up.t0, tTrans = up.tTrans;
+  // ⑤ 商品に紐付け
+  if (jobKey) jobSet_(jobKey, { pct: 95, step: '商品に設定中' });
+  var uj = callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: itemId, video_upload_id: [vid] });
+  var uerr = (uj.error && uj.error !== '') ? (uj.error + ' ' + (uj.message || '')) : '';
+  if (uerr) throw new Error('update_item(video) ' + uerr);
+  return { ok: true, video_upload_id: vid, size: size, parts: n,
+    ms: { total: new Date().getTime() - t0, transcode: new Date().getTime() - tTrans } };
+}
+/* 動画のバイト列を Shopee に上げて video_upload_id を返す（init → 4MBずつ → complete → 変換待ち）。商品には紐付けない。
+   ★2026-09-26 全出品に同じ動画を入れる（promo）ために setItemVideo_ から切り出した。中身は元のまま */
+function uploadVideoBytes_(shopId, bytes, jobKey) {
+  var size = bytes.length;
   if (size > 30 * 1024 * 1024) throw new Error('動画が大きすぎます（' + Math.round(size / 1048576) + 'MB／上限30MB）');
   var t0 = new Date().getTime();
-  if (jobKey) jobSet_(jobKey, { pct: 10, step: 'GASが受け取りました（' + Math.round(size / 1048576 * 10) / 10 + 'MB・' + Math.round((new Date().getTime() - t0) / 1000) + '秒）' });
   // ① init
   var ij = callShop_(shopId, '/api/v2/media_space/init_video_upload', null, 'post', { file_md5: md5Hex_(bytes), file_size: size });
   var vid = ((ij.response || {}).video_upload_id) || '';
@@ -2004,13 +2031,69 @@ function setItemVideo_(shopId, itemId, url, jobKey) {
     if (st === 'FAILED') throw new Error('動画の変換に失敗しました（形式や長さを確認してください）');
   }
   if (st !== 'SUCCEEDED') throw new Error('変換が終わりませんでした（時間をおいて再実行してください）');
-  // ⑤ 商品に紐付け
-  if (jobKey) jobSet_(jobKey, { pct: 95, step: '商品に設定中' });
-  var uj = callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: itemId, video_upload_id: [vid] });
-  var uerr = (uj.error && uj.error !== '') ? (uj.error + ' ' + (uj.message || '')) : '';
-  if (uerr) throw new Error('update_item(video) ' + uerr);
-  return { ok: true, video_upload_id: vid, size: size, parts: n,
-    ms: { total: new Date().getTime() - t0, transcode: new Date().getTime() - tTrans } };
+  return { vid: vid, parts: n, t0: t0, tTrans: tTrans };
+}
+/* ★2026-09-26 本人「全部の出品に動画を入れたい」「動画はこれ（shop動画_英語.mp4）に統一」「画像枠が余っていればこの6枚を入れて。商品画像が最優先。
+   余った枠の数だけ（2枚余ったらランダムに2枚…6枚余ったら全部）」「B と C（古い動画）は消して」＝全部この動画に置き換える。
+   ★カタログを壊さない：書くのは update_item の image（今ある画像を【同じ順で先頭に残し】、空き枠にだけ足す）と video_upload_id だけ。
+     明細・価格・在庫・名前には触らない。書く直前に get_item_base_info で今の画像を読み直す（DBの控えは使わない）。 */
+var PROMO_BASE = 'https://gucci1119.github.io/shopee-compare/promo/';
+var PROMO_IMGS = ['p1_shipping.jpg', 'p2_quality.jpg', 'p3_about.jpg', 'p4_check.jpg', 'p5_request.jpg', 'p6_region.jpg'];
+var PROMO_VIDEO = 'shop_video_en.mp4', PROMO_VID_TTL = 5 * 86400000;
+function promoSetup_() {
+  var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
+  PROMO_IMGS.forEach(function (f) { if (!A.imgs[f]) A.imgs[f] = uploadImageUrl_(PROMO_BASE + f); });
+  A.at = new Date().toISOString(); baKvSet_('promo_assets', A);
+  return A;
+}
+function promoVideoFor_(shopId, cc, A, force) {
+  A.vid = A.vid || {};
+  var e = A.vid[cc];
+  if (!force && e && e.id && (Date.now() - Number(e.at || 0)) < PROMO_VID_TTL) return e.id;
+  ufBump_(1, 'promo(動画取得)');
+  var res = UrlFetchApp.fetch(PROMO_BASE + PROMO_VIDEO, { muteHttpExceptions: true, followRedirects: true });
+  if (res.getResponseCode() >= 400) throw new Error('動画を取得できません HTTP ' + res.getResponseCode());
+  var up = uploadVideoBytes_(shopId, res.getBlob().getBytes(), null);
+  A.vid[cc] = { id: up.vid, at: Date.now(), shop: shopId };
+  baKvSet_('promo_assets', A);
+  return up.vid;
+}
+function promoApply_(shopId, cc, itemIds, dry, noVideo) {
+  if (!dry && ufTotal_() > ufStopLine_() - 3000) return { ok: false, stop: 'quota', error: '接続枠が残り少ないので止めました（' + ufTotal_() + '）' };
+  var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
+  var bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean);
+  if (bids.length !== PROMO_IMGS.length) { A = promoSetup_(); bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean); }
+  var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
+  if (!ids.length) return { ok: true, n: 0, items: [] };
+  var v = (dry || noVideo) ? '' : promoVideoFor_(shopId, cc, A, false);
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+  if (b.error && b.error !== '') throw new Error('get_item_base_info ' + b.error + ' ' + (b.message || ''));
+  var list = ((b.response || {}).item_list) || [], out = [], found = {};
+  list.forEach(function (it) {
+    found[it.item_id] = 1;
+    var cur = ((it.image || {}).image_id_list || []).slice(), have = {};
+    cur.forEach(function (x) { have[x] = 1; });
+    var cand = bids.filter(function (x) { return !have[x]; });
+    for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* ランダム */
+    var add = cand.slice(0, Math.max(0, 9 - cur.length));
+    var rec = { item_id: it.item_id, status: it.item_status, cur: cur.length, add: add.length, hadVideo: !!((it.video_info || []).length) };
+    if (dry) { rec.dry = 1; out.push(rec); return; }
+    var body = { item_id: it.item_id };
+    if (add.length) body.image = { image_id_list: cur.concat(add) };
+    if (v) body.video_upload_id = [v];
+    if (!body.image && !body.video_upload_id) { rec.ok = true; rec.skip = 'nothing'; out.push(rec); return; }
+    var r = callShop_(shopId, '/api/v2/product/update_item', null, 'post', body);
+    var err = (r.error && r.error !== '') ? (r.error + ' ' + (r.message || '')) : '';
+    if (err && v && /video/i.test(err)) {   /* 控えの動画が使えなくなっていた＝上げ直して1回だけやり直す */
+      v = promoVideoFor_(shopId, cc, A, true); body.video_upload_id = [v];
+      r = callShop_(shopId, '/api/v2/product/update_item', null, 'post', body);
+      err = (r.error && r.error !== '') ? (r.error + ' ' + (r.message || '')) : '';
+    }
+    rec.ok = !err; if (err) rec.err = err.slice(0, 200);
+    out.push(rec);
+  });
+  ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
+  return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
 }
 // ★明細画像をまとめて差し替える。items=[{option, url}]
 //   ①画像を並列DL ②media_spaceへ並列アップロード ③update_tier_variation は1回だけ
