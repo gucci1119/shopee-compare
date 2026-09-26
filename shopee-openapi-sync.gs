@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1230';
+var SRC_VER = '20260926-1245';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2060,13 +2060,14 @@ function promoSetup_() {
 }
 function promoVideoFor_(shopId, cc, A, force) {
   A.vid = A.vid || {};
-  var e = A.vid[cc];
+  var key = (A.vid[cc] && A.vid[cc].shop && String(A.vid[cc].shop) !== String(shopId)) ? (cc + '_' + shopId) : cc;   /* 同じ国に2店舗＝動画は店ごとに控える（取り合って毎回上げ直さない） */
+  var e = A.vid[key];
   if (!force && e && e.id && (Date.now() - Number(e.at || 0)) < PROMO_VID_TTL) return e.id;
   ufBump_(1, 'promo(動画取得)');
   var res = UrlFetchApp.fetch(PROMO_BASE + PROMO_VIDEO, { muteHttpExceptions: true, followRedirects: true });
   if (res.getResponseCode() >= 400) throw new Error('動画を取得できません HTTP ' + res.getResponseCode());
   var up = uploadVideoBytes_(shopId, res.getBlob().getBytes(), null);
-  A.vid[cc] = { id: up.vid, at: Date.now(), shop: shopId };
+  A.vid[key] = { id: up.vid, at: Date.now(), shop: shopId };
   baKvSet_('promo_assets', A);
   return up.vid;
 }
@@ -2087,7 +2088,8 @@ function promoTick() {
       var cc = PROMO_CCS[ci];
       var doneMap = baKv_('promo_done_' + cc) || {};
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var todo = (rows || []).filter(function (r) { return r && r.item_id && r.shop_id && !doneMap[r.item_id]; });
+      /* 失敗した分は6時間おいて3回までやり直す（1回の失敗で永久に外さない） */
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000); });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
@@ -2100,12 +2102,13 @@ function promoTick() {
           if (job.limit) take = take.slice(0, Math.max(0, Number(job.limit) - Number(job.n || 0)));
           var res;
           try { res = promoApply_(parseInt(shops[si], 10), cc, take, false, false); }
-          catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { doneMap[id] = { at: Date.now(), ok: 0, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
+          catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { var d0 = doneMap[id] || {}; doneMap[id] = { at: Date.now(), ok: 0, tries: Number(d0.tries || 0) + 1, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
           if (!res.ok && res.stop) { job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない＝次の回に */
           (res.items || []).forEach(function (x) {
-            var d = { at: Date.now(), ok: x.ok ? 1 : 0 };
-            if (x.err) d.err = String(x.err).slice(0, 120);
-            if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
+            var d = { at: Date.now(), ok: x.ok ? 1 : 0 }, d0 = doneMap[x.item_id] || {};
+            if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; }
+            if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
+            else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
           });
@@ -2159,12 +2162,12 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
     rec.from = cur0; rec.to = body.image ? next : cur0;   /* 戻せるように前後を返す（ポータルが控える） */
     if (v) body.video_upload_id = [v];
     if (!body.image && !body.video_upload_id) { rec.ok = true; rec.skip = 'nothing'; out.push(rec); return; }
-    var r = callShop_(shopId, '/api/v2/product/update_item', null, 'post', body);
-    var err = (r.error && r.error !== '') ? (r.error + ' ' + (r.message || '')) : '';
+    /* ★callShop_ はエラーで投げる＝1件ずつ受け止める（投げっぱなしだと同じ回の25件が全部「失敗」になり、書けた分の控えも消える） */
+    var upd = function () { try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); return ''; } catch (eU) { return String((eU && eU.message) || eU); } };
+    var err = upd();
     if (err && v && /video/i.test(err)) {   /* 控えの動画が使えなくなっていた＝上げ直して1回だけやり直す */
-      v = promoVideoFor_(shopId, cc, A, true); body.video_upload_id = [v];
-      r = callShop_(shopId, '/api/v2/product/update_item', null, 'post', body);
-      err = (r.error && r.error !== '') ? (r.error + ' ' + (r.message || '')) : '';
+      try { v = promoVideoFor_(shopId, cc, A, true); body.video_upload_id = [v]; err = upd(); }
+      catch (eV) { err = err + ' / 動画の上げ直しも失敗: ' + String((eV && eV.message) || eV).slice(0, 80); }
     }
     rec.ok = !err; if (err) rec.err = err.slice(0, 200);
     out.push(rec);
