@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1845';
+var SRC_VER = '20260926-1910';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2272,10 +2272,18 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
    BR の返金の44%が「届いていない」・22%が「気が変わった」で、申請は注文から中央値21日（届くのは約45日後）＝遅さが理由。
    説明文の【一番上】に到着目安（ポルトガル語＋英語）を足す。印（DNOTE_MARK）が既にあれば何もしない。書く直前に読み直す・
    拡張形式（extended）の説明文は触らない（形が違う）・文字数の上限を超えるなら足さない。 */
-var DNOTE_MARK = '⏰ Delivery time:';   /* BR（英語の行）も他国も同じ印＝既に足してあれば二重にしない */
-var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva de 14 a 45 dias (de 2 semanas a cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 14–45 days (2 weeks to 1.5 months) after shipping.\n\n'   /* ★本人「BRは早い時もあるので、2週間〜1.5ヶ月の方がいい」「1週間で着くことはなさそう」 */,
-  /* ★本人「他国にも一応必要。ブラジル版とブラジル以外版に分けましょう」「約2〜3週間」：英語のみ */
-  PH: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', SG: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', MY: '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', /* ★本人「その通り」（TH/VN/TW は現地語＋英語） */ VN: '⏰ THỜI GIAN GIAO HÀNG: hàng được gửi từ Nhật Bản, mất khoảng 14–21 ngày (2–3 tuần) sau khi gửi. Vui lòng theo dõi đơn hàng bằng mã vận đơn. Cảm ơn bạn đã kiên nhẫn chờ đợi! 🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TH: '⏰ ระยะเวลาจัดส่ง: สินค้าส่งจากญี่ปุ่น ใช้เวลาประมาณ 14–21 วัน (2–3 สัปดาห์) หลังจากจัดส่ง สามารถติดตามพัสดุได้ด้วยเลขพัสดุ ขอบคุณสำหรับความอดทนรอ 🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n', TW: '⏰ 到貨時間：商品從日本寄出，寄出後約 14–21 天（2–3 週）送達。請使用物流追蹤碼查詢包裹。感謝您的耐心等候！🙏\n' + '⏰ Delivery time: shipped from Japan. Delivery takes about 14–21 days (2–3 weeks) after shipping. Please track your parcel with the tracking number. Thank you for your patience! 🙏\n\n' };
+var DNOTE_MARK = '【IMPORTANT – DELIVERY TIME】';
+var DNOTE_OLD_MARK = /⏰ Delivery time:|【IMPORTANT – DELIVERY TIME】/;   /* 前の版の文面も見分ける＝入れ替える */
+/* ★2026-09-26 本人「BRは早い時もあるので2週間〜1.5ヶ月」「1週間で着くことはなさそう」「3週間〜1ヶ月かかることが多いを※で」「期間のところは強調できる？必ず確認してくれと」
+   説明文は太字にできない＝⚠️・【】・大文字・「購入前に必ず確認」で強調 */
+var DNOTE_EN = '⚠️【IMPORTANT – DELIVERY TIME】⚠️\n📦 Ships from JAPAN. Delivery takes about 14–21 DAYS (2–3 weeks) after shipping.\n👉 PLEASE CHECK THIS BEFORE PURCHASING. Track your parcel with the tracking number. Thank you for your patience! 🙏\n\n';
+var DNOTE_TEXT = {
+  BR: '⚠️【IMPORTANTE – PRAZO DE ENTREGA】⚠️\n📦 Enviamos do JAPÃO. A entrega leva de 14 a 45 DIAS (de 2 semanas a 1 mês e meio) após o envio.\n※ Na maioria dos casos, leva de 3 SEMANAS a 1 MÊS.\n👉 POR FAVOR, CONFIRME O PRAZO ANTES DE COMPRAR. Acompanhe pelo código de rastreio. Obrigado pela paciência! 🙏\n⚠️【IMPORTANT – DELIVERY TIME】 Ships from JAPAN. Delivery takes 14–45 DAYS (2 weeks to 1.5 months) after shipping. ※ In most cases it takes 3 WEEKS to 1 MONTH. PLEASE CHECK THIS BEFORE PURCHASING.\n\n',
+  PH: DNOTE_EN, SG: DNOTE_EN, MY: DNOTE_EN,
+  TH: '⚠️【สำคัญ – ระยะเวลาจัดส่ง】⚠️\n📦 สินค้าส่งจากญี่ปุ่น ใช้เวลาประมาณ 14–21 วัน (2–3 สัปดาห์) หลังจัดส่ง\n👉 กรุณาตรวจสอบก่อนสั่งซื้อ ติดตามพัสดุได้ด้วยเลขพัสดุ ขอบคุณสำหรับความอดทนรอ 🙏\n' + DNOTE_EN,
+  VN: '⚠️【QUAN TRỌNG – THỜI GIAN GIAO HÀNG】⚠️\n📦 Hàng gửi từ NHẬT BẢN, mất khoảng 14–21 NGÀY (2–3 tuần) sau khi gửi.\n👉 VUI LÒNG KIỂM TRA TRƯỚC KHI MUA. Theo dõi đơn hàng bằng mã vận đơn. Cảm ơn bạn đã kiên nhẫn chờ đợi! 🙏\n' + DNOTE_EN,
+  TW: '⚠️【重要－到貨時間】⚠️\n📦 商品從日本寄出，寄出後約 14–21 天（2–3 週）送達。\n👉 購買前請務必確認。可使用物流追蹤碼查詢包裹。感謝您的耐心等候！🙏\n' + DNOTE_EN
+};
 var DNOTE_MAXLEN = 2900;
 function dnoteTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dnoteTick') ScriptApp.deleteTrigger(t); }); }
 function dnoteApply_(shopId, cc, itemIds, dry) {
@@ -2285,7 +2293,7 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
   var out = [], first = add.split('\n')[0];
   /* 先頭の ⏰ の行（別の国のカタログを写した時に入ってくる他国の文面）を外す */
-  var stripNote = function (t) { var ls = String(t || '').split('\n'); while (ls.length && /^⏰/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); };
+  var stripNote = function (t) { var ls = String(t || '').split('\n'); while (ls.length && /^(⏰|⚠️|📦|※|👉)/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); };
   (((b.response || {}).item_list) || []).forEach(function (it) {
     var rec = { item_id: it.item_id };
     var body;
@@ -2297,7 +2305,7 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
       });
       var allText = fl.filter(function (f) { return f.field_type === 'text'; }).map(function (f) { return f.text; }).join('\n');
       if (allText.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
-      if (allText.indexOf(DNOTE_MARK) >= 0 && fl.length && fl[0].field_type === 'text') { fl[0].text = stripNote(fl[0].text); rec.fixed = 1; }
+      if (DNOTE_OLD_MARK.test(allText) && fl.length && fl[0].field_type === 'text') { fl[0].text = stripNote(fl[0].text); rec.fixed = 1; }
       if (fl.length && fl[0].field_type === 'text') fl[0].text = add + fl[0].text; else fl.unshift({ field_type: 'text', text: add.replace(/\n+$/, '') });
       if ((allText.length + add.length) > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + (allText.length + add.length) + '字）'; out.push(rec); return; }
       rec.ext = 1; rec.len = allText.length + add.length;
@@ -2305,7 +2313,7 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
     } else {
       var d = String(it.description || '');
       if (d.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
-      if (d.indexOf(DNOTE_MARK) >= 0) { d = stripNote(d); rec.fixed = 1; }   /* 他国の文面が入っていた＝入れ替える */
+      if (DNOTE_OLD_MARK.test(d)) { d = stripNote(d); rec.fixed = 1; }   /* 他国の文面が入っていた＝入れ替える */
       var nd = add + d;
       if (nd.length > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + nd.length + '字）'; out.push(rec); return; }
       rec.len = nd.length; body = { item_id: it.item_id, description: nd };
