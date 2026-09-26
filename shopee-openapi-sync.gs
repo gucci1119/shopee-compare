@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1830g';
+var SRC_VER = '20260926-1900s';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2106,6 +2106,13 @@ function promoSetup_() {
    国別の配送日数の画像（正方形・BR=ポルトガル語／TH・VN・TW=現地語＋英語／PH・SG・MY=英語）に差し替える。説明文には画像を入れられない（whitelist）ため写真の枠で見せる。
    A.gal = {br,th,vn,tw,en: image_id}。入っていれば p1 の位置にその国の画像を使い、古い p1 と他国の配送画像は外す（strip と同じ扱い）。空きが足りない時も配送画像は必ず入れる */
 var PROMO_GAL_VER = 1;
+/* ★2026-09-26 本人「業務が止まらないように細心の注意を払ってやってくれ」「自動の新規出品も動いてるので、そこへの影響も考えて」。
+   本体の枠は同居の tool に大半を使われていて実際の余裕が読めない（こちらの数え 3,725 回で Google に止められた）。一括は【小さく・早めに降りる】：
+   ①その日すでに断られていたら何もしない ②こちらの数えが BULK_USED_MAX を超えたらその日は降りる ③1日の件数上限（配送画像・説明文それぞれ）
+   ④🤖が直近に触ったカタログ（listings.update_time が2時間以内）は後回し（明細追加と重ならないように） */
+var BULK_USED_MAX = 3500, PROMO_GAL_DAILY = 300, DNOTE_DAILY = 300, BULK_SKIP_RECENT_SEC = 2 * 3600;
+function bulkOk_() { return !ufDead_() && ufTotal_() < BULK_USED_MAX; }
+function dayCount_(job, key, add) { var d = ufToday_(); if (job[key + 'Day'] !== d) { job[key + 'Day'] = d; job[key + 'N'] = 0; } job[key + 'N'] = Number(job[key + 'N'] || 0) + (add || 0); return job[key + 'N']; }
 function promoGalSetup_(ver) {
   var ids = {};
   ['br', 'th', 'vn', 'tw', 'en'].forEach(function (k) { ids[k] = uploadImageUrl_(PROMO_BASE + 'gal_delivery_' + k + '.png?v=' + encodeURIComponent(String(ver || Date.now()))); if (!ids[k]) throw new Error('画像を上げられません: ' + k); });
@@ -2185,8 +2192,10 @@ function promoTick() {
   if (C.get('promo_running')) return;
   C.put('promo_running', '1', 360);
   try {
+    if (ufDead_()) return;   /* ★今日すでに断られている＝何もしない（トリガーも消さない＝明日また来る） */
     var job = baKv_('promo_job') || {};
     if (!job.on) { promoTriggerOff_(); return; }
+    try { var Ag = baKv_('promo_assets') || {}; if (!Ag.gal && bulkOk_()) promoGalSetup_('auto'); } catch (eG) { job.msg = '配送画像を上げられませんでした: ' + String((eG && eG.message) || eG).slice(0, 120); }
     if (job.pauseUntil && Date.now() < Number(job.pauseUntil)) return;   /* ★2026-09-26 動画を用意できなかった＝3時間おく（10分ごとに上げ直して枠を燃やさない） */
     var t0 = Date.now(), done0 = Number(job.n || 0);
     var pnMap = ((baKvFresh_('promo_new') || {}).map) || {};   /* ★2026-09-26 作成時に入れ終わった新しい出品（promoAfterCreate_）＝やり直さない */
@@ -2201,14 +2210,17 @@ function promoTick() {
         pnIds.forEach(function (id) { var d0 = doneMap[id]; if (!d0 || !d0.ok) { doneMap[id] = { at: Number(pnMap[id].at) || Date.now(), ok: 1, src: 'new' }; if (d0 && d0.from) doneMap[id].from = d0.from; } });
         baKvSet_('promo_done_' + cc, doneMap); promoNewDrop_(pnIds); job.nNew = Number(job.nNew || 0) + pnIds.length;
       }
-      var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status,images,synced_at&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
+      var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status,images,synced_at,update_time&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
       /* 失敗した分は6時間おいて3回までやり直す（1回の失敗で永久に外さない） */
       /* ★2026-09-26 古いお店画像の一覧（promo_assets.strip）を後から足したので、入れ終わりでも【入れた後に同期した画像に strip が残っている】出品は1回だけ入れ直す（redo） */
       var stripSet = {}; ((baKv_('promo_assets') || {}).strip || []).forEach(function (x) { stripSet[x] = 1; });
       var needsRedo = function (r, d) { if (!d || !d.ok || d.redo) return false; if (!(Date.parse(r.synced_at || '') > Number(d.at || 0))) return false; return (r.images || []).some(function (x) { return stripSet[x]; }); };
       var galOn = !!(((baKv_('promo_assets') || {}).gal || {})[DIMG_KEY[cc]]);
-      var needsGal = function (d) { return galOn && d && d.ok && Number(d.galv || 0) < PROMO_GAL_VER; };   /* ★配送日数の画像に差し替える（入れ終わった出品も1回やり直す） */
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d) || needsGal(d); });
+      var galLeft = Math.max(0, PROMO_GAL_DAILY - dayCount_(job, 'gal', 0));
+      var nowSec = Math.floor(Date.now() / 1000);
+      var needsGal = function (d, r) { return galOn && galLeft > 0 && d && d.ok && Number(d.galv || 0) < PROMO_GAL_VER && !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* ★配送日数の画像に差し替える（入れ終わった出品も1回やり直す・1日の上限・🤖が直近に触ったものは後回し） */
+      var galPick = 0;
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -2217,6 +2229,7 @@ function promoTick() {
         var ids = byShop[shops[si]];
         for (var bi = 0; bi < ids.length; bi += 25) {
           if (Date.now() - t0 > 4.5 * 60000) { if (job.mode === 'daily') { job.mode = 'bulk'; promoTriggerOff_(); ScriptApp.newTrigger('promoTick').timeBased().everyMinutes(10).create(); } job.msg = '時間切れ（次の回へ）'; return promoSaveJob_(job); }   /* ★2026-09-26 毎日の見回りで終わらない量＝10分ごとに戻して片づけ、終わったらまた毎日へ */
+          if (!bulkOk_()) { job.msg = '本体の接続枠を業務に残すため今日はここまで（数え ' + ufTotal_() + '）'; return promoSaveJob_(job); }
           if (job.limit && Number(job.n || 0) >= Number(job.limit)) { job.on = false; job.msg = '試運転の上限 ' + job.limit + ' 件で止めました（確認待ち）'; promoTriggerOff_(); return promoSaveJob_(job); }
           var take = ids.slice(bi, bi + 25);
           if (job.limit) take = take.slice(0, Math.max(0, Number(job.limit) - Number(job.n || 0)));
@@ -2230,7 +2243,7 @@ function promoTick() {
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
             if (redoIds[x.item_id]) d.redo = d0.redo || (needsGal(d0) ? undefined : 1);   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
-            if (x.ok && galOn) d.galv = PROMO_GAL_VER; else if (d0.galv) d.galv = d0.galv;
+            if (x.ok && galOn) { if (needsGal(d0, { update_time: 0 })) dayCount_(job, 'gal', 1); d.galv = PROMO_GAL_VER; } else if (d0.galv) d.galv = d0.galv;
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
           });
@@ -2241,6 +2254,7 @@ function promoTick() {
         }
       }
     }
+    try { var dj = baKv_('dnote_job') || {}; var leftMs = 5 * 60000 - (Date.now() - t0); if (dj.on && bulkOk_() && leftMs > 60000) dnoteTick(leftMs - 20000); } catch (eD) {}   /* GASの1回6分を超えない（残り時間だけ使う） */   /* ★説明文の文字（1日 DNOTE_DAILY 件まで）も同じ回でやる */
     /* ★2026-09-26 止めずに【1日1回】へ（Seller Center で手で作った出品・作成時に動画を付け損ねた出品・6時間待ちの再試行を拾う）。毎日かかるのは7か国の一覧の読み（数ページ）＋promo_done の読み＝枠はほぼ使わない */
     job.doneAt = new Date().toISOString();
     if (job.mode !== 'daily') {
@@ -2367,11 +2381,13 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
   });
   return { ok: true, n: out.length, items: out, uf: ufTotal_() };
 }
-function dnoteTick() {
+function dnoteTick(budgetMs) {
   var C = CacheService.getScriptCache(); if (C.get('dnote_running')) return; C.put('dnote_running', '1', 360);
   try {
+    if (ufDead_()) return;
     var job = baKv_('dnote_job') || {}; if (!job.on) { dnoteTriggerOff_(); return; }
     var t0 = Date.now();
+    if (dayCount_(job, 'day', 0) >= DNOTE_DAILY) { job.msg = '今日の上限 ' + DNOTE_DAILY + ' 件（明日続き）'; baKvSet_('dnote_job', job); return; }
     var fr = baKvFreshMany_(['dnote_done']); if (!fr) { job.msg = 'dnote_done を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }
     var done = fr.dnote_done || {};
     var ccs = Object.keys(DNOTE_TEXT);
@@ -2384,11 +2400,12 @@ function dnoteTick() {
       for (var si = 0; si < shops.length; si++) {
         var ids = byShop[shops[si]];
         for (var bi = 0; bi < ids.length; bi += 25) {
-          if (Date.now() - t0 > 4.5 * 60000) { job.msg = '時間切れ（次の回へ）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
-          if (ufTotal_() > ufStopLine_() - 6000) { job.msg = '接続枠が少ないので次の回へ（' + ufTotal_() + '）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          if (Date.now() - t0 > (typeof budgetMs === 'number' && budgetMs > 0 ? budgetMs : 4.5 * 60000)) { job.msg = '時間切れ（次の回へ）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          if (!bulkOk_() || ufTotal_() > ufStopLine_() - 6000) { job.msg = '本体の接続枠を業務に残すため今日はここまで（数え ' + ufTotal_() + '）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          if (dayCount_(job, 'day', 0) >= DNOTE_DAILY) { job.msg = '今日の上限 ' + DNOTE_DAILY + ' 件（明日続き）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var res; try { res = dnoteApply_(parseInt(shops[si], 10), cc, ids.slice(bi, bi + 25), false); } catch (e) { job.msg = cc + ': ' + String((e && e.message) || e).slice(0, 120); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var halt = false;
-          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; });
+          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; if (!x.skip) dayCount_(job, 'day', 1); });
           baKvSet_('dnote_done', done);
           if (halt) { job.msg = '枠切れ・通信の失敗で止めた（次の回へ）'; baKvSet_('dnote_job', job); return; }
           job.at = new Date().toISOString(); job.msg = cc + ' 進行中'; baKvSet_('dnote_job', job);
