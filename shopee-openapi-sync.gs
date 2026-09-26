@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1245';
+var SRC_VER = '20260926-1320';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2071,6 +2071,40 @@ function promoVideoFor_(shopId, cc, A, force) {
   baKvSet_('promo_assets', A);
   return up.vid;
 }
+/* ★2026-09-26 本人「新しく作る出品にも最初から入れて」。作る入口は全部 addItem_ を通る（🤖の家族カタログ／満杯の複製／2店舗目／他の国から種、ポータルの出品・複製）＝ここ1か所で入れる。
+   画像：商品の写真を先頭に元の順のまま・空いた枠にだけ6枚（一括と同じ promoMergeImgs_＝足りない時はランダム・入れる分は p1→p6 の順）。9枚は超えない・商品の写真は1枚も落とさない。
+   動画：控えにある id だけ使う（ここで上げ直すと変換待ちで最大4分半＝🤖の1回を食う）。無い/弾かれた→動画なしで作り、毎日の見回りが入れる。動画の失敗で作成は止めない */
+function promoMergeImgs_(cur0, A, bids) {
+  var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; });
+  var keep = (cur0 || []).filter(function (x) { return x && !strip[x] && bids.indexOf(x) < 0; });
+  var cand = bids.slice();
+  for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* 空きが足りない時は6枚からランダムに */
+  var add = cand.slice(0, Math.max(0, 9 - keep.length)).sort(function (a, b2) { return bids.indexOf(a) - bids.indexOf(b2); });   /* 入れる分は決まった順（p1→p6）で後ろへ */
+  return { keep: keep, add: add, next: keep.concat(add) };
+}
+function promoVidKey_(A, cc, shopId) { var e = (A.vid || {})[cc]; return (e && e.shop && String(e.shop) !== String(shopId)) ? (cc + '_' + shopId) : cc; }   /* promoVideoFor_ の key と同じ決め方（変えるなら両方） */
+function promoForNew_(shopId, imgIds, A) {
+  A = A || baKv_('promo_assets') || {};
+  var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; }).filter(Boolean);
+  if (bids.length !== PROMO_IMGS.length) return null;   /* 6枚がまだ上がっていない＝ここでは上げない（作成を遅くしない） */
+  var m = promoMergeImgs_(imgIds, A, bids);
+  if (!m.keep.length) return null;                      /* 商品の写真が1枚も残らない＝触らない（お店の画像だけの出品は作らない） */
+  return { A: A, keepIds: m.keep.slice(), imgs: m.next, add: m.add.length, keep: m.keep.length };
+}
+function promoAfterCreate_(shopId, itemId, P, result) {
+  var cc = baCcOfShop_(shopId); if (!cc) { result.promo_warn = '国が分からないので動画は毎日の見回りに任せます'; return; }
+  var A = P.A || {}, e = (A.vid || {})[promoVidKey_(A, cc, shopId)], vok = 0;
+  if (e && e.id && String(e.shop || shopId) === String(shopId)) {
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(itemId, 10), video_upload_id: [e.id] }); vok = 1; }
+    catch (eV) { result.promo_warn = '動画を付けられませんでした（毎日の見回りで入れ直します）: ' + String((eV && eV.message) || eV).slice(0, 120); }
+  } else result.promo_warn = '動画の控えがありません（毎日の見回りで入れます）';
+  result.promo = { add: P.add, keep: P.keep, video: vok }; if (vok) result.promo_video = 1;
+  if (P.imgErr) result.promo.imgErr = P.imgErr;
+  /* 出来た分は小さい promo_new に控える→見回りが promo_done_<cc> へ移す。読めなかった時は書かない（他の分を消さない＝見回りがやり直すだけ） */
+  if (vok && !P.imgErr) { try { var fr = baKvFreshMany_(['promo_new']); if (fr) { var mp = ((fr.promo_new || {}).map) || {}; mp[itemId] = { cc: cc, shop: String(shopId), at: Date.now(), add: P.add }; baKvSet_('promo_new', { map: mp, at: new Date().toISOString() }); } } catch (eN) {} }
+}
+function promoNewDrop_(ids) { if (!ids || !ids.length) return; try { var fr = baKvFreshMany_(['promo_new']); if (!fr) return; var mp = ((fr.promo_new || {}).map) || {}; ids.forEach(function (id) { delete mp[id]; }); baKvSet_('promo_new', { map: mp, at: new Date().toISOString() }); } catch (e) {} }
+var PROMO_DAILY_HOUR = 18;   /* 日本時間。枠のリセット（夏16時・冬17時）の後＝🤖に枠を使い切られた後に当たらない */
 /* ★全出品への一括（10分ごと・GAS の中で回す＝Chrome が落ちても止まらない）。
    promo_job = {on, limit(試運転の上限・0=無制限), n(今までに処理した数), ok, ng, at, msg}
    promo_done_<cc> = {item_id: {at, ok, err?, from?}}（from＝書く前の画像の並び＝戻す時に使う）
@@ -2083,10 +2117,20 @@ function promoTick() {
   try {
     var job = baKv_('promo_job') || {};
     if (!job.on) { promoTriggerOff_(); return; }
+    if (job.pauseUntil && Date.now() < Number(job.pauseUntil)) return;   /* ★2026-09-26 動画を用意できなかった＝3時間おく（10分ごとに上げ直して枠を燃やさない） */
     var t0 = Date.now(), done0 = Number(job.n || 0);
+    var pnMap = ((baKvFresh_('promo_new') || {}).map) || {};   /* ★2026-09-26 作成時に入れ終わった新しい出品（promoAfterCreate_）＝やり直さない */
     for (var ci = 0; ci < PROMO_CCS.length; ci++) {
       var cc = PROMO_CCS[ci];
-      var doneMap = baKv_('promo_done_' + cc) || {};
+      /* ★2026-09-26 読めなかった時に {} で進むと、下の baKvSet_ が promo_done を丸ごと上書きし【戻す控え from】が全部消える＝止める */
+      var dmR = baKvFreshMany_(['promo_done_' + cc]);
+      if (!dmR) { job.msg = cc + ' の控え（promo_done）を読めないので止めました（次の回へ）'; return promoSaveJob_(job); }
+      var doneMap = dmR['promo_done_' + cc] || {};
+      var pnIds = Object.keys(pnMap).filter(function (id) { return pnMap[id] && pnMap[id].cc === cc; });
+      if (pnIds.length) {
+        pnIds.forEach(function (id) { var d0 = doneMap[id]; if (!d0 || !d0.ok) { doneMap[id] = { at: Number(pnMap[id].at) || Date.now(), ok: 1, src: 'new' }; if (d0 && d0.from) doneMap[id].from = d0.from; } });
+        baKvSet_('promo_done_' + cc, doneMap); promoNewDrop_(pnIds); job.nNew = Number(job.nNew || 0) + pnIds.length;
+      }
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
       /* 失敗した分は6時間おいて3回までやり直す（1回の失敗で永久に外さない） */
       var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000); });
@@ -2096,14 +2140,14 @@ function promoTick() {
       for (var si = 0; si < shops.length; si++) {
         var ids = byShop[shops[si]];
         for (var bi = 0; bi < ids.length; bi += 25) {
-          if (Date.now() - t0 > 4.5 * 60000) { job.msg = '時間切れ（次の回へ）'; return promoSaveJob_(job); }
+          if (Date.now() - t0 > 4.5 * 60000) { if (job.mode === 'daily') { job.mode = 'bulk'; promoTriggerOff_(); ScriptApp.newTrigger('promoTick').timeBased().everyMinutes(10).create(); } job.msg = '時間切れ（次の回へ）'; return promoSaveJob_(job); }   /* ★2026-09-26 毎日の見回りで終わらない量＝10分ごとに戻して片づけ、終わったらまた毎日へ */
           if (job.limit && Number(job.n || 0) >= Number(job.limit)) { job.on = false; job.msg = '試運転の上限 ' + job.limit + ' 件で止めました（確認待ち）'; promoTriggerOff_(); return promoSaveJob_(job); }
           var take = ids.slice(bi, bi + 25);
           if (job.limit) take = take.slice(0, Math.max(0, Number(job.limit) - Number(job.n || 0)));
           var res;
           try { res = promoApply_(parseInt(shops[si], 10), cc, take, false, false); }
-          catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { var d0 = doneMap[id] || {}; doneMap[id] = { at: Date.now(), ok: 0, tries: Number(d0.tries || 0) + 1, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
-          if (!res.ok && res.stop) { job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない＝次の回に */
+          catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); if (ufDead_() || /fetch失敗/.test(String((e && e.message) || e))) return promoSaveJob_(job); /* ★2026-09-26 枠切れ・通信の失敗は商品の失敗に数えない（数えると全件を1回で掃いて3回で永久に外す） */ job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { var d0 = doneMap[id] || {}; doneMap[id] = { at: Date.now(), ok: 0, tries: Number(d0.tries || 0) + 1, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
+          if (!res.ok && res.stop && !(res.items || []).length) { if (res.stop === 'video') job.pauseUntil = Date.now() + 3 * 3600000; job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない・動画が用意できない＝次の回に */
           (res.items || []).forEach(function (x) {
             var d = { at: Date.now(), ok: x.ok ? 1 : 0 }, d0 = doneMap[x.item_id] || {};
             if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; }
@@ -2113,12 +2157,18 @@ function promoTick() {
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
           });
           baKvSet_('promo_done_' + cc, doneMap);
+          if (!res.ok && res.stop) { if (res.stop === 'video') job.pauseUntil = Date.now() + 3 * 3600000; job.msg = res.error; return promoSaveJob_(job); }   /* ★2026-09-26 途中で止めた回＝書けた分（from 付き）だけ控えて次の回へ */
           job.at = new Date().toISOString(); job.cc = cc; job.msg = cc + ' 進行中';
           baKvSet_('promo_job', job);
         }
       }
     }
-    job.on = false; job.doneAt = new Date().toISOString(); job.msg = '全部終わりました'; promoTriggerOff_();
+    /* ★2026-09-26 止めずに【1日1回】へ（Seller Center で手で作った出品・作成時に動画を付け損ねた出品・6時間待ちの再試行を拾う）。毎日かかるのは7か国の一覧の読み（数ページ）＋promo_done の読み＝枠はほぼ使わない */
+    job.doneAt = new Date().toISOString();
+    if (job.mode !== 'daily') {
+      job.mode = 'daily'; job.limit = 0; job.msg = '全部終わりました（以後は毎日' + PROMO_DAILY_HOUR + '時に新しい出品だけ）';
+      promoTriggerOff_(); ScriptApp.newTrigger('promoTick').timeBased().everyDays(1).atHour(PROMO_DAILY_HOUR).inTimezone('Asia/Tokyo').create();
+    } else job.msg = '毎日の見回り：' + (Number(job.n || 0) - done0) + '件（' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MM/dd HH:mm') + '）';
     promoSaveJob_(job);
   } finally { C.remove('promo_running'); }
 }
@@ -2126,7 +2176,7 @@ function promoSaveJob_(job) { job.at = new Date().toISOString(); baKvSet_('promo
 function promoTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'promoTick') ScriptApp.deleteTrigger(t); }); }
 function promoStart_(limit) {
   var job = baKv_('promo_job') || {};
-  job.on = true; job.limit = Number(limit || 0) ? Number(job.n || 0) + Number(limit) : 0; job.startAt = new Date().toISOString(); job.msg = '開始';
+  job.on = true; job.mode = 'bulk'; job.pauseUntil = 0; job.limit = Number(limit || 0) ? Number(job.n || 0) + Number(limit) : 0; job.startAt = new Date().toISOString(); job.msg = '開始';
   baKvSet_('promo_job', job);
   promoTriggerOff_();
   ScriptApp.newTrigger('promoTick').timeBased().everyMinutes(10).create();
@@ -2140,19 +2190,18 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; });
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
-  var v = (dry || noVideo) ? '' : promoVideoFor_(shopId, cc, A, false);
+  var v = '', halt = '', vRetried = false;
+  if (!dry && !noVideo) { try { v = promoVideoFor_(shopId, cc, A, false); } catch (eV0) { return { ok: false, stop: 'video', error: '動画を用意できませんでした（3時間おいてやり直し）: ' + String((eV0 && eV0.message) || eV0).slice(0, 160) }; } }   /* ★2026-09-26 投げたままだと25件まとめて失敗に数え、次の25件でまた上げ直す（1回で最大100回ぶんの枠） */
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
   if (b.error && b.error !== '') throw new Error('get_item_base_info ' + b.error + ' ' + (b.message || ''));
   var list = ((b.response || {}).item_list) || [], out = [], found = {};
   list.forEach(function (it) {
+    if (halt) return;   /* 枠切れ・通信の失敗・動画の上げ直し失敗で止めた後は触らない（記録もしない＝次の回にやり直す） */
     found[it.item_id] = 1;
     var cur0 = ((it.image || {}).image_id_list || []).slice();
     /* ★本人「古い版を手で入れた出品がある。見分けて工夫して」：多くの出品に共通して入っていた【お店の画像】（古い版＋同じ絵柄の別の番号）は
        promo_assets.strip に控えてある（2026-09-26 目で見て51種類を仕分け）。それと今回の6枚を外し、残った商品の写真だけを元の順で前に詰める */
-    var cur = cur0.filter(function (x) { return !strip[x] && bids.indexOf(x) < 0; });
-    var cand = bids.slice();
-    for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* 空きが足りない時は6枚からランダムに */
-    var add = cand.slice(0, Math.max(0, 9 - cur.length)).sort(function (a, b2) { return bids.indexOf(a) - bids.indexOf(b2); });   /* 入れる分は決まった順（p1→p6）で後ろへ */
+    var mg = promoMergeImgs_(cur0, A, bids), cur = mg.keep, add = mg.add;   /* ★2026-09-26 作成時（promoForNew_）と同じ決め方を共有 */
     var next = cur.concat(add), same = next.length === cur0.length && next.every(function (x, k) { return x === cur0[k]; });
     var rec = { item_id: it.item_id, status: it.item_status, before: cur0.length, keep: cur.length, removed: cur0.length - cur.length - cur0.filter(function (x) { return bids.indexOf(x) >= 0; }).length, add: add.length, hadVideo: !!((it.video_info || []).length) };
     if (dry) { rec.dry = 1; out.push(rec); return; }
@@ -2163,15 +2212,20 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
     if (v) body.video_upload_id = [v];
     if (!body.image && !body.video_upload_id) { rec.ok = true; rec.skip = 'nothing'; out.push(rec); return; }
     /* ★callShop_ はエラーで投げる＝1件ずつ受け止める（投げっぱなしだと同じ回の25件が全部「失敗」になり、書けた分の控えも消える） */
-    var upd = function () { try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); return ''; } catch (eU) { return String((eU && eU.message) || eU); } };
+    /* ★2026-09-26 枠切れ（断られた事実＝ufDead_）と通信の失敗（fetch失敗）は商品の失敗ではない＝数えずに止める（数えると3回で永久に外れる） */
+    var upd = function () { try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); return ''; } catch (eU) { var mU = String((eU && eU.message) || eU); if (ufDead_() || /fetch失敗/.test(mU)) halt = mU; return mU; } };
     var err = upd();
-    if (err && v && /video/i.test(err)) {   /* 控えの動画が使えなくなっていた＝上げ直して1回だけやり直す */
-      try { v = promoVideoFor_(shopId, cc, A, true); body.video_upload_id = [v]; err = upd(); }
-      catch (eV) { err = err + ' / 動画の上げ直しも失敗: ' + String((eV && eV.message) || eV).slice(0, 80); }
+    if (halt) return;
+    if (err && v && /video/i.test(err) && !vRetried) {   /* 控えの動画が使えなくなっていた＝上げ直して1回だけやり直す（この呼び出しで1回まで＝1件ごとに上げ直さない） */
+      vRetried = true;
+      try { v = promoVideoFor_(shopId, cc, A, true); } catch (eV) { halt = 'video: 動画の上げ直しに失敗: ' + String((eV && eV.message) || eV).slice(0, 120); return; }
+      body.video_upload_id = [v]; err = upd();
+      if (halt) return;
     }
     rec.ok = !err; if (err) rec.err = err.slice(0, 200);
     out.push(rec);
   });
+  if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, uf: ufTotal_() };
   ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
   return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
 }
@@ -3179,6 +3233,9 @@ function addItem_(body) {
     imgIds = body.images.slice(0, 9).map(function (u) { return _upImg(u); }).filter(Boolean);
   }
   if (!imgIds.length) throw new Error('画像が必要（image_ids か images URL を渡す）');
+  /* ★2026-09-26 お店の画像6枚を空いた枠に（商品の写真が先・9枚まで）。失敗しても作成は止めない。body.promo===false で入れない（テスト用） */
+  var _promo = null;
+  if (body.promo !== false) { try { _promo = promoForNew_(shopId, imgIds, body.promo_assets || null); if (_promo) imgIds = _promo.imgs; } catch (ePm) { _promo = null; } }
   var payload = {
     original_price: parseFloat(body.price),
     description: (function (d) { d = String(d || ''); return d.length >= 20 ? d : (d + ' ' + String(body.item_name || '') + ' 日本の商品です。丁寧に梱包して発送します。').slice(0, 3000); })(body.description || body.item_name || ''), // Shopeeは説明20字以上必須→短ければ自動補完
@@ -3199,7 +3256,16 @@ function addItem_(body) {
      作る時点で必須のものがあると入口で弾かれる。→ 属性で弾かれた時だけ、そのカテゴリの必須属性のうち
      「No／否」系の選択肢があるもの（成人向けか？等）を埋めて1回だけ作り直す。平常時は呼ばない＝接続枠は増えない。 */
   var j;
-  try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
+  try {
+    try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
+    catch (eAdd0) {
+      /* ★2026-09-26 足したお店の画像で弾かれた時だけ、商品の写真だけで1回作り直す（お店の画像のせいで出品を止めない）。それ以外は下の既存の作り直しへ */
+      var msg0 = String((eAdd0 && eAdd0.message) || eAdd0);
+      if (!(_promo && _promo.add && /image/i.test(msg0))) throw eAdd0;
+      _promo.imgErr = msg0.slice(0, 160); _promo.add = 0; imgIds = _promo.keepIds; payload.image = { image_id_list: imgIds };
+      j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+    }
+  }
   catch (eAdd) {
     var msgA = String((eAdd && eAdd.message) || eAdd);
     /* ★2026-09-24 「Product category is prohibited for the channel. Channel detail: <名前>」＝そのチャネルだけ外して1回作り直す。
@@ -3261,6 +3327,8 @@ function addItem_(body) {
     result.tier_options = optionList.map(function (o) { return o.option; }); // 生成した一意オプション名（確認用）
     result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
   }
+  /* ★2026-09-26 統一動画は作った【後】に update_item で付ける（add_item では送らない＝cloneItem_ の実測に合わせる）。失敗しても作成は成功のまま */
+  if (itemId && _promo) { try { promoAfterCreate_(shopId, itemId, _promo, result); } catch (ePa) { result.promo_warn = String((ePa && ePa.message) || ePa).slice(0, 160); } }
   return result;
 }
 // 出品編集（公式API・ブリッジ卒業）：タイトル/親SKU/説明を product/update_item で更新。指定shop_id×item_id。
@@ -4473,7 +4541,8 @@ function cloneItem_(shopId, itemId, newName, publish) {
   // ★商品動画も引き継ぐ（Shopeeは1本まで）。add_item では送れないので作成後に付ける
   var vsrc = ((base.video_info || [])[0] || {});
   var vurl = vsrc.video_url || '';
-  if (out && out.item_id && vurl) {
+  /* ★2026-09-26 統一動画を付けられた時は元の動画を写さない（本人「動画はこれに統一」＝どうせ同じ／取得＋分割アップ＋変換待ちで5〜10回ぶんの枠と数分を節約） */
+  if (out && out.item_id && vurl && !out.promo_video) {
     try { setItemVideo_(shopId, out.item_id, vurl); out.video = 1; }
     catch (e) { out.video_warn = String((e && e.message) || e); }
   }
@@ -7782,7 +7851,13 @@ function seedShopCatalog_(p) {
   var base = (full && full.base) || {};
   if (!base.item_name) return { ok: false, error: '元のカタログに名前がありません' };
   /* 画像は URL で渡す（image_id は店ごとなので使い回せない）。base の image_url_list を使う。 */
-  var urls = ((base.image || {}).image_url_list || []).slice(0, 9);
+  /* ★2026-09-26 元のカタログに入っているお店の画像（今の6枚・strip の古い版）は写さない。URLで上げ直すと新しい番号になり「商品の写真」と見分けられず、
+     addItem_ が足す6枚と二重になる（＋1枚2回の枠の無駄）。image_url_list と image_id_list は同じ並び。全部お店の画像なら今までどおり全部写す（0枚にしない） */
+  var _pa = null; try { _pa = baKv_('promo_assets'); } catch (ePa) { _pa = null; }
+  var _skip = {}; if (_pa) { (_pa.strip || []).forEach(function (x) { _skip[x] = 1; }); Object.keys(_pa.imgs || {}).forEach(function (f) { _skip[_pa.imgs[f]] = 1; }); }
+  var _sIds = (base.image || {}).image_id_list || [], _allU = (base.image || {}).image_url_list || [];
+  var urls = _allU.filter(function (u, k) { return !_skip[_sIds[k]]; }).slice(0, 9);
+  if (!urls.length) urls = _allU.slice(0, 9);
   if (!urls.length) return { ok: false, error: '元のカタログに画像がありません' };
   var tierName = '';
   try { var tv = ((full.model || {}).tier_variation || [])[0]; tierName = (tv && tv.name) || ''; } catch (e2) {}
@@ -7814,6 +7889,7 @@ function seedShopCatalog_(p) {
   body.tier_name = String(tierName || 'Title').slice(0, 20);
   body.variations = [{ name: 'test', price: Number(p.price) || 300, stock: 0 }];
   body.forceTier = true;
+  if (_pa) body.promo_assets = _pa;
   /* ★2026-09-24 作る先の国のカテゴリを機種で指定できる（TW は機種ごとに葉が分かれている）。無ければ addItem_ の keyword 解決 */
   if (p.category_id && !isNaN(parseInt(p.category_id, 10))) body.category_id = parseInt(p.category_id, 10);
   var r = null;
