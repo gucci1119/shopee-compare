@@ -4497,7 +4497,7 @@
     "並び順が違う": "Different order",
     "カタログ作成日時": "Listing created",
     "この組で一番新しい": "Newest in group",
-    "今日": "Today",
+    "⚠ 出品を読み込めていません（0件ではありません）。": "⚠ Listings not loaded (this is not zero).",
     "同じ国（1店舗目・2店舗目は1つの店として）の中で、中身が全く同じカタログの組": "Groups of listings with identical content in the same country (1st and 2nd shops count as one store)",
     "です。Shopee に重複として消される前に、": ". Before Shopee removes them as duplicates, ",
     "各組から1つを残して手作業で消す": "keep one per group and delete the rest by hand",
@@ -20159,6 +20159,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '🐛 <b>🧹カタログの質が全部0になることがあったのを直しました</b>（本人「なぜか表示されなくなりました。バグ？」）。ポータルを読み込み直した直後に出品の読み込みが2本重なると、追い越された方が待たずに戻り、空の出品で表を作っていました。追い越されたら新しい方の読み込みを待つように（出品を読む全画面に効く）。読めていない時は0ではなく「読み込めていません＋🔄」を出します。',
       '🕒 <b>🟰の「出品日」を「カタログ作成日時」に</b>（本人「いつ新規作成されたカタログか分かるように」）。日付だけだったのを 日本時間の日時＋◯日前 にし、組の中で一番新しく作られた出品に「この組で一番新しい」を付けました（📋コピーも日時に）。明細を足しても変わらない＝カタログを作った時点です。',
       '🗑 <b>🟰同じ国に中身が全く同じカタログの各行に「🗑 消す」と明細の中身を足しました</b>（本人「ここから消せる？」→「つけてくれ」「バリエーションの中身も見れるようにしといて」）。消すのは<b>1件ずつ・本人が押して・確認2回</b>（1回目にこの出品の販売・いいね・閲覧と、組に残る出品を表示／「残す目安」の行なら警告／2回目は item ID の一致）。出品一覧の国メニューの🗑と同じ処理を1つにまとめて共用（削除の記録＝操作ログ＋app_kv deleted_listings）。消すと組を作り直し、残り1つになった組は一覧から消えます。明細は商品名の下に 名前・価格・在庫・販売 を並び順どおりに全部表示し、残す目安と価格が違う明細は赤、並び順が違えば「並び順が違う」と出します。',
       '🟰 <b>🧹 カタログの質に「同じ国に中身が全く同じカタログ」を足しました</b>（本人「各国で全く内容が同じカタログのリストを作っておいて。後から手作業で消す。重複があると Shopee に消されるので、その前に」）。同じ国（1店舗目・2店舗目は1つの店）の中で、<b>タイトルが同じ（①②の違いは無視）で明細も全部同じ</b>、または<b>明細3つ以上が全部同じでタイトルもほぼ同じ（型番・容量などの数字まで一致）</b>の組を、組ごとに並べます。各組の緑の行＝販売 → いいね → 閲覧 → 古い方 で一番の出品（残す目安）。ID を押すと Seller Center の編集画面・📋でタブ区切りコピー。<b>読むだけ</b>＝何も消しません（カタログは自動で消さない決まり）。',
@@ -31151,6 +31152,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       await cqLoadStats();
     } catch (e) { if (seq === cqS.seq) host.innerHTML = errBox(e); return; }
     if (seq !== cqS.seq) return;   /* 後から押した読み込みに追い越された */
+    if (!lst.loaded || !CQ_CCS.some(cc => (lst.byCc[cc] || []).length)) { host.innerHTML = '<div style="padding:14px 4px;color:#b3261e;font-size:12.5px">⚠ 出品を読み込めていません（0件ではありません）。<button class="smd-btn" id="cq-retry" style="font-size:11px;padding:2px 10px;margin-left:6px">🔄 読み直す</button></div>'; const rb = host.querySelector('#cq-retry'); if (rb) rb.addEventListener('click', () => renderQualityTab(true)); return; }   /* 読めていないのに全部0と出さない */
     cqBuild();
     cqDraw();
   }
@@ -35719,12 +35721,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     } catch (e) { toast('一括作成エラー: ' + (e.message || e), true); if (host) renderLedger(); }
   }
   // lst.byCc を確実にロード（出品状況/分析/横断で共有）
-  async function ensureListings() {
-    if (lst.loaded) return;
+  /* ★2026-09-27 本人「なぜか表示されなくなりました」＝🧹カタログの質が全部0。読み込みが2本重なると（起動時のアカウント確定で lst.byCc を空にして読み直す）
+     追い越された方が【何も待たずに】戻り、呼んだ側は空の lst.byCc で描いていた。→ 追い越されたら新しい方の読み込みを待ってから戻る */
+  function ensureListings() {
+    if (lst.loaded) return Promise.resolve();
+    const p = ensureListingsBody_();
+    lst._ensureP = p;
+    return p;
+  }
+  async function ensureListingsBody_() {
+    const seq = (lst._seq = (lst._seq || 0) + 1);   // アカウント切替で読込が重なった時、古い(未フィルタ)結果が上書きしないように。★最初の await より前に振る＝_ensureP と同じ順番になり、自分自身を待たない
     if (!state.accounts) await loadAccounts().catch(() => {}); // 系統(fam:)フィルタのshop_id解決に登録簿が要る→先に確保
-    const seq = (lst._seq = (lst._seq || 0) + 1);   // アカウント切替で読込が重なった時、古い(未フィルタ)結果が上書きしないように
     const data = await listingsFromDb();
-    if (seq !== lst._seq) return;                    // より新しい読込に追い越された→この結果は破棄
+    if (seq !== lst._seq) { const np = lst._ensureP; if (np) await np.catch(() => {}); return; }   // より新しい読込に追い越された→この結果は破棄し、新しい方が済むまで待つ
     lst.byCc = data;
     // ★販売数の付け替え補正は【ここ1か所】で当てる。読み込んだ時点で正しい数にしておけば、
     //   一覧・分析・母数・カバレッジ・クラスタ…どこで数えても自動でズレない。
