@@ -2620,6 +2620,37 @@
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
     return gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: shopId, item_id: itemId }, 90000);
   }
+  /* ★カタログを1件消す（本人が押して・確認2回・元に戻せない）。出品一覧の国メニューの🗑と、🧹カタログの質の🟰（2026-09-27 本人「つけてくれ」）で共用。
+     extra＝確認文に足す行（🟰は「この組に残る出品」など）。消せたら true。自動では呼ばない＝ループの中から呼ばない（[[shopee-never-delete-catalogs]]） */
+  async function deleteCatalogConfirmed(cc, id, name, extra) {
+    const nm = String(name || '');
+    if (!confirm('⚠ ' + cc + ' の商品(item ' + id + ')をShopeeから【削除】します。\n\n' + nm + '\n' + (extra ? '\n' + extra + '\n' : '') + '\n削除すると元に戻せません。売上・注文履歴は残りますが、この出品ページは消えます。\n\n本当に削除しますか？')) return false;
+    // ★入力欄にIDを入れておく（手打ち不要・選択してコピーもできる）。消して空にすれば中止できる
+    const t = prompt('本当に削除する場合はそのままOKを押してください。\nやめる場合はキャンセル、または欄を空にしてOK。\n\nitem ID:', String(id));
+    if (String(t || '').trim() !== String(id)) { if (t != null) alert('item IDが一致しないので中止しました'); return false; }
+    try {
+      const sid2 = shopIdOfListing(cc, +id);
+      const r = await openapiDeleteItem(sid2, id);
+      if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
+      // ★消した商品の記録を残す：操作ログ＋専用の台帳（app_kv deleted_listings・最新500件）
+      const snap = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(id)) || {};
+      try { logAct('出品', 'カタログ削除', nm, cc + ' item ' + id + '／明細' + ((snap.model_count != null) ? snap.model_count : '?') + '件／' + (snap.status === 1 ? '出品中' : '停止・その他') + '／価格 ' + (snap.price_min != null ? snap.price_min + '〜' + (snap.price_max != null ? snap.price_max : snap.price_min) : '-')); } catch (_) {}
+      try {
+        if (settings.sbSecret) {
+          const rows0 = await sbGetAll('app_kv', 'select=v&k=eq.deleted_listings');   /* 読めなかったら書かない（消した商品の記録が1件に縮む） */
+          const arr = ((rows0 && rows0[0] && rows0[0].v && rows0[0].v.items) || []);
+          arr.push({ cc, item_id: id, name: nm, image: snap.image || '', model_count: snap.model_count, status: snap.status,
+            price_min: snap.price_min, price_max: snap.price_max, models: snap.models, deleted_at: new Date().toISOString() });
+          await sbUpsert('app_kv', [{ k: 'deleted_listings', v: { items: arr.slice(-500) }, updated_at: new Date().toISOString() }]);
+        }
+      } catch (_) {}
+      // 画面とDBから消す
+      if (lst.byCc[cc]) lst.byCc[cc] = lst.byCc[cc].filter(x => String(x.item_id) !== String(id));
+      try { if (settings.sbSecret) await sbDelete('listings', 'item_id=eq.' + encodeURIComponent(id)); } catch (_) {}
+      toast('🗑 削除しました（item ' + id + '）');
+      return true;
+    } catch (e) { alert('削除に失敗: ' + e.message); return false; }
+  }
   async function openapiUnlistItem(shopId, itemId, unlist) {
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
@@ -4462,6 +4493,8 @@
     "タイトルも明細も同じ": "Same title and variations",
     "明細が全部同じ（タイトルが少し違う）": "Same variations (title differs slightly)",
     "中身が全く同じカタログはありません": "No identical listings",
+    "🗑 消す": "🗑 Delete",
+    "並び順が違う": "Different order",
     "同じ国（1店舗目・2店舗目は1つの店として）の中で、中身が全く同じカタログの組": "Groups of listings with identical content in the same country (1st and 2nd shops count as one store)",
     "です。Shopee に重複として消される前に、": ". Before Shopee removes them as duplicates, ",
     "各組から1つを残して手作業で消す": "keep one per group and delete the rest by hand",
@@ -20123,6 +20156,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '🗑 <b>🟰同じ国に中身が全く同じカタログの各行に「🗑 消す」と明細の中身を足しました</b>（本人「ここから消せる？」→「つけてくれ」「バリエーションの中身も見れるようにしといて」）。消すのは<b>1件ずつ・本人が押して・確認2回</b>（1回目にこの出品の販売・いいね・閲覧と、組に残る出品を表示／「残す目安」の行なら警告／2回目は item ID の一致）。出品一覧の国メニューの🗑と同じ処理を1つにまとめて共用（削除の記録＝操作ログ＋app_kv deleted_listings）。消すと組を作り直し、残り1つになった組は一覧から消えます。明細は商品名の下に 名前・価格・在庫・販売 を並び順どおりに全部表示し、残す目安と価格が違う明細は赤、並び順が違えば「並び順が違う」と出します。',
       '🟰 <b>🧹 カタログの質に「同じ国に中身が全く同じカタログ」を足しました</b>（本人「各国で全く内容が同じカタログのリストを作っておいて。後から手作業で消す。重複があると Shopee に消されるので、その前に」）。同じ国（1店舗目・2店舗目は1つの店）の中で、<b>タイトルが同じ（①②の違いは無視）で明細も全部同じ</b>、または<b>明細3つ以上が全部同じでタイトルもほぼ同じ（型番・容量などの数字まで一致）</b>の組を、組ごとに並べます。各組の緑の行＝販売 → いいね → 閲覧 → 古い方 で一番の出品（残す目安）。ID を押すと Seller Center の編集画面・📋でタブ区切りコピー。<b>読むだけ</b>＝何も消しません（カタログは自動で消さない決まり）。',
     ] },
     { date: '2026-09-26', items: [
@@ -28284,35 +28318,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       // 公開/非公開の切替（公式API・ログイン不要）。要 GAS再デプロイ＋shop_id判明
       { const sid = shopIdOfListing(cc, +id); if (sid && settings.openapiUrl && settings.writeToken) {
         row('📢 公開する（未公開→公開）', async () => { if (!confirm(`${cc} の商品(item ${id})を【公開】にします。よろしいですか？`)) return; try { await openapiUnlistItem(sid, +id, false); toast('📢 公開しました（Shopeeで確認）'); } catch (e) { alert('公開に失敗: ' + (e.message || e)); } }, '#1a7f37');
-        row('🗑 このカタログを完全に削除', async () => {
-          const nm = String(name || '');
-          if (!confirm('⚠ ' + cc + ' の商品(item ' + id + ')をShopeeから【削除】します。\n\n' + nm + '\n\n削除すると元に戻せません。売上・注文履歴は残りますが、この出品ページは消えます。\n\n本当に削除しますか？')) return;
-          // ★入力欄にIDを入れておく（手打ち不要・選択してコピーもできる）。消して空にすれば中止できる
-          const t = prompt('本当に削除する場合はそのままOKを押してください。\nやめる場合はキャンセル、または欄を空にしてOK。\n\nitem ID:', String(id));
-          if (String(t || '').trim() !== String(id)) { if (t != null) alert('item IDが一致しないので中止しました'); return; }
-          try {
-            const sid2 = shopIdOfListing(cc, +id);
-            const r = await openapiDeleteItem(sid2, id);
-            if (!r || !r.ok) throw new Error((r && r.error) || '失敗');
-            // ★消した商品の記録を残す：操作ログ＋専用の台帳（app_kv deleted_listings・最新500件）
-            const snap = (lst.byCc[cc] || []).find(x => String(x.item_id) === String(id)) || {};
-            try { logAct('出品', 'カタログ削除', nm, cc + ' item ' + id + '／明細' + ((snap.model_count != null) ? snap.model_count : '?') + '件／' + (snap.status === 1 ? '出品中' : '停止・その他') + '／価格 ' + (snap.price_min != null ? snap.price_min + '〜' + (snap.price_max != null ? snap.price_max : snap.price_min) : '-')); } catch (_) {}
-            try {
-              if (settings.sbSecret) {
-                const rows0 = await sbGetAll('app_kv', 'select=v&k=eq.deleted_listings');   /* 読めなかったら書かない（消した商品の記録が1件に縮む） */
-                const arr = ((rows0 && rows0[0] && rows0[0].v && rows0[0].v.items) || []);
-                arr.push({ cc, item_id: id, name: nm, image: snap.image || '', model_count: snap.model_count, status: snap.status,
-                  price_min: snap.price_min, price_max: snap.price_max, models: snap.models, deleted_at: new Date().toISOString() });
-                await sbUpsert('app_kv', [{ k: 'deleted_listings', v: { items: arr.slice(-500) }, updated_at: new Date().toISOString() }]);
-              }
-            } catch (_) {}
-            // 画面とDBから消す
-            if (lst.byCc[cc]) lst.byCc[cc] = lst.byCc[cc].filter(x => String(x.item_id) !== String(id));
-            try { if (settings.sbSecret) await sbDelete('listings', 'item_id=eq.' + encodeURIComponent(id)); } catch (_) {}
-            toast('🗑 削除しました（item ' + id + '）');
-            drawListingStatus();
-          } catch (e) { alert('削除に失敗: ' + e.message); }
-        }, '#d93025');
+        row('🗑 このカタログを完全に削除', async () => { if (await deleteCatalogConfirmed(cc, id, name)) drawListingStatus(); }, '#d93025');
         row('🔒 非公開(下書き)にする', async () => { if (!confirm(`${cc} の商品(item ${id})を【非公開(下書き)】にします。よろしいですか？`)) return; try { await openapiUnlistItem(sid, +id, true); toast('🔒 非公開にしました'); } catch (e) { alert('失敗: ' + (e.message || e)); } }, '#b3701a');
       } }
     } else if (search) {
@@ -31234,6 +31240,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const dt = t => t ? new Date(Number(t) * 1000).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', year: '2-digit', month: 'numeric', day: 'numeric' }) : '—';
     const th = 'padding:5px 6px;position:sticky;top:0;background:#eef3fb;z-index:2;white-space:nowrap;text-align:left';
     const td = 'padding:4px 6px;border-bottom:1px solid #f0f0f0;white-space:nowrap;vertical-align:middle';
+    /* 明細の中身（本人 2026-09-27「バリエーションの中身も見れるようにしといて」）＝押さずに商品名の下へ全部並べる。
+       名前・価格・在庫・販売を明細の並び順で。残す目安の行と比べて価格が違う明細は赤・並び順が違えばその旨を出す */
+    const mn = m => String((m && m.n) || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const varHtml = (l, base, i) => {
+      const ms = (l.models || []).filter(m => m && !m.ghost); if (!ms.length) return '';
+      const bm = new Map(); ((base && base.models) || []).filter(m => m && !m.ghost).forEach(m => bm.set(mn(m), m));
+      const orderDiff = i > 0 && ms.map(mn).join('\u0001') !== ((base.models || []).filter(m => m && !m.ghost).map(mn).join('\u0001'));
+      const chips = ms.map(m => {
+        const b = bm.get(mn(m)), pd = i > 0 && b && Number(b.price) !== Number(m.price);
+        return `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px solid ${pd ? '#f3c1bd' : '#e3e6ea'};border-radius:10px;background:${pd ? '#fdecea' : '#fafbfc'};font-size:10.5px;line-height:1.5;white-space:nowrap"${pd ? ` title="残す目安の出品では ${av(String(b.price))}"` : ''}>${esc(m.n || '')} <span style="color:${pd ? '#b3261e;font-weight:700' : '#5b6472'}">${m.price == null ? '—' : Number(m.price).toLocaleString()}</span> <span class="smd-dim">在${m.stock == null ? '?' : m.stock}</span>${Number(m.sold) ? ` <span style="color:#1a7f37">売${m.sold}</span>` : ''}</span>`;
+      }).join('');
+      return `<div style="margin-top:3px;white-space:normal">${orderDiff ? '<span style="font-size:10px;color:#b3701a;margin-right:4px">並び順が違う</span>' : ''}${chips}</div>`;
+    };
     const body = shown.map(g => {
       const items = g.items.slice().sort(cmp);
       const rg = regionByCc(g.cc) || {};
@@ -31243,7 +31262,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         return `<tr style="${i === 0 ? 'border-top:2px solid #d0d5dd;' : ''}${keep ? 'background:#f3faf4' : ''}">
           ${i === 0 ? `<td rowspan="${items.length}" style="${td};vertical-align:top;font-weight:700;color:${rg.color || '#333'}">${g.cc}<div class="smd-dim" style="font-size:10px;font-weight:400;white-space:normal;max-width:120px">${g.why === 'same' ? 'タイトルも明細も同じ' : '明細が全部同じ（タイトルが少し違う）'}${g.nVar ? '・明細' + g.nVar : '・単品'}</div></td>` : ''}
           <td style="${td}">${keep ? '<span style="color:#1a7f37;font-weight:700" title="販売 → いいね → 閲覧 → 古い方 の順で一番の出品。消す方を選ぶ時の目安（決めるのは本人）">残す目安</span>' : '<span style="color:#b3261e">候補</span>'}</td>
-          <td style="${td};white-space:normal;min-width:240px;max-width:420px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(l.image || '')}" style="width:30px;height:30px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0">${nm(l.name, 'wrap')}</div></div></td>
+          <td style="${td};white-space:normal;min-width:240px;max-width:420px"><div style="display:flex;gap:6px;align-items:center"><img src="${IMG_CDN}${esc(l.image || '')}" style="width:30px;height:30px;object-fit:cover;border-radius:5px;background:#eee;flex:none" loading="lazy" onerror="this.style.opacity=.15"><div style="min-width:0">${nm(l.name, 'wrap')}${varHtml(l, items[0], i)}</div></div></td>
           <td style="${td}"><a href="${av(editUrlFor(rg.host || '', l.item_id))}" target="_blank" rel="noopener" title="Seller Center の編集画面を開く">${l.item_id}</a></td>
           <td style="${td};font-size:10.5px">${esc(acctLabel(l.shop_id) || String(l.shop_id || ''))}</td>
           <td style="${td}">${Number(l.status) === 8 ? '<span class="smd-dim">非公開</span>' : '公開'}</td>
@@ -31252,14 +31271,29 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           <td style="${td};text-align:right">${Math.max(sold(l), Number(s.sale) || 0).toLocaleString()}</td>
           <td style="${td};text-align:right">${s.likes == null ? '—' : Number(s.likes).toLocaleString()}</td>
           <td style="${td};text-align:right">${s.views == null ? '—' : Number(s.views).toLocaleString()}</td>
-          <td style="${td}">${dt(l.create_time)}</td></tr>`;
+          <td style="${td}">${dt(l.create_time)}</td>
+          <td style="${td}"><button class="smd-btn cq-del" data-cc="${g.cc}" data-id="${l.item_id}" style="font-size:11px;padding:2px 10px;color:#d93025;border-color:#f3c1bd" title="この出品を Shopee から削除する（確認が2回出ます・元に戻せません）">🗑 消す</button></td></tr>`;
       }).join('');
     }).join('');
     box.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 8px;font-size:12px;line-height:1.6">🟰 <b>同じ国（1店舗目・2店舗目は1つの店として）の中で、中身が全く同じカタログの組</b>です。Shopee に重複として消される前に、<b>各組から1つを残して手作業で消す</b>ための一覧（ここからは何も消しません）。<br><span class="smd-dim">同じとみなす＝タイトルが同じ（①②の番号の違いは無視）で明細も全部同じ／または明細3つ以上が全部同じでタイトルもほぼ同じ（型番・容量などの数字まで一致）。緑の行＝販売 → いいね → 閲覧 → 古い方 で一番の出品（残す目安）。ID を押すと Seller Center の編集画面。出品データは最後の同期時点のもの＝すでに Shopee に消されている出品が混じることがあります。</span></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 6px;font-size:12px"><span><b>${gs.length.toLocaleString()}</b> 組・<b>${nItems.toLocaleString()}</b> 出品（1つずつ残すと消す対象は <b>${extra.toLocaleString()}</b> 件）</span><button class="smd-btn" id="cq-dup-copy" style="font-size:11px;padding:2px 10px" title="表計算に貼れる形（タブ区切り）でコピー">📋 一覧をコピー</button></div>
-      <div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11.5px"><thead><tr><th style="${th}">国</th><th style="${th}">目安</th><th style="${th}">商品</th><th style="${th}">Item ID</th><th style="${th}">店</th><th style="${th}">状態</th><th style="${th};text-align:right">価格</th><th style="${th};text-align:right">在庫</th><th style="${th};text-align:right">🛒販売</th><th style="${th};text-align:right">❤️いいね</th><th style="${th};text-align:right">👁閲覧</th><th style="${th}">出品日</th></tr></thead><tbody>${body || '<tr><td colspan="12" class="smd-empty">中身が全く同じカタログはありません</td></tr>'}</tbody></table></div>
+      <div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid #e5e5e5;border-radius:8px"><table style="border-collapse:collapse;width:100%;font-size:11.5px"><thead><tr><th style="${th}">国</th><th style="${th}">目安</th><th style="${th}">商品</th><th style="${th}">Item ID</th><th style="${th}">店</th><th style="${th}">状態</th><th style="${th};text-align:right">価格</th><th style="${th};text-align:right">在庫</th><th style="${th};text-align:right">🛒販売</th><th style="${th};text-align:right">❤️いいね</th><th style="${th};text-align:right">👁閲覧</th><th style="${th}">出品日</th><th style="${th}"></th></tr></thead><tbody>${body || '<tr><td colspan="13" class="smd-empty">中身が全く同じカタログはありません</td></tr>'}</tbody></table></div>
       ${gs.length > shown.length ? `<div style="text-align:center;margin:10px 0"><button class="smd-btn" id="cq-more">さらに表示</button> <span class="smd-dim" style="font-size:11px">残り ${(gs.length - shown.length).toLocaleString()} 組</span></div>` : ''}`;
     const mo = box.querySelector('#cq-more'); if (mo) mo.addEventListener('click', () => { cqS.page++; cqDrawBody(); });
+    /* 🗑 消す（本人 2026-09-27「つけてくれ」）＝1件ずつ・本人が押して・確認2回。消したら画面の出品から外して組を作り直す（残り1つになった組は一覧から消える） */
+    box.querySelectorAll('.cq-del').forEach(b => b.addEventListener('click', async () => {
+      const cc = b.dataset.cc, id = b.dataset.id;
+      const g = gs.find(x => x.cc === cc && x.items.some(l => String(l.item_id) === id)); if (!g) return;
+      const items = g.items.slice().sort(cmp), l = items.find(x => String(x.item_id) === id);
+      const s0 = st(l), rest = items.filter(x => String(x.item_id) !== id);
+      const extra = 'この出品：販売 ' + Math.max(sold(l), Number(s0.sale) || 0) + '・いいね ' + (s0.likes == null ? '?' : s0.likes) + '・閲覧 ' + (s0.views == null ? '?' : s0.views) + '・' + (Number(l.status) === 8 ? '非公開' : '公開') + '\n'
+        + (items[0] === l ? '⚠ これは「残す目安」の出品です（組の中で販売・いいね・閲覧が一番）。\n' : '')
+        + 'この組に残る出品：' + rest.map(x => '#' + x.item_id + '（販売 ' + Math.max(sold(x), Number(st(x).sale) || 0) + '）').join('、');
+      b.disabled = true;
+      const ok = await deleteCatalogConfirmed(cc, id, l.name, extra);
+      if (!ok) { b.disabled = false; return; }
+      cqBuild(); cqDraw();
+    }));
     box.querySelector('#cq-dup-copy').addEventListener('click', () => {
       const head = ['組', '国', '目安', 'Item ID', '店', '状態', '価格', '在庫', '販売', 'いいね', '閲覧', '出品日', '商品名', 'Seller Center'].join('\t');
       const lines = gs.map((g, gi) => g.items.slice().sort(cmp).map((l, i) => { const s = st(l), rg = regionByCc(g.cc) || {}; return [gi + 1, g.cc, i === 0 ? '残す目安' : '候補', l.item_id, acctLabel(l.shop_id) || l.shop_id || '', Number(l.status) === 8 ? '非公開' : '公開', l.price_min == null ? '' : l.price_min, l.stock == null ? '' : l.stock, Math.max(sold(l), Number(s.sale) || 0), s.likes == null ? '' : s.likes, s.views == null ? '' : s.views, dt(l.create_time), String(l.name || '').replace(/[\t\n]/g, ' '), editUrlFor(rg.host || '', l.item_id)].join('\t'); }).join('\n')).join('\n');
