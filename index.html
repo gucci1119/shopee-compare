@@ -20090,6 +20090,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🎮 <b>母数の「出している」で Switch2 だけグレー（計算前）のままだったのを直しました</b>（本人「Switch2の出しているだけ、なぜグレー？」）。突き合わせは作品マスタがある機種だけを回していて、Switch2 には作品マスタが無かったためです。作品マスタが無い機種は、母数と同じ材料（駿河屋＋楽天の商品名）で突き合わせます。',
       '🧹 <b>出品管理に「🧹 カタログの質」タブを足しました</b>（本人「既存カタログの質アップを並行してやっていく」）。いま出している出品（公開・非公開）の <b>⛔Shopeeが止めている（店内重複・禁止カテゴリ＝Seller Centerで手で直すまでAPIで書けない・エラー文をそのまま表示）／動画なし／商品写真3枚未満／お店の画像なし／タイトル40字未満・120字超／重量なし／公開中で在庫0／非公開</b> を、上に問題×国の件数表（押さずに見える・数字を押すとその国のその問題に絞る）、下に 行＝タイトルで束ねたカタログ×列＝7か国 の表で出します。セルは足りないものだけ・押すとその国の Seller Center 編集画面。動画とお店の画像は GAS の一括（promo_done）の状態も並べます（入れ終わり／待ち／失敗／3回失敗）。<b>読むだけ</b>＝Shopee にも app_kv にも書きません。🧭やりたいこと・⌘K からも開けます。',
       '📈 <b>アクセス（各国）の「1年」に過去の数字が入るようにしました</b>（本人「これ1年は取れないのか？」）。Business Insights の同じ画面に「月」で頼むとその月の日別が返ることを実物で確かめ、13か月ぶんを8秒おきに取り込みます（userscript v1.2.0・店ごとに1回だけ・エラーが出たら止める）。本体7か国はこちらで取り込み済み。2店舗目は userscript を入れ直すと自動で取り込みます。保存は国・店ごとに新しい400日なので、1年表示の「前の期間」は出ません。',
       '🖼 <b>新しく作る出品にも最初からお店の画像6枚と統一動画を入れます</b>（🤖自動出品・複製・2店舗目・ポータルからの出品すべて）。商品の写真が先・空いた枠にだけ後ろから・9枚まで。画像で弾かれたら商品の写真だけで作り直します。全出品への一括は、1件の失敗で同じ回の25件が「失敗」になっていたのを直し、失敗は6時間おいて3回までやり直します。一括が終わったら毎日18時に新しい出品だけ見回ります。',
@@ -28908,7 +28909,18 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const gen = _tmRowsGen;
     try {
       const r = await sbGetAll('app_kv', 'select=v&k=eq.titles_' + encodeURIComponent(hw));
-      const rows = ((r && r[0] && r[0].v) || {}).rows || [];
+      let rows = ((r && r[0] && r[0].v) || {}).rows || [];
+      /* ★2026-09-26 本人「Switch2の出しているだけ、なぜグレー？」：作品マスタ（titles_<hw>）が無い機種は突き合わせが永久に「計算前」だった。
+         無い機種は【母数と同じ材料＝駿河屋＋楽天】の商品名で突き合わせる（ソフトだけ・同じ作品は1つに） */
+      if (!r || !r.length) {
+        const g = await sbGetAll('app_kv', 'select=v&k=eq.sg_' + encodeURIComponent(hw));
+        const rk = await loadJanMaster(hw);
+        if (!rk) return null;   // 楽天が読めない＝控えない（次で取り直す）
+        const seen = new Set(); rows = [];
+        const addT = t => { t = String(t || ''); if (!t || BOSHU_NG.test(t) || BOSHU_DL.test(t)) return; const k = boshuKey(t); if (!k || seen.has(k)) return; seen.add(k); rows.push({ ja: t, en: '' }); };
+        (((g && g[0] && g[0].v) || {}).rows || []).forEach(x => { if (x && (!x.k || sgKindOf(x) === 'soft')) addT(x.t); });
+        rk.forEach(x => addT(x && x.t));
+      }
       if (gen === _tmRowsGen) _tmRowsCache[hw] = { at: Date.now(), rows };
       return rows;
     }
@@ -29125,7 +29137,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const names = ((own.byCc || {})[cc]) || {};
       if (!Object.keys(names).length) return;
       const M = tmMatchOf(cc); lst.tmMatchCc[cc] = M;
-      const todo = Object.keys(master || {}).filter(h => M[h] == null);
+      const todo = [...new Set([...Object.keys(master || {}), ...Object.keys(lst.boshuU || {})])].filter(h => M[h] == null);   // ★作品マスタが無い機種（Switch2 等）も回す
       if (!todo.length) return;
       _tmMatching = true;
       try {
@@ -29148,7 +29160,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const totalOwn = Object.keys(own.per || {}).reduce((a, k) => a + (own.per[k] || 0), 0);
     if (!totalOwn) return;
     lst.tmMatch = lst.tmMatch || tmCacheLoad() || {};
-    const todo = Object.keys(master || {}).filter(h => lst.tmMatch[h] == null);
+    const todo = [...new Set([...Object.keys(master || {}), ...Object.keys(lst.boshuU || {})])].filter(h => lst.tmMatch[h] == null);
     if (!todo.length) return;
     _tmMatching = true;
     for (const h of todo) {
