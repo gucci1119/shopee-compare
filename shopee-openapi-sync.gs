@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1150';
+var SRC_VER = '20260926-1230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -817,6 +817,18 @@ function doGetInner_(e) {
     }
     // ★商品動画の差し替え／削除。url= 動画の公開URL（ポータルがSupabase Storageに上げたもの）。
     //   Shopeeは 4MB分割アップロード→完了→トランスコード待ち→update_item という多段。job= で進捗を書き戻す。
+    if (p.action === 'promo_start' || p.action === 'promo_stop' || p.action === 'promo_status') {
+      var pjcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var pjout;
+      try {
+        var pjwt = P_().getProperty('WRITE_TOKEN');
+        if (!pjwt || p.token !== pjwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'promo_start') pjout = { ok: true, job: promoStart_(p.limit) };
+        else if (p.action === 'promo_stop') { var j0 = baKv_('promo_job') || {}; j0.on = false; j0.msg = '止めました（手動）'; promoTriggerOff_(); pjout = { ok: true, job: promoSaveJob_(j0) }; }
+        else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
+      } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'promo_setup' || p.action === 'promo_apply') {
       var prcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var prout;
@@ -2058,6 +2070,65 @@ function promoVideoFor_(shopId, cc, A, force) {
   baKvSet_('promo_assets', A);
   return up.vid;
 }
+/* ★全出品への一括（10分ごと・GAS の中で回す＝Chrome が落ちても止まらない）。
+   promo_job = {on, limit(試運転の上限・0=無制限), n(今までに処理した数), ok, ng, at, msg}
+   promo_done_<cc> = {item_id: {at, ok, err?, from?}}（from＝書く前の画像の並び＝戻す時に使う）
+   ★🤖と同じ getScriptLock を使わない（使うと🤖が止まる・2026-09-19 実測）＝重なり防止はキャッシュの印で */
+var PROMO_CCS = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+function promoTick() {
+  var C = CacheService.getScriptCache();
+  if (C.get('promo_running')) return;
+  C.put('promo_running', '1', 360);
+  try {
+    var job = baKv_('promo_job') || {};
+    if (!job.on) { promoTriggerOff_(); return; }
+    var t0 = Date.now(), done0 = Number(job.n || 0);
+    for (var ci = 0; ci < PROMO_CCS.length; ci++) {
+      var cc = PROMO_CCS[ci];
+      var doneMap = baKv_('promo_done_' + cc) || {};
+      var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
+      var todo = (rows || []).filter(function (r) { return r && r.item_id && r.shop_id && !doneMap[r.item_id]; });
+      if (!todo.length) continue;
+      var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
+      var shops = Object.keys(byShop);
+      for (var si = 0; si < shops.length; si++) {
+        var ids = byShop[shops[si]];
+        for (var bi = 0; bi < ids.length; bi += 25) {
+          if (Date.now() - t0 > 4.5 * 60000) { job.msg = '時間切れ（次の回へ）'; return promoSaveJob_(job); }
+          if (job.limit && Number(job.n || 0) >= Number(job.limit)) { job.on = false; job.msg = '試運転の上限 ' + job.limit + ' 件で止めました（確認待ち）'; promoTriggerOff_(); return promoSaveJob_(job); }
+          var take = ids.slice(bi, bi + 25);
+          if (job.limit) take = take.slice(0, Math.max(0, Number(job.limit) - Number(job.n || 0)));
+          var res;
+          try { res = promoApply_(parseInt(shops[si], 10), cc, take, false, false); }
+          catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { doneMap[id] = { at: Date.now(), ok: 0, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
+          if (!res.ok && res.stop) { job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない＝次の回に */
+          (res.items || []).forEach(function (x) {
+            var d = { at: Date.now(), ok: x.ok ? 1 : 0 };
+            if (x.err) d.err = String(x.err).slice(0, 120);
+            if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
+            doneMap[x.item_id] = d;
+            job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
+          });
+          baKvSet_('promo_done_' + cc, doneMap);
+          job.at = new Date().toISOString(); job.cc = cc; job.msg = cc + ' 進行中';
+          baKvSet_('promo_job', job);
+        }
+      }
+    }
+    job.on = false; job.doneAt = new Date().toISOString(); job.msg = '全部終わりました'; promoTriggerOff_();
+    promoSaveJob_(job);
+  } finally { C.remove('promo_running'); }
+}
+function promoSaveJob_(job) { job.at = new Date().toISOString(); baKvSet_('promo_job', job); return job; }
+function promoTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'promoTick') ScriptApp.deleteTrigger(t); }); }
+function promoStart_(limit) {
+  var job = baKv_('promo_job') || {};
+  job.on = true; job.limit = Number(limit || 0) ? Number(job.n || 0) + Number(limit) : 0; job.startAt = new Date().toISOString(); job.msg = '開始';
+  baKvSet_('promo_job', job);
+  promoTriggerOff_();
+  ScriptApp.newTrigger('promoTick').timeBased().everyMinutes(10).create();
+  return job;
+}
 function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   if (!dry && ufTotal_() > ufStopLine_() - 3000) return { ok: false, stop: 'quota', error: '接続枠が残り少ないので止めました（' + ufTotal_() + '）' };
   var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
@@ -2083,7 +2154,8 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
     var rec = { item_id: it.item_id, status: it.item_status, before: cur0.length, keep: cur.length, removed: cur0.length - cur.length - cur0.filter(function (x) { return bids.indexOf(x) >= 0; }).length, add: add.length, hadVideo: !!((it.video_info || []).length) };
     if (dry) { rec.dry = 1; out.push(rec); return; }
     var body = { item_id: it.item_id };
-    if (!same && next.length) body.image = { image_id_list: next };
+    if (!next.length) { rec.ok = false; rec.err = '画像が0枚になるので書かない'; rec.from = cur0; out.push(rec); return; }   /* ★壊さない：空の画像リストは絶対に送らない */
+    if (!same) body.image = { image_id_list: next };
     rec.from = cur0; rec.to = body.image ? next : cur0;   /* 戻せるように前後を返す（ポータルが控える） */
     if (v) body.video_upload_id = [v];
     if (!body.image && !body.video_upload_id) { rec.ok = true; rec.skip = 'nothing'; out.push(rec); return; }
