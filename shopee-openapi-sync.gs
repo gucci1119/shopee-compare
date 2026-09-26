@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1500';
+var SRC_VER = '20260926-1530';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2142,9 +2142,13 @@ function promoTick() {
         pnIds.forEach(function (id) { var d0 = doneMap[id]; if (!d0 || !d0.ok) { doneMap[id] = { at: Number(pnMap[id].at) || Date.now(), ok: 1, src: 'new' }; if (d0 && d0.from) doneMap[id].from = d0.from; } });
         baKvSet_('promo_done_' + cc, doneMap); promoNewDrop_(pnIds); job.nNew = Number(job.nNew || 0) + pnIds.length;
       }
-      var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
+      var rows = sbSelectAll_('listings', 'select=item_id,shop_id,status,images,synced_at&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
       /* 失敗した分は6時間おいて3回までやり直す（1回の失敗で永久に外さない） */
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000); });
+      /* ★2026-09-26 古いお店画像の一覧（promo_assets.strip）を後から足したので、入れ終わりでも【入れた後に同期した画像に strip が残っている】出品は1回だけ入れ直す（redo） */
+      var stripSet = {}; ((baKv_('promo_assets') || {}).strip || []).forEach(function (x) { stripSet[x] = 1; });
+      var needsRedo = function (r, d) { if (!d || !d.ok || d.redo) return false; if (!(Date.parse(r.synced_at || '') > Number(d.at || 0))) return false; return (r.images || []).some(function (x) { return stripSet[x]; }); };
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d); });
+      var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
@@ -2164,6 +2168,7 @@ function promoTick() {
             if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
+            if (redoIds[x.item_id]) d.redo = 1;   /* 入れ直しは1回だけ */
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
           });
