@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1440';
+var SRC_VER = '20260926-1500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -828,6 +828,15 @@ function doGetInner_(e) {
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'gallery_fill') {   /* ★2026-09-26 本人「おけ！」：商品写真が3枚未満の出品に、明細の写真（バリエ）／同じ商品の他国の写真（単品）を足す */
+      var gfcb2 = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), gfo;
+      try {
+        var gfwt = P_().getProperty('WRITE_TOKEN'); if (!gfwt || p.token !== gfwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var gfs = parseInt(p.shop_id, 10); if (!getToken_(gfs)) throw new Error('未認可 shop_id=' + p.shop_id);
+        gfo = galleryFill_(gfs, p.item_id, String(p.add || '').split(',').filter(Boolean), p.dry === '1', Number(p.cap || 5), String(p.src || ''));
+      } catch (err) { gfo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(gfcb2 + '(' + JSON.stringify(gfo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'promo_setup' || p.action === 'promo_apply') {
       var prcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -2230,6 +2239,31 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, uf: ufTotal_() };
   ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
   return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
+}
+/* ★2026-09-26 商品写真の足し込み（本人「おけ！」）。
+   今の商品写真は【1枚も外さず元の順で先頭】→ 後ろに add（明細の写真 or 同じ商品の他国の写真）を商品写真が cap 枚になるまで → 残りの空き枠にお店の画像（promoMergeImgs_）。
+   書く直前に get_item_base_info で読み直す・空リストは送らない・書く前の並びを app_kv gallery_fill_log に控える（戻せるように） */
+function galleryFill_(shopId, itemId, add, dry, cap, src) {
+  cap = Math.max(1, Math.min(8, cap || 5));
+  var iid = parseInt(itemId, 10); if (!(iid > 0)) throw new Error('item_id 不正');
+  var A = baKv_('promo_assets') || {}; var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; }).filter(Boolean);
+  var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; }); bids.forEach(function (x) { strip[x] = 1; });
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(iid) }, 'get');
+  var it = (((b.response || {}).item_list) || [])[0]; if (!it) throw new Error('Shopeeに見つからない item_id=' + iid);
+  var cur0 = ((it.image || {}).image_id_list || []).slice();
+  var prod = cur0.filter(function (x) { return x && !strip[x]; });
+  var seen = {}; prod.forEach(function (x) { seen[x] = 1; });
+  var extra = (add || []).map(function (x) { return String(x).trim(); }).filter(function (x) { if (!x || strip[x] || seen[x] || !/^[a-z0-9-]+$/i.test(x)) return false; seen[x] = 1; return true; });
+  var newProd = prod.concat(extra.slice(0, Math.max(0, cap - prod.length)));
+  var next = bids.length === PROMO_IMGS.length ? promoMergeImgs_(newProd, A, bids).next : newProd.slice(0, 9);
+  var rec = { item_id: iid, before: cur0.length, prod: prod.length, added: newProd.length - prod.length, after: next.length, from: cur0, to: next };
+  if (!next.length || newProd.length < prod.length) { rec.ok = false; rec.err = '商品写真が減る/空になるので書かない'; return rec; }
+  if (newProd.length === prod.length) { rec.ok = true; rec.skip = '足せる写真なし'; return rec; }
+  if (dry) { rec.ok = true; rec.dry = 1; return rec; }
+  callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: iid, image: { image_id_list: next } });
+  rec.ok = true;
+  try { var fr = baKvFreshMany_(['gallery_fill_log']); if (fr) { var L = fr.gallery_fill_log || {}; L[iid] = { at: Date.now(), shop: shopId, src: src, from: cur0, to: next }; baKvSet_('gallery_fill_log', L); } } catch (eL) { rec.warn = '控えを書けませんでした: ' + String((eL && eL.message) || eL).slice(0, 100); }
+  return rec;
 }
 // ★明細画像をまとめて差し替える。items=[{option, url}]
 //   ①画像を並列DL ②media_spaceへ並列アップロード ③update_tier_variation は1回だけ
