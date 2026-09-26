@@ -19659,7 +19659,6 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ⚠️ 保存は【まるごとの上書き】。読めていないまま保存すると、
   //   **他のPCで「読んだ」にした印が全部消えて、片付けたお知らせが全部戻ってくる**。
   async function notifReadLoad() {
-    if (notif.readOk && notif.read) return notif.read;
     try {
       const rows = await sbGetAll('app_kv', 'select=v&k=eq.notif_read');
       notif.read = (rows && rows[0] && rows[0].v) || {};
@@ -19670,6 +19669,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function notifReadSave() {
     // ⚠️ 読み直しで**いま付けた既読を上書きしない**（手元を上に重ねる）
+    notif.readOk = false;   // 毎回サーバを読み直して手元を重ねる（別タブ/別PCの既読を古い手元で消さない）
     if (!notif.readOk) {
       const mine = notif.read || {}, base = notif.readBase;
       await notifReadLoad();
@@ -19849,9 +19849,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (over.parcel) kept.push({ id: 'more:' + jstDate(Date.now()), ic: '🧹', cat: 'parcel', kind: 'more', at: '',
       ti: 'ほか ' + over.parcel + '件あります', sb: '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます' });
     notif.items = kept;
+    notif.allIds = out.map(x => x.id);   // 上限で隠れた分も「すべて既読」で既読にする（隠れた未読が後から浮いてくるのを防ぐ）
     return kept;
   }
-  function notifUnread() { const rd = notif.read || {}; return notif.items.filter(x => !rd[x.id]).length; }
+  // ★荷物は段階でIDが変わる（out:→arr:／late:→arr:）。同じ荷物をどこかの段階で既読にしたら既読のまま（2026-09-26 本人「全部既読にしても復活してくる」）
+  function nfIsRead(rd, x) {
+    if (rd[x.id]) return true;
+    if (x.kind === 'more') return true;
+    if (x.cat === 'parcel' && x.itemId) {
+      if (rd['arr:' + x.itemId] || rd['out:' + x.itemId]) return true;
+      const p = 'late:' + x.itemId + ':'; return Object.keys(rd).some(k => k.startsWith(p));
+    }
+    return false;
+  }
+  function notifUnread() { const rd = notif.read || {}; return notif.items.filter(x => !nfIsRead(rd, x)).length; }
   function notifPaint() {
     const b = document.getElementById('smd-notif-badge'); if (!b) return;
     const n = notifUnread();
@@ -19869,7 +19880,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   4回作り直しても安定しなかった（2026-08-13）。押したカテゴリだけ描き直す＝確実に動く形に戻す。
     return `<div class="nf-tabs">` + NOTIF_CATS.map(([k, label]) => {
       const arr = k === 'all' ? notif.items : notif.items.filter(x => (x.cat || 'todo') === k);
-      const un = arr.filter(x => !rd[x.id]).length;
+      const un = arr.filter(x => !nfIsRead(rd, x)).length;
       const on = cur === k;
       return `<button class="nf-tab${on ? ' on' : ''}${!arr.length && k !== 'all' ? ' off' : ''}" data-c="${k}" title="${k === 'all' ? 'すべて表示' : label + 'だけ表示'}">${label} <b>${arr.length}</b>${un ? `<span class="nf-dot"></span>` : ''}</button>`;
     }).join('') + `</div>`;
@@ -19911,7 +19922,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function notifRows(list, rd) {
     return list.map(x => {
-      const un = !rd[x.id];
+      const un = !nfIsRead(rd, x);
       return `<div class="nf-item${un ? ' unread' : ''}" data-id="${esc(x.id)}">
         <div class="nf-ic">${x.img
           ? `<img src="${/^https?:/.test(x.img) ? esc(x.img) : IMG_CDN + esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" title="${av(x.ti || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:6px;background:#f2f2f2;display:block" onerror="this.replaceWith(document.createTextNode('${x.ic}'))">`
@@ -19938,6 +19949,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     pn.querySelector('.nf-close').addEventListener('click', notifClose);
     pn.querySelector('.nf-allread').addEventListener('click', async () => {
       notif.read = notif.read || {}; const now = new Date().toISOString();
+      (notif.allIds || []).forEach(id => { notif.read[id] = now; });
       notif.items.forEach(x => { notif.read[x.id] = now; });
       notifPaint(); notifRender(); await notifReadSave();
     });
@@ -20092,6 +20104,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '🔔 <b>お知らせを「すべて既読」にしても復活してくるのを直しました</b>（本人「全部既読にしても復活してくるんだけど」）。既読はちゃんと保存されていましたが、荷物のお知らせは「配達中」→「届きました」と段階が変わるたびに別のお知らせとして数え直していました。同じ荷物をどこかの段階で既読にしたら既読のままにします。「すべて既読」は、件数の上限で画面に出ていない荷物も既読にします（後から未読が浮いてこない）。別のタブやPCで付けた既読を古い画面が上書きしないようにもしました。',
       '💱 <b>受取額・粗利で Payoneer の2%を二重に引いていたのを直しました</b>（本人「よーわからん」）。円に換える率（日次の為替×国別スプレッド）には、実際の着金から出したShopee分に Payoneer の2%を足した分がもう入っています。そのうえで「入金為替手数料2%」をもう一度引いていたので、価格計算・出品を作る・利益の見込みの受取額と粗利が約2%低く出ていました（出品価格は変わりません）。⚙️の入金為替手数料を0%にしました。',
       '🔧 <b>💴価格計算と💸Payoneerリリースを点検して直しました</b>（本人「ここも点検して」「これはどこまで正しい？」）。価格計算：①「出品を作る」の下書きの目標ROIを拾っていた（9/10の直しがここだけ漏れていた）②SG/MYの価格を整数に丸めて見せていた（S$25.5→S$26）③VNの上限の表記が古かった（正しくは100万VND未満）④掲載%・PayPal手数料の保存値が読み直すと初期値に戻っていた。Payoneer：「注文からの経過」がほぼ全部「61日〜/不明」に落ちていたのを直しました。今週の実績・未払いの判定・払い出しと注文の突き合わせ（直近30日すべて件数一致）は正しいことを実データで確認しました。',
       '🔍 <b>写真にマウスを合わせた時の拡大が、「写真を直す」などの窓の後ろに出ていたのを直しました</b>（本人「マウス合わせると、裏に出ていない？」）。拡大と、押して開く大きい写真を一番手前に出します。',
