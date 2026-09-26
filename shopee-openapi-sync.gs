@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1530';
+var SRC_VER = '20260926-1545';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2079,7 +2079,10 @@ function promoVideoFor_(shopId, cc, A, force) {
   if (res.getResponseCode() >= 400) throw new Error('動画を取得できません HTTP ' + res.getResponseCode());
   var up = uploadVideoBytes_(shopId, res.getBlob().getBytes(), null);
   A.vid[key] = { id: up.vid, at: Date.now(), shop: shopId };
-  baKvSet_('promo_assets', A);
+  /* ★2026-09-26 書く直前に読み直して vid だけ混ぜる（ポータルで strip＝古いお店画像の一覧 を足した直後に、古い写しで丸ごと上書きして消さない） */
+  var FR = baKvFreshMany_(['promo_assets']);
+  if (FR && FR.promo_assets) { var FA = FR.promo_assets; FA.vid = FA.vid || {}; FA.vid[key] = A.vid[key]; baKvSet_('promo_assets', FA); A.strip = FA.strip; }
+  else if (FR) baKvSet_('promo_assets', A);
   return up.vid;
 }
 /* ★2026-09-26 本人「新しく作る出品にも最初から入れて」。作る入口は全部 addItem_ を通る（🤖の家族カタログ／満杯の複製／2店舗目／他の国から種、ポータルの出品・複製）＝ここ1か所で入れる。
