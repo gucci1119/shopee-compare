@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1900s';
+var SRC_VER = '20260926-1910c';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2110,7 +2110,7 @@ var PROMO_GAL_VER = 1;
    本体の枠は同居の tool に大半を使われていて実際の余裕が読めない（こちらの数え 3,725 回で Google に止められた）。一括は【小さく・早めに降りる】：
    ①その日すでに断られていたら何もしない ②こちらの数えが BULK_USED_MAX を超えたらその日は降りる ③1日の件数上限（配送画像・説明文それぞれ）
    ④🤖が直近に触ったカタログ（listings.update_time が2時間以内）は後回し（明細追加と重ならないように） */
-var BULK_USED_MAX = 3500, PROMO_GAL_DAILY = 300, DNOTE_DAILY = 300, BULK_SKIP_RECENT_SEC = 2 * 3600;
+var BULK_USED_MAX = 3000, PROMO_GAL_DAILY = 300, DNOTE_DAILY = 300, BULK_SKIP_RECENT_SEC = 2 * 3600;
 function bulkOk_() { return !ufDead_() && ufTotal_() < BULK_USED_MAX; }
 function dayCount_(job, key, add) { var d = ufToday_(); if (job[key + 'Day'] !== d) { job[key + 'Day'] = d; job[key + 'N'] = 0; } job[key + 'N'] = Number(job[key + 'N'] || 0) + (add || 0); return job[key + 'N']; }
 function promoGalSetup_(ver) {
@@ -2216,7 +2216,7 @@ function promoTick() {
       var stripSet = {}; ((baKv_('promo_assets') || {}).strip || []).forEach(function (x) { stripSet[x] = 1; });
       var needsRedo = function (r, d) { if (!d || !d.ok || d.redo) return false; if (!(Date.parse(r.synced_at || '') > Number(d.at || 0))) return false; return (r.images || []).some(function (x) { return stripSet[x]; }); };
       var galOn = !!(((baKv_('promo_assets') || {}).gal || {})[DIMG_KEY[cc]]);
-      var galLeft = Math.max(0, PROMO_GAL_DAILY - dayCount_(job, 'gal', 0));
+      var galLeft = Math.max(0, Math.min(PROMO_GAL_DAILY, Number(job.galCap || PROMO_GAL_DAILY)) - dayCount_(job, 'gal', 0));   /* job.galCap＝試運転の1日上限（最初は少しだけ入れて目で確かめる） */
       var nowSec = Math.floor(Date.now() / 1000);
       var needsGal = function (d, r) { return galOn && galLeft > 0 && d && d.ok && Number(d.galv || 0) < PROMO_GAL_VER && !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* ★配送日数の画像に差し替える（入れ終わった出品も1回やり直す・1日の上限・🤖が直近に触ったものは後回し） */
       var galPick = 0;
@@ -2387,7 +2387,8 @@ function dnoteTick(budgetMs) {
     if (ufDead_()) return;
     var job = baKv_('dnote_job') || {}; if (!job.on) { dnoteTriggerOff_(); return; }
     var t0 = Date.now();
-    if (dayCount_(job, 'day', 0) >= DNOTE_DAILY) { job.msg = '今日の上限 ' + DNOTE_DAILY + ' 件（明日続き）'; baKvSet_('dnote_job', job); return; }
+    var dCap = Math.min(DNOTE_DAILY, Number(job.dayCap || DNOTE_DAILY));
+    if (dayCount_(job, 'day', 0) >= dCap) { job.msg = '今日の上限 ' + dCap + ' 件（明日続き）'; baKvSet_('dnote_job', job); return; }
     var fr = baKvFreshMany_(['dnote_done']); if (!fr) { job.msg = 'dnote_done を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }
     var done = fr.dnote_done || {};
     var ccs = Object.keys(DNOTE_TEXT);
@@ -2402,7 +2403,7 @@ function dnoteTick(budgetMs) {
         for (var bi = 0; bi < ids.length; bi += 25) {
           if (Date.now() - t0 > (typeof budgetMs === 'number' && budgetMs > 0 ? budgetMs : 4.5 * 60000)) { job.msg = '時間切れ（次の回へ）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           if (!bulkOk_() || ufTotal_() > ufStopLine_() - 6000) { job.msg = '本体の接続枠を業務に残すため今日はここまで（数え ' + ufTotal_() + '）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
-          if (dayCount_(job, 'day', 0) >= DNOTE_DAILY) { job.msg = '今日の上限 ' + DNOTE_DAILY + ' 件（明日続き）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          if (dayCount_(job, 'day', 0) >= dCap) { job.msg = '今日の上限 ' + dCap + ' 件（明日続き）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var res; try { res = dnoteApply_(parseInt(shops[si], 10), cc, ids.slice(bi, bi + 25), false); } catch (e) { job.msg = cc + ': ' + String((e && e.message) || e).slice(0, 120); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var halt = false;
           (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; if (!x.skip) dayCount_(job, 'day', 1); });
