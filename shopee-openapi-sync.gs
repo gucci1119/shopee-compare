@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1700';
+var SRC_VER = '20260926-1710';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6339,7 +6339,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
    - cfg.rephoto === false で止められる */
 function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (cfg && cfg.rephoto === false) return;
-  if (BA_AI_DOWN || ufTotal_() > ufStopLine_() - 2500) return;   /* AIが使えない／枠が少ない時は見直しをしない。★線は【そのアカウントの線】（子機は別枠） */
+  if (BA_AI_DOWN || ufTotal_() > ufStopLine_() - 7000) return;   /* AIが使えない／枠が少ない時は見直しをしない。★線は【そのアカウントの線】（子機は別枠）。★2026-09-26 2500→7000：見直し（出品済み写真の再判定）が枠を食い、13:35〜16:00 新しい出品が0件になった（本人「13:30から止まっている？」「1日15点を下回りたくない」）＝新しい出品の分を7000残す */
   /* ★2026-09-20 ここを 300 固定にしていたため、写真の見直しが【1日300回】で頭打ちになり、見直し対象145件に対して0件しか見ずに止まっていた。本番の出品と同じ枠にそろえる */
   var cap = (cfg && Number(cfg.judgeCap)) || (Math.max(1, Number(cfg.dailyMax) || 100) * 6);
   var rp = baKv_('boshu_auto_rephoto') || {}; rp.items = rp.items || {};
