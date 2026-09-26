@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1600';
+var SRC_VER = '20260926-1630';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2168,7 +2168,7 @@ function promoTick() {
           if (!res.ok && res.stop && !(res.items || []).length) { if (res.stop === 'video') job.pauseUntil = Date.now() + 3 * 3600000; job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない・動画が用意できない＝次の回に */
           (res.items || []).forEach(function (x) {
             var d = { at: Date.now(), ok: x.ok ? 1 : 0 }, d0 = doneMap[x.item_id] || {};
-            if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
+            if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited|exceeds 2 ?MB|price ratio|error_price_ratio/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
             if (redoIds[x.item_id]) d.redo = 1;   /* 入れ直しは1回だけ */
