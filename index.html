@@ -20213,6 +20213,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '🛡 <b>業務の同期を最優先に：🤖の自動出品が業務の接続枠まで食わないようにしました</b>（本人「くれぐれも業務が回ることを最優先に」「自動出品はしてほしいけど、業務を止めてまでしてほしくない」）。🤖を起こす前に2台目・3台目の使用数を読み、止まり線（17,000）までの残りが「リセットまでの業務の見込み（1時間200回×残り時間＋1,000）」を下回ったら、その回の🤖と写真集めを見送ります。見送ったことは操作ログ「🤖巡回を見送り（業務の枠を残す）」に1時間1回残します。リセット後は自動で再開します。',
       '🔤 <b>🧹カタログの質の表のセルを、絵文字から言葉にしました</b>（本人「0とか、なんかよくわからん」「そのアイコン、意味がわからん」）。0️⃣→「公開中で在庫0」、🙈→「非公開」、📷1→「写真1枚」、🎬→「動画なし」、🏪→「お店の画像なし」、⛔→「Shopeeに止められている」、✓→「✓ 問題なし」など。',
       '🈯 <b>🧹カタログの質の ⛔ に出ていた英語のエラー文を、日本語の意味に置き換えました</b>（本人「店内重複ってどういう意味やっけ？エラー文とかわからん」）。例：店内重複＝同じ店に同じ中身の出品があるとShopeeに判断され、更新を断られた（お店の画像・動画が入らない）。元の英文は吹き出しに残しています。',
       '🏷 <b>🟰の名前を「重複出品（同じ国・同じ中身）」に短くしました</b>（本人「ここのセクション名も変更しといて」）。件数表・絞り込みのボタンに出る名前です。',
@@ -30908,6 +30909,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       else if (pct >= 0.70) _cevery = BA_COLLECT_EVERY_MS * 4;
       else if (pct >= 0.50) _cevery = BA_COLLECT_EVERY_MS * 2;
     } catch (_) {}
+    if (!force) {   /* ★2026-09-27 業務の枠を残す（baBizReserveOk）。写真集めも2台目・3台目の枠を食うので、両方とも業務の見込みを割っていたら集めない */
+      try { const [b2, b3] = await Promise.all([baBizReserveOk(settings.boshuUrl), baBizReserveOk(settings.boshuUrl2)]); if (!b2.ok && !b3.ok) { lst._baCollectMsg = '業務（注文・入金の同期）の接続枠を残すため、写真集めを休んでいます（リセットまで ' + b2.hrs + '時間）'; _why('biz-reserve'); return; } } catch (_) {}
+    }
     if (!force && Date.now() - (lst._baCollectAt || 0) < _cevery) { _why('interval ' + Math.round((_cevery - (Date.now() - (lst._baCollectAt || 0))) / 60000) + 'min'); return; }
     if (!force && !pcIsOwner()) { lst._baCollectMsg = '自動収集は担当のPC（' + ((PC.owner && PC.owner.label) || 'もう1台') + '）で動いています'; _why('not-owner'); return; }   // 🖥 2台で同じサイトを同時に叩かない
     // 同じブラウザでポータルを2枚開いていても、集めるのは1枚だけ（25分以内に他のタブが集めていたら譲る）
@@ -31046,6 +31050,36 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try { localStorage.setItem('smdSbDownUntil', String(Date.now() + 20 * 60000)); } catch (_) {}
     return false;
   }
+  /* ★2026-09-27 本人「くれぐれも業務が回ることを最優先に」「自動出品はしてほしいけど、業務を止めてまでしてほしくない」。
+     本体の枠が尽きた日は業務の同期（注文・入金・出品）を2台目・3台目が代わりにやる。🤖が枠を先に食うと、背景の止まり線（17,000）に朝のうちに届き、
+     リセット（米国太平洋0時＝日本16/17時）まで業務の同期も止まる（9/27 実測：2台目 1時間 約1,100回・3台目も同じペースで朝6時ごろ到達の見込みだった）。
+     → 🤖を起こす前にその台の使用数を読み（uf_status＝接続枠を使わない）、【止まり線までの残り】が【リセットまでの業務の見込み（1時間200回×残り時間＋1,000）】を下回ったら🤖を起こさない。
+     業務の見込み 200回/時 は 9/27 の2台目の内訳（入金・注文・出品同期）から。見込みの数字を変える時はここ */
+  const BA_BIZ_PER_H = 200, BA_BIZ_BUF = 1000, BA_STOP_LINE = 17000;
+  function ufHoursToReset() {
+    try {
+      const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour12: false, hour: 'numeric', minute: 'numeric' }).formatToParts(new Date());
+      const h = Number((f.find(x => x.type === 'hour') || {}).value) % 24, m = Number((f.find(x => x.type === 'minute') || {}).value) || 0;
+      return Math.max(0.1, 24 - h - m / 60);
+    } catch (_) { return 24; }
+  }
+  const _baBizCache = {};
+  async function baBizReserveOk(url) {
+    if (!url) return { ok: true };
+    const c = _baBizCache[url]; if (c && Date.now() - c.at < 5 * 60000) return c;
+    let used = null;
+    try {
+      const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), 60000);
+      const r = await fetch(url + '?action=uf_status&callback=cb&cb=' + Date.now(), { credentials: 'omit', signal: ac.signal }); clearTimeout(tm);
+      const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(await r.text()); if (m) { const d = JSON.parse(m[1]); if (d && d.used != null) used = Number(d.used); }
+    } catch (_) {}
+    if (used == null) return { ok: true, unknown: true };   /* 読めない時は止めない（GAS 側の 🐢 と止まり線が残る） */
+    const hrs = ufHoursToReset(), left = BA_STOP_LINE - used, need = Math.round(BA_BIZ_PER_H * hrs + BA_BIZ_BUF);
+    const o = { ok: left >= need, used, left, need, hrs: Math.round(hrs * 10) / 10, at: Date.now() };
+    _baBizCache[url] = o;
+    try { localStorage.setItem('smdBaBizGuard_' + String(url).slice(-18), JSON.stringify(o)); } catch (_) {}
+    return o;
+  }
   async function baWebTick() {
     if (typeof pcIsOwner !== 'function' || !pcIsOwner()) return;
     if (!(await sbHealthy())) return;   /* データベースが応えない間は🤖を起こさない */
@@ -31060,6 +31094,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (nowMs - last < sl.every * 60000 - 20000) continue;
       const other = slots.find(o => o !== sl); const ol = Number(localStorage.getItem('smdBaWebTick_' + other.key) || 0); if (nowMs - ol < 90000) continue;
       try { localStorage.setItem(stamp, String(Date.now())); } catch (_) {}
+      const bz = await baBizReserveOk(url);
+      if (!bz.ok) { try { const lk = 'smdBaBizSkipLog_' + sl.key; if (Date.now() - Number(localStorage.getItem(lk) || 0) > 3600000) { localStorage.setItem(lk, String(Date.now())); logAct('出品', '🤖巡回を見送り（業務の枠を残す）', sl.name, '使用 ' + bz.used + '・止まり線まで残り ' + bz.left + '／リセットまで ' + bz.hrs + '時間の業務の見込み ' + bz.need); } } catch (_) {} continue; }
       try {
         const r = await fetch(url + '?action=boshu_auto_tick_bg&token=' + encodeURIComponent(settings.writeToken) + '&callback=cb&cb=' + Date.now());
         const txt = await r.text(); const ok = /"ok":true/.test(txt);
