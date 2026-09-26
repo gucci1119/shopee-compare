@@ -4444,6 +4444,17 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    // 📅 今月のリスト（🎯有在庫化候補の月次凍結・2026-09-26）
+    "📅 今月のリスト（今月買うもの）": "📅 This month's list (what to buy this month)",
+    "🆕 新しく入った": "🆕 New this month",
+    "🔁 続けて入っている": "🔁 Still on the list",
+    "👋 外れた": "👋 Dropped",
+    "さらに表示": "Show more",
+    "たたむ": "Collapse",
+    "🎯 今月買うもの →": "🎯 What to buy this month →",
+    "先月の表と比べています…": "Comparing with last month's list…",
+    "粗利—": "Gross —",
+    "先月の表がありません（注文の履歴が足りない）＝全部「新しく入った」に見えます。": "No list for last month (not enough order history), so everything shows as new.",
     // 🏦 🤖を2台目のGoogleアカウントで動かす（2026-09-21）
     "動かす場所（接続枠はGoogleアカウントごとに2万回/日）": "Where it runs (the 20,000 calls/day quota is per Google account)",
     "本体のGAS（いつもの Shopee OpenAPI Sync）": "Main GAS (the usual Shopee OpenAPI Sync)",
@@ -8289,7 +8300,7 @@
       try { productIds = null; } catch (_) {}
       try { lst._ledgerRows = null; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; lst._ledgerImg = undefined; lst._ledgerCostMap = undefined; } catch (_) {}
       try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
-      try { repeatCache = null; } catch (_) {}                        // 🎯有在庫化候補（注文＋在庫の集計）
+      try { repeatCache = null; repSnap = null; } catch (_) {}        // 🎯有在庫化候補（注文＋在庫の集計）＋📅今月のリスト（保存済みの月は上書きしない＝読み直すだけ）
       try { _dbRankCache = null; } catch (_) {}                       // 📊価格調整DBランキング
       try { renderTrend._orders = null; } catch (_) {}                // 売上・注文数の推移
       try { lstDropStatus = null; } catch (_) {}                      // 出品一覧の仕入元ソース状態
@@ -10769,6 +10780,7 @@
         if (/^listing_specs/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.brand) m.brand = dmBrand(m.brand); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^dropship/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.title) m.title = dmProd(m.title); if (m.url) m.url = dmUrl(m.url); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
         if (/^profit_sheet/.test(k) && v.items) { const it = {}; Object.keys(v.items).forEach(id => { const m = { ...v.items[id] }; if (m.cost) m.cost = dmMoney(m.cost); if (m.paypal_yen) m.paypal_yen = dmMoney(m.paypal_yen); if (m.paypal_local) m.paypal_local = dmMoney(m.paypal_local); if (m.supplier) m.supplier = dmSupplier(m.supplier); if (m.supplier_url) m.supplier_url = dmUrl(m.supplier_url); if (Array.isArray(m.stock_no)) m.stock_no = m.stock_no.map(dmSku); it[id] = m; }); return { ...r, v: { ...v, items: it } }; }
+        if (/^repeat_snap_/.test(k) && Array.isArray(v.rows)) return { ...r, v: { ...v, rows: v.rows.map(x => ({ ...x, n: dmProd(x.n), p: dmProd(x.p), gm: x.gm != null ? dmMoney(x.gm) : x.gm })) } };   // ★2026-09-26 📅今月のリスト（凍結した商品名・粗利）
         if (/^plan_cfg/.test(k)) {   // 🎭事業計画の目標額・固定費内訳も実額なのでスケール
           const c = { ...v };
           ['targetNet', 'targetTakeHome', 'opexFixed'].forEach(f => { if (c[f] != null && c[f] !== '') c[f] = dmMoney(c[f]); });
@@ -12231,7 +12243,7 @@
         stock: Object.prototype.hasOwnProperty.call(heldBy, pk) ? heldBy[pk] : null
       };
     });
-    repeatCache = { rows: rows };
+    repeatCache = { rows: rows, ordersN: (orders || []).length, grossOk: !!repGrossMap, acctQ: acctQs('orders', '') };   // ★2026-09-26 📅今月のリストの保存判定用（読めた注文数・粗利が読めたか・垢で絞った集計か）。欠けた表を凍結しないため
     return repeatCache;
   }
   // 選択中の集計期間で 販売数・月販・在庫の持ち・勢い を計算する（winを渡すと期間ボタン別の件数計算に使える）
@@ -12571,6 +12583,101 @@
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">💡 <b>予想月販＝「売れた月あたり」の平均販売数</b>（在庫切れ・休眠の月は分母に入れない＝在庫があれば月何個売れるか）。キャンセル・未払い・返品は除外。<b>バリエーションが実商品</b>なので親商品とは分けて集計。<b>⚡=1ヶ月集中の一発物</b>（定番は🔁の月数が多いもの）。原価目安は注文SNで在庫台帳と突合できた分の<b>最安〜最高（幅）</b>＝いくらまで出して良いかの目安。幅が広い商品は安く拾えた時だけ買う判断ができます（下段の「中央◯・◯件」が中央値と実績件数）。<br><b>現在庫はSKUを使わずに突合しています</b>：売れた在庫（注文SNで商品が確定する分）を正解データにして「仕入れ名→商品」を学習し、未販売の在庫保管中に当てています。当てられない商品は<b>0ではなく「不明」</b>と表示します（嘘の在庫数を出さないため）。仕入れ名の表記が揃うほど精度が上がります。</div>
     </details>`;
   }
+  // ---------------- 📅 今月のリスト（🎯の月次凍結＋先月比） ----------------
+  // ★2026-09-26 本人「毎月入れ替わると思う」：🎯の候補を毎月1日時点で凍結（app_kv repeat_snap_YYYY-MM）し、先月の表と比べて 🆕新しく入った／🔁続けて入っている／👋外れた を出す＝今月買うもの。
+  //   中身は「その月1日0時より前の注文」だけで計算する＝何日に開いても1日時点と同じ表（担当PCが1日に開かなくてよい）。先月分が無ければ同じ方法で作り直す（bf:1）。
+  //   基準は画面のボタンと切り離して固定（明細別・直近90日・月2個以上 or 🔁3ヶ月以上）。「月1個以上」は使わない（売れた月あたりなので1個売れれば必ず1.0＝全部入る）。
+  //   保存は担当PCだけ。読めなかった時・デモ・垢の絞り込み中・粗利が読めない時・履歴が90日ぶん無い時は保存しない（空や欠けた表を凍結しない）。既にある月は上書きしない。
+  const REP_SNAP_WIN = 90;
+  const REP_SNAP_RULE = '明細別・直近90日・予想月販2個以上 または 🔁3ヶ月以上';
+  let repSnap = null;          // {ym, prevYm, cur, prev, curSaved, prevSaved, err, note}。月が変わったら読み直す
+  let repSnapBusy = false;     // 読み込み中の二重起動よけ
+  const repSnapMore = {};      // 「さらに表示」を押した区分（new/keep/gone）
+  const REP_SNAP_CAP = 12;
+  const repSnapYmNow = () => jstDate(Date.now()).slice(0, 7);
+  const repSnapPrevYm = ym => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
+  // その月1日0時時点の候補。repeatRate と同じ数え方（数量ぶんの日付・売れた月あたり）を「今」ではなく「1日」基準でやる
+  function repSnapCompute(rows, ym) {
+    const asOf = ym + '-01', asOfMs = Date.parse(asOf + 'T00:00:00'), DAY = 86400000, inWin = x => asOfMs - Date.parse(x + 'T00:00:00') <= REP_SNAP_WIN * DAY;
+    const out = [];
+    (rows || []).forEach(r => {
+      const all = (r.dates || []).filter(x => x && x < asOf); if (!all.length) return;
+      const w = all.filter(inWin); if (!w.length) return;
+      const pm = w.length / new Set(w.map(x => x.slice(0, 7))).size, sm = new Set(all.map(x => x.slice(0, 7))).size;
+      if (!(pm >= 2 || sm >= 3)) return;
+      let gm = null;
+      if (repGrossMap) { const gs = (r.sales || []).filter(s => s.date && s.date < asOf && inWin(s.date)).map(s => repGrossMap.get(s.cc + '|' + s.sn)).filter(v => v != null).sort((a, b) => a - b); if (gs.length) gm = Math.round(pm * gs[Math.floor(gs.length / 2)]); }
+      out.push({ k: r.key, n: String(r.variation || ''), p: String(r.parent || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '').slice(0, 120), pm: Math.round(pm * 10) / 10, sm, gm });
+    });
+    return out.sort((a, b) => ((b.gm || 0) - (a.gm || 0)) || (b.pm - a.pm));
+  }
+  async function repSnapLoad() {
+    const ym = repSnapYmNow(), pym = repSnapPrevYm(ym), kC = 'repeat_snap_' + ym, kP = 'repeat_snap_' + pym;
+    const st = { ym, prevYm: pym, cur: null, prev: null, curSaved: false, prevSaved: false, err: '', note: '' };
+    let kv = null;
+    try { kv = await sbGetAll('app_kv', 'select=k,v&k=in.(' + encodeURIComponent(kC) + ',' + encodeURIComponent(kP) + ')'); }
+    catch (e) { st.err = '保存済みの月次リストを読めませんでした（' + ((e && e.message) || e) + '）'; }   // 読めない＝「無い」ではない。この回は保存しない
+    const got = {}; (kv || []).forEach(r => { if (r && r.k && r.v && Array.isArray(r.v.rows)) got[r.k] = r.v; });
+    const rc = repeatCache, rows = (rc && rc.rows) || [];
+    const minD = rows.reduce((m, r) => (r.dates && r.dates[0] && (!m || r.dates[0] < m)) ? r.dates[0] : m, '');
+    const enough = y => !!minD && Date.parse(minD + 'T00:00:00') <= Date.parse(y + '-01T00:00:00') - REP_SNAP_WIN * 86400000;   // 取り込み開始が90日窓より後＝その月の表は欠ける
+    let pcLabel = ''; try { pcLabel = (PC && PC.label) || ''; } catch (_) {}
+    const mk = (y, bf) => ({ v: 1, ym: y, asOf: y + '-01', rule: REP_SNAP_RULE, win: REP_SNAP_WIN, at: new Date().toISOString(), pc: pcLabel, bf: bf ? 1 : 0, ordersN: (rc && rc.ordersN) || 0, rows: repSnapCompute(rows, y) });
+    st.cur = got[kC] || null; st.curSaved = !!st.cur;
+    st.prev = got[kP] || null; st.prevSaved = !!st.prev;
+    if (rows.length) { if (!st.cur && enough(ym)) st.cur = mk(ym, false); if (!st.prev && enough(pym)) st.prev = mk(pym, true); }
+    const block = [];
+    let owner = false; try { owner = pcIsOwner(); } catch (_) {}
+    if (st.err) block.push(st.err);
+    if (!owner) block.push('このPCは担当ではありません（担当PCで開くと確定します）');
+    if (demoOn()) block.push('🎭デモ表示中');
+    if (!rc || rc.acctQ !== '') block.push('アカウントで絞り込んだ集計です（全アカウント表示で開くと確定します）');
+    if (!rc || !rc.ordersN) block.push('注文を読めていません');
+    if (!rc || !rc.grossOk) block.push('入金・仕入を読めていません（粗利が欠けた表は凍結しない）');
+    const toSave = [];
+    if (!block.length) {
+      if (!st.curSaved && st.cur && st.cur.rows.length) toSave.push({ k: kC, v: st.cur });
+      if (!st.prevSaved && st.prev && st.prev.rows.length) toSave.push({ k: kP, v: st.prev });
+    }
+    if (toSave.length) {
+      try { await sbUpsert('app_kv', toSave.map(x => ({ k: x.k, v: x.v, updated_at: new Date().toISOString() }))); toSave.forEach(x => { if (x.k === kC) st.curSaved = true; else st.prevSaved = true; }); }
+      catch (e) { block.push('保存に失敗しました（' + ((e && e.message) || e) + '）'); }
+    }
+    st.note = block.join('／');
+    repSnap = st;
+  }
+  function repSnapHtml() {
+    const box = inner => `<div id="rep-snap" class="tool-card" style="max-width:none;border-left:4px solid #0b5cab;margin:0 0 8px;padding:10px 14px">${inner}</div>`;
+    const head = '<b style="font-size:13px">📅 今月のリスト（今月買うもの）</b>';
+    const ym = repSnapYmNow();
+    if (!repSnap || repSnap.ym !== ym) return box(`<span class="smd-spin"></span> ${head} <span class="smd-dim" style="font-size:11.5px">先月の表と比べています…</span>`);
+    const s = repSnap, cur = s.cur, prev = s.prev;
+    if (!cur) return box(`${head} <span style="color:#d93025;font-size:11.5px">今月の表を作れませんでした：${esc(s.err || s.note || '注文の履歴が90日ぶんありません')}</span>`);
+    const pMap = new Map(((prev && prev.rows) || []).map(x => [x.k, x])), cMap = new Map(cur.rows.map(x => [x.k, x]));
+    const gNew = cur.rows.filter(x => !pMap.has(x.k)), gKeep = cur.rows.filter(x => pMap.has(x.k)), gGone = prev ? prev.rows.filter(x => !cMap.has(x.k)).sort((a, b) => b.pm - a.pm) : [];
+    const gmTxt = v => v == null ? '<span class="smd-dim">粗利—</span>' : `<span style="color:${v >= 5000 ? '#137333' : '#333'}">粗利${fmtJpy(v)}/月</span>`;
+    const nameOf = x => x.n ? `<b style="color:#7b52c4">${nm(x.n, 'wrap')}</b> <span class="smd-dim" style="font-size:10px">${nm(x.p, 'wrap')}</span>` : nm(x.p, 'wrap');
+    const item = (x, kind) => {
+      const pv = pMap.get(x.k);
+      const num = kind === 'gone' ? `先月${x.pm.toFixed(1)}/月` : (kind === 'keep' && pv ? `${pv.pm.toFixed(1)}→<b>${x.pm.toFixed(1)}</b>/月` : `<b>${x.pm.toFixed(1)}</b>/月`);
+      const kw = kind === 'gone' ? '' : encodeURIComponent(sourcingKeyword(x.p, x.n) || x.n || x.p);
+      return `<div style="font-size:11.5px;padding:3px 0;border-bottom:1px dotted #e6e8ee">${nameOf(x)}<div style="font-size:10.5px;white-space:nowrap">${num}${x.sm >= 3 ? ` <span style="color:#0b5cab">🔁${x.sm}ヶ月</span>` : ''} ・ ${gmTxt(x.gm)}${kw ? ` ・ <a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a>` : ''}</div></div>`;
+    };
+    const col = (g, label, color, list, kind, empty) => {
+      const all = true, shown = list, rest = 0;   // ★押さないと見えない を作らない＝全件をスクロール枠で出す
+      return `<div style="min-width:0"><div style="font-weight:700;font-size:12px;color:${color};border-bottom:2px solid ${color};padding-bottom:2px;margin-bottom:2px"><span>${label}</span> <span>${list.length}</span></div>`
+        + (list.length ? `<div style="max-height:420px;overflow:auto">${shown.map(x => item(x, kind)).join('')}</div>` : `<div class="smd-dim" style="font-size:11px;padding:4px 0">${empty}</div>`)
+        + (rest > 0 ? `<button class="smd-btn rep-snap-more" data-g="${g}" style="font-size:10.5px;padding:1px 8px;margin-top:4px">さらに表示</button> <span class="smd-dim" style="font-size:10px">残り${rest}件</span>` : (all && list.length > REP_SNAP_CAP ? `<button class="smd-btn rep-snap-more" data-g="${g}" style="font-size:10.5px;padding:1px 8px;margin-top:4px">たたむ</button>` : '')) + '</div>';
+    };
+    const m = Number(ym.slice(5));
+    const status = s.curSaved ? `<span style="color:#137333">✅ ${m}/1時点で確定済み</span>` : `<span style="color:#e8710a">⚠ 未保存（この画面で計算した${m}/1時点の表）：${esc(s.note || '')}</span>`;
+    const prevNote = !prev ? `<span style="color:#e8710a">先月の表がありません（注文の履歴が足りない）＝全部「新しく入った」に見えます。</span>` : (prev.bf ? '先月分は後から同じ基準で作り直したものです。' : '');
+    return box(`${head} <span class="smd-dim" style="font-size:11.5px">${esc(ym)}・${cur.rows.length}件（🆕 新しく入った ${gNew.length}／🔁 続けて ${gKeep.length}／👋 外れた ${gGone.length}）</span>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:3px">${status}　基準：${esc(cur.rule || REP_SNAP_RULE)}（下の表のボタンとは別の固定基準）。毎月1日0時より前の注文だけで数える＝何日に開いても同じ表。粗利の多い順。${prevNote}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:8px">
+        ${col('new', '🆕 新しく入った', '#137333', gNew, 'new', '今月から入ったものはありません')}${col('keep', '🔁 続けて入っている', '#0b5cab', gKeep, 'keep', '先月から続けて入っているものはありません')}${col('gone', '👋 外れた', '#9aa0a6', gGone, 'gone', prev ? '外れたものはありません' : '比べる先月の表がありません')}
+      </div>`);
+  }
   async function renderRepeatSellers() {
     const host = document.getElementById('stk-repeat'); if (!host) return;
     if (!repeatCache) {
@@ -12579,7 +12686,11 @@
       catch (e) { host.innerHTML = '<div class="tool-card" style="max-width:none;padding:11px 14px;color:#d93025">有在庫化候補の集計に失敗: ' + esc(e.message) + '</div>'; return; }
     }
     const h = document.getElementById('stk-repeat'); if (!h) return;   // 集計中に他ページへ移った場合
-    h.innerHTML = repeatSellersHtml(repeatCache.rows);
+    h.innerHTML = repSnapHtml() + repeatSellersHtml(repeatCache.rows);
+    /* ★2026-09-26 📅今月のリスト：読み込み（＋担当PCなら月初の凍結）は月に1回だけ走らせ、終わったら上の箱だけ差し替える。
+       renderRepeatSellers() を呼び直さない＝描画の中から再描画を予約する無限ループを作らない。失敗しても repSnap を埋めるのでこの月は再試行しない（まとめて更新で読み直す） */
+    if ((!repSnap || repSnap.ym !== repSnapYmNow()) && !repSnapBusy) { repSnapBusy = true; repSnapLoad().catch(e => { repSnap = { ym: repSnapYmNow(), err: String((e && e.message) || e) }; }).finally(() => { repSnapBusy = false; const el = document.getElementById('rep-snap'); if (el) el.outerHTML = repSnapHtml(); }); }
+    if (!h.dataset.snapWired) { h.dataset.snapWired = '1'; h.addEventListener('click', e => { const b = e.target.closest('.rep-snap-more'); if (!b) return; repSnapMore[b.dataset.g] = !repSnapMore[b.dataset.g]; const el = document.getElementById('rep-snap'); if (el) el.outerHTML = repSnapHtml(); }); }   // 箱は差し替わるので親(#stk-repeat)で1回だけ受ける
     h.querySelectorAll('.rep-min').forEach(el => el.addEventListener('click', () => { const v = el.dataset.v; repeatMin = /^\d/.test(v) ? Number(v) : v; renderRepeatSellers(); }));
     h.querySelectorAll('.rep-view').forEach(el => el.addEventListener('click', () => { repeatView = el.dataset.v; renderRepeatSellers(); }));
     // 列ヘッダで並び替え。同じ列をもう一度押すと逆順／別の列は「まず知りたい向き」から（数字＝多い順、名前＝A→Z）
@@ -15776,8 +15887,10 @@
     const wrap = document.getElementById('buy-body');
     const tab = state.buyTab || 'search';
     const btab = (t, label) => `<button class="buy-tab${t === tab ? ' on' : ''}" data-t="${t}">${label}</button>`; // 選択の見た目は共通の.smd-seg/.onに統一
-    wrap.innerHTML = `<span class="smd-seg" style="margin:0 0 14px">${btab('search', '🔎 仕入れ検索')}${btab('waiting', '⏳ 入庫待ち・到着予定')}${btab('suppliers', '🏪 仕入先')}</span><div id="buy-inner"></div>`;
+    wrap.innerHTML = `<span class="smd-seg" style="margin:0 0 14px">${btab('search', '🔎 仕入れ検索')}${btab('waiting', '⏳ 入庫待ち・到着予定')}${btab('suppliers', '🏪 仕入先')}</span><button class="smd-btn" id="buy-go-monthly" title="在庫管理 ▸ 🎯有在庫化候補 の「📅 今月のリスト」へ（毎月1日時点の候補と先月比）" style="font-size:11.5px;padding:3px 10px;margin:0 0 14px 10px;color:#7b52c4;border-color:#c9b6ea;font-weight:700">🎯 今月買うもの →</button><div id="buy-inner"></div>`;
     wrap.querySelectorAll('.buy-tab').forEach(b => b.addEventListener('click', () => { state.buyTab = b.dataset.t; renderBuy(); }));
+    /* ★2026-09-26 本人「毎月入れ替わると思う」：今月のリストの本体は在庫管理の🎯に置き、仕入れ管理からは飛ぶだけ（同じ表を2か所で持たない） */
+    { const gb = wrap.querySelector('#buy-go-monthly'); if (gb) gb.addEventListener('click', () => { stockTab = 'repeat'; try { localStorage.setItem('smdStockTab', 'repeat'); } catch (_) {} showPage('stock'); setTimeout(() => { try { applyStockTab(); const el = document.getElementById('rep-snap'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (_) {} }, 80); }); }
     const inner = wrap.querySelector('#buy-inner');
     if (tab === 'search') renderSourcing(inner); else if (tab === 'waiting') renderWaiting(inner); else renderSuppliers(inner);
   }
@@ -19938,6 +20051,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-26', items: [
+      '📅 <b>🎯有在庫化候補に「今月のリスト」を足しました</b>（本人「毎月入れ替わると思う」）。毎月1日時点の候補（明細別・直近90日・予想月販2個以上 または 🔁3ヶ月以上）を app_kv <code>repeat_snap_YYYY-MM</code> に凍結し、先月の表と比べて 🆕新しく入った／🔁続けて入っている／👋外れた を一覧の上にそのまま並べます（全件をスクロール枠で）。1日0時より前の注文だけで数えるので、何日に開いても1日時点と同じ表です。保存は担当PCだけ・読めなかった時／デモ表示／アカウント絞り込み中／粗利が読めない時は保存しません（既にある月は上書きしない）。仕入れ管理には「🎯 今月買うもの →」のボタンだけ置きました。',
       '📦 <b>一括発送手配で「もう手配済み」を失敗と数えていたのを直しました</b>（本人「なぜ失敗するのか？」）。10:58 に11件とも手配済み→Chrome が落ちて読み直した後、ポータルに手配済みがまだ入っておらず、同じ11件をもう一度押して「失敗 11件（not eligible for rescheduling）」と出ていました。Shopee 側は1回だけ正しく手配されています。1件ずつの📦発送手配と同じく「☑️ もう手配済みだった」として数え、表示も手配済みに直します。',
       '🧭 <b>出品管理の「🤖 自動出品」タブ</b>・<b>🧭やりたいこと</b>を追加済み（上の項目参照）。',
       '🤖 <b>出品管理に「🤖 自動出品」タブを作りました</b>（本人「空白を自動で出す は母数の中だと分かりにくい。もっと上のレイヤーに。ここからアクセスできるのは残した上で」）。中身は母数の画面の「🤖 空白を自動で出す」と同じ（設定・進み具合・公開待ち・写真を直す）で、母数からも今までどおり開けます。🧭やりたいこと・⌘K の「まだ出していない作品を自動で出す」もこのタブへ飛ぶようにしました。',
