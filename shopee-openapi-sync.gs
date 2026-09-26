@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1805';
+var SRC_VER = '20260926-1815';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6265,7 +6265,7 @@ var BA_CASE_REQUIRED_HW = { ds: 1, '3ds': 1, vita: 1, psp: 1, ps1: 1, ps2: 1, ps
    ①基準を変えた（版が上がった）②前に見てから30日たった のどちらかで、出品済みの写真をもう一度見る。
    写真の基準を変えたら必ずこの数字を1つ上げる（baJudge_ の控えの鍵 |v12| も一緒に上げる）。
    ★2026-09-23 例外：基準を【ゆるめた】時（白背景でも影・傾きがあれば実物）は控えの鍵だけ v12 に上げ、BA_RULE_VER は上げない＝出品済みの見直し（baRephoto_）を全件やり直さない（前にOKだった物はゆるめた基準でもOK） */
-var BA_RULE_VER = 14, BA_RECHECK_DAYS = 30;   /* 14＝2026-09-26 シュリンクの印（はみ出し/シワ/閉じ筋/フィルム上の値札）を書き写させて落とす＝出品済みも見直す／12＝2026-09-23 21:00 白背景の緩めを取り消し／13＝2026-09-26 四隅の確認（Sonnet）を足した＝出品済みも見直す */
+var BA_RULE_VER = 15, BA_RECHECK_DAYS = 30;   /* 15＝2026-09-26 シュリンク確認で機種ロゴも照合（Switch に PS4 版の写真が残っていた）＝出品済みも見直す／14＝2026-09-26 シュリンクの印（はみ出し/シワ/閉じ筋/フィルム上の値札）を書き写させて落とす＝出品済みも見直す／12＝2026-09-23 21:00 白背景の緩めを取り消し／13＝2026-09-26 四隅の確認（Sonnet）を足した＝出品済みも見直す */
 var BA_RULE_RECHECK_SINCE = '2026-09-23T11:05:00Z';   /* v11 で出した明細のうち、この時刻より前の分は厳しい基準で通っているので見直さない（緩めていた 20:10〜21:00 の分だけ見直す） */
 function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し)|ケース(なし|無し)/.test(String((a && a.name) || '')); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
@@ -6323,13 +6323,16 @@ function baConfirmCorners_(imgUrl, u, st, cache) {
    今までは kind=sealed を AI の一言に任せていて、Switch のケースは表の透明な袋で元々光るので見分けられていなかった。
    ＝フィルムの印を【書き写させて】コードで決める（本人「それで弾かれるのが多くなるなら大丈夫」＝厳しめ：印が1つでも見えたら落とす）。
    試し：シュリンクの1枚は はみ出し/シワ/閉じ筋 の3つとも true、中古のケース6枚は glare_only。結果は cache[u+'|s1'] に 'sealed:0|1' */
-function baSealedCheck_(imgUrl, u, st, cache) {
-  var ck = u + '|s1', cv = cache ? String(cache[ck] || '') : '';
+function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
+  /* ★2026-09-26 s2：同じ問い合わせで【パッケージの機種ロゴ】も書き写させ、違う機種なら 'hw:<見えた機種>' を返す
+     （本人「なぜこれは各国で画像が違う？」→ Switch のカタログに PS4 版の写真が6か国で「問題なし」のまま残っていた。機種の照合は初回判定にしか無かった） */
+  var ck = u + '|s2', cv = cache ? String(cache[ck] || '') : '';
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
+  if (cv.indexOf('hw:') === 0) return cv;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 200, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームの出品写真です。透明なフィルム（シュリンク包装）に関して、見えたことだけを書き写してください。判定はしないでください。JSONだけで答える：{"film_overhang":true|false（透明フィルムの縁がケースや箱の外側にはみ出している・余っている）,"film_wrinkle":true|false（角や縁に透明フィルムのシワ・よれ・折れ目がある）,"film_seam":true|false（フィルムを熱で閉じた筋・つなぎ目の線が見える）,"sticker_on_film":true|false（値札やシールがフィルムの上に貼られている）,"glare_only":true|false（表面が光っているだけでフィルムの縁やシワは見えない）,"notes":"見えた印を20字以内"}' } ] }] };
+    { type: 'text', text: '中古ゲームの出品写真です。透明なフィルム（シュリンク包装）に関して、見えたことだけを書き写してください。判定はしないでください。JSONだけで答える：{"film_overhang":true|false（透明フィルムの縁がケースや箱の外側にはみ出している・余っている）,"film_wrinkle":true|false（角や縁に透明フィルムのシワ・よれ・折れ目がある）,"film_seam":true|false（フィルムを熱で閉じた筋・つなぎ目の線が見える）,"sticker_on_film":true|false（値札やシールがフィルムの上に貼られている）,"glare_only":true|false（表面が光っているだけでフィルムの縁やシワは見えない）,"platform_seen":"パッケージやラベルに印刷されている機種のロゴ・表記をそのまま書き写す（例 PS4 / Nintendo Switch / PlayStation 2 / NINTENDO 3DS。読めなければ空）","notes":"見えた印を20字以内"}' } ] }] };
   ufBump_(1, 'boshu_auto(シュリンクの確認)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -6339,6 +6342,7 @@ function baSealedCheck_(imgUrl, u, st, cache) {
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = null; try { o = m ? JSON.parse(m[0]) : null; } catch (e) {}
   if (!o) return null;
   var sealed = !!(o.film_overhang === true || o.film_wrinkle === true || o.film_seam === true || o.sticker_on_film === true);
+  if (hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); if (seenHw.length && seenHw[0] !== String(hwKey)) { if (cache) cache[ck] = 'hw:' + seenHw[0]; return 'hw:' + seenHw[0]; } }
   if (cache) cache[ck] = 'sealed:' + (sealed ? 1 : 0);
   return sealed;
 }
@@ -6361,8 +6365,9 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
       var n0 = baConfirmCorners_(imgUrl, u, st, cache);
       if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
       if (n0 >= 3) { cache[u] = 'ng:catalog4'; return { ok: false, judged: true, kind: 'catalog4', cached: true }; }
-      var s0 = baSealedCheck_(imgUrl, u, st, cache);   /* ★2026-09-26 通っていた写真もシュリンクの確認を1回だけ */
+      var s0 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey);   /* ★2026-09-26 通っていた写真もシュリンク（と機種ロゴ）の確認を1回だけ */
       if (s0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
+      if (typeof s0 === 'string') { cache[u] = 'ng:wrongplatform'; return { ok: false, judged: true, kind: 'wrongplatform', cached: true }; }
       if (s0) { cache[u] = 'ng:sealed'; return { ok: false, judged: true, kind: 'sealed', cached: true }; }
     }
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
@@ -6417,7 +6422,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     var n1 = baConfirmCorners_(imgUrl, u, st, cache);
     if (n1 === null) return { ok: false, judged: false, kind: 'unconfirmed' };   /* 確認できなかった＝通さない・控えない */
     if (n1 >= 3) { ok = false; kind = 'catalog4'; }
-    if (ok) { var s1 = baSealedCheck_(imgUrl, u, st, cache); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (s1) { ok = false; kind = 'sealed'; } }
+    if (ok) { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = 'wrongplatform'; } else if (s1) { ok = false; kind = 'sealed'; } }
   }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
