@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1910c';
+var SRC_VER = '20260927-0030n';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7716,6 +7716,25 @@ function baSubShop_(cc, mainShopId) {
     return sub ? parseInt(sub.shop_id, 10) : 0;
   } catch (e) { return 0; }
 }
+/* ★2026-09-26 本人「同じ国の1個目、2個目のアカウントで、一つのショップという考え方」「同じ国の中で同じカタログ名がないように」「①とか②とかを変えればいい」。
+   カタログの番号（①②…）は【その国の全部の店・親SKUが空のもの・非公開のものも含めた、同じ名前の並び】で空いている一番小さい番号を取る。
+   家族（親SKUが同じ）だけで数えると、2店舗目や親SKUの無いカタログと同じ名前になる（TH DS ① が2店舗に1つずつ・VN DS ③④⑤）。 */
+var BA_CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+function baNameBase_(n) { return String(n || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+function baCountryNames_(cc) {
+  var out = [], seen = {};
+  try { Object.keys(BA_CTX_ROWS || {}).forEach(function (k) { (BA_CTX_ROWS[k] || []).forEach(function (r) { if (r && r.cc === cc && !seen[r.item_id]) { seen[r.item_id] = 1; out.push(String(r.name || '')); } }); }); } catch (e) {}
+  if (!out.length) { try { (sbSelectAll_('listings', 'select=item_id,name&cc=eq.' + encodeURIComponent(cc) + '&status=in.(1,8)') || []).forEach(function (r) { out.push(String(r.name || '')); }); } catch (e2) {} }
+  try { var fm = baKv_('boshu_fam_made') || {}; Object.keys(fm).forEach(function (k) { var v = fm[k]; if (v && v.cc === cc && v.name) out.push(String(v.name)); }); } catch (e3) {}   /* 作ったばかりで一覧に載っていない分も */
+  return out;
+}
+function baFreeNo_(cc, name, extraNames) {
+  var b = baNameBase_(name), used = {};
+  baCountryNames_(cc).concat(extraNames || []).forEach(function (n) { if (baNameBase_(n) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 0] = 1; });
+  var no = 1; while (used[no]) no++;
+  return no;
+}
+function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim(); return nm + ' ' + (BA_CIRC[no - 1] || ('(' + no + ')')); }
 /* 満杯の店の代わりに、2店舗目へ同じ中身のカタログを作る（非公開で作られる→明細を入れてから公開）。
    作れなければ null（＝今までどおり1店舗目で続ける） */
 function baCloneToSub_(cc, base, newName, st, hw, role) {
@@ -7752,11 +7771,17 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
      これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
   var srcName = String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
-  if (srcName) srcName = srcName + ' ①';   /* ★2026-09-25 本人「①つけといて。どうせ②も出すから」 */
+  if (srcName) srcName = baWithNo_(srcName, baFreeNo_(cc, srcName));   /* ★2026-09-25 本人「①つけといて」→ 2026-09-26 国の中で空いている番号（2店舗目・親SKU無しも含めて重ねない） */
   if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（名前が決まっていません＝設定の name が空）'); return null; }
   /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
   var pool = allRowsCc || [];
-  var src = pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0] || pool.filter(function (r) { return (r.hws || []).indexOf(hw) >= 0; })[0];
+  /* ★2026-09-26 本人「画像とカタログ名がずれてる」「そういうカタログがいっぱいある」。元にするカタログを【名前に機種が入っているもの】で選んでいたので、
+     「Pokemon Main RPG Series（Switch 等）」「Puyo Puyo Series」「Metal Gear Solid Series」のような作品シリーズのカタログが選ばれ、表紙の写真ごと複製されていた
+     （実測：MY Switch ②③ の表紙が Pokemon・TH PS2 ① が Puyo Puyo / Metal Gear・TW PS1 と PSP の表紙が入れ替わり）。
+     → 元にするのは【同じ家族】＝親SKUが家族のもの、または番号を外した名前が家族の名前と同じカタログだけ。無ければ作らない（間違った表紙で出すより出さない） */
+  var _fb = baNameBase_(srcName);
+  var _isFamSrc = function (r) { return (wantSku && String(r.parent_sku || '').trim() === wantSku) || baNameBase_(r.name) === _fb; };
+  var src = pool.filter(function (r) { return _isFamSrc(r) && r.status === 1; })[0] || pool.filter(function (r) { return _isFamSrc(r); })[0];
   /* ★2026-09-23 同じ機種が1つも無い国がある（実測：MY は gc の Variation カタログが0・TW は3）。
      その時は【同じ国の別機種の Variation カタログ】を元にする。引き継ぐのは説明文・状態写真・カテゴリ・重さで、
      これらは機種が違っても同じ定型なので実害は小さい。名前と親SKUはこのあと家族のものに書き換える。
@@ -7769,12 +7794,13 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     var other = null;
     Object.keys(allRowsAll).forEach(function (c2) {
       if (c2 === cc || other) return;
-      var r2 = (allRowsAll[c2] || []).filter(function (r) { return (r.hws || []).indexOf(hw) >= 0 && r.status === 1; })[0];
+      var r2 = (allRowsAll[c2] || []).filter(function (r) { return ((wantSku && String(r.parent_sku || '').trim() === wantSku) || (r.hws || []).length === 1 && r.hws[0] === hw && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, ''))) && r.status === 1; })[0];   /* ★2026-09-26 他の国からも作品シリーズのカタログは元にしない */
       if (r2) other = r2;
     });
     if (other) {
       var dst = 0;
       try { dst = pool.length ? parseInt(pool[0].shop_id, 10) : baMainShop_(cc); } catch (eD) { dst = 0; }
+      if (dst && baShopFull_(cc, dst)) { var dSub = baSubShop_(cc, dst); if (!dSub) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } dst = dSub; }   /* ★2026-09-26 満杯の店に作ると公開できず毎日作り直す */
       if (!dst) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var pr0 = 0;
       try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
@@ -7792,6 +7818,16 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（どの国にも ' + hw + ' のカタログがありません）'); return null; }
   var cl = null;
   /* ★2026-09-25 台湾はタイトル60字。他の国の長い家族名のまま複製すると add_item が error_title_len_no_pass で落ちる（実測 09/25 TW ps1・ps3）。店の上限に合わせて切る（seedShopCatalog_ と同じ） */
+  /* ★2026-09-26 1店舗目の出品枠が満杯なのに1店舗目へ作っていた＝作ったカタログは公開できず、次の回は「満杯の店の非公開カタログ」として無視され、
+     また新しく作る…を毎日くり返していた（実測：TH の PS2 ① が1店舗目に4つ・GBA ① が2つ・どれも明細は仮の test だけ）。満杯なら2店舗目へ作る。2店舗目が無ければ作らない */
+  if (baShopFull_(cc, src.shop_id)) {
+    var srcF = {}; Object.keys(src).forEach(function (k) { srcF[k] = src[k]; }); srcF.parent_sku = wantSku;   /* 2店舗目のカタログの親SKUは【家族のもの】（元にした別カタログの親SKUではない） */
+    var subF = baCloneToSub_(cc, srcF, srcName, st, hw, 'fam');
+    if (!subF) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目にも作れないので作りません'); return null; }
+    try { baFamMadeRec_(hw, cc, subF.item_id, subF.name, subF.shop_id, wantSku, src.weight, 0); } catch (eRs) {}
+    baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを2店舗目に作りました（1店舗目が満杯・非公開・' + subF.item_id + '）');
+    subF.parent_sku = wantSku; return subF;
+  }
   var _nmLim = 120; try { var _mx = shopNameLimit_(src.shop_id); if (_mx > 0) _nmLim = Math.min(_mx, 120); } catch (eNl) {}
   var _fitName = baFitName_(srcName, _nmLim);
   try { cl = cloneItem_(src.shop_id, src.item_id, _fitName, false); }
@@ -7851,7 +7887,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     if (!tgt) {
       if (cfg.autoClone === false) { res.note = '満杯（複製OFF）'; break; }
       var base = rows[rows.length - 1];
-      var nextNo = Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1;
+      var nextNo = Math.max(Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1, baFreeNo_(cc, rows[rows.length - 1].name));   /* ★2026-09-26 国の中（2店舗目・親SKU無しも含む）で空いている番号 */
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
@@ -7868,7 +7904,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var _role = series ? 'series' : 'fam';   /* ★Codex指摘：シリーズのカタログの複製を家族に数えると、次の回から無関係の作品がそこへ入る */
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
-        var sub1 = baCloneToSub_(cc, base, nm0, st, hw, _role);
+        var sub1 = baCloneToSub_(cc, base, newName, st, hw, _role);   /* ★2026-09-26 元の名前（①のまま）でなく、国の中で空いている番号の名前で作る */
         if (sub1) {
           BA_FAM_TICK++; st.cloneMade.n++;
           tgt = sub1; rows.push(tgt); newItem = true;
