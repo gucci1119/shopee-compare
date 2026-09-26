@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1910';
+var SRC_VER = '20260926-1850d';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -839,6 +839,18 @@ function doGetInner_(e) {
         else dno = { ok: true, job: baKv_('dnote_job') || {} };
       } catch (err) { dno = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dncb + '(' + JSON.stringify(dno) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'dimg_setup' || p.action === 'dimg_start' || p.action === 'dimg_stop' || p.action === 'dimg_status' || p.action === 'dimg_apply') {   /* ★2026-09-26 説明文の先頭に配送日数の画像 */
+      var dicb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dio;
+      try {
+        var diwt = P_().getProperty('WRITE_TOKEN'); if (!diwt || p.token !== diwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'dimg_setup') dio = dimgSetup_(p.ver);
+        else if (p.action === 'dimg_start') { var ij = baKv_('dimg_job') || {}; ij.on = true; ij.startAt = new Date().toISOString(); ij.msg = '開始'; baKvSet_('dimg_job', ij); dimgTriggerOff_(); ScriptApp.newTrigger('dimgTick').timeBased().everyMinutes(10).create(); dio = { ok: true, job: ij }; }
+        else if (p.action === 'dimg_stop') { var ij2 = baKv_('dimg_job') || {}; ij2.on = false; ij2.msg = '止めました（手動）'; baKvSet_('dimg_job', ij2); dimgTriggerOff_(); dio = { ok: true, job: ij2 }; }
+        else if (p.action === 'dimg_apply') dio = dimgApply_(parseInt(p.shop_id, 10), String(p.cc || '').toUpperCase(), String(p.items || '').split(','), p.dry === '1');
+        else dio = { ok: true, job: baKv_('dimg_job') || {}, assets: baKv_('dimg_assets') || {} };
+      } catch (err) { dio = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dicb + '(' + JSON.stringify(dio) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'img_shrink_replace') {   /* ★2026-09-26 本人「2MB以下にすればいいんじゃない？」：2MBを超える古い商品写真を、縮めた同じ写真（ポータルが Supabase に置いたURL）で【同じ位置】に差し替える */
       var isc = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), iso;
@@ -2305,8 +2317,11 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
       });
       var allText = fl.filter(function (f) { return f.field_type === 'text'; }).map(function (f) { return f.text; }).join('\n');
       if (allText.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
-      if (DNOTE_OLD_MARK.test(allText) && fl.length && fl[0].field_type === 'text') { fl[0].text = stripNote(fl[0].text); rec.fixed = 1; }
-      if (fl.length && fl[0].field_type === 'text') fl[0].text = add + fl[0].text; else fl.unshift({ field_type: 'text', text: add.replace(/\n+$/, '') });
+      /* 先頭が画像（配送日数の画像など）でも、最初の【文章の欄】に足す。文章の欄が無ければ先頭の画像の並びの直後に作る */
+      var ti = -1; for (var q = 0; q < fl.length; q++) { if (fl[q].field_type === 'text') { ti = q; break; } }
+      if (DNOTE_OLD_MARK.test(allText) && ti >= 0) { fl[ti].text = stripNote(fl[ti].text); rec.fixed = 1; }
+      if (ti >= 0) fl[ti].text = add + fl[ti].text;
+      else { var lead = 0; while (lead < fl.length && fl[lead].field_type === 'image') lead++; fl.splice(lead, 0, { field_type: 'text', text: add.replace(/\n+$/, '') }); }
       if ((allText.length + add.length) > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + (allText.length + add.length) + '字）'; out.push(rec); return; }
       rec.ext = 1; rec.len = allText.length + add.length;
       body = { item_id: it.item_id, description_type: 'extended', description_info: { extended_description: { field_list: fl } } };
@@ -2355,6 +2370,104 @@ function dnoteTick() {
     }
     job.on = false; job.doneAt = new Date().toISOString(); job.msg = '全部終わりました'; dnoteTriggerOff_(); baKvSet_('dnote_job', job);
   } finally { C.remove('dnote_running'); }
+}
+/* ★2026-09-26 本人「説明文のとこに画像も入れて運用の中で反応を見ていこう」「これで問い合わせが少なくなって、返品も減れば御の字」。
+   説明文の【一番上】に配送日数の画像（国別：BR=ポルトガル語／TH／VN／TW／PH・SG・MY=英語）を1枚入れる。
+   画像は説明文用に scene=desc で上げる（normal だと正方形に加工される）。通常の説明文は「画像＋元の文章」の拡張形式に変える（文章は一字も変えない）。
+   もう入っていれば何もしない・前の版の画像なら差し替える・書く直前に読み直す・書く前の形を dimg_log に控える（戻せるように） */
+var DIMG_KEY = { BR: 'br', TH: 'th', VN: 'vn', TW: 'tw', PH: 'en', SG: 'en', MY: 'en' };
+var DIMG_BASE = 'https://gucci1119.github.io/shopee-compare/img/desc_delivery_';
+function dimgTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dimgTick') ScriptApp.deleteTrigger(t); }); }
+function dimgUpload_(url) {
+  var blob = fetchRetry_(url, { muteHttpExceptions: true, __tag: '説明文画像の取り寄せ' }).getBlob();
+  var ts = now_(), path = '/api/v2/media_space/upload_image';
+  var u = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+  var res = fetchRetry_(u, { method: 'post', muteHttpExceptions: true, payload: { image: blob, scene: 'desc' }, __tag: '説明文画像のアップロード' });
+  var j = JSON.parse(res.getContentText());
+  if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
+  var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
+  var got = info.image_id || (info.image_id_list || [])[0];
+  if (!got) throw new Error('image_id が返らない: ' + res.getContentText().slice(0, 200));
+  return got;
+}
+function dimgSetup_(ver) {
+  var A = baKv_('dimg_assets') || {}; var old = A.ids || {}; var prev = A.prev || [];
+  var ids = {};
+  ['br', 'th', 'vn', 'tw', 'en'].forEach(function (k) { ids[k] = dimgUpload_(DIMG_BASE + k + '.png?v=' + encodeURIComponent(String(ver || Date.now()))); });
+  Object.keys(old).forEach(function (k) { if (old[k] && prev.indexOf(old[k]) < 0 && old[k] !== ids[k]) prev.push(old[k]); });
+  A = { ids: ids, prev: prev, at: new Date().toISOString(), ver: String(ver || '') };
+  baKvSet_('dimg_assets', A);
+  return { ok: true, assets: A };
+}
+function dimgApply_(shopId, cc, itemIds, dry) {
+  var A = baKv_('dimg_assets') || {}; var key = DIMG_KEY[cc]; var img = key && (A.ids || {})[key];
+  if (!img) throw new Error('この国の画像がまだ無い（dimg_setup を先に）: ' + cc);
+  var known = {}; Object.keys(A.ids || {}).forEach(function (k) { known[A.ids[k]] = 1; }); (A.prev || []).forEach(function (x) { known[x] = 1; });
+  var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
+  if (!ids.length) return { ok: true, n: 0, items: [] };
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+  var out = [], log = {};
+  (((b.response || {}).item_list) || []).forEach(function (it) {
+    var rec = { item_id: it.item_id }, fl, before;
+    if (String(it.description_type || 'normal') === 'extended') {
+      fl = ((((it.description_info || {}).extended_description) || {}).field_list || []).map(function (f) {
+        if (f.field_type === 'image') return { field_type: 'image', image_info: { image_id: ((f.image_info || {}).image_id) } };
+        return { field_type: 'text', text: String(f.text || '') };
+      });
+      before = { type: 'extended', fl: fl.map(function (f) { return f.field_type === 'image' ? 'img:' + f.image_info.image_id : 'text:' + f.text.length; }) };
+      if (fl.length && fl[0].field_type === 'image' && fl[0].image_info.image_id === img) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
+      /* 前の版・別の国の配送画像が入っていたら外してから先頭に入れる（写真などの画像はそのまま） */
+      var had = fl.length; fl = fl.filter(function (f) { return !(f.field_type === 'image' && known[f.image_info.image_id]); }); if (fl.length !== had) rec.fixed = 1;
+      fl.unshift({ field_type: 'image', image_info: { image_id: img } });
+      rec.ext = 1;
+    } else {
+      var d = String(it.description || '');
+      before = { type: 'normal', len: d.length };
+      fl = [{ field_type: 'image', image_info: { image_id: img } }];
+      if (d.trim()) fl.push({ field_type: 'text', text: d });
+    }
+    if (fl.length > 30) { rec.ok = false; rec.err = '欄が多すぎる（' + fl.length + '）'; out.push(rec); return; }
+    rec.fields = fl.length;
+    if (dry) { rec.ok = true; rec.dry = 1; out.push(rec); return; }
+    try {
+      callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: it.item_id, description_type: 'extended', description_info: { extended_description: { field_list: fl } } });
+      rec.ok = true; log[it.item_id] = { at: Date.now(), cc: cc, shop: shopId, before: before };
+    } catch (e) { var m = String((e && e.message) || e); rec.ok = false; rec.err = m.slice(0, 160); if (ufDead_() || /fetch失敗/.test(m)) rec.halt = 1; }
+    out.push(rec);
+  });
+  if (Object.keys(log).length) { try { var fr = baKvFreshMany_(['dimg_log']); if (fr) { var L = fr.dimg_log || {}; Object.keys(log).forEach(function (k) { if (!L[k]) L[k] = log[k]; }); baKvSet_('dimg_log', L); } } catch (eL) {} }
+  return { ok: true, n: out.length, items: out, uf: ufTotal_() };
+}
+function dimgTick() {
+  var C = CacheService.getScriptCache(); if (C.get('dimg_running') || C.get('dnote_running')) return; C.put('dimg_running', '1', 360);
+  try {
+    var job = baKv_('dimg_job') || {}; if (!job.on) { dimgTriggerOff_(); return; }
+    var t0 = Date.now();
+    var fr = baKvFreshMany_(['dimg_done']); if (!fr) { job.msg = 'dimg_done を読めない＝次の回へ'; baKvSet_('dimg_job', job); return; }
+    var done = fr.dimg_done || {};
+    var ccs = job.ccs && job.ccs.length ? job.ccs : Object.keys(DIMG_KEY);
+    for (var ci = 0; ci < ccs.length; ci++) {
+      var cc = ccs[ci];
+      var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
+      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
+      var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
+      var shops = Object.keys(byShop);
+      for (var si = 0; si < shops.length; si++) {
+        var ids = byShop[shops[si]];
+        for (var bi = 0; bi < ids.length; bi += 25) {
+          if (Date.now() - t0 > 4.5 * 60000) { job.msg = '時間切れ（次の回へ）'; job.at = new Date().toISOString(); baKvSet_('dimg_done', done); baKvSet_('dimg_job', job); return; }
+          if (ufTotal_() > ufStopLine_() - 6000) { job.msg = '接続枠が少ないので次の回へ（' + ufTotal_() + '）'; job.at = new Date().toISOString(); baKvSet_('dimg_done', done); baKvSet_('dimg_job', job); return; }
+          var res; try { res = dimgApply_(parseInt(shops[si], 10), cc, ids.slice(bi, bi + 25), false); } catch (e) { job.msg = cc + ': ' + String((e && e.message) || e).slice(0, 120); baKvSet_('dimg_done', done); baKvSet_('dimg_job', job); return; }
+          var halt = false;
+          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; });
+          baKvSet_('dimg_done', done);
+          if (halt) { job.msg = '枠切れ・通信の失敗で止めた（次の回へ）'; baKvSet_('dimg_job', job); return; }
+          job.at = new Date().toISOString(); job.msg = cc + ' 進行中'; baKvSet_('dimg_job', job);
+        }
+      }
+    }
+    job.on = false; job.doneAt = new Date().toISOString(); job.msg = '全部終わりました'; dimgTriggerOff_(); baKvSet_('dimg_job', job);
+  } finally { C.remove('dimg_running'); }
 }
 /* 縮めた写真で同じ位置を差し替える。url は Supabase の listing-imgs（ポータルが canvas で縮めて置いた同じ写真）だけ受け付ける。
    書く直前に読み直す・old_id が今の並びに無ければ何もしない・枚数と順番は変えない・書く前の並びを gallery_fill_log に控える */
