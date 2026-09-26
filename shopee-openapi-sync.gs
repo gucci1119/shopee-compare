@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1850d';
+var SRC_VER = '20260926-1830g';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -817,13 +817,14 @@ function doGetInner_(e) {
     }
     // ★商品動画の差し替え／削除。url= 動画の公開URL（ポータルがSupabase Storageに上げたもの）。
     //   Shopeeは 4MB分割アップロード→完了→トランスコード待ち→update_item という多段。job= で進捗を書き戻す。
-    if (p.action === 'promo_start' || p.action === 'promo_stop' || p.action === 'promo_status') {
+    if (p.action === 'promo_start' || p.action === 'promo_stop' || p.action === 'promo_status' || p.action === 'promo_gal_setup') {
       var pjcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var pjout;
       try {
         var pjwt = P_().getProperty('WRITE_TOKEN');
         if (!pjwt || p.token !== pjwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         if (p.action === 'promo_start') pjout = { ok: true, job: promoStart_(p.limit) };
+        else if (p.action === 'promo_gal_setup') pjout = promoGalSetup_(p.ver);
         else if (p.action === 'promo_stop') { var j0 = baKv_('promo_job') || {}; j0.on = false; j0.msg = '止めました（手動）'; promoTriggerOff_(); pjout = { ok: true, job: promoSaveJob_(j0) }; }
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
@@ -2101,6 +2102,23 @@ function promoSetup_() {
   A.at = new Date().toISOString(); baKvSet_('promo_assets', A);
   return A;
 }
+/* ★2026-09-26 本人「（配送日数の画像を）同じような内容が書いてあるやつと差し替え」→ お店の画像 p1（WE ARE JAPANESE SELLERS／丁寧な梱包と迅速な発送）を、
+   国別の配送日数の画像（正方形・BR=ポルトガル語／TH・VN・TW=現地語＋英語／PH・SG・MY=英語）に差し替える。説明文には画像を入れられない（whitelist）ため写真の枠で見せる。
+   A.gal = {br,th,vn,tw,en: image_id}。入っていれば p1 の位置にその国の画像を使い、古い p1 と他国の配送画像は外す（strip と同じ扱い）。空きが足りない時も配送画像は必ず入れる */
+var PROMO_GAL_VER = 1;
+function promoGalSetup_(ver) {
+  var ids = {};
+  ['br', 'th', 'vn', 'tw', 'en'].forEach(function (k) { ids[k] = uploadImageUrl_(PROMO_BASE + 'gal_delivery_' + k + '.png?v=' + encodeURIComponent(String(ver || Date.now()))); if (!ids[k]) throw new Error('画像を上げられません: ' + k); });
+  var FR = baKvFreshMany_(['promo_assets']); if (!FR) throw new Error('promo_assets を読めない');
+  var A = FR.promo_assets || {}; A.gal = ids; A.galAt = new Date().toISOString(); baKvSet_('promo_assets', A);
+  return { ok: true, gal: ids };
+}
+function promoBids_(A, cc) {
+  var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; });
+  var g = cc && A.gal && A.gal[DIMG_KEY[String(cc).toUpperCase()]];
+  if (g) bids[0] = g;
+  return bids.filter(Boolean);
+}
 function promoVideoFor_(shopId, cc, A, force) {
   A.vid = A.vid || {};
   var key = (A.vid[cc] && A.vid[cc].shop && String(A.vid[cc].shop) !== String(shopId)) ? (cc + '_' + shopId) : cc;   /* 同じ国に2店舗＝動画は店ごとに控える（取り合って毎回上げ直さない） */
@@ -2122,16 +2140,22 @@ function promoVideoFor_(shopId, cc, A, force) {
    動画：控えにある id だけ使う（ここで上げ直すと変換待ちで最大4分半＝🤖の1回を食う）。無い/弾かれた→動画なしで作り、毎日の見回りが入れる。動画の失敗で作成は止めない */
 function promoMergeImgs_(cur0, A, bids) {
   var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; });
+  /* 配送日数の画像に差し替えた国では、古い p1 と【他の国の】配送画像も外す（国をまたいで写した出品に混ざらないように） */
+  var gals = {}; Object.keys(A.gal || {}).forEach(function (k) { if (A.gal[k]) gals[A.gal[k]] = 1; });
+  var p1 = (A.imgs || {})[PROMO_IMGS[0]];
+  if (p1 && bids.indexOf(p1) < 0) strip[p1] = 1;
+  Object.keys(gals).forEach(function (x) { if (bids.indexOf(x) < 0) strip[x] = 1; });
   var keep = (cur0 || []).filter(function (x) { return x && !strip[x] && bids.indexOf(x) < 0; });
   var cand = bids.slice();
   for (var i = cand.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = cand[i]; cand[i] = cand[j]; cand[j] = t; }   /* 空きが足りない時は6枚からランダムに */
+  if (gals[bids[0]]) { cand = [bids[0]].concat(cand.filter(function (x) { return x !== bids[0]; })); }   /* 配送日数の画像は空きが1枠でもあれば必ず入れる */
   var add = cand.slice(0, Math.max(0, 9 - keep.length)).sort(function (a, b2) { return bids.indexOf(a) - bids.indexOf(b2); });   /* 入れる分は決まった順（p1→p6）で後ろへ */
   return { keep: keep, add: add, next: keep.concat(add) };
 }
 function promoVidKey_(A, cc, shopId) { var e = (A.vid || {})[cc]; return (e && e.shop && String(e.shop) !== String(shopId)) ? (cc + '_' + shopId) : cc; }   /* promoVideoFor_ の key と同じ決め方（変えるなら両方） */
 function promoForNew_(shopId, imgIds, A) {
   A = A || baKv_('promo_assets') || {};
-  var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; }).filter(Boolean);
+  var bids = promoBids_(A, baCcOfShop_(shopId));
   if (bids.length !== PROMO_IMGS.length) return null;   /* 6枚がまだ上がっていない＝ここでは上げない（作成を遅くしない） */
   var m = promoMergeImgs_(imgIds, A, bids);
   if (!m.keep.length) return null;                      /* 商品の写真が1枚も残らない＝触らない（お店の画像だけの出品は作らない） */
@@ -2182,7 +2206,9 @@ function promoTick() {
       /* ★2026-09-26 古いお店画像の一覧（promo_assets.strip）を後から足したので、入れ終わりでも【入れた後に同期した画像に strip が残っている】出品は1回だけ入れ直す（redo） */
       var stripSet = {}; ((baKv_('promo_assets') || {}).strip || []).forEach(function (x) { stripSet[x] = 1; });
       var needsRedo = function (r, d) { if (!d || !d.ok || d.redo) return false; if (!(Date.parse(r.synced_at || '') > Number(d.at || 0))) return false; return (r.images || []).some(function (x) { return stripSet[x]; }); };
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d); });
+      var galOn = !!(((baKv_('promo_assets') || {}).gal || {})[DIMG_KEY[cc]]);
+      var needsGal = function (d) { return galOn && d && d.ok && Number(d.galv || 0) < PROMO_GAL_VER; };   /* ★配送日数の画像に差し替える（入れ終わった出品も1回やり直す） */
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; return !d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d) || needsGal(d); });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -2203,7 +2229,8 @@ function promoTick() {
             if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited|exceeds 2 ?MB|price ratio|error_price_ratio/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
-            if (redoIds[x.item_id]) d.redo = 1;   /* 入れ直しは1回だけ */
+            if (redoIds[x.item_id]) d.redo = d0.redo || (needsGal(d0) ? undefined : 1);   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
+            if (x.ok && galOn) d.galv = PROMO_GAL_VER; else if (d0.galv) d.galv = d0.galv;
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
           });
@@ -2236,8 +2263,8 @@ function promoStart_(limit) {
 function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   if (!dry && ufTotal_() > ufStopLine_() - 3000) return { ok: false, stop: 'quota', error: '接続枠が残り少ないので止めました（' + ufTotal_() + '）' };
   var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
-  var bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean);
-  if (bids.length !== PROMO_IMGS.length) { A = promoSetup_(); bids = PROMO_IMGS.map(function (f) { return A.imgs[f]; }).filter(Boolean); }
+  var bids = promoBids_(A, cc);
+  if (bids.length !== PROMO_IMGS.length) { A = promoSetup_(); bids = promoBids_(A, cc); }
   var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; });
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
@@ -2492,8 +2519,9 @@ function imgShrinkReplace_(shopId, itemId, oldIds, urls) {
 function galleryFill_(shopId, itemId, add, dry, cap, src) {
   cap = Math.max(1, Math.min(8, cap || 5));
   var iid = parseInt(itemId, 10); if (!(iid > 0)) throw new Error('item_id 不正');
-  var A = baKv_('promo_assets') || {}; var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; }).filter(Boolean);
+  var A = baKv_('promo_assets') || {}; var bids = promoBids_(A, baCcOfShop_(shopId));
   var strip = {}; (A.strip || []).forEach(function (x) { strip[x] = 1; }); bids.forEach(function (x) { strip[x] = 1; });
+  Object.keys(A.gal || {}).forEach(function (k) { if (A.gal[k]) strip[A.gal[k]] = 1; }); if ((A.imgs || {})[PROMO_IMGS[0]]) strip[A.imgs[PROMO_IMGS[0]]] = 1;   /* お店の画像（配送画像・古い p1 も）は商品写真に数えない */
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(iid) }, 'get');
   var it = (((b.response || {}).item_list) || [])[0]; if (!it) throw new Error('Shopeeに見つからない item_id=' + iid);
   var cur0 = ((it.image || {}).image_id_list || []).slice();
