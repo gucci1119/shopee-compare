@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1710';
+var SRC_VER = '20260926-1730';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -828,6 +828,17 @@ function doGetInner_(e) {
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'dnote_start' || p.action === 'dnote_stop' || p.action === 'dnote_status' || p.action === 'dnote_apply') {   /* ★2026-09-26 BR 説明文の先頭に到着目安 */
+      var dncb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dno;
+      try {
+        var dnwt = P_().getProperty('WRITE_TOKEN'); if (!dnwt || p.token !== dnwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'dnote_start') { var dj = baKv_('dnote_job') || {}; dj.on = true; dj.startAt = new Date().toISOString(); dj.msg = '開始'; baKvSet_('dnote_job', dj); dnoteTriggerOff_(); ScriptApp.newTrigger('dnoteTick').timeBased().everyMinutes(10).create(); dno = { ok: true, job: dj }; }
+        else if (p.action === 'dnote_stop') { var dj2 = baKv_('dnote_job') || {}; dj2.on = false; dj2.msg = '止めました（手動）'; baKvSet_('dnote_job', dj2); dnoteTriggerOff_(); dno = { ok: true, job: dj2 }; }
+        else if (p.action === 'dnote_apply') { dno = dnoteApply_(parseInt(p.shop_id, 10), String(p.cc || 'BR').toUpperCase(), String(p.items || '').split(','), p.dry === '1'); }
+        else dno = { ok: true, job: baKv_('dnote_job') || {} };
+      } catch (err) { dno = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dncb + '(' + JSON.stringify(dno) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'img_shrink_replace') {   /* ★2026-09-26 本人「2MB以下にすればいいんじゃない？」：2MBを超える古い商品写真を、縮めた同じ写真（ポータルが Supabase に置いたURL）で【同じ位置】に差し替える */
       var isc = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), iso;
@@ -2256,6 +2267,65 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, uf: ufTotal_() };
   ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
   return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
+}
+/* ★2026-09-26 本人「案1：出品ページに届くまでの目安（約1か月半）を書いておく。これ必要ですね」。
+   BR の返金の44%が「届いていない」・22%が「気が変わった」で、申請は注文から中央値21日（届くのは約45日後）＝遅さが理由。
+   説明文の【一番上】に到着目安（ポルトガル語＋英語）を足す。印（DNOTE_MARK）が既にあれば何もしない。書く直前に読み直す・
+   拡張形式（extended）の説明文は触らない（形が違う）・文字数の上限を超えるなら足さない。 */
+var DNOTE_MARK = 'PRAZO DE ENTREGA';
+var DNOTE_TEXT = { BR: '⏰ PRAZO DE ENTREGA: enviamos do Japão. A entrega leva em média 30 a 45 dias (cerca de 1 mês e meio) após o envio. Acompanhe pelo código de rastreio. Agradecemos a sua paciência! 🙏\n⏰ Delivery time: shipped from Japan, arrives in about 30–45 days (about 1.5 months) after shipping.\n\n' };
+var DNOTE_MAXLEN = 2900;
+function dnoteTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dnoteTick') ScriptApp.deleteTrigger(t); }); }
+function dnoteApply_(shopId, cc, itemIds, dry) {
+  var add = DNOTE_TEXT[cc]; if (!add) throw new Error('この国の文面がない: ' + cc);
+  var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
+  if (!ids.length) return { ok: true, n: 0, items: [] };
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+  var out = [];
+  (((b.response || {}).item_list) || []).forEach(function (it) {
+    var rec = { item_id: it.item_id };
+    if (String(it.description_type || 'normal') !== 'normal') { rec.ok = true; rec.skip = 'extended'; out.push(rec); return; }
+    var d = String(it.description || '');
+    if (d.indexOf(DNOTE_MARK) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
+    var nd = add + d;
+    if (nd.length > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + nd.length + '字）'; out.push(rec); return; }
+    if (dry) { rec.ok = true; rec.dry = 1; rec.len = nd.length; out.push(rec); return; }
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: it.item_id, description: nd }); rec.ok = true; }
+    catch (e) { var m = String((e && e.message) || e); rec.ok = false; rec.err = m.slice(0, 160); if (ufDead_() || /fetch失敗/.test(m)) rec.halt = 1; }
+    out.push(rec);
+  });
+  return { ok: true, n: out.length, items: out, uf: ufTotal_() };
+}
+function dnoteTick() {
+  var C = CacheService.getScriptCache(); if (C.get('dnote_running')) return; C.put('dnote_running', '1', 360);
+  try {
+    var job = baKv_('dnote_job') || {}; if (!job.on) { dnoteTriggerOff_(); return; }
+    var t0 = Date.now();
+    var fr = baKvFreshMany_(['dnote_done']); if (!fr) { job.msg = 'dnote_done を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }
+    var done = fr.dnote_done || {};
+    var ccs = Object.keys(DNOTE_TEXT);
+    for (var ci = 0; ci < ccs.length; ci++) {
+      var cc = ccs[ci];
+      var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
+      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
+      var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
+      var shops = Object.keys(byShop);
+      for (var si = 0; si < shops.length; si++) {
+        var ids = byShop[shops[si]];
+        for (var bi = 0; bi < ids.length; bi += 25) {
+          if (Date.now() - t0 > 4.5 * 60000) { job.msg = '時間切れ（次の回へ）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          if (ufTotal_() > ufStopLine_() - 6000) { job.msg = '接続枠が少ないので次の回へ（' + ufTotal_() + '）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          var res; try { res = dnoteApply_(parseInt(shops[si], 10), cc, ids.slice(bi, bi + 25), false); } catch (e) { job.msg = cc + ': ' + String((e && e.message) || e).slice(0, 120); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
+          var halt = false;
+          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; });
+          baKvSet_('dnote_done', done);
+          if (halt) { job.msg = '枠切れ・通信の失敗で止めた（次の回へ）'; baKvSet_('dnote_job', job); return; }
+          job.at = new Date().toISOString(); job.msg = cc + ' 進行中'; baKvSet_('dnote_job', job);
+        }
+      }
+    }
+    job.on = false; job.doneAt = new Date().toISOString(); job.msg = '全部終わりました'; dnoteTriggerOff_(); baKvSet_('dnote_job', job);
+  } finally { C.remove('dnote_running'); }
 }
 /* 縮めた写真で同じ位置を差し替える。url は Supabase の listing-imgs（ポータルが canvas で縮めて置いた同じ写真）だけ受け付ける。
    書く直前に読み直す・old_id が今の並びに無ければ何もしない・枚数と順番は変えない・書く前の並びを gallery_fill_log に控える */
