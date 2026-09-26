@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1750';
+var SRC_VER = '20260926-1805';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2283,16 +2283,35 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
-  var out = [];
+  var out = [], first = add.split('\n')[0];
+  /* 先頭の ⏰ の行（別の国のカタログを写した時に入ってくる他国の文面）を外す */
+  var stripNote = function (t) { var ls = String(t || '').split('\n'); while (ls.length && /^⏰/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); };
   (((b.response || {}).item_list) || []).forEach(function (it) {
     var rec = { item_id: it.item_id };
-    if (String(it.description_type || 'normal') !== 'normal') { rec.ok = true; rec.skip = 'extended'; out.push(rec); return; }
-    var d = String(it.description || '');
-    if (d.indexOf(DNOTE_MARK) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
-    var nd = add + d;
-    if (nd.length > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + nd.length + '字）'; out.push(rec); return; }
-    if (dry) { rec.ok = true; rec.dry = 1; rec.len = nd.length; out.push(rec); return; }
-    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: it.item_id, description: nd }); rec.ok = true; }
+    var body;
+    if (String(it.description_type || 'normal') === 'extended') {
+      /* ★拡張形式（画像つきの説明文）：先頭の文章の欄に足す（無ければ文章の欄を1つ先頭に作る）。画像の欄は番号をそのまま戻す */
+      var fl = ((((it.description_info || {}).extended_description) || {}).field_list || []).map(function (f) {
+        if (f.field_type === 'image') return { field_type: 'image', image_info: { image_id: ((f.image_info || {}).image_id) } };
+        return { field_type: 'text', text: String(f.text || '') };
+      });
+      var allText = fl.filter(function (f) { return f.field_type === 'text'; }).map(function (f) { return f.text; }).join('\n');
+      if (allText.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
+      if (allText.indexOf(DNOTE_MARK) >= 0 && fl.length && fl[0].field_type === 'text') { fl[0].text = stripNote(fl[0].text); rec.fixed = 1; }
+      if (fl.length && fl[0].field_type === 'text') fl[0].text = add + fl[0].text; else fl.unshift({ field_type: 'text', text: add.replace(/\n+$/, '') });
+      if ((allText.length + add.length) > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + (allText.length + add.length) + '字）'; out.push(rec); return; }
+      rec.ext = 1; rec.len = allText.length + add.length;
+      body = { item_id: it.item_id, description_type: 'extended', description_info: { extended_description: { field_list: fl } } };
+    } else {
+      var d = String(it.description || '');
+      if (d.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
+      if (d.indexOf(DNOTE_MARK) >= 0) { d = stripNote(d); rec.fixed = 1; }   /* 他国の文面が入っていた＝入れ替える */
+      var nd = add + d;
+      if (nd.length > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + nd.length + '字）'; out.push(rec); return; }
+      rec.len = nd.length; body = { item_id: it.item_id, description: nd };
+    }
+    if (dry) { rec.ok = true; rec.dry = 1; out.push(rec); return; }
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); rec.ok = true; }
     catch (e) { var m = String((e && e.message) || e); rec.ok = false; rec.err = m.slice(0, 160); if (ufDead_() || /fetch失敗/.test(m)) rec.halt = 1; }
     out.push(rec);
   });
