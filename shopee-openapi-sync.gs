@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260926-1630';
+var SRC_VER = '20260926-1650';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -828,6 +828,15 @@ function doGetInner_(e) {
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'img_shrink_replace') {   /* ★2026-09-26 本人「2MB以下にすればいいんじゃない？」：2MBを超える古い商品写真を、縮めた同じ写真（ポータルが Supabase に置いたURL）で【同じ位置】に差し替える */
+      var isc = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), iso;
+      try {
+        var iswt = P_().getProperty('WRITE_TOKEN'); if (!iswt || p.token !== iswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var iss = parseInt(p.shop_id, 10); if (!getToken_(iss)) throw new Error('未認可 shop_id=' + p.shop_id);
+        iso = imgShrinkReplace_(iss, p.item_id, String(p.old_id || ''), String(p.url || ''));
+      } catch (err) { iso = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(isc + '(' + JSON.stringify(iso) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'gallery_fill') {   /* ★2026-09-26 本人「おけ！」：商品写真が3枚未満の出品に、明細の写真（バリエ）／同じ商品の他国の写真（単品）を足す */
       var gfcb2 = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), gfo;
@@ -2247,6 +2256,21 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, uf: ufTotal_() };
   ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
   return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
+}
+/* 縮めた写真で同じ位置を差し替える。url は Supabase の listing-imgs（ポータルが canvas で縮めて置いた同じ写真）だけ受け付ける。
+   書く直前に読み直す・old_id が今の並びに無ければ何もしない・枚数と順番は変えない・書く前の並びを gallery_fill_log に控える */
+function imgShrinkReplace_(shopId, itemId, oldId, url) {
+  var iid = parseInt(itemId, 10); if (!(iid > 0)) throw new Error('item_id 不正');
+  if (!/^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\/listing-imgs\//.test(url)) throw new Error('url は listing-imgs だけ');
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(iid) }, 'get');
+  var it = (((b.response || {}).item_list) || [])[0]; if (!it) throw new Error('Shopeeに見つからない item_id=' + iid);
+  var cur0 = ((it.image || {}).image_id_list || []).slice();
+  if (cur0.indexOf(oldId) < 0) return { ok: true, skip: '今の並びに無い（もう差し替え済み）', item_id: iid };
+  var nid = uploadImageUrl_(url); if (!nid) throw new Error('上げ直しで番号が取れない');
+  var next = cur0.map(function (x) { return x === oldId ? nid : x; });
+  callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: iid, image: { image_id_list: next } });
+  try { var fr = baKvFreshMany_(['gallery_fill_log']); if (fr) { var L = fr.gallery_fill_log || {}; L[iid + '|shrink'] = { at: Date.now(), shop: shopId, src: 'shrink', from: cur0, to: next }; baKvSet_('gallery_fill_log', L); } } catch (eL) {}
+  return { ok: true, item_id: iid, old: oldId, new_id: nid, n: next.length };
 }
 /* ★2026-09-26 商品写真の足し込み（本人「おけ！」）。
    今の商品写真は【1枚も外さず元の順で先頭】→ 後ろに add（明細の写真 or 同じ商品の他国の写真）を商品写真が cap 枚になるまで → 残りの空き枠にお店の画像（promoMergeImgs_）。
