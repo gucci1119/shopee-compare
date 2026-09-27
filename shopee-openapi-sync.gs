@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260927-1400w';
+var SRC_VER = '20260927-1530u';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -132,6 +132,22 @@ function ufBump_(n, tag) {
   var c = (n > 0 ? n : 1);
   _ufRun += c;
   if (tag) { var k = String(tag); _ufTag[k] = (_ufTag[k] || 0) + c; }
+  ufSpillMaybe_();
+}
+/* ★2026-09-27 3台目の数え漏れの真因。数えた回数は実行の【最後に】まとめて書く作りで、
+   6分の上限で殺された実行は finally も走らない＝その回に使った通信が1回も記録されない。
+   実測（3台目の実行履歴・7日間）：🤖（boshuAutoTick と、ポータルから起こす doGet）が360秒で殺されたのが 9/26 16〜19時に8回・9/27 6〜8時に5回。
+   その直後の 9/27 6:11 から「枠切れ」で失敗が続いた（こちらの数えは約14,400のまま）。
+   → 実行の途中でも 30回 か 30秒 ごとに控え（ufSpill_）へ書き出す。控えは ufSelf_ が足し、ufPersist_ が本体へ取り込む（既存の仕組み）。
+   Properties の書き込みは urlfetch を使わない。 */
+var _ufSpillAt = 0;
+function ufSpillMaybe_() {
+  if (_ufRun < 30 && !(_ufRun > 0 && Date.now() - (_ufSpillAt || 0) > 30000)) return;
+  if (!_ufSpillAt) { _ufSpillAt = Date.now(); if (_ufRun < 30) return; }
+  try {
+    P_().setProperty('ufSpill_' + Utilities.getUuid().slice(0, 8), JSON.stringify({ d: ufToday_(), n: _ufRun, tag: _ufTag, at: new Date().toISOString(), mid: 1 }));
+    _ufRun = 0; _ufTag = {}; _ufSpillAt = Date.now();
+  } catch (e) {}
 }
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
