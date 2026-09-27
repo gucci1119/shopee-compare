@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-0730c';
+var SRC_VER = '20260928-0810s';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7165,7 +7165,7 @@ function boshuAutoTick(manual) {
     var _tkSig0 = { J: baSig_(baKv_(BA_JUDGED)), E: baSig_(enCache), S: baSig_(sameCache), I: baSig_(used), L: baSig_(ledger) };
     /* ★2026-09-24 本人「めっちゃコスト無駄になってた」：控えが4,000件を超えると {} に捨てていた（実測 4,156件）＝以後は毎回ゼロから
        同一作品判定を聞き直し、作品1つに16〜38回。捨てずに【古い方から】削って 8,000 件まで持つ（挿入順＝古い順） */
-    { var _sk = Object.keys(sameCache); if (_sk.length > 8000) { var _trim = {}; _sk.slice(_sk.length - 6000).forEach(function (x) { _trim[x] = sameCache[x]; }); sameCache = _trim; } }   // ★v182→2026-09-24
+    { var _sk = Object.keys(sameCache); if (_sk.length > 36000) { var _trim = {}; _sk.slice(_sk.length - 12000).forEach(function (x) { _trim[x] = sameCache[x]; }); sameCache = _trim; } }   // ★v182→2026-09-24
     st.aiTextCap = dailyMax * 4; try { st.aiKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
     /* ★2026-09-20 本人「高額品で在庫少ないのは出さないでね」「高額品ソフトは海賊版も多いので気をつけて」「ファミコンとか特に注意で」
