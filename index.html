@@ -4688,6 +4688,7 @@
     "🤖自動出品": "🤖 Auto-listed",
     "🤖 自動出品": "🤖 Auto-listed",
     "自動出品だけ": "auto-listed only",
+    "🎮 売れた明細": "🎮 Variations sold",
     "🤖 自動出品（読み込み中）": "🤖 Auto-listed (loading)",
     "明細は不明": "variation unknown",
     "🤖作成": "🤖 Bot-made",
@@ -10296,7 +10297,7 @@
     const liveWarn = allErr0 && haveAny ? '<div class="smd-dim" style="font-size:11px;margin-top:6px">⚠️ Shopeeからのライブ更新に失敗しています（表示は保存済みのデータ）。上部の「🔄 更新」で再取得できます。</div>' : '';
     if (!rows.length) {
       const emptyMsg = loading ? '読み込み中...' : allErr ? '⚠️ 注文の取得に失敗しました（すべての国でエラー）。上部の「🔄 更新」で再取得してください。<br><span class="smd-dim" style="font-size:11px">※「注文なし」ではありません。ネットワーク／キー／同期の問題の可能性。</span>' : (state.orders.filter === 'late' ? '未対応（未手配）で発送期限が近い/超過した注文はありません🎉<br><span class="smd-dim" style="font-size:11px">※発送手配済(伝票発行済)はShopee期限を満たしているので対象外です</span>' : (state.orders.ccFilter ? state.orders.ccFilter + ' に該当する注文はありません（他の国は上の国チップで）' : '未処理の注文はありません🎉')) + liveWarn;
-      list.innerHTML = `<div class="smd-empty">${emptyMsg}</div>`;
+      list.innerHTML = `<div class="smd-empty">${(!loading && !allErr && state.orders.autoOnly) ? '🤖自動出品の明細を含む注文は、この条件ではまだありません。<br><span class="smd-dim" style="font-size:11px">上の「🤖 自動出品」をもう一度押すと解除します。</span>' : emptyMsg}</div>`;
       return;
     }
     const frag = document.createDocumentFragment();
@@ -20270,6 +20271,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-28', items: [
+      '🎮 <b>💰実売を押した時の「実売の履歴」に、どの明細が売れたかを入れました</b>（本人「何の明細が売れたかという情報も、実売のところを押したらその中に押し込めないかな」）。上に<b>🎮売れた明細</b>（明細ごとの個数・国・利益の平均・最後に売れた日）の表、下の注文の一覧に<b>明細</b>の列を足しました。キャンセル・未払いの注文は灰色の取り消し線にして、売れた数には数えません。',
       '🤖 <b>注文管理に「🤖 自動出品」の絞り込みを足しました</b>（本人「自動出品で出したやつがフィルターで見れるような機能も」）。🤖自動出品で入れた明細を含む注文だけを出します。①未手配・国・検索などと組み合わせて使えます。見分け方は明細の紫の「🤖自動出品」の印と同じです。',
     ] },
     { date: '2026-09-27', items: [
@@ -35452,7 +35454,7 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     try {
       const [pk, ords, inc] = await Promise.all([
         settings.sbKey ? sbGetAll('app_kv', 'select=v&k=eq.profit_sheet').catch(() => null) : [],
-        settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts').catch(() => null) : [],
+        settings.sbKey ? sbGetAll('orders', 'select=cc,sn,items,order_ts,status').catch(() => null) : [],
         settings.sbKey ? sbGetAll('income', 'select=cc,sn,amount').catch(() => null) : [],
       ]);
       if (pk === null || ords === null || inc === null) { lst._ledgerMapsFailAt = Date.now(); return; }   /* ★2026-09-23 読めなかった空を「構築済み」として固定しない（60秒後の描画で読み直す） */
@@ -35471,7 +35473,7 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
           if (costY != null && !bundle) { const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: costY, ts }; }
           if (profitY != null && !bundle) { (pm[k] = pm[k] || []).push({ profit: profitY, ts }); }
           // 過去オーダー明細（まとめ買い含む全件・💰実売クリックの履歴/変遷/原価統計用）
-          (om[k] = om[k] || []).push({ cc: o.cc, sn: o.sn, ts, cost: (bundle ? null : costY), income: amtY, profit: (bundle ? null : profitY), bundle, nItems });
+          (om[k] = om[k] || []).push({ cc: o.cc, sn: o.sn, ts, cost: (bundle ? null : costY), income: amtY, profit: (bundle ? null : profitY), bundle, nItems, variation: String(it.variation || ''), qty: Number(it.qty) || 1, status: String(o.status || '') });   /* ★2026-09-28 明細名・個数・状態も持つ（💰実売の中に「どの明細が売れたか」を出す） */
         });
       });
       lst._ledgerCostMap = cm; lst._ledgerProfitMap = pm; lst._ledgerOrderMap = om;
@@ -35512,6 +35514,23 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
     return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-width:${W}px"><line x1="${pad}" y1="${zeroY.toFixed(1)}" x2="${W - pad}" y2="${zeroY.toFixed(1)}" stroke="#ccc" stroke-dasharray="3 3"/><polyline points="${line}" fill="none" stroke="#1a7f37" stroke-width="1.5"/>${dots}<text x="${pad}" y="12" font-size="9" fill="#999">利益¥${Math.round(max).toLocaleString()}</text><text x="${pad}" y="${(H - pad + 10).toFixed(0)}" font-size="9" fill="#999">¥${Math.round(min).toLocaleString()}</text></svg>`;
   }
   // 💰 実売クリック：過去オーダー明細＋利益変遷＋原価統計（まとめ買いは?表示）
+  /* ★2026-09-28 本人「何の明細が売れたかという情報も、実売のところを押したら（グラフや日付や国）その中に押し込めないかな」。
+     注文の明細名（variation）ごとに、売れた個数・国・利益（単品注文で分かる分）をまとめる。キャンセル/未払いは数えない */
+  var OH_SKIP = /(UNPAID|CANCEL|INVALID)/i;
+  function ohVarSummary(sorted) {
+    const g = new Map();
+    (sorted || []).forEach(o => { if (!o.variation || OH_SKIP.test(o.status || '')) return;
+      const k = o.variation; let x = g.get(k); if (!x) g.set(k, x = { n: 0, cc: new Set(), prof: [], last: 0 });
+      x.n += o.qty || 1; x.cc.add(o.cc); if (o.profit != null) x.prof.push(o.profit); if (o.ts > x.last) x.last = o.ts; });
+    if (!g.size) return '';
+    const a = [...g.entries()].sort((p, q) => (q[1].n - p[1].n) || (q[1].last - p[1].last));
+    const yen = n => (n >= 0 ? '+' : '') + '¥' + Math.round(n).toLocaleString();
+    const dOf = ts => { const d = new Date(tsMs(ts)); return (d.getMonth() + 1) + '/' + d.getDate(); };
+    return `<div style="margin-bottom:10px"><div style="font-size:11px;color:#888;margin-bottom:2px">🎮 売れた明細（${a.length}種類・個数の多い順／キャンセル・未払いを除く）</div>
+      <table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:2px 7px">明細</th><th style="padding:2px 7px;text-align:right">個数</th><th style="padding:2px 7px">国</th><th style="padding:2px 7px;text-align:right">利益（単品注文の平均）</th><th style="padding:2px 7px">最後に売れた日</th></tr></thead><tbody>`
+      + a.map(([v, x]) => `<tr style="border-top:1px solid #f1f1f1"><td style="padding:3px 7px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v)}">${esc(v)}</td><td style="padding:3px 7px;text-align:right;font-weight:700;color:#c2185b">${x.n}</td><td style="padding:3px 7px;white-space:nowrap">${[...x.cc].map(c => (CC_FLAG[c] || '') + c).join(' ')}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${x.prof.length ? `<span style="color:${x.prof.reduce((s2, v2) => s2 + v2, 0) >= 0 ? '#1a7f37' : '#d93025'};font-weight:700">${yen(x.prof.reduce((s2, v2) => s2 + v2, 0) / x.prof.length)}</span> <span class="smd-dim" style="font-size:10px">(${x.prof.length}件)</span>` : '<span class="smd-dim">—</span>'}</td><td style="padding:3px 7px;white-space:nowrap;color:#666">${dOf(x.last)}</td></tr>`).join('')
+      + `</tbody></table></div>`;
+  }
   function showOrderHistory(name) {
     const arr = (lst._ledgerOrderMap || {})[(name || '').toLowerCase().trim()];
     const jpy = n => (n >= 0 ? '+' : '') + '¥' + Math.round(n).toLocaleString();
@@ -35521,14 +35540,15 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
       ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:20px;max-width:480px"><b>💰 ${esc(name)}</b><div style="margin-top:8px;color:#666;font-size:13px">まだ売れた注文の実績（入金＋仕入が揃ったもの）がありません。</div><div style="text-align:right;margin-top:12px"><button class="oh-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:6px 14px;cursor:pointer">閉じる</button></div></div>`;
     } else {
       const sorted = arr.slice().sort((a, b) => b.ts - a.ts), cs = ledgerCostStatsByName(name), ps = ledgerProfitStatsByName(name);
-      const rows = sorted.map(o => { const rg = regionByCc(o.cc) || {}; const d = new Date(tsMs(o.ts)); const ds = o.ts ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '—'; return `<tr style="${o.bundle ? 'background:#fff8ec' : ''}"><td style="padding:3px 7px;white-space:nowrap">${ds}</td><td style="padding:3px 7px;white-space:nowrap"><span style="color:${rg.color || '#333'};font-weight:700">${CC_FLAG[o.cc] || ''}${o.cc}</span></td><td style="padding:3px 7px;font-family:monospace;font-size:10px;color:#888">${esc(o.sn || '')}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${o.income != null ? '¥' + o.income.toLocaleString() : '—'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${o.cost != null ? '¥' + o.cost.toLocaleString() : '—'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700">${o.bundle ? `<span title="まとめ買い（${o.nItems}品同時注文）は原価を1品に按分できないため利益不明" style="color:#c47">🧺まとめ買い ?</span>` : (o.profit != null ? `<span style="color:${o.profit >= 0 ? '#1a7f37' : '#d93025'}">${jpy(o.profit)}</span>` : '<span class="smd-dim">—</span>')}</td></tr>`; }).join('');
+      const rows = sorted.map(o => { const rg = regionByCc(o.cc) || {}; const d = new Date(tsMs(o.ts)); const ds = o.ts ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '—'; const cx = OH_SKIP.test(o.status || ''); return `<tr style="${cx ? 'color:#aaa;text-decoration:line-through' : (o.bundle ? 'background:#fff8ec' : '')}"${cx ? ' title="' + esc(o.status) + '（売れた数には数えません）"' : ''}><td style="padding:3px 7px;white-space:nowrap">${ds}</td><td style="padding:3px 7px;white-space:nowrap"><span style="color:${rg.color || '#333'};font-weight:700">${CC_FLAG[o.cc] || ''}${o.cc}</span></td><td style="padding:3px 7px;font-family:monospace;font-size:10px;color:#888">${esc(o.sn || '')}</td><td style="padding:3px 7px;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.variation || '')}">${o.variation ? esc(o.variation) : '<span class="smd-dim">（単品）</span>'}${o.qty > 1 ? ' <b style="color:#d93025">×' + o.qty + '</b>' : ''}${cx ? ' <span style="font-size:10px">' + (/UNPAID/i.test(o.status) ? '未払い' : 'キャンセル') + '</span>' : ''}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${o.income != null ? '¥' + o.income.toLocaleString() : '—'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap">${o.cost != null ? '¥' + o.cost.toLocaleString() : '—'}</td><td style="padding:3px 7px;text-align:right;white-space:nowrap;font-weight:700">${o.bundle ? `<span title="まとめ買い（${o.nItems}品同時注文）は原価を1品に按分できないため利益不明" style="color:#c47">🧺まとめ買い ?</span>` : (o.profit != null ? `<span style="color:${o.profit >= 0 ? '#1a7f37' : '#d93025'}">${jpy(o.profit)}</span>` : '<span class="smd-dim">—</span>')}</td></tr>`; }).join('');
       ov.innerHTML = `<div style="background:#fff;border-radius:10px;width:660px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3)">
         <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid #eee"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">💰 実売の履歴：<span title="${esc(name)}">${esc(name)}</span></b><button class="oh-close" style="border:1px solid #ddd;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer">閉じる</button></div>
         <div style="padding:14px 18px;max-height:calc(100vh - 160px);overflow:auto">
           ${ps ? `<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-bottom:8px"><span>実売利益 <b style="color:${ps.recent < 0 ? '#d93025' : '#1a7f37'}">直近${jpy(ps.recent)}</b></span><span class="smd-dim">中央${jpy(ps.median)}・最${jpy(ps.max)}〜${jpy(ps.min)}・単品注文${ps.n}件</span></div>` : ''}
           ${cs ? `<div style="font-size:12px;margin-bottom:8px;background:#fbfaf6;border:1px solid #ece3cf;border-radius:6px;padding:6px 10px">📗 原価（単品注文${cs.n}件の仕入）：最小¥${cs.min.toLocaleString()}／最大¥${cs.max.toLocaleString()}／平均¥${cs.avg.toLocaleString()}／中央¥${cs.median.toLocaleString()}</div>` : ''}
+          ${ohVarSummary(sorted)}
           ${profitTrendSvg(sorted) ? `<div style="margin-bottom:10px"><div style="font-size:11px;color:#888;margin-bottom:2px">📈 利益の変遷（単品注文・古い→新しい）</div>${profitTrendSvg(sorted)}</div>` : ''}
-          <table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:2px 7px">日付</th><th style="padding:2px 7px">国</th><th style="padding:2px 7px">注文#</th><th style="padding:2px 7px;text-align:right">入金(円)</th><th style="padding:2px 7px;text-align:right">仕入(円)</th><th style="padding:2px 7px;text-align:right">利益</th></tr></thead><tbody>${rows}</tbody></table>
+          <table style="border-collapse:collapse;width:100%;font-size:12px"><thead><tr style="color:#888;font-size:10.5px;text-align:left"><th style="padding:2px 7px">日付</th><th style="padding:2px 7px">国</th><th style="padding:2px 7px">注文#</th><th style="padding:2px 7px">明細</th><th style="padding:2px 7px;text-align:right">入金(円)</th><th style="padding:2px 7px;text-align:right">仕入(円)</th><th style="padding:2px 7px;text-align:right">利益</th></tr></thead><tbody>${rows}</tbody></table>
           <div class="smd-dim" style="font-size:10.5px;margin-top:8px">※入金円＝Payoneer受取の円換算。仕入＝利益管理表の原価。<b>🧺まとめ買い</b>は原価を1品に分けられないため利益は「?」（統計からも除外）。</div>
         </div></div>`;
     }
