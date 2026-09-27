@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-0230c';
+var SRC_VER = '20260928-0400j';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6341,7 +6341,10 @@ function baKvMerge_(k, mine, fresh, cap) {
   var base = (fresh && fresh[k] && typeof fresh[k] === 'object' && !Array.isArray(fresh[k])) ? fresh[k] : null;
   if (!base) return mine;
   var out = {}; Object.keys(base).forEach(function (x) { out[x] = base[x]; }); Object.keys(mine || {}).forEach(function (x) { out[x] = mine[x]; });
-  if (cap && Object.keys(out).length > cap) return mine;
+  /* ★2026-09-28 本人「一回見た写真を再度見に行ったりしてない？」→ していた。上限を超えると【混ぜずに自分の分だけで上書き】していたため、
+     3台（本体・2台目・3台目）が同じ控えに書くと、ほかの台の判定が消えて同じ写真をまた判定していた（控え 5,916/6,000 件＝ほぼ毎回この上書き）。
+     → 上限を超えたら【古い方から】削る（ほかの台の新しい判定は残す） */
+  if (cap) { var ks = Object.keys(out); if (ks.length > cap) { var keep = {}; ks.slice(ks.length - cap).forEach(function (x) { keep[x] = out[x]; }); out = keep; } }
   return out;
 }
 function baLog_(st, line) {
@@ -6467,6 +6470,7 @@ function baCleanJa_(t) {
    鍵はスクリプト プロパティ CLAUDE_KEY（コードや Supabase には置かない）。結果は boshu_auto_judged に溜めて同じ写真は二度見ない。
    鍵が無ければ判定なしで進む（ログに1回だけ警告）。鍵があるのに判定できなければ通さない。1日の判定回数は上限（dailyMax×3）で頭打ち */
 var BA_JUDGED = 'boshu_auto_judged';
+var BA_JUDGED_CAP = 12000;   /* ★2026-09-28 6,000→12,000（約2MB）。上限で捨てた写真はまた判定し直す＝料金。9/22〜27 は判定1万6千回に対し控えは3,381枚だった */
 /* ★v186 メルカリShops（業者）の出品はカタログ画像が多い（2026-09-18 実測：集めた187件中87件が Shops）。本人「メルカリショップスからでもいい。実際の写真じゃないやつはやめてほしい。新品と間違われるのが嫌」＝Shops を外すのではなく、個人の出品を先に試し、実物かどうかは写真のAI判定で決める */
 function baIsShop_(x) { return !!x && (/\/shops\/product\//.test(String(x.src || '')) || /mercari-shops-static/.test(String(x.img || '') + ' ' + String(x.thumb || ''))); }
 /* ★v186 写真を試す順番：使用感のある出品から（本人「新品と間違われるのが嫌」「箱なので少々汚いぐらいの画像で載せといた方がいい」）。メルカリの商品の状態＝傷汚れあり/状態が悪い→やや傷汚れ→傷汚れなし→不明。未使用に近い・新品は写真に使わない（-1）。同じ状態なら個人の出品が先・Shops が後 */
@@ -6535,8 +6539,9 @@ function baCornersArt_(imgUrl, key, st) {
 function baConfirmCorners_(imgUrl, u, st, cache) {
   var ck = u + '|c1', cv = cache ? String(cache[ck] || '') : '';
   var n;
+  if (cv.indexOf('art:') !== 0 && cache) { var _ic = baImgIdx_(cache)[String(u).split('|')[0]]; if (_ic && _ic.c1 && _ic.c1.indexOf('art:') === 0) { cv = _ic.c1; cache[ck] = cv; } }   /* ★2026-09-28 同じ写真の四隅は1回だけ聞く */
   if (cv.indexOf('art:') === 0) n = Number(cv.slice(4));
-  else { var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return -1; n = baCornersArt_(imgUrl, key, st); if (n === null) return null; if (n >= 0 && cache) cache[ck] = 'art:' + n; }
+  else { var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return -1; n = baCornersArt_(imgUrl, key, st); if (n === null) return null; if (n >= 0 && cache) { cache[ck] = 'art:' + n; baImgMemoSet_(u, 'c1', 'art:' + n); } }
   return n;
 }
 /* ★2026-09-26 本人「シュリンク被ってるから新品に見えない？」（THE Fishing Vol.3：右端でフィルムがケースの外にはみ出し・角にシワ）。
@@ -6547,6 +6552,7 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   /* ★2026-09-26 s2：同じ問い合わせで【パッケージの機種ロゴ】も書き写させ、違う機種なら 'hw:<見えた機種>' を返す
      （本人「なぜこれは各国で画像が違う？」→ Switch のカタログに PS4 版の写真が6か国で「問題なし」のまま残っていた。機種の照合は初回判定にしか無かった） */
   var ck = u + '|s3', cv = cache ? String(cache[ck] || '') : '';   /* s3＝2026-09-26 写真の上に後から載せた文字（【最安値】★良品・動作確認済★ 等）も見る */
+  if (!cv && cache) { var _is = baImgIdx_(cache)[String(u).split('|')[0]]; if (_is && _is.s3 && (_is.s3.indexOf('sealed:') === 0 || _is.s3 === 'ov:1')) { cv = _is.s3; cache[ck] = cv; } }   /* ★2026-09-28 同じ写真のシュリンク・文字入りは1回だけ聞く（機種ロゴは作品の機種で変わるので使い回さない） */
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
   if (cv.indexOf('hw:') === 0 || cv === 'ov:1') return cv;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
@@ -6564,10 +6570,26 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   var sealed = !!(o.film_overhang === true || o.film_wrinkle === true || o.film_seam === true || o.sticker_on_film === true);
   if (hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); if (seenHw.length && seenHw[0] !== String(hwKey)) { if (cache) cache[ck] = 'hw:' + seenHw[0]; return 'hw:' + seenHw[0]; } }
   /* ★2026-09-26 本人「この上に文章載っているの弾いて欲しい（後で背景透過する時に差し替えないといけない）」＝出品者が写真に載せた文字は使わない */
-  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) cache[ck] = 'ov:1'; return 'ov:1'; }
-  if (cache) cache[ck] = 'sealed:' + (sealed ? 1 : 0);
+  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; baImgMemoSet_(u, 's3', 'ov:1'); } return 'ov:1'; }
+  if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); baImgMemoSet_(u, 's3', 'sealed:' + (sealed ? 1 : 0)); }
   return sealed;
 }
+/* ★2026-09-28 本人「一回見た写真を再度見に行ったりしてない？」。控えの鍵は「写真|v13|機種|作品」なので、
+   同じ写真を別の機種・別の作品として、もう一度 AI に見せていた（控えの中だけで117回・うち65回はカタログ画像など写真そのものがダメな判定）。
+   → 写真そのもので決まる判定（カタログ画像・表面でない・未開封・箱説・画面・海外版・グッズ・文字入り）と、四隅・シュリンクの結果は【写真単位】で使い回す。
+   索引は1回の実行で1度だけ作る（控えの鍵を1周するだけ・通信なし） */
+var BA_IMG_IDX = null, BA_IMG_IDX_SRC = null;
+var BA_INTR_NG = /^ng:(catalog|catalog4|notfront|sealed|boxed|screen|overseas|goods|overlay)$/;
+function baImgIdx_(cache) {
+  if (BA_IMG_IDX && BA_IMG_IDX_SRC === cache) return BA_IMG_IDX;
+  BA_IMG_IDX = {}; BA_IMG_IDX_SRC = cache;
+  Object.keys(cache || {}).forEach(function (k) {
+    var p = k.indexOf('|'), b = p < 0 ? k : k.slice(0, p), v = String(cache[k] || ''), o = BA_IMG_IDX[b] || (BA_IMG_IDX[b] = {});
+    if (/\|c1$/.test(k)) o.c1 = v; else if (/\|s3$/.test(k)) o.s3 = v; else if (BA_INTR_NG.test(v)) o.ng = v;
+  });
+  return BA_IMG_IDX;
+}
+function baImgMemoSet_(u, field, v) { if (!BA_IMG_IDX) return; var p = String(u).indexOf('|'), b = p < 0 ? String(u) : String(u).slice(0, p); var o = BA_IMG_IDX[b] || (BA_IMG_IDX[b] = {}); o[field] = v; }
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
@@ -6594,6 +6616,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     }
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
   }
+  if (cache) { var _im = baImgIdx_(cache)[String(imgUrl || '').replace(/\?.*$/, '')]; if (_im && _im.ng) { cache[u] = _im.ng; return { ok: false, judged: true, kind: _im.ng.slice(3), cached: true, reused: true }; } }   /* ★2026-09-28 別の機種・作品で「写真そのものがダメ」と出た写真は見に行かない */
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
@@ -6711,7 +6734,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (changed) {
     /* ★2026-09-26 2台（child/child2）とポータルが丸ごと書いて相手の結果を消していた（H.A.W.X. 2 を 07:04Z と 07:11Z に2回見直し）。変えた明細だけ新しい値に重ねる */
     try { var _rpF = baKvFresh_('boshu_auto_rephoto') || {}; _rpF.items = _rpF.items || {}; Object.keys(rp.items).forEach(function (k) { if (rp.items[k] !== _rp0[k]) _rpF.items[k] = rp.items[k]; }); baKvSet_('boshu_auto_rephoto', _rpF); } catch (eR) {}
-    try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, baKvFreshMany_([BA_JUDGED]), 6000)); } catch (eJ) {}
+    try { baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, baKvFreshMany_([BA_JUDGED]), BA_JUDGED_CAP)); } catch (eJ) {}
   }
 }
 /* 🛍 Yahoo!フリマ（paypayfleamarket.yahoo.co.jp）を GAS から探す（2026-09-23 本人「ヤフオクではなく、Yahoo!フリマでは無理か？」）。
@@ -7081,7 +7104,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-22 写真が全部NGだった作品の記録（GASだけが書く）。ポータルの写真集めはこれを見て【NGの写真を除いて】集め直す。
        前は pre に写真が残ったまま＝ポータルは「写真あり」と見なして二度と探さず、GASはヤフオク（弾かれて休み）待ちのまま止まっていた */
     var preRej = baKv_('boshu_auto_prerej') || {}, preRejChanged = false;
-    var judged = baKv_(BA_JUDGED) || {}; { var _jk = Object.keys(judged); if (_jk.length > 6000) { var _jt = {}; _jk.slice(_jk.length - 5000).forEach(function (x) { _jt[x] = judged[x]; }); judged = _jt; } }   /* ★2026-09-26 3,000件で {} に捨てていた＝判定をやり直し続けていた（今日 3,234回判定・控え 1,737件）。捨てずに削る */
+    var judged = baKv_(BA_JUDGED) || {}; { var _jk = Object.keys(judged); if (_jk.length > BA_JUDGED_CAP) { var _jt = {}; _jk.slice(_jk.length - BA_JUDGED_CAP).forEach(function (x) { _jt[x] = judged[x]; }); judged = _jt; } }   /* ★2026-09-26 3,000件で {} に捨てていた＝判定をやり直し続けていた（今日 3,234回判定・控え 1,737件）。捨てずに削る */
     if (baRunnerId_() === 'child' || baRunnerId_() === 'main') try { baSkuPlanTick_(st, t0); } catch (eSk) { baLog_(st, 'SKUの一括付与に失敗: ' + String(eSk).slice(0, 100)); }
     try { baJanBackfill_(st, t0); } catch (eJb) { baLog_(st, 'JANの後入れに失敗: ' + String(eJb).slice(0, 100)); }
     try { baPartialRepair_(st); } catch (ePa) { baLog_(st, '途中止まりの明細の直しに失敗: ' + String(ePa).slice(0, 100)); }
@@ -7202,7 +7225,7 @@ function boshuAutoTick(manual) {
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
     /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
     var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
-    try { if (baSig_(judged) !== _tkSig0.J) baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, 6000)); } catch (eJ) {}
+    try { if (baSig_(judged) !== _tkSig0.J) baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _fr, BA_JUDGED_CAP)); } catch (eJ) {}
     try { if (baSig_(enCache) !== _tkSig0.E) baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _fr, 0)); if (baSig_(sameCache) !== _tkSig0.S) baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _fr, 12000)); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
     if (preRejChanged) { try { preRej = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 160)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
@@ -7314,7 +7337,7 @@ function boshuAutoPrejudge_(hw, maxN) {
     var dailyMax = Number(cfg.dailyMax) || 100; st.aiTextCap = dailyMax * 4;
     var judged = baKv_(BA_JUDGED) || {}, sameCache = baKv_(BA_SAME) || {}, pre = baKv_('boshu_auto_pre') || {};
     var r = baPrejudgePass_(ctx.cand, pre, judged, sameCache, st, hw, BA_HW_WORD[hw] || hw.toUpperCase(), Number(cfg.maxCostJpy) || 15000, dailyMax * 6, Math.max(1, Math.min(80, Number(maxN) || 40)), t0, 235000);
-    baKvSet_(BA_JUDGED, judged); baKvSet_(BA_SAME, sameCache);
+    { var _frP = baKvFreshMany_([BA_JUDGED, BA_SAME]); baKvSet_(BA_JUDGED, baKvMerge_(BA_JUDGED, judged, _frP, BA_JUDGED_CAP)); baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _frP, 12000)); }   /* ★2026-09-28 丸ごと上書き→混ぜて書く（ほかの台の判定を消さない） */
     baLog_(st, '🔍 写真をまとめて先に判定 ' + r.n + '枚（OK ' + r.ok + '・NG ' + r.ng + '・残り ' + r.left + '作品）'); st.updated = new Date().toISOString(); baKvSet_(BA_ST, st);
     try { ufPersist_(); } catch (e3) {}
     return { ok: true, hw: hw, judged: r.n, okN: r.ok, ngN: r.ng, left: r.left };
@@ -7629,7 +7652,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today;
   var _pvStDirty = !needPhoto || ((stP.today && stP.today.aiText) || 0) !== _pvSig0.ai;   /* 🔜の表示を更新する時・AIを使った時だけ */
   if (_pvStDirty) { try { baKvSet_(BA_ST, st); } catch (e) {} }
-  try { if (baSig_(enCache) !== _pvSig0.en) baKvSet_(BA_EN, enCache); if (baSig_(sameCache) !== _pvSig0.same) baKvSet_(BA_SAME, sameCache); } catch (eC) {}   // ★v182
+  try { var _frV = baKvFreshMany_([BA_EN, BA_SAME]); if (baSig_(enCache) !== _pvSig0.en) baKvSet_(BA_EN, baKvMerge_(BA_EN, enCache, _frV, 0)); if (baSig_(sameCache) !== _pvSig0.same) baKvSet_(BA_SAME, baKvMerge_(BA_SAME, sameCache, _frV, 12000)); } catch (eC) {}   // ★v182／★2026-09-28 混ぜて書く
   ufPersist_();
   return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, held: held, blocked: blocked, aiKey: !!stP.aiKey };
 }
