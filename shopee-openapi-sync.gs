@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260927-0030n';
+var SRC_VER = '20260927-1400w';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -22,7 +22,7 @@ function now_() { return Math.floor(Date.now() / 1000); }
 // 背景ループがどれだけ走っても手動操作が枠切れ(get_shipping_parameter失敗)しない。教訓[[shopee_portal_perf_quota]]。
 /* ★2026-09-21 停止ラインを実態に合わせて下げた。ここが「ブレーキが効かない」最後の原因だった。
    枠2万は【Googleアカウント単位】で、同じアカウントに Shopeeコミュニティの自動Bumpツール（プロジェクト `tool`）が
-   同居している。実行ログの実測：boost は毎回「UrlFetchApp.fetch を呼び出す権限がありません」で失敗＝枠は食わないが、
+   同居している。実行ログの実測：boost は毎回「UrlFetchApp の fetch を呼び出す権限がありません」で失敗＝枠は食わないが、
    **token_refresh が35秒走って「完了」**＝この中で大量に fetch している。こちらからは数えられない（外部ライブラリ FT2）。
    引き算での実測：Google が上限と言った 2026-09-21 09:43 JST 時点で【こちらの計測 8,481／実際は20,000】
    ＝**数え漏れ 1万1,500回以上（枠の約6割）**。2日連続でほぼ同じ量（出品数に連動しない＝時間トリガーの形）。
@@ -6168,7 +6168,7 @@ var BA_HW_WORD = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', p
 var BA_DROP = /\b(used|new|japan|japanese|jp|ver|version|edition|import|region\s*free|complete|boxed|cib|the\s*best|best|greatest\s*hits|players?\s*choice|value\s*selection|platinum|classics|nintendo\s*selects|廉価版|ベスト版|通常版|新品|中古|日本語版|国内版)\b/g;
 var BA_MACHINE = /\b(ps[1-5]|psp|ps\s*vita|vita|switch\s*2|switch|nintendo\s*ds|3ds|ds|wii\s*u|wii|gamecube|gc|n64|nintendo\s*64|snes|sfc|super\s*famicom|famicom|fc|nes|gba|game\s*boy\s*advance|game\s*boy|gb|gbc|mega\s*drive|genesis|md|saturn|ss|dreamcast|dc|playstation)\b/g;
 // 機種の判定（ポータル HW_PAT と同じ）。カタログ名・明細名に出てくる機種を【全部】拾う
-var BA_HW_PAT = [['switch2', /switch\s*2|スイッチ\s*2|\bns2\b/i], ['switch', /switch(?!\s*2)|スイッチ(?!\s*2)/i],   /* ★v188 Switch 2 は初代と別の機種（前は初代に分類＝Switch 2 の「出している」が0） */ ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i], ['ps3', /\bps3\b|playstation\s*3/i], ['ps2', /\bps2\b|playstation\s*2/i], ['psp', /\bpsp\b|playstation\s*portable/i], ['vita', /\bvita\b/i], ['3ds', /\b3ds\b/i], ['ds', /\bds\b|nintendo\s*ds/i], ['wiiu', /wii\s*u/i], ['wii', /\bwii\b/i], ['gc', /gamecube|ゲームキューブ|\bgc\b/i], ['n64', /nintendo\s*64|\bn64\b/i], ['sfc', /super\s*(famicom|nintendo)|\bsfc\b|\bsnes\b/i], ['fc', /famicom|\bfc\b|\bnes\b/i], ['gba', /game\s*boy\s*advance|\bgba\b/i], ['gb', /game\s*boy|\bgbc?\b/i], ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['xbsx', /xbox\s*series/i], ['xboxone', /xbox\s*one/i], ['xbox360', /xbox\s*360/i], ['xbox', /\bxbox\b/i], ['pce', /pc\s*engine|turbografx|pcエンジン/i], ['ws', /wonder\s*swan|ワンダースワン/i], ['gg', /game\s*gear|ゲームギア/i], ['ngcd', /neo\s*geo\s*cd/i], ['3do', /\b3do\b/i], ['pcfx', /pc-?fx/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]];
+var BA_HW_PAT = [['switch2', /switch\s*2|スイッチ\s*2|\bns2\b/i], ['switch', /switch(?!\s*2)|スイッチ(?!\s*2)/i],   /* ★v188 Switch 2 は初代と別の機種（前は初代に分類＝Switch 2 の「出している」が0） */ ['ps5', /\bps5\b|playstation\s*5/i], ['ps4', /\bps4\b|playstation\s*4/i], ['ps3', /\bps3\b|playstation\s*3/i], ['ps2', /\bps2\b|playstation\s*2/i], ['psp', /\bpsp\b|playstation\s*portable/i], ['vita', /\bvita\b/i], ['3ds', /\b3ds\b/i], ['ds', /\bds\b|nintendo\s*ds/i], ['wiiu', /wii\s*u\b/i], ['wii', /\bwii\b(?!\s*u\b)/i], ['gc', /gamecube|ゲームキューブ|\bgc\b/i], ['n64', /nintendo\s*64|\bn64\b/i], ['sfc', /super\s*(famicom|nintendo)|\bsfc\b|\bsnes\b/i], ['fc', /famicom|\bfc\b|\bnes\b/i], ['gba', /game\s*boy\s*advance|\bgba\b/i], ['gb', /game\s*boy(?!\s*advance)|\bgbc?\b/i], ['md', /mega\s*drive|genesis/i], ['ss', /sega\s*saturn|セガサターン/i], ['dc', /dreamcast/i], ['xbsx', /xbox\s*series/i], ['xboxone', /xbox\s*one/i], ['xbox360', /xbox\s*360/i], ['xbox', /\bxbox\b/i], ['pce', /pc\s*engine|turbografx|pcエンジン/i], ['ws', /wonder\s*swan|ワンダースワン/i], ['gg', /game\s*gear|ゲームギア/i], ['ngcd', /neo\s*geo\s*cd/i], ['3do', /\b3do\b/i], ['pcfx', /pc-?fx/i], ['ps1', /playstation(?!\s*[2-5])|\bps1\b|\bps\b/i]];
 function baHwsOf_(txt) { var t = String(txt || ''), out = []; BA_HW_PAT.forEach(function (p) { if (p[1].test(t)) out.push(p[0]); }); return out; }
 var BA_NG = /ACTIVE BODY|\((ピンク|ブルー|レッド|ブラック|ホワイト|イエロー|グリーン|パープル|オレンジ|グレー|ネイビー|クリア)\)|\[[A-Z]{2,4}-\d{3}|海賊版|非正規|コピー品|リプロ(ダクション)?|repro(duction)?|bootleg|\d{2,3}\s*in\s*1|互換|ゲームコンピューター|GAME ?COMPUTER|モジュレータ|スイッチBOX|スイッチブースター|Movie Player|ゲームポーチ|Fast Charging|FC-MOBILE|PokeFami|ポケファミ|レトロフリーク|RETRO ?FREAK|タッチペン|スタイラス|プロテクションフィルム|液晶フィルム|ストラップ|ポーチ|amiibo|アミーボ|ぬいぐるみ|キーホルダー|アクリルスタンド|アクリルキーホルダー|アクスタ|ヘッドセット|Headset|イヤホン|ヘッドホン|コントローラ|ジョイコン|Joy-?Con|プロコン|ジョイスティック|本体|ドック|ハードケース|クリアケース|キャリングケース|収納ケース|ソフトケース|セミハードケース|TPUカバー|フロントカバー|きせかえカバー|シリコンカバー|ハードカバー|レンズ保護|液晶保護|保護シート|保護フィルム|ガラスパネル|ガラスフィルム|充電ケーブル|USBケーブル|延長ケーブル|充電スタンド|チャージングスタンド|プレイスタンド|充電グリップ|マグネットバンパー|シリコンプロテクト|ACアダプタ|ACアダプター|SDカード|microSD|メモリーカード|マスキングテープ|クリアファイル|マグカップ|缶バッジ|クリーニングクロス|マルチクリーニング|USBハブ|ハブスタンド|USB変換|変換コネクタ|変換アダプタ|冷却ファン|攻略本|ファンブック|設定資料集|サウンドトラック|Blu-?ray|カレンダー|Tシャツ|トートバッグ|きせかえセット|ウェポンパック|シーズンパス|追加コンテンツ|セット商品|Switch Lite本体|有機ELモデル\)|ケーブル|アダプタ|プレーヤー|プレイヤー|端子|HDMI|Bitfunx|タルコンガ|同梱版|ランク\)|ジャンク|ソフトのみ|説明書のみ|箱のみ|メモリーキング|マッハメモリー|メモリーカード|(NGC|GC|PS[1-5]|PSP|PSV|Vita|DS|3DS|Wii|WiiU|Switch|SFC|FC|N64|GBA?|GB|MD|SS|DC)用|memory ?card|\bcontroller\b|\bcable\b|\badapt[eo]r\b|\bcharger\b|charging stand|carrying case|screen protector|protective film|silicone cover|joy-?con|\bheadset\b|\bearphones?\b|battery pack|\bconverter\b|vga box|component cable|s-video|link cable|wavebird|box only|manual only|console only|console set|skin sticker|wrist strap|\bpouch\b/i;
 // ヤフオクの検索結果で「ソフト本体の写真ではない」出品を落とす（攻略本・箱のみ・まとめ売り・周辺機器）
@@ -7780,7 +7780,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
      （実測：MY Switch ②③ の表紙が Pokemon・TH PS2 ① が Puyo Puyo / Metal Gear・TW PS1 と PSP の表紙が入れ替わり）。
      → 元にするのは【同じ家族】＝親SKUが家族のもの、または番号を外した名前が家族の名前と同じカタログだけ。無ければ作らない（間違った表紙で出すより出さない） */
   var _fb = baNameBase_(srcName);
-  var _isFamSrc = function (r) { return (wantSku && String(r.parent_sku || '').trim() === wantSku) || baNameBase_(r.name) === _fb; };
+  var _isFamSrc = function (r) { var h = baHwsOf_(r.name); if (h.length && h.indexOf(hw) < 0) return false; return (wantSku && String(r.parent_sku || '').trim() === wantSku) || baNameBase_(r.name) === _fb; };   /* ★2026-09-27 名前の機種が違うカタログは元にしない（親SKUが同じでも） */
   var src = pool.filter(function (r) { return _isFamSrc(r) && r.status === 1; })[0] || pool.filter(function (r) { return _isFamSrc(r); })[0];
   /* ★2026-09-23 同じ機種が1つも無い国がある（実測：MY は gc の Variation カタログが0・TW は3）。
      その時は【同じ国の別機種の Variation カタログ】を元にする。引き継ぐのは説明文・状態写真・カテゴリ・重さで、
@@ -7794,7 +7794,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     var other = null;
     Object.keys(allRowsAll).forEach(function (c2) {
       if (c2 === cc || other) return;
-      var r2 = (allRowsAll[c2] || []).filter(function (r) { return ((wantSku && String(r.parent_sku || '').trim() === wantSku) || (r.hws || []).length === 1 && r.hws[0] === hw && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, ''))) && r.status === 1; })[0];   /* ★2026-09-26 他の国からも作品シリーズのカタログは元にしない */
+      var r2 = (allRowsAll[c2] || []).filter(function (r) { return (r.hws || []).length === 1 && r.hws[0] === hw && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, '')) && r.status === 1; })[0];   /* ★2026-09-26 他の国からも作品シリーズのカタログは元にしない／★2026-09-27 親SKUが同じでも【名前の機種がちょうど同じ】ものだけ（実測：MY Wii U ② が TH Wii の写真で作られた＝旧 wii の型が「Wii U」にも当たっていた） */
       if (r2) other = r2;
     });
     if (other) {
