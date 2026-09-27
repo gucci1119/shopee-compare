@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260927-1530u';
+var SRC_VER = '20260928-0230c';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1415,6 +1415,42 @@ function trafficIngest_(body) {
     return { ok: true, cc: cc, shop: shop || null, n: n, days: Object.keys(kv[cc]).length };
   } finally { try { lock.releaseLock(); } catch (e) {} }
 }
+/* ★2026-09-28 本人「明細ごとに、今までカートに入れられた回数みたいなのって出せる？」「そういう列追加できる？」。
+   公式APIにカート数は無い。Business Insights の商品パフォーマンス（内部API /api/mydata/v4/product/performance/）は
+   カタログごと・【明細ごと】に add_to_cart_units / add_to_cart_buyers / confirmed_units を返す（2026-09-28 TH で実測・1回50件まで）。
+   署名が要るので、datacenter のタブの userscript（shopee-insights v1.3.0）がページ自身の XHR で全ページ読み、ここへ分けて送る。
+   鍵なし（traffic_ingest と同じ型）。書けるのは app_kv `product_perf_<shop_id>` だけ。
+   run（取り込み1回の印）が変わったら中身を入れ替え、同じ run の続き（part）は足していく＝途中で止まっても前の日の分は消さない。
+   件数を小さく保つため、明細は数字が1つでも0でないものだけ持つ */
+function productPerfIngest_(body) {
+  var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
+  var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15); if (!shop) throw new Error('shop_id がありません');
+  var run = String(body.run || '').slice(0, 40); if (!run) throw new Error('run がありません');
+  var items = body.items; if (!items || !items.length) throw new Error('items 空');
+  if (items.length > 200) throw new Error('1回200件まで');
+  var num = function (v) { var x = Number(v); return isFinite(x) ? Math.round(x * 10000) / 10000 : 0; };
+  var k = 'product_perf_' + shop;
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var cur = baKvFreshMany_([k]); if (!cur) throw new Error(k + ' を読めませんでした（上書きしないで止めます）');
+    var v = cur[k] || {};
+    if (v.run !== run) { v = { cc: cc, shop: shop, run: run, items: {}, prev_at: v.done_at || v.at || null }; }
+    v.cc = cc; v.name = String(body.shop_name || v.name || '').slice(0, 60); v.period = String(body.period || '').slice(0, 20);
+    v.st = Number(body.st) || v.st || 0; v.et = Number(body.et) || v.et || 0; v.at = new Date().toISOString(); v.total = Number(body.total) || v.total || 0;
+    var n = 0;
+    items.forEach(function (it) {
+      var id = String((it && it.id) || '').replace(/\D/g, ''); if (!id) return;
+      var o = { uv: num(it.uv), pv: num(it.pv), lk: num(it.likes), im: num(it.imp), ck: num(it.clk), au: num(it.atc_u), ab: num(it.atc_b), cu: num(it.conf_u), co: num(it.conf_o) };
+      var ms = {}; (it.m || []).forEach(function (m) { var mid = String((m && m.id) || '').replace(/\D/g, ''); if (!mid) return; var au = num(m.atc_u), ab = num(m.atc_b), cu = num(m.conf_u); if (au || ab || cu) ms[mid] = [au, ab, cu]; });
+      if (Object.keys(ms).length) o.m = ms;
+      v.items[id] = o; n++;
+    });
+    v.got = Object.keys(v.items).length;
+    if (body.last) v.done_at = v.at;
+    baKvSet_(k, v);
+    return { ok: true, cc: cc, shop: shop, run: run, n: n, got: v.got, done: !!body.last };
+  } finally { try { lock.releaseLock(); } catch (e) {} }
+}
 function doPost(e) {
   try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
 }
@@ -1429,6 +1465,7 @@ function doPostInner_(e) {
        Seller Center の datacenter ページで動く userscript（shopee-insights.user.js）がページ自身の応答を横取りして送ってくる。
        鍵なし（yamato_ship と同じ型）。書けるのは app_kv `traffic_daily` だけ。数値だけを国×日で上書き保存 */
     if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
+    if (body.action === 'product_perf_ingest') { out = productPerfIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
