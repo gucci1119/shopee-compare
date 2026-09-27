@@ -9554,15 +9554,30 @@
     if (_ordAutoAt && Date.now() - _ordAutoAt < 30 * 60000) return Promise.resolve(null);   /* 読み込み済み＝描き直さない（描画の中から再描画を予約しない [[portal-no-render-loop]]） */
     _ordAutoAt = Date.now();
     return Promise.all([sbGet('app_kv', 'select=k,v&k=like.boshu_auto_done_*'), baKvGet('boshu_auto_en')]).then(([rows, en]) => {
-      const set = new Map(); en = en || {};
+      const set = new Map(), mids = new Map(); en = en || {};
       (rows || []).forEach(r => {
         const hw = String(r.k || '').replace('boshu_auto_done_', ''), v = r.v || {};
         Object.keys(v).forEach(key => {
           const names = [en[key] && en[key].en, en[key] && en[key].short].filter(Boolean);
-          Object.keys(v[key] || {}).forEach(cc => { if (/^\d/.test(String(v[key][cc] || ''))) names.forEach(n => set.set(cc + '|' + String(n).toLowerCase().trim(), hw)); });
+          Object.keys(v[key] || {}).forEach(cc => {
+            const val = String(v[key][cc] || ''); if (!/^\d/.test(val)) return;
+            names.forEach(n => set.set(cc + '|' + String(n).toLowerCase().trim(), hw));
+            const mm = val.match(/^(\d+)#(\d+)/); if (mm) { const o = mids.get(mm[1]) || { cc: cc, hw: hw, ids: new Set() }; o.ids.add(mm[2]); mids.set(mm[1], o); }
+          });
         });
       });
-      _ordAuto = set; return set;
+      /* ★2026-09-28 英題だけだと取りこぼす（明細名は店の文字数で切られる：DS③ 100件中30件が英題と一致しない）。
+         台帳の item#model から【Shopee上の実際の明細名】を引いて足す。🤖のカタログ（約400件）だけ読む＝100件ずつ4回程度 */
+      const ids = [...mids.keys()], chunks = [];
+      for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+      return Promise.all(chunks.map(c => sbGetAll('listings', 'select=cc,item_id,models&item_id=in.(' + c.join(',') + ')').catch(() => []))).then(parts => {
+        parts.forEach(rs => (rs || []).forEach(r => {
+          const o = mids.get(String(r.item_id)); if (!o) return;
+          let ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } }
+          (ms || []).forEach(m => { if (m && m.n && m.id != null && o.ids.has(String(m.id))) set.set((r.cc || o.cc) + '|' + String(m.n).toLowerCase().trim(), o.hw); });
+        }));
+        _ordAuto = set; return set;
+      });
     }).catch(() => { _ordAutoAt = 0; return _ordAuto; });
   }
   function ordAutoBadge(cc, variation) {
@@ -20247,6 +20262,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '🤖 <b>注文管理の🤖自動出品の印の取りこぼしを減らしました</b>。英題の名前だけで照合していたため、明細名が店の文字数で切られた明細（DS③では100件中30件）は、売れても🤖が付かない状態でした。🤖の台帳にある明細番号から、Shopee上の実際の明細名を引いて照合に足しています。',
       '🛒 <b>明細ごとの販売数を出しました</b>（本人「バリエーションの場合、どの明細が売れたか分からへんのかね」「カタログの販売1は、どの明細なのか分からない」）。Shopeeの公式APIは明細ごとの販売数を返さないため、明細の販売はずっと0でした。<b>注文から明細ごとに数え</b>、明細を開いた行の販売欄に<b>オレンジの数字</b>で出します。カタログの販売数の下にも<b>売れた明細の上位3つ</b>を出します。注文にカタログ番号が無いものは、明細名・カタログ名・明細の画像で1つに決まった時だけ数えます（実測93%）。決まらない時は「明細は不明」と出します（推測で割り振りません）。',
       '🤖 <b>出品一覧で、自動出品のカタログと明細が一目で分かるようにしました</b>（本人「自動出品で出した明細がどれか分かるように」「注文管理と同じ感じで、明細やカタログが一目で分かるように」）。カードに紫の <b>🤖自動 n/m件</b>（そのカタログの明細のうち自動出品で入れた数）と、🤖が作ったカタログには濃い紫の <b>🤖作成</b> が付きます。明細を開くと、自動出品の行の名前の前に 🤖 が付きます。絞り込みに <b>🤖 自動出品</b> ボタンも足しました（自動出品が入っているカタログだけに絞る）。元は🤖の台帳（注文管理の🤖印と同じもの）です。',
       '📅 <b>🎯有在庫化候補（今月のリスト）を見やすくし、「買う意思があった注文」を数えるようにしました</b>（本人「キャンセル分は抜いてるよね？」「発送前のキャンセルだけ省いてくれたらいい」「どうやって見ればいいかを書いておいて」「もう少し見やすく」）。数えないのは<b>発送前のキャンセルと未払い</b>だけ。倉庫でスキャンされた後のキャンセル・「届くのが遅い」キャンセル・届いた後の返品は数えます（発送後かどうかは「🚚倉庫へ発送済」の印と、キャンセル理由＝配達失敗・紛失・集荷失敗で判断。理由の記録が無い古いキャンセルは発送前として外します）。リストの上に「見方」（🆕新しく入った＝仕入れを始める候補／🔁続けて入っている＝定番／👋外れた＝売れ行きが落ちた、数字の読み方）を常に出し、各列の下にも意味を書きました。数字は「個/月」と単位を付け、先月→今月は ▲増えた ▼減った で色分け。※9月の表は9/1に固めたもので、この変更の前の数え方のままです。',
