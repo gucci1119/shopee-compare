@@ -20271,7 +20271,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-28', items: [
-      '📁 <b>出品ログのカードに「入れた先のカタログ」を全部並べました</b>（本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」）。同じ日・同じ国に同じ明細を2つ以上のカタログ（シリーズ＋機種など）へ入れた時は、その全部を 📁カタログ名＋🛒商品ページ＋✏️編集 の形で1行ずつ出します。',
+      '📁 <b>出品ログのカードに「入れた先のカタログ」を全部並べました</b>（本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」）。同じ国で同じ明細が2つ以上のカタログ（シリーズ＋機種など）に入っている時は、その全部を 📁カタログ名＋🛒商品ページ＋✏️編集 の形で1行ずつ出します。',
       '🖼 <b>実売の履歴の画像が一部出ていなかったのを直しました</b>（本人「一部入ってないのはなぜ？」）。注文に入っている画像の名前の約15%は末尾に小さい画像の印（_tn）が最初から付いていて、そこへもう一度付けたため存在しない画像を見に行っていました。',
       '🛒 <b>出品一覧に「🛒カート」の列を足しました</b>（本人「明細ごとに、今までカートに入れられた回数みたいなのって出せる？」「そういう列追加できる？」）。カタログの行＝カートに入れられた個数（下に 人数/訪問者）、明細を開くと<b>明細ごとの個数</b>。数字は Shopee の Business Insights 商品パフォーマンスの<b>直近30日</b>で、各国の Business Insights のタブ（userscript v1.3.0）が1日1回取り込みます（公式APIには無いため）。取り込む前の店は「—」です。列は「操作」のすぐ左にあります。',
       '🛒 <b>販売数の下に並べていた明細の内訳をやめ、販売数を押した時の画面に移しました</b>（本人「1明細ずつ別々に書かなくてよくない？押したら出る形でよくない？」）。🛒販売の数字を押すと、日ごとの推移の下に<b>🎮売れた明細</b>（画像・明細名・個数）が出ます。',
@@ -34216,13 +34216,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   const llogNm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
   /* ★2026-09-28 本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」
      「カートのマークと鉛筆のマークを、カタログ名の横につけるイメージ」。
-     その日の記録のうち【同じ国・同じ明細名】のものを束ね、入れた先のカタログを全部並べる（シリーズのカタログ＋機種のカタログ 等）。
+     【同じ国・同じ明細名】が入っているカタログを出品データ全体から束ね、入れた先のカタログを全部並べる（シリーズのカタログ＋機種のカタログ 等）。
      各行＝📁カタログ名＋🛒（お客さんが見る商品ページ）＋✏️（セラーセンターの編集ページ）。束ねは selRows ごとに1回だけ作る */
   let _llCatsSrc = null, _llCatsMap = null;
   function llogCatsHtml(r, rows) {
     if (!r || !r.model_name) return '';
-    if (_llCatsSrc !== rows) { _llCatsSrc = rows; _llCatsMap = {}; (rows || []).forEach(x => { if (!x || !x.model_name) return; const k = x.cc + '|' + llogNm(x.model_name); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(x.item_id))) a.push({ item_id: x.item_id, name: x.name || '' }); }); }
-    const list = _llCatsMap[r.cc + '|' + llogNm(r.model_name)] || [{ item_id: r.item_id, name: r.name || '' }];
+    /* 束ねの元＝【いまの出品データ全体】（lst.byCc）で、同じ国に同じ明細名が入っているカタログ全部。
+       🤖は1回の出品ではシリーズか機種のどちらか1つにしか入れないので、その日の記録だけでは2つ目が見えない（9/27 の1,778枚で0件だった）。
+       出品データが読めていない時だけ、その日の記録で束ねる */
+    const src = (lst.byCc && Object.keys(lst.byCc).length) ? lst.byCc : null;
+    const sig = src ? Object.keys(src).map(c => c + (src[c] || []).length).join(',') : rows;
+    if (_llCatsSrc !== sig) { _llCatsSrc = sig; _llCatsMap = {};
+      const add = (cc, id, name, mn) => { const k = cc + '|' + llogNm(mn); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(id))) a.push({ item_id: id, name: name || '' }); };
+      if (src) Object.keys(src).forEach(cc => (src[cc] || []).forEach(l => (l.models || []).forEach(m => { if (m && !m.ghost && m.n) add(cc, l.item_id, l.name, m.n); })));
+      else (rows || []).forEach(x => { if (x && x.model_name) add(x.cc, x.item_id, x.name, x.model_name); }); }
+    const list = (_llCatsMap[r.cc + '|' + llogNm(r.model_name)] || []).slice();
+    if (!list.some(c => String(c.item_id) === String(r.item_id))) list.unshift({ item_id: r.item_id, name: r.name || '' });
     const rgB = REGIONS.find(x => x.cc === r.cc) || {};
     return '<span style="display:block;margin-top:1px" title="' + av('入れた先のカタログ（' + list.length + 'つ）') + '">' + list.map(c => {
       const sid = (logState.shopMap || {})[r.cc + '|' + c.item_id];
