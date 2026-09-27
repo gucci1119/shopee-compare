@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-0400j';
+var SRC_VER = '20260928-0520k';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6499,7 +6499,9 @@ function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12
 /* ★2026-09-20 本人「ゲームキューブにxbox混ざってるで」：出品名に別の機種が書いてある写真は使わない（同じ題名の Xbox版・PS2版。先に集めてあった控えにも効く） */
 var BA_PLAT_JA = [['xbox', /xbox/i], ['ps5', /ps5|プレステ\s*5/i], ['ps4', /ps4|プレステ\s*4/i], ['ps3', /ps3|プレステ\s*3/i], ['ps2', /ps2|プレステ\s*2|プレイステーション\s*2/i], ['psp', /psp/i], ['vita', /vita/i], ['3ds', /3ds/i], ['wiiu', /wii\s*u/i], ['wii', /wii(?!\s*u)/i], ['gc', /gamecube|ゲームキューブ/i], ['n64', /n64|ニンテンドー\s*64/i], ['sfc', /スーパーファミコン|スーファミ|sfc/i], ['gba', /gba|ゲームボーイアドバンス/i], ['dc', /ドリームキャスト|ドリキャス|dreamcast/i], ['ss', /セガサターン/i], ['switch', /switch|スイッチ/i]];
 function baPlatOk_(a, hw) { var n = String((a && a.name) || ''); if (!n) return true; var ps = []; BA_PLAT_JA.forEach(function (p) { if (p[1].test(n)) ps.push(p[0]); }); if (!ps.length) return true; var h = String(hw || ''); if (h === 'xbox360' || h === 'xboxone') h = 'xbox'; if (h === 'switch2') h = 'switch'; return ps.indexOf(h) >= 0; }
-function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
+/* ★2026-09-28 本人「さらに減らせる余地」④：出品名に未開封・シュリンク付きと書いてある写真は、AI に見せる前に外す（未開封は元々落とす対象＝基準は同じ）。「新品同様」は中古なので外さない */
+var BA_SEALED_NAME = /未開封|シュリンク(付|つき|有|あり|残)|新品未使用|\bsealed\b/i;   /* 「新品」単独は外さない（「新品で購入・中古」等の書き方があり、写真の候補を減らしすぎる） */
+function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw) && !BA_SEALED_NAME.test(String(a.name || '')); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 var BA_MANUAL = null;   /* 手動の判定（app_kv.boshu_auto_judged_manual）。1回の実行で1度だけ読む */
 var BA_MANUAL_IMG = null;
 function baManualOf_(imgUrl, expect) {
@@ -6606,13 +6608,15 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (cache && cache[u]) {
     var c0 = String(cache[u]);
     if (c0.indexOf('ok:') === 0) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
-      var n0 = baConfirmCorners_(imgUrl, u, st, cache);
-      if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
-      if (n0 >= 3) { cache[u] = 'ng:catalog4'; return { ok: false, judged: true, kind: 'catalog4', cached: true }; }
+      /* ★2026-09-28 本人「さらに減らせる余地」①：シュリンクの確認（38%を落とす・Haiku）を先、四隅の確認（5.5%・上位モデル）を後に。
+         先に落ちた写真には高い方をかけない。確認の中身は同じ＝基準は変わらない */
       var s0 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey);   /* ★2026-09-26 通っていた写真もシュリンク（と機種ロゴ）の確認を1回だけ */
       if (s0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
       if (typeof s0 === 'string') { var k0 = s0 === 'ov:1' ? 'overlay' : 'wrongplatform'; cache[u] = 'ng:' + k0; return { ok: false, judged: true, kind: k0, cached: true }; }
       if (s0) { cache[u] = 'ng:sealed'; return { ok: false, judged: true, kind: 'sealed', cached: true }; }
+      var n0 = baConfirmCorners_(imgUrl, u, st, cache);
+      if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
+      if (n0 >= 3) { cache[u] = 'ng:catalog4'; return { ok: false, judged: true, kind: 'catalog4', cached: true }; }
     }
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
   }
@@ -6664,10 +6668,11 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
   if (ok) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像 */
-    var n1 = baConfirmCorners_(imgUrl, u, st, cache);
-    if (n1 === null) return { ok: false, judged: false, kind: 'unconfirmed' };   /* 確認できなかった＝通さない・控えない */
-    if (n1 >= 3) { ok = false; kind = 'catalog4'; }
-    if (ok) { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = (s1 === 'ov:1' ? 'overlay' : 'wrongplatform'); } else if (s1) { ok = false; kind = 'sealed'; } }
+    /* ★2026-09-28 ①：シュリンク（安い・よく落とす）→ 四隅（高い）の順。基準は同じ */
+    { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = (s1 === 'ov:1' ? 'overlay' : 'wrongplatform'); } else if (s1) { ok = false; kind = 'sealed'; } }
+    if (ok) { var n1 = baConfirmCorners_(imgUrl, u, st, cache);
+      if (n1 === null) return { ok: false, judged: false, kind: 'unconfirmed' };   /* 確認できなかった＝通さない・控えない */
+      if (n1 >= 3) { ok = false; kind = 'catalog4'; } }
   }   // ★v186 本人「海外版はいらない」（題名に書かず写真にだけ「海外版」と入れる出品がある）   // ★v184 写っているのが別の作品
   if (cache) cache[u] = (ok ? 'ok:' : 'ng:') + kind;
   return { ok: ok, judged: true, kind: kind };
