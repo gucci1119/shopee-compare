@@ -20271,6 +20271,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-28', items: [
+      '📁 <b>出品ログのカードに「入れた先のカタログ」を全部並べました</b>（本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」）。同じ日・同じ国に同じ明細を2つ以上のカタログ（シリーズ＋機種など）へ入れた時は、その全部を 📁カタログ名＋🛒商品ページ＋✏️編集 の形で1行ずつ出します。',
       '🖼 <b>実売の履歴の画像が一部出ていなかったのを直しました</b>（本人「一部入ってないのはなぜ？」）。注文に入っている画像の名前の約15%は末尾に小さい画像の印（_tn）が最初から付いていて、そこへもう一度付けたため存在しない画像を見に行っていました。',
       '🛒 <b>出品一覧に「🛒カート」の列を足しました</b>（本人「明細ごとに、今までカートに入れられた回数みたいなのって出せる？」「そういう列追加できる？」）。カタログの行＝カートに入れられた個数（下に 人数/訪問者）、明細を開くと<b>明細ごとの個数</b>。数字は Shopee の Business Insights 商品パフォーマンスの<b>直近30日</b>で、各国の Business Insights のタブ（userscript v1.3.0）が1日1回取り込みます（公式APIには無いため）。取り込む前の店は「—」です。列は「操作」のすぐ左にあります。',
       '🛒 <b>販売数の下に並べていた明細の内訳をやめ、販売数を押した時の画面に移しました</b>（本人「1明細ずつ別々に書かなくてよくない？押したら出る形でよくない？」）。🛒販売の数字を押すと、日ごとの推移の下に<b>🎮売れた明細</b>（画像・明細名・個数）が出ます。',
@@ -34213,6 +34214,26 @@ create policy "listing_log all" on listing_log for all using (true) with check (
      読むのは app_kv 十数行だけ（Shopeeは叩かない）。分からない時は「分かりません」と出す＝[[dont-report-zero-when-unknown]] */
   let _llogWhy = null;
   const llogNm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  /* ★2026-09-28 本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」
+     「カートのマークと鉛筆のマークを、カタログ名の横につけるイメージ」。
+     その日の記録のうち【同じ国・同じ明細名】のものを束ね、入れた先のカタログを全部並べる（シリーズのカタログ＋機種のカタログ 等）。
+     各行＝📁カタログ名＋🛒（お客さんが見る商品ページ）＋✏️（セラーセンターの編集ページ）。束ねは selRows ごとに1回だけ作る */
+  let _llCatsSrc = null, _llCatsMap = null;
+  function llogCatsHtml(r, rows) {
+    if (!r || !r.model_name) return '';
+    if (_llCatsSrc !== rows) { _llCatsSrc = rows; _llCatsMap = {}; (rows || []).forEach(x => { if (!x || !x.model_name) return; const k = x.cc + '|' + llogNm(x.model_name); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(x.item_id))) a.push({ item_id: x.item_id, name: x.name || '' }); }); }
+    const list = _llCatsMap[r.cc + '|' + llogNm(r.model_name)] || [{ item_id: r.item_id, name: r.name || '' }];
+    const rgB = REGIONS.find(x => x.cc === r.cc) || {};
+    return '<span style="display:block;margin-top:1px" title="' + av('入れた先のカタログ（' + list.length + 'つ）') + '">' + list.map(c => {
+      const sid = (logState.shopMap || {})[r.cc + '|' + c.item_id];
+      const bu = (typeof buyerUrlFor === 'function' ? buyerUrlFor(r.cc, c.item_id) : '') || ((rgB.buyer && sid) ? 'https://' + rgB.buyer + '/product/' + sid + '/' + c.item_id : '');
+      const eu = (typeof editUrlForCc === 'function' ? editUrlForCc(r.cc, c.item_id) : '') || '';
+      return '<span style="display:flex;gap:3px;align-items:flex-start;font-size:9.5px;line-height:1.3;color:#5a6b8c"><span style="flex:1;min-width:0;word-break:break-word">📁 ' + esc(c.name || String(c.item_id)) + '</span>'
+        + (bu ? '<a href="' + esc(bu) + '" target="_blank" rel="noopener" title="このカタログのShopee商品ページ（お客さんが見る画面）" style="text-decoration:none;flex:none">🛒</a>' : '')
+        + (eu ? '<a href="' + esc(eu) + '" target="_blank" rel="noopener" title="このカタログをセラーセンターで編集" style="text-decoration:none;flex:none">✏️</a>' : '')
+        + '</span>';
+    }).join('') + '</span>';
+  }
   const LLOG_WHY_TXT = {
     noimg: ['📷', '写真がまだ無い（さがし中）'],
     noimg_ai: ['📷', '写真が基準から外れていた'],
@@ -34739,7 +34760,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 const nmTxt = esc(r.model_name || r.name || ''); const bot = isAuto(r) ? '<span title="🤖 母数の自動出品が足した明細" style="color:#5e35b1">🤖 </span>' : '';
                 const nmHtml = bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" style="color:#1a3d7c;text-decoration:none" title="${av((r.name || '') + '｜押すとShopeeの商品ページを開きます')}">${nmTxt}</a>` : nmTxt;
                 return `<span style="display:flex;gap:4px;align-items:flex-start"><span style="flex:1;min-width:0;font-size:11px;font-weight:600;color:#333;line-height:1.35;word-break:break-word">${bot}${nmHtml}</span>${bu ? `<a href="${esc(bu)}" target="_blank" rel="noopener" title="Shopee の商品ページ（お客さんが見る画面）を開く" style="flex:none;font-size:11px;text-decoration:none">🛒</a>` : ''}${eu ? `<a href="${esc(eu)}" target="_blank" rel="noopener" title="セラーセンターの編集ページを開く" style="flex:none;font-size:11px;text-decoration:none">✏️</a>` : ''}</span>`; })()}
-              <span style="display:block;font-size:9.5px;color:#8a8f98;line-height:1.3;word-break:break-word" title="${esc(r.name || '')}">${esc(r.model_name ? (r.name || '') : '')}</span>
+              ${llogCatsHtml(r, selRows)}
               ${(() => { /* ★2026-09-23 本人「これどのアカウントに出したかもわかれば嬉しい」。1店舗目の枠が埋まると🤖は2店舗目に出すので、
                    カードごとに【出した店】を出す（shop_id → 登録簿の店名・注文画面の 🏪 と同じ部品）。読めていない時は「読み込み中」＝空欄にしない */
                 const sm = logState.shopMap;
