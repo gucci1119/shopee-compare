@@ -4582,6 +4582,12 @@
     "いま出している出品の足りないもの（動画・商品写真・お店の画像・タイトルの長さ・重量・在庫0・非公開）を国×カタログの表で見る。読むだけ（Shopeeには書きません）": "See what existing listings are missing (video, product photos, shop images, title length, weight, out of stock, unlisted) in a country × catalog table. Read-only (writes nothing to Shopee)",
     // 📅 今月のリスト（🎯有在庫化候補の月次凍結・2026-09-26）
     "📅 今月のリスト（今月買うもの）": "📅 This month's list (what to buy this month)",
+    "見方": "How to read",
+    "先月は無く、今月から入った＝最近売れ始めた → 仕入れを始める候補": "Not on last month's list, new this month = started selling recently → candidate to start stocking",
+    "先月も今月も入っている＝定番 → 切らさないように仕入れる": "On both last month's and this month's list = a staple → keep it in stock",
+    "先月は入っていたが今月は基準未満＝売れ行きが落ちた → 追加の仕入れは控える": "On last month's list but below the bar now = sales dropped → hold off on restocking",
+    "個/月": "pcs/mo",
+    "か月売れた": "months with sales",
     "🆕 新しく入った": "🆕 New this month",
     "🔁 続けて入っている": "🔁 Still on the list",
     "👋 外れた": "👋 Dropped",
@@ -12307,10 +12313,10 @@
   let repGrossMap = null;   // 'cc|sn' → 粗利(円)。単品注文だけ（複数点の注文は入金が注文全体なので商品に割れない）
   async function buildRepeatSellers() {
     const [orders, inv, incRows, costRows] = await Promise.all([
-      sbGetAll('orders', 'select=cc,sn,status,items,order_date,shop_id&order=order_date.desc'),
+      sbGetAll('orders', 'select=cc,sn,status,items,order_date,shop_id,cancel_reason&order=order_date.desc'),
       sbGetAll('inventory', 'select=shopee_sn,name,name_supplier,price,status').catch(() => []),
       sbGetAll('income', 'select=cc,sn,amount').catch(() => null),
-      sbGetAll('costs', 'select=cc,sn,cost').catch(() => null),
+      sbGetAll('costs', 'select=cc,sn,cost,self_transit_at').catch(() => null),
     ]);
     /* ★2026-09-24 本人「データやコンテクストが溜まってきたのでアップデート」：候補の並びを「数」でなく「粗利」でも見られるように。
        粗利＝入金（escrow・注文日のレート）− 仕入（costs、無ければ在庫台帳の仕入額）。単品注文だけ数える（複数点の注文は割れない） */
@@ -12324,10 +12330,19 @@
     const bySn = new Map();
     (inv || []).forEach(r => { const k = String(r.shopee_sn || '').trim(); if (k && !bySn.has(k)) bySn.set(k, r); });
     const skip = /CANCEL|UNPAID|INVALID|RETURN/i, now = Date.now(), DAY = 86400000;   // キャンセル(実測26.5%)＋返品は需要でないので除外
+    /* ★2026-09-27 本人「発送前のキャンセルだけ省いてくれたらいい」「Shopee倉庫でスキャンされてからキャンセルされたやつ・到着が遅いからキャンセル・届いたけど気が変わった、は含めて」＝買う意思があった注文は需要として数える。
+       外すのは【発送前のキャンセル】と未払い・無効だけ。発送後かどうかは ①こちらが「倉庫へ発送済」にした（costs.self_transit_at）②キャンセル理由が配達失敗・紛失・集荷失敗 で見る。
+       返品（TO_RETURN・届いた後の返品）は数える。理由が記録されていない古いキャンセル（891件）は見分けられないので発送前として外す */
+    const shippedSn = new Set(); (costRows || []).forEach(r => { if (r && r.self_transit_at) shippedSn.add(r.cc + '|' + r.sn); });
+    const postShipReason = /Failed Delivery|parcel has been lost|lost|3PL pickup Fail|Delivery service provider/i;
+    const preShipOnly = /CANCEL/i, alwaysSkip = /UNPAID|INVALID/i;
+    const countAsDemand = o => { const st = String(o.status || ''); if (alwaysSkip.test(st)) return false; if (!preShipOnly.test(st)) return true; return shippedSn.has(o.cc + '|' + o.sn) || postShipReason.test(String(o.cancel_reason || '')); };
+    repPostShipCancelN = 0;
     const snProd = new Map();   // 単品注文のSN → 商品キー（現在庫を数えるための正解データ）
     const g = {};
     (orders || []).forEach(o => {
-      if (skip.test(o.status || '')) return;
+      if (!countAsDemand(o)) return;
+      if (preShipOnly.test(String(o.status || ''))) repPostShipCancelN++;
       const items = o.items || [];
       if (items.length === 1) {
         const k0 = repeatProdKey(items[0].name, String(items[0].variation || '').trim());
@@ -12746,6 +12761,7 @@
   const REP_SNAP_WIN = 90;
   const REP_SNAP_RULE = '明細別・直近90日・予想月販2個以上 または 🔁3ヶ月以上';
   let repSnap = null;          // {ym, prevYm, cur, prev, curSaved, prevSaved, err, note}。月が変わったら読み直す
+  let repPostShipCancelN = 0;   // ★2026-09-27 発送した後にキャンセルされて、需要として数えた注文の数
   let repSnapBusy = false;     // 読み込み中の二重起動よけ
   const repSnapMore = {};      // 「さらに表示」を押した区分（new/keep/gone）
   const REP_SNAP_CAP = 12;
@@ -12812,17 +12828,20 @@
     const gNew = cur.rows.filter(x => !pMap.has(x.k)), gKeep = cur.rows.filter(x => pMap.has(x.k)), gGone = prev ? prev.rows.filter(x => !cMap.has(x.k)).sort((a, b) => b.pm - a.pm) : [];
     const gmTxt = v => v == null ? '<span class="smd-dim">粗利—</span>' : `<span style="color:${v >= 5000 ? '#137333' : '#333'}">粗利${fmtJpy(v)}/月</span>`;
     const imgMap = new Map(((repeatCache && repeatCache.rows) || []).map(r => [r.key, r.img]));   // ★本人「画像もいるだろ？」：凍結前の月は画像を持っていない＝今の集計から引く
-    const thumb = x => { const im = x.i || imgMap.get(x.k); return im ? `<img src="${IMG_CDN}${esc(im)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;flex:none" loading="lazy">` : '<span style="width:40px;height:40px;flex:none;background:#f1f3f4;border-radius:4px"></span>'; };
+    const thumb = x => { const im = x.i || imgMap.get(x.k); return im ? `<img src="${IMG_CDN}${esc(im)}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;flex:none" loading="lazy">` : '<span style="width:40px;height:40px;flex:none;background:#f1f3f4;border-radius:4px"></span>'; };
     const nameOf = x => x.n ? `<b style="color:#7b52c4">${nm(x.n, 'wrap')}</b> <span class="smd-dim" style="font-size:10px">${nm(x.p, 'wrap')}</span>` : nm(x.p, 'wrap');
     const item = (x, kind) => {
       const pv = pMap.get(x.k);
-      const num = kind === 'gone' ? `先月${x.pm.toFixed(1)}/月` : (kind === 'keep' && pv ? `${pv.pm.toFixed(1)}→<b>${x.pm.toFixed(1)}</b>/月` : `<b>${x.pm.toFixed(1)}</b>/月`);
+      /* ★2026-09-27 本人「もう少しこのページ見やすく」：数字に単位と意味を付け、増減を色で出す */
+      const arrow = (kind === 'keep' && pv) ? (x.pm > pv.pm + 0.05 ? '<span style="color:#137333">▲</span>' : x.pm < pv.pm - 0.05 ? '<span style="color:#d93025">▼</span>' : '<span class="smd-dim">→</span>') : '';
+      const num = kind === 'gone' ? `<span class="smd-dim">先月</span> <b style="font-size:12px">${x.pm.toFixed(1)}</b>個/月` : (kind === 'keep' && pv ? `<span class="smd-dim">${pv.pm.toFixed(1)}</span> ${arrow} <b style="font-size:12.5px">${x.pm.toFixed(1)}</b>個/月` : `<b style="font-size:12.5px">${x.pm.toFixed(1)}</b>個/月`);
       const kw = kind === 'gone' ? '' : encodeURIComponent(sourcingKeyword(x.p, x.n) || x.n || x.p);
-      return `<div style="display:flex;gap:8px;align-items:flex-start;font-size:11.5px;padding:4px 0;border-bottom:1px dotted #e6e8ee">${thumb(x)}<div style="min-width:0">${nameOf(x)}<div style="font-size:10.5px;white-space:nowrap">${num}${x.sm >= 3 ? ` <span style="color:#0b5cab">🔁${x.sm}ヶ月</span>` : ''} ・ ${gmTxt(x.gm)}${kw ? ` ・ <a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a>` : ''}</div></div></div>`;
+      return `<div style="display:flex;gap:8px;align-items:flex-start;font-size:11.5px;padding:6px 0;border-bottom:1px solid #eef0f4">${thumb(x)}<div style="min-width:0">${nameOf(x)}<div style="font-size:11px;white-space:nowrap;margin-top:2px">${num}${x.sm >= 3 ? ` <span style="color:#0b5cab" title="${x.sm}か月続けて売れた">🔁${x.sm}か月売れた</span>` : ''} ・ ${gmTxt(x.gm)}${kw ? ` ・ <a href="https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-weight:700;text-decoration:none">メルカリ</a>` : ''}</div></div></div>`;
     };
     const col = (g, label, color, list, kind, empty) => {
       const shown = list;   // ★押さないと見えない を作らない＝全件をスクロール枠で出す
-      return `<div style="min-width:0"><div style="font-weight:700;font-size:12px;color:${color};border-bottom:2px solid ${color};padding-bottom:2px;margin-bottom:2px"><span>${label}</span> <span>${list.length}</span></div>`
+      const sub = { new: '先月は無く、今月から入った＝最近売れ始めた → 仕入れを始める候補', keep: '先月も今月も入っている＝定番 → 切らさないように仕入れる', gone: '先月は入っていたが今月は基準未満＝売れ行きが落ちた → 追加の仕入れは控える' }[g] || '';
+      return `<div style="min-width:0"><div style="font-weight:700;font-size:13px;color:${color};border-bottom:2px solid ${color};padding-bottom:2px"><span>${label}</span> <span>${list.length}件</span></div><div style="font-size:10.5px;color:#555;margin:2px 0 4px">${sub}</div>`
         + (list.length ? `<div style="max-height:420px;overflow:auto">${shown.map(x => item(x, kind)).join('')}</div>` : `<div class="smd-dim" style="font-size:11px;padding:4px 0">${empty}</div>`)
         + '</div>';
     };
@@ -12830,7 +12849,11 @@
     const status = s.curSaved ? `<span style="color:#137333">✅ ${m}/1時点で確定済み</span>` : `<span style="color:#e8710a">⚠ 未保存（この画面で計算した${m}/1時点の表）：${esc(s.note || '')}</span>`;
     const prevNote = !prev ? `<span style="color:#e8710a">先月の表がありません（注文の履歴が足りない）＝全部「新しく入った」に見えます。</span>` : (prev.bf ? '先月分は後から同じ基準で作り直したものです。' : '');
     return box(`${head} <span class="smd-dim" style="font-size:11.5px">${esc(ym)}・${cur.rows.length}件（🆕 新しく入った ${gNew.length}／🔁 続けて ${gKeep.length}／👋 外れた ${gGone.length}）</span>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:3px">${status}　基準：${esc(cur.rule || REP_SNAP_RULE)}（下の表のボタンとは別の固定基準）。毎月1日0時より前の注文だけで数える＝何日に開いても同じ表。粗利の多い順。${prevNote}</div>
+      <div class="pagehelp" style="font-size:11px;margin-top:6px;line-height:1.6;background:#f5f8ff;border:1px solid #d6e2f5;border-radius:6px;padding:6px 10px">
+        <b>見方</b>：毎月1日に「よく売れている明細」を固め、先月の表と比べて3つに分けています。<b style="color:#137333">🆕 新しく入った</b>＝今月から入った（仕入れを始める候補）／<b style="color:#0b5cab">🔁 続けて入っている</b>＝先月から続く定番（切らさない）／<b style="color:#80868b">👋 外れた</b>＝先月から落ちた（追加は控える）。<br>
+        数字：<b>2.0個/月</b>＝売れた月あたりの個数（予想月販）・<b>3.0 ▲ 4.0個/月</b>＝先月→今月（▲増えた ▼減った）・<b>🔁3か月売れた</b>＝3か月続けて売れた・<b>粗利¥7,005/月</b>＝月あたりの粗利の見込み・<b style="color:#ff0211">メルカリ</b>＝安い順で仕入れを探す。数えないのは<b>発送前のキャンセルと未払い</b>だけ（発送後のキャンセル・届いた後の返品は、買う意思があったので数えます）。
+      </div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:3px">${status}　基準：${esc(cur.rule || REP_SNAP_RULE)}（下の表のボタンとは別の固定基準）。毎月1日0時より前の注文だけで数える＝何日に開いても同じ表。粗利の多い順。${prevNote}${repPostShipCancelN ? `　発送した後のキャンセル ${repPostShipCancelN}件は「買う意思があった」として数えています（下の表も同じ）。` : ''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:8px">
         ${col('new', '🆕 新しく入った', '#137333', gNew, 'new', '今月から入ったものはありません')}${col('keep', '🔁 続けて入っている', '#0b5cab', gKeep, 'keep', '先月から続けて入っているものはありません')}${col('gone', '👋 外れた', '#9aa0a6', gGone, 'gone', prev ? '外れたものはありません' : '比べる先月の表がありません')}
       </div>`);
@@ -20220,6 +20243,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-27', items: [
+      '📅 <b>🎯有在庫化候補（今月のリスト）を見やすくし、「買う意思があった注文」を数えるようにしました</b>（本人「キャンセル分は抜いてるよね？」「発送前のキャンセルだけ省いてくれたらいい」「どうやって見ればいいかを書いておいて」「もう少し見やすく」）。数えないのは<b>発送前のキャンセルと未払い</b>だけ。倉庫でスキャンされた後のキャンセル・「届くのが遅い」キャンセル・届いた後の返品は数えます（発送後かどうかは「🚚倉庫へ発送済」の印と、キャンセル理由＝配達失敗・紛失・集荷失敗で判断。理由の記録が無い古いキャンセルは発送前として外します）。リストの上に「見方」（🆕新しく入った＝仕入れを始める候補／🔁続けて入っている＝定番／👋外れた＝売れ行きが落ちた、数字の読み方）を常に出し、各列の下にも意味を書きました。数字は「個/月」と単位を付け、先月→今月は ▲増えた ▼減った で色分け。※9月の表は9/1に固めたもので、この変更の前の数え方のままです。',
       '🧮 <b>接続枠の数え漏れを塞ぎました（3台目で数えより早く枠切れになっていた件）</b>。数えた回数は処理の最後にまとめて書く作りで、6分の上限で途中で止められた処理は1回も記録されていませんでした（3台目の実行履歴：🤖が6分で止められたのが 9/26 夕方に8回・9/27 朝に5回→その直後に枠切れ）。処理の途中でも30回か30秒ごとに書き出すようにしたので、上の接続枠の数字が実際に近くなります。',
       '🎮 <b>🤖が「Wii U」のカタログを「Wii」の写真で作るのを直しました</b>（本人「またなんか内容と画像が違うやつ出してない？」）。機種の見分け方で「Wii」が「Wii U」にも当たっていたため、MY の Wii U ② が TH の Wii の写真で作られていました。「Wii」は「Wii U」に当たらない・「ゲームボーイ」は「ゲームボーイアドバンス」に当たらないように直し、写真を借りる元は<b>名前の機種がちょうど同じ</b>カタログだけにしました（親SKUが同じでも機種が違えば使いません）。',
       '🧩 <b>Shopee接続枠の内訳に「4台目（gutiken.wimp1119s）💬取込の窓口」を足しました</b>（本人「4台目の表示は？」）。Smart Reply・メルカリあいさつが使う取込GASの窓口を4台目のGoogleアカウントへ移したので（本体の枠が尽きても 🎮・📮・注文メッセージ・取り札が止まらない）、その使用数を並べて出します。Shopee は叩かない台なので、下の合計には入れていません。',
