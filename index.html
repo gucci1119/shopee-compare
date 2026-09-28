@@ -2548,7 +2548,7 @@
                 if (!alt || ufUrlBlocked(alt)) break;
                 try { toast('⛔ こちらの接続枠が尽きたので、もう1つのGoogleアカウントでやり直します', 4000); } catch (_) {}
                 try { if (typeof params.__onHop === 'function') params.__onHop(alt); } catch (_) {}
-                const q2 = Object.assign({}, params, { callback: 'cb' }); delete q2.__onHop;
+                const q2 = Object.assign({}, q); delete q2.__onHop;   /* ★2026-09-28 Codex：鍵（rk）を足した q から作る（params からだと切替先で「鍵がありません」） */
                 const qs2 = Object.keys(q2).filter(k => q2[k] != null && q2[k] !== '').map(k => k + '=' + encodeURIComponent(q2[k])).join('&');
                 const u2 = alt + (alt.includes('?') ? '&' : '?') + qs2;
                 /* ★2026-09-27 本人「いつ完了するのかわからない」「ずっとこの状態」＝やり直しの fetch に時間切れが無く、相方の台が混んでいると永遠に待っていた。
@@ -2574,7 +2574,7 @@
         //   Failed to fetch になる。この時は <script> 経由（CORSの影響を受けない）で取り直す。
         if (/Failed to fetch|NetworkError|CORS/i.test(msg)) {
           if (isWrite) { lastErr = '__DISCONNECTED__結果を確認できませんでした（通信が切れました）。GAS側では処理が続いている可能性が高いので、🗂しごとセンターの進捗を見てください'; }
-          else { try { return await jsonpScript(url.replace(/&callback=cb$/, ''), timeoutMs || 60000); } catch (e2) { lastErr = 'サーバーに繋がりません（' + msg + '）'; } }
+          else { try { return await jsonpScript(url.replace(/([?&])callback=cb(&|$)/, (m0, a, b) => (b ? a : '')), timeoutMs || 60000); }   /* ★2026-09-28 Codex：callback が末尾でなくても外す（rk を足した後は途中にある） */ catch (e2) { lastErr = 'サーバーに繋がりません（' + msg + '）'; } }
         } else if (msg && lastErr !== msg && !/aborted/i.test(msg)) throw e;
         /* ★2026-09-27 本人「削除に失敗: signal is aborted without reason」＝時間切れで打ち切っただけで、GAS は Shopee で削除を済ませていた（TH 47361319678）。
            書き込みの時間切れは「失敗」ではなく「届いたか分からない」。呼び手（🗑消す）は DB で確かめる */
@@ -34215,15 +34215,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
      「カートのマークと鉛筆のマークを、カタログ名の横につけるイメージ」。
      【同じ国・同じ明細名】が入っているカタログを出品データ全体から束ね、入れた先のカタログを全部並べる（シリーズのカタログ＋機種のカタログ 等）。
      各行＝📁カタログ名＋🛒（お客さんが見る商品ページ）＋✏️（セラーセンターの編集ページ）。束ねは selRows ごとに1回だけ作る */
-  let _llCatsSrc = null, _llCatsMap = null;
+  let _llCatsSrc = null, _llCatsMap = null, _llCatsRows = null, _llCatsByCc = null;
   function llogCatsHtml(r, rows) {
     if (!r || !r.model_name) return '';
     /* 束ねの元＝【いまの出品データ全体】（lst.byCc）で、同じ国に同じ明細名が入っているカタログ全部。
        🤖は1回の出品ではシリーズか機種のどちらか1つにしか入れないので、その日の記録だけでは2つ目が見えない（9/27 の1,778枚で0件だった）。
        出品データが読めていない時だけ、その日の記録で束ねる */
     const src = (lst.byCc && Object.keys(lst.byCc).length) ? lst.byCc : null;
-    const sig = src ? Object.keys(src).map(c => c + (src[c] || []).length).join(',') : rows;
-    if (_llCatsSrc !== sig) { _llCatsSrc = sig; _llCatsMap = {};
+    const sig = src ? Object.keys(src).map(c => c + (src[c] || []).length).join(',') + '|' + (lst._llSeq || 0) : rows;
+    if (_llCatsSrc !== sig || _llCatsRows !== rows || _llCatsByCc !== (src && Object.values(src))[0]) { _llCatsSrc = sig; _llCatsRows = rows; _llCatsByCc = src && Object.values(src)[0]; _llCatsMap = {};   /* ★2026-09-28 Codex：件数だけでは明細の追加・改名に気づかない＝出品ログを描くたび（rows が変わるたび）と出品データの入れ替え時に作り直す */
       const add = (cc, id, name, mn) => { const k = cc + '|' + llogNm(mn); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(id))) a.push({ item_id: id, name: name || '' }); };
       if (src) Object.keys(src).forEach(cc => (src[cc] || []).forEach(l => (l.models || []).forEach(m => { if (m && !m.ghost && m.n) add(cc, l.item_id, l.name, m.n); })));
       else (rows || []).forEach(x => { if (x && x.model_name) add(x.cc, x.item_id, x.name, x.model_name); }); }
@@ -37129,7 +37129,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const ps = tr.querySelector('.pa-psug'); if (ps) { ps.textContent = paYen(p); ps.style.color = p < 0 ? '#d93025' : ''; }
       const ch = tr.querySelector('.pa-chg'); if (ch) { ch.textContent = (chg > 0 ? '+' : '') + chg + '%'; ch.style.color = chg > 0 ? '#1a7f37' : '#c2185b'; }
     }));
-    const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { shown.forEach(e => { if (e.sug != null) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
+    const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
     const sn = root.querySelector('#pa-selnone'); if (sn) sn.addEventListener('click', () => { PA.sel.clear(); root.querySelectorAll('.pa-ck').forEach(c => { c.checked = false; }); selCount(); });
     if (applyBtn) applyBtn.addEventListener('click', () => paApply(byKey));
   }
@@ -48120,7 +48120,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function pcInit() {
     try { PC.id = localStorage.getItem('smdPcId') || ''; if (!PC.id) { PC.id = Math.random().toString(36).slice(2, 8); localStorage.setItem('smdPcId', PC.id); } PC.label = localStorage.getItem('smdPcLabel') || ('PC-' + PC.id.slice(0, 3)); } catch (_) { PC.id = PC.id || 'x' + Date.now().toString(36).slice(-5); PC.label = PC.label || 'PC'; }
   }
-  function pcIsOwner() { if (!settings.sbSecret) return false; if (!PC.known) return PC.fails >= 3 && (function () { try { return localStorage.getItem('smdPcWasOwner') === '1'; } catch (_) { return false; } })();   /* ★2026-09-23 読めない時に引き継ぐのは【直前まで担当だったPC】だけ（2台とも担当になると外部サイトを二重に叩く） */ if (PC.last && Date.now() - PC.last > 5 * 60000) { try { if (typeof pcBeat === 'function') pcBeat(); } catch (_) {} return false; }   /* ★2026-09-28 レビュー：担当の確認が5分以上とれていない（裏タブで凍結・通信失敗）なら、担当のつもりで動かない＝2台同時に動かない */ return !!(PC.owner && PC.owner.id === PC.id); }   // 3回続けて読めない＝1台運用とみなして動かす（全部止まるよりまし）
+  function pcIsOwner() { if (!settings.sbSecret) return false; if (!PC.known) return PC.fails >= 3 && (function () { try { return localStorage.getItem('smdPcWasOwner') === '1'; } catch (_) { return false; } })();   /* ★2026-09-23 読めない時に引き継ぐのは【直前まで担当だったPC】だけ（2台とも担当になると外部サイトを二重に叩く） */ if (PC.last && Date.now() - PC.last > 5 * 60000) return false;   /* 確認し直しは定期の pcBeat に任せる（ここから呼ぶと pcDraw→pcIsOwner→pcBeat で連鎖する・Codex 指摘） */   /* ★2026-09-28 レビュー：担当の確認が5分以上とれていない（裏タブで凍結・通信失敗）なら、担当のつもりで動かない＝2台同時に動かない */ return !!(PC.owner && PC.owner.id === PC.id); }   // 3回続けて読めない＝1台運用とみなして動かす（全部止まるよりまし）
   function pcPageLabel() { try { const b = document.querySelector('#smd-nav button.on'); return (b ? b.textContent.replace(/\s+/g, ' ').trim() : String(state.page || '')).slice(0, 24); } catch (_) { return ''; } }
   async function pcKvPut(k, v) { const key = settings.sbSecret; if (!key) return false; const r = await fetch(`${SB_URL}/rest/v1/app_kv?on_conflict=k`, { method: 'POST', headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify([{ k: k, v: v, updated_at: new Date().toISOString() }]) }); return r.ok; }
   async function pcKvRead() { const key = settings.sbSecret || settings.sbKey; const r = await fetch(`${SB_URL}/rest/v1/app_kv?select=k,v&k=like.pc_*`, { headers: { apikey: key, Authorization: 'Bearer ' + key } }); if (!r.ok) throw new Error('HTTP ' + r.status); const a = await r.json(); if (!Array.isArray(a)) throw new Error('bad'); return a; }
