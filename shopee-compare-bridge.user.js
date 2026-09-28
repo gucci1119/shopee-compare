@@ -2,12 +2,11 @@
 // @name         Shopee Compare Bridge
 // @name:ja      【Shopee】🌉 ポータルとの橋渡し（ブリッジ）
 // @namespace    https://github.com/kawaguchiryoya
-// @version      1.7.2
+// @version      1.7.3
 // @description  Shopee全国比較サイト用のデータ橋渡し。サイトからのリクエストをGM_xmlhttpRequestで各国Seller Center/GAS/メルカリへ中継する。SPC_CDS_VER付きのCSRF必須APIにはcookieのSPC_CDSを自動付与。v1.3.0: Shopeeセラーページに⇄全ショップ・ワンクリック切替パネルを追加。
 // @downloadURL  https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/gucci1119/shopee-compare/main/shopee-compare-bridge.user.js
 // @match        https://gucci1119.github.io/shopee-compare/*
-// @match        https://*.github.io/shopee-compare/*
 // @match        http://localhost:8788/*
 // @match        http://127.0.0.1:8788/*
 // GM_cookieは@match/@includeのドメインのcookieのみ読める。各国SellerのSPC_CDS注入のため下記を追加（Shopeeページ上ではbridgeは待受のみで無害）
@@ -48,7 +47,7 @@
 (function () {
   'use strict';
 
-  const VER = '1.7.0';
+  const VER = '1.7.3';   /* ★2026-09-28 レビュー（脆弱性）：@match の https://*.github.io/shopee-compare/* を外した。誰でも同じ名前のページを作れば、本人のセラーのログインで Shopee を読み書きできてしまうため。本人のポータル（gucci1119.github.io）とローカルだけ */
   // 動作確認用マーカー（サイト側やデバッグから見える）
   try { document.documentElement.setAttribute('data-smd-bridge', VER); } catch (_) {}
 

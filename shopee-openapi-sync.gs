@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-0810s';
+var SRC_VER = '20260928-0930k';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -312,6 +312,13 @@ function doGet(e) {
 }
 function doGetInner_(e) {
   var p = (e && e.parameter) || {};
+  /* ★2026-09-28 レビュー（脆弱性）：公開URLから鍵なしで叩ける読み取りの口（外部URLの取得＝1回で最大20回ぶん枠を使う・明細/在庫の読み取り・ZIP作成）に鍵を要求する。
+     叩かれ続けると接続枠（2万/日）が尽きて出品・発送手配まで止まる。ポータルは rk に WRITE_TOKEN を付けて呼ぶ（token だと書き込み扱いになり再試行しないため別名）。
+     WRITE_TOKEN が未設定の台では止めない（止めすぎて写真集めを壊さない） */
+  if (/^(get_models|get_item_full|fetch_metas|fetch_meta|fetch_image|fetch_images|zip_variation_images)$/.test(String(p.action || '')) || (p.action === 'news' && p.force)) {
+    var _rkw = ''; try { _rkw = P_().getProperty('WRITE_TOKEN') || ''; } catch (eRk) {}
+    if (_rkw && p.rk !== _rkw && p.token !== _rkw) { var _rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''); return ContentService.createTextOutput(_rcb + '(' + JSON.stringify({ ok: false, error: '鍵がありません（⚙️設定の WRITE_TOKEN）' }) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT); }
+  }
   try {
     /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
        エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
@@ -1680,7 +1687,6 @@ function tokShareOne_(nt) {
   for (var i = 0; i < 3; i++) { try { baKvSet_(tokKvKey_(nt.shop_id), Object.assign({ at: now_() }, nt)); return true; } catch (e) { Utilities.sleep(700 * (i + 1)); } }
   return false;
 }
-function tokShare_(list) { (list || []).forEach(function (t) { tokShareOne_(t); }); }
 function tokSharedLoad_() {
   try {
     var rows = sbSelect_('app_kv', 'select=k,v&k=like.shopee_tok_*'), out = [];
@@ -6493,20 +6499,6 @@ function baEnName_(row, st, enCache, hw) {
   var cut = en.slice(0, 31), sp = cut.lastIndexOf(' ');
   return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim().replace(/(\s+(of|the|and|a|an|to|in|for|with|vs\.?)|[\s:\-–&,]+)+$/i, '').trim();   /* 切った末尾が of / the / コロンで終わらないように */
 }
-function baEnNameOld_(row) {
-  var en = String(row.en || '').trim();
-  if (!en && row.ja) { try { en = String(LanguageApp.translate(baCleanJa_(row.ja), 'ja', 'en') || '').trim(); } catch (e) { en = ''; } }
-  if (!en) return '';
-  en = en.replace(/[""''"]/g, '').replace(/\s*[-–—:：]\s*(special|limited|deluxe|premium|collector'?s|anniversary|complete|definitive|remaster(ed)?|hd)\s+edition\b/ig, '')
-         .replace(/\s{2,}/g, ' ').replace(/[,\.]+$/g, '').trim();
-  en = en.replace(/\b[a-z]/g, function (c) { return c.toUpperCase(); });
-  en = en.split(' ').map(function (w, i) { return (i > 0 && /^(The|A|An|Of|For|With|And|In|On|To|By|From)$/.test(w)) ? w.toLowerCase() : w; }).join(' ');
-  if (en.length <= 30) return en;
-  var shr = [[/\b(the|a|an)\s+/ig, ''], [/\s*\((?!.*\d).*?\)\s*/g, ' '], [/\bvolume\b/ig, 'Vol'], [/\bversion\b/ig, 'Ver'], [/\bspecial\b/ig, 'SP'], [/\bcollection\b/ig, 'Coll'], [/\badventures?\b/ig, 'Adv'], [/\bchronicles?\b/ig, 'Chron'], [/\s+/g, ' ']];
-  for (var i = 0; i < shr.length; i++) { en = en.replace(shr[i][0], shr[i][1]).trim(); if (en.length <= 30) return en; }
-  var cut = en.slice(0, 31), sp = cut.lastIndexOf(' ');
-  return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim();
-}
 function baCleanJa_(t) {
   return String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects|ハッピープライスセレクション|ベストコレクション)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
 }
@@ -6875,7 +6867,6 @@ function baMatch_(items, ja, hw) {
   hit.sort(function (a, b) { return a.extra - b.extra; });
   return hit.map(function (h) { return h.it; });
 }
-function baMedian_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; return a[Math.floor(a.length / 2)]; }
 // 仕入れ目安＝相場の上側（75パーセンタイル）。中央値だと実際に買える玉が無いことがある（安い順に売れていく）
 /* ★v190 外れ値を除いてから上側75%（本人 2026-09-18「2,000・2,500・2,700・2,800・3,000 の中に 1万円があったら外れ値」）。3件以上なら中央値の2倍超・0.4倍未満を捨てる。2件で倍以上開いていたら安い方（高い方は外れ値の可能性・どのみち件数不足で在庫0） */
 function baCostEst_(arr) { var a = arr.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!a.length) return 0; if (a.length >= 3) { var med = a[Math.floor(a.length / 2)]; var b = a.filter(function (x) { return x <= med * 2 && x >= med * 0.4; }); if (b.length) a = b; } else if (a.length === 2 && a[1] > a[0] * 2) return a[0]; return a[Math.min(a.length - 1, Math.floor(a.length * 0.75))]; }
