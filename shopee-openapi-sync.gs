@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-1140v';
+var SRC_VER = '20260928-1200w';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6596,7 +6596,11 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   var ck = u + (BA_CONFIRM ? '|s4' : '|s3'), cv = cache ? String(cache[ck] || '') : '';   /* ★Codex：上位モデルの控え（|s4）と Haiku の控え（|s3）を分ける */
   /* ★2026-09-28 Codex：Haiku で「未開封ではない／文字入り／別機種」と確認済みの写真は聞き直さない（鍵を変えたせいで約1,200枚を上位モデルで聞き直し、1日の上限も素通りする所だった） */
   if (!cv && cache && BA_CONFIRM) { var _s3 = String(cache[u + '|s3'] || ''); if (_s3 === 'sealed:0' || _s3 === 'ov:1' || _s3.indexOf('hw:') === 0) cv = _s3; }
-  if (!cv && cache && BA_CONFIRM) { var _is = baImgIdx_(cache)[String(u).split('|')[0]]; if (_is && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) { cv = _is.s4; cache[ck] = cv; } }
+  if (!cv && cache) { var _is = baImgIdx_(cache)[String(u).split('|')[0]] || {};   /* 写真単位の使い回し（別の作品で確認済みの同じ写真） */
+    if (BA_CONFIRM && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) cv = _is.s4;
+    else if (BA_CONFIRM && (_is.s3 === 'sealed:0' || _is.s3 === 'ov:1')) cv = _is.s3;   /* Haiku で「未開封ではない・文字入り」と確認済み */
+    else if (!BA_CONFIRM && _is.s3 && (_is.s3.indexOf('sealed:') === 0 || _is.s3 === 'ov:1')) cv = _is.s3;
+    if (cv) cache[ck] = cv; }
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
   if (cv.indexOf('hw:') === 0 || cv === 'ov:1') return cv;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
@@ -6619,8 +6623,8 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   if (big && Array.isArray(o.corners) && o.corners.length === 4 && cache) { var nArt = o.corners.filter(function (x) { return String(x) === 'art'; }).length; cache[u + '|c1'] = 'art:' + nArt; baImgMemoSet_(u, 'c1', 'art:' + nArt); }
   var sealed = big ? !!(o.sealed_look === true || o.sticker_on_film === true || o.film_overhang === true) : !!(o.film_overhang === true || o.film_wrinkle === true || o.film_seam === true || o.sticker_on_film === true);
   if (hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); if (seenHw.length && seenHw[0] !== String(hwKey)) { if (cache) cache[ck] = 'hw:' + seenHw[0]; return 'hw:' + seenHw[0]; } }
-  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; if (big) baImgMemoSet_(u, 's4', 'ov:1'); } return 'ov:1'; }
-  if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); if (big) baImgMemoSet_(u, 's4', 'sealed:' + (sealed ? 1 : 0)); }
+  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; baImgMemoSet_(u, big ? 's4' : 's3', 'ov:1'); } return 'ov:1'; }
+  if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); baImgMemoSet_(u, big ? 's4' : 's3', 'sealed:' + (sealed ? 1 : 0)); }
   return sealed;
 }
 /* ★2026-09-28 本人「一回見た写真を再度見に行ったりしてない？」。控えの鍵は「写真|v13|機種|作品」なので、
@@ -6634,7 +6638,7 @@ function baImgIdx_(cache) {
   BA_IMG_IDX = {}; BA_IMG_IDX_SRC = cache;
   Object.keys(cache || {}).forEach(function (k) {
     var p = k.indexOf('|'), b = p < 0 ? k : k.slice(0, p), v = String(cache[k] || ''), o = BA_IMG_IDX[b] || (BA_IMG_IDX[b] = {});
-    if (/\|c1$/.test(k)) o.c1 = v; else if (/\|s4$/.test(k)) o.s4 = v; else if (/\|s\d$/.test(k)) { } else if (BA_INTR_NG.test(v)) o.ng = v;
+    if (/\|c1$/.test(k)) o.c1 = v; else if (/\|s4$/.test(k)) o.s4 = v; else if (/\|s3$/.test(k)) o.s3 = v; else if (/\|s\d$/.test(k)) { } else if (BA_INTR_NG.test(v)) o.ng = v;
   });
   return BA_IMG_IDX;
 }
