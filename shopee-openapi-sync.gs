@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-1110q';
+var SRC_VER = '20260928-1140v';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6594,6 +6594,8 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
      控えは新しい鍵 |s4（古い |s3＝Haikuの判定は落としすぎなので使わない）。四隅は |c1 に同じ形で書く。上位モデルを止めている時（confirmModel=false）は Haiku で今までどおり */
   if (BA_CONFIRM === null) { var c00 = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (c00.confirmModel === false) ? '' : String(c00.confirmModel || 'claude-sonnet-5'); }
   var ck = u + (BA_CONFIRM ? '|s4' : '|s3'), cv = cache ? String(cache[ck] || '') : '';   /* ★Codex：上位モデルの控え（|s4）と Haiku の控え（|s3）を分ける */
+  /* ★2026-09-28 Codex：Haiku で「未開封ではない／文字入り／別機種」と確認済みの写真は聞き直さない（鍵を変えたせいで約1,200枚を上位モデルで聞き直し、1日の上限も素通りする所だった） */
+  if (!cv && cache && BA_CONFIRM) { var _s3 = String(cache[u + '|s3'] || ''); if (_s3 === 'sealed:0' || _s3 === 'ov:1' || _s3.indexOf('hw:') === 0) cv = _s3; }
   if (!cv && cache && BA_CONFIRM) { var _is = baImgIdx_(cache)[String(u).split('|')[0]]; if (_is && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) { cv = _is.s4; cache[ck] = cv; } }
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
   if (cv.indexOf('hw:') === 0 || cv === 'ov:1') return cv;
@@ -6650,13 +6652,6 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
-  /* ★2026-09-28 「未開封」で落としていた写真（Haiku の判定は落としすぎ・25枚中13枚が普通の中古）は、上位モデルが使える時に【最初から】判定し直す。
-     控えを消して下の普通の判定に流す＝他の条件（表面・作品・機種）も1日の上限も今までどおり効く（Codex 指摘：四隅とシュリンクだけで復活させると裏面や別作品まで通る）。
-     見直したかどうかは |s4（上位モデルの確認の控え）で見る。Haiku の控えは |s3 なので混ざらない */
-  if (cache && String(cache[u] || '') === 'ng:sealed' && !cache[u + '|s4']) {
-    if (BA_CONFIRM === null) { var _cf = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (_cf.confirmModel === false) ? '' : String(_cf.confirmModel || 'claude-sonnet-5'); }
-    if (BA_CONFIRM) { delete cache[u]; cache[u + '|s4'] = 'rev'; }   /* 'rev'＝見直しに入った印（最初の判定でまた落ちても、次から繰り返さない。上位モデルの確認まで進めば上書きされる） */
-  }
   if (cache && cache[u]) {
     var c0 = String(cache[u]);
     if (c0.indexOf('ok:') === 0) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
