@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-1200w';
+var SRC_VER = '20260928-1530y';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -77,6 +77,23 @@ var _ufRun = 0;        // この実行中に使った urlfetch 回数（callShop
 var _ufTag = {};       // { '/api/v2/product/get_item_base_info': 123, ... }
 // 💴 Claude の利用料（トークン数）をスクリプト プロパティに貯め、uf_status のついでにポータルへ返す（urlfetch は増えない）。
 //   日付は JST・70日で捨てる。ポータル側は smdAiSpendGas に控えて、端末の記録と合算して「💴 API利用料」に出す。
+// 💴 その日（日本時間）の AI 料金の見込み（円）。自分の控え＋他の台が app_kv に載せた控え（boshu_auto_status*.uf.aiSpend）を足す。
+//   単価：四隅の確認＝上位モデル $3/$15、ほかは Haiku $1/$5（100万トークンあたり）。1ドル＝150円。
+function baAiYenOfDay_(d) {
+  var y = 0; Object.keys(d || {}).forEach(function (lab) { var t = d[lab] || {}; var big = /四隅/.test(lab); y += ((Number(t.in) || 0) * (big ? 3 : 1) + (Number(t.out) || 0) * (big ? 15 : 5)) / 1e6 * 150; });
+  return y;
+}
+function baAiYenToday_() {
+  var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var mine = baAiYenOfDay_((aiSpendLoad_().days || {})[day]), other = 0, partial = false;
+  try {
+    (sbSelect_('app_kv', 'select=k,v&k=like.boshu_auto_status*') || []).forEach(function (r) {
+      if (!r || r.k === BA_ST) return; var u = r.v && r.v.uf; if (!u || !u.aiSpend || !u.aiSpend.days) return;
+      other += baAiYenOfDay_(u.aiSpend.days[day]);
+    });
+  } catch (e) { partial = true; }
+  return { d: day, yen: mine + other, mine: Math.round(mine), other: Math.round(other), partial: partial };
+}
 function aiSpendLoad_() { var o = null; try { var s = P_().getProperty('aiSpend'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || !o.days) o = { days: {} }; return o; }
 function aiSpendBump_(kind, u) {
   if (!u) return;
@@ -7076,6 +7093,11 @@ function boshuAutoTick(manual) {
     /* かかったブレーキは「▶ 再開」（brakeAckAt）まで外れない。機種を回す前に見る（別の機種の番で勝手に解けない・Codex指摘） */
     if (st.brake) { if (ackAt >= (Date.parse(st.brake.at || '') || 0)) st.brake = null; else if (cfg.autoBrake !== false && manual !== true) { st.lastMsg = '🛑 自動ブレーキ中：' + String(st.brake.why || '') + '（🤖の「▶ 再開」を押すまで止まります）'; return finish_(st.lastMsg); } }
     if (cfg.autoBrake !== false && manual !== true && (st.errStreak || 0) >= 3) { st.brake = { at: st.errAt || new Date().toISOString(), kind: 'err', why: 'エラーが ' + st.errStreak + ' 回続いた: ' + String(st.lastErr || '').slice(0, 120) }; st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '（🤖の「▶ 再開」を押すまで止まります）'; return finish_(st.lastMsg); }
+    /* 💴 2026-09-28 本人「1ヶ月に3万円以上は使いたくない」→ その日の AI 料金（全台の合計）が上限に達したら🤖はその日休む。
+       数えるのは API が返した実際のトークン数（推定の件数ではない）。0 で上限なし */
+    var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
+    try { st.aiYen = baAiYenToday_(); st.aiYen.cap = aiCap; } catch (eY) { st.aiYen = null; }
+    if (aiCap > 0 && st.aiYen && st.aiYen.yen >= aiCap && manual !== true) { st.lastMsg = '💴 今日のAI料金が上限に達したので明日まで休み（約¥' + Math.round(st.aiYen.yen) + '／上限 ¥' + aiCap + '）'; return finish_(st.lastMsg); }
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
     var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey) && (!_myHws || _myHws.indexOf(String(h)) >= 0); });
