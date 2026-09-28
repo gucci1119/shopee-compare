@@ -17250,13 +17250,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
         ]);
-        renderAlerts._cache = { orders, at: Date.now(), rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null };
+        renderAlerts._cache = { orders, at: Date.now(), rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null , rs: { st: ((rs || []).find(x => x.k === 'stock_restore_state') || {}).v || null, man: ((rs || []).find(x => x.k === 'stock_restore_manual') || {}).v || {} } };
         rowsync = renderAlerts._cache.rowsync;
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
     const eliCases = (renderAlerts._cache && renderAlerts._cache.eli && renderAlerts._cache.eli.cases) || {};
+    /* 🔔 売れて在庫0で確認待ち（在庫の自動復活・本人 2026-09-28「0のまま気づかないと機会損失がでかい」） */
+    const rsC = (renderAlerts._cache && renderAlerts._cache.rs) || {}, rsMan = rsC.man || {};
+    const rsReview = Object.entries((rsC.st && rsC.st.watchZero) || {}).filter(([k, w]) => w && w.kind !== 'watch' && !(rsMan[k] && String(rsMan[k]) >= String(w.at || ''))).map(([k, w]) => w).sort((a, b) => String(b.at).localeCompare(String(a.at)));
     if (Object.keys(eliCases).some(k => eliCases[k] && !eliCases[k].done)) { try { await ensureListings(); } catch (_) {} }   // 商品名・電池情報は出品データから（お知らせを先に開いても出るように・Codex指摘）
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
@@ -17386,12 +17389,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ['国', '理由', '最後の成功', '最後の記録', '開く'],
         rowsyncRows.map(r => `<tr style="background:#fff5f5"><td style="font-size:11px;font-weight:700">${r.cc}</td><td style="font-size:11px">${esc(r.why)}</td><td style="font-size:11px;white-space:nowrap">${r.lastOk}</td><td style="font-size:11px">${r.lastMsg}</td><td>${r.host ? `<a href="https://${r.host}/portal/sale/order?type=toship" target="_blank" style="font-size:11px">SCタブ↗</a>` : ''}</td></tr>`).join(''),
         '各国の Seller Center タブで動く転記（明細→_row・入金→F/G・画像→AC列）が3時間おきに届いていません。そのタブが閉じている／眠っている／ログイン切れが主な原因。タブを開いて左下の「▶ 今すぐ」を押すと再開します。Chrome設定→パフォーマンス→「常にアクティブにするサイト」に seller.shopee.* と banhang.shopee.vn を入れると眠りません。', 'al-rowsync') +
+      card('🔔', '売れて在庫0になった明細（確認待ち）', '#1565c0', rsReview.length,
+        ['0になった日時', '国', '明細', 'カタログ'],
+        rsReview.slice(0, 100).map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(w.at))}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${nm(w.name, 'wrap')}</td><td style="font-size:11px">${nm(w.title || '', 'wrap')}</td></tr>`).join(''),
+        'まだ戻すか決めていない商品が売れて在庫0のままです。<button class="al-gorestock smd-btn b-open" style="font-size:11px;padding:1px 8px">🔁 在庫の自動復活で決める</button>（画像を見て「戻す（次も自動）／今回だけ／様子見」）', 'al-restock') +
       card('🧾', 'データ不整合の疑い', '#c2185b', dataIssues.length,
         ['国', '注文SN', '商品', '注文日', '内容', '確認'],
         dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。', 'al-data');
 
-    const total = arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length + eliRows.length + baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0);   // 🤖未確認だけの時も「アラートなし🎉」で隠さない（Codex指摘）
+    const total = rsReview.length + arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length + eliRows.length + baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0);   // 🤖未確認だけの時も「アラートなし🎉」で隠さない（Codex指摘）
     // 伝票は出したが、家から出す期限を過ぎてまだ倉庫へ送っていない注文（📦注文管理の「🚨遅延中」と同じ数え方＝ordDueBucket の 'over'）。
     //   上の「発送期日」は未手配（伝票なし）だけを見ているので、これを足さないと注文管理が「遅延中 4件」なのにバッジは 0 になる（2026-09-19 実測）
     // ※伝票を出した注文の status は 'Processed'（'To Ship' ではない）。最初 'To Ship' だけで数えて 0件になった（実データで確認 2026-09-19）
@@ -17409,6 +17416,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['🔋 ELI提出', eliRows.length, '#7b52c4', 'al-eli'],
       ['🤖 自動出品の点検', baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0), baBrake ? '#d93025' : '#1565c0', 'al-ba'],
       ['📄 転記停止', rowsyncRows.length, '#b71c1c', 'al-rowsync'],
+      ['🔔 在庫0の確認待ち', rsReview.length, '#1565c0', 'al-restock'],
       ['🧾 データ不整合', dataIssues.length, '#c2185b', 'al-data'],
       ['🏬 滞留在庫', dead.length, '#666', 'al-dead'],
     ];
@@ -17417,6 +17425,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
       : chipBar + html;
     body.querySelectorAll('.al-chip').forEach(b => b.addEventListener('click', () => { const t = document.getElementById(b.dataset.go); if (t) { t.open = true; t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }));
+    { const gr = body.querySelector('.al-gorestock'); if (gr) gr.addEventListener('click', () => { try { lst.tab = 'restock'; localStorage.setItem('smdListTab', 'restock'); } catch (_) {} showPage('list'); }); }
     { const gd = body.querySelector('.al-godead'); if (gd) gd.addEventListener('click', () => { try { stock.dead = true; stock.st = ''; stock.q = ''; } catch (_) {} showPage('stock'); }); }
     // 🤖 自動で出した明細を「見た」に（app_kv.boshu_auto_seen.at）。これより新しい分だけが次から出る
     body.querySelectorAll('.ba-seen').forEach(b => b.addEventListener('click', async () => {
@@ -20286,6 +20295,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-28', items: [
+      '🔔 <b>在庫の自動復活を「売れた商品を毎日目で決める」形にしました</b>（本人「毎日売れていった商品を自分で目で判定していくのはどう？」「オーダーが入ってない商品からの導線も残して」）。決めていない商品は自動では戻さず<b>確認待ち</b>に画像付きで並び、<b>戻す（次も自動）／今回だけ戻す／様子見</b>を選ぶ。決めた商品は次から自動。これで既定 ON（勝手には戻らない）。⚠️自動検知にも件数が出ます。',
       '🖼 <b>🔁在庫の自動復活の一覧に商品画像を出しました</b>（本人「商品ごとのキメのところに画像がない」）。明細の画像（無ければカタログの1枚目）。',
       '🔁 <b>出品管理に「在庫の自動復活」を足しました</b>（本人「注文が入って在庫が0になったら自動で1や2に」「0のまま気づかないと機会損失がでかい」「潤沢なものは5」「たまごっちの高いやつ・年に数回しか在庫がないゲームは注意」）。GAS が注文の同期（1時間ごと）の直後に、直近3日の支払い済み注文の明細で<b>いまShopeeで在庫0</b>のものだけを戻します（わざと0にしている明細は注文が無いので触りません）。商品ごとに <b>既定（1）／数を指定／様子見</b> を名前で決め、全部の国に効きます。様子見の明細が0になったら🟡の一覧に出て、そこから手で戻せます。<b>最初は OFF</b>。',
       '🧴 <b>🛒Amazonで買ったものに「私物（事業外）」を足しました</b>（本人「普通の日用品で買ったやつもたまにある。物販の事業に一切関係ない」）。押すと経費にも仕入れにも入れず、「扱いが決まった」に灰色で移ります。名前からの自動判定はしません（SGでは日用品も売り物のため）。',
@@ -31370,21 +31380,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   function rsDraw() {
     const host = document.getElementById('list-restock'); if (!host || !RS.kv) return;
     const { cfg, rules, state, manual } = RS.kv;
-    const on = cfg.on === true, defQ = Math.max(1, parseInt(cfg.qty, 10) || 1);
+    const on = cfg.on !== false, defQ = Math.max(1, parseInt(cfg.qty, 10) || 1);
     const last = state.last || {};
-    const nWatch = Object.values(rules).filter(r => r && r.m === 'watch').length, nQty = Object.values(rules).filter(r => r && r.q > 0).length;
+    const nWatch = Object.values(rules).filter(r => r && r.m === 'watch').length, nQty = Object.values(rules).filter(r => r && (r.q > 0 || r.m === 'auto')).length;
     const wz = Object.entries(state.watchZero || {}).filter(([k, w]) => w && !(manual[k] && String(manual[k]) >= String(w.at || ''))).map(([k, w]) => Object.assign({ key: k }, w)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
     const head = `<div class="tool-card" style="max-width:none;margin:0 0 12px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-        <label style="font-size:14px;font-weight:700"><input type="checkbox" id="rs-on" ${on ? 'checked' : ''}> 🔁 注文で在庫0になった明細を自動で戻す</label>
-        <label style="font-size:12.5px">指定の無い商品は <input id="rs-defq" type="number" min="1" max="99" value="${defQ}" style="width:52px"> 個に戻す</label>
-        <span style="font-size:12.5px">商品ごとの決め：<b>様子見 ${rsNum(nWatch)}</b>・<b>数を指定 ${rsNum(nQty)}</b></span>
-        <span class="smd-dim" style="font-size:11.5px">${state.lastAt ? '最後に見た時刻 ' + esc(jstDateTime(state.lastAt)) + '（戻した ' + rsNum(last.restored || 0) + '・様子見 ' + rsNum(last.watch || 0) + '・まだ在庫あり ' + rsNum(last.still || 0) + (last.err ? '・<b style="color:#b3261e">失敗 ' + rsNum(last.err) + '</b>' : '') + '）' : (on ? 'まだ1回も動いていません（注文の同期＝1時間ごとの直後に動きます）' : '')}</span>
+        <label style="font-size:14px;font-weight:700"><input type="checkbox" id="rs-on" ${on ? 'checked' : ''}> 🔁 注文で在庫0になった明細を見張る</label>
+        <label style="font-size:12.5px">「自動で戻す」の数 <input id="rs-defq" type="number" min="1" max="99" value="${defQ}" style="width:52px"> 個</label>
+        <span style="font-size:12.5px">決めた商品：<b>自動で戻す ${rsNum(nQty)}</b>・<b>様子見 ${rsNum(nWatch)}</b>（決めていない商品は売れたら確認待ちに並びます）</span>
+        <span class="smd-dim" style="font-size:11.5px">${state.lastAt ? '最後に見た時刻 ' + esc(jstDateTime(state.lastAt)) + '（自動で戻した ' + rsNum(last.restored || 0) + '・確認待ち ' + rsNum(last.review || 0) + '・様子見 ' + rsNum(last.watch || 0) + '・まだ在庫あり ' + rsNum(last.still || 0) + (last.err ? '・<b style="color:#b3261e">失敗 ' + rsNum(last.err) + '</b>' : '') + '）' : (on ? 'まだ1回も動いていません（注文の同期＝1時間ごとの直後に動きます）' : '')}</span>
       </div>
-      ${on ? '' : '<div style="margin-top:6px;font-size:12.5px;color:#8a4b00"><b>いまは OFF です。</b>下の「商品ごとの決め」で、すぐ仕入れられない商品（高いもの・年に数回しか市場に出ないもの）を <b>様子見</b> にしてから ON にしてください。</div>'}
+      ${on ? '' : '<div style="margin-top:6px;font-size:12.5px;color:#8a4b00"><b>いまは OFF です。</b>売れて0になった明細を見に行きません（確認待ちにも並びません）。</div>'}
     </div>`;
-    const wzHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">🟡 様子見で在庫0のまま（${rsNum(wz.length)}件）<span class="smd-dim" style="font-weight:400;font-size:11.5px">　注文で0になったが、様子見なので戻していない明細。仕入れられるのを確かめてから戻す</span></div>
-      ${wz.length ? `<table style="border-collapse:collapse;font-size:12px;width:100%;margin-top:6px"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 6px">0になった日時</th><th style="text-align:left;padding:2px 6px">国</th><th></th><th style="text-align:left;padding:2px 6px">商品</th><th style="text-align:left;padding:2px 6px">注文</th><th></th></tr>${wz.map(w => `<tr><td style="padding:2px 6px;white-space:nowrap">${esc(jstDateTime(w.at))}</td><td style="padding:2px 6px">${esc(w.cc)}</td><td style="padding:2px 4px;width:48px">${rsImg(((RS.groups || []).find(g => g.k === w.rk) || {}).img)}</td><td style="padding:2px 6px">${nm(w.name, 'wrap')}${w.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(w.title, 'wrap')}</div>` : ''}</td><td style="padding:2px 6px;font-size:11px" class="smd-dim">${esc(w.sn || '')}</td><td style="padding:2px 6px;white-space:nowrap"><input type="number" min="1" max="99" value="${(rules[w.rk] && rules[w.rk].q) || 1}" class="rs-wq" style="width:44px"> <button class="smd-btn b-write rs-wback" data-k="${esc(w.key)}">在庫を戻す</button> <button class="smd-btn rs-wskip" data-k="${esc(w.key)}" title="戻さずに一覧から外す">外す</button></td></tr>`).join('')}</table>` : '<div style="font-size:12px;margin-top:6px;color:#137333">✔ ありません</div>'}
+    const wzRow = w => { const g = (RS.groups || []).find(x => x.k === w.rk) || {}; const img = w.img || g.img; const isW = w.kind === 'watch';
+      return `<tr style="${isW ? 'background:#fffbea' : ''}"><td style="padding:2px 6px;white-space:nowrap;font-size:11px">${esc(jstDateTime(w.at))}<div>${isW ? '<b style="color:#8a4b00">🟡 様子見</b>' : '<b style="color:#1565c0">🔔 確認待ち</b>'}</div></td><td style="padding:2px 6px">${esc(w.cc)}</td><td style="padding:2px 4px;width:48px">${rsImg(img)}</td><td style="padding:2px 6px">${nm(w.name, 'wrap')}${w.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(w.title, 'wrap')}</div>` : ''}<div class="smd-dim" style="font-size:10.5px">注文 ${esc(w.sn || '')}</div></td>
+        <td style="padding:2px 6px;white-space:nowrap"><input type="number" min="1" max="99" value="${(rules[w.rk] && rules[w.rk].q) || defQ}" class="rs-wq" style="width:44px"> 個で
+          ${isW ? '' : `<button class="smd-btn b-write rs-wact" data-a="auto" data-k="${esc(w.key)}" title="いま戻して、次にこの商品が売れた時も自動でこの数に戻す">戻す（次も自動）</button> `}<button class="smd-btn rs-wact" data-a="once" data-k="${esc(w.key)}" title="今回だけ戻す。次に売れた時もまた確認待ちに並ぶ">今回だけ戻す</button>
+          ${isW ? `<button class="smd-btn rs-wact" data-a="skip" data-k="${esc(w.key)}" title="戻さずに一覧から外す">外す</button>` : `<button class="smd-btn b-sort rs-wact" data-a="watch" data-k="${esc(w.key)}" title="戻さない。次に売れた時も様子見の一覧に並ぶ">様子見（戻さない）</button>`}</td></tr>`; };
+    const nReview = wz.filter(w => w.kind !== 'watch').length;
+    const wzHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">🔔 売れて在庫0になった明細（確認待ち ${rsNum(nReview)}件・様子見 ${rsNum(wz.length - nReview)}件）<span class="smd-dim" style="font-weight:400;font-size:11.5px">　画像を見て、すぐ仕入れられるなら「戻す（次も自動）」、高い・なかなか出ないものは「様子見」。決めた商品は次から自動で処理されます</span></div>
+      ${wz.length ? `<table style="border-collapse:collapse;font-size:12px;width:100%;margin-top:6px"><tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 6px">0になった日時</th><th style="text-align:left;padding:2px 6px">国</th><th></th><th style="text-align:left;padding:2px 6px">商品</th><th style="text-align:left;padding:2px 6px">どうするか</th></tr>${wz.map(wzRow).join('')}</table>` : '<div style="font-size:12px;margin-top:6px;color:#137333">✔ ありません</div>'}
     </div>`;
     const q = rsKey(RS.q);
     let list = RS.groups || [];
@@ -31394,7 +31410,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     else if (RS.f === 'many') list = list.filter(e => e.maxStock >= 3 && !rules[e.k]);
     list = list.slice().sort(RS.sort === 'stock' ? (a, b) => b.maxStock - a.maxStock || b.maxJpy - a.maxJpy : (a, b) => b.maxJpy - a.maxJpy);
     const shown = list.slice(0, 300);
-    const cur = e => { const r = rules[e.k]; return !r ? 'def' : (r.m === 'watch' ? 'watch' : 'qty'); };
+    const cur = e => { const r = rules[e.k]; return !r ? 'def' : (r.m === 'watch' ? 'watch' : r.m === 'auto' ? 'auto' : 'qty'); };
     const row = e => { const c = cur(e), r = rules[e.k] || {}; return `<tr data-k="${esc(e.k)}">
       ${RS.f === 'many' ? `<td style="padding:2px 6px"><input type="checkbox" class="rs-chk" ${RS.uncheck.has(e.k) ? '' : 'checked'}></td>` : ''}
       <td style="padding:2px 4px;width:48px">${rsImg(e.img)}</td>
@@ -31402,7 +31418,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <td style="padding:2px 6px;text-align:right;white-space:nowrap">${e.maxJpy ? '約' + fmtJpy(e.maxJpy) : '—'}</td>
       <td style="padding:2px 6px;text-align:right">${rsNum(e.maxStock)}</td>
       <td style="padding:2px 6px;white-space:nowrap" class="smd-dim">${e.ccs.size}か国・${rsNum(e.n)}明細</td>
-      <td style="padding:2px 6px;white-space:nowrap"><select class="rs-mode"><option value="def" ${c === 'def' ? 'selected' : ''}>既定（${defQ}に戻す）</option><option value="qty" ${c === 'qty' ? 'selected' : ''}>数を指定して戻す</option><option value="watch" ${c === 'watch' ? 'selected' : ''}>様子見（戻さない）</option></select>
+      <td style="padding:2px 6px;white-space:nowrap"><select class="rs-mode"><option value="def" ${c === 'def' ? 'selected' : ''}>未定（売れたら確認）</option><option value="auto" ${c === 'auto' ? 'selected' : ''}>自動で戻す（${defQ}個）</option><option value="qty" ${c === 'qty' ? 'selected' : ''}>自動で戻す（数を指定）</option><option value="watch" ${c === 'watch' ? 'selected' : ''}>様子見（戻さない）</option></select>
         <input type="number" class="rs-q" min="1" max="99" value="${r.q || Math.max(1, e.maxStock)}" style="width:46px;${c === 'qty' ? '' : 'display:none'}"></td></tr>`; };
     const setHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">⚙️ 商品ごとの決め <span class="smd-dim" style="font-weight:400;font-size:11.5px">　同じ名前の明細は全部の国に同じ決めが効きます。すぐ仕入れられない商品は「様子見」、潤沢な商品は「数を指定」（5など）</span></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
@@ -31425,8 +31441,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const onb = host.querySelector('#rs-on');
     if (onb) onb.addEventListener('change', async () => {
       if (onb.checked) {
-        const nW = Object.values(RS.kv.rules).filter(r => r && r.m === 'watch').length;
-        if (!confirm('在庫の自動復活を ON にします。\n\n・注文で在庫0になった明細を、決めた数（指定が無ければ ' + (parseInt(RS.kv.cfg.qty, 10) || 1) + '個）に戻します\n・様子見にした商品（いま ' + nW + '件）は戻しません\n\nすぐ仕入れられない商品（高いもの・年に数回しか出ないもの）を様子見にしましたか？')) { onb.checked = false; return; }
+        if (!confirm('在庫の自動復活を ON にします。\n\n・「自動で戻す」に決めた商品だけ、注文で0になったら戻します\n・決めていない商品は戻さず「確認待ち」に並べます（画像を見て決める）\n・様子見の商品は戻しません')) { onb.checked = false; return; }
       }
       try { RS.kv.cfg = await rsSaveKey('stock_restore_cfg', c => { c.on = onb.checked; c.at = new Date().toISOString(); }, '在庫の自動復活の設定'); try { logAct('出品', '在庫の自動復活', onb.checked ? 'ON' : 'OFF', ''); } catch (_) {} rsDraw(); } catch (e) { onb.checked = !onb.checked; err(e); }
     });
@@ -31442,7 +31457,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const k = tr.dataset.k, sel = tr.querySelector('.rs-mode'), qn = tr.querySelector('.rs-q'); if (!sel) return;
       sel.addEventListener('change', async () => {
         if (qn) qn.style.display = sel.value === 'qty' ? '' : 'none';
-        const val = sel.value === 'watch' ? { m: 'watch' } : sel.value === 'qty' ? { q: Math.max(1, Math.min(99, parseInt(qn.value, 10) || 1)) } : null;
+        const val = sel.value === 'watch' ? { m: 'watch' } : sel.value === 'auto' ? { m: 'auto' } : sel.value === 'qty' ? { q: Math.max(1, Math.min(99, parseInt(qn.value, 10) || 1)) } : null;
         try { await saveRule(k, val); toast('保存しました'); } catch (e) { err(e); }
       });
       if (qn) qn.addEventListener('change', async () => { if (sel.value !== 'qty') return; try { await saveRule(k, { q: Math.max(1, Math.min(99, parseInt(qn.value, 10) || 1)) }); toast('保存しました'); } catch (e) { err(e); } });
@@ -31456,19 +31471,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       bulk.disabled = true;
       try { const at = new Date().toISOString(); RS.kv.rules = await rsSaveKey('stock_restore_rules', r => { ks.forEach(k => { if (!r[k]) r[k] = { q: Math.min(99, ms.get(k) || 1), at }; }); }, '商品ごとの決め'); toast(ks.length + '件を保存しました'); rsDraw(); } catch (e) { bulk.disabled = false; err(e); }
     });
-    host.querySelectorAll('.rs-wback,.rs-wskip').forEach(b => b.addEventListener('click', async () => {
-      const k = b.dataset.k, w = (RS.kv.state.watchZero || {})[k]; if (!w) return;
-      b.disabled = true;
+    host.querySelectorAll('.rs-wact').forEach(b => b.addEventListener('click', async () => {
+      const k = b.dataset.k, a = b.dataset.a, w = (RS.kv.state.watchZero || {})[k]; if (!w) return;
+      const n = Math.max(1, Math.min(99, parseInt(b.closest('td').querySelector('.rs-wq').value, 10) || 1));
+      const restore = a === 'auto' || a === 'once';
+      if (restore && !confirm(w.cc + '「' + w.name + '」の在庫を ' + n + ' に戻します（Shopee に書きます）' + (a === 'auto' ? '\n次にこの商品が売れた時も、自動で ' + n + ' に戻します' : ''))) return;
+      host.querySelectorAll('.rs-wact[data-k="' + CSS.escape(k) + '"]').forEach(x => { x.disabled = true; });
       try {
-        if (b.classList.contains('rs-wback')) {
-          const n = Math.max(1, Math.min(99, parseInt(b.closest('td').querySelector('.rs-wq').value, 10) || 1));
-          if (!confirm(w.cc + '「' + w.name + '」の在庫を ' + n + ' に戻します（Shopee に書きます）')) { b.disabled = false; return; }
+        if (restore) {
           await openapiUpdateStockList(w.shop_id, w.item_id, [{ model_id: Number(w.model_id) || 0, stock: n }]);
-          try { logAct('出品', '様子見の在庫を戻した', w.cc + ' ' + w.item_id, w.name + ' → ' + n); } catch (_) {}
+          try { logAct('出品', '売れて0の在庫を戻した', w.cc + ' ' + w.item_id, w.name + ' → ' + n + (a === 'auto' ? '（次も自動）' : '（今回だけ）')); } catch (_) {}
         }
-        RS.kv.manual = await rsSaveKey('stock_restore_manual', m => { m[k] = new Date().toISOString(); }, '手で戻した記録');
-        toast(b.classList.contains('rs-wback') ? '在庫を戻しました' : '一覧から外しました'); rsDraw();
-      } catch (e) { b.disabled = false; err(e); }
+        if ((a === 'auto' || a === 'watch') && w.rk) RS.kv.rules = await rsSaveKey('stock_restore_rules', r => { r[w.rk] = Object.assign(a === 'watch' ? { m: 'watch' } : (n === (parseInt(RS.kv.cfg.qty, 10) || 1) ? { m: 'auto' } : { q: n }), { at: new Date().toISOString() }); }, '商品ごとの決め');
+        RS.kv.manual = await rsSaveKey('stock_restore_manual', m => { m[k] = new Date().toISOString(); }, '手で決めた記録');
+        toast(a === 'auto' ? '戻しました（次も自動）' : a === 'once' ? '今回だけ戻しました' : a === 'watch' ? '様子見にしました（戻していません）' : '一覧から外しました'); rsDraw();
+      } catch (e) { host.querySelectorAll('.rs-wact[data-k="' + CSS.escape(k) + '"]').forEach(x => { x.disabled = false; }); err(e); }
     }));
   }
   async function renderQualityTab(force) {
@@ -33340,7 +33357,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         plan: '<b>この画面：これから出品する予定の商品リストです（出品予定の管理）。</b><span class="step">1</span><b>＋追加</b>で 商品名・予定日・バリエ・仕入元 を登録 <span class="step">2</span><b>予定日順</b>に並び<b style="color:#d93025">期限切れは赤</b> <span class="step">3</span>できたら<b>✅出品済</b>／<b>✍️作成へ</b>で出品を作る画面に引き継ぎ。',
         auto: '<b>この画面：母数の空白（まだ出していない作品）を、🤖が写真を探して自動で出品します。</b><span class="step">1</span>上で <b>ON/OFF・1日の上限・機種と国</b> を決める <span class="step">2</span>進み具合と <b>公開待ち</b> を見る <span class="step">3</span>写真がおかしい明細は <b>写真を直す</b> でまとめて直す',
         quality: '<b>この画面：いま出している出品の「足りないもの」を国ごとに見ます（読むだけ・Shopeeには書きません）。</b><span class="step">1</span>上の表で <b>問題×国の件数</b> を見る（数字を押すとその国のその問題だけに絞る） <span class="step">2</span>売れている順に並んだカタログの <b>アイコンを押す</b>＝その国の Seller Center 編集画面で直す <span class="step">3</span>🎬動画と🏪お店の画像は GAS の一括が自動で入れる（⏳待ち／✗失敗を見るだけ）',
-        restock: '<b>この画面：注文で在庫0になった明細を、自動で戻す仕組みの設定です。</b><span class="step">1</span>すぐ仕入れられない商品（高いもの・年に数回しか市場に出ないもの）を<b>様子見</b>に <span class="step">2</span>潤沢な商品は<b>数を指定</b>（5など） <span class="step">3</span>上で <b>ON</b>。様子見の商品が0になったら🟡の一覧に出るので、仕入れられるのを確かめて<b>在庫を戻す</b>',
+        restock: '<b>この画面：注文で在庫0になった明細を戻す仕組みです。</b><span class="step">1</span>売れて0になった明細が<b>🔔確認待ち</b>に並ぶ（毎日） <span class="step">2</span>画像を見て <b>戻す（次も自動）</b>／<b>今回だけ戻す</b>／<b>様子見</b> <span class="step">3</span>決めた商品は次から自動。まだ売れていない商品も下の<b>商品ごとの決め</b>で先に決められます',
         dropship: '<b>この画面：フリマ/ECの商品URLを無在庫で出品し、その在庫を見張って切れたら取り下げ/在庫0にする仕組み。監視〜取り下げまで実データで動きます。</b><br><span class="step">1</span>下の<b>監視カタログ</b>に<b>商品URLを＋追加</b>　<span class="step">2</span>GASが1日2回<b>自動巡回</b>して在庫/画像/価格を🤖取得　<span class="step">3</span>売切れは<b>取り下げ候補</b>に。<b>✍️出品作成</b>で各国へ出品／<b>🔗紐付け</b>た出品を<b>🚫取り下げ / 0️⃣在庫0</b>（公式API・確認式）。'
       };
       const htKey = (tab === 'analysis' && anaSub === 'coverage') ? 'coverage' : tab;

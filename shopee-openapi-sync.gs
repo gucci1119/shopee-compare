@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-2010k';
+var SRC_VER = '20260928-2140v';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4366,7 +4366,7 @@ function saveCustomers_(cc, shopId, details) {
 // ── 🔁 在庫の自動復活（本人 2026-09-28「注文が入って在庫が0になったら自動で1に。0のまま気づかないと機会損失がでかい」）──
 //   対象：直近3日の支払い済み注文（tab 300/400/500）の明細のうち、Shopee で【いま在庫0】のもの＝注文で0になったもの。
 //   わざと0にしている明細（🤖の他国0・市場が少ないので0で出した・途中止まり）は注文が無いので対象に入らない。
-//   商品ごとの決め（app_kv stock_restore_rules {名前の鍵:{m:'watch'}|{q:5}}・国をまたいで名前で束ねる）。様子見は戻さず、一覧（stock_restore_state.watchZero）に出してポータルから手で戻す。
+//   商品ごとの決め（app_kv stock_restore_rules {鍵:{m:'auto'}|{q:5}|{m:'watch'}}）。決めていない商品と様子見は戻さず（確認待ち／様子見）、一覧（stock_restore_state.watchZero）に出してポータルから手で戻す。
 //   戻す数は rules の q、無ければ cfg.qty（既定1）。公開中（status 1）の出品だけ。1回に見る明細は40件まで・同じ注文明細は二度見ない。
 function srKey_(name) { return String(name || '').replace(/^\s*\[[^\]]*\]\s*/, '').replace(/[\u2460-\u2473]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
 /* 鍵＝カタログのタイトル＋明細名（明細名だけだと Yellow など別商品の色名が混ざる）。単品はタイトルだけ。①②の番号は無視＝同じシリーズの続きも同じ決め */
@@ -4374,7 +4374,7 @@ function srRuleKey_(title, model) { return srKey_(title) + (model ? ' | ' + srKe
 function stockRestoreRun_() {
   var rows = sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,stock_restore_state,stock_restore_manual)');   /* 読めなければ投げる＝何も書かない */
   var by = {}; (rows || []).forEach(function (r) { by[r.k] = r.v; });
-  var cfg = by.stock_restore_cfg || {}; if (cfg.on !== true) return { skipped: 'off' };   /* 最初は OFF：商品ごとの決め（様子見・数）を本人が見てから ON（高いたまごっち・年に数回しか仕入れられないゲームがある） */
+  var cfg = by.stock_restore_cfg || {}; if (cfg.on === false) return { skipped: 'off' };   /* ★2026-09-28 本人「毎日売れた商品を目で判定」→ 決めていない商品は戻さず確認待ちに並べる＝既定 ON でも勝手には戻らない */   /* 最初は OFF：商品ごとの決め（様子見・数）を本人が見てから ON（高いたまごっち・年に数回しか仕入れられないゲームがある） */
   var qty = Math.max(1, parseInt(cfg.qty, 10) || 1), days = Math.max(1, Math.min(14, parseInt(cfg.days, 10) || 3));
   var rules = by.stock_restore_rules || {}, st = by.stock_restore_state || {};
   var done = st.done || {}, log = st.log || [], watchZero = st.watchZero || {};
@@ -4405,7 +4405,8 @@ function stockRestoreRun_() {
     var wk = srRuleKey_(li.name || c.name, m ? m.name : '');
     var mid = m ? m.model_id : 0;
     var rule = rules[wk] || null;
-    if (rule && rule.m === 'watch') { out.watch++; watchZero[c.cc + '|' + c.item_id + '|' + mid] = { at: nowIso, cc: c.cc, shop_id: String(li.shop_id), item_id: c.item_id, model_id: mid, name: m ? m.name : (li.name || c.name), title: m ? (li.name || '') : '', rk: wk, sn: c.sn }; mark('watch'); return; }
+    var auto = rule && (rule.m === 'auto' || parseInt(rule.q, 10) > 0);
+    if (!auto) { var kind = (rule && rule.m === 'watch') ? 'watch' : 'review'; if (kind === 'watch') out.watch++; else out.review = (out.review || 0) + 1; watchZero[c.cc + '|' + c.item_id + '|' + mid] = { kind: kind, at: nowIso, cc: c.cc, shop_id: String(li.shop_id), item_id: c.item_id, model_id: mid, name: m ? m.name : (li.name || c.name), title: m ? (li.name || '') : '', rk: wk, sn: c.sn, img: (m && m.img) || '' }; mark(kind); return; }
     try {
       var q = (rule && parseInt(rule.q, 10) > 0) ? Math.min(99, parseInt(rule.q, 10)) : qty;   /* 商品ごとの数（潤沢な在庫は5など）。無ければ既定の1 */
       var r = updateStock_(li.shop_id, c.item_id, mid, q);
