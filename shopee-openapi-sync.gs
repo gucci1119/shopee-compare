@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260929-0050s';
+var SRC_VER = '20260929-0130m';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4377,6 +4377,7 @@ function stockRestoreRun_() {
   var cfg = by.stock_restore_cfg || {}; if (cfg.on === false) return { skipped: 'off' };   /* ★2026-09-28 本人「毎日売れた商品を目で判定」→ 決めていない商品は戻さず確認待ちに並べる＝既定 ON でも勝手には戻らない */   /* 最初は OFF：商品ごとの決め（様子見・数）を本人が見てから ON（高いたまごっち・年に数回しか仕入れられないゲームがある） */
   var qty = Math.max(1, parseInt(cfg.qty, 10) || 1), days = Math.max(1, Math.min(14, parseInt(cfg.days, 10) || 3));
   var rules = by.stock_restore_rules || {}, st = by.stock_restore_state || {};
+  if (st.fmt !== 2) st = {};   /* ★2026-09-29 明細を単品扱いにしていた版の控え（確認待ち22件・model 0）は捨てて、明細ごとに作り直す */
   var done = st.done || {}, log = st.log || [], watchZero = st.watchZero || {};
   var since = Utilities.formatDate(new Date(Date.now() - days * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
   var ords = sbSelectAll_('orders', 'select=cc,sn,tab,order_date,items&tab=in.(300,400,500)&order_date=gte.' + since) || [];
@@ -4394,23 +4395,34 @@ function stockRestoreRun_() {
     var mark = function (res, extra) { done[c.k] = { at: nowIso, r: res }; var e = { at: nowIso, cc: c.cc, sn: c.sn, item_id: c.item_id, name: c.variation || c.name, r: res }; if (extra) Object.keys(extra).forEach(function (x) { e[x] = extra[x]; }); log.unshift(e); };
     if (!li) { out.skip++; mark('no_listing'); return; }
     if (Number(li.status) !== 1) { out.skip++; mark('not_live'); return; }
-    var models; try { models = cache[c.item_id] || (cache[c.item_id] = getModels_(li.shop_id, c.item_id)); } catch (e) { out.err++; return; }   /* 読めなければ控えずに次回 */
-    var m = null;
-    if (models && models.length) { var want = c.variation.trim(); m = models.filter(function (x) { return String(x.name || '').trim() === want; })[0] || null; if (!m) { out.skip++; mark('no_model'); return; } }
-    var stock = m ? Number(m.stock) || 0 : null;
-    if (!m) { /* 単品：明細なし＝ model_id 0。在庫は get_item_base_info の代わりに listings の stock を使わず API を読む */
-      try { var jb = callShop_(parseInt(li.shop_id, 10), '/api/v2/product/get_item_base_info', { item_id_list: c.item_id }, 'get'); var ib = ((jb.response || {}).item_list || [])[0] || {}; var sv = ib.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; stock = ss.stock != null ? Number(ss.stock) : Number((sv.summary_info || {}).total_available_stock) || 0; } catch (e2) { out.err++; return; }
+    /* ★2026-09-29 本人「在庫に戻すのはカタログごとじゃなくて明細ごと。バリエーションもある」：getModels_ は {models:[…]} を返す。
+       前は箱のまま .length を見ていて、全部の明細を「単品（model 0）」扱いにしていた（確認待ち22件がカタログ単位になった） */
+    var gm; try { gm = cache[c.item_id] || (cache[c.item_id] = getModels_(li.shop_id, c.item_id)); } catch (e) { out.err++; return; }   /* 読めなければ控えずに次回 */
+    var models = (gm && gm.models) || [];
+    if (!models.length) { out.err++; return; }                                  /* 読めなかった＝0 とみなさない */
+    var m = null, want = c.variation.trim();
+    var real = models.filter(function (x) { return Number(x.model_id) > 0; });
+    if (real.length) {                                                           /* バリエーションあり＝注文の明細名で1つに決める */
+      if (!want) { out.skip++; mark('no_model'); return; }
+      var vn = function (t) { return String(t || '').replace(/\s*[,\/]\s*/g, ',').replace(/\s+/g, ' ').trim().toLowerCase(); };   /* 2段の明細は注文だと「Red / L」、API だと「Red,L」 */
+      m = real.filter(function (x) { return vn(x.name) === vn(want); })[0] || null;
+      if (!m) { out.skip++; mark('no_model'); return; }
+    } else {                                                                     /* 単品（model 0） */
+      if (want) { out.skip++; mark('no_model'); return; }
+      m = models[0];
     }
+    if (m.stock == null || isNaN(Number(m.stock))) { out.err++; return; }
+    var stock = Number(m.stock);
     if (stock > 0) { out.still++; done[c.k] = { at: nowIso, r: 'still' }; return; }
-    var wk = srRuleKey_(li.name || c.name, m ? m.name : '', m ? m.sku : '');
-    var mid = m ? m.model_id : 0;
+    var mid = Number(m.model_id) || 0;
+    var wk = srRuleKey_(li.name || c.name, mid ? m.name : '', m.sku || '');
     var rule = rules[wk] || null;
     var auto = rule && (rule.m === 'auto' || parseInt(rule.q, 10) > 0);
-    if (!auto) { var kind = (rule && rule.m === 'watch') ? 'watch' : 'review'; if (kind === 'watch') out.watch++; else out.review = (out.review || 0) + 1; watchZero[c.cc + '|' + c.item_id + '|' + mid] = { kind: kind, at: nowIso, cc: c.cc, shop_id: String(li.shop_id), item_id: c.item_id, model_id: mid, name: m ? m.name : (li.name || c.name), title: m ? (li.name || '') : '', rk: wk, sn: c.sn, img: (m && m.img) || '' }; mark(kind); return; }
+    if (!auto) { var kind = (rule && rule.m === 'watch') ? 'watch' : 'review'; if (kind === 'watch') out.watch++; else out.review = (out.review || 0) + 1; watchZero[c.cc + '|' + c.item_id + '|' + mid] = { kind: kind, at: nowIso, cc: c.cc, shop_id: String(li.shop_id), item_id: c.item_id, model_id: mid, name: mid ? m.name : (li.name || c.name), title: mid ? (li.name || '') : '', rk: wk, sn: c.sn, img: m.img || '' }; mark(kind); return; }
     try {
       var q = (rule && parseInt(rule.q, 10) > 0) ? Math.min(99, parseInt(rule.q, 10)) : qty;   /* 商品ごとの数（潤沢な在庫は5など）。無ければ既定の1 */
       var r = updateStock_(li.shop_id, c.item_id, mid, q);
-      if (baStockOk_(r)) { out.restored++; if (m) m.stock = q; mark('restored', { qty: q }); }
+      if (baStockOk_(r)) { out.restored++; m.stock = q; mark('restored', { qty: q }); }
       else { out.err++; }
     } catch (e3) { out.err++; }
   });
@@ -4420,7 +4432,7 @@ function stockRestoreRun_() {
   if (log.length > 300) log = log.slice(0, 300);
   var cutW = new Date(Date.now() - 30 * 86400000).toISOString(), man = by.stock_restore_manual || {};
   Object.keys(watchZero).forEach(function (k) { var w = watchZero[k]; if (!w || String(w.at || '') < cutW || (man[k] && String(man[k]) >= String(w.at || ''))) delete watchZero[k]; });   /* 手で戻した・30日たった様子見は一覧から外す */
-  sbUpsert_('app_kv', [{ k: 'stock_restore_state', v: { done: done, log: log, watchZero: watchZero, lastAt: nowIso, last: out }, updated_at: nowIso }], 'k');
+  sbUpsert_('app_kv', [{ k: 'stock_restore_state', v: { fmt: 2, done: done, log: log, watchZero: watchZero, lastAt: nowIso, last: out }, updated_at: nowIso }], 'k');
   return out;
 }
 function syncOrdersAll(daysWindow, trkMode) {
