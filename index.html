@@ -20295,7 +20295,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-29', items: [
-      '🟥 <b>🔁在庫の自動復活に「いま在庫0」の一覧</b>（本人「現状在庫ゼロのリストも出してほしい」）。公開中の出品で在庫0の明細がある商品を、どの国が0か付きで並べ、国を横に並べた表（各国の在庫数・0は赤）で、チェックした国の0だけを戻せる（本人「国ごとで違うくない？」→決めは商品で全国共通・在庫は国ごと）。わざと0の明細も含むので注意書き付き。',
+      '🟥 <b>🔁在庫の自動復活に「いま在庫0」の一覧</b>（本人「現状在庫ゼロのリストも出してほしい」）。公開中の出品で在庫0の明細がある商品を、どの国が0か付きで並べ、国を横に並べた表（各国の在庫数・0は赤）で、チェックした国の0だけを戻せる（本人「国ごとで違うくない？」→決めは商品で全国共通・在庫は国ごと）。束ねる鍵は<b>SKU（機種_作品名・7か国共通・明細の78%）</b>、無ければタイトル＋明細名（国でタイトルが違う出品が約3,000件別行になっていたため）。わざと0の明細も含むので注意書き付き。',
     ] },
     { date: '2026-09-28', items: [
       '🔔 <b>在庫の自動復活を「売れた商品を毎日目で決める」形にしました</b>（本人「毎日売れていった商品を自分で目で判定していくのはどう？」「オーダーが入ってない商品からの導線も残して」）。決めていない商品は自動では戻さず<b>確認待ち</b>に画像付きで並び、<b>戻す（次も自動）／今回だけ戻す／様子見</b>を選ぶ。決めた商品は次から自動。これで既定 ON（勝手には戻らない）。⚠️自動検知にも件数が出ます。',
@@ -31338,7 +31338,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
      鍵は名前（明細名／単品はタイトル）で国をまたいで束ねる＝GAS の srKey_ と同じ正規化 */
   const rsNum = v => (Number(v) || 0).toLocaleString();
   const rsKey = n => String(n || '').replace(/^\s*\[[^\]]*\]\s*/, '').replace(/[\u2460-\u2473]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const rsRuleKey = (title, model) => rsKey(title) + (model ? ' | ' + rsKey(model) : '');   /* GAS srRuleKey_ と同じ。明細名だけだと Yellow など別商品の色名が混ざる */
+  const rsRuleKey = (title, model, sku) => { const sk = String(sku || '').trim().toUpperCase(); return sk ? 'sku:' + sk : rsKey(title) + (model ? ' | ' + rsKey(model) : ''); };   /* SKU（機種_作品名・7か国共通）があれば SKU で国をまたいで束ねる（本人「国ごとで違うくない？」）。無ければタイトル＋明細名 */   /* GAS srRuleKey_ と同じ。明細名だけだと Yellow など別商品の色名が混ざる */
   const RS = { q: '', f: 'all', sort: 'price', kv: null, seq: 0, uncheck: new Set() };
   async function rsLoadKv() {
     const rows = await sbGetAll('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,stock_restore_state,stock_restore_manual)');
@@ -31358,8 +31358,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(l => {
       if (Number(l.status) !== 1) return;
       const rate = fxRate(cc, today) || 0;
-      const add = (name, mid, stock, price, img) => {
-        const k = rsRuleKey(l.name, mid ? name : ''); if (!k) return;
+      const add = (name, mid, stock, price, img, sku) => {
+        const k = rsRuleKey(l.name, mid ? name : '', sku); if (!k) return;
         let e = g.get(k); if (!e) { e = { k, name: String(name), title: mid ? String(l.name || '') : '', zero: [], st: {}, ccs: new Set(), n: 0, maxStock: 0, maxJpy: 0, img: '' }; g.set(k, e); }
         if (!e.img && img) e.img = img;
         (e.st[cc] = e.st[cc] || []).push(Number(stock) || 0);
@@ -31367,7 +31367,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         e.ccs.add(cc); e.n++; e.maxStock = Math.max(e.maxStock, Number(stock) || 0); e.maxJpy = Math.max(e.maxJpy, Math.round((Number(price) || 0) * rate));
       };
       const ms = (l.models || []).filter(m => m && !m.ghost && m.id);
-      if (ms.length) ms.forEach(m => add(m.n, m.id, m.stock, m.price, m.img || l.image)); else add(l.name, 0, l.stock, l.price_max || l.price_min, l.image);
+      if (ms.length) ms.forEach(m => add(m.n, m.id, m.stock, m.price, m.img || l.image, m.sku)); else add(l.name, 0, l.stock, l.price_max || l.price_min, l.image, '');
     }));
     return [...g.values()];
   }
@@ -31420,13 +31420,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const row = e => { const c = cur(e), r = rules[e.k] || {}; return `<tr data-k="${esc(e.k)}">
       ${RS.f === 'many' ? `<td style="padding:2px 6px"><input type="checkbox" class="rs-chk" ${RS.uncheck.has(e.k) ? '' : 'checked'}></td>` : ''}
       <td style="padding:2px 4px;width:48px">${rsImg(e.img)}</td>
-      <td style="padding:2px 6px">${nm(e.name, 'wrap')}${e.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(e.title, 'wrap')}</div>` : ''}</td>
+      <td style="padding:2px 6px">${nm(e.name, 'wrap')}${e.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(e.title, 'wrap')}</div>` : ''}${e.k.startsWith('sku:') ? `<div class="smd-dim" style="font-size:10px">SKU ${esc(e.k.slice(4))}</div>` : ''}</td>
       <td style="padding:2px 6px;text-align:right;white-space:nowrap">${e.maxJpy ? '約' + fmtJpy(e.maxJpy) : '—'}</td>
       ${CQ_CCS.map(cc => { const a = e.st[cc]; if (!a) return '<td style="padding:2px 4px;text-align:center;color:#ccc">—</td>'; const mn = Math.min(...a), mx = Math.max(...a); const z = mn === 0; return `<td style="padding:2px 4px;text-align:center;white-space:nowrap;${z ? 'background:#fdecea;color:#b3261e;font-weight:700' : ''}">${RS.f === 'zero' && z ? `<input type="checkbox" class="rs-zc" data-cc="${cc}" checked style="margin:0 2px 0 0">` : ''}${mn === mx ? mn : mn + '〜' + mx}</td>`; }).join('')}
       <td style="padding:2px 6px;white-space:nowrap" class="smd-dim">${rsNum(e.n)}明細${RS.f === 'zero' ? `<div style="margin-top:2px"><input type="number" class="rs-zq" min="1" max="99" value="${(rules[e.k] && rules[e.k].q) || defQ}" style="width:40px"> <button class="smd-btn b-write rs-zback" title="チェックした国の在庫0の明細をこの数にする（Shopee に書きます）">チェックした国の0を戻す</button></div>` : ''}</td>
       <td style="padding:2px 6px;white-space:nowrap"><select class="rs-mode"><option value="def" ${c === 'def' ? 'selected' : ''}>未定（売れたら確認）</option><option value="auto" ${c === 'auto' ? 'selected' : ''}>自動で戻す（${defQ}個）</option><option value="qty" ${c === 'qty' ? 'selected' : ''}>自動で戻す（数を指定）</option><option value="watch" ${c === 'watch' ? 'selected' : ''}>様子見（戻さない）</option></select>
         <input type="number" class="rs-q" min="1" max="99" value="${r.q || Math.max(1, e.maxStock)}" style="width:46px;${c === 'qty' ? '' : 'display:none'}"></td></tr>`; };
-    const setHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">⚙️ 商品ごとの決め <span class="smd-dim" style="font-weight:400;font-size:11.5px">　同じ名前の明細は全部の国に同じ決めが効きます。すぐ仕入れられない商品は「様子見」、潤沢な商品は「数を指定」（5など）</span></div>
+    const setHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">⚙️ 商品ごとの決め <span class="smd-dim" style="font-weight:400;font-size:11.5px">　同じSKU（無ければ同じタイトル＋明細名）の明細は全部の国に同じ決めが効きます。すぐ仕入れられない商品は「様子見」、潤沢な商品は「数を指定」（5など）</span></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <input id="rs-q" type="search" placeholder="名前で探す（例: tamagotchi）" value="${esc(RS.q)}" style="width:240px">
         <span class="smd-seg" id="rs-f">${[['all', 'すべて'], ['set', '決めたもの'], ['watch', '様子見だけ'], ['many', 'いま在庫3以上（未設定）'], ['zero', 'いま在庫0']].map(([k, l]) => `<button data-f="${k}" class="${RS.f === k ? 'on' : ''}">${l}</button>`).join('')}</span>

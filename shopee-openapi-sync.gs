@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-2140v';
+var SRC_VER = '20260929-0050s';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4370,7 +4370,7 @@ function saveCustomers_(cc, shopId, details) {
 //   戻す数は rules の q、無ければ cfg.qty（既定1）。公開中（status 1）の出品だけ。1回に見る明細は40件まで・同じ注文明細は二度見ない。
 function srKey_(name) { return String(name || '').replace(/^\s*\[[^\]]*\]\s*/, '').replace(/[\u2460-\u2473]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
 /* 鍵＝カタログのタイトル＋明細名（明細名だけだと Yellow など別商品の色名が混ざる）。単品はタイトルだけ。①②の番号は無視＝同じシリーズの続きも同じ決め */
-function srRuleKey_(title, model) { return srKey_(title) + (model ? ' | ' + srKey_(model) : ''); }
+function srRuleKey_(title, model, sku) { var sk = String(sku || '').trim().toUpperCase(); if (sk) return 'sku:' + sk; return srKey_(title) + (model ? ' | ' + srKey_(model) : ''); }   /* ★2026-09-29 本人「国ごとで違うくない？」→ SKU（機種_作品名・7か国共通）があれば SKU で束ねる。明細の78%に入っている */
 function stockRestoreRun_() {
   var rows = sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,stock_restore_state,stock_restore_manual)');   /* 読めなければ投げる＝何も書かない */
   var by = {}; (rows || []).forEach(function (r) { by[r.k] = r.v; });
@@ -4402,7 +4402,7 @@ function stockRestoreRun_() {
       try { var jb = callShop_(parseInt(li.shop_id, 10), '/api/v2/product/get_item_base_info', { item_id_list: c.item_id }, 'get'); var ib = ((jb.response || {}).item_list || [])[0] || {}; var sv = ib.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; stock = ss.stock != null ? Number(ss.stock) : Number((sv.summary_info || {}).total_available_stock) || 0; } catch (e2) { out.err++; return; }
     }
     if (stock > 0) { out.still++; done[c.k] = { at: nowIso, r: 'still' }; return; }
-    var wk = srRuleKey_(li.name || c.name, m ? m.name : '');
+    var wk = srRuleKey_(li.name || c.name, m ? m.name : '', m ? m.sku : '');
     var mid = m ? m.model_id : 0;
     var rule = rules[wk] || null;
     var auto = rule && (rule.m === 'auto' || parseInt(rule.q, 10) > 0);
