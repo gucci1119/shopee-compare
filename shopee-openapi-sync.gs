@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260928-1040p';
+var SRC_VER = '20260928-1110q';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6592,12 +6592,12 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
      実測（控えの「未開封」322枚から無作為25枚を目視→正解表）：Haiku のフィルムの印（1つでも）＝普通の中古13枚中9枚を未開封と誤判定／
      Sonnet 5 に1回で聞く＝13枚中1枚・本当の未開封5枚中4枚を拾う（取りこぼし1枚は拾えた1枚と同じ商品）。四隅も同じ回答で埋める＝呼び出しが1回減る。
      控えは新しい鍵 |s4（古い |s3＝Haikuの判定は落としすぎなので使わない）。四隅は |c1 に同じ形で書く。上位モデルを止めている時（confirmModel=false）は Haiku で今までどおり */
-  var ck = u + '|s4', cv = cache ? String(cache[ck] || '') : '';
-  if (!cv && cache) { var _is = baImgIdx_(cache)[String(u).split('|')[0]]; if (_is && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) { cv = _is.s4; cache[ck] = cv; } }
+  if (BA_CONFIRM === null) { var c00 = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (c00.confirmModel === false) ? '' : String(c00.confirmModel || 'claude-sonnet-5'); }
+  var ck = u + (BA_CONFIRM ? '|s4' : '|s3'), cv = cache ? String(cache[ck] || '') : '';   /* ★Codex：上位モデルの控え（|s4）と Haiku の控え（|s3）を分ける */
+  if (!cv && cache && BA_CONFIRM) { var _is = baImgIdx_(cache)[String(u).split('|')[0]]; if (_is && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) { cv = _is.s4; cache[ck] = cv; } }
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
   if (cv.indexOf('hw:') === 0 || cv === 'ov:1') return cv;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
-  if (BA_CONFIRM === null) { var c0 = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (c0.confirmModel === false) ? '' : String(c0.confirmModel || 'claude-sonnet-5'); }
   var big = !!BA_CONFIRM, model = big ? BA_CONFIRM : 'claude-haiku-4-5-20251001';
   var txt0 = '中古ゲームの出品写真です。見えたことだけを書き写してください。判定はしないでください。JSONだけで答える：{'
     + (big ? '"corners":["art|other"×4（画像の四隅＝左上・右上・左下・右下の端のすぐ内側が、パッケージ・ラベル・カセットの印刷された絵柄や文字なら art、机・床・布・手・壁・余白・背景・ケースの外側なら other）],' : '')
@@ -6617,8 +6617,8 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   if (big && Array.isArray(o.corners) && o.corners.length === 4 && cache) { var nArt = o.corners.filter(function (x) { return String(x) === 'art'; }).length; cache[u + '|c1'] = 'art:' + nArt; baImgMemoSet_(u, 'c1', 'art:' + nArt); }
   var sealed = big ? !!(o.sealed_look === true || o.sticker_on_film === true || o.film_overhang === true) : !!(o.film_overhang === true || o.film_wrinkle === true || o.film_seam === true || o.sticker_on_film === true);
   if (hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); if (seenHw.length && seenHw[0] !== String(hwKey)) { if (cache) cache[ck] = 'hw:' + seenHw[0]; return 'hw:' + seenHw[0]; } }
-  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; baImgMemoSet_(u, 's4', 'ov:1'); } return 'ov:1'; }
-  if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); baImgMemoSet_(u, 's4', 'sealed:' + (sealed ? 1 : 0)); }
+  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; if (big) baImgMemoSet_(u, 's4', 'ov:1'); } return 'ov:1'; }
+  if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); if (big) baImgMemoSet_(u, 's4', 'sealed:' + (sealed ? 1 : 0)); }
   return sealed;
 }
 /* ★2026-09-28 本人「一回見た写真を再度見に行ったりしてない？」。控えの鍵は「写真|v13|機種|作品」なので、
@@ -6650,10 +6650,16 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
+  /* ★2026-09-28 「未開封」で落としていた写真（Haiku の判定は落としすぎ・25枚中13枚が普通の中古）は、上位モデルが使える時に【最初から】判定し直す。
+     控えを消して下の普通の判定に流す＝他の条件（表面・作品・機種）も1日の上限も今までどおり効く（Codex 指摘：四隅とシュリンクだけで復活させると裏面や別作品まで通る）。
+     見直したかどうかは |s4（上位モデルの確認の控え）で見る。Haiku の控えは |s3 なので混ざらない */
+  if (cache && String(cache[u] || '') === 'ng:sealed' && !cache[u + '|s4']) {
+    if (BA_CONFIRM === null) { var _cf = baKv_('boshu_auto_cfg') || {}; BA_CONFIRM = (_cf.confirmModel === false) ? '' : String(_cf.confirmModel || 'claude-sonnet-5'); }
+    if (BA_CONFIRM) { delete cache[u]; cache[u + '|s4'] = 'rev'; }   /* 'rev'＝見直しに入った印（最初の判定でまた落ちても、次から繰り返さない。上位モデルの確認まで進めば上書きされる） */
+  }
   if (cache && cache[u]) {
     var c0 = String(cache[u]);
-    var _revive = (c0 === 'ng:sealed' && !(cache[u + '|s4']));   /* ★2026-09-28 「未開封」で落としていた写真は、新しい聞き方（上位モデル1回）で1度だけ見直す＝使える中古の写真を取り戻す */
-    if (c0.indexOf('ok:') === 0 || _revive) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
+    if (c0.indexOf('ok:') === 0) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
       /* ★2026-09-28 本人「さらに減らせる余地」①：シュリンクの確認（38%を落とす・Haiku）を先、四隅の確認（5.5%・上位モデル）を後に。
          先に落ちた写真には高い方をかけない。確認の中身は同じ＝基準は変わらない */
       var s0 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey);   /* ★2026-09-26 通っていた写真もシュリンク（と機種ロゴ）の確認を1回だけ */
@@ -6663,7 +6669,6 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
       var n0 = baConfirmCorners_(imgUrl, u, st, cache);
       if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
       if (n0 >= 3) { cache[u] = 'ng:catalog4'; return { ok: false, judged: true, kind: 'catalog4', cached: true }; }
-      if (_revive) { cache[u] = 'ok:resealed'; return { ok: true, judged: true, kind: 'resealed', cached: true }; }
     }
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
   }
