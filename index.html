@@ -20294,6 +20294,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-09-29', items: [
+      '🟥 <b>🔁在庫の自動復活に「いま在庫0」の一覧</b>（本人「現状在庫ゼロのリストも出してほしい」）。公開中の出品で在庫0の明細がある商品を、どの国が0か付きで並べ、国を横に並べた表（各国の在庫数・0は赤）で、チェックした国の0だけを戻せる（本人「国ごとで違うくない？」→決めは商品で全国共通・在庫は国ごと）。わざと0の明細も含むので注意書き付き。',
+    ] },
     { date: '2026-09-28', items: [
       '🔔 <b>在庫の自動復活を「売れた商品を毎日目で決める」形にしました</b>（本人「毎日売れていった商品を自分で目で判定していくのはどう？」「オーダーが入ってない商品からの導線も残して」）。決めていない商品は自動では戻さず<b>確認待ち</b>に画像付きで並び、<b>戻す（次も自動）／今回だけ戻す／様子見</b>を選ぶ。決めた商品は次から自動。これで既定 ON（勝手には戻らない）。⚠️自動検知にも件数が出ます。',
       '🖼 <b>🔁在庫の自動復活の一覧に商品画像を出しました</b>（本人「商品ごとのキメのところに画像がない」）。明細の画像（無ければカタログの1枚目）。',
@@ -31357,8 +31360,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const rate = fxRate(cc, today) || 0;
       const add = (name, mid, stock, price, img) => {
         const k = rsRuleKey(l.name, mid ? name : ''); if (!k) return;
-        let e = g.get(k); if (!e) { e = { k, name: String(name), title: mid ? String(l.name || '') : '', ccs: new Set(), n: 0, maxStock: 0, maxJpy: 0, img: '' }; g.set(k, e); }
+        let e = g.get(k); if (!e) { e = { k, name: String(name), title: mid ? String(l.name || '') : '', zero: [], st: {}, ccs: new Set(), n: 0, maxStock: 0, maxJpy: 0, img: '' }; g.set(k, e); }
         if (!e.img && img) e.img = img;
+        (e.st[cc] = e.st[cc] || []).push(Number(stock) || 0);
+        if (!(Number(stock) > 0)) e.zero.push({ cc, shop_id: String(l.shop_id || ''), item_id: String(l.item_id), model_id: mid || 0 });
         e.ccs.add(cc); e.n++; e.maxStock = Math.max(e.maxStock, Number(stock) || 0); e.maxJpy = Math.max(e.maxJpy, Math.round((Number(price) || 0) * rate));
       };
       const ms = (l.models || []).filter(m => m && !m.ghost && m.id);
@@ -31408,6 +31413,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (RS.f === 'set') list = list.filter(e => rules[e.k]);
     else if (RS.f === 'watch') list = list.filter(e => rules[e.k] && rules[e.k].m === 'watch');
     else if (RS.f === 'many') list = list.filter(e => e.maxStock >= 3 && !rules[e.k]);
+    else if (RS.f === 'zero') list = list.filter(e => e.zero.length);
     list = list.slice().sort(RS.sort === 'stock' ? (a, b) => b.maxStock - a.maxStock || b.maxJpy - a.maxJpy : (a, b) => b.maxJpy - a.maxJpy);
     const shown = list.slice(0, 300);
     const cur = e => { const r = rules[e.k]; return !r ? 'def' : (r.m === 'watch' ? 'watch' : r.m === 'auto' ? 'auto' : 'qty'); };
@@ -31416,20 +31422,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <td style="padding:2px 4px;width:48px">${rsImg(e.img)}</td>
       <td style="padding:2px 6px">${nm(e.name, 'wrap')}${e.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(e.title, 'wrap')}</div>` : ''}</td>
       <td style="padding:2px 6px;text-align:right;white-space:nowrap">${e.maxJpy ? '約' + fmtJpy(e.maxJpy) : '—'}</td>
-      <td style="padding:2px 6px;text-align:right">${rsNum(e.maxStock)}</td>
-      <td style="padding:2px 6px;white-space:nowrap" class="smd-dim">${e.ccs.size}か国・${rsNum(e.n)}明細</td>
+      ${CQ_CCS.map(cc => { const a = e.st[cc]; if (!a) return '<td style="padding:2px 4px;text-align:center;color:#ccc">—</td>'; const mn = Math.min(...a), mx = Math.max(...a); const z = mn === 0; return `<td style="padding:2px 4px;text-align:center;white-space:nowrap;${z ? 'background:#fdecea;color:#b3261e;font-weight:700' : ''}">${RS.f === 'zero' && z ? `<input type="checkbox" class="rs-zc" data-cc="${cc}" checked style="margin:0 2px 0 0">` : ''}${mn === mx ? mn : mn + '〜' + mx}</td>`; }).join('')}
+      <td style="padding:2px 6px;white-space:nowrap" class="smd-dim">${rsNum(e.n)}明細${RS.f === 'zero' ? `<div style="margin-top:2px"><input type="number" class="rs-zq" min="1" max="99" value="${(rules[e.k] && rules[e.k].q) || defQ}" style="width:40px"> <button class="smd-btn b-write rs-zback" title="チェックした国の在庫0の明細をこの数にする（Shopee に書きます）">チェックした国の0を戻す</button></div>` : ''}</td>
       <td style="padding:2px 6px;white-space:nowrap"><select class="rs-mode"><option value="def" ${c === 'def' ? 'selected' : ''}>未定（売れたら確認）</option><option value="auto" ${c === 'auto' ? 'selected' : ''}>自動で戻す（${defQ}個）</option><option value="qty" ${c === 'qty' ? 'selected' : ''}>自動で戻す（数を指定）</option><option value="watch" ${c === 'watch' ? 'selected' : ''}>様子見（戻さない）</option></select>
         <input type="number" class="rs-q" min="1" max="99" value="${r.q || Math.max(1, e.maxStock)}" style="width:46px;${c === 'qty' ? '' : 'display:none'}"></td></tr>`; };
     const setHtml = `<div class="tool-card" style="max-width:none;margin:0 0 12px"><div style="font-weight:700;font-size:13.5px">⚙️ 商品ごとの決め <span class="smd-dim" style="font-weight:400;font-size:11.5px">　同じ名前の明細は全部の国に同じ決めが効きます。すぐ仕入れられない商品は「様子見」、潤沢な商品は「数を指定」（5など）</span></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <input id="rs-q" type="search" placeholder="名前で探す（例: tamagotchi）" value="${esc(RS.q)}" style="width:240px">
-        <span class="smd-seg" id="rs-f">${[['all', 'すべて'], ['set', '決めたもの'], ['watch', '様子見だけ'], ['many', 'いま在庫3以上（未設定）']].map(([k, l]) => `<button data-f="${k}" class="${RS.f === k ? 'on' : ''}">${l}</button>`).join('')}</span>
+        <span class="smd-seg" id="rs-f">${[['all', 'すべて'], ['set', '決めたもの'], ['watch', '様子見だけ'], ['many', 'いま在庫3以上（未設定）'], ['zero', 'いま在庫0']].map(([k, l]) => `<button data-f="${k}" class="${RS.f === k ? 'on' : ''}">${l}</button>`).join('')}</span>
         <label style="font-size:12px">並び <select id="rs-sort"><option value="price" ${RS.sort === 'price' ? 'selected' : ''}>価格の高い順</option><option value="stock" ${RS.sort === 'stock' ? 'selected' : ''}>在庫の多い順</option></select></label>
         <span class="smd-dim" style="font-size:11.5px">${rsNum(list.length)}件${list.length > shown.length ? '（上の ' + rsNum(shown.length) + '件を表示）' : ''}</span>
       </div>
+      ${RS.f === 'zero' ? `<div style="margin-top:6px;font-size:12px;background:#fdecea;border:1px solid #f5c2c0;border-radius:6px;padding:6px 8px">いま在庫0の明細がある商品です（公開中の出品だけ・国をまたいで束ねています）。<b>わざと0にしている明細も含みます</b>（🤖が市場に少ない作品を0で出した・一点物が他の国で売れたので0にした 等）。戻す国にチェックを入れて数を入れ「チェックした国の0を戻す」、ずっと様子見なら右の決めを「様子見」に。</div>` : ''}
       ${RS.f === 'many' ? `<div style="margin-top:6px;font-size:12px;background:#fff8e1;border:1px solid #f0d58c;border-radius:6px;padding:6px 8px">いま在庫3以上にしている明細です。<b>高いもの・すぐ仕入れられないもののチェックを外してから</b>、下のボタンで「いまの在庫数で戻す」決めにまとめて入れます（チェックを外したものは既定の ${defQ} のまま）。
         <button class="smd-btn b-write" id="rs-bulk" style="margin-left:6px">✔ チェックした ${rsNum(shown.filter(e => !RS.uncheck.has(e.k)).length)}件を「いまの在庫数で戻す」にする</button></div>` : ''}
-      <div style="overflow:auto;max-height:560px;margin-top:6px"><table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px">${RS.f === 'many' ? '<th></th>' : ''}<th></th><th style="text-align:left;padding:2px 6px">商品（明細名／単品はタイトル）</th><th style="text-align:right;padding:2px 6px">価格（最高）</th><th style="text-align:right;padding:2px 6px">在庫（最大）</th><th style="text-align:left;padding:2px 6px">出している所</th><th style="text-align:left;padding:2px 6px">0になったら</th></tr>${shown.map(row).join('')}</table></div>
+      <div style="overflow:auto;max-height:560px;margin-top:6px"><table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px">${RS.f === 'many' ? '<th></th>' : ''}<th></th><th style="text-align:left;padding:2px 6px">商品（明細名／単品はタイトル）</th><th style="text-align:right;padding:2px 6px">価格（最高）</th>${CQ_CCS.map(cc => `<th style="text-align:center;padding:2px 4px">${cc}</th>`).join('')}<th style="text-align:left;padding:2px 6px">明細数</th><th style="text-align:left;padding:2px 6px">0になったら</th></tr>${shown.map(row).join('')}</table></div>
     </div>`;
     const lg = (state.log || []).slice(0, 40), RL = { restored: '✅ 戻した', watch: '🟡 様子見', no_listing: '出品が見つからない', not_live: '公開中でない', no_model: '明細が見つからない' };
     const logHtml = `<details class="tool-card" style="max-width:none;margin:0 0 12px"><summary style="cursor:pointer;font-weight:700;font-size:13px">📜 最近の動き（${rsNum(lg.length)}件）</summary>${lg.length ? `<table style="border-collapse:collapse;font-size:11.5px;width:100%;margin-top:6px">${lg.map(x => `<tr><td style="padding:1px 6px;white-space:nowrap">${esc(jstDateTime(x.at))}</td><td style="padding:1px 6px">${esc(x.cc)}</td><td style="padding:1px 6px">${nm(x.name, 'wrap')}</td><td style="padding:1px 6px;white-space:nowrap">${esc(RL[x.r] || x.r)}${x.qty ? '（' + x.qty + '個）' : ''}</td></tr>`).join('')}</table>` : '<div class="smd-dim" style="font-size:12px;margin-top:4px">まだありません</div>'}</details>`;
@@ -31462,6 +31469,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       });
       if (qn) qn.addEventListener('change', async () => { if (sel.value !== 'qty') return; try { await saveRule(k, { q: Math.max(1, Math.min(99, parseInt(qn.value, 10) || 1)) }); toast('保存しました'); } catch (e) { err(e); } });
     });
+    host.querySelectorAll('.rs-zback').forEach(b => b.addEventListener('click', async () => {
+      const tr = b.closest('tr'), k = tr.dataset.k, e = (RS.groups || []).find(x => x.k === k); if (!e || !e.zero.length) return;
+      const ccs = new Set([...tr.querySelectorAll('.rs-zc:checked')].map(c => c.dataset.cc)); const tgt = e.zero.filter(z => ccs.has(z.cc));
+      if (!tgt.length) { alert('戻す国にチェックを入れてください'); return; }
+      const n = Math.max(1, Math.min(99, parseInt(b.closest('td').querySelector('.rs-zq').value, 10) || 1));
+      if (!confirm('「' + e.name + '」の在庫0の明細 ' + tgt.length + '件（' + [...ccs].join('・') + '）を ' + n + ' にします（Shopee に書きます）')) return;
+      b.disabled = true; const by = new Map();
+      tgt.forEach(z => { const kk = z.shop_id + '|' + z.item_id; if (!by.has(kk)) by.set(kk, { shop_id: z.shop_id, item_id: z.item_id, list: [] }); by.get(kk).list.push({ model_id: Number(z.model_id) || 0, stock: n }); });
+      let ok = 0, ng = 0;
+      for (const x of by.values()) { try { await openapiUpdateStockList(x.shop_id, x.item_id, x.list); ok += x.list.length; } catch (_) { ng += x.list.length; } }
+      try { logAct('出品', '在庫0の明細を戻した', e.name, ok + '件 → ' + n + (ng ? '（失敗 ' + ng + '）' : '')); } catch (_) {}
+      if (!ng) { e.zero = e.zero.filter(z => !ccs.has(z.cc)); Object.keys(e.st).forEach(cc => { if (ccs.has(cc)) e.st[cc] = e.st[cc].map(v => v || n); }); toast(ok + '件を ' + n + ' にしました'); rsDraw(); } else { b.disabled = false; alert(ok + '件は戻しました。' + ng + '件は失敗しました（もう一度押すと残りを試します）'); }
+    }));
     const bulk = host.querySelector('#rs-bulk');
     if (bulk) bulk.addEventListener('click', async () => {
       const ks = [...host.querySelectorAll('.rs-chk:checked')].map(c => c.closest('tr').dataset.k);
