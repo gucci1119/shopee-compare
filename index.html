@@ -17836,6 +17836,65 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const prevPct = (prevN > 0) ? Math.round((projN - prevN) / prevN * 100) : null;
     return { daysIn, cur, daysEl, n, gn, projN, gpo, g, shipPO, packPO, varPO, contrib, fixed, be, projNet, projAfter, pcfg, target, needN, rb, retPct, expPct, rentN, prevPct };
   }
+  /* 📅 月次のふりかえりの日ごとの記録（本人 2026-09-29「ここは毎日どこかで更新されるようにして」→「毎日の記録を残す」）。
+     ふりかえりを描くたびに【今月の今日の値】を app_kv.pl_review_daily に上書きで残す＋担当PCが1日1回、画面を開いていなくても裏で今月を計算して残す。 */
+  const PLR = { hist: null, at: 0, pend: null, t: null };
+  function plReviewSnapSave(snap) {
+    try {
+      if (!settings.sbSecret || demoOn()) return;
+      const today = jstDate(Date.now()); if (snap.ym !== today.slice(0, 7)) return;   /* 過去の月を開いた時は書かない */
+      PLR.pend = Object.assign({}, snap, { at: new Date().toISOString() });
+      clearTimeout(PLR.t);
+      PLR.t = setTimeout(async () => {
+        const sv = PLR.pend; PLR.pend = null; if (!sv) return;
+        const cur = await sbGet('app_kv', 'select=v&k=eq.pl_review_daily').catch(() => null); if (cur === null) return;   /* 読めなければ書かない */
+        const v = ((cur || [])[0] || {}).v || {}; const d = v.days || {};
+        d[today] = sv;
+        const keep = Object.keys(d).sort().slice(-120); const nd = {}; keep.forEach(k => { nd[k] = d[k]; });
+        await sbUpsert('app_kv', [{ k: 'pl_review_daily', v: { days: nd }, updated_at: new Date().toISOString() }], 'k');
+        PLR.hist = nd; PLR.at = Date.now(); plReviewHistFill();
+      }, 4000);
+    } catch (_) {}
+  }
+  async function plReviewHistLoad(force) {
+    if (!force && PLR.hist && Date.now() - PLR.at < 300000) return PLR.hist;
+    const r = await sbGet('app_kv', 'select=v&k=eq.pl_review_daily').catch(() => null);
+    if (r !== null) { PLR.hist = (((r || [])[0] || {}).v || {}).days || {}; PLR.at = Date.now(); }
+    return PLR.hist || {};
+  }
+  function plReviewHistFill() {
+    const els = document.querySelectorAll('.pl-rv-hist'); if (!els.length) return;
+    plReviewHistLoad().then(h => {
+      els.forEach(el => {
+        const ym = el.dataset.ym, days = Object.keys(h || {}).filter(d => d.slice(0, 7) === ym).sort().reverse().slice(0, 31);
+        if (!days.length) { el.innerHTML = '<span class="smd-dim" style="font-size:11px">📅 日ごとの記録：まだありません（今日から毎日1回残ります）</span>'; return; }
+        const y = v => (v == null ? '—' : ((v < 0 ? '▲ ' : '') + fmtJpy(Math.abs(Math.round(v)))));
+        const tr = days.map((d, i) => { const x = h[d] || {}, pv = h[days[i + 1]] || null;
+          const dn = (pv && x.projNet != null && pv.projNet != null) ? Math.round(x.projNet - pv.projNet) : null;
+          return `<tr><td style="padding:2px 8px;white-space:nowrap">${esc(d.slice(5))}</td><td style="padding:2px 8px;text-align:right">${x.n != null ? x.n : '—'}</td><td style="padding:2px 8px;text-align:right">${x.projN != null ? x.projN : '—'}</td><td style="padding:2px 8px;text-align:right">${y(x.contrib)}</td><td style="padding:2px 8px;text-align:right;font-weight:700">${y(x.projNet)}</td><td style="padding:2px 8px;text-align:right;color:${dn == null ? '#999' : dn >= 0 ? '#1a7f37' : '#b3261e'}">${dn == null ? '' : (dn >= 0 ? '+' : '▲ ') + fmtJpy(Math.abs(dn))}</td><td style="padding:2px 8px;white-space:nowrap">${esc(x.vSweet || '')}</td><td style="padding:2px 8px;white-space:nowrap">${esc(x.vHot || '')}</td><td style="padding:2px 8px;text-align:right" class="smd-dim">${x.noCost ? x.noCost + '件' : ''}</td></tr>`; }).join('');
+        el.innerHTML = `<details open><summary style="cursor:pointer;font-weight:800;font-size:13px">📅 日ごとの記録（${days.length}日）<span class="smd-dim" style="font-weight:400;font-size:11px">　毎日1回、その日の見込みを残しています（画面を開かない日も担当PCが裏で計算）</span></summary>
+          <div style="overflow:auto;margin-top:4px"><table style="border-collapse:collapse;font-size:11.5px;min-width:640px"><tr class="smd-dim" style="font-size:10.5px"><th style="text-align:left;padding:2px 8px">日付</th><th style="text-align:right;padding:2px 8px">注文</th><th style="text-align:right;padding:2px 8px">月末見込み</th><th style="text-align:right;padding:2px 8px">貢献利益/件</th><th style="text-align:right;padding:2px 8px">営業利益の見込み</th><th style="text-align:right;padding:2px 8px">前日比</th><th style="text-align:left;padding:2px 8px">甘口</th><th style="text-align:left;padding:2px 8px">辛口</th><th style="text-align:right;padding:2px 8px">仕入未入力</th></tr>${tr}</table></div></details>`;
+      });
+    }).catch(() => {});
+  }
+  /* 担当PCが1日1回（6時以降）、今月のふりかえりを裏で計算して残す。利益の画面を開いている時は触らない（その画面が描けば残る） */
+  async function plReviewDaily() {
+    try {
+      if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+      const now = Date.now(), today = jstDate(now); if (new Date(now + 9 * 3600000).getUTCHours() < 6) return;
+      if (localStorage.getItem('smdPlRvDay') === today) return;
+      const h = await plReviewHistLoad(true); if (h && h[today]) { localStorage.setItem('smdPlRvDay', today); return; }
+      if (state.page === 'profit') return;
+      const sel = document.getElementById('pf-month'); if (!sel) return;
+      const ym = today.slice(0, 7), old = sel.value;
+      if (![...sel.options].some(o => o.value === ym)) { const o = document.createElement('option'); o.value = ym; o.textContent = ym; sel.appendChild(o); }
+      sel.value = ym;
+      try { await renderProfit(true); } finally { if (state.page !== 'profit' && old && old !== ym) { sel.value = old; pf.ym = null; } }   /* 次に利益の画面を開いた時は元の月で読み直す */
+      localStorage.setItem('smdPlRvDay', today);
+    } catch (_) {}
+  }
+  setTimeout(() => { plReviewDaily(); }, 6 * 60 * 1000);
+  setInterval(() => { plReviewDaily(); }, 30 * 60 * 1000);
   function plReviewHtml(c, prevN, rets, issues) {
     if (!c || !c.ok || !c.expOk) return '';
     const y = v => fmtJpy(Math.round(v || 0));
@@ -17868,6 +17927,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const vSweet = (be != null && projN >= be) ? '🟢 回っています' : '🟡 分岐点の手前です';
     const vMid = `🟡 残るのは月 ${sy(projNet)}`;
     const vHot = projNet >= target ? '🟢 目標に届いています' : projNet >= 300000 ? '🟠 1人分はあるが目標には届きません' : '🔴 あなたの取り分が1人分（¥30万）に届きません';
+    try { plReviewSnapSave({ ym: c.ym, n, projN, prevN: prevN != null ? prevN : null, gpo: Math.round(gpo || 0), varPO: Math.round(varPO || 0), contrib: Math.round(contrib || 0), fixed: Math.round(fixed || 0), be, projNet: Math.round(projNet || 0), projAfter: Math.round(projAfter || 0), target, needN, vSweet, vMid, vHot, noCost: c.noCost || 0, provN: c.provAllN || 0 }); } catch (_) {}
+    setTimeout(plReviewHistFill, 0);
     /* 🧭 改善の方向性（本人「改善の方向性みたいなのもセットで欲しい」）＝効く順に、円の見込みを付けて。決め打ちの文は書かず、数字が無い手は出さない */
     const lev = [];
     let retMonthN = 0, retMonthJpy = 0;
@@ -17892,6 +17953,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${col('🍰 甘口', vSweet, sweet, '#f1f8f4')}${col('🍛 中辛', vMid, mid, '#fff8e8')}${col('🌶 辛口', vHot, hot, '#fdeeee')}</div>
       ${lev.length ? `<div style="margin-top:8px;padding:8px 10px;background:#eef3fb;border-radius:8px"><div style="font-weight:800;font-size:13px">🧭 改善の方向性（効く順）</div><ol style="margin:4px 0 0;padding-left:20px;font-size:12px;line-height:1.55">${lev.map(l => `<li>${l.t}</li>`).join('')}</ol></div>` : ''}
+      <div class="pl-rv-hist" data-ym="${esc(c.ym)}" style="margin-top:8px"></div>
       <div class="smd-dim" style="font-size:11px;margin-top:6px">貢献利益＝粗利/件 − 送料・資材/件。固定費＝人件費（もう1人に払う分）・家賃・ツール・その他。目標は📈事業計画の目標営業利益（月別があればそれ）。あなた（オーナー）の取り分は入っていません。</div>
     </div>`;
   }
@@ -20303,6 +20365,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-09-29', items: [
+      '📅 <b>月次のふりかえりに「日ごとの記録」</b>（本人「ここは毎日どこかで更新されるようにして」→「毎日の記録を残す」）。ふりかえりを描くたびに今日の値（注文・月末見込み・貢献利益/件・営業利益の見込み・甘口/辛口の評価・仕入未入力）を残し、画面を開かない日も担当PCが1日1回（6時以降）裏で計算して残します。カードの下に日ごとの表（前日比つき）。',
       '🟪 <b>9/26 の緑191件も🤖でした</b>（本人「9/26だけちょびっと緑が表示されてるがこれは何？」）：出品ログ用の🤖の控えに入っていなかっただけで、🤖の出品台帳には全部ありました。台帳の明細IDでも照合します。',
       '🟪 <b>出品ログのグラフで、過去の日も🤖自動出品の分を紫にしました</b>（本人「なんで当日しか紫じゃないのか。わかりにくい」）。🤖の控えは明細名で照合していたのに、9/21 から一覧は明細名を読まない（重いので選んだ日だけ）作りにしたため、今日以外は全部「手動」扱いになっていました。🤖が入れたカタログの行だけ明細名を読み、明細IDで照合します。直近7日・30日の「🤖自動／手動」の件数も同じく直ります。',
       '🩹 <b>価格計算が「ppFee is not defined」で止まっていたのを直しました</b>（本人「壊れてる」）。9/26 の点検で PayPal 手数料の値の定義を1行消していました。／<b>「Shopee枠」を押した時の内訳をすぐ出す</b>（本人「出るけどめちゃくちゃ遅い」）：手元の直近の値ですぐ開き、古い台は裏で取り直します。控えの無い台も最大8秒で打ち切ります。',
