@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260929-0300c';
+var SRC_VER = '20260929-2230a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1292,6 +1292,11 @@ function doGetInner_(e) {
         stout = { ok: true, list: stlist, exp: stmin, at: new Date().toISOString() };
       } catch (err) { stout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(stcb + '(' + JSON.stringify(stout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'anthropic_receipts') {   /* 🧾 手で今すぐ（WRITE_TOKEN 必須） */
+      var arcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), arout;
+      try { var arwt = P_().getProperty('WRITE_TOKEN'); if (!arwt || p.token !== arwt) throw new Error('WRITE_TOKEN不正'); arout = anthropicReceiptsToExpenses_(true); } catch (eA) { arout = { ok: false, error: String((eA && eA.message) || eA) }; }
+      return ContentService.createTextOutput(arcb + '(' + JSON.stringify(arout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'uf_status') {
       var ufcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -7088,7 +7093,49 @@ function boshuAutoRecheck() {
   return out;
 }
 // ★本体。manual=true はポータルの「▶ 今すぐ1回まわす」から（結果を返す）
+// ── 🧾 Claude（Anthropic）API のクレジット購入を経費へ（本人 2026-09-29「claudeのこれも月々の経費で入れたい」「その時のレートでいいです」）──
+//   領収書メール（invoice+statements@mail.anthropic.com「Your receipt from Anthropic」）は ryoya.kawaguchi1119@gmail.com 宛て＝3台目の持ち主。
+//   届いたメールを読む台で動く（他の台は検索結果が0件＝何もしない）。1通＝1行・メモに領収書番号＝二重に入れない。
+//   円は【支払った日】の USD→JPY（frankfurter の日次レート）。分類は「ツール代（その他）」。
+function anthropicReceiptsToExpenses_(force) {
+  var P = P_(), last = Number(P.getProperty('ANTH_RCPT_AT') || 0);
+  if (!force && Date.now() - last < 6 * 3600 * 1000) return { skipped: 'recent' };
+  P.setProperty('ANTH_RCPT_AT', String(Date.now()));
+  var threads = [];
+  try { threads = GmailApp.search('from:invoice+statements@mail.anthropic.com subject:"receipt from Anthropic"', 0, 100); } catch (e) { return { ok: false, error: 'Gmail: ' + String(e).slice(0, 120) }; }
+  if (!threads.length) return { ok: true, found: 0 };
+  var have = {};
+  try { (sbSelect_('expenses', 'select=memo&memo=like.' + encodeURIComponent('[Claude API]*') + '&limit=1000') || []).forEach(function (r) { var m = /領収書 ([\d-]+)/.exec(r.memo || ''); if (m) have[m[1]] = 1; }); } catch (e1) { return { ok: false, error: '既存の経費を読めない（書かない）' }; }
+  var out = { ok: true, found: 0, added: 0, rows: [] }, rateCache = {};
+  threads.forEach(function (th) {
+    th.getMessages().forEach(function (msg) {
+      var body = msg.getPlainBody() || '';
+      var rc = (/Receipt number\s*[:#]?\s*([\d-]{6,})/i.exec(body) || /#(\d{4}-\d{4}-\d{4})/.exec(msg.getSubject() || '') || [])[1];
+      var amt = (/\$\s*([\d,]+\.\d{2})/.exec(body) || [])[1];
+      if (!rc || !amt) return;
+      out.found++;
+      if (have[rc]) return;
+      var usd = Number(String(amt).replace(/,/g, '')); if (!(usd > 0)) return;
+      var inv = (/Invoice number\s*[:#]?\s*([A-Z0-9-]+)/i.exec(body) || [])[1] || '';
+      var paid = (/Paid\s+([A-Za-z]+ \d{1,2}, \d{4})/.exec(body) || [])[1];
+      var pd = paid ? new Date(paid + ' 12:00:00 UTC') : msg.getDate();
+      var ymdUtc = Utilities.formatDate(pd, 'UTC', 'yyyy-MM-dd');
+      var ymd = Utilities.formatDate(msg.getDate(), 'Asia/Tokyo', 'yyyy-MM-dd');   /* 経費の日付＝領収書が届いた日（日本時間） */
+      var rate = rateCache[ymdUtc];
+      if (!rate) {
+        try { ufBump_(1, 'frankfurter(USDJPY)'); var fj = JSON.parse(UrlFetchApp.fetch('https://api.frankfurter.app/' + ymdUtc + '?from=USD&to=JPY', { muteHttpExceptions: true }).getContentText() || '{}'); rate = Number((fj.rates || {}).JPY) || 0; } catch (e2) { rate = 0; }
+        if (!rate) return;   /* レートが取れなければ入れない（次の回にもう一度） */
+        rateCache[ymdUtc] = rate;
+      }
+      var jpy = Math.round(usd * rate);
+      var row = { ymd: ymd, category: 'ツール代（その他）', amount: jpy, memo: '[Claude API] 領収書 ' + rc + (inv ? '・請求書 ' + inv : '') + '・$' + usd.toFixed(2) + '（1USD=¥' + rate.toFixed(2) + '・' + ymdUtc + '）' };
+      sbUpsert_('expenses', [row]); have[rc] = 1; out.added++; out.rows.push(row);
+    });
+  });
+  return out;
+}
 function boshuAutoTick(manual) {
+  try { anthropicReceiptsToExpenses_(false); } catch (eAR) {}   /* 🧾 6時間に1回・領収書が届く台（3台目）だけが実際に入れる */
   var lock = LockService.getScriptLock();
   /* ★v198：30分ごとの実行は鍵を90秒まで待つ。📸写真の索引（condIndexTick）と同じ鍵を使っているので、5秒で諦めると索引が走っている間🤖が1回も回らない
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
