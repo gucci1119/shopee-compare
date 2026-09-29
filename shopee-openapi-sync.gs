@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260929-0130m';
+var SRC_VER = '20260929-0300c';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7647,7 +7647,7 @@ function baLoadCtx_(cfg, hw, ccs) {
   var _liveOf = {}; rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
   var _buried = 0, _buriedItems = {};
-  var _madeIds = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') _madeIds[String(_fm[kk].item_id)] = 1; }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
+  var _madeIds = {}, _madeNk = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') { _madeIds[String(_fm[kk].item_id)] = 1; var _kcc = kk.split('|')[1]; if (_fm[kk].name) _madeNk[_kcc + '|' + baNameKey_(_fm[kk].name)] = 1; } }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
   rows.forEach(function (r) {
     if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
     itemCc[String(r.item_id)] = r.cc;
@@ -7657,7 +7657,11 @@ function baLoadCtx_(cfg, hw, ccs) {
     //   （鍵は機種名を落とすので、PS3の「Final Fantasy X」がPS2の空白を消してしまう・Codexの指摘）。機種が書いていないものは安全側に「出している」とみなす
     modelNames[String(r.item_id)] = (ms || []).filter(function (m) { return m && !m.ghost && m.n; }).map(function (m) { return String(m.n).toLowerCase().trim(); });   // ★v184 自動ブレーキ用（入れた明細がまだあるか）
     var fo = famOf(r.cc);
-    var inFam = (fo.sku && String(r.parent_sku || '').trim() === fo.sku) || (!fo.sku && fo.nk && baNameKey_(r.name) === fo.nk) || !!_madeIds[String(r.item_id)];   /* ★2026-09-25 自分で作ったカタログは親SKUが付かなくても家族 */
+    /* ★2026-09-29 本人「なぜswitch系のカタログ、100明細埋まりきっていないのに出されている？」＝複製の直後に仮の明細(test)の写真付けが失敗すると、作った記録を残す前に止まり、
+       親SKUが空の国（SG）では家族と分からず、次の番号をまた作っていた（SG⑥⑧・PH⑨が「test 1つ・非公開」で放置）。
+       → 自分で作った家族カタログと【番号以外同じ名前】で、中身が仮の明細だけのカタログは家族に戻す（拾い直す） */
+    var _onlyTest = (ms || []).filter(function (m) { return m && !m.ghost; }).every(function (m) { return String(m.n || '').toLowerCase() === 'test'; });
+    var inFam = (fo.sku && String(r.parent_sku || '').trim() === fo.sku) || (!fo.sku && fo.nk && baNameKey_(r.name) === fo.nk) || !!_madeIds[String(r.item_id)] || (_onlyTest && !!_madeNk[r.cc + '|' + baNameKey_(r.name)]);   /* ★2026-09-25 自分で作ったカタログは親SKUが付かなくても家族 */
     var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
     (ms || []).forEach(function (m) {
       if (!m || m.ghost || !m.n) return;
@@ -8149,11 +8153,17 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         if (!cl.item_id) { res.note = '複製失敗'; break; }
         tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
         rows.push(tgt); newItem = true;
+        try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc0) {}   /* ★2026-09-29 写真付けより【先に】控える（失敗しても次の回が見つけて続きを入れる＝放置カタログを作らない） */
         // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
         try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
         baLog_(st, cc + '：満杯なので複製 → ' + newName + '（非公開・' + cl.item_id + '）');
-        try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc2) {}
       }
+    }
+    /* ★2026-09-29 仮の明細(test)だけのカタログ（前の回で写真付けに失敗して残ったもの）に入れる時は、先に test へ写真を付け直す。
+       失敗したらこの回は見送る（新しいカタログは作らない） */
+    if (!newItem && (tgt.models || []).length && (tgt.models || []).every(function (m) { return String((m && m.n) || '').toLowerCase() === 'test'; })) {
+      try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); }
+      catch (eT) { res.note = 'test画像失敗（放置カタログの続き）: ' + String((eT && eT.message) || eT).slice(0, 60); baLog_(st, cc + ' ' + res.note + '・' + tgt.item_id); break; }
     }
     var free2 = 100 - (tgt.models || []).length;
     var batch = todo.slice(i, i + free2);
