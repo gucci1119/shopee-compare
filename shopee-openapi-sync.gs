@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260929-2230a';
+var SRC_VER = '20260929-2300b';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7096,7 +7096,7 @@ function boshuAutoRecheck() {
 // ── 🧾 Claude（Anthropic）API のクレジット購入を経費へ（本人 2026-09-29「claudeのこれも月々の経費で入れたい」「その時のレートでいいです」）──
 //   領収書メール（invoice+statements@mail.anthropic.com「Your receipt from Anthropic」）は ryoya.kawaguchi1119@gmail.com 宛て＝3台目の持ち主。
 //   届いたメールを読む台で動く（他の台は検索結果が0件＝何もしない）。1通＝1行・メモに領収書番号＝二重に入れない。
-//   円は【支払った日】の USD→JPY（frankfurter の日次レート）。分類は「ツール代（その他）」。
+//   円は【支払った日】の USD→JPY（frankfurter の日次レート）。分類は「ツール代（その他）」。API（請求書 4QK6DI79-）だけ・サブスクは入れない。
 function anthropicReceiptsToExpenses_(force) {
   var P = P_(), last = Number(P.getProperty('ANTH_RCPT_AT') || 0);
   if (!force && Date.now() - last < 6 * 3600 * 1000) return { skipped: 'recent' };
@@ -7117,6 +7117,10 @@ function anthropicReceiptsToExpenses_(force) {
       if (have[rc]) return;
       var usd = Number(String(amt).replace(/,/g, '')); if (!(usd > 0)) return;
       var inv = (/Invoice number\s*[:#]?\s*([A-Z0-9-]+)/i.exec(body) || [])[1] || '';
+      /* ★API のクレジット購入だけ（請求書番号の頭＝API の組織。Claude のサブスク＝別の頭 YCAXYF2R は入れない＝ツール代・スクールと二重になるため）。
+         頭はスクリプト プロパティ ANTH_INV_PREFIX で変えられる（既定 4QK6DI79・カンマ区切りで複数可） */
+      var _pre = String(P.getProperty('ANTH_INV_PREFIX') || '4QK6DI79').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      if (!inv || !_pre.some(function (x) { return inv.indexOf(x) === 0; })) return;
       var paid = (/Paid\s+([A-Za-z]+ \d{1,2}, \d{4})/.exec(body) || [])[1];
       var pd = paid ? new Date(paid + ' 12:00:00 UTC') : msg.getDate();
       var ymdUtc = Utilities.formatDate(pd, 'UTC', 'yyyy-MM-dd');
