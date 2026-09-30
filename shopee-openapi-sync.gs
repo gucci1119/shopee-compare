@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260930-1500h';
+var SRC_VER = '20260930-1700b';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8182,10 +8182,30 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
   var wG = Math.round((Number(rows[0].weight) || 0) * 1000) || Number(fam.weightG) || 150;
   var seen = {}; todo.forEach(function (p) { seen[baTmKey_(p.en)] = 1; });
-  var i = 0, guard = 0;
+  /* ★2026-09-30 本人「その価格帯が出せるカタログを作ればいいのでは？」「作るもしくは、入れられるカタログに入れるとか」。
+     実測：価格の幅（最安の5倍・BR4倍）を超えて「在庫0・幅の上限の値段」で置いた明細が 813（186カタログ）。空きのある先頭のカタログに入れていたため。
+     → 作品ごとに【幅に収まるカタログ】を選ぶ。どれにも収まらない作品は後ろへ回し、最後に複製（満杯の時と同じ仕組み・1日の上限も同じ）で新しいカタログを作ってまとめて入れる。
+     作れない時（今日の上限・複製OFF・cfg.bandRoute=false）は今までどおり在庫0で置く */
+  var bandOn = cfg.bandRoute !== false;
+  var estP = function (p) { try { return p && p.cost > 0 ? (baPriceFromTbl_(cfg, cc, wG, p.cost) || 0) : 0; } catch (eE) { return 0; } };
+  var bandFits = function (row, price, ref) { if (!(price > 0)) return true; var ps = (row.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; }); if (!ps.length) { if (!(ref > 0)) return true; ps = [ref]; } var lo = Math.min.apply(null, ps), hi = Math.max.apply(null, ps); return price >= hi / ratio && price <= lo * ratio; };
+  var canClone = function () { if (cfg.autoClone === false) return false; var d = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10); var n = (st.cloneMade && st.cloneMade.d === d) ? st.cloneMade.n : 0; if (n >= Math.max(1, Number(cfg.clonePerDay) || 12)) return 'next'; return BA_FAM_TICK >= 1 ? 'next' : true; };   /* 'next'＝この回はもう作った（1回1件）／今日の上限→次の回（明日）に作る。在庫0で置くのは複製OFFの時だけ */
+  var i = 0, guard = 0, bandHp = 0, bandForce = false;
   while (i < todo.length && guard++ < 4) {
     var tgt = null;
-    for (var r = 0; r < rows.length; r++) { var free = 100 - (rows[r].models || []).length; if (free > 0 && rows[r].status !== 0) { tgt = rows[r]; break; } }
+    var _hp = bandOn ? estP(todo[i]) : 0; bandHp = 0; bandForce = false;
+    for (var r = 0; r < rows.length; r++) { var free = 100 - (rows[r].models || []).length; if (free > 0 && rows[r].status !== 0 && (!_hp || bandFits(rows[r], _hp))) { tgt = rows[r]; break; } }
+    if (!tgt && _hp) {
+      var _anyFree = rows.some(function (x) { return (100 - (x.models || []).length) > 0 && x.status !== 0; });
+      if (!todo[i]._band && todo.slice(i + 1).some(function (q) { return !q._band; })) { todo[i]._band = 1; todo.push(todo.splice(i, 1)[0]); guard--; continue; }   /* 幅に収まらない作品は後ろへ（収まる作品を先に入れる）。1作品1回だけ */
+      var _cc = canClone();
+      if (_anyFree && _cc === 'next') { baSkipRec_(st, hw, cc, todo[i], 'band_next'); baLog_(st, cc + '：価格の幅に収まるカタログが無い→次の回に作って入れます（' + String(todo[i].en || '').slice(0, 26) + '）'); todo.splice(i, 1); guard--; continue; }   /* 台帳に書かない＝次の回にまた候補になる */
+      if (_anyFree && !_cc) {
+        for (var r3 = 0; r3 < rows.length; r3++) { if ((100 - (rows[r3].models || []).length) > 0 && rows[r3].status !== 0) { tgt = rows[r3]; break; } }   /* 作れない＝今までどおり在庫0で置く */
+        bandForce = true;
+        baLog_(st, cc + '：価格の幅に収まるカタログが無く、複製がOFFなので在庫0で置きます（' + String(todo[i].en || '').slice(0, 26) + '）');
+      } else { bandHp = _hp; if (_anyFree) baLog_(st, cc + '：価格の幅に収まるカタログが無いので新しく作ります（' + String(todo[i].en || '').slice(0, 26) + '）'); }
+    }
     var newItem = false;
     if (!tgt) {
       if (cfg.autoClone === false) { res.note = '満杯（複製OFF）'; break; }
@@ -8229,7 +8249,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc0) {}   /* ★2026-09-29 写真付けより【先に】控える（失敗しても次の回が見つけて続きを入れる＝放置カタログを作らない） */
         // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
         try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
-        baLog_(st, cc + '：満杯なので複製 → ' + newName + '（非公開・' + cl.item_id + '）');
+        baLog_(st, cc + '：' + (bandHp ? '価格帯用に複製' : '満杯なので複製') + ' → ' + newName + '（非公開・' + cl.item_id + '）');
       }
     }
     /* ★2026-09-29 仮の明細(test)だけのカタログ（前の回で写真付けに失敗して残ったもの）に入れる時は、先に test へ写真を付け直す。
@@ -8240,6 +8260,11 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     }
     var free2 = 100 - (tgt.models || []).length;
     var batch = todo.slice(i, i + free2);
+    if (bandOn && !bandForce) {   /* ★2026-09-30 このカタログの幅に収まる作品だけを入れる（収まらない作品は残して次のカタログへ）。新しいカタログは先頭の作品の値段を基準にする */
+      var _ref = bandHp || _hp, _in = [], _out = [];
+      todo.slice(i).forEach(function (q) { if (_in.length < free2 && bandFits(tgt, estP(q), _ref)) _in.push(q); else _out.push(q); });
+      if (_in.length) { todo = todo.slice(0, i).concat(_in, _out); batch = _in; }
+    }
     // 価格：価格表（仕入帯→現地）→ 無ければカタログ平均。既存明細との価格差（5倍/BR4倍）とVN上限を先に守る
     var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
     var avg = ps.length ? ps.reduce(function (a, b) { return a + b; }, 0) / ps.length : 0;
