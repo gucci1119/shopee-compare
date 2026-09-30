@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260929-2300b';
+var SRC_VER = '20260930-1500h';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6629,8 +6629,30 @@ function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使�
 /* ★v192 全件がカタログ画像だと分かっている出品元（メルカリShops の「【中古】NGCソフト …」型＝中古チェーンの通販。2026-09-18 実測：くるりんスカッシュ・PC原人・ZOIDS・WWE がこれで、Haiku は絵柄だけの画像に OK（箱）を付けた）。Shops 全体は外さない（本人「ショップスからでもいい」） */
 function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12}ソフト/.test(String((a && a.name) || '')); }
 /* ★2026-09-20 本人「ゲームキューブにxbox混ざってるで」：出品名に別の機種が書いてある写真は使わない（同じ題名の Xbox版・PS2版。先に集めてあった控えにも効く） */
-var BA_PLAT_JA = [['xbox', /xbox/i], ['ps5', /ps5|プレステ\s*5/i], ['ps4', /ps4|プレステ\s*4/i], ['ps3', /ps3|プレステ\s*3/i], ['ps2', /ps2|プレステ\s*2|プレイステーション\s*2/i], ['psp', /psp/i], ['vita', /vita/i], ['3ds', /3ds/i], ['wiiu', /wii\s*u/i], ['wii', /wii(?!\s*u)/i], ['gc', /gamecube|ゲームキューブ/i], ['n64', /n64|ニンテンドー\s*64/i], ['sfc', /スーパーファミコン|スーファミ|sfc/i], ['gba', /gba|ゲームボーイアドバンス/i], ['dc', /ドリームキャスト|ドリキャス|dreamcast/i], ['ss', /セガサターン/i], ['switch', /switch|スイッチ/i]];
-function baPlatOk_(a, hw) { var n = String((a && a.name) || ''); if (!n) return true; var ps = []; BA_PLAT_JA.forEach(function (p) { if (p[1].test(n)) ps.push(p[0]); }); if (!ps.length) return true; var h = String(hw || ''); if (h === 'xbox360' || h === 'xboxone') h = 'xbox'; if (h === 'switch2') h = 'switch'; return ps.indexOf(h) >= 0; }
+/* ★2026-09-30 本人「ファミコンの箱をつけてしまっている」「何回同じことするのだ？」（Wii のクレイジークライマーに FC 版の写真）。
+   ①機種の語の表がポータル（PLAT_JA）より少なく、ファミコン・GB・DS 等が無かった＝「ファミコン」と書いた出品も他機種の写真として通り得た→ポータルと同じ表にする
+   ②写真の控え（boshu_auto_pre）の鍵は作品名だけ＝同じ名前の別機種（FC 版）で集めた写真の束を Wii がそのまま使っていた→ baPreOf_ で束の機種を確かめる */
+var BA_PLAT_JA = [['switch2', /switch\s*2|スイッチ\s*2/i], ['switch', /switch(?!\s*2)|スイッチ(?!\s*2)/i], ['ps5', /ps5|プレステ\s*5|プレイステーション\s*5|playstation\s*5/i], ['ps4', /ps4|プレステ\s*4|プレイステーション\s*4|playstation\s*4/i], ['ps3', /ps3|プレステ\s*3|プレイステーション\s*3|playstation\s*3/i], ['ps2', /ps2|プレステ\s*2|プレイステーション\s*2|playstation\s*2/i], ['psp', /psp|プレイステーション\s*ポータブル/i], ['vita', /vita|ヴィータ/i], ['3ds', /3ds/i], ['ds', /(^|[^3a-z])ds(i|lite)?(?![a-z])|ニンテンドーds/i], ['wiiu', /wii\s*u/i], ['wii', /wii(?!\s*u)/i], ['gc', /gamecube|ゲームキューブ|(^|[^a-z])n?gc(?![a-z])/i], ['n64', /n64|ニンテンドー\s*64|nintendo\s*64|ロクヨン/i], ['sfc', /sfc|スーパーファミコン|スーファミ|snes/i], ['fc', /(^|[^ー])ファミコン|(^|[^sa-z])fc(?![a-z])|ファミリーコンピュータ/i], ['gba', /gba|ゲームボーイアドバンス|アドバンス/i], ['gb', /(^|[^a-z])gbc?(?![a-z])|ゲームボーイ(?!アドバンス)/i], ['ss', /セガサターン|サターン/i], ['dc', /ドリームキャスト|ドリキャス|dreamcast/i], ['md', /メガドライブ|メガドラ/i], ['xbox', /xbox/i], ['pce', /pcエンジン/i], ['ws', /ワンダースワン/i]];
+function baPlatsOf_(name) { var n = String(name || '').normalize('NFKC').toLowerCase(), ps = []; BA_PLAT_JA.forEach(function (p) { if (p[1].test(n)) ps.push(p[0]); }); return ps; }
+function baHwSame_(a, b) { a = String(a || ''); b = String(b || ''); if (a === b) return true; var g = function (x) { return /^xbox/.test(x) ? 'xbox' : x === 'gbc' ? 'gb' : x; }; return g(a) === g(b); }
+function baPlatOk_(a, hw) { var ps = baPlatsOf_(a && a.name); if (!ps.length) return true; var h = String(hw || ''); return ps.some(function (p) { return baHwSame_(p, h) || (h === 'switch2' && p === 'switch'); }); }
+/* 写真の束がどの機種で集められたか。ポータルが書く hw があればそれ。無い古い束は出品名の多数決（機種の語がある名前が2つ以上・半数超え）。分からなければ '' */
+var BA_PREHW_MEMO = {};
+function baPreHw_(e, key) {
+  if (!e) return ''; if (e.hw) return String(e.hw);
+  var mk = String(key || '') + '|' + String(e.at || '') + '|' + String(e.img || ''); if (BA_PREHW_MEMO[mk] !== undefined) return BA_PREHW_MEMO[mk];
+  var cnt = {}, n = 0; [e].concat(e.alts || []).forEach(function (a) { var ps = baPlatsOf_(a && a.name); if (!ps.length) return; n++; ps.forEach(function (p) { var q = baHwSame_(p, 'gb') ? 'gb' : p; cnt[q] = (cnt[q] || 0) + 1; }); });
+  var top = '', tn = 0; Object.keys(cnt).forEach(function (k) { if (cnt[k] > tn) { tn = cnt[k]; top = k; } });
+  var r = (n >= 2 && tn * 2 > n) ? top : ''; BA_PREHW_MEMO[mk] = r; return r;
+}
+/* 作品 key・機種 hw の写真の束。別機種で集めた束は返さない（＝写真なし扱い→ポータルがこの機種で集め直し、key@hw に置く） */
+function baPreOf_(pre, key, hw) {
+  if (!pre || !key) return undefined; var h = String(hw || '');
+  var at = h ? pre[key + '@' + h] : null; if (at) return at;
+  var e = pre[key]; if (!e || !h) return e;
+  var ph = baPreHw_(e, key); if (ph && !baHwSame_(ph, h) && !(h === 'switch2' && ph === 'switch')) return undefined;
+  return e;
+}
 /* ★2026-09-28 本人「さらに減らせる余地」④：出品名に未開封・シュリンク付きと書いてある写真は、AI に見せる前に外す（未開封は元々落とす対象＝基準は同じ）。「新品同様」は中古なので外さない */
 var BA_SEALED_NAME = /未開封|シュリンク(付|つき|有|あり|残)|新品未使用|\bsealed\b/i;   /* 「新品」単独は外さない（「新品で購入・中古」等の書き方があり、写真の候補を減らしすぎる） */
 function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw) && !BA_SEALED_NAME.test(String(a.name || '')); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
@@ -6862,7 +6884,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     if (!j0.judged) break;   /* 鍵なし・上限・障害＝今日はここまで（印は付けない＝次回また見る） */
     n++; changed = true;
     if (j0.ok) { rp.items[id] = { s: 'keep', v: BA_RULE_VER, at: new Date().toISOString() }; continue; }
-    var pm = pre[a.key], cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 5) : [];
+    var pm = baPreOf_(pre, a.key, hw), cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 5) : [];
     var done = false, lastKind = j0.kind;
     for (var k = 0; k < cands.length && !done; k++) {
       var cu = String(cands[k].img || cands[k].thumb || ''); if (!cu) continue;
@@ -7248,7 +7270,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-23 優先の機種は【写真の揃った候補がある時だけ】先に回す。実測（2台目 19:49）：Switch を優先で選んだが写真待ちで picks が0件＝その回は何も出ずに終わり、
        2台目の他の10機種の番も1回飛んだ。写真が無い時は普段の順ぐりに落とす（読む控えは後で同じ物を使う＝接続枠は増えない） */
     var _preP = baKv_('boshu_auto_pre') || {}, _rejP = baKv_('boshu_auto_prerej') || {};
-    var _readyP = function (c) { var p0 = _preP[c.key]; if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return false; var rj = _rejP[c.key]; return !(rj && String(p0.img).replace(/\?.*$/, '') === String(rj.img || '')); };
+    var _readyP = function (c) { var p0 = baPreOf_(_preP, c.key, hw || _h); if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return false; var rj = _rejP[c.key]; return !(rj && String(p0.img).replace(/\?.*$/, '') === String(rj.img || '')); };
     if (st.pTick % 2 === 1) {
       var _pc = Number(st.pCursor) || 0;
       for (var _pi = 0; _pi < _prio.length && !hw; _pi++) {
@@ -7326,15 +7348,15 @@ function boshuAutoTick(manual) {
     var highNeed = minHits + 3;   /* 高額品は「出品が minHits+3 件以上ある」時だけ出す */
     var picks = [];
     /* ★2026-09-26 写真の揃った作品から試す（段の中は今までの順＝他国で売れた順）。0＝控えの写真にこの機種・この作品のAI OK／1＝控えの写真あり・NG記録なし／2＝写真なし・全部NG（ヤフオク待ち） */
-    { var _tierOf = function (c0) { var p0 = pre[c0.key]; if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return 2; var rj0 = preRej[c0.key]; if (rj0 && String(p0.img).replace(/\?.*$/, '') === String(rj0.img || '')) return 2; return baPhotoOrder_([p0].concat(p0.alts || []), hw).slice(0, 10).some(function (a) { return String(judged[String(a.img || '').replace(/\?.*$/, '') + '|v13|' + hwWord + '|' + c0.key] || '').indexOf('ok:') === 0; }) ? 0 : 1; };
+    { var _tierOf = function (c0) { var p0 = baPreOf_(pre, c0.key, hw); if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return 2; var rj0 = preRej[c0.key]; if (rj0 && String(p0.img).replace(/\?.*$/, '') === String(rj0.img || '')) return 2; return baPhotoOrder_([p0].concat(p0.alts || []), hw).slice(0, 10).some(function (a) { return String(judged[String(a.img || '').replace(/\?.*$/, '') + '|v13|' + hwWord + '|' + c0.key] || '').indexOf('ok:') === 0; }) ? 0 : 1; };
       cand = cand.map(function (c0, ix) { return { c: c0, ix: ix, t: _tierOf(c0) }; }).sort(function (a, b) { return (a.t - b.t) || (a.ix - b.ix); }).map(function (o) { return o.c; }); }
     for (var i = 0; i < cand.length && picks.length < perTick; i++) {
       if (Date.now() - t0 > DEADLINE * 0.55) break;
       if (st.today.n + picks.length >= dailyMax && manual !== true) break;
       var c = cand[i];
-      if (!yahooOk && !((pre[c.key] || {}).img)) continue;
+      if (!yahooOk && !((baPreOf_(pre, c.key, hw) || {}).img)) continue;
       /* ★v190 仕入の目安が上限を超える作品は出さない（本人 2026-09-18「金額が高すぎるゲームはリスクなので、あんま出したくない」。前は在庫0で出していた）。AIを呼ぶ前に外す＝費用ゼロ。台帳には入れない（上限を変えたらまた候補になる） */
-      var costChk = 0; { var pmC = pre[c.key]; if (pmC && pmC.img) costChk = baCostFromPre_(pmC); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; }
+      var costChk = 0; { var pmC = baPreOf_(pre, c.key, hw); if (pmC && pmC.img) costChk = baCostFromPre_(pmC); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; }
         if (pmC && pmC.img && costChk >= highCost && (Number(pmC.hits) || 0) < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', Number(pmC.hits) || 0); continue; } }   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
@@ -7349,7 +7371,7 @@ function boshuAutoTick(manual) {
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
       // ★メルカリの写真が先に集めてあれば、それを優先（本人「画像はメルカリとかヤフオクとかの中古の画像に」）。取れなければヤフオクへ
-      var pm = pre[c.key];
+      var pm = baPreOf_(pre, c.key, hw);
       /* 判定できなかった写真（ブラウザ側のCORS失敗など）は「実物の写真」の保証が無いので使わない（本人「実物の写真じゃないのに通るのはおかしい」） */
       if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
       if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
@@ -7507,7 +7529,7 @@ function boshuAutoTick(manual) {
 function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, maxN, t0, limitMs) {
   var n = 0, okN = 0, ngN = 0, left = 0;
   for (var pi = 0; pi < cand.length; pi++) {
-    var pc = cand[pi], pp = pre[pc.key]; if (!pp || !pp.img) continue;
+    var pc = cand[pi], pp = baPreOf_(pre, pc.key, hw); if (!pp || !pp.img) continue;
     if (baCostFromPre_(pp) > maxCost) continue;
     var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
     for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
@@ -7520,7 +7542,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
       if (!jP.judged) { stop = true; break; }
       n++; if (jP.ok) { okN++; hasOk = true; } else ngN++;
     }
-    if (stop) { left++; if (n >= maxN || Date.now() - t0 > limitMs) { for (var pr = pi + 1; pr < cand.length; pr++) { var p2 = pre[cand[pr].key]; if (p2 && p2.img) left++; } break; } }
+    if (stop) { left++; if (n >= maxN || Date.now() - t0 > limitMs) { for (var pr = pi + 1; pr < cand.length; pr++) { var p2 = baPreOf_(pre, cand[pr].key, hw); if (p2 && p2.img) left++; } break; } }
   }
   return { n: n, ok: okN, ng: ngN, left: left };
 }
@@ -7774,14 +7796,14 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   var preRejP = baKv_('boshu_auto_prerej') || {};
   /* ★2026-09-22 いまの写真が🤖で全部NGだった作品も集め直しに戻す（3回まで・その後は3日休み） */
   var rejNow_ = function (c, p0) { var rj = preRejP[c.key]; if (!rj || !p0 || !p0.img) return false; if (String(p0.img).replace(/\?.*$/, '') !== String(rj.img || '')) return false; if (p0.missAt && Date.parse(p0.missAt) > Date.parse(rj.at || 0) && Date.now() - Date.parse(p0.missAt) < 3 * 86400000) return false;   /* NGの後に探して見つからなかった＝3日休む（前は10分ごとに探し続けていた） */ if ((Number(rj.n) || 0) >= 3 && Date.now() - Date.parse(rj.at || 0) < 3 * 86400000) return false; return true; };
-  if (needPhoto) candList = candList.filter(function (c) { var p0 = pre[c.key]; if (rejNow_(c, p0)) return true; return !(p0 && (p0.img || (p0.missAt && Date.now() - Date.parse(p0.missAt) < 3 * 86400000))); });   // ★写真集め用：写真がある／3日以内に探して無かった作品は最初から外す（先頭40件で詰まらない・Codex指摘）
+  if (needPhoto) candList = candList.filter(function (c) { var p0 = baPreOf_(pre, c.key, hw); if (rejNow_(c, p0)) return true; return !(p0 && (p0.img || (p0.missAt && Date.now() - Date.parse(p0.missAt) < 3 * 86400000))); });   // ★写真集め用：写真がある／3日以内に探して無かった作品は最初から外す（先頭40件で詰まらない・Codex指摘）
   /* ★v194 「次に出す予定」には【実際に出る見込みの作品】だけを並べる（本人 2026-09-18）。高額で出さない／全部の国で価格差の枠に入らず見送り／使える写真が無い、は held（出さない見込み・理由つき）へ回し、その分だけ先の候補を見る（最大 n×3 件まで） */
   candList.slice(0, needPhoto ? n : n * 3).forEach(function (c) {
     if (!needPhoto && rows.length >= n) return;
     var row = { key: c.key, ja: c.ja, en: c.en || '', jan: c.jan || '', sg: c.sg ? 1 : 0, need: c.need, series: {}, plan: {}, sold: c.sold || 0 };
     /* ★写真集め用（needPhoto）は英名を作らない＝AIの予算を出品の判定に残す（検索は日本語名で足りる・Codex指摘） */
     if (!needPhoto) { try { var en2 = baEnName_(c, stP, enCache, hw); if (en2 && !/[ぁ-んァ-ヶ一-龠]/.test(en2)) row.en = en2; else if (!row.en) row.note = '英語名が作れない'; var ce = enCache[c.key]; row.enSrc = c.en ? 'master' : (ce ? ce.src : ''); } catch (e) {} }
-    var pm = pre[c.key];
+    var pm = baPreOf_(pre, c.key, hw);
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
       row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = baCostFromPre_(pm); row.pr = baPriceRange_(pm); row.hits = Number(pm.hits) || 1; row.from = 'mercari';
@@ -7918,7 +7940,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     if (!need.length) return;
     r.need = need;
     r.sold = (r.en ? soldVar[baKey_(r.en)] : 0) || soldVar[r.key] || 0;               // 他国で売れた回数（90日）
-    r.hasPre = (pre[r.key] && pre[r.key].img) ? 1 : 0;                                 // メルカリの写真が先に集まっている（ヤフオクを叩かずに済む）
+    r.hasPre = ((baPreOf_(pre, r.key, hw) || {}).img) ? 1 : 0;                                 // メルカリの写真が先に集まっている（ヤフオクを叩かずに済む）
     out.push(r);
   });
   // ★他国で売れた作品 → メルカリ写真あり → 駿河屋にある（物理で流通が確か）→ JANあり → 名前順（同じ群の中は安定）
