@@ -20497,7 +20497,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-01', items: [
-      '▶ <b>「注文明細 → {国}_row」の実行ボタンを、各国のセラーセンターのタブに「今すぐ転記」を頼む形に替えました</b>（本人「3時間おきの間で、手動でそのタイミングでやりたい時もある」）。前はブリッジ経由でエクスポートを作っていて、ブリッジが詰まると7か国とも timeout になっていました。今はタブが1分以内に依頼を受けて、国ごとに約40秒ずつずらして転記し、結果が届いた順にこの画面に出ます（各国のタブに転記のスクリプト 1.5.2 以降が入っていることが前提）。ポータルの3時間おきの自動実行からは明細を呼ばなくしました（タブ側が自分で3時間おきに回しているので二重になっていた）。',
+      '▶ <b>ポータルの3時間おきの自動実行から、注文明細を外しました</b>（各国のセラーセンターのタブが3時間おきに自分で同じことをしていて二重だった）。手で押す「明細 → 実行」は今までどおりその場で動きます。今日 7か国とも timeout になったのは Tampermonkey が固まっていたため（Chrome の再起動で直りました）。',
       '📅 <b>利益管理表の月替わりを自動にしました</b>（本人「10月1日の利益管理表も作っておいてください」「これ毎月勝手にやってください」「関数が入っているところと入っていないところは、きちんと見極めてください」）。毎月1日 0:30 に、GAS「利益管理表 月替わり（自動）」が前の月の表を複製し、注文ごとのデータだけを消して（ひな形の数式・配列数式は残す・数式が値で上書きされた所は数式に戻す）、新しい月の表を作ります。前々月の表は old フォルダへ。何をしたかは新しい表の「_月替わりの記録」に残ります。ポータルの仕入・入金のミラーも、今月・先月の表の番号が無ければ自動で取りに行きます（毎月1日に黙って止まっていた所）。',
     ] },
     { date: '2026-09-30', items: [
@@ -47937,31 +47937,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       + (failed.length ? '（入らなかった国: ' + failed.join(' ') + '）' : '') + '　（書き込み先 ' + tg.label + '）';
     return { done: done, fail: fail, failed: failed };
   }
-  /* 各国のセラーセンターのタブに「今すぐ転記」を頼み、届いた結果（app_kv.rowsync_last・1.5.2 以降の記録だけ）を国ごとに出す。最大15分待つ */
-  async function rowRequestGo(ccs, ast, alist) {
-    const all = ['ph', 'br', 'sg', 'my', 'vn', 'th', 'tw'], list = (ccs && ccs.length) ? ccs : all;
-    const at = new Date().toISOString();
-    await sbUpsert('app_kv', [{ k: 'rowsync_request', v: { at: at, ccs: list }, updated_at: at }]);
-    ast.textContent = '▶ 各国のセラーセンターのタブに「今すぐ転記」を頼みました（1分以内に順番に始まります・国ごとに約40秒ずつずらします）';
-    const lines = {}; list.forEach(cc => { lines[cc] = '⏳ 待っています…'; });
-    const draw = () => { alist.innerHTML = list.map(cc => '<div>' + esc(lines[cc]).replace(/^(⏳|✅|❌|⌛)/, '$1 <b>' + cc.toUpperCase() + '</b> …') + '</div>').join(''); };
-    const fresh = (x) => x && x.at > at && /^1\.(5\.([2-9]|\d\d)|[6-9]|\d\d)/.test(String(x.ver || ''));   /* もう1台の古い版（1.4.0 等）の失敗を拾わない */
-    draw();
-    const t0 = Date.now();
-    while (Date.now() - t0 < 15 * 60 * 1000) {
-      await new Promise(r => setTimeout(r, 15000));
-      let v = null; try { const r = await sbGet('app_kv', 'select=v&k=eq.rowsync_last'); v = r && r[0] && r[0].v; } catch (_) {}
-      if (v) list.forEach(cc => { const x = v[cc]; if (fresh(x) && lines[cc].indexOf('⏳') === 0) lines[cc] = (x.ok ? '✅ ' : '❌ ') + String(x.msg || '').slice(0, 140); });
-      draw();
-      if (list.every(cc => lines[cc].indexOf('⏳') !== 0)) break;
-    }
-    let done = 0, fail = 0; const failed = [];
-    list.forEach(cc => { if (lines[cc].indexOf('✅') === 0) done++; else { fail++; failed.push(cc.toUpperCase()); if (lines[cc].indexOf('⏳') === 0) lines[cc] = '⌛ 15分以内に結果が来ませんでした（その国のセラーセンターのタブが開いていない・眠っている・転記のスクリプトが古い）'; } });
-    draw();
-    ast.textContent = '▶ 今すぐ転記おわり：成功 ' + done + 'か国 / 失敗・未着 ' + fail + 'か国' + (failed.length ? '（' + failed.join(' ') + '）' : '');
-    try { renderDepRuns(); } catch (_) {}
-    return { done: done, fail: fail, failed: failed };
-  }
   // ★自動実行からも呼ぶので、ボタンの中に閉じ込めずに関数として出しておく。
   //   auto=true のときは確認ダイアログを出さない（誰も見ていないので、出すと止まってしまう）。
   async function rowAllGo(dry, auto) {
@@ -47978,16 +47953,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (ar) ar.disabled = true;
     let out = { done: 0, fail: 0, failed: [] };
     const selCc = auto ? '' : String(((document.getElementById('rowall-cc') || {}).value) || '');
-    /* ★2026-10-01 本人「3時間おきの間で、手動でそのタイミングでやりたい時もある」：明細の本番は、ブリッジ経由（timeout で全滅していた）でなく
-       各国のセラーセンターのタブ（転記 userscript 1.5.2〜・3時間おきに自動で同じことをしている）に「今すぐ」を頼む。
-       自動実行（auto）からは呼ばない＝タブ側が3時間おきに自分で回している（二重にしない） */
+    /* ★2026-10-01 自動実行（auto）からは明細を呼ばない＝セラーセンターのタブ（転記 userscript）が3時間おきに自分で回している（二重にしない）。
+       手で押した時は今までどおりブリッジ経由で今すぐ（タブへの依頼方式も試したが、裏タブのタイマーが止められ17分以上かかった＝やめた。timeout の真因は Tampermonkey の詰まり→Chrome再起動で直る） */
     if (!dry && auto) { toolBusy = null; if (ad) ad.disabled = false; if (ar) ar.disabled = false; return { done: 0, fail: 0, failed: [], skipped: '明細はセラーセンターのタブが3時間おきに自動で転記（ポータルからは呼ばない）' }; }
-    if (!dry && !tsidNow) {
-      try { out = (await rowRequestGo(selCc ? [selCc] : null, ast, alist)) || out; }
-      catch (e) { ast.textContent = '❌ ' + ((e && e.message) || e); out = { done: 0, fail: 0, failed: [], skipped: String((e && e.message) || e) }; }
-      toolBusy = null; if (ad) ad.disabled = false; if (ar) ar.disabled = false;
-      return out;
-    }
     try { out = (await rowRunAll(dry, ast, alist, selCc ? [selCc] : null)) || out; }
     catch (e) { ast.textContent = '❌ ' + ((e && e.message) || e); out = { done: 0, fail: 0, failed: [], skipped: String((e && e.message) || e) }; }
     toolBusy = null;
