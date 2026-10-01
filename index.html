@@ -18373,6 +18373,25 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // 月替わりする利益管理表：その月のシートIDを返す（YYYY-MM）。今月は旧・単一IDにもフォールバック
   const sheetIdForMonth = (ym) => (settings.sheetIds && settings.sheetIds[ym]) || (ym === jstYm() ? settings.sheetId : '') || '';
   const prevYm = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
+  /* ★2026-10-01 本人「これ毎月勝手にやってください」：月替わりで今月の利益管理表の番号が設定に無いと、仕入・入金のミラーが黙って止まる（毎月1日の時限爆弾）。
+     GAS「利益管理表 月替わり（自動）」が毎月1日 0:30 に表を作り、番号を返す。表は「リンクを知っている人が編集可」なので入口のURLは公開コードに書かず、
+     app_kv.profit_roll（鍵が無いと読めない）に置く。今月・先月の番号が無い時だけ取りに行き、このブラウザの設定に保存する */
+  async function ensureSheetIds() {
+    try {
+      const cur = jstYm(), prev = prevYm(cur);
+      const need = [cur, prev].filter(ym => !(settings.sheetIds && settings.sheetIds[ym]));
+      if (!need.length) return;
+      const r = await sbGet('app_kv', 'select=v&k=eq.profit_roll');
+      const u = r && r[0] && r[0].v && r[0].v.url; if (!u) return;
+      let changed = false;
+      for (const ym of need) {
+        const j = await fetch(u + '?action=sheet_id&ym=' + ym, { credentials: 'omit' }).then(x => x.json()).catch(() => null);
+        if (j && j.ok && j.id && j.ym === ym) { settings.sheetIds = Object.assign({}, settings.sheetIds || {}, { [ym]: j.id }); changed = true; }
+      }
+      if (changed) saveSettings();
+    } catch (_) {}
+  }
+  setTimeout(() => { ensureSheetIds(); }, 8000);
   // 転記/ミラー対象シートID（今月＋先月・重複と空を除く）＝入金確定の月ズレに対応
   // ★どの月のシートに書くのかを、月つきで返す（2026-09-10）。
   //   月替わり直後は今月のIDが未登録で、旧・単一ID(settings.sheetId＝前回保存時の月)へ落ちる。
@@ -20476,6 +20495,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-01', items: [
+      '📅 <b>利益管理表の月替わりを自動にしました</b>（本人「10月1日の利益管理表も作っておいてください」「これ毎月勝手にやってください」「関数が入っているところと入っていないところは、きちんと見極めてください」）。毎月1日 0:30 に、GAS「利益管理表 月替わり（自動）」が前の月の表を複製し、注文ごとのデータだけを消して（ひな形の数式・配列数式は残す・数式が値で上書きされた所は数式に戻す）、新しい月の表を作ります。前々月の表は old フォルダへ。何をしたかは新しい表の「_月替わりの記録」に残ります。ポータルの仕入・入金のミラーも、今月・先月の表の番号が無ければ自動で取りに行きます（毎月1日に黙って止まっていた所）。',
+    ] },
     { date: '2026-09-30', items: [
       '🔁 <b>「注文で在庫0になった明細を見張る」の数字の意味を直しました</b>（本人「これって本当にない？」）。右の「確認待ち 0」は【最後の1回で新しく見た注文】の結果だけで、累計ではありませんでした（その時 確認待ちは14件あった）。いまの確認待ちの件数を先頭に赤で出し、回の結果は「この回に新しく見た注文 N件のうち」と書きます。見張り自体は直近3日の注文40件・43明細をすべて見ていて、取りこぼしはありませんでした。',
       '🪜 <b>高い作品は、値段が合うカタログに入れる（無ければ作る）</b>（本人「その価格帯が出せるカタログを作ればいいのでは？」「作るもしくは、入れられるカタログに入れるとか」「低価格帯用のカタログ、高価格帯用のカタログを用意しておいてもいい」）。Shopee は1つのカタログの最高値が最安値の5倍（BR は4倍）までなので、空きのある先頭のカタログに入れていた頃は、高い作品が「在庫0・上限の値段」で置かれていました（実測 813明細・186カタログ）。今後は作品ごとに値段の幅に収まるカタログを選び、どこにも収まらなければ新しいカタログ（②③…）を作ってまとめて入れます＝高価格帯用のカタログになります。作れない回（1回1件・1日12件の上限）は在庫0にせず次の回に回します。すでに在庫0で入っている分は同じ国に同じ作品が2つ並ぶ（重複）ので、まだ動かしていません。',
@@ -47505,6 +47527,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //    理由: 月末の注文(例 6/29)はShopee Japan倉庫到着が翌月初週になり、My Income(入金)の確定が月をまたぐ。
       //    確定は「注文が載っている月のシート(=先月)」で更新されるため、今月シートだけだと取りこぼす。
       const prevYmOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
+      await ensureSheetIds();
       const mirrorSheets = [...new Set([jstYm(), prevYmOf(jstYm())])].map(ym => ({ ym, id: sheetIdForMonth(ym) })).filter(x => x.id);
       if (mirrorSheets.length) {
         say(`📄 利益管理表を読み取り中...（${mirrorSheets.map(s => s.ym).join(' ＋ ')}）`);
