@@ -20495,6 +20495,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-02', items: [
+      '🖼 <b>🤖の「写真の差し替え待ち」が1件も進んでいなかったのを直しました</b>（9/30 の別機種の写真11明細が差し替わらなかった件の調べで判明）。待ちの374件のうち、先頭の古い6件が手がかりの記録から外れていたため、毎回0件で終わり、後ろに順番が回っていませんでした。今は使える分だけを新しい順に1回6件ずつ探し直します（2台目の記録も見る・記録から外れた分は機種と英語名から作品を引き当てる）。',
+    ] },
     { date: '2026-10-01', items: [
       '▶ <b>ポータルの3時間おきの自動実行から、注文明細を外しました</b>（各国のセラーセンターのタブが3時間おきに自分で同じことをしていて二重だった）。手で押す「明細 → 実行」は今までどおりその場で動きます。今日 7か国とも timeout になったのは Tampermonkey が固まっていたため（Chrome の再起動で直りました）。',
       '📅 <b>利益管理表の月替わりを自動にしました</b>（本人「10月1日の利益管理表も作っておいてください」「これ毎月勝手にやってください」「関数が入っているところと入っていないところは、きちんと見極めてください」）。毎月1日 0:30 に、GAS「利益管理表 月替わり（自動）」が前の月の表を複製し、注文ごとのデータだけを消して（ひな形の数式・配列数式は残す・数式が値で上書きされた所は数式に戻す）、新しい月の表を作ります。前々月の表は old フォルダへ。何をしたかは新しい表の「_月替わりの記録」に残ります。ポータルの仕入・入金のミラーも、今月・先月の表の番号が無ければ自動で取りに行きます（毎月1日に黙って止まっていた所）。',
@@ -31329,10 +31332,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* ★2026-09-20 本人「画像、おかしいの差し替えて変えてくれないかな？」：GAS の見直しで「基準外だが代わりが無い」(nophoto) になった明細は、
          控えに代わりの写真が無いだけ。ここで【探し直して】控えに入れ、GAS の見直しの印を消す＝次の回に差し替わる。1回6件まで */
       try {
-        const [rpv, stv] = await Promise.all([baKvGet('boshu_auto_rephoto'), baKvGet('boshu_auto_status')]);
-        const items = (rpv && rpv.items) || {}; const added = (stv && stv.added) || [];
-        const todo = Object.keys(items).filter(k => items[k] && items[k].s === 'nophoto').slice(0, 6)
-          .map(k => { const p2 = k.split('#'); const a = added.find(x => String(x.item_id) === p2[0] && String(x.en) === p2.slice(1).join('#')); return a ? { k, a } : null; }).filter(Boolean);
+        /* ★2026-10-02 実測：差し替え待ち 374件が1件も進んでいなかった。先頭6件を取ってから「足した明細の記録（直近400件）」と突き合わせていたため、
+           先頭が記録から外れた古い分（9/20〜）だと毎回0件＝後ろに一度も順番が回らなかった。2台目（child2）の記録も見ていなかった。
+           → 本体＋2台目の記録で突き合わせ、外れた分は見直しの記録の 機種＋英語名 から作品を引き当てる。使えるものだけを新しい順に6件 */
+        const [rpv, stv, st2, enm] = await Promise.all([baKvGet('boshu_auto_rephoto'), baKvGet('boshu_auto_status'), baKvGet('boshu_auto_status_child2'), baKvGet('boshu_auto_en')]);
+        const items = (rpv && rpv.items) || {}; const added = [].concat((stv && stv.added) || [], (st2 && st2.added) || []);
+        const enKey = {}; Object.keys(enm || {}).forEach(k0 => { const e0 = enm[k0] && enm[k0].en; if (e0 && !enKey[String(e0).toLowerCase()]) enKey[String(e0).toLowerCase()] = k0; });
+        const todo = Object.keys(items).filter(k => items[k] && items[k].s === 'nophoto').map(k => {
+          const p2 = k.split('#'), it2 = items[k], en2 = it2.en || p2.slice(1).join('#');
+          const a = added.find(x => String(x.item_id) === p2[0] && String(x.en) === en2);
+          if (a) return { k, a, at: it2.at || '' };
+          const key2 = enKey[String(en2).toLowerCase()];
+          return (key2 && it2.hw) ? { k, a: { key: key2, hw: it2.hw, ja: '', en: en2 }, at: it2.at || '' } : null;
+        }).filter(Boolean).sort((x, y) => String(y.at).localeCompare(String(x.at))).slice(0, 6);
         if (todo.length) {
           const pre2 = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {});
           const _delK = todo.map(x => baPreKeyFor(pre2, x.a.key, x.a.hw));   /* ★2026-09-30 この機種の束だけ消す（別機種の束はその機種で使っている） */
