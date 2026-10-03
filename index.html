@@ -6273,6 +6273,9 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "名前だけで照合して別の機種が混ざる所を直しました（JAN・値付けの見直し・子SKU・原価の紐付け）": "Fixed places that mixed up platforms by matching names only (JAN, price review, child SKU, cost matching)",
+    "候補がはっきりしているので最初から選んでいます": "Pre-selected because the candidate is clear",
+    "候補が決めきれないので最初は外しています（中身を見て選んでください）": "Not pre-selected because the candidate is unclear (check and choose)",
     "🔁在庫の自動復活：押した瞬間に「⏳戻しています」・4件ずつ並行・失敗を画面に出す": "🔁 Auto restock: shows “⏳ restoring” the moment you press, runs 4 at a time, shows failures",
     "🔎仕入れ検索の検索語：題名の一部のメーカー名（Capcom vs SNK など）と番号を消さない": "🔎 Sourcing search keywords: keep maker names and numbers that are part of the title (Capcom vs SNK etc.)",
     "⏳ 戻しています…": "⏳ Restoring…",
@@ -20568,6 +20571,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-03', items: [
+      '🎮 <b>名前だけで照合して別の機種が混ざる所を直しました（JAN・値付けの見直し・子SKU・原価の紐付け）</b>（Obsidian「19_名前だけの照合の洗い出し」の「高」）。①JANを同じ名前の明細に配る時・母数から当てる時は【明細SKUの頭の機種】で分ける。母数の英名照合は完全一致だけに（前は語の重なり半分で当てていた）。同じ名前が別機種にもある明細は、名前だけで旧い値を写さない ②🏷値付けの見直しは、注文の出品番号があればそれで出品を引く（同じ名前の別カタログの売上で値段を書かない） ③子SKUをそろえる時、機種の違うカタログ・明細は束ねない ④原価の紐付けの候補から機種の違う在庫を外し、候補がはっきりしない時は最初からチェックを入れない。',
       '⏱ <b>🔁在庫の自動復活：押した瞬間に「⏳戻しています」・4件ずつ並行・失敗を画面に出す</b>（本人「押してもすぐに画面変わらないんだけどな、遅すぎない？」「押しても反応してなくない？」）。前は Shopee への書き込みと記録の保存が全部終わるまで描き直さず、エラーも黙って捨てていました。',
       '🔎 <b>🔎仕入れ検索の検索語：題名の一部のメーカー名（Capcom vs SNK など）と番号を消さない</b>（本人「ここもう少し精度高めたい。多分一個もこれ合ってないと思う」）。「Capcom vs SNK 2」が「vs PS2」になっていました→「Capcom vs SNK 2 PS2」。英語の語に番号をくっつけない（SNK2 にしない）。',
       '⚡ <b>🔁在庫の自動復活：確認を出さず、チェックでまとめて戻せるように</b>（本人「これ1個ずつの設定も、いちいち確認が出るのも面倒くさい。すぐパパパパッとできるようにしたい」「多分その各国共通で管理すると思うので」）。各行にチェック、上に「全部選ぶ」と「戻す（次も自動）／今回だけ戻す／様子見」。1行のボタンも確認なしで動き、同じ商品がほかの国でも確認待ちなら全部の国にまとめて効きます。',
@@ -29198,6 +29202,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const g0 = mkDic(pairs), dic = g0.m, bad = g0.bad;
     const dicHw = {};
     Object.keys(pairsHw).forEach(h => { dicHw[h] = mkDic(pairsHw[h]).m; });
+    /* 明細の鍵（id:item#model）→ 明細SKUの頭から機種（母数の機種名＝小文字）。分からなければ '' */
+    const _JFB_SKU2HW = { PSVITA: 'vita', VITA: 'vita', SWITCH: 'switch', SWITCH2: 'switch2', WIIU: 'wiiu', WII: 'wii', '3DS': '3ds', DS: 'ds', GBA: 'gba', GBC: 'gb', GB: 'gb', GC: 'gc', N64: 'n64', SFC: 'sfc', FC: 'fc', PS1: 'ps1', PS2: 'ps2', PS3: 'ps3', PS4: 'ps4', PS5: 'ps5', PSP: 'psp' };
+    const _jfbMap = new Map();
+    try { Object.values(lst.byCc || {}).forEach(arr => (arr || []).forEach(l => (l.models || []).forEach(m => { if (!m || !m.id) return; const h = _JFB_SKU2HW[pidSkuHw(m)] || ''; if (h) _jfbMap.set('id:' + l.item_id + '#' + m.id, h); }))); } catch (_) {}
+    const _jfbHwOf = k => _jfbMap.get(k) || '';
     // ② こちらの明細の空いているところへ
     // ⚠️【最重要】読めなかったときに空っぽで進んではいけない。
     //   この先で1件でも書き込むと、保存が**台帳まるごとの上書き**なので、
@@ -29218,7 +29227,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (SRC_EN.test(String(v.src || ''))) return;
       const jp = String(v.jp || '').trim(); if (!jp) return;
       tgt++;
-      const j = dic.get(tmKey(jp)); if (!j) return;
+      /* ★2026-10-03 全機種をまとめた辞書（dic）を引くと、片方の機種の JAN しか母数に無い時に別機種の明細へ入っていた。
+         明細SKUの頭で機種が分かる明細は、その機種の辞書だけを引く（無ければ入れない） */
+      const _mh = _jfbHwOf(k);
+      const _D = _mh ? dicHw[_mh] : dic; if (!_D) return;
+      const j = _D.get(tmKey(jp)); if (!j) return;
       // ★出どころは既存の src に入れる（新しい項目を足すと保存時の「残す一覧」から漏れて消える）。
       //   ⚠️ src は【上書きする】。空いていた明細には「AIで探したが見つからなかった時に見た先」が
       //      残っていることが多く、そのままだと出どころが分からない（実際に65件入れて2件しか判別できなかった）。
@@ -37450,17 +37463,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const models = (l.models || []).filter(m => (m.n || '').trim()); // 名前つき明細(バリエ商品)のみ
       if (!models.length) return;
       const img = (l.image || '').trim(); if (!img) return;
-      let g = byImg.get(img); if (!g) { g = []; byImg.set(img, g); }
+      /* ★2026-10-03 表紙が同じでも機種の違うカタログは束ねない（別機種の明細の SKU が多数決で1つにされて書き込まれていた）。機種はカタログ名から */
+      let _hk = ''; try { _hk = invHwAuto(l.name || '') || ''; } catch (_) {}
+      const gk = img + '|' + _hk;
+      let g = byImg.get(gk); if (!g) { g = []; byImg.set(gk, g); }
       g.push({ cc: l.cc, host: (regionByCc(l.cc) || {}).host, item_id: l.item_id, name: l.name || '', status: l.status, models });
     }));
     const norm = s => String(s || '').trim().toUpperCase();
     const skuOK = s => /_/.test(String(s || '')) && /[a-z]/i.test(String(s || '')) && String(s).trim().length >= 4;
     const clusters = [];
-    byImg.forEach((g, img) => {
+    byImg.forEach((g, gk) => {
+      const img = String(gk).split('|')[0];
       const rep = g.map(x => x.name).sort((a, b) => b.length - a.length)[0] || '';
       const nameOrder = [], nameDisp = {}, skuVotes = {};
       g.forEach(l => l.models.forEach(m => {
-        const nk = norm(m.n); if (!nameDisp[nk]) { nameDisp[nk] = m.n; nameOrder.push(nk); }
+        const nk = norm(m.n) + '\u0000' + pidSkuHw(m); if (!nameDisp[nk]) { nameDisp[nk] = m.n; nameOrder.push(nk); }
         if (m.sku) { (skuVotes[nk] = skuVotes[nk] || {})[m.sku] = (skuVotes[nk][m.sku] || 0) + 1; }
       }));
       const used = new Set(), target = {};
@@ -37480,7 +37497,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const seenInL = {}; l.models.forEach(m => { if (m.sku) seenInL[norm(m.sku)] = (seenInL[norm(m.sku)] || 0) + 1; });
         const hasDup = Object.keys(seenInL).some(k => seenInL[k] > 1) || l.models.some(m => !(m.sku || '').trim());
         if (hasDup) dupN++;
-        const changes = l.models.map(m => { const t = target[norm(m.n)]; const chg = !!(t && norm(m.sku) !== norm(t)); if (chg) changeN++; return { model_id: m.id, name: m.n, old: m.sku || '', neu: t, chg }; }).filter(c => c.neu);
+        const changes = l.models.map(m => { const t = target[norm(m.n) + '\u0000' + pidSkuHw(m)]; const chg = !!(t && norm(m.sku) !== norm(t)); if (chg) changeN++; return { model_id: m.id, name: m.n, old: m.sku || '', neu: t, chg }; }).filter(c => c.neu);
         return { cc: l.cc, host: l.host, item_id: l.item_id, name: l.name, status: l.status, changes, changed: changes.some(c => c.chg) };
       });
       if (!changeN && !dupN) return; // 既に整っている
@@ -37593,6 +37610,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // 仕入の優先順位は💹利益明細（pfCost）と同じ：①手入力(costs) → ②在庫台帳（その注文に紐付いた在庫の合計）→ ③利益計算表
       const invM = new Map(); (inv || []).forEach(r => { const k = String(r.shopee_sn || '').trim(); if (k && r.price != null) invM.set(k, (invM.get(k) || 0) + Number(r.price)); });
       const nameIdx = new Map(); (lis || []).forEach(l => { const k = l.cc + '|' + paNorm(l.name); (nameIdx.get(k) || nameIdx.set(k, []).get(k)).push(l); });
+      const idIdx = new Map(); (lis || []).forEach(l => idIdx.set(l.cc + '|' + String(l.item_id), l));   /* ★2026-10-03 注文に item_id があれば名前より先にそれで引く（同じ国に同じ名前のカタログが複数あると別カタログの売上・原価で値段を書いていた） */
       const skip = /CANCEL|UNPAID|INVALID|RETURN/i, DAY = 86400000, now = Date.now();
       const ordMs = o => { const t = Number(o.order_ts) || 0; if (t) return t < 1e11 ? t * 1000 : t; const d = Date.parse(String(o.order_date || '').slice(0, 10) + 'T12:00:00Z'); return isFinite(d) ? d : 0; };
       const g = new Map(); let unmatched = 0;
@@ -37601,10 +37619,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const items = o.items || [], t = ordMs(o); if (!t) return;
         items.forEach(it => {
           const cands = nameIdx.get(o.cc + '|' + paNorm(it.name)) || [];
-          const L = cands.find(l => o.shop_id && String(l.shop_id) === String(o.shop_id) && l.status === 1) || cands.find(l => l.status === 1) || cands[0];
+          const L = (it.item_id && idIdx.get(o.cc + '|' + String(it.item_id))) || cands.find(l => o.shop_id && String(l.shop_id) === String(o.shop_id) && l.status === 1) || cands.find(l => l.status === 1) || cands[0];
           if (!L) { unmatched++; return; }
           let m = null; const vv = paNorm(it.variation);
-          if (L.models && L.models.length) { m = L.models.find(x => paNorm(x.n) === vv); if (!m) { unmatched++; return; } }
+          if (L.models && L.models.length) { m = (it.model_id && L.models.find(x => String(x.id) === String(it.model_id))) || L.models.find(x => paNorm(x.n) === vv); if (!m) { unmatched++; return; } }
           const key = o.cc + '|' + L.item_id + '|' + (m ? m.id : 0);
           let e = g.get(key);
           if (!e) { e = { key, cc: o.cc, item_id: L.item_id, model_id: m ? m.id : 0, shop_id: L.shop_id || null, name: L.name, vari: m ? m.n : '', img: (m && m.img) || L.image || '', status: L.status, stock: m ? m.stock : L.stock, price: Number(m ? m.price : L.price_min) || 0, weightG: L.weight ? Math.round(Number(L.weight) * 1000) : null, sales: [], prof: [] }; g.set(key, e); }
@@ -39443,6 +39461,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const janHwAuto = (row) => !String(((pidOf(pidKey(row && row.parent_sku)) || {}).f || {})['機種'] || '').trim() && !!janHwOf(row);
   let _pidByName = null, _pidByNameAt = 0;
   const pidNameKey = (nm, hw) => String(nm || '').trim().toLowerCase().replace(/\s+/g, ' ') + '\u0000' + String(hw || '').trim();
+  /* ★2026-10-03 名前で JAN を写す鍵の機種を【明細SKUの頭】から取る（[[19_名前だけの照合の洗い出し（2026-10-03）]]）。
+     前はカタログ名から機種を1つだけ取っていた（janHwOf）＝シリーズのカタログで PS3 の明細と PS4 の明細が同じ鍵になり、別機種の JAN が配られて保存された */
+  const pidHwCanon = x => { const k = String(x || '').toUpperCase().replace(/[^A-Z0-9ぁ-んァ-ヶ一-龠]/g, ''); return ({ VITA: 'PSVITA', PSV: 'PSVITA', NSW: 'SWITCH', NS: 'SWITCH', NINTENDOSWITCH: 'SWITCH', GAMECUBE: 'GC', NDS: 'DS', XBOX360: 'XBOX', PSX: 'PS1' })[k] || k; };
+  const pidSkuHw = m => (String((m && m.sku) || '').toUpperCase().match(/^([A-Z0-9]{1,10})_/) || [])[1] || '';
+  const pidMHw = (m, fb) => pidHwCanon(pidSkuHw(m) || fb);
   function pidNameIndex() {
     if (_pidByName && Date.now() - _pidByNameAt < 4000) return _pidByName;
     const m = new Map();
@@ -39452,7 +39475,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!x || x.ghost || !x.n) return;
         const k = pidKeyModel(r, x); const p = productIds[k];
         if (!p || (!String(p.jan || '').trim() && !String(p.mpn || '').trim())) return;
-        const nk = pidNameKey(x.n, hw);
+        const nk = pidNameKey(x.n, pidMHw(x, hw));
         if (!m.has(nk)) m.set(nk, { jan: p.jan || '', mpn: p.mpn || '', src: p.src || '', srcUrl: p.srcUrl || '' });
       });
     }));
@@ -39574,6 +39597,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const _pidHas = (k) => { const v = k && productIds && productIds[k]; return !!(v && (v.jan || v.mpn || v.own || (v.f && Object.keys(v.f).length))); };
   // 明細名 → その名前で保存されている旧キーの値（親SKUが変わって行方不明になった分の救出用）
   let _pidNameIdx = null, _pidNameAt = 0;
+  /* 同じ明細名が2つ以上の機種（明細SKUの頭）にあるか。あるなら名前だけで値を写さない */
+  let _pidMultiHw = null, _pidMultiHwAt = 0;
+  function pidNameMultiHw(nm) {
+    if (!_pidMultiHw || Date.now() - _pidMultiHwAt > 60000) {
+      const by = new Map();
+      try { Object.values(lst.byCc || {}).forEach(arr => (arr || []).forEach(l => (l.models || []).forEach(m => { if (!m || !m.n) return; const k = String(m.n).trim().toLowerCase().replace(/\s+/g, ' '); const h = pidSkuHw(m) || '?'; if (!by.has(k)) by.set(k, new Set()); by.get(k).add(h); }))); } catch (_) {}
+      _pidMultiHw = by; _pidMultiHwAt = Date.now();
+    }
+    const set = _pidMultiHw.get(String(nm || '').trim().toLowerCase().replace(/\s+/g, ' '));
+    return !!(set && [...set].filter(h => h !== '?').length >= 2);
+  }
   function _pidLegacyByName(nm) {
     if (!nm) return null;
     if (!_pidNameIdx || Date.now() - _pidNameAt > 4000) {
@@ -39597,7 +39631,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const nm = m ? String(m.n || '').trim().toLowerCase().replace(/\s+/g, ' ') : '';
     const legacy = (!m || m.id === 0) ? base : ((base && nm) ? base + '｜' + nm : null);
     if (_pidHas(legacy)) { productIds[idk] = productIds[legacy]; _pidTouch(); return idk; }   // 旧鍵から引っ越す
-    if (nm) { const rescued = _pidLegacyByName(nm); if (rescued) { productIds[idk] = rescued; _pidTouch(); return idk; } }  // 親SKUが変わって迷子になった分を救出
+    if (nm && !pidNameMultiHw(nm)) { const rescued = _pidLegacyByName(nm); if (rescued) { productIds[idk] = rescued; _pidTouch(); return idk; } }  // 親SKUが変わって迷子になった分を救出。★2026-10-03 同じ名前が別機種にもある明細は救出しない（別機種の JAN を写していた）
     return idk;
   };
   const pidKey = (sku) => { const s = (sku == null ? '' : String(sku)).trim(); return s || null; }; // JAN/型番のキー＝parent_sku（商品単位・各国横断で共有。空なら不可＝先にSKU設定が要る）
@@ -39676,18 +39710,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const dic = await janEnJa(hw);
     productIds = productIds || {};
     let tgt = 0, hit = 0;
-    (models || []).forEach(m => {
-      if (!m || m.ghost || !m.n) return;
+    /* ★2026-10-03 明細の機種は【明細SKUの頭】を正に（カタログの機種と違う明細はその機種の母数を引く）。名前の照合は完全一致だけ
+       （前は語の重なり0.5で当てていた＝[[jan-name-match-exact-only]] 違反） */
+    const SKU2HW = { PSVITA: 'vita', VITA: 'vita', SWITCH: 'switch', SWITCH2: 'switch2', WIIU: 'wiiu', WII: 'wii', '3DS': '3ds', DS: 'ds', GBA: 'gba', GBC: 'gb', GB: 'gb', GC: 'gc', N64: 'n64', SFC: 'sfc', FC: 'fc', PS1: 'ps1', PS2: 'ps2', PS3: 'ps3', PS4: 'ps4', PS5: 'ps5', PSP: 'psp' };
+    const _byHw = {};
+    const ctxOf = async h => { if (!_byHw[h]) { const i2 = await janMstIdx(h); const d2 = await janEnJa(h); _byHw[h] = { idx: i2, dic: d2 }; } return _byHw[h]; };
+    _byHw[hw] = { idx: idx, dic: dic };
+    for (const m of (models || [])) {
+      if (!m || m.ghost || !m.n) continue;
       const k = pidKeyModel(row, m); const v = productIds[k] || {};
-      if (String(v.jan || '').trim()) return;
+      if (String(v.jan || '').trim()) continue;
       tgt++;
-      const ja = String(v.jp || '').trim() || (dic ? dic.lookup(m.n) : '') || '';
-      if (!ja) return;
-      const jan = idx.get(tmKey(ja)); if (!jan) return;
+      const mh = SKU2HW[pidSkuHw(m)] || hw;
+      let c2; try { c2 = await ctxOf(mh); } catch (_) { continue; }
+      if (!c2 || !c2.idx || !c2.idx.size) continue;
+      const ja = String(v.jp || '').trim() || (c2.dic ? c2.dic.lookup(m.n, 1) : '') || '';
+      if (!ja) continue;
+      const jan = c2.idx.get(tmKey(ja)); if (!jan) continue;
       // ★出どころは既存の src に入れる（新しい項目を足すと保存時の「残す一覧」から漏れて消える）。
       productIds[k] = Object.assign({}, v, { jan: jan, jp: v.jp || ja, at: Date.now(), src: v.src || '母数(楽天ブックス・駿河屋)から自動' });
       hit++;
-    });
+    }
     if (hit) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); try { janStatPaint(row); } catch (_) {} }
     return { tgt: tgt, hit: hit };
   }
@@ -42196,7 +42239,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       {
         const idx = pidNameIndex(); let reused = 0;
         tgt = tgt.filter(m => {
-          const got = idx.get(pidNameKey(m.n, hw)); if (!got) return true;
+          const got = idx.get(pidNameKey(m.n, pidMHw(m, hw))); if (!got) return true;
           const k = pidKeyModel(row, m), prev = productIds[k] || {};
           const nj = String(prev.jan || '').trim() || got.jan, nm2 = String(prev.mpn || '').trim() || got.mpn;
           if (nj === String(prev.jan || '') && nm2 === String(prev.mpn || '')) return true;
@@ -42355,12 +42398,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           hit++;
           // ♻️ 分かった答えを、他の国の【同じ明細名】にもその場で配る＝次に払わなくて済む
           try {
-            const nk = pidNameKey(m.n, hw);
+            const nk = pidNameKey(m.n, pidMHw(m, hw));
             Object.keys(lst.byCc || {}).forEach(cc2 => (lst.byCc[cc2] || []).forEach(r2 => {
               if (String(r2.item_id) === String(row.item_id)) return;
               const hw2 = janHwOf(r2);
               (r2.models || []).forEach(x2 => {
-                if (!x2 || x2.ghost || !x2.n || pidNameKey(x2.n, hw2) !== nk) return;
+                if (!x2 || x2.ghost || !x2.n || pidNameKey(x2.n, pidMHw(x2, hw2)) !== nk) return;
                 const k2 = pidKeyModel(r2, x2), p2 = productIds[k2] || {};
                 const j2 = String(p2.jan || '').trim() || nj, m2 = String(p2.mpn || '').trim() || nm;
                 if (j2 === String(p2.jan || '') && m2 === String(p2.mpn || '')) return;
@@ -42660,7 +42703,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         rows.forEach(r => { const hw = janHwOf(r); (r.models || []).forEach(m => {
           if (!m || m.ghost || !m.n) return;
           const v = productIds[pidKeyModel(r, m)] || {};
-          const nm2 = pidNameKey(m.n, hw);
+          const nm2 = pidNameKey(m.n, pidMHw(m, hw));
           ['jan', 'mpn'].forEach(f => { const x = String(v[f] || '').trim(); if (!x) return;
             (nameOfVal[VK(f, x)] = nameOfVal[VK(f, x)] || new Set()).add(nm2); });
         }); });
@@ -42672,14 +42715,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const v = productIds[pidKeyModel(r, m)] || {};
           const j = String(v.jan || '').trim(), mp = String(v.mpn || '').trim();
           if (!j && !mp) return;
-          const k = pidNameKey(m.n, hw);
+          const k = pidNameKey(m.n, pidMHw(m, hw));
           if (!idx.has(k)) idx.set(k, { jan: j, mpn: mp, src: v.src || '', srcUrl: v.srcUrl || '' });
         }); });
         const jobs = []; let skipBad = 0;
         rows.forEach(r => { const hw = janHwOf(r); (r.models || []).forEach(m => {
           if (!m || m.ghost || !m.n) return;
           const k = pidKeyModel(r, m), prev = productIds[k] || {};
-          const got = idx.get(pidNameKey(m.n, hw)); if (!got) return;
+          const got = idx.get(pidNameKey(m.n, pidMHw(m, hw))); if (!got) return;
           let nj = String(prev.jan || '').trim(), nm2 = String(prev.mpn || '').trim();
           if (!nj && got.jan) { if (bad('jan', got.jan)) skipBad++; else nj = got.jan; }
           if (!nm2 && got.mpn) { if (bad('mpn', got.mpn)) skipBad++; else nm2 = got.mpn; }
@@ -46435,8 +46478,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const rows = need.map((o) => {
       const oname = (o.items && o.items.map(it => (it.name || '') + ' ' + (it.variation || '')).join(' ')) || '';
       const ot = new Set(toks(oname));
-      const cand = poolTok.map(p => { let s = 0; ot.forEach(w => { if (p.t.has(w)) s++; }); return { v: p.v, s: s }; }).filter(c => c.s >= 1).sort((a, b) => b.s - a.s).slice(0, 5);
-      return { o: o, oname: oname, cand: cand };
+      /* ★2026-10-03 機種の違う在庫を候補から外す（前は語の重なりだけ＝PS4の在庫がPS3の注文の原価に紐付いた）。機種は明細名→出品名の順で読む */
+      let ohw = ''; try { ohw = (o.items || []).map(it => invHwAuto(it.variation || '') || invHwAuto(it.name || '')).find(Boolean) || ''; } catch (_) {}
+      const cand = poolTok.map(p => { let s = 0; ot.forEach(w => { if (p.t.has(w)) s++; }); let vh = ''; try { vh = invHwAuto((p.v.name_supplier || '') + ' ' + (p.v.name || '')) || ''; } catch (_) {} return { v: p.v, s: s, hwOk: !ohw || !vh || vh === ohw }; }).filter(c => c.s >= 1 && c.hwOk).sort((a, b) => b.s - a.s).slice(0, 5);
+      return { o: o, oname: oname, cand: cand, sure: !!(cand[0] && cand[0].s >= 3 && (!cand[1] || cand[1].s < cand[0].s)) };
     });
     const withCand = rows.filter(r => r.cand.length);
     const optLabel = v => `${(v.name || v.name_supplier || v.item_id || '').slice(0, 40)}  ¥${(v.price || 0).toLocaleString()}${v.supplier ? ' / ' + v.supplier : ''}`;
@@ -46446,7 +46491,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         withCand.map((r, i) => {
           const rg = regionByCc(r.o.cc) || { color: '#333' };
           return `<tr>
-            <td style="text-align:center"><input type="checkbox" class="cm-ck" data-i="${i}" checked></td>
+            <td style="text-align:center"><input type="checkbox" class="cm-ck" data-i="${i}"${r.sure ? ' checked' : ''} title="${r.sure ? '候補がはっきりしているので最初から選んでいます' : '候補が決めきれないので最初は外しています（中身を見て選んでください）'}"></td>
             <td style="font-size:12px">${nm(r.oname.replace(STOP, '').trim() || r.oname, '260px')}</td>
             <td style="white-space:nowrap;font-size:11px"><b style="color:${rg.color}">${r.o.cc}</b> ${esc((r.o.order_date || '').slice(5))}</td>
             <td><select class="cm-sel" data-i="${i}" style="width:100%;max-width:420px;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:6px">${r.cand.map((c, ci) => `<option value="${esc(c.v.item_id)}"${ci === 0 ? ' selected' : ''}>${esc(optLabel(c.v))}${c.s >= 2 ? ' ✓' : ''}</option>`).join('')}<option value="">（スキップ）</option></select></td>
