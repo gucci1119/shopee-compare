@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261004-0300g';
+var SRC_VER = '20261004-0400h';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1521,7 +1521,8 @@ function doPostInner_(e) {
     else if (body.action === 'outbox_done') out = outboxDone_(body);
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
-    else if (body.action === 'upload_image') out = uploadImageData_(body);  // ★PCのファイルをShopeeへアップ→image_idを返す（D&D/ファイル選択用）
+    else if (body.action === 'upload_image') out = uploadImageData_(body);
+    else if (body.action === 'desc_block') out = descBlockSet_(body.shop_id, body.item_id, String(body.block || ''), String(body.tag || '中文說明'), !!body.dry);   /* ★2026-10-04 段落が長くGETのURLに入らない（HTTP 404）のでPOSTでも受ける */  // ★PCのファイルをShopeeへアップ→image_idを返す（D&D/ファイル選択用）
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
