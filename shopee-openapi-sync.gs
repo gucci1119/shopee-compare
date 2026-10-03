@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261003-2400e';
+var SRC_VER = '20261004-0130f';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4298,7 +4298,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
     _ol.forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
       if (!tab) return;
-      var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, variation: it.model_name || '' }; });
+      var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, model_id: (it.model_id != null ? it.model_id : null), variation: it.model_name || '' }; });   /* ★2026-10-04 明細番号も残す（明細名を変えても売れた明細を突き合わせられるように） */
       var day = o.create_time ? new Date((o.create_time + tz * 3600) * 1000).toISOString().slice(0, 10) : null;
       // キャンセル理由：買い手の記入(buyer_cancel_reason)優先→無ければcancel_reason。誰が(system/buyer/seller)も付す
       var creason = String(o.buyer_cancel_reason || o.cancel_reason || '').trim();
@@ -8811,11 +8811,17 @@ function baSoldSync_(st) {
   ords.forEach(function (o) {
     var items = o.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (e) { items = []; } }
     (items || []).forEach(function (it) {
-      var nm = String((it && it.name) || '').trim(), vr = String((it && it.variation) || '').trim().toLowerCase(); if (!nm || !vr) return;
+      var nm = String((it && it.name) || '').trim(), vr = String((it && it.variation) || '').trim().toLowerCase();
+      var iid = String((it && it.item_id) || ''), mid = String((it && it.model_id) || '');
+      if (!(iid && mid) && (!nm || !vr)) return;
       added.forEach(function (a) {
         if (!a || a.cc !== o.cc || !a.key) return;
-        if (String(a.en || '').trim().toLowerCase() !== vr) return;
-        if (nm.indexOf(String(a.cat || '').slice(0, 40)) !== 0 && String(a.cat || '').indexOf(nm.slice(0, 40)) !== 0) return;
+        /* ★2026-10-04 注文に出品番号＋明細番号があればそれで突き合わせる（明細名・カタログ名を繁体字などに変えても外れない＝本人「明細名も繁体字にした方がいいんじゃないの？」）。無い古い注文だけ名前で見る */
+        if (iid && mid) { if (String(a.item_id) !== iid || String(a.model_id) !== mid) return; }
+        else {
+          if (String(a.en || '').trim().toLowerCase() !== vr) return;
+          if (nm.indexOf(String(a.cat || '').slice(0, 40)) !== 0 && String(a.cat || '').indexOf(nm.slice(0, 40)) !== 0) return;
+        }
         var sk = a.key + '@' + (a.hw || ''); soldKeys[sk] = soldKeys[sk] || o.cc; if (!a.sold) { a.sold = true; a.soldAt = new Date().toISOString(); }
       });
     });
