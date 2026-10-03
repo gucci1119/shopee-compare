@@ -6277,6 +6277,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "在庫の自動復活：続けて押しても、消した行が戻ってこないように": "Stock auto-restore: rows no longer come back when pressed in a row",
     "アクセス（各国）に「🧪 施策の効果」": "'🧪 Effect of changes' in Access (by country)",
     "🧪 施策の効果": "🧪 Effect of changes",
     "台湾の題名を繁体字に": "Taiwan titles in Traditional Chinese",
@@ -20658,6 +20659,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-04', items: [
+      '🔁 <b>在庫の自動復活：続けて押しても、消した行が戻ってこないように</b>（本人「これ連続でパパぱぱっとできるようにしたい」「一度押して消えた後にまた戻ってくることがある」）。真因＝2つの処理が同時に記録を「読む→書く」して、後から書いた方が先の記録を消していた。保存を1本ずつ順番にし、押した行はその場で「済み／処理中」として覚えるので、描き直しても戻りません。',
       '🧪 <b>アクセス（各国）に「🧪 施策の効果」</b>（本人「これでビューが増えたかとか計測したいね」）。台湾の題名を繁体字にした前の数字（変えた142件と、触っていない71件の閲覧・店の訪問者）を控え、前→今と、触っていない出品との差（季節・セールを差し引いた伸び）を出します。出品の閲覧は30日たつと比べ切れます。',
       '🇹🇼 <b>台湾の題名を繁体字に</b>（142件）。中国語の題名の出品は英語の約2.7倍見られていたため。明細名・SKUは英語のままなので、ポータルの検索は今まで通り英語でできます。',
       '🛡 <b>在庫の自動復活：もう在庫がある明細は書かない</b>。戻すボタンは指定の数で上書きするので、もう1台・手で先に戻していると在庫を減らしていました（PH Chrono Trigger：在庫3を1にするところだった）。書く前に公式APIで今の在庫を読み（同じ出品は1回）、在庫が1以上の明細は書かずに一覧から外します。',
@@ -31781,7 +31783,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const by = {}; (rows || []).forEach(r => { by[r.k] = r.v; });
     RS.kv = { cfg: by.stock_restore_cfg || {}, rules: by.stock_restore_rules || {}, state: by.stock_restore_state || {}, manual: by.stock_restore_manual || {} };
   }
-  async function rsSaveKey(k, mutate, what) {   /* 読み直してから書く（他のPCの変更を消さない） */
+  /* ★2026-10-04 本人「一度押して消えた後にまた戻ってくることがある」「こうやることが多い」（行を続けて押す）。
+     真因＝2つの処理が同時に「読む→書く」をして、後から書いた方が先の記録を上書きで消していた。→ 保存は1本ずつ順番に */
+  let _rsSaveQ = Promise.resolve();
+  function rsSaveKey(k, mutate, what) { const run = () => rsSaveKeyNow(k, mutate, what); const p = _rsSaveQ.then(run, run); _rsSaveQ = p.catch(() => {}); return p; }
+  async function rsSaveKeyNow(k, mutate, what) {   /* 読み直してから書く（他のPCの変更を消さない） */
     if (!settings.sbSecret) throw new Error('この端末は書き込みキー未設定です（⚙️設定）');
     const kv = await sbGetAll('app_kv', 'select=v&k=eq.' + k).catch(() => undefined);
     const cur = baKvMust(kv === undefined ? undefined : ((kv && kv[0] && kv[0].v) || {}), what);
@@ -31970,7 +31976,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const nWatch = Object.values(rules).filter(r => r && r.m === 'watch').length, nQty = Object.values(rules).filter(r => r && (r.q > 0 || r.m === 'auto')).length;
     /* ★2026-09-29 明細を単品扱いにしていた版の記録（model 0 なのに出品にバリエーションがある）は出さない＝押すとカタログ全体に書いてしまう */
     const rsHasModels = w => { try { const l = ((lst.byCc || {})[w.cc] || []).find(x => String(x.item_id) === String(w.item_id)); return !!(l && (l.models || []).some(m => m && m.id && !m.ghost)); } catch (_) { return false; } };
-    const wz = Object.entries(state.watchZero || {}).filter(([k, w]) => w && !(manual[k] && String(manual[k]) >= String(w.at || '')) && !(!Number(w.model_id) && rsHasModels(w))).map(([k, w]) => Object.assign({ key: k }, w)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const wz = Object.entries(state.watchZero || {}).filter(([k, w]) => w && !(RS.doneLocal && RS.doneLocal.has(k)) && !(manual[k] && String(manual[k]) >= String(w.at || '')) && !(!Number(w.model_id) && rsHasModels(w))).map(([k, w]) => Object.assign({ key: k }, w)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
     const head = `<div class="tool-card" style="max-width:none;margin:0 0 12px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
         <label style="font-size:14px;font-weight:700"><input type="checkbox" id="rs-on" ${on ? 'checked' : ''}> 🔁 注文で在庫0になった明細を見張る</label>
@@ -31980,7 +31986,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       </div>
       ${on ? '' : '<div style="margin-top:6px;font-size:12.5px;color:#8a4b00"><b>いまは OFF です。</b>売れて0になった明細を見に行きません（確認待ちにも並びません）。</div>'}
     </div>`;
-    const wzRow = w => { w.rk = rsKeyOfW(w); const g = (RS.groups || []).find(x => x.k === w.rk) || {}; const img = w.img || g.img; const isW = w.kind === 'watch';
+    const wzRow = w => { if (RS.pending && RS.pending.has(w.key)) return `<tr style="opacity:.45;pointer-events:none"><td style="padding:2px 6px;font-size:11px"><input type="checkbox" class="rs-wsel" data-k="${esc(w.key)}" disabled> ${esc(jstDateTime(w.at))}</td><td style="padding:2px 6px">${esc(w.cc)}</td><td style="padding:2px 4px;width:48px">${rsImg(w.img)}</td><td style="padding:2px 6px">${nm(w.name, 'wrap')}</td><td style="padding:2px 6px"><b style="color:#1565c0">⏳ ${esc(RS.pending.get(w.key))}</b></td></tr>`; w.rk = rsKeyOfW(w); const g = (RS.groups || []).find(x => x.k === w.rk) || {}; const img = w.img || g.img; const isW = w.kind === 'watch';
       return `<tr style="${isW ? 'background:#fffbea' : ''}"><td style="padding:2px 6px;white-space:nowrap;font-size:11px"><label style="cursor:pointer"><input type="checkbox" class="rs-wsel" data-k="${esc(w.key)}" style="vertical-align:middle;margin:0 4px 0 0">${esc(jstDateTime(w.at))}</label><div>${isW ? '<b style="color:#8a4b00">🟡 様子見</b>' : '<b style="color:#1565c0">🔔 確認待ち</b>'}</div></td><td style="padding:2px 6px">${esc(w.cc)}</td><td style="padding:2px 4px;width:48px">${rsImg(img)}</td><td style="padding:2px 6px">${nm(w.name, 'wrap')}${w.title ? `<div class="smd-dim" style="font-size:10.5px">${nm(w.title, 'wrap')}</div>` : ''}<div class="smd-dim" style="font-size:10.5px">注文 ${esc(w.sn || '')}</div>${(RS.failMsg || {})[w.key] ? `<div style="color:#d93025;font-size:11px;font-weight:700;margin-top:2px">⚠ ${esc(RS.failMsg[w.key])}</div>` : ''}</td>
         <td style="padding:2px 6px;white-space:nowrap"><input type="number" min="1" max="99" value="${(rules[w.rk] && rules[w.rk].q) || defQ}" class="rs-wq" style="width:44px"> 個で
           ${isW ? '' : `<button class="smd-btn b-write rs-wact" data-a="auto" data-k="${esc(w.key)}" title="いま戻して、次にこの商品が売れた時も自動でこの数に戻す">戻す（次も自動）</button> `}<button class="smd-btn rs-wact" data-a="once" data-k="${esc(w.key)}" title="今回だけ戻す。次に売れた時もまた確認待ちに並ぶ">今回だけ戻す</button>
@@ -32094,6 +32100,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* ★2026-10-03 本人「これ押してもすぐに画面変わらないんだけどな、遅すぎない？」＝Shopeeへの書き込みと記録の保存が全部終わるまで描き直していなかった。
          押した瞬間に行を「処理中」にして薄くし、書き込みは4件ずつ並行。終わった行は消え、失敗した行だけ戻る */
       const label = a === 'auto' || a === 'once' ? '⏳ 戻しています…' : '⏳ 記録しています…';
+      RS.pending = RS.pending || new Map(); RS.doneLocal = RS.doneLocal || new Set();
+      all.forEach(k => RS.pending.set(k, label.replace('⏳ ', '')));
       all.forEach(k => { const cb = host.querySelector('.rs-wsel[data-k="' + CSS.escape(k) + '"]'); const tr = cb && cb.closest('tr'); if (!tr) return; tr.style.opacity = '.45'; tr.style.pointerEvents = 'none'; const td = tr.lastElementChild; if (td) td.innerHTML = '<b style="color:#1565c0">' + label + '</b>'; });
       toast(label.replace('⏳ ', '') + '（' + all.length + '件）');
       let ok = 0, ng = 0; const done = [], errs = [];
@@ -32115,7 +32123,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             try {
               const d0 = await openapiGetModels(w0.shop_id, w0.item_id); const ms0 = (d0 && d0.models) || [];
               const has = x => { const mid = Number(x.w.model_id) || 0; const m = ms0.find(mm => String(mm.model_id) === String(mid)) || (ms0.length === 1 && !mid ? ms0[0] : null); return m && Number(m.stock) > 0; };
-              want.filter(has).forEach(x => { done.push(x.k); ok++; delete RS.failMsg[x.k]; hideRow(x.k); try { logAct('出品', '売れて0の在庫を戻す→もう在庫ありで書かず', x.w.cc + ' ' + x.w.item_id, x.w.name); } catch (_) {} });
+              want.filter(has).forEach(x => { done.push(x.k); ok++; delete RS.failMsg[x.k]; RS.doneLocal.add(x.k); RS.pending.delete(x.k); hideRow(x.k); try { logAct('出品', '売れて0の在庫を戻す→もう在庫ありで書かず', x.w.cc + ' ' + x.w.item_id, x.w.name); } catch (_) {} });
               for (let i = want.length - 1; i >= 0; i--) if (has(want[i])) want.splice(i, 1);
               if (!want.length) return;
             } catch (_) {}   // 読めなければ従来どおり書く（戻す操作を止めない）
@@ -32135,14 +32143,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         want.forEach(x => {
           if (okAll) {
             if (restore) { try { logAct('出品', '売れて0の在庫を戻した', x.w.cc + ' ' + x.w.item_id, x.w.name + ' → ' + x.n + (a === 'auto' ? '（次も自動）' : '（今回だけ）')); } catch (_) {} }
-            done.push(x.k); ok++; delete RS.failMsg[x.k]; hideRow(x.k);
+            done.push(x.k); ok++; delete RS.failMsg[x.k]; RS.doneLocal.add(x.k); RS.pending.delete(x.k); hideRow(x.k);
           } else {
+            RS.pending.delete(x.k);
             ng++; RS.failMsg[x.k] = '戻せませんでした：' + why.replace(/（.*$/, '').slice(0, 60) + '（もう一度押せばやり直します）';
             errs.push(x.w.cc + ' ' + String(x.w.name || '').slice(0, 30));
           }
         });
       };
       { const q = [...byItem.values()]; await Promise.all(Array.from({ length: Math.min(3, q.length) }, async () => { while (q.length) await one(q.shift()); })); }
+      all.forEach(k => RS.pending.delete(k));
       try {
         if ((a === 'auto' || a === 'watch') && done.length) {
           const dq = parseInt(RS.kv.cfg.qty, 10) || 1;
