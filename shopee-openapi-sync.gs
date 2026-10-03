@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261003-2330d';
+var SRC_VER = '20261003-2400e';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6599,15 +6599,14 @@ function baEnName_(row, st, enCache, hw) {
 /* ★2026-10-03 本人「こういうのはベスト版でしょ？だから明細のところも、ベストって分かるように入れといてほしい。もし文字が余ればやけど」。
    ベスト版かどうかは作品マスタ（駿河屋・楽天・Wikidata）には無い＝手がかりは【作品名】と【写真を取った出品の題名】だけ。
    題名の「ベスト／best」は、作品名そのものに入っていない時だけ見る（ベストプレープロ野球 などを取り違えない）。明細名30字に収まる時だけ「 Best」を足す */
-var BA_BEST_RE = /(ベスト版|Best版|the\s*best|ザ・?ベスト|廉価版|新価格版|Greatest\s*Hits|Nintendo\s*Selects|ハッピープライス)/i, BA_BEST_LOOSE = /ベスト|\bbest\b/i;
+var BA_BEST_RE = /(ベスト版|Best版|the\s*best|ザ・?ベスト|廉価版|新価格版|Greatest\s*Hits|Nintendo\s*Selects|ハッピープライス|ベストコレクション|ベストセレクション|ベストプライス|Best\s*Collection|Best\s*Selection|Best\s*Price)/i;   /* ★2026-10-03 レビュー：「ベスト」の語だけで付けるのはやめた（ベスト状態・ベストショット等の煽り文句でも Best が付いた）。決まった言い方だけ */
 /* ★2026-10-03 使った写真の控え（boshu_auto_imgs：写真URL→使った作品）の値を【作品@機種】に。前は作品だけ＝同じ名前の別機種が同じ写真を使えた
    （[[19_名前だけの照合の洗い出し（2026-10-03）]]）。古い値（作品だけ）はどの機種のものか分からないので「よその物」として扱う＝別機種への使い回しを止める側に倒す */
 function baUsedTag_(key, hw) { return String(key || '') + '@' + String(hw || ''); }
 function baUsedOk_(used, u, key, hw) { var v = used && used[u]; return !v || v === baUsedTag_(key, hw); }
 function baBestOf_(ja, photoTitle) {
   var j = String(ja || ''), t = String(photoTitle || '');
-  if (BA_BEST_RE.test(j) || BA_BEST_RE.test(t)) return true;
-  return BA_BEST_LOOSE.test(t) && !BA_BEST_LOOSE.test(j);
+  return BA_BEST_RE.test(j) || BA_BEST_RE.test(t);
 }
 /* ★2026-10-03 本人「これ、PS4ってどういうこと？…スイッチのゲームじゃないのか？」（Switch に「Kunio-Kuns Three Kingdoms PS4」）。
    英題を短くする時にAIが機種名を付けた。【末尾】に出品する機種と違う機種名があれば外す（題名の途中＝Kirby Wii Deluxe・Fish Eyes Wii(Wii) は正式名なので残す） */
@@ -6859,6 +6858,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + em.slice(0, 80) + (BA_AI_DOWN ? '（この回はAIを止めます）' : ''));
     return { ok: false, judged: false, kind: 'error' };
   }
+  if (st && st.aiDown) baAiDownClear_(st);   /* ★2026-10-03 レビュー：写真の判定が通った時も「AIが使えない」を消す（文章AIを呼ばない回だと🔔が残り続けた） */
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   var ok = !!o.product_photo, kind = String(o.kind || '');
   /* ★v192 「実物か」をAIの一言に任せない：周りに何も写っていない（scene=none）か、縁も影も見えない（edges=false）なら、AIが true と言ってもカタログ画像として落とす */

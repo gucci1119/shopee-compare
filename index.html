@@ -6273,6 +6273,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "今日の直しのレビューで見つけた3点を直しました": "Fixed 3 issues found when reviewing today's changes",
     "🌱切り出し候補に「作品シリーズのカタログ候補」を追加": "Added 'series catalog candidates' to the 🌱 spin-off tab",
     "📚 作品シリーズのカタログ候補（その国にまだ自分のシリーズカタログが無いもの）": "📚 Series catalog candidates (series with no own catalog in that country yet)",
     "総称の明細で売れた": "Sold in generic",
@@ -20585,6 +20586,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-03', items: [
+      '🔍 <b>今日の直しのレビューで見つけた3点を直しました</b>。①子SKUをそろえる時、SKUが空の明細に他の国のSKUではなく新しく作ったSKUが付く形になっていた（今日の機種分けの副作用）→同じ名前の明細の機種が1つなら寄せる・2機種以上なら触らない。KIRBY_ のような機種でない頭は機種として扱わない ②🤖明細名の「Best」：写真の出品の題名に「ベスト」の語があるだけで付けていた→ベスト版・the Best・廉価版などの決まった言い方だけ ③🔔「AIの残高切れ」：写真の判定だけが成功した時に消えずに残ることがあった→写真の判定の成功でも消す。',
       '📚 <b>🌱切り出し候補に「作品シリーズのカタログ候補」を追加</b>。国ごとに、まだ自分のシリーズカタログが無いシリーズを A/B/C で並べ、総称の明細で売れた数・単品で売れた数・月あたり・総称に入っている明細・母数・他の国で売れた数・1枠あたりの見込み（推測）を出します。読むだけで何も書きません。',
       '🎮 <b>🤖の相場：出品名に機種が書いてある出品を優先（3件以上あれば）・ヤフオクの機種判定にカタカナの機種名</b>。機種の語が無い出品は別機種かもしれず、相場（仕入れの目安）が混ざっていました。「ファミコン クレイジークライマー」のようなカタカナの機種名の出品が、別の機種の候補に残っていたのも直しました。',
       '🎮 <b>名前だけで照合して別の機種が混ざる所を直しました（JAN・値付けの見直し・子SKU・原価の紐付け）</b>（Obsidian「19_名前だけの照合の洗い出し」の「高」）。①JANを同じ名前の明細に配る時・母数から当てる時は【明細SKUの頭の機種】で分ける。母数の英名照合は完全一致だけに（前は語の重なり半分で当てていた）。同じ名前が別機種にもある明細は、名前だけで旧い値を写さない ②🏷値付けの見直しは、注文の出品番号があればそれで出品を引く（同じ名前の別カタログの売上で値段を書かない） ③子SKUをそろえる時、機種の違うカタログ・明細は束ねない ④原価の紐付けの候補から機種の違う在庫を外し、候補がはっきりしない時は最初からチェックを入れない。',
@@ -37531,8 +37533,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const img = String(gk).split('|')[0];
       const rep = g.map(x => x.name).sort((a, b) => b.length - a.length)[0] || '';
       const nameOrder = [], nameDisp = {}, skuVotes = {};
+      /* ★2026-10-03 レビューで直した：SKU の頭を何でも機種とみなすと ①SKU が空の明細が別の鍵になり、他の国の SKU ではなく新しく作った SKU が付いていた
+         ②KIRBY_… のような機種の無い SKU も「機種 KIRBY」と扱っていた。→ 機種として知っている頭だけを使い、空の明細は【同じ名前の明細に機種が1つしか無い時だけ】その機種に寄せる。
+         決めきれない（同じ名前が2機種以上にあって自分の SKU が空）明細は触らない */
+      const KHW = /^(PSVITA|VITA|SWITCH2?|WIIU|WII|3DS|DS|GBA|GBC|GB|GC|N64|SFC|FC|PS[1-5]|PSP|MD|SS|DC|XBOX)$/;
+      const hwOfM = m => { const h = pidSkuHw(m); return KHW.test(h) ? pidHwCanon(h) : ''; };
+      const hwsByName = {}; g.forEach(l => l.models.forEach(m => { const h = hwOfM(m); if (h) (hwsByName[norm(m.n)] = hwsByName[norm(m.n)] || new Set()).add(h); }));
+      const nkOf = m => { let h = hwOfM(m); if (!h) { const st = hwsByName[norm(m.n)]; if (st && st.size > 1) return null; h = st ? [...st][0] : ''; } return norm(m.n) + '\u0000' + h; };
       g.forEach(l => l.models.forEach(m => {
-        const nk = norm(m.n) + '\u0000' + pidSkuHw(m); if (!nameDisp[nk]) { nameDisp[nk] = m.n; nameOrder.push(nk); }
+        const nk = nkOf(m); if (!nk) return; if (!nameDisp[nk]) { nameDisp[nk] = m.n; nameOrder.push(nk); }
         if (m.sku) { (skuVotes[nk] = skuVotes[nk] || {})[m.sku] = (skuVotes[nk][m.sku] || 0) + 1; }
       }));
       const used = new Set(), target = {};
@@ -37552,7 +37561,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const seenInL = {}; l.models.forEach(m => { if (m.sku) seenInL[norm(m.sku)] = (seenInL[norm(m.sku)] || 0) + 1; });
         const hasDup = Object.keys(seenInL).some(k => seenInL[k] > 1) || l.models.some(m => !(m.sku || '').trim());
         if (hasDup) dupN++;
-        const changes = l.models.map(m => { const t = target[norm(m.n) + '\u0000' + pidSkuHw(m)]; const chg = !!(t && norm(m.sku) !== norm(t)); if (chg) changeN++; return { model_id: m.id, name: m.n, old: m.sku || '', neu: t, chg }; }).filter(c => c.neu);
+        const changes = l.models.map(m => { const _nk = nkOf(m); const t = _nk ? target[_nk] : null; const chg = !!(t && norm(m.sku) !== norm(t)); if (chg) changeN++; return { model_id: m.id, name: m.n, old: m.sku || '', neu: t, chg }; }).filter(c => c.neu);
         return { cc: l.cc, host: l.host, item_id: l.item_id, name: l.name, status: l.status, changes, changed: changes.some(c => c.chg) };
       });
       if (!changeN && !dupN) return; // 既に整っている
