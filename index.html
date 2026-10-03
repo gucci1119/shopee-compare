@@ -6277,6 +6277,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "在庫の自動復活：もう在庫がある明細は書かない": "Stock auto-restore: don't overwrite items that already have stock",
     "在庫の自動復活をサクサクに": "Faster stock auto-restore",
     "出品管理のタブをスリムにしました": "Slimmed the Listings tabs",
     "✍️ 出品する": "✍️ List",
@@ -20611,6 +20612,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-04', items: [
+      '🛡 <b>在庫の自動復活：もう在庫がある明細は書かない</b>。戻すボタンは指定の数で上書きするので、もう1台・手で先に戻していると在庫を減らしていました（PH Chrono Trigger：在庫3を1にするところだった）。書く前に公式APIで今の在庫を読み（同じ出品は1回）、在庫が1以上の明細は書かずに一覧から外します。',
       '⚡ <b>在庫の自動復活をサクサクに</b>（本人「これサクサクできるようにして」）。①同じ出品の明細は1回の書き込みにまとめる ②書き込みの返事がエラー（HTTP 404 など）でも、Shopeeの今の在庫を読んで戻したい数になっていれば成功にする（GASが書けたのにエラーページを返すことがある） ③失敗しても画面を止めるダイアログは出さず、その行に赤字で理由を出す（もう一度押せばやり直し）。',
     ] },
     { date: '2026-10-03', items: [
@@ -32058,6 +32060,19 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const w0 = st0[ks[0]];
         const want = ks.map(k => ({ k, w: st0[k], n: qBy[rkOf(st0[k])] || qtyOf(k) }));
         let okAll = !restore, why = '';
+        /* ★2026-10-04 戻す前に今の在庫を見る（本人「続けて」）：在庫がもう1以上ある明細に書くと、指定の数で上書き＝3→1に【減らして】いた（PH Chrono Trigger 実測 在庫3）。
+           公式API（get_models）で出品ごとに1回だけ読む（同じ出品の明細はまとめて1回）。在庫がある明細は書かずに一覧から外す */
+        if (restore) {
+          {   /* 本人「APIでできることはAPIでやって」＝手元の出品データ（古いことがある）では決めず、毎回公式APIで今の在庫を読む */
+            try {
+              const d0 = await openapiGetModels(w0.shop_id, w0.item_id); const ms0 = (d0 && d0.models) || [];
+              const has = x => { const mid = Number(x.w.model_id) || 0; const m = ms0.find(mm => String(mm.model_id) === String(mid)) || (ms0.length === 1 && !mid ? ms0[0] : null); return m && Number(m.stock) > 0; };
+              want.filter(has).forEach(x => { done.push(x.k); ok++; delete RS.failMsg[x.k]; hideRow(x.k); try { logAct('出品', '売れて0の在庫を戻す→もう在庫ありで書かず', x.w.cc + ' ' + x.w.item_id, x.w.name); } catch (_) {} });
+              for (let i = want.length - 1; i >= 0; i--) if (has(want[i])) want.splice(i, 1);
+              if (!want.length) return;
+            } catch (_) {}   // 読めなければ従来どおり書く（戻す操作を止めない）
+          }
+        }
         if (restore) {
           const list = want.map(x => ({ model_id: Number(x.w.model_id) || 0, stock: x.n }));
           try { await openapiUpdateStockList(w0.shop_id, w0.item_id, list); okAll = true; }
