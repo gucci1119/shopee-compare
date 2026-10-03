@@ -6273,6 +6273,19 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "🌱切り出し候補に「作品シリーズのカタログ候補」を追加": "Added 'series catalog candidates' to the 🌱 spin-off tab",
+    "📚 作品シリーズのカタログ候補（その国にまだ自分のシリーズカタログが無いもの）": "📚 Series catalog candidates (series with no own catalog in that country yet)",
+    "総称の明細で売れた": "Sold in generic",
+    "単品で売れた": "Sold as single",
+    "月あたり": "Per month",
+    "直近90日の月あたり": "Per month (90d)",
+    "売れた作品数": "Titles sold",
+    "総称に入っている明細": "Variations in generic",
+    "単品の出品": "Single listings",
+    "母数": "Universe",
+    "見込み/月": "Expected/mo",
+    "他の国で売れた": "Sold elsewhere",
+    "評価": "Grade",
     "🤖の相場：出品名に機種が書いてある出品を優先（3件以上あれば）・ヤフオクの機種判定にカタカナの機種名": "\ud83e\udd16 market price: prefer listings that state the platform (if 3+) and read katakana platform names on Yahoo",
     "名前だけで照合して別の機種が混ざる所を直しました（JAN・値付けの見直し・子SKU・原価の紐付け）": "Fixed places that mixed up platforms by matching names only (JAN, price review, child SKU, cost matching)",
     "候補がはっきりしているので最初から選んでいます": "Pre-selected because the candidate is clear",
@@ -20572,6 +20585,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-03', items: [
+      '📚 <b>🌱切り出し候補に「作品シリーズのカタログ候補」を追加</b>。国ごとに、まだ自分のシリーズカタログが無いシリーズを A/B/C で並べ、総称の明細で売れた数・単品で売れた数・月あたり・総称に入っている明細・母数・他の国で売れた数・1枠あたりの見込み（推測）を出します。読むだけで何も書きません。',
       '🎮 <b>🤖の相場：出品名に機種が書いてある出品を優先（3件以上あれば）・ヤフオクの機種判定にカタカナの機種名</b>。機種の語が無い出品は別機種かもしれず、相場（仕入れの目安）が混ざっていました。「ファミコン クレイジークライマー」のようなカタカナの機種名の出品が、別の機種の候補に残っていたのも直しました。',
       '🎮 <b>名前だけで照合して別の機種が混ざる所を直しました（JAN・値付けの見直し・子SKU・原価の紐付け）</b>（Obsidian「19_名前だけの照合の洗い出し」の「高」）。①JANを同じ名前の明細に配る時・母数から当てる時は【明細SKUの頭の機種】で分ける。母数の英名照合は完全一致だけに（前は語の重なり半分で当てていた）。同じ名前が別機種にもある明細は、名前だけで旧い値を写さない ②🏷値付けの見直しは、注文の出品番号があればそれで出品を引く（同じ名前の別カタログの売上で値段を書かない） ③子SKUをそろえる時、機種の違うカタログ・明細は束ねない ④原価の紐付けの候補から機種の違う在庫を外し、候補がはっきりしない時は最初からチェックを入れない。',
       '⏱ <b>🔁在庫の自動復活：押した瞬間に「⏳戻しています」・4件ずつ並行・失敗を画面に出す</b>（本人「押してもすぐに画面変わらないんだけどな、遅すぎない？」「押しても反応してなくない？」）。前は Shopee への書き込みと記録の保存が全部終わるまで描き直さず、エラーも黙って捨てていました。',
@@ -31728,6 +31742,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     try {
       await ensureListings();
       if (!SP.orders || force) { const since = jstDate(Date.now() - SP.days * 86400000); SP.orders = await sbGetAll('orders', `select=cc,sn,order_ts,status,items&order_date=gte.${since}&order=cc,sn`); SP.at = Date.now(); }
+      if (!SP.serCand || force) { const r = await sbGetAll('app_kv', 'select=v&k=eq.series_candidates').catch(() => null); SP.serCand = (r && r[0] && r[0].v) || { err: r === null }; }
       if (!SP.autoIds || force) {
         const kv = await sbGetAll('app_kv', 'select=k,v&k=like.boshu_auto_done_*').catch(() => null);
         SP.autoOk = kv !== null; SP.autoIds = new Set();
@@ -31776,6 +31791,41 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     });
     return [...g.values()];
   }
+  /* ★2026-10-03 作品シリーズのカタログ候補（本人「まだ出してないゲームシリーズで出した方がいいものをリスト化してポータルに・根拠も」）。
+     中身は app_kv series_candidates（分析して書いた表・読むだけ）。国ごとに、その国にまだ自分のシリーズカタログが無いシリーズを並べる。
+     見込みは推測（総称の明細で売れた分＋単品で売れた分の月平均から）。出すかは人が決める＝ここは何も書かない。 */
+  function spSeriesHtml() {
+    const d = SP.serCand || {};
+    if (d.err) return '<div class="tool-card" style="max-width:none;margin:0 0 12px;color:#b3261e;font-size:12.5px">⚠ シリーズ候補（app_kv series_candidates）を読めませんでした。🔄で読み直してください</div>';
+    if (!d.cc) return '<div class="tool-card smd-dim" style="max-width:none;margin:0 0 12px">シリーズ候補はまだ作られていません。</div>';
+    const gc = { A: 'background:#e8f5e9;color:#1b5e20;border-color:#81c784', B: 'background:#fff8e1;color:#8d6e00;border-color:#ffd54f', C: 'background:#f5f5f5;color:#777;border-color:#ccc' };
+    const badge = g => `<span style="display:inline-block;min-width:18px;text-align:center;border:1px solid;border-radius:8px;padding:0 6px;font-weight:700;${gc[g] || gc.C}">${esc(g)}</span>`;
+    const num = (v, dg) => (v ? (dg ? (+v).toFixed(dg) : v) : '<span style="color:#ccc">0</span>');
+    const ccs = CQ_CCS.filter(cc => (d.cc[cc] || []).length);
+    const tbl = cc => {
+      const rows = (d.cc[cc] || []);
+      const sl = (d.slot || {})[cc];
+      return `<div style="margin-top:10px"><b style="font-size:13px">${esc(cc)}</b> <span class="smd-dim" style="font-size:11px">${sl ? `いまのシリーズカタログは1枠あたり月 ${sl[0]} 点・総称カタログは月 ${sl[1]} 点` : ''}</span>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;width:100%">
+        <tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:3px 6px">シリーズ</th><th>評価</th><th style="padding:3px 4px" title="総称カタログの明細として売れた点数（1年）">総称の明細で売れた</th><th style="padding:3px 4px" title="単品の出品で売れた点数（1年）">単品で売れた</th><th style="padding:3px 4px">月あたり</th><th style="padding:3px 4px">直近90日の月あたり</th><th style="padding:3px 4px">売れた作品数</th><th style="padding:3px 4px" title="いま総称カタログに入っている明細の数＝切り出せばそのまま移せる">総称に入っている明細</th><th style="padding:3px 4px">単品の出品</th><th style="padding:3px 4px" title="母数（シリーズの作品数）">母数</th><th style="padding:3px 4px" title="1枠あたりの月の販売点数の見込み（推測）">見込み/月</th><th style="text-align:left;padding:3px 6px">他の国で売れた</th><th style="text-align:left;padding:3px 6px">例</th></tr>
+        ${rows.map(r => `<tr style="border-top:1px solid #eee">
+          <td style="padding:3px 6px;font-weight:700">${esc(r.s)}${r.s8 ? `<div style="font-size:10.5px;color:#b3261e;font-weight:400">止まっている（status 8）シリーズカタログが ${r.s8} 件ある</div>` : ''}</td>
+          <td style="text-align:center">${badge(r.g)}</td>
+          <td style="text-align:right;padding:3px 6px">${num(r.gm)}</td><td style="text-align:right;padding:3px 6px">${num(r.sg)}</td>
+          <td style="text-align:right;padding:3px 6px">${num(r.pm, 2)}</td><td style="text-align:right;padding:3px 6px">${num(r.p90, 2)}</td>
+          <td style="text-align:right;padding:3px 6px">${num(r.w)}</td><td style="text-align:right;padding:3px 6px">${num(r.mi)}</td><td style="text-align:right;padding:3px 6px">${num(r.si)}</td><td style="text-align:right;padding:3px 6px">${num(r.b)}</td>
+          <td style="text-align:right;padding:3px 6px;font-weight:700">${num(r.ex, 2)}</td>
+          <td style="padding:3px 6px;font-size:11px">${Object.entries(r.oc || {}).map(([c, n]) => `${esc(c)} ${n}`).join('・') || '<span style="color:#ccc">—</span>'}</td>
+          <td style="padding:3px 6px;font-size:11px">${(r.eg || []).map(x => `<div>${nm(x, 'wrap')}</div>`).join('')}</td></tr>`).join('')}
+      </table></div></div>`;
+    };
+    return `<div class="tool-card" style="max-width:none;margin:0 0 12px">
+      <b style="font-size:14px">📚 作品シリーズのカタログ候補（その国にまだ自分のシリーズカタログが無いもの）</b>
+      <div class="smd-dim" style="font-size:11.5px;margin-top:4px">${esc(d.note || '')}${d.at ? '（' + esc(String(d.at).slice(0, 10)) + ' に集計）' : ''}<br>
+        評価 A＝作る価値あり・B＝様子見・C＝勧めない。<b>シリーズカタログは1枠あたりの販売が総称カタログより少ない国が多い</b>（上の各国の数字）。ただし明細100件あたりではシリーズの方が売れる＝枠に余裕がある時・明細を寄せられる時に作る。SG・TH・TW はシリーズの需要がほぼ見えていません。</div>
+      ${ccs.map(tbl).join('')}
+    </div>`;
+  }
   function spDraw() {
     const host = document.getElementById('list-spinoff'); if (!host) return;
     const all = SP.groups || [];
@@ -31796,7 +31846,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <td style="padding:2px 6px;white-space:nowrap;font-size:11px">${esc(e.first)}${e.last && e.last !== e.first ? '<br>〜' + esc(e.last) : ''}</td>
       <td style="padding:2px 6px;font-size:11px">${[...e.cats.values()].map(c => `<div>${edit(c.cc, c.item_id)} ${nm(c.name, 'wrap')}</div>`).join('')}</td>
       <td style="padding:2px 6px;font-size:11px">${Object.keys(e.ded).length ? Object.entries(e.ded).map(([cc, l]) => `<div>✔ ${edit(cc, l.item_id)} ${nm(l.name, 'wrap')}</div>`).join('') : '<span style="color:#b3261e;font-weight:700">まだ無い</span>'}</td></tr>`;
-    host.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 12px">
+    host.innerHTML = spSeriesHtml() + `<div class="tool-card" style="max-width:none;margin:0 0 12px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <b style="font-size:14px">🌱 総称のバリエーションで売れた作品</b>
         <span class="smd-dim" style="font-size:11.5px">直近${SP.days}日の注文（キャンセル除く）・${esc(jstDateTime(SP.at))} に読み込み</span>
