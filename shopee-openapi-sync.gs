@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261003-2130b';
+var SRC_VER = '20261003-2210c';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6600,6 +6600,10 @@ function baEnName_(row, st, enCache, hw) {
    ベスト版かどうかは作品マスタ（駿河屋・楽天・Wikidata）には無い＝手がかりは【作品名】と【写真を取った出品の題名】だけ。
    題名の「ベスト／best」は、作品名そのものに入っていない時だけ見る（ベストプレープロ野球 などを取り違えない）。明細名30字に収まる時だけ「 Best」を足す */
 var BA_BEST_RE = /(ベスト版|Best版|the\s*best|ザ・?ベスト|廉価版|新価格版|Greatest\s*Hits|Nintendo\s*Selects|ハッピープライス)/i, BA_BEST_LOOSE = /ベスト|\bbest\b/i;
+/* ★2026-10-03 使った写真の控え（boshu_auto_imgs：写真URL→使った作品）の値を【作品@機種】に。前は作品だけ＝同じ名前の別機種が同じ写真を使えた
+   （[[19_名前だけの照合の洗い出し（2026-10-03）]]）。古い値（作品だけ）はどの機種のものか分からないので「よその物」として扱う＝別機種への使い回しを止める側に倒す */
+function baUsedTag_(key, hw) { return String(key || '') + '@' + String(hw || ''); }
+function baUsedOk_(used, u, key, hw) { var v = used && used[u]; return !v || v === baUsedTag_(key, hw); }
 function baBestOf_(ja, photoTitle) {
   var j = String(ja || ''), t = String(photoTitle || '');
   if (BA_BEST_RE.test(j) || BA_BEST_RE.test(t)) return true;
@@ -6936,7 +6940,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     var done = false, lastKind = j0.kind;
     for (var k = 0; k < cands.length && !done; k++) {
       var cu = String(cands[k].img || cands[k].thumb || ''); if (!cu) continue;
-      var cuKey = cu.replace(/\?.*$/, ''); if (used[cuKey] && used[cuKey] !== a.key) continue;
+      var cuKey = cu.replace(/\?.*$/, ''); if (!baUsedOk_(used, cuKey, a.key, a.hw)) continue;
       if (String(a.src || '') && String(cands[k].src || '') === String(a.src || '')) continue;   /* いま載せているのと同じ出品の写真 */
       var jc = baJudge_(cu, st, judged, cap, ex);
       if (!jc.judged) break;
@@ -6944,7 +6948,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
       try {
         var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu, expect: a.img }]);
         if (r && !r.applied && r.changed && r.changed.length) { rp.items[id] = { s: 'manual', v: BA_RULE_VER, at: new Date().toISOString(), cc: a.cc }; baLog_(st, '📷 人が差し替えた写真なので触らない: ' + a.en); done = true; break; }
-        if (r && r.applied) { used[cuKey] = a.key; try { baKvSet_(BA_IMGS, used); } catch (eU) {} rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
+        if (r && r.applied) { used[cuKey] = baUsedTag_(a.key, a.hw); try { baKvSet_(BA_IMGS, used); } catch (eU) {} rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
       } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 160)); rp.items[id] = { s: 'error', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
     }
     if (!done) { rp.items[id] = { s: 'nophoto', v: BA_RULE_VER, at: new Date().toISOString(), was: lastKind, cc: a.cc, item_id: a.item_id, shop_id: a.shop_id, en: a.en, hw: hw }; baLog_(st, '📷 写真が基準外（' + lastKind + '）だが代わりが無い: ' + a.cc + ' ' + a.en); }
@@ -7425,13 +7429,13 @@ function boshuAutoTick(manual) {
       var pm = baPreOf_(pre, c.key, hw);
       /* 判定できなかった写真（ブラウザ側のCORS失敗など）は「実物の写真」の保証が無いので使わない（本人「実物の写真じゃないのに通るのはおかしい」） */
       if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
-      if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
+      if (pm && pm.img && baUsedOk_(used, pm.img, c.key, hw)) {
         /* ★出す直前に、使う1枚だけAI判定（ポータルで判定済みならそのまま）。実物でなければ次の候補（最大2枚）、それも駄目ならヤフオクへ */
         /* ★v182 先に「同じ作品の出品か」（題名・文章AI）、通ったら「実物の写真か」（画像AI）。どちらかで落ちたら次の候補（最大2枚）、それも駄目ならヤフオクへ */
         var okM = false, sameNgM = 0, sameUnj = 0, candsM = baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, (BA_CART_ONLY_HW[hw] ? 10 : 8));   /* ★2026-09-23 出品の2〜4枚目も候補に入るようになったので、カセット機種は10枚・他は8枚まで試す（1枚 約¥0.3） */   /* 2026-09-20 新基準で通過率が41%に下がった→試す枚数を4→6（1枚 約¥0.3） */   /* 紙箱の機種は使用感のある出品から・プラケースの機種は綺麗な出品から。同じ状態なら個人→Shops。最大4枚まで判定 */
         try { baSameTitleBatch_(c, hw, candsM.map(function (x) { return x && x.name; }), st, sameCache); } catch (eSb2) {}   /* ★2026-09-24 まとめて1回 */
         for (var ci = 0; ci < candsM.length && !okM; ci++) {
-          var cm = candsM[ci]; if (!cm || !cm.img || (used[cm.img] && used[cm.img] !== c.key)) continue;
+          var cm = candsM[ci]; if (!cm || !cm.img || !baUsedOk_(used, cm.img, c.key, hw)) continue;
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
           if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
           var okP = false;   /* ★v184 前の「AI判定OK」は実物かどうかしか見ていない＝題名・機種の突き合わせは必ずやり直す（Codex指摘） */
@@ -7453,13 +7457,13 @@ function boshuAutoTick(manual) {
           pm = null;
         }
       }
-      if (pm && pm.img && !(used[pm.img] && used[pm.img] !== c.key)) {
+      if (pm && pm.img && baUsedOk_(used, pm.img, c.key, hw)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
           var costM = costChk || baCostFromPre_(pm), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
           if (costM >= highCost && hitsM < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hitsM); continue; }   /* 高い×出品が少ない＝出さない（候補には残る） */
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
-          used[pm.img] = c.key;
+          used[pm.img] = baUsedTag_(c.key, hw);
           picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, pm.name)), best: baBestOf_(c.ja, pm.name) || undefined, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
           continue;
         }
@@ -7480,7 +7484,7 @@ function boshuAutoTick(manual) {
       var img = null, srcId = '', srcUrl = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
       try { baSameTitleBatch_(c, hw, hits.map(function (h) { return h.t; }), st, sameCache); } catch (eSb) {}   /* ★2026-09-24 候補題名をまとめて1回で判定 */
-      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); srcUrl = String(hits[k].url || ''); break; } if (triedY >= 3) break; }
+      for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || !baUsedOk_(used, u, c.key, hw)) continue; /* 別の作品が使った写真は使わない（自分のやり直しは可） */ var sy = baSameTitle_(c, hw, hits[k].t, st, sameCache); if (!sy.same) { if (!sy.judged && sy.why !== 'nokey') { sameUnj++; break; } sameNgY++; if (sameNgY >= 4) break; continue; } /* ★v182 同じ作品の出品だけ */ var jy = baJudge_(u, st, judged, judgeCap, { key: c.key, ja: c.ja, en: en, hw: hwWord, hwKey: hw }); triedY++; if (jy.ok) { img = u; srcId = String(hits[k].id || ''); srcUrl = String(hits[k].url || ''); break; } if (triedY >= 3) break; }
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       if (cost > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', hits.length); continue; }
@@ -7489,7 +7493,7 @@ function boshuAutoTick(manual) {
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 160)); }
       if (!imageId) { out.skipped++; Utilities.sleep(1500); continue; }
-      used[img] = c.key;
+      used[img] = baUsedTag_(c.key, hw);
       var _yT = ((hits || []).filter(function (h) { return String(h.img || '').replace(/\?.*$/, '') === String(img || '').replace(/\?.*$/, ''); })[0] || {}).t || '';
       picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, _yT)), best: baBestOf_(c.ja, _yT) || undefined, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
@@ -7882,7 +7886,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
         var hits = baMatch_(y.items, c.ja || c.en, hw);
         var img = '', srcId = '';
         var srcTitle = '', srcPrice = 0;
-        for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || (used[u] && used[u] !== c.key)) continue; img = u; srcId = String(hits[k].id || ''); srcTitle = String(hits[k].t || '').slice(0, 80); srcPrice = Number(hits[k].price) || 0; break; }
+        for (var k = 0; k < hits.length; k++) { var u = String(hits[k].img || '').replace(/\?.*$/, ''); if (!u || !baUsedOk_(used, u, c.key, hw)) continue; img = u; srcId = String(hits[k].id || ''); srcTitle = String(hits[k].t || '').slice(0, 80); srcPrice = Number(hits[k].price) || 0; break; }
         row.hits = hits.length; row.cost = baCostOfHits_(hits); row.img = img; row.src = srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''; row.srcTitle = srcTitle; row.srcPrice = srcPrice; row.q = 'https://auctions.yahoo.co.jp/search/search?p=' + encodeURIComponent(q) + '&istatus=2&fixed=3';
         row.stock = (hits.length >= minHits && row.cost > 0 && row.cost <= maxCost) ? 1 : 0;
         if (!img) row.note = '中古の写真が見つからない（このままだと飛ばされる）';
@@ -8811,17 +8815,17 @@ function baSoldSync_(st) {
         if (!a || a.cc !== o.cc || !a.key) return;
         if (String(a.en || '').trim().toLowerCase() !== vr) return;
         if (nm.indexOf(String(a.cat || '').slice(0, 40)) !== 0 && String(a.cat || '').indexOf(nm.slice(0, 40)) !== 0) return;
-        soldKeys[a.key] = soldKeys[a.key] || o.cc; if (!a.sold) { a.sold = true; a.soldAt = new Date().toISOString(); }
+        var sk = a.key + '@' + (a.hw || ''); soldKeys[sk] = soldKeys[sk] || o.cc; if (!a.sold) { a.sold = true; a.soldAt = new Date().toISOString(); }
       });
     });
   });
   var keys = Object.keys(soldKeys); if (!keys.length) return;
   var zeroed = 0;
   live.forEach(function (a) {
-    if (!soldKeys[a.key] || a.sold) return;   // 売れた国そのものは Shopee が在庫を減らしている
+    var sk2 = a.key + '@' + (a.hw || ''); if (!soldKeys[sk2] || a.sold) return;   // 売れた国そのものは Shopee が在庫を減らしている。★2026-10-03 鍵に機種を足した（前は作品だけ＝PS3版が売れるとPS4版の在庫も0にしていた）
     var sid = a.shop_id; if (!sid) { try { var r = sbSelect_('listings', 'select=shop_id&item_id=eq.' + a.item_id + '&limit=1'); sid = r && r[0] && r[0].shop_id; } catch (e) {} }
     if (!sid) return;
-    try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); a.zeroedWhy = 'sold:' + soldKeys[a.key]; zeroed++; }
+    try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); a.zeroedWhy = 'sold:' + soldKeys[sk2]; zeroed++; }
     catch (e) { baLog_(st, '在庫0にできず（' + a.cc + ' ' + a.en + '）: ' + String(e).slice(0, 60)); }
   });
   if (zeroed) baLog_(st, '🛒 売れた作品の他国在庫を0に ' + zeroed + '件（' + keys.map(function (k) { return soldKeys[k]; }).join('・') + ' で売れた）');
