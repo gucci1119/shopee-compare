@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20260930-1700b';
+var SRC_VER = '20261003-2100a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6503,9 +6503,9 @@ function baClaudeJson_(prompt, st, tag, maxTokens) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) return { nokey: true };
   var cap = Number((st && st.aiTextCap) || 0) || 400;
+  if (BA_AI_DOWN) return null;   /* ★2026-10-03 残高切れ等で断られている間は呼ばない（前は文章AIだけ素通りしていた） */
   if (st && st.today) {
     if ((st.today.aiText || 0) >= cap) { if (!st.today.capT) { st.today.capT = 1; baLog_(st, '⚠ 今日の文章AI（英題・同一作品）が上限 ' + cap + ' 回→これ以上は聞かない'); } return null; }
-    st.today.aiText = (st.today.aiText || 0) + 1;
   }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: maxTokens || 200, messages: [{ role: 'user', content: prompt }] };
   ufBump_(1, 'boshu_auto(' + tag + ')');
@@ -6513,7 +6513,9 @@ function baClaudeJson_(prompt, st, tag, maxTokens) {
   catch (e) { if (st) baLog_(st, '⚠ AI(' + tag + ') 通信失敗 ' + String(e).slice(0, 160)); return null; }
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   try { aiSpendBump_(tag + '(自動出品)', j.usage); } catch (e) {}
-  if (code >= 400) { if (st) baLog_(st, '⚠ AI(' + tag + ') HTTP ' + code + ' ' + String((j.error && j.error.message) || '').slice(0, 80)); return null; }
+  if (code >= 400) { var emT = String((j.error && j.error.message) || ''); if (baAiDownIsFatal_(code, emT)) baAiDownSet_(st, code, emT); if (st) baLog_(st, '⚠ AI(' + tag + ') HTTP ' + code + ' ' + emT.slice(0, 80) + (BA_AI_DOWN ? '（AIを止めます・30分後にまた1回だけ試す）' : '')); return null; }
+  if (st && st.today) st.today.aiText = (st.today.aiText || 0) + 1;   /* ★2026-10-03 数えるのは成功した回だけ（失敗まで数えてチャージ後も上限に張り付いた） */
+  if (st && st.aiDown) baAiDownClear_(st);
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/);
   try { return m ? JSON.parse(m[0]) : null; } catch (e) { return null; }
 }
@@ -6669,6 +6671,31 @@ function baManualOf_(imgUrl, expect) {
   return (BA_MANUAL_IMG && BA_MANUAL_IMG[u]) ? 'ng:manual' : '';
 }
 var BA_AI_DOWN = '';   /* AIが使えない理由（残高切れ等）。立ったらこの実行では AI を呼ばない＝Shopee枠を守る */
+/* ★2026-10-03 本人「なぜ毎回同じミスをする。これ何回めだ？」（残高切れ3回目：9/20・9/24・10/2〜3）。
+   ①9/20の守りは写真判定にしか無く、文章AI（英題・同一作品）は15分ごとに呼んで失敗し続けた ②失敗も「今日の回数」に数え、チャージ後も上限に張り付いた
+   ③気づくのは毎回本人だった。→ 断られた事実（残高切れ・鍵不正）をスクリプト プロパティに残して【実行をまたいで】AIを止め、30分に1回だけ試す。
+   成功したら消す。状態に st.aiDown を載せてポータルに出す。 */
+var BA_AI_DOWN_PROP = 'BA_AI_DOWN_AT', BA_AI_DOWN_RETRY_MS = 30 * 60 * 1000;
+function baAiDownIsFatal_(code, em) { return /credit balance|insufficient|invalid x-api-key|authentication_error/i.test(String(em || '')) || code === 401 || code === 403; }
+function baAiDownSet_(st, code, em) {
+  BA_AI_DOWN = String(em || '').slice(0, 60) || ('HTTP ' + code);
+  var o = { at: new Date().toISOString(), msg: BA_AI_DOWN, code: code };
+  try { var prev = JSON.parse(P_().getProperty(BA_AI_DOWN_PROP) || 'null'); if (prev && prev.since) o.since = prev.since; } catch (e) {}
+  if (!o.since) o.since = o.at;
+  try { P_().setProperty(BA_AI_DOWN_PROP, JSON.stringify(o)); } catch (e) {}
+  if (st) st.aiDown = o;
+}
+function baAiDownClear_(st) {
+  try { if (P_().getProperty(BA_AI_DOWN_PROP)) { P_().deleteProperty(BA_AI_DOWN_PROP); if (st) baLog_(st, '✅ AIが使えるようになりました（残高・鍵が戻った）'); } } catch (e) {}
+  if (st) st.aiDown = null;
+}
+/* 実行の頭で呼ぶ：前の実行で断られていて30分たっていなければ、この実行はAIを呼ばない（数ではなく断られた事実で止める） */
+function baAiDownLoad_(st) {
+  var o = null; try { o = JSON.parse(P_().getProperty(BA_AI_DOWN_PROP) || 'null'); } catch (e) {}
+  if (st) st.aiDown = o || null;
+  if (o && o.at && (Date.now() - Date.parse(o.at)) < BA_AI_DOWN_RETRY_MS) { BA_AI_DOWN = o.msg || 'AI down'; return true; }
+  return false;
+}
 /* ★2026-09-26 本人「この辺もイメージ画像になってる」（Football Manager 26・Kippers English・LEGO Star Wars 3DS …）。
    Haiku は「背景・縁・影」を聞いても平らなジャケット画像に ok:box を付けていた。Haiku で通っていた写真を目で見たら 6枚中4枚が出してはいけない写真だった。
    → Haiku が通した写真だけ、上位モデルに【画像の四隅に何が写っているか】だけを聞き、3隅以上が絵柄なら宣材としてコードで落とす（[[ai-extract-then-decide-in-code]]）。
@@ -6686,7 +6713,7 @@ function baCornersArt_(imgUrl, key, st) {
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
   try { aiSpendBump_('写真の四隅の確認(自動出品)', j.usage); } catch (e) {}
-  if (code >= 400) { var em = String((j.error && j.error.message) || ''); if (st) baLog_(st, '⚠ 四隅の確認ができず HTTP ' + code + ' ' + em.slice(0, 80)); if (/credit balance|insufficient|invalid x-api-key|authentication_error/i.test(em) || code === 401 || code === 403) BA_AI_DOWN = em.slice(0, 60) || ('HTTP ' + code); return null; }
+  if (code >= 400) { var em = String((j.error && j.error.message) || ''); if (st) baLog_(st, '⚠ 四隅の確認ができず HTTP ' + code + ' ' + em.slice(0, 80)); if (baAiDownIsFatal_(code, em)) baAiDownSet_(st, code, em); return null; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch (e) {}
   if (!Array.isArray(o.corners) || o.corners.length !== 4) return null;
   return o.corners.filter(function (x) { return String(x) === 'art'; }).length;
@@ -6734,7 +6761,7 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
   try { aiSpendBump_(big ? '写真の四隅＋シュリンク(自動出品)' : '写真のシュリンク確認(自動出品)', j.usage); } catch (e) {}
-  if (code >= 400) { var em = String((j.error && j.error.message) || ''); if (st) baLog_(st, '⚠ 写真の確認ができず HTTP ' + code + ' ' + em.slice(0, 80)); if (/credit balance|insufficient|invalid x-api-key|authentication_error/i.test(em) || code === 401 || code === 403) { BA_AI_DOWN = em.slice(0, 60) || ('HTTP ' + code); } return null; }
+  if (code >= 400) { var em = String((j.error && j.error.message) || ''); if (st) baLog_(st, '⚠ 写真の確認ができず HTTP ' + code + ' ' + em.slice(0, 80)); if (baAiDownIsFatal_(code, em)) baAiDownSet_(st, code, em); return null; }
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); var o = null; try { o = m ? JSON.parse(m[0]) : null; } catch (e) {}
   if (!o) return null;
   if (big && Array.isArray(o.corners) && o.corners.length === 4 && cache) { var nArt = o.corners.filter(function (x) { return String(x) === 'art'; }).length; cache[u + '|c1'] = 'art:' + nArt; baImgMemoSet_(u, 'c1', 'art:' + nArt); }
@@ -6803,7 +6830,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     /* ★2026-09-20 本人「止まらないようにしてね」「絶対に」：Anthropic の残高切れ（credit balance）や鍵不正の時、
        1件ずつ試し続けると **出品は1件も増えないのに Shopee枠だけ減る**（実測：11:31〜の回で枠が一気に減った）。
        この実行の残りは AI を呼ばない＝枠を守る。次の実行でまた1回だけ試す */
-    if (/credit balance|insufficient|invalid x-api-key|authentication_error/i.test(em) || code === 401 || code === 403) { BA_AI_DOWN = em.slice(0, 60) || ('HTTP ' + code); }
+    if (baAiDownIsFatal_(code, em)) baAiDownSet_(st, code, em);
     if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + em.slice(0, 80) + (BA_AI_DOWN ? '（この回はAIを止めます）' : ''));
     return { ok: false, judged: false, kind: 'error' };
   }
@@ -7219,6 +7246,9 @@ function boshuAutoTick(manual) {
     }
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
+    /* ★2026-10-03 残高切れの間に失敗まで数えて上限(12,000)に張り付いた今日の数を一度だけ戻す（以後は成功だけ数える） */
+    if (st.today.d === '2026-10-03' && !st.today.aiFix1003) { st.today.aiText = 0; st.today.capT = 0; st.today.aiFix1003 = 1; }
+    if (baAiDownLoad_(st)) baLog_(st, '⛔ AIが使えない（' + String(BA_AI_DOWN).slice(0, 50) + '）→この回はAIを呼ばない。' + Math.round(BA_AI_DOWN_RETRY_MS / 60000) + '分ごとに1回だけ試す');
     st.lastAt = new Date().toISOString();
     try { baSoldSync_(st); } catch (eS) { baLog_(st, '売れた作品の見直しに失敗: ' + String(eS).slice(0, 160)); }   // 在庫1で出した作品がどこかの国で売れたら、他の国の在庫を0に（一点物の二重販売を防ぐ）。OFFでも動く
     if (!cfg.on && manual !== true) { st.lastMsg = 'OFF'; return finish_('OFF'); }
