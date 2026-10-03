@@ -6273,6 +6273,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "出品ログのカードで、別の機種の版のカタログまで並んでいたのを直しました": "Fixed listing-log cards that also listed catalogs of other platform versions",
     "🎯 値付けの戦略：フロント商品とバック商品（2026-10-03）": "🎯 Pricing strategy: front items and back items (2026-10-03)",
     "目的": "Goal",
     "測り方": "How we measure",
@@ -20541,6 +20542,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-03', items: [
+      '📁 <b>出品ログのカードで、別の機種の版のカタログまで並んでいたのを直しました</b>（本人「なんでこのソフト、PS3なのにDSとかプレステ4とかWii Uとかに入っちゃってるわけ？」）。LEGOバットマン3のように機種違いで明細名が同じソフトを、名前だけで束ねていました。出品そのものは機種ごとに正しく分かれています。明細SKUの頭の機種（PS3_・PS4_ など）が違うものは並べません。',
       '🎯 <b>🏷値付けの見直しの上に「値付けの戦略（フロント商品とバック商品）」を置きました</b>（本人「ポータルにもどこかに戦略をまとめて」）。フロント＝仕入が安く手元にあってすぐ送れる品は、売れていた頃の値段に戻す（受取−仕入≧¥250）。バック＝¥1,200ルール。目的・測り方・根拠も同じカードに書いています。',
       '⛔ <b>AnthropicのAPI残高が切れたら、🔔お知らせに出るようにしました</b>（本人「なぜ毎回同じミスをする。これ何回めだ？」＝9/20・9/24・10/2 の3回とも、気づいたのは本人だった）。10/2〜3 は残高切れで🤖の出品が1日1,200〜1,900件→39件・74件に落ちていました。GAS は「断られた」事実を残して、実行をまたいでAIを止め、30分に1回だけ試します。数えるのは成功した回だけにしたので、チャージ後に「今日の上限」に張り付いて止まり続けることもなくなります。',
       '📗 <b>利益管理表の取込（📗即時取込・1時間ごと）が前月の表も読むようにしました</b>（10/2）。月末の注文は翌月に届いて発送されるので、前月の表への書き込みも入ります。',
@@ -34828,6 +34830,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
      読むのは app_kv 十数行だけ（Shopeeは叩かない）。分からない時は「分かりません」と出す＝[[dont-report-zero-when-unknown]] */
   let _llogWhy = null;
   const llogNm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const llogPlat = (sku) => { const m = String(sku || '').toUpperCase().match(/^([A-Z0-9]+)_/); return m ? m[1] : ''; };   /* 明細SKUの頭＝機種（PS3_LEGO_… → PS3） */
   /* ★2026-09-28 本人「入れた先のカタログ名とそのリンクも欲しい。2つのカタログに入れたなら2つ…全部表示してリンクまで飛べるように」
      「カートのマークと鉛筆のマークを、カタログ名の横につけるイメージ」。
      【同じ国・同じ明細名】が入っているカタログを出品データ全体から束ね、入れた先のカタログを全部並べる（シリーズのカタログ＋機種のカタログ 等）。
@@ -34841,10 +34844,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const src = (lst.byCc && Object.keys(lst.byCc).length) ? lst.byCc : null;
     const sig = src ? Object.keys(src).map(c => c + (src[c] || []).length).join(',') + '|' + (lst._llSeq || 0) : rows;
     if (_llCatsSrc !== sig || _llCatsRows !== rows || _llCatsByCc !== (src && Object.values(src))[0]) { _llCatsSrc = sig; _llCatsRows = rows; _llCatsByCc = src && Object.values(src)[0]; _llCatsMap = {};   /* ★2026-09-28 Codex：件数だけでは明細の追加・改名に気づかない＝出品ログを描くたび（rows が変わるたび）と出品データの入れ替え時に作り直す */
-      const add = (cc, id, name, mn) => { const k = cc + '|' + llogNm(mn); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(id))) a.push({ item_id: id, name: name || '' }); };
-      if (src) Object.keys(src).forEach(cc => (src[cc] || []).forEach(l => (l.models || []).forEach(m => { if (m && !m.ghost && m.n) add(cc, l.item_id, l.name, m.n); })));
+      const add = (cc, id, name, mn, pl) => { const k = cc + '|' + llogNm(mn); const a = _llCatsMap[k] || (_llCatsMap[k] = []); if (!a.some(c => String(c.item_id) === String(id))) a.push({ item_id: id, name: name || '', pl: pl || '' }); };
+      if (src) Object.keys(src).forEach(cc => (src[cc] || []).forEach(l => (l.models || []).forEach(m => { if (m && !m.ghost && m.n) add(cc, l.item_id, l.name, m.n, llogPlat(m.sku)); })));
       else (rows || []).forEach(x => { if (x && x.model_name) add(x.cc, x.item_id, x.name, x.model_name); }); }
-    const list = (_llCatsMap[r.cc + '|' + llogNm(r.model_name)] || []).slice();
+    /* ★2026-10-03 本人「なんでこのソフト、PS3なのにDSとかプレステ4とかWii Uとかに入っちゃってるわけ？」＝LEGOバットマン3は PS3/PS4/WiiU/3DS の明細名が同じで、
+       名前だけで束ねると【別の機種の版のカタログ】まで並んでいた（出品データは機種ごとに別の明細で正しい）。明細SKUの頭の機種（PS3_/PS4_/WIIU_/3DS_…）が違うものは束ねない */
+    const rPl = llogPlat(((logState.skuMap || {})[r.cc + '|' + r.item_id + '#' + r.model_id]) || '');
+    const list = (_llCatsMap[r.cc + '|' + llogNm(r.model_name)] || []).filter(c => !rPl || !c.pl || c.pl === rPl || String(c.item_id) === String(r.item_id));
     if (!list.some(c => String(c.item_id) === String(r.item_id))) list.unshift({ item_id: r.item_id, name: r.name || '' });
     const rgB = REGIONS.find(x => x.cc === r.cc) || {};
     return '<span style="display:block;margin-top:1px" title="' + av('入れた先のカタログ（' + list.length + 'つ）') + '">' + list.map(c => {
