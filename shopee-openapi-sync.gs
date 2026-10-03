@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261003-2100a';
+var SRC_VER = '20261003-2130b';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6596,6 +6596,27 @@ function baEnName_(row, st, enCache, hw) {
   var cut = en.slice(0, 31), sp = cut.lastIndexOf(' ');
   return (sp >= 6 ? cut.slice(0, sp) : en.slice(0, 30)).trim().replace(/(\s+(of|the|and|a|an|to|in|for|with|vs\.?)|[\s:\-–&,]+)+$/i, '').trim();   /* 切った末尾が of / the / コロンで終わらないように */
 }
+/* ★2026-10-03 本人「こういうのはベスト版でしょ？だから明細のところも、ベストって分かるように入れといてほしい。もし文字が余ればやけど」。
+   ベスト版かどうかは作品マスタ（駿河屋・楽天・Wikidata）には無い＝手がかりは【作品名】と【写真を取った出品の題名】だけ。
+   題名の「ベスト／best」は、作品名そのものに入っていない時だけ見る（ベストプレープロ野球 などを取り違えない）。明細名30字に収まる時だけ「 Best」を足す */
+var BA_BEST_RE = /(ベスト版|Best版|the\s*best|ザ・?ベスト|廉価版|新価格版|Greatest\s*Hits|Nintendo\s*Selects|ハッピープライス)/i, BA_BEST_LOOSE = /ベスト|\bbest\b/i;
+function baBestOf_(ja, photoTitle) {
+  var j = String(ja || ''), t = String(photoTitle || '');
+  if (BA_BEST_RE.test(j) || BA_BEST_RE.test(t)) return true;
+  return BA_BEST_LOOSE.test(t) && !BA_BEST_LOOSE.test(j);
+}
+/* ★2026-10-03 本人「これ、PS4ってどういうこと？…スイッチのゲームじゃないのか？」（Switch に「Kunio-Kuns Three Kingdoms PS4」）。
+   英題を短くする時にAIが機種名を付けた。【末尾】に出品する機種と違う機種名があれば外す（題名の途中＝Kirby Wii Deluxe・Fish Eyes Wii(Wii) は正式名なので残す） */
+var BA_PLAT_TAIL_RE = /[\s\-–:,(]*\(?\b(PS ?Vita|Vita|PS[1-5]|PSP|Nintendo Switch ?2?|Switch ?2?|Wii ?U|Wii|3DS|NDS|DS|GameCube|GC|N64|GBA|GBC|GB|Xbox(?: ?360| ?One| Series [XS])?|PC)\)?\s*$/i;
+function baEnPlatStrip_(en, hw) {
+  var t = String(en || ''), m = t.match(BA_PLAT_TAIL_RE); if (!m) return t;
+  var w = m[1].toUpperCase().replace(/\s+/g, ''), own = String(hw || '').toUpperCase();
+  var same = (w === own) || (own === 'VITA' && /VITA/.test(w)) || (own === 'SWITCH' && /^(NINTENDO)?SWITCH$/.test(w)) || (own === 'WIIU' && w === 'WIIU') || (own === 'DS' && w === 'NDS');
+  if (same) return t;
+  var cut = t.slice(0, m.index).replace(/[\s\-–:,]+$/, '').trim();
+  return cut.length >= 3 ? cut : t;
+}
+function baBestName_(en, best) { en = String(en || ''); if (!best || /\bbest\b/i.test(en)) return en; var s2 = en + ' Best'; return s2.length <= 30 ? s2 : en; }
 function baCleanJa_(t) {
   return String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects|ハッピープライスセレクション|ベストコレクション)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
 }
@@ -7439,7 +7460,7 @@ function boshuAutoTick(manual) {
           if (costM >= highCost && hitsM < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hitsM); continue; }   /* 高い×出品が少ない＝出さない（候補には残る） */
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
           used[pm.img] = c.key;
-          picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
+          picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, pm.name)), best: baBestOf_(c.ja, pm.name) || undefined, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
           continue;
         }
         baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
@@ -7469,7 +7490,8 @@ function boshuAutoTick(manual) {
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 160)); }
       if (!imageId) { out.skipped++; Utilities.sleep(1500); continue; }
       used[img] = c.key;
-      picks.push({ key: c.key, ja: c.ja, en: en, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
+      var _yT = ((hits || []).filter(function (h) { return String(h.img || '').replace(/\?.*$/, '') === String(img || '').replace(/\?.*$/, ''); })[0] || {}).t || '';
+      picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, _yT)), best: baBestOf_(c.ja, _yT) || undefined, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
