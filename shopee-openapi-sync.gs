@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261004-0130f';
+var SRC_VER = '20261004-0300g';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -582,6 +582,19 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(acb + '(' + JSON.stringify(aout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★公式APIで出品編集（タイトル/親SKU/説明）：ブリッジ卒業。params: shop_id, item_id, name, sku, desc（送った項目だけ更新）
+    /* ★2026-10-04 説明文の先頭に「現地語の段落」を差し込む（本人「台湾強化」→ 検索で見られる説明文に作品名を繁体字で並べる）。
+       拡張説明（文章＋画像）でも画像は消さない：今の field_list を読み、最初の文章の先頭だけを入れ替えて書き戻す。
+       段落は 【BLOCK_TAG】…【／BLOCK_TAG】 で囲み、2回目以降はその段落だけを入れ替える（重ねない）。Shopee 呼び出しは読み1＋書き1 */
+    if (p.action === 'desc_block') {
+      var dbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var dbout;
+      try {
+        var dbwt = P_().getProperty('WRITE_TOKEN');
+        if (!dbwt || p.token !== dbwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        dbout = descBlockSet_(p.shop_id, p.item_id, String(p.block || ''), String(p.tag || '中文說明'), p.dry === '1');
+      } catch (err) { dbout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(dbcb + '(' + JSON.stringify(dbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'update_item') {
       var ucb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var uout;
@@ -3798,6 +3811,46 @@ function brandList_(shopId, categoryId, q) {
   var key = String(q || '').trim().toLowerCase();
   var hits = key ? all.filter(function (b) { return String(b.n).toLowerCase().indexOf(key) >= 0; }) : all;
   return { ok: true, total: all.length, hits: hits.length, brands: hits.slice(0, 60), cached: !!key || true };
+}
+function descBlockSet_(shopId, itemId, block, tag, dry) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
+  if (!shopId || !itemId) throw new Error('shop_id / item_id 必須');
+  tag = String(tag || '中文說明').replace(/[【】／]/g, '').slice(0, 20);
+  var open = '【' + tag + '】', close = '【／' + tag + '】';
+  var strip = function (t) { t = String(t || ''); var a = t.indexOf(open), b = t.indexOf(close); if (a >= 0 && b > a) t = (t.slice(0, a) + t.slice(b + close.length)).replace(/^\s+/, ''); return t; };
+  var b0 = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId), need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
+  var base = (((b0.response || {}).item_list) || [])[0];
+  if (!base) throw new Error('出品が読めません item_id=' + itemId);
+  var head = block ? (open + '\n' + block.trim() + '\n' + close + '\n\n') : '';
+  var MAX = 3000, payload = { item_id: itemId }, before = 0, after = 0;
+  if (String(base.description_type || '') === 'extended') {
+    var fl = (((base.description_info || {}).extended_description || {}).field_list) || [];
+    var out = [], put = false;
+    fl.forEach(function (f) {
+      if (f.field_type === 'text') {
+        var t = strip(f.text); before += String(f.text || '').length;
+        if (!put) { t = head + t; put = true; }
+        out.push({ field_type: 'text', text: t });
+      } else if (f.field_type === 'image' && f.image_info && f.image_info.image_id) {
+        out.push({ field_type: 'image', image_info: { image_id: f.image_info.image_id } });
+      }
+    });
+    if (!put) out.unshift({ field_type: 'text', text: head.trim() });
+    after = out.reduce(function (a, f) { return a + (f.field_type === 'text' ? f.text.length : 0); }, 0);
+    if (after > MAX) throw new Error('説明文が長すぎます（' + after + '字・上限' + MAX + '）');
+    payload.description_type = 'extended';
+    payload.description_info = { extended_description: { field_list: out } };
+    payload._imgs = fl.filter(function (f) { return f.field_type === 'image'; }).length;
+  } else {
+    var d0 = String(base.description || ''); before = d0.length;
+    var d1 = head + strip(d0); after = d1.length;
+    if (after > MAX) throw new Error('説明文が長すぎます（' + after + '字・上限' + MAX + '）');
+    payload.description = d1;
+  }
+  var imgs = payload._imgs || 0; delete payload._imgs;
+  if (dry) return { ok: true, dry: true, type: base.description_type || 'normal', before: before, after: after, imgs: imgs };
+  callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
+  return { ok: true, type: base.description_type || 'normal', before: before, after: after, imgs: imgs };
 }
 function updateItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
