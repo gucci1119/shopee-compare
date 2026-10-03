@@ -20661,7 +20661,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-04', items: [
-      '📥 <b>📥母数のJANを入れるボタンに「同じSKUから写す」を追加（単品のカタログも）</b>（本人「JANを埋めたいね」「無料でできる方法ない？」「単品カタログも埋めていって欲しい」）。明細SKU（機種_作品名）は7か国共通なので、どこかの国の明細にJANがあれば同じSKUの他の国へ写します。単品のカタログは親SKUが同じ明細SKUと一致すれば写します。無料・接続枠ゼロ。同じSKUにJANが2つ以上ある時は写しません。',
+      '📥 <b>📥母数のJANを入れるボタンに「同じSKUから写す」を追加（単品のカタログも）</b>（本人「JANを埋めたいね」「無料でできる方法ない？」「単品カタログも埋めていって欲しい」）。明細SKU（機種_作品名）は7か国共通なので、どこかの国の明細にJANがあれば同じSKUの他の国へ写します。単品のカタログは親SKUが同じ明細SKUと一致すれば写します。無料・接続枠ゼロ。同じSKUにJANが2つ以上ある時と、まとめ売りに見える出品・明細（Set/Bundle/Lot/まとめ/セット/＋など）は写しません（JANの欄は1つなので）。',
       '⚙️ <b>在庫の自動復活：決めた商品の件数を押すと、その一覧へ飛ぶ</b>（本人「これ登録した内容はどこで見れる？」）。決めた内容は下の「⚙️ 商品ごとの決め」にあります。上の「自動で戻す N」「様子見 N」を押すと、そこへ飛んで「決めたもの／様子見だけ」に絞ります。',
       '🔁 <b>在庫の自動復活：続けて押しても、消した行が戻ってこないように</b>（本人「これ連続でパパぱぱっとできるようにしたい」「一度押して消えた後にまた戻ってくることがある」）。真因＝2つの処理が同時に記録を「読む→書く」して、後から書いた方が先の記録を消していた。保存を1本ずつ順番にし、押した行はその場で「済み／処理中」として覚えるので、描き直しても戻りません。',
       '🧪 <b>アクセス（各国）に「🧪 施策の効果」</b>（本人「これでビューが増えたかとか計測したいね」）。台湾の題名を繁体字にした前の数字（変えた142件と、触っていない71件の閲覧・店の訪問者）を控え、前→今と、触っていない出品との差（季節・セールを差し引いた伸び）を出します。出品の閲覧は30日たつと比べ切れます。',
@@ -29483,17 +29483,20 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const put = (sk, j) => { if (!sk || !j) return; if (bySku.has(sk) && bySku.get(sk) !== j) bad4.add(sk); else bySku.set(sk, j); };
       const rows4 = []; Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rows4.push(r)));
       const live = m => m && !m.ghost && String(m.n || '').trim();
+      /* 本人「まとめ売りのカタログは、JANが2つ以上になるカタログとかもあると思う」＝JANの欄は1つ。まとめ売りに1つだけ入れると間違いになるので、まとめ売りに見える出品・明細は写す側からも受け取る側からも外す */
+      const BUNDLE = /\b(set|bundle|lot|lote|kit|combo|pack of|\d+\s*(games|jogos|pcs|本|個))\b|まとめ|セット|\+|＆|&/i;
       rows4.forEach(r => {
         const ms = (r.models || []).filter(live);
-        ms.forEach(m => { const sk = String(m.sku || '').trim().toUpperCase(); if (!KH.test(sk)) return; const j = String((productIds[pidKeyModel(r, m)] || {}).jan || '').trim(); if (j.length === 13) put(sk, j); });
+        if (BUNDLE.test(String(r.name || '')) && !ms.length) return;
+        ms.forEach(m => { if (BUNDLE.test(String(m.n || ''))) return; const sk = String(m.sku || '').trim().toUpperCase(); if (!KH.test(sk)) return; const j = String((productIds[pidKeyModel(r, m)] || {}).jan || '').trim(); if (j.length === 13) put(sk, j); });
         if (!ms.length) { const ps = String(r.parent_sku || '').trim().toUpperCase(); const pk = pidKey(r.parent_sku); if (KH.test(ps) && pk) { const j = String((productIds[pk] || {}).jan || '').trim(); if (j.length === 13) put(ps, j); } }
       });
       amb4 = bad4.size;
       const give = (k, j, src) => { const v = productIds[k] || {}; if (String(v.jan || '').trim()) return false; productIds[k] = Object.assign({}, v, { jan: j, at: Date.now(), src: src, noJan: undefined, noJanAt: undefined, reJan: undefined }); return true; };
       rows4.forEach(r => {
         const ms = (r.models || []).filter(live);
-        if (ms.length) ms.forEach(m => { const sk = String(m.sku || '').trim().toUpperCase(); if (!bySku.has(sk) || bad4.has(sk)) return; if (give(pidKeyModel(r, m), bySku.get(sk), '同じ明細SKUの他の国から自動')) hit4++; });
-        else { const ps = String(r.parent_sku || '').trim().toUpperCase(); const pk = pidKey(r.parent_sku); if (!pk || !bySku.has(ps) || bad4.has(ps)) return; if (give(pk, bySku.get(ps), '同じSKUの明細から自動（単品）')) hit4s++; }
+        if (ms.length) ms.forEach(m => { if (BUNDLE.test(String(m.n || ''))) return; const sk = String(m.sku || '').trim().toUpperCase(); if (!bySku.has(sk) || bad4.has(sk)) return; if (give(pidKeyModel(r, m), bySku.get(sk), '同じ明細SKUの他の国から自動')) hit4++; });
+        else { if (BUNDLE.test(String(r.name || ''))) return; const ps = String(r.parent_sku || '').trim().toUpperCase(); const pk = pidKey(r.parent_sku); if (!pk || !bySku.has(ps) || bad4.has(ps)) return; if (give(pk, bySku.get(ps), '同じSKUの明細から自動（単品）')) hit4s++; }
       });
     } catch (e4) { console.warn('[JAN ④ 同じSKUから写す]', e4); }
     if (hit || gotJa || undo || hit4 || hit4s) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); }
