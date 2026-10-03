@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261004-0400h';
+var SRC_VER = '20261004-0800i';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -165,6 +165,16 @@ function ufSpillMaybe_() {
     P_().setProperty('ufSpill_' + Utilities.getUuid().slice(0, 8), JSON.stringify({ d: ufToday_(), n: _ufRun, tag: _ufTag, at: new Date().toISOString(), mid: 1 }));
     _ufRun = 0; _ufTag = {}; _ufSpillAt = Date.now();
   } catch (e) {}
+}
+/* ★2026-10-04 本人「なんでこんなに減るの早い？」：2台目・3台目が半日で約1.5万回。9,337回が🤖の同一作品判定（AI）。
+   真因＝AIの1日の上限が「出品上限×4」（dailyMax 3000 → 12,000回）で、GASの枠（1台2万回）より大きかった＋私が10/3に今日の回数を0に戻した。
+   → AIは急がない処理なので、その台の枠の使用が BA_AI_UF_STOP を超えたら呼ばない。1日の上限も BA_AI_HARD_CAP で頭打ち（業務の数から決めない） */
+var BA_AI_UF_STOP = 12000, BA_AI_HARD_CAP = 1500;
+function baAiQuotaOk_(st) {
+  var used = 0; try { used = ufTotal_(); } catch (e) { used = 0; }   /* 今日これまで＋控え＋この実行分＋他プロジェクトの分（uf_status の used と同じ） */
+  if (used < BA_AI_UF_STOP) return true;
+  if (st && !st._aiUfW) { st._aiUfW = 1; try { baLog_(st, '🐢 この台のGAS枠を ' + used + '回使ったので、今日はAIに聞きません（' + BA_AI_UF_STOP + '回で止める決まり・16:00(JST)に戻ります）'); } catch (e) {} }
+  return false;
 }
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
@@ -6556,8 +6566,9 @@ function baLog_(st, line) {
 function baClaudeJson_(prompt, st, tag, maxTokens) {
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
   if (!key) return { nokey: true };
-  var cap = Number((st && st.aiTextCap) || 0) || 400;
-  if (BA_AI_DOWN) return null;   /* ★2026-10-03 残高切れ等で断られている間は呼ばない（前は文章AIだけ素通りしていた） */
+  var cap = Math.min(Number((st && st.aiTextCap) || 0) || 400, BA_AI_HARD_CAP);
+  if (BA_AI_DOWN) return null;
+  if (!baAiQuotaOk_(st)) return null;   /* ★2026-10-03 残高切れ等で断られている間は呼ばない（前は文章AIだけ素通りしていた） */
   if (st && st.today) {
     if ((st.today.aiText || 0) >= cap) { if (!st.today.capT) { st.today.capT = 1; baLog_(st, '⚠ 今日の文章AI（英題・同一作品）が上限 ' + cap + ' 回→これ以上は聞かない'); } return null; }
   }
@@ -6786,6 +6797,7 @@ function baCornersArt_(imgUrl, key, st) {
   var body = { model: BA_CONFIRM, max_tokens: 300, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
     { type: 'text', text: '商品写真の判定の下準備です。見えたものだけを書いてください。corners＝画像の四隅（左上・右上・左下・右下の端のすぐ内側）に写っているものを、それぞれ "art"（パッケージ・ラベル・カセットの印刷された絵柄や文字）か "other"（机・床・布・手・壁・余白・背景・ケースの外側など、印刷面の外のもの）で答える。JSONだけ: {"corners":["art|other","art|other","art|other","art|other"]}' }] }] };
+  if (!baAiQuotaOk_(st)) return null;
   ufBump_(1, 'boshu_auto(写真の四隅の確認)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -6834,6 +6846,7 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
     + ',"platform_seen":"パッケージやラベルに印刷されている機種のロゴ・表記をそのまま書き写す（例 PS4 / Nintendo Switch / PlayStation 2 / NINTENDO 3DS。読めなければ空）","overlay_text":"写真の上に【後から載せた】文字・値札・星・枠・スタンプ（出品者が画像加工で足したもの。パッケージに印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
   var body = { model: model, max_tokens: big ? 400 : 200, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'url', url: String(imgUrl) } }, { type: 'text', text: txt0 }] }] };
   if (big) body.thinking = { type: 'disabled' };
+  if (!baAiQuotaOk_(st)) return null;
   ufBump_(1, big ? 'boshu_auto(写真の四隅＋シュリンク)' : 'boshu_auto(シュリンクの確認)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
@@ -6894,10 +6907,12 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
   }
   if (cache) { var _im = baImgIdx_(cache)[String(imgUrl || '').replace(/\?.*$/, '')]; if (_im && _im.ng) { cache[u] = _im.ng; return { ok: false, judged: true, kind: _im.ng.slice(3), cached: true, reused: true }; } }   /* ★2026-09-28 別の機種・作品で「写真そのものがダメ」と出た写真は見に行かない */
+  if (capN > BA_AI_HARD_CAP * 2) capN = BA_AI_HARD_CAP * 2;
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
     { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'ファミコン・スーパーファミコンのカセットは、正規品なら ラベルが印刷で鮮明・端がまっすぐ・任天堂やメーカーの表記や型番がある。次のどれかが見えたら repro=true：ラベルが紙を貼っただけ／手書き／色がにじんでいる・カセットの色や形が見慣れない（透明・蛍光色）・英語だけのラベルなのに日本のゲーム・1本に何本ものゲーム（\u300c100 in 1\u300d等）。判断できなければ repro=false。' + '★写っているものが【ゲームソフトそのもの】でなければ product_photo=false・kind="goods" です：トレーディングカード（ポケモンカード等）、グッズ（マグネット・ぬいぐるみ・パスケース・アクリルスタンド・缶バッジ・タオル・キーホルダー等）、特典の台紙や紙だけ、中身の入っていない空のケース・空容器だけ。カセット・ディスク・ケース入りのソフト本体が写っている写真だけ true にしてください。' + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。shadow＝商品の影・光の反射・写り込みが見えるなら true。tilt＝商品が傾いて写っている、遠近が付いている、机に置いた角度が分かる（真上から平らに撮ったスキャンのようでない）なら true。JSONだけで答えて（この順番で）: {"scene":"...","bg":0〜100（写真の中で商品以外＝机・床・布・手・壁などが写っている面積の割合。商品が画面いっぱいで周りが見えなければ0）,"edges":true|false,"shadow":true|false,"tilt":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|goods|other","repro":true|false' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' + _extraRule } ] }] };
+  if (!baAiQuotaOk_(st)) return { ok: false, judged: false, kind: 'error' };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
