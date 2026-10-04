@@ -6277,6 +6277,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "🔎仕入れ検索の検索語をAIで日本の正式な題名＋機種に": "\ud83d\udd0e Sourcing: AI builds the Japanese title + platform search keyword",
     "入庫待ち・お知らせの「🏢届け先」を消しました（届け先が1か所になったため）": "Removed the \ud83c\udfe2 destination column/badges (only one destination now)",
     "出品一覧の明細ごとに🎯仕入れの目安を出す": "Show \ud83c\udfaf estimated cost per variation in All Listings",
     "📥母数のJANを入れるボタンに「同じSKUから写す」を追加（単品のカタログも）": "\ud83d\udce5 Fill JAN from master: also copy from the same SKU (incl. single listings)",
@@ -16157,6 +16158,7 @@
     { const hit = sourcingKeywordFromDict(variation); if (hit) return hit; }
     // ★次に🤖が出した明細の日本語名（ヤフオク／メルカリで実際に使われた題名）＋機種。ローマ字化（Taiko no Tasujin）より確実
     { const j = srcJaOf(variation); if (j && j.ja && /[ぁ-んァ-ヶ一-龠]/.test(j.ja)) { const hw = HW_JA[String(j.hw || '').toLowerCase()] || ''; const c = srcDictClean(j.ja); return (c.length >= 3 ? c : j.ja) + (hw && !new RegExp(hw, 'i').test(c) ? ' ' + hw : ''); } }
+    { const a = srcAiKwOf(name, variation); if (a) return a; }   // ★2026-10-04 AIが作った日本の正式な題名＋機種（機械の置き換えより先）
     const strip = (raw) => String(raw || '')
       .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}①-⓿️‍✅⭐️]/gu, ' ') // 絵文字・丸数字①②・記号
       .replace(/[【〔\[].*?[】〕\]]/g, ' ')   // 【..】[..]
@@ -16364,11 +16366,43 @@
       return arr;
     } catch (_) { return null; } finally { delete _lotBusy[key]; }
   }
+  /* ★2026-10-04 検索語をAIに作らせる（本人「ここもやっぱりまだまだ精度低いし」「3ヶ月くらいずっと使ってない」）。
+     英語の出品名を機械的に置き換えると壊れる（実測30件：「アドバンス」だけ＝リズム天国／「Super Super Super 2 ゲームボーイ」／GC版オカリナに N64／「ポケモン Japonês …」）。
+     → 手直し・過去の仕入れ・🤖の日本語名が無い行だけ、Claude に「日本の正式な題名＋機種」を作らせて app_kv.src_kw_ai に控える（2台で共有・同じ出品は二度聞かない）。
+     鍵が無い／失敗＝今までどおり機械の置き換え。キーワード欄は手で直せる（手直しが最優先） */
+  var _kwAi = null, _kwAiBusy = false;   // var/function＝sourcingKeyword（この行より前）から呼ばれても TDZ にならない
+  function kwAiKey(name, variation) { return String(name || '').slice(0, 150) + '||' + String(variation || '').slice(0, 80); }
+  async function kwAiLoad() { if (_kwAi) return _kwAi; try { const r = await sbGet('app_kv', 'select=v&k=eq.src_kw_ai'); _kwAi = (((r || [])[0] || {}).v) || {}; } catch (_) { _kwAi = {}; } return _kwAi; }
+  function srcAiKwOf(name, variation) { const v = _kwAi && _kwAi[kwAiKey(name, variation)]; return (typeof v === 'string' && v.trim()) ? v.trim() : ''; }
+  async function kwAiAsk(list) {
+    if (!settings.claudeKey || _kwAiBusy || !list.length) return 0; _kwAiBusy = true;
+    try {
+      const arr = list.slice(0, 40);
+      const prompt = 'Shopee（海外）で売れた日本の中古ゲーム・周辺機器の出品名です。仕入れのため、メルカリ・ヤフオクで同じ物を探す【日本語の検索語】を1件ずつ作ってください。\n'
+        + '決まり：①日本で発売された時の正式な題名（略さない。ポケモン本編は「ポケットモンスター リーフグリーン」の形）'
+        + '②後ろに機種を1つ（PS1 PS2 PS3 PS4 PS5 PSP Vita DS 3DS GB GBC GBA SFC FC N64 GC Wii WiiU Switch など）。明細名に機種が書いてあればそれが正しい。題名に並んでいる機種の羅列は無視'
+        + '③本体・コントローラー・メモリーカードなどは日本での商品名＋色・左右（例「ジョイコン ネオンブルー L」「PS2 メモリーカード 8MB シルバー」「スーパーゲームボーイ2」）'
+        + '④Used・Japan・Variation・中古・ポルトガル語などの飾りは入れない ⑤自信が無い時は空文字\n'
+        + 'JSONだけで返す：{"items":[{"i":番号,"kw":"検索語"}]}\n\n'
+        + arr.map((x, i) => i + ': ' + String(x.name || '').slice(0, 160) + ' ／ 明細: ' + String(x.variation || '').slice(0, 80)).join('\n');
+      const body = { model: 'claude-sonnet-5', max_tokens: 6000, messages: [{ role: 'user', content: prompt }] };
+      const r2 = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify(body) });
+      const j = await r2.json(); try { if (j.usage) aiSpendAdd('検索語の日本語化(仕入れ検索)', { in: j.usage.input_tokens || 0, out: j.usage.output_tokens || 0 }); } catch (_) {}
+      if (!r2.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r2.status));
+      const txt = (j.content || []).map(c => c.text || '').join(''); const m = txt.match(/\{[\s\S]*\}/); const o = m ? JSON.parse(m[0]) : {};
+      const add = {}; (o.items || []).forEach(x => { const a = arr[Number(x.i)]; const kw = String((x && x.kw) || '').replace(/\s+/g, ' ').trim(); if (a && kw && kw.length <= 60) add[kwAiKey(a.name, a.variation)] = kw; });
+      const n = Object.keys(add).length; if (!n) return 0;
+      _kwAi = Object.assign(_kwAi || {}, add);
+      if (settings.sbSecret && !demoOn()) { try { const cur = await sbGet('app_kv', 'select=v&k=eq.src_kw_ai'); const v = Object.assign({}, (((cur || [])[0] || {}).v) || {}, add); await sbUpsert('app_kv', [{ k: 'src_kw_ai', v, updated_at: new Date().toISOString() }]); } catch (e) { console.warn('[検索語AI] 共有保存に失敗', e); } }
+      return n;
+    } catch (e) { console.warn('[検索語AI]', e); try { toast('検索語の日本語化に失敗：' + String(e.message || e).slice(0, 60), true); } catch (_) {} return 0; } finally { _kwAiBusy = false; }
+  }
   async function renderSourcing(host) {
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     try { await loadSrcDict(); } catch (_) {}   // 🔎過去の仕入れタイトル辞書（検索語の精度）
     try { await loadSrcJa(); } catch (_) {}     // 🤖が出した明細の日本語名・JAN
     try { await loadKwFix(); } catch (_) {}     // ✍️手で直した検索語（全PC共有・最優先）
+    try { await kwAiLoad(); } catch (_) {}      // 🤖AIが作った日本語の検索語（控え）
     let orders;
     try { orders = await sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,order_ts,order_date&tab=eq.300&order=order_ts.desc.nullslast,order_date.desc.nullslast,sn.desc'); }
     catch (e) { host.innerHTML = errBox(e); return; }
@@ -16412,6 +16446,15 @@
         if (n && Array.isArray(parts) && parts.length >= 2) parts.forEach((kwp, k) => out.push({ o: x.o, ix: x.ix + '.' + (k + 1), it: Object.assign({}, x.it, { variation: ((x.it.variation ? x.it.variation + ' ' : '') + '〔' + (k + 1) + '/' + parts.length + '〕 ' + kwp), _lot: { k: k + 1, n: parts.length, kw: kwp } }) }));
         else { out.push(x); if (n && settings.claudeKey && asked < 3 && !renderSourcing._lotAsked?.[x.it.name]) { asked++; (renderSourcing._lotAsked = renderSourcing._lotAsked || {})[x.it.name] = 1; lotSplitAsk(x.it.name, n).then(a => { if (a && state.page === 'buy') { try { renderSourcing(host); } catch (_) {} } }); } } });
       disp = out; }
+    /* 🤖 検索語がまだ機械の置き換えしか無い行だけ、まとめてAIに聞く（1回の描画で1回・聞いた出品は二度聞かない・答えが来たら1回だけ描き直す） */
+    if (settings.claudeKey) {
+      const asked = renderSourcing._kwAiAsked = renderSourcing._kwAiAsked || {};
+      const need = []; const seen = {};
+      disp.forEach(x => { const it = x.it; if (it._lot) return; const kk = kwStoreKey(it.name, it.variation); let sv = null; try { sv = (kwFix && kwFix[kk]) || localStorage.getItem(kk); } catch (_) {}
+        if (sv != null) return; if (sourcingKeywordFromDict(it.variation)) return; const jj = srcJaOf(it.variation); if (jj && jj.ja && /[ぁ-んァ-ヶ一-龠]/.test(jj.ja)) return;
+        const ak = kwAiKey(it.name, it.variation); if (srcAiKwOf(it.name, it.variation) || asked[ak] || seen[ak]) return; seen[ak] = 1; need.push({ name: it.name, variation: it.variation, ak }); });
+      if (need.length) { need.forEach(x => { asked[x.ak] = 1; }); kwAiAsk(need).then(n => { if (n && host.isConnected) renderSourcing(host); }); }
+    }
     if (sortMode === 'deadline') disp.sort((a, b) => (a.o.ship_by || 9e15) - (b.o.ship_by || 9e15) || tsOf(b.o) - tsOf(a.o));
     else disp.sort((a, b) => tsOf(b.o) - tsOf(a.o));
     const shippedN = items.filter(x => srcDoneReason(x.o)).length;
@@ -20667,6 +20710,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-04', items: [
+      '🔎 <b>🔎仕入れ検索の検索語をAIで日本の正式な題名＋機種に</b>（本人「ここもやっぱりまだまだ精度低いし」「3ヶ月くらいずっと使ってない」）。精度が低い真因は検索語でした（英語名の機械置き換えで「アドバンス」だけ／「Super Super Super 2」／GC版にN64／ポルトガル語が混ざる）。手直し・過去の仕入れ・🤖の日本語名が無い行だけ、AIに日本の正式な題名＋機種を作らせて控えます（2台で共有・同じ出品は二度聞きません）。検索語の欄は今までどおり手で直せて、手直しが最優先です。',
       '🏢 <b>入庫待ち・お知らせの「🏢届け先」を消しました（届け先が1か所になったため）</b>（本人「もう、旧事務所に届くことはないよ」「新事務所の表記ももはやいらんだろ」）。届け先の登録を新事務所1件にし、届け先の列・バッジ・🔔お知らせの🏢・届け先ごとの件数は、届け先が2か所以上登録してある時だけ出すようにしました。',
       '🎯 <b>出品一覧の明細ごとに🎯仕入れの目安を出す</b>（本人「これはなんでできない？」）：💰利益台帳は7月の出品から作った表で、🤖が足した明細が入っていなかった（重なり0件）→ 出品一覧で明細を開いた時、価格の下に🎯目安を出します。中身は🤖が出品した時のヤフオク定額（その明細の値、無ければ明細SKUが同じ他の明細の値）。実際の仕入ではないので利益には入れません。',
       '🐛 <b>📥母数のJANを入れるで入れたJANが保存されていなかったのを直しました</b>。台帳をその場で読んだのに「読めた印」を立てておらず、保存の守りが止めていました（入れたように見えて台帳には残っていなかった）。',
