@@ -6277,6 +6277,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "出品ログ：下書きから公開した分は出品に数えない": "Listing log: publishing a draft is not counted as a new listing",
     "🔎仕入れ検索：N64版の混入とジョイコンの左右違いを外す": "\ud83d\udd0e Sourcing: exclude N64 versions and wrong-side Joy-Con",
     "🔎仕入れ検索：メルカリ・Yahoo!フリマは関連の高い順に取ってから安い順に": "\ud83d\udd0e Sourcing: fetch Mercari / Yahoo Flea by relevance, then sort by price",
     "🔎仕入れ検索：説明書・攻略本・空き箱・体験版・海外版を候補から外す": "\ud83d\udd0e Sourcing: exclude manuals, guidebooks, empty boxes, demos and foreign versions",
@@ -20749,6 +20750,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-04', items: [
+      '🧾 <b>出品ログ：下書きから公開した分は出品に数えない</b>（本人「非公開からの公開は出品とカウントしなくていいで」「すでに前にページは作ってたわけやん？」）。台湾の下書きを公開した分（親SKUが他の国の商品番号＝コピーの下書き）が、新しい出品として10/4に約900明細数えられていました。こうしたカタログは控え（listlog_drafts）に入れ、出品ログのグラフ・件数から外します。',
       '🔎 <b>🔎仕入れ検索：N64版の混入とジョイコンの左右違いを外す</b>：GC版「時のオカリナ」の候補に「64ソフト」が、ジョイコンLの候補に「右R」が出ていました。機種（64ソフト・ニンテンドー64）と左右（右/左・(R)/(L)）を見て、提案から外します。',
       '🔎 <b>🔎仕入れ検索：メルカリ・Yahoo!フリマは関連の高い順に取ってから安い順に</b>：安い順に30件だけ取っていたので、あいまい検索で拾った¥300前後の別商品（他のPS2ソフト・修理用ドライバー等）で枠が埋まり、本物が入っていませんでした（スーパーゲームボーイ2・PS2メモリーカードが「合う出品なし」）。関連の高い順に取り、ハズレを外してから安い順に並べます。照合も、検索語の日本語の語が全部入っている物だけに（「Pokémon」のような英字は見ない・＆の表記ゆれを吸収）。説明書だけ・攻略本・グッズ・漫画も外します。',
       '🔎 <b>🔎仕入れ検索：説明書・攻略本・空き箱・体験版・海外版を候補から外す</b>：検索語を直した後に実測すると、上位が「取扱説明書」「必勝攻略法」「パッケージ」¥300「箱説のみ」「体験版」「ディスク1のみ」「イラスト」「オーケストラCD」「北米版」でした。こうした物は提案から外し、🔍比較一覧の下段に理由つきで残します。',
@@ -35038,7 +35040,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const nr = await sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&created_at=gt.' + encodeURIComponent(maxAt) + '&order=created_at.asc' + llogNoTest());
       if (!nr || !nr.length) return;
       const have = new Set(logState.rows.map(r => r.id));
-      const fresh = nr.filter(r => !have.has(r.id)); if (!fresh.length) return;
+      const fresh = nr.filter(r => !have.has(r.id) && !(logState.drafts && logState.drafts.has(r.cc + '|' + r.item_id))); if (!fresh.length) return;
       try {
         const st = await sbGetAll('app_kv', 'select=v&k=like.boshu_auto_status*');
         const am = logState.autoMap = logState.autoMap || {};
@@ -35099,7 +35101,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   async function syncListingLogInner() {
     if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定で登録してください）');
     const [live, known, baKv] = await Promise.all([
-      sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models'),
+      sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models,parent_sku'),
       sbGetAll('listing_log', 'select=cc,item_id,model_id'),
       baKvGet('boshu_auto_status').then(v => (v ? [{ v }] : [])).catch(() => []),   /* 担当が2か所でも合算して読む */
     ]);
@@ -35127,10 +35129,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const today = jstDate(Date.now());
     const mOf = (L) => { const m = L.models; if (Array.isArray(m)) return m; try { return JSON.parse(m || '[]'); } catch (_) { return []; } };
     const add = [];
+    /* ★2026-10-04 本人「非公開からの公開は出品とカウントしなくていいで」「すでに前にページは作ってたわけやん？」。
+       下書き（他の国からコピーした物＝親SKUが他国の商品番号の数字だけ）を公開すると、Shopee は新しい商品番号を付けるので新規カタログに見える。
+       → 親SKUが数字だけ（9桁以上）の新規カタログは app_kv.listlog_drafts に控え、出品ログの数から外す（行は残す＝毎回「新規」と数え直さないため） */
+    const draftNew = {};
     live.forEach(r => {
       const ms = mOf(r);
       // そのカタログ自体が初めて＝Shopeeの出品日を使う（過去分もそれっぽい日付で埋まる）
       const isNewItem = !knownItems.has(r.cc + '|' + r.item_id);
+      if (isNewItem && /^\d{9,}$/.test(String(r.parent_sku || '').trim())) draftNew[r.cc + '|' + r.item_id] = today;
       // ★既に記録があるカタログの models が一時的に空で返ってきた時に、
       //   model_id=0 の仮行を「今日出品」として作ってしまっていた（2026-08-10 にSGが579件も
       //   今日扱いになった原因。実際にはその明細は3月の出品）。既知カタログなら何もしない。
@@ -35155,6 +35162,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           seeded: isNewItem && !!ct });
       });
     });
+    if (Object.keys(draftNew).length) { try { const cur = await sbGet('app_kv', 'select=v&k=eq.listlog_drafts'); if (cur !== null) { const v = Object.assign({}, (((cur || [])[0] || {}).v || {}).keys || {}, draftNew); await sbUpsert('app_kv', [{ k: 'listlog_drafts', v: { keys: v, n: Object.keys(v).length }, updated_at: new Date().toISOString() }], 'k'); } } catch (e) { console.warn('[出品ログ] 下書き公開の控えに失敗', e); } }
     { const keep = add.filter(a => !llogIsTest(a.model_name)); if (keep.length) await sbUpsert('listing_log', keep); }
     try { await modelChangeTrack(live); } catch (_) {}
     // 実体化できた仮行(model_id=0)は二重計上になるので消す
@@ -35201,9 +35209,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
            一覧・グラフ・集計に要る軽い列だけを読み、3列は下で【選んだ日のぶんだけ】取りに行く。
            ⚠️ 7日ぶんの機種別（baRecentByHw）は別のクエリで name を取っているので影響しない。 */
         sbGetAll('listing_log', 'select=id,cc,item_id,model_id,ymd,seeded,created_at,price&order=ymd.desc' + llogNoTest()),
-        sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto)').catch(() => []),
+        sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto,listlog_drafts)').catch(() => []),
       ]);
-      logState.rows = rows; logState.loadErr = ''; logState.loadErrAt = 0;
+      { const dr = (kv || []).find(x => x.k === 'listlog_drafts'); logState.drafts = new Set(Object.keys((dr && dr.v && dr.v.keys) || {})); }
+      logState.rows = (rows || []).filter(r => !logState.drafts.has(r.cc + '|' + r.item_id));   /* ★2026-10-04 下書きから公開した分は出品に数えない */
+      logState.loadErr = ''; logState.loadErrAt = 0;
       { const au = (kv || []).find(x => x.k === 'listlog_auto'); logState.autoMap = (au && au.v && au.v.map) || {}; }
       /* ★2026-09-29 本人「なんで当日しか紫じゃないのか」＝🤖の控えは【明細名】が鍵なのに、9/21 から一覧は明細名を読まなくなった（重いので選んだ日だけ）。
          → 選んでいない日は照合できず全部「手動」になっていた。🤖が入れたカタログの行だけ明細名を読み、明細IDの集合（cc|model_id）に置き換えて照合する */
