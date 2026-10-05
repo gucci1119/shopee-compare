@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261006-0030a';
+var SRC_VER = '20261006-0110a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -582,7 +582,9 @@ function doGetInner_(e) {
         aout = addItem_({
           shop_id: p.shop_id, item_name: p.name, description: p.desc || p.name,
           price: p.price, stock: p.stock, weight: p.weight,
-          category: p.category || 'Games', condition: p.condition || 'USED',
+          /* ★2026-10-06 /exec から作る時も題名で機種のカテゴリを当てる（前は category が常に 'Games' で、10/5 の直しが効いていなかった）。category_id を渡せばそれを使う */
+          category: p.category || '', category_id: p.category_id || '', condition: p.condition || 'USED',
+          image_ids: p.image_ids ? String(p.image_ids).split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 9) : [],   // ★2026-10-06 Shopeeの画像IDはそのまま使う（取り直し・上げ直しをしない＝枠を食わない）
           brand_id: p.brand_id, publish: p.publish === '1',
           images: p.images ? String(p.images).split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [],
           variations: p.variations ? (function () { try { return JSON.parse(p.variations); } catch (_) { return []; } })() : [], // [{name,price,stock,sku,image}]（バリエ商品）
@@ -3678,7 +3680,8 @@ function addItem_(body) {
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
   var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
-  function _upImg(u) { u = String(u || ''); if (!u) return null; if (_imgCache[u]) return _imgCache[u]; var id = uploadImageUrl_(u); if (id) _imgCache[u] = id; return id; }
+  function _upImg(u) { u = String(u || ''); if (!u) return null; if (!/^https?:\/\//i.test(u)) return u;   /* ★2026-10-06 URLでなければShopeeの画像ID＝そのまま使う */
+    if (_imgCache[u]) return _imgCache[u]; var id = uploadImageUrl_(u); if (id) _imgCache[u] = id; return id; }
   var imgIds = body.image_ids || [];
   if ((!imgIds || !imgIds.length) && body.images && body.images.length) {
     imgIds = body.images.slice(0, 9).map(function (u) { return _upImg(u); }).filter(Boolean);
