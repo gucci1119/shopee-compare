@@ -6277,6 +6277,7 @@
     "📖 マニュアル": "📖 Manual",
     "⚙️ 設定": "⚙️ Settings",
     "🔔 お知らせ": "🔔 Notifications",
+    "降格「カテゴリ違い」を Shopee の提案どおりに自動で直す": "Auto-fix 'wrong category' deboosts with Shopee's suggested category",
     "出品ログ：下書きから公開した分は出品に数えない": "Listing log: publishing a draft is not counted as a new listing",
     "🔎仕入れ検索：N64版の混入とジョイコンの左右違いを外す": "\ud83d\udd0e Sourcing: exclude N64 versions and wrong-side Joy-Con",
     "🔎仕入れ検索：メルカリ・Yahoo!フリマは関連の高い順に取ってから安い順に": "\ud83d\udd0e Sourcing: fetch Mercari / Yahoo Flea by relevance, then sort by price",
@@ -18053,6 +18054,53 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     await sbUpsert('app_kv', [{ k: 'boshu_added_hist', v: { m }, updated_at: new Date().toISOString() }]);
   }
   setTimeout(() => { lstDailySnap().catch(() => { try { localStorage.removeItem('smdLstSnapDay'); } catch (_) {} }); baAddedHist().catch(() => {}); }, 4 * 60 * 1000);
+  /* ★2026-10-05 降格「カテゴリ違い」を Shopee の提案どおりに自動で直す（本人「ここに溜まっていってるのもちゃんと直してほしい」「Adopt Suggestion から Shopee がサジェストしてるカテゴリーにそのまま当てはめればいい」
+     「Shopee がサジェストするカテゴリーがもう絶対なんで、他に直したとしても、そこに強制的に直される」）。
+     担当PCだけ・2時間に1回。7か国の Seller Center の降格一覧（search_deboosted_product_list・ブリッジ経由）を読み、提案のカテゴリ（suggested_category_path の末尾）が
+     今のカテゴリと違う物だけ公式API（update_item の category_id）で直す。新しいカテゴリでブランドが必須なら、弾かれた時だけ「ブランドなし」を付ける（先に付けると元のブランドを消す）。
+     中身が同じ組（🟰）の出品は触らない（片方を編集すると相方が Shopee に消される＝2026-09-26 VN）。直した後も降格の印は Shopee が見直すまで残る＝同じカテゴリなら何もしない */
+  async function deboostAutoFix(force) {
+    if (!force && (!pcIsOwner() || demoOn())) return null;
+    if (!settings.writeToken || !settings.openapiUrl) return null;
+    try { if (!force && Date.now() - Number(localStorage.getItem('smdDeboostFixAt') || 0) < 2 * 3600e3) return null; localStorage.setItem('smdDeboostFixAt', String(Date.now())); } catch (_) {}
+    try { await ensureListings(); } catch (_) {}
+    let dupIds = new Map(); try { dupIds = cqDupGroups().byId; } catch (_) {}
+    const sl = ms => new Promise(r => setTimeout(r, ms));
+    const res = { at: new Date().toISOString(), seen: 0, fixed: 0, nobrand: 0, ng: 0, skipDup: 0, waiting: 0, byCc: {}, errs: [] };
+    for (const rg of REGIONS) {
+      let cur = '', n = 0;
+      for (let pg = 1; pg <= 10; pg++) {
+        let j = null;
+        try { j = JSON.parse(await Promise.race([bridgeRequest('GET', `https://${rg.host}/api/v3/mpsku/list/v2/search_deboosted_product_list?SPC_CDS_VER=2&page_number=${pg}&page_size=24&list_type=deboosted${cur ? '&cursor=' + encodeURIComponent(cur) : ''}`), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 30s')), 30000))])); } catch (e) { res.errs.push(rg.cc + ' 一覧: ' + String(e && e.message || e).slice(0, 80)); break; }
+        const ps = (j && j.data && j.data.products) || [];
+        for (const p of ps) {
+          res.seen++;
+          const rs = ((p.deboosted_infos || {}).reasons || []).find(r => Array.isArray(r.suggested_category_path) && r.suggested_category_path.length);
+          if (!rs) continue;
+          const want = rs.suggested_category_path[rs.suggested_category_path.length - 1], have = (p.category_path || []).slice(-1)[0];
+          if (String(want) === String(have)) { res.waiting++; continue; }
+          if (dupIds.has(String(p.id))) { res.skipDup++; continue; }
+          const sid = shopIdOfListing(rg.cc, p.id); if (!sid) continue;
+          try {
+            let r = await openapiUpdateItem({ shop_id: sid, item_id: p.id, category_id: want });
+            if (r && !r.ok && /brand/i.test(String(r.error || ''))) { r = await openapiUpdateItem({ shop_id: sid, item_id: p.id, category_id: want, brand_id: 0, brand_name: 'NoBrand' }); if (r && r.ok) res.nobrand++; }
+            if (r && r.ok) { res.fixed++; n++; } else { res.ng++; if (res.errs.length < 10) res.errs.push(rg.cc + ' ' + p.id + ': ' + String((r && r.error) || '').slice(0, 100)); }
+          } catch (e) { res.ng++; if (res.errs.length < 10) res.errs.push(rg.cc + ' ' + p.id + ': ' + String(e && e.message || e).slice(0, 100)); }
+          await sl(1500);
+        }
+        cur = (j && j.data && j.data.page_info && j.data.page_info.cursor) || '';
+        if (ps.length < 24 || !cur) break;
+        await sl(1500);
+      }
+      if (n) res.byCc[rg.cc] = n;
+    }
+    try { if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'deboost_fix_log', v: res, updated_at: new Date().toISOString() }]); } catch (_) {}
+    if (res.fixed || res.ng) { try { logAct('出品', '降格（カテゴリ違い）を提案どおりに直した', '', '直した ' + res.fixed + '件（ブランドなし ' + res.nobrand + '）・失敗 ' + res.ng + '・組で除外 ' + res.skipDup + '・見直し待ち ' + res.waiting); } catch (_) {} }
+    return res;
+  }
+  setTimeout(() => { deboostAutoFix().catch(e => console.warn('[降格の自動直し]', e)); }, 6 * 60 * 1000);
+  setInterval(() => { deboostAutoFix().catch(e => console.warn('[降格の自動直し]', e)); }, 2 * 3600e3);
+
   setInterval(() => { lstDailySnap().catch(() => {}); baAddedHist().catch(() => {}); }, 30 * 60 * 1000);
   async function planConvLoad(host) {
     const box = host.querySelector('#plan-conv'); if (!box) return;
@@ -20749,6 +20797,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-05', items: [
+      '🗂 <b>降格「カテゴリ違い」を Shopee の提案どおりに自動で直す</b>（本人「ここに溜まっていってるのもちゃんと直してほしい」「Shopee がサジェストするカテゴリーがもう絶対」）。担当のPCが2時間に1回、7か国の Seller Center の降格一覧を読み、Shopee の提案カテゴリ（Adopt Suggestion と同じ）に公式APIで直します。ブランドが必須のカテゴリでは、弾かれた時だけ「ブランドなし」を付けます。中身が同じ組の出品は触りません。直した後も降格の印は Shopee が見直すまで残ります。',
+    ] },
     { date: '2026-10-04', items: [
       '🧾 <b>出品ログ：下書きから公開した分は出品に数えない</b>（本人「非公開からの公開は出品とカウントしなくていいで」「すでに前にページは作ってたわけやん？」）。台湾の下書きを公開した分（親SKUが他の国の商品番号＝コピーの下書き）が、新しい出品として10/4に約900明細数えられていました。こうしたカタログは控え（listlog_drafts）に入れ、出品ログのグラフ・件数から外します。',
       '🔎 <b>🔎仕入れ検索：N64版の混入とジョイコンの左右違いを外す</b>：GC版「時のオカリナ」の候補に「64ソフト」が、ジョイコンLの候補に「右R」が出ていました。機種（64ソフト・ニンテンドー64）と左右（右/左・(R)/(L)）を見て、提案から外します。',
