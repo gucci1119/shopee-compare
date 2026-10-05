@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261004-0800i';
+var SRC_VER = '20261005-2200a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3673,7 +3673,8 @@ function mandatoryAttrFill_(shopId, catId, list) {
 }
 function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
-  var categoryId = body.category_id ? parseInt(body.category_id, 10) : resolveCategoryId_(shopId, body.category || 'Games');
+  /* ★2026-10-05 カテゴリの指定が無ければ、題名から機種のカテゴリを当てる（「Games」で探すと Video Games > Others に入り、Shopee に降格されていた） */
+  var categoryId = body.category_id ? parseInt(body.category_id, 10) : ((!body.category && baCatByName_(body.item_name)) || resolveCategoryId_(shopId, body.category || 'Games'));
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
   var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
@@ -5072,7 +5073,7 @@ function cloneItem_(shopId, itemId, newName, publish) {
     stock: 1,
     weight: base.weight || 0.5,
     image_ids: imgIds,
-    category_id: base.category_id,
+    category_id: (function () { var bc = base.category_id, c = baCatByName_(newName || base.item_name); return (c && (bc === 101091 || bc === 100698)) ? c : bc; })(),   /* ★2026-10-05 元が「その他」なら機種のカテゴリへ */
     condition: base.condition || 'USED',
     brand_id: ((base.brand || {}).brand_id) || 0,
     publish: publish ? 1 : 0        // 既定は非公開
@@ -8698,8 +8699,10 @@ function baFitName_(name, limit) {
   return n;
 }
 /* ★2026-09-24 国×機種のカテゴリ。TW は「Gaming & Consoles > Video Games > 機種」に葉が分かれている（get_category 実測）。他国は 0＝従来の keyword 解決 */
+/* ★2026-10-05 全部の国に広げた（前は台湾だけ）。カテゴリの番号は7か国共通（BR・TH・PH・TW で同じ番号を確認）。
+   ほかの国は「Games」の語で探して Video Games > Others(101091) に入れていた → PS2 などのソフトが Shopee に「カテゴリ違い」で降格されていた（BR 75件・TH 62件・10/5）。
+   本人「Shopee がサジェストするカテゴリーがもう絶対」＝下の対応は Shopee の提案（suggested_category_path）と同じ */
 function baCatForCc_(hw, cc) {
-  if (String(cc).toUpperCase() !== 'TW') return 0;
   var h = String(hw || '').toLowerCase();
   if (/^switch/.test(h)) return 101087;
   if (/^ps[12345]$/.test(h)) return 101082;
@@ -8710,6 +8713,13 @@ function baCatForCc_(hw, cc) {
   if (/^gb/.test(h)) return 101086;
   if (/^xbox/.test(h)) return 101083;
   return 101091;   /* GC・N64・SFC・FC・MD・SS など＝Others */
+}
+// 題名から機種が1つに決まるソフトだけ、機種のカテゴリを返す（本体・周辺機器や機種が複数並ぶ総称は 0＝今までどおり）
+function baCatByName_(name) {
+  var t = String(name || '');
+  if (/console|controller|joy-?con|memory\s*card|cable|adapt|charger|本体|主機|accessor|\bstand\b|pocket\s*station|amiibo|figure|tamagotchi|\bscph|\bcech|\bpch-\d|\bslim\b|\blite\b|\bxl\b|\bll\b/i.test(t)) return 0;
+  var cats = {}; baHwsOf_(t).forEach(function (h) { var c = baCatForCc_(h, ''); if (c) cats[c] = 1; });
+  var k = Object.keys(cats); return k.length === 1 ? parseInt(k[0], 10) : 0;
 }
 function seedShopCatalog_(p) {
   var src = parseInt(p.src_shop_id, 10), dst = parseInt(p.dst_shop_id, 10), itemId = parseInt(p.item_id, 10);
