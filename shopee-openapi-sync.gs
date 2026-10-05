@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261005-2330a';
+var SRC_VER = '20261006-0030a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6482,6 +6482,29 @@ function baJanReal_(v) { var j = String(v || '').trim(); if (!/^\d{13}$/.test(j)
 /* ★2026-09-20 本人「枠の減り早すぎる」：1回の実行で app_kv を十数回バラバラに読んでいた（実測：1日 1,018回＝枠の1位）。
    実行の頭で【まとめて1回】読み、以後はその控えを使う。書いた時は控えも更新する（読み直さない） */
 var BA_KV_CACHE = null;
+/* ★2026-10-06 本人「Best版じゃなくない？」「同じ画像に見える」「なぜそんなことが起きる？」：
+   作品マスタ（駿河屋・楽天）は通常版とベスト版を別のJANで持つ。🤖はJANごとに候補にし、写真は日本語名で探すので両方とも通常版の写真を拾い、
+   英名はAIが別々に訳す（7 ~Mole Morses Cavalry~ ／ 7 - the Cavalry of Mormoos -）→ 英名の照合をすり抜けて【同じ物】が同じ出品に2つ並んだ
+   （PS2 モールモースの騎兵隊・PSP アイマスSP パーフェクトサン＝13明細を詰め直しで削除）。作品の鍵（baKey_）は「(」以降を落とし空白を残すので
+   「7(セブン)～…」が「7」になり、「アイドルマスターSP」と「アイドルマスター SP」が別の鍵になる。
+   → 版の違い（ベスト版・廉価版・括弧書き）と空白を落とした【ゆるい鍵】で、国ごとに「もう足した作品」を覚えて2つ目を出さない。
+   既存の鍵（台帳・英名の控え）は変えない（変えると出した作品がまた候補に戻る）。初回は 🤖の控え boshu_added_hist から作る */
+var BA_LOOSE = 'boshu_loose_added', BA_LOOSE_DIRTY = 0;
+function baLooseKey_(hw, ja) { var k = baTmKey_(baCleanJa_(ja)).replace(/\s+/g, ''); return k ? (String(hw || '') + '|' + k) : ''; }
+function baLooseMap_() {
+  var L = baKv_(BA_LOOSE); if (L && typeof L === 'object') return L;
+  if (BA_KV_ERR) return null;
+  L = {};
+  try { var h = baKv_('boshu_added_hist'); var m = (h && h.m) || {}; Object.keys(m).forEach(function (x) { var v = m[x]; if (!v || !v.ja || !v.cc) return; var lk = baLooseKey_(v.hw, v.ja); if (!lk) return; var s0 = L[lk] || ''; if (s0.indexOf(v.cc) < 0) L[lk] = s0 + v.cc + ','; }); } catch (eH) { return null; }
+  if (BA_KV_CACHE) BA_KV_CACHE[BA_LOOSE] = L; BA_LOOSE_DIRTY = 1; return L;
+}
+function baLooseMark_(hw, cc, ja) { try { var L = baLooseMap_(); if (!L) return; var lk = baLooseKey_(hw, ja); if (!lk) return; var s0 = L[lk] || ''; if (s0.indexOf(cc) < 0) { L[lk] = s0 + cc + ','; BA_LOOSE_DIRTY = 1; } } catch (e) {} }
+function baLooseSave_() {
+  if (!BA_LOOSE_DIRTY) return;
+  try { var L = baLooseMap_(); if (!L) return; var fr = baKvFreshMany_([BA_LOOSE]); if (!fr) return; var cur = fr[BA_LOOSE] || {};
+    Object.keys(cur).forEach(function (k) { var b = L[k] || ''; String(cur[k] || '').split(',').forEach(function (cc) { if (cc && b.indexOf(cc) < 0) b += cc + ','; }); L[k] = b; });
+    baKvSet_(BA_LOOSE, L); BA_LOOSE_DIRTY = 0; } catch (e) {}
+}
 var BA_FAM_TICK = 0;   /* ★2026-09-23 この実行で作った新しいカタログの数（1回の巡回で1件まで・全部の作成経路で数える） */
 /* ★2026-09-21 設定が【読めなかった】のと【読めたが未設定】を区別する（Codex指摘P1・裏取り済み）。
    区別しないと、担当が2台目なのに本体側の読みが失敗しただけで cfg={} になり、
@@ -7291,7 +7314,7 @@ function boshuAutoTick(manual) {
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
-  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto']);
+  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto', BA_LOOSE]);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
@@ -7497,8 +7520,12 @@ function boshuAutoTick(manual) {
          同じ巡回で両方選ばれ、英題がAIで別々に訳された（7 ~Mole Morses Cavalry~ ／ 7 - the Cavalry of Mormoos -）ので英名の照合をすり抜け、同じ出品に同じ作品が2つ並んだ。
          JANが違えば別商品（決めごと）だが、ベスト版の印が題名に無いとお客さんには同じ物にしか見えない。→ 同じ巡回で【日本語名の鍵が同じ】作品は2つ目を出さない。
          ベスト版の印がある方は名前に Best が付く（baBestName_）ので次の巡回で別名として出る。印の無い方は台帳に skip:dup で残り、出し直さない */
-      { var jk0 = c.ja ? baTmKey_(baCleanJa_(c.ja)) : '';
-        if (jk0 && picks.some(function (pp) { return pp && pp.ja && baTmKey_(baCleanJa_(pp.ja)) === jk0; })) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; } }
+      { var jk0 = c.ja ? baLooseKey_(hw, c.ja) : '';
+        if (jk0) {
+          if (picks.some(function (pp) { return pp && pp.ja && baLooseKey_(hw, pp.ja) === jk0; })) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; }
+          var L0 = baLooseMap_(), have0 = L0 ? String(L0[jk0] || '') : '';   /* 別の日に足した同じ作品（2026-10-06 アイマスSP 9/28通常・9/30ベスト版） */
+          if (have0) { var need0 = (c.need || []).filter(function (cc3) { return have0.indexOf(cc3) < 0; }); if (!need0.length) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; } c.need = need0; }
+        } }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
@@ -7651,6 +7678,7 @@ function boshuAutoTick(manual) {
     baLogAutoMark_(_mk);
   } catch (eM) {}
   try { st.uf = { child: isChild_(), runner: baRunnerId_(), src: SRC_VER, used: ufTotal_(), stop: ufStopLine_(), cap: 20000, at: new Date().toISOString(), aiSpend: (isChild_() ? aiSpendLoad_() : null) }; } catch (eU) {}
+  try { baLooseSave_(); } catch (eLS) {}
   try { st.updated = new Date().toISOString(); baKvSet_(BA_ST, st); } catch (e2) {}
     try { ufPersist_(); } catch (e3) {}
     try { lock.releaseLock(); } catch (e4) {}
@@ -8453,6 +8481,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         /* 記録は【普通に足した時と丸ごと同じ形】。形が違うと売れた時の他国在庫0・写真の見直し・
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
+          baLooseMark_(hw, cc, _x0._p.ja);
           st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
             shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
@@ -8496,7 +8525,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
