@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261005-2200a';
+var SRC_VER = '20261005-2330a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7493,6 +7493,12 @@ function boshuAutoTick(manual) {
         var stillNeed = (c.need || []).filter(function (cc2) { var s2 = listedByCc[cc2] || {}; return !((enK1 && s2[enK1]) || (enK2 && s2[enK2])); });
         if (!stillNeed.length) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_en'); continue; }
         c.need = stillNeed; }
+      /* ★2026-10-05 本人「何か同じの出していない？」「バグ？」：PS2「7〜モールモースの騎兵隊〜」の通常版(JAN 4907892015043)と PlayStation2 the Best(4907892015296)が
+         同じ巡回で両方選ばれ、英題がAIで別々に訳された（7 ~Mole Morses Cavalry~ ／ 7 - the Cavalry of Mormoos -）ので英名の照合をすり抜け、同じ出品に同じ作品が2つ並んだ。
+         JANが違えば別商品（決めごと）だが、ベスト版の印が題名に無いとお客さんには同じ物にしか見えない。→ 同じ巡回で【日本語名の鍵が同じ】作品は2つ目を出さない。
+         ベスト版の印がある方は名前に Best が付く（baBestName_）ので次の巡回で別名として出る。印の無い方は台帳に skip:dup で残り、出し直さない */
+      { var jk0 = c.ja ? baTmKey_(baCleanJa_(c.ja)) : '';
+        if (jk0 && picks.some(function (pp) { return pp && pp.ja && baTmKey_(baCleanJa_(pp.ja)) === jk0; })) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; } }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
