@@ -18065,6 +18065,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { if (!force && Date.now() - Number(localStorage.getItem('smdDeboostFixAt') || 0) < 2 * 3600e3) return null; localStorage.setItem('smdDeboostFixAt', String(Date.now())); } catch (_) {}
     try { await ensureListings(); } catch (_) {}
     let dupIds = new Map(); try { dupIds = cqDupGroups().byId; } catch (_) {}
+    /* ★2026-10-05 必須の欄（型番・TIS No. など＝事実が要るので埋めない）や「このカテゴリは出せない」で断られた物は7日は試さない（2時間ごとに同じ10件を失敗し続けて枠の無駄だった） */
+    let skipMap = {}; try { skipMap = JSON.parse(localStorage.getItem('smdDeboostSkip') || '{}') || {}; } catch (_) {}
+    Object.keys(skipMap).forEach(k => { if (Date.now() - skipMap[k] > 7 * 864e5) delete skipMap[k]; });
     const sl = ms => new Promise(r => setTimeout(r, ms));
     const res = { at: new Date().toISOString(), seen: 0, fixed: 0, nobrand: 0, ng: 0, skipDup: 0, waiting: 0, byCc: {}, errs: [] };
     for (const rg of REGIONS) {
@@ -18080,12 +18083,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           const want = rs.suggested_category_path[rs.suggested_category_path.length - 1], have = (p.category_path || []).slice(-1)[0];
           if (String(want) === String(have)) { res.waiting++; continue; }
           if (dupIds.has(String(p.id))) { res.skipDup++; continue; }
+          if (skipMap[rg.cc + '|' + p.id]) { res.skipNeed = (res.skipNeed || 0) + 1; continue; }
           const sid = shopIdOfListing(rg.cc, p.id); if (!sid) continue;
           /* ★gasCall は失敗すると【例外を投げる】（{ok:false} を返さない）＝1回目はブランドのやり直しに進めず 40件中0件だった（10/5）。例外も結果に直して見る */
           const upd = async (extra) => { try { await openapiUpdateItem(Object.assign({ shop_id: sid, item_id: p.id, category_id: want }, extra || {})); return { ok: true }; } catch (e) { return { ok: false, error: String((e && e.message) || e) }; } };
           let r = await upd();
           if (!r.ok && /brand/i.test(r.error)) { r = await upd({ brand_id: 0, brand_name: 'NoBrand' }); if (r.ok) res.nobrand++; }
-          if (r.ok) { res.fixed++; n++; } else { res.ng++; if (res.errs.length < 10) res.errs.push(rg.cc + ' ' + p.id + ': ' + String(r.error || '').slice(0, 100)); }
+          if (r.ok) { res.fixed++; n++; } else { res.ng++; if (/mandatory|prohibited/i.test(r.error || '')) skipMap[rg.cc + '|' + p.id] = Date.now(); if (res.errs.length < 10) res.errs.push(rg.cc + ' ' + p.id + ': ' + String(r.error || '').slice(0, 100)); }
           await sl(1500);
         }
         cur = (j && j.data && j.data.page_info && j.data.page_info.cursor) || '';
@@ -18094,6 +18098,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       if (n) res.byCc[rg.cc] = n;
     }
+    try { localStorage.setItem('smdDeboostSkip', JSON.stringify(skipMap)); } catch (_) {}
     try { if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'deboost_fix_log', v: res, updated_at: new Date().toISOString() }]); } catch (_) {}
     if (res.fixed || res.ng) { try { logAct('出品', '降格（カテゴリ違い）を提案どおりに直した', '', '直した ' + res.fixed + '件（ブランドなし ' + res.nobrand + '）・失敗 ' + res.ng + '・組で除外 ' + res.skipDup + '・見直し待ち ' + res.waiting); } catch (_) {} }
     return res;
