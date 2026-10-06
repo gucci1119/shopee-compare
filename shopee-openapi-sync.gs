@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261006-2300a';
+var SRC_VER = '20261006-2345a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8445,7 +8445,11 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     var batch = todo.slice(i, i + free2);
     if (bandOn && !bandForce) {   /* ★2026-09-30 このカタログの幅に収まる作品だけを入れる（収まらない作品は残して次のカタログへ）。新しいカタログは先頭の作品の値段を基準にする */
       var _ref = bandHp || _hp, _in = [], _out = [];
-      todo.slice(i).forEach(function (q) { if (_in.length < free2 && bandFits(tgt, estP(q), _ref)) _in.push(q); else _out.push(q); });
+      /* ★2026-10-06 本人「空いてるカタログに入るものは、そこにどんどん入れてほしい」「空きがあるうちに次のカタログをあまり作らないで」：
+         新しく作ったカタログには【既存の空きのあるカタログのどれにも価格の幅が合わない作品だけ】を入れる。
+         前は新しいカタログの幅に入る作品を全部入れていたので、MY Switch ⑪ に ⑩ にも入る RM165〜262 の5件が入った（10/5 18:39） */
+      var _fitsOld = function (q) { var pq = estP(q); return rows.some(function (x) { return x !== tgt && !x.isNew && x.status !== 0 && (100 - (x.models || []).length) > 0 && bandFits(x, pq); }); };
+      todo.slice(i).forEach(function (q) { if (_in.length < free2 && bandFits(tgt, estP(q), _ref) && !(newItem && _in.length && _fitsOld(q))) _in.push(q); else _out.push(q); });
       if (_in.length) { todo = todo.slice(0, i).concat(_in, _out); batch = _in; }
     }
     // 価格：価格表（仕入帯→現地）→ 無ければカタログ平均。既存明細との価格差（5倍/BR4倍）とVN上限を先に守る
@@ -8827,6 +8831,11 @@ function seedShopCatalog_(p) {
   body.forceTier = true;
   if (_pa) body.promo_assets = _pa;
   /* ★2026-09-24 作る先の国のカテゴリを機種で指定できる（TW は機種ごとに葉が分かれている）。無ければ addItem_ の keyword 解決 */
+  /* ★2026-10-06 本人「なんかカテゴリーおかしくない？」：TH 2店舗目の Switch ⑪ が「Toys & Games > Dice, Board & Card Games」に入っていた。
+     ここでカテゴリを渡さず addItem_ が「Games」の語で探していたため（10/5 に題名から機種を当てる直しは入ったが、機種が複数のシリーズのカタログは当たらない）。
+     → 元のカタログのカテゴリ（番号は7か国共通）をそのまま使う。「その他」(101091/100698)の時だけ題名で機種を当て直す */
+  if (base.category_id && [101091, 100698].indexOf(Number(base.category_id)) < 0) body.category_id = Number(base.category_id);
+  else { var _bc = baCatByName_(body.item_name); if (_bc) body.category_id = _bc; else if (base.category_id) body.category_id = Number(base.category_id); }
   if (p.category_id && !isNaN(parseInt(p.category_id, 10))) body.category_id = parseInt(p.category_id, 10);
   var r = null;
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
