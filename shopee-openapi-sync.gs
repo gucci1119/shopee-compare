@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261006-2345a';
+var SRC_VER = '20261007-0030a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7188,7 +7188,9 @@ function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Mat
    実測 2026-09-25：同期待ちの間に「カタログ群なし」→もう1つ作る→ duplicates で落ちる、をくり返していた */
 function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price, role) {
   try { var m = baKvFresh_('boshu_fam_made') || {}; m[hw + '|' + cc + '|' + itemId] = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || ''), role: String(role || 'fam') }; baKvSet_('boshu_fam_made', m); } catch (e1) {}
-  try { sbUpsert_('listings', [{ cc: cc, item_id: itemId, name: String(name || ''), parent_sku: String(sku || ''), status: 0, shop_id: String(shopId || ''), model_count: 1, models: [{ n: 'test', price: Number(price) || 0 }], weight: (weight != null ? weight : null), synced_at: new Date().toISOString() }]); } catch (e2) {}
+  /* ★2026-10-07 status は 8（非公開）で控える。0 だと入れ先の候補（status !== 0）から外れ、一覧の同期が来るまでの間に
+     次の回がまた新しいカタログを作っていた（VN DS ⑩⑪⑫ が test だけで並んだ・本人「なぜtestで残ってるの？」） */
+  try { sbUpsert_('listings', [{ cc: cc, item_id: itemId, name: String(name || ''), parent_sku: String(sku || ''), status: 8, shop_id: String(shopId || ''), model_count: 1, models: [{ n: 'test', price: Number(price) || 0 }], weight: (weight != null ? weight : null), synced_at: new Date().toISOString() }]); } catch (e2) {}
 }
 function baCcOfShop_(shopId) { try { var t = getToken_(parseInt(shopId, 10)); if (t && t.cc) return String(t.cc).toUpperCase(); } catch (e0) {} try { var r = sbSelectAll_('listings', 'select=cc&shop_id=eq.' + parseInt(shopId, 10) + '&limit=1'); if (r && r[0] && r[0].cc) return String(r[0].cc); } catch (e1) {} return ''; }
 function baFamMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price) { baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price); }
@@ -8371,7 +8373,8 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
      作れない時（今日の上限・複製OFF・cfg.bandRoute=false）は今までどおり在庫0で置く */
   var bandOn = cfg.bandRoute !== false;
   var estP = function (p) { try { return p && p.cost > 0 ? (baPriceFromTbl_(cfg, cc, wG, p.cost) || 0) : 0; } catch (eE) { return 0; } };
-  var bandFits = function (row, price, ref) { if (!(price > 0)) return true; var ps = (row.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; }); if (!ps.length) { if (!(ref > 0)) return true; ps = [ref]; } var lo = Math.min.apply(null, ps), hi = Math.max.apply(null, ps); return price >= hi / ratio && price <= lo * ratio; };
+  /* ★2026-10-07 test は元カタログの値段を写しただけの仮の明細＝幅の基準にしない（test だけのカタログには何でも入る） */
+  var bandFits = function (row, price, ref) { if (!(price > 0)) return true; var ps = (row.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '').toLowerCase() !== 'test'; }).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; }); if (!ps.length) { if (!(ref > 0)) return true; ps = [ref]; } var lo = Math.min.apply(null, ps), hi = Math.max.apply(null, ps); return price >= hi / ratio && price <= lo * ratio; };
   var canClone = function () { if (cfg.autoClone === false) return false; var d = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10); var n = (st.cloneMade && st.cloneMade.d === d) ? st.cloneMade.n : 0; if (n >= Math.max(1, Number(cfg.clonePerDay) || 12)) return 'next'; return BA_FAM_TICK >= 1 ? 'next' : true; };   /* 'next'＝この回はもう作った（1回1件）／今日の上限→次の回（明日）に作る。在庫0で置くのは複製OFFの時だけ */
   var i = 0, guard = 0, bandHp = 0, bandForce = false;
   while (i < todo.length && guard++ < 4) {
@@ -8414,7 +8417,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         if (sub1) {
           BA_FAM_TICK++; st.cloneMade.n++;
           tgt = sub1; rows.push(tgt); newItem = true;
-          try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
+          try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); baFinishClone_(cfg, cc, tgt, true, 0, st); break; }   /* ★2026-10-07 作った直後に止まる時も締めを通す（test の在庫を0に・放置しない） */
         }
       }
       var cl = null, dupErr = '';
@@ -8431,7 +8434,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         rows.push(tgt); newItem = true;
         try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc0) {}   /* ★2026-09-29 写真付けより【先に】控える（失敗しても次の回が見つけて続きを入れる＝放置カタログを作らない） */
         // ★test は画像なし。Shopeeは「全部あり／全部なし」しか許さないので、足す前に1枚目の写真を test にも付けておく（あとで test ごと消す）
-        try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); break; }
+        try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (e) { res.note = 'test画像失敗: ' + String((e && e.message) || e).slice(0, 60); baLog_(st, cc + ' ' + res.note); baFinishClone_(cfg, cc, tgt, true, 0, st); break; }   /* ★2026-10-07 同上 */
         baLog_(st, cc + '：' + (bandHp ? '価格帯用に複製' : '満杯なので複製') + ' → ' + newName + '（非公開・' + cl.item_id + '）');
       }
     }
