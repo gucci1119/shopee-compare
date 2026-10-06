@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261006-0110a';
+var SRC_VER = '20261006-2300a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6494,18 +6494,33 @@ var BA_KV_CACHE = null;
    既存の鍵（台帳・英名の控え）は変えない（変えると出した作品がまた候補に戻る）。初回は 🤖の控え boshu_added_hist から作る */
 var BA_LOOSE = 'boshu_loose_added', BA_LOOSE_DIRTY = 0;
 function baLooseKey_(hw, ja) { var k = baTmKey_(baCleanJa_(ja)).replace(/\s+/g, ''); return k ? (String(hw || '') + '|' + k) : ''; }
+/* ★2026-10-06 Codex指摘（P2×3）を受けて作り直し：
+   ①値を「国:item_id」で持つ。満杯の店の【非公開カタログ】に埋もれた明細は、2店舗目へ出し直す決まり（baLoadCtx_ の buried）があるので、
+     記録の出品が埋もれている国は止めない（前は国だけを持っていたので出し直しまで止めていた）。古い形（国だけ）は止める側に倒す
+   ②同じ巡回の重複は【その国だけ】外す（PH に出す作品のせいで TW まで skip:dup にしていた）
+   ③初回の作成で控え（boshu_added_hist）が読めなかった時は空で作らない（null＝今回は守りを使わない・次の回にやり直す） */
+function baLooseToks_(s) { return String(s || '').split(',').filter(Boolean).map(function (t) { var p = t.split(':'); return { cc: p[0], id: p[1] || '' }; }); }
+function baLooseBlocks_(s, cc, buried) {
+  var ts = baLooseToks_(s).filter(function (t) { return t.cc === cc; }); if (!ts.length) return false;
+  return ts.some(function (t) { return !t.id || !(buried && buried[String(t.id)]); });   // どれか1つでも「埋もれていない出品」なら止める
+}
+function baLooseAdd_(s, cc, id) { var tok = cc + (id ? ':' + id : ''); var ts = String(s || '').split(',').filter(Boolean); if (ts.indexOf(tok) >= 0) return s; ts.push(tok); return ts.join(',') + ','; }
 function baLooseMap_() {
   var L = baKv_(BA_LOOSE); if (L && typeof L === 'object') return L;
   if (BA_KV_ERR) return null;
+  var errBefore = BA_KV_ERR; BA_KV_ERR = false;
+  var h = baKv_('boshu_added_hist');
+  if (BA_KV_ERR || !h || typeof h !== 'object' || !h.m) { BA_KV_ERR = BA_KV_ERR || errBefore; return null; }   // ③読めない／中身が無い＝空で作らない
+  BA_KV_ERR = errBefore;
   L = {};
-  try { var h = baKv_('boshu_added_hist'); var m = (h && h.m) || {}; Object.keys(m).forEach(function (x) { var v = m[x]; if (!v || !v.ja || !v.cc) return; var lk = baLooseKey_(v.hw, v.ja); if (!lk) return; var s0 = L[lk] || ''; if (s0.indexOf(v.cc) < 0) L[lk] = s0 + v.cc + ','; }); } catch (eH) { return null; }
+  try { var m = h.m; Object.keys(m).forEach(function (x) { var v = m[x]; if (!v || !v.ja || !v.cc) return; var lk = baLooseKey_(v.hw, v.ja); if (!lk) return; L[lk] = baLooseAdd_(L[lk], v.cc, v.item_id); }); } catch (eH) { return null; }
   if (BA_KV_CACHE) BA_KV_CACHE[BA_LOOSE] = L; BA_LOOSE_DIRTY = 1; return L;
 }
-function baLooseMark_(hw, cc, ja) { try { var L = baLooseMap_(); if (!L) return; var lk = baLooseKey_(hw, ja); if (!lk) return; var s0 = L[lk] || ''; if (s0.indexOf(cc) < 0) { L[lk] = s0 + cc + ','; BA_LOOSE_DIRTY = 1; } } catch (e) {} }
+function baLooseMark_(hw, cc, ja, itemId) { try { var L = baLooseMap_(); if (!L) return; var lk = baLooseKey_(hw, ja); if (!lk) return; var nv = baLooseAdd_(L[lk], cc, itemId); if (nv !== L[lk]) { L[lk] = nv; BA_LOOSE_DIRTY = 1; } } catch (e) {} }
 function baLooseSave_() {
   if (!BA_LOOSE_DIRTY) return;
   try { var L = baLooseMap_(); if (!L) return; var fr = baKvFreshMany_([BA_LOOSE]); if (!fr) return; var cur = fr[BA_LOOSE] || {};
-    Object.keys(cur).forEach(function (k) { var b = L[k] || ''; String(cur[k] || '').split(',').forEach(function (cc) { if (cc && b.indexOf(cc) < 0) b += cc + ','; }); L[k] = b; });
+    Object.keys(cur).forEach(function (k) { var b = L[k] || ''; String(cur[k] || '').split(',').filter(Boolean).forEach(function (t) { if (String(b).split(',').indexOf(t) < 0) b = String(b) + t + ','; }); L[k] = b; });
     baKvSet_(BA_LOOSE, L); BA_LOOSE_DIRTY = 0; } catch (e) {}
 }
 var BA_FAM_TICK = 0;   /* ★2026-09-23 この実行で作った新しいカタログの数（1回の巡回で1件まで・全部の作成経路で数える） */
@@ -7525,9 +7540,13 @@ function boshuAutoTick(manual) {
          ベスト版の印がある方は名前に Best が付く（baBestName_）ので次の巡回で別名として出る。印の無い方は台帳に skip:dup で残り、出し直さない */
       { var jk0 = c.ja ? baLooseKey_(hw, c.ja) : '';
         if (jk0) {
-          if (picks.some(function (pp) { return pp && pp.ja && baLooseKey_(hw, pp.ja) === jk0; })) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; }
-          var L0 = baLooseMap_(), have0 = L0 ? String(L0[jk0] || '') : '';   /* 別の日に足した同じ作品（2026-10-06 アイマスSP 9/28通常・9/30ベスト版） */
-          if (have0) { var need0 = (c.need || []).filter(function (cc3) { return have0.indexOf(cc3) < 0; }); if (!need0.length) { baMark_(ledger, c.key, ccsHw, 'skip:dup'); out.skipped++; baSkipRec_(st, hw, '', c, 'dup_ja'); continue; } c.need = need0; }
+          var _pc = {}; picks.forEach(function (pp) { if (pp && pp.ja && baLooseKey_(hw, pp.ja) === jk0) (pp.need || []).forEach(function (x) { _pc[x] = 1; }); });   /* ②同じ巡回で同じ作品を選んだ国だけ */
+          var L0 = baLooseMap_(), have0 = L0 ? String(L0[jk0] || '') : '', _bur = (ctx && ctx.buried) || {};   /* ①別の日に足した同じ作品（埋もれている国は止めない） */
+          var _keep = [], _drop = [];
+          (c.need || []).forEach(function (cc3) { if (_pc[cc3] || (have0 && baLooseBlocks_(have0, cc3, _bur))) _drop.push(cc3); else _keep.push(cc3); });
+          if (_drop.length) { baMark_(ledger, c.key, _drop, 'skip:dup'); baSkipRec_(st, hw, _drop.join('/'), c, 'dup_ja'); }
+          if (!_keep.length) { out.skipped++; continue; }
+          c.need = _keep;
         } }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
@@ -7923,7 +7942,7 @@ function baLoadCtx_(cfg, hw, ccs) {
   } catch (e) {}
   var pre0 = baKv_('boshu_auto_pre') || {};
   var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems, baKv_(BA_EN) || {});
-  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames };
+  return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames, buried: _buriedItems };
 }
 // 🔜 次に出す予定（上位 limit 件）。ヤフオクは叩かない＝枠は Supabase 読みの数回だけ
 function boshuAutoPreview_(hw, limit, noYahoo, needPhoto) {
@@ -8484,7 +8503,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         /* 記録は【普通に足した時と丸ごと同じ形】。形が違うと売れた時の他国在庫0・写真の見直し・
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
-          baLooseMark_(hw, cc, _x0._p.ja);
+          baLooseMark_(hw, cc, _x0._p.ja, tgt.item_id);
           st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
             shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
@@ -8528,7 +8547,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { baLooseMark_(hw, cc, x._p.ja); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
