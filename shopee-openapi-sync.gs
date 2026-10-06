@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261007-0030a';
+var SRC_VER = '20261007-0210a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8609,11 +8609,27 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
     return;
   }
   if (!addedHere) {
+    /* ★2026-10-07 本人「はい」（「作った回に1件も入らなかった新カタログはその場で消す」）：この回に作って（newItem）1件も入らなかったカタログは【消す】。
+       在庫0で残すと「test だけ・非公開」の空き箱が溜まる（10/4 に22件・10/7 に VN 15件を手で消した）。
+       消す前に Shopee の今の明細を読み、test だけ（他の明細が1つも無い）の時だけ消す。消せなければ従来どおり在庫0にする。
+       ※『既存カタログは消さない』の禁忌は sold・いいねのある資産の話。ここで消すのは作って数秒の空き箱だけ */
     try {
       var g = getModels_(tgt.shop_id, tgt.item_id) || {}; var ms = g.models || [], tm = null;
+      var onlyTest = ms.length > 0 && ms.every(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && m.name) || '')); });
+      if (onlyTest) {
+        var dj = callShop_(parseInt(tgt.shop_id, 10), '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(tgt.item_id, 10) });
+        if (dj && dj.error && dj.error !== '') throw new Error(dj.error + ' ' + (dj.message || ''));
+        try { var fm = baKvFresh_('boshu_fam_made'); if (fm && typeof fm === 'object') { Object.keys(fm).forEach(function (k) { if (fm[k] && String(fm[k].item_id) === String(tgt.item_id)) delete fm[k]; }); baKvSet_('boshu_fam_made', fm); } } catch (eF) {}   /* ★Codex指摘：読めなかった時（null）に {} で書くと控えが丸ごと消える→読めた時だけ書く */
+        try { sbDelete_('listings', 'cc=eq.' + encodeURIComponent(cc) + '&item_id=eq.' + parseInt(tgt.item_id, 10)); } catch (eS) {}
+        baLog_(st, cc + '：' + String(tgt.name || '').slice(-14) + ' は1件も入らなかったので消しました（test だけ・' + tgt.item_id + '）');
+        return;
+      }
       for (var i = 0; i < ms.length; i++) { if (/^\s*(test|dummy|sample)\d*\s*$/i.test(String(ms[i].name || ''))) { tm = ms[i]; break; } }
       if (tm && tm.model_id && (Number(tm.stock) || 0) > 0) { updateStock_(tgt.shop_id, tgt.item_id, tm.model_id, 0); baLog_(st, cc + '：1件も入らなかったので test の在庫を0にしました'); }
-    } catch (e) { baLog_(st, cc + '：test の在庫を0にできませんでした ' + String(e).slice(0, 160)); }
+    } catch (e) {
+      baLog_(st, cc + '：空のカタログを消せませんでした→在庫0を試します ' + String((e && e.message) || e).slice(0, 160));
+      try { var g2 = getModels_(tgt.shop_id, tgt.item_id) || {}; var ms2 = g2.models || []; for (var i2 = 0; i2 < ms2.length; i2++) { if (/^\s*(test|dummy|sample)\d*\s*$/i.test(String(ms2[i2].name || '')) && ms2[i2].model_id && (Number(ms2[i2].stock) || 0) > 0) { updateStock_(tgt.shop_id, tgt.item_id, ms2[i2].model_id, 0); break; } } } catch (e2) { baLog_(st, cc + '：test の在庫を0にできませんでした ' + String(e2).slice(0, 160)); }
+    }
     return;
   }
   try { removeVariation_(tgt.shop_id, tgt.item_id, ['test'], '0', ''); tgt.models = (tgt.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '') !== 'test'; }); }
