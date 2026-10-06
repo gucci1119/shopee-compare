@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261007-0840a';
+var SRC_VER = '20261007-0930a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6765,6 +6765,7 @@ function baKnownCatalog_(a) { return baIsShop_(a) && /^\s*【中古】\s*\S{0,12
 /* ★2026-09-30 本人「ファミコンの箱をつけてしまっている」「何回同じことするのだ？」（Wii のクレイジークライマーに FC 版の写真）。
    ①機種の語の表がポータル（PLAT_JA）より少なく、ファミコン・GB・DS 等が無かった＝「ファミコン」と書いた出品も他機種の写真として通り得た→ポータルと同じ表にする
    ②写真の控え（boshu_auto_pre）の鍵は作品名だけ＝同じ名前の別機種（FC 版）で集めた写真の束を Wii がそのまま使っていた→ baPreOf_ で束の機種を確かめる */
+var BA_COVER_BASE = 'https://gucci1119.github.io/shopee-compare/img/cover_';   /* ★2026-10-07 型が無い機種の最初のカタログに付ける仮の表紙（本人が後で差し替える） */
 var BA_PLAT_JA = [['switch2', /switch\s*2|スイッチ\s*2/i], ['switch', /switch(?!\s*2)|スイッチ(?!\s*2)/i], ['ps5', /ps5|プレステ\s*5|プレイステーション\s*5|playstation\s*5/i], ['ps4', /ps4|プレステ\s*4|プレイステーション\s*4|playstation\s*4/i], ['ps3', /ps3|プレステ\s*3|プレイステーション\s*3|playstation\s*3/i], ['ps2', /ps2|プレステ\s*2|プレイステーション\s*2|playstation\s*2/i], ['psp', /psp|プレイステーション\s*ポータブル/i], ['vita', /vita|ヴィータ/i], ['3ds', /3ds/i], ['ds', /(^|[^3a-z])ds(i|lite)?(?![a-z])|ニンテンドーds/i], ['wiiu', /wii\s*u/i], ['wii', /wii(?!\s*u)/i], ['gc', /gamecube|ゲームキューブ|(^|[^a-z])n?gc(?![a-z])/i], ['n64', /n64|ニンテンドー\s*64|nintendo\s*64|ロクヨン/i], ['sfc', /sfc|スーパーファミコン|スーファミ|snes/i], ['fc', /(^|[^ー])ファミコン|(^|[^sa-z])fc(?![a-z])|ファミリーコンピュータ/i], ['gba', /gba|ゲームボーイアドバンス|アドバンス/i], ['gb', /(^|[^a-z])gbc?(?![a-z])|ゲームボーイ(?!アドバンス)/i], ['ss', /セガサターン|サターン/i], ['dc', /ドリームキャスト|ドリキャス|dreamcast/i], ['md', /メガドライブ|メガドラ/i], ['xbox', /xbox/i], ['pce', /pcエンジン/i], ['ws', /ワンダースワン/i]];
 function baPlatsOf_(name) { var n = String(name || '').normalize('NFKC').toLowerCase(), ps = []; BA_PLAT_JA.forEach(function (p) { if (p[1].test(n)) ps.push(p[0]); }); return ps; }
 function baHwSame_(a, b) { a = String(a || ''); b = String(b || ''); if (a === b) return true; var g = function (x) { return /^xbox/.test(x) ? 'xbox' : x === 'gbc' ? 'gb' : x; }; return g(a) === g(b); }
@@ -7186,8 +7187,8 @@ function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Mat
    親SKU/名前の書き換えが失敗しても家族と見分けられる（baLoadCtx_ の _madeIds）。
    あわせて listings に仮の行を入れる＝出品同期（各店を数時間ごと）を待たずに次の巡回が見つける。
    実測 2026-09-25：同期待ちの間に「カタログ群なし」→もう1つ作る→ duplicates で落ちる、をくり返していた */
-function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price, role) {
-  try { var m = baKvFresh_('boshu_fam_made'); if (!m || typeof m !== 'object') { if (BA_KV_ERR) throw new Error('boshu_fam_made を読めなかったので控えを書かない（空で上書きすると控えが丸ごと消える・Codex指摘 2026-10-07）'); m = {}; } m[hw + '|' + cc + '|' + itemId] = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || ''), role: String(role || 'fam') }; baKvSet_('boshu_fam_made', m); } catch (e1) {}
+function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price, role, extra) {
+  try { var m = baKvFresh_('boshu_fam_made'); if (!m || typeof m !== 'object') { if (BA_KV_ERR) throw new Error('boshu_fam_made を読めなかったので控えを書かない（空で上書きすると控えが丸ごと消える・Codex指摘 2026-10-07）'); m = {}; } var _rec = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || ''), role: String(role || 'fam') }; if (extra && typeof extra === 'object') Object.keys(extra).forEach(function (k) { _rec[k] = extra[k]; }); m[hw + '|' + cc + '|' + itemId] = _rec; baKvSet_('boshu_fam_made', m); } catch (e1) {}   /* ★2026-10-07 extra＝{coverTmp:1} 表紙が仮（本人が後で差し替える） */
   /* ★2026-10-07 status は 8（非公開）で控える。0 だと入れ先の候補（status !== 0）から外れ、一覧の同期が来るまでの間に
      次の回がまた新しいカタログを作っていた（VN DS ⑩⑪⑫ が test だけで並んだ・本人「なぜtestで残ってるの？」） */
   try { sbUpsert_('listings', [{ cc: cc, item_id: itemId, name: String(name || ''), parent_sku: String(sku || ''), status: 8, shop_id: String(shopId || ''), model_count: 1, models: [{ n: 'test', price: Number(price) || 0 }], weight: (weight != null ? weight : null), synced_at: new Date().toISOString() }]); } catch (e2) {}
@@ -8303,6 +8304,28 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       return { cc: cc, item_id: sd.item_id, name: _fitName2, shop_id: dst, weight: other.weight, parent_sku: wantSku, models: [{ n: 'test', price: pr0 || 0 }], status: 0, isNew: true };
     }
   }
+  /* ★2026-10-07 本人「ない場合はカタログから作ってしまって良い」「Top画像は仮でよい・後でこちらで差し替える」「差し替えると分かるようにしておいて」：
+     同じ機種のカタログがどの国にも無い時（Switch2・MD など）は、【同じ国の別のバリエカタログ】から説明文・重さ・送料設定だけ借りて作り、
+     表紙は機種ごとの仮の画像（Pages の img/cover_<hw>.png）にする。写真は別機種から写さない＝9/23 の事故（GB の写真が PS に付く）は起きない。
+     控えに coverTmp:1 を付け、ポータル「🧹カタログの質 › 🖼 表紙が仮」に並ぶ */
+  if (!src && !other && allRowsAll) {
+    var _any = null;
+    try { _any = ((allRowsAll[cc] || []).filter(function (r) { return r.status === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')); })[0]) || ((allRowsAll[cc] || []).filter(function (r) { return (r.models || []).length > 1; })[0]) || null; } catch (eA) { _any = null; }
+    if (_any) {
+      var dst2 = 0; try { dst2 = parseInt(_any.shop_id, 10) || baMainShop_(cc); } catch (eD2) { dst2 = 0; }
+      if (dst2 && baShopFull_(cc, dst2)) { var dSub2 = baSubShop_(cc, dst2); if (!dSub2) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } dst2 = dSub2; }
+      if (!dst2) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
+      var cover = BA_COVER_BASE + encodeURIComponent(hw) + '.png';
+      var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: 0, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName });
+      if (!sd2 || !sd2.ok || !sd2.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
+      var _nmLim3 = 120; try { var _mx3 = shopNameLimit_(dst2); if (_mx3 > 0) _nmLim3 = Math.min(_mx3, 120); } catch (eNl3) {}
+      var _fitName3 = baFitName_(srcName, _nmLim3);
+      try { callShop_(dst2, '/api/v2/product/update_item', null, 'post', { item_id: sd2.item_id, item_name: _fitName3, item_sku: wantSku || undefined }); } catch (eU3) { baLog_(st, cc + '：作ったカタログ ' + sd2.item_id + ' に名前/親SKUを付けられませんでした ' + String((eU3 && eU3.message) || eU3).slice(0, 120)); }
+      try { baCatalogMadeRec_(hw, cc, sd2.item_id, _fitName3, dst2, wantSku, _any.weight, 0, 'fam', { coverTmp: 1, coverUrl: cover, structFrom: String(_any.item_id) }); } catch (eR3) {}
+      baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを【仮の表紙】で作りました（非公開・' + sd2.item_id + '／型は同じ国の ' + _any.item_id + '・写真は写していない）→ 表紙は本人が差し替え');
+      return { cc: cc, item_id: sd2.item_id, name: _fitName3, shop_id: dst2, weight: _any.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
+    }
+  }
   if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（どの国にも ' + hw + ' のカタログがありません）'); return null; }
   var cl = null;
   /* ★2026-09-25 台湾はタイトル60字。他の国の長い家族名のまま複製すると add_item が error_title_len_no_pass で落ちる（実測 09/25 TW ps1・ps3）。店の上限に合わせて切る（seedShopCatalog_ と同じ） */
@@ -8804,7 +8827,8 @@ function baCatByName_(name) {
 function seedShopCatalog_(p) {
   var src = parseInt(p.src_shop_id, 10), dst = parseInt(p.dst_shop_id, 10), itemId = parseInt(p.item_id, 10);
   if (!src || !dst || !itemId) return { ok: false, error: 'src_shop_id / dst_shop_id / item_id 必須' };
-  if (src === dst) return { ok: false, error: '同じ店舗です' };
+  var _imgOv = (p.image_urls && p.image_urls.length) ? p.image_urls.slice(0, 9) : null;   /* ★2026-10-07 表紙を差し替えて作る（仮の表紙＝型が無い機種の最初の1つ） */
+  if (src === dst && !_imgOv) return { ok: false, error: '同じ店舗です' };
   var full = null;
   try { full = getItemFull_(src, itemId); } catch (e) { return { ok: false, error: '元のカタログを読めません: ' + String((e && e.message) || e).slice(0, 120) }; }
   var base = (full && full.base) || {};
@@ -8817,6 +8841,7 @@ function seedShopCatalog_(p) {
   var _sIds = (base.image || {}).image_id_list || [], _allU = (base.image || {}).image_url_list || [];
   var urls = _allU.filter(function (u, k) { return !_skip[_sIds[k]]; }).slice(0, 9);
   if (!urls.length) urls = _allU.slice(0, 9);
+  if (_imgOv) urls = _imgOv;
   if (!urls.length) return { ok: false, error: '元のカタログに画像がありません' };
   var tierName = '';
   try { var tv = ((full.model || {}).tier_variation || [])[0]; tierName = (tv && tv.name) || ''; } catch (e2) {}
