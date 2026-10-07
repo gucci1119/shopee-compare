@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261007-0930a';
+var SRC_VER = '20261007-1400a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8310,20 +8310,28 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
      控えに coverTmp:1 を付け、ポータル「🧹カタログの質 › 🖼 表紙が仮」に並ぶ */
   if (!src && !other && allRowsAll) {
     var _any = null;
-    try { _any = ((allRowsAll[cc] || []).filter(function (r) { return r.status === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')); })[0]) || ((allRowsAll[cc] || []).filter(function (r) { return (r.models || []).length > 1; })[0]) || null; } catch (eA) { _any = null; }
+    /* 型の選び方：①機種が1つの汎用カタログ（説明文が定型・名前を置き換えれば他機種の語が残らない）②無ければ公開中のバリエカタログ③最後は何でも */
+    try {
+      var _pool = allRowsAll[cc] || [];
+      _any = (_pool.filter(function (r) { return r.status === 1 && (r.hws || []).length === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')) && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, '')); })[0])
+        || (_pool.filter(function (r) { return r.status === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')); })[0])
+        || (_pool.filter(function (r) { return (r.models || []).length > 1; })[0]) || null;
+    } catch (eA) { _any = null; }
     if (_any) {
       var dst2 = 0; try { dst2 = parseInt(_any.shop_id, 10) || baMainShop_(cc); } catch (eD2) { dst2 = 0; }
       if (dst2 && baShopFull_(cc, dst2)) { var dSub2 = baSubShop_(cc, dst2); if (!dSub2) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } dst2 = dSub2; }
       if (!dst2) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var cover = BA_COVER_BASE + encodeURIComponent(hw) + '.png';
-      var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: 0, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName });
+      var _wKg = (Number(fam.weightG) > 0) ? Number(fam.weightG) / 1000 : 0;   /* ★家族の重さ（Switch2＝150g）。別機種から借りると 0.2 等になり送料が狂う（Codex/advisor指摘 2026-10-07） */
+      var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: 0, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName, weight: _wKg, rename_desc: 1 });
       if (!sd2 || !sd2.ok || !sd2.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
       var _nmLim3 = 120; try { var _mx3 = shopNameLimit_(dst2); if (_mx3 > 0) _nmLim3 = Math.min(_mx3, 120); } catch (eNl3) {}
       var _fitName3 = baFitName_(srcName, _nmLim3);
       try { callShop_(dst2, '/api/v2/product/update_item', null, 'post', { item_id: sd2.item_id, item_name: _fitName3, item_sku: wantSku || undefined }); } catch (eU3) { baLog_(st, cc + '：作ったカタログ ' + sd2.item_id + ' に名前/親SKUを付けられませんでした ' + String((eU3 && eU3.message) || eU3).slice(0, 120)); }
-      try { baCatalogMadeRec_(hw, cc, sd2.item_id, _fitName3, dst2, wantSku, _any.weight, 0, 'fam', { coverTmp: 1, coverUrl: cover, structFrom: String(_any.item_id) }); } catch (eR3) {}
+      var _wEff = _wKg > 0 ? _wKg : _any.weight;   /* ★Codex指摘：控えと戻り値も作った時の重さにそろえる（listings の重さで価格表の帯を選ぶので、ずれると次の回の値付けが狂う） */
+      try { baCatalogMadeRec_(hw, cc, sd2.item_id, _fitName3, dst2, wantSku, _wEff, 0, 'fam', { coverTmp: 1, coverUrl: cover, structFrom: String(_any.item_id) }); } catch (eR3) {}
       baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを【仮の表紙】で作りました（非公開・' + sd2.item_id + '／型は同じ国の ' + _any.item_id + '・写真は写していない）→ 表紙は本人が差し替え');
-      return { cc: cc, item_id: sd2.item_id, name: _fitName3, shop_id: dst2, weight: _any.weight, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
+      return { cc: cc, item_id: sd2.item_id, name: _fitName3, shop_id: dst2, weight: _wEff, parent_sku: wantSku, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
     }
   }
   if (!src) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（どの国にも ' + hw + ' のカタログがありません）'); return null; }
@@ -8853,9 +8861,14 @@ function seedShopCatalog_(p) {
     item_name: baFitName_(String(p.name || base.item_name || ''), (function () {
       try { var mx = shopNameLimit_(dst); return (mx > 0 ? Math.min(mx, 120) : 120); } catch (e) { return 60; }
     })()),
-    description: String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || ''),
+    description: (function () {
+      var _d = String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || '');
+      /* ★2026-10-07 型が別機種の時（仮の表紙の経路）は、説明文の先頭に残る元の名前を新しい名前に置き換える（実測：PH Switch2 の説明文が「GTA Series Sony PS1…」で始まっていた） */
+      if (p.rename_desc && p.name && base.item_name && _d.indexOf(String(base.item_name)) >= 0) _d = _d.split(String(base.item_name)).join(String(p.name));
+      return _d;
+    })(),
     images: urls,
-    weight: (base.weight != null ? base.weight : 0.5),
+    weight: (p.weight > 0 ? Number(p.weight) : (base.weight != null ? base.weight : 0.5)),   /* ★2026-10-07 家族の重さ（weightG）を優先。別機種から借りた重さ（0.2）で公開されていた */
     condition: base.condition || 'USED',
     price: Number(p.price) || 300,
     stock: 0,                       /* 種なので在庫0。売れるものは🤖が明細で入れる */
