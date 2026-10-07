@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261007-2230a';
+var SRC_VER = '20261007-2330a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7779,7 +7779,7 @@ function condIndexTick(manual) {
     var qAge = q.at ? (Date.now() - Date.parse(q.at)) : Infinity;
     var noGroup = Array.isArray(q.items) && q.items.length && !q.items[0].g;
     if (noGroup) { var keysOld = Object.keys(idx.items); if (keysOld.length <= 60 && keysOld.every(function (k) { return !idx.items[k].g; })) idx.items = {}; }   /* v196：セット番号を入れる前に見た最初の数十枚は、指示文も古いので見直す */
-    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 2) { var built = condQueueBuild_(idx.items); if (built) q = built; }
+    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 3) { var built = condQueueBuild_(idx.items); if (built) q = built; }
     var items = Array.isArray(q.items) ? q.items : [];
     if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
@@ -7835,13 +7835,13 @@ function condIndexTick(manual) {
 }
 /* 候補の一覧を作る（ポータルの condQueueBuild と同じ規則）：過去120日に送った画像のうち、注文後メッセージの前後5分に送ったもの（案内バナー）を除く。写真の依頼の48時間以内に送った画像を先頭に。索引済みは外してから1,500件で切る */
 function condQueueBuild_(done) {
-  var since = new Date(Date.now() - 120 * 86400000).toISOString();
-  var rows = sbSelectAll_('chat_messages', 'select=cc,conversation_id,direction,msg_type,text,msg_time&direction=in.(in,out)&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc');
+  var since = '2025-05-01T00:00:00Z';   /* ★2026-10-07 120日の制限を外した（送った写真 3,554枚のうち364枚が120日より前） */
+  var rows = sbSelectAll_('chat_messages', 'select=cc,conversation_id,buyer,direction,msg_type,text,msg_time&direction=in.(in,out)&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc');
   if (!Array.isArray(rows) || rows.length < 100) return null;   /* 読めていない時に空の一覧で上書きしない */
   var by = {}; rows.forEach(function (m) { (by[m.conversation_id] = by[m.conversation_id] || []).push(m); });
   var ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
   var PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
-  var seen = {}, items = [];
+  var seen = {}, items = [], gBuy = {};
   /* セット＝同じ会話で、前の画像から4分以内に続けて送った写真（1つの商品の表・裏・中身をまとめて送っている）。番号は会話名そのものでなくハッシュ（索引にお客さんの名前を残さない） */
   var hashG = function (str) { var h = 5381; for (var q2 = 0; q2 < str.length; q2++) h = ((h << 5) + h + str.charCodeAt(q2)) | 0; return (h >>> 0).toString(36); };
   Object.keys(by).forEach(function (c) {
@@ -7856,32 +7856,37 @@ function condQueueBuild_(done) {
       var rq = '';
       for (var k = i - 1; k >= 0 && k >= i - 14; k--) { var y = ms[k]; if (y.direction === 'in' && y.msg_type === 'text' && t - Date.parse(y.msg_time) <= 48 * 3600000 && PHOTO.test(y.text || '')) { rq = String(y.text || '').replace(/\s+/g, ' ').slice(0, 140); break; } }
       seen[u] = 1; items.push({ u: u, cc: m.cc || '', at: m.msg_time, req: rq ? 1 : 0, rq: rq, g: gCur });
+      { var gb = gBuy[gCur] = gBuy[gCur] || { cc: m.cc || '', buyer: String(m.buyer || ''), t0: tG, t1: tG }; gb.t0 = Math.min(gb.t0, tG); gb.t1 = Math.max(gb.t1, tG); }
     }
   });
   /* セット単位で並べる：依頼の直後のセットが先・新しいセットが先・セットの中は送った順（セットが途中で切れて半分だけ判定、を減らす） */
   var gInfo = {}; items.forEach(function (x) { var gi = gInfo[x.g] = gInfo[x.g] || { req: 0, at: 0 }; if (x.req) gi.req = 1; gi.at = Math.max(gi.at, Date.parse(x.at) || 0); });
   items.sort(function (a, b) { var A = gInfo[a.g], B = gInfo[b.g]; return (B.req - A.req) || (B.at - A.at) || (a.g < b.g ? -1 : a.g > b.g ? 1 : 0) || (Date.parse(a.at) - Date.parse(b.at)); });
   var pending = items.filter(function (x) { return !(done || {})[x.u]; });
-  /* ★2026-10-07 本人「送れる写真を自動収集してストックしておきたい」（9/19 にも「毎回メルカリから採取するのは面倒」）。
-     🤖が出品用に選んだメルカリの中古の出品（boshu_auto_pre の src＝/item/mXXX）の写真 _1〜_3 を、状態写真の候補にも足す。
-     同じ作品・同じ機種の【中古の一例】として送る（本人10/7「それでいい」）。題名と機種はAIの読みより🤖の出品名を優先（hti/hhw）。
-     メルカリの画像は公開の CDN（static.mercdn.net）＝メルカリのページは叩かない。チャットの写真を先に・メルカリは需要の多い機種から600枚ずつ */
-  var mer = [];
+  /* ★2026-10-07 本人「過去に送った写真をまずメッセージから取れないのか？」：送った写真のセットを【そのお客さんの注文の商品】に結びつける。
+     同じ国・同じお客さんの注文（取消を除く）のうち、写真を送った前後14日にあるもの。商品（出品ID＋明細名）が1つに決まる時だけ結ぶ（2つ以上なら結ばない＝取り違えない）。
+     実測：写真を送った会話 792 のうち 521 が注文につながり、389 は商品が1つに決まる。結果は app_kv cond_photo_links（セット番号→出品ID・明細名・カタログ名）。
+     ※🤖の作品のメルカリ写真を足す案（同日）は、本人の「手で出した売れ筋の写真が要る」を受けてやめた（9/25 の Smart Reply がその場でメルカリから引く） */
   try {
-    var pre = baKv_('boshu_auto_pre') || {};
-    var HW_ORDER = ['switch', 'switch2', 'ps1', 'ps2', 'ps3', 'ps4', 'psp', 'vita', 'ds', '3ds', 'gc', 'wii', 'wiiu', 'gba', 'gb', 'sfc', 'fc', 'n64', 'md', 'ss', 'ws', 'ps5'];
-    var seenM = {};
-    Object.keys(pre).forEach(function (k) {
-      var v = pre[k]; if (!v || !v.img || v.miss) return;
-      var mm = String(v.src || '').match(/jp\.mercari\.com\/item\/(m\d+)/); if (!mm || seenM[mm[1]]) return; seenM[mm[1]] = 1;
-      var nm = String(v.name || '').slice(0, 90), hh = String(v.hw || k.split('@')[1] || baHwsOf_(nm)[0] || '');
-      var rank = HW_ORDER.indexOf(hh); if (rank < 0) rank = 50;
-      for (var n2 = 1; n2 <= 3; n2++) mer.push({ u: 'https://static.mercdn.net/item/detail/orig/photos/' + mm[1] + '_' + n2 + '.jpg', g: 'm:' + mm[1], cc: '', at: String(v.at || ''), req: 0, rq: '', src: 'mercari', hti: nm, hhw: hh, rk: rank, cond: String(v.cond || '').slice(0, 12) });
-    });
-    mer = mer.filter(function (x) { return !(done || {})[x.u]; }).sort(function (a, b) { return (a.rk - b.rk) || String(b.at).localeCompare(String(a.at)) || (a.u < b.u ? -1 : 1); }).slice(0, 600);
-  } catch (eM) { mer = []; }
-  pending = pending.slice(0, 900).concat(mer);
-  var out = { at: new Date().toISOString(), v: 2, total: items.length, indexed: items.length - pending.length, mercari: mer.length, items: pending.slice(0, 1500), by: 'gas' };
+    var ords = sbSelectAll_('orders', 'select=cc,buyer,status,order_ts,items&order_ts=gte.1745000000');
+    if (Array.isArray(ords)) {
+      var ob = {}; ords.forEach(function (r) { if (!r || !r.buyer || /CANCEL|UNPAID|INVALID/i.test(String(r.status || ''))) return; (ob[r.cc + '|' + r.buyer] = ob[r.cc + '|' + r.buyer] || []).push(r); });
+      var links = {}, nL = 0;
+      Object.keys(gBuy).forEach(function (g) {
+        var gb = gBuy[g]; if (!gb.buyer) return; var t0 = gb.t0 / 1000, t1 = gb.t1 / 1000;
+        var prods = {};
+        (ob[gb.cc + '|' + gb.buyer] || []).forEach(function (r) {
+          if (!(r.order_ts >= t0 - 14 * 86400 && r.order_ts <= t1 + 14 * 86400)) return;
+          var its = r.items; if (typeof its === 'string') { try { its = JSON.parse(its); } catch (eJ) { its = []; } }
+          (its || []).forEach(function (x) { if (x && x.item_id) prods[String(x.item_id) + '|' + String(x.variation || '')] = { pid: String(x.item_id), pv: String(x.variation || '').slice(0, 120), pcat: String(x.name || '').slice(0, 160) }; });
+        });
+        var ks = Object.keys(prods); if (ks.length !== 1) return;
+        var p = prods[ks[0]]; p.cc = gb.cc; links[g] = p; nL++;
+      });
+      baKvSet_('cond_photo_links', { at: new Date().toISOString(), n: nL, links: links });
+    }
+  } catch (eL) {}
+  var out = { at: new Date().toISOString(), v: 3, total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas' };
   baKvSet_(COND_Q, out);
   return out;
 }
