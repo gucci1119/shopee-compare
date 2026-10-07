@@ -6295,6 +6295,7 @@
     "在庫の自動復活：続けて押しても、消した行が戻ってこないように": "Stock auto-restore: rows no longer come back when pressed in a row",
     "アクセス（各国）に「🧪 施策の効果」": "'🧪 Effect of changes' in Access (by country)",
     "🧪 施策の効果": "🧪 Effect of changes",
+    "🧪 施策ログ（効果）": "🧪 Change log (effects)", "＋ 施策を記録する": "+ Record a change", "記録する": "Record", "まだ記録がありません": "No records yet", "前（30日）": "Before (30d)", "後": "After", "伸び": "Change", "店の訪問者（1日あたり）": "Shop visitors (per day)", "注文（取消を除く・1日あたり）": "Orders (excl. cancelled, per day)", "まだ無し": "None yet", "読めず": "Unreadable", "日付と「何をしたか」を入れてください": "Enter a date and what you did", "⏳ 記録しています…": "⏳ Saving…", "✅ 記録しました": "✅ Saved",
     "台湾の題名を繁体字に": "Taiwan titles in Traditional Chinese",
     "在庫の自動復活：もう在庫がある明細は書かない": "Stock auto-restore: don't overwrite items that already have stock",
     "在庫の自動復活をサクサクに": "Faster stock auto-restore",
@@ -15053,42 +15054,90 @@
      ここで「前 → 今」を並べる。出品の views は直近30日の合計のような数字（日ごとに少しずつ減る）＝施策から30日たつと比べ切れる。
      比べる相手（ctrl）の伸びで割ると、季節・セールの分を差し引いた伸びになる。読むだけ */
   async function renderTrafficExp(kv) {
+    /* ★2026-10-07 本人「こういう感じで施策した時の効果をログでポータルにも残しておきたい」：
+       「🧪 施策の効果」を【施策ログ】に広げた。app_kv exp_<名前> 1件＝施策1つ（cc・at・what・note・pre・items・ctrl）。
+       ・出品ごとの数字（items/ctrl）が無い施策も載せる（例：2店舗目に一括公開）＝店の訪問者と注文だけで見る
+       ・注文（取消を除く・1日あたり）を施策の前30日と後で並べる
+       ・「＋ 施策を記録」で本人の施策もここに足せる（その時点の訪問者・注文を前の数字として控える）
+       ・効果の判定は30日たってから（訪問者や出品の閲覧は遅れて動く＝[[measure-with-lag]]）。読むだけ（Shopee には書かない） */
     const el = document.getElementById('traffic-exp'); if (!el) return;
-    const exps = await sbGetAll('app_kv', 'select=k,v&k=like.exp_*');
-    if (!exps || !exps.length) { el.innerHTML = ''; return; }
+    const exps = (await sbGetAll('app_kv', 'select=k,v&k=like.exp_*')) || [];
+    const rows = exps.filter(r => r && r.v && r.v.cc && r.v.at).sort((a, b) => String(b.v.at).localeCompare(String(a.v.at)));
+    const ccsAll = [...new Set(rows.map(r => r.v.cc))];
+    const minAt = rows.length ? rows.map(r => r.v.at).sort()[0] : jstDate(Date.now());
+    const since = Math.floor(Date.parse(minAt + 'T00:00:00+09:00') / 1000) - 31 * 86400;
+    let ords = [];
+    if (ccsAll.length) { try { ords = (await sbGetAll('orders', 'select=cc,status,order_ts&order_ts=gte.' + since + '&cc=in.(' + ccsAll.join(',') + ')')) || []; } catch (_) { ords = null; } }
+    const sg = v => (v == null ? '—' : (v > 0 ? '+' : '') + v + '%');
+    const pct = (a, b) => (a > 0 && b != null ? Math.round((b / a - 1) * 100) : null);
+    const r1 = v => (v == null ? '—' : String(Math.round(v * 10) / 10));
     const out = [];
-    for (const row of exps) {
-      const x = row.v || {}; if (!x.cc || !x.items) continue;
-      const ids = Object.keys(x.items).concat(Object.keys(x.ctrl || {}));
-      const now = {};
-      for (let i = 0; i < ids.length; i += 150) {
-        const part = ids.slice(i, i + 150);
-        const r = await sbGetAll('listing_stats_history', 'select=item_id,snap_date,views,likes,sale&item_id=in.(' + part.join(',') + ')&snap_date=gte.' + x.at + '&order=snap_date.desc');
-        (r || []).forEach(q => { const k = String(q.item_id); if (!now[k]) now[k] = q; });
+    for (const row of rows) {
+      const x = row.v;
+      const t0 = Math.floor(Date.parse(x.at + 'T00:00:00+09:00') / 1000), nowS = Math.floor(Date.now() / 1000);
+      const days = Math.max(0, Math.floor((nowS - t0) / 86400));
+      /* 店の訪問者（1日あたり）：前＝控えた pre か、無ければ traffic_daily の前30日／今＝施策の翌日から */
+      const m = (kv && kv[x.cc]) || {};
+      const dPre = Object.keys(m).filter(d => d < x.at && d >= jstDate((t0 - 30 * 86400) * 1000)).sort(), dPost = Object.keys(m).filter(d => d > x.at).sort();
+      const avgOf = (ds, f) => ds.length ? ds.reduce((a, d) => a + (Number((m[d] || {})[f]) || 0), 0) / ds.length : null;
+      const uv0 = x.pre && x.pre.uv != null ? Number(x.pre.uv) : avgOf(dPre, 'uv'), uv1 = avgOf(dPost, 'uv');
+      /* 注文（取消を除く・1日あたり） */
+      let o0 = null, o1 = null;
+      if (ords) {
+        const ok = o => o.cc === x.cc && !/CANCEL|INVALID|UNPAID/i.test(String(o.status || ''));
+        const pre = ords.filter(o => ok(o) && o.order_ts >= t0 - 30 * 86400 && o.order_ts < t0).length;
+        const post = ords.filter(o => ok(o) && o.order_ts >= t0).length;
+        o0 = pre / 30; o1 = days > 0 ? post / days : null;
       }
-      const lastSnap = Object.values(now).map(q => q.snap_date).sort().pop() || '';
-      const sum = (o, f, cur) => Object.keys(o || {}).reduce((a, k) => a + (cur ? (now[k] ? Number(now[k][f]) || 0 : 0) : (Number((o[k] || [])[f === 'views' ? 0 : f === 'likes' ? 1 : 2]) || 0)), 0);
-      const iv0 = sum(x.items, 'views'), iv1 = sum(x.items, 'views', 1), cv0 = sum(x.ctrl, 'views'), cv1 = sum(x.ctrl, 'views', 1);
-      const il0 = sum(x.items, 'likes'), il1 = sum(x.items, 'likes', 1), is0 = sum(x.items, 'sale'), is1 = sum(x.items, 'sale', 1);
-      const m = (kv && kv[x.cc]) || {}; const post = Object.keys(m).filter(d => d > x.at).sort();
-      const avg = f => post.length ? post.reduce((a, d) => a + (Number((m[d] || {})[f]) || 0), 0) / post.length : null;
-      const days = Math.floor((Date.now() - Date.parse(x.at + 'T00:00:00+09:00')) / 86400000);
-      const pct = (a, b) => (a > 0 ? Math.round((b / a - 1) * 100) : null);
-      const pi = pct(iv0, iv1), pc = pct(cv0, cv1);
-      const lift = (iv0 > 0 && cv0 > 0 && cv1 > 0) ? Math.round(((iv1 / iv0) / (cv1 / cv0) - 1) * 100) : null;
-      const sg = v => (v == null ? '—' : (v > 0 ? '+' : '') + v + '%');
+      /* 出品ごとの閲覧（items・ctrl がある施策だけ） */
+      let itemRows = '';
+      if (x.items && Object.keys(x.items).length) {
+        const ids = Object.keys(x.items).concat(Object.keys(x.ctrl || {})); const now = {};
+        for (let i = 0; i < ids.length; i += 150) {
+          const r = await sbGetAll('listing_stats_history', 'select=item_id,snap_date,views,likes,sale&item_id=in.(' + ids.slice(i, i + 150).join(',') + ')&snap_date=gte.' + x.at + '&order=snap_date.desc');
+          (r || []).forEach(q => { const k = String(q.item_id); if (!now[k]) now[k] = q; });
+        }
+        const sum = (o, f, cur) => Object.keys(o || {}).reduce((a, k) => a + (cur ? (now[k] ? Number(now[k][f]) || 0 : 0) : (Number((o[k] || [])[f === 'views' ? 0 : f === 'likes' ? 1 : 2]) || 0)), 0);
+        const iv0 = sum(x.items, 'views'), iv1 = sum(x.items, 'views', 1), cv0 = sum(x.ctrl, 'views'), cv1 = sum(x.ctrl, 'views', 1);
+        const lift = (iv0 > 0 && cv0 > 0 && cv1 > 0) ? Math.round(((iv1 / iv0) / (cv1 / cv0) - 1) * 100) : null;
+        itemRows = `<tr><td style="padding:2px 8px">変えた出品 ${Object.keys(x.items).length}件の閲覧（直近30日）</td><td style="text-align:right;padding:2px 8px">${iv0.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${iv1.toLocaleString()}</td><td style="text-align:right;padding:2px 8px;font-weight:700">${sg(pct(iv0, iv1))}</td></tr>` +
+          (x.ctrl && Object.keys(x.ctrl).length ? `<tr><td style="padding:2px 8px">比べる相手（触っていない ${Object.keys(x.ctrl).length}件）の閲覧</td><td style="text-align:right;padding:2px 8px">${cv0.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${cv1.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${sg(pct(cv0, cv1))}</td></tr>
+          <tr><td style="padding:2px 8px"><b>相手との差（季節・セールを差し引いた伸び）</b></td><td></td><td></td><td style="text-align:right;padding:2px 8px;font-weight:800;color:${lift == null ? '#888' : lift > 0 ? '#1a7f37' : '#c2185b'}">${sg(lift)}</td></tr>` : '');
+      }
+      const judge = days >= 30 ? '<span style="color:#1a7f37;font-weight:700">30日たちました＝判定できます</span>' : '<span class="smd-dim">判定は ' + jstDate((t0 + 30 * 86400) * 1000) + ' 以降（あと' + (30 - days) + '日）</span>';
       out.push(`<div style="margin-top:8px;padding:8px 10px;border:1px solid #e3e6ea;border-radius:8px;background:#fff">
-        <b>${esc(x.cc)}：${esc(x.what || row.k)}</b> <span class="smd-dim" style="font-size:11px">${esc(x.at)} から ${days}日（出品の閲覧は30日たつと比べ切れます${lastSnap ? '・最新の記録 ' + esc(lastSnap) : ''}）</span>
+        <div><b>${esc(x.at)}　${esc(x.cc)}：${esc(x.what || row.k)}</b>　<span class="smd-dim" style="font-size:11px">${days}日たった</span>　${judge}</div>
+        ${x.note ? `<div class="smd-dim" style="font-size:11px;margin-top:2px;line-height:1.5">${esc(x.note)}</div>` : ''}
         <table style="border-collapse:collapse;font-size:12px;margin-top:6px">
-          <tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 8px"></th><th style="padding:2px 8px">前</th><th style="padding:2px 8px">今</th><th style="padding:2px 8px">伸び</th></tr>
-          <tr><td style="padding:2px 8px">変えた出品 ${Object.keys(x.items).length}件の閲覧</td><td style="text-align:right;padding:2px 8px">${iv0.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${iv1.toLocaleString()}</td><td style="text-align:right;padding:2px 8px;font-weight:700">${sg(pi)}</td></tr>
-          <tr><td style="padding:2px 8px">比べる相手（触っていない ${Object.keys(x.ctrl || {}).length}件）の閲覧</td><td style="text-align:right;padding:2px 8px">${cv0.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${cv1.toLocaleString()}</td><td style="text-align:right;padding:2px 8px">${sg(pc)}</td></tr>
-          <tr><td style="padding:2px 8px"><b>相手との差（季節・セールを差し引いた伸び）</b></td><td></td><td></td><td style="text-align:right;padding:2px 8px;font-weight:800;color:${lift == null ? '#888' : lift > 0 ? '#1a7f37' : '#c2185b'}">${sg(lift)}</td></tr>
-          <tr><td style="padding:2px 8px">変えた出品のいいね／売れた数</td><td style="text-align:right;padding:2px 8px">${il0} ／ ${is0}</td><td style="text-align:right;padding:2px 8px">${il1} ／ ${is1}</td><td></td></tr>
-          <tr><td style="padding:2px 8px">店の訪問者／閲覧（1日あたり）</td><td style="text-align:right;padding:2px 8px">${x.pre ? x.pre.uv + ' ／ ' + x.pre.pv : '—'}</td><td style="text-align:right;padding:2px 8px">${post.length ? (Math.round(avg('uv') * 10) / 10) + ' ／ ' + (Math.round(avg('pv') * 10) / 10) : 'まだ記録なし'}</td><td style="text-align:right;padding:2px 8px">${post.length && x.pre ? sg(pct(x.pre.uv, avg('uv'))) : '—'}${post.length ? `<div class="smd-dim" style="font-size:10px">後の${post.length}日</div>` : ''}</td></tr>
+          <tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 8px"></th><th style="padding:2px 8px">前（30日）</th><th style="padding:2px 8px">後</th><th style="padding:2px 8px">伸び</th></tr>
+          <tr><td style="padding:2px 8px">店の訪問者（1日あたり）</td><td style="text-align:right;padding:2px 8px">${r1(uv0)}</td><td style="text-align:right;padding:2px 8px">${dPost.length ? r1(uv1) + ' <span class="smd-dim" style="font-size:10px">(' + dPost.length + '日分)</span>' : '<span class="smd-dim">まだ無し</span>'}</td><td style="text-align:right;padding:2px 8px;font-weight:700">${sg(pct(uv0, uv1))}</td></tr>
+          <tr><td style="padding:2px 8px">注文（取消を除く・1日あたり）</td><td style="text-align:right;padding:2px 8px">${ords ? r1(o0) : '読めず'}</td><td style="text-align:right;padding:2px 8px">${ords && o1 != null ? r1(o1) : '—'}</td><td style="text-align:right;padding:2px 8px;font-weight:700">${ords ? sg(pct(o0, o1)) : '—'}</td></tr>
+          ${itemRows}
         </table></div>`);
     }
-    el.innerHTML = out.length ? `<div class="tool-card" style="max-width:none;margin:0 0 10px"><b>🧪 施策の効果</b> <span class="smd-dim" style="font-size:11px">施策の前の数字と今を比べます（読むだけ）</span>${out.join('')}</div>` : '';
+    const ccOpts = ['TW', 'TH', 'MY', 'SG', 'PH', 'VN', 'BR'].map(c => `<option>${c}</option>`).join('');
+    el.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 10px"><div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap"><b>🧪 施策ログ（効果）</b><span class="smd-dim" style="font-size:11px">やった施策と、その前後の訪問者・注文・出品の閲覧を並べます（新しい順・読むだけ）。効果は30日たってから判定します</span></div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:#2b6cb0">＋ 施策を記録する</summary>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px">
+          <select id="exp-cc">${ccOpts}</select>
+          <input id="exp-at" type="date" value="${jstDate(Date.now())}" style="font-size:12px">
+          <input id="exp-what" placeholder="何をしたか（例：題名を繁体字に）" style="flex:1;min-width:220px;font-size:12px;padding:3px 6px">
+          <input id="exp-note" placeholder="メモ（任意）" style="flex:1;min-width:180px;font-size:12px;padding:3px 6px">
+          <button class="smd-btn b-write" id="exp-add" style="font-size:12px">記録する</button><span class="smd-dim" id="exp-msg" style="font-size:11px"></span>
+        </div></details>
+      ${out.length ? out.join('') : '<div class="smd-dim" style="font-size:12px;margin-top:6px">まだ記録がありません</div>'}</div>`;
+    const btn = el.querySelector('#exp-add');
+    if (btn) btn.addEventListener('click', async () => {
+      const cc = el.querySelector('#exp-cc').value, at = el.querySelector('#exp-at').value, what = el.querySelector('#exp-what').value.trim(), note = el.querySelector('#exp-note').value.trim();
+      const msg = el.querySelector('#exp-msg');
+      if (!what || !/^\d{4}-\d{2}-\d{2}$/.test(at)) { msg.textContent = '日付と「何をしたか」を入れてください'; return; }
+      btn.disabled = true; msg.textContent = '⏳ 記録しています…';
+      try {
+        const k = 'exp_' + cc.toLowerCase() + '_' + at.replace(/-/g, '') + '_' + Date.now().toString(36);
+        await sbUpsert('app_kv', [{ k, v: { cc, at, what, note, by: 'portal', made: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+        msg.textContent = '✅ 記録しました'; renderTrafficExp(kv).catch(() => {});
+      } catch (e) { btn.disabled = false; msg.textContent = '記録できませんでした: ' + String((e && e.message) || e).slice(0, 120); }
+    });
   }
   async function renderPlan(force) {
     const body = document.getElementById('plan-body');
@@ -20831,6 +20880,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-07', items: [
+      '🧪 <b>アクセス（各国）の「施策の効果」を「施策ログ」にしました</b>（本人「施策した時の効果をログでポータルにも残しておきたい」）。施策ごとに、前30日と後の【店の訪問者・注文（1日あたり）】を並べ、出品の閲覧が分かる施策は「変えた出品／触っていない出品」の差も出します。30日たつと「判定できます」と出ます。「＋ 施策を記録する」で、自分でやった施策も足せます。',
       '🖼 <b>🧹カタログの質に「表紙が仮のカタログ（差し替え待ち）」を足しました</b>（本人「カタログのTop画像は仮に作らせていい。後できちんとしたのを作ってこちらで差し替える」「差し替えると分かるようにどっかでしておいて」）。型になる同じ機種のカタログがどの国にも無い機種（Switch2・メガドライブ など）は、🤖が同じ国の別カタログから説明文・重さだけ借りて、文字だけの仮の表紙で最初の1つを作るようにしました（写真は別機種から写しません）。SC で表紙を差し替えたら「✅ 差し替えた」で印を消します。',
       '🗑 <b>🤖が作った回に1件も入らなかった新カタログは、その場で消すようにしました</b>（本人「testだけのは消していいんじゃないの？」「はい」）。消す前に Shopee の今の明細が test だけか読んで確かめます。あわせて test だけで残っていた VN の15件を消しました。',
       '🗂 <b>🤖が2店舗目に作ったカタログ66件のカテゴリを機種のゲームカテゴリに直しました</b>（本人「なんかカテゴリーおかしくない？」）。2店舗目へ作る時にカテゴリを渡していなかったのが原因で、以後は元のカタログのカテゴリを引き継ぎます。',
