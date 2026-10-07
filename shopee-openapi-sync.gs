@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261007-1400a';
+var SRC_VER = '20261007-2230a';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7779,7 +7779,7 @@ function condIndexTick(manual) {
     var qAge = q.at ? (Date.now() - Date.parse(q.at)) : Infinity;
     var noGroup = Array.isArray(q.items) && q.items.length && !q.items[0].g;
     if (noGroup) { var keysOld = Object.keys(idx.items); if (keysOld.length <= 60 && keysOld.every(function (k) { return !idx.items[k].g; })) idx.items = {}; }   /* v196：セット番号を入れる前に見た最初の数十枚は、指示文も古いので見直す */
-    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup) { var built = condQueueBuild_(idx.items); if (built) q = built; }
+    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 2) { var built = condQueueBuild_(idx.items); if (built) q = built; }
     var items = Array.isArray(q.items) ? q.items : [];
     if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
@@ -7801,10 +7801,11 @@ function condIndexTick(manual) {
       if (code === 400 && /credit|billing|balance/i.test(String((j.error && j.error.message) || ''))) break;
       var o = null; if (code < 400) { var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/); try { o = m ? JSON.parse(m[0]) : null; } catch (e4) { o = null; } }
       /* 判定できなかった（HTTPエラー・JSONが壊れている）画像は印を付けずに次回もう一度。3回だめなら諦める（Codex指摘） */
-      if (!o || !o.type) { idx.fail[x.u] = (idx.fail[x.u] || 0) + 1; continue; }
+      if (!o || !o.type) { idx.fail[x.u] = (idx.fail[x.u] || 0) + ((code === 400 && /image|url|download|fetch/i.test(String((j.error && j.error.message) || ''))) ? 3 : 1); continue; }   /* ★2026-10-07 画像が無い（メルカリの写真が2枚だけ等）は1回で諦める */
       var ty = String(o.type);
       var pi = !(o.personal_info === false) || ty === 'shipping_label';   /* 個人情報は「無い」と明示された時だけ無い扱い（Codex指摘） */
       var rec = { ty: ty, pi: pi ? 1 : 0, it: String(o.item || '').slice(0, 40), kd: (/^(software|console|controller|accessory|toy|card|book|other)$/.test(String(o.kind || '')) ? String(o.kind) : ''), md: String(o.model || '').slice(0, 40), cl: String(o.color || '').toLowerCase().slice(0, 30), ti: String(o.title_seen || '').slice(0, 90), pf: String(o.platform_seen || '').slice(0, 40), hw: (baHwsOf_(String(o.platform_seen || ''))[0] || ''), parts: Array.isArray(o.parts) ? o.parts.slice(0, 12).map(function (p) { return String(p).slice(0, 20); }) : [], vw: String(o.view || '').slice(0, 16), g: String(x.g || ''), cc: String(x.cc || ''), at: String(x.at || ''), req: x.req ? 1 : 0, rq: String(x.rq || '').slice(0, 140), ok: (ty === 'product_photo' && !pi) ? 1 : 0 };
+      if (x.src === 'mercari') { rec.src = 'mercari'; if (x.hti) rec.hti = String(x.hti).slice(0, 90); if (x.hhw) rec.hhw = String(x.hhw); if (x.cond) rec.cond = String(x.cond); }   /* ★2026-10-07 メルカリの中古の一例＝題名・機種は🤖の出品名を正にする */
       idx.items[x.u] = rec; n++; if (rec.ok) usable++;
     }
     /* ★v196 セットの題名・機種を決める：裏面や中身の写真は1枚では機種を読み違える（実測：PS3 の裏面を Vita、ディスクを PS4 と答えた）。
@@ -7816,7 +7817,13 @@ function condIndexTick(manual) {
         var pickOf = function (field) { var fr = rs.filter(function (r) { return r.vw === 'front' && r[field]; }); var src = fr.length ? fr : rs.filter(function (r) { return r[field]; }); var cnt = {}; src.forEach(function (r) { cnt[r[field]] = (cnt[r[field]] || 0) + 1; }); var best = ''; Object.keys(cnt).forEach(function (k) { if (!best || cnt[k] > cnt[best]) best = k; }); return best; };
         var gti = pickOf('ti'), ghw = pickOf('hw'), gpf = pickOf('pf'), gkd = pickOf('kd'), gmd = pickOf('md'), gcl = pickOf('cl');   /* v197：種類・型番・色（本体やコントローラーは題名が無いので、これで引く） */
         var allParts = {}; rs.forEach(function (r) { (r.parts || []).forEach(function (p2) { allParts[p2] = 1; }); });
-        groups[g].forEach(function (r) { r.gti = gti; r.ghw = ghw; r.gpf = gpf; r.gparts = Object.keys(allParts); r.gn = rs.length; r.gkd = gkd; r.gmd = gmd; r.gcl = gcl; });
+        var hint = groups[g].filter(function (r) { return r.hti || r.hhw; })[0]; if (hint) { if (hint.hti) gti = hint.hti; if (hint.hhw) ghw = hint.hhw; }
+        /* ★2026-10-07 「汎用」＝売っている形と同じ写真（本人「説明書付いてたりとか、異常に綺麗な状態だったりもあるので」「汎用的に使えるものが良い」）：
+           説明書・チラシ・帯・はがきが写っていない。紙箱の機種（FC・SFC・N64・GB・GBA・WS）は箱も写っていない（カセット単体で売る）。プラケースの機種はケースが写っている */
+        var pk = Object.keys(allParts), CART_ONLY_G = { fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1, md: 1 };
+        var extra = pk.some(function (p3) { return /^(manual|flyer|obi|registration_card)$/.test(p3); });
+        var gen = !extra && (CART_ONLY_G[ghw] ? !(allParts.box || allParts.case) : (!BA_CASE_REQUIRED_HW[ghw] || !!allParts.case || !!allParts.box)) ? 1 : 0;
+        groups[g].forEach(function (r) { r.gti = gti; r.ghw = ghw; r.gpf = gpf; r.gparts = pk; r.gn = rs.length; r.gkd = gkd; r.gmd = gmd; r.gcl = gcl; r.gen = gen; });
       });
     } catch (eG) {}
     idx.updatedAt = new Date().toISOString();
@@ -7855,7 +7862,26 @@ function condQueueBuild_(done) {
   var gInfo = {}; items.forEach(function (x) { var gi = gInfo[x.g] = gInfo[x.g] || { req: 0, at: 0 }; if (x.req) gi.req = 1; gi.at = Math.max(gi.at, Date.parse(x.at) || 0); });
   items.sort(function (a, b) { var A = gInfo[a.g], B = gInfo[b.g]; return (B.req - A.req) || (B.at - A.at) || (a.g < b.g ? -1 : a.g > b.g ? 1 : 0) || (Date.parse(a.at) - Date.parse(b.at)); });
   var pending = items.filter(function (x) { return !(done || {})[x.u]; });
-  var out = { at: new Date().toISOString(), total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas' };
+  /* ★2026-10-07 本人「送れる写真を自動収集してストックしておきたい」（9/19 にも「毎回メルカリから採取するのは面倒」）。
+     🤖が出品用に選んだメルカリの中古の出品（boshu_auto_pre の src＝/item/mXXX）の写真 _1〜_3 を、状態写真の候補にも足す。
+     同じ作品・同じ機種の【中古の一例】として送る（本人10/7「それでいい」）。題名と機種はAIの読みより🤖の出品名を優先（hti/hhw）。
+     メルカリの画像は公開の CDN（static.mercdn.net）＝メルカリのページは叩かない。チャットの写真を先に・メルカリは需要の多い機種から600枚ずつ */
+  var mer = [];
+  try {
+    var pre = baKv_('boshu_auto_pre') || {};
+    var HW_ORDER = ['switch', 'switch2', 'ps1', 'ps2', 'ps3', 'ps4', 'psp', 'vita', 'ds', '3ds', 'gc', 'wii', 'wiiu', 'gba', 'gb', 'sfc', 'fc', 'n64', 'md', 'ss', 'ws', 'ps5'];
+    var seenM = {};
+    Object.keys(pre).forEach(function (k) {
+      var v = pre[k]; if (!v || !v.img || v.miss) return;
+      var mm = String(v.src || '').match(/jp\.mercari\.com\/item\/(m\d+)/); if (!mm || seenM[mm[1]]) return; seenM[mm[1]] = 1;
+      var nm = String(v.name || '').slice(0, 90), hh = String(v.hw || k.split('@')[1] || baHwsOf_(nm)[0] || '');
+      var rank = HW_ORDER.indexOf(hh); if (rank < 0) rank = 50;
+      for (var n2 = 1; n2 <= 3; n2++) mer.push({ u: 'https://static.mercdn.net/item/detail/orig/photos/' + mm[1] + '_' + n2 + '.jpg', g: 'm:' + mm[1], cc: '', at: String(v.at || ''), req: 0, rq: '', src: 'mercari', hti: nm, hhw: hh, rk: rank, cond: String(v.cond || '').slice(0, 12) });
+    });
+    mer = mer.filter(function (x) { return !(done || {})[x.u]; }).sort(function (a, b) { return (a.rk - b.rk) || String(b.at).localeCompare(String(a.at)) || (a.u < b.u ? -1 : 1); }).slice(0, 600);
+  } catch (eM) { mer = []; }
+  pending = pending.slice(0, 900).concat(mer);
+  var out = { at: new Date().toISOString(), v: 2, total: items.length, indexed: items.length - pending.length, mercari: mer.length, items: pending.slice(0, 1500), by: 'gas' };
   baKvSet_(COND_Q, out);
   return out;
 }
