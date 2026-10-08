@@ -15733,6 +15733,8 @@
       if (miss.length) return '版が違う可能性（「' + miss[0] + '」が無い）'; }
     /* ★2026-10-09 グッズ（巾着・バッグ・タオル…）は作品名を含むので名前の照合を通ってしまう（スカイウォードソードHDに「丸底巾着袋」¥800、マリオストライカーズに「マルチバッグ 巾着」¥680） */
     if (/巾着|マルチバッグ|トートバッグ|エコバッグ|グッズ|タオル|キーホルダー|缶バッジ|アクリルスタンド|アクスタ|クリアファイル|ぬいぐるみ|マグカップ|Tシャツ|ステッカー|マイニンテンドーストア限定(?!版)|一番くじ|ガチャ|フィギュア(?!.{0,4}(付|同梱|セット))/.test(nm)) return 'グッズ（ソフトではない）';
+    /* ★2026-10-09 本人「これは多分全部外れてると思う」：モンスターボールPlus の提案4件が全部 用品（ポーチ・アイロンワッペン・シリコンカバー・自動化アイテム） */
+    if (/ポーチ|ワッペン|アイロン|シリコン\s*カバー|保護\s*(フィルム|カバー|ケース)|(用|専用)\s*(ケース|カバー|フィルム|スタンド|ホルダー|充電|ストラップ)|自動化|改造|互換\s*(ケース|カバー)/.test(nm)) return '用品・アクセサリー（本体ではない）';
     /* ★2026-10-04 ジョイコンの左右（L の注文に「右R」・R の注文に「左」が出ていた） */
     if (kt && kt.side) { const isR = /右|\(R\)|（R）|\bR\b/.test(nm), isL = /左|\(L\)|（L）|\bL\b/.test(nm);
       if (kt.side === 'L' && isR && !isL) return '左右が違う(右)'; if (kt.side === 'R' && isL && !isR) return '左右が違う(左)'; }
@@ -16400,7 +16402,10 @@
     if (hit.length) {
       const ps = hit.map(r => r.p).sort((a, b) => a - b);
       const last = hit.slice().sort((a, b) => (b.d || '').localeCompare(a.d || ''))[0];
-      out = { n: hit.length, med: ps[Math.floor(ps.length / 2)], min: ps[0], max: ps[ps.length - 1], last };
+      /* ★2026-10-09 本人「仕入れ実績はレンジで表示した方がいい」「何円かってところ」：4件以上は真ん中の半分（外れ値を除く）、3件以下は最安〜最高 */
+      const q = f => ps[Math.min(ps.length - 1, Math.max(0, Math.round((ps.length - 1) * f)))];
+      const lo = ps.length >= 4 ? q(0.25) : ps[0], hi = ps.length >= 4 ? q(0.75) : ps[ps.length - 1];
+      out = { n: hit.length, med: ps[Math.floor(ps.length / 2)], min: ps[0], max: ps[ps.length - 1], lo, hi, last };
     }
     _srcPastMemo.set(mk, out); return out;
   }
@@ -16885,7 +16890,10 @@
       const kt = srcKwToks(kwRaw);
       const clean0 = deals.filter(d => !srcSuspect(d, kt));
       const cheapCut = srcCheapCut(clean0);
-      const clean = clean0.filter(d => !srcIsCheapOutlier(d, cheapCut));   /* ★2026-10-09 相場より極端に安い候補は提案に出さない */
+      const past = srcPastFor(kt);
+      /* ★2026-10-09 過去に3件以上仕入れた作品で、その中央値の半額未満は別物の疑い（用品・付属品だけ等）として提案から外す（比較一覧には残る） */
+      const pastCut = (past && past.n >= 3) ? Math.round(past.med * 0.5) : 0;
+      const clean = clean0.filter(d => !srcIsCheapOutlier(d, cheapCut) && !(pastCut && (d.eff != null ? d.eff : d.price) < pastCut));   /* ★2026-10-09 相場より極端に安い候補は提案に出さない */
       // メルカリ枠は【らくらく便を優先】。ゆうゆうより到着が1日早く、発送期限に効く。
       //   ただし極端に高くなるなら意味がないので、最安の1.15倍までを「同等」とみなす。
       const pickBy = k => {
@@ -16904,17 +16912,20 @@
         : ceil.ceil <= 0
           ? `<div style="margin-bottom:3px;color:#d93025;font-size:10.5px">🔴 <b>この売値では赤字</b>（入金見込¥${ceil.payout.toLocaleString()}）</div>`
           : `<div style="margin-bottom:3px">🎯 <b>上限 ¥${ceil.ceil.toLocaleString()}</b><span class="smd-dim" style="font-size:10px">（入金見込¥${ceil.payout.toLocaleString()}−目標¥${ceil.target.toLocaleString()}）</span></div>`;
-      const past = srcPastFor(kt), ocond = srcOrderCond((disp[i] && disp[i].it && disp[i].it.name) || '');
+      const ocond = srcOrderCond((disp[i] && disp[i].it && disp[i].it.name) || '');
       const head2 = `<div style="font-size:10.5px;margin-bottom:3px;display:flex;gap:10px;flex-wrap:wrap">`
         + `<span title="${ocond.sure ? 'Shopeeの商品名から読んだ状態' : '商品名に状態の印が無いので中古とみなしています'}">📀 注文の状態：<b style="color:${ocond.c === '新品' ? '#1565c0' : '#444'}">${ocond.c}</b>${ocond.sure ? '' : '（推定）'}</span>`
-        + (past ? `<span title="在庫台帳で検索語の語が全部入っている仕入れ（同じ機種・まとめ買い除く）。範囲 ¥${past.min.toLocaleString()}〜¥${past.max.toLocaleString()}／直近：${esc(past.last.raw).slice(0, 60)}">📦 過去の仕入 <b>${past.n}件</b>・中央 <b>¥${past.med.toLocaleString()}</b>（直近 ¥${past.last.p.toLocaleString()}${past.last.d ? '・' + past.last.d.slice(2).replace(/-/g, '/') : ''}）</span>` : '<span class="smd-dim" title="在庫台帳に同じ作品の仕入れが見つかりません">📦 過去の仕入：なし（初めて）</span>')
+        + (past ? `<span title="在庫台帳で検索語の語が全部入っている仕入れ（同じ機種・まとめ買い除く）。範囲 ¥${past.min.toLocaleString()}〜¥${past.max.toLocaleString()}／直近：${esc(past.last.raw).slice(0, 60)}">📦 過去の仕入 <b>¥${past.lo.toLocaleString()}${past.hi !== past.lo ? '〜¥' + past.hi.toLocaleString() : ''}</b>（${past.n}件${past.n >= 4 ? '・真ん中の半分' : ''}／直近 ¥${past.last.p.toLocaleString()}${past.last.d ? '・' + past.last.d.slice(2).replace(/-/g, '/') : ''}）</span>` : '<span class="smd-dim" title="在庫台帳に同じ作品の仕入れが見つかりません">📦 過去の仕入：なし（初めて）</span>')
         + `</div>`;
       if (!top.length) { box.innerHTML = `<div class="smd-dim" style="font-size:10.5px">この検索語に合う出品がありません（取得した ${deals.length}件は<b>まとめ売り・別商品</b>でした）。<b>🔍比較一覧</b>で全部見るか、キーワードを直してください。</div>` + statLine(r); return; }
       const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null; const miss = [];
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${hrefOk(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:12px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
           ${k === 0 ? '🥇' : (j ? j.icon : '')}${d.img ? `<img src="${esc(d.img)}" referrerpolicy="no-referrer" loading="lazy" style="width:26px;height:26px;object-fit:cover;border-radius:4px;background:#f2f2f2" onerror="this.style.display='none'">` : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:4px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${(() => { const cc = srcCandCond(d); const mis = cc.c && cc.c !== ocond.c;
             return cc.c ? `<span style="font-size:9.5px;font-weight:${mis ? 700 : 400};color:${mis ? (ocond.c === '新品' ? '#d93025' : '#b26a00') : '#8a8f98'}" title="${mis ? (ocond.c === '新品' ? '注文は新品なのに、この候補は中古です' : '注文は中古なのに、この候補は新品です（割高・出品の状態と違う）') : '出品の状態（注文と同じ）'}">${mis ? '⚠' : ''}${esc(cc.lab)}${mis ? '（注文は' + ocond.c + '）' : ''}</span>` : `<span class="smd-dim" style="font-size:9.5px" title="このサイトの一覧からは状態が読めません。開いて確かめてください">状態?</span>`; })()}${past ? (() => { const v = d.eff != null ? d.eff : d.price; const pct = Math.round((v - past.med) / past.med * 100);
-            return `<span style="font-size:9.5px;font-weight:700;color:${pct > 30 ? '#d93025' : (pct < -50 ? '#b26a00' : '#5a6b8c')}" title="過去の仕入の中央 ¥${past.med.toLocaleString()}（${past.n}件）と比べて${pct < -50 ? '。半額以下は別物・欠品の疑いもあります' : ''}">実績比${pct >= 0 ? '+' : ''}${pct}%</span>`; })() : ''}${ceil && ceil.ceil > 0 ? (() => { const v = d.eff != null ? d.eff : d.price; const over = v - ceil.ceil;
+            const tip = `過去の仕入 ¥${past.lo.toLocaleString()}〜¥${past.hi.toLocaleString()}（${past.n}件・中央 ¥${past.med.toLocaleString()}）と比べて`;
+            if (v > past.hi) return `<span style="font-size:9.5px;font-weight:700;color:${pct > 30 ? '#d93025' : '#b26a00'}" title="${tip}">実績より+¥${(v - past.hi).toLocaleString()}</span>`;
+            if (v < past.lo) return `<span style="font-size:9.5px;font-weight:700;color:${pct < -50 ? '#b26a00' : '#1a7f37'}" title="${tip}${pct < -50 ? '。半額以下は別物・欠品の疑いもあります' : ''}">実績より−¥${(past.lo - v).toLocaleString()}</span>`;
+            return `<span style="font-size:9.5px;color:#5a6b8c" title="${tip}">実績の範囲内</span>`; })() : ''}${ceil && ceil.ceil > 0 ? (() => { const v = d.eff != null ? d.eff : d.price; const over = v - ceil.ceil;
             return over <= 0 ? `<span style="font-size:9.5px;color:#1a7f37" title="上限 ¥${ceil.ceil.toLocaleString()} 以内">上限内</span>` : `<span style="font-size:9.5px;color:#d93025;font-weight:700" title="上限 ¥${ceil.ceil.toLocaleString()} を超えています">上限+¥${over.toLocaleString()}</span>`; })() : ''}${j ? `<b style="color:${j.c};font-size:10px" title="この値段で仕入れた場合の見込み粗利（入金見込み − 仕入額）">粗利${j.profit >= 0 ? '+' : '−'}¥${Math.abs(j.profit).toLocaleString()}</b>` : ''}${miss.length ? `<span style="color:#b26a00;font-size:10px" title="検索語の「${esc(miss.join('・'))}」が商品名にありません。別商品の可能性があります">⚠別商品かも</span>` : ''}${dealFlags(d.name).map(f => `<span style="color:${f.c};font-size:10px" title="${esc(f.d)}">${f.t}</span>`).join('')}<span style="color:#1a7f37;font-weight:700">開く→</span></a>`; }).join('');
       box.innerHTML = head + head2 + chips + statLine(r) + (r.cached ? '<span class="smd-dim" style="font-size:9.5px">（保存済みの結果）</span>' : '');
       // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
@@ -21072,8 +21083,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📅 <b>アクセスのグラフ：まとめを「月」「週」にした時、期間を自動で広げます</b>（本人「月だと取れてなかったりするんだけど、なんで？」）。データは毎日貯まっていましたが、期間が7日のまま「月」にすると点が1つしか出ませんでした。「月」なら半年、「週」なら3か月に広げ、読み込む範囲も広げ直します。',
       '📈 <b>アクセスのグラフ：数の少ない国の動きが見えるようにしました</b>（本人「母数が多い国のグラフの目盛りに引っ張られる」「台湾とかはアクセスが少ないから変化を見にくい」「台湾だけの表示にした時に目盛りを減らすとか見やすいように」）。①「前の期間を重ねる」の<b>合計の線は右の別の目盛り</b>に（国ごとの線が左の目盛りをいっぱいに使える）②<b>国（店）を1つだけ選んだ時は合計を描かず、その国の前の期間を点線で</b>出し、縦軸もその国に合わせる③新しく<b>「国ごとに分けて並べる」</b>＝国ごとの小さなグラフを並べ、それぞれ自分の縦軸④目盛りは6本まで。',
       '💤 <b>仕入れ検索（メルカリ）：1年以上取引していない出品者を外しました</b>（本人「最近ログインして使っていない人が多分いる。そういう人は発送してこない」「1年以上取引がない人」）。出品者の評価の一番新しい日付（＝メルカリ全体で最後に取引した日）を見て、1年以上前なら提案から外し下段へ。読めなかった時は外しません。',
+      '🎯 <b>仕入れ検索：用品・付属品を提案から外しました</b>（本人「これは多分全部外れてると思う」）。モンスターボールPlusの提案4件が全部、ポーチ・アイロンワッペン・シリコンカバー・自動化アイテムでした。①名前に用品の語（ポーチ・ワッペン・〜用ケース/カバー・自動化 等）があれば下段へ ②<b>過去に3件以上仕入れた作品で、仕入れ値の中央の半額未満</b>は別物の疑いとして下段へ（比較一覧には残ります）。',
       '🐢 <b>仕入れ検索が「候補を検索中…」のまま進まなくなったのを直しました</b>（本人「めっちゃ遅くなった、ずっとぐるぐるしてる」）。直前の変更で、12行がそれぞれ最大8件のメルカリ詳細（＋取引日）を同時に問い合わせ、中継の6枠を埋めて検索が順番待ちになっていました。詳細は<b>全体で1件ずつ</b>の列に並べ、1行あたり最大5件に。読めた詳細は6時間この端末に控え、開き直しても問い合わせません。',
-      '🧾 <b>仕入れ検索：判断に要る情報を候補ごとに出しました</b>（本人「なんで発送元地域と到着予定がらくらくのやつは出なくなった？」「最終更新日っていうより、セラーの取引がしばらくないか」「判断を早くしたい」「各オーダー、仕入れ候補4つは出してほしい」「これまでの仕入れ実績と比べてどれくらい乖離があるか、ターゲット内に収まっているか」「コンディションがずれてないか」）。①<b>発送元・日数が出なかった真因</b>＝安い順の先頭がメルカリShopsだと詳細取りがそこで打ち切られていた→Shopsは別の窓口で読み、読めない1件で止めない・画面に出ている候補を先に読む ②<b>🤝◯日前取引</b>（出品者が最後に取引した日・30日以内は緑／半年超は赤）・Shopsは🏪 ③候補を<b>3→4つ</b> ④<b>📦過去の仕入</b>（在庫台帳で同じ作品・同じ機種の件数・中央値・直近）と候補ごとの<b>実績比±%</b> ⑤候補ごとに<b>上限内／上限+¥</b> ⑥<b>注文の状態（中古/新品）</b>と候補の状態を並べ、ずれていたら⚠。',
+      '🧾 <b>仕入れ検索：判断に要る情報を候補ごとに出しました</b>（本人「なんで発送元地域と到着予定がらくらくのやつは出なくなった？」「最終更新日っていうより、セラーの取引がしばらくないか」「判断を早くしたい」「各オーダー、仕入れ候補4つは出してほしい」「これまでの仕入れ実績と比べてどれくらい乖離があるか、ターゲット内に収まっているか」「コンディションがずれてないか」）。①<b>発送元・日数が出なかった真因</b>＝安い順の先頭がメルカリShopsだと詳細取りがそこで打ち切られていた→Shopsは別の窓口で読み、読めない1件で止めない・画面に出ている候補を先に読む ②<b>🤝◯日前取引</b>（出品者が最後に取引した日・30日以内は緑／半年超は赤）・Shopsは🏪 ③候補を<b>3→4つ</b> ④<b>📦過去の仕入</b>（在庫台帳で同じ作品・同じ機種の件数・中央値・直近）と候補ごとに<b>実績の範囲内／実績より±¥</b>（過去の仕入は¥◯〜¥◯の幅で表示） ⑤候補ごとに<b>上限内／上限+¥</b> ⑥<b>注文の状態（中古/新品）</b>と候補の状態を並べ、ずれていたら⚠。',
       '🚚 <b>仕入れ検索（メルカリ）：届くのが遅い出品を提案から外しました</b>（本人「極力、1~2日で発送のやつを」「発送元地域も離島とか沖縄、北海道、九州は省いて」「未定も」「極力らくらくメルカリ便で」）。安い順に最大6件まで詳細を見て、<b>発送まで3日以上／発送元が北海道・沖縄・九州・離島・未定／配送方法が未定・定形外</b>は下段へ。らくらくメルカリ便は最安の1.3倍まで優先（前は1.15倍）。※8/10の記録「九州・沖縄・北海道からは+1日」「らくらく0.9日・ゆうゆう1.1日」を候補選びに使っていなかったのを直したものです。',
       '🔎 <b>仕入れ検索：外れの型を3つ追加で外しました</b>（本人「今のところ、この仕入れ検索は使えるクオリティじゃない」）。画面の提案12個を実物と答え合わせしたら5個が別物でした。①<b>グッズ</b>（巾着・バッグ・タオル・キーホルダー等＝作品名を含むので通っていた）②<b>版の印が無い</b>（注文が「HD」「リマスター」「インターナショナル」等なのに候補に無い＝元の版）③<b>カセットの機種（Switch・DS・GB系）の注文に「DISC／ディスク」</b>（＝別機種）。どれも消さずに比較一覧の下段へ回します。',
       '🔎 <b>仕入れ検索：相場より極端に安い候補を提案から外しました</b>（本人「ここの精度はいつになったら上がるんでしょうか？」）。名前に「ケースのみ」「特典のみ」と書いていない別物が最安に来ていました（例：マリオストライカーズ バトルリーグ＝メルカリの相場¥3,400〜なのに¥680、スカイウォードソードHDにYahoo!フリマ¥800）。同じ検索で見つかった<b>ふつうの候補の値段の中央値の35%未満</b>は「別物の疑い」として提案に出さず、🔍比較一覧の下段（網掛け・理由つき）に回します。候補が4件未満の時は相場が読めないので使いません。',
