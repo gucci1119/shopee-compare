@@ -15684,6 +15684,18 @@
     if (d && d.det && d.det.catNg) return d.det.catNg;
     if (d && d.catId) { const ng = mercCatNg(d.catId); if (ng) return ng; }
     if (d && d.det && d.det.incomplete) return d.det.incomplete;
+    /* ★2026-10-09 本人「極力、1~2日で発送のやつを」「発送元地域も離島とか沖縄、北海道、九州は省いてほしい」「未定も」「到着が遅いので」（メルカリの場合）。
+       詳細（items/get）を見た候補だけ判定する。見ていない候補は判定しない（詳細は drawSugg が安い順に取りに行く） */
+    if (d && d.k === 'mercari') {
+      if (typeof MERC_UNSET !== 'undefined' && MERC_UNSET.has(d.smid)) return '配送方法が未定（到着が遅い）';
+      if (typeof MERC_SLOW !== 'undefined' && MERC_SLOW.has(d.smid)) return '定形外など（追跡なし・遅い）';
+      if (d.det) {
+        if (d.det.days != null && d.det.days > 2) return '発送まで' + (d.det.durName || (d.det.days + '日')) + '（遅い）';
+        const ar = String(d.det.area || '');
+        if (!ar || /未定/.test(ar)) return '発送元が未定（到着が遅い）';
+        if (/北海道|沖縄|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|離島/.test(ar)) return '発送元が遠い（' + ar + '）';
+      }
+    }
     if (kt && kt.hw) { const dh = invHwAuto(nm); if (dh && dh !== kt.hw) return '別機種(' + dh + ')';
       if (kt.hw !== 'n64' && /(^|[^0-9])64\s*ソフト|ニンテンドウ?\s*64|nintendo\s*64|\bn64\b/i.test(nm)) return '別機種(N64)'; }   /* ★2026-10-04 GC版オカリナの候補に「64ソフト」が出ていた */
     /* ★2026-10-09 カセットの機種（Switch・DS・3DS・GB系）の注文に「DISC／ディスク」の出品＝別機種（スカイウォードソードHD Switch に Wii 版 DISCのみ） */
@@ -16749,7 +16761,7 @@
         const c = clean.filter(d => d.k === k); if (!c.length) return null;
         if (k !== 'mercari') return c[0];
         const cheapest = c[0].eff != null ? c[0].eff : c[0].price;
-        const near = c.filter(d => (d.eff != null ? d.eff : d.price) <= cheapest * 1.15);
+        const near = c.filter(d => (d.eff != null ? d.eff : d.price) <= cheapest * 1.3);   /* ★2026-10-09 本人「極力らくらくメルカリ便で（到着が早いので）」1.15倍→1.3倍まで らくらく を優先 */
         return near.slice().sort((x, y) => (mercRank(x) - mercRank(y)) || ((x.eff != null ? x.eff : x.price) - (y.eff != null ? y.eff : y.price)))[0] || c[0];
       };
       const top = [];
@@ -16769,12 +16781,14 @@
       // 本命（先頭）のメルカリ候補だけ、発送までの日数・発送元地域を後から取って足す
       (async () => {
         // まず本命1件だけ詳細を見る。攻略本やケース欠品だった時に限り、次の候補を追加で見る（最大3回）。
-        let changed = false;
-        for (let n = 0; n < 3; n++) {
+        let changed = false, good = 0;
+        /* ★2026-10-09 発送日数・発送元・状態を見るため、安い順に最大6件まで詳細を見る（条件に合う物が2件そろったら止める・1件ずつ0.7秒あける＝叩きすぎない） */
+        for (let n = 0; n < 6 && good < 2; n++) {
           const d = clean.find(x => x.k === 'mercari' && !x.det); if (!d) break;
           const det = await mercDetail(mercIdOf(d.url)); if (!det) break;
           d.det = det; changed = true;
-          if (!srcSuspect(d, kt)) break;      // 問題なし＝ここで打ち切り
+          if (!srcSuspect(d, kt)) good++;
+          await new Promise(r => setTimeout(r, 700));
         }
         if (changed && box.isConnected) drawSugg(i, r);
       })();
@@ -20912,6 +20926,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-09', items: [
+      '🚚 <b>仕入れ検索（メルカリ）：届くのが遅い出品を提案から外しました</b>（本人「極力、1~2日で発送のやつを」「発送元地域も離島とか沖縄、北海道、九州は省いて」「未定も」「極力らくらくメルカリ便で」）。安い順に最大6件まで詳細を見て、<b>発送まで3日以上／発送元が北海道・沖縄・九州・離島・未定／配送方法が未定・定形外</b>は下段へ。らくらくメルカリ便は最安の1.3倍まで優先（前は1.15倍）。※8/10の記録「九州・沖縄・北海道からは+1日」「らくらく0.9日・ゆうゆう1.1日」を候補選びに使っていなかったのを直したものです。',
       '🔎 <b>仕入れ検索：外れの型を3つ追加で外しました</b>（本人「今のところ、この仕入れ検索は使えるクオリティじゃない」）。画面の提案12個を実物と答え合わせしたら5個が別物でした。①<b>グッズ</b>（巾着・バッグ・タオル・キーホルダー等＝作品名を含むので通っていた）②<b>版の印が無い</b>（注文が「HD」「リマスター」「インターナショナル」等なのに候補に無い＝元の版）③<b>カセットの機種（Switch・DS・GB系）の注文に「DISC／ディスク」</b>（＝別機種）。どれも消さずに比較一覧の下段へ回します。',
       '🔎 <b>仕入れ検索：相場より極端に安い候補を提案から外しました</b>（本人「ここの精度はいつになったら上がるんでしょうか？」）。名前に「ケースのみ」「特典のみ」と書いていない別物が最安に来ていました（例：マリオストライカーズ バトルリーグ＝メルカリの相場¥3,400〜なのに¥680、スカイウォードソードHDにYahoo!フリマ¥800）。同じ検索で見つかった<b>ふつうの候補の値段の中央値の35%未満</b>は「別物の疑い」として提案に出さず、🔍比較一覧の下段（網掛け・理由つき）に回します。候補が4件未満の時は相場が読めないので使いません。',
     ] },
