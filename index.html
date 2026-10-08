@@ -14902,7 +14902,7 @@
           : `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">国</b>${chip('ccall', '', 'すべて', TA.ccs.length === allCc.length)}${allCc.map(cc => `<button class="smd-btn ta-chip" data-g="cc" data-v="${cc}" style="font-size:11px;padding:3px 9px;${TA.ccs.indexOf(cc) >= 0 ? 'background:' + ccCol(cc) + ';color:#fff;border-color:' + ccCol(cc) : ''}">${cc}</button>`).join('')}</div>`}
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">指標</b>${TA_METRICS.map(([m, l]) => chip('metric', m, l, TA.metric === m)).join('')}</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">グラフ</b>${[['line', '📈 折れ線'], ['stack', '📊 積み上げ棒'], ['area', '⛰ 積み上げ面'], ['hbar', '▭ 横棒（国の合計）'], ['pie', '◔ 円（国の構成）']].map(([c, l]) => chip('chart', c, l, TA.chart === c)).join('')}
-          <span style="width:12px"></span>${chip('ma', '', '7日移動平均', TA.ma, '日ごとのでこぼこをならして傾向を見る（折れ線のとき）')}${chip('cmp', '', '前の期間を重ねる', TA.cmp, '同じ長さの前の期間の合計を点線で重ねる（折れ線・合計で数える指標のとき）')}</div>
+          <span style="width:12px"></span>${chip('ma', '', '7日移動平均', TA.ma, '日ごとのでこぼこをならして傾向を見る（折れ線のとき）')}${chip('cmp', '', '前の期間を重ねる', TA.cmp, '同じ長さの前の期間の合計を点線で重ねる（折れ線・合計で数える指標のとき）')}${chip('split', '', '国ごとに分けて並べる', TA.split, '国（店）ごとに小さなグラフを並べて、それぞれ自分の縦軸で動きを見る。台湾のように数が少ない国の変化も見える（折れ線のとき）')}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${kpis}</div>
       <div style="position:relative;height:300px"><canvas id="ta-main"></canvas></div>
@@ -14918,7 +14918,7 @@
       const g = b.dataset.g, v = b.dataset.v;
       if (g === 'period') { TA.period = Number(v); TA._d = (Number(v) * 2 > 60) ? null : TA._d; TA._prod = null; }
       else if (g === 'gran') TA.gran = v; else if (g === 'metric') TA.metric = v; else if (g === 'chart') TA.chart = v;
-      else if (g === 'ma') TA.ma = !TA.ma; else if (g === 'cmp') TA.cmp = !TA.cmp;
+      else if (g === 'ma') TA.ma = !TA.ma; else if (g === 'cmp') TA.cmp = !TA.cmp; else if (g === 'split') TA.split = !TA.split;
       else if (g === 'dim') { TA.dim = v; }
       else if (g === 'shopall') TA.shops = shopIds.slice();
       else if (g === 'shop') { const i = TA.shops.indexOf(v); if (i >= 0) { if (TA.shops.length > 1) TA.shops.splice(i, 1); } else TA.shops.push(v); }
@@ -14942,17 +14942,37 @@
       else TA._charts.push(new Chart(main, { type: TA.chart === 'pie' ? 'doughnut' : 'bar', data: { labels: tot.map(x => entLabel(x.cc)), datasets: [{ label: mi[1], data: tot.map(x => x.v), backgroundColor: tot.map(x => entCol(x.cc)) }] },
         options: Object.assign({}, baseOpt, TA.chart === 'hbar' ? { indexAxis: 'y', plugins: Object.assign({}, baseOpt.plugins, { legend: { display: false } }) } : {}) }));
     } else {
+      /* ★2026-10-09 本人「母数が多い国のグラフの目盛りに引っ張られる」「台湾とかはそもそもアクセスが少ないから変化を見にくい」「台湾だけの表示にした時に目盛りの数を減らすとか見やすいように」
+         ①合計の線（この期間・前の期間）は右の別の縦軸へ（国ごとの線が左の縦軸をいっぱいに使える）②国（店）が1つだけの時は合計を描かず、その国の前の期間を点線で（縦軸がその国に合う）
+         ③「国ごとに分けて並べる」＝国ごとに小さなグラフを並べ、それぞれ自分の縦軸 ④目盛りは6本まで */
+      const one = ents.length === 1;
+      const prevOf = (list) => { const pb = [...new Set(prev.map(y => taBucket(y, TA.gran)))]; return pb.map(b => { let s2 = 0, any = false; list.forEach(cc => { const v = taVal(taAgg(cc, prev, TA.gran).get(b), m); if (v != null) { s2 += v; any = true; } }); return any ? s2 : null; }).slice(-buckets.length); };
+      const labels = buckets.map(b => TA.gran === 'month' ? b : b.slice(5));
+      const yTicks = { maxTicksLimit: 6, callback: v => taFmt(m, v) };
+      if (TA.split && TA.chart === 'line' && ents.length > 1) {
+        const host = main.parentElement; host.style.height = 'auto';
+        host.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px">' + series.map((se, i) => `<div style="border:1px solid #e3e8ef;border-radius:8px;padding:6px 8px"><div style="font-size:11.5px;font-weight:700;color:${entCol(se.cc)}">${esc(entLabel(se.cc))}</div><div style="height:150px"><canvas id="ta-split-${i}"></canvas></div></div>`).join('') + '</div>';
+        series.forEach((se, i) => { const d2 = [{ label: entLabel(se.cc), data: se.data, borderColor: entCol(se.cc), backgroundColor: entCol(se.cc), tension: .25, pointRadius: buckets.length > 60 ? 0 : 2 }];
+          if (TA.cmp && sumLike) d2.push({ label: '前の期間', data: prevOf([se.cc]), borderColor: '#9aa4b0', borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, tension: .25 });
+          TA._charts.push(new Chart(document.getElementById('ta-split-' + i), { type: 'line', data: { labels, datasets: d2 }, options: Object.assign({}, baseOpt, { plugins: Object.assign({}, baseOpt.plugins, { legend: { display: false } }), interaction: { mode: 'index', intersect: false }, scales: { x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } }, y: { beginAtZero: false, grace: '10%', ticks: Object.assign({}, yTicks, { font: { size: 10 } }) } } }) })); });
+      } else {
       const ds = series.map(s => ({ label: entLabel(s.cc), data: s.data, borderColor: entCol(s.cc), backgroundColor: entCol(s.cc) + (TA.chart === 'line' ? '' : 'cc'), fill: TA.chart === 'area', tension: .25, pointRadius: buckets.length > 60 ? 0 : 2, spanGaps: false }));
+      let useY2 = false;
       if (TA.cmp && TA.chart === 'line' && sumLike) {
-        const pb = [...new Set(prev.map(y => taBucket(y, TA.gran)))];
-        const pd = pb.map(b => { let s = 0, any = false; ents.forEach(cc => { const v = taVal(taAgg(cc, prev, TA.gran).get(b), m); if (v != null) { s += v; any = true; } }); return any ? s : null; });
-        const cd = buckets.map((b, i) => { let s = 0, any = false; series.forEach(se => { if (se.data[i] != null) { s += se.data[i]; any = true; } }); return any ? s : null; });
-        ds.push({ label: '合計（この期間）', data: cd, borderColor: '#2b3440', borderWidth: 2, pointRadius: 0, tension: .25 });
-        ds.push({ label: '合計（前の期間）', data: pd.slice(-buckets.length), borderColor: '#9aa4b0', borderDash: [5, 4], borderWidth: 2, pointRadius: 0, tension: .25 });
+        if (one) ds.push({ label: entLabel(ents[0]) + '（前の期間）', data: prevOf(ents), borderColor: '#9aa4b0', borderDash: [5, 4], borderWidth: 2, pointRadius: 0, tension: .25 });
+        else {
+          const cd = buckets.map((b, i) => { let s2 = 0, any = false; series.forEach(se => { if (se.data[i] != null) { s2 += se.data[i]; any = true; } }); return any ? s2 : null; });
+          ds.push({ label: '合計（この期間）・右の目盛り', data: cd, borderColor: '#2b3440', borderWidth: 2, pointRadius: 0, tension: .25, yAxisID: 'y2' });
+          ds.push({ label: '合計（前の期間）・右の目盛り', data: prevOf(ents), borderColor: '#9aa4b0', borderDash: [5, 4], borderWidth: 2, pointRadius: 0, tension: .25, yAxisID: 'y2' });
+          useY2 = true;
+        }
       }
       const stacked = TA.chart === 'stack' || TA.chart === 'area';
-      TA._charts.push(new Chart(main, { type: TA.chart === 'stack' ? 'bar' : 'line', data: { labels: buckets.map(b => TA.gran === 'month' ? b : b.slice(5)), datasets: ds },
-        options: Object.assign({}, baseOpt, { interaction: { mode: 'index', intersect: false }, scales: { x: { stacked }, y: { stacked, beginAtZero: true } } }) }));
+      const sc = { x: { stacked }, y: { stacked, beginAtZero: !one || stacked, grace: one ? '10%' : 0, ticks: yTicks } };
+      if (useY2) sc.y2 = { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: yTicks };
+      TA._charts.push(new Chart(main, { type: TA.chart === 'stack' ? 'bar' : 'line', data: { labels, datasets: ds },
+        options: Object.assign({}, baseOpt, { interaction: { mode: 'index', intersect: false }, scales: sc }) }));
+      }
     }
     // 🌏 国ごとの比較表
     const cols = [['uv', '訪問者'], ['pv', 'PV'], ['ppv', 'PV/訪問'], ['nv', '新規'], ['bounce', '直帰率'], ['stay', '滞在秒'], ['ord', '注文'], ['cvr', '注文率'], ['gmv', '売上'], ['aov', '客単価']];
@@ -20945,6 +20965,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-09', items: [
+      '📈 <b>アクセスのグラフ：数の少ない国の動きが見えるようにしました</b>（本人「母数が多い国のグラフの目盛りに引っ張られる」「台湾とかはアクセスが少ないから変化を見にくい」「台湾だけの表示にした時に目盛りを減らすとか見やすいように」）。①「前の期間を重ねる」の<b>合計の線は右の別の目盛り</b>に（国ごとの線が左の目盛りをいっぱいに使える）②<b>国（店）を1つだけ選んだ時は合計を描かず、その国の前の期間を点線で</b>出し、縦軸もその国に合わせる③新しく<b>「国ごとに分けて並べる」</b>＝国ごとの小さなグラフを並べ、それぞれ自分の縦軸④目盛りは6本まで。',
       '💤 <b>仕入れ検索（メルカリ）：1年以上取引していない出品者を外しました</b>（本人「最近ログインして使っていない人が多分いる。そういう人は発送してこない」「1年以上取引がない人」）。出品者の評価の一番新しい日付（＝メルカリ全体で最後に取引した日）を見て、1年以上前なら提案から外し下段へ。読めなかった時は外しません。',
       '🚚 <b>仕入れ検索（メルカリ）：届くのが遅い出品を提案から外しました</b>（本人「極力、1~2日で発送のやつを」「発送元地域も離島とか沖縄、北海道、九州は省いて」「未定も」「極力らくらくメルカリ便で」）。安い順に最大6件まで詳細を見て、<b>発送まで3日以上／発送元が北海道・沖縄・九州・離島・未定／配送方法が未定・定形外</b>は下段へ。らくらくメルカリ便は最安の1.3倍まで優先（前は1.15倍）。※8/10の記録「九州・沖縄・北海道からは+1日」「らくらく0.9日・ゆうゆう1.1日」を候補選びに使っていなかったのを直したものです。',
       '🔎 <b>仕入れ検索：外れの型を3つ追加で外しました</b>（本人「今のところ、この仕入れ検索は使えるクオリティじゃない」）。画面の提案12個を実物と答え合わせしたら5個が別物でした。①<b>グッズ</b>（巾着・バッグ・タオル・キーホルダー等＝作品名を含むので通っていた）②<b>版の印が無い</b>（注文が「HD」「リマスター」「インターナショナル」等なのに候補に無い＝元の版）③<b>カセットの機種（Switch・DS・GB系）の注文に「DISC／ディスク」</b>（＝別機種）。どれも消さずに比較一覧の下段へ回します。',
