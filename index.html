@@ -15663,6 +15663,17 @@
     const sideM = /ジョイコン|joy-?con/i.test(String(kwRaw || '')) ? String(kwRaw || '').match(/(?:^|\s)(L|R)(?:\s|$)/) : null;
     return { side: sideM ? sideM[1] : '', genuine: /純正/.test(String(kwRaw || '')), toks, ja, key: toks.slice().sort((a, b) => b.length - a.length)[0] || '', hw: mt ? invHwAuto(mt) : '' };
   }
+  /* ★2026-10-09 本人「ここの精度はいつになったら上がるんでしょうか？」：名前では外せない別物（ケースだけ・特典だけ等を書いていない出品）が最安に来ていた。
+     実例：マリオストライカーズ バトルリーグ（メルカリの相場 ¥3,400〜）の提案にメルカリ ¥680。
+     → 同じ検索の【名前で問題なしの候補】の中央値の35%未満は「相場より極端に安い＝別物の疑い」として提案から外す（比較一覧の下段には残す）。
+       候補が4件未満の時は相場が読めないので使わない */
+  function srcCheapCut(list) {
+    const ps = (list || []).map(d => (d.eff != null ? d.eff : d.price)).filter(v => v > 0).sort((a, b) => a - b);
+    if (ps.length < 4) return 0;
+    const med = ps[Math.floor(ps.length / 2)];
+    return Math.round(med * 0.35);
+  }
+  function srcIsCheapOutlier(d, cut) { const v = d ? (d.eff != null ? d.eff : d.price) : 0; return !!(cut && v > 0 && v < cut); }
   // 候補がハズレっぽい理由を返す（''＝問題なし）。除外はせず、行内の提案から外して比較一覧の下段へ回す。
   function srcSuspect(d, kt) {
     const nm = (d && d.name) || '';
@@ -15984,7 +15995,7 @@
   }
   function dealCacheSet(kw, deals, broadKw, siteStat) {
     try { let kt0 = null; try { kt0 = srcKwToks(decodeURIComponent(kw)); } catch (_) {}   /* ★2026-10-04 ハズレでない物を先に残す（安い順の上位25件だけだと¥300の別商品で埋まって本物が消えていた） */
-      const keep = kt0 ? deals.filter(d => !srcSuspect(d, kt0)).concat(deals.filter(d => srcSuspect(d, kt0))) : deals;
+      const keep = kt0 ? deals.filter(d => !srcSuspect(d, kt0)).concat(deals.filter(d => srcSuspect(d, kt0))) : deals;   /* 安値の外れ判定は描く時に毎回する（ここで捨てない） */
       localStorage.setItem('srcDeals10:' + kw, JSON.stringify({ at: Date.now(), deals: keep.slice(0, 40), broadKw: broadKw || '', siteStat: siteStat || null })); }
     catch (_) { try { Object.keys(localStorage).filter(k => k.startsWith('srcDeals10:')).slice(0, 60).forEach(k => localStorage.removeItem(k)); } catch (__) {} }
   }
@@ -16061,8 +16072,9 @@
   function renderDeals(container, deals, showN, broadKw, ceil, kwRaw) {
     // 怪しい候補（別商品・まとめ売り・ジャンク）は消さずに末尾へ落として網掛けにする
     if (kwRaw) { const kt = srcKwToks(kwRaw);
-      deals = deals.slice().map(d => Object.assign({}, d, { _sus: srcSuspect(d, kt) }))
-        .sort((a, b) => (a._sus ? 1 : 0) - (b._sus ? 1 : 0)); }
+      deals = deals.slice().map(d => Object.assign({}, d, { _sus: srcSuspect(d, kt) }));
+      { const cut = srcCheapCut(deals.filter(d => !d._sus)); if (cut) deals.forEach(d => { if (!d._sus && srcIsCheapOutlier(d, cut)) d._sus = '相場より極端に安い（¥' + cut.toLocaleString() + '未満＝別物の疑い）'; }); }
+      deals.sort((a, b) => (a._sus ? 1 : 0) - (b._sus ? 1 : 0)); }
     if (!deals.length) { container.innerHTML = '<span class="smd-dim" style="font-size:11.5px">今すぐ買える出品が見つかりませんでした。<b>英語のサブタイトルは日本のサイトに無い</b>ことが多いです（例：Sacred Stones→聖魔の光石）。キーワードを<b>日本語の作品名＋機種</b>に手直しするか、各サイトの検索ボタンで確認を。</span>'; return; }
     // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
     const bySite = {};
@@ -16719,7 +16731,9 @@
       //   怪しいものは提案から外し、比較一覧の下段に網掛けで残す。
       const kwRaw = (() => { try { return decodeURIComponent(kwOf(i)); } catch (_) { return ''; } })();
       const kt = srcKwToks(kwRaw);
-      const clean = deals.filter(d => !srcSuspect(d, kt));
+      const clean0 = deals.filter(d => !srcSuspect(d, kt));
+      const cheapCut = srcCheapCut(clean0);
+      const clean = clean0.filter(d => !srcIsCheapOutlier(d, cheapCut));   /* ★2026-10-09 相場より極端に安い候補は提案に出さない */
       // メルカリ枠は【らくらく便を優先】。ゆうゆうより到着が1日早く、発送期限に効く。
       //   ただし極端に高くなるなら意味がないので、最安の1.15倍までを「同等」とみなす。
       const pickBy = k => {
@@ -20888,6 +20902,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-09', items: [
+      '🔎 <b>仕入れ検索：相場より極端に安い候補を提案から外しました</b>（本人「ここの精度はいつになったら上がるんでしょうか？」）。名前に「ケースのみ」「特典のみ」と書いていない別物が最安に来ていました（例：マリオストライカーズ バトルリーグ＝メルカリの相場¥3,400〜なのに¥680、スカイウォードソードHDにYahoo!フリマ¥800）。同じ検索で見つかった<b>ふつうの候補の値段の中央値の35%未満</b>は「別物の疑い」として提案に出さず、🔍比較一覧の下段（網掛け・理由つき）に回します。候補が4件未満の時は相場が読めないので使いません。',
+    ] },
     { date: '2026-10-07', items: [
       '🧪 <b>施策ログを1施策1行に</b>（本人「縦に表示されるのうっとうしい」「折り畳めるように」）。行を押すと前後の数字が開きます。',
       '🧪 <b>アクセス（各国）の「施策の効果」を「施策ログ」にしました</b>（本人「施策した時の効果をログでポータルにも残しておきたい」）。施策ごとに、前30日と後の【店の訪問者・注文（1日あたり）】を並べ、出品の閲覧が分かる施策は「変えた出品／触っていない出品」の差も出します。30日たつと「判定できます」と出ます。「＋ 施策を記録する」で、自分でやった施策も足せます。',
