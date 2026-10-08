@@ -15694,6 +15694,7 @@
         const ar = String(d.det.area || '');
         if (!ar || /未定/.test(ar)) return '発送元が未定（到着が遅い）';
         if (/北海道|沖縄|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|離島/.test(ar)) return '発送元が遠い（' + ar + '）';
+        if (typeof d.det.lastTx === 'number' && d.det.lastTx > 0 && Date.now() - d.det.lastTx > 365 * 86400000) return '出品者が1年以上取引していない（' + new Date(d.det.lastTx).toISOString().slice(0, 7).replace('-', '/') + '）';
       }
     }
     if (kt && kt.hw) { const dh = invHwAuto(nm); if (dh && dh !== kt.hw) return '別機種(' + dh + ')';
@@ -15777,8 +15778,26 @@
       const cat = d.item_category || {};
       if (cat.id != null) { mercCat[String(cat.id)] = { root: Number(cat.root_category_id), name: String(cat.name || '') }; mercCatSave(); }
       out = { days: sd.max_days != null ? Number(sd.max_days) : null, durName: sd.name || '', area: fa.name || '', incomplete,
+        sellerId: (d.seller && d.seller.id != null) ? String(d.seller.id) : '', lastTx: null,
         cond: (d.item_condition || {}).name || '', catId: cat.id != null ? String(cat.id) : '', catNg: (MERC_CAT_NG_ROOT.has(Number(cat.root_category_id)) || MERC_CAT_NG_NAME.test(String(cat.name || ''))) ? String(cat.name || '書籍') : '' };
     } catch (_) { out = null; }
+    /* ★2026-10-09 本人「メルカリは最近ログインして使っていない人が多分いる。そういう人は発送してこない」「1年以上取引がない人」「メルカリ上で不特定多数と売買してるってこと」
+       → 出品者の評価の一番新しい日付＝最後に取引した日（reviews/history・評価ページが使っている窓口）。読めなければ判定しない（外さない） */
+    if (out && out.sellerId) {
+      try {
+        const ru = 'https://api.mercari.jp/reviews/history?user_id=' + encodeURIComponent(out.sellerId) + '&subject=seller,buyer&fame=good,normal,bad&limit=1';
+        const rt = await bridgeRequest('GET', ru, null, { headers: { 'DPoP': await mercariDpop(ru, 'GET'), 'X-Platform': 'web' } });
+        const rj = JSON.parse(rt) || {};
+        const arr = Array.isArray(rj.data) ? rj.data : (Array.isArray(rj.reviews) ? rj.reviews : (rj.data && Array.isArray(rj.data.reviews) ? rj.data.reviews : []));
+        const f = arr[0] || null;
+        let ts = f ? (f.created || f.updated || f.created_at || f.createdAt || null) : null;
+        if (typeof ts === 'string' && /^\d+$/.test(ts)) ts = Number(ts);
+        if (typeof ts === 'string') ts = Date.parse(ts) || null;
+        if (typeof ts === 'number' && ts < 1e12) ts = ts * 1000;
+        out.lastTx = ts || (arr.length === 0 && rj && (rj.data || rj.reviews) ? 0 : null);   /* 0＝評価が1件も無い／null＝読めなかった */
+        try { const dbg = JSON.parse(localStorage.getItem('srcLastTxDebug') || '[]'); if (dbg.length < 5) { dbg.push({ id: out.sellerId, lastTx: out.lastTx, raw: String(rt).slice(0, 400) }); localStorage.setItem('srcLastTxDebug', JSON.stringify(dbg)); } } catch (_) {}
+      } catch (_) { out.lastTx = null; }
+    }
     mercDetailCache.set(itemId, out);
     return out;
   }
@@ -20926,6 +20945,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-09', items: [
+      '💤 <b>仕入れ検索（メルカリ）：1年以上取引していない出品者を外しました</b>（本人「最近ログインして使っていない人が多分いる。そういう人は発送してこない」「1年以上取引がない人」）。出品者の評価の一番新しい日付（＝メルカリ全体で最後に取引した日）を見て、1年以上前なら提案から外し下段へ。読めなかった時は外しません。',
       '🚚 <b>仕入れ検索（メルカリ）：届くのが遅い出品を提案から外しました</b>（本人「極力、1~2日で発送のやつを」「発送元地域も離島とか沖縄、北海道、九州は省いて」「未定も」「極力らくらくメルカリ便で」）。安い順に最大6件まで詳細を見て、<b>発送まで3日以上／発送元が北海道・沖縄・九州・離島・未定／配送方法が未定・定形外</b>は下段へ。らくらくメルカリ便は最安の1.3倍まで優先（前は1.15倍）。※8/10の記録「九州・沖縄・北海道からは+1日」「らくらく0.9日・ゆうゆう1.1日」を候補選びに使っていなかったのを直したものです。',
       '🔎 <b>仕入れ検索：外れの型を3つ追加で外しました</b>（本人「今のところ、この仕入れ検索は使えるクオリティじゃない」）。画面の提案12個を実物と答え合わせしたら5個が別物でした。①<b>グッズ</b>（巾着・バッグ・タオル・キーホルダー等＝作品名を含むので通っていた）②<b>版の印が無い</b>（注文が「HD」「リマスター」「インターナショナル」等なのに候補に無い＝元の版）③<b>カセットの機種（Switch・DS・GB系）の注文に「DISC／ディスク」</b>（＝別機種）。どれも消さずに比較一覧の下段へ回します。',
       '🔎 <b>仕入れ検索：相場より極端に安い候補を提案から外しました</b>（本人「ここの精度はいつになったら上がるんでしょうか？」）。名前に「ケースのみ」「特典のみ」と書いていない別物が最安に来ていました（例：マリオストライカーズ バトルリーグ＝メルカリの相場¥3,400〜なのに¥680、スカイウォードソードHDにYahoo!フリマ¥800）。同じ検索で見つかった<b>ふつうの候補の値段の中央値の35%未満</b>は「別物の疑い」として提案に出さず、🔍比較一覧の下段（網掛け・理由つき）に回します。候補が4件未満の時は相場が読めないので使いません。',
