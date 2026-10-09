@@ -21119,6 +21119,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-09', items: [
+      '🧹 <b>写真集めの無駄な読み直しを減らしました</b>（無駄取りレビューの残り）。1回の写真集めで約6MBの写真の控えを機種ごとに3回（8機種で24回）読み直していたのを、1分以内に読んだ分を使い回すように。保存の直前だけは必ず読み直します（別のタブやGASの変更を消さないため）。',
       '🇻🇳 <b>ベトナムの価格上限を 909,090 VND に下げました</b>（Shopee からの通知「明細の通常価格（割引前・VAT抜き）を 909,090 VND 以下に・期限 10/13・超えると出品ごと非公開」）。上限を超えていた <b>732明細（62出品）を 909,000 VND に引き下げ</b>、実物を読み直して残り0件を確認。うち在庫ありの明細は約286件、残りは在庫0の仮置き（999,000）でした。出品を作る画面・🤖自動出品の上限も 909,090 にしています。',
       '🕒 <b>アクセスのグラフ：「まとめ」をなくし、期間を選ぶだけにしました</b>（本人「まとめとその期間って分けてるけど、意味あるのかな？」）。点の区切りは期間で自動（7日・半月・1か月＝1日ごと／3か月＝1週ごと／半年・1年＝1か月ごと）。※Shopee のアクセスは1日ごとの合計しか取れないので、1時間ごとは出せません。',
       '📅 <b>アクセスのグラフ：まとめを「月」「週」にした時、期間を自動で広げます</b>（本人「月だと取れてなかったりするんだけど、なんで？」）。データは毎日貯まっていましたが、期間が7日のまま「月」にすると点が1つしか出ませんでした。「月」なら半年、「週」なら3か月に広げ、読み込む範囲も広げ直します。',
@@ -31655,7 +31656,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   const baPreShardKeys = () => Array.from({ length: BA_PRE_SHARDS }, (_, i) => 'boshu_auto_pre_s' + i);
   const baPreShardOf = (k) => { let h = 0; const t = String(k); for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0; return 'boshu_auto_pre_s' + (h % BA_PRE_SHARDS); };
   let _baPreSharded = null;
-  async function baPreRead() {
+  /* ★2026-10-09 無駄取り：写真集め1回で約6MBの控えを機種ごとに3回（8機種で24回）読み直していた。
+     → 1分以内に読んだ／保存した控えを使い回す。【保存の直前だけは必ず読み直す】（fresh=true・別のタブやGASの変更を消さないため） */
+  let _baPreMemo = null;
+  async function baPreRead(fresh) {
+    if (!fresh && _baPreMemo && Date.now() - _baPreMemo.at < 60000) return Object.assign({}, _baPreMemo.v);
+    const v = await baPreReadRaw();
+    if (v && typeof v === 'object') _baPreMemo = { at: Date.now(), v: v };
+    return v;
+  }
+  async function baPreReadRaw() {
     try {
       const r = await sbGetAll('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys()).join(',') + ')');
       const by = {}; (r || []).forEach(x => { by[x.k] = x.v; });
@@ -31682,6 +31692,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (!ok) throw err;
     }
     if (targets.length === BA_PRE_SHARDS) _baPreSharded = true;
+    _baPreMemo = { at: Date.now(), v: Object.assign({}, full || {}) };
   }
   async function baKvGet(k) {
     if (k === 'boshu_auto_pre') return baPreRead();
@@ -31886,7 +31897,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         try { localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}   /* 心拍（別タブに「いま集めている」と伝える） */
         await new Promise(rs => setTimeout(rs, 1200 + Math.random() * 800));
       }
-      if (Object.keys(changed).length) { const cur = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {}); Object.keys(changed).forEach(k => { if (!(cur[k] && cur[k].img && !(pre[k] && pre[k].img))) cur[k] = pre[k]; }); try { await baPreSave(cur, Object.keys(changed)); } catch (eSv) { saveErr = String((eSv && eSv.message) || eSv).slice(0, 120); } }
+      if (Object.keys(changed).length) { const cur = Object.assign({}, baKvMust(await baPreRead(true), '写真の控え') || {}); Object.keys(changed).forEach(k => { if (!(cur[k] && cur[k].img && !(pre[k] && pre[k].img))) cur[k] = pre[k]; }); try { await baPreSave(cur, Object.keys(changed)); } catch (eSv) { saveErr = String((eSv && eSv.message) || eSv).slice(0, 120); } }
     } finally { lst._baCollecting = false; }
     return { got, miss, skipped, tried, saveErr };
   }
@@ -32104,7 +32115,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           return (key2 && it2.hw) ? { k, a: { key: key2, hw: it2.hw, ja: '', en: en2 }, at: it2.at || '' } : null;
         }).filter(Boolean).sort((x, y) => String(y.at).localeCompare(String(x.at))).slice(0, 6);
         if (todo.length) {
-          const pre2 = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {});
+          const pre2 = Object.assign({}, baKvMust(await baPreRead(true), '写真の控え') || {});
           const _delK = todo.map(x => baPreKeyFor(pre2, x.a.key, x.a.hw));   /* ★2026-09-30 この機種の束だけ消す（別機種の束はその機種で使っている） */
           _delK.forEach(k => { delete pre2[k]; });   // 控えを消して探し直す（前の写真は基準外なので残さない）
           await baPreSave(pre2, _delK);
@@ -33509,7 +33520,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       box.querySelectorAll('.ba-pv-alt').forEach(btn => btn.addEventListener('click', async () => {
         const key = btn.dataset.key; btn.disabled = true;
         try {
-          const pre = Object.assign({}, baKvMust(await baKvGet('boshu_auto_pre'), '写真の控え') || {}); const _ak = pre[key + '@' + pvHw] ? key + '@' + pvHw : key; const cur = baPreOf(pre, key, pvHw); if (!cur || !cur.alts || !cur.alts.length) { alert('次の候補がありません'); return; }
+          const pre = Object.assign({}, baKvMust(await baPreRead(true), '写真の控え') || {}); const _ak = pre[key + '@' + pvHw] ? key + '@' + pvHw : key; const cur = baPreOf(pre, key, pvHw); if (!cur || !cur.alts || !cur.alts.length) { alert('次の候補がありません'); return; }
           const next = cur.alts.shift(); const rest = cur.alts;
           pre[_ak] = Object.assign({}, cur, next, { alts: rest.concat([{ img: cur.img, thumb: cur.thumb, src: cur.src, price: cur.price, name: cur.name, cond: cur.cond }]), at: new Date().toISOString() });
           await baPreSave(pre, [_ak]);
