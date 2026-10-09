@@ -30966,21 +30966,28 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       //   価格は表記ゆれ（￥/¥/円）があるので**必須にしない**。取れたら入れる程度にする
       /* ★2026-09-26 駿河屋の商品リンクは /product/detail/ と /product/other/（他の出品者の扱い）の2種類。other を取りこぼし、1ページ24件のうち6件（SILENT HILL 2・3 など主要作も）が母数から抜けていた */
       /* ★2026-10-10 🃏 トレカの商品IDは「GU879982」のような英数字（ソフトは数字だけ）→ [A-Za-z0-9]+ に。数字だけの前提で 0 件になっていた */
-      const re = /\/product\/(?:detail|other)\/([A-Za-z0-9]+)[\s\S]{0,500}?<h3[^>]*product-name[^>]*>([\s\S]{0,160}?)<\/h3>([\s\S]{0,700})/g;
+      const re = /\/product\/(?:detail|other)\/([A-Za-z0-9]+)[\s\S]{0,500}?<h3[^>]*product-name[^>]*>([\s\S]{0,160}?)<\/h3>([\s\S]{0,2600})/g;   /* ★2026-10-10 🃏 トレカは価格（マケプレ）が h3 の 700 字より後ろ→ 2,600 字まで見て、次の商品名で切る */
       let m;
       while ((m = re.exec(html))) {
         const id = m[1];
         if (seen.has(id)) continue;
         const t = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
         if (!t) continue;
-        const pm = String(m[3] || '').replace(/<[^>]+>/g, ' ').match(/[￥¥]\s*([\d,]+)|([\d,]{3,7})\s*円/);
+        const _blk = String(m[3] || '').split('product-name')[0];   /* 次の商品の価格を拾わない */
+        const _bt = _blk.replace(/<[^>]+>/g, ' ');
+        /* 価格は「中古：￥N」（駿河屋の在庫）を優先、無ければ「マケプレ ￥N」（他の出品者）。トレカは駿河屋在庫が品切れでもマケプレで相場が分かる */
+        const pm = _bt.match(/中古[：:]\s*[￥¥]\s*([\d,]+)/) || _bt.match(/マケプレ[\s\S]{0,120}?[￥¥]\s*([\d,]+)/) || _bt.match(/[￥¥]\s*([\d,]+)|([\d,]{3,7})\s*円/);
+        const _mp = !!(pm && /マケプレ/.test(pm[0]));
         seen.add(id);
         // ★区分名（「Xbox Oneソフト」「Xbox Oneハード」等）も拾う。これが無いと
         //   ソフトの本数（＝母数）が数えられない（2026-09-03まで保存していなかった）。
         //   ⚠️ 区分名には【全角スペース】が入る（「Xbox　Oneソフト」）ので詰めてから使う。
-        const km = /background-kishu[^>]*>\s*([^<]{1,40}?)\s*</.exec(m[3]);
+        const km = /background-kishu[^>]*>\s*([^<]{1,120}?)\s*</.exec(_blk);   /* ★2026-10-10 🃏 区分名は「ポケモンカードゲーム/SAR/悪/MEGA 拡張パック 30th CELEBRATION」のように長い→120字 */
+        const dm = /\[発売日[：:]\s*([\d\/]{6,10})\]/.exec(_blk);
         const kind = km ? km[1].replace(/[\u3000\s]+/g, '') : '';
         const _row = { t: t.slice(0, 120), id: id, k: kind, p: pm ? (parseInt(String(pm[1] || pm[2]).replace(/,/g, ''), 10) || 0) : 0 };
+        if (_mp) _row.mp = 1;   /* 価格がマケプレ（他の出品者）の印 */
+        if (dm) _row.d = dm[1];   /* 発売日 */
         const _kj = keepJan[id];   // 前に拾ったJANは引き継ぐ（取り直しにならないように）
         if (_kj) { if (_kj.j) _row.j = _kj.j; if (_kj.jx) _row.jx = _kj.jx; if (_kj.mpn) _row.mpn = _kj.mpn; }
         rows.push(_row);
