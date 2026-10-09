@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.4
+// @version      3.44.5
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -444,7 +444,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.4';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.5';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2607,7 +2607,9 @@
       // ★未設定なら「全体ON」で作る（本人方針：基本は全体ON）。ただし**作った時刻より後に来た発言だけ**を対象にする。
       //   そうしないと、有効化した瞬間に過去の未返信ぜんぶへ一斉送信してしまう。
       if (!cfg) {
-        cfg = { on: true, text: 'Thank you for your message. Our staff will check and get back to you shortly. As we are a seller based in Japan, our reply may be delayed due to the time difference. Thank you for your understanding.',
+        /* ★3.44.5（2026-10-09 本人「なぜこれ自動マークが出ていない」wesleydf）：設定が無いと【全体ON】で作っていたため、
+           10/9 21:50 に設定が作り直された瞬間から過去7日の未返信へ6通送った（一次返答は Smart Reply の役目・この自動返信は既定OFFと決めていた）。→ 無ければ OFF で作る */
+        cfg = { on: false, text: 'Thank you for your message. Our staff will check and get back to you shortly. As we are a seller based in Japan, our reply may be delayed due to the time difference. Thank you for your understanding.',
                 delayMin: 1, gapH: 6, at: new Date().toISOString() };
         await sbReq('POST', 'app_kv?on_conflict=k', [{ k: 'chat_autoreply', v: cfg, updated_at: new Date().toISOString() }], 'resolution=merge-duplicates,return=minimal').catch(() => {});
         return;   // 次の回から適用（この瞬間より後に来た発言だけが対象）
