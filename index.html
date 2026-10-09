@@ -21119,7 +21119,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-09', items: [
-      '📚 <b>母数の表の「出している」が膨らんでいた真因を直しました</b>（宿題「Xbox One が 318%」）。Xbox One の出品は実は 0 件でした。突き合わせの索引に<b>全機種のJAN調べの日本語題名（約27,000件）を機種を問わず混ぜていた</b>ため、他機種と同名の作品（Minecraft・FIFA・バイオハザード等）が Xbox One の作品一覧に当たっていました。これは他の機種でも少しずつ水増しになっていました。索引にはその機種の分だけ入れるようにし（機種は JAN調べの f.機種→無ければ出品の機種）、控えを捨てて数え直します。',
+      '📚 <b>母数の表の「出している」が膨らんでいた真因を直しました</b>（宿題「Xbox One が 318%」）。Xbox One の出品は実は 0 件でした。突き合わせの索引に<b>全機種のJAN調べの日本語題名（約27,000件）を機種を問わず混ぜていた</b>ため、他機種と同名の作品（Minecraft・FIFA・バイオハザード等）が Xbox One の作品一覧に当たっていました。これは他の機種でも少しずつ水増しになっていました。索引にはその機種の分だけ入れるようにし（機種は 明細名の接頭「PS5:」→出品名→JAN調べの f.機種 の順）、控えを捨てて数え直します。',
       '🛑 <b>チャット取り込みの自動返信を止めました（OFF）</b>（本人「なぜこれ自動マークが出ていない」BR wesleydf）。印が無かった一通は Smart Reply ではなく、チャット取り込み（userscript）の自動返信でした。この自動返信は既定OFFと決めていましたが、設定（chat_autoreply）が無いと<b>全体ON</b>で作り直す作りで、10/9 21:50 に作り直された直後から過去7日の未返信へ <b>6通</b>（PH2・BR3・MY1）送っていました。設定をOFFに戻し、チャット取り込み 3.44.5 で「無ければOFFで作る」に。メッセージ画面の表示上の初期値もOFFに。',
       '🧹 <b>写真集めの無駄な読み直しを減らしました</b>（無駄取りレビューの残り）。1回の写真集めで約6MBの写真の控えを機種ごとに3回（8機種で24回）読み直していたのを、1分以内に読んだ分を使い回すように。保存の直前だけは必ず読み直します（別のタブやGASの変更を消さないため）。',
       '🇻🇳 <b>ベトナムの価格上限を 909,090 VND に下げました</b>（Shopee からの通知「明細の通常価格（割引前・VAT抜き）を 909,090 VND 以下に・期限 10/13・超えると出品ごと非公開」）。上限を超えていた <b>732明細（62出品）を 909,000 VND に引き下げ</b>、実物を読み直して残り0件を確認。うち在庫ありの明細は約286件、残りは在庫0の仮置き（999,000）でした。出品を作る画面・🤖自動出品の上限も 909,090 にしています。',
@@ -30276,14 +30276,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   /* ★2026-10-09 宿題「Xbox One が 318%」の真因：ここで【全機種】の JAN調べの日本語題名（product_ids.jp 約27,000件）を機種を問わず索引に混ぜていた。
      Xbox One の出品は 0 件なのに、他機種と同名の作品（Minecraft・FIFA・バイオハザード等）が Xbox One の作品一覧に当たって「出している」に数えられていた。
      → 機種（hw）が渡された時は、その機種の分だけ入れる。機種は f.機種（約2万件に入っている）→無ければ出品（item_id）の機種→それも無ければ入れない */
-  let _pidHwByItem = null;
+  /* 機種の手がかりの順＝①明細名（「PS5:タイトル」の接頭。PS1〜PS5 が混ざった総称カタログが多い）②出品名・親SKU ③JAN調べの f.機種（PS5 の分はほぼ空だった）。
+     実測：PS5 を含むカタログ90件のJAN調べ250件のうち f.機種 が入っているのは66件で、しかも 3ds/switch/ps4 など別機種の値だった */
+  let _pidHwByKey = null, _pidHwByItem = null;
   function _pidHwOfKey(k, v) {
     try {
-      const f = String(((v || {}).f || {})['機種'] || (v || {}).own || '').toLowerCase();
-      if (f) return f;
-      if (!_pidHwByItem) { _pidHwByItem = {}; try { Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => { if (r && r.item_id && !_pidHwByItem[r.item_id]) _pidHwByItem[r.item_id] = hwOf((r.name || '') + ' ' + (r.parent_sku || '')); })); } catch (_) {} }
-      const m = String(k || '').match(/^id:(\d+)#/);
-      return (m && _pidHwByItem[m[1]]) || '';
+      if (!_pidHwByKey) {
+        _pidHwByKey = {}; _pidHwByItem = {};
+        try { Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+          if (!r || !r.item_id) return;
+          const lh = hwOf((r.name || '') + ' ' + (r.parent_sku || ''));
+          if (!_pidHwByItem[r.item_id]) _pidHwByItem[r.item_id] = lh;
+          (r.models || []).forEach(m => { if (m && m.id) { const kk = 'id:' + r.item_id + '#' + m.id; if (!_pidHwByKey[kk]) _pidHwByKey[kk] = hwOf(m.n || '') || lh; } });
+        })); } catch (_) {}
+      }
+      const ks = String(k || '');
+      if (_pidHwByKey[ks]) return _pidHwByKey[ks];
+      const m = ks.match(/^id:(\d+)#/);
+      if (m && _pidHwByItem[m[1]]) return _pidHwByItem[m[1]];
+      return String(((v || {}).f || {})['機種'] || (v || {}).own || '').toLowerCase();
     } catch (_) { return ''; }
   }
   function tmMineIndex(names, link, hw) {
@@ -30306,7 +30317,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // 🧮 突合の結果を覚えておく。★毎回その場で数え直すと、開くたびに「551 …」と数字が動いて落ち着かない
   //   （2026-08-31 本人「なんで毎回読み込むの？最初から出せないのかな？数字変わるのウザい」）。
   //   6時間もてば十分（出品はそんなに動かない）。🔄で数え直せる。
-  const TM_CACHE_KEY = 'smdTmMatch_v2';
+  const TM_CACHE_KEY = 'smdTmMatch_v3';
   const TM_CACHE_MS = 6 * 3600 * 1000;
   function tmCacheLoad() {
     try {
