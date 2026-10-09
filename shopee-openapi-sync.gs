@@ -8064,7 +8064,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
       var tgt = null; for (var r = 0; r < trs.length; r++) { if (100 - (trs[r].models || []).length > 0) { tgt = trs[r]; break; } }
       var full = !tgt; if (!tgt) tgt = trs[0];
       if (!tgt) { row.plan[cc] = { note: 'カタログ群なし' }; return; }
-      var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
+      var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 909090 : 0;   // ★2026-10-09 Shopee通知：VNの明細は 909,090 VND 以下（超えると出品ごと非公開）
       var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
       var wG = Math.round((Number(tgt.weight) || 0) * 1000) || Number(cfg.family[hw].weightG) || 150;
       var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
@@ -8427,7 +8427,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   var res = { added: 0, skipped: 0, note: '' };
   rows = rows.slice().sort(function (a, b) { return ((a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1)) || (baSeriesNo_(a.name) - baSeriesNo_(b.name)) || (a.item_id - b.item_id); });
   if (!rows.length) { res.note = 'カタログ群なし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); baSkipRec_(st, hw, cc, p, 'nofam'); }); return res; }
-  var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 999999 : 0;
+  var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 909090 : 0;   // ★2026-10-09 Shopee通知：VNの明細は 909,090 VND 以下（超えると出品ごと非公開）
   var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
   var wG = Math.round((Number(rows[0].weight) || 0) * 1000) || Number(fam.weightG) || 150;
   var seen = {}; todo.forEach(function (p) { seen[baTmKey_(p.en)] = 1; });
