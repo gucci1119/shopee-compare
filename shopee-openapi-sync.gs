@@ -640,14 +640,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
-        baout = p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -6429,6 +6429,16 @@ var BA_YNG = /限定版|限定盤|完全生産限定|初回限定|エディシ�
 /* ★2026-09-21 除外語の誤爆よけ。**商品そのものがポーチ・ぬいぐるみ等**のカタログがあるので、
    除外語が探している題名にも入っている時は落とさない（[[ng-word-substring-kills-real-titles]] と同じ型を3回目で塞ぐ）。 */
 var BA_YNG_G = new RegExp(BA_YNG.source, 'g');
+/* ★2026-10-10 本人「値段かなり違うので、通常盤と、限定版は」「これ徹底して」「めっちゃ気をつけて」：限定版・コレクターズ・特典同梱の版の語。
+   写真元の題名にこの語があり、出す作品名（和名・英名）に無ければ【別物】＝写真にも仕入の目安にも使わない。作品名にもあれば（ヨルハエディション等）そのまま */
+var BA_EDITION_RE = /限定版|限定盤|完全生産限定|初回限定|数量限定|限定セット|エディション|edition|コレクターズ|collector|black\s*box|特装版|豪華版|同梱版|特典付|特典あり|特典同梱|プレミアム\s*(?:版|box|ボックス|パック|エディション)|premium\s*(?:edition|box|pack)|デラックス\s*(?:版|エディション|box|ボックス)|deluxe\s*(?:edition|box)|スペシャル\s*(?:版|パック|box|ボックス|エディション)|special\s*(?:edition|pack|box)|コレクターズボックス|アニバーサリー\s*(?:版|エディション|box)/i;
+var BA_EDITION_G = new RegExp(BA_EDITION_RE.source, 'gi');
+function baEditionOk_(name, ja, en) {
+  var hit = String(name || '').normalize('NFKC').match(BA_EDITION_G); if (!hit) return true;
+  var w = (String(ja || '') + ' ' + String(en || '')).normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+  for (var i = 0; i < hit.length; i++) { var h = String(hit[i]).toLowerCase().replace(/\s+/g, ''); if (w.indexOf(h) < 0) return false; }
+  return true;
+}
 function baNgOk_(name, want) {
   var hit = String(name || '').match(BA_YNG_G);
   if (!hit) return true;
@@ -6662,7 +6672,7 @@ function baSameTitle_(c, hw, listingTitle, st, cache) {
   if (cache && cache[k] != null) { var v = String(cache[k]); return { same: v.indexOf('ok:') === 0, judged: true, why: v.slice(3), cached: true }; }
   var o = baClaudeJson_('Target game: Japanese title "' + String(c.ja || '') + '"' + (c.en ? ' / English title "' + String(c.en) + '"' : '') + ' (platform: ' + (BA_HW_LABEL[hw] || hw) + ').\n' +
     'Marketplace listing title (Japanese): "' + t.slice(0, 140) + '"\n' +
-    'Is this listing the SAME game software for the SAME platform? Answer false if it is a sequel/prequel/spin-off/different numbered entry, a different game in the series, a version for another platform, a peripheral/accessory/console, a bundle of several games, a guide book/soundtrack/figure, or an empty box/manual only. A different edition of the same game (Best/廉価版/limited) is still the same game.\n' +
+    'Is this listing the SAME game software for the SAME platform? Answer false if it is a sequel/prequel/spin-off/different numbered entry, a different game in the series, a version for another platform, a peripheral/accessory/console, a bundle of several games, a guide book/soundtrack/figure, or an empty box/manual only. A Best/廉価版/new-price re-release of the same game IS the same game. BUT a limited/collector\'s/special edition that comes with extras (figure, art book, soundtrack, large box) is NOT the same when the target title does not name that edition: answer false and say "limited edition".\n' +
     'Reply JSON only: {"same": true|false, "why": "<short reason in Japanese>"}', st, '同一作品判定', 120);
   if (o && o.nokey) return { same: true, judged: false, why: 'nokey' };
   if (!o) return { same: false, judged: false, why: 'unjudged' };
@@ -7174,7 +7184,7 @@ function baCostEst_(arr) { var a = arr.filter(function (x) { return x > 0; }).so
 /* 一覧に出す金額帯（中古だけ・外れ値を除いた後の 最安〜最高 と件数、除いた外れ値の件数）。本人「金額帯のレンジの表示もあった方がいい」 */
 function baPriceRange_(pm) { if (!pm) return null; var ps = [pm].concat(pm.alts || []).filter(function (a) { return a && baCondRank_(a, 'gc') >= 0; }).map(function (a) { return Number(a.price) || 0; }).filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; }); if (!ps.length) return null; var all = ps.length, out = 0; if (ps.length >= 3) { var med = ps[Math.floor(ps.length / 2)]; var b = ps.filter(function (x) { return x <= med * 2 && x >= med * 0.4; }); if (b.length) { out = ps.length - b.length; ps = b; } } return { lo: ps[0], hi: ps[ps.length - 1], n: all, out: out }; }
 /* ★2026-10-03 hw があれば、出品名に【その機種が書いてある】出品が3件以上ある時はそれだけで相場を出す（機種の語が無い出品は別機種かもしれない＝相場が混ざる・[[19_名前だけの照合の洗い出し（2026-10-03）]]） */
-function baCostFromPre_(pm, hw) { if (!pm) return 0; var _all = [pm].concat(pm.alts || []).filter(function (a) { return a && baCondRank_(a, 'gc') >= 0; }); if (hw) { var _ex = _all.filter(function (a) { var p0 = baPlatsOf_(a.name); return p0.length && p0.some(function (x) { return baHwSame_(x, hw); }); }); if (_ex.length >= 3) _all = _ex; } var ps = _all.map(function (a) { return Number(a.price) || 0; }).filter(function (x) { return x > 0; }); var base = Number(pm.cost || pm.price) || 0; if (ps.length >= 3) return baCostEst_(ps); if (ps.length && base > Math.max.apply(null, ps) * 2) return baCostEst_(ps); return base; }
+function baCostFromPre_(pm, hw, ja, en) { if (!pm) return 0; var _all = [pm].concat(pm.alts || []).filter(function (a) { return a && baCondRank_(a, 'gc') >= 0 && ((ja == null && en == null) || baEditionOk_(a.name, ja, en)); });   /* ★2026-10-10 限定版の値段を通常版の仕入の目安に混ぜない */ if (hw) { var _ex = _all.filter(function (a) { var p0 = baPlatsOf_(a.name); return p0.length && p0.some(function (x) { return baHwSame_(x, hw); }); }); if (_ex.length >= 3) _all = _ex; } var ps = _all.map(function (a) { return Number(a.price) || 0; }).filter(function (x) { return x > 0; }); var base = Number(pm.cost || pm.price) || 0; if (ps.length >= 3) return baCostEst_(ps); if (ps.length && base > Math.max.apply(null, ps) * 2) return baCostEst_(ps); return base; }
 // hits は baMatch_ が「作品名に近い順」に並べている。近い方の半分（最低3件）だけで相場を見る＝副題違いの続編に引きずられない
 function baCostOfHits_(hits) { var n = Math.max(3, Math.ceil(hits.length / 2)); return baCostEst_(hits.slice(0, n).map(function (h) { return h.price; })); }
 // 価格表（ポータルが書いたもの）から現地価格。無ければ 0
@@ -7532,7 +7542,7 @@ function boshuAutoTick(manual) {
       var c = cand[i];
       if (!yahooOk && !((baPreOf_(pre, c.key, hw) || {}).img)) continue;
       /* ★v190 仕入の目安が上限を超える作品は出さない（本人 2026-09-18「金額が高すぎるゲームはリスクなので、あんま出したくない」。前は在庫0で出していた）。AIを呼ぶ前に外す＝費用ゼロ。台帳には入れない（上限を変えたらまた候補になる） */
-      var costChk = 0; { var pmC = baPreOf_(pre, c.key, hw); if (pmC && pmC.img) costChk = baCostFromPre_(pmC, hw); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; }
+      var costChk = 0; { var pmC = baPreOf_(pre, c.key, hw); if (pmC && pmC.img) costChk = baCostFromPre_(pmC, hw, c.ja, c.en); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; }
         if (pmC && pmC.img && costChk >= highCost && (Number(pmC.hits) || 0) < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', Number(pmC.hits) || 0); continue; } }   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
@@ -7571,6 +7581,7 @@ function boshuAutoTick(manual) {
         try { baSameTitleBatch_(c, hw, candsM.map(function (x) { return x && x.name; }), st, sameCache); } catch (eSb2) {}   /* ★2026-09-24 まとめて1回 */
         for (var ci = 0; ci < candsM.length && !okM; ci++) {
           var cm = candsM[ci]; if (!cm || !cm.img || !baUsedOk_(used, cm.img, c.key, hw)) continue;
+          if (!baEditionOk_(cm.name, c.ja, en)) { sameNgM++; continue; }   /* ★2026-10-10 限定版・特典同梱の出品の写真を通常版に使わない（NieR Black Box の件） */
           var smM = baSameTitle_(c, hw, cm.name, st, sameCache);
           if (!smM.same) { if (!smM.judged && smM.why !== 'nokey') sameUnj++; else sameNgM++; continue; }
           var okP = false;   /* ★v184 前の「AI判定OK」は実物かどうかしか見ていない＝題名・機種の突き合わせは必ずやり直す（Codex指摘） */
@@ -7595,7 +7606,7 @@ function boshuAutoTick(manual) {
       if (pm && pm.img && baUsedOk_(used, pm.img, c.key, hw)) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
-          var costM = costChk || baCostFromPre_(pm, hw), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
+          var costM = costChk || baCostFromPre_(pm, hw, c.ja, en), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
           if (costM >= highCost && hitsM < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hitsM); continue; }   /* 高い×出品が少ない＝出さない（候補には残る） */
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
           used[pm.img] = baUsedTag_(c.key, hw);
@@ -7722,7 +7733,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
   var n = 0, okN = 0, ngN = 0, left = 0;
   for (var pi = 0; pi < cand.length; pi++) {
     var pc = cand[pi], pp = baPreOf_(pre, pc.key, hw); if (!pp || !pp.img) continue;
-    if (baCostFromPre_(pp, hw) > maxCost) continue;
+    if (baCostFromPre_(pp, hw, pc.ja, pc.en) > maxCost) continue;
     var ordJ = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), hasOk = false, stop = false;
     for (var oj = 0; oj < ordJ.length && !hasOk; oj++) {
       var kJ = String(ordJ[oj].img || '').replace(/\?.*$/, '') + '|v13|' + hwWord + '|' + pc.key, vK = String(judged[kJ] || '');
@@ -8029,7 +8040,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
     var pm = baPreOf_(pre, c.key, hw);
     if (pm && /判定できず/.test(String(pm.judge || ''))) pm = null;
     if (pm && pm.img) {
-      row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = baCostFromPre_(pm, hw); row.pr = baPriceRange_(pm); row.hits = Number(pm.hits) || 1; row.from = 'mercari';
+      row.img = pm.thumb || pm.img; row.src = pm.src || ''; row.cost = baCostFromPre_(pm, hw, c.ja, c.en); row.pr = baPriceRange_(pm); row.hits = Number(pm.hits) || 1; row.from = 'mercari';
       /* ★v189 実行時に試す順番（baPhotoOrder_）で並べ、AIが判定済みの写真は結果を添える＝一覧で「どの写真が使われるか／なぜ落ちたか」が分かる（本人「判断しやすく」）。ここではAIを呼ばない（控えを読むだけ・無料） */
       try {
         if (!boshuAutoPreviewBody_._jc) boshuAutoPreviewBody_._jc = baKv_(BA_JUDGED) || {};
@@ -9310,4 +9321,58 @@ function tcgCronInstall_(p) {
   var m = Math.max(5, Number((p && p.minutes) || 30));
   ScriptApp.newTrigger('tcgCron').timeBased().everyMinutes(m === 5 || m === 10 || m === 15 || m === 30 ? m : 30).create();
   return { ok: true, removed: removed, created: 'everyMinutes(' + m + ')' };
+}
+
+
+/* ★2026-10-10 本人「他にもそういうのありますよね？」：限定版の化粧箱の写真が【通常版の明細】に付いていないかの監査。
+   対象＝駿河屋の控え（sg_<hw>）に限定版（BA_EDITION_RE）が存在する作品のうち、🤖が出した明細（台帳 boshu_auto_done_<hw> の item#model）で、作品名に限定の語が無いもの。
+   写真そのものを AI（baJudge_・special_box）で見て、化粧箱なら ng:limitedbox → 在庫0＋写真取り直し（rephoto retry）。結果は app_kv limited_audit。
+   1回 max 件（既定40・AI料金）。同じ明細は二度見ない。p.dry=1 で対象を数えるだけ */
+var BA_CF_TLD = { BR: 'com.br', SG: 'sg', MY: 'com.my', PH: 'ph', TH: 'co.th', TW: 'tw', VN: 'vn' };
+function baLimitedAudit_(p) {
+  var dry = String((p && p.dry) || '') === '1'; var max = Math.max(1, Math.min(120, Number((p && p.max) || 40)));
+  var cfg = baKv_(BA_CFG) || {}; var hws = (p && p.hw) ? [String(p.hw)] : (cfg.hws || []).slice();
+  var res = baKv_('limited_audit') || {}; res.items = res.items || {}; res.runs = res.runs || [];
+  var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
+  var judged = {}; var out = { ok: true, dry: dry, hws: hws.length, targets: 0, judged: 0, flagged: [], skipped: 0, byHw: {} };
+  var stripEd = function (t) { return String(t || '').replace(BA_EDITION_G, ' ').replace(/[\[［【][^\]］】]*[\]］】]/g, ' '); };
+  var t0 = Date.now();
+  for (var hi = 0; hi < hws.length; hi++) {
+    var hw = hws[hi]; if (Date.now() - t0 > 240000) { out.note = '時間切れ（続きは次の回）'; break; }
+    var sg = (baKv_('sg_' + hw) || {}).rows || []; var lim = {};
+    sg.forEach(function (r) { var t = String((r && r.t) || ''); if (BA_EDITION_RE.test(t)) { var k = baKey_(stripEd(t)); if (k) lim[k] = t; } });
+    var limN = Object.keys(lim).length; if (!limN) { out.byHw[hw] = { lim: 0 }; continue; }
+    var ledger = baKv_('boshu_auto_done_' + hw) || {}; var targets = [];
+    Object.keys(ledger).forEach(function (key) {
+      if (BA_EDITION_RE.test(key)) return;   /* 作品名そのものが限定版なら対象外 */
+      var bk = baKey_(stripEd(key)); if (!bk || !lim[bk]) return;
+      var o = ledger[key] || {}; Object.keys(o).forEach(function (cc) { var v = String(o[cc] || ''); var m = v.match(/^(\d+)#(\d+)$/); if (!m) return; var id = m[1] + '#' + m[2]; if (res.items[id]) return; targets.push({ hw: hw, key: key, cc: cc, item_id: m[1], model_id: m[2], limTitle: lim[bk] }); });
+    });
+    out.byHw[hw] = { lim: limN, targets: targets.length }; out.targets += targets.length;
+    if (dry) continue;
+    for (var ti = 0; ti < targets.length && out.judged < max; ti++) {
+      if (Date.now() - t0 > 240000) { out.note = '時間切れ（続きは次の回）'; break; }
+      var tg = targets[ti]; var id2 = tg.item_id + '#' + tg.model_id;
+      var row = null; try { row = (sbSelect_('listings', 'select=cc,shop_id,models&item_id=eq.' + tg.item_id) || [])[0] || null; } catch (eR) { row = null; }
+      if (!row) { res.items[id2] = { hw: hw, cc: tg.cc, kind: 'nolisting', at: new Date().toISOString() }; out.skipped++; continue; }
+      var ms = row.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e1) { ms = []; } }
+      var md = (ms || []).filter(function (m) { return m && String(m.id) === tg.model_id; })[0];
+      if (!md || !md.img) { res.items[id2] = { hw: hw, cc: tg.cc, kind: 'noimg', at: new Date().toISOString(), en: md && md.n }; out.skipped++; continue; }
+      var url = 'https://cf.shopee.' + (BA_CF_TLD[String(row.cc || tg.cc)] || 'sg') + '/file/' + md.img;
+      var jd = baJudge_(url, st, judged, 999, { key: 'audit:' + id2, ja: tg.key, en: String(md.n || ''), hw: BA_HW_WORD[hw] || hw, hwKey: hw });
+      out.judged++;
+      var rec = { hw: hw, cc: tg.cc, en: String(md.n || ''), kind: jd.kind || '', ok: !!jd.ok, judged: !!jd.judged, at: new Date().toISOString(), lim: tg.limTitle, img: md.img, stock: md.stock };
+      if (!jd.judged) { out.skipped++; if (jd.kind === 'budget' || jd.kind === 'aidown' || jd.kind === 'error') { out.note = 'AIが使えない（' + jd.kind + '）→ここで止める'; res.items[id2] = rec; break; } }
+      res.items[id2] = rec;
+      if (jd.kind === 'limitedbox') {
+        var act = { stock: '', rephoto: '' };
+        try { updateStock_(String(row.shop_id), tg.item_id, tg.model_id, 0); act.stock = 'ok'; } catch (eS) { act.stock = 'err ' + String(eS).slice(0, 60); }
+        try { var rp = baKvFresh_('boshu_auto_rephoto') || {}; rp.items = rp.items || {}; rp.items[tg.item_id + '#' + String(md.n || '')] = { s: 'retry', why: 'limitedbox 監査 ' + new Date().toISOString().slice(0, 10) }; baKvSet_('boshu_auto_rephoto', rp); act.rephoto = 'ok'; } catch (eP) { act.rephoto = 'err ' + String(eP).slice(0, 60); }
+        rec.act = act; out.flagged.push({ cc: tg.cc, hw: hw, item_id: tg.item_id, model_id: tg.model_id, en: rec.en, lim: tg.limTitle, act: act });
+      }
+    }
+  }
+  if (!dry) { res.at = new Date().toISOString(); res.runs.unshift({ at: res.at, judged: out.judged, flagged: out.flagged.length, targets: out.targets }); if (res.runs.length > 50) res.runs.length = 50; try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); } }
+  out.remaining = out.targets - out.judged - out.skipped;
+  return out;
 }
