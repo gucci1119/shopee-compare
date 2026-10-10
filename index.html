@@ -5252,6 +5252,10 @@
     "出品価格（現地通貨）": "Listing price (local currency)",
     "出品日が新しい順（＝直近に出した商品が上）": "Newest listings first",
     "🤖 これまでに自動で出した明細（機種×国）": "🤖 Auto-listed variations so far (console × country)",
+    "区分・機種": "Category / console",
+    "🎮 ゲーム": "🎮 Games",
+    "🃏 トレカ": "🃏 TCG",
+    "🧸 グッズ": "🧸 Goods",
     "1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）": "1 cell = 1 variation, counted from the bot ledger (boshu_auto_done), today included",
     "空きが多い国＝その機種のカタログがまだ無い国（TW・MY が多い）。🤖は1回の巡回で1つ・1日6つまでカタログを作ってから埋めていきます。": "Countries with many blanks have no catalog for that console yet (mostly TW and MY). The bot creates one catalog per run, up to six a day, then fills them.",
     "作品数": "Titles",
@@ -21121,6 +21125,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-11', items: [
+      '🗂 <b>出品ログの「これまでに自動で出した明細（機種×国）」を区分（🎮ゲーム／🃏トレカ／🧸グッズ）で括りました</b>（本人「ここはカードとかの括りはない？」「カードは機種ではないしな」）。区分ごとの小計行を出し、トレカ・グッズの行は機種でなくタイトル名（ポケモンカード等）で並びます。',
+      '🩹 <b>母数ページのチカチカを直しました</b>（本人「何か表示がチカチカして不安定」）。機種ごとに「出している」を数え終わるたびに画面全体を描き直していた（31機種＝31回）のを、1.2秒に1回までに間引きました。トレカ・グッズは作品マスタが無いので突き合わせ自体をしない（毎回DBを読み直していた分も止まります）。',
+      '🛡 <b>限定版写真の監査を3台のGASで回し、3,243件を判定・写真が商品と違う371件を在庫0にしました</b>（化粧箱291／別作品51／別機種29）。残り507件は16:10に本体で自動再開し、そのあと通常版の実物写真に差し替えて在庫を戻す処理（limited_fix・本体 v305）を回します。'
+    ] },
     { date: '2026-10-10', items: [
       '🃏 <b>トレカが母数・出品ログ・個数の表に機種と同じ行で出るようになりました</b>（本人「この出品ログやら、他に関連するところの、そのトレカのやつも作るんだからね」「個数のところとかも」「母数」）。区分の鍵は機種と同じ（pokeca／yugioh／onepiece…16種）。表示名は TITLE_HW_JA に1か所、短い名前は HW_JA、出品の区分判定（PLAT_JA）はカタログ名の「Pokemon Card Game Series／TCG」等で当てる。駿河屋の控え（sg_index）に16種の件数を入れた（ポケカ 1,440／遊戯王 480／MTG 720 等）。<b>今後も区分（アニメグッズ・ゲームグッズ）を足す時は同じ場所を全部そろえる</b>（スキル new-category-everywhere）',
       '🛡 <b>限定版の写真・値段を通常版に使わないようにしました</b>（本人「相場4万円くらいするんだけど、なんでこんなクソ安い値段で出てるんだ？」「通常盤と、限定版は」「これ徹底して」）。通常版「NieR: Automata」の明細に Black Box Edition の化粧箱の写真が付いて6か国に出ていた（BRで購入あり）。写真集め（メルカリ）・写真の照合（Yahoo!フリマ/ヤフオク）・仕入の目安・同一作品判定・写真のAI判定（化粧箱＝special_box）の5か所で、出品題名に限定版/エディション/コレクターズ/Black Box/特典同梱 等の語があり、出す作品名に無ければ別物として扱う。該当6明細は在庫0にして写真の取り直しを予約',
@@ -30385,19 +30394,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const M = tmMatchOf(cc); lst.tmMatchCc[cc] = M;
       const todo = [...new Set([...Object.keys(master || {}), ...Object.keys(lst.boshuU || {})])].filter(h => M[h] == null);   // ★作品マスタが無い機種（Switch2 等）も回す
       if (!todo.length) return;
-      _tmMatching = true;
+      _tmMatching = true; let _lastDraw = Date.now(); let _dirty = false;
+      /* ★2026-10-11 本人「何か表示がチカチカして不安定」＝機種ごとに数え終わるたびに母数ページ全体を描き直していた（31機種＝31回）。描き直しは1.2秒に1回まで、残りは最後に1回 [[portal-input-redraw]] */
+      const _draw = (force) => { if (!(lst.tab === 'titles' && document.getElementById('list-titles') && tmCurCc() === cc)) return; if (!force && Date.now() - _lastDraw < 1200) { _dirty = true; return; } _lastDraw = Date.now(); _dirty = false; renderTitleMaster(); };
       try {
         for (const h of todo) {
+          if (typeof tmCatOf === 'function' && tmCatOf(h) !== 'game') { M[h] = 0; continue; }   /* 🃏🧸 トレカ・グッズは作品マスタが無く「出している」も別の式＝突き合わせない（毎回読み直してチカチカ・DB読みの原因） */
           const rows = await loadTitleRows(h); if (!rows) continue;
           const lk = await loadTitleLink();
           const mi = tmMineIndex(names[h] || [], lk, h);
           let hit = 0; rows.forEach(r => { if (tmHas(r, mi.set, mi.blob, mi.idx)) hit++; });
           M[h] = hit;
           try { localStorage.setItem(TM_CACHE_KEY + '_' + cc, JSON.stringify({ at: Date.now(), m: M })); } catch (_) {}
-          if (lst.tab === 'titles' && document.getElementById('list-titles') && tmCurCc() === cc) renderTitleMaster();
+          _draw(false);
           await new Promise(r => setTimeout(r, 30));
         }
-      } finally { _tmMatching = false; }
+      } finally { _tmMatching = false; if (_dirty) _draw(true); }
       return;
     }
     if (_tmMatching) return;
@@ -30408,8 +30420,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     lst.tmMatch = lst.tmMatch || tmCacheLoad() || {};
     const todo = [...new Set([...Object.keys(master || {}), ...Object.keys(lst.boshuU || {})])].filter(h => lst.tmMatch[h] == null);
     if (!todo.length) return;
-    _tmMatching = true;
+    _tmMatching = true; let _lastDraw2 = Date.now(); let _dirty2 = false;
+    const _draw2 = (force) => { if (!(lst.tab === 'titles' && document.getElementById('list-titles'))) return; if (!force && Date.now() - _lastDraw2 < 1200) { _dirty2 = true; return; } _lastDraw2 = Date.now(); _dirty2 = false; renderTitleMaster(); };
     for (const h of todo) {
+      if (typeof tmCatOf === 'function' && tmCatOf(h) !== 'game') { lst.tmMatch[h] = 0; continue; }   /* 🃏🧸 同上 */
       const rows = await loadTitleRows(h);
       if (!rows) continue;                    // 読めなかった＝0を控えない（次の描画でやり直す）
       const lk = await loadTitleLink();
@@ -30418,10 +30432,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       rows.forEach(r => { if (tmHas(r, mi.set, mi.blob, mi.idx)) hit++; });
       lst.tmMatch[h] = hit;
       tmCacheSave(lst.tmMatch);
-      if (lst.tab === 'titles' && document.getElementById('list-titles')) renderTitleMaster();   // 出たそばから表を更新
+      _draw2(false);   // 出たそばから表を更新（1.2秒に1回まで）
       await new Promise(r => setTimeout(r, 30));
     }
-    _tmMatching = false;
+    _tmMatching = false; if (_dirty2) _draw2(true);
   }
 
 
@@ -36033,13 +36047,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       ${acctNote}
     </details>`;
     }
-    const rows = hws.map(hw => { const r = tot.hw[hw]; return `<tr><td style="padding:3px 7px;white-space:nowrap"><b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${esc(hw)}</span></td>${ccs.map(cc => cell(r[cc] || 0)).join('')}${cell(r.n, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1">${r.t.toLocaleString()}</td></tr>`; }).join('');
+    /* ★2026-10-11 本人「ここはカードとかの括りはない？」「カードは機種ではないしな」＝区分（🎮ゲーム／🃏トレカ／🧸グッズ）で括り、区分ごとの小計行を出す。トレカ・グッズの行は機種でなくタイトル名（ポケモンカード等）[[new-category-everywhere]] */
+    const CAT_LBL = { game: '🎮 ゲーム', tcg: '🃏 トレカ', goods: '🧸 グッズ' }; const catOrd = { game: 0, tcg: 1, goods: 2 };
+    const catOf = h => (typeof tmCatOf === 'function' ? tmCatOf(h) : 'game');
+    const byCat = {}; hws.forEach(hw => { const c = catOf(hw); (byCat[c] = byCat[c] || []).push(hw); });
+    const cats = Object.keys(byCat).sort((a, b) => (catOrd[a] ?? 9) - (catOrd[b] ?? 9));
+    const rowOf = hw => { const r = tot.hw[hw]; const c = catOf(hw); const lbl = c === 'game' ? `<b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${esc(hw)}</span>` : `<b>${esc(TITLE_HW_JA[hw] || hw)}</b> <span class="smd-dim" style="font-size:10px">${c === 'tcg' ? 'トレカ' : 'グッズ'}</span>`;
+      return `<tr><td style="padding:3px 7px 3px 14px;white-space:nowrap">${lbl}</td>${ccs.map(cc => cell(r[cc] || 0)).join('')}${cell(r.n, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1">${r.t.toLocaleString()}</td></tr>`; };
+    const rows = cats.map(c => { const list = byCat[c]; const sub = { n: 0, t: 0 }; list.forEach(hw => { const r = tot.hw[hw]; ccs.forEach(cc => { sub[cc] = (sub[cc] || 0) + (r[cc] || 0); }); sub.n += r.n || 0; sub.t += r.t || 0; });
+      const head = cats.length > 1 || c !== 'game' ? `<tr style="background:#f6f3fc;border-top:1px solid #e3d9f5"><td style="padding:3px 7px;white-space:nowrap;color:#5e35b1"><b>${CAT_LBL[c] || c}</b> <span class="smd-dim" style="font-size:10px">${list.length}${c === 'game' ? '機種' : 'タイトル'}</span></td>${ccs.map(cc => cell(sub[cc] || 0)).join('')}${cell(sub.n, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1;font-weight:700">${sub.t.toLocaleString()}</td></tr>` : '';
+      return head + list.map(rowOf).join(''); }).join('');
     const foot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 7px"><b>合計</b></td>${ccs.map(cc => cell(tot.cc[cc] || 0, true)).join('')}${cell(tot.all, true)}<td style="text-align:right;padding:3px 7px;color:#5e35b1;font-weight:700">${tot.titles.toLocaleString()}</td></tr>`;
     return `<details data-fold="llogTot" ${(() => { try { return localStorage.getItem('smdFold_llogTot') === '0' ? '' : 'open'; } catch (_) { return 'open'; } })()} style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px">
       <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×国） <span style="color:#ee4d2d">${tot.all.toLocaleString()}件</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">／ 作品 ${tot.titles.toLocaleString()}件 ・ 1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）</span></summary>
       ${tabs}
       <div style="overflow-x:auto;margin-top:6px"><table style="border-collapse:collapse;font-size:11.5px;min-width:560px">
-        <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 7px">${sh('hw', '機種')}</th>${ccs.map(cc => `<th style="text-align:right;padding:3px 7px">${sh(cc, esc(cc), ccCol(cc))}</th>`).join('')}<th style="text-align:right;padding:3px 7px">${sh('n', '合計')}</th><th style="text-align:right;padding:3px 7px" title="1つでも国に出ている作品の数（台帳の鍵の数）">${sh('t', '作品数', '#5e35b1')}</th></tr></thead>
+        <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 7px">${sh('hw', '区分・機種')}</th>${ccs.map(cc => `<th style="text-align:right;padding:3px 7px">${sh(cc, esc(cc), ccCol(cc))}</th>`).join('')}<th style="text-align:right;padding:3px 7px">${sh('n', '合計')}</th><th style="text-align:right;padding:3px 7px" title="1つでも国に出ている作品の数（台帳の鍵の数）">${sh('t', '作品数', '#5e35b1')}</th></tr></thead>
         <tbody>${rows}${foot}</tbody></table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:4px">空きが多い国＝その機種のカタログがまだ無い国（TW・MY が多い）。🤖は1回の巡回で1つ・1日6つまでカタログを作ってから埋めていきます。</div>
     </details>`;
