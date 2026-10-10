@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261009-1200';
+var SRC_VER = '20261011-0745';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9419,7 +9419,8 @@ function baLimitedFix_(p) {
         out.replaced.push({ id: id, cc: v.cc, en: en, src: cm.src || '' }); done = true;
       }
       if (!done) { if (!/^ai:/.test(why)) { try { updateStock_(String(row.shop_id), mm[1], mm[2], 0); } catch (eS0) {} }   /* 差し替えられない＝写真が商品と違うまま売らせない（監査が在庫0にしていない分も含めて） */
-        v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why, stock: 0 }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める'; break; } }
+        if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める（この明細は次の回に見直す）'; out.tried--; break; }   /* ★2026-10-11 AIが使えなかった明細に fix を書かない＝永久に飛ばされない */
+        v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why, stock: 0 }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); }
     } catch (e) { v.fix = { s: 'error', at: new Date().toISOString(), why: String(e).slice(0, 120) }; out.err.push({ id: id, e: String(e).slice(0, 120) }); }
   }
   try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); }
