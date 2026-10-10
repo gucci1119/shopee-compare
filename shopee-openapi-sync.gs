@@ -7342,6 +7342,7 @@ function boshuAutoTick(manual) {
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   try {
     var cfg = baKv_(BA_CFG) || {};
+    try { tcgEnsureTrigger_(cfg); } catch (eTg) {}   /* 🃏 2026-10-10 担当の台に tcgCron（Head 固定の時間トリガー）を1回だけ作る */
     /* ★2026-09-21 🤖の担当は【1つだけ】。本体と2台目（別Googleアカウント）の両方で動くと
        **同じ作品を二重に出す**。担当は app_kv.boshu_auto_cfg.runner（既定 'main'＝本体）。
        ★ここは関数の【いちばん先】に置く（Codex指摘・裏取り済み）。
@@ -9258,6 +9259,15 @@ function tcgPreview_(p) {
   var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names);
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
   return { ok: true, hw: hw, stat: cands.stat, list: cands.list.slice(0, n).map(function (c) { return { en: c.en, ja: c.ja, cost: c.cost, need: c.need.length, k: c.k }; }) };
+}
+/* 担当の台（cfg.tcg.runner）で、Head で走る boshuAutoTick の中から tcgCron の時間トリガーを1回だけ作る＝/exec の再デプロイ無しで動き出す（gas-deploy スキル：Head から作ったトリガーは保存だけで最新） */
+function tcgEnsureTrigger_(cfg) {
+  var tc = (cfg && cfg.tcg) || {}; if (!tc.on) return;
+  if (String(tc.runner || 'child2') !== baRunnerId_()) return;
+  var P = P_(); if (P.getProperty('TCG_TRIG') === 'v1') return;
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'tcgCron'; });
+  if (!has) ScriptApp.newTrigger('tcgCron').timeBased().everyMinutes(30).create();
+  P.setProperty('TCG_TRIG', 'v1');
 }
 function tcgCron() { try { var r = tcgTick(false); console.log('tcgCron ' + JSON.stringify(r).slice(0, 300)); } catch (e) { console.log('tcgCron err ' + e); } }
 function tcgCronInstall_(p) {
