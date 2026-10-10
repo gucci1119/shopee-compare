@@ -21123,6 +21123,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-10-10', items: [
       '🃏 <b>トレカが母数・出品ログ・個数の表に機種と同じ行で出るようになりました</b>（本人「この出品ログやら、他に関連するところの、そのトレカのやつも作るんだからね」「個数のところとかも」「母数」）。区分の鍵は機種と同じ（pokeca／yugioh／onepiece…16種）。表示名は TITLE_HW_JA に1か所、短い名前は HW_JA、出品の区分判定（PLAT_JA）はカタログ名の「Pokemon Card Game Series／TCG」等で当てる。駿河屋の控え（sg_index）に16種の件数を入れた（ポケカ 1,440／遊戯王 480／MTG 720 等）。<b>今後も区分（アニメグッズ・ゲームグッズ）を足す時は同じ場所を全部そろえる</b>（スキル new-category-everywhere）',
+      '🛒 <b>トレカの内訳に「メルカリで売れた」印を付けました</b>。駿河屋のカードと、メルカリで最近売れた物をカード番号（132/103 等）で突き合わせ、売れた件数と平均価格をカードに添える。絞り込みに「🛒 メルカリで売れた」。番号が題名に無い出品（まとめ売り等）は照合しない＝確実な分だけ',
       '🛒 <b>メルカリで売れた物を、トレカ・グッズの母数の第2の仕入元として取り込めるようにしました</b>（本人「別に駿河屋にこだわらなくてもいいよ」「いろんなところから引っ張ってこれば？」）。区分ごとの検索語（ポケモンカード／ポケモン グッズ 等）で売り切れを新しい順に60件×10ページ（app_kv mc_<区分>・mc_index）。母数の行に「メルカリ 売れた n／総数」を添える。駿河屋との名寄せ（足し合わせ）はこれから',
       '🖼 <b>トレカ・グッズの内訳を、ゲームと同じ画像付きカードにしました</b>（本人「なんだこれ」＝マスタ未取込の文が出ていた／「画像でてないやん？ゲームとは表示が違う」「同じような感じにできないかね？」）。行を押すと駿河屋の人気順上位がカード（駿河屋の写真・中古価格・出している／まだ・駿河屋/メルカリ/Yahoo!フリマへのリンク）で並び、すべて／出している／まだ で絞れる。出しているかはトレカ＝カード番号、グッズ＝名前の先頭（目安）で照合',
       '👀 <b>母数の見せ方を直しました</b>（本人「amiiboのPS5版とかそもそもなくない？」「見せ方考えないと」「他のも見てみて」）。本体・コントローラ・メモリ等の区分では、その機種に商品が無い行（母数0・出している0）を省いて件数だけ添える（メモリ/カードは32機種中19が0だった）。見出しの区分名の文字化け（絵文字を半分に切っていた）を直した。amiibo は機種ごとの物ではないのでゲームの区分タブから外し、🧸グッズの「amiibo」1行（駿河屋 おもちゃ×amiibo）にした',
@@ -31033,6 +31034,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
      駿河屋（中古店が持っている物・人気順）と合わせて見る。1ページ60件・既定10ページ（600件）・同じ商品IDは1回 */
   const MC_KW = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王 カード', yugioh_rush: 'ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード カード', wixoss: 'ウィクロス', zx: 'ゼクス カード', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG カード', unionarena: 'ユニオンアリーナ',
     goods_pokemon: 'ポケモン グッズ', goods_mario: 'マリオ グッズ', goods_zelda: 'ゼルダ グッズ', goods_kirby: 'カービィ グッズ', goods_anime: 'アニメ グッズ', goods_amiibo: 'amiibo' };
+  async function ensureMcRows(hw) {
+    lst.mcRows = lst.mcRows || {};
+    if (lst.mcRows[hw]) return lst.mcRows[hw];
+    try { const g = await sbGetAll('app_kv', 'select=v&k=eq.mc_' + encodeURIComponent(hw)); lst.mcRows[hw] = ((g && g[0] && g[0].v) || {}).rows || []; }
+    catch (_) { lst.mcRows[hw] = null; }   /* 読めなかった＝null（空と区別） */
+    return lst.mcRows[hw];
+  }
   async function mercariSearchPage(keyword, opts) {
     const url = 'https://api.mercari.jp/v2/entities:search';
     const dpop = await mercariDpop(url, 'POST');
@@ -34221,6 +34229,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const sg = (lst.sgRows || {})[hw] || [];
       const mineAll = (own && own.names && own.names[hw]) ? [...own.names[hw]] : [];
       const isTcg = tmCatOf(hw) === 'tcg';
+      /* 🛒 メルカリで売れた物（mc_<区分>）と突き合わせ：トレカはカード番号（例 132/103）が題名にある物だけ＝確実な分だけ */
+      const mcRows = await ensureMcRows(hw);
+      const mcByNum = new Map();
+      if (isTcg && Array.isArray(mcRows)) mcRows.forEach(r => { const m = String(r.t || '').normalize('NFKC').match(/(\d{1,3}\/\d{1,3})/); if (!m) return; const k = m[1].toLowerCase(); const a = mcByNum.get(k) || []; a.push(r); mcByNum.set(k, a); });
       const numOf = t => { const m = String(t || '').normalize('NFKC').match(/^([A-Za-z0-9\-]{1,8}\/[A-Za-z0-9\-]{1,8})/); return m ? m[1].toLowerCase() : ''; };
       const mineNums = new Set(mineAll.map(n => { const m = String(n).match(/([A-Za-z0-9\-]{1,8}\/[A-Za-z0-9\-]{1,8})\s*$/); return m ? m[1].toLowerCase() : ''; }).filter(Boolean));
       const normG = t => String(t || '').normalize('NFKC').toLowerCase().replace(/[「」『』【】()（）\s]/g, '');
@@ -34229,11 +34241,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const t = String(r.t || ''); let have = false;
         if (isTcg) { const n0 = numOf(t); have = !!(n0 && mineNums.has(n0)); }
         else { const k = normG(t).slice(0, 18); have = !!(k && mineG.some(m => m.indexOf(k) >= 0)); }
-        return { i: i + 1, t, p: Number(r.p) || 0, k: String(r.k || ''), id: String(r.id || ''), have, d: r.d || '' };
+        const sold = isTcg ? (mcByNum.get(numOf(t)) || []) : [];
+        return { i: i + 1, t, p: Number(r.p) || 0, k: String(r.k || ''), id: String(r.id || ''), have, d: r.d || '', sold };
       });
-      const hit = items.filter(x => x.have).length;
+      const hit = items.filter(x => x.have).length, soldN = items.filter(x => x.sold.length).length;
       if (!lst.tmFil) lst.tmFil = 'all';
-      const fil = lst.tmFil === 'yes' ? items.filter(x => x.have) : lst.tmFil === 'no' ? items.filter(x => !x.have) : items;
+      const fil = lst.tmFil === 'yes' ? items.filter(x => x.have) : lst.tmFil === 'no' ? items.filter(x => !x.have) : lst.tmFil === 'sold' ? items.filter(x => x.sold.length) : items;
       const CAP = 400;
       const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:3px 11px;font-size:11.5px;cursor:pointer">${label} <b>${n.toLocaleString()}</b></button>`;
       const card = x => `<div style="border:1px solid ${x.have ? '#cfe6d6' : '#e6e6e6'};background:${x.have ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;position:relative">
@@ -34241,7 +34254,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.t)}</div>
         ${x.k ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.k.split('/').slice(isTcg ? 1 : 0).join(' / ').slice(0, 50))}</div>` : ''}
         <div style="display:flex;flex-direction:column;gap:3px;margin-top:auto;align-items:flex-start">
-          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${x.have ? '<span style="font-size:9.5px;font-weight:700;color:#1a7f37;background:#e6f4ea;border-radius:8px;padding:1px 7px">出している</span>' : '<span class="smd-dim" style="font-size:9.5px">まだ</span>'}${x.p ? `<span style="font-size:9.5px;font-weight:700;color:#c30d23" title="駿河屋の中古価格">¥${x.p.toLocaleString()}</span>` : ''}<span class="smd-dim" style="font-size:9px">#${x.i}</span></div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${x.have ? '<span style="font-size:9.5px;font-weight:700;color:#1a7f37;background:#e6f4ea;border-radius:8px;padding:1px 7px">出している</span>' : '<span class="smd-dim" style="font-size:9.5px">まだ</span>'}${x.p ? `<span style="font-size:9.5px;font-weight:700;color:#c30d23" title="駿河屋の中古価格">¥${x.p.toLocaleString()}</span>` : ''}${x.sold.length ? `<span style="font-size:9.5px;font-weight:700;color:#b3261e;background:#fdecea;border-radius:8px;padding:1px 7px" title="${av('メルカリで最近売れた（同じカード番号）：\\n' + x.sold.slice(0, 5).map(r => '¥' + Number(r.p).toLocaleString() + ' ' + String(r.t).slice(0, 40)).join('\\n'))}">🛒 売れた ${x.sold.length}件 ¥${Math.round(x.sold.reduce((a, r) => a + (Number(r.p) || 0), 0) / x.sold.length).toLocaleString()}</span>` : ''}<span class="smd-dim" style="font-size:9px">#${x.i}</span></div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             ${x.id ? `<a href="https://www.suruga-ya.jp/product/detail/${esc(x.id)}" target="_blank" rel="noopener" style="color:#c30d23;font-size:9.5px;font-weight:700;text-decoration:none">駿河屋</a>` : ''}
             <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.t.replace(/「[^」]*」/g, '').trim())}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
@@ -34251,7 +34264,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       </div>`;
       box.innerHTML = tmCloseBar + `<div class="tool-card" style="margin:0;max-width:none">
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)}</b><span class="smd-dim" style="font-size:11.5px">駿河屋の${isTcg ? 'シングルカード' : 'グッズ'}（人気順の上位）${isTcg ? '・出しているかはカード番号で照合' : '・出しているかは名前の先頭で照合（目安）'}</span>
-          <span style="display:flex;gap:6px;margin-left:8px">${seg('all', 'すべて', items.length)}${seg('yes', '出している', hit)}${seg('no', 'まだ', items.length - hit)}</span></div>
+          <span style="display:flex;gap:6px;margin-left:8px">${seg('all', 'すべて', items.length)}${seg('yes', '出している', hit)}${seg('no', 'まだ', items.length - hit)}${isTcg && Array.isArray(mcRows) ? seg('sold', '🛒 メルカリで売れた', soldN) : ''}</span>${isTcg ? `<span class="smd-dim" style="font-size:10.5px">${Array.isArray(mcRows) ? 'メルカリ売れた物 ' + mcRows.length.toLocaleString() + ' 件のうち番号つき ' + mcByNum.size.toLocaleString() + ' 種と照合' : 'メルカリの控えは未取得'}</span>` : ''}</div>
         ${items.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">${fil.slice(0, CAP).map(card).join('')}</div>${fil.length > CAP ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">先頭 ${CAP} 件だけ表示しています（全 ${fil.length.toLocaleString()} 件）</div>` : ''}` : '<span class="smd-dim" style="font-size:12px">駿河屋からまだ取り込んでいません（🔧 データの更新 → 駿河屋の一覧）。</span>'}
       </div>`;
       box.querySelectorAll('.tm-fil').forEach(b => b.addEventListener('click', () => { lst.tmFil = b.dataset.f; renderTitleDetail(hw, own); }));
