@@ -640,14 +640,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
-        baout = p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -9374,5 +9374,53 @@ function baLimitedAudit_(p) {
   }
   if (!dry) { res.at = new Date().toISOString(); res.runs.unshift({ at: res.at, judged: out.judged, flagged: out.flagged.length, targets: out.targets }); if (res.runs.length > 50) res.runs.length = 50; try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); } }
   out.remaining = out.targets - out.judged - out.skipped;
+  return out;
+}
+
+
+/* ★2026-10-10 監査で化粧箱と分かった明細（limited_audit.items kind=limitedbox・在庫0）の写真を、控え（boshu_auto_pre）の通常版の実物写真に差し替えて在庫を1に戻す。
+   候補＝版の語が無い（baEditionOk_）・同一作品（baSameTitle_）・AI判定OK（special_box 含む）。通る写真が無ければ fix.s='nophoto' で在庫0のまま（🤖の画面に出す）。
+   baRephoto_ は st.added（直近）だけを見るので、古い明細はここで直す。1回 max 件（既定10）・同じ明細は二度やらない */
+function baLimitedFix_(p) {
+  var max = Math.max(1, Math.min(40, Number((p && p.max) || 10)));
+  var res = baKv_('limited_audit') || {}; res.items = res.items || {};
+  var pre = baKv_('boshu_auto_pre') || {}; var used = baKv_(BA_IMGS) || {}; var judged = {}; var sameCache = {};
+  var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
+  var out = { ok: true, tried: 0, replaced: [], nophoto: [], err: [] }; var t0 = Date.now(); var ledgers = {};
+  var ids = Object.keys(res.items).filter(function (k) { var v = res.items[k]; return v && v.kind === 'limitedbox' && !v.fix; });
+  for (var i = 0; i < ids.length && out.tried < max; i++) {
+    if (Date.now() - t0 > 230000) { out.note = '時間切れ（続きは次の回）'; break; }
+    var id = ids[i], v = res.items[id], hw = String(v.hw || ''); var mm = id.match(/^(\d+)#(\d+)$/); if (!mm) continue;
+    out.tried++;
+    try {
+      if (!ledgers[hw]) ledgers[hw] = baKv_('boshu_auto_done_' + hw) || {};
+      var key = ''; var L = ledgers[hw]; Object.keys(L).some(function (k) { var o = L[k] || {}; return Object.keys(o).some(function (cc) { if (String(o[cc]) === id) { key = k; return true; } return false; }); });
+      if (!key) { v.fix = { s: 'nokey', at: new Date().toISOString() }; out.nophoto.push({ id: id, why: 'nokey' }); continue; }
+      var row = (sbSelect_('listings', 'select=cc,shop_id,models&item_id=eq.' + mm[1]) || [])[0]; if (!row) { v.fix = { s: 'nolisting', at: new Date().toISOString() }; continue; }
+      var ms = row.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e1) { ms = []; } }
+      var md = (ms || []).filter(function (m) { return m && String(m.id) === mm[2]; })[0]; if (!md) { v.fix = { s: 'nomodel', at: new Date().toISOString() }; continue; }
+      var en = String(md.n || v.en || ''); var c = { key: key, ja: key, en: en };
+      var pm = baPreOf_(pre, key, hw); var cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 8) : [];
+      var ex = { key: 'fix:' + id, ja: key, en: en, hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
+      var done = false, why = cands.length ? '' : 'nopre';
+      for (var k = 0; k < cands.length && !done; k++) {
+        var cm = cands[k]; var cu = String(cm.img || cm.thumb || ''); if (!cu) continue;
+        if (!baEditionOk_(cm.name, key, en)) { why = why || 'edition'; continue; }
+        var cuKey = cu.replace(/\?.*$/, ''); if (!baUsedOk_(used, cuKey, key, hw)) { why = why || 'used'; continue; }
+        var sm = baSameTitle_(c, hw, cm.name, st, sameCache); if (!sm.same) { why = why || ('same:' + sm.why); continue; }
+        var jc = baJudge_(cu, st, judged, 999, ex); if (!jc.judged) { why = 'ai:' + jc.kind; break; }
+        if (!jc.ok) { why = why || ('ng:' + jc.kind); continue; }
+        var r = setVariationImagesBulk_(String(row.shop_id), mm[1], [{ option: en, url: cu, expect: md.img }]);
+        if (!r || r.ok === false) { why = 'replace:' + String((r && r.error) || '').slice(0, 60); continue; }
+        try { updateStock_(String(row.shop_id), mm[1], mm[2], 1); } catch (eS) {}
+        v.fix = { s: 'replaced', at: new Date().toISOString(), url: cu, src: cm.src || '', name: String(cm.name || '').slice(0, 80), stock: 1 };
+        try { used[cuKey] = baUsedTag_(key, hw); } catch (eU) {}   /* 使った写真の印（baUsedOk_ と同じ形） */
+        out.replaced.push({ id: id, cc: v.cc, en: en, src: cm.src || '' }); done = true;
+      }
+      if (!done) { v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める'; break; } }
+    } catch (e) { v.fix = { s: 'error', at: new Date().toISOString(), why: String(e).slice(0, 120) }; out.err.push({ id: id, e: String(e).slice(0, 120) }); }
+  }
+  try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); }
+  try { baKvSet_(BA_IMGS, used); } catch (eW2) {}
   return out;
 }
