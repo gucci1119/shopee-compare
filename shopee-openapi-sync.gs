@@ -640,14 +640,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
-        baout = p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -6938,7 +6938,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) {
     var c0 = String(cache[u]);
-    if (c0.indexOf('ok:') === 0) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない） */
+    if (c0.indexOf('ok:') === 0 && !(expect && expect.tcg)) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない）。🃏トレカは通さない（2026-10-10） */
       /* ★2026-09-28 本人「さらに減らせる余地」①：シュリンクの確認（38%を落とす・Haiku）を先、四隅の確認（5.5%・上位モデル）を後に。
          先に落ちた写真には高い方をかけない。確認の中身は同じ＝基準は変わらない */
       var s0 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey);   /* ★2026-09-26 通っていた写真もシュリンク（と機種ロゴ）の確認を1回だけ */
@@ -6956,7 +6956,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
     { type: 'image', source: { type: 'url', url: String(imgUrl) } },
-    { type: 'text', text: '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'ファミコン・スーパーファミコンのカセットは、正規品なら ラベルが印刷で鮮明・端がまっすぐ・任天堂やメーカーの表記や型番がある。次のどれかが見えたら repro=true：ラベルが紙を貼っただけ／手書き／色がにじんでいる・カセットの色や形が見慣れない（透明・蛍光色）・英語だけのラベルなのに日本のゲーム・1本に何本ものゲーム（\u300c100 in 1\u300d等）。判断できなければ repro=false。' + '★写っているものが【ゲームソフトそのもの】でなければ product_photo=false・kind="goods" です：トレーディングカード（ポケモンカード等）、グッズ（マグネット・ぬいぐるみ・パスケース・アクリルスタンド・缶バッジ・タオル・キーホルダー等）、特典の台紙や紙だけ、中身の入っていない空のケース・空容器だけ。カセット・ディスク・ケース入りのソフト本体が写っている写真だけ true にしてください。' + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。shadow＝商品の影・光の反射・写り込みが見えるなら true。tilt＝商品が傾いて写っている、遠近が付いている、机に置いた角度が分かる（真上から平らに撮ったスキャンのようでない）なら true。JSONだけで答えて（この順番で）: {"scene":"...","bg":0〜100（写真の中で商品以外＝机・床・布・手・壁などが写っている面積の割合。商品が画面いっぱいで周りが見えなければ0）,"edges":true|false,"shadow":true|false,"tilt":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|goods|other","repro":true|false' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' + _extraRule } ] }] };
+    { type: 'text', text: (expect && expect.tcg) ? tcgJudgePrompt_(expect) : '中古ゲームソフトの出品写真です。出品者が自分の手元の商品そのもの（パッケージ・ケース・カートリッジ・ディスクなど、実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・床・布・手などの背景、ケースの縁や厚み、光の反射や影、傾きが写ります。次はすべて false：①パッケージの絵柄だけが画面いっぱいに平らに写っていて背景も縁も影も無い画像（スキャン・公式の商品画像・通販サイトのカタログ画像。kind=catalog）②テレビやモニターにゲーム画面・タイトル画面を映して撮った動作確認の写真（本体やケーブルと一緒に写っていても、主役が画面なら kind=screen）③商品が写っていない写真④複数タイトルのまとめ写真⑤シュリンク（透明フィルム）で未開封のまま＝新品に見える写真（kind=sealed）。箱やケースに多少の傷み・日焼け・汚れ・値札の跡があるのは問題ありません（中古だと分かる写真のほうが良い）。kind は主役の物を正確に：紙やプラの外箱が写っていれば box、むき出しのゲームカセット（カートリッジ）だけなら cartridge。迷ったら false。' + (expect ? 'この写真は「' + String(expect.ja || '') + (expect.en ? ' / ' + String(expect.en) : '') + '」（' + String(expect.hw || '') + ' 用ソフト）のはずです。パッケージやラベルの題名・機種ロゴが読めて、まず、パッケージやラベルに印刷されている機種のロゴ・表記をそのまま platform_seen に書き写してください（例: "NINTENDO GAMECUBE" "PlayStation 2" "Wii"。読めなければ ""）。題名も見えたとおり title_seen に書き写してください（読めなければ ""）。そのうえで、題名が明らかに別の作品・続編なら title_match="no"、読めて合っていれば "yes"、読めなければ "unreadable"。日本版だけが欲しいので、海外版（北米・欧州・アジア版）なら overseas=true：写真に「海外版」「北米版」「輸入版」などの文字がある／ESRB・PEGI・USK のレーティングマークが見える／パッケージの表記が英語など外国語だけ（日本版は CERO マークや日本語の表記がある）。判断できなければ overseas=false。' : '') + 'ファミコン・スーパーファミコンのカセットは、正規品なら ラベルが印刷で鮮明・端がまっすぐ・任天堂やメーカーの表記や型番がある。次のどれかが見えたら repro=true：ラベルが紙を貼っただけ／手書き／色がにじんでいる・カセットの色や形が見慣れない（透明・蛍光色）・英語だけのラベルなのに日本のゲーム・1本に何本ものゲーム（\u300c100 in 1\u300d等）。判断できなければ repro=false。' + '★写っているものが【ゲームソフトそのもの】でなければ product_photo=false・kind="goods" です：トレーディングカード（ポケモンカード等）、グッズ（マグネット・ぬいぐるみ・パスケース・アクリルスタンド・缶バッジ・タオル・キーホルダー等）、特典の台紙や紙だけ、中身の入っていない空のケース・空容器だけ。カセット・ディスク・ケース入りのソフト本体が写っている写真だけ true にしてください。' + '判断の前に、見えているものをそのまま書いてください。scene＝商品のまわりに写っているもの（例: "木の机" "カーペット" "手" "白い布"。商品の絵柄だけが画面いっぱいで周りに何も写っていなければ "none"）。edges＝箱やケースの縁・厚み・角の傷み・ビニールの反射・影のどれかが見えるなら true、平らな絵柄だけなら false。shadow＝商品の影・光の反射・写り込みが見えるなら true。tilt＝商品が傾いて写っている、遠近が付いている、机に置いた角度が分かる（真上から平らに撮ったスキャンのようでない）なら true。JSONだけで答えて（この順番で）: {"scene":"...","bg":0〜100（写真の中で商品以外＝机・床・布・手・壁などが写っている面積の割合。商品が画面いっぱいで周りが見えなければ0）,"edges":true|false,"shadow":true|false,"tilt":true|false,"shown":"front|back|open|manual|multiple|other"（front＝商品1点を表面＝おもて面だけから撮った写真。閉じた箱・ケースの表、またはカセットのラベル面。back＝裏面。open＝ケースや箱を開けて中身を見せている、またはディスク・カセットをケース・箱と並べている。manual＝説明書・チラシ・はがきなどの紙が一緒に写っている。multiple＝商品が2点以上、または複数の写真を1枚にまとめた画像）,"product_photo":true|false,"kind":"box|case|cartridge|disc|screen|catalog|sealed|goods|other","repro":true|false' + (expect ? ',"platform_seen":"...","title_seen":"...","title_match":"yes|no|unreadable","overseas":true|false' : '') + '}' + _extraRule } ] }] };
   if (!baAiQuotaOk_(st)) return { ok: false, judged: false, kind: 'error' };
   ufBump_(1, 'boshu_auto(写真AI判定)');
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
@@ -7001,7 +7001,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (ok && o.repro === true) { ok = false; kind = 'repro'; }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
-  if (ok) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像 */
+  if (ok && !(expect && expect.tcg)) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像。🃏トレカはカード面そのものが絵柄なので通さない（2026-10-10） */
     /* ★2026-09-28 ①：シュリンク（安い・よく落とす）→ 四隅（高い）の順。基準は同じ */
     { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = (s1 === 'ov:1' ? 'overlay' : 'wrongplatform'); } else if (s1) { ok = false; kind = 'sealed'; } }
     if (ok) { var n1 = baConfirmCorners_(imgUrl, u, st, cache);
@@ -8957,7 +8957,8 @@ function baLogAutoMark_(rows) {
   } catch (e) {}
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
-var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG' };
+var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG',
+  pokeca: 'POKECA', pokeca_old: 'POKECAOLD', yugioh: 'YUGIOH', yugioh_rush: 'YUGIOHRD', onepiece: 'OPCG', duema: 'DUEMA', weiss: 'WEISS', battlespirits: 'BATSPI', vanguard: 'VANGUARD', wixoss: 'WIXOSS', zx: 'ZX', digimon: 'DIGIMON', shadowverse: 'SHADOWVERSE', dbh: 'DBH', mtg: 'MTG', unionarena: 'UNIONARENA' };   /* 🃏 2026-10-10 トレカ（明細SKUの頭） */
 // 入った明細のJANを product_ids（app_kv・{items:{'id:<item>#<model>': {...}}}）へ。既にJANが入っている鍵は触らない
 /* ★2026-09-20 本人「出してない商品を出すんでしょ？なぜ JAN 情報がないとかいうことが起こる？」
    実測：🤖の 83明細のうち JAN なし 40件、そのうち 38件は model_id が空＝add_model の返事から明細IDを拾えず、JAN を書く鍵（id:<item>#<model>）が作れなかった（マスタに JAN はあった）。
@@ -9071,4 +9072,197 @@ function baSoldSync_(st) {
     catch (e) { baLog_(st, '在庫0にできず（' + a.cc + ' ' + a.en + '）: ' + String(e).slice(0, 60)); }
   });
   if (zeroed) baLog_(st, '🛒 売れた作品の他国在庫を0に ' + zeroed + '件（' + keys.map(function (k) { return soldKeys[k]; }).join('・') + ' で売れた）');
+}
+
+
+/* ================================================================================================
+   🃏 トレカ（シングルカード）の自動出品 ─ 2026-10-10
+   本人「トレカの出品もよろしく」「シングルだけですね」「トレカも中古で出す」「あまり高いのは出さない」「ポケカ、ワンピース、遊戯王などを有名どころ以外も出すよ」
+   　　「この出品ログやら、他に関連するところの、そのトレカのやつも作るんだからね」「個数のところとかも」「母数」
+   仕組み（ソフトの🤖と同じ部品を使う＝鍵は機種と同じ hw）：
+     母数   … 駿河屋のシングル（人気順の上位）＝ app_kv sg_<hw>（ポータルの🧮が書く）。価格帯 cfg.tcg.minJpy〜maxJpy（既定 ¥300〜¥5,000）だけ
+     明細名 … 「<レアリティ> <英名> <番号>」（例 SAR Mew ex 129/103・30字以内）。英名は app_kv tcg_names_<hw>（ポケカ＝種族 898 の日英）。英名にできないカード（トレーナーズ等）は出さない
+     写真   … Yahoo!フリマ/ヤフオクで「ポケモンカード <和名> <番号>」を探し、題名に番号が入る出品の写真だけ → AI判定（カード用の問い・実物の写真だけ。駿河屋の画像は使わない）
+     価格   … 価格表 baPriceFromTbl_（カタログの重量 300g・仕入＝駿河屋の中古価格）。ソフトと同じ
+     入れ先 … cfg.family[hw]（既存の「Pokemon Card Game Series TCG PCG PTCG」カタログ・名前/親SKUで束ねる）→ baAddToCc_（満杯なら複製）
+     台帳   … boshu_auto_done_<hw>（出品ログ・個数の表はこれを読む）／状態 tcg_auto_status
+   担当は cfg.tcg.runner（既定 child2＝3台目）。ソフトの🤖と同じ鍵（getScriptLock）を取るので同時には走らない
+   ================================================================================================ */
+var TCG_HW_JA = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
+var TCG_SEARCH_WORD = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
+/* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
+var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
+function tcgJudgePrompt_(expect) {
+  return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、光の反射や影、傾き、擦れや白かけが写ります。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い・影が無い）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）}';
+}
+/* 駿河屋の題名 → {num, rar, name}。例 "129/103[SAR]：(キラ)ミュウex"・"030/103(14/30)：(キラ)ピカチュウ"・"088/076[AR]：(キラ)カクレオン" */
+function tcgParsePokeca_(t) {
+  var x = String(t || '').normalize('NFKC').trim();
+  var m = x.match(/^([A-Za-z0-9\-]{1,8}\/[A-Za-z0-9\-]{1,8})\s*(?:\([^)]*\))?\s*(?:\[([^\]]+)\])?\s*[：:]\s*(.+)$/);
+  if (!m) return null;
+  var name = m[3].replace(/\((キラ|ミラー|マスターボール|モンスターボール|ノンキラ|ホロ|[^)]{1,12})\)/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!name) return null;
+  return { num: m[1], rar: String(m[2] || '').trim(), name: name };
+}
+/* 和名 → 英名（種族の辞書）。接尾（ex/V/VMAX/VSTAR/GX…）は残す。タッグ（&）は両方を訳す。辞書に無ければ ''＝出さない */
+function tcgEnPokeca_(name, map) {
+  map = map || {};
+  var parts = String(name || '').split(/\s*[&＆]\s*/);
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var raw = parts[i].trim(), suf = '';
+    var sm = raw.match(/\s*(ex|EX|VMAX|VSTAR|GX|BREAK|LV\.?\s*X)$/); if (sm) { suf = sm[1].replace(/\s+/g, ''); raw = raw.slice(0, sm.index).trim(); }
+    else { var vm = raw.match(/(.)V$/); if (vm && !/[A-Za-z]/.test(vm[1])) { suf = 'V'; raw = raw.slice(0, -1).trim(); } }
+    var pre = '';
+    var pm = raw.match(/^(メガ|M)\s*(.+)$/); if (pm) { pre = 'Mega '; raw = pm[2].trim(); }
+    var reg = ''; var rm = raw.match(/^(ガラル|アローラ|ヒスイ|パルデア)(?:の)?(.+)$/); if (rm) { reg = { 'ガラル': 'Galarian ', 'アローラ': 'Alolan ', 'ヒスイ': 'Hisuian ', 'パルデア': 'Paldean ' }[rm[1]]; raw = rm[2].trim(); }
+    var en = map[raw] || map[raw.replace(/・/g, '')] || '';
+    if (!en) { var fm = raw.match(/^(.+?)(X|Y|Z)$/); if (fm && map[fm[1]] && pre) { en = map[fm[1]] + ' ' + fm[2]; } }   /* メガミュウツーY */
+    if (!en) return '';
+    out.push((pre + reg + en + (suf ? ' ' + suf : '')).trim());
+  }
+  return out.join(' & ');
+}
+function tcgEnName_(hw, pr, names) {
+  if (hw === 'pokeca' || hw === 'pokeca_old') return tcgEnPokeca_(pr.name, names);
+  return '';   /* 他のタイトルは英名の辞書ができてから */
+}
+/* 候補＝駿河屋の控え（人気順）から、価格帯に入り・英名にでき・どこかの国にまだ出していない物 */
+function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names) {
+  var tc = cfg.tcg || {}; var minJ = Number(tc.minJpy) || 300, maxJ = Number(tc.maxJpy) || 5000;
+  var sv = baKv_('sg_' + hw) || {}; var rows = sv.rows || [];
+  var out = [], stat = { rows: rows.length, band: 0, parse: 0, noname: 0, long: 0, listed: 0, cand: 0 };
+  var seenEn = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i]; if (!r || !r.t) continue;
+    var price = Number(r.p) || 0; if (!(price >= minJ && price <= maxJ)) { stat.band++; continue; }
+    if (/BOX|ボックス|パック|デッキ|セット|まとめ|プロモ.*未開封|サプライ|スリーブ/i.test(String(r.k || '') + ' ' + r.t)) { stat.band++; continue; }
+    var pr = tcgParsePokeca_(r.t); if (!pr) { stat.parse++; continue; }
+    var en = tcgEnName_(hw, pr, names); if (!en) { stat.noname++; continue; }
+    var full = ((pr.rar ? pr.rar + ' ' : '') + en + ' ' + pr.num).replace(/\s+/g, ' ').trim();
+    if (full.length > 30) full = (en + ' ' + pr.num).trim();
+    if (full.length > 30) { stat.long++; continue; }
+    if (seenEn[full.toLowerCase()]) continue; seenEn[full.toLowerCase()] = 1;
+    var key = hw + ':' + String(r.id || full);
+    var k1 = baTmKey_(full);
+    var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && /^\d/.test(String(d))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
+    if (!need.length) { stat.listed++; continue; }
+    out.push({ key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0 });
+    stat.cand++;
+  }
+  return { list: out, stat: stat };
+}
+/* 写真を1枚：題名に番号が入る出品だけ → AI判定（カード用）。戻り {img, src, srcTitle, hits} か null。blocked なら {blocked:1} */
+function tcgPhoto_(hw, c, cfg, st, judged, capN) {
+  var q = (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num;
+  var y = baPhotoSrc_(q, cfg);
+  if (y.blocked) return { blocked: 1 };
+  var numN = String(c.num).replace(/\s+/g, '').toLowerCase();
+  var hits = (y.items || []).filter(function (it) {
+    var t = String(it.t || '').normalize('NFKC').toLowerCase();
+    if (TCG_NG_TITLE.test(t)) return false;
+    if (t.replace(/\s+/g, '').indexOf(numN) < 0) return false;           /* 番号が題名に無い出品は別のカードかもしれない＝使わない */
+    return true;
+  });
+  var used = baKv_(BA_IMGS) || {};
+  var tried = 0;
+  for (var i = 0; i < hits.length && tried < 3; i++) {
+    var u = String(hits[i].img || '').replace(/\?.*$/, ''); if (!u) continue;
+    if (!baUsedOk_(used, u, c.key, hw)) continue;
+    tried++;
+    var j = baJudge_(u, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
+    if (j.ok) return { img: u, src: hits[i].url || (hits[i].id ? ('https://auctions.yahoo.co.jp/jp/auction/' + hits[i].id) : ''), srcTitle: String(hits[i].t || '').slice(0, 80), hits: hits.length, q: q, from: y.src || 'paypay' };
+    if (j.kind === 'budget' || j.kind === 'error' || j.kind === 'aidown') return { stop: j.kind };
+  }
+  return { miss: 1, hits: hits.length, q: q };
+}
+function tcgTick(manual) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(manual === true ? 5000 : 60000)) return { ok: false, error: 'いま走っています（🤖と同じ鍵）' };
+  var t0 = Date.now(), DEADLINE = 240000;
+  BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
+  baKvPrefetch_([BA_CFG, 'tcg_auto_status', 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual']);
+  var st = baKv_('tcg_auto_status') || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
+  var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {} };
+  var finish_ = function (msg) { st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_('tcg_auto_status', st); } catch (e) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  try {
+    var cfg = baKv_(BA_CFG) || {};
+    if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
+    var tc = cfg.tcg || {};
+    var rid = baRunnerId_(), want = String(tc.runner || 'child2');
+    if (manual !== true && rid !== want) { ufPersist_(); try { lock.releaseLock(); } catch (e1) {} return { ok: false, skipped: 'not_runner', runner: rid, want: want }; }
+    if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
+    if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
+    var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) return finish_('🛡 Shopee枠の残りが少ないので見送り（' + ufNow + '／' + ufStopLine_() + '）');
+    var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
+    if (!hasKey) return finish_('🔒 CLAUDE_KEY が無いので出しません（カードは写真の判定なしでは出さない）');
+    var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
+    try { var ay = baAiYenToday_(); if (aiCap > 0 && ay && ay.yen >= aiCap && manual !== true) return finish_('💴 今日のAI料金が上限（¥' + Math.round(ay.yen) + '／' + aiCap + '）'); } catch (eY) {}
+    var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0, judged: 0 };
+    var dailyMax = Number(tc.dailyMax) || 60;
+    if (st.today.added >= dailyMax && manual !== true) return finish_('今日の上限 ' + dailyMax + '件に達したので明日まで休み');
+    var hws = (tc.hws || ['pokeca']).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
+    if (!hws.length) return finish_('🃏 の入れ先（cfg.family）が無い');
+    var cur = Number(st.cursor) || 0, hw = hws[cur % hws.length]; st.cursor = cur + 1;
+    out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
+    var names = (baKv_('tcg_names_' + hw) || {}).map || {};
+    var ctx = baLoadCtx_(cfg, hw, ccs);
+    var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names);
+    st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
+    if (!cands.list.length) return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）');
+    var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
+    var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
+    var picks = [], tried = 0, miss = 0, blocked = false;
+    var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
+    if (!yahooOk) return finish_('写真の検索が弾かれている間は休み（' + st.blockedUntil + '）');
+    for (var i = 0; i < cands.list.length && picks.length < perTick && Date.now() - t0 < 150000; i++) {
+      var c = cands.list[i];
+      var tr = (st.tried = st.tried || {})[c.key] || 0; if (tr >= 3) continue;   /* 3回写真が見つからなかったカードは当分出さない */
+      tried++;
+      var ph = tcgPhoto_(hw, c, cfg, st, judged, capN);
+      if (ph.blocked) { blocked = true; st.blockedUntil = Date.now() + 2 * 3600000; baLog_(st, '写真の検索に弾かれた→2時間休む'); break; }
+      if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
+      if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
+      var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); continue; }
+      if (!imageId) continue;
+      picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1 });
+      delete st.tried[c.key];
+    }
+    if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (blocked ? '・弾かれた' : '') + '）'); }
+    for (var ci = 0; ci < ccs.length; ci++) {
+      var cc = ccs[ci]; if (Date.now() - t0 > DEADLINE) { baLog_(st, '時間切れ→残りは次の回'); break; }
+      try {
+        var r = baAddToCc_(cfg, cc, hw, fam, ctx.famRows[cc] || [], ctx.allRows[cc] || [], picks, ctx.listedByCc[cc] || {}, ctx.ledger, st, '', ctx.allRows);
+        out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
+      } catch (eC) { out.ccs[cc] = { error: String(eC).slice(0, 160) }; baLog_(st, cc + '：' + String(eC).slice(0, 160)); }
+    }
+    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length;
+    try { baKvSet_('boshu_auto_done_' + hw, ctx.ledger); } catch (eL) { baLog_(st, '台帳の保存に失敗: ' + String(eL).slice(0, 120)); }
+    try { baKvSet_('tcg_judged', judged); } catch (eJ2) {}
+    if (st.added.length > 300) st.added.length = 300; if (st.log.length > 200) st.log.length = 200; if (st.skipped.length > 200) st.skipped.length = 200;
+    return finish_(hw + '：' + picks.length + '枚を試して ' + out.added + ' 明細を追加（見送り ' + out.skipped + '）');
+  } catch (e) {
+    st.lastErr = String((e && e.stack) || e).slice(0, 400); baLog_(st, '⚠ ' + String(e).slice(0, 200));
+    out.ok = false; out.error = String(e).slice(0, 200); return finish_('エラー: ' + String(e).slice(0, 120));
+  }
+}
+/* 候補の下見（出さない）：ポータルの🃏画面用。hw= で機種、n= で件数 */
+function tcgPreview_(p) {
+  var cfg = baKv_(BA_CFG) || {}; var hw = String((p && p.hw) || 'pokeca'); var fam = (cfg.family || {})[hw] || {};
+  var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs : (cfg.ccs || []);
+  var names = (baKv_('tcg_names_' + hw) || {}).map || {};
+  var ledger = baKv_('boshu_auto_done_' + hw) || {};
+  var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names);
+  var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
+  return { ok: true, hw: hw, stat: cands.stat, list: cands.list.slice(0, n).map(function (c) { return { en: c.en, ja: c.ja, cost: c.cost, need: c.need.length, k: c.k }; }) };
+}
+function tcgCron() { try { var r = tcgTick(false); console.log('tcgCron ' + JSON.stringify(r).slice(0, 300)); } catch (e) { console.log('tcgCron err ' + e); } }
+function tcgCronInstall_(p) {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'tcgCron') { ScriptApp.deleteTrigger(t); removed++; } });
+  if (String((p && p.off) || '') === '1') return { ok: true, removed: removed, created: '' };
+  var m = Math.max(5, Number((p && p.minutes) || 30));
+  ScriptApp.newTrigger('tcgCron').timeBased().everyMinutes(m === 5 || m === 10 || m === 15 || m === 30 ? m : 30).create();
+  return { ok: true, removed: removed, created: 'everyMinutes(' + m + ')' };
 }
