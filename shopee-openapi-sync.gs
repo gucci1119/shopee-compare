@@ -8547,7 +8547,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (ceilA && price > ceilA) price = ceilA;
       if ((hi && price < hi / ratio) || (lo && price > lo * ratio)) { baSet_(ledger, p.key, cc, 'skip:ratio'); res.skipped++; baSkipRec_(st, hw, cc, p, 'ratio'); return; }   // 丸めで枠から出たら見送り
       lo = lo ? Math.min(lo, price) : price; hi = hi ? Math.max(hi, price) : price;
-      items.push({ option: p.en, price: price, stock: p.stock, sku: baSkuOf_(hw, p.en), image_id: p.imageId, _p: p });   /* ★2026-09-20 明細SKU＝機種_作品名（7か国共通・本人OK） */
+      items.push({ option: p.en, price: price, stock: p.stock, sku: p.sku || baSkuOf_(hw, p.en), image_id: p.imageId, _p: p });   /* 🃏 トレカは 区分_弾記号_番号_レアリティ（2026-10-10） */   /* ★2026-09-20 明細SKU＝機種_作品名（7か国共通・本人OK） */
     });
     if (!items.length) { i += batch.length; continue; }
     /* ♻️ 複製したカタログに【仮の明細(test)】が残っていたら、まず1件ぶんをそこへ上書きして枠を取り戻す。
@@ -9126,12 +9126,37 @@ function tcgEnPokeca_(name, map) {
   }
   return out.join(' & ');
 }
-function tcgEnName_(hw, pr, names) {
-  if (hw === 'pokeca' || hw === 'pokeca_old') return tcgEnPokeca_(pr.name, names);
-  return '';   /* 他のタイトルは英名の辞書ができてから */
+/* ★2026-10-10 本人「この辺に型番あるくない？」＝カード左下の「M3a 132/103 SAR」。弾の記号は駿河屋の題名に無く、区分名（MEGA拡張パック30thCELEBRATION）にだけある
+   → 区分名→弾記号を文章AIに1回だけ聞いて app_kv tcg_sets に控える（{区分名: {code, at}}）。分からなければ '' */
+function tcgSetCode_(hw, setName, ai) {
+  setName = String(setName || '').trim(); if (!setName || !ai || !ai.sets) return '';
+  var c = ai.sets[setName]; if (c) return String(c.code || '');
+  if (!(ai.setBudget > 0) || !ai.st) return '';
+  ai.setBudget--;
+  var o = baClaudeJson_('Japanese Pokémon TCG expansion (set) name: "' + setName + '". Reply JSON only: {"code": "<the set code printed at the bottom-left of its cards, e.g. sv8a, M3a, SV-P, s12a. Empty string if not sure>"}', ai.st, 'tcg_set', 120);
+  if (!o || o.nokey) { ai.setBudget++; return ''; }
+  var code = String(o.code || '').trim(); if (!/^[A-Za-z0-9\-]{1,8}$/.test(code)) code = '';
+  ai.sets[setName] = { code: code, at: Date.now() }; ai.setsDirty = 1;
+  return code;
+}
+function tcgEnName_(hw, pr, names, ai) {
+  var en = '';
+  if (hw === 'pokeca' || hw === 'pokeca_old') en = tcgEnPokeca_(pr.name, names);
+  if (en) return en;
+  /* ★2026-10-10 辞書に無い名前（トレーナーズ・サポート・グッズ・特殊な形態＝ポケカで106件）は文章AIに公式英名を聞く。控え app_kv tcg_names_ai（{和名: {en, kind}}）＝同じ名前は2度聞かない。1回の実行で ai.budget 件まで */
+  if (!ai || !ai.cache) return '';
+  var c = ai.cache[pr.name]; if (c) return String(c.en || '');
+  if (!(ai.budget > 0) || !ai.st) return '';
+  ai.budget--;
+  var o = baClaudeJson_('Japanese Pokémon TCG card name: "' + pr.name + '" (game: ' + (TCG_HW_JA[hw] || hw) + ').\nReply JSON only: {"en": "<the official English card name exactly as printed on the English version of this card (Trainer/Supporter/Item/Energy names included). Empty string if you are not sure>", "kind": "pokemon|trainer|energy|other"}', ai.st, 'tcg_name', 200);
+  if (!o || o.nokey) { ai.budget++; return ''; }
+  var en2 = String(o.en || '').trim();
+  if (/[ぁ-んァ-ヶ一-龠]/.test(en2) || en2.length > 30) en2 = '';
+  ai.cache[pr.name] = { en: en2, kind: String(o.kind || ''), at: Date.now() }; ai.dirty = 1;
+  return en2;
 }
 /* 候補＝駿河屋の控え（人気順）から、価格帯に入り・英名にでき・どこかの国にまだ出していない物 */
-function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names) {
+function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names, ai) {
   var tc = cfg.tcg || {}; var minJ = Number(tc.minJpy) || 300, maxJ = Number(tc.maxJpy) || 5000;
   var sv = baKv_('sg_' + hw) || {}; var rows = sv.rows || [];
   var out = [], stat = { rows: rows.length, band: 0, parse: 0, noname: 0, long: 0, listed: 0, cand: 0 };
@@ -9141,16 +9166,18 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names) {
     var price = Number(r.p) || 0; if (!(price >= minJ && price <= maxJ)) { stat.band++; continue; }
     if (/BOX|ボックス|パック|デッキ|セット|まとめ|プロモ.*未開封|サプライ|スリーブ/i.test(String(r.t || '')) || /サプライ|スリーブ|デッキケース|プレイマット/i.test(String(r.k || ''))) { stat.band++; continue; }   /* 区分(k)には「MEGA拡張パック…」のように収録弾の名前が入る＝k で「パック」を見ると全部落ちる（10/10 実測：1,438件が band 落ち） */
     var pr = tcgParsePokeca_(r.t); if (!pr) { stat.parse++; continue; }
-    var en = tcgEnName_(hw, pr, names); if (!en) { stat.noname++; continue; }
+    var en = tcgEnName_(hw, pr, names, ai); if (!en) { stat.noname++; continue; }
     var full = ((pr.rar ? pr.rar + ' ' : '') + en + ' ' + pr.num).replace(/\s+/g, ' ').trim();
     if (full.length > 30) full = (en + ' ' + pr.num).trim();
     if (full.length > 30) { stat.long++; continue; }
     if (seenEn[full.toLowerCase()]) continue; seenEn[full.toLowerCase()] = 1;
     var key = hw + ':' + String(r.id || full);
     var k1 = baTmKey_(full);
+    var setName = String(r.k || '').split('/').pop(); var setCode = tcgSetCode_(hw, setName, ai);
+    var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + pr.rar.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && /^\d/.test(String(d))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
     if (!need.length) { stat.listed++; continue; }
-    out.push({ key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0 });
+    out.push({ key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku });
     stat.cand++;
   }
   return { list: out, stat: stat };
@@ -9210,8 +9237,11 @@ function tcgTick(manual) {
     var cur = Number(st.cursor) || 0, hw = hws[cur % hws.length]; st.cursor = cur + 1;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
     var names = (baKv_('tcg_names_' + hw) || {}).map || {};
+    var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, Number(tc.aiNames) || 10), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, setsDirty: 0 };   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
     var ctx = baLoadCtx_(cfg, hw, ccs);
-    var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names);
+    var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
+    if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
+    if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
     st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
     if (!cands.list.length) return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）');
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
@@ -9229,7 +9259,7 @@ function tcgTick(manual) {
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); continue; }
       if (!imageId) continue;
-      picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1 });
+      picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (blocked ? '・弾かれた' : '') + '）'); }
@@ -9256,9 +9286,9 @@ function tcgPreview_(p) {
   var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs : (cfg.ccs || []);
   var names = (baKv_('tcg_names_' + hw) || {}).map || {};
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
-  var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names);
+  var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0 });   /* 下見はAIを呼ばない（控えだけ使う） */
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
-  return { ok: true, hw: hw, stat: cands.stat, list: cands.list.slice(0, n).map(function (c) { return { en: c.en, ja: c.ja, cost: c.cost, need: c.need.length, k: c.k }; }) };
+  return { ok: true, hw: hw, stat: cands.stat, list: cands.list.slice(0, n).map(function (c) { return { en: c.en, ja: c.ja, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
 }
 /* 担当の台（cfg.tcg.runner）で、Head で走る boshuAutoTick の中から tcgCron の時間トリガーを1回だけ作る＝/exec の再デプロイ無しで動き出す（gas-deploy スキル：Head から作ったトリガーは保存だけで最新） */
 function tcgEnsureTrigger_(cfg) {
