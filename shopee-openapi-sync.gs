@@ -9139,7 +9139,7 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names) {
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i]; if (!r || !r.t) continue;
     var price = Number(r.p) || 0; if (!(price >= minJ && price <= maxJ)) { stat.band++; continue; }
-    if (/BOX|ボックス|パック|デッキ|セット|まとめ|プロモ.*未開封|サプライ|スリーブ/i.test(String(r.k || '') + ' ' + r.t)) { stat.band++; continue; }
+    if (/BOX|ボックス|パック|デッキ|セット|まとめ|プロモ.*未開封|サプライ|スリーブ/i.test(String(r.t || '')) || /サプライ|スリーブ|デッキケース|プレイマット/i.test(String(r.k || ''))) { stat.band++; continue; }   /* 区分(k)には「MEGA拡張パック…」のように収録弾の名前が入る＝k で「パック」を見ると全部落ちる（10/10 実測：1,438件が band 落ち） */
     var pr = tcgParsePokeca_(r.t); if (!pr) { stat.parse++; continue; }
     var en = tcgEnName_(hw, pr, names); if (!en) { stat.noname++; continue; }
     var full = ((pr.rar ? pr.rar + ' ' : '') + en + ' ' + pr.num).replace(/\s+/g, ' ').trim();
