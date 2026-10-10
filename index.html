@@ -34173,7 +34173,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const rows = await loadTitleRows(hw);
     await ensureSgRows(hw);          // ★物理判定と画像は駿河屋の一覧が要る。描画前に揃える
     if (!rows) { box.innerHTML = tmCloseBar + '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。</span></div>'; return; }
-    /* ★2026-10-10 🃏🧸 トレカ・グッズは作品マスタ（Wikidata）が無い＝駿河屋の取り込み（人気順の上位）をそのまま内訳にする（本人「なんだこれ」＝マスタ未取込の文が出ていた） */
+    /* ★2026-10-10 🃏🧸 トレカ・グッズは作品マスタ（Wikidata）が無い＝駿河屋の取り込み（人気順の上位）をそのまま内訳にする。
+       本人「画像でてないやん？ゲームとは表示が違う」「同じような感じにできないかね？」→ ゲームと同じ画像付きカード（駿河屋 photo.php?shinaban=ID）＋すべて／出している／まだ の絞り込み */
     if (typeof tmCatOf === 'function' && tmCatOf(hw) !== 'game') {
       const sg = (lst.sgRows || {})[hw] || [];
       const mineAll = (own && own.names && own.names[hw]) ? [...own.names[hw]] : [];
@@ -34182,19 +34183,36 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const mineNums = new Set(mineAll.map(n => { const m = String(n).match(/([A-Za-z0-9\-]{1,8}\/[A-Za-z0-9\-]{1,8})\s*$/); return m ? m[1].toLowerCase() : ''; }).filter(Boolean));
       const normG = t => String(t || '').normalize('NFKC').toLowerCase().replace(/[「」『』【】()（）\s]/g, '');
       const mineG = mineAll.map(normG);
-      let hit = 0;
-      const trs = sg.map((r, i) => {
+      const items = sg.map((r, i) => {
         const t = String(r.t || ''); let have = false;
         if (isTcg) { const n0 = numOf(t); have = !!(n0 && mineNums.has(n0)); }
         else { const k = normG(t).slice(0, 18); have = !!(k && mineG.some(m => m.indexOf(k) >= 0)); }
-        if (have) hit++;
-        const url = r.id ? ('https://www.suruga-ya.jp/product/detail/' + encodeURIComponent(String(r.id))) : '';
-        return `<tr style="${have ? 'background:#eef7ee' : ''}"><td class="smd-dim" style="text-align:right;padding:3px 6px">${i + 1}</td><td style="padding:3px 6px">${url ? `<a href="${esc(url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${esc(t)}</a>` : esc(t)}${r.k ? `<div class="smd-dim" style="font-size:10px">${esc(String(r.k).split('/').slice(1).join(' / ').slice(0, 60))}</div>` : ''}</td><td style="text-align:right;padding:3px 6px;white-space:nowrap">${r.p ? '¥' + Number(r.p).toLocaleString() : '—'}</td><td style="text-align:center;padding:3px 6px">${have ? '<span style="color:#1a7f37;font-weight:700">出している</span>' : '<span class="smd-dim">—</span>'}</td></tr>`;
-      }).join('');
-      box.innerHTML = tmCloseBar + `<div class="tool-card" style="margin:0;max-width:none">
-        <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px"><b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)}</b><span class="smd-dim" style="font-size:11.5px">駿河屋の${isTcg ? 'シングルカード' : 'グッズ'}（人気順の上位 ${sg.length.toLocaleString()} 件）／出している ${hit.toLocaleString()} 件${isTcg ? '（カード番号で照合）' : '（名前の先頭で照合・目安）'}</span></div>
-        ${sg.length ? `<div style="max-height:70vh;overflow:auto"><table class="smd-table" style="font-size:12px;border-collapse:collapse;width:100%"><tr><th></th><th style="text-align:left">${isTcg ? 'カード' : '商品'}</th><th style="text-align:right">駿河屋 中古</th><th>出品</th></tr>${trs}</table></div>` : '<span class="smd-dim" style="font-size:12px">駿河屋からまだ取り込んでいません（🔧 データの更新 → 駿河屋の一覧）。</span>'}
+        return { i: i + 1, t, p: Number(r.p) || 0, k: String(r.k || ''), id: String(r.id || ''), have, d: r.d || '' };
+      });
+      const hit = items.filter(x => x.have).length;
+      if (!lst.tmFil) lst.tmFil = 'all';
+      const fil = lst.tmFil === 'yes' ? items.filter(x => x.have) : lst.tmFil === 'no' ? items.filter(x => !x.have) : items;
+      const CAP = 400;
+      const seg = (k, label, n) => `<button class="tm-fil" data-f="${k}" style="border:1px solid ${lst.tmFil === k ? '#1565c0' : '#dfe3e8'};background:${lst.tmFil === k ? '#e8f1fd' : '#fff'};color:${lst.tmFil === k ? '#1565c0' : '#555'};border-radius:14px;padding:3px 11px;font-size:11.5px;cursor:pointer">${label} <b>${n.toLocaleString()}</b></button>`;
+      const card = x => `<div style="border:1px solid ${x.have ? '#cfe6d6' : '#e6e6e6'};background:${x.have ? '#f4fbf6' : '#fff'};border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;position:relative">
+        <div style="height:96px;background:#f6f7f9;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden">${x.id ? `<img src="https://www.suruga-ya.jp/database/photo.php?shinaban=${esc(x.id)}&size=m" referrerpolicy="no-referrer" loading="lazy" style="max-width:100%;max-height:96px;object-fit:contain" onerror="this.style.display='none';this.parentElement.textContent='画像なし';this.parentElement.style.color='#c9c9c9';this.parentElement.style.fontSize='10px'">` : '<span style="color:#c9c9c9;font-size:10px">画像なし</span>'}</div>
+        <div style="font-size:11px;font-weight:700;line-height:1.35">${esc(x.t)}</div>
+        ${x.k ? `<div class="smd-dim" style="font-size:10px;line-height:1.3">${esc(x.k.split('/').slice(isTcg ? 1 : 0).join(' / ').slice(0, 50))}</div>` : ''}
+        <div style="display:flex;flex-direction:column;gap:3px;margin-top:auto;align-items:flex-start">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${x.have ? '<span style="font-size:9.5px;font-weight:700;color:#1a7f37;background:#e6f4ea;border-radius:8px;padding:1px 7px">出している</span>' : '<span class="smd-dim" style="font-size:9.5px">まだ</span>'}${x.p ? `<span style="font-size:9.5px;font-weight:700;color:#c30d23" title="駿河屋の中古価格">¥${x.p.toLocaleString()}</span>` : ''}<span class="smd-dim" style="font-size:9px">#${x.i}</span></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            ${x.id ? `<a href="https://www.suruga-ya.jp/product/detail/${esc(x.id)}" target="_blank" rel="noopener" style="color:#c30d23;font-size:9.5px;font-weight:700;text-decoration:none">駿河屋</a>` : ''}
+            <a href="https://jp.mercari.com/search?keyword=${encodeURIComponent(x.t.replace(/「[^」]*」/g, '').trim())}&status=on_sale" target="_blank" rel="noopener" style="color:#ff0211;font-size:9.5px;font-weight:700;text-decoration:none">メルカリ</a>
+            <a href="https://paypayfleamarket.yahoo.co.jp/search/${encodeURIComponent(x.t.replace(/「[^」]*」/g, '').trim())}?open=1" target="_blank" rel="noopener" style="color:#ff0033;font-size:9.5px;font-weight:700;text-decoration:none">Yahoo!フリマ</a>
+          </div>
+        </div>
       </div>`;
+      box.innerHTML = tmCloseBar + `<div class="tool-card" style="margin:0;max-width:none">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><b style="font-size:14px">${esc(TITLE_HW_JA[hw] || hw)}</b><span class="smd-dim" style="font-size:11.5px">駿河屋の${isTcg ? 'シングルカード' : 'グッズ'}（人気順の上位）${isTcg ? '・出しているかはカード番号で照合' : '・出しているかは名前の先頭で照合（目安）'}</span>
+          <span style="display:flex;gap:6px;margin-left:8px">${seg('all', 'すべて', items.length)}${seg('yes', '出している', hit)}${seg('no', 'まだ', items.length - hit)}</span></div>
+        ${items.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">${fil.slice(0, CAP).map(card).join('')}</div>${fil.length > CAP ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">先頭 ${CAP} 件だけ表示しています（全 ${fil.length.toLocaleString()} 件）</div>` : ''}` : '<span class="smd-dim" style="font-size:12px">駿河屋からまだ取り込んでいません（🔧 データの更新 → 駿河屋の一覧）。</span>'}
+      </div>`;
+      box.querySelectorAll('.tm-fil').forEach(b => b.addEventListener('click', () => { lst.tmFil = b.dataset.f; renderTitleDetail(hw, own); }));
       return;
     }
     if (!rows.length) { box.innerHTML = tmCloseBar + '<div class="tool-card" style="margin:0;max-width:none"><span class="smd-dim" style="font-size:12px">まだマスタを取り込んでいません（右上の「⬇ マスタを取り込む」）。</span></div>'; return; }
