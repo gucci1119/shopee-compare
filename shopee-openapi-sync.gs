@@ -9346,7 +9346,7 @@ function baLimitedAudit_(p) {
     Object.keys(ledger).forEach(function (key) {
       if (BA_EDITION_RE.test(key)) return;   /* 作品名そのものが限定版なら対象外 */
       var bk = baKey_(stripEd(key)); if (!bk || !lim[bk]) return;
-      var o = ledger[key] || {}; Object.keys(o).forEach(function (cc) { var v = String(o[cc] || ''); var m = v.match(/^(\d+)#(\d+)$/); if (!m) return; var id = m[1] + '#' + m[2]; if (res.items[id]) return; targets.push({ hw: hw, key: key, cc: cc, item_id: m[1], model_id: m[2], limTitle: lim[bk] }); });
+      var o = ledger[key] || {}; Object.keys(o).forEach(function (cc) { var v = String(o[cc] || ''); var m = v.match(/^(\d+)#(\d+)$/); if (!m) return; var id = m[1] + '#' + m[2]; if (res.items[id] && res.items[id].judged !== false) return;   /* ★2026-10-11 AIが使えなかった（judged:false＝error/budget）明細は次の回にもう一度見る（17件が永久に飛ばされていた） */ targets.push({ hw: hw, key: key, cc: cc, item_id: m[1], model_id: m[2], limTitle: lim[bk] }); });
     });
     out.byHw[hw] = { lim: limN, targets: targets.length }; out.targets += targets.length;
     if (dry) continue;
@@ -9362,7 +9362,7 @@ function baLimitedAudit_(p) {
       var jd = baJudge_(url, st, judged, 999, { key: 'audit:' + id2, ja: tg.key, en: String(md.n || ''), hw: BA_HW_WORD[hw] || hw, hwKey: hw });
       out.judged++;
       var rec = { hw: hw, cc: tg.cc, en: String(md.n || ''), kind: jd.kind || '', ok: !!jd.ok, judged: !!jd.judged, at: new Date().toISOString(), lim: tg.limTitle, img: md.img, stock: md.stock };
-      if (!jd.judged) { out.skipped++; if (jd.kind === 'budget' || jd.kind === 'aidown' || jd.kind === 'error') { out.note = 'AIが使えない（' + jd.kind + '）→ここで止める'; res.items[id2] = rec; break; } }
+      if (!jd.judged) { out.skipped++; if (jd.kind === 'budget' || jd.kind === 'aidown' || jd.kind === 'error') { out.note = 'AIが使えない（' + jd.kind + '）→ここで止める'; break; } continue; }   /* ★2026-10-11 判定できなかった明細は記録しない＝次の回に見直す */
       res.items[id2] = rec;
       /* ★2026-10-10 監査で【別機種の写真（wrongplatform）・別作品の写真（wrongtitle）】も見つかる（最初の109件で 11＋4）。これも写真が商品と違う＝同じ扱い（在庫0＋差し替え） */
       if (jd.kind === 'limitedbox' || jd.kind === 'wrongplatform' || jd.kind === 'wrongtitle') {
