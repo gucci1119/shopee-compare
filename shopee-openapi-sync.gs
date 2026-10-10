@@ -9116,10 +9116,12 @@ function tcgEnPokeca_(name, map) {
     var pre = '';
     var pm = raw.match(/^(メガ|M)\s*(.+)$/); if (pm) { pre = 'Mega '; raw = pm[2].trim(); }
     var reg = ''; var rm = raw.match(/^(ガラル|アローラ|ヒスイ|パルデア)(?:の)?(.+)$/); if (rm) { reg = { 'ガラル': 'Galarian ', 'アローラ': 'Alolan ', 'ヒスイ': 'Hisuian ', 'パルデア': 'Paldean ' }[rm[1]]; raw = rm[2].trim(); }
+    var own = ''; var om = raw.match(/^(ロケット団|サカキ|N|ダイゴ|ナンジャモ|マリィ|エリカ|カスミ|リーリエ|アセロラ|ヒカリ|ホップ|マチス|タケシ|シロナ|キバナ|ルリナ|ネズ|ヒガナ|ミツル|イーブイ)の(.+)$/); if (om) { own = { 'ロケット団': "Team Rocket's ", 'サカキ': "Giovanni's ", 'N': "N's ", 'ダイゴ': "Steven's ", 'ナンジャモ': "Iono's ", 'マリィ': "Marnie's ", 'エリカ': "Erika's ", 'カスミ': "Misty's ", 'リーリエ': "Lillie's ", 'アセロラ': "Acerola's ", 'ヒカリ': "Dawn's ", 'ホップ': "Hop's ", 'マチス': "Lt. Surge's ", 'タケシ': "Brock's ", 'シロナ': "Cynthia's ", 'キバナ': "Raihan's ", 'ルリナ': "Nessa's ", 'ネズ': "Piers's ", 'ヒガナ': "Zinnia's ", 'ミツル': "Wally's ", 'イーブイ': "Eevee's " }[om[1]]; raw = om[2].trim(); }   /* 持ち主つき（ロケット団のミミッキュ・Nのゼクロム） */
+    var sp = ''; var spm = raw.match(/^(わるい|ひかる|やさしい|いい)(.+)$/); if (spm) { sp = { 'わるい': 'Dark ', 'ひかる': 'Shining ', 'やさしい': 'Light ', 'いい': 'Good ' }[spm[1]]; raw = spm[2].trim(); }   /* 旧裏の「わるい◯◯」「ひかる◯◯」 */
     var en = map[raw] || map[raw.replace(/・/g, '')] || '';
     if (!en) { var fm = raw.match(/^(.+?)(X|Y|Z)$/); if (fm && map[fm[1]] && pre) { en = map[fm[1]] + ' ' + fm[2]; } }   /* メガミュウツーY */
     if (!en) return '';
-    out.push((pre + reg + en + (suf ? ' ' + suf : '')).trim());
+    out.push((own + sp + pre + reg + en + (suf ? ' ' + suf : '')).trim());
   }
   return out.join(' & ');
 }
