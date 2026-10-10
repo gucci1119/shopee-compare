@@ -9418,7 +9418,8 @@ function baLimitedFix_(p) {
         try { used[cuKey] = baUsedTag_(key, hw); } catch (eU) {}   /* 使った写真の印（baUsedOk_ と同じ形） */
         out.replaced.push({ id: id, cc: v.cc, en: en, src: cm.src || '' }); done = true;
       }
-      if (!done) { v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める'; break; } }
+      if (!done) { if (!/^ai:/.test(why)) { try { updateStock_(String(row.shop_id), mm[1], mm[2], 0); } catch (eS0) {} }   /* 差し替えられない＝写真が商品と違うまま売らせない（監査が在庫0にしていない分も含めて） */
+        v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why, stock: 0 }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める'; break; } }
     } catch (e) { v.fix = { s: 'error', at: new Date().toISOString(), why: String(e).slice(0, 120) }; out.err.push({ id: id, e: String(e).slice(0, 120) }); }
   }
   try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); }
