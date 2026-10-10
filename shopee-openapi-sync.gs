@@ -9364,7 +9364,8 @@ function baLimitedAudit_(p) {
       var rec = { hw: hw, cc: tg.cc, en: String(md.n || ''), kind: jd.kind || '', ok: !!jd.ok, judged: !!jd.judged, at: new Date().toISOString(), lim: tg.limTitle, img: md.img, stock: md.stock };
       if (!jd.judged) { out.skipped++; if (jd.kind === 'budget' || jd.kind === 'aidown' || jd.kind === 'error') { out.note = 'AIが使えない（' + jd.kind + '）→ここで止める'; res.items[id2] = rec; break; } }
       res.items[id2] = rec;
-      if (jd.kind === 'limitedbox') {
+      /* ★2026-10-10 監査で【別機種の写真（wrongplatform）・別作品の写真（wrongtitle）】も見つかる（最初の109件で 11＋4）。これも写真が商品と違う＝同じ扱い（在庫0＋差し替え） */
+      if (jd.kind === 'limitedbox' || jd.kind === 'wrongplatform' || jd.kind === 'wrongtitle') {
         var act = { stock: '', rephoto: '' };
         try { updateStock_(String(row.shop_id), tg.item_id, tg.model_id, 0); act.stock = 'ok'; } catch (eS) { act.stock = 'err ' + String(eS).slice(0, 60); }
         try { var rp = baKvFresh_('boshu_auto_rephoto') || {}; rp.items = rp.items || {}; rp.items[tg.item_id + '#' + String(md.n || '')] = { s: 'retry', why: 'limitedbox 監査 ' + new Date().toISOString().slice(0, 10) }; baKvSet_('boshu_auto_rephoto', rp); act.rephoto = 'ok'; } catch (eP) { act.rephoto = 'err ' + String(eP).slice(0, 60); }
@@ -9387,7 +9388,7 @@ function baLimitedFix_(p) {
   var pre = baKv_('boshu_auto_pre') || {}; var used = baKv_(BA_IMGS) || {}; var judged = {}; var sameCache = {};
   var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
   var out = { ok: true, tried: 0, replaced: [], nophoto: [], err: [] }; var t0 = Date.now(); var ledgers = {};
-  var ids = Object.keys(res.items).filter(function (k) { var v = res.items[k]; return v && v.kind === 'limitedbox' && !v.fix; });
+  var ids = Object.keys(res.items).filter(function (k) { var v = res.items[k]; return v && (v.kind === 'limitedbox' || v.kind === 'wrongplatform' || v.kind === 'wrongtitle') && !v.fix; });
   for (var i = 0; i < ids.length && out.tried < max; i++) {
     if (Date.now() - t0 > 230000) { out.note = '時間切れ（続きは次の回）'; break; }
     var id = ids[i], v = res.items[id], hw = String(v.hw || ''); var mm = id.match(/^(\d+)#(\d+)$/); if (!mm) continue;
