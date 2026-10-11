@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0850';
+var SRC_VER = '20261012-0910';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8492,7 +8492,9 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       var cover = BA_COVER_BASE + encodeURIComponent(hw) + '.png';
       var _wKg = (Number(fam.weightG) > 0) ? Number(fam.weightG) / 1000 : 0;   /* ★家族の重さ（Switch2＝150g）。別機種から借りると 0.2 等になり送料が狂う（Codex/advisor指摘 2026-10-07） */
       var _dsw = TCG_HW_JA[hw] ? [['pok[eé]mon\\s*card\\s*game(?:\\s*series)?', TCG_EN[hw] || hw], ['nintendo\\s*amiibo(?:\\s*figure)?', TCG_EN[hw] || hw], ['pok[eé]mon\\s*moncolle(?:\\s*monster\\s*collection)?', TCG_EN[hw] || hw], ['pok[eé]mon', /pok[eé]mon/i.test(TCG_EN[hw] || '') ? 'Pokemon' : (TCG_EN[hw] || hw)]] : null;   /* 説明文の Pokémon の語をシリーズ名に（10/7 の Switch2 に GTA/Pokemon の文が残った事故の再発防止） */
-      var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: 0, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName, weight: _wKg, rename_desc: 1, desc_swap: _dsw });
+      /* ★2026-10-12 VN は値段 1,000 VND 未満を受け付けない（既定の仮の値段 300 で毎回「price … must be between 1000.00 and …」）。型のカタログの明細の値段（その国の通貨）を仮の値段にする */
+      var _pr2 = 0; try { _pr2 = (_any.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (ePr2) {}
+      var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: _pr2, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName, weight: _wKg, rename_desc: 1, desc_swap: _dsw });
       if (!sd2 || !sd2.ok || !sd2.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
       var _nmLim3 = 120; try { var _mx3 = shopNameLimit_(dst2); if (_mx3 > 0) _nmLim3 = Math.min(_mx3, 120); } catch (eNl3) {}
       var _fitName3 = baFitName_(srcName, _nmLim3);
@@ -9073,6 +9075,11 @@ function seedShopCatalog_(p) {
   body.tier_name = String(tierName || 'Title').slice(0, 20);
   body.variations = [{ name: 'test', price: Number(p.price) || 300, stock: 0 }];
   body.forceTier = true;
+  /* ★2026-10-12 TH でトレカのカタログが毎回「Attribute "Platform Compatibility" is mandatory」で作れなかった（遊戯王・ラッシュ・ワンピース・デジモン…全部）。
+     型のカタログの属性を写していなかった。cloneItem_ と同じく src_attrs に渡す＝必須で弾かれた時だけ addItem_ がこれを土台に送り直す */
+  body.src_attrs = (base.attribute_list || []).map(function (a) {
+    return { attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).filter(function (v) { return v && v.value_id; }).map(function (v) { return v.value_unit ? { value_id: v.value_id, value_unit: v.value_unit } : { value_id: v.value_id }; }) };
+  }).filter(function (a) { return a.attribute_value_list.length; });
   if (_pa) body.promo_assets = _pa;
   /* ★2026-09-24 作る先の国のカテゴリを機種で指定できる（TW は機種ごとに葉が分かれている）。無ければ addItem_ の keyword 解決 */
   /* ★2026-10-06 本人「なんかカテゴリーおかしくない？」：TH 2店舗目の Switch ⑪ が「Toys & Games > Dice, Board & Card Games」に入っていた。
