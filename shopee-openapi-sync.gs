@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-1340';
+var SRC_VER = '20261011-1500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7866,7 +7866,9 @@ function condQueueBuild_(done) {
     for (var i = 0; i < ms.length; i++) {
       var m = ms[i]; if (m.direction !== 'out' || m.msg_type !== 'image') continue;
       { var tG = Date.parse(m.msg_time); if (!gCur || tG - gLast > 4 * 60000) gCur = hashG(String(c) + '|' + String(m.msg_time)); gLast = tG; }
-      var u = String(m.text || '').split('@')[0].trim(); if (!/^https?:\/\//.test(u) || seen[u]) continue;
+      /* ★2026-10-11 URL の末尾に改行＋次の文字が連結していた（61枚）→空白でも切る。スタンプ（deo.shopeemobile）は商品の写真ではないので入れない（60枚） */
+      var u = String(m.text || '').split(/[\s@]/)[0].trim(); if (!/^https?:\/\//.test(u) || seen[u]) continue;
+      if (/deo\.shopeemobile|\/sticker|\/stamp/i.test(u)) continue;
       var t = Date.parse(m.msg_time), banner = false;
       for (var j = Math.max(0, i - 10); j < Math.min(ms.length, i + 11) && !banner; j++) { var x = ms[j]; if (x.direction === 'out' && x.msg_type === 'text' && Math.abs(Date.parse(x.msg_time) - t) <= 5 * 60000 && ORDER_TXT.test(x.text || '')) banner = true; }
       if (banner) continue;
