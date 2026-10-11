@@ -9168,7 +9168,7 @@ function baTcgPreorder_(shopId, itemId, hw, st, cc) {
    シリーズの英名（カタログ名・説明文の置換・明細名に使う） */
 var TCG_EN = { acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag', pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA' };
 /* 駿河屋の題名の「(パラレル)」「(ホロ)」「(SECRET)」等＝同じ番号でも別のカード（値段が10倍違う）。落とさず短い英語の札にして名前・SKU・鍵に残す */
-var TCG_VAR_EN = [[/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil']];
+var TCG_VAR_EN = [[/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil'], [/ゴールデン|golden/i, 'Golden Tag'], [/スーパータグ|super\s*tag/i, 'Super Tag'], [/ダブルタグ|double\s*tag/i, 'Double Tag'], [/スペシャルタグ|special\s*tag/i, 'Special Tag']];
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
 /* 汎用の題名パーサー：「番号[レアリティ]：名前」（遊戯王 BETB-JP027[UL]：…／ワンピ OP17-118[SEC]：(パラレル)…／デュエマ 33/100[VR]：…＜フレーバー＞／ヴァイス GA04/S131-100[RR]：…／ヴァンガ DZ-BT16/045[RR]：…）
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
@@ -9198,7 +9198,7 @@ function tcgParseCard_(hw, t, k) {
   if (!m) return null;
   var num = m[1], rar = String(m[2] || '').trim(), rest = m[3].trim(), vars = [];
   rest = rest.replace(/^(?:\(([^()]{1,24})\)\s*)+/, function (all) { all.replace(/\(([^()]{1,24})\)/g, function (_, v) { vars.push(v.trim()); return ''; }); return ''; });
-  var tail = rest.match(/\(([^()]{1,30})\)\s*$/); if (tail && /SECRET|シークレット|パラレル|ホロ|箔押し|サイン|\bSP\b|版|foil|キラ|プロモ/i.test(tail[1])) { vars.push(tail[1].trim()); rest = rest.slice(0, tail.index).trim(); }
+  var tail = rest.match(/\(([^()]{1,30})\)\s*$/); if (tail && /SECRET|シークレット|パラレル|ホロ|箔押し|サイン|\bSP\b|版|foil|キラ|プロモ|ゴールデン|スーパータグ|ダブルタグ|スペシャルタグ|タグ$/i.test(tail[1]))   /* 🪙 メザスタ「ピカチュウ(ゴールデンタグ)」は変種（2026-10-11） */ { vars.push(tail[1].trim()); rest = rest.slice(0, tail.index).trim(); }
   rest = rest.replace(/＜[^＞]*＞|<[^>]*>/g, '').replace(/\/\[[^\]]*\]\s*$/, '').replace(/\[[^\]]*\]\s*$/, '').replace(/\s+/g, ' ').trim();
   if (!rest) return null;
   var varEn = vars.map(tcgVarEn_).filter(function (v, i, a) { return v && a.indexOf(v) === i; }).join(' ');
