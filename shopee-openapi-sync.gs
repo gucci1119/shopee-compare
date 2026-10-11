@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2040';
+var SRC_VER = '20261011-2050';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8820,7 +8820,7 @@ function baListLogWrite_(st, t0) {
   /* ★2026-10-11 本人「出品の各カードに仕入れ金額の情報も欲しい」：listing_log に列が無いので app_kv llog_cost_<hw>（{m:{cc|item|model: 仕入れ目安}}）に同じ鍵で控える。機種ごと＝1つの担当が1つの鍵で書くので台をまたいで消し合わない */
   try {
     var byHw = {};
-    (st.added || []).forEach(function (a) { if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return; (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = Math.round(Number(a.cost)); });
+    (st.added || []).forEach(function (a) { if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return; (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80) }; });   /* ★2026-10-11 本人「どこの仕入れ元リンクから取ってきたかも欲しい」＝目安の元（駿河屋の題名）と写真の元（出品URL）も控える */
     Object.keys(byHw).forEach(function (h) { var kk = 'llog_cost_' + h; var cur = baKvFresh_(kk); if (!cur || typeof cur !== 'object') cur = {}; cur.m = cur.m || {}; Object.keys(byHw[h]).forEach(function (key) { cur.m[key] = byHw[h][key]; }); cur.at = new Date().toISOString(); cur.src = 'gas'; baKvSet_(kk, cur); });
   } catch (eC) {}
   return rows.length;
