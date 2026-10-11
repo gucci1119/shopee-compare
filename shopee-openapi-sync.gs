@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-1210';
+var SRC_VER = '20261011-1340';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8400,6 +8400,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   try { cl = cloneItem_(src.shop_id, src.item_id, _fitName, false); }
   catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 160)); return null; }
   if (!cl || !cl.item_id) return null;
+  baTcgPreorder_(src.shop_id, cl.item_id, hw, st, cc);   /* ★2026-10-11 トレカの新カタログは予約出品（DTS 7日） */
   /* 親SKUを家族のものに揃える（cloneItem_ は元のカタログの親SKUを引き継ぐので必ず上書きする） */
   if (wantSku) { try { callShop_(src.shop_id, '/api/v2/product/update_item', null, 'post', { item_id: cl.item_id, item_sku: wantSku }); } catch (eS) { baLog_(st, cc + '：親SKUを付けられませんでした（' + String(eS).slice(0, 160) + '）'); } }
   baLog_(st, '🆕 ' + cc + '：' + hw + ' の汎用カタログを作りました（非公開・' + cl.item_id + '／元: ' + String(src.name || '').slice(0, 40) + '）'
@@ -8509,6 +8510,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (!tgt) {
         if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); break; }
         if (!cl.item_id) { res.note = '複製失敗'; break; }
+        baTcgPreorder_(base.shop_id, cl.item_id, hw, st, cc);   /* ★2026-10-11 トレカの新カタログは予約出品（DTS 7日） */
         tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
         rows.push(tgt); newItem = true;
         try { baCatalogMadeRec_(hw, cc, cl.item_id, newName, base.shop_id, base.parent_sku, base.weight, 0, _role); } catch (eRc0) {}   /* ★2026-09-29 写真付けより【先に】控える（失敗しても次の回が見つけて続きを入れる＝放置カタログを作らない） */
@@ -9103,6 +9105,12 @@ function baSoldSync_(st) {
      台帳   … boshu_auto_done_<hw>（出品ログ・個数の表はこれを読む）／状態 tcg_auto_status
    担当は cfg.tcg.runner（既定 child2＝3台目）。ソフトの🤖と同じ鍵（getScriptLock）を取るので同時には走らない
    ================================================================================================ */
+/* ★2026-10-11 本人「トレカは pre-order でもいいかもね（仕入れ元がらくらく/ゆうゆう便以外が多い）出品リミット減らない範囲で」：
+   トレカのカタログ（各国1〜数件＝予約出品の割合は0.1%程度・非Preferred 10%／SG 5% の上限に触れない）は予約出品・DTS 7日。既存7件は 10/11 に update_item で切替済み。新しく複製した時はここで付ける */
+function baTcgPreorder_(shopId, itemId, hw, st, cc) {
+  try { if (!TCG_HW_JA[hw]) return; updateItem_({ shop_id: shopId, item_id: itemId, pre_order: { is_pre_order: true, days_to_ship: 7 } }); if (st) baLog_(st, (cc || '') + '：トレカの新カタログを予約出品（DTS 7日）にしました（' + itemId + '）'); }
+  catch (e) { if (st) baLog_(st, (cc || '') + '：予約出品の設定に失敗（' + String((e && e.message) || e).slice(0, 80) + '）'); }
+}
 var TCG_HW_JA = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
 var TCG_SEARCH_WORD = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
