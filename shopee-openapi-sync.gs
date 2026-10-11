@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-0840';
+var SRC_VER = '20261011-1210';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -80,7 +80,7 @@ var _ufTag = {};       // { '/api/v2/product/get_item_base_info': 123, ... }
 // 💴 その日（日本時間）の AI 料金の見込み（円）。自分の控え＋他の台が app_kv に載せた控え（boshu_auto_status*.uf.aiSpend）を足す。
 //   単価：四隅の確認＝上位モデル $3/$15、ほかは Haiku $1/$5（100万トークンあたり）。1ドル＝150円。
 function baAiYenOfDay_(d) {
-  var y = 0; Object.keys(d || {}).forEach(function (lab) { var t = d[lab] || {}; var big = /四隅/.test(lab); y += ((Number(t.in) || 0) * (big ? 3 : 1) + (Number(t.out) || 0) * (big ? 15 : 5)) / 1e6 * 150; });
+  var y = 0; Object.keys(d || {}).forEach(function (lab) { if (/監査/.test(lab)) return; /* 監査・直しの分は上限に数えない（料金の表示には残る） */ var t = d[lab] || {}; var big = /四隅/.test(lab); y += ((Number(t.in) || 0) * (big ? 3 : 1) + (Number(t.out) || 0) * (big ? 15 : 5)) / 1e6 * 150; });
   return y;
 }
 function baAiYenToday_() {
@@ -6972,7 +6972,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(body), muteHttpExceptions: true });
   var code = res.getResponseCode(); var j = {}; try { j = JSON.parse(res.getContentText() || '{}'); } catch (e) {}
   if (st && st.today) st.today.judged = (st.today.judged || 0) + 1;
-  try { aiSpendBump_('写真の判定(自動出品)', j.usage); } catch (e) {}   // 💴 ポータルの「API利用料」に載せる（2026-09-16 まで1円も載っていなかった）
+  try { aiSpendBump_((expect && /^(audit|fix):/.test(String(expect.key || ''))) ? '写真の判定(監査・直し)' : '写真の判定(自動出品)', j.usage); } catch (e) {}   /* ★2026-10-11 監査・写真直しの分は別の札＝自動出品の日次上限（aiYenCap）に数えない（監査でトレカが止まった） */   // 💴 ポータルの「API利用料」に載せる（2026-09-16 まで1円も載っていなかった）
   if (code >= 400) {
     var em = String((j.error && j.error.message) || '');
     /* ★2026-09-20 本人「止まらないようにしてね」「絶対に」：Anthropic の残高切れ（credit balance）や鍵不正の時、
