@@ -31096,8 +31096,12 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const kw = MC_KW[hw]; if (!kw) throw new Error('この区分はメルカリの検索語が未設定です');
     const cap = Number((settings.mcPages || {})[hw]) || 80;   /* ★2026-10-11 10ページ(約600件)→80ページ。1.5秒間隔＝約2分 */
     const seen = new Set(), rows = []; let token = '', total = null;
+    let stopWhy = '';
     for (let pg = 1; pg <= cap; pg++) {
-      const r = await mercariSearchPage(kw, { soldOnly: true, pageToken: token });
+      /* ★2026-10-11 16ページ目で中継の時間切れ→取れた分まで捨てていた。1回だけ待って再試行し、だめなら取れた分で打ち切って保存する */
+      let r = null;
+      try { r = await mercariSearchPage(kw, { soldOnly: true, pageToken: token }); }
+      catch (e1) { await new Promise(res => setTimeout(res, 6000)); try { r = await mercariSearchPage(kw, { soldOnly: true, pageToken: token }); } catch (e2) { stopWhy = String((e2 && e2.message) || e2).slice(0, 60); break; } }
       if (r.total != null) total = r.total;
       r.items.forEach(x => { if (seen.has(x.id)) return; seen.add(x.id); rows.push({ id: x.id, t: x.t, p: x.p, img: x.img, cid: x.cid }); });
       if (typeof onProg === 'function') { try { onProg(pg); } catch (_) {} }
@@ -31105,7 +31109,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       token = r.next;
       await new Promise(res => setTimeout(res, 1500));   /* 叩きすぎない（[[dont-get-ip-blocked]]） */
     }
-    const v = { at: new Date().toISOString(), hw: hw, kw: kw, n: rows.length, total: total, rows: rows };
+    if (!rows.length) throw new Error('メルカリから1件も取れませんでした' + (stopWhy ? '（' + stopWhy + '）' : ''));
+    const v = { at: new Date().toISOString(), hw: hw, kw: kw, n: rows.length, total: total, rows: rows, stopWhy: stopWhy || '' };
     /* ★2026-10-11 本人「駿河屋にこだわらなくていい」＝メルカリにしか無いカード（カード番号 132/103 等が駿河屋の控えに無い物）を数え、母数に足す（mc_index.extra） */
     let extra = 0, numbered = 0;
     try {
@@ -31122,7 +31127,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         await sbUpsert('app_kv', [{ k: 'mc_index', v: idx, updated_at: new Date().toISOString() }]);
       } catch (e) { console.warn('[メルカリ母数] mc_index の更新に失敗', e); }
     }
-    return { n: rows.length, total: total };
+    return { n: rows.length, total: total, stopWhy: stopWhy || '' };
   }
   try { window.smdMercariSearch = (kw, opts) => mercariSearch(kw, opts); window.smdMercariCrawl = (hw, cb) => mercariCrawl(hw, cb); } catch (_) {}   /* 🧸 2026-10-10 母数を複数の仕入元から（本人「いろんなところから引っ張ってこれば？」）：メルカリの売れた物を数える下見用 */
 
