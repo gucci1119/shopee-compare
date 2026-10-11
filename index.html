@@ -2224,6 +2224,7 @@
     const html = '<div style="font-size:12px">'
       + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶん＋GAS側（母数🤖の自動出品の写真判定）のぶんです。webchat の Smart Reply（自動返信）の分は含みません（あちらのドックの💰に出ます）。</div>'
       + '<div id="ai-report-box" style="border:1px solid #cfd8e3;background:#f6f9fc;border-radius:8px;padding:10px;margin-bottom:14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:12.5px">🧾 Anthropic の実績（請求のもと・全期間・全キー）</b><button id="ai-report-btn" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 10px">🔄 取り直す</button></div><div id="ai-report-body" class="smd-dim" style="font-size:11px">読み込み中…</div></div>'
+      + '<div id="ai-actual-box" style="border:1px solid #d9d0ee;background:#faf7ff;border-radius:8px;padding:10px;margin-bottom:14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><b style="font-size:12.5px">🧾 Console の実績（本当の請求・CSV）</b><span class="smd-dim" style="font-size:10.5px">platform.claude.com → コスト → 右上⤓ の CSV</span><label class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 11px;cursor:pointer">📥 CSV を読む<input id="ai-actual-file" type="file" accept=".csv,text/csv" multiple style="display:none"></label></div><div id="ai-actual-body" class="smd-dim">読み込み中…</div></div>'
       + (months.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと</div>'
         + '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:14px"><thead><tr>'
         + '<th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
@@ -2256,7 +2257,7 @@
     const cbtn = wrap.querySelector('#ai-cost-close'); if (cbtn) cbtn.addEventListener('click', close);
     // 🧾 Anthropic の実績：控えがあれば即出し、無ければ取りに行く（6時間は GAS 側の控えを返す＝Anthropic を叩かない）
     const rbody = wrap.querySelector('#ai-report-body'), rbtn = wrap.querySelector('#ai-report-btn');
-    const setupNote = '<div>ポータルが数え始める前（〜2026-09-16）の分や Smart Reply の分まで含めた<b>本当の数字</b>は Anthropic 側にしかありません。取るには Admin API キーが要ります：'
+    const setupNote = '<div>ポータルが数え始める前（〜2026-09-16）の分や Smart Reply の分まで含めた<b>本当の数字</b>は Anthropic 側にしかありません。取るには Admin API キーが要ります（<b>個人向けプランでは出せません</b>＝2026-10-11 確認。その場合は上の「🧾 Console の実績（CSV）」を使ってください）：'
       + '<ol style="margin:4px 0 0 18px;padding:0;line-height:1.7"><li>console.anthropic.com → Settings → <b>Admin keys</b> で発行（組織の管理者だけ）</li><li>GAS「Shopee OpenAPI Sync」→ プロジェクトの設定 → スクリプト プロパティに <b>ANTHROPIC_ADMIN_KEY</b> として貼る（コードや Supabase には置かない）</li><li>ここで「🔄 取り直す」</li></ol></div>';
     const paintReport = async (force) => {
       if (!rbody) return;
@@ -2268,6 +2269,48 @@
     };
     if (rbtn) rbtn.addEventListener('click', () => paintReport(true));
     paintReport(false);
+    /* 🧾 Console の実績（本人 2026-10-11「Claude で使った実際の料金を引っ張ってくるには」「自動化してね」「こまめに追加購入するので月1だと足りない」）
+       個人向けプランでは Admin キーが出せない（/settings/admin-keys が無い）ので、コスト画面の CSV を読んで app_kv ai_actual（日×モデル×種別の USD）に積む。
+       同じ日はまるごと置き換え（CSV は累計なので重複しない）。見積もり（トークン数×単価）との差も出す */
+    const abody = wrap.querySelector('#ai-actual-body'), afile = wrap.querySelector('#ai-actual-file');
+    const actualHtml = (v) => {
+      const dd = (v && v.days) || {}; const ds = Object.keys(dd).sort().reverse(); if (!ds.length) return '<div class="smd-dim">まだ CSV を読んでいません。コスト画面（platform.claude.com/workspaces/default/cost）の右上 ⤓ で落として「📥 CSV を読む」。</div>';
+      const usd = o => Object.keys(o || {}).reduce((a, m) => a + Object.keys(o[m] || {}).reduce((b, t) => b + (Number(o[m][t]) || 0), 0), 0);
+      const mons = [...new Set(ds.map(d => d.slice(0, 7)))];
+      const est = aiSpendDays();
+      const mrows = mons.map(m => { const dm = ds.filter(d => d.slice(0, 7) === m); const u = dm.reduce((a, d) => a + usd(dd[d]), 0);
+        const e = Object.keys(est).filter(k => String(k).slice(0, 7) === m).reduce((a, k) => a + aiYenOf(est[k]), 0); const y = Math.round(u * AI_USDJPY);
+        return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;font-weight:700">' + m + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">$' + u.toFixed(2) + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + y.toLocaleString() + '</td><td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">¥' + Math.round(e).toLocaleString() + (e ? ' <span style="font-size:10px">(' + (y ? Math.round(e / y * 100) : 0) + '%)</span>' : '') + '</td><td style="padding:3px 8px;border-top:1px solid #eee;color:#8a8f98;font-size:10.5px">' + dm[dm.length - 1] + '〜' + dm[0] + '</td></tr>'; }).join('');
+      const models = [...new Set(ds.flatMap(d => Object.keys(dd[d] || {})))];
+      const drows = ds.slice(0, 40).map(d => '<tr><td style="padding:2px 8px;border-top:1px solid #eee;white-space:nowrap">' + d + '</td>' + models.map(m => { const o = (dd[d] || {})[m]; const u = o ? Object.keys(o).reduce((a, t) => a + (Number(o[t]) || 0), 0) : 0; return '<td style="text-align:right;padding:2px 8px;border-top:1px solid #eee">' + (o ? '$' + u.toFixed(2) : '<span class="smd-dim">—</span>') + '</td>'; }).join('') + '<td style="text-align:right;padding:2px 8px;border-top:1px solid #eee;font-weight:700">$' + usd(dd[d]).toFixed(2) + '</td></tr>').join('');
+      return '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:8px"><thead><tr><th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">実績 $</th><th style="text-align:right;padding:3px 8px">円（$1=¥' + AI_USDJPY + '）</th><th style="text-align:right;padding:3px 8px">ポータルの見積もり</th><th style="text-align:left;padding:3px 8px">CSV の範囲</th></tr></thead><tbody>' + mrows + '</tbody></table>'
+        + '<details><summary style="cursor:pointer;font-size:11px;color:#5e35b1">日ごと・モデルごと（直近40日）</summary><table style="border-collapse:collapse;width:100%;font-size:11px;margin-top:4px"><thead><tr><th style="text-align:left;padding:2px 8px">日（UTC）</th>' + models.map(m => '<th style="text-align:right;padding:2px 8px">' + esc(m) + '</th>').join('') + '<th style="text-align:right;padding:2px 8px">合計</th></tr></thead><tbody>' + drows + '</tbody></table></details>'
+        + '<div class="smd-dim" style="font-size:10.5px;margin-top:6px">日付は Console と同じ UTC。見積もりの％＝ポータルの見積もり÷実績（100%より大きければ見積もりが多め）。最後に読んだ CSV：' + esc(String((v.files || []).slice(-1)[0] || '')) + '</div>';
+    };
+    const paintActual = async () => { if (!abody) return; try { const r = await sbGet('app_kv', 'select=v&k=eq.ai_actual'); abody.innerHTML = actualHtml((r && r[0] && r[0].v) || {}); abody.classList.remove('smd-dim'); } catch (e) { abody.textContent = '読めませんでした：' + String((e && e.message) || e); } };
+    paintActual();
+    if (afile) afile.addEventListener('change', async () => {
+      const files = [...(afile.files || [])]; if (!files.length) return;
+      try {
+        const cur = ((await sbGet('app_kv', 'select=v&k=eq.ai_actual')) || [])[0]; const v = (cur && cur.v) || {}; v.days = v.days || {}; v.files = v.files || [];
+        let added = 0, usdSum = 0;
+        for (const f of files) {
+          const text = await f.text(); const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim());
+          const head = lines.shift().split(','); const ix = n => head.indexOf(n);
+          const iD = ix('usage_date_utc'), iM = ix('model'), iT = ix('token_type'), iC = ix('cost_usd');
+          if (iD < 0 || iM < 0 || iC < 0) { alert(f.name + '：Console のコスト CSV ではないようです（usage_date_utc / model / cost_usd の列が無い）'); continue; }
+          const fresh = {};
+          lines.forEach(l => { const c = l.split(','); const d = c[iD], m = c[iM], t = iT >= 0 ? (c[iT] || 'cost') : 'cost', u = Number(c[iC]) || 0; if (!/^\d{4}-\d{2}-\d{2}$/.test(d || '') || !m) return; const o = fresh[d] = fresh[d] || {}; const mm = o[m] = o[m] || {}; mm[t] = Math.round(((mm[t] || 0) + u) * 10000) / 10000; usdSum += u; });
+          Object.keys(fresh).forEach(d => { v.days[d] = fresh[d]; added++; });   /* CSV は日ごとの累計＝同じ日はまるごと置き換え */
+          v.files.push(f.name); if (v.files.length > 30) v.files = v.files.slice(-30);
+        }
+        v.src = 'console_csv'; v.at = new Date().toISOString();
+        await sbUpsert('app_kv', [{ k: 'ai_actual', v, updated_at: new Date().toISOString() }]);
+        toast('🧾 Console の実績を読みました：' + added + '日ぶん・$' + usdSum.toFixed(2));
+        paintActual();
+      } catch (e) { alert('読めませんでした：' + String((e && e.message) || e)); }
+      afile.value = '';
+    });
     const clr = wrap.querySelector('#ai-cost-clear');
     if (clr) clr.addEventListener('click', () => {
       if (!confirm('この端末に記録したAPI利用料の集計を消します。\n\u203BAnthropic側の請求は消えません。')) return;
@@ -4990,7 +5033,7 @@
     '🔎 選んだ出品のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected listings',
     '⚡ JAN・型番を自動で入れる': '⚡ Fill JAN / model no. automatically',
     '▾ ひとつずつ実行する': '▾ Run them one by one', '▴ 閉じる': '▴ Close',
-    '💴 APIの利用料 明細': '💴 API cost — details', '月ごと': 'By month', '日ごと・用途ごと': 'By day and purpose',
+    '💴 APIの利用料 明細': '💴 API cost — details', '🧾 Console の実績（本当の請求・CSV）': '🧾 Console actuals (real billing, CSV)', '📥 CSV を読む': '📥 Read CSV', '実績 $': 'Actual $', 'ポータルの見積もり': 'Portal estimate', 'CSV の範囲': 'CSV range', '日ごと・モデルごと（直近40日）': 'By day and model (last 40 days)', '月ごと': 'By month', '日ごと・用途ごと': 'By day and purpose',
     'JAN・型番調べ': 'JAN / model no. lookup', 'シリーズ調査': 'Series research', '写真の判定': 'Photo check', '写真の判定(自動出品)': 'Photo check (auto-listing, GAS)', '英題(自動出品)': 'English title (auto-listing, GAS)', '同一作品判定(自動出品)': 'Same-title check (auto-listing, GAS)',
     '🗑 この端末の記録を消す': '🗑 Clear this device\u2019s record',
     '🔎 選んだ明細のJAN・型番を探す': '🔎 Look up JAN / model no. for the selected variations',
