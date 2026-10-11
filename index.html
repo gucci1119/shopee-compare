@@ -18434,6 +18434,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     });
     return r;
   }
+  /* 💵 その月に買った全部（在庫台帳の仕入日がその月）。本人 2026-10-11「その月の仕入れ金額も考慮すると残る利益」。利益明細側と入出金側の両方の損益表で使う */
+  function plBuyInfo(ym, inv) {
+    if (!Array.isArray(inv)) return null;
+    let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0;
+    inv.forEach(r => { if (invPurDate(r).slice(0, 7) !== ym) return;
+      const isAmz = /amazon/i.test(String(r.supplier || '')) || String(r.source || '') === 'amazon'; if (isAmz && !r.shopee_sn) return;   /* Amazon の備品・私物は経費側（🛒）で数える */
+      const st = String(r.status || ''); if (/私物|事業外|取消|キャンセル/.test(st)) return;
+      const pr = Number(r.price) || 0; if (!(pr > 0)) { noPrice++; return; }
+      total += pr; n++; if (!r.shopee_sn) { unsold += pr; unsoldN++; } });
+    return { total, n, unsold, unsoldN, noPrice };
+  }
   function plCtx(ym, expRows, extras) {
     const ok = pf.grossYm === ym && typeof pf.grossTotal === 'number';
     const c = { ym, ok, gross: ok ? pf.grossTotal : null, grossN: pf.grossN || 0, fixN: pf.grossFixN || 0, provN: pf.grossProvN || 0, cxl: ok ? (Number(pf.cxlLoss) || 0) : 0, cxlN: pf.cxlN || 0 };
@@ -19283,12 +19294,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let plRemind = [], plCfgV = null, plYmt = null;
     try { plCfgV = await plCfg(); if (plCfgV && Array.isArray(plCfgV.fixBreak)) plCfgV.fixBreak.forEach(x => { const ec = x.ecat || plEcatOf(x.name); if (plModeOf(x) === 'remind' && !rows.some(r => r.category === ec)) plRemind.push({ name: x.name, ecat: ec, amount: plMonthlyOf(x) }); }); } catch (_) {}
     try { const kvy = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + exp.ym)); plYmt = (kvy && kvy[0] && kvy[0].v) || null; } catch (_) {}
-    const buyInfo = (() => { let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0;
-      (invMonth || []).forEach(r => { const isAmz = /amazon/i.test(String(r.supplier || '')) || String(r.source || '') === 'amazon'; if (isAmz && !r.shopee_sn) return;   /* Amazon の備品・私物は経費側（🛒）で数える */
-        const st = String(r.status || ''); if (/私物|事業外|取消|キャンセル/.test(st)) return;
-        const pr = Number(r.price) || 0; if (!(pr > 0)) { noPrice++; return; }
-        total += pr; n++; if (!r.shopee_sn) { unsold += pr; unsoldN++; } });
-      return { total, n, unsold, unsoldN, noPrice }; })();
+    const buyInfo = plBuyInfo(exp.ym, inv);
     const plCtxV = plCtx(exp.ym, rows, { refund: refundTotal, remind: plRemind, buy: buyInfo });
     const plCard = plCardHtml(plCtxV);
     const plReview = plReviewHtml(plCtxV, await plPrevCount(exp.ym), formalRet, issues);
@@ -48387,7 +48393,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const _roi = pairCost ? Math.round(pairProfit / pairCost * 100) : null;
     const _pcol = pairProfit < 0 ? '#d93025' : '#1a7f37';
     // 🧮 月次損益（絞り込みに依存しない・月指定の時だけ）。返金・補償はこの画面では読んでいないので「未集計」と出す
-    const _plTop = /^\d{4}-\d{2}$/.test(String(pf.ym || '')) ? (() => { const _c = plCtx(pf.ym, pf.expRows, { refund: refundForYm(pf.issuesRows || [], pf.ym) }); return plCardHtml(_c) + plReviewHtml(_c, (pl.prevN || {})[pf.ym], pf.returnsRows, pf.issuesRows); })() : '';
+    if (!stock.rows && !pf._invReq) { pf._invReq = 1; ensureInv().then(() => { try { if (typeof renderProfit === 'function') renderProfit(); } catch (_) {} }).catch(() => {}); }   /* ★2026-10-11 この月に仕入れた全部を出すのに在庫台帳が要る＝未読込なら1回だけ読んで描き直す */
+    const _plTop = /^\d{4}-\d{2}$/.test(String(pf.ym || '')) ? (() => { const _c = plCtx(pf.ym, pf.expRows, { refund: refundForYm(pf.issuesRows || [], pf.ym), buy: plBuyInfo(pf.ym, stock.rows) }); return plCardHtml(_c) + plReviewHtml(_c, (pl.prevN || {})[pf.ym], pf.returnsRows, pf.issuesRows); })() : '';
     html = _plTop + `<div class="tool-card" style="margin:0 0 10px;max-width:none;padding:10px 14px;display:flex;flex-wrap:wrap;gap:22px;align-items:flex-end"
         title="いま絞り込んでいる範囲の合計です（表のいちばん上の「合計」行と同じ数字）。粗利は【入金と仕入の両方が分かっている注文】だけで計算しています">`
       + _kpi('注文', pairN + '件', orders.length !== pairN ? '表示 ' + orders.length + '件' : '', '#2b3440')
