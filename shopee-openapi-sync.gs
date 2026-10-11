@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0200';
+var SRC_VER = '20261012-0230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9433,8 +9433,23 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names, ai) {
   return { list: out, stat: stat };
 }
 /* 写真を1枚：題名に番号が入る出品だけ → AI判定（カード用）。戻り {img, src, srcTitle, hits} か null。blocked なら {blocked:1} */
-function tcgPhoto_(hw, c, cfg, st, judged, capN) {
+function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   var q = (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num;
+  /* ★2026-10-12 本人「ヤフオクだけで探してるの？メルカリは？」：トレカは Yahoo!フリマ1本で、弾かれると全部止まっていた（10/11 13:22 以降 0件）。
+     GAS はメルカリを読めないので、ポータル（家の回線のブラウザ）がメルカリで集めた写真の控え tcg_pre を先に使う＝ゲームの boshu_auto_pre と同じ形。
+     控えは boshu_auto_pre（約6MB）に相乗りしない＝4台目が30分ごとに数MBを読むと DB が落ちる（10/10・10/11） */
+  var pre = (baKv_('tcg_pre') || {})[c.key];
+  var mUsed = baKv_(BA_IMGS) || {}, mTried = 0;
+  var mImgs = (pre && Array.isArray(pre.imgs)) ? pre.imgs : [];
+  for (var mi = 0; mi < mImgs.length && mTried < 3; mi++) {
+    var mu = String(mImgs[mi].img || '').replace(/\?.*$/, ''); if (!mu) continue;
+    if (!baUsedOk_(mUsed, mu, c.key, hw)) continue;
+    mTried++;
+    var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
+    if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), hits: mImgs.length, q: q, from: 'mercari' };
+    if (mj.kind === 'budget' || mj.kind === 'error' || mj.kind === 'aidown') return { stop: mj.kind };
+  }
+  if (yahooOk === false) return { nosrc: 1 };   /* Yahoo!フリマは弾かれて休み中＝メルカリの控えが無いカードは今回は飛ばす（試した回数に数えない） */
   var y = baPhotoSrc_(q, cfg);
   if (y.blocked) return { blocked: 1 };
   var numN = String(c.num).replace(/\s+/g, '').toLowerCase();
@@ -9456,12 +9471,13 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN) {
   }
   return { miss: 1, hits: hits.length, q: q };
 }
+var BA_PRE_DIRTY_TCG = false;
 function tcgTick(manual) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(manual === true ? 5000 : 60000)) return { ok: false, error: 'いま走っています（🤖と同じ鍵）' };
   var t0 = Date.now(), DEADLINE = 240000;
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
-  baKvPrefetch_([BA_CFG, 'tcg_auto_status', 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual']);
+  baKvPrefetch_([BA_CFG, 'tcg_auto_status', 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
   var st = baKv_('tcg_auto_status') || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {} };
   var finish_ = function (msg) { st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_('tcg_auto_status', st); } catch (e) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
@@ -9499,22 +9515,27 @@ function tcgTick(manual) {
     var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
     var picks = [], tried = 0, miss = 0, blocked = false;
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
-    if (!yahooOk) return finish_('写真の検索が弾かれている間は休み（' + st.blockedUntil + '）');
+    var tPre = baKv_('tcg_pre') || {}, nosrc = 0;
+    /* ★2026-10-12 弾かれている間も、メルカリの写真の控えがあるカードは続ける（前はここで丸ごと休み） */
+    if (!yahooOk && !cands.list.some(function (x) { var e = tPre[x.key]; return e && e.imgs && e.imgs.length; })) return finish_(hw + '：Yahoo!フリマは弾かれて休み中・メルカリの写真の控えも無い（' + st.blockedUntil + '）');
     var tPh = Date.now();   /* ★2026-10-11 妖怪メダルの回が「候補 53・試した 0」で終わった＝英名を AI で付ける時間（aiNamesOther 40件）で t0 からの 150 秒を使い切り、写真探しの for に一度も入らなかった。写真探しは【ここから】120秒・全体は DEADLINE-30秒 */
     for (var i = 0; i < cands.list.length && picks.length < perTick && Date.now() - tPh < 120000 && Date.now() - t0 < DEADLINE - 30000; i++) {
       var c = cands.list[i];
       var tr = (st.tried = st.tried || {})[c.key] || 0; if (tr >= 3) continue;   /* 3回写真が見つからなかったカードは当分出さない */
+      if (!yahooOk) { var _e = tPre[c.key]; if (!(_e && _e.imgs && _e.imgs.length)) continue; }   /* 弾かれ中は控えのあるカードだけ・飛ばした分は試した数に入れない */
       tried++;
-      var ph = tcgPhoto_(hw, c, cfg, st, judged, capN);
-      if (ph.blocked) { blocked = true; st.blockedUntil = Date.now() + 2 * 3600000; baLog_(st, '写真の検索に弾かれた→2時間休む'); break; }
+      var ph = tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk);
+      if (ph.nosrc) { nosrc++; tried--; continue; }
+      if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = Date.now() + 2 * 3600000; baLog_(st, 'Yahoo!フリマの検索に弾かれた→2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
-      var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); continue; }
+      var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return String(m.img || '').replace(/\?.*$/, '') !== ph.img; }); BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
       picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
-    if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (blocked ? '・弾かれた' : '') + '）'); }
+    if (BA_PRE_DIRTY_TCG) { try { baKvSet_('tcg_pre', tPre); } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }
+    if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci]; if (Date.now() - t0 > DEADLINE) { baLog_(st, '時間切れ→残りは次の回'); break; }
       try {
@@ -9526,7 +9547,8 @@ function tcgTick(manual) {
     try { baKvSet_('boshu_auto_done_' + hw, ctx.ledger); } catch (eL) { baLog_(st, '台帳の保存に失敗: ' + String(eL).slice(0, 120)); }
     try { baKvSet_('tcg_judged', judged); } catch (eJ2) {}
     if (st.added.length > 300) st.added.length = 300; if (st.log.length > 200) st.log.length = 200; if (st.skipped.length > 200) st.skipped.length = 200;
-    return finish_(hw + '：' + picks.length + '枚を試して ' + out.added + ' 明細を追加（見送り ' + out.skipped + '）');
+    var _nm = picks.filter(function (x) { return x.from === 'mercari'; }).length;
+    return finish_(hw + '：' + picks.length + '枚を試して ' + out.added + ' 明細を追加（見送り ' + out.skipped + '・写真はメルカリ ' + _nm + '／Yahoo!フリマ ' + (picks.length - _nm) + '）');
   } catch (e) {
     st.lastErr = String((e && e.stack) || e).slice(0, 400); baLog_(st, '⚠ ' + String(e).slice(0, 200));
     out.ok = false; out.error = String(e).slice(0, 200); return finish_('エラー: ' + String(e).slice(0, 120));
@@ -9540,7 +9562,8 @@ function tcgPreview_(p) {
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0, offBudget: 0 });   /* 下見はAIを呼ばない（控えだけ使う） */
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
-  return { ok: true, hw: hw, stat: cands.stat, list: cands.list.slice(0, n).map(function (c) { return { en: c.en, ja: c.ja, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
+  /* ★2026-10-12 ポータルがメルカリで写真を集めるための材料（key・検索語・番号・NG語）も返す。並びは巡回が試す順のまま */
+  return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
 }
 /* 担当の台（cfg.tcg.runner）で、Head で走る boshuAutoTick の中から tcgCron の時間トリガーを1回だけ作る＝/exec の再デプロイ無しで動き出す（gas-deploy スキル：Head から作ったトリガーは保存だけで最新） */
 function tcgEnsureTrigger_(cfg) {

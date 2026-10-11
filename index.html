@@ -21405,6 +21405,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-12', items: [
+      '🃏 <b>トレカの写真をメルカリからも探すようにしました</b>（本人「ヤフオクだけで探してるの？メルカリは？」）：トレカの自動出品は写真を Yahoo!フリマだけで探していて、弾かれると2時間まるごと止まっていました（10/11 13:22 以降 0件）。ゲームと同じく、このブラウザがトレカの候補をメルカリで探して写真の候補を控え（tcg_pre）に置き、GAS は【メルカリの写真があればそれを先に・無ければ Yahoo!フリマ】で使います。Yahoo!フリマが休みの間も、メルカリの写真があるカードは出し続けます。写真が商品そのものかの判定は今までどおり出す直前に1枚だけ。※メルカリの写真集めはポータルを開いている間だけ進みます',
+    ] },
     { date: '2026-10-11', items: [
       '🪙 <b>小物の枚物4区分を母数に足しました</b>（本人「トレカ以外も出していってね」「バトルコイン・指人形・メザスタ・妖怪ウォッチメダル・amiibo」「どうぶつの森のカード」）：どうぶつの森 amiiboカード／妖怪メダル／ポケモン モンコレ／メザスタのタグ。駿河屋を検索語で集め、トレカと同じ流れ（番号・名前・写真・予約出品）で🃏の自動出品に載せます。バトルコインは駿河屋に11件しか無いので見送り（メルカリ側は別途）。',
       '✅ <b>「出荷前チェック」を📦注文管理の上に置きました</b>（本人が共有したゴマちゃんの投稿「ミスは注意力でなくチェックリストの不在。自社で起きたミスだけを潰したリストが最強」）。最初の4行は返品理由の実数（直近120件：商品違い16・欠品5・破損4・住所違い2）から。ミスが出たら「＋1行足す」、または返品ページの各行「✅チェック項目に」で理由と商品名が入った状態から1行にできます。🖨きょうの作業指示（A4）の「③つめる」にも☐付きで印刷されます。外した項目は消さず控えに残します。',
@@ -32457,6 +32460,54 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   /* ★2026-10-09 仕入れ画面を開いているタブがあれば、同じPCの他のタブの写真集めも休む（localStorage の時刻で伝える） */
   const _buyBusyAny = () => { try { if (state.page === 'buy' && document.visibilityState === 'visible') { localStorage.setItem('smdBuyBusyAt', String(Date.now())); return true; } return Date.now() - Number(localStorage.getItem('smdBuyBusyAt') || 0) < 90000; } catch (_) { return false; } };
   try { setInterval(() => { try { if (state.page === 'buy' && document.visibilityState === 'visible') localStorage.setItem('smdBuyBusyAt', String(Date.now())); } catch (_) {} }, 30000); } catch (_) {}
+  /* 🃏 ★2026-10-12 本人「ヤフオクだけで探してるの？メルカリは？」：トレカの巡回（GAS tcgTick）は Yahoo!フリマ1本で、弾かれると全部止まっていた（10/11 13:22 以降 0件）。
+     GAS はメルカリを読めないので、ゲームと同じくこのブラウザ（ブリッジ）がメルカリで写真の候補を集め、app_kv.tcg_pre（カードの鍵→{hw,at,imgs[]}）に置く。
+     boshu_auto_pre（約6MB）には相乗りしない＝GAS が30分ごとに読むので小さく保つ（上限 3,000 枚ぶん）。AI判定はここではしない（出す直前に GAS が1枚だけ判定）。
+     照合はカード番号（157/103 等）が題名に入っていること＋GAS と同じ NG 語（BOX・パック・まとめ・鑑定…）。見つからなかったカードは3日は引き直さない */
+  async function baCollectTcg(cfg, msgs) {
+    const tc = (cfg && cfg.tcg) || {};
+    if (!tc.on || !settings.boshuUrl3) return;
+    const hwsT = Array.from(new Set((tc.hws || []).filter(h => cfg.family && cfg.family[h])));
+    if (!hwsT.length) return;
+    const tp = Object.assign({}, baKvMust(await baKvGetRaw('tcg_pre'), 'トレカの写真の控え') || {});
+    let ti = 0; try { ti = Number(localStorage.getItem('smdTcgCollectIdx') || 0) || 0; } catch (_) {}
+    const sleep = (ms) => new Promise(rs => setTimeout(rs, ms));
+    let changed = 0;
+    for (let t = 0; t < 2; t++) {
+      const hw = hwsT[(ti++) % hwsT.length];
+      try { localStorage.setItem('smdTcgCollectIdx', String(ti)); localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}
+      let r = null, err = '';
+      try { r = await gasCall({ action: 'tcg_preview', token: settings.writeToken, hw, n: 40, _url: settings.boshuUrl3 }, 240000); } catch (e) { err = String((e && e.message) || e); }
+      if (!r || !r.ok || !Array.isArray(r.list)) { msgs.push('🃏 ' + (TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗（' + String(err || (r && r.error) || '').slice(0, 40) + '）'); continue; }
+      let ng = null; try { ng = new RegExp(r.ng, 'i'); } catch (_) { ng = null; }
+      const fresh = (e) => e && ((e.imgs && e.imgs.length) || (e.missAt && Date.now() - Date.parse(e.missAt) < 3 * 86400000));
+      const todo = r.list.filter(c => c && c.key && c.q && !fresh(tp[c.key])).slice(0, 15);
+      let got = 0, miss = 0;
+      for (const c of todo) {
+        let items = [];
+        try { items = await mercariSearch(c.q, { relevance: true }); } catch (_) { miss++; await sleep(2500); continue; }
+        const numN = String(c.num || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+        const jn = String(c.jaName || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+        const hits = items.filter(x => {
+          const t0 = String(x.name || '').normalize('NFKC').toLowerCase();
+          if (ng && ng.test(t0)) return false;
+          const t2 = t0.replace(/\s+/g, '');
+          return numN ? t2.indexOf(numN) >= 0 : (!!jn && t2.indexOf(jn) >= 0);   /* 番号が題名に無い出品は別のカードかもしれない＝使わない（GAS tcgPhoto_ と同じ） */
+        });
+        const imgs = hits.slice(0, 4).map(x => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : x.img, src: x.url, name: String(x.name || '').slice(0, 80), price: Number(x.price) || 0 }; }).filter(x => x.img);
+        const now = new Date().toISOString();
+        tp[c.key] = imgs.length ? { hw, at: now, imgs } : { hw, missAt: now };
+        if (imgs.length) got++; else miss++;
+        changed++;
+        await sleep(2500);
+      }
+      msgs.push('🃏 ' + (TITLE_HW_JA[hw] || hw) + '：メルカリの写真 ' + got + '件' + (miss ? '・見つからず ' + miss : '') + (todo.length ? '' : '（探すカード無し）'));
+    }
+    if (!changed) return;
+    const ks = Object.keys(tp);
+    if (ks.length > 3000) ks.sort((a, b) => String((tp[b] && (tp[b].at || tp[b].missAt)) || '').localeCompare(String((tp[a] && (tp[a].at || tp[a].missAt)) || ''))).slice(3000).forEach(k => { delete tp[k]; });
+    await sbUpsert('app_kv', [{ k: 'tcg_pre', v: tp, updated_at: new Date().toISOString() }]);
+  }
   async function baAutoCollectTick(force) {
     try { window.__baCollectTick = new Date().toISOString(); localStorage.setItem('smdBaCollectTick', window.__baCollectTick); } catch (_) {}
     /* ★2026-10-09 レビュー：担当でないPCでも毎分 Supabase 4〜5回＋GAS を読んでから捨てていた。安い判定を先に（約6,000回/日→ほぼ0） */
@@ -32540,6 +32591,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
          さらに1回で2機種ぶん集める（機種が4→15に増えたので、1機種ずつだと一巡に7時間半かかる）。叩く間隔は今までどおり1件2.5秒 */
       let ci = 0; try { ci = Number(localStorage.getItem('smdBaCollectIdx') || 0) || 0; } catch (_) { ci = lst._baCollectIdx || 0; }
       const msgs = [];
+      try { await baCollectTcg(cfg, msgs); } catch (eTcg) { msgs.push('🃏 トレカの写真集めに失敗: ' + String((eTcg && eTcg.message) || eTcg).slice(0, 60)); }   /* 🃏 トレカ優先（本人 10/12）＝ゲームより先に */
       /* ★2026-09-21 本人「1日500とか1000とか出していきたい」→ 詰まりを数えたら写真だった
          （集めた1,182作品のうち 写真あり558・見つからず195・**まだ探していない429**／AI判定は51%が不合格でカタログ画像245が最大）。
          1回3機種→5機種、1機種25枚→40枚に太くする。 */
