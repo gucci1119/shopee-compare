@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2130';
+var SRC_VER = '20261011-2230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3258,7 +3258,11 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     addModel_(shopId, itemId, newModels);
   } catch (eAdd) {
     var eMsg = String((eAdd && eAdd.message) || eAdd), okRetry = false;
-    if (/tier_index/i.test(eMsg)) {
+    if (/enabled together/i.test(eMsg)) {   /* ★2026-10-11 SG：関連チャネル（SPX Express Lockers (Overseas)）を足して1回だけ送り直す */
+      try { var relFix = logiRelatedFixItem_(shopId, itemId, eMsg); if (relFix) { Utilities.sleep(1500); addModel_(shopId, itemId, newModels); okRetry = true; tierRetry += '配送チャネル「' + relFix.name + '」を足して再送 →成功'; } }
+      catch (eRel) { eMsg = String((eRel && eRel.message) || eRel); tierRetry += '配送チャネルを足して再送 →失敗 ' + eMsg.slice(0, 80); }
+    }
+    if (!okRetry && /tier_index/i.test(eMsg)) {
       for (var rt = 1; rt <= 2 && !okRetry; rt++) {
         Utilities.sleep(3000 * rt);
         var seen = -1;
@@ -3558,6 +3562,32 @@ function resolveCategoryId_(shopId, keyword) {
 }
 // 物流チャネル解決：Locker/自己集荷系（価格上限・サイズ制限が厳しく高額品が「max price over limit」で弾かれる）を除外し、
 // 使える有効チャネルを「全て」有効化する（＝手動出品と同じ挙動。単一Lockerに縛られて高額品が出せない問題を防ぐ）。返り値は logistic_info 配列。
+/* ★2026-10-11 SG の add_model／add_item が「Related channel should be enabled together. Channel detail: SPX Express Lockers (Overseas)」で落ちる
+   （2台目ログ 10/11 11:58・12:05＝SG の全家族で明細が1件も入らない）。カタログは SPX Express Lockers が有効で、Shopee が新しく
+   「〜(Overseas)」も一緒に有効にすることを求めている。言われたチャネルを get_channel_list で引き、カタログの配送設定に足して（update_item）
+   もう1回だけ送り直す。控え logi2_<shop> にも足して、次の add_item からは最初から送る。見つからなければ null（＝元のエラーのまま）。 */
+function logiRelatedFromErr_(shopId, errMsg) {
+  var m = /enabled together[^:]*:\s*([^\n]+)$/i.exec(String(errMsg || '')); if (!m) return null;
+  var want = String(m[1] || '').replace(/[.。\s]+$/, '').trim().toLowerCase(); if (!want) return null;
+  var chl = [];
+  try { chl = (((callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get') || {}).response || {}).logistics_channel_list) || []; } catch (eL) { return null; }
+  var ids = chl.filter(function (c) { var nm = String(c.logistics_channel_name || '').trim().toLowerCase(); return nm && (nm === want || want.indexOf(nm) === 0 && nm.length >= want.length - 2); }).map(function (c) { return c.logistics_channel_id; });
+  if (!ids.length) ids = chl.filter(function (c) { var nm = String(c.logistics_channel_name || '').trim().toLowerCase(); return nm && want.indexOf(nm) >= 0 && nm.length > 8; }).map(function (c) { return c.logistics_channel_id; });
+  if (!ids.length) return null;
+  try { var ck = 'logi2_' + shopId, cur = []; try { cur = JSON.parse(P_().getProperty(ck) || '[]') || []; } catch (eC) { cur = []; }
+    ids.forEach(function (id) { if (!cur.some(function (x) { return x.logistic_id === id; })) cur.push({ logistic_id: id, enabled: true }); });
+    if (cur.length) P_().setProperty(ck, JSON.stringify(cur)); } catch (eP) {}
+  return { ids: ids, name: m[1].trim() };
+}
+function logiRelatedFixItem_(shopId, itemId, errMsg) {
+  var rel = logiRelatedFromErr_(shopId, errMsg); if (!rel) return null;
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId) }, 'get');
+  var it = (((b.response || {}).item_list) || [])[0] || {};
+  var cur = (it.logistic_info || []).filter(function (x) { return x.enabled; }).map(function (x) { return { logistic_id: x.logistic_id, enabled: true }; });
+  rel.ids.forEach(function (id) { if (!cur.some(function (x) { return x.logistic_id === id; })) cur.push({ logistic_id: id, enabled: true }); });
+  updateItem_({ shop_id: shopId, item_id: itemId, logistic_info: cur });
+  return rel;
+}
 function resolveLogisticInfo_(shopId) {
   var ck = 'logi2_' + shopId; // ★旧 logi_ の単一idキャッシュ(Locker混入の恐れ)は使わず新キーに
   var c0 = P_().getProperty(ck);
@@ -3762,7 +3792,11 @@ function addItem_(body) {
     /* ★2026-09-24 「Product category is prohibited for the channel. Channel detail: <名前>」＝そのチャネルだけ外して1回作り直す。
        外したチャネルは控え（logi2_<shop>）からも消して、次からは最初から送らない。 */
     var mCh = /prohibited for the channel[^:]*:\s*(.+)$/i.exec(msgA);
-    if (mCh) {
+    var relNew = /enabled together/i.test(msgA) ? logiRelatedFromErr_(shopId, msgA) : null;   /* ★2026-10-11 SG：関連チャネルを足して1回だけ作り直す */
+    if (relNew) {
+      relNew.ids.forEach(function (id) { if (!(payload.logistic_info || []).some(function (x) { return x.logistic_id === id; })) payload.logistic_info = (payload.logistic_info || []).concat([{ logistic_id: id, enabled: true }]); });
+      j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
+    } else if (mCh) {
       var badName = String(mCh[1] || '').trim().toLowerCase();
       var chl = [];
       try { chl = (((callShop_(shopId, '/api/v2/logistics/get_channel_list', null, 'get') || {}).response || {}).logistics_channel_list) || []; } catch (eL) { chl = []; }
