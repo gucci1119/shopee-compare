@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2245';
+var SRC_VER = '20261011-2300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9454,7 +9454,8 @@ function tcgTick(manual) {
     var picks = [], tried = 0, miss = 0, blocked = false;
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
     if (!yahooOk) return finish_('写真の検索が弾かれている間は休み（' + st.blockedUntil + '）');
-    for (var i = 0; i < cands.list.length && picks.length < perTick && Date.now() - t0 < 150000; i++) {
+    var tPh = Date.now();   /* ★2026-10-11 妖怪メダルの回が「候補 53・試した 0」で終わった＝英名を AI で付ける時間（aiNamesOther 40件）で t0 からの 150 秒を使い切り、写真探しの for に一度も入らなかった。写真探しは【ここから】120秒・全体は DEADLINE-30秒 */
+    for (var i = 0; i < cands.list.length && picks.length < perTick && Date.now() - tPh < 120000 && Date.now() - t0 < DEADLINE - 30000; i++) {
       var c = cands.list[i];
       var tr = (st.tried = st.tried || {})[c.key] || 0; if (tr >= 3) continue;   /* 3回写真が見つからなかったカードは当分出さない */
       tried++;
