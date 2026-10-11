@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-1500';
+var SRC_VER = '20261011-1900';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1431,6 +1431,30 @@ function doGetInner_(e) {
 // ★webchat取り込み：Tampermonkeyから生チャットJSON/正規化メッセージをPOSTで受ける（WRITE_TOKENガード）
 // body: { token, action:'chat_ingest', captures:[{url,cc,body}], messages:[{...chat_messagesの行}] }
 /* 国×日のアクセス（Business Insights の Traffic Overview）。app_kv traffic_daily = { cc: { 'YYYY-MM-DD': {pv,uv,nv,ev,nf,stay,bounce,at} }, upd: {cc: iso} } */
+/* 🧾 Claude Console の実績（本当の請求）の受け口（2026-10-11 本人「自動化してね」「こまめに追加購入するので月1だと足りない」）
+   個人向けプランでは Admin API キーが出せないので、platform.claude.com のコスト画面で動く userscript（claude-console-cost）がページ自身の応答を横取りして送ってくる。
+   鍵なし（traffic_ingest と同じ型）。書けるのは app_kv `ai_actual` だけ。rows=[{d:'YYYY-MM-DD', model, type, usd}] を日×モデル×種別に畳み、同じ日はまるごと置き換える。
+   raw（横取りした応答の先頭）は形の確認用に ai_actual_raw に別で控える（最大 60KB・1本だけ） */
+function aiActualIngest_(body) {
+  var rows = body.rows; var raw = body.raw ? String(body.raw).slice(0, 60000) : '';
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var out = { ok: true, days: 0, usd: 0 };
+    if (raw) { try { baKvSet_('ai_actual_raw', { at: new Date().toISOString(), url: String(body.url || '').slice(0, 300), raw: raw }); out.raw = raw.length; } catch (e) { out.rawErr = String(e).slice(0, 80); } }
+    if (!rows || !rows.length) return out;
+    if (rows.length > 5000) rows = rows.slice(-5000);
+    var kv = baKvFresh_('ai_actual'); if (!kv || typeof kv !== 'object') kv = {}; kv.days = kv.days || {};
+    var fresh = {};
+    rows.forEach(function (r) { if (!r) return; var d = String(r.d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return; var m = String(r.model || '?').slice(0, 60), t = String(r.type || 'cost').slice(0, 40), u = Number(r.usd) || 0;
+      var o = fresh[d] = fresh[d] || {}; var mm = o[m] = o[m] || {}; mm[t] = Math.round(((mm[t] || 0) + u) * 10000) / 10000; out.usd += u; });
+    Object.keys(fresh).forEach(function (d) { kv.days[d] = fresh[d]; out.days++; });
+    var cut = Utilities.formatDate(new Date(Date.now() - 400 * 86400000), 'UTC', 'yyyy-MM-dd'); Object.keys(kv.days).forEach(function (d) { if (d < cut) delete kv.days[d]; });
+    kv.src = 'console_userscript'; kv.at = new Date().toISOString(); kv.ver = String(body.ver || '');
+    baKvSet_('ai_actual', kv);
+    out.usd = Math.round(out.usd * 100) / 100;
+    return out;
+  } finally { lock.releaseLock(); }
+}
 function trafficIngest_(body) {
   var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
   var rows = body.rows; if (!rows || !rows.length) throw new Error('rows 空');
@@ -1525,6 +1549,7 @@ function doPostInner_(e) {
        Seller Center の datacenter ページで動く userscript（shopee-insights.user.js）がページ自身の応答を横取りして送ってくる。
        鍵なし（yamato_ship と同じ型）。書けるのは app_kv `traffic_daily` だけ。数値だけを国×日で上書き保存 */
     if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
+    if (body.action === 'ai_actual_ingest') { out = aiActualIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }   /* ★2026-10-11 Claude Console のコスト（本当の請求）を userscript が横取りして送る＝鍵なし。書けるのは app_kv ai_actual だけ */
     if (body.action === 'product_perf_ingest') { out = productPerfIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
