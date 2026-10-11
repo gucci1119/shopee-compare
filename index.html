@@ -17957,12 +17957,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const BA_CF = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
     const rowsyncRows = (() => {
       if (!settings.depUrl && !settings.openapiUrl) return [];   // 転記を使っていない環境では出さない
-      const ccs = ['ph', 'br', 'vn', 'my', 'th', 'sg', 'tw']; const out = [];
+      const ccs = ['ph', 'br', 'vn', 'my', 'th', 'sg', 'tw', 'ph2', 'br2', 'my2', 'th2', 'sg2', 'tw2']; const out = [];   /* ★2026-10-11 {国}2＝第二アカウント（gs_japan_select）の転記。記録が一度も無い鍵は出さない（下で r が無ければ飛ばす） */
       // 生存記録そのものが動き始めて4時間未満なら「記録なし」の国は責めない（v1.3.4 を入れた直後に7か国が赤くなるのを防ぐ）
       const newest = Math.max(0, ...ccs.map(c => { const r = (rowsync || {})[c]; const t = r && r.at ? Date.parse(r.at) : NaN; return isNaN(t) ? 0 : t; }));
       const warming = !newest || (Date.now() - newest) < 4 * 3600000;
       ccs.forEach(cc => {
         const r = (rowsync || {})[cc];
+        if (/2$/.test(cc) && !r) return;   /* 第二アカウントは転記が始まってから見る */
         const okAt = r && r.okAt ? Date.parse(r.okAt) : NaN, at = r && r.at ? Date.parse(r.at) : NaN;
         const hrs = isNaN(okAt) ? Infinity : (Date.now() - okAt) / 3600000;
         let why = '';
@@ -17970,8 +17971,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         else if (hrs > 4) why = '最後の成功から ' + (isFinite(hrs) ? Math.floor(hrs) + '時間' : '不明') + '（3時間おきのはず）';
         else if (r.ok === false) why = '最後の実行が失敗';
         if (!why) return;
-        const rg = regionByCc(cc.toUpperCase());
-        out.push({ cc: cc.toUpperCase(), why, lastOk: isNaN(okAt) ? '—' : new Date(okAt).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16), lastMsg: r ? esc(String(r.msg || '').slice(0, 90)) : '', host: rg ? rg.host : '' });
+        const rg = regionByCc(cc.replace(/2$/, '').toUpperCase());
+        out.push({ cc: cc.toUpperCase().replace(/2$/, ' 2店目'), why, lastOk: isNaN(okAt) ? '—' : new Date(okAt).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16), lastMsg: r ? esc(String(r.msg || '').slice(0, 90)) : '', host: rg ? rg.host : '' });
       });
       return out;
     })();
@@ -21137,6 +21138,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-11', items: [
+      '🏪 <b>第二アカウント（gs_japan_select）の注文を利益管理表へ入れる土台を作りました</b>（本人「スプシは、第二アカウント用でもう一つ必要かな？」「ずれないの？」「他との連携も整合性が合うように」）。別ブックは作らず、同じ月の表の中に {国}2_row／{国}2_p（6か国）を足し、月の集計（売上・支払い）は本店＋第二の合算に。ポータル側は🔔「転記が止まっている国」が第二アカウント（TH 2店目 等）も見る・利益管理表ミラー（仕入額/入金額）が {国}2_p も読む。転記そのものは第二アカウントのセラーセンター（別プロファイル）に転記 userscript v1.6.0 を入れてから動きます。',
       '🏪 <b>第二アカウント（gs_japan_select）の注文が本店の注文として記録されていたのを直しました</b>（本人「第二アカウントのオーダーって、ポータルに表示されている？」）。注文の商品がどの店の出品かで店を決めます。TH の注文1件（2610108FAX70R7）を gs_japan_select.th に付け直しました。',
       '🗂 <b>出品ログの「これまでに自動で出した明細（機種×国）」を区分（🎮ゲーム／🃏トレカ／🧸グッズ）で括りました</b>（本人「ここはカードとかの括りはない？」「カードは機種ではないしな」）。区分ごとの小計行を出し、トレカ・グッズの行は機種でなくタイトル名（ポケモンカード等）で並びます。',
       '🩹 <b>母数ページのチカチカを直しました</b>（本人「何か表示がチカチカして不安定」）。機種ごとに「出している」を数え終わるたびに画面全体を描き直していた（31機種＝31回）のを、1.2秒に1回までに間引きました。トレカ・グッズは作品マスタが無いので突き合わせ自体をしない（毎回DBを読み直していた分も止まります）。',
@@ -48870,8 +48872,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const costRows = [];
         for (const { id } of mirrorSheets) {
           for (const region of targets) {
+            /* ★2026-10-11 第二アカウント（gs_japan_select）は同じブックの {国}2_p。注文番号で別物なので同じ costs に入る */
+            const tabs2 = [region.cc.toLowerCase() + '_p'].concat((state.accounts || []).filter(a => a && String(a.cc || '').toUpperCase() === region.cc && /sub/i.test(String(a.status || ''))).length ? [region.cc.toLowerCase() + '2_p'] : []);
+            for (const tabName of tabs2) {
             try {
-              const tbl = await gvizFetch(id, region.cc.toLowerCase() + '_p');
+              const tbl = await gvizFetch(id, tabName);
               const seen = new Set();
               (tbl.rows || []).forEach(row => {
                 const c = row.c || [];
@@ -48885,7 +48890,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 if (cost != null || dep != null) costRows.push({
                   cc: region.cc, sn: String(sn), cost, deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() });
               });
-            } catch (e) { say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
+            } catch (e) { if (!/2_p$/.test(tabName)) say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
+            }
           }
         }
         await sbUpsert('costs', costRows);
