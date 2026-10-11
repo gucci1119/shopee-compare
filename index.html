@@ -1950,6 +1950,14 @@
   const aiYen = (t, kind) => { const p = AI_PRICE[kind] || AI_PRICE._default;
     return Math.round((((t.in || 0) / 1e6 * p.in) + ((t.out || 0) / 1e6 * p.out) + ((t.search || 0) / 1000 * p.search)) * AI_USDJPY); };
   const aiYenOf = (byKind) => Object.keys(byKind || {}).reduce((a, k) => a + aiYen(byKind[k], k), 0);
+  /* 🧾 Console の実績（app_kv ai_actual・日×モデル×種別 USD・UTC日付）。本人 2026-10-11「予測は入らなくて、本当に実績だけで良くない？」
+     ＝金額は実績を正とし、用途の内訳だけ見積もりの割合で実績を按分する（Console はモデル別までしか分からない） */
+  let _aiActual = null, _aiActualAt = 0;
+  const aiActualUsd = o => Object.keys(o || {}).reduce((a, m) => a + Object.keys(o[m] || {}).reduce((b, t) => b + (Number(o[m][t]) || 0), 0), 0);
+  function aiActualMonthYen(mon) { const dd = (_aiActual && _aiActual.days) || {}; let u = 0, n = 0; Object.keys(dd).forEach(d => { if (d.slice(0, 7) === mon) { u += aiActualUsd(dd[d]); n++; } }); return n ? Math.round(u * AI_USDJPY) : null; }
+  function aiEstMonthYen(mon) { const days = aiSpendDays(); return Object.keys(days).filter(k => String(k).slice(0, 7) === mon).reduce((a, k) => a + aiYenOf(days[k]), 0); }
+  function aiFactor(mon) { const a = aiActualMonthYen(mon); if (a == null) return 1; const e = aiEstMonthYen(mon); return e > 0 ? a / e : 1; }   /* 見積もり→実績の按分係数（実績が無い月は1） */
+  async function aiActualLoad(force) { if (!settings.sbKey) return _aiActual; if (_aiActual && !force && Date.now() - _aiActualAt < 30 * 60000) return _aiActual; try { const r = await sbGet('app_kv', 'select=v&k=eq.ai_actual'); _aiActual = (r && r[0] && r[0].v) || { days: {} }; _aiActualAt = Date.now(); } catch (_) {} return _aiActual; }
   function aiCostDraw() {
     const el = document.getElementById('ai-cost'); if (!el) return;
     const days = aiSpendDays();
@@ -1963,14 +1971,17 @@
     el.style.display = '';   // ★0円でも必ず出す（出ていないのが「0円」なのか「壊れている」のか分からなくなる）
     el.style.color = yMonth >= 10000 ? '#b3261e' : (yMonth >= 3000 ? '#e8770a' : '#8a8f98');
     el.style.fontWeight = yMonth >= 3000 ? '700' : '400';
-    el.textContent = '💴 今月 ¥' + yMonth.toLocaleString();   // 上のバーは短く（本人 2026-09-19「見せ方をもっと簡略化できる」）。何の料金か・内訳は吹き出しに
+    const aMonth = aiActualMonthYen(mon);
+    const shown = aMonth != null ? aMonth : yMonth;
+    el.style.color = shown >= 10000 ? '#b3261e' : (shown >= 3000 ? '#e8770a' : '#8a8f98'); el.style.fontWeight = shown >= 3000 ? '700' : '400';
+    el.textContent = '💴 今月 ¥' + shown.toLocaleString() + (aMonth != null ? '' : '（見積）');   // 実績（Console）があれば実績、無ければ見積もり。上のバーは短く（本人 2026-09-19）
     // ★何にいくら使ったかの内訳。合計だけ見せても、どこを削ればいいか分からない
     el.title = 'ポータルが使ったAPIの利用料です（JAN・型番調べ／シリーズ調査／写真の判定／母数🤖の自動出品の写真判定＝GAS側）。\n'
       + '★トークン数は実測です（API応答の usage を毎回足しています）。円は【単価表 × 1ドル150円の固定】での概算です。\n'
       + '※ここに入らないもの：Smart Reply（webchatのAI返信）の利用料／このPC以外で使った分／ポータルが数え始める前（〜2026-09-16）の分。\n'
       + (Object.keys(monByKind).some(k => !aiPriceKnown(k)) ? '⚠ 単価表に無い用途があります（いちばん高い単価で多めに計算しています）：' + Object.keys(monByKind).filter(k => !aiPriceKnown(k)).join('・') + '\n' : '')
       + '\n'
-      + '今月（' + mon + '）¥' + yMonth.toLocaleString() + '　／　きょう ¥' + yToday.toLocaleString() + '　／　ぜんぶ ¥' + yAll.toLocaleString() + '\n\n'
+      + (aMonth != null ? '【実績（Console の請求）】今月 ¥' + aMonth.toLocaleString() + '（見積もり ¥' + yMonth.toLocaleString() + '）\n' : '今月（' + mon + '）¥' + yMonth.toLocaleString() + '（見積もり）\n') + 'きょう（見積もり）¥' + yToday.toLocaleString() + '　／　ぜんぶ（見積もり）¥' + yAll.toLocaleString() + '\n\n'
       + 'クリックすると【日ごと・用途ごとの明細】が出ます。';
     el.onclick = () => aiCostDetail();
   }
@@ -2201,35 +2212,34 @@
     const kinds = [...new Set(keys.flatMap(k => Object.keys(days[k])))];
     const rowsHtml = keys.map(day => {
       const byKind = days[day];
-      const yen = aiYenOf(byKind);
+      const fct = aiFactor(String(day).slice(0, 7)); const yen = Math.round(aiYenOf(byKind) * fct);
       const cells = kinds.map(k => { const t = byKind[k];
-        return '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee">' + (t ? '¥' + aiYen(t, k).toLocaleString() + '<span class="smd-dim" style="font-size:9.5px"> /' + t.n + '回</span>' : '<span class="smd-dim">—</span>') + '</td>'; }).join('');
+        return '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee">' + (t ? '¥' + Math.round(aiYen(t, k) * fct).toLocaleString() + '<span class="smd-dim" style="font-size:9.5px"> /' + t.n + '回</span>' : '<span class="smd-dim">—</span>') + '</td>'; }).join('');
       const n = Object.keys(byKind).reduce((a, k) => a + byKind[k].n, 0);
       const sr = Object.keys(byKind).reduce((a, k) => a + (byKind[k].search || 0), 0);
       return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;white-space:nowrap">' + day + '</td>' + cells
         + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + yen.toLocaleString() + '</td>'
         + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">' + n + '回 / 検索' + sr + '</td></tr>';
     }).join('');
-    const total = keys.reduce((a, k) => a + aiYenOf(days[k]), 0);
+    const total = keys.reduce((a, k) => a + Math.round(aiYenOf(days[k]) * aiFactor(String(k).slice(0, 7))), 0);
     // ★月ごとの小計。請求と同じ単位で見たいので、月を先に出す
     const months = [...new Set(keys.map(k => String(k).slice(0, 7)))].sort().reverse();
     const monthHtml = months.map(m => {
       const ds = keys.filter(k => String(k).slice(0, 7) === m);
-      const y = ds.reduce((a, k) => a + aiYenOf(days[k]), 0);
+      const y = ds.reduce((a, k) => a + aiYenOf(days[k]), 0); const am = aiActualMonthYen(m);
       const n = ds.reduce((a, k) => a + Object.keys(days[k]).reduce((b, x) => b + days[k][x].n, 0), 0);
       return '<tr><td style="padding:3px 8px;border-top:1px solid #eee;font-weight:700">' + m + '</td>'
-        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">¥' + y.toLocaleString() + '</td>'
+        + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;font-weight:700">' + (am != null ? '¥' + am.toLocaleString() + ' <span class="smd-dim" style="font-size:10px">実績</span>' : '¥' + y.toLocaleString() + ' <span class="smd-dim" style="font-size:10px">見積</span>') + '</td>'
         + '<td style="text-align:right;padding:3px 8px;border-top:1px solid #eee;color:#8a8f98">' + n + '回</td></tr>';
     }).join('');
     const html = '<div style="font-size:12px">'
-      + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">実際に使ったトークン数から計算しています（見積もりではありません）。この端末に記録したぶん＋GAS側（母数🤖の自動出品の写真判定）のぶんです。webchat の Smart Reply（自動返信）の分は含みません（あちらのドックの💰に出ます）。</div>'
-      + '<div id="ai-report-box" style="border:1px solid #cfd8e3;background:#f6f9fc;border-radius:8px;padding:10px;margin-bottom:14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:12.5px">🧾 Anthropic の実績（請求のもと・全期間・全キー）</b><button id="ai-report-btn" class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 10px">🔄 取り直す</button></div><div id="ai-report-body" class="smd-dim" style="font-size:11px">読み込み中…</div></div>'
+      + '<div class="smd-dim" style="font-size:11px;margin-bottom:8px">金額は Console の実績（本当の請求）が正。用途ごとの内訳は、ポータルが数えたトークン数の割合で実績を按分しています。この端末に記録したぶん＋GAS側（母数🤖の自動出品の写真判定）のぶんです。webchat の Smart Reply（自動返信）の分は含みません（あちらのドックの💰に出ます）。</div>'
       + '<div id="ai-actual-box" style="border:1px solid #d9d0ee;background:#faf7ff;border-radius:8px;padding:10px;margin-bottom:14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><b style="font-size:12.5px">🧾 Console の実績（本当の請求・CSV）</b><span class="smd-dim" style="font-size:10.5px">platform.claude.com → コスト → 右上⤓ の CSV</span><label class="smd-btn" style="margin-left:auto;font-size:11px;padding:3px 11px;cursor:pointer">📥 CSV を読む<input id="ai-actual-file" type="file" accept=".csv,text/csv" multiple style="display:none"></label></div><div id="ai-actual-body" class="smd-dim">読み込み中…</div></div>'
       + (months.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">月ごと</div>'
         + '<table style="border-collapse:collapse;width:100%;font-size:11.5px;margin-bottom:14px"><thead><tr>'
         + '<th style="text-align:left;padding:3px 8px">月</th><th style="text-align:right;padding:3px 8px">合計</th><th style="text-align:right;padding:3px 8px">回数</th></tr></thead><tbody>'
         + monthHtml + '</tbody></table>') : '')
-      + (keys.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">日ごと・用途ごと</div>'
+      + (keys.length ? ('<div style="font-weight:700;font-size:12px;margin:2px 0 4px">日ごと・用途ごと <span class="smd-dim" style="font-weight:400;font-size:10.5px">（実績がある月は、見積もりの割合で実績を按分した金額）</span></div>'
         + '<table style="border-collapse:collapse;width:100%;font-size:11.5px"><thead><tr>'
         + '<th style="text-align:left;padding:3px 8px">日（JST）</th>'
         + kinds.map(k => '<th style="text-align:right;padding:3px 8px">' + esc(k) + '</th>').join('')
@@ -2287,7 +2297,7 @@
         + '<details><summary style="cursor:pointer;font-size:11px;color:#5e35b1">日ごと・モデルごと（直近40日）</summary><table style="border-collapse:collapse;width:100%;font-size:11px;margin-top:4px"><thead><tr><th style="text-align:left;padding:2px 8px">日（UTC）</th>' + models.map(m => '<th style="text-align:right;padding:2px 8px">' + esc(m) + '</th>').join('') + '<th style="text-align:right;padding:2px 8px">合計</th></tr></thead><tbody>' + drows + '</tbody></table></details>'
         + '<div class="smd-dim" style="font-size:10.5px;margin-top:6px">日付は Console と同じ UTC。見積もりの％＝ポータルの見積もり÷実績（100%より大きければ見積もりが多め）。最後に読んだ CSV：' + esc(String((v.files || []).slice(-1)[0] || '')) + '</div>';
     };
-    const paintActual = async () => { if (!abody) return; try { const r = await sbGet('app_kv', 'select=v&k=eq.ai_actual'); abody.innerHTML = actualHtml((r && r[0] && r[0].v) || {}); abody.classList.remove('smd-dim'); } catch (e) { abody.textContent = '読めませんでした：' + String((e && e.message) || e); } };
+    const paintActual = async () => { if (!abody) return; try { const v = await aiActualLoad(true); abody.innerHTML = actualHtml(v || {}); abody.classList.remove('smd-dim'); aiCostDraw(); } catch (e) { abody.textContent = '読めませんでした：' + String((e && e.message) || e); } };
     paintActual();
     if (afile) afile.addEventListener('change', async () => {
       const files = [...(afile.files || [])]; if (!files.length) return;
@@ -9371,6 +9381,7 @@
   try { const _e0 = document.getElementById('uf-quota'); if (_e0 && !_e0.textContent) ufPillRestore(_e0); } catch (_) {}   /* ★開いた瞬間に前回の値 */
   try { setTimeout(() => { ufQuotaDraw(); setInterval(ufQuotaDraw, 300000); }, 800); } catch (_) {}
   try { aiCostDraw(); } catch (_) {}   // 💴 AI検索の使用額（保存済みの記録を起動時に出す）
+  try { aiActualLoad().then(() => aiCostDraw()); } catch (_) {}   // 🧾 Console の実績を読んでから上のバーを実績に
   // 📍 見ていた場所を控える（再読み込みで戻すため）。書きすぎないよう300msに1回だけ。
   { let t = 0;
     // ★行は【#lst-scroll という箱の中】をスクロールする。window の scroll では動かないので、
@@ -36135,7 +36146,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   const AUTO_ROI_FROM = '2026-09-23';
   function llogAutoRoi() {
     let yen = 0, days = {}; try { days = aiSpendDays() || {}; } catch (_) {}
-    Object.keys(days).forEach(d => { if (d < AUTO_ROI_FROM) return; Object.keys(days[d]).forEach(k => { if (/\(自動出品\)|監査/.test(k)) yen += aiYen(days[d][k], k); }); });
+    Object.keys(days).forEach(d => { if (d < AUTO_ROI_FROM) return; const f = aiFactor(String(d).slice(0, 7)); Object.keys(days[d]).forEach(k => { if (/\(自動出品\)|監査/.test(k)) yen += aiYen(days[d][k], k) * f; }); });   /* 実績がある月は実績に按分 */
     const set = _ordAuto, items = _ordAutoItems, om = lst._ledgerOrderMap;
     const ready = !!(set && set.size && items && items.size && om && Object.keys(om).length);
     let n = 0, paid = 0, pend = 0, canc = 0, inc = 0, cost = 0, prof = 0, unk = 0; const seen = new Set(), rows = [];
