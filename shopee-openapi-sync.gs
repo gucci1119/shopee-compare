@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0040';
+var SRC_VER = '20261012-0200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8548,9 +8548,12 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
      1回の巡回で作るのは1件・1日 famPerDay（既定6）件まで。数は st に日付つきで持つ（推定ではなく実績で止める）。 */
   var _fmDay = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
   if (!st.famMade || st.famMade.d !== _fmDay) st.famMade = { d: _fmDay, n: 0 };
-  var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6));
-  if (!famRows.length && cfg.autoFamily !== false && (st.famMade.n >= _fmCap || BA_FAM_TICK >= 1)) {
-    baLog_(st, cc + '：' + hw + ' のカタログは' + (BA_FAM_TICK >= 1 ? 'この回はもう作りません（1回1件）' : '今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）'));
+  /* ★2026-10-12 本人「なぜポケモンしか出ていない」「トレカ優先で出して」：遊戯王等は国にカタログが無く（nofam 12件）、1回1件の枠を PH が使うと他の6か国は毎回見送りだった。トレカ（TCG_HW_JA）は1回に国ごと1件＝最大7件・1日20件まで作る（表紙は仮・本人が差し替え） */
+  var _isTcgHw = !!(typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]);
+  var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6)); if (_isTcgHw) _fmCap = Math.max(_fmCap, Number(cfg.famPerDayTcg || 20));
+  var _fmTickMax = _isTcgHw ? 7 : 1;
+  if (!famRows.length && cfg.autoFamily !== false && (st.famMade.n >= _fmCap || BA_FAM_TICK >= _fmTickMax)) {
+    baLog_(st, cc + '：' + hw + ' のカタログは' + (BA_FAM_TICK >= _fmTickMax ? 'この回はもう作りません（1回' + _fmTickMax + '件）' : '今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）'));
     res.famDeferred = true;   /* ★2026-09-25 作らなかっただけ＝「作れない」ではない。6時間の除外（boshu_cc_fail）に入れない（実測：TH が1回1件の枠を使うと TW が毎回6時間外れていた） */
   } else if (!famRows.length && cfg.autoFamily !== false) {
     var made = baEnsureFam_(cfg, hw, cc, allRows, famName, st, allRowsAll);
