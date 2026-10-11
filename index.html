@@ -3612,17 +3612,28 @@
       preOrder, warn, needsDropoff, items,
     };
   }
-  const orderRowToDb = o => ({
+  /* ★2026-10-11 本人「第二アカウントのオーダーって、ポータルに表示されている？」＝TH の gs_japan_select.th の注文 2610108FAX70R7 が【本店の shop_id】で入っていた。
+     真因＝ここで国の既定店（activeShopByCc＝ブリッジのタブの店）を一律に書いていた。注文の商品（item_id）がどの店の出品かで店を決める（出品データ lst.byCc の shop_id）。
+     分からなければ、その国に店が1つの時だけ既定店・2店ある国は shop_id を書かない（GASの注文同期が正しい店で入れる＝null で潰さない） */
+  function orderShopOf(cc, items) {
+    try {
+      const arr = (lst.byCc || {})[cc] || []; const ids = new Set((items || []).map(i => String((i && i.item_id) || '')).filter(Boolean));
+      if (ids.size) { const hit = arr.find(l => l && ids.has(String(l.item_id)) && l.shop_id); if (hit) return String(hit.shop_id); }
+      const regs = (state.accounts || []).filter(a => a && a.shop_id && String(a.cc || '').toUpperCase() === cc);
+      if (regs.length <= 1) return activeShopByCc[cc] || (regs[0] && String(regs[0].shop_id)) || null;
+    } catch (_) {}
+    return null;
+  }
+  const orderRowToDb = o => { const sid = orderShopOf(o.region.cc, o.items); const row = {
     cc: o.region.cc, order_id: o.orderId, sn: o.sn, buyer: o.buyer, status: o.status,
     tab: o.tab, ship_by: o.shipBy || null, tracking: o.tracking || null, total: (o.total != null ? o.total : null),
     items: o.items, order_date: snToDate(o.sn), pre_order: !!o.preOrder, synced_at: new Date().toISOString(),
-    shop_id: activeShopByCc[o.region.cc] || null,
-  });
+  }; if (sid) row.shop_id = sid; return row; };
   // 注文をDBへupsert。shop_idを判定できた国だけshop_idを書き、未判別の国はshop_id列を外して既存値を保持（nullで潰さない）。
   async function upsertOrdersPreservingShop(orderRows, targets) {
-    const detCcs = new Set((targets || []).filter(r => activeShopByCc[r.cc]).map(r => r.cc));
-    const withShop = orderRows.filter(o => detCcs.has(o.cc));
-    const noShop = orderRows.filter(o => !detCcs.has(o.cc)).map(({ shop_id, ...rest }) => rest);
+    /* ★2026-10-11 店は行ごとに決める（orderRowToDb が付けた shop_id がある行だけ書く・無い行は列を外して既存値を保持） */
+    const withShop = orderRows.filter(o => o.shop_id);
+    const noShop = orderRows.filter(o => !o.shop_id).map(({ shop_id, ...rest }) => rest);
     const doUpsert = async (rows) => {
       if (!rows.length) return;
       try { await sbUpsert('orders', rows, 'cc,sn'); }
@@ -21126,6 +21137,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-11', items: [
+      '🏪 <b>第二アカウント（gs_japan_select）の注文が本店の注文として記録されていたのを直しました</b>（本人「第二アカウントのオーダーって、ポータルに表示されている？」）。注文の商品がどの店の出品かで店を決めます。TH の注文1件（2610108FAX70R7）を gs_japan_select.th に付け直しました。',
       '🗂 <b>出品ログの「これまでに自動で出した明細（機種×国）」を区分（🎮ゲーム／🃏トレカ／🧸グッズ）で括りました</b>（本人「ここはカードとかの括りはない？」「カードは機種ではないしな」）。区分ごとの小計行を出し、トレカ・グッズの行は機種でなくタイトル名（ポケモンカード等）で並びます。',
       '🩹 <b>母数ページのチカチカを直しました</b>（本人「何か表示がチカチカして不安定」）。機種ごとに「出している」を数え終わるたびに画面全体を描き直していた（31機種＝31回）のを、1.2秒に1回までに間引きました。トレカ・グッズは作品マスタが無いので突き合わせ自体をしない（毎回DBを読み直していた分も止まります）。',
       '🛡 <b>限定版写真の監査を3台のGASで回し、3,243件を判定・写真が商品と違う371件を在庫0にしました</b>（化粧箱291／別作品51／別機種29）。残り507件は16:10に本体で自動再開し、そのあと通常版の実物写真に差し替えて在庫を戻す処理（limited_fix・本体 v305）を回します。'
