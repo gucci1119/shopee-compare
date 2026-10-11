@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2050';
+var SRC_VER = '20261011-2130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8402,7 +8402,8 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     try {
       var _pool = allRowsAll[cc] || [];
       /* ★2026-10-11 トレカのシリーズは【同じ国のポケカの家族カタログ】を型にする（カテゴリ・説明文・属性がカード用。ゲームのカタログを型にすると Others カテゴリの遊戯王ができる） */
-      if (TCG_HW_JA[hw]) _any = (_pool.filter(function (r) { return /pok[eé]mon\s*card\s*game/i.test(String(r.name || '')) && r.status === 1 && (r.models || []).length > 1; })[0]) || (_pool.filter(function (r) { return /pok[eé]mon\s*card\s*game/i.test(String(r.name || '')); })[0]) || null;
+      var _tplRe = hw === 'acnh' ? /amiibo/i : hw === 'moncolle' ? /moncolle/i : /pok[eé]mon\s*card\s*game/i;   /* 🪙 小物は同じ国の既存カタログ（amiibo／moncolle）を型に。無ければポケカ */
+      if (TCG_HW_JA[hw]) _any = (_pool.filter(function (r) { return _tplRe.test(String(r.name || '')) && r.status === 1 && (r.models || []).length > 1; })[0]) || (_pool.filter(function (r) { return _tplRe.test(String(r.name || '')); })[0]) || (_pool.filter(function (r) { return /pok[eé]mon\s*card\s*game/i.test(String(r.name || '')) && r.status === 1; })[0]) || null;
       if (!_any) _any = (_pool.filter(function (r) { return r.status === 1 && (r.hws || []).length === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')) && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, '')); })[0])
         || (_pool.filter(function (r) { return r.status === 1 && (r.models || []).length > 1 && /variation/i.test(String(r.name || '')); })[0])
         || (_pool.filter(function (r) { return (r.models || []).length > 1; })[0]) || null;
@@ -8413,7 +8414,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       if (!dst2) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var cover = BA_COVER_BASE + encodeURIComponent(hw) + '.png';
       var _wKg = (Number(fam.weightG) > 0) ? Number(fam.weightG) / 1000 : 0;   /* ★家族の重さ（Switch2＝150g）。別機種から借りると 0.2 等になり送料が狂う（Codex/advisor指摘 2026-10-07） */
-      var _dsw = TCG_HW_JA[hw] ? [['pok[eé]mon\\s*card\\s*game(?:\\s*series)?', TCG_EN[hw] || hw], ['pok[eé]mon', TCG_EN[hw] || hw]] : null;   /* 説明文の Pokémon の語をシリーズ名に（10/7 の Switch2 に GTA/Pokemon の文が残った事故の再発防止） */
+      var _dsw = TCG_HW_JA[hw] ? [['pok[eé]mon\\s*card\\s*game(?:\\s*series)?', TCG_EN[hw] || hw], ['nintendo\\s*amiibo(?:\\s*figure)?', TCG_EN[hw] || hw], ['pok[eé]mon\\s*moncolle(?:\\s*monster\\s*collection)?', TCG_EN[hw] || hw], ['pok[eé]mon', /pok[eé]mon/i.test(TCG_EN[hw] || '') ? 'Pokemon' : (TCG_EN[hw] || hw)]] : null;   /* 説明文の Pokémon の語をシリーズ名に（10/7 の Switch2 に GTA/Pokemon の文が残った事故の再発防止） */
       var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: 0, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName, weight: _wKg, rename_desc: 1, desc_swap: _dsw });
       if (!sd2 || !sd2.ok || !sd2.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
       var _nmLim3 = 120; try { var _mx3 = shopNameLimit_(dst2); if (_mx3 > 0) _nmLim3 = Math.min(_mx3, 120); } catch (eNl3) {}
@@ -9027,7 +9028,7 @@ function baLogAutoMark_(rows) {
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG',
-  pokeca: 'POKECA', pokeca_old: 'POKECAOLD', yugioh: 'YUGIOH', yugioh_rush: 'YUGIOHRD', onepiece: 'OPCG', duema: 'DUEMA', weiss: 'WEISS', battlespirits: 'BATSPI', vanguard: 'VANGUARD', wixoss: 'WIXOSS', zx: 'ZX', digimon: 'DIGIMON', shadowverse: 'SHADOWVERSE', dbh: 'DBH', mtg: 'MTG', unionarena: 'UNIONARENA' };   /* 🃏 2026-10-10 トレカ（明細SKUの頭） */
+  acnh: 'ACNH', yokai: 'YOKAI', moncolle: 'MONCOLLE', mezastar: 'MEZASTAR', pokeca: 'POKECA', pokeca_old: 'POKECAOLD', yugioh: 'YUGIOH', yugioh_rush: 'YUGIOHRD', onepiece: 'OPCG', duema: 'DUEMA', weiss: 'WEISS', battlespirits: 'BATSPI', vanguard: 'VANGUARD', wixoss: 'WIXOSS', zx: 'ZX', digimon: 'DIGIMON', shadowverse: 'SHADOWVERSE', dbh: 'DBH', mtg: 'MTG', unionarena: 'UNIONARENA' };   /* 🃏 2026-10-10 トレカ（明細SKUの頭） */
 // 入った明細のJANを product_ids（app_kv・{items:{'id:<item>#<model>': {...}}}）へ。既にJANが入っている鍵は触らない
 /* ★2026-09-20 本人「出してない商品を出すんでしょ？なぜ JAN 情報がないとかいうことが起こる？」
    実測：🤖の 83明細のうち JAN なし 40件、そのうち 38件は model_id が空＝add_model の返事から明細IDを拾えず、JAN を書く鍵（id:<item>#<model>）が作れなかった（マスタに JAN はあった）。
@@ -9165,7 +9166,7 @@ function baTcgPreorder_(shopId, itemId, hw, st, cc) {
 }
 /* ★2026-10-11 本人「ポケモン以外も出していってくださいよ、ガンガン」「勝手にカタログ作っていいから。そのシリーズのね」「画像も勝手に設定して…カタログのトップ画像」
    シリーズの英名（カタログ名・説明文の置換・明細名に使う） */
-var TCG_EN = { pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA' };
+var TCG_EN = { acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag', pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA' };
 /* 駿河屋の題名の「(パラレル)」「(ホロ)」「(SECRET)」等＝同じ番号でも別のカード（値段が10倍違う）。落とさず短い英語の札にして名前・SKU・鍵に残す */
 var TCG_VAR_EN = [[/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil']];
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
@@ -9173,6 +9174,25 @@ function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
 function tcgParseCard_(hw, t, k) {
   if (hw === 'pokeca' || hw === 'pokeca_old') return tcgParsePokeca_(t);
+  /* 🪙 2026-10-11 小物（本人「トレカ以外も」）：妖怪メダル「[コード保証無し] 名前 種類(レア) 「弾」」／モンコレ「モンコレ MS-23 ピチュー 「ポケットモンスター」」。番号が無い物は名前で見分ける（写真の検索も名前で） */
+  if (hw === 'yokai') {
+    var y = String(t || '').normalize('NFKC').replace(/^\[[^\]]*\]\s*/, '').trim();
+    var ym = y.match(/^(.+?)\s+([^\s「」(]*メダル[^\s「」(]*)\s*(?:\(([^)]+)\))?\s*「([^」]+)」/);
+    if (!ym) return null;
+    var yname = ym[1].replace(/\s*\/.*$/, '').trim(); if (!yname || /メダル$/.test(yname)) return null;
+    var series = String(ym[4] || '').replace(/^妖怪ウォッチ\s*/, '').replace(/\s+/g, ' ').trim();
+    var sn = (series.match(/(第[一二三四五六七八九十\d]+弾|第[一二三四五六七八九十\d]+章|Vol\.?\s*\d+|stage\s*\d+|case\s*\d+|\d+弾)/i) || [])[1] || series.slice(0, 12);
+    return { num: '', rar: ym[3] ? ym[3].trim() : '', name: yname, vars: [], varEn: '', kind: ym[2].trim(), series: series, setTag: sn };
+  }
+  if (hw === 'moncolle') {
+    var mm = String(t || '').normalize('NFKC').match(/^モンコレ\s+(?:([A-Z]{1,3}-\d{1,3})\s+)?(.+?)\s*「([^」]*)」/);
+    if (!mm) return null;
+    var mname = mm[2].trim(), mvars = [];
+    mname = mname.replace(/\(([^()]{1,24})\)/g, function (_, v) { mvars.push(v.trim()); return ' '; }).replace(/\s+/g, ' ').trim();
+    if (!mname || /セット$/.test(mname)) return null;
+    var mvar = mvars.map(tcgVarEn_).filter(function (v, i, a) { return v && a.indexOf(v) === i; }).join(' ');
+    return { num: mm[1] || '', rar: '', name: mname, vars: mvars, varEn: mvar };
+  }
   var x = String(t || '').normalize('NFKC').trim();
   var m = x.match(/^([A-Za-z0-9][A-Za-z0-9\-\/\.]{1,24})\s*(?:\[([^\]]+)\])?\s*[：:]\s*(.+)$/);
   if (!m) return null;
@@ -9186,8 +9206,8 @@ function tcgParseCard_(hw, t, k) {
   if (/^[\d\/]+$/.test(num)) { var sm = String(k || '').match(/\[([A-Za-z0-9\-]{3,14})\]/); if (sm) num = sm[1] + ' ' + num; }
   return { num: num, rar: rar, name: rest, vars: vars, varEn: varEn };
 }
-var TCG_HW_JA = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
-var TCG_SEARCH_WORD = { pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
+var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウォッチ 妖怪メダル', moncolle: 'ポケモン モンコレ', mezastar: 'ポケモンメザスタ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
+var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
 var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
 function tcgJudgePrompt_(expect) {
@@ -9285,7 +9305,7 @@ function tcgSetCode_(hw, setName, ai, pr) {
 }
 function tcgEnName_(hw, pr, names, ai) {
   var en = '';
-  if (hw === 'pokeca' || hw === 'pokeca_old') en = tcgEnPokeca_(pr.name, names);
+  if (hw === 'pokeca' || hw === 'pokeca_old' || hw === 'moncolle' || hw === 'mezastar') en = tcgEnPokeca_(pr.name, names);
   if (en) return en;
   /* ★2026-10-10 辞書に無い名前（トレーナーズ・サポート・グッズ・特殊な形態＝ポケカで106件）は文章AIに公式英名を聞く。控え app_kv tcg_names_ai（{和名: {en, kind}}）＝同じ名前は2度聞かない。1回の実行で ai.budget 件まで */
   if (!ai || !ai.cache) return '';
@@ -9313,7 +9333,7 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names, ai) {
     var pr = tcgParseCard_(hw, r.t, r.k); if (!pr) { stat.parse++; continue; }
     var en = tcgEnName_(hw, pr, names, ai); if (!en) { stat.noname++; continue; }
     var vtag = pr.varEn ? ' ' + pr.varEn : '';
-    var full = ((pr.rar ? pr.rar + ' ' : '') + en + vtag + ' ' + pr.num).replace(/\s+/g, ' ').trim();
+    var full = ((pr.rar ? pr.rar + ' ' : '') + en + vtag + ' ' + (pr.num || pr.setTag || '')).replace(/\s+/g, ' ').trim();   /* 番号の無い小物は弾（setTag）で見分ける */
     if (full.length > 30) full = (en + vtag + ' ' + pr.num).replace(/\s+/g, ' ').trim();
     if (full.length > 30 && vtag) full = (en.slice(0, Math.max(6, 30 - vtag.length - String(pr.num).length - 2)).trim() + vtag + ' ' + pr.num).trim();   /* 変種の札は落とさない（落とすと別のカードが同じ名前になる） */
     if (full.length > 30) { stat.long++; continue; }
@@ -9338,7 +9358,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN) {
   var hits = (y.items || []).filter(function (it) {
     var t = String(it.t || '').normalize('NFKC').toLowerCase();
     if (TCG_NG_TITLE.test(t)) return false;
-    if (t.replace(/\s+/g, '').indexOf(numN) < 0) return false;           /* 番号が題名に無い出品は別のカードかもしれない＝使わない */
+    if (numN) { if (t.replace(/\s+/g, '').indexOf(numN) < 0) return false; } else { var _jn = String(c.jaName || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ''); if (!_jn || t.replace(/\s+/g, '').indexOf(_jn) < 0) return false; }   /* 🪙 番号の無い小物は名前で突き合わせる */           /* 番号が題名に無い出品は別のカードかもしれない＝使わない */
     return true;
   });
   var used = baKv_(BA_IMGS) || {};
@@ -9384,7 +9404,7 @@ function tcgTick(manual) {
     if (!hws.length) return finish_('🃏 の入れ先（cfg.family）が無い');
     var cur = Number(st.cursor) || 0, hw = hws[cur % hws.length]; st.cursor = cur + 1;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
-    var names = (baKv_('tcg_names_' + hw) || {}).map || {};
+    var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
     var ctx = baLoadCtx_(cfg, hw, ccs);
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
