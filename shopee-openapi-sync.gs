@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2030';
+var SRC_VER = '20261011-2040';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -94,6 +94,18 @@ function baAiYenToday_() {
   } catch (e) { partial = true; }
   return { d: day, yen: mine + other, mine: Math.round(mine), other: Math.round(other), partial: partial };
 }
+/* 💴 ★2026-10-11【決めごと】本人「月に30000円までってのは守って」「超えるなら許可が必ず必要」「その時の利益によって考える」
+   今月の AI 料金＝Console の実績（app_kv ai_actual・本当の請求・UTC日×モデル×種別 USD）の当月分 ×150円 ＋ 実績にまだ無い日の見積もり（今日）。
+   上限 cfg.aiYenCapMonth（既定 30,000）に達したら 🤖/🃏/監査/写真直し を止める。上げるのは本人だけ */
+function baAiYenMonth_() {
+  var mon = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM'), todayU = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+  var usd = 0, days = 0, hasToday = false;
+  try { var rows = sbSelect_('app_kv', 'select=v&k=eq.ai_actual') || []; var dd = (rows[0] && rows[0].v && rows[0].v.days) || {};
+    Object.keys(dd).forEach(function (d) { if (String(d).slice(0, 7) !== mon) return; days++; if (d === todayU) hasToday = true; var o = dd[d] || {}; Object.keys(o).forEach(function (m) { Object.keys(o[m] || {}).forEach(function (t) { usd += Number(o[m][t]) || 0; }); }); }); } catch (e) {}
+  var est = 0; try { if (!hasToday) est = (baAiYenToday_() || {}).yen || 0; } catch (e2) {}
+  return { mon: mon, yen: Math.round(usd * 150 + est), actual: Math.round(usd * 150), est: Math.round(est), days: days };
+}
+function baAiMonthCap_(cfg) { var c = cfg && cfg.aiYenCapMonth; return (c === undefined || c === null || c === '') ? 30000 : Number(c); }
 function aiSpendLoad_() { var o = null; try { var s = P_().getProperty('aiSpend'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || !o.days) o = { days: {} }; return o; }
 function aiSpendBump_(kind, u) {
   if (!u) return;
@@ -7455,6 +7467,7 @@ function boshuAutoTick(manual) {
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
     try { st.aiYen = baAiYenToday_(); st.aiYen.cap = aiCap; } catch (eY) { st.aiYen = null; }
     if (aiCap > 0 && st.aiYen && st.aiYen.yen >= aiCap && manual !== true) { st.lastMsg = '💴 今日のAI料金が上限に達したので明日まで休み（約¥' + Math.round(st.aiYen.yen) + '／上限 ¥' + aiCap + '）'; return finish_(st.lastMsg); }
+    try { var aym0 = baAiYenMonth_(); st.aiYenMonth = aym0; var capM0 = baAiMonthCap_(cfg); if (capM0 > 0 && aym0.yen >= capM0 && manual !== true) { st.lastMsg = '💴 今月のAI料金が上限 ¥' + capM0 + ' に達したので止めています（実績 ¥' + aym0.actual + '＋今日の見積 ¥' + aym0.est + '）。上げるには本人の許可が要ります'; return finish_(st.lastMsg); } } catch (eM0) {}
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
     var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey) && (!_myHws || _myHws.indexOf(String(h)) >= 0); });
@@ -9362,6 +9375,7 @@ function tcgTick(manual) {
     if (!hasKey) return finish_('🔒 CLAUDE_KEY が無いので出しません（カードは写真の判定なしでは出さない）');
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
     try { var ay = baAiYenToday_(); if (aiCap > 0 && ay && ay.yen >= aiCap && manual !== true) return finish_('💴 今日のAI料金が上限（¥' + Math.round(ay.yen) + '／' + aiCap + '）'); } catch (eY) {}
+    try { var aym = baAiYenMonth_(); st.aiYenMonth = aym; var capM = baAiMonthCap_(cfg); if (capM > 0 && aym.yen >= capM && manual !== true) return finish_('💴 今月のAI料金が上限 ¥' + capM + ' に達したので止めています（実績 ¥' + aym.actual + '＋今日の見積 ¥' + aym.est + '）。上げるには本人の許可が要ります'); } catch (eM) {}
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0, judged: 0 };
     var dailyMax = Number(tc.dailyMax) || 60;
@@ -9452,6 +9466,7 @@ var BA_CF_TLD = { BR: 'com.br', SG: 'sg', MY: 'com.my', PH: 'ph', TH: 'co.th', T
 function baLimitedAudit_(p) {
   var dry = String((p && p.dry) || '') === '1'; var max = Math.max(1, Math.min(120, Number((p && p.max) || 40)));
   var cfg = baKv_(BA_CFG) || {}; var hws = (p && p.hw) ? [String(p.hw)] : (cfg.hws || []).slice();
+  try { var aymA = baAiYenMonth_(); var capA = baAiMonthCap_(cfg); if (capA > 0 && aymA.yen >= capA) return { ok: false, error: '💴 今月のAI料金が上限 ¥' + capA + '（実績 ¥' + aymA.actual + '＋今日 ¥' + aymA.est + '）＝本人の許可が要る', note: 'AIが使えない（month_cap）' }; } catch (eMA) {}
   var res = baKv_('limited_audit') || {}; res.items = res.items || {}; res.runs = res.runs || [];
   var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
   var judged = {}; var out = { ok: true, dry: dry, hws: hws.length, targets: 0, judged: 0, flagged: [], skipped: 0, byHw: {} };
@@ -9504,6 +9519,7 @@ function baLimitedAudit_(p) {
    baRephoto_ は st.added（直近）だけを見るので、古い明細はここで直す。1回 max 件（既定10）・同じ明細は二度やらない */
 function baLimitedFix_(p) {
   var max = Math.max(1, Math.min(40, Number((p && p.max) || 10)));
+  try { var cfgF = baKv_(BA_CFG) || {}; var aymF = baAiYenMonth_(); var capF = baAiMonthCap_(cfgF); if (capF > 0 && aymF.yen >= capF) return { ok: false, error: '💴 今月のAI料金が上限 ¥' + capF + '（実績 ¥' + aymF.actual + '＋今日 ¥' + aymF.est + '）＝本人の許可が要る', note: 'AIが使えない（month_cap）' }; } catch (eMF) {}
   var res = baKv_('limited_audit') || {}; res.items = res.items || {};
   var pre = baKv_('boshu_auto_pre') || {}; var used = baKv_(BA_IMGS) || {}; var judged = {}; var sameCache = {};
   var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
