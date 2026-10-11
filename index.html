@@ -5279,6 +5279,13 @@
     "投じたAI料金": "AI cost invested",
     "売れた🤖明細": "Auto-listed variations sold",
     "（入金済み ": "(paid ",
+    "📋 売れた商品の内訳（": "📋 Sold items (",
+    "注文日": "Order date",
+    "明細": "Variation",
+    "状態": "Status",
+    "入金済": "Paid",
+    "取消": "Cancelled",
+    "入金が「—」＝まだ Shopee から入金されていない注文（発送〜入金確定は倉庫スキャンの数日後）。仕入が「—」＝利益管理表にまだ仕入値が入っていない": "Paid “—” = Shopee has not paid out yet (payout settles a few days after the warehouse scan). Cost “—” = no cost in the profit sheet yet",
     "・取消 ": ", cancelled ",
     "回収率": "Payback",
     "回収済み（＋": "Recovered (+",
@@ -9806,7 +9813,7 @@
      「国｜明細名」の集合を作り、注文の明細名と一致したら 🤖 の印を出す。
      ★注文データには item_id が入っていない（実測：直近の注文は items[].item_id が空）ので、🤖自身の「売れた」判定と同じく明細名で突き合わせる。
      読み込みは30分に1回だけ（app_kv 十数行＋控え1行）。 */
-  let _ordAuto = null, _ordAutoAt = 0;
+  let _ordAuto = null, _ordAutoAt = 0, _ordAutoItems = null;   /* _ordAutoItems＝🤖が明細を足したカタログ item_id → { cc, hw, ids:Set(model_id) }（収支の厳密な突き合わせ用） */
   function ordAutoLoad() {
     if (_ordAutoAt && Date.now() - _ordAutoAt < 30 * 60000) return Promise.resolve(null);   /* 読み込み済み＝描き直さない（描画の中から再描画を予約しない [[portal-no-render-loop]]） */
     _ordAutoAt = Date.now();
@@ -9835,7 +9842,7 @@
           let ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } }
           (ms || []).forEach(m => { if (m && m.n && m.id != null && o.ids.has(String(m.id))) set.set((r.cc || o.cc) + '|' + String(m.n).toLowerCase().trim(), o.hw); });
         }));
-        _ordAuto = set; return set;
+        _ordAuto = set; _ordAutoItems = mids; return set;
       });
     }).catch(() => { _ordAutoAt = 0; return _ordAuto; });
   }
@@ -36061,14 +36068,21 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   function llogAutoRoi() {
     let yen = 0, days = {}; try { days = aiSpendDays() || {}; } catch (_) {}
     Object.keys(days).forEach(d => { if (d < AUTO_ROI_FROM) return; Object.keys(days[d]).forEach(k => { if (/\(自動出品\)|監査/.test(k)) yen += aiYen(days[d][k], k); }); });
-    const set = _ordAuto, om = lst._ledgerOrderMap;
-    const ready = !!(set && set.size && om && Object.keys(om).length);
-    let n = 0, paid = 0, canc = 0, inc = 0, cost = 0, prof = 0, unk = 0; const seen = new Set();
+    const set = _ordAuto, items = _ordAutoItems, om = lst._ledgerOrderMap;
+    const ready = !!(set && set.size && items && items.size && om && Object.keys(om).length);
+    let n = 0, paid = 0, canc = 0, inc = 0, cost = 0, prof = 0, unk = 0; const seen = new Set(), rows = [];
+    /* ★厳密に：①注文日が 9/23 以降（日付の無い注文は数えない）②注文の item_id が🤖の台帳にあるカタログ ③その明細が🤖の明細（model_id が台帳と一致、または明細名が🤖の英題と一致）
+       名前だけだと、手で出した同じ名前の古い明細まで拾って「11件・¥56,962」と出た（2026-10-11 本人「これほんまかね？」） */
     if (ready) Object.keys(om).forEach(name => (om[name] || []).forEach(e => {
-      const v = String(e.variation || '').toLowerCase().trim(); if (!v || !set.has(e.cc + '|' + v)) return;
-      const d = e.ts ? new Date(tsMs(e.ts) + 9 * 3600000).toISOString().slice(0, 10) : ''; if (d && d < AUTO_ROI_FROM) return;
+      if (!e.ts) return; const d = new Date(tsMs(e.ts) + 9 * 3600000).toISOString().slice(0, 10); if (d < AUTO_ROI_FROM) return;
+      const it = items.get(String(e.item_id || '')); if (!it) return;
+      const v = String(e.variation || '').toLowerCase().trim();
+      const byModel = e.model_id && e.model_id !== '0' && it.ids && it.ids.has(String(e.model_id));
+      if (!byModel && !(v && set.has(e.cc + '|' + v))) return;
       const id = e.cc + ':' + e.sn + ':' + v; if (seen.has(id)) return; seen.add(id);
-      if (/cancel/i.test(String(e.status || ''))) { canc++; return; }   /* 取消は売れた数に入れない */
+      const cancelled = /cancel/i.test(String(e.status || ''));
+      rows.push({ d, cc: e.cc, hw: it.hw || set.get(e.cc + '|' + v) || '', name: String(e.variation || ''), status: String(e.status || ''), income: e.income, cost: e.cost, profit: e.profit, bundle: !!e.bundle, cancelled });
+      if (cancelled) { canc++; return; }
       n++; if (e.income != null) { paid++; inc += e.income; } if (e.cost != null) cost += e.cost; if (e.profit != null) prof += e.profit; else if (e.income != null) unk++;
     }));
     const rate = yen > 0 ? Math.round(prof / yen * 100) : (prof > 0 ? 100 : 0);
@@ -36078,12 +36092,20 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const body = ready
       ? `<span>売れた🤖明細 <b>${n}</b>件<span class="smd-dim" style="font-size:10px">（入金済み ${paid}${canc ? '・取消 ' + canc : ''}）</span></span><span>入金 <b>${y(inc)}</b></span><span>仕入 <b>${y(cost)}</b></span><span>利益 <b style="color:${prof >= 0 ? '#2e7d32' : '#b3261e'}">${y(prof)}</b>${unk ? `<span class="smd-dim" style="font-size:10px">（まとめ買いで不明 ${unk}件）</span>` : ''}</span>`
       : `<span class="smd-dim">注文と利益管理表を読み込み中…</span>`;
+    rows.sort((a, b) => a.d < b.d ? 1 : -1);
+    const cellY = v => v == null ? '<span class="smd-dim">—</span>' : y(v);
+    const list = rows.length ? `<details style="margin-top:5px"><summary style="cursor:pointer;font-size:11px;color:#5e35b1">📋 売れた商品の内訳（${rows.length}件）</summary>
+      <div style="overflow-x:auto;margin-top:4px"><table style="border-collapse:collapse;font-size:11px;min-width:560px">
+        <thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:2px 6px">注文日</th><th style="padding:2px 6px">国</th><th style="padding:2px 6px">機種</th><th style="text-align:left;padding:2px 6px">明細</th><th style="padding:2px 6px">状態</th><th style="text-align:right;padding:2px 6px">入金</th><th style="text-align:right;padding:2px 6px">仕入</th><th style="text-align:right;padding:2px 6px">利益</th></tr></thead>
+        <tbody>${rows.map(r => `<tr style="${r.cancelled ? 'color:#9aa0a6;text-decoration:line-through' : ''}"><td style="padding:2px 6px;white-space:nowrap">${r.d}</td><td style="padding:2px 6px;text-align:center">${esc(r.cc)}</td><td style="padding:2px 6px;text-align:center">${esc(String(r.hw).toUpperCase())}</td><td style="padding:2px 6px">${esc(r.name)}</td><td style="padding:2px 6px;text-align:center;white-space:nowrap">${r.cancelled ? '取消' : (r.income != null ? '入金済' : esc(r.status || ''))}</td><td style="padding:2px 6px;text-align:right">${cellY(r.income)}</td><td style="padding:2px 6px;text-align:right">${cellY(r.cost)}</td><td style="padding:2px 6px;text-align:right">${r.bundle && r.income != null ? '<span class="smd-dim" title="まとめ買い＝仕入が按分できない">不明</span>' : cellY(r.profit)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="smd-dim" style="font-size:10px;margin-top:3px">入金が「—」＝まだ Shopee から入金されていない注文（発送〜入金確定は倉庫スキャンの数日後）。仕入が「—」＝利益管理表にまだ仕入値が入っていない</div></details>` : '';
     return `<div data-fold="llogRoi" style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px;font-size:12px">
       <div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center">
         <b style="color:#5e35b1">🤖 自動出品の収支</b><span class="smd-dim" style="font-size:10.5px">${AUTO_ROI_FROM} 〜</span>
         <span>投じたAI料金 <b>${y(yen)}</b></span>${body}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:5px"><span style="white-space:nowrap">回収率 <b style="color:${col}">${rate}%</b></span>${bar}<span class="smd-dim" style="white-space:nowrap;font-size:11px">${prof >= yen ? '回収済み（＋' + y(prof - yen) + '）' : '残り ' + y(yen - prof)}</span></div>
+      ${list}
       <div class="smd-dim" style="font-size:10.5px;margin-top:3px">投じた額＝🤖の英題・写真判定・同一作品判定・限定版写真の監査と直しのAI料金。回収＝🤖の明細が売れた注文の利益（入金−利益管理表の仕入値）。人の時間は入れていません。</div>
     </div>`;
   }
@@ -37361,7 +37383,7 @@ grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この
           if (costY != null && !bundle) { const cur = cm[k]; if (!cur || ts > cur.ts) cm[k] = { cost: costY, ts }; }
           if (profitY != null && !bundle) { (pm[k] = pm[k] || []).push({ profit: profitY, ts }); }
           // 過去オーダー明細（まとめ買い含む全件・💰実売クリックの履歴/変遷/原価統計用）
-          (om[k] = om[k] || []).push({ cc: o.cc, sn: o.sn, ts, status: String(o.status || ''), cost: (bundle ? null : costY), income: amtY, profit: (bundle ? null : profitY), bundle, nItems, variation: String(it.variation || ''), qty: Number(it.qty) || 1, status: String(o.status || ''), image: String(it.image || '') });   /* ★2026-09-28 明細名・個数・状態も持つ（💰実売の中に「どの明細が売れたか」を出す） */
+          (om[k] = om[k] || []).push({ cc: o.cc, sn: o.sn, ts, status: String(o.status || ''), item_id: String(it.item_id || ''), model_id: String(it.model_id || ''), cost: (bundle ? null : costY), income: amtY, profit: (bundle ? null : profitY), bundle, nItems, variation: String(it.variation || ''), qty: Number(it.qty) || 1, status: String(o.status || ''), image: String(it.image || '') });   /* ★2026-09-28 明細名・個数・状態も持つ（💰実売の中に「どの明細が売れたか」を出す） */
         });
       });
       lst._ledgerCostMap = cm; lst._ledgerProfitMap = pm; lst._ledgerOrderMap = om;
