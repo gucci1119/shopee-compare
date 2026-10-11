@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2300';
+var SRC_VER = '20261012-0040';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1230,6 +1230,14 @@ function doGetInner_(e) {
       try { gbout = brandList_(parseInt(p.shop_id, 10), parseInt(p.category_id, 10), String(p.q || '')); }
       catch (err) { gbout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gbcb + '(' + JSON.stringify(gbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'outreach_ai') {   /* 📣 営業の返事を AI に【型と抜き出しだけ】書かせる（2026-10-12 本人「ある程度自動化したい」「英語で何言ってるかわからんので分かるようにしたい」）。合否と動きは呼び元のコードの表で決める。鍵は顧客情報抽出 GAS の OUTREACH_TOKEN（本体には置かない） */
+      var oacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var oaout;
+      try { if (!outreachAuth_(p.token)) throw new Error('token'); oaout = outreachAi_(p); oaout.ok = true; }
+      catch (err) { oaout = { ok: false, error: String((err && err.message) || err) }; }
+      ufPersist_();
+      return ContentService.createTextOutput(oacb + '(' + JSON.stringify(oaout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'ai_usage_report') {   // 🧾 Anthropic の実績（Admin API）・WRITE_TOKEN 必須（誰でも叩けると Anthropic を無駄に呼ばれる）・2026-09-16
       var arcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -6709,6 +6717,41 @@ function baClaudeJson_(prompt, st, tag, maxTokens) {
   var txt = (j.content || []).map(function (c) { return c.text || ''; }).join(''); var m = txt.match(/\{[\s\S]*\}/);
   try { return m ? JSON.parse(m[0]) : null; } catch (e) { return null; }
 }
+/* ═══ 📣 営業の返事の判定（2026-10-12）。型（1〜9）と抜き出し（商品名・機種・状態の希望）と和訳だけを AI に書かせる。
+   型：1 興味あり一般／2 商品の依頼／3 質問（送料・関税・支払い・納期）／4 値段交渉／5 不要・迷惑／7 クレーム・未着・返品／8 別人・間違い／0 判定不能
+   （6 無反応と 9 英語以外は呼び元で扱う。何語でも訳して型を付ける）
+   mode=translate なら和訳だけ（こちらが送った文の和訳用） ═══ */
+/* 鍵を本体に置かない：顧客情報抽出 GAS（営業の窓口）に同じ token で outreach_stats を聞き、ok なら通す（1回1 fetch・結果は5分控える） */
+var OUTREACH_API = 'https://script.google.com/macros/s/AKfycbyabXXBhsDZmB1X7K_4DNrLsRZ0TXIFax_qnmp2eamrFKan3uVaRxgArD9o6XFage7LTg/exec';
+function outreachAuth_(token) {
+  token = String(token || ''); if (!token) return false;
+  var c = CacheService.getScriptCache(); var ck = 'oa_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, token, Utilities.Charset.UTF_8)).slice(0, 20);
+  try { if (c.get(ck) === '1') return true; } catch (e) {}
+  try { ufBump_(1, 'outreach_auth'); var r = UrlFetchApp.fetch(OUTREACH_API + '?action=outreach_stats&token=' + encodeURIComponent(token), { muteHttpExceptions: true, followRedirects: true }); var j = JSON.parse(r.getContentText() || '{}'); if (j && j.ok) { try { c.put(ck, '1', 300); } catch (e2) {} return true; } } catch (e) {}
+  return false;
+}
+function outreachAi_(p) {
+  var text = String(p.text || '').slice(0, 2000); if (!text.trim()) throw new Error('text');
+  var mode = String(p.mode || 'classify');
+  var st = { aiTextCap: 300, today: {} };
+  var prompt;
+  if (mode === 'translate') {
+    prompt = '次の文を自然な日本語に訳してください。JSON だけを返す: {"ja":"和訳"}\n\n' + text;
+  } else {
+    var ours = String(p.ours || '').slice(0, 1200);
+    prompt = 'あなたは日本の中古ゲーム販売店（Shopee に出店・海外の購入者に WhatsApp/Zalo/Viber で営業メッセージを送った）の受信担当です。' +
+      '購入者からの返事を読み、次の JSON だけを返してください（説明文は不要）。\n' +
+      '{"type":<1-8 または 0>,"lang":"<原文の言語コード>","ja":"<原文の自然な日本語訳>","items":[{"title":"<商品名（分かれば日本語の正式名）>","hw":"<機種（Switch/PS2/GBA 等）>","cond":"<状態の希望（中古/美品/新品/不問）>"}],"money":<金額の話が含まれるなら true>,"summary":"<一言の日本語要約>"}\n' +
+      '型：1=興味あり・一般（お礼・今後連絡する・了解）／2=具体的な商品の依頼（商品名や写真の説明がある）／3=質問（送料・関税・支払い方法・納期・在庫）／4=値段交渉・割引の要求／5=不要・迷惑・送らないで／7=クレーム・未着・返品・不良／8=別人・間違い電話・誰？／0=どれでもない。\n' +
+      '商品名が分からない時は items を空にする。日本語訳は意訳でよいが省略しない。\n\n' +
+      (ours ? '【こちらが直前に送った文】\n' + ours + '\n\n' : '') + '【購入者からの返事】\n' + text;
+  }
+  var j = baClaudeJson_(prompt, st, 'outreach', 600);
+  if (!j) return { type: 0, ja: '', items: [], nokey: false, failed: true };
+  if (j.nokey) return { type: 0, ja: '', items: [], nokey: true };
+  return { type: Number(j.type) || 0, lang: String(j.lang || ''), ja: String(j.ja || ''), items: Array.isArray(j.items) ? j.items.slice(0, 5) : [], money: !!j.money, summary: String(j.summary || '') };
+}
+
 var BA_EN = 'boshu_auto_en';       // 作品鍵 → {en, short, src}（AIに聞いた英題の控え。同じ作品は二度聞かない）
 var BA_SAME = 'boshu_auto_same';   // md5(作品|出品題名) → 'ok:理由' / 'ng:理由'
 // ★v182 同一作品判定：仕入元の出品題名が「同じ作品・同じ機種のソフト本体」か。続編・別機種・周辺機器・まとめ売り・攻略本を落とす（規則の漏れをAIで拾う）
