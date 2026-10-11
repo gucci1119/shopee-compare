@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0230';
+var SRC_VER = '20261012-0850';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8585,14 +8585,15 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   while (i < todo.length && guard++ < 4) {
     var tgt = null;
     var _hp = bandOn ? estP(todo[i]) : 0; bandHp = 0; bandForce = false;
-    for (var r = 0; r < rows.length; r++) { var free = 100 - (rows[r].models || []).length; if (free > 0 && rows[r].status !== 0 && (!_hp || bandFits(rows[r], _hp))) { tgt = rows[r]; break; } }
+    /* ★2026-10-12 作ったばかりのカタログ（baEnsureFam_ の戻り・status 0・isNew）は非公開でも入れ先にする。前は外していたので、作った回に1枚も入らず、そのシリーズの次の順番（9シリーズで約4.5時間後）まで空のままだった（10/12 03〜08時に32件作って明細は1件） */
+    for (var r = 0; r < rows.length; r++) { var free = 100 - (rows[r].models || []).length; if (free > 0 && (rows[r].status !== 0 || rows[r].isNew) && (!_hp || bandFits(rows[r], _hp))) { tgt = rows[r]; break; } }
     if (!tgt && _hp) {
-      var _anyFree = rows.some(function (x) { return (100 - (x.models || []).length) > 0 && x.status !== 0; });
+      var _anyFree = rows.some(function (x) { return (100 - (x.models || []).length) > 0 && (x.status !== 0 || x.isNew); });
       if (!todo[i]._band && todo.slice(i + 1).some(function (q) { return !q._band; })) { todo[i]._band = 1; todo.push(todo.splice(i, 1)[0]); guard--; continue; }   /* 幅に収まらない作品は後ろへ（収まる作品を先に入れる）。1作品1回だけ */
       var _cc = canClone();
       if (_anyFree && (_cc === 'next' || _cc === 'cap')) { baSkipRec_(st, hw, cc, todo[i], _cc === 'cap' ? 'band_cap' : 'band_next'); baLog_(st, cc + '：価格の幅に収まるカタログが無い→' + (_cc === 'cap' ? ('新しいカタログは今日の上限（' + Math.max(1, Number(cfg.clonePerDay) || 12) + '件）に達したので明日作って入れます') : 'この回はもう1件作ったので次の回に作って入れます') + '（' + String(todo[i].en || '').slice(0, 26) + '）'); todo.splice(i, 1); guard--; continue; }   /* 台帳に書かない＝次の回にまた候補になる */
       if (_anyFree && !_cc) {
-        for (var r3 = 0; r3 < rows.length; r3++) { if ((100 - (rows[r3].models || []).length) > 0 && rows[r3].status !== 0) { tgt = rows[r3]; break; } }   /* 作れない＝今までどおり在庫0で置く */
+        for (var r3 = 0; r3 < rows.length; r3++) { if ((100 - (rows[r3].models || []).length) > 0 && (rows[r3].status !== 0 || rows[r3].isNew)) { tgt = rows[r3]; break; } }   /* 作れない＝今までどおり在庫0で置く */
         bandForce = true;
         baLog_(st, cc + '：価格の幅に収まるカタログが無く、複製がOFFなので在庫0で置きます（' + String(todo[i].en || '').slice(0, 26) + '）');
       } else { bandHp = _hp; if (_anyFree) baLog_(st, cc + '：価格の幅に収まるカタログが無いので新しく作ります（' + String(todo[i].en || '').slice(0, 26) + '）'); }
