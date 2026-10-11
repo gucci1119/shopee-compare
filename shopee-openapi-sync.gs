@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261011-2230';
+var SRC_VER = '20261011-2245';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8998,7 +8998,10 @@ function seedShopCatalog_(p) {
       try { var mx = shopNameLimit_(dst); return (mx > 0 ? Math.min(mx, 120) : 120); } catch (e) { return 60; }
     })()),
     description: (function () {
-      var _d = String((base.description_info && base.description_info.extended_description ? '' : base.description) || base.item_name || '');
+      var _d = String((base.description_info && base.description_info.extended_description ? '' : base.description) || '');
+      /* ★2026-10-11 型の説明文が拡張型（extended＝field_list）だと空になって題名だけの説明文になっていた（実測：遊戯王 PH 53369071961 の説明文が題名そのまま）。文字の欄をつないで使う */
+      if (!_d && base.description_info && base.description_info.extended_description) { try { _d = ((base.description_info.extended_description.field_list || []).filter(function (f) { return f && f.field_type === 'text' && f.text; }).map(function (f) { return String(f.text); })).join('\n'); } catch (eXd) { _d = ''; } }
+      if (!_d) _d = String(base.item_name || '');
       /* ★2026-10-07 型が別機種の時（仮の表紙の経路）は、説明文の先頭に残る元の名前を新しい名前に置き換える（実測：PH Switch2 の説明文が「GTA Series Sony PS1…」で始まっていた） */
       if (p.rename_desc && p.name && base.item_name && _d.indexOf(String(base.item_name)) >= 0) _d = _d.split(String(base.item_name)).join(String(p.name));
       if (p.desc_swap && p.desc_swap.length) p.desc_swap.forEach(function (sw) { try { _d = _d.replace(new RegExp(sw[0], 'gi'), sw[1]); } catch (eSw) {} });   /* ★2026-10-11 説明文の語の置換（トレカ：Pokémon→シリーズ名） */
