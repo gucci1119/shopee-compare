@@ -9535,6 +9535,9 @@ function tcgTick(manual) {
     var ctx = baLoadCtx_(cfg, hw, ccs);
     var _nameBudget = ai.budget; ai.budget = 0; ai.allowNoName = true;   /* ★2026-10-12 候補作りでは英語名のAIを呼ばない（写真が通ったカードだけ後で聞く） */
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
+    /* 名前が付いているカード（もう払った名前）を先に試す＝新しい英語名のAIを減らす。下見（tcgPreview_）も同じ並び */
+    cands.list = cands.list.filter(function (x) { return !x.noname; }).concat(cands.list.filter(function (x) { return x.noname; }));
+    var _seenRun = {}; cands.list.forEach(function (x) { if (x.en) _seenRun[String(x.en).toLowerCase()] = 1; });   /* 名付け後に同じ題名が2つ入ると束ごと拒否される＝この回の題名を先に覚えておく */
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
     st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
@@ -9560,7 +9563,7 @@ function tcgTick(manual) {
       if (c.noname) {   /* 写真が通ったので、ここで初めて英語名を聞く（1枚1回・控え tcg_names_ai に残る） */
         if (!(_nameBudget > 0)) { baLog_(st, '英語名のAIがこの回の枠を使い切った→残りは次の回'); break; }
         ai.budget = 1; var _enN = tcgEnName_(hw, c._pr, names, ai); _nameBudget -= (1 - ai.budget); ai.budget = 0;
-        var _fc = _enN ? tcgFinishCand_(hw, c._r, c._pr, _enN, c.cost, ccs, ctx.listedByCc, ctx.ledger, ai, {}, {}) : null;
+        var _fc = _enN ? tcgFinishCand_(hw, c._r, c._pr, _enN, c.cost, ccs, ctx.listedByCc, ctx.ledger, ai, _seenRun, {}) : null;
         if (!_fc) { baSkipRec_(st, hw, '', c, _enN ? 'listed_or_long' : 'noname'); continue; }
         c = _fc;
       }
@@ -9598,6 +9601,7 @@ function tcgPreview_(p) {
   var names = (baKv_('tcg_names_' + hw) || {}).map || {};
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0, offBudget: 0, allowNoName: true });   /* ★2026-10-12 名前がまだ無いカードも写真を集める（名前は写真が通った後に GAS が聞く） */   /* 下見はAIを呼ばない（控えだけ使う） */
+  cands.list = cands.list.filter(function (x) { return !x.noname; }).concat(cands.list.filter(function (x) { return x.noname; }));   /* 巡回と同じ並び（名前ありが先） */
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
   /* ★2026-10-12 ポータルがメルカリで写真を集めるための材料（key・検索語・番号・NG語）も返す。並びは巡回が試す順のまま */
   return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
