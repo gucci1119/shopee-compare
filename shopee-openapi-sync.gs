@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1230';
+var SRC_VER = '20261012-1700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7099,6 +7099,9 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     /* ★2026-09-20 本人「止まらないようにしてね」「絶対に」：Anthropic の残高切れ（credit balance）や鍵不正の時、
        1件ずつ試し続けると **出品は1件も増えないのに Shopee枠だけ減る**（実測：11:31〜の回で枠が一気に減った）。
        この実行の残りは AI を呼ばない＝枠を守る。次の実行でまた1回だけ試す */
+    /* ★2026-10-12 本人「なんでこんなにもトレカ増えないんだ」：Claude が写真を取りに行けない（HTTP 400 Unable to download the file）時も 'error' を返していて、
+       トレカの回は12:50〜15:50の7回とも最初の1枚で「AI判定が止まった」まま何もしなかった。これは【その写真】の問題＝写真を落として次の写真・次のカードへ進む */
+    if (code === 400 && /download|fetch|retriev|url/i.test(em) && !/credit|balance|api[_ ]?key|auth/i.test(em)) { if (st) baLog_(st, '⚠ 写真をAIが取りに行けない（' + em.slice(0, 60) + '）→この写真を落として次へ'); return { ok: false, judged: true, kind: 'nodl' }; }
     if (baAiDownIsFatal_(code, em)) baAiDownSet_(st, code, em);
     if (st) baLog_(st, '⚠ AI判定できず HTTP ' + code + ' ' + em.slice(0, 80) + (BA_AI_DOWN ? '（この回はAIを止めます）' : ''));
     return { ok: false, judged: false, kind: 'error' };
@@ -9299,7 +9302,7 @@ function baSoldSync_(st) {
    トレカのカタログ（各国1〜数件＝予約出品の割合は0.1%程度・非Preferred 10%／SG 5% の上限に触れない）は予約出品・DTS 7日。既存7件は 10/11 に update_item で切替済み。新しく複製した時はここで付ける */
 function baTcgPreorder_(shopId, itemId, hw, st, cc) {
   try { if (!TCG_HW_JA[hw]) return; updateItem_({ shop_id: shopId, item_id: itemId, pre_order: { is_pre_order: true, days_to_ship: 7 } }); if (st) baLog_(st, (cc || '') + '：トレカの新カタログを予約出品（DTS 7日）にしました（' + itemId + '）'); }
-  catch (e) { if (st) baLog_(st, (cc || '') + '：予約出品の設定に失敗（' + String((e && e.message) || e).slice(0, 80) + '）'); }
+  catch (e) { if (st) baLog_(st, (cc || '') + '：予約出品の設定に失敗（' + String((e && e.message) || e).slice(0, 160) + '）'); }
 }
 /* ★2026-10-11 本人「ポケモン以外も出していってくださいよ、ガンガン」「勝手にカタログ作っていいから。そのシリーズのね」「画像も勝手に設定して…カタログのトップ画像」
    シリーズの英名（カタログ名・説明文の置換・明細名に使う） */
