@@ -3284,6 +3284,18 @@
   }
   const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
+  /* ★2026-10-13 限定版の明細を「限定版」として出し直す作業（本人「限定版は、明細変更も必要でしょ」「赤字を出したくない」）を Claude が
+     ページの外から1件ずつ回すための入口。after が空（＝削除になる）や before が短すぎる時は断る＝名前の置換で別の明細を巻き込まない */
+  try { window.__smdRenameModel = async (shopId, itemId, before, after) => {
+    if (!String(after || '').trim()) throw new Error('変更後が空（削除になる）なので断りました');
+    if (String(before || '').trim().length < 4) throw new Error('変更前が短すぎます');
+    return openapiRenameModels(shopId, itemId, before, after);
+  }; } catch (_) {}
+  try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
+    if (action !== 'update_stock' && action !== 'update_price') throw new Error('在庫と価格だけ');
+    if (!(Number(modelId) > 0)) throw new Error('model_id が要ります');
+    return openapiUpdate(action, Object.assign({ shop_id: shopId, item_id: itemId, model_id: modelId }, action === 'update_stock' ? { stock: val } : { price: val }));
+  }; } catch (_) {}
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
@@ -21425,6 +21437,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-13', items: [
+      '📇 <b>明細の無い単品の出品も、JANを調べる対象に入れました</b>（本人「JAN入ってないの結構ありますね」）：これまで JAN の空きの一覧は明細（バリエ）しか数えておらず、単品の出品（Used Nintendo DS Dragon Ball Kai… 等）は丸ごと漏れていました。単品は親SKU（7か国共通）で束ねて1回だけ調べます',
+      '🏷 <b>限定版の箱の写真が付いていた明細を「限定版」として出し直す準備</b>（本人「限定版は、明細変更も必要でしょ」「価格改定もきちんとしているのか」「赤字を出したくない」）：明細名を Claude が1件ずつ書き換えるための入口を足しました。変更後が空（＝削除）は断ります',
       '🃏 <b>出品ログの型番（カード番号）を、トレカの全区分で出すようにしました</b>（本人「なぜこれ型番を出さないの？」「出せるやつは出して欲しい」）：これまでポケカ・遊戯王・ワンピース・デュエマなど一部だけで、<b>どうぶつの森 amiiboカード（例 S6・295）・ガンバライジング／ガンバレジェンズ・WIXOSS・Z/X・シャドウバース・DBH・妖怪メダル・モンコレ・メザスタ・MTG・UNION ARENA</b> は明細の SKU に番号があっても「JAN —」だけでした。データベースの読み書きは増やしていません',
       '🔧 <b>出品一覧で明細を開くと、少し遅れて一番上へ飛ぶのを直しました</b>（本人「明細開いても、上に戻るようになった」）：開いた後に出品日・更新日を読み終えて描き直す所で、位置を戻していなかったのが原因です',
     ] },
@@ -44631,18 +44645,26 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const janTodoGroups = () => {
       const rows2 = []; Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rows2.push(r))); productIds = productIds || {};   /* 絞り込みに関係なく出品ぜんぶ */
       const grp = new Map();
-      rows2.forEach(r => { if (/\bTCG\b|Single Card|Trading Card/i.test(String(r.name || ''))) return; (r.models || []).forEach(m => {
+      rows2.forEach(r => { if (/\bTCG\b|Single Card|Trading Card/i.test(String(r.name || ''))) return;
+        /* ★2026-10-13 本人「JAN入ってないの結構ありますね」：明細の無い【単品の出品】（Used Nintendo DS Dragon Ball Kai… 等）は
+           models が空で、この一覧に1件も入っていなかった＝調べる対象から丸ごと漏れていた。単品はカタログ名そのものを検索語にし、鍵は id:item_id */
+        const single = !(r.models || []).length;
+        const ms = single ? [{ id: 0, n: '', _single: 1 }] : r.models;
+        ms.forEach(m => {
         if (!m || m.ghost) return;
-        const k = pidKeyModel(r, m); if (!k) return;
+        const k = pidKeyModel(r, single ? null : m); if (!k) return;
         const pp = productIds[k] || {}; if (String(pp.jan || '').trim()) return;
-        const q = janKeyword(r, m); const kw = (q && q.kw) || String(m.n || '').trim();
+        const q = single ? null : janKeyword(r, m);
+        const kw = single ? String(r.name || '').replace(/\b(Used|Japanese|Japan|Ver\.?|Edition|Region Free|Import)\b/gi, ' ').replace(/[【\[(（].*?[】\])）]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) : ((q && q.kw) || String(m.n || '').trim());
         if (!kw || kw.length < 4) return;
         /* ★2026-10-12 本人「続けて」：明細名に機種が無い（「White」「Mario」等）と作品が決まらない＝4,698種類が手付かずだった。
            機種が無い時は【カタログ名】で束ねる（"@カタログ名"）＝別のカタログの「White」を同じJANにしない。機種のある分の鍵は変えない（入れ済みの控えと合う） */
         let mc = (q && q.machine) || '';
+        const psku = String(r.parent_sku || '').trim();
+        if (single && psku) mc = '@sku:' + psku;   /* 単品は国ごとに題名が少しずつ違う＝親SKU（M_S_PS2_… 7か国共通）で束ねる */
         if (!mc) mc = '@' + String(r.name || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-        const gk = kw.toLowerCase() + '\u0000' + mc;
-        if (!grp.has(gk)) grp.set(gk, { kw: kw, machine: mc, sku: String(m.sku || '').trim(), keys: [] });
+        const gk = (single && psku) ? ('\u0001single\u0000' + mc) : (kw.toLowerCase() + '\u0000' + mc);
+        if (!grp.has(gk)) grp.set(gk, { kw: kw, machine: mc, sku: single ? psku : String(m.sku || '').trim(), keys: [] });
         grp.get(gk).keys.push(k);
       }); });
       return grp;
@@ -44659,8 +44681,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_manual');
       const man = (((g || [])[0] || {}).v || {}).items || {};
       const grp = janTodoGroups(); let hit = 0, names = 0;
+      const bySku = {}; Object.keys(man).forEach(k => { const i = k.indexOf('|@sku:'); if (i >= 0) bySku[k.slice(i + 1)] = man[k]; });   /* 単品は検索語が国で変わりうる＝親SKUだけで引く */
       grp.forEach((gv, gk) => {
-        const a = man[String(gv.kw).toLowerCase() + '|' + (gv.machine || '')]; if (!a || !String(a.jan || '').trim() || !/^\d{8}$|^\d{13}$/.test(String(a.jan).trim())) return;
+        const a = man[String(gv.kw).toLowerCase() + '|' + (gv.machine || '')] || (/^@sku:/.test(gv.machine || '') ? bySku[gv.machine] : null); if (!a || !String(a.jan || '').trim() || !/^\d{8}$|^\d{13}$/.test(String(a.jan).trim())) return;
         names++;
         gv.keys.forEach(k => {
           const prev = productIds[k] || {}; if (String(prev.jan || '').trim()) return;
