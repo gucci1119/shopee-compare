@@ -21424,6 +21424,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-13', items: [
+      '🔧 <b>出品一覧で明細を開くと、少し遅れて一番上へ飛ぶのを直しました</b>（本人「明細開いても、上に戻るようになった」）：開いた後に出品日・更新日を読み終えて描き直す所で、位置を戻していなかったのが原因です',
+    ] },
     { date: '2026-10-12', items: [
       '📇 <b>JANの「調べる一覧」にカタログ名を足しました</b>（本人「続けて」）：明細名に機種が無いもの（「White」「Mario」等・約4,700種類）はカタログごとに分けて書き出し、Claude がカタログ名から作品・機種を決めて調べられるようにしました。今日 Claude が調べて入れたのは約2,900明細（API料金¥0）',
       '🃏 <b>母数（トレカ）の上の「トレカの自動出品」に、3台分の状態を出しました</b>：今日の数は3台の合計、台ごとの最新の様子も1行ずつ',
@@ -43633,25 +43636,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     // ★▶を押すと一覧を作り直すので、そのままだと**画面が一番上に戻ってしまう**（本人指摘 2026-08-20）。
     //   押した行が画面のどの高さにあったかを覚えておき、描き直したあとに同じ高さへ戻す＝その場で開いて見える。
+    /* ★2026-10-13 本人「明細開いても、上に戻るようになった」：開いた直後の描き直しは位置を戻していたが、
+       そのあと「出品日・更新日」を読み終えて【もう一度】描き直す所は戻していなかった＝少し遅れて一番上へ飛ぶ。
+       描き直しは必ずこの関数を通し、押した行を同じ高さに戻す */
+    const lstRedrawKeep = (k) => {
+      const q = () => document.querySelector('#lst-list .lst-exp[data-k="' + (window.CSS && CSS.escape ? CSS.escape(k) : k) + '"]');
+      const e1 = q(); const before = e1 ? (e1.closest('[data-k]') || e1).getBoundingClientRect().top : null;
+      drawListingStatus();
+      if (before == null) return;
+      requestAnimationFrame(() => {
+        const el2 = q(); if (!el2) return;
+        const d = (el2.closest('[data-k]') || el2).getBoundingClientRect().top - before;
+        if (d) { const sc = document.getElementById('lst-scroll'); (sc && sc.scrollHeight > sc.clientHeight ? sc : window).scrollBy(0, d); }
+      });
+    };
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => {
       const k = el.dataset.k;
-      const card = el.closest('[data-k]') || el;
-      const before = card.getBoundingClientRect().top;          // 押した行の画面上の位置
       if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k);
       // ★開いた明細は覚える（再読み込みしても開いたまま。本人 2026-08-28
       //   「ページ再読み込みした時に、開いてたバリエ閉じたり…やめてほしい」）
       try { localStorage.setItem('smdListOpen', JSON.stringify([...lst.open].slice(-40))); } catch (_) {}
       /* ★2026-09-20 明細の「出品日・更新日」は開いた時に読む。呼び出しを書き忘れていて「📅 読み込み中…」のまま止まっていた */
-      if (lst.open.has(k)) { try { const p2 = String(k).split(':');   /* 鍵は「国:item_id」 */ modelDatesLoad(p2[0], p2[1]).then(fresh => { if (fresh && lst.open.has(k)) drawListingStatus(); }).catch(() => {}); } catch (_) {} }
-      drawListingStatus();
-      requestAnimationFrame(() => {
-        const el2 = document.querySelector('#lst-list .lst-exp[data-k="' + (window.CSS && CSS.escape ? CSS.escape(k) : k) + '"]');
-        if (!el2) return;
-        const card2 = el2.closest('[data-k]') || el2;
-        const after = card2.getBoundingClientRect().top;
-        const d = after - before;
-        if (d) { const sc = document.getElementById('lst-scroll'); (sc && sc.scrollHeight > sc.clientHeight ? sc : window).scrollBy(0, d); }
-      });
+      if (lst.open.has(k)) { try { const p2 = String(k).split(':');   /* 鍵は「国:item_id」 */ modelDatesLoad(p2[0], p2[1]).then(fresh => { if (fresh && lst.open.has(k)) lstRedrawKeep(k); }).catch(() => {}); } catch (_) {} }
+      lstRedrawKeep(k);
     }));
     document.querySelectorAll('#lst-list .lst-edit').forEach(el => {
       el.addEventListener('click', () => { if (!el.dataset.host) { alert('この国のホスト不明で編集できません'); return; } openCatalogEditor(el.dataset.cc, el.dataset.host, el.dataset.id, el.dataset.name); });
