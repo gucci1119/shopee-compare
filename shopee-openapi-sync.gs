@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1040';
+var SRC_VER = '20261012-1050';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9196,8 +9196,11 @@ function baWriteJan_(q) {
   var pid = baKv_('product_ids') || {}; pid.items = pid.items || {}; var n = 0;
   q.forEach(function (e) {
     var k = 'id:' + e.item_id + '#' + e.model_id; var cur = pid.items[k];
-    if (cur && String(cur.jan || '').trim()) return;
-    pid.items[k] = Object.assign({}, cur || {}, { at: Date.now(), jp: e.ja || (cur && cur.jp) || '', jan: e.jan, mpn: (cur && cur.mpn) || '', own: (cur && cur.own) || '', src: '自動出品（母数の空白）', cond: (cur && cur.cond) || '', srcUrl: e.src || '', f: Object.assign({}, (cur && cur.f) || {}, { '機種': BA_HW_LABEL[e.hw] || String(e.hw || '').toUpperCase() }) });
+    /* ★2026-10-12 トレカは JAN が無い＝カード番号（弾の記号＋番号）を型番（mpn）として入れる（本人「仕入れ目安、型番とかなぜでない？ゲームと同じ基準で」） */
+    var hasJ = String(e.jan || '').trim();
+    if (hasJ) { if (cur && String(cur.jan || '').trim()) return; }
+    else { if (!String(e.mpn || '').trim() || (cur && String(cur.mpn || '').trim())) return; }
+    pid.items[k] = Object.assign({}, cur || {}, { at: Date.now(), jp: e.ja || (cur && cur.jp) || '', jan: hasJ ? e.jan : ((cur && cur.jan) || ''), mpn: (cur && cur.mpn) || e.mpn || '', own: (cur && cur.own) || '', src: (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[e.hw]) ? '自動出品（トレカ）' : '自動出品（母数の空白）', cond: (cur && cur.cond) || '', srcUrl: e.src || '', f: Object.assign({}, (cur && cur.f) || {}, { '機種': BA_HW_LABEL[e.hw] || String(e.hw || '').toUpperCase() }) });
     n++;
   });
   if (n) baKvSet_('product_ids', pid);
@@ -9598,7 +9601,7 @@ function tcgTick(manual) {
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return baJpgUrl_(String(m.img || '').replace(/\?.*$/, '')) !== ph.img; }); tPre[c.key]._dirty = 1; BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
       usedT[ph.img] = baUsedTag_(c.key, hw); usedDirty = true;
-      picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
+      picks.push({ mpn: ((c.setCode ? String(c.setCode).toUpperCase() + ' ' : '') + String(c.num || '')).trim(), key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { var _frP = baKvFreshMany_(['tcg_pre']); var _mineP = {}; Object.keys(tPre).forEach(function (k) { var e = tPre[k]; if (e && (e.rej || e._dirty)) _mineP[k] = e; }); var _baseP = (_frP && _frP['tcg_pre']) || null; if (_baseP) { Object.keys(_mineP).forEach(function (k) { var f = _baseP[k] || {}; f.rej = _mineP[k].rej; if (_mineP[k]._dirty) f.imgs = _mineP[k].imgs; delete f._dirty; _baseP[k] = f; }); baKvSet_('tcg_pre', _baseP); } } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }   /* ★2026-10-12 ポータルが同時に集めた分を消さない＝読み直した最新に、こちらで変えたカードの rej／imgs だけ重ねる */
@@ -9617,6 +9620,14 @@ function tcgTick(manual) {
     }
     st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length;
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
+    /* 型番（カード番号）を product_ids に＝出品ログの「JAN — ／ 型番 …」に出る。初回だけ、今までに入れた分（st.added・en の末尾の番号）も埋め戻す */
+    try {
+      var _mpnBy = {}; picks.forEach(function (pk) { _mpnBy[pk.key] = pk.mpn; });
+      var _bf = P_().getProperty('TCG_MPN_BF') !== '1'; var _qM = [], _t0s = new Date(t0 - 2000).toISOString();
+      (st.added || []).forEach(function (a) { if (!a || !a.item_id || !a.model_id) return; var isNew = a.at >= _t0s; if (!isNew && !_bf) return; var m = (isNew && _mpnBy[a.key]) || ((String(a.en || '').match(/(\S+)\s*$/) || [])[1] || ''); if (m) _qM.push({ item_id: a.item_id, model_id: a.model_id, mpn: m, ja: a.ja || '', src: a.src || '', hw: a.hw || hw }); });
+      if (_qM.length) { var _wm = baWriteJan_(_qM); if (_wm) baLog_(st, '型番（カード番号）を台帳に ' + _wm + '件'); }
+      if (_bf) P_().setProperty('TCG_MPN_BF', '1');
+    } catch (eMp) { baLog_(st, '型番の記録に失敗: ' + String(eMp).slice(0, 120)); }
     if (out.added > 0) {
       try { var _llT = baListLogWrite_(st, t0); if (_llT) baLog_(st, '出品ログに ' + _llT + '件 記録'); } catch (eLlT) { baLog_(st, '出品ログへの記録に失敗: ' + String(eLlT).slice(0, 120)); }
       try { var _ymdT = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); var _cutT = Date.now() - 3600000;
