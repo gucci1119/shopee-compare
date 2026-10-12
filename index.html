@@ -21406,6 +21406,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-12', items: [
+      '🃏 <b>トレカの自動出品にゲームの守りを4つ足しました</b>（本人「対策して」）：①写真集めの候補から写真済みのカードを先に外す（朝からずっと「探すカード無し」で止まっていた）②Yahoo!フリマは1時間6回まで・間をあける（弾かれて止まるのを防ぐ）③AI が全部ダメと判定した写真は二度と選ばずに集め直す（3回ダメなら3日休む）④入れたその場で出品ログと仕入れ目安を書く',
       '🃏 <b>トレカの写真集めをゲームと同じ決めごとに</b>（本人「この辺も過去に議論していない？」）：未使用・新品の出品の写真は使わない／中古チェーンのカタログ画像は除く／個人の出品を先に、Shops を後に（9/18 にゲームで決めた「新品と間違われる写真は使わない」）',
       '🖼 <b>メルカリ Shops の写真が Shopee に上がらなかったのを直しました</b>：Shops の画像は webp 形式で、Shopee が受け付けませんでした（トレカで6枚中3枚が落ち、その前の AI 判定がムダに）。同じ写真を jpg（大きいサイズ）で取るようにしました。ゲームの写真にも同じ守りが効きます',
       '💴 <b>トレカの AI 料金のムダを削りました</b>（本人「コスト無駄にしないで」）：英語名の AI を1回40枚分→10枚分に（今日は400回呼んで、出せたのは46枚でした）。写真は普通の出品の大きい写真を先に使い、Shopee に上げられないことがある Shops の小さい画像は後回しにしました（上げられない写真に AI 判定を払わない）',
@@ -32484,11 +32485,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const hw = hwsT[(ti++) % hwsT.length];
       try { localStorage.setItem('smdTcgCollectIdx', String(ti)); localStorage.setItem('smdBaCollectHb', String(Date.now())); } catch (_) {}
       let r = null, err = '';
-      try { r = await gasCall({ action: 'tcg_preview', token: settings.writeToken, hw, n: 40, _url: settings.boshuUrl3 }, 240000); } catch (e) { err = String((e && e.message) || e); }
+      try { r = await gasCall({ action: 'tcg_preview', token: settings.writeToken, hw, n: 40, needPhoto: '1', _url: settings.boshuUrl3 }, 240000);   /* ★2026-10-12 needPhoto＝写真済みを GAS が切る前に外す（先頭40件が写真済みで埋まって止まっていた） */ } catch (e) { err = String((e && e.message) || e); }
       if (!r || !r.ok || !Array.isArray(r.list)) { msgs.push('🃏 ' + (TITLE_HW_JA[hw] || hw) + '：候補の取得に失敗（' + String(err || (r && r.error) || '').slice(0, 40) + '）'); continue; }
       let ng = null; try { ng = new RegExp(r.ng, 'i'); } catch (_) { ng = null; }
-      const fresh = (e) => e && ((e.imgs && e.imgs.length) || (e.missAt && Date.now() - Date.parse(e.missAt) < 3 * 86400000));
-      const todo = r.list.filter(c => c && c.key && c.q && !fresh(tp[c.key])).slice(0, 15);
+      /* GAS が needPhoto で絞った後なので、ここは「NG の写真しか無いカードも集め直す」だけ見る（ゲームの prerej と同じ） */
+      const rejOf = (c) => new Set(((c && c.rej) || []).concat(((tp[c.key] || {}).rej || {}).imgs || []));
+      const fresh = (c) => { const e = tp[c.key]; if (!e) return false; const rs = rejOf(c); const ok = (e.imgs || []).filter(m => !rs.has(String(m.img || ''))); return ok.length > 0 || (!(e.imgs || []).length && e.missAt && Date.now() - Date.parse(e.missAt) < 3 * 86400000); };
+      const todo = r.list.filter(c => c && c.key && c.q && !fresh(c)).slice(0, 15);
       let got = 0, miss = 0;
       for (const c of todo) {
         let items = [];
@@ -32510,7 +32513,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         hits.sort((a, b) => (_tShop(a) ? 1 : 0) - (_tShop(b) ? 1 : 0));
         const imgs = hits.slice(0, 4).map(x => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : String(x.img || '').replace(/^(https:\/\/assets\.mercari-shops-static\.com\/-\/)(?:small|medium|large)(\/plain\/[^@?#]+)@webp$/, '$1large$2@jpg'),   /* ★2026-10-12 Shops の webp は Shopee に上がらない→同じ写真の jpg（large）に */ src: x.url, name: String(x.name || '').slice(0, 80), price: Number(x.price) || 0 }; }).filter(x => x.img);
         const now = new Date().toISOString();
-        tp[c.key] = imgs.length ? { hw, at: now, imgs } : { hw, missAt: now };
+        const _rs = rejOf(c); const imgs2 = imgs.filter(m => !_rs.has(String(m.img || '')));   /* NG になった写真は二度と選ばない */
+        const _rj = (tp[c.key] || {}).rej;   /* NG の記録は残す（3回で3日休む判定に使う） */
+        tp[c.key] = imgs2.length ? { hw, at: now, imgs: imgs2, rej: _rj } : { hw, missAt: now, rej: _rj };
+        if (!imgs2.length) { miss++; changed++; await sleep(2500); continue; }
         if (imgs.length) got++; else miss++;
         changed++;
         await sleep(2500);
