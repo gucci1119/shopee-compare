@@ -21425,6 +21425,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-12', items: [
+      '📥 <b>「母数のJANを明細に入れる」で、同じ名前でJANが2つ以上ある作品も入るようにしました</b>（本人「おけ」・これまで 8,684件を見送り）：限定・コレクターズ・Edition・特典・BOX 等の題名を除いた中で、いちばん短い題名（＝通常版らしい）のJANを入れます。明細名に限定の語がある時は入れません（通常版と限定版は別物）',
       '🔖 <b>JAN・型番が保存されないことがあったのを直しました</b>（本人「何か下に赤いエラー出てた」＝「台帳を読めていないので保存しませんでした」）：台帳を読む経路3つのうち2つが「読めた印」を立て忘れていて、先にそちらで読まれると、読めているのに保存を止めていた',
       '📒 <b>出品ログの直し2つ</b>（本人「出した時間が載ってないのもある」「これ2つリンクあるのはなぜ」）：①作ったばかりのカタログ（2日以内）を「初回取り込み」扱いにして時刻を消していた→新しいものは時刻を出す。今日の24件はトレカの自動出品の記録の時刻で書き戻した ②カードの下のカタログの行に、上の明細名の行と同じ 🛒✏️ が重ねて出ていた→同じカタログなら出さない（別のカタログにも同じ明細が入っている時だけ出す）',
       '🃏 <b>トレカの区分に仮面ライダー（ガンバライジング・ガンバレジェンズ）を足しました</b>（本人「仮面ライダーカードとかも」「王道じゃないカードも」「王道はみんな出してるから」）：母数・出品ログ・出品の区分判定・英語表示に同時に出ます。駿河屋は検索語で取り込みます。あわせて、取り込み済みだった UNION ARENA（ハンターハンター等）・ドラゴンボールヒーローズ・ウィクロス・Z/X・シャドウバース・MTG を自動出品の巡回に入れました',
@@ -30187,13 +30188,29 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     for (const hw of jhws) {
       try { (await loadJanMaster(hw)).forEach(r => { if (r && r.jan && r.t) addPair(hw, r.t, r.jan); }); } catch (_) { sgFail.add(hw); }
     }
+    /* ★2026-10-12 本人「おけ」（同じ名前で違うJANの 8,684件を見送っていた件）：本人の決まり「JANは版違いにこだわらず通常版らしい1つ」（10/10）に合わせ、
+       限定・コレクターズ・Edition・特典・BOX・同梱 等の題名を除いた中で【題名がいちばん短い1つ】を採る（短い＝余計な版の語が無い＝通常版らしい）。
+       ただし「通常版と限定版は別物」（10/10 NieR）なので、明細名そのものに限定の語がある時は、この緩い答えは使わない（_jfbLooseSkip）。
+       一番短い題名が2つ以上あって JAN が違う時は、決められないので入れない */
+    const _JFB_LTD = /限定|コレクターズ|collector|edition|エディション|特典|同梱|BOX|ボックス|プレミアム|premium|豪華|特装|アニバーサリー|anniversary|セット|set\b|パック|pack/i;
     const mkDic = (list) => {
-      const m = new Map(), bd = new Set();
+      const m = new Map(), bd = new Set(), all = new Map();
       list.forEach(([t, j]) => { const k = tmKey(t); if (!k) return;
+        (all.get(k) || all.set(k, []).get(k)).push([t, j]);
         if (m.has(k)) { if (m.get(k) !== j) bd.add(k); return; } m.set(k, j); });
-      bd.forEach(k => m.delete(k));   // 同じ名前で違うJAN＝版違い。入れない
-      return { m: m, bad: bd };
+      const loose = new Set();
+      bd.forEach(k => {
+        m.delete(k);
+        const c = (all.get(k) || []).filter(x => !_JFB_LTD.test(String(x[0])));
+        if (!c.length) return;
+        const minL = Math.min.apply(null, c.map(x => String(x[0]).length));
+        const js = new Set(c.filter(x => String(x[0]).length === minL).map(x => x[1]));
+        if (js.size === 1) { m.set(k, Array.from(js)[0]); loose.add(k); }
+      });
+      m._loose = loose;
+      return { m: m, bad: bd, loose: loose };
     };
+    const _jfbLooseSkip = (D, key, nm) => !!(D && D._loose && D._loose.has(key) && _JFB_LTD.test(String(nm || '')));
     const g0 = mkDic(pairs), dic = g0.m, bad = g0.bad;
     const dicHw = {};
     Object.keys(pairsHw).forEach(h => { dicHw[h] = mkDic(pairsHw[h]).m; });
@@ -30229,6 +30246,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const _mh = _jfbHwOf(k);
       const _D = _mh ? dicHw[_mh] : dic; if (!_D) return;
       const j = _D.get(tmKey(jp)); if (!j) return;
+      if (_jfbLooseSkip(_D, tmKey(jp), jp + ' ' + String((v && v.n) || ''))) return;
       // ★出どころは既存の src に入れる（新しい項目を足すと保存時の「残す一覧」から漏れて消える）。
       //   ⚠️ src は【上書きする】。空いていた明細には「AIで探したが見つからなかった時に見た先」が
       //      残っていることが多く、そのままだと出どころが分からない（実際に65件入れて2件しか判別できなかった）。
@@ -30318,7 +30336,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             const a = dd.lookup(m.n, 1); if (!a) continue;
             jaSet.add(a); if (!jaHit) { jaHit = a; }
             if (!jj || !jj.size) continue;
-            const jx = jj.get(tmKey(a));
+            const jx = _jfbLooseSkip(jj, tmKey(a), a + ' ' + String(m.n || '')) ? '' : jj.get(tmKey(a));
             if (jx) { janSet.add(jx); if (!janHit) { janHit = jx; jaHit = a; hw = c; } }
           }
           // ★2つ以上の機種で違うJANに当たったら【入れない】。どちらの機種か決められない。
