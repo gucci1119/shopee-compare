@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1020';
+var SRC_VER = '20261012-1030';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9527,6 +9527,9 @@ function tcgTick(manual) {
     if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
     if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
     var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) return finish_('🛡 Shopee枠の残りが少ないので見送り（' + ufNow + '／' + ufStopLine_() + '）');
+    /* ★2026-10-12【最重要】トレカは在庫1で7か国に出すのに、売れた時に他国の在庫を0にする処理（ゲームの boshuAutoTick 7530行の baSoldSync_）を呼んでいなかった＝同じ1枚が二重に売れうる。
+       baSoldSync_ は渡した状態の added（直近3日の注文と突き合わせ）を見るので、トレカの状態をそのまま渡す */
+    try { baSoldSync_(st); } catch (eSold) { baLog_(st, '売れたカードの見直しに失敗: ' + String(eSold).slice(0, 160)); }
     var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     if (!hasKey) return finish_('🔒 CLAUDE_KEY が無いので出しません（カードは写真の判定なしでは出さない）');
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
@@ -9555,6 +9558,8 @@ function tcgTick(manual) {
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
     var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
     var picks = [], tried = 0, miss = 0, blocked = false;
+    /* ★2026-10-12 使った写真の印（ゲームの used[pm.img]=baUsedTag_ 7734行）を付けていなかった＝同じ写真が変種違いの別カードに付きうる。baKv_ の控えと同じ物を触るので、この回の後のカードにもすぐ効く */
+    var usedT = baKv_(BA_IMGS) || {}, usedDirty = false;
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
     var tPre = baKv_('tcg_pre') || {}, nosrc = 0;
     /* ★2026-10-12 弾かれている間も、メルカリの写真の控えがあるカードは続ける（前はここで丸ごと休み） */
@@ -9579,11 +9584,13 @@ function tcgTick(manual) {
       }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return String(m.img || '').replace(/\?.*$/, '') !== ph.img; }); BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
+      usedT[ph.img] = baUsedTag_(c.key, hw); usedDirty = true;
       picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { baKvSet_('tcg_pre', tPre); } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN2) {} ai.dirty = 0; }
+    if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
     if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
