@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1810';
+var SRC_VER = '20261012-1920';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7154,7 +7154,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-10-12 本人「下のこの袋もつくと思われるやろ」（ワンピースの P-159 ルフィが付録の袋に入ったままの写真）。カードは聞いていた kind・graded を合否に使っていなかった＋袋入りを聞いていなかった。
      カード1枚の写真（kind=card）以外・袋や付録の台紙に入ったまま・鑑定ケース入りは落とす（シングルの中古カードとして出すので、付いてこない物が写っていると誤解される） */
   if (ok && expect && expect.tcg) {
-    if (String(o.kind || '') && String(o.kind || '') !== 'card') { ok = false; kind = 'notcard'; }
+    if (String(o.kind || '') && String(o.kind || '') !== tcgItemKind_(expect.hw)) { ok = false; kind = 'notcard'; }   /* ★同日 小物はシリーズの形（figure/medal/tag）で見る */
     else if (o.in_package === true) { ok = false; kind = 'packaged'; }
     else if (o.graded === true) { ok = false; kind = 'graded'; }
     /* ★2026-10-12 本人「この辺新品の写真じゃない？」（バトスピ 悠々たるムルナー＝メルカリShopsのスキャン画像が7か国に出た）。AI は scene・edges を甘く付けることがある。
@@ -9368,7 +9368,17 @@ var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウ�
 var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ', gamba: 'ガンバライジング', gambale: 'ガンバレジェンズ' };
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
 var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ込み|綴じ込み|袋入り|ブリスター|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
+/* ★2026-10-12 本人「モンコレってフィギュアでしょ？」「妖怪メダルとメザスタタグ これはトレカじゃないね」：小物はカード1枚の判定にかけると kind≠card で全部落ちていた（妖怪 5枚試して0明細＝AI料金だけ）。
+   シリーズごとに「正しい形」を決め、その形の実物写真なら通す（カード以外の問い） */
+var TCG_ITEM_KIND = { moncolle: 'figure', yokai: 'medal', mezastar: 'tag' };
+var TCG_ITEM_JA = { figure: 'フィギュア（小さな人形）', medal: 'メダル', tag: 'タグ（ゲーム機で読み込むプラスチックのカード状のタグ）' };
+function tcgItemKind_(hw) { return TCG_ITEM_KIND[String(hw || '')] || 'card'; }
 function tcgJudgePrompt_(expect) {
+  var ik = tcgItemKind_(expect && expect.hw);
+  if (ik !== 'card') {
+    var nmJ = TCG_ITEM_JA[ik] || ik;
+    return '中古の' + String((expect && expect.game) || '') + 'の' + nmJ + '（1個）の出品写真です。出品者が自分の手元の実物をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・手などの背景、影、傾きが写ります。公式の商品画像・通販サイトの画像・切り抜き画像（背景が無い・影が無い）・画面の写真・未開封の箱やパッケージに入ったまま・何個もまとめて写した写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"' + ik + '|box|pack|other"（' + nmJ + 'の実物1個なら ' + ik + '）,"scene":"周りに写っている物（無ければ none）","edges":true/false（実物の縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待する「' + String((expect && expect.name) || '') + '」と同じか）,"graded":false,"in_package":true/false（未開封の袋・箱・台紙に入ったままか）}';
+  }
   return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、光の反射や影、傾き、擦れや白かけが写ります。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い・影が無い）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）,"in_package":true/false（カードが雑誌の付録の袋・台紙・未開封の包装・ブリスターに入ったままか。透明な袋越しに見えている時も true。スリーブ・ローダーは false）}';
 }
 /* 駿河屋の題名 → {num, rar, name}。例 "129/103[SAR]：(キラ)ミュウex"・"030/103(14/30)：(キラ)ピカチュウ"・"088/076[AR]：(キラ)カクレオン" */
