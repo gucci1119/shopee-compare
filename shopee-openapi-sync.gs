@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1210';
+var SRC_VER = '20261012-1215';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9625,7 +9625,7 @@ function tcgTick(manual) {
     /* 名前が付いているカード（もう払った名前）を先に試す＝新しい英語名のAIを減らす。下見（tcgPreview_）も同じ並び */
     /* ★2026-10-12 本人「仕入れ高いのばかりだろ」「もっと安いのも出して」：候補は駿河屋の控えの並びのままだった → 仕入の安い順（同じ値段なら名前ありが先） */
     /* ★2026-10-12 本人「潤沢に在庫があるやつを出していってね」：メルカリで同じ番号の出品が3件以上見つかったカード（tcg_pre.hits）を先に。1件しか無いカードは仕入れにくいので後回し。同じ組の中は安い順 */
-    var _tpS = baKv_('tcg_pre') || {}; var _sup = function (x) { var e = _tpS[x.key]; var h = e && Number(e.hits); return !e ? 1 : (h >= 3 ? 0 : (h >= 2 ? 1 : 2)); };
+    var _tpS = baKv_('tcg_pre') || {}; var _sup = function (x) { var e = _tpS[x.key]; var h = e && Number(e.hits); return (!e || e.hits == null) ? 1 : (h >= 3 ? 0 : (h >= 2 ? 1 : 2)); };   /* 出品数の記録が無い（前に集めた分）は中くらい */
     cands.list.sort(function (a, b) { return _sup(a) - _sup(b) || (Number(a.cost) || 0) - (Number(b.cost) || 0) || ((a.noname ? 1 : 0) - (b.noname ? 1 : 0)); });
     var _seenRun = {}; cands.list.forEach(function (x) { if (x.en) _seenRun[String(x.en).toLowerCase()] = 1; });   /* 名付け後に同じ題名が2つ入ると束ごと拒否される＝この回の題名を先に覚えておく */
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
