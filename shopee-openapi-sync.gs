@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1005';
+var SRC_VER = '20261012-1010';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9506,7 +9506,7 @@ var BA_PRE_DIRTY_TCG = false;
 function tcgTick(manual) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(manual === true ? 5000 : 60000)) return { ok: false, error: 'いま走っています（🤖と同じ鍵）' };
-  var t0 = Date.now(), DEADLINE = 240000;
+  var t0 = Date.now(), DEADLINE = 300000;   /* ★2026-10-12 4分→5分（GAS の1回は6分まで）。カタログ作り＋写真判定でブラジルまでで時間切れ＝タイ・ベトナムに届かなかった */
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
   baKvPrefetch_([BA_CFG, 'tcg_auto_status', 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
   var st = baKv_('tcg_auto_status') || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
@@ -9580,8 +9580,10 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN2) {} ai.dirty = 0; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
     if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
-    for (var ci = 0; ci < ccs.length; ci++) {
-      var cc = ccs[ci]; if (Date.now() - t0 > DEADLINE) { baLog_(st, '時間切れ→残りは次の回'); break; }
+    /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
+    var _ccOrd = ccs.slice(); var _ccFrom = String(st.ccNext || ''); var _ccI = _ccOrd.indexOf(_ccFrom); if (_ccI > 0) _ccOrd = _ccOrd.slice(_ccI).concat(_ccOrd.slice(0, _ccI)); st.ccNext = '';
+    for (var ci = 0; ci < _ccOrd.length; ci++) {
+      var cc = _ccOrd[ci]; if (Date.now() - t0 > DEADLINE) { st.ccNext = cc; baLog_(st, '時間切れ→' + cc + ' から先は次の回（次の回は ' + cc + ' から始める）'); break; }
       try {
         var r = baAddToCc_(cfg, cc, hw, fam, ctx.famRows[cc] || [], ctx.allRows[cc] || [], picks, ctx.listedByCc[cc] || {}, ctx.ledger, st, '', ctx.allRows);
         out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
