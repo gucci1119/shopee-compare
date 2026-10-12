@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.5
+// @version      3.44.6
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -357,6 +357,7 @@
   setInterval(function () {
     try {
       if (!getSbKey() || !isWebchat()) return;
+      if (!GM_getValue('wsProbeOn', false)) return;   /* ★3.44.6：調査は終わっている＝毎分の書き込みを止める（再開は GM の wsProbeOn を true に） */
       if (Date.now() - _wsProbe.at < 55000) return;
       _wsProbe.at = Date.now();
       // ★タブ（ドメイン）ごとに記録を分ける。1つのキーに全タブが書いていたため、
@@ -444,7 +445,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.5';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.6';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -2560,7 +2561,9 @@
   // ★ポータルのボタンを押してから動き出すまでの待ちは、ほぼこの間隔ぶん。
   //   10秒だと「読み込み中…」が長く感じる（本人指摘）。Supabaseへの軽い1リクエストなので3秒に詰める。
   setTimeout(pollCmd, 4000);
-  setInterval(pollCmd, 3000);
+  /* ★3.44.6：3秒ごと×webchat の全タブ（1日に約20万回）だった。巡回役のタブは5秒ごと、ほかのタブは30秒ごと（調査コマンドはそれで足りる） */
+  let _pcAt = 0;
+  setInterval(function () { const iv = isWorker() ? 5000 : 30000; if (Date.now() - _pcAt < iv - 500) return; _pcAt = Date.now(); pollCmd(); }, 5000);
 
   // ---- ❓ FAQ History を取り込む ----
   // スレッド内の「FAQ History」カードには、お客さんがAIアシスタントに聞いた内容が入っている。
@@ -2615,6 +2618,13 @@
         return;   // 次の回から適用（この瞬間より後に来た発言だけが対象）
       }
       if (!cfg.text || busy) return;
+      /* ★3.44.6（2026-10-12 Supabase が繰り返し落ちた総点検）：自動返信が OFF でも、下で chat_messages を最大4000行（本文つき）読んでから「OFF なので何もしない」で戻っていた＝2分ごとに全部むだ読み。
+         個別に ON にした相手（forceAuto）も無ければ、重い読みの前に戻る */
+      let meta = {};
+      try { const mk = await sbReq('GET', 'app_kv?select=v&k=eq.chat_conv_meta'); meta = (mk && mk.json && mk.json[0] && mk.json[0].v) || {}; } catch (_) {}
+      const noAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].noAuto));
+      const forceAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].forceAuto));
+      if (!cfg.on && !forceAuto.size) return;   // 全体OFF＋個別指定なし＝何もしない（重い読みの前に）
       const text = String(cfg.text).trim();
       const delayMs = Math.max(1, Number(cfg.delayMin || 1)) * 60000;
       const gapMs = Math.max(1, Number(cfg.gapH || 6)) * 3600000;
@@ -2647,12 +2657,7 @@
         const k = (m.cc || '') + ':' + (m.buyer || '');
         (conv[k] = conv[k] || []).push(Object.assign({ _k: kd }, m));
       });
-      // ★「この人には自動返信しない」（ポータルの会話ヘッダで個別に指定）を尊重する
-      let meta = {};
-      try { const mk = await sbReq('GET', 'app_kv?select=v&k=eq.chat_conv_meta'); meta = (mk && mk.json && mk.json[0] && mk.json[0].v) || {}; } catch (_) {}
-      const noAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].noAuto));
-      const forceAuto = new Set(Object.keys(meta).filter(k => meta[k] && meta[k].forceAuto));
-      if (!cfg.on && !forceAuto.size) return;   // 全体OFF＋個別指定なし＝何もしない
+      // ★「この人には自動返信しない」（ポータルの会話ヘッダで個別に指定）は上で読んだ meta を使う
       // ★★送信済みかどうかは**送信ログ(chat_outbox)**で見る。chat_messagesで見ていたため、
       //   取り込み直しや重複掃除でその行が消えると「まだ送っていない」と誤判定し、
       //   **同じお客さんに自動返信が2回届いた**（実際に発生）。ログは掃除の影響を受けない。
