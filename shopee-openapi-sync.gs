@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1700';
+var SRC_VER = '20261012-1720';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7142,6 +7142,9 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     if (String(o.kind || '') && String(o.kind || '') !== 'card') { ok = false; kind = 'notcard'; }
     else if (o.in_package === true) { ok = false; kind = 'packaged'; }
     else if (o.graded === true) { ok = false; kind = 'graded'; }
+    /* ★2026-10-12 本人「この辺新品の写真じゃない？」（バトスピ 悠々たるムルナー＝メルカリShopsのスキャン画像が7か国に出た）。AI は scene・edges を甘く付けることがある。
+       傾き・影・背景（10%以上）のどれも無い＝平らに切り抜いたスキャン／公式画像として落とす（実物を撮った写真にはどれかが必ず写る） */
+    else if (o.tilt !== true && o.shadow !== true && !(Number(o.bg) >= 10)) { ok = false; kind = 'scan'; }
   }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
