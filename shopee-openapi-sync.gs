@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1050';
+var SRC_VER = '20261012-1040b';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9564,6 +9564,28 @@ function tcgTick(manual) {
     var ctx = baLoadCtx_(cfg, hw, ccs);
     var _nameBudget = ai.budget; ai.budget = 0; ai.allowNoName = true;   /* ★2026-10-12 候補作りでは英語名のAIを呼ばない（写真が通ったカードだけ後で聞く） */
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
+    /* ★2026-10-12 本人「今までのも入れてや」：出品ログの仕入れ目安（llog_cost_<hw>）と型番（product_ids の mpn）を、このシリーズで今までに入れた全部（台帳 boshu_auto_done_<hw>）に埋める。
+       値は駿河屋の控え sg_<hw> の価格（=候補の仕入れ目安と同じ出所）とカード番号。シリーズごとに1回だけ（P: TCG_BF3_<hw>）。sg_* は大きいので Mac からは読まず、ここ（既に読んでいる）でやる */
+    try {
+      if (P_().getProperty('TCG_BF3_' + hw) !== '1') {
+        var _sv = (baKv_('sg_' + hw) || {}).rows || [], _byId = {}; _sv.forEach(function (r) { if (r && r.id) _byId[String(r.id)] = r; });
+        var _sets = ai.sets || {}, _cost = {}, _qB = [], _nB = 0;
+        Object.keys(ctx.ledger || {}).forEach(function (key) {
+          var row = _byId[String(key).split(':').slice(1).join(':')]; if (!row) return;
+          var o = ctx.ledger[key] || {}; var pr = null; try { pr = tcgParseCard_(hw, row.t, row.k); } catch (ePr) {}
+          var setName = String(row.k || '').split('/').pop(); var sc = (_sets[setName] && (_sets[setName].code || _sets[setName])) || '';
+          var mpn = pr ? (((typeof sc === 'string' && sc) ? sc.toUpperCase() + ' ' : '') + String(pr.num || '')).trim() : '';
+          Object.keys(o).forEach(function (cc) {
+            var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return;
+            if (Number(row.p) > 0) _cost[cc + '|' + m[1] + '|' + m[2]] = { c: Math.round(Number(row.p)), src: '', from: 'surugaya', ja: String(row.t || '').slice(0, 80) };
+            if (mpn) _qB.push({ item_id: m[1], model_id: m[2], mpn: mpn, ja: String(row.t || '').slice(0, 80), src: '', hw: hw });
+            _nB++;
+          });
+        });
+        if (Object.keys(_cost).length) { var _kk = 'llog_cost_' + hw; var _cur = baKvFresh_(_kk); if (_cur && typeof _cur === 'object') { _cur.m = _cur.m || {}; var _add = 0; Object.keys(_cost).forEach(function (k) { if (!_cur.m[k]) { _cur.m[k] = _cost[k]; _add++; } }); _cur.at = new Date().toISOString(); if (_add) baKvSet_(_kk, _cur); baLog_(st, hw + '：今までの明細の仕入れ目安を ' + _add + '件 埋めた'); } else if (_cur === null) { baKvSet_(_kk, { m: _cost, at: new Date().toISOString(), src: 'gas' }); baLog_(st, hw + '：今までの明細の仕入れ目安を ' + Object.keys(_cost).length + '件 埋めた'); } }
+        P_().setProperty('TCG_BF3_' + hw, '1');
+      }
+    } catch (eBf) { baLog_(st, hw + '：今までの分の埋め戻しに失敗: ' + String(eBf).slice(0, 160)); }
     /* 名前が付いているカード（もう払った名前）を先に試す＝新しい英語名のAIを減らす。下見（tcgPreview_）も同じ並び */
     cands.list = cands.list.filter(function (x) { return !x.noname; }).concat(cands.list.filter(function (x) { return x.noname; }));
     var _seenRun = {}; cands.list.forEach(function (x) { if (x.en) _seenRun[String(x.en).toLowerCase()] = 1; });   /* 名付け後に同じ題名が2つ入ると束ごと拒否される＝この回の題名を先に覚えておく */
@@ -9620,14 +9642,7 @@ function tcgTick(manual) {
     }
     st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length;
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
-    /* 型番（カード番号）を product_ids に＝出品ログの「JAN — ／ 型番 …」に出る。初回だけ、今までに入れた分（st.added・en の末尾の番号）も埋め戻す */
-    try {
-      var _mpnBy = {}; picks.forEach(function (pk) { _mpnBy[pk.key] = pk.mpn; });
-      var _bf = P_().getProperty('TCG_MPN_BF') !== '1'; var _qM = [], _t0s = new Date(t0 - 2000).toISOString();
-      (st.added || []).forEach(function (a) { if (!a || !a.item_id || !a.model_id) return; var isNew = a.at >= _t0s; if (!isNew && !_bf) return; var m = (isNew && _mpnBy[a.key]) || ((String(a.en || '').match(/(\S+)\s*$/) || [])[1] || ''); if (m) _qM.push({ item_id: a.item_id, model_id: a.model_id, mpn: m, ja: a.ja || '', src: a.src || '', hw: a.hw || hw }); });
-      if (_qM.length) { var _wm = baWriteJan_(_qM); if (_wm) baLog_(st, '型番（カード番号）を台帳に ' + _wm + '件'); }
-      if (_bf) P_().setProperty('TCG_MPN_BF', '1');
-    } catch (eMp) { baLog_(st, '型番の記録に失敗: ' + String(eMp).slice(0, 120)); }
+    /* ★2026-10-12 型番は product_ids（約4.5MB）に書かない＝30分ごとに大物を読み書きすると DB が落ちる（10/10・10/12 10:31）。出品ログは SKU からカード番号を読んで出す */
     if (out.added > 0) {
       try { var _llT = baListLogWrite_(st, t0); if (_llT) baLog_(st, '出品ログに ' + _llT + '件 記録'); } catch (eLlT) { baLog_(st, '出品ログへの記録に失敗: ' + String(eLlT).slice(0, 120)); }
       try { var _ymdT = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); var _cutT = Date.now() - 3600000;
