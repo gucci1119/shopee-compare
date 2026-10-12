@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0955';
+var SRC_VER = '20261012-1005';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3712,7 +3712,11 @@ function imgIdCachePut_(url, id) {
   try { CacheService.getScriptCache().put('img_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(url))), String(id), 86400); }
   catch (e) {}
 }
+/* ★2026-10-12 メルカリ Shops の画像は「…/-/small/plain/<id>.webp@webp」＝webp。Shopee の upload_image は webp を「image is invalid」で断る
+   （10/12 のトレカで 6枚中3枚が落ち、その前に払った写真のAI判定がムダになった）。末尾の @webp を @jpg に・small を large にすると同じ写真が jpg で取れる（実測 200 image/jpeg 160KB） */
+function baJpgUrl_(u) { return String(u || '').replace(/^(https:\/\/assets\.mercari-shops-static\.com\/-\/)(?:small|medium|large)(\/plain\/[^@?#]+)@webp$/, '$1large$2@jpg'); }
 function uploadImageUrl_(imageUrl) {
+  imageUrl = baJpgUrl_(imageUrl);
   var hit = imgIdCacheGet_(imageUrl);
   if (hit) return hit;                       // 既に上げてある＝枠を使わない
   // ★署名は【画像を取ってきた後】に作る。先に作ると、画像のダウンロードで手間取った分だけ
@@ -9469,7 +9473,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   var mUsed = baKv_(BA_IMGS) || {}, mTried = 0;
   var mImgs = (pre && Array.isArray(pre.imgs)) ? pre.imgs : [];
   for (var mi = 0; mi < mImgs.length && mTried < 3; mi++) {
-    var mu = String(mImgs[mi].img || '').replace(/\?.*$/, ''); if (!mu) continue;
+    var mu = baJpgUrl_(String(mImgs[mi].img || '').replace(/\?.*$/, '')); if (!mu) continue;   /* 判定する写真と上げる写真を同じ jpg に */
     if (!baUsedOk_(mUsed, mu, c.key, hw)) continue;
     mTried++;
     var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
