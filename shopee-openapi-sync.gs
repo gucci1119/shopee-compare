@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1010';
+var SRC_VER = '20261012-1015';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3747,6 +3747,9 @@ function mandatoryAttrFill_(shopId, catId, list) {
   tree.forEach(function (a) {
     if (!a.mandatory || have[a.attribute_id]) return;
     var o = (a.options || []).filter(function (x) { return /^(no|none|否|不是|非成人|not adult|non[- ]?adult)(\b|$)/i.test(String((x && x.name) || '').trim()); })[0];
+    /* ★2026-10-12 TH のトレカ・グッズのカタログが「Platform Compatibility が必須」で作れなかった（型のポケカのカタログにも値が無い）。
+       カード・グッズには機種が無い＝「Others（その他）」が事実。属性名が Platform の時だけ Others を選ぶ（他の必須属性は事実が無ければ埋めない＝10/05 の決めごと） */
+    if ((!o || !o.id) && (/platform/i.test(String(a.name || '')) || Number(a.attribute_id) === 100545)) o = (a.options || []).filter(function (x) { return /^(others?|อื่นๆ|其他|khác)(\s|$|\b)/i.test(String((x && x.name) || '').trim()); })[0];
     if (!o || !o.id) return;
     list.push({ attribute_id: a.attribute_id, attribute_value_list: [{ value_id: o.id }] }); added++; names.push(a.name + '=' + o.name);
   });
