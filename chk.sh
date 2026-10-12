@@ -230,4 +230,8 @@ if [ -n "$B6" ]; then echo "NG  カタログを作った後に控え（baCatalog
 # 7-7 自動の読み直し（setTimeout / online）は作業中（appBusy）を見る。見ないと写真集めや取り込みが途中で消える（2026-09-25 21:28）
 B7=$(awk '{ l[NR]=$0 } END { for (i=1;i<=NR;i++) if (l[i] ~ /setTimeout\(\(\) => location\.reload|addEventListener\(.online.[^;]*location\.reload/) { ok=0; for (j=i-4;j<=i;j++) if (l[j] ~ /appBusy/) ok=1; if (!ok) print i": "substr(l[i],1,100) } }' index.html)
 if [ -n "$B7" ]; then echo "NG  自動の読み直しが作業中（appBusy）を見ていない"; echo "$B7"; NG=1; else echo "OK  自動の読み直しは作業中を待つ"; fi
+# 7-8 ★2026-10-12 Supabase を繰り返し落とした（10/10・10/12 3回）。定期処理に「大物の app_kv を丸ごと書く／先読みに足す」コードが【新しく増えていたら】止める。
+#     大物＝product_ids（約4.5MB）・boshu_auto_pre*（約6MB）・titles_*・sg_*・listings・cond_photo_index。直前のコミットと比べて増えた行だけ見る
+B8=$(git diff -U0 HEAD -- shopee-openapi-sync.gs index.html 2>/dev/null | grep '^+' | grep -v '^+++' | grep -E "baKvSet_\(['\"](product_ids|boshu_auto_pre|titles_|sg_|cond_photo_index)|baWriteJan_\(|baKvPrefetch_\(\[[^]]*(product_ids|boshu_auto_pre)|sbUpsert\(['\"]app_kv['\"][^)]*(product_ids|boshu_auto_pre|titles_)" | head -5)
+if [ -n "$B8" ]; then echo "NG  大物（product_ids・写真の控え・駿河屋/母数の控え等）の書き込み／先読みが増えています。何MBを何分ごと・何台かを書き出して、本当に要るか決めてから（スキル supabase-read-guard）"; echo "$B8"; NG=1; else echo "OK  大物の書き込み・先読みは増えていない"; fi
 exit $NG
