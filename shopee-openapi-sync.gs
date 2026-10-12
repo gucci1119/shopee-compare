@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-0910';
+var SRC_VER = '20261012-0950';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9422,23 +9422,42 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names, ai) {
     var price = Number(r.p) || 0; if (!(price >= minJ && price <= maxJ)) { stat.band++; continue; }
     if (/BOX|ボックス|パック|デッキ|セット|まとめ|プロモ.*未開封|サプライ|スリーブ/i.test(String(r.t || '')) || /サプライ|スリーブ|デッキケース|プレイマット/i.test(String(r.k || ''))) { stat.band++; continue; }   /* 区分(k)には「MEGA拡張パック…」のように収録弾の名前が入る＝k で「パック」を見ると全部落ちる（10/10 実測：1,438件が band 落ち） */
     var pr = tcgParseCard_(hw, r.t, r.k); if (!pr) { stat.parse++; continue; }
-    var en = tcgEnName_(hw, pr, names, ai); if (!en) { stat.noname++; continue; }
+    var en = tcgEnName_(hw, pr, names, ai);
+    /* ★2026-10-12 本人「コスト無駄にしないで」「なぜゲームは順調なのにカードは無駄が多いのか」：英語名のAIを【写真が見つかる前に】先に聞いていた
+       （10/12 は400回聞いて試したのは46枚）。写真探しは日本語名＋番号でできるので、名前が無いカードも候補に出し（noname）、英語名は写真が通った後に聞く */
+    if (!en) {
+      stat.noname++;
+      if (!(ai && ai.allowNoName) || !r.id) continue;
+      var keyN = hw + ':' + String(r.id);
+      var needN = ccs.filter(function (cc) { var d = (ledger[keyN] || {})[cc]; return !(d && /^\d/.test(String(d))); });
+      if (!needN.length) { stat.listed++; continue; }
+      out.push({ key: keyN, hw: hw, id: String(r.id), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: '', cost: price, need: needN, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: '', sku: '', noname: 1, _r: r, _pr: pr });
+      stat.cand++;
+      continue;
+    }
+    var fc = tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenEn, stat);
+    if (fc) { out.push(fc); stat.cand++; }
+  }
+  return { list: out, stat: stat };
+}
+/* 英語名が決まったカードの 題名・鍵・SKU・まだ出していない国 を作る（候補作りと、写真が通った後の名付けの両方で使う）。出せなければ null */
+function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenEn, stat) {
+  stat = stat || {}; seenEn = seenEn || {};
+  {
     var vtag = pr.varEn ? ' ' + pr.varEn : '';
     var full = ((pr.rar ? pr.rar + ' ' : '') + en + vtag + ' ' + (pr.num || pr.setTag || '')).replace(/\s+/g, ' ').trim();   /* 番号の無い小物は弾（setTag）で見分ける */
     if (full.length > 30) full = (en + vtag + ' ' + pr.num).replace(/\s+/g, ' ').trim();
     if (full.length > 30 && vtag) full = (en.slice(0, Math.max(6, 30 - vtag.length - String(pr.num).length - 2)).trim() + vtag + ' ' + pr.num).trim();   /* 変種の札は落とさない（落とすと別のカードが同じ名前になる） */
-    if (full.length > 30) { stat.long++; continue; }
-    if (seenEn[full.toLowerCase()]) continue; seenEn[full.toLowerCase()] = 1;
+    if (full.length > 30) { stat.long = (stat.long || 0) + 1; return null; }
+    if (seenEn[full.toLowerCase()]) return null; seenEn[full.toLowerCase()] = 1;
     var key = hw + ':' + String(r.id || full);
     var k1 = baTmKey_(full);
     var setName = String(r.k || '').split('/').pop(); var setCode = (hw === 'pokeca' || hw === 'pokeca_old') ? tcgSetCode_(hw, setName, ai, pr) : '';   /* ★2026-10-11 弾記号の公式検索はポケカだけ。他は番号に弾が入っている（OP17-118 等） */
     var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + pr.rar.replace(/[^A-Za-z0-9]+/g, '') : '') + (pr.varEn ? '_' + pr.varEn.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && /^\d/.test(String(d))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
-    if (!need.length) { stat.listed++; continue; }
-    out.push({ key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku });
-    stat.cand++;
+    if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
+    return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku };
   }
-  return { list: out, stat: stat };
 }
 /* 写真を1枚：題名に番号が入る出品だけ → AI判定（カード用）。戻り {img, src, srcTitle, hits} か null。blocked なら {blocked:1} */
 function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
@@ -9514,6 +9533,7 @@ function tcgTick(manual) {
     var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
     var ctx = baLoadCtx_(cfg, hw, ccs);
+    var _nameBudget = ai.budget; ai.budget = 0; ai.allowNoName = true;   /* ★2026-10-12 候補作りでは英語名のAIを呼ばない（写真が通ったカードだけ後で聞く） */
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
@@ -9537,12 +9557,21 @@ function tcgTick(manual) {
       if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = Date.now() + 2 * 3600000; baLog_(st, 'Yahoo!フリマの検索に弾かれた→2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
+      if (c.noname) {   /* 写真が通ったので、ここで初めて英語名を聞く（1枚1回・控え tcg_names_ai に残る） */
+        if (!(_nameBudget > 0)) { baLog_(st, '英語名のAIがこの回の枠を使い切った→残りは次の回'); break; }
+        ai.budget = 1; var _enN = tcgEnName_(hw, c._pr, names, ai); _nameBudget -= (1 - ai.budget); ai.budget = 0;
+        var _fc = _enN ? tcgFinishCand_(hw, c._r, c._pr, _enN, c.cost, ccs, ctx.listedByCc, ctx.ledger, ai, {}, {}) : null;
+        if (!_fc) { baSkipRec_(st, hw, '', c, _enN ? 'listed_or_long' : 'noname'); continue; }
+        c = _fc;
+      }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return String(m.img || '').replace(/\?.*$/, '') !== ph.img; }); BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
       picks.push({ key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { baKvSet_('tcg_pre', tPre); } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }
+    if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN2) {} ai.dirty = 0; }
+    if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
     if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci]; if (Date.now() - t0 > DEADLINE) { baLog_(st, '時間切れ→残りは次の回'); break; }
@@ -9568,7 +9597,7 @@ function tcgPreview_(p) {
   var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs : (cfg.ccs || []);
   var names = (baKv_('tcg_names_' + hw) || {}).map || {};
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
-  var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0, offBudget: 0 });   /* 下見はAIを呼ばない（控えだけ使う） */
+  var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0, offBudget: 0, allowNoName: true });   /* ★2026-10-12 名前がまだ無いカードも写真を集める（名前は写真が通った後に GAS が聞く） */   /* 下見はAIを呼ばない（控えだけ使う） */
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
   /* ★2026-10-12 ポータルがメルカリで写真を集めるための材料（key・検索語・番号・NG語）も返す。並びは巡回が試す順のまま */
   return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
