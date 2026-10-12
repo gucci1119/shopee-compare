@@ -21425,6 +21425,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-12', items: [
+      '📇 <b>JANを Claude（チャット）が調べて入れる口を作りました</b>（本人「指定しなくても」「ほんで、ポータルへ入力まで」）：AI調べ（API料金）を使わず、JANが空の名前の一覧を書き出し→Claude が調べた答えを空いている欄にだけ入れます',
       '📇 <b>JAN・型番の一括が、25種類送って12種類しか調べていなかったのを直しました</b>（本人「何故そんなにかかるの？」「前そんなにかからなかったよ」）：AI調査GASは1回12種類まで＝後ろ13種類は調べずに「調べた」と数えていた。費用も高いモデル（Sonnet）の値段で計算していた（JAN調べは Haiku＝約1/3）。いまは12種類ずつ・Haiku の値段で出します',
       '🧸 <b>出品ログの大分類で、小物（モンコレのフィギュア・妖怪メダル・メザスタのタグ・amiiboカード）を「その他」にしました</b>（本人「モンコレはトレカじゃなくない？」「amiiboとか」「妖怪メダルとメザスタタグ これはトレカじゃないね」）',
       '🃏 <b>出品ログで、トレカが「その他」に入っていたのを直しました</b>（本人「その他にトレカ入ってない？」）：トレカの明細SKUの頭（YUGIOHRD・OPCG・BATSPI・GANBARIZING 等）を区分として読めていなかった。小物（どう森カード・妖怪・モンコレ・メザスタ）も🃏トレカに数えます',
@@ -44609,6 +44610,49 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           + 'かかった費用：約 ¥' + yen.toLocaleString() + '（実際に使ったトークンから計算）\n'
           + (list.length > seen ? '\n残り ' + (list.length - seen).toLocaleString() + '種類。もう一度押すと続きから進みます。' : ''));
       }); }
+    /* ★2026-10-12 本人「特定のカタログを指定してこれのJANを調べてって言うと、金かからない？」「指定しなくても」「ほんで、ポータルへ入力まで」：
+       AI調べ（API料金・1種類 約¥4）の代わりに、Claude（チャット）が調べて入れる口。
+       ①JANが空の(名前,機種)を app_kv jan_todo に書き出す（トレカ・カードは除く＝シングルにJANは無い。明細が多い名前から）
+       ②Claude が調べた答えを app_kv jan_manual（{items:{"名前\u0000機種":{jan,mpn,src,url}}}）に置く → ③ここで空いている欄にだけ入れて保存 */
+    const janTodoGroups = () => {
+      const rows2 = []; Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => rows2.push(r))); productIds = productIds || {};   /* 絞り込みに関係なく出品ぜんぶ */
+      const grp = new Map();
+      rows2.forEach(r => { if (/\bTCG\b|Single Card|Trading Card/i.test(String(r.name || ''))) return; (r.models || []).forEach(m => {
+        if (!m || m.ghost) return;
+        const k = pidKeyModel(r, m); if (!k) return;
+        const pp = productIds[k] || {}; if (String(pp.jan || '').trim()) return;
+        const q = janKeyword(r, m); const kw = (q && q.kw) || String(m.n || '').trim();
+        if (!kw || kw.length < 4) return;
+        const gk = kw.toLowerCase() + '\u0000' + ((q && q.machine) || '');
+        if (!grp.has(gk)) grp.set(gk, { kw: kw, machine: (q && q.machine) || '', keys: [] });
+        grp.get(gk).keys.push(k);
+      }); });
+      return grp;
+    };
+    window.__smdJanTodoExport = async () => {
+      if (!kvOk.product_ids) return { ok: false, error: 'JANの台帳をまだ読めていません（出品一覧を開いて少し待つ）' };
+      const grp = janTodoGroups();
+      const items = [...grp.values()].sort((a, b) => b.keys.length - a.keys.length).map(g => ({ kw: g.kw, machine: g.machine, n: g.keys.length }));
+      await sbUpsert('app_kv', [{ k: 'jan_todo', v: { at: new Date().toISOString(), n: items.length, items: items }, updated_at: new Date().toISOString() }]);
+      return { ok: true, n: items.length, models: items.reduce((a, x) => a + x.n, 0) };
+    };
+    window.__smdJanManualImport = async () => {
+      if (!kvOk.product_ids) return { ok: false, error: 'JANの台帳をまだ読めていません' };
+      const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_manual');
+      const man = (((g || [])[0] || {}).v || {}).items || {};
+      const grp = janTodoGroups(); let hit = 0, names = 0;
+      grp.forEach((gv, gk) => {
+        const a = man[gk]; if (!a || !String(a.jan || '').trim() || !/^\d{8}$|^\d{13}$/.test(String(a.jan).trim())) return;
+        names++;
+        gv.keys.forEach(k => {
+          const prev = productIds[k] || {}; if (String(prev.jan || '').trim()) return;
+          productIds[k] = Object.assign({}, prev, { jan: String(a.jan).trim(), mpn: String(prev.mpn || '').trim() || String(a.mpn || '').trim(), src: a.src || 'Claudeが調べた', srcUrl: a.url || '', at: Date.now(), noJan: undefined, noJanAt: undefined });
+          hit++;
+        });
+      });
+      if (hit) { _pidDupCache = null; saveProductIds(); try { logAct('出品', 'JANをClaudeの調べから入れた', 'all', hit + '明細・' + names + '種類'); } catch (_) {} }
+      return { ok: true, names: names, models: hit, have: Object.keys(man).length };
+    };
     // ⚡ 1タッチ：①規則で自社コード ②画像からJAN ③ネットからJAN・型番 を順に走らせる。
     //   ★処理そのものは足さない。既にある3つのボタンを順番に押して待つだけ＝同じ判定を二重に持たない。
     //   ★途中のお知らせは出さない（1タッチなのに3回ダイアログが出ると意味がない）。最後にまとめて出す。
