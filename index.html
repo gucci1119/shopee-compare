@@ -8394,7 +8394,12 @@
   }
   function appUpdateApply() {
     if (!_appNew) return;
-    if (!appBusy()) { appReloadFresh(); return; }
+    /* ★2026-10-12 新しい版を出すと、全PCの空いている全タブが3分以内に一斉に読み直していた（＝起動時の重い読みが押し寄せる）。裏のタブは表に戻った時に、表のタブは0〜3分ばらつかせて */
+    if (!appBusy()) {
+      if (document.hidden) { if (!window.__appUpVis) { window.__appUpVis = true; document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => { if (!appBusy()) appReloadFresh(); }, 1500); }); } return; }
+      if (!window.__appUpJit) { window.__appUpJit = true; setTimeout(() => { if (!appBusy()) appReloadFresh(); else appUpdateApply(); }, Math.random() * 180000); }
+      return;
+    }
     // 作業中は待つ（勝手に消すと入力が飛ぶ）。理由も出しておく
     const n = document.getElementById('smd-appup-note');
     if (n) n.textContent = '手が5分止まったら自動で更新します（急ぐときは左のボタン）';
@@ -11040,7 +11045,15 @@
   function sbDownClear() {
     if (!_sbDownSince) return; const was = Date.now() - _sbDownSince; _sbDownSince = 0; const b = document.getElementById('smd-sbdown'); if (b) b.remove();
     /* 30秒以上止まっていたら、止まっている間に「読み込み中…」のまま残ったカードを描き直すため1回読み直す（作業中は読み直さない） */
-    try { if (was > 30000 && !(typeof appBusy === 'function' && appBusy())) setTimeout(() => location.reload(), 1500); } catch (_) {}
+    /* ★2026-10-12 戻った瞬間に全PC・全タブが1.5秒後に一斉に読み直し、弱った DB に起動時の重い読み（在庫全件・注文・出品ログ…）が押し寄せていた（10:31→10:38 の再停止の形）。
+       → 自動では読み直さない。表に出ているタブだけ、0〜5分ばらつかせてから。裏のタブは表に戻った時に読み直す */
+    try {
+      if (was > 30000 && !(typeof appBusy === 'function' && appBusy())) {
+        const _go = () => { if (!document.hidden && !(typeof appBusy === 'function' && appBusy())) location.reload(); };
+        if (document.hidden) document.addEventListener('visibilitychange', function _v() { if (!document.hidden) { document.removeEventListener('visibilitychange', _v); setTimeout(_go, 2000 + Math.random() * 60000); } });
+        else setTimeout(_go, 30000 + Math.random() * 270000);
+      }
+    } catch (_) {}
   }
   window.fetch = async function (u, o) {
     const url = (typeof u === 'string') ? u : ((u && u.url) || '');
@@ -11069,7 +11082,7 @@
   }
   function sbFailOk() { _sbOkAt = Date.now(); if (_sbFailPend) { clearTimeout(_sbFailPend); _sbFailPend = 0; } sbDownClear(); }
   /* ネットが戻った時も、写真集めなどの作業中は読み直さない（Wi-Fi が一瞬切れただけで30分の写真集めを止めていた・2026-09-25 21:28） */
-  window.addEventListener('online', () => { try { if (_sbDownSince && !(typeof appBusy === 'function' && appBusy())) location.reload(); } catch (_) {} });
+  window.addEventListener('online', () => { try { if (_sbDownSince && !document.hidden && !(typeof appBusy === 'function' && appBusy())) setTimeout(() => location.reload(), 5000 + Math.random() * 120000); } catch (_) {} });   /* ★2026-10-12 一斉に読み直さない（表のタブだけ・ばらつかせる） */
   const INV_SHEET_ID = '1PEJPEvjsqpvP_PDs_6M-9-9KDm5Gb24PxG779lzE2TE'; // InventoryItem（QR在庫管理）
   // ★書き込みの失敗を【黙って捨てない】ための番人（2026-08-15 新設）
   //   きっかけ：存在しない列に書こうとして upsert がまるごと失敗していたのに、呼び出し側が
@@ -11426,7 +11439,7 @@
       };
       const chunks = new Array(offs.length); let idx = 0;
       const worker = async () => { while (idx < offs.length) { const i = idx++; chunks[i] = await one(offs[i]); _done += chunks[i].length; try { if (_sbProgress) _sbProgress(table, _done, total); } catch (_) {} } };
-      await Promise.all(Array.from({ length: Math.min(8, offs.length) }, worker));
+      await Promise.all(Array.from({ length: Math.min(3, offs.length) }, worker));   /* ★2026-10-12 同時8本→3本（OFFSET の重い読みを1タブで8本ずつ投げると、1GB の DB の時間切れ・メモリ不足に直結する） */
       chunks.forEach(c => out.push(...c));
       return maskDemo(table, out);
     }
@@ -21406,6 +21419,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-12', items: [
+      '🛡 <b>データベースが戻った瞬間・新しい版を出した時に、全部のタブが一斉に読み直すのをやめました</b>：戻った直後の弱ったデータベースに、全PC・全タブの起動時の重い読み込みが押し寄せていました（10:31 に戻って 10:38 にまた止まった形）。表のタブだけ、時間をばらつかせて読み直し、裏のタブは表に戻った時に読み直します。まとめて読む時の同時の本数も8本から3本に減らしました',
       '🛡 <b>データベースが落ちないように、空回りの読み込みを止めました</b>（本人「全体、落ちないように一度レビューかけたほうがいいんじゃない？」）：ゲームを止めているのに🤖巡回が1時間に約20回、毎回約12MBを読んでから何もせず戻っていました。ゲームの機種が空ならポータルは呼ばず、GAS も大物を読む前に戻ります（売れた作品の他国在庫0は続けます）。トレカの写真集めの下見が同じ控えを最大41回読み直していたのも1回に',
       '🃏 <b>出品ログのトレカに「型番」（カード番号）を出しました</b>（本人「型番とかなぜでない？」）：シングルカードには JAN が無いので、明細の SKU からカード番号（例：M6A 124/103 SAR）を読んで型番の欄に出します。データベースの読み書きは増やしていません',
       '🃏 <b>トレカの自動出品にゲームの守りを4つ足しました</b>（本人「対策して」）：①写真集めの候補から写真済みのカードを先に外す（朝からずっと「探すカード無し」で止まっていた）②Yahoo!フリマは1時間6回まで・間をあける（弾かれて止まるのを防ぐ）③AI が全部ダメと判定した写真は二度と選ばずに集め直す（3回ダメなら3日休む）④入れたその場で出品ログと仕入れ目安を書く',
