@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1130';
+var SRC_VER = '20261012-1140';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9622,6 +9622,7 @@ function tcgTick(manual) {
     if (!cands.list.length) return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）');
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
     var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
+    var _jN0 = Object.keys(judged).length;   /* ★2026-10-12 判定が増えた時だけ書く（前は毎回丸ごと書き戻していた＝Supabase 総点検） */
     var picks = [], tried = 0, miss = 0, blocked = false;
     /* ★2026-10-12 使った写真の印（ゲームの used[pm.img]=baUsedTag_ 7734行）を付けていなかった＝同じ写真が変種違いの別カードに付きうる。baKv_ の控えと同じ物を触るので、この回の後のカードにもすぐ効く */
     var usedT = baKv_(BA_IMGS) || {}, usedDirty = false;
@@ -9657,7 +9658,7 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN2) {} ai.dirty = 0; }
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
-    if (!picks.length) { try { baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
+    if (!picks.length) { try { if (Object.keys(judged).length !== _jN0) baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
     var _ccOrd = ccs.slice(); var _ccFrom = String(st.ccNext || ''); var _ccI = _ccOrd.indexOf(_ccFrom); if (_ccI > 0) _ccOrd = _ccOrd.slice(_ccI).concat(_ccOrd.slice(0, _ccI)); st.ccNext = '';
     for (var ci = 0; ci < _ccOrd.length; ci++) {
@@ -9676,7 +9677,7 @@ function tcgTick(manual) {
         baLogAutoMark_((st.added || []).filter(function (a) { return !!(a && a.at && a.en && a.cc && a.item_id && Date.parse(a.at) >= _cutT); }).map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymdT }; })); } catch (eMkT) {}
     }
     try { baKvSet_('boshu_auto_done_' + hw, ctx.ledger); } catch (eL) { baLog_(st, '台帳の保存に失敗: ' + String(eL).slice(0, 120)); }
-    try { baKvSet_('tcg_judged', judged); } catch (eJ2) {}
+    try { if (Object.keys(judged).length !== _jN0) baKvSet_('tcg_judged', judged); } catch (eJ2) {}
     if (st.added.length > 300) st.added.length = 300; if (st.log.length > 200) st.log.length = 200; if (st.skipped.length > 200) st.skipped.length = 200;
     var _nm = picks.filter(function (x) { return x.from === 'mercari'; }).length;
     return finish_(hw + '：' + picks.length + '枚を試して ' + out.added + ' 明細を追加（見送り ' + out.skipped + '・写真はメルカリ ' + _nm + '／Yahoo!フリマ ' + (picks.length - _nm) + '）');
