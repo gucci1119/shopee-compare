@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1920';
+var SRC_VER = '20261012-1935';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9618,7 +9618,7 @@ function tcgTick(manual) {
   baKvPrefetch_([BA_CFG, SK, 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
   var st = baKv_(SK) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || []; st.runner = rid0;
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
@@ -9642,7 +9642,14 @@ function tcgTick(manual) {
     var hws = (tc.hws || ['pokeca']).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
     if (RUN) { var _mine = RUN[rid0] || []; hws = hws.filter(function (h) { return _mine.indexOf(h) >= 0; }); }   /* ★2026-10-12 自分の受け持ちのシリーズだけ */
     if (!hws.length) return finish_('🃏 の入れ先（cfg.family）が無い');
-    var cur = Number(st.cursor) || 0, hw = hws[cur % hws.length]; st.cursor = cur + 1;
+    /* ★2026-10-12 本人「AIの費用だけかかって出品が増えていない これ本当にやめてね」「早めに止血したい」：シリーズごとに今日の【AI判定の回数】と【足した明細】を数え、
+       判定12回以上で0明細のシリーズは今日はもう回さない（自動ブレーキ）。全部止まったらこの台は休み。翌日に戻る */
+    if (!st.yieldD || st.yieldD.d !== todayJ) st.yieldD = { d: todayJ, h: {} };
+    var _brk = function (h) { var y = st.yieldD.h[h]; return !!(y && y.j >= 12 && !y.a); };
+    var cur = Number(st.cursor) || 0, hw = '';
+    for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (!_brk(_h)) { hw = _h; st.cursor = cur + _k + 1; break; } }
+    if (!hw) return finish_('🩹 受け持ちの全シリーズが「AIを使っても出ない」ので今日は休み（' + hws.map(function (h) { var y = st.yieldD.h[h] || {}; return h + ' 判定' + (y.j || 0) + '/追加' + (y.a || 0); }).join('・') + '）');
+    st._yHw = hw; st._yJ0 = Number(st.today.judged) || 0;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
     var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
