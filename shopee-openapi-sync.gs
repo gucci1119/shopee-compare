@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1140';
+var SRC_VER = '20261012-1150';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7133,6 +7133,13 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-10-10 本人「相場4万円くらいするんだけど、なんでこんなクソ安い値段で出てるんだ？」＝通常版「NieR: Automata」の明細に、限定版 Black Box Edition の化粧箱の写真が付いて6か国に出ていた（BR で売れた）。
      写真元の題名の除外（BA_YNG に 限定版/エディション/特典付）に加えて、写真そのものが限定版の外箱なら、出す作品名に限定の語が無い限り落とす */
   if (ok && o.special_box === true && expect && !/限定|エディション|edition|特装|豪華|コレクターズ|collector|black\s*box|特典/i.test(String(expect.ja || '') + ' ' + String(expect.en || ''))) { ok = false; kind = 'limitedbox'; }
+  /* ★2026-10-12 本人「下のこの袋もつくと思われるやろ」（ワンピースの P-159 ルフィが付録の袋に入ったままの写真）。カードは聞いていた kind・graded を合否に使っていなかった＋袋入りを聞いていなかった。
+     カード1枚の写真（kind=card）以外・袋や付録の台紙に入ったまま・鑑定ケース入りは落とす（シングルの中古カードとして出すので、付いてこない物が写っていると誤解される） */
+  if (ok && expect && expect.tcg) {
+    if (String(o.kind || '') && String(o.kind || '') !== 'card') { ok = false; kind = 'notcard'; }
+    else if (o.in_package === true) { ok = false; kind = 'packaged'; }
+    else if (o.graded === true) { ok = false; kind = 'graded'; }
+  }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
   if (ok && !(expect && expect.tcg)) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像。🃏トレカはカード面そのものが絵柄なので通さない（2026-10-10） */
@@ -9337,9 +9344,9 @@ function tcgParseCard_(hw, t, k) {
 var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウォッチ 妖怪メダル', moncolle: 'ポケモン モンコレ', mezastar: 'ポケモンメザスタ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
 var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
-var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
+var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ込み|綴じ込み|袋入り|ブリスター|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
 function tcgJudgePrompt_(expect) {
-  return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、光の反射や影、傾き、擦れや白かけが写ります。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い・影が無い）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）}';
+  return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、光の反射や影、傾き、擦れや白かけが写ります。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い・影が無い）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）,"in_package":true/false（カードが雑誌の付録の袋・台紙・未開封の包装・ブリスターに入ったままか。透明な袋越しに見えている時も true。スリーブ・ローダーは false）}';
 }
 /* 駿河屋の題名 → {num, rar, name}。例 "129/103[SAR]：(キラ)ミュウex"・"030/103(14/30)：(キラ)ピカチュウ"・"088/076[AR]：(キラ)カクレオン" */
 function tcgParsePokeca_(t) {
