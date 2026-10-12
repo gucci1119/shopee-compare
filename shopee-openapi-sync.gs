@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1110';
+var SRC_VER = '20261012-1130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8073,7 +8073,8 @@ function setupCondIndexTrigger() {
 }
 function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
-function baLoadCtx_(cfg, hw, ccs) {
+function baLoadCtx_(cfg, hw, ccs, opts) {
+  var _tcg = !!(opts && opts.tcg);   /* ★2026-10-12 トレカ用＝カードのカタログ（約195件）だけ読み、ゲーム用の候補作り・写真の控え6MB・product_ids・90日分の注文は読まない */
   // 出している（国別）＝listings の明細名とJAN
   var fam = cfg.family[hw]; var famRows = {}, listedByCc = {}, allRows = {};
   var famSku = String(fam.sku || '').trim(), famNk = String(fam.nameKey || '').trim();   // 親SKUが無い群はカタログ名（①②を除く）で束ねる（ポータル baNameKey と同じ）
@@ -8083,7 +8084,9 @@ function baLoadCtx_(cfg, hw, ccs) {
      90日分の注文を丸ごと読み直していた＝候補切れの機種が多い日は1回の巡回で最大12回分の全件読み。同じ実行の中では1回だけ読む（国の組み合わせごと） */
   var _rowsKey = ccs.slice().sort().join(',');
   BA_CTX_ROWS = BA_CTX_ROWS || {};
-  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')');
+  if (_tcg) _rowsKey = 'tcg|' + _rowsKey;
+  /* ★2026-10-12 Supabase が繰り返し落ちた。トレカの巡回が30分ごとに出品全件（7,371カタログ・明細の中身つき）を読んでいた＝カードのカタログ（195件・約3%）だけで足りる */
+  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*)' : ''));
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
   /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
@@ -8096,7 +8099,9 @@ function baLoadCtx_(cfg, hw, ccs) {
      ＝数字では満杯なのに非公開カタログが入れ先に戻り、公開できない明細を足してから印が付く、を毎日くり返す。
      baShopFull_ と同じく【枠の数字】でも見る。公開中の数はいま読んだ rows から数える＝接続枠は増えない（app_kv の枠表を1回読むだけ） */
   var _capOf = {}; try { ((baKv_('shop_item_limit') || {}).shops || []).forEach(function (x) { if (x && x.shop_id && Number(x.cap) > 0) _capOf[String(x.shop_id)] = Number(x.cap); }); } catch (eCap) {}
-  var _liveOf = {}; rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
+  var _liveOf = {};
+  if (_tcg) { try { sbSelectAll_('listings', 'select=shop_id&status=eq.1&cc=in.(' + ccs.join(',') + ')').forEach(function (r) { _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; }); } catch (eLv) {} }   /* 枠の満杯は全出品で数える（店IDの1列だけ＝軽い） */
+  else rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
   var _buried = 0, _buriedItems = {};
   var _madeIds = {}, _madeNk = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') { _madeIds[String(_fm[kk].item_id)] = 1; var _kcc = kk.split('|')[1]; if (_fm[kk].name) _madeNk[_kcc + '|' + baNameKey_(_fm[kk].name)] = 1; } }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
@@ -8124,11 +8129,11 @@ function baLoadCtx_(cfg, hw, ccs) {
     if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
   });
   var janByCc = {};
-  try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
+  if (!_tcg) try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   /* ★売れる見込みの材料：直近90日に売れた明細名（英名）。他国で売れた作品を、まだ出していない国へ先に出す（本人「効率的に、効果がある使い方」） */
   var soldVar = BA_CTX_SOLD || {};
-  if (!BA_CTX_SOLD) try {
+  if (!BA_CTX_SOLD && !_tcg) try {
     var since90 = Math.floor(Date.now() / 1000) - 90 * 86400;
     sbSelectAll_('orders', 'select=items&order_ts=gte.' + since90 + '&status=not.in.(CANCELLED,Cancelled,UNPAID)').forEach(function (o) {
       var items = o.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (e) { items = []; } }
@@ -8136,6 +8141,7 @@ function baLoadCtx_(cfg, hw, ccs) {
     });
     BA_CTX_SOLD = soldVar;   /* 読めた時だけ控える（読めなかった時は次の機種でもう一度試す） */
   } catch (e) {}
+  if (_tcg) return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: [], pre: {}, modelNames: modelNames, buried: _buriedItems };
   var pre0 = baKv_('boshu_auto_pre') || {};
   var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems, baKv_(BA_EN) || {});
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames, buried: _buriedItems };
@@ -9582,7 +9588,7 @@ function tcgTick(manual) {
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
     var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
-    var ctx = baLoadCtx_(cfg, hw, ccs);
+    var ctx = baLoadCtx_(cfg, hw, ccs, { tcg: 1 });
     var _nameBudget = ai.budget; ai.budget = 0; ai.allowNoName = true;   /* ★2026-10-12 候補作りでは英語名のAIを呼ばない（写真が通ったカードだけ後で聞く） */
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
     /* ★2026-10-12 本人「今までのも入れてや」：出品ログの仕入れ目安（llog_cost_<hw>）と型番（product_ids の mpn）を、このシリーズで今までに入れた全部（台帳 boshu_auto_done_<hw>）に埋める。
