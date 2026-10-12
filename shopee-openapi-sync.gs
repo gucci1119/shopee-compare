@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1150';
+var SRC_VER = '20261012-1200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9621,7 +9621,8 @@ function tcgTick(manual) {
       }
     } catch (eBf) { baLog_(st, hw + '：今までの分の埋め戻しに失敗: ' + String(eBf).slice(0, 160)); }
     /* 名前が付いているカード（もう払った名前）を先に試す＝新しい英語名のAIを減らす。下見（tcgPreview_）も同じ並び */
-    cands.list = cands.list.filter(function (x) { return !x.noname; }).concat(cands.list.filter(function (x) { return x.noname; }));
+    /* ★2026-10-12 本人「仕入れ高いのばかりだろ」「もっと安いのも出して」：候補は駿河屋の控えの並びのままだった → 仕入の安い順（同じ値段なら名前ありが先） */
+    cands.list.sort(function (a, b) { return (Number(a.cost) || 0) - (Number(b.cost) || 0) || ((a.noname ? 1 : 0) - (b.noname ? 1 : 0)); });
     var _seenRun = {}; cands.list.forEach(function (x) { if (x.en) _seenRun[String(x.en).toLowerCase()] = 1; });   /* 名付け後に同じ題名が2つ入ると束ごと拒否される＝この回の題名を先に覚えておく */
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
@@ -9700,7 +9701,7 @@ function tcgPreview_(p) {
   var names = (baKv_('tcg_names_' + hw) || {}).map || {};
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   var cands = tcgCandidates_(hw, ccs, {}, ledger, cfg, names, { cache: baKv_('tcg_names_ai') || {}, budget: 0, sets: baKv_('tcg_sets') || {}, setBudget: 0, offBudget: 0, allowNoName: true });   /* ★2026-10-12 名前がまだ無いカードも写真を集める（名前は写真が通った後に GAS が聞く） */   /* 下見はAIを呼ばない（控えだけ使う） */
-  cands.list = cands.list.filter(function (x) { return !x.noname; }).concat(cands.list.filter(function (x) { return x.noname; }));   /* 巡回と同じ並び（名前ありが先） */
+  cands.list.sort(function (a, b) { return (Number(a.cost) || 0) - (Number(b.cost) || 0) || ((a.noname ? 1 : 0) - (b.noname ? 1 : 0)); });   /* 巡回と同じ並び（仕入の安い順） */
   /* ★2026-10-12 写真集め用（needPhoto）は【切る前に】写真済み・3日以内に見つからなかった・NG 3回で休み中のカードを外す（ゲームの boshuAutoPreviewBody_ 8157行と同じ）。
      前は先頭40件で切ってからポータルが絞っていたので、40件が写真済みで埋まると「探すカード無し」で写真集めが止まっていた（10/12 朝ずっと） */
   if (p && String(p.needPhoto) === '1') {
