@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1215';
+var SRC_VER = '20261012-1230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9162,7 +9162,7 @@ function baLogAutoMark_(rows) {
 }
 function baSet_(ledger, key, cc, val) { var o = ledger[key] = ledger[key] || {}; o[cc] = val; }
 var BA_HW_LABEL = { switch: 'Switch', switch2: 'Switch2', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', ds: 'DS', '3ds': '3DS', wii: 'Wii', wiiu: 'WiiU', gc: 'GC', n64: 'N64', sfc: 'SFC', fc: 'FC', gba: 'GBA', gb: 'GB', md: 'MD', ss: 'SS', dc: 'DC', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCE', ws: 'WS', gg: 'GG',
-  acnh: 'ACNH', yokai: 'YOKAI', moncolle: 'MONCOLLE', mezastar: 'MEZASTAR', pokeca: 'POKECA', pokeca_old: 'POKECAOLD', yugioh: 'YUGIOH', yugioh_rush: 'YUGIOHRD', onepiece: 'OPCG', duema: 'DUEMA', weiss: 'WEISS', battlespirits: 'BATSPI', vanguard: 'VANGUARD', wixoss: 'WIXOSS', zx: 'ZX', digimon: 'DIGIMON', shadowverse: 'SHADOWVERSE', dbh: 'DBH', mtg: 'MTG', unionarena: 'UNIONARENA' };   /* 🃏 2026-10-10 トレカ（明細SKUの頭） */
+  acnh: 'ACNH', yokai: 'YOKAI', moncolle: 'MONCOLLE', mezastar: 'MEZASTAR', pokeca: 'POKECA', pokeca_old: 'POKECAOLD', yugioh: 'YUGIOH', yugioh_rush: 'YUGIOHRD', onepiece: 'OPCG', duema: 'DUEMA', weiss: 'WEISS', battlespirits: 'BATSPI', vanguard: 'VANGUARD', wixoss: 'WIXOSS', zx: 'ZX', digimon: 'DIGIMON', shadowverse: 'SHADOWVERSE', dbh: 'DBH', mtg: 'MTG', unionarena: 'UNIONARENA', gamba: 'GANBARIZING', gambale: 'GANBALEGENDS' };   /* 🃏 2026-10-10 トレカ（明細SKUの頭） */
 // 入った明細のJANを product_ids（app_kv・{items:{'id:<item>#<model>': {...}}}）へ。既にJANが入っている鍵は触らない
 /* ★2026-09-20 本人「出してない商品を出すんでしょ？なぜ JAN 情報がないとかいうことが起こる？」
    実測：🤖の 83明細のうち JAN なし 40件、そのうち 38件は model_id が空＝add_model の返事から明細IDを拾えず、JAN を書く鍵（id:<item>#<model>）が作れなかった（マスタに JAN はあった）。
@@ -9303,7 +9303,7 @@ function baTcgPreorder_(shopId, itemId, hw, st, cc) {
 }
 /* ★2026-10-11 本人「ポケモン以外も出していってくださいよ、ガンガン」「勝手にカタログ作っていいから。そのシリーズのね」「画像も勝手に設定して…カタログのトップ画像」
    シリーズの英名（カタログ名・説明文の置換・明細名に使う） */
-var TCG_EN = { acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag', pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA' };
+var TCG_EN = { acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag', pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA', gamba: 'Kamen Rider Battle Ganbarizing', gambale: 'Kamen Rider Ganba Legends' };
 /* 駿河屋の題名の「(パラレル)」「(ホロ)」「(SECRET)」等＝同じ番号でも別のカード（値段が10倍違う）。落とさず短い英語の札にして名前・SKU・鍵に残す */
 var TCG_VAR_EN = [[/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil'], [/ゴールデン|golden/i, 'Golden Tag'], [/スーパータグ|super\s*tag/i, 'Super Tag'], [/ダブルタグ|double\s*tag/i, 'Double Tag'], [/スペシャルタグ|special\s*tag/i, 'Special Tag']];
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
@@ -9343,8 +9343,8 @@ function tcgParseCard_(hw, t, k) {
   if (/^[\d\/]+$/.test(num)) { var sm = String(k || '').match(/\[([A-Za-z0-9\-]{3,14})\]/); if (sm) num = sm[1] + ' ' + num; }
   return { num: num, rar: rar, name: rest, vars: vars, varEn: varEn };
 }
-var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウォッチ 妖怪メダル', moncolle: 'ポケモン モンコレ', mezastar: 'ポケモンメザスタ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA' };
-var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ' };
+var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウォッチ 妖怪メダル', moncolle: 'ポケモン モンコレ', mezastar: 'ポケモンメザスタ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA', gamba: '仮面ライダー ガンバライジング', gambale: '仮面ライダー ガンバレジェンズ' };
+var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ', gamba: 'ガンバライジング', gambale: 'ガンバレジェンズ' };
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
 var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ込み|綴じ込み|袋入り|ブリスター|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
 function tcgJudgePrompt_(expect) {

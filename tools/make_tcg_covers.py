@@ -24,7 +24,9 @@ S={ 'pokeca':('Pokemon Card Game','Single Card  /  Japanese',(255,203,5),(60,90,
     'yokai':('Yo-kai Watch Medal','Single Medal  /  Japanese',(240,80,60),(250,220,80)),
     'moncolle':('Pokemon Moncolle Figure','Single Figure  /  Japanese',(255,203,5),(60,90,200)),
     'mezastar':('Pokemon Mezastar Tag','Single Tag  /  Japanese',(60,120,220),(250,200,60)),
-    'unionarena':('UNION ARENA','Single Card  /  Japanese',(250,250,250),(230,60,60)) }
+    'unionarena':('UNION ARENA','Single Card  /  Japanese',(250,250,250),(230,60,60)),
+    'gamba':('Kamen Rider Ganbarizing','Single Card  /  Japanese',(30,30,30),(220,40,40)),
+    'gambale':('Kamen Rider Ganba Legends','Single Card  /  Japanese',(20,40,90),(240,200,40)) }
 def rr(d,box,r,fill,outline=INK,w=5): d.rounded_rectangle(box,radius=r,fill=fill,outline=outline,width=w)
 def card(d,cx,cy,w,h,c1,c2,txt):
     x0,y0,x1,y1=cx-w//2,cy-h//2,cx+w//2,cy+h//2
