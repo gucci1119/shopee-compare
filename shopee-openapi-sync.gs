@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1720';
+var SRC_VER = '20261012-1810';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -83,14 +83,29 @@ function baAiYenOfDay_(d) {
   var y = 0; Object.keys(d || {}).forEach(function (lab) { if (/監査/.test(lab)) return; /* 監査・直しの分は上限に数えない（料金の表示には残る） */ var t = d[lab] || {}; var big = /四隅/.test(lab); y += ((Number(t.in) || 0) * (big ? 3 : 1) + (Number(t.out) || 0) * (big ? 15 : 5)) / 1e6 * 150; });
   return y;
 }
+var TCG_RUNNERS_N = 1;
+/* ★2026-10-12 トレカを複数の台で回すと、他の台の「今日のAI料金」が見えず、1日の上限（aiYenCap）が台ごとに効く＝最大で台数倍使える。
+   各台が自分の分（直近2日）を小さな控え ai_spend_<台> に出し、baAiYenToday_ が全台を足す */
+function tcgAiSpendPublish_(rid) {
+  var o = aiSpendLoad_(), d = {}, today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), y = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
+  [today, y].forEach(function (k) { if (o.days && o.days[k]) d[k] = o.days[k]; });
+  baKvSet_('ai_spend_' + rid, { at: new Date().toISOString(), days: d });
+}
 function baAiYenToday_() {
   var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   var mine = baAiYenOfDay_((aiSpendLoad_().days || {})[day]), other = 0, partial = false;
   try {
-    (sbSelect_('app_kv', 'select=k,v&k=like.boshu_auto_status*') || []).forEach(function (r) {
-      if (!r || r.k === BA_ST) return; var u = r.v && r.v.uf; if (!u || !u.aiSpend || !u.aiSpend.days) return;
-      other += baAiYenOfDay_(u.aiSpend.days[day]);
+    /* ★2026-10-12 ①状態の控え（1つ400KB）を丸ごと読んでいた→ uf だけ読む ②トレカの台の分（ai_spend_<台>）も足す。同じ台が両方にあれば新しい方だけ。自分の台は除く */
+    var _me = baRunnerId_(), byRid = {};
+    (sbSelect_('app_kv', 'select=k,u:v->uf&k=like.boshu_auto_status*') || []).forEach(function (r) {
+      if (!r || r.k === BA_ST) return; var u = r.u; if (!u || !u.aiSpend || !u.aiSpend.days) return;
+      var id = String(u.runner || r.k); if (id === _me) return; byRid[id] = { at: String(u.at || ''), y: baAiYenOfDay_(u.aiSpend.days[day]) };
     });
+    (sbSelect_('app_kv', 'select=k,v&k=like.ai_spend_*') || []).forEach(function (r) {
+      if (!r || !r.v || !r.v.days) return; var id = String(r.k).replace(/^ai_spend_/, ''); if (id === _me) return;
+      var y2 = baAiYenOfDay_(r.v.days[day]); if (!byRid[id] || String(r.v.at || '') >= byRid[id].at) byRid[id] = { at: String(r.v.at || ''), y: y2 };
+    });
+    Object.keys(byRid).forEach(function (id) { other += byRid[id].y; });
   } catch (e) { partial = true; }
   return { d: day, yen: mine + other, mine: Math.round(mine), other: Math.round(other), partial: partial };
 }
@@ -8599,7 +8614,7 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   if (!st.famMade || st.famMade.d !== _fmDay) st.famMade = { d: _fmDay, n: 0 };
   /* ★2026-10-12 本人「なぜポケモンしか出ていない」「トレカ優先で出して」：遊戯王等は国にカタログが無く（nofam 12件）、1回1件の枠を PH が使うと他の6か国は毎回見送りだった。トレカ（TCG_HW_JA）は1回に国ごと1件＝最大7件・1日20件まで作る（表紙は仮・本人が差し替え） */
   var _isTcgHw = !!(typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]);
-  var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6)); if (_isTcgHw) _fmCap = Math.max(_fmCap, Number(cfg.famPerDayTcg || 20));
+  var _fmCap = Math.max(0, Number(cfg.famPerDay != null ? cfg.famPerDay : 6)); if (_isTcgHw) _fmCap = Math.ceil(Math.max(_fmCap, Number(cfg.famPerDayTcg || 20)) / TCG_RUNNERS_N);   /* ★2026-10-12 台ごとに数えるので台数で割る＝全体の上限は今まで通り */
   var _fmTickMax = _isTcgHw ? 7 : 1;
   if (!famRows.length && cfg.autoFamily !== false && (st.famMade.n >= _fmCap || BA_FAM_TICK >= _fmTickMax)) {
     baLog_(st, cc + '：' + hw + ' のカタログは' + (BA_FAM_TICK >= _fmTickMax ? 'この回はもう作りません（1回' + _fmTickMax + '件）' : '今日はもう作りません（今日 ' + st.famMade.n + '/' + _fmCap + '件）'));
@@ -8665,7 +8680,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (!st.cloneMade || st.cloneMade.d !== _cdDay) st.cloneMade = { d: _cdDay, n: 0 };
       var _cdCap = Math.max(1, Number(cfg.clonePerDay) || 12);
       /* ★2026-10-12 本人「値段合わなければカタログ作っていいから」＝トレカは値段の幅が合わない時に新しいカタログ（②③…）を作ってよい。1日の上限を広げる（cfg.clonePerDayTcg・既定40） */
-      if (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) _cdCap = Math.max(_cdCap, Number(cfg.clonePerDayTcg) || 40);
+      if (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) _cdCap = Math.ceil(Math.max(_cdCap, Number(cfg.clonePerDayTcg) || 40) / TCG_RUNNERS_N);   /* ★2026-10-12 台数で割る */
       if (st.cloneMade.n >= _cdCap) { res.note = '複製は今日はもう作りません（今日 ' + st.cloneMade.n + '/' + _cdCap + '件）'; baLog_(st, cc + '：' + res.note); break; }
       var _role = series ? 'series' : 'fam';   /* ★Codex指摘：シリーズのカタログの複製を家族に数えると、次の回から無関係の作品がそこへ入る */
       if (baShopFull_(cc, base.shop_id)) {
@@ -9572,16 +9587,33 @@ function tcgTick(manual) {
   if (!lock.tryLock(manual === true ? 5000 : 60000)) return { ok: false, error: 'いま走っています（🤖と同じ鍵）' };
   var t0 = Date.now(), DEADLINE = 300000;   /* ★2026-10-12 4分→5分（GAS の1回は6分まで）。カタログ作り＋写真判定でブラジルまでで時間切れ＝タイ・ベトナムに届かなかった */
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
-  baKvPrefetch_([BA_CFG, 'tcg_auto_status', 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
-  var st = baKv_('tcg_auto_status') || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
-  var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {} };
-  var finish_ = function (msg) { st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_('tcg_auto_status', st); } catch (e) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  /* ★2026-10-12 本人「分散させてもいいけど」「二重で同じもの出したりして無駄にならないように」「ちゃんとしてくれるなら」：トレカを複数の台で回す。
+     ①シリーズ（hw）を台ごとに分ける（cfg.tcg.runners＝{child:[...],child2:[...],child3:[...]}）。出した印（boshu_auto_done_<hw>）とカタログは hw ごと＝2台が同じ台帳・同じカタログを触らない＝二重に出ない
+     ②状態の控えは台ごと（主担当 cfg.tcg.runner は今まで通り tcg_auto_status・他は tcg_auto_status_<台>）＝日の件数・順番・休みを上書きし合わない
+     ③トリガーは各台5分ごと・自分の番（分を5で割った数 % 台数 ＝ 自分の順番）だけ動く＝15分ごとに1台ずつ。大きな控えを読むのは自分の番と決まってから（Supabase を同時に叩かない）
+     ④設定（64KB）だけ先に読み、担当でなければ何も読まずに戻る */
+  var cfg0 = null; try { cfg0 = (baKvFreshMany_([BA_CFG]) || {})[BA_CFG] || null; } catch (eC0) {}
+  if (!cfg0) { try { lock.releaseLock(); } catch (eL0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
+  var tc0 = cfg0.tcg || {}, rid0 = baRunnerId_(), RUN = (tc0.runners && typeof tc0.runners === 'object') ? tc0.runners : null;
+  var runIds = RUN ? Object.keys(RUN).filter(function (r) { return RUN[r] && RUN[r].length; }).sort() : [];
+  TCG_RUNNERS_N = RUN ? Math.max(1, runIds.length) : 1;
+  if (manual !== true && manual !== 'web') {
+    if (RUN) {
+      var _ix = runIds.indexOf(rid0);
+      if (_ix < 0) { try { lock.releaseLock(); } catch (eL1) {} return { ok: false, skipped: 'not_runner', runner: rid0 }; }
+      if (Math.floor(new Date().getMinutes() / 5) % runIds.length !== _ix) { try { lock.releaseLock(); } catch (eL2) {} return { ok: false, skipped: 'not_my_slot', runner: rid0 }; }
+    } else if (rid0 !== String(tc0.runner || 'child2')) { try { lock.releaseLock(); } catch (eL3) {} return { ok: false, skipped: 'not_runner', runner: rid0 }; }
+  }
+  var SK = (RUN && rid0 !== String(tc0.runner || '')) ? 'tcg_auto_status_' + rid0 : 'tcg_auto_status';
+  baKvPrefetch_([BA_CFG, SK, 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
+  var st = baKv_(SK) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || []; st.runner = rid0;
+  var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
+  var finish_ = function (msg) { st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
     var tc = cfg.tcg || {};
-    var rid = baRunnerId_(), want = String(tc.runner || 'child2');
-    if (manual !== true && rid !== want) { ufPersist_(); try { lock.releaseLock(); } catch (e1) {} return { ok: false, skipped: 'not_runner', runner: rid, want: want }; }
+    var rid = rid0;   /* 担当の判定は上（設定だけ読んだ時点）で済ませた */
     if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
     if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
     var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) return finish_('🛡 Shopee枠の残りが少ないので見送り（' + ufNow + '／' + ufStopLine_() + '）');
@@ -9595,9 +9627,10 @@ function tcgTick(manual) {
     try { var aym = baAiYenMonth_(); st.aiYenMonth = aym; var capM = baAiMonthCap_(cfg); if (capM > 0 && aym.yen >= capM && manual !== true) return finish_('💴 今月のAI料金が上限 ¥' + capM + ' に達したので止めています（実績 ¥' + aym.actual + '＋今日の見積 ¥' + aym.est + '）。上げるには本人の許可が要ります'); } catch (eM) {}
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0, judged: 0 };
-    var dailyMax = Number(tc.dailyMax) || 60;
+    var dailyMax = Math.ceil((Number(tc.dailyMax) || 60) / TCG_RUNNERS_N);   /* ★2026-10-12 台ごとに数えるので台数で割る＝全体の上限 cfg.tcg.dailyMax は今まで通り */
     if (st.today.added >= dailyMax && manual !== true) return finish_('今日の上限 ' + dailyMax + '件に達したので明日まで休み');
     var hws = (tc.hws || ['pokeca']).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
+    if (RUN) { var _mine = RUN[rid0] || []; hws = hws.filter(function (h) { return _mine.indexOf(h) >= 0; }); }   /* ★2026-10-12 自分の受け持ちのシリーズだけ */
     if (!hws.length) return finish_('🃏 の入れ先（cfg.family）が無い');
     var cur = Number(st.cursor) || 0, hw = hws[cur % hws.length]; st.cursor = cur + 1;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
@@ -9673,10 +9706,10 @@ function tcgTick(manual) {
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { var _frP = baKvFreshMany_(['tcg_pre']); var _mineP = {}; Object.keys(tPre).forEach(function (k) { var e = tPre[k]; if (e && (e.rej || e._dirty)) _mineP[k] = e; }); var _baseP = (_frP && _frP['tcg_pre']) || null; if (_baseP) { Object.keys(_mineP).forEach(function (k) { var f = _baseP[k] || {}; f.rej = _mineP[k].rej; if (_mineP[k]._dirty) f.imgs = _mineP[k].imgs; delete f._dirty; _baseP[k] = f; }); baKvSet_('tcg_pre', _baseP); } } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }   /* ★2026-10-12 ポータルが同時に集めた分を消さない＝読み直した最新に、こちらで変えたカードの rej／imgs だけ重ねる */
-    if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN2) {} ai.dirty = 0; }
+    if (ai.dirty) { try { baKvSetMerged_('tcg_names_ai', ai.cache, baKvFreshMany_(['tcg_names_ai']), 0); } catch (eN2) {} ai.dirty = 0; }   /* ★2026-10-12 複数の台で回すので読み直して足す
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
-    if (!picks.length) { try { if (Object.keys(judged).length !== _jN0) baKvSet_('tcg_judged', judged); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
+    if (!picks.length) { try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
     var _ccOrd = ccs.slice(); var _ccFrom = String(st.ccNext || ''); var _ccI = _ccOrd.indexOf(_ccFrom); if (_ccI > 0) _ccOrd = _ccOrd.slice(_ccI).concat(_ccOrd.slice(0, _ccI)); st.ccNext = '';
     for (var ci = 0; ci < _ccOrd.length; ci++) {
@@ -9695,7 +9728,7 @@ function tcgTick(manual) {
         baLogAutoMark_((st.added || []).filter(function (a) { return !!(a && a.at && a.en && a.cc && a.item_id && Date.parse(a.at) >= _cutT); }).map(function (a) { return { cc: a.cc, item_id: a.item_id, en: a.en, ymd: _ymdT }; })); } catch (eMkT) {}
     }
     try { baKvSet_('boshu_auto_done_' + hw, ctx.ledger); } catch (eL) { baLog_(st, '台帳の保存に失敗: ' + String(eL).slice(0, 120)); }
-    try { if (Object.keys(judged).length !== _jN0) baKvSet_('tcg_judged', judged); } catch (eJ2) {}
+    try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ2) {}
     if (st.added.length > 300) st.added.length = 300; if (st.log.length > 200) st.log.length = 200; if (st.skipped.length > 200) st.skipped.length = 200;
     var _nm = picks.filter(function (x) { return x.from === 'mercari'; }).length;
     return finish_(hw + '：' + picks.length + '枚を試して ' + out.added + ' 明細を追加（見送り ' + out.skipped + '・写真はメルカリ ' + _nm + '／Yahoo!フリマ ' + (picks.length - _nm) + '）');
