@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1040b';
+var SRC_VER = '20261012-1110';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7471,6 +7471,27 @@ function boshuAutoTick(manual) {
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
   var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
+  /* ★2026-10-12 Supabase が繰り返し落ちた（10/11 22:33 の時間切れはこの下の束ね読みそのもの）。担当でない台・ゲームの機種が空の時も、
+     先に約12MB（写真の控え6MB・product_ids 4.5MB…）を読んでから「何もしない」で戻っていた＝ポータルから1時間に約20回。
+     → 設定（小さい）だけ先に読み、担当でない・機種が空なら大物を読まずに戻る。機種が空でも、売れた作品の他国在庫0（baSoldSync_）だけは続ける（二重販売を防ぐ） */
+  if (manual !== true) {
+    var _c0 = baKv_(BA_CFG);
+    if (_c0 && !BA_KV_ERR) {
+      try { tcgEnsureTrigger_(_c0); } catch (eTg0) {}
+      var _r0 = baRunnerId_();
+      if (_c0.runners && typeof _c0.runners === 'object' && Object.keys(_c0.runners).length && !(_c0.runners[_r0] && _c0.runners[_r0].length)) { ufPersist_(); try { lock.releaseLock(); } catch (eL0) {} return { ok: false, skipped: 'not_runner', runner: _r0 }; }
+      var _h0 = (_c0.hws || []).filter(function (h) { return _c0.family && _c0.family[h] && (_c0.family[h].sku || _c0.family[h].nameKey); });
+      if (!_h0.length || !_c0.on) {
+        try {
+          var _st0 = baKv_(BA_ST) || {}; var _sig0 = JSON.stringify(_st0.added || []);
+          baSoldSync_(_st0);
+          if (JSON.stringify(_st0.added || []) !== _sig0) baKvSet_(BA_ST, _st0);   /* 在庫を0にした時だけ書く */
+        } catch (eS0) {}
+        ufPersist_(); try { lock.releaseLock(); } catch (eL1) {}
+        return { ok: true, skipped: !_c0.on ? 'off' : 'no_hws', src: SRC_VER };
+      }
+    }
+  }
   baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto', BA_LOOSE]);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
@@ -9681,8 +9702,9 @@ function tcgPreview_(p) {
     });
   }
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
+  var _tpOnce = baKv_('tcg_pre') || {};   /* ★2026-10-12 1回だけ読む（前は候補ごとに読み直し＝1回の呼び出しで最大41回・BA_KV_CACHE が無いと控えが効かない） */
   /* ★2026-10-12 ポータルがメルカリで写真を集めるための材料（key・検索語・番号・NG語）も返す。並びは巡回が試す順のまま */
-  return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { rej: ((((baKv_('tcg_pre') || {})[c.key] || {}).rej || {}).imgs) || [], key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
+  return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { rej: (((_tpOnce[c.key] || {}).rej || {}).imgs) || [], key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
 }
 /* 担当の台（cfg.tcg.runner）で、Head で走る boshuAutoTick の中から tcgCron の時間トリガーを1回だけ作る＝/exec の再デプロイ無しで動き出す（gas-deploy スキル：Head から作ったトリガーは保存だけで最新） */
 function tcgEnsureTrigger_(cfg) {
