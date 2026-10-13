@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261013-0820';
+var SRC_VER = '20261013-2310';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8504,6 +8504,9 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
      これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
   var srcName = String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
+  /* ★2026-10-13 本人「基本、現地語はヒットしやすいので」「検索で」：トレカの新しいカタログは TW/TH/VN/BR では現地語の名前で作る（10/13 に既存69件も同じ形へ）。
+     英語の Card/TCG は残す＝トレカの巡回はカタログ名か親SKUに card/tcg がある物だけ読む */
+  if (!famName) { var _loc = tcgLocalFamName_(hw, cc); if (_loc) srcName = _loc; }
   if (srcName) srcName = baWithNo_(srcName, baFreeNo_(cc, srcName));   /* ★2026-09-25 本人「①つけといて」→ 2026-09-26 国の中で空いている番号（2店舗目・親SKU無しも含めて重ねない） */
   if (!srcName) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（名前が決まっていません＝設定の name が空）'); return null; }
   /* 元にするカタログ＝その国の同じ機種のバリエカタログ（公開中を優先） */
@@ -9383,6 +9386,18 @@ function tcgParseCard_(hw, t, k) {
 }
 var TCG_HW_JA = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪ウォッチ 妖怪メダル', moncolle: 'ポケモン モンコレ', mezastar: 'ポケモンメザスタ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード（旧裏）', yugioh: '遊戯王', yugioh_rush: '遊戯王ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエル・マスターズ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトルスピリッツ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'Z/X', digimon: 'デジモンカード', shadowverse: 'シャドウバース エボルヴ', dbh: 'ドラゴンボールヒーローズ', mtg: 'マジック：ザ・ギャザリング', unionarena: 'UNION ARENA', gamba: '仮面ライダー ガンバライジング', gambale: '仮面ライダー ガンバレジェンズ' };
 var TCG_SEARCH_WORD = { acnh: 'どうぶつの森 amiiboカード', yokai: '妖怪メダル', moncolle: 'モンコレ', mezastar: 'メザスタ タグ', pokeca: 'ポケモンカード', pokeca_old: 'ポケモンカード 旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王 ラッシュデュエル', onepiece: 'ワンピースカード', duema: 'デュエマ', weiss: 'ヴァイスシュヴァルツ', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'ウィクロス', zx: 'ゼクス', digimon: 'デジモンカード', shadowverse: 'シャドウバース', dbh: 'ドラゴンボールヒーローズ', mtg: 'MTG', unionarena: 'ユニオンアリーナ', gamba: 'ガンバライジング', gambale: 'ガンバレジェンズ' };
+/* ★2026-10-13 本人「基本、現地語はヒットしやすいので」：トレカのカタログ名を国の言葉で（TW＝【二手】＋台湾の呼び名＋英語＋日版／TH・VN・BR＝中古の語＋カード等の語＋英語＋日本の品）。
+   英語の部分に Card/TCG を残す（トレカの巡回はカタログ名か親SKUの card/tcg で読む）。番号は baWithNo_ が末尾に付ける */
+var TCG_LOC_EN = { pokeca: 'Pokemon Card Game TCG PTCG Single Card', onepiece: 'One Piece Card Game TCG Single Card', yugioh: 'Yu-Gi-Oh! OCG Single Card TCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel Single Card TCG', duema: 'Duel Masters Single Card TCG', dbh: 'Dragon Ball Heroes Single Card TCG', battlespirits: 'Battle Spirits Single Card TCG', vanguard: 'Cardfight!! Vanguard Single Card TCG', digimon: 'Digimon Card Game Single Card TCG', shadowverse: 'Shadowverse EVOLVE Single Card TCG', weiss: 'Weiss Schwarz Single Card TCG', wixoss: 'WIXOSS Single Card TCG', zx: 'Z/X Single Card TCG', mtg: 'Magic The Gathering MTG Single Card TCG', unionarena: 'Union Arena Single Card TCG', gamba: 'Kamen Rider Ganbarizing Card', gambale: 'Kamen Rider Ganba Legends Card', acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Yokai Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag Card' };
+var TCG_LOC_ZH = { pokeca: '寶可夢卡牌 PTCG 單卡', onepiece: '航海王卡牌 OPCG 單卡', yugioh: '遊戲王 OCG 單卡', yugioh_rush: '遊戲王 Rush Duel 單卡', duema: '決鬥大師 單卡', dbh: '七龍珠英雄 卡片', battlespirits: '戰鬥之魂 單卡', vanguard: '卡片戰鬥先導者 單卡', digimon: '數碼寶貝卡牌 單卡', shadowverse: '闇影詩章 EVOLVE 單卡', weiss: '黑白雙翼 單卡', wixoss: 'WIXOSS 單卡', zx: 'Z/X 單卡', mtg: '魔法風雲會 MTG 單卡', unionarena: 'UNION ARENA 單卡', gamba: '假面騎士 Ganbarizing 卡片', gambale: '假面騎士 Ganba Legends 卡片', acnh: '動物森友會 amiibo卡', yokai: '妖怪手錶 妖怪徽章', moncolle: '寶可夢 Moncolle 公仔', mezastar: '寶可夢 Mezastar 卡匣' };
+function tcgLocalFamName_(hw, cc) {
+  var en = TCG_LOC_EN[hw]; if (!en) return '';
+  var kind = hw === 'yokai' ? 'medal' : (hw === 'moncolle' ? 'figure' : 'card');
+  if (cc === 'TW') { var w = en.replace(/ Single Card/, '').split(' '), nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + en + ' 日版'; while (nm.length > 57 && w.length > 1) { nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + w.join(' ') + ' 日版'; if (nm.length > 57) w.splice(w.length - 2, 1); } return nm; }   /* 台湾は60字まで（番号の分を空ける）。Card/TCG は末尾なので残る */
+  var L = { TH: ['[มือสอง]', { card: 'การ์ด', medal: 'เหรียญ', figure: 'ฟิกเกอร์' }, '| สินค้าญี่ปุ่น'], VN: ['[Đã qua sử dụng]', { card: 'Thẻ bài', medal: 'Huy hiệu', figure: 'Mô hình' }, '| Hàng Nhật'], BR: ['[Usado]', { card: 'Carta', medal: 'Medalha', figure: 'Figura' }, '| Japonês'] }[cc];
+  if (!L) return '';
+  return L[0] + ' ' + L[1][kind] + ' ' + en + ' ' + L[2];
+}
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
 var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ込み|綴じ込み|袋入り|ブリスター|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
 /* ★2026-10-12 本人「モンコレってフィギュアでしょ？」「妖怪メダルとメザスタタグ これはトレカじゃないね」：小物はカード1枚の判定にかけると kind≠card で全部落ちていた（妖怪 5枚試して0明細＝AI料金だけ）。
