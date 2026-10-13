@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-0835';
+var SRC_VER = '20261014-0850';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9589,7 +9589,10 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     var key = hw + ':' + String(r.id || full);
     var k1 = baTmKey_(full);
     var setName = String(r.k || '').split('/').pop(); var setCode = (hw === 'pokeca' || hw === 'pokeca_old') ? tcgSetCode_(hw, setName, ai, pr) : '';   /* ★2026-10-11 弾記号の公式検索はポケカだけ。他は番号に弾が入っている（OP17-118 等） */
-    var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + pr.rar.replace(/[^A-Za-z0-9]+/g, '') : '') + (pr.varEn ? '_' + pr.varEn.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
+    /* ★2026-10-14 本人「明細のSKUって、全部ユニークだよね？」：番号の無い区分（モンコレ・妖怪メダル等）は SKU が「MONCOLLE_」で止まり、別の商品で同じSKUになっていた＝英語の明細名を入れる */
+    if (!String(pr.num || '').trim()) { var skuN = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + full.toUpperCase().replace(/[^A-Z0-9]+/g, '_')).replace(/_+/g, '_').replace(/_$/, '').slice(0, 100); }
+    var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + pr.rar.replace(/[^A-Za-z0-9]+/g, '') : '') + (pr.varEn ? '_' + pr.varEn.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);
+    if (typeof skuN !== 'undefined' && skuN) sku = skuN;   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
     if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
     return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku };
