@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261013-2310';
+var SRC_VER = '20261013-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8131,7 +8131,9 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   BA_CTX_ROWS = BA_CTX_ROWS || {};
   if (_tcg) _rowsKey = 'tcg|' + _rowsKey;
   /* ★2026-10-12 Supabase が繰り返し落ちた。トレカの巡回が30分ごとに出品全件（7,371カタログ・明細の中身つき）を読んでいた＝カードのカタログ（195件・約3%）だけで足りる */
-  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*)' : ''));
+  /* ★2026-10-13 本人「妖怪ウォッチメダルもモンコレもカードじゃないしな」「メダルとフィギュアだもん」：card/tcg だけで絞ると妖怪メダル（YOKAI_WATCH_MEDAL_SERIES）・モンコレ（POKEMON_MONCOLLE_SERIES）・メザスタの入れ先が見えず、
+     作った回の1件目だけ入って以後は増えなかった（4か国の新カタログが全部 明細1）。親SKUの medal/moncolle/mezastar でも読む */
+  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,parent_sku.ilike.*mezastar*)' : ''));
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
   /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
