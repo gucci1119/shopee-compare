@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-0850';
+var SRC_VER = '20261014-0900';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9350,7 +9350,7 @@ function baTcgPreorder_(shopId, itemId, hw, st, cc) {
    シリーズの英名（カタログ名・説明文の置換・明細名に使う） */
 var TCG_EN = { acnh: 'Animal Crossing amiibo Card', yokai: 'Yo-kai Watch Medal', moncolle: 'Pokemon Moncolle Figure', mezastar: 'Pokemon Mezastar Tag', frienda: 'Pokemon Frienda Pick', pokeca: 'Pokemon Card Game', pokeca_old: 'Pokemon Card Game (Old Back)', yugioh: 'Yu-Gi-Oh! OCG', yugioh_rush: 'Yu-Gi-Oh! Rush Duel', onepiece: 'One Piece Card Game', duema: 'Duel Masters', weiss: 'Weiss Schwarz', battlespirits: 'Battle Spirits', vanguard: 'Cardfight!! Vanguard', wixoss: 'WIXOSS', zx: 'Z/X Zillions of enemy X', digimon: 'Digimon Card Game', shadowverse: 'Shadowverse EVOLVE', dbh: 'Dragon Ball Heroes', mtg: 'Magic: The Gathering', unionarena: 'UNION ARENA', gamba: 'Kamen Rider Battle Ganbarizing', gambale: 'Kamen Rider Ganba Legends' };
 /* 駿河屋の題名の「(パラレル)」「(ホロ)」「(SECRET)」等＝同じ番号でも別のカード（値段が10倍違う）。落とさず短い英語の札にして名前・SKU・鍵に残す */
-var TCG_VAR_EN = [[/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil'], [/ゴールデン|golden/i, 'Golden Tag'], [/スーパータグ|super\s*tag/i, 'Super Tag'], [/ダブルタグ|double\s*tag/i, 'Double Tag'], [/スペシャルタグ|special\s*tag/i, 'Special Tag']];
+var TCG_VAR_EN = [/* ★2026-10-14 本人「これはモンコレなのか？」：ポケデルゼはボールの種類（モンスターボール等）で別の商品＝名前に入れる */ [/マスターボール/, 'Master Ball'], [/ハイパーボール/, 'Ultra Ball'], [/スーパーボール/, 'Great Ball'], [/モンスターボール/, 'Poke Ball'], [/プレミアボール/, 'Premier Ball'], [/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil'], [/ゴールデン|golden/i, 'Golden Tag'], [/スーパータグ|super\s*tag/i, 'Super Tag'], [/ダブルタグ|double\s*tag/i, 'Double Tag'], [/スペシャルタグ|special\s*tag/i, 'Special Tag']];
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
 /* 汎用の題名パーサー：「番号[レアリティ]：名前」（遊戯王 BETB-JP027[UL]：…／ワンピ OP17-118[SEC]：(パラレル)…／デュエマ 33/100[VR]：…＜フレーバー＞／ヴァイス GA04/S131-100[RR]：…／ヴァンガ DZ-BT16/045[RR]：…）
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
