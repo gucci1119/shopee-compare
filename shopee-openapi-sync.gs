@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-0600';
+var SRC_VER = '20261014-0835';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9557,11 +9557,31 @@ function tcgCandidates_(hw, ccs, listedByCc, ledger, cfg, names, ai) {
 /* ★2026-10-12 ゲームの候補作り（8288行 9/2x）と同じ規則：見送りの理由が変わらないもの（VN の値段上限・重複・値段の比…）は「出した」扱い。
    入れていなかったので、6か国に出し済みで VN だけ vncap のポケカ6枚を毎回選び直し、写真探しと判定をやり直していた（10/12 10:07 の回「6枚を試して0明細」） */
 var TCG_SKIP_DONE = /^skip:(noimg|noname|dup|manual|nosame|vncap|ratio)/;
+/* ★2026-10-14 本人「何か日本語になってない？」：駿河屋のレアリティ（アルティメットレア・ノーマル・ホロ）と妖怪メダルの弾（第四弾・妖怪メダルドリーム01）を
+   そのまま明細名に付けていた（DBH 49件・妖怪 40件超）。英語の略号・英語に直し、直せない日本語は落とす */
+var TCG_RAR_EN = { 'アルティメットレア': 'UR', 'スーパーレア': 'SR', 'シークレットレア': 'SEC', 'シークレット': 'SEC', 'スーパーシークレット': 'SSEC', 'レア': 'R', 'コモン': 'C', 'アンコモン': 'UC', 'キャンペーン': 'CP', 'パラレル': 'P', 'ノーマル': 'N', 'ホロ': 'Holo', 'プロモ': 'PR', 'ゴールド': 'Gold', 'シルバー': 'Silver', 'ブロンズ': 'Bronze', 'レジェンド': 'Legend' };
+function tcgRarEn_(rar) {
+  var t = String(rar || '').trim(); if (!t) return '';
+  if (TCG_RAR_EN[t]) return TCG_RAR_EN[t];
+  Object.keys(TCG_RAR_EN).sort(function (a, b) { return b.length - a.length; }).forEach(function (k) { t = t.split(k).join(' ' + TCG_RAR_EN[k] + ' '); });
+  t = t.replace(/[^\x20-\x7E]/g, ' ').replace(/\s+/g, ' ').trim();
+  return t;
+}
+function tcgAsciiTag_(tag) {
+  var KN = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+  var num = function (x) { return /^\d+$/.test(x) ? x : String(x).split('').reduce(function (s, c) { return c === '十' ? (s || 1) * 10 : s + (KN[c] || 0); }, 0); };
+  var t = String(tag || '').normalize('NFKC');
+  t = t.replace(/第([一二三四五六七八九十\d]+)弾/g, function (_, n) { return ' Vol.' + num(n) + ' '; }).replace(/第([一二三四五六七八九十\d]+)章/g, function (_, n) { return ' Ch.' + num(n) + ' '; }).replace(/([一二三四五六七八九十\d]+)弾/g, function (_, n) { return ' Vol.' + num(n) + ' '; });
+  t = t.replace(/妖怪メダル|妖怪ウォッチ/g, ' ').replace(/ドリーム/g, ' Dream ').replace(/零/g, ' Zero ').replace(/USA/g, ' USA ').replace(/ガム/g, ' Gum ').replace(/ラム(ネ)?/g, ' Ramune ').replace(/バスターズ/g, ' Busters ').replace(/トレジャー/g, ' Treasure ').replace(/レジェンド/g, ' Legend ').replace(/ゼロ/g, ' ');
+  t = t.replace(/[^\x20-\x7E]/g, ' ').replace(/[()（）]/g, ' ').replace(/\s+/g, ' ').trim();
+  return t;
+}
 function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenEn, stat) {
   stat = stat || {}; seenEn = seenEn || {};
   {
     var vtag = pr.varEn ? ' ' + pr.varEn : '';
-    var full = ((pr.rar ? pr.rar + ' ' : '') + en + vtag + ' ' + (pr.num || pr.setTag || '')).replace(/\s+/g, ' ').trim();   /* 番号の無い小物は弾（setTag）で見分ける */
+    var _rarE = tcgRarEn_(pr.rar), _tagE = tcgAsciiTag_(pr.setTag);
+    var full = ((_rarE ? _rarE + ' ' : '') + en + vtag + ' ' + (pr.num || _tagE || '')).replace(/\s+/g, ' ').trim();   /* 番号の無い小物は弾（setTag）で見分ける */
     if (full.length > 30) full = (en + vtag + ' ' + pr.num).replace(/\s+/g, ' ').trim();
     if (full.length > 30 && vtag) full = (en.slice(0, Math.max(6, 30 - vtag.length - String(pr.num).length - 2)).trim() + vtag + ' ' + pr.num).trim();   /* 変種の札は落とさない（落とすと別のカードが同じ名前になる） */
     if (full.length > 30) { stat.long = (stat.long || 0) + 1; return null; }
