@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261012-1935';
+var SRC_VER = '20261013-0820';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3148,6 +3148,22 @@ function removeVariationShift_(shopId, itemId, midCsv) {
   }
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], newModels);
 
+  // ①-b ★2026-10-13 update_tier_variation は既にある枠の SKU・価格・在庫を受け付けない（名前と画像だけ上へ動き、
+  //   SKU・価格・在庫は枠に残る＝1つ上の作品の値になる。10/6 の削除で 13カタログ・238明細がずれた）。
+  //   中身が動いた枠だけ、移す元の値を model_id 指定で書き直す（位置は動かさない）。
+  var fixSku = [], fixPr = [], fixSt = [];
+  for (var s1 = 0; s1 < k; s1++) {
+    if (keep[s1] === s1) continue;
+    var mSrc = bySlot[keep[s1]], midDst = bySlot[s1].model_id;
+    fixSku.push({ model_id: midDst, sku: mSrc.model_sku || '' });
+    var pr1 = parseFloat(priceOf(mSrc)); if (pr1 > 0) fixPr.push({ model_id: midDst, price: pr1 });
+    var st1 = parseInt(stockOf(mSrc), 10); if (!isNaN(st1)) fixSt.push({ model_id: midDst, stock: st1 });
+  }
+  var fixErr = [];
+  for (var f1 = 0; f1 < fixSku.length; f1 += 50) { try { updateModelSku_(shopId, itemId, fixSku.slice(f1, f1 + 50)); } catch (eS) { fixErr.push('SKU ' + String((eS && eS.message) || eS).slice(0, 80)); } }
+  if (fixPr.length) { try { updatePriceList_(shopId, itemId, fixPr); } catch (eP) { fixErr.push('価格 ' + String((eP && eP.message) || eP).slice(0, 80)); } }
+  if (fixSt.length) { try { updateStockList_(shopId, itemId, fixSt); } catch (eT) { fixErr.push('在庫 ' + String((eT && eT.message) || eT).slice(0, 80)); } }
+
   // ② あまった末尾の枠を消す（末尾なので位置が動かない＝安全）
   for (var s2 = k; s2 < n; s2++) {
     var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: bySlot[s2].model_id });
@@ -3171,7 +3187,8 @@ function removeVariationShift_(shopId, itemId, midCsv) {
   return {
     ok: true, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
     remain: r4.opt.length, models_remain: r4.models.length,
-    note: '順番は崩していません（販売数の表示だけ1つずれます）'
+    fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr,
+    note: '順番は崩していません（販売数の表示だけ1つずれます）' + (fixErr.length ? '。⚠SKU・価格・在庫の書き直しに失敗: ' + fixErr.join(' / ') : '')
   };
 }
 function bulkEditTier_(shopId, itemId, opts, imgs) {
@@ -9892,6 +9909,9 @@ function baLimitedFix_(p) {
         if (!jc.ok) { why = why || ('ng:' + jc.kind); continue; }
         var r = setVariationImagesBulk_(String(row.shop_id), mm[1], [{ option: en, url: cu, expect: md.img }]);
         if (!r || r.ok === false) { why = 'replace:' + String((r && r.error) || '').slice(0, 60); continue; }
+        /* ★2026-10-13 本人「本当に直ってるの？」：差し替えが0件（applied:0＝いまの画像が控えと違う明細は触らない作り）でも ok:true が返り、
+           写真が限定版の箱のまま在庫を1に戻していた（160件中116件・在庫1が96件）。【実際に差し替わった時だけ】在庫を戻す */
+        if (!(Number(r.applied) > 0)) { why = 'notapplied' + (r.changed && r.changed.length ? ':changed' : ''); break; }
         try { updateStock_(String(row.shop_id), mm[1], mm[2], 1); } catch (eS) {}
         v.fix = { s: 'replaced', at: new Date().toISOString(), url: cu, src: cm.src || '', name: String(cm.name || '').slice(0, 80), stock: 1 };
         try { used[cuKey] = baUsedTag_(key, hw); } catch (eU) {}   /* 使った写真の印（baUsedOk_ と同じ形） */
