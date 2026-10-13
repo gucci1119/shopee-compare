@@ -21458,6 +21458,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-14', items: [
+      '🔢 <b>トレカ・小物の明細の型番（カードの番号）を、台帳の「型番」に入れるようにしました</b>（本人「型番あるやつは、型番欲しいんだけど」「なんでいつも、JAN 型番のとこに入れてくれないの？」）：明細名の末尾の番号（OP17-022・285・129/103 等）を入れます。入っている型番は触りません。今ある分はまとめて入れ、これから出す分も2時間ごとに入ります',
       '🔎 <b>メザスタのタグ・フレンダのピックの写真が集まらなかったのを直しました</b>：メルカリの題名に番号を書かない出品がほとんどで、メザスタは候補62件が全部「見つからず」でした。名前とグレードが題名にあれば写真の候補にします（違う物は後の写真判定で落とします）',
     ] },
     { date: '2026-10-13', items: [
@@ -32647,6 +32648,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (Date.now() - (lst._baCollectAt || 0) < BA_COLLECT_EVERY_MS) return;
       if (_buyBusyAny()) { try { localStorage.setItem('smdBaCollectWhy', JSON.stringify({ at: new Date().toISOString(), why: '仕入れ画面を開いているので休み' })); } catch (_) {} return; }
     }
+    try { const _lm = Number(localStorage.getItem('smdTcgMpnAt') || 0); if (Date.now() - _lm > 2 * 3600000 && typeof window.__smdTcgMpnFill === 'function') { const _rm = window.__smdTcgMpnFill(); if (_rm && _rm.ok) localStorage.setItem('smdTcgMpnAt', String(Date.now())); } } catch (_) {}   /* ★10/14 トレカの型番を台帳へ */
     const _why = (w) => { try { window.__baCollectWhy = { at: new Date().toISOString(), why: String(w || '') }; localStorage.setItem('smdBaCollectWhy', JSON.stringify(window.__baCollectWhy)); } catch (_) {} };
     // ★2026-09-18 本人「私がいない間に質の高い出品を」＝母数ページを開いていなくても、ポータルがどこかで開いていれば集める（前は母数ページ表示中だけ＝席を外すと写真の供給が止まる）
     /* ★2026-09-21 本人「Shopee枠は必ず余裕を残して」：写真集めも枠を見て間隔をのばす。
@@ -44711,6 +44713,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const items = [...grp.values()].sort((a, b) => b.keys.length - a.keys.length).map(g => ({ kw: g.kw, machine: g.machine, sku: g.sku || '', n: g.keys.length }));
       await sbUpsert('app_kv', [{ k: 'jan_todo', v: { at: new Date().toISOString(), n: items.length, items: items }, updated_at: new Date().toISOString() }]);
       return { ok: true, n: items.length, models: items.reduce((a, x) => a + x.n, 0) };
+    };
+    /* ★2026-10-14 本人「これ、型番とかないの？」「型番あるやつは、型番欲しいんだけど」「なんでいつも、JAN 型番のとこに入れてくれないの？」：
+       トレカ・小物の明細は名前の末尾がカードの番号（OP17-022／285／129/103／1-5-006）＝それを台帳の型番（mpn）に入れる。
+       入っている型番は触らない。番号の無い物（妖怪メダル等）は入れない。担当PCの写真集めの巡回から2時間に1回も呼ぶ */
+    window.__smdTcgMpnFill = () => {
+      if (!kvOk.product_ids) return { ok: false, error: '台帳をまだ読めていません' };
+      productIds = productIds || {};
+      const isTcg = (r) => /CARD_SERIES|_TCG|TCG_|MEDAL|MONCOLLE|MEZASTAR|FRIENDA|AMIIBO_CARD/i.test(String(r.parent_sku || '')) || /\bTCG\b|Single Card|Trading Card|amiibo\+? Card|Moncolle|Mezastar|Frienda|Yo-?kai Watch[^\n]{0,20}Medal/i.test(String(r.name || ''));
+      let hit = 0, rows = 0;
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
+        if (!r || !isTcg(r) || !(r.models || []).length) return; rows++;
+        r.models.forEach(m => {
+          if (!m || m.ghost) return;
+          const k = pidKeyModel(r, m); if (!k) return;
+          const prev = productIds[k] || {}; if (String(prev.mpn || '').trim()) return;
+          const tok = String(m.n || '').trim().split(/\s+/).pop() || '';
+          if (!/\d/.test(tok) || !/^[A-Za-z0-9][A-Za-z0-9\-\/\.]{0,20}$/.test(tok)) return;
+          productIds[k] = Object.assign({}, prev, { mpn: tok, mpnSrc: '明細名の番号（トレカ）', at: Date.now() });
+          hit++;
+        });
+      }));
+      if (hit) { _pidDupCache = null; saveProductIds(); try { logAct('出品', 'トレカの型番を台帳に入れた', 'all', hit + '明細'); } catch (_) {} }
+      return { ok: true, catalogs: rows, models: hit };
     };
     window.__smdJanManualImport = async () => {
       if (!kvOk.product_ids) return { ok: false, error: 'JANの台帳をまだ読めていません' };
