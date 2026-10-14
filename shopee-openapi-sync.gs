@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-2240';
+var SRC_VER = '20261015-0100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9727,8 +9727,22 @@ function tcgTick(manual) {
        判定12回以上で0明細のシリーズは今日はもう回さない（自動ブレーキ）。全部止まったらこの台は休み。翌日に戻る */
     if (!st.yieldD || st.yieldD.d !== todayJ) st.yieldD = { d: todayJ, h: {} };
     var _brk = function (h) { var y = st.yieldD.h[h]; return !!(y && y.j >= 12 && !y.a); };
-    var cur = Number(st.cursor) || 0, hw = '';
-    for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (!_brk(_h)) { hw = _h; st.cursor = cur + _k + 1; break; } }
+    /* ★2026-10-15 本人「少しでも無料で多く、そして早く出品をしたい」：Claude だけモードでは、写真OK（boshu_auto_judged_manual の ok）でまだ出していない候補が
+       1つも無いシリーズを選ぶと、1回（最長5分）が「0枚を試して」で空回りする（10/15 00:33 実測：3台目が遊戯王104件を抱えたまま yugioh_rush／zx／mtg で空回り）。
+       選ぶ前に【OK写真あり ＆ 台帳に無い】候補の数をシリーズごとに数え、0 のシリーズは飛ばす。読む物は tcg_pre と判定の控え（どちらもこの回で後で読む＝通信は増えない）＋台帳（小） */
+    var _okHw = null;
+    if (tc.claudeOnly === true) {
+      try {
+        var _tp0 = baKv_('tcg_pre') || {}; baManualOf_('', { key: '_' }); var _mn0 = BA_MANUAL || {}, _okKeys = {};
+        Object.keys(_mn0).forEach(function (k) { if (String(_mn0[k]).indexOf('ok') !== 0) return; var ck = k.split('||')[1]; if (!ck || !_tp0[ck]) return; var h0 = (_tp0[ck] && _tp0[ck].hw) || ck.split(':')[0]; (_okKeys[h0] = _okKeys[h0] || {})[ck] = 1; });
+        _okHw = {};
+        hws.forEach(function (h) { var ks = Object.keys(_okKeys[h] || {}); if (!ks.length) { _okHw[h] = 0; return; } var dn = baKv_('boshu_auto_done_' + h) || {}; _okHw[h] = ks.filter(function (k) { return !dn[k]; }).length; });
+      } catch (eOk) { _okHw = null; }
+    }
+    var cur = Number(st.cursor) || 0, hw = '', _noOk = [];
+    for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h)) continue; if (_okHw && !_okHw[_h]) { _noOk.push(_h); continue; } hw = _h; st.cursor = cur + _k + 1; break; }
+    if (!hw && _okHw && _noOk.length) return finish_('🃏 受け持ちのシリーズに「写真OKでまだ出していない」候補が無い（' + _noOk.join('・') + '）＝Claude の判定待ち');
+    if (hw && _okHw) baLog_(st, hw + '：写真OKで未出品の候補 ' + _okHw[hw] + ' 件（飛ばしたシリーズ ' + (_noOk.length ? _noOk.join('・') : 'なし') + '）');
     if (!hw) return finish_('🩹 受け持ちの全シリーズが「AIを使っても出ない」ので今日は休み（' + hws.map(function (h) { var y = st.yieldD.h[h] || {}; return h + ' 判定' + (y.j || 0) + '/追加' + (y.a || 0); }).join('・') + '）');
     st._yHw = hw; st._yJ0 = Number(st.today.judged) || 0;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
