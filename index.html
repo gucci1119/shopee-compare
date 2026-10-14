@@ -37053,9 +37053,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             /* ★2026-10-14 本人「このページ、マジで重いんだけど」：出品データ（lst.byCc＝起動時に全件読んである）に同じカタログが居れば、Supabase に models を取りに行かない。
                実測：この読み（100件ずつ・models 込み）が1日ぶんで10本・28秒だった。無い物（出品データの取り込み前の新しいカタログ）だけ読む */
             const fromMem = [], ids = [];
-            ids0.forEach(id => { const x = (ds || []).find(y => String(y.item_id) === id); const row = x ? llRowOf(x.cc, id) : null; if (row && Array.isArray(row.models)) fromMem.push(row); else ids.push(id); });
-            for (let i = 0; i < ids.length + 1; i += 100) {
-              const part = i < ids.length ? await sbGetAll('listings', 'select=cc,item_id,shop_id,parent_sku,models&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')') : fromMem;
+            ids0.forEach(id => {
+              const xs = (ds || []).filter(y => String(y.item_id) === id), row = xs.length ? llRowOf(xs[0].cc, id) : null;
+              /* メモリの行は【その日の明細が全部入っている時だけ】使う（起動後に🤖が足した明細は無い＝その時は Supabase から読む） */
+              const covered = !!(row && Array.isArray(row.models) && xs.every(y => row.models.some(mm => mm && String(mm.id) === String(y.model_id))));
+              if (covered) fromMem.push(row); else ids.push(id);
+            });
+            const _parts = [fromMem];
+            for (let i = 0; i < ids.length; i += 100) _parts.push(await sbGetAll('listings', 'select=cc,item_id,shop_id,parent_sku,models&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')'));
+            for (const part of _parts) {
               (part || []).forEach(l => {
                 sku[l.cc + '|' + l.item_id] = String(l.parent_sku || '').trim(); shp[l.cc + '|' + l.item_id] = l.shop_id;
                 (l.models || []).forEach(mm => {
