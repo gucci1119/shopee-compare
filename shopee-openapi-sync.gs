@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-2130';
+var SRC_VER = '20261014-2240';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9369,12 +9369,13 @@ function tcgParseCard_(hw, t, k) {
   /* 🧸 2026-10-14 本人「amiiboのフィギュアは？」：駿河屋「amiibo ガール【ネオンピンク】(スプラトゥーンシリーズ)」→ 名前＋色（【】の中は名前に含める＝英語名の鍵が別になる）・番号は無い。amiiboカード・アルバム・セットは出さない */
   if (hw === 'goods_amiibo') {
     var am = String(t || '').normalize('NFKC').replace(/^\[[^\]]*\]\s*/, '').trim();
+    for (var _c = 0; _c < 3; _c++) am = am.replace(/\s*\((?:箱|本体|説明書|ケース|付属|台座)[^()]*(?:\([^()]*\))?[^()]*\)\s*$/, '');   /* 末尾の状態注記（箱・説明書欠け／本体のみ）は名前に入れない */
     if (!/^amiibo\s+/i.test(am) || /カード|アルバム|セット|まとめ|ケース|スタンド/.test(am)) return null;
-    var amm = am.replace(/^amiibo\s+/i, '').match(/^(.+?)\s*(?:\(([^()]*(?:シリーズ|Series)[^()]*)\))?\s*$/i);
-    if (!amm) return null;
-    var aname = amm[1].replace(/【([^】]{1,24})】/g, ' $1 ').replace(/\s+/g, ' ').trim();
+    var body = am.replace(/^amiibo\s+/i, '').trim();
+    var amm = body.match(/^(.+?)\s*\(([^()]+)\)\s*$/);   /* 末尾の ( ) はシリーズ（「(スプラトゥーンシリーズ)」「(ゼルダの伝説 ブレス オブ ザ ワイルド)」） */
+    var aname = (amm ? amm[1] : body).replace(/【([^】]{1,30})】/g, ' $1 ').replace(/\[([^\]]{1,30})\]/g, ' $1 ').replace(/\s+/g, ' ').trim();
     if (!aname) return null;
-    return { num: '', rar: '', name: aname, vars: [], varEn: '', series: String(amm[2] || '').replace(/シリーズ$/, '').trim(), setTag: '' };
+    return { num: '', rar: '', name: aname, vars: [], varEn: '', series: String(amm ? amm[2] : '').replace(/シリーズ$/, '').trim(), setTag: '' };
   }
   if (hw === 'moncolle') {
     var mm = String(t || '').normalize('NFKC').match(/^モンコレ\s+(?:([A-Z]{1,3}-\d{1,3})\s+)?(.+?)\s*「([^」]*)」/);
@@ -9519,6 +9520,8 @@ function tcgSetCode_(hw, setName, ai, pr) {
 }
 function tcgEnName_(hw, pr, names, ai) {
   var en = '';
+  /* 🧸 2026-10-14 amiibo の名前は『amiibo:名前』の鍵だけを見る（ヒカリ・ホムラ・ソラ・リンク等の短い名前がヴァイス等のカード名と取り違わないため）。無ければ空＝出さない（AI には聞かない） */
+  if (hw === 'goods_amiibo') { var ca = ai && ai.cache && ai.cache['amiibo:' + String(pr.name || '').trim()]; return ca ? String(ca.en || '').trim() : ''; }
   if (hw === 'pokeca' || hw === 'pokeca_old' || hw === 'moncolle' || hw === 'mezastar' || hw === 'frienda') en = tcgEnPokeca_(pr.name, names);
   if (en) return en;
   /* ★2026-10-10 辞書に無い名前（トレーナーズ・サポート・グッズ・特殊な形態＝ポケカで106件）は文章AIに公式英名を聞く。控え app_kv tcg_names_ai（{和名: {en, kind}}）＝同じ名前は2度聞かない。1回の実行で ai.budget 件まで */
