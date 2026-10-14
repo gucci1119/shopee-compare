@@ -21605,6 +21605,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-14', items: [
+      '🐢 <b>出品ログが重くなっていたのを直しました</b>（本人「このページめちゃめちゃ重くなっている気がする」）：今日入れた「明細が増えたら読み直す」が、その日の全件（2,700行＋出品データ）を1分ごとに読み直していました。2回目からは前回より後に増えた行と、まだ読んでいないカタログだけを5分おきに読みます',
       '💴 <b>🃏自動出品を「Claude だけ」に切り替えました（API 料金 ¥0）</b>（本人「0円で動いてる？」「一旦それで行ってみよう」）：写真は Claude が見て合格にした物だけ、英語名は Claude が付けた物か辞書の物だけを使い、GAS からは有料の AI を呼びません（設定 cfg.tcg.claudeOnly）。出品の速さは Claude の判定の量で決まります',
       '🏷🔢 <b>出品ログ：画面を開いた後に🤖が出した明細も、明細SKUと型番が入るようにしました</b>（本人「何回も言ってるけど、JAN・型番のところにその型番はなんで入らないのか？」「なんで親のSKUが入っているのか？」）：その日の明細名・SKUを【その日を開いた最初の1回だけ】読んでいたので、後から増えた明細は名前もSKUも無く、親SKU・型番なしになっていました。その日の明細が増えたら読み直します。🖼 あわせて、メルカリShops（業者）のカード画像（スキャン・公式画像）を GAS の AI が通していたのを止めました（Shops の写真は Claude が見て合格にした物だけ使う）',
       '🔎 <b>メザスタのタグの写真が集まらなかったのを直しました</b>：メルカリを「メザスタ タグ カイリュー 4-4-045」のように番号付きで探していて、ほとんど当たっていませんでした。「メザスタ ＋ 名前」で探し、名前とグレードで絞るようにしました（前に見つからなかった分も探し直します）',
@@ -36957,17 +36958,25 @@ create policy "listing_log all" on listing_log for all using (true) with check (
        その日の明細名・SKU を【その日を開いた最初の1回だけ】読んでいた＝開いた後に🤖が足した明細は名前も明細SKUも無く、親SKU表示・型番なしになっていた。
        その日の行が増えたら読み直す（前の読みから1分以上あける） */
     const _dN = (byDay.get(sel) || []).length;
-    if ((logState._detailDay !== sel || (_dN > (logState._detailN || 0) && Date.now() - (logState._detailAt || 0) > 60000)) && !logState._detailBusy) {
+    /* ★2026-10-14 本人「このページめちゃめちゃ重くなっている気がする」：上の読み直しが【その日の全件】（2,700行＋出品データ）を1分ごとに読んでいた。
+       2回目からは【前回より後に記録された行】と【まだ読んでいないカタログ】だけ読む・間隔は5分。名前は控え（_nameMap）から毎回当てる */
+    const _same = logState._detailDay === sel;
+    if ((!_same || (_dN > (logState._detailN || 0) && Date.now() - (logState._detailAt || 0) > 300000)) && !logState._detailBusy) {
       logState._detailBusy = true; logState._detailN = _dN; logState._detailAt = Date.now();
+      if (!_same) { logState._nameMap = {}; logState._detailSince = ''; logState._detailItems = new Set(); logState.skuMap = null; logState.stockMap = null; }
+      const _inc = _same && !!logState._detailSince;
       (async () => {
         try {
-          const ds = await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image&ymd=eq.' + encodeURIComponent(sel));
-          const m = {}; (ds || []).forEach(x => { m[x.cc + '|' + x.item_id + '|' + x.model_id] = x; });
-          (logState.rows || []).forEach(r => { const d = m[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } });
+          const ds = await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image,created_at&ymd=eq.' + encodeURIComponent(sel) + (_inc ? '&created_at=gt.' + encodeURIComponent(logState._detailSince) : ''));
+          const nmap = logState._nameMap = logState._nameMap || {};
+          (ds || []).forEach(x => { nmap[x.cc + '|' + x.item_id + '|' + x.model_id] = x; if (x.created_at && String(x.created_at) > String(logState._detailSince || '')) logState._detailSince = x.created_at; });
+          (logState.rows || []).forEach(r => { const d = nmap[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } });
           /* ★2026-09-23 本人「SKUも出してほしいです」。SKUは listing_log に無い（列は id/cc/item_id/model_id/ymd/name/model_name/image/price/seeded/created_at）ので
              出品データ listings.models[].sku から引く。全件は重いので【その日に出したカタログの分だけ】100件ずつ取る。 */
           try {
-            const ids = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))], sku = {}, stk = {}, shp = {};
+            const _seenIt = logState._detailItems = logState._detailItems || new Set();
+            const ids = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))].filter(id => !_seenIt.has(id)), sku = logState.skuMap || {}, stk = logState.stockMap || {}, shp = logState._shpMap = logState._shpMap || {};
+            ids.forEach(id => _seenIt.add(id));
             for (let i = 0; i < ids.length; i += 100) {
               const part = await sbGetAll('listings', 'select=cc,item_id,shop_id,parent_sku,models&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')');
               (part || []).forEach(l => {
@@ -36987,7 +36996,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
             /* 読んだ分はこの端末に6時間とっておく（開き直すたびに GAS の枠を使わない） */
             let fc = {}; try { fc = JSON.parse(localStorage.getItem('smdLlSkuFill') || '{}') || {}; } catch (_) { fc = {}; }
             const now = Date.now(); Object.keys(fc).forEach(k => { if (!fc[k] || now - fc[k].at > 6 * 3600e3) delete fc[k]; });
-            const need = miss.filter(k => { const c = fc[k]; if (!c) return true; Object.keys(c.m || {}).forEach(mid => { logState.skuMap[k + '#' + mid] = c.m[mid]; }); return false; });
+            const need = miss.filter(k => { const c = fc[k]; if (!c) return true; Object.keys(c.m || {}).forEach(mid => { logState.skuMap[k + '#' + mid] = c.m[mid]; });
+              /* 同じカタログに後から明細が増えた時は、控えに無い明細があれば読み直す */
+              return (ds || []).some(x => x.cc + '|' + x.item_id === k && !(c.m || {})[x.model_id]); });
             if (need.length) (async () => {
               for (const k of need) {
                 const [cc, it] = k.split('|');
@@ -37013,6 +37024,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         try { renderListingLog(); } catch (_) { }
       })();
     }
+    try { const _nm = logState._nameMap; if (_nm) (byDay.get(sel) || []).forEach(r => { if (r.name) return; const d = _nm[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } }); } catch (_) {}
     const selAll = (byDay.get(sel) || []).slice().sort((a, b) => String(a.cc).localeCompare(String(b.cc)) || String(a.name || '').localeCompare(String(b.name || '')));
     selAll.forEach(r => {
       const sku = llSkuOf(r); const mSku = sku.match(/^([A-Z0-9]+)_/);
