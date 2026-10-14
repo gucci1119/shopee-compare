@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-0330';
+var SRC_VER = '20261015-0350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8829,13 +8829,24 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     catch (e) {
       var em = String((e && e.message) || e).slice(0, 160);
       baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：追加失敗 ' + em);
-      // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
-      if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
+      /* ★2026-10-15 03:4x 「現在95件・追加10件」で丸ごと失敗して1回（10枚）が無駄になっていた（妖怪メダル TW/MY・4台目）。
+         空きがあるぶん（100−現在）だけ先に入れ、残りは次の回（満杯扱い→新しいカタログ②）に回す */
+      var _mFull = /現在(\d+)件/.exec(em), _freeN = _mFull ? (100 - Number(_mFull[1])) : 0;
+      if (_freeN > 0 && _freeN < items.length) {
+        var _restItems = items.slice(_freeN); items = items.slice(0, _freeN);
+        try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：空き ' + _freeN + ' 件だけ入れた（残り ' + _restItems.length + ' は次の回・次のカタログ）'); }
+        catch (e2) { r2 = null; em = String((e2 && e2.message) || e2).slice(0, 160); baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：空きぶんの追加も失敗 ' + em); }
+        if (!r2) { tgt.models = new Array(100); continue; }
+        tgt.models = new Array(100);   /* これで満杯＝同じ回の残りは新しいカタログへ */
+      } else {
+        // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
+        if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
       items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); baSkipRec_(st, hw, cc, x._p, 'err:' + em.slice(0, 60)); });
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
       /* ★上書きで1件だけ入っている場合がある。ここで締めないとカタログが非公開のまま公開待ちにも載らない（Codex指摘） */
       res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st);
       i += batch.length; continue;
+      }
     }
     /* ★このカタログに実際に入った数。`res.added` は実行ぜんぶの累計なので締めの判断に使えない。 */
     var _addedHere = 0;
