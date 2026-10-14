@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-1000';
+var SRC_VER = '20261014-1810';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9614,6 +9614,10 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   for (var mi = 0; mi < mImgs.length && mTried < 3; mi++) {
     var mu = baJpgUrl_(String(mImgs[mi].img || '').replace(/\?.*$/, '')); if (!mu || rejSet[mu]) continue;   /* 判定する写真と上げる写真を同じ jpg に */
     if (!baUsedOk_(mUsed, mu, c.key, hw)) continue;
+    /* ★2026-10-14 本人「まだ新品のこの画像出してるよね？」「その実物のやつを出してほしいんだよ、中古の」：メルカリShops（業者）の写真はカードの画像データ（スキャン・公式画像）がほとんど。
+       Claude の判定は Shops の写真を notphoto で落としていたのに、Claude がまだ見ていない Shops の写真を GAS の AI が ok:card で通していた（ヴァイス チルノ THP/S130-091S・7か国）。
+       → Shops の写真は Claude が見て ok にした物だけ使う（AI には聞かない＝費用も減る） */
+    if (/mercari-shops/.test(mu) && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 落としたことにはしない＝Claude の判定に回る */
     mTried++;
     var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
     if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), hits: mImgs.length, q: q, from: 'mercari' };
