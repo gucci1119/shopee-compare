@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-0100';
+var SRC_VER = '20261015-0145';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9740,7 +9740,15 @@ function tcgTick(manual) {
       } catch (eOk) { _okHw = null; }
     }
     var cur = Number(st.cursor) || 0, hw = '', _noOk = [];
-    for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h)) continue; if (_okHw && !_okHw[_h]) { _noOk.push(_h); continue; } hw = _h; st.cursor = cur + _k + 1; break; }
+    if (_okHw) {
+      /* ★2026-10-15 01:4x 順番どおりだと、ポケカ約149件を抱えたまま候補1件のシリーズに1回（最長5分）を使う。
+         【写真OKで未出品の候補が一番多いシリーズ】から出す（同数なら順番どおり）。少ないシリーズは多い方が減ってから回る＝全部いずれ出る */
+      var _best = '', _bestN = 0;
+      for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h)) continue; var _n = Number(_okHw[_h]) || 0; if (!_n) { _noOk.push(_h); continue; } if (_n > _bestN) { _best = _h; _bestN = _n; } }
+      if (_best) { hw = _best; st.cursor = cur + 1; }
+    } else {
+      for (var _k2 = 0; _k2 < hws.length; _k2++) { var _h2 = hws[(cur + _k2) % hws.length]; if (!_brk(_h2)) { hw = _h2; st.cursor = cur + _k2 + 1; break; } }
+    }
     if (!hw && _okHw && _noOk.length) return finish_('🃏 受け持ちのシリーズに「写真OKでまだ出していない」候補が無い（' + _noOk.join('・') + '）＝Claude の判定待ち');
     if (hw && _okHw) baLog_(st, hw + '：写真OKで未出品の候補 ' + _okHw[hw] + ' 件（飛ばしたシリーズ ' + (_noOk.length ? _noOk.join('・') : 'なし') + '）');
     if (!hw) return finish_('🩹 受け持ちの全シリーズが「AIを使っても出ない」ので今日は休み（' + hws.map(function (h) { var y = st.yieldD.h[h] || {}; return h + ' 判定' + (y.j || 0) + '/追加' + (y.a || 0); }).join('・') + '）');
