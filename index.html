@@ -1243,6 +1243,7 @@
       <span style="color:#5a6b8c;font-size:11.5px">※記録した返金額は損益の「純利益」に反映されます。</span>
     </div>
     <div id="ret-body" style="padding:12px 20px"></div>
+    <div id="inq-body" style="padding:4px 20px 16px;border-top:1px solid #e3e8f0"></div>
   </div>
   <!-- 入出金・経費 -->
   <div id="page-expenses" style="display:none">
@@ -5989,6 +5990,7 @@
     '計算ロジック': 'How this is calculated',
     'ダッシュボード': 'Dashboard', 'やること': 'To-Do', '注文管理': 'Orders', '在庫管理': 'Inventory',
     '仕入れ管理': 'Sourcing', '出品管理': 'Listings', 'メッセージ': 'Messages', '返品・キャンセル': 'Returns & Cancels',
+    '❓ 商品ごとの問い合わせ': '❓ Inquiries by product', '🔄 今すぐ溜める': '🔄 Collect now', '商品（カタログ）': 'Product (catalog)', '質問': 'Questions', '最近の質問 → こちらの答え': 'Recent questions → our answers', '🛠 改造・CFW': '🛠 Modded / CFW', '📦 箱・説明書': '📦 Box / manual', '🔤 言語': '🔤 Language', '🌐 リージョン': '🌐 Region', '📷 状態・写真': '📷 Condition / photos', '🔋 動作・電池': '🔋 Working / battery', '✅ 本物か': '✅ Authentic?', '🚚 配送・税': '🚚 Shipping / tax', '💸 値引き': '💸 Discount', '📋 在庫・他の商品': '📋 Stock / other items', '💬 その他': '💬 Other', 'まだ商品つきの問い合わせがありません': 'No product-linked inquiries yet',
     '損益・入出金': 'Profit & Cash', '価格計算': 'Price Calculator', '顧客管理': 'Customers', '業界ニュース': 'Industry News',
     'アカウント': 'Accounts', '操作ログ': 'Activity Log', '改修履歴': 'Changelog', 'マニュアル': 'Manual',
     '事業計画': 'Business Plan', '確定申告・帳簿': 'Tax & Books', '仕入先': 'Suppliers', '売れ行き・値下げ': 'Sales rank & markdowns',
@@ -9294,7 +9296,7 @@
       buy: renderBuy, customers: renderCustomers, plan: renderPlan, traffic: renderTraffic, tax: renderTax, suppliers: renderSuppliers,
       tools: () => { try { renderDepRuns(); const c = document.getElementById('dep-auto'); if (c) c.checked = depAutoOn(); depAutoNextLabel(); } catch (_) {} },   // 転記ページ：開いた瞬間に直近の実行と自動実行の状態を出す
       log: renderLog, changelog: renderChangelog, manual: renderManual, todo: renderTodo, news: renderNews, messages: renderMessages,
-      expenses: renderExpenses, returns: renderReturns, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
+      expenses: renderExpenses, returns: (f) => { renderReturns(f); renderInquiries().catch(() => {}); }, fx: renderFx, pricecalc: () => { priceCalcRestore(); priceCalcRun(); setTimeout(() => { const c = document.getElementById('pc-cost'); if (c && !c.value) try { c.focus(); } catch (_) {} }, 60); },
       account: renderAccounts,
       rank: () => paRender(),   // 🏷 値付けの見直し（旧ランキングは中の切替で）
     };
@@ -19918,6 +19920,151 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       + ' inputmode="numeric" placeholder="—" title="SLS+などの補償金（円）。大幅に遅れて入るので、入金されたら記入してください"'
       + ' style="width:76px;font-size:10.5px;padding:2px 5px;border:1px solid ' + (cv ? '#1a7f37' : '#ddd') + ';border-radius:6px;text-align:right">';
   }
+  /* ★2026-10-14 本人「こういう今までの質問を溜めておきたい。でも、質問されないように画像で説明するようにしたいので、ログを溜めていきたい」「商品ごとに」
+     材料：chat_messages の ❓FAQ履歴（「[Product] カタログ名」が入る）＋チャット取り込みが読む「問い合わせ中の商品」カード（app_kv.chat_interest＝直近60人で消える）。
+     → 30分ごと（担当PCだけ）に、会話ごとの「どの商品の話か」と「お客さんの質問・こちらの答え」を app_kv.inquiry_log に溜める（消さない）。
+     商品はカタログ単位（どの明細＝どの作品かまでは分からない）。話題は語で分ける（AIは使わない＝¥0） */
+  const INQ_TOPICS = [
+    ['mod', '🛠 改造・CFW', /jailbr|modded|\bmod\b|\bcfw\b|hack|homebrew|desbloquead|unlocked/i],
+    ['box', '📦 箱・説明書', /\bbox|\bcase\b|caixa|manual|\bcib\b|complete|completo|insert|caja|hộp|sách|กล่อง|คู่มือ|盒|說明書/i],
+    ['lang', '🔤 言語', /english|ingl[eê]s|portugu|language|idioma|subtitle|legenda|japanese only|tiếng anh|ภาษา|英文|中文|語言/i],
+    ['region', '🌐 リージョン', /region|regi[aã]o|\bntsc|\bpal\b|bloqueio|play (it )?(on|in) (my|a|an|us|american|brazil)/i],
+    ['cond', '📷 状態・写真', /photo|picture|\bpics?\b|foto|image|imagem|condition|condi[cç][aã]o|scratch|risc|estado|ảnh|hình|รูป|สภาพ|照片|狀況/i],
+    ['work', '🔋 動作・電池', /\bwork|funciona|\btest|batter|bateria|\bsave\b|pilha|hoạt động|ใช้งาน|能玩|正常/i],
+    ['auth', '✅ 本物か', /original|authentic|genuine|fake|\breal\b|pirat|chính hãng|แท้|正版/i],
+    ['ship', '🚚 配送・税', /ship|deliver|tracking|rastre|envio|frete|entrega|arriv|chegar|customs|\btax|imposto|taxa|giao hàng|ส่ง|運送/i],
+    ['price', '💸 値引き', /discount|desconto|cheaper|lower price|negoti|giảm|ลด|便宜|折扣/i],
+    ['stock', '📋 在庫・他の商品', /available|in stock|dispon[ií]vel|still have|do you have|còn hàng|มีไหม|有貨/i],
+  ];
+  function inqTopicsOf(t) { const s = String(t || ''); return INQ_TOPICS.filter(x => x[2].test(s)).map(x => x[0]); }
+  // 一次返答・注文後のお礼など、こちらの決まり文句は「答え」に数えない
+  const INQ_AUTO_RE = /reply in order|check and reply|Responderemos|verificaremos|ตอบกลับ|trả lời (theo|sớm)|依序回覆|Thank you for your purchase|Obrigad[oa] pela (sua )?compra|Thank you for your inquiry\.?\s*$/i;
+  function inqNormTitle(t) {
+    return String(t || '').replace(/\[[^\]]*\]/g, ' ').replace(/\b(used|usado|variation|japan(ese)?( ver(sion)?)?|working|jp)\b/gi, ' ')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
+  }
+  async function inqLogTick(force) {
+    if (!force && !pcIsOwner()) return { skipped: true };   // 🖥 担当のPCだけ
+    if (!(settings.sbKey || settings.sbSecret)) return { skipped: true };
+    // 読めない時は書かない（空で上書きすると溜めた分が消える）
+    const r0 = await sbGetAll('app_kv', 'select=v&k=eq.inquiry_log');
+    const cur = ((r0 || [])[0] || {}).v || {};
+    const convs = cur.convs || {};
+    const last = cur.last || '2000-01-01T00:00:00Z';
+    const touched = new Set();
+    let maxSync = last;
+    const addRef = (cid, cc, buyer, t, title, src) => {
+      title = String(title || '').trim().slice(0, 160); if (!title) return;
+      const c = convs[cid] || (convs[cid] = { cc, buyer, refs: [], qs: [] });
+      if (!c.refs.some(x => x.title === title && Math.abs(Date.parse(x.t) - Date.parse(t)) < 6 * 3600e3)) { c.refs.push({ t, title, src }); touched.add(cid); }
+    };
+    // ① FAQ履歴の [Product] 行（新しく取り込まれた分だけ）
+    const faq = await sbGetAll('chat_messages', 'select=conversation_id,cc,buyer,text,msg_time,synced_at&text=ilike.*%5BProduct%5D*&synced_at=gt.' + encodeURIComponent(last) + '&order=synced_at.asc');
+    for (const m of faq || []) {
+      if (m.synced_at > maxSync) maxSync = m.synced_at;
+      const cid = m.conversation_id || (m.cc + ':' + m.buyer);
+      String(m.text || '').split('\n').forEach(ln => { const mm = ln.match(/\[Product\]\s*(.+)$/); if (mm) addRef(cid, m.cc, m.buyer, m.msg_time, mm[1], 'faq'); });
+    }
+    // ② 取り込みが読んだ「問い合わせ中の商品」カード（直近60人ぶんしか残らないので、ここで写し取る）
+    try {
+      const ki = await sbGetAll('app_kv', 'select=v&k=eq.chat_interest');
+      const by = ((((ki || [])[0] || {}).v) || {}).byBuyer || {};
+      Object.keys(by).forEach(b => {
+        const e = by[b] || {}, iq = e.inquiry; if (!iq || iq.kind !== 'product' || !iq.title) return;
+        const cc = ((String((e.profile || {}).shop || '').match(/\(([A-Z]{2})\)/) || [])[1]) || '';
+        if (!cc) return;   // 国が分からないものは会話に結べない
+        const at = Date.parse(e.at); if (!at) return;
+        addRef(cc + ':' + b, cc, b, new Date(at + 9 * 3600e3).toISOString(), iq.title, 'card');   // chat_messages.msg_time は日本時間をUTCとして入っているので合わせる
+      });
+    } catch (_) {}
+    // ③ 新しい発言があった会話も読み直す（会話の番号だけ・軽い）
+    //    初回は全部が新しい会話なので読まない（17,000行を読まない）。最新の時刻だけ控える
+    if (cur.last) {
+      const neu = await sbGetAll('chat_messages', 'select=conversation_id,synced_at&synced_at=gt.' + encodeURIComponent(last) + '&order=synced_at.asc');
+      for (const m of neu || []) { if (m.synced_at > maxSync) maxSync = m.synced_at; if (convs[m.conversation_id]) touched.add(m.conversation_id); }
+    } else {
+      const lt = await sbGetAll('chat_messages', 'select=synced_at&order=synced_at.desc&limit=1');
+      if (lt && lt[0] && lt[0].synced_at > maxSync) maxSync = lt[0].synced_at;
+    }
+    // ④ 触った会話を20件ずつ読み直して、質問と答えを作り直す
+    const ids = [...touched];
+    for (let i = 0; i < ids.length; i += 20) {
+      const part = ids.slice(i, i + 20);
+      const rows = await sbGetAll('chat_messages', 'select=conversation_id,direction,msg_type,text,msg_time&conversation_id=in.(' + part.map(x => '"' + String(x).replace(/"/g, '') + '"').join(',') + ')&order=msg_time.asc');
+      const byC = {}; (rows || []).forEach(x => (byC[x.conversation_id] = byC[x.conversation_id] || []).push(x));
+      for (const cid of part) {
+        const c = convs[cid]; const ms = byC[cid] || []; if (!c) continue;
+        c.refs.sort((a, b) => String(a.t).localeCompare(String(b.t)));
+        const refAt = t => { let k = 0; const tt = Date.parse(t) + 15 * 60000; c.refs.forEach((r, j) => { if (Date.parse(r.t) <= tt) k = j; }); return k; };
+        const qs = [];
+        ms.forEach((m, j) => {
+          let q = '';
+          if (m.direction === 'in' && m.msg_type === 'text') q = String(m.text || '').trim();
+          else if (m.direction === 'sys' && /^❓FAQ履歴/.test(m.text || '')) {   // FAQ履歴の中のお客さんの質問行
+            q = String(m.text).split('\n').filter(ln => ln.indexOf(c.buyer + ':') === 0 && !/\[Product\]|\[Chat AI Assistant\]/.test(ln)).map(ln => ln.slice(c.buyer.length + 1).trim()).join(' / ');
+          }
+          q = q.replace(/^\[\[q\]\][^\n]*\n/, '').replace(/\[(Image|Sticker|Video)\]\s*(\/\s*)?/gi, '').replace(/\s*Translated by Shopee[\s\S]*$/i, '').replace(/\s*(\d{1,2}:\d{2}\s*)?Safety tip[\s\S]*$/i, '').trim();   // 引用・画像の印・Shopee の訳注を落とす
+          if (!q || /^https?:\/\/\S+$/.test(q) || q.length < 3 || /^\[(Order|Product)\]/.test(q)) return;
+          // 商品を見た時（FAQ・カード）から2日以内の発言だけをその商品の質問にする（何か月も続く会話の後の話を混ぜない）
+          const tq = Date.parse(m.msg_time); const ri = refAt(m.msg_time); const rt = Date.parse((c.refs[ri] || {}).t);
+          if (!(tq >= rt - 15 * 60000 && tq <= rt + 2 * 86400e3)) return;
+          const tp = inqTopicsOf(q);
+          if (!tp.length && !/[?？]/.test(q)) return;   // あいさつ・お礼は質問に数えない
+          let a = '';
+          for (let k = j + 1; k < ms.length && !a; k++) { const o = ms[k]; if (Date.parse(o.msg_time) - Date.parse(m.msg_time) > 3 * 86400e3) break; if (o.direction === 'out' && o.msg_type === 'text' && !INQ_AUTO_RE.test(o.text || '')) a = String(o.text || '').trim(); }
+          qs.push({ t: m.msg_time, q: q.slice(0, 300), a: a.slice(0, 300), ti: ri, tp });
+        });
+        // 同じ質問の重複（FAQ と本文の二重）をまとめる
+        const seen = new Set(); c.qs = qs.filter(x => { const k = x.q.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+      }
+      if (i + 20 < ids.length) await new Promise(r => setTimeout(r, 1500));   // 一度に投げない（DBを落とさない）
+    }
+    const v = { convs, last: maxSync, at: new Date().toISOString(), n: Object.keys(convs).length };
+    await sbUpsert('app_kv', [{ k: 'inquiry_log', v, updated_at: v.at }]);
+    return { ok: true, touched: ids.length, convs: v.n };
+  }
+  window.__smdInqLogTick = inqLogTick;
+  async function renderInquiries(force) {
+    const body = document.getElementById('inq-body'); if (!body) return;
+    body.innerHTML = '<div class="smd-dim" style="padding:10px 4px"><span class="smd-spin"></span>問い合わせを読み込み中…</div>';
+    let v;
+    try { const r = await sbGetAll('app_kv', 'select=v&k=eq.inquiry_log'); v = ((r || [])[0] || {}).v; }
+    catch (e) { body.innerHTML = '<div style="color:#c0392b">⚠️ 問い合わせのログを読めませんでした：' + esc(e.message) + '</div>'; return; }
+    const head = '<div style="display:flex;align-items:center;gap:10px;margin:4px 0 8px"><b style="font-size:15px">❓ 商品ごとの問い合わせ</b>'
+      + '<button class="smd-btn" id="inq-run">🔄 今すぐ溜める</button><span class="smd-dim" style="font-size:12px">' + (v ? '最終 ' + esc(jstDateTime(v.at)) + '・会話 ' + v.n + '件' : 'まだ溜めていません') + '　※30分ごとに自動で溜まります（担当のPC）。商品はカタログ単位で、どの明細の話かまでは分かりません</span></div>';
+    const P = {};
+    Object.values((v && v.convs) || {}).forEach(c => (c.qs || []).forEach(q => {
+      const ref = c.refs[q.ti] || c.refs[0]; if (!ref) return;
+      const k = inqNormTitle(ref.title); const p = P[k] || (P[k] = { titles: {}, cc: new Set(), qs: [], tp: {} });
+      p.titles[ref.title] = (p.titles[ref.title] || 0) + 1; p.cc.add(c.cc);
+      p.qs.push(Object.assign({ cc: c.cc }, q)); (q.tp.length ? q.tp : ['other']).forEach(t => p.tp[t] = (p.tp[t] || 0) + 1);
+    }));
+    const rows = Object.values(P).sort((a, b) => b.qs.length - a.qs.length);
+    const tot = {}; rows.forEach(p => Object.keys(p.tp).forEach(t => tot[t] = (tot[t] || 0) + p.tp[t]));
+    const cols = INQ_TOPICS.filter(x => tot[x[0]]).concat(tot.other ? [['other', '💬 その他']] : []);
+    let h = head;
+    if (!rows.length) { body.innerHTML = h + '<div class="smd-dim">まだ商品つきの問い合わせがありません</div>'; }
+    else {
+      h += '<div style="overflow:auto"><table class="pf-table" style="font-size:12px"><thead><tr><th>商品（カタログ）</th><th>国</th><th>質問</th>'
+        + cols.map(x => '<th title="' + esc(x[1]) + '">' + esc(x[1]) + '<br><span class="smd-dim">' + tot[x[0]] + '</span></th>').join('') + '<th>最近の質問 → こちらの答え</th></tr></thead><tbody>';
+      rows.slice(0, 300).forEach(p => {
+        const title = Object.entries(p.titles).sort((a, b) => b[1] - a[1])[0][0];
+        const recent = p.qs.slice().sort((a, b) => String(b.t).localeCompare(String(a.t))).slice(0, 3)
+          .map(q => '<div style="margin:2px 0"><span class="smd-dim">' + esc(q.cc) + ' ' + esc(String(q.t).slice(5, 10)) + '</span> ' + esc(q.q.slice(0, 140)) + (q.a ? '<br><span style="color:#2e7d32">→ ' + esc(q.a.slice(0, 140)) + '</span>' : '<br><span class="smd-dim">→（答えの記録なし）</span>') + '</div>').join('');
+        h += '<tr><td style="max-width:280px">' + esc(title) + '</td><td>' + esc([...p.cc].join(' ')) + '</td><td style="text-align:right"><b>' + p.qs.length + '</b></td>'
+          + cols.map(x => '<td style="text-align:center">' + (p.tp[x[0]] ? '<b>' + p.tp[x[0]] + '</b>' : '<span class="smd-dim">·</span>') + '</td>').join('')
+          + '<td style="min-width:320px">' + recent + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+      body.innerHTML = h;
+    }
+    const b = body.querySelector('#inq-run');
+    if (b) b.addEventListener('click', async () => {
+      b.disabled = true; b.textContent = '⏳ 溜めています…';
+      try { const r = await inqLogTick(true); b.textContent = '✅ ' + (r.touched || 0) + '会話を更新'; setTimeout(() => renderInquiries(), 800); }
+      catch (e) { b.disabled = false; b.textContent = '⚠️ 失敗：' + String(e.message).slice(0, 60); }
+    });
+  }
   async function renderReturns(force) {
     const body = document.getElementById('ret-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
@@ -21458,6 +21605,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-14', items: [
+      '❓ <b>商品ごとの問い合わせログを溜め始めました</b>（本人「こういう今までの質問を溜めておきたい。質問されないように画像で説明するようにしたいので、ログを溜めていきたい」「商品ごとに」）：↩️返品・キャンセルの画面の下に「❓ 商品ごとの問い合わせ」の表を足しました。会話の記録にある FAQ履歴（[Product] 商品名）と、チャット取り込みが読む「問い合わせ中の商品」カードから、どの商品の話かを結び、お客さんの質問とこちらの答えを30分ごとに溜めます（消しません）。質問は 改造・箱説明書・言語・リージョン・状態写真・動作・本物か・配送・値引き に語で分けて数えます（AIは使わない）。商品はカタログ単位で、どの明細の話かまでは分かりません',
       '🔢 <b>出したばかりのトレカの明細にも、すぐ型番が入るようにしました</b>（本人「また型番ついてないぜ？何回やるのこれ」）：出品データの同期を待っていたので、出したその日は型番が空でした。出品ログの行（🤖の記録）からも台帳の型番に入れます',
       '🔢 <b>トレカ・小物の明細の型番（カードの番号）を、台帳の「型番」に入れるようにしました</b>（本人「型番あるやつは、型番欲しいんだけど」「なんでいつも、JAN 型番のとこに入れてくれないの？」）：明細名の末尾の番号（OP17-022・285・129/103 等）を入れます。入っている型番は触りません。今ある分はまとめて入れ、これから出す分も2時間ごとに入ります',
       '🔎 <b>メザスタのタグ・フレンダのピックの写真が集まらなかったのを直しました</b>：メルカリの題名に番号を書かない出品がほとんどで、メザスタは候補62件が全部「見つからず」でした。名前とグレードが題名にあれば写真の候補にします（違う物は後の写真判定で落とします）',
@@ -50855,6 +51003,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   止まったまま放置されているものを拾って続きから走らせる（10秒後＝他の初期化とぶつけない）。
     setTimeout(() => { bkResumeStalled().catch(() => {}); }, 10000);
     loadJpHolidays();           // 祝日（内閣府CSV由来）。30日に1回だけ取り直す
+    // ❓ 商品ごとの問い合わせを溜める（担当のPCだけ・30分ごと・2026-10-14）
+    setTimeout(() => { inqLogTick().catch(() => {}); }, 120000); setInterval(() => { inqLogTick().catch(() => {}); }, 30 * 60000);
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
