@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-0250';
+var SRC_VER = '20261015-0330';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9738,6 +9738,10 @@ function tcgTick(manual) {
        判定12回以上で0明細のシリーズは今日はもう回さない（自動ブレーキ）。全部止まったらこの台は休み。翌日に戻る */
     if (!st.yieldD || st.yieldD.d !== todayJ) st.yieldD = { d: todayJ, h: {} };
     var _brk = function (h) { var y = st.yieldD.h[h]; return !!(y && y.j >= 12 && !y.a); };
+    /* ★2026-10-15 03:2x 「写真OKで未出品の候補 68 件」と数えても、候補づくり（名前なし・長すぎ・帯）で全部落ちて「0枚を試して」が1時間半続いた（3台目 yugioh）。
+       同じシリーズで【2回続けて0枚】なら今日はそのシリーズを飛ばす（成功したら戻す） */
+    if (!st.zeroD || st.zeroD.d !== todayJ) st.zeroD = { d: todayJ, h: {} };
+    var _zero = function (h) { return (Number((st.zeroD.h || {})[h]) || 0) >= 2; };
     /* ★2026-10-15 本人「少しでも無料で多く、そして早く出品をしたい」：Claude だけモードでは、写真OK（boshu_auto_judged_manual の ok）でまだ出していない候補が
        1つも無いシリーズを選ぶと、1回（最長5分）が「0枚を試して」で空回りする（10/15 00:33 実測：3台目が遊戯王104件を抱えたまま yugioh_rush／zx／mtg で空回り）。
        選ぶ前に【OK写真あり ＆ 台帳に無い】候補の数をシリーズごとに数え、0 のシリーズは飛ばす。読む物は tcg_pre と判定の控え（どちらもこの回で後で読む＝通信は増えない）＋台帳（小） */
@@ -9755,10 +9759,10 @@ function tcgTick(manual) {
       /* ★2026-10-15 01:4x 順番どおりだと、ポケカ約149件を抱えたまま候補1件のシリーズに1回（最長5分）を使う。
          【写真OKで未出品の候補が一番多いシリーズ】から出す（同数なら順番どおり）。少ないシリーズは多い方が減ってから回る＝全部いずれ出る */
       var _best = '', _bestN = 0;
-      for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h)) continue; var _n = Number(_okHw[_h]) || 0; if (!_n) { _noOk.push(_h); continue; } if (_n > _bestN) { _best = _h; _bestN = _n; } }
+      for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h) || _zero(_h)) continue; var _n = Number(_okHw[_h]) || 0; if (!_n) { _noOk.push(_h); continue; } if (_n > _bestN) { _best = _h; _bestN = _n; } }
       if (_best) { hw = _best; st.cursor = cur + 1; }
     } else {
-      for (var _k2 = 0; _k2 < hws.length; _k2++) { var _h2 = hws[(cur + _k2) % hws.length]; if (!_brk(_h2)) { hw = _h2; st.cursor = cur + _k2 + 1; break; } }
+      for (var _k2 = 0; _k2 < hws.length; _k2++) { var _h2 = hws[(cur + _k2) % hws.length]; if (!_brk(_h2) && !_zero(_h2)) { hw = _h2; st.cursor = cur + _k2 + 1; break; } }
     }
     if (!hw && _okHw && _noOk.length) return finish_('🃏 受け持ちのシリーズに「写真OKでまだ出していない」候補が無い（' + _noOk.join('・') + '）＝Claude の判定待ち');
     if (hw && _okHw) baLog_(st, hw + '：写真OKで未出品の候補 ' + _okHw[hw] + ' 件（飛ばしたシリーズ ' + (_noOk.length ? _noOk.join('・') : 'なし') + '）');
@@ -9802,7 +9806,7 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
     st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
-    if (!cands.list.length) return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）');
+    if (!cands.list.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）'); }
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
     var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
     var _jN0 = Object.keys(judged).length;   /* ★2026-10-12 判定が増えた時だけ書く（前は毎回丸ごと書き戻していた＝Supabase 総点検） */
@@ -9851,7 +9855,7 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSetMerged_('tcg_names_ai', ai.cache, baKvFreshMany_(['tcg_names_ai']), 0); } catch (eN2) {} ai.dirty = 0; }   /* ★2026-10-12 複数の台で回すので読み直して足す
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
-    if (!picks.length) { try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
+    if (!picks.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
     var _ccOrd = ccs.slice(); var _ccFrom = String(st.ccNext || ''); var _ccI = _ccOrd.indexOf(_ccFrom); if (_ccI > 0) _ccOrd = _ccOrd.slice(_ccI).concat(_ccOrd.slice(0, _ccI)); st.ccNext = '';
     for (var ci = 0; ci < _ccOrd.length; ci++) {
@@ -9861,7 +9865,7 @@ function tcgTick(manual) {
         out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
       } catch (eC) { out.ccs[cc] = { error: String(eC).slice(0, 160) }; baLog_(st, cc + '：' + String(eC).slice(0, 160)); }
     }
-    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length;
+    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0;
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
     /* ★2026-10-12 型番は product_ids（約4.5MB）に書かない＝30分ごとに大物を読み書きすると DB が落ちる（10/10・10/12 10:31）。出品ログは SKU からカード番号を読んで出す */
     if (out.added > 0) {
