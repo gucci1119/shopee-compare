@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-0145';
+var SRC_VER = '20261015-0250';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9623,9 +9623,12 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   var mImgs = (pre && Array.isArray(pre.imgs)) ? pre.imgs : [];
   /* ★2026-10-12 ゲームの boshu_auto_prerej（7716行）と同じ：AI が全部 NG にした写真を控えに残し、ポータルはそれを二度と選ばずに集め直す（3回ダメなら3日休む） */
   var rejSet = {}; ((pre && pre.rej && pre.rej.imgs) || []).forEach(function (u) { rejSet[u] = 1; });
-  var mNg = [];
+  var mNg = [], mMulti = null;
+  /* ★2026-10-15 本人「1枚きり抜けたりしない？」：同じカードN枚の写真から切り抜いた単品（app_kv.tcg_crop[key]・merge.py が作る）を先に見る＝これが ok なら単品 x1 として使える */
+  var _crops = ((baKv_('tcg_crop') || {})[c.key]) || [], _single = null;
+  for (var ci0 = 0; ci0 < _crops.length && !_single; ci0++) { var cu0 = String((_crops[ci0] || {}).img || ''); if (!cu0) continue; if (String(baManualOf_(cu0, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue; if (!baUsedOk_(mUsed, cu0, c.key, hw)) continue; _single = { img: cu0, src: '', srcTitle: 'crop', hits: mImgs.length, q: q, from: 'mercari-crop' }; }
   for (var mi = 0; mi < mImgs.length && mTried < 3; mi++) {
-    var mu = baJpgUrl_(String(mImgs[mi].img || '').replace(/\?.*$/, '')); if (!mu || rejSet[mu]) continue;   /* 判定する写真と上げる写真を同じ jpg に */
+    var mu = baJpgUrl_(String(mImgs[mi].img || '').replace(/\?.*$/, '')); if (!mu) continue; if (rejSet[mu] && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 判定する写真と上げる写真を同じ jpg に。★2026-10-15 古いNG（rej）でも Claude が ok にした写真は使う */
     if (!baUsedOk_(mUsed, mu, c.key, hw)) continue;
     /* ★2026-10-14 本人「まだ新品のこの画像出してるよね？」「その実物のやつを出してほしいんだよ、中古の」：メルカリShops（業者）の写真はカードの画像データ（スキャン・公式画像）がほとんど。
        Claude の判定は Shops の写真を notphoto で落としていたのに、Claude がまだ見ていない Shops の写真を GAS の AI が ok:card で通していた（ヴァイス チルノ THP/S130-091S・7か国）。
@@ -9633,12 +9636,20 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
     if (/mercari-shops/.test(mu) && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;
     /* ★2026-10-14 本人「一旦それで行ってみよう」（写真判定・英語名づけを Claude に寄せて ¥0）：cfg.tcg.claudeOnly のときは Claude が ok にした写真だけ（AI に聞かない） */
     if (cfg && cfg.tcg && cfg.tcg.claudeOnly === true && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 落としたことにはしない＝Claude の判定に回る */
+    /* ★2026-10-15 本人「1枚の写真がないのなら仕方ないけど、その枚数分の金額にして」「そして、何枚と書いておいて」：
+       同じカードが複数枚並んだ写真（Claude の判定 ok:claude:xN）は【単品の写真が無い時だけ】使い、N枚セットとして出す（名前に xN・仕入 ×N・SKU に _XN）。単品が後で見つかれば単品が先 */
+    var _mvC = /^ok:claude:x(\d+)$/.exec(String(baManualOf_(mu, { key: c.key, hwKey: '' }) || ''));
+    if (_mvC) { if (!mMulti) mMulti = { mu: mu, mi: mi, copies: Number(_mvC[1]) }; continue; }
+    if (_single) continue;   /* 切り抜きの単品がある＝元の写真は N枚セット用にだけ使う */
     mTried++;
     var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
     if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), hits: mImgs.length, q: q, from: 'mercari' };
     if (mj.kind === 'budget' || mj.kind === 'error' || mj.kind === 'aidown') return { stop: mj.kind };
     mNg.push(mu);
   }
+  var _multiOut = (mMulti && mMulti.copies >= 2) ? { img: mMulti.mu, copies: mMulti.copies, src: mImgs[mMulti.mi].src || '', srcTitle: String(mImgs[mMulti.mi].name || '').slice(0, 80) } : null;
+  if (_single) { if (_multiOut) _single.multi = _multiOut; return _single; }   /* 単品（切り抜き）＋ N枚セット（元写真）の両方 */
+  if (_multiOut) return { img: _multiOut.img, copies: _multiOut.copies, src: _multiOut.src, srcTitle: _multiOut.srcTitle, hits: mImgs.length, q: q, from: 'mercari' };
   if (mNg.length && pre) {
     var r0 = pre.rej || {}; var allNg = (r0.imgs || []).concat(mNg).filter(function (u, k, arr) { return arr.indexOf(u) === k; }).slice(-30);
     pre.rej = { imgs: allNg, n: (Number(r0.n) || 0) + 1, at: new Date().toISOString() }; BA_PRE_DIRTY_TCG = true;
@@ -9824,6 +9835,15 @@ function tcgTick(manual) {
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return baJpgUrl_(String(m.img || '').replace(/\?.*$/, '')) !== ph.img; }); tPre[c.key]._dirty = 1; BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
       usedT[ph.img] = baUsedTag_(c.key, hw); usedDirty = true;
+      /* ★2026-10-15 同じカードN枚の写真で出す時＝N枚セット：名前に「 xN」（30字に収める）・仕入 ×N（売値は仕入から表で出る＝枚数分）・SKU に _XN（単品と別の明細） */
+      var _cpN = Number(ph.copies) || 0;
+      if (ph.multi && Number(ph.multi.copies) >= 2) {   /* 切り抜きの単品が本命・元の写真で N枚セットも足す（同じ回・別の明細・台帳の鍵は key~xN） */
+        var _mN = Number(ph.multi.copies), _enS = String(c.en || ''), _tagS = ' x' + _mN; if ((_enS + _tagS).length > 30) _enS = _enS.slice(0, 30 - _tagS.length).trim();
+        var _imgS = ph.multi.img, _idS = null; try { _idS = uploadImageUrl_(_imgS); } catch (eUp2) { _idS = null; }
+        if (_idS) { picks.push({ mpn: ((c.setCode ? String(c.setCode).toUpperCase() + ' ' : '') + String(c.num || '')).trim(), key: c.key + '~x' + _mN, ja: c.ja, en: _enS + _tagS, jan: '', img: _imgS, imageId: _idS, hits: ph.hits || 0, cost: Math.round((Number(c.cost) || 0) * _mN), need: c.need, src: ph.multi.src, srcTitle: ph.multi.srcTitle, q: ph.q, from: 'mercari', stock: 1, sg: 1, sku: (c.sku ? String(c.sku) + '_X' + _mN : c.sku), setCode: c.setCode }); baLog_(st, hw + '：' + _enS + ' は単品（切り抜き）に加えて同じカード ' + _mN + '枚のセットも出す（仕入 ×' + _mN + '）'); }
+        c = Object.assign({}, c, { en: ((String(c.en || '') + ' x1').length > 30 ? String(c.en || '').slice(0, 27).trim() : String(c.en || '')) + ' x1' });   /* 本人「何枚と書いておいて」＝単品も x1 と書く */
+      }
+      if (_cpN >= 2) { var _enB = String(c.en || ''), _tag = ' x' + _cpN; if ((_enB + _tag).length > 30) _enB = _enB.slice(0, 30 - _tag.length).trim(); c = Object.assign({}, c, { en: _enB + _tag, cost: Math.round((Number(c.cost) || 0) * _cpN), sku: (c.sku ? String(c.sku) + '_X' + _cpN : c.sku) }); baLog_(st, hw + '：' + _enB + ' は単品の写真が無いので同じカード ' + _cpN + '枚の写真＝' + _cpN + '枚セット（仕入 ×' + _cpN + '）で出す'); }
       picks.push({ mpn: ((c.setCode ? String(c.setCode).toUpperCase() + ' ' : '') + String(c.num || '')).trim(), key: c.key, ja: c.ja, en: c.en, jan: '', img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
