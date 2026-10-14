@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261014-1810';
+var SRC_VER = '20261014-1840';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9617,7 +9617,9 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
     /* ★2026-10-14 本人「まだ新品のこの画像出してるよね？」「その実物のやつを出してほしいんだよ、中古の」：メルカリShops（業者）の写真はカードの画像データ（スキャン・公式画像）がほとんど。
        Claude の判定は Shops の写真を notphoto で落としていたのに、Claude がまだ見ていない Shops の写真を GAS の AI が ok:card で通していた（ヴァイス チルノ THP/S130-091S・7か国）。
        → Shops の写真は Claude が見て ok にした物だけ使う（AI には聞かない＝費用も減る） */
-    if (/mercari-shops/.test(mu) && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 落としたことにはしない＝Claude の判定に回る */
+    if (/mercari-shops/.test(mu) && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;
+    /* ★2026-10-14 本人「一旦それで行ってみよう」（写真判定・英語名づけを Claude に寄せて ¥0）：cfg.tcg.claudeOnly のときは Claude が ok にした写真だけ（AI に聞かない） */
+    if (cfg && cfg.tcg && cfg.tcg.claudeOnly === true && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 落としたことにはしない＝Claude の判定に回る */
     mTried++;
     var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
     if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), hits: mImgs.length, q: q, from: 'mercari' };
@@ -9628,6 +9630,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
     var r0 = pre.rej || {}; var allNg = (r0.imgs || []).concat(mNg).filter(function (u, k, arr) { return arr.indexOf(u) === k; }).slice(-30);
     pre.rej = { imgs: allNg, n: (Number(r0.n) || 0) + 1, at: new Date().toISOString() }; BA_PRE_DIRTY_TCG = true;
   }
+  if (cfg && cfg.tcg && cfg.tcg.claudeOnly === true) return { nosrc: 1 };   /* ★2026-10-14 Claude だけモード：Claude が見るのはメルカリの控え（tcg_pre）だけ＝Yahoo!フリマは探しても使えない（枠のむだ）。試した回数にも数えない */
   if (yahooOk === false) return { nosrc: 1 };   /* Yahoo!フリマは弾かれて休み中＝メルカリの控えが無いカードは今回は飛ばす（試した回数に数えない） */
   /* ★2026-10-12 ゲーム（7744行）と同じく Yahoo!フリマは1時間 BA_YAHOO_PER_HOUR 回まで・間を1.2〜2.7秒あける（上限が無く、120秒の間に次々叩いて弾かれていた） */
   var _yhK = new Date().toISOString().slice(0, 13); if (!st.yh || st.yh.h !== _yhK) st.yh = { h: _yhK, n: 0 };
@@ -9648,6 +9651,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   for (var i = 0; i < hits.length && tried < 3; i++) {
     var u = String(hits[i].img || '').replace(/\?.*$/, ''); if (!u) continue;
     if (!baUsedOk_(used, u, c.key, hw)) continue;
+    if (cfg && cfg.tcg && cfg.tcg.claudeOnly === true && String(baManualOf_(u, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* ★2026-10-14 Claude だけモード */
     tried++;
     var j = baJudge_(u, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
     if (j.ok) return { img: u, src: hits[i].url || (hits[i].id ? ('https://auctions.yahoo.co.jp/jp/auction/' + hits[i].id) : ''), srcTitle: String(hits[i].t || '').slice(0, 80), hits: hits.length, q: q, from: y.src || 'paypay' };
@@ -9718,6 +9722,7 @@ function tcgTick(manual) {
     var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar' || hw === 'frienda') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
     var ctx = baLoadCtx_(cfg, hw, ccs, { tcg: 1 });
+    var CLAUDE_ONLY = tc.claudeOnly === true; if (CLAUDE_ONLY) { ai.budget = 0; ai.setBudget = 0; }   /* ★2026-10-14 Claude だけモード＝英語名・弾記号の AI も呼ばない（tcg_names_ai と辞書にある名前だけ使う） */
     var _nameBudget = ai.budget; ai.budget = 0; ai.allowNoName = true;   /* ★2026-10-12 候補作りでは英語名のAIを呼ばない（写真が通ったカードだけ後で聞く） */
     var cands = tcgCandidates_(hw, ccs, ctx.listedByCc, ctx.ledger, cfg, names, ai);
     /* ★2026-10-12 本人「今までのも入れてや」：出品ログの仕入れ目安（llog_cost_<hw>）と型番（product_ids の mpn）を、このシリーズで今までに入れた全部（台帳 boshu_auto_done_<hw>）に埋める。
@@ -9774,8 +9779,9 @@ function tcgTick(manual) {
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
       if (c.noname) {   /* 写真が通ったので、ここで初めて英語名を聞く（1枚1回・控え tcg_names_ai に残る） */
-        if (!(_nameBudget > 0)) { baLog_(st, '英語名のAIがこの回の枠を使い切った→残りは次の回'); break; }
-        ai.budget = 1; var _enN = tcgEnName_(hw, c._pr, names, ai); _nameBudget -= (1 - ai.budget); ai.budget = 0;
+        if (!(_nameBudget > 0) && !CLAUDE_ONLY) { baLog_(st, '英語名のAIがこの回の枠を使い切った→残りは次の回'); break; }
+        ai.budget = CLAUDE_ONLY ? 0 : 1; var _enN = tcgEnName_(hw, c._pr, names, ai); _nameBudget -= ((CLAUDE_ONLY ? 0 : 1) - ai.budget); ai.budget = 0;
+        if (!_enN && CLAUDE_ONLY) { st.tried[c.key] = tr; continue; }   /* 名前は Claude が付けるまで待つ（noname の印を付けない＝付いたら出る） */
         var _fc = _enN ? tcgFinishCand_(hw, c._r, c._pr, _enN, c.cost, ccs, ctx.listedByCc, ctx.ledger, ai, _seenRun, {}) : null;
         if (!_fc) { baSkipRec_(st, hw, '', c, _enN ? 'listed_or_long' : 'noname'); continue; }
         c = _fc;
