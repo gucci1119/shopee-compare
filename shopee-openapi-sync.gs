@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-1200';
+var SRC_VER = '20261015-1300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8630,7 +8630,10 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   if (!todo.length) { res.note = '対象なし'; return res; }
   // ★関連するバリエカタログ（Final Fantasy Series 等）があればそちらへ、無ければ機種のカタログ群へ（本人 2026-09-13「関連するバリエーションのカタログに追加していって欲しい」）
   var groups = {}, order = [];
-  todo.forEach(function (p) { var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+  todo.forEach(function (p) {
+    /* ★2026-10-15 トレカの大シリーズ（p.ser）：家族の中で名前に「 <SER> Series」を持つカタログだけを入れ先にする。無ければ下で作る */
+    if (p.ser) { var _tag = ' ' + p.ser + ' Series', _tk = 'T:' + p.ser; if (!groups[_tk]) { groups[_tk] = { rows: famRows.filter(function (r) { return String(r.name || '').indexOf(_tag) >= 0; }), todo: [], series: '', ser: p.ser }; order.push(_tk); } groups[_tk].todo.push(p); return; }
+    var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
   /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
   /* ★2026-09-23 作りすぎない安全弁。今日は1日で14件（うち7件は公開まで）作ってしまい、写真の取り違えが広がった。
      1回の巡回で作るのは1件・1日 famPerDay（既定6）件まで。数は st に日付つきで持つ（推定ではなく実績で止める）。 */
@@ -8648,7 +8651,15 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
     if (made) { st.famMade.n++; BA_FAM_TICK++; }
     if (made) { famRows = [made]; order.forEach(function (gk) { if (gk === 'F') groups[gk].rows = famRows; }); }
   }
-  order.forEach(function (gk) { var g = groups[gk]; var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
+  /* ★2026-10-15 大シリーズのカタログが無ければ作る（作る数の安全弁は家族と同じ）。作れなかった群はこの回は入れない＝台帳に印を付けず次の回へ */
+  order.forEach(function (gk) { var g = groups[gk]; if (!g.ser || g.rows.length) return;
+    if (cfg.autoFamily === false) return;
+    if (st.famMade.n >= _fmCap || BA_FAM_TICK >= _fmTickMax) { baLog_(st, cc + '：' + hw + ' ' + g.ser + ' シリーズのカタログは' + (BA_FAM_TICK >= _fmTickMax ? 'この回はもう作りません' : '今日はもう作りません') + '（' + g.todo.length + '件は次の回）'); res.famDeferred = true; return; }
+    var _sn = tcgSeriesFamName_(hw, cc, g.ser); if (!_sn) { baLog_(st, cc + '：' + g.ser + ' シリーズの名前が作れないので家族のカタログに入れます'); g.rows = famRows; return; }
+    var madeS = baEnsureFam_(cfg, hw, cc, allRows, _sn, st, allRowsAll);
+    if (madeS) { st.famMade.n++; BA_FAM_TICK++; g.rows = [madeS]; baLog_(st, cc + '：' + g.ser + ' シリーズのカタログを作った「' + String(madeS.name || '').slice(0, 60) + '」'); }
+  });
+  order.forEach(function (gk) { var g = groups[gk]; if (g.ser && !g.rows.length) { res.note = (res.note ? res.note + '／' : '') + g.ser + ' シリーズのカタログ待ち'; return; } var r2 = baAddBatch_(cfg, cc, hw, fam, g.rows, g.todo, listedSet, ledger, st, g.series); res.added += r2.added || 0; res.skipped += r2.skipped || 0; if (r2.shop_id) res.shop_id = r2.shop_id; if (r2.note) res.note = (res.note ? res.note + '／' : '') + (g.series ? '[' + g.series + '] ' : '') + r2.note; });
   if (res.famDeferred && res.note) res.note = res.note.replace(/カタログ群なし/g, 'カタログ待ち（この回は作らない）');
   return res;
 }
@@ -9424,6 +9435,16 @@ function tcgLocalFamName_(hw, cc) {
   if (!L) return '';
   return L[0] + ' ' + L[1][kind] + ' ' + en + ' ' + L[2];
 }
+/* ★2026-10-15 本人「シリーズごとのカタログに仕分け」「大シリーズで。細かくするかは反応を見て」：弾記号の頭（SV9→SV・M6A→M・S12a→S・SM12→SM）を大シリーズとし、
+   cfg.tcg.seriesSplit（例 ['pokeca']）に入っている区分だけ、入れ先を「<英名> <SER> Series Single Card」のカタログに分ける。既存カタログは触らない（いいね・sold） */
+function tcgSeriesOf_(setCode) { var m = /^([A-Za-z]{1,3})/.exec(String(setCode || '').trim()); return m ? m[1].toUpperCase() : ''; }
+function tcgSeriesFamName_(hw, cc, ser) {
+  var en0 = TCG_LOC_EN[hw]; if (!en0 || !ser) return '';
+  var en1 = /Single Card/.test(en0) ? en0.replace(/Single Card/, ser + ' Series Single Card') : (en0 + ' ' + ser + ' Series');
+  TCG_LOC_EN[hw] = en1; var nm = '';
+  try { nm = tcgLocalFamName_(hw, cc); } finally { TCG_LOC_EN[hw] = en0; }
+  return (nm && nm.indexOf(' ' + ser + ' Series') >= 0) ? nm : '';   /* TW の文字数詰めで札が落ちたら分けない */
+}
 /* 出品の題名でカードのシングルではない物（BOX・パック・まとめ売り・鑑定品・デッキ・オリパ・サプライ） */
 var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ込み|綴じ込み|袋入り|ブリスター|まとめ|セット|psa|bgs|ace\s*\d|鑑定|デッキ|プロキシ|オリパ|スリーブ|プレイマット|ファイル|ケース|プロモカード付|シュリンク|カートン|\d+\s*枚\s*(セット|まとめ)|大量|引退/i;
 /* ★2026-10-12 本人「モンコレってフィギュアでしょ？」「妖怪メダルとメザスタタグ これはトレカじゃないね」：小物はカード1枚の判定にかけると kind≠card で全部落ちていた（妖怪 5枚試して0明細＝AI料金だけ）。
@@ -9870,6 +9891,8 @@ function tcgTick(manual) {
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
     if (!picks.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
+    /* ★2026-10-15 大シリーズで入れ先を分ける（cfg.tcg.seriesSplit に入っている区分だけ・弾記号の頭） */
+    if (Array.isArray(tc.seriesSplit) && tc.seriesSplit.indexOf(hw) >= 0) picks.forEach(function (p) { p.ser = tcgSeriesOf_(p.setCode); });
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
     var _ccOrd = ccs.slice(); var _ccFrom = String(st.ccNext || ''); var _ccI = _ccOrd.indexOf(_ccFrom); if (_ccI > 0) _ccOrd = _ccOrd.slice(_ccI).concat(_ccOrd.slice(0, _ccI)); st.ccNext = '';
     for (var ci = 0; ci < _ccOrd.length; ci++) {
