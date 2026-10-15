@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-0350';
+var SRC_VER = '20261015-1200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9718,7 +9718,7 @@ function tcgTick(manual) {
     } else if (rid0 !== String(tc0.runner || 'child2')) { try { lock.releaseLock(); } catch (eL3) {} return { ok: false, skipped: 'not_runner', runner: rid0 }; }
   }
   var SK = (RUN && rid0 !== String(tc0.runner || '')) ? 'tcg_auto_status_' + rid0 : 'tcg_auto_status';
-  baKvPrefetch_([BA_CFG, SK, 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre']);
+  baKvPrefetch_([BA_CFG, SK, 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre', 'tcg_names_ai', 'tcg_sets', 'tcg_crop', 'limited_audit', 'boshu_shop_full', 'shop_item_limit', 'boshu_fam_made']);   /* ★2026-10-15 小さい鍵も1回でまとめ読み（4台目が1回に app_kv を約80回読んでいた＝接続枠） */
   var st = baKv_(SK) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || []; st.runner = rid0;
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
   var finish_ = function (msg) { try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
@@ -9757,12 +9757,15 @@ function tcgTick(manual) {
        1つも無いシリーズを選ぶと、1回（最長5分）が「0枚を試して」で空回りする（10/15 00:33 実測：3台目が遊戯王104件を抱えたまま yugioh_rush／zx／mtg で空回り）。
        選ぶ前に【OK写真あり ＆ 台帳に無い】候補の数をシリーズごとに数え、0 のシリーズは飛ばす。読む物は tcg_pre と判定の控え（どちらもこの回で後で読む＝通信は増えない）＋台帳（小） */
     var _okHw = null;
-    if (tc.claudeOnly === true) {
+    /* ★2026-10-15 11:5x 接続枠：OK候補の数え（台帳を最大8本読む）は20分に1回。間は前回の数を使い、出した分だけ減らす */
+    if (tc.claudeOnly === true && st.okHw && st.okHwAt && Date.now() - st.okHwAt < 20 * 60000) { _okHw = st.okHw; }
+    else if (tc.claudeOnly === true) {
       try {
         var _tp0 = baKv_('tcg_pre') || {}; baManualOf_('', { key: '_' }); var _mn0 = BA_MANUAL || {}, _okKeys = {};
         Object.keys(_mn0).forEach(function (k) { if (String(_mn0[k]).indexOf('ok') !== 0) return; var ck = k.split('||')[1]; if (!ck || !_tp0[ck]) return; var h0 = (_tp0[ck] && _tp0[ck].hw) || ck.split(':')[0]; (_okKeys[h0] = _okKeys[h0] || {})[ck] = 1; });
         _okHw = {};
         hws.forEach(function (h) { var ks = Object.keys(_okKeys[h] || {}); if (!ks.length) { _okHw[h] = 0; return; } var dn = baKv_('boshu_auto_done_' + h) || {}; _okHw[h] = ks.filter(function (k) { return !dn[k]; }).length; });
+        st.okHw = _okHw; st.okHwAt = Date.now();
       } catch (eOk) { _okHw = null; }
     }
     var cur = Number(st.cursor) || 0, hw = '', _noOk = [];
@@ -9876,7 +9879,7 @@ function tcgTick(manual) {
         out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
       } catch (eC) { out.ccs[cc] = { error: String(eC).slice(0, 160) }; baLog_(st, cc + '：' + String(eC).slice(0, 160)); }
     }
-    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0;
+    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0; if (st.okHw && st.okHw[hw] != null) st.okHw[hw] = Math.max(0, Number(st.okHw[hw]) - picks.length);
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
     /* ★2026-10-12 型番は product_ids（約4.5MB）に書かない＝30分ごとに大物を読み書きすると DB が落ちる（10/10・10/12 10:31）。出品ログは SKU からカード番号を読んで出す */
     if (out.added > 0) {
