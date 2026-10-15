@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-2255';
+var SRC_VER = '20261015-2300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -689,6 +689,18 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★モデル(明細)読み：get_model_list（ブリッジproductRead代替）。params: shop_id, item_id。読み取り専用なのでtoken不要。
+    /* ★2026-10-15 本人「SLS送料のこれ合ってる？」：注文1件の入金明細（order_income）をそのまま返す（送料・値引き・手数料の内訳を実物で確かめる用。urlfetch 1回） */
+    if (p.action === 'escrow_raw') {
+      var ercb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var erout;
+      try {
+        var erwt = P_().getProperty('WRITE_TOKEN'); if (!erwt || p.token !== erwt) throw new Error('WRITE_TOKEN不正');
+        var ershop = parseInt(p.shop_id, 10); if (!getToken_(ershop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var erj = callShop_(ershop, '/api/v2/payment/get_escrow_detail', { order_sn: String(p.sn || '') }, 'get');
+        erout = { ok: true, income: (erj.response || {}).order_income || null, err: erj.error || '' };
+      } catch (ee) { erout = { ok: false, error: String((ee && ee.message) || ee) }; }
+      return ContentService.createTextOutput(ercb + '(' + JSON.stringify(erout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_models') {
       var gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var gout;
