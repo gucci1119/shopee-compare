@@ -26,7 +26,13 @@ S={ 'pokeca':('Pokemon Card Game','Single Card  /  Japanese',(255,203,5),(60,90,
     'mezastar':('Pokemon Mezastar Tag','Single Tag  /  Japanese',(60,120,220),(250,200,60)),
     'unionarena':('UNION ARENA','Single Card  /  Japanese',(250,250,250),(230,60,60)),
     'gamba':('Kamen Rider Ganbarizing','Single Card  /  Japanese',(30,30,30),(220,40,40)),
-    'gambale':('Kamen Rider Ganba Legends','Single Card  /  Japanese',(20,40,90),(240,200,40)) }
+    'gambale':('Kamen Rider Ganba Legends','Single Card  /  Japanese',(20,40,90),(240,200,40)),
+    'dbs':('Dragon Ball Super Card Game','Single Card  /  Japanese',(250,140,30),(40,80,200)),
+    'gundam':('Gundam Card Game','Single Card  /  Japanese',(240,240,245),(40,60,160)),
+    'fftcg':('Final Fantasy TCG','Single Card  /  Japanese',(30,40,70),(200,180,120)),
+    'fecipher':('Fire Emblem Cipher','Single Card  /  Japanese',(60,80,170),(230,70,60)),
+    'smt':('Shin Megami Tensei TCG','Single Card  /  Japanese',(40,40,50),(200,60,80)),
+    'goods_amiibo':('Nintendo amiibo','Single Figure  /  Japanese',(230,40,40),(250,250,250)) }
 def rr(d,box,r,fill,outline=INK,w=5): d.rounded_rectangle(box,radius=r,fill=fill,outline=outline,width=w)
 def card(d,cx,cy,w,h,c1,c2,txt):
     x0,y0,x1,y1=cx-w//2,cy-h//2,cx+w//2,cy+h//2
