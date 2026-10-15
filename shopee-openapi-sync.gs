@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-2045';
+var SRC_VER = '20261015-2255';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8633,7 +8633,9 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
   todo.forEach(function (p) {
     /* ★2026-10-15 トレカの大シリーズ（p.ser）：家族の中で名前に「 <SER> Series」を持つカタログだけを入れ先にする。無ければ下で作る */
     if (p.ser) { var _tag = ' ' + p.ser + ' Series', _tk = 'T:' + p.ser; if (!groups[_tk]) { groups[_tk] = { rows: famRows.filter(function (r) { return String(r.name || '').indexOf(_tag) >= 0; }), todo: [], series: '', ser: p.ser }; order.push(_tk); } groups[_tk].todo.push(p); return; }
-    var sr = baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+    /* ★2026-10-15 本人「Wii/Wii U ハンドル マリオ…絶対違うやん」の調べで実例：BR のバトスピ「Ryuki Survive SEC 26RCB01-X05」が『関連するバリエカタログ』の仕組み（名前のシリーズ鍵 kamen rider）で
+       【仮面ライダーのゲームソフトのカタログ】に入っていた（10/12）。トレカ・グッズは家族カタログ（親SKU）以外に入れない＝シリーズ鍵の寄せ先は使わない */
+    var sr = (TCG_HW_JA[hw] || /^goods_/.test(String(hw))) ? [] : baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
   /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
   /* ★2026-09-23 作りすぎない安全弁。今日は1日で14件（うち7件は公開まで）作ってしまい、写真の取り違えが広がった。
      1回の巡回で作るのは1件・1日 famPerDay（既定6）件まで。数は st に日付つきで持つ（推定ではなく実績で止める）。 */
