@@ -1027,6 +1027,8 @@
         <span class="pc-sep"></span>
         <span class="pc-f"><span class="pc-l"><span class="pc-no" style="background:#5b3fa8">5</span>Shopee掲載＝①の<input type="number" id="pc-ratio" value="50" style="width:54px"><i>%</i></span><em>②で載せる割合。残りをPayPalでもらう</em></span>
         <span class="pc-f"><span class="pc-l"><span class="pc-no" style="background:#5b3fa8">6</span>PayPal手数料<input type="number" id="pc-ppfee" value="4.1" step="0.1" style="width:58px"><i>%＋</i><input type="number" id="pc-ppfix" value="40" style="width:54px"><i>円</i></span><em>海外受取はおおむね 4.1%＋40円（目安）</em></span>
+        <span class="pc-sep"></span>
+        <span class="pc-f"><span class="pc-l"><span class="pc-no" style="background:#1a7f37">7</span>売値<select id="pc-sellcc" style="width:58px"><option value="">国</option><option>PH</option><option>SG</option><option>MY</option><option>BR</option><option>VN</option><option>TH</option><option>TW</option></select><input type="number" id="pc-sell" placeholder="現地通貨" style="width:92px"></span><em>この国でこの値段で出したい時。粗利・ROIを逆算し、他の国は同じROIで揃える（④より優先）</em></span>
       </div>
       <div id="pc-msg" class="smd-dim" style="font-size:10.5px;margin:5px 0 8px">①だけ入れれば計算できます。打った瞬間に下が変わります（計算ボタンはありません）。</div>
       <div id="pc-mini"></div>
@@ -5968,6 +5970,7 @@
     '入力する（この4つを埋めるだけ）': 'Fill in these four',
     '仕入額（円・税込）': 'Cost (JPY, incl. tax)', '重量（g）': 'Weight (g)', '寸法 W×H×D（cm）': 'Dimensions W×H×D (cm)',
     '目標ROI（%）': 'Target ROI (%)', '目標ROI': 'Target ROI', '仕入額': 'Cost',
+    '売値': 'Sell price', '国': 'Country', '現地通貨': 'Local currency', 'この国でこの値段で出したい時。粗利・ROIを逆算し、他の国は同じROIで揃える（④より優先）': 'When you want to sell at this price in this country. Works out gross profit / ROI backwards and aligns the other countries to the same ROI (overrides ④)', '⑦ 指定した売値': '⑦ Your sell price', '他の国は同じ ROI': 'Other countries use the same ROI', '仕入れを下回ります': 'Below cost',
     'いくらで仕入れるか。送料込みの支払額': 'What you pay to buy it, shipping included',
     '梱包材こみ。空欄なら500gで計算': 'Including packaging. Blank = calculated as 500g',
     '箱の外寸。MYは容積重量で課金なので必須': 'Outer box size. Required for MY (volumetric weight)',
@@ -9034,7 +9037,7 @@
   //   ② Shopee＋PayPalで差額 … Shopee側は「抑えた価格」で出し、不足分をPayPalで別途受け取る運用。
   //      Shopee手数料は掲載価格にしか掛からないので、同じ手取りでも【手数料が減る＝利益が増える】。
   // 入力を憶えておく：ページを開き直すたびに打ち直すのが面倒なので、前回の値を復元する
-  const PC_IDS = ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'];
+  const PC_IDS = ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix', 'pc-sellcc', 'pc-sell'];
   function priceCalcSave() {
     const o = {}; PC_IDS.forEach(id => { const el = document.getElementById(id); if (el) o[id] = el.value; });
     try { localStorage.setItem('smdPriceCalc', JSON.stringify(o)); } catch (_) {}
@@ -9058,10 +9061,20 @@
     const ppFix = Math.max(0, num('pc-ppfix') != null ? num('pc-ppfix') : 40);                          // PayPal固定手数料(円)
     const opt = { weightG: wg || 0, dimW: dW || 0, dimH: dH || 0, dimD: dD || 0, ignoreDraftRoi: true };   // ★2026-09-26 点検：「出品を作る」の下書きROIを拾わない（9/10の直しがここだけ漏れていた）
     if (roi != null) opt.roiPct = roi;
+    /* ★2026-10-15 ⑦売値（本人「3,500円仕入れのやつを…60で売りたいときにどれくらい利益が出るとか、販売価格を指定したいパターン」）：
+       選んだ国の売値（現地通貨）から粗利・ROI を逆算し、他の国はその ROI で揃える（④目標ROIより優先）。選んだ国の①はその売値に固定 */
+    const sellCc = String((document.getElementById('pc-sellcc') || {}).value || ''), sellV = num('pc-sell');
+    let sellInfo = null;
+    if (sellCc && sellV > 0 && !sample) {
+      const pfS = priceProfitFor(sellCc, cost, sellV, opt);
+      const roiS = cost > 0 ? pfS.profit / cost * 100 : 0;
+      opt.roiPct = Math.round(roiS * 10) / 10;
+      sellInfo = { cc: sellCc, price: sellV, pf: pfS, roi: roiS };
+    }
     const target = TARGET_GROSS();
     const rows = REGIONS.map(rg => {
       const cc = rg.cc;
-      const raw = priceLocalFor(cc, cost, opt);
+      const raw = (sellInfo && sellInfo.cc === cc) ? sellInfo.price : priceLocalFor(cc, cost, opt);
       const local = roundLocal(raw, rg.priceUnit || 1);
       const pf = priceProfitFor(cc, cost, local, opt);
       // ② PayPal併用：Shopee掲載を「仕入がちょうど回収できる線」まで下げ、残りをPayPalで受け取る
@@ -9125,12 +9138,17 @@
     if (mini) mini.innerHTML = rows.map(r => `<span class="pc-mi"><span class="ord-cc" style="background:${r.rg.color};font-size:9px">${r.cc}</span><b>${cur(r.rg, r.local)}</b><u style="color:${r.pf.profit >= target ? '#1a7f37' : '#b26a00'}">${y(r.pf.profit)}</u></span>`).join('');
     out.innerHTML =
       (sample ? `<div style="background:#fff8e6;border:1px solid #f0d9a0;border-radius:8px;padding:4px 10px;margin-bottom:6px;font-size:11px;color:#7a5a10">📝 <b>例（仕入 ¥1,500・500g）で表示中。</b>①を打ち替えると本物の数字になります。</div>` : '') +
+      (sellInfo ? (() => { const rgS = regionByCc(sellInfo.cc), pfS = sellInfo.pf, neg = pfS.profit <= 0;
+        return `<div style="background:${neg ? '#fdecea' : '#eaf7ee'};border:1px solid ${neg ? '#f5c6c0' : '#bfe3c8'};border-radius:8px;padding:8px 12px;margin-bottom:9px;font-size:12px;color:${neg ? '#8a2018' : '#155c2a'};line-height:1.7">
+          💰 <b>⑦ ${sellInfo.cc} を ${cur(rgS, sellInfo.price)}（${y(sellInfo.price * rgS.rateJpy)}）で出すと：粗利 ${y(pfS.profit)}・ROI ${Math.round(sellInfo.roi)}%・受取額 ${y(pfS.payoutJpy)}</b>
+          （買い手の支払 ${y(pfS.buyerJpy)} → Shopee手数料 −${y(pfS.feeJpy)} → SLS送料 −${y(pfS.slsJpy)} → その他 −${y(pfS.fixedJpy + pfS.payFxJpy)} → 仕入 −${y(cost)}）${neg ? '<br>⚠️ <b>仕入れを下回ります</b>' : ''}<br>
+          他の国は同じ ROI ${Math.round(sellInfo.roi)}% で揃えています（④目標ROIより優先）。⑦を空にすると元の計算に戻ります。</div>`; })() : '') +
       `<div style="font-size:11.5px;font-weight:700;color:#0f172a;margin:0 0 4px">📌 各国で設定する出品価格</div>`+
       `<div class="pc-cards">${rows.map(r => {
         const ok1 = r.pf.profit >= target;
         return `<div class="pc-card">
           <div class="pc-card-cc"><span class="ord-cc" style="background:${r.rg.color}">${r.cc}</span><span class="pc-card-nm">${CC_JA[r.cc] || ''}</span></div>
-          <div class="pc-card-price">${cur(r.rg, r.local)}</div>${capOf(r.cc) && r.local > capOf(r.cc) ? `<div class="pc-cap ng" style="margin:2px auto 0;display:inline-block">⚠ ${r.cc}の上限 ${r.rg.cur}${capOf(r.cc).toLocaleString()} 超</div>` : ''}
+          <div class="pc-card-price">${cur(r.rg, r.local)}</div>${(sellInfo && sellInfo.cc === r.cc) ? `<div style="display:inline-block;margin:2px auto 0;padding:1px 7px;border-radius:9px;background:#1a7f37;color:#fff;font-size:10px;font-weight:700">⑦ 指定した売値</div>` : ''}${capOf(r.cc) && r.local > capOf(r.cc) ? `<div class="pc-cap ng" style="margin:2px auto 0;display:inline-block">⚠ ${r.cc}の上限 ${r.rg.cur}${capOf(r.cc).toLocaleString()} 超</div>` : ''}
           <div class="pc-card-jpy">${y(r.local * r.rg.rateJpy)}</div>
           <div class="pc-card-prof" style="color:${ok1 ? '#1a7f37' : (r.pf.profit > 0 ? '#b26a00' : '#d93025')}">粗利 ${y(r.pf.profit)}<span style="font-weight:400;color:#8a8f98"> / ROI ${Math.round(r.pf.roi)}%</span></div>
           <div class="pc-card-pp" title="② Shopeeに抑えて出し、差額をPayPalでもらう形の内訳（Shopeeに載せる額 ＋ PayPalで請求する額）。下の表の②の段に計算の中身があります">②<span class="pc-pat">Shopee＋PayPal</span> <b>${cur(r.rg, r.lowLocal)}</b> ＋ PayPal <b>${cur(r.rg, r.ppAsk / r.rg.rateJpy)}</b></div>
@@ -9429,7 +9447,7 @@
       setTimeout(layout, 300);
     }
     const live = () => { clearTimeout(pcT); pcT = setTimeout(() => { priceCalcSave(); priceCalcRun(); }, 220); };
-    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'].forEach(id => {
+    ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-ratio', 'pc-ppfee', 'pc-ppfix', 'pc-sellcc', 'pc-sell'].forEach(id => {
       const el = document.getElementById(id); if (!el) return;
       el.addEventListener('input', live);
       el.addEventListener('change', live);
@@ -21609,6 +21627,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-15', items: [
+      '💴 <b>価格計算に「⑦ 売値」を足しました</b>（本人「3,500円仕入れのやつを…60で売りたいときにどれくらい利益が出るとか、販売価格を指定したいパターンのとき計算できない」）：国を選んで現地通貨の売値を入れると、その国の粗利・ROI・受取額を逆算して上に出し、その国の①はその売値に固定、他の国は同じROIで揃えます（④目標ROIより優先）。空にすると元の計算に戻ります。',
       '🃏 <b>ニッチなトレカ5区分を母数と自動出品に足しました</b>（本人「女神転生のトレカとかは出してますか？もっとニッチなやつとか」）：ドラゴンボールスーパー カードゲーム・ガンダムカードゲーム・FFTCG・ファイアーエムブレム サイファ・真・女神転生 TCG。駿河屋の在庫（検索ヒット）はそれぞれ 15,068／5,152／1,825／2,560／3,862 件。駿河屋の小区分番号が取れないので、トレカ区分＋検索語で控えを集めます。母数・出品ログ・個数・出品一覧の機種に同時に出ます',
       '🃏 <b>ポケカのカタログを大シリーズ（SV／S／M…）で分ける仕組み</b>（本人「シリーズごとのカタログに仕分け」「いいねが付いた今のカタログは消したくない」「大シリーズより細かくするかは反応を見て」）：これから出す分だけ、名前に「SV Series」等を持つカタログへ入れ、無ければ作ります。既存カタログは触りません。設定（cfg.tcg.seriesSplit）で区分ごとに有効化（配備後にポケカから）',
     ] },
