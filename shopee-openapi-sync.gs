@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261015-1400';
+var SRC_VER = '20261015-2045';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9786,6 +9786,10 @@ function tcgTick(manual) {
         Object.keys(_mn0).forEach(function (k) { if (String(_mn0[k]).indexOf('ok') !== 0) return; var ck = k.split('||')[1]; if (!ck || !_tp0[ck]) return; var h0 = (_tp0[ck] && _tp0[ck].hw) || ck.split(':')[0]; (_okKeys[h0] = _okKeys[h0] || {})[ck] = 1; });
         _okHw = {};
         hws.forEach(function (h) { var ks = Object.keys(_okKeys[h] || {}); if (!ks.length) { _okHw[h] = 0; return; } var dn = baKv_('boshu_auto_done_' + h) || {}; _okHw[h] = ks.filter(function (k) { return !dn[k]; }).length; });
+        /* ★2026-10-15 20:4x 新しいシリーズ（dbs/gundam/fftcg/fecipher/smt）は「OK候補が無い＝飛ばす」で写真集めすら始まらず永久に出ない（鶏と卵）。
+           写真の控え（tcg_pre）に1件も無いシリーズを『冷えたシリーズ』として覚え、下で3回に1回・1日1回まで写真集めに使う */
+        var _hasPre = {}; Object.keys(_tp0).forEach(function (k0) { var h1 = (_tp0[k0] && _tp0[k0].hw) || String(k0).split(':')[0]; _hasPre[h1] = 1; });
+        st.coldHw = hws.filter(function (h) { return !_hasPre[h]; });
         st.okHw = _okHw; st.okHwAt = Date.now();
       } catch (eOk) { _okHw = null; }
     }
@@ -9796,6 +9800,9 @@ function tcgTick(manual) {
       var _best = '', _bestN = 0;
       for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h) || _zero(_h)) continue; var _n = Number(_okHw[_h]) || 0; if (!_n) { _noOk.push(_h); continue; } if (_n > _bestN) { _best = _h; _bestN = _n; } }
       if (_best) { hw = _best; st.cursor = cur + 1; }
+      /* ★2026-10-15 20:4x 冷えたシリーズの写真集め：3回に1回（OK候補が1つも無ければ毎回）・同じシリーズは1日1回まで */
+      st.coldDone = st.coldDone || {}; var _cold = (st.coldHw || []).filter(function (h) { return !_brk(h) && !_zero(h) && st.coldDone[h] !== todayJ; });
+      if (_cold.length) { st.coldN = (Number(st.coldN) || 0) + 1; if (!_best || st.coldN % 3 === 0) { var _ch = _cold[0]; st.coldDone[_ch] = todayJ; hw = _ch; _okHw[hw] = Number(_okHw[hw]) || 0; baLog_(st, '🌱 ' + hw + '：写真を一度も集めていないシリーズなので、この回は写真集めに使う（Claude の判定が付いたら出る）'); } }
     } else {
       for (var _k2 = 0; _k2 < hws.length; _k2++) { var _h2 = hws[(cur + _k2) % hws.length]; if (!_brk(_h2) && !_zero(_h2)) { hw = _h2; st.cursor = cur + _k2 + 1; break; } }
     }
