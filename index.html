@@ -21642,6 +21642,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-16', items: [
+      '💴 <b>出品ログの「仕入れ目安・店・在庫・型番」が、画面を開いた後に出た明細で「—」のままだったのを直しました</b>（本人「また仕入れ目安とか JAN の型番とか出てない。これ何回やるの」）。原因＝新しい行を差分で読む経路が、仕入れ目安の控え（llog_cost）・店ID・SKU・在庫の控えを読み直していなかった（控え自体には入っていた＝Supabase で確認）。新しい行が来たら控えを読み直し、既存カタログに足された明細も読み直す。読み込み中の印が詰まって二度と読まない形も60秒で解除。',
+      '🔢 <b>型番を、SKU の頭の一覧に無い区分でも明細名から出します</b>（本人「JAN が無ければ型番」）。例：DBS の FB10-070、バトスピの 26RCB01-X05、ヴァンガードの DZ-SS16/030、ポケカの SV4PT 001/021。',
+    ] },
     { date: '2026-10-15', items: [
       '💴 <b>価格計算：各国のカードの値段を直接打ち替えられるようにしました</b>（本人「3,500円仕入れのやつを…60で売りたいときにどれくらい利益が出るとか、販売価格を指定したいパターンのとき計算できない」「各国の値段の上に打ち込めるようにした方がいい」）：カードの値段を打ち替えると、その国だけその売値で粗利・ROI・受取額と内訳を上に出します（他の国はそのまま）。「⟲ 戻す」で元の計算に戻ります。打った値は次に開いた時も残ります。「打ち替えた国のROIに他の国も揃える」（既定ON）を付けると、打った国の ROI で他の国の価格も変わります（ROI がマイナスの時は揃えない）。入力欄の並びに「⟲ 入力を全部リセット」も足し、入力欄は「基本」「PayPal併用」の2段にまとめて説明はマウスを乗せた時だけ出す形にしました（本人「もうちょっとコンパクトにわかりやすく」）。',
       '💴 <b>価格計算：売値の入力欄を表の先頭列に入れ、カードをやめました</b>（本人「売り値のところも縦表示にして合わせた方が分かりやすい」「ベトナムドンと日本円は下に」）：国ごとの行の「①出品価格」が入力欄で、円は現地通貨の下に出ます。',
@@ -36660,6 +36664,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     }
     return { added: add.length, total: kset.size, cleaned };
   }
+  /* ★2026-10-16 本人「仕入れ目安が出てない。何回やるの」：控えの読み直しを関数にして、差分で新しい行が来た時にも読み直す。
+     読み込み中の印が詰まって二度と読まない形（約束が返らない）も、60秒で解除する */
+  function llogLoadCostMap(force) {
+    if (logState._costMapBusy && logState._costMapBusyAt && Date.now() - logState._costMapBusyAt > 60 * 1000) logState._costMapBusy = false;
+    if (force) logState.costMap = null;
+    if (logState._costMapBusy || logState.costMap) return;
+    logState._costMapBusyAt = Date.now();
+    logState._costMapBusy = true; sbGet('app_kv', 'select=k,v&k=like.llog_cost_*').then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || '') } : { c: Number(v) || 0, src: '', from: '', ja: '' }; }); }); logState.costMap = cm; logState._costMapAt = Date.now(); try { renderLog(); } catch (_) {} }).catch(() => { logState.costMap = {}; logState._costMapAt = Date.now(); }).finally(() => { logState._costMapBusy = false; }); 
+  }
   async function loadListingLog() {
     /* ★2026-09-21 本人「なんかずっと読み込み中だけど、重くなってますかね？」→ 実測でその通りだった。
        `listing_log` は **28,301行**あり、ここで **全行×全列**を1,000行ずつページ送りで読む＝29往復。
@@ -36711,7 +36724,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       /* ★2026-10-11 本人「出品の各カードに仕入れ金額の情報も欲しい」：🤖/🃏が明細を足した時の仕入れ目安（仕入元の価格）を app_kv llog_cost_<hw> から読む（小さい・1回だけ） */
       /* ★2026-10-12 本人「仕入れ目安載ってないけど」：画面を開いた時に1回だけ読み、その後に出したカードは仕入れ目安が「—」のままだった（控えには入っていた）。5分たったら読み直す */
       if (logState.costMap && logState._costMapAt && Date.now() - logState._costMapAt > 5 * 60 * 1000 && !logState._costMapBusy) logState.costMap = null;
-      if (!logState._costMapBusy && !logState.costMap) { logState._costMapBusy = true; sbGet('app_kv', 'select=k,v&k=like.llog_cost_*').then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || '') } : { c: Number(v) || 0, src: '', from: '', ja: '' }; }); }); logState.costMap = cm; logState._costMapAt = Date.now(); try { renderLog(); } catch (_) {} }).catch(() => { logState.costMap = {}; logState._costMapAt = Date.now(); }).finally(() => { logState._costMapBusy = false; }); }
+      llogLoadCostMap(false);
       if (!logState._shopMapBusy && !logState.shopMap) { logState._shopMapBusy = true; sbGetAll('listings', 'select=cc,item_id,shop_id').then(li => { const sm = {}; (li || []).forEach(l => { if (l.shop_id) sm[l.cc + '|' + l.item_id] = String(l.shop_id); }); logState.shopMap = sm; try { if (typeof renderListingLog === 'function' && document.getElementById('list-log')) renderListingLog(); } catch (_) {} }).catch(() => { logState.shopMap = logState.shopMap || {}; }).finally(() => { logState._shopMapBusy = false; }); }
       const g = ((kv || []).find(x => x.k === 'listlog_goal') || {}).v;   // 2つ読むようになったので kv[0] と決め打ちしない
       logState.goal = (g && Number(g.perDay)) || Number(localStorage.getItem('smdListLogGoal')) || 10;
@@ -37092,7 +37105,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
              出品データ listings.models[].sku から引く。全件は重いので【その日に出したカタログの分だけ】100件ずつ取る。 */
           try {
             const _seenIt = logState._detailItems = logState._detailItems || new Set();
-            const ids0 = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))].filter(id => !_seenIt.has(id)), sku = logState.skuMap || {}, stk = logState.stockMap || {}, shp = logState._shpMap = logState._shpMap || {};
+            const ids0 = [...new Set((ds || []).map(x => String(x.item_id)).filter(Boolean))].filter(id => _inc || !_seenIt.has(id)), sku = logState.skuMap || {}, stk = logState.stockMap || {}, shp = logState._shpMap = logState._shpMap || {};   /* ★2026-10-16 差分（新しい行）の時は見たカタログでも読み直す＝既存カタログに足された明細の SKU・在庫・店が「—」のままだった */
             ids0.forEach(id => _seenIt.add(id));
             /* ★2026-10-14 本人「このページ、マジで重いんだけど」：出品データ（lst.byCc＝起動時に全件読んである）に同じカタログが居れば、Supabase に models を取りに行かない。
                実測：この読み（100件ずつ・models 込み）が1日ぶんで10本・28秒だった。無い物（出品データの取り込み前の新しいカタログ）だけ読む */
@@ -37117,6 +37130,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               });
             }
             logState.skuMap = sku; logState.stockMap = stk;
+            /* ★2026-10-16 本人「仕入れ目安・JAN・型番が出てない。これ見つけた瞬間指摘する」：新しい行が来た時は仕入れ目安の控え（llog_cost_*）も読み直し、店IDの控えにも足す */
+            try { if (logState.shopMap) Object.keys(shp).forEach(k => { if (shp[k]) logState.shopMap[k] = String(shp[k]); }); } catch (_) {}
+            if ((ds || []).length && (!logState._costMapAt || Date.now() - logState._costMapAt > 60 * 1000)) { try { llogLoadCostMap(true); } catch (_) {} }
             /* ★2026-10-14 本人「SKUは、明細のSKUを表示して欲しいんだけど」：出したばかりの明細は出品データの取り込み前で明細SKUが無く、親SKUを出していた
                → 明細SKUが無いカタログだけ、Shopee から直接読み直して埋める（1日の表示で最大150カタログ・1つずつ・終わったら描き直す） */
             const miss = [...new Set((ds || []).filter(x => !sku[x.cc + '|' + x.item_id + '#' + x.model_id] && shp[x.cc + '|' + x.item_id]).map(x => x.cc + '|' + x.item_id))].slice(0, 150);   // 40 では1日分に足りなかった（10/14 実測：78明細が親SKUのまま）
@@ -37483,6 +37499,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 /* ★2026-10-12 本人「仕入れ目安、型番とかなぜでない？」「カードは、JANってあるの？」：シングルカードに JAN は無い＝カード番号が型番。
                    product_ids（大物）には書かず、🃏の明細SKU（区分_弾記号_番号_レアリティ 例 POKECA_M6A_124_103_SAR）から読む＝DBの読み書きゼロ */
                 if (!jan && !mpn && logState.skuMap) { const _sk = String(logState.skuMap[r.cc + '|' + r.item_id + '#' + r.model_id] || ''); const _m = /^(POKECAOLD|POKECA_OLD|POKECA|YUGIOHRD|YUGIOH|OPCG|DUEMA|WEISS|VANGUARD|DIGIMON|BATSPI|ACNH|YOKAI|MONCOLLE|MEZASTAR|WIXOSS|ZX|SHADOWVERSE|DBH|MTG|UNIONARENA|GANBARIZING|GANBALEGENDS|[A-Z]+_CARD)_(.+)$/i.exec(_sk); /* ★2026-10-13 本人「なぜこれ型番を出さないの？」「出せるやつは出して欲しい」＝amiiboカード（ACNH_S6）・ガンバ・WIXOSS 等が抜けていた。GAS の SKU の頭（BA_TCG_SKU）と同じ並び */ if (_m) { const _p = _m[2].split('_'); const _rar = /^[A-Z]{1,4}$/.test(_p[_p.length - 1] || '') && _p.length > 2 ? _p.pop() : ''; mpn = (_p.length >= 3 && /^\d+$/.test(_p[_p.length - 1]) && /^\d+$/.test(_p[_p.length - 2]) ? _p.slice(0, -2).join(' ') + ' ' + _p[_p.length - 2] + '/' + _p[_p.length - 1] : _p.join('-')).trim() + (_rar ? ' ' + _rar : ''); } }
+                /* ★2026-10-16 本人「JAN が無ければ型番」：SKU の頭の一覧に無い区分（DBS の FB10-070 等）でも、明細名の中のカード番号（数字と / か - を含む最後の語・前に弾記号があれば付ける）を型番として出す */
+                if (!jan && !mpn) { try { const _t = String(r.model_name || '').split(/\s+/); let _i = -1; for (let q = _t.length - 1; q >= 0; q--) { if (/\d/.test(_t[q]) && /[\/-]/.test(_t[q]) && /^[A-Za-z0-9\/\-]+$/.test(_t[q])) { _i = q; break; } } if (_i >= 0) { mpn = _t[_i]; if (_i > 0 && /^[A-Z0-9]{2,8}$/.test(_t[_i - 1]) && /\d/.test(_t[_i - 1])) mpn = _t[_i - 1] + ' ' + mpn; } } catch (_) {} }
                 if (typeof productIds !== 'undefined' && productIds === null) return '<span style="display:block;font-size:9.5px;color:#c0392b">JAN 読み込み中…</span>';
                 if (!jan) return `<span style="display:block;font-size:9.5px;color:#bbb">JAN —${mpn ? ' ／ 型番 ' + esc(mpn) : ''}</span>`;
 
