@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-1600';
+var SRC_VER = '20261016-1700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -713,7 +713,7 @@ function doGetInner_(e) {
         var rowHit = 0;
         /* ③ llog_cost_<hw> の jan を埋める：台帳の key→cc:item#model から鍵を作る */
         var lc = baKv_('llog_cost_' + sjHw) || {}; lc.m = lc.m || {}; var lcHit = 0;
-        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; var jan = cache[id]; if (!jan) return; var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object' && !e.jan) { e.jan = jan; lcHit++; } }); });
+        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; if (cache[id] === undefined || cache[id] === null) return; var jan = cache[id] || ''; var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object') { if (jan && !e.jan) { e.jan = jan; lcHit++; } if (!e.jc) { e.jc = 1; lcHit++; } } }); });
         if (lcHit) baKvSet_('llog_cost_' + sjHw, lc);
         sjout = { ok: true, hw: sjHw, listed: listedIds.length, todoBefore: todo.length, fetched: fetched, hit: hit, rowsFilled: rowHit, llogFilled: lcHit, cached: Object.keys(cache).length, log: sjSt.log.slice(-5) };
       } catch (esj) { sjout = { ok: false, error: String((esj && esj.message) || esj) }; }
@@ -8862,7 +8862,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
           baLooseMark_(hw, cc, _x0._p.ja, tgt.item_id);
-          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
+          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
             shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
             img: _x0._p.imageId || '', cost: _x0._p.cost || 0, hits: _x0._p.hits || 0, reused: 1, partial: _ru.partial ? 1 : 0 });
@@ -8916,7 +8916,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
@@ -9091,7 +9091,7 @@ function baListLogWrite_(st, t0) {
   /* ★2026-10-11 本人「出品の各カードに仕入れ金額の情報も欲しい」：listing_log に列が無いので app_kv llog_cost_<hw>（{m:{cc|item|model: 仕入れ目安}}）に同じ鍵で控える。機種ごと＝1つの担当が1つの鍵で書くので台をまたいで消し合わない */
   try {
     var byHw = {};
-    (st.added || []).forEach(function (a) { if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return; (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), jan: String(a.jan || ''), mpn: String(a.mpn || '') };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す */ });   /* ★2026-10-11 本人「どこの仕入れ元リンクから取ってきたかも欲しい」＝目安の元（駿河屋の題名）と写真の元（出品URL）も控える */
+    (st.added || []).forEach(function (a) { if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return; (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), jan: String(a.jan || ''), mpn: String(a.mpn || ''), jc: a.jc ? 1 : 0 };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す。jc=1 は JAN を確かめ済み（無ければ「JAN なし」） */ });   /* ★2026-10-11 本人「どこの仕入れ元リンクから取ってきたかも欲しい」＝目安の元（駿河屋の題名）と写真の元（出品URL）も控える */
     Object.keys(byHw).forEach(function (h) { var kk = 'llog_cost_' + h; var cur = baKvFresh_(kk); if (!cur || typeof cur !== 'object') cur = {}; cur.m = cur.m || {}; Object.keys(byHw[h]).forEach(function (key) { cur.m[key] = byHw[h][key]; }); cur.at = new Date().toISOString(); cur.src = 'gas'; baKvSet_(kk, cur); });
   } catch (eC) {}
   return rows.length;
@@ -9967,7 +9967,8 @@ function tcgTick(manual) {
           if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
           baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');
         }
-        c = Object.assign({}, c, { jan: _janG, mpn: _mpnG }); }
+        var _jcG = (_janG ? 1 : ((st._sgJan && st._sgJan[String(c.key || '').split(':')[1] || ''] !== undefined) ? 1 : 0));   /* 1＝JAN を確かめ済み（答えが無ければ「JAN なし」と出す） */
+        c = Object.assign({}, c, { jan: _janG, mpn: _mpnG, jc: _jcG }); }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return baJpgUrl_(String(m.img || '').replace(/\?.*$/, '')) !== ph.img; }); tPre[c.key]._dirty = 1; BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
       usedT[ph.img] = baUsedTag_(c.key, hw); usedDirty = true;
@@ -9976,11 +9977,11 @@ function tcgTick(manual) {
       if (ph.multi && Number(ph.multi.copies) >= 2) {   /* 切り抜きの単品が本命・元の写真で N枚セットも足す（同じ回・別の明細・台帳の鍵は key~xN） */
         var _mN = Number(ph.multi.copies), _enS = String(c.en || ''), _tagS = ' x' + _mN; if ((_enS + _tagS).length > 30) _enS = _enS.slice(0, 30 - _tagS.length).trim();
         var _imgS = ph.multi.img, _idS = null; try { _idS = uploadImageUrl_(_imgS); } catch (eUp2) { _idS = null; }
-        if (_idS) { picks.push({ mpn: (c.mpn || tcgMpnOf_(c)), key: c.key + '~x' + _mN, ja: c.ja, en: _enS + _tagS, jan: String(c.jan || ''), img: _imgS, imageId: _idS, hits: ph.hits || 0, cost: Math.round((Number(c.cost) || 0) * _mN), need: c.need, src: ph.multi.src, srcTitle: ph.multi.srcTitle, q: ph.q, from: 'mercari', stock: 1, sg: 1, sku: (c.sku ? String(c.sku) + '_X' + _mN : c.sku), setCode: c.setCode }); baLog_(st, hw + '：' + _enS + ' は単品（切り抜き）に加えて同じカード ' + _mN + '枚のセットも出す（仕入 ×' + _mN + '）'); }
+        if (_idS) { picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key + '~x' + _mN, ja: c.ja, en: _enS + _tagS, jan: String(c.jan || ''), img: _imgS, imageId: _idS, hits: ph.hits || 0, cost: Math.round((Number(c.cost) || 0) * _mN), need: c.need, src: ph.multi.src, srcTitle: ph.multi.srcTitle, q: ph.q, from: 'mercari', stock: 1, sg: 1, sku: (c.sku ? String(c.sku) + '_X' + _mN : c.sku), setCode: c.setCode }); baLog_(st, hw + '：' + _enS + ' は単品（切り抜き）に加えて同じカード ' + _mN + '枚のセットも出す（仕入 ×' + _mN + '）'); }
         c = Object.assign({}, c, { en: ((String(c.en || '') + ' x1').length > 30 ? String(c.en || '').slice(0, 27).trim() : String(c.en || '')) + ' x1' });   /* 本人「何枚と書いておいて」＝単品も x1 と書く */
       }
       if (_cpN >= 2) { var _enB = String(c.en || ''), _tag = ' x' + _cpN; if ((_enB + _tag).length > 30) _enB = _enB.slice(0, 30 - _tag.length).trim(); c = Object.assign({}, c, { en: _enB + _tag, cost: Math.round((Number(c.cost) || 0) * _cpN), sku: (c.sku ? String(c.sku) + '_X' + _cpN : c.sku) }); baLog_(st, hw + '：' + _enB + ' は単品の写真が無いので同じカード ' + _cpN + '枚の写真＝' + _cpN + '枚セット（仕入 ×' + _cpN + '）で出す'); }
-      picks.push({ mpn: (c.mpn || tcgMpnOf_(c)), key: c.key, ja: c.ja, en: c.en, jan: String(c.jan || ''), img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
+      picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key, ja: c.ja, en: c.en, jan: String(c.jan || ''), img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { var _frP = baKvFreshMany_(['tcg_pre']); var _mineP = {}; Object.keys(tPre).forEach(function (k) { var e = tPre[k]; if (e && (e.rej || e._dirty)) _mineP[k] = e; }); var _baseP = (_frP && _frP['tcg_pre']) || null; if (_baseP) { Object.keys(_mineP).forEach(function (k) { var f = _baseP[k] || {}; f.rej = _mineP[k].rej; if (_mineP[k]._dirty) f.imgs = _mineP[k].imgs; delete f._dirty; _baseP[k] = f; }); baKvSet_('tcg_pre', _baseP); } } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }   /* ★2026-10-12 ポータルが同時に集めた分を消さない＝読み直した最新に、こちらで変えたカードの rej／imgs だけ重ねる */
