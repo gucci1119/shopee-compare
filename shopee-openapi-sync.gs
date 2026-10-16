@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-1700';
+var SRC_VER = '20261016-1730';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9698,6 +9698,18 @@ function tcgAsciiTag_(tag) {
   t = t.replace(/[^\x20-\x7E]/g, ' ').replace(/[()（）]/g, ' ').replace(/\s+/g, ' ').trim();
   return t;
 }
+/* ★2026-10-16 本人「バージョン違いで同じキャラがある。全部被らないように」「トレカも同じレア度で弾やシーズン違いがある。絶対に」
+   ① amiibo は版（駿河屋の題名の末尾の括弧＝シリーズ）を英語名と SKU に必ず入れる（Mario (Super Mario) / Mario (Smash)）
+   ② どの区分でも、同じ回で同じ英語名・同じ SKU が別の商品（別の駿河屋ID）に出たら、弾・シリーズ・最後は駿河屋IDの末尾で必ず区別する（黙って飛ばさない・混ぜない） */
+var TCG_SERIES_EN = [[/大乱闘スマ(ッシュ)?ブラ(ザーズ)?/, 'Smash'], [/スーパーマリオ/, 'Super Mario'], [/マリオカート/, 'Mario Kart'], [/ゼルダの伝説|ゼルダ/, 'Zelda'], [/スプラトゥーン/, 'Splatoon'], [/どうぶつの森/, 'AC'], [/ファイアーエムブレム/, 'FE'], [/星のカービィ|カービィ/, 'Kirby'], [/ポケモン/, 'Pokemon'], [/メトロイド/, 'Metroid'], [/モンスターハンター/, 'MH'], [/ゼノブレイド/, 'Xenoblade'], [/ヨッシー/, 'Yoshi'], [/ピクミン/, 'Pikmin'], [/ドンキーコング/, 'DK'], [/ストリートファイター/, 'SF'], [/ロックマン/, 'Mega Man'], [/ショベルナイト/, 'Shovel Knight'], [/ディアブロ|ダイアブロ/, 'Diablo'], [/スカイランダーズ/, 'Skylanders'], [/毛糸/, 'Yarn'], [/ベヨネッタ/, 'Bayonetta'], [/クロノ/, 'Chrono'], [/ゼノブレ/, 'Xeno'], [/ソニック/, 'Sonic'], [/パックマン/, 'Pac-Man'], [/メガテン|真・女神転生/, 'SMT'], [/ファミコン/, 'Famicom']];
+function tcgSeriesEn_(series) {
+  var sj = String(series || '').replace(/シリーズ$/, '').trim(); if (!sj) return '';
+  for (var i = 0; i < TCG_SERIES_EN.length; i++) { if (TCG_SERIES_EN[i][0].test(sj)) return TCG_SERIES_EN[i][1]; }
+  var a = ''; try { a = tcgAsciiTag_(sj); } catch (e) { a = ''; }
+  if (a && /^[A-Za-z0-9 .\-]+$/.test(a)) return a.slice(0, 12);
+  var h = 0; for (var q = 0; q < sj.length; q++) h = (h * 31 + sj.charCodeAt(q)) >>> 0;   /* 英語にできない版＝短い符号で区別（同じ版は同じ符号） */
+  return 'v' + h.toString(16).slice(0, 4);
+}
 function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenEn, stat) {
   stat = stat || {}; seenEn = seenEn || {};
   {
@@ -9706,9 +9718,17 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     var full = ((_rarE ? _rarE + ' ' : '') + en + vtag + ' ' + (pr.num || _tagE || '')).replace(/\s+/g, ' ').trim();   /* 番号の無い小物は弾（setTag）で見分ける */
     if (full.length > 30) full = (en + vtag + ' ' + pr.num).replace(/\s+/g, ' ').trim();
     if (full.length > 30 && vtag) full = (en.slice(0, Math.max(6, 30 - vtag.length - String(pr.num).length - 2)).trim() + vtag + ' ' + pr.num).trim();   /* 変種の札は落とさない（落とすと別のカードが同じ名前になる） */
+    /* ① amiibo：版（シリーズ）を名前に必ず入れる。30字に収まらなければ版の略を優先して名前側を詰める */
+    if (hw === 'goods_amiibo' && pr.series) { var _sEn = tcgSeriesEn_(pr.series); if (_sEn) { var _sfx = ' (' + _sEn + ')'; var _base = full; if ((_base + _sfx).length > 30) _base = _base.slice(0, Math.max(6, 30 - _sfx.length)).trim(); full = (_base + _sfx).trim(); } }
     if (full.length > 30) { stat.long = (stat.long || 0) + 1; return null; }
-    if (seenEn[full.toLowerCase()]) return null; seenEn[full.toLowerCase()] = 1;
     var key = hw + ':' + String(r.id || full);
+    /* ② 同じ回に同じ英語名が【別の商品】で出たら、弾／シリーズ／駿河屋IDの末尾で必ず区別する（前は黙って飛ばしていた＝版違いが一生出なかった） */
+    if (seenEn[full.toLowerCase()] && seenEn[full.toLowerCase()] !== key) {
+      var _d = tcgAsciiTag_(pr.setTag || '') || tcgSeriesEn_(pr.series || '') || ('#' + String(r.id || '').slice(-4));
+      var _f2 = (full + ' ' + _d).replace(/\s+/g, ' ').trim(); if (_f2.length > 30) _f2 = (full.slice(0, Math.max(6, 30 - _d.length - 1)).trim() + ' ' + _d).trim();
+      if (!seenEn[_f2.toLowerCase()] || seenEn[_f2.toLowerCase()] === key) { full = _f2; var _disSku = _d; } else { stat.dupname = (stat.dupname || 0) + 1; return null; }
+    }
+    if (seenEn[full.toLowerCase()] === key) return null; seenEn[full.toLowerCase()] = key;
     var k1 = baTmKey_(full);
     var setName = String(r.k || '').split('/').pop(); var setCode = (hw === 'pokeca' || hw === 'pokeca_old') ? tcgSetCode_(hw, setName, ai, pr) : '';   /* ★2026-10-11 弾記号の公式検索はポケカだけ。他は番号に弾が入っている（OP17-118 等） */
     /* ★2026-10-14 本人「明細のSKUって、全部ユニークだよね？」：番号の無い区分（モンコレ・妖怪メダル等）は SKU が「MONCOLLE_」で止まり、別の商品で同じSKUになっていた＝英語の明細名を入れる */
@@ -9716,6 +9736,7 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + tcgRarEn_(pr.rar).replace(/[^A-Za-z0-9]+/g, '') : '') + (pr.varEn ? '_' + pr.varEn.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);
     sku = sku.replace(/_+$/, '');   /* ★2026-10-14 レア度が日本語だけ（アルティメットレア等）だと「DBH_MM2_031_」で止まっていた＝英語の略号にして末尾の _ を落とす */
     if (typeof skuN !== 'undefined' && skuN) sku = skuN;   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
+    if (typeof _disSku !== 'undefined' && _disSku) sku = (sku + '_' + String(_disSku).replace(/[^A-Za-z0-9]+/g, '')).replace(/_+/g, '_').slice(0, 100);   /* 名前を区別したら SKU も同じ札で区別する */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
     if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
     return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku };
