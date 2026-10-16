@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-1730';
+var SRC_VER = '20261016-2000';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -698,14 +698,14 @@ function doGetInner_(e) {
       var sjout;
       try {
         var sjwt = P_().getProperty('WRITE_TOKEN'); if (!sjwt || p.token !== sjwt) throw new Error('WRITE_TOKEN不正');
-        var sjHw = String(p.hw || ''); if (!/^goods_[a-z0-9_]+$/.test(sjHw)) throw new Error('hw はグッズ（goods_*）だけ');
+        var sjHw = String(p.hw || ''); if (!/^goods_[a-z0-9_]+$|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(sjHw)) throw new Error('hw はグッズ（goods_*・小物4区分）だけ');
         var sjN = Math.max(1, Math.min(40, Number(p.n) || 20));
         var sjSt = { log: [] };
         var sgv = baKv_('sg_' + sjHw) || {}; var rows = sgv.rows || [];
         var led = baKv_('boshu_auto_done_' + sjHw) || {};
         var cache = baKv_(SG_JAN_CACHE) || {};
         var listedIds = Object.keys(led).map(function (k) { return k.split(':')[1] || ''; }).filter(function (x) { return /^\d+$/.test(x) && Object.keys(led[sjHw + ':' + x] || {}).some(function (cc) { return String(led[sjHw + ':' + x][cc] || '').indexOf('#') > 0; }); });
-        var todo = listedIds.filter(function (id) { return !(cache[id]); });
+        var todo = listedIds.filter(function (id) { return cache[id] === undefined || cache[id] === null; });   /* ★'' は「見たが無かった」＝もう取りに行かない */
         var fetched = 0, hit = 0;
         for (var qi = 0; qi < todo.length && fetched < sjN; qi++) { var jv = sgJanFromPage_(sjSt, todo[qi]); fetched++; if (jv) hit++; if (sjSt._sgJanN >= SG_JAN_PER_RUN) break; }
         cache = baKv_(SG_JAN_CACHE) || cache;
@@ -9978,7 +9978,7 @@ function tcgTick(manual) {
       }
       /* ★2026-10-16 守り：仕入れ目安が無い・JAN も型番も無い明細は出さない（本人「これから絶対なし」）。写真を上げる前に見る＝無駄な通信をしない */
       { var _mpnG = tcgMpnOf_(c), _janG = String(c.jan || '');
-        if (!_janG && !_mpnG && /^goods_/.test(String(hw))) _janG = sgJanFromPage_(st, String(c.key || '').split(':')[1] || '');
+        if (!_janG && !_mpnG && /^goods_|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(String(hw))) _janG = sgJanFromPage_(st, String(c.key || '').split(':')[1] || '');   /* ★2026-10-16 20:00 小物4区分（妖怪メダル等）も駿河屋ページの JAN を見る（jan_sg_cache はブラウザ側の「📇 駿河屋のJANを埋める」からも写す） */
         if (!(Number(c.cost) > 0)) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は仕入れ目安が無いので出さない'); baSkipRec_(st, hw, '', c, 'nocost'); continue; }
         if (!_janG && !_mpnG) {
           /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
