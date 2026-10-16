@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-1230';
+var SRC_VER = '20261016-1600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9959,7 +9959,14 @@ function tcgTick(manual) {
       { var _mpnG = tcgMpnOf_(c), _janG = String(c.jan || '');
         if (!_janG && !_mpnG && /^goods_/.test(String(hw))) _janG = sgJanFromPage_(st, String(c.key || '').split(':')[1] || '');
         if (!(Number(c.cost) > 0)) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は仕入れ目安が無いので出さない'); baSkipRec_(st, hw, '', c, 'nocost'); continue; }
-        if (!_janG && !_mpnG) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); tcgJanTodoPush_(hw, c); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
+        if (!_janG && !_mpnG) {
+          /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
+             既定＝出した上で夜の JAN 調べ（ポータルの「駿河屋のJANを埋める」＝ブラウザ経由）に回す。cfg.tcg.requireIdGoods=true なら出さない（本人の判断で切替） */
+          var _strict = !/^goods_|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(String(hw)) || !!(tc && tc.requireIdGoods);
+          tcgJanTodoPush_(hw, c);
+          if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
+          baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');
+        }
         c = Object.assign({}, c, { jan: _janG, mpn: _mpnG }); }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return baJpgUrl_(String(m.img || '').replace(/\?.*$/, '')) !== ph.img; }); tPre[c.key]._dirty = 1; BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;
