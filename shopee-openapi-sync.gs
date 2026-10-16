@@ -9035,7 +9035,7 @@ function sgJanFromPage_(st, sgId) {
     var r = UrlFetchApp.fetch('https://www.suruga-ya.jp/product/detail/' + sgId, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36', 'Accept-Language': 'ja' } });
     var code = r.getResponseCode(); var html = code === 200 ? r.getContentText() : '';
     if (code !== 200 || html.length < 3000 || /アクセスが集中|しばらく時間をおいて|ご利用いただけません|Too Many Requests|Access Denied/i.test(html)) { st._sgJanN = SG_JAN_PER_RUN; baLog_(st, '駿河屋に弾かれた（' + code + '）→この回の JAN 読みは止める'); return ''; }
-    var m = /JAN[^0-9]{0,60}(\d{13}|\d{8})/.exec(html) || /(?:JANコード|jan_code|JAN code)[^0-9]{0,60}(\d{13}|\d{8})/i.exec(html);
+    var m = /"gtin13"\s*:\s*"(\d{13})"/.exec(html) || /JAN[^0-9]{0,60}(\d{13}|\d{8})/.exec(html) || /(?:JANコード|jan_code|JAN code)[^0-9]{0,60}(\d{13}|\d{8})/i.exec(html);   /* 駿河屋は JSON-LD の gtin13 に JAN（9/4 実測・ポータルの「駿河屋のJANを埋める」と同じ読み方） */
     if (m && baJanReal_(m[1])) jan = m[1];
   } catch (e) { baLog_(st, '駿河屋の JAN 読み失敗 ' + sgId + ': ' + String((e && e.message) || e).slice(0, 100)); }
   st._sgJan[sgId] = jan || '';
