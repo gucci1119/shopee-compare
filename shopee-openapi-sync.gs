@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-1200';
+var SRC_VER = '20261016-1230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -690,6 +690,35 @@ function doGetInner_(e) {
     }
     // ★モデル(明細)読み：get_model_list（ブリッジproductRead代替）。params: shop_id, item_id。読み取り専用なのでtoken不要。
     /* ★2026-10-15 本人「SLS送料のこれ合ってる？」：注文1件の入金明細（order_income）をそのまま返す（送料・値引き・手数料の内訳を実物で確かめる用。urlfetch 1回） */
+    /* ★2026-10-16 本人「JAN もしくは型番が出ればいい」：出品済みのグッズ（amiibo 等）に後から JAN を付ける口。
+       sg_<hw> の控えの商品ID → 駿河屋の商品ページ（JSON-LD gtin13）→ ①jan_sg_cache ③llog_cost_<hw>（出品ログのカードが読む）に書く（sg_<hw> は読むだけ）。
+       params: hw・n（1回に読む件数・既定20）。台帳（boshu_auto_done_<hw>）に出品の記録がある物を優先。枠に数える・弾かれたら止める */
+    if (p.action === 'sg_jan_backfill') {
+      var sjcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var sjout;
+      try {
+        var sjwt = P_().getProperty('WRITE_TOKEN'); if (!sjwt || p.token !== sjwt) throw new Error('WRITE_TOKEN不正');
+        var sjHw = String(p.hw || ''); if (!/^goods_[a-z0-9_]+$/.test(sjHw)) throw new Error('hw はグッズ（goods_*）だけ');
+        var sjN = Math.max(1, Math.min(40, Number(p.n) || 20));
+        var sjSt = { log: [] };
+        var sgv = baKv_('sg_' + sjHw) || {}; var rows = sgv.rows || [];
+        var led = baKv_('boshu_auto_done_' + sjHw) || {};
+        var cache = baKv_(SG_JAN_CACHE) || {};
+        var listedIds = Object.keys(led).map(function (k) { return k.split(':')[1] || ''; }).filter(function (x) { return /^\d+$/.test(x) && Object.keys(led[sjHw + ':' + x] || {}).some(function (cc) { return String(led[sjHw + ':' + x][cc] || '').indexOf('#') > 0; }); });
+        var todo = listedIds.filter(function (id) { return !(cache[id]); });
+        var fetched = 0, hit = 0;
+        for (var qi = 0; qi < todo.length && fetched < sjN; qi++) { var jv = sgJanFromPage_(sjSt, todo[qi]); fetched++; if (jv) hit++; if (sjSt._sgJanN >= SG_JAN_PER_RUN) break; }
+        cache = baKv_(SG_JAN_CACHE) || cache;
+        /* ② 駿河屋の控え（sg_<hw>）には書かない（大物の書き込みを増やさない）。候補づくりは jan_sg_cache を先に見るので要らない */
+        var rowHit = 0;
+        /* ③ llog_cost_<hw> の jan を埋める：台帳の key→cc:item#model から鍵を作る */
+        var lc = baKv_('llog_cost_' + sjHw) || {}; lc.m = lc.m || {}; var lcHit = 0;
+        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; var jan = cache[id]; if (!jan) return; var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object' && !e.jan) { e.jan = jan; lcHit++; } }); });
+        if (lcHit) baKvSet_('llog_cost_' + sjHw, lc);
+        sjout = { ok: true, hw: sjHw, listed: listedIds.length, todoBefore: todo.length, fetched: fetched, hit: hit, rowsFilled: rowHit, llogFilled: lcHit, cached: Object.keys(cache).length, log: sjSt.log.slice(-5) };
+      } catch (esj) { sjout = { ok: false, error: String((esj && esj.message) || esj) }; }
+      return ContentService.createTextOutput(sjcb + '(' + JSON.stringify(sjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'escrow_raw') {
       var ercb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var erout;
