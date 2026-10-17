@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261016-2000';
+var SRC_VER = '20261017-0130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -707,13 +707,14 @@ function doGetInner_(e) {
         var listedIds = Object.keys(led).map(function (k) { return k.split(':')[1] || ''; }).filter(function (x) { return /^\d+$/.test(x) && Object.keys(led[sjHw + ':' + x] || {}).some(function (cc) { return String(led[sjHw + ':' + x][cc] || '').indexOf('#') > 0; }); });
         var todo = listedIds.filter(function (id) { return cache[id] === undefined || cache[id] === null; });   /* ★'' は「見たが無かった」＝もう取りに行かない */
         var fetched = 0, hit = 0;
-        for (var qi = 0; qi < todo.length && fetched < sjN; qi++) { var jv = sgJanFromPage_(sjSt, todo[qi]); fetched++; if (jv) hit++; if (sjSt._sgJanN >= SG_JAN_PER_RUN) break; }
+        var sjLoose = BA_LOOSE_HW.test(sjHw);   /* ばら売り＝駿河屋は見ない・JAN は書かない・jc だけ付ける */
+        for (var qi = 0; !sjLoose && qi < todo.length && fetched < sjN; qi++) { var jv = sgJanFromPage_(sjSt, todo[qi]); fetched++; if (jv) hit++; if (sjSt._sgJanN >= SG_JAN_PER_RUN) break; }
         cache = baKv_(SG_JAN_CACHE) || cache;
         /* ② 駿河屋の控え（sg_<hw>）には書かない（大物の書き込みを増やさない）。候補づくりは jan_sg_cache を先に見るので要らない */
         var rowHit = 0;
         /* ③ llog_cost_<hw> の jan を埋める：台帳の key→cc:item#model から鍵を作る */
         var lc = baKv_('llog_cost_' + sjHw) || {}; lc.m = lc.m || {}; var lcHit = 0;
-        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; if (cache[id] === undefined || cache[id] === null) return; var jan = cache[id] || ''; var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object') { if (jan && !e.jan) { e.jan = jan; lcHit++; } if (!e.jc) { e.jc = 1; lcHit++; } } }); });
+        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; if (!sjLoose && (cache[id] === undefined || cache[id] === null)) return; var jan = sjLoose ? '' : (cache[id] || ''); var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object') { if (jan && !e.jan) { e.jan = jan; lcHit++; } if (!e.jc) { e.jc = 1; lcHit++; } } }); });
         if (lcHit) baKvSet_('llog_cost_' + sjHw, lc);
         sjout = { ok: true, hw: sjHw, listed: listedIds.length, todoBefore: todo.length, fetched: fetched, hit: hit, rowsFilled: rowHit, llogFilled: lcHit, cached: Object.keys(cache).length, log: sjSt.log.slice(-5) };
       } catch (esj) { sjout = { ok: false, error: String((esj && esj.message) || esj) }; }
@@ -8857,7 +8858,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         baSet_(ledger, _x0._p.key, cc, String(tgt.item_id) + '#' + _ru.model_id); res.added++;
         listedSet[baTmKey_(_x0.option)] = 1;
         tgt.models = (tgt.models || []).map(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && (m.n || m.name)) || '')) ? { n: _x0.option, price: _x0.price } : m; });
-        if (_x0._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan, hw: hw, ja: _x0._p.ja || '', src: _x0._p.src || '' });
+        if (_x0._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan, hw: hw, ja: _x0._p.ja || '', src: _x0._p.src || '' });
         /* 記録は【普通に足した時と丸ごと同じ形】。形が違うと売れた時の他国在庫0・写真の見直し・
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
@@ -8915,7 +8916,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var mid = okNames[okNm_(x.option)];
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
-        if (mid && x._p.jan) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
+        if (mid && x._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
         try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
@@ -9052,6 +9053,8 @@ function tcgMpnOf_(c) {
   return '';
 }
 var SG_JAN_CACHE = 'jan_sg_cache', SG_JAN_PER_RUN = 20;
+/* ★2026-10-17 本人「個体識別のための JAN なので、そういう場合は JAN 不要」：ばら売りの小物（妖怪メダル・メザスタ・フレンダ・あつ森カード）は駿河屋の gtin13 が【パックの JAN】＝別の個体と同じ番号になる。JAN は付けず（台帳にも書かず）名前で識別する */
+var BA_LOOSE_HW = /^(yokai|mezastar|frienda|acnh)$/;
 function sgJanFromPage_(st, sgId) {
   sgId = String(sgId || ''); if (!/^\d+$/.test(sgId)) return '';
   st._sgJan = st._sgJan || (baKv_(SG_JAN_CACHE) || {}); st._sgJanN = st._sgJanN || 0;
@@ -9978,7 +9981,8 @@ function tcgTick(manual) {
       }
       /* ★2026-10-16 守り：仕入れ目安が無い・JAN も型番も無い明細は出さない（本人「これから絶対なし」）。写真を上げる前に見る＝無駄な通信をしない */
       { var _mpnG = tcgMpnOf_(c), _janG = String(c.jan || '');
-        if (!_janG && !_mpnG && /^goods_|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(String(hw))) _janG = sgJanFromPage_(st, String(c.key || '').split(':')[1] || '');   /* ★2026-10-16 20:00 小物4区分（妖怪メダル等）も駿河屋ページの JAN を見る（jan_sg_cache はブラウザ側の「📇 駿河屋のJANを埋める」からも写す） */
+        if (BA_LOOSE_HW.test(String(hw))) _janG = '';   /* ★2026-10-17 ばら売り小物はパック JAN を付けない（個体識別にならない） */
+        if (!_janG && !_mpnG && /^goods_|^moncolle$/.test(String(hw))) _janG = sgJanFromPage_(st, String(c.key || '').split(':')[1] || '');   /* ★2026-10-16 20:00 小物4区分（妖怪メダル等）も駿河屋ページの JAN を見る（jan_sg_cache はブラウザ側の「📇 駿河屋のJANを埋める」からも写す） */
         if (!(Number(c.cost) > 0)) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は仕入れ目安が無いので出さない'); baSkipRec_(st, hw, '', c, 'nocost'); continue; }
         if (!_janG && !_mpnG) {
           /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
@@ -9988,7 +9992,7 @@ function tcgTick(manual) {
           if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
           baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');
         }
-        var _jcG = (_janG ? 1 : ((st._sgJan && st._sgJan[String(c.key || '').split(':')[1] || ''] !== undefined) ? 1 : 0));   /* 1＝JAN を確かめ済み（答えが無ければ「JAN なし」と出す） */
+        var _jcG = BA_LOOSE_HW.test(String(hw)) ? 1 : (_janG ? 1 : ((st._sgJan && st._sgJan[String(c.key || '').split(':')[1] || ''] !== undefined) ? 1 : 0));   /* ばら売り＝JAN 不要（確かめ済み扱い） */   /* 1＝JAN を確かめ済み（答えが無ければ「JAN なし」と出す） */
         c = Object.assign({}, c, { jan: _janG, mpn: _mpnG, jc: _jcG }); }
       var imageId = null; try { imageId = uploadImageUrl_(ph.img); } catch (eU) { baLog_(st, '画像アップ失敗: ' + c.en + ' ' + String(eU).slice(0, 120)); if (ph.from === 'mercari' && tPre[c.key] && tPre[c.key].imgs) { tPre[c.key].imgs = tPre[c.key].imgs.filter(function (m) { return baJpgUrl_(String(m.img || '').replace(/\?.*$/, '')) !== ph.img; }); tPre[c.key]._dirty = 1; BA_PRE_DIRTY_TCG = true; } continue; }
       if (!imageId) continue;

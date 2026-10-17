@@ -21663,6 +21663,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-17', items: [
+      '🔢 <b>ばら売りの小物（妖怪メダル・メザスタ・フレンダ・あつ森カード）は「JAN 不要（ばら売り）／ 名前で識別」と出します</b>（本人「個体識別のための JAN なので、そういう場合は JAN 不要」）。駿河屋の商品ページの JAN はパックの番号で、同じ弾の別のメダルが同じ番号になるため、付けると重複検知で別物が同じに見える。GAS も出す時に付けず、台帳にも書きません（20261017-0130）。',
+    ] },
     { date: '2026-10-16', items: [
       '📇 <b>出品ログの「JAN なし（確かめ済み）」が「JAN 未取得」のまま出ていたのを直しました</b>。台帳から控えを作る時に「駿河屋まで確かめた」印を写していませんでした。妖怪メダル 1,126 件は駿河屋の商品ページまで全部確かめ済み（JAN 493・無し 633）。',
       '📇 <b>「駿河屋のJANを埋める」が Cloudflare の確認ページ（200 で返る約6KBの「Just a moment...」）を「JAN が無い」と記録しないようにしました</b>。見つけたら遮断扱いで10分休みます。あわせて GAS 20261016-2000：妖怪メダル・メザスタ等の小物4区分も出す前に駿河屋ページの JAN を見る／sg_jan_backfill の対象に小物4区分／「見たが無かった」は取りに行き直さない。amiibo の明細名に版（Smash／AC／Kirby 等）が付くようになりました（20:00 の出品で確認）。',
@@ -37526,6 +37529,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 let pv = {}; try { pv = (typeof pidOf === 'function') ? (pidOf('id:' + r.item_id + (r.model_id ? '#' + r.model_id : '')) || pidOf('id:' + r.item_id) || {}) : {}; } catch (_) {}
                 let jan = String(pv.jan || '').trim(); let mpn = String(pv.mpn || '').trim();
                 try { const _ce = logState.costMap && logState.costMap[r.cc + '|' + r.item_id + '|' + r.model_id]; if (_ce) { if (!jan && _ce.jan) jan = String(_ce.jan); if (!mpn && _ce.mpn) mpn = String(_ce.mpn); } } catch (_) {}   /* ★2026-10-16 本人「JAN（無ければ型番）は全部書いて」：🤖/🃏の控えの JAN・型番を先に使う */
+                /* ★2026-10-17 本人「個体識別のための JAN なので、そういう場合（ばら売りのメダル等＝駿河屋の gtin13 がパックの JAN で別の個体と同じ番号）は JAN 不要」：ばら売りの小物は JAN を出さず「名前で識別」 */
+                let _loose = false; try { const _skL = String((logState.skuMap && logState.skuMap[r.cc + '|' + r.item_id + '#' + r.model_id]) || ''); _loose = /^(YOKAI|MEZASTAR|FRIENDA|ACNH)/i.test(_skL) || /Yo-?kai|妖怪|Medal|メザスタ|Mezastar|Frienda|フレンダ|amiibo\s*card/i.test(String(r.name || '')); } catch (_) {}
+                if (_loose) jan = '';
                 /* ★2026-10-12 本人「仕入れ目安、型番とかなぜでない？」「カードは、JANってあるの？」：シングルカードに JAN は無い＝カード番号が型番。
                    product_ids（大物）には書かず、🃏の明細SKU（区分_弾記号_番号_レアリティ 例 POKECA_M6A_124_103_SAR）から読む＝DBの読み書きゼロ */
                 if (!jan && !mpn && logState.skuMap) { const _sk = String(logState.skuMap[r.cc + '|' + r.item_id + '#' + r.model_id] || ''); const _m = /^(POKECAOLD|POKECA_OLD|POKECA|YUGIOHRD|YUGIOH|OPCG|DUEMA|WEISS|VANGUARD|DIGIMON|BATSPI|ACNH|YOKAI|MONCOLLE|MEZASTAR|WIXOSS|ZX|SHADOWVERSE|DBH|MTG|UNIONARENA|GANBARIZING|GANBALEGENDS|[A-Z]+_CARD)_(.+)$/i.exec(_sk); /* ★2026-10-13 本人「なぜこれ型番を出さないの？」「出せるやつは出して欲しい」＝amiiboカード（ACNH_S6）・ガンバ・WIXOSS 等が抜けていた。GAS の SKU の頭（BA_TCG_SKU）と同じ並び */ if (_m) { const _p = _m[2].split('_'); const _rar = /^[A-Z]{1,4}$/.test(_p[_p.length - 1] || '') && _p.length > 2 ? _p.pop() : ''; mpn = (_p.length >= 3 && /^\d+$/.test(_p[_p.length - 1]) && /^\d+$/.test(_p[_p.length - 2]) ? _p.slice(0, -2).join(' ') + ' ' + _p[_p.length - 2] + '/' + _p[_p.length - 1] : _p.join('-')).trim() + (_rar ? ' ' + _rar : ''); if (mpn && !/\d/.test(mpn)) mpn = ''; } }   /* ★2026-10-16 妖怪メダル等、SKU が名前だけ（YOKAI_USAPYON_INVADER_MODE）の物を型番にしない＝型番は必ず数字を含む。無ければ「型番 なし（名前）」 */
@@ -37534,8 +37540,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 if (typeof productIds !== 'undefined' && productIds === null) return '<span style="display:block;font-size:9.5px;color:#c0392b">JAN 読み込み中…</span>';
                 /* ★2026-10-16 本人「JAN も型番も無ければ無いでいいけど、その『ない』って書いといて」：確かめ済み（控えの jc=1）なら「JAN なし」、まだなら「JAN 未取得」。型番が無い区分（グッズ）は「型番 なし」と書く */
                 if (!jan) { let _jc = false, _goods = false; try { const _ce2 = logState.costMap && logState.costMap[r.cc + '|' + r.item_id + '|' + r.model_id]; _jc = !!(_ce2 && _ce2.jc); const _sk2 = String((logState.skuMap && logState.skuMap[r.cc + '|' + r.item_id + '#' + r.model_id]) || ''); _goods = /^(AMIIBO|YOKAI|MONCOLLE|MEZASTAR|FRIENDA|ACNH|GOODS)/i.test(_sk2) || /amiibo|Yo-kai|妖怪|Medal|モンコレ|メザスタ|Figure|フィギュア|公仔|ฟิกเกอร์/i.test(String(r.name || '')); } catch (_) {}
-                  const _janTxt = (_jc || mpn) ? 'JAN なし' : 'JAN 未取得';   /* 型番があるカードは JAN を調べる対象ではない＝「なし」で確定 */ const _mpnTxt = mpn ? ' ／ 型番 ' + esc(mpn) : (_goods ? ' ／ 型番 なし（' + esc(String(r.model_name || '').slice(0, 24) || '名前なし') + '）' : ' ／ 型番 —');   /* 本人「キャラ名やバージョン名を入れてもいいから『ない』と分かるように。空欄だけはやめて」＝識別はキャラ名（明細名） */
-                  return `<span style="display:block;font-size:9.5px;color:${_jc || mpn ? '#8a8f98' : '#c0392b'}" title="${(_jc || mpn) ? (mpn ? 'シングルカードに JAN は無い＝型番（カード番号）で識別' : '駿河屋の商品ページまで確かめたが JAN が無かった') : 'JAN はまだ調べていない（夜の JAN 調べに積んである）'}">${_janTxt}${_mpnTxt}</span>`; }
+                  const _janTxt = _loose ? 'JAN 不要（ばら売り）' : ((_jc || mpn) ? 'JAN なし' : 'JAN 未取得');   /* 型番があるカードは JAN を調べる対象ではない＝「なし」で確定 */ const _mpnTxt = mpn ? ' ／ 型番 ' + esc(mpn) : (_loose ? ' ／ 名前で識別（' + esc(String(r.model_name || '').slice(0, 24) || '名前なし') + '）' : (_goods ? ' ／ 型番 なし（' + esc(String(r.model_name || '').slice(0, 24) || '名前なし') + '）' : ' ／ 型番 —'));   /* 本人「キャラ名やバージョン名を入れてもいいから『ない』と分かるように。空欄だけはやめて」＝識別はキャラ名（明細名） */
+                  return `<span style="display:block;font-size:9.5px;color:${_loose || _jc || mpn ? '#8a8f98' : '#c0392b'}" title="${_loose ? 'ばら売りの小物＝JAN はパックの番号で個体を識別しないので付けない（名前で識別）' : ((_jc || mpn) ? (mpn ? 'シングルカードに JAN は無い＝型番（カード番号）で識別' : '駿河屋の商品ページまで確かめたが JAN が無かった') : 'JAN はまだ調べていない（夜の JAN 調べに積んである）')}">${_janTxt}${_mpnTxt}</span>`; }
 
                 return `<span style="display:block;font-size:9.5px;color:#1e8e3e;font-weight:700"><span class="llog-jan" data-j="${av(jan)}" title="押すとコピーします" style="cursor:pointer;text-decoration:underline dotted">JAN ${esc(jan)}</span>${mpn ? ` <span style="color:#8a8f98;font-weight:400">／ 型番 ${esc(mpn)}</span>` : ''}</span>`;
               })()}
