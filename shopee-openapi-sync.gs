@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261018-2245';
+var SRC_VER = '20261019-0005';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8513,6 +8513,15 @@ function baMainShop_(cc) {
   } catch (e) { return 0; }
 }
 /* その国の2店舗目（サブ垢）の shop_id。登録簿 accounts の status が 'sub' の行。無ければ 0 */
+/* ★2026-10-19 その国の全部の店（家族カタログのある店＋accounts の main/sub）が出品枠いっぱいか。1店でも空きがあれば false */
+function baCcNoRoom_(cc, famRows) {
+  var shops = {};
+  (famRows || []).forEach(function (r) { if (r && r.shop_id) shops[String(r.shop_id)] = 1; });
+  try { (sbSelectAll_('accounts', 'select=shop_id,status&cc=eq.' + encodeURIComponent(cc) + '&status=in.(main,sub)') || []).forEach(function (a) { if (a && a.shop_id) shops[String(a.shop_id)] = 1; }); } catch (e) {}
+  var ids = Object.keys(shops); if (!ids.length) return false;
+  for (var i = 0; i < ids.length; i++) { if (!baShopFull_(cc, ids[i])) return false; }
+  return true;
+}
 function baSubShop_(cc, mainShopId) {
   try {
     var rows = sbSelectAll_('accounts', 'select=cc,shop_id,status&cc=eq.' + encodeURIComponent(cc));
@@ -8707,6 +8716,19 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
     /* ★2026-10-15 本人「Wii/Wii U ハンドル マリオ…絶対違うやん」の調べで実例：BR のバトスピ「Ryuki Survive SEC 26RCB01-X05」が『関連するバリエカタログ』の仕組み（名前のシリーズ鍵 kamen rider）で
        【仮面ライダーのゲームソフトのカタログ】に入っていた（10/12）。トレカ・グッズは家族カタログ（親SKU）以外に入れない＝シリーズ鍵の寄せ先は使わない */
     var sr = (TCG_HW_JA[hw] || /^goods_/.test(String(hw))) ? [] : baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+  /* ★2026-10-19 本人「枠空いているバリエーションにとりあえず入れてほしい」：その国の全部の店が出品枠いっぱい（＝新しいカタログを作っても公開できない）なら、
+     シリーズ名が違っても、同じ区分（家族）で【公開中・明細に空きがある】カタログを入れ先に足す（シリーズのカタログを先、他はその後ろ）。価格の幅はこれまで通り守る。
+     実測 10/18：TH は SV ①② が100で満杯・① 3つに空き 214、TW は SV② 83・MC① 26・S① 86 の空き。PH/SG は空き 3〜4 でほぼ無い */
+  try {
+    if ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_/.test(String(hw))) {
+      if (baCcNoRoom_(cc, famRows)) {
+        var _addedAny = 0;
+        order.forEach(function (gk) { var g = groups[gk]; if (!g.ser) return; var have = {}; g.rows.forEach(function (r) { have[String(r.item_id)] = 1; });
+          famRows.forEach(function (r) { if (!have[String(r.item_id)] && r.status === 1 && (r.models || []).length < 100) { g.rows.push(r); _addedAny++; } }); });
+        if (_addedAny) baLog_(st, cc + '：出品枠がいっぱいで新しいカタログを作れないので、シリーズ違いでも空きのある ' + hw + ' のカタログに入れます（' + _addedAny + ' 件を入れ先に足した）');
+      }
+    }
+  } catch (eNR) { baLog_(st, cc + '：空きカタログへの振り分けで失敗 ' + String((eNR && eNR.message) || eNR).slice(0, 120)); }
   /* ★2026-09-23 その国に家族カタログが1つも無ければ、ここで1つ作ってから入れる（MY・TW が対象外だった理由） */
   /* ★2026-09-23 作りすぎない安全弁。今日は1日で14件（うち7件は公開まで）作ってしまい、写真の取り違えが広がった。
      1回の巡回で作るのは1件・1日 famPerDay（既定6）件まで。数は st に日付つきで持つ（推定ではなく実績で止める）。 */
