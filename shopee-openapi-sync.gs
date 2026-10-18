@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261018-2140';
+var SRC_VER = '20261018-2200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2040,7 +2040,8 @@ function callShop_(shopId, path, query, method, body) {
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
-  if (j.error) throw new Error(path + ' error=' + j.error + ' ' + (j.message || ''));
+  if (j.error) { var _fl = ''; try { var _f = (j.response || {}).failure_list; if (_f && _f.length) _fl = ' failure_list=' + JSON.stringify(_f).slice(0, 300); } catch (eFl) {}   /* ★2026-10-18 unlist_item 等は上の error が「all failed」だけで、本当の理由は response.failure_list[].failed_reason に入る。これを捨てていたので『公開失敗＝枠満杯』と決めつけ、172/1,000 の TH 2店舗目に満杯の印を付けていた */
+    throw new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); }
   return j;
 }
 function shopInfo_(shopId) { var j = callShop_(shopId, '/api/v2/shop/get_shop_info', null, 'get'); return { region: j.region, shop_name: j.shop_name }; }
@@ -8965,7 +8966,7 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
       try { unlistItem_(tgt.shop_id, tgt.item_id, false); tgt.status = 1; baLog_(st, cc + '：' + tgt.name + ' を公開（非公開のまま明細が入っていた）'); }
       catch (e3) {
         var em3 = String((e3 && e3.message) || e3);
-        if (/unlist_item_all_failed|item_limit|limit/i.test(em3)) { baShopFull_(cc, tgt.shop_id, true); baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
+        if (/item_limit|limit|quota|exceed|maximum/i.test(em3)) { baShopFull_(cc, tgt.shop_id, true);   /* ★2026-10-18 all_failed だけでは満杯と言わない（理由は failure_list に出る） */ baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
         else baLog_(st, cc + '：公開に失敗 ' + em3.slice(0, 160));
       }
     }
@@ -9004,7 +9005,7 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
       /* ★2026-09-23 本人「1店舗目の枠がないなら2店舗目に出せばいい」。
          出品枠が満杯だと公開だけが弾かれる（実測 TH：`error_unlist_item_all_failed`・1店舗目は500/500）。
          ここで【この店は満杯】と覚えて、次に新しいカタログを作る時は2店舗目に作る。 */
-      if (/unlist_item_all_failed|item_limit|limit/i.test(em2)) { baShopFull_(cc, tgt.shop_id, true); baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
+      if (/item_limit|limit|quota|exceed|maximum/i.test(em2)) { baShopFull_(cc, tgt.shop_id, true);   /* ★2026-10-18 同上 */ baLog_(st, cc + '：出品枠が満杯で公開できません → この国の新しいカタログは2店舗目に作ります'); }
       baLog_(st, cc + '：公開に失敗 ' + em2.slice(0, 160));
     }
   }
