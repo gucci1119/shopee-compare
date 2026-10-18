@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261018-2200';
+var SRC_VER = '20261018-2215';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -677,6 +677,30 @@ function doGetInner_(e) {
         baout = p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'item_limit_refresh') {
+      /* ★2026-10-18 全店の出品枠（get_item_limit の item_count_limit.max_limit）を取り直して app_kv shop_item_limit に保存。
+         9/23 の控え（TH 2店舗目 1,000）が古く、実際は 172 件で「listing limit に達した」と断られていた。1店1回＝13回の urlfetch */
+      var ilcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var ilo;
+      try {
+        var ilwt = P_().getProperty('WRITE_TOKEN');
+        if (!ilwt || p.token !== ilwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var accs = sbSelectAll_('accounts', 'select=cc,shop_id,status&status=in.(main,sub)') || [];
+        var ilShops = [], ilErrs = [];
+        accs.forEach(function (a) {
+          if (!a || !a.shop_id) return;
+          try {
+            var lim = callShop_(parseInt(a.shop_id, 10), '/api/v2/product/get_item_limit', {}, 'get');
+            var cap = Number((((lim.response || {}).item_count_limit) || {}).max_limit) || 0;
+            ilShops.push({ cc: a.cc, shop_id: String(a.shop_id), role: a.status, cap: cap });
+          } catch (eL) { ilErrs.push(a.cc + '/' + a.shop_id + ': ' + String((eL && eL.message) || eL).slice(0, 120)); }
+        });
+        var ilPrev = baKvFresh_('shop_item_limit') || {};
+        if (ilShops.length) baKvSet_('shop_item_limit', { at: new Date().toISOString(), shops: ilShops });
+        ilo = { ok: true, shops: ilShops, errs: ilErrs, prev: ilPrev.shops || [] };
+      } catch (err) { ilo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(ilcb + '(' + JSON.stringify(ilo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'unlist_item') {
       var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -8519,7 +8543,11 @@ function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g,
    作れなければ null（＝今までどおり1店舗目で続ける） */
 function baCloneToSub_(cc, base, newName, st, hw, role) {
   var sub = baSubShop_(cc, base.shop_id);
-  if (!sub) { baLog_(st, cc + '：2店舗目が登録簿にありません（1店舗目のまま続けます）'); return null; }
+  if (!sub) {
+    var _isSubBase = false; try { _isSubBase = (sbSelectAll_('accounts', 'select=shop_id,status&cc=' + encodeURIComponent(cc) + '&shop_id=eq.' + encodeURIComponent(String(base.shop_id))) || []).some(function (r) { return String(r.status || '') === 'sub'; }); } catch (eB) {}
+    baLog_(st, cc + (_isSubBase ? '：2店舗目も出品枠が満杯です（' + base.shop_id + '）' : '：2店舗目が登録簿にありません'));   /* ★2026-10-18 元のカタログが2店舗目の時に「登録簿にありません」と出ていた＝実際は2店舗目も満杯 */
+    return null;
+  }
   var pr = 0;
   try { pr = (base.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (e) {}
   /* ★2026-09-23 2店舗目に同じ名前のカタログが既にあると `product duplicates an existing product` で弾かれる（実測 TH）。
@@ -8766,6 +8794,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
         var sub1 = baCloneToSub_(cc, base, newName, st, hw, _role);   /* ★2026-09-26 元の名前（①のまま）でなく、国の中で空いている番号の名前で作る */
+        if (!sub1) { res.note = hw + ' の複製先が無い（この店は出品枠が満杯・2店舗目も無いか満杯）→ この国は今日は足しません'; baLog_(st, cc + '：' + res.note); break; }   /* ★2026-10-18 ここで止めないと下へ抜けて【満杯の店】に複製を作り続けていた（実測 TH 2店舗目に SV ③④⑤⑥・どれも公開できず） */
         if (sub1) {
           BA_FAM_TICK++; st.cloneMade.n++;
           tgt = sub1; rows.push(tgt); newItem = true;
