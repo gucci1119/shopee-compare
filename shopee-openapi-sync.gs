@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261019-0005';
+var SRC_VER = '20261019-0015';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8720,7 +8720,9 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
      シリーズ名が違っても、同じ区分（家族）で【公開中・明細に空きがある】カタログを入れ先に足す（シリーズのカタログを先、他はその後ろ）。価格の幅はこれまで通り守る。
      実測 10/18：TH は SV ①② が100で満杯・① 3つに空き 214、TW は SV② 83・MC① 26・S① 86 の空き。PH/SG は空き 3〜4 でほぼ無い */
   try {
-    if ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_/.test(String(hw))) {
+    /* ★2026-10-19 00:1x 本人「そのカタログにあった商品を入れて欲しいけど」＝シリーズ違いは混ぜない。この振り分けは cfg.tcgMixSeriesWhenFull === true の時だけ（既定オフ）。
+       代わりに、空きのあるカタログに合うシリーズのカードを候補として優先する */
+    if (cfg.tcgMixSeriesWhenFull === true && ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_/.test(String(hw)))) {
       if (baCcNoRoom_(cc, famRows)) {
         var _addedAny = 0;
         order.forEach(function (gk) { var g = groups[gk]; if (!g.ser) return; var have = {}; g.rows.forEach(function (r) { have[String(r.item_id)] = 1; });
