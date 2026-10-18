@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261018-2215';
+var SRC_VER = '20261018-2245';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8544,7 +8544,7 @@ function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g,
 function baCloneToSub_(cc, base, newName, st, hw, role) {
   var sub = baSubShop_(cc, base.shop_id);
   if (!sub) {
-    var _isSubBase = false; try { _isSubBase = (sbSelectAll_('accounts', 'select=shop_id,status&cc=' + encodeURIComponent(cc) + '&shop_id=eq.' + encodeURIComponent(String(base.shop_id))) || []).some(function (r) { return String(r.status || '') === 'sub'; }); } catch (eB) {}
+    var _isSubBase = false; try { _isSubBase = (sbSelectAll_('accounts', 'select=shop_id,status&cc=eq.' + encodeURIComponent(cc) + '&shop_id=eq.' + encodeURIComponent(String(base.shop_id))) || []).some(function (r) { return String(r.status || '') === 'sub'; }); } catch (eB) {}
     baLog_(st, cc + (_isSubBase ? '：2店舗目も出品枠が満杯です（' + base.shop_id + '）' : '：2店舗目が登録簿にありません'));   /* ★2026-10-18 元のカタログが2店舗目の時に「登録簿にありません」と出ていた＝実際は2店舗目も満杯 */
     return null;
   }
