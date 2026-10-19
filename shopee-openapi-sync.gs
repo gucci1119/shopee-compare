@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261019-1600';
+var SRC_VER = '20261019-1620';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -756,16 +756,17 @@ function doGetInner_(e) {
     /* 🧺 ★2026-10-19 本人「まとめ買い割引：2点5%・3点10%、BR・PH から…やりましょう」：公式APIの【Bundle Deal】（rule_type 2＝割合・additional_tiers で段）。
        店の公開中・在庫ありのカタログを全部入れる（1つの Bundle Deal は1,000件まで＝超える店は2つ目を作る）。期間は 90 日（Shopee の上限の範囲）。
        控え＝app_kv promo_bundle_<bundle_deal_id>。終わらせるなら action=promo_bundle_end */
-    if (p.action === 'promo_bundle' || p.action === 'promo_bundle_end') {
+    if (p.action === 'promo_bundle' || p.action === 'promo_bundle_end' || p.action === 'promo_bundle_delete') {
       var pbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var pbo;
       try {
         var pbwt = P_().getProperty('WRITE_TOKEN');
         if (!pbwt || p.token !== pbwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var pbShop = parseInt(p.shop_id, 10); if (!pbShop) throw new Error('shop_id 必須');
-        if (p.action === 'promo_bundle_end') {
+        if (p.action === 'promo_bundle_end' || p.action === 'promo_bundle_delete') {
           var pbId0 = String(p.bundle_deal_id || ''); if (!pbId0) throw new Error('bundle_deal_id 必須');
-          var bej = callShop_(pbShop, '/api/v2/bundle_deal/end_bundle_deal', null, 'post', { bundle_deal_id: Number(pbId0) });
+          /* 進行中は end、これからの物（upcoming）は delete（実測 10/19：upcoming に end は「Only the ongoing bundle deal can be ended」） */
+          var bej = callShop_(pbShop, p.action === 'promo_bundle_delete' ? '/api/v2/bundle_deal/delete_bundle_deal' : '/api/v2/bundle_deal/end_bundle_deal', null, 'post', { bundle_deal_id: Number(pbId0) });
           pbo = { ok: true, action: p.action, bundle_deal_id: pbId0, res: bej.response || null };
         } else {
           var pct1 = Number(p.pct1) || 5, min1 = Number(p.min1) || 2, pct2 = Number(p.pct2) || 10, min2 = Number(p.min2) || 3, pbDays = Number(p.days) || 90;
@@ -778,12 +779,15 @@ function doGetInner_(e) {
           for (var ci = 0; ci < pbIds.length; ci += 1000) {
             var chunk = pbIds.slice(ci, ci + 1000);
             var pbName = String(p.name || ('Bundle ' + min1 + '=' + pct1 + '% ' + min2 + '=' + pct2 + '%')).slice(0, 22) + (pbIds.length > 1000 ? ' ' + String.fromCharCode(65 + deals.length) : '');
-            var bj = callShop_(pbShop, '/api/v2/bundle_deal/add_bundle_deal', null, 'post', { rule_type: 2, discount_percentage: pct1, min_amount: min1, start_time: pbStart, end_time: pbEnd, name: pbName.slice(0, 25), purchase_limit: Number(p.purchase_limit) || 10, additional_tiers: [{ min_amount: min2, discount_percentage: pct2 }] });
+            var bdBody = { rule_type: 2, discount_percentage: pct1, min_amount: min1, start_time: pbStart, end_time: pbEnd, name: pbName.slice(0, 25), purchase_limit: Number(p.purchase_limit) || 10 };
+            if (String(p.tiers || '1') !== '0') bdBody.additional_tiers = [{ min_amount: min2, discount_percentage: pct2 }];   /* tiers=0 で段なし（切り分け用） */
+            var bj = callShop_(pbShop, '/api/v2/bundle_deal/add_bundle_deal', null, 'post', bdBody);
             var bid = (bj.response || {}).bundle_deal_id; if (!bid) throw new Error('add_bundle_deal: ' + JSON.stringify(bj).slice(0, 200));
             var okN = 0, errN = 0;
             for (var bi = 0; bi < chunk.length; bi += 50) {
               var ij = callShop_(pbShop, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: Number(bid), item_list: chunk.slice(bi, bi + 50).map(function (i) { return { item_id: i, status: 1 }; }) });
               var ir = ij.response || {}; okN += (ir.success_list || []).length;
+              if (bi === 0 && !pbErrs.length && (ir.failed_list || []).length) pbErrs.push({ item_id: 0, err: 'raw: ' + JSON.stringify(ij).slice(0, 300) });   /* 切り分け用に最初の生の返事を残す */
               (ir.failed_list || []).forEach(function (f) { errN++; if (pbErrs.length < 40) pbErrs.push({ item_id: f.item_id, err: String(f.fail_error || '') + ' ' + String(f.fail_message || '').slice(0, 80) }); });
             }
             pbOk += okN;
