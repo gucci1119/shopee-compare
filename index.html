@@ -21713,6 +21713,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-19', items: [
+      '🛍 <b>トレカの写真集めを Yahoo!フリマにも広げました</b>（本人「枠が空いてたらフルで使い回したい」「ブラジル、トレカとかガンガン出して」）：メルカリで見つからなかったカードは Yahoo!フリマでも探す（同じ照合＝番号が題名にある・NG語なし・新品/未使用は除く）。接続枠は使わない（ブリッジ）。弾かれたら6時間休む。写真の合否は今まで通り Claude の判定。\n',
       '📊 <b>閲覧・いいね・販売の統計を毎日取り直すようにしました</b>：本体の毎日 4:44 の同期が 7/28 から1度も書けていなかった（Boost の選ぶ根拠と商品表の数字が3か月前のままだった）。担当PCのポータルが毎日 17 時以降に1回、全13店の統計を Shopee から取り直す。\n',
       '🧹 <b>👣アクセスの商品表に「枠空け候補」を足しました</b>（本人「出品はバリエーションの枠が埋まったら打ち止め？」「別の施策をやらなきゃね」「出品開始日が古く、いいねも閲覧数もついていなく、1回も売れていないカタログが優先」「画像も欲しい」「ポータルにもまとめて」）。条件＝公開中・生涯売上0・閲覧0・いいね0・出品30日超を古い順に（画像・出品日・経過日数つき）。☑で選んで「非公開にする」を押すと公式API（unlist_item）で1件ずつ非公開に＝消さないので戻せる。「📊 統計を取り直す」で表示中の国の閲覧・いいね・販売を Shopee から取り直す（主店舗の統計は 7/28 から止まっていたので、この日に PH・SG・TH・TW を取り直した）。出品枠：PH・SG・TH・TW は 1店舗目・2店舗目（枠100）とも満杯、BR・VN・MY は余裕あり。',
     ] },
@@ -32890,6 +32891,35 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
      GAS はメルカリを読めないので、ゲームと同じくこのブラウザ（ブリッジ）がメルカリで写真の候補を集め、app_kv.tcg_pre（カードの鍵→{hw,at,imgs[]}）に置く。
      boshu_auto_pre（約6MB）には相乗りしない＝GAS が30分ごとに読むので小さく保つ（上限 3,000 枚ぶん）。AI判定はここではしない（出す直前に GAS が1枚だけ判定）。
      照合はカード番号（157/103 等）が題名に入っていること＋GAS と同じ NG 語（BOX・パック・まとめ・鑑定…）。見つからなかったカードは3日は引き直さない */
+  /* 🛍 ★2026-10-19 本人「枠が空いてたらフルで使い回したい」「ブラジル、トレカとかガンガン出して」＝いまの天井は写真が見つかる枚数（メルカリだけ・30分で2〜15枚）。
+     メルカリで見つからなかったカードは Yahoo!フリマ（paypayfleamarket.yahoo.co.jp）でも探す。GAS の baPaypay_ と同じ読み方（__NEXT_DATA__）を、接続枠を使わずブリッジ（GM_xhr）で。
+     弾かれた（403/429/5xx・__NEXT_DATA__ が無い）ら 6 時間休む（[[dont-get-ip-blocked]]）。写真の合否は今まで通り Claude の判定（tcg_pre → 予定タスク）が見る */
+  async function yfmSearch(q) {
+    try { if (Date.now() - Number(localStorage.getItem('smdYfmBlockedAt') || 0) < 6 * 3600000) return { items: [], blocked: true, paused: true }; } catch (_) {}
+    const url = 'https://paypayfleamarket.yahoo.co.jp/search/' + encodeURIComponent(q) + '?open=1&sort=price&order=asc';
+    let html = '';
+    try { html = await bridgeRequest('GET', url, null, { timeout: 20000 }); } catch (e) { const em = String((e && e.message) || e); if (/\b(403|429|5\d\d)\b/.test(em)) { try { localStorage.setItem('smdYfmBlockedAt', String(Date.now())); } catch (_) {} return { items: [], blocked: true, err: em }; } return { items: [], err: em }; }
+    const m = String(html || '').match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!m) { try { localStorage.setItem('smdYfmBlockedAt', String(Date.now())); } catch (_) {} return { items: [], blocked: true }; }
+    let j = null; try { j = JSON.parse(m[1]); } catch (_) { try { localStorage.setItem('smdYfmBlockedAt', String(Date.now())); } catch (_) {} return { items: [], blocked: true }; }
+    const out = { items: [], blocked: false }, seen = {};
+    const walk = (o, depth) => {
+      if (!o || typeof o !== 'object' || depth > 12 || out.items.length > 120) return;
+      const id = o.id;
+      if (id && /^[a-z0-9]{8,}$/i.test(String(id)) && o.price != null && (o.name || o.title) && !seen[id]) {
+        seen[id] = 1;
+        if (o.itemStatus == null || o.itemStatus === 'OPEN') {
+          const im = o.imageUrl || (o.images && o.images[0] && (o.images[0].url || o.images[0].imageUrl || (typeof o.images[0] === 'string' ? o.images[0] : ''))) || o.thumbnailImageUrl || '';
+          const cond = String(o.condition || o.itemCondition || (o.conditionName || '') || '');
+          if (im) out.items.push({ id: String(id), name: String(o.name || o.title), img: String(im).replace(/&amp;/g, '&'), price: Number(o.price) || 0, url: 'https://paypayfleamarket.yahoo.co.jp/item/' + id, cond });
+        }
+      }
+      const vs = Array.isArray(o) ? o : Object.keys(o).map(k => o[k]);
+      for (let i = 0; i < vs.length; i++) walk(vs[i], depth + 1);
+    };
+    walk(j, 0);
+    return out;
+  }
   async function baCollectTcg(cfg, msgs) {
     const tc = (cfg && cfg.tcg) || {};
     if (!tc.on || !settings.boshuUrl3) return;
@@ -32898,7 +32928,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const tp = Object.assign({}, baKvMust(await baKvGetRaw('tcg_pre'), 'トレカの写真の控え') || {});
     let ti = 0; try { ti = Number(localStorage.getItem('smdTcgCollectIdx') || 0) || 0; } catch (_) {}
     const sleep = (ms) => new Promise(rs => setTimeout(rs, ms));
-    let changed = 0;
+    let changed = 0, yfmPaused = false;
+    try { yfmPaused = Date.now() - Number(localStorage.getItem('smdYfmBlockedAt') || 0) < 6 * 3600000; } catch (_) {}
     /* ★2026-10-12 本人「ゲームよりトレカ優先してって言ったやん」：前はトレカ2シリーズ／ゲーム8機種で、トレカは30分に1回しか順番が来なかった → 1回4シリーズ（cfg.tcg.collectHws） */
     const nT = Math.max(1, Math.min(10, Number(tc.collectHws) || 4));
     for (let t = 0; t < nT; t++) {
@@ -32912,7 +32943,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const rejOf = (c) => new Set(((c && c.rej) || []).concat(((tp[c.key] || {}).rej || {}).imgs || []));
       const fresh = (c) => { const e = tp[c.key]; if (!e) return false; if ((hw === 'mezastar' || hw === 'frienda') && !(e.imgs || []).length && String(e.missAt || '') < (hw === 'mezastar' ? '2026-10-14T09:00' : '2026-10-14T06:00')) return false;   /* ★10/14 番号でしか拾わなかった頃の「見つからず」は探し直す */ const rs = rejOf(c); const ok = (e.imgs || []).filter(m => !rs.has(String(m.img || ''))); return ok.length > 0 || (!(e.imgs || []).length && e.missAt && Date.now() - Date.parse(e.missAt) < 3 * 86400000); };
       const todo = r.list.filter(c => c && c.key && c.q && !fresh(c)).slice(0, 15);
-      let got = 0, miss = 0;
+      let got = 0, miss = 0, gotYfm = 0, yHits = 0;
       for (const c of todo) {
         let items = [];
         /* ★2026-10-14 メザスタの写真が毎回0件だった＝検索語が「メザスタ タグ カイリュー 4-4-045」と細かすぎ（メルカリの題名は番号もタグの語も書かないことが多い）。メザスタは「メザスタ ＋ 名前」で探し、下の名前＋グレードの照合で絞る */
@@ -32938,15 +32969,34 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         hits.sort((a, b) => (_tShop(a) ? 1 : 0) - (_tShop(b) ? 1 : 0));
         const imgs = hits.slice(0, 4).map(x => { const m2 = String(x.url || '').match(/\/item\/(m\d+)/); return { img: m2 ? ('https://static.mercdn.net/item/detail/orig/photos/' + m2[1] + '_1.jpg') : String(x.img || '').replace(/^(https:\/\/assets\.mercari-shops-static\.com\/-\/)(?:small|medium|large)(\/plain\/[^@?#]+)@webp$/, '$1large$2@jpg'),   /* ★2026-10-12 Shops の webp は Shopee に上がらない→同じ写真の jpg（large）に */ src: x.url, name: String(x.name || '').slice(0, 80), price: Number(x.price) || 0 }; }).filter(x => x.img);
         const now = new Date().toISOString();
-        const _rs = rejOf(c); const imgs2 = imgs.filter(m => !_rs.has(String(m.img || '')));   /* NG になった写真は二度と選ばない */
+        const _rs = rejOf(c); let imgs2 = imgs.filter(m => !_rs.has(String(m.img || '')));   /* NG になった写真は二度と選ばない */
+        /* ★2026-10-19 メルカリに無ければ Yahoo!フリマ（同じ照合＝番号が題名にある・NG語なし・新品/未使用は除く） */
+        let gotY = 0;
+        if (!imgs2.length && !yfmPaused) {
+          const y = await yfmSearch(_q);
+          if (y.blocked) { yfmPaused = true; msgs.push('🛍 Yahoo!フリマに弾かれたので6時間休みます'); }
+          else {
+            const yh = (y.items || []).filter(x => {
+              const t0 = String(x.name || '').normalize('NFKC').toLowerCase(); if (ng && ng.test(t0)) return false;
+              if (/未使用|新品/.test(String(x.cond || '')) || /未使用|新品未開封/.test(t0)) return false;
+              const t2 = t0.replace(/\s+/g, '');
+              if (numN && (hw === 'mezastar' || hw === 'frienda')) return !!jn && t2.indexOf(jn) >= 0;
+              if (hw === 'goods_amiibo' && jn) { const _ws = String(c.jaName || '').normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean); return _ws.every(w => t2.indexOf(w) >= 0); }
+              return numN ? t2.indexOf(numN) >= 0 : (!!jn && t2.indexOf(jn) >= 0);
+            });
+            const yimgs = yh.slice(0, 4).map(x => ({ img: String(x.img || ''), src: x.url, name: String(x.name || '').slice(0, 80), price: Number(x.price) || 0, from: 'yfm' })).filter(x => x.img && !_rs.has(x.img));
+            if (yimgs.length) { imgs2 = yimgs; gotY = yimgs.length; yHits += yh.length; }
+            await sleep(1500);
+          }
+        }
         const _rj = (tp[c.key] || {}).rej;   /* NG の記録は残す（3回で3日休む判定に使う） */
-        tp[c.key] = imgs2.length ? { hw, at: now, imgs: imgs2, rej: _rj, hits: hits.length } : { hw, missAt: now, rej: _rj, hits: 0 };   /* ★2026-10-12 hits＝メルカリで同じ番号の出品が何件あったか（本人「潤沢に在庫があるやつを」→ GAS が多い順に出す） */
+        tp[c.key] = imgs2.length ? { hw, at: now, imgs: imgs2, rej: _rj, hits: hits.length + (gotY ? 1 : 0), yfm: gotY ? 1 : 0 } : { hw, missAt: now, rej: _rj, hits: 0 };   /* ★2026-10-12 hits＝メルカリで同じ番号の出品が何件あったか（本人「潤沢に在庫があるやつを」→ GAS が多い順に出す） */
         if (!imgs2.length) { miss++; changed++; await sleep(2500); continue; }
-        if (imgs.length) got++; else miss++;
+        if (gotY) gotYfm++; else if (imgs.length) got++; else miss++;
         changed++;
         await sleep(2500);
       }
-      msgs.push('🃏 ' + (TITLE_HW_JA[hw] || hw) + '：メルカリの写真 ' + got + '件' + (miss ? '・見つからず ' + miss : '') + (todo.length ? '' : '（探すカード無し）'));
+      msgs.push('🃏 ' + (TITLE_HW_JA[hw] || hw) + '：メルカリの写真 ' + got + '件' + (gotYfm ? '・Yahoo!フリマ ' + gotYfm + '件' : '') + (miss ? '・見つからず ' + miss : '') + (todo.length ? '' : '（探すカード無し）'));
     }
     if (!changed) return;
     const ks = Object.keys(tp);
