@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261019-0015';
+var SRC_VER = '20261019-1600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -701,6 +701,100 @@ function doGetInner_(e) {
         ilo = { ok: true, shops: ilShops, errs: ilErrs, prev: ilPrev.shops || [] };
       } catch (err) { ilo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ilcb + '(' + JSON.stringify(ilo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* 💸 ★2026-10-19 本人「いいね付きで売れていない商品の初動値下げ（10%・2週間）…やりましょう」：公式APIの【割引（Discount）】で作る。
+       値段そのものは触らず、期限つきの割引にする＝期限が来れば自動で元に戻る・Shopee が「いいねした人」に値下げ通知を出す・打消し線つきで見える。
+       手順：add_discount（開始は今から1時間以上先・180日以内）→ listings の models から明細ごとの割引価格を計算 → add_discount_item（1回50件まで）。
+       控え＝app_kv promo_discount_<discount_id>（店・件数・期限・失敗一覧）。終わらせるなら action=promo_discount_end */
+    if (p.action === 'promo_discount' || p.action === 'promo_discount_end') {
+      var pdcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var pdo;
+      try {
+        var pdwt = P_().getProperty('WRITE_TOKEN');
+        if (!pdwt || p.token !== pdwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var pdShop = parseInt(p.shop_id, 10); if (!pdShop) throw new Error('shop_id 必須');
+        if (p.action === 'promo_discount_end') {
+          var pdId0 = String(p.discount_id || ''); if (!pdId0) throw new Error('discount_id 必須');
+          var ej = callShop_(pdShop, '/api/v2/discount/end_discount', null, 'post', { discount_id: Number(pdId0) });
+          pdo = { ok: true, action: p.action, discount_id: pdId0, res: ej.response || null };
+        } else {
+          var pdIds = String(p.ids || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+          if (!pdIds.length) throw new Error('ids 必須');
+          var pdPct = Number(p.pct) || 10, pdDays = Number(p.days) || 14;
+          var pdCc = String(p.cc || '').toUpperCase();
+          var pdDec = (pdCc === 'VN' || pdCc === 'TW') ? 0 : 2;   /* 通貨の桁：VN・TW は整数、他は小数2桁 */
+          var pdRound = function (x) { var f = Math.pow(10, pdDec); return Math.round(Number(x) * (100 - pdPct) / 100 * f) / f; };
+          var pdStart = now_() + 3900, pdEnd = pdStart + pdDays * 86400;   /* 開始＝今から65分後（1時間以上先の決まり） */
+          var pdName = String(p.name || ('Like ' + pdPct + '% off ' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MMdd'))).slice(0, 60);
+          var dj = callShop_(pdShop, '/api/v2/discount/add_discount', null, 'post', { discount_name: pdName, start_time: pdStart, end_time: pdEnd });
+          var pdId = (dj.response || {}).discount_id; if (!pdId) throw new Error('add_discount: ' + JSON.stringify(dj).slice(0, 200));
+          var pdRows = [];
+          for (var pi = 0; pi < pdIds.length; pi += 50) {
+            pdRows = pdRows.concat(sbSelectAll_('listings', 'select=item_id,price_min,models&shop_id=eq.' + pdShop + '&item_id=in.(' + pdIds.slice(pi, pi + 50).join(',') + ')') || []);
+          }
+          var pdItems = [];
+          pdRows.forEach(function (r) {
+            var ms = (r.models || []).filter(function (m) { return m && m.id && Number(m.price) > 0; });
+            if (ms.length) pdItems.push({ item_id: parseInt(r.item_id, 10), purchase_limit: 0, model_list: ms.map(function (m) { return { model_id: Number(m.id), model_promotion_price: pdRound(m.price) }; }) });
+            else if (Number(r.price_min) > 0) pdItems.push({ item_id: parseInt(r.item_id, 10), purchase_limit: 0, item_promotion_price: pdRound(r.price_min) });
+          });
+          var pdCount = 0, pdErrs = [], pdModels = 0;
+          for (var pj = 0; pj < pdItems.length; pj += 50) {
+            var batch = pdItems.slice(pj, pj + 50);
+            var aj = callShop_(pdShop, '/api/v2/discount/add_discount_item', null, 'post', { discount_id: Number(pdId), item_list: batch });
+            var rs = aj.response || {}; pdCount += Number(rs.count) || 0;
+            (rs.error_list || []).forEach(function (e2) { if (pdErrs.length < 40) pdErrs.push({ item_id: e2.item_id, model_id: e2.model_id, err: String(e2.fail_error || '') + ' ' + String(e2.fail_message || '').slice(0, 80) }); });
+            batch.forEach(function (b) { pdModels += (b.model_list || []).length || 1; });
+          }
+          var rec = { discount_id: String(pdId), cc: pdCc, shop_id: String(pdShop), name: pdName, pct: pdPct, days: pdDays, start: pdStart, end: pdEnd, ids: pdIds, items: pdItems.length, models: pdModels, added: pdCount, errors: pdErrs, at: new Date().toISOString() };
+          try { baKvSet_('promo_discount_' + pdId, rec); } catch (eK) {}
+          pdo = { ok: true, action: p.action, discount_id: String(pdId), items: pdItems.length, added: pdCount, errors: pdErrs.length, errorsSample: pdErrs.slice(0, 8), start: pdStart, end: pdEnd, name: pdName };
+        }
+      } catch (err) { pdo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(pdcb + '(' + JSON.stringify(pdo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* 🧺 ★2026-10-19 本人「まとめ買い割引：2点5%・3点10%、BR・PH から…やりましょう」：公式APIの【Bundle Deal】（rule_type 2＝割合・additional_tiers で段）。
+       店の公開中・在庫ありのカタログを全部入れる（1つの Bundle Deal は1,000件まで＝超える店は2つ目を作る）。期間は 90 日（Shopee の上限の範囲）。
+       控え＝app_kv promo_bundle_<bundle_deal_id>。終わらせるなら action=promo_bundle_end */
+    if (p.action === 'promo_bundle' || p.action === 'promo_bundle_end') {
+      var pbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var pbo;
+      try {
+        var pbwt = P_().getProperty('WRITE_TOKEN');
+        if (!pbwt || p.token !== pbwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var pbShop = parseInt(p.shop_id, 10); if (!pbShop) throw new Error('shop_id 必須');
+        if (p.action === 'promo_bundle_end') {
+          var pbId0 = String(p.bundle_deal_id || ''); if (!pbId0) throw new Error('bundle_deal_id 必須');
+          var bej = callShop_(pbShop, '/api/v2/bundle_deal/end_bundle_deal', null, 'post', { bundle_deal_id: Number(pbId0) });
+          pbo = { ok: true, action: p.action, bundle_deal_id: pbId0, res: bej.response || null };
+        } else {
+          var pct1 = Number(p.pct1) || 5, min1 = Number(p.min1) || 2, pct2 = Number(p.pct2) || 10, min2 = Number(p.min2) || 3, pbDays = Number(p.days) || 90;
+          var pbCc = String(p.cc || '').toUpperCase();
+          var pbStart = now_() + 600, pbEnd = pbStart + pbDays * 86400;
+          var pbRows = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + pbShop + '&status=eq.1&stock=gt.0&order=item_id.asc') || [];
+          var pbIds = pbRows.map(function (r) { return parseInt(r.item_id, 10); }).filter(Boolean);
+          if (p.ids) { var want = {}; String(p.ids).split(',').forEach(function (x) { if (x.trim()) want[x.trim()] = 1; }); pbIds = pbIds.filter(function (i) { return want[String(i)]; }); }   /* 試しに一部だけ */
+          var deals = [], pbErrs = [], pbOk = 0;
+          for (var ci = 0; ci < pbIds.length; ci += 1000) {
+            var chunk = pbIds.slice(ci, ci + 1000);
+            var pbName = String(p.name || ('Bundle ' + min1 + '=' + pct1 + '% ' + min2 + '=' + pct2 + '%')).slice(0, 22) + (pbIds.length > 1000 ? ' ' + String.fromCharCode(65 + deals.length) : '');
+            var bj = callShop_(pbShop, '/api/v2/bundle_deal/add_bundle_deal', null, 'post', { rule_type: 2, discount_percentage: pct1, min_amount: min1, start_time: pbStart, end_time: pbEnd, name: pbName.slice(0, 25), purchase_limit: Number(p.purchase_limit) || 10, additional_tiers: [{ min_amount: min2, discount_percentage: pct2 }] });
+            var bid = (bj.response || {}).bundle_deal_id; if (!bid) throw new Error('add_bundle_deal: ' + JSON.stringify(bj).slice(0, 200));
+            var okN = 0, errN = 0;
+            for (var bi = 0; bi < chunk.length; bi += 50) {
+              var ij = callShop_(pbShop, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: Number(bid), item_list: chunk.slice(bi, bi + 50).map(function (i) { return { item_id: i, status: 1 }; }) });
+              var ir = ij.response || {}; okN += (ir.success_list || []).length;
+              (ir.failed_list || []).forEach(function (f) { errN++; if (pbErrs.length < 40) pbErrs.push({ item_id: f.item_id, err: String(f.fail_error || '') + ' ' + String(f.fail_message || '').slice(0, 80) }); });
+            }
+            pbOk += okN;
+            var brec = { bundle_deal_id: String(bid), cc: pbCc, shop_id: String(pbShop), name: pbName, pct1: pct1, min1: min1, pct2: pct2, min2: min2, start: pbStart, end: pbEnd, items: chunk.length, added: okN, failed: errN, at: new Date().toISOString() };
+            deals.push(brec);
+            try { baKvSet_('promo_bundle_' + bid, brec); } catch (eK2) {}
+          }
+          pbo = { ok: true, action: p.action, deals: deals, items: pbIds.length, added: pbOk, errors: pbErrs.length, errorsSample: pbErrs.slice(0, 8) };
+        }
+      } catch (err) { pbo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(pbcb + '(' + JSON.stringify(pbo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'unlist_item') {
       var lcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
