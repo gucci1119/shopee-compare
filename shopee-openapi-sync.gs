@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1945';
+var SRC_VER = '20261020-2100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1581,6 +1581,34 @@ function doGetInner_(e) {
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-10-20 指定した品物の明細を Shopee から取り直して listings に書く（値段だけの変更は同期で拾えないため）。params: shop_id, ids（カンマ区切り・最大60） */
+    if (p.action === 'listings_refetch') {
+      var lfcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var lfout;
+      try {
+        var lfwt = P_().getProperty('WRITE_TOKEN');
+        if (!lfwt || p.token !== lfwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var lfshop = parseInt(p.shop_id, 10); if (!getToken_(lfshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var lfIds = String(p.ids || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean).slice(0, 60);
+        if (!lfIds.length) throw new Error('ids 必須');
+        var lfRows = [], lfErr = [];
+        lfIds.forEach(function (iid) {
+          try {
+            var g = getModels_(lfshop, iid);
+            var ms = (g.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0, ti: (m.tier_index || [])[0] }; });
+            var opt = (((g.tier_variation || [])[0] || {}).option_list || []);
+            if (opt.length) { var used = {}; ms.forEach(function (m) { if (m.ti != null) used[m.ti] = 1; }); opt.forEach(function (o, i2) { if (!used[i2]) ms.push({ id: null, ghost: true, ti: i2, n: String(o.option || ''), sku: '', img: '', price: 0, stock: 0, sold: 0 }); }); ms.sort(function (a, b) { return (a.ti == null ? 1e9 : a.ti) - (b.ti == null ? 1e9 : b.ti); }); }
+            var real = ms.filter(function (m) { return !m.ghost; });
+            if (!real.length) { lfErr.push(iid + ' 明細なし（単品は対象外）'); return; }
+            var pr = real.map(function (m) { return m.price; }).filter(function (x) { return x > 0; });
+            lfRows.push({ item_id: Number(iid), shop_id: String(lfshop), models: ms, model_count: real.length, price_min: pr.length ? Math.min.apply(null, pr) : null, price_max: pr.length ? Math.max.apply(null, pr) : null, stock: real.reduce(function (a, m) { return a + (Number(m.stock) || 0); }, 0), synced_at: new Date().toISOString() });
+          } catch (eF) { lfErr.push(iid + ' ' + String(eF.message || eF).slice(0, 80)); }
+        });
+        if (lfRows.length) sbUpsert_('listings', lfRows);
+        lfout = { ok: true, asked: lfIds.length, written: lfRows.length, errors: lfErr };
+      } catch (err) { lfout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(lfcb + '(' + JSON.stringify(lfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'delete_variation_shift') {
       var dscb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -5827,6 +5855,14 @@ function syncListingsForShop_(tok, sinceSec) {
     } catch (ePv2) { prevById = {}; Logger.log('増分ぶんの前回分が読めませんでした（従来どおり取り直します）: ' + ePv2); }
   }
   var reused = 0;
+  /* ★2026-10-20 本人「上限値超えるやつは消して」の調べで発覚：値段だけの変更では Shopee の update_time が変わらない
+     （BR 23093838993 を R$528 に書いた後も update_time は 2026-09 のまま）。上の「同じ更新時刻なら明細を使い回す」が、
+     値段の変更を永久に取り込まなかった（VN 41カタログ・452明細が 10/9 に 909,000 へ下げた後も DB は 999,000 のまま＝11日間）。
+     → 全件同期では、品物の番号で7組に分けて【1日1組】は更新時刻が同じでも明細を取り直す（店ごとに1日1回＝枠は1/7ずつ）。
+       すぐ直したい品物は action=listings_refetch で取り直す */
+  var _rotDay = Math.floor(now_() / 86400), _rotKey = 'LS_ROT_' + shopId, _rotOn = false;
+  if (!sinceSec) { try { _rotOn = P_().getProperty(_rotKey) !== String(_rotDay); } catch (eRot) { _rotOn = false; } }
+  var _rotN = 0;
   for (var i = 0; i < ids.length; i += 50) {
     var batch = ids.slice(i, i + 50).map(function (x) { return x.item_id; });
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: batch.join(',') }, 'get');
@@ -5839,6 +5875,7 @@ function syncListingsForShop_(tok, sinceSec) {
       var _sameTime = !!(_prev && it.update_time && _prev.update_time
         && Number(_prev.update_time) === Number(it.update_time)
         && Array.isArray(_prev.models) && _prev.models.length);
+      if (_sameTime && _rotOn && it.has_model && (Number(String(it.item_id).slice(-6)) % 7) === (_rotDay % 7)) { _sameTime = false; _rotN++; }   // 今日の組は取り直す
       if (it.has_model && _sameTime) {
         // ★前回と同じ更新時刻＝中身は変わっていない。保存済みの明細をそのまま使う（APIを叩かない）
         models = _prev.models;
@@ -5904,6 +5941,7 @@ function syncListingsForShop_(tok, sinceSec) {
     });
   }
   if (reused) Logger.log('明細を取り直さずに済んだ商品: ' + reused + '件（接続枠の節約）');
+  if (_rotOn) { try { P_().setProperty(_rotKey, String(_rotDay)); } catch (eRot2) {} Logger.log('今日の組（7分の1）で明細を取り直した商品: ' + _rotN + '件'); }
   if (rows.length) sbUpsert_('listings', rows);   // on_conflict はポータルと同じくPK(item_id)に委ねる
   // コンディション等を app_kv へ。増分同期(changed)のときは既存に上書きマージ、全件(full)のときは作り直す
   if (rows.length) {
