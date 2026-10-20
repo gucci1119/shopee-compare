@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1430';
+var SRC_VER = '20261020-1530';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6897,11 +6897,15 @@ var BA_KV_PREFETCH_ERR = '';
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre') {
-    try { var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; return vp; } catch (eP) { BA_KV_ERR = true; return null; }
+    try { var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
   }
-  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; return v; } catch (e) { BA_KV_ERR = true; return null; }
+  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; return v; } catch (e) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
 }
-function baKvSet_(k, v) { sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
+/* ★2026-10-20 全体レビュー 高-A：読めなかった鍵（522・時間切れ）は、この実行では書かない。読めない時に `|| {}` で始めた中身（その回の数件だけ）で、
+   台帳 boshu_auto_done_<hw>・状態・仕入れ目安の控えなどを丸ごと上書きして、手で付けた見送り印や出品済みの印を消す筋道があった（10/19 高-新2 と同じ型）。
+   書き込みの入口1か所で止める＝全部の書き手に効く。読み直して読めれば印は消える */
+var BA_KV_FAIL = {};
+function baKvSet_(k, v) { if (BA_KV_FAIL[k]) { try { Logger.log('⚠ ' + k + ' はこの実行で読めなかったので書きません（空の中身で上書きしないため）'); } catch (eLg) {} return; } sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
 /* ★2026-09-23 レビューで見つけた穴。🤖の実行中は app_kv を先読みした控え（BA_KV_CACHE）で答えるので、
    【取り札】の「書いた直後に読み直して自分の札か確かめる」が控えに当たり、必ず「取れた」になっていた（2台目と3台目が同時に
    同じ店のトークンを更新すると refresh_token の取り合いで全店の認証が壊れる）。取り札は必ず控えを飛ばして読む。 */
@@ -8165,6 +8169,8 @@ function gameJudgeCands_(p) {
   var maxCost = Number(cfg.maxCostJpy) || 15000;
   var out = { ok: true, src: SRC_VER, runner: BA_ST, hws: hws, start: start, done: [], next: null, list: [], skipped: {}, extra: [] };
   try { out.extra = (((baKv_('photo_learn') || {}).rules || {}).extra || []).map(function (x) { return String((x && x.text) || ''); }).filter(String); } catch (e) {}
+  /* ★2026-10-20 全体レビュー 高-B：先読みしないと機種ごとに product_ids・写真の控えなどを読み直していた（21機種で約220〜250MB）。巡回と同じく最初に1回 */
+  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', 'product_ids', 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit']);   /* B8_OK：今まで機種ごとに約10〜12MB×21回＝約220〜250MB/回 → 1回 約12MB。4台目・1時間に1回（予定タスク）＝減らす変更 */
   var judged = baKv_(BA_JUDGED) || {}; BA_MANUAL = null;
   for (var hi = start; hi < hws.length; hi++) {
     if (Date.now() - t0 > LIMIT_MS) { out.next = hi; break; }
@@ -9138,6 +9144,9 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       } else {
         // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
         if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
+        /* ★2026-10-20 全体レビュー 中③：販促（まとめ買い割引・値下げ）に入っているカタログには明細を足せない（product.error_cannt_init_tier_in_promotion）。
+           見送り印（skip:err）・6時間除外・エラー回数・当日停止のどれにも数えない＝そのカタログを販促から外せば次の回にそのまま入る。原因が分かる文言で残す */
+        if (/in_promotion|has promotion/i.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 販促（まとめ買い割引・値下げ）に入っているので明細を足せません＝このカタログを販促から外すと次の回で入ります（見送りにはしない）'); res.note = (res.note ? res.note + '／' : '') + '販促中で足せない'; i += batch.length; continue; }
       items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); baSkipRec_(st, hw, cc, x._p, 'err:' + em.slice(0, 60)); });
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
       /* ★上書きで1件だけ入っている場合がある。ここで締めないとカタログが非公開のまま公開待ちにも載らない（Codex指摘） */
@@ -10267,7 +10276,7 @@ function tcgTick(manual) {
         out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
       } catch (eC) { out.ccs[cc] = { error: String(eC).slice(0, 160) }; baLog_(st, cc + '：' + String(eC).slice(0, 160)); }
     }
-    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0; else st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1;   /* ★2026-10-18 候補はあるのに1件も足せない回（複製の上限・全部見送り）も「0枚」に数える＝2回続いたらそのシリーズは今日飛ばして他へ回る。10/18 午後、ポケカが TH/TW の複製上限で止まったまま一番多いシリーズとして毎回選ばれ、他のシリーズが7時間回らなかった */ if (st.okHw && st.okHw[hw] != null) st.okHw[hw] = Math.max(0, Number(st.okHw[hw]) - picks.length);
+    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0; else if (!/販促中で足せない/.test(JSON.stringify(out.ccs || {}))) st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1;   /* ★2026-10-18 候補はあるのに1件も足せない回（複製の上限・全部見送り）も「0枚」に数える＝2回続いたらそのシリーズは今日飛ばして他へ回る。10/18 午後、ポケカが TH/TW の複製上限で止まったまま一番多いシリーズとして毎回選ばれ、他のシリーズが7時間回らなかった */ if (st.okHw && st.okHw[hw] != null) st.okHw[hw] = Math.max(0, Number(st.okHw[hw]) - picks.length);
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
     /* ★2026-10-12 型番は product_ids（約4.5MB）に書かない＝30分ごとに大物を読み書きすると DB が落ちる（10/10・10/12 10:31）。出品ログは SKU からカード番号を読んで出す */
     if (out.added > 0) {
