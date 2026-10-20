@@ -3309,7 +3309,22 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
     return res;
   }
-  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
+  /* ★2026-10-20 本人「これ今、書き込んだけど、ここの表示変わってない」：価格は Shopee に入るが、🏷値付けの見直しが読み直す Supabase の listings は
+     次の出品同期まで古い値のまま＝書いた直後の表に前の価格が出ていた。書けたらその場で listings の明細の価格（models[].price と price_min）も同じ値にする */
+  async function sbReflectPrices(itemId, list) {
+    try {
+      const rows = await sbGetAll('listings', 'select=cc,item_id,models,price_min&item_id=eq.' + encodeURIComponent(itemId));
+      for (const l of (rows || [])) {
+        const byId = new Map((list || []).map(x => [String(x.model_id || ''), Number(x.price)]));
+        let models = Array.isArray(l.models) ? l.models.map(m => { const np = byId.get(String(m.id != null ? m.id : m.model_id)); return (np > 0) ? Object.assign({}, m, { price: np }) : m; }) : l.models;
+        const prices = Array.isArray(models) ? models.map(m => Number(m.price)).filter(x => x > 0) : [];
+        const patch = { models: models };
+        if (prices.length) patch.price_min = Math.min.apply(null, prices); else if (byId.has('')) patch.price_min = byId.get('');
+        await sbPatch('listings', 'cc=eq.' + encodeURIComponent(l.cc) + '&item_id=eq.' + encodeURIComponent(l.item_id), patch);
+      }
+    } catch (e) { console.warn('[価格] 書いた価格を控え（listings）に反映できませんでした（次の同期で直ります）', e && e.message); }
+  }
+  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(async r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} await sbReflectPrices(itemId, list); } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
   /* ★2026-10-13 限定版の明細を「限定版」として出し直す作業（本人「限定版は、明細変更も必要でしょ」「赤字を出したくない」）を Claude が
      ページの外から1件ずつ回すための入口。after が空（＝削除になる）や before が短すぎる時は断る＝名前の置換で別の明細を巻き込まない */
@@ -21737,6 +21752,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-20', items: [
+      '🏷 <b>価格を書き込んだ直後に、表の「今の価格」が前のままだったのを直しました</b>（本人「これ今、書き込んだけど、ここの表示変わってない」）。Shopee には入っていましたが、表が読む控え（出品の一覧）が次の同期まで古い値でした。書けたらその場で控えも同じ値にします。',
       '🔎 <b>全体レビューで見つけた所を直しました</b>：①枠空け候補に、統計が無い（閲覧・いいね・売上が分からない）カタログを入れない ②🔔値付けの提案は「要対応」の件数に入れない（チップと表だけ）・🏷で書いた後はすぐ数え直す ③提案の数えは画面の店の選択で絞らず全部の国で ④統計の取り直しから30分は提案の数えを待つ（重い読みを重ねない）。',
       '🧹 <b>👣アクセスの「枠空け候補」を ON のまま開き直すと、表が「読み込み中…」のまま止まるのを直しました</b>（全体レビューで見つけた不具合。選んだ候補の控えが保存のたびに壊れた形で書かれていました）。',
       '🏷 <b>🔔お知らせに「値付けの提案（おすすめ）」カードを足しました</b>（本人「この値段に調整します、という候補を上げてきてもらって、最終意思決定は私がする。そのボタンをポチッと押したら調整がかかる」）。毎日19時以降に担当PCが🏷値付けの見直しと同じ計算で数え（控え app_kv price_adj_digest）、🔴赤字／🟠薄利／🟡上げすぎ／🔵余地のうち1回の幅（+40%／−15%）に収まる提案を上位30件まで表に出します。「✅ おすすめ N件をまとめて書き込む」を押すと、その場で読み直していまも条件を満たす明細だけを選び、今まで通りの内容確認（1回）のあと明細の価格だけを書きます（カタログは触らない・フロント商品は10/3の下限¥250の規則のまま）。',
