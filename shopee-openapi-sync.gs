@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1530';
+var SRC_VER = '20261020-1600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -697,7 +697,10 @@ function doGetInner_(e) {
           } catch (eL) { ilErrs.push(a.cc + '/' + a.shop_id + ': ' + String((eL && eL.message) || eL).slice(0, 120)); }
         });
         var ilPrev = baKvFresh_('shop_item_limit') || {};
-        if (ilShops.length) baKvSet_('shop_item_limit', { at: new Date().toISOString(), shops: ilShops });
+        /* ★2026-10-20 全体レビュー 低1：1店でも失敗するとその店の枠が控えから消え、満杯判定が外れていた → 取れた店だけ上書き・取れなかった店は前回の値を残す */
+        var _ilMap = {}; (ilPrev.shops || []).forEach(function (x) { if (x && x.shop_id) _ilMap[String(x.shop_id)] = x; }); ilShops.forEach(function (x) { _ilMap[String(x.shop_id)] = x; });
+        var _ilAll = Object.keys(_ilMap).map(function (k) { return _ilMap[k]; });
+        if (ilShops.length) baKvSet_('shop_item_limit', { at: new Date().toISOString(), shops: _ilAll });
         ilo = { ok: true, shops: ilShops, errs: ilErrs, prev: ilPrev.shops || [] };
       } catch (err) { ilo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ilcb + '(' + JSON.stringify(ilo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -7303,6 +7306,8 @@ function baImgIdx_(cache) {
 function baImgMemoSet_(u, field, v) { if (!BA_IMG_IDX) return; var p = String(u).indexOf('|'), b = p < 0 ? String(u) : String(u).slice(0, p); var o = BA_IMG_IDX[b] || (BA_IMG_IDX[b] = {}); o[field] = v; }
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
+  /* ★2026-10-20 全体レビュー 中②：手動判定（Claude ¥0）や判定の控えが読めなかった回は、判定済みの写真を有料 AI でやり直してしまう＝その回は AI を呼ばない */
+  if (BA_KV_FAIL['boshu_auto_judged_manual'] || BA_KV_FAIL[BA_JUDGED]) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
   var mv = baManualOf_(imgUrl, expect); if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
   /* ★2026-09-21 📚 本人が「📚学んだこと」で足した追加の指示を判定に足す（app_kv.photo_learn.rules.extra）。
