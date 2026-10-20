@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1230';
+var SRC_VER = '20261020-1430';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6884,9 +6884,16 @@ function baKvPrefetch_(keys) {
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
     if (wantPre) BA_KV_CACHE['boshu_auto_pre'] = baPreMerge_(byKey);
-    BA_KV_ERR = false;
-  } catch (e) { BA_KV_CACHE = null; BA_KV_ERR = true; }
+    BA_KV_ERR = false; BA_KV_PREFETCH_ERR = '';
+  } catch (e) {
+    /* ★2026-10-20 14:2x 🤖が 13:0x から毎回「cfg_unreadable」で降りていた（一括読み＝大きな控え15本＋写真の控えの分割を1回で読むのが失敗）。
+       一括が失敗しても設定が1本で読めるなら、控えを1本ずつ読む形（BA_KV_CACHE={}＝読んだ物は控える）に切り替えて続ける。理由は BA_KV_PREFETCH_ERR に残す */
+    BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300);
+    BA_KV_CACHE = null; BA_KV_ERR = true;
+    try { var _rc = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(BA_CFG)); BA_KV_CACHE = {}; BA_KV_CACHE[BA_CFG] = (_rc && _rc[0] && _rc[0].v) || null; BA_KV_ERR = false; } catch (e2) {}
+  }
 }
+var BA_KV_PREFETCH_ERR = '';
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre') {
@@ -7746,6 +7753,7 @@ function boshuAutoTick(manual) {
   baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto', BA_LOOSE]);
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
+  if (BA_KV_PREFETCH_ERR) { try { baLog_(st, '⚠ 控えの一括読みに失敗→1本ずつ読んで続けます：' + BA_KV_PREFETCH_ERR.slice(0, 120)); } catch (ePf) {} }
   try {
     var cfg = baKv_(BA_CFG) || {};
     try { tcgEnsureTrigger_(cfg); } catch (eTg) {}   /* 🃏 2026-10-10 担当の台に tcgCron（Head 固定の時間トリガー）を1回だけ作る */
@@ -7759,8 +7767,8 @@ function boshuAutoTick(manual) {
     if (BA_KV_ERR) {
       /* 設定が読めていない＝担当がどちらか分からない。**分からない時は動かない**（Codex指摘P1）。 */
       ufPersist_();
-      Logger.log('🤖 設定を読めなかったのでこの実行は何もしません（担当が分からない状態では動かさない）');
-      return { ok: false, skipped: 'cfg_unreadable' };
+      Logger.log('🤖 設定を読めなかったのでこの実行は何もしません（担当が分からない状態では動かさない）' + (BA_KV_PREFETCH_ERR ? '：' + BA_KV_PREFETCH_ERR : ''));
+      return { ok: false, skipped: 'cfg_unreadable', err: BA_KV_PREFETCH_ERR };
     }
     /* ★2026-09-23 担当を機種で分ける（cfg.runners＝{ child: ['gc',…], child2: ['ds',…] }）。
        あれば「自分の担当に機種が割り当てられているか」で決める（同じ機種を2か所に割り当てない＝同じ作品を二重に出さない。
