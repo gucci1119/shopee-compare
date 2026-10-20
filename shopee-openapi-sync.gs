@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-2100';
+var SRC_VER = '20261020-2115';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1602,10 +1602,11 @@ function doGetInner_(e) {
             var real = ms.filter(function (m) { return !m.ghost; });
             if (!real.length) { lfErr.push(iid + ' 明細なし（単品は対象外）'); return; }
             var pr = real.map(function (m) { return m.price; }).filter(function (x) { return x > 0; });
-            lfRows.push({ item_id: Number(iid), shop_id: String(lfshop), models: ms, model_count: real.length, price_min: pr.length ? Math.min.apply(null, pr) : null, price_max: pr.length ? Math.max.apply(null, pr) : null, stock: real.reduce(function (a, m) { return a + (Number(m.stock) || 0); }, 0), synced_at: new Date().toISOString() });
+            /* 既存の行の欄だけを直す（upsert は cc 等の必須欄が無いと Postgres が断る＝23502） */
+            sbPatch_('listings', 'item_id=eq.' + encodeURIComponent(String(iid)) + '&shop_id=eq.' + encodeURIComponent(String(lfshop)), { models: ms, model_count: real.length, price_min: pr.length ? Math.min.apply(null, pr) : null, price_max: pr.length ? Math.max.apply(null, pr) : null, stock: real.reduce(function (a, m) { return a + (Number(m.stock) || 0); }, 0), synced_at: new Date().toISOString() });
+            lfRows.push(iid);
           } catch (eF) { lfErr.push(iid + ' ' + String(eF.message || eF).slice(0, 80)); }
         });
-        if (lfRows.length) sbUpsert_('listings', lfRows);
         lfout = { ok: true, asked: lfIds.length, written: lfRows.length, errors: lfErr };
       } catch (err) { lfout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(lfcb + '(' + JSON.stringify(lfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
