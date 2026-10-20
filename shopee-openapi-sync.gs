@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1700';
+var SRC_VER = '20261020-1930';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2325,11 +2325,55 @@ function getAttributeTree_(shopId, catId, lang) {
 function updatePriceList_(shopId, itemId, list) {
   var pl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, original_price: parseFloat(x.price) }; }).filter(function (x) { return !isNaN(x.original_price); });
   if (!pl.length) throw new Error('価格リストが空');
-  var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', { item_id: parseInt(itemId, 10), price_list: pl });
+  var body = { item_id: parseInt(itemId, 10), price_list: pl }, j, promo = null;
+  try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
+  catch (eP) {
+    /* ★2026-10-20 本人「なんでこれ失敗するの？」（🏷値付けの見直し 16明細が全部失敗）：販促に入っている品物は Shopee が値段の変更を断る
+       （error_update_price_fail「Cannot update price for variation because the product has promotion」）。10/19 にまとめ買い割引へ店の単品を全部入れたため。
+       → まとめ買い割引（Bundle Deal）は一度外して書き、すぐ同じ割引に戻す（割引は残る）。
+         値下げ（Discount Promotions＝いいね10%など）は外したまま戻さない：赤字直しの値上げに10%引きが重なると目標の利益を割るため。
+         それ以外の販促（Flash Sale 等）は触らずに失敗のまま返す */
+    if (!/has promotion|in_promotion/i.test(String((eP && eP.message) || eP))) throw eP;
+    promo = priceUnlockPromo_(shopId, itemId);
+    if (promo.other.length) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String(eP.message || eP).slice(0, 200) + ' ／外せない販促: ' + promo.other.join(',')); }
+    if (!promo.bundleOut.length && !promo.discountOut.length) throw eP;
+    Utilities.sleep(1500);
+    try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
+    catch (eP2) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String((eP2 && eP2.message) || eP2).slice(0, 250) + ' ／販促は元に戻しました（値下げは外したまま: ' + promo.discountOut.length + '）'); }
+    priceRelockPromo_(shopId, itemId, promo);
+  }
   /* ★2026-09-28 Codex：明細ごとの失敗（failure_list）を見ずに全部成功扱いしていた → 1つでも失敗があれば理由つきで失敗にする（価格・在庫は同じ値を送り直しても害がない） */
   var fl = ((j && j.response) || {}).failure_list || [];
   if (fl.length) throw new Error('一部の明細を変えられませんでした（' + fl.length + '/' + pl.length + '）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
-  return { updated: pl.length, response: (j && j.response) || j };
+  return { updated: pl.length, response: (j && j.response) || j, promo: promo };
+}
+/* 価格を書く前に販促から外す（get_item_promotion で今入っている販促を読む）。戻り＝{bundleOut:[id], discountOut:[id], other:[種類], bundleBack:[], bundleBackErr:[]} */
+function priceUnlockPromo_(shopId, itemId) {
+  var out = { bundleOut: [], discountOut: [], other: [], bundleBack: [], bundleBackErr: [] };
+  var gj = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get');
+  var it = (((gj || {}).response || {}).success_list || [])[0] || {};
+  (it.promotion || []).forEach(function (pr) {
+    var ty = String(pr.promotion_type || ''), pid = Number(pr.promotion_id), stg = String(pr.promotion_staging || '');
+    if (stg && !/ongoing|upcoming/i.test(stg)) return;
+    if (/bundle/i.test(ty)) {
+      try { var dj = callShop_(shopId, '/api/v2/bundle_deal/delete_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: parseInt(itemId, 10) }] });
+        if (((dj.response || {}).success_list || []).length) out.bundleOut.push(pid); else out.other.push('まとめ買い割引から外せない ' + JSON.stringify((dj.response || {}).failed_list || dj).slice(0, 80)); }
+      catch (e1) { out.other.push('まとめ買い割引から外せない ' + String(e1.message || e1).slice(0, 80)); }
+    } else if (/discount/i.test(ty)) {
+      try { callShop_(shopId, '/api/v2/discount/delete_discount_item', null, 'post', { discount_id: pid, item_id: parseInt(itemId, 10) }); out.discountOut.push(pid); }
+      catch (e2) { out.other.push('値下げから外せない ' + String(e2.message || e2).slice(0, 80)); }
+    } else out.other.push(ty || '不明な販促');
+  });
+  return out;
+}
+/* 外したまとめ買い割引に戻す（値下げは戻さない） */
+function priceRelockPromo_(shopId, itemId, promo) {
+  (promo.bundleOut || []).forEach(function (pid) {
+    try { var aj = callShop_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: parseInt(itemId, 10), status: 1 }] });
+      if (((aj.response || {}).success_list || []).length) promo.bundleBack.push(pid); else promo.bundleBackErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); }
+    catch (e) { promo.bundleBackErr.push(pid + ' ' + String(e.message || e).slice(0, 100)); }
+  });
+  return promo;
 }
 // ★在庫を複数モデルまとめて更新（update_stock stock_list）。list=[{model_id,stock}]
 function updateStockList_(shopId, itemId, list) {
