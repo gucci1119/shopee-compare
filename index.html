@@ -773,6 +773,15 @@
     #rs-wzcard td:nth-child(4) { grid-column: 2 / 4; }
     #rs-wzcard td:nth-child(5) { grid-column: 1 / 4; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     #rs-setcard table { min-width: 760px; }
+    /* 説明（.pagehelp）は畳んだ時も要点の2行だけ見せる（全部隠すと何の画面か分からない）。タップで全文 */
+    .pagehelp.collapsed { padding: 6px 66px 6px 10px !important; }
+    .pagehelp.collapsed::before { content: none !important; }
+    .pagehelp.collapsed > .help-body.help-body { display: -webkit-box !important; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; line-height: 1.55; }
+    .pagehelp.collapsed .help-body br { display: none; }
+    /* 表の中だけスクロールする枠は画面の半分まで＝枠の外に指を置けばページ全体を動かせる（枠が画面を埋めるとページが止まって見える） */
+    #smd-main .pf-scroll, #smd-main [style*="overflow:auto"][style*="max-height"], #smd-main [style*="overflow-y:auto"][style*="max-height"] { max-height: 50vh !important; }
+    /* 注文管理の出荷前チェック：前置きの文と各項目の出所（返品理由の件数）は省き、確認項目だけ見せる */
+    #ship-check b + .smd-dim, #ship-check li > .smd-dim { display: none; }
   }
   /* 🎭 デモ表示モード：商品画像をぼかして識別不能に（テキスト系はデータ層で匿名化） */
   html.smd-demo img { filter: blur(11px) saturate(.6) contrast(.95) !important; }
@@ -6744,6 +6753,7 @@
     "📚 母数を開く": "📚 Open coverage",
     "⌘K でも同じように探せます": "You can search the same list with ⌘K",
     "見つかりません。言い方を変えてみてください（例：値下げ／在庫／伝票）": "Nothing found. Try other words (e.g. price cut / stock / waybill)",
+    "▼ 続き": "▼ More", "▼ 開く": "▼ Open",
     "✕ 閉じる": "✕ Close",
     "🏷 値付けの見直し": "🏷 Price review",
     "📊 売れ行きランキング": "📊 Sales ranking",
@@ -9109,8 +9119,11 @@
       })); }
   }
   // 画面上部の説明(.pagehelp)を折りたたみ式に。状態は全ページ共通で記憶（フィルター等は残す）。
+  /* ★2026-10-20 本人「スマホの画面って縦に長いし…説明がめっちゃ長いと、そもそもスクロールできる位置まで到達できない」：
+     スマホ（幅820以下）は開け閉めをパソコンと別に覚え、最初は畳む（畳んだ時も要点の2行は見せる＝CSS側） */
+  const helpKey = () => { try { return matchMedia('(max-width: 820px)').matches ? 'smdHelpHiddenM' : 'smdHelpHidden'; } catch (_) { return 'smdHelpHidden'; } };
   function applyHelpState() {
-    let hidden = true; try { hidden = localStorage.getItem('smdHelpHidden') !== '0'; } catch (_) {} // 既定＝畳む（散らかり低減）。一度「開く」を押すと'0'を記憶し以後は開いたまま
+    let hidden = true; try { hidden = localStorage.getItem(helpKey()) !== '0'; } catch (_) {} // 既定＝畳む（散らかり低減）。一度「開く」を押すと'0'を記憶し以後は開いたまま
     document.querySelectorAll('.pagehelp').forEach(h => {
       let t = h.querySelector('.help-toggle');
       if (!t) {
@@ -9119,14 +9132,23 @@
         while (h.firstChild) body.appendChild(h.firstChild);
         h.appendChild(body);
         t = document.createElement('span'); t.className = 'help-toggle';
-        t.addEventListener('click', e => { e.stopPropagation(); let now = false; try { now = localStorage.getItem('smdHelpHidden') !== '1'; localStorage.setItem('smdHelpHidden', now ? '1' : '0'); } catch (_) {} applyHelpState(); });
+        t.addEventListener('click', e => { e.stopPropagation(); let now = false; try { now = localStorage.getItem(helpKey()) !== '1'; localStorage.setItem(helpKey(), now ? '1' : '0'); } catch (_) {} applyHelpState(); });
         h.appendChild(t);
-        h.addEventListener('click', () => { if (h.classList.contains('collapsed')) { try { localStorage.setItem('smdHelpHidden', '0'); } catch (_) {} applyHelpState(); } }); // 畳んだバー自体クリックでも開く
+        h.addEventListener('click', () => { if (h.classList.contains('collapsed')) { try { localStorage.setItem(helpKey(), '0'); } catch (_) {} applyHelpState(); } }); // 畳んだバー自体クリックでも開く
       }
       h.classList.toggle('collapsed', hidden);
-      t.textContent = hidden ? '▼ 開く' : '✕ 閉じる';
+      t.textContent = hidden ? (helpKey() === 'smdHelpHiddenM' ? '▼ 続き' : '▼ 開く') : '✕ 閉じる';
     });
   }
+  /* ★2026-10-20 データが届いてから描かれる説明（在庫管理「今月のリスト」の見方など）は、ページを開いた直後の applyHelpState に間に合わず、
+     畳まれないまま長く残っていた。説明が新しく描かれたら（まだ畳むボタンが付いていない .pagehelp があれば）当て直す */
+  try {
+    let _helpT = 0;
+    new MutationObserver(() => {
+      if (_helpT) return;
+      _helpT = setTimeout(() => { _helpT = 0; try { if ([...document.querySelectorAll('.pagehelp')].some(h => !h.querySelector(':scope > .help-toggle'))) applyHelpState(); } catch (_) {} }, 250);
+    }).observe(document.getElementById('smd-main') || document.body, { childList: true, subtree: true });
+  } catch (_) {}
   // ═══ 💴 出品価格の計算機 ═══════════════════════════════════════════════
   //  リクエストが来た商品を「各国いくらで出すか」を出す。既存の値付けエンジン（重量・手数料・SLS・
   //  為替・目標ROI）をそのまま使うので、出品を作る画面と同じ数字になる。
@@ -21792,6 +21814,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-20', items: [
+      '📱 <b>スマホで本体まで届かない問題を直しました</b>（本人「スマホの画面って縦に長いし…説明がめっちゃ長いと、そもそもスクロールできる位置まで到達できない」「多分他のページもそうですね」）。①上の<b>説明はスマホでは最初から畳み</b>、要点の2行だけ見せます（▼続き で全文。開け閉めはパソコンと別に覚えます）。データが届いてから描かれる説明（在庫管理の「今月のリスト」の見方など）も畳まれるようにしました ②<b>表の中だけスクロールする枠は画面の半分まで</b>に（やること・在庫管理・仕入れ・出品管理・返品・顧客・操作ログ。枠が画面を埋めると、指を置いた時にページ全体が動かなかった）③注文管理の出荷前チェックは、前置きの文と出所の注記を省いて確認項目だけに。',
       '📱 <b>スマホの表示を直しました</b>（本人「スマホの表示、もっと見やすくして」「崩れてるところとかあるし」）。幅375で全画面を測ると、上の帯の為替・枠の表示が折り返さず、<b>どの画面も534px幅まで広がって</b>いました（スマホでは全体が縮んで横にずれる）。①上の帯は<b>1行にして横にすべらせる</b>形に（更新・お知らせ・検索を先頭。高さ231px→41px）②表は<b>カードの中で横にすべらせる</b>（注文管理の発送スケジュール・事業計画・アクセス・出品管理）③<b>🔁在庫の自動復活の確認待ちは1件ずつのカード</b>に（商品名が潰れ、押すボタンが右に隠れていた）④画面の左右の余白を詰めました。パソコンの表示は変わりません。',
       '🧹 <b>🔁在庫の自動復活の画面を整理</b>（本人「もうちょっとここも整理してほしい」）。上の説明帯・設定カード・各欄に同じ説明が重なっていたのを、説明帯は1行・設定カードは「見張る ON／自動で戻す数／最後に見た回」の1行にまとめました。その下に <b>🔔確認待ち・⚙️自動で戻す・🟡様子見・🟥いま在庫0・📜最近の動き</b> の件数ボタンを並べ、押すとその欄へ飛びます（長い説明はボタンにマウスを乗せると出ます）。',
       '🧹 <b>👣枠空けで非公開にしたカタログを、🤖の巡回が公開し直さないようにしました</b>（全体レビュー）。非公開にした印を共有の控えに残し、🤖はそのカタログを明細の足し先にしません（出品済みの数には入れたまま）。控えの更新に失敗した件数も出すようにしました。',
