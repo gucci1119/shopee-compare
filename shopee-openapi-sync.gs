@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1930';
+var SRC_VER = '20261020-1945';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2336,7 +2336,7 @@ function updatePriceList_(shopId, itemId, list) {
     if (!/has promotion|in_promotion/i.test(String((eP && eP.message) || eP))) throw eP;
     promo = priceUnlockPromo_(shopId, itemId);
     if (promo.other.length) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String(eP.message || eP).slice(0, 200) + ' ／外せない販促: ' + promo.other.join(',')); }
-    if (!promo.bundleOut.length && !promo.discountOut.length) throw eP;
+    if (!promo.bundleOut.length && !promo.discountOut.length) throw new Error(String((eP && eP.message) || eP).slice(0, 220) + ' ／販促を読んだ結果: ' + String(promo.raw || '').slice(0, 300));
     Utilities.sleep(1500);
     try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
     catch (eP2) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String((eP2 && eP2.message) || eP2).slice(0, 250) + ' ／販促は元に戻しました（値下げは外したまま: ' + promo.discountOut.length + '）'); }
@@ -2351,6 +2351,7 @@ function updatePriceList_(shopId, itemId, list) {
 function priceUnlockPromo_(shopId, itemId) {
   var out = { bundleOut: [], discountOut: [], other: [], bundleBack: [], bundleBackErr: [] };
   var gj = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get');
+  try { out.raw = JSON.stringify(gj.response || gj).slice(0, 400); } catch (eR) {}
   var it = (((gj || {}).response || {}).success_list || [])[0] || {};
   (it.promotion || []).forEach(function (pr) {
     var ty = String(pr.promotion_type || ''), pid = Number(pr.promotion_id), stg = String(pr.promotion_staging || '');
