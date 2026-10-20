@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1600';
+var SRC_VER = '20261020-1700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8419,6 +8419,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   else rows.forEach(function (r) { if (r && r.status === 1) _liveOf[String(r.shop_id)] = (_liveOf[String(r.shop_id)] || 0) + 1; });
   var _isFull = function (cc, shop) { var t = Number(_fullMap[String(cc) + '|' + String(shop)] || 0); if (t && now_() - t < 24 * 3600) return true; var cap = _capOf[String(shop)]; return !!(cap && (cap - (_liveOf[String(shop)] || 0)) <= 5); };
   var _buried = 0, _buriedItems = {};
+  var _slotFree = {}; try { _slotFree = (baKv_('slot_free_unlisted') || {}).items || {}; } catch (eSf) {}
   var _madeIds = {}, _madeNk = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') { _madeIds[String(_fm[kk].item_id)] = 1; var _kcc = kk.split('|')[1]; if (_fm[kk].name) _madeNk[_kcc + '|' + baNameKey_(_fm[kk].name)] = 1; } }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
   rows.forEach(function (r) {
     if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
@@ -8440,6 +8441,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
       if (!inFam) { var mh = baHwsOf_(m.n); var hs = mh.length ? mh : catHws; if (hs.length && hs.indexOf(hw) < 0) return; }
       var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) set[k1] = 1; if (k2) set[k2] = 1;
     });
+    /* ★2026-10-20 全体レビュー（ポータル中①）：👣枠空けで本人が非公開にしたカタログ（app_kv slot_free_unlisted）は入れ先にしない＝明細を足して公開し直さない。出品済みの数には入れたまま（同じ作品を他で出し直さない） */
+    if (inFam && r.status !== 1 && _slotFree[String(r.item_id)]) inFam = false;
     if (inFam) (famRows[r.cc] = famRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [] }));
     if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
   });
