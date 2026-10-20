@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261019-1620';
+var SRC_VER = '20261020-1100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -667,14 +667,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'game_judge_cands' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
-        baout = p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'game_judge_cands' ? gameJudgeCands_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -8103,6 +8103,49 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
     if (stop) { left++; if (n >= maxN || Date.now() - t0 > limitMs) { for (var pr = pi + 1; pr < cand.length; pr++) { var p2 = baPreOf_(pre, cand[pr].key, hw); if (p2 && p2.img) left++; } break; } }
   }
   return { n: n, ok: okN, ng: ngN, left: left };
+}
+/* ★2026-10-20 🎮 ゲームの写真判定を Claude（会話の中・API料金¥0）が先回りで入れる＝🃏の tcg_preview と同じ役（本人 10/12「お金かけずに」・10/20「どんどんアップデートして」）。
+   読むだけ（ヤフオク・AI・app_kv の書き込みは無し）。候補＝巡回と同じ ctx.cand（次に出す見込みの作品・優先順）のうち、写真の控え（boshu_auto_pre）に写真があり、
+   仕入れ目安が上限内で、写真が有料AIの控え（boshu_auto_judged）にも手動の控え（judged_manual）にも無い物。合否は手元の merge_games.py が baJudge_ と同じ規則で決め、
+   judged_manual に「写真|機種|作品の鍵」で入れる → 巡回の baJudge_ は AI の前にそれを見る（baManualOf_）＝その写真は AI を呼ばずに出品へ。
+   p.hws＝'all'（cfg.hws 全部）か 'switch,ps2'、p.n＝1機種あたりの作品数（既定40・最大120）、p.start＝続きの機種の添字。250秒で切って next を返す */
+function gameJudgeCands_(p) {
+  var t0 = Date.now(), LIMIT_MS = 250000;
+  var cfg = baKv_(BA_CFG) || {};
+  var hwsReq = String((p && p.hws) || 'all');
+  var hws = hwsReq === 'all' ? (cfg.hws || []).slice() : hwsReq.split(',').map(function (s) { return s.trim(); }).filter(String);
+  var n = Math.max(1, Math.min(120, parseInt((p && p.n) || '40', 10) || 40)); var start = Math.max(0, parseInt((p && p.start) || '0', 10) || 0);
+  var maxCost = Number(cfg.maxCostJpy) || 15000;
+  var out = { ok: true, src: SRC_VER, runner: BA_ST, hws: hws, start: start, done: [], next: null, list: [], skipped: {}, extra: [] };
+  try { out.extra = (((baKv_('photo_learn') || {}).rules || {}).extra || []).map(function (x) { return String((x && x.text) || ''); }).filter(String); } catch (e) {}
+  var judged = baKv_(BA_JUDGED) || {}; BA_MANUAL = null;
+  for (var hi = start; hi < hws.length; hi++) {
+    if (Date.now() - t0 > LIMIT_MS) { out.next = hi; break; }
+    var hw = hws[hi]; var fam = (cfg.family || {})[hw]; if (!fam) { out.skipped[hw] = 'nofam'; continue; }
+    var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice(); if (!ccs.length) { out.skipped[hw] = 'noccs'; continue; }
+    var hwWord = BA_HW_WORD[hw] || hw.toUpperCase(); var ctx;
+    try { ctx = baLoadCtx_(cfg, hw, ccs); } catch (eC) { out.skipped[hw] = 'ctx:' + String((eC && eC.message) || eC).slice(0, 80); continue; }
+    var pre = ctx.pre || {}; var sk = { cand: (ctx.cand || []).length, nopre: 0, cost: 0, judgedOk: 0, allJudged: 0, out: 0 };
+    for (var i = 0; i < ctx.cand.length && sk.out < n; i++) {
+      var pc = ctx.cand[i], pp = baPreOf_(pre, pc.key, hw); if (!pp || !pp.img) { sk.nopre++; continue; }
+      if (baCostFromPre_(pp, hw, pc.ja, pc.en) > maxCost) { sk.cost++; continue; }
+      var ord = baPhotoOrder_([pp].concat(pp.alts || []), hw).slice(0, 4), imgs = [], hasOk = false;
+      for (var j = 0; j < ord.length; j++) {
+        var u = String(ord[j].img || '').replace(/\?.*$/, ''); if (!u) continue;
+        var vK = String(judged[u + '|v13|' + hwWord + '|' + pc.key] || ''), mv = String(baManualOf_(u, { key: pc.key, hwKey: hw }) || '');
+        if (vK.indexOf('ok:') === 0 || mv.indexOf('ok:') === 0) { hasOk = true; break; }
+        if (vK || mv) continue;
+        if (!baEditionOk_(ord[j].name, pc.ja, pc.en)) continue;
+        imgs.push({ img: u, thumb: String(ord[j].thumb || ''), name: String(ord[j].name || '').slice(0, 120), price: Number(ord[j].price) || 0, shop: baIsShop_(ord[j]) ? 1 : 0 });
+      }
+      if (hasOk) { sk.judgedOk++; continue; }
+      if (!imgs.length) { sk.allJudged++; continue; }
+      sk.out++; out.list.push({ key: pc.key, hw: hw, hwWord: hwWord, ja: String(pc.ja || ''), en: String(pc.en || ''), cartOnly: !!BA_CART_ONLY_HW[hw], caseReq: !!BA_CASE_REQUIRED_HW[hw], imgs: imgs.slice(0, 2) });
+    }
+    out.skipped[hw] = sk; out.done.push(hw);
+  }
+  out.ms = Date.now() - t0; out.n = out.list.length;
+  return out;
 }
 /* 🔍 まとめて先に判定する（ポータルのボタン／手動）。出品はしない。1回 最大 maxN 枚・4分まで */
 function boshuAutoPrejudge_(hw, maxN) {
