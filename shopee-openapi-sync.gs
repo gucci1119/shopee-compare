@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-1100';
+var SRC_VER = '20261020-1230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -756,6 +756,45 @@ function doGetInner_(e) {
     /* 🧺 ★2026-10-19 本人「まとめ買い割引：2点5%・3点10%、BR・PH から…やりましょう」：公式APIの【Bundle Deal】（rule_type 2＝割合・additional_tiers で段）。
        店の公開中・在庫ありのカタログを全部入れる（1つの Bundle Deal は1,000件まで＝超える店は2つ目を作る）。期間は 90 日（Shopee の上限の範囲）。
        控え＝app_kv promo_bundle_<bundle_deal_id>。終わらせるなら action=promo_bundle_end */
+    /* 🧺 ★2026-10-20 販促に入っているカタログには明細を足せない（実測 10/19 16:32〜：add_model が product.error_cannt_init_tier_in_promotion
+       「The product cannot create new variation because the product has promotion」＝BR のまとめ買い割引（全カタログ）を入れた直後から、🤖の BR の出品が全部失敗し
+       機種ごとに6時間止まっていた）。→ 明細を足す先のカタログを販促から外す道具：
+       promo_bundle_items（get_bundle_deal_item＝中身を読む）／promo_bundle_remove（delete_bundle_deal_item・ids をカンマ区切り）／promo_discount_remove（delete_discount_item・ids） */
+    if (p.action === 'promo_bundle_items' || p.action === 'promo_bundle_remove' || p.action === 'promo_discount_remove') {
+      var prcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var pro;
+      try {
+        var prwt = P_().getProperty('WRITE_TOKEN');
+        if (!prwt || p.token !== prwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var prShop = parseInt(p.shop_id, 10); if (!prShop) throw new Error('shop_id 必須');
+        var prIds = String(p.ids || '').split(',').map(function (x) { return parseInt(x.trim(), 10); }).filter(Boolean);
+        if (p.action === 'promo_bundle_items') {
+          var bid1 = Number(p.bundle_deal_id); if (!bid1) throw new Error('bundle_deal_id 必須');
+          var gj = callShop_(prShop, '/api/v2/bundle_deal/get_bundle_deal_item', { bundle_deal_id: bid1 }, 'get');
+          var gl = ((gj.response || {}).item_list || []).map(function (x) { return x.item_id; });
+          pro = { ok: true, action: p.action, bundle_deal_id: String(bid1), n: gl.length, item_ids: gl, err: gj.error || '' };
+        } else if (p.action === 'promo_bundle_remove') {
+          var bid2 = Number(p.bundle_deal_id); if (!bid2) throw new Error('bundle_deal_id 必須'); if (!prIds.length) throw new Error('ids 必須');
+          var rmOk = 0, rmErr = [];
+          for (var ri = 0; ri < prIds.length; ri += 50) {
+            var dj = callShop_(prShop, '/api/v2/bundle_deal/delete_bundle_deal_item', null, 'post', { bundle_deal_id: bid2, item_list: prIds.slice(ri, ri + 50).map(function (i) { return { item_id: i }; }) });
+            var dr = dj.response || {}; rmOk += (dr.success_list || []).length;
+            (dr.failed_list || []).forEach(function (f) { if (rmErr.length < 30) rmErr.push({ item_id: f.item_id, err: String(f.fail_error || '') + ' ' + String(f.fail_message || '').slice(0, 80) }); });
+            if (dj.error && rmErr.length < 30) rmErr.push({ item_id: 0, err: 'raw: ' + JSON.stringify(dj).slice(0, 200) });
+          }
+          pro = { ok: true, action: p.action, bundle_deal_id: String(bid2), asked: prIds.length, removed: rmOk, errors: rmErr.length, errorsSample: rmErr.slice(0, 8) };
+        } else {
+          var did = Number(p.discount_id); if (!did) throw new Error('discount_id 必須'); if (!prIds.length) throw new Error('ids 必須');
+          var ddOk = 0, ddErr = [];
+          for (var di = 0; di < prIds.length; di++) {
+            var dd = callShop_(prShop, '/api/v2/discount/delete_discount_item', null, 'post', { discount_id: did, item_id: prIds[di] });
+            if (dd.error) { if (ddErr.length < 30) ddErr.push({ item_id: prIds[di], err: String(dd.error).slice(0, 120) }); } else ddOk++;
+          }
+          pro = { ok: true, action: p.action, discount_id: String(did), asked: prIds.length, removed: ddOk, errors: ddErr.length, errorsSample: ddErr.slice(0, 8) };
+        }
+      } catch (err) { pro = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(prcb + '(' + JSON.stringify(pro) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'promo_bundle' || p.action === 'promo_bundle_end' || p.action === 'promo_bundle_delete') {
       var pbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var pbo;
