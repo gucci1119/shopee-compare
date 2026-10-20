@@ -6492,6 +6492,16 @@
     "🌍 各国そろえる": "🌍 Align countries",
     "🆕 この国に無い商品": "🆕 Missing in this country",
     "🟢 フロントの下限 1個 ¥": "🟢 Front floor per unit ¥",
+    "値付けの提案（おすすめ・押すと書き込み）": "Price proposals (recommended · press to write)",
+    "🏷 値付けの提案": "🏷 Price proposals",
+    "件をまとめて書き込む": " items: write all",
+    "🏷 値付けの見直しで1件ずつ選ぶ": "🏷 Pick one by one in Price review",
+    "押すと読み直して、いまも条件を満たす明細だけを内容確認（1回）のうえ書きます。表は上位30件": "Pressing re-reads and writes only items that still qualify, after one confirmation. Table shows top 30",
+    "時点の数え（内訳 🔴": " count (breakdown 🔴",
+    "件＝1回の幅 +40%／−15% の中の提案）。": " = proposals within the per-step band +40% / −15%).",
+    "商品 ▸ 明細": "Item ▸ variation",
+    "今の価格 → 提案": "Now → proposed",
+    "利益/個 今 → 提案": "Profit/unit now → proposed",
     "残す　候補＝仕入 ¥": " kept · candidates = cost ¥",
     "以下・月": " or less, ",
     "点以上売れた": "+ sold/month",
@@ -18212,11 +18222,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
         ]);
         renderAlerts._cache = { orders, at: Date.now(), rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null , rs: { st: ((rs || []).find(x => x.k === 'stock_restore_state') || {}).v || null, man: ((rs || []).find(x => x.k === 'stock_restore_manual') || {}).v || {} } };
         rowsync = renderAlerts._cache.rowsync;
         renderAlerts._cache.amz = ((rs || []).find(x => x.k === 'amz_class') || {}).v || {};
+        renderAlerts._cache.paDigest = ((rs || []).find(x => x.k === 'price_adj_digest') || {}).v || null;   /* 🏷 値付けの提案（毎日19時以降の数え） */
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
     /* ★2026-10-06 本人「ポータルで何か課題があれば潰して」：入庫待ち223件のうち Amazon 80件の多くが段ボール・OPP袋・ルーター・椅子などの備品で、
@@ -18227,6 +18238,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const _notGoods = r => { if (!/amazon/i.test(String(r.supplier || ''))) return false; const c = _amzCls[r.item_id]; if (c && c.k) return c.k === 'supply' || c.k === 'personal'; const sg = amzSuggest(r.name_supplier || r.name); return !!(sg.sure && sg.k === 'supply'); };
       inv = (inv || []).filter(r => !_notGoods(r)); }
     const eliCases = (renderAlerts._cache && renderAlerts._cache.eli && renderAlerts._cache.eli.cases) || {};
+    /* 🏷 ★2026-10-20 値付けの提案（本人「候補を上げてきてもらって、最終意思決定は私がする。ボタンをポチッと押したら調整がかかる」） */
+    const paD = (renderAlerts._cache && renderAlerts._cache.paDigest) || null;
+    const paRecN = paD && paD.rec ? Number(paD.rec) || 0 : 0, paTop = (paD && paD.top) || [];
+    const paCatJa = { loss: '🔴赤字', thin: '🟠薄利', over: '🟡上げすぎ', room: '🔵余地' };
     /* 🔔 売れて在庫0で確認待ち（在庫の自動復活・本人 2026-09-28「0のまま気づかないと機会損失がでかい」） */
     const rsC = (renderAlerts._cache && renderAlerts._cache.rs) || {}, rsMan = rsC.man || {};
     const rsReview = Object.entries((rsC.st && rsC.st.watchZero) || {}).filter(([k, w]) => w && w.kind !== 'watch' && !(rsMan[k] && String(rsMan[k]) >= String(w.at || ''))).map(([k, w]) => w).sort((a, b) => String(b.at).localeCompare(String(a.at)));
@@ -18360,6 +18375,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ['国', '理由', '最後の成功', '最後の記録', '開く'],
         rowsyncRows.map(r => `<tr style="background:#fff5f5"><td style="font-size:11px;font-weight:700">${r.cc}</td><td style="font-size:11px">${esc(r.why)}</td><td style="font-size:11px;white-space:nowrap">${r.lastOk}</td><td style="font-size:11px">${r.lastMsg}</td><td>${r.host ? `<a href="https://${r.host}/portal/sale/order?type=toship" target="_blank" style="font-size:11px">SCタブ↗</a>` : ''}</td></tr>`).join(''),
         '各国の Seller Center タブで動く転記（明細→_row・入金→F/G・画像→AC列）が3時間おきに届いていません。そのタブが閉じている／眠っている／ログイン切れが主な原因。タブを開いて左下の「▶ 今すぐ」を押すと再開します。Chrome設定→パフォーマンス→「常にアクティブにするサイト」に seller.shopee.* と banhang.shopee.vn を入れると眠りません。', 'al-rowsync') +
+      card('🏷', '値付けの提案（おすすめ・押すと書き込み）', '#5b3fd6', paRecN,
+        ['区分', '国', '商品 ▸ 明細', '今の価格 → 提案', '利益/個 今 → 提案'],
+        paTop.map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(paCatJa[w.cat] || w.cat)}${w.front ? ' 🟢' : ''}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${nm(w.name + (w.vari ? ' ▸ ' + w.vari : ''), 'wrap')}</td><td style="font-size:11px;white-space:nowrap">${esc(paLoc(w.cc, w.from))} → <b>${esc(paLoc(w.cc, w.to))}</b></td><td style="font-size:11px;white-space:nowrap">${esc(paYen(w.p))} → ${esc(paYen(w.pSug))}</td></tr>`).join(''),
+        `${paD && paD.at ? esc(jstDateTime(paD.at)) + ' 時点の数え（内訳 🔴' + (paD.counts || {}).loss + '・🟠' + (paD.counts || {}).thin + '・🟡' + (paD.counts || {}).over + '・🔵' + (paD.counts || {}).room + '・おすすめ ' + paRecN + '件＝1回の幅 +40%／−15% の中の提案）。' : ''}<button class="al-paapply smd-btn b-write" style="font-size:11.5px;padding:2px 10px;font-weight:700">✅ おすすめ ${paRecN} 件をまとめて書き込む</button> <button class="al-pago smd-btn b-open" style="font-size:11px;padding:1px 8px">🏷 値付けの見直しで1件ずつ選ぶ</button> <span class="smd-dim">押すと読み直して、いまも条件を満たす明細だけを内容確認（1回）のうえ書きます。表は上位30件</span>`, 'al-price') +
       card('🔔', '売れて在庫0になった明細（確認待ち）', '#1565c0', rsReview.length,
         ['0になった日時', '国', '明細', 'カタログ'],
         rsReview.slice(0, 100).map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(w.at))}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${nm(w.name, 'wrap')}</td><td style="font-size:11px">${nm(w.title || '', 'wrap')}</td></tr>`).join(''),
@@ -18369,7 +18388,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         dataIssues.slice(0, 100).map(r => `<tr>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         'ポータルDBが古い可能性（未払いのまま／発送済なのに追跡なし）。📄でShopeeを確認し、注文管理で「更新」→設定から同期すると直ります。', 'al-data');
 
-    const total = rsReview.length + arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length + eliRows.length + baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0);   // 🤖未確認だけの時も「アラートなし🎉」で隠さない（Codex指摘）
+    const total = paRecN + rsReview.length + arrivedNotRecv.length + shipRows.length + stuckShip.length + stuckArrive.length + noProof.length + dataIssues.length + rowsyncRows.length + eliRows.length + baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0);   // 🤖未確認だけの時も「アラートなし🎉」で隠さない（Codex指摘）
     // 伝票は出したが、家から出す期限を過ぎてまだ倉庫へ送っていない注文（📦注文管理の「🚨遅延中」と同じ数え方＝ordDueBucket の 'over'）。
     //   上の「発送期日」は未手配（伝票なし）だけを見ているので、これを足さないと注文管理が「遅延中 4件」なのにバッジは 0 になる（2026-09-19 実測）
     // ※伝票を出した注文の status は 'Processed'（'To Ship' ではない）。最初 'To Ship' だけで数えて 0件になった（実データで確認 2026-09-19）
@@ -18387,6 +18406,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['🔋 ELI提出', eliRows.length, '#7b52c4', 'al-eli'],
       ['🤖 自動出品の点検', baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0), baBrake ? '#d93025' : '#1565c0', 'al-ba'],
       ['📄 転記停止', rowsyncRows.length, '#b71c1c', 'al-rowsync'],
+      ['🏷 値付けの提案', paRecN, '#5b3fd6', 'al-price'],
       ['🔔 在庫0の確認待ち', rsReview.length, '#1565c0', 'al-restock'],
       ['🧾 データ不整合', dataIssues.length, '#c2185b', 'al-data'],
       ['🏬 滞留在庫', dead.length, '#666', 'al-dead'],
@@ -18397,6 +18417,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       : chipBar + html;
     body.querySelectorAll('.al-chip').forEach(b => b.addEventListener('click', () => { const t = document.getElementById(b.dataset.go); if (t) { t.open = true; t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }));
     { const gr = body.querySelector('.al-gorestock'); if (gr) gr.addEventListener('click', () => { try { lst.tab = 'restock'; localStorage.setItem('smdListTab', 'restock'); } catch (_) {} showPage('list'); }); }
+    { const pa1 = body.querySelector('.al-paapply'); if (pa1) pa1.addEventListener('click', () => { paApplyRecommended(pa1).catch(e => alert((e && e.message) || e)); });
+      const pa2 = body.querySelector('.al-pago'); if (pa2) pa2.addEventListener('click', () => { featGo({ p: 'list', k: 'rank', fn: () => { PA.cat = 'act'; try { paSave(); } catch (_) {} } }); }); }
     { const gd = body.querySelector('.al-godead'); if (gd) gd.addEventListener('click', () => { try { stock.dead = true; stock.st = ''; stock.q = ''; } catch (_) {} showPage('stock'); }); }
     // 🤖 自動で出した明細を「見た」に（app_kv.boshu_auto_seen.at）。これより新しい分だけが次から出る
     body.querySelectorAll('.ba-seen').forEach(b => b.addEventListener('click', async () => {
@@ -21712,6 +21734,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-20', items: [
+      '🏷 <b>🔔お知らせに「値付けの提案（おすすめ）」カードを足しました</b>（本人「この値段に調整します、という候補を上げてきてもらって、最終意思決定は私がする。そのボタンをポチッと押したら調整がかかる」）。毎日19時以降に担当PCが🏷値付けの見直しと同じ計算で数え（控え app_kv price_adj_digest）、🔴赤字／🟠薄利／🟡上げすぎ／🔵余地のうち1回の幅（+40%／−15%）に収まる提案を上位30件まで表に出します。「✅ おすすめ N件をまとめて書き込む」を押すと、その場で読み直していまも条件を満たす明細だけを選び、今まで通りの内容確認（1回）のあと明細の価格だけを書きます（カタログは触らない・フロント商品は10/3の下限¥250の規則のまま）。',
+    ] },
     { date: '2026-10-19', items: [
       '🛍 <b>トレカの写真集めを Yahoo!フリマにも広げました</b>（本人「枠が空いてたらフルで使い回したい」「ブラジル、トレカとかガンガン出して」）：メルカリで見つからなかったカードは Yahoo!フリマでも探す（同じ照合＝番号が題名にある・NG語なし・新品/未使用は除く）。接続枠は使わない（ブリッジ）。弾かれたら6時間休む。写真の合否は今まで通り Claude の判定。\n',
       '📊 <b>閲覧・いいね・販売の統計を毎日取り直すようにしました</b>：本体の毎日 4:44 の同期が 7/28 から1度も書けていなかった（Boost の選ぶ根拠と商品表の数字が3か月前のままだった）。担当PCのポータルが毎日 17 時以降に1回、全13店の統計を Shopee から取り直す。\n',
@@ -32882,6 +32907,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         console.log('[統計] 毎日の取り直し', ymd, r && r.ok, (r && r.log && r.log.length) || 0, '店');
       } catch (e) { console.warn('[統計] 毎日の取り直しに失敗', e.message); }
     }, 10 * 60000);
+    if (!lst._paDigestTimer) lst._paDigestTimer = setInterval(() => { paDigestDaily().catch(() => {}); }, 10 * 60000);   /* 🏷 値付けの提案を毎日19時以降に1回数える（担当PC） */
     setTimeout(() => { baAutoCollectTick().catch(() => {}); }, 8000);
   }
   /* ★2026-10-09 仕入れ画面を開いているタブがあれば、同じPCの他のタブの写真集めも休む（localStorage の時刻で伝える） */
@@ -40111,6 +40137,46 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const dc = box2.querySelector('.deal-cutall'); if (dc) dc.addEventListener('click', () => runDealCutAll());
   }
 
+  /* ★2026-10-20 本人「この値段に調整します、という候補を上げてきてもらって、最終意思決定は私がする。そのボタンをポチッと押したら調整がかかる」
+     ①おすすめ＝区分が 赤字/薄利/上げすぎ/余地 で提案価格があり、1回の幅（+40%／−15%）の中の物（フロントは 10/3 の下限¥250 の規則のまま・特別扱いしない）
+     ②毎日 19時以降に担当PCが1回だけ数えて app_kv price_adj_digest に控える（件数＋上位30件・17時の統計の取り直しと重ねない）→ 🔔お知らせに「🏷 値付けの提案」カード
+     ③カードのボタンは控えの数字では書かない。押した瞬間に読み直して（paLoad(true)）いまも条件を満たす物だけを選び、既存の paApply（最新の出品の読み直し・国の守り・内容確認）に渡す */
+  const PA_REC_UP = 1.4, PA_REC_DOWN = 0.85;
+  function paIsRec(e) { return !!(e && e.sug != null && e.price > 0 && ['loss', 'thin', 'over', 'room'].includes(e.cat) && Math.abs(e.sug - e.price) > 1e-9 && e.sug <= e.price * PA_REC_UP && e.sug >= e.price * PA_REC_DOWN); }
+  async function paDigestBuild(force) {
+    const D = await paLoad(!!force);
+    const targets = new Set(accountTargets().map(r => r.cc)); const rows = D.rows.filter(e => targets.has(e.cc));
+    const counts = { loss: 0, thin: 0, over: 0, room: 0 }; rows.forEach(e => { if (counts[e.cat] != null) counts[e.cat]++; });
+    const order = { loss: 0, thin: 1, over: 2, room: 3 };
+    const rec = rows.filter(paIsRec).sort((a, b) => (order[a.cat] - order[b.cat]) || ((b.score || 0) - (a.score || 0)));
+    return { at: Date.now(), counts, rec: rec.length, top: rec.slice(0, 30).map(e => ({ key: e.key, cc: e.cc, name: String(e.name || '').slice(0, 70), vari: String(e.vari || '').slice(0, 40), from: e.price, to: e.sug, cat: e.cat, p: e.pNow, pSug: e.pSug, front: !!e.front })) };
+  }
+  async function paDigestWrite(force) { const d = await paDigestBuild(force); const ok = await pcKvPut('price_adj_digest', d); if (renderAlerts._cache) renderAlerts._cache.paDigest = d; return { ok, d }; }
+  async function paDigestDaily() {
+    try {
+      if (typeof pcIsOwner === 'function' && !pcIsOwner()) return;
+      const jst = new Date(Date.now() + 9 * 3600000), ymd = jst.toISOString().slice(0, 10);
+      if (jst.getUTCHours() < 19) return;   /* 17時台の統計の取り直しと重ねない（Supabase の負荷） */
+      if (localStorage.getItem('smdPaDigestAt') === ymd) return;
+      localStorage.setItem('smdPaDigestAt', ymd);   /* 先に印＝失敗しても1日1回 */
+      const r = await paDigestWrite(false);
+      console.log('[値付けの提案] 毎日の数え', ymd, r.ok, r.d && r.d.rec, '件');
+    } catch (e) { console.warn('[値付けの提案] 毎日の数えに失敗（控えは書かない＝0件とは言わない）', e.message); }
+  }
+  async function paApplyRecommended(btn) {
+    const label = btn ? btn.textContent : ''; if (btn) { btn.disabled = true; btn.textContent = '⏳ 読み直して、いまも条件を満たす提案だけ選んでいます…'; }
+    try {
+      const D = await paLoad(true);
+      const targets = new Set(accountTargets().map(r => r.cc));
+      const rec = D.rows.filter(e => targets.has(e.cc) && paIsRec(e));
+      if (!rec.length) { toast('✅ いま書き込める提案はありません（読み直した結果）'); return; }
+      PA.sel = new Set(rec.map(e => e.key)); PA.edit = {}; try { paSave(); } catch (_) {}
+      await paApply(new Map(D.rows.map(e => [e.key, e])));
+      try { await paDigestWrite(true); } catch (_) {}
+      try { renderAlerts(true); } catch (_) {}
+    } catch (e) { alert('書き込めませんでした: ' + ((e && e.message) || e)); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
+  }
   async function paApply(byKey) {
     let pick = [...PA.sel].map(k => byKey.get(k)).filter(e => e && e.sug != null).map(e => ({ e, from0: e.price, to: Number(PA.edit[e.key] != null ? PA.edit[e.key] : e.sug) })).filter(x => x.to > 0 && Math.abs(x.to - x.e.price) > 1e-9);
     if (!pick.length) { alert('書き込める明細がありません（提案価格が今と同じ・または未選択）'); return; }
