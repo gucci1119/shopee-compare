@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261021-2300';
+var SRC_VER = '20261021-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1451,6 +1451,29 @@ function doGetInner_(e) {
       try { gbout = brandList_(parseInt(p.shop_id, 10), parseInt(p.category_id, 10), String(p.q || '')); }
       catch (err) { gbout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gbcb + '(' + JSON.stringify(gbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-10-21 📣 営業の段階管理（本人「バイヤーごとに今どのステータスか把握したい」「ステータスごとに何人停滞してるか」）
+       営業の台帳＝顧客リスト（1_Hq6yvl…）の「営業送信」シートを本体が直接読む／手で付ける段階（stage:<key>）を1行足す。WRITE_TOKEN 必須・urlfetch は使わない */
+    if (p.action === 'outreach_board' || p.action === 'outreach_stage') {
+      var obcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var obout;
+      try {
+        var obwt = P_().getProperty('WRITE_TOKEN'); if (!obwt || p.token !== obwt) throw new Error('WRITE_TOKEN不正');
+        var obss = SpreadsheetApp.openById('1_Hq6yvl_7KDDlGdNrg1VUnqK2F-7p5OMrRjolu_ysVc'); var obsh = obss.getSheetByName('営業送信'); if (!obsh) throw new Error('営業送信 シートが無い');
+        if (p.action === 'outreach_stage') {
+          var key = String(p.stage || '').replace(/[^a-z_]/g, ''); if (!key) throw new Error('stage 必須');
+          var ph = String(p.phone || '').replace(/[^0-9]/g, ''); if (!ph) throw new Error('phone 必須');
+          obsh.appendRow([new Date(), String(p.app || ''), String(p.cc || ''), ph, String(p.acc || ''), String(p.name || ''), 'stage:' + key, '', String(p.note || 'ポータルで設定').slice(0, 200), '']);
+          obout = { ok: true, written: 1 };
+        } else {
+          var v = obsh.getDataRange().getValues(); var ev = [];
+          for (var oi = 1; oi < v.length; oi++) { var r = v[oi]; var ph2 = String(r[3] || '').replace(/[^0-9]/g, ''); if (!ph2) continue;
+            var t = (r[0] instanceof Date) ? r[0].getTime() : (Date.parse(String(r[0] || '')) || 0);
+            ev.push([t, String(r[1] || ''), String(r[2] || ''), ph2, String(r[4] || ''), String(r[5] || ''), String(r[6] || ''), String(r[8] || '').slice(0, 120), String(r[9] || '').slice(0, 160)]); }
+          obout = { ok: true, cols: ['t', 'app', 'cc', 'phone', 'acc', 'name', 'status', 'note', 'ja'], events: ev };
+        }
+      } catch (err) { obout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(obcb + '(' + JSON.stringify(obout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'outreach_ai') {   /* 📣 営業の返事を AI に【型と抜き出しだけ】書かせる（2026-10-12 本人「ある程度自動化したい」「英語で何言ってるかわからんので分かるようにしたい」）。合否と動きは呼び元のコードの表で決める。鍵は顧客情報抽出 GAS の OUTREACH_TOKEN（本体には置かない） */
       var oacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
