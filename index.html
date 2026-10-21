@@ -21975,6 +21975,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '🔁 <b>在庫の自動復活の確認待ちに、消した明細と限定版を出さないようにしました</b>（本人「これなぜ、表示されている？」＝さくら荘 BR）：消した明細は詰め直しで番号が別の作品に入れ替わるため、押すと別の作品の在庫を書くおそれがありました。戻す前に今の明細の名前を読み、同じ時だけ書きます（読めない時は書きません）。限定版は並べず、戻しません。',
       '🛑 <b>🤖が限定版・特装版・エディションの題名そのものを出さないようにしました</b>（本人「化粧箱付きの商品は、新規自動出品では絶対に出さない」）：🤖の限定版の明細183件はこの入口から出ていました。手動出品は今まで通り出せます。',
       '🧾 <b>Claude の写真判定の控えを2つに分けました</b>（控えが2.6MBを超えて予定タスクが読めず、🃏🎮の判定が6回止まっていた）：古いNGを別の鍵に移し、GASは2つを合わせて読みます。あわせて、限定版がある作品は「通常版と確かめた写真」だけをOKにします（さくら荘の再発よけ）。',
       '🔍 <b>仕入れ検索の取得を外から呼べるようにしました</b>（限定版の市場在庫を作品ごとにまとめて数えるため。画面は変わりません）。',
@@ -33938,6 +33939,8 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     { const b = document.getElementById('sp-reload'); if (b) b.addEventListener('click', () => renderSpinoffTab(true)); }
     { const qi = document.getElementById('sp-q'); if (qi) { let t; qi.addEventListener('input', () => { clearTimeout(t); const pos = qi.selectionStart; t = setTimeout(() => { SP.q = qi.value; spDraw(); const n = document.getElementById('sp-q'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (_) {} } }, 250); }); } }
   }
+  const RS_LIM_RE = /\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i;   /* ★2026-10-22 限定版は在庫を戻さない */
+  const rsNameKey = t => String(t || '').replace(/\s*[,\/]\s*/g, ',').replace(/\s+/g, ' ').trim().toLowerCase();
   async function renderRestockTab(force) {
     const host = document.getElementById('list-restock'); if (!host) return;
     const seq = ++RS.seq;
@@ -33959,7 +33962,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const nWatch = Object.values(rules).filter(r => r && r.m === 'watch').length, nQty = Object.values(rules).filter(r => r && (r.q > 0 || r.m === 'auto')).length;
     /* ★2026-09-29 明細を単品扱いにしていた版の記録（model 0 なのに出品にバリエーションがある）は出さない＝押すとカタログ全体に書いてしまう */
     const rsHasModels = w => { try { const l = ((lst.byCc || {})[w.cc] || []).find(x => String(x.item_id) === String(w.item_id)); return !!(l && (l.models || []).some(m => m && m.id && !m.ghost)); } catch (_) { return false; } };
-    const wz = Object.entries(state.watchZero || {}).filter(([k, w]) => w && !(RS.doneLocal && RS.doneLocal.has(k)) && !(manual[k] && String(manual[k]) >= String(w.at || '')) && !(!Number(w.model_id) && rsHasModels(w))).map(([k, w]) => Object.assign({ key: k }, w)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    /* ★2026-10-22 本人「これなぜ、表示されている？」（さくら荘 BR＝限定版の化粧箱の写真で売れて、明細はもう消した）：
+       ①消した明細（いまの出品に同じ番号の明細が無い／番号が別の作品に入れ替わった＝詰め直し削除）は出さない。押すと別の作品の在庫を書いてしまう
+       ②限定版（名前に Limited・限定・特装・豪華・Collector 等）は戻さない決まり（本人「化粧箱付きの商品は絶対に出さない」）＝並べない */
+    const rsGone = w => { try { if (!Number(w.model_id)) return false; const l = ((lst.byCc || {})[w.cc] || []).find(x => String(x.item_id) === String(w.item_id)); if (!l) return false; const m = (l.models || []).find(x => String(x.id) === String(w.model_id)); if (!m) return true; return !!(w.name && m.n && rsNameKey(m.n) !== rsNameKey(w.name)); } catch (_) { return false; } };
+    const wz = Object.entries(state.watchZero || {}).filter(([k, w]) => w && !(RS.doneLocal && RS.doneLocal.has(k)) && !(manual[k] && String(manual[k]) >= String(w.at || '')) && !(!Number(w.model_id) && rsHasModels(w)) && !RS_LIM_RE.test(String(w.name || '')) && !rsGone(w)).map(([k, w]) => Object.assign({ key: k }, w)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
     /* ★2026-10-20 本人「もうちょっとここも整理してほしい」：説明が上の帯・このカード・各カードの3か所に重なっていた。
        このカードは「設定と最後の回」の1行＋「下の3つの欄へ飛ぶ」1行だけにし、長い説明は title（マウスを乗せると出る）へ */
     const nRev0 = wz.filter(w => w.kind !== 'watch').length, nLog0 = (state.log || []).slice(0, 40).length;
@@ -34121,11 +34128,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           {   /* 本人「APIでできることはAPIでやって」＝手元の出品データ（古いことがある）では決めず、毎回公式APIで今の在庫を読む */
             try {
               const d0 = await openapiGetModels(w0.shop_id, w0.item_id); const ms0 = (d0 && d0.models) || [];
+              /* ★2026-10-22 明細の番号は詰め直し削除で別の作品に入れ替わることがある＝【名前が同じ時だけ】書く。限定版は書かない */
+              const gone = x => { const mid = Number(x.w.model_id) || 0; if (!mid) return false; const m = ms0.find(mm => String(mm.model_id) === String(mid)); return !m || !!(x.w.name && m.name && rsNameKey(m.name) !== rsNameKey(x.w.name)); };
+              want.filter(x => gone(x) || RS_LIM_RE.test(String(x.w.name || ''))).forEach(x => { done.push(x.k); ok++; delete RS.failMsg[x.k]; RS.doneLocal.add(x.k); RS.pending.delete(x.k); hideRow(x.k); try { logAct('出品', '売れて0の在庫を戻す→明細が消えた／入れ替わった・限定版のため書かず', x.w.cc + ' ' + x.w.item_id, String(x.w.name || '')); } catch (_) {} });
+              for (let i = want.length - 1; i >= 0; i--) if (gone(want[i]) || RS_LIM_RE.test(String(want[i].w.name || ''))) want.splice(i, 1);
+              if (!want.length) return;
               const has = x => { const mid = Number(x.w.model_id) || 0; const m = ms0.find(mm => String(mm.model_id) === String(mid)) || (ms0.length === 1 && !mid ? ms0[0] : null); return m && Number(m.stock) > 0; };
               want.filter(has).forEach(x => { done.push(x.k); ok++; delete RS.failMsg[x.k]; RS.doneLocal.add(x.k); RS.pending.delete(x.k); hideRow(x.k); try { logAct('出品', '売れて0の在庫を戻す→もう在庫ありで書かず', x.w.cc + ' ' + x.w.item_id, x.w.name); } catch (_) {} });
               for (let i = want.length - 1; i >= 0; i--) if (has(want[i])) want.splice(i, 1);
               if (!want.length) return;
-            } catch (_) {}   // 読めなければ従来どおり書く（戻す操作を止めない）
+            } catch (eR0) { want.forEach(x => { RS.pending.delete(x.k); ng++; RS.failMsg[x.k] = '今の明細を読めませんでした（名前を確かめられないので書いていません・もう一度押してください）'; errs.push(x.w.cc + ' ' + String(x.w.name || '').slice(0, 30)); }); return; }   // ★2026-10-22 読めない時は書かない（番号が別の作品に入れ替わっているかもしれない）
           }
         }
         if (restore) {
