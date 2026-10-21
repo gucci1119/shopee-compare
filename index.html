@@ -21844,6 +21844,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-21', items: [
+      '💴 <b>値付けの見直し：「提案後の利益」を自分で打てるように</b>（本人「提案後の利益のところを自分で調整できるようにしたら？」「結局さ、いくら利益取りたいかよ」）。欲しい1個あたりの利益（円）を打つと、仕入れ・手取り率・今日の為替から<b>値段を逆算して提案価格に入れ、その行を選びます</b>。提案価格を打った時は今まで通り利益が計算し直されます。',
       '↩ <b>キャンセルで在庫が戻らないように</b>（本人「全ての商品、キャンセルされて、在庫戻らないようにして」）。Shopee は注文がキャンセルされると在庫を自動で戻す（NieR: Automata が 10/10 の注文の自動キャンセルで在庫1に戻り、限定版の写真・通常版の値段のまま 10/21 にまた売れた）。GAS の注文の同期のたびに、新しいキャンセルを見つけて<b>戻った数だけ在庫を引き戻す</b>ようにしました（1注文1回・0未満にしない・本体だけ・今あるキャンセルは触らない）。控え＝cancel_stock_done。',
     ]},
     { date: '2026-10-20', items: [
@@ -40203,7 +40204,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <td style="text-align:right;white-space:nowrap">${paYen(e.target)}${e.roiT != null ? `<div class="smd-dim" style="font-size:10px">仕入${paYen(e.cost)}×${e.roiT}%</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap">${paLoc(e.cc, e.price)}${e.soldBefore ? `<div class="smd-dim" style="font-size:10px">売れた頃 ${paLoc(e.cc, e.soldBefore)}</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap">${sugV != null ? `<input class="pa-price" data-k="${esc(e.key)}" type="number" step="${rg.priceUnit || 1}" value="${sugV}" style="width:${String(sugV).length > 6 ? 96 : 76}px;text-align:right"><div class="pa-chg" style="font-size:10px;color:${chg > 0 ? '#1a7f37' : '#c2185b'}">${chg > 0 ? '+' : ''}${chg}%</div>` : '<span class="smd-dim">—</span>'}</td>
-        <td class="pa-psug" style="text-align:right;white-space:nowrap;${pS != null && pS < 0 ? 'color:#d93025' : ''}">${pS != null ? paYen(pS) : '—'}${pS != null && !e.kOwn ? '<div class="smd-dim" style="font-size:10px">手取り率は国の平均</div>' : ''}</td>
+        <td class="pa-psug" style="text-align:right;white-space:nowrap">${pS != null ? `<span style="font-size:11px;color:#6b7280">¥</span><input class="pa-prof" data-k="${esc(e.key)}" type="number" step="100" value="${Math.round(pS)}" title="欲しい1個あたりの利益（円）を打つと、そこから逆算した値段が提案価格に入ります" style="width:78px;text-align:right;${pS < 0 ? 'color:#d93025;' : ''}">` : '—'}${pS != null && !e.kOwn ? '<div class="smd-dim" style="font-size:10px">手取り率は国の平均</div>' : ''}</td>
         <td style="font-size:11px;color:#5a6b8a;min-width:240px">${esc(e.why)}${e.ratioWant ? `<div style="margin-top:4px"><button class="smd-btn b-write pa-move" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px" title="本人 2026-10-20「その場合は価格差が合う違う明細に入れ直して」：同じ店の、値段の差が合うバリエのカタログを探して、この明細を ${paLoc(e.cc, e.ratioWant)} で入れ直し、ここからは消す（カタログは残す）">🔀 値段の差が合う別のカタログへ ${paLoc(e.cc, e.ratioWant)} で移す</button><div class="pa-move-box" data-k="${esc(e.key)}"></div></div>` : ''}</td>
       </tr>`;
     }).join('');
@@ -40296,8 +40297,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const e = byKey.get(inp.dataset.k); if (!e) return; const v = Number(inp.value);
       if (!(v > 0)) return; PA.edit[e.key] = v;
       const tr = inp.closest('tr'), p = e.profitAt(v), chg = Math.round((v / e.price - 1) * 100);
-      const ps = tr.querySelector('.pa-psug'); if (ps) { ps.textContent = paYen(p); ps.style.color = p < 0 ? '#d93025' : ''; }
+      const pf = tr.querySelector('.pa-prof'); if (pf && p != null && document.activeElement !== pf) { pf.value = Math.round(p); pf.style.color = p < 0 ? '#d93025' : ''; }
       const ch = tr.querySelector('.pa-chg'); if (ch) { ch.textContent = (chg > 0 ? '+' : '') + chg + '%'; ch.style.color = chg > 0 ? '#1a7f37' : '#c2185b'; }
+    }));
+    /* ★2026-10-21 本人「提案後の利益のところを自分で調整できるようにしたら？」「結局さ、いくら利益取りたいかよ」：
+       欲しい利益（円）を打つと、仕入れ・手取り率・今日の為替から値段を逆算して提案価格に入れ、その行を選ぶ（書き込むのは「選んだ…を書き込む」を押した時） */
+    root.querySelectorAll('.pa-prof').forEach(inp => inp.addEventListener('input', () => {
+      const e = byKey.get(inp.dataset.k); if (!e) return; const d = Number(inp.value);
+      if (!isFinite(d) || inp.value === '' || !(e.k > 0) || !(e.rNow > 0) || e.cost == null) return;
+      const unit = (regionByCc(e.cc) || {}).priceUnit || 1, P = paUp((e.cost + d) / (e.k * e.rNow), unit);
+      if (!(P > 0)) return; PA.edit[e.key] = P;
+      const tr = inp.closest('tr'), pr = tr.querySelector('.pa-price'); if (pr) pr.value = P;
+      const chg = Math.round((P / e.price - 1) * 100), ch = tr.querySelector('.pa-chg'); if (ch) { ch.textContent = (chg > 0 ? '+' : '') + chg + '%'; ch.style.color = chg > 0 ? '#1a7f37' : '#c2185b'; }
+      inp.style.color = d < 0 ? '#d93025' : '';
+      const ck = tr.querySelector('.pa-ck'); if (ck && !ck.checked) { ck.checked = true; PA.sel.add(e.key); try { selCount(); } catch (_) {} }
     }));
     const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
     const sn = root.querySelector('#pa-selnone'); if (sn) sn.addEventListener('click', () => { PA.sel.clear(); root.querySelectorAll('.pa-ck').forEach(c => { c.checked = false; }); selCount(); });
