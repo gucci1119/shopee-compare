@@ -3366,7 +3366,17 @@
     if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const qs = 'action=' + action + '&token=' + encodeURIComponent(settings.writeToken) + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId) + '&list=' + encodeURIComponent(JSON.stringify(list));
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000, true);
+    /* ★2026-10-22 本人「書き込みしたのに残るやつある」：価格・在庫の書き込みだけは本体に直に投げていて、本体の1日の枠が切れた日に失敗していた。
+       値段・在庫は同じ値を送り直しても害がない（冪等）ので、枠が切れた台は避け、枠切れで断られたら別の台で書き直す */
+    let base = settings.openapiUrl;
+    if (ufUrlBlocked(base)) { const a0 = gasPeerUrl(base); if (a0) base = a0; }
+    let res = null;
+    for (let hop = 0; hop < 4; hop++) {
+      res = await jsonp(base + (base.includes('?') ? '&' : '?') + qs, 60000, true);
+      const er = String((res && res.error) || '');
+      if (res && !res.ok && /1\s*日に|for one day|接続枠が尽きている|urlfetch/i.test(er)) { ufMarkBlocked(base, er); const alt = gasPeerUrl(base); if (alt && alt !== base) { try { toast('⛔ 本体の接続枠が尽きたので、別のGoogleアカウントで書き直します', 3000); } catch (_) {} base = alt; continue; } }
+      break;
+    }
     if (!res || !res.ok) throw new Error((res && res.error) || '公式API更新に失敗');
     return res;
   }
@@ -21975,6 +21985,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '🏷 <b>値付けの見直し：書き込みが失敗した日の直し＋VNの上限超えは削除を提案</b>（本人「書き込みしたのに残るやつある」「ベトナムで価格超えてしまうやつは削除提案してきて」「明細ないやつは、カタログごと」）：①価格・在庫の書き込みも、本体の接続枠が尽きた日は別のGoogleアカウントで書き直す ②全部失敗した回も記録に残す ③VNで上限（909,090ドン）を超えないと目標に届かない行に「🗑 この明細を消す／カタログごと消す」を出す。',
       '🔁 <b>在庫の自動復活の確認待ちに、消した明細と限定版を出さないようにしました</b>（本人「これなぜ、表示されている？」＝さくら荘 BR）：消した明細は詰め直しで番号が別の作品に入れ替わるため、押すと別の作品の在庫を書くおそれがありました。戻す前に今の明細の名前を読み、同じ時だけ書きます（読めない時は書きません）。限定版は並べず、戻しません。',
       '🛑 <b>🤖が限定版・特装版・エディションの題名そのものを出さないようにしました</b>（本人「化粧箱付きの商品は、新規自動出品では絶対に出さない」）：🤖の限定版の明細183件はこの入口から出ていました。手動出品は今まで通り出せます。',
       '🧾 <b>Claude の写真判定の控えを2つに分けました</b>（控えが2.6MBを超えて予定タスクが読めず、🃏🎮の判定が6回止まっていた）：古いNGを別の鍵に移し、GASは2つを合わせて読みます。あわせて、限定版がある作品は「通常版と確かめた写真」だけをOKにします（さくら荘の再発よけ）。',
@@ -40282,7 +40293,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (sug != null && sug < e.price * 0.85) { sug = paDown(e.price * 0.85, unit); why += '（1回の値下げは−15%まで）'; }
         /* ★2026-10-20 本人「なんでこれ失敗するの？」：バリエのカタログは「いちばん高い明細÷いちばん安い明細」が上限（BR 4倍・他 5倍）を超えると Shopee が断る
            （BR Fire Emblem：R$528→899 が「price ratio … exceeds 4」で失敗）。提案の時点で上限の少し手前に抑える */
-        e.ratioWant = null; e.ratioLim = null;
+        e.ratioWant = null; e.ratioLim = null; e.ceilDel = false;
         if (sug != null && e.model_id && e.mPrices && e.mPrices.length > 1) {
           const oth = e.mPrices.filter(x => x.id !== String(e.model_id)).map(x => x.p);
           if (oth.length) {
@@ -40296,7 +40307,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
            「The max price of the product is over max limit」で断られていた（VN 2件）。上限で止め、止めても赤字なら理由に書く。今すでに上限超なら上限まで下げる */
         { const ceil = (typeof PRICE_CEIL !== 'undefined' && PRICE_CEIL[e.cc]) || 0;
           if (ceil && e.price > ceil) { sug = paDown(ceil, unit); cat = cat === 'ok' ? 'over' : cat; why += `（今の値段が ${e.cc} の上限 ${paLoc(e.cc, ceil)} を超えている＝Shopee に断られる・止められるので上限まで下げる）`; }
-          else if (ceil && sug != null && sug > ceil) { sug = paDown(ceil, unit); const pc = profitAt(sug); why += `（${e.cc} は1明細 ${paLoc(e.cc, ceil)} が上限なので、そこで止めた${pc != null && pc < 0 ? '。上限でも1個 ' + paYen(pc) + '＝' + e.cc + ' では目標に届かない（この国では出さない・在庫0も考える）' : ''}）`;
+          else if (ceil && sug != null && sug > ceil) { e.ceilDel = true; sug = paDown(ceil, unit); const pc = profitAt(sug); why += `（${e.cc} は1明細 ${paLoc(e.cc, ceil)} が上限なので、そこで止めた${pc != null && pc < 0 ? '。上限でも1個 ' + paYen(pc) + '＝' + e.cc + ' では目標に届かない（この国では出さない・在庫0も考える）' : ''}）`;
             if (Math.abs(sug - e.price) < unit / 2 || sug <= e.price) { sug = null; why += '＝これ以上は上げられない'; } } }
         e.cat = cat; e.sug = sug; e.why = why;
         e.pSug = sug != null ? profitAt(sug) : null;
@@ -40359,7 +40370,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <td style="text-align:right;white-space:nowrap">${paLoc(e.cc, e.price)}${e.soldBefore ? `<div class="smd-dim" style="font-size:10px">売れた頃 ${paLoc(e.cc, e.soldBefore)}</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap">${sugV != null ? `<span style="font-size:11px;color:#6b7280">${esc(rg.cur || '')}</span><input class="pa-price" data-k="${esc(e.key)}" type="text" inputmode="decimal" value="${paFmtIn(sugV, rg.priceUnit)}" style="width:${String(sugV).length > 6 ? 100 : 80}px;text-align:right"><div class="pa-chg" style="font-size:10px;color:${chg > 0 ? '#1a7f37' : '#c2185b'}">${chg > 0 ? '+' : ''}${chg}%</div>` : '<span class="smd-dim">—</span>'}</td>
         <td class="pa-psug" style="text-align:right;white-space:nowrap">${pS != null ? `<span style="font-size:11px;color:#6b7280">¥</span><input class="pa-prof" data-k="${esc(e.key)}" type="text" inputmode="numeric" value="${paFmtIn(pS, 1)}" title="欲しい1個あたりの利益（円）を打つと、そこから逆算した値段が提案価格に入ります" style="width:78px;text-align:right;${pS < 0 ? 'color:#d93025;' : ''}">` : '—'}${pS != null && !e.kOwn ? '<div class="smd-dim" style="font-size:10px">手取り率は国の平均</div>' : ''}</td>
-        <td style="font-size:11px;color:#5a6b8a;min-width:240px">${esc(e.why)}${e.ratioWant ? `<div style="margin-top:4px"><button class="smd-btn b-write pa-move" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px" title="本人 2026-10-20「その場合は価格差が合う違う明細に入れ直して」：同じ店の、値段の差が合うバリエのカタログを探して、この明細を ${paLoc(e.cc, e.ratioWant)} で入れ直し、ここからは消す（カタログは残す）">🔀 値段の差が合う別のカタログへ ${paLoc(e.cc, e.ratioWant)} で移す</button><div class="pa-move-box" data-k="${esc(e.key)}"></div></div>` : ''}</td>
+        <td style="font-size:11px;color:#5a6b8a;min-width:240px">${esc(e.why)}${e.ratioWant ? `<div style="margin-top:4px"><button class="smd-btn b-write pa-move" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px" title="本人 2026-10-20「その場合は価格差が合う違う明細に入れ直して」：同じ店の、値段の差が合うバリエのカタログを探して、この明細を ${paLoc(e.cc, e.ratioWant)} で入れ直し、ここからは消す（カタログは残す）">🔀 値段の差が合う別のカタログへ ${paLoc(e.cc, e.ratioWant)} で移す</button><div class="pa-move-box" data-k="${esc(e.key)}"></div></div>` : ''}${e.ceilDel ? `<div style="margin-top:4px"><button class="smd-btn pa-ceil-del" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px;border-color:#f5c2c0;background:#fdecea;color:#b3261e" title="本人 2026-10-22「ベトナムで価格超えてしまうやつは削除提案してきて」「明細ないやつは、カタログごと」">🗑 ${e.cc} の上限を超える＝${e.model_id ? 'この明細を消す' : 'カタログごと消す'}</button><span class="pa-del-st" data-k="${esc(e.key)}" style="font-size:11px;margin-left:4px"></span></div>` : ''}</td>
       </tr>`;
     }).join('');
     const logRows = (D.log || []).slice(-300).reverse();
@@ -40488,6 +40499,37 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
        ②押した候補へ add_variation（名前・SKU・在庫・写真はそのまま、値段は目標）③足せたら元から消す（末尾なら delete_variation・途中なら詰め直し）
        ④両方を listings_refetch。足せなかったら元は触らない */
     const PA_HW_RE = { SWITCH: /switch/i, PS5: /ps5/i, PS4: /ps4/i, PS3: /ps3/i, PS2: /ps2/i, PS1: /ps1|playstation(?! ?[2-5])/i, PSP: /psp/i, VITA: /vita/i, '3DS': /3ds/i, DS: /\bn?ds\b|nintendo ds/i, GBA: /gba|advance/i, GBC: /gbc|color/i, GB: /\bgb\b|game ?boy/i, WIIU: /wii ?u/i, WII: /\bwii\b/i, GC: /gamecube|\bgc\b/i, N64: /n64|nintendo 64/i, SFC: /sfc|super famicom|snes/i, FC: /\bfc\b|famicom|\bnes\b/i, MD: /mega ?drive|\bmd\b/i, SS: /saturn/i };
+    /* ★2026-10-22 本人「ベトナムで価格超えてしまうやつは削除提案してきて」「明細の」「明細ないやつは、カタログごと」：
+       VN の上限（909,090）を超えないと目標に届かない明細は消す。明細つきは明細だけ（末尾なら delete_variation・途中なら詰め直し）、明細の無い単品はカタログごと（delete_item） */
+    root.querySelectorAll('.pa-ceil-del').forEach(b => b.addEventListener('click', async () => {
+      const e = byKey.get(b.dataset.k); if (!e) return;
+      const st = root.querySelector('.pa-del-st[data-k="' + CSS.escape(e.key) + '"]');
+      const sid = e.shop_id || (typeof shopIdOfListing === 'function' && shopIdOfListing(e.cc, e.item_id));
+      if (!sid) { if (st) st.innerHTML = '<span style="color:#d93025">店（shop_id）が分からない＝出品一覧で🔄更新してから</span>'; return; }
+      const what = e.model_id ? `明細「${e.vari || e.name}」` : `カタログ「${e.name}」（明細なし＝カタログごと）`;
+      if (!confirm(`🗑 ${e.cc} ${what} を消します（${e.cc} の上限を超えないと目標の利益に届かないため）。\n元に戻せません。よろしいですか？`)) return;
+      b.disabled = true; if (st) st.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>消しています…</span>';
+      try {
+        let dr;
+        if (!e.model_id) dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);
+        else {
+          const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
+          const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
+          if (ms.length <= 1) dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);   // 最後の1明細＝カタログごと
+          else {
+            const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
+            if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 120000);
+            else dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 300000);
+            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 300000);
+            try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); } catch (_) {}
+          }
+        }
+        if (!dr || !dr.ok) throw new Error(String((dr && dr.error) || '失敗').slice(0, 200));
+        try { logAct('価格調整', e.cc + ' の上限超えで消した', e.cc + ' ' + e.item_id, what); } catch (_) {}
+        if (st) st.innerHTML = '<b style="color:#1a7f37">✅ 消しました</b>';
+        setTimeout(() => { PA.data = null; paRender(true); }, 1200);
+      } catch (err) { b.disabled = false; if (st) st.innerHTML = '<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 200)) + '</b>'; }
+    }));
     root.querySelectorAll('.pa-move').forEach(b => b.addEventListener('click', async () => {
       const e = byKey.get(b.dataset.k); if (!e || !e.ratioWant) return;
       const box = root.querySelector('.pa-move-box[data-k="' + CSS.escape(e.key) + '"]'); if (!box) return;
@@ -40672,6 +40714,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       mp.set(i + 1, null, `✅${ok} ❌${fail}`);
     }
     mp.set(gArr.length, '✅ 完了', `✅${ok} ❌${fail}`);
+    /* ★2026-10-22 全部失敗した回も記録に残す（前は成功が1件も無いと何も残らず、後から「書いたのか」が分からなかった） */
+    if (!done.length && fail) { try { logAct('価格調整', '値付けの見直し(公式)', '', `0明細 成功・${fail}失敗　` + errs.slice(0, 8).join(' / ')); } catch (_) {} }
     // 記録：変更前→後（後から効果を比べる・戻せるように）。読み直してから足す＝別PCの記録を消さない
     if (done.length) {
       try {
