@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-0710';
+var SRC_VER = '20261022-0815';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7362,9 +7362,19 @@ var BA_SEALED_NAME = /未開封|シュリンク(付|つき|有|あり|残)|新�
 function baPhotoOrder_(list, hw) { return (list || []).filter(function (a) { return a && !baKnownCatalog_(a) && baCondRank_(a, hw) >= 0 && baPlatOk_(a, hw) && !BA_SEALED_NAME.test(String(a.name || '')); }).map(function (a, i) { return { a: a, i: i, r: (baIsShop_(a) ? 100 : 0) + ((BA_CART_ONLY_HW[String(hw || '')] && baBoxedName_(a)) ? 50 : 0) + ((BA_CASE_REQUIRED_HW[String(hw || '')] && baSoftOnlyName_(a)) ? 50 : 0) + baCondRank_(a, hw) }   /* ★バージョン201（2026-09-20 実測）：AIが見た写真 294枚の通過率は 個人 79%（205/260）・業者(メルカリShops) 50%（17/34）。落ちる理由の1位はカタログ画像（27/72）。今までは「同じ状態なら個人が先」だけで、状態が良い業者の写真が個人より先に試されていた→ 業者の写真は個人を全部試した後に回す（AIの判定1回ぶんの料金と、写真が通らず見送りになる数を減らす） */; }).sort(function (p, q) { return (p.r - q.r) || (p.i - q.i); }).map(function (o) { return o.a; }); }
 var BA_MANUAL = null;   /* 手動の判定（app_kv.boshu_auto_judged_manual）。1回の実行で1度だけ読む */
 var BA_MANUAL_IMG = null;
+/* ★2026-10-22 判定の控えが 2.6MB を超え、Claude 判定（予定タスク）が読めず6回止まった。古い NG を別の鍵 boshu_auto_judged_manual_ng に移した。
+   読む時は2つを合わせる（同じ鍵は本体が勝つ）。NG の写真は機種・作品に関わらず二度と使わない（BA_MANUAL_IMG） */
+function baManualLoad_() {
+  if (BA_MANUAL !== null) return;
+  var a = baKv_('boshu_auto_judged_manual_ng') || {}, b = baKv_('boshu_auto_judged_manual') || {};
+  BA_MANUAL = {}; BA_MANUAL_IMG = {};
+  Object.keys(a).forEach(function (k) { BA_MANUAL[k] = a[k]; });
+  Object.keys(b).forEach(function (k) { BA_MANUAL[k] = b[k]; });
+  Object.keys(BA_MANUAL).forEach(function (k) { if (String(BA_MANUAL[k]).indexOf('ng:') === 0) BA_MANUAL_IMG[k.split('|')[0]] = 1; });
+}
 function baManualOf_(imgUrl, expect) {
   if (!expect || !expect.key) return '';
-  if (BA_MANUAL === null) { BA_MANUAL = baKv_('boshu_auto_judged_manual') || {}; BA_MANUAL_IMG = {}; Object.keys(BA_MANUAL).forEach(function (k) { if (String(BA_MANUAL[k]).indexOf('ng:') === 0) BA_MANUAL_IMG[k.split('|')[0]] = 1; }); }
+  baManualLoad_();
   var u = String(imgUrl || '').replace(/\?.*$/, '');
   var v = String(BA_MANUAL[u + '|' + String(expect.hwKey || '') + '|' + expect.key] || '');
   if (v) return v;
@@ -7509,7 +7519,8 @@ function baImgMemoSet_(u, field, v) { if (!BA_IMG_IDX) return; var p = String(u)
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-10-20 全体レビュー 中②：手動判定（Claude ¥0）や判定の控えが読めなかった回は、判定済みの写真を有料 AI でやり直してしまう＝その回は AI を呼ばない */
-  if (BA_KV_FAIL['boshu_auto_judged_manual'] || BA_KV_FAIL[BA_JUDGED]) return { ok: false, judged: false, kind: 'aidown' };
+  try { baManualLoad_(); } catch (eML) {}
+  if (BA_KV_FAIL['boshu_auto_judged_manual'] || BA_KV_FAIL['boshu_auto_judged_manual_ng'] || BA_KV_FAIL[BA_JUDGED]) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
   var mv = baManualOf_(imgUrl, expect);
   /* ★2026-10-22 本人「化粧箱付きの商品は、新規自動出品では絶対に出さない。緊急事項」（さくら荘のペットな彼女 BR＝限定版の化粧箱の写真が Claude の手動OKで通り、通常版の値段で売れた）。
@@ -8184,6 +8195,9 @@ function boshuAutoTick(manual) {
           if (!_keep.length) { out.skipped++; continue; }
           c.need = _keep;
         } }
+      /* ★2026-10-22 本人「化粧箱付きの商品は、新規自動出品では絶対に出さない。緊急事項」「限定版の化粧箱付きのソフトは、価格が高くて在庫が希少」：
+         作品名そのものが限定版・特装版・エディション等（BA_EDITION_RE）の候補は🤖では出さない（手動出品は本人が出す）。10/22 時点で🤖の限定版の明細が183件あった＝この入口から出ていた */
+      if (BA_EDITION_RE.test(String(c.ja || '') + ' ' + String(c.en || '') + ' ' + String(c.key || ''))) { out.skipped++; baSkipRec_(st, hw, '', c, 'limitedtitle', 0); continue; }
       // ★日本語名が無い作品（作品マスタの英名だけ）は英名で探す。日本の出品にも英題が書いてあることが多い（Metroid Prime 等）
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || '');
       var q = (qBase + ' ' + hwWord).trim();
@@ -10585,6 +10599,8 @@ function baLimitedAudit_(p) {
       var o = ledger[key] || {}; Object.keys(o).forEach(function (cc) { var v = String(o[cc] || ''); var m = v.match(/^(\d+)#(\d+)$/); if (!m) return; var id = m[1] + '#' + m[2]; if (res.items[id] && res.items[id].judged !== false) return;   /* ★2026-10-11 AIが使えなかった（judged:false＝error/budget）明細は次の回にもう一度見る（17件が永久に飛ばされていた） */ targets.push({ hw: hw, key: key, cc: cc, item_id: m[1], model_id: m[2], limTitle: lim[bk] }); });
     });
     out.byHw[hw] = { lim: limN, targets: targets.length }; out.targets += targets.length;
+    /* ★2026-10-22 list=1：対象の明細の一覧を返す（Claude が会話の中で写真を見る＝AI料金¥0） */
+    if (dry && String((p && p.list) || '') === '1') { out.list = (out.list || []).concat(targets.map(function (t) { return [t.hw, t.cc, t.item_id, t.model_id, t.key, t.limTitle]; })); }
     if (dry) continue;
     for (var ti = 0; ti < targets.length && out.judged < max; ti++) {
       if (Date.now() - t0 > 240000) { out.note = '時間切れ（続きは次の回）'; break; }
