@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261021-2350';
+var SRC_VER = '20261022-0710';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7372,6 +7372,21 @@ function baManualOf_(imgUrl, expect) {
      人が【この写真はNG】と言ったのなら、機種や作品の鍵に関わらず二度と使わない（OKの方は文脈が要るので完全一致だけ） */
   return (BA_MANUAL_IMG && BA_MANUAL_IMG[u]) ? 'ng:manual' : '';
 }
+/* ★2026-10-22 その作品に限定版（特典付きの箱）があるか＝駿河屋の控え sg_<hw> に限定版の題名があるか。1回の実行で機種ごとに1度だけ作る */
+var BA_LIMSET = {};
+function baHasLimited_(hw, key) {
+  try {
+    hw = String(hw || ''); key = String(key || ''); if (!hw || !key) return false;
+    if (!BA_LIMSET[hw]) {
+      var set = {}; var rows = (baKv_('sg_' + hw) || {}).rows || [];
+      var stripEd = function (t) { return String(t || '').replace(BA_EDITION_G, ' ').replace(/[\[［【][^\]］】]*[\]］】]/g, ' '); };
+      rows.forEach(function (r) { var t = String((r && r.t) || ''); if (BA_EDITION_RE.test(t)) { var k = baKey_(stripEd(t)); if (k) set[k] = 1; } });
+      BA_LIMSET[hw] = set;
+    }
+    var k2 = baKey_(String(key).replace(BA_EDITION_G, ' ').replace(/[\[［【][^\]］】]*[\]］】]/g, ' '));
+    return !!(BA_LIMSET[hw][k2] || BA_LIMSET[hw][key]);
+  } catch (e) { return true; }   /* 読めない時は安全側（限定版があるとみなす） */
+}
 var BA_AI_DOWN = '';   /* AIが使えない理由（残高切れ等）。立ったらこの実行では AI を呼ばない＝Shopee枠を守る */
 /* ★2026-10-03 本人「なぜ毎回同じミスをする。これ何回めだ？」（残高切れ3回目：9/20・9/24・10/2〜3）。
    ①9/20の守りは写真判定にしか無く、文章AI（英題・同一作品）は15分ごとに呼んで失敗し続けた ②失敗も「今日の回数」に数え、チャージ後も上限に張り付いた
@@ -7496,7 +7511,11 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-10-20 全体レビュー 中②：手動判定（Claude ¥0）や判定の控えが読めなかった回は、判定済みの写真を有料 AI でやり直してしまう＝その回は AI を呼ばない */
   if (BA_KV_FAIL['boshu_auto_judged_manual'] || BA_KV_FAIL[BA_JUDGED]) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-09-20 本人「手動でOK出せるようにもしておいて」：ポータルの 👍／👎 が AI より先 */
-  var mv = baManualOf_(imgUrl, expect); if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
+  var mv = baManualOf_(imgUrl, expect);
+  /* ★2026-10-22 本人「化粧箱付きの商品は、新規自動出品では絶対に出さない。緊急事項」（さくら荘のペットな彼女 BR＝限定版の化粧箱の写真が Claude の手動OKで通り、通常版の値段で売れた）。
+     駿河屋に限定版がある作品（ゲーム）は、手動OKに「通常版の写真と確かめた」印（nolim）が無ければ通さない＝AI の special_box 判定も通らないまま出るのを止める */
+  if (mv && mv.indexOf('ok:') === 0 && expect && !expect.tcg && baHasLimited_(expect.hwKey, expect.key) && !/nolim|通常版/i.test(mv)) return { ok: false, judged: false, kind: 'limcheck', cached: true };
+  if (mv) return { ok: mv.indexOf('ok:') === 0, judged: true, kind: 'manual', cached: true };
   /* ★2026-09-21 📚 本人が「📚学んだこと」で足した追加の指示を判定に足す（app_kv.photo_learn.rules.extra）。
      本人「見直したやつをしっかり学習して、どんどん賢くなっていってほしい」「また基準をちょっと精緻化していく」
      ＝ポータルの 🔍 と 🤖 が【同じ基準】で見るようにする。読めない時は足さないだけ（判定は止めない）。 */
@@ -8206,6 +8225,9 @@ function boshuAutoTick(manual) {
         if (imageIdM) {
           var costM = costChk || baCostFromPre_(pm, hw, c.ja, en), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
           if (costM >= highCost && hitsM < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hitsM); continue; }   /* 高い×出品が少ない＝出さない（候補には残る） */
+          /* ★2026-10-22 本人「そもそも市場在庫が少ないやつは、もう出さないで欲しい」「最優先」（9/12 の「在庫が少ないソフトは在庫0で出品」を変更）。
+             同じ物の出品が minHits 件未満＝仕入れられない恐れ（売れてから謝ってキャンセル→評価が落ちる）→ 出さない（候補には残る） */
+          if (hitsM < minHits) { out.skipped++; baSkipRec_(st, hw, '', c, 'fewsupply', hitsM); continue; }
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
           used[pm.img] = baUsedTag_(c.key, hw);
           picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, pm.name)), best: baBestOf_(c.ja, pm.name) || undefined, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
@@ -8233,6 +8255,7 @@ function boshuAutoTick(manual) {
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       if (cost > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', hits.length); continue; }
       if (cost >= highCost && hits.length < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hits.length); continue; }
+      if (hits.length < minHits) { out.skipped++; baSkipRec_(st, hw, '', c, 'fewsupply', hits.length); continue; }   /* ★2026-10-22 市場在庫が少ない＝出さない */
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
       var imageId = null;
       try { imageId = uploadImageUrl_(img); } catch (e) { baLog_(st, '画像アップ失敗: ' + c.ja + ' ' + String(e).slice(0, 160)); }
