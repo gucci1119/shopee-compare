@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261020-2115';
+var SRC_VER = '20261021-0130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4907,6 +4907,56 @@ function stockRestoreRun_() {
   sbUpsert_('app_kv', [{ k: 'stock_restore_state', v: { fmt: 2, done: done, log: log, watchZero: watchZero, lastAt: nowIso, last: out }, updated_at: nowIso }], 'k');
   return out;
 }
+/* ↩ ★2026-10-21 本人「全ての商品、キャンセルされて、在庫戻らないようにして」：Shopee は注文がキャンセルされると在庫を自動で戻す。
+   NieR: Automata（BR）は 10/10 の注文が発送されずに自動キャンセル→在庫が1に戻り、直していない限定版の写真・通常版の値段のまま 10/21 にまた売れた。
+   → 新しくキャンセルになった注文ごとに【1回だけ】、戻った数を引き戻す（今の在庫−数量・0未満にしない）。
+   初回は今あるキャンセル（直近40日）を全部「済み」にして触らない。控え＝app_kv cancel_stock_done {sn: {at, r}}。
+   控えが読めない時は何もしない（全部を新しいキャンセルと見誤って一斉に減らさない）。1回に20注文まで */
+function cancelStockGuard_() {
+  try { if (isChild_()) return { skip: '子機では動かさない（二重に引かない）' }; } catch (eC) { return { skip: '台の判定ができない' }; }
+  var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done');
+  if (!Array.isArray(rows)) return { skip: '控えが読めない' };
+  var since = Utilities.formatDate(new Date(Date.now() - 40 * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var cancels = sbSelectAll_('orders', 'select=cc,sn,shop_id,items,status&status=eq.CANCELLED&order_date=gte.' + since);
+  if (!Array.isArray(cancels)) return { skip: 'キャンセルが読めない' };
+  var nowIso = new Date().toISOString();
+  if (!rows.length) {   // 初回：今あるキャンセルは触らない
+    var seed = {}; cancels.forEach(function (o) { seed[String(o.sn)] = { at: nowIso, r: 'seed' }; });
+    sbUpsert_('app_kv', [{ k: 'cancel_stock_done', v: { items: seed, startedAt: nowIso }, updated_at: nowIso }], 'k');
+    return { seeded: cancels.length };
+  }
+  var cur = rows[0].v || {}; cur.items = cur.items || {};
+  var todo = cancels.filter(function (o) { return !cur.items[String(o.sn)]; }).slice(0, 20);
+  var out = { checked: cancels.length, todo: todo.length, fixed: [], errors: [] };
+  todo.forEach(function (o) {
+    var shop = parseInt(o.shop_id, 10), res = [];
+    if (!shop) { out.errors.push(o.sn + ' shop_id なし'); return; }
+    var byItem = {};
+    (o.items || []).forEach(function (it) { var iid = String(it.item_id || ''); if (!iid) return; (byItem[iid] = byItem[iid] || []).push({ mid: Number(it.model_id) || 0, q: Math.max(1, Number(it.qty) || 1) }); });
+    Object.keys(byItem).forEach(function (iid) {
+      try {
+        var list = [], g = null;
+        byItem[iid].forEach(function (x) {
+          var now;
+          if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0]; if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; }
+          else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); }
+          var nv = Math.max(0, now - x.q);
+          if (nv !== now) list.push({ model_id: x.mid, stock: nv }); res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
+        });
+        if (list.length) updateStockList_(shop, iid, list);
+      } catch (e) { res.push(iid + ' 失敗 ' + String((e && e.message) || e).slice(0, 80)); out.errors.push(o.cc + ' ' + o.sn + ' ' + iid); }
+    });
+    cur.items[String(o.sn)] = { at: nowIso, r: res.join(' / ').slice(0, 300) };   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は r と errors に残す）
+    out.fixed.push(o.cc + ' ' + o.sn + '：' + res.join(' / ').slice(0, 120));
+  });
+  if (todo.length) {
+    var cutoff = Date.now() - 60 * 86400000;
+    Object.keys(cur.items).forEach(function (k) { var t = Date.parse((cur.items[k] || {}).at || ''); if (t && t < cutoff) delete cur.items[k]; });
+    cur.at = nowIso;
+    sbUpsert_('app_kv', [{ k: 'cancel_stock_done', v: cur, updated_at: nowIso }], 'k');
+  }
+  return out;
+}
 function syncOrdersAll(daysWindow, trkMode) {
   var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
   if (!force && !coreAllowed_()) { Logger.log('syncOrdersAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★注文は業務の血流＝UF_STOP_CORE まで止めない */
@@ -4916,7 +4966,8 @@ function syncOrdersAll(daysWindow, trkMode) {
   if (!force) { var tl = parseInt(P_().getProperty('trkLast') || '0', 10) || 0; if (now_() - tl >= 6 * 3600) { doTrk = true; P_().setProperty('trkLast', String(now_())); } }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok, daysWindow, doTrk, force)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
-  try { log.push({ restock: stockRestoreRun_() }); } catch (eR) { log.push({ restock_error: String(eR).slice(0, 160) }); }   /* 🔁 注文で0になった明細を戻す（注文を読んだ直後に） */
+  try { log.push({ restock: stockRestoreRun_() }); } catch (eR) { log.push({ restock_error: String(eR).slice(0, 160) }); }
+  try { log.push({ cancelGuard: cancelStockGuard_() }); } catch (eCg) { log.push({ cancelGuard_error: String(eCg).slice(0, 160) }); }   /* ↩ キャンセルで戻った在庫を引き戻す */   /* 🔁 注文で0になった明細を戻す（注文を読んだ直後に） */
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
