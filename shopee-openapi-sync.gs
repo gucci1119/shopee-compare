@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261021-0130';
+var SRC_VER = '20261021-2130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3464,12 +3464,37 @@ function removeVariationShift_(shopId, itemId, midCsv) {
       r3.models.map(function (m) { return entryOf(m, (m.tier_index || [])[0]); }));
   }
 
-  var r4 = read();
+  /* ★2026-10-21 TW 53568339509 で2件消した後、残り74件の値段が1つずつずれたまま ok:true を返した（本人「学んでないよね」「本当、どうにかならんのか」）。
+     → 最後に必ず読み直し、残した明細の値段・在庫・SKU が【消す前の同じ名前の明細】と同じかを名前で突き合わせる。
+       違えば1回だけ model_id 指定で書き直して読み直し、それでも違えば ok:false とずれた明細を返す（呼び出し側は止まる） */
+  var expect = {};
+  for (var sx = 0; sx < n; sx++) { if (!bySlot[sx]) continue; var nmx = String((optList[sx] || {}).option || ''); var keptX = keep.indexOf(sx) >= 0; if (keptX && nmx) expect[nmx] = { price: parseFloat(priceOf(bySlot[sx])) || 0, stock: parseInt(stockOf(bySlot[sx]), 10), sku: String(bySlot[sx].model_sku || '') }; }
+  var compare = function (rr) {
+    var bad = [];
+    rr.models.forEach(function (m) {
+      var oi = (m.tier_index || [])[0], nm = String(((rr.opt[oi] || {}).option) || ''), ex = expect[nm]; if (!ex) return;
+      var pr = parseFloat(priceOf(m)) || 0, st = parseInt(stockOf(m), 10), sk = String(m.model_sku || '');
+      if (Math.abs(pr - ex.price) > 0.001 || st !== ex.stock || sk !== ex.sku) bad.push({ name: nm, model_id: m.model_id, want: ex, now: { price: pr, stock: st, sku: sk } });
+    });
+    return bad;
+  };
+  var r4 = read(), bad4 = compare(r4), retried = 0;
+  if (bad4.length) {
+    retried = bad4.length;
+    var rp = bad4.filter(function (b) { return Math.abs(b.now.price - b.want.price) > 0.001 && b.want.price > 0; }).map(function (b) { return { model_id: b.model_id, price: b.want.price }; });
+    var rs = bad4.filter(function (b) { return b.now.stock !== b.want.stock && !isNaN(b.want.stock); }).map(function (b) { return { model_id: b.model_id, stock: b.want.stock }; });
+    var rk = bad4.filter(function (b) { return b.now.sku !== b.want.sku; }).map(function (b) { return { model_id: b.model_id, sku: b.want.sku }; });
+    if (rp.length) { try { Utilities.sleep(1500); updatePriceList_(shopId, itemId, rp); } catch (eRp) { fixErr.push('価格(やり直し) ' + String((eRp && eRp.message) || eRp).slice(0, 120)); } }
+    if (rs.length) { try { updateStockList_(shopId, itemId, rs); } catch (eRs) { fixErr.push('在庫(やり直し) ' + String((eRs && eRs.message) || eRs).slice(0, 120)); } }
+    for (var fk = 0; fk < rk.length; fk += 50) { try { updateModelSku_(shopId, itemId, rk.slice(fk, fk + 50)); } catch (eRk) { fixErr.push('SKU(やり直し) ' + String((eRk && eRk.message) || eRk).slice(0, 120)); } }
+    r4 = read(); bad4 = compare(r4);
+  }
   return {
-    ok: true, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
+    ok: bad4.length === 0, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
     remain: r4.opt.length, models_remain: r4.models.length,
-    fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr,
-    note: '順番は崩していません（販売数の表示だけ1つずれます）' + (fixErr.length ? '。⚠SKU・価格・在庫の書き直しに失敗: ' + fixErr.join(' / ') : '')
+    fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, retried: retried,
+    mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') : undefined,
+    note: '順番は崩していません（販売数の表示だけ1つずれます）' + (retried ? '。ずれた ' + retried + ' 件を書き直しました' : '') + (fixErr.length ? '。⚠書き直しの失敗: ' + fixErr.join(' / ') : '')
   };
 }
 function bulkEditTier_(shopId, itemId, opts, imgs) {
