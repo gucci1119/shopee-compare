@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261021-2130';
+var SRC_VER = '20261021-2300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3478,7 +3478,11 @@ function removeVariationShift_(shopId, itemId, midCsv) {
     });
     return bad;
   };
+  /* ★2026-10-21 書き込み直後に読むと反映前の値が返り「ずれあり（ok:false）」と誤って出た（BR 2カタログ・直後の読み直しでは正しい値）。
+     読む前に待ち、ずれて見えたら書き直す前にもう一度読み直す（反映待ちの見かけのずれで書き直さない） */
+  Utilities.sleep(4000);
   var r4 = read(), bad4 = compare(r4), retried = 0;
+  if (bad4.length) { Utilities.sleep(6000); r4 = read(); bad4 = compare(r4); }
   if (bad4.length) {
     retried = bad4.length;
     var rp = bad4.filter(function (b) { return Math.abs(b.now.price - b.want.price) > 0.001 && b.want.price > 0; }).map(function (b) { return { model_id: b.model_id, price: b.want.price }; });
@@ -3487,7 +3491,7 @@ function removeVariationShift_(shopId, itemId, midCsv) {
     if (rp.length) { try { Utilities.sleep(1500); updatePriceList_(shopId, itemId, rp); } catch (eRp) { fixErr.push('価格(やり直し) ' + String((eRp && eRp.message) || eRp).slice(0, 120)); } }
     if (rs.length) { try { updateStockList_(shopId, itemId, rs); } catch (eRs) { fixErr.push('在庫(やり直し) ' + String((eRs && eRs.message) || eRs).slice(0, 120)); } }
     for (var fk = 0; fk < rk.length; fk += 50) { try { updateModelSku_(shopId, itemId, rk.slice(fk, fk + 50)); } catch (eRk) { fixErr.push('SKU(やり直し) ' + String((eRk && eRk.message) || eRk).slice(0, 120)); } }
-    r4 = read(); bad4 = compare(r4);
+    Utilities.sleep(4000); r4 = read(); bad4 = compare(r4);
   }
   return {
     ok: bad4.length === 0, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
