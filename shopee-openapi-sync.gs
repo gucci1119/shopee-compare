@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-0900';
+var SRC_VER = '20261022-0950';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4967,7 +4967,14 @@ function stockRestoreRun_() {
    初回は今あるキャンセル（直近40日）を全部「済み」にして触らない。控え＝app_kv cancel_stock_done {sn: {at, r}}。
    控えが読めない時は何もしない（全部を新しいキャンセルと見誤って一斉に減らさない）。1回に20注文まで */
 function cancelStockGuard_() {
-  try { if (isChild_()) return { skip: '子機では動かさない（二重に引かない）' }; } catch (eC) { return { skip: '台の判定ができない' }; }
+  /* ★2026-10-22 本人「在庫の自動復活機能と、キャンセルで在庫を戻さない機能、バッティングしてないかな？」：
+     ①前は本体だけで動いた＝本体の枠が尽きた日（10/22）は1日止まっていた → 取り札（syncGate_）を取れた台が動く（二重に引かない）
+     ②「自動で戻す」に決めた商品は、戻す前にキャンセルされると 0 まで引いていた（自動復活は発送待ち以降の注文しか見ない＝誰も戻さない）
+       → 決めた数より下げない。限定版（Limited・限定・特装…）は決めがあっても引き戻す */
+  if (!syncGate_('cancelStockGuard', 900)) return { skip: 'gate' };
+  var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { skip: '自動で戻す決めが読めない' }; }
+  var srRules = srBy.stock_restore_rules || {}, srQ = Math.max(1, parseInt((srBy.stock_restore_cfg || {}).qty, 10) || 1);
+  var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return r.m === 'auto' ? srQ : 0; };
   var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done');
   if (!Array.isArray(rows)) return { skip: '控えが読めない' };
   var since = Utilities.formatDate(new Date(Date.now() - 40 * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
@@ -4992,9 +4999,11 @@ function cancelStockGuard_() {
         var list = [], g = null;
         byItem[iid].forEach(function (x) {
           var now;
-          if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0]; if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; }
+          var keep = 0;
+          if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0]; if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; keep = keepOf(m.name, m.sku); }
           else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); }
           var nv = Math.max(0, now - x.q);
+          if (keep > 0) nv = Math.min(now, Math.max(nv, keep));   /* 自動で戻す決めの数は残す */
           if (nv !== now) list.push({ model_id: x.mid, stock: nv }); res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
         });
         if (list.length) updateStockList_(shop, iid, list);
