@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2235';
+var SRC_VER = '20261022-2250';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -763,7 +763,7 @@ function doGetInner_(e) {
        「The product cannot create new variation because the product has promotion」＝BR のまとめ買い割引（全カタログ）を入れた直後から、🤖の BR の出品が全部失敗し
        機種ごとに6時間止まっていた）。→ 明細を足す先のカタログを販促から外す道具：
        promo_bundle_items（get_bundle_deal_item＝中身を読む）／promo_bundle_remove（delete_bundle_deal_item・ids をカンマ区切り）／promo_discount_remove（delete_discount_item・ids） */
-    if (p.action === 'promo_bundle_items' || p.action === 'promo_bundle_remove' || p.action === 'promo_discount_remove') {
+    if (p.action === 'promo_bundle_items' || p.action === 'promo_bundle_remove' || p.action === 'promo_discount_remove' || p.action === 'promo_bundle_add') {
       var prcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var pro;
       try {
@@ -776,6 +776,17 @@ function doGetInner_(e) {
           var gj = callShop_(prShop, '/api/v2/bundle_deal/get_bundle_deal_item', { bundle_deal_id: bid1 }, 'get');
           var gl = ((gj.response || {}).item_list || []).map(function (x) { return x.item_id; });
           pro = { ok: true, action: p.action, bundle_deal_id: String(bid1), n: gl.length, item_ids: gl, err: gj.error || '' };
+        } else if (p.action === 'promo_bundle_add') {
+          /* ★2026-10-22 本人「都度外したり付けたりすればいいのでは？」＝明細を足す時は割引から一時的に外す作り（addVariationsBulk_）にしたので、10/20 に外したカタログを既存の割引へ戻す口 */
+          var bid3 = Number(p.bundle_deal_id); if (!bid3) throw new Error('bundle_deal_id 必須'); if (!prIds.length) throw new Error('ids 必須');
+          var adOk = 0, adErr = [];
+          for (var ai3 = 0; ai3 < prIds.length; ai3 += 50) {
+            var aj3 = callShop_(prShop, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: bid3, item_list: prIds.slice(ai3, ai3 + 50).map(function (i) { return { item_id: i, status: 1 }; }) });
+            var ar3 = aj3.response || {}; adOk += (ar3.success_list || []).length;
+            (ar3.failed_list || []).forEach(function (f) { if (adErr.length < 30) adErr.push({ item_id: f.item_id, err: String(f.fail_error || '') + ' ' + String(f.fail_message || '').slice(0, 80) }); });
+            if (aj3.error && adErr.length < 30) adErr.push({ item_id: 0, err: 'raw: ' + JSON.stringify(aj3).slice(0, 200) });
+          }
+          pro = { ok: true, action: p.action, bundle_deal_id: String(bid3), asked: prIds.length, added: adOk, errors: adErr.length, errorsSample: adErr.slice(0, 8) };
         } else if (p.action === 'promo_bundle_remove') {
           var bid2 = Number(p.bundle_deal_id); if (!bid2) throw new Error('bundle_deal_id 必須'); if (!prIds.length) throw new Error('ids 必須');
           var rmOk = 0, rmErr = [];
