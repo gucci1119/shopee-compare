@@ -15921,7 +15921,9 @@
     const costRow = rows.find(r => r.cost > 0 && r.gn > 0);
     const costPerOrder = costRow ? costRow.cost / costRow.gn : 0; // 仕入は突合済(gn)の合計→gnで割る（nで割ると過小）
     const targetCost = Math.round(needOrders * costPerOrder);
-    const vatAuto = Math.round(targetCost * 10 / 110);
+    /* ★2026-10-22 還付の元はお店からの仕入だけ＝目標の仕入にその割合を掛ける。割合は在庫台帳（読めていれば直近90日）、読めていなければ 7〜9月の実測 15%（1,970件中 Amazon・Shops・楽天等） */
+    const vatBizShare = (() => { try { const inv = (typeof stock !== 'undefined' && Array.isArray(stock.rows)) ? stock.rows : null; if (!inv) return 0.15; const since = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10); let b = 0, a = 0; inv.forEach(r => { const d = invPurDate(r); if (!d || d < since) return; const pr = Number(r.price) || 0; if (!(pr > 0)) return; a += pr; if (plVatKind(r.supplier) === 'biz') b += pr; }); return a > 0 ? b / a : 0.15; } catch (_) { return 0.15; } })();
+    const vatAuto = Math.round(targetCost * vatBizShare * 10 / 110);
     const vatRefund = (cfg.vatRefund !== '' && cfg.vatRefund != null && !isNaN(Number(cfg.vatRefund))) ? Number(cfg.vatRefund) : vatAuto;
     const takeHome = afterTax(targetNet);           // 税・保険後（還付なし）
     const takeHomeVat = takeHome + vatRefund;        // 消費税還付込み
@@ -18911,15 +18913,23 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return r;
   }
   /* 💵 その月に買った全部（在庫台帳の仕入日がその月）。本人 2026-10-11「その月の仕入れ金額も考慮すると残る利益」。利益明細側と入出金側の両方の損益表で使う */
+  /* ★2026-10-22 消費税還付の見込みを仕入先で分ける（Obsidian 10_shopee/19_Shopee＋PayPal併用の税金・10/21 調べ）：
+     還付の元（仕入税額控除）になるのは【お店からの仕入】（Amazon・メルカリShops・楽天・セカスト・Yahoo!ショッピング・駿河屋 等）。
+     フリマ・オークションの【個人からの仕入】（メルカリ・Yahoo!フリマ・ヤフオク・ラクマ）は、古物商がゲームソフトを買う場合は本人確認が要り、
+     古物商特例も経過措置も使えない（国税庁 インボイスQ&A 問106-2）と見るのが安全＝還付の元に数えない。経過措置を当ててよいかは税理士に確認中＝参考で別に出す */
+  const PL_VAT_FLEA_RE = /メルカリ(?!\s*shops)|yahoo!?\s*フリマ|paypay\s*フリマ|ヤフオク|ラクマ|mercari(?!\s*shops)/i;
+  const PL_VAT_TRANSITION = 0.7;   /* 経過措置の控除の割合（10/21 調べのメモ「今の段階と思われる 70%・期間は要確認」）＝参考値 */
+  function plVatKind(sup) { const t = String(sup || '').trim(); if (!t) return 'unknown'; return PL_VAT_FLEA_RE.test(t) ? 'flea' : 'biz'; }
   function plBuyInfo(ym, inv) {
     if (!Array.isArray(inv)) return null;
-    let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0;
+    let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0, biz = 0, flea = 0, unk = 0;
     inv.forEach(r => { if (invPurDate(r).slice(0, 7) !== ym) return;
       const isAmz = /amazon/i.test(String(r.supplier || '')) || String(r.source || '') === 'amazon'; if (isAmz && !r.shopee_sn) return;   /* Amazon の備品・私物は経費側（🛒）で数える */
       const st = String(r.status || ''); if (/私物|事業外|取消|キャンセル/.test(st)) return;
       const pr = Number(r.price) || 0; if (!(pr > 0)) { noPrice++; return; }
-      total += pr; n++; if (!r.shopee_sn) { unsold += pr; unsoldN++; } });
-    return { total, n, unsold, unsoldN, noPrice };
+      total += pr; n++; if (!r.shopee_sn) { unsold += pr; unsoldN++; }
+      { const k = plVatKind(r.supplier); if (k === 'biz') biz += pr; else if (k === 'flea') flea += pr; else unk += pr; } });
+    return { total, n, unsold, unsoldN, noPrice, biz, flea, unk };
   }
   function plCtx(ym, expRows, extras) {
     const ok = pf.grossYm === ym && typeof pf.grossTotal === 'number';
@@ -18955,8 +18965,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const pcfg = plan.cfg || pl.tpl || {};
     c.taxPct = (pcfg.taxPct === '' || pcfg.taxPct == null) ? 0 : (Number(pcfg.taxPct) || 0);
     c.afterTax = c.ok ? (c.net > 0 ? Math.round(c.net * (1 - Math.min(c.taxPct, 95) / 100)) : c.net) : null;
-    c.vatBase = c.ok ? (c.cost + g.ship + g.pack + g.place + g.tool) : 0;
+    /* ★2026-10-22 前は「売れた注文の仕入の全部＋国内経費」×10/110＝仕入の全部に消費税が入っている前提で、中古の実態より約3倍大きく出ていた。
+       控除は【その月に買った仕入】で数える（売れた月ではない）＝在庫台帳の仕入日がこの月の行のうち、お店からの仕入だけ */
+    c.vatBuyBiz = bi ? bi.biz : null; c.vatBuyFlea = bi ? bi.flea : 0; c.vatBuyUnk = bi ? bi.unk : 0;
+    c.vatBase = c.ok ? ((bi ? bi.biz : 0) + g.ship + g.pack + g.place + g.tool) : 0;
     c.vatRefund = c.ok ? Math.round(c.vatBase * 10 / 110) : null;
+    c.vatFleaRef = (c.ok && bi) ? Math.round(bi.flea * 10 / 110 * PL_VAT_TRANSITION) : 0;
     c.afterTaxVat = c.ok ? c.afterTax + c.vatRefund : null;
     return c;
   }
@@ -18994,7 +19008,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${c.buy != null ? line('💵 この月に仕入れた全部', '− ' + y(c.buy), { col: '#7b4a12', sub: `${c.buyN}件（在庫台帳の仕入日がこの月）／うち<b>まだ売れていない ${y(c.buyUnsold)}（${c.buyUnsoldN}件）</b>${c.buyNoPrice ? '／金額未入力 ' + c.buyNoPrice + '件は含まず' : ''}` }) : ''}
         ${c.cashNet != null ? line('　＝ 現金ベースの残り', (c.cashNet < 0 ? '▲ ' : '') + y(Math.abs(c.cashNet)), { strong: true, col: c.cashNet < 0 ? '#c5221f' : '#137333', sub: `入金（確定＋暫定）− この月に仕入れた全部 − 経費 − 返金。売れていない在庫 ${y(c.buyUnsold)} は来月以降に売れれば戻る` }) : ''}
         ${line('　税引後の手取り目安', (c.afterTax < 0 ? '▲ ' : '') + y(Math.abs(c.afterTax)), { col: c.afterTax < 0 ? '#c5221f' : '#137333', sub: c.taxPct > 0 ? `税・保険 ${c.taxPct}%（📈事業計画）` : '⚠ 📈事業計画の「税・保険 見込み率」が未設定' })}
-        ${line('　＋ 消費税還付の見込み（輸出免税）', '+ ' + y(c.vatRefund), { col: '#0f9d58', sub: `仕入＋国内経費 ${y(c.vatBase)} の 10/110` })}
+        ${line('　＋ 消費税還付の見込み（輸出免税）', '+ ' + y(c.vatRefund), { col: '#0f9d58', sub: c.vatBuyBiz == null ? `国内経費 ${y(c.vatBase)} の 10/110（この月の仕入を読めていない＝お店からの仕入が入っていない）` : `お店からの仕入 ${y(c.vatBuyBiz)}＋国内経費 ${y(c.vatBase - c.vatBuyBiz)} の 10/110。フリマ等の個人からの仕入 ${y(c.vatBuyFlea)} は数えない${c.vatBuyUnk ? '・仕入先が空 ' + y(c.vatBuyUnk) + ' も数えない' : ''}` })}
+        ${c.vatFleaRef ? line('　（参考）フリマ仕入に経過措置を当てられた場合', '+ ' + y(c.vatFleaRef), { col: '#8a8f98', sub: `個人からの仕入 ${y(c.vatBuyFlea)} の 10/110 × ${Math.round(PL_VAT_TRANSITION * 100)}%。古物商のゲームソフトの匿名仕入に当ててよいかは税理士に確認中＝上の合計には入れていない` }) : ''}
         ${line('　＝ 還付込みの手取り目安', (c.afterTaxVat < 0 ? '▲ ' : '') + y(Math.abs(c.afterTaxVat)), { strong: true, col: c.afterTaxVat < 0 ? '#c5221f' : '#137333' })}
         ${gm.invest ? line('（別枠）初期投資', y(gm.invest), { col: '#7b52c4', sub: '営業利益に含めない（回収は📈事業計画）' }) : ''}
       </table>
@@ -21986,6 +22001,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '🧾 <b>消費税還付の見込みを、還付の元になる仕入だけで数えるように直しました</b>（10/21 の税金の調べの続き）：前は仕入の全部×10/110 で、フリマ中心の今の仕入では約3倍大きく出ていました。月次の損益カードは「その月に買ったお店からの仕入（Amazon・メルカリShops・楽天・セカスト等）＋国内経費」の10/110に。メルカリ・Yahoo!フリマ・ヤフオク・ラクマの個人からの仕入は数えず、経過措置を当てた場合の額を（参考・税理士に確認中）で別の行に出します。事業計画の自動推定も、仕入のうちお店からの割合を掛けるようにしました。',
       '🏷 <b>値付けの見直し：上限で止めた赤字の値段を提案しないようにしました</b>（本人「赤字を提案してくるなよ」「それ以上の価格に修正することを提案してこいって」）：提案価格は目標の利益に届く値段のまま出します。その値段がカタログの値段の差の上限（BR 4倍・他 5倍）や VN の上限（909,090ドン）を超える行は🚫になり、チェックでは書かず（Shopee が断るため）、右の「別のカタログへ移す（無ければ②を作る）」／「消す」で進めます。',
       '↩ <b>キャンセルの在庫の引き戻しと、在庫の自動復活がぶつからないようにしました</b>（本人「バッティングは今してないかな？」）：「自動で戻す」に決めた商品は、戻す前にキャンセルされても決めた数より下げません（前は0まで引いて誰も戻さなかった）。限定版は今まで通り引き戻します。引き戻しは本体だけでなく、空いている台が取り札を取って動きます（本体の枠が尽きた日に止まらない）。※GAS の反映は19時以降。',
       '💴 <b>値付けの見直しに円の値段と損益分岐を出しました</b>（本人「現地通貨の価格があるところには、円の価格もちょっと下とかに欲しい」「損益分岐点もちょっと知りたい」）：今の価格・売れた頃・提案価格の下に ≈¥（今日の為替で換算・提案価格は打ち直すとその場で変わる）、目標の下に「損益分岐 R$xx（≈¥yy）」＝この値段より下だと赤字。',
