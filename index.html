@@ -21985,6 +21985,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '➕ <b>値段の差で移せるカタログが無い時は、②を作って移せるようにしました</b>（本人「ポップコーンバケツ2のカタログはあるんやろうか？」「ない場合は…作ってくれるのだろうか？」）：🏷値付けの見直しの「🔀 別のカタログへ移す」で、同じ家族（①②…）のカタログが無ければ「➕ このカタログの②を作って移す」が出ます（元を複製・非公開で作る・番号は国の全店で数える）。グッズなど機種の語が無いものは、関係のないゲームのカタログを移し先に出さないようにしました。',
       '🏷 <b>値付けの見直し：書き込みが失敗した日の直し＋VNの上限超えは削除を提案</b>（本人「書き込みしたのに残るやつある」「ベトナムで価格超えてしまうやつは削除提案してきて」「明細ないやつは、カタログごと」）：①価格・在庫の書き込みも、本体の接続枠が尽きた日は別のGoogleアカウントで書き直す ②全部失敗した回も記録に残す ③VNで上限（909,090ドン）を超えないと目標に届かない行に「🗑 この明細を消す／カタログごと消す」を出す。',
       '🔁 <b>在庫の自動復活の確認待ちに、消した明細と限定版を出さないようにしました</b>（本人「これなぜ、表示されている？」＝さくら荘 BR）：消した明細は詰め直しで番号が別の作品に入れ替わるため、押すと別の作品の在庫を書くおそれがありました。戻す前に今の明細の名前を読み、同じ時だけ書きます（読めない時は書きません）。限定版は並べず、戻しません。',
       '🛑 <b>🤖が限定版・特装版・エディションの題名そのものを出さないようにしました</b>（本人「化粧箱付きの商品は、新規自動出品では絶対に出さない」）：🤖の限定版の明細183件はこの入口から出ていました。手動出品は今まで通り出せます。',
@@ -40540,9 +40541,47 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try {
         const cands = await sbGetAll('listings', 'select=item_id,name,price_min,price_max,model_count&cc=eq.' + e.cc + '&shop_id=eq.' + sid + '&status=eq.1&model_count=gt.1&model_count=lt.98&price_min=gte.' + (want / lim).toFixed(2) + '&price_max=lte.' + (want * lim).toFixed(2));
         const hwKey = String(e.sku || '').split('_')[0].toUpperCase(), hwRe = PA_HW_RE[hwKey];
-        const list = (cands || []).filter(c => String(c.item_id) !== String(e.item_id) && Math.max(Number(c.price_max), want) / Math.min(Number(c.price_min), want) <= lim)
+        /* ★2026-10-22 本人「ポップコーンバケツ2のカタログはあるんやろうか？」：機種の語が無いもの（グッズ等）は、名前が同じ家族（①②…）のカタログだけを移し先にする＝関係のないゲームのカタログへ入れない */
+        const srcRow = ((lst.byCc || {})[e.cc] || []).find(x => String(x.item_id) === String(e.item_id)) || { name: e.name };
+        const famKey = seriesKey(srcRow.name || e.name);
+        const list = (cands || []).filter(c => String(c.item_id) !== String(e.item_id) && Math.max(Number(c.price_max), want) / Math.min(Number(c.price_min), want) <= lim && (hwRe || seriesKey(c.name) === famKey))
           .map(c => Object.assign(c, { hit: hwRe ? hwRe.test(c.name) : false })).sort((a, b) => (b.hit - a.hit) || (b.model_count - a.model_count)).slice(0, 6);
-        if (!list.length) { box.innerHTML = '<span style="color:#b06000">値段の差が合うカタログが同じ店にありません（新しいカタログを作るか、在庫0にするかを決めてください）</span>'; return; }
+        if (!list.length) {
+          /* ★2026-10-22 本人「ない場合は、この値段の差がある別のカタログへ移すというのは作ってくれるのだろうか？」：
+             移せる家族のカタログが無い時は、元のカタログを複製して次の番号（②…・国の全店で数える）を作り、そこへ移す。作ったカタログは非公開（公開は本人が決める） */
+          const sibs = ((lst.byCc || {})[e.cc] || []).filter(x => seriesKey(x.name) === famKey);
+          const nextNo = Math.max(1, ...sibs.map(x => seriesNo(x.name) || 1)) + 1, mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
+          const cur = String(srcRow.name || e.name || ''), curMark = CIRC[(seriesNo(cur) || 1) - 1];
+          const newName = (curMark && cur.includes(curMark)) ? cur.replace(curMark, mark) : (/ \| /.test(cur) ? cur.replace(/ \| (?!.* \| )/, ' ' + mark + ' | ') : cur.trim() + ' ' + mark);
+          box.innerHTML = '<div style="color:#b06000;font-size:11px;margin:3px 0">値段の差が合う同じ家族のカタログがありません。</div><button class="smd-btn b-write pa-make2" style="font-size:11px;padding:1px 8px" title="' + esc(newName) + '">➕ このカタログの' + esc(mark) + 'を作って ' + esc(paLoc(e.cc, want)) + ' で移す（非公開で作る）</button><span class="pa-make2-st" style="font-size:11px;margin-left:4px"></span>';
+          box.querySelector('.pa-make2').addEventListener('click', async ev => {
+            const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'); bt.disabled = true;
+            const say = (h) => { st2.innerHTML = h; };
+            try {
+              const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; return; }
+              say('<span class="smd-dim"><span class="smd-spin"></span>' + esc(mark) + 'を作っています…</span>');
+              const cr = await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000);
+              const nid = cr && cr.item_id; if (!nid) throw new Error('カタログを作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '失敗')) + (/duplicat/i.test(String((cr && cr.error) || '')) ? '（同じ店に同じ中身と判断された＝表紙を変える必要があります）' : ''));
+              say('<span class="smd-dim"><span class="smd-spin"></span>明細を入れています…</span>');
+              const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) : '';
+              const ar = await openapiAddVariation(sid, nid, { option: e.vari || e.name, price: want, stock: Math.max(0, Number(e.stock) || 0), sku: e.sku || '', image: img });
+              if (!ar || !ar.ok) throw new Error(esc(mark) + '（' + nid + '・非公開）は作れましたが、明細を入れられませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
+              try { const gm = await openapiGetModels(sid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: nid, mids: String(t.model_id) }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
+              say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログから消しています…</span>');
+              let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
+              const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
+              const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
+              if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 120000);
+              else dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 300000);
+              try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + nid }, 120000); } catch (_) {}
+              try { logAct('価格調整', '値段の差で' + mark + 'を作って移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${newName}・非公開） ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
+              if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ ' + esc(mark) + '（非公開）に入れましたが、元から消せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にするか、もう一度消してください</b>'); return; }
+              say('<b style="color:#1a7f37">✅ ' + esc(mark) + 'を非公開で作って移しました（' + esc(newName.slice(0, 60)) + '）。公開は出品一覧で</b>');
+              setTimeout(() => { PA.data = null; paRender(true); }, 2500);
+            } catch (err) { bt.disabled = false; say('<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 240)) + '</b>'); }
+          });
+          return;
+        }
         box.innerHTML = '<div class="smd-dim" style="font-size:10.5px;margin:3px 0">移し先を押すと、その場で移します（名前・SKU・在庫・写真はそのまま、値段は ' + esc(paLoc(e.cc, want)) + '）</div>' + list.map(c => `<button class="smd-btn pa-move-go" data-t="${esc(String(c.item_id))}" style="font-size:10.5px;padding:1px 7px;margin:2px 4px 2px 0;text-align:left;${c.hit ? 'border-color:#1a7f37' : ''}" title="${esc(c.name)}">${c.hit ? '✅ ' : ''}${esc(String(c.name).slice(0, 48))}<span class="smd-dim">（明細${c.model_count}・${esc(paLoc(e.cc, c.price_min))}〜${esc(paLoc(e.cc, c.price_max))}）</span></button>`).join('');
         box.querySelectorAll('.pa-move-go').forEach(g => g.addEventListener('click', async () => {
           const tgt = g.dataset.t; box.querySelectorAll('button').forEach(x => { x.disabled = true; });
