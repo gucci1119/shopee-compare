@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2250';
+var SRC_VER = '20261022-2320';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -646,7 +646,7 @@ function doGetInner_(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id, logistic_info: (function () { try { return p.logistic_info ? JSON.parse(p.logistic_info) : null; } catch (e) { return null; } })() });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id, min_purchase: p.min_purchase, logistic_info: (function () { try { return p.logistic_info ? JSON.parse(p.logistic_info) : null; } catch (e) { return null; } })() });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -4388,6 +4388,9 @@ function updateItem_(body) {
   }
   // 属性(specifics)：attribute_list=[{attribute_id, attribute_value_list:[{value_id, original_value_name, value_unit}]}]
   if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
+  /* ★2026-10-22 本人「まとめ買い割引かけて、単品だと買えない設定ってできるん？」：商品ごとの最低購入数（purchase_limit_info.min_purchase_limit・get_item_base_info で実在を確認）。
+     1カタログ＝100種のカードなので、違うカードで数えるなら「このシリーズから2枚以上」になる（同じ明細で数えるなら在庫1では買えなくなる＝試して確かめる） */
+  if (body.min_purchase != null && String(body.min_purchase) !== '' && parseInt(body.min_purchase, 10) >= 1) payload.purchase_limit_info = { min_purchase_limit: parseInt(body.min_purchase, 10) };
   // カテゴリ変更：category_id を渡すと Shopee 側でカテゴリが移る。属性はカテゴリ依存なので
   // 変更時は新カテゴリの attribute_list を同時に渡すこと（渡さないと必須属性欠落で弾かれる）。
   if (body.category_id != null && String(body.category_id) !== '' && !isNaN(parseInt(body.category_id, 10))) payload.category_id = parseInt(body.category_id, 10);
