@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2140';
+var SRC_VER = '20261022-2230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3543,7 +3543,27 @@ function bulkEditTier_(shopId, itemId, opts, imgs) {
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: objs }], remap);
   if (imgErr.length) throw new Error('画像の差し替えに失敗した明細があります: ' + imgErr.slice(0, 5).join(' / '));
 }
+/* 🧺 ★2026-10-22 本人「これ、都度外したり付けたりすればいいのでは？」：販促（まとめ買い割引・値下げ）に入っているカタログは明細を足せない
+   （product.error_cannt_init_tier_in_promotion）→ 断られた時だけ、値段の書き込みと同じ手（priceUnlockPromo_）で販促から外して足し、まとめ買い割引にはすぐ戻す。
+   値下げ（Discount）は値段の書き込みと同じく外したまま（足した明細には値下げの値段が無い・戻すには明細ごとの値段が要る）。
+   Flash Sale など外せない販促は戻して失敗のまま返す。ポータルの一括追加（1659）と🤖巡回の両方がここを通る */
 function addVariationsBulk_(shopId, itemId, items, jobKey) {
+  try { return addVariationsBulk0_(shopId, itemId, items, jobKey); }
+  catch (e) {
+    var em = String((e && e.message) || e);
+    if (!/in_promotion|has promotion/i.test(em)) throw e;
+    var promo = priceUnlockPromo_(shopId, itemId);
+    if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo); throw new Error(em.slice(0, 200) + ' ／販促を外せませんでした: ' + (promo.other.join(',') || String(promo.raw || '').slice(0, 160))); }
+    Utilities.sleep(1500);
+    var r;
+    try { r = addVariationsBulk0_(shopId, itemId, items, jobKey); }
+    catch (e2) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String((e2 && e2.message) || e2).slice(0, 220) + ' ／販促から外して再送しても失敗（まとめ買い割引は戻しました）'); }
+    priceRelockPromo_(shopId, itemId, promo);
+    try { r = r || {}; r.promo = { bundleOut: promo.bundleOut.length, bundleBack: promo.bundleBack.length, discountOut: promo.discountOut.length, backErr: (promo.bundleBackErr || []).slice(0, 2) }; } catch (eP) {}
+    return r;
+  }
+}
+function addVariationsBulk0_(shopId, itemId, items, jobKey) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!items || !items.length) throw new Error('対象が空です');
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
@@ -8477,7 +8497,18 @@ function condIndexTick(manual) {
     var t0 = Date.now();
     /* やることが無い時は枠を1回も使わずに休む（30分ごとのトリガーが毎回 Supabase を読むのを避ける・Codex指摘）。休みの印はスクリプト プロパティ＝時限つきなので勝手に戻る */
     var idleUntil = 0; try { idleUntil = Number(P_().getProperty('COND_IDLE_UNTIL') || 0); } catch (e0) {}
-    if (manual !== true && idleUntil && Date.now() < idleUntil) return { ok: true, skipped: 'idle' };
+    var freshAt0 = 0; try { freshAt0 = Number(P_().getProperty('COND_FRESH_AT') || 0); } catch (eF0) {}
+    var freshDue = Date.now() - freshAt0 > 30 * 60000;   /* ★2026-10-22 休み中でも30分ごとに「新しく送った写真」だけは見に行く */
+    if (manual !== true && idleUntil && Date.now() < idleUntil) {
+      if (!freshDue) return { ok: true, skipped: 'idle' };
+      /* 休み中の見回りは軽く：大きい索引（cond_photo_index）は読まず、一覧（cond_photo_queue）と直近36時間の会話だけ。新しい写真が無ければ休みを続ける */
+      try { P_().setProperty('COND_FRESH_AT', String(Date.now())); } catch (eF4) {}
+      var rq0 = sbSelect_('app_kv', 'select=v&k=eq.' + COND_Q); var q0 = (Array.isArray(rq0) && rq0[0] && rq0[0].v) || null;
+      if (!q0 || !Array.isArray(q0.items)) return { ok: true, skipped: 'idle' };
+      var fr0 = condQueueBuild_({}, new Date(Date.now() - 36 * 3600000).toISOString(), q0);
+      if (!fr0) return { ok: true, skipped: 'idle', fresh: 0 };
+      try { P_().deleteProperty('COND_IDLE_UNTIL'); } catch (eF5) {}
+    }
     if (!bgAllowed_() && manual !== true) return { ok: true, skipped: 'urlfetch 予約枠' };
     var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return { ok: false, error: 'CLAUDE_KEY がありません' };
     /* ★読めなかった時は進めない（baKv_ は失敗を null で返す＝空の索引で上書きすると今までの判定が全部消える・Codex指摘／[[catch-empty-is-not-absence]]） */
@@ -8489,7 +8520,12 @@ function condIndexTick(manual) {
     var qAge = q.at ? (Date.now() - Date.parse(q.at)) : Infinity;
     var noGroup = Array.isArray(q.items) && q.items.length && !q.items[0].g;
     if (noGroup) { var keysOld = Object.keys(idx.items); if (keysOld.length <= 60 && keysOld.every(function (k) { return !idx.items[k].g; })) idx.items = {}; }   /* v196：セット番号を入れる前に見た最初の数十枚は、指示文も古いので見直す */
-    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 3) { var built = condQueueBuild_(idx.items); if (built) q = built; }
+    if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 3) { var built = condQueueBuild_(idx.items); if (built) q = built; try { P_().setProperty('COND_FRESH_AT', String(Date.now())); } catch (eF1) {} }
+    else if (freshDue) {
+      try { P_().setProperty('COND_FRESH_AT', String(Date.now())); } catch (eF2) {}
+      var fr = condQueueBuild_(idx.items, new Date(Date.now() - 36 * 3600000).toISOString(), q);
+      if (fr) { q = fr; try { P_().deleteProperty('COND_IDLE_UNTIL'); } catch (eF3) {} }
+    }
     var items = Array.isArray(q.items) ? q.items : [];
     if (!items.length) { try { P_().setProperty('COND_IDLE_UNTIL', String(Date.now() + 3 * 3600000)); } catch (e1) {} return { ok: true, judged: 0, left: 0, note: '候補がありません' }; }
     var todo = items.filter(function (x) { return x && x.u && !idx.items[x.u] && (idx.fail[x.u] || 0) < 3; }).slice(0, 20);
@@ -8544,10 +8580,12 @@ function condIndexTick(manual) {
   finally { try { ufPersist_(); } catch (e5) {} try { lock.releaseLock(); } catch (e6) {} }
 }
 /* 候補の一覧を作る（ポータルの condQueueBuild と同じ規則）：過去120日に送った画像のうち、注文後メッセージの前後5分に送ったもの（案内バナー）を除く。写真の依頼の48時間以内に送った画像を先頭に。索引済みは外してから1,500件で切る */
-function condQueueBuild_(done) {
-  var since = '2025-05-01T00:00:00Z';   /* ★2026-10-07 120日の制限を外した（送った写真 3,554枚のうち364枚が120日より前） */
+/* ★2026-10-22 本人「保存しておかないと、また調べなあかん」「自動で保存されるようにしておかないと」：一覧の作り直しが1日1回だけ＝送った写真が索引→Drive に入るまで最大1〜2日。
+   sinceIso を渡すと【その時刻から後の会話だけ】読んで、新しく送った写真を今の一覧（prevQ）に足す（注文との結びつけは1日1回の全体の時だけ）。condIndexTick が30分ごとに呼ぶ */
+function condQueueBuild_(done, sinceIso, prevQ) {
+  var since = sinceIso || '2025-05-01T00:00:00Z';   /* ★2026-10-07 120日の制限を外した（送った写真 3,554枚のうち364枚が120日より前） */
   var rows = sbSelectAll_('chat_messages', 'select=cc,conversation_id,buyer,direction,msg_type,text,msg_time&direction=in.(in,out)&msg_time=gte.' + encodeURIComponent(since) + '&order=msg_time.asc');
-  if (!Array.isArray(rows) || rows.length < 100) return null;   /* 読めていない時に空の一覧で上書きしない */
+  if (!Array.isArray(rows) || (!sinceIso && rows.length < 100)) return null;   /* 読めていない時に空の一覧で上書きしない */
   var by = {}; rows.forEach(function (m) { (by[m.conversation_id] = by[m.conversation_id] || []).push(m); });
   var ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
   var PHOTO = /photo|picture|\bpics?\b|image|foto|imagem|v[ií]deo|show me|can i see|hình|ảnh|รูป/i;
@@ -8579,6 +8617,14 @@ function condQueueBuild_(done) {
      同じ国・同じお客さんの注文（取消を除く）のうち、写真を送った前後14日にあるもの。商品（出品ID＋明細名）が1つに決まる時だけ結ぶ（2つ以上なら結ばない＝取り違えない）。
      実測：写真を送った会話 792 のうち 521 が注文につながり、389 は商品が1つに決まる。結果は app_kv cond_photo_links（セット番号→出品ID・明細名・カタログ名）。
      ※🤖の作品のメルカリ写真を足す案（同日）は、本人の「手で出した売れ筋の写真が要る」を受けてやめた（9/25 の Smart Reply がその場でメルカリから引く） */
+  if (sinceIso) {
+    var pq = (prevQ && Array.isArray(prevQ.items)) ? prevQ.items : []; var have = {}; pq.forEach(function (x) { if (x && x.u) have[x.u] = 1; });
+    var add = pending.filter(function (x) { return !have[x.u]; });
+    if (!add.length) return null;
+    var outF = { at: prevQ.at || new Date().toISOString(), v: 3, total: (prevQ.total || pq.length) + add.length, indexed: prevQ.indexed || 0, items: add.concat(pq).slice(0, 1500), by: 'gas', freshAt: new Date().toISOString(), freshAdded: add.length };
+    baKvSet_(COND_Q, outF);
+    return outF;
+  }
   try {
     var ords = sbSelectAll_('orders', 'select=cc,buyer,status,order_ts,items&order_ts=gte.1745000000');
     if (Array.isArray(ords)) {
@@ -9373,7 +9419,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       }
     }
     var r2 = null;
-    try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); }
+    try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); if (r2 && r2.promo) baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 まとめ買い割引から一度外して明細を足し、戻しました（外す ' + r2.promo.bundleOut + '・戻す ' + r2.promo.bundleBack + (r2.promo.discountOut ? '・値下げは外したまま ' + r2.promo.discountOut : '') + '）'); }
     catch (e) {
       var em = String((e && e.message) || e).slice(0, 160);
       baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：追加失敗 ' + em);
