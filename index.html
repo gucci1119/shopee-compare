@@ -15478,6 +15478,17 @@
     if (!document.getElementById('ta-cc')) return;   // ★読み込みを待つ間に別の画面へ移ると、ここから先の書き込み先が無い（2026-09-26 コンソールに TypeError）
     (TA._charts || []).forEach(ch => { try { ch.destroy(); } catch (_) {} }); TA._charts = [];
     const m = TA.metric, sumLike = mi[2] === 'sum';
+    /* ★2026-10-22 本人「ここは積み上げなんで、数値もグラフ内に欲しい」＝積み上げ棒の各段に数字・棒の上に合計を描く（段が低くて入らない時は段の数字を省き、合計だけ出す） */
+    const taStackLabels = (fmt) => ({ id: 'taStackLabels', afterDatasetsDraw(chart) {
+      const { ctx } = chart; const tot = {}, top = {};
+      ctx.save(); ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      chart.data.datasets.forEach((d, i) => { if (!chart.isDatasetVisible(i)) return; const meta = chart.getDatasetMeta(i); if (meta.type !== 'bar') return;
+        (meta.data || []).forEach((el, k) => { const v = d.data[k]; if (v == null || !el) return; tot[k] = (tot[k] || 0) + Number(v); top[k] = top[k] == null ? el.y : Math.min(top[k], el.y);
+          const h = Math.abs(el.base - el.y); const t = fmt(v); if (h < 13 || ctx.measureText(t).width > (el.width || 0) - 2) return;
+          ctx.fillStyle = '#fff'; ctx.fillText(t, el.x, (el.y + el.base) / 2); }); });
+      if (chart.data.datasets.filter((d, i) => chart.isDatasetVisible(i)).length > 1) { ctx.fillStyle = '#334155'; ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        Object.keys(tot).forEach(k => { const el = chart.getDatasetMeta(0).data[k] || {}; const t = fmt(tot[k]); if (ctx.measureText(t).width > (el.width || 0) + 6) return; ctx.fillText(t, el.x, top[k] - 7); }); }
+      ctx.restore(); } });
     const buckets = [...new Set(days.map(y => taBucket(y, TA.gran)))];
     const series = ents.map(cc => { const B = taAgg(cc, days, TA.gran); let data = buckets.map(b => taVal(B.get(b), m));
       if (TA.ma && TA.gran === 'day' && TA.chart === 'line') data = data.map((_, i) => { const w = data.slice(Math.max(0, i - 6), i + 1).filter(x => x != null); return w.length ? w.reduce((a, x) => a + x, 0) / w.length : null; });
@@ -15511,7 +15522,7 @@
         /* ★2026-10-22 本人「合計っていらんくね？」＝店が2つ以上の時の「合計（この期間／前の期間）」の線は出さない（合計は上の数字の欄で見られる）。店が1つの時の「前の期間」の点線は残す */
       }
       const stacked = TA.chart === 'stack' || TA.chart === 'area';
-      const sc = { x: { stacked }, y: { stacked, beginAtZero: !one || stacked, grace: one ? '10%' : 0, ticks: yTicks } };
+      const sc = { x: { stacked }, y: { stacked, beginAtZero: !one || stacked, grace: (one || TA.chart === 'stack') ? '10%' : 0, ticks: yTicks } };
       if (useY2) sc.y2 = { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: yTicks };
       /* ★2026-10-11 本人「線のところから矢印を引っ張る形で、どのアカウントのどの国かを立てておいた方が分かりやすい」
          ＝折れ線の右端に、線の色で「TH gs_japan_select.th」のような札を出し、線の端から引き出し線でつなぐ。札が重なる時は上下にずらす */
@@ -15533,7 +15544,7 @@
           ctx.fillText(it.text, x2 + 3, it.ly); });
         ctx.restore(); } };
       const padR = TA.chart === 'line' ? Math.min(220, 16 + 6.2 * Math.max(0, ...ds.map(d => String(d.label || '').replace(/・右の目盛り$/, '').length))) : 0;
-      TA._charts.push(new Chart(main, { type: TA.chart === 'stack' ? 'bar' : 'line', data: { labels, datasets: ds }, plugins: [endLabels],
+      TA._charts.push(new Chart(main, { type: TA.chart === 'stack' ? 'bar' : 'line', data: { labels, datasets: ds }, plugins: TA.chart === 'stack' ? [endLabels, taStackLabels(v => taFmt(m, v))] : [endLabels],
         options: Object.assign({}, baseOpt, { layout: { padding: { right: padR } }, interaction: { mode: 'index', intersect: false }, scales: sc }) }));
       }
     }
@@ -15547,7 +15558,7 @@
     TA._charts.push(new Chart(document.getElementById('ta-wd'), { type: 'bar', data: { labels: ['月', '火', '水', '木', '金', '土', '日'], datasets: [{ label: mi[1] + '（平均）', data: wdS.map((s, i) => wdN[i] ? s / wdN[i] : null), backgroundColor: '#7b61ff' }] }, options: Object.assign({}, baseOpt, { plugins: Object.assign({}, baseOpt.plugins, { legend: { display: false } }) }) }));
     // 🆕 新規と既存
     const nvB = buckets.map(b => { let n = 0, e = 0; ents.forEach(cc => { const a = taAgg(cc, days, TA.gran).get(b); if (a && a.has) { n += a.nv; e += a.ev; } }); return [n, e]; });
-    TA._charts.push(new Chart(document.getElementById('ta-nv'), { type: 'bar', data: { labels: buckets.map(b => TA.gran === 'month' ? b : b.slice(5)), datasets: [{ label: '新規', data: nvB.map(x => x[0] || null), backgroundColor: '#22c55e' }, { label: '既存', data: nvB.map(x => x[1] || null), backgroundColor: '#94a3b8' }] }, options: Object.assign({}, baseOpt, { scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } }) }));
+    TA._charts.push(new Chart(document.getElementById('ta-nv'), { type: 'bar', data: { labels: buckets.map(b => TA.gran === 'month' ? b : b.slice(5)), datasets: [{ label: '新規', data: nvB.map(x => x[0] || null), backgroundColor: '#22c55e' }, { label: '既存', data: nvB.map(x => x[1] || null), backgroundColor: '#94a3b8' }] }, plugins: [taStackLabels(v => Math.round(v).toLocaleString())], options: Object.assign({}, baseOpt, { scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, grace: '12%' } } }) }));
     renderTrafficProd();
   }
   async function renderTrafficProd() {
@@ -21996,6 +22007,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '📊 <b>積み上げ棒グラフに数字を入れました</b>（本人「ここは積み上げなんで、数値もグラフ内に欲しい」）：「🆕 新規と既存の訪問者」と、上の大きいグラフを「📊 積み上げ棒」にした時、各段の中に数字・棒の上に合計を描きます（段が低くて入らない時は段の数字を省き、合計だけ）。',
+      '📈 <b>2店舗目の MY・SG の線が最後の日だけ点線になっていたのを直しました</b>（本人「なぜ点々なってるん？」「データあるはずやろ？」）：点線は線の端から名札への引き出し線で、10-21 の値が入っていなかったのが原因。Shopee は 10-21 を「確定済み・訪問者0人」と返していたのに、アクセス取り込み（userscript）が「直近2日の0は未確定」とみなして捨てていました。v1.4.1 で Shopee の確定の印（data_ready）を見て、確定済みなら0人の日も送るようにしました。',
       '📊 <b>枠空け候補の「統計の日付」が 7/28 のまま古く見えていたのを直しました</b>（本人「これ全部0だけど意味あるの？」）：閲覧・いいね・販売の統計は毎日取り直していましたが、GAS が書く時に更新日時を付けておらず、最初に作った日のまま表示されていました。app_kv に書く時は必ず更新日時を付けるようにしました（GAS SRC 20261022-2140）。',
       '📈 <b>訪問者のグラフから「合計」の線を外しました</b>（本人「合計っていらんくね？」）：店を2つ以上並べた時の合計（この期間・前の期間）の線と右の目盛りを出さないようにしました。店を1つにした時の「前の期間」の点線は残しています。',
       '🧾 <b>消費税還付の見込みを、還付の元になる仕入だけで数えるように直しました</b>（10/21 の税金の調べの続き）：前は仕入の全部×10/110 で、フリマ中心の今の仕入では約3倍大きく出ていました。月次の損益カードは「その月に買ったお店からの仕入（Amazon・メルカリShops・楽天・セカスト等）＋国内経費」の10/110に。メルカリ・Yahoo!フリマ・ヤフオク・ラクマの個人からの仕入は数えず、経過措置を当てた場合の額を（参考・税理士に確認中）で別の行に出します。事業計画の自動推定も、仕入のうちお店からの割合を掛けるようにしました。',
