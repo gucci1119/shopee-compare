@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2320';
+var SRC_VER = '20261022-2330';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3559,18 +3559,24 @@ function bulkEditTier_(shopId, itemId, opts, imgs) {
    値下げ（Discount）は値段の書き込みと同じく外したまま（足した明細には値下げの値段が無い・戻すには明細ごとの値段が要る）。
    Flash Sale など外せない販促は戻して失敗のまま返す。ポータルの一括追加（1659）と🤖巡回の両方がここを通る */
 function addVariationsBulk_(shopId, itemId, items, jobKey) {
+  /* ★2026-10-22 レビュー：①外せない／再送も失敗した時に元の文言（in_promotion）を残すと、🤖が「販促中＝見送らない」と扱い30分ごとに外す・戻すを繰り返した
+     → 文言を消して【promo_hard】の印にする（🤖は普通の失敗として見送る）。②戻せたかを文面に正しく出し、外した割引・値下げの ID を app_kv promo_unlock_log に控える（後で promo_bundle_add で戻せる） */
+  var clean = function (t) { return String(t || '').replace(/product\.error_cannt_init_tier_in_promotion|in_promotion|has promotion/ig, '販促中'); };
   try { return addVariationsBulk0_(shopId, itemId, items, jobKey); }
   catch (e) {
     var em = String((e && e.message) || e);
     if (!/in_promotion|has promotion/i.test(em)) throw e;
     var promo = priceUnlockPromo_(shopId, itemId);
-    if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo); throw new Error(em.slice(0, 200) + ' ／販促を外せませんでした: ' + (promo.other.join(',') || String(promo.raw || '').slice(0, 160))); }
+    var note = function (stage) { try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: stage, bundleOut: promo.bundleOut, bundleBack: promo.bundleBack, bundleBackErr: (promo.bundleBackErr || []).slice(0, 3), discountOut: promo.discountOut, other: promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {} };
+    var backTxt = function () { var nb = (promo.bundleOut || []).length, bb = (promo.bundleBack || []).length; return (nb ? (bb === nb ? 'まとめ買い割引は戻しました' : '⚠まとめ買い割引を戻せませんでした（' + (nb - bb) + '件・promo_unlock_log）') : '') + ((promo.discountOut || []).length ? '・値下げ ' + promo.discountOut.length + '件は外したまま' : ''); };
+    if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo); note('cannot_unlock'); throw new Error('promo_hard: ' + clean(em).slice(0, 160) + ' ／販促を外せませんでした: ' + clean(promo.other.join(',') || String(promo.raw || '')).slice(0, 160) + ' ' + backTxt()); }
     Utilities.sleep(1500);
     var r;
     try { r = addVariationsBulk0_(shopId, itemId, items, jobKey); }
-    catch (e2) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String((e2 && e2.message) || e2).slice(0, 220) + ' ／販促から外して再送しても失敗（まとめ買い割引は戻しました）'); }
+    catch (e2) { priceRelockPromo_(shopId, itemId, promo); note('retry_failed'); throw new Error('promo_hard: ' + clean((e2 && e2.message) || e2).slice(0, 200) + ' ／販促から外して再送しても失敗（' + backTxt() + '）'); }
     priceRelockPromo_(shopId, itemId, promo);
-    try { r = r || {}; r.promo = { bundleOut: promo.bundleOut.length, bundleBack: promo.bundleBack.length, discountOut: promo.discountOut.length, backErr: (promo.bundleBackErr || []).slice(0, 2) }; } catch (eP) {}
+    if ((promo.bundleBack || []).length < (promo.bundleOut || []).length || (promo.discountOut || []).length) note('added');
+    try { r = r || {}; r.promo = { bundleOut: promo.bundleOut.length, bundleBack: promo.bundleBack.length, discountOut: promo.discountOut.length, backErr: (promo.bundleBackErr || []).slice(0, 2), text: backTxt() }; } catch (eP) {}
     return r;
   }
 }
@@ -3602,7 +3608,7 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
         var urs = fetchAllRetry_(ureqs);
         urs.forEach(function (r3, k3) {
           if (!r3) return;                                  // このアップだけ失敗＝画像なしで明細は作る
-          try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; if (imgIds[uidx[k3]]) imgIdCachePut_((items[uidx[k3]] || {}).image, imgIds[uidx[k3]]); } catch (e) {}
+          try { var jj = JSON.parse(r3.getContentText()); var info = (jj.response || {}).image_info || (((jj.response || {}).image_info_list || [])[0]) || {}; imgIds[uidx[k3]] = info.image_id || null; if (imgIds[uidx[k3]] && items[uidx[k3]]) items[uidx[k3]].image_id = imgIds[uidx[k3]]; /* ★2026-10-22 販促で断られて再送する時に画像を上げ直さない */ if (imgIds[uidx[k3]]) imgIdCachePut_((items[uidx[k3]] || {}).image, imgIds[uidx[k3]]); } catch (e) {}
         });
       }
     }
@@ -7435,7 +7441,8 @@ function baHasLimited_(hw, key) {
   try {
     hw = String(hw || ''); key = String(key || ''); if (!hw || !key) return false;
     if (!BA_LIMSET[hw]) {
-      var set = {}; var rows = (baKv_('sg_' + hw) || {}).rows || [];
+      var sgv = baKv_('sg_' + hw); if (BA_KV_FAIL['sg_' + hw]) return true;   /* ★2026-10-22 レビュー：読めなかった時は null が返る＝「限定版なし」に倒れていた。読めない時は安全側 */
+      var set = {}; var rows = (sgv || {}).rows || [];
       var stripEd = function (t) { return String(t || '').replace(BA_EDITION_G, ' ').replace(/[\[［【][^\]］】]*[\]］】]/g, ' '); };
       rows.forEach(function (r) { var t = String((r && r.t) || ''); if (BA_EDITION_RE.test(t)) { var k = baKey_(stripEd(t)); if (k) set[k] = 1; } });
       BA_LIMSET[hw] = set;
@@ -8462,7 +8469,9 @@ function gameJudgeCands_(p) {
       for (var j = 0; j < ord.length; j++) {
         var u = String(ord[j].img || '').replace(/\?.*$/, ''); if (!u) continue;
         var vK = String(judged[u + '|v13|' + hwWord + '|' + pc.key] || ''), mv = String(baManualOf_(u, { key: pc.key, hwKey: hw }) || '');
-        if (vK.indexOf('ok:') === 0 || mv.indexOf('ok:') === 0) { hasOk = true; break; }
+        var _needNolim = mv.indexOf('ok:') === 0 && !/nolim|通常版/i.test(mv) && vK.indexOf('ok:') !== 0 && baHasLimited_(hw, pc.key);   /* ★2026-10-22 レビュー：限定版がある作品の手動OK（nolim なし）は出品で limcheck に止められる＝判定に戻して nolim を付け直す機会を作る */
+        if (!_needNolim && (vK.indexOf('ok:') === 0 || mv.indexOf('ok:') === 0)) { hasOk = true; break; }
+        if (_needNolim) { imgs.push({ img: u, thumb: String(ord[j].thumb || ''), name: String(ord[j].name || '').slice(0, 120), price: Number(ord[j].price) || 0, shop: baIsShop_(ord[j]) ? 1 : 0, recheck: 'nolim' }); continue; }
         if (vK || mv) continue;
         if (!baEditionOk_(ord[j].name, pc.ja, pc.en)) continue;
         imgs.push({ img: u, thumb: String(ord[j].thumb || ''), name: String(ord[j].name || '').slice(0, 120), price: Number(ord[j].price) || 0, shop: baIsShop_(ord[j]) ? 1 : 0 });
@@ -8512,7 +8521,7 @@ function condIndexTick(manual) {
     /* やることが無い時は枠を1回も使わずに休む（30分ごとのトリガーが毎回 Supabase を読むのを避ける・Codex指摘）。休みの印はスクリプト プロパティ＝時限つきなので勝手に戻る */
     var idleUntil = 0; try { idleUntil = Number(P_().getProperty('COND_IDLE_UNTIL') || 0); } catch (e0) {}
     var freshAt0 = 0; try { freshAt0 = Number(P_().getProperty('COND_FRESH_AT') || 0); } catch (eF0) {}
-    var freshDue = Date.now() - freshAt0 > 30 * 60000;   /* ★2026-10-22 休み中でも30分ごとに「新しく送った写真」だけは見に行く */
+    var freshDue = Date.now() - freshAt0 > 30 * 60000, _freshDone = false;   /* ★2026-10-22 休み中でも30分ごとに「新しく送った写真」だけは見に行く */
     if (manual !== true && idleUntil && Date.now() < idleUntil) {
       if (!freshDue) return { ok: true, skipped: 'idle' };
       /* 休み中の見回りは軽く：大きい索引（cond_photo_index）は読まず、一覧（cond_photo_queue）と直近36時間の会話だけ。新しい写真が無ければ休みを続ける */
@@ -8521,6 +8530,7 @@ function condIndexTick(manual) {
       if (!q0 || !Array.isArray(q0.items)) return { ok: true, skipped: 'idle' };
       var fr0 = condQueueBuild_({}, new Date(Date.now() - 36 * 3600000).toISOString(), q0);
       if (!fr0) return { ok: true, skipped: 'idle', fresh: 0 };
+      _freshDone = true;   /* ★2026-10-22 レビュー：この回で会話を読み直さない（2度読みしない） */
       try { P_().deleteProperty('COND_IDLE_UNTIL'); } catch (eF5) {}
     }
     if (!bgAllowed_() && manual !== true) return { ok: true, skipped: 'urlfetch 予約枠' };
@@ -8535,7 +8545,7 @@ function condIndexTick(manual) {
     var noGroup = Array.isArray(q.items) && q.items.length && !q.items[0].g;
     if (noGroup) { var keysOld = Object.keys(idx.items); if (keysOld.length <= 60 && keysOld.every(function (k) { return !idx.items[k].g; })) idx.items = {}; }   /* v196：セット番号を入れる前に見た最初の数十枚は、指示文も古いので見直す */
     if (!Array.isArray(q.items) || !q.items.length || qAge > 24 * 3600000 || noGroup || q.v !== 3) { var built = condQueueBuild_(idx.items); if (built) q = built; try { P_().setProperty('COND_FRESH_AT', String(Date.now())); } catch (eF1) {} }
-    else if (freshDue) {
+    else if (freshDue && !_freshDone) {
       try { P_().setProperty('COND_FRESH_AT', String(Date.now())); } catch (eF2) {}
       var fr = condQueueBuild_(idx.items, new Date(Date.now() - 36 * 3600000).toISOString(), q);
       if (fr) { q = fr; try { P_().deleteProperty('COND_IDLE_UNTIL'); } catch (eF3) {} }
@@ -8661,7 +8671,9 @@ function condQueueBuild_(done, sinceIso, prevQ) {
       baKvSet_('cond_photo_links', { at: new Date().toISOString(), n: nL, links: links });
     }
   } catch (eL) {}
-  var out = { at: new Date().toISOString(), v: 3, total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas' };
+  /* ★2026-10-22 レビュー：1日1回の作り直しも見回りの「見た印」（直近36時間）を持たせる＝作り直しの直後に索引済みの写真を新しいと数えて休みを解かない */
+  var _fs = {}, _fsCut = Date.now() - 36 * 3600000; items.forEach(function (x) { if (Date.parse(x.at) >= _fsCut) _fs[x.u] = 1; });
+  var out = { at: new Date().toISOString(), v: 3, total: items.length, indexed: items.length - pending.length, items: pending.slice(0, 1500), by: 'gas', fseen: _fs };
   baKvSet_(COND_Q, out);
   return out;
 }
@@ -9436,7 +9448,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       }
     }
     var r2 = null;
-    try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); if (r2 && r2.promo) baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 まとめ買い割引から一度外して明細を足し、戻しました（外す ' + r2.promo.bundleOut + '・戻す ' + r2.promo.bundleBack + (r2.promo.discountOut ? '・値下げは外したまま ' + r2.promo.discountOut : '') + '）'); }
+    try { r2 = addVariationsBulk_(tgt.shop_id, tgt.item_id, items, null); if (r2 && r2.promo) baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 まとめ買い割引から一度外して明細を足した（外す ' + r2.promo.bundleOut + '・戻す ' + r2.promo.bundleBack + '：' + (r2.promo.text || '') + '）'); }
     catch (e) {
       var em = String((e && e.message) || e).slice(0, 160);
       baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：追加失敗 ' + em);

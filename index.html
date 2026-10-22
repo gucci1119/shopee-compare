@@ -3403,7 +3403,9 @@
       }
     } catch (e) { console.warn('[価格] 書いた価格を控え（listings）に反映できませんでした（次の同期で直ります）', e && e.message); }
   }
-  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(async r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} await sbReflectPrices(itemId, list); } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
+  const openapiUpdatePriceList = (shopId, itemId, list) => openapiUpdateModelList('update_price_list', shopId, itemId, list).then(async r => { if (r && r.ok) { try { lst._priceWriteSeq = (lst._priceWriteSeq || 0) + 1; lst._leakHtmlCache = null; } catch (_) {} await sbReflectPrices(itemId, list);
+    /* ★2026-10-22 レビュー：GAS が値段を書くために外したまとめ買い割引を戻せなかった時（bundleBackErr）は、黙らずに出して記録する（別の台でやり直すと外れたまま誰も気づかない） */
+    try { const pm = r.result && r.result.promo; if (pm && pm.bundleBackErr && pm.bundleBackErr.length) { toast('⚠ 値段は書けましたが、まとめ買い割引に戻せませんでした（item ' + itemId + '）。🧺割引への戻しが必要です', true); logAct('価格調整', '⚠まとめ買い割引を戻せず', String(itemId), JSON.stringify(pm.bundleBackErr).slice(0, 200)); } } catch (_) {} } return r; }); // 価格を書いたらマージン漏れ検知のキャッシュを無効化（値上げして直したのに赤字表示が残るのを防ぐ）
   const openapiUpdateStockList = (shopId, itemId, list) => openapiUpdateModelList('update_stock_list', shopId, itemId, list);
   /* ★2026-10-13 限定版の明細を「限定版」として出し直す作業（本人「限定版は、明細変更も必要でしょ」「赤字を出したくない」）を Claude が
      ページの外から1件ずつ回すための入口。after が空（＝削除になる）や before が短すぎる時は断る＝名前の置換で別の明細を巻き込まない */
@@ -22065,6 +22067,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '🔍 <b>今日の変更を全体レビューして直しました</b>：①値付けの見直しの「明細を消す」が、DB の古い明細数で「最後の1つ」と見てカタログごと消すことがあった→Shopee の今の明細で数え、最後の1つの時は「カタログごと消える」と書いた確認を出す ②②の作成で仮の明細 test が消えていないのに公開していた→読み直して test が無い時だけ公開 ③値段を書く時に外したまとめ買い割引を戻せなかったら警告と記録を出す。',
       '✍️ <b>仕入れ検索の候補から「下書きへ」で出品作成に送れるようにしました</b>（リクエスト→出品の第2歩）：押すと出品作成の画面に、商品名・仕入額（送料込み）・重さ・その写真・仕入元のURLが入った状態で開きます。出品はまだしません（名前・機種・写真を確かめてから本人が出す）。',
       '🔎 <b>仕入れ検索の候補を、一覧と同じ決めで絞るようにしました</b>（今日のレビュー）：相場の35%未満（ケースだけ等の別物の疑い）・配送未定や定形外・発送元が遠い・グッズや用品・別機種を外し、限定版の語も🤖と同じ一覧にそろえました。',
       '🔎 <b>価格計算に「仕入れ検索」を足しました</b>（本人「リクエスト系は、自動で利益計算して、値札設定、出品までできたら楽」「段階的に」の第1歩）：リクエストの商品名を入れて「中古の値段を探す」を押すと、仕入れ先の横断検索で中古の安い順に8件並びます（新品・未開封・限定版らしい物は除く）。「これで計算」で送料込みの値段が①仕入額に入り、各国の値段がその場で出ます。買うのは「開く」から本人が。',
@@ -40613,9 +40616,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         let dr;
         if (!e.model_id) dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);
         else {
-          const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
-          const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
-          if (ms.length <= 1) dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);   // 最後の1明細＝カタログごと
+          /* ★2026-10-22 レビュー：明細の数を DB（古い・口座の絞り込みで空になる）で数えると、明細が何十件もあるカタログを「最後の1明細」と見てカタログごと消していた
+             → Shopee の今の状態（get_models）で数える。読めない・0件なら止める。本当に最後の1明細なら、カタログごと消すと書いた確認をもう一度出す */
+          let md = null; try { md = await openapiGetModels(sid, e.item_id); } catch (eM) { md = null; }
+          const ms = ((md && md.models) || []).map(m => ({ id: m.model_id, ti: (m.tier_index || [])[0] }));
+          if (!ms.length) throw new Error('Shopee から明細を読めませんでした（消していません）');
+          if (!ms.some(m => String(m.id) === String(e.model_id))) throw new Error('この明細は Shopee に見当たりません（もう消えている・別の明細になった可能性）。🔄更新してから');
+          if (ms.length <= 1) {
+            if (!confirm(`⚠ ${e.cc}「${e.name}」はこの明細が最後の1つです。消すと【カタログごと】消えます（sold・いいねも消えます）。本当に消しますか？`)) { b.disabled = false; if (st) st.innerHTML = '<span class="smd-dim">やめました</span>'; return; }
+            dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);   // 最後の1明細＝カタログごと
+          }
           else {
             const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
             if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id) }, 120000);
@@ -40674,7 +40684,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               try { const gm = await openapiGetModels(sid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: nid, mids: String(t.model_id) }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
               let imgOk = !img; if (img) { try { const ir = await openapiSetVariationImage(sid, nid, e.vari || e.name, img); imgOk = !!(ir && ir.ok); } catch (_) {} }
               /* ★2026-10-22 本人「非公開じゃなくて公開」：本物の明細を入れて test を消した後に公開する */
-              let pubOk = false; try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: sid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {}
+              /* ★2026-10-22 レビュー：test を消すのに失敗しても公開へ進むと、在庫1の「test」が買える＝Shopee を読み直して test が無い時だけ公開する */
+              let testLeft = true; try { const g2 = await openapiGetModels(sid, nid); testLeft = ((g2 && g2.models) || []).some(m => String(m.name || '').trim().toLowerCase() === 'test'); } catch (_) { testLeft = true; }
+              let pubOk = false; if (!testLeft) { try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: sid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {} }
+              if (testLeft) say('<b style="color:#b06000">⚠ 仮の明細「test」が消えていない（読めなかった）ので、' + esc(mark) + 'は非公開のままにしました。Seller Center で test を消してから公開してください</b>');
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログから消しています…</span>');
               let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
               const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
