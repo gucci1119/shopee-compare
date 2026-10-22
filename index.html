@@ -8094,6 +8094,7 @@
     [/^(.+)：写真 (\d+)件(.*)・⚠保存に失敗（(.*)）$/, '$1: $2 photos$3 · ⚠ save failed ($4)'],
     [/^(.+)：担当の台の接続枠が85%超なので今回は集めない$/, '$1: its runner is over 85% of the quota, skipped this time'],
     [/^🧩 GAS の版: (.*)$/, '🧩 GAS source version: $1'],
+    [/^損益分岐 (.*)$/, 'Break-even $1'], [/^売れた頃 (.*)$/, 'When it sold $1'],
     [/^⚠️ GAS の版がそろっていません（古い台に貼り替え→保存→再デプロイ）: (.*)$/, '⚠️ GAS versions differ (paste, save and redeploy the old one): $1'],
     [/^🤖出品の担当$/, 'runs 🤖 listing'],
     [/^⛔ 使い切り$/, '⛔ used up'],
@@ -21985,6 +21986,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '💴 <b>値付けの見直しに円の値段と損益分岐を出しました</b>（本人「現地通貨の価格があるところには、円の価格もちょっと下とかに欲しい」「損益分岐点もちょっと知りたい」）：今の価格・売れた頃・提案価格の下に ≈¥（今日の為替で換算・提案価格は打ち直すとその場で変わる）、目標の下に「損益分岐 R$xx（≈¥yy）」＝この値段より下だと赤字。',
       '➕ <b>値段の差で移せるカタログが無い時は、②を作って移せるようにしました</b>（本人「ポップコーンバケツ2のカタログはあるんやろうか？」「ない場合は…作ってくれるのだろうか？」）：🏷値付けの見直しの「🔀 別のカタログへ移す」で、同じ家族（①②…）のカタログが無ければ「➕ このカタログの②を作って移す」が出ます（元を複製・非公開で作る・番号は国の全店で数える）。グッズなど機種の語が無いものは、関係のないゲームのカタログを移し先に出さないようにしました。',
       '🏷 <b>値付けの見直し：書き込みが失敗した日の直し＋VNの上限超えは削除を提案</b>（本人「書き込みしたのに残るやつある」「ベトナムで価格超えてしまうやつは削除提案してきて」「明細ないやつは、カタログごと」）：①価格・在庫の書き込みも、本体の接続枠が尽きた日は別のGoogleアカウントで書き直す ②全部失敗した回も記録に残す ③VNで上限（909,090ドン）を超えないと目標に届かない行に「🗑 この明細を消す／カタログごと消す」を出す。',
       '🔁 <b>在庫の自動復活の確認待ちに、消した明細と限定版を出さないようにしました</b>（本人「これなぜ、表示されている？」＝さくら荘 BR）：消した明細は詰め直しで番号が別の作品に入れ替わるため、押すと別の作品の在庫を書くおそれがありました。戻す前に今の明細の名前を読み、同じ時だけ書きます（読めない時は書きません）。限定版は並べず、戻しません。',
@@ -40325,6 +40327,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try { return await PA.busy; } finally { PA.busy = null; }
   }
 
+  /* ★2026-10-22 本人「現地通貨の価格があるところには、円の価格もちょっと下とかに欲しい」「損益分岐点もちょっと知りたい」：
+     円＝その値段×今日の為替（売値の円換算・手数料を引く前）。損益分岐＝利益0になる値段＝仕入 ÷ 手取り率 ÷ 為替（国の値段の刻みで切り上げ） */
+  const paJpy = (e, P) => (e && e.rNow > 0 && Number(P) > 0) ? '≈¥' + Math.round(Number(P) * e.rNow).toLocaleString() : '';
+  const paBe = e => { try { if (!(e && e.k > 0 && e.rNow > 0 && e.cost > 0)) return 0; const unit = (regionByCc(e.cc) || {}).priceUnit || 1; return paUp(e.cost / (e.k * e.rNow), unit); } catch (_) { return 0; } };
   async function paRender(force) {
     const root = document.getElementById('pa-root'); if (!root) return;
     const sub = document.getElementById('pa-sub');
@@ -40367,9 +40373,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <td style="min-width:260px">${img ? `<img src="${esc(img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px;float:left;margin-right:6px" onerror="this.style.display='none'">` : ''}<a href="${hrefOk(url)}" target="_blank" rel="noopener" style="color:inherit">${esc(e.name)}</a>${e.vari ? `<div style="color:#5b3fd6;font-size:11px">▸ ${esc(e.vari)}</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap">${e.u30}<span class="smd-dim"> / 月${Math.round(e.uPrev * 10) / 10}</span></td>
         <td style="text-align:right;white-space:nowrap;${e.pNow != null && e.pNow < 0 ? 'color:#d93025;font-weight:700' : ''}">${paYen(e.pNow)}<div class="smd-dim" style="font-size:10px">実績 ${paYen(e.pMed)}・${e.nP}件</div></td>
-        <td style="text-align:right;white-space:nowrap">${paYen(e.target)}${e.roiT != null ? `<div class="smd-dim" style="font-size:10px">仕入${paYen(e.cost)}×${e.roiT}%</div>` : ''}</td>
-        <td style="text-align:right;white-space:nowrap">${paLoc(e.cc, e.price)}${e.soldBefore ? `<div class="smd-dim" style="font-size:10px">売れた頃 ${paLoc(e.cc, e.soldBefore)}</div>` : ''}</td>
-        <td style="text-align:right;white-space:nowrap">${sugV != null ? `<span style="font-size:11px;color:#6b7280">${esc(rg.cur || '')}</span><input class="pa-price" data-k="${esc(e.key)}" type="text" inputmode="decimal" value="${paFmtIn(sugV, rg.priceUnit)}" style="width:${String(sugV).length > 6 ? 100 : 80}px;text-align:right"><div class="pa-chg" style="font-size:10px;color:${chg > 0 ? '#1a7f37' : '#c2185b'}">${chg > 0 ? '+' : ''}${chg}%</div>` : '<span class="smd-dim">—</span>'}</td>
+        <td style="text-align:right;white-space:nowrap">${paYen(e.target)}${e.roiT != null ? `<div class="smd-dim" style="font-size:10px">仕入${paYen(e.cost)}×${e.roiT}%</div>` : ''}${paBe(e) ? `<div style="font-size:10px;color:#8a4b00" title="この値段より下だと赤字（仕入れ・手数料・送料を引いて利益0）＝仕入 ÷ 手取り率 ÷ 今日の為替">損益分岐 ${paLoc(e.cc, paBe(e))}<span class="smd-dim">（${paJpy(e, paBe(e))}）</span></div>` : ''}</td>
+        <td style="text-align:right;white-space:nowrap">${paLoc(e.cc, e.price)}${paJpy(e, e.price) ? `<div class="smd-dim" style="font-size:10px">${paJpy(e, e.price)}</div>` : ''}${e.soldBefore ? `<div class="smd-dim" style="font-size:10px">売れた頃 ${paLoc(e.cc, e.soldBefore)}${paJpy(e, e.soldBefore) ? '（' + paJpy(e, e.soldBefore) + '）' : ''}</div>` : ''}</td>
+        <td style="text-align:right;white-space:nowrap">${sugV != null ? `<span style="font-size:11px;color:#6b7280">${esc(rg.cur || '')}</span><input class="pa-price" data-k="${esc(e.key)}" type="text" inputmode="decimal" value="${paFmtIn(sugV, rg.priceUnit)}" style="width:${String(sugV).length > 6 ? 100 : 80}px;text-align:right"><div class="pa-chg" style="font-size:10px;color:${chg > 0 ? '#1a7f37' : '#c2185b'}">${chg > 0 ? '+' : ''}${chg}%</div><div class="pa-jpy smd-dim" style="font-size:10px">${paJpy(e, sugV)}</div>` : '<span class="smd-dim">—</span>'}</td>
         <td class="pa-psug" style="text-align:right;white-space:nowrap">${pS != null ? `<span style="font-size:11px;color:#6b7280">¥</span><input class="pa-prof" data-k="${esc(e.key)}" type="text" inputmode="numeric" value="${paFmtIn(pS, 1)}" title="欲しい1個あたりの利益（円）を打つと、そこから逆算した値段が提案価格に入ります" style="width:78px;text-align:right;${pS < 0 ? 'color:#d93025;' : ''}">` : '—'}${pS != null && !e.kOwn ? '<div class="smd-dim" style="font-size:10px">手取り率は国の平均</div>' : ''}</td>
         <td style="font-size:11px;color:#5a6b8a;min-width:240px">${esc(e.why)}${e.ratioWant ? `<div style="margin-top:4px"><button class="smd-btn b-write pa-move" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px" title="本人 2026-10-20「その場合は価格差が合う違う明細に入れ直して」：同じ店の、値段の差が合うバリエのカタログを探して、この明細を ${paLoc(e.cc, e.ratioWant)} で入れ直し、ここからは消す（カタログは残す）">🔀 値段の差が合う別のカタログへ ${paLoc(e.cc, e.ratioWant)} で移す</button><div class="pa-move-box" data-k="${esc(e.key)}"></div></div>` : ''}${e.ceilDel ? `<div style="margin-top:4px"><button class="smd-btn pa-ceil-del" data-k="${esc(e.key)}" style="font-size:11px;padding:1px 8px;border-color:#f5c2c0;background:#fdecea;color:#b3261e" title="本人 2026-10-22「ベトナムで価格超えてしまうやつは削除提案してきて」「明細ないやつは、カタログごと」">🗑 ${e.cc} の上限を超える＝${e.model_id ? 'この明細を消す' : 'カタログごと消す'}</button><span class="pa-del-st" data-k="${esc(e.key)}" style="font-size:11px;margin-left:4px"></span></div>` : ''}</td>
       </tr>`;
@@ -40465,6 +40471,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const tr = inp.closest('tr'), p = e.profitAt(v), chg = Math.round((v / e.price - 1) * 100);
       const pf = tr.querySelector('.pa-prof'); if (pf && p != null && document.activeElement !== pf) { pf.value = paFmtIn(p, 1); pf.style.color = p < 0 ? '#d93025' : ''; }
       const ch = tr.querySelector('.pa-chg'); if (ch) { ch.textContent = (chg > 0 ? '+' : '') + chg + '%'; ch.style.color = chg > 0 ? '#1a7f37' : '#c2185b'; }
+      const jy = tr.querySelector('.pa-jpy'); if (jy) jy.textContent = paJpy(e, v);
     }));
     /* ★2026-10-21 本人「提案後の利益のところを自分で調整できるようにしたら？」「結局さ、いくら利益取りたいかよ」：
        欲しい利益（円）を打つと、仕入れ・手取り率・今日の為替から値段を逆算して提案価格に入れ、その行を選ぶ（書き込むのは「選んだ…を書き込む」を押した時） */
@@ -40477,6 +40484,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const tr = inp.closest('tr'), pr = tr.querySelector('.pa-price'); if (pr) pr.value = paFmtIn(P, unit);
       const chg = Math.round((P / e.price - 1) * 100), ch = tr.querySelector('.pa-chg'); if (ch) { ch.textContent = (chg > 0 ? '+' : '') + chg + '%'; ch.style.color = chg > 0 ? '#1a7f37' : '#c2185b'; }
       inp.style.color = d < 0 ? '#d93025' : '';
+      { const jy = tr.querySelector('.pa-jpy'); if (jy) jy.textContent = paJpy(e, P); }
       const ck = tr.querySelector('.pa-ck'); if (ck && !ck.checked) { ck.checked = true; PA.sel.add(e.key); try { selCount(); } catch (_) {} }
     }));
     const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
