@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-0950';
+var SRC_VER = '20261022-2140';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6220,7 +6220,7 @@ function syncListingStatsForShop_(tok) {
     });
   }
   var n = Object.keys(stats).length;
-  if (n) sbUpsert_('app_kv', [{ k: 'listing_stats_' + shopId, v: { items: stats } }], 'k'); // 非破壊：この店の分だけ丸ごと置換
+  if (n) sbUpsert_('app_kv', [{ k: 'listing_stats_' + shopId, v: { items: stats, at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'k'); // 非破壊：この店の分だけ丸ごと置換。★2026-10-22 updated_at を付ける（付けないと作った日 7/28 のままで、ポータルの「統計の日付」が古く見えていた）
   // 📈日次スナップショット：listing_stats_history に (item_id, snap_date) で1日1行を積む→ポータルで期間フィルタ(過去N日の伸び)に使う。
   // テーブル未作成でも current 同期は壊さないよう try/catch。JST日付。
   if (n) {
@@ -6312,6 +6312,8 @@ function sbSelectAll_(table, query) {
   return out;
 }
 function sbUpsert_(table, rows, onConflict) {
+  /* ★2026-10-22 app_kv は updated_at を付けないと作った日のまま（listing_stats_* が 7/28 のまま＝ポータルの「統計の日付」が古く見えた）＝付け忘れていても必ず付ける */
+  if (table === 'app_kv' && rows && rows.length) { var nowU = new Date().toISOString(); rows = rows.map(function (r) { if (!r || r.updated_at) return r; var o = {}; Object.keys(r).forEach(function (kk) { o[kk] = r[kk]; }); o.updated_at = nowU; return o; }); }
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : ''), key = cfg_('SB_SERVICE_KEY');
   for (var i = 0; i < rows.length; i += 200) {
     ufBump_(1, 'Supabase書き(' + table + ')');
