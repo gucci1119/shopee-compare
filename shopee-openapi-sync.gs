@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2340';
+var SRC_VER = '20261022-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8588,6 +8588,9 @@ function condIndexTick(manual) {
         var gti = pickOf('ti'), ghw = pickOf('hw'), gpf = pickOf('pf'), gkd = pickOf('kd'), gmd = pickOf('md'), gcl = pickOf('cl');   /* v197：種類・型番・色（本体やコントローラーは題名が無いので、これで引く） */
         var allParts = {}; rs.forEach(function (r) { (r.parts || []).forEach(function (p2) { allParts[p2] = 1; }); });
         var hint = groups[g].filter(function (r) { return r.hti || r.hhw; })[0]; if (hint) { if (hint.hti) gti = hint.hti; if (hint.hhw) ghw = hint.hhw; }
+        /* ★2026-10-22 本人「さっきのPSPレッド入ってなくない？」の確認で発覚：本体の写真の題名が、画面に映ったゲーム名（Girls Side）になっていた
+           → 本体・コントローラー・周辺機器は作品名を題名にしない（Drive の書き出しが「型番 (色)」で名前を付ける＝【PSP】PSP (red)） */
+        if (/^(console|controller|accessory)$/.test(String(gkd || ''))) gti = '';
         /* ★2026-10-07 「汎用」＝売っている形と同じ写真（本人「説明書付いてたりとか、異常に綺麗な状態だったりもあるので」「汎用的に使えるものが良い」）：
            説明書・チラシ・帯・はがきが写っていない。紙箱の機種（FC・SFC・N64・GB・GBA・WS）は箱も写っていない（カセット単体で売る）。プラケースの機種はケースが写っている */
         var pk = Object.keys(allParts), CART_ONLY_G = { fc: 1, sfc: 1, n64: 1, gb: 1, gbc: 1, gba: 1, vb: 1, ws: 1, ngp: 1, md: 1 };
