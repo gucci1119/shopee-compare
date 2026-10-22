@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2350';
+var SRC_VER = '20261023-0715';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4264,7 +4264,12 @@ function addItem_(body) {
       return { tier_index: [i], original_price: parseFloat(v.price != null ? v.price : body.price), model_sku: String(v.sku || ''), seller_stock: [{ stock: parseInt(v.stock != null ? v.stock : 1, 10) }] };
     });
     var tvBody = { item_id: itemId, tier_variation: [{ name: String(body.tier_name || 'バージョン').slice(0, 30), option_list: optionList }], model: modelList };
-    var jt = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', tvBody);
+    /* ★2026-10-23 作った直後だと Shopee が「The item is still being created. Please wait 5 seconds」で断る＝入れ物だけ残った（TW のコライドン）。この返事の時だけ6秒待って最大3回やり直す */
+    var jt;
+    for (var _tv = 0; ; _tv++) {
+      try { jt = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', tvBody); break; }
+      catch (eTv) { if (_tv < 3 && /still being created|wait 5 seconds/i.test(String((eTv && eTv.message) || eTv))) { Utilities.sleep(6000); continue; } throw eTv; }
+    }
     result.variations = vars.length;
     result.tier_options = optionList.map(function (o) { return o.option; }); // 生成した一意オプション名（確認用）
     result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
