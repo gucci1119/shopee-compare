@@ -1094,6 +1094,14 @@
     <div id="pc-sentinel" style="height:1px"></div>
     <div class="tool-card" id="pc-inputs" style="margin:0 20px 12px;max-width:none;background:#fff;padding:8px 12px">
       <!-- ★2026-10-15 本人「もうちょっとコンパクトにわかりやすく」：2段（基本／PayPal併用）・説明はマウスを乗せた時（title）だけ -->
+      <!-- ★2026-10-22 本人「リクエスト系は、自動で利益計算して、値札設定、出品までできたら楽」「段階的に」→ 第1歩：商品名から仕入れ値を探して①に入れる -->
+      <div class="pc-row" id="pc-src-row" style="margin-bottom:6px">
+        <span class="pc-grp" style="background:#0f7b6c">仕入れ検索</span>
+        <input type="text" id="pc-src-q" placeholder="リクエストの商品名（例：ポケモン クリスタル GBC）" style="flex:1;min-width:220px;font-size:12px;padding:3px 6px">
+        <button type="button" id="pc-src-go" class="smd-btn" style="font-size:11px;padding:2px 10px">🔎 中古の値段を探す</button>
+        <span id="pc-src-msg" class="smd-dim" style="font-size:11px"></span>
+      </div>
+      <div id="pc-src-list" style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 6px"></div>
       <div class="pc-row pc-row1">
         <span class="pc-grp">基本</span>
         <span class="pc-f" title="いくらで仕入れるか。送料込みの支払額"><span class="pc-l"><span class="pc-no">1</span>仕入額<input type="number" id="pc-cost" placeholder="1500" style="width:80px"><i>円</i><span class="req">必須</span></span></span>
@@ -5992,6 +6000,11 @@
     '(商品名なし)': '(no item name)', '追跡情報なし': 'no tracking information',
     // ══ 💴 価格計算ページ：画面に出る文字を1つ残らず入れる（英語モードで日本語を残さない）══
     '（リクエストされた商品を、各国いくらで出せばいいか）': '(What price to list a requested item at, in each country)',
+    '仕入れ検索': 'Source search',
+    '🔎 中古の値段を探す': '🔎 Find used prices',
+    'リクエストの商品名（例：ポケモン クリスタル GBC）': 'Requested item name (e.g. Pokemon Crystal GBC)',
+    'これで計算': 'Use this cost',
+    '押すと①仕入額に入ります（送料込みの実質価格）': 'Click to put it into ① Cost (price incl. shipping)',
     '仕入額を入れると、7か国それぞれの出品価格と手取りが出ます。': 'Enter the cost and you get the list price and net for all 7 countries.',
     '手数料・SLS送料・為替・目標ROIは⚙️設定の値＝「出品を作る」と同じ数字。①Shopeeのみ／②Shopee＋PayPal／③Shopee最小＋PayPal の3通り。':
       'Fees, SLS shipping, FX and target ROI all come from Settings — the same numbers as Create Listing. Three patterns: ① Shopee only / ② Shopee + PayPal / ③ Minimum Shopee + PayPal.',
@@ -9615,7 +9628,31 @@
       el.addEventListener('input', live);
       el.addEventListener('change', live);
       el.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(pcT); priceCalcRun(); } });
-    }); }
+    });
+    /* ★2026-10-22 仕入れ検索：仕入れ先の横断検索（srcFetchDeals）で中古の安い順に8件並べ、押すと送料込みの実質価格を①仕入額に入れる。
+       新品・未開封・限定版らしい物は除く（限定版を通常版の値段で出さない＝edition-regular-vs-limited）。買うのは本人（リンクを開くだけ） */
+    (() => { const go = document.getElementById('pc-src-go'), qi = document.getElementById('pc-src-q'); if (!go || go.dataset.wired) return; go.dataset.wired = '1';
+      const run = async () => {
+        const q = String(qi.value || '').trim(), msg = document.getElementById('pc-src-msg'), box = document.getElementById('pc-src-list');
+        if (!q) { msg.textContent = '商品名を入れてください'; return; }
+        go.disabled = true; msg.textContent = '探しています…'; box.innerHTML = '';
+        try {
+          const r = await srcFetchDeals(encodeURIComponent(q), (k, n) => { msg.textContent = '探しています… ' + k + ' ' + (n < 0 ? '×' : n + '件'); });
+          const NG = /新品|未開封|未使用|シュリンク|限定版|特装|豪華|BOX|ボックス|プレミアム|ジャンク/i;
+          const ds = (r.deals || []).filter(d => !NG.test(String(d.name || ''))).slice(0, 8);
+          if (!ds.length) { msg.textContent = '中古の出品が見つかりませんでした（' + Object.values(r.siteStat || {}).map(x => x.label + (x.n < 0 ? '×' : x.n)).join('・') + '）'; return; }
+          msg.textContent = '押すと①仕入額に入ります（送料込みの実質価格）';
+          box.innerHTML = ds.map((d, i) => `<div style="border:1px solid #d6e4e1;border-radius:8px;padding:4px 6px;width:150px;font-size:11px;background:#fbfffe">
+            ${d.img ? `<img src="${esc(d.img)}" style="width:100%;height:80px;object-fit:cover;border-radius:4px" loading="lazy">` : ''}
+            <div style="font-weight:700">¥${Number(d.eff || d.price).toLocaleString()} <span class="smd-dim" style="font-weight:400">${esc(d.site || '')}</span></div>
+            <div title="${esc(d.name || '')}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.name || '')}</div>
+            <div style="display:flex;gap:4px;margin-top:3px"><button type="button" class="smd-btn pc-src-use" data-i="${i}" style="font-size:10.5px;padding:1px 6px">これで計算</button>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener" style="font-size:10.5px">開く</a>` : ''}</div></div>`).join('');
+          box.querySelectorAll('.pc-src-use').forEach(b => b.onclick = () => { const d = ds[Number(b.dataset.i)]; const c = document.getElementById('pc-cost'); c.value = String(Math.round(Number(d.eff || d.price))); c.dispatchEvent(new Event('input', { bubbles: true })); msg.textContent = '①仕入額に ¥' + c.value + ' を入れました（' + (d.site || '') + '）'; });
+        } catch (e) { msg.textContent = '❌ 探せませんでした: ' + String((e && e.message) || e).slice(0, 80); }
+        finally { go.disabled = false; }
+      };
+      go.onclick = run; qi.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); run(); } });
+    })(); }
   // 枠の残りは開いた時に出し、あとは5分ごとに静かに更新する（この呼び出しは枠を使わない）
   try { const _e0 = document.getElementById('uf-quota'); if (_e0 && !_e0.textContent) ufPillRestore(_e0); } catch (_) {}   /* ★開いた瞬間に前回の値 */
   try { setTimeout(() => { ufQuotaDraw(); setInterval(ufQuotaDraw, 300000); }, 800); } catch (_) {}
@@ -22007,6 +22044,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-22', items: [
+      '🔎 <b>価格計算に「仕入れ検索」を足しました</b>（本人「リクエスト系は、自動で利益計算して、値札設定、出品までできたら楽」「段階的に」の第1歩）：リクエストの商品名を入れて「中古の値段を探す」を押すと、仕入れ先の横断検索で中古の安い順に8件並びます（新品・未開封・限定版らしい物は除く）。「これで計算」で送料込みの値段が①仕入額に入り、各国の値段がその場で出ます。買うのは「開く」から本人が。',
       '📊 <b>積み上げ棒グラフに数字を入れました</b>（本人「ここは積み上げなんで、数値もグラフ内に欲しい」）：「🆕 新規と既存の訪問者」と、上の大きいグラフを「📊 積み上げ棒」にした時、各段の中に数字・棒の上に合計を描きます（段が低くて入らない時は段の数字を省き、合計だけ）。',
       '📈 <b>2店舗目の MY・SG の線が最後の日だけ点線になっていたのを直しました</b>（本人「なぜ点々なってるん？」「データあるはずやろ？」）：点線は線の端から名札への引き出し線で、10-21 の値が入っていなかったのが原因。Shopee は 10-21 を「確定済み・訪問者0人」と返していたのに、アクセス取り込み（userscript）が「直近2日の0は未確定」とみなして捨てていました。v1.4.1 で Shopee の確定の印（data_ready）を見て、確定済みなら0人の日も送るようにしました。',
       '📊 <b>枠空け候補の「統計の日付」が 7/28 のまま古く見えていたのを直しました</b>（本人「これ全部0だけど意味あるの？」）：閲覧・いいね・販売の統計は毎日取り直していましたが、GAS が書く時に更新日時を付けておらず、最初に作った日のまま表示されていました。app_kv に書く時は必ず更新日時を付けるようにしました（GAS SRC 20261022-2140）。',
