@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2230';
+var SRC_VER = '20261022-2235';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8619,9 +8619,12 @@ function condQueueBuild_(done, sinceIso, prevQ) {
      ※🤖の作品のメルカリ写真を足す案（同日）は、本人の「手で出した売れ筋の写真が要る」を受けてやめた（9/25 の Smart Reply がその場でメルカリから引く） */
   if (sinceIso) {
     var pq = (prevQ && Array.isArray(prevQ.items)) ? prevQ.items : []; var have = {}; pq.forEach(function (x) { if (x && x.u) have[x.u] = 1; });
+    /* 見回りで一度見た写真（fseen）は二度足さない＝索引済みの写真を毎回「新しい」と数えて休みを解かないように */
+    var fseen = (prevQ && prevQ.fseen) || {}; Object.keys(fseen).forEach(function (u) { have[u] = 1; });
     var add = pending.filter(function (x) { return !have[x.u]; });
     if (!add.length) return null;
-    var outF = { at: prevQ.at || new Date().toISOString(), v: 3, total: (prevQ.total || pq.length) + add.length, indexed: prevQ.indexed || 0, items: add.concat(pq).slice(0, 1500), by: 'gas', freshAt: new Date().toISOString(), freshAdded: add.length };
+    var fs2 = {}; items.forEach(function (x) { fs2[x.u] = 1; });
+    var outF = { at: prevQ.at || new Date().toISOString(), v: 3, total: (prevQ.total || pq.length) + add.length, indexed: prevQ.indexed || 0, items: add.concat(pq).slice(0, 1500), by: 'gas', freshAt: new Date().toISOString(), freshAdded: add.length, fseen: fs2 };
     baKvSet_(COND_Q, outF);
     return outF;
   }
