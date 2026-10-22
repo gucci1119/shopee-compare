@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261022-2330';
+var SRC_VER = '20261022-2340';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10015,8 +10015,10 @@ function baSoldSync_(st) {
    ================================================================================================ */
 /* ★2026-10-11 本人「トレカは pre-order でもいいかもね（仕入れ元がらくらく/ゆうゆう便以外が多い）出品リミット減らない範囲で」：
    トレカのカタログ（各国1〜数件＝予約出品の割合は0.1%程度・非Preferred 10%／SG 5% の上限に触れない）は予約出品・DTS 7日。既存7件は 10/11 に update_item で切替済み。新しく複製した時はここで付ける */
+/* ★2026-10-22 本人「なるほどね。解除して」「忘れてたわ」：トレカのカタログが238件に増え、出品の少ない店（2店舗目は上限100）では予約出品の割合が上限（SG 9/14〜 公開中の10%・超えると7日間100件）に触れる
+   → 新しく作るトレカのカタログは予約出品にしない（cfg.tcg.preorder === true の時だけ付ける）。既存は 10/22 に一括で解除 */
 function baTcgPreorder_(shopId, itemId, hw, st, cc) {
-  try { if (!TCG_HW_JA[hw]) return; updateItem_({ shop_id: shopId, item_id: itemId, pre_order: { is_pre_order: true, days_to_ship: 7 } }); if (st) baLog_(st, (cc || '') + '：トレカの新カタログを予約出品（DTS 7日）にしました（' + itemId + '）'); }
+  try { if (!TCG_HW_JA[hw]) return; var _c = null; try { _c = baKv_(BA_CFG) || {}; } catch (eC) {} if (!(_c && _c.tcg && _c.tcg.preorder === true)) return; updateItem_({ shop_id: shopId, item_id: itemId, pre_order: { is_pre_order: true, days_to_ship: 7 } }); if (st) baLog_(st, (cc || '') + '：トレカの新カタログを予約出品（DTS 7日）にしました（' + itemId + '）'); }
   catch (e) { if (st) baLog_(st, (cc || '') + '：予約出品の設定に失敗（' + String((e && e.message) || e).slice(0, 160) + '）'); }
 }
 /* ★2026-10-11 本人「ポケモン以外も出していってくださいよ、ガンガン」「勝手にカタログ作っていいから。そのシリーズのね」「画像も勝手に設定して…カタログのトップ画像」
