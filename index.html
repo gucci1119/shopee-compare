@@ -1143,6 +1143,7 @@
           <div style="flex:1;min-width:240px"><div class="smd-dim" style="font-size:10.5px;margin-bottom:2px">🇯🇵 日本語の意味（確認用・送るのは左）</div><div id="pc-q-ja" style="white-space:pre-wrap;font-size:12px;line-height:1.5;background:#fff;border:1px dashed #c7d2fe;border-radius:6px;padding:6px;color:#334155"></div></div></div>
         <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">
           <button type="button" id="pc-q-copy" class="smd-btn" style="font-size:11px;padding:2px 9px">📋 文面をコピー</button>
+          <button type="button" id="pc-q-tochat" class="smd-btn" style="font-size:11px;padding:2px 9px;display:none;background:#fff7ed;border-color:#fdba74" title="Smart Reply の 💴 で開いた時だけ出ます。いまの文面を、開いた元の webchat の入力欄に入れます（送信はしません。開いている会話の相手が違う時は入れません）">💬 Smart Reply の入力欄へ</button>
           <button type="button" id="pc-q-ppmake" class="smd-btn" style="font-size:11px;padding:2px 9px" title="PayPal の支払いリンクの作成画面を開いて、商品名・金額・通貨を入れます（userscript「PayPal Link Filler」）。作成は自分で押す→できたリンクは自動でコピー">💳 PayPal リンクを作る</button>
           <button type="button" id="pc-q-addreq" class="smd-btn" style="font-size:11px;padding:2px 9px" title="その国・その価格帯の Request page に、相手の名前入りの明細（在庫1）を足して、商品のリンクを出します">🛒 買うと言われたら：Request page に追加</button>
           <span id="pc-q-msg" class="smd-dim"></span></div>
@@ -6669,6 +6670,8 @@
     "または 目標粗利": "or target profit",
     "📨 見積もり（お客さんに送る文面）": "📨 Quote (message to the buyer)",
     "📋 文面をコピー": "📋 Copy message",
+    "💬 Smart Reply の入力欄へ": "💬 Put into Smart Reply input",
+    "Smart Reply の 💴 で開いた時だけ出ます。いまの文面を、開いた元の webchat の入力欄に入れます（送信はしません。開いている会話の相手が違う時は入れません）": "Shown only when opened from Smart Reply's 💴. Puts this message into the input box of the webchat that opened it (it does not send; nothing is put in if a different buyer's chat is open).",
     "🇯🇵 日本語の意味（確認用・送るのは左）": "🇯🇵 Japanese meaning (for checking; send the left one)",
     "🛒 買うと言われたら：Request page に追加": "🛒 If they buy: add to Request page",
     "払い方": "Payment",
@@ -9424,6 +9427,27 @@
     const m2 = t.match(/[~〜～]\s*(?:R\$)?\s*(\d+(?:\.\d+)?)(k?)/i); if (m2) return [0, K(m2[1], m2[2])];
     return [0, Infinity];
   }
+  /* ★2026-10-24 本人「smart reply、ワッツアップからもできるように」：Smart Reply の 💴 で開いた時は、文面を開いた元の webchat の入力欄へ入れる（送らない・送るのは本人）。
+     窓のつながり（window.opener）に postMessage → Smart Reply が「いま開いている会話の相手＝見積もりの相手」を確かめてから入れて返事をする。
+     相手が違う・返事が無い時は入れずに、文面をコピーして貼ってもらう（別のお客さんの入力欄に入る事故を止める）。WhatsApp はコピーまで */
+  function pcQuoteToChat() {
+    const msg = document.getElementById('pc-q-msg'), t = String((document.getElementById('pc-q-text') || {}).value || '').trim();
+    if (!t) { msg.textContent = '文面が空です（先に仕入額を入れてください）'; return; }
+    const buyer = String((document.getElementById('pc-q-buyer') || {}).value || '').trim(), cc = (document.getElementById('pc-q-cc') || {}).value || '';
+    const fallback = (why) => { try { navigator.clipboard.writeText(t); } catch (_) {} msg.textContent = '⚠ ' + why + '。文面はコピーしたので、チャットに貼ってください'; };
+    if (!buyer) { fallback('相手のユーザー名が空なので入れていません'); return; }
+    let op = null; try { op = window.opener; } catch (_) {}
+    if (!op || op.closed) { fallback('開いた元の webchat が見つかりません（ポータルを直接開いた・webchat を閉じた）'); return; }
+    const id = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); let done = false;
+    const onAck = (e) => { const d = e.data || {}; if (!d || d.smdQuoteAck !== id || !/^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn)$/.test(e.origin)) return; done = true; window.removeEventListener('message', onAck);
+      if (d.ok) { msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に入れました。webchat で中身を見て、写真も付けて自分で送信してください'; try { toast('💬 Smart Reply の入力欄に入れました（送信はしていません）'); } catch (_) {} }
+      else fallback(String(d.err || '入れられませんでした')); };
+    window.addEventListener('message', onAck);
+    const to = /^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn)$/.test(pcQuote.o || '') ? pcQuote.o : '*';
+    try { op.postMessage({ smdQuoteInsert: t, buyer: buyer, cc: cc, id: id }, to); } catch (e) { window.removeEventListener('message', onAck); fallback('webchat に渡せませんでした'); return; }
+    msg.textContent = '⏳ Smart Reply の入力欄へ入れています…';
+    setTimeout(() => { if (done) return; window.removeEventListener('message', onAck); fallback('Smart Reply から返事がありません（Smart Reply が古い版・webchat を読み直した・別の国の webchat から開いた）'); }, 3000);
+  }
   async function pcQuoteAddReq() {
     const L = pcQuote.last, msg = document.getElementById('pc-q-msg'); if (!L) { msg.textContent = '先に仕入額を入れてください'; return; }
     if (!L.buyer) { msg.textContent = '相手のユーザー名を入れてください（明細名に入れます）'; return; }
@@ -9979,6 +10003,7 @@
           ta.addEventListener('keydown', () => { ta.dataset.typing = '1'; }); ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; }); ta.addEventListener('blur', () => { delete ta.dataset.typing; }); } }
       { const cp = document.getElementById('pc-q-copy'); if (cp) cp.onclick = async () => { const t = document.getElementById('pc-q-text').value; try { await navigator.clipboard.writeText(t); document.getElementById('pc-q-msg').textContent = '📋 コピーしました（チャットに貼って、写真もドラッグして送ってください）'; } catch (_) { document.getElementById('pc-q-text').select(); document.execCommand('copy'); document.getElementById('pc-q-msg').textContent = '📋 コピーしました'; } }; }
       { const ar = document.getElementById('pc-q-addreq'); if (ar) ar.onclick = () => pcQuoteAddReq(); }
+      { const tc = document.getElementById('pc-q-tochat'); if (tc) tc.onclick = () => pcQuoteToChat(); }
       /* ★2026-10-24 本人「一度、通してやってくれて構わん」：作成後に userscript がリンクをコピーする→ここで1回押せば欄に入って文面も描き直す */
       { const pp = document.getElementById('pc-q-pppaste'); if (pp) pp.onclick = () => { const m = document.getElementById('pc-q-msg'); if (m) m.textContent = '⏳ コピーされたリンクを読んでいます…';
           navigator.clipboard.readText().then(t0 => { const t = String(t0 || '').trim();
@@ -10007,6 +10032,7 @@
       /* チャットから来た時：#pricecalc?q=…&cc=…&buyer=…&src=sr|wa */
       const fromChat = () => { const h = String(location.hash || ''); const i = h.indexOf('?'); if (h.indexOf('pricecalc') < 0 || i < 0) return; const p = new URLSearchParams(h.slice(i + 1)); const q = p.get('q'); if (!q || window._pcLastHash === h) return; window._pcLastHash = h;
         qi.value = q; const cc = (p.get('cc') || 'BR').toUpperCase(); const sel = document.getElementById('pc-q-cc'); if (sel) sel.value = cc; const by = document.getElementById('pc-q-buyer'); if (by) by.value = p.get('buyer') || ''; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = p.get('t') || q; const pl = document.getElementById('pc-q-plan'); if (pl) pl.value = p.get('src') === 'wa' ? '2' : '1';
+        pcQuote.src = p.get('src') || ''; pcQuote.o = p.get('o') || ''; { const tc = document.getElementById('pc-q-tochat'); if (tc) tc.style.display = pcQuote.src === 'sr' ? '' : 'none'; }
         window._pcAutoPick = true; run(); };
       /* ★2026-10-24 Smart Reply の 💴 でポータルを新しく開くと『Cannot access JP_DICT before initialization』で検索が止まった＝ここはスクリプトの途中で走る（JP_DICT はもっと下で作る）。最初の1回は読み込みが終わってから */
       setTimeout(fromChat, 0); window.addEventListener('hashchange', fromChat);
@@ -22468,6 +22494,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
+      '💬 <b>見積もりの文面を Smart Reply の入力欄へ</b>（本人「smart reply、ワッツアップからもできるように」）：Smart Reply の 💴 から開いた時だけ、見積もり欄に「💬 Smart Reply の入力欄へ」が出ます。押すと、開いた元の webchat で<b>いま開いている会話の相手が見積もりの相手と同じ時だけ</b>入力欄に文面が入ります（送信はしません・送るのは自分）。相手が違う／返事が無い時は入れずに文面をコピーします。🛒 Request page に追加した後に押せば、リンク入りの文面が入ります。WhatsApp は今までどおり 📋 コピーで貼ります。',
       '🧮 価格計算の後片付け（レビューの残り）：②③の表の『PayPal請求』『買い手の支払』を見積もり文面と同じ丸め（単位で切り上げ）に揃えました（表と文面で 1 BRL ずれることがあった）。使われていなかった古い設定（PayPal の粗利の打ち替え）を消しました。',
       '💴 <b>Smart Reply と WhatsApp に「💴 見積もり」ボタン</b>（本人「見積もりをある程度自動化したい」）：いま開いている会話の相手・国と、選んだ文字（無ければお客さんの最後の発言）でこの価格計算を開きます。仕入れ検索→各国の値段→英語の文面まで出ます（送るのは自分）。ポータルを新しく開いた時に仕入れ検索が止まる不具合も直しました。',
       '💳 <b>PayPal の支払いリンクが通しで使えるようになりました</b>（本人が Tampermonkey の「ページのブラックリスト」から *paypal.tld/* を外した・「一度、通してやってくれて構わん」）：「💳 PayPal リンクを作る」→ 作成画面に商品名・説明・金額・通貨が自動で入る → 「作成」→ リンクが自動でコピー → 見積もりの「PayPal リンク」欄の横の <b>📥 貼る</b> で欄に入り、文面（Transaction Guidelines）の Payment Link に入ります。押した後の案内も「手で貼る」前提から直しました（入らない時はタブを1回読み込み直す）。',
