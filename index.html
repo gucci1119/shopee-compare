@@ -6629,6 +6629,8 @@
     "📗 利益管理表の仕入れ値を取り込み中…": "📗 Importing costs from the profit sheet…",
     "💰 今月の利益": "💰 Profit this month",
     "経費を引くと": "After expenses",
+    "画像を変えた回数": "Image change count",
+    "回変更": " changes",
     "注文管理の「期日の説明」に、祝日の前後で Shopee が期日を延ばすことを書き留めました": "Orders: noted that Shopee extends deadlines around holidays",
     "出品ログの「仕入れ目安」も、明細の番号だけで結び付けないようにしました": "Listing log est. cost no longer matches by variation number alone",
     "内訳": "Breakdown",
@@ -22156,6 +22158,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '🖼 <b>明細ごとに「画像を変えた回数」を数え始めました</b>（本人「画像変更回数をカウントしておいたほうがいいかも」「自動出品後に、白抜き処理してるやつもあるからね」）：出品一覧の明細の更新日の下に「🖼 画像 N回変更」。名前が同じまま写真だけ変わった時に数えます（10/23 から）。1回以上の明細は白抜きなどで替えた写真なので、写真の見直しで勝手に止めない目印にします。',
       '🗓 <b>注文管理の「期日の説明」に、祝日の前後で Shopee が期日を延ばすことを書き留めました</b>（本人「ブラジルは1日伸びることあるよね」「ポータルのどこかに書き留めておいて」「これブラジルだけなん？」）：日本の祝日の前後は BR・PH・VN・MY どの国も延びた。ブラジルの祝日はブラジルだけ。TH の本店はいつも1〜3日長い。表示の期日は Shopee の期日をそのまま使っているので、延びた分も入っています。',
       '🔧 <b>出品ログの「仕入れ目安」も、明細の番号だけで結び付けないようにしました</b>：明細を消すと番号が別のソフトに移るため、🤖が出した時の名前と今の名前が違う時は使いません（値付けの見直しと同じ直し）。',
       '⚪ <b>値付けの見直しに「判断材料が足りない」の内訳を出しました</b>：仕入れ待ち・入金待ち・出品していない・今の値段が不明などの件数。仕入れ待ちは転記して「🔄 読み直す」と判定されます。',
@@ -37306,7 +37309,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const cur = await sbGet('app_kv', 'select=v&k=eq.model_changes_' + cc).catch(() => null); if (cur === null) continue;   /* 読めなかった時は書かない（空で上書きしない） */
       const old = (((cur || [])[0] || {}).v || {}).m || {}; const first = !Object.keys(old).length; const nx = {}; let ch = 0;
       /* ★2026-09-20 「価格変更の before→after を残す」（Obsidian の宿題・本人「₱1,560 → ₱1,980 も欲しい」）＝3つ目に【前の値】を持つ */
-      Object.keys(byCc[cc]).forEach(k => { const h = byCc[cc][k], o = old[k]; if (!o) { nx[k] = [h, first ? '' : today]; ch++; } else if (o[0] !== h) { nx[k] = [h, today, o[0]]; ch++; } else nx[k] = o; });
+      /* ★2026-10-23 本人「画像変更回数をカウントしておいたほうがいいかも」「自動出品後に、白抜き処理してるやつもあるからね」：4つ目に【画像が変わった回数】を持つ。
+         名前が同じまま画像だけ変わった時に +1（詰め直しで別の作品の名前になった時は 0 から）。1回以上＝出品後に写真を替えた明細（本人の白抜きなど）＝写真の見直しで勝手に止めない目印 */
+      Object.keys(byCc[cc]).forEach(k => { const h = byCc[cc][k], o = old[k]; if (!o) { nx[k] = [h, first ? '' : today]; ch++; } else if (o[0] !== h) { const oa = String(o[0]).split('|'), ha = String(h).split('|'); const sameName = oa[0] === ha[0]; const imgN = sameName ? (Number(o[3]) || 0) + (oa[3] !== ha[3] && oa[3] && ha[3] ? 1 : 0) : 0; nx[k] = imgN ? [h, today, o[0], imgN] : [h, today, o[0]]; ch++; } else nx[k] = o; });
       if (ch || Object.keys(old).length !== Object.keys(nx).length) await sbUpsert('app_kv', [{ k: 'model_changes_' + cc, v: { at: new Date().toISOString(), m: nx }, updated_at: new Date().toISOString() }]);
     }
     lst._mDates = null; lst._mDatesReq = 0;
@@ -43326,6 +43331,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (cg && cg[2]) { const pv = String(cg[2]).split('|'), nw = String(cg[0]).split('|'); const lbl = ['名', '価', '庫', '画']; const ch2 = [];
                 for (let i2 = 0; i2 < 4; i2++) { if (pv[i2] !== nw[i2]) ch2.push(i2 === 3 ? '画像' : (lbl[i2] + ' ' + (pv[i2] || '—') + '→' + (nw[i2] || '—'))); }
                 if (ch2.length) d2 = '<div class="smd-dim" style="font-size:9.5px" title="前回の記録からの変化">' + esc(ch2.join(' / ').slice(0, 40)) + '</div>'; }
+              if (cg && Number(cg[3]) > 0) d2 += '<div style="font-size:9.5px;color:#6a1b9a" title="出品した後に写真が変わった回数（2026-10-23 から数える）。1回以上＝白抜きなどで替えた写真＝写真の見直しで勝手に止めない">🖼 画像 ' + Number(cg[3]) + '回変更</div>';
               return a + '<br>' + b + d2; })())
           + cell(6, 'text-align:right;white-space:nowrap', canEdit
               ? `<span style="color:#1565c0">${cur}<input class="lst-prc" data-mid="${m.id}" value="${m.price}" inputmode="decimal" style="width:70px;padding:3px 5px;border:1px solid #cdd3db;border-radius:6px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="${m.id}" style="font-size:10px">${rg.rateJpy && m.price ? fmtJpy(Math.round(m.price * rg.rateJpy)) : ''}</div>${lstEstHtml(m)}`
