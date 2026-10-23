@@ -10628,7 +10628,7 @@
     //   send = 自分の手から離れないといけない日（家を出る日）
     //   scan = Shopee Japan倉庫でスキャンされないといけない日（＝Shopeeのship_by_date）
     //   発送の翌朝に倉庫へ着き、その日のうちにスキャンされるので send = scan - 1日。
-    const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, preCnt = {}, ordOf = {}, ordScanOf = {}, itemsOf = {};
+    const cnt = {}, scanCnt = {}, nfrCnt = {}, lastCnt = {}, lateCnt = {}, preCnt = {}, ordOf = {}, ordScanOf = {}, itemsOf = {}, ltItemsOf = {};
     const ordYmdOf_ = (r) => (r.orderTs ? jstDate(Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : String(r.orderDate || r.order_date || snToDate(r.sn) || '')).slice(0, 10);
     // ★「なぜ昨日の注文がもう今日発送なのか」に毎回つまずくので、Shopeeがくれた猶予を数字で出す。
     //   同じ発送日に集まるのは、Shopeeの猶予が注文ごとに +2〜+6日 とばらつくため（実測）。
@@ -10665,6 +10665,7 @@
       //   2つのレーンの合計は必ず一致する（片方だけ寄せ直すと数が合わなくなる）。
       const kl = key(lastSec, r.cc);
       lastCnt[kl] = (lastCnt[kl] || 0) + 1;
+      (ltItemsOf[kl] = ltItemsOf[kl] || []).push(r);      // ★2026-10-23 本人「この2件って何なの？」「ポータルで見れないの？」＝🆘の数字にも中身を出す
       if (late) { lateCnt[ks] = (lateCnt[ks] || 0) + 1; }     // ①を過ぎた分（過去の日に赤で残す）
       const kc = key(ordLsrScan(r), r.cc); scanCnt[kc] = (scanCnt[kc] || 0) + 1; push(ordScanOf, kc, odOf(r));
       const kn = key(ordNfrScan(r), r.cc); nfrCnt[kn] = (nfrCnt[kn] || 0) + 1;
@@ -10689,7 +10690,7 @@
     }
     const cell = (d) => {
       const isToday = d.k === jstDate(Date.now());
-      const isSel = String(state.orders.filter || '') === ('send:' + d.k);
+      const isSel = String(state.orders.filter || '') === ('send:' + d.k) || String(state.orders.filter || '') === ('last:' + d.k);
       const off = d.n === 0;
       const isPast = d.k < jstDate(Date.now());
       const wCol = d.w === 0 ? '#c0392b' : d.w === 6 ? '#1565c0' : '#8a8f98';   // 日=赤 土=青
@@ -10704,7 +10705,11 @@
         + (d.sc ? '\n\n🏭 この日がスキャン期限 ' + d.sc + '件'
                   + '\n　 → ' + nx(d.k, -1) + ' までに発送が必要です'
                   + (d.srcSc ? '\n　 内訳：' + d.srcSc : '') : '')
-        + (d.lt ? '\n\n🆘 この日が最終期限 ' + d.lt + '件（超過で注文取消）' : '')
+        + (d.lt ? '\n\n🆘 この日が最終期限 ' + d.lt + '件（超過で注文取消）' + (() => {
+            const li = ltItemsOf[d.k] || [];
+            return li.slice(0, 12).map(r => { const it = (r.items || [])[0] || {}; return '\n　・' + r.cc + ' ' + r.sn + ' ' + String(it.name || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '').slice(0, 34) + '（📦 ' + md2(key(ordShipDeadline(r), r.cc)) + ' に家から出す）'; }).join('')
+              + (li.length > 12 ? '\n　…ほか ' + (li.length - 12) + '件' : '') + '\n　🆘の数字をクリックで一覧に表示';
+          })() : '')
         + (d.nf ? '\n\n🛑 この日に自動キャンセル ' + d.nf + '件' : '')
         + (() => {
             const li = (itemsOf[d.k] || []);
@@ -10753,7 +10758,7 @@
         return `<div class="ord-calgrid" style="display:flex;flex-direction:column;gap:1px;overflow-x:auto;-webkit-overflow-scrolling:touch">
           ${row(head('', '#8a8f98', ''), x => `<div style="font-size:9.5px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:700">${W[x.d.w]}</div><div style="font-size:11px;color:${x.isToday ? '#ee4d2d' : x.wCol};font-weight:${x.isToday ? '700' : '600'}">${x.isToday ? '今日 ' : ''}${x.d.md}</div>${jpHolidayOf(x.d.k) ? `<div style="font-size:8px;color:#c0392b;font-weight:700;line-height:1.2">${jpHolidayOf(x.d.k)}</div>` : '<div style="height:10px"></div>'}`)}
           ${row(head('📦 家から出す', '#1a7f37', '家から出す期限（遅延の基準）。超過すると発送遅延扱い'), x => `<div style="font-size:${x.d.n ? '19' : '13'}px;font-weight:800;color:${x.d.n ? (x.isPast ? '#b71c1c' : '#1a7f37') : '#c9ced6'};line-height:1.15">${x.d.n}${x.d.pre ? `<span style="font-size:9px;color:#7b52c4;font-weight:700" title="内 予約(pre-order)${x.d.pre}件"> 予${x.d.pre}</span>` : ''}</div>`)}
-          ${row(head('🆘 キャンセル', '#c0392b', 'キャンセルの基準（倉庫でスキャンされる期限）。超過すると自動キャンセル'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt}</div>`)}
+          ${row(head('🆘 キャンセル', '#c0392b', 'キャンセルの基準（倉庫でスキャンされる期限）。超過すると自動キャンセル'), x => `<div style="font-size:${x.d.lt ? '13' : '10'}px;font-weight:${x.d.lt ? '800' : '400'};color:${x.d.lt ? '#c0392b' : '#c9ced6'}">${x.d.lt ? `<span class="ord-callt" data-d="${x.d.k}" style="cursor:pointer;text-decoration:underline dotted" title="クリックでこの日がキャンセル期限の注文を一覧に表示">${x.d.lt}</span>` : x.d.lt}</div>`)}
           ${row(head('注文日', '#6b7280', 'その日に出す分が、いつの注文か（いちばん古い〜新しい）'), x => `<div style="font-size:10px;color:#6b7280;line-height:1.25;min-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(() => {
             if (!x.d.n) return '';
             // ★以前は【いちばん多い注文日1つ】だけを出していたため、「8/16注文」と書いてあるのに
@@ -10833,6 +10838,14 @@
       document.querySelectorAll('#ord-filter button').forEach(x => x.classList.remove('on'));
       renderShipDeadline(); renderOrders();
     }));
+    el.querySelectorAll('.ord-callt').forEach(c => c.addEventListener('click', (ev) => {   // ★2026-10-23 🆘の数字＝その日がキャンセル期限の注文に絞る
+      ev.stopPropagation();
+      const d0 = new Date(jstDate(Date.now()) + 'T00:00:00+09:00'), d1 = new Date(c.dataset.d + 'T00:00:00+09:00');
+      state.orders.calOfs = Math.round((d1 - d0) / 86400000);
+      state.orders.filter = 'last:' + c.dataset.d; state.orders.page = 1;
+      document.querySelectorAll('#ord-filter button').forEach(x => x.classList.remove('on'));
+      renderShipDeadline(); renderOrders();
+    }));
     el.querySelectorAll('.ord-duechip').forEach(c => c.addEventListener('click', () => {
       state.orders.filter = c.dataset.k; state.orders.page = 1;
       document.querySelectorAll('#ord-filter button').forEach(x => x.classList.remove('on'));
@@ -10898,6 +10911,7 @@
         const W2 = ['日', '月', '火', '水', '木', '金', '土'];
         let lab = '';
         if (/^send:/.test(f)) { const d = new Date(f.slice(5) + 'T00:00:00+09:00'); lab = '📆 ' + (d.getMonth() + 1) + '/' + d.getDate() + '(' + W2[d.getDay()] + ') に家から出す分'; }
+        else if (/^last:/.test(f)) { const d = new Date(f.slice(5) + 'T00:00:00+09:00'); lab = '🆘 ' + (d.getMonth() + 1) + '/' + d.getDate() + '(' + W2[d.getDay()] + ') がキャンセル期限の分'; }
         else if (/^due/.test(f)) lab = '📦 家から出す期限で絞り込み中';
         else if (/^scan/.test(f)) lab = '🏭 倉庫でスキャンされる期限で絞り込み中';
         fi.innerHTML = lab
@@ -10923,6 +10937,11 @@
       // ★カレンダー（shipCalendarHtml）と同じく【その国の現地日付】で合わせる（2026-09-14 本人「火曜7件なのに1件しか出ない」＝ここだけ日本時間で丸めていて、BR（時差12h）の6件が翌日扱いで落ちていた）
       const key = (sec, cc) => { const d = new Date(sec * 1000 + ccTz_(cc) * 3600 * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); };
       rows = rows.filter(r => r.tab === 300 && !ordDone(r) && r.shipBy && key(ordShipDeadline(r), r.cc) === want);
+    }
+    else if (/^last:/.test(String(state.orders.filter || ''))) {         // ★2026-10-23 🆘の数字をクリック＝その日がキャンセル期限（自動キャンセルの前日）の分。カレンダーと同じく現地日付
+      const want = String(state.orders.filter).slice(5);
+      const key = (sec, cc) => { const d = new Date(sec * 1000 + ccTz_(cc) * 3600 * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); };
+      rows = rows.filter(r => r.tab === 300 && !ordDone(r) && r.shipBy && key(ordNfrScan(r) - 86400, r.cc) === want);
     }
     else if (/^scan/.test(String(state.orders.filter || ''))) {          // ⏰スキャンしめきり（倉庫・自動キャンセルの基準）
       const want = String(state.orders.filter).slice(4);
@@ -22067,6 +22086,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '🆘 <b>発送スケジュールの「🆘 キャンセル」の数字から、どの注文かが見られるようにしました</b>（本人「この2件って何なの？」「ポータルで見れないの？」）：数字に乗せると注文番号・商品名・家から出す日、クリックで下の注文一覧をその日がキャンセル期限の分に絞ります。',
       '🃏 <b>トレカのフロント商品（1カード1出品）を TW・TH の本店にも出しました</b>：本店にトレカのカタログが無い2か国は、2店舗目のカタログを本店へ写して作ります。',
       '🛠 <b>カタログを作った直後に明細の枠を付けに行くと「まだ作成中・5秒待って」と断られ、明細の無い入れ物だけ残ることがあったのを直しました</b>：この返事の時だけ6秒待って最大3回やり直します（GAS）。'
     ] },
