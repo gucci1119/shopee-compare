@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-0300';
+var SRC_VER = '20261024-0330';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7535,19 +7535,19 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   /* ★2026-09-28 Codex：Haiku で「未開封ではない／文字入り／別機種」と確認済みの写真は聞き直さない（鍵を変えたせいで約1,200枚を上位モデルで聞き直し、1日の上限も素通りする所だった） */
   if (!cv && cache && BA_CONFIRM) { var _s3 = String(cache[u + '|s3'] || ''); if (_s3 === 'sealed:0' || _s3 === 'ov:1' || _s3.indexOf('hw:') === 0) cv = _s3; }
   if (!cv && cache) { var _is = baImgIdx_(cache)[String(u).split('|')[0]] || {};   /* 写真単位の使い回し（別の作品で確認済みの同じ写真） */
-    if (BA_CONFIRM && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1')) cv = _is.s4;
+    if (BA_CONFIRM && _is.s4 && (_is.s4.indexOf('sealed:') === 0 || _is.s4 === 'ov:1' || _is.s4 === 'pt:1')) cv = _is.s4;
     else if (BA_CONFIRM && (_is.s3 === 'sealed:0' || _is.s3 === 'ov:1')) cv = _is.s3;   /* Haiku で「未開封ではない・文字入り」と確認済み */
     else if (!BA_CONFIRM && _is.s3 && (_is.s3.indexOf('sealed:') === 0 || _is.s3 === 'ov:1')) cv = _is.s3;
     if (cv) cache[ck] = cv; }
   if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
-  if (cv.indexOf('hw:') === 0 || cv === 'ov:1') return cv;
+  if (cv.indexOf('hw:') === 0 || cv === 'ov:1' || cv === 'pt:1') return cv;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
   var big = !!BA_CONFIRM, model = big ? BA_CONFIRM : 'claude-haiku-4-5-20251001';
   var txt0 = '中古ゲームの出品写真です。見えたことだけを書き写してください。判定はしないでください。JSONだけで答える：{'
     + (big ? '"corners":["art|other"×4（画像の四隅＝左上・右上・左下・右下の端のすぐ内側が、パッケージ・ラベル・カセットの印刷された絵柄や文字なら art、机・床・布・手・壁・余白・背景・ケースの外側なら other）],' : '')
     + '"film_overhang":true|false（透明フィルムの縁がケースや箱の外側にはみ出している・余っている）,"film_wrinkle":true|false（ケースや箱を包む透明フィルムそのものにシワ・よれ・折れ目がある。ゲームのケースに元からある透明な差し込み袋やケースの光沢・反射は含めない）,"film_seam":true|false（フィルムを熱で閉じた筋が見える）,"sticker_on_film":true|false（値札やシールがフィルムの上に貼られている）'
     + (big ? ',"sealed_look":true|false（新品の未開封に見えるか：外側を包む透明フィルムがはっきり見える時だけ true）' : ',"glare_only":true|false（表面が光っているだけでフィルムの縁やシワは見えない）')
-    + ',"platform_seen":"パッケージやラベルに印刷されている機種のロゴ・表記をそのまま書き写す（例 PS4 / Nintendo Switch / PlayStation 2 / NINTENDO 3DS。読めなければ空）","overlay_text":"写真の上に【後から載せた】文字・値札・星・枠・スタンプ（出品者が画像加工で足したもの。パッケージに印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
+    + ',"platform_seen":"パッケージやラベルに印刷されている機種のロゴ・表記をそのまま書き写す（例 PS4 / Nintendo Switch / PlayStation 2 / NINTENDO 3DS。読めなければ空）","overlay_text":"写真の上に【後から載せた】文字・値札・星・枠・スタンプ（出品者が画像加工で足したもの。パッケージに印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空","overlay_on_item":true|false（その後から載せた文字・印が、商品（パッケージ・ケース・カセット）の上に重なっているか。商品の外側の帯・余白・背景の上だけなら false。文字が無ければ false）,"whole_item":true|false（商品の全体が画像の中に収まっているか。端が画像の外に切れている・背表紙や一部だけのアップなら false）}';
   var body = { model: model, max_tokens: big ? 400 : 200, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'url', url: String(imgUrl) } }, { type: 'text', text: txt0 }] }] };
   if (big) body.thinking = { type: 'disabled' };
   if (!baAiQuotaOk_(st)) return null;
@@ -7562,7 +7562,10 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
   if (big && Array.isArray(o.corners) && o.corners.length === 4 && cache) { var nArt = o.corners.filter(function (x) { return String(x) === 'art'; }).length; cache[u + '|c1'] = 'art:' + nArt; baImgMemoSet_(u, 'c1', 'art:' + nArt); }
   var sealed = big ? !!(o.sealed_look === true || o.sticker_on_film === true || o.film_overhang === true) : !!(o.film_overhang === true || o.film_wrinkle === true || o.film_seam === true || o.sticker_on_film === true);
   if (hwKey && o.platform_seen) { var seenHw = baHwsOf_(String(o.platform_seen)); if (seenHw.length && seenHw[0] !== String(hwKey)) { if (cache) cache[ck] = 'hw:' + seenHw[0]; return 'hw:' + seenHw[0]; } }
-  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { if (cache) { cache[ck] = 'ov:1'; baImgMemoSet_(u, big ? 's4' : 's3', 'ov:1'); } return 'ov:1'; }
+  /* ★2026-10-24 本人が10/23に35種類を見て決めた線：後から載せた文字は【商品に重なっていれば】NG・商品の外の帯（24時間以内発送・動作確認済 等）だけなら OK。
+     overlay_on_item を返さない古い答え（undefined）は今まで通り落とす側。／全体が写っていない（端が切れている・背表紙だけ）写真も NG（pt:1） */
+  if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2 && o.overlay_on_item !== false) { if (cache) { cache[ck] = 'ov:1'; baImgMemoSet_(u, big ? 's4' : 's3', 'ov:1'); } return 'ov:1'; }
+  if (o.whole_item === false) { if (cache) { cache[ck] = 'pt:1'; baImgMemoSet_(u, big ? 's4' : 's3', 'pt:1'); } return 'pt:1'; }
   if (cache) { cache[ck] = 'sealed:' + (sealed ? 1 : 0); baImgMemoSet_(u, big ? 's4' : 's3', 'sealed:' + (sealed ? 1 : 0)); }
   return sealed;
 }
@@ -7571,7 +7574,7 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
    → 写真そのもので決まる判定（カタログ画像・表面でない・未開封・箱説・画面・海外版・グッズ・文字入り）と、四隅・シュリンクの結果は【写真単位】で使い回す。
    索引は1回の実行で1度だけ作る（控えの鍵を1周するだけ・通信なし） */
 var BA_IMG_IDX = null, BA_IMG_IDX_SRC = null;
-var BA_INTR_NG = /^ng:(catalog|catalog4|notfront|boxed|screen|overseas|goods|overlay)$/;   /* sealed は外した（9/28：未開封の判定は毎回ぶれ・落としすぎていた） */
+var BA_INTR_NG = /^ng:(catalog|catalog4|notfront|boxed|screen|overseas|goods|overlay|partial)$/;   /* sealed は外した（9/28：未開封の判定は毎回ぶれ・落としすぎていた） */
 function baImgIdx_(cache) {
   if (BA_IMG_IDX && BA_IMG_IDX_SRC === cache) return BA_IMG_IDX;
   BA_IMG_IDX = {}; BA_IMG_IDX_SRC = cache;
@@ -7609,7 +7612,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
          先に落ちた写真には高い方をかけない。確認の中身は同じ＝基準は変わらない */
       var s0 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey);   /* ★2026-09-26 通っていた写真もシュリンク（と機種ロゴ）の確認を1回だけ */
       if (s0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
-      if (typeof s0 === 'string') { var k0 = s0 === 'ov:1' ? 'overlay' : 'wrongplatform'; cache[u] = 'ng:' + k0; return { ok: false, judged: true, kind: k0, cached: true }; }
+      if (typeof s0 === 'string') { var k0 = s0 === 'ov:1' ? 'overlay' : s0 === 'pt:1' ? 'partial' : 'wrongplatform'; cache[u] = 'ng:' + k0; return { ok: false, judged: true, kind: k0, cached: true }; }
       if (s0) { cache[u] = 'ng:sealed'; return { ok: false, judged: true, kind: 'sealed', cached: true }; }
       var n0 = baConfirmCorners_(imgUrl, u, st, cache);
       if (n0 === null) return { ok: false, judged: false, kind: 'unconfirmed' };
@@ -7687,7 +7690,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
   if (ok && !(expect && expect.tcg)) {   /* ★2026-09-26 最後に四隅の確認（上位モデル）。3隅以上が絵柄＝平らな宣材画像。🃏トレカはカード面そのものが絵柄なので通さない（2026-10-10） */
     /* ★2026-09-28 ①：シュリンク（安い・よく落とす）→ 四隅（高い）の順。基準は同じ */
-    { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = (s1 === 'ov:1' ? 'overlay' : 'wrongplatform'); } else if (s1) { ok = false; kind = 'sealed'; } }
+    { var s1 = baSealedCheck_(imgUrl, u, st, cache, expect && expect.hwKey); if (s1 === null) return { ok: false, judged: false, kind: 'unconfirmed' }; if (typeof s1 === 'string') { ok = false; kind = (s1 === 'ov:1' ? 'overlay' : s1 === 'pt:1' ? 'partial' : 'wrongplatform'); } else if (s1) { ok = false; kind = 'sealed'; } }
     if (ok) { var n1 = baConfirmCorners_(imgUrl, u, st, cache);
       if (n1 === null) return { ok: false, judged: false, kind: 'unconfirmed' };   /* 確認できなかった＝通さない・控えない */
       if (n1 >= 3) { ok = false; kind = 'catalog4'; } }
