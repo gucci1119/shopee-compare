@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261023-0715';
+var SRC_VER = '20261024-0300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3588,6 +3588,13 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], opts = (tier.option_list || []).map(function (o) { return o.option; });
   if (opts.length + items.length > 100) throw new Error('明細は1商品100件までです（現在' + opts.length + '件・追加' + items.length + '件）');
+  /* ★2026-10-24 価格計算のレビューの残り「GAS 側でも値段の上限を確かめる」：VN の明細は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。
+     🤖は自分で上限に収めているが、ポータルの Request page 追加・手動の一括追加はここを通るだけ＝画像を上げる前に止める（比率 BR4倍/他5倍は Shopee 自身が断るのでここでは見ない） */
+  var ccAdd = ''; try { ccAdd = baCcOfShop_(shopId); } catch (eCc) {}
+  if (ccAdd === 'VN') {
+    var overVn = items.filter(function (x) { return parseFloat(x.price) > 909090; });
+    if (overVn.length) throw new Error('VN の明細は 909,090 VND までです（超えると出品ごと非公開）。上限超え ' + overVn.length + '件：' + overVn.slice(0, 4).map(function (x) { return String(x.option || '').slice(0, 30) + ' ' + x.price; }).join(' / ') + '。PayPal 併用で Shopee の掲載額を下げてください');
+  }
   // ① 画像を並列で取得→media_spaceへ並列アップロード
   var imgIds = [];
   for (var i = 0; i < items.length; i += 12) {
