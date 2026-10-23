@@ -6629,6 +6629,8 @@
     "📗 利益管理表の仕入れ値を取り込み中…": "📗 Importing costs from the profit sheet…",
     "💰 今月の利益": "💰 Profit this month",
     "経費を引くと": "After expenses",
+    "内訳": "Breakdown",
+    "値付けの見直しに「判断材料が足りない」の内訳を出しました": "Price review now shows the breakdown of Not enough data",
     "🔄 追跡を今すぐ更新": "🔄 Refresh tracking now",
     "🔄 追跡を取得中…（1分ほど）": "🔄 Fetching tracking… (about 1 min)",
     "🔄 追跡を更新しました": "🔄 Tracking updated",
@@ -22151,6 +22153,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '⚪ <b>値付けの見直しに「判断材料が足りない」の内訳を出しました</b>：仕入れ待ち・入金待ち・出品していない・今の値段が不明などの件数。仕入れ待ちは転記して「🔄 読み直す」と判定されます。',
       '🔄 <b>入庫待ちに「追跡を今すぐ更新」ボタンを付けました</b>（本人「追跡更新する用のボタン欲しい」「任意のタイミングで更新したい時用の」）：自動は1時間ごとですが、押すとその場で配送業者から取り直して表示し直します。あわせて、ヤマトの『配達中』が取り込まれていなかったのを直しました。',
       '🔧 <b>今月の利益（ダッシュボード）と🧮損益の粗利が、💹利益明細を一度開かないと出なかったのを直しました</b>（本人「なぜ、わざわざ損益・入出金を一度表示しないといけない？」）：月を選ぶ欄の中身が利益明細を開いた時に初めて作られていたため、先に作ってから計算します。',
       '💰 <b>ダッシュボードに「今月の利益」を出しました</b>（本人「ここにその月の利益出したいね」「入庫待ちいらんな」「死に筋もいらん」「経費普通引くだろ」）：入庫待ち・死に筋のカードを外し、数字は🧮損益の画面の営業利益と同じ式（入金−仕入−経費〔初期投資は別枠〕−返金−キャンセル損）で、下の段に件数と引いた経費を出します（本人「粗利は重要じゃない」）。',
@@ -40351,6 +40354,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const paSkuKey = x => { const s0 = String(x || '').trim().toUpperCase(); return (s0.length >= 4 && /_/.test(s0)) ? s0 : ''; };
   const paIsFront = e => { const F = PA.front || {}; return !!((F.keys && F.keys[e.key]) || (paSkuKey(e.sku) && F.skus && F.skus[paSkuKey(e.sku)])); };
   const PA_REQ_RE = /solicitar p[aá]gina|envie-me uma mensagem|request page|send us a message|can'?t find what|リクエスト|様 ?専用|まとめ商品/i;
+  const L_PA = t => t;
   const PA_CATS = [
     ['loss', '🔴 赤字', '#d93025', '値上げ'], ['thin', '🟠 利益が薄い', '#e8770a', '値上げ'],
     ['over', '🟡 上げすぎて売れなくなった', '#c9a400', '少し値下げ'], ['room', '🔵 よく売れて値上げの余地', '#1a73e8', '少し値上げ'],
@@ -40599,6 +40603,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${chip('cat', 'front', '🟢 フロント', PA.cat === 'front', inAcct.filter(e => e.front && (!PA.cc || e.cc === PA.cc)).length, '#1e8e3e')}
           ${chip('cat', 'frontc', '🟢 フロント候補', PA.cat === 'frontc', inAcct.filter(e => e.frontCand && (!PA.cc || e.cc === PA.cc)).length, '#5f9e6e')}
           ${(() => { const FC = paFrontCfg(); return `<span style="display:inline-flex;gap:4px;align-items:center;font-size:11px;padding:2px 8px;border:1px solid #c8e6c9;border-radius:8px;background:#f6fbf6" title="フロントの決め（全員共通で保存）">🟢 フロントの下限 1個 ¥<input type="number" class="pa-fcfg" data-f="floor" value="${FC.floor}" min="0" step="10" style="width:56px;font-size:11px">残す　候補＝仕入 ¥<input type="number" class="pa-fcfg" data-f="candCost" value="${FC.candCost}" min="0" step="100" style="width:62px;font-size:11px">以下・月<input type="number" class="pa-fcfg" data-f="candMo" value="${FC.candMo}" min="0" step="1" style="width:40px;font-size:11px">点以上売れた</span>`; })()}
+          ${(() => {   /* ★2026-10-23 「判断材料が足りない」の内訳（理由ごとの件数）。仕入れ待ちが埋まると赤字などに移ってくる */
+            const nd = inAcct.filter(e => e.cat === 'nodata' && (!PA.cc || e.cc === PA.cc)); if (!nd.length) return '';
+            const lab = w => /仕入が分からない/.test(w) ? '仕入れ待ち' : /入金がまだ/.test(w) ? '入金待ち' : /出品中ではない/.test(w) ? '出品していない' : /今の価格/.test(w) ? '今の値段が不明' : /リクエスト/.test(w) ? 'リクエスト用' : /PayPal/.test(w) ? 'PayPal併用' : 'その他';
+            const m = {}; nd.forEach(e => { const k = lab(String(e.why || '')); m[k] = (m[k] || 0) + 1; });
+            return '<span style="font-size:11px;color:#6b7280;padding:2px 6px" title="判断材料が足りない明細の理由ごとの件数。仕入れ待ちは転記して🔄読み直すと判定されます">⚪ ' + L_PA('内訳') + '：' + Object.entries(m).sort((x, y) => y[1] - x[1]).map(([k, v]) => k + ' ' + v).join('・') + '</span>';
+          })()}
           ${PA.frontOk === false ? '<span style="color:#d93025;font-size:11px;font-weight:700">⚠ フロントの印を読めませんでした（印が無いのではなく読めていません）。🔄で読み直してください</span>' : ''}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
