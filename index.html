@@ -9314,12 +9314,14 @@
   /* ★2026-10-23 本人「shopeeだけで買った時よりどれくらい安くなるか」「粗利差とかも見れると」：②③で打った粗利は②③だけに効かせる（①の売値は動かさず PayPal 請求だけ変える）＝①比と「①より○安い」が見える */
   /* ★2026-10-23 本人「数値の入力のとこには、自動でカンマ欲しい」：入力欄は文字の欄にして 3桁カンマで出す。読む時はカンマを外す */
   function pcFmt(v, unit) { const n = Number(v) || 0; return (unit || 1) < 1 ? (Math.round(n * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 }) : Math.round(n).toLocaleString('en-US'); }
+  /* ★2026-10-24 レビューの残り「PayPal の端数が表と文面で揃うように」：表は 円÷レートをそのまま四捨五入、文面は単位で切り上げ＝1 BRL ずれることがあった。両方これで切り上げ（買い手に請求する額＝手取りが足りなくならない側） */
+  function pcPPLocal(jpy, rg) { const u = (rg && rg.priceUnit) || 1; return jpy > 0 && rg && rg.rateJpy ? Math.ceil(jpy / rg.rateJpy / u - 1e-9) * u : 0; }
   function pcUncomma(el) { if (el && typeof el.value === 'string' && /,/.test(el.value)) el.value = el.value.replace(/,/g, ''); }
   /* ★2026-10-24 レビュー：②の掲載額の連動で変わった⑤は、基本をリセット・仕入額の変更で元（連動前）に戻す＝次の商品が 34% から始まらないように */
   /* ★2026-10-24 レビュー：新しい商品に移る時（仕入額が変わる・仕入れ検索で選ぶ・チャットから開く・基本リセット）に、前の商品の物を全部消す
      ＝売値・粗利・掲載額の打ち替え、連動で変えた⑤、仕入れ先（写真）、Request page のリンク、照合番号の確定 */
   function pcNewItem(keepDeal) {
-    pcOv = {}; pcOvPP = { '2': {}, '3': {} }; pcOvShop = { '2': {}, '3': {} }; pcRatioRestore();
+    pcOv = {}; pcOvShop = { '2': {}, '3': {} }; pcRatioRestore();
     if (!keepDeal) pcQuote.deal = null;
     pcQuote.link = ''; pcQuote.optName = ''; pcQuote.ref = ''; pcQuote.refKey = ''; pcQuote.refFixed = false;
     const ta = document.getElementById('pc-q-text'); if (ta) delete ta.dataset.edited;
@@ -9328,7 +9330,7 @@
   /* 30日を過ぎた照合番号の控えを消す */
   try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.indexOf('smdQuoteRef|') === 0) { try { const o = JSON.parse(localStorage.getItem(k) || 'null'); if (!o || Date.now() - (o.at || 0) > 30 * 86400000) localStorage.removeItem(k); } catch (_) { localStorage.removeItem(k); } } } } catch (_) {}
   function pcRatioRestore() { const ri = document.getElementById('pc-ratio'); if (ri && window._pcRatioBase != null) { ri.value = window._pcRatioBase; window._pcRatioBase = null; } }
-  var pcOvPP = { '2': {}, '3': {} };
+
   /* ★2026-10-23 本人「shopee側の出品価格を指定することもある」：②③の Shopee 掲載額を国ごとに打ち替え（現地通貨）＝足りない粗利を PayPal で埋める */
   var pcOvShop = { '2': {}, '3': {} };
   /* ★2026-10-23 本人「画像をもらったら、メルカリとかヤフオクで仕入れ値みて、価格計算して、バイヤーに画像と値段を送る。買うってなったらリクエストページに明細追加して出品して、そのリンクを送る」「これをある程度自動化したい」
@@ -9350,7 +9352,7 @@
     const ISO = { BR: 'BRL', PH: 'PHP', SG: 'SGD', MY: 'MYR', VN: 'VND', TH: 'THB', TW: 'TWD' }[cc] || r.rg.cur;
     const num = (v) => unit < 1 ? (Math.round(v * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 }) : Math.round(v).toLocaleString('en-US');
     const shopL = plan === '2' ? r.lowLocal : plan === '3' ? r.minLocal : r.local;
-    const ppJ = plan === '2' ? r.ppAsk : plan === '3' ? r.pp3Ask : 0, ppL = ppJ > 0 ? Math.ceil(ppJ / r.rg.rateJpy / unit) * unit : 0;
+    const ppJ = plan === '2' ? r.ppAsk : plan === '3' ? r.pp3Ask : 0, ppL = pcPPLocal(ppJ, r.rg);
     const save = plan === '1' ? 0 : Math.max(0, r.pf.buyerJpy - ((plan === '2' ? r.lowPf : r.minPf).buyerJpy + ppJ));
     const saveL = plan === '1' ? 0 : Math.max(0, Math.round((r.local - (shopL + ppL)) / unit) * unit);   /* ★2026-10-24 レビュー：文面の数字（値引き前）どうしの差で出す＝足し算が合う */
     /* ★2026-10-23 本人「突合用にshopeeのorder numberもあった方がいいかも？」「取りっぱぐれないように、先にpaypalで支払ってもらう」＝PayPal の時点では Shopee の注文番号が無い
@@ -9507,10 +9509,9 @@
       /* ★2026-10-23 本人「ブラジルのとこに2500円の粗利って打っても8303になる」：②で打った粗利が Shopee の分だけの粗利より低いと、PayPal を0にしても下がらなかった
          → その時は Shopee の掲載額そのものを下げて、ちょうどその粗利にする（PayPal は0） */
       if (Number(pcOvShop['2'][cc]) > 0) { lowLocal = roundLocal(Number(pcOvShop['2'][cc]), rg.priceUnit || 1); lowPf = priceProfitFor(cc, cost, lowLocal, opt); }
-      else if (pcOvPP['2'][cc] != null && Number(pcOvPP['2'][cc]) < lowPf.profit) { lowLocal = pcSolvePrice(cc, cost, Number(pcOvPP['2'][cc]), opt, rg.priceUnit || 1); lowPf = priceProfitFor(cc, cost, lowLocal, opt); }
       // ①と同じ手取りに届かせるのに必要な「PayPalの請求額」。手数料で目減りするので、その分を上乗せして請求する。
       //   手取り = 請求 ×(1−料率) − 固定  →  請求 = (必要手取り + 固定) ÷ (1−料率)
-      const need = Math.max(0, (pcOvPP['2'][cc] != null ? Number(pcOvPP['2'][cc]) : pf.profit) - lowPf.profit);                      // ①に届かせるのに要る手取り(円)
+      const need = Math.max(0, pf.profit - lowPf.profit);                      // ①に届かせるのに要る手取り(円)
       const ppAsk = need > 0 ? Math.round((need + ppFix) / (1 - ppRate)) : 0;  // 買い手に請求するPayPal額
       const ppFee = ppAsk > 0 ? Math.round(ppAsk * ppRate + ppFix) : 0;      // PayPal手数料（★2026-09-29 9/26の点検で定義を消していた→価格計算が「ppFee is not defined」で全部止まっていた）
       const ppNet = Math.max(0, Math.round(ppAsk - (ppAsk * ppRate + ppFix)));  // 実際に手元に残る
@@ -9524,7 +9525,7 @@
       const minRaw = (slsL + fixedL) / Math.max(0.05, (1 - disc3) * feeKeep(cc));
       const minLocal = Number(pcOvShop['3'][cc]) > 0 ? roundLocal(Number(pcOvShop['3'][cc]), unit) : Math.max(unit, Math.ceil(minRaw / unit) * unit);      // 切り上げ（下回るとShopee側が赤字）
       const minPf = priceProfitFor(cc, cost, minLocal, opt);
-      const need3 = Math.max(0, (pcOvPP['3'][cc] != null ? Number(pcOvPP['3'][cc]) : pf.profit) - minPf.profit);
+      const need3 = Math.max(0, pf.profit - minPf.profit);
       const pp3Ask = need3 > 0 ? Math.round((need3 + ppFix) / (1 - ppRate)) : 0;
       const pp3Net = Math.max(0, Math.round(pp3Ask - (pp3Ask * ppRate + ppFix)));
       return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net, ov: !!ovP };
@@ -9591,7 +9592,7 @@
         const td = (h) => `<td style="text-align:right;white-space:nowrap">${h}</td>`;
         /* ★2026-10-23 本人「ここを変えれるようにしたら？」「ここもか」：粗利（円）と ROI（%）も打ち替え可＝その国の売値をその粗利になる値に置き換える（揃える ON なら他の国も同じ粗利に） */
         /* ★2026-10-23 本人「これは、粗利変えられないの？」（②③の表）：②③の粗利は①と同じ額に合わせる作り＝ここで打った値も①の売値の逆算に使う */
-        const profIn = (r, vv, extra, pw) => { const gC = pw ? 'pc-gpp-in' : 'pc-gp-in', rC = pw ? 'pc-roip-in' : 'pc-roi-in', dW = pw ? ` data-w="${pw}"` : '', ovPP = pw && pcOvPP[pw][r.cc] != null; const v = vv != null ? vv : r.pf.profit, okC = v >= target ? '#1a7f37' : (v > 0 ? '#b26a00' : '#d93025'); const roiV = cost > 0 ? Math.round(v / cost * 100) : Math.round(r.pf.roi);
+        const profIn = (r, vv, extra, pw) => { const gC = pw ? 'pc-gpp-in' : 'pc-gp-in', rC = pw ? 'pc-roip-in' : 'pc-roi-in', dW = pw ? ` data-w="${pw}"` : '', ovPP = false; const v = vv != null ? vv : r.pf.profit, okC = v >= target ? '#1a7f37' : (v > 0 ? '#b26a00' : '#d93025'); const roiV = cost > 0 ? Math.round(v / cost * 100) : Math.round(r.pf.roi);
           return `<span style="font-size:12px;font-weight:700;color:${okC}">¥</span><input type="text" inputmode="numeric" class="${gC}" data-cc="${r.cc}"${dW} value="${pcFmt(v, 1)}" step="100" title="取りたい粗利（円）を打つと、この国の売値をその粗利になる値に変えます（Enter か欄を離れると反映）" style="width:86px;font:inherit;font-weight:700;font-size:14px;color:${okC};text-align:right;border:1px dashed #cbd5e1;border-radius:6px;background:#fffdf5;padding:1px 4px">`
             + `<span class="pc-sub" style="display:block;color:${okC}">ROI <input type="text" inputmode="numeric" class="${rC}" data-cc="${r.cc}"${dW} value="${roiV}" step="1" title="ROI（%）を打つと、この国の売値をその ROI になる値に変えます" style="width:46px;font:inherit;font-size:11px;color:${okC};text-align:right;border:1px dashed #cbd5e1;border-radius:5px;background:#fffdf5;padding:0 3px">%${extra ? esc(extra) : ''}${ovPP ? ` <a href="#" class="pc-ppreset" data-cc="${r.cc}" data-w="${pw}" style="color:#1565c0" title="①と同じ粗利に戻す">↺①に合わせる</a>` : ''}</span>`; };
         /* ★2026-10-23 本人「①の出品価格見てしまってた」「shopee掲載とpaypal掲載のとこか見るのは」「合計額も欲しい」「少し見にくい」：②③では①の列を薄く「（参考）」に・合計の列を足す */
@@ -9599,8 +9600,8 @@
         const tbl1 = `<table class="pf-table pc-table pc-tbl2">${head(['粗利（ROI）', '買い手の支払', 'Shopee手数料', 'SLS送料 ' + chargeG + 'g', 'その他の控除', '受取額（円）'])}${rows.map(r => `<tr class="pc-hl">${ccCell(r)}${td(profIn(r))}${td(`${y(r.pf.buyerJpy)}<span class="pc-sub" style="display:block" title="${av('値引き ' + discPct + '% 後')}">−${y(r.pf.discJpy)}</span>`)}${td(feeCell(r, r.pf))}${td(slsCell(r, r.pf))}${td(othCell(r.pf))}${td(`<b>${y(r.pf.payoutJpy)}</b>`)}</tr>`).join('')}</table>`;
         const tblPP = (which) => { const pfK = which === '2' ? 'lowPf' : 'minPf', askK = which === '2' ? 'ppAsk' : 'pp3Ask', netK = which === '2' ? 'ppNet' : 'pp3Net', locK = which === '2' ? 'lowLocal' : 'minLocal', col = which === '2' ? '#5b3fa8' : '#0b7285', cls = which === '2' ? 'pc-hl2' : 'pc-hl3';
           return `<table class="pf-table pc-table pc-tbl2">${head(['粗利<br>（Shopee＋PayPal）', '買い手の支払', 'Shopee掲載', 'PayPal請求<span class="pc-sub" style="display:block;font-weight:400">買い手が払う</span>', 'PayPal手取り<span class="pc-sub" style="display:block;font-weight:400">あなたが受け取る</span>', '<span style="color:' + col + '">合計<br>（掲載＋請求）</span><span class="pc-sub" style="display:block;font-weight:400" title="Shopee の掲載額と PayPal の請求額を足した値段（Shopee の想定値引き前）。実際に買い手が払う見込みは「買い手の支払」の列">値引き前の値段</span>', 'Shopee手数料', 'SLS送料 ' + chargeG + 'g', 'その他の控除', '受取額<br>（Shopee側）'], true)}${rows.map(r => { const pf = r[pfK], ask = r[askK], net = r[netK], t2 = pf.profit + net, tot = pf.buyerJpy + ask;
-            return `<tr class="${cls}">${ccCell(r)}${td(profIn(r, t2, '　①比 ' + (t2 - r.pf.profit >= 0 ? '+' : '−') + y(Math.abs(t2 - r.pf.profit)), which))}${td(`<b style="font-size:13px">${y(tot)}</b><span class="pc-sub" style="display:block" title="${av('Shopee ' + y(pf.buyerJpy) + '＋PayPal ' + y(ask))}">①より ${y(r.pf.buyerJpy - tot)} 安い</span>`)}${td(`<span style="display:inline-block;width:24px;text-align:right;font-size:11.5px;font-weight:600;color:${col};margin-right:2px">${r.rg.cur}</span><input type="text" inputmode="decimal" class="pc-shop-in" data-cc="${r.cc}" data-w="${which}" value="${pcFmt(r[locK], r.rg.priceUnit || 1)}" step="${(r.rg.priceUnit || 1) < 1 ? '0.5' : '1'}" title="Shopee に載せる額（現地通貨）を打ち替え。足りない粗利を PayPal の請求で埋めます" style="width:84px;font:inherit;font-weight:700;font-size:13px;color:${col};text-align:right;border:1px dashed #cbd5e1;border-radius:6px;background:#fffdf5;padding:1px 4px">${pcOvShop[which][r.cc] != null ? ` <a href="#" class="pc-shopreset" data-cc="${r.cc}" data-w="${which}" style="color:#1565c0;font-size:10px">↺</a>` : ''}<span class="pc-sub" style="display:block">${y(r[locK] * r.rg.rateJpy)}</span>${capOf(r.cc) && capOver(r) ? `<span class="pc-sub" style="display:block">${capBadge(r, r[locK])}</span>` : ''}`)}${td(`<b style="color:${col}">${cur(r.rg, ask / r.rg.rateJpy)}</b><span class="pc-sub" style="display:block">${y(ask)}</span>`)}${td(`<b style="color:#1a7f37">${y(net)}</b><span class="pc-sub" style="display:block" title="PayPal 手数料（⑥）">手数料 −${y(Math.max(0, ask - net))}</span>`)}${td(`<b style="color:${col};font-size:14px">${cur(r.rg, r[locK] + ask / r.rg.rateJpy)}</b><span class="pc-sub" style="display:block">${y(r[locK] * r.rg.rateJpy + ask)}</span>`)}${td(feeCell(r, pf))}${td(slsCell(r, pf))}${td(othCell(pf))}${td(`<b>${y(pf.payoutJpy)}</b>`)}</tr>`; }).join('')}</table>`; };
-        const tabs = [['1', '① Shopeeだけで出す', '#0f172a'], ['2', '② Shopeeに抑えて出し、差額をPayPalでもらう（' + (Object.keys(pcOvShop['2']).length || Object.keys(pcOvPP['2']).length ? '掲載は国ごとに指定あり・基準＝①の' : '掲載の基準＝①の') + Math.round(ratio * 100) + '%）', '#5b3fa8'], ['3', '③ Shopee掲載を最小にして、ほとんどをPayPalでもらう', '#0b7285']];
+            return `<tr class="${cls}">${ccCell(r)}${td(profIn(r, t2, '　①比 ' + (t2 - r.pf.profit >= 0 ? '+' : '−') + y(Math.abs(t2 - r.pf.profit)), which))}${td(`<b style="font-size:13px">${y(tot)}</b><span class="pc-sub" style="display:block" title="${av('Shopee ' + y(pf.buyerJpy) + '＋PayPal ' + y(ask))}">①より ${y(r.pf.buyerJpy - tot)} 安い</span>`)}${td(`<span style="display:inline-block;width:24px;text-align:right;font-size:11.5px;font-weight:600;color:${col};margin-right:2px">${r.rg.cur}</span><input type="text" inputmode="decimal" class="pc-shop-in" data-cc="${r.cc}" data-w="${which}" value="${pcFmt(r[locK], r.rg.priceUnit || 1)}" step="${(r.rg.priceUnit || 1) < 1 ? '0.5' : '1'}" title="Shopee に載せる額（現地通貨）を打ち替え。足りない粗利を PayPal の請求で埋めます" style="width:84px;font:inherit;font-weight:700;font-size:13px;color:${col};text-align:right;border:1px dashed #cbd5e1;border-radius:6px;background:#fffdf5;padding:1px 4px">${pcOvShop[which][r.cc] != null ? ` <a href="#" class="pc-shopreset" data-cc="${r.cc}" data-w="${which}" style="color:#1565c0;font-size:10px">↺</a>` : ''}<span class="pc-sub" style="display:block">${y(r[locK] * r.rg.rateJpy)}</span>${capOf(r.cc) && capOver(r) ? `<span class="pc-sub" style="display:block">${capBadge(r, r[locK])}</span>` : ''}`)}${td(`<b style="color:${col}">${cur(r.rg, pcPPLocal(ask, r.rg))}</b><span class="pc-sub" style="display:block">${y(ask)}</span>`)}${td(`<b style="color:#1a7f37">${y(net)}</b><span class="pc-sub" style="display:block" title="PayPal 手数料（⑥）">手数料 −${y(Math.max(0, ask - net))}</span>`)}${td(`<b style="color:${col};font-size:14px">${cur(r.rg, r[locK] + pcPPLocal(ask, r.rg))}</b><span class="pc-sub" style="display:block">${y(r[locK] * r.rg.rateJpy + ask)}</span>`)}${td(feeCell(r, pf))}${td(slsCell(r, pf))}${td(othCell(pf))}${td(`<b>${y(pf.payoutJpy)}</b>`)}</tr>`; }).join('')}</table>`; };
+        const tabs = [['1', '① Shopeeだけで出す', '#0f172a'], ['2', '② Shopeeに抑えて出し、差額をPayPalでもらう（' + (Object.keys(pcOvShop['2']).length ? '掲載は国ごとに指定あり・基準＝①の' : '掲載の基準＝①の') + Math.round(ratio * 100) + '%）', '#5b3fa8'], ['3', '③ Shopee掲載を最小にして、ほとんどをPayPalでもらう', '#0b7285']];
         return `<div class="pc-tabs">${tabs.map(t => `<button type="button" class="pc-tab${tab === t[0] ? ' on' : ''}" data-t="${t[0]}" style="--c:${t[2]}">${t[1]}</button>`).join('')}</div>` +
           `<div class="pf-scroll" style="max-height:none">${tab === '2' ? tblPP('2') : tab === '3' ? tblPP('3') : tbl1}</div>`;
       })() +
@@ -9885,7 +9886,7 @@
         const alOn2 = (() => { const al = document.getElementById('pc-align'); return !!(al && al.checked); })();
         const ccs = alOn2 ? (window._pcRows || []).map(rr => rr.cc) : [el.dataset.cc];
         if (alOn2) pcOv = {};
-        ccs.forEach(c2 => { const rg2 = regionByCc(c2); if (!rg2) return; delete pcOv[c2]; pcOv[c2] = pcSolvePrice(c2, cx.cost, tg, cx.opt || {}, rg2.priceUnit || 1); delete pcOvPP['2'][c2]; delete pcOvPP['3'][c2]; delete pcOvShop['2'][c2]; delete pcOvShop['3'][c2]; });
+        ccs.forEach(c2 => { const rg2 = regionByCc(c2); if (!rg2) return; delete pcOv[c2]; pcOv[c2] = pcSolvePrice(c2, cx.cost, tg, cx.opt || {}, rg2.priceUnit || 1); delete pcOvShop['2'][c2]; delete pcOvShop['3'][c2]; });
         priceCalcSave(); priceCalcRun(); });
       outEl.addEventListener('click', async e => { const b = e.target.closest && e.target.closest('.pc-qcopy'); if (!b) return; e.preventDefault();
         if ((window._pcCtx || {}).sample) { try { toast('先に①仕入額を入れてください（今は例の表です）'); } catch (_) {} return; }
@@ -9899,10 +9900,10 @@
         /* ★2026-10-23 本人「ここの数値も連動して変わる？」：揃える ON で②の掲載額を打ったら、①に対する割合を⑤に入れて全部の国をその割合に（打った国の上書きは消す） */
         const alOn = (() => { const al = document.getElementById('pc-align'); return !!(al && al.checked); })();
         const r0 = (window._pcRows || []).find(x => x.cc === el.dataset.cc);
-        if (w === '2' && alOn && r0 && r0.local > 0) { const pct = Math.max(5, Math.min(100, Math.round(v / r0.local * 1000) / 10)); const ri = document.getElementById('pc-ratio'); if (ri) { if (window._pcRatioBase == null) window._pcRatioBase = ri.value; ri.value = String(pct); } pcOvShop['2'] = {}; Object.keys(pcOvPP['2']).forEach(k => { if (Number(pcOvPP['2'][k]) < 0) delete pcOvPP['2'][k]; }); priceCalcSave(); try { toast('⑤ Shopee掲載を ①の ' + pct + '% にして全部の国をそろえました'); } catch (_) {} priceCalcRun(); return; }
+        if (w === '2' && alOn && r0 && r0.local > 0) { const pct = Math.max(5, Math.min(100, Math.round(v / r0.local * 1000) / 10)); const ri = document.getElementById('pc-ratio'); if (ri) { if (window._pcRatioBase == null) window._pcRatioBase = ri.value; ri.value = String(pct); } pcOvShop['2'] = {}; priceCalcSave(); try { toast('⑤ Shopee掲載を ①の ' + pct + '% にして全部の国をそろえました'); } catch (_) {} priceCalcRun(); return; }
         pcOvShop[w][el.dataset.cc] = v; priceCalcRun(); });
       outEl.addEventListener('click', e => { const a = e.target.closest && e.target.closest('.pc-shopreset'); if (!a) return; e.preventDefault(); delete pcOvShop[a.dataset.w][a.dataset.cc]; priceCalcRun(); });
-      outEl.addEventListener('click', e => { const a = e.target.closest && e.target.closest('.pc-ppreset'); if (!a) return; e.preventDefault(); delete pcOvPP[a.dataset.w][a.dataset.cc]; priceCalcRun(); });
+      
       outEl.addEventListener('change', e => { const el = e.target; if (!el.classList || !(el.classList.contains('pc-gp-in') || el.classList.contains('pc-roi-in'))) return;
         const cc = el.dataset.cc, v = Number(el.value), cx = window._pcCtx || {}; const rg = regionByCc(cc); if (!rg || !(cx.cost > 0) || cx.sample || el.value === '' || isNaN(v)) return;
         const tgt = el.classList.contains('pc-roi-in') ? cx.cost * v / 100 : v;
@@ -22467,6 +22468,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
+      '🧮 価格計算の後片付け（レビューの残り）：②③の表の『PayPal請求』『買い手の支払』を見積もり文面と同じ丸め（単位で切り上げ）に揃えました（表と文面で 1 BRL ずれることがあった）。使われていなかった古い設定（PayPal の粗利の打ち替え）を消しました。',
       '💴 <b>Smart Reply と WhatsApp に「💴 見積もり」ボタン</b>（本人「見積もりをある程度自動化したい」）：いま開いている会話の相手・国と、選んだ文字（無ければお客さんの最後の発言）でこの価格計算を開きます。仕入れ検索→各国の値段→英語の文面まで出ます（送るのは自分）。ポータルを新しく開いた時に仕入れ検索が止まる不具合も直しました。',
       '💳 <b>PayPal の支払いリンクが通しで使えるようになりました</b>（本人が Tampermonkey の「ページのブラックリスト」から *paypal.tld/* を外した・「一度、通してやってくれて構わん」）：「💳 PayPal リンクを作る」→ 作成画面に商品名・説明・金額・通貨が自動で入る → 「作成」→ リンクが自動でコピー → 見積もりの「PayPal リンク」欄の横の <b>📥 貼る</b> で欄に入り、文面（Transaction Guidelines）の Payment Link に入ります。押した後の案内も「手で貼る」前提から直しました（入らない時はタブを1回読み込み直す）。',
       '🔍 <b>価格計算のレビューで見つかった所を直しました</b>（本人「一回レビューして」）：①お客さんに送る商品リンクがセラー用のアドレス（seller.shopee…）だった→買い手用に ②仕入れ検索の「これで計算」・チャットから開いた時も前の商品の打ち替えを消す（打っている途中も）③VN の上限（₫909,090）を超える値段は Request page に足さない ④前の商品の写真・商品名・Shopee リンク・照合番号を次の見積もりに残さない ⑤照合番号は PayPal リンクを作った時か Request page に足した時に確定（1文字打つたびに控えを増やさない・30日で消す）⑥描き直しのたびに打ち替えが消えていた→消すのはページを読んだ最初だけ ⑦目標粗利・目標ROI を変えたら売値の打ち替えを消す ⑧例の表で📋を押しても前の文面をコピーしない ⑨「約○安い」を文面の値段どうしの差に ⑩Request page の価格帯の読み取り（R$・k）。',
