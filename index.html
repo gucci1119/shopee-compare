@@ -22193,6 +22193,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '⚡ <b>出品一覧の絞り込み欄を軽くしました</b>（本人「ここの入力のとこ、めっちゃ重くなってる」）：打つたびに 7,760件ぶんの検索用の文字（商品名・明細名・ID・JAN・型番）を作り直していた（1回 約0.15秒）→ 1回作ったら覚えて使い回します。',
       '✏️ <b>価格計算の表の「粗利（円）」と「ROI（%）」も打ち替えられるようにしました</b>（本人「ここを変えれるようにしたら？」「ここもか」）：打つとその国の売値をその粗利・ROI になる値に変えます。「揃える」が ON なら他の国も同じ粗利にぴったり揃います（前は ROI 換算で少しずれた）。',
       '⟲ <b>価格計算のリセットを2つに分けました</b>（本人「paypal手数料とか、shopee掲載の%とかは入力を全部リセット押して消えるとまずいでしょ」「選べるようにしたら？」）：「⟲ 基本をリセット」＝①〜④・目標粗利・打ち替えた売値だけ／「⟲ PayPal設定を既定に戻す」＝⑤⑥とチェックだけ。目標粗利は国ごとにちょうど届く最も安い価格を探すように直しました（ROI 換算だと最大1割ずれた）。',
       '💴 <b>価格計算に「目標粗利（円）」を足しました</b>（本人「取りたい粗利から出品額決めれるようにしたい」）：④目標ROI の右に「または 目標粗利 ○円」。入れると7か国とも その粗利になる出品価格を逆算します（④より優先。各国の売値を打ち替えて揃える時はそちらが優先）。',
@@ -44328,12 +44329,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ');   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
         return kwNorm(raw);   // ★アクセントを落として比べる（Pokémon→pokemon）
       };
+      /* ★2026-10-23 本人「ここの入力のとこ、めっちゃ重くなってる」：打つたびに 7,760件ぶん hay を作り直していた（1回 約0.15秒）。
+         行（オブジェクト）ごとに覚える＝データを読み直せば行が新しくなるので自然に作り直し。JAN の台帳（productIds）が入れ替わった時も作り直す */
+      const _hayMemo = (window.__lstHayMemo = window.__lstHayMemo && window.__lstHayMemo.pid === productIds ? window.__lstHayMemo : { pid: productIds, m: new WeakMap() });
+      const hayC = (r) => { let v = _hayMemo.m.get(r); if (v === undefined) { v = hay(r); _hayMemo.m.set(r, v); } return v; };
       // 日本語で打った語は英語にも広げて、どちらでも当たるようにする（除外語も同じ扱い）
       const incV = inc.map(kwExpand), excV = exc.map(kwExpand);
-      rows = rows.filter(r => { const h = hay(r);
+      rows = rows.filter(r => { const h = hayC(r);
         return incV.every(vs => vs.some(t => h.includes(t))) && !excV.some(vs => vs.some(t => h.includes(t))); });
       // ★ID だけで探している時の逃げ道（下で使う）：他の絞り込み（国・明細/単品・状態…）で 0件になったら、全件から ID で当て直す
-      lst._idSearch = (inc.length && !exc.length && inc.every(t => /^\d{6,}$/.test(t))) ? (r => incV.every(vs => vs.some(t => hay(r).includes(t)))) : null;
+      lst._idSearch = (inc.length && !exc.length && inc.every(t => /^\d{6,}$/.test(t))) ? (r => incV.every(vs => vs.some(t => hayC(r).includes(t)))) : null;
       T('q', '検索「' + lst.search + '」');
     }
     // 公開/非公開（status 1=公開・それ以外=非公開）
