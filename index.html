@@ -6629,6 +6629,7 @@
     "📗 利益管理表の仕入れ値を取り込み中…": "📗 Importing costs from the profit sheet…",
     "💰 今月の利益": "💰 Profit this month",
     "経費を引くと": "After expenses",
+    "出品ログの「仕入れ目安」も、明細の番号だけで結び付けないようにしました": "Listing log est. cost no longer matches by variation number alone",
     "内訳": "Breakdown",
     "値付けの見直しに「判断材料が足りない」の内訳を出しました": "Price review now shows the breakdown of Not enough data",
     "🔄 追跡を今すぐ更新": "🔄 Refresh tracking now",
@@ -22153,6 +22154,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '🔧 <b>出品ログの「仕入れ目安」も、明細の番号だけで結び付けないようにしました</b>：明細を消すと番号が別のソフトに移るため、🤖が出した時の名前と今の名前が違う時は使いません（値付けの見直しと同じ直し）。',
       '⚪ <b>値付けの見直しに「判断材料が足りない」の内訳を出しました</b>：仕入れ待ち・入金待ち・出品していない・今の値段が不明などの件数。仕入れ待ちは転記して「🔄 読み直す」と判定されます。',
       '🔄 <b>入庫待ちに「追跡を今すぐ更新」ボタンを付けました</b>（本人「追跡更新する用のボタン欲しい」「任意のタイミングで更新したい時用の」）：自動は1時間ごとですが、押すとその場で配送業者から取り直して表示し直します。あわせて、ヤマトの『配達中』が取り込まれていなかったのを直しました。',
       '🔧 <b>今月の利益（ダッシュボード）と🧮損益の粗利が、💹利益明細を一度開かないと出なかったのを直しました</b>（本人「なぜ、わざわざ損益・入出金を一度表示しないといけない？」）：月を選ぶ欄の中身が利益明細を開いた時に初めて作られていたため、先に作ってから計算します。',
@@ -43905,7 +43907,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       });
       Object.keys(made || {}).forEach(k => { const x = made[k] || {}; if (x.item_id) madeMap.set(String(x.item_id), { hw: String(k).split('|')[0], at: x.at || '', role: x.role || 'fam' }); });
       /* ★2026-10-04 仕入れの目安（本人「これはなんでできない？」＝利益台帳には🤖の明細が入っていなかった）。🤖が出した時のヤフオク定額を明細番号ごとに持つ */
-      const costMap = new Map(); Object.values((hist && hist.m) || {}).forEach(a => { if (a && a.model_id && Number(a.cost) > 0) { const k = String(a.model_id), at = Date.parse(a.at) || 0, o2 = costMap.get(k); if (!o2 || at > o2.at) costMap.set(k, { c: Math.round(Number(a.cost)), at: at }); } });
+      const costMap = new Map(); Object.values((hist && hist.m) || {}).forEach(a => { if (a && a.model_id && Number(a.cost) > 0) { const k = String(a.model_id), at = Date.parse(a.at) || 0, o2 = costMap.get(k); if (!o2 || at > o2.at) costMap.set(k, { c: Math.round(Number(a.cost)), at: at, en: String(a.en || '') }); } });
       _lstAuto = { byItem: byItem, made: madeMap, nk: nk, cost: costMap }; _lstAutoLoading = null; return _lstAuto;
     }).catch(() => { _lstAutoLoading = null; _lstAutoFailAt = Date.now(); return null; });
     return _lstAutoLoading;
@@ -43919,11 +43921,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   var _estSkuSrc = null, _estSku = null;
   function lstEstCost(m) {
     if (!_lstAuto || !_lstAuto.cost || !m || m.id == null) return null;
-    const d = _lstAuto.cost.get(String(m.id)); if (d) return { c: d.c, how: 'この明細を🤖が出した時' };
+    /* ★2026-10-23 明細の削除は詰め直し＝同じ番号が別のソフトの名前になる。番号で見つけても、🤖が出した時の英語名と今の明細名が違えば使わない（値付けの見直しと同じ型の直し） */
+    const _same = (x, y) => { const p = String(x || '').toLowerCase().replace(/\s+/g, ' ').trim(), q = String(y || '').toLowerCase().replace(/\s+/g, ' ').trim(); return !p || !q || p === q || p.includes(q) || q.includes(p); };
+    const d = _lstAuto.cost.get(String(m.id)); if (d && _same(d.en, m.n)) return { c: d.c, how: 'この明細を🤖が出した時' };
     if (_estSkuSrc !== lst.byCc) {
       _estSkuSrc = lst.byCc; _estSku = new Map();
       const KH = /^(PSVITA|VITA|SWITCH2?|WIIU|WII|3DS|DS|GBA|GBC|GB|GC|N64|SFC|FC|PS[1-5]|PSP|MD|SS|DC|XBOX)_/;
-      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => (r.models || []).forEach(md => { const e = md && md.id != null && _lstAuto.cost.get(String(md.id)); if (!e) return; const k = String(md.sku || '').trim().toUpperCase(); if (!KH.test(k)) return; const o = _estSku.get(k); if (!o || e.at > o.at) _estSku.set(k, e); })));
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => (r.models || []).forEach(md => { const e = md && md.id != null && _lstAuto.cost.get(String(md.id)); if (!e || (e.en && md.n && !String(md.n).toLowerCase().includes(String(e.en).toLowerCase().slice(0, 12)) && !String(e.en).toLowerCase().includes(String(md.n).toLowerCase().slice(0, 12)))) return; const k = String(md.sku || '').trim().toUpperCase(); if (!KH.test(k)) return; const o = _estSku.get(k); if (!o || e.at > o.at) _estSku.set(k, e); })));
     }
     const k = String(m.sku || '').trim().toUpperCase(); const e = k && _estSku.get(k);
     return e ? { c: e.c, how: '同じ明細SKU（' + k + '）を🤖が出した時' } : null;
