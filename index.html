@@ -6626,6 +6626,9 @@
     "フロントを外す": "Unmark front",
     "🟢 フロントにする（候補）": "🟢 Make front (candidate)",
     "🟢 フロント候補": "🟢 Front candidates",
+    "📗 利益管理表の仕入れ値を取り込み中…": "📗 Importing costs from the profit sheet…",
+    "値付けの見直しで「1件処理するとまた1件出てくる」のを直しました": "Fixed: Price review showed loss items one at a time after each action",
+    "利益管理表の仕入れ値をその場で取り込んでから、注文・入金・出品を読み直す（転記した分の赤字もまとめて出ます）": "Import costs from the profit sheet now, then reload orders, payouts and listings (loss items from newly entered costs all appear at once)",
     "🟢 フロントにしました": "🟢 Marked as front",
     "フロントの印を外しました": "Front mark removed",
     "今日の直しのレビューで見つけた3点を直しました": "Fixed 3 issues found when reviewing today's changes",
@@ -22086,6 +22089,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '🏷 <b>値付けの見直しで「1件処理するとまた1件出てくる」のを直しました</b>（本人「最初から全部出せないのか？」）：赤字は仕入れ値が分かって初めて判定できますが、仕入れ値は利益管理表から1時間に1回しか取り込んでいませんでした（転記した分が少しずつ届いていた）。「🔄 読み直す」を押すと、先に利益管理表の取り込みをその場で走らせてから読み直します。',
       '🆘 <b>発送スケジュールの「🆘 キャンセル」の数字から、どの注文かが見られるようにしました</b>（本人「この2件って何なの？」「ポータルで見れないの？」）：数字に乗せると注文番号・商品名・家から出す日、クリックで下の注文一覧をその日がキャンセル期限の分に絞ります。',
       '🃏 <b>トレカのフロント商品（1カード1出品）を TW・TH の本店にも出しました</b>：本店にトレカのカタログが無い2か国は、2店舗目のカタログを本店へ写して作ります。',
       '🛠 <b>カタログを作った直後に明細の枠を付けに行くと「まだ作成中・5秒待って」と断られ、明細の無い入れ物だけ残ることがあったのを直しました</b>：この返事の時だけ6秒待って最大3回やり直します（GAS）。'
@@ -40531,7 +40535,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <span class="smd-dim" style="font-size:11.5px">国</span>
           ${chip('cc', '', 'すべて', !PA.cc, null)}${ccs.map(cc => chip('cc', cc, cc, PA.cc === cc, null, (regionByCc(cc) || {}).color)).join('')}
           <input id="pa-q" type="search" placeholder="商品名・明細名で絞り込み" value="${esc(PA.q)}" style="margin-left:8px;font-size:12px;padding:3px 8px;width:220px">
-          <button class="smd-btn" id="pa-reload" style="font-size:11.5px" title="注文・入金・出品を読み直す">🔄 読み直す</button>
+          <button class="smd-btn" id="pa-reload" style="font-size:11.5px" title="利益管理表の仕入れ値をその場で取り込んでから、注文・入金・出品を読み直す（転記した分の赤字もまとめて出ます）">🔄 読み直す</button>
           <span class="smd-dim" style="font-size:11px">読込 ${new Date(D.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}${D.unmatched ? `・出品が見つからない注文 ${D.unmatched.toLocaleString()}明細（名前を変えた・削除した出品）は除外` : ''}</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;padding:6px 8px;background:#f5f3ff;border-radius:6px">
@@ -40577,7 +40581,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     root.querySelectorAll('.pa-card').forEach(b => b.addEventListener('click', () => { PA.cat = b.dataset.v; PA.limit = 200; paSave(); paRender(); }));
     root.querySelectorAll('.pa-sort').forEach(h => h.addEventListener('click', () => { const k = h.dataset.s; if (PA.sort === k) PA.dir = -PA.dir; else { PA.sort = k; PA.dir = k === 'name' ? 1 : -1; } paSave(); paRender(); }));
     const q = root.querySelector('#pa-q'); if (q) { let tm = null; q.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => { PA.q = q.value; paRender().then(() => { const q2 = document.getElementById('pa-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }); }, 350); }); }
-    const rl = root.querySelector('#pa-reload'); if (rl) rl.addEventListener('click', () => paRender(true));
+    /* ★2026-10-23 本人「1個処理するとまた1個出てくる。最初から全部出せないのか？」：赤字は仕入れ値が分かって初めて判定できる。仕入れ値は利益管理表から
+       1時間に1回しか取り込んでいなかった＝転記した分が少しずつ届いて、1件ずつ出てきていた。読み直す時に、先に利益管理表の取り込みをその場で走らせる */
+    const rl = root.querySelector('#pa-reload'); if (rl) rl.addEventListener('click', async () => {
+      rl.disabled = true; const t0 = rl.textContent; rl.textContent = '📗 利益管理表の仕入れ値を取り込み中…';
+      try { await invRunFetch('run_profitsheet', 180000); }
+      catch (e) { toast('⚠ 利益管理表の取り込みに失敗（前に取り込んだ仕入れ値で読み直します）: ' + ((e && e.message) || e)); }
+      rl.textContent = t0; rl.disabled = false;
+      paRender(true);
+    });
     const mo = root.querySelector('#pa-more'); if (mo) mo.addEventListener('click', () => { PA.limit += 300; paRender(); });
     const byKey = new Map(D.rows.map(e => [e.key, e]));
     const applyBtn = root.querySelector('#pa-apply');
