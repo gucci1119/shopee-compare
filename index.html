@@ -6627,6 +6627,13 @@
     "🟢 フロントにする（候補）": "🟢 Make front (candidate)",
     "🟢 フロント候補": "🟢 Front candidates",
     "📗 利益管理表の仕入れ値を取り込み中…": "📗 Importing costs from the profit sheet…",
+    "💰 今月の利益": "💰 Profit this month",
+    "経費を引くと": "After expenses",
+    "経費を読めませんでした": "Could not read expenses",
+    "キャンセル損": "Cancellation loss",
+    "今月の注文・入金・仕入れから計算中…": "Calculating from this month's orders, payouts and costs…",
+    "今月の粗利を計算できませんでした（💹利益明細を開くと入ります）": "Could not calculate this month's gross profit (open 💹 Profit details to load it)",
+    "ダッシュボードに「今月の利益」を出しました": "Dashboard now shows profit this month",
     "値付けの見直しで、売れていない明細が赤字として次々に出ていたのを直しました": "Fixed: Price review kept showing unsold variations as loss items one after another",
     "値付けの見直しで「1件処理するとまた1件出てくる」のを直しました": "Fixed: Price review showed loss items one at a time after each action",
     "利益管理表の仕入れ値をその場で取り込んでから、注文・入金・出品を読み直す（転記した分の赤字もまとめて出ます）": "Import costs from the profit sheet now, then reload orders, payouts and listings (loss items from newly entered costs all appear at once)",
@@ -11764,6 +11771,29 @@
     return maskDemo(table, out);
   }
 
+  /* ★2026-10-23 ダッシュボードの「💰 今月の利益」。💹利益明細と同じ数字（pf.grossTotal）を使う。今月分がまだ無ければ、🧮損益の画面と同じく自分で取りに行く（押さないと出ないを作らない）。
+     取れなかった時は「—」（0円と言わない）。経費は expenses の今月分の合計 */
+  async function fillDashProfit() {
+    const ym = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
+    const put = (v, s2) => { const b = document.getElementById('kpi-profit'); if (!b) return; const vv = b.querySelector('.v'), ss = b.querySelector('.s'); if (vv) vv.innerHTML = v; if (ss) ss.innerHTML = s2; };
+    const L_ = t => t;   /* 文言の印（英語版の辞書は画面の文字を置き換える） */
+    const have = () => { try { return pf.grossYm === ym && typeof pf.grossTotal === 'number'; } catch (_) { return false; } };
+    if (!have()) {
+      if (fillDashProfit._busy) return;
+      if (fillDashProfit._failAt && Date.now() - fillDashProfit._failAt < 10 * 60000) { put('—', '今月の粗利を計算できませんでした（💹利益明細を開くと入ります）'); return; }
+      fillDashProfit._busy = true;
+      const sel = document.getElementById('pf-month');
+      try { if (sel) { const keep = sel.value; sel.value = ym; if (sel.value === ym) await renderProfit(true); try { sel.value = keep; } catch (_) {} } } catch (_) {}
+      fillDashProfit._busy = false;
+      if (!have()) { fillDashProfit._failAt = Date.now(); put('—', '今月の粗利を計算できませんでした（💹利益明細を開くと入ります）'); return; }
+    }
+    const [yy, mm] = ym.split('-').map(Number), nym = mm === 12 ? (yy + 1) + '-01' : yy + '-' + String(mm + 1).padStart(2, '0');
+    let expSum = null; try { const rows = await sbGetAll('expenses', 'select=amount&ymd=gte.' + ym + '-01&ymd=lt.' + nym + '-01'); expSum = (rows || []).reduce((a, r) => a + (Number(r.amount) || 0), 0); } catch (_) {}
+    const g = pf.grossTotal, cxl = Number(pf.cxlLoss) || 0, net = expSum != null ? g - expSum - cxl : null;
+    put('<span style="color:' + (g >= 0 ? '#1a7f37' : '#d93025') + '">' + fmtJpy(g) + '</span>',
+      '粗利 ' + (pf.grossN || 0) + '件（確定' + (pf.grossFixN || 0) + '・暫定' + (pf.grossProvN || 0) + '）'
+      + (net != null ? '<br>' + L_('経費を引くと') + ' <b style="color:' + (net >= 0 ? '#1a7f37' : '#d93025') + '">' + fmtJpy(net) + '</b> (' + L_('経費') + ' ' + fmtJpy(expSum) + (cxl ? ' / ' + L_('キャンセル損') + ' ' + fmtJpy(cxl) : '') + ')' : '<br>' + L_('経費を読めませんでした')));
+  }
   async function renderDash(force) {
     const kpis = document.getElementById('dash-kpis');
     // ★🚚倉庫へ発送済（手元→倉庫へ輸送中）の印は costs にある。**注文管理を開くまで空**なので、
@@ -11855,7 +11885,8 @@
         ['昨日の売上', fmtJpy(yestJpy), `${yOrders}件 / ${yUnits}点（日本時間・昨日）`, '昨日1日分（日本時間）の売上（円換算）。買い手支払額(escrow)ベースの速報値でキャンセルは除外済み。入金確定で微増減することあり。今日との比較の基準に。'],
         ['未発送', notShipped.length + '件' + (state.orders.selfTransitOk === false ? ' ⚠' : ''), (state.orders.selfTransitOk === false ? '⚠ 倉庫へ発送済の印を読めていません（多めに出ます）・' : '') + (overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件 ・` : (due24.length ? `⚠ 24h以内 ${due24.length}件 ・` : '')) + `①未手配 ${toShip.length} / ②伝票発行済 ${arrangedN}` + (inTransitN ? ` ・🚚倉庫へ ${inTransitN}` : ''), '**まだ手元にある**注文の数（①未手配＋②伝票発行済）。①＝Shopeeで発送手配をまだ押していない ②＝手配して伝票が出た（まだ手元）。🚚倉庫へ＝もう手を離れて倉庫へ輸送中なので、この数には入れていません。', 'orders'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeがまだ支払っていない（リリース前に預かり中＝escrow）の入金見込み額。リリース後はここから外れて実入金になる。'],
-        ['⏳入庫待ち', waiting.length + '件', '仕入れ ' + fmtJpy(waitVal) + (arrivedNotRecv ? ` ・📥到着済未反映${arrivedNotRecv}` : ''), '仕入元（メルカリ等）から到着待ちの在庫。📥到着済未反映は受取処理が必要（詳細はクリック→仕入れ管理/アラート）。', 'buy'],
+        /* ★2026-10-23 本人「ここにその月の利益出したいね」「入庫待ちいらんな」「死に筋もいらん」：入庫待ち・死に筋を外して今月の利益。数字は fillDashProfit が💹利益明細と同じ計算（粗利＝入金−仕入）で後から入れる */
+        ['💰 今月の利益', '<span class="smd-spin"></span>', '今月の注文・入金・仕入れから計算中…', '今月（日本時間）の注文の粗利＝入金（円換算・Shopee手数料は差引済）−仕入。確定＝倉庫スキャン後で金額が決まった分／暫定＝まだ動く分。下の段は今月の経費とキャンセル損を引いた額（返金の手入力分は🧮損益の画面で）。', 'expenses', 'kpi-profit'],
         (() => {   /* 🚚 フリーSPS：月800件（キャンセル・未払いを除く注文数・日本時間の暦月）。読めなかった時は「—」（0件と言わない） */
           if (!Array.isArray(monthOrders)) return ['🚚 フリーSPS 800件', '—', '今月の注文を読めませんでした（🔄で読み直し）', '月800件（キャンセル・未払いを除く）を保つと佐川の配送を無料で使える枠。'];
           const SPS = 800, n = monthOrders.filter(o => !/CANCEL|UNPAID/i.test(String(o.status || ''))).length;
@@ -11867,9 +11898,9 @@
             ok ? '今月は達成🎉' : `月末見込み 約${proj != null ? proj : '—'}件・残り${Math.ceil(left)}日で<b>1日${need}件</b>要る`,
             '本人 2026-10-20「月にフリーSPS基準は満たしたいね」「800件だ」「キャンセルはのぞくオーダー数」：月800件を保つと佐川の配送を無料で使える枠。数え方＝今月（日本時間）の注文のうちキャンセル・未払いを除いた件数（全店合計）。見込み＝ここまでのペースで月末まで進んだ場合。'];
         })(),
-        ['🏚死に筋(90日超)', deadArr.length + '件', deadArr.length ? fmtJpy(deadVal) + ' 滞留' : 'なし🎉', '仕入から90日超で在庫保管中＝資金が寝ている状態。値下げ／損切りの検討対象。明細はクリック→アラートに一本化。', deadArr.length ? 'alerts' : ''],
-      ].map(([t, v, s, tip, go]) => `<div class="kpi${go ? ' kpi-go' : ''}"${go ? ` data-go="${go}" style="cursor:pointer"` : ''}${tip ? ` title="${esc(tip)}"` : ''}><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}${go ? ' <span style="color:#1a73e8;font-size:10px;white-space:nowrap">→詳細</span>' : ''}</div></div>`).join('');
+      ].map(([t, v, s, tip, go, kid]) => `<div class="kpi${go ? ' kpi-go' : ''}"${kid ? ` id="${kid}"` : ''}${go ? ` data-go="${go}" style="cursor:pointer"` : ''}${tip ? ` title="${esc(tip)}"` : ''}><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}${go ? ' <span style="color:#1a73e8;font-size:10px;white-space:nowrap">→詳細</span>' : ''}</div></div>`).join('');
       kpis.querySelectorAll('.kpi-go').forEach(el => el.addEventListener('click', () => showPage(el.dataset.go)));
+      fillDashProfit();
       const due = document.getElementById('dash-due');
       due.innerHTML = toShip.slice(0, 8).map(o => {
         const rg = regionByCc(o.cc);
@@ -22090,6 +22121,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-23', items: [
+      '💰 <b>ダッシュボードに「今月の利益」を出しました</b>（本人「ここにその月の利益出したいね」「入庫待ちいらんな」「死に筋もいらん」）：入庫待ち・死に筋のカードを外し、今月の粗利（入金−仕入・確定/暫定の件数）と、経費・キャンセル損を引いた額を出します。数字は💹利益明細と同じ計算です。',
       '🛑 <b>値付けの見直しで、売れていない明細が赤字として次々に出ていたのを直しました</b>（本人「ポコポコベトナムのやつ出てくる」「最初から全部出せよ」）：明細の削除は詰め直し（消した位置に後ろの明細の名前を詰める）なので、注文と明細を番号だけで結び付けると、消した明細の注文が隣の明細の名前で出ていました（VN：Afterimage の注文が Asobi Daizen 51 → Mario &amp; Luigi RPG の名前で）。注文した時の明細名と今の名前が違えば名前で結び付け直し、無ければ消えた明細として外します。',
       '🏷 <b>値付けの見直しで「1件処理するとまた1件出てくる」のを直しました</b>（本人「最初から全部出せないのか？」）：赤字は仕入れ値が分かって初めて判定できますが、仕入れ値は利益管理表から1時間に1回しか取り込んでいませんでした（転記した分が少しずつ届いていた）。「🔄 読み直す」を押すと、先に利益管理表の取り込みをその場で走らせてから読み直します。',
       '🆘 <b>発送スケジュールの「🆘 キャンセル」の数字から、どの注文かが見られるようにしました</b>（本人「この2件って何なの？」「ポータルで見れないの？」）：数字に乗せると注文番号・商品名・家から出す日、クリックで下の注文一覧をその日がキャンセル期限の分に絞ります。',
