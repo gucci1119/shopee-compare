@@ -6443,7 +6443,7 @@
     "この画面：ポータル上で「いつ・誰が・何を変更したか」の記録です（参照用）。": "This screen: a record of who changed what and when in this portal (reference only).",
     "※価格や在庫の書込・出品・SKU統一などの履歴。トラブル時の確認に。": "Price and stock writes, listings, SKU unification and so on — useful when something goes wrong.",
     "（ポータル/GASの改修履歴）": "(Change history of the portal and GAS)",
-    "📥 貼る": "📥 Paste", "Request page への依頼品の追加を「だれだれ専用」の画像に": "Request page items now get a \"Reserved for\" image", "💬 WhatsApp の入力欄へ": "💬 Put into WhatsApp input", "WhatsApp の 💴 から開いた時も「💬 WhatsApp の入力欄へ」": "From WhatsApp 💴 too: 💬 Put into WhatsApp input", "Smart Reply と WhatsApp に「💴 見積もり」ボタン": "A 💴 Quote button in Smart Reply and WhatsApp", "💳 PayPal リンクを作る": "💳 Make PayPal link",
+    "📥 貼る": "📥 Paste", "▶ 公開する": "▶ Publish", "Request page の入れ先を実際の値段で選ぶ・入らなければ新しく作る": "Pick the Request page by real prices; create a new one if none fits", "🆕 新しい Request page を作りました（非公開）。お客さんが買えるように公開してください →": "🆕 Created a new Request page (unlisted). Publish it so the buyer can purchase →", "Request page への依頼品の追加を「だれだれ専用」の画像に": "Request page items now get a \"Reserved for\" image", "💬 WhatsApp の入力欄へ": "💬 Put into WhatsApp input", "WhatsApp の 💴 から開いた時も「💬 WhatsApp の入力欄へ」": "From WhatsApp 💴 too: 💬 Put into WhatsApp input", "Smart Reply と WhatsApp に「💴 見積もり」ボタン": "A 💴 Quote button in Smart Reply and WhatsApp", "💳 PayPal リンクを作る": "💳 Make PayPal link",
     "PayPal の支払いリンクが通しで使えるようになりました": "PayPal payment links now work end to end",
     "PayPal リンク": "PayPal link",
     "　予備：金額": "  Backup: amount",
@@ -9483,6 +9483,25 @@
     return uploadImgToStorage(cv.toDataURL('image/jpeg', 0.9), 'req');
   }
   try { window.__pcReservedImage = pcReservedImage; } catch (_) {}   /* 試し用（明細は足さずに画像だけ作る） */
+  /* 新しい Request page を作る（複製）：値段が近いページを元に、名前＝元の名前（末尾の番号を除く）＋国の全店で次の番号。
+     複製の直後は明細 test が1件だけ＝値段を今回の値段に合わせておく（足す明細との価格差で断られないように） */
+  async function pcReqNewPage(L, all, price) {
+    const NUM = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+    const src = all.slice().sort((a, b) => ((b.inBand ? 1 : 0) - (a.inBand ? 1 : 0)) || ((b.c.status === 1 ? 1 : 0) - (a.c.status === 1 ? 1 : 0)) || (Math.abs(Math.log(a.mid / price)) - Math.abs(Math.log(b.mid / price))))[0];
+    const base = String(src.c.name || '').replace(/\s*[①-⑳]\s*$/, '').trim();
+    const used = new Set(); all.forEach(x => { const nm0 = String(x.c.name || '').trim(); if (nm0 === base) used.add(1); else if (nm0.indexOf(base) === 0) { const ch = nm0.slice(base.length).trim(); const k = NUM.indexOf(ch); if (k >= 0) used.add(k + 1); } });
+    let n = 2; while (used.has(n) && n < 20) n++;
+    const newName = (base + ' ' + NUM[n - 1]).slice(0, 120);
+    const cr = await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: src.c.shop_id, item_id: src.c.item_id, name: newName, publish: 0 }, 180000);
+    const nid = cr && (cr.item_id || (cr.data && cr.data.item_id));
+    if (!nid) throw new Error('複製できませんでした: ' + String((cr && (cr.error || JSON.stringify(cr))) || '').slice(0, 120));
+    await new Promise(z => setTimeout(z, 4000));
+    const gm = await gasCall({ action: 'get_models', shop_id: src.c.shop_id, item_id: nid }, 60000);
+    const tm = (((gm || {}).data || {}).models || []).find(m => String(m.name || '').trim().toLowerCase() === 'test');
+    if (tm) { try { await gasCall({ action: 'update_price_list', token: settings.writeToken, shop_id: src.c.shop_id, item_id: nid, list: JSON.stringify([{ model_id: tm.model_id, price: price }]) }, 60000); } catch (_) {} }
+    try { logAct('出品', 'Request page を新しく作った', newName, L.cc + ' ' + nid + '（元 ' + src.c.item_id + '）'); } catch (_) {}
+    return { c: { item_id: String(nid), shop_id: src.c.shop_id, name: newName, status: 8 }, ms: [] };
+  }
   async function pcQuoteAddReq() {
     const L = pcQuote.last, msg = document.getElementById('pc-q-msg'); if (!L) { msg.textContent = '先に仕入額を入れてください'; return; }
     if (!L.buyer) { msg.textContent = '相手のユーザー名を入れてください（明細名に入れます）'; return; }
@@ -9493,10 +9512,20 @@
     try { cats = await sbGetAll('listings', 'select=item_id,shop_id,name,status,models&cc=eq.' + L.cc + '&or=(name.ilike.*Request%20page*,name.ilike.*Solicitar*)'); } catch (e) { msg.textContent = '❌ 読めませんでした: ' + String(e.message || e).slice(0, 60); return; }
     const price = L.shopL, lim = L.cc === 'BR' ? 4 : 5;
     { const cap = (typeof PRICE_CEIL !== 'undefined' ? PRICE_CEIL[L.cc] : 0) || 0; if (cap && price > cap) { msg.textContent = '⚠ ' + L.cc + ' の出品価格の上限（' + cap.toLocaleString() + '）を超えています（' + price.toLocaleString() + '）。②③の払い方にして Shopee に載せる額を下げてください'; return; } }   /* ★2026-10-24 レビュー：上限超えの明細が1つ入ると Request page ごと止まる */
-    const cand = (cats || []).filter(c => c.status === 1).map(c => { let ms = c.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } } ms = (ms || []).filter(m => m && m.id); const b = pcReqBand(c.name); const ps = ms.map(m => Number(m.price) || 0).filter(v => v > 0).concat([price]); const ratio = Math.max(...ps) / Math.max(1e-9, Math.min(...ps)); return { c, ms, b, ratio }; })
-      .filter(x => price >= x.b[0] && price <= x.b[1] && x.ms.length < 100 && x.ratio <= lim).sort((a, b) => (a.b[1] - a.b[0]) - (b.b[1] - b.b[0]));
-    if (!cand.length) { msg.textContent = '⚠ ' + L.cc + ' に、この値段（' + price + '）が入る Request page が見つかりません（価格帯・100明細・価格差 ' + lim + '倍）。手で選んでください'; return; }
-    const pick = cand[0];
+    /* ★2026-10-24 本人「request page は価格差4倍制限（ブラジルは4倍、他国は違う）とか、明細が100個になったらもう追加できないので、新しく作らないといけない」「オブシディアン見て」
+       入れ先は【実際の値段】で選ぶ（名前の「400~2000」等の幅は実際の値段と合っていないページがある＝SG は 2000~10000 の名前で 37〜166 SGD）。
+       条件＝公開中・100明細未満・足した後の最高÷最安が上限（BR 4倍・他 5倍）以内。名前の幅に入るページを先に、次に値段の真ん中が近い順。
+       どこにも入らない時だけ、値段の近いページを次の番号（①②…・国の全店で数える）で複製して作る（スキル catalog-create）。作ったページは非公開＝公開はボタンで本人が決める */
+    const parseMs = (c) => { let ms = c.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } } return (ms || []).filter(m => m && m.id); };
+    const all = (cats || []).map(c => { const ms = parseMs(c); const ps = ms.map(m => Number(m.price) || 0).filter(v => v > 0); const b = pcReqBand(c.name); const lo = ps.length ? Math.min.apply(null, ps) : price, hi = ps.length ? Math.max.apply(null, ps) : price; const lo2 = Math.min(lo, price), hi2 = Math.max(hi, price); return { c, ms, b, inBand: price >= b[0] && price <= b[1], ratio: lo2 > 0 ? hi2 / lo2 : 99, mid: Math.sqrt(lo * hi) }; });
+    const cand = all.filter(x => x.c.status === 1 && x.ms.length < 100 && x.ratio <= lim)
+      .sort((a, b) => ((b.inBand ? 1 : 0) - (a.inBand ? 1 : 0)) || (Math.abs(Math.log(a.mid / price)) - Math.abs(Math.log(b.mid / price))));
+    let pick = cand[0] || null, madeNew = false;
+    if (!pick) {
+      if (!all.length) { msg.textContent = '⚠ ' + L.cc + ' に Request page が1つもありません（複製の元が無い）。Seller Center で1つ作ってください'; return; }
+      msg.textContent = '入る Request page が無いので（満杯・価格差 ' + lim + '倍）、新しく作っています…（2分ほど）';
+      try { pick = await pcReqNewPage(L, all, price); madeNew = true; } catch (eN) { msg.textContent = '❌ 新しい Request page を作れませんでした: ' + String((eN && eN.message) || eN).slice(0, 140); return; }
+    }
     const nm = (L.buyer + ' ' + (L.title || pcQuote.q || '')).replace(/\s+/g, ' ').trim().slice(0, 30);
     if (pick.ms.some(m => String(m.n || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細がもうあります: ' + nm; return; }
     /* ★2026-10-24 確認ダイアログはやめる（本人の決め：確認は削除だけ・10/3）。押した瞬間に下の文言が変わる */
@@ -9508,17 +9537,30 @@
       let rImg = ''; try { rImg = await pcReservedImage(L.buyer, d.img || ''); } catch (eI) { rImg = ''; }
       if (!rImg) throw new Error('「Reserved for」の画像を作れませんでした（書き込みキー sbSecret・画像の置き場 listing-imgs を確かめてください）');
       msg.textContent = '追加しています…（1分ほど）';
-      await sbUpsert('app_kv', [{ k: kv, v: { items: [{ option: nm, price: price, stock: 1, sku: ('REQ_' + (L.ref || L.buyer)).slice(0, 40), image: rImg }] }, updated_at: new Date().toISOString() }]);
+      await sbUpsert('app_kv', [{ k: kv, v: { items: [{ option: nm, price: price, stock: 1, sku: ('REQ_' + (L.ref || L.buyer)).slice(0, 40), image: madeNew ? '' : rImg }] }, updated_at: new Date().toISOString() }]);
       const res = await gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv }, 300000));
       if (!res || res.ok === false || !(Number(res.added) > 0)) throw new Error((res && (res.error || JSON.stringify(res).slice(0, 120))) || '返事がありません');
+      if (madeNew) {   /* ★複製に付いてくる仮の明細 test を消す（位置を動かさない消し方）→ 写真を付け直す（test に画像が無いので足す時は画像なしで入る） */
+        msg.textContent = '仮の明細（test）を消して、写真を付けています…';
+        await new Promise(z => setTimeout(z, 3000));
+        const gm = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000);
+        const tm = (((gm || {}).data || {}).models || []).find(m => String(m.name || '').trim().toLowerCase() === 'test');
+        if (tm) { const dr = await gasSerial(() => gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, mids: String(tm.model_id) }, 300000)); if (!dr || dr.ok === false) throw new Error('仮の明細 test を消せませんでした: ' + String((dr && dr.error) || '').slice(0, 80)); await new Promise(z => setTimeout(z, 3000)); }
+        const ik = 'reqimg_' + pick.c.item_id + '_' + Date.now().toString(36);
+        await sbUpsert('app_kv', [{ k: ik, v: { items: [{ option: nm, url: rImg }] }, updated_at: new Date().toISOString() }]);
+        const ir = await gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: ik }, 300000));
+        if (!ir || ir.ok === false || ir.failed) throw new Error('写真を付けられませんでした: ' + String((ir && (ir.error || JSON.stringify(ir))) || '').slice(0, 100));
+      }
       /* 仕入れ目安を残す（依頼品の仕入値＝見積もりに使った中古の値段） */
       try { await sbUpsert('app_kv', [{ k: 'req_quote_' + L.cc + '_' + pick.c.item_id + '_' + Date.now().toString(36), v: { at: new Date().toISOString(), ref: L.ref, sku: 'REQ_' + (L.ref || L.buyer), cc: L.cc, item_id: pick.c.item_id, option: nm, price, pp: L.ppL, pp_cur: (L.cc === 'MY' || L.cc === 'VN') ? 'JPY' : L.ISO, pp_jpy: Math.ceil(L.ppJ || 0), iso: L.ISO, plan: L.plan, buyer: L.buyer, title: L.title, cost: Math.round(Number(d.eff || d.price)), src: d.url || '', site: d.site || '' }, updated_at: new Date().toISOString() }]); } catch (_) {}
       const rg = regionByCc(L.cc) || {}; const link = 'https://' + (rg.buyer || 'shopee.com.br') + '/product/' + pick.c.shop_id + '/' + pick.c.item_id;   /* ★2026-10-24 レビュー：host はセラー用（seller.shopee…）＝お客さんは開けない→買い手用の buyer */
-      pcQuote.link = link; pcQuote.optName = nm; pcRefFix();
+      pcQuote.link = link; pcQuote.optName = nm; pcQuote.madeNew = madeNew; pcRefFix();
       const ta = document.getElementById('pc-q-text') || document.createElement('textarea');   /* 一瞬の処理（長く回さない） */
       if (L.plan === '1' && ((document.getElementById('pc-q-stage') || {}).value === 'deal')) { delete ta.dataset.edited; try { pcQuoteRender(); } catch (_) {} }   /* ★2026-10-24 ①の案内文はリンク入りで描き直す */
       else { const add = '\n\nReady! Here is the link — please choose the option "' + nm + '":\n' + link; ta.value = ta.value + add; ta.dataset.edited = '1'; }
-      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '）。文面の最後にリンクを足しました → 📋 コピーして送ってください';
+      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '）。文面にリンクを入れました → 📋 コピーするか 💬 入力欄へ'
+        + (madeNew ? '<br><b style="color:#b45309">🆕 新しい Request page を作りました（非公開）。お客さんが買えるように公開してください →</b> <button type="button" class="smd-btn" id="pc-q-reqpub" style="font-size:11px;padding:2px 9px">▶ 公開する</button>' : '');
+      if (madeNew) { const pb2 = document.getElementById('pc-q-reqpub'); if (pb2) pb2.onclick = () => { pb2.disabled = true; pb2.textContent = '⏳ 公開しています…'; gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, unlist: 0 }, 60000).then(ur => { if (ur && ur.ok === false) throw new Error(ur.error || ''); pb2.textContent = '✅ 公開しました'; }).catch(eP => { pb2.disabled = false; pb2.textContent = '❌ 公開できませんでした（もう一度）'; try { toast('公開できませんでした: ' + String((eP && eP.message) || eP).slice(0, 80)); } catch (_) {} }); }; }
       try { refreshOneListing(L.cc, pick.c.item_id, pick.c.shop_id); } catch (_) {}
       try { logAct('出品', '依頼品をRequest pageへ', nm, L.cc + ' ' + price + (L.ppL ? '＋PayPal ' + L.ppL : '')); } catch (_) {}
     } catch (e) { msg.textContent = '❌ 足せませんでした: ' + String((e && e.message) || e).slice(0, 120) + '（Shopee の画面で確かめてから、もう一度押すか手で足してください）'; }
@@ -10107,6 +10149,7 @@
                   if (!ttl.trim() || /[\u3040-\u30ff\u4e00-\u9fff]/.test(ttl)) { const t2 = '英語の商品名がありません（日本語のまま）。この画面で直して 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t2; tell(false, t2); return; }
                   await pcQuoteAddReq();
                   if (!pcQuote.link) { const t3 = (mm && mm.textContent) || 'Request page に足せませんでした'; tell(false, t3); return; }
+                  if (pcQuote.madeNew) { const t6 = '入る Request page が無かったので新しく作りました（非公開）。ポータルの「▶ 公開する」を押してから、案内文を送ってください'; tell(false, t6); return; }   /* 公開は本人が決める＝閉じずに残す */
                   pcQuoteToChat();
                   setTimeout(() => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? 'Request page に足して、案内文を入力欄に入れました' : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }, 3600);
                 } catch (eA) { const t5 = '自動で進められませんでした: ' + String((eA && eA.message) || eA).slice(0, 120); if (mm) mm.textContent = '❌ ' + t5; tell(false, t5); }
@@ -22575,6 +22618,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
+      '📑 <b>Request page の入れ先を実際の値段で選ぶ・入らなければ新しく作る</b>（本人「価格差4倍制限（ブラジルは4倍、他国は違う）」「明細が100個になったら新しく作らないといけない」）：名前の値段の幅ではなく、明細が100未満・足した後の価格差が上限（BR 4倍・他 5倍）以内のページを選びます（名前の幅に入るページを優先）。どこにも入らない時は、値段の近いページを次の番号（①②…）で複製して作り、明細を足して「Reserved for」の写真を付けます。作ったページは非公開なので「▶ 公開する」で公開してください。',
       '🤖 <b>依頼品の入口に「自動で進める」</b>（本人「ワッツアップからできないの？」）：&auto=1 と値段・英語の商品名を付けて開くと、ポータルが裏で 🛒 Request page に追加 → 案内文をチャットの入力欄へ → 閉じる、まで進めます。足りない物がある時や失敗した時は、この画面に理由を出して残り、開いた元にも結果を返します。',
       '🛒 <b>Request page への依頼品の追加を「だれだれ専用」の画像に</b>（本人「こんな感じの画像にして欲しい」）：「🛒 Request page に追加」で、仕入れ先の写真の上に赤い帯「Reserved for [相手] / Other customers cannot purchase.」を付けた画像を作って明細の写真にします（写真が取れない時は帯だけ）。確認の画面は出さなくなりました。<b>仕入れ予定のリンクから開く入口</b>も追加（#pricecalc?…&cost=仕入額&url=仕入れ先&price=約束した値段）＝検索せずにその仕入れ先で計算し、🛒 追加 → 💬 入力欄へ で案内文まで。',
       '💬 <b>WhatsApp の 💴 から開いた時も「💬 WhatsApp の入力欄へ」</b>（本人「ワッツアップからリンクを送るパターンもありそう」）：見積もりの文面（🛒 Request page に追加の後ならリンク入り）を、開いた元の WhatsApp の入力欄に入れます。開いている会話の相手が見積もりの相手と違う時は入れずにコピーだけ。送信はしません。WhatsApp のスクリプト v1.4.13 が要ります。',
