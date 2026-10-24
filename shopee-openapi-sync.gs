@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0700';
+var SRC_VER = '20261025-0730';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8624,7 +8624,7 @@ function boshuAutoTick(manual) {
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
-    try { var _gjt = baGameJanTodoFlush_(); if (out.nojan) baLog_(st, '🔢 JAN が無いので出さなかった ' + out.nojan + '作品（うち写真あり ' + (out.nojanPh || 0) + '＝夜の JAN 調べに ' + _gjt + '件積んだ・写真の無い作品は写真が集まってから積む）');   /* ★2026-10-25 05：md が「0件積んだ」の理由がログで分からなかった */ } catch (eGJ) {}
+    try { var _gjt = baGameJanTodoFlush_(); if (out.nojan) baLog_(st, '🔢 JAN が無いので出さなかった ' + out.nojan + '作品（うち写真あり ' + (out.nojanPh || 0) + '＝夜の JAN 調べに ' + _gjt + '件積んだ' + (BA_JAN_TODO_LAST && BA_JAN_TODO_LAST.waiting >= 0 ? '・待ち ' + BA_JAN_TODO_LAST.waiting + '件' + (BA_JAN_TODO_LAST.pruned ? '（答えの入った物など ' + BA_JAN_TODO_LAST.pruned + '件を外した）' : '') : '') + '・写真の無い作品は写真が集まってから積む）');   /* ★2026-10-25 05：md が「0件積んだ」の理由がログで分からなかった */ } catch (eGJ) {}
     /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
@@ -9969,18 +9969,35 @@ function baGameJanOf_(hw, c) {
   return '';
 }
 function baGameJanTodo_(hw, c) {
+  if (BA_JAN_TODO_LOOSE.test(String(hw || ''))) return;
   var k = ('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90);
   if (BA_GAME_JAN_TODO[k] || Object.keys(BA_GAME_JAN_TODO).length >= BA_GAME_JAN_TODO_MAX) return;
   BA_GAME_JAN_TODO[k] = { hw: String(hw || ''), ja: String((c && c.ja) || '').slice(0, 80), en: String((c && c.en) || '').slice(0, 60), sg: baGameJanKey_(hw, c), game: 1, at: new Date().toISOString() };
 }
+/* ★2026-10-25 05・01 商品部：jan_todo_auto 251件のうち本当の待ちは39件だった（答え済み150・ばら売り49・7日以内に調べて無かった13）。
+   答えが入っても鍵が残るので、件数が実際の待ちより多く見えていた → 書く時に、読み直した中身から「答えが入った物」「ばら売りの区分」を外す。
+   答えの控え jan_sg_cache は、この実行ですでに読んでいる時（BA_GAME_JAN）だけ使う＝読む量を増やさない。7日以内に調べて無かった物は Mac 側の done.txt にあり GAS からは見えない＝待ちに数える */
+var BA_JAN_TODO_LOOSE = /^(yokai|mezastar|frienda|acnh)$/;
+function baJanTodoAnswered_(e) { if (!e || typeof e !== 'object' || !BA_GAME_JAN) return false; var sg = String(e.sg || ''); return !!(sg && baJanReal_(String(BA_GAME_JAN[sg] || ''))); }
+function baJanTodoWrite_(one) {   /* 返り＝{ pushed: 足した数, waiting: 書いた後の待ちの数, pruned: 外した数 }。読めなければ書かない */
+  var fr = baKvFreshMany_(['jan_todo_auto']); if (!fr) return { pushed: 0, waiting: -1, pruned: 0 };
+  var base = (fr['jan_todo_auto'] && typeof fr['jan_todo_auto'] === 'object' && !Array.isArray(fr['jan_todo_auto'])) ? fr['jan_todo_auto'] : {};
+  var out = {}, pushed = 0, pruned = 0;
+  Object.keys(base).forEach(function (k) { var e = base[k]; if (/^__/.test(k)) return; if (e && (BA_JAN_TODO_LOOSE.test(String(e.hw || '')) || baJanTodoAnswered_(e))) { pruned++; return; } out[k] = e; });
+  Object.keys(one || {}).forEach(function (k) { var e = one[k]; if (!e || BA_JAN_TODO_LOOSE.test(String(e.hw || '')) || baJanTodoAnswered_(e)) return; if (!out[k]) pushed++; out[k] = e; });
+  if (pushed || pruned) baKvSet_('jan_todo_auto', out);
+  return { pushed: pushed, waiting: Object.keys(out).length, pruned: pruned };
+}
+var BA_JAN_TODO_LAST = null;
 function baGameJanTodoFlush_() {
   var ks = Object.keys(BA_GAME_JAN_TODO); if (!ks.length) return 0;
   var one = BA_GAME_JAN_TODO; BA_GAME_JAN_TODO = {};
-  baKvSetMerged_('jan_todo_auto', one, baKvFreshMany_(['jan_todo_auto']), 0);   /* 読み直して重ねる＝トレカ側の積みを消さない・読めなければ書かない */
-  return ks.length;
+  BA_JAN_TODO_LAST = baJanTodoWrite_(one);   /* 読み直して重ねる＝トレカ側の積みを消さない・読めなければ書かない・答えの入った物とばら売りは外す */
+  return BA_JAN_TODO_LAST.pushed;
 }
 function tcgJanTodoPush_(hw, c) {
-  try { var one = {}; var k = String((c && c.key) || hw + ':' + String((c && c.ja) || '')).slice(0, 80); one[k] = { hw: hw, ja: String((c && c.ja) || '').slice(0, 80), en: String((c && c.en) || '').slice(0, 60), sg: (String((c && c.key) || '').split(':')[1] || ''), at: new Date().toISOString() }; baKvSetMerged_('jan_todo_auto', one, baKvFreshMany_(['jan_todo_auto']), 0); } catch (e) {}
+  if (BA_JAN_TODO_LOOSE.test(String(hw || ''))) return;   /* ★2026-10-25 ばら売りは JAN が要らない＝積まない */
+  try { var one = {}; var k = String((c && c.key) || hw + ':' + String((c && c.ja) || '')).slice(0, 80); one[k] = { hw: hw, ja: String((c && c.ja) || '').slice(0, 80), en: String((c && c.en) || '').slice(0, 60), sg: (String((c && c.key) || '').split(':')[1] || ''), at: new Date().toISOString() }; BA_JAN_TODO_LAST = baJanTodoWrite_(one); } catch (e) {}
 }
 function baListLogWrite_(st, t0) {
   var since = new Date((Number(t0) || Date.now()) - 2000).toISOString();
