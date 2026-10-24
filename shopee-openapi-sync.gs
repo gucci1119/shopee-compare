@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-1200';
+var SRC_VER = '20261024-1600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1770,7 +1770,11 @@ function aiActualIngest_(body) {
     var fresh = {};
     rows.forEach(function (r) { if (!r) return; var d = String(r.d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return; var m = String(r.model || '?').slice(0, 60), t = String(r.type || 'cost').slice(0, 40), u = Number(r.usd) || 0;
       var o = fresh[d] = fresh[d] || {}; var mm = o[m] = o[m] || {}; mm[t] = Math.round(((mm[t] || 0) + u) * 10000) / 10000; out.usd += u; });
-    Object.keys(fresh).forEach(function (d) { kv.days[d] = fresh[d]; out.days++; });
+    /* ★2026-10-24 全体レビュー：鍵なしの受け口なので、日の合計が今より減る置き換えは断る（Console の CSV は日ごとの累計で減らない）。0円を送られて月¥30,000のブレーキが効かなくなるのを止める */
+    var sumDay_ = function (o) { var t = 0; Object.keys(o || {}).forEach(function (m) { Object.keys(o[m] || {}).forEach(function (k) { t += Number(o[m][k]) || 0; }); }); return t; };
+    out.skipped = [];
+    Object.keys(fresh).forEach(function (d) { if (kv.days[d] && sumDay_(fresh[d]) + 0.01 < sumDay_(kv.days[d])) { out.skipped.push(d); return; } kv.days[d] = fresh[d]; out.days++; });
+    if (out.skipped.length) kv.refused = { at: new Date().toISOString(), days: out.skipped.slice(0, 31) };   // 断った記録（減る置き換え）
     var cut = Utilities.formatDate(new Date(Date.now() - 400 * 86400000), 'UTC', 'yyyy-MM-dd'); Object.keys(kv.days).forEach(function (d) { if (d < cut) delete kv.days[d]; });
     kv.src = 'console_userscript'; kv.at = new Date().toISOString(); kv.ver = String(body.ver || '');
     baKvSet_('ai_actual', kv);
@@ -3219,6 +3223,10 @@ function cleanVariation_(shopId, itemId) {
   for (var i = 0; i < optList.length; i++) { if (used[i]) keep.push(i); else removed.push(optList[i].option); }
   if (!removed.length) return { ok: true, removed: 0, remain: optList.length };
   if (!keep.length) throw new Error('全ての明細に中身がありません（この商品はここでは直せません）');
+  /* ★2026-10-24 全体レビュー：途中に中身の無い枠があると、後ろの明細の位置を詰めることになる＝位置が動く明細は Shopee が保てず消える（8/15 に3件）。
+     末尾だけの空き枠は位置が動かないので掃除してよい。途中にあれば詰めずに止める（位置を動かさない決まり） */
+  var midGhost = []; for (var g = 0; g < keep[keep.length - 1]; g++) if (!used[g]) midGhost.push(optList[g].option);
+  if (midGhost.length) throw new Error('途中に中身の無い明細の枠があります（' + midGhost.slice(0, 5).join(' / ') + '）。詰めると後ろの明細が消えるので止めました。Seller Center でその枠に中身を入れるか、相談してください');
   var map = {}, newOpts = [];
   keep.forEach(function (oi, ni) { map[oi] = ni; newOpts.push(tierOpt_(optList[oi])); });
   var remap = models.map(function (m) { return remapEntry_(m, map[(m.tier_index || [])[0]]); });
