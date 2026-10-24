@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1000';
+var SRC_VER = '20261025-1030';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5504,8 +5504,12 @@ function finalizedSns_(cc) {
 // ＋ offline_adjustment_list（補償/関税など注文別調整）→ order_adjustments表
 // 調整の分類：プラス金額=補償/返戻、マイナスで duty/customs/tax=関税、その他=other
 function adjKind_(amount, blob) {
-  if (amount > 0) return 'compensation';
+  /* ★2026-10-25 本人「マイナス分であればマイナス、プラスであればプラスと分かるように」→ 名目を先に見る。
+     前は amount>0 を全部 compensation にしていたため、TH の関税の払い戻し（Physical Products Duty Refund）47行が
+     「SLS+補償」に入り、返品・キャンセルの補償の合計と補償メールに混ざっていた。
+     関税・税・輸入の行は符号に関わらず duty（戻りは関税の合計から差し引かれる）。それ以外は今までどおり */
   if (/duty|customs|tax\b|import/i.test(blob)) return 'duty';
+  if (amount > 0) return 'compensation';
   return 'other';
 }
 // payout_listから調整行を作る（複数payoutで共有）
