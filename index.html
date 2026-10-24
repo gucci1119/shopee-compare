@@ -452,6 +452,8 @@
   .nf-amt { margin-left:8px; font-weight:800; white-space:nowrap; }
   .nf-amt.pos { color:#188038; }
   .nf-amt.neg { color:#d93025; }
+  .nf-jpy { margin-left:4px; font-weight:600; font-size:11.5px; white-space:nowrap; }
+  .nf-jpy.pos { color:#188038; } .nf-jpy.neg { color:#d93025; }
   .nf-ac { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
   .nf-ac button { font-size:11px; padding:3px 9px; border:1px solid #ddd; background:#fff; border-radius:6px; cursor:pointer; }
   .nf-ac button.go { border-color:#1565c0; color:#1565c0; }
@@ -8482,6 +8484,8 @@
     [/^通関手数料が引かれました$/, 'Customs declaration fee deducted'], [/^関税が引かれました$/, 'Duty deducted'], [/^税が引かれました$/, 'Tax deducted'],
     [/^物流の手数料が引かれました$/, 'Logistics service fee deducted'], [/^送料が引かれました$/, 'Shipping fee deducted'], [/^広告費が引かれました$/, 'Ads fee deducted'],
     [/^完了後の返金が引かれました$/, 'Refund after completion deducted'], [/^調整（＋）$/, 'Adjustment (+)'], [/^調整（−）$/, 'Adjustment (−)'],
+    [/^（約([＋−])¥(.+)）$/, '(approx. $1¥$2)'], [/^（円換算待ち）$/, '(waiting for JPY rate)'],
+    [/^直近45日のうち古い分です。調整の一覧は「↩️ 返品・キャンセル」の補償・関税の欄で見られます$/, 'Older items within the last 45 days. The full list of adjustments is in the compensation / duty section of ↩️ Returns & Cancellations'],
     [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
     [/^期限 (.+)$/, 'Due $1'],
     [/^届きました：(.+)$/, 'Arrived: $1'], [/^配達中です：(.+)$/, 'Out for delivery: $1'],
@@ -23460,6 +23464,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       const adj = notif._adj.rows;
       const groups = new Map();
+      const fxOk = !!(FXD._doneAt && FXD.days && Object.keys(FXD.days).length);
       (adj || []).forEach(a => {
         const ms = epochMs(a.payout_time);
         if (!isFinite(ms) || ms < lim) return;     // 日付が取れない/45日より前は出さない
@@ -23468,8 +23473,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const day = jstDate(ms);
         const gk = [a.cc, day, lb.t, amt > 0 ? '+' : '-'].join('|');
         let g = groups.get(gk);
-        if (!g) { g = { cc: a.cc, day, lb, sign: amt > 0 ? 1 : -1, ms, sum: 0, n: 0, sns: [], ids: [], src: '' }; groups.set(gk, g); }
+        if (!g) { g = { cc: a.cc, day, lb, sign: amt > 0 ? 1 : -1, ms, sum: 0, n: 0, sns: [], ids: [], src: '', jpy: 0, jpyNg: false }; groups.set(gk, g); }
         g.sum += amt; g.n++; if (ms > g.ms) g.ms = ms;
+        /* 円は ↩️返品・キャンセルの補償の集計（adjRate）と同じ式＝払い出し日のレート×国別スプレッド・1件ずつ四捨五入して足す。
+           為替をまだ読めていない時は既定レートで出さず「円換算待ち」（見積もりで BR 28円が出たのと同じ事故を防ぐ） */
+        if (fxOk) { const r = fxRate(a.cc, new Date(ms).toISOString().slice(0, 10)); if (r) g.jpy += Math.round(amt * r); else g.jpyNg = true; } else g.jpyNg = true;
         if (a.order_sn) g.sns.push(a.order_sn);
         g.ids.push('adj:' + a.cc + ':' + a.order_sn + ':' + a.amount);   // 前の作りの id＝既読の控えを引き継ぐ
         if (!g.src) g.src = [a.module, a.scenario].filter(Boolean).join(' / ');
@@ -23481,6 +23489,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ic: g.sign > 0 ? '💰' : '💸', cat: 'money', kind: 'money',
           at: notifSortKey(jstDateTime(g.ms), g.day),
           ti: g.lb.t, amt: (g.sign > 0 ? '＋' : '−') + (rg.cur || '') + v.toLocaleString(undefined, { minimumFractionDigits: dec, maximumFractionDigits: dec }), amtSign: g.sign,
+          jpyTxt: g.jpyNg ? '（円換算待ち）' : '（約' + (g.jpy >= 0 ? '＋' : '−') + '¥' + Math.abs(g.jpy).toLocaleString() + '）',
           sb: [notifWhen(jstDateTime(g.ms), '入金'), g.cc, g.n > 1 ? g.n + '件' : (g.sns[0] ? '注文番号 ' + g.sns[0] : '')].filter(Boolean).join('　'),
           raw: g.lb.raw ? g.src : '' });   // 名目が分からない時だけ、元の英語の名目を下の行に出す
       });
@@ -23503,6 +23512,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // カテゴリごとに上限をかける（ベルが埋まると読まなくなる）
     const cap = { order: 40, parcel: 40, ship: 30, money: 20, todo: 20 }, seen = {}, kept = [], over = {};
     out.forEach(x => { const c = x.cat || 'todo'; seen[c] = (seen[c] || 0) + 1; if (seen[c] <= (cap[c] || 20)) kept.push(x); else over[c] = (over[c] || 0) + 1; });
+    if (over.money) kept.push({ id: 'more:money:' + jstDate(Date.now()), ic: '🧹', cat: 'money', kind: 'more', at: '',
+      ti: 'ほか ' + over.money + '件あります', sb: '直近45日のうち古い分です。調整の一覧は「↩️ 返品・キャンセル」の補償・関税の欄で見られます' });
     if (over.parcel) kept.push({ id: 'more:' + jstDate(Date.now()), ic: '🧹', cat: 'parcel', kind: 'more', at: '',
       ti: 'ほか ' + over.parcel + '件あります', sb: '古い入庫待ちは「🧹長期滞留の点検」でまとめて受け取れます' });
     notif.items = kept;
@@ -23585,7 +23596,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ? `<img src="${/^https?:/.test(x.img) ? esc(x.img) : IMG_CDN + esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" title="${av(x.ti || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:6px;background:#f2f2f2;display:block" onerror="this.replaceWith(document.createTextNode('${x.ic}'))">`
           : x.ic}</div>
         <div class="nf-bd">
-          <div class="nf-ti">${esc(x.ti)}${x.amt ? `<span class="nf-amt ${x.amtSign > 0 ? 'pos' : 'neg'}">${esc(x.amt)}</span>` : ''}</div>
+          <div class="nf-ti">${esc(x.ti)}${x.amt ? `<span class="nf-amt ${x.amtSign > 0 ? 'pos' : 'neg'}">${esc(x.amt)}</span>${x.jpyTxt ? `<span class="nf-jpy ${x.amtSign > 0 ? 'pos' : 'neg'}">${esc(x.jpyTxt)}</span>` : ''}` : ''}</div>
           <div class="nf-sb">${esc(x.sb)}</div>
           ${x.raw ? `<div class="nf-sb">${esc(x.raw)}</div>` : ''}
           <div class="nf-ac">
@@ -23764,6 +23775,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-10-25', items: [
       '💰 <b>お知らせのお金の行に「＋／−」と名目を付けました</b>（本人「もしマイナス分であればマイナス、プラスであればプラスと分かるように」・きっかけは TH の ฿111）：前は払い出しの調整のうちプラスの分だけを、全部「調整金が入りました」と出していました。TH の ฿111 などは補償ではなく<b>関税の払い戻し</b>（Physical Products Duty Refund）でした。いまは名目で見出しを分けます（「SLS+の補償が入りました」「関税が払い戻されました」「関税が引かれました」「通関手数料が引かれました」「物流の手数料が引かれました」など）。金額は入った分を緑の「＋」、引かれた分を赤の「−」で出します。<b>引かれた分も出す</b>ようにしました。物流の手数料は約780件あるので、<b>同じ日・同じ国・同じ名目は1行にまとめて件数と合計</b>を出します。名目が分からない時は「調整（＋）／（−）」と書き、元の英語の名目を下に出します。今ある1,294件は全部、名目のある見出しに分かれました。',
+      '💴 <b>お知らせのお金の行に、日本円の目安を並べました</b>（本人「これ現地の為替だから、日本円でいくら入ってきたかが分かるようにしておいてください」）：「＋฿7,337（約＋¥34,3xx）」のように出します。円は「↩️ 返品・キャンセル」の補償の集計と同じ式（払い出し日のレート×国別の実効スプレッド・1件ずつ四捨五入して足す）なので、両方の画面で同じ額になります。為替をまだ読めていない時は、古い既定のレートで出さずに「（円換算待ち）」と出します。お金の行が20行を超えた時は「ほか N件あります」を出すようにしました（前は黙って隠れていました）。',
     ] },
     { date: '2026-10-24', items: [
       '🗂 <b>写真の控えを機種ごとの鍵にも保存するようにしました（二重書き）</b>：🤖の写真の控え（約1,740万字）を、巡回のたびに全部読んでいました。機種ごとの鍵（boshu_auto_pre_h_機種）に分けて、巡回はその機種の分だけ読む準備です。今は今までの8分割にも同じ物を書いていて、動きは変わりません。GAS が移す処理を1回走らせた後に、3日並べて動かして毎日ずれを点検し、問題が無ければ台ごとに切り替えます（05 情報システム部の判断）。',
