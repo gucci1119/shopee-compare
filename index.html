@@ -449,6 +449,9 @@
   .nf-bd { flex:1; min-width:0; }
   .nf-ti { font-weight:700; color:#0f172a; }
   .nf-sb { color:#64748b; font-size:11px; margin-top:1px; }
+  .nf-amt { margin-left:8px; font-weight:800; white-space:nowrap; }
+  .nf-amt.pos { color:#188038; }
+  .nf-amt.neg { color:#d93025; }
   .nf-ac { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
   .nf-ac button { font-size:11px; padding:3px 9px; border:1px solid #ddd; background:#fff; border-radius:6px; cursor:pointer; }
   .nf-ac button.go { border-color:#1565c0; color:#1565c0; }
@@ -8472,7 +8475,14 @@
     [/^追跡の最終取り込み (.+)$/, 'Tracking last synced $1'], [/^（(\d+)分前）。取り込みは$/, '($1 min ago). It syncs'],
     [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'], [/^入金 (.+)$/, 'Paid $1'],
     [/^発送期限が過ぎています：(.+)$/, 'Shipping deadline has passed: $1'], [/^今日が発送期限です：(.+)$/, 'Shipping deadline is today: $1'],
-    [/^調整金が入りました：(.+)$/, 'Adjustment received: $1'], [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
+    [/^調整金が入りました：(.+)$/, 'Adjustment received: $1'],
+    [/^関税が払い戻されました$/, 'Duty refunded'], [/^税が払い戻されました$/, 'Tax refunded'], [/^返金の補償が入りました$/, 'Refund compensation received'],
+    [/^SLS\+の補償が入りました$/, 'SLS+ compensation received'], [/^補償が入りました（争いの判定）$/, 'Compensation received (dispute ruling)'],
+    [/^返送料の補助が入りました$/, 'Return shipping subsidy received'], [/^返送料が戻りました$/, 'Return shipping fee reimbursed'],
+    [/^通関手数料が引かれました$/, 'Customs declaration fee deducted'], [/^関税が引かれました$/, 'Duty deducted'], [/^税が引かれました$/, 'Tax deducted'],
+    [/^物流の手数料が引かれました$/, 'Logistics service fee deducted'], [/^送料が引かれました$/, 'Shipping fee deducted'], [/^広告費が引かれました$/, 'Ads fee deducted'],
+    [/^完了後の返金が引かれました$/, 'Refund after completion deducted'], [/^調整（＋）$/, 'Adjustment (+)'], [/^調整（−）$/, 'Adjustment (−)'],
+    [/^発送済なのに追跡番号がありません：(.+)$/, 'Marked shipped but has no tracking number: $1'],
     [/^期限 (.+)$/, 'Due $1'],
     [/^届きました：(.+)$/, 'Arrived: $1'], [/^配達中です：(.+)$/, 'Out for delivery: $1'],
     [/^受け取り済みにしました：(.+)$/, 'Marked received: $1'],
@@ -23272,6 +23282,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (typeof v === 'number' || /^\d+$/.test(String(v))) { const n = Number(v); return n < 1e11 ? n * 1000 : n; }
     const t = Date.parse(v); return isFinite(t) ? t : NaN;
   }
+  // 💰 払い出しの調整（order_adjustments）の名目 → お知らせの見出し。{ t:見出し, raw:名目が分からない }
+  //   ★2026-10-25 本人「マイナス分であればマイナス、プラスであればプラスと分かるように」。
+  //     名目は 2026-10-25 時点の実データ 1,294行・17種から（module＋scenario で見る。remark は読まない）。
+  //     GAS の kind（amount>0 は全部 compensation）は使わない＝関税の払い戻しが「補償」に入っているため。
+  function adjNotifLabel(a, amt) {
+    const mod = String(a.module || ''), blob = (mod + ' ' + (a.scenario || '') + ' ' + (a.remark || '')).toLowerCase();
+    if (amt > 0) {
+      if (/duty|customs/.test(blob)) return { t: '関税が払い戻されました' };
+      if (/\btax\b|vat|pit\b/.test(blob)) return { t: '税が払い戻されました' };
+      if (/^refund amount$/i.test(mod)) return { t: '返金の補償が入りました' };
+      if (/non-receipt|lost|damage|sls\+|^compensation$/.test(mod.toLowerCase()) || /logistics compensation/.test(blob)) return { t: 'SLS+の補償が入りました' };
+      if (/agent/.test(blob)) return { t: '補償が入りました（争いの判定）' };
+      if (/subsidy|reverse shipping/.test(blob)) return { t: '返送料の補助が入りました' };
+      if (/return shipping/.test(blob)) return { t: '返送料が戻りました' };
+      return { t: '調整（＋）', raw: true };
+    }
+    if (/import customs declaration/.test(blob)) return { t: '通関手数料が引かれました' };
+    if (/duty|customs|import/.test(blob)) return { t: '関税が引かれました' };
+    if (/\btax\b|vat|pit\b/.test(blob)) return { t: '税が引かれました' };
+    if (/logistics (provider )?service fee|export documentation/.test(blob)) return { t: '物流の手数料が引かれました' };
+    if (/actual shipping fee|asf/.test(blob)) return { t: '送料が引かれました' };
+    if (/marketing|paid ads/.test(blob)) return { t: '広告費が引かれました' };
+    if (/^refund amount$/i.test(mod) || /return refund/.test(blob)) return { t: '完了後の返金が引かれました' };
+    return { t: '調整（−）', raw: true };
+  }
   // スキャン時刻の表記ゆれ（2026/08/10 14:32 / 08/10 14:32 / 8月10日 14:32）を「今日 14:32」等の読みやすい形に
   function notifWhen(t, label) {
     const raw = String(t || '').trim(); if (!raw) return '';
@@ -23410,18 +23445,44 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           sn: o.sn, cc: o.cc });
       });
     } catch (_) {}
-    // ── 💰 お金：Shopeeからの調整金（SLS+の補償など）が入った
+    // ── 💰 お金：Shopee の払い出しに入った調整（プラス＝入った・マイナス＝引かれた）
+    //   ★2026-10-25 本人「もしマイナス分であればマイナス、プラスであればプラスと分かるように」
+    //     （TH ฿111 は補償ではなく関税の払い戻し＝「Physical Products Duty Refund」）。
+    //     前は amount>0 だけを全部「調整金が入りました」と出していた。名目で見出しを分け、金額に＋／−を付ける。
+    //     引かれた分も出す。ただし物流の手数料（約780件）や VN の通関手数料は1件ずつだと埋まるので、
+    //     同じ日・同じ国・同じ名目・同じ向きは1行にまとめて件数と合計を出す。
     try {
-      const adj = await sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,remark,payout_time&amount=gt.0&order=payout_time.desc&limit=60');
       const lim = Date.now() - 45 * 86400000;
+      /* 引かれた分も読むので行が 60→約800 に増える（物流の手数料が7割）。調整は1日1回ほどしか増えないので、
+         読んだ結果を60分持ち回す（お知らせは10分ごと＋開くたびに作り直す）＝読む量は前とほぼ同じ */
+      if (!notif._adj || Date.now() - notif._adj.at > 3600000) {
+        notif._adj = { at: Date.now(), rows: await sbGetAll('order_adjustments', 'select=cc,order_sn,amount,module,scenario,payout_time&payout_time=gte.' + Math.floor(lim / 1000) + '&order=payout_time.desc') };
+      }
+      const adj = notif._adj.rows;
+      const groups = new Map();
       (adj || []).forEach(a => {
         const ms = epochMs(a.payout_time);
         if (!isFinite(ms) || ms < lim) return;     // 日付が取れない/45日より前は出さない
-        const rg = regionByCc(a.cc) || {};
-        out.push({ id: 'adj:' + a.cc + ':' + a.order_sn + ':' + a.amount, ic: '💰', cat: 'money', kind: 'money',
-          at: notifSortKey(jstDateTime(ms), jstDate(ms)),
-          ti: '調整金が入りました：' + (rg.cur || '') + Math.round(Number(a.amount) || 0).toLocaleString(),
-          sb: [notifWhen(jstDateTime(ms), '入金'), a.cc, a.module || '', a.remark || '', '注文番号 ' + a.order_sn].filter(Boolean).join('　') });
+        const amt = Number(a.amount) || 0; if (!amt) return;
+        const lb = adjNotifLabel(a, amt);
+        const day = jstDate(ms);
+        const gk = [a.cc, day, lb.t, amt > 0 ? '+' : '-'].join('|');
+        let g = groups.get(gk);
+        if (!g) { g = { cc: a.cc, day, lb, sign: amt > 0 ? 1 : -1, ms, sum: 0, n: 0, sns: [], ids: [], src: '' }; groups.set(gk, g); }
+        g.sum += amt; g.n++; if (ms > g.ms) g.ms = ms;
+        if (a.order_sn) g.sns.push(a.order_sn);
+        g.ids.push('adj:' + a.cc + ':' + a.order_sn + ':' + a.amount);   // 前の作りの id＝既読の控えを引き継ぐ
+        if (!g.src) g.src = [a.module, a.scenario].filter(Boolean).join(' / ');
+      });
+      groups.forEach(g => {
+        const rg = regionByCc(g.cc) || {};
+        const v = Math.abs(g.sum), dec = v < 100 && Math.round(v) !== v ? 2 : 0;
+        out.push({ id: g.n === 1 ? g.ids[0] : 'adjg:' + [g.cc, g.day, g.lb.t, g.sign > 0 ? '+' : '-'].join(':'), subIds: g.n > 1 ? g.ids : null,
+          ic: g.sign > 0 ? '💰' : '💸', cat: 'money', kind: 'money',
+          at: notifSortKey(jstDateTime(g.ms), g.day),
+          ti: g.lb.t, amt: (g.sign > 0 ? '＋' : '−') + (rg.cur || '') + v.toLocaleString(undefined, { minimumFractionDigits: dec, maximumFractionDigits: dec }), amtSign: g.sign,
+          sb: [notifWhen(jstDateTime(g.ms), '入金'), g.cc, g.n > 1 ? g.n + '件' : (g.sns[0] ? '注文番号 ' + g.sns[0] : '')].filter(Boolean).join('　'),
+          raw: g.lb.raw ? g.src : '' });   // 名目が分からない時だけ、元の英語の名目を下の行に出す
       });
     } catch (_) {}
     // ── ⚠️ 要対応：発送済なのに追跡番号が無い（＝配送事故を見逃す）
@@ -23452,6 +23513,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function nfIsRead(rd, x) {
     if (rd[x.id]) return true;
     if (x.kind === 'more') return true;
+    if (x.subIds && x.subIds.length && x.subIds.every(id => rd[id])) return true;   // まとめた💰の行＝中の1件ずつが全部既読なら既読
     if (x.cat === 'parcel' && x.itemId) {
       if (rd['arr:' + x.itemId] || rd['out:' + x.itemId]) return true;
       const p = 'late:' + x.itemId + ':'; return Object.keys(rd).some(k => k.startsWith(p));
@@ -23523,8 +23585,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ? `<img src="${/^https?:/.test(x.img) ? esc(x.img) : IMG_CDN + esc(x.img)}" referrerpolicy="no-referrer" loading="lazy" title="${av(x.ti || '')}" style="width:34px;height:34px;object-fit:cover;border-radius:6px;background:#f2f2f2;display:block" onerror="this.replaceWith(document.createTextNode('${x.ic}'))">`
           : x.ic}</div>
         <div class="nf-bd">
-          <div class="nf-ti">${esc(x.ti)}</div>
+          <div class="nf-ti">${esc(x.ti)}${x.amt ? `<span class="nf-amt ${x.amtSign > 0 ? 'pos' : 'neg'}">${esc(x.amt)}</span>` : ''}</div>
           <div class="nf-sb">${esc(x.sb)}</div>
+          ${x.raw ? `<div class="nf-sb">${esc(x.raw)}</div>` : ''}
           <div class="nf-ac">
             ${x.kind === 'arrived' || x.kind === 'likely' ? `<button class="ok nf-recv" data-item="${esc(x.itemId)}" title="在庫台帳の状態を「在庫保管中」にします">✅ 受け取った</button>` : ''}
             ${x.kind === 'arrivedAuto' ? '<span class="smd-dim" style="font-size:10.5px;color:#1a7f37">✓ 配達完了の記録が出たので、自動で在庫保管中にしました（3日たつとこの行は消えます）</span>' : ''}
@@ -23699,6 +23762,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-25', items: [
+      '💰 <b>お知らせのお金の行に「＋／−」と名目を付けました</b>（本人「もしマイナス分であればマイナス、プラスであればプラスと分かるように」・きっかけは TH の ฿111）：前は払い出しの調整のうちプラスの分だけを、全部「調整金が入りました」と出していました。TH の ฿111 などは補償ではなく<b>関税の払い戻し</b>（Physical Products Duty Refund）でした。いまは名目で見出しを分けます（「SLS+の補償が入りました」「関税が払い戻されました」「関税が引かれました」「通関手数料が引かれました」「物流の手数料が引かれました」など）。金額は入った分を緑の「＋」、引かれた分を赤の「−」で出します。<b>引かれた分も出す</b>ようにしました。物流の手数料は約780件あるので、<b>同じ日・同じ国・同じ名目は1行にまとめて件数と合計</b>を出します。名目が分からない時は「調整（＋）／（−）」と書き、元の英語の名目を下に出します。今ある1,294件は全部、名目のある見出しに分かれました。',
+    ] },
     { date: '2026-10-24', items: [
       '🗂 <b>写真の控えを機種ごとの鍵にも保存するようにしました（二重書き）</b>：🤖の写真の控え（約1,740万字）を、巡回のたびに全部読んでいました。機種ごとの鍵（boshu_auto_pre_h_機種）に分けて、巡回はその機種の分だけ読む準備です。今は今までの8分割にも同じ物を書いていて、動きは変わりません。GAS が移す処理を1回走らせた後に、3日並べて動かして毎日ずれを点検し、問題が無ければ台ごとに切り替えます（05 情報システム部の判断）。',
       '✂️ <b>見積もりの文面から「(shipping included)／（送料込み）」を外しました</b>（本人「(shipping included). って必要かな？」）：お客さんが Shopee の会計で別に送料を払うことがあるかは確かめられていないので、言い切らないようにしました（値段の計算は変わりません）。',
