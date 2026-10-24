@@ -19951,6 +19951,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const pl = { autoDone: {}, tplAt: 0, tpl: null };
   const PL_AUTO_TAG = '[自動]';
   const PL_YAMATO_TAG = '[自動:ヤマト]';
+  /* ★2026-10-24 レビュー#4：自動で入る行（[自動] [自動:ヤマト] [Claude API] [Amazon]）を「手で入れた行」に数えない。
+     前は [Claude API]（GAS 3台目が領収書から入れる・ツール代）が手入力扱いになり、その月のツール・通信の固定費が自動登録されず「✔ 手で入っています」と出て抜けた */
+  function plIsAutoMemo(m) { return /^\[(自動[\]:]|Claude API\]|Amazon\])/.test(String(m || '')); }
+  /* 手で入れた行（同じ区分）。Claude の項目を内訳に入れている時は、領収書から入った [Claude API] の行を「入っている」と見る（二重にしない） */
+  function plManualRows(rows, name, ecat) { const isAi = /claude|anthropic/i.test(String(name || '')); return (rows || []).filter(r => (plGroupOf(r.category) === plGroupOf(ecat) && !plIsAutoMemo(r.memo)) || (isAi && String(r.memo || '').indexOf(PL_CLAUDE_TAG) === 0)); }
+  /* レビュー#35：「[自動] 人件費」の項目が「[自動] 人件費（梱包）」の行を自分の行と取り違えない（より長い項目名に当たる行はそちらに譲る） */
+  function plAutoRowOwned(memo, name, items) { const m = String(memo || ''); const nm0 = String(name || '').trim(); if (!nm0 || m.indexOf(PL_AUTO_TAG + ' ' + nm0) !== 0) return false; return !(items || []).some(y => { const n2 = String((y && y.name) || '').trim(); return n2.length > nm0.length && n2.indexOf(nm0) === 0 && m.indexOf(PL_AUTO_TAG + ' ' + n2) === 0; }); }
+  /* レビュー#1：上のアカウント選択で店を絞っているか（acctQs と同じ条件）。絞ると注文・入金だけが1店になり、経費・仕入・着金は全店のまま＝純利益・申告の数字が混ざる。
+     全店で読み直す口（acctQs を1回だけ外す）は共通部品なので親と相談。ここでは知らせる・自動登録とCSVを止めるだけ */
+  function plAcctFiltered() { const a = state.acct; return !!(state.acctReady && a && a !== 'all'); }
+  function plAcctBanner(what) { return plAcctFiltered() ? `<div style="margin:0 0 10px;padding:8px 12px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:8px;font-size:12.5px;color:#c0392b">⚠ <b>上のアカウント選択で店を絞り込んでいます。</b>注文・入金はその店の分だけ、経費・仕入・Payoneer着金は全店のままです。<b>${what}は混ざった数字です。</b>正しく見るには上のアカウントを「すべて」に戻してください（固定費の自動登録とCSVは止めています）。</div>` : ''; }
   const PL_CLAUDE_TAG = '[Claude API]';   /* GAS 3台目が領収書メールから入れる経費行のメモの先頭（anthropicReceiptsToExpenses_） */
   /* 🤖 AI（Claude API）の利用料を月次損益に見せる（本人 2026-10-11「損益・入出金のところにも反映されている？」「内訳も必要なのでね」「経費は詳細にみれるようにしたい」）
      経費そのものは【クレジットの購入】（領収書メール→GAS・1通1行「ツール代（その他）」）で既に入っている＝現金で出た額。
@@ -20039,6 +20050,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.sbSecret) { out.skipped = 'この端末は書き込みキー未設定（⚙️設定）'; return out; }
     const cfg = await plCfg(); const items = (cfg && Array.isArray(cfg.fixBreak)) ? cfg.fixBreak : [];
     if (!items.length) { out.skipped = '固定費の内訳が未設定（📈事業計画で人件費・家賃・ツール等を入れてください）'; return out; }
+    if (plAcctFiltered()) { out.skipped = '上のアカウント選択で店を絞り込み中は入れません（件数連動が1店だけの出荷件数になるため）。アカウントを「すべて」に戻してから押してください'; return out; }   /* ★レビュー#1 */
     const rows = await sbGetAll('expenses', `select=id,ymd,category,amount,memo&ymd=gte.${ym}-01&ymd=lt.${plNextYm(ym)}-01`);
     const needShip = items.some(x => plModeOf(x) === 'perOrder');
     const shipped = needShip ? await plShippedCount(ym) : 0;
@@ -20047,8 +20059,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const mode = plModeOf(x); const name = String(x.name || '').trim(); if (!name) continue;
       const ecat = x.ecat || plEcatOf(name);
       const key = PL_AUTO_TAG + ' ' + name;
-      const cur = rows.find(r => String(r.memo || '').indexOf(key) === 0);
-      const sameGroupManual = rows.some(r => plGroupOf(r.category) === plGroupOf(ecat) && String(r.memo || '').indexOf(PL_AUTO_TAG) !== 0);
+      const cur = rows.find(r => plAutoRowOwned(r.memo, name, items));   /* ★レビュー#35：「人件費」が「人件費（梱包）」の行を取らない */
+      const sameGroupManual = plManualRows(rows, name, ecat).length > 0;   /* ★レビュー#4：[Claude API]・[自動:ヤマト]・[Amazon] は手入力に数えない */
       if (mode === 'remind') { if (!rows.some(r => plGroupOf(r.category) === plGroupOf(ecat))) out.remind.push({ name, ecat, amount: plMonthlyOf(x) }); continue; }
       // ★同じ区分を手で入れてある月（例：2026-08 の「人件費 ¥100,000」）には重ねない。自動で入れるのは、その区分に手入力が無い月だけ
       if (!cur && sameGroupManual) { out.manual = (out.manual || []).concat([name]); continue; }
@@ -20057,7 +20069,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!(amount > 0)) continue;
       out.total += amount;
       // ★経費は毎月違う（本人）。自動で入れた行を表で直したら、自動が勝手に戻さない＝上書きは「今すぐ登録／更新」を押した時（force）だけ
-      if (cur) { if (opts.force && (Number(cur.amount) !== amount || cur.memo !== memo || cur.category !== ecat)) { await sbPatch('expenses', 'id=eq.' + cur.id, { amount, memo, category: ecat }); out.updated++; } }
+      if (cur) { if (opts.force && !/（この月の実額）/.test(String(cur.memo || '')) && (Number(cur.amount) !== amount || cur.memo !== memo || cur.category !== ecat)) {   /* ★レビュー#9：右の欄で直した「この月の実額」は「まとめて入れる」・事業計画の「反映」でも戻さない */ await sbPatch('expenses', 'id=eq.' + cur.id, { amount, memo, category: ecat }); out.updated++; } }
       else ins.push({ ymd: ym + '-01', category: ecat, amount, memo });
     }
     if (ins.length) { await sbUpsert('expenses', ins); out.added += ins.length; }
@@ -20107,22 +20119,46 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     return { header: H, cols: { no: H[iNo] || '', date: H[iDate] || '', ref: H[iRef] || '', fee: feeCols.map(i => H[i]) }, lines, total: lines.reduce((s, l) => s + l.jpy, 0) };
   }
-  async function yamatoCommit(parsed, ymDefault) {
+  /* ★2026-10-24 レビュー#5・#29：前は明細を出荷日の月で分け、その月の送料を【今回のCSVの分だけの合計】で上書きしていた
+     ＝9月請求のCSVに 8/31 出荷が数件混ざると、前に取り込んだ8月の送料（全額）がその数件の額に置き換わった（控え dom_ship_<月> も同じ）。
+     請求明細CSVとB2クラウドのCSVを一緒に選ぶと、同じ荷物が2回足された。
+     → GAS yamatoShip_（運賃情報の速報）と同じ作り：控えの明細に【伝票番号で混ぜる】（同じ番号は今回の請求額で1回・src:'invoice'・invoiceAt を書く＝GAS が速報で上書きしない）。
+       経費「送料」の額は混ぜた後の明細の合計。読めなかった月があれば取り込みごと止める（空で上書きしない）。伝票番号の無い行は日付・額・管理番号で鍵を作る（同じCSVを入れ直しても1回） */
+  function yamatoKeyed(lines) {
+    const seen = {}; const map = new Map();
+    (lines || []).forEach(l => { let no = String(l.no || ''); if (!no) { const b = '#' + (l.d || '') + '|' + Math.round(Number(l.jpy) || 0) + '|' + (l.ref || ''); seen[b] = (seen[b] || 0) + 1; no = b + '|' + seen[b]; } map.set(no, Object.assign({}, l, { no, src: 'invoice' })); });
+    return map;
+  }
+  async function yamatoPlan(parsed, ymDefault) {
     const byYm = {};
-    parsed.lines.forEach(l => { const ym = (l.d || '').slice(0, 7) || ymDefault; const b = (byYm[ym] = byYm[ym] || { n: 0, total: 0, lines: [] }); b.n++; b.total += l.jpy; b.lines.push(l); });
-    const yms = Object.keys(byYm).sort();
-    for (const ym of yms) {
-      const b = byYm[ym];
-      const rows = await sbGetAll('expenses', `select=id,memo,amount&ymd=gte.${ym}-01&ymd=lt.${plNextYm(ym)}-01&category=eq.${encodeURIComponent('送料')}`);
-      const cur = rows.find(r => String(r.memo || '').indexOf(PL_YAMATO_TAG) === 0);
-      const memo = `${PL_YAMATO_TAG} 請求明細 ${b.n}件（${ym}）`;
-      if (cur) await sbPatch('expenses', 'id=eq.' + cur.id, { amount: Math.round(b.total), memo });
-      else await sbUpsert('expenses', [{ ymd: ym + '-01', category: '送料', amount: Math.round(b.total), memo }]);
-      await sbUpsert('app_kv', [{ k: 'dom_ship_' + ym, v: { n: b.n, total: Math.round(b.total), at: new Date().toISOString(), cols: parsed.cols, lines: b.lines.slice(0, 3000) }, updated_at: new Date().toISOString() }], 'k');
+    yamatoKeyed(parsed.lines).forEach(l => { const ym = (l.d || '').slice(0, 7) || ymDefault; (byYm[ym] = byYm[ym] || []).push(l); });
+    const ymPlan = [];
+    for (const ym of Object.keys(byYm).sort()) {
+      const [rows, kv] = await Promise.all([   /* 読めなければ throw＝取り込みごと止める */
+        sbGetAll('expenses', `select=id,memo,amount&ymd=gte.${ym}-01&ymd=lt.${plNextYm(ym)}-01&category=eq.${encodeURIComponent('送料')}`),
+        sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + ym)),
+      ]);
+      const prev = (kv && kv[0] && kv[0].v) || null;
+      const map = new Map(); ((prev && prev.lines) || []).forEach(x => { if (x && x.no) map.set(String(x.no), x); });
+      let add = 0, upd = 0; byYm[ym].forEach(l => { if (map.has(l.no)) upd++; else add++; map.set(l.no, l); });
+      const all = [...map.values()].sort((a, b) => String(a.d || '').localeCompare(String(b.d || '')));
+      const total = Math.round(all.reduce((t, x) => t + (Number(x.jpy) || 0), 0));
+      const cur = rows.find(r => /^\[自動:ヤマト\] 請求明細/.test(String(r.memo || ''))) || rows.find(r => /^\[自動:ヤマト\] 運賃情報/.test(String(r.memo || ''))) || rows.find(r => String(r.memo || '').indexOf(PL_YAMATO_TAG) === 0) || null;
+      ymPlan.push({ ym, prev, all, total, n: all.length, fareN: all.filter(x => x.src === 'fare').length, now: byYm[ym].length, add, upd, cur, before: cur ? Math.round(Number(cur.amount) || 0) : 0 });
     }
-    try { logAct('入出金・経費', 'ヤマト運賃CSV取込', yms.join(','), parsed.lines.length + '件 ¥' + Math.round(parsed.total)); } catch (_) {}
+    return ymPlan;
+  }
+  async function yamatoCommit(ymPlan, parsed) {
+    for (const p of ymPlan) {
+      const memo = `${PL_YAMATO_TAG} 請求明細 ${p.n}件（${p.ym}）` + (p.fareN ? `・うち速報 ${p.fareN}件` : '');
+      if (p.cur) await sbPatch('expenses', 'id=eq.' + p.cur.id, { amount: p.total, memo });
+      else await sbUpsert('expenses', [{ ymd: p.ym + '-01', category: '送料', amount: p.total, memo }]);
+      const at = new Date().toISOString();
+      await sbUpsert('app_kv', [{ k: 'dom_ship_' + p.ym, v: Object.assign({}, p.prev || {}, { n: p.n, total: p.total, at, invoiceAt: at, cols: parsed.cols, lines: p.all.slice(0, 3000) }), updated_at: at }], 'k');
+    }
+    try { logAct('入出金・経費', 'ヤマト運賃CSV取込', ymPlan.map(p => p.ym).join(','), parsed.lines.length + '件 ¥' + Math.round(parsed.total) + '／' + ymPlan.map(p => p.ym + ' ' + p.before + '→' + p.total).join(' ')); } catch (_) {}
     exp._allRows = null;
-    return byYm;
+    return ymPlan;
   }
   // ---- 月次損益の材料（💹の読み込み結果 pf を使う・絞り込みに依存しない） ----
   // 🔁 正式返品は「注文月の入金が減る」形で粗利にもう入っている（escrow同期）。別の行で引くと二重になる。
@@ -20616,8 +20652,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const MODES = [['auto', '毎月同じ額を自動で'], ['remind', '月ごとに手で入れる'], ['perOrder', '1件単価×出荷数']];
     const monthOf = (x, i) => {   // 右の列：この月に入っている額
       const key = PL_AUTO_TAG + ' ' + String(x.name || '').trim(); const ec = x.ecat || plEcatOf(x.name);
-      const auto = rows.find(r => String(r.memo || '').indexOf(key) === 0);
-      const man = rows.filter(r => plGroupOf(r.category) === plGroupOf(ec) && String(r.memo || '').indexOf(PL_AUTO_TAG) !== 0);
+      const auto = rows.find(r => plAutoRowOwned(r.memo, x.name, items));   /* ★レビュー#35 */
+      const man = plManualRows(rows, x.name, ec);   /* ★レビュー#4 */
       const inp = (v, id) => `<span style="white-space:nowrap">¥<input class="pl-fb-cur" data-i="${i}" data-id="${id || ''}" value="${v == null ? '' : Number(v)}" inputmode="numeric" placeholder="${Number(plMonthlyOf(x)) || ''}" title="この月に経費として入れる額。いつもの額と違う月は、ここだけ直します（Enterで保存）" style="${ist};width:96px;text-align:right;font-weight:700"></span>`;
       if (auto) return `${inp(auto.amount, auto.id)} <span style="font-size:11px;color:#1a7f37;white-space:nowrap">✔ 入っています</span>`;
       if (man.length) return `<span style="font-size:11px;color:#1565c0;white-space:nowrap" title="この区分は手で入れた行が既にあります（経費の表を見てください）">✔ 手で入っています ${fmtJpy(man.reduce((t, r) => t + (Number(r.amount) || 0), 0))}</span>`;
@@ -20635,7 +20671,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return `<div class="tool-card" style="margin:0 0 12px;max-width:none">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-weight:700;font-size:14px">🔁 毎月かかる経費（人件費・家賃・ツールなど）</span>
         <label style="font-size:12px" title="ONにすると、月が変わって最初にこの画面を開いた時に「毎月同じ額を自動で」の項目をいつもの額で入れます"><input type="checkbox" id="pl-auto-on" ${on ? 'checked' : ''}> 月が変わったら自動で入れる</label>
-        <button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px" title="「まだ」の項目を、いつもの額でまとめてこの月に入れます（入っている行は上書きします）">${esc(ym)} にまとめて入れる</button>
+        <button class="smd-btn b-write" id="pl-auto-run" style="font-size:12px" title="「まだ」の項目を、いつもの額でまとめてこの月に入れます（自動で入れた行は今の額に直します。右の欄で直した「この月の実額」は上書きしません）">${esc(ym)} にまとめて入れる</button>
         <span id="pl-fb-stat" class="smd-dim" style="font-size:11px"></span></div>
       <div class="smd-dim" style="font-size:11.5px;margin:6px 0 4px">左＝<b>いつもの額</b>（毎月の基準・全PC共通）。右＝<b>${esc(ym)} に実際に入る額</b>。<b>今月だけ違う時は右の額だけ直してください</b>（左は変えなくてよい）。</div>
       <table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:4px">項目</th><th style="text-align:left;padding:4px">経費の分類</th><th style="text-align:left;padding:4px">いつもの額</th><th style="text-align:left;padding:4px">入れ方</th><th style="text-align:left;padding:4px;background:#e9f5ec">${esc(ym)} に入る額</th><th></th></tr>${rowsH}
@@ -20807,35 +20843,47 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const onChange = (cls, fn) => host.querySelectorAll('.' + cls).forEach(el => el.addEventListener('change', () => { const i = +el.dataset.i; fbSave(cfg => { const x = cfg.fixBreak[i]; if (x) fn(x, el.value.trim()); }); }));
     onChange('pl-fb-name', (x, v) => { if (v) x.name = v; });
     onChange('pl-fb-ecat', (x, v) => { x.ecat = v || undefined; });
-    onChange('pl-fb-amt', (x, v) => { x.amount = Math.round(Number(v.replace(/[^0-9.\-]/g, '')) || 0); });
+    onChange('pl-fb-amt', (x, v) => { x.amount = Math.round(Number(v.normalize('NFKC').replace(/[^0-9.\-]/g, '')) || 0); });
     onChange('pl-fb-freq', (x, v) => { x.freq = v || 'monthly'; });
     onChange('pl-fb-mode', (x, v) => { x.mode = v || 'auto'; });
-    onChange('pl-fb-unit', (x, v) => { x.unit = Math.round(Number(v.replace(/[^0-9.]/g, '')) || 0); });
+    onChange('pl-fb-unit', (x, v) => { x.unit = Math.round(Number(v.normalize('NFKC').replace(/[^0-9.]/g, '')) || 0); });
     // ★その月だけの実額：内訳の金額（毎月の基準）は変えず、その月の経費行だけを作る／直す（メモ「[自動] 項目名」＝自動起票と同じ鍵なので二重にならない）
-    host.querySelectorAll('.pl-fb-cur').forEach(el => { const save = async () => { const v = Math.round(Number(String(el.value).replace(/[^0-9.]/g, '')) || 0); const cfg = await plCfg(); const x = cfg && cfg.fixBreak && cfg.fixBreak[+el.dataset.i]; if (!x) return; if (!settings.sbSecret) { alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
+    /* ★2026-10-24 レビュー#6：①欄を抜けた change と「入れる」が投げる change で保存が2回走り、同じ固定費が2行入った（連打も同じ）
+       ②欄を空にする・全角（５００００）で打つと 0 になり、確認なしで経費の行を削除していた（その後 自動でいつもの額が入り直す＝0円を残せない）。
+       → 保存中は2回目を捨てる／全角は半角に直して読む／空は何もしない（元の額に戻す）／「0」と打った時だけ 0円の行で残す（自動で入れ直されない）。消すのは②の経費の表の🗑（確認あり） */
+    host.querySelectorAll('.pl-fb-cur').forEach(el => { const save = async () => {
+        if (el.dataset.busy) return;
+        const raw = String(el.value).normalize('NFKC').replace(/[^0-9.]/g, '');
+        if (!raw) { if (el.dataset.id) { el.value = el.defaultValue; toast('空では消しません（消す時は②の経費の表の🗑）。0円にする時は「0」と入れてください'); } return; }
+        const v = Math.round(Number(raw) || 0);
+        el.dataset.busy = '1'; el.disabled = true; const put = host.querySelector('.pl-fb-put[data-i="' + el.dataset.i + '"]'); if (put) { put.disabled = true; put.textContent = '⏳'; }
+        const undo = () => { delete el.dataset.busy; el.disabled = false; if (put) { put.disabled = false; put.textContent = '入れる'; } };
+        const cfg = await plCfg(); const x = cfg && cfg.fixBreak && cfg.fixBreak[+el.dataset.i]; if (!x) { undo(); return; } if (!settings.sbSecret) { undo(); alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
         const key = PL_AUTO_TAG + ' ' + String(x.name || '').trim(); const ecat = x.ecat || plEcatOf(x.name);
-        try { if (el.dataset.id) { if (v > 0) await sbPatch('expenses', 'id=eq.' + el.dataset.id, { amount: v, memo: key + '（この月の実額）' }); else { await sbDelete('expenses', 'id=eq.' + el.dataset.id); } }
-          else if (v > 0) await sbUpsert('expenses', [{ ymd: ym + '-01', category: ecat, amount: v, memo: key + '（この月の実額）' }]);
-          else return;
-          try { logAct('入出金・経費', '固定費 その月の実額', ym + ' ' + x.name, v + '円'); } catch (_) {} exp._allRows = null; toast(`${ym} の「${x.name}」を ${fmtJpy(v)} にしました`); renderExpenses(); } catch (e) { alert('保存できませんでした: ' + ((e && e.message) || e)); } };
+        try { if (el.dataset.id) await sbPatch('expenses', 'id=eq.' + el.dataset.id, { amount: v, memo: key + '（この月の実額）' });
+          else await sbUpsert('expenses', [{ ymd: ym + '-01', category: ecat, amount: v, memo: key + '（この月の実額）' }]);
+          try { logAct('入出金・経費', '固定費 その月の実額', ym + ' ' + x.name, v + '円'); } catch (_) {} exp._allRows = null; toast(`${ym} の「${x.name}」を ${fmtJpy(v)} にしました`); renderExpenses(); } catch (e) { undo(); alert('保存できませんでした: ' + ((e && e.message) || e)); } };
       el.addEventListener('change', save); el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } }); });
-    host.querySelectorAll('.pl-fb-put').forEach(b => b.addEventListener('click', () => { const inp = host.querySelector('.pl-fb-cur[data-i="' + b.dataset.i + '"]'); if (inp) { if (!String(inp.value).trim()) inp.value = inp.placeholder || ''; inp.dispatchEvent(new Event('change')); } }));
+    host.querySelectorAll('.pl-fb-put').forEach(b => b.addEventListener('click', () => { const inp = host.querySelector('.pl-fb-cur[data-i="' + b.dataset.i + '"]'); if (inp) { if (inp.dataset.busy) return; if (!String(inp.value).trim()) inp.value = inp.placeholder || ''; inp.dispatchEvent(new Event('change')); } }));
     host.querySelectorAll('.pl-fb-del').forEach(el => el.addEventListener('click', () => { const i = +el.dataset.i; if (!confirm('この項目を内訳から消しますか？（登録済みの経費は消えません）')) return; fbSave(cfg => { cfg.fixBreak.splice(i, 1); }); }));
-    const addBtn = host.querySelector('#pl-fb-add'); if (addBtn) addBtn.addEventListener('click', () => { const g = id => (host.querySelector('#' + id) || {}).value || ''; const name = g('pl-fb-nname').trim(); const amt = Math.round(Number(String(g('pl-fb-namt')).replace(/[^0-9.]/g, '')) || 0); const mode = g('pl-fb-nmode') || 'auto'; if (!name) { alert('項目名を入れてください'); return; } if (mode !== 'perOrder' && !(amt > 0)) { alert('金額を入れてください'); return; } fbSave(cfg => { cfg.fixBreak.push({ name, amount: amt, freq: g('pl-fb-nfreq') || 'monthly', ecat: g('pl-fb-necat') || plEcatOf(name), mode, unit: mode === 'perOrder' ? amt : undefined }); }); });
+    const addBtn = host.querySelector('#pl-fb-add'); if (addBtn) addBtn.addEventListener('click', () => { const g = id => (host.querySelector('#' + id) || {}).value || ''; const name = g('pl-fb-nname').trim(); const amt = Math.round(Number(String(g('pl-fb-namt')).normalize('NFKC').replace(/[^0-9.]/g, '')) || 0); const mode = g('pl-fb-nmode') || 'auto'; if (!name) { alert('項目名を入れてください'); return; } if (mode !== 'perOrder' && !(amt > 0)) { alert('金額を入れてください'); return; } fbSave(cfg => { cfg.fixBreak.push({ name, amount: amt, freq: g('pl-fb-nfreq') || 'monthly', ecat: g('pl-fb-necat') || plEcatOf(name), mode, unit: mode === 'perOrder' ? amt : undefined }); }); });
     const f = host.querySelector('#pl-ymt-file'); const card = host.querySelector('#pl-ymt-card'); const prev = host.querySelector('#pl-ymt-prev');
     const handle = async files => {
       if (!files || !files.length) return;
       if (!settings.sbSecret) { alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
+      const prevHtml = prev ? prev.innerHTML : '';
+      if (prev) prev.innerHTML = '⏳ CSVを読んでいます…';   /* 押した瞬間に反応 */
       try {
         const all = { lines: [], total: 0, cols: null };
         for (const fl of files) { const p = yamatoParse(plDecodeBytes(await fl.arrayBuffer())); all.lines = all.lines.concat(p.lines); all.total += p.total; all.cols = p.cols; }
         if (!all.lines.length) throw new Error('明細行が0件でした');
-        const byYm = {}; all.lines.forEach(l => { const k = (l.d || '').slice(0, 7) || ym; byYm[k] = (byYm[k] || 0) + l.jpy; });
-        const msg = `ヤマトの明細 ${all.lines.length}件・合計 ${fmtJpy(all.total)}\n月ごと：${Object.keys(byYm).sort().map(k => k + ' ' + fmtJpy(byYm[k])).join('／')}\n金額の列：${all.cols.fee.join('＋')}${all.cols.date ? '／日付の列：' + all.cols.date : '／日付の列なし→ ' + ym + ' として登録'}\n\n経費「送料」として登録します（同じ月の取込分は上書き）。よろしいですか？`;
-        if (!confirm(msg)) return;
-        if (prev) prev.innerHTML = '取り込み中…';
-        await yamatoCommit(all, ym); toast('国内送料を登録しました'); renderExpenses();
-      } catch (e) { alert('取り込めませんでした: ' + ((e && e.message) || e)); }
+        const ymPlan = await yamatoPlan(all, ym);   /* ★レビュー#5：今ある送料・控えと伝票番号で合わせた結果を先に出す（前後の額を見てから入れる） */
+        const dupN = all.lines.length - ymPlan.reduce((t, x) => t + x.now, 0);
+        const msg = `ヤマトの明細 ${all.lines.length}件・合計 ${fmtJpy(all.total)}${dupN > 0 ? `（同じ伝票番号 ${dupN}件は1回に）` : ''}\n金額の列：${all.cols.fee.join('＋')}${all.cols.date ? '／日付の列：' + all.cols.date : '／日付の列なし→ ' + ym + ' として登録'}\n\n経費「送料」に、月ごとの控えと伝票番号で合わせて入れます（同じ番号は今回の額で1回）：\n${ymPlan.map(x => `${x.ym}：${fmtJpy(x.before)} → ${fmtJpy(x.total)}（今回 ${x.now}件＝新しい番号 ${x.add}件・前からある番号 ${x.upd}件／控えの明細 計${x.n}件${x.fareN ? '・うち速報 ' + x.fareN + '件' : ''}）`).join('\n')}\n\nよろしいですか？`;
+        if (!confirm(msg)) { if (prev) prev.innerHTML = prevHtml; return; }
+        if (prev) prev.innerHTML = '⏳ 取り込み中…';
+        await yamatoCommit(ymPlan, all); toast('国内送料を登録しました'); renderExpenses();
+      } catch (e) { if (prev) prev.innerHTML = prevHtml; alert('取り込めませんでした: ' + ((e && e.message) || e)); }
     };
     if (f) f.addEventListener('change', () => handle([...f.files]));
     if (card) { card.addEventListener('dragover', e => { e.preventDefault(); card.style.background = '#eef4ff'; }); card.addEventListener('dragleave', () => { card.style.background = ''; }); card.addEventListener('drop', e => { e.preventDefault(); card.style.background = ''; handle([...((e.dataTransfer && e.dataTransfer.files) || [])]); }); }
@@ -20962,6 +21010,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderExpenses() {
     const body = document.getElementById('exp-body');
+    const _expSeq = (exp._seq = (exp._seq || 0) + 1);   /* ★レビュー#32 */
     if (!exp.ym) exp.ym = jstYm();
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     const [y, m] = exp.ym.split('-').map(Number);
@@ -20969,11 +21018,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let rows, issues = [], inv = [], formalRet = [], retMetaKv = [];
     const expLoadFail = [];   // ★読めなかったものを控える。0件と同じ顔にしない（2026-09-10）
     try { [rows, issues, inv, formalRet, retMetaKv] = await Promise.all([sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), ensureInv().catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), sbGetAll('returns', 'select=cc,order_sn,status,refund_amount,update_time,create_time').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; }), sbGetAll('app_kv', 'select=v&k=eq.return_meta').catch(e2 => { expLoadFail.push(String((e2 && e2.message) || e2).slice(0, 60)); return []; })]); }
-    catch (e) { body.innerHTML = errBox(e); return; }
+    catch (e) { if (_expSeq === exp._seq) body.innerHTML = errBox(e); return; }
+    if (_expSeq !== exp._seq) return;   /* ★レビュー#32：追い越された古い読み込みは捨てる */
     exp.rows = rows;
     exp.loadFail = expLoadFail;
     // ★固定費の自動登録（📈事業計画の内訳から。月が変わって最初に開いた時に1回・担当PCだけ・二重には入らない）
-    try { const cfgA = await plCfg(); if (cfgA && cfgA.fixAuto && settings.sbSecret && exp.ym <= jstYm() && !pl.autoDone[exp.ym] && pcIsOwner()) { pl.autoDone[exp.ym] = 1; const ra = await expAutoPost(exp.ym); if (ra && ra.changed) { rows = await sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`); exp.rows = rows; try { toast(`固定費を自動登録しました（追加${ra.added}・更新${ra.updated}）`); } catch (_) {} } } } catch (_) {}
+    try { const cfgA = await plCfg(); if (cfgA && cfgA.fixAuto && settings.sbSecret && exp.ym === jstYm() && !plAcctFiltered() && !pl.autoDone[exp.ym] && pcIsOwner()) {   /* ★レビュー#7：自動は今月だけ（過去の月を開いても足さない）・#1 店で絞り込み中は入れない */ pl.autoDone[exp.ym] = 1; const ra = await expAutoPost(exp.ym); if (ra && ra.changed) { rows = await sbGetAll('expenses', `select=*&ymd=gte.${exp.ym}-01&ymd=lt.${nextYm}-01&order=ymd.desc,id.desc`); exp.rows = rows; try { toast(`固定費を自動登録しました（追加${ra.added}・更新${ra.updated}）`); } catch (_) {} } } } catch (_) {}
     // ★これまで exp.retMeta はどこにも代入されておらず、下の retLossForYm に常に null が渡っていた＝
     //   この画面だけ【補償が0円扱い】で返金が過大・純利益が過少に出ていた（2026-09-10 是正）。
     exp.retMeta = (retMetaKv && retMetaKv[0] && retMetaKv[0].v && retMetaKv[0].v.items) || null;
@@ -21047,7 +21097,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <select id="exp-month" style="padding:5px;font-size:13px">${months.map(mm => `<option ${mm === exp.ym ? 'selected' : ''}>${mm}</option>`).join('')}</select>
         <span style="color:#ccc">｜</span>
         <span class="smd-dim" style="font-size:12px">経費を追加:</span>
-        <input type="date" id="exp-date" value="${jstToday()}" style="padding:5px;font-size:13px">
+        <input type="date" id="exp-date" value="${exp.ym === jstYm() ? jstToday() : exp.ym + '-01'}" style="padding:5px;font-size:13px">
         <select id="exp-cat" style="padding:5px;font-size:13px">${catOpts}</select>
         <input type="number" id="exp-amt" placeholder="金額(円)" style="padding:5px;font-size:13px;width:110px">
         <input type="text" id="exp-memo" placeholder="メモ（任意）" style="padding:5px;font-size:13px;width:180px">
@@ -21057,7 +21107,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // カテゴリ別集計
     const catCards = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px">` +
       catList.filter(c => byCat[c]).map(c => `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px"><div class="smd-dim" style="font-size:11px">${esc(c)}</div><div style="font-weight:700;font-size:15px">${fmtJpy(byCat[c] || 0)}</div></div>`).join('') +
-      `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px;background:#fff4f2"><div class="smd-dim" style="font-size:11px">経費合計</div><div style="font-weight:700;font-size:15px;color:#d93025">${fmtJpy(total)}</div></div></div>`;
+      `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px;background:#fff4f2"><div class="smd-dim" style="font-size:11px">経費合計</div><div style="font-weight:700;font-size:15px;color:#d93025">${fmtJpy(plCtxV.expTotal)}</div>${plCtxV.g.invest ? `<div class="smd-dim" style="font-size:10px">初期投資 ${fmtJpy(plCtxV.g.invest)} は含めない</div>` : ''}</div></div>`;   /* ★レビュー#30：損益の表と同じ（初期投資は別枠） */
     // 明細
     const table = `<div class="tool-card exp-fill" style="margin:0;max-width:720px"><div class="pf-scroll" style="max-height:34vh"><table class="pf-table"><tr><th>日付</th><th>カテゴリ</th><th>金額</th><th>メモ</th><th></th></tr>` +
       (rows.length ? rows.map(r => `<tr>
@@ -21134,7 +21184,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const jump = `<div class="exp-jump"><span class="smd-dim">このページの並び：</span><button class="smd-btn exp-jump-b" data-sec="1">① 今月の結論</button><button class="smd-btn exp-jump-b" data-sec="2">② この月の経費</button><button class="smd-btn exp-jump-b" data-sec="3">③ 月ごとの推移</button><button class="smd-btn exp-jump-b" data-sec="4">④ 取り込み・自動登録</button></div>`;
     /* ★2026-10-11 本人「ごちゃごちゃしてる」→ 並びを4つの節に固定：①結論（帯・損益の表・ふりかえり）②この月の経費（入力・分類・明細）③月ごとの推移（マス→明細）④取り込み・自動登録（AI・ヤマト・固定費・Amazon・削減メモ＝月1回見れば足りる物）。
        日ごとの記録は右の列に押し込まず全幅へ。数字とカードは1つも減らしていない（減らしたのは繰り返しの文だけ） */
-    body.innerHTML = expFailBanner + jump + kpi + `<div class="exp-grid">
+    if (_expSeq !== exp._seq) return;   /* ★レビュー#32：月を素早く切り替えた時、遅く終わった古い描画で上書きしない（ボタンが別の月に結び付かない） */
+    body.innerHTML = plAcctBanner('この画面の粗利・純利益・月次損益CSV') + expFailBanner + jump + kpi + `<div class="exp-grid">
         ${sec(1, '① 今月の結論', '損益の表と、この月の数字から組んだふりかえり')}
         <div>${plCard}</div>
         <div>${plReview}</div>
@@ -21168,7 +21219,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const cb = document.getElementById('csv-ledger-m'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_${exp.ym}.csv`, ledgerRows(invMonth))); }
     { const cb = document.getElementById('csv-ledger-all'); if (cb) cb.addEventListener('click', () => downloadCsv(`古物台帳_全期間.csv`, ledgerRows(invAll))); }
     { const cb = document.getElementById('csv-exp2'); if (cb) cb.addEventListener('click', () => downloadCsv(`経費_${exp.ym}.csv`, [['日付', 'カテゴリ', '金額(円)', 'メモ']].concat(rows.map(r => [r.ymd || '', r.category || '', r.amount != null ? r.amount : '', r.memo || ''])).concat([['', '経費合計', total, ''], ['', '返金合計', refundTotal, '']]))); }
-    { const cb = document.getElementById('csv-pl'); if (cb) cb.addEventListener('click', () => downloadCsv(`月次損益_${exp.ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', total, rows.length + '件'], ['手で記録した返金', refundTotal, '正式返品は入金に織り込み済み'], ['キャンセル損失', cxlLoss, cxlLoss ? ('日本を出た後 ' + pf.cxlN + '件の仕入額') : ''], ['純利益', net != null ? net : '', grossOk ? (pf.cxlUndecided ? ('段階が未確定のキャンセル ' + pf.cxlUndecided + '件は損失0円で計算') : '') : '粗利未計算']])); }
+    { const cb = document.getElementById('csv-pl'); if (cb) cb.addEventListener('click', () => plAcctFiltered() ? alert('上のアカウント選択で店を絞り込み中は出しません（粗利は1店・経費は全店で混ざるため）。アカウントを「すべて」に戻してください') : downloadCsv(`月次損益_${exp.ym}.csv`, [['項目', '金額(円)', '備考'], ['粗利合計', grossOk ? pf.grossTotal : '', grossOk ? pf.grossN + '件' : '利益ページ未計算'], ['経費合計', plCtxV.expTotal, rows.length + '件' + (plCtxV.g.invest ? '（初期投資は含めない）' : '')], ['初期投資（別枠）', plCtxV.g.invest || 0, '純利益に含めない'], ['手で記録した返金', refundTotal, '正式返品は入金に織り込み済み'], ['キャンセル損失', cxlLoss, cxlLoss ? ('日本を出た後 ' + pf.cxlN + '件の仕入額') : ''], ['純利益', plCtxV.net != null ? plCtxV.net : '', grossOk ? (pf.cxlUndecided ? ('段階が未確定のキャンセル ' + pf.cxlUndecided + '件は損失0円で計算') : '') : '粗利未計算']])); }
     // ハンドラ
     document.getElementById('exp-month').addEventListener('change', e => { exp.ym = e.target.value; renderExpenses(); });
     { const gp = document.getElementById('exp-goplan'); if (gp) gp.addEventListener('click', () => showPage('plan')); }
@@ -21179,14 +21230,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const cat = document.getElementById('exp-cat').value;
       const memo = document.getElementById('exp-memo').value.trim();
       if (!ymd || !amt) { document.getElementById('exp-msg').textContent = '日付と金額を入力してください'; return; }
+      const addB = document.getElementById('exp-add'); if (addB.disabled) return; addB.disabled = true; addB.textContent = '⏳ 追加中…';   /* ★レビュー#6と同じ型：連打で2行入れない */
       try {
         await sbUpsert('expenses', [{ ymd, category: cat, amount: Math.round(amt), memo: memo || null }]);
         logAct('入出金・経費', '経費追加', cat, `${ymd} / ¥${Math.round(amt).toLocaleString()}${memo ? ' / ' + memo : ''}`);
+        exp._allRows = null; if (String(ymd).slice(0, 7) !== exp.ym) toast(`${String(ymd).slice(0, 7)} の経費として入れました（いま開いている ${exp.ym} の表には出ません）`);
         renderExpenses();
-      } catch (e) { document.getElementById('exp-msg').textContent = '失敗: ' + e.message; }
+      } catch (e) { addB.disabled = false; addB.textContent = '＋ 追加'; document.getElementById('exp-msg').textContent = '失敗: ' + e.message; }
     });
     body.querySelectorAll('.exp-amt-e').forEach(el => el.addEventListener('change', async e => {
-      try { await sbPatch('expenses', 'id=eq.' + e.target.dataset.id, { amount: Math.round(Number(e.target.value) || 0) }); renderExpenses(); }
+      if (!String(e.target.value).trim()) { e.target.value = e.target.defaultValue; toast('空では保存しません（消す時は🗑）'); return; }   /* ★レビュー#6と同じ型：空（数字でない入力も空になる）を 0円で書かない */
+      try { await sbPatch('expenses', 'id=eq.' + e.target.dataset.id, { amount: Math.round(Number(e.target.value) || 0) }); exp._allRows = null; renderExpenses(); }
       catch (err) { alert('更新失敗: ' + err.message); }
     }));
     body.querySelectorAll('.exp-memo-e').forEach(el => el.addEventListener('change', async e => {
@@ -21195,7 +21249,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }));
     body.querySelectorAll('.exp-del').forEach(el => el.addEventListener('click', async () => {
       if (!confirm('この経費を削除しますか？')) return;
-      try { await sbDelete('expenses', 'id=eq.' + el.dataset.id); logAct('入出金・経費', '経費削除', el.dataset.id, ''); renderExpenses(); }
+      try { await sbDelete('expenses', 'id=eq.' + el.dataset.id); logAct('入出金・経費', '経費削除', el.dataset.id, ''); exp._allRows = null; renderExpenses(); }
       catch (err) { alert('削除失敗: ' + err.message); }
     }));
   }
@@ -22544,13 +22598,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     '交通費': '旅費交通費', '旅費交通費': '旅費交通費', '接待': '接待交際費', '接待交際費': '接待交際費',
     '消耗品費': '消耗品費', '書籍': '新聞図書費', '研修': '研修費', '固定費': '雑費', 'その他': '雑費',
   };
-  const TAX_ACCTS = ['給料賃金', '外注工賃', '地代家賃', '通信費', '荷造運賃', '消耗品費', '広告宣伝費',
+  const TAX_ACCTS = ['給料賃金', '外注工賃', '地代家賃', '水道光熱費', '通信費', '荷造運賃', '消耗品費', '広告宣伝費',
     '支払手数料', '旅費交通費', '接待交際費', '新聞図書費', '研修費', '雑費'];
   const taxAcctOf = c => (tax.cfg && tax.cfg.map && tax.cfg.map[c]) || TAX_ACCT_DEF[String(c || '').trim()] || '雑費';
 
+  /* ★2026-10-24 レビュー#11：前は tax_cfg が読めなかった時も空の設定で始まり、1か所入力するか科目を1つ選ぶと、全年分の棚卸高・USD/JPY・科目の割り当てを空で上書きした。
+     2台のPCでも、古い画面の側が保存すると相手の入力を消した。→ 読めなかったら保存しない／保存の直前に読み直し、この画面で変えた所（_dirty）だけ重ねる */
+  function taxSet(sec, k, v) { if (!tax.cfg[sec]) tax.cfg[sec] = {}; tax.cfg[sec][k] = v; const d = tax._dirty = tax._dirty || {}; (d[sec] = d[sec] || {})[k] = v; }
+  function taxApplyDirty() { const d = tax._dirty || {}; Object.keys(d).forEach(sec => { tax.cfg[sec] = Object.assign({}, tax.cfg[sec] || {}, d[sec]); }); }
   async function taxSave() {
-    try { await sbUpsert('app_kv', [{ k: 'tax_cfg', v: tax.cfg, updated_at: new Date().toISOString() }]); }
-    catch (e) { toast('❌ 保存できませんでした: ' + e.message); }
+    if (tax._cfgFail) { toast('❌ 確定申告の設定を読めていないので保存しません（空の設定で上書きしないため）。画面を開き直してください'); return false; }
+    const d = tax._dirty || {}; const snap = JSON.parse(JSON.stringify(d));
+    if (!Object.keys(snap).some(sec => Object.keys(snap[sec] || {}).length)) return true;
+    try {
+      const cur = await sbGetAll('app_kv', 'select=v&k=eq.tax_cfg');
+      const base = (cur && cur[0] && cur[0].v) || {};
+      const out = Object.assign({}, base);
+      ['map', 'open', 'close', 'usdJpy'].forEach(sec => { out[sec] = Object.assign({}, base[sec] || {}, snap[sec] || {}); });
+      await sbUpsert('app_kv', [{ k: 'tax_cfg', v: out, updated_at: new Date().toISOString() }]);
+      Object.keys(snap).forEach(sec => Object.keys(snap[sec] || {}).forEach(k => { if (d[sec] && d[sec][k] === snap[sec][k]) delete d[sec][k]; }));
+      tax.cfg = out; taxApplyDirty();
+      return true;
+    } catch (e) { toast('❌ 保存できませんでした: ' + ((e && e.message) || e)); return false; }
   }
 
   async function renderTax() {
@@ -22558,13 +22627,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv;
     const taxFails = [];
+    let taxCfgFail = '';
+    if ((!FXD.days || !Object.keys(FXD.days).length) && !(FXD._triedAt && Date.now() - FXD._triedAt < 60000)) { FXD._triedAt = Date.now(); try { await applyFxRates(); } catch (_) {} }   /* ★レビュー#16：読めていない時だけ・1分に1回まで読み直す（読めていれば読みは増えない） */
     try {
       [orders, income, inv, expenses, kv, issues, rets, rmeta, shKv, payouts, amtKv] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,tab,order_date,order_ts'),
         sbGetAll('income', 'select=cc,sn,amount,buyer_paid,fee_total'),
         sbGetAll('inventory', 'select=item_id,price,status,shopee_sn,purchase_date,purchase_ts'),
         sbGetAll('expenses', 'select=ymd,amount,category,memo'),
-        sbGetAll('app_kv', 'select=v&k=eq.tax_cfg').catch(() => []),
+        sbGetAll('app_kv', 'select=v&k=eq.tax_cfg').catch(e => { taxCfgFail = String((e && e.message) || e).slice(0, 80); return null; }),   /* ★レビュー#11：読めなかった＝空、にしない */
         loadSoft(sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at'), '手で記録した返金', taxFails),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
         loadSoft(sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status'), '正式な返品リクエスト', taxFails),
         loadSoft(sbGetAll('app_kv', 'select=v&k=eq.return_meta'), '補償金の記録', taxFails),
@@ -22573,9 +22644,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         loadSoft(sbGetAll('app_kv', 'select=v,updated_at&k=eq.profit_amounts'), '利益管理表の入金額の控え', taxFails),   // 📗利益管理表から拾った現地通貨の入金額（公式API以前の売上を埋める控え）
       ]);
     } catch (e) { body.innerHTML = errBox(e); return; }
-    tax.cfg = (kv && kv[0] && kv[0].v) || { map: {}, open: {}, close: {}, usdJpy: {} };
+    tax._cfgFail = !!taxCfgFail;
+    if (taxCfgFail) { taxFails.push('確定申告の設定（棚卸高・USD/JPY・科目の割り当て）＝読めないので保存しません（' + taxCfgFail + '）'); tax.cfg = tax.cfg || { map: {}, open: {}, close: {}, usdJpy: {} }; }
+    else tax.cfg = (kv && kv[0] && kv[0].v) || { map: {}, open: {}, close: {}, usdJpy: {} };
     if (!tax.cfg.map) tax.cfg.map = {};
     if (!tax.cfg.open) tax.cfg.open = {}; if (!tax.cfg.close) tax.cfg.close = {}; if (!tax.cfg.usdJpy) tax.cfg.usdJpy = {};
+    taxApplyDirty();   /* まだ保存が終わっていない入力を、読み直した値の上に戻す（欄が古い値に戻らない） */
     const shMap = (shKv && shKv[0] && shKv[0].v && shKv[0].v.items) || {};
     const ymdOf = o => (o.order_ts ? jstDate(Number(o.order_ts) < 1e11 ? Number(o.order_ts) * 1000 : Number(o.order_ts)) : (o.order_date || '')).slice(0, 10);
     const years = [...new Set(orders.map(o => ymdOf(o).slice(0, 4)).filter(Boolean))].sort().reverse();
@@ -22617,19 +22691,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ---- 当期仕入高（その年に仕入れた在庫の合計） ----
     const invYmd = it => (it.purchase_ts ? String(it.purchase_ts).slice(0, 10) : (it.purchase_date || '')).slice(0, 10);
     let buys = 0, nBuy = 0;
-    inv.forEach(it => { if (invYmd(it).slice(0, 4) === Y && it.price != null) { buys += Number(it.price); nBuy++; } });
+    /* ★2026-10-24 レビュー#12：前は「仕入キャンセル」も当期仕入高に足し、期末棚卸高からは外していた＝キャンセル額がそのまま売上原価に乗った。
+       仕入でない行（仕入キャンセル・私物・事業外）は、💴入出金の「この月に仕入れた全部」（plBuyInfo）と同じ物差しで仕入高にも棚卸高にも入れない */
+    const TAX_NOT_BUY = /私物|事業外|取消|キャンセル/;
+    inv.forEach(it => { if (invYmd(it).slice(0, 4) === Y && it.price != null && !TAX_NOT_BUY.test(String(it.status || ''))) { buys += Number(it.price); nBuy++; } });
 
     // ---- 棚卸高。実地棚卸の値が入っていればそれが正。無ければ在庫台帳から推定 ----
     //   期末＝その年の12/31時点で「在庫保管中」かつ その日までに仕入れた在庫の合計
+    /* ★2026-10-24 レビュー#13：前は【今の状態】で見ていた＝2025/12/31 に在庫にあって 2026/2 に売れた物が 2025年の期末から消え、物が売れるたびに過去の年の原価が動いた。
+       販売済みは、紐付いた注文の注文日（JST・売上と同じ日付）で「その日までに売れていたか」を見る。注文が見つからない販売済みは従来どおり除き、件数を出す */
+    const soldYmd = new Map(); orders.forEach(o => { if (!o.sn || o.tab === 600 || o.tab === 200) return; const d = ymdOf(o); if (d && (!soldYmd.has(o.sn) || d < soldYmd.get(o.sn))) soldYmd.set(o.sn, d); });
+    let soldNoDate = 0;
     const stockAt = ymd => inv.reduce((t, it) => {
       if (it.price == null) return t;
       const d = invYmd(it); if (!d || d > ymd) return t;           // まだ仕入れていない
-      if (it.status === '販売済み' || it.status === '仕入キャンセル') return t;  // ざっくり：売れた分は除く
+      if (TAX_NOT_BUY.test(String(it.status || ''))) return t;      // 仕入キャンセル・私物は在庫ではない（当期仕入高と同じ物差し）
+      if (it.status === '販売済み') { const sd = it.shopee_sn ? soldYmd.get(it.shopee_sn) : null; if (!sd) { if (ymd === Y + '-12-31') soldNoDate++; return t; } if (sd <= ymd) return t; }   // 期末より後に売れた物は、その時点では在庫
       return t + Number(it.price);
     }, 0);
     const autoClose = Math.round(stockAt(Y + '-12-31'));
     const autoOpen = Math.round(stockAt((Number(Y) - 1) + '-12-31'));
-    const openVal = (tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '') ? Number(tax.cfg.open[Y]) : autoOpen;
+    /* ★レビュー#36：期首＝前の年の期末。前の年の期末を手で入れてあればそれを引き継ぐ（前は前年の自動計算値のままで、差が売上原価に入った） */
+    const Yp = String(Number(Y) - 1);
+    const openFromPrev = (tax.cfg.close[Yp] != null && tax.cfg.close[Yp] !== '') ? Number(tax.cfg.close[Yp]) : null;
+    const openVal = (tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '') ? Number(tax.cfg.open[Y]) : (openFromPrev != null ? openFromPrev : autoOpen);
     const closeVal = (tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '') ? Number(tax.cfg.close[Y]) : autoClose;
     const cogs = openVal + buys - closeVal;   // ★売上原価
 
@@ -22647,6 +22732,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       byCat[x.category || '(未分類)'] = (byCat[x.category || '(未分類)'] || 0) + v;
     });
     const expTotal = Object.values(byAcct).reduce((a, b) => a + b, 0);
+    const taxAcctList = TAX_ACCTS.concat(Object.keys(byAcct).filter(a => TAX_ACCTS.indexOf(a) < 0));   /* ★レビュー#14：一覧に無い科目も行・CSV・選択欄から消さない */
 
     // ---- 為替差損益 ----
     //   計算値 … 注文日のレート×実効スプレッドで積み上げた入金（＝上の売上）
@@ -22681,7 +22767,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
          それまでこの年の数字は<b>売上原価と経費の下ごしらえとしてだけ</b>使ってください。</span></div>`;
     const yrSel = `<select id="tax-year">${years.map(y => `<option value="${y}"${y === Y ? ' selected' : ''}>${y}年</option>`).join('')}</select>`;
 
-    body.innerHTML = loadFailBanner(taxFails, '売上原価・返金・為替差損益を含む数字') +
+    body.innerHTML = loadFailBanner(taxFails, '売上原価・返金・為替差損益を含む数字') + fxStaleBanner() + plAcctBanner('この画面の売上・所得と税理士用CSV') +   /* ★レビュー#16・#1 */
       `<div class="smd-toolbar" style="margin:0 0 10px">📅 対象年 ${yrSel}
         <button class="smd-btn" id="tax-csv" style="margin-left:8px">⬇ CSV（税理士へ渡す用）</button>
         <span class="smd-dim" style="font-size:11.5px;margin-left:8px">円換算は<b>注文日のレート</b>（💱為替の日次レート）</span></div>` +
@@ -22694,13 +22780,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="padding-left:18px" class="smd-dim" title="手で記録した返金（PayPal返金など）。正式返品はShopee入金の減額として売上高に反映済み">返金（手で記録した分）</td><td style="text-align:right">${money(-refund)}</td><td></td></tr>
           <tr><td><b>純売上高</b></td><td style="text-align:right">${money(sales - refund)}</td><td></td></tr>
           <tr><td colspan="3" style="padding-top:10px;font-weight:700">売上原価</td></tr>
-          <tr><td style="padding-left:18px">期首棚卸高 <span class="smd-dim" style="font-size:10.5px">（前年末の在庫）</span></td><td style="text-align:right"><input id="tax-open" value="${openVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '手入力' : '在庫台帳から自動 ' + fmtJpy(autoOpen)}</td></tr>
+          <tr><td style="padding-left:18px">期首棚卸高 <span class="smd-dim" style="font-size:10.5px">（前年末の在庫）</span></td><td style="text-align:right"><input id="tax-open" value="${openVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '手入力' : (openFromPrev != null ? '前の年の期末（手入力）を引き継ぎ' : '在庫台帳から自動 ' + fmtJpy(autoOpen))}</td></tr>
           <tr><td style="padding-left:18px">当期仕入高</td><td style="text-align:right">${money(buys)}</td><td class="smd-dim" style="font-size:10.5px">${nBuy}件</td></tr>
-          <tr><td style="padding-left:18px">期末棚卸高 <span class="smd-dim" style="font-size:10.5px">（年末に残った在庫）</span></td><td style="text-align:right"><input id="tax-close" value="${closeVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '' ? '手入力' : '在庫台帳から自動 ' + fmtJpy(autoClose)}</td></tr>
+          <tr><td style="padding-left:18px">期末棚卸高 <span class="smd-dim" style="font-size:10.5px">（年末に残った在庫）</span></td><td style="text-align:right"><input id="tax-close" value="${closeVal}" style="width:120px;text-align:right;padding:3px 5px;font-size:12px"></td><td class="smd-dim" style="font-size:10.5px">${tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '' ? '手入力' : '在庫台帳から自動 ' + fmtJpy(autoClose) + (soldNoDate ? '（売れた日が分からない販売済み ' + soldNoDate + '件は数えず）' : '')}</td></tr>
           <tr><td><b>売上原価</b> <span class="smd-dim" style="font-size:10.5px">期首＋仕入−期末</span></td><td style="text-align:right">${money(cogs)}</td><td></td></tr>
           <tr class="pf-total"><td><b>売上総利益（粗利）</b></td><td style="text-align:right">${RELIABLE ? money(gross, gross < 0 ? '#d93025' : '#1a7f37') : '<span class="smd-dim">—</span>'}</td><td class="smd-dim" style="font-size:10.5px">${RELIABLE ? '' : '売上が不足のため非表示'}</td></tr>
           <tr><td colspan="3" style="padding-top:10px;font-weight:700">経費</td></tr>
-          ${TAX_ACCTS.filter(a => byAcct[a]).map(a => `<tr><td style="padding-left:18px">${a}</td><td style="text-align:right">${money(byAcct[a])}</td><td></td></tr>`).join('')}
+          ${taxAcctList.filter(a => byAcct[a]).map(a => `<tr><td style="padding-left:18px">${a}</td><td style="text-align:right">${money(byAcct[a])}</td><td></td></tr>`).join('')}
           <tr><td><b>経費合計</b></td><td style="text-align:right">${money(expTotal)}</td><td></td></tr>
           <tr class="pf-total"><td><b>所得（事業所得）</b></td><td style="text-align:right;font-size:15px">${RELIABLE ? money(profit, profit < 0 ? '#d93025' : '#1a7f37') : '<span style="color:#b3261e">データ不足</span>'}</td><td class="smd-dim" style="font-size:10.5px">${RELIABLE ? '' : '入金 ' + Math.round(cover * 100) + '%'}</td></tr>
         </table>
@@ -22728,32 +22814,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <table class="pf-table"><tr><th>カテゴリ（実際に使っている名前）</th><th style="text-align:right">${Y}年の金額</th><th>勘定科目</th></tr>` +
         (Object.keys(byCat).length ? Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]).map(c =>
           `<tr><td>${esc(c)}</td><td style="text-align:right">${fmtJpy(byCat[c])}</td>` +
-          `<td><select class="tax-map" data-c="${esc(c)}">${TAX_ACCTS.map(a => `<option${a === taxAcctOf(c) ? ' selected' : ''}>${a}</option>`).join('')}</select></td></tr>`).join('')
+          `<td><select class="tax-map" data-c="${esc(c)}">${taxAcctList.map(a => `<option${a === taxAcctOf(c) ? ' selected' : ''}>${a}</option>`).join('')}</select></td></tr>`).join('')
           : '<tr><td colspan="3" class="smd-dim" style="font-size:12px">この年の経費が登録されていません（💴入出金・経費で登録してください）</td></tr>') +
         `</table></div>`;
 
     document.getElementById('tax-year').addEventListener('change', e => { tax.year = e.target.value; renderTax(); });
-    const numOf = v => { const n = Number(String(v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? '' : n; };
+    const numOf = v => { const t = String(v == null ? '' : v).normalize('NFKC').replace(/[^0-9.\-]/g, ''); if (!t) return ''; const n = Number(t); return isNaN(n) ? '' : n; };   /* ★レビュー#10：空は ''＝自動に戻す（0 にしない）・全角も読む */
     // ★打鍵ごとに renderTax() を呼ぶと【フォームごと描き直して再取得】が走り、
     //   1文字目でinputが消えて2文字目が打てなくなる（2026-09-10・Codexの指摘で発覚。私が同日に入れた不具合）。
     //   打鍵では値を控えるだけにして、手が止まってから保存と再描画をする。
     let taxT = null;
-    const taxLater = () => { clearTimeout(taxT); taxT = setTimeout(() => { taxSave(); renderTax(); }, 700); };
-    document.getElementById('tax-open').addEventListener('input', e => { tax.cfg.open[Y] = numOf(e.target.value); taxLater(); });
-    document.getElementById('tax-close').addEventListener('input', e => { tax.cfg.close[Y] = numOf(e.target.value); taxLater(); });
-    document.getElementById('tax-usdjpy').addEventListener('input', e => { tax.cfg.usdJpy[Y] = numOf(e.target.value); taxLater(); });
+    const taxLater = () => { clearTimeout(taxT); taxT = setTimeout(async () => { await taxSave(); renderTax(); }, 700); };   /* ★レビュー#40：保存が終わってから読み直す */
+    document.getElementById('tax-open').addEventListener('input', e => { taxSet('open', Y, numOf(e.target.value)); taxLater(); });
+    document.getElementById('tax-close').addEventListener('input', e => { taxSet('close', Y, numOf(e.target.value)); taxLater(); });
+    document.getElementById('tax-usdjpy').addEventListener('input', e => { taxSet('usdJpy', Y, numOf(e.target.value)); taxLater(); });
     // 入力欄から離れた時は待たずに確定する（打ち終わってすぐ画面を切り替えても保存が落ちないように）
-    ['tax-open', 'tax-close', 'tax-usdjpy'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('change', () => { clearTimeout(taxT); taxSave(); renderTax(); }); });
-    body.querySelectorAll('.tax-map').forEach(el => el.addEventListener('change', () => { tax.cfg.map[el.dataset.c] = el.value; taxSave(); renderTax(); }));
+    ['tax-open', 'tax-close', 'tax-usdjpy'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('change', async () => { clearTimeout(taxT); await taxSave(); renderTax(); }); });
+    body.querySelectorAll('.tax-map').forEach(el => el.addEventListener('change', async () => { el.disabled = true; taxSet('map', el.dataset.c, el.value); await taxSave(); renderTax(); }));
     document.getElementById('tax-csv').addEventListener('click', () => {
+      if (!FXD.days || !Object.keys(FXD.days).length) { alert('日次の為替レートを読めていないので出しません（古い既定のレートで換算した数字になるため）。💱為替を開くか、画面を更新してください'); return; }   /* ★レビュー#16 */
+      if (plAcctFiltered()) { alert('上のアカウント選択で店を絞り込み中は出しません（売上は1店・仕入と経費は全店で混ざるため）。アカウントを「すべて」に戻してください'); return; }   /* ★レビュー#1 */
       const rows = [['項目', '科目', '金額(円)', '備考']];
       rows.push(['売上高', '売上高', Math.round(sales), 'Shopee入金(注文日レート換算)＋PayPal差分 / ' + nDep + '件']);
       rows.push(['返金（手で記録した分）', '売上高(控除)', -Math.round(refund), '正式返品はShopee入金の減額として売上高に反映済み']);
-      rows.push(['期首棚卸高', '期首商品棚卸高', Math.round(openVal), tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '実地棚卸(手入力)' : '在庫台帳から自動計算']);
+      rows.push(['期首棚卸高', '期首商品棚卸高', Math.round(openVal), tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '実地棚卸(手入力)' : (openFromPrev != null ? '前年の期末棚卸高(手入力)を引継ぎ' : '在庫台帳から自動計算')]);
       rows.push(['当期仕入高', '仕入金額', Math.round(buys), nBuy + '件']);
       rows.push(['期末棚卸高', '期末商品棚卸高', -Math.round(closeVal), tax.cfg.close[Y] != null && tax.cfg.close[Y] !== '' ? '実地棚卸(手入力)' : '在庫台帳から自動計算']);
       rows.push(['売上原価', '売上原価', Math.round(cogs), '期首＋仕入−期末']);
-      TAX_ACCTS.filter(a => byAcct[a]).forEach(a => rows.push(['経費', a, Math.round(byAcct[a]), '']));
+      taxAcctList.filter(a => byAcct[a]).forEach(a => rows.push(['経費', a, Math.round(byAcct[a]), '']));
       rows.push(['所得', '事業所得', RELIABLE ? Math.round(profit) : '', RELIABLE ? '' : '⚠️入金額データが' + Math.round(cover * 100) + '%しか無いため算出不可（売上が欠けており、このまま計算すると大幅な赤字に見えます）']);
       rows.push(['為替差損益(目安)', '為替差損益', Math.round(payJpy - (sales - ppl)), 'Payoneer着金$' + Math.round(payUsd) + ' × USD/JPY ' + usdJpy + ' − 計算上の入金。対象期間が1〜2か月ずれるため目安']);
       downloadCsv('確定申告_' + Y + '年.csv', rows);
@@ -22808,7 +22896,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 📈 月次サマリー・エクスポート ----------------
   function downloadCsv(name, rows) {
     // CSVインジェクション対策：先頭が = + - @ タブ 等のセルは先頭に ' を付けてExcel/Sheetsに数式実行させない（古物台帳/確定申告CSVは特に重要）
-    const csv = rows.map(r => r.map(c => { let s = String(c == null ? '' : c); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }).join(',')).join('\r\n');
+    const csv = rows.map(r => r.map(c => { let s = String(c == null ? '' : c); if (typeof c !== 'number' && /^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }).join(',')).join('\r\n');   /* ★2026-10-24 レビュー#15：数値（マイナス）は文字にしない */
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -50910,11 +50998,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // ★優先順位：①手入力 → ②在庫台帳（紐付けた在庫の仕入額）→ ③スプシ取込。
   //   以前は②と③が逆で、スプシに値があると在庫台帳を見ないため、🔎在庫候補で紐付けても数字が変わらなかった。
   //   スプシは将来切り離す方針なので、ポータル自前のデータ（在庫台帳）を先に見る。
+  /* ★2026-10-24 レビュー#3：注文の個数（items の qty の合計）より紐付いた在庫（仕入額あり）が少ない＝「一部だけ」。
+     その時はスプシの注文全体の額が大きければそれ、無ければ未入力扱い（粗利に入れず、仕入額のセルと KPI に件数を出す。🔗仕入れ自動マッチの対象にも戻る） */
+  const pfUnits = o => (o.items || []).reduce((s, it) => s + (Number(it && it.qty) || 1), 0);
+  const pfCostPartial = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); if (cm && cm.cost != null) return null; const inv = pfInv(o).filter(it => it.price != null); const u = pfUnits(o); return (inv.length && u > 1 && inv.length < u) ? { have: inv.length, need: u } : null; };
   const pfCost = o => {
     const cm = pf.costMap.get(o.cc + ':' + o.sn);
     if (cm && cm.cost != null) return cm.cost;         // ①ポータルで手入力/確定した値が最優先
     const inv = pfInv(o).filter(it => it.price != null);
-    if (inv.length) return inv.reduce((s, it) => s + it.price, 0);   // ②在庫台帳（紐付いた在庫の仕入額）
+    if (inv.length) { const invSum = inv.reduce((s, it) => s + it.price, 0); if (!pfCostPartial(o)) return invSum;   // ②在庫台帳（紐付いた在庫の仕入額）
+      const shc = Number((pfSheet(o) || {}).cost) || 0; return shc > invSum ? shc : null; }   // 一部だけ：スプシの注文全体の額が大きければそれ・無ければ未入力扱い（レビュー#3）
     const sh = pfSheet(o); return (sh && Number(sh.cost) > 0) ? Number(sh.cost) : null;  // ③利益計算表(スプシ)の控え
   };
   // 在庫No（Stock No.）が付いているか＝仕入れた実物が到着し在庫台帳に載った注文（到着待ちはstock_no空）。📗スプシ取込のstock_no配列 or 紐付いた在庫で判定。
@@ -50957,7 +51050,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       return { o: o, oname: oname, cand: cand, sure: !!(cand[0] && cand[0].s >= 3 && (!cand[1] || cand[1].s < cand[0].s)) };
     });
     const withCand = rows.filter(r => r.cand.length);
-    const optLabel = v => `${(v.name || v.name_supplier || v.item_id || '').slice(0, 40)}  ¥${(v.price || 0).toLocaleString()}${v.supplier ? ' / ' + v.supplier : ''}`;
+    /* ★2026-10-24 レビュー#2：同じ在庫が2つ以上の注文の第一候補なら、2つ目からは最初のチェックを外す（両方に付けない） */
+    { const firstUse = new Set(); withCand.forEach(r => { const id = r.cand[0] && r.cand[0].v.item_id; if (!id) return; if (firstUse.has(id)) r.sure = false; else firstUse.add(id); }); }
+    /* レビュー#26：40字で切ると後ろの「限定版」・機種が消えて通常版と取り違える → 120字まで出す */
+    const optLabel = v => `${(v.name || v.name_supplier || v.item_id || '').slice(0, 120)}  ¥${(v.price || 0).toLocaleString()}${v.supplier ? ' / ' + v.supplier : ''}`;
     body.innerHTML =
       `<div style="font-size:12px;color:#8a6d3b;background:#fff8e1;border:1px solid #ffe0a3;border-radius:6px;padding:8px 10px;margin-bottom:10px">未紐付けの在庫（仕入額あり）<b>${pool.length}</b>件と、商品名で照合しました。候補を確認し、正しければ選んで「紐付け保存」。保存すると在庫の <code>shopee_sn</code> にこの注文が入り、仕入額が利益に反映されます（間違いは在庫ページで解除可）。<br>候補あり <b>${withCand.length}</b>件 / 候補なし <b>${rows.length - withCand.length}</b>件。</div>` +
       (withCand.length ? `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:820px"><tr><th style="width:34px"></th><th>注文（商品）</th><th>国/日付</th><th>候補（在庫→仕入額）</th></tr>` +
@@ -50980,19 +51076,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const jobs = [];
       body.querySelectorAll('.cm-ck').forEach(ck => { if (!ck.checked) return; const i = +ck.dataset.i; const sel = body.querySelector('.cm-sel[data-i="' + i + '"]'); const id = sel && sel.value; if (id) jobs.push({ id: id, o: withCand[i].o }); });
       if (!jobs.length) { body.querySelector('.cm-msg').textContent = 'チェックされた紐付けがありません'; return; }
+      /* ★2026-10-24 レビュー#2：同じ在庫を2つ以上の注文に選んでいたら止める */
+      { const cnt = {}; jobs.forEach(j => { cnt[j.id] = (cnt[j.id] || 0) + 1; }); const dup = Object.keys(cnt).filter(k => cnt[k] > 1); if (dup.length) { const m0 = body.querySelector('.cm-msg'); m0.style.color = '#d93025'; m0.textContent = '同じ在庫を2つ以上の注文に選んでいます（在庫No ' + dup.join('・') + '）。どれか1つの注文だけにしてください'; return; } }
       if (!confirm(jobs.length + '件の在庫を、対応する注文に紐付けます（仕入額が利益に反映）。よろしいですか？')) return;
-      saveBtn.disabled = true; saveBtn.textContent = '保存中…'; const msg = body.querySelector('.cm-msg'); let ok = 0;
+      saveBtn.disabled = true; saveBtn.textContent = '保存中…'; const msg = body.querySelector('.cm-msg'); let sent = 0;
       const now = new Date().toISOString();
+      const errs = [];
       for (const j of jobs) {
         try {
-          await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(j.id), { shopee_sn: j.o.sn, status: '販売済み', edited_at: now });
-          const it = inv.find(x => x.item_id === j.id); if (it) { it.shopee_sn = j.o.sn; if (!pf.invMap.has(j.o.sn)) pf.invMap.set(j.o.sn, []); pf.invMap.get(j.o.sn).push(it); }
-          ok++; msg.textContent = ok + '/' + jobs.length + ' 紐付け…';
-        } catch (e) { msg.style.color = '#d93025'; msg.textContent = '一部失敗: ' + e.message; }
+          /* まだどの注文にも付いていない在庫だけに書く（別のPC・別の画面で先に付けた紐付けを上書きしない） */
+          await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(j.id) + '&or=' + encodeURIComponent('(shopee_sn.is.null,shopee_sn.eq.)'), { shopee_sn: j.o.sn, status: '販売済み', edited_at: now });
+          sent++; msg.textContent = sent + '/' + jobs.length + ' 紐付け…';
+        } catch (e) { errs.push(j.id + '：' + ((e && e.message) || e)); }
       }
-      try { logAct('利益', '仕入れ自動マッチ', pf.ym || '', ok + '件紐付け'); } catch (_) {}
+      /* PATCH は条件に合わない時（もう付いていた）も成功で返る＝書けたかを1回の読みで確かめてから画面の控えに入れる */
+      let got = null;
+      try { got = await sbGetAll('inventory', 'select=item_id,shopee_sn&item_id=in.(' + jobs.map(j => encodeURIComponent(j.id)).join(',') + ')'); } catch (e) { errs.push('書けたかを確かめられませんでした（' + ((e && e.message) || e) + '）。🔄で読み直してください'); }
+      let ok = 0;
+      if (got) jobs.forEach(j => { const g = got.find(x => String(x.item_id) === String(j.id)); if (g && String(g.shopee_sn || '') === String(j.o.sn)) { ok++; const it = inv.find(x => x.item_id === j.id); if (it) { it.shopee_sn = j.o.sn; if (!pf.invMap.has(j.o.sn)) pf.invMap.set(j.o.sn, []); pf.invMap.get(j.o.sn).push(it); } } else if (!errs.some(t => t.indexOf(j.id + '：') === 0)) errs.push(j.id + '：' + (g ? '既に別の注文（' + (g.shopee_sn || '?') + '）に付いています' : '在庫が見つかりません')); });
+      try { logAct('利益', '仕入れ自動マッチ', pf.ym || '', ok + '件紐付け' + (errs.length ? '・付かなかった ' + errs.length + '件' : '')); } catch (_) {}
+      try { pfRender(); } catch (_) {}
+      if (errs.length) { msg.style.color = '#d93025'; msg.textContent = '✅ ' + ok + '件を紐付けました／付かなかった ' + errs.length + '件：' + errs.slice(0, 5).join('／') + (errs.length > 5 ? ' ほか' : ''); saveBtn.textContent = '閉じてください（付かなかった分は上のとおり）'; return; }
       toast('✅ ' + ok + '件を紐付けました');
-      close(); try { pfRender(); } catch (_) {}
+      close();
     });
   }
 
@@ -51330,6 +51436,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               ` title="注文合計の仕入額${invs.length && invSum ? '（在庫連携の自動値 ¥' + invSum + '、入力で上書き）' : (scost > 0 ? '（利益計算表スプシの取込値 ¥' + scost + '、入力で上書き）' : '（手入力で保存）')}"` +
               ` style="width:100%;max-width:96px;padding:4px 6px;border:1px solid ${manual != null ? '#ddd' : (invSum ? '#b3a4e0' : (scost > 0 ? '#9ccc9c' : '#f0b429'))};border-radius:6px;font-size:12px">` +
               `${manual != null && meta && meta.cost_at ? `<div class="smd-dim" style="font-size:9px" title="仕入額の入力日（日本時間）">記入 ${jstDT(meta.cost_at)}</div>` : ''}` : '') +
+            (first && pfCostPartial(o) ? `<div style="font-size:9.5px;color:#b5341a;margin-top:2px" title="注文の個数より紐付いた在庫が少ないので、粗利には入れていません（残りを🔎在庫候補で充てるか、注文全体の仕入額を入力）">⚠ 在庫 ${pfCostPartial(o).have}/${pfCostPartial(o).need}点だけ</div>` : '') +
             (n > 1 && rowInvs.length && rowCost ? `<div style="font-size:11px;color:#7a6ba7;margin-top:2px" title="この商品分（在庫連携）">¥${rowCost.toLocaleString()}</div>` : '') +
             `</td>`; },
         };
@@ -51375,9 +51482,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     html = _plTop + `<div class="tool-card" style="margin:0 0 10px;max-width:none;padding:10px 14px;display:flex;flex-wrap:wrap;gap:22px;align-items:flex-end"
         title="いま絞り込んでいる範囲の合計です（表のいちばん上の「合計」行と同じ数字）。粗利は【入金と仕入の両方が分かっている注文】だけで計算しています">`
       + _kpi('注文', pairN + '件', orders.length !== pairN ? '表示 ' + orders.length + '件' : '', '#2b3440')
-      + _kpi('販売額', fmtJpy(tSales), '')
+      + _kpi('販売額', fmtJpy(tSales), (() => { const z = orders.filter(o => o.tab !== 200 && o.tab !== 600 && !(pfSales(o) > 0)).length; return z ? '⚠ 販売額不明 ' + z + '件' : ''; })())   /* ★レビュー#23：空が0に化けて合計から落ちる件数を出す */
       + _kpi('入金（確定）', fmtJpy(tFix), tProv ? '暫定 ' + fmtJpy(tProv) : '')
-      + _kpi('仕入額', fmtJpy(tCost), '', '#a15')
+      + _kpi('仕入額', fmtJpy(tCost), (() => { const z = orders.filter(o => pfCostPartial(o) && pfCost(o) == null).length; return z ? '⚠ 在庫が一部だけ ' + z + '件（粗利に入れず）' : ''; })(), '#a15')   /* ★レビュー#3 */
       + _kpi('粗利', fmtJpy(pairProfit), '入金と仕入がそろった分', _pcol, true)
       + _kpi('ROI', _roi == null ? '—' : _roi + '%', '', _pcol, true)
       + `</div>` + pfFeePanelHtml(orders) + html;
@@ -51394,7 +51501,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const _loadWarn = _issueWarn + (pf._failSheet ? _wbox('<b>利益計算表の取り込み値（仕入額・仕入元）を読み込めませんでした。</b>仕入額が0円のまま粗利が多めに出ています。画面を更新してください。') : '') + (pf._failReturns ? _wbox('<b>返品・返金の記録を読み込めませんでした。</b>返金済みの注文に印が付いていません。画面を更新してください。') : '');
     /* ★2026-10-18 本人「横スクロールが安定しない」：仕入額の入力・検索・更新のたびに表を丸ごと描き直して横位置が左端に戻っていた。描き直す前の横・縦の位置を控えて戻す（出品一覧と同じ） */
     const _pfSc0 = body.querySelector('.pf-scroll'); const _pfX = _pfSc0 ? _pfSc0.scrollLeft : 0, _pfY = _pfSc0 ? _pfSc0.scrollTop : 0;
-    body.innerHTML = fxStaleBanner() + _loadWarn + html;   // ★日次レートが読めていない時は必ず知らせる
+    body.innerHTML = fxStaleBanner() + plAcctBanner('上の「月次の損益」の純利益') + _loadWarn + html;   // ★日次レートが読めていない時は必ず知らせる／★レビュー#1 店で絞った時も
     { const _pfSc1 = body.querySelector('.pf-scroll'); if (_pfSc1) { if (_pfX) _pfSc1.scrollLeft = _pfX; if (_pfY) _pfSc1.scrollTop = _pfY; } }
     fitScroll('profit');
     wirePageNav(body, p => { pf.page = p; const sc = body.querySelector('.pf-scroll'); if (sc) sc.scrollTop = 0; pfRender(); }); // ★ページ送り（同じ絞り込みなのでsig一致＝1ページ目に戻らずそのページを描画）
@@ -51420,7 +51527,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         pop.style.top = Math.min(window.innerHeight - 120, r.bottom + 6) + 'px';
         try {
           if (!_invAll) _invAll = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,supplier_url,purchase_date,shopee_sn,bin,status&limit=9000');
-          const ord = (pf.rows || []).find(x => x.sn === sn) || {};
+          const ord = (pf.orders || []).find(x => x.sn === sn && (!cc || x.cc === cc)) || {};   /* ★レビュー#22：前は pf.rows（存在しない）を見ていた */
           const od = String(ord.order_date || '').slice(0, 10);
           // ★文字の似方だけで出すと「Mario Bros」に「KINGDOM HEARTS」が43%で並ぶ。
           //   商品名は日英が混ざるうえ、機種名や「Nintendo」「Used」など共通語が多くて似てしまうため。
@@ -51508,7 +51615,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             b2.disabled = true; b2.textContent = '…';
             try {
               // ★注文に充てたら在庫の状態も「販売済み」にする（棚卸しで押し直す手間をなくす）
-              await sbUpsert('inventory', [{ item_id: b2.dataset.id, shopee_sn: b2.dataset.sn, status: '販売済み' }]);
+              /* ★2026-10-24 レビュー#2と同じ型：まだどの注文にも付いていない在庫だけに書き、書けたかを読み直して確かめる（別のPC・別の注文の紐付けを上書きしない） */
+              await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(b2.dataset.id) + '&or=' + encodeURIComponent('(shopee_sn.is.null,shopee_sn.eq.)'), { shopee_sn: b2.dataset.sn, status: '販売済み' });
+              const chk = await sbGet('inventory', 'select=item_id,shopee_sn&item_id=eq.' + encodeURIComponent(b2.dataset.id));
+              if (!chk || !chk[0] || String(chk[0].shopee_sn || '') !== String(b2.dataset.sn)) throw new Error('この在庫は既に別の注文（' + ((chk && chk[0] && chk[0].shopee_sn) || '不明') + '）に付いています。🔄で読み直してください');
+              { const row0 = (_invAll || []).find(x => String(x.item_id) === String(b2.dataset.id)); if (row0) { try { pfInvalidateSn(row0, { shopee_sn: b2.dataset.sn, status: '販売済み' }); } catch (_) {} } }   /* ★レビュー#18：画面の控えにもすぐ入れる */
               try { logAct('利益', '在庫紐付け', String(b2.dataset.nm).slice(0, 40), cc + ' ' + b2.dataset.sn + ' → 在庫No ' + b2.dataset.id); } catch (_) {}
               toast('✓ 在庫No ' + b2.dataset.id + ' を充てました');
               _invAll = null; invPopClose(); pf._cache = null; renderProfit();
@@ -51668,7 +51779,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const cans = (pf.orders || []).filter(o => o.tab === 600);
     if (!cans.length) return '';
     const per = {}, need = [];
-    let lostJpy = 0, lostN = 0, unknownN = 0;
+    let lostJpy = 0, lostN = 0, unknownN = 0, guessOutN = 0;
     cans.forEach(o => {
       const its = (pf.invMap && pf.invMap.get(o.sn)) || [];
       const cost = its.reduce((t, i) => t + (Number(i.price) || 0), 0);
@@ -51676,7 +51787,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const t = per[o.cc] = per[o.cc] || { n: 0, '発送前': 0, '日本国内': 0, '日本を出た後': 0, unknown: 0, lostJpy: 0 };
       t.n++;
       if (stage) t[stage]++; else { t.unknown++; unknownN++; }
-      if (stage === '日本を出た後') { t.lostJpy += cost; lostJpy += cost; lostN++; }
+      /* ★2026-10-24 レビュー#19：純利益に渡す pfMonthCancelLoss と同じ物差し（推定だけの段階は損失に入れない・在庫の紐付けが無ければ pfCost）。前はカードと損益の表で別の数字だった */
+      if (stage === '日本を出た後') { if (guess) guessOutN++; else { const lc = its.length ? cost : (Number(pfCost(o)) || 0); t.lostJpy += lc; lostJpy += lc; lostN++; } }
       // 仕入 or 伝票の形跡があるもの＝損失になりうるので必ず仕分け対象に出す。推定だけの行も確定させたいので出す
       if (its.length || o.tracking || !stage || guess) need.push({ o, its, cost, stage, guess });
     });
@@ -51704,6 +51816,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<b>発送前</b>＝仕入も発送もしていない（損失なし）／<b style="color:#1a73e8">日本国内</b>＝荷物が戻る＝在庫に復活（損失なし）／<b style="color:#d93025">日本を出た後</b>＝戻らない＝仕入額が損失（SLS+半額保証の対象）。` +
       `段階は<b>↩️返品・キャンセル管理と同じデータ</b>なので、どちらで直しても両方に反映されます。` +
       (unknownN ? `<br><b style="color:#e8710a">未判定 ${unknownN}件</b> — 下で段階を押して確定してください（未判定の分は損失に計上されていません）。` : '') +
+      (guessOutN ? `<br><b style="color:#e8710a">推定で「日本を出た後」 ${guessOutN}件</b> — 段階を押して確定するまで損失に入れていません。` : '') +
       `</div>` +
       `<table class="pf-table"><tr><th>国</th><th style="text-align:right">キャンセル</th><th style="text-align:right">発送前</th><th style="text-align:right">日本国内</th><th style="text-align:right">日本を出た後</th><th style="text-align:right">未判定</th><th style="text-align:right">損失(仕入額)</th></tr>${rows}` +
       `<tr class="pf-total"><td>合計</td><td style="text-align:right">${cans.length}</td><td colspan="4" style="text-align:right">日本を出た後 ${lostN}件</td><td style="text-align:right;color:#d93025">${lostJpy ? '−' + fmtJpy(lostJpy) : '—'}</td></tr></table>` +
