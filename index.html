@@ -12399,22 +12399,25 @@
       fillDashProfit._busy = true;
       const sel = document.getElementById('pf-month');
       /* ★同日 本人「なぜ、わざわざ、損益・入出金を一度表示しないといけない？」：月の選択肢は pfBind（利益明細を開いた時）で初めて作られる＝空のまま選べず何もしていなかった。先に作る */
+      try { if (!stock.rows) await ensureInv(); } catch (_) {}   /* ★2026-10-24 レビュー：ダッシュボードの読み込みから在庫台帳を外した代わり。無いまま renderProfit を回すと、中で読み直して選択中の別の月で全読みし直す */
       try { if (sel) { pfBind(); const keep = sel.value; sel.value = ym; if (sel.value === ym) await renderProfit(true); try { sel.value = keep; } catch (_) {} } } catch (_) {}
       fillDashProfit._busy = false;
       if (!have()) { fillDashProfit._failAt = Date.now(); put('—', '今月の粗利を計算できませんでした（💹利益明細を開くと入ります）'); return; }
     }
     const [yy, mm] = ym.split('-').map(Number), nym = mm === 12 ? (yy + 1) + '-01' : yy + '-' + String(mm + 1).padStart(2, '0');
     /* ★同日 本人「88941？」「粗利は重要じゃない」：🧮損益の画面（plCtx）と同じ式にそろえる＝初期投資は経費に入れない・手で記録した返金も引く。粗利は出さない */
-    let expSum = null, refund = 0;
+    let expSum = null, refund = 0, issFail = false;
     try {
       const [rows, iss] = await Promise.all([sbGetAll('expenses', 'select=amount,category&ymd=gte.' + ym + '-01&ymd=lt.' + nym + '-01'), sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at').catch(() => null)]);
       expSum = (rows || []).reduce((a, r) => a + (plIsInvest(r.category) ? 0 : (Number(r.amount) || 0)), 0);
       refund = iss ? (Number(refundForYm(iss, ym)) || 0) : 0;
+      if (!iss) issFail = true;   /* ★2026-10-24 レビュー：読めなかったのを「返金0」に化けさせない（印を出す） */
     } catch (_) {}
     const g = pf.grossTotal, cxl = Number(pf.cxlLoss) || 0, net = expSum != null ? g - expSum - refund - cxl : null;
     const col = v => '<span style="color:' + (v >= 0 ? '#1a7f37' : '#d93025') + '">' + fmtJpy(v) + '</span>';
     if (net == null) { put('—', L_('経費を読めませんでした')); return; }
-    put(col(net), (pf.grossN || 0) + L_('件') + ' (' + L_('確定') + (pf.grossFixN || 0) + ' / ' + L_('暫定') + (pf.grossProvN || 0) + ')'
+    if (pf._failIssues) issFail = true;   // 利益明細の側で読めなかった時はキャンセル損も 0 のまま
+    put(col(net) + (issFail ? ' <span style="color:#b45309;font-size:13px">⚠</span>' : ''), (issFail ? '<span style="color:#b45309;font-weight:700">' + L_('⚠ 返金・キャンセル損を読めていません（多めに出ています）') + '</span><br>' : '') + (pf.grossN || 0) + L_('件') + ' (' + L_('確定') + (pf.grossFixN || 0) + ' / ' + L_('暫定') + (pf.grossProvN || 0) + ')'
       + '<br>' + L_('経費') + ' ' + fmtJpy(expSum) + (refund ? ' / ' + L_('返金') + ' ' + fmtJpy(refund) : '') + (cxl ? ' / ' + L_('キャンセル損') + ' ' + fmtJpy(cxl) : '') + ' ' + L_('を引いた後'));
   }
   async function renderDash(force) {
@@ -12441,7 +12444,7 @@
           sbGetAll('daily_stats', `select=*&day=gte.${since}&order=day`),
           sbGetAll('orders', 'select=cc,order_id,sn,buyer,tab,ship_by,status,items,tracking&tab=lt.500&order=ship_by.asc'),
           incomeShared(),
-          soft('在庫', ensureInv()),
+          null,   /* ★2026-10-24 レビュー：在庫台帳はもう使っていない（入庫待ち・死に筋の KPI は 10/23 に外した）。読まない。💰今月の利益が要る時だけ fillDashProfit が読む */
           soft('入金', sbGetAll('payouts', 'select=cc,payout_time,payout_amount,from_amount&order=payout_time')),
           soft('直近注文', sbGetAll('orders', `select=cc,sn,order_ts,order_date,total,tab,items&order_date=gte.${since5}`)),
           sbGetAll('orders', 'select=status,order_ts&order_ts=gte.' + monthStartTs).catch(() => null),
@@ -12463,7 +12466,7 @@
       const tCcO = {}, tCcU = {}, tCcL = {}, yCcL = {};  // cc → 注文数 / 商品数 / 現地売上(今日) / 現地売上(昨日)
       let yOrders = 0, yUnits = 0;                       // 昨日の注文数・点数
       (recentOrders || []).forEach(o => {
-        if (o.tab === 600) return;  // キャンセル除外
+        if (o.tab === 600 || o.tab === 200) return;  // キャンセル・未払い（UNPAID＝tab 200）は除外（★2026-10-24 レビュー：未払いが「件・点」に入って後から減っていた）
         const d = odDate(o), units = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
         const paid = snPaid.has(o.cc + '|' + o.sn) ? snPaid.get(o.cc + '|' + o.sn) : (Number(o.total) || 0);
         if (d === jstToday) { tCcO[o.cc] = (tCcO[o.cc] || 0) + 1; tCcU[o.cc] = (tCcU[o.cc] || 0) + units; tCcL[o.cc] = (tCcL[o.cc] || 0) + paid; }
@@ -12486,27 +12489,25 @@
       const toShip = notShipped.filter(o => !ordArranged(o));                                                    // ①未手配
       const arrangedN = notShipped.length - toShip.length;                                                        // ②伝票発行済（まだ手元）
       const inTransitN = orders.filter(o => o.tab === 300 && !held(o)).length;                                    // ③倉庫へ発送済（手を離れた）
-      // 期限の緊急度も同じ母集団（toShipは既に未手配のみ）
-      const unarr = toShip;
+      // ★2026-10-24 レビュー：期限は【まだ手元にある全部】（①未手配＋②伝票発行済）で見る。②も倉庫スキャンが遅れれば遅延になる。
+      //   注文管理の「🚨遅延中・本日発送」も①②の両方を数えている（ordDone で外すのは③倉庫へ発送済だけ）
+      const unarr = notShipped;
       // ★ship_by は【起点】であって期限そのものではない。家から出す期限は ordShipDeadline（＋1日）。
       //   生の ship_by で数えていたので、注文管理のカードが「あと2日」と出ている同じ注文を
       //   ここでは「期限切れ」と数えていた（同じ画面の中で食い違っていた・2026-09-06）。
-      const _dl = o => ordShipDeadline({ shipBy: o.ship_by });
-      const overdueShip = unarr.filter(o => o.ship_by && (_dl(o) - nowSec()) < 0);           // 未手配で既に期限切れ（最優先）
-      const due24 = unarr.filter(o => o.ship_by && (_dl(o) - nowSec()) >= 0 && (_dl(o) - nowSec()) < 86400); // 未手配でこれから24h以内
+      // ★2026-10-24 レビュー：秒で引き算せず【日付】で数える（期日は現地の日付・今日は日本時間＝dueBucketOf_／記憶 shopee_ship_deadline_local_tz）。
+      //   秒だと、今日が期日で時刻だけ過ぎた注文が上の KPI では「期限切れ」・すぐ下の一覧では「今日中」と食い違い、
+      //   MY 等の現地では前日の期日が逆に「24h以内」と甘く出ていた。cc も渡す（日曜の繰り上げを現地の曜日で見る）
+      const _dl = o => ordShipDeadline({ shipBy: o.ship_by, cc: o.cc });
+      const _bk = o => dueBucketOf_(_dl(o), o.cc);
+      const overdueShip = unarr.filter(o => o.ship_by && _bk(o) === 'over');   // 家から出す日を過ぎた（注文管理の🚨遅延中と同じ）
+      const due24 = unarr.filter(o => o.ship_by && _bk(o) === 'd0');           // 今日が家から出す日（名前は前のまま・中身は「今日が期限」）
       let pendJpy = 0, pendN = 0;
       income.forEach(i => { if (i.pending !== true) return; const rg = regionByCc(i.cc); if (rg) { pendJpy += (i.amount || 0) * rg.rateJpy; pendN++; } });
-      // ---- 運用KPI（在庫由来の要対応・横断） ----
-      const holdD = r => { const d = invPurDate(r); let t = d ? Date.parse(d) : NaN; if (isNaN(t)) t = r.created_at ? Date.parse(r.created_at) : NaN; return isNaN(t) ? 0 : (Date.now() - t) / 86400000; };
-      const waiting = inv.filter(r => r.status === '入庫待ち');
-      const waitVal = waiting.reduce((s, r) => s + (r.price || 0), 0);
-      const deadArr = inv.filter(r => r.status === '在庫保管中' && holdD(r) > 90);
-      const deadVal = deadArr.reduce((s, r) => s + (r.price || 0), 0);
-      const arrivedNotRecv = waiting.filter(r => deliveredAt(r)).length;
       kpis.innerHTML = [
         ['今日の売上', fmtJpy(todayJpy), `${todayOrders}件 / ${todayUnits}点（日本時間・今日）`, '今日（日本時間0時〜）の全7か国の売上を円換算で合計。件＝注文数（チャートの注文数と一致）／点＝商品数（1注文に複数商品のことあり）。'],
         ['昨日の売上', fmtJpy(yestJpy), `${yOrders}件 / ${yUnits}点（日本時間・昨日）`, '昨日1日分（日本時間）の売上（円換算）。買い手支払額(escrow)ベースの速報値でキャンセルは除外済み。入金確定で微増減することあり。今日との比較の基準に。'],
-        ['未発送', notShipped.length + '件' + (state.orders.selfTransitOk === false ? ' ⚠' : ''), (state.orders.selfTransitOk === false ? '⚠ 倉庫へ発送済の印を読めていません（多めに出ます）・' : '') + (overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件 ・` : (due24.length ? `⚠ 24h以内 ${due24.length}件 ・` : '')) + `①未手配 ${toShip.length} / ②伝票発行済 ${arrangedN}` + (inTransitN ? ` ・🚚倉庫へ ${inTransitN}` : ''), '**まだ手元にある**注文の数（①未手配＋②伝票発行済）。①＝Shopeeで発送手配をまだ押していない ②＝手配して伝票が出た（まだ手元）。🚚倉庫へ＝もう手を離れて倉庫へ輸送中なので、この数には入れていません。', 'orders'],
+        ['未発送', notShipped.length + '件' + (state.orders.selfTransitOk === false ? ' ⚠' : ''), (state.orders.selfTransitOk === false ? '⚠ 倉庫へ発送済の印を読めていません（多めに出ます）・' : '') + (overdueShip.length ? `🔴 期限切れ ${overdueShip.length}件 ・` : (due24.length ? `⚠ 今日が期限 ${due24.length}件 ・` : '')) + `①未手配 ${toShip.length} / ②伝票発行済 ${arrangedN}` + (inTransitN ? ` ・🚚倉庫へ ${inTransitN}` : ''), '**まだ手元にある**注文の数（①未手配＋②伝票発行済）。①＝Shopeeで発送手配をまだ押していない ②＝手配して伝票が出た（まだ手元）。🚚倉庫へ＝もう手を離れて倉庫へ輸送中なので、この数には入れていません。', 'orders'],
         ['入金予定(Pending)', fmtJpy(pendJpy), pendN + '件（未入金のみ）', 'Shopeeがまだ支払っていない（リリース前に預かり中＝escrow）の入金見込み額。リリース後はここから外れて実入金になる。'],
         /* ★2026-10-23 本人「ここにその月の利益出したいね」「入庫待ちいらんな」「死に筋もいらん」：入庫待ち・死に筋を外して今月の利益。数字は fillDashProfit が💹利益明細と同じ計算（粗利＝入金−仕入）で後から入れる */
         ['💰 今月の利益', '<span class="smd-spin"></span>', '今月の注文・入金・仕入れから計算中…', '今月（日本時間）の利益＝入金（円換算・Shopee手数料は差引済）−仕入−今月の経費（初期投資は別枠で入れない）−手で記録した返金−キャンセル損。🧮損益の画面の営業利益と同じ式。確定＝倉庫スキャン後で金額が決まった分／暫定＝まだ動く分。', 'expenses', 'kpi-profit'],
@@ -12525,20 +12526,23 @@
       kpis.querySelectorAll('.kpi-go').forEach(el => el.addEventListener('click', () => showPage(el.dataset.go)));
       fillDashProfit();
       const due = document.getElementById('dash-due');
-      due.innerHTML = toShip.slice(0, 8).map(o => {
+      due.innerHTML = notShipped.slice(0, 8).map(o => {
         const rg = regionByCc(o.cc);
         const it = (o.items && o.items[0]) || {};
         const img = it.image
           ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;border-radius:6px;object-fit:cover;flex:none" loading="lazy">`
           : `<span style="width:34px;height:34px;flex:none;background:#f4f4f4;border-radius:6px"></span>`;
         const link = rg ? `https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}` : null;
-        const body = `<b style="color:${rg ? rg.color : '#333'};flex:none">${o.cc}</b>${img}` +
+        const arr2 = ordArranged(o);   // ★2026-10-24 レビュー：②伝票発行済も並べるので印を付ける
+        const body = `<b style="color:${rg ? rg.color : '#333'};flex:none">${o.cc}</b>` +
+          `<span style="flex:none;font-size:11px;font-weight:700;color:${arr2 ? '#1565c0' : '#b45309'}" title="${arr2 ? '②伝票発行済（手配は押した・まだ手元）' : '①未手配（Shopeeで発送手配をまだ押していない）'}">${arr2 ? '②' : '①'}</span>${img}` +
           `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc(it.name || '')}</span>`;
         return `<div class="dash-row" style="align-items:center">` +
           (link ? `<a href="${link}" target="_blank" title="注文詳細を開く" style="display:flex;align-items:center;gap:8px;min-width:0;color:inherit;text-decoration:none">${body}</a>`
                 : `<span style="display:flex;align-items:center;gap:8px;min-width:0">${body}</span>`) +
           `<span style="flex:none">${shipByBadge(o.ship_by, false, o.cc)}</span></div>`;
-      }).join('') || '<div class="smd-dim">未発送はありません🎉</div>';
+      }).join('') + (notShipped.length > 8 ? `<div class="dash-row"><span class="dash-due-more" style="color:#1a73e8;cursor:pointer;font-size:12px">ほか ${notShipped.length - 8}件 → 📦注文管理</span></div>` : '') || '<div class="smd-dim">未発送はありません🎉</div>';
+      { const mo = due.querySelector('.dash-due-more'); if (mo) mo.addEventListener('click', () => showPage('orders')); }
       const ccEl = document.getElementById('dash-cc');
       /* ★2026-09-21 本人「情報量が多すぎるところ」。7か国ぶん縦に並べていたが、朝のうちは【6行が「0件」】で
          画面の高さだけ取って何も伝えていなかった。売れた国だけ行にして、0件の国は最後に1行でまとめる。
@@ -12833,46 +12837,48 @@
       // ---- 📊 自動分析（傾向を文章化。利益は仕入未入力が多いため当面除外） ----
       const anaEl = document.getElementById('dash-analysis');
       if (anaEl) {
-        const byDay = {};  // 各国ローカル日付(daily_stats.day) → {jpy, units, cc:{cc:jpy}}
-        days.forEach(d => { const rg = regionByCc(d.cc); if (!rg) return; const j = (d.sales || 0) * rg.rateJpy; const e = byDay[d.day] = byDay[d.day] || { jpy: 0, units: 0, cc: {} }; e.jpy += j; e.units += (d.units || 0); e.cc[d.cc] = (e.cc[d.cc] || 0) + j; });
-        // ★daily_stats.day は各国ローカル日付なので、JST暦日で引かず「実在する日付バケットの末尾N日」で集計（BR等の時差ズレ回避）
+        const byDay = {};  // 各国ローカル日付(daily_stats.day) → {jpy, units, cc:{cc:jpy}}（終わった日だけ）
+        // ★2026-10-24 レビュー：前は「実在する日付の末尾7つ」＝途中の今日を含む7日 vs 丸7日で比べていて、前週比が最大 約1/7 低く出た。
+        //   国ごとに【現地の昨日】を最後の日にして、直近7日（昨日まで）とその前の7日を比べる。途中の今日（現地）は入れない
+        const _sh = (ds, n) => new Date(Date.parse(ds + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+        const _lastDone = {}; REGIONS.forEach(rg => { _lastDone[rg.cc] = _sh(new Date(Date.now() + ccTz_(rg.cc) * 3600000).toISOString().slice(0, 10), -1); });
+        const w7Cc = {}, p7Cc = {}, seen7 = new Set();
+        days.forEach(d => { const rg = regionByCc(d.cc); if (!rg) return; const ld = _lastDone[d.cc], day = String(d.day || '').slice(0, 10); if (!ld || !day || day > ld) return;
+          const j = (d.sales || 0) * rg.rateJpy; const e = byDay[day] = byDay[day] || { jpy: 0, units: 0, cc: {} }; e.jpy += j; e.units += (d.units || 0); e.cc[d.cc] = (e.cc[d.cc] || 0) + j;
+          if (day >= _sh(ld, -6)) { w7Cc[d.cc] = (w7Cc[d.cc] || 0) + j; seen7.add(d.cc); } else if (day >= _sh(ld, -13)) p7Cc[d.cc] = (p7Cc[d.cc] || 0) + j; });
         const dayKeys = Object.keys(byDay).sort();
-        const last7Keys = dayKeys.slice(-7), prev7Keys = dayKeys.slice(-14, -7);
-        const sumKeys = (ks) => ks.reduce((s, k) => s + (byDay[k] ? byDay[k].jpy : 0), 0);
-        const last7 = sumKeys(last7Keys), prev7 = sumKeys(prev7Keys);
+        const last7 = Object.keys(w7Cc).reduce((s, k) => s + w7Cc[k], 0), prev7 = Object.keys(p7Cc).reduce((s, k) => s + p7Cc[k], 0);
         // 「今日」はKPI/国別と同じく日本時間基準(tCc)を使う（daily_statsの各国ローカル日付と混ぜない）
         const todayCc = REGIONS.map(rg => { const t = tCc[rg.cc]; return { cc: rg.cc, jpy: t ? t.local * rg.rateJpy : 0, units: t ? t.units : 0 }; });
         const activeToday = todayCc.filter(x => x.units > 0).sort((a, b) => b.jpy - a.jpy);
         const zeroToday = todayCc.filter(x => x.units === 0).map(x => x.cc);
         // 直近7日どの日にもその国のdaily_statsが1行も無い＝データ欠落。※値0でもキーが在れば「同期済で売上0」なので silent 扱いしない（偽「同期漏れ」を防ぐ）
-        const silent7 = REGIONS.filter(rg => !last7Keys.some(k => byDay[k] && byDay[k].cc && (rg.cc in byDay[k].cc))).map(rg => rg.cc);
+        const silent7 = REGIONS.filter(rg => !seen7.has(rg.cc)).map(rg => rg.cc);
         let bestK = null, bestV = 0; dayKeys.slice(-14).forEach(k => { if (byDay[k].jpy > bestV) { bestV = byDay[k].jpy; bestK = k; } });
         const overdue = overdueShip;   // ★上のカードと同じ数え方（家から出す期限＝ordShipDeadline）。生の ship_by で数えると同じ画面で食い違う
-        const oldest = overdue.reduce((m, o) => Math.min(m, _dl(o) || Infinity), Infinity);
-        const oldestH = isFinite(oldest) ? Math.floor((nowSec() - oldest) / 3600) : 0;
+        const oldestD = overdue.reduce((m, o) => Math.max(m, -dueDayDiff_(_dl(o), o.cc)), 0);   // ★2026-10-24 レビュー：最古は【日】で（一覧のバッジ「N日 超過」と同じ数え方）
         const tr = prev7 ? Math.round((last7 / prev7 - 1) * 100) : null;
         const vac = !!settings.vacationMode;
         const L = [];
         if (vac) L.push(`<b style="color:#b45309">🏖 バケーション中</b>（${settings.vacationSince || '—'} 開始・${vacDays()}日目）… 売上・受注の停止は<b>想定内</b>です。以下の売上系の警告は抑制しています。`);
         L.push(`<b>今日</b>：${activeToday.length ? activeToday.map(x => x.cc + ' ' + fmtJpy(x.jpy)).join('・') + (activeToday.length > 1 ? '（' + activeToday[0].cc + 'が牽引）' : '') : (vac ? 'まだ売上0 <span class="smd-dim">🏖バケーション中＝想定内</span>' : 'まだ売上0')}。${zeroToday.length && !vac ? `<span class="smd-dim">${zeroToday.join('/')}は本日まだ0</span>` : ''}`);
-        L.push(`<b>直近7日</b>：${fmtJpy(last7)}${tr != null ? `（前の7日 ${fmtJpy(prev7)} 比 <b style="color:${tr >= 0 ? '#1a7f37' : '#d93025'}">${tr >= 0 ? '+' : ''}${tr}%</b>${vac ? '' : (tr >= 15 ? ' 📈好調' : tr <= -15 ? ' 📉失速' : '')}）` : ''}。${bestK ? `直近2週のベストは <b>${bestK}</b>（${fmtJpy(bestV)}）` : ''}`);
+        L.push(`<b>直近7日（昨日まで）</b>：${fmtJpy(last7)}${tr != null ? `（前の7日 ${fmtJpy(prev7)} 比 <b style="color:${tr >= 0 ? '#1a7f37' : '#d93025'}">${tr >= 0 ? '+' : ''}${tr}%</b>${vac ? '' : (tr >= 15 ? ' 📈好調' : tr <= -15 ? ' 📉失速' : '')}）` : ''}。${bestK ? `直近2週のベストは <b>${bestK}</b>（${fmtJpy(bestV)}）` : ''}`);
         if (silent7.length) L.push(vac
           ? `<b style="color:#b45309">直近7日 売上0の国</b>：${silent7.join(' / ')} … 🏖バケーション中のため<b>想定内</b>（同期・トークンは正常前提。解除後も0が続くなら <code>diag</code> で確認）。`
           : `<b style="color:#e8710a">直近7日 売上0の国</b>：${silent7.join(' / ')} … 実際に動きが無いか、<b>日次同期の漏れ</b>（GAS <code>syncAll</code> が全店で回っているか＝トークン有効か。<code>diag</code>で確認）。要確認。`);
-        L.push(`<b>未発送</b>：${notShipped.length}件（未手配 ${toShip.length}・伝票発行済 ${arrangedN}）${overdue.length ? `、未手配のうち<b style="color:#d93025">期限超過 ${overdue.length}件</b>（最古 ${oldestH}h超過）→ 早めに発送を` : (toShip.length ? '（未手配は期限に余裕あり）' : '')}${due24.length ? `。24h以内も ${due24.length}件` : ''}`);
+        L.push(`<b>未発送</b>：${notShipped.length}件（未手配 ${toShip.length}・伝票発行済 ${arrangedN}）${overdue.length ? `、まだ手元の分のうち<b style="color:#d93025">期限超過 ${overdue.length}件</b>（最古 ${oldestD}日超過）→ 早めに発送を` : (notShipped.length ? '（期限に余裕あり）' : '')}${due24.length ? `。今日が期限も ${due24.length}件` : ''}`);
         if (state._dashUnpaidJpy != null) L.push(`<b>これから受け取る合計</b>：${fmtJpy(state._dashUnpaidJpy)}（週ごとの予定は上のカード）`);
         else if (pendN) L.push(`<b>入金予定</b>：${fmtJpy(pendJpy)}（金額が未確定の ${pendN}件）`);
-        L.push(`<b>1日平均（直近7日）</b>：${fmtJpy(last7 / 7)}／今日はここまで ${fmtJpy(todayCc.reduce((s, x) => s + x.jpy, 0))}`);
+        L.push(`<b>1日平均（昨日までの7日）</b>：${fmtJpy(last7 / 7)}／今日はここまで ${fmtJpy(todayCc.reduce((s, x) => s + x.jpy, 0))}`);
         anaEl.innerHTML = L.map(l => `<div style="margin:3px 0">・${l}</div>`).join('');
         // 国別（直近7日・前週比）
-        const ccSum = (ks, cc) => ks.reduce((s, k) => s + ((byDay[k] && byDay[k].cc[cc]) || 0), 0);
-        const ccJpy7 = REGIONS.map(rg => { const td = todayCc.find(x => x.cc === rg.cc) || {}; return { cc: rg.cc, color: rg.color, w7: ccSum(last7Keys, rg.cc), prev: ccSum(prev7Keys, rg.cc), today: td.jpy || 0 }; }).filter(x => x.w7 > 0 || x.today > 0).sort((a, b) => b.w7 - a.w7);
+        const ccJpy7 = REGIONS.map(rg => { const td = todayCc.find(x => x.cc === rg.cc) || {}; return { cc: rg.cc, color: rg.color, w7: w7Cc[rg.cc] || 0, prev: p7Cc[rg.cc] || 0, today: td.jpy || 0 }; }).filter(x => x.w7 > 0 || x.today > 0).sort((a, b) => b.w7 - a.w7);
         const byccEl = document.getElementById('dash-bycc');
-        if (byccEl) byccEl.innerHTML = '<b>直近7日 国別</b>：' + (ccJpy7.length ? ccJpy7.map(x => { const d = x.prev ? Math.round((x.w7 / x.prev - 1) * 100) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b style="color:${x.color}">${x.cc}</b> ${fmtJpy(x.w7)}${d != null ? ` <span style="color:${d >= 0 ? '#1a7f37' : '#d93025'};font-size:11px">${d >= 0 ? '+' : ''}${d}%</span>` : ''}${x.today ? ` <span class="smd-dim" style="font-size:11px">(今日${fmtJpy(x.today)})</span>` : ''}</span>`; }).join('') : '<span class="smd-dim">データなし</span>');
+        if (byccEl) byccEl.innerHTML = '<b>直近7日 国別（昨日まで）</b>：' + (ccJpy7.length ? ccJpy7.map(x => { const d = x.prev ? Math.round((x.w7 / x.prev - 1) * 100) : null; return `<span style="white-space:nowrap;margin-right:14px;display:inline-block"><b style="color:${x.color}">${x.cc}</b> ${fmtJpy(x.w7)}${d != null ? ` <span style="color:${d >= 0 ? '#1a7f37' : '#d93025'};font-size:11px">${d >= 0 ? '+' : ''}${d}%</span>` : ''}${x.today ? ` <span class="smd-dim" style="font-size:11px">(今日${fmtJpy(x.today)})</span>` : ''}</span>`; }).join('') : '<span class="smd-dim">データなし</span>');
         // おすすめアクション（タスク化）
         const actions = [];
-        if (overdue.length) actions.push({ key: 'ship-overdue', cat: '発送', priority: 1, text: `期限超過 <b style="color:#d93025">${overdue.length}件</b>（最古${oldestH}h）を今日中に発送`, task: `【発送】期限超過${overdue.length}件を発送（最古${oldestH}h超過）` });
-        if (due24.length) actions.push({ key: 'ship-due24', cat: '発送', priority: 1, text: `24h以内締切 <b>${due24.length}件</b>を優先処理`, task: `【発送】24h以内締切 ${due24.length}件を発送` });
+        if (overdue.length) actions.push({ key: 'ship-overdue', cat: '発送', priority: 1, text: `期限超過 <b style="color:#d93025">${overdue.length}件</b>（最古${oldestD}日超過）を今日中に発送`, task: `【発送】期限超過${overdue.length}件を発送（最古${oldestD}日超過）` });
+        if (due24.length) actions.push({ key: 'ship-due24', cat: '発送', priority: 1, text: `今日が発送期限 <b>${due24.length}件</b>を今日中に発送`, task: `【発送】今日が発送期限 ${due24.length}件を発送` });
         if (!vac) silent7.forEach(cc => actions.push({ key: 'sales-zero-' + cc, cat: '売上', priority: 2, text: `<b>${cc}</b> は直近7日 売上0 → 日次同期の確認（GAS/トークン） or テコ入れ（値下げ/露出/在庫）`, task: `【${cc}】直近7日 売上0 — 日次同期確認＆テコ入れ検討` }));
         if (!vac) ccJpy7.forEach(x => { if (x.prev && x.w7 / x.prev < 0.7) { const d = Math.round((x.w7 / x.prev - 1) * 100); actions.push({ key: 'sales-drop-' + x.cc, cat: '売上', priority: 2, text: `<b style="color:${x.color}">${x.cc}</b> 直近7日が前週比 <b style="color:#d93025">${d}%</b> → 要因確認・対策`, task: `【${x.cc}】売上が前週比${d}% — 要因確認・対策` }); } });
         if (pendN) actions.push({ key: 'pay-pending', cat: '入金', priority: 3, text: `今週の着金を確認（これから受け取る合計 ${fmtJpy(state._dashUnpaidJpy != null ? state._dashUnpaidJpy : pendJpy)}）`, task: `【入金】今週の Payoneer 着金を確認` });
@@ -13257,7 +13263,11 @@
       body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
       try {
         // 追加日時の新しい順（最新に登録したものを先頭に）。item_id順だと同日でもソース名で並び最新が埋もれるため
-        stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc');
+        // ★2026-10-24 レビュー#3：棚卸の記録（stocktake）と機種・カテゴリの手直し（inv_class）は ensureInv でしか読んでいなかった。
+        //   在庫管理を開いたまま再読み込みすると在庫だけ読んで描き、棚卸バーが「✓あり 0／全部未確認」・手直しが自動判定に見えた。
+        //   → 一緒に待つ（読めていれば takLoad / invClsLoad は何も読まない）。どちらも中で例外を拾うので、ここは止まらない
+        const [invRows] = await Promise.all([sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'), takLoad(), invClsLoad()]);
+        stock.rows = invRows;
         // 画像: Shopee注文SN → 注文明細の画像（在庫名は日本語で商品名照合できないため、SN一致が確実）
         stock.imgMap = new Map();
         const orders = await sbGetAll('orders', 'select=sn,items').catch(() => []);
@@ -13266,6 +13276,8 @@
           if (o.sn && it && it.image && !stock.imgMap.has(o.sn)) stock.imgMap.set(o.sn, it.image);
         });
       } catch (e) { body.innerHTML = errBox(e); return; }
+    } else if (!tak.ok || !invCls.ok) {
+      await Promise.all([takLoad(), invClsLoad()]);   // 前に読めなかった分だけ読み直す（読めている方は何も読まない）
     }
     stockRender();
   }
@@ -13313,12 +13325,13 @@
       }
       await sbUpsert('inventory', [Object.assign({ item_id: itemId, edited_at: new Date().toISOString() }, patch)]);
       const row = stock.rows.find(r => r.item_id === itemId);
+      const rowBefore = row ? Object.assign({}, row) : null;   // ★書き換える前の控え（💹の突合マップで元の注文から外すのに要る・2026-10-24）
       if (row) Object.assign(row, patch);
       logAct('在庫管理', '編集', itemId, Object.entries(patch).map(([k, v]) => `${k}=${v == null ? '(空)' : v}`).join(' / '));
       // ★仕入額や注文SNを直した瞬間に💹利益・📈事業計画へ効かせる。
       //   在庫は120秒キャッシュしているので、無効化しないと「入力したのに粗利が変わらない」ように見える。
       if ('shopee_sn' in patch || 'price' in patch || 'status' in patch) {
-        try { pf._invAt = 0; if (pf.invMap) pfInvalidateSn(row, patch); } catch (_) {}
+        try { pf._invAt = 0; if (pf.invMap) pfInvalidateSn(rowBefore, patch); } catch (_) {}
         try { plan._cache = null; } catch (_) {}
       }
       return true;
@@ -13417,7 +13430,7 @@
             `<td style="font-size:11px">${esc(r.supplier || '')}</td>` +
             `<td style="text-align:right;font-size:11px">${r.price != null ? fmtJpy(r.price) : '<span class="smd-dim">未入力</span>'}</td>` +
             `<td style="font-size:11px">${esc(r.status || '')}${r.shopee_sn ? `<br><span style="color:#e8710a;font-size:10px">既に ${esc(r.shopee_sn)} に紐付き</span>` : ''}</td>` +
-            `<td><button class="smd-btn ip-pick" data-id="${esc(r.item_id)}" style="font-size:11px;padding:2px 8px">割り当て</button></td></tr>`).join('') + `</table>`
+            `<td><button class="smd-btn ip-pick" data-id="${esc(r.item_id)}" style="font-size:11px;padding:2px 8px">${r.shopee_sn && r.shopee_sn !== sn ? '付け替え' : '割り当て'}</button></td></tr>`).join('') + `</table>`
         : '<div class="smd-dim" style="font-size:12px;padding:8px 2px">該当する在庫がありません（絞り込みを緩めるか、チェックを外してください）</div>';
       wrap.querySelectorAll('.ip-pick').forEach(b => b.addEventListener('click', async () => {
         b.disabled = true;
@@ -13425,11 +13438,18 @@
         try {
           // stockSaveは在庫ページ用（stock.rowsが必要）なので、ここは直接書く。状態も「販売済み」へ寄せる
           await sbPatch('inventory', 'item_id=eq.' + encodeURIComponent(b.dataset.id), { shopee_sn: sn, status: '販売済み', edited_at: new Date().toISOString() });
-          const it = inv.find(x => x.item_id === b.dataset.id); if (it) { it.shopee_sn = sn; it.status = '販売済み'; }
-          logAct('在庫管理', '注文へ割当', b.dataset.id, cc + ' / ' + sn);
-          toast('🔗 割り当てました（状態は「販売済み」）');
+          const it = inv.find(x => x.item_id === b.dataset.id);
+          // ★2026-10-24 レビュー#6：別の注文に紐付いていた在庫を選ぶと、元の注文の原価が黙って外れていた。
+          //   どこから外したかを出す。💹の突合マップも「元の注文から外して新しい注文へ」動かす
+          //   （以前は足すだけ＝再読み込みまで同じ仕入額が2つの注文に乗っていた）。書き換える前の値で呼ぶ
+          const prevSn = it ? String(it.shopee_sn || '') : '';
+          try { pf._invAt = 0; if (pf.invMap && it) pfInvalidateSn(Object.assign({}, it), { shopee_sn: sn, status: '販売済み' }); } catch (_) {}
+          try { plan._cache = null; } catch (_) {}
+          if (it) { it.shopee_sn = sn; it.status = '販売済み'; }
+          const moved = prevSn && prevSn !== sn;
+          logAct('在庫管理', '注文へ割当', b.dataset.id, cc + ' / ' + sn + (moved ? '（' + prevSn + ' から付け替え）' : ''));
+          toast(moved ? '🔗 ' + prevSn + ' から付け替えました（' + prevSn + ' の原価は外れます・状態は「販売済み」）' : '🔗 割り当てました（状態は「販売済み」）');
           close();
-          try { if (pf.invMap) { if (!pf.invMap.has(sn)) pf.invMap.set(sn, []); if (it) pf.invMap.get(sn).push(it); pfRender(); } } catch (_) {}
         } catch (e) { alert('割り当て失敗: ' + e.message); b.disabled = false; }
       }));
     };
@@ -13541,18 +13561,28 @@
   // 選択した在庫の状態を一括変更（届いた入庫待ちを「在庫保管中(受取済)」にまとめて片付ける用）
   async function stockBulkStatus(newStatus) {
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
-    const ids = [...(stock.sel || [])]; if (!ids.length) return;
+    // ★2026-10-24 レビュー#1：選択（☑）は🖨️一括印刷と共用。「状態:すべて」で全選択→印刷→そのまま押すと、
+    //   販売済み・仕入キャンセルまで「在庫保管中」になり、在庫の点数と仕入額（資産）が増えて見えた。
+    //   → 変えるのは【入庫待ち】の行だけ。他の状態は触らず、触らなかった件数を出す。
+    const selIds = [...(stock.sel || [])]; if (!selIds.length) return;
+    const ids = selIds.filter(id => { const r0 = (stock.rows || []).find(x => x.item_id === id); return r0 && r0.status === '入庫待ち'; });
+    const skipped = selIds.length - ids.length;
+    if (!ids.length) { toast('選んだ ' + selIds.length + '件に「入庫待ち」がありません（入庫待ち以外は変えません）', true); return; }
     if (!confirm(`選択した ${ids.length}件 の状態を「${newStatus}」に変更します。\n（届いた入庫待ちを受取済にする一括処理）\nよろしいですか？`)) return;
+    const rbBtn = document.getElementById('stk-bulkrecv');
+    if (rbBtn) { rbBtn.disabled = true; rbBtn.textContent = '⏳ 変更中…'; }
     try {
       const now = new Date().toISOString();
       const rows = ids.map(id => ({ item_id: id, status: newStatus, edited_at: now }));
       for (let i = 0; i < rows.length; i += 200) await sbUpsert('inventory', rows.slice(i, i + 200));
       ids.forEach(id => { const r = stock.rows.find(x => x.item_id === id); if (r) r.status = newStatus; });
-      try { logAct('在庫管理', '一括状態変更', ids.length + '件', '→' + newStatus); } catch (_) {}
+      try { logAct('在庫管理', '一括状態変更', ids.length + '件', '→' + newStatus + (skipped ? '（入庫待ち以外 ' + skipped + '件は触らず）' : '')); } catch (_) {}
+      // ★状態が変わった＝在庫の点数と資産が動く。stockSave と同じく💹利益・📈事業計画のキャッシュを捨てる
+      try { pf._invAt = 0; plan._cache = null; } catch (_) {}
       stock.sel.clear();
-      toast(`✅ ${ids.length}件を「${newStatus}」にしました`);
+      toast(`✅ ${ids.length}件を「${newStatus}」にしました` + (skipped ? `（入庫待ち以外の ${skipped}件は触っていません）` : ''));
       stockRender();
-    } catch (e) { alert('一括変更に失敗: ' + e.message); }
+    } catch (e) { alert('一括変更に失敗: ' + e.message); if (rbBtn) { rbBtn.disabled = false; rbBtn.textContent = '✅ 受取済にする（' + selIds.length + '）'; } }
   }
   // ItemID（主キー）そのものを変更。印刷済みQRラベルとはズレるので確認を挟む
   async function stockRenameId(oldId, newId, inputEl) {
@@ -14319,11 +14349,30 @@
   //   機械的に「重複」「二重引当」と決めつけると正常なものを壊す。目で見て押すだけにする。
   var tana = { rows: null, loading: false, q: '', st: '在庫保管中', page: 0, sort: 'old' };
   var TANA_PER = 80;
+  // ★2026-10-24 レビュー#2：棚卸しタブは在庫を【別に全件】読んで別のコピーで持っていた。台帳で「仕入キャンセル」に直しても
+  //   棚卸しタブは古い「在庫保管中」のまま→「まとめて販売済み」で上書き、逆に棚卸しタブで変えた分は台帳に出なかった。
+  //   → 台帳（stock.rows）を読んであれば【同じ行】を古い順に並べて使う（開くたびに並べ直す＝台帳の追加・分割・統合もそのまま出る）。
+  //   🔄読み直す（force）はサーバーから読み、台帳の行に重ねる＝どちらから見ても同じ値。
   async function tanaLoad(force) {
+    if (!force && stock.rows) {
+      tana.rows = stock.rows.slice().sort(function (a, b) { var x = String(a.purchase_date || ''), y = String(b.purchase_date || ''); return x < y ? -1 : (x > y ? 1 : 0); });
+      tana.err = null;
+      if (tana.hints == null) {
+        try { var kv0 = await sbGetAll('app_kv', 'select=v&k=eq.stock_mail_hints'); tana.hints = (kv0 && kv0[0] && kv0[0].v && kv0[0].v.items) || []; }
+        catch (e) { tana.hints = []; }
+      }
+      return;
+    }
     if (tana.rows && !force) return;
     tana.loading = true; drawTana();
     try {
-      tana.rows = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,supplier_url,status,purchase_date,shopee_sn,bin&order=purchase_date.asc.nullsfirst');
+      var fresh = await sbGetAll('inventory', 'select=item_id,name,name_supplier,image,price,supplier,supplier_url,status,purchase_date,shopee_sn,bin&order=purchase_date.asc.nullsfirst');
+      if (stock.rows) {
+        var byId = new Map(stock.rows.map(function (r) { return [String(r.item_id), r]; }));
+        fresh = fresh.map(function (v) { var o = byId.get(String(v.item_id)); if (o) { Object.assign(o, v); return o; } return v; });
+        stock._tanaDirty = true;   // 台帳の行も新しい値になった＝📒に戻った時に描き直す
+      }
+      tana.rows = fresh; tana.err = null;
     } catch (e) {
       // ★「読めなかった」を「0件」と同じ顔にしない。現物を数える画面で「在庫あり0点」と
       //   断言したまま『まとめて販売済みにする』へ進めてしまう（2026-09-10 是正）。
@@ -14365,11 +14414,20 @@
   }
   async function tanaSet(id, st) {
     if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
-    await sbUpsert('inventory', [{ item_id: id, status: st }]);
+    await sbUpsert('inventory', [{ item_id: id, status: st, edited_at: new Date().toISOString() }]);
     var r = (tana.rows || []).find(function (x) { return String(x.item_id) === String(id); });
     if (r) r.status = st;
+    tanaSyncStock_([String(id)], st);
     try { logAct('在庫', '棚卸し', String(id), st); } catch (e) { }
     return true;
+  }
+  function tanaSyncStock_(ids, st) {
+    if (stock.rows && ids.length) {
+      var want = new Set(ids);
+      stock.rows.forEach(function (x) { if (want.has(String(x.item_id))) x.status = st; });
+    }
+    stock._tanaDirty = true;
+    try { pf._invAt = 0; plan._cache = null; } catch (_) {}
   }
   function drawTana() {
     var host = document.getElementById('stock-tana'); if (!host) return;
@@ -14463,7 +14521,10 @@
     { var ob = host.querySelector('#tn-old'); if (ob) ob.addEventListener('change', function () { tana.oldOnly = ob.checked; tana.page = 0; drawTana(); }); }
     { var bb = host.querySelector('#tn-bulk');
       if (bb) bb.addEventListener('click', async function () {
-        var target = tanaFiltered().filter(function (v) { return String(v.status || '') !== '販売済み'; });
+        // ★2026-10-24 レビュー#10：「全部」のまま押すと、入庫待ち・届かなかった（仕入キャンセル）まで販売済みになり、
+        //   資産から外していた仕入れが販売済みとして原価に戻った。→ 状態で絞った時だけ。届かなかったは対象にしない
+        if (!tana.st) { alert('「全部」のままでは使えません。\n\n「在庫あり」などの状態で絞り込んでから押してください（届かなかった・入庫待ちを販売済みにしないため）'); return; }
+        var target = tanaFiltered().filter(function (v) { var s0 = String(v.status || ''); return s0 !== '販売済み' && s0 !== '仕入キャンセル'; });
         if (!target.length) { alert('対象がありません'); return; }
         if (!confirm('いま絞り込まれている ' + target.length + '件 を、まとめて「販売済み」にします。\n\n'
           + '※実物を数えて残っていたものは、あとからItemIDで検索して「在庫あり」に戻せます。\n\nよろしいですか？')) return;
@@ -14473,8 +14534,10 @@
           for (var i = 0; i < target.length; i += 200) {
             var part = target.slice(i, i + 200);
             bb.textContent = '反映中… ' + i + '/' + target.length;
-            await sbUpsert('inventory', part.map(function (v) { return { item_id: v.item_id, status: '販売済み' }; }));
+            var nowB = new Date().toISOString();
+            await sbUpsert('inventory', part.map(function (v) { return { item_id: v.item_id, status: '販売済み', edited_at: nowB }; }));
             part.forEach(function (v) { v.status = '販売済み'; });
+            tanaSyncStock_(part.map(function (v) { return String(v.item_id); }), '販売済み');
             done += part.length;
           }
           try { logAct('在庫', '棚卸し一括', '', done + '件を販売済みに'); } catch (e) { }
@@ -14487,10 +14550,13 @@
         if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return; }
         ib.disabled = true; ib.textContent = '読み込み中…';
         var cand = [];
+        var readErr = null;
         try {
           var kv = await sbGetAll('app_kv', 'select=v&k=eq.profit_link_import');
           cand = (kv && kv[0] && kv[0].v && kv[0].v.items) || [];
-        } catch (e) { }
+        } catch (e) { readErr = (e && e.message) || String(e); }
+        // ★2026-10-24 レビュー#9：読めなかった時に catch で空になり「候補がありません。GASで…実行してから」と出ていた＝0件と同じ顔
+        if (readErr) { alert('取り込み候補を読めませんでした（0件ではなく不明です）。\n\n通信を確かめて、もう一度押してください。\n' + readErr); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
         if (!cand.length) { alert('取り込み候補がありません。\n\nGASで importProfitScanFolder を実行してから、もう一度押してください。'); ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映'; return; }
         // 在庫台帳にある在庫Noだけを対象にする（ざっくりでよいので、無いものは黙って飛ばす）
         var have = {}, byMid = {};
@@ -14587,6 +14653,7 @@
           }
           try { logAct('在庫', '利益管理表から紐付け', '', rows.length + '件（キャンセル' + nCan + '・不明' + nMiss + '）'); } catch (e) { }
           toast('✓ ' + rows.length + '件を反映しました');
+          try { pf._invAt = 0; plan._cache = null; } catch (_) {}   // 注文の紐付けと原価が動いた
           await tanaLoad(true); drawTana();
         } catch (e2) { alert('反映に失敗: ' + ((e2 && e2.message) || e2)); }
         ib.disabled = false; ib.textContent = '📥 利益管理表の紐付けを反映';
@@ -14703,9 +14770,12 @@
       try {
         const t = x.mates[0];
         const patch = {};
-        ['image', 'supplier_url', 'tracking_no', 'proof', 'supplier', 'seller', 'note'].forEach(f => {
+        // ★2026-10-24 レビュー#8：注文の紐付け（shopee_sn）・棚（bin）・仕入日時・配送情報が PITM 側にだけある時、消すと失われていた（消すのは取り消せない）
+        ['image', 'supplier_url', 'tracking_no', 'proof', 'supplier', 'seller', 'note', 'shopee_sn', 'bin', 'purchase_ts', 'delivery_info'].forEach(f => {
           if (!t[f] && x.p[f]) patch[f] = x.p[f];      // スプシ側が空の項目だけ埋める（上書きしない）
         });
+        // 注文に紐付いた＝売れている。stockSave と同じく「在庫保管中／入庫待ち」なら「販売済み」へ寄せる
+        if (patch.shopee_sn && (t.status === '在庫保管中' || t.status === '入庫待ち')) patch.status = '販売済み';
         if (Object.keys(patch).length) { patch.item_id = t.item_id; await sbUpsert('inventory', [patch]); moved++; }
         await sbDelete('inventory', 'item_id=eq.' + encodeURIComponent(id));
         del++;
@@ -14714,6 +14784,7 @@
     alert('まとめました：' + del + '件を統合' + (moved ? '（うち' + moved + '件は情報をスプシ側へ移動）' : '') + (ng ? '／失敗 ' + ng + '件' : ''));
     stock.rows = null;
     try { stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); } catch (_) {}
+    try { pf._invAt = 0; plan._cache = null; } catch (_) {}   // 行が消えた・紐付けが移った＝💹📈を読み直させる
     renderDupId();
   }
   async function renderTana() { await tanaLoad(false); drawTana(); }
@@ -14769,7 +14840,7 @@
       ['⚠️ 仕分けが必要', needFix.length + '点', '状態と注文の紐付きが食い違っています', '__fix'],
       // ★棚卸で現物を確認できたのに、この台帳に行が無いItemID。スプシ側にしか登録されていない分。
       //   棚卸モードを開かないと見えなかったので、常設のタイルにして必ず目に入るようにする。
-      ['📦 台帳に無い現物', Object.keys(tak.unknown || {}).length + '点', '棚卸で読み取れたが台帳に行が無い', '__unk'],
+      ['📦 台帳に無い現物', tak.ok ? Object.keys(tak.unknown || {}).length + '点' : '不明', '棚卸で読み取れたが台帳に行が無い', '__unk'],
       ['全登録', all.length + '点', 'クリックで絞り込み解除', ''],
     ].map(([t, v, s, f]) => `<div class="kpi stk-kpi" data-f="${esc(f)}" style="cursor:pointer" title="クリックで下の一覧をこの条件で絞り込みます"><div class="t">${t}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
     document.querySelectorAll('.stk-kpi').forEach(el => el.addEventListener('click', () => {
@@ -14903,6 +14974,8 @@
             `<div style="font-size:12.5px;margin-top:2px;opacity:.95"><span style="font-family:monospace">${esc(ls.id)}</span>${ls.name ? '　' + esc(String(ls.name)) : ''}</div></div>`;
         })() : '';
         return `<div style="margin:8px 0 0;padding:8px 10px;border:1px solid ${scan ? '#1a7f37' : '#e5e5e5'};border-radius:8px;background:${scan ? '#eafaf0' : '#fafafa'}">` + lsBox +
+          (!tak.ok ? `<div style="margin:0 0 6px;padding:6px 9px;background:#fdecea;border:1px solid #f5c2c2;border-radius:6px;font-size:12px;color:#b3261e;font-weight:700">⚠️ 棚卸の記録を読めていません。下の ✓あり・未確認 の数は0ではなく不明です（通信を確かめて 🔄 更新）</div>` : '') +
+          (!invCls.ok ? `<div style="margin:0 0 6px;padding:6px 9px;background:#fff8e6;border:1px solid #f3d08a;border-radius:6px;font-size:12px;color:#7a5a00">⚠️ 機種・カテゴリの手直しを読めていません。いまは自動判定の値で出ています（🔄 更新で読み直し）</div>` : '') +
           `<button class="smd-btn" id="stk-takscan" style="${scan ? 'background:#1a7f37;border-color:#1a7f37;color:#fff;font-weight:700' : 'border-color:#1a7f37;color:#1a7f37;font-weight:700'}" title="ONにすると、QRスキャン／ハンディスキャナで読み取ったItemIDがその場で「✓あり」に登録されます。現物を1つずつ手に取って読ませてください">📋 棚卸モード ${scan ? 'ON' : 'OFF'}</button>` +
           `<span style="margin-left:10px;font-size:12.5px">在庫保管中 <b>${target.length}</b>件 ／ <b style="color:#1a7f37">✓あり ${ok}</b> ／ <b style="color:#d93025">✗なし ${ng}</b> ／ <b style="color:#e8710a">未確認 ${todo}</b></span>` +
           // ★金額の把握が棚卸の目的（期末棚卸高になる）。件数だけでなく仕入額を常に出す。
@@ -15259,7 +15332,8 @@
     { const tb = document.getElementById('stock-tab');
       if (tb && !tb.dataset.wired) { tb.dataset.wired = '1';
         tb.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; stockTab = b.dataset.k;
-          try { localStorage.setItem('smdStockTab', stockTab); } catch (_) {} applyStockTab(); }); } }
+          try { localStorage.setItem('smdStockTab', stockTab); } catch (_) {}
+          if (stockTab !== 'tana' && stock._tanaDirty && stock.rows) { stock._tanaDirty = false; stockRender(); } else applyStockTab(); }); } }
     { const cb = document.getElementById('stk-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('在庫_' + new Date().toISOString().slice(0, 10) + '.csv', [['ItemID', '商品名', 'SKU', '仕入元', 'セラー', '仕入額(円)', 'コンディション', '状態', '棚', '受取日時', 'Shopee注文SN', '備考']].concat(rows.map(r => [r.item_id || '', r.name || r.name_supplier || '', r.sku || '', r.supplier || '', r.seller || '', r.price != null ? r.price : '', r.condition || '', r.status || '', r.bin || '', deliveredAt(r) || '', r.shopee_sn || '', r.note || ''])))); }
     body.querySelectorAll('.stk-qr').forEach(el => el.addEventListener('click', () => stockLabelPreview(el.dataset.id)));
     // ラベル一括印刷：チェックボックス選択
@@ -15360,7 +15434,7 @@
       g.items.push({ name: r.name || r.name_supplier || '', price: r.price, date: d, ship: sm, url: r.supplier_url, txn: stkTxnUrl(r), received: receivedDay(deliveredAt(r)) });
     });
     // 事業者マーケット（Shops/ショッピング/楽天/店舗系）は請求書等に事業者情報が出る＝連絡可
-    const BIZ_SUP = /^(メルカリShops|ヤフーショッピング|楽天|Nintendo Store|ブックオフ)/;
+    const BIZ_SUP = /^(メルカリShops|Yahoo!ショッピング|ヤフーショッピング|楽天|Nintendo Store|オフモール|ブックオフ|セカストオンライン)/;   // ★g.supplier は normSupplier でそろえた後の名前（Yahoo!ショッピング・オフモール）。旧表記のままだと事業者が「匿名のみ／配送不明」に落ちていた（レビュー 仕入れ管理 #11）
     const contactOf = g => (BIZ_SUP.test(g.supplier) || g.open > 0) ? 'open' : (g.anon > 0 ? 'anon' : 'unknown');
     let sellers = Object.values(bySeller).filter(g => g.n >= 2);
     sellers.forEach(g => { g.contact = contactOf(g); g.items.sort((a, b) => String(b.date).localeCompare(String(a.date))); });
@@ -15393,10 +15467,10 @@
         g.items.map(it => `<div style="font-size:10.5px;line-height:1.5">${esc(it.date || '')} ・ ${it.price != null ? fmtJpy(it.price) : ''} ・ ${it.url ? `<a href="${hrefOk(it.url)}" target="_blank" rel="noopener" style="color:#1565c0;text-decoration:none">${nm(it.name, '220px')}↗</a>` : nm(it.name, '220px')}${it.ship ? ` <span class="smd-dim">[${esc(it.ship)}]</span>` : ''}${it.received ? ` <span style="color:#2e7d32">📥受取${esc(it.received)}</span>` : ''}</div>`).join('') +
         `</div></td></tr>`).join('') : `<tr><td colspan="8" class="smd-dim" style="padding:12px">${sup.contactOnly ? '連絡可（匿名以外）のリピートセラーはいません。「住所が分かる相手のみ」を外すと全リピートを表示。' : 'リピートセラー（2回以上）はまだありません。'}</td></tr>`) +
       `</table></div></div>`;
-    { const cb = document.getElementById('sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数', '平均到着日数', '到着計測数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size, avgLead(v) != null ? avgLead(v) : '', v.leadN])))); }
-    { const cb = document.getElementById('sup-contact'); if (cb) cb.addEventListener('click', () => { sup.contactOnly = !sup.contactOnly; renderSuppliers(); }); }
-    { const cb = document.getElementById('sup-scsv'); if (cb) cb.addEventListener('click', () => downloadCsv('リピートセラー_' + new Date().toISOString().slice(0, 10) + '.csv', [['セラー', '仕入元', '回数', '合計仕入額(円)', '平均(円)', '直近仕入', '連絡可否', '連絡可発送数', '匿名発送数', '不明']].concat(shown.map(g => [g.seller, g.supplier, g.n, Math.round(g.val), Math.round(g.n ? g.val / g.n : 0), g.last, g.contact === 'open' ? '連絡可' : g.contact === 'anon' ? '匿名のみ' : '不明', g.open, g.anon, g.unknown])))); }
-    body.querySelectorAll('.sup-exp').forEach(el => el.addEventListener('click', () => { const box = document.getElementById('supi-' + el.dataset.idx); if (!box) return; const show = box.style.display === 'none'; box.style.display = show ? '' : 'none'; el.textContent = el.textContent.replace(show ? '▾' : '▴', show ? '▴' : '▾'); }));
+    { const cb = body.querySelector('#sup-csv'); if (cb) cb.addEventListener('click', () => downloadCsv('仕入先_' + new Date().toISOString().slice(0, 10) + '.csv', [['仕入元', '件数', '仕入額合計(円)', '平均単価(円)', 'セラー数', '平均到着日数', '到着計測数']].concat(list.map(([s, v]) => [s, v.n, Math.round(v.val), Math.round(v.n ? v.val / v.n : 0), v.sellers.size, avgLead(v) != null ? avgLead(v) : '', v.leadN])))); }
+    { const cb = body.querySelector('#sup-contact'); if (cb) cb.addEventListener('click', () => { sup.contactOnly = !sup.contactOnly; renderSuppliers(body); }); }   // ★仕入れ管理のタブの中（#buy-inner）に描いているので、その場所に描き直す（引数無しだと隠れた #sup-body に描いていた・レビュー 仕入れ管理 #10）
+    { const cb = body.querySelector('#sup-scsv'); if (cb) cb.addEventListener('click', () => downloadCsv('リピートセラー_' + new Date().toISOString().slice(0, 10) + '.csv', [['セラー', '仕入元', '回数', '合計仕入額(円)', '平均(円)', '直近仕入', '連絡可否', '連絡可発送数', '匿名発送数', '不明']].concat(shown.map(g => [g.seller, g.supplier, g.n, Math.round(g.val), Math.round(g.n ? g.val / g.n : 0), g.last, g.contact === 'open' ? '連絡可' : g.contact === 'anon' ? '匿名のみ' : '不明', g.open, g.anon, g.unknown])))); }
+    body.querySelectorAll('.sup-exp').forEach(el => el.addEventListener('click', () => { const box = body.querySelector('#supi-' + el.dataset.idx); if (!box) return; const show = box.style.display === 'none'; box.style.display = show ? '' : 'none'; el.textContent = el.textContent.replace(show ? '▾' : '▴', show ? '▴' : '▾'); }));
     setupColumns('suppliers', body);
     fitScroll('suppliers');
   }
@@ -15490,19 +15564,31 @@
     return { live, check: checkAccountMatch(live, targets.map(r => r.cc)) };
   }
   const ACCT_SQL = 'create table if not exists accounts (\n  id text primary key,\n  cc text,\n  label text,\n  shop_id text,\n  browser text,\n  status text,\n  tags text,\n  note text,\n  updated_at timestamptz default now()\n);\nalter table accounts disable row level security;\ngrant select,insert,update,delete on accounts to anon,authenticated,service_role;';
-  async function renderAccounts() {
-    const host = document.getElementById('acct-body');
-    host.innerHTML = '<span class="smd-dim">読み込み中…</span>';
-    let rows = null, missing = false;
+  // ★2026-10-24 登録簿の読み：「読めなかった」を「テーブルが無い」「0件」に化けさせない（catch-empty-is-not-absence）。
+  //   以前は例外も service_role の読み直し失敗も「テーブルがまだありません」か「まだ登録がありません」になり、
+  //   その状態で「一括取込」を押すと既存の名前（＝系統）・ブラウザ・メモ・状態が Shopee の既定値で上書きされた。
+  async function acctReadAll() {
     try {
-      rows = await sbGet('accounts', 'select=*&order=cc.asc');
+      let rows = await sbGet('accounts', 'select=*&order=cc.asc');
       // accountsはRLSでanonが空(200)を返すことがある→service_roleで確実に読む（管理データ・書込もservice_role）
       if (Array.isArray(rows) && rows.length === 0 && settings.sbSecret) {
         const r = await fetch(`${SB_URL}/rest/v1/accounts?select=*&order=cc.asc`, { headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret } });
-        if (r.ok) rows = await r.json();
+        if (!r.ok) return { err: 'service_role での読み直し HTTP ' + r.status };
+        rows = await r.json();
       }
-      if (!Array.isArray(rows)) missing = true;
-    } catch (e) { missing = true; }
+      if (!Array.isArray(rows)) return { err: '応答の形が違います' };
+      return { rows };
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      if (/HTTP 404\b/.test(m)) return { missing: true };   // テーブルが無い時だけ（PostgREST は 404）
+      return { err: m };
+    }
+  }
+  async function renderAccounts() {
+    const host = document.getElementById('acct-body');
+    host.innerHTML = '<span class="smd-dim">読み込み中…</span>';
+    const rd = await acctReadAll();
+    const rows = rd.rows || null, missing = !!rd.missing, readErr = rd.err || '';
     const intro = `<div class="tool-card" style="max-width:none;margin-bottom:10px;background:#f7faff;border:1px solid #e0ecff"><div style="font-size:12.5px;line-height:1.8">
         <b>アカウント＝そのChromeのShopeeログイン</b>。ポータルはブラウザのセッション(cookie)を使うので、<b>第2アカウントは別Chromeで開けばそのまま第2アカウントとして動きます</b>（出品・明細追加もその垢に効く）。ここは各アカウントの <b>shop_id・使用ブラウザ・特徴</b> をまとめる登録簿（Supabase保存＝どのPC/Chromeからでも同じ内容が見える）。
         <br><span class="smd-dim">⚠️同期の注意：現状データ(出品/注文)は「国(cc)」単位でshop_id未分離のため、<b>第2垢を🔄同期すると同じ国に混ざります</b>。第2垢の出品が増える前に「shop_idでデータ分離」を入れるのが安全（下部メモ）。</span>
@@ -15514,6 +15600,14 @@
         <textarea class="acct-sql" readonly style="width:100%;height:158px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ACCT_SQL)}</textarea>
         <div style="margin-top:6px"><button class="acct-sql-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
       const cp = host.querySelector('.acct-sql-copy'); if (cp) cp.addEventListener('click', () => { const ta = host.querySelector('.acct-sql'); ta.select(); try { document.execCommand('copy'); cp.textContent = '✓ コピーしました'; } catch (_) {} });
+      return;
+    }
+    if (readErr) {
+      host.innerHTML = intro + `<div class="tool-card" style="max-width:none;border:1px solid #f5c2c0;background:#fff0f0">
+        <b style="font-size:13px">⚠️ 登録簿を読めませんでした</b>
+        <div class="smd-dim" style="font-size:12px;margin:6px 0">理由：${esc(readErr)}<br>テーブルが無いのではなく、読むのに失敗しています。読めるまで「取込」「追加」は止めています（空のまま取込むと、既存の名前・ブラウザ・メモ・状態が上書きされるため）。</div>
+        <button class="acct-retry smd-btn">🔄 読み直す</button></div>`;
+      const rt = host.querySelector('.acct-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中…'; renderAccounts(); });
       return;
     }
     const detected = settings.shopIds || {};
@@ -15531,11 +15625,12 @@
     const importCard = `<div class="tool-card" style="max-width:none;margin-bottom:10px;background:#eef8f0;border:1px solid #cdeccf"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🔄 Shopeeから全ショップ取込</b><button class="acct-import smd-btn" style="background:#1a7f37;color:#fff;border-color:#1a7f37">メインアカウント配下を一括取込</button><span class="smd-dim" style="font-size:11px">1ログインで見える全ショップ（shop_id・店名・国・最終ログイン）を登録簿へ。既存の名前/ブラウザ/タグ/メモは保持。状態はメイン垢=main、他=subで初期化（あとで編集可）。</span></div></div>`;
     const ccOpts = REGIONS.map(r => `<option value="${r.cc}">${r.cc}</option>`).join('');
     const stOpts = (sel) => ACCT_STATUS.map(s => `<option value="${s[0]}"${sel === s[0] ? ' selected' : ''}>${s[1]}</option>`).join('');
-    const detHtml = REGIONS.some(r => detected[r.cc]) ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">このブラウザで検出中のshop_id（前回同期した垢）：${REGIONS.filter(r => detected[r.cc]).map(r => `<span style="margin-right:8px"><b style="color:${r.color}">${r.cc}</b> ${esc(detected[r.cc])} <button class="acct-usedet smd-btn" data-cc="${r.cc}" data-sid="${esc(detected[r.cc])}" style="font-size:9px;padding:0 4px">↑登録欄へ</button></span>`).join('')}</div>` : '';
+    const detCcs = REGIONS.filter(r => detected[r.cc] && !acctByShop[String(detected[r.cc])]);   // ★2026-10-24 登録済みの店は出さない
+    const detHtml = detCcs.length ? `<div class="smd-dim" style="font-size:11px;margin-top:6px">このブラウザで検出中・未登録のshop_id（前回同期した垢）：${detCcs.map(r => `<span style="margin-right:8px"><b style="color:${r.color}">${r.cc}</b> ${esc(detected[r.cc])} <button class="acct-usedet smd-btn" data-cc="${r.cc}" data-sid="${esc(detected[r.cc])}" style="font-size:9px;padding:0 4px">↑登録欄へ</button></span>`).join('')}</div>` : '';
     const form = `<div class="tool-card" style="max-width:none;margin-bottom:10px"><b style="font-size:13px">＋ アカウント追加</b>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px">
         <select class="acct-f-cc" style="padding:4px 6px;border:1px solid #ddd;border-radius:6px">${ccOpts}</select>
-        <input class="acct-f-label" placeholder="名前(例: PHメイン/PH仕入れ用)" style="width:190px;padding:4px 6px;border:1px solid #ddd;border-radius:6px">
+        <input class="acct-f-label" placeholder="名前(例: gcsonlinestore.ph)" style="width:190px;padding:4px 6px;border:1px solid #ddd;border-radius:6px">
         <input class="acct-f-shop" placeholder="shop_id" style="width:110px;padding:4px 6px;border:1px solid #ddd;border-radius:6px;font-family:monospace">
         <input class="acct-f-browser" placeholder="使用ブラウザ(例: Chrome-仕事)" style="width:160px;padding:4px 6px;border:1px solid #ddd;border-radius:6px">
         <select class="acct-f-status" style="padding:4px 6px;border:1px solid #ddd;border-radius:6px">${stOpts('sub')}</select>
@@ -15547,23 +15642,46 @@
     // 各国内は メイン→サブ→新規→休眠 の順（同順は名前順）＝メインが一番上
     const stOrder = { main: 0, sub: 1, new: 2, dormant: 3 };
     Object.values(byCc).forEach(arr => arr.sort((a, b) => (stOrder[a.status] != null ? stOrder[a.status] : 9) - (stOrder[b.status] != null ? stOrder[b.status] : 9) || String(a.label || '').localeCompare(String(b.label || ''), 'ja')));
-    const listHtml = REGIONS.filter(r => byCc[r.cc]).map(r => `<div style="margin-bottom:6px"><div style="font-weight:700;color:${r.color};font-size:13px;margin:4px 0">${r.cc} <span class="smd-dim" style="font-weight:400;font-size:11px">${byCc[r.cc].length}アカウント</span></div>
+    const listHtml = REGIONS.filter(r => byCc[r.cc]).map(r => `<div style="margin-bottom:6px"><div style="font-weight:700;color:${r.color};font-size:13px;margin:4px 0">${r.cc} <span class="smd-dim" style="font-weight:400;font-size:11px">${byCc[r.cc].length}アカウント</span> <span class="acct-ccwarn" data-cc="${r.cc}" style="font-weight:400;font-size:11px"></span></div>
         ${byCc[r.cc].map(a => `<div class="acct-row" data-id="${esc(a.id)}" data-cc="${esc(a.cc)}" style="border:1px solid #eee;border-radius:6px;padding:7px 9px;margin-bottom:5px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px">
-          <input class="acct-e-label" value="${av(a.label || '')}" style="width:160px;padding:3px 6px;border:1px solid #eee;border-radius:6px;font-weight:600">
-          <span class="smd-dim" style="font-size:10px">shop_id</span><input class="acct-e-shop" value="${av(a.shop_id || '')}" style="width:100px;padding:3px 6px;border:1px solid #eee;border-radius:6px;font-family:monospace">
+          <input class="acct-e-label" value="${av(a.label || '')}" data-saved="${av(a.label || '')}" style="width:160px;padding:3px 6px;border:1px solid #eee;border-radius:6px;font-weight:600">
+          <span class="smd-dim" style="font-size:10px">shop_id</span><input class="acct-e-shop" value="${av(a.shop_id || '')}" data-saved="${av(a.shop_id || '')}" style="width:100px;padding:3px 6px;border:1px solid #eee;border-radius:6px;font-family:monospace">
           <input class="acct-e-browser" value="${av(a.browser || '')}" placeholder="ブラウザ" style="width:140px;padding:3px 6px;border:1px solid #eee;border-radius:6px">
-          <select class="acct-e-status" style="padding:3px 6px;border:1px solid #eee;border-radius:6px">${stOpts(a.status)}</select>
+          <select class="acct-e-status" data-saved="${av(a.status || '')}" style="padding:3px 6px;border:1px solid #eee;border-radius:6px">${stOpts(a.status)}</select>
           <input class="acct-e-tags" value="${av(a.tags || '')}" placeholder="特徴タグ" style="width:170px;padding:3px 6px;border:1px solid #eee;border-radius:6px">
           <input class="acct-e-note" value="${av(a.note || '')}" placeholder="メモ" style="flex:1;min-width:110px;padding:3px 6px;border:1px solid #eee;border-radius:6px">
           <button class="acct-save smd-btn" style="font-size:10px">保存</button>
           <button class="acct-del smd-btn" style="font-size:10px;color:#d93025">削除</button>
-        </div>`).join('')}</div>`).join('') || '<div class="smd-dim" style="padding:8px">まだ登録がありません。上のフォームから追加してください。</div>';
+          <div class="acct-fam smd-dim" style="flex-basis:100%;font-size:11px"></div>
+        </div>`).join('')}</div>`).join('') || ('<div class="smd-dim" style="padding:8px">' + (settings.sbSecret ? 'まだ登録がありません。上のフォームから追加してください。' : '登録が見えません。このPCは書き込みキー（service_role）が未設定なので、公開キーでは空に見えているだけの可能性があります（⚙️設定で入力すると読めます）。') + '</div>');
     const ALTER_SQL = "alter table listings add column if not exists shop_id text;\nalter table orders   add column if not exists shop_id text;\nalter table income   add column if not exists shop_id text;\ncreate index if not exists listings_shop_idx on listings(shop_id);\ncreate index if not exists orders_shop_idx   on orders(shop_id);";
     const noteHtml = `<div class="tool-card" style="max-width:none;margin-top:10px;background:#fafafa"><b style="font-size:12px">📎 アカウント別にデータを分ける（有効化手順）</b>
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin:4px 0">実装済み：ヘッダの<b>「対象アカウント」</b>で全データ（出品/注文/ダッシュボード/損益）を絞り込めます。同期時に「今アクティブなショップ」のshop_idを各行へ自動付与。<br><b>有効化に2手順</b>：①下記SQLを1回だけ実行（listings/orders/incomeにshop_id列を追加）②各アカウントに切替(Switch Shop)→🔄同期（既存行はshop_id無し＝「未判別」。再同期で振り分け）。</div>
       <textarea class="acct-alter" readonly style="width:100%;height:110px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ddd;border-radius:6px">${esc(ALTER_SQL)}</textarea>
       <div style="margin-top:5px"><button class="acct-alter-copy smd-btn">SQLをコピー</button> <a href="https://supabase.com/dashboard/project/khjjjouhryigqunxygyg/sql/new" target="_blank" class="smd-btn" style="text-decoration:none">SQL Editorを開く↗</a></div></div>`;
-    host.innerHTML = intro + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${listHtml}</div>` + noteHtml;
+    const useNote = `<div class="smd-dim" style="font-size:11px;line-height:1.6;margin-bottom:6px">状態と shop_id は🤖出品が使います（メイン＝1店舗目・サブ＝1店舗目が満杯の時の2店舗目）。サブがある国は利益管理表の {国}2_p も読みます。<b>メインは国に1つ・shop_id は数字だけ</b>（外れた値は保存しません）。名前の末尾（.ph 等）を外した部分が「系統」で、上部の対象アカウントの系統の絞り込みと🌏全タブ切替が使います。</div>`;
+    host.innerHTML = intro + importCard + switchAllCard + detectCard + form + `<div class="tool-card" style="max-width:none">${useNote}${listHtml}</div>` + noteHtml;
+    // ★2026-10-24 画面の行の「保存済みの値」（data-saved）。重複・メインの数の判定はこれで見る（closure の rows は保存のたびに古くなる）
+    const acctRowsNow = () => [...host.querySelectorAll('.acct-row')].map(x => {
+      const sv = c => { const el = x.querySelector(c); return (el && el.dataset.saved) || ''; };
+      return { el: x, id: x.dataset.id, cc: x.dataset.cc, shop: sv('.acct-e-shop'), status: sv('.acct-e-status'), label: sv('.acct-e-label') };
+    });
+    // ★2026-10-24 国ごとのメインの数（0・2つ以上を赤で）と、名前から決まる「系統」を行の下に出す。保存のたびにここだけ描き直す（読み直さない）
+    const acctMarks = () => {
+      const now = acctRowsNow();
+      const famN = {}; now.forEach(x => { const f = famOfLabel(x.label || x.shop); if (f) famN[f] = (famN[f] || 0) + 1; });
+      host.querySelectorAll('.acct-ccwarn').forEach(w => {
+        const n = now.filter(x => x.cc === w.dataset.cc && x.status === 'main').length;
+        w.innerHTML = n === 1 ? '' : n === 0 ? '<b style="color:#d93025">⚠️ メインがありません</b> <span class="smd-dim">（🤖出品がこの国にまだ無い機種の汎用カタログを作る時、1店舗目が決まりません）</span>' : '<b style="color:#d93025">⚠️ メインが' + n + 'つあります</b> <span class="smd-dim">（🤖出品がどれを1店舗目に使うか決まりません。1つだけ残してサブ等に）</span>';
+      });
+      now.forEach(x => {
+        const box = x.el.querySelector('.acct-fam'); if (!box) return;
+        const f = famOfLabel(x.label || x.shop), n = famN[f] || 0, lone = n === 1 && now.length > 1;
+        box.innerHTML = '系統：<b>' + esc(f || '（なし）') + '</b>（' + n + '店）' + (lone ? ' <span style="color:#b26a00">⚠️ この系統はこの店だけです。名前の形（例 gcsonlinestore.ph）が他の店と揃っているか確かめてください</span>' : '');
+        x.el.style.boxShadow = lone ? 'inset 3px 0 0 #f0ad4e' : '';
+      });
+    };
+    acctMarks();
     host.querySelectorAll('.acct-switchall').forEach(b => b.addEventListener('click', () => {
       const fam = b.dataset.family;
       if (state.mode !== 'live') { alert('ライブモード（ブリッジ入りPC）で使えます'); return; }
@@ -15578,9 +15696,11 @@
       impBtn.disabled = true; impBtn.textContent = '取込中…';
       let shops; try { shops = await fetchShopList(); } catch (e) { alert('取得失敗: ' + e.message); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; return; }
       if (!shops.length) { alert('ショップが取得できませんでした（ログイン状態を確認）'); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; return; }
-      const existing = {}; (rows || []).forEach(a => existing[a.id] = a);
+      const rd2 = await acctReadAll();
+      if (!rd2.rows) { alert('登録簿を読めなかったので取込を止めました（' + (rd2.err || 'accounts テーブルがありません') + '）。\n既存の名前・ブラウザ・メモ・状態を上書きしないためです。画面を開き直してからやり直してください'); impBtn.disabled = false; impBtn.textContent = 'メインアカウント配下を一括取込'; return; }
+      const existing = {}, exByShop = {}; rd2.rows.forEach(a => { existing[a.id] = a; if (a.shop_id) exByShop[String(a.shop_id)] = a; });
       const upserts = shops.map(s => {
-        const cc = String(s.country || '').toUpperCase(); const id = cc + '_' + s.shop_id; const ex = existing[id] || {};
+        const cc = String(s.country || '').toUpperCase(); const ex = exByShop[String(s.shop_id)] || existing[cc + '_' + s.shop_id] || {}; const id = ex.id || (cc + '_' + s.shop_id);
         return { id, cc, label: ex.label || s.shop_name || s.username || String(s.shop_id), shop_id: String(s.shop_id), browser: ex.browser || '', status: ex.status || (s.is_main_shop ? 'main' : 'sub'), tags: ex.tags || '', note: ex.note || (s.last_login ? '最終ログイン ' + new Date(s.last_login * 1000).toISOString().slice(0, 10) : ''), updated_at: new Date().toISOString() };
       });
       try { for (let i = 0; i < upserts.length; i += 100) await sbUpsert('accounts', upserts.slice(i, i + 100)); try { logAct('アカウント', '全ショップ取込', '', upserts.length + '件'); } catch (_) {} state.accounts = null; try { await initAcctBar(); } catch (_) {} toast('✅ ' + upserts.length + 'ショップを取込・更新しました'); renderAccounts(); }
@@ -15606,36 +15726,67 @@
       dbtn.disabled = true; dbtn.textContent = '取得中…';
       const live = await detectShopIds(targets); lst.liveShop = live; renderDetect(live);
       dbtn.disabled = false; dbtn.textContent = '再取得';
-      host.querySelectorAll('.acct-setmy').forEach(b => b.addEventListener('click', () => {
+    });
+    const detBox = host.querySelector('.acct-detect-res');
+    if (detBox) detBox.addEventListener('click', e => {   // ★2026-10-24 委譲＝renderDetect で表が作り直されても効く
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.classList.contains('acct-setmy')) {
         if (!b.dataset.sid) { alert('取得できた垢がありません'); return; }
         settings.myShop = settings.myShop || {}; settings.myShop[b.dataset.cc] = { shop_id: b.dataset.sid, name: b.dataset.name || '', label: b.dataset.label || b.dataset.name || b.dataset.sid };
         saveSettings(); renderDetect(lst.liveShop || {});
-      }));
-      host.querySelectorAll('.acct-reg').forEach(b => b.addEventListener('click', () => {
+      } else if (b.classList.contains('acct-reg')) {
         host.querySelector('.acct-f-cc').value = b.dataset.cc; host.querySelector('.acct-f-shop').value = b.dataset.sid;
         if (!host.querySelector('.acct-f-label').value) host.querySelector('.acct-f-label').value = b.dataset.name || '';
         host.querySelector('.acct-f-label').scrollIntoView({ block: 'center' }); host.querySelector('.acct-f-label').focus();
-      }));
+      }
     });
     const acp = host.querySelector('.acct-alter-copy'); if (acp) acp.addEventListener('click', () => { const ta = host.querySelector('.acct-alter'); ta.select(); try { document.execCommand('copy'); acp.textContent = '✓ コピーしました'; } catch (_) {} });
-    host.querySelector('.acct-add').addEventListener('click', async () => {
+    host.querySelector('.acct-add').addEventListener('click', async (ev) => {
+      const ab = ev.currentTarget;
       const g = s => ((host.querySelector(s) || {}).value || '').trim();
       const cc = (host.querySelector('.acct-f-cc') || {}).value || 'PH', label = g('.acct-f-label'), shop = g('.acct-f-shop');
+      const st = (host.querySelector('.acct-f-status') || {}).value;
       if (!label) { alert('名前を入れてください'); return; }
+      if (shop && !/^\d+$/.test(shop)) { alert('shop_id は数字だけです（「' + shop + '」）'); return; }
       const id = cc + '_' + (shop || ('x' + Date.now()));
-      try { await sbUpsert('accounts', [{ id, cc, label, shop_id: shop, browser: g('.acct-f-browser'), status: (host.querySelector('.acct-f-status') || {}).value, tags: g('.acct-f-tags'), note: g('.acct-f-note'), updated_at: new Date().toISOString() }]); try { logAct('アカウント', '追加', cc, label); } catch (_) {} state.accounts = null; try { await initAcctBar(); } catch (_) {} renderAccounts(); }
-      catch (e) { alert('保存エラー: ' + e.message); }
+      // ★2026-10-24 登録済みの店を「追加」すると upsert で既存の行が丸ごと上書きされ、ブラウザ・タグ・メモが消え・状態がフォームの値（既定 sub）になっていた
+      //   （本店の行でやるとその国のメインが0＝🤖出品の1店舗目が決まらない）
+      const now = acctRowsNow();
+      const dup = now.find(x => x.id === id || (shop && x.shop === shop));
+      if (dup) { dup.el.style.background = '#fff8e1'; dup.el.scrollIntoView({ block: 'center' }); alert('この店はもう登録されています（' + (dup.label || dup.id) + '）。下の一覧のその行を直してください。\n（追加すると、その行のブラウザ・タグ・メモ・状態が上書きされます）'); return; }
+      if (st === 'main') { const m = now.find(x => x.cc === cc && x.status === 'main'); if (m) { alert(cc + ' のメインはもう「' + (m.label || m.id) + '」です。メインは国に1つ（🤖出品の1店舗目）。サブ等で追加してください'); return; } }
+      ab.disabled = true; ab.textContent = '⏳ 追加中…';
+      try { await sbUpsert('accounts', [{ id, cc, label, shop_id: shop, browser: g('.acct-f-browser'), status: st, tags: g('.acct-f-tags'), note: g('.acct-f-note'), updated_at: new Date().toISOString() }]); try { logAct('アカウント', '追加', cc, label); } catch (_) {} state.accounts = null; try { await initAcctBar(); } catch (_) {} renderAccounts(); }
+      catch (e) { alert('保存エラー: ' + e.message); ab.disabled = false; ab.textContent = '追加'; }
     });
     host.querySelectorAll('.acct-usedet').forEach(b => b.addEventListener('click', () => { host.querySelector('.acct-f-cc').value = b.dataset.cc; host.querySelector('.acct-f-shop').value = b.dataset.sid; host.querySelector('.acct-f-browser').focus(); }));
     // 行の保存（保存ボタン＋各項目の変更で自動保存）。プルダウン変更が保存されず戻る問題を解消
     const saveAcctRow = async (row, btn) => {
       const id = row.dataset.id, cc = row.dataset.cc;
       const g = s => ((row.querySelector(s) || {}).value || '').trim();
+      const stEl = row.querySelector('.acct-e-status'), shEl = row.querySelector('.acct-e-shop'), lbEl = row.querySelector('.acct-e-label');
+      const st = stEl ? stEl.value : '', shop = g('.acct-e-shop'), label = g('.acct-e-label');
+      const stWas = stEl ? (stEl.dataset.saved || '') : '', shopWas = shEl ? (shEl.dataset.saved || '') : '', lbWas = lbEl ? (lbEl.dataset.saved || '') : '';
+      // ★2026-10-24 状態と shop_id は🤖出品（GAS baMainShop_／baSubShop_）と利益管理表 {国}2_p の読みが使う＝外れた値は保存しない
+      const stop = msg => { if (stEl && st !== stWas) stEl.value = stWas; if (shEl && shop !== shopWas) shEl.value = shopWas; row.style.background = '#fff0f0'; setTimeout(() => { row.style.background = ''; }, 3000); alert(msg); };
+      if (shop && !/^\d+$/.test(shop)) return stop('shop_id は数字だけです（「' + shop + '」は保存しませんでした）');
+      const others = acctRowsNow().filter(x => x.el !== row);
+      if (st === 'main') { const m = others.find(x => x.cc === cc && x.status === 'main'); if (m) return stop(cc + ' のメインはもう「' + (m.label || m.id) + '」です。メインは国に1つ（🤖出品の1店舗目）。先にそちらをサブ等に変えてから、こちらをメインにしてください'); }
+      const shopChanged = !!shop && shop !== shopWas;
+      const newId = shopChanged ? cc + '_' + shop : id;
+      if (shopChanged) { const d = others.find(x => x.id === newId || x.shop === shop); if (d) return stop('この shop_id はもう「' + (d.label || d.id) + '」で登録されています（同じ店が2行になるので保存しませんでした）'); }
       try {
-        await sbUpsert('accounts', [{ id, cc, label: g('.acct-e-label'), shop_id: g('.acct-e-shop'), browser: g('.acct-e-browser'), status: (row.querySelector('.acct-e-status') || {}).value, tags: g('.acct-e-tags'), note: g('.acct-e-note'), updated_at: new Date().toISOString() }]);
+        await sbUpsert('accounts', [{ id: newId, cc, label, shop_id: shop, browser: g('.acct-e-browser'), status: st, tags: g('.acct-e-tags'), note: g('.acct-e-note'), updated_at: new Date().toISOString() }]);
+        if (newId !== id) {   // ★2026-10-24 id が古い shop_id のままだと、次の一括取込で同じ店がもう1行できていた
+          row.dataset.id = newId;
+          try { await sbDelete('accounts', 'id=eq.' + encodeURIComponent(id)); }
+          catch (e) { alert('新しい行（' + newId + '）は保存しましたが、古い行（' + id + '）を消せませんでした：' + e.message + '\n同じ店が2行になっています。画面を開き直して古い方を削除してください'); }
+        }
+        if (stEl) stEl.dataset.saved = st; if (shEl) shEl.dataset.saved = shop; if (lbEl) lbEl.dataset.saved = label;
         if (btn) { btn.textContent = '✓'; btn.style.color = '#1a7f37'; setTimeout(() => { btn.textContent = '保存'; btn.style.color = ''; }, 1200); }
         else { row.style.transition = 'background .3s'; row.style.background = '#eef8f0'; setTimeout(() => { row.style.background = ''; }, 600); }
-        state.accounts = null; try { await initAcctBar(); } catch (_) {}   // ヘッダのセレクタ（メイン順）も更新
+        acctMarks();
+        if (st !== stWas || shop !== shopWas || label !== lbWas) { state.accounts = null; try { await initAcctBar(); } catch (_) {} }   // ヘッダのセレクタ（メイン順）も更新。上部が使うのは id・cc・label・shop_id・status だけ（loadAccounts）
       } catch (e) { alert('保存エラー: ' + e.message); }
     };
     host.querySelectorAll('.acct-row').forEach(row => {
@@ -15644,7 +15795,7 @@
     });
     host.querySelectorAll('.acct-del').forEach(b => b.addEventListener('click', async () => {
       const id = b.closest('.acct-row').dataset.id;
-      if (!confirm('このアカウント登録を削除しますか？（Shopee側には影響しません）')) return;
+      if (!confirm('このアカウント登録を削除しますか？\nShopee の店は消えませんが、🤖出品の1店舗目・2店舗目の選び方と、利益管理表（{国}2_p）を読むかどうかが変わります。')) return;
       try { await sbDelete('accounts', 'id=eq.' + encodeURIComponent(id)); renderAccounts(); } catch (e) { alert('削除エラー: ' + e.message); }
     }));
   }
@@ -15653,11 +15804,27 @@
      段階：①案内済み ②返事あり ③依頼あり ④金額調整中 ⑤購入待ち ⑥購入済み ⑦発送済み ⑧完了 ×対象外
      自動＝台帳（本体 GAS outreach_board：顧客リストの「営業送信」）の状態＋Shopee の注文（buyer＝Shopee名・最初の案内より後）。④⑤・PayPal受取・× は手で（outreach_stage） */
   const OUT_ST = [
-    ['sent', '① 案内済み', 0], ['replied', '② 返事あり・依頼待ち', 7], ['requested', '③ 依頼あり・見積もり前', 3], ['quote', '④ 金額調整中', 3],
+    ['friend_req', '⓪ 友だち申請中（承認待ち）', 7], ['sent', '① 案内済み', 0], ['replied', '② 返事あり・依頼待ち', 7], ['requested', '③ 依頼あり・見積もり前', 3], ['quote', '④ 金額調整中', 3],
     ['wait_buy', '⑤ 購入待ち（リンク送付済み）', 3], ['bought', '⑥ 購入済み', 7], ['shipped', '⑦ 発送済み', 0], ['done', '⑧ 完了', 0], ['x', '× 対象外', 0]
   ];
   const OUT_IDX = Object.fromEntries(OUT_ST.map((x, i) => [x[0], i]));
-  const outState = { data: null, at: 0, filter: null };
+  /* ★2026-10-24 「最後の動き」に台帳の語（reply:3・auto:1・stage:quote…）がそのまま出ていた＝日本語に。型は GAS outreachAi_・予定タスク zalo-viber-outreach-daily の表と同じ */
+  const OUT_RTYPE = { 0: '型不明（要確認）', 1: '興味あり', 2: '商品の依頼', 3: '質問', 4: '値段交渉', 5: '不要・迷惑', 6: '無反応', 7: 'クレーム・未着', 8: '別人・間違い' };
+  const OUT_WORD = { sent: '案内を送った', unknown: '案内を送った（画面で確かめられず）', requested: 'Zalo の友だち申請を出した', contact: '連絡先に登録した', existing: '既に会話あり（送っていない）', notfound: '番号が見つからない', skip: '飛ばした', reply: '相手から返事', optout: '「送らないで」→ 以後送らない', wrongnumber: '別人・番号違い → 説明を送った', task: '仕入れの依頼を記録' };
+  const OUT_NOTE = { 'invalid number': '番号が無効', 'chat not opened': '会話を開けず', 'already had a conversation': '既に会話あり', 'send not confirmed on screen': '画面で送信を確かめられず' };
+  const outSp = (x) => '<span>' + esc(x) + '</span>';   /* 英語表示の辞書は文字の塊ごとに当たるので、決まった言葉は span で分ける */
+  function outWord(st) {
+    st = String(st || ''); const failed = /:failed$/.test(st); if (failed) st = st.slice(0, -7);
+    let m, w;
+    if ((m = st.match(/^reply:(\d+)$/))) w = outSp('相手から返事') + '：' + outSp(OUT_RTYPE[m[1]] || ('型' + m[1]));
+    else if ((m = st.match(/^auto:(\d+)$/))) w = outSp('一次返答を自動で送った') + '：' + outSp(OUT_RTYPE[m[1]] || ('型' + m[1]));
+    else if (st === 'stage:paypal') w = outSp('PayPal 受取済みにした');
+    else if (st === 'stage:paypal_off') w = outSp('PayPal 受取を外した');
+    else if ((m = st.match(/^stage:(.+)$/))) w = outSp('段階を手で') + ' → ' + outSp((OUT_ST[OUT_IDX[m[1]]] || [])[1] || m[1]);
+    else w = outSp(OUT_WORD[st] || st);
+    return failed ? w + ' ' + outSp('（返す文は送れず）') : w;
+  }
+  const outState = { data: null, at: 0, filter: null, inflight: null };
   async function outCallMain(params, ms) {
     if (!settings.openapiUrl || !settings.writeToken) throw new Error('⚙️設定に「OpenAPI同期GAS URL」と「WRITE_TOKEN」を入れてください');
     const q = Object.assign({ token: settings.writeToken }, params);
@@ -15668,6 +15835,12 @@
   }
   async function outLoad(force) {
     if (!force && outState.data && Date.now() - outState.at < 120000) return outState.data;
+    /* ★2026-10-24 読み直しは1本だけ（2本並ぶと、先に始めた古い方が後に終わって新しい分を上書きしていた） */
+    if (outState.inflight) return outState.inflight;
+    outState.inflight = outLoadBoard().finally(() => { outState.inflight = null; });
+    return outState.inflight;
+  }
+  async function outLoadBoard() {
     const b = await outCallMain({ action: 'outreach_board' }, 90000);
     const ppl = {};
     (b.events || []).forEach(e => {
@@ -15676,7 +15849,8 @@
       if (acc) p.acc = acc; if (name) p.name = name; if (cc) p.cc = cc;
       p.ev.push({ t, status, note, ja });
       if (t && (!p.first || t < p.first) && !/^stage:/.test(status)) p.first = t;
-      if (t >= p.last) { p.last = t; p.lastTxt = status + (note ? '（' + note + '）' : ''); }
+      if (t >= p.last) { p.last = t; p.lastTxt = status + (note ? '（' + note + '）' : ''); p.lastEv = { status, note, ja }; }
+      if (/^reply/.test(status) && t >= ((p.lastReply && p.lastReply.t) || 0)) p.lastReply = { t, note, ja };
       if (/^stage:/.test(status)) { const k = status.slice(6); if (k === 'paypal') p.paypal = true; else if (k === 'paypal_off') p.paypal = false; else p.manual = { k, t }; }
     });
     const list = Object.values(ppl).filter(p => !p.ev.every(x => /^(existing)$/.test(x.status)));   /* 既に会話があって送っていない人は除く */
@@ -15691,12 +15865,16 @@
     const now = Date.now();
     list.forEach(p => {
       const sts = p.ev.map(x => x.status);
-      let st = 'sent';
-      if (sts.some(x => /^(reply:[1-8]|reply|auto:\d)$/.test(x))) st = 'replied';
-      if (sts.some(x => /^(reply:2|task|auto:2)$/.test(x))) st = 'requested';
-      if (sts.some(x => /^(optout|wrongnumber|notfound)$/.test(x))) st = 'x';
+      /* ★2026-10-24 Zalo は友だち申請だけの人を requested（案内文はまだ）と書く＝①に数えず⓪へ。承認されて案内を送ると sent が付いて①に進む */
+      let st = (sts.includes('requested') && !sts.some(x => /^(sent|unknown)$/.test(x))) ? 'friend_req' : 'sent';
+      /* ★2026-10-24 AI が型を決められなかった返事は reply:0（userscript・GAS outreachAi_）＝返事はあったので②に数える */
+      if (sts.some(x => /^(reply(:\d+)?|auto:\d(:failed)?)$/.test(x))) st = 'replied';
+      if (sts.some(x => /^(reply:2|task|auto:2(:failed)?)$/.test(x))) st = 'requested';
+      /* ★2026-10-24 謝りの1通が送れないと optout:failed／wrongnumber:failed、2行目が書けないと reply:5／reply:8 だけが残る（whatsapp-outreach 202・210）。
+         相手が「送らないで」「別人」と言った事実は同じ＝×に（②の赤い停滞で追いかける形に出ていた） */
+      if (sts.some(x => /^(optout|wrongnumber|notfound)(:failed)?$|^reply:[58]$/.test(x))) st = 'x';
       let autoT = p.last;
-      const os = (ordBy[String(p.acc || '').toLowerCase()] || []).filter(o => Number(o.order_ts || 0) * 1000 > (p.first || 0) && !/CANCEL|UNPAID/i.test(String(o.status || '')));
+      const os = (ordBy[String((demoOn() ? dmBuyer(p.acc) : p.acc) || '').toLowerCase()] || []).filter(o => Number(o.order_ts || 0) * 1000 > (p.first || 0) && !/CANCEL|UNPAID/i.test(String(o.status || '')));
       p.orders = os;
       /* ★2026-10-21 本人「単なる Shopee の注文じゃないで」＝営業の後の Shopee 注文は常連さんの通常の購入もある。⑥⑦⑧は手で付けた時だけ（注文は参考で並べるだけ） */
       if (p.manual) { if (p.manual.k === 'x' || OUT_IDX[p.manual.k] > OUT_IDX[st] || p.manual.t >= autoT) st = p.manual.k; }
@@ -15711,7 +15889,7 @@
     const body = document.getElementById('out-body'); if (!body) return;
     if (!outState.data || force === true) body.innerHTML = '<div class="smd-dim">営業の台帳を読み込み中…</div>';
     let list;
-    try { list = await outLoad(force === true); }
+    try { list = (force === 'local' && outState.data) ? outState.data : await outLoad(force === true); }
     catch (e) { body.innerHTML = '<div class="tool-card" style="max-width:none;border-color:#f0c4bd"><b style="color:#d93025">営業の台帳を読めませんでした</b><div style="font-size:12px;margin-top:6px">' + esc(String((e && e.message) || e)) + '</div></div>'; return; }
     const apps = ['whatsapp', 'zalo', 'viber'], appJa = { whatsapp: 'WhatsApp', zalo: 'Zalo', viber: 'Viber' };
     const cell = (arr) => { if (!arr.length) return '<span class="smd-dim">—</span>'; const s = arr.filter(p => p.stalled).length; return arr.length + (s ? ` <span style="color:#d93025;font-weight:700">（停滞 ${s}）</span>` : ''); };
@@ -15727,11 +15905,15 @@
     tb += '<div style="overflow-x:auto"><table class="smd-table" style="font-size:12px;width:100%"><tr><th style="text-align:left">段階</th><th style="text-align:left">名前（Shopee名）</th><th>国・アプリ</th><th style="text-align:left">最後の動き</th><th>PayPal</th><th style="text-align:left">段階を変える</th></tr>';
     rows.forEach(p => {
       const ja = (OUT_ST[OUT_IDX[p.stage]] || [])[1] || p.stage;
+      /* ★2026-10-24 名前は GAS の jsonp から来て maskDemo を通らない＝🎭デモでも実名が出ていた。メモ（連絡先登録の行は「名前(Shopee名)_国」）・和訳もデモでは出さない */
+      const demo = demoOn(), ev = p.lastEv || {};
+      const lastHtml = outWord(ev.status) + ((!demo && ev.note) ? '<span class="smd-dim">（' + esc(OUT_NOTE[ev.note] || ev.note) + '）</span>' : '')
+        + ((!demo && p.lastReply && p.lastReply.ja) ? '<div style="font-size:11.5px;color:#5a6b8c;margin-top:2px"><span>相手の最後の返事（和訳）</span>：' + esc(p.lastReply.ja) + '</div>' : '');
       const ord = (p.orders || []).length ? `<div class="smd-dim" style="font-size:11px">営業の後の通常の Shopee 注文 ${p.orders.length}件（参考）</div>` : '';
       tb += `<tr${p.stalled ? ' style="background:#fff1f0"' : ''}><td style="text-align:left;white-space:nowrap">${esc(ja)}${p.stalled ? ' <b style="color:#d93025"><span>停滞</span> ' + p.days + '<span>日</span></b>' : ''}</td>`
-        + `<td style="text-align:left">${esc(p.name || '—')}<span class="smd-dim">（${esc(p.acc || '—')}）</span>${ord}</td>`
+        + `<td style="text-align:left">${esc((demo ? dmName(p.name) : p.name) || '—')}<span class="smd-dim">（${esc((demo ? dmBuyer(p.acc) : p.acc) || '—')}）</span>${ord}</td>`
         + `<td>${esc(p.cc || '')}・${esc(appJa[p.app] || p.app)}</td>`
-        + `<td style="text-align:left"><span class="smd-dim">${p.days}日前</span> ${esc(String(p.lastTxt || '').slice(0, 60))}</td>`
+        + `<td style="text-align:left"><span class="smd-dim">${p.days}日前</span> ${lastHtml}</td>`
         + `<td><label style="cursor:pointer"><input type="checkbox" data-out-pp="${esc(p.key)}"${p.paypal ? ' checked' : ''}> 受取済</label></td>`
         + `<td style="text-align:left"><select data-out-st="${esc(p.key)}" style="font-size:12px">${opt(p.stage)}</select></td></tr>`;
     });
@@ -15746,9 +15928,19 @@
       try {
         await outCallMain({ action: 'outreach_stage', stage: key, app: p.app, cc: p.cc, phone: p.phone, acc: p.acc, name: p.name, note: 'ポータルで設定' });
         toast('段階を保存しました');
-        renderOutreach(true);   /* 押した時だけ（描画のたびには走らない） */
+        /* ★2026-10-24 保存のたびに台帳を全部読み直していた＝表が「読み込み中」に消えて続けて直せず、2人続けると古い読みが後に終わって2人目が元に戻って見えた。
+           台帳には書けているので手元の分を書き換えて描き直す（最新の台帳は 🔄 読み直す か2分後） */
+        const q = (outState.data || []).find(x => x.key === p.key) || p, now = Date.now(), ev = { t: now, status: 'stage:' + key, note: 'ポータルで設定', ja: '' };
+        q.ev.push(ev); q.last = now; q.lastTxt = ev.status + '（' + ev.note + '）'; q.lastEv = ev;
+        if (key === 'paypal') q.paypal = true; else if (key === 'paypal_off') q.paypal = false;
+        else { q.manual = { k: key, t: now }; q.stage = key; q.since = now; q.days = 0; q.stalled = false; }
+        renderOutreach('local');
       }
-      catch (e) { alert('保存できませんでした：' + ((e && e.message) || e)); el.disabled = false; }
+      catch (e) {
+        alert('保存できませんでした：' + ((e && e.message) || e)); el.disabled = false;
+        /* ★2026-10-24 失敗しても選んだ段階・チェックが画面に残り、保存できたと思えてしまっていた＝元に戻す */
+        if (el.tagName === 'SELECT') el.value = p.stage; else el.checked = !!p.paypal;
+      }
     };
     body.querySelectorAll('[data-out-st]').forEach(sel => sel.addEventListener('change', () => { const p = byKey[sel.getAttribute('data-out-st')]; if (p) save(p, sel.value, sel); }));
     body.querySelectorAll('[data-out-pp]').forEach(cb => cb.addEventListener('change', () => { const p = byKey[cb.getAttribute('data-out-pp')]; if (p) save(p, cb.checked ? 'paypal' : 'paypal_off', cb); }));
@@ -17614,8 +17806,8 @@
     // サイト別の最安（横断比較サマリー）。🏆＝全体最安。
     const bySite = {};
     deals.forEach(d => { const e = d.eff != null ? d.eff : d.price; if (!bySite[d.site] || e < (bySite[d.site].eff != null ? bySite[d.site].eff : bySite[d.site].price)) bySite[d.site] = d; });
-    const chips = Object.values(bySite).sort((a, b) => a.price - b.price).map((d, i) =>
-      `<a href="${hrefOk(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:#fff;border:1px solid ${i === 0 ? '#1a7f37' : '#e0e0e0'};border-radius:12px;padding:2px 9px;margin:0 5px 5px 0;font-size:11.5px">${i === 0 ? '🏆' : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:4px;padding:1px 4px">${esc(d.site)}</span> <b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.cond ? `<span style="color:#888;font-size:9.5px">${esc(d.cond)}</span>` : ''}</a>`).join('');
+    const chips = Object.values(bySite).sort((a, b) => (a.eff != null ? a.eff : a.price) - (b.eff != null ? b.eff : b.price)).map((d, i) =>   /* ★🏆は送料込みの最安（サイトの代表を選ぶ物差しと同じ。レビュー 仕入れ管理 #23） */
+      `<a href="${hrefOk(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:#fff;border:1px solid ${i === 0 ? '#1a7f37' : '#e0e0e0'};border-radius:12px;padding:2px 9px;margin:0 5px 5px 0;font-size:11.5px">${i === 0 ? '🏆' : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:4px;padding:1px 4px">${esc(d.site)}</span> <b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${d.cond ? `<span style="color:#888;font-size:9.5px">${esc(d.cond)}</span>` : ''}</a>`).join('');
     const n = showN || 15;
     // 🎯 上限仕入額が出せる時は、1件ずつ「この値段で買ったら粗利いくら」を出して 🟢🟡🔴 で色分けする
     const jg = d => ceil ? srcJudge(d.eff != null ? d.eff : d.price, ceil) : null;
@@ -17646,7 +17838,8 @@
         🎯 <b>上限仕入額 <span style="color:#1a4fa0;font-size:14px">¥${ceil.ceil.toLocaleString()}</span></b> まで
         <span class="smd-dim" style="font-size:10.5px">（売値 ${esc(ceil.cur)}${Math.round(ceil.price).toLocaleString()}${ceil.basis === 'sold' ? '<span title="この注文が実際に売れた額から計算しています（いちばん正確）">＝実売</span>' : ceil.basis === 'min' ? '<span style="color:#b26a00" title="この注文の売値が取れず、出品の最安明細の価格で代用しています。多バリエ商品では実際より安く出るので目安です">＝最安明細(目安)</span>' : ''} → 手数料${ceil.feePct}%・SLS¥${ceil.slsJpy.toLocaleString()}(${ceil.weightG}g)を引いた<b>入金見込み ¥${ceil.payout.toLocaleString()}</b> − 目標粗利 ¥${ceil.target.toLocaleString()}${ceil.wEst ? '／⚠出品に重量が無いため既定値で計算' : ''}）</span>
         ${best ? `　<b style="color:#1a7f37">🥇 ${esc(best.site)} ¥${best.price.toLocaleString()}</b> <a href="${hrefOk(best.url)}" target="_blank" rel="noopener" style="color:#fff;background:#1a7f37;border-radius:6px;padding:2px 9px;text-decoration:none;font-weight:700;font-size:11.5px">購入ページを開く→</a>`
-          : `　<b style="color:#d93025">上限内の候補なし</b><span class="smd-dim" style="font-size:10.5px">（最安 ¥${deals[0].price.toLocaleString()}＝目標粗利に ¥${(deals[0].price - ceil.ceil).toLocaleString()} 届かない）</span>`}
+          : (() => { const pool = deals.filter(d => !d._sus); const lo = Math.min(...(pool.length ? pool : deals).map(d => d.eff != null ? d.eff : d.price));   /* ★上限の判定と同じ送料込みで差を出す（送料抜きだと「¥-200 届かない」が出た。レビュー 仕入れ管理 #16） */
+            return `　<b style="color:#d93025">上限内の候補なし</b><span class="smd-dim" style="font-size:10.5px">（送料込みの最安 ¥${lo.toLocaleString()}＝目標粗利に ¥${(lo - ceil.ceil).toLocaleString()} 届かない）</span>`; })()}
       </div>`;
     container.innerHTML =
       `<div style="font-size:12px;font-weight:700;margin-bottom:5px">💰 サイト横断・安い順で比較（${deals.length}件）<span class="smd-dim" style="font-weight:400;font-size:10.5px">　※開く＝実際の商品ページ。決済ボタンはご自身で（購入は自動化しません）</span></div>` +
@@ -17655,7 +17848,7 @@
       (broadKw ? `<div style="font-size:11px;color:#b26a00;background:#fff8e6;border-radius:6px;padding:4px 8px;margin-bottom:6px">🔎 ヒット0のサイトは「<b>${esc(broadKw)}</b>」に広げて再検索しました（英語サブタイトル等を外し作品名＋機種で。別バリエも混じるので現物を確認してください）。</div>` : '') +
       `<div style="margin-bottom:7px">各サイト最安↓ ${chips}</div>` +
       `<div style="overflow-x:auto"><table class="pf-table" style="width:100%;min-width:640px;font-size:12px"><tr><th style="width:28px">${ceil ? '判定' : '#'}</th><th style="width:44px">画像</th><th style="width:96px">サイト</th><th style="width:82px;text-align:right">価格</th>${ceil ? '<th style="width:104px;text-align:right">見込み粗利</th>' : ''}<th style="width:54px">状態</th><th>商品名</th><th style="width:54px">リンク</th></tr>${rows}</table></div>` + more;
-    const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20));
+    const mb = container.querySelector('.src-deal-more'); if (mb) mb.addEventListener('click', () => renderDeals(container, deals, n + 20, broadKw, ceil, kwRaw));
   }
   // よく出る英語タイトル → 日本語での検索語（日本の仕入先はJPの方がヒットしやすい）。全一致でなく含めば置換
   const JP_DICT = [
@@ -17804,14 +17997,15 @@
   }
   /* ★2026-10-09 本人「これまでの仕入れ実績と比べてどれくらい乖離があるか、ターゲット内に収まっているか…その仕入れ価格が正しいか判断できる」
      在庫台帳（inventory）の仕入額を、検索語の日本語の語が全部入っている仕入れ（同じ機種）で集める。まとめ買いは除く。 */
-  let srcPastRows = null;
+  let srcPastRows = null, srcPastErr = 0;   // ★読めなかった時刻。読めなかったのを「なし（初めて）」に化けさせない（catch-empty-is-not-absence・レビュー 仕入れ管理 #7）
   function loadSrcPast() {
     if (srcPastRows !== null) return Promise.resolve(srcPastRows);
+    if (srcPastErr && Date.now() - srcPastErr < 60000) return Promise.resolve(null);   // 失敗の直後は読み直さない（1分あけて次の描画で）
     srcPastRows = [];
     return sbGetAll('inventory', 'select=name_supplier,price,purchase_date&price=gt.0&name_supplier=not.is.null')
       .then(rows => { srcPastRows = (rows || []).filter(r => r.name_supplier && Number(r.price) > 0 && !/([×x]\s*\d|\d+\s*(点|個|本|枚|台)\s*(セット|まとめ)|まとめ売り|セット売り)/i.test(r.name_supplier))
-        .map(r => ({ n: srcNrm(r.name_supplier), raw: r.name_supplier, p: Number(r.price), d: String(r.purchase_date || '').slice(0, 10) })); return srcPastRows; })
-      .catch(() => srcPastRows);
+        .map(r => ({ n: srcNrm(r.name_supplier), raw: r.name_supplier, p: Number(r.price), d: String(r.purchase_date || '').slice(0, 10) })); srcPastErr = 0; return srcPastRows; })
+      .catch(e => { console.warn('[仕入れ検索] 過去の仕入を読めませんでした', e); srcPastRows = null; srcPastErr = Date.now(); return null; });
   }
   const _srcPastMemo = new Map();
   function srcPastFor(kt) {
@@ -18156,7 +18350,7 @@
     { const ls = await lotSplitLoad(); const out = []; let asked = 0;
       disp.forEach(x => { const n = lotNOf(x.it.name); const parts = n ? ls[String(x.it.name || '').slice(0, 200)] : null;
         if (n && Array.isArray(parts) && parts.length >= 2) parts.forEach((kwp, k) => out.push({ o: x.o, ix: x.ix + '.' + (k + 1), it: Object.assign({}, x.it, { variation: ((x.it.variation ? x.it.variation + ' ' : '') + '〔' + (k + 1) + '/' + parts.length + '〕 ' + kwp), _lot: { k: k + 1, n: parts.length, kw: kwp } }) }));
-        else { out.push(x); if (n && settings.claudeKey && asked < 3 && !renderSourcing._lotAsked?.[x.it.name]) { asked++; (renderSourcing._lotAsked = renderSourcing._lotAsked || {})[x.it.name] = 1; lotSplitAsk(x.it.name, n).then(a => { if (a && state.page === 'buy') { try { renderSourcing(host); } catch (_) {} } }); } } });
+        else { out.push(x); if (n && settings.claudeKey && asked < 3 && !renderSourcing._lotAsked?.[x.it.name]) { asked++; (renderSourcing._lotAsked = renderSourcing._lotAsked || {})[x.it.name] = 1; lotSplitAsk(x.it.name, n).then(a => { if (a && state.page === 'buy' && host.isConnected) { try { renderSourcing(host); } catch (_) {} } }); } } });
       disp = out; }
     /* 🤖 検索語がまだ機械の置き換えしか無い行だけ、まとめてAIに聞く（1回の描画で1回・聞いた出品は二度聞かない・答えが来たら1回だけ描き直す） */
     if (settings.claudeKey) {
@@ -18165,7 +18359,7 @@
       disp.forEach(x => { const it = x.it; if (it._lot) return; const kk = kwStoreKey(it.name, it.variation); let sv = null; try { sv = (kwFix && kwFix[kk]) || localStorage.getItem(kk); } catch (_) {}
         if (sv != null) return; if (sourcingKeywordFromDict(it.variation)) return; const jj = srcJaOf(it.variation, it.name); if (jj && jj.ja && /[ぁ-んァ-ヶ一-龠]/.test(jj.ja)) return;
         const ak = kwAiKey(it.name, it.variation); if (srcAiKwOf(it.name, it.variation) || asked[ak] || seen[ak]) return; seen[ak] = 1; need.push({ name: it.name, variation: it.variation, ak }); });
-      if (need.length) { need.forEach(x => { asked[x.ak] = 1; }); kwAiAsk(need).then(n => { if (n && host.isConnected) renderSourcing(host); }); }
+      if (need.length && !_kwAiBusy) { const send = need.slice(0, 40); send.forEach(x => { asked[x.ak] = 1; }); kwAiAsk(send).then(n => { if (n && host.isConnected) renderSourcing(host); }); }   // ★印は実際に送った分だけ（41件目以降・問い合わせ中に重なった行は次の描画で聞く。レビュー 仕入れ管理 #6）
     }
     if (sortMode === 'deadline') disp.sort((a, b) => (a.o.ship_by || 9e15) - (b.o.ship_by || 9e15) || tsOf(b.o) - tsOf(a.o));
     else disp.sort((a, b) => tsOf(b.o) - tsOf(a.o));
@@ -18349,10 +18543,10 @@
       const ocond = srcOrderCond((disp[i] && disp[i].it && disp[i].it.name) || '');
       const head2 = `<div style="font-size:10.5px;margin-bottom:3px;display:flex;gap:10px;flex-wrap:wrap">`
         + `<span title="${ocond.sure ? 'Shopeeの商品名から読んだ状態' : '商品名に状態の印が無いので中古とみなしています'}">📀 注文の状態：<b style="color:${ocond.c === '新品' ? '#1565c0' : '#444'}">${ocond.c}</b>${ocond.sure ? '' : '（推定）'}</span>`
-        + (past ? `<span title="在庫台帳で検索語の語が全部入っている仕入れ（同じ機種・まとめ買い除く）。範囲 ¥${past.min.toLocaleString()}〜¥${past.max.toLocaleString()}／直近：${esc(past.last.raw).slice(0, 60)}">📦 過去の仕入 <b>¥${past.lo.toLocaleString()}${past.hi !== past.lo ? '〜¥' + past.hi.toLocaleString() : ''}</b>（${past.n}件${past.n >= 4 ? '・真ん中の半分' : ''}／直近 ¥${past.last.p.toLocaleString()}${past.last.d ? '・' + past.last.d.slice(2).replace(/-/g, '/') : ''}）</span>` : '<span class="smd-dim" title="在庫台帳に同じ作品の仕入れが見つかりません">📦 過去の仕入：なし（初めて）</span>')
+        + (past ? `<span title="在庫台帳で検索語の語が全部入っている仕入れ（同じ機種・まとめ買い除く）。範囲 ¥${past.min.toLocaleString()}〜¥${past.max.toLocaleString()}／直近：${esc(past.last.raw).slice(0, 60)}">📦 過去の仕入 <b>¥${past.lo.toLocaleString()}${past.hi !== past.lo ? '〜¥' + past.hi.toLocaleString() : ''}</b>（${past.n}件${past.n >= 4 ? '・真ん中の半分' : ''}／直近 ¥${past.last.p.toLocaleString()}${past.last.d ? '・' + past.last.d.slice(2).replace(/-/g, '/') : ''}）</span>` : (srcPastErr ? '<span style="color:#b26a00" title="在庫台帳を読めませんでした。少し待って開き直すと読み直します">📦 過去の仕入：読めませんでした</span>' : '<span class="smd-dim" title="在庫台帳に同じ作品の仕入れが見つかりません">📦 過去の仕入：なし（初めて）</span>'))
         + `</div>`;
       if (!top.length) { box.innerHTML = `<div class="smd-dim" style="font-size:10.5px">この検索語に合う出品がありません（取得した ${deals.length}件は<b>まとめ売り・別商品</b>でした）。<b>🔍比較一覧</b>で全部見るか、キーワードを直してください。</div>` + statLine(r); return; }
-      const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.price, ceil) : null; const miss = [];
+      const chips = top.map((d, k) => { const j = ceil ? srcJudge(d.eff != null ? d.eff : d.price, ceil) : null; const miss = [];   /* ★判定は送料込み（隣の「上限内／上限+¥」と同じ物差し。レビュー 仕入れ管理 #3） */
         return `<a class="src-pick${miss.length ? ' src-miss' : ''}" data-i="${i}" data-cost="${d.price}" data-site="${esc(d.site)}" href="${hrefOk(d.url)}" target="_blank" rel="noopener" title="${esc(d.name)}" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;background:${j ? j.bg : '#fff'};border:1px solid ${j ? j.c : '#ddd'};border-radius:12px;padding:2px 8px;margin:0 4px 4px 0;font-size:11px">
           ${k === 0 ? '🥇' : (j ? j.icon : '')}${d.img ? `<img src="${esc(d.img)}" referrerpolicy="no-referrer" loading="lazy" style="width:26px;height:26px;object-fit:cover;border-radius:4px;background:#f2f2f2" onerror="this.style.display='none'">` : ''}<span style="background:${d.bg};color:#fff;font-size:9px;font-weight:700;border-radius:4px;padding:1px 4px">${esc(d.site)}</span><b style="color:#c0392b">¥${d.price.toLocaleString()}</b>${d.fee > 0 ? `<span class="smd-dim" style="font-size:9.5px" title="送料の目安を足した実質価格">+送${d.fee.toLocaleString()}=¥${d.eff.toLocaleString()}</span>` : ''}${shipFlags(d).map(f => `<span style="color:${f.c};font-size:9.5px" title="${esc(f.d)}">${f.t}</span>`).join('')}${(kt.col && kt.col.length && !srcColorOf(d.name).length) ? `<span style="font-size:9.5px;color:#b26a00;font-weight:700" title="出品名に色が書いてありません。注文は${esc(kt.col[0])}です。写真で色を確かめてください">色を確認（注文は${esc(kt.col[0])}）</span>` : ''}${(() => { const cc = srcCandCond(d); const mis = cc.c && cc.c !== ocond.c;
             return cc.c ? `<span style="font-size:9.5px;font-weight:${mis ? 700 : 400};color:${mis ? (ocond.c === '新品' ? '#d93025' : '#b26a00') : '#8a8f98'}" title="${mis ? (ocond.c === '新品' ? '注文は新品なのに、この候補は中古です' : '注文は中古なのに、この候補は新品です（割高・出品の状態と違う）') : '出品の状態（注文と同じ）'}">${mis ? '⚠' : ''}${esc(cc.lab)}${mis ? '（注文は' + ocond.c + '）' : ''}</span>` : `<span class="smd-dim" style="font-size:9.5px" title="このサイトの一覧からは状態が読めません。開いて確かめてください">状態?</span>`; })()}${past ? (() => { const v = d.eff != null ? d.eff : d.price; const pct = Math.round((v - past.med) / past.med * 100);
@@ -18390,59 +18584,58 @@
     host.querySelectorAll('.src-deals-go').forEach(btn => btn.addEventListener('click', () => runDeals(+btn.dataset.i, true)));
     // 開いた時点で自動的に候補を集める（同時2件・6時間キャッシュ）。⚙のトグルでOFFにできる。
     const srcSkip = (i) => { const x = disp[i]; return !!(x && isDone(x)); };   // 仕入れ済＝もう探さない
-    async function autoSuggest() {
-      // ⚠️ 再描画（ページ送り・並べ替え・サイトのチェック等）から何度も呼ばれる。
-      //   前の周回を止めずに始めると【古い周回が生き残ったまま】重なって走り、
-      //   仕入元サイトへのリクエストが倍・三倍になる（遮断されると仕入れ自体が止まる・2026-09-06）。
-      //   → 走っていたら必ず止めて、終わるのを待ってから始める。
-      if (autoSuggest._running) {
-        renderSourcing._stop = true;
-        for (let w = 0; w < 60 && autoSuggest._running; w++) await new Promise(r => setTimeout(r, 100));
-      }
+    /* ★2026-10-24 自動検索と「🔄全行を再取得」を1本の走らせ方にまとめた（レビュー 仕入れ管理 #5）。
+       以前の守り（autoSuggest._running）は、描き直しのたびに作り直される関数に付いていたので、前の周回を止められず重なって走っていた
+       （並べ替え・✓仕入れ済・ページ送りのたびに古い周回が生き残り、古い並びの結果を新しい表の同じ番号の行に描くこともあった）。
+       再取得ボタンは自動検索を止めず、行の間の待ちも中継の時間切れの守りも無しで全行を叩いていた（遮断の筋道・dont-get-ip-blocked）。
+       → 周回の番号（renderSourcing._run）を1つだけ持つ。新しい周回が始まったら古い周回は次の行で抜け、結果も描かない。行の間は1秒前後あける。 */
+    async function srcRunRows(boxes, force, label) {
+      if (!host.isConnected) return 0;
+      const run = renderSourcing._run = (renderSourcing._run || 0) + 1;
+      for (let w = 0; w < 60 && renderSourcing._autoRunning; w++) await new Promise(r => setTimeout(r, 100));   // 前の周回の1行が終わるのを待つ（最大6秒）
+      if (run !== renderSourcing._run || !host.isConnected) return 0;   // 待っている間にさらに新しい周回が始まった
       renderSourcing._stop = false;
-      autoSuggest._running = true;
+      renderSourcing._autoRunning = run;
+      const msg = host.querySelector('#src-deals-all-msg');
+      let done = 0, halted = false; const q = boxes.map(b => +b.dataset.i);
       try {
+        while (q.length) {
+          if (renderSourcing._stop || run !== renderSourcing._run || !host.isConnected) break;
+          /* ★2026-10-09 本人「このページ重くなってる・候補の検索が結構長い」：中継（Tampermonkey）が詰まると1件28秒の時間切れを延々繰り返し、
+             全行が「検索中…」のまま10分以上回っていた。続けて時間切れが出たら止めて、そう表示する（回し続けない） */
+          if (bridgeTimeoutStreak >= 6) {
+            q.forEach(k => { const bx = host.querySelector(`.src-sugg[data-i="${k}"]`); if (bx) bx.innerHTML = '<span style="color:#d93025;font-size:10.5px">⚠ 中継（Tampermonkey）が応答していません（時間切れが続いています）。Chrome を再起動すると直ります（タブは残ります）。直ったら「全行を再取得」</span>'; });
+            q.length = 0; halted = true; if (msg) msg.textContent = '中継が応答しないため止めました'; break;
+          }
+          const i = q.shift();
+          let r = null, err = null;
+          try { r = await srcDealsFor(i, force); } catch (e) { err = e.message || e; }
+          if (run !== renderSourcing._run || !host.isConnected) break;   // 待っている間に描き直された＝この結果は古い並びの行のもの。描かない
+          try { drawSugg(i, r, err); } catch (e) { try { drawSugg(i, null, e.message || e); } catch (_) {} }
+          done++; if (msg) msg.textContent = `${label} ${done}/${boxes.length}`;
+          // ★1行で最大8サイトを同時に叩く。120msだと1分で数百リクエストになるので、
+          //   1秒前後＋ゆらぎにする（叩きすぎて遮断されると仕入れができなくなる）。保存済みの結果（叩いていない）なら待たない
+          if (q.length && !(r && r.cached)) await new Promise(res => setTimeout(res, 900 + Math.floor(Math.random() * 500)));
+        }
+      } finally { if (renderSourcing._autoRunning === run) renderSourcing._autoRunning = 0; }
+      if (msg && !halted && run === renderSourcing._run) msg.textContent = renderSourcing._stop ? '停止しました' : `${label} 完了（${done}件）`;
+      return done;
+    }
+    async function autoSuggest() {
+      // ⚠️ 再描画（ページ送り・並べ替え・サイトのチェック等）から何度も呼ばれる。前の周回は srcRunRows が止める（重ねて走らせない・2026-09-06）
       const all = [...host.querySelectorAll('.src-sugg')];
       all.filter(b => srcSkip(+b.dataset.i)).forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">✓ 仕入れ済のため検索しません</span>'; });
       const AUTO_MAX = 12;   // 開いた瞬間に何十行も走らせると画面が固まる。続きは「🔄全行を再取得」で
       const pending = all.filter(b => !srcSkip(+b.dataset.i));
       const boxes = pending.slice(0, AUTO_MAX);
       pending.slice(AUTO_MAX).forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px">🔍比較一覧 で取得（自動は上位' + AUTO_MAX + '行まで）</span>'; });
-      const msg = document.getElementById('src-deals-all-msg');
       boxes.forEach(b => { b.innerHTML = '<span class="smd-dim" style="font-size:10.5px"><span class="smd-spin"></span> 候補を検索中…</span>'; });
-      let done = 0, q = boxes.map(b => +b.dataset.i);
-      const worker = async () => {
-        while (q.length) {
-          if (renderSourcing._stop) return;
-          /* ★2026-10-09 本人「このページ重くなってる・候補の検索が結構長い」：中継（Tampermonkey）が詰まると1件28秒の時間切れを延々繰り返し、
-             全行が「検索中…」のまま10分以上回っていた。続けて時間切れが出たら止めて、そう表示する（回し続けない） */
-          if (bridgeTimeoutStreak >= 6) {
-            q.concat([]).forEach(k => { const bx = host.querySelector(`.src-sugg[data-i="${k}"]`); if (bx) bx.innerHTML = '<span style="color:#d93025;font-size:10.5px">⚠ 中継（Tampermonkey）が応答していません（時間切れが続いています）。Chrome を再起動すると直ります（タブは残ります）。直ったら「全行を再取得」</span>'; });
-            q.length = 0; if (msg) msg.textContent = '中継が応答しないため止めました'; return;
-          }
-          const i = q.shift();
-          try { drawSugg(i, await srcDealsFor(i)); } catch (e) { drawSugg(i, null, e.message || e); }
-          done++; if (msg) msg.textContent = `自動検索 ${done}/${boxes.length}`;
-          // ★1行で最大8サイトを同時に叩く。120msだと1分で数百リクエストになるので、
-          //   1秒前後＋ゆらぎにする（叩きすぎて遮断されると仕入れができなくなる）。
-          await new Promise(r => setTimeout(r, 900 + Math.floor(Math.random() * 500)));
-        }
-      };
-      await worker();   // 1行ずつ。1行の中で最大8サイトを同時に叩くため、行を並列にするとブリッジ(6枠)が詰まる
-      if (msg) msg.textContent = renderSourcing._stop ? '停止しました' : `自動検索 完了（${boxes.length}件）`;
-      } finally { autoSuggest._running = false; }
+      await srcRunRows(boxes, false, '自動検索');   // 1行ずつ。1行の中で最大8サイトを同時に叩くため、行を並列にするとブリッジ(6枠)が詰まる
     }
-    { const ab = document.getElementById('src-deals-all'); if (ab) ab.addEventListener('click', async () => {
+    { const ab = host.querySelector('#src-deals-all'); if (ab) ab.addEventListener('click', async () => {
       ab.disabled = true; const orig = ab.textContent; ab.textContent = '🔍 再取得中…';
-      renderSourcing._stop = false;
-      const boxes = [...host.querySelectorAll('.src-sugg')].filter(b => !srcSkip(+b.dataset.i));
-      const msg = document.getElementById('src-deals-all-msg');
-      let done = 0, q = boxes.map(b => +b.dataset.i);
-      const worker = async () => { while (q.length) { if (renderSourcing._stop) return; const i = q.shift();
-        try { drawSugg(i, await srcDealsFor(i, true)); } catch (e) { drawSugg(i, null, e.message || e); }
-        done++; if (msg) msg.textContent = `再取得 ${done}/${boxes.length}`; } };
-      await worker();
-      ab.disabled = false; ab.textContent = orig;
+      try { await srcRunRows([...host.querySelectorAll('.src-sugg')].filter(b => !srcSkip(+b.dataset.i)), true, '再取得'); }   // ★自動検索を止めてから・行の間をあけて・時間切れの守りつき（レビュー 仕入れ管理 #5）
+      finally { ab.disabled = false; ab.textContent = orig; }
     }); }
     { const sb = document.getElementById('src-auto-stop'); if (sb) sb.addEventListener('click', () => { renderSourcing._stop = true; sb.textContent = '停止中…'; }); }
     host.querySelectorAll('.src-site').forEach(cb => cb.addEventListener('change', () => {
@@ -18557,7 +18750,8 @@
     const parseT = (t) => {
       const m = String(t || '').trim().match(/^(?:(\d{4})\/)?(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
       if (!m) return null;
-      const y = m[1] ? +m[1] : new Date().getFullYear();
+      let y = m[1] ? +m[1] : new Date().getFullYear();
+      if (!m[1] && new Date(y, +m[2] - 1, +m[3]).getTime() > Date.now() + 2 * 86400000) y -= 1;   // ★年の無い時刻が先の日付＝去年（1月に12月末の引受を読む時。レビュー 仕入れ管理 #14）
       return new Date(y, +m[2] - 1, +m[3], m[4] ? +m[4] : 12, m[5] ? +m[5] : 0);
     };
     const by = {};
@@ -18595,7 +18789,8 @@
     const first = h[0];
     const m = String((first && first.t) || '').trim().match(/^(?:(\d{4})\/)?(\d{1,2})\/(\d{1,2})/);
     if (!m) return null;
-    const base = new Date(m[1] ? +m[1] : new Date().getFullYear(), +m[2] - 1, +m[3]);
+    let base = new Date(m[1] ? +m[1] : new Date().getFullYear(), +m[2] - 1, +m[3]);
+    if (!m[1] && base.getTime() > Date.now() + 2 * 86400000) base = new Date(base.getFullYear() - 1, +m[2] - 1, +m[3]);   // ★年の無い引受が先の日付＝去年（年末年始に見込み日が1年ずれた。レビュー 仕入れ管理 #14）
     const k = String(r.ship_method || '').trim() || '(不明)';
     const st = (stats && (stats[k] || stats['(不明)'])) || null;
     let add = Math.max(1, Math.ceil(st ? st.days : 2));     // 実績が無い時は2日（安全側）
@@ -18821,6 +19016,7 @@
       else if (st === 'out') phase = 'out';                          // 持ち出し中＝お近くで配達中
       else if (st === 'arrived') phase = 'arrived';                  // 配達店/最寄局に到着＝まもなく配達
       else if (futureEta) { phase = 'eta'; eta = futureEta; }        // 未来のお届け予定日＝到着予定
+      else if (hasCarrier && etaUse && etaUse < todayStr && etaUse !== etaCoarse) { phase = 'eta'; eta = etaUse; }   // ★予定日（業者の予定・追跡からの見込み）を過ぎて届いていない＝到着予定超過として数える（以前は今日以降しか eta にせず「到着予定超過」が一度も出なかった）。ざっくりの見込みは「届いてるかも」の方で拾う（レビュー 仕入れ管理 #13）
       else if (st === 'linehaul') phase = 'linehaul';               // 輸送中（作業店通過/中継）
       else if (st === 'shipped') phase = 'shipped';                 // 発送済・受付直後
       else if (ds || di || r.tracking_no || r.ship_method) phase = 'transit';
@@ -20829,7 +21025,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return false; }
     try {
       await sbUpsert('order_issues', [Object.assign({ cc, sn, updated_at: new Date().toISOString() }, patch)]);
-      try { renderReturns._cache = null; } catch (_) {} // 書込後は返品ページのキャッシュを破棄→次のrenderReturnsで取り直し
+      // ★2026-10-24 全体レビュー #8：書くたびにキャッシュを捨てていたため、段階を1件選ぶごとに
+      //   キャンセル全件・order_issues・補償・返品・控えを全部読み直していた（段階を決める206件＝206回の全件読み）。
+      //   → 書けた内容をキャッシュの該当行にだけ重ねる（他のPCの変更は2分のキャッシュ切れか🔄で入る）。
+      try {
+        const c = renderReturns._cache;
+        if (c && Array.isArray(c.issues)) {
+          const row = c.issues.find(r => r.cc === cc && r.sn === sn);
+          if (row) Object.assign(row, patch); else c.issues.push(Object.assign({ cc, sn }, patch));
+        }
+      } catch (_) { try { renderReturns._cache = null; } catch (_2) {} }
       logAct('返品・キャンセル', '記録', sn, cc + ' / ' + Object.entries(patch).map(([k, v]) => `${k}=${v == null ? '(空)' : v}`).join(' '));
       return true;
     } catch (e) { alert('保存失敗: ' + e.message); return false; }
@@ -21144,20 +21349,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
     // ⚠️ 読み直しで**いま決めた内容を上書きしない**（手元を上に重ねる）。ここを間違えると
     //   「保存しました」と返しながら**返品の判断が記録されない**（2026-09-08 Codex指摘）。
-    if (!retMetaOk) {
-      var mine = retMeta, base = retMetaBase;
-      await retMetaLoad();
-      if (retMetaOk) retMeta = mergeMine_(retMeta, mine, base);
-    }
+    // ★2026-10-24 全体レビュー #1：読み直すのが「前に読めなかった時」だけだったため、
+    //   2台のPC（同じPCの2タブも）で開いたまま別の行を直すと、後から保存した側の【開いた時の控え】で
+    //   丸ごと上書きされ、先に保存した側の判断（戻ってきた・補償金）が消えていた。
+    //   → 保存のたびに読み直し、手元でいじった分だけを mergeMine_ で重ねてから書く。
+    //   読み直しに失敗しても、前に一度読めていれば手元は正しい控え＋自分の変更なので、そのまま書いてよい。
+    var mine = retMeta, base = retMetaBase, hadOk = retMetaOk;   // ★読む前に控える（retMetaLoad が base を上書きする）
+    await retMetaLoad();
+    if (retMetaOk) retMeta = mergeMine_(retMeta, mine, base);
+    else if (hadOk) { retMeta = mine; retMetaOk = true; }      // 読み直しだけ失敗＝手元で保存する
     if (!retMetaOk) {
       alert(i18nOn()
         ? 'Could not read the current return records, so nothing was saved (it would be erased).\nCheck your connection and try again.'
         : 'いまの控えを読めていないので保存しません（消えてしまうため）。\n通信を確かめて、もう一度お試しください。');
       return false;
     }
-    await sbUpsert('app_kv', [{ k: 'return_meta', v: { items: retMeta }, updated_at: new Date().toISOString() }]);
+    // ★書き込みの失敗をそのまま上げると、トーストも警告も出ず選んだ色だけ変わっていた（レビュー #9②）
+    try { await sbUpsert('app_kv', [{ k: 'return_meta', v: { items: retMeta }, updated_at: new Date().toISOString() }]); }
+    catch (e) { alert((i18nOn() ? 'Could not save the return record: ' : '返品の控えを保存できませんでした：') + ((e && e.message) || e)); return false; }
     retMetaBase = snapBase_(retMeta);          // 保存できた＝ここが新しい土台
+    retMetaOk = true;
     return true;
+  }
+  // 保存できなかった行は【最後に読めたサーバの値】へ戻す（押す前の手元の値に戻すと、
+  //   次の保存で他のPCの変更を古い値で塗り戻すため）。一度も読めていない時だけ押す前の値に戻す。
+  function retMetaUndo_(k, prev) {
+    var b = retMetaBase ? retMetaBase[k] : prev;
+    if (b === undefined) delete retMeta[k]; else retMeta[k] = JSON.parse(JSON.stringify(b));
+    return retMeta[k] || {};
   }
   function retMetaKey(r) { return (r.cc || '') + ':' + (r.order_sn || ''); }
   function retKindCell(r) {
@@ -21320,9 +21539,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function renderReturns(force) {
     const body = document.getElementById('ret-body');
+    // ★1件記録するたびに描き直すと表のスクロールが先頭に戻っていた（レビュー #8）。読み込み中に縮む前に位置を控える
+    const _keepPos = { key: renderReturns._posKey, y: window.scrollY || 0, tops: Array.from(body.querySelectorAll('.pf-scroll')).map(e => e.scrollTop) };
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let cancelled, issues, adjustments, formalReturns;
-    const rch = renderReturns._cache; // ★タブ/ページ切替の度の全件再取得を解消（TTL120秒／saveIssue・まとめて更新で破棄）
+    const rch = renderReturns._cache; // ★タブ/ページ切替の度の全件再取得を解消（TTL120秒／saveIssue は該当行だけ差し替え・まとめて更新で破棄）
     if (!force && rch && Date.now() - rch.at < 120000) {
       ({ cancelled, issues, adjustments, formalReturns } = rch);
     } else {
@@ -21444,12 +21665,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     }
     const compExtra = compOnlyKeys.map(k => { const i = k.indexOf(':'); const cc = k.slice(0, i), sn = k.slice(i + 1); const od = compOrdMap.get(k) || {}; return { cc, sn, buyer: od.buyer || '', status: '補償', items: od.items || [], _comp: true, _realStatus: od.status || '', _realTab: od.tab, order_date: od.order_date || snToDate(sn) || '', order_ts: od.order_ts }; });
     // フィルタ（全部/キャンセル/補償あり/保証待ち）
-    const hasCompRow = o => (adjComp.get(o.cc + ':' + o.sn) || 0) > 0 || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0) > 0;
+    // ★↩️返品リクエストのタブで入れた「補償金(円)」（return_meta.comp）を見ていなかったため、補償を受け取って記入しても
+    //   🚨補償の取りこぼし・申請用CSVに残り続けた（同じ注文を二重に申請しかねない・2026-10-24 レビュー #3）
+    const metaCompOf = o => Number((retMeta[o.cc + ':' + o.sn] || {}).comp) || 0;
+    const hasCompRow = o => (adjComp.get(o.cc + ':' + o.sn) || 0) > 0 || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0) > 0 || metaCompOf(o) > 0;
     // ★補償が入った注文を先頭に（＝埋もれず一目で分かる）。残りは日付の新しい順。
     const dateKeyOf = o => { if (o.order_ts) { const t = Number(o.order_ts); return t < 1e11 ? t * 1000 : t; } const d = o.order_date || snToDate(o.sn); return d ? Date.parse(d + 'T00:00:00') : 0; };
     const rowsAll = rows.concat(compExtra).sort((a, b) => dateKeyOf(b) - dateKeyOf(a)); // 日付の新しい順
     // タブで「返金・補償（お金が動いた分）」と「キャンセル（損失なし）」に分ける
-    const isRefundRow = o => o._comp || hasCompRow(o) || ((issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0) > 0;
+    // ★手で足した行（配達後の返品など）は返金額を入れるまで🚫キャンセルタブへ行き、足したタブから消えていた（レビュー #14）
+    const isRefundRow = o => o._comp || hasCompRow(o) || ((issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0) > 0
+      || (o.status === '手動追加' && /^(返品|一部返金)$/.test((issueMap.get(o.cc + ':' + o.sn) || {}).kind || '返品'));
     const cancelRows = rowsAll.filter(o => !isRefundRow(o));
     const refundRows = rowsAll.filter(isRefundRow);
     // ↩️ 返品リクエスト（Shopee公式 returns API＝買い手が正式に申請した返品/返金。キャンセルや補償とは別の実データ）
@@ -21460,7 +21686,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let retOrdMap = new Map();
     if (formalReturns.length) {
       const rsns = [...new Set(formalReturns.map(r => r.order_sn).filter(Boolean))];
-      if (rsns.length) { try { const ro = await sbGetAll('orders', 'select=cc,sn,buyer,items&sn=in.(' + rsns.map(s => encodeURIComponent('"' + s + '"')).join(',') + ')'); (ro || []).forEach(o => retOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {} }
+      if (rsns.length) { try { const ro = await sbGetAll('orders', 'select=cc,sn,buyer,items,tracking&sn=in.(' + rsns.map(s => encodeURIComponent('"' + s + '"')).join(',') + ')'); (ro || []).forEach(o => retOrdMap.set(o.cc + ':' + o.sn, o)); } catch (_) {} }
     }
     const retRefundJpy = r => {
       const t = Number(r.create_time || r.update_time || 0);
@@ -21473,7 +21699,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 既にrefundRows(補償/手動返金)に居るcc:snは重複させない。返金額>0の正式返品だけ損失行として追加。
     const refundKeys0 = new Set(refundRows.map(o => o.cc + ':' + o.sn));
     const returnExtra = formalReturns.filter(r => r.order_sn && (Number(r.refund_amount) || 0) > 0 && !refundKeys0.has((r.cc || '') + ':' + r.order_sn))
-      .map(r => { const cc = r.cc || '', sn = r.order_sn; const od = retOrdMap.get(cc + ':' + sn) || {}; const t = Number(r.create_time || r.update_time || 0); return { cc, sn, buyer: od.buyer || '', items: od.items || [], _return: true, ret_status: r.status, ret_reason: r.reason, refund_jpy: retRefundJpy(r), refund_local: Number(r.refund_amount) || 0, currency: r.currency, order_ts: null, order_date: t ? new Date(t < 1e11 ? t * 1000 : t).toISOString().slice(0, 10) : (snToDate(sn) || '') }; });
+      .map(r => { const cc = r.cc || '', sn = r.order_sn; const od = retOrdMap.get(cc + ':' + sn) || {}; const t = Number(r.create_time || r.update_time || 0); return { cc, sn, buyer: od.buyer || '', items: od.items || [], _return: true, ret_status: r.status, ret_reason: r.reason, refund_jpy: retRefundJpy(r), refund_local: Number(r.refund_amount) || 0, currency: r.currency, return_sn: r.return_sn || '', refund_amount: Number(r.refund_amount) || 0, tracking: od.tracking || '', order_ts: null, order_date: t ? new Date(t < 1e11 ? t * 1000 : t).toISOString().slice(0, 10) : (snToDate(sn) || '') }; });
     const rtab = renderReturns._tab || 'refund';
     // 返金・補償タブは「補償（お金が戻った/戻る注文）」を先頭に固める（返品損失に埋もれて後ろページに散る問題の解消）。補償内・非補償内はそれぞれ日付の新しい順。
     const isCompRow = o => o._comp || hasCompRow(o);
@@ -21503,7 +21729,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['comp_desc', '補償額：大きい順'], ['refund_desc', '返金額：大きい順'],
     ];
     const SK = renderReturns._sort || 'date_desc';
-    const compOf = o => (adjComp.get(o.cc + ':' + o.sn) || 0) || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0);
+    const compOf = o => (adjComp.get(o.cc + ':' + o.sn) || 0) || ((issueMap.get(o.cc + ':' + o.sn) || {}).comp_amount || 0) || metaCompOf(o);
     const payOf = o => adjCompPay.get(o.cc + ':' + o.sn) || 0;
     const refundOf = o => (issueMap.get(o.cc + ':' + o.sn) || {}).refund_jpy || 0;
     const sortRows = (arr) => {
@@ -21522,7 +21748,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     };
     const cmpDefault = (x, y) => dateKeyOf(y) - dateKeyOf(x);
     const beforeF = rowsView.length;
-    rowsView = sortRows(applyF(rowsView));
+    if (rtab !== 'formal') rowsView = sortRows(applyF(rowsView));   // ★返品リクエストのタブは絞り込みの帯が無い＝掛けない（レビュー #5）
     const filteredN = beforeF - rowsView.length;
     if (rtab === 'refund' && renderReturns._showCxl !== true) { rowsView = rowsView.filter(o => { const c = retStatusOf(o) === 'CANCELLED'; if (c) cxlHidden++; return !c; }); }
     // 🚨 補償の取りこぼし＝荷物未着・中身なしなのに補償が入っていないもの。
@@ -21544,7 +21770,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const isLostRow = o => /NON_?RECEIPT|ITEM_MISSING|未着|中身/i.test(lostReasonOf(o));
     const lostBase = refundRows.concat(returnExtra);
     const lostAll = lostBase.filter(o => isLostRow(o) && !isCompRow(o));
-    if (renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));
+    if (rtab === 'refund' && renderReturns._lostOnly === true) rowsView = rowsView.filter(o => isLostRow(o) && !isCompRow(o));   // ★他のタブでは切替が出ないので掛けない（レビュー #4）
     const refundTotal = issues.reduce((s, r) => s + (r.refund_jpy || 0), 0);
     const recorded = issues.length;
     const ccOpts = REGIONS.map(r => `<option>${r.cc}</option>`).join('');
@@ -21568,24 +21794,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td>${o._comp ? `<span style="font-size:11px;color:#188038;white-space:nowrap">🎁 ${esc(adjCompScen.get(o.cc + ':' + o.sn) || '補償')}</span>` : o._return ? `<span style="font-size:11px;color:#c0392b">${esc(retReasonJa(o.ret_reason) || '返品')}</span>` : `<input class="ri-reason" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.reason || '')}" placeholder="${esc(cancelReasonJa(o.cancel_reason) || '理由')}" title="${o.cancel_reason ? 'Shopee記録: ' + esc(cancelReasonJa(o.cancel_reason)) : ''}" style="width:100%;min-width:120px;padding:2px 4px;font-size:11px">` + ((!o._comp && adjCompScen.get(o.cc + ':' + o.sn)) ? `<div style="font-size:9.5px;color:#188038;margin-top:2px" title="Shopeeの補償明細に記載された理由">🎁 ${esc(adjCompScen.get(o.cc + ':' + o.sn))}</div>` : '')}</td>
         <td>${o._return ? `<b style="color:#d93025;font-size:11px" title="返品リクエストの返金額＝損失（現地→円）">-${fmtJpy(o.refund_jpy)}</b><br><span class="smd-dim" style="font-size:9px">${esc(fmtLoc2(o.cc, o.refund_local))}</span>` : `<input class="ri-refund" type="number" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${iss.refund_jpy != null ? iss.refund_jpy : ''}" placeholder="返金¥" style="width:84px;padding:2px 4px;font-size:11px">`}</td>
         <td><input class="ri-refdate" type="date" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.refund_date || '')}" title="返金日（この月に計上）" style="font-size:11px;padding:2px 4px"></td>
-        <td style="font-size:10.5px;white-space:nowrap;text-align:center" title="買い手がアプリから正式申請した返品/返金リクエスト（Shopee returns）。申請日→承認/更新日と状態">${(() => { const r = retByOrderSn.get(o.cc + ':' + o.sn); if (!r) return '<span class="smd-dim">—</span>'; const ap = fmtEpMD(r.update_time), rq = fmtEpMD(r.create_time); return `<span style="color:${retStatusColor(r.status)};font-weight:700">${esc(retStatusJa(r.status))}</span>${ap ? `<br><span title="承認/更新日">承認 ${ap}</span>` : ''}${rq ? `<br><span class="smd-dim" style="font-size:9px">申請 ${rq}</span>` : ''}`; })()}</td>
-        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+半額保証の受取（payout明細から自動検知／手動記入）＋入金日">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; const pay = adjCompPay.get(o.cc + ':' + o.sn); const payTxt = pay ? `<br><span style="color:#1a7f37;font-size:9px" title="補償の入金日(payout)">💰${fmtEpMD(pay)} 入金</span>` : ''; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動${iss.comp_date ? ' ' + esc(String(iss.comp_date).replace(/^\d{2}(\d{2})-(\d{1,2})-(\d{1,2}).*/, '$1/$2/$3')) : ''}</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅保証済</span>${payTxt}`; return '<span class="smd-dim">—</span>'; })()}</td>
+        <td style="font-size:10.5px;white-space:nowrap;text-align:center" title="買い手がアプリから正式申請した返品/返金リクエスト（Shopee returns）。申請日→承認/更新日と状態">${(() => { const r = retByOrderSn.get(o.cc + ':' + o.sn); if (!r) return '<span class="smd-dim">—</span>'; const ap = fmtEpMD(r.update_time), rq = fmtEpMD(r.create_time); return `<span style="color:${retStatusColor(r.status)};font-weight:700">${esc(retStatusJa(r.status))}</span>${ap ? `<br><span title="Shopeeで最後に状態が変わった日（承認の日とは限りません）"><span>${r.status === 'ACCEPTED' ? '承認' : '最終更新'}</span> ${ap}</span>` : ''}${rq ? `<br><span class="smd-dim" style="font-size:9px">申請 ${rq}</span>` : ''}`; })()}</td>
+        <td style="font-size:11px;white-space:nowrap;text-align:center" title="SLS+半額保証の受取（payout明細から自動検知／手動記入）＋入金日">${(() => { const auto = adjComp.get(o.cc + ':' + o.sn) || 0; const autoLoc = adjCompLoc.get(o.cc + ':' + o.sn) || 0; const man = iss.comp_amount || 0; const pay = adjCompPay.get(o.cc + ':' + o.sn); const payTxt = pay ? `<br><span style="color:#1a7f37;font-size:9px" title="補償の入金日(payout)">💰${fmtEpMD(pay)} 入金</span>` : ''; if (man > 0) return `<b style="color:#1a7f37">${fmtJpy(man)}</b><br><span class="smd-dim" style="font-size:9px">✍手動${iss.comp_date ? ' ' + esc(String(iss.comp_date).replace(/^\d{2}(\d{2})-(\d{1,2})-(\d{1,2}).*/, '$1/$2/$3')) : ''}</span>`; if (auto > 0) return `<b style="color:#1a7f37">${fmtJpy(auto)}</b><br><span style="color:#188038;font-size:9.5px">${esc(fmtLoc2(o.cc, autoLoc))}</span><br><span style="color:#1a7f37;font-size:9px">✅保証済</span>${payTxt}`; const mc = metaCompOf(o); if (mc > 0) return `<b style="color:#1a7f37">${fmtJpy(mc)}</b><br><span class="smd-dim" style="font-size:9px">✍返品リクエストで記入</span>`; return '<span class="smd-dim">—</span>'; })()}</td>
         <td>${sel('ri-restock', o.cc, o.sn, RET_RESTOCK, iss.restock)}</td>
         <td><input class="ri-memo" data-cc="${esc(o.cc)}" data-sn="${esc(o.sn)}" value="${esc(iss.memo || '')}" placeholder="メモ" style="width:100%;min-width:110px;padding:2px 4px;font-size:11px"><button class="smd-btn ri-tocheck" data-cc="${av(o.cc)}" data-sn="${av(o.sn)}" data-reason="${av(o._return ? retReasonJa(o._return.reason) : (o.cancel_reason ? cancelReasonJa(o.cancel_reason) : ''))}" data-name="${av(it.name || '')}" style="font-size:10px;padding:1px 6px;margin-top:2px;white-space:nowrap" title="この返品・トラブルを出荷前チェックの1行にする（理由と商品名を入れた形で聞きます）">✅ チェック項目に</button></td>
       </tr>`;
     }).join('');
     // 返品・返金の分析：シリーズ別/国別/理由別のパターン把握（リージョン違い等の対策に）
     const analysisCard = (() => {
-      if (!rows.length) return '';
+      // ★正式な返品リクエスト（商品違い・欠品・動作不良など）を1件も数えておらず、「なぜ返品されているか」が
+      //   実際はキャンセル（未払い等）の理由だった（2026-10-24 レビュー #11）。同じ注文は1回だけ・取り下げ済みは数えない。
+      const anaSeen = new Set(rows.map(o => o.cc + ':' + o.sn));
+      const anaRet = formalReturns.filter(r => { const k = (r.cc || '') + ':' + (r.order_sn || ''); if (!r.order_sn || /cancel/i.test(String(r.status || '')) || anaSeen.has(k)) return false; anaSeen.add(k); return true; })
+        .map(r => { const od = retOrdMap.get((r.cc || '') + ':' + r.order_sn) || {}; return { cc: r.cc || '', sn: r.order_sn, items: od.items || [], _return: true, ret_reason: r.reason, refund_jpy: retRefundJpy(r) }; });
+      const anaRows = rows.concat(anaRet);
+      if (!anaRows.length) return '';
       const byFr = {}, byCc = {}, byReason = {};
-      rows.forEach(o => {
+      anaRows.forEach(o => {
         const iss = issueMap.get(o.cc + ':' + o.sn) || {};
-        const refund = iss.refund_jpy || 0;
+        const refund = o._return ? (o.refund_jpy || 0) : (iss.refund_jpy || 0);
         const it = (o.items || [])[0] || {};
         const fr = (typeof classifyFranchise === 'function' ? classifyFranchise(it.name || '') : '') || 'その他';
         (byFr[fr] = byFr[fr] || { n: 0, refund: 0 }); byFr[fr].n++; byFr[fr].refund += refund;
         (byCc[o.cc] = byCc[o.cc] || { n: 0, refund: 0 }); byCc[o.cc].n++; byCc[o.cc].refund += refund;
-        const rs = (iss.reason || '').trim() || cancelReasonJa(o.cancel_reason);
+        const rs = o._return ? retReasonJa(o.ret_reason) : ((iss.reason || '').trim() || cancelReasonJa(o.cancel_reason));
         if (rs) byReason[rs] = (byReason[rs] || 0) + 1;
       });
       const topFr = Object.entries(byFr).sort((a, b) => b[1].n - a[1].n).slice(0, 12);
@@ -21594,7 +21826,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       /* ※ byReason の鍵は cancelReasonJa() を通した【日本語】なので、ここで原文は出せない（出すと嘘になる）。
          原文が見たい時は下の表の「理由」欄にカーソルを乗せる（そこは原文を title に入れている）。 */
       const chip = (label, n, extra, col, tip) => `<span ${tip ? `title="${esc(tip)}"` : ''} style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${col || '#e0d0d0'};border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b>${esc(label)}</b> ${n}件${extra ? ` <span style="color:#d93025">${extra}</span>` : ''}</span>`;
-      return `<details class="tool-card" open style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">📊 返品・返金の分析 <span class="smd-dim" style="font-weight:400;font-size:11px">（何が・なぜ返品されているか＝対策のヒント）</span></summary>
+      return `<details class="tool-card" open style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px"><summary style="cursor:pointer;font-weight:700;font-size:14px">📊 返品・返金の分析 <span class="smd-dim" style="font-weight:400;font-size:11px">（何が・なぜ返品されているか＝対策のヒント）</span> <span class="smd-dim" style="font-weight:400;font-size:11px">キャンセル・手で足した分 ${rows.length}件 ＋ 返品リクエスト ${anaRet.length}件</span></summary>
         <div style="margin-top:8px;font-size:12px"><b>シリーズ別</b>（多い順・返金額）<div style="margin:4px 0 8px">${topFr.map(([fr, v]) => chip(fr, v.n, v.refund ? fmtJpy(v.refund) : '', '#e0c0cc')).join('') || '<span class="smd-dim">—</span>'}</div>
         <b>国別</b><div style="margin:4px 0 8px">${ccArr.map(([cc, v]) => chip(cc, v.n, v.refund ? fmtJpy(v.refund) : '', (regionByCc(cc) || {}).color || '#ccc')).join('')}</div>
         ${topReason.length ? `<b>理由別</b>（Shopee自動取得＋手動記録）<div style="margin:4px 0 4px">${topReason.map(([r, n]) => chip(r, n, '', '#d0d0e0')).join('')}</div>` : '<div class="smd-dim" style="font-size:11px">キャンセル理由はShopeeから自動取得します（未払い/配送失敗/注文変更希望 等）。返品(配達後)の理由は各行の「理由」欄に手動記入を。</div>'}
@@ -21754,7 +21986,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const tabRel = '　<span style="color:#8a97a3">｜3つの違い＝<b>↩️申請</b>(買い手が出した原本) → <b>💸返金・補償</b>(実際にお金が動いた＝損失と回収) ／ <b>❌キャンセル</b>(発送前に流れた＝損失なし)</span>';
     const tabHint = (rtab === 'formal' ? 'Shopeeで買い手が正式に申請した返品/返金リクエストの実データ（原本）' : rtab === 'refund' ? '返金を出した／Shopee補償が入った注文 ＝ 損失と回収を管理' : '発送前・未払い等で流れた注文 ＝ 基本は再出品するだけ') + tabRel;
     const tabBar = `<div style="display:flex;gap:2px;align-items:center;border-bottom:1px solid #eee;margin:0 0 12px;flex-wrap:wrap">${tabBtn('formal', '↩️ 返品リクエスト', formalReturns.length, rtab === 'formal')}${tabBtn('refund', '💸 返金・補償', refundRows.length + returnExtra.length, rtab === 'refund')}${tabBtn('cancel', '🚫 キャンセル', cancelRows.length, rtab === 'cancel')}<span class="smd-dim" style="margin-left:auto;align-self:center;font-size:11px;padding-right:6px">${tabHint}</span></div>`;
-    const summary = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 返金合計 <b style="color:#d93025">${fmtJpy(refundTotal)}</b></div>`;
+    const summary = `<div class="smd-dim" style="font-size:12px;margin:0 4px 10px">キャンセル ${cancelled.length}件 ・ <span style="color:#188038">補償が入った注文 ${compKeys.size}件</span> ・ 記録済み ${recorded}件 ・ 手で記録した返金 <b style="color:#d93025">${fmtJpy(refundTotal)}</b> ・ <span title="Shopeeの正式な返品リクエストの返金額（取り下げ済みを除く）。入出金では入金に織り込み済みなので、上の『手で記録した返金』とは足しません">返品リクエストの返金 <b style="color:#d93025">${fmtJpy(retAllRaw.filter(r => !/cancel/i.test(String(r.status || ''))).reduce((s2, r) => s2 + retRefundJpy(r), 0))}</b></span></div>`;
     const addTool = `<div class="tool-card" style="margin:0 0 12px;max-width:none"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span class="smd-dim" style="font-size:12px">SN指定で追加（配達後の返品など）:</span>
         <select id="ret-cc" style="padding:5px;font-size:13px">${ccOpts}</select>
@@ -21798,6 +22030,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         : rtab === 'refund'
           ? (stageTodo + analysisCard + compCard + adjCard + addTool + lostToggle + cxlToggle + filterBar + tableBlock)
           : (addTool + filterBar + tableBlock));
+    { const pk = [rtab, retPage, JSON.stringify(renderReturns._f || {}), renderReturns._sort || '', !!renderReturns._lostOnly, !!renderReturns._showCxl, !!renderReturns._showCanc].join('|');
+      renderReturns._posKey = pk;
+      if (_keepPos.key === pk) {
+        body.querySelectorAll('.pf-scroll').forEach((e, i) => { if (_keepPos.tops[i]) e.scrollTop = _keepPos.tops[i]; });
+        if (_keepPos.y) window.scrollTo(0, _keepPos.y);
+      } }
     { const bind = (id, key) => { const el = document.getElementById(id); if (!el) return;
         el.addEventListener('change', () => { renderReturns._f[key] = el.value; renderReturns._page = 1; renderReturns(); }); };
       { const tb = document.getElementById('rf-stagetodo');
@@ -21812,11 +22050,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.querySelectorAll('.ret-kind').forEach(function (sel) {
       sel.addEventListener('change', async function () {
         var k = sel.dataset.k, v = sel.value;
+        var prevK = retMeta[k] ? JSON.parse(JSON.stringify(retMeta[k])) : undefined;
         retMeta[k] = Object.assign({}, retMeta[k], { kind: v || undefined });
         if (!v) delete retMeta[k].kind;
         sel.style.borderColor = v ? '#7b52c4' : '#ddd';
         var ok = await retMetaSave();
-        if (!ok) return;
+        if (!ok) { var cur = retMetaUndo_(k, prevK); sel.value = cur.kind || ''; sel.style.borderColor = cur.kind ? '#7b52c4' : '#ddd'; return; }
         toast('\u2713 保存しました');
         if (v !== 'back') return;
         var sn = k.split(':')[1];
@@ -21836,17 +22075,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             toast('\uD83D\uDCE6 在庫 ' + hit.length + '件を在庫台帳に戻しました（原価はこの注文から外れます）');
             try { logAct('返品', '在庫を戻す', sn, hit.length + '件'); } catch (_) {}
           }
-        } catch (e) { }
+        } catch (e) { alert((i18nOn() ? 'Could not return the stock to inventory (only the return type was saved): ' : '在庫を台帳へ戻せませんでした（返品の区分だけ保存しました）：') + ((e && e.message) || e)); }   // ★捨てると戻ったと思い込む（レビュー #9①）
       });
     });
     body.querySelectorAll('.ret-comp').forEach(function (inp) {
       inp.addEventListener('change', async function () {
         var k = inp.dataset.k, n = Number(String(inp.value).replace(/[^0-9.\-]/g, ''));
+        var prevK = retMeta[k] ? JSON.parse(JSON.stringify(retMeta[k])) : undefined;
         retMeta[k] = Object.assign({}, retMeta[k], { comp: (n > 0 ? n : undefined) });
         if (!(n > 0)) delete retMeta[k].comp;
         inp.style.borderColor = n > 0 ? '#1a7f37' : '#ddd';
         var ok = await retMetaSave();
-        if (ok) toast('\u2713 補償金を保存しました');
+        if (!ok) { var cur = retMetaUndo_(k, prevK); inp.value = cur.comp != null ? String(cur.comp) : ''; inp.style.borderColor = cur.comp ? '#1a7f37' : '#ddd'; return; }
+        toast('\u2713 補償金を保存しました');
       });
     });
     { const c = body.querySelector('#ret-showcanc'); if (c) c.addEventListener('change', () => { renderReturns._showCanc = c.checked; renderReturns._page = 1; renderReturns(); }); }
@@ -21897,11 +22138,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (await saveIssue(e.target.dataset.cc, e.target.dataset.sn, patch)) renderReturns();
     }));
     body.querySelectorAll('.ri-compdate').forEach(el => el.addEventListener('change', e => saveIssue(e.target.dataset.cc, e.target.dataset.sn, { comp_date: e.target.value || null })));
-    document.getElementById('ret-add').addEventListener('click', async () => {
+    { const _ra = body.querySelector('#ret-add'); if (_ra) _ra.addEventListener('click', async () => {   // ★返品リクエストのタブには無い（レビュー #6）
       const cc = document.getElementById('ret-cc').value, sn = document.getElementById('ret-sn').value.trim();
       if (!sn) { document.getElementById('ret-msg').textContent = 'SNを入力してください'; return; }
       if (await saveIssue(cc, sn, { kind: '返品' })) renderReturns();
-    });
+    }); }
     setupColumns('returns', body);
   }
   // ---------------- 💱 為替レート ----------------
@@ -27093,7 +27334,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ★在庫の `name` は【ほぼ空】。実体は `name_supplier`（記録済みの地雷）。
     //   ここだけ name_supplier を見ておらず、**商品名でなく ITM-… のIDを見せて**いた。
     if (_invSplitBusy.has(id)) { alert('⏳ この在庫の分割がまだ実行中です。終わってから、一覧を開き直してやり直してください（重ねると仕入額が二重になります）'); return; }
-    const ans = prompt(`「${(invName(r) || id).slice(0, 30)}」を何個に分割しますか？\nItemIDに枝番(-1,-2…)を付け、仕入額 ¥${total.toLocaleString()} を均等割りします（余りは-1に寄せます）。`, '2');
+    const ans = prompt(`「${(invName(r) || id).slice(0, 30)}」を何個に分割しますか？\nItemIDに枝番(-1,-2…)を付け、仕入額 ¥${total.toLocaleString()} を均等割りします（余りは-1に寄せます）。` + (r.shopee_sn ? `\n※注文 ${r.shopee_sn} との紐付けは -1 に引き継ぎます（他の枝番は紐付けなし・状態は元のまま「${r.status || ''}」）。` : ''), '2');
     if (ans == null) return;
     const n = parseInt(ans, 10);
     if (!n || n < 2 || n > 100) { alert('2〜100の数を入力してください'); return; }
@@ -27104,7 +27345,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       newRows.push(Object.assign({}, r, {
         item_id: id + '-' + i,
         price: total ? (i === 1 ? base + rem : base) : null,
-        sku: null, shopee_sn: null, proof: null, bin: null,   // 個体別の項目はクリア
+        sku: null, shopee_sn: (i === 1 ? (r.shopee_sn || null) : null), proof: null, bin: null,   // 個体別の項目はクリア（★注文の紐付けだけは -1 に引き継ぐ＝黙って原価を消さない・2026-10-24 レビュー#7）
         edited_at: now, synced_at: now,
       }));
     }
@@ -27124,7 +27365,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         throw new Error('元行の削除に失敗したため中止しました（作成した枝番は取り消し済み）: ' + delErr.message);
       }
       stock.rows = stock.rows.filter(x => x.item_id !== id).concat(newRows);
-      logAct('在庫管理', 'まとめ分割', id, newRows.length + '枝番に分割');
+      // ★2026-10-24 レビュー#7：棚卸の ✓ と機種・カテゴリの手直しが元の ItemID のまま残り、枝番が「未確認」・自動判定に戻って見えた → 枝番へ写す
+      try {
+        const tk = tak.items[String(id)];
+        if (tk) { branchIds.forEach(b => { if (!tak.items[b]) tak.items[b] = tk; }); takSave().catch(e => toast('❌ 棚卸の記録を保存できませんでした: ' + e.message, true)); }
+        const ic = invCls.items[id];
+        if (ic) { branchIds.forEach(b => { if (!invCls.items[b]) invCls.items[b] = Object.assign({}, ic); }); invClsSave().catch(e => toast('❌ 保存できませんでした: ' + e.message, true)); }
+      } catch (_) {}
+      // 仕入額が枝番に分かれた・紐付けは -1 へ移った＝💹の突合マップと📈のキャッシュを直す
+      try { pf._invAt = 0; if (pf.invMap && r.shopee_sn) { pfInvalidateSn(r, { shopee_sn: null }); pfInvalidateSn(Object.assign({}, newRows[0], { shopee_sn: null }), { shopee_sn: r.shopee_sn }); } } catch (_) {}
+      try { plan._cache = null; } catch (_) {}
+      logAct('在庫管理', 'まとめ分割', id, newRows.length + '枝番に分割' + (r.shopee_sn ? '（注文 ' + r.shopee_sn + ' は ' + newRows[0].item_id + ' へ）' : ''));
+      if (r.shopee_sn) toast('✂ ' + n + '個に分けました（注文 ' + r.shopee_sn + ' の紐付けは ' + newRows[0].item_id + ' に引き継ぎ）');
       stockRender();
     } catch (e) { alert('分割失敗: ' + e.message); } finally { _invSplitBusy.delete(id); }
   }
@@ -27217,23 +27469,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!name) { document.getElementById('sa-msg').textContent = '商品名は必須です'; return; }
       if (!settings.sbSecret) { document.getElementById('sa-msg').textContent = '⚙️設定で書き込みキーが必要です'; return; }
       const now = new Date();
-      const itemId = 'PITM-' + now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + now.getTime().toString(36).slice(-4);
+      // ★2026-10-24 レビュー#5：日付は日本時間で（toISOString は世界標準時＝0:00〜8:59 の登録が前日になり、月初の朝の分が前月の仕入れに入った）
+      const jd = jstDate(now);
+      const itemId = 'PITM-' + jd.replace(/-/g, '') + '-' + now.getTime().toString(36).slice(-4);
       const snRaw = v('sa-sn');
       const row = {
         item_id: itemId, name, supplier: v('sa-sup') || null, seller: v('sa-seller') || null, price: v('sa-price') ? Number(v('sa-price')) : null,
         condition: v('sa-cond') || null, status: document.getElementById('sa-st').value, purchase_status: document.getElementById('sa-ps').value || null,
         sku: v('sa-sku') || null, bin: v('sa-bin') || null, name_supplier: v('sa-nsup') || null, supplier_order: v('sa-sorder') || null,
         supplier_url: (/^https?:\/\//i.test(v('sa-surl')) ? v('sa-surl') : null), image: (/^https?:\/\//i.test(v('sa-img')) ? v('sa-img') : null), shopee_sn: /^\d{6}[A-Z0-9]{4,}$/.test(snRaw) ? snRaw : null,
-        purchase_date: now.toISOString().slice(0, 10), source: 'portal', edited_at: now.toISOString(), synced_at: now.toISOString(),
+        purchase_date: jd, source: 'portal', edited_at: now.toISOString(), synced_at: now.toISOString(),
       };
+      // ★2026-10-24 レビュー#4：押しても無効にならず、通信が遅い時に2回押すと末尾の違う PITM が2行できた（仕入額が二重）→ 押した瞬間に止める
+      const saBtn = document.getElementById('sa-save');
+      if (saBtn.disabled) return;
+      saBtn.disabled = true; saBtn.textContent = '⏳ 登録中…';
       document.getElementById('sa-msg').textContent = '登録中...';
       try {
         await sbUpsert('inventory', [row]);
         stock.rows.unshift(row);
         stock.adding = false;
         logAct('在庫管理', '手動登録', row.item_id, name);
+        try { pf._invAt = 0; plan._cache = null; } catch (_) {}
         stockRender();
-      } catch (e) { document.getElementById('sa-msg').textContent = '失敗: ' + e.message; }
+      } catch (e) { document.getElementById('sa-msg').textContent = '失敗: ' + e.message; saBtn.disabled = false; saBtn.textContent = '登録'; }
     });
   }
 
@@ -49892,6 +50151,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const buk = {};
       orders.forEach(o => {
         const ds = ordDate(o); if (!ds) return;
+        if (o.tab === 200) return;   // ★2026-10-24 レビュー：未払い（UNPAID）はまだ注文になっていない＝数えない（ダッシュボードの KPI・フリーSPS と揃える）
         const isCancel = o.tab === 600;
         if (isCancel && !inclCancel) return;
         if (rr && (ds < rr.s || ds > rr.e)) return;
@@ -53003,7 +53263,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ❓ 商品ごとの問い合わせを溜める（担当のPCだけ・30分ごと・2026-10-14）
     setTimeout(() => { inqLogTick().catch(() => {}); }, 120000); setInterval(() => { inqLogTick().catch(() => {}); }, 30 * 60000);
     document.getElementById('alert-refresh').addEventListener('click', async e => { e.target.disabled = true; e.target.textContent = '⏳ 更新中'; await renderAlerts(true); e.target.disabled = false; e.target.textContent = '🔄 更新'; });
-    document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
+    document.getElementById('ret-refresh').addEventListener('click', () => renderReturns(true));   // ★force なしだと2分以内は古いまま（レビュー #7）
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
     if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
     setInterval(alertBadgeTick_, 10 * 60 * 1000);   // ★2026-10-24 レビュー #2：朝に数えた赤い件数が昼に古いまま残らないように（読んだ注文で期限だけ今の日付でやり直す・読み書きなし）
