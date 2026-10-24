@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0100';
+var SRC_VER = '20261025-0200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8195,8 +8195,9 @@ function boshuAutoTick(manual) {
       }
     }
   }
-  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', 'product_ids', 'listlog_auto', BA_LOOSE]);
+  baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', BA_JAN_IDX, 'listlog_auto', BA_LOOSE]);   /* B8_OK 2026-10-25：product_ids（約1,229万字）を外して小さい索引 jan_by_item に替えた＝減らす変更 */
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
+  baPreHwCount_(st);
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   if (BA_KV_PREFETCH_ERR) { try { baLog_(st, '⚠ 控えの一括読みに失敗→1本ずつ読んで続けます：' + BA_KV_PREFETCH_ERR.slice(0, 120)); } catch (ePf) {} }
   try {
@@ -8635,7 +8636,7 @@ function gameJudgeCands_(p) {
   var out = { ok: true, src: SRC_VER, runner: BA_ST, hws: hws, start: start, done: [], next: null, list: [], skipped: {}, extra: [] };
   try { out.extra = (((baKv_('photo_learn') || {}).rules || {}).extra || []).map(function (x) { return String((x && x.text) || ''); }).filter(String); } catch (e) {}
   /* ★2026-10-20 全体レビュー 高-B：先読みしないと機種ごとに product_ids・写真の控えなどを読み直していた（21機種で約220〜250MB）。巡回と同じく最初に1回 */
-  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', 'product_ids', 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit']);   /* B8_OK：今まで機種ごとに約10〜12MB×21回＝約220〜250MB/回 → 1回 約12MB。4台目・1時間に1回（予定タスク）＝減らす変更 */
+  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', BA_JAN_IDX, 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit']);   /* B8_OK：今まで機種ごとに約10〜12MB×21回＝約220〜250MB/回 → 1回 約12MB。4台目・1時間に1回（予定タスク）＝減らす変更 */
   var judged = baKv_(BA_JUDGED) || {}; BA_MANUAL = null;
   for (var hi = start; hi < hws.length; hi++) {
     if (Date.now() - t0 > LIMIT_MS) { out.next = hi; break; }
@@ -8946,7 +8947,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
     if (/variation/i.test(r.name || '')) { var sk = inFam ? '' : baSeriesKey_(r.name); if (sk) (allRows[r.cc] = allRows[r.cc] || []).push(Object.assign({}, r, { models: ms || [], skey: sk, hws: catHws, inFam: inFam })); }
   });
   var janByCc = {};
-  if (!_tcg) try { var pid = (baKv_('product_ids') || {}).items || {}; Object.keys(pid).forEach(function (k) { var j = String((pid[k] || {}).jan || '').trim(); if (!j) return; var mm = k.match(/^id:(\d+)/); var c = mm ? itemCc[mm[1]] : ''; if (c) (janByCc[c] = janByCc[c] || {})[j] = 1; }); } catch (e) {}
+  /* ★2026-10-25 product_ids（約1,229万字）を巡回ごとに読まない：小さい索引 jan_by_item（商品番号→JAN）から作る。索引が無い・読めない・3時間より古い時だけ product_ids を読んで作り直す（baJanIdx_） */
+  if (!_tcg) try { var jix = baJanIdx_(); if (jix) Object.keys(jix).forEach(function (it) { var c = itemCc[it]; if (!c) return; var js = jix[it] || []; for (var ji = 0; ji < js.length; ji++) (janByCc[c] = janByCc[c] || {})[js[ji]] = 1; }); } catch (e) {}
   var ledger = baKv_('boshu_auto_done_' + hw) || {};
   /* ★売れる見込みの材料：直近90日に売れた明細名（英名）。他国で売れた作品を、まだ出していない国へ先に出す（本人「効率的に、効果がある使い方」） */
   var soldVar = BA_CTX_SOLD || {};
@@ -8973,7 +8975,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   if (noYahoo && !bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };
   /* ★2026-09-25 候補出し（写真集めが1回8機種呼ぶ）は app_kv を1つずつ読んでいた＝1回あたり約25回・1日で2台目の Supabase 読み 2,173回の主因。
      巡回（boshuAutoTick）と同じく最初に1回でまとめて読む（接続枠は1回）。同じ実行の中の baKv_ は全部この控えから返る */
-  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', 'product_ids', 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit', 'boshu_fam_made', 'boshu_auto_done_' + hw, 'titles_' + hw, 'sg_' + hw, 'jan_master_' + hw]);   // ★自動（写真集め）の呼び出しは背景扱い＝枠を侵さない（Codex指摘）
+  if (!BA_KV_CACHE) baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_judged_manual', 'photo_learn', BA_JAN_IDX, 'boshu_cc_fail', 'boshu_shop_full', 'shop_item_limit', 'boshu_fam_made', 'boshu_auto_done_' + hw, 'titles_' + hw, 'sg_' + hw, 'jan_master_' + hw]);   /* B8_OK 2026-10-25：product_ids を外して jan_by_item に＝減らす変更 */   // ★自動（写真集め）の呼び出しは背景扱い＝枠を侵さない（Codex指摘）
   var cfg = baKv_(BA_CFG) || {};
   if (!hw || !cfg.family || !cfg.family[hw] || !(cfg.family[hw].sku || cfg.family[hw].nameKey)) return { ok: false, error: 'その機種の足す先（カタログ群）が設定されていません' };
   var ccs = (cfg.family[hw].ccs && cfg.family[hw].ccs.length) ? cfg.family[hw].ccs.slice() : (cfg.ccs || []).slice();
@@ -10163,9 +10165,67 @@ function baSkuPlanTick_(st, t0) {
   baKvSet_('sku_plan_state', ps);
   baLog_(st, '🏷 SKU：' + n + 'カタログ・' + okN + '明細に付けた（' + ps.pos + '/' + items.length + '）');
 }
+/* ★2026-10-25 JAN の小さい索引（05 情報システム部の判断・05-07 出品管理）。巡回が product_ids（約1,229万字）を毎回読んでいたのは
+   「その国にもう出している JAN」（janByCc）を作るためだけ＝商品番号→JAN だけの索引 jan_by_item にする。
+   形：{ at: 作り直した時刻, n: JAN の数, items: { '<item_id>': ['JAN', ...] } }。国は巡回が listings から引く（今と同じ itemCc）。
+   作り直し：索引が無い・読めない・3時間より古い時、その巡回が product_ids を1回読んで作る（どの台でも。前は全部の巡回が毎回読んでいた）。
+   書いた JAN（baWriteJan_）はその場で足す。ポータルで本人が入れた JAN は次の作り直し（最長3時間）まで入らない＝名前の鍵の守り（listedByCc）は今のまま先に効く */
+var BA_JAN_IDX = 'jan_by_item';
+var BA_JAN_IDX_MS = 3 * 3600 * 1000;
+var BA_JAN_IDX_MEMO = null;
+function baJanIdxBuild_(pid) {
+  var items = {}, n = 0, src = (pid && pid.items) || {};
+  Object.keys(src).forEach(function (k) {
+    var j = String((src[k] || {}).jan || '').trim(); if (!j) return;
+    var mm = k.match(/^id:(\d+)/); if (!mm) return;
+    var a = items[mm[1]] = items[mm[1]] || []; if (a.indexOf(j) < 0) { a.push(j); n++; }
+  });
+  return { items: items, n: n };
+}
+function baJanIdx_() {
+  if (BA_JAN_IDX_MEMO) return BA_JAN_IDX_MEMO;
+  var ix = baKv_(BA_JAN_IDX), ixFail = !!BA_KV_FAIL[BA_JAN_IDX];
+  var age = ix && ix.at ? Date.now() - Date.parse(ix.at) : Infinity;
+  if (!ixFail && ix && ix.items && age >= 0 && age < BA_JAN_IDX_MS) { try { BA_KV_SZ[BA_JAN_IDX + '(索引)'] = JSON.stringify(ix).length; } catch (eSz) {} BA_JAN_IDX_MEMO = ix.items; return ix.items; }
+  /* 今までどおり product_ids を読む（読めなければ JAN の守りは無し＝前と同じ） */
+  var t0 = new Date().toISOString();
+  var pid = baKv_('product_ids'); if (!pid || BA_KV_FAIL['product_ids']) return null;
+  var b = baJanIdxBuild_(pid);
+  if (!ixFail) { var v = { at: t0, n: b.n, items: b.items }; try { baKvSet_(BA_JAN_IDX, v); BA_KV_SZ[BA_JAN_IDX + '(作り直し)'] = JSON.stringify(v).length; } catch (eW) {} }
+  BA_JAN_IDX_MEMO = b.items; return b.items;
+}
+function baJanIdxAdd_(q) {
+  var add = (q || []).filter(function (e) { return e && e.item_id && String(e.jan || '').trim(); }); if (!add.length) return 0;
+  var ix = baKv_(BA_JAN_IDX); if (!ix || !ix.items || BA_KV_FAIL[BA_JAN_IDX]) return 0;   /* 索引が無ければ次の作り直しで入る */
+  var n = 0;
+  add.forEach(function (e) { var it = String(e.item_id), j = String(e.jan).trim(); var a = ix.items[it] = ix.items[it] || []; if (a.indexOf(j) < 0) { a.push(j); n++; } });
+  if (n) { ix.n = (Number(ix.n) || 0) + n; baKvSet_(BA_JAN_IDX, ix); if (BA_JAN_IDX_MEMO) BA_JAN_IDX_MEMO = ix.items; }
+  return n;
+}
+/* ★2026-10-25 写真の控え（約1,816万字・8分割）を機種ごとに分けたら減るかを、推測でなく数える（読む量は増やさない・読んだ写しを数えるだけ）。
+   1台6時間に1回、状態の preHw に { 機種: [件数, 文字数] } を置く（機種の分からない物は '?'）。分け方を変えるかはこの数字を見てから決める */
+function baPreHwCount_(st) {
+  try {
+    var last = Number(P_().getProperty('BA_PREHW_AT') || 0); if (Date.now() - last < 6 * 3600 * 1000) return;
+    var pre = BA_KV_CACHE && BA_KV_CACHE['boshu_auto_pre']; if (!pre || typeof pre !== 'object') return;   /* 先読みに入っていない時は読みに行かない */
+    var by = {}, tot = 0, n = 0;
+    Object.keys(pre).forEach(function (k) {
+      var e = pre[k]; var at = k.lastIndexOf('@'); var h = at > 0 ? k.slice(at + 1) : (baPreHw_(e, k) || '?');
+      var c = 0; try { c = JSON.stringify(e).length + k.length + 4; } catch (eC) {}
+      var b = by[h] = by[h] || [0, 0]; b[0]++; b[1] += c; tot += c; n++;
+    });
+    st.preHw = { at: new Date().toISOString(), n: n, chars: tot, by: by };
+    P_().setProperty('BA_PREHW_AT', String(Date.now()));
+  } catch (e) {}
+}
 function baWriteJan_(q) {
   if (!q || !q.length) return 0;
-  var pid = baKv_('product_ids') || {}; pid.items = pid.items || {}; var n = 0;
+  /* ★2026-10-25 product_ids は先読みに入れない＝書く物がある時だけここで読む。ここで読んだ時はその時刻を「読んだ時刻」にする（後の「他が書いたか」の比べに使う） */
+  var _pidRef = BA_KV_AT;
+  if (!(BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, 'product_ids'))) _pidRef = Date.now();
+  var pid = baKv_('product_ids');
+  if (!pid || typeof pid !== 'object' || BA_KV_FAIL['product_ids']) throw new Error('product_ids を読めなかったので書きません（' + q.length + '件は次の回へ）');
+  pid.items = pid.items || {}; var n = 0;
   q.forEach(function (e) {
     var k = 'id:' + e.item_id + '#' + e.model_id; var cur = pid.items[k];
     /* ★2026-10-12 トレカは JAN が無い＝カード番号（弾の記号＋番号）を型番（mpn）として入れる（本人「仕入れ目安、型番とかなぜでない？ゲームと同じ基準で」） */
@@ -10179,7 +10239,7 @@ function baWriteJan_(q) {
     /* ★2026-10-24 全体レビュー（出品管理 #6）：pid は巡回の頭で読んだ写し。ポータル（JAN の手入力・📥取り込み・型番の自動入れ）がその後に書いていれば丸ごと書くと消える
        → 更新時刻だけ読み、先読みの1分前より後に書かれていたら（ポータルの時計のずれを見込む）product_ids を読み直して、この回の明細だけ重ねる（既に JAN・型番がある鍵は触らない＝元と同じ決まり）。読めなければ書かない */
     var _stale = true;
-    try { var _ua = sbSelect_('app_kv', 'select=updated_at&k=eq.product_ids'); var _at = Date.parse((_ua && _ua[0] && _ua[0].updated_at) || ''); _stale = !(BA_KV_AT && _at && _at < BA_KV_AT - 60000); } catch (eUa) { _stale = true; }
+    try { var _ua = sbSelect_('app_kv', 'select=updated_at&k=eq.product_ids'); var _at = Date.parse((_ua && _ua[0] && _ua[0].updated_at) || ''); _stale = !(_pidRef && _at && _at < _pidRef - 60000); } catch (eUa) { _stale = true; }
     if (_stale) {
       var _fr = null; try { var _rr = sbSelect_('app_kv', 'select=v&k=eq.product_ids'); _fr = (_rr && _rr[0] && _rr[0].v) || null; } catch (eFr) { _fr = null; }
       if (!_fr || typeof _fr !== 'object') throw new Error('product_ids を読み直せなかったので書きません（ポータルで入れた JAN を古い写しで消さないため）');
@@ -10195,6 +10255,7 @@ function baWriteJan_(q) {
     }
     baKvSet_('product_ids', pid);   // B8_OK 2026-10-24：前からある1回の書き込み（if (n) baKvSet_）の置き換え＝回数は同じ。増えたのは updated_at だけの読み（数十バイト）と、他が書いた後だけの読み直し
     try { if (BA_KV_CACHE) BA_KV_CACHE['product_ids'] = pid; } catch (eKc) {}
+    try { baJanIdxAdd_(q); } catch (eJx) {}   /* 書いた JAN は索引にもその場で足す（次の作り直しを待たない） */
   }
   q.length = 0;
   return n;
