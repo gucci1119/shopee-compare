@@ -88,16 +88,19 @@ paypal-link-filler（userscript）がリンクをコピーする。カードの�
 5. **（SR 6.18.90）** ベトナム語の「ベトナムまで何日」系の止め語（ve viet nam ngay tuan…・国名・days/long/arrive/delivery/shipping）を足す。止め語を除いて残ったのが機種名だけ（PS2・PSP・DS・3DS・GBA・SFC・Switch 等）なら品名なしとして止める（例「PS2 鬼武者 有嗎」「Do you have PS2?」→止める／「PS2 Onimusha」→そのまま）
 
 ## 11. 追記（2026-10-24・ポータル 価格計算改善担当）返事に足した項目
-1. **内訳 `plans[n].bd`**（本人「お客さんが払う額って、これうちが設定する売り値ってことですよね？日本円でいくらかとか、そういう細かいところまで表示があった方がいいんじゃないの？」）。①②③とも同じ形。Shopee チャットは①だけ使えばよい
+1. **内訳 `plans[n].bd`**（本人「お客さんが払う額って、これうちが設定する売り値ってことですよね？日本円でいくらかとか、そういう細かいところまで表示があった方がいいんじゃないの？」）。①②③とも同じ形。Shopee Smart Reply は①、WA Smart Reply は①②③を使う。**チャット側は計算し直さず、rows を上から順にそのまま出す**
    ```
-   bd: { rate(円/現地通貨・着金スプレッド込み), rateSrc('daily'|'default'),
-         listL(Shopee の掲載価格・現地), listJpy, discPct(想定値引き%), discJpy, buyerJpy(値引き後に買い手が Shopee に払う額・円),
-         feePct, feeJpy(Shopee 手数料), weight(g), chargeG(課金重量 g), slsL, slsJpy(SLS 送料), fixedJpy(国別の固定控除),
-         payFxPct(入金時の為替%), payFxJpy, payoutJpy(Shopee から入る円), cost(仕入), shopProfit(Shopee 側だけの粗利＝payoutJpy−cost),
-         ppAskJpy(PayPal で請求する額・円), ppFeeJpy(PayPal 手数料), ppNetJpy(PayPal の手取り) }
-   粗利（plans[n].profit）＝ payoutJpy − cost ＋ ppNetJpy（①は PayPal 0）
+   bd: { rate(1現地通貨あたりの円・着金スプレッド込み), rateSrc('daily'|'default'), saleJpy(売り値の円),
+         rows: [ { label, jpy(円・差し引きは負の数), local?(現地通貨の額), note?(補足：% や g), sum?(true＝太字＋上に線) } ... ],
+         raw: { rate, rateSrc, listL, listJpy, discPct, discJpy, buyerJpy, feePct, feeJpy, weight, chargeG, slsL, slsJpy, fixedJpy,
+                payFxPct, payFxJpy, payoutJpy, cost, shopProfit, ppAskJpy, ppFeeJpy, ppNetJpy } }   // 検算・WhatsApp 用の生の値
    ```
-   - 「お客さんが払う額」＝`total`（掲載＋PayPal の請求・現地通貨・値引き前）。値引き後に Shopee で実際に払う見込みは `buyerJpy`
+   rows の並び（名前と順番はポータルが決める。0円の行は出さない）：
+   - ①：売り値（local・note＝R$350 等）／想定値引き（note 5%）／Shopee 手数料（note 15.75%）／送料 SLS（note「300g（R$33.5）」）／国別の固定控除（0なら無し）／入金時の為替手数料（note 2%・0%なら無し）／**入金見込み**（sum）／仕入れ／**粗利**（sum）
+   - ②③：「売り値（Shopee に出す分）」から**入金見込み**までは①と同じ形 → 「PayPal で受け取る額（お客さんが払う）」（＋・local・MY/VN は note「円で請求」）／「PayPal 手数料」（−・note「4.1%＋40円」）／仕入れ／**粗利**
+   - 足し算はぴったり合う：入金見込み＝その上の行の合計＝raw.payoutJpy、粗利＝入金見込みからの合計＝plans[n].profit。丸めの差は「入金時の為替手数料」の行（0% の時は Shopee 手数料の行）で吸う
+   - 例（BR・仕入 ¥3,250・300g・目標の粗利 3,500・①）は下の 11.5
+   - 「お客さんが払う額」＝`total`（掲載＋PayPal の請求・現地通貨・値引き前）。値引き後に Shopee で実際に払う見込みは raw.buyerJpy
 2. **`rateSrc` と warn**：為替（app_kv.fx_daily）を読めなかった時は `rateSrc:'default'`（コードの既定レート）で、warn に「為替レートを読めなかった…」。ポータルは為替を読み終えるまで返事を待つ（最長15秒）＝前は起動直後の既定レート（BR 28円）で返していた
 3. **仕入れ候補の `acc`・`cond`**（10.4）：`deal` と `others` の各行に `acc`（付属品：「箱・説明書あり」「箱あり」「説明書あり」「箱あり・説明書なし」「ソフトのみ」「カセットのみ」「箱なし」等。出品名から読む・読めなければ空）と `cond`（状態：メルカリ・Yahoo!フリマは出品の状態「未使用に近い」「傷汚れなし」「やや傷汚れ」等。ヤフオクは名前から「美品」「動作確認済」等が読めた時だけ・無ければ空）
 4. **仕入れ先**：見積もりはメルカリ・ヤフオク（定額の出品だけ・オークションは即決つきも使わない）・Yahoo!フリマの3つだけ。探す語が英語だけなら英→日の辞書で日本語にしてから探し、できなければ ok:false「日本語の品名が分からないので探せません」

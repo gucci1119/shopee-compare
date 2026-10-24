@@ -9842,10 +9842,26 @@
           try { const pf = pl === '1' ? r.pf : pl === '2' ? r.lowPf : r.minPf, listL = pl === '1' ? r.local : pl === '2' ? r.lowLocal : r.minLocal, rate = Number(r.rg.rateJpy) || 0, op = cx.opt || {};
             const vol = (op.dimW && op.dimH && op.dimD) ? op.dimW * op.dimH * op.dimD / 6 : 0, chg = Math.max(Number(op.weightG) || 0, vol);
             const ask = pl === '1' ? 0 : pl === '2' ? (r.ppAsk || 0) : (r.pp3Ask || 0), net = pl === '1' ? 0 : pl === '2' ? (r.ppNet || 0) : (r.pp3Net || 0);
-            o.bd = { rate: Math.round(rate * 10000) / 10000, rateSrc: out.rateSrc, listL: listL, listJpy: Math.round(listL * rate), discPct: Number(settings.priceDiscountPct) || 0, discJpy: pf.discJpy, buyerJpy: pf.buyerJpy,
+            const raw = { rate: Math.round(rate * 10000) / 10000, rateSrc: out.rateSrc, listL: listL, listJpy: Math.round(listL * rate), discPct: Number(settings.priceDiscountPct) || 0, discJpy: pf.discJpy, buyerJpy: pf.buyerJpy,
               feePct: pf.feePct, feeJpy: pf.feeJpy, weight: Number(op.weightG) || 0, chargeG: Math.round(chg), slsL: slsLocal(cc, chg), slsJpy: pf.slsJpy, fixedJpy: pf.fixedJpy,
               payFxPct: Number(settings.pricePayoutFxPct) || 0, payFxJpy: pf.payFxJpy, payoutJpy: pf.payoutJpy, cost: out.cost, shopProfit: pf.profit,
               ppAskJpy: Math.round(ask), ppFeeJpy: Math.round(Math.max(0, ask - net)), ppNetJpy: Math.round(net) };   /* 粗利＝payoutJpy − cost ＋ ppNetJpy */
+            /* ★2026-10-24 05：Shopee Smart Reply 6.18.97 が読む形（rows を上から表示・差し引きは負の数・sum:true は太字＋上に線・SR は計算し直さない）。
+               足し算がぴったり合うように、丸めの差は「入金時の為替手数料」（0% の時は Shopee 手数料）の行で吸う＝入金見込みは raw.payoutJpy、粗利は o.profit と同じ */
+            const sale = raw.listJpy, curS = r.rg.cur || '', numL = (v) => (r.rg.priceUnit || 1) < 1 ? (Math.round(v * 100) / 100).toLocaleString('en-US') : Math.round(v).toLocaleString('en-US');
+            let dDisc = -raw.discJpy, dFee = -raw.feeJpy, dSls = -raw.slsJpy, dFix = -raw.fixedJpy, dFx = -raw.payFxJpy;
+            const gap = raw.payoutJpy - (sale + dDisc + dFee + dSls + dFix + dFx); if (gap) { if (raw.payFxPct > 0) dFx += gap; else dFee += gap; }
+            const rows2 = [{ label: pl === '1' ? '売り値' : '売り値（Shopee に出す分）', jpy: sale, local: listL, note: curS + numL(listL) }];
+            if (dDisc) rows2.push({ label: '想定値引き', jpy: dDisc, note: raw.discPct + '%' });
+            rows2.push({ label: 'Shopee 手数料', jpy: dFee, note: raw.feePct + '%' });
+            rows2.push({ label: '送料 SLS', jpy: dSls, note: raw.chargeG + 'g（' + curS + numL(raw.slsL) + '）' });
+            if (dFix) rows2.push({ label: '国別の固定控除', jpy: dFix });
+            if (dFx) rows2.push({ label: '入金時の為替手数料', jpy: dFx, note: raw.payFxPct + '%' });
+            rows2.push({ label: '入金見込み', jpy: raw.payoutJpy, sum: true });
+            if (pl !== '1' && raw.ppAskJpy) { rows2.push({ label: 'PayPal で受け取る額（お客さんが払う）', jpy: raw.ppAskJpy, local: pcPPLocal(raw.ppAskJpy, r.rg), note: (cc === 'MY' || cc === 'VN') ? '円で請求' : curS + numL(pcPPLocal(raw.ppAskJpy, r.rg)) }); rows2.push({ label: 'PayPal 手数料', jpy: -raw.ppFeeJpy, note: (Number((document.getElementById('pc-ppfee') || {}).value) || 4.1) + '%＋' + (Number((document.getElementById('pc-ppfix') || {}).value) || 40) + '円' }); }
+            rows2.push({ label: '仕入れ', jpy: -raw.cost });
+            rows2.push({ label: '粗利', jpy: raw.payoutJpy + (pl !== '1' ? raw.ppAskJpy - raw.ppFeeJpy : 0) - raw.cost, sum: true });
+            o.bd = { rate: raw.rate, rateSrc: raw.rateSrc, saleJpy: sale, rows: rows2, raw: raw };
           } catch (_) {}
           out.plans[pl] = o;
         });
